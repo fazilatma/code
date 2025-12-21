@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Self-assessment of the concept of gamification</title>
+  <style>
+    body {
+      font-family: "Vazir", sans-serif;
+      background-color: #f9fbfd;
+      margin: 0;
+      padding: 0;
+      color: #333;
+    }
+
+    /* مودال */
+    .modal {
+      display: flex;
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0,0,0,0.6);
+      justify-content: center;
+      align-items: center;
+    }
+    .modal-content {
+      background: white;
+      padding: 40px;
+      border-radius: 16px;
+      width: 90%;
+      max-width: 600px;
+      text-align: center;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+      animation: fadeIn 0.4s ease-out;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: scale(0.9); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .modal h2 {
+      color: #1a5276;
+      margin-bottom: 15px;
+      font-size: 24px;
+    }
+    .modal p {
+      line-height: 1.8;
+      margin: 12px 0;
+      font-size: 16px;
+    }
+    .student-name {
+      font-weight: bold;
+      color: #2c3e50;
+      font-size: 18px;
+    }
+    .intro-text {
+      color: #555;
+    }
+    .start-btn {
+      margin-top: 25px;
+      padding: 12px 30px;
+      background: #28a745;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 18px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .start-btn:hover {
+      background: #218838;
+    }
+
+    /* سبک آزمون (مخفی تا زمان شروع) */
+    #quiz-container {
+      display: none;
+      max-width: 800px;
+      margin: 30px auto;
+      background: white;
+      padding: 30px;
+      border-radius: 14px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.08);
+    }
+
+    /* سبک‌های آزمون (همان قبلی) */
+    h1 {
+      text-align: center;
+      color: #1a5276;
+      margin-bottom: 25px;
+    }
+    .question {
+      margin-bottom: 30px;
+      padding: 15px;
+      border-radius: 10px;
+      background: #f8f9fa;
+    }
+    .question-text {
+      font-weight: bold;
+      margin-bottom: 10px;
+    }
+    .options label {
+      display: block;
+      margin: 8px 0;
+      padding: 10px;
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .options input {
+      margin-left: 10px;
+    }
+    button#submit-btn {
+      display: block;
+      width: 100%;
+      padding: 14px;
+      background: #28a745;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 18px;
+      cursor: pointer;
+      margin-top: 20px;
+    }
+    button#submit-btn:hover {
+      background: #218838;
+    }
+    #result {
+      display: none;
+      margin-top: 30px;
+      padding: 20px;
+      background: #e8f5e9;
+      border-radius: 12px;
+      line-height: 1.6;
+    }
+    .feedback-item {
+      margin-bottom: 20px;
+      padding: 12px;
+      border-right: 4px solid #28a745;
+      background: #f1f8e9;
+      border-radius: 6px;
+    }
+    .feedback-item.wrong {
+      border-right-color: #dc3545;
+      background: #ffebee;
+    }
+    .feedback-item h4 {
+      margin: 0 0 6px 0;
+      color: #1b5e20;
+    }
+    .feedback-item.wrong h4 {
+      color: #c62828;
+    }
+    .overall {
+      font-size: 18px;
+      font-weight: bold;
+      margin-bottom: 20px;
+      text-align: center;
+    }
+  </style>
+  <link href="https://v1.fontapi.ir/css/Vazir" rel="stylesheet">
+</head>
+<body>
+
+<!-- مودال معرفی -->
+<div id="introModal" class="modal">
+  <div class="modal-content">
+    <h2>Self-assessment of the concept of gamification</h2>
+    <p class="student-name">سمیه عبدالخانی</p>
+    <p class="intro-text">Somayeh, student at Tarbiat Modares University, majoring in Educational Technology</p>
+    <button class="start-btn" onclick="startQuiz()">شروع آزمون</button>
+  </div>
+</div>
+
+<!-- آزمون (در ابتدا مخفی) -->
+<div id="quiz-container">
+  <h1>آزمون بازی‌وارسازی (سطح دانشگاهی)</h1>
+  <form id="quizForm">
+    <!-- Question 1 -->
+    <div class="question">
+      <div class="question-text">۱. «بازی‌وارسازی (Gamification)» دقیقاً به چه معناست؟</div>
+      <div class="options">
+        <label><input type="radio" name="q1" value="a"> استفاده از عناصر بازی در یک زمینه غیربازی برای افزایش انگیزه و مشارکت</label>
+        <label><input type="radio" name="q1" value="b"> جایگزینی کامل محتوای آموزشی با بازی‌های تجاری</label>
+        <label><input type="radio" name="q1" value="c"> کاهش حجم مطالب درسی</label>
+        <label><input type="radio" name="q1" value="d"> تمرکز صرف بر جنبه‌های تفریحی یادگیری</label>
+      </div>
+    </div>
+
+    <!-- Question 2 -->
+    <div class="question">
+      <div class="question-text">۲. نظریه «خودتعیین‌گری (SDT)» کدام مؤلفه‌ها را برای انگیزه داخلی ضروری می‌داند؟</div>
+      <div class="options">
+        <label><input type="radio" name="q2" value="a"> رقابت، سرعت و پاداش</label>
+        <label><input type="radio" name="q2" value="b"> استقلال، شایستگی و تعلق اجتماعی</label>
+        <label><input type="radio" name="q2" value="c"> کیفیت تصویر، صدا و رابط کاربری</label>
+        <label><input type="radio" name="q2" value="d"> زمان‌بندی دقیق و امتیازدهی پیچیده</label>
+      </div>
+    </div>
+
+    <!-- Question 3 -->
+    <div class="question">
+      <div class="question-text">۳. کدام عنصر بازی‌وارسازی به کاربر این احساس را می‌دهد که در مسیر پیشرفت قرار دارد؟</div>
+      <div class="options">
+        <label><input type="radio" name="q3" value="a"> نمایه کاربری (Profile)</label>
+        <label><input type="radio" name="q3" value="b"> نشان‌ها (Badges)</label>
+        <label><input type="radio" name="q3" value="c"> جدول امتیاز (Leaderboard)</label>
+        <label><input type="radio" name="q3" value="d"> سطح‌بندی (Leveling)</label>
+      </div>
+    </div>
+
+    <!-- Question 4 -->
+    <div class="question">
+      <div class="question-text">۴. استفاده از «نشان‌ها (Badges)» در بازی‌وارسازی بیشتر به چه هدفی کمک می‌کند؟</div>
+      <div class="options">
+        <label><input type="radio" name="q4" value="a"> افزایش سرعت پردازش اطلاعات</label>
+        <label><input type="radio" name="q4" value="b"> نمایش مهارت‌ها یا دستاوردهای خاص کاربر</label>
+        <label><input type="radio" name="q4" value="c"> کاهش نیاز به تعامل کاربر</label>
+        <label><input type="radio" name="q4" value="d"> محدود کردن دسترسی کاربران به مراحل بعدی</label>
+      </div>
+    </div>
+
+    <!-- Question 5 -->
+    <div class="question">
+      <div class="question-text">۵. کدام عنصر بیشترین تأثیر را بر انگیزه داخلی کاربر در محیط‌های یادگیری دارد؟</div>
+      <div class="options">
+        <label><input type="radio" name="q5" value="a"> رتبه‌بندی در جدول امتیاز</label>
+        <label><input type="radio" name="q5" value="b"> دریافت جوایز مالی</label>
+        <label><input type="radio" name="q5" value="c"> ارائه بازخورد مثبت و فرصت برای خود-ارزیابی</label>
+        <label><input type="radio" name="q5" value="d"> معرفی کاربر در شبکه‌های اجتماعی</label>
+      </div>
+    </div>
+
+    <button type="button" id="submit-btn" onclick="submitQuiz()">ارسال پاسخ‌ها و دریافت بازخورد</button>
+  </form>
+
+  <div id="result"></div>
+</div>
+
+<script>
+  function startQuiz() {
+    document.getElementById("introModal").style.display = "none";
+    document.getElementById("quiz-container").style.display = "block";
+  }
+
+  const correctAnswers = {
+    q1: "a",
+    q2: "b",
+    q3: "d",
+    q4: "b",
+    q5: "c"
+  };
+
+  const explanations = {
+    q1: "بازی‌وارسازی به‌معنای استفاده از مکانیزم‌های بازی (مثل امتیاز، نشان، سطح) در زمینه‌های غیربازی است تا انگیزه و تعامل کاربر را افزایش دهد — نه جایگزینی محتوا با بازی.",
+    q2: "نظریه خودتعیین‌گری (Self-Determination Theory) سه نیاز روانشناختی اساسی را برجسته می‌کند: استقلال (autonomy)، شایستگی (competence) و تعلق اجتماعی (relatedness).",
+    q3: "«سطح‌بندی (Leveling)» به کاربر نشان می‌دهد که چقدر پیشرفت کرده و چه چیزی در آینده منتظرش است — این حس پیشرفت، انگیزه را تقویت می‌کند.",
+    q4: "«نشان‌ها (Badges)» نمادهای بصری از دستاوردهای کاربر هستند و به‌عنوان تأییدیه‌ای بر مهارت‌ها یا رفتارهای مطلوب عمل می‌کنند.",
+    q5: "انگیزه داخلی زمانی تقویت می‌شود که کاربر احساس رشد و خودکارآمدی کند. بازخورد سازنده و فرصت خود-ارزیابی، این احساس را تقویت می‌کند — نه پاداش‌های خارجی."
+  };
+
+  function submitQuiz() {
+    let score = 0;
+    const total = 5;
+    const resultDiv = document.getElementById("result");
+    const form = document.getElementById("quizForm");
+
+    let feedbackHtml = `<div class="overall">امتیاز شما: <strong>${score}/${total}</strong></div><hr>`;
+
+    for (let i = 1; i <= total; i++) {
+      const q = `q${i}`;
+      const selected = document.querySelector(`input[name="${q}"]:checked`);
+      const userAnswer = selected ? selected.value : null;
+      const correct = correctAnswers[q];
+      const isCorrect = userAnswer === correct;
+
+      if (isCorrect) score++;
+
+      feedbackHtml += `
+        <div class="feedback-item ${isCorrect ? '' : 'wrong'}">
+          <h4>سؤال ${i}: ${isCorrect ? '✅ پاسخ شما صحیح بود.' : '❌ پاسخ شما نادرست بود.'}</h4>
+          <p><strong>توضیح:</strong> ${explanations[q]}</p>
+        </div>
+      `;
+    }
+
+    let overallMessage = "";
+    if (score === 5) {
+      overallMessage = "👏 تبریک! شما درک عمیقی از مبانی بازی‌وارسازی و روانشناسی انگیزش دارید. می‌توانید این دانش را در طراحی آموزش‌های تعاملی به‌کار ببرید.";
+    } else if (score >= 3) {
+      overallMessage = "✅ درک خوبی از مفاهیم کلیدی دارید. مرور نظریه SDT و عناصر طراحی (مثل Leveling و Badges) می‌تواند شما را به سطح حرفه‌ای برساند.";
+    } else {
+      overallMessage = "📚 پیشنهاد می‌شود مفاهیم بازی‌وارسازی، به‌ویژه تفاوت بین انگیزه داخلی و خارجی و نقش عناصر بازی‌محور در یادگیری، را مطالعه کنید.";
+    }
+
+    feedbackHtml += `<div style="margin-top:20px; padding-top:15px; border-top:1px solid #ccc; font-weight:bold;">${overallMessage}</div>`;
+
+    resultDiv.innerHTML = feedbackHtml;
+    resultDiv.style.display = "block";
+    form.style.display = "none";
+  }
+</script>
+
+</body>
+</html>
