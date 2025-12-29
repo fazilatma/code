@@ -1,8 +1,7 @@
 {
-"app":"noviex"
-"port":80
-"build":{
-"location":"iran"
-}
-"disks":[]
-}
+    "flask": {
+      "mirror": true,
+      "pythonVersion": "3.12",
+      "timezone": "America/Los_Angeles"
+    }
+  }
