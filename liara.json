@@ -1,4 +1,6 @@
 {
+    "app": "noviex", 
+    "platform": "flask",
     "flask": {
       "mirror": true,
       "pythonVersion": "3.12",
