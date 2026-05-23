@@ -1,0 +1,13 @@
+{
+  "h": "720",
+  "p": "7",
+  "m": "3",
+  "n": "5",
+  "g": "1",
+  "t": "1.5",
+  "tf": "60",
+  "chartLib": "tradingview",
+  "fetch": "10",
+  "code": "action = None\navg_p = calc_avg(current_steps)\ntarget_p = avg_p * (1 + tp_pct) if avg_p > 0 else 0\nlast_p = close.iloc[-1]\n\n# 1. BUY: on crossover & below gap threshold\nif crossover(close, super_line) and len(current_steps) < n_max:\n    if not current_steps or last_p <= current_steps[-1] * (1 - gap_pct):\n        action = \"BUY\"\n\n# 2. SELL_LAST: on crossunder when at full capacity\nelif len(current_steps) == n_max and crossunder(close, super_line):\n    action = \"SELL_LAST\"\n\n# 3. SELL_ALL: on crossunder when in profit\nelif current_steps and last_p > target_p and crossunder(close, super_line):\n    action = \"SELL_ALL\"\n",
+  "mode": "sim"
+}

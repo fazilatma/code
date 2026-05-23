@@ -1,0 +1,22 @@
+[
+    {
+        "id": "d3e0a8ee27c7f567",
+        "buyer_id": "06453505f535053a",
+        "title": "آیفون 15 پرو مکس 256GB",
+        "category": "موبایل",
+        "description": "رنگ تیتانیوم مشکی، رجیستر شده، آکبند",
+        "budget": 65000000,
+        "status": "open",
+        "created_at": "2026-05-23 23:39:34"
+    },
+    {
+        "id": "cc03e68731e80c05",
+        "buyer_id": "06453505f535053a",
+        "title": "هدفون بلوتوثی Sony WH-1000XM5",
+        "category": "هدفون",
+        "description": "نو، با گارانتی معتبر",
+        "budget": 12500000,
+        "status": "completed",
+        "created_at": "2026-05-23 23:39:34"
+    }
+]

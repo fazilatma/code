@@ -1,0 +1,18 @@
+{
+    "h": "720",
+    "p": "1",
+    "m": "0.5",
+    "n": "5",
+    "g": "1",
+    "t": "1.5",
+    "tf": "60",
+    "chartLib": "tradingview",
+    "fetch": "10",
+    "notification_method": "bale",
+    "code": "",
+    "mode": "live",
+    "exchange": "nobitex",
+    "nobitex_token": "6dd0024b34785a99a000e76ab4f2552a628d5a6c",
+    "tabdeal_api_key": "",
+    "tabdeal_secret_key": ""
+}
