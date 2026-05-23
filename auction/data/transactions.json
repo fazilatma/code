@@ -1,0 +1,29 @@
+[
+    {
+        "id": "27401b483629023e",
+        "user_id": "06453505f535053a",
+        "type": "debit",
+        "amount": 12500000,
+        "description": "خرید هدفون بلوتوثی سونی",
+        "reference": "WH-1000XM5",
+        "created_at": "1403\/02\/28"
+    },
+    {
+        "id": "53d8e6a743517113",
+        "user_id": "06453505f535053a",
+        "type": "credit",
+        "amount": 500000,
+        "description": "شارژ کیف پول",
+        "reference": "شارژ آنلاین",
+        "created_at": "1403\/02\/25"
+    },
+    {
+        "id": "b712ec550263746b",
+        "user_id": "06453505f535053a",
+        "type": "debit",
+        "amount": 18900000,
+        "description": "خرید ساعت هوشمند اپل سری ۹",
+        "reference": "Apple Watch Series 9",
+        "created_at": "1403\/02\/15"
+    }
+]

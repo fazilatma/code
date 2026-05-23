@@ -19,18 +19,51 @@ body {
     padding: 10px 0px 20px 0px;
 }
 
+.mona-images {
+    width: 100%;
+    max-width: 400px;
+    height: auto;
+    border: 8px solid #fff;
+    box-sizing: border-box;
+    display: block;
+    margin: 0.8rem auto;
+}
+
+.haiku-containers {
+    padding: 10px 0 20px 0;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 680px;
+    margin: 0 auto;
+}
+
 .haikus {
     font-size: 18px;
     white-space: pre-wrap;
+    line-height: 1.4;
+    margin: 0.4rem;
 }
 
+/* Mobile adjustments */
 @media only screen and (max-width: 600px) {
-    .june-images {
-        max-width: 340px;
-        max-height: 340px;
+    .mona-images {
+        max-width: 320px;
+        border-width: 6px;
     }
 
     .haikus {
-        font-size: 22px;
+        font-size: 16px;
+        padding: 0 12px;
+    }
+
+    body {
+        padding: 12px 8px;
+    }
+}
+
+/* Make sure very small screens keep readable text */
+@media only screen and (max-width: 360px) {
+    .haikus {
+        font-size: 15px;
     }
 }

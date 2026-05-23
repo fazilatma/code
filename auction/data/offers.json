@@ -1,0 +1,41 @@
+[
+    {
+        "id": "ac3977d8e3e6eb54",
+        "request_id": "d3e0a8ee27c7f567",
+        "seller_id": null,
+        "price": 64500000,
+        "description": "سلام، گوشی موجوده، آکبند با گارانتی ۱۸ ماهه",
+        "warranty_months": 18,
+        "delivery_days": 1,
+        "delivery_time": "۱ تا ۲ روز کاری",
+        "status": "pending",
+        "discount_percent": 3,
+        "created_at": "2026-05-23 23:39:34"
+    },
+    {
+        "id": "ca3b5f096a08eb72",
+        "request_id": "d3e0a8ee27c7f567",
+        "seller_id": null,
+        "price": 62800000,
+        "description": "سلام، قیمت مناسبی دارم، بدون گارانتی ولی کالای اصلی",
+        "warranty_months": 0,
+        "delivery_days": 4,
+        "delivery_time": "۲ تا  روز کاری",
+        "status": "pending",
+        "discount_percent": 3,
+        "created_at": "2026-05-23 23:39:34"
+    },
+    {
+        "id": "303fd4a21b0a394a",
+        "request_id": "d3e0a8ee27c7f567",
+        "seller_id": "5bf2a49cb4d1a522",
+        "price": 65900000,
+        "description": "گوشی موجوده، امکان ارسال فوری با پیک در شیراز",
+        "warranty_months": 7,
+        "delivery_days": 3,
+        "delivery_time": "۱ تا ۳ روز کاری",
+        "status": "pending",
+        "discount_percent": 2,
+        "created_at": "2026-05-23 23:39:34"
+    }
+]
