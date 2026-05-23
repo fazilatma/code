@@ -1,5 +1,26 @@
 <?php
 declare(strict_types=1);
+
+
+// ===== ERROR REPORTING =====
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
+error_reporting(E_ALL);
+set_error_handler(function($severity, $message, $file, $line) {
+    if (!(error_reporting() & $severity)) return false;
+    error_log(sprintf("[%s] %s in %s on line %d", 
+        date('Y-m-d H:i:s'), $message, $file, $line));
+    return false;
+});
+register_shutdown_function(function() {
+    $error = error_get_last();
+    if ($error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_PARSE])) {
+        error_log(sprintf("[FATAL] %s in %s on line %d", 
+            $error['message'], $error['file'], $error['line']));
+    }
+});
+// ===========================
+
 session_start();
 
 /*
@@ -381,6 +402,7 @@ function icon_svg(string $n): string {
         'arrow-left'=>'<svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>',
         'chevron-left'=>'<svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>',
         'check-circle'=>'<svg viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+        'tag'=>'<svg viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>',
         'truck-icon'=>'<svg viewBox="0 0 24 24"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>',
         'truck-fast'=>'<svg viewBox="0 0 24 24"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/><path d="M14 1h4l2 4"/></svg>',
         'timer'=>'<svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/><line x1="12" y1="2" x2="12" y2="5"/></svg>',
