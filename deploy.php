@@ -20,7 +20,8 @@
 @set_time_limit(300);
 @ini_set('memory_limit', '256M');
 
-const DEPLOY_VERSION = '2.0';
+const DEPLOY_VERSION = '3.0';
+const DEPLOY_BUILD   = '1405-05-10';
 const CONFIG_FILE    = __DIR__ . '/.deploy-config.json';
 const BACKUP_DIR     = __DIR__ . '/_backups';
 const LOG_FILE       = __DIR__ . '/.deploy-log.json';
@@ -92,7 +93,8 @@ function jout($data, int $code = 200): void {
 function human_size(int $b): string {
     if ($b < 1024) return $b . ' B';
     if ($b < 1048576) return round($b / 1024, 1) . ' KB';
-    return round($b / 1048576, 2) . ' MB';
+    if ($b < 1073741824) return round($b / 1048576, 2) . ' MB';
+    return round($b / 1073741824, 2) . ' GB';
 }
 
 /**
@@ -807,6 +809,55 @@ if ($isApi) {
     }
 
     // --- اجرای استقرار / بررسی ---
+    /* v3.0 — پیش‌نمایش تفاوت: پیش از نصب معلوم می‌شود دقیقاً چه چیزی
+     * عوض می‌شود. برای فایل‌های بزرگ فقط خلاصهٔ آماری برمی‌گردد. */
+    if ($action === 'diff') {
+        $repo   = trim((string)($_POST['repo'] ?? $cfg['repo'] ?? ''));
+        $branch = trim((string)($_POST['branch'] ?? ''));
+        $src    = trim((string)($_POST['source'] ?? ''));
+        $destN  = basename(trim((string)($_POST['dest'] ?? '')) ?: $src);
+        $folder = trim((string)($_POST['folder'] ?? ''));
+        if ($repo === '' || $src === '') jout(['ok' => false, 'error' => 'ریپو و فایل مبدأ لازم است']);
+
+        $res = http_get(gh_raw_url($repo, $branch, $src), $cfg['github_token'] ?? '');
+        if (!$res['ok'] && $res['code'] === 401 && ($cfg['github_token'] ?? '') !== '') {
+            $res = http_get(gh_raw_url($repo, $branch, $src), '');
+        }
+        if (!$res['ok']) jout(['ok' => false, 'error' => 'دانلود ناموفق: ' . $res['error']]);
+
+        $new = $res['body'];
+        $dirAbs = safe_path($folder, true);
+        $dest = ($dirAbs === null) ? null : rtrim($dirAbs, '/') . '/' . $destN;
+        $old = ($dest && is_file($dest)) ? (string)@file_get_contents($dest) : null;
+
+        if ($old === null) {
+            jout(['ok' => true, 'is_new' => true, 'new_lines' => substr_count($new, "\n") + 1,
+                  'new_size' => strlen($new), 'new_size_h' => human_size(strlen($new))]);
+        }
+        if ($old === $new) jout(['ok' => true, 'same' => true]);
+
+        $a = explode("\n", $old);
+        $b = explode("\n", $new);
+        // مقایسهٔ سرانگشتی: چند خط از ابتدا و انتها یکسان‌اند
+        $n1 = count($a); $n2 = count($b);
+        $pre = 0; while ($pre < $n1 && $pre < $n2 && $a[$pre] === $b[$pre]) $pre++;
+        $suf = 0; while ($suf < ($n1 - $pre) && $suf < ($n2 - $pre) && $a[$n1 - 1 - $suf] === $b[$n2 - 1 - $suf]) $suf++;
+        $removed = max(0, $n1 - $pre - $suf);
+        $added   = max(0, $n2 - $pre - $suf);
+
+        $sample = [];
+        $cap = 60;
+        for ($i = 0; $i < min($removed, $cap); $i++) $sample[] = ['t' => '-', 'n' => $pre + $i + 1, 'x' => mb_substr($a[$pre + $i], 0, 200)];
+        for ($i = 0; $i < min($added, $cap); $i++)   $sample[] = ['t' => '+', 'n' => $pre + $i + 1, 'x' => mb_substr($b[$pre + $i], 0, 200)];
+
+        jout(['ok' => true, 'same' => false, 'is_new' => false,
+              'old_lines' => $n1, 'new_lines' => $n2,
+              'added' => $added, 'removed' => $removed,
+              'old_size_h' => human_size(strlen($old)), 'new_size_h' => human_size(strlen($new)),
+              'unchanged_head' => $pre, 'unchanged_tail' => $suf,
+              'sample' => $sample, 'truncated' => ($removed > $cap || $added > $cap)]);
+    }
+
     if ($action === 'deploy' || $action === 'dryrun') {
         $job = [
             'repo'      => (string)($_POST['repo'] ?? ''),
@@ -847,6 +898,55 @@ if ($isApi) {
     // --- مدیریت کارها ---
     if ($action === 'jobs_list') {
         jout(['ok' => true, 'jobs' => array_values($cfg['jobs'] ?? [])]);
+    }
+
+    /* v3.0 — وضعیت همهٔ کارها در یک نگاه: هر مقصد با گیت‌هاب مقایسه
+     * می‌شود تا معلوم شود کدام به‌روز است و کدام عقب مانده. */
+    if ($action === 'jobs_status') {
+        $out = [];
+        foreach (($cfg['jobs'] ?? []) as $j) {
+            $repo   = trim($j['repo']   ?? $cfg['repo']   ?? '');
+            $branch = trim($j['branch'] ?? $cfg['branch'] ?? '');
+            $src    = trim($j['source'] ?? '');
+            $destN  = basename(trim($j['dest'] ?? '') ?: $src);
+            $folder = trim($j['folder'] ?? '');
+
+            $row = ['name' => $j['name'] ?? '', 'source' => $src,
+                    'dest' => ltrim(($folder !== '' ? rtrim($folder, '/') . '/' : '') . $destN, '/'),
+                    'branch' => $branch, 'state' => 'unknown', 'note' => ''];
+
+            $dirAbs = safe_path($folder, true);
+            $local  = ($dirAbs === null) ? null : rtrim($dirAbs, '/') . '/' . $destN;
+
+            if ($repo === '' || $src === '') { $row['state'] = 'error'; $row['note'] = 'تنظیمات ناقص'; $out[] = $row; continue; }
+
+            $api = 'https://api.github.com/repos/' . $repo . '/contents/'
+                 . implode('/', array_map('rawurlencode', explode('/', $src)))
+                 . '?ref=' . rawurlencode($branch);
+            $r = http_get($api, $cfg['github_token'] ?? '', true);
+            if (!$r['ok']) {
+                $row['state'] = 'error';
+                $row['note']  = $r['code'] === 404 ? 'در گیت‌هاب پیدا نشد' : $r['error'];
+                $out[] = $row; continue;
+            }
+            $d = json_decode($r['body'], true);
+            $remoteSha = (string)($d['sha'] ?? '');
+            $row['remote_size'] = (int)($d['size'] ?? 0);
+
+            if (!$local || !is_file($local)) {
+                $row['state'] = 'missing';
+                $row['note']  = 'روی هاست وجود ندارد';
+            } else {
+                $body = (string)@file_get_contents($local);
+                $localSha = sha1('blob ' . strlen($body) . "\0" . $body);
+                $row['local_size'] = strlen($body);
+                $row['mtime'] = date('Y-m-d H:i', (int)filemtime($local));
+                if ($localSha === $remoteSha) { $row['state'] = 'current'; $row['note'] = 'به‌روز'; }
+                else { $row['state'] = 'stale'; $row['note'] = 'نسخهٔ جدید موجود است'; }
+            }
+            $out[] = $row;
+        }
+        jout(['ok' => true, 'jobs' => $out]);
     }
 
     if ($action === 'job_save') {
@@ -1012,11 +1112,80 @@ if ($isApi) {
             'api_token'  => $cfg['api_token'] ?? '',
             'has_gh'     => !empty($cfg['github_token']),
             'version'    => DEPLOY_VERSION,
+            'build'      => DEPLOY_BUILD,
             'php'        => PHP_VERSION,
             'dir'        => __DIR__,
             'writable'   => is_writable(__DIR__),
             'curl'       => function_exists('curl_init'),
         ]]);
+    }
+
+    /* v3.0 — بررسی سلامت: هر چیزی که ممکن است استقرار را خراب کند،
+     * پیش از اجرا و با راهنمای رفع مشکل گزارش می‌شود. */
+    if ($action === 'health') {
+        $checks = [];
+        $add = function (string $name, string $state, string $note = '', string $fix = '') use (&$checks) {
+            $checks[] = ['name' => $name, 'state' => $state, 'note' => $note, 'fix' => $fix];
+        };
+
+        $add('نسخهٔ PHP', version_compare(PHP_VERSION, '7.4', '>=') ? 'ok' : 'warn', PHP_VERSION,
+             version_compare(PHP_VERSION, '7.4', '>=') ? '' : 'PHP 7.4 یا بالاتر توصیه می‌شود');
+        $add('cURL', function_exists('curl_init') ? 'ok' : 'warn',
+             function_exists('curl_init') ? 'فعال' : 'غیرفعال',
+             function_exists('curl_init') ? '' : 'بدون cURL از fallback کندتر استفاده می‌شود');
+        $add('OpenSSL (رمزنگاری بکاپ)', function_exists('openssl_encrypt') ? 'ok' : 'fail',
+             function_exists('openssl_encrypt') ? 'در دسترس' : 'موجود نیست',
+             function_exists('openssl_encrypt') ? '' : 'بدون آن، بکاپ رمزنگاری‌شده کار نمی‌کند');
+        $add('پوشه قابل نوشتن', is_writable(__DIR__) ? 'ok' : 'fail', __DIR__,
+             is_writable(__DIR__) ? '' : 'سطح دسترسی پوشه را ۷۵۵ کنید');
+
+        $free = @disk_free_space(__DIR__);
+        $add('فضای دیسک', ($free !== false && $free > 20971520) ? 'ok' : 'warn',
+             $free !== false ? human_size((int)$free) . ' آزاد' : 'نامشخص',
+             ($free !== false && $free <= 20971520) ? 'کمتر از ۲۰ مگابایت آزاد است' : '');
+
+        $add('فایل تنظیمات', is_file(CONFIG_FILE) ? 'ok' : 'warn',
+             is_file(CONFIG_FILE) ? ('دسترسی ' . substr(sprintf('%o', fileperms(CONFIG_FILE)), -3)) : 'ساخته نشده');
+
+        ensure_backup_dir();
+        $bk = glob(BACKUP_DIR . '/*.bak') ?: [];
+        $add('پوشهٔ بکاپ', is_dir(BACKUP_DIR) ? 'ok' : 'warn', count($bk) . ' نسخه',
+             is_file(BACKUP_DIR . '/.htaccess') ? '' : 'فایل .htaccess محافظ ساخته نشد');
+
+        // دسترسی واقعی به گیت‌هاب، نه فقط حدس
+        $t0 = microtime(true);
+        $ping = http_get('https://api.github.com/rate_limit', $cfg['github_token'] ?? '', true);
+        $ms = (int)round((microtime(true) - $t0) * 1000);
+        if ($ping['ok']) {
+            $rl = json_decode($ping['body'], true);
+            $rem = $rl['rate']['remaining'] ?? '?';
+            $lim = $rl['rate']['limit'] ?? '?';
+            $add('اتصال به گیت‌هاب', 'ok', $ms . 'ms · سهمیه ' . $rem . '/' . $lim,
+                 ($lim == 60 ? 'بدون توکن، ساعتی ۶۰ درخواست مجاز است' : ''));
+        } else {
+            $add('اتصال به گیت‌هاب', 'fail', $ping['error'],
+                 'فایروال هاست یا DNS را بررسی کنید');
+        }
+
+        $jobs = $cfg['jobs'] ?? [];
+        $add('کارهای ذخیره‌شده', $jobs ? 'ok' : 'warn', count($jobs) . ' کار',
+             $jobs ? '' : 'برای اجرای گروهی و cron حداقل یک کار بسازید');
+
+        $bad = 0;
+        foreach ($jobs as $j) {
+            $d = safe_path(($j['folder'] ?? '') . '/' . basename($j['dest'] ?? ''), false);
+            if ($d === null || (is_file($d) && !is_writable($d))) $bad++;
+        }
+        if ($jobs) {
+            $add('مقصد کارها', $bad ? 'warn' : 'ok',
+                 $bad ? ($bad . ' مقصد قابل نوشتن نیست') : 'همه قابل نوشتن',
+                 $bad ? 'سطح دسترسی فایل‌های مقصد را بررسی کنید' : '');
+        }
+
+        $fails = count(array_filter($checks, fn($c) => $c['state'] === 'fail'));
+        $warns = count(array_filter($checks, fn($c) => $c['state'] === 'warn'));
+        jout(['ok' => true, 'checks' => $checks, 'fails' => $fails, 'warns' => $warns,
+              'verdict' => $fails ? 'fail' : ($warns ? 'warn' : 'ok')]);
     }
 
     if ($action === 'settings_save') {
@@ -1200,7 +1369,10 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
 
 <?php else: ?>
 <!-- ============ پنل اصلی ============ -->
-<h1>🚀 پنل استقرار گیت‌هاب <span class="chip">v<?=DEPLOY_VERSION?></span></h1>
+<h1>🚀 پنل استقرار گیت‌هاب
+  <span class="chip">v<?=DEPLOY_VERSION?></span>
+  <span id="healthPill" class="chip" style="cursor:pointer" onclick="runHealth(true)" title="بررسی سلامت">⏳</span>
+</h1>
 <p class="sub">فایل‌ها را از گیت‌هاب مستقیم روی هاست نصب کنید — بدون کپی و پیست.</p>
 
 <div class="tabs">
@@ -1292,10 +1464,12 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
     <div id="d_steps" class="steps"></div>
     <div class="row" style="margin-top:12px">
       <button class="btn b-amber" onclick="run(true)">🔍 بررسی (بدون تغییر)</button>
+      <button class="btn b-gray" onclick="showDiff()">📝 تفاوت‌ها</button>
       <button class="btn b-green" onclick="run(false)">🚀 نصب کن</button>
       <div style="flex:1"></div>
       <button class="btn b-gray" onclick="saveJobPrompt()">⭐ ذخیره به‌عنوان کار</button>
     </div>
+    <div id="d_diff" style="margin-top:12px"></div>
   </div>
 </div>
 
@@ -1310,8 +1484,10 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
     <div class="row" style="margin-bottom:13px">
       <button class="btn b-green" onclick="runJobs(false)">🚀 اجرای همه</button>
       <button class="btn b-amber" onclick="runJobs(true)">🔍 بررسی همه</button>
+      <button class="btn b-blue" onclick="jobsStatus()">📊 وضعیت همه</button>
       <button class="btn b-gray" onclick="loadJobs()">↻ تازه‌سازی</button>
     </div>
+    <div id="j_status" style="margin-bottom:12px"></div>
     <div id="j_list"><div class="empty">در حال بارگذاری...</div></div>
     <div id="j_out" class="steps"></div>
   </div>
@@ -1488,9 +1664,20 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
   </div>
 
   <div class="card">
+    <h2>🩺 بررسی سلامت</h2>
+    <p class="hint" style="margin-bottom:10px">
+      همهٔ پیش‌نیازهای استقرار بررسی می‌شوند: دسترسی‌ها، افزونه‌ها، فضای دیسک،
+      اتصال واقعی به گیت‌هاب و سهمیهٔ باقی‌مانده.
+    </p>
+    <button class="btn b-blue" style="margin-bottom:12px" onclick="runHealth(true)">🩺 اجرای بررسی</button>
+    <div id="healthBox"><div class="empty">هنوز اجرا نشده</div></div>
+  </div>
+
+  <div class="card">
     <h2>ℹ️ وضعیت سیستم</h2>
     <table>
-      <tr><th style="width:36%">نسخهٔ PHP</th><td id="i_php" class="mono">—</td></tr>
+      <tr><th style="width:36%">نسخهٔ پنل</th><td id="i_ver" class="mono">—</td></tr>
+      <tr><th>نسخهٔ PHP</th><td id="i_php" class="mono">—</td></tr>
       <tr><th>پوشهٔ نصب</th><td id="i_dir" class="mono">—</td></tr>
       <tr><th>قابل نوشتن</th><td id="i_w" class="mono">—</td></tr>
       <tr><th>cURL</th><td id="i_curl" class="mono">—</td></tr>
@@ -1789,6 +1976,7 @@ async function loadSettings(){
   $('s_branch').value=SETTINGS.branch||'';
   $('s_api').value=SETTINGS.api_token||'';
   $('s_ghstate').textContent=SETTINGS.has_gh?'تنظیم شده':'تنظیم نشده';
+  $('i_ver').textContent='v'+SETTINGS.version+(SETTINGS.build?' · '+SETTINGS.build:'');
   $('i_php').textContent=SETTINGS.php;
   $('i_dir').textContent=SETTINGS.dir;
   $('i_w').innerHTML=SETTINGS.writable?'<span style="color:#4ade80">بله</span>':'<span style="color:#f87171">خیر — chmod 755</span>';
@@ -1913,6 +2101,96 @@ async function wbPush(){
     +' · <a href="'+esc(r.url)+'" target="_blank" style="color:#93c5fd">مشاهده در گیت‌هاب ↗</a>','m-ok');
 }
 
+/* ---------- v3.0: بررسی سلامت ---------- */
+async function runHealth(show){
+  const pill=$('healthPill');
+  if(pill) pill.textContent='⏳';
+  const r=await api('health');
+  if(!r.ok){ if(pill) pill.textContent='✗'; return; }
+
+  if(pill){
+    const icon={ok:'🟢',warn:'🟡',fail:'🔴'}[r.verdict]||'⚪';
+    pill.textContent=icon+' '+(r.verdict==='ok'?'سالم':(r.fails?r.fails+' خطا':r.warns+' هشدار'));
+    pill.style.borderColor={ok:'#22c55e',warn:'#f59e0b',fail:'#ef4444'}[r.verdict]||'#334155';
+  }
+
+  const box=$('healthBox');
+  if(box){
+    const dot={ok:'<span style="color:#4ade80">●</span>',warn:'<span style="color:#fbbf24">●</span>',fail:'<span style="color:#f87171">●</span>'};
+    box.innerHTML='<table><tr><th style="width:4%"></th><th style="width:34%">مورد</th><th>وضعیت</th></tr>'
+      +r.checks.map(c=>'<tr><td>'+(dot[c.state]||'●')+'</td>'
+        +'<td>'+esc(c.name)+'</td>'
+        +'<td class="mono">'+esc(c.note)
+        +(c.fix?'<div style="color:#fbbf24;font-size:10.5px;font-family:Tahoma">↳ '+esc(c.fix)+'</div>':'')
+        +'</td></tr>').join('')+'</table>';
+  }
+  if(show && r.verdict==='ok') showTip('✓ همه‌چیز سالم است');
+}
+
+function showTip(t){
+  const pill=$('healthPill'); if(!pill) return;
+  const old=pill.textContent; pill.textContent=t;
+  setTimeout(()=>runHealth(false),2200);
+}
+
+/* ---------- v3.0: پیش‌نمایش تفاوت ---------- */
+async function showDiff(){
+  const j=jobFromForm();
+  if(!j.source) return msg('d_msg','ابتدا فایل مبدأ را انتخاب کنید','m-err');
+  msg('d_msg','<span class="spin"></span> در حال مقایسه...','m-info');
+  $('d_diff').innerHTML='';
+  const r=await api('diff',{repo:j.repo,branch:j.branch,source:j.source,dest:j.dest,folder:j.folder},'POST');
+  if(!r.ok) return msg('d_msg','✗ '+esc(r.error||'خطا'),'m-err');
+
+  if(r.same){ msg('d_msg','✓ فایل روی هاست دقیقاً با گیت‌هاب یکسان است','m-ok'); return; }
+  if(r.is_new){
+    msg('d_msg','⚠ فایل جدید است — روی هاست وجود ندارد','m-warn');
+    $('d_diff').innerHTML='<div class="hint">'+toFaNum(r.new_lines)+' خط · '+esc(r.new_size_h)+'</div>';
+    return;
+  }
+
+  msg('d_msg','⚠ '+toFaNum(r.added)+' خط افزوده · '+toFaNum(r.removed)+' خط حذف‌شده','m-warn');
+  let h='<div class="hint" style="margin-bottom:6px">'
+      +esc(r.old_size_h)+' → '+esc(r.new_size_h)+' · '
+      +toFaNum(r.old_lines)+' → '+toFaNum(r.new_lines)+' خط · '
+      +toFaNum(r.unchanged_head)+' خط ابتدایی بدون تغییر</div>';
+  if(r.sample && r.sample.length){
+    h+='<div style="max-height:300px;overflow:auto;border:1px solid #334155;border-radius:8px;'
+      +'font-family:ui-monospace,monospace;font-size:11px;direction:ltr;text-align:left">';
+    r.sample.forEach(s=>{
+      const bg=s.t==='+'?'#052e16':'#450a0a', c=s.t==='+'?'#86efac':'#fca5a5';
+      h+='<div style="background:'+bg+';color:'+c+';padding:2px 8px;white-space:pre-wrap;word-break:break-all">'
+        +s.t+' '+esc(s.x)+'</div>';
+    });
+    h+='</div>';
+    if(r.truncated) h+='<div class="hint">فقط بخشی از تفاوت‌ها نمایش داده شده است</div>';
+  }
+  $('d_diff').innerHTML=h;
+}
+
+const toFaNum=n=>String(n==null?0:n).replace(/[0-9]/g,d=>'۰۱۲۳۴۵۶۷۸۹'[d]);
+
+/* ---------- v3.0: وضعیت همهٔ کارها ---------- */
+async function jobsStatus(){
+  const box=$('j_status');
+  box.innerHTML='<div class="hint"><span class="spin"></span> در حال مقایسه با گیت‌هاب...</div>';
+  const r=await api('jobs_status');
+  if(!r.ok){ box.innerHTML='<div class="hint">خطا</div>'; return; }
+  if(!r.jobs.length){ box.innerHTML=''; return; }
+  const badge={
+    current:'<span style="color:#4ade80">✓ به‌روز</span>',
+    stale:'<span style="color:#fbbf24">⬆ نسخهٔ جدید</span>',
+    missing:'<span style="color:#93c5fd">＋ جدید</span>',
+    error:'<span style="color:#f87171">✗ خطا</span>',
+    unknown:'<span style="color:#64748b">؟</span>'
+  };
+  box.innerHTML='<table><tr><th>کار</th><th>مقصد</th><th>وضعیت</th></tr>'
+    +r.jobs.map(j=>'<tr><td>'+esc(j.name)+'</td>'
+      +'<td class="mono">'+esc(j.dest)+(j.mtime?'<div style="color:#64748b;font-size:10px">'+esc(j.mtime)+'</div>':'')+'</td>'
+      +'<td>'+(badge[j.state]||j.state)+(j.note&&j.state==='error'?'<div style="color:#64748b;font-size:10px">'+esc(j.note)+'</div>':'')+'</td></tr>').join('')
+    +'</table>';
+}
+
 async function logout(){ await api('logout'); location.reload(); }
 
 /* ---------- شروع ---------- */
@@ -1932,6 +2210,7 @@ async function logout(){ await api('logout'); location.reload(); }
       $('folderlist').innerHTML=fr.folders.map(f=>'<option value="'+esc(f)+'">').join('');
     }
     if(SETTINGS.repo) loadBranches();
+    runHealth(false);   // v3.0: وضعیت سلامت در نوار بالا
   }
 })();
 </script>
