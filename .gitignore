@@ -1,2 +1,16 @@
 
 profiles.json
+connections.json
+bsl_progress.json
+bsl_stop_signal.json
+woo_progress.json
+woo_stop_signal.json
+sync_state.json
+bsl_products_temp.json
+woo_queue.json
+woo_products_temp.json
+bsl_queue.json
+extract_progress.json
+extract_stop_signal.json
+extract_queue.json
+uploads/
