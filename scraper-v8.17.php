@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.30';
+const APP_VERSION = '8.31';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4002,9 +4002,8 @@ saveSyncState($state);
 echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE); exit;
 }
 
-// v8.30: cron_sync و cron_run یکی شدند. cron_sync فقط نام مستعار است تا
-// کران‌جاب‌های قدیمی که آن آدرس را صدا می‌زنند از کار نیفتند.
-if (isset($_GET['cron_run']) || isset($_GET['cron_sync']) || (($_POST['action'] ?? '') === 'cron_run')) {
+// v8.31: تنها نقطهٔ ورود کران — cron_sync حذف شد چون دقیقاً همین کار را می‌کرد.
+if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
 header('Content-Type: application/json; charset=UTF-8');
 @set_time_limit(0);
 @ignore_user_abort(true);
@@ -4145,6 +4144,22 @@ function notifPrereq(array $cn): ?string {
 }
 
 /**
+ * v8.31: پیام خطای گویا برای پاسخ‌های ناموفق باسلام.
+ * ۴۰۴ معمولاً یعنی مسیر عوض شده (باسلام به API Gateway مهاجرت کرده) و
+ * ۴۰۳ یعنی توکن اسکوپ لازم را ندارد — این دو را نباید یکی گزارش کرد.
+ */
+function bslApiError(array $r, string $what, string $endpoint, string $scope = ''): string {
+    $c = (int)($r['code'] ?? 0);
+    if ($c === 404) return $what . ' — مسیر یافت نشد (۴۰۴): ' . $endpoint;
+    if ($c === 401) return $what . ' — توکن نامعتبر یا منقضی (۴۰۱)';
+    if ($c === 403) return $what . ' — توکن دسترسی لازم را ندارد (۴۰۳)'
+                         . ($scope !== '' ? ' · اسکوپ موردنیاز: ' . $scope : '');
+    if ($c === 429) return $what . ' — تعداد درخواست بیش از حد (۴۲۹)، کمی بعد تلاش کنید';
+    if ($c === 0)   return $what . ' — ارتباط با باسلام برقرار نشد';
+    return $what . ' — خطای HTTP ' . $c;
+}
+
+/**
  * بررسی سفارش‌های جدید.
  * $test=true یعنی حالت آزمایشی: وضعیت ذخیره نمی‌شود تا اجرای بعدی هم
  * همان نتیجه را بدهد، و اگر چیزی نبود یک پیام نمونه فرستاده می‌شود.
@@ -4152,8 +4167,10 @@ function notifPrereq(array $cn): ?string {
 function notifCheckOrders(array $cn, bool $test = false, bool $send = true): array {
     $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
     $st = notifLoadState(); $since = (int)($st['last_order_check'] ?? 0);
-    $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/orders?per_page=10&sort=created_at_desc');
-    if (!$r['ok']) return ['ok' => false, 'error' => 'دریافت سفارش‌ها ناموفق (HTTP ' . ($r['code'] ?? 0) . ')', 'found' => 0];
+    // v8.31: مسیر درست طبق مستندات رسمی — سفارش‌های غرفه‌دار
+    $r = bslReq($tk, 'GET', 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=10&sort=created_at:desc');
+    if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
+            'error' => bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read')];
 
     $rows = $r['body']['data'] ?? [];
     $found = 0; $sentTo = []; $samples = [];
@@ -4161,9 +4178,15 @@ function notifCheckOrders(array $cn, bool $test = false, bool $send = true): arr
         $t = strtotime($o['created_at'] ?? 'now');
         if (!$test && $t <= $since) break;
         $found++;
-        $msg = "🛒 سفارش جدید باسلام\nشماره: #" . ($o['id'] ?? 0)
-             . "\nمشتری: " . ($o['customer']['name'] ?? 'نامشخص')
-             . "\nمبلغ: " . number_format((int)($o['total_price'] ?? 0)) . ' تومان';
+        // v8.31: ساختار پاسخ vendor-parcels — مشتری زیر order است
+        $oid  = $o['order']['id'] ?? ($o['id'] ?? 0);
+        $cust = $o['order']['customer']['name'] ?? ($o['customer']['name'] ?? 'نامشخص');
+        $amt  = (int)($o['total_items_price'] ?? ($o['total_price'] ?? 0));
+        $stat = $o['status']['title'] ?? ($o['status']['name'] ?? '');
+        $msg = "🛒 سفارش جدید باسلام\nشماره: #" . $oid
+             . "\nمشتری: " . $cust
+             . "\nمبلغ: " . number_format($amt) . ' تومان'
+             . ($stat !== '' ? "\nوضعیت: " . $stat : '');
         $samples[] = $msg;
         if ($send && !$test) $sentTo = notifSend($cn, $msg);
         if ($test) break;   // در حالت تست فقط تازه‌ترین مورد
@@ -4180,18 +4203,27 @@ function notifCheckOrders(array $cn, bool $test = false, bool $send = true): arr
 function notifCheckChats(array $cn, bool $test = false, bool $send = true): array {
     $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
     $st = notifLoadState(); $since = (int)($st['last_chat_check'] ?? 0);
-    $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/chats?per_page=10&sort=created_at_desc');
-    if (!$r['ok']) return ['ok' => false, 'error' => 'دریافت گفتگوها ناموفق (HTTP ' . ($r['code'] ?? 0) . ')', 'found' => 0];
+    // v8.31: مسیر درست — گفتگوها زیر ریشه است، نه زیر vendors
+    $r = bslReq($tk, 'GET', 'chats?limit=10&order_by=updated_at');
+    if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
+            'error' => bslApiError($r, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')];
 
-    $rows = $r['body']['data'] ?? [];
+    // v8.31: پاسخ chats به شکل data.chats است، نه data
+    $rows = $r['body']['data']['chats'] ?? ($r['body']['data'] ?? []);
     $found = 0; $sentTo = []; $samples = [];
     foreach ($rows as $c) {
-        $t = strtotime($c['created_at'] ?? 'now');
+        if (!is_array($c)) continue;
+        $t = strtotime($c['updated_at'] ?? ($c['created_at'] ?? 'now'));
         if (!$test && $t <= $since) break;
         $found++;
-        $txt = $c['last_message']['text'] ?? ($c['last_message']['content'] ?? '...');
-        $msg = "💬 پیام مشتری باسلام\nمشتری: " . ($c['customer']['name'] ?? 'مشتری')
-             . "\nپیام: " . mb_substr($txt, 0, 200);
+        $lm  = $c['last_message'] ?? [];
+        $txt = is_array($lm) ? ($lm['text'] ?? ($lm['content'] ?? '...')) : '...';
+        $who = $c['contact']['name'] ?? ($c['contact']['title']
+             ?? ($c['customer']['name'] ?? 'مشتری'));
+        $unseen = (int)($c['unseen_message_count'] ?? 0);
+        $msg = "💬 پیام مشتری باسلام\nمشتری: " . $who
+             . ($unseen > 0 ? " ({$unseen} خوانده‌نشده)" : '')
+             . "\nپیام: " . mb_substr((string)$txt, 0, 200);
         $samples[] = $msg;
         if ($send && !$test) $sentTo = notifSend($cn, $msg);
         if ($test) break;
@@ -4209,7 +4241,8 @@ function notifCheckProducts(array $cn, bool $test = false, bool $send = true): a
     $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
     $st = notifLoadState(); $since = (int)($st['last_product_check'] ?? 0);
     $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=10&sort=created_at_desc&statuses=2976&statuses=3790&statuses=3567');
-    if (!$r['ok']) return ['ok' => false, 'error' => 'دریافت محصولات ناموفق (HTTP ' . ($r['code'] ?? 0) . ')', 'found' => 0];
+    if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
+            'error' => bslApiError($r, 'دریافت محصولات ناموفق', 'vendors/{id}/products', 'vendor.product.read')];
 
     $rows = $r['body']['data'] ?? [];
     $found = 0; $sentTo = []; $samples = [];
@@ -11072,6 +11105,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.31', t:'رفع خطای ۴۰۴ استعلام‌های باسلام', items:[
+    'مسیر سفارش‌ها به vendor-parcels و گفتگوها به chats اصلاح شد (باسلام به API Gateway مهاجرت کرده بود)',
+    'اصلاح نگاشت فیلدها طبق مستندات رسمی — مشتری، مبلغ و تعداد پیام خوانده‌نشده',
+    'پیام خطای گویا: تفکیک ۴۰۴ (مسیر) از ۴۰۳ (کمبود اسکوپ) و ۴۰۱ (توکن)',
+    'حذف کامل cron_sync'
+  ]},
   {v:'8.30', t:'اعلان تغییرات مبدأ و ادغام کران', items:[
     'اعلان گران/ارزان شدن و موجود/ناموجود شدن محصولات سایت مبدأ',
     'اعلان خطای اجرای خودکار — دیگر شکست کران‌جاب بی‌صدا نمی‌ماند',
@@ -13360,7 +13399,7 @@ function toggleSync(){
     // Deprecated - sync is now per-profile
 }
 function startSyncTimer(){
-    // Deprecated - sync is now per-profile via cron_sync
+    // Deprecated - sync is now per-profile via cron_run
 }
 function runSyncNow(){
     // v8.28: دقیقاً همان پنل و همان رصد زندهٔ دکمهٔ «استخراج بک‌اند»
