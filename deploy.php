@@ -211,6 +211,211 @@ function ensure_self_guard(): void {
     }
 }
 
+/* =====================================================================
+ *  پشتیبان‌گیری ورک‌اسپیس هاست → گیت‌هاب
+ * ===================================================================== */
+
+/** فایل‌هایی که هرگز نباید در ریپو منتشر شوند (کلید و رمز دارند) */
+function wb_secret_files(): array {
+    return [
+        'connections.json',      // توکن باسلام، کلید ووکامرس، کلید AI
+        '.deploy-config.json',   // هش رمز پنل و توکن API
+        '.versioncheck.json',    // ممکن است توکن گیت‌هاب داشته باشد
+        '.deploy-log.json',
+        '.htaccess',
+    ];
+}
+
+/** پوشه‌هایی که ارزش بکاپ ندارند یا حجیم‌اند */
+function wb_skip_dirs(): array {
+    return ['_backups', 'uploads', '.git', 'node_modules', 'vendor', '.cache', 'tmp'];
+}
+
+function wb_is_secret(string $rel): bool {
+    $base = basename($rel);
+    if (in_array($base, wb_secret_files(), true)) return true;
+    // فایل‌های موقت صف/وضعیت هم داده‌های کاری‌اند، نه کد
+    if (preg_match('~^(bsl|woo|extract)_(queue|products_temp|progress|stop_signal)~', $base)) return true;
+    if (preg_match('~^bsl_queue_products_.*\.json$~', $base)) return true;
+    return false;
+}
+
+/**
+ * محتوای فایل را برای نشت کلید بررسی می‌کند — یک تور ایمنی دوم،
+ * چون ممکن است کاربر فایلی با نام دیگر داشته باشد که کلید داخلش است.
+ */
+function wb_looks_secret(string $data): bool {
+    if (preg_match('~eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}~', $data)) return true;   // JWT
+    if (preg_match('~\bck_[a-f0-9]{32,}~i', $data)) return true;                            // WooCommerce key
+    if (preg_match('~\bcs_[a-f0-9]{32,}~i', $data)) return true;
+    if (preg_match('~\bgh[pousr]_[A-Za-z0-9]{30,}~', $data)) return true;                   // GitHub token
+    if (preg_match('~\bAIza[A-Za-z0-9_-]{30,}~', $data)) return true;                       // Google/Gemini
+    if (preg_match('~\$2y\$\d\d\$[./A-Za-z0-9]{50,}~', $data)) return true;                 // bcrypt hash
+    return false;
+}
+
+/**
+ * فایل‌های پوشهٔ جاری را جمع می‌کند.
+ * $includeCsv: الگوهای اضافی جدا شده با کاما (مثلاً "*.json")
+ * $withSecrets: اگر true باشد فایل‌های حساس هم وارد می‌شوند (فقط ریپوی خصوصی!)
+ */
+function wb_collect(string $includeCsv = '', bool $withSecrets = false, int $maxBytes = 25000000): array {
+    $root = realpath(__DIR__);
+    $files = []; $skipped = []; $bytes = 0; $secretHits = [];
+    $skipDirs = wb_skip_dirs();
+
+    $it = new RecursiveIteratorIterator(
+        new RecursiveCallbackFilterIterator(
+            new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
+            function ($cur) use ($skipDirs) {
+                if ($cur->isDir()) return !in_array($cur->getFilename(), $skipDirs, true);
+                return true;
+            }
+        ),
+        RecursiveIteratorIterator::SELF_FIRST
+    );
+
+    foreach ($it as $f) {
+        if (!$f->isFile()) continue;
+        $abs = $f->getPathname();
+        $rel = ltrim(str_replace('\\', '/', substr($abs, strlen($root))), '/');
+        if ($rel === '') continue;
+
+        $size = (int)$f->getSize();
+        if ($size > 5000000) { $skipped[] = ['path' => $rel, 'why' => 'بزرگ‌تر از ۵ مگابایت']; continue; }
+        if (preg_match('~\.(bak|log|lock|tmp)$~i', $rel)) { $skipped[] = ['path' => $rel, 'why' => 'فایل موقت']; continue; }
+
+        if (wb_is_secret($rel) && !$withSecrets) {
+            $skipped[] = ['path' => $rel, 'why' => '🔑 حاوی کلید — رد شد'];
+            $secretHits[] = $rel;
+            continue;
+        }
+
+        $data = @file_get_contents($abs);
+        if ($data === false) { $skipped[] = ['path' => $rel, 'why' => 'قابل خواندن نیست']; continue; }
+
+        // تور ایمنی دوم: محتوا را هم بررسی کن
+        if (!$withSecrets && wb_looks_secret($data)) {
+            $skipped[] = ['path' => $rel, 'why' => '🔑 کلید در محتوا پیدا شد — رد شد'];
+            $secretHits[] = $rel;
+            continue;
+        }
+
+        if ($bytes + $size > $maxBytes) { $skipped[] = ['path' => $rel, 'why' => 'عبور از سقف حجم کل']; continue; }
+
+        $files[] = ['path' => $rel, 'size' => $size, 'data' => $data];
+        $bytes += $size;
+    }
+
+    usort($files, fn($a, $b) => strcmp($a['path'], $b['path']));
+    usort($skipped, fn($a, $b) => strcmp($a['path'], $b['path']));
+    return ['files' => $files, 'skipped' => $skipped, 'bytes' => $bytes, 'secret_hits' => $secretHits];
+}
+
+/** درخواست به GitHub API با متد دلخواه */
+function wb_api(string $method, string $url, string $token, ?array $body = null): array {
+    $hdr = [
+        'User-Agent: deploy-panel-backup',
+        'Accept: application/vnd.github+json',
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $token,
+    ];
+    $payload = $body === null ? null : json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    if (!function_exists('curl_init')) return ['ok' => false, 'code' => 0, 'error' => 'cURL در دسترس نیست', 'data' => null];
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_CUSTOMREQUEST => $method,
+        CURLOPT_CONNECTTIMEOUT => 15, CURLOPT_TIMEOUT => 180,
+        CURLOPT_HTTPHEADER => $hdr, CURLOPT_ENCODING => '',
+    ]);
+    if ($payload !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    $raw = curl_exec($ch);
+    $err = curl_error($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+
+    if ($raw === false) return ['ok' => false, 'code' => 0, 'error' => $err ?: 'ارتباط ناموفق', 'data' => null];
+    $d = json_decode((string)$raw, true);
+    if ($code >= 200 && $code < 300) return ['ok' => true, 'code' => $code, 'error' => '', 'data' => $d];
+
+    $m = is_array($d) && !empty($d['message']) ? $d['message'] : ('HTTP ' . $code);
+    if ($code === 401) $m = 'توکن گیت‌هاب نامعتبر است (۴۰۱)';
+    if ($code === 403) $m = 'دسترسی رد شد (۴۰۳) — توکن باید مجوز repo داشته باشد';
+    if ($code === 404) $m = 'ریپو یا برنچ پیدا نشد (۴۰۴)';
+    return ['ok' => false, 'code' => $code, 'error' => $m, 'data' => $d];
+}
+
+/**
+ * ساخت کامیت با Git Data API:
+ *   blob برای هر فایل → یک tree → commit → به‌روزرسانی ref
+ */
+function wb_push(string $repo, string $branch, string $message, string $token, array $files): array {
+    $base = 'https://api.github.com/repos/' . $repo;
+    $steps = [];
+    $step = function (string $l, bool $ok, string $n = '') use (&$steps) { $steps[] = ['label' => $l, 'ok' => $ok, 'note' => $n]; };
+
+    // ۱) کامیت پایه: برنچ موجود یا برنچ پیش‌فرض
+    $parent = null; $baseTree = null; $created = false;
+    $ref = wb_api('GET', $base . '/git/ref/heads/' . rawurlencode($branch), $token);
+    if ($ref['ok']) {
+        $parent = $ref['data']['object']['sha'] ?? null;
+        $step('برنچ موجود', true, $branch);
+    } else {
+        $repoInfo = wb_api('GET', $base, $token);
+        if (!$repoInfo['ok']) { $step('خواندن ریپو', false, $repoInfo['error']); return ['ok' => false, 'error' => $repoInfo['error'], 'steps' => $steps]; }
+        $def = $repoInfo['data']['default_branch'] ?? 'main';
+        $defRef = wb_api('GET', $base . '/git/ref/heads/' . rawurlencode($def), $token);
+        if ($defRef['ok']) $parent = $defRef['data']['object']['sha'] ?? null;
+        $created = true;
+        $step('برنچ جدید ساخته می‌شود', true, $branch . ' (از ' . $def . ')');
+    }
+    if ($parent) {
+        $pc = wb_api('GET', $base . '/git/commits/' . $parent, $token);
+        if ($pc['ok']) $baseTree = $pc['data']['tree']['sha'] ?? null;
+    }
+
+    // ۲) blob برای هر فایل
+    $tree = [];
+    foreach ($files as $f) {
+        $b = wb_api('POST', $base . '/git/blobs', $token, [
+            'content'  => base64_encode($f['data']),
+            'encoding' => 'base64',
+        ]);
+        if (!$b['ok']) { $step('آپلود ' . $f['path'], false, $b['error']); return ['ok' => false, 'error' => 'آپلود ناموفق: ' . $f['path'] . ' — ' . $b['error'], 'steps' => $steps]; }
+        $tree[] = ['path' => $f['path'], 'mode' => '100644', 'type' => 'blob', 'sha' => $b['data']['sha']];
+    }
+    $step('آپلود فایل‌ها', true, count($tree) . ' فایل');
+
+    // ۳) درخت
+    $tp = ['tree' => $tree];
+    if ($baseTree) $tp['base_tree'] = $baseTree;
+    $t = wb_api('POST', $base . '/git/trees', $token, $tp);
+    if (!$t['ok']) { $step('ساخت درخت', false, $t['error']); return ['ok' => false, 'error' => $t['error'], 'steps' => $steps]; }
+    $step('ساخت درخت', true);
+
+    // ۴) کامیت
+    $cp = ['message' => $message, 'tree' => $t['data']['sha']];
+    if ($parent) $cp['parents'] = [$parent];
+    $c = wb_api('POST', $base . '/git/commits', $token, $cp);
+    if (!$c['ok']) { $step('ساخت کامیت', false, $c['error']); return ['ok' => false, 'error' => $c['error'], 'steps' => $steps]; }
+    $sha = $c['data']['sha'];
+    $step('ساخت کامیت', true, substr($sha, 0, 7));
+
+    // ۵) به‌روزرسانی/ساخت ref
+    if ($created) {
+        $u = wb_api('POST', $base . '/git/refs', $token, ['ref' => 'refs/heads/' . $branch, 'sha' => $sha]);
+    } else {
+        $u = wb_api('PATCH', $base . '/git/refs/heads/' . rawurlencode($branch), $token, ['sha' => $sha, 'force' => false]);
+    }
+    if (!$u['ok']) { $step('ثبت برنچ', false, $u['error']); return ['ok' => false, 'error' => $u['error'], 'steps' => $steps]; }
+    $step('ثبت برنچ', true, $branch);
+
+    return ['ok' => true, 'branch' => $branch, 'commit' => substr($sha, 0, 7),
+            'count' => count($tree), 'created' => $created, 'steps' => $steps,
+            'url' => 'https://github.com/' . $repo . '/tree/' . $branch];
+}
+
 /**
  * هستهٔ استقرار — همهٔ مسیرها از اینجا عبور می‌کنند.
  */
@@ -621,6 +826,43 @@ if ($isApi) {
     }
 
     // --- بکاپ‌ها ---
+    /* =============================================================
+     * پشتیبان‌گیری از ورک‌اسپیس هاست به گیت‌هاب
+     * فایل‌ها با Git Data API آپلود می‌شوند (blob → tree → commit)،
+     * پس یک کامیت تمیز ساخته می‌شود و تاریخچه دست‌نخورده می‌ماند.
+     * ============================================================= */
+
+    // پیش‌نمایش: چه چیزی آپلود می‌شود و چه چیزی رد می‌شود
+    if ($action === 'wb_scan') {
+        $inc = trim((string)($_POST['include'] ?? $_GET['include'] ?? ''));
+        $secrets = !empty($_POST['secrets'] ?? $_GET['secrets'] ?? '');
+        $r = wb_collect($inc, $secrets);
+        jout(['ok' => true, 'files' => $r['files'], 'skipped' => $r['skipped'],
+              'total_bytes' => $r['bytes'], 'total_h' => human_size($r['bytes']),
+              'secret_hits' => $r['secret_hits']]);
+    }
+
+    if ($action === 'wb_push') {
+        $repo   = trim((string)($_POST['repo'] ?? $cfg['repo'] ?? ''));
+        $branch = trim((string)($_POST['branch'] ?? '')) ?: ('host-backup/' . date('Ymd-His'));
+        $inc    = trim((string)($_POST['include'] ?? ''));
+        $secrets= !empty($_POST['secrets']);
+        $msg    = trim((string)($_POST['message'] ?? '')) ?: ('Host workspace backup ' . date('Y-m-d H:i'));
+        $tok    = trim((string)($_POST['gh_token'] ?? '')) ?: (string)($cfg['github_token'] ?? '');
+
+        if (!preg_match('~^[\w.-]+/[\w.-]+$~', $repo)) jout(['ok' => false, 'error' => 'نام ریپو نامعتبر (قالب user/repo)']);
+        if ($tok === '') jout(['ok' => false, 'error' => 'برای نوشتن در گیت‌هاب توکن لازم است (دسترسی repo)']);
+        // نام برنچ نباید شامل .. یا / ابتدایی/انتهایی باشد (گیت هم اجازه نمی‌دهد)
+        if (!preg_match('~^[\w][\w./-]*$~', $branch) || strpos($branch, '..') !== false
+            || substr($branch, -1) === '/' || strpos($branch, '//') !== false) {
+            jout(['ok' => false, 'error' => 'نام برنچ نامعتبر است']);
+        }
+
+        $r = wb_collect($inc, $secrets);
+        if (!$r['files']) jout(['ok' => false, 'error' => 'فایلی برای آپلود پیدا نشد']);
+        jout(wb_push($repo, $branch, $msg, $tok, $r['files']));
+    }
+
     if ($action === 'backups') {
         ensure_backup_dir();
         $files = glob(BACKUP_DIR . '/*.bak') ?: [];
@@ -869,6 +1111,7 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
   <div class="tab on" data-p="deploy">📦 استقرار</div>
   <div class="tab" data-p="jobs">⭐ کارهای ذخیره‌شده</div>
   <div class="tab" data-p="backups">🗄️ بکاپ‌ها</div>
+  <div class="tab" data-p="wbackup">☁️ بکاپ هاست</div>
   <div class="tab" data-p="history">📜 تاریخچه</div>
   <div class="tab" data-p="settings">⚙️ تنظیمات</div>
   <div style="flex:1"></div>
@@ -979,6 +1222,62 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
 </div>
 
 <!-- ---------- بکاپ‌ها ---------- -->
+<!-- ---------- بکاپ ورک‌اسپیس هاست ---------- -->
+<div class="pane" id="p-wbackup">
+  <div class="card">
+    <h2>☁️ ارسال ورک‌اسپیس هاست به گیت‌هاب</h2>
+    <p class="hint" style="margin-bottom:12px">
+      همهٔ فایل‌های پوشهٔ جاری در یک کامیت به برنچ دلخواه فرستاده می‌شوند.
+      هم بکاپ مطمئن است و هم اجازه می‌دهد کد با تنظیمات و شرایط واقعی هاست بررسی شود.
+    </p>
+
+    <div class="msg m-warn on" style="font-size:12px;line-height:1.8">
+      🔑 <b>فایل‌های حاوی کلید به‌صورت پیش‌فرض ارسال نمی‌شوند</b> —
+      <code>connections.json</code> (توکن باسلام و کلید ووکامرس)،
+      <code>.deploy-config.json</code> (رمز پنل) و فایل‌های صف.
+      علاوه بر نام فایل، <b>محتوای</b> هر فایل هم برای کلید بررسی می‌شود.
+    </div>
+
+    <div class="grid">
+      <div class="fld">
+        <label>ریپو</label>
+        <input type="text" id="wb_repo" placeholder="user/repo">
+      </div>
+      <div class="fld">
+        <label>برنچ مقصد</label>
+        <input type="text" id="wb_branch" placeholder="host-backup/1405-05-10">
+        <div class="hint">اگر وجود نداشته باشد ساخته می‌شود. توصیه: یک برنچ جدا از کد.</div>
+      </div>
+    </div>
+    <div class="fld">
+      <label>پیام کامیت</label>
+      <input type="text" id="wb_msg" placeholder="Host workspace backup">
+    </div>
+    <div class="fld">
+      <label>توکن گیت‌هاب (با دسترسی <code>repo</code>)</label>
+      <input type="password" id="wb_token" placeholder="اگر در تنظیمات ذخیره شده، خالی بگذارید">
+      <div class="hint">برای <b>نوشتن</b> در گیت‌هاب توکن الزامی است، حتی برای ریپوی عمومی.</div>
+    </div>
+
+    <div class="fld">
+      <label style="display:flex;align-items:center;gap:7px;cursor:pointer;color:#fca5a5">
+        <input type="checkbox" id="wb_secrets"> ارسال فایل‌های حاوی کلید (فقط ریپوی خصوصی!)
+      </label>
+      <div class="hint" style="color:#fca5a5">
+        اگر ریپو عمومی باشد، این کار توکن‌های شما را برای همه منتشر می‌کند.
+      </div>
+    </div>
+
+    <div id="wb_msgbox" class="msg"></div>
+    <div class="row">
+      <button class="btn b-amber" onclick="wbScan()">🔍 پیش‌نمایش فایل‌ها</button>
+      <button class="btn b-green" onclick="wbPush()" id="wb_btn">☁️ ارسال به گیت‌هاب</button>
+    </div>
+    <div id="wb_steps" class="steps"></div>
+    <div id="wb_list" style="margin-top:12px"></div>
+  </div>
+</div>
+
 <div class="pane" id="p-backups">
   <div class="card">
     <h2>🗄️ بکاپ‌ها</h2>
@@ -1083,6 +1382,7 @@ document.querySelectorAll('.tab[data-p]').forEach(t=>{
     if(t.dataset.p==='backups')  loadBackups();
     if(t.dataset.p==='history')  loadHistory();
     if(t.dataset.p==='settings') loadSettings();
+    if(t.dataset.p==='wbackup')  wbInit();
   };
 });
 
@@ -1386,6 +1686,80 @@ function copyApi(){
   navigator.clipboard.writeText(i.value).then(()=>msg('s_msg','✓ کپی شد','m-ok'));
 }
 
+/* ---------- بکاپ ورک‌اسپیس هاست ---------- */
+function wbInit(){
+  if(!$('wb_repo').value) $('wb_repo').value = SETTINGS.repo || '';
+  if(!$('wb_branch').value){
+    const d=new Date(), p=n=>String(n).padStart(2,'0');
+    $('wb_branch').value='host-backup/'+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
+  }
+}
+
+function wbRenderList(r){
+  let h='';
+  if(r.files && r.files.length){
+    h+='<div style="font-size:12px;color:#4ade80;font-weight:700;margin:8px 0 4px">✓ ارسال می‌شود ('+r.files.length+' فایل · '+esc(r.total_h)+')</div>';
+    h+='<div style="max-height:220px;overflow-y:auto;border:1px solid #334155;border-radius:8px">';
+    r.files.forEach(f=>{
+      h+='<div style="display:flex;justify-content:space-between;gap:10px;padding:5px 9px;border-bottom:1px solid #1e293b;font-size:11.5px;font-family:ui-monospace,monospace">'
+        +'<span style="color:#e2e8f0">'+esc(f.path)+'</span>'
+        +'<span style="color:#64748b;flex:0 0 auto">'+fmtSize(f.size)+'</span></div>';
+    });
+    h+='</div>';
+  }
+  if(r.skipped && r.skipped.length){
+    h+='<div style="font-size:12px;color:#fbbf24;font-weight:700;margin:12px 0 4px">⊘ رد شد ('+r.skipped.length+')</div>';
+    h+='<div style="max-height:180px;overflow-y:auto;border:1px solid #334155;border-radius:8px">';
+    r.skipped.forEach(f=>{
+      h+='<div style="display:flex;justify-content:space-between;gap:10px;padding:5px 9px;border-bottom:1px solid #1e293b;font-size:11.5px">'
+        +'<span style="color:#94a3b8;font-family:ui-monospace,monospace">'+esc(f.path)+'</span>'
+        +'<span style="color:#64748b;flex:0 0 auto">'+esc(f.why)+'</span></div>';
+    });
+    h+='</div>';
+  }
+  $('wb_list').innerHTML=h;
+}
+
+async function wbScan(){
+  msg('wb_msgbox','<span class="spin"></span> در حال بررسی فایل‌ها...','m-info');
+  $('wb_steps').innerHTML='';
+  const r=await api('wb_scan',{include:'',secrets:$('wb_secrets').checked?'1':''},'POST');
+  if(!r.ok) return msg('wb_msgbox','✗ '+esc(r.error||'خطا'),'m-err');
+  wbRenderList(r);
+  let m='✓ '+r.files.length+' فایل آمادهٔ ارسال ('+esc(r.total_h)+')';
+  if(r.secret_hits && r.secret_hits.length) m+=' · 🔑 '+r.secret_hits.length+' فایل حساس محافظت شد';
+  msg('wb_msgbox',m,'m-ok');
+}
+
+async function wbPush(){
+  const repo=$('wb_repo').value.trim(), branch=$('wb_branch').value.trim();
+  if(!repo)   return msg('wb_msgbox','نام ریپو را وارد کنید','m-err');
+  if(!branch) return msg('wb_msgbox','نام برنچ را وارد کنید','m-err');
+
+  if($('wb_secrets').checked &&
+     !confirm('⚠️ هشدار جدی\n\nفایل‌های حاوی توکن و کلید ارسال می‌شوند.\n'
+             +'اگر ریپو عمومی باشد، همه به آن‌ها دسترسی خواهند داشت.\n\nادامه می‌دهید؟')) return;
+  if(!confirm('ارسال ورک‌اسپیس هاست به «'+branch+'»؟')) return;
+
+  const btn=$('wb_btn');
+  btn.disabled=true; btn.textContent='⏳ در حال ارسال...';
+  msg('wb_msgbox','<span class="spin"></span> آپلود در حال انجام است — برای پروژهٔ بزرگ ممکن است طول بکشد...','m-info');
+  $('wb_steps').innerHTML='';
+
+  const r=await api('wb_push',{
+    repo, branch, include:'', message:$('wb_msg').value.trim(),
+    secrets:$('wb_secrets').checked?'1':'', gh_token:$('wb_token').value
+  },'POST');
+
+  btn.disabled=false; btn.textContent='☁️ ارسال به گیت‌هاب';
+  renderSteps('wb_steps', r.steps);
+  if(!r.ok) return msg('wb_msgbox','✗ '+esc(r.error||'خطا'),'m-err');
+  $('wb_token').value='';
+  msg('wb_msgbox','✓ '+r.count+' فایل ارسال شد · کامیت <code>'+esc(r.commit)+'</code>'
+    +(r.created?' · برنچ ساخته شد':'')
+    +' · <a href="'+esc(r.url)+'" target="_blank" style="color:#93c5fd">مشاهده در گیت‌هاب ↗</a>','m-ok');
+}
+
 async function logout(){ await api('logout'); location.reload(); }
 
 /* ---------- شروع ---------- */
@@ -1393,6 +1767,12 @@ async function logout(){ await api('logout'); location.reload(); }
   const r=await api('settings_get');
   if(r.ok){
     SETTINGS=r.settings;
+    // اجازه می‌دهد اسکریپر مستقیم روی تب بکاپ باز کند: deploy.php#wbackup
+    const want=(location.hash||'').replace('#','');
+    if(want){
+      const t=document.querySelector('.tab[data-p="'+want.replace(/[^a-z]/gi,'')+'"]');
+      if(t) t.click();
+    }
     $('d_repo').value=SETTINGS.repo||'';
     const fr=await api('folders');
     if(fr.ok){

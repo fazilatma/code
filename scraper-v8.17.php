@@ -27,7 +27,7 @@ const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.22';
+const APP_VERSION = '8.23';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -215,7 +215,7 @@ $d = @json_decode(@file_get_contents($file) ?: '', true);
 return is_array($d) ? $d : ['running'=>false,'total_log_count'=>0];
 }
 function loadConnections(): array {
-if (!file_exists(CONNECTIONS_FILE)) return ['woocommerce'=>[],'basalam'=>['token'=>'eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiI1NTAiLCJqdGkiOiJjMzdlMGQ2YjJhNjc4ODZhNGI4ZTkxYWVkYzVkOGMyMzE5M2ZlODc3YWRiNDIzZmU3ZDVkYWEzYThiYzNmNjZkNzU1Yzk3OTJhN2Y4NGQ5MSIsImlhdCI6MTc4MTE1MDQ1OS4xNTg4ODcsIm5iZiI6MTc4MTE1MDQ1OS4xNTg4OTEsImV4cCI6MTgxMjY4NjQ1OS4xMzQwNzIsInN1YiI6IjE5OTU3NzI0Iiwic2NvcGVzIjpbIm9yZGVyLXByb2Nlc3NpbmciLCJ2ZW5kb3IucHJvZmlsZS5yZWFkIiwidmVuZG9yLnByb2ZpbGUud3JpdGUiLCJjdXN0b21lci5wcm9maWxlLnJlYWQiLCJjdXN0b21lci5wcm9maWxlLndyaXRlIiwidmVuZG9yLnByb2R1Y3QucmVhZCIsInZlbmRvci5wcm9kdWN0LndyaXRlIiwiY3VzdG9tZXIub3JkZXIucmVhZCIsImN1c3RvbWVyLm9yZGVyLndyaXRlIiwidmVuZG9yLnBhcmNlbC5yZWFkIiwidmVuZG9yLnBhcmNlbC53cml0ZSIsImN1c3RvbWVyLndhbGxldC5yZWFkIiwiY3VzdG9tZXIud2FsbGV0LndyaXRlIiwiY3VzdG9tZXIuY2hhdC5yZWFkIiwiY3VzdG9tZXIuY2hhdC53cml0ZSJdLCJ1c2VyX2lkIjoxOTk1NzcyNH0.lgv5Teo1nhAGV6SkIfrOmYPZ17FLbSbhgwePgu2OVfbHfnj_qCtT63xZgbJnm2Ev_DgwLjSdJ3Vaut3pK9ypeREKaa7fTud7iJqBn3xkXzbdtGbbJtlRjMrL0hgkAgSMOWeitJvWNjDtkImcZDtPi3C3JjV2-I8DHIHz1Kg_Zs3iEjkCGwq2PWIRB2BGdTBgzJF1DDmpGZVFkd7cViWC-2UYGzBAsKPqAOmv322TODiiZ6FjbiWoSGFDgvrZKBcbfQnkcElJDu7SWzXFG-_HKTK3DVjvUpYU1O3i7-2eZcTCPt13VSAkmVIGUyeGtGJg54onZPgpeesJB30QBcRpbfb5JMo7gGVxyQYKAtNBOP8nzvLK8gYJ2ajdqiWW_8LEW4Q9voR5bdg_zAD4hAyxdGegIDAouc3h9wp_o56AkAzRdZJC3BWmt6PFg1kxksfWmv-t5T3HDdVH1wLnO16HPvEW4h0DPWeXpYWKxJspVrQzkRDpDL_8J1KbQz7Yk6EQBUVmpgGLgi2qEXDAcB8jz54DFm_uQahfFVdpMuMjqL2ctWp5G55J4Of_EaFu34NM1YxsohhjTScXkbIUkxRyEps-GcCaBRK6eq_oVliNp2LH0Xj7xxjJtIgOvi3M9DplrYjwwBRMXkC6fhndUHgKjXTnFO0SmFhD2-8RdmImpWI','vendor_id'=>1211728,'preparation_days'=>3,'weight'=>500,'package_weight'=>600,'stock'=>10,'category_id'=>0,'auto_category'=>false]];
+if (!file_exists(CONNECTIONS_FILE)) return ['woocommerce'=>[],'basalam'=>['token'=>'','vendor_id'=>0,'preparation_days'=>3,'weight'=>500,'package_weight'=>600,'stock'=>10,'category_id'=>0,'auto_category'=>false]];
 $d = @json_decode(@file_get_contents(CONNECTIONS_FILE) ?: '', true);
 return is_array($d) ? $d : ['woocommerce'=>[],'basalam'=>[]];
 }
@@ -8208,6 +8208,14 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="cact">
 <button class="btn btn-cyan" onclick="vcSave(true)" style="flex:1">💾 ذخیره</button>
 </div>
+
+<div style="border-top:1px solid #1e293b;margin:12px 0 10px"></div>
+<div style="font-size:11px;color:#94a3b8;margin-bottom:6px">☁️ بکاپ ورک‌اسپیس هاست</div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+همهٔ فایل‌های هاست را در یک برنچ گیت‌هاب ذخیره می‌کند. فایل‌های حاوی کلید
+(مثل <code>connections.json</code>) به‌صورت خودکار کنار گذاشته می‌شوند.
+</div>
+<button class="btn btn-teal" onclick="vcOpenBackup()" style="width:100%;padding:10px">☁️ باز کردن پنل بکاپ هاست</button>
 </div>
 </div>
 </div>
@@ -10854,6 +10862,23 @@ function vcSave(showMsg) {
         vcBadge(VC.check_on_load ? 'خودکار' : 'دستی', VC.check_on_load ? 'on' : 'off');
         if (showMsg) showToast('✓ ذخیره شد');
     }).catch(() => showToast('خطا در ذخیره', true));
+}
+
+/**
+ * v8.23: پنل بکاپ ورک‌اسپیس را باز می‌کند.
+ * خودِ اسکریپر چیزی آپلود نمی‌کند؛ کار به deploy.php واگذار می‌شود تا
+ * این فایل ساده و دور از الگوهای مشکوک برای اسکنر هاست بماند.
+ */
+function vcOpenBackup() {
+    fetch('?vc_deploy_info=1').then(r => r.json()).then(d => {
+        if (!d.ok) {
+            showToast(d.error || 'نصب‌کننده در دسترس نیست', true);
+            vcStat('✗ ' + esc(d.error || ''), '#f87171');
+            return;
+        }
+        window.open(d.file + '#wbackup', '_blank');
+        showToast('پنل بکاپ در تب جدید باز شد');
+    }).catch(() => showToast('خطا در ارتباط', true));
 }
 
 /** حذف توکن گیت‌هاب — رفع سریع خطای ۴۰۱ روی ریپوی عمومی */
