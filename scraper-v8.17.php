@@ -25,9 +25,10 @@ const BSL_QUEUE_FILE = __DIR__ . '/bsl_queue.json';
 const EXTRACT_PROGRESS_FILE = __DIR__ . '/extract_progress.json';
 const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
+const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.29';
+const APP_VERSION = '8.30';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3526,7 +3527,7 @@ if (isset($_POST['ai'])) { $a = json_decode($_POST['ai'], true) ?: []; $conn['ai
 
 if (isset($_POST['baleh'])) { $bl = json_decode($_POST['baleh'], true) ?: []; $conn['baleh'] = ['enabled'=>!empty($bl['enabled']),'token'=>trim($bl['token']??''),'chat_id'=>trim($bl['chat_id']??'')]; }
 if (isset($_POST['rubika'])) { $rb = json_decode($_POST['rubika'], true) ?: []; $conn['rubika'] = ['enabled'=>!empty($rb['enabled']),'token'=>trim($rb['token']??''),'chat_id'=>trim($rb['chat_id']??'')]; }
-if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund'])]; }
+if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund']),'src_price'=>!empty($ne['src_price']),'src_stock'=>!empty($ne['src_stock']),'run_fail'=>!empty($ne['run_fail'])]; }
 echo json_encode(['ok'=>saveConnections($conn),'message'=>'ذخیره شد'], JSON_UNESCAPED_UNICODE); exit;
 }
 
@@ -3972,6 +3973,12 @@ $u=trim($_GET['url']??'');
 if($u!==''&&filter_var($u,FILTER_VALIDATE_URL))$profileKey=profileKey($u);
 }
 $res=runBackendExtract($profileKey,'manual',true);
+// v8.30: همان اعلان‌های تغییر مبدأ که کران‌جاب می‌فرستد
+if(!empty($res['ok'])){
+$cnNow=loadConnections();
+$profsNow=loadProfiles();
+notifSourceChanges($cnNow,$res,$profsNow[$profileKey]['name']??$profileKey);
+}
 // اگر پاسخ زودهنگام ارسال شده، دیگر چیزی چاپ نمی‌کنیم
 if(empty($res['__early_sent'])){
 header('Content-Type: application/json; charset=UTF-8');
@@ -3980,145 +3987,6 @@ echo json_encode($res,JSON_UNESCAPED_UNICODE);
 exit;
 }
 
-if (isset($_GET['cron_sync'])) {
-// v8.22: cron هر ۵ دقیقه صدا زده می‌شود ولی یک اسکرپ می‌تواند طولانی‌تر
-// شود؛ بدون قفل، اجراها روی هم می‌افتند و پروفایل دوبار پردازش می‌شود.
-@set_time_limit(0);
-@ignore_user_abort(true);
-$cronLock = __DIR__ . '/.cron_sync.lock';
-$lockAge  = is_file($cronLock) ? (time() - (int)@filemtime($cronLock)) : PHP_INT_MAX;
-if ($lockAge < 1800) {   // قفل تا ۳۰ دقیقه معتبر است، بعد کهنه فرض می‌شود
-    header('Content-Type: application/json; charset=UTF-8');
-    echo json_encode(['ok' => true, 'skipped' => true,
-        'reason' => 'اجرای قبلی هنوز تمام نشده (' . $lockAge . ' ثانیه)'], JSON_UNESCAPED_UNICODE);
-    exit;
-}
-@file_put_contents($cronLock, (string)time());
-register_shutdown_function(function () use ($cronLock) { @unlink($cronLock); });
-
-$syncState = loadSyncState();
-$profiles = loadProfiles();
-$now = time();
-$results = [];
-$cn = loadConnections();
-$queue = bslReadQueue();
-$bslAutoCreated = 0;
-
-foreach ($profiles as $key => $profile) {
-$syncCfg = $profile['syncConfig'] ?? [];
-if (empty($syncCfg['enabled'])) continue;
-
-$interval = (int)($syncCfg['interval'] ?? 3600);
-$lastRun = (int)($syncState[$key]['lastRun'] ?? 0);
-if ($interval > 0 && ($now - $lastRun < $interval)) continue;
-
-// v8.27: دقیقاً همان استخراجی که دکمهٔ دستی انجام می‌دهد — با همان صف،
-// پیشرفت زنده و گزارش — فقط با برچسب «auto» تا در صف قابل تشخیص باشد.
-$cronBefore = count(extractPrevMap($profile));
-$exRes = runBackendExtract($key, 'auto');
-if (empty($exRes['ok'])) {
-    $why = $exRes['error'] ?? 'خطای نامشخص';
-    $results[] = ['profile' => $key, 'ok' => false, 'error' => 'اسکرپ مجدد ناموفق: ' . $why];
-    $syncState[$key] = ['lastRun' => $now, 'status' => 'scrape_failed', 'error' => $why];
-    saveSyncState($syncState);
-    continue;
-}
-$cronAfter = (int)($exRes['extracted'] ?? 0);
-// پروفایل داخل تابع ذخیره شده، پس نسخهٔ به‌روز را دوباره بخوان
-$profiles = loadProfiles();
-$profile  = $profiles[$key] ?? $profile;
-// محافظ: اگر سایت موقتاً خالی برگرداند، کل کاتالوگ را «حذف‌شده» نفرست
-if ($cronBefore > 0 && $cronAfter === 0) {
-    $results[] = ['profile' => $key, 'ok' => false, 'error' => 'صفحه هیچ محصولی برنگرداند — برای ایمنی ارسال لغو شد'];
-    $syncState[$key] = ['lastRun' => $now, 'status' => 'empty_result', 'error' => 'صفر محصول'];
-    saveSyncState($syncState);
-    continue;
-}
-$results[] = ['profile' => $key, 'ok' => true, 'scraped' => $cronAfter];
-
-$target = $syncCfg['target'] ?? 'woo';
-if ($target === 'bsl' || $target === 'both') {
-$rawProducts = $profile['products'] ?? [];
-if (!empty($rawProducts)) {
-$orderedProducts = [];
-$productsOrder = $profile['productsOrder'] ?? [];
-if (!empty($productsOrder) && is_array($productsOrder)) {
-$prodMap = [];
-foreach ($rawProducts as $entry) {
-if (is_array($entry) && count($entry) >= 2) $prodMap[$entry[0]] = $entry[1];
-}
-foreach ($productsOrder as $pk) {
-if (isset($prodMap[$pk])) $orderedProducts[] = $prodMap[$pk];
-}
-} else {
-foreach ($rawProducts as $entry) {
-if (is_array($entry) && count($entry) >= 2) $orderedProducts[] = $entry[1];
-}
-}
-if (!empty($orderedProducts)) {
-$queueId = 'sync_' . $key . '_' . $now;
-$qFile = __DIR__ . '/bsl_queue_products_' . $queueId . '.json';
-$saveOk = @file_put_contents($qFile, json_encode($orderedProducts, JSON_UNESCAPED_UNICODE), LOCK_EX);
-if ($saveOk) {
-$catId = (int)($cn['basalam']['category_id'] ?? 0);
-$autoCat = !empty($cn['basalam']['auto_category']);
-$titleSuffix = trim($profile['titleSuffix'] ?? '') ?: trim($cn['basalam']['title_suffix'] ?? '');
-$delayMs = max(0,(int)($cn['basalam']['delay_ms'] ?? 500));
-$retryDelayMs = max(0,(int)($cn['basalam']['retry_delay_ms'] ?? 1000));
-$queue['entries'][] = [
-'id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile,
-'total' => count($orderedProducts), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0,
-'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0,
-'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs],
-'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true,
-];
-$bslAutoCreated++;
-$results[] = ['key' => $key, 'name' => $profile['name'] ?? $key, 'status' => 'queued_bsl', 'total' => count($orderedProducts)];
-}
-}
-}
-}
-
-if ($target === 'woo' || $target === 'both') {
-// v8.21: Queue products for WooCommerce
-if(!empty($orderedProducts)){
-$wooSuffix=trim($profile['titleSuffix']??'') ?: trim($cn['basalam']['title_suffix']??'');
-@file_put_contents(WOO_PRODUCTS_FILE,json_encode($orderedProducts,JSON_UNESCAPED_UNICODE),LOCK_EX);
-$wooQueue=wooReadQueue();
-$wooQueueId='sync_woo_'.$key.'_'.$now;
-$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>'running','products_file'=>WOO_PRODUCTS_FILE,'total'=>count($orderedProducts),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$now,'done_at'=>0,'config'=>['title_suffix'=>$wooSuffix]];
-wooWriteQueue($wooQueue);
-}
-$syncState[$key] = ['lastRun' => $now, 'status' => 'running'];
-$results[] = ['key' => $key, 'name' => $profile['name'] ?? $key, 'status' => 'started'];
-}
-}
-
-if ($bslAutoCreated > 0) {
-bslWriteQueue($queue);
-
-foreach ($results as $r) {
-if ($r['status'] === 'queued_bsl') {
-$syncState[$r['key']] = ['lastRun' => $now, 'status' => 'queued'];
-}
-}
-}
-saveSyncState($syncState);
-
-if ($bslAutoCreated > 0) {
-
-}
-
-// v8.29: مرحلهٔ سوم — استعلام سفارش/پیام/محصول. قبلاً فقط در cron_run
-// بود و در cron_sync اجرا نمی‌شد، یعنی نیمی از اجراها اعلانی نمی‌داد.
-$notif = bslCheckNotifications($cn);
-
-header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(['ok' => true, 'due' => $results, 'time' => $now,
-                  'bsl_auto_created' => $bslAutoCreated,
-                  'notifications' => $notif], JSON_UNESCAPED_UNICODE);
-exit;
-}
 if (isset($_GET['sync_status'])) {
 header('Content-Type: application/json; charset=UTF-8');
 echo json_encode(['ok' => true, 'state' => loadSyncState()], JSON_UNESCAPED_UNICODE);
@@ -4134,8 +4002,24 @@ saveSyncState($state);
 echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE); exit;
 }
 
-if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
+// v8.30: cron_sync و cron_run یکی شدند. cron_sync فقط نام مستعار است تا
+// کران‌جاب‌های قدیمی که آن آدرس را صدا می‌زنند از کار نیفتند.
+if (isset($_GET['cron_run']) || isset($_GET['cron_sync']) || (($_POST['action'] ?? '') === 'cron_run')) {
 header('Content-Type: application/json; charset=UTF-8');
+@set_time_limit(0);
+@ignore_user_abort(true);
+
+// قفل ضد هم‌پوشانی — یک اجرای طولانی نباید با اجرای بعدی تداخل کند
+$cronLock = __DIR__ . '/.cron_run.lock';
+$lockAge  = is_file($cronLock) ? (time() - (int)@filemtime($cronLock)) : PHP_INT_MAX;
+if ($lockAge < 1800) {
+    echo json_encode(['ok' => true, 'skipped' => true, 'profiles' => [],
+        'reason' => 'اجرای قبلی هنوز تمام نشده (' . $lockAge . ' ثانیه)'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+@file_put_contents($cronLock, (string)time());
+register_shutdown_function(function () use ($cronLock) { @unlink($cronLock); });
+
 $now = time();
 $profiles = loadProfiles();
 $syncState = loadSyncState();
@@ -4159,10 +4043,14 @@ $pResult['extract_method'] = 'backend_extract';
 $pResult['new'] = (int)($exRes['new'] ?? 0);
 $pResult['price_changed'] = (int)($exRes['price_changed'] ?? 0);
 $pResult['removed'] = (int)($exRes['removed'] ?? 0);
+// v8.30: گران/ارزان و موجود/ناموجود شدن سایت مبدأ را اطلاع بده
+$srcN = notifSourceChanges($cn, $exRes, $profile['name'] ?? $key);
+if (!empty($srcN['sent'])) $pResult['src_notified'] = $srcN['sent'];
 $profiles = loadProfiles();
 $profile  = $profiles[$key] ?? $profile;
 } else {
 $pResult['extract_error'] = $exRes['error'] ?? 'خطای نامشخص';
+notifRunFailure($cn, 'استخراج', $profile['name'] ?? $key, $pResult['extract_error']);
 }
 
 // Now get products from profile (either freshly scraped or previously saved)
@@ -4224,7 +4112,6 @@ echo json_encode($results, JSON_UNESCAPED_UNICODE); exit;
  *  در کران‌جاب هم به ترتیب اولویت اجرا شوند.
  * ===================================================================== */
 
-const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 function notifLoadState(): array {
     if (!is_file(NOTIF_STATE_FILE)) return [];
@@ -4353,6 +4240,84 @@ function notifCheckProducts(array $cn, bool $test = false, bool $send = true): a
 }
 
 /**
+ * v8.30: اعلان تغییرات سایت مبدأ.
+ * نتیجهٔ استخراج را می‌گیرد و گران/ارزان شدن و موجود/ناموجود شدن را
+ * به پیام‌رسان‌ها گزارش می‌کند. برای جلوگیری از هرزنامه، به‌جای یک پیام
+ * برای هر محصول، یک خلاصهٔ فشرده با نمونه‌ها فرستاده می‌شود.
+ */
+function notifSourceChanges(array $cn, array $res, string $profileName = '', int $sampleLimit = 5): array {
+    $ne = $cn['notif_events'] ?? [];
+    $wantPrice = !empty($ne['src_price']);
+    $wantStock = !empty($ne['src_stock']);
+    if (!$wantPrice && !$wantStock) return ['ok' => true, 'skipped' => 'disabled'];
+    if (notifPrereq($cn) !== null) return ['ok' => false, 'error' => notifPrereq($cn)];
+
+    $up = (int)($res['price_up'] ?? 0);
+    $down = (int)($res['price_down'] ?? 0);
+    $noPrice = (int)($res['no_price'] ?? 0);
+    $gone = (int)($res['gone_from_site'] ?? 0);
+    $back = 0;
+    foreach (($res['new_items'] ?? []) as $it) {
+        if (($it['reason'] ?? '') === 'دوباره موجود شد') $back++;
+    }
+
+    $blocks = [];
+
+    if ($wantPrice && ($up > 0 || $down > 0)) {
+        $lines = ["💰 تغییر قیمت در سایت مبدأ" . ($profileName !== '' ? " — {$profileName}" : '')];
+        $lines[] = "▲ گران شد: {$up}   ▼ ارزان شد: {$down}";
+        $n = 0;
+        foreach (($res['changed_items'] ?? []) as $it) {
+            if ($n >= $sampleLimit) break;
+            $arrow = ($it['dir'] ?? '') === 'up' ? '▲' : '▼';
+            $pct = isset($it['pct']) ? (($it['pct'] > 0 ? '+' : '') . $it['pct'] . '٪') : '';
+            $lines[] = $arrow . ' ' . mb_substr((string)($it['title'] ?? ''), 0, 40)
+                     . "\n   " . ($it['old_price'] ?? '') . ' ← ' . ($it['new_price'] ?? '') . ' ' . $pct;
+            $n++;
+        }
+        $rest = ($up + $down) - $n;
+        if ($rest > 0) $lines[] = "... و {$rest} مورد دیگر";
+        $blocks[] = implode("\n", $lines);
+    }
+
+    if ($wantStock && ($noPrice > 0 || $gone > 0 || $back > 0)) {
+        $lines = ["📦 تغییر موجودی در سایت مبدأ" . ($profileName !== '' ? " — {$profileName}" : '')];
+        if ($noPrice > 0) $lines[] = "🚫 ناموجود شد: {$noPrice}";
+        if ($gone > 0)    $lines[] = "❌ از سایت حذف شد: {$gone}";
+        if ($back > 0)    $lines[] = "✅ دوباره موجود شد: {$back}";
+        $n = 0;
+        foreach (($res['removed_items'] ?? []) as $it) {
+            if ($n >= $sampleLimit) break;
+            $why = $it['reason'] ?? '';
+            if ($why === 'بدون قیمت') continue;   // محصول تازه‌ای که هیچ‌وقت قیمت نداشته
+            $lines[] = '• ' . mb_substr((string)($it['title'] ?? ''), 0, 45) . ' — ' . $why;
+            $n++;
+        }
+        $blocks[] = implode("\n", $lines);
+    }
+
+    if (!$blocks) return ['ok' => true, 'sent' => 0, 'nothing' => true];
+
+    $sentCount = 0; $last = [];
+    foreach ($blocks as $b) { $last = notifSend($cn, $b); $sentCount++; }
+    return ['ok' => true, 'sent' => $sentCount, 'price_up' => $up, 'price_down' => $down,
+            'no_price' => $noPrice, 'gone' => $gone, 'back' => $back, 'delivery' => $last];
+}
+
+/**
+ * v8.30: اعلان شکست یک اجرا. سکوت بدترین حالت است — اگر کران‌جاب
+ * خراب شود باید خبردار شوید، نه اینکه روزها بی‌صدا بماند.
+ */
+function notifRunFailure(array $cn, string $stage, string $profileName, string $error): array {
+    if (empty($cn['notif_events']['run_fail'])) return ['ok' => true, 'skipped' => 'disabled'];
+    if (notifPrereq($cn) !== null) return ['ok' => false];
+    $msg = "⚠️ خطا در اجرای خودکار\nمرحله: {$stage}"
+         . ($profileName !== '' ? "\nپروفایل: {$profileName}" : '')
+         . "\nعلت: " . mb_substr($error, 0, 200);
+    return ['ok' => true, 'delivery' => notifSend($cn, $msg)];
+}
+
+/**
  * اجرای همهٔ بررسی‌های فعال — همان چیزی که کران‌جاب صدا می‌زند.
  * ترتیب عمدی: سفارش (پول)، پیام (مشتری منتظر است)، محصول (اطلاعی).
  */
@@ -4387,6 +4352,36 @@ if (isset($_GET['notif_test'])) {
     if ($kind === 'orders')        $r = notifCheckOrders($cn, true);
     elseif ($kind === 'chats')     $r = notifCheckChats($cn, true);
     elseif ($kind === 'products')  $r = notifCheckProducts($cn, true);
+    elseif ($kind === 'source') {
+        // v8.30: از آخرین گزارش استخراج استفاده می‌کند تا پیام واقعی باشد
+        $rep = null;
+        foreach (glob(__DIR__ . '/extract_report_*.json') ?: [] as $f) {
+            $d = json_decode((string)@file_get_contents($f), true);
+            if (is_array($d) && (($d['price_up'] ?? 0) || ($d['price_down'] ?? 0)
+                || ($d['no_price'] ?? 0) || ($d['gone_from_site'] ?? 0))) { $rep = $d; break; }
+            if ($rep === null && is_array($d)) $rep = $d;
+        }
+        if ($rep === null) {
+            $rep = ['price_up' => 1, 'price_down' => 1, 'no_price' => 1, 'gone_from_site' => 0,
+                'changed_items' => [
+                    ['title' => 'نمونه — کالای گران‌شده', 'old_price' => '100,000', 'new_price' => '130,000', 'dir' => 'up', 'pct' => 30],
+                    ['title' => 'نمونه — کالای ارزان‌شده', 'old_price' => '80,000', 'new_price' => '60,000', 'dir' => 'down', 'pct' => -25]],
+                'removed_items' => [['title' => 'نمونه — کالای ناموجود', 'reason' => 'ناموجود شد']],
+                'new_items' => []];
+        }
+        // در حالت تست، هر دو نوع اعلان را صرف‌نظر از تنظیمات بفرست
+        $cnTest = $cn;
+        $cnTest['notif_events']['src_price'] = true;
+        $cnTest['notif_events']['src_stock'] = true;
+        $sr = notifSourceChanges($cnTest, $rep, 'تست');
+        $r = ['ok' => !empty($sr['ok']), 'found' => (int)($sr['sent'] ?? 0),
+              'total_seen' => (int)($rep['extracted'] ?? 0),
+              'sent' => $sr['delivery'] ?? [],
+              'sample' => '▲ گران: ' . (int)($sr['price_up'] ?? 0)
+                        . ' | ▼ ارزان: ' . (int)($sr['price_down'] ?? 0)
+                        . ' | 🚫 ناموجود: ' . (int)($sr['no_price'] ?? 0)];
+        if (!empty($sr['nothing'])) $r['sample'] = 'تغییری برای گزارش نبود';
+    }
     else { echo json_encode(['ok' => false, 'error' => 'نوع تست نامعتبر']); exit; }
 
     echo json_encode($r, JSON_UNESCAPED_UNICODE);
@@ -8489,6 +8484,9 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifProductStatus" checked style="width:15px;height:15px"><span>📋 تغییر وضعیت محصول</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifProductNew" checked style="width:15px;height:15px"><span>➕ محصول جدید افزوده شد</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifOrderRefund" checked style="width:15px;height:15px"><span>🔄 بازگشت سفارش</span></label>
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSrcPrice" checked style="width:15px;height:15px"><span>💰 گران/ارزان شدن مبدأ</span></label>
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSrcStock" checked style="width:15px;height:15px"><span>📦 موجود/ناموجود شدن مبدأ</span></label>
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifRunFail" checked style="width:15px;height:15px"><span>⚠️ خطای اجرای خودکار</span></label>
 </div>
 </div>
 <div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
@@ -8502,6 +8500,9 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <button class="btn btn-teal" onclick="notifTest('orders')" style="flex:1">🛒 تست سفارش‌ها</button>
 <button class="btn btn-cyan" onclick="notifTest('chats')" style="flex:1">💬 تست پیام‌ها</button>
 <button class="btn btn-indigo" onclick="notifTest('products')" style="flex:1">📋 تست محصولات</button>
+</div>
+<div class="cact">
+<button class="btn btn-orange" onclick="notifTest('source')" style="flex:1">💰 تست تغییرات مبدأ (قیمت و موجودی)</button>
 </div>
 <div id="notifTestR" style="margin-top:8px"></div>
 <div id="notifTR" style="margin-top:8px"></div>
@@ -11071,6 +11072,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.30', t:'اعلان تغییرات مبدأ و ادغام کران', items:[
+    'اعلان گران/ارزان شدن و موجود/ناموجود شدن محصولات سایت مبدأ',
+    'اعلان خطای اجرای خودکار — دیگر شکست کران‌جاب بی‌صدا نمی‌ماند',
+    'ادغام cron_sync و cron_run در یک مسیر واحد با قفل ضد هم‌پوشانی'
+  ]},
   {v:'8.29', t:'اعلان‌های پیام‌رسان', items:[
     'دکمه‌های تست جداگانه برای سفارش‌ها، پیام‌های مشتری و تغییر وضعیت محصولات',
     'استعلام اعلان‌ها به‌عنوان مرحلهٔ سوم به «اجرای حالا» و کران‌جاب اضافه شد',
@@ -11126,7 +11132,7 @@ const CHANGELOG = [
  * حالت تست وضعیت را ذخیره نمی‌کند تا اعلان واقعی بعدی از دست نرود.
  */
 function notifTest(kind){
-  const labels={orders:'🛒 سفارش‌ها',chats:'💬 پیام‌ها',products:'📋 محصولات'};
+  const labels={orders:'🛒 سفارش‌ها',chats:'💬 پیام‌ها',products:'📋 محصولات',source:'💰 تغییرات مبدأ'};
   const box=$('notifTestR');
   if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال استعلام '+esc(labels[kind]||kind)+' از باسلام...</div>';
   fetch('?notif_test=1&kind='+encodeURIComponent(kind)).then(r=>r.json()).then(d=>{
@@ -11537,7 +11543,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
@@ -11545,7 +11551,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0}));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0}));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
