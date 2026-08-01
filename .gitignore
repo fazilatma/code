@@ -19,3 +19,4 @@ _backups/
 .deploy-log.json
 .versioncheck.json
 .cron_sync.lock
+extract_report_*.json
