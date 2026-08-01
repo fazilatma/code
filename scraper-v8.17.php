@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.31';
+const APP_VERSION = '8.32';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4159,6 +4159,128 @@ function bslApiError(array $r, string $what, string $endpoint, string $scope = '
     return $what . ' — خطای HTTP ' . $c;
 }
 
+/* =====================================================================
+ *  v8.32: وضعیت سفارش‌های غرفه‌دار و نرمال‌سازی پاسخ باسلام
+ *  کدها از مستندات رسمی order_processing گرفته شده‌اند (پارامتر statuses).
+ * ===================================================================== */
+
+/** کد وضعیت سفارش → نام فارسی */
+function bslParcelStatuses(): array {
+    return [
+        3739 => 'جدید',              3237 => 'در حال آماده‌سازی',
+        3238 => 'ارسال شده',          5017 => 'اطلاعات ارسال نادرست',
+        3572 => 'نرسیده',             3740 => 'ثبت مشکل شده',
+        4633 => 'درخواست لغو مشتری',  5075 => 'درخواست توافق تأخیر',
+        3195 => 'رضایت',              3233 => 'عودت وجه کامل',
+        3067 => 'لغو',                6440 => 'درخواست لغو غرفه‌دار',
+    ];
+}
+
+/** سفارش‌هایی که هنوز ارسال نشده‌اند و غرفه‌دار باید کاری برایشان بکند */
+function bslUnsentStatuses(): array { return [3739, 3237]; }
+
+/**
+ * v8.32: نام مشتری را از ساختار درست بیرون می‌کشد.
+ * طبق مستندات، customer سه کلید دارد: recipient / city / user — و
+ * «name» مستقیم زیر customer وجود ندارد. نسخهٔ ۸.۳۱ اشتباه می‌خواند و
+ * همیشه «نامشخص» می‌داد.
+ */
+function bslParcelCustomerName(array $o): string {
+    $c = $o['order']['customer'] ?? ($o['customer'] ?? []);
+    if (!is_array($c)) return 'نامشخص';
+    foreach ([['recipient', 'name'], ['user', 'name']] as $p) {
+        $v = trim((string)($c[$p[0]][$p[1]] ?? ''));
+        if ($v !== '') return $v;
+    }
+    $v = trim((string)($c['name'] ?? ''));
+    return $v !== '' ? $v : 'نامشخص';
+}
+
+/** یک ردیف vendor-parcels را به ساختار ساده و یک‌دست تبدیل می‌کند */
+function bslNormalizeParcel(array $o): array {
+    $stId  = (int)($o['status']['id'] ?? 0);
+    $names = bslParcelStatuses();
+    $stTxt = trim((string)($o['status']['title'] ?? ''));
+    if ($stTxt === '') $stTxt = $names[$stId] ?? '—';
+    $items = [];
+    foreach (($o['items'] ?? []) as $it) {
+        if (!is_array($it)) continue;
+        $items[] = ['title' => (string)($it['title'] ?? ''), 'qty' => (int)($it['quantity'] ?? 1)];
+    }
+    return [
+        'parcel_id'   => (int)($o['id'] ?? 0),
+        'order_id'    => (int)($o['order']['id'] ?? 0),
+        'customer'    => bslParcelCustomerName($o),
+        'amount'      => (int)($o['total_items_price'] ?? 0),
+        'status_id'   => $stId,
+        'status'      => $stTxt,
+        'unsent'      => in_array($stId, bslUnsentStatuses(), true),
+        'created_at'  => (string)($o['created_at'] ?? ''),
+        'send_before' => (string)($o['estimate_send_at'] ?? ''),
+        'items'       => $items,
+        'items_count' => count($items),
+    ];
+}
+
+/**
+ * v8.32: یک ردیف chats را نرمال می‌کند.
+ * طبق مستندات، متن پیام زیر last_message.content.text است نه
+ * last_message.text — نسخهٔ ۸.۳۱ اشتباه می‌خواند و همیشه «...» می‌فرستاد.
+ */
+function bslNormalizeChat(array $c): array {
+    $lm = is_array($c['last_message'] ?? null) ? $c['last_message'] : [];
+    $txt = '';
+    foreach ([$lm['content']['text'] ?? null, $lm['text'] ?? null] as $cand) {
+        if (is_string($cand) && trim($cand) !== '') { $txt = trim($cand); break; }
+    }
+    $ct = $c['contact'] ?? [];
+    $who = '';
+    if (is_array($ct)) {
+        foreach (['name', 'title', 'username', 'hash_id'] as $k) {
+            $v = trim((string)($ct[$k] ?? ''));
+            if ($v !== '') { $who = $v; break; }
+        }
+    } elseif (is_string($ct)) { $who = trim($ct); }
+    if ($who === '') $who = trim((string)($lm['sender']['name'] ?? ''));
+    if ($who === '') $who = 'مشتری';
+    $type = (string)($lm['message_type'] ?? '');
+    if ($txt === '') $txt = $type !== '' && $type !== 'text' ? '[' . $type . ']' : '—';
+    return [
+        'chat_id'    => (int)($c['id'] ?? 0),
+        'who'        => $who,
+        'text'       => $txt,
+        'unseen'     => (int)($c['unseen_message_count'] ?? 0),
+        'updated_at' => (string)($c['updated_at'] ?? ($c['created_at'] ?? '')),
+        'chat_type'  => (string)($c['chat_type'] ?? ''),
+        'sender'     => trim((string)($lm['sender']['name'] ?? '')),
+    ];
+}
+
+/** متن پیام‌رسان برای یک سفارش */
+function bslParcelMsg(array $n, string $head = '🛒 سفارش باسلام'): string {
+    $s = $head . "\nشماره: #" . ($n['order_id'] ?: $n['parcel_id'])
+       . "\nمشتری: " . $n['customer']
+       . "\nمبلغ: " . number_format($n['amount']) . ' تومان'
+       . "\nوضعیت: " . $n['status'];
+    if (!empty($n['items'])) {
+        $lines = [];
+        foreach (array_slice($n['items'], 0, 3) as $it) {
+            $lines[] = '• ' . mb_substr($it['title'], 0, 45) . ' ×' . $it['qty'];
+        }
+        $more = count($n['items']) - count($lines);
+        if ($more > 0) $lines[] = '• و ' . $more . ' قلم دیگر';
+        $s .= "\n" . implode("\n", $lines);
+    }
+    return $s;
+}
+
+/** متن پیام‌رسان برای یک گفتگو */
+function bslChatMsg(array $n, string $head = '💬 پیام مشتری باسلام'): string {
+    return $head . "\nمشتری: " . $n['who']
+         . ($n['unseen'] > 0 ? ' (' . $n['unseen'] . ' خوانده‌نشده)' : '')
+         . "\nپیام: " . mb_substr($n['text'], 0, 300);
+}
+
 /**
  * بررسی سفارش‌های جدید.
  * $test=true یعنی حالت آزمایشی: وضعیت ذخیره نمی‌شود تا اجرای بعدی هم
@@ -4175,18 +4297,12 @@ function notifCheckOrders(array $cn, bool $test = false, bool $send = true): arr
     $rows = $r['body']['data'] ?? [];
     $found = 0; $sentTo = []; $samples = [];
     foreach ($rows as $o) {
+        if (!is_array($o)) continue;
         $t = strtotime($o['created_at'] ?? 'now');
         if (!$test && $t <= $since) break;
         $found++;
-        // v8.31: ساختار پاسخ vendor-parcels — مشتری زیر order است
-        $oid  = $o['order']['id'] ?? ($o['id'] ?? 0);
-        $cust = $o['order']['customer']['name'] ?? ($o['customer']['name'] ?? 'نامشخص');
-        $amt  = (int)($o['total_items_price'] ?? ($o['total_price'] ?? 0));
-        $stat = $o['status']['title'] ?? ($o['status']['name'] ?? '');
-        $msg = "🛒 سفارش جدید باسلام\nشماره: #" . $oid
-             . "\nمشتری: " . $cust
-             . "\nمبلغ: " . number_format($amt) . ' تومان'
-             . ($stat !== '' ? "\nوضعیت: " . $stat : '');
+        // v8.32: از نرمال‌ساز مشترک استفاده می‌کند تا نام مشتری درست خوانده شود
+        $msg = bslParcelMsg(bslNormalizeParcel($o), '🛒 سفارش جدید باسلام');
         $samples[] = $msg;
         if ($send && !$test) $sentTo = notifSend($cn, $msg);
         if ($test) break;   // در حالت تست فقط تازه‌ترین مورد
@@ -4216,14 +4332,8 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
         $t = strtotime($c['updated_at'] ?? ($c['created_at'] ?? 'now'));
         if (!$test && $t <= $since) break;
         $found++;
-        $lm  = $c['last_message'] ?? [];
-        $txt = is_array($lm) ? ($lm['text'] ?? ($lm['content'] ?? '...')) : '...';
-        $who = $c['contact']['name'] ?? ($c['contact']['title']
-             ?? ($c['customer']['name'] ?? 'مشتری'));
-        $unseen = (int)($c['unseen_message_count'] ?? 0);
-        $msg = "💬 پیام مشتری باسلام\nمشتری: " . $who
-             . ($unseen > 0 ? " ({$unseen} خوانده‌نشده)" : '')
-             . "\nپیام: " . mb_substr((string)$txt, 0, 200);
+        // v8.32: نرمال‌ساز مشترک — متن پیام زیر content.text است
+        $msg = bslChatMsg(bslNormalizeChat($c), '💬 پیام مشتری باسلام');
         $samples[] = $msg;
         if ($send && !$test) $sentTo = notifSend($cn, $msg);
         if ($test) break;
@@ -4418,6 +4528,159 @@ if (isset($_GET['notif_test'])) {
     else { echo json_encode(['ok' => false, 'error' => 'نوع تست نامعتبر']); exit; }
 
     echo json_encode($r, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v8.32: اندپوینت‌های مودال استعلام
+ *  دکمه‌های استعلام حالا اول لیست را نشان می‌دهند، بعد کاربر تصمیم
+ *  می‌گیرد چه چیزی به پیام‌رسان‌ها برود.
+ * ===================================================================== */
+
+/** لیست سفارش‌های غرفه — برای مودال */
+if (isset($_GET['bsl_orders_list'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cn = loadConnections();
+    $tk = trim((string)($cn['basalam']['token'] ?? ''));
+    $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
+    if ($tk === '' || $vid <= 0) {
+        echo json_encode(['ok' => false, 'error' => 'تنظیمات باسلام ناقص است'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $per = min(30, max(5, (int)($_GET['per_page'] ?? 20)));   // سقف مستندات: ۳۰
+    $filter = (string)($_GET['filter'] ?? 'all');
+    $ep = 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=' . $per . '&sort=created_at:desc';
+    if ($filter === 'unsent') $ep .= '&statuses=' . implode(',', bslUnsentStatuses());
+    $cur = trim((string)($_GET['cursor'] ?? ''));
+    if ($cur !== '') $ep .= '&cursor=' . rawurlencode($cur);
+
+    $r = bslReq($tk, 'GET', $ep);
+    if (!$r['ok']) {
+        echo json_encode(['ok' => false,
+            'error' => bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read')],
+            JSON_UNESCAPED_UNICODE); exit;
+    }
+    $rows = [];
+    foreach (($r['body']['data'] ?? []) as $o) { if (is_array($o)) $rows[] = bslNormalizeParcel($o); }
+    $unsent = 0;
+    foreach ($rows as $n) { if ($n['unsent']) $unsent++; }
+    echo json_encode(['ok' => true, 'rows' => $rows, 'total' => count($rows), 'unsent' => $unsent,
+        'filter' => $filter, 'next_cursor' => (string)($r['body']['next_cursor'] ?? '')],
+        JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** لیست گفتگوها — برای مودال */
+if (isset($_GET['bsl_chats_list'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cn = loadConnections();
+    $tk = trim((string)($cn['basalam']['token'] ?? ''));
+    if ($tk === '') {
+        echo json_encode(['ok' => false, 'error' => 'توکن باسلام تنظیم نشده'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $limit = min(50, max(5, (int)($_GET['limit'] ?? 20)));
+    $filter = (string)($_GET['filter'] ?? 'all');
+    $ep = 'chats?limit=' . $limit . '&order_by=updated_at';
+    if ($filter === 'unseen') $ep .= '&filters=unseen';   // فیلتر رسمی مستندات
+
+    $r = bslReq($tk, 'GET', $ep);
+    if (!$r['ok']) {
+        echo json_encode(['ok' => false,
+            'error' => bslApiError($r, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')],
+            JSON_UNESCAPED_UNICODE); exit;
+    }
+    $raw = $r['body']['data']['chats'] ?? ($r['body']['data'] ?? []);
+    $rows = [];
+    foreach ($raw as $c) { if (is_array($c)) $rows[] = bslNormalizeChat($c); }
+    $unseen = 0;
+    foreach ($rows as $n) { if ($n['unseen'] > 0) $unseen++; }
+    echo json_encode(['ok' => true, 'rows' => $rows, 'total' => count($rows), 'unseen' => $unseen,
+        'filter' => $filter], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/**
+ * ارسال موارد انتخاب‌شده به پیام‌رسان‌ها.
+ * kind=orders|chats و ids=فهرست شناسه‌های جداشده با کاما.
+ * اگر ids خالی باشد، همهٔ موارد «اقدام‌نشده» فرستاده می‌شوند.
+ */
+if (isset($_GET['bsl_notify_selected'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cn = loadConnections();
+    $why = notifPrereq($cn);
+    if ($why !== null) { echo json_encode(['ok' => false, 'error' => $why], JSON_UNESCAPED_UNICODE); exit; }
+    $tk = (string)$cn['basalam']['token'];
+    $vid = (int)$cn['basalam']['vendor_id'];
+    $kind = (string)($_GET['kind'] ?? '');
+    $idsRaw = trim((string)($_GET['ids'] ?? ''));
+    $want = $idsRaw === '' ? [] : array_filter(array_map('intval', explode(',', $idsRaw)));
+    $digest = !empty($_GET['digest']);   // یک پیام خلاصه به‌جای چند پیام جدا
+
+    if ($kind === 'orders') {
+        $r = bslReq($tk, 'GET', 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=30&sort=created_at:desc');
+        if (!$r['ok']) { echo json_encode(['ok' => false,
+            'error' => bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read')],
+            JSON_UNESCAPED_UNICODE); exit; }
+        $picked = [];
+        foreach (($r['body']['data'] ?? []) as $o) {
+            if (!is_array($o)) continue;
+            $n = bslNormalizeParcel($o);
+            if ($want ? in_array($n['parcel_id'], $want, true) : $n['unsent']) $picked[] = $n;
+        }
+    } elseif ($kind === 'chats') {
+        $r = bslReq($tk, 'GET', 'chats?limit=50&order_by=updated_at');
+        if (!$r['ok']) { echo json_encode(['ok' => false,
+            'error' => bslApiError($r, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')],
+            JSON_UNESCAPED_UNICODE); exit; }
+        $raw = $r['body']['data']['chats'] ?? ($r['body']['data'] ?? []);
+        $picked = [];
+        foreach ($raw as $c) {
+            if (!is_array($c)) continue;
+            $n = bslNormalizeChat($c);
+            if ($want ? in_array($n['chat_id'], $want, true) : $n['unseen'] > 0) $picked[] = $n;
+        }
+    } else { echo json_encode(['ok' => false, 'error' => 'نوع نامعتبر'], JSON_UNESCAPED_UNICODE); exit; }
+
+    if (!$picked) {
+        echo json_encode(['ok' => true, 'sent' => 0, 'delivery' => [],
+            'note' => 'موردی برای ارسال نبود'], JSON_UNESCAPED_UNICODE); exit;
+    }
+
+    $delivery = []; $sent = 0;
+    if ($digest) {
+        // یک پیام فشرده — برای وقتی موارد زیاد است و نمی‌خواهیم پیام‌رسان پر شود
+        if ($kind === 'orders') {
+            $lines = ['📦 سفارش‌های ارسال‌نشده (' . count($picked) . ' مورد)'];
+            $sum = 0;
+            foreach ($picked as $n) {
+                $sum += $n['amount'];
+                $lines[] = '• #' . ($n['order_id'] ?: $n['parcel_id']) . ' — ' . $n['customer']
+                         . ' — ' . number_format($n['amount']) . ' تومان — ' . $n['status'];
+            }
+            $lines[] = '━━━━━━━━━━';
+            $lines[] = 'جمع: ' . number_format($sum) . ' تومان';
+        } else {
+            $tot = 0;
+            foreach ($picked as $n) { $tot += $n['unseen']; }
+            $lines = ['💬 پیام‌های خوانده‌نشده (' . count($picked) . ' گفتگو · ' . $tot . ' پیام)'];
+            foreach ($picked as $n) {
+                $lines[] = '• ' . $n['who'] . ($n['unseen'] > 0 ? ' (' . $n['unseen'] . ')' : '')
+                         . ' — ' . mb_substr($n['text'], 0, 60);
+            }
+        }
+        $delivery = notifSend($cn, implode("\n", $lines));
+        $sent = 1;
+    } else {
+        foreach ($picked as $n) {
+            $msg = $kind === 'orders'
+                 ? bslParcelMsg($n, '📦 سفارش ارسال‌نشده')
+                 : bslChatMsg($n, '💬 پیام خوانده‌نشده');
+            $delivery = notifSend($cn, $msg);
+            $sent++;
+            if ($sent >= 20) break;   // سقف ایمنی برای جلوگیری از هرزنامه
+        }
+    }
+    echo json_encode(['ok' => true, 'sent' => $sent, 'picked' => count($picked),
+        'delivery' => $delivery, 'digest' => $digest], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -8524,18 +8787,18 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 <div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
-<div style="font-size:11px;color:#94a3b8;margin-bottom:6px">🧪 تست استعلام از باسلام</div>
+<div style="font-size:11px;color:#94a3b8;margin-bottom:6px">🔍 استعلام از باسلام</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
-هر دکمه واقعاً از باسلام استعلام می‌گیرد و تازه‌ترین مورد را به پیام‌رسان‌ها می‌فرستد.
-حالت تست وضعیت را ذخیره نمی‌کند، پس اعلان‌های واقعی بعدی از دست نمی‌روند.
+اول لیست را باز می‌کند تا ببینید چه خبر است؛ بعد خودتان انتخاب می‌کنید
+چه چیزی به پیام‌رسان‌ها برود. چیزی بدون تأیید شما فرستاده نمی‌شود.
 </div>
 <div class="cact">
-<button class="btn btn-teal" onclick="notifTest('orders')" style="flex:1">🛒 تست سفارش‌ها</button>
-<button class="btn btn-cyan" onclick="notifTest('chats')" style="flex:1">💬 تست پیام‌ها</button>
+<button class="btn btn-teal" onclick="openOrdersModal()" style="flex:1">🛒 سفارش‌ها</button>
+<button class="btn btn-cyan" onclick="openChatsModal()" style="flex:1">💬 گفتگوها</button>
+</div>
+<div class="cact">
 <button class="btn btn-indigo" onclick="notifTest('products')" style="flex:1">📋 تست محصولات</button>
-</div>
-<div class="cact">
-<button class="btn btn-orange" onclick="notifTest('source')" style="flex:1">💰 تست تغییرات مبدأ (قیمت و موجودی)</button>
+<button class="btn btn-orange" onclick="notifTest('source')" style="flex:1">💰 تست تغییرات مبدأ</button>
 </div>
 <div id="notifTestR" style="margin-top:8px"></div>
 <div id="notifTR" style="margin-top:8px"></div>
@@ -11105,6 +11368,14 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.32', t:'مودال استعلام: اول ببین، بعد بفرست', items:[
+    'دکمه‌های «سفارش‌ها» و «گفتگوها» حالا لیست را در مودال باز می‌کنند، نه اینکه مستقیم پیام بفرستند',
+    'انتخاب موردی با تیک، و دو دکمهٔ ارسال: «خلاصه در یک پیام» یا «جداگانه»',
+    'فیلتر «ارسال‌نشده» و «خوانده‌نشده» — موارد نیازمند اقدام از پیش تیک خورده‌اند',
+    'رفع باگ: نام مشتری در سفارش‌ها همیشه «نامشخص» نشان داده می‌شد — مسیر درست customer.recipient.name است',
+    'رفع باگ: متن آخرین پیام گفتگو خوانده نمی‌شد — مسیر درست last_message.content.text است',
+    'نمایش نام فارسی وضعیت سفارش از جدول رسمی کدها (جدید، در حال آماده‌سازی، ارسال شده و ...)'
+  ]},
   {v:'8.31', t:'رفع خطای ۴۰۴ استعلام‌های باسلام', items:[
     'مسیر سفارش‌ها به vendor-parcels و گفتگوها به chats اصلاح شد (باسلام به API Gateway مهاجرت کرده بود)',
     'اصلاح نگاشت فیلدها طبق مستندات رسمی — مشتری، مبلغ و تعداد پیام خوانده‌نشده',
@@ -11201,6 +11472,221 @@ function notifTest(kind){
     if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';
     showToast('خطا شبکه',1);
   });
+}
+
+/* =====================================================================
+ *  v8.32: مودال‌های استعلام — سفارش‌ها و گفتگوها
+ *  اول لیست را نشان می‌دهد، بعد کاربر انتخاب می‌کند چه چیزی
+ *  به پیام‌رسان‌ها فرستاده شود. هر دو مودال از یک اسکلت مشترک می‌آیند.
+ * ===================================================================== */
+let inqState={kind:'',filter:'',rows:[],sel:{},loading:false};
+
+function inqClose(){
+  const m=document.getElementById('inqModalContainer');
+  if(m)m.remove();
+  inqState={kind:'',filter:'',rows:[],sel:{},loading:false};
+}
+
+/** تاریخ ISO را به شکل خوانا و کوتاه فارسی درمی‌آورد */
+function inqDate(s){
+  if(!s)return '—';
+  const d=new Date(s);
+  if(isNaN(d))return '—';
+  try{
+    return new Intl.DateTimeFormat('fa-IR',{month:'short',day:'numeric',
+      hour:'2-digit',minute:'2-digit'}).format(d);
+  }catch(e){return d.toLocaleString();}
+}
+
+function inqMoney(n){return toFa(Number(n||0).toLocaleString('en-US'))+' تومان';}
+
+/** کلید یکتای هر ردیف بسته به نوع */
+function inqId(r){return inqState.kind==='orders'?r.parcel_id:r.chat_id;}
+
+/** ردیف‌هایی که به‌طور پیش‌فرض «اقدام‌نشده» شمرده می‌شوند */
+function inqIsPending(r){return inqState.kind==='orders'?!!r.unsent:(r.unseen>0);}
+
+function inqSelectedIds(){
+  return Object.keys(inqState.sel).filter(k=>inqState.sel[k]);
+}
+
+function inqToggle(id){
+  inqState.sel[id]=!inqState.sel[id];
+  inqRenderFoot();
+  const cb=document.getElementById('inqCb_'+id);
+  if(cb)cb.checked=!!inqState.sel[id];
+  const tr=document.getElementById('inqRow_'+id);
+  if(tr)tr.style.background=inqState.sel[id]?'#1e3a5f':'';
+}
+
+function inqSelectAll(on){
+  inqState.rows.forEach(r=>{inqState.sel[inqId(r)]=on;});
+  inqRenderBody();inqRenderFoot();
+}
+
+/** فقط موارد اقدام‌نشده را تیک می‌زند */
+function inqSelectPending(){
+  inqState.rows.forEach(r=>{inqState.sel[inqId(r)]=inqIsPending(r);});
+  inqRenderBody();inqRenderFoot();
+}
+
+function openOrdersModal(filter){inqOpen('orders',filter||'all');}
+function openChatsModal(filter){inqOpen('chats',filter||'all');}
+
+function inqOpen(kind,filter){
+  inqState.kind=kind;inqState.filter=filter;inqState.sel={};inqState.loading=true;
+  const isOrd=kind==='orders';
+  const title=isOrd?'🛒 سفارش‌های باسلام':'💬 گفتگوهای باسلام';
+  let html='<div class="bsl-modal-overlay" onclick="if(event.target===this)inqClose()">';
+  html+='<div class="bsl-modal" style="max-width:920px">';
+  html+='<div class="bsl-modal-head"><h2 id="inqTitle">'+title+'</h2>'
+      +'<button class="btn btn-gray" onclick="inqClose()">✕</button></div>';
+  // نوار فیلتر
+  html+='<div style="display:flex;gap:6px;padding:8px 12px;background:#111c31;border-bottom:1px solid #334155;flex-wrap:wrap;align-items:center">';
+  if(isOrd){
+    html+='<button class="btn btn-gray" id="inqF_all" onclick="inqSetFilter(\'all\')" style="font-size:11px;padding:5px 10px">همه</button>';
+    html+='<button class="btn btn-gray" id="inqF_unsent" onclick="inqSetFilter(\'unsent\')" style="font-size:11px;padding:5px 10px">📦 ارسال‌نشده</button>';
+  }else{
+    html+='<button class="btn btn-gray" id="inqF_all" onclick="inqSetFilter(\'all\')" style="font-size:11px;padding:5px 10px">همه</button>';
+    html+='<button class="btn btn-gray" id="inqF_unseen" onclick="inqSetFilter(\'unseen\')" style="font-size:11px;padding:5px 10px">💬 خوانده‌نشده</button>';
+  }
+  html+='<span style="flex:1"></span>';
+  html+='<span id="inqSummary" style="font-size:11px;color:#94a3b8"></span>';
+  html+='<button class="btn btn-gray" onclick="inqReload()" style="font-size:11px;padding:5px 10px">🔄 تازه‌سازی</button>';
+  html+='</div>';
+  html+='<div class="bsl-modal-body" id="inqBody" style="min-height:180px"></div>';
+  html+='<div class="bsl-modal-pager" id="inqFoot" style="justify-content:space-between;flex-wrap:wrap;gap:6px"></div>';
+  html+='</div></div>';
+  const old=document.getElementById('inqModalContainer');if(old)old.remove();
+  const div=document.createElement('div');div.id='inqModalContainer';div.innerHTML=html;
+  document.body.appendChild(div);
+  inqReload();
+}
+
+function inqSetFilter(f){inqState.filter=f;inqState.sel={};inqReload();}
+
+function inqReload(){
+  const body=document.getElementById('inqBody');
+  if(body)body.innerHTML='<div style="padding:26px;text-align:center;color:#93c5fd;font-size:12px">⏳ در حال استعلام از باسلام...</div>';
+  inqRenderFoot();
+  const isOrd=inqState.kind==='orders';
+  const url=isOrd
+    ?('?bsl_orders_list=1&per_page=30&filter='+encodeURIComponent(inqState.filter))
+    :('?bsl_chats_list=1&limit=50&filter='+encodeURIComponent(inqState.filter));
+  fetch(url).then(r=>r.json()).then(d=>{
+    inqState.loading=false;
+    if(!d||!d.ok){
+      if(body)body.innerHTML='<div style="padding:20px;color:#fca5a5;font-size:12px;background:#7f1d1d20;border-radius:8px;margin:8px">✗ '+esc(d&&d.error?d.error:'خطا در دریافت')+'</div>';
+      inqRenderFoot();return;
+    }
+    inqState.rows=d.rows||[];
+    // پیش‌فرض: موارد اقدام‌نشده تیک خورده باشند تا کار کاربر کم شود
+    inqState.rows.forEach(r=>{if(inqState.sel[inqId(r)]===undefined)inqState.sel[inqId(r)]=inqIsPending(r);});
+    const sm=document.getElementById('inqSummary');
+    if(sm){
+      sm.innerHTML=isOrd
+        ?(toFa(d.total||0)+' سفارش · <b style="color:#fbbf24">'+toFa(d.unsent||0)+'</b> ارسال‌نشده')
+        :(toFa(d.total||0)+' گفتگو · <b style="color:#fbbf24">'+toFa(d.unseen||0)+'</b> خوانده‌نشده');
+    }
+    ['all','unsent','unseen'].forEach(f=>{
+      const b=document.getElementById('inqF_'+f);
+      if(b){b.className='btn '+(inqState.filter===f?'btn-cyan':'btn-gray');}
+    });
+    inqRenderBody();inqRenderFoot();
+  }).catch(e=>{
+    inqState.loading=false;
+    if(body)body.innerHTML='<div style="padding:20px;color:#fca5a5;font-size:12px">✗ خطا در ارتباط: '+esc(e.message)+'</div>';
+    inqRenderFoot();
+  });
+}
+
+function inqRenderBody(){
+  const body=document.getElementById('inqBody');
+  if(!body)return;
+  const rows=inqState.rows;
+  if(!rows.length){
+    body.innerHTML='<div style="padding:30px;text-align:center;color:#64748b;font-size:12px">موردی یافت نشد</div>';
+    return;
+  }
+  const isOrd=inqState.kind==='orders';
+  let h='<table class="bsl-modal-table"><thead><tr>'
+    +'<th style="width:34px"><input type="checkbox" onclick="inqSelectAll(this.checked)" style="width:15px;height:15px;cursor:pointer"></th>';
+  h+=isOrd
+    ?'<th>شماره</th><th>مشتری</th><th>مبلغ</th><th>وضعیت</th><th>تاریخ</th>'
+    :'<th>مشتری</th><th>آخرین پیام</th><th>خوانده‌نشده</th><th>زمان</th>';
+  h+='</tr></thead><tbody>';
+  rows.forEach(r=>{
+    const id=inqId(r);
+    const pend=inqIsPending(r);
+    const on=!!inqState.sel[id];
+    h+='<tr id="inqRow_'+id+'" style="border-bottom:1px solid #1e293b;'+(on?'background:#1e3a5f':'')+'">';
+    h+='<td style="text-align:center"><input type="checkbox" id="inqCb_'+id+'" '+(on?'checked':'')
+      +' onclick="inqToggle('+id+')" style="width:15px;height:15px;cursor:pointer"></td>';
+    if(isOrd){
+      h+='<td style="font-family:ui-monospace,monospace;direction:ltr;text-align:right">#'+toFa(r.order_id||r.parcel_id)+'</td>';
+      h+='<td>'+esc(r.customer||'—')+(r.items_count>0?'<div style="font-size:9.5px;color:#64748b">'+toFa(r.items_count)+' قلم</div>':'')+'</td>';
+      h+='<td style="white-space:nowrap">'+inqMoney(r.amount)+'</td>';
+      h+='<td><span style="font-size:10px;padding:2px 7px;border-radius:4px;background:'
+        +(pend?'#7c2d12':'#14532d')+';color:'+(pend?'#fdba74':'#86efac')+'">'+esc(r.status||'—')+'</span></td>';
+      h+='<td style="font-size:10px;color:#94a3b8;white-space:nowrap">'+esc(inqDate(r.created_at))+'</td>';
+    }else{
+      h+='<td>'+esc(r.who||'—')+'</td>';
+      h+='<td style="max-width:340px;color:#cbd5e1">'+esc((r.text||'').slice(0,90))+'</td>';
+      h+='<td style="text-align:center">'+(r.unseen>0
+        ?'<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:#7f1d1d;color:#fca5a5">'+toFa(r.unseen)+'</span>'
+        :'<span style="color:#475569">—</span>')+'</td>';
+      h+='<td style="font-size:10px;color:#94a3b8;white-space:nowrap">'+esc(inqDate(r.updated_at))+'</td>';
+    }
+    h+='</tr>';
+  });
+  h+='</tbody></table>';
+  body.innerHTML=h;
+}
+
+function inqRenderFoot(){
+  const foot=document.getElementById('inqFoot');
+  if(!foot)return;
+  const n=inqSelectedIds().length;
+  const isOrd=inqState.kind==='orders';
+  const lbl=isOrd?'سفارش':'گفتگو';
+  let h='<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">';
+  h+='<button class="btn btn-gray" onclick="inqSelectPending()" style="font-size:11px;padding:5px 10px">'
+    +(isOrd?'انتخاب ارسال‌نشده‌ها':'انتخاب خوانده‌نشده‌ها')+'</button>';
+  h+='<button class="btn btn-gray" onclick="inqSelectAll(false)" style="font-size:11px;padding:5px 10px">هیچ‌کدام</button>';
+  h+='<span style="font-size:11px;color:'+(n?'#4ade80':'#64748b')+'">'+toFa(n)+' '+lbl+' انتخاب شده</span>';
+  h+='</div>';
+  h+='<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">';
+  h+='<button class="btn btn-purple" id="inqSendDigest" '+(n?'':'disabled')
+    +' onclick="inqSend(1)" style="font-size:11px;padding:6px 11px">📋 ارسال خلاصه (یک پیام)</button>';
+  h+='<button class="btn btn-green" id="inqSendEach" '+(n?'':'disabled')
+    +' onclick="inqSend(0)" style="font-size:11px;padding:6px 11px">📨 ارسال جداگانه</button>';
+  h+='</div>';
+  foot.innerHTML=h;
+}
+
+function inqSend(digest){
+  const ids=inqSelectedIds();
+  if(!ids.length){showToast('موردی انتخاب نشده',1);return;}
+  if(!digest&&ids.length>5&&!confirm('می‌خواهید '+ids.length+' پیام جداگانه فرستاده شود؟\nبرای شلوغ نشدن پیام‌رسان، «ارسال خلاصه» بهتر است.'))return;
+  ['inqSendDigest','inqSendEach'].forEach(k=>{const b=document.getElementById(k);if(b){b.disabled=true;}});
+  const b2=document.getElementById(digest?'inqSendDigest':'inqSendEach');
+  const oldTxt=b2?b2.textContent:'';
+  if(b2)b2.textContent='⏳ در حال ارسال...';
+  fetch('?bsl_notify_selected=1&kind='+encodeURIComponent(inqState.kind)
+    +'&digest='+(digest?1:0)+'&ids='+encodeURIComponent(ids.join(',')))
+    .then(r=>r.json()).then(d=>{
+      if(b2)b2.textContent=oldTxt;
+      inqRenderFoot();
+      if(!d||!d.ok){showToast((d&&d.error)?d.error:'ارسال ناموفق',1);return;}
+      if(d.note){showToast(d.note,1);return;}
+      const dl=d.delivery||{};
+      const bad=Object.keys(dl).filter(k=>dl[k]!=='sent');
+      if(bad.length)showToast('⚠ ارسال به '+bad.join('، ')+' ناموفق بود',1);
+      else showToast('✓ '+toFa(d.sent||0)+' پیام فرستاده شد');
+    }).catch(()=>{
+      if(b2)b2.textContent=oldTxt;
+      inqRenderFoot();showToast('خطا شبکه',1);
+    });
 }
 
 function renderChangelog(){
