@@ -7918,7 +7918,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div id="vcLocalInfo" style="font-family:monospace;font-size:11px;color:#67e8f9">—</div>
 </div>
 
-<button class="btn btn-blue" onclick="vcCheck(true)" id="vcBtnCheck" style="width:100%;padding:11px;font-size:13px">🔍 بررسی نسخهٔ جدید</button>
+<button class="btn btn-blue" onclick="vcCheck(true)" id="vcBtnCheck" style="width:100%;padding:11px;font-size:13px">🔍 بررسی و نصب نسخهٔ جدید</button>
 <button class="btn btn-green hidden" onclick="vcUpdate()" id="vcBtnUpdate" style="width:100%;padding:12px;font-size:13px;margin-top:8px">⬇ نصب نسخهٔ جدید</button>
 <div class="status" id="vcStatus" style="margin-top:8px;text-align:center">—</div>
 
@@ -10497,7 +10497,7 @@ function vcCheck(manual) {
     if (manual) vcStat('<span style="opacity:.7">در حال مقایسه با گیت‌هاب...</span>', '#93c5fd');
 
     fetch('?vc_check=1' + (manual ? '&force=1' : '')).then(r => r.json()).then(d => {
-        const reset = () => { if (btn) { btn.disabled = false; btn.textContent = '🔍 بررسی نسخهٔ جدید'; } };
+        const reset = () => { if (btn) { btn.disabled = false; btn.textContent = '🔍 بررسی و نصب نسخهٔ جدید'; } };
         if (d.skipped) { reset(); return; }
         if (!d.ok) {
             vcStat('✗ ' + esc(d.error || 'خطا'), '#f87171');
@@ -10513,25 +10513,32 @@ function vcCheck(manual) {
             reset(); return;
         }
 
-        // نسخهٔ جدید موجود است — فقط اطلاع می‌دهیم
+        // نسخهٔ جدید موجود است
         VC_PENDING = true;
         vcBadge('جدید', 'tg');
         $('vcBtnUpdate').classList.remove('hidden');
         vcStat('⬆ نسخهٔ جدید: <code>' + esc(d.remote_id) + '</code> · ' +
                toFa((d.remote_size / 1024).toFixed(0)) + ' KB', '#fbbf24');
+        reset();
+
         if (!d.deploy_ready) {
             vcStat('⬆ نسخهٔ جدید موجود است — اما رمز نصب‌کننده تنظیم نشده', '#fbbf24');
+            if (manual) showToast('رمز نصب‌کننده را در «منبع و نصب‌کننده» وارد کنید', true);
+            return;
         }
+
         const busy = vcBusy();
         if (busy) {
             showToast('نسخهٔ جدید موجود است (پس از پایان «' + busy + '»)', true);
-        } else if (!manual) {
-            vcBanner(d);
+            return;
         }
-        reset();
+
+        // دکمهٔ دستی = کاربر خودش خواسته، پس همان‌جا نصب و رفرش می‌کنیم
+        if (manual) { vcUpdate(true); return; }
+        vcBanner(d);
     }).catch(() => {
         vcStat('✗ خطا در ارتباط', '#f87171');
-        if (btn) { btn.disabled = false; btn.textContent = '🔍 بررسی نسخهٔ جدید'; }
+        if (btn) { btn.disabled = false; btn.textContent = '🔍 بررسی و نصب نسخهٔ جدید'; }
     });
 }
 
@@ -10550,7 +10557,7 @@ function vcBanner(d) {
         'padding:8px 13px;border-radius:7px;cursor:pointer;font-family:inherit;font-size:12px">بعداً</button>';
     document.body.appendChild(b);
     document.body.style.paddingTop = (b.offsetHeight + 6) + 'px';
-    document.getElementById('vcGo').onclick = () => { vcCloseBar(); vcUpdate(); };
+    document.getElementById('vcGo').onclick = () => { vcCloseBar(); vcUpdate(true); };
     document.getElementById('vcNo').onclick = vcCloseBar;
 }
 function vcCloseBar() {
@@ -10563,47 +10570,75 @@ function vcCloseBar() {
  * نصب: این تابع خودش چیزی نمی‌نویسد. یک فرم به deploy.php ارسال می‌کند
  * که فایلی مستقل است و کار نصب را با همان زنجیرهٔ ایمنی انجام می‌دهد.
  */
-function vcUpdate() {
+function vcUpdate(skipConfirm) {
     const busy = vcBusy();
     if (busy) { showToast('«' + busy + '» در جریان است — بعداً', true); return; }
 
+    const btn = $('vcBtnUpdate');
+    const lock = () => { if (btn) { btn.disabled = true; btn.textContent = '⏳ در حال نصب...'; } };
+    const unlock = () => { if (btn) { btn.disabled = false; btn.textContent = '⬇ نصب نسخهٔ جدید'; } };
+
     fetch('?vc_deploy_info=1').then(r => r.json()).then(d => {
-        if (!d.ok) { showToast(d.error || 'نصب‌کننده در دسترس نیست', true); vcStat('✗ ' + esc(d.error || ''), '#f87171'); return; }
+        if (!d.ok) {
+            showToast(d.error || 'نصب‌کننده در دسترس نیست', true);
+            vcStat('✗ ' + esc(d.error || ''), '#f87171');
+            return;
+        }
         if (!d.token) {
             showToast('ابتدا رمز نصب‌کننده را در تنظیمات وارد کنید', true);
             vcStat('✗ رمز نصب‌کننده تنظیم نشده — بخش «منبع و نصب‌کننده»', '#fbbf24');
             return;
         }
-        if (!confirm('نسخهٔ جدید نصب شود؟\n\nنصب توسط ' + d.file + ' انجام می‌شود و از نسخهٔ فعلی بکاپ گرفته خواهد شد.')) return;
+        if (!skipConfirm && !confirm('نسخهٔ جدید نصب شود؟\n\nنصب توسط ' + d.file +
+            ' انجام می‌شود و از نسخهٔ فعلی بکاپ گرفته خواهد شد.')) return;
 
-        showToast('⏳ ارسال به نصب‌کننده...');
-        // مرورگر مستقیم به deploy.php می‌رود؛ این اسکریپت درگیر نوشتن نیست
-        const f = document.createElement('form');
-        f.method = 'POST';
-        f.action = d.file;
-        f.target = '_blank';
-        f.innerHTML = '<input type="hidden" name="action" value="deploy">' +
-            '<input type="hidden" name="api_token" value="' + esc(d.token) + '">' +
-            '<input type="hidden" name="repo" value="' + esc($('vcRepo').value.trim()) + '">' +
-            '<input type="hidden" name="branch" value="' + esc($('vcBranch').value.trim()) + '">' +
-            '<input type="hidden" name="source" value="' + esc($('vcPath').value.trim()) + '">' +
-            '<input type="hidden" name="dest" value="' + esc(VC ? VC.self_name : '') + '">' +
-            '<input type="hidden" name="folder" value="">' +
-            '<input type="hidden" name="check_php" value="1">' +
-            '<input type="hidden" name="backup" value="1">';
-        document.body.appendChild(f);
-        f.submit();
-        f.remove();
+        lock();
+        vcCloseBar();
+        showToast('⏳ در حال نصب نسخهٔ جدید...');
+        vcStat('<span style="opacity:.7">' + esc(d.file) + ' در حال نصب...</span>', '#93c5fd');
 
-        vcStat('نصب در پنجرهٔ جدید انجام می‌شود — پس از اتمام، این صفحه را رفرش کنید', '#93c5fd');
-        setTimeout(() => {
-            if (confirm('نصب تمام شد؟ برای بارگذاری نسخهٔ جدید، صفحه رفرش شود.')) {
-                const u = new URL(location.href);
-                u.searchParams.set('_v', Date.now());
-                location.replace(u.toString());
-            }
-        }, 3500);
-    }).catch(() => showToast('خطا در ارتباط', true));
+        // در پس‌زمینه صدا زده می‌شود؛ نصب را deploy.php انجام می‌دهد نه این فایل
+        const fd = new FormData();
+        fd.append('action',    'deploy');
+        fd.append('api_token', d.token);
+        fd.append('repo',      $('vcRepo').value.trim());
+        fd.append('branch',    $('vcBranch').value.trim());
+        fd.append('source',    $('vcPath').value.trim());
+        fd.append('dest',      VC ? VC.self_name : '');
+        fd.append('folder',    '');
+        fd.append('check_php', '1');
+        fd.append('backup',    '1');
+
+        return fetch(d.file, { method: 'POST', body: fd })
+            .then(r => r.json().catch(() => ({ ok: false, error: 'پاسخ نامعتبر از نصب‌کننده' })))
+            .then(res => {
+                if (!res.ok) {
+                    vcStat('✗ ' + esc(res.error || 'نصب ناموفق'), '#f87171');
+                    showToast(res.error || 'نصب ناموفق', true);
+                    unlock();
+                    return;
+                }
+                if (res.same || res.changed === false) {
+                    vcStat('✓ از قبل به‌روز بود', '#4ade80');
+                    showToast('✓ از قبل به‌روز بود');
+                    $('vcBtnUpdate').classList.add('hidden');
+                    unlock();
+                    return;
+                }
+                vcStat('✓ نصب شد' + (res.backup ? ' · بکاپ: <code>' + esc(res.backup) + '</code>' : '') +
+                       ' — بارگذاری مجدد...', '#4ade80');
+                showToast('✓ به‌روزرسانی انجام شد — صفحه رفرش می‌شود');
+                setTimeout(() => {
+                    const u = new URL(location.href);
+                    u.searchParams.set('_v', Date.now());   // دور زدن کش مرورگر
+                    location.replace(u.toString());
+                }, 1400);
+            });
+    }).catch(() => {
+        showToast('خطا در ارتباط با نصب‌کننده', true);
+        vcStat('✗ خطا در ارتباط', '#f87171');
+        unlock();
+    });
 }
 
 /* ---------- دراپ‌داون‌های جستجودار ---------- */
