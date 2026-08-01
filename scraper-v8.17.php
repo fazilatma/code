@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.34';
+const APP_VERSION = '8.35';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4200,6 +4200,129 @@ if (isset($_GET['queue_watchdog'])) {
         $out[] = queueStallRecover($wq, max(30, $after), $dry);
     }
     echo json_encode(['ok' => true, 'checks' => $out], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v8.35: خودآزمون — «آیا واقعاً همان کدی که فکر می‌کنم روی سرور است؟»
+ *
+ *  چند بار پیش آمده که تغییری ساخته شده ولی روی هاست نصب نشده و
+ *  به نظر رسیده کار نکرده است. این صفحه بدون حدس‌زدن جواب می‌دهد:
+ *  هر قابلیت را واقعاً در همین فایلِ در حال اجرا بررسی می‌کند.
+ * ===================================================================== */
+if (isset($_GET['selftest'])) {
+    $wantJson = isset($_GET['json']);
+    header('Content-Type: ' . ($wantJson ? 'application/json' : 'text/html') . '; charset=UTF-8');
+
+    $checks = [];
+    $add = function (string $ver, string $name, bool $ok, string $detail = '') use (&$checks) {
+        $checks[] = ['ver' => $ver, 'name' => $name, 'ok' => $ok, 'detail' => $detail];
+    };
+
+    // ۱) وجود توابع کلیدی هر نسخه — اگر نصب ناقص باشد اینجا لو می‌رود
+    $fnMap = [
+        ['8.32', 'مودال استعلام سفارش‌ها و گفتگوها', 'bslNormalizeParcel'],
+        ['8.32', 'خواندن درست نام مشتری', 'bslParcelCustomerName'],
+        ['8.33', 'متن کامل پیام‌های مشتری', 'bslFetchChatMessages'],
+        ['8.33', 'نگهبان صف ارسال', 'queueStallCheck'],
+        ['8.34', 'بازنشستگی محصولات رفته از مبدأ', 'retireRemoved'],
+        ['8.34', 'محافظ ایمنی بازنشستگی', 'retireGuard'],
+    ];
+    foreach ($fnMap as [$v, $label, $fn]) {
+        $add($v, $label, function_exists($fn), $fn . '()');
+    }
+
+    // ۲) رفع خطای ۴۲۲ — نباید هیچ sort نامعتبری در کد مانده باشد
+    $selfSrc = (string)@file_get_contents(__FILE__);
+    // رشته را تکه‌تکه می‌سازیم تا خودِ همین خط در شمارش نیفتد و
+    // «هشدار الکی» ندهد — خودآزمون نباید خودش را پیدا کند.
+    $badSort = substr_count($selfSrc, 'sort=' . 'created_at');
+    $add('8.33', 'رفع خطای ۴۲۲ (حذف sort نامعتبر)', $badSort === 0,
+         $badSort === 0 ? 'پاک است' : $badSort . ' مورد باقی مانده');
+
+    // ۳) اندپوینت‌های تازه واقعاً در همین فایل هستند؟
+    foreach ([['8.32', 'bsl_orders_list'], ['8.32', 'bsl_chats_list'],
+              ['8.32', 'bsl_notify_selected'], ['8.33', 'queue_watchdog'],
+              ['8.34', 'retire_run']] as [$v, $ep]) {
+        $add($v, 'اندپوینت ?' . $ep, strpos($selfSrc, "'" . $ep . "'") !== false);
+    }
+
+    // ۴) بررسی منطقی محافظ ایمنی — واقعاً اجرا می‌شود، نه فقط وجود دارد
+    if (function_exists('retireGuard')) {
+        $cfg  = ['retire_max_pct' => 30, 'retire_max_count' => 50];
+        $gZero = retireGuard(5, 0, $cfg);      // استخراج خالی → باید جلوگیری کند
+        $gBig  = retireGuard(60, 100, $cfg);   // تعداد زیاد → باید جلوگیری کند
+        $gOk   = retireGuard(5, 100, $cfg);    // کم و طبیعی → باید اجازه دهد
+        $add('8.34', 'محافظ: استخراج خالی را رد می‌کند', !empty($gZero['blocked']));
+        $add('8.34', 'محافظ: حذف انبوه را رد می‌کند',    !empty($gBig['blocked']));
+        $add('8.34', 'محافظ: حذف کم را اجازه می‌دهد',    !empty($gOk['allow']));
+    }
+
+    // ۵) تنظیمات فعلی — برای اینکه بدانید چه چیزی روشن است
+    $cnS = loadConnections();
+    $cfgNow = [
+        'نسخهٔ در حال اجرا'   => APP_VERSION,
+        'اقدام بازنشستگی'     => (retireModes()[$cnS['retire_mode'] ?? 'off'] ?? '?'),
+        'نگهبان صف'           => (!isset($cnS['stall_watchdog']) || !empty($cnS['stall_watchdog'])) ? 'فعال' : 'خاموش',
+        'آستانهٔ گیر کردن'    => (int)($cnS['stall_after'] ?? 300) . ' ثانیه',
+        'توکن باسلام'         => trim((string)($cnS['basalam']['token'] ?? '')) !== '' ? 'تنظیم شده' : '— خالی',
+        'پیام‌رسان'           => (!empty($cnS['baleh']['token']) || !empty($cnS['rubika']['token'])) ? 'تنظیم شده' : '— خالی',
+    ];
+
+    $okCount = 0;
+    foreach ($checks as $c) { if ($c['ok']) $okCount++; }
+    $allOk = $okCount === count($checks);
+
+    if ($wantJson) {
+        echo json_encode(['ok' => $allOk, 'version' => APP_VERSION,
+            'passed' => $okCount, 'total' => count($checks),
+            'checks' => $checks, 'config' => $cfgNow], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $esc = fn($s) => htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
+    echo '<!DOCTYPE html><html dir="rtl" lang="fa"><head><meta charset="UTF-8">'
+       . '<meta name="viewport" content="width=device-width,initial-scale=1">'
+       . '<title>خودآزمون v' . APP_VERSION . '</title><style>'
+       . 'body{font-family:Tahoma,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;padding:16px;line-height:1.7}'
+       . '.wrap{max-width:760px;margin:0 auto}h1{font-size:18px;margin:0 0 4px}'
+       . '.big{font-size:34px;font-weight:700;font-family:ui-monospace,monospace}'
+       . '.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}'
+       . 'table{width:100%;border-collapse:collapse;font-size:13px}'
+       . 'td{padding:7px 6px;border-bottom:1px solid #334155}'
+       . '.v{color:#64748b;font-family:ui-monospace,monospace;font-size:11px;white-space:nowrap}'
+       . '.ok{color:#4ade80}.no{color:#f87171}.d{color:#64748b;font-size:11px}'
+       . '.hero{border-radius:12px;padding:16px;text-align:center;margin-bottom:14px}'
+       . '</style></head><body><div class="wrap">';
+    echo '<div class="hero" style="background:' . ($allOk ? '#14532d' : '#7f1d1d')
+       . ';border:1px solid ' . ($allOk ? '#22c55e' : '#ef4444') . '">'
+       . '<div class="big">v' . $esc(APP_VERSION) . '</div>'
+       . '<div style="font-size:14px;margin-top:4px">'
+       . ($allOk ? '✅ همهٔ قابلیت‌ها روی این سرور فعال‌اند' : '⚠️ نصب ناقص است — فایل قدیمی روی سرور مانده')
+       . '</div><div class="d" style="margin-top:4px">' . $okCount . ' از ' . count($checks) . ' بررسی موفق</div></div>';
+
+    if (!$allOk) {
+        echo '<div class="card" style="border-color:#f59e0b">'
+           . '<b style="color:#fbbf24">چه باید کرد؟</b><br>'
+           . 'یعنی فایل روی هاست قدیمی است. با <code>deploy.php</code> نسخهٔ تازه را نصب کنید '
+           . 'و بعد این صفحه را دوباره باز کنید.</div>';
+    }
+
+    echo '<div class="card"><b>وضعیت فعلی</b><table>';
+    foreach ($cfgNow as $k => $v) {
+        echo '<tr><td style="width:45%">' . $esc($k) . '</td><td><b>' . $esc($v) . '</b></td></tr>';
+    }
+    echo '</table></div><div class="card"><b>بررسی قابلیت‌ها</b><table>';
+    foreach ($checks as $c) {
+        echo '<tr><td class="v">v' . $esc($c['ver']) . '</td><td>' . $esc($c['name'])
+           . ($c['detail'] !== '' ? ' <span class="d">' . $esc($c['detail']) . '</span>' : '')
+           . '</td><td style="width:34px;text-align:center" class="' . ($c['ok'] ? 'ok' : 'no') . '">'
+           . ($c['ok'] ? '✓' : '✗') . '</td></tr>';
+    }
+    echo '</table></div>';
+    echo '<div class="d">این صفحه فقط می‌خواند و چیزی را تغییر نمی‌دهد. '
+       . 'برای خروجی ماشینی: <code>?selftest=1&amp;json=1</code></div>';
+    echo '</div></body></html>';
     exit;
 }
 
@@ -9253,6 +9376,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>آستانه (ثانیه):</label><input type="number" id="stallAfter" value="300" min="60" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">بی‌حرکتی بیش از این = گیر کرده</span></div>
 <div class="cact">
 <button class="btn btn-gray" onclick="watchdogCheck()" style="flex:1">🔎 بررسی حالا</button>
+<button class="btn btn-gray" onclick="window.open('?selftest=1','_blank')" style="flex:1">🧾 خودآزمون نصب</button>
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
 </div>
 <div id="watchdogR" style="margin-top:8px"></div>
@@ -11838,6 +11962,13 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.35', t:'خودآزمون نصب — بفهمید چه نسخه‌ای واقعاً روی سرور است', items:[
+    'صفحهٔ ?selftest=1 هر قابلیت را در همان فایلِ در حال اجرا بررسی می‌کند',
+    'اگر نصب ناقص باشد (فایل قدیمی روی هاست مانده باشد) صریح می‌گوید',
+    'محافظ ایمنی بازنشستگی واقعاً اجرا و آزمایش می‌شود، نه فقط وجودش بررسی شود',
+    'خروجی JSON با ?selftest=1&json=1 برای بررسی خودکار',
+    'دکمهٔ «خودآزمون نصب» در تنظیمات اعلان‌ها'
+  ]},
   {v:'8.34', t:'بازنشستگی خودکار محصولات رفته از مبدأ', items:[
     'اگر محصولی در سایت مبدأ ناموجود یا حذف شود، حالا روی ووکامرس و باسلام هم از دسترس خارج می‌شود',
     'چهار حالت: کاری نکن / پیش‌نویس / ناموجود / حذف — پیش‌فرض «کاری نکن» است تا ناخواسته چیزی پاک نشود',
