@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.40';
+const APP_VERSION = '8.41';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -11017,6 +11017,7 @@ function applyProfile(p) {
 
     // Restore saved products from profile
     if (p.products && Array.isArray(p.products) && p.products.length > 0) {
+        resetResultFilter();
         products.clear();
         order = p.productsOrder || p.products.map(e => e[0]);
         p.products.forEach(entry => {
@@ -11514,6 +11515,8 @@ function renderCard(p){
   ${origDiffers ? `<span class="price-orig">${esc(origPrice)}</span>` : ''}
   <div class="price ${price!=='0'?'':'no-price'}">${price!=='0'?esc(price):'؟'}</div>
   ${p.link?`<a class="plink" href="${esc(p.link)}" target="_blank">مشاهده</a>`:''}</div>`;
+  // v8.41: محصول تازه هرگز نباید به‌خاطر فیلترِ اجرای قبلی پنهان شود
+  if(resultFilter!=='all'&&Object.keys(prodStatusMap).length===0)resetResultFilter();
   const _cls='product'+(_st==='new'?' is-new':_st==='changed'?' is-chg':'');
   if(el){el.innerHTML=html;el.className=_cls;el.style.display=matchFilter(_st)?'':'none';}
   else{const d=document.createElement('div');d.className=_cls;d.dataset.k=p.key;d.innerHTML=html;
@@ -12079,6 +12082,7 @@ function loadBackendExtractResults(key){
         const prof=d.profile||{};
         const prods=prof.products||[];
         const prodOrder=prof.productsOrder||[];
+        resetResultFilter();
         products.clear();order=[];
         if(!prodOrder.length)return;
         // Convert products: could be [[key,data],...] or {key:data,...}
@@ -12155,7 +12159,7 @@ function start(useSel=false){
 
   products.clear();order=[];pages=0;details=0;running=true;
   $('vGrid').innerHTML='';$('tBody').innerHTML='';
-  prodStatusMap={};resultFilter='all';updateResultCounts();
+  resetResultFilter();
   log('▶ شروع: '+url,'info');
 
   $('startBtn').classList.add('hidden');$('startManualBtn').classList.add('hidden');$('stopBtn').classList.remove('hidden');
@@ -12330,6 +12334,7 @@ function finishDetailExtraction(){
 // v7.81: Clear results only (keep selectors, URL, profile settings)
 function clearResults(){
   if(!confirm('پاک کردن همه نتایج؟ (تنظیمات و سلکتورها حفظ می‌شوند)')) return;
+  resetResultFilter();
   products.clear();order=[];pages=0;details=0;
   $('vGrid').innerHTML='<div class="empty-state" id="emptyState"><div class="icon">📭</div><p>هنوز محصولی اسکرپ نشده است.</p></div>';
   $('tBody').innerHTML='';$('txtContent').textContent='';
@@ -12345,7 +12350,7 @@ function clearResults(){
 }
 
 function reset(){
-  stop();$('url').value='<?=h(DEFAULT_URL)?>';products.clear();order=[];pages=0;details=0;
+  stop();$('url').value='<?=h(DEFAULT_URL)?>';resetResultFilter();products.clear();order=[];pages=0;details=0;
   $('vGrid').innerHTML='<div class="empty-state" id="emptyState"><div class="icon">📭</div><p>هنوز محصولی اسکرپ نشده است.</p></div>';
   $('tBody').innerHTML='';$('txtContent').textContent='';
   $('logs').innerHTML='<div class="log log-info">ریست شد</div>';
@@ -12435,6 +12440,13 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.41', t:'رفع باگ: شمارنده ۵۰۰ محصول می‌گفت ولی صفحه خالی بود', items:[
+    'باگ نسخهٔ ۸.۴۰: فیلتر نتایج بین اجراها باقی می‌ماند',
+    'اگر روی «جدید» فیلتر می‌کردید و بعد پروفایل دیگری بارگذاری می‌شد، محصولات تازه وضعیتی نداشتند و همه پنهان می‌شدند',
+    'حالا با شروع استخراج، بارگذاری پروفایل، پاک کردن نتایج و بازنشانی، فیلتر هم صفر می‌شود',
+    'دکمه‌های فیلتر هم بصری بازنشانی می‌شوند، نه فقط متغیر داخلی',
+    'محافظ: اگر فیلتری فعال باشد ولی هیچ محصولی وضعیت نداشته باشد، خودکار به «همه» برمی‌گردد تا صفحه هیچ‌وقت خالی نماند'
+  ]},
   {v:'8.40', t:'نشان جدید/آپدیت روی تب نتایج', items:[
     'کنار عنوان هر محصول در تب نتایج، نشان «جدید» یا «آپدیت» نمایش داده می‌شود',
     'نوار فیلتر بالای نتایج: همه / جدید / آپدیت / بدون تغییر با شمارش هرکدام',
@@ -13981,6 +13993,12 @@ function setResultFilter(f){
 }
 
 function applyResultFilter(){
+  // v8.41: اگر فیلتری فعال است ولی هیچ محصولی وضعیت ندارد، یعنی نقشهٔ
+  // وضعیت مربوط به اجرای قبلی بوده. در این حالت به‌جای پنهان کردن همه‌چیز
+  // خودکار به «همه» برمی‌گردیم — کاربر نباید با صفحهٔ خالی روبه‌رو شود.
+  if(resultFilter!=='all'&&Object.keys(prodStatusMap).length===0){
+    resetResultFilter();
+  }
   document.querySelectorAll('#vGrid .product').forEach(el=>{
     const st=prodStatusMap[el.dataset.k]||'';
     el.style.display=matchFilter(st)?'':'none';
@@ -13995,6 +14013,23 @@ function matchFilter(st){
   if(resultFilter==='all')return true;
   if(resultFilter==='unchanged')return st==='';
   return st===resultFilter;
+}
+
+/**
+ * v8.41: صفر کردن وضعیت و فیلتر نتایج.
+ *
+ * باگ نسخهٔ ۸.۴۰: فیلتر یک متغیر سراسری بود و بین اجراها باقی می‌ماند.
+ * اگر کاربر روی «جدید» فیلتر می‌کرد و بعد پروفایل دیگری بارگذاری می‌شد،
+ * محصولات تازه هیچ وضعیتی نداشتند و همه با display:none پنهان می‌شدند —
+ * شمارنده «۵۰۰ محصول» می‌گفت ولی صفحه تقریباً خالی بود.
+ */
+function resetResultFilter(){
+  prodStatusMap={};
+  resultFilter='all';
+  document.querySelectorAll('#resultFilterBar .rf-btn').forEach(b=>{
+    b.classList.toggle('on',b.dataset.f==='all');
+  });
+  updateResultCounts();
 }
 
 /**
