@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.42';
+const APP_VERSION = '8.43';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1526,8 +1526,14 @@ $profiles[$key] = [
 'products' => $productsData,
 'productsOrder' => $productsOrder,
 'syncConfig' => $syncConfig,
-'bslCategoryId' => (int)($_POST['bslCategoryId'] ?? 0),
-'bslFallbackCatIds' => array_values(array_filter(array_map('intval', json_decode($_POST['bslFallbackCatIds'] ?? '[]', true) ?: []), function($v){return $v>0;})),
+// v8.43: اگر این فیلدها در درخواست نباشند، مقدار قبلی حفظ شود.
+// قبلاً هر ذخیره‌ای که آن‌ها را نمی‌فرستاد، دستهٔ پروفایل را صفر می‌کرد.
+'bslCategoryId' => array_key_exists('bslCategoryId', $_POST)
+    ? (int)$_POST['bslCategoryId']
+    : (int)($profiles[$key]['bslCategoryId'] ?? 0),
+'bslFallbackCatIds' => array_key_exists('bslFallbackCatIds', $_POST)
+    ? array_values(array_filter(array_map('intval', json_decode((string)$_POST['bslFallbackCatIds'], true) ?: []), function($v){return $v>0;}))
+    : (array)($profiles[$key]['bslFallbackCatIds'] ?? []),
 'updatedAt' => time()
 ];
 if (saveProfiles($profiles)) {
@@ -10612,7 +10618,7 @@ let bslProfileFallbackCats=[];
 let bslProfileFallbackSelectedCatId=0;
 function addBslProfileFallbackCat(){const catId=bslProfileFallbackSelectedCatId;if(catId<=0||bslProfileFallbackCats.includes(catId)){showToast('ابتدا یک دسته انتخاب کنید',1);return;}bslProfileFallbackCats.push(catId);bslProfileFallbackSelectedCatId=0;$('bslProfileFallbackCatSearch').value='';renderBslProfileFallbackCats(bslProfileFallbackCats);scheduleSave();}
 function removeBslProfileFallbackCat(idx){bslProfileFallbackCats.splice(idx,1);renderBslProfileFallbackCats(bslProfileFallbackCats);scheduleSave();}
-function renderBslProfileFallbackCats(ids){bslProfileFallbackCats=ids;const list=$('bslProfileFallbackList');if(!list)return;list.innerHTML='';ids.forEach((catId,idx)=>{const catName=bslCatNameByIdJS(catId);const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:6px;padding:6px 10px;background:#1e293b;border-radius:6px;border:1px solid #475569';row.innerHTML='<span style="flex:1;color:#e2e8f0;font-size:12px">'+esc(catName||'دسته')+' <span style="color:#94a3b8">(#'+catId+')</span></span><button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="removeBslProfileFallbackCat('+idx+')">✕</button>';list.appendChild(row);});}
+function renderBslProfileFallbackCats(ids){bslProfileFallbackCats=Array.isArray(ids)?ids:[];const list=$('bslProfileFallbackList');if(!list)return;/* v8.43: اگر دسته‌ها هنوز نرسیده‌اند، بعد از رسیدنشان دوباره رسم کن تا نام‌ها ظاهر شوند */if(bslProfileFallbackCats.length>0&&(!bslAllCats||bslAllCats.length===0)){if(!window.__fbRetry){window.__fbRetry=1;setTimeout(function(){window.__fbRetry=0;if(bslAllCats&&bslAllCats.length>0)renderBslProfileFallbackCats(bslProfileFallbackCats);},2500);}}ids=bslProfileFallbackCats;list.innerHTML='';ids.forEach((catId,idx)=>{const catName=bslCatNameByIdJS(catId);const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:6px;padding:6px 10px;background:#1e293b;border-radius:6px;border:1px solid #475569';row.innerHTML='<span style="flex:1;color:#e2e8f0;font-size:12px">'+esc(catName||'دسته')+' <span style="color:#94a3b8">(#'+catId+')</span></span><button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="removeBslProfileFallbackCat('+idx+')">✕</button>';list.appendChild(row);});}
 function initBslProfileFallbackCatSearch(){const si=$('bslProfileFallbackCatSearch');const dl=$('bslProfileFallbackCatDropList');if(!si||!dl)return;si.onfocus=function(){if(bslAllCats.length>0){dl.style.display='block';renderBslProfileFallbackCatDropList(bslAllCats,'');}};si.onblur=function(){setTimeout(()=>{dl.style.display='none';},200);};si.oninput=function(){const q=si.value.toLowerCase().trim();renderBslProfileFallbackCatDropList(bslAllCats,q);};}
 function renderBslProfileFallbackCatDropList(cats,q){const dl=$('bslProfileFallbackCatDropList');if(!dl)return;dl.innerHTML='';const filtered=cats.filter(c=>!q||c.name.toLowerCase().includes(q)).slice(0,100);if(filtered.length===0){dl.innerHTML='<div style="padding:8px;color:#64748b;font-size:11px;text-align:center">دسته‌ای یافت نشد</div>';return;}filtered.forEach(c=>{const d=document.createElement('div');d.style.cssText='padding:6px 10px;cursor:pointer;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b';d.textContent=c.name+' ('+c.id+')';d.onmousedown=function(){bslProfileFallbackSelectedCatId=c.id;$('bslProfileFallbackCatSearch').value=c.name;dl.style.display='none';};dl.appendChild(d);});}
 function bslCatNameByIdJS(catId){if(!bslAllCats||bslAllCats.length===0)return'';const cat=bslAllCats.find(c=>c.id===catId);return cat?cat.name:'';}
@@ -10633,7 +10639,7 @@ function testBslVendor(idx){const v=bslExtraVendors[idx];if(!v||!v.token){showTo
 function renderBslVendors(){const list=$('bslVendorsList');if(!list)return;list.innerHTML='';if(bslExtraVendors.length===0){list.innerHTML='<div style="color:#64748b;font-size:11px;text-align:center;padding:8px">غرفه اضافی وجود ندارد</div>';return;}bslExtraVendors.forEach((v,idx)=>{const card=document.createElement('div');card.style.cssText='background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px';const info=v.shop_name?'<div style="color:#22d3ee;font-size:11px;margin-bottom:4px">'+esc(v.shop_name)+' (#'+v.vendor_id+')</div>':'';const nameVal=v.name||'';card.innerHTML='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-size:11px;color:#fbbf24;font-weight:700">غرفه '+(idx+1)+'</span><button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="removeBslVendor('+idx+')">✕</button></div>'+info+'<div style="display:flex;gap:6px;margin-bottom:6px"><input type="text" id="bslVName_'+idx+'" value="'+esc(nameVal)+'" placeholder="نام" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px;direction:rtl" oninput="bslExtraVendors['+idx+'].name=this.value"></div><div style="display:flex;gap:6px;margin-bottom:6px"><input type="password" id="bslVToken_'+idx+'" value="'+esc(v.token||'')+'" placeholder="Token" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].token=this.value"></div><div style="display:flex;gap:6px"><input type="number" id="bslVVid_'+idx+'" value="'+(v.vendor_id||'')+'" placeholder="شماره غرفه" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].vendor_id=parseInt(this.value)||0"><button class="btn btn-cyan" id="bslVTestBtn_'+idx+'" style="font-size:10px;padding:4px 8px" onclick="testBslVendor('+idx+')">🔗 تست</button></div>';list.appendChild(card);});}
 // v8.17: Per-profile BaSalam category dropdown
 let bslProfileSelectedCatId=0;
-function renderBslProfileCatDropdown(cats,selectedId){const si=$('bslProfileCatSearch');const list=$('bslProfileCatList');if(!si||!list)return;bslProfileSelectedCatId=selectedId;$('bslProfileCatId').value=String(selectedId);if(selectedId>0){const c=cats.find(x=>x.id===selectedId);if(c)si.value=c.name;}si.onfocus=function(){list.style.display='block';};si.onblur=function(){setTimeout(()=>{list.style.display='none';},200);};si.oninput=function(){const q=si.value.toLowerCase().trim();renderBslProfileCatList(cats,q);};renderBslProfileCatList(cats,'');}
+function renderBslProfileCatDropdown(cats,selectedId){const si=$('bslProfileCatSearch');const list=$('bslProfileCatList');if(!si||!list)return;/* v8.43: اگر بدون شناسه صدا زده شود (مثلاً دکمهٔ 🔄)، انتخاب فعلی نباید پاک شود */if(selectedId===undefined||selectedId===null)selectedId=bslProfileSelectedCatId||parseInt($('bslProfileCatId').value)||0;bslProfileSelectedCatId=selectedId||0;$('bslProfileCatId').value=String(bslProfileSelectedCatId);if(selectedId>0){const c=cats.find(x=>x.id===selectedId);if(c)si.value=c.name;}si.onfocus=function(){list.style.display='block';};si.onblur=function(){setTimeout(()=>{list.style.display='none';},200);};si.oninput=function(){const q=si.value.toLowerCase().trim();renderBslProfileCatList(cats,q);};renderBslProfileCatList(cats,'');}
 function renderBslProfileCatList(cats,q){const list=$('bslProfileCatList');if(!list)return;list.innerHTML='';cats.filter(c=>!q||c.name.toLowerCase().includes(q)).slice(0,100).forEach(c=>{const d=document.createElement('div');d.style.cssText='padding:6px 10px;cursor:pointer;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b';d.textContent=c.name+' ('+c.id+')';d.onmousedown=function(){bslProfileSelectedCatId=c.id;$('bslProfileCatId').value=String(c.id);$('bslProfileCatSearch').value=c.name;list.style.display='none';scheduleSave();};list.appendChild(d);});}
 function bslSelectProfileCat(catId){bslProfileSelectedCatId=catId;$('bslProfileCatId').value=String(catId);if(bslAllCats.length>0){const c=bslAllCats.find(x=>x.id===catId);if(c)$('bslProfileCatSearch').value=c.name;}scheduleSave();}
 
@@ -11068,7 +11074,24 @@ function applyProfile(p) {
     if(p.bslCategoryId && p.bslCategoryId>0){
         bslProfileSelectedCatId=p.bslCategoryId;
         if($('bslProfileCatId'))$('bslProfileCatId').value=String(p.bslCategoryId);
-        if(bslAllCats.length>0){renderBslProfileCatDropdown(bslAllCats,p.bslCategoryId);}
+        if(bslAllCats.length>0){
+            renderBslProfileCatDropdown(bslAllCats,p.bslCategoryId);
+        }else{
+            // v8.43: دسته‌ها هنوز نرسیده‌اند. قبلاً هیچ کاری نمی‌شد و کادر
+            // خالی می‌ماند، بعد ذخیرهٔ خودکار همان خالی را ذخیره می‌کرد.
+            // حالا شناسه را نشان می‌دهیم و پس از رسیدن دسته‌ها نام را می‌گذاریم.
+            if($('bslProfileCatSearch'))$('bslProfileCatSearch').value='#'+p.bslCategoryId;
+            const _wantCat=p.bslCategoryId;
+            loadBslCats();
+            let _tries=0;
+            const _t=setInterval(()=>{
+                _tries++;
+                if(bslAllCats&&bslAllCats.length>0){
+                    clearInterval(_t);
+                    renderBslProfileCatDropdown(bslAllCats,_wantCat);
+                }else if(_tries>20){clearInterval(_t);}
+            },400);
+        }
     }else{
         bslProfileSelectedCatId=0;
         if($('bslProfileCatId'))$('bslProfileCatId').value='0';
@@ -11107,9 +11130,15 @@ function collectProfileData() {
         products: prodsArr,
         productsOrder: [...order],
         // v8.06: Per-profile BaSalam category
-        bslCategoryId: bslProfileSelectedCatId||bslSelectedCatId||0,
+        // v8.43: اگر متغیرها هنوز مقدار نگرفته‌اند، از فیلد مخفی بخوان تا
+        // ذخیرهٔ خودکار انتخاب قبلی را با صفر جایگزین نکند.
+        bslCategoryId: bslProfileSelectedCatId
+            || parseInt(($('bslProfileCatId')||{}).value||'0')
+            || bslSelectedCatId
+            || parseInt(($('bsCat')||{}).value||'0')
+            || 0,
         // v8.17: Per-profile fallback categories
-        bslFallbackCatIds: bslProfileFallbackCats||[]
+        bslFallbackCatIds: Array.isArray(bslProfileFallbackCats)?bslProfileFallbackCats:[]
     };
 }
 
@@ -12463,6 +12492,14 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.43', t:'رفع باگ: دستهٔ باسلام پروفایل ذخیره/بازیابی نمی‌شد', items:[
+    'هر ذخیره‌ای که فیلد دسته را نمی‌فرستاد، دستهٔ پروفایل را صفر می‌کرد — حالا مقدار قبلی حفظ می‌شود',
+    'دکمهٔ 🔄 کنار دستهٔ پروفایل، انتخاب فعلی را پاک می‌کرد',
+    'هنگام بارگذاری پروفایل اگر دسته‌ها هنوز نرسیده بودند، کادر خالی می‌ماند و ذخیرهٔ خودکار همان خالی را ثبت می‌کرد',
+    'حالا تا رسیدن دسته‌ها شناسه نمایش داده می‌شود و بعد نام جایگزین می‌گردد',
+    'نام دسته‌های جایگزین هم پس از بارگذاری دسته‌ها دوباره رسم می‌شود',
+    'خواندن مقدار از فیلد مخفی به‌عنوان پشتیبان، تا انتخاب با صفر جایگزین نشود'
+  ]},
   {v:'8.42', t:'رفع باگ اصلی: فقط یک محصول در تب نتایج دیده می‌شد', items:[
     'علت واقعی: محصولات در پروفایل به شکل [کلید, محصول] ذخیره می‌شوند و خودِ محصول فیلد key ندارد',
     'هنگام بارگذاری پروفایل، p.key برابر undefined می‌شد و همهٔ محصولات روی یک کارت بازنویسی می‌شدند',
