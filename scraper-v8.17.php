@@ -27,7 +27,7 @@ const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.26';
+const APP_VERSION = '8.27';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3733,28 +3733,23 @@ $p=readProgress(EXTRACT_PROGRESS_FILE);
 echo json_encode($p,JSON_UNESCAPED_UNICODE);exit;
 }
 
-if(isset($_GET['action']) && $_GET['action'] === 'backend_extract'){
-set_time_limit(0); ignore_user_abort(true);
+/**
+ * v8.27: هستهٔ مشترک استخراج بک‌اند.
+ * هم دکمهٔ دستی و هم کران‌جاب دقیقاً همین تابع را صدا می‌زنند تا رفتار
+ * یکسان باشد و صف/پیشرفت/گزارش در هر دو حالت ثبت شود. تنها تفاوت،
+ * برچسب trigger است که در ردیف صف ذخیره می‌شود.
+ */
+function runBackendExtract(string $profileKey, string $trigger = 'manual', bool $emitEarlyResponse = false): array {
+@set_time_limit(0); @ignore_user_abort(true);
 @unlink(EXTRACT_PROGRESS_FILE); @unlink(EXTRACT_STOP_FILE);
+
 $startedAt=time();
-$profileKey=trim($_GET['profile_key']??$_POST['profile_key']??'');
 $profiles=loadProfiles();
 
-$profile=null;
-if($profileKey!==''&&isset($profiles[$profileKey])){
-$profile=$profiles[$profileKey];
-}else{
-
-$url=trim($_GET['url']??'');
-if($url!==''&&filter_var($url,FILTER_VALIDATE_URL)){
-$k=profileKey($url);
-if(isset($profiles[$k]))$profile=$profiles[$k];
-}
-}
+$profile=isset($profiles[$profileKey])?$profiles[$profileKey]:null;
 if(!$profile){
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'error'=>'پروفایل یافت نشد','total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['❌ پروفایل یافت نشد'],'total_log_count'=>1]);
-header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(['ok'=>false,'error'=>'پروفایل یافت نشد'],JSON_UNESCAPED_UNICODE);exit;
+return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'error'=>'پروفایل یافت نشد'];
 }
 
 $url=$profile['url']??'';
@@ -3768,22 +3763,26 @@ $prevOrder=$profile['productsOrder']??[];
 
 if(!filter_var($url,FILTER_VALIDATE_URL)){
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'error'=>'URL نامعتبر','total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['❌ URL نامعتبر'],'total_log_count'=>1]);
-echo json_encode(['ok'=>false,'error'=>'URL نامعتبر'],JSON_UNESCAPED_UNICODE);exit;
+return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'error'=>'URL نامعتبر'];
 }
 if(empty($selectors)||empty($selectors['container'])){
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'error'=>'سلکتورها ذخیره نشده — ابتدا با فرانت‌اند استخراج کنید','total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['❌ سلکتورها ذخیره نشده'],'total_log_count'=>1]);
-echo json_encode(['ok'=>false,'error'=>'سلکتورها ذخیره نشده'],JSON_UNESCAPED_UNICODE);exit;
+return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'error'=>'سلکتورها ذخیره نشده'];
 }
 
 $queue=extractReadQueue();
 $queueId='ex_'.$profileKey.'_'.time();
-$queue['entries'][]=['id'=>$queueId,'status'=>'running','profile_key'=>$profileKey,'url'=>$url,'profile_name'=>$profile['name']??$profileKey,'started_at'=>time(),'products_count'=>0,'total'=>0,'current'=>0,'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0];
+$queue['entries'][]=['id'=>$queueId,'status'=>'running','profile_key'=>$profileKey,'url'=>$url,'profile_name'=>$profile['name']??$profileKey,'started_at'=>time(),'products_count'=>0,'total'=>0,'current'=>0,'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,'trigger'=>$trigger];
 extractWriteQueue($queue);
 
 // v8.22: نسخهٔ قبلی را همین ابتدا بخوان تا مقایسه بتواند زنده انجام شود
 $livePrevMap=extractPrevMap($profile);
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>0,'current'=>0,'started_at'=>$startedAt,'queue_id'=>$queueId,'recent_log'=>['⏳ شروع استخراج بک‌اند...'],'total_log_count'=>1,'extracted'=>0,'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,'price_up'=>0,'price_down'=>0,'url'=>$url,'profile_name'=>$profile['name']??$profileKey]);
 
+// v8.27: پاسخ زودهنگام فقط برای درخواست مرورگر معنا دارد تا کاربر منتظر
+// نماند و بقیهٔ کار در پس‌زمینه ادامه یابد. وقتی کران‌جاب این تابع را
+// صدا می‌زند نباید چیزی چاپ شود، وگرنه خروجی JSON دوتکه می‌شود.
+if($emitEarlyResponse){
 while(@ob_get_level())@ob_end_clean();
 $initResp=json_encode(['ok'=>true,'started'=>true,'profile_key'=>$profileKey,'url'=>$url,'max_pages'=>$maxPages],JSON_UNESCAPED_UNICODE);
 header('Content-Type: application/json; charset=UTF-8');
@@ -3792,12 +3791,13 @@ header('Connection: close');
 echo $initResp;
 if(function_exists('fastcgi_finish_request')){fastcgi_finish_request();}
 @ob_flush();@flush();
+}
 
 $allProducts=[];$seenKeys=[];$nextUrl=null;$totalPages=0;
 for($page=1;$page<=$maxPages;$page++){
 if(file_exists(EXTRACT_STOP_FILE)){@unlink(EXTRACT_STOP_FILE);
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'total'=>count($allProducts),'current'=>$page,'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>2,'extracted'=>count($allProducts)]);
-echo json_encode(['ok'=>false,'cancelled'=>true],JSON_UNESCAPED_UNICODE);exit;
+return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'cancelled'=>true];
 }
 if($page===1){$pageUrl=$url;}
 elseif($pagType==='next_selector'&&$nextUrl){$pageUrl=$nextUrl;}
@@ -3857,7 +3857,7 @@ writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>$max
 foreach($needDetail as $key=>$p){
 if(file_exists(EXTRACT_STOP_FILE)){@unlink(EXTRACT_STOP_FILE);
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'extracted'=>count($allProducts),'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>$totalPages+$detailDone+1]);
-echo json_encode(['ok'=>false,'cancelled'=>true],JSON_UNESCAPED_UNICODE);exit;
+return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'cancelled'=>true];
 }
 $detailDone++;
 $dr=fetch_html($p['link'],10);
@@ -3962,8 +3962,21 @@ extractSaveReport($queueId, [
 foreach($queue['entries'] as &$qe){if($qe['id']===$queueId){$qe['status']='done';$qe['products_count']=count($allProducts);$qe['total']=count($allProducts);$qe['current']=count($allProducts);$qe['done_at']=time();$qe['new']=$newCount;$qe['price_changed']=$priceChanged;$qe['removed']=$removedCount;$qe['unchanged']=$unchanged;$qe['price_up']=$priceUp;$qe['price_down']=$priceDown;$qe['has_report']=true;break;}}unset($qe);
 extractWriteQueue($queue);
 
+return ['__early_sent'=>$emitEarlyResponse, 'ok'=>true,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url)];
+}
+
+if(isset($_GET['action']) && $_GET['action'] === 'backend_extract'){
+$profileKey=trim($_GET['profile_key']??$_POST['profile_key']??'');
+if($profileKey===''){
+$u=trim($_GET['url']??'');
+if($u!==''&&filter_var($u,FILTER_VALIDATE_URL))$profileKey=profileKey($u);
+}
+$res=runBackendExtract($profileKey,'manual',true);
+// اگر پاسخ زودهنگام ارسال شده، دیگر چیزی چاپ نمی‌کنیم
+if(empty($res['__early_sent'])){
 header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(['ok'=>true,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url)],JSON_UNESCAPED_UNICODE);
+echo json_encode($res,JSON_UNESCAPED_UNICODE);
+}
 exit;
 }
 
@@ -3999,20 +4012,21 @@ $interval = (int)($syncCfg['interval'] ?? 3600);
 $lastRun = (int)($syncState[$key]['lastRun'] ?? 0);
 if ($interval > 0 && ($now - $lastRun < $interval)) continue;
 
-// v8.22: قبلاً نتیجهٔ اسکرپ مجدد نادیده گرفته می‌شد؛ حالا اگر شکست بخورد
-// محصولات قدیمی دوباره ارسال نمی‌شوند و علت در وضعیت سینک ثبت می‌شود.
+// v8.27: دقیقاً همان استخراجی که دکمهٔ دستی انجام می‌دهد — با همان صف،
+// پیشرفت زنده و گزارش — فقط با برچسب «auto» تا در صف قابل تشخیص باشد.
 $cronBefore = count(extractPrevMap($profile));
-$cronScraped = cronRescrapeProfile($profile, $key, $profiles);
-if ($cronScraped === null) {
-    $why = empty($profile['selectors']['container'])
-        ? 'سلکتور کانتینر تنظیم نشده'
-        : 'آدرس نامعتبر یا صفحه در دسترس نیست';
+$exRes = runBackendExtract($key, 'auto');
+if (empty($exRes['ok'])) {
+    $why = $exRes['error'] ?? 'خطای نامشخص';
     $results[] = ['profile' => $key, 'ok' => false, 'error' => 'اسکرپ مجدد ناموفق: ' . $why];
     $syncState[$key] = ['lastRun' => $now, 'status' => 'scrape_failed', 'error' => $why];
     saveSyncState($syncState);
     continue;
 }
-$cronAfter = count($cronScraped);
+$cronAfter = (int)($exRes['extracted'] ?? 0);
+// پروفایل داخل تابع ذخیره شده، پس نسخهٔ به‌روز را دوباره بخوان
+$profiles = loadProfiles();
+$profile  = $profiles[$key] ?? $profile;
 // محافظ: اگر سایت موقتاً خالی برگرداند، کل کاتالوگ را «حذف‌شده» نفرست
 if ($cronBefore > 0 && $cronAfter === 0) {
     $results[] = ['profile' => $key, 'ok' => false, 'error' => 'صفحه هیچ محصولی برنگرداند — برای ایمنی ارسال لغو شد'];
@@ -4131,11 +4145,18 @@ $target = $syncCfg['target'] ?? 'woo';
 if ($interval > 0 && ($now - $lastRun < $interval)) { $pResult['status'] = 'not_due'; $pResult['remaining'] = $interval - ($now - $lastRun); $results['profiles'][] = $pResult; continue; }
 $pResult['status'] = 'syncing'; $pResult['target'] = $target;
 
-// v8.19: Re-scrape using manual selectors before sending, unless selectors are empty
-$extracted = cronRescrapeProfile($profile, $key, $profiles);
-if ($extracted !== null) {
-$pResult['extracted'] = count($extracted);
-$pResult['extract_method'] = 'manual_selectors';
+// v8.27: همان هستهٔ استخراج دکمهٔ دستی، با برچسب auto
+$exRes = runBackendExtract($key, 'auto');
+if (!empty($exRes['ok'])) {
+$pResult['extracted'] = (int)($exRes['extracted'] ?? 0);
+$pResult['extract_method'] = 'backend_extract';
+$pResult['new'] = (int)($exRes['new'] ?? 0);
+$pResult['price_changed'] = (int)($exRes['price_changed'] ?? 0);
+$pResult['removed'] = (int)($exRes['removed'] ?? 0);
+$profiles = loadProfiles();
+$profile  = $profiles[$key] ?? $profile;
+} else {
+$pResult['extract_error'] = $exRes['error'] ?? 'خطای نامشخص';
 }
 
 // Now get products from profile (either freshly scraped or previously saved)
@@ -4191,78 +4212,6 @@ echo json_encode($results, JSON_UNESCAPED_UNICODE); exit;
 
 // v8.19: Re-scrape a profile using its manual selectors. Returns updated products array.
 // If selectors are empty, returns null (caller should use saved products).
-function cronRescrapeProfile(array &$profile, string $key, array &$profiles): ?array {
-$selectors = $profile['selectors'] ?? [];
-$detailSelectors = extractNormalizeDetailSelectors($profile['detailSelectors'] ?? []);
-if (empty($selectors['container'])) return null;
-$url = $profile['url'] ?? '';
-$maxPages = max(1, min(100, (int)($profile['pages'] ?? 10)));
-$pagType = $profile['pagType'] ?? 'query_page';
-$pagVal = $profile['pagVal'] ?? '';
-if (!filter_var($url, FILTER_VALIDATE_URL)) return null;
-$allProducts = []; $seenKeys = []; $nextUrl = null;
-for ($page = 1; $page <= $maxPages; $page++) {
-if ($page === 1) { $pageUrl = $url; }
-elseif ($pagType === 'next_selector' && $nextUrl) { $pageUrl = $nextUrl; }
-elseif ($pagType === 'next_selector' && !$nextUrl) { break; }
-else { $pageUrl = build_page_url_custom($url, $url, $page, $pagType, $pagVal); }
-// v8.22: یک خطای گذرای شبکه نباید کل سینک را خراب کند
-$res = fetch_html($pageUrl, 20);
-if (!$res['ok']) {
-    usleep(1200000);
-    $res = fetch_html($pageUrl, 25);   // یک بار تلاش مجدد
-}
-if (!$res['ok']) { if ($page === 1) break; else continue; }
-$pageProducts = parse_with_selectors($res['html'], $res['url'], $selectors);
-foreach ($pageProducts as $pk => $pp) { if (!isset($seenKeys[$pk])) { $seenKeys[$pk] = 1; $allProducts[$pk] = $pp; } }
-if ($pagType === 'next_selector' && !empty($pagVal)) {
-[$dom, $xp] = load_dom($res['html']);
-$xpath = cssToXpath($pagVal);
-$nodes = @$xp->query($xpath);
-if ($nodes && $nodes->length && $nodes->item(0) instanceof DOMElement) {
-$href = $nodes->item(0)->getAttribute('href');
-if ($href && $href !== '#' && !preg_match('~^(javascript:|data:)~i', $href)) { $nextUrl = make_absolute_url($href, $res['url']); } else { $nextUrl = null; }
-} else { $nextUrl = null; }
-}
-if ($page > 1 && count($pageProducts) === 0) break;
-usleep(500000);
-}
-// Phase 2: Detail extraction
-$needDetail = [];
-foreach ($allProducts as $dk => $dp) { if ((empty($dp['image']) || empty($dp['price'])) && !empty($dp['link'])) { $needDetail[$dk] = $dp; } }
-if (!empty($needDetail) && !empty($detailSelectors)) {
-foreach ($needDetail as $dk => $dp) {
-$dr = fetch_html($dp['link'], 10);
-if ($dr['ok']) {
-[$dom2, $xp2] = load_dom($dr['html']);
-foreach ($detailSelectors as $field => $selStr) {
-if (empty($selStr)) continue;
-$xPath = cssToXpath($selStr);
-$ns = @$xp2->query($xPath);
-if ($ns && $ns->length) {
-$val = '';
-if ($field === 'image') { $el = $ns->item(0); $src = $el->getAttribute('src') ?? $el->getAttribute('data-src') ?? $el->getAttribute('data-lazy-src') ?? ''; if ($src) $val = make_absolute_url($src, $dr['url']); if (!$val) { $content = $el->getAttribute('content'); if ($content && url_is_image($content)) $val = make_absolute_url($content, $dr['url']); } }
-elseif ($field === 'price') { $val = extractPrice($ns->item(0)->textContent); }
-else { $val = trim($ns->item(0)->textContent); }
-if ($val) $allProducts[$dk][$field] = $val;
-}
-}
-if (empty($allProducts[$dk]['image'])) { $ogImg = @$xp2->query("//meta[@property='og:image']/@content"); if ($ogImg && $ogImg->length) { $imgUrl = $ogImg->item(0)->nodeValue; if ($imgUrl && url_is_image($imgUrl)) $allProducts[$dk]['image'] = make_absolute_url($imgUrl, $dr['url']); } }
-}
-usleep(200000);
-}
-}
-// Save updated products to profile
-$productsData = []; $productsOrder = array_keys($allProducts);
-foreach ($allProducts as $pk => $pp) { $productsData[] = [$pk, $pp]; }
-$profile['products'] = $productsData;
-$profile['productsOrder'] = $productsOrder;
-$profile['updatedAt'] = time();
-$profiles[$key] = $profile;
-saveProfiles($profiles);
-return $allProducts;
-}
-
 function bslCheckNotifications(array $cn): array {
 $result = []; $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
 $balehToken = $cn['baleh']['token'] ?? ''; $balehChatId = $cn['baleh']['chat_id'] ?? '';
@@ -10337,6 +10286,12 @@ function renderExtractQueue(entries, progress){
         html+='<div style="display:flex;justify-content:space-between;align-items:center">';
         html+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
         html+='<span style="color:'+statusColors[st]+';font-weight:700;font-size:12px">'+statusLabels[st]+'</span>';
+        // v8.27: منشأ اجرا — دستی یا خودکار (کران‌جاب)
+        if(e.trigger==='auto'){
+            html+='<span style="color:#22d3ee;font-size:10px;background:#0e749020;padding:1px 6px;border-radius:4px">⏱ خودکار</span>';
+        }else if(e.trigger==='manual'){
+            html+='<span style="color:#a78bfa;font-size:10px;background:#4c1d9520;padding:1px 6px;border-radius:4px">👤 دستی</span>';
+        }
         if(e.profile_name)html+='<span style="color:#94a3b8;font-size:10px">'+esc(e.profile_name)+'</span>';
         if(products>0)html+='<span style="color:#e2e8f0;font-weight:600;font-size:12px">'+toFa(products)+' محصول</span>';
         html+='</div>';
