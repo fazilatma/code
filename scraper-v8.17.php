@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.41';
+const APP_VERSION = '8.42';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -11022,6 +11022,7 @@ function applyProfile(p) {
         order = p.productsOrder || p.products.map(e => e[0]);
         p.products.forEach(entry => {
             if (Array.isArray(entry) && entry.length === 2) {
+                if(entry[1]&&typeof entry[1]==='object'&&!entry[1].key)entry[1].key=entry[0];
                 products.set(entry[0], entry[1]);
             }
         });
@@ -11497,8 +11498,26 @@ function update(){
 function scrollElBottom(el){if(!el)return;try{if(el.scrollHeight>el.clientHeight&&el.scrollHeight>0){const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<80;if(nearBottom)el.scrollTop=el.scrollHeight;}}catch(e){}}
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
 
-function renderCard(p){
-  const el=document.querySelector(`[data-k="${p.key}"]`);
+/**
+ * v8.42: کلید محصول را مطمئن می‌کند.
+ *
+ * محصولات ذخیره‌شده در پروفایل به شکل [کلید, محصول] نگه داشته می‌شوند،
+ * یعنی خودِ شیء محصول فیلد key ندارد. هنگام بارگذاری پروفایل، p.key
+ * برابر undefined می‌شد و چون جست‌وجو با [data-k="undefined"] انجام
+ * می‌شد، همهٔ محصولات روی یک کارت بازنویسی می‌شدند و فقط یکی دیده می‌شد.
+ */
+function ensureKey(p,fallback){
+  if(!p||typeof p!=='object')return '';
+  if(p.key===undefined||p.key===null||p.key===''){
+    if(fallback!==undefined&&fallback!==null&&fallback!=='')p.key=fallback;
+  }
+  return p.key||'';
+}
+
+function renderCard(p,k){
+  const _k=ensureKey(p,k);
+  if(!_k)return;                       // بدون کلید نمی‌توان کارت ساخت
+  const el=$('vGrid').querySelector(`[data-k="${_k}"]`);
   let title = getFinalTitle(p.title);
   let price = getFinalPrice(p.price);
   let origPrice = getOriginalPrice(p.price);
@@ -11519,12 +11538,14 @@ function renderCard(p){
   if(resultFilter!=='all'&&Object.keys(prodStatusMap).length===0)resetResultFilter();
   const _cls='product'+(_st==='new'?' is-new':_st==='changed'?' is-chg':'');
   if(el){el.innerHTML=html;el.className=_cls;el.style.display=matchFilter(_st)?'':'none';}
-  else{const d=document.createElement('div');d.className=_cls;d.dataset.k=p.key;d.innerHTML=html;
+  else{const d=document.createElement('div');d.className=_cls;d.dataset.k=_k;d.innerHTML=html;
        d.style.display=matchFilter(_st)?'':'none';$('vGrid').appendChild(d);}
 }
 
-function renderRow(p,i){
-  const el=$('tBody').querySelector(`[data-k="${p.key}"]`);
+function renderRow(p,i,k){
+  const _k=ensureKey(p,k);
+  if(!_k)return;
+  const el=$('tBody').querySelector(`[data-k="${_k}"]`);
   let title = getFinalTitle(p.title);
   let price = getFinalPrice(p.price);
   let origPrice = getOriginalPrice(p.price);
@@ -11545,7 +11566,7 @@ function renderRow(p,i){
   const html=`<td>${toFa(i)}</td><td>${statusBadge(_st)}${esc(title)}</td><td class="td-orig">${esc(origPrice)}</td><td style="direction:ltr;text-align:right">${esc(price)}</td>
   <td>${p.link?`<a href="${esc(p.link)}" target="_blank">لینک</a>`:'-'}</td><td style="direction:ltr;text-align:left;font-size:9px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.image||'')}">${esc(p.image||'-')}</td>${detailTds}${customTd}`;
   if(el){el.innerHTML=html;el.style.display=matchFilter(_st)?'':'none';}
-  else{const tr=document.createElement('tr');tr.dataset.k=p.key;tr.innerHTML=html;
+  else{const tr=document.createElement('tr');tr.dataset.k=_k;tr.innerHTML=html;
        tr.style.display=matchFilter(_st)?'':'none';$('tBody').appendChild(tr);}
 }
 
@@ -11571,8 +11592,8 @@ function refreshViews() {
         $('vGrid').innerHTML = '<div class="empty-state" id="emptyState"><div class="icon">📭</div><p>هنوز محصولی اسکرپ نشده است.</p></div>';
     } else {
         order.forEach((k, i) => {
-            renderCard(products.get(k));
-            renderRow(products.get(k), i + 1);
+            renderCard(products.get(k),k);
+            renderRow(products.get(k), i + 1, k);
         });
     }
     if ($('txtContent')) $('txtContent').textContent = genTxt();
@@ -12103,10 +12124,12 @@ function loadBackendExtractResults(key){
         prodOrder.forEach(k=>{
             const p=prodMap[k];
             if(p){
+                // v8.42: کلید را روی خود شیء بنشان — پروفایل آن را جدا نگه می‌دارد
+                if(typeof p==='object'&&!p.key)p.key=k;
                 products.set(k,p);
                 order.push(k);
-                renderCard(p);
-                renderRow(p,order.length);
+                renderCard(p,k);
+                renderRow(p,order.length,k);
             }
         });
         update();
@@ -12179,7 +12202,7 @@ function start(useSel=false){
   es.addEventListener('page_done',e=>{const d=JSON.parse(e.data);log(`✓ صفحه ${d.page}: +${d.new} جدید، کل: ${d.total}`,'ok');});
   es.addEventListener('missing_start',e=>{const d=JSON.parse(e.data);$('status').textContent=`دریافت جزئیات ${toFa(d.current)}/${toFa(d.total)}`;$('progressBar').style.width=(d.current/d.total*100)+'%';});
   es.addEventListener('fetch_info',e=>{const d=JSON.parse(e.data);if(d.msg)$('status').textContent=d.msg;log(d.msg,'info');});
-  es.addEventListener('missing_done',e=>{const d=JSON.parse(e.data);details++;const p=products.get(d.key);if(p){if(d.image)p.image=d.image;if(d.price)p.price=d.price;if(d.image_cached){p._imgCached=true;p._imgValid=true;}else if(d.image_valid){p._imgValid=true;}products.set(d.key,p);renderCard(p);renderRow(p,order.indexOf(d.key)+1);}update();});
+  es.addEventListener('missing_done',e=>{const d=JSON.parse(e.data);details++;const p=products.get(d.key);if(p){if(d.image)p.image=d.image;if(d.price)p.price=d.price;if(d.image_cached){p._imgCached=true;p._imgValid=true;}else if(d.image_valid){p._imgValid=true;}products.set(d.key,p);renderCard(p,d.key);renderRow(p,order.indexOf(d.key)+1,d.key);}update();});
   es.addEventListener('complete',e=>{
       const d=JSON.parse(e.data);
       log(`✅ تکمیل: ${d.total} محصول`,'ok');
@@ -12299,8 +12322,8 @@ function parseSSEEvent(ev) {
                 });
                 products.set(d.key, p);
                 if (added > 0) {
-                    renderCard(p);
-                    renderRow(p, order.indexOf(d.key) + 1);
+                    renderCard(p, d.key);
+                    renderRow(p, order.indexOf(d.key) + 1, d.key);
                 }
             }
         } else if (type === 'detail_complete') {
@@ -12440,6 +12463,14 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.42', t:'رفع باگ اصلی: فقط یک محصول در تب نتایج دیده می‌شد', items:[
+    'علت واقعی: محصولات در پروفایل به شکل [کلید, محصول] ذخیره می‌شوند و خودِ محصول فیلد key ندارد',
+    'هنگام بارگذاری پروفایل، p.key برابر undefined می‌شد و همهٔ محصولات روی یک کارت بازنویسی می‌شدند',
+    'حالا کلید به‌صورت صریح به renderCard و renderRow داده می‌شود',
+    'هنگام بارگذاری، کلید روی خود شیء محصول هم نشانده می‌شود',
+    'جست‌وجوی کارت به داخل vGrid محدود شد (قبلاً کل صفحه را می‌گشت)',
+    'محصول بدون کلید نادیده گرفته می‌شود، نه اینکه روی کارت قبلی بنویسد'
+  ]},
   {v:'8.41', t:'رفع باگ: شمارنده ۵۰۰ محصول می‌گفت ولی صفحه خالی بود', items:[
     'باگ نسخهٔ ۸.۴۰: فیلتر نتایج بین اجراها باقی می‌ماند',
     'اگر روی «جدید» فیلتر می‌کردید و بعد پروفایل دیگری بارگذاری می‌شد، محصولات تازه وضعیتی نداشتند و همه پنهان می‌شدند',
@@ -15109,7 +15140,7 @@ function fetchMissingImages(){
                         }
                         if(p.d.image&&!pr.image){pr.image=p.d.image;pr._imgValid=true;pr._imgCached=true;changed=true;}
                         if(p.d.price&&!pr.price){pr.price=p.d.price;changed=true;}
-                        if(changed){found++;products.set(p.d.key,pr);renderCard(pr);renderRow(pr,order.indexOf(p.d.key)+1);}
+                        if(changed){found++;products.set(p.d.key,pr);renderCard(pr,p.d.key);renderRow(pr,order.indexOf(p.d.key)+1,p.d.key);}
                     }
                 }else if(p.t==='fetch_info'){
                     $('detailStatus').textContent=esc(p.d.msg);
@@ -15183,10 +15214,10 @@ function finFM(done,found,failed,total){
   // v8.06: Don't call observeImages() on every renderCard — too expensive with 600+ products
   // Instead, observe only the new image element
   const _renderCard=renderCard;
-  renderCard=function(p){
-    _renderCard(p);
+  renderCard=function(p,k){
+    _renderCard(p,k);
     // Find the new image in the just-created/updated element
-    const el=document.querySelector(`.product[data-k="${p.key}"]`);
+    const el=document.querySelector(`.product[data-k="${(p&&p.key)||k||''}"]`);
     if(el){const img=el.querySelector('img.lazy-img[data-src]');if(img)observeSingle(img);}
   };
   const _refreshViews=refreshViews;
