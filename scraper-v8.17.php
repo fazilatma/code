@@ -27,7 +27,7 @@ const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.25';
+const APP_VERSION = '8.26';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -132,6 +132,17 @@ function extractSourcePrice(array $p): string {
 }
 
 /**
+ * v8.26: آیا این رشته یک قیمت واقعی است؟
+ *
+ * سایت‌ها برای کالای ناموجود یا «تماس بگیرید» یا رشتهٔ خالی می‌گذارند یا
+ * متنی بدون عدد. عدد صفر هم قیمت معتبر نیست. چنین محصولی برای فروش
+ * آماده نیست و باید در دستهٔ ناموجود بیفتد، نه «بدون تغییر».
+ */
+function extractHasPrice($price): bool {
+    return extractPriceNum($price) > 0;
+}
+
+/**
  * v8.22: مقایسهٔ زندهٔ محصولات فعلی با نسخهٔ قبلی.
  * برای هر تغییر قیمت مشخص می‌کند گران شده یا ارزان.
  * لیست‌ها برای جلوگیری از بزرگ شدن فایل progress محدود می‌شوند.
@@ -139,11 +150,25 @@ function extractSourcePrice(array $p): string {
 function extractLiveCompare(array $current, array $prevMap, int $limit = 300): array {
     $new = []; $changed = []; $removed = [];
     $nNew = 0; $nChanged = 0; $nUnchanged = 0; $nUp = 0; $nDown = 0;
+    $nGone = 0;   // v8.26: محصولاتی که هنوز در سایت هستند ولی قیمت ندارند
 
     foreach ($current as $key => $p) {
         $curr = extractSourcePrice($p);          // همیشه قیمت مبدأ
         $prev = $prevMap[$key] ?? null;
+        $currHas = extractHasPrice($curr);
+
         if (!$prev) {
+            // v8.26: محصول تازه‌ای که اصلاً قیمت ندارد، «جدید» نیست —
+            // چیزی برای فروش نیست، پس در دستهٔ ناموجود می‌نشیند.
+            if (!$currHas) {
+                $nGone++;
+                if (count($removed) < $limit) {
+                    $removed[] = ['title' => $p['title'] ?? $p['name'] ?? $key, 'price' => '',
+                                  'key' => $key, 'link' => $p['link'] ?? '', 'image' => $p['image'] ?? '',
+                                  'reason' => 'بدون قیمت'];
+                }
+                continue;
+            }
             $nNew++;
             if (count($new) < $limit) {
                 $new[] = ['title' => $p['title'] ?? $p['name'] ?? $key, 'price' => $curr,
@@ -151,26 +176,51 @@ function extractLiveCompare(array $current, array $prevMap, int $limit = 300): a
             }
             continue;
         }
+
         $prevPrice = extractSourcePrice(is_array($prev) ? $prev : []);
-        if ($curr !== $prevPrice && $curr !== '' && $prevPrice !== '') {
-            $oldN = extractPriceNum($prevPrice);
-            $newN = extractPriceNum($curr);
-            // اگر فقط قالب‌بندی عوض شده باشد (مثلاً «۱۲۰۰۰۰» و «۱۲۰,۰۰۰»)
-            // عدد یکسان است و نباید «تغییر قیمت» شمرده شود.
-            if ($oldN === $newN) { $nUnchanged++; continue; }
-            $nChanged++;
-            $dir = $newN > $oldN ? 'up' : 'down';
-            if ($dir === 'up') $nUp++; else $nDown++;
-            $diff = $newN - $oldN;
-            $pct = $oldN > 0 ? round($diff / $oldN * 100, 1) : 0;
-            if (count($changed) < $limit) {
-                $changed[] = ['title' => $p['title'] ?? $p['name'] ?? $key,
-                              'old_price' => $prevPrice, 'new_price' => $curr,
-                              'dir' => $dir, 'diff' => $diff, 'pct' => $pct,
-                              'key' => $key, 'link' => $p['link'] ?? '', 'image' => $p['image'] ?? ''];
+        $prevHas = extractHasPrice($prevPrice);
+
+        // v8.26: قیمت داشت و حالا ندارد → ناموجود شده. قبلاً این حالت
+        // «بدون تغییر» شمرده می‌شد و کاملاً از دید پنهان می‌ماند.
+        if ($prevHas && !$currHas) {
+            $nGone++;
+            if (count($removed) < $limit) {
+                $removed[] = ['title' => $p['title'] ?? $p['name'] ?? $key,
+                              'price' => $prevPrice, 'key' => $key,
+                              'link' => $p['link'] ?? '', 'image' => $p['image'] ?? '',
+                              'reason' => 'ناموجود شد'];
             }
-        } else {
-            $nUnchanged++;
+            continue;
+        }
+        // قیمت نداشت و حالا دارد → دوباره موجود شد، مثل محصول جدید
+        if (!$prevHas && $currHas) {
+            $nNew++;
+            if (count($new) < $limit) {
+                $new[] = ['title' => $p['title'] ?? $p['name'] ?? $key, 'price' => $curr,
+                          'key' => $key, 'link' => $p['link'] ?? '', 'image' => $p['image'] ?? '',
+                          'reason' => 'دوباره موجود شد'];
+            }
+            continue;
+        }
+        // هیچ‌کدام قیمت ندارند → همچنان ناموجود، نه «بدون تغییر»
+        if (!$prevHas && !$currHas) { $nGone++; continue; }
+
+        $oldN = extractPriceNum($prevPrice);
+        $newN = extractPriceNum($curr);
+        // اگر فقط قالب‌بندی عوض شده باشد (مثلاً «۱۲۰۰۰۰» و «۱۲۰,۰۰۰»)
+        // عدد یکسان است و نباید «تغییر قیمت» شمرده شود.
+        if ($oldN === $newN) { $nUnchanged++; continue; }
+
+        $nChanged++;
+        $dir = $newN > $oldN ? 'up' : 'down';
+        if ($dir === 'up') $nUp++; else $nDown++;
+        $diff = $newN - $oldN;
+        $pct = $oldN > 0 ? round($diff / $oldN * 100, 1) : 0;
+        if (count($changed) < $limit) {
+            $changed[] = ['title' => $p['title'] ?? $p['name'] ?? $key,
+                          'old_price' => $prevPrice, 'new_price' => $curr,
+                          'dir' => $dir, 'diff' => $diff, 'pct' => $pct,
+                          'key' => $key, 'link' => $p['link'] ?? '', 'image' => $p['image'] ?? ''];
         }
     }
 
@@ -178,12 +228,21 @@ function extractLiveCompare(array $current, array $prevMap, int $limit = 300): a
         if (isset($current[$key])) continue;
         $removed[] = ['title' => $prev['title'] ?? $prev['name'] ?? $key,
                       'price' => extractSourcePrice(is_array($prev) ? $prev : []), 'key' => $key,
-                      'link' => $prev['link'] ?? '', 'image' => $prev['image'] ?? ''];
+                      'link' => $prev['link'] ?? '', 'image' => $prev['image'] ?? '',
+                      'reason' => 'از سایت حذف شد'];
         if (count($removed) > $limit) array_pop($removed);
     }
 
+    // v8.26: «حذف‌شده» = هم آن‌هایی که از سایت رفته‌اند و هم آن‌هایی که
+    // هنوز هستند ولی قیمت ندارند (ناموجود). شمارش از روی خودِ لیست
+    // انجام نمی‌شود چون لیست سقف دارد ولی شمارنده باید دقیق بماند.
+    $nRemovedGone = 0;
+    foreach ($prevMap as $key => $_) { if (!isset($current[$key])) $nRemovedGone++; }
+
     return [
-        'new' => $nNew, 'price_changed' => $nChanged, 'removed' => count($removed),
+        'new' => $nNew, 'price_changed' => $nChanged,
+        'removed' => $nRemovedGone + $nGone,
+        'gone_from_site' => $nRemovedGone, 'no_price' => $nGone,
         'unchanged' => $nUnchanged, 'price_up' => $nUp, 'price_down' => $nDown,
         'new_items' => $new, 'changed_items' => $changed, 'removed_items' => $removed,
     ];
@@ -10378,9 +10437,14 @@ function loadExtractModalCounters(queueId){
             removedItems:rp.removed_items||[], unchangedCount:rp.unchanged||0,
             totalOld:0
         };
-        const nNew=(rp.new_items||[]).length, nChg=(rp.changed_items||[]).length;
-        const nRem=(rp.removed_items||[]).length, nUnc=rp.unchanged||0;
+        // شمارنده‌ها از خودِ گزارش خوانده می‌شوند نه از طول لیست،
+        // چون لیست‌ها سقف ۳۰۰ تایی دارند ولی شمارش باید دقیق باشد.
+        const nNew=rp.new!=null?rp.new:(rp.new_items||[]).length;
+        const nChg=rp.price_changed!=null?rp.price_changed:(rp.changed_items||[]).length;
+        const nRem=rp.removed!=null?rp.removed:(rp.removed_items||[]).length;
+        const nUnc=rp.unchanged||0;
         const up=rp.price_up||0, down=rp.price_down||0;
+        const gone=rp.gone_from_site||0, noPrice=rp.no_price||0;
 
         const cell=(icon,label,val,color,type,extra)=>
             '<div class="lc" style="border-color:'+color+'33" onclick="showExtractReport(\''+type+'\')" title="کلیک برای دیدن فهرست">'
@@ -10391,7 +10455,7 @@ function loadExtractModalCounters(queueId){
             '<div class="lc" style="border-color:#67e8f933"><b style="color:#67e8f9">'+toFa(rp.extracted||0)+'</b><span>📦 کل</span></div>'
             +cell('🆕','جدید',nNew,'#4ade80','new')
             +cell('💰','تغییر قیمت',nChg,'#facc15','changed',nChg?('▲'+toFa(up)+' ▼'+toFa(down)):'')
-            +cell('❌','حذف/ناموجود',nRem,'#f87171','removed')
+            +cell('❌','حذف/ناموجود',nRem,'#f87171','removed',noPrice?('🚫'+toFa(noPrice)+' بی‌قیمت'):'')
             +cell('⏭','بدون تغییر',nUnc,'#94a3b8','unchanged');
     }).catch(()=>{
         if(box)box.innerHTML='<div style="grid-column:1/-1;color:#f87171;font-size:11px;padding:6px">خطا در دریافت گزارش</div>';
@@ -10461,12 +10525,13 @@ function renderLiveCounters(d){
 
     let extra='';
     if(nChg>0)extra='▲'+toFa(up)+' ▼'+toFa(down);
+    const noPrice=d.no_price||0;   // v8.26: چند تا از حذف‌شده‌ها بی‌قیمت‌اند
 
     box.innerHTML=
         cell('📦','کل','','#67e8f9','none').replace('<b style="color:#67e8f9"></b>','<b style="color:#67e8f9">'+toFa(d.extracted||0)+'</b>')
         +cell('🆕','جدید',nNew,'#4ade80','new')
         +cell('💰','تغییر قیمت',nChg,'#facc15','changed',extra)
-        +cell('❌','حذف/ناموجود',nRem,'#f87171','removed')
+        +cell('❌','حذف/ناموجود',nRem,'#f87171','removed',noPrice?('🚫'+toFa(noPrice)+' بی‌قیمت'):'')
         +cell('⏭','بدون تغییر',nUnc,'#94a3b8','unchanged');
 }
 
@@ -11995,7 +12060,7 @@ function showExtractReport(type){
         html+='<thead><tr style="background:#1e293b;color:#94a3b8"><th style="padding:6px;text-align:right">#</th><th style="padding:6px;text-align:right">عنوان</th>';
         if(type==='new'){html+='<th style="padding:6px;text-align:right">قیمت</th>';}
         if(type==='changed'){html+='<th style="padding:6px;text-align:right">قیمت مبدأ (قبلی)</th><th style="padding:6px;text-align:right">قیمت مبدأ (جدید)</th><th style="padding:6px;text-align:right">وضعیت</th><th style="padding:6px;text-align:right">اختلاف</th>';}
-        if(type==='removed'){html+='<th style="padding:6px;text-align:right">قیمت</th>';}
+        if(type==='removed'){html+='<th style="padding:6px;text-align:right">آخرین قیمت</th><th style="padding:6px;text-align:right">علت</th>';}
         html+='</tr></thead><tbody>';
         list.forEach((item,i)=>{
             const link=item.link?'<a href="'+esc(item.link)+'" target="_blank" style="color:#60a5fa;text-decoration:none">🔗</a> ':'';
@@ -12023,7 +12088,12 @@ function showExtractReport(type){
                 html+='<td style="padding:4px;color:'+dCol+';font-family:ui-monospace,monospace;font-size:11px;direction:ltr;text-align:right">'
                      +toFa(sign+Number(diff).toLocaleString('en-US'))+(pct?'<br><span style="font-size:9px;opacity:.8">'+toFa(sign+pct)+'٪</span>':'')+'</td>';
             }
-            if(type==='removed'){html+='<td style="padding:4px;color:#94a3b8">'+toFa(item.price)+'</td>';}
+            if(type==='removed'){
+                const why=item.reason||'از سایت حذف شد';
+                const wc=why.indexOf('قیمت')>=0?'#fbbf24':'#f87171';
+                html+='<td style="padding:4px;color:#94a3b8">'+(item.price?toFa(item.price):'—')+'</td>';
+                html+='<td style="padding:4px"><span class="pdir" style="background:'+wc+'22;color:'+wc+'">'+esc(why)+'</span></td>';
+            }
             html+='</tr>';
         });
         html+='</tbody></table></div>';
