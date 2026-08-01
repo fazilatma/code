@@ -27,7 +27,7 @@ const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.27';
+const APP_VERSION = '8.28';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -8240,6 +8240,16 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="settings-panel-body" style="padding:0">
 
 <div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>📜 تغییرات نسخه‌ها</h3><span class="cst off">v<?=APP_VERSION?></span><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+آنچه در هر نسخه تغییر کرده است. نسخهٔ فعلی با رنگ روشن مشخص شده.
+</div>
+<div id="changelogBox" style="max-height:340px;overflow-y:auto"></div>
+</div>
+</div>
+
+<div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🔄 نسخهٔ کد</h3><span class="cst off" id="vcBadge">—</span><span class="arrow">▼</span></div>
 <div class="smenu-body">
 <div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px">
@@ -10197,25 +10207,40 @@ function startBackendSync(){
             showToast('⚠️ سلکتورها ذخیره نشده — ابتدا با فرانت‌اند استخراج کنید',1);
             return;
         }
-        // Show extraction progress panel
-        const panel=$('extractProgressPanel');
-        if(panel){
-            panel.style.display='block';
-            panel.innerHTML='<div style="color:#a855f7;font-weight:bold;padding:8px;margin-bottom:4px;background:#2e106530;border-radius:6px">⚡ استخراج بک‌اند — پیشرفت زنده</div>'
-                +'<div id="liveCounters" class="live-cnt"></div>'
-                +'<div id="extractLog" style="max-height:400px;overflow-y:auto;font-size:11px;color:#e2e8f0"></div>'
-                +'<div id="extractStats" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:8px;margin-top:10px"></div>'
-                +'<div style="text-align:center;margin-top:8px"><button class="btn btn-red" onclick="stopBackendExtract()">⏹ توقف</button></div>';
-        }
-        $('extractStatusText').textContent='⚡ در حال استخراج بک‌اند...';
-        $('extractProgressBar').style.width='0%';
-        $('extractProgress').classList.remove('hidden');
-
+        openExtractPanel('⚡ استخراج بک‌اند — پیشرفت زنده');
         // Trigger backend extract endpoint (fire-and-forget)
         fetch('?action=backend_extract&profile_key='+encodeURIComponent(profileKey(url)),{method:'GET'}).catch(()=>{});
-        // Start polling for progress
-        extractPollTimer=setInterval(pollExtractProgress,1500);
+        watchExtractProgress();
     }).catch(()=>{showToast('خطا شبکه',1);});
+}
+
+/**
+ * v8.28: پنل پیشرفت استخراج — یک ظاهر واحد برای هر سه مسیر
+ * (دکمهٔ استخراج بک‌اند، دکمهٔ اجرای حالا، و کران‌جاب). قبلاً هرکدام
+ * پنل خودش را می‌ساخت و «اجرای حالا» نه شمارنده داشت نه دکمهٔ توقف و
+ * نه اصلاً polling را شروع می‌کرد، برای همین به نظر می‌رسید کاری نمی‌کند.
+ */
+function openExtractPanel(title){
+    switchMainTab('start');
+    const panel=$('extractProgressPanel');
+    if(panel){
+        panel.style.display='block';
+        panel.innerHTML='<div style="color:#a855f7;font-weight:bold;padding:8px;margin-bottom:4px;background:#2e106530;border-radius:6px">'+esc(title)+'</div>'
+            +'<div id="liveCounters" class="live-cnt"></div>'
+            +'<div id="extractLog" style="max-height:400px;overflow-y:auto;font-size:11px;color:#e2e8f0"></div>'
+            +'<div id="extractStats" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:8px;margin-top:10px"></div>'
+            +'<div style="text-align:center;margin-top:8px"><button class="btn btn-red" onclick="stopBackendExtract()">⏹ توقف</button></div>';
+    }
+    if($('extractStatusText'))$('extractStatusText').textContent='⚡ در حال استخراج...';
+    if($('extractProgressBar')){$('extractProgressBar').style.width='0%';$('extractProgressBar').style.background='linear-gradient(90deg,#7c3aed,#a855f7)';}
+    if($('extractProgress'))$('extractProgress').classList.remove('hidden');
+    refreshExtractQueue();
+}
+
+/** شروع (یا ازسرگیری) رصد پیشرفت — از چند بار اجرا شدن جلوگیری می‌کند */
+function watchExtractProgress(){
+    if(extractPollTimer)clearInterval(extractPollTimer);
+    extractPollTimer=setInterval(pollExtractProgress,1500);
 }
 function stopBackendExtract(){
     fetch('?extract_stop=1').catch(()=>{});
@@ -10931,6 +10956,71 @@ renderDetailFieldsList();
  * ================================================================== */
 let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING = false;
 
+/* ==================================================================
+ *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
+ * ================================================================== */
+const CHANGELOG = [
+  {v:'8.28', t:'یکسان‌سازی ظاهر استخراج', items:[
+    'دکمهٔ «اجرای حالا» و کران‌جاب دقیقاً همان پنل و شمارنده‌های زندهٔ «استخراج بک‌اند» را نشان می‌دهند',
+    'رفع اشکال: «اجرای حالا» اصلاً رصد پیشرفت را شروع نمی‌کرد، برای همین به نظر می‌رسید کاری نمی‌کند',
+    'افزوده شدن همین گزارش تغییرات به منوی همبرگری'
+  ]},
+  {v:'8.27', t:'هستهٔ مشترک استخراج', items:[
+    'کران‌جاب و دکمهٔ دستی یک تابع مشترک را اجرا می‌کنند تا رفتارشان از هم فاصله نگیرد',
+    'برچسب «👤 دستی» و «⏱ خودکار» روی ردیف‌های صف',
+    'حذف کد تکراری قدیمی که باعث می‌شد فیلدهای جزئیات در اجرای خودکار خالی بماند'
+  ]},
+  {v:'8.26', t:'محصولات بدون قیمت', items:[
+    'محصول بی‌قیمت یا «ناموجود» حالا در دستهٔ حذف/ناموجود می‌آید، نه «بدون تغییر»',
+    'تفکیک «از سایت حذف شد» و «ناموجود شد» با ستون علت',
+    'رفع اشکال: شمارنده‌ها از طول لیست خوانده می‌شدند و در اجرای بزرگ کمتر گزارش می‌کردند'
+  ]},
+  {v:'8.25', t:'مقایسه بر پایهٔ قیمت مبدأ', items:[
+    'گران/ارزان شدن همیشه با قیمت اصلی سایت سنجیده می‌شود، نه قیمت اعمال‌شدهٔ خودمان',
+    'شمارنده‌های قابل کلیک در مودال کارهای تمام‌شده',
+    'رفع اشکال: اختلاف صرفاً قالب‌بندی («۱۲۰٬۰۰۰» و «120000») تغییر قیمت شمرده می‌شد'
+  ]},
+  {v:'8.24', t:'بکاپ رمزنگاری‌شده', items:[
+    'ارسال کل ورک‌اسپیس هاست به گیت‌هاب با رمزنگاری AES-256-GCM فایل‌های حساس',
+    'بازگرداندن فایل رمزشده با عبارت رمز'
+  ]},
+  {v:'8.23', t:'بکاپ ورک‌اسپیس', items:[
+    'ارسال فایل‌های هاست به یک برنچ گیت‌هاب',
+    'محافظت دولایه در برابر انتشار کلیدها (نام فایل + بررسی محتوا)'
+  ]},
+  {v:'8.22', t:'شمارنده‌های زنده', items:[
+    'شمارنده‌های جدید/تغییر قیمت/حذف‌شده در حین استخراج و قابل کلیک',
+    'ستون «گران شد / ارزان شد» با اختلاف و درصد',
+    'مقاوم‌سازی کران‌جاب: قفل ضد هم‌پوشانی و محافظ صفحهٔ خالی'
+  ]},
+  {v:'8.21', t:'رفع خطای ۴۰۱', items:[
+    'توکن نامعتبر گیت‌هاب دیگر کل به‌روزرسانی را از کار نمی‌اندازد و خودکار پاک می‌شود'
+  ]},
+  {v:'8.20', t:'نسخه و صف استخراج', items:[
+    'نمایش نسخهٔ کد در بالای صفحه',
+    'ظاهر صف استخراج هم‌سان با صف ووکامرس و باسلام'
+  ]},
+  {v:'8.18', t:'به‌روزرسانی از گیت‌هاب', items:[
+    'بررسی و نصب نسخهٔ جدید از داخل پنل'
+  ]},
+];
+
+function renderChangelog(){
+  const box=$('changelogBox');
+  if(!box)return;
+  const cur='<?=APP_VERSION?>';
+  box.innerHTML=CHANGELOG.map(c=>{
+    const isCur=c.v===cur;
+    return '<div style="border-right:2px solid '+(isCur?'#4ade80':'#334155')+';padding:0 9px 10px;margin-bottom:8px">'
+      +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">'
+      +'<b style="color:'+(isCur?'#4ade80':'#94a3b8')+';font-size:12px;font-family:ui-monospace,monospace">v'+esc(c.v)+'</b>'
+      +(isCur?'<span style="font-size:9px;color:#4ade80;background:#14532d;padding:1px 6px;border-radius:4px">فعلی</span>':'')
+      +'<span style="font-size:11px;color:#e2e8f0">'+esc(c.t)+'</span></div>'
+      +'<ul style="margin:0;padding-right:16px;color:#94a3b8;font-size:10.5px;line-height:1.8">'
+      +c.items.map(i=>'<li>'+esc(i)+'</li>').join('')+'</ul></div>';
+  }).join('');
+}
+
 /** آیا عملیات سنگینی در جریان است؟ */
 function vcBusy() {
     try {
@@ -11277,6 +11367,7 @@ vcLoad(() => {
     if (VC && VC.check_on_load) setTimeout(() => vcCheck(false), 1200);
     if (VC && VC.repo) setTimeout(() => vcLoadBranches(false), 2200);
 });
+renderChangelog();
 
 // ========== Connection JS ==========
 let wSend=false,bSend=false,cn={woocommerce:{},basalam:{}},extractPollTimer=null,extractModalTimer=null;
@@ -13113,19 +13204,13 @@ function startSyncTimer(){
     // Deprecated - sync is now per-profile via cron_sync
 }
 function runSyncNow(){
-    // v8.22: Show extraction progress in Start tab
-    switchMainTab('start');
+    // v8.28: دقیقاً همان پنل و همان رصد زندهٔ دکمهٔ «استخراج بک‌اند»
     $('syncStatus').textContent='🔄 در حال اجرای کران جاب...';
     $('syncStatus').style.color='#67e8f9';
+    openExtractPanel('🔄 اجرای کران جاب — استخراج و ارسال');
+    watchExtractProgress();
     const fd=new FormData();
     fd.append('action','cron_run');
-    // Show extraction progress panel
-    const ep=$('extractProgress');
-    if(ep){ep.classList.remove('hidden');}
-    const bar=$('extractProgressBar');
-    if(bar){bar.style.width='10%';bar.style.background='linear-gradient(90deg,#7c3aed,#a855f7)';}
-    const panel=$('extractProgressPanel');
-    if(panel){panel.style.display='block';panel.innerHTML='<div style="color:#a78bfa;font-weight:bold;padding:8px;margin-bottom:4px;background:#2e106530;border-radius:6px">🔄 اجرای کران جاب — استخراج و ارسال</div><div id="extractLog" style="max-height:400px;overflow-y:auto;font-size:11px;color:#e2e8f0"></div>';}
     fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
         if(!d||!d.profiles){showToast('❌ خطا در اجرای کران',1);$('syncStatus').textContent='❌ خطا';$('syncStatus').style.color='#f87171';return;}
         const profiles=d.profiles||[];
@@ -13151,7 +13236,10 @@ function runSyncNow(){
             });
             eLog.innerHTML+='<div style="color:#22c55e;padding:4px 0;font-weight:bold">✅ کران جاب کامل شد</div>';
         }
-        // Update progress bar
+        // v8.28: کران تمام شد — رصد را متوقف و صف/شمارنده‌ها را نهایی کن
+        if(extractPollTimer)clearInterval(extractPollTimer);
+        pollExtractProgress();
+        refreshExtractQueue();
         const bar=$('extractProgressBar');
         if(bar){bar.style.width='100%';}
         // Show detailed results
