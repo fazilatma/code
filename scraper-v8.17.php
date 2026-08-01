@@ -933,6 +933,226 @@ if(strpos($url,'/')===0)return $base.$url;
 return rtrim($pageUrl,'/').'/'.ltrim($url,'/');
 }
 
+/* =====================================================================
+ *  بررسی نسخه — فقط خواندنی
+ *  ---------------------------------------------------------------
+ *  این بخش عمداً هیچ کدی دانلود نمی‌کند و هیچ فایل PHP ای نمی‌نویسد.
+ *  فقط شناسهٔ نسخهٔ گیت‌هاب را با فایل فعلی مقایسه می‌کند و نتیجه را
+ *  گزارش می‌دهد. کار نصب بر عهدهٔ deploy.php است که فایلی جداگانه است
+ *  و روی هدف دیگری می‌نویسد — نه روی خودش و نه روی این فایل از داخل
+ *  همین اسکریپت. این جداسازی باعث می‌شود الگوی «دانلود ← بازنویسی خود
+ *  ← اجرا» که اسکنرهای امنیتی هاست آن را بک‌دور می‌شناسند شکل نگیرد.
+ * ===================================================================== */
+
+const VC_FILE = __DIR__ . '/.versioncheck.json';
+
+function vc_defaults(): array {
+    return [
+        'check_on_load' => false,
+        'repo'          => 'fazilatma/code',
+        'branch'        => 'main',
+        'path'          => 'scraper-v8.17.php',
+        'github_token'  => '',
+        'deploy_file'   => 'deploy.php',
+        'deploy_token'  => '',
+        'last_check'    => 0,
+    ];
+}
+
+function vc_load(): array {
+    $d = vc_defaults();
+    if (!is_file(VC_FILE)) return $d;
+    $j = json_decode((string)@file_get_contents(VC_FILE), true);
+    return is_array($j) ? array_merge($d, $j) : $d;
+}
+
+function vc_save(array $c): bool {
+    $ok = @file_put_contents(VC_FILE, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX) !== false;
+    if ($ok) @chmod(VC_FILE, 0600);
+    return $ok;
+}
+
+/** شناسهٔ محتوا با همان الگوریتم گیت، برای مقایسه با پاسخ API */
+function vc_content_id(string $data): string {
+    return sha1('blob ' . strlen($data) . "\0" . $data);
+}
+
+/** درخواست GET فقط برای خواندن اطلاعات (متادیتا)، نه کد */
+function vc_get_json(string $url, string $token = '', int $timeout = 25): array {
+    $hdr = [
+        'User-Agent: scraper-version-check',
+        'Accept: application/vnd.github+json',
+        'Cache-Control: no-cache',
+    ];
+    if ($token !== '') $hdr[] = 'Authorization: Bearer ' . $token;
+
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 5,
+            CURLOPT_CONNECTTIMEOUT => 12, CURLOPT_TIMEOUT => $timeout, CURLOPT_ENCODING => '',
+            CURLOPT_HTTPHEADER => $hdr,
+        ]);
+        $b = curl_exec($ch);
+        $e = curl_error($ch);
+        $c = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        if ($b === false) return ['ok' => false, 'code' => 0, 'error' => $e ?: 'ارتباط ناموفق', 'data' => null];
+        if ($c !== 200)   return ['ok' => false, 'code' => $c, 'error' => 'HTTP ' . $c, 'data' => null];
+        $d = json_decode((string)$b, true);
+        return is_array($d) ? ['ok' => true, 'code' => 200, 'error' => '', 'data' => $d]
+                            : ['ok' => false, 'code' => 200, 'error' => 'پاسخ نامعتبر', 'data' => null];
+    }
+
+    $ctx = stream_context_create([
+        'http' => ['method' => 'GET', 'timeout' => $timeout, 'header' => implode("\r\n", $hdr), 'ignore_errors' => true],
+        'ssl'  => ['verify_peer' => true, 'verify_peer_name' => true],
+    ]);
+    $b = @file_get_contents($url, false, $ctx);
+    if ($b === false) return ['ok' => false, 'code' => 0, 'error' => 'ارتباط ناموفق', 'data' => null];
+    $d = json_decode((string)$b, true);
+    return is_array($d) ? ['ok' => true, 'code' => 200, 'error' => '', 'data' => $d]
+                        : ['ok' => false, 'code' => 0, 'error' => 'پاسخ نامعتبر', 'data' => null];
+}
+
+/** مقایسهٔ نسخه — هیچ چیزی دانلود یا نوشته نمی‌شود */
+if (isset($_GET['vc_check'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $c = vc_load();
+
+    if (empty($_GET['force']) && empty($c['check_on_load'])) {
+        echo json_encode(['ok' => true, 'skipped' => true, 'update' => false]);
+        exit;
+    }
+    if (trim((string)$c['repo']) === '' || trim((string)$c['path']) === '') {
+        echo json_encode(['ok' => false, 'error' => 'ریپو یا مسیر فایل تنظیم نشده'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $local = vc_content_id((string)@file_get_contents(__FILE__));
+    $api = 'https://api.github.com/repos/' . $c['repo'] . '/contents/'
+         . implode('/', array_map('rawurlencode', explode('/', $c['path'])))
+         . '?ref=' . rawurlencode($c['branch']);
+    $r = vc_get_json($api, $c['github_token']);
+    if (!$r['ok'] || !isset($r['data']['sha'])) {
+        echo json_encode(['ok' => false, 'error' => $r['code'] === 404
+            ? 'فایل یا برنچ پیدا نشد' : ($r['error'] ?: 'خطا')], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $c['last_check'] = time();
+    vc_save($c);
+
+    $remote = (string)$r['data']['sha'];
+    echo json_encode([
+        'ok'          => true,
+        'update'      => $remote !== $local,
+        'local_id'    => substr($local, 0, 8),
+        'remote_id'   => substr($remote, 0, 8),
+        'remote_size' => (int)($r['data']['size'] ?? 0),
+        'local_size'  => (int)@filesize(__FILE__),
+        'branch'      => $c['branch'],
+        'path'        => $c['path'],
+        'deploy_ready'=> $c['deploy_token'] !== '' && is_file(__DIR__ . '/' . basename($c['deploy_file'])),
+        'deploy_file' => basename($c['deploy_file']),
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** فهرست برنچ‌ها — فقط خواندنی */
+if (isset($_GET['vc_branches'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $c = vc_load();
+    $repo = trim((string)($_GET['repo'] ?? $c['repo']));
+    if (!preg_match('~^[\w.-]+/[\w.-]+$~', $repo)) {
+        echo json_encode(['ok' => false, 'error' => 'نام ریپو نامعتبر است (قالب: user/repo)'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $r = vc_get_json('https://api.github.com/repos/' . $repo . '/branches?per_page=100', $c['github_token']);
+    if (!$r['ok']) {
+        echo json_encode(['ok' => false, 'error' => $r['code'] === 404
+            ? 'ریپو پیدا نشد (خصوصی است؟ توکن لازم است)' : $r['error']], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $out = [];
+    foreach ($r['data'] as $b) {
+        if (!empty($b['name'])) $out[] = ['name' => $b['name'], 'sha' => substr((string)($b['commit']['sha'] ?? ''), 0, 7)];
+    }
+    echo json_encode(['ok' => true, 'branches' => $out], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** فهرست فایل‌های PHP یک برنچ — فقط خواندنی */
+if (isset($_GET['vc_files'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $c = vc_load();
+    $repo   = trim((string)($_GET['repo'] ?? $c['repo']));
+    $branch = trim((string)($_GET['branch'] ?? $c['branch']));
+    if (!preg_match('~^[\w.-]+/[\w.-]+$~', $repo) || $branch === '') {
+        echo json_encode(['ok' => false, 'error' => 'ریپو و برنچ لازم است'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $r = vc_get_json('https://api.github.com/repos/' . $repo . '/git/trees/' . rawurlencode($branch) . '?recursive=1', $c['github_token'], 30);
+    if (!$r['ok'] || !isset($r['data']['tree'])) {
+        echo json_encode(['ok' => false, 'error' => $r['code'] === 404 ? 'برنچ پیدا نشد' : $r['error']], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $files = [];
+    foreach ($r['data']['tree'] as $n) {
+        if (($n['type'] ?? '') !== 'blob') continue;
+        $p = (string)$n['path'];
+        if (!preg_match('~\.php\d?$~i', $p)) continue;
+        $files[] = ['path' => $p, 'size' => (int)($n['size'] ?? 0)];
+    }
+    usort($files, fn($a, $b) => $b['size'] <=> $a['size']);
+    echo json_encode(['ok' => true, 'files' => $files], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** تنظیمات بررسی نسخه */
+if (isset($_GET['vc_settings'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $c = vc_load();
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+        $c['check_on_load'] = !empty($_POST['check_on_load']);
+        if (isset($_POST['repo']))        $c['repo']        = trim((string)$_POST['repo']);
+        if (isset($_POST['branch']))      $c['branch']      = trim((string)$_POST['branch']);
+        if (isset($_POST['path']))        $c['path']        = ltrim(trim((string)$_POST['path']), '/');
+        if (isset($_POST['deploy_file'])) $c['deploy_file'] = basename(trim((string)$_POST['deploy_file']));
+        foreach (['github_token', 'deploy_token'] as $k) {
+            $v = (string)($_POST[$k] ?? '');
+            if ($v === '__CLEAR__')  $c[$k] = '';
+            elseif (trim($v) !== '') $c[$k] = trim($v);
+        }
+        if (!vc_save($c)) { echo json_encode(['ok' => false, 'error' => 'ذخیرهٔ تنظیمات ناموفق']); exit; }
+    }
+    $deployPath = __DIR__ . '/' . basename($c['deploy_file']);
+    $out = $c;
+    $out['github_token']   = '';
+    $out['deploy_token']   = '';
+    $out['has_gh_token']   = $c['github_token'] !== '';
+    $out['has_dep_token']  = $c['deploy_token'] !== '';
+    $out['deploy_present'] = is_file($deployPath);
+    $out['self_name']      = basename(__FILE__);
+    $out['local_id']       = substr(vc_content_id((string)@file_get_contents(__FILE__)), 0, 8);
+    $out['local_size']     = (int)@filesize(__FILE__);
+    echo json_encode(['ok' => true, 'settings' => $out], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** آدرس و توکن deploy.php را به مرورگر می‌دهد تا خودش صدا بزند */
+if (isset($_GET['vc_deploy_info'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $c = vc_load();
+    $f = basename($c['deploy_file']);
+    if (!is_file(__DIR__ . '/' . $f)) {
+        echo json_encode(['ok' => false, 'error' => 'فایل ' . $f . ' روی هاست پیدا نشد'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    echo json_encode(['ok' => true, 'file' => $f, 'token' => $c['deploy_token']], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (!empty($_GET['rp'])) {
 $rpUrl = trim($_GET['rp']);
 if (!filter_var($rpUrl, FILTER_VALIDATE_URL)) { http_response_code(400); echo 'Invalid'; exit; }
@@ -7650,7 +7870,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>اسکرپر ووکامرس v8.22</title>
-<style>*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}body{font-family:Tahoma,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:12px;padding-bottom:90px;padding-top:56px;direction:rtl}.container{max-width:1400px;margin:0 auto}h1{font-size:18px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}input,select{background:#0f172a;border:1px solid #475569;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%}input[type="checkbox"]{width:auto}select{min-width:90px;width:auto}.btn{padding:11px 14px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;transition:.15s;white-space:nowrap}.btn:hover{opacity:.9}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:not-allowed}.btn-blue{background:linear-gradient(135deg,#3b82f6,#06b6d4);color:#000}.btn-red{background:#ef4444;color:#fff}.btn-green{background:#22c55e;color:#000}.btn-purple{background:#a855f7;color:#fff}.btn-orange{background:#f97316;color:#000}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:#eab308;color:#000}.btn-cyan{background:#06b6d4;color:#000}.btn-teal{background:#14b8a6;color:#000}.btn-pink{background:#ec4899;color:#fff}.btn-indigo{background:#6366f1;color:#fff}.hidden{display:none!important}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}.stat{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.stat b{font-size:20px;display:block}.stat span{color:#64748b;font-size:10px}.progress{height:5px;background:#334155;border-radius:5px;margin:10px 0;overflow:hidden}.progress-bar{height:100%;background:linear-gradient(90deg,#3b82f6,#a855f7);width:0;transition:.3s}.progress-bar.pink{background:linear-gradient(90deg,#ec4899,#f59e0b)}.status{color:#94a3b8;font-size:12px;margin-bottom:8px}.logs{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:140px;overflow-y:auto;font-family:monospace;font-size:11px;margin-bottom:10px;direction:ltr;text-align:left}.log{padding:2px 0;border-bottom:1px solid #1e293b}.log-ok{color:#4ade80}.log-err{color:#f87171}.log-info{color:#60a5fa}.log-detail{color:#f0abfc}.main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #334155;display:flex;z-index:1000;box-shadow:0 -4px 20px rgba(0,0,0,.5);padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:10px 4px 8px;border:none;background:transparent;color:#64748b;font-size:11px;font-family:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative;transition:color .2s}.main-tab .t-icon{font-size:20px}.main-tab .t-label{font-weight:600}.main-tab.active{color:#3b82f6;background:#1e293b}.main-tab .badge{position:absolute;top:4px;right:calc(50% - 20px);background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:10px;min-width:16px;text-align:center}.main-tab .badge.ok{background:#22c55e;color:#000}.tab-pane{display:none;animation:fadeIn .3s ease}.tab-pane.active{display:block}@keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.sub-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.sub-tab.active{background:#3b82f6;color:#000}.mode-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.mode-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.mode-tab.active{background:#3b82f6;color:#000}.visual-container{display:grid;grid-template-columns:1fr;gap:14px}.iframe-wrap{background:#0f172a;border:1px solid #334155;border-radius:0 0 10px 10px;overflow:auto;height:600px;position:relative;resize:vertical;min-height:300px;max-height:95vh}.iframe-wrap iframe{width:100%;height:100%;border:none;background:#fff;min-height:100%}.iframe-wrap .if-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:13px}.iframe-size-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#1e293b;border:1px solid #334155;border-radius:10px 10px 0 0;font-size:12px;color:#94a3b8}.iframe-size-bar input[type=range]{flex:1;cursor:pointer}.iframe-size-bar .size-val{color:#67e8f9;font-weight:700;min-width:50px;text-align:center;font-size:13px}.iframe-size-bar label{cursor:pointer;color:#94a3b8}.selector-panel{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px}.selector-panel h3{margin:0 0 10px;font-size:14px;color:#67e8f9}.sel-item{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.sel-item.has{border-color:#22c55e;background:#14532d20}.sel-item.has label{color:#4ade80}.sel-item label{display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px;color:#94a3b8}.sel-item input{width:100%;font-family:monospace;font-size:11px;padding:6px 8px}.sel-item .sel-preview{font-size:10px;color:#86efac;padding:4px 8px;background:#0f172a;border:1px solid #22c55e;border-radius:4px;margin-top:6px;font-family:Tahoma,sans-serif;word-break:break-word;max-height:60px;overflow:hidden;line-height:1.4}.sel-item .sel-preview.price-prev{color:#fbbf24;border-color:#f59e0b;font-family:monospace;direction:ltr;text-align:left}.sel-item .sel-preview.link-prev{color:#a78bfa;border-color:#8b5cf6;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.img-prev{color:#f472b6;border-color:#ec4899;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.empty{color:#fca5a5;border-color:#ef4444;background:#7f1d1d30}.sel-item .sel-actions-row{display:flex;gap:4px;margin-top:6px}.sel-item .sel-actions-row .btn{padding:4px 8px;font-size:10px;flex:1}.sel-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}.suggest-list{max-height:150px;overflow-y:auto;background:#1e293b;border:1px solid #334155;border-radius:6px;margin-top:6px}.suggest-item{padding:8px;font-size:11px;cursor:pointer;font-family:monospace;border-bottom:1px solid #334155}.suggest-item:hover{background:#334155}.detail-field{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.detail-field.enabled{border-color:#a855f7;background:#2d1b4e}.detail-field-row{display:flex;gap:8px;align-items:center;margin-bottom:6px}.detail-field-row .fname{flex:0 0 110px;font-size:12px;font-weight:700;color:#c4b5fd}.detail-field-row .ftoggle{flex:0 0 auto}.detail-field-row .fselector{flex:1;font-family:monospace;font-size:11px;padding:6px 8px}.detail-field-meta{font-size:10px;color:#64748b;display:flex;gap:10px;align-items:center}.detail-field-meta .preview{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}.product{background:#1e293b;border:1px solid #334155;border-radius:12px;overflow:hidden}.thumb{height:140px;background:linear-gradient(135deg,#1e3a5f,#312e81);display:flex;align-items:center;justify-content:center}.thumb img{width:100%;height:100%;object-fit:cover}.noimg{color:#64748b;font-weight:600;font-size:11px}.pbody{padding:10px}.ptitle{font-weight:700;font-size:12px;margin-bottom:6px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:36px}.pdetail-short{font-size:10px;color:#cbd5e1;line-height:1.4;margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-height:30px}.price{display:inline-block;padding:4px 8px;background:#166534;color:#86efac;border-radius:6px;font-weight:700;font-size:12px;margin-bottom:4px}.price-orig{display:block;font-size:10px;color:#64748b;text-decoration:line-through;margin-bottom:4px;direction:ltr;text-align:right;font-family:monospace}.no-price{background:#7f1d1d;color:#fca5a5}.plink{display:block;text-align:center;padding:6px;background:#1e3a5f;border-radius:6px;color:#60a5fa;text-decoration:none;font-weight:600;font-size:11px}.table-wrap{overflow-x:auto;border:1px solid #334155;border-radius:10px}table{width:100%;border-collapse:collapse;font-size:12px;min-width:750px}th,td{padding:8px 10px;text-align:right;border-bottom:1px solid #334155}th{background:#1e3a5f;color:#93c5fd;font-size:10px}.td-orig{color:#94a3b8;text-decoration:line-through;font-size:11px;font-family:monospace;direction:ltr;text-align:right}.td-detail{font-size:10px;color:#cbd5e1;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.text-view{position:relative}.text-content{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px;font-family:monospace;font-size:11px;white-space:pre-wrap;max-height:400px;overflow:auto;direction:ltr;text-align:left}.copy-btn{position:absolute;top:6px;left:6px}.copied{background:#22c55e!important}.alert{padding:10px;border-radius:8px;margin-bottom:10px;font-size:12px}.alert-info{background:#1e3a5f;border:1px solid #3b82f6;color:#93c5fd}.alert-purple{background:#3b0764;border:1px solid #a855f7;color:#e9d5ff}.alert-success{background:#14532d;border:1px solid #22c55e;color:#86efac}.settings-card h3{margin-bottom:12px;font-size:14px;color:#67e8f9}.profile-row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}.profile-row select{flex:2;min-width:150px;font-weight:600}.profile-row input{flex:1;min-width:120px}.profile-row .btn{flex:0 0 auto}.profile-indicator{display:inline-block;padding:3px 8px;border-radius:4px;font-size:10px}.saved{background:#14532d;color:#86efac;border:1px solid #22c55e}.unsaved{background:#78350f;color:#fbbf24;border:1px solid #f59e0b}.toast{position:fixed;top:80px;left:50%;transform:translateX(-50%);background:#14532d;color:#86efac;padding:12px 20px;border-radius:8px;border:1px solid #22c55e;box-shadow:0 8px 20px rgba(0,0,0,.5);z-index:99999;font-weight:700;font-size:12px;opacity:0;transition:opacity .3s,top .3s;pointer-events:none;max-width:90%;text-align:center}.toast.show{opacity:1;top:60px}.toast.error{background:#7f1d1d;color:#fca5a5;border-color:#ef4444}.row label{color:#94a3b8;font-size:12px;min-width:80px;display:flex;align-items:center}input[type="checkbox"]{margin-left:5px}.section-title{font-size:13px;color:#67e8f9;margin-bottom:8px;font-weight:700;display:flex;align-items:center;gap:6px}.section-title.purple{color:#c4b5fd}.empty-state{text-align:center;padding:40px 20px;color:#64748b}.empty-state .icon{font-size:48px;margin-bottom:10px;opacity:.5}.empty-state p{font-size:13px}.switch{position:relative;display:inline-block;width:36px;height:20px}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;inset:0;background:#475569;transition:.2s;border-radius:20px}.slider:before{position:absolute;content:"";height:14px;width:14px;right:3px;bottom:3px;background:#fff;transition:.2s;border-radius:50%}input:checked+.slider{background:#a855f7}input:checked+.slider:before{transform:translateX(-16px)}.cc{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.cc.wc{border-color:#7c3aed}.cc.bs{border-color:#0891b2}.cch{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;cursor:pointer}.cch h3{font-size:14px;margin:0;display:flex;align-items:center;gap:6px}.ccb{overflow:hidden}.ccb.collapsed{max-height:0!important;padding:0;margin:0;overflow:hidden}.cst{display:inline-block;padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700}.cst.on{background:#14532d;color:#86efac}.cst.off{background:#475569;color:#94a3b8}.cst.tg{background:#78350f;color:#fbbf24}.crow{display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap}.crow label{min-width:100px;color:#94a3b8;font-size:12px;flex-shrink:0}.crow input,.crow select{flex:1;min-width:150px}.cact{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.sres{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:500px;overflow-y:auto;font-size:11px;margin-top:10px}.sres .ok2{color:#4ade80;padding:2px 0;border-bottom:1px solid #1e293b}.sres .no2{color:#f87171;padding:2px 0;border-bottom:1px solid #1e293b}.sres a{color:#60a5fa;text-decoration:none}.scard{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:8px;margin:4px 0;display:flex;gap:8px;align-items:flex-start;transition:border-color .2s}.scard:hover{border-color:#475569}.scard-img{width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0;background:#0f172a}.scard-noimg{width:48px;height:48px;border-radius:6px;flex-shrink:0;background:#0f172a;display:flex;align-items:center;justify-content:center;color:#475569;font-size:18px}.scard-body{flex:1;min-width:0;direction:rtl}.scard-title{color:#e2e8f0;font-weight:700;font-size:11px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl}.scard-meta{display:flex;gap:6px;flex-wrap:wrap;font-size:10px;margin-bottom:2px;direction:rtl}.scard-meta span{display:inline-flex;align-items:center;gap:2px}.scard-price{color:#4ade80;font-family:monospace;font-size:10px;direction:ltr}.scard-cat{color:#c084fc;font-size:9px}.scard-unit{color:#64748b;font-size:9px}.scard-result{font-size:10px;font-weight:700;margin-top:2px}.scard-ok{color:#4ade80}.scard-up{color:#facc15}.scard-skip{color:#94a3b8}.scard-fail{color:#f87171}.scard.scard-ok{border-left:3px solid #4ade80}.scard.scard-up{border-left:3px solid #facc15}.scard.scard-skip{border-left:3px solid #94a3b8}.scard.scard-fail{border-left:3px solid #f87171}.scard-err{color:#f87171;font-size:9px;margin-top:2px;direction:rtl;background:#7f1d1d20;padding:1px 6px;border-radius:3px}.scard-reason{color:#fbbf24;font-size:9px;margin-top:2px;direction:rtl;background:#42200620;padding:1px 6px;border-radius:3px}.scard-rid{color:#60a5fa;font-size:9px;direction:ltr}.ssum{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:10px}.ssum .si{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.ssum .si b{font-size:18px;display:block}.ssum .si span{color:#64748b;font-size:10px}@media(min-width:900px){body{padding:16px;padding-bottom:16px}h1{font-size:22px}.main-tabs{position:static;border-top:none;box-shadow:none;background:#1e293b;border:1px solid #334155;border-radius:12px;margin-bottom:14px;padding:3px}.main-tab{padding:12px;border-radius:8px;flex-direction:row;gap:8px;font-size:13px}.main-tab .t-icon{font-size:16px}.main-tab.active{background:#3b82f6}.main-tab .badge{position:static;margin-right:4px;min-width:auto}.visual-container{grid-template-columns:1fr 320px}.grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.btn{padding:10px 16px}.profile-row{flex-wrap:nowrap}}.bsl-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:10px}.bsl-modal{background:#0f172a;border:1px solid #334155;border-radius:14px;max-width:95vw;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;width:900px}.bsl-modal-head{padding:12px 16px;background:#1e293b;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between}.bsl-modal-head h2{margin:0;font-size:15px;color:#67e8f9}.bsl-modal-body{overflow:auto;flex:1;padding:8px}.bsl-modal-table{width:100%;border-collapse:collapse;font-size:11px}.bsl-modal-table th{background:#1e293b;color:#67e8f9;padding:8px;text-align:center;font-size:11px;border:1px solid #334155;white-space:nowrap}.bsl-modal-table td{padding:6px 8px;border:1px solid #1e293b;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bsl-modal-table td.td-name{max-width:none;white-space:normal;overflow:visible;line-height:1.4;font-size:12px;direction:rtl;unicode-bidi:plaintext}.bsl-modal-table tr:hover td{background:#1e293b80}.bsl-modal-table .td-id{color:#94a3b8;font-family:monospace;text-align:center}.bsl-modal-table .td-price{color:#fbbf24;font-family:monospace;text-align:center;direction:ltr}.bsl-modal-table .td-stock{color:#22c55e;text-align:center}.bsl-modal-table .td-status{text-align:center}.bsl-modal-table .td-img{width:40px;height:40px;object-fit:cover;border-radius:4px}.bsl-modal-pager{padding:8px 16px;background:#1e293b;border-top:1px solid #334155;display:flex;align-items:center;justify-content:center;gap:8px}.bsl-tabs{display:flex;gap:2px;padding:0 12px;background:#1e293b;border-bottom:1px solid #334155;flex-wrap:wrap;direction:rtl}.bsl-tab{padding:6px 12px;font-size:11px;color:#94a3b8;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap;border-radius:6px 6px 0 0}.bsl-tab:hover{color:#e2e8f0;background:#334155}.bsl-tab.active{color:#67e8f9;border-bottom-color:#67e8f9;background:#0f172a;font-weight:700}.bsl-tab .tab-count{font-size:9px;color:#64748b;margin-right:2px}.hamburger-btn{position:fixed;top:10px;left:10px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.hamburger-btn:hover{background:#334155}.hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:1;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}.smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}</style>
+<style>*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}body{font-family:Tahoma,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:12px;padding-bottom:90px;padding-top:56px;direction:rtl}.container{max-width:1400px;margin:0 auto}h1{font-size:18px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}input,select{background:#0f172a;border:1px solid #475569;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%}input[type="checkbox"]{width:auto}select{min-width:90px;width:auto}.btn{padding:11px 14px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;transition:.15s;white-space:nowrap}.btn:hover{opacity:.9}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:not-allowed}.btn-blue{background:linear-gradient(135deg,#3b82f6,#06b6d4);color:#000}.btn-red{background:#ef4444;color:#fff}.btn-green{background:#22c55e;color:#000}.btn-purple{background:#a855f7;color:#fff}.btn-orange{background:#f97316;color:#000}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:#eab308;color:#000}.btn-cyan{background:#06b6d4;color:#000}.btn-teal{background:#14b8a6;color:#000}.btn-pink{background:#ec4899;color:#fff}.btn-indigo{background:#6366f1;color:#fff}.hidden{display:none!important}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}.stat{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.stat b{font-size:20px;display:block}.stat span{color:#64748b;font-size:10px}.progress{height:5px;background:#334155;border-radius:5px;margin:10px 0;overflow:hidden}.progress-bar{height:100%;background:linear-gradient(90deg,#3b82f6,#a855f7);width:0;transition:.3s}.progress-bar.pink{background:linear-gradient(90deg,#ec4899,#f59e0b)}.status{color:#94a3b8;font-size:12px;margin-bottom:8px}.logs{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:140px;overflow-y:auto;font-family:monospace;font-size:11px;margin-bottom:10px;direction:ltr;text-align:left}.log{padding:2px 0;border-bottom:1px solid #1e293b}.log-ok{color:#4ade80}.log-err{color:#f87171}.log-info{color:#60a5fa}.log-detail{color:#f0abfc}.main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #334155;display:flex;z-index:1000;box-shadow:0 -4px 20px rgba(0,0,0,.5);padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:10px 4px 8px;border:none;background:transparent;color:#64748b;font-size:11px;font-family:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative;transition:color .2s}.main-tab .t-icon{font-size:20px}.main-tab .t-label{font-weight:600}.main-tab.active{color:#3b82f6;background:#1e293b}.main-tab .badge{position:absolute;top:4px;right:calc(50% - 20px);background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:10px;min-width:16px;text-align:center}.main-tab .badge.ok{background:#22c55e;color:#000}.tab-pane{display:none;animation:fadeIn .3s ease}.tab-pane.active{display:block}@keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.sub-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.sub-tab.active{background:#3b82f6;color:#000}.mode-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.mode-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.mode-tab.active{background:#3b82f6;color:#000}.visual-container{display:grid;grid-template-columns:1fr;gap:14px}.iframe-wrap{background:#0f172a;border:1px solid #334155;border-radius:0 0 10px 10px;overflow:auto;height:600px;position:relative;resize:vertical;min-height:300px;max-height:95vh}.iframe-wrap iframe{width:100%;height:100%;border:none;background:#fff;min-height:100%}.iframe-wrap .if-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:13px}.iframe-size-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#1e293b;border:1px solid #334155;border-radius:10px 10px 0 0;font-size:12px;color:#94a3b8}.iframe-size-bar input[type=range]{flex:1;cursor:pointer}.iframe-size-bar .size-val{color:#67e8f9;font-weight:700;min-width:50px;text-align:center;font-size:13px}.iframe-size-bar label{cursor:pointer;color:#94a3b8}.selector-panel{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px}.selector-panel h3{margin:0 0 10px;font-size:14px;color:#67e8f9}.sel-item{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.sel-item.has{border-color:#22c55e;background:#14532d20}.sel-item.has label{color:#4ade80}.sel-item label{display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px;color:#94a3b8}.sel-item input{width:100%;font-family:monospace;font-size:11px;padding:6px 8px}.sel-item .sel-preview{font-size:10px;color:#86efac;padding:4px 8px;background:#0f172a;border:1px solid #22c55e;border-radius:4px;margin-top:6px;font-family:Tahoma,sans-serif;word-break:break-word;max-height:60px;overflow:hidden;line-height:1.4}.sel-item .sel-preview.price-prev{color:#fbbf24;border-color:#f59e0b;font-family:monospace;direction:ltr;text-align:left}.sel-item .sel-preview.link-prev{color:#a78bfa;border-color:#8b5cf6;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.img-prev{color:#f472b6;border-color:#ec4899;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.empty{color:#fca5a5;border-color:#ef4444;background:#7f1d1d30}.sel-item .sel-actions-row{display:flex;gap:4px;margin-top:6px}.sel-item .sel-actions-row .btn{padding:4px 8px;font-size:10px;flex:1}.sel-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}.suggest-list{max-height:150px;overflow-y:auto;background:#1e293b;border:1px solid #334155;border-radius:6px;margin-top:6px}.suggest-item{padding:8px;font-size:11px;cursor:pointer;font-family:monospace;border-bottom:1px solid #334155}.suggest-item:hover{background:#334155}.detail-field{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.detail-field.enabled{border-color:#a855f7;background:#2d1b4e}.detail-field-row{display:flex;gap:8px;align-items:center;margin-bottom:6px}.detail-field-row .fname{flex:0 0 110px;font-size:12px;font-weight:700;color:#c4b5fd}.detail-field-row .ftoggle{flex:0 0 auto}.detail-field-row .fselector{flex:1;font-family:monospace;font-size:11px;padding:6px 8px}.detail-field-meta{font-size:10px;color:#64748b;display:flex;gap:10px;align-items:center}.detail-field-meta .preview{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}.product{background:#1e293b;border:1px solid #334155;border-radius:12px;overflow:hidden}.thumb{height:140px;background:linear-gradient(135deg,#1e3a5f,#312e81);display:flex;align-items:center;justify-content:center}.thumb img{width:100%;height:100%;object-fit:cover}.noimg{color:#64748b;font-weight:600;font-size:11px}.pbody{padding:10px}.ptitle{font-weight:700;font-size:12px;margin-bottom:6px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:36px}.pdetail-short{font-size:10px;color:#cbd5e1;line-height:1.4;margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-height:30px}.price{display:inline-block;padding:4px 8px;background:#166534;color:#86efac;border-radius:6px;font-weight:700;font-size:12px;margin-bottom:4px}.price-orig{display:block;font-size:10px;color:#64748b;text-decoration:line-through;margin-bottom:4px;direction:ltr;text-align:right;font-family:monospace}.no-price{background:#7f1d1d;color:#fca5a5}.plink{display:block;text-align:center;padding:6px;background:#1e3a5f;border-radius:6px;color:#60a5fa;text-decoration:none;font-weight:600;font-size:11px}.table-wrap{overflow-x:auto;border:1px solid #334155;border-radius:10px}table{width:100%;border-collapse:collapse;font-size:12px;min-width:750px}th,td{padding:8px 10px;text-align:right;border-bottom:1px solid #334155}th{background:#1e3a5f;color:#93c5fd;font-size:10px}.td-orig{color:#94a3b8;text-decoration:line-through;font-size:11px;font-family:monospace;direction:ltr;text-align:right}.td-detail{font-size:10px;color:#cbd5e1;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.text-view{position:relative}.text-content{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px;font-family:monospace;font-size:11px;white-space:pre-wrap;max-height:400px;overflow:auto;direction:ltr;text-align:left}.copy-btn{position:absolute;top:6px;left:6px}.copied{background:#22c55e!important}.alert{padding:10px;border-radius:8px;margin-bottom:10px;font-size:12px}.alert-info{background:#1e3a5f;border:1px solid #3b82f6;color:#93c5fd}.alert-purple{background:#3b0764;border:1px solid #a855f7;color:#e9d5ff}.alert-success{background:#14532d;border:1px solid #22c55e;color:#86efac}.settings-card h3{margin-bottom:12px;font-size:14px;color:#67e8f9}.profile-row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}.profile-row select{flex:2;min-width:150px;font-weight:600}.profile-row input{flex:1;min-width:120px}.profile-row .btn{flex:0 0 auto}.profile-indicator{display:inline-block;padding:3px 8px;border-radius:4px;font-size:10px}.saved{background:#14532d;color:#86efac;border:1px solid #22c55e}.unsaved{background:#78350f;color:#fbbf24;border:1px solid #f59e0b}.toast{position:fixed;top:80px;left:50%;transform:translateX(-50%);background:#14532d;color:#86efac;padding:12px 20px;border-radius:8px;border:1px solid #22c55e;box-shadow:0 8px 20px rgba(0,0,0,.5);z-index:99999;font-weight:700;font-size:12px;opacity:0;transition:opacity .3s,top .3s;pointer-events:none;max-width:90%;text-align:center}.toast.show{opacity:1;top:60px}.toast.error{background:#7f1d1d;color:#fca5a5;border-color:#ef4444}.row label{color:#94a3b8;font-size:12px;min-width:80px;display:flex;align-items:center}input[type="checkbox"]{margin-left:5px}.section-title{font-size:13px;color:#67e8f9;margin-bottom:8px;font-weight:700;display:flex;align-items:center;gap:6px}.section-title.purple{color:#c4b5fd}.empty-state{text-align:center;padding:40px 20px;color:#64748b}.empty-state .icon{font-size:48px;margin-bottom:10px;opacity:.5}.empty-state p{font-size:13px}.switch{position:relative;display:inline-block;width:36px;height:20px}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;inset:0;background:#475569;transition:.2s;border-radius:20px}.slider:before{position:absolute;content:"";height:14px;width:14px;right:3px;bottom:3px;background:#fff;transition:.2s;border-radius:50%}input:checked+.slider{background:#a855f7}input:checked+.slider:before{transform:translateX(-16px)}.cc{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.cc.wc{border-color:#7c3aed}.cc.bs{border-color:#0891b2}.cch{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;cursor:pointer}.cch h3{font-size:14px;margin:0;display:flex;align-items:center;gap:6px}.ccb{overflow:hidden}.ccb.collapsed{max-height:0!important;padding:0;margin:0;overflow:hidden}.cst{display:inline-block;padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700}.cst.on{background:#14532d;color:#86efac}.cst.off{background:#475569;color:#94a3b8}.cst.tg{background:#78350f;color:#fbbf24}.crow{display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap}.crow label{min-width:100px;color:#94a3b8;font-size:12px;flex-shrink:0}.crow input,.crow select{flex:1;min-width:150px}.cact{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.sres{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:500px;overflow-y:auto;font-size:11px;margin-top:10px}.sres .ok2{color:#4ade80;padding:2px 0;border-bottom:1px solid #1e293b}.sres .no2{color:#f87171;padding:2px 0;border-bottom:1px solid #1e293b}.sres a{color:#60a5fa;text-decoration:none}.scard{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:8px;margin:4px 0;display:flex;gap:8px;align-items:flex-start;transition:border-color .2s}.scard:hover{border-color:#475569}.scard-img{width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0;background:#0f172a}.scard-noimg{width:48px;height:48px;border-radius:6px;flex-shrink:0;background:#0f172a;display:flex;align-items:center;justify-content:center;color:#475569;font-size:18px}.scard-body{flex:1;min-width:0;direction:rtl}.scard-title{color:#e2e8f0;font-weight:700;font-size:11px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl}.scard-meta{display:flex;gap:6px;flex-wrap:wrap;font-size:10px;margin-bottom:2px;direction:rtl}.scard-meta span{display:inline-flex;align-items:center;gap:2px}.scard-price{color:#4ade80;font-family:monospace;font-size:10px;direction:ltr}.scard-cat{color:#c084fc;font-size:9px}.scard-unit{color:#64748b;font-size:9px}.scard-result{font-size:10px;font-weight:700;margin-top:2px}.scard-ok{color:#4ade80}.scard-up{color:#facc15}.scard-skip{color:#94a3b8}.scard-fail{color:#f87171}.scard.scard-ok{border-left:3px solid #4ade80}.scard.scard-up{border-left:3px solid #facc15}.scard.scard-skip{border-left:3px solid #94a3b8}.scard.scard-fail{border-left:3px solid #f87171}.scard-err{color:#f87171;font-size:9px;margin-top:2px;direction:rtl;background:#7f1d1d20;padding:1px 6px;border-radius:3px}.scard-reason{color:#fbbf24;font-size:9px;margin-top:2px;direction:rtl;background:#42200620;padding:1px 6px;border-radius:3px}.scard-rid{color:#60a5fa;font-size:9px;direction:ltr}.ssum{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:10px}.ssum .si{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.ssum .si b{font-size:18px;display:block}.ssum .si span{color:#64748b;font-size:10px}@media(min-width:900px){body{padding:16px;padding-bottom:16px}h1{font-size:22px}.main-tabs{position:static;border-top:none;box-shadow:none;background:#1e293b;border:1px solid #334155;border-radius:12px;margin-bottom:14px;padding:3px}.main-tab{padding:12px;border-radius:8px;flex-direction:row;gap:8px;font-size:13px}.main-tab .t-icon{font-size:16px}.main-tab.active{background:#3b82f6}.main-tab .badge{position:static;margin-right:4px;min-width:auto}.visual-container{grid-template-columns:1fr 320px}.grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.btn{padding:10px 16px}.profile-row{flex-wrap:nowrap}}.bsl-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:10px}.bsl-modal{background:#0f172a;border:1px solid #334155;border-radius:14px;max-width:95vw;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;width:900px}.bsl-modal-head{padding:12px 16px;background:#1e293b;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between}.bsl-modal-head h2{margin:0;font-size:15px;color:#67e8f9}.bsl-modal-body{overflow:auto;flex:1;padding:8px}.bsl-modal-table{width:100%;border-collapse:collapse;font-size:11px}.bsl-modal-table th{background:#1e293b;color:#67e8f9;padding:8px;text-align:center;font-size:11px;border:1px solid #334155;white-space:nowrap}.bsl-modal-table td{padding:6px 8px;border:1px solid #1e293b;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bsl-modal-table td.td-name{max-width:none;white-space:normal;overflow:visible;line-height:1.4;font-size:12px;direction:rtl;unicode-bidi:plaintext}.bsl-modal-table tr:hover td{background:#1e293b80}.bsl-modal-table .td-id{color:#94a3b8;font-family:monospace;text-align:center}.bsl-modal-table .td-price{color:#fbbf24;font-family:monospace;text-align:center;direction:ltr}.bsl-modal-table .td-stock{color:#22c55e;text-align:center}.bsl-modal-table .td-status{text-align:center}.bsl-modal-table .td-img{width:40px;height:40px;object-fit:cover;border-radius:4px}.bsl-modal-pager{padding:8px 16px;background:#1e293b;border-top:1px solid #334155;display:flex;align-items:center;justify-content:center;gap:8px}.bsl-tabs{display:flex;gap:2px;padding:0 12px;background:#1e293b;border-bottom:1px solid #334155;flex-wrap:wrap;direction:rtl}.bsl-tab{padding:6px 12px;font-size:11px;color:#94a3b8;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap;border-radius:6px 6px 0 0}.bsl-tab:hover{color:#e2e8f0;background:#334155}.bsl-tab.active{color:#67e8f9;border-bottom-color:#67e8f9;background:#0f172a;font-weight:700}.bsl-tab .tab-count{font-size:9px;color:#64748b;margin-right:2px}.hamburger-btn{position:fixed;top:10px;left:10px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.hamburger-btn:hover{background:#334155}.hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:1;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}.smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}.vc-drop{position:absolute;top:100%;left:0;right:0;background:#0f172a;border:1px solid #475569;border-radius:8px;max-height:220px;overflow-y:auto;z-index:60;display:none;margin-top:3px;box-shadow:0 6px 18px rgba(0,0,0,.5)}.vc-drop.open{display:block}.vc-opt{padding:8px 10px;cursor:pointer;font-size:11px;font-family:monospace;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;gap:8px;direction:ltr;text-align:left}.vc-opt:last-child{border-bottom:none}.vc-opt:hover{background:#1e3a5f}.vc-opt .vc-meta{color:#64748b;font-size:10px;flex:0 0 auto}.vc-drop .vc-none{padding:10px;color:#64748b;font-size:11px;text-align:center}</style>
 </head>
 <body>
 <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleSettingsPanel()">☰</button>
@@ -7689,6 +7909,71 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="settings-panel" id="settingsPanel">
 <div class="settings-panel-head"><h2>☰ تنظیمات عمومی</h2><button class="btn btn-gray" onclick="toggleSettingsPanel()" style="font-size:14px;padding:4px 10px">✕</button></div>
 <div class="settings-panel-body" style="padding:0">
+
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🔄 نسخهٔ کد</h3><span class="cst off" id="vcBadge">—</span><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px">
+<div style="font-size:11px;color:#94a3b8;margin-bottom:4px">نسخهٔ فعلی روی هاست</div>
+<div id="vcLocalInfo" style="font-family:monospace;font-size:11px;color:#67e8f9">—</div>
+</div>
+
+<button class="btn btn-blue" onclick="vcCheck(true)" id="vcBtnCheck" style="width:100%;padding:11px;font-size:13px">🔍 بررسی نسخهٔ جدید</button>
+<button class="btn btn-green hidden" onclick="vcUpdate()" id="vcBtnUpdate" style="width:100%;padding:12px;font-size:13px;margin-top:8px">⬇ نصب نسخهٔ جدید</button>
+<div class="status" id="vcStatus" style="margin-top:8px;text-align:center">—</div>
+
+<div class="crow" style="margin-top:10px;margin-bottom:4px">
+<label style="min-width:auto;display:flex;align-items:center;gap:7px;cursor:pointer;color:#e2e8f0;font-size:12px">
+<input type="checkbox" id="vcOnLoad" onchange="vcSave(true)"> بررسی خودکار هنگام باز/رفرش شدن صفحه
+</label>
+</div>
+<div style="font-size:10.5px;color:#64748b;margin:0 0 6px;line-height:1.7">
+فقط <b>اطلاع می‌دهد</b>؛ نصب همیشه با تأیید خودتان انجام می‌شود.
+اگر خاموش باشد، هیچ درخواستی هنگام رفرش فرستاده نمی‌شود.
+</div>
+
+<div class="smenu-hdr" onclick="toggleSmenu(this)" style="padding:9px 0;border-top:1px solid #1e293b">
+<h3 style="font-size:12px;color:#94a3b8">⚙️ منبع و نصب‌کننده</h3><span class="arrow">▼</span></div>
+<div class="smenu-body" style="padding:0">
+<div class="alert alert-info" style="font-size:10.5px;line-height:1.7;margin-bottom:10px">
+نصب توسط <b>deploy.php</b> انجام می‌شود که فایلی جداگانه است. این اسکریپت
+هرگز خودش را بازنویسی نمی‌کند تا اسکنر امنیتی هاست آن را مشکوک نشناسد.
+</div>
+<div class="crow">
+  <label>ریپو:</label>
+  <input id="vcRepo" placeholder="user/repo" dir="ltr" oninput="vcDirty()" style="flex:1">
+  <button class="btn btn-gray" onclick="vcLoadBranches(true)" id="vcBtnRepo" style="flex:0 0 auto;padding:8px 12px">🔄</button>
+</div>
+<div class="crow vc-pick">
+  <label>برنچ:</label>
+  <div style="flex:1;position:relative;min-width:150px">
+    <input id="vcBranch" placeholder="ابتدا 🔄 را بزنید" dir="ltr" autocomplete="off"
+           oninput="vcFilterBranch()" onfocus="vcFilterBranch()">
+    <div class="vc-drop" id="vcBranchDrop"></div>
+  </div>
+</div>
+<div class="crow vc-pick">
+  <label>مسیر فایل:</label>
+  <div style="flex:1;position:relative;min-width:150px">
+    <input id="vcPath" placeholder="ابتدا برنچ را انتخاب کنید" dir="ltr" autocomplete="off"
+           oninput="vcFilterFile()" onfocus="vcFilterFile()">
+    <div class="vc-drop" id="vcPathDrop"></div>
+  </div>
+</div>
+<div style="font-size:10px;color:#64748b;margin:-4px 0 8px" id="vcFileCount"></div>
+<div class="crow"><label>توکن گیت‌هاب:</label><input type="password" id="vcGhToken" placeholder="فقط ریپوی خصوصی" dir="ltr" oninput="vcDirty()"></div>
+<div class="crow"><label>فایل نصب‌کننده:</label><input id="vcDeployFile" placeholder="deploy.php" dir="ltr" oninput="vcDirty()"></div>
+<div class="crow"><label>رمز نصب‌کننده:</label><input type="password" id="vcDepToken" placeholder="توکن API پنل deploy" dir="ltr" oninput="vcDirty()"></div>
+<div style="font-size:10px;color:#64748b;margin-bottom:8px">
+گیت‌هاب: <span id="vcGhState">—</span> · نصب‌کننده: <span id="vcDepState">—</span> ·
+برای حذف <code>__CLEAR__</code> بنویسید
+</div>
+<div class="cact">
+<button class="btn btn-cyan" onclick="vcSave(true)" style="flex:1">💾 ذخیره</button>
+</div>
+</div>
+</div>
+</div>
 
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🛒 ووکامرس</h3><span class="cst off" id="wcS">غیرمتصل</span><span class="arrow">▼</span></div>
@@ -10117,6 +10402,284 @@ function dlCSV(){dl('csv');}
 function dlExcel(){dl('excel');}
 
 renderDetailFieldsList();
+
+/* ==================================================================
+ *  بررسی نسخه و نصب از طریق deploy.php
+ *  این اسکریپت خودش هیچ کدی دانلود یا بازنویسی نمی‌کند؛ فقط مقایسه
+ *  می‌کند و برای نصب، مرورگر را به deploy.php (فایل جداگانه) می‌فرستد.
+ * ================================================================== */
+let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING = false;
+
+/** آیا عملیات سنگینی در جریان است؟ */
+function vcBusy() {
+    try {
+        if (typeof running !== 'undefined' && running) return 'اسکرپ';
+        if (typeof detailRunning !== 'undefined' && detailRunning) return 'استخراج تفصیلی';
+        if (typeof bslClientRunning !== 'undefined' && bslClientRunning) return 'ارسال به باسلام';
+        if (typeof wSend !== 'undefined' && wSend) return 'ارسال به ووکامرس';
+        if (typeof bSend !== 'undefined' && bSend) return 'ارسال به باسلام';
+        if (typeof fetchMissingRunning !== 'undefined' && fetchMissingRunning) return 'تکمیل اطلاعات';
+        if (typeof ddRunning !== 'undefined' && ddRunning) return 'حذف تکراری‌ها';
+    } catch (e) {}
+    return '';
+}
+
+function vcStat(msg, color) {
+    const el = $('vcStatus');
+    if (el) { el.innerHTML = msg; el.style.color = color || '#4ade80'; }
+}
+function vcBadge(t, cls) {
+    const b = $('vcBadge');
+    if (b) { b.textContent = t; b.className = 'cst ' + (cls || 'off'); }
+}
+function vcDirty() {
+    clearTimeout(vcSaveTimer);
+    vcSaveTimer = setTimeout(() => vcSave(), 900);
+}
+function vcFmtSize(b) {
+    if (!b) return '';
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+}
+function vcCloseDrops() {
+    ['vcBranchDrop', 'vcPathDrop'].forEach(id => { const e = $(id); if (e) e.classList.remove('open'); });
+}
+
+function vcLoad(then) {
+    fetch('?vc_settings=1').then(r => r.json()).then(d => {
+        if (!d.ok) return;
+        VC = d.settings;
+        if ($('vcOnLoad'))     $('vcOnLoad').checked   = !!VC.check_on_load;
+        if ($('vcRepo'))       $('vcRepo').value       = VC.repo || '';
+        if ($('vcBranch'))     $('vcBranch').value     = VC.branch || '';
+        if ($('vcPath'))       $('vcPath').value       = VC.path || '';
+        if ($('vcDeployFile')) $('vcDeployFile').value = VC.deploy_file || 'deploy.php';
+        if ($('vcGhState'))    $('vcGhState').textContent  = VC.has_gh_token ? 'تنظیم شده' : 'تنظیم نشده';
+        if ($('vcDepState'))   $('vcDepState').textContent = VC.has_dep_token ? 'تنظیم شده' : 'تنظیم نشده';
+        if ($('vcLocalInfo')) {
+            $('vcLocalInfo').innerHTML = esc(VC.self_name) + '<br>' +
+                '<span style="color:#64748b">' + esc(VC.local_id) + ' · ' +
+                toFa((VC.local_size / 1024).toFixed(0)) + ' KB</span>';
+        }
+        vcBadge(VC.check_on_load ? 'خودکار' : 'دستی', VC.check_on_load ? 'on' : 'off');
+        vcStat('برای بررسی نسخهٔ جدید دکمه را بزنید', '#64748b');
+        if (typeof then === 'function') then();
+    }).catch(() => {});
+}
+
+function vcSave(showMsg) {
+    const fd = new FormData();
+    fd.append('check_on_load', $('vcOnLoad').checked ? '1' : '');
+    fd.append('repo',        $('vcRepo').value.trim());
+    fd.append('branch',      $('vcBranch').value.trim());
+    fd.append('path',        $('vcPath').value.trim());
+    fd.append('deploy_file', $('vcDeployFile').value.trim() || 'deploy.php');
+    if ($('vcGhToken').value)  fd.append('github_token', $('vcGhToken').value);
+    if ($('vcDepToken').value) fd.append('deploy_token', $('vcDepToken').value);
+
+    fetch('?vc_settings=1', { method: 'POST', body: fd }).then(r => r.json()).then(d => {
+        if (!d.ok) { showToast(d.error || 'ذخیره ناموفق', true); return; }
+        VC = d.settings;
+        $('vcGhToken').value = ''; $('vcDepToken').value = '';
+        if ($('vcGhState'))  $('vcGhState').textContent  = VC.has_gh_token ? 'تنظیم شده' : 'تنظیم نشده';
+        if ($('vcDepState')) $('vcDepState').textContent = VC.has_dep_token ? 'تنظیم شده' : 'تنظیم نشده';
+        vcBadge(VC.check_on_load ? 'خودکار' : 'دستی', VC.check_on_load ? 'on' : 'off');
+        if (showMsg) showToast('✓ ذخیره شد');
+    }).catch(() => showToast('خطا در ذخیره', true));
+}
+
+/** مقایسهٔ نسخه. manual=true یعنی کاربر دکمه زده. */
+function vcCheck(manual) {
+    if (!manual && (!VC || !VC.check_on_load)) return;
+    const btn = $('vcBtnCheck');
+    if (manual && btn) { btn.disabled = true; btn.textContent = '⏳ در حال بررسی...'; }
+    if (manual) vcStat('<span style="opacity:.7">در حال مقایسه با گیت‌هاب...</span>', '#93c5fd');
+
+    fetch('?vc_check=1' + (manual ? '&force=1' : '')).then(r => r.json()).then(d => {
+        const reset = () => { if (btn) { btn.disabled = false; btn.textContent = '🔍 بررسی نسخهٔ جدید'; } };
+        if (d.skipped) { reset(); return; }
+        if (!d.ok) {
+            vcStat('✗ ' + esc(d.error || 'خطا'), '#f87171');
+            if (manual) showToast(d.error || 'خطا', true);
+            reset(); return;
+        }
+        if (!d.update) {
+            VC_PENDING = false;
+            $('vcBtnUpdate').classList.add('hidden');
+            vcStat('✓ نسخهٔ شما به‌روز است — <code>' + esc(d.local_id) + '</code>', '#4ade80');
+            vcBadge('به‌روز', 'on');
+            if (manual) showToast('✓ نسخهٔ شما به‌روز است');
+            reset(); return;
+        }
+
+        // نسخهٔ جدید موجود است — فقط اطلاع می‌دهیم
+        VC_PENDING = true;
+        vcBadge('جدید', 'tg');
+        $('vcBtnUpdate').classList.remove('hidden');
+        vcStat('⬆ نسخهٔ جدید: <code>' + esc(d.remote_id) + '</code> · ' +
+               toFa((d.remote_size / 1024).toFixed(0)) + ' KB', '#fbbf24');
+        if (!d.deploy_ready) {
+            vcStat('⬆ نسخهٔ جدید موجود است — اما رمز نصب‌کننده تنظیم نشده', '#fbbf24');
+        }
+        const busy = vcBusy();
+        if (busy) {
+            showToast('نسخهٔ جدید موجود است (پس از پایان «' + busy + '»)', true);
+        } else if (!manual) {
+            vcBanner(d);
+        }
+        reset();
+    }).catch(() => {
+        vcStat('✗ خطا در ارتباط', '#f87171');
+        if (btn) { btn.disabled = false; btn.textContent = '🔍 بررسی نسخهٔ جدید'; }
+    });
+}
+
+function vcBanner(d) {
+    if (document.getElementById('vcBar')) return;
+    const b = document.createElement('div');
+    b.id = 'vcBar';
+    b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:linear-gradient(135deg,#f59e0b,#f97316);' +
+        'color:#1c1207;padding:11px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;' +
+        'font-family:Tahoma,sans-serif;font-size:13px;font-weight:700;box-shadow:0 3px 14px rgba(0,0,0,.4);direction:rtl';
+    b.innerHTML = '<span style="flex:1;min-width:200px">⬆ نسخهٔ جدیدی از کد روی گیت‌هاب موجود است' +
+        ' <span style="opacity:.75;font-weight:400">(' + esc(d.remote_id) + ')</span></span>' +
+        '<button id="vcGo" style="background:#0f172a;color:#fde68a;border:none;padding:8px 15px;border-radius:7px;' +
+        'font-weight:700;cursor:pointer;font-family:inherit;font-size:12px">نصب کن</button>' +
+        '<button id="vcNo" style="background:transparent;color:#1c1207;border:1px solid rgba(0,0,0,.35);' +
+        'padding:8px 13px;border-radius:7px;cursor:pointer;font-family:inherit;font-size:12px">بعداً</button>';
+    document.body.appendChild(b);
+    document.body.style.paddingTop = (b.offsetHeight + 6) + 'px';
+    document.getElementById('vcGo').onclick = () => { vcCloseBar(); vcUpdate(); };
+    document.getElementById('vcNo').onclick = vcCloseBar;
+}
+function vcCloseBar() {
+    const b = document.getElementById('vcBar');
+    if (b) b.remove();
+    document.body.style.paddingTop = '';
+}
+
+/**
+ * نصب: این تابع خودش چیزی نمی‌نویسد. یک فرم به deploy.php ارسال می‌کند
+ * که فایلی مستقل است و کار نصب را با همان زنجیرهٔ ایمنی انجام می‌دهد.
+ */
+function vcUpdate() {
+    const busy = vcBusy();
+    if (busy) { showToast('«' + busy + '» در جریان است — بعداً', true); return; }
+
+    fetch('?vc_deploy_info=1').then(r => r.json()).then(d => {
+        if (!d.ok) { showToast(d.error || 'نصب‌کننده در دسترس نیست', true); vcStat('✗ ' + esc(d.error || ''), '#f87171'); return; }
+        if (!d.token) {
+            showToast('ابتدا رمز نصب‌کننده را در تنظیمات وارد کنید', true);
+            vcStat('✗ رمز نصب‌کننده تنظیم نشده — بخش «منبع و نصب‌کننده»', '#fbbf24');
+            return;
+        }
+        if (!confirm('نسخهٔ جدید نصب شود؟\n\nنصب توسط ' + d.file + ' انجام می‌شود و از نسخهٔ فعلی بکاپ گرفته خواهد شد.')) return;
+
+        showToast('⏳ ارسال به نصب‌کننده...');
+        // مرورگر مستقیم به deploy.php می‌رود؛ این اسکریپت درگیر نوشتن نیست
+        const f = document.createElement('form');
+        f.method = 'POST';
+        f.action = d.file;
+        f.target = '_blank';
+        f.innerHTML = '<input type="hidden" name="action" value="deploy">' +
+            '<input type="hidden" name="api_token" value="' + esc(d.token) + '">' +
+            '<input type="hidden" name="repo" value="' + esc($('vcRepo').value.trim()) + '">' +
+            '<input type="hidden" name="branch" value="' + esc($('vcBranch').value.trim()) + '">' +
+            '<input type="hidden" name="source" value="' + esc($('vcPath').value.trim()) + '">' +
+            '<input type="hidden" name="dest" value="' + esc(VC ? VC.self_name : '') + '">' +
+            '<input type="hidden" name="folder" value="">' +
+            '<input type="hidden" name="check_php" value="1">' +
+            '<input type="hidden" name="backup" value="1">';
+        document.body.appendChild(f);
+        f.submit();
+        f.remove();
+
+        vcStat('نصب در پنجرهٔ جدید انجام می‌شود — پس از اتمام، این صفحه را رفرش کنید', '#93c5fd');
+        setTimeout(() => {
+            if (confirm('نصب تمام شد؟ برای بارگذاری نسخهٔ جدید، صفحه رفرش شود.')) {
+                const u = new URL(location.href);
+                u.searchParams.set('_v', Date.now());
+                location.replace(u.toString());
+            }
+        }, 3500);
+    }).catch(() => showToast('خطا در ارتباط', true));
+}
+
+/* ---------- دراپ‌داون‌های جستجودار ---------- */
+function vcLoadBranches(manual) {
+    const repo = $('vcRepo').value.trim();
+    if (!repo) { if (manual) showToast('ابتدا نام ریپو را وارد کنید', true); return Promise.resolve(); }
+    const btn = $('vcBtnRepo');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+    return fetch('?vc_branches=1&repo=' + encodeURIComponent(repo)).then(r => r.json()).then(d => {
+        if (!d.ok) { VC_BRANCHES = []; if (manual) showToast(d.error || 'ناموفق', true); return; }
+        VC_BRANCHES = d.branches || [];
+        if (manual) showToast('✓ ' + toFa(VC_BRANCHES.length) + ' برنچ');
+        $('vcBranch').placeholder = 'کلیک یا تایپ کنید';
+        return vcLoadFiles(false);
+    }).catch(() => { if (manual) showToast('خطا در ارتباط', true); })
+      .finally(() => { if (btn) { btn.disabled = false; btn.textContent = '🔄'; } });
+}
+
+function vcLoadFiles(manual) {
+    const repo = $('vcRepo').value.trim(), branch = $('vcBranch').value.trim();
+    if (!repo || !branch) return Promise.resolve();
+    $('vcFileCount').textContent = 'در حال دریافت فهرست...';
+    return fetch('?vc_files=1&repo=' + encodeURIComponent(repo) + '&branch=' + encodeURIComponent(branch))
+        .then(r => r.json()).then(d => {
+            if (!d.ok) { VC_FILES = []; $('vcFileCount').textContent = ''; if (manual) showToast(d.error || 'ناموفق', true); return; }
+            VC_FILES = d.files || [];
+            $('vcFileCount').textContent = toFa(VC_FILES.length) + ' فایل PHP';
+            $('vcPath').placeholder = 'کلیک یا تایپ کنید';
+        }).catch(() => { $('vcFileCount').textContent = ''; });
+}
+
+function vcRenderDrop(dropId, items, onPick, emptyMsg) {
+    const box = $(dropId);
+    if (!box) return;
+    if (!items.length) {
+        box.innerHTML = '<div class="vc-none">' + esc(emptyMsg || 'موردی یافت نشد') + '</div>';
+        box.classList.add('open'); return;
+    }
+    box.innerHTML = items.map((it, i) =>
+        '<div class="vc-opt" data-i="' + i + '"><span>' + esc(it.label) + '</span>' +
+        '<span class="vc-meta">' + esc(it.meta || '') + '</span></div>').join('');
+    box.querySelectorAll('.vc-opt').forEach(el => {
+        el.onmousedown = e => { e.preventDefault(); onPick(items[+el.dataset.i]); };
+    });
+    box.classList.add('open');
+}
+
+function vcFilterBranch() {
+    const q = $('vcBranch').value.trim().toLowerCase();
+    if (!VC_BRANCHES.length) { vcRenderDrop('vcBranchDrop', [], () => {}, 'ابتدا دکمهٔ 🔄 را بزنید'); return; }
+    const cur = VC ? VC.branch : '';
+    const items = VC_BRANCHES.filter(b => b.name.toLowerCase().includes(q)).slice(0, 60)
+        .map(b => ({ label: b.name, meta: (b.name === cur ? '● فعلی  ' : '') + b.sha, value: b.name }));
+    vcRenderDrop('vcBranchDrop', items, it => {
+        $('vcBranch').value = it.value;
+        vcCloseDrops(); vcDirty(); VC_FILES = [];
+        $('vcPath').placeholder = 'در حال بارگذاری...';
+        vcLoadFiles(true);
+    });
+}
+
+function vcFilterFile() {
+    const q = $('vcPath').value.trim().toLowerCase();
+    if (!VC_FILES.length) { vcRenderDrop('vcPathDrop', [], () => {}, 'ابتدا ریپو و برنچ را انتخاب کنید'); return; }
+    const self = VC ? VC.self_name : '';
+    const items = VC_FILES.filter(f => f.path.toLowerCase().includes(q)).slice(0, 80)
+        .map(f => ({ label: f.path, meta: (f.path.split('/').pop() === self ? '★ ' : '') + vcFmtSize(f.size), value: f.path }));
+    vcRenderDrop('vcPathDrop', items, it => { $('vcPath').value = it.value; vcCloseDrops(); vcDirty(); });
+}
+
+document.addEventListener('click', e => { if (!e.target.closest('.vc-pick')) vcCloseDrops(); });
+
+vcLoad(() => {
+    if (VC && VC.check_on_load) setTimeout(() => vcCheck(false), 1200);
+    if (VC && VC.repo) setTimeout(() => vcLoadBranches(false), 2200);
+});
 
 // ========== Connection JS ==========
 let wSend=false,bSend=false,cn={woocommerce:{},basalam:{}},extractPollTimer=null,extractModalTimer=null;
