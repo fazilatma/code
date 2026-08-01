@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.32';
+const APP_VERSION = '8.33';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4098,9 +4098,46 @@ $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($orderedProducts);
 $results['profiles'][] = $pResult;
 }
 saveSyncState($syncState);
+
+// v8.33: مرحلهٔ نگهبان — اگر ارسالی وسط راه گیر کرده، ادامه‌اش بده.
+// هزینه‌اش وقتی چیزی گیر نکرده صفر است: فقط چند خط خواندن از فایل.
+$stallCfg  = (int)($cn['stall_after'] ?? 300);
+$stallWake = !isset($cn['stall_watchdog']) || !empty($cn['stall_watchdog']);
+if ($stallWake) {
+    $results['watchdog'] = [];
+    foreach (['bsl', 'woo'] as $wq) {
+        $w = queueStallRecover($wq, $stallCfg);
+        if (!empty($w['stalled'])) {
+            $results['watchdog'][] = $w;
+            notifRunFailure($cn, 'نگهبان صف',
+                $wq === 'bsl' ? 'باسلام' : 'ووکامرس',
+                'ارسال ' . ($w['kind'] === 'waiting' ? 'در صف مانده بود' : 'گیر کرده بود')
+                . ' (' . (int)($w['idle'] ?? 0) . ' ثانیه بی‌حرکت، '
+                . (int)($w['current'] ?? 0) . '/' . (int)($w['total'] ?? 0) . ') — '
+                . (!empty($w['resumed']) ? 'خودکار ادامه داده شد ✅' : 'ادامه ناموفق ❌'));
+        }
+    }
+}
+
 $notifyResult = bslCheckNotifications($cn);
 if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
 echo json_encode($results, JSON_UNESCAPED_UNICODE); exit;
+}
+
+/** v8.33: بررسی/ادامهٔ دستی صف گیرکرده */
+if (isset($_GET['queue_watchdog'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cn = loadConnections();
+    $after = (int)($_GET['after'] ?? ($cn['stall_after'] ?? 300));
+    $dry   = !empty($_GET['dry']);
+    $which = (string)($_GET['which'] ?? 'both');
+    $out = [];
+    foreach (($which === 'both' ? ['bsl', 'woo'] : [$which]) as $wq) {
+        if ($wq !== 'bsl' && $wq !== 'woo') continue;
+        $out[] = queueStallRecover($wq, max(30, $after), $dry);
+    }
+    echo json_encode(['ok' => true, 'checks' => $out], JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
 // v8.19: Re-scrape a profile using its manual selectors. Returns updated products array.
@@ -4155,6 +4192,18 @@ function bslApiError(array $r, string $what, string $endpoint, string $scope = '
     if ($c === 403) return $what . ' — توکن دسترسی لازم را ندارد (۴۰۳)'
                          . ($scope !== '' ? ' · اسکوپ موردنیاز: ' . $scope : '');
     if ($c === 429) return $what . ' — تعداد درخواست بیش از حد (۴۲۹)، کمی بعد تلاش کنید';
+    // v8.33: ۴۲۲ یعنی پارامتر ورودی نامعتبر است — جزئیات را از پاسخ بیرون می‌کشیم
+    if ($c === 422) {
+        $det = [];
+        foreach ((array)($r['body']['detail'] ?? []) as $d) {
+            if (!is_array($d)) continue;
+            $loc = is_array($d['loc'] ?? null) ? end($d['loc']) : '';
+            $m   = (string)($d['msg'] ?? '');
+            if ($loc !== '' || $m !== '') $det[] = trim($loc . ' ' . $m);
+        }
+        return $what . ' — پارامتر نامعتبر (۴۲۲)'
+             . ($det ? ': ' . mb_substr(implode(' · ', $det), 0, 160) : ' در ' . $endpoint);
+    }
     if ($c === 0)   return $what . ' — ارتباط با باسلام برقرار نشد';
     return $what . ' — خطای HTTP ' . $c;
 }
@@ -4274,11 +4323,66 @@ function bslParcelMsg(array $n, string $head = '🛒 سفارش باسلام'): 
     return $s;
 }
 
-/** متن پیام‌رسان برای یک گفتگو */
-function bslChatMsg(array $n, string $head = '💬 پیام مشتری باسلام'): string {
-    return $head . "\nمشتری: " . $n['who']
-         . ($n['unseen'] > 0 ? ' (' . $n['unseen'] . ' خوانده‌نشده)' : '')
-         . "\nپیام: " . mb_substr($n['text'], 0, 300);
+/**
+ * v8.33: متن پیام‌های خوانده‌نشدهٔ یک گفتگو را می‌گیرد.
+ * فقط پیام‌های طرف مقابل برگردانده می‌شود، به ترتیب قدیم به جدید،
+ * تا در پیام‌رسان همان چیزی دیده شود که مشتری نوشته است.
+ */
+function bslMyUserId(string $tk): int {
+    static $cache = [];
+    $k = substr(md5($tk), 0, 12);
+    if (isset($cache[$k])) return $cache[$k];
+    $r = bslReq($tk, 'GET', 'users/me');
+    $id = 0;
+    if (!empty($r['ok'])) $id = (int)($r['body']['id'] ?? ($r['body']['user_id'] ?? 0));
+    return $cache[$k] = $id;
+}
+
+function bslFetchChatMessages(string $tk, int $chatId, int $limit = 10, int $myUserId = -1): array {
+    if ($chatId <= 0) return [];
+    // v8.33: پیش‌فرض یعنی «خودت پیدا کن» تا پاسخ‌های خود غرفه‌دار فیلتر شوند
+    if ($myUserId < 0) $myUserId = bslMyUserId($tk);
+    $lim = max(1, min(50, $limit));
+    $r = bslReq($tk, 'GET', 'chats/' . $chatId . '/messages?limit=' . $lim . '&order=desc');
+    if (!$r['ok']) return [];
+    $rows = $r['body']['data']['messages'] ?? ($r['body']['data'] ?? []);
+    if (!is_array($rows)) return [];
+    $out = [];
+    foreach ($rows as $m) {
+        if (!is_array($m)) continue;
+        $sid = (int)($m['sender']['id'] ?? 0);
+        if ($myUserId > 0 && $sid === $myUserId) continue;   // پیام‌های خودمان را نشان نده
+        $txt = $m['content']['text'] ?? null;
+        if (!is_string($txt) || trim($txt) === '') {
+            $mt = (string)($m['message_type'] ?? '');
+            $txt = $mt !== '' && $mt !== 'text' ? '[' . $mt . ']' : '';
+        }
+        $txt = trim((string)$txt);
+        if ($txt === '') continue;
+        $out[] = ['text' => $txt, 'at' => (string)($m['created_at'] ?? ''),
+                  'sender' => trim((string)($m['sender']['name'] ?? ''))];
+    }
+    return array_reverse($out);   // قدیمی‌ترین اول، مثل خود گفتگو
+}
+
+/**
+ * متن پیام‌رسان برای یک گفتگو.
+ * v8.33: اگر متن پیام‌ها داده شود، همه را می‌فرستد نه فقط آخری.
+ */
+function bslChatMsg(array $n, string $head = '💬 پیام مشتری باسلام', array $msgs = []): string {
+    $s = $head . "\nمشتری: " . $n['who']
+       . ($n['unseen'] > 0 ? ' (' . $n['unseen'] . ' خوانده‌نشده)' : '');
+    if ($msgs) {
+        $s .= "\n━━━━━━━━━━";
+        $budget = 3000;   // سقف امن برای بله/روبیکا
+        foreach ($msgs as $m) {
+            $line = "\n▸ " . mb_substr($m['text'], 0, 700);
+            if (mb_strlen($line) > $budget) { $s .= "\n… (بقیه در باسلام)"; break; }
+            $s .= $line; $budget -= mb_strlen($line);
+        }
+        return $s;
+    }
+    return $s . "\nپیام: " . mb_substr($n['text'], 0, 700);
 }
 
 /**
@@ -4290,7 +4394,7 @@ function notifCheckOrders(array $cn, bool $test = false, bool $send = true): arr
     $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
     $st = notifLoadState(); $since = (int)($st['last_order_check'] ?? 0);
     // v8.31: مسیر درست طبق مستندات رسمی — سفارش‌های غرفه‌دار
-    $r = bslReq($tk, 'GET', 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=10&sort=created_at:desc');
+    $r = bslReq($tk, 'GET', 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=10');
     if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
             'error' => bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read')];
 
@@ -4333,7 +4437,12 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
         if (!$test && $t <= $since) break;
         $found++;
         // v8.32: نرمال‌ساز مشترک — متن پیام زیر content.text است
-        $msg = bslChatMsg(bslNormalizeChat($c), '💬 پیام مشتری باسلام');
+        // v8.33: متن کامل پیام‌های خوانده‌نشده هم گرفته می‌شود
+        $nc = bslNormalizeChat($c);
+        $body = $nc['unseen'] > 0
+              ? bslFetchChatMessages($tk, $nc['chat_id'], min(10, $nc['unseen']))
+              : [];
+        $msg = bslChatMsg($nc, '💬 پیام مشتری باسلام', $body);
         $samples[] = $msg;
         if ($send && !$test) $sentTo = notifSend($cn, $msg);
         if ($test) break;
@@ -4350,7 +4459,7 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
 function notifCheckProducts(array $cn, bool $test = false, bool $send = true): array {
     $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
     $st = notifLoadState(); $since = (int)($st['last_product_check'] ?? 0);
-    $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=10&sort=created_at_desc&statuses=2976&statuses=3790&statuses=3567');
+    $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=10&statuses=2976&statuses=3790&statuses=3567');
     if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
             'error' => bslApiError($r, 'دریافت محصولات ناموفق', 'vendors/{id}/products', 'vendor.product.read')];
 
@@ -4380,6 +4489,109 @@ function notifCheckProducts(array $cn, bool $test = false, bool $send = true): a
         $sentTo = notifSend($cn, $msg);
     }
     return ['ok' => true, 'found' => $found, 'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+}
+
+/* =====================================================================
+ *  v8.33: نگهبان صف — تشخیص گیر کردن ارسال و ادامهٔ خودکار
+ *
+ *  چرا امن است: قفل‌های bsl_backend/woo_backend با flock گرفته می‌شوند.
+ *  اگر پردازه واقعاً زنده باشد قفل در اختیار اوست و درخواست تازه فوراً
+ *  «already running» می‌گیرد و برمی‌گردد. اگر پردازه مرده باشد، سیستم‌عامل
+ *  قفل را آزاد کرده و کار ادامه پیدا می‌کند. پس نگهبان هیچ‌وقت دو پردازش
+ *  موازی نمی‌سازد و روی سرعت ارسال اثری ندارد — فقط یک درخواست HTTP سبک
+ *  است که وقتی چیزی گیر نکرده باشد اصلاً فرستاده نمی‌شود.
+ * ===================================================================== */
+
+/** آدرس خود اسکریپت برای فراخوانی داخلی */
+function selfBaseUrl(): string {
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    if ($host === '') return '';
+    $https = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+    return ($https ? 'https' : 'http') . '://' . $host . ($_SERVER['SCRIPT_NAME'] ?? '');
+}
+
+/** یک فراخوانی «شلیک کن و فراموش کن» به خود اسکریپت */
+function fireAndForget(string $qs, int $timeoutMs = 1200): bool {
+    $base = selfBaseUrl();
+    if ($base === '') return false;
+    $ch = curl_init($base . '?' . ltrim($qs, '?'));
+    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => 1, CURLOPT_NOSIGNAL => 1,
+        CURLOPT_TIMEOUT_MS => $timeoutMs, CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_SSL_VERIFYPEER => 0, CURLOPT_SSL_VERIFYHOST => 0]);
+    curl_exec($ch);
+    $err = curl_errno($ch);
+    curl_close($ch);
+    // مهلت تمام‌شدن یعنی کار شروع شده و پس‌زمینه ادامه می‌دهد — خطا نیست
+    return $err === 0 || $err === CURLE_OPERATION_TIMEDOUT;
+}
+
+/**
+ * بررسی می‌کند صف ارسال گیر کرده یا نه.
+ * گیر کرده = ردیفی در حال اجراست ولی از آخرین پیشرفتش بیش از
+ * $staleAfter ثانیه گذشته، یا ردیفی در انتظار مانده و هیچ‌کس نمی‌بردش.
+ */
+function queueStallCheck(string $which, int $staleAfter = 300): array {
+    $isBsl = $which === 'bsl';
+    $qFile = $isBsl ? BSL_QUEUE_FILE : WOO_QUEUE_FILE;
+    $pFile = $isBsl ? BSL_PROGRESS_FILE : WOO_PROGRESS_FILE;
+    $lock  = __DIR__ . ($isBsl ? '/bsl_backend.lock' : '/woo_backend.lock');
+
+    $q = json_decode((string)@file_get_contents($qFile), true);
+    $entries = is_array($q['entries'] ?? null) ? $q['entries'] : [];
+    $running = null; $waiting = null;
+    foreach ($entries as $e) {
+        $st = $e['status'] ?? '';
+        if ($st === 'running' && $running === null) $running = $e;
+        if ($st === 'waiting' && $waiting === null) $waiting = $e;
+    }
+    if ($running === null && $waiting === null) {
+        return ['stalled' => false, 'reason' => 'صفی در جریان نیست'];
+    }
+
+    $prog = readProgress($pFile);
+    $now  = time();
+    // پردازهٔ زنده قفل را در دست دارد؛ اگر قفل باز شود یعنی پردازه رفته
+    $lockFresh = false;
+    if (is_file($lock)) {
+        $fp = @fopen($lock, 'c');
+        if ($fp) {
+            $lockFresh = !@flock($fp, LOCK_EX | LOCK_NB);   // نشد ⇒ کسی گرفته ⇒ زنده
+            if (!$lockFresh) @flock($fp, LOCK_UN);
+            @fclose($fp);
+        }
+    }
+
+    if ($running !== null) {
+        $ts = (int)($prog['last_progress_ts'] ?? 0);
+        if ($ts <= 0) $ts = (int)($running['started_at'] ?? 0);
+        $idle = $ts > 0 ? ($now - $ts) : PHP_INT_MAX;
+        if ($lockFresh && $idle <= $staleAfter) {
+            return ['stalled' => false, 'reason' => 'در حال اجرا', 'idle' => $idle];
+        }
+        if ($idle > $staleAfter) {
+            return ['stalled' => true, 'kind' => 'running', 'idle' => $idle,
+                'queue_id' => $running['id'] ?? '', 'lock_held' => $lockFresh,
+                'current' => (int)($running['current'] ?? 0),
+                'total' => (int)($running['total'] ?? 0)];
+        }
+        return ['stalled' => false, 'reason' => 'تازه شروع شده', 'idle' => $idle];
+    }
+
+    // فقط ردیف در انتظار — اگر پردازنده‌ای زنده نیست باید راهش انداخت
+    if ($lockFresh) return ['stalled' => false, 'reason' => 'پردازنده فعال است'];
+    return ['stalled' => true, 'kind' => 'waiting', 'idle' => 0,
+        'queue_id' => $waiting['id'] ?? '', 'lock_held' => false,
+        'current' => 0, 'total' => (int)($waiting['total'] ?? 0)];
+}
+
+/** اگر صف گیر کرده باشد، پردازش را دوباره راه می‌اندازد */
+function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = false): array {
+    $chk = queueStallCheck($which, $staleAfter);
+    $chk['which'] = $which;
+    if (empty($chk['stalled']) || $dryRun) { $chk['resumed'] = false; return $chk; }
+    $action = $which === 'bsl' ? 'bsl_backend' : 'woo_backend';
+    $chk['resumed'] = fireAndForget('action=' . $action);
+    return $chk;
 }
 
 /**
@@ -4548,7 +4760,7 @@ if (isset($_GET['bsl_orders_list'])) {
     }
     $per = min(30, max(5, (int)($_GET['per_page'] ?? 20)));   // سقف مستندات: ۳۰
     $filter = (string)($_GET['filter'] ?? 'all');
-    $ep = 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=' . $per . '&sort=created_at:desc';
+    $ep = 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=' . $per;
     if ($filter === 'unsent') $ep .= '&statuses=' . implode(',', bslUnsentStatuses());
     $cur = trim((string)($_GET['cursor'] ?? ''));
     if ($cur !== '') $ep .= '&cursor=' . rawurlencode($cur);
@@ -4616,7 +4828,7 @@ if (isset($_GET['bsl_notify_selected'])) {
     $digest = !empty($_GET['digest']);   // یک پیام خلاصه به‌جای چند پیام جدا
 
     if ($kind === 'orders') {
-        $r = bslReq($tk, 'GET', 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=30&sort=created_at:desc');
+        $r = bslReq($tk, 'GET', 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=30');
         if (!$r['ok']) { echo json_encode(['ok' => false,
             'error' => bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read')],
             JSON_UNESCAPED_UNICODE); exit; }
@@ -4671,9 +4883,13 @@ if (isset($_GET['bsl_notify_selected'])) {
         $sent = 1;
     } else {
         foreach ($picked as $n) {
-            $msg = $kind === 'orders'
-                 ? bslParcelMsg($n, '📦 سفارش ارسال‌نشده')
-                 : bslChatMsg($n, '💬 پیام خوانده‌نشده');
+            if ($kind === 'orders') {
+                $msg = bslParcelMsg($n, '📦 سفارش ارسال‌نشده');
+            } else {
+                // v8.33: متن کامل پیام‌های مشتری، نه فقط آخرین پیام
+                $body = bslFetchChatMessages($tk, $n['chat_id'], max(1, min(10, $n['unseen'] ?: 1)));
+                $msg = bslChatMsg($n, '💬 پیام خوانده‌نشده', $body);
+            }
             $delivery = notifSend($cn, $msg);
             $sent++;
             if ($sent >= 20) break;   // سقف ایمنی برای جلوگیری از هرزنامه
@@ -11368,6 +11584,14 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.33', t:'رفع خطای ۴۲۲، متن کامل پیام‌ها، نگهبان صف', items:[
+    'رفع خطای ۴۲۲ در استعلام سفارش‌ها و محصولات — پارامتر sort نامعتبر بود و حذف شد',
+    'پیام خطای ۴۲۲ حالا دقیقاً می‌گوید کدام پارامتر ایراد داشته',
+    'متن کامل پیام‌های خوانده‌نشدهٔ مشتری به پیام‌رسان‌ها فرستاده می‌شود، نه فقط آخرین پیام',
+    'نگهبان صف: اگر ارسال ووکامرس یا باسلام بیش از ۵ دقیقه بی‌حرکت بماند، خودکار ادامه داده می‌شود',
+    'نگهبان با flock کار می‌کند، پس هیچ‌وقت دو پردازش موازی نمی‌سازد و سرعت ارسال را کم نمی‌کند',
+    'اندپوینت ?queue_watchdog برای بررسی دستی وضعیت گیر کردن صف'
+  ]},
   {v:'8.32', t:'مودال استعلام: اول ببین، بعد بفرست', items:[
     'دکمه‌های «سفارش‌ها» و «گفتگوها» حالا لیست را در مودال باز می‌کنند، نه اینکه مستقیم پیام بفرستند',
     'انتخاب موردی با تیک، و دو دکمهٔ ارسال: «خلاصه در یک پیام» یا «جداگانه»',
