@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.35';
+const APP_VERSION = '8.36';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4085,10 +4085,14 @@ if ($target === 'woo' || $target === 'both') {
 // v8.21: Queue products for WooCommerce (not just set sync state)
 if(!empty($orderedProducts)){
 $wooSuffix=trim($profile['titleSuffix']??'') ?: trim($cn['basalam']['title_suffix']??'');
-@file_put_contents(WOO_PRODUCTS_FILE,json_encode($orderedProducts,JSON_UNESCAPED_UNICODE),LOCK_EX);
 $wooQueue=wooReadQueue();
 $wooQueueId='cron_woo_'.$key.'_'.$now;
-$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>'running','products_file'=>WOO_PRODUCTS_FILE,'total'=>count($orderedProducts),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$now,'done_at'=>0,'config'=>['title_suffix'=>$wooSuffix]];
+// v8.36: فایل مخصوص همین اجرا — قبلاً همه روی WOO_PRODUCTS_FILE می‌نوشتند
+// و اجرای بعدی محصولات اجرای قبلی را می‌فرستاد.
+$wooQFile=__DIR__.'/woo_queue_products_'.$wooQueueId.'.json';
+@file_put_contents($wooQFile,json_encode($orderedProducts,JSON_UNESCAPED_UNICODE),LOCK_EX);
+@file_put_contents(WOO_PRODUCTS_FILE,json_encode($orderedProducts,JSON_UNESCAPED_UNICODE),LOCK_EX);
+$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>'running','products_file'=>$wooQFile,'total'=>count($orderedProducts),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$now,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'config'=>['title_suffix'=>$wooSuffix]];
 wooWriteQueue($wooQueue);
 $pResult['woo']='queued';$pResult['woo_total']=count($orderedProducts);
 }
@@ -5468,7 +5472,8 @@ header('Content-Type: text/event-stream'); header('Cache-Control: no-cache'); he
 while (@ob_get_level()) @ob_end_clean();
 
 $fromFile=!empty($_POST['from_file']);
-if($fromFile){$raw=@file_get_contents(WOO_PRODUCTS_FILE);$pd=json_decode($raw?:'[]',true)?:[];}
+// v8.36: مثل باسلام — فایل مخصوص همین صف، نه فایل مشترک
+if($fromFile){$raw=@file_get_contents(wooQueueProductsFile(trim($_POST['queue_id']??'')));$pd=json_decode($raw?:'[]',true)?:[];}
 else{$rawInput=$_POST['products']??'[]';$pd=json_decode($rawInput,true)?:[];}
 $cn=loadConnections(); $w=$cn['woocommerce']??[];
 if(empty($w['store_url'])){send_sse('error',['message'=>'تنظیمات ووکامرس ناقص']);send_sse('done',[]);exit;}
@@ -5954,7 +5959,11 @@ $verifyProducts=json_decode(@file_get_contents(WOO_PRODUCTS_FILE)?:'',true)?:[];
 if(empty($verifyProducts)){echo json_encode(['ok'=>false,'error'=>'فایل محصولات خالی است بعد از کپی'],JSON_UNESCAPED_UNICODE);exit;}
 }
 $wooTitleSuffix=trim($_POST['title_suffix']??'');
-$entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'config'=>['title_suffix'=>$wooTitleSuffix]];
+// v8.36: پروفایل مبدأ را در صف ووکامرس هم ثبت کن
+$pKeyIn=trim((string)($_POST['profile_key']??''));
+$pNameIn=trim((string)($_POST['profile_name']??''));
+if($pKeyIn!==''&&$pNameIn===''){$__pf=loadProfiles();$pNameIn=(string)($__pf[$pKeyIn]['name']??$pKeyIn);}
+$entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['title_suffix'=>$wooTitleSuffix]];
 $queue['entries'][]=$entry;
 wooWriteQueue($queue);
 echo json_encode(['ok'=>true,'queue_id'=>$queueId,'status'=>$status,'position'=>count($queue['entries']),'start_now'=>$startImm,'queue_count'=>count($queue['entries'])],JSON_UNESCAPED_UNICODE);
@@ -6691,6 +6700,58 @@ function bslWriteQueue(array $queue): void {
 @file_put_contents(BSL_QUEUE_FILE,json_encode($queue,JSON_UNESCAPED_UNICODE),LOCK_EX);
 }
 
+/**
+ * v8.36: فایل محصولاتِ یک ورودی صف را برمی‌گرداند.
+ *
+ * چرا لازم است: تا نسخهٔ ۸.۳۵ همهٔ ارسال‌ها از یک فایل مشترک
+ * (BSL_PRODUCTS_FILE) می‌خواندند، ولی آن فایل با شروع هر ارسال تازه
+ * بازنویسی می‌شد. نتیجه این بود که اگر پروفایل دیگری ارسال می‌شد،
+ * محصولات پروفایل قبلی فرستاده می‌شد. حالا هر صف فایل خودش را دارد.
+ */
+function bslQueueProductsFile(string $queueId): string {
+    $queueId=trim($queueId);
+    if($queueId!==''){
+        // مسیر ثبت‌شده در خود صف مرجع اصلی است
+        $q=bslReadQueue();
+        foreach(($q['entries']??[]) as $e){
+            if(($e['id']??'')===$queueId){
+                $f=(string)($e['products_file']??'');
+                if($f!==''&&is_file($f)) return $f;
+                break;
+            }
+        }
+        $guess=__DIR__.'/bsl_queue_products_'.basename($queueId).'.json';
+        if(is_file($guess)) return $guess;
+    }
+    return BSL_PRODUCTS_FILE;   // سازگاری با مسیرهای قدیمی بدون queue_id
+}
+
+/** همان منطق برای ووکامرس */
+function wooQueueProductsFile(string $queueId): string {
+    $queueId=trim($queueId);
+    $q=@json_decode((string)@file_get_contents(WOO_QUEUE_FILE),true);
+    $entries=is_array($q['entries']??null)?$q['entries']:[];
+    if($queueId!==''){
+        foreach($entries as $e){
+            if(($e['id']??'')===$queueId){
+                $f=(string)($e['products_file']??'');
+                if($f!==''&&is_file($f)) return $f;
+                break;
+            }
+        }
+        $guess=__DIR__.'/woo_queue_products_'.basename($queueId).'.json';
+        if(is_file($guess)) return $guess;
+    }
+    // فراخوان‌های ووکامرس queue_id نمی‌فرستند؛ پس ردیف در حال اجرا را خودمان پیدا می‌کنیم
+    foreach($entries as $e){
+        if(($e['status']??'')==='running'){
+            $f=(string)($e['products_file']??'');
+            if($f!==''&&is_file($f)) return $f;
+        }
+    }
+    return WOO_PRODUCTS_FILE;
+}
+
 if(isset($_GET['bsl_queue_status'])){
 header('Content-Type: application/json; charset=UTF-8');
 $queue=bslReadQueue();
@@ -6771,7 +6832,11 @@ $cn['basalam']['delay_ms']=$delayMs;
 $cn['basalam']['retry_delay_ms']=$retryDelayMs;
 @file_put_contents(CONNECTIONS_FILE,json_encode($cn,JSON_UNESCAPED_UNICODE),LOCK_EX);
 }
-$entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'paused_at'=>0,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs]];
+// v8.36: نام و کلید پروفایل را نگه می‌داریم تا در صف معلوم باشد چه چیزی می‌رود
+$pKeyIn=trim((string)($_POST['profile_key']??''));
+$pNameIn=trim((string)($_POST['profile_name']??''));
+if($pKeyIn!==''&&$pNameIn===''){$__pf=loadProfiles();$pNameIn=(string)($__pf[$pKeyIn]['name']??$pKeyIn);}
+$entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'paused_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs]];
 $queue['entries'][]=$entry;
 bslWriteQueue($queue);
 echo json_encode(['ok'=>true,'queue_id'=>$queueId,'status'=>$status,'position'=>count($queue['entries']),'start_now'=>$startImm,'queue_count'=>count($queue['entries'])],JSON_UNESCAPED_UNICODE);
@@ -8116,10 +8181,15 @@ if(!$autoCat&&(empty($bs['category_id'])||(int)$bs['category_id']<=0)){header('C
 
 $fromFile=!empty($_POST['from_file']);
 if($fromFile){
-$raw=@file_get_contents(BSL_PRODUCTS_FILE);
+// v8.36: فایل مخصوصِ همین صف را بخوان، نه فایل مشترک.
+// باگ قدیمی: همه‌ی ارسال‌ها از BSL_PRODUCTS_FILE می‌خواندند و چون این
+// فایل با هر ارسال جدید بازنویسی می‌شود، اگر دو ارسال نزدیک به هم
+// شروع می‌شدند، پروفایل دوم محصولات پروفایل اول را می‌فرستاد.
+$srcFile=bslQueueProductsFile(trim($_POST['queue_id']??''));
+$raw=@file_get_contents($srcFile);
 $pd=json_decode($raw?:'[]',true)?:[];
 
-$fSize=@filesize(BSL_PRODUCTS_FILE);
+$fSize=@filesize($srcFile);
 }else{
 $rawInput=$_POST['products']??'[]';
 $pd=json_decode($rawInput,true)?:[];
@@ -9343,43 +9413,9 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSrcPrice" checked style="width:15px;height:15px"><span>💰 گران/ارزان شدن مبدأ</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSrcStock" checked style="width:15px;height:15px"><span>📦 موجود/ناموجود شدن مبدأ</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifRunFail" checked style="width:15px;height:15px"><span>⚠️ خطای اجرای خودکار</span></label>
-<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifRetire" checked style="width:15px;height:15px"><span>🗂 بازنشستگی محصولات رفته از مبدأ</span></label>
 </div>
 </div>
 <div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
-<div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
-<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🗂 محصولات رفته از مبدأ</div>
-<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
-وقتی محصولی در سایت مبدأ ناموجود یا حذف شد، روی ووکامرس/باسلام چه شود؟
-«پیش‌نویس» پیشنهاد می‌شود چون برگشت‌پذیر است.
-</div>
-<div class="crow"><label>اقدام:</label>
-<select id="retireMode" style="flex:1">
-<option value="off">کاری نکن (فقط گزارش)</option>
-<option value="draft">پیش‌نویس/غیرفعال کن</option>
-<option value="outofstock">ناموجود کن</option>
-<option value="delete">حذف کن (زباله‌دان)</option>
-</select></div>
-<div class="crow"><label>حداکثر ٪ حذف:</label><input type="number" id="retireMaxPct" value="30" min="1" max="100" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">اگر بیشتر شد، متوقف شو</span></div>
-<div class="crow"><label>حداکثر تعداد:</label><input type="number" id="retireMaxCount" value="50" min="1" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">سقف در هر اجرا</span></div>
-<div style="font-size:10px;color:#f87171;background:#7f1d1d20;padding:6px 8px;border-radius:6px;margin-bottom:6px">
-⚠️ محافظ: اگر سایت مبدأ خراب شود و همه‌چیز «حذف‌شده» به نظر برسد، این دو سقف جلوی پاک شدن کل فروشگاه را می‌گیرند.
-</div>
-<div class="cact">
-<button class="btn btn-gray" onclick="retirePreview()" style="flex:1">👁 پیش‌نمایش</button>
-<button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
-</div>
-<div id="retireR" style="margin-top:8px"></div>
-<div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
-<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🩺 نگهبان صف ارسال</div>
-<div class="crow"><label>فعال:</label><input type="checkbox" id="stallWatchdog" checked style="width:16px;height:16px"></div>
-<div class="crow"><label>آستانه (ثانیه):</label><input type="number" id="stallAfter" value="300" min="60" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">بی‌حرکتی بیش از این = گیر کرده</span></div>
-<div class="cact">
-<button class="btn btn-gray" onclick="watchdogCheck()" style="flex:1">🔎 بررسی حالا</button>
-<button class="btn btn-gray" onclick="window.open('?selftest=1','_blank')" style="flex:1">🧾 خودآزمون نصب</button>
-<button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
-</div>
-<div id="watchdogR" style="margin-top:8px"></div>
 <div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
 <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">🔍 استعلام از باسلام</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
@@ -9396,6 +9432,52 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 <div id="notifTestR" style="margin-top:8px"></div>
 <div id="notifTR" style="margin-top:8px"></div>
+</div></div>
+
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🗂 محصولات رفته از مبدأ</h3><span class="cst off" id="retireS">خاموش</span><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+وقتی محصولی در سایت مبدأ ناموجود یا حذف شد، روی ووکامرس/باسلام چه شود؟
+«پیش‌نویس» پیشنهاد می‌شود چون برگشت‌پذیر است.
+</div>
+<div class="crow"><label>اقدام:</label>
+<select id="retireMode" onchange="updateRetireBadge()" style="flex:1">
+<option value="off">کاری نکن (فقط گزارش)</option>
+<option value="draft">پیش‌نویس/غیرفعال کن</option>
+<option value="outofstock">ناموجود کن</option>
+<option value="delete">حذف کن (زباله‌دان)</option>
+</select></div>
+<div class="crow"><label>حداکثر ٪ حذف:</label><input type="number" id="retireMaxPct" value="30" min="1" max="100" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">اگر بیشتر شد، متوقف شو</span></div>
+<div class="crow"><label>حداکثر تعداد:</label><input type="number" id="retireMaxCount" value="50" min="1" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">سقف در هر اجرا</span></div>
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer;margin-bottom:6px"><input type="checkbox" id="notifRetire" checked style="width:15px;height:15px"><span>🔔 اعلان نتیجه به پیام‌رسان‌ها</span></label>
+<div style="font-size:10px;color:#f87171;background:#7f1d1d20;padding:6px 8px;border-radius:6px;margin-bottom:6px">
+⚠️ محافظ: اگر سایت مبدأ خراب شود و همه‌چیز «حذف‌شده» به نظر برسد، این دو سقف جلوی پاک شدن کل فروشگاه را می‌گیرند.
+</div>
+<div class="cact">
+<button class="btn btn-gray" onclick="retirePreview()" style="flex:1">👁 پیش‌نمایش</button>
+<button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
+</div>
+<div id="retireR" style="margin-top:8px"></div>
+</div></div>
+
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🩺 نگهبان صف ارسال</h3><span class="cst off" id="stallS">فعال</span><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+اگر ارسالی وسط راه گیر کند، خودکار ادامه داده می‌شود.
+چون از قفل سیستمی استفاده می‌کند، سرعت ارسال سالم را کم نمی‌کند.
+</div>
+<div class="crow"><label>فعال:</label><input type="checkbox" id="stallWatchdog" onchange="updateStallBadge()" checked style="width:16px;height:16px"></div>
+<div class="crow"><label>آستانه (ثانیه):</label><input type="number" id="stallAfter" value="300" min="60" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">بی‌حرکتی بیش از این = گیر کرده</span></div>
+<div class="cact">
+<button class="btn btn-gray" onclick="watchdogCheck()" style="flex:1">🔎 بررسی حالا</button>
+<button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
+</div>
+<div class="cact">
+<button class="btn btn-gray" onclick="window.open('?selftest=1','_blank')" style="flex:1">🧾 خودآزمون نصب</button>
+</div>
+<div id="watchdogR" style="margin-top:8px"></div>
 </div></div>
 
 </div></div>
@@ -11962,6 +12044,14 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.36', t:'رفع باگ ارسال پروفایل اشتباه', items:[
+    'باگ مهم: هنگام ارسال یک پروفایل، محصولات پروفایل دیگری فرستاده می‌شد',
+    'علت: همهٔ ارسال‌ها از یک فایل مشترک می‌خواندند که با هر ارسال تازه بازنویسی می‌شد',
+    'حالا هر صف فایل محصولات خودش را دارد و بر اساس queue_id خوانده می‌شود',
+    'نام پروفایل در صف ثبت و نمایش داده می‌شود تا معلوم باشد چه چیزی می‌رود',
+    'همین اشکال در صف ووکامرس و در کران‌جاب هم رفع شد',
+    'تنظیمات «محصولات رفته از مبدأ» و «نگهبان صف» به بخش‌های جدای منوی همبرگری منتقل شدند'
+  ]},
   {v:'8.35', t:'خودآزمون نصب — بفهمید چه نسخه‌ای واقعاً روی سرور است', items:[
     'صفحهٔ ?selftest=1 هر قابلیت را در همان فایلِ در حال اجرا بررسی می‌کند',
     'اگر نصب ناقص باشد (فایل قدیمی روی هاست مانده باشد) صریح می‌گوید',
@@ -12089,6 +12179,23 @@ function notifTest(kind){
     if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';
     showToast('خطا شبکه',1);
   });
+}
+
+/** v8.36: نشانگر کنار عنوان بخش «محصولات رفته از مبدأ» */
+function updateRetireBadge(){
+  const el=$('retireS'),sel=$('retireMode');
+  if(!el||!sel)return;
+  const lbl={off:'خاموش',draft:'پیش‌نویس',outofstock:'ناموجود',delete:'حذف'}[sel.value]||'خاموش';
+  el.textContent=lbl;
+  el.className='cst '+(sel.value==='off'?'off':'on');
+}
+
+/** v8.36: نشانگر کنار عنوان بخش «نگهبان صف» */
+function updateStallBadge(){
+  const el=$('stallS'),cb=$('stallWatchdog');
+  if(!el||!cb)return;
+  el.textContent=cb.checked?'فعال':'خاموش';
+  el.className='cst '+(cb.checked?'on':'off');
 }
 
 /**
@@ -12744,7 +12851,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
@@ -13162,6 +13269,8 @@ function queueWooSend(ps){
             fd2.append('queue_id',qid);
             fd2.append('total',String(totalSaved));
             fd2.append('start_immediately','1');
+            fd2.append('profile_key',($('profileSelect')&&$('profileSelect').value)||'');
+            fd2.append('profile_name',($('profileName')&&$('profileName').value)||'');
             fd2.append('title_suffix',$('titleSuffix')?$('titleSuffix').value.trim():'');
             fetch('?woo_queue_add=1',{method:'POST',body:fd2}).then(r=>r.json()).then(d=>{
                 if(!d.ok){showToast('خطا: '+d.error,1);return;}
@@ -13542,6 +13651,8 @@ function queueBslSend(ps,catId){
             fd2.append('delay_ms',$('bsDelayMs')?($('bsDelayMs').value||'500'):'500');
             fd2.append('retry_delay_ms',$('bsRetryDelayMs')?($('bsRetryDelayMs').value||'1000'):'1000');
             fd2.append('start_immediately','1');
+            fd2.append('profile_key',($('profileSelect')&&$('profileSelect').value)||'');
+            fd2.append('profile_name',($('profileName')&&$('profileName').value)||'');
             fetch('?bsl_queue_add=1',{method:'POST',body:fd2}).then(r=>r.json()).then(d=>{
                 if(!d.ok){showToast('\u062e\u0637\u0627: '+d.error,1);return;}
                 showToast('\u2713 '+toFa(totalSaved)+' \u0645\u062d\u0635\u0648\u0644 \u062f\u0631 \u0635\u0641 \u2014 \u0633\u0631\u0648\u0631\u0633\u0627\u06cc\u062f');

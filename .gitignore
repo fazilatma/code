@@ -25,3 +25,7 @@ extract_report_*.json
 # v8.33: runtime locks for the send workers
 bsl_backend.lock
 woo_backend.lock
+
+# v8.36: per-queue product files (one per send)
+bsl_queue_products_*.json
+woo_queue_products_*.json
