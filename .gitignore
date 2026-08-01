@@ -18,3 +18,4 @@ _backups/
 .deploy-config.json
 .deploy-log.json
 .versioncheck.json
+.cron_sync.lock
