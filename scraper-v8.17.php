@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.38';
+const APP_VERSION = '8.39';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3938,7 +3938,9 @@ $prevMap=$prevProducts;
 
 // v8.22: همان تابعی که در حین اجرا استفاده شد، تا نتیجهٔ نهایی با
 // شمارنده‌های زنده اختلاف نداشته باشد.
-$finalCmp=extractLiveCompare($allProducts,$prevMap);
+// v8.39: سقف بالاتر برای مقایسهٔ نهایی — این لیست‌ها مبنای «ارسال فقط
+// تغییرات» هستند، پس اگر بریده شوند محصولی بی‌صدا جا می‌ماند.
+$finalCmp=extractLiveCompare($allProducts,$prevMap,100000);
 $newCount=$finalCmp['new'];
 $priceChanged=$finalCmp['price_changed'];
 $removedCount=$finalCmp['removed'];
@@ -4017,6 +4019,74 @@ saveSyncState($state);
 echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE); exit;
 }
 
+/* =====================================================================
+ *  v8.39: ارسال فقط تغییرات («افزودن/آپدیت»)
+ *
+ *  تیک‌های «افزودن/آپدیت ووکامرس» و «افزودن/آپدیت باسلام» از نسخهٔ ۷
+ *  در رابط کاربری بودند و ذخیره هم می‌شدند، ولی هیچ‌جای سمت سرور
+ *  خوانده نمی‌شدند. نتیجه این بود که هر اجرای کران کل محصولات را
+ *  دوباره می‌فرستاد و برای پروفایل چندهزارتایی ساعت‌ها طول می‌کشید.
+ *
+ *  حالا اگر تیک فعال باشد فقط محصولات جدید و تغییرکرده فرستاده
+ *  می‌شوند. حذف‌شده‌ها مسیر جداگانهٔ خودشان را دارند (retireRemoved).
+ * ===================================================================== */
+
+/**
+ * از نتیجهٔ استخراج، کلید محصولاتی را برمی‌گرداند که باید ارسال شوند.
+ * خروجی null یعنی «فیلتری اعمال نکن» (همه را بفرست).
+ */
+function syncChangedKeys(array $exRes): ?array {
+    if (empty($exRes['ok'])) return null;   // استخراج نشد؛ به لیست تغییرات اعتماد نکن
+    $keys = [];
+    foreach (['new_items', 'changed_items'] as $bucket) {
+        foreach (($exRes[$bucket] ?? []) as $it) {
+            if (!is_array($it)) continue;
+            $k = (string)($it['key'] ?? '');
+            if ($k !== '') $keys[$k] = true;
+        }
+    }
+    return $keys;
+}
+
+/**
+ * محصولات پروفایل را به ترتیب درست و همراه با کلیدشان برمی‌گرداند.
+ * محصولات به شکل [کلید, محصول] ذخیره می‌شوند و کران قبلاً کلید را دور
+ * می‌ریخت؛ برای فیلتر کردن لازم است نگه داشته شود.
+ *
+ * $onlyKeys اگر داده شود، فقط همان کلیدها برگردانده می‌شوند.
+ */
+function profileOrderedProducts(array $profile, ?array $onlyKeys = null): array {
+    $raw = $profile['products'] ?? [];
+    $map = [];
+    foreach ($raw as $entry) {
+        if (is_array($entry) && count($entry) >= 2 && is_string($entry[0])) {
+            $map[$entry[0]] = $entry[1];
+        }
+    }
+    $order = $profile['productsOrder'] ?? [];
+    $out = [];
+    if (!empty($order) && is_array($order)) {
+        foreach ($order as $k) {
+            if (!isset($map[$k])) continue;
+            if ($onlyKeys !== null && !isset($onlyKeys[$k])) continue;
+            $out[] = $map[$k];
+        }
+        return $out;
+    }
+    if ($map) {
+        foreach ($map as $k => $p) {
+            if ($onlyKeys !== null && !isset($onlyKeys[$k])) continue;
+            $out[] = $p;
+        }
+        return $out;
+    }
+    // ساختار قدیمی: فهرست تخت بدون کلید — فیلتر ممکن نیست
+    foreach ($raw as $entry) {
+        if (is_array($entry) && (isset($entry['title']) || isset($entry['price']))) $out[] = $entry;
+    }
+    return $out;
+}
+
 // v8.31: تنها نقطهٔ ورود کران — cron_sync حذف شد چون دقیقاً همین کار را می‌کرد.
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
 header('Content-Type: application/json; charset=UTF-8');
@@ -4085,34 +4155,48 @@ notifRunFailure($cn, 'استخراج', $profile['name'] ?? $key, $pResult['extra
 }
 
 // Now get products from profile (either freshly scraped or previously saved)
-$rawProducts = $profile['products'] ?? [];
-$orderedProducts = [];
-$productsOrder = $profile['productsOrder'] ?? [];
-if (!empty($productsOrder) && is_array($productsOrder)) { $prodMap = []; foreach ($rawProducts as $entry) { if (is_array($entry) && count($entry) >= 2) $prodMap[$entry[0]] = $entry[1]; } foreach ($productsOrder as $pk) { if (isset($prodMap[$pk])) $orderedProducts[] = $prodMap[$pk]; } }
-else { foreach ($rawProducts as $entry) { if (is_array($entry) && count($entry) >= 2 && is_string($entry[0])) $orderedProducts[] = $entry[1]; elseif (is_array($entry) && (isset($entry['title']) || isset($entry['price']))) $orderedProducts[] = $entry; } }
+// v8.39: اگر تیک «افزودن/آپدیت» فعال باشد، فقط محصولات جدید و
+// تغییرکرده فرستاده می‌شوند نه کل فهرست.
+$wooOnlyChanged = !empty($syncCfg['wooAddUpdate']);
+$bslOnlyChanged = !empty($syncCfg['bslAddUpdate']);
+$changedKeys = ($wooOnlyChanged || $bslOnlyChanged) ? syncChangedKeys($exRes ?? []) : null;
+
+$orderedProducts = profileOrderedProducts($profile);
+$changedProducts = $changedKeys === null
+    ? $orderedProducts
+    : profileOrderedProducts($profile, $changedKeys);
+
+if ($changedKeys !== null) {
+    $pResult['changed_only'] = count($changedProducts);
+    $pResult['catalog_size'] = count($orderedProducts);
+}
 
 if ($target === 'woo' || $target === 'both') {
 // v8.21: Queue products for WooCommerce (not just set sync state)
-if(!empty($orderedProducts)){
+// v8.39: با تیک «افزودن/آپدیت ووکامرس» فقط تغییرات ارسال می‌شود
+$wooSend = $wooOnlyChanged ? $changedProducts : $orderedProducts;
+if(!empty($wooSend)){
 $wooSuffix=trim($profile['titleSuffix']??'') ?: trim($cn['basalam']['title_suffix']??'');
 $wooQueue=wooReadQueue();
 $wooQueueId='cron_woo_'.$key.'_'.$now;
 // v8.36: فایل مخصوص همین اجرا — قبلاً همه روی WOO_PRODUCTS_FILE می‌نوشتند
 // و اجرای بعدی محصولات اجرای قبلی را می‌فرستاد.
 $wooQFile=__DIR__.'/woo_queue_products_'.$wooQueueId.'.json';
-@file_put_contents($wooQFile,json_encode($orderedProducts,JSON_UNESCAPED_UNICODE),LOCK_EX);
-@file_put_contents(WOO_PRODUCTS_FILE,json_encode($orderedProducts,JSON_UNESCAPED_UNICODE),LOCK_EX);
-$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>'running','products_file'=>$wooQFile,'total'=>count($orderedProducts),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$now,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'config'=>['title_suffix'=>$wooSuffix]];
+@file_put_contents($wooQFile,json_encode($wooSend,JSON_UNESCAPED_UNICODE),LOCK_EX);
+@file_put_contents(WOO_PRODUCTS_FILE,json_encode($wooSend,JSON_UNESCAPED_UNICODE),LOCK_EX);
+$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>'running','products_file'=>$wooQFile,'total'=>count($wooSend),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$now,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'only_changed'=>$wooOnlyChanged,'config'=>['title_suffix'=>$wooSuffix]];
 wooWriteQueue($wooQueue);
-$pResult['woo']='queued';$pResult['woo_total']=count($orderedProducts);
-}
+$pResult['woo']='queued';$pResult['woo_total']=count($wooSend);
+} else { $pResult['woo'] = $wooOnlyChanged ? 'no_changes' : 'no_products'; }
 $syncState[$key]=['lastRun'=>$now,'status'=>'running_woo'];
 }
 if ($target === 'bsl' || $target === 'both') {
-if (!empty($orderedProducts)) {
+// v8.39: با تیک «افزودن/آپدیت باسلام» فقط تغییرات ارسال می‌شود
+$bslSend = $bslOnlyChanged ? $changedProducts : $orderedProducts;
+if (!empty($bslSend)) {
 $queueId = 'cron_' . $key . '_' . $now;
 $qFile = __DIR__ . '/bsl_queue_products_' . $queueId . '.json';
-if (@file_put_contents($qFile, json_encode($orderedProducts, JSON_UNESCAPED_UNICODE), LOCK_EX)) {
+if (@file_put_contents($qFile, json_encode($bslSend, JSON_UNESCAPED_UNICODE), LOCK_EX)) {
 $catId = (int)($cn['basalam']['category_id'] ?? 0);
 $autoCat = !empty($cn['basalam']['auto_category']);
 $titleSuffix = trim($profile['titleSuffix'] ?? '') ?: trim($cn['basalam']['title_suffix'] ?? '');
@@ -4124,12 +4208,12 @@ if ($profileCatId > 0) $catId = $profileCatId;
 $profileFallbackCats = $profile['bslFallbackCatIds'] ?? [];
 $allFallbackCats = array_values(array_unique(array_merge($profileFallbackCats, $fallbackCats)));
 $queue = bslReadQueue();
-$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($orderedProducts), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
+$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
 bslWriteQueue($queue);
 $syncState[$key] = ['lastRun' => $now, 'status' => 'queued_bsl'];
-$pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($orderedProducts);
+$pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
 } else { $pResult['bsl'] = 'file_save_error'; }
-} else { $pResult['bsl'] = 'no_products'; }
+} else { $pResult['bsl'] = $bslOnlyChanged ? 'no_changes' : 'no_products'; }
 }
 $results['profiles'][] = $pResult;
 }
@@ -9814,14 +9898,19 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px">
                         <input type="checkbox" id="profileSyncWooAddUpdate" onchange="scheduleSave();updateSyncStatusText()">
                         <span style="color:#c4b5fd">افزودن/آپدیت ووکامرس</span>
-                        <span style="color:#64748b;font-size:9px">(جلوگیری از تکرار + آپدیت قیمت)</span>
+                        <span style="color:#64748b;font-size:9px">(فقط محصولات جدید و تغییرکرده ارسال شوند)</span>
                     </label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px">
                         <input type="checkbox" id="profileSyncBslAddUpdate" onchange="scheduleSave();updateSyncStatusText()">
                         <span style="color:#67e8f9">افزودن/آپدیت باسلام</span>
-                        <span style="color:#64748b;font-size:9px">(جلوگیری از تکرار + آپدیت قیمت)</span>
+                        <span style="color:#64748b;font-size:9px">(فقط محصولات جدید و تغییرکرده ارسال شوند)</span>
                     </label>
                 </div>
+            </div>
+            <div style="font-size:10px;color:#64748b;line-height:1.7;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px 8px;margin-top:4px">
+                💡 بدون این تیک‌ها، هر اجرای خودکار <b>کل</b> محصولات را دوباره می‌فرستد.
+                با تیک، فقط تفاوت‌های نسبت به اجرای قبلی ارسال می‌شود — برای فهرست‌های بزرگ بسیار سریع‌تر است.
+                محصولات حذف‌شده از مبدأ مسیر جداگانه دارند («🗂 محصولات رفته از مبدأ»).
             </div>
             <div id="profileSyncStatus" style="font-size:10px;color:#64748b;margin-top:6px"></div>
         </div>
@@ -12328,6 +12417,15 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.39', t:'ارسال فقط تغییرات — تیک‌های افزودن/آپدیت بالاخره کار می‌کنند', items:[
+    'باگ قدیمی: تیک‌های «افزودن/آپدیت ووکامرس» و «افزودن/آپدیت باسلام» ذخیره می‌شدند ولی سمت سرور اصلاً خوانده نمی‌شدند',
+    'نتیجه این بود که هر اجرای خودکار کل محصولات را دوباره می‌فرستاد',
+    'حالا با فعال بودن تیک، فقط محصولات جدید و تغییرکرده ارسال می‌شوند',
+    'هر تیک مستقل عمل می‌کند — می‌توان فقط برای یکی از دو مقصد فعالش کرد',
+    'اگر تغییری نباشد، صف اصلاً ساخته نمی‌شود (no_changes)',
+    'اگر استخراج شکست بخورد، برای احتیاط کل فهرست فرستاده می‌شود نه فهرست ناقص',
+    'سقف ۳۰۰تایی لیست تغییرات برداشته شد تا در فهرست‌های بزرگ محصولی جا نماند'
+  ]},
   {v:'8.38', t:'یادآوری موارد بی‌جواب', items:[
     'هر مورد فقط یک بار اعلان می‌شود؛ دیگر با هر اجرای کران تکرار نمی‌شود',
     'اگر پیام مشتری بی‌جواب بماند یا سفارشی ارسال نشود، بعد از ۳۰ دقیقه (قابل تنظیم) یادآوری می‌آید',
