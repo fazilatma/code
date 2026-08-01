@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.46';
+const APP_VERSION = '8.47';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4381,6 +4381,35 @@ if (isset($_GET['retire_run'])) {
     exit;
 }
 
+/**
+ * v8.47: مغایرت‌گیری مقصد با پروفایل‌ها.
+ * ?recon=1&target=woo|bsl            → فقط گزارش (پیش‌فرض، امن)
+ * &apply=1                           → اعمال تغییرات
+ * &mode=off|draft|outofstock|delete  → با موارد اضافی چه شود
+ * &fix_price=0                       → قیمت‌ها دست نخورند
+ */
+if (isset($_GET['recon'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(0);
+    $cn = loadConnections();
+    $target = (string)($_GET['target'] ?? '');
+    if ($target !== 'woo' && $target !== 'bsl') {
+        echo json_encode(['ok' => false, 'error' => 'مقصد نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $apply = !empty($_GET['apply']);
+    $mode  = (string)($_GET['mode'] ?? ($cn['retire_mode'] ?? 'off'));
+    if (!isset(retireModes()[$mode])) $mode = 'off';
+    $fixPrice = !isset($_GET['fix_price']) || $_GET['fix_price'] !== '0';
+    $res = reconRun($cn, $target, $apply, $mode, $fixPrice);
+    // فهرست‌ها را برای پاسخ کوتاه کن تا مرورگر خفه نشود
+    foreach (['extra', 'price_diff'] as $k) {
+        $res[$k . '_total'] = count($res[$k] ?? []);
+        if (isset($res[$k]) && count($res[$k]) > 200) $res[$k] = array_slice($res[$k], 0, 200);
+    }
+    echo json_encode($res, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 /** v8.33: بررسی/ادامهٔ دستی صف گیرکرده */
 if (isset($_GET['queue_watchdog'])) {
     header('Content-Type: application/json; charset=UTF-8');
@@ -5414,6 +5443,220 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
             }
         }
         if (count($out['items']) < 50) $out['items'][] = $row;
+    }
+    return $out;
+}
+
+/* =====================================================================
+ *  v8.47: مغایرت‌گیری — مقایسهٔ مقصد با نتایج پروفایل‌ها
+ *
+ *  همهٔ پروفایل‌هایی که همگام‌سازی دوره‌ای‌شان روشن است را می‌گیرد،
+ *  فهرست محصولاتِ نهاییِ آن‌ها را می‌سازد، بعد کل محصولات ووکامرس یا
+ *  باسلام را می‌خواند و سه چیز را گزارش می‌کند:
+ *    • در مقصد هست ولی در هیچ پروفایلی نیست  → حذف/بازنشستگی
+ *    • قیمتش با قیمت پروفایل فرق دارد         → به‌روزرسانی قیمت
+ *    • یکسان است                              → دست نخورده
+ *
+ *  ⚠️ حذف خطرناک است، پس همان محافظ بازنشستگی اینجا هم اعمال می‌شود و
+ *  حالت پیش‌فرض «فقط گزارش» است.
+ * ===================================================================== */
+
+/** عنوان را برای مقایسه یکدست می‌کند */
+function reconNormTitle(string $t): string {
+    $t = trim($t);
+    $t = preg_replace('~\s+~u', ' ', $t);
+    return function_exists('mb_strtolower') ? mb_strtolower($t, 'UTF-8') : strtolower($t);
+}
+
+/** فهرست محصولات نهاییِ همهٔ پروفایل‌های دارای همگام‌سازی دوره‌ای */
+function reconExpected(string $target): array {
+    $out = [];
+    foreach (loadProfiles() as $key => $profile) {
+        $sc = $profile['syncConfig'] ?? [];
+        if (empty($sc['enabled'])) continue;                 // فقط تیک‌خورده‌ها
+        $t = (string)($sc['target'] ?? 'woo');
+        if ($t !== 'both' && $t !== $target) continue;       // مقصد باید بخواند
+        foreach (profileOrderedProducts($profile) as $p) {
+            $title = reconNormTitle((string)($p['title'] ?? ''));
+            if ($title === '') continue;
+            $price = (int)($p['final_price'] ?? 0);
+            if (isset($out[$title]) && (int)$out[$title]['price'] > 0) continue;
+            $out[$title] = ['price' => $price, 'profile' => $profile['name'] ?? $key,
+                            'key' => (string)($p['key'] ?? '')];
+        }
+    }
+    return $out;
+}
+
+/** همهٔ محصولات ووکامرس */
+function reconFetchWoo(array $w, int $maxPages = 60): array {
+    $rows = [];
+    for ($page = 1; $page <= $maxPages; $page++) {
+        $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET',
+            'products?per_page=100&status=any&page=' . $page);
+        if (empty($r['ok']) || !is_array($r['body'])) break;
+        $batch = $r['body'];
+        if (!$batch) break;
+        foreach ($batch as $pr) {
+            $name = trim((string)($pr['name'] ?? ''));
+            if ($name === '') continue;
+            $rows[] = ['id' => (int)($pr['id'] ?? 0), 'title' => $name,
+                       'price' => (int)preg_replace('~[^\d]~', '', (string)($pr['regular_price'] ?? '0')),
+                       'status' => (string)($pr['status'] ?? '')];
+        }
+        if (count($batch) < 100) break;
+        usleep(150000);
+    }
+    return $rows;
+}
+
+/** همهٔ محصولات فعال باسلام. قیمت باسلام به ریال است. */
+function reconFetchBsl(string $tk, int $vid, int $maxPages = 60): array {
+    $rows = [];
+    for ($page = 1; $page <= $maxPages; $page++) {
+        $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?page=' . $page
+             . '&per_page=100&statuses=2976&statuses=3790');
+        if (empty($r['ok'])) break;
+        $batch = $r['body']['data'] ?? [];
+        if (!$batch) break;
+        foreach ($batch as $pr) {
+            if (!is_array($pr)) continue;
+            $rev  = $pr['revision']['data'] ?? [];
+            $name = trim((string)($pr['title'] ?? ($pr['name'] ?? ($rev['title'] ?? ''))));
+            if ($name === '') continue;
+            $rial = (int)($rev['primary_price'] ?? ($pr['primary_price'] ?? 0));
+            $rows[] = ['id' => (int)($pr['id'] ?? 0), 'title' => $name,
+                       'price' => $rial, 'price_toman' => (int)round($rial / 10),
+                       'status' => (int)(is_array($pr['status'] ?? null)
+                                   ? ($pr['status']['value'] ?? 0) : ($pr['status'] ?? 0))];
+        }
+        if (count($batch) < 100) break;
+        usleep(150000);
+    }
+    return $rows;
+}
+
+/**
+ * مقایسه و در صورت درخواست، اعمال تغییرات.
+ * $mode برای موارد اضافی: off | draft | outofstock | delete
+ */
+function reconRun(array $cn, string $target, bool $apply = false,
+                  string $mode = 'off', bool $fixPrice = true): array {
+    $out = ['ok' => true, 'target' => $target, 'apply' => $apply, 'mode' => $mode,
+            'expected' => 0, 'remote' => 0, 'extra' => [], 'price_diff' => [],
+            'matched' => 0, 'deleted' => 0, 'repriced' => 0, 'failed' => 0];
+
+    $expected = reconExpected($target);
+    $out['expected'] = count($expected);
+    if (!$expected) {
+        $out['ok'] = false;
+        $out['error'] = 'هیچ پروفایلی با همگام‌سازی دوره‌ای برای این مقصد پیدا نشد';
+        return $out;
+    }
+
+    if ($target === 'woo') {
+        $w = $cn['woocommerce'] ?? [];
+        if (empty($w['store_url'])) { $out['ok'] = false; $out['error'] = 'تنظیمات ووکامرس ناقص'; return $out; }
+        $remote = reconFetchWoo($w);
+    } else {
+        $tk = (string)($cn['basalam']['token'] ?? '');
+        $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
+        if ($tk === '' || $vid <= 0) { $out['ok'] = false; $out['error'] = 'تنظیمات باسلام ناقص'; return $out; }
+        $remote = reconFetchBsl($tk, $vid);
+    }
+    $out['remote'] = count($remote);
+    if (!$remote) {
+        $out['ok'] = false;
+        $out['error'] = 'هیچ محصولی از مقصد دریافت نشد — برای احتیاط کاری انجام نشد';
+        return $out;
+    }
+
+    // دسته‌بندی
+    foreach ($remote as $r) {
+        $key = reconNormTitle($r['title']);
+        if (!isset($expected[$key])) {
+            $out['extra'][] = ['id' => $r['id'], 'title' => $r['title'], 'price' => $r['price']];
+            continue;
+        }
+        $want = (int)$expected[$key]['price'];
+        $have = $target === 'bsl' ? (int)($r['price_toman'] ?? 0) : (int)$r['price'];
+        if ($want > 0 && $have !== $want) {
+            $out['price_diff'][] = ['id' => $r['id'], 'title' => $r['title'],
+                'from' => $have, 'to' => $want, 'profile' => $expected[$key]['profile']];
+        } else {
+            $out['matched']++;
+        }
+    }
+
+    if (!$apply) return $out;
+
+    // --- اصلاح قیمت ---
+    if ($fixPrice && $out['price_diff']) {
+        foreach ($out['price_diff'] as $i => $d) {
+            $okRow = false;
+            if ($target === 'woo') {
+                $r = wooReq($cn['woocommerce']['store_url'], $cn['woocommerce']['consumer_key'],
+                    $cn['woocommerce']['consumer_secret'], 'PUT', 'products/' . $d['id'],
+                    ['regular_price' => (string)$d['to']]);
+                $okRow = !empty($r['ok']);
+            } else {
+                $tk = (string)$cn['basalam']['token']; $vid = (int)$cn['basalam']['vendor_id'];
+                $bu = ['primary_price' => $d['to'] * 10];      // باسلام ریال می‌خواهد
+                $r = bslReq($tk, 'PATCH', 'products/' . $d['id'], $bu);
+                if ((int)($r['code'] ?? 0) === 404)
+                    $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $d['id'], $bu);
+                $okRow = !empty($r['ok']);
+            }
+            if ($okRow) $out['repriced']++; else $out['failed']++;
+            $out['price_diff'][$i]['done'] = $okRow;
+            usleep(200000);
+        }
+    }
+
+    // --- حذف/بازنشستگی موارد اضافی ---
+    if ($mode !== 'off' && $out['extra']) {
+        // v8.47: مبنای درصد باید کل محصولات مقصد باشد. retireGuard خودش
+        // removed را به مخرج اضافه می‌کند، پس «باقی‌مانده» را می‌دهیم.
+        $kept = max(0, count($remote) - count($out['extra']));
+        $guard = retireGuard(count($out['extra']), $kept, $cn);
+        $out['guard'] = $guard;
+        if (empty($guard['allow'])) {
+            $out['skipped_delete'] = $guard['reason'];
+            return $out;
+        }
+        foreach ($out['extra'] as $i => $d) {
+            $okRow = false;
+            if ($target === 'woo') {
+                $w = $cn['woocommerce'];
+                if ($mode === 'delete') {
+                    $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'DELETE', 'products/' . $d['id'] . '?force=false');
+                } elseif ($mode === 'outofstock') {
+                    $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'PUT', 'products/' . $d['id'], ['stock_status' => 'outofstock', 'stock_quantity' => 0]);
+                } else {
+                    $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'PUT', 'products/' . $d['id'], ['status' => 'draft']);
+                }
+                $okRow = !empty($r['ok']);
+            } else {
+                $tk = (string)$cn['basalam']['token']; $vid = (int)$cn['basalam']['vendor_id'];
+                if ($mode === 'delete') {
+                    $r = bslReq($tk, 'DELETE', 'products/' . $d['id']);
+                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'DELETE', 'vendors/' . $vid . '/products/' . $d['id']);
+                } elseif ($mode === 'outofstock') {
+                    $r = bslReq($tk, 'PATCH', 'products/' . $d['id'], ['stock' => 0]);
+                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $d['id'], ['stock' => 0]);
+                } else {
+                    $r = bslReq($tk, 'PATCH', 'products/' . $d['id'], ['status' => 3790]);
+                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $d['id'], ['status' => 3790]);
+                }
+                $okRow = !empty($r['ok']);
+            }
+            if ($okRow) $out['deleted']++; else $out['failed']++;
+            $out['extra'][$i]['done'] = $okRow;
+            usleep(200000);
+        }
     }
     return $out;
 }
@@ -9987,6 +10230,19 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
 </div>
 <div id="retireR" style="margin-top:8px"></div>
+<div style="margin-top:10px;padding-top:10px;border-top:1px solid #334155">
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🔍 مغایرت‌گیری با مقصد</div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+همهٔ پروفایل‌هایی که «همگام‌سازی دوره‌ای» آن‌ها روشن است را با فروشگاه مقایسه می‌کند:
+محصولی که در هیچ پروفایلی نیست، و محصولی که قیمتش مغایرت دارد.
+اول فقط گزارش می‌گیرد؛ اعمال تغییرات با تأیید شماست.
+</div>
+<div class="cact">
+<button class="btn btn-purple" onclick="reconScan('woo')" style="flex:1">🛒 بررسی ووکامرس</button>
+<button class="btn btn-cyan" onclick="reconScan('bsl')" style="flex:1">🏪 بررسی باسلام</button>
+</div>
+<div id="reconR" style="margin-top:8px"></div>
+</div>
 </div></div>
 
 <div class="smenu">
@@ -12646,6 +12902,16 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.47', t:'مغایرت‌گیری ووکامرس و باسلام با پروفایل‌ها', items:[
+    'دو دکمهٔ جدید: بررسی ووکامرس و بررسی باسلام',
+    'همهٔ پروفایل‌هایی که همگام‌سازی دوره‌ای‌شان روشن است را با فروشگاه مقایسه می‌کند',
+    'محصولی که در هیچ پروفایلی نیست را نشان می‌دهد و می‌تواند حذف یا غیرفعال کند',
+    'محصولی که قیمتش مغایرت دارد را نشان می‌دهد و می‌تواند اصلاح کند',
+    'اول فقط گزارش می‌گیرد — هیچ تغییری بدون تأیید صریح شما انجام نمی‌شود',
+    'محافظ ایمنی بازنشستگی اینجا هم اعمال می‌شود تا حذف انبوه اتفاقی رخ ندهد',
+    'اگر مقصد هیچ محصولی برنگرداند، برای احتیاط هیچ کاری انجام نمی‌شود',
+    'تفاوت واحد ریال باسلام و تومان ووکامرس در مقایسه لحاظ شده است'
+  ]},
   {v:'8.46', t:'نصب نسخهٔ جدید بدون منتظر ماندن برای صف', items:[
     'قبلاً اگر اسکرپ یا ارسالی در جریان بود، نصب نسخهٔ جدید رد می‌شد',
     'حالا نصب همیشه انجام می‌شود و فقط اطلاع داده می‌شود چه کاری در جریان است',
@@ -12865,6 +13131,109 @@ function notifTest(kind){
 
 /** v8.37: پینگ آزمایشی — همان پیامی که کران‌جاب می‌فرستد */
 function testPing(){notifTest('ping');}
+
+/* =====================================================================
+ *  v8.47: مغایرت‌گیری — رابط کاربری
+ * ===================================================================== */
+var reconLast=null;
+
+function reconLabel(t){return t==='woo'?'ووکامرس':'باسلام';}
+
+/** گام ۱: فقط گزارش، بدون هیچ تغییری */
+function reconScan(target){
+  const box=$('reconR');
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال خواندن '
+    +esc(reconLabel(target))+' و مقایسه با پروفایل‌ها... (ممکن است طول بکشد)</div>';
+  fetch('?recon=1&target='+encodeURIComponent(target)).then(r=>r.json()).then(d=>{
+    reconLast=d;
+    if(!box)return;
+    if(!d.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px;background:#7f1d1d20;'
+      +'padding:6px 8px;border-radius:6px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    box.innerHTML=reconReport(d,target);
+  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا: '+esc(e.message)+'</div>';});
+}
+
+function reconReport(d,target){
+  const nExtra=d.extra_total||0, nDiff=d.price_diff_total||0;
+  let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px;font-size:11px">';
+  h+='<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px">'
+   +'<span style="color:#94a3b8">در پروفایل‌ها: <b style="color:#e2e8f0">'+toFa(d.expected||0)+'</b></span>'
+   +'<span style="color:#94a3b8">در '+esc(reconLabel(target))+': <b style="color:#e2e8f0">'+toFa(d.remote||0)+'</b></span>'
+   +'<span style="color:#86efac">یکسان: '+toFa(d.matched||0)+'</span>'
+   +'</div>';
+  h+='<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px">'
+   +'<span style="color:'+(nExtra?'#fca5a5':'#64748b')+'">🗑 اضافی: <b>'+toFa(nExtra)+'</b></span>'
+   +'<span style="color:'+(nDiff?'#fbbf24':'#64748b')+'">💰 مغایرت قیمت: <b>'+toFa(nDiff)+'</b></span>'
+   +'</div>';
+  if(d.applied){
+    h+='<div style="color:#4ade80;margin:4px 0">✅ اعمال شد — '
+      +toFa(d.repriced||0)+' قیمت اصلاح، '+toFa(d.deleted||0)+' مورد اضافی'
+      +((d.failed||0)?' · <span style="color:#fca5a5">'+toFa(d.failed)+' ناموفق</span>':'')+'</div>';
+  }
+  if(d.skipped_delete){
+    h+='<div style="color:#fca5a5;background:#7f1d1d20;padding:5px 7px;border-radius:6px;margin:4px 0">'
+      +'🛑 حذف انجام نشد: '+esc(d.skipped_delete)+'</div>';
+  }
+  // نمونه‌ها
+  const sample=(arr,title,color,fmt)=>{
+    if(!arr||!arr.length)return '';
+    let x='<div style="margin-top:6px"><div style="color:'+color+';font-weight:700;margin-bottom:3px">'+title+'</div>';
+    arr.slice(0,8).forEach(it=>{x+='<div style="color:#cbd5e1;border-top:1px solid #1e293b;padding:2px 0">• '+fmt(it)+'</div>';});
+    if(arr.length>8)x+='<div style="color:#64748b;padding-top:2px">… و '+toFa(arr.length-8)+' مورد دیگر</div>';
+    return x+'</div>';
+  };
+  h+=sample(d.extra,'🗑 در هیچ پروفایلی نیست','#fca5a5',
+    it=>esc(String(it.title||'').slice(0,50))+(it.done===true?' <span style="color:#4ade80">✓</span>':''));
+  h+=sample(d.price_diff,'💰 قیمت مغایر','#fbbf24',
+    it=>esc(String(it.title||'').slice(0,40))+' <span style="color:#94a3b8">'
+      +toFa(Number(it.from||0).toLocaleString('en-US'))+' → </span>'
+      +'<b style="color:#e2e8f0">'+toFa(Number(it.to||0).toLocaleString('en-US'))+'</b>'
+      +(it.done===true?' <span style="color:#4ade80">✓</span>':''));
+  if(!d.applied&&(nExtra||nDiff)){
+    h+='<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">';
+    h+='<div style="color:#94a3b8;margin-bottom:5px">اقدام برای موارد اضافی:</div>';
+    h+='<select id="reconMode" style="width:100%;margin-bottom:6px;padding:5px;font-size:11px">'
+      +'<option value="off">کاری نکن (فقط قیمت‌ها اصلاح شود)</option>'
+      +'<option value="draft">پیش‌نویس/غیرفعال کن</option>'
+      +'<option value="outofstock">ناموجود کن</option>'
+      +'<option value="delete">حذف کن (زباله‌دان)</option></select>';
+    h+='<label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;margin-bottom:6px;cursor:pointer">'
+      +'<input type="checkbox" id="reconFixPrice" checked style="width:14px;height:14px">'
+      +'<span>قیمت‌های مغایر اصلاح شوند ('+toFa(nDiff)+')</span></label>';
+    h+='<button class="btn btn-green" onclick="reconApply(\''+target+'\')" style="width:100%;font-size:11px">'
+      +'✅ اعمال تغییرات</button>';
+    h+='</div>';
+  }
+  if(!nExtra&&!nDiff)h+='<div style="color:#4ade80;margin-top:4px">✓ همه‌چیز هماهنگ است</div>';
+  return h+'</div>';
+}
+
+/** گام ۲: اعمال، با تأیید صریح */
+function reconApply(target){
+  const mode=($('reconMode')||{}).value||'off';
+  const fix=($('reconFixPrice')||{}).checked?1:0;
+  const d=reconLast||{};
+  const nExtra=d.extra_total||0, nDiff=d.price_diff_total||0;
+  const modeTxt={off:'',draft:'پیش‌نویس',outofstock:'ناموجود',delete:'حذف'}[mode]||'';
+  let msg='تغییرات روی '+reconLabel(target)+':\n';
+  if(fix&&nDiff)msg+='\n• اصلاح قیمت '+nDiff+' محصول';
+  if(mode!=='off'&&nExtra)msg+='\n• '+modeTxt+' کردن '+nExtra+' محصول اضافی';
+  if(!fix&&mode==='off'){showToast('هیچ اقدامی انتخاب نشده',1);return;}
+  msg+='\n\nادامه می‌دهید؟';
+  if(!confirm(msg))return;
+  const box=$('reconR');
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال اعمال...</div>';
+  fetch('?recon=1&apply=1&target='+encodeURIComponent(target)
+    +'&mode='+encodeURIComponent(mode)+'&fix_price='+fix)
+   .then(r=>r.json()).then(res=>{
+    reconLast=res;
+    if(!box)return;
+    if(!res.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px">✗ '+esc(res.error||'خطا')+'</div>';return;}
+    res.applied=true;
+    box.innerHTML=reconReport(res,target);
+    showToast('✓ '+toFa(res.repriced||0)+' قیمت · '+toFa(res.deleted||0)+' مورد اضافی');
+  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا: '+esc(e.message)+'</div>';});
+}
 
 /** v8.36: نشانگر کنار عنوان بخش «محصولات رفته از مبدأ» */
 function updateRetireBadge(){
