@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.33';
+const APP_VERSION = '8.34';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3527,7 +3527,17 @@ if (isset($_POST['ai'])) { $a = json_decode($_POST['ai'], true) ?: []; $conn['ai
 
 if (isset($_POST['baleh'])) { $bl = json_decode($_POST['baleh'], true) ?: []; $conn['baleh'] = ['enabled'=>!empty($bl['enabled']),'token'=>trim($bl['token']??''),'chat_id'=>trim($bl['chat_id']??'')]; }
 if (isset($_POST['rubika'])) { $rb = json_decode($_POST['rubika'], true) ?: []; $conn['rubika'] = ['enabled'=>!empty($rb['enabled']),'token'=>trim($rb['token']??''),'chat_id'=>trim($rb['chat_id']??'')]; }
-if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund']),'src_price'=>!empty($ne['src_price']),'src_stock'=>!empty($ne['src_stock']),'run_fail'=>!empty($ne['run_fail'])]; }
+if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund']),'src_price'=>!empty($ne['src_price']),'src_stock'=>!empty($ne['src_stock']),'run_fail'=>!empty($ne['run_fail']),'retire'=>!empty($ne['retire'])]; }
+// v8.34: تنظیمات بازنشستگی محصولات رفته از مبدأ
+if (isset($_POST['retire_mode'])) {
+    $rm = (string)$_POST['retire_mode'];
+    $conn['retire_mode'] = isset(retireModes()[$rm]) ? $rm : 'off';
+}
+if (isset($_POST['retire_max_pct']))   $conn['retire_max_pct']   = max(1, min(100, (float)$_POST['retire_max_pct']));
+if (isset($_POST['retire_max_count'])) $conn['retire_max_count'] = max(1, (int)$_POST['retire_max_count']);
+// v8.33: تنظیمات نگهبان صف
+if (isset($_POST['stall_watchdog'])) $conn['stall_watchdog'] = !empty($_POST['stall_watchdog']) && $_POST['stall_watchdog'] !== 'false';
+if (isset($_POST['stall_after']))    $conn['stall_after']    = max(60, (int)$_POST['stall_after']);
 echo json_encode(['ok'=>saveConnections($conn),'message'=>'ذخیره شد'], JSON_UNESCAPED_UNICODE); exit;
 }
 
@@ -4045,6 +4055,18 @@ $pResult['removed'] = (int)($exRes['removed'] ?? 0);
 // v8.30: گران/ارزان و موجود/ناموجود شدن سایت مبدأ را اطلاع بده
 $srcN = notifSourceChanges($cn, $exRes, $profile['name'] ?? $key);
 if (!empty($srcN['sent'])) $pResult['src_notified'] = $srcN['sent'];
+
+// v8.34: محصولاتی که از مبدأ رفته‌اند را روی مقصد بازنشسته کن
+$retireMode = (string)($cn['retire_mode'] ?? 'off');
+if ($retireMode !== 'off' && !empty($exRes['removed_items'])) {
+    $rt = retireRemoved($cn, $exRes['removed_items'], $target, $retireMode,
+                        (int)($exRes['extracted'] ?? 0));
+    $pResult['retire'] = ['mode' => $retireMode, 'retired' => (int)($rt['retired'] ?? 0),
+        'not_found' => (int)($rt['not_found'] ?? 0), 'failed' => (int)($rt['failed'] ?? 0)];
+    if (!empty($rt['skipped'])) $pResult['retire']['skipped'] = $rt['skipped'];
+    notifRetire($cn, $rt, $profile['name'] ?? $key);
+}
+
 $profiles = loadProfiles();
 $profile  = $profiles[$key] ?? $profile;
 } else {
@@ -4122,6 +4144,47 @@ if ($stallWake) {
 $notifyResult = bslCheckNotifications($cn);
 if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
 echo json_encode($results, JSON_UNESCAPED_UNICODE); exit;
+}
+
+/**
+ * v8.34: بازنشستگی دستی — پیش‌نمایش یا اجرا.
+ * ?retire_run=1&profile=<key>&mode=draft&dry=1
+ * بدون dry=1 واقعاً روی ووکامرس/باسلام اعمال می‌شود.
+ */
+if (isset($_GET['retire_run'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cn  = loadConnections();
+    $key = (string)($_GET['profile'] ?? '');
+    $dry = !isset($_GET['dry']) || $_GET['dry'] !== '0';   // پیش‌فرض: فقط پیش‌نمایش
+    $profiles = loadProfiles();
+    if ($key === '' || !isset($profiles[$key])) {
+        echo json_encode(['ok' => false, 'error' => 'پروفایل نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $profile = $profiles[$key];
+    $mode = (string)($_GET['mode'] ?? ($cn['retire_mode'] ?? 'draft'));
+    if (!isset(retireModes()[$mode]) || $mode === 'off') $mode = 'draft';
+    $target = (string)($_GET['target'] ?? ($profile['syncConfig']['target'] ?? 'woo'));
+
+    // آخرین گزارش استخراج این پروفایل را پیدا کن
+    $rep = null; $newest = 0;
+    foreach (glob(__DIR__ . '/extract_report_*.json') ?: [] as $f) {
+        $d = json_decode((string)@file_get_contents($f), true);
+        if (!is_array($d)) continue;
+        if (($d['profile_key'] ?? '') !== $key) continue;
+        $ts = (int)@filemtime($f);
+        if ($ts >= $newest) { $newest = $ts; $rep = $d; }
+    }
+    if ($rep === null) {
+        echo json_encode(['ok' => false,
+            'error' => 'گزارش استخراجی برای این پروفایل نیست — اول یک استخراج اجرا کنید'],
+            JSON_UNESCAPED_UNICODE); exit;
+    }
+    $items = $rep['removed_items'] ?? [];
+    $res = retireRemoved($cn, $items, $target, $mode, (int)($rep['extracted'] ?? 0), $dry);
+    $res['ok'] = true; $res['profile'] = $profile['name'] ?? $key;
+    $res['report_time'] = $newest;
+    echo json_encode($res, JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
 /** v8.33: بررسی/ادامهٔ دستی صف گیرکرده */
@@ -4592,6 +4655,164 @@ function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = 
     $action = $which === 'bsl' ? 'bsl_backend' : 'woo_backend';
     $chk['resumed'] = fireAndForget('action=' . $action);
     return $chk;
+}
+
+/* =====================================================================
+ *  v8.34: بازنشستگی خودکار محصولاتی که از مبدأ رفته‌اند
+ *
+ *  وقتی محصولی در سایت مبدأ ناموجود یا حذف می‌شود، تا امروز فقط گزارش
+ *  می‌شد و روی ووکامرس/باسلام دست‌نخورده می‌ماند. حالا می‌توان خودکار
+ *  آن را از دسترس خارج کرد.
+ *
+ *  پیش‌فرض عمداً «پیش‌نویس/غیرفعال» است نه حذف، چون برگشت‌پذیر است و
+ *  نظرات و تاریخچهٔ محصول از بین نمی‌رود.
+ *
+ *  ⚠️ محافظ ایمنی: اگر سایت مبدأ یک بار خراب شود و چیزی برنگرداند،
+ *  همهٔ محصولات «حذف‌شده» به نظر می‌رسند. برای همین اگر نسبت حذف‌ها از
+ *  یک آستانه بگذرد، هیچ کاری انجام نمی‌شود و فقط هشدار می‌رود.
+ * ===================================================================== */
+
+/** حالت‌های مجاز بازنشستگی */
+function retireModes(): array {
+    return ['off' => 'کاری نکن', 'draft' => 'پیش‌نویس/غیرفعال', 'outofstock' => 'ناموجود کن', 'delete' => 'حذف کامل'];
+}
+
+/**
+ * تصمیم می‌گیرد که آیا بازنشستگی مجاز است یا محافظ باید جلویش را بگیرد.
+ * $removed تعداد رفته‌ها، $total کل محصولات دیده‌شده در این اجرا.
+ */
+function retireGuard(int $removed, int $total, array $cfg): array {
+    $maxPct   = (float)($cfg['retire_max_pct'] ?? 30);   // درصد
+    $maxCount = (int)($cfg['retire_max_count'] ?? 50);   // سقف مطلق
+    if ($removed <= 0) return ['allow' => false, 'reason' => 'موردی برای بازنشستگی نیست'];
+    // اگر استخراج تقریباً هیچ محصولی نداده، یعنی مبدأ خراب بوده — دست نزن
+    if ($total <= 0) return ['allow' => false, 'blocked' => true,
+        'reason' => 'استخراج هیچ محصولی برنگرداند — احتمال خرابی سایت مبدأ'];
+    $pct = $total > 0 ? ($removed / max(1, $total + $removed)) * 100 : 100;
+    if ($pct > $maxPct) return ['allow' => false, 'blocked' => true, 'pct' => round($pct, 1),
+        'reason' => 'نسبت حذف‌ها (' . round($pct, 1) . '٪) از آستانهٔ ' . $maxPct . '٪ بیشتر است'];
+    if ($removed > $maxCount) return ['allow' => false, 'blocked' => true, 'pct' => round($pct, 1),
+        'reason' => 'تعداد حذف‌ها (' . $removed . ') از سقف ' . $maxCount . ' بیشتر است'];
+    return ['allow' => true, 'pct' => round($pct, 1)];
+}
+
+/** یک محصول ووکامرس را با عنوان پیدا می‌کند */
+function wooFindByTitle(array $w, string $title): ?array {
+    if ($title === '') return null;
+    $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET',
+        'products?search=' . urlencode($title) . '&status=any&per_page=10');
+    if (empty($r['ok']) || !is_array($r['body'] ?? null)) return null;
+    foreach ($r['body'] as $ep) {
+        if (trim((string)($ep['name'] ?? '')) === $title) return $ep;
+    }
+    return null;
+}
+
+/** یک محصول باسلام را با عنوان پیدا می‌کند */
+function bslFindByTitle(string $tk, int $vid, string $title): ?array {
+    if ($title === '' || $vid <= 0) return null;
+    $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=20&title=' . rawurlencode($title));
+    if (empty($r['ok'])) return null;
+    foreach (($r['body']['data'] ?? []) as $p) {
+        if (!is_array($p)) continue;
+        if (trim((string)($p['title'] ?? ($p['name'] ?? ''))) === $title) return $p;
+    }
+    return null;
+}
+
+/**
+ * محصولات رفته از مبدأ را روی مقصد بازنشسته می‌کند.
+ * $items همان removed_items استخراج است.
+ */
+function retireRemoved(array $cn, array $items, string $target, string $mode,
+                       int $extracted, bool $dryRun = false): array {
+    $out = ['mode' => $mode, 'target' => $target, 'checked' => 0,
+            'retired' => 0, 'not_found' => 0, 'failed' => 0, 'items' => [], 'dry_run' => $dryRun];
+    if ($mode === 'off' || !$items) { $out['skipped'] = 'غیرفعال'; return $out; }
+
+    $guard = retireGuard(count($items), $extracted, $cn);
+    $out['guard'] = $guard;
+    if (empty($guard['allow'])) { $out['skipped'] = $guard['reason']; return $out; }
+
+    $w   = $cn['woocommerce'] ?? [];
+    $tk  = (string)($cn['basalam']['token'] ?? '');
+    $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
+    $suffix = trim((string)($w['title_suffix'] ?? ''));
+
+    foreach ($items as $it) {
+        $title = trim((string)($it['title'] ?? ''));
+        if ($title === '') continue;
+        $out['checked']++;
+        $row = ['title' => mb_substr($title, 0, 60), 'reason' => $it['reason'] ?? ''];
+
+        if ($target === 'woo' || $target === 'both') {
+            $t = $suffix !== '' && mb_strpos($title, $suffix) === false ? $title . $suffix : $title;
+            $ex = wooFindByTitle($w, $t) ?: wooFindByTitle($w, $title);
+            if (!$ex) { $out['not_found']++; $row['woo'] = 'یافت نشد'; }
+            elseif ($dryRun) { $row['woo'] = 'آماده: #' . $ex['id']; }
+            else {
+                $id = (int)$ex['id'];
+                if ($mode === 'delete') {
+                    $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'DELETE', 'products/' . $id . '?force=false');   // به زباله‌دان، نه نابودی
+                } elseif ($mode === 'outofstock') {
+                    $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'PUT', 'products/' . $id, ['stock_status' => 'outofstock', 'stock_quantity' => 0]);
+                } else {
+                    $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'PUT', 'products/' . $id, ['status' => 'draft']);
+                }
+                if (!empty($r['ok'])) { $out['retired']++; $row['woo'] = 'انجام شد #' . $id; }
+                else { $out['failed']++; $row['woo'] = 'خطا ' . (int)($r['code'] ?? 0); }
+            }
+        }
+
+        if (($target === 'bsl' || $target === 'both') && $tk !== '' && $vid > 0) {
+            $ex = bslFindByTitle($tk, $vid, $title);
+            if (!$ex) { $out['not_found']++; $row['bsl'] = 'یافت نشد'; }
+            elseif ($dryRun) { $row['bsl'] = 'آماده: #' . $ex['id']; }
+            else {
+                $id = (int)$ex['id'];
+                if ($mode === 'delete') {
+                    $r = bslReq($tk, 'DELETE', 'products/' . $id);
+                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'DELETE', 'vendors/' . $vid . '/products/' . $id);
+                } elseif ($mode === 'outofstock') {
+                    $r = bslReq($tk, 'PATCH', 'products/' . $id, ['stock' => 0]);
+                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $id, ['stock' => 0]);
+                } else {
+                    $r = bslReq($tk, 'PATCH', 'products/' . $id, ['status' => 3790]);   // غیرفعال
+                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $id, ['status' => 3790]);
+                }
+                if (!empty($r['ok'])) { $out['retired']++; $row['bsl'] = 'انجام شد #' . $id; }
+                else { $out['failed']++; $row['bsl'] = 'خطا ' . (int)($r['code'] ?? 0); }
+            }
+        }
+        if (count($out['items']) < 50) $out['items'][] = $row;
+    }
+    return $out;
+}
+
+/** اعلان نتیجهٔ بازنشستگی به پیام‌رسان‌ها */
+function notifRetire(array $cn, array $res, string $profileName = ''): array {
+    if (empty($cn['notif_events']['retire'])) return ['ok' => true, 'skipped' => 'disabled'];
+    if (notifPrereq($cn) !== null) return ['ok' => false];
+    $modeLbl = retireModes()[$res['mode'] ?? 'off'] ?? '';
+    if (!empty($res['guard']['blocked'])) {
+        return ['ok' => true, 'delivery' => notifSend($cn,
+            "🛑 بازنشستگی خودکار متوقف شد" . ($profileName !== '' ? "\nپروفایل: {$profileName}" : '')
+            . "\nعلت: " . ($res['guard']['reason'] ?? '')
+            . "\nهیچ محصولی تغییر نکرد — اگر درست است، دستی اجرا کنید.")];
+    }
+    if ((int)($res['retired'] ?? 0) <= 0) return ['ok' => true, 'skipped' => 'nothing'];
+    $lines = ["🗂 بازنشستگی محصولات رفته از مبدأ" . ($profileName !== '' ? " — {$profileName}" : ''),
+              'اقدام: ' . $modeLbl,
+              'انجام‌شده: ' . (int)$res['retired']
+              . ' · یافت‌نشده: ' . (int)($res['not_found'] ?? 0)
+              . ' · ناموفق: ' . (int)($res['failed'] ?? 0)];
+    foreach (array_slice($res['items'] ?? [], 0, 8) as $it) {
+        $lines[] = '• ' . ($it['title'] ?? '') . ' — ' . ($it['reason'] ?? '');
+    }
+    return ['ok' => true, 'delivery' => notifSend($cn, implode("\n", $lines))];
 }
 
 /**
@@ -8999,9 +9220,42 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSrcPrice" checked style="width:15px;height:15px"><span>💰 گران/ارزان شدن مبدأ</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSrcStock" checked style="width:15px;height:15px"><span>📦 موجود/ناموجود شدن مبدأ</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifRunFail" checked style="width:15px;height:15px"><span>⚠️ خطای اجرای خودکار</span></label>
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifRetire" checked style="width:15px;height:15px"><span>🗂 بازنشستگی محصولات رفته از مبدأ</span></label>
 </div>
 </div>
 <div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
+<div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🗂 محصولات رفته از مبدأ</div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+وقتی محصولی در سایت مبدأ ناموجود یا حذف شد، روی ووکامرس/باسلام چه شود؟
+«پیش‌نویس» پیشنهاد می‌شود چون برگشت‌پذیر است.
+</div>
+<div class="crow"><label>اقدام:</label>
+<select id="retireMode" style="flex:1">
+<option value="off">کاری نکن (فقط گزارش)</option>
+<option value="draft">پیش‌نویس/غیرفعال کن</option>
+<option value="outofstock">ناموجود کن</option>
+<option value="delete">حذف کن (زباله‌دان)</option>
+</select></div>
+<div class="crow"><label>حداکثر ٪ حذف:</label><input type="number" id="retireMaxPct" value="30" min="1" max="100" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">اگر بیشتر شد، متوقف شو</span></div>
+<div class="crow"><label>حداکثر تعداد:</label><input type="number" id="retireMaxCount" value="50" min="1" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">سقف در هر اجرا</span></div>
+<div style="font-size:10px;color:#f87171;background:#7f1d1d20;padding:6px 8px;border-radius:6px;margin-bottom:6px">
+⚠️ محافظ: اگر سایت مبدأ خراب شود و همه‌چیز «حذف‌شده» به نظر برسد، این دو سقف جلوی پاک شدن کل فروشگاه را می‌گیرند.
+</div>
+<div class="cact">
+<button class="btn btn-gray" onclick="retirePreview()" style="flex:1">👁 پیش‌نمایش</button>
+<button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
+</div>
+<div id="retireR" style="margin-top:8px"></div>
+<div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🩺 نگهبان صف ارسال</div>
+<div class="crow"><label>فعال:</label><input type="checkbox" id="stallWatchdog" checked style="width:16px;height:16px"></div>
+<div class="crow"><label>آستانه (ثانیه):</label><input type="number" id="stallAfter" value="300" min="60" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">بی‌حرکتی بیش از این = گیر کرده</span></div>
+<div class="cact">
+<button class="btn btn-gray" onclick="watchdogCheck()" style="flex:1">🔎 بررسی حالا</button>
+<button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
+</div>
+<div id="watchdogR" style="margin-top:8px"></div>
 <div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
 <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">🔍 استعلام از باسلام</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
@@ -11584,6 +11838,14 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.34', t:'بازنشستگی خودکار محصولات رفته از مبدأ', items:[
+    'اگر محصولی در سایت مبدأ ناموجود یا حذف شود، حالا روی ووکامرس و باسلام هم از دسترس خارج می‌شود',
+    'چهار حالت: کاری نکن / پیش‌نویس / ناموجود / حذف — پیش‌فرض «کاری نکن» است تا ناخواسته چیزی پاک نشود',
+    'حذف در ووکامرس به زباله‌دان می‌رود (force=false) و در باسلام غیرفعال می‌شود، پس برگشت‌پذیر است',
+    'محافظ ایمنی: اگر بیش از ۳۰٪ یا بیش از ۵۰ محصول یک‌جا حذف شده باشند، هیچ کاری نمی‌کند و هشدار می‌فرستد',
+    'دکمهٔ «پیش‌نمایش» نشان می‌دهد چه اتفاقی می‌افتد، بدون اینکه چیزی تغییر کند',
+    'دکمهٔ «بررسی حالا» برای نگهبان صف و تنظیم آستانه از داخل پنل'
+  ]},
   {v:'8.33', t:'رفع خطای ۴۲۲، متن کامل پیام‌ها، نگهبان صف', items:[
     'رفع خطای ۴۲۲ در استعلام سفارش‌ها و محصولات — پارامتر sort نامعتبر بود و حذف شد',
     'پیام خطای ۴۲۲ حالا دقیقاً می‌گوید کدام پارامتر ایراد داشته',
@@ -11696,6 +11958,65 @@ function notifTest(kind){
     if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';
     showToast('خطا شبکه',1);
   });
+}
+
+/**
+ * v8.34: پیش‌نمایش بازنشستگی — هیچ تغییری اعمال نمی‌کند، فقط نشان می‌دهد
+ * چه محصولاتی روی مقصد پیدا می‌شوند و چه بلایی سرشان می‌آید.
+ */
+function retirePreview(){
+  const box=$('retireR');
+  const key=$('profileSelect')?$('profileSelect').value:'';
+  if(!key){if(box)box.innerHTML='<div style="color:#fca5a5;font-size:11px">اول یک پروفایل انتخاب کنید</div>';return;}
+  const mode=$('retireMode')?$('retireMode').value:'draft';
+  if(mode==='off'){if(box)box.innerHTML='<div style="color:#94a3b8;font-size:11px">اقدام روی «کاری نکن» است</div>';return;}
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال بررسی...</div>';
+  fetch('?retire_run=1&dry=1&profile='+encodeURIComponent(key)+'&mode='+encodeURIComponent(mode))
+   .then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){box.innerHTML='<div style="color:#f87171;font-size:11px;background:#7f1d1d20;padding:6px 8px;border-radius:6px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    if(d.skipped){
+      const blocked=d.guard&&d.guard.blocked;
+      box.innerHTML='<div style="color:'+(blocked?'#fca5a5':'#94a3b8')+';font-size:11px;background:'+(blocked?'#7f1d1d20':'#0f172a')+';padding:6px 8px;border-radius:6px">'
+        +(blocked?'🛑 ':'ℹ️ ')+esc(d.skipped)+'</div>';return;
+    }
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
+    h+='<div style="color:#fbbf24;margin-bottom:4px">پیش‌نمایش — هیچ تغییری اعمال نشد</div>';
+    h+='<div style="color:#94a3b8">بررسی‌شده: '+toFa(d.checked||0)+' · یافت‌نشده: '+toFa(d.not_found||0)+'</div>';
+    (d.items||[]).slice(0,12).forEach(it=>{
+      h+='<div style="border-top:1px solid #1e293b;padding:3px 0;color:#cbd5e1">• '+esc(it.title||'')
+        +' <span style="color:#64748b">'+esc(it.reason||'')+'</span>'
+        +(it.woo?' <span style="color:#67e8f9">woo: '+esc(it.woo)+'</span>':'')
+        +(it.bsl?' <span style="color:#c4b5fd">bsl: '+esc(it.bsl)+'</span>':'')+'</div>';
+    });
+    h+='<div style="margin-top:6px;color:#94a3b8">برای اجرای واقعی، «اقدام» را ذخیره کنید تا در اجرای خودکار بعدی انجام شود.</div>';
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';});
+}
+
+/** v8.34: بررسی دستی وضعیت گیر کردن صف */
+function watchdogCheck(){
+  const box=$('watchdogR');
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال بررسی...</div>';
+  const after=$('stallAfter')?$('stallAfter').value:300;
+  fetch('?queue_watchdog=1&dry=1&after='+encodeURIComponent(after)).then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا</div>';return;}
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
+    (d.checks||[]).forEach(c=>{
+      const nm=c.which==='bsl'?'باسلام':'ووکامرس';
+      if(c.stalled){
+        h+='<div style="color:#fca5a5">⚠️ '+esc(nm)+' گیر کرده — '+toFa(c.idle||0)+' ثانیه بی‌حرکت'
+          +' ('+toFa(c.current||0)+'/'+toFa(c.total||0)+')</div>';
+      }else{
+        h+='<div style="color:#86efac">✓ '+esc(nm)+' — '+esc(c.reason||'سالم')+'</div>';
+      }
+    });
+    h+='<div style="margin-top:4px;color:#64748b">در اجرای خودکار بعدی، موارد گیرکرده ادامه داده می‌شوند.</div>';
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';});
 }
 
 /* =====================================================================
@@ -12292,7 +12613,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
@@ -12300,7 +12621,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0}));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0}));fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
