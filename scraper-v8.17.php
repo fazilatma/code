@@ -947,8 +947,8 @@ const SU_KEEP        = 15;
 
 function su_defaults(): array {
     return [
-        'enabled'      => false,
-        'auto_check'   => true,
+        'enabled'      => true,    // دکمهٔ دستی همیشه در دسترس است
+        'auto_check'   => false,   // بررسی هنگام رفرش: پیش‌فرض خاموش
         'auto_apply'   => false,   // پیش‌فرض: فقط اطلاع بده، خودسرانه نصب نکن
         'repo'         => 'fazilatma/code',
         'branch'       => 'main',
@@ -1015,7 +1015,15 @@ function su_http(string $url, string $token = '', bool $json = false, int $timeo
 if (isset($_GET['su_check'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $c = su_load();
-    if (empty($c['enabled'])) { echo json_encode(['ok' => true, 'enabled' => false]); exit; }
+    // بررسی خودکار فقط وقتی روشن است؛ ولی درخواست دستی (force) همیشه اجرا می‌شود
+    if (empty($_GET['force']) && empty($c['auto_check'])) {
+        echo json_encode(['ok' => true, 'enabled' => true, 'update' => false, 'skipped' => true]);
+        exit;
+    }
+    if (trim((string)$c['repo']) === '' || trim((string)$c['path']) === '') {
+        echo json_encode(['ok' => false, 'enabled' => true, 'error' => 'ریپو یا مسیر فایل تنظیم نشده'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
 
     $self = __FILE__;
     $cur  = su_blob_sha((string)@file_get_contents($self));
@@ -1055,7 +1063,10 @@ if (isset($_GET['su_check'])) {
 if (isset($_GET['su_apply'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $c = su_load();
-    if (empty($c['enabled'])) { echo json_encode(['ok' => false, 'error' => 'خودآپدیت فعال نیست']); exit; }
+    if (trim((string)$c['repo']) === '' || trim((string)$c['path']) === '') {
+        echo json_encode(['ok' => false, 'error' => 'ابتدا ریپو و مسیر فایل را تنظیم کنید'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
 
     $self = __FILE__;
     if (!is_writable($self)) {
@@ -7943,6 +7954,55 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="settings-panel-body" style="padding:0">
 
 <div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🔄 به‌روزرسانی کد</h3><span class="cst off" id="suBadge">—</span><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px">
+<div style="font-size:11px;color:#94a3b8;margin-bottom:4px">نسخهٔ فعلی روی هاست</div>
+<div id="suLocalInfo" style="font-family:monospace;font-size:11px;color:#67e8f9">—</div>
+</div>
+<button class="btn btn-green" onclick="suManual()" id="suBtnUpdate" style="width:100%;padding:12px;font-size:13px">⬇ بررسی و به‌روزرسانی کد</button>
+<div class="status" id="suStatus" style="margin-top:8px;text-align:center">—</div>
+
+<div style="border-top:1px solid #1e293b;margin:12px 0 10px"></div>
+
+<div class="crow" style="margin-bottom:4px">
+<label style="min-width:auto;display:flex;align-items:center;gap:7px;cursor:pointer;color:#e2e8f0;font-size:12px">
+<input type="checkbox" id="suAutoCheck" onchange="suSave(true)"> بررسی خودکار هنگام باز/رفرش شدن صفحه
+</label>
+</div>
+<div style="font-size:10.5px;color:#64748b;margin:0 0 8px;line-height:1.7">
+اگر روشن باشد، با هر رفرش نسخهٔ گیت‌هاب چک می‌شود و در صورت وجود نسخهٔ جدید اطلاع می‌دهد.
+اگر خاموشش کنید، فقط با دکمهٔ بالا به‌روزرسانی می‌شود.
+</div>
+<div class="crow" style="margin-bottom:4px">
+<label style="min-width:auto;display:flex;align-items:center;gap:7px;cursor:pointer;color:#e2e8f0;font-size:12px">
+<input type="checkbox" id="suAutoApply" onchange="suSave(true)"> نصب خودکار بدون پرسیدن
+</label>
+</div>
+<div style="font-size:10.5px;color:#64748b;margin:0 0 10px;line-height:1.7">
+فقط وقتی «بررسی خودکار» روشن است معنا دارد. بدون این، اول از شما تأیید گرفته می‌شود.
+</div>
+
+<div class="smenu-hdr" onclick="toggleSmenu(this)" style="padding:9px 0;border-top:1px solid #1e293b">
+<h3 style="font-size:12px;color:#94a3b8">⚙️ منبع گیت‌هاب</h3><span class="arrow">▼</span></div>
+<div class="smenu-body" style="padding:0">
+<div class="crow"><label>ریپو:</label><input id="suRepo" placeholder="user/repo" dir="ltr" oninput="suDirty()"></div>
+<div class="crow"><label>برنچ:</label><input id="suBranch" placeholder="main" dir="ltr" oninput="suDirty()"></div>
+<div class="crow"><label>مسیر فایل:</label><input id="suPath" placeholder="scraper-v8.17.php" dir="ltr" oninput="suDirty()"></div>
+<div class="crow"><label>توکن:</label><input type="password" id="suToken" placeholder="فقط ریپوی خصوصی" dir="ltr" oninput="suDirty()"></div>
+<div style="font-size:10px;color:#64748b;margin-bottom:8px">
+توکن: <span id="suTokenState">—</span> · برای حذف <code>__CLEAR__</code> بنویسید
+</div>
+<div class="cact">
+<button class="btn btn-cyan" onclick="suSave(true)" style="flex:1">💾 ذخیره</button>
+<button class="btn btn-gray" onclick="suShowBackups()" style="flex:1">🗄️ بکاپ‌ها</button>
+</div>
+<div id="suBackupList" style="display:none;margin-top:10px"></div>
+</div>
+</div>
+</div>
+
+<div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🛒 ووکامرس</h3><span class="cst off" id="wcS">غیرمتصل</span><span class="arrow">▼</span></div>
 <div class="smenu-body">
 <div class="crow"><label>آدرس:</label><input type="url" id="wcUrl" placeholder="https://yourstore.com" dir="ltr"></div>
@@ -8154,50 +8214,6 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 
 <div class="tab-pane" id="pane-settings">
-    <div class="card settings-card" style="border-color:#22c55e">
-        <div class="section-title" style="color:#4ade80">🔄 به‌روزرسانی از گیت‌هاب</div>
-        <div class="row" style="align-items:center">
-            <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                <input type="checkbox" id="suEnabled" onchange="suSave()"> فعال بودن خودآپدیت
-            </label>
-        </div>
-        <div id="suBody" style="display:none">
-            <div class="row" style="align-items:center;margin-top:6px">
-                <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                    <input type="checkbox" id="suAutoCheck" onchange="suSave()"> بررسی خودکار هنگام باز شدن صفحه
-                </label>
-            </div>
-            <div class="row" style="align-items:center">
-                <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                    <input type="checkbox" id="suAutoApply" onchange="suSave()"> نصب خودکار بدون پرسیدن
-                </label>
-            </div>
-            <div style="font-size:11px;color:#64748b;margin:4px 0 10px;line-height:1.7">
-                💡 اگر «نصب خودکار» خاموش باشد، فقط اطلاع می‌دهد و خودتان تصمیم می‌گیرید (پیشنهاد می‌شود).
-            </div>
-            <div class="row">
-                <input type="text" id="suRepo" placeholder="user/repo" oninput="suDirty()">
-                <input type="text" id="suBranch" placeholder="برنچ" oninput="suDirty()" style="max-width:220px">
-            </div>
-            <div class="row">
-                <input type="text" id="suPath" placeholder="مسیر فایل در ریپو" oninput="suDirty()">
-            </div>
-            <div class="row">
-                <input type="password" id="suToken" placeholder="توکن گیت‌هاب (فقط ریپوی خصوصی)" oninput="suDirty()">
-            </div>
-            <div style="font-size:11px;color:#64748b;margin-bottom:10px">
-                وضعیت توکن: <span id="suTokenState">—</span> · برای حذف عبارت <code>__CLEAR__</code> را وارد کنید
-            </div>
-            <div class="row">
-                <button class="btn btn-cyan" onclick="suSave(true)" style="flex:1">💾 ذخیرهٔ تنظیمات</button>
-                <button class="btn btn-blue" onclick="suCheck(true)" style="flex:1">🔍 بررسی نسخه</button>
-                <button class="btn btn-gray" onclick="suShowBackups()">🗄️ بکاپ‌ها</button>
-            </div>
-            <div class="status" id="suStatus" style="color:#4ade80;margin-top:8px">—</div>
-            <div id="suBackupList" style="display:none;margin-top:10px"></div>
-        </div>
-    </div>
-
     <div class="card settings-card">
         <div class="section-title">📝 عنوان محصول</div>
         <div class="row" style="align-items:center">
@@ -10438,35 +10454,46 @@ function suStat(msg, color) {
     if (el) { el.innerHTML = msg; el.style.color = color || '#4ade80'; }
 }
 
+function suBadge(text, cls) {
+    const b = $('suBadge');
+    if (b) { b.textContent = text; b.className = 'cst ' + (cls || 'off'); }
+}
+
 function suDirty() {
     clearTimeout(suSaveTimer);
     suSaveTimer = setTimeout(() => suSave(), 900);
 }
 
-function suLoad() {
+function suLoad(then) {
     fetch('?su_settings=1').then(r => r.json()).then(d => {
         if (!d.ok) return;
         SU = d.settings;
-        if ($('suEnabled'))   $('suEnabled').checked   = !!SU.enabled;
-        if ($('suAutoCheck')) $('suAutoCheck').checked = SU.auto_check !== false;
+        if ($('suAutoCheck')) $('suAutoCheck').checked = !!SU.auto_check;
         if ($('suAutoApply')) $('suAutoApply').checked = !!SU.auto_apply;
         if ($('suRepo'))   $('suRepo').value   = SU.repo   || '';
         if ($('suBranch')) $('suBranch').value = SU.branch || '';
         if ($('suPath'))   $('suPath').value   = SU.path   || '';
         if ($('suTokenState')) $('suTokenState').textContent = SU.has_token ? 'تنظیم شده' : 'تنظیم نشده';
-        if ($('suBody')) $('suBody').style.display = SU.enabled ? 'block' : 'none';
-        if (!SU.writable) {
-            suStat('⚠ فایل قابل نوشتن نیست — سطح دسترسی را روی ۶۴۴ تنظیم کنید', '#fbbf24');
-        } else {
-            suStat('نسخهٔ فعلی: <code>' + esc(SU.local_sha) + '</code> · ' +
-                   toFa((SU.local_size / 1024).toFixed(0)) + ' کیلوبایت', '#64748b');
+        if ($('suLocalInfo')) {
+            $('suLocalInfo').innerHTML = esc(SU.self_name) + '<br>' +
+                '<span style="color:#64748b">' + esc(SU.local_sha) + ' · ' +
+                toFa((SU.local_size / 1024).toFixed(0)) + ' KB</span>';
         }
+        if (!SU.writable) {
+            suStat('⚠ فایل قابل نوشتن نیست — chmod را ۶۴۴ کنید', '#fbbf24');
+            suBadge('قفل', 'tg');
+        } else {
+            suStat('برای بررسی نسخهٔ جدید دکمه را بزنید', '#64748b');
+            suBadge(SU.auto_check ? 'خودکار' : 'دستی', SU.auto_check ? 'on' : 'off');
+        }
+        if (typeof then === 'function') then();
     }).catch(() => {});
 }
 
 function suSave(showMsg) {
     const fd = new FormData();
-    fd.append('enabled',    $('suEnabled').checked ? '1' : '');
+    // «فعال» دیگر جدا نیست: وجود تنظیمات معتبر یعنی فعال است
+    fd.append('enabled', '1');
     fd.append('auto_check', $('suAutoCheck').checked ? '1' : '');
     fd.append('auto_apply', $('suAutoApply').checked ? '1' : '');
     fd.append('repo',   $('suRepo').value.trim());
@@ -10475,8 +10502,6 @@ function suSave(showMsg) {
     const tk = $('suToken').value;
     if (tk) fd.append('github_token', tk);
 
-    if ($('suBody')) $('suBody').style.display = $('suEnabled').checked ? 'block' : 'none';
-
     fetch('?su_settings=1', { method: 'POST', body: fd })
         .then(r => r.json())
         .then(d => {
@@ -10484,38 +10509,60 @@ function suSave(showMsg) {
             SU = d.settings;
             $('suToken').value = '';
             if ($('suTokenState')) $('suTokenState').textContent = SU.has_token ? 'تنظیم شده' : 'تنظیم نشده';
-            if (showMsg) showToast('✓ تنظیمات ذخیره شد');
+            suBadge(SU.auto_check ? 'خودکار' : 'دستی', SU.auto_check ? 'on' : 'off');
+            if (showMsg) showToast('✓ ذخیره شد');
         })
         .catch(() => showToast('خطا در ذخیره', true));
 }
 
-/** بررسی نسخه. manual=true یعنی کاربر خودش دکمه زده. */
-function suCheck(manual) {
-    if (!manual && SU && SU.auto_check === false) return;
-    if (manual) suStat('<span style="opacity:.7">در حال بررسی...</span>', '#93c5fd');
+/** دکمهٔ دستی: همیشه کار می‌کند، حتی اگر بررسی خودکار خاموش باشد */
+function suManual() {
+    const busy = suBusy();
+    if (busy) { showToast('«' + busy + '» در جریان است — بعداً', true); return; }
+    const btn = $('suBtnUpdate');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ در حال بررسی...'; }
+    suStat('<span style="opacity:.7">در حال بررسی نسخهٔ گیت‌هاب...</span>', '#93c5fd');
+
+    fetch('?su_check=1&force=1').then(r => r.json()).then(d => {
+        const reset = () => { if (btn) { btn.disabled = false; btn.textContent = '⬇ بررسی و به‌روزرسانی کد'; } };
+        if (!d.ok) { suStat('✗ ' + esc(d.error || 'خطا'), '#f87171'); showToast(d.error || 'خطا', true); reset(); return; }
+        if (!d.update) {
+            suStat('✓ نسخهٔ شما به‌روز است — <code>' + esc(d.local_sha) + '</code>', '#4ade80');
+            showToast('✓ نسخهٔ شما به‌روز است');
+            reset();
+            return;
+        }
+        // در حالت دستی مستقیم نصب می‌کنیم؛ کاربر خودش درخواست کرده
+        suStat('⬇ نسخهٔ جدید یافت شد — در حال نصب...', '#fbbf24');
+        suApply(true);
+    }).catch(() => {
+        suStat('✗ خطا در ارتباط', '#f87171');
+        if (btn) { btn.disabled = false; btn.textContent = '⬇ بررسی و به‌روزرسانی کد'; }
+    });
+}
+
+/** بررسی خودکار هنگام لود صفحه — فقط اگر چک‌باکس روشن باشد */
+function suCheck() {
+    if (!SU || !SU.auto_check) return;
 
     fetch('?su_check=1').then(r => r.json()).then(d => {
-        if (!d.enabled) { if (manual) suStat('خودآپدیت فعال نیست', '#64748b'); return; }
-        if (!d.ok) {
-            if (manual) suStat('✗ ' + esc(d.error || 'خطا'), '#f87171');
-            return;
-        }
-        if (!d.update) {
-            suStat('✓ به‌روز است — <code>' + esc(d.local_sha) + '</code>', '#4ade80');
-            if (manual) showToast('✓ نسخهٔ شما به‌روز است');
+        if (!d.ok || !d.enabled || !d.update) {
+            if (d.ok && d.enabled && !d.update) {
+                suStat('✓ به‌روز است — <code>' + esc(d.local_sha) + '</code>', '#4ade80');
+            }
             return;
         }
 
-        // نسخهٔ جدید موجود است
         const busy = suBusy();
         if (busy) {
             suStat('⚠ نسخهٔ جدید موجود است — تا پایان «' + esc(busy) + '» صبر می‌کنیم', '#fbbf24');
             showToast('نسخهٔ جدید موجود است (پس از پایان کار جاری)', true);
+            suBadge('جدید', 'tg');
             return;
         }
 
-        suStat('⬆ نسخهٔ جدید: <code>' + esc(d.remote_sha) + '</code> (فعلی <code>' +
-               esc(d.local_sha) + '</code>)', '#fbbf24');
+        suStat('⬆ نسخهٔ جدید: <code>' + esc(d.remote_sha) + '</code>', '#fbbf24');
+        suBadge('جدید', 'tg');
 
         if (d.auto_apply) {
             showToast('⬇ نسخهٔ جدید یافت شد — در حال به‌روزرسانی...');
@@ -10523,7 +10570,7 @@ function suCheck(manual) {
         } else {
             suPrompt(d);
         }
-    }).catch(() => { if (manual) suStat('✗ خطا در ارتباط', '#f87171'); });
+    }).catch(() => {});
 }
 
 /** نوار اعلان بالای صفحه با دکمهٔ تأیید */
@@ -10561,13 +10608,17 @@ function suApply(silent) {
     showToast('⏳ در حال به‌روزرسانی...');
     suStat('<span style="opacity:.7">در حال دانلود و نصب...</span>', '#93c5fd');
 
+    const btn = $('suBtnUpdate');
+    const unlock = () => { if (btn) { btn.disabled = false; btn.textContent = '⬇ بررسی و به‌روزرسانی کد'; } };
+
     fetch('?su_apply=1').then(r => r.json()).then(d => {
         if (!d.ok) {
             suStat('✗ ' + esc(d.error || 'خطا'), '#f87171');
             showToast(d.error || 'به‌روزرسانی ناموفق', true);
+            unlock();
             return;
         }
-        if (!d.changed) { suStat('✓ از قبل به‌روز بود', '#4ade80'); return; }
+        if (!d.changed) { suStat('✓ از قبل به‌روز بود', '#4ade80'); unlock(); return; }
 
         suStat('✓ نصب شد — صفحه در حال بارگذاری مجدد...', '#4ade80');
         showToast('✓ به‌روزرسانی انجام شد — بارگذاری مجدد');
@@ -10579,6 +10630,7 @@ function suApply(silent) {
     }).catch(() => {
         suStat('✗ خطا در ارتباط', '#f87171');
         showToast('خطا در به‌روزرسانی', true);
+        unlock();
     });
 }
 
@@ -10619,9 +10671,8 @@ function suRestore(file) {
     }).catch(() => showToast('خطا', true));
 }
 
-// راه‌اندازی: تنظیمات را بخوان و در صورت فعال بودن، یک بررسی سبک انجام بده
-suLoad();
-setTimeout(() => { if (SU && SU.enabled && SU.auto_check !== false) suCheck(false); }, 1500);
+// راه‌اندازی: تنظیمات را بخوان؛ بررسی خودکار فقط اگر چک‌باکس روشن باشد
+suLoad(() => { if (SU && SU.auto_check) setTimeout(suCheck, 1200); });
 
 // ========== Connection JS ==========
 let wSend=false,bSend=false,cn={woocommerce:{},basalam:{}},extractPollTimer=null,extractModalTimer=null;
