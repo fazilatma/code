@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.36';
+const APP_VERSION = '8.37';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3527,7 +3527,7 @@ if (isset($_POST['ai'])) { $a = json_decode($_POST['ai'], true) ?: []; $conn['ai
 
 if (isset($_POST['baleh'])) { $bl = json_decode($_POST['baleh'], true) ?: []; $conn['baleh'] = ['enabled'=>!empty($bl['enabled']),'token'=>trim($bl['token']??''),'chat_id'=>trim($bl['chat_id']??'')]; }
 if (isset($_POST['rubika'])) { $rb = json_decode($_POST['rubika'], true) ?: []; $conn['rubika'] = ['enabled'=>!empty($rb['enabled']),'token'=>trim($rb['token']??''),'chat_id'=>trim($rb['chat_id']??'')]; }
-if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund']),'src_price'=>!empty($ne['src_price']),'src_stock'=>!empty($ne['src_stock']),'run_fail'=>!empty($ne['run_fail']),'retire'=>!empty($ne['retire'])]; }
+if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund']),'src_price'=>!empty($ne['src_price']),'src_stock'=>!empty($ne['src_stock']),'run_fail'=>!empty($ne['run_fail']),'retire'=>!empty($ne['retire']),'cron_ping'=>!empty($ne['cron_ping'])]; }
 // v8.34: تنظیمات بازنشستگی محصولات رفته از مبدأ
 if (isset($_POST['retire_mode'])) {
     $rm = (string)$_POST['retire_mode'];
@@ -3538,6 +3538,8 @@ if (isset($_POST['retire_max_count'])) $conn['retire_max_count'] = max(1, (int)$
 // v8.33: تنظیمات نگهبان صف
 if (isset($_POST['stall_watchdog'])) $conn['stall_watchdog'] = !empty($_POST['stall_watchdog']) && $_POST['stall_watchdog'] !== 'false';
 if (isset($_POST['stall_after']))    $conn['stall_after']    = max(60, (int)$_POST['stall_after']);
+// v8.37: فاصلهٔ پینگ کران (دقیقه) — صفر یعنی هر اجرا
+if (isset($_POST['ping_every'])) $conn['ping_every'] = max(0, (int)$_POST['ping_every']);
 echo json_encode(['ok'=>saveConnections($conn),'message'=>'ذخیره شد'], JSON_UNESCAPED_UNICODE); exit;
 }
 
@@ -4022,6 +4024,10 @@ header('Content-Type: application/json; charset=UTF-8');
 $cronLock = __DIR__ . '/.cron_run.lock';
 $lockAge  = is_file($cronLock) ? (time() - (int)@filemtime($cronLock)) : PHP_INT_MAX;
 if ($lockAge < 1800) {
+    // v8.37: حتی وقتی به‌خاطر قفل رد می‌شویم هم پینگ بفرست — وگرنه یک قفلِ
+    // گیرکرده دقیقاً شبیه «کران‌جاب اصلاً اجرا نمی‌شود» به نظر می‌رسد.
+    $cnLock = loadConnections();
+    notifCronPing($cnLock, ['profiles' => [], 'locked' => $lockAge]);
     echo json_encode(['ok' => true, 'skipped' => true, 'profiles' => [],
         'reason' => 'اجرای قبلی هنوز تمام نشده (' . $lockAge . ' ثانیه)'], JSON_UNESCAPED_UNICODE);
     exit;
@@ -4033,7 +4039,8 @@ $now = time();
 $profiles = loadProfiles();
 $syncState = loadSyncState();
 $cn = loadConnections();
-$results = ['time' => $now, 'profiles' => []];
+// v8.37: ok صریح، تا ابزارهای بیرونی بتوانند موفقیت اجرا را تشخیص دهند
+$results = ['ok' => true, 'time' => $now, 'profiles' => []];
 foreach ($profiles as $key => $profile) {
 $syncCfg = $profile['syncConfig'] ?? [];
 $pResult = ['key' => $key, 'name' => $profile['name'] ?? $key];
@@ -4147,6 +4154,12 @@ if ($stallWake) {
 
 $notifyResult = bslCheckNotifications($cn);
 if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
+
+// v8.37: پینگ — آخرین کار، تا خلاصهٔ همین اجرا را هم بتواند گزارش کند
+$pingRes = notifCronPing($cn, $results);
+if (!empty($pingRes['sent'])) $results['ping'] = 'sent';
+elseif (!empty($pingRes['skipped'])) $results['ping'] = $pingRes['skipped'];
+
 echo json_encode($results, JSON_UNESCAPED_UNICODE); exit;
 }
 
@@ -4358,6 +4371,58 @@ function notifSend(array $cn, string $msg): array {
     if ($rt !== '' && $rc !== '')  $out['rubika'] = bslSendToRubika($rt, $rc, $msg) ? 'sent' : 'fail';
     if (!$out) $out['none'] = 'no_messenger';
     return $out;
+}
+
+/**
+ * v8.37: پیام «پینگ» برای اثبات اینکه خودِ کران‌جاب اجرا می‌شود.
+ *
+ * فرق این با «خطای اجرای خودکار»: آن وقتی می‌آید که کاری شکست بخورد،
+ * ولی اگر کران‌جاب اصلاً اجرا نشود هیچ پیامی نمی‌آید و سکوت گمراه‌کننده
+ * است. پینگ دقیقاً همین حالت را آشکار می‌کند.
+ *
+ * ⚠️ چون کران معمولاً هر ۵ دقیقه اجرا می‌شود، ارسال پیام در هر اجرا
+ * روزی ۲۸۸ پیام می‌شود. برای همین یک فاصلهٔ زمانی (پیش‌فرض ۶ ساعت)
+ * رعایت می‌شود؛ با ping_every=0 می‌توان هر اجرا را فرستاد.
+ */
+function notifCronPing(array $cn, array $results, bool $force = false): array {
+    if (!$force && empty($cn['notif_events']['cron_ping'])) return ['ok' => true, 'skipped' => 'disabled'];
+    if (notifPrereq($cn) !== null) return ['ok' => false, 'error' => notifPrereq($cn)];
+
+    $everyMin = (int)($cn['ping_every'] ?? 360);   // دقیقه
+    $st  = notifLoadState();
+    $last = (int)($st['last_cron_ping'] ?? 0);
+    $now  = time();
+    if (!$force && $everyMin > 0 && $last > 0 && ($now - $last) < $everyMin * 60) {
+        return ['ok' => true, 'skipped' => 'throttled',
+                'next_in' => $everyMin * 60 - ($now - $last)];
+    }
+
+    // خلاصهٔ کاری که همین اجرا انجام داد تا پینگ فقط «زنده‌ام» نباشد
+    $profiles = is_array($results['profiles'] ?? null) ? $results['profiles'] : [];
+    $ran = 0; $notDue = 0; $errs = 0; $extracted = 0;
+    foreach ($profiles as $p) {
+        $stt = $p['status'] ?? '';
+        if ($stt === 'not_due') { $notDue++; continue; }
+        if ($stt === 'sync_disabled') continue;
+        $ran++;
+        $extracted += (int)($p['extracted'] ?? 0);
+        if (!empty($p['extract_error'])) $errs++;
+    }
+    $sinceTxt = $last > 0 ? gmdate('H:i', min(359999, $now - $last)) : '—';
+
+    $msg = "📡 کران‌جاب اجرا شد"
+         . "\nزمان سرور: " . date('Y-m-d H:i:s')
+         . "\nنسخه: " . APP_VERSION
+         . "\nپروفایل‌های اجراشده: " . $ran
+         . ($notDue > 0 ? " · نوبتشان نبود: " . $notDue : '')
+         . ($extracted > 0 ? "\nمحصولات استخراج‌شده: " . $extracted : '')
+         . ($errs > 0 ? "\n⚠️ خطا در " . $errs . " پروفایل" : '')
+         . ($last > 0 ? "\nفاصله از پینگ قبلی: " . $sinceTxt : '')
+         . ($force ? "\n(پینگ آزمایشی)" : '');
+
+    $delivery = notifSend($cn, $msg);
+    if (!$force) { $st['last_cron_ping'] = $now; notifSaveState($st); }
+    return ['ok' => true, 'sent' => true, 'delivery' => $delivery, 'message' => $msg];
 }
 
 /** پیش‌نیازها را بررسی می‌کند و در صورت نبود، علت را برمی‌گرداند */
@@ -5055,6 +5120,14 @@ if (isset($_GET['notif_test'])) {
     if ($kind === 'orders')        $r = notifCheckOrders($cn, true);
     elseif ($kind === 'chats')     $r = notifCheckChats($cn, true);
     elseif ($kind === 'products')  $r = notifCheckProducts($cn, true);
+    elseif ($kind === 'ping') {
+        // v8.37: پینگ آزمایشی — فاصلهٔ زمانی را نادیده می‌گیرد و
+        // وضعیت را ذخیره نمی‌کند تا پینگ واقعی بعدی از دست نرود
+        $pr = notifCronPing($cn, ['profiles' => []], true);
+        $r = ['ok' => !empty($pr['ok']), 'found' => 1, 'total_seen' => 1,
+              'sent' => $pr['delivery'] ?? [], 'sample' => $pr['message'] ?? ''];
+        if (!empty($pr['error'])) { $r['ok'] = false; $r['error'] = $pr['error']; }
+    }
     elseif ($kind === 'source') {
         // v8.30: از آخرین گزارش استخراج استفاده می‌کند تا پیام واقعی باشد
         $rep = null;
@@ -9413,6 +9486,17 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSrcPrice" checked style="width:15px;height:15px"><span>💰 گران/ارزان شدن مبدأ</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSrcStock" checked style="width:15px;height:15px"><span>📦 موجود/ناموجود شدن مبدأ</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifRunFail" checked style="width:15px;height:15px"><span>⚠️ خطای اجرای خودکار</span></label>
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifCronPing" style="width:15px;height:15px"><span>📡 پینگ اجرای کران‌جاب</span></label>
+<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;padding-right:21px">
+<span>حداکثر هر</span>
+<input type="number" id="pingEvery" value="360" min="0" style="max-width:70px;padding:4px 6px;font-size:11px" dir="ltr">
+<span>دقیقه</span>
+<button class="btn btn-gray" onclick="testPing()" style="font-size:10px;padding:3px 8px">📡 تست</button>
+</div>
+<div style="font-size:10px;color:#64748b;padding-right:21px;line-height:1.6">
+کران معمولاً هر ۵ دقیقه اجرا می‌شود؛ بدون این فاصله روزی ۲۸۸ پیام می‌آید.
+صفر یعنی هر اجرا پیام بفرست.
+</div>
 </div>
 </div>
 <div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
@@ -12044,6 +12128,13 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.37', t:'پینگ کران‌جاب — بفهمید زمان‌بند واقعاً کار می‌کند', items:[
+    'تیک «📡 پینگ اجرای کران‌جاب» به فهرست رویدادهای اعلان اضافه شد',
+    'هر بار کران اجرا شود پیام می‌آید: زمان سرور، نسخه، تعداد پروفایل‌ها و محصولات استخراج‌شده',
+    'فاصلهٔ زمانی قابل تنظیم (پیش‌فرض ۶ ساعت) چون کران هر ۵ دقیقه اجرا می‌شود و بدون آن روزی ۲۸۸ پیام می‌آمد',
+    'اگر اجرا به‌خاطر قفل رد شود هم پینگ می‌آید — وگرنه قفلِ گیرکرده شبیه کرانِ خاموش دیده می‌شود',
+    'دکمهٔ «📡 تست» برای دیدن همان پیام بدون منتظر ماندن'
+  ]},
   {v:'8.36', t:'رفع باگ ارسال پروفایل اشتباه', items:[
     'باگ مهم: هنگام ارسال یک پروفایل، محصولات پروفایل دیگری فرستاده می‌شد',
     'علت: همهٔ ارسال‌ها از یک فایل مشترک می‌خواندند که با هر ارسال تازه بازنویسی می‌شد',
@@ -12149,7 +12240,7 @@ const CHANGELOG = [
  * حالت تست وضعیت را ذخیره نمی‌کند تا اعلان واقعی بعدی از دست نرود.
  */
 function notifTest(kind){
-  const labels={orders:'🛒 سفارش‌ها',chats:'💬 پیام‌ها',products:'📋 محصولات',source:'💰 تغییرات مبدأ'};
+  const labels={orders:'🛒 سفارش‌ها',chats:'💬 پیام‌ها',products:'📋 محصولات',source:'💰 تغییرات مبدأ',ping:'📡 پینگ کران'};
   const box=$('notifTestR');
   if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال استعلام '+esc(labels[kind]||kind)+' از باسلام...</div>';
   fetch('?notif_test=1&kind='+encodeURIComponent(kind)).then(r=>r.json()).then(d=>{
@@ -12180,6 +12271,9 @@ function notifTest(kind){
     showToast('خطا شبکه',1);
   });
 }
+
+/** v8.37: پینگ آزمایشی — همان پیامی که کران‌جاب می‌فرستد */
+function testPing(){notifTest('ping');}
 
 /** v8.36: نشانگر کنار عنوان بخش «محصولات رفته از مبدأ» */
 function updateRetireBadge(){
@@ -12851,7 +12945,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
@@ -12859,7 +12953,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0}));fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
