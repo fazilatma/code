@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.43';
+const APP_VERSION = '8.44';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4037,6 +4037,64 @@ echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE); exit;
  *  می‌شوند. حذف‌شده‌ها مسیر جداگانهٔ خودشان را دارند (retireRemoved).
  * ===================================================================== */
 
+/* =====================================================================
+ *  v8.44: آماده‌سازی محصول برای ارسال، سمت سرور
+ *
+ *  تا اینجا فقط مرورگر قیمت نهایی را می‌ساخت (getSendP در جاوااسکریپت).
+ *  کران محصول خام را در صف می‌گذاشت و ارسال‌کننده دنبال final_price
+ *  می‌گشت که وجود نداشت، پس قیمت صفر می‌شد. حالا همان منطق اینجا هم
+ *  پیاده شده تا اجرای خودکار و دستی یک نتیجه بدهند.
+ * ===================================================================== */
+
+/** قیمت نهایی با ضریب/درصد و گِرد کردن پروفایل — معادل getFinalPriceNum */
+function profileFinalPrice(array $profile, $rawPrice): int {
+    $base = extractPriceNum($rawPrice);
+    if ($base <= 0) return 0;
+    $mode = (string)($profile['priceMode'] ?? 'none');
+    $val  = (float)($profile['priceVal'] ?? 0);
+    $final = $base;
+    if ($mode === 'percent')         $final = $base * (1 + ($val / 100));
+    elseif ($mode === 'multiplier')  $final = $base * $val;
+    $final = (int)round($final);
+    $round = (int)($profile['roundPrice'] ?? 0);
+    if ($round > 0) $final = (int)(round($final / $round) * $round);
+    return $final;
+}
+
+/** امضای تنظیمات قیمت — اگر عوض شود یعنی قیمت همهٔ محصولات عوض شده */
+function profilePriceSignature(array $profile): string {
+    return (string)($profile['priceMode'] ?? 'none') . '|'
+         . (string)($profile['priceVal'] ?? 0) . '|'
+         . (string)($profile['roundPrice'] ?? 0) . '|'
+         . trim((string)($profile['titleSuffix'] ?? ''));
+}
+
+/** محصول ذخیره‌شده را به همان شکلی درمی‌آورد که مرورگر می‌فرستد */
+function prepareForSend(array $profile, string $key, array $p): array {
+    $raw = (string)($p['price'] ?? '');
+    $title = trim((string)($p['title'] ?? ($p['name'] ?? '')));
+    $suffix = trim((string)($profile['titleSuffix'] ?? ''));
+    if ($suffix !== '' && $title !== '' && mb_strpos($title, $suffix) === false) {
+        $title .= ' ' . $suffix;
+    }
+    $unit = (mb_strpos($raw, 'ریال') !== false || mb_strpos($raw, 'ر.ی') !== false)
+          ? 'rial' : 'toman';
+    return [
+        'key'         => $key,
+        'title'       => $title,
+        'final_price' => (string)profileFinalPrice($profile, $raw),
+        'price'       => $raw,
+        'price_unit'  => $unit,
+        'image'       => (string)($p['image'] ?? ''),
+        'sku'         => (string)($p['sku'] ?? ''),
+        'short_desc'  => (string)($p['shortDesc'] ?? ($p['short_desc'] ?? '')),
+        'long_desc'   => (string)($p['longDesc'] ?? ($p['long_desc'] ?? '')),
+        'weight'      => (string)($p['weight'] ?? ''),
+        'link'        => (string)($p['link'] ?? ''),
+        'orig_price'  => (string)($p['origPrice'] ?? ($p['originalPrice'] ?? '')),
+    ];
+}
+
 /**
  * از نتیجهٔ استخراج، کلید محصولاتی را برمی‌گرداند که باید ارسال شوند.
  * خروجی null یعنی «فیلتری اعمال نکن» (همه را بفرست).
@@ -4061,7 +4119,7 @@ function syncChangedKeys(array $exRes): ?array {
  *
  * $onlyKeys اگر داده شود، فقط همان کلیدها برگردانده می‌شوند.
  */
-function profileOrderedProducts(array $profile, ?array $onlyKeys = null): array {
+function profileOrderedProducts(array $profile, ?array $onlyKeys = null, bool $forSend = true): array {
     $raw = $profile['products'] ?? [];
     $map = [];
     foreach ($raw as $entry) {
@@ -4069,26 +4127,34 @@ function profileOrderedProducts(array $profile, ?array $onlyKeys = null): array 
             $map[$entry[0]] = $entry[1];
         }
     }
+    // v8.44: قیمت نهایی را همین‌جا بساز، وگرنه ارسال‌کننده final_price
+    // را پیدا نمی‌کند و قیمت صفر می‌فرستد.
+    $mk = function (string $k, $p) use ($profile, $forSend) {
+        if (!is_array($p)) return null;
+        return $forSend ? prepareForSend($profile, $k, $p) : $p;
+    };
     $order = $profile['productsOrder'] ?? [];
     $out = [];
     if (!empty($order) && is_array($order)) {
         foreach ($order as $k) {
             if (!isset($map[$k])) continue;
             if ($onlyKeys !== null && !isset($onlyKeys[$k])) continue;
-            $out[] = $map[$k];
+            $v = $mk((string)$k, $map[$k]); if ($v !== null) $out[] = $v;
         }
         return $out;
     }
     if ($map) {
         foreach ($map as $k => $p) {
             if ($onlyKeys !== null && !isset($onlyKeys[$k])) continue;
-            $out[] = $p;
+            $v = $mk((string)$k, $p); if ($v !== null) $out[] = $v;
         }
         return $out;
     }
     // ساختار قدیمی: فهرست تخت بدون کلید — فیلتر ممکن نیست
     foreach ($raw as $entry) {
-        if (is_array($entry) && (isset($entry['title']) || isset($entry['price']))) $out[] = $entry;
+        if (!is_array($entry) || (!isset($entry['title']) && !isset($entry['price']))) continue;
+        $k = (string)($entry['key'] ?? '');
+        $out[] = $forSend ? prepareForSend($profile, $k, $entry) : $entry;
     }
     return $out;
 }
@@ -4167,6 +4233,20 @@ $wooOnlyChanged = !empty($syncCfg['wooAddUpdate']);
 $bslOnlyChanged = !empty($syncCfg['bslAddUpdate']);
 $changedKeys = ($wooOnlyChanged || $bslOnlyChanged) ? syncChangedKeys($exRes ?? []) : null;
 
+// v8.44: اگر ضریب/درصد قیمت یا پسوند عنوان دستی عوض شده باشد، قیمت
+// «همهٔ» محصولات عوض شده — حتی آن‌هایی که سایت مبدأ تغییرشان نداده.
+// در این حالت فیلتر «فقط تغییرات» باید یک بار کنار گذاشته شود، وگرنه
+// قیمت جدید هیچ‌وقت به ووکامرس و باسلام نمی‌رسد.
+$priceSig  = profilePriceSignature($profile);
+$lastSig   = (string)($syncState[$key]['price_sig'] ?? '');
+$pricingChanged = ($lastSig !== '' && $lastSig !== $priceSig);
+if ($pricingChanged && $changedKeys !== null) {
+    $changedKeys = null;                    // این بار همه را بفرست
+    $pResult['pricing_changed'] = true;
+    $pResult['pricing_from'] = $lastSig;
+    $pResult['pricing_to'] = $priceSig;
+}
+
 $orderedProducts = profileOrderedProducts($profile);
 $changedProducts = $changedKeys === null
     ? $orderedProducts
@@ -4194,7 +4274,7 @@ $wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>'running','products_file'=>$
 wooWriteQueue($wooQueue);
 $pResult['woo']='queued';$pResult['woo_total']=count($wooSend);
 } else { $pResult['woo'] = $wooOnlyChanged ? 'no_changes' : 'no_products'; }
-$syncState[$key]=['lastRun'=>$now,'status'=>'running_woo'];
+$syncState[$key]=['lastRun'=>$now,'status'=>'running_woo','price_sig'=>$priceSig];
 }
 if ($target === 'bsl' || $target === 'both') {
 // v8.39: با تیک «افزودن/آپدیت باسلام» فقط تغییرات ارسال می‌شود
@@ -4216,11 +4296,15 @@ $allFallbackCats = array_values(array_unique(array_merge($profileFallbackCats, $
 $queue = bslReadQueue();
 $queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
 bslWriteQueue($queue);
-$syncState[$key] = ['lastRun' => $now, 'status' => 'queued_bsl'];
+$syncState[$key] = ['lastRun' => $now, 'status' => 'queued_bsl', 'price_sig' => $priceSig];
 $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
 } else { $pResult['bsl'] = 'file_save_error'; }
 } else { $pResult['bsl'] = $bslOnlyChanged ? 'no_changes' : 'no_products'; }
 }
+// v8.44: امضای قیمت را در هر حالت ثبت کن تا ارسال کامل فقط یک بار
+// تکرار شود، نه در هر اجرای بعدی.
+if (!isset($syncState[$key])) $syncState[$key] = ['lastRun' => $now, 'status' => 'idle'];
+$syncState[$key]['price_sig'] = $priceSig;
 $results['profiles'][] = $pResult;
 }
 saveSyncState($syncState);
@@ -12492,6 +12576,14 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.44', t:'تغییر ضریب قیمت حالا همهٔ محصولات را به‌روز می‌کند', items:[
+    'باگ بزرگ: کران اصلاً قیمت نهایی را نمی‌ساخت — ارسال‌کننده دنبال final_price می‌گشت که وجود نداشت و قیمت صفر می‌شد',
+    'محاسبهٔ درصد/ضریب/گِرد کردن و پسوند عنوان حالا سمت سرور هم انجام می‌شود',
+    'با تغییر دستی ضریب یا درصد قیمت، همهٔ محصولات یک بار به‌عنوان آپدیت فرستاده می‌شوند',
+    'حتی اگر تیک «فقط تغییرات» فعال باشد، این ارسال کامل یک‌باره انجام می‌شود',
+    'امضای تنظیمات قیمت ذخیره می‌شود تا ارسال کامل فقط یک بار تکرار شود',
+    'تغییر پسوند عنوان هم مثل تغییر قیمت رفتار می‌کند'
+  ]},
   {v:'8.43', t:'رفع باگ: دستهٔ باسلام پروفایل ذخیره/بازیابی نمی‌شد', items:[
     'هر ذخیره‌ای که فیلد دسته را نمی‌فرستاد، دستهٔ پروفایل را صفر می‌کرد — حالا مقدار قبلی حفظ می‌شود',
     'دکمهٔ 🔄 کنار دستهٔ پروفایل، انتخاب فعلی را پاک می‌کرد',
