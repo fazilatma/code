@@ -28,7 +28,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.37';
+const APP_VERSION = '8.38';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3540,6 +3540,9 @@ if (isset($_POST['stall_watchdog'])) $conn['stall_watchdog'] = !empty($_POST['st
 if (isset($_POST['stall_after']))    $conn['stall_after']    = max(60, (int)$_POST['stall_after']);
 // v8.37: فاصلهٔ پینگ کران (دقیقه) — صفر یعنی هر اجرا
 if (isset($_POST['ping_every'])) $conn['ping_every'] = max(0, (int)$_POST['ping_every']);
+// v8.38: یادآوری موارد بی‌جواب
+if (isset($_POST['notif_remind_after'])) $conn['notif_remind_after'] = max(0, (int)$_POST['notif_remind_after']);
+if (isset($_POST['notif_remind_max']))   $conn['notif_remind_max']   = max(0, (int)$_POST['notif_remind_max']);
 echo json_encode(['ok'=>saveConnections($conn),'message'=>'ذخیره شد'], JSON_UNESCAPED_UNICODE); exit;
 }
 
@@ -4362,6 +4365,113 @@ function notifSaveState(array $st): void {
     @file_put_contents(NOTIF_STATE_FILE, json_encode($st, JSON_UNESCAPED_UNICODE), LOCK_EX);
 }
 
+/* =====================================================================
+ *  v8.38: پیگیری تک‌تک موارد + یادآوری
+ *
+ *  تا نسخهٔ ۸.۳۷ فقط یک «زمان آخرین بررسی» ذخیره می‌شد. یعنی هر مورد
+ *  دقیقاً یک بار اعلان می‌شد و بعد برای همیشه ساکت می‌ماند — حتی اگر
+ *  پیام مشتری بی‌جواب مانده بود.
+ *
+ *  حالا وضعیت هر مورد جداگانه نگه داشته می‌شود:
+ *    • مورد تازه            → اعلان
+ *    • وضعیتش عوض شده       → اعلان (رویداد تازه است)
+ *    • بی‌تغییر ولی بی‌جواب  → بعد از فاصلهٔ تعیین‌شده، یادآوری
+ *    • جواب داده شده        → دیگر یادآوری نمی‌شود
+ * ===================================================================== */
+
+/** تنظیمات یادآوری: فاصله (ثانیه) و سقف تعداد */
+function notifRemindCfg(array $cn): array {
+    $after = $cn['notif_remind_after'] ?? 30;      // دقیقه
+    $after = (int)$after;
+    if ($after < 0) $after = 0;                    // ۰ = یادآوری خاموش
+    $max = (int)($cn['notif_remind_max'] ?? 0);    // ۰ = بی‌نهایت
+    return ['after' => $after * 60, 'max' => max(0, $max)];
+}
+
+/**
+ * تصمیم می‌گیرد برای یک مورد اعلان بفرستیم یا نه.
+ *
+ * $sig امضای وضعیت است؛ اگر عوض شود یعنی اتفاق تازه‌ای افتاده.
+ * $pending یعنی هنوز کاری برایش لازم است (پیام بی‌جواب، سفارش ارسال‌نشده).
+ *
+ * خروجی: '' یعنی نفرست · 'new' · 'changed' · 'remind'
+ */
+function notifDecide(array &$st, string $key, string $sig, bool $pending,
+                     array $cfg, int $now): string {
+    if (!isset($st['items']) || !is_array($st['items'])) $st['items'] = [];
+    $prev = $st['items'][$key] ?? null;
+
+    if (!is_array($prev)) {
+        $st['items'][$key] = ['sig' => $sig, 'first' => $now, 'last' => $now,
+                              'n' => 1, 'pending' => $pending];
+        return 'new';
+    }
+    if ((string)($prev['sig'] ?? '') !== $sig) {
+        // امضا عوض شده — مثلاً پیام تازه رسیده یا وضعیت سفارش تغییر کرده
+        $st['items'][$key] = ['sig' => $sig, 'first' => (int)($prev['first'] ?? $now),
+                              'last' => $now, 'n' => 1, 'pending' => $pending];
+        return 'changed';
+    }
+    // همان وضعیت قبلی
+    if (!$pending) { $st['items'][$key]['pending'] = false; return ''; }
+    if ($cfg['after'] <= 0) return '';
+    if ($now - (int)($prev['last'] ?? 0) < $cfg['after']) return '';
+    $n = (int)($prev['n'] ?? 1);
+    if ($cfg['max'] > 0 && $n > $cfg['max']) return '';   // سقف یادآوری پر شده
+    $st['items'][$key]['last'] = $now;
+    $st['items'][$key]['n'] = $n + 1;
+    $st['items'][$key]['pending'] = true;
+    return 'remind';
+}
+
+/**
+ * موارد قدیمی و تمام‌شده را پاک می‌کند تا فایل وضعیت بی‌نهایت بزرگ نشود.
+ * موارد بی‌جواب نگه داشته می‌شوند چون هنوز باید یادآوری شوند.
+ */
+function notifPrune(array &$st, int $now, int $maxAge = 604800): void {
+    if (empty($st['items']) || !is_array($st['items'])) return;
+    foreach ($st['items'] as $k => $v) {
+        if (!is_array($v)) { unset($st['items'][$k]); continue; }
+        $age = $now - (int)($v['last'] ?? 0);
+        if (empty($v['pending']) && $age > 86400)   { unset($st['items'][$k]); continue; }
+        if ($age > $maxAge)                          { unset($st['items'][$k]); }
+    }
+    // سقف سخت، برای وقتی غرفه خیلی شلوغ است
+    if (count($st['items']) > 500) {
+        uasort($st['items'], fn($a, $b) => (int)($b['last'] ?? 0) <=> (int)($a['last'] ?? 0));
+        $st['items'] = array_slice($st['items'], 0, 500, true);
+    }
+}
+
+/**
+ * هنگام ارتقا از نسخه‌های قبلی، موارد قدیمی را بی‌صدا ثبت می‌کند.
+ * بدون این کار، اولین اجرا هر ۱۰ مورد موجود را «تازه» می‌دید و یک‌جا
+ * ۱۰ پیام می‌فرستاد.
+ */
+function notifSeedIfNeeded(array &$st, string $kind, array $seen, int $watermark): bool {
+    $flag = 'seeded_' . $kind;
+    if (!empty($st[$flag])) return false;
+    if (!isset($st['items']) || !is_array($st['items'])) $st['items'] = [];
+    if ($watermark > 0) {
+        foreach ($seen as $s) {
+            // فقط مواردی که قبلاً هم بوده‌اند؛ موارد تازه‌تر باید اعلان شوند
+            if ((int)$s['ts'] > 0 && (int)$s['ts'] <= $watermark) {
+                $st['items'][$s['key']] = ['sig' => $s['sig'], 'first' => (int)$s['ts'],
+                    'last' => $watermark, 'n' => 1, 'pending' => !empty($s['pending'])];
+            }
+        }
+    }
+    $st[$flag] = time();
+    return true;
+}
+
+/** سرتیتر پیام بر اساس نوع رویداد */
+function notifHead(string $why, string $base, int $n = 0): string {
+    if ($why !== 'remind') return $base;
+    $tag = '🔁 یادآوری' . ($n > 1 ? ' (' . $n . ')' : '');
+    return $base === '' ? $tag : $tag . ' — ' . $base;
+}
+
 /** ارسال یک پیام به همهٔ پیام‌رسان‌های فعال */
 function notifSend(array $cn, string $msg): array {
     $out = [];
@@ -4654,24 +4764,50 @@ function notifCheckOrders(array $cn, bool $test = false, bool $send = true): arr
             'error' => bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read')];
 
     $rows = $r['body']['data'] ?? [];
-    $found = 0; $sentTo = []; $samples = [];
+    $now = time(); $cfg = notifRemindCfg($cn);
+
+    // v8.38: امضا = وضعیت سفارش. «بی‌جواب» یعنی هنوز ارسال نشده،
+    // پس تا وقتی غرفه‌دار کاری نکند یادآوری می‌شود.
+    $norm = [];
     foreach ($rows as $o) {
         if (!is_array($o)) continue;
-        $t = strtotime($o['created_at'] ?? 'now');
-        if (!$test && $t <= $since) break;
-        $found++;
-        // v8.32: از نرمال‌ساز مشترک استفاده می‌کند تا نام مشتری درست خوانده شود
-        $msg = bslParcelMsg(bslNormalizeParcel($o), '🛒 سفارش جدید باسلام');
+        $np = bslNormalizeParcel($o);
+        if ($np['parcel_id'] <= 0) continue;
+        $norm[] = ['np' => $np, 'key' => 'order:' . $np['parcel_id'],
+                   'sig' => (string)$np['status_id'],
+                   'ts' => strtotime($np['created_at'] ?: 'now') ?: $now,
+                   'pending' => !empty($np['unsent'])];
+    }
+
+    if ($test) {
+        $sentTo = [];
+        $sample = $norm ? bslParcelMsg($norm[0]['np'], '🛒 سفارش جدید باسلام') : '';
+        if ($send) {
+            $msg = $sample ? ("🧪 تست سفارش‌ها\n" . $sample) : "🧪 تست سفارش‌ها\nهیچ سفارشی در ۱۰ مورد اخیر نبود، اما ارتباط برقرار است ✅";
+            $sentTo = notifSend($cn, $msg);
+        }
+        return ['ok' => true, 'found' => count($norm), 'total_seen' => count($rows),
+                'sent' => $sentTo, 'sample' => $sample];
+    }
+
+    notifSeedIfNeeded($st, 'orders', $norm, $since);
+
+    $found = 0; $reminded = 0; $sentTo = []; $samples = [];
+    foreach ($norm as $f) {
+        $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
+        if ($why === '') continue;
+        $n = (int)($st['items'][$f['key']]['n'] ?? 1);
+        $base = $why === 'changed' ? '📦 تغییر وضعیت سفارش باسلام' : '🛒 سفارش جدید باسلام';
+        $msg = bslParcelMsg($f['np'], notifHead($why, $base, $n - 1));
         $samples[] = $msg;
-        if ($send && !$test) $sentTo = notifSend($cn, $msg);
-        if ($test) break;   // در حالت تست فقط تازه‌ترین مورد
+        if ($why === 'remind') $reminded++; else $found++;
+        if ($send) $sentTo = notifSend($cn, $msg);
     }
-    if (!$test) { $st['last_order_check'] = time(); notifSaveState($st); }
-    if ($test && $send) {
-        $msg = $samples ? ("🧪 تست سفارش‌ها\n" . $samples[0]) : "🧪 تست سفارش‌ها\nهیچ سفارشی در ۱۰ مورد اخیر نبود، اما ارتباط برقرار است ✅";
-        $sentTo = notifSend($cn, $msg);
-    }
-    return ['ok' => true, 'found' => $found, 'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+    $st['last_order_check'] = $now;
+    notifPrune($st, $now);
+    notifSaveState($st);
+    return ['ok' => true, 'found' => $found, 'reminded' => $reminded,
+            'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
 }
 
 /** بررسی پیام‌های جدید مشتری */
@@ -4685,29 +4821,58 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
 
     // v8.31: پاسخ chats به شکل data.chats است، نه data
     $rows = $r['body']['data']['chats'] ?? ($r['body']['data'] ?? []);
-    $found = 0; $sentTo = []; $samples = [];
+    $now = time(); $cfg = notifRemindCfg($cn);
+
+    // v8.38: امضای هر گفتگو = شناسهٔ آخرین پیام + تعداد خوانده‌نشده.
+    // «بی‌جواب» یعنی هنوز پیام خوانده‌نشده دارد.
+    $norm = [];
     foreach ($rows as $c) {
         if (!is_array($c)) continue;
-        $t = strtotime($c['updated_at'] ?? ($c['created_at'] ?? 'now'));
-        if (!$test && $t <= $since) break;
-        $found++;
-        // v8.32: نرمال‌ساز مشترک — متن پیام زیر content.text است
-        // v8.33: متن کامل پیام‌های خوانده‌نشده هم گرفته می‌شود
         $nc = bslNormalizeChat($c);
-        $body = $nc['unseen'] > 0
-              ? bslFetchChatMessages($tk, $nc['chat_id'], min(10, $nc['unseen']))
-              : [];
-        $msg = bslChatMsg($nc, '💬 پیام مشتری باسلام', $body);
+        if ($nc['chat_id'] <= 0) continue;
+        $lastId = (int)($c['last_message']['id'] ?? 0);
+        // v8.38: امضا فقط شناسهٔ آخرین پیام است. اگر تعداد خوانده‌نشده را هم
+        // در امضا بیاوریم، جواب دادن مشتری (۲ → ۰) مثل «رویداد تازه» دیده
+        // می‌شود و یک اعلان بی‌مورد می‌فرستد.
+        $norm[] = ['nc' => $nc, 'key' => 'chat:' . $nc['chat_id'],
+                   'sig' => (string)$lastId,
+                   'ts' => strtotime($nc['updated_at'] ?: 'now') ?: $now,
+                   'pending' => $nc['unseen'] > 0];
+    }
+
+    if ($test) {
+        $sentTo = []; $sample = '';
+        if ($norm) {
+            $f = $norm[0];
+            $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, $f['nc']['unseen'])) : [];
+            $sample = bslChatMsg($f['nc'], '💬 پیام مشتری باسلام', $body);
+        }
+        if ($send) {
+            $msg = $sample ? ("🧪 تست پیام‌ها\n" . $sample) : "🧪 تست پیام‌ها\nهیچ پیامی در ۱۰ مورد اخیر نبود، اما ارتباط برقرار است ✅";
+            $sentTo = notifSend($cn, $msg);
+        }
+        return ['ok' => true, 'found' => count($norm), 'total_seen' => count($rows),
+                'sent' => $sentTo, 'sample' => $sample];
+    }
+
+    notifSeedIfNeeded($st, 'chats', $norm, $since);
+
+    $found = 0; $reminded = 0; $sentTo = []; $samples = [];
+    foreach ($norm as $f) {
+        $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
+        if ($why === '') continue;
+        $n = (int)($st['items'][$f['key']]['n'] ?? 1);
+        $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, $f['nc']['unseen'])) : [];
+        $msg = bslChatMsg($f['nc'], notifHead($why, '💬 پیام مشتری باسلام', $n - 1), $body);
         $samples[] = $msg;
-        if ($send && !$test) $sentTo = notifSend($cn, $msg);
-        if ($test) break;
+        if ($why === 'remind') $reminded++; else $found++;
+        if ($send) $sentTo = notifSend($cn, $msg);
     }
-    if (!$test) { $st['last_chat_check'] = time(); notifSaveState($st); }
-    if ($test && $send) {
-        $msg = $samples ? ("🧪 تست پیام‌ها\n" . $samples[0]) : "🧪 تست پیام‌ها\nهیچ پیامی در ۱۰ مورد اخیر نبود، اما ارتباط برقرار است ✅";
-        $sentTo = notifSend($cn, $msg);
-    }
-    return ['ok' => true, 'found' => $found, 'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+    $st['last_chat_check'] = $now;
+    notifPrune($st, $now);
+    notifSaveState($st);
+    return ['ok' => true, 'found' => $found, 'reminded' => $reminded,
+            'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
 }
 
 /** بررسی تغییر وضعیت یا افزوده شدن محصول */
@@ -4719,31 +4884,56 @@ function notifCheckProducts(array $cn, bool $test = false, bool $send = true): a
             'error' => bslApiError($r, 'دریافت محصولات ناموفق', 'vendors/{id}/products', 'vendor.product.read')];
 
     $rows = $r['body']['data'] ?? [];
-    $found = 0; $sentTo = []; $samples = [];
+    $now = time(); $cfg = notifRemindCfg($cn);
+
+    // v8.38: امضا = وضعیت محصول. «تأیید نشده» نیاز به اقدام دارد، پس
+    // تا وقتی درست نشود یادآوری می‌شود؛ محصول فعال یادآوری ندارد.
+    $norm = [];
     foreach ($rows as $p) {
-        $t = strtotime($p['created_at'] ?? 'now');
-        if (!$test && $t <= $since) break;
+        if (!is_array($p)) continue;
+        $pid = (int)($p['id'] ?? 0);
+        if ($pid <= 0) continue;
         $ps = $p['status'] ?? [];
         $val = is_array($ps) ? (int)($ps['value'] ?? 0) : (int)$ps;
         $title = mb_substr((string)($p['title'] ?? ($p['name'] ?? 'محصول')), 0, 60);
-        $msg = '';
-        if ($val === 3567 || $val === 4184) {
-            $msg = "📋 تغییر وضعیت محصول باسلام\nمحصول: " . $title
-                 . "\nوضعیت جدید: " . ($val === 3567 ? 'تأیید نشده ❌' : 'بایگانی 🗑️');
-        } elseif ($val === 2976) {
-            $msg = "➕ محصول جدید باسلام\nمحصول: " . $title . "\nوضعیت: فعال ✅";
+        if ($val === 3567)      { $txt = "📋 تغییر وضعیت محصول باسلام\nمحصول: " . $title . "\nوضعیت جدید: تأیید نشده ❌"; $pend = true; }
+        elseif ($val === 4184)  { $txt = "📋 تغییر وضعیت محصول باسلام\nمحصول: " . $title . "\nوضعیت جدید: بایگانی 🗑️"; $pend = false; }
+        elseif ($val === 2976)  { $txt = "➕ محصول جدید باسلام\nمحصول: " . $title . "\nوضعیت: فعال ✅"; $pend = false; }
+        else continue;
+        $norm[] = ['key' => 'prod:' . $pid, 'sig' => (string)$val, 'text' => $txt,
+                   'ts' => strtotime($p['created_at'] ?? 'now') ?: $now, 'pending' => $pend];
+    }
+
+    if ($test) {
+        $sentTo = [];
+        $sample = $norm ? $norm[0]['text'] : '';
+        if ($send) {
+            $msg = $sample ? ("🧪 تست محصولات\n" . $sample) : "🧪 تست محصولات\nتغییری در ۱۰ محصول اخیر نبود، اما ارتباط برقرار است ✅";
+            $sentTo = notifSend($cn, $msg);
         }
-        if ($msg === '') continue;
-        $found++; $samples[] = $msg;
-        if ($send && !$test) $sentTo = notifSend($cn, $msg);
-        if ($test) break;
+        return ['ok' => true, 'found' => count($norm), 'total_seen' => count($rows),
+                'sent' => $sentTo, 'sample' => $sample];
     }
-    if (!$test) { $st['last_product_check'] = time(); notifSaveState($st); }
-    if ($test && $send) {
-        $msg = $samples ? ("🧪 تست محصولات\n" . $samples[0]) : "🧪 تست محصولات\nتغییری در ۱۰ محصول اخیر نبود، اما ارتباط برقرار است ✅";
-        $sentTo = notifSend($cn, $msg);
+
+    notifSeedIfNeeded($st, 'products', $norm, $since);
+
+    $found = 0; $reminded = 0; $sentTo = []; $samples = [];
+    foreach ($norm as $f) {
+        $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
+        if ($why === '') continue;
+        $n = (int)($st['items'][$f['key']]['n'] ?? 1);
+        $msg = $why === 'remind'
+             ? notifHead($why, '', $n - 1) . "\n" . $f['text']
+             : $f['text'];
+        $samples[] = $msg;
+        if ($why === 'remind') $reminded++; else $found++;
+        if ($send) $sentTo = notifSend($cn, $msg);
     }
-    return ['ok' => true, 'found' => $found, 'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+    $st['last_product_check'] = $now;
+    notifPrune($st, $now);
+    notifSaveState($st);
+    return ['ok' => true, 'found' => $found, 'reminded' => $reminded,
+            'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
 }
 
 /* =====================================================================
@@ -9498,6 +9688,16 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 صفر یعنی هر اجرا پیام بفرست.
 </div>
 </div>
+<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🔁 یادآوری موارد بی‌جواب</div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+هر مورد فقط یک بار اعلان می‌شود. اگر پیام مشتری بی‌جواب بماند یا سفارشی
+ارسال نشود، بعد از این مدت دوباره یادآوری می‌آید. به‌محض پاسخ دادن،
+یادآوری خودبه‌خود قطع می‌شود.
+</div>
+<div class="crow"><label>یادآوری بعد از:</label><input type="number" id="remindAfter" value="30" min="0" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">دقیقه · ۰ = خاموش</span></div>
+<div class="crow"><label>حداکثر تکرار:</label><input type="number" id="remindMax" value="0" min="0" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = بی‌نهایت</span></div>
+</div>
 </div>
 <div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
@@ -12128,6 +12328,15 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.38', t:'یادآوری موارد بی‌جواب', items:[
+    'هر مورد فقط یک بار اعلان می‌شود؛ دیگر با هر اجرای کران تکرار نمی‌شود',
+    'اگر پیام مشتری بی‌جواب بماند یا سفارشی ارسال نشود، بعد از ۳۰ دقیقه (قابل تنظیم) یادآوری می‌آید',
+    'به‌محض پاسخ دادن یا ارسال سفارش، یادآوری خودبه‌خود قطع می‌شود',
+    'پیام تازه یا تغییر وضعیت، بلافاصله اعلان می‌شود حتی اگر قبلاً یادآوری رفته باشد',
+    'پیام‌های یادآوری با نشان 🔁 و شمارهٔ دفعه مشخص می‌شوند',
+    'حداکثر تعداد یادآوری قابل تنظیم است (۰ = بی‌نهایت)',
+    'هنگام ارتقا، موارد قدیمی بی‌صدا ثبت می‌شوند تا یک‌جا ۱۰ پیام نیاید'
+  ]},
   {v:'8.37', t:'پینگ کران‌جاب — بفهمید زمان‌بند واقعاً کار می‌کند', items:[
     'تیک «📡 پینگ اجرای کران‌جاب» به فهرست رویدادهای اعلان اضافه شد',
     'هر بار کران اجرا شود پیام می‌آید: زمان سرور، نسخه، تعداد پروفایل‌ها و محصولات استخراج‌شده',
@@ -12945,7 +13154,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
@@ -12953,7 +13162,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});

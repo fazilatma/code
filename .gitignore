@@ -29,3 +29,6 @@ woo_backend.lock
 # v8.36: per-queue product files (one per send)
 bsl_queue_products_*.json
 woo_queue_products_*.json
+
+# v8.38: per-item notification state (runtime)
+last_notification_check.json
