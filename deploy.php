@@ -259,10 +259,11 @@ function wb_looks_secret(string $data): bool {
  * $includeCsv: الگوهای اضافی جدا شده با کاما (مثلاً "*.json")
  * $withSecrets: اگر true باشد فایل‌های حساس هم وارد می‌شوند (فقط ریپوی خصوصی!)
  */
-function wb_collect(string $includeCsv = '', bool $withSecrets = false, int $maxBytes = 25000000): array {
+function wb_collect(string $includeCsv = '', bool $withSecrets = false, int $maxBytes = 25000000, string $encPass = ''): array {
     $root = realpath(__DIR__);
-    $files = []; $skipped = []; $bytes = 0; $secretHits = [];
+    $files = []; $skipped = []; $bytes = 0; $secretHits = []; $encrypted = [];
     $skipDirs = wb_skip_dirs();
+    $encMode = $encPass !== '';   // حالت رمزنگاری: چیزی جا نمی‌ماند
 
     $it = new RecursiveIteratorIterator(
         new RecursiveCallbackFilterIterator(
@@ -283,33 +284,42 @@ function wb_collect(string $includeCsv = '', bool $withSecrets = false, int $max
 
         $size = (int)$f->getSize();
         if ($size > 5000000) { $skipped[] = ['path' => $rel, 'why' => 'بزرگ‌تر از ۵ مگابایت']; continue; }
-        if (preg_match('~\.(bak|log|lock|tmp)$~i', $rel)) { $skipped[] = ['path' => $rel, 'why' => 'فایل موقت']; continue; }
-
-        if (wb_is_secret($rel) && !$withSecrets) {
-            $skipped[] = ['path' => $rel, 'why' => '🔑 حاوی کلید — رد شد'];
-            $secretHits[] = $rel;
-            continue;
-        }
+        if (preg_match('~\.(lock|tmp)$~i', $rel)) { $skipped[] = ['path' => $rel, 'why' => 'فایل موقت']; continue; }
 
         $data = @file_get_contents($abs);
         if ($data === false) { $skipped[] = ['path' => $rel, 'why' => 'قابل خواندن نیست']; continue; }
 
-        // تور ایمنی دوم: محتوا را هم بررسی کن
-        if (!$withSecrets && wb_looks_secret($data)) {
-            $skipped[] = ['path' => $rel, 'why' => '🔑 کلید در محتوا پیدا شد — رد شد'];
+        $isSecret = wb_is_secret($rel) || wb_looks_secret($data);
+
+        if ($isSecret) {
             $secretHits[] = $rel;
-            continue;
+            if ($encMode) {
+                // رمزنگاری و ارسال با پسوند .enc — محتوای اصلی هرگز خام نمی‌رود
+                try {
+                    $data = wb_encrypt($data, $encPass);
+                } catch (Throwable $e) {
+                    $skipped[] = ['path' => $rel, 'why' => 'رمزنگاری ناموفق — رد شد'];
+                    continue;
+                }
+                $rel .= '.enc';
+                $size = strlen($data);
+                $encrypted[] = $rel;
+            } elseif (!$withSecrets) {
+                $skipped[] = ['path' => $rel, 'why' => '🔑 حاوی کلید — رد شد'];
+                continue;
+            }
         }
 
         if ($bytes + $size > $maxBytes) { $skipped[] = ['path' => $rel, 'why' => 'عبور از سقف حجم کل']; continue; }
 
-        $files[] = ['path' => $rel, 'size' => $size, 'data' => $data];
+        $files[] = ['path' => $rel, 'size' => $size, 'data' => $data, 'enc' => $isSecret && $encMode];
         $bytes += $size;
     }
 
     usort($files, fn($a, $b) => strcmp($a['path'], $b['path']));
     usort($skipped, fn($a, $b) => strcmp($a['path'], $b['path']));
-    return ['files' => $files, 'skipped' => $skipped, 'bytes' => $bytes, 'secret_hits' => $secretHits];
+    return ['files' => $files, 'skipped' => $skipped, 'bytes' => $bytes,
+            'secret_hits' => $secretHits, 'encrypted' => $encrypted];
 }
 
 /** درخواست به GitHub API با متد دلخواه */
@@ -414,6 +424,54 @@ function wb_push(string $repo, string $branch, string $message, string $token, a
     return ['ok' => true, 'branch' => $branch, 'commit' => substr($sha, 0, 7),
             'count' => count($tree), 'created' => $created, 'steps' => $steps,
             'url' => 'https://github.com/' . $repo . '/tree/' . $branch];
+}
+
+/* =====================================================================
+ *  رمزنگاری فایل‌های حساس
+ *  AES-256-GCM با کلید مشتق‌شده از عبارت عبور (PBKDF2-SHA256).
+ *  GCM انتخاب شده چون علاوه بر رمزنگاری، دستکاری را هم تشخیص می‌دهد.
+ * ===================================================================== */
+
+const WB_ENC_MAGIC = 'SCRENC1';
+const WB_ENC_ITER  = 210000;   // مطابق توصیهٔ OWASP برای PBKDF2-SHA256
+
+/** فایل رمزنگاری‌شده را به شکل متنی و قابل نگهداری در گیت برمی‌گرداند */
+function wb_encrypt(string $plain, string $pass): string {
+    $salt = random_bytes(16);
+    $iv   = random_bytes(12);                       // اندازهٔ استاندارد GCM
+    $key  = hash_pbkdf2('sha256', $pass, $salt, WB_ENC_ITER, 32, true);
+    $tag  = '';
+    $ct   = openssl_encrypt($plain, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+    if ($ct === false) throw new RuntimeException('رمزنگاری ناموفق');
+
+    // هدر خوانا + بدنهٔ base64 با طول ثابت، تا diff گیت قابل فهم بماند
+    $b64 = chunk_split(base64_encode($ct), 76, "\n");
+    return WB_ENC_MAGIC . "\n"
+         . 'iter:' . WB_ENC_ITER . "\n"
+         . 'salt:' . base64_encode($salt) . "\n"
+         . 'iv:'   . base64_encode($iv) . "\n"
+         . 'tag:'  . base64_encode($tag) . "\n"
+         . "--\n" . $b64;
+}
+
+/** رمزگشایی؛ در صورت اشتباه بودن رمز یا دستکاری فایل، null برمی‌گرداند */
+function wb_decrypt(string $blob, string $pass): ?string {
+    if (strncmp($blob, WB_ENC_MAGIC, strlen(WB_ENC_MAGIC)) !== 0) return null;
+    $parts = explode("--\n", $blob, 2);
+    if (count($parts) !== 2) return null;
+    $head = $parts[0]; $body = preg_replace('~\s+~', '', $parts[1]);
+
+    $get = function (string $k) use ($head): string {
+        return preg_match('~^' . $k . ':(.*)$~m', $head, $m) ? trim($m[1]) : '';
+    };
+    $iter = (int)$get('iter'); $salt = base64_decode($get('salt'), true);
+    $iv = base64_decode($get('iv'), true); $tag = base64_decode($get('tag'), true);
+    $ct = base64_decode($body, true);
+    if ($iter < 1000 || !$salt || !$iv || !$tag || $ct === false) return null;
+
+    $key = hash_pbkdf2('sha256', $pass, $salt, $iter, 32, true);
+    $out = openssl_decrypt($ct, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+    return $out === false ? null : $out;   // false یعنی رمز غلط یا فایل دستکاری شده
 }
 
 /**
@@ -836,10 +894,42 @@ if ($isApi) {
     if ($action === 'wb_scan') {
         $inc = trim((string)($_POST['include'] ?? $_GET['include'] ?? ''));
         $secrets = !empty($_POST['secrets'] ?? $_GET['secrets'] ?? '');
-        $r = wb_collect($inc, $secrets);
-        jout(['ok' => true, 'files' => $r['files'], 'skipped' => $r['skipped'],
+        $pass = (string)($_POST['enc_pass'] ?? '');
+        $r = wb_collect($inc, $secrets, 25000000, $pass);
+        // فقط فهرست برمی‌گردد، نه محتوای فایل‌ها
+        $list = array_map(fn($f) => ['path' => $f['path'], 'size' => $f['size'], 'enc' => !empty($f['enc'])], $r['files']);
+        jout(['ok' => true, 'files' => $list, 'skipped' => $r['skipped'],
               'total_bytes' => $r['bytes'], 'total_h' => human_size($r['bytes']),
-              'secret_hits' => $r['secret_hits']]);
+              'secret_hits' => $r['secret_hits'], 'encrypted' => $r['encrypted']]);
+    }
+
+    /* بازگرداندن یک فایل رمزشده از گیت‌هاب به هاست */
+    if ($action === 'wb_restore') {
+        $repo   = trim((string)($_POST['repo'] ?? $cfg['repo'] ?? ''));
+        $branch = trim((string)($_POST['branch'] ?? ''));
+        $path   = trim((string)($_POST['path'] ?? ''));
+        $pass   = (string)($_POST['enc_pass'] ?? '');
+        if (!preg_match('~^[\w.-]+/[\w.-]+$~', $repo)) jout(['ok' => false, 'error' => 'نام ریپو نامعتبر']);
+        if ($branch === '' || $path === '')            jout(['ok' => false, 'error' => 'برنچ و مسیر فایل لازم است']);
+        if ($pass === '')                              jout(['ok' => false, 'error' => 'عبارت رمز لازم است']);
+        if (substr($path, -4) !== '.enc')              jout(['ok' => false, 'error' => 'فقط فایل‌های .enc قابل بازگردانی‌اند']);
+
+        $res = http_get(gh_raw_url($repo, $branch, $path), $cfg['github_token'] ?? '');
+        if (!$res['ok']) jout(['ok' => false, 'error' => 'دانلود ناموفق: ' . $res['error']]);
+
+        $plain = wb_decrypt($res['body'], $pass);
+        if ($plain === null) jout(['ok' => false, 'error' => 'رمزگشایی ناموفق — عبارت رمز اشتباه است یا فایل دستکاری شده']);
+
+        $dest = safe_path(substr($path, 0, -4));   // حذف پسوند .enc
+        if ($dest === null) jout(['ok' => false, 'error' => 'مسیر مقصد نامعتبر']);
+        if (is_file($dest)) {
+            ensure_backup_dir();
+            @copy($dest, BACKUP_DIR . '/' . basename($dest) . '.' . date('Ymd-His') . '.bak');
+        }
+        if (@file_put_contents($dest, $plain, LOCK_EX) === false) jout(['ok' => false, 'error' => 'نوشتن فایل ناموفق']);
+        @chmod($dest, 0600);
+        log_add(['type' => 'wb_restore', 'dest' => basename($dest), 'ok' => true]);
+        jout(['ok' => true, 'restored' => basename($dest), 'size' => strlen($plain)]);
     }
 
     if ($action === 'wb_push') {
@@ -858,9 +948,15 @@ if ($isApi) {
             jout(['ok' => false, 'error' => 'نام برنچ نامعتبر است']);
         }
 
-        $r = wb_collect($inc, $secrets);
+        $pass = (string)($_POST['enc_pass'] ?? '');
+        if ($pass !== '' && strlen($pass) < 10) {
+            jout(['ok' => false, 'error' => 'عبارت رمز باید حداقل ۱۰ کاراکتر باشد']);
+        }
+        $r = wb_collect($inc, $secrets, 25000000, $pass);
         if (!$r['files']) jout(['ok' => false, 'error' => 'فایلی برای آپلود پیدا نشد']);
-        jout(wb_push($repo, $branch, $msg, $tok, $r['files']));
+        $out = wb_push($repo, $branch, $msg, $tok, $r['files']);
+        $out['encrypted'] = $r['encrypted'] ?? [];
+        jout($out);
     }
 
     if ($action === 'backups') {
@@ -1231,11 +1327,11 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
       هم بکاپ مطمئن است و هم اجازه می‌دهد کد با تنظیمات و شرایط واقعی هاست بررسی شود.
     </p>
 
-    <div class="msg m-warn on" style="font-size:12px;line-height:1.8">
-      🔑 <b>فایل‌های حاوی کلید به‌صورت پیش‌فرض ارسال نمی‌شوند</b> —
-      <code>connections.json</code> (توکن باسلام و کلید ووکامرس)،
-      <code>.deploy-config.json</code> (رمز پنل) و فایل‌های صف.
-      علاوه بر نام فایل، <b>محتوای</b> هر فایل هم برای کلید بررسی می‌شود.
+    <div class="msg m-info on" style="font-size:12px;line-height:1.8">
+      🔐 <b>با تعیین عبارت رمز، همهٔ فایل‌ها ارسال می‌شوند</b> — فایل‌های حاوی کلید
+      (<code>connections.json</code>، <code>.deploy-config.json</code> و…) پیش از ارسال با
+      <b>AES-256-GCM</b> رمزنگاری شده و با پسوند <code>.enc</code> ذخیره می‌شوند.
+      بدون عبارت رمز، این فایل‌ها اصلاً ارسال نمی‌شوند.
     </div>
 
     <div class="grid">
@@ -1259,12 +1355,23 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
       <div class="hint">برای <b>نوشتن</b> در گیت‌هاب توکن الزامی است، حتی برای ریپوی عمومی.</div>
     </div>
 
+    <div class="fld" style="border:1px solid #22c55e;border-radius:9px;padding:11px;background:#052e1620">
+      <label style="color:#86efac;font-weight:700">🔐 عبارت رمز (برای رمزنگاری فایل‌های حساس)</label>
+      <input type="password" id="wb_pass" placeholder="حداقل ۱۰ کاراکتر — جایی امن نگه دارید">
+      <div class="hint" style="line-height:1.8">
+        با پر کردن این فیلد، <b>همهٔ</b> فایل‌های پوشه ارسال می‌شوند و فایل‌های حساس
+        رمزنگاری‌شده می‌روند. اگر خالی باشد، فایل‌های حساس ارسال نمی‌شوند.<br>
+        ⚠️ <b>این رمز در هیچ‌جا ذخیره نمی‌شود.</b> اگر فراموشش کنید، بازگرداندن آن فایل‌ها
+        غیرممکن است.
+      </div>
+    </div>
+
     <div class="fld">
       <label style="display:flex;align-items:center;gap:7px;cursor:pointer;color:#fca5a5">
-        <input type="checkbox" id="wb_secrets"> ارسال فایل‌های حاوی کلید (فقط ریپوی خصوصی!)
+        <input type="checkbox" id="wb_secrets"> ارسال فایل‌های حساس <b>بدون رمزنگاری</b>
       </label>
       <div class="hint" style="color:#fca5a5">
-        اگر ریپو عمومی باشد، این کار توکن‌های شما را برای همه منتشر می‌کند.
+        فقط برای ریپوی خصوصی. اگر ریپو عمومی باشد، توکن‌های شما برای همه منتشر می‌شوند.
       </div>
     </div>
 
@@ -1275,6 +1382,30 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
     </div>
     <div id="wb_steps" class="steps"></div>
     <div id="wb_list" style="margin-top:12px"></div>
+  </div>
+
+  <div class="card">
+    <h2>🔓 بازگرداندن فایل رمزشده</h2>
+    <p class="hint" style="margin-bottom:12px">
+      یک فایل <code>.enc</code> را از گیت‌هاب می‌گیرد، رمزگشایی می‌کند و روی هاست می‌نویسد.
+      پیش از بازنویسی، از نسخهٔ فعلی بکاپ گرفته می‌شود.
+    </p>
+    <div class="grid">
+      <div class="fld">
+        <label>برنچ</label>
+        <input type="text" id="wr_branch" placeholder="host-backup/...">
+      </div>
+      <div class="fld">
+        <label>مسیر فایل در ریپو</label>
+        <input type="text" id="wr_path" placeholder="connections.json.enc">
+      </div>
+    </div>
+    <div class="fld">
+      <label>عبارت رمز</label>
+      <input type="password" id="wr_pass" placeholder="همان رمزی که هنگام بکاپ استفاده شد">
+    </div>
+    <div id="wr_msg" class="msg"></div>
+    <button class="btn b-amber" onclick="wbRestore()">🔓 رمزگشایی و بازگرداندن</button>
   </div>
 </div>
 
@@ -1702,7 +1833,7 @@ function wbRenderList(r){
     h+='<div style="max-height:220px;overflow-y:auto;border:1px solid #334155;border-radius:8px">';
     r.files.forEach(f=>{
       h+='<div style="display:flex;justify-content:space-between;gap:10px;padding:5px 9px;border-bottom:1px solid #1e293b;font-size:11.5px;font-family:ui-monospace,monospace">'
-        +'<span style="color:#e2e8f0">'+esc(f.path)+'</span>'
+        +'<span style="color:'+(f.enc?'#86efac':'#e2e8f0')+'">'+(f.enc?'🔐 ':'')+esc(f.path)+'</span>'
         +'<span style="color:#64748b;flex:0 0 auto">'+fmtSize(f.size)+'</span></div>';
     });
     h+='</div>';
@@ -1723,12 +1854,26 @@ function wbRenderList(r){
 async function wbScan(){
   msg('wb_msgbox','<span class="spin"></span> در حال بررسی فایل‌ها...','m-info');
   $('wb_steps').innerHTML='';
-  const r=await api('wb_scan',{include:'',secrets:$('wb_secrets').checked?'1':''},'POST');
+  const r=await api('wb_scan',{include:'',secrets:$('wb_secrets').checked?'1':'',enc_pass:$('wb_pass').value},'POST');
   if(!r.ok) return msg('wb_msgbox','✗ '+esc(r.error||'خطا'),'m-err');
   wbRenderList(r);
   let m='✓ '+r.files.length+' فایل آمادهٔ ارسال ('+esc(r.total_h)+')';
-  if(r.secret_hits && r.secret_hits.length) m+=' · 🔑 '+r.secret_hits.length+' فایل حساس محافظت شد';
+  if(r.encrypted && r.encrypted.length)      m+=' · 🔐 '+r.encrypted.length+' فایل رمزنگاری می‌شود';
+  else if(r.secret_hits && r.secret_hits.length) m+=' · 🔑 '+r.secret_hits.length+' فایل حساس کنار گذاشته شد';
   msg('wb_msgbox',m,'m-ok');
+}
+
+async function wbRestore(){
+  const branch=$('wr_branch').value.trim(), path=$('wr_path').value.trim(), pass=$('wr_pass').value;
+  if(!branch||!path) return msg('wr_msg','برنچ و مسیر فایل را وارد کنید','m-err');
+  if(!pass)          return msg('wr_msg','عبارت رمز را وارد کنید','m-err');
+  if(!confirm('فایل «'+path+'» رمزگشایی و روی هاست نوشته شود؟')) return;
+
+  msg('wr_msg','<span class="spin"></span> در حال دریافت و رمزگشایی...','m-info');
+  const r=await api('wb_restore',{repo:$('wb_repo').value.trim(),branch,path,enc_pass:pass},'POST');
+  if(!r.ok) return msg('wr_msg','✗ '+esc(r.error||'خطا'),'m-err');
+  $('wr_pass').value='';
+  msg('wr_msg','✓ بازگردانی شد: <code>'+esc(r.restored)+'</code> ('+r.size+' بایت)','m-ok');
 }
 
 async function wbPush(){
@@ -1736,8 +1881,13 @@ async function wbPush(){
   if(!repo)   return msg('wb_msgbox','نام ریپو را وارد کنید','m-err');
   if(!branch) return msg('wb_msgbox','نام برنچ را وارد کنید','m-err');
 
-  if($('wb_secrets').checked &&
-     !confirm('⚠️ هشدار جدی\n\nفایل‌های حاوی توکن و کلید ارسال می‌شوند.\n'
+  const pass=$('wb_pass').value;
+  if(pass && pass.length<10) return msg('wb_msgbox','عبارت رمز باید حداقل ۱۰ کاراکتر باشد','m-err');
+  if(pass && !confirm('🔐 عبارت رمز را جایی امن یادداشت کرده‌اید؟\n\n'
+                     +'این رمز در هیچ‌جا ذخیره نمی‌شود. بدون آن، فایل‌های رمزشده\n'
+                     +'قابل بازگرداندن نخواهند بود.')) return;
+  if($('wb_secrets').checked && !pass &&
+     !confirm('⚠️ هشدار جدی\n\nفایل‌های حاوی توکن و کلید بدون رمزنگاری ارسال می‌شوند.\n'
              +'اگر ریپو عمومی باشد، همه به آن‌ها دسترسی خواهند داشت.\n\nادامه می‌دهید؟')) return;
   if(!confirm('ارسال ورک‌اسپیس هاست به «'+branch+'»؟')) return;
 
@@ -1748,14 +1898,17 @@ async function wbPush(){
 
   const r=await api('wb_push',{
     repo, branch, include:'', message:$('wb_msg').value.trim(),
-    secrets:$('wb_secrets').checked?'1':'', gh_token:$('wb_token').value
+    secrets:$('wb_secrets').checked?'1':'', gh_token:$('wb_token').value, enc_pass:pass
   },'POST');
 
   btn.disabled=false; btn.textContent='☁️ ارسال به گیت‌هاب';
   renderSteps('wb_steps', r.steps);
   if(!r.ok) return msg('wb_msgbox','✗ '+esc(r.error||'خطا'),'m-err');
   $('wb_token').value='';
-  msg('wb_msgbox','✓ '+r.count+' فایل ارسال شد · کامیت <code>'+esc(r.commit)+'</code>'
+  if(!$('wr_branch').value) $('wr_branch').value=branch;   // آماده برای بازگردانی
+  msg('wb_msgbox','✓ '+r.count+' فایل ارسال شد'
+    +(r.encrypted&&r.encrypted.length?' (🔐 '+r.encrypted.length+' رمزشده)':'')
+    +' · کامیت <code>'+esc(r.commit)+'</code>'
     +(r.created?' · برنچ ساخته شد':'')
     +' · <a href="'+esc(r.url)+'" target="_blank" style="color:#93c5fd">مشاهده در گیت‌هاب ↗</a>','m-ok');
 }

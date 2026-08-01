@@ -27,7 +27,7 @@ const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.23';
+const APP_VERSION = '8.24';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
