@@ -23,12 +23,13 @@ const WOO_QUEUE_FILE = __DIR__ . '/woo_queue.json';
 const WOO_PRODUCTS_FILE = __DIR__ . '/woo_products_temp.json';
 const BSL_QUEUE_FILE = __DIR__ . '/bsl_queue.json';
 const EXTRACT_PROGRESS_FILE = __DIR__ . '/extract_progress.json';
+const CATLEARN_FILE = __DIR__ . '/category_learning.json';   // v8.48
 const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.47';
+const APP_VERSION = '8.48';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -513,6 +514,89 @@ if ($result > 0) return $result;
 return $catId;
 }
 
+/* =====================================================================
+ *  v8.48: یادگیری دسته‌بندی از انتخاب‌های دستی
+ *
+ *  هر بار کاربر دستهٔ یک محصول را دستی اصلاح می‌کند، کلمهٔ اولِ عنوان
+ *  به‌همراه دستهٔ انتخاب‌شده ذخیره می‌شود. دفعهٔ بعد که محصولی با همان
+ *  کلمهٔ اول بیاید، همان دسته پیشنهاد می‌شود.
+ *
+ *  چرا کلمهٔ اول: در فارسی نام محصول تقریباً همیشه با نوع کالا شروع
+ *  می‌شود — «کفش ورزشی مردانه»، «عسل طبیعی سبلان». کلمهٔ اول تعیین‌کننده
+ *  است و بقیه صفت‌اند. الگوریتم قبلی همهٔ کلمات را یکسان می‌دید، برای
+ *  همین «روغن موتور» گاهی زیر «موتور سیکلت» می‌رفت.
+ * ===================================================================== */
+
+/** کلمهٔ اولِ معنادار عنوان را برمی‌گرداند */
+function catFirstWord(string $title): string {
+    $n = preg_replace('/[0-9!@#$%^&*()+=\[\]{}|\\\\:;"\'<>,.?\/_\-–—…·«»]/u', ' ',
+                      mb_strtolower(trim($title), 'UTF-8'));
+    $n = preg_replace('/\s{2,}/u', ' ', trim($n));
+    if ($n === '') return '';
+    $skip = ['خرید', 'فروش', 'قیمت', 'ارسال', 'رایگان', 'تخفیف', 'ویژه', 'جدید', 'اصل', 'اصلی'];
+    foreach (preg_split('/\s+/u', $n) as $w) {
+        $w = trim($w);
+        if (mb_strlen($w, 'UTF-8') < 2) continue;
+        if (in_array($w, $skip, true)) continue;   // کلمات تبلیغاتی ابتدای عنوان
+        return $w;
+    }
+    return '';
+}
+
+function catLearnLoad(): array {
+    if (!is_file(CATLEARN_FILE)) return [];
+    $d = json_decode((string)@file_get_contents(CATLEARN_FILE), true);
+    return is_array($d) ? $d : [];
+}
+
+function catLearnSave(array $d): void {
+    @file_put_contents(CATLEARN_FILE, json_encode($d, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/**
+ * ثبت یک انتخاب دستی.
+ * برای هر کلمهٔ اول، شمارش هر دسته نگه داشته می‌شود تا اگر کاربر نظرش
+ * عوض شد، انتخاب تازه‌تر و پرتکرارتر برنده شود.
+ */
+function catLearnRecord(string $title, int $catId, string $catName = ''): bool {
+    $w = catFirstWord($title);
+    if ($w === '' || $catId <= 0) return false;
+    $d = catLearnLoad();
+    if (!isset($d[$w]) || !is_array($d[$w])) $d[$w] = ['cats' => [], 'n' => 0];
+    $k = (string)$catId;
+    $prev = $d[$w]['cats'][$k] ?? ['n' => 0, 'name' => ''];
+    $d[$w]['cats'][$k] = ['n' => (int)$prev['n'] + 1,
+                          'name' => $catName !== '' ? $catName : (string)($prev['name'] ?? ''),
+                          'at' => time()];
+    $d[$w]['n'] = (int)($d[$w]['n'] ?? 0) + 1;
+    $d[$w]['last'] = time();
+    // سقف حجم: ۱۰۰۰ کلمه، قدیمی‌ترها حذف می‌شوند
+    if (count($d) > 1000) {
+        uasort($d, fn($a, $b) => (int)($b['last'] ?? 0) <=> (int)($a['last'] ?? 0));
+        $d = array_slice($d, 0, 1000, true);
+    }
+    catLearnSave($d);
+    return true;
+}
+
+/** دستهٔ آموخته‌شده برای کلمهٔ اولِ این عنوان، یا ۰ */
+function catLearnLookup(string $title, ?array $learned = null): int {
+    $w = catFirstWord($title);
+    if ($w === '') return 0;
+    $d = $learned ?? catLearnLoad();
+    $row = $d[$w] ?? null;
+    if (!is_array($row) || empty($row['cats'])) return 0;
+    $bestId = 0; $bestN = 0; $bestAt = 0;
+    foreach ($row['cats'] as $cid => $info) {
+        $n = (int)($info['n'] ?? 0); $at = (int)($info['at'] ?? 0);
+        // پرتکرارترین؛ در تساوی، تازه‌ترین
+        if ($n > $bestN || ($n === $bestN && $at > $bestAt)) {
+            $bestN = $n; $bestAt = $at; $bestId = (int)$cid;
+        }
+    }
+    return $bestId;
+}
+
 function autoMatchBslCategory(string $productTitle, array $flatCategories): int {
 
 $norm=preg_replace('/[0-9!@#$%^&*()+=\[\]{}|\\\\:;"\'<>,.?\/_\-–—…·«»]/u',' ',mb_strtolower(trim($productTitle),'UTF-8'));
@@ -521,6 +605,17 @@ $norm=preg_replace('/\s{2,}/u',' ',$norm);
 $stop=['قیمت','فروش','ارسال','رایگان','تخفیف','ویژه','نو','جدید','ست','بسته','دار','تکه','عدد','پک','سایز','رنگ','و','با','از','برای','در','یک','این','آن','که','هم','است','بود','شد','کن','کرد','باید','دیگر','بندی','جعبه','کیسه','سفید','مشکی','آبی','طلایی','سلیکونی','فانتزی','کد','اصلی','مخصوص','تک','فرد','نوع','مدل','خط','سری','متفرقه','کرانه','تن'];
 $pWords=array_unique(array_filter(preg_split('/\s+/u',$norm),function($w)use($stop){return mb_strlen($w,'UTF-8')>=2&&!in_array($w,$stop);}));
 if(empty($pWords))return 0;
+
+// v8.48: اول حافظهٔ یادگیری. اگر کاربر قبلاً برای این کلمهٔ اول دسته‌ای
+// انتخاب کرده، همان برنده است — انتخاب انسان بر حدس الگوریتم مقدم است.
+$learnedId=catLearnLookup($productTitle);
+if($learnedId>0){
+foreach($flatCategories as $c){if((int)($c['id']??0)===$learnedId)return $learnedId;}
+}
+
+// v8.48: کلمهٔ اول نوع کالا را می‌گوید و بقیه صفت‌اند، پس وزنش بیشتر است
+$firstWord=catFirstWord($productTitle);
+
 $bestScore=0;$bestCatId=0;
 foreach($flatCategories as $cat){
 
@@ -531,21 +626,23 @@ if(empty($catWords))continue;
 $overlap=0;
 foreach($pWords as $pw){
 $pwLen=mb_strlen($pw,'UTF-8');
+// v8.48: تطبیق روی کلمهٔ اول سه برابر ارزش دارد
+$wMul=($firstWord!==''&&$pw===$firstWord)?3:1;
 foreach($catWords as $cw){
 $cw=trim($cw);$cwLen=mb_strlen($cw,'UTF-8');
 
-if($pw===($cw)){$overlap+=3;break;}
+if($pw===($cw)){$overlap+=3*$wMul;break;}
 
 if($pwLen<$cwLen){
 
 if(mb_substr($cw,0,$pwLen,'UTF-8')===($pw)){
 $nc=mb_substr($cw,$pwLen,1,'UTF-8');
-if($nc===' '||$nc==='\u200c'||$nc==='‌'){$overlap+=2;break;}
+if($nc===' '||$nc==='\u200c'||$nc==='‌'){$overlap+=2*$wMul;break;}
 }
 
 if(mb_substr($cw,$cwLen-$pwLen,$pwLen,'UTF-8')===($pw)){
 $pc=mb_substr($cw,$cwLen-$pwLen-1,1,'UTF-8');
-if($pc===' '||$pc==='\u200c'||$pc==='‌'){$overlap+=2;break;}
+if($pc===' '||$pc==='\u200c'||$pc==='‌'){$overlap+=2*$wMul;break;}
 }
 }
 
@@ -553,7 +650,7 @@ if($pwLen>$cwLen&&mb_strpos($pw,$cw,0,'UTF-8')!==false){
 $pos=mb_strpos($pw,$cw,0,'UTF-8');
 $beforeOk=$pos===0||mb_substr($pw,$pos-1,1,'UTF-8')===' ';
 $afterOk=$pos+$cwLen===mb_strlen($pw,'UTF-8')||mb_substr($pw,$pos+$cwLen,1,'UTF-8')===' ';
-if($beforeOk&&$afterOk){$overlap+=1.5;break;}
+if($beforeOk&&$afterOk){$overlap+=1.5*$wMul;break;}
 }
 }
 }
@@ -4410,6 +4507,54 @@ if (isset($_GET['recon'])) {
     exit;
 }
 
+/**
+ * v8.48: مدیریت حافظهٔ یادگیری دسته‌بندی.
+ * ?catlearn=1                 → فهرست آموخته‌ها
+ * &forget=<کلمه>              → فراموش کردن یک کلمه
+ * &clear=1                    → پاک کردن همه
+ * &test=<عنوان>               → ببین برای این عنوان چه پیشنهاد می‌دهد
+ */
+if (isset($_GET['catlearn'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $d = catLearnLoad();
+
+    $forget = trim((string)($_GET['forget'] ?? ''));
+    if ($forget !== '') {
+        $w = catFirstWord($forget) ?: $forget;
+        unset($d[$w]);
+        catLearnSave($d);
+        echo json_encode(['ok' => true, 'forgot' => $w, 'left' => count($d)], JSON_UNESCAPED_UNICODE); exit;
+    }
+    if (!empty($_GET['clear'])) {
+        catLearnSave([]);
+        echo json_encode(['ok' => true, 'cleared' => true], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $test = trim((string)($_GET['test'] ?? ''));
+    if ($test !== '') {
+        echo json_encode(['ok' => true, 'title' => $test, 'first_word' => catFirstWord($test),
+            'learned_cat' => catLearnLookup($test, $d)], JSON_UNESCAPED_UNICODE); exit;
+    }
+
+    $rows = [];
+    foreach ($d as $w => $row) {
+        if (!is_array($row)) continue;
+        $bestId = 0; $bestN = 0; $bestName = '';
+        foreach (($row['cats'] ?? []) as $cid => $info) {
+            if ((int)($info['n'] ?? 0) > $bestN) {
+                $bestN = (int)$info['n']; $bestId = (int)$cid;
+                $bestName = (string)($info['name'] ?? '');
+            }
+        }
+        $rows[] = ['word' => $w, 'cat_id' => $bestId, 'cat_name' => $bestName,
+                   'times' => $bestN, 'total' => (int)($row['n'] ?? 0),
+                   'variants' => count($row['cats'] ?? []), 'last' => (int)($row['last'] ?? 0)];
+    }
+    usort($rows, fn($a, $b) => $b['last'] <=> $a['last']);
+    echo json_encode(['ok' => true, 'count' => count($rows),
+        'rows' => array_slice($rows, 0, 300)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 /** v8.33: بررسی/ادامهٔ دستی صف گیرکرده */
 if (isset($_GET['queue_watchdog'])) {
     header('Content-Type: application/json; charset=UTF-8');
@@ -7389,7 +7534,15 @@ $bu=['category_id'=>$newCatId,'status'=>2976];
 $r=bslReq($tk,'PATCH','products/'.$productId,$bu);
 if($r['code']===404)$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$productId,$bu);
 if($r['ok']&&!empty($r['body']['id'])){
-echo json_encode(['ok'=>true,'msg'=>'دسته اصلاح شد — محصول ID#'.$productId.' به دسته ID#'.$newCatId.' تغییر یافت','product_id'=>$productId,'category_id'=>$newCatId],JSON_UNESCAPED_UNICODE);
+// v8.48: این یک انتخاب دستیِ تأییدشده است — یادش بگیر
+$learnTitle=trim((string)($_GET['title']??''));
+if($learnTitle===''){
+$g=bslReq($tk,'GET','products/'.$productId);
+if(!empty($g['ok'])){$gb=$g['body']??[];
+$learnTitle=(string)($gb['title']??($gb['name']??($gb['revision']['data']['title']??'')));}
+}
+$learned=$learnTitle!==''?catLearnRecord($learnTitle,$newCatId,trim((string)($_GET['cat_name']??''))):false;
+echo json_encode(['ok'=>true,'msg'=>'دسته اصلاح شد — محصول ID#'.$productId.' به دسته ID#'.$newCatId.' تغییر یافت','product_id'=>$productId,'category_id'=>$newCatId,'learned'=>$learned,'learn_word'=>$learnTitle!==''?catFirstWord($learnTitle):''],JSON_UNESCAPED_UNICODE);
 }else{
 
 $rUnpub=bslReq($tk,'PATCH','products/'.$productId,['status'=>3790]);
@@ -10243,6 +10396,18 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 <div id="reconR" style="margin-top:8px"></div>
 </div>
+<div style="margin-top:10px;padding-top:10px;border-top:1px solid #334155">
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🧠 یادگیری دسته‌بندی</div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+هر بار دستهٔ محصولی را دستی اصلاح کنید، سیستم کلمهٔ اولِ عنوان را با آن دسته به خاطر می‌سپارد
+و دفعهٔ بعد خودش همان را پیشنهاد می‌دهد.
+</div>
+<div class="cact">
+<button class="btn btn-gray" onclick="catLearnShow()" style="flex:1">📚 آموخته‌ها</button>
+<button class="btn btn-gray" onclick="catLearnTest()" style="flex:1">🧪 آزمایش عنوان</button>
+</div>
+<div id="catLearnR" style="margin-top:8px"></div>
+</div>
 </div></div>
 
 <div class="smenu">
@@ -12902,6 +13067,15 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.48', t:'یادگیری دسته‌بندی از انتخاب‌های دستی', items:[
+    'هر بار دستهٔ محصولی را دستی اصلاح کنید، کلمهٔ اولِ عنوان با آن دسته به خاطر سپرده می‌شود',
+    'دفعهٔ بعد محصولی با همان کلمهٔ اول، خودکار همان دسته را می‌گیرد',
+    'انتخاب انسان بر حدس الگوریتم مقدم است',
+    'کلمهٔ اول عنوان حالا سه برابر وزن دارد — در فارسی نوع کالا معمولاً اول می‌آید',
+    'کلمات تبلیغاتی مثل «خرید» و «قیمت» در ابتدای عنوان نادیده گرفته می‌شوند',
+    'اگر برای یک کلمه چند دسته ثبت شده باشد، پرتکرارترین برنده است',
+    'بخش «🧠 یادگیری دسته‌بندی» برای دیدن، آزمایش و پاک کردن آموخته‌ها'
+  ]},
   {v:'8.47', t:'مغایرت‌گیری ووکامرس و باسلام با پروفایل‌ها', items:[
     'دو دکمهٔ جدید: بررسی ووکامرس و بررسی باسلام',
     'همهٔ پروفایل‌هایی که همگام‌سازی دوره‌ای‌شان روشن است را با فروشگاه مقایسه می‌کند',
@@ -13233,6 +13407,55 @@ function reconApply(target){
     box.innerHTML=reconReport(res,target);
     showToast('✓ '+toFa(res.repriced||0)+' قیمت · '+toFa(res.deleted||0)+' مورد اضافی');
   }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا: '+esc(e.message)+'</div>';});
+}
+
+/* v8.48: رابط حافظهٔ یادگیری دسته‌بندی */
+function catLearnShow(){
+  const box=$('catLearnR');
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ ...</div>';
+  fetch('?catlearn=1').then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا</div>';return;}
+    if(!d.count){box.innerHTML='<div style="color:#64748b;font-size:11px">هنوز چیزی آموخته نشده — '
+      +'یک دسته را دستی اصلاح کنید.</div>';return;}
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
+    h+='<div style="display:flex;align-items:center;margin-bottom:5px">'
+      +'<span style="color:#93c5fd">🧠 '+toFa(d.count)+' کلمه آموخته شده</span>'
+      +'<span style="flex:1"></span>'
+      +'<button class="btn btn-red" onclick="catLearnClear()" style="font-size:10px;padding:3px 8px">پاک کردن همه</button></div>';
+    d.rows.slice(0,40).forEach(r=>{
+      h+='<div style="display:flex;gap:6px;align-items:center;border-top:1px solid #1e293b;padding:3px 0">'
+        +'<b style="color:#e2e8f0;min-width:70px">'+esc(r.word)+'</b>'
+        +'<span style="color:#94a3b8;flex:1">→ '+esc(r.cat_name||('#'+r.cat_id))+'</span>'
+        +'<span style="color:#64748b;font-size:10px">'+toFa(r.times)+'×</span>'
+        +(r.variants>1?'<span style="color:#fbbf24;font-size:10px" title="چند دستهٔ مختلف">⚠'+toFa(r.variants)+'</span>':'')
+        +'<button class="btn btn-gray" onclick="catLearnForget(\''+encodeURIComponent(r.word)+'\')" '
+        +'style="font-size:9px;padding:2px 6px">✕</button></div>';
+    });
+    if(d.count>40)h+='<div style="color:#64748b;padding-top:4px">… و '+toFa(d.count-40)+' مورد دیگر</div>';
+    box.innerHTML=h+'</div>';
+  }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا</div>';});
+}
+function catLearnForget(w){
+  fetch('?catlearn=1&forget='+w).then(r=>r.json()).then(()=>{showToast('فراموش شد');catLearnShow();});
+}
+function catLearnClear(){
+  if(!confirm('همهٔ آموخته‌ها پاک شوند؟'))return;
+  fetch('?catlearn=1&clear=1').then(r=>r.json()).then(()=>{showToast('پاک شد');catLearnShow();});
+}
+function catLearnTest(){
+  const t=prompt('عنوان محصول را بنویسید:');
+  if(!t)return;
+  const box=$('catLearnR');
+  fetch('?catlearn=1&test='+encodeURIComponent(t)).then(r=>r.json()).then(d=>{
+    if(!box)return;
+    box.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">'
+      +'<div style="color:#cbd5e1">عنوان: '+esc(d.title||'')+'</div>'
+      +'<div style="color:#93c5fd">کلمهٔ اول: <b>'+esc(d.first_word||'—')+'</b></div>'
+      +'<div style="color:'+(d.learned_cat?'#4ade80':'#64748b')+'">'
+      +(d.learned_cat?('✓ دستهٔ آموخته‌شده: #'+d.learned_cat):'— هنوز برای این کلمه چیزی آموخته نشده')
+      +'</div></div>';
+  }).catch(()=>{});
 }
 
 /** v8.36: نشانگر کنار عنوان بخش «محصولات رفته از مبدأ» */
@@ -17242,7 +17465,17 @@ function bslFixCat(productId,catId,autoCatId){
     const btn=document.getElementById('btn-'+productId);
     const btnM=document.getElementById('btn-'+productId+'-m');
     if(btn)btn.disabled=true;if(btnM)btnM.disabled=true;
-    fetch('?bsl_fix_cat=1&product_id='+productId+'&category_id='+useCatId).then(r=>r.json()).then(d=>{
+    // v8.48: عنوان و نام دسته را هم بفرست تا سیستم یاد بگیرد
+    let _t='',_cn='';
+    try{
+        const row=(window._phase2Rows||[]).find(x=>String(x.id)===String(productId));
+        if(row)_t=row.title||'';
+        const cats=window._phase2Cats||window._bslModalCats||bslAllCats||[];
+        const c=cats.find(x=>x.id===useCatId); if(c)_cn=c.name||'';
+    }catch(e){}
+    fetch('?bsl_fix_cat=1&product_id='+productId+'&category_id='+useCatId
+      +'&title='+encodeURIComponent(_t)+'&cat_name='+encodeURIComponent(_cn))
+      .then(r=>r.json()).then(d=>{
         // v8.45: به‌جای innerHTML+= که کل کارت را بازسازی و رویدادها را
         // نابود می‌کرد، فقط نوار وضعیتِ همان کارت به‌روز می‌شود.
         const row=document.getElementById('p2-'+productId);
@@ -17250,7 +17483,8 @@ function bslFixCat(productId,catId,autoCatId){
         if(d&&d.ok){
             showToast('✓ دسته اصلاح شد');
             if(row){row.classList.add('p2-ok');row.dataset.done='1';}
-            if(st)st.innerHTML='<span class="p2-ok-txt">✅ اصلاح شد — دستهٔ #'+useCatId+'</span>';
+            if(st)st.innerHTML='<span class="p2-ok-txt">✅ اصلاح شد — دستهٔ #'+useCatId+'</span>'
+                 +(d.learned?'<span style="color:#93c5fd;margin-right:6px">🧠 آموخته شد: «'+esc(d.learn_word||'')+'»</span>':'');
             const box=document.getElementById('p2Done');
             if(box){const n=(parseInt(box.dataset.n||'0')||0)+1;box.dataset.n=String(n);
                     box.textContent='✅ '+toFa(n)+' اصلاح شد';}

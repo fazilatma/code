@@ -32,3 +32,6 @@ woo_queue_products_*.json
 
 # v8.38: per-item notification state (runtime)
 last_notification_check.json
+
+# v8.48: category learning memory (runtime)
+category_learning.json
