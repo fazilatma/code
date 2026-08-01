@@ -256,9 +256,21 @@ function do_deploy(array $job, array $cfg, bool $dryRun = false): array {
 
     // ۱) دانلود
     $url = gh_raw_url($repo, $branch, $src);
-    $res = http_get($url, $cfg['github_token'] ?? '');
+    $ghTok = $cfg['github_token'] ?? '';
+    $res = http_get($url, $ghTok);
+    // یک توکن نامعتبر باعث ۴۰۱ می‌شود حتی روی ریپوی عمومی؛ بدون توکن دوباره تلاش کن
+    if (!$res['ok'] && $res['code'] === 401 && $ghTok !== '') {
+        $retry = http_get($url, '');
+        if ($retry['ok']) {
+            $res = $retry;
+            $addStep('توکن گیت‌هاب', true, 'توکن نامعتبر بود — بدون آن ادامه داده شد');
+        }
+    }
     if (!$res['ok']) {
-        $hint = $res['code'] === 404 ? ' (مسیر یا برنچ اشتباه است؟)' : '';
+        $hint = '';
+        if ($res['code'] === 404)      $hint = ' (مسیر یا برنچ اشتباه است؟)';
+        elseif ($res['code'] === 401)  $hint = ' — توکن گیت‌هاب نامعتبر است؛ در تنظیمات __CLEAR__ بگذارید';
+        elseif ($res['code'] === 403)  $hint = ($ghTok !== '' ? ' — توکن مجوز لازم را ندارد' : ' — محدودیت نرخ گیت‌هاب، کمی بعد تلاش کنید');
         $addStep('دانلود از گیت‌هاب', false, $res['error'] . $hint);
         return ['ok' => false, 'error' => 'دانلود ناموفق: ' . $res['error'] . $hint, 'steps' => $steps];
     }

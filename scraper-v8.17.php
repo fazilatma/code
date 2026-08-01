@@ -27,7 +27,7 @@ const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.20';
+const APP_VERSION = '8.21';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -981,6 +981,38 @@ function vc_content_id(string $data): string {
     return sha1('blob ' . strlen($data) . "\0" . $data);
 }
 
+/** پیام خطای گویا برای کدهای رایج گیت‌هاب */
+function vc_http_error(int $code, string $fallback, bool $hadToken): string {
+    if ($code === 401) {
+        return 'توکن گیت‌هاب نامعتبر یا منقضی است (۴۰۱) — چون ریپو عمومی است، توکن را حذف کنید';
+    }
+    if ($code === 403) {
+        return $hadToken
+            ? 'دسترسی رد شد (۴۰۳) — توکن مجوز لازم را ندارد'
+            : 'محدودیت نرخ گیت‌هاب (۴۰۳) — ساعتی ۶۰ درخواست برای هر IP؛ کمی بعد دوباره تلاش کنید';
+    }
+    if ($code === 404) return 'فایل، برنچ یا ریپو پیدا نشد (۴۰۴)';
+    return $fallback ?: ('خطا HTTP ' . $code);
+}
+
+/**
+ * درخواست GET فقط برای خواندن اطلاعات (متادیتا)، نه کد.
+ * اگر توکن نامعتبر باشد و ریپو عمومی، یک‌بار بدون توکن دوباره تلاش می‌کند
+ * تا یک توکن خراب کل قابلیت را از کار نیندازد.
+ */
+function vc_get_json_auto(string $url, string $token = '', int $timeout = 25): array {
+    $r = vc_get_json($url, $token, $timeout);
+    if (!$r['ok'] && $r['code'] === 401 && $token !== '') {
+        $retry = vc_get_json($url, '', $timeout);
+        if ($retry['ok']) {
+            $retry['token_rejected'] = true;   // به UI بگو توکن بد است
+            return $retry;
+        }
+    }
+    $r['token_rejected'] = false;
+    return $r;
+}
+
 /** درخواست GET فقط برای خواندن اطلاعات (متادیتا)، نه کد */
 function vc_get_json(string $url, string $token = '', int $timeout = 25): array {
     $hdr = [
@@ -1037,11 +1069,20 @@ if (isset($_GET['vc_check'])) {
     $api = 'https://api.github.com/repos/' . $c['repo'] . '/contents/'
          . implode('/', array_map('rawurlencode', explode('/', $c['path'])))
          . '?ref=' . rawurlencode($c['branch']);
-    $r = vc_get_json($api, $c['github_token']);
+    $r = vc_get_json_auto($api, $c['github_token']);
     if (!$r['ok'] || !isset($r['data']['sha'])) {
-        echo json_encode(['ok' => false, 'error' => $r['code'] === 404
-            ? 'فایل یا برنچ پیدا نشد' : ($r['error'] ?: 'خطا')], JSON_UNESCAPED_UNICODE);
+        echo json_encode([
+            'ok' => false,
+            'error' => vc_http_error((int)$r['code'], (string)$r['error'], $c['github_token'] !== ''),
+            'code' => (int)$r['code'],
+            'bad_token' => (int)$r['code'] === 401,
+        ], JSON_UNESCAPED_UNICODE);
         exit;
+    }
+    // توکن بد بود ولی بدون آن کار کرد — خودکار پاکش کن تا دفعهٔ بعد خطا ندهد
+    if (!empty($r['token_rejected'])) {
+        $c['github_token'] = '';
+        vc_save($c);
     }
 
     $c['last_check'] = time();
@@ -1072,12 +1113,17 @@ if (isset($_GET['vc_branches'])) {
         echo json_encode(['ok' => false, 'error' => 'نام ریپو نامعتبر است (قالب: user/repo)'], JSON_UNESCAPED_UNICODE);
         exit;
     }
-    $r = vc_get_json('https://api.github.com/repos/' . $repo . '/branches?per_page=100', $c['github_token']);
+    $r = vc_get_json_auto('https://api.github.com/repos/' . $repo . '/branches?per_page=100', $c['github_token']);
     if (!$r['ok']) {
-        echo json_encode(['ok' => false, 'error' => $r['code'] === 404
-            ? 'ریپو پیدا نشد (خصوصی است؟ توکن لازم است)' : $r['error']], JSON_UNESCAPED_UNICODE);
+        echo json_encode([
+            'ok' => false,
+            'error' => vc_http_error((int)$r['code'], (string)$r['error'], $c['github_token'] !== ''),
+            'code' => (int)$r['code'],
+            'bad_token' => (int)$r['code'] === 401,
+        ], JSON_UNESCAPED_UNICODE);
         exit;
     }
+    if (!empty($r['token_rejected'])) { $c['github_token'] = ''; vc_save($c); }
     $out = [];
     foreach ($r['data'] as $b) {
         if (!empty($b['name'])) $out[] = ['name' => $b['name'], 'sha' => substr((string)($b['commit']['sha'] ?? ''), 0, 7)];
@@ -1096,11 +1142,17 @@ if (isset($_GET['vc_files'])) {
         echo json_encode(['ok' => false, 'error' => 'ریپو و برنچ لازم است'], JSON_UNESCAPED_UNICODE);
         exit;
     }
-    $r = vc_get_json('https://api.github.com/repos/' . $repo . '/git/trees/' . rawurlencode($branch) . '?recursive=1', $c['github_token'], 30);
+    $r = vc_get_json_auto('https://api.github.com/repos/' . $repo . '/git/trees/' . rawurlencode($branch) . '?recursive=1', $c['github_token'], 30);
     if (!$r['ok'] || !isset($r['data']['tree'])) {
-        echo json_encode(['ok' => false, 'error' => $r['code'] === 404 ? 'برنچ پیدا نشد' : $r['error']], JSON_UNESCAPED_UNICODE);
+        echo json_encode([
+            'ok' => false,
+            'error' => vc_http_error((int)$r['code'], (string)$r['error'], $c['github_token'] !== ''),
+            'code' => (int)$r['code'],
+            'bad_token' => (int)$r['code'] === 401,
+        ], JSON_UNESCAPED_UNICODE);
         exit;
     }
+    if (!empty($r['token_rejected'])) { $c['github_token'] = ''; vc_save($c); }
     $files = [];
     foreach ($r['data']['tree'] as $n) {
         if (($n['type'] ?? '') !== 'blob') continue;
@@ -10629,6 +10681,19 @@ function vcSave(showMsg) {
     }).catch(() => showToast('خطا در ذخیره', true));
 }
 
+/** حذف توکن گیت‌هاب — رفع سریع خطای ۴۰۱ روی ریپوی عمومی */
+function vcClearToken() {
+    const fd = new FormData();
+    fd.append('github_token', '__CLEAR__');
+    fetch('?vc_settings=1', { method: 'POST', body: fd }).then(r => r.json()).then(d => {
+        if (!d.ok) { showToast(d.error || 'حذف ناموفق', true); return; }
+        VC = d.settings;
+        if ($('vcGhState')) $('vcGhState').textContent = 'تنظیم نشده';
+        showToast('✓ توکن حذف شد — دوباره تلاش کنید');
+        vcStat('توکن حذف شد — دکمهٔ بررسی را بزنید', '#4ade80');
+    }).catch(() => showToast('خطا در ارتباط', true));
+}
+
 /** مقایسهٔ نسخه. manual=true یعنی کاربر دکمه زده. */
 function vcCheck(manual) {
     if (!manual && (!VC || !VC.check_on_load)) return;
@@ -10640,7 +10705,14 @@ function vcCheck(manual) {
         const reset = () => { if (btn) { btn.disabled = false; btn.textContent = '🔍 بررسی و نصب نسخهٔ جدید'; } };
         if (d.skipped) { reset(); return; }
         if (!d.ok) {
-            vcStat('✗ ' + esc(d.error || 'خطا'), '#f87171');
+            if (d.bad_token) {
+                // رایج‌ترین علت ۴۰۱: توکنی که لازم نیست و نامعتبر است
+                vcStat('✗ ' + esc(d.error) +
+                    ' <button class="btn" style="font-size:10px;padding:2px 8px;background:#dc2626;color:#fff;border:none;border-radius:4px;margin-right:6px" onclick="vcClearToken()">حذف توکن</button>',
+                    '#f87171');
+            } else {
+                vcStat('✗ ' + esc(d.error || 'خطا'), '#f87171');
+            }
             if (manual) showToast(d.error || 'خطا', true);
             reset(); return;
         }
