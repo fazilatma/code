@@ -27,7 +27,7 @@ const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.28';
+const APP_VERSION = '8.29';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4109,8 +4109,14 @@ if ($bslAutoCreated > 0) {
 
 }
 
+// v8.29: مرحلهٔ سوم — استعلام سفارش/پیام/محصول. قبلاً فقط در cron_run
+// بود و در cron_sync اجرا نمی‌شد، یعنی نیمی از اجراها اعلانی نمی‌داد.
+$notif = bslCheckNotifications($cn);
+
 header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(['ok' => true, 'due' => $results, 'time' => $now, 'bsl_auto_created' => $bslAutoCreated], JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok' => true, 'due' => $results, 'time' => $now,
+                  'bsl_auto_created' => $bslAutoCreated,
+                  'notifications' => $notif], JSON_UNESCAPED_UNICODE);
 exit;
 }
 if (isset($_GET['sync_status'])) {
@@ -4212,88 +4218,181 @@ echo json_encode($results, JSON_UNESCAPED_UNICODE); exit;
 
 // v8.19: Re-scrape a profile using its manual selectors. Returns updated products array.
 // If selectors are empty, returns null (caller should use saved products).
+/* =====================================================================
+ *  v8.29: اعلان‌های باسلام
+ *  به سه بررسی مستقل تقسیم شده تا هرکدام دکمهٔ تست جدا داشته باشند و
+ *  در کران‌جاب هم به ترتیب اولویت اجرا شوند.
+ * ===================================================================== */
+
+const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
+
+function notifLoadState(): array {
+    if (!is_file(NOTIF_STATE_FILE)) return [];
+    $d = json_decode((string)@file_get_contents(NOTIF_STATE_FILE), true);
+    return is_array($d) ? $d : [];
+}
+
+function notifSaveState(array $st): void {
+    @file_put_contents(NOTIF_STATE_FILE, json_encode($st, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/** ارسال یک پیام به همهٔ پیام‌رسان‌های فعال */
+function notifSend(array $cn, string $msg): array {
+    $out = [];
+    $bt = $cn['baleh']['token'] ?? '';  $bc = $cn['baleh']['chat_id'] ?? '';
+    $rt = $cn['rubika']['token'] ?? ''; $rc = $cn['rubika']['chat_id'] ?? '';
+    if ($bt !== '' && $bc !== '')  $out['baleh']  = bslSendToBaleh($bt, $bc, $msg) ? 'sent' : 'fail';
+    if ($rt !== '' && $rc !== '')  $out['rubika'] = bslSendToRubika($rt, $rc, $msg) ? 'sent' : 'fail';
+    if (!$out) $out['none'] = 'no_messenger';
+    return $out;
+}
+
+/** پیش‌نیازها را بررسی می‌کند و در صورت نبود، علت را برمی‌گرداند */
+function notifPrereq(array $cn): ?string {
+    if (trim((string)($cn['basalam']['token'] ?? '')) === '') return 'توکن باسلام تنظیم نشده';
+    if ((int)($cn['basalam']['vendor_id'] ?? 0) <= 0)         return 'شناسهٔ غرفه تنظیم نشده';
+    $hasMsgr = (!empty($cn['baleh']['token']) && !empty($cn['baleh']['chat_id']))
+            || (!empty($cn['rubika']['token']) && !empty($cn['rubika']['chat_id']));
+    if (!$hasMsgr) return 'هیچ پیام‌رسانی تنظیم نشده (بله یا روبیکا)';
+    return null;
+}
+
+/**
+ * بررسی سفارش‌های جدید.
+ * $test=true یعنی حالت آزمایشی: وضعیت ذخیره نمی‌شود تا اجرای بعدی هم
+ * همان نتیجه را بدهد، و اگر چیزی نبود یک پیام نمونه فرستاده می‌شود.
+ */
+function notifCheckOrders(array $cn, bool $test = false, bool $send = true): array {
+    $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
+    $st = notifLoadState(); $since = (int)($st['last_order_check'] ?? 0);
+    $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/orders?per_page=10&sort=created_at_desc');
+    if (!$r['ok']) return ['ok' => false, 'error' => 'دریافت سفارش‌ها ناموفق (HTTP ' . ($r['code'] ?? 0) . ')', 'found' => 0];
+
+    $rows = $r['body']['data'] ?? [];
+    $found = 0; $sentTo = []; $samples = [];
+    foreach ($rows as $o) {
+        $t = strtotime($o['created_at'] ?? 'now');
+        if (!$test && $t <= $since) break;
+        $found++;
+        $msg = "🛒 سفارش جدید باسلام\nشماره: #" . ($o['id'] ?? 0)
+             . "\nمشتری: " . ($o['customer']['name'] ?? 'نامشخص')
+             . "\nمبلغ: " . number_format((int)($o['total_price'] ?? 0)) . ' تومان';
+        $samples[] = $msg;
+        if ($send && !$test) $sentTo = notifSend($cn, $msg);
+        if ($test) break;   // در حالت تست فقط تازه‌ترین مورد
+    }
+    if (!$test) { $st['last_order_check'] = time(); notifSaveState($st); }
+    if ($test && $send) {
+        $msg = $samples ? ("🧪 تست سفارش‌ها\n" . $samples[0]) : "🧪 تست سفارش‌ها\nهیچ سفارشی در ۱۰ مورد اخیر نبود، اما ارتباط برقرار است ✅";
+        $sentTo = notifSend($cn, $msg);
+    }
+    return ['ok' => true, 'found' => $found, 'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+}
+
+/** بررسی پیام‌های جدید مشتری */
+function notifCheckChats(array $cn, bool $test = false, bool $send = true): array {
+    $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
+    $st = notifLoadState(); $since = (int)($st['last_chat_check'] ?? 0);
+    $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/chats?per_page=10&sort=created_at_desc');
+    if (!$r['ok']) return ['ok' => false, 'error' => 'دریافت گفتگوها ناموفق (HTTP ' . ($r['code'] ?? 0) . ')', 'found' => 0];
+
+    $rows = $r['body']['data'] ?? [];
+    $found = 0; $sentTo = []; $samples = [];
+    foreach ($rows as $c) {
+        $t = strtotime($c['created_at'] ?? 'now');
+        if (!$test && $t <= $since) break;
+        $found++;
+        $txt = $c['last_message']['text'] ?? ($c['last_message']['content'] ?? '...');
+        $msg = "💬 پیام مشتری باسلام\nمشتری: " . ($c['customer']['name'] ?? 'مشتری')
+             . "\nپیام: " . mb_substr($txt, 0, 200);
+        $samples[] = $msg;
+        if ($send && !$test) $sentTo = notifSend($cn, $msg);
+        if ($test) break;
+    }
+    if (!$test) { $st['last_chat_check'] = time(); notifSaveState($st); }
+    if ($test && $send) {
+        $msg = $samples ? ("🧪 تست پیام‌ها\n" . $samples[0]) : "🧪 تست پیام‌ها\nهیچ پیامی در ۱۰ مورد اخیر نبود، اما ارتباط برقرار است ✅";
+        $sentTo = notifSend($cn, $msg);
+    }
+    return ['ok' => true, 'found' => $found, 'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+}
+
+/** بررسی تغییر وضعیت یا افزوده شدن محصول */
+function notifCheckProducts(array $cn, bool $test = false, bool $send = true): array {
+    $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
+    $st = notifLoadState(); $since = (int)($st['last_product_check'] ?? 0);
+    $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=10&sort=created_at_desc&statuses=2976&statuses=3790&statuses=3567');
+    if (!$r['ok']) return ['ok' => false, 'error' => 'دریافت محصولات ناموفق (HTTP ' . ($r['code'] ?? 0) . ')', 'found' => 0];
+
+    $rows = $r['body']['data'] ?? [];
+    $found = 0; $sentTo = []; $samples = [];
+    foreach ($rows as $p) {
+        $t = strtotime($p['created_at'] ?? 'now');
+        if (!$test && $t <= $since) break;
+        $ps = $p['status'] ?? [];
+        $val = is_array($ps) ? (int)($ps['value'] ?? 0) : (int)$ps;
+        $title = mb_substr((string)($p['title'] ?? ($p['name'] ?? 'محصول')), 0, 60);
+        $msg = '';
+        if ($val === 3567 || $val === 4184) {
+            $msg = "📋 تغییر وضعیت محصول باسلام\nمحصول: " . $title
+                 . "\nوضعیت جدید: " . ($val === 3567 ? 'تأیید نشده ❌' : 'بایگانی 🗑️');
+        } elseif ($val === 2976) {
+            $msg = "➕ محصول جدید باسلام\nمحصول: " . $title . "\nوضعیت: فعال ✅";
+        }
+        if ($msg === '') continue;
+        $found++; $samples[] = $msg;
+        if ($send && !$test) $sentTo = notifSend($cn, $msg);
+        if ($test) break;
+    }
+    if (!$test) { $st['last_product_check'] = time(); notifSaveState($st); }
+    if ($test && $send) {
+        $msg = $samples ? ("🧪 تست محصولات\n" . $samples[0]) : "🧪 تست محصولات\nتغییری در ۱۰ محصول اخیر نبود، اما ارتباط برقرار است ✅";
+        $sentTo = notifSend($cn, $msg);
+    }
+    return ['ok' => true, 'found' => $found, 'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+}
+
+/**
+ * اجرای همهٔ بررسی‌های فعال — همان چیزی که کران‌جاب صدا می‌زند.
+ * ترتیب عمدی: سفارش (پول)، پیام (مشتری منتظر است)، محصول (اطلاعی).
+ */
 function bslCheckNotifications(array $cn): array {
-$result = []; $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
-$balehToken = $cn['baleh']['token'] ?? ''; $balehChatId = $cn['baleh']['chat_id'] ?? '';
-$rubikaToken = $cn['rubika']['token'] ?? ''; $rubikaChatId = $cn['rubika']['chat_id'] ?? '';
-$ne = $cn['notif_events'] ?? [];
-if (empty($tk) || $vid <= 0 || (empty($balehToken) && empty($rubikaToken))) return $result;
-$lastNotifFile = __DIR__ . '/last_notification_check.json';
-$lastCheck = 0; $lastChatCheck = 0; $lastProductCheck = 0;
-if (file_exists($lastNotifFile)) { $lastData = json_decode(file_get_contents($lastNotifFile), true) ?: []; $lastCheck = (int)($lastData['last_order_check'] ?? 0); $lastChatCheck = (int)($lastData['last_chat_check'] ?? 0); $lastProductCheck = (int)($lastData['last_product_check'] ?? 0); }
-$now = time();
-$sendNotif = function(string $msg) use ($balehToken, $balehChatId, $rubikaToken, $rubikaChatId, &$result) {
-if (!empty($balehToken) && !empty($balehChatId)) { $r = bslSendToBaleh($balehToken, $balehChatId, $msg); $result[] = $r ? 'baleh_sent' : 'baleh_fail'; }
-if (!empty($rubikaToken) && !empty($rubikaChatId)) { $r = bslSendToRubika($rubikaToken, $rubikaChatId, $msg); $result[] = $r ? 'rubika_sent' : 'rubika_fail'; }
-};
-
-if (!empty($ne['order_new']) || !empty($ne['order_status'])) {
-$orders = bslReq($tk, 'GET', 'vendors/' . $vid . '/orders?per_page=10&sort=created_at_desc');
-if ($orders['ok'] && !empty($orders['body']['data'])) {
-foreach ($orders['body']['data'] as $order) {
-$orderId = $order['id'] ?? 0; $orderTime = strtotime($order['created_at'] ?? 'now');
-$orderStatus = $order['status']['name'] ?? ($order['status']['value'] ?? 'نامشخص');
-if ($orderTime <= $lastCheck) break;
-if (!empty($ne['order_new'])) {
-$msg = "🛒 سفارش جدید باسلام\nشماره: #" . $orderId . "\nمشتری: " . ($order['customer']['name'] ?? 'نامشخص') . "\nمبلغ: " . number_format((int)($order['total_price'] ?? 0)) . " تومان\nوضعیت: " . $orderStatus;
-$sendNotif($msg);
-}
-}
-}
+    $why = notifPrereq($cn);
+    if ($why !== null) return [];
+    $ne = $cn['notif_events'] ?? [];
+    $out = [];
+    if (!empty($ne['order_new']) || !empty($ne['order_status'])) {
+        $r = notifCheckOrders($cn);
+        if (!empty($r['found'])) $out['orders'] = $r['found'];
+    }
+    if (!empty($ne['chat_msg'])) {
+        $r = notifCheckChats($cn);
+        if (!empty($r['found'])) $out['chats'] = $r['found'];
+    }
+    if (!empty($ne['product_status']) || !empty($ne['product_new'])) {
+        $r = notifCheckProducts($cn);
+        if (!empty($r['found'])) $out['products'] = $r['found'];
+    }
+    return $out;
 }
 
-if (!empty($ne['chat_msg'])) {
-$chats = bslReq($tk, 'GET', 'vendors/' . $vid . '/chats?per_page=10&sort=created_at_desc');
-if ($chats['ok'] && !empty($chats['body']['data'])) {
-foreach ($chats['body']['data'] as $chat) {
-$chatTime = strtotime($chat['created_at'] ?? 'now');
-if ($chatTime <= $lastChatCheck) break;
-$chatMsg = $chat['last_message']['text'] ?? ($chat['last_message']['content'] ?? '...');
-$chatCustomer = $chat['customer']['name'] ?? 'مشتری';
-$msg = "💬 پیام مشتری باسلام\nمشتری: " . $chatCustomer . "\nپیام: " . mb_substr($chatMsg, 0, 200);
-$sendNotif($msg);
-}
-}
+/* دکمه‌های تست — هر بررسی را جدا اجرا و نتیجه را گزارش می‌کند */
+if (isset($_GET['notif_test'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $kind = $_GET['kind'] ?? '';
+    $cn = loadConnections();
+    $why = notifPrereq($cn);
+    if ($why !== null) { echo json_encode(['ok' => false, 'error' => $why], JSON_UNESCAPED_UNICODE); exit; }
+
+    if ($kind === 'orders')        $r = notifCheckOrders($cn, true);
+    elseif ($kind === 'chats')     $r = notifCheckChats($cn, true);
+    elseif ($kind === 'products')  $r = notifCheckProducts($cn, true);
+    else { echo json_encode(['ok' => false, 'error' => 'نوع تست نامعتبر']); exit; }
+
+    echo json_encode($r, JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
-if (!empty($ne['product_status']) || !empty($ne['product_new'])) {
-$products = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=10&sort=created_at_desc&statuses=2976&statuses=3790&statuses=3567');
-if ($products['ok'] && !empty($products['body']['data'])) {
-foreach ($products['body']['data'] as $product) {
-$prodTime = strtotime($product['created_at'] ?? 'now');
-if ($prodTime <= $lastProductCheck) break;
-$prodStatus = $product['status'] ?? [];
-$statusVal = is_array($prodStatus) ? ($prodStatus['value'] ?? 0) : (int)$prodStatus;
-$statusName = is_array($prodStatus) ? ($prodStatus['name'] ?? '') : '';
-$prodTitle = $product['title'] ?? ($product['name'] ?? 'محصول');
-if (!empty($ne['product_status']) && ($statusVal === 3567 || $statusVal === 4184)) {
-$statusLabel = $statusVal === 3567 ? 'تأیید نشده ❌' : 'بایگانی 🗑️';
-$msg = "📋 تغییر وضعیت محصول باسلام\nمحصول: " . mb_substr($prodTitle, 0, 60) . "\nوضعیت جدید: " . $statusLabel;
-$sendNotif($msg);
-}
-if (!empty($ne['product_new']) && $statusVal === 2976) {
-$msg = "➕ محصول جدید باسلام\nمحصول: " . mb_substr($prodTitle, 0, 60) . "\nوضعیت: فعال ✅";
-$sendNotif($msg);
-}
-}
-}
-}
-
-if (!empty($ne['order_refund'])) {
-$refunds = bslReq($tk, 'GET', 'vendors/' . $vid . '/orders?per_page=5&sort=created_at_desc&statuses=refunded');
-if ($refunds['ok'] && !empty($refunds['body']['data'])) {
-foreach ($refunds['body']['data'] as $refund) {
-$refundTime = strtotime($refund['created_at'] ?? 'now');
-if ($refundTime <= $lastCheck) break;
-$refundId = $refund['id'] ?? 0;
-$msg = "🔄 بازگشت سفارش باسلام\nشماره: #" . $refundId . "\nمشتری: " . ($refund['customer']['name'] ?? 'نامشخص') . "\nمبلغ: " . number_format((int)($refund['total_price'] ?? 0)) . " تومان";
-$sendNotif($msg);
-}
-}
-}
-@file_put_contents($lastNotifFile, json_encode(['last_order_check' => $now, 'last_chat_check' => $now, 'last_product_check' => $now], JSON_UNESCAPED_UNICODE), LOCK_EX);
-return $result;
-}
 function bslSendToBaleh(string $token, string $chatId, string $text): bool {
 $url = 'https://tapi.bale.ai/bot' . $token . '/sendMessage';
 $ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE), CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
@@ -8393,6 +8492,18 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 </div>
 <div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
+<div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
+<div style="font-size:11px;color:#94a3b8;margin-bottom:6px">🧪 تست استعلام از باسلام</div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+هر دکمه واقعاً از باسلام استعلام می‌گیرد و تازه‌ترین مورد را به پیام‌رسان‌ها می‌فرستد.
+حالت تست وضعیت را ذخیره نمی‌کند، پس اعلان‌های واقعی بعدی از دست نمی‌روند.
+</div>
+<div class="cact">
+<button class="btn btn-teal" onclick="notifTest('orders')" style="flex:1">🛒 تست سفارش‌ها</button>
+<button class="btn btn-cyan" onclick="notifTest('chats')" style="flex:1">💬 تست پیام‌ها</button>
+<button class="btn btn-indigo" onclick="notifTest('products')" style="flex:1">📋 تست محصولات</button>
+</div>
+<div id="notifTestR" style="margin-top:8px"></div>
 <div id="notifTR" style="margin-top:8px"></div>
 </div></div>
 
@@ -10960,6 +11071,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.29', t:'اعلان‌های پیام‌رسان', items:[
+    'دکمه‌های تست جداگانه برای سفارش‌ها، پیام‌های مشتری و تغییر وضعیت محصولات',
+    'استعلام اعلان‌ها به‌عنوان مرحلهٔ سوم به «اجرای حالا» و کران‌جاب اضافه شد',
+    'رفع اشکال: cron_sync اصلاً اعلان‌ها را بررسی نمی‌کرد، فقط cron_run'
+  ]},
   {v:'8.28', t:'یکسان‌سازی ظاهر استخراج', items:[
     'دکمهٔ «اجرای حالا» و کران‌جاب دقیقاً همان پنل و شمارنده‌های زندهٔ «استخراج بک‌اند» را نشان می‌دهند',
     'رفع اشکال: «اجرای حالا» اصلاً رصد پیشرفت را شروع نمی‌کرد، برای همین به نظر می‌رسید کاری نمی‌کند',
@@ -11004,6 +11120,43 @@ const CHANGELOG = [
     'بررسی و نصب نسخهٔ جدید از داخل پنل'
   ]},
 ];
+
+/**
+ * v8.29: تست استعلام باسلام — واقعاً درخواست می‌فرستد، نه شبیه‌سازی.
+ * حالت تست وضعیت را ذخیره نمی‌کند تا اعلان واقعی بعدی از دست نرود.
+ */
+function notifTest(kind){
+  const labels={orders:'🛒 سفارش‌ها',chats:'💬 پیام‌ها',products:'📋 محصولات'};
+  const box=$('notifTestR');
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال استعلام '+esc(labels[kind]||kind)+' از باسلام...</div>';
+  fetch('?notif_test=1&kind='+encodeURIComponent(kind)).then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){
+      box.innerHTML='<div style="color:#f87171;font-size:11px;background:#7f1d1d20;padding:6px 8px;border-radius:6px">✗ '+esc(d.error||'خطا')+'</div>';
+      showToast(d.error||'تست ناموفق',1);
+      return;
+    }
+    const sent=d.sent||{};
+    const chips=Object.keys(sent).map(k=>{
+      const okv=sent[k]==='sent';
+      const nm={baleh:'بله',rubika:'روبیکا',none:'پیام‌رسان'}[k]||k;
+      return '<span style="font-size:10px;padding:1px 7px;border-radius:4px;margin-left:4px;background:'
+        +(okv?'#14532d':'#7f1d1d')+';color:'+(okv?'#86efac':'#fca5a5')+'">'
+        +(okv?'✓ ':'✗ ')+esc(nm)+'</span>';
+    }).join('');
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
+    h+='<div style="color:#4ade80;margin-bottom:4px">✓ ارتباط با باسلام برقرار است</div>';
+    h+='<div style="color:#94a3b8">بررسی‌شده: '+toFa(d.total_seen||0)+' مورد · یافت‌شده: '+toFa(d.found||0)+'</div>';
+    if(chips)h+='<div style="margin-top:4px">ارسال: '+chips+'</div>';
+    if(d.sample)h+='<div style="margin-top:6px;color:#cbd5e1;background:#1e293b;padding:6px;border-radius:6px;white-space:pre-wrap;font-size:10.5px">'+esc(d.sample)+'</div>';
+    h+='</div>';
+    box.innerHTML=h;
+    showToast('✓ تست '+(labels[kind]||kind)+' انجام شد');
+  }).catch(()=>{
+    if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';
+    showToast('خطا شبکه',1);
+  });
+}
 
 function renderChangelog(){
   const box=$('changelogBox');
@@ -13234,6 +13387,15 @@ function runSyncNow(){
                 if(p.bsl==='queued'){eLog.innerHTML+='<div style="color:#22d3ee;padding:2px 0">📋 '+esc(p.name||p.key)+' — '+toFa(p.bsl_total||0)+' محصول در صف باسلام</div>';}
                 if(p.status==='not_due'){eLog.innerHTML+='<div style="color:#64748b;padding:2px 0">⏳ '+esc(p.name||p.key)+' — هنوز نوبت نیست</div>';}
             });
+            // v8.29: مرحلهٔ سوم — نتیجهٔ استعلام اعلان‌ها
+            const nf=d.notifications||{};
+            const nk=Object.keys(nf);
+            if(nk.length){
+                const lbl={orders:'🛒 سفارش جدید',chats:'💬 پیام جدید',products:'📋 تغییر محصول'};
+                nk.forEach(k=>{eLog.innerHTML+='<div style="color:#fbbf24;padding:2px 0">'+(lbl[k]||k)+': '+toFa(nf[k])+' مورد — اعلان ارسال شد</div>';});
+            }else{
+                eLog.innerHTML+='<div style="color:#64748b;padding:2px 0">🔔 استعلام اعلان‌ها: مورد جدیدی نبود</div>';
+            }
             eLog.innerHTML+='<div style="color:#22c55e;padding:4px 0;font-weight:bold">✅ کران جاب کامل شد</div>';
         }
         // v8.28: کران تمام شد — رصد را متوقف و صف/شمارنده‌ها را نهایی کن
