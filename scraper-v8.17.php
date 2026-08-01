@@ -933,6 +933,258 @@ if(strpos($url,'/')===0)return $base.$url;
 return rtrim($pageUrl,'/').'/'.ltrim($url,'/');
 }
 
+/* =====================================================================
+ *  خودآپدیت از گیت‌هاب  (v8.18)
+ *  با هر بار باز شدن صفحه، هش نسخهٔ روی گیت‌هاب با فایل فعلی مقایسه
+ *  می‌شود. مقایسه فقط با git blob SHA انجام می‌گیرد، بنابراین تا وقتی
+ *  تغییری نباشد هیچ دانلود سنگینی رخ نمی‌دهد.
+ * ===================================================================== */
+
+const SU_CONFIG_FILE = __DIR__ . '/.selfupdate.json';
+const SU_BACKUP_DIR  = __DIR__ . '/_backups';
+const SU_MIN_BYTES   = 50000;   // این فایل بزرگ است؛ کوچک‌تر از این یعنی خرابی
+const SU_KEEP        = 15;
+
+function su_defaults(): array {
+    return [
+        'enabled'      => false,
+        'auto_check'   => true,
+        'auto_apply'   => false,   // پیش‌فرض: فقط اطلاع بده، خودسرانه نصب نکن
+        'repo'         => 'fazilatma/code',
+        'branch'       => 'main',
+        'path'         => 'scraper-v8.17.php',
+        'github_token' => '',
+        'last_check'   => 0,
+        'last_sha'     => '',
+        'last_update'  => 0,
+    ];
+}
+
+function su_load(): array {
+    $d = su_defaults();
+    if (!is_file(SU_CONFIG_FILE)) return $d;
+    $j = json_decode((string)@file_get_contents(SU_CONFIG_FILE), true);
+    return is_array($j) ? array_merge($d, $j) : $d;
+}
+
+function su_save(array $c): bool {
+    $ok = @file_put_contents(SU_CONFIG_FILE, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX) !== false;
+    if ($ok) @chmod(SU_CONFIG_FILE, 0600);
+    return $ok;
+}
+
+/** همان الگوریتمی که گیت برای شناسهٔ محتوا استفاده می‌کند */
+function su_blob_sha(string $data): string {
+    return sha1('blob ' . strlen($data) . "\0" . $data);
+}
+
+function su_http(string $url, string $token = '', bool $json = false, int $timeout = 60): array {
+    $hdr = [
+        'User-Agent: scraper-selfupdate',
+        'Accept: ' . ($json ? 'application/vnd.github+json' : 'application/vnd.github.raw, text/plain, */*'),
+        'Cache-Control: no-cache',
+    ];
+    if ($token !== '') $hdr[] = 'Authorization: Bearer ' . $token;
+
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 5,
+            CURLOPT_CONNECTTIMEOUT => 12, CURLOPT_TIMEOUT => $timeout, CURLOPT_ENCODING => '',
+            CURLOPT_HTTPHEADER => $hdr,
+        ]);
+        $b = curl_exec($ch);
+        $e = curl_error($ch);
+        $c = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        if ($b === false) return ['ok' => false, 'code' => 0, 'error' => $e ?: 'ارتباط ناموفق', 'body' => ''];
+        if ($c !== 200)   return ['ok' => false, 'code' => $c, 'error' => 'HTTP ' . $c, 'body' => (string)$b];
+        return ['ok' => true, 'code' => 200, 'error' => '', 'body' => (string)$b];
+    }
+
+    $ctx = stream_context_create([
+        'http' => ['method' => 'GET', 'timeout' => $timeout, 'header' => implode("\r\n", $hdr), 'ignore_errors' => true],
+        'ssl'  => ['verify_peer' => true, 'verify_peer_name' => true],
+    ]);
+    $b = @file_get_contents($url, false, $ctx);
+    if ($b === false) return ['ok' => false, 'code' => 0, 'error' => 'ارتباط ناموفق', 'body' => ''];
+    return ['ok' => true, 'code' => 200, 'error' => '', 'body' => $b];
+}
+
+/** بررسی سبک: فقط متادیتا می‌گیرد، نه خود فایل */
+if (isset($_GET['su_check'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $c = su_load();
+    if (empty($c['enabled'])) { echo json_encode(['ok' => true, 'enabled' => false]); exit; }
+
+    $self = __FILE__;
+    $cur  = su_blob_sha((string)@file_get_contents($self));
+
+    $api = 'https://api.github.com/repos/' . $c['repo'] . '/contents/'
+         . implode('/', array_map('rawurlencode', explode('/', $c['path'])))
+         . '?ref=' . rawurlencode($c['branch']);
+    $r = su_http($api, $c['github_token'], true, 25);
+    if (!$r['ok']) {
+        echo json_encode(['ok' => false, 'enabled' => true, 'error' =>
+            $r['code'] === 404 ? 'فایل یا برنچ پیدا نشد' : $r['error']], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $d = json_decode($r['body'], true);
+    if (!isset($d['sha'])) { echo json_encode(['ok' => false, 'enabled' => true, 'error' => 'پاسخ نامعتبر']); exit; }
+
+    $c['last_check'] = time();
+    $c['last_sha']   = $d['sha'];
+    su_save($c);
+
+    echo json_encode([
+        'ok'         => true,
+        'enabled'    => true,
+        'update'     => $d['sha'] !== $cur,
+        'auto_apply' => !empty($c['auto_apply']),
+        'local_sha'  => substr($cur, 0, 8),
+        'remote_sha' => substr((string)$d['sha'], 0, 8),
+        'size'       => (int)($d['size'] ?? 0),
+        'local_size' => (int)@filesize($self),
+        'branch'     => $c['branch'],
+        'path'       => $c['path'],
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** اعمال به‌روزرسانی — همان زنجیرهٔ ایمنی deploy.php */
+if (isset($_GET['su_apply'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $c = su_load();
+    if (empty($c['enabled'])) { echo json_encode(['ok' => false, 'error' => 'خودآپدیت فعال نیست']); exit; }
+
+    $self = __FILE__;
+    if (!is_writable($self)) {
+        echo json_encode(['ok' => false, 'error' => 'فایل قابل نوشتن نیست (chmod را بررسی کنید)'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $raw = 'https://raw.githubusercontent.com/' . $c['repo'] . '/refs/heads/'
+         . $c['branch'] . '/' . implode('/', array_map('rawurlencode', explode('/', $c['path'])));
+    $r = su_http($raw, $c['github_token'], false, 120);
+    if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => 'دانلود ناموفق: ' . $r['error']], JSON_UNESCAPED_UNICODE); exit; }
+
+    $body = $r['body'];
+    $size = strlen($body);
+    $curBody = (string)@file_get_contents($self);
+
+    if ($size < SU_MIN_BYTES) {
+        echo json_encode(['ok' => false, 'error' => 'حجم دریافتی مشکوک است (' . $size . ' بایت) — لغو شد'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    if (strncmp(ltrim($body), '<?php', 5) !== 0) {
+        echo json_encode(['ok' => false, 'error' => 'محتوای دریافتی کد PHP نیست — لغو شد'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    try {
+        token_get_all($body, TOKEN_PARSE);
+    } catch (Throwable $e) {
+        echo json_encode(['ok' => false, 'error' => 'خطای نحوی در نسخهٔ جدید: ' . $e->getMessage() . ' — لغو شد'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    if (su_blob_sha($body) === su_blob_sha($curBody)) {
+        echo json_encode(['ok' => true, 'changed' => false, 'message' => 'از قبل به‌روز است'], JSON_UNESCAPED_UNICODE); exit;
+    }
+
+    if (!is_dir(SU_BACKUP_DIR)) @mkdir(SU_BACKUP_DIR, 0755, true);
+    if (is_dir(SU_BACKUP_DIR)) {
+        if (!is_file(SU_BACKUP_DIR . '/.htaccess')) @file_put_contents(SU_BACKUP_DIR . '/.htaccess', "Require all denied\nDeny from all\n");
+        $bak = basename($self) . '.' . date('Ymd-His') . '.bak';
+        if (!@copy($self, SU_BACKUP_DIR . '/' . $bak)) {
+            echo json_encode(['ok' => false, 'error' => 'بکاپ‌گیری ناموفق — برای ایمنی لغو شد'], JSON_UNESCAPED_UNICODE); exit;
+        }
+        $olds = glob(SU_BACKUP_DIR . '/' . basename($self) . '.*.bak') ?: [];
+        if (count($olds) > SU_KEEP) {
+            usort($olds, fn($a, $b) => filemtime($b) <=> filemtime($a));
+            foreach (array_slice($olds, SU_KEEP) as $o) @unlink($o);
+        }
+    } else {
+        echo json_encode(['ok' => false, 'error' => 'ساخت پوشهٔ بکاپ ناموفق'], JSON_UNESCAPED_UNICODE); exit;
+    }
+
+    $tmp = $self . '.tmp-' . bin2hex(random_bytes(5));
+    if (@file_put_contents($tmp, $body, LOCK_EX) !== $size) {
+        @unlink($tmp);
+        echo json_encode(['ok' => false, 'error' => 'نوشتن فایل موقت ناموفق'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    if (su_blob_sha((string)@file_get_contents($tmp)) !== su_blob_sha($body)) {
+        @unlink($tmp);
+        echo json_encode(['ok' => false, 'error' => 'فایل نوشته‌شده مخدوش است — لغو شد'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    @chmod($tmp, (fileperms($self) & 0777) ?: 0644);
+    if (!@rename($tmp, $self)) {
+        @unlink($tmp);
+        echo json_encode(['ok' => false, 'error' => 'جایگزینی فایل ناموفق'], JSON_UNESCAPED_UNICODE); exit;
+    }
+
+    @clearstatcache(true, $self);
+    if (function_exists('opcache_invalidate')) @opcache_invalidate($self, true);
+
+    $c['last_update'] = time();
+    su_save($c);
+
+    echo json_encode(['ok' => true, 'changed' => true, 'size' => $size,
+        'backup' => $bak, 'message' => 'به‌روزرسانی انجام شد'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** خواندن/نوشتن تنظیمات خودآپدیت */
+if (isset($_GET['su_settings'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $c = su_load();
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+        $c['enabled']    = !empty($_POST['enabled']);
+        $c['auto_check'] = !empty($_POST['auto_check']);
+        $c['auto_apply'] = !empty($_POST['auto_apply']);
+        if (isset($_POST['repo']))   $c['repo']   = trim((string)$_POST['repo']);
+        if (isset($_POST['branch'])) $c['branch'] = trim((string)$_POST['branch']);
+        if (isset($_POST['path']))   $c['path']   = ltrim(trim((string)$_POST['path']), '/');
+        $gh = (string)($_POST['github_token'] ?? '');
+        if ($gh === '__CLEAR__')  $c['github_token'] = '';
+        elseif (trim($gh) !== '') $c['github_token'] = trim($gh);
+        if (!su_save($c)) { echo json_encode(['ok' => false, 'error' => 'ذخیرهٔ تنظیمات ناموفق']); exit; }
+    }
+    $out = $c;
+    $out['github_token'] = '';
+    $out['has_token']    = !empty($c['github_token']);
+    $out['self_name']    = basename(__FILE__);
+    $out['writable']     = is_writable(__FILE__);
+    $out['local_sha']    = substr(su_blob_sha((string)@file_get_contents(__FILE__)), 0, 8);
+    $out['local_size']   = (int)@filesize(__FILE__);
+    echo json_encode(['ok' => true, 'settings' => $out], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** فهرست بکاپ‌ها و بازگردانی */
+if (isset($_GET['su_backups'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $list = [];
+    foreach (glob(SU_BACKUP_DIR . '/' . basename(__FILE__) . '.*.bak') ?: [] as $f) {
+        $list[] = ['file' => basename($f), 'size' => (int)filesize($f), 'time' => date('Y-m-d H:i:s', (int)filemtime($f))];
+    }
+    usort($list, fn($a, $b) => strcmp($b['time'], $a['time']));
+    echo json_encode(['ok' => true, 'backups' => $list], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['su_restore'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $b = basename((string)($_POST['file'] ?? ''));
+    $src = SU_BACKUP_DIR . '/' . $b;
+    if ($b === '' || !preg_match('~\.bak$~', $b) || !is_file($src)) {
+        echo json_encode(['ok' => false, 'error' => 'بکاپ نامعتبر']); exit;
+    }
+    $self = __FILE__;
+    if (!is_writable($self)) { echo json_encode(['ok' => false, 'error' => 'فایل قابل نوشتن نیست']); exit; }
+    @copy($self, SU_BACKUP_DIR . '/' . basename($self) . '.' . date('Ymd-His') . '.bak');
+    if (!@copy($src, $self)) { echo json_encode(['ok' => false, 'error' => 'بازگردانی ناموفق']); exit; }
+    @clearstatcache(true, $self);
+    if (function_exists('opcache_invalidate')) @opcache_invalidate($self, true);
+    echo json_encode(['ok' => true, 'message' => 'بازگردانی شد'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (!empty($_GET['rp'])) {
 $rpUrl = trim($_GET['rp']);
 if (!filter_var($rpUrl, FILTER_VALIDATE_URL)) { http_response_code(400); echo 'Invalid'; exit; }
@@ -7902,6 +8154,50 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 
 <div class="tab-pane" id="pane-settings">
+    <div class="card settings-card" style="border-color:#22c55e">
+        <div class="section-title" style="color:#4ade80">🔄 به‌روزرسانی از گیت‌هاب</div>
+        <div class="row" style="align-items:center">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="suEnabled" onchange="suSave()"> فعال بودن خودآپدیت
+            </label>
+        </div>
+        <div id="suBody" style="display:none">
+            <div class="row" style="align-items:center;margin-top:6px">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                    <input type="checkbox" id="suAutoCheck" onchange="suSave()"> بررسی خودکار هنگام باز شدن صفحه
+                </label>
+            </div>
+            <div class="row" style="align-items:center">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                    <input type="checkbox" id="suAutoApply" onchange="suSave()"> نصب خودکار بدون پرسیدن
+                </label>
+            </div>
+            <div style="font-size:11px;color:#64748b;margin:4px 0 10px;line-height:1.7">
+                💡 اگر «نصب خودکار» خاموش باشد، فقط اطلاع می‌دهد و خودتان تصمیم می‌گیرید (پیشنهاد می‌شود).
+            </div>
+            <div class="row">
+                <input type="text" id="suRepo" placeholder="user/repo" oninput="suDirty()">
+                <input type="text" id="suBranch" placeholder="برنچ" oninput="suDirty()" style="max-width:220px">
+            </div>
+            <div class="row">
+                <input type="text" id="suPath" placeholder="مسیر فایل در ریپو" oninput="suDirty()">
+            </div>
+            <div class="row">
+                <input type="password" id="suToken" placeholder="توکن گیت‌هاب (فقط ریپوی خصوصی)" oninput="suDirty()">
+            </div>
+            <div style="font-size:11px;color:#64748b;margin-bottom:10px">
+                وضعیت توکن: <span id="suTokenState">—</span> · برای حذف عبارت <code>__CLEAR__</code> را وارد کنید
+            </div>
+            <div class="row">
+                <button class="btn btn-cyan" onclick="suSave(true)" style="flex:1">💾 ذخیرهٔ تنظیمات</button>
+                <button class="btn btn-blue" onclick="suCheck(true)" style="flex:1">🔍 بررسی نسخه</button>
+                <button class="btn btn-gray" onclick="suShowBackups()">🗄️ بکاپ‌ها</button>
+            </div>
+            <div class="status" id="suStatus" style="color:#4ade80;margin-top:8px">—</div>
+            <div id="suBackupList" style="display:none;margin-top:10px"></div>
+        </div>
+    </div>
+
     <div class="card settings-card">
         <div class="section-title">📝 عنوان محصول</div>
         <div class="row" style="align-items:center">
@@ -10117,6 +10413,215 @@ function dlCSV(){dl('csv');}
 function dlExcel(){dl('excel');}
 
 renderDetailFieldsList();
+
+/* ==================================================================
+ *  خودآپدیت از گیت‌هاب (v8.18)
+ * ================================================================== */
+let SU = null, suSaveTimer = null;
+
+/** آیا عملیات سنگینی در جریان است؟ وسط کار نباید فایل عوض شود. */
+function suBusy() {
+    try {
+        if (typeof running !== 'undefined' && running) return 'اسکرپ';
+        if (typeof detailRunning !== 'undefined' && detailRunning) return 'استخراج تفصیلی';
+        if (typeof bslClientRunning !== 'undefined' && bslClientRunning) return 'ارسال به باسلام';
+        if (typeof wSend !== 'undefined' && wSend) return 'ارسال به ووکامرس';
+        if (typeof bSend !== 'undefined' && bSend) return 'ارسال به باسلام';
+        if (typeof fetchMissingRunning !== 'undefined' && fetchMissingRunning) return 'تکمیل اطلاعات';
+        if (typeof ddRunning !== 'undefined' && ddRunning) return 'حذف تکراری‌ها';
+    } catch (e) {}
+    return '';
+}
+
+function suStat(msg, color) {
+    const el = $('suStatus');
+    if (el) { el.innerHTML = msg; el.style.color = color || '#4ade80'; }
+}
+
+function suDirty() {
+    clearTimeout(suSaveTimer);
+    suSaveTimer = setTimeout(() => suSave(), 900);
+}
+
+function suLoad() {
+    fetch('?su_settings=1').then(r => r.json()).then(d => {
+        if (!d.ok) return;
+        SU = d.settings;
+        if ($('suEnabled'))   $('suEnabled').checked   = !!SU.enabled;
+        if ($('suAutoCheck')) $('suAutoCheck').checked = SU.auto_check !== false;
+        if ($('suAutoApply')) $('suAutoApply').checked = !!SU.auto_apply;
+        if ($('suRepo'))   $('suRepo').value   = SU.repo   || '';
+        if ($('suBranch')) $('suBranch').value = SU.branch || '';
+        if ($('suPath'))   $('suPath').value   = SU.path   || '';
+        if ($('suTokenState')) $('suTokenState').textContent = SU.has_token ? 'تنظیم شده' : 'تنظیم نشده';
+        if ($('suBody')) $('suBody').style.display = SU.enabled ? 'block' : 'none';
+        if (!SU.writable) {
+            suStat('⚠ فایل قابل نوشتن نیست — سطح دسترسی را روی ۶۴۴ تنظیم کنید', '#fbbf24');
+        } else {
+            suStat('نسخهٔ فعلی: <code>' + esc(SU.local_sha) + '</code> · ' +
+                   toFa((SU.local_size / 1024).toFixed(0)) + ' کیلوبایت', '#64748b');
+        }
+    }).catch(() => {});
+}
+
+function suSave(showMsg) {
+    const fd = new FormData();
+    fd.append('enabled',    $('suEnabled').checked ? '1' : '');
+    fd.append('auto_check', $('suAutoCheck').checked ? '1' : '');
+    fd.append('auto_apply', $('suAutoApply').checked ? '1' : '');
+    fd.append('repo',   $('suRepo').value.trim());
+    fd.append('branch', $('suBranch').value.trim());
+    fd.append('path',   $('suPath').value.trim());
+    const tk = $('suToken').value;
+    if (tk) fd.append('github_token', tk);
+
+    if ($('suBody')) $('suBody').style.display = $('suEnabled').checked ? 'block' : 'none';
+
+    fetch('?su_settings=1', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(d => {
+            if (!d.ok) { showToast(d.error || 'ذخیره ناموفق', true); return; }
+            SU = d.settings;
+            $('suToken').value = '';
+            if ($('suTokenState')) $('suTokenState').textContent = SU.has_token ? 'تنظیم شده' : 'تنظیم نشده';
+            if (showMsg) showToast('✓ تنظیمات ذخیره شد');
+        })
+        .catch(() => showToast('خطا در ذخیره', true));
+}
+
+/** بررسی نسخه. manual=true یعنی کاربر خودش دکمه زده. */
+function suCheck(manual) {
+    if (!manual && SU && SU.auto_check === false) return;
+    if (manual) suStat('<span style="opacity:.7">در حال بررسی...</span>', '#93c5fd');
+
+    fetch('?su_check=1').then(r => r.json()).then(d => {
+        if (!d.enabled) { if (manual) suStat('خودآپدیت فعال نیست', '#64748b'); return; }
+        if (!d.ok) {
+            if (manual) suStat('✗ ' + esc(d.error || 'خطا'), '#f87171');
+            return;
+        }
+        if (!d.update) {
+            suStat('✓ به‌روز است — <code>' + esc(d.local_sha) + '</code>', '#4ade80');
+            if (manual) showToast('✓ نسخهٔ شما به‌روز است');
+            return;
+        }
+
+        // نسخهٔ جدید موجود است
+        const busy = suBusy();
+        if (busy) {
+            suStat('⚠ نسخهٔ جدید موجود است — تا پایان «' + esc(busy) + '» صبر می‌کنیم', '#fbbf24');
+            showToast('نسخهٔ جدید موجود است (پس از پایان کار جاری)', true);
+            return;
+        }
+
+        suStat('⬆ نسخهٔ جدید: <code>' + esc(d.remote_sha) + '</code> (فعلی <code>' +
+               esc(d.local_sha) + '</code>)', '#fbbf24');
+
+        if (d.auto_apply) {
+            showToast('⬇ نسخهٔ جدید یافت شد — در حال به‌روزرسانی...');
+            suApply(true);
+        } else {
+            suPrompt(d);
+        }
+    }).catch(() => { if (manual) suStat('✗ خطا در ارتباط', '#f87171'); });
+}
+
+/** نوار اعلان بالای صفحه با دکمهٔ تأیید */
+function suPrompt(d) {
+    if (document.getElementById('suBanner')) return;
+    const b = document.createElement('div');
+    b.id = 'suBanner';
+    b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:linear-gradient(135deg,#f59e0b,#f97316);' +
+        'color:#1c1207;padding:11px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;' +
+        'font-family:Tahoma,sans-serif;font-size:13px;font-weight:700;box-shadow:0 3px 14px rgba(0,0,0,.4);direction:rtl';
+    b.innerHTML =
+        '<span style="flex:1;min-width:200px">⬆ نسخهٔ جدیدی از اسکریپر روی گیت‌هاب موجود است' +
+        ' <span style="opacity:.75;font-weight:400">(' + esc(d.remote_sha) + ' ← ' + esc(d.local_sha) + ')</span></span>' +
+        '<button id="suGo" style="background:#0f172a;color:#fde68a;border:none;padding:8px 15px;border-radius:7px;' +
+        'font-weight:700;cursor:pointer;font-family:inherit;font-size:12px">به‌روزرسانی کن</button>' +
+        '<button id="suNo" style="background:transparent;color:#1c1207;border:1px solid rgba(0,0,0,.35);' +
+        'padding:8px 13px;border-radius:7px;cursor:pointer;font-family:inherit;font-size:12px">بعداً</button>';
+    document.body.appendChild(b);
+    document.body.style.paddingTop = (b.offsetHeight + 6) + 'px';
+    document.getElementById('suGo').onclick = () => suApply(false);
+    document.getElementById('suNo').onclick = () => suCloseBanner();
+}
+
+function suCloseBanner() {
+    const b = document.getElementById('suBanner');
+    if (b) b.remove();
+    document.body.style.paddingTop = '';
+}
+
+function suApply(silent) {
+    const busy = suBusy();
+    if (busy) { showToast('«' + busy + '» در جریان است — بعداً تلاش کنید', true); return; }
+
+    suCloseBanner();
+    showToast('⏳ در حال به‌روزرسانی...');
+    suStat('<span style="opacity:.7">در حال دانلود و نصب...</span>', '#93c5fd');
+
+    fetch('?su_apply=1').then(r => r.json()).then(d => {
+        if (!d.ok) {
+            suStat('✗ ' + esc(d.error || 'خطا'), '#f87171');
+            showToast(d.error || 'به‌روزرسانی ناموفق', true);
+            return;
+        }
+        if (!d.changed) { suStat('✓ از قبل به‌روز بود', '#4ade80'); return; }
+
+        suStat('✓ نصب شد — صفحه در حال بارگذاری مجدد...', '#4ade80');
+        showToast('✓ به‌روزرسانی انجام شد — بارگذاری مجدد');
+        setTimeout(() => {
+            const u = new URL(location.href);
+            u.searchParams.set('_v', Date.now());   // دور زدن کش مرورگر
+            location.replace(u.toString());
+        }, 1200);
+    }).catch(() => {
+        suStat('✗ خطا در ارتباط', '#f87171');
+        showToast('خطا در به‌روزرسانی', true);
+    });
+}
+
+function suShowBackups() {
+    const box = $('suBackupList');
+    if (box.style.display === 'block') { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    box.innerHTML = '<div style="color:#64748b;font-size:12px">در حال بارگذاری...</div>';
+    fetch('?su_backups=1').then(r => r.json()).then(d => {
+        if (!d.ok || !d.backups.length) {
+            box.innerHTML = '<div style="color:#64748b;font-size:12px">بکاپی موجود نیست.</div>';
+            return;
+        }
+        box.innerHTML = d.backups.map(b =>
+            '<div style="display:flex;gap:8px;align-items:center;background:#0f172a;border:1px solid #334155;' +
+            'border-radius:7px;padding:8px;margin-bottom:6px;font-size:11.5px">' +
+            '<span style="flex:1;color:#94a3b8;font-family:monospace">' + esc(b.time) + ' · ' +
+            toFa((b.size / 1024).toFixed(0)) + ' KB</span>' +
+            '<button class="btn btn-orange" style="padding:5px 11px;font-size:11px" ' +
+            'onclick="suRestore(\'' + esc(b.file) + '\')">بازگردانی</button></div>'
+        ).join('');
+    }).catch(() => { box.innerHTML = '<div style="color:#f87171;font-size:12px">خطا</div>'; });
+}
+
+function suRestore(file) {
+    if (suBusy()) { showToast('عملیاتی در جریان است', true); return; }
+    if (!confirm('این نسخه بازگردانی شود؟ نسخهٔ فعلی هم بکاپ می‌شود.')) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    fetch('?su_restore=1', { method: 'POST', body: fd }).then(r => r.json()).then(d => {
+        if (!d.ok) { showToast(d.error || 'ناموفق', true); return; }
+        showToast('✓ بازگردانی شد — بارگذاری مجدد');
+        setTimeout(() => {
+            const u = new URL(location.href);
+            u.searchParams.set('_v', Date.now());
+            location.replace(u.toString());
+        }, 1000);
+    }).catch(() => showToast('خطا', true));
+}
+
+// راه‌اندازی: تنظیمات را بخوان و در صورت فعال بودن، یک بررسی سبک انجام بده
+suLoad();
+setTimeout(() => { if (SU && SU.enabled && SU.auto_check !== false) suCheck(false); }, 1500);
 
 // ========== Connection JS ==========
 let wSend=false,bSend=false,cn={woocommerce:{},basalam:{}},extractPollTimer=null,extractModalTimer=null;
