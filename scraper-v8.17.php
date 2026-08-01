@@ -24,12 +24,13 @@ const WOO_PRODUCTS_FILE = __DIR__ . '/woo_products_temp.json';
 const BSL_QUEUE_FILE = __DIR__ . '/bsl_queue.json';
 const EXTRACT_PROGRESS_FILE = __DIR__ . '/extract_progress.json';
 const CATLEARN_FILE = __DIR__ . '/category_learning.json';   // v8.48
+const RECON_PROGRESS_FILE = __DIR__ . '/recon_progress.json'; // v8.49
 const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.48';
+const APP_VERSION = '8.49';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4485,25 +4486,94 @@ if (isset($_GET['retire_run'])) {
  * &mode=off|draft|outofstock|delete  → با موارد اضافی چه شود
  * &fix_price=0                       → قیمت‌ها دست نخورند
  */
+/**
+ * v8.49: مغایرت‌گیری سمت سرور با گزارش زنده.
+ * ?recon=1&target=woo|bsl[&apply=1&mode=...&fix_price=0]  → شروع در پس‌زمینه
+ * ?recon_status=1                                          → وضعیت زنده
+ * ?recon_result=1                                          → نتیجهٔ کامل
+ */
 if (isset($_GET['recon'])) {
     header('Content-Type: application/json; charset=UTF-8');
-    @set_time_limit(0);
-    $cn = loadConnections();
     $target = (string)($_GET['target'] ?? '');
     if ($target !== 'woo' && $target !== 'bsl') {
         echo json_encode(['ok' => false, 'error' => 'مقصد نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
     }
+    // قفل، تا دو مغایرت‌گیری هم‌زمان اجرا نشوند
+    $lockFile = __DIR__ . '/recon.lock';
+    $fp = fopen($lockFile, 'c');
+    if (!$fp || !flock($fp, LOCK_EX | LOCK_NB)) {
+        if ($fp) fclose($fp);
+        echo json_encode(['ok' => false, 'error' => 'یک مغایرت‌گیری در حال اجراست',
+            'running' => true], JSON_UNESCAPED_UNICODE); exit;
+    }
+    @set_time_limit(0); @ignore_user_abort(true);
+
     $apply = !empty($_GET['apply']);
-    $mode  = (string)($_GET['mode'] ?? ($cn['retire_mode'] ?? 'off'));
+    $cn = loadConnections();
+    $mode = (string)($_GET['mode'] ?? ($cn['retire_mode'] ?? 'off'));
     if (!isset(retireModes()[$mode])) $mode = 'off';
     $fixPrice = !isset($_GET['fix_price']) || $_GET['fix_price'] !== '0';
-    $res = reconRun($cn, $target, $apply, $mode, $fixPrice);
-    // فهرست‌ها را برای پاسخ کوتاه کن تا مرورگر خفه نشود
+
+    @unlink(RECON_PROGRESS_FILE);
+    reconProgress(['running' => true, 'done' => false, 'target' => $target,
+        'apply' => $apply, 'mode' => $mode, 'started_at' => time(), 'phase' => 'start',
+        'log_add' => [($apply ? '🚀 شروع اعمال تغییرات' : '🔍 شروع بررسی') . ' — '
+            . ($target === 'woo' ? 'ووکامرس' : 'باسلام')]]);
+
+    // پاسخ فوری، بعد ادامهٔ کار در پس‌زمینه
+    $early = json_encode(['ok' => true, 'started' => true, 'target' => $target],
+        JSON_UNESCAPED_UNICODE);
+    header('Connection: close');
+    header('Content-Length: ' . strlen($early));
+    echo $early;
+    @ob_flush(); @flush();
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+
+    register_shutdown_function(function () use ($fp, $lockFile) {
+        @flock($fp, LOCK_UN); @fclose($fp); @unlink($lockFile);
+    });
+
+    try {
+        $res = reconRun($cn, $target, $apply, $mode, $fixPrice);
+    } catch (Throwable $e) {
+        reconProgress(['running' => false, 'done' => true, 'error' => $e->getMessage(),
+            'log_add' => ['❌ خطا: ' . $e->getMessage()]]);
+        exit;
+    }
     foreach (['extra', 'price_diff'] as $k) {
         $res[$k . '_total'] = count($res[$k] ?? []);
-        if (isset($res[$k]) && count($res[$k]) > 200) $res[$k] = array_slice($res[$k], 0, 200);
+        if (isset($res[$k]) && count($res[$k]) > 300) $res[$k] = array_slice($res[$k], 0, 300);
     }
-    echo json_encode($res, JSON_UNESCAPED_UNICODE);
+    @file_put_contents(__DIR__ . '/recon_result.json',
+        json_encode($res, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    reconProgress(['running' => false, 'done' => true, 'phase' => 'done',
+        'extra' => (int)$res['extra_total'], 'diff' => (int)$res['price_diff_total'],
+        'matched' => (int)($res['matched'] ?? 0), 'repriced' => (int)($res['repriced'] ?? 0),
+        'deleted' => (int)($res['deleted'] ?? 0), 'failed' => (int)($res['failed'] ?? 0),
+        'result_ok' => !empty($res['ok']), 'error' => $res['error'] ?? '',
+        'log_add' => [empty($res['ok']) ? ('❌ ' . ($res['error'] ?? 'ناموفق')) : '✅ پایان']]);
+    exit;
+}
+
+/** v8.49: وضعیت زندهٔ مغایرت‌گیری */
+if (isset($_GET['recon_status'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $st = reconProgressRead();
+    $since = max(0, (int)($_GET['since'] ?? 0));
+    $log = is_array($st['log'] ?? null) ? $st['log'] : [];
+    $st['log_total'] = count($log);
+    $st['log'] = $since > 0 ? array_slice($log, $since) : array_slice($log, -60);
+    $st['ok'] = true;
+    echo json_encode($st, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** v8.49: نتیجهٔ کامل آخرین مغایرت‌گیری */
+if (isset($_GET['recon_result'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $f = __DIR__ . '/recon_result.json';
+    if (!is_file($f)) { echo json_encode(['ok' => false, 'error' => 'نتیجه‌ای نیست'], JSON_UNESCAPED_UNICODE); exit; }
+    echo (string)@file_get_contents($f);
     exit;
 }
 
@@ -5613,6 +5683,33 @@ function reconNormTitle(string $t): string {
     return function_exists('mb_strtolower') ? mb_strtolower($t, 'UTF-8') : strtolower($t);
 }
 
+/* v8.49: گزارش زندهٔ مغایرت‌گیری */
+function reconProgress(array $patch): void {
+    $cur = [];
+    if (is_file(RECON_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(RECON_PROGRESS_FILE), true);
+        if (is_array($d)) $cur = $d;
+    }
+    $log = is_array($cur['log'] ?? null) ? $cur['log'] : [];
+    if (isset($patch['log_add'])) {
+        foreach ((array)$patch['log_add'] as $line) {
+            $log[] = ['t' => time(), 'm' => (string)$line];
+        }
+        if (count($log) > 300) $log = array_slice($log, -300);
+        unset($patch['log_add']);
+    }
+    $cur = array_merge($cur, $patch);
+    $cur['log'] = $log;
+    $cur['ts'] = time();
+    @file_put_contents(RECON_PROGRESS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+function reconProgressRead(): array {
+    if (!is_file(RECON_PROGRESS_FILE)) return ['running' => false, 'done' => false, 'log' => []];
+    $d = json_decode((string)@file_get_contents(RECON_PROGRESS_FILE), true);
+    return is_array($d) ? $d : ['running' => false, 'done' => false, 'log' => []];
+}
+
 /** فهرست محصولات نهاییِ همهٔ پروفایل‌های دارای همگام‌سازی دوره‌ای */
 function reconExpected(string $target): array {
     $out = [];
@@ -5649,6 +5746,8 @@ function reconFetchWoo(array $w, int $maxPages = 60): array {
                        'price' => (int)preg_replace('~[^\d]~', '', (string)($pr['regular_price'] ?? '0')),
                        'status' => (string)($pr['status'] ?? '')];
         }
+        reconProgress(['phase' => 'fetch', 'fetched' => count($rows), 'page' => $page,
+            'log_add' => ['📄 صفحهٔ ' . $page . ': ' . count($batch) . ' محصول (مجموع ' . count($rows) . ')']]);
         if (count($batch) < 100) break;
         usleep(150000);
     }
@@ -5675,6 +5774,8 @@ function reconFetchBsl(string $tk, int $vid, int $maxPages = 60): array {
                        'status' => (int)(is_array($pr['status'] ?? null)
                                    ? ($pr['status']['value'] ?? 0) : ($pr['status'] ?? 0))];
         }
+        reconProgress(['phase' => 'fetch', 'fetched' => count($rows), 'page' => $page,
+            'log_add' => ['📄 صفحهٔ ' . $page . ': ' . count($batch) . ' محصول (مجموع ' . count($rows) . ')']]);
         if (count($batch) < 100) break;
         usleep(150000);
     }
@@ -5691,14 +5792,19 @@ function reconRun(array $cn, string $target, bool $apply = false,
             'expected' => 0, 'remote' => 0, 'extra' => [], 'price_diff' => [],
             'matched' => 0, 'deleted' => 0, 'repriced' => 0, 'failed' => 0];
 
+    reconProgress(['phase' => 'profiles', 'log_add' => ['🔎 خواندن پروفایل‌های دارای همگام‌سازی دوره‌ای...']]);
     $expected = reconExpected($target);
     $out['expected'] = count($expected);
+    reconProgress(['phase' => 'profiles', 'expected' => count($expected),
+        'log_add' => ['✅ ' . count($expected) . ' محصول از پروفایل‌ها جمع شد']]);
     if (!$expected) {
         $out['ok'] = false;
         $out['error'] = 'هیچ پروفایلی با همگام‌سازی دوره‌ای برای این مقصد پیدا نشد';
         return $out;
     }
 
+    reconProgress(['phase' => 'fetch', 'log_add' => ['📥 دریافت محصولات '
+        . ($target === 'woo' ? 'ووکامرس' : 'باسلام') . '...']]);
     if ($target === 'woo') {
         $w = $cn['woocommerce'] ?? [];
         if (empty($w['store_url'])) { $out['ok'] = false; $out['error'] = 'تنظیمات ووکامرس ناقص'; return $out; }
@@ -5710,6 +5816,8 @@ function reconRun(array $cn, string $target, bool $apply = false,
         $remote = reconFetchBsl($tk, $vid);
     }
     $out['remote'] = count($remote);
+    reconProgress(['phase' => 'compare', 'remote' => count($remote),
+        'log_add' => ['✅ ' . count($remote) . ' محصول از مقصد دریافت شد', '⚖️ مقایسه...']]);
     if (!$remote) {
         $out['ok'] = false;
         $out['error'] = 'هیچ محصولی از مقصد دریافت نشد — برای احتیاط کاری انجام نشد';
@@ -5733,6 +5841,13 @@ function reconRun(array $cn, string $target, bool $apply = false,
         }
     }
 
+    reconProgress(['phase' => $apply ? 'apply' : 'done',
+        'extra' => count($out['extra']), 'diff' => count($out['price_diff']),
+        'matched' => $out['matched'],
+        'log_add' => ['📊 اضافی: ' . count($out['extra'])
+            . ' · مغایرت قیمت: ' . count($out['price_diff'])
+            . ' · یکسان: ' . $out['matched']]]);
+
     if (!$apply) return $out;
 
     // --- اصلاح قیمت ---
@@ -5754,6 +5869,11 @@ function reconRun(array $cn, string $target, bool $apply = false,
             }
             if ($okRow) $out['repriced']++; else $out['failed']++;
             $out['price_diff'][$i]['done'] = $okRow;
+            reconProgress(['phase' => 'apply', 'step' => 'price',
+                'repriced' => $out['repriced'], 'failed' => $out['failed'],
+                'cur' => $i + 1, 'cur_total' => count($out['price_diff']),
+                'log_add' => [($okRow ? '💰 ' : '❌ ') . mb_substr($d['title'], 0, 40)
+                    . ' — ' . number_format($d['from']) . ' → ' . number_format($d['to'])]]);
             usleep(200000);
         }
     }
@@ -5767,6 +5887,7 @@ function reconRun(array $cn, string $target, bool $apply = false,
         $out['guard'] = $guard;
         if (empty($guard['allow'])) {
             $out['skipped_delete'] = $guard['reason'];
+            reconProgress(['log_add' => ['🛑 حذف انجام نشد: ' . $guard['reason']]]);
             return $out;
         }
         foreach ($out['extra'] as $i => $d) {
@@ -5800,6 +5921,10 @@ function reconRun(array $cn, string $target, bool $apply = false,
             }
             if ($okRow) $out['deleted']++; else $out['failed']++;
             $out['extra'][$i]['done'] = $okRow;
+            reconProgress(['phase' => 'apply', 'step' => 'extra',
+                'deleted' => $out['deleted'], 'failed' => $out['failed'],
+                'cur' => $i + 1, 'cur_total' => count($out['extra']),
+                'log_add' => [($okRow ? '🗑 ' : '❌ ') . mb_substr($d['title'], 0, 45)]]);
             usleep(200000);
         }
     }
@@ -13067,6 +13192,15 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.49', t:'مغایرت‌گیری سمت سرور با گزارش زنده', items:[
+    'مغایرت‌گیری حالا در پس‌زمینهٔ سرور اجرا می‌شود، نه در یک درخواست مسدودکننده',
+    'قبلاً برای فروشگاه‌های بزرگ مرورگر تایم‌اوت می‌شد و نتیجه از دست می‌رفت',
+    'گزارش زنده و خط‌به‌خط: هر صفحهٔ دریافتی، هر قیمت اصلاح‌شده، هر محصول حذف‌شده',
+    'شمارنده‌های زنده: پروفایل، مقصد، یکسان، اضافی، مغایرت',
+    'بستن مرورگر کار را متوقف نمی‌کند',
+    'قفل، تا دو مغایرت‌گیری هم‌زمان اجرا نشوند',
+    'نتیجهٔ کامل ذخیره می‌شود و بعداً هم قابل مشاهده است'
+  ]},
   {v:'8.48', t:'یادگیری دسته‌بندی از انتخاب‌های دستی', items:[
     'هر بار دستهٔ محصولی را دستی اصلاح کنید، کلمهٔ اولِ عنوان با آن دسته به خاطر سپرده می‌شود',
     'دفعهٔ بعد محصولی با همان کلمهٔ اول، خودکار همان دسته را می‌گیرد',
@@ -13314,17 +13448,85 @@ var reconLast=null;
 function reconLabel(t){return t==='woo'?'ووکامرس':'باسلام';}
 
 /** گام ۱: فقط گزارش، بدون هیچ تغییری */
-function reconScan(target){
+function reconScan(target){reconStart(target,false,'off',1);}
+
+/** v8.49: شروع در پس‌زمینه و سپس دنبال کردن گزارش زنده */
+function reconStart(target,apply,mode,fixPrice){
   const box=$('reconR');
-  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال خواندن '
-    +esc(reconLabel(target))+' و مقایسه با پروفایل‌ها... (ممکن است طول بکشد)</div>';
-  fetch('?recon=1&target='+encodeURIComponent(target)).then(r=>r.json()).then(d=>{
-    reconLast=d;
-    if(!box)return;
-    if(!d.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px;background:#7f1d1d20;'
-      +'padding:6px 8px;border-radius:6px">✗ '+esc(d.error||'خطا')+'</div>';return;}
-    box.innerHTML=reconReport(d,target);
-  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا: '+esc(e.message)+'</div>';});
+  let q='?recon=1&target='+encodeURIComponent(target);
+  if(apply)q+='&apply=1&mode='+encodeURIComponent(mode||'off')+'&fix_price='+(fixPrice?1:0);
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال شروع...</div>';
+  fetch(q).then(r=>r.json()).then(d=>{
+    if(!d.ok){
+      if(box)box.innerHTML='<div style="color:#fca5a5;font-size:11px;background:#7f1d1d20;'
+        +'padding:6px 8px;border-radius:6px">✗ '+esc(d.error||'خطا')+'</div>';
+      return;
+    }
+    reconWatch(target);
+  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ '+esc(e.message)+'</div>';});
+}
+
+var reconTimer=null, reconSeen=0;
+
+function reconWatch(target){
+  if(reconTimer)clearInterval(reconTimer);
+  reconSeen=0;
+  const box=$('reconR');
+  if(box)box.innerHTML=
+    '<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px;font-size:11px">'
+    +'<div id="reconHead" style="color:#93c5fd;margin-bottom:5px">⏳ در حال اجرا...</div>'
+    +'<div id="reconCounts" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:5px"></div>'
+    +'<div id="reconLog" style="max-height:190px;overflow:auto;font-family:ui-monospace,monospace;'
+    +'font-size:10.5px;line-height:1.8;direction:rtl;background:#111c31;border-radius:6px;padding:6px"></div>'
+    +'</div>';
+  const tick=()=>{
+    fetch('?recon_status=1&since='+reconSeen).then(r=>r.json()).then(st=>{
+      const logEl=$('reconLog');
+      if(logEl&&st.log&&st.log.length){
+        st.log.forEach(l=>{
+          const d=document.createElement('div');
+          d.style.color='#cbd5e1';
+          d.textContent=l.m;
+          logEl.appendChild(d);
+        });
+        logEl.scrollTop=logEl.scrollHeight;
+      }
+      reconSeen=st.log_total||reconSeen;
+      const c=$('reconCounts');
+      if(c){
+        const cell=(lbl,v,col)=>v===undefined?'':
+          '<span style="color:#94a3b8">'+lbl+': <b style="color:'+col+'">'+toFa(v)+'</b></span>';
+        c.innerHTML=cell('پروفایل',st.expected,'#e2e8f0')+cell('مقصد',st.remote,'#e2e8f0')
+          +cell('یکسان',st.matched,'#86efac')+cell('اضافی',st.extra,'#fca5a5')
+          +cell('مغایرت',st.diff,'#fbbf24')
+          +(st.repriced?cell('اصلاح‌شده',st.repriced,'#4ade80'):'')
+          +(st.deleted?cell('حذف‌شده',st.deleted,'#4ade80'):'')
+          +(st.cur&&st.cur_total?'<span style="color:#93c5fd">'+toFa(st.cur)+'/'+toFa(st.cur_total)+'</span>':'');
+      }
+      const h=$('reconHead');
+      if(st.done){
+        clearInterval(reconTimer);reconTimer=null;
+        if(h)h.innerHTML=st.result_ok===false
+          ?'<span style="color:#fca5a5">✗ '+esc(st.error||'ناموفق')+'</span>'
+          :'<span style="color:#4ade80">✅ پایان</span>';
+        fetch('?recon_result=1').then(r=>r.json()).then(res=>{
+          reconLast=res;
+          if(!res.ok)return;
+          res.applied=!!st.apply;
+          const b=$('reconR');
+          if(b)b.innerHTML=reconReport(res,target)
+            +'<div style="margin-top:6px"><button class="btn btn-gray" onclick="reconWatch(\''+target+'\')" '
+            +'style="font-size:10px;padding:3px 8px">📜 نمایش گزارش</button></div>';
+        }).catch(()=>{});
+      }else if(h){
+        const ph={start:'شروع',profiles:'خواندن پروفایل‌ها',fetch:'دریافت از مقصد',
+                  compare:'مقایسه',apply:'اعمال تغییرات'}[st.phase]||'در حال اجرا';
+        h.innerHTML='⏳ '+esc(ph)+'...';
+      }
+    }).catch(()=>{});
+  };
+  tick();
+  reconTimer=setInterval(tick,1200);
 }
 
 function reconReport(d,target){
@@ -13382,80 +13584,20 @@ function reconReport(d,target){
   return h+'</div>';
 }
 
-/** گام ۲: اعمال، با تأیید صریح */
+/** گام ۲: اعمال، با تأیید صریح — سمت سرور با گزارش زنده */
 function reconApply(target){
   const mode=($('reconMode')||{}).value||'off';
   const fix=($('reconFixPrice')||{}).checked?1:0;
   const d=reconLast||{};
   const nExtra=d.extra_total||0, nDiff=d.price_diff_total||0;
   const modeTxt={off:'',draft:'پیش‌نویس',outofstock:'ناموجود',delete:'حذف'}[mode]||'';
+  if(!fix&&mode==='off'){showToast('هیچ اقدامی انتخاب نشده',1);return;}
   let msg='تغییرات روی '+reconLabel(target)+':\n';
   if(fix&&nDiff)msg+='\n• اصلاح قیمت '+nDiff+' محصول';
   if(mode!=='off'&&nExtra)msg+='\n• '+modeTxt+' کردن '+nExtra+' محصول اضافی';
-  if(!fix&&mode==='off'){showToast('هیچ اقدامی انتخاب نشده',1);return;}
   msg+='\n\nادامه می‌دهید؟';
   if(!confirm(msg))return;
-  const box=$('reconR');
-  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال اعمال...</div>';
-  fetch('?recon=1&apply=1&target='+encodeURIComponent(target)
-    +'&mode='+encodeURIComponent(mode)+'&fix_price='+fix)
-   .then(r=>r.json()).then(res=>{
-    reconLast=res;
-    if(!box)return;
-    if(!res.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px">✗ '+esc(res.error||'خطا')+'</div>';return;}
-    res.applied=true;
-    box.innerHTML=reconReport(res,target);
-    showToast('✓ '+toFa(res.repriced||0)+' قیمت · '+toFa(res.deleted||0)+' مورد اضافی');
-  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا: '+esc(e.message)+'</div>';});
-}
-
-/* v8.48: رابط حافظهٔ یادگیری دسته‌بندی */
-function catLearnShow(){
-  const box=$('catLearnR');
-  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ ...</div>';
-  fetch('?catlearn=1').then(r=>r.json()).then(d=>{
-    if(!box)return;
-    if(!d.ok){box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا</div>';return;}
-    if(!d.count){box.innerHTML='<div style="color:#64748b;font-size:11px">هنوز چیزی آموخته نشده — '
-      +'یک دسته را دستی اصلاح کنید.</div>';return;}
-    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
-    h+='<div style="display:flex;align-items:center;margin-bottom:5px">'
-      +'<span style="color:#93c5fd">🧠 '+toFa(d.count)+' کلمه آموخته شده</span>'
-      +'<span style="flex:1"></span>'
-      +'<button class="btn btn-red" onclick="catLearnClear()" style="font-size:10px;padding:3px 8px">پاک کردن همه</button></div>';
-    d.rows.slice(0,40).forEach(r=>{
-      h+='<div style="display:flex;gap:6px;align-items:center;border-top:1px solid #1e293b;padding:3px 0">'
-        +'<b style="color:#e2e8f0;min-width:70px">'+esc(r.word)+'</b>'
-        +'<span style="color:#94a3b8;flex:1">→ '+esc(r.cat_name||('#'+r.cat_id))+'</span>'
-        +'<span style="color:#64748b;font-size:10px">'+toFa(r.times)+'×</span>'
-        +(r.variants>1?'<span style="color:#fbbf24;font-size:10px" title="چند دستهٔ مختلف">⚠'+toFa(r.variants)+'</span>':'')
-        +'<button class="btn btn-gray" onclick="catLearnForget(\''+encodeURIComponent(r.word)+'\')" '
-        +'style="font-size:9px;padding:2px 6px">✕</button></div>';
-    });
-    if(d.count>40)h+='<div style="color:#64748b;padding-top:4px">… و '+toFa(d.count-40)+' مورد دیگر</div>';
-    box.innerHTML=h+'</div>';
-  }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا</div>';});
-}
-function catLearnForget(w){
-  fetch('?catlearn=1&forget='+w).then(r=>r.json()).then(()=>{showToast('فراموش شد');catLearnShow();});
-}
-function catLearnClear(){
-  if(!confirm('همهٔ آموخته‌ها پاک شوند؟'))return;
-  fetch('?catlearn=1&clear=1').then(r=>r.json()).then(()=>{showToast('پاک شد');catLearnShow();});
-}
-function catLearnTest(){
-  const t=prompt('عنوان محصول را بنویسید:');
-  if(!t)return;
-  const box=$('catLearnR');
-  fetch('?catlearn=1&test='+encodeURIComponent(t)).then(r=>r.json()).then(d=>{
-    if(!box)return;
-    box.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">'
-      +'<div style="color:#cbd5e1">عنوان: '+esc(d.title||'')+'</div>'
-      +'<div style="color:#93c5fd">کلمهٔ اول: <b>'+esc(d.first_word||'—')+'</b></div>'
-      +'<div style="color:'+(d.learned_cat?'#4ade80':'#64748b')+'">'
-      +(d.learned_cat?('✓ دستهٔ آموخته‌شده: #'+d.learned_cat):'— هنوز برای این کلمه چیزی آموخته نشده')
-      +'</div></div>';
-  }).catch(()=>{});
+  reconStart(target,true,mode,fix);
 }
 
 /** v8.36: نشانگر کنار عنوان بخش «محصولات رفته از مبدأ» */
