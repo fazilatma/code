@@ -1,0 +1,70 @@
+name: Deploy to host
+
+# با هر push روی این برنچ اجرا می‌شود — و هر بار که من چیزی commit کنم،
+# یعنی خودکار بعد از هر پرامپت.
+on:
+  push:
+    branches:
+      - arena/019fb317-code
+      - main
+    paths:
+      - 'scraper-v8.17.php'
+      - 'deploy.php'
+  workflow_dispatch:        # امکان اجرای دستی از تب Actions
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false   # دو دیپلوی هم‌زمان روی هاست انجام نشود
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: فراخوانی نصب‌کننده روی هاست
+        env:
+          DEPLOY_URL:   ${{ secrets.DEPLOY_URL }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DEPLOY_URL:-}" ] || [ -z "${DEPLOY_TOKEN:-}" ]; then
+            echo "::error::DEPLOY_URL یا DEPLOY_TOKEN تنظیم نشده است."
+            echo "به Settings → Secrets and variables → Actions بروید و هر دو را اضافه کنید."
+            exit 1
+          fi
+
+          echo "در حال فراخوانی نصب‌کننده..."
+
+          # خروجی و کد وضعیت را جدا می‌گیریم تا خطا را دقیق تشخیص دهیم.
+          # --retry می‌تواند چند کد پشت سر هم چاپ کند، پس فقط آخری را نگه می‌داریم.
+          raw_code=$(curl -sS -o /tmp/out.txt -w '%{http_code}\n' \
+            --max-time 180 --retry 2 --retry-delay 5 \
+            -X POST "$DEPLOY_URL" \
+            -d "action=run_jobs" \
+            -d "api_token=$DEPLOY_TOKEN" \
+            -d "names=[]" || true)
+          http_code=$(printf '%s' "$raw_code" | tr -d '\r' | tail -n1)
+          http_code=${http_code:-000}
+
+          echo "--- پاسخ هاست ---"
+          cat /tmp/out.txt || true
+          echo
+          echo "-----------------"
+          echo "HTTP: $http_code"
+
+          if [ "$http_code" = "000" ]; then
+            echo "::error::ارتباط با هاست برقرار نشد (آدرس یا فایروال را بررسی کنید)."
+            exit 1
+          fi
+          if [ "$http_code" != "200" ]; then
+            echo "::error::هاست کد $http_code برگرداند."
+            exit 1
+          fi
+
+          # deploy.php در صورت شکست، ok:false برمی‌گرداند
+          if grep -q '"ok":false' /tmp/out.txt; then
+            echo "::error::نصب‌کننده خطا گزارش کرد (متن بالا را ببینید)."
+            exit 1
+          fi
+
+          echo "::notice::دیپلوی با موفقیت انجام شد."
