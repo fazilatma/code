@@ -30,7 +30,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.51';
+const APP_VERSION = '8.52';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -13223,6 +13223,13 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.52', t:'رفع دکمهٔ نارنجی و پیدا شدن دکمهٔ فاز ۲', items:[
+    'دکمهٔ نارنجی «ارسال با دستهٔ انتخاب‌شده» در واقع کار می‌کرد ولی هیچ بازخوردی نشان نمی‌داد',
+    'علت: bslFixCat فقط عناصر مودال فاز ۲ را به‌روز می‌کرد و در پنجرهٔ جزئیات آن عناصر وجود ندارند',
+    'حالا نتیجه، پیام یادگیری و خطا در همان پنجرهٔ جزئیات هم نمایش داده می‌شود',
+    'دکمهٔ «🔄 فاز ۲» به سربرگ مدیریت محصولات اضافه شد و همیشه در دسترس است',
+    'قبلاً فقط ته نوار ابزار تب «تأیید نشده» بود و پیدا کردنش سخت بود'
+  ]},
   {v:'8.51', t:'اصلاح دستهٔ تأیید نشده‌ها با یادگیری و هوش مصنوعی', items:[
     'دکمهٔ «🔄 اصلاح دسته‌بندی (فاز ۲)» در تب تأیید نشده‌ها اضافه شد',
     'بلافاصله بعد از هر انتخاب دستی، محصولات دیگر با همان کلمهٔ اول پیدا می‌شوند و دکمهٔ «اعمال» می‌گیرند',
@@ -16829,7 +16836,7 @@ function renderBslModal(products){
     const isManageable=['active','inactive','not_approved','pending','archived'].includes(activeTab);
     let html='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslModal()">';
     html+='<div class="bsl-modal">';
-    html+='<div class="bsl-modal-head"><h2>\u{1F3EA} \u0645\u062F\u06CC\u0631\u06CC\u062A \u062C\u0627\u0645\u0639 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0628\u0627\u0633\u0644\u0627\u0645 ('+toFa(total)+' \u0645\u062D\u0635\u0648\u0644)</h2><div style="display:flex;gap:4px"><button class="btn btn-red" style="font-size:11px;padding:4px 8px" onclick="bslFindDuplicates()">\u{1F50D} \u062A\u06A9\u0631\u0627\u0631\u06CC\u200C\u0647\u0627</button><button class="btn btn-cyan" style="font-size:11px;padding:4px 8px" onclick="bslStatusOverview()">\u{1F4CA} \u0648\u0636\u0639\u06CC\u062A</button><button class="btn btn-gray" onclick="closeBslModal()">\u2715</button></div></div>';
+    html+='<div class="bsl-modal-head"><h2>\u{1F3EA} \u0645\u062F\u06CC\u0631\u06CC\u062A \u062C\u0627\u0645\u0639 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0628\u0627\u0633\u0644\u0627\u0645 ('+toFa(total)+' \u0645\u062D\u0635\u0648\u0644)</h2><div style="display:flex;gap:4px"><button class="btn btn-red" style="font-size:11px;padding:4px 8px" onclick="bslFindDuplicates()">\u{1F50D} \u062A\u06A9\u0631\u0627\u0631\u06CC\u200C\u0647\u0627</button><button class=\"btn btn-purple\" style=\"font-size:11px;padding:4px 8px\" onclick=\"bslPhase2Check()\" title=\"اصلاح دستهٔ محصولات رد شده\">🔄 فاز ۲</button><button class="btn btn-cyan" style="font-size:11px;padding:4px 8px" onclick="bslStatusOverview()">\u{1F4CA} \u0648\u0636\u0639\u06CC\u062A</button><button class="btn btn-gray" onclick="closeBslModal()">\u2715</button></div></div>';
     // Tabs
     html+='<div class="bsl-tabs">';
     BSL_TABS.forEach(t=>{
@@ -17934,10 +17941,17 @@ function bslFixCat(productId,catId,autoCatId){
         // v8.45: به‌جای innerHTML+= که کل کارت را بازسازی و رویدادها را
         // نابود می‌کرد، فقط نوار وضعیتِ همان کارت به‌روز می‌شود.
         const row=document.getElementById('p2-'+productId);
-        const st=document.getElementById('p2st-'+productId);
+        // v8.52: این تابع از دو جا صدا زده می‌شود: مودال فاز ۲ و پنجرهٔ
+        // جزئیات محصول. قبلاً فقط عناصر فاز ۲ را به‌روز می‌کرد، پس در
+        // پنجرهٔ جزئیات هیچ بازخوردی دیده نمی‌شد و دکمهٔ نارنجی «کار
+        // نمی‌کرد» به نظر می‌رسید — با اینکه درخواست واقعاً می‌رفت.
+        const st=document.getElementById('p2st-'+productId)
+              ||document.getElementById('bslInlineResult-'+productId);
+        const inlineBtn=document.getElementById('bslInlineBtn-'+productId);
         if(d&&d.ok){
             showToast('✓ دسته اصلاح شد');
             if(row){row.classList.add('p2-ok');row.dataset.done='1';}
+            if(inlineBtn){inlineBtn.disabled=true;inlineBtn.textContent='✅ ارسال شد';}
             if(st)st.innerHTML='<span class="p2-ok-txt">✅ اصلاح شد — دستهٔ #'+useCatId+'</span>'
                  +(d.learned?'<span style="color:#93c5fd;margin-right:6px">🧠 آموخته شد: «'+esc(d.learn_word||'')+'»</span>':'');
             const box=document.getElementById('p2Done');
@@ -17950,10 +17964,14 @@ function bslFixCat(productId,catId,autoCatId){
             const msg=(d&&d.error)?d.error:'خطای نامشخص';
             showToast('❌ '+msg,1);
             if(btn)btn.disabled=false;if(btnM)btnM.disabled=false;
+            if(inlineBtn)inlineBtn.disabled=false;
             if(row)row.classList.add('p2-err');
             if(st)st.innerHTML='<span class="p2-err-txt">❌ '+esc(msg)+'</span>';
         }
-    }).catch(e=>{showToast('❌ خطا شبکه',1);if(btn)btn.disabled=false;if(btnM)btnM.disabled=false;});
+    }).catch(e=>{showToast('❌ خطا شبکه',1);if(btn)btn.disabled=false;if(btnM)btnM.disabled=false;
+        const ib=document.getElementById('bslInlineBtn-'+productId);if(ib)ib.disabled=false;
+        const ir=document.getElementById('bslInlineResult-'+productId);
+        if(ir)ir.innerHTML='<span style="color:#fca5a5">❌ خطا شبکه</span>';});
 }
 function closePhase2(){const m=document.getElementById('phase2Container');if(m)m.remove();}
 function mb_substr(s,len){if(!s)return'';if(s.length<=len)return s;return s.substring(0,len)+'…';}
