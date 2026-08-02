@@ -1,47 +1,23 @@
+# PHP runtime and build artifacts
+*.php~
 
-profiles.json
-connections.json
-bsl_progress.json
-bsl_stop_signal.json
-woo_progress.json
-woo_stop_signal.json
-sync_state.json
-bsl_products_temp.json
-woo_queue.json
-woo_products_temp.json
-bsl_queue.json
-extract_progress.json
-extract_stop_signal.json
-extract_queue.json
-uploads/
-_backups/
-.deploy-config.json
-.deploy-log.json
-.versioncheck.json
-.cron_sync.lock
-extract_report_*.json
-.cron_run.lock
+# Dependencies and packages
+vendor/
 
-# v8.33: runtime locks for the send workers
-bsl_backend.lock
-woo_backend.lock
+# Logs and temp files
+*.log
+*.tmp
+*.swp
 
-# v8.36: per-queue product files (one per send)
-bsl_queue_products_*.json
-woo_queue_products_*.json
+# Environment
+.env
+.env.local
+.env.*
 
-# v8.38: per-item notification state (runtime)
-last_notification_check.json
+# Editors
+.vscode/
+.idea/
 
-# v8.48: category learning memory (runtime)
-category_learning.json
-
-# v8.49: recon runtime state
-recon_progress.json
-recon_result.json
-recon.lock
-
-# v8.53: suffix report runtime state
-suffix_progress.json
-suffix_result.json
-suffix.lock
+# OS generated files
+.DS_Store
+Thumbs.db
