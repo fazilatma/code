@@ -31,7 +31,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.53';
+const APP_VERSION = '8.54';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -10833,46 +10833,6 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
 </div>
 <div id="retireR" style="margin-top:8px"></div>
-<div style="margin-top:10px;padding-top:10px;border-top:1px solid #334155">
-<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🔍 مغایرت‌گیری با مقصد</div>
-<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
-همهٔ پروفایل‌هایی که «همگام‌سازی دوره‌ای» آن‌ها روشن است را با فروشگاه مقایسه می‌کند:
-محصولی که در هیچ پروفایلی نیست، و محصولی که قیمتش مغایرت دارد.
-اول فقط گزارش می‌گیرد؛ اعمال تغییرات با تأیید شماست.
-</div>
-<div class="cact">
-<button class="btn btn-purple" onclick="reconScan('woo')" style="flex:1">🛒 بررسی ووکامرس</button>
-<button class="btn btn-cyan" onclick="reconScan('bsl')" style="flex:1">🏪 بررسی باسلام</button>
-</div>
-<div id="reconR" style="margin-top:8px"></div>
-</div>
-<div style="margin-top:10px;padding-top:10px;border-top:1px solid #334155">
-<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🧠 یادگیری دسته‌بندی</div>
-<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
-هر بار دستهٔ محصولی را دستی اصلاح کنید، سیستم کلمهٔ اولِ عنوان را با آن دسته به خاطر می‌سپارد
-و دفعهٔ بعد خودش همان را پیشنهاد می‌دهد.
-</div>
-<div class="cact">
-<button class="btn btn-gray" onclick="catLearnShow()" style="flex:1">📚 آموخته‌ها</button>
-<button class="btn btn-gray" onclick="catLearnTest()" style="flex:1">🧪 آزمایش عنوان</button>
-</div>
-<div id="catLearnR" style="margin-top:8px"></div>
-</div>
-<div style="margin-top:10px;padding-top:10px;border-top:1px solid #334155">
-<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">📊 آمار محصولات هر پروفایل</div>
-<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
-بر اساس پسوند یکتای هر پروفایل، محصولات ثبت‌شده در مقصد تفکیک می‌شوند:
-تأیید شده، تأیید نشده، در انتظار و غیرفعال — با درصد و نمودار.
-</div>
-<div class="cact">
-<button class="btn btn-purple" onclick="sfxRun('woo')" style="flex:1">🛒 آمار ووکامرس</button>
-<button class="btn btn-cyan" onclick="sfxRun('bsl')" style="flex:1">🏪 آمار باسلام</button>
-</div>
-<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin-top:6px;cursor:pointer">
-<input type="checkbox" id="sfxNotify" style="width:14px;height:14px">
-<span>📤 گزارش را به پیام‌رسان‌ها هم بفرست</span></label>
-<div id="sfxR" style="margin-top:8px"></div>
-</div>
 </div></div>
 
 <div class="smenu">
@@ -10893,6 +10853,53 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 <div id="watchdogR" style="margin-top:8px"></div>
 </div></div>
+
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🔍 مغایرت‌گیری با مقصد</h3><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+همهٔ پروفایل‌هایی که «همگام‌سازی دوره‌ای» آن‌ها روشن است را با فروشگاه مقایسه می‌کند:
+محصولی که در هیچ پروفایلی نیست، و محصولی که قیمتش مغایرت دارد.
+اول فقط گزارش می‌گیرد؛ اعمال تغییرات با تأیید شماست.
+</div>
+<div class="cact">
+<button class="btn btn-purple" onclick="reconScan('woo')" style="flex:1">🛒 بررسی ووکامرس</button>
+<button class="btn btn-cyan" onclick="reconScan('bsl')" style="flex:1">🏪 بررسی باسلام</button>
+</div>
+<div id="reconR" style="margin-top:8px"></div>
+</div></div>
+
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🧠 یادگیری دسته‌بندی</h3><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+هر بار دستهٔ محصولی را دستی اصلاح کنید، سیستم کلمهٔ اولِ عنوان را با آن دسته به خاطر می‌سپارد
+و دفعهٔ بعد خودش همان را پیشنهاد می‌دهد.
+</div>
+<div class="cact">
+<button class="btn btn-gray" onclick="catLearnShow()" style="flex:1">📚 آموخته‌ها</button>
+<button class="btn btn-gray" onclick="catLearnTest()" style="flex:1">🧪 آزمایش عنوان</button>
+</div>
+<div id="catLearnR" style="margin-top:8px"></div>
+</div></div>
+
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>📊 آمار محصولات هر پروفایل</h3><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+بر اساس پسوند یکتای هر پروفایل، محصولات ثبت‌شده در مقصد تفکیک می‌شوند:
+تأیید شده، تأیید نشده، در انتظار و غیرفعال — با درصد و نمودار.
+</div>
+<div class="cact">
+<button class="btn btn-purple" onclick="sfxRun('woo')" style="flex:1">🛒 آمار ووکامرس</button>
+<button class="btn btn-cyan" onclick="sfxRun('bsl')" style="flex:1">🏪 آمار باسلام</button>
+</div>
+<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin-top:6px;cursor:pointer">
+<input type="checkbox" id="sfxNotify" style="width:14px;height:14px">
+<span>📤 گزارش را به پیام‌رسان‌ها هم بفرست</span></label>
+<div id="sfxR" style="margin-top:8px"></div>
+</div></div>
+
 
 </div></div>
 
@@ -13532,6 +13539,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.54', t:'مرتب‌سازی منو — هر قابلیت بخش خودش را دارد', items:[
+    'بخش «محصولات رفته از مبدأ» بیش از حد شلوغ شده بود و چهار قابلیت نامرتبط تویش جمع بود',
+    'دکمه‌های آمار ته آن بخش بودند و بدون اسکرول دیده نمی‌شدند',
+    'حالا سه بخش مستقل: 🔍 مغایرت‌گیری با مقصد · 🧠 یادگیری دسته‌بندی · 📊 آمار محصولات هر پروفایل',
+    'بخش بازنشستگی دوباره فقط کار خودش را دارد'
+  ]},
   {v:'8.53', t:'آمار محصولات هر پروفایل بر اساس پسوند', items:[
     'دو دکمهٔ جدید: آمار ووکامرس و آمار باسلام',
     'بر اساس پسوند یکتای هر پروفایل، محصولات مقصد تفکیک می‌شوند',
