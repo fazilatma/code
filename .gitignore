@@ -40,3 +40,8 @@ category_learning.json
 recon_progress.json
 recon_result.json
 recon.lock
+
+# v8.53: suffix report runtime state
+suffix_progress.json
+suffix_result.json
+suffix.lock
