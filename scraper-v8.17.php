@@ -31,8 +31,8 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.55';
-const APP_VERSION_DATE = '1405/05/10';
+const APP_VERSION = '8.56';
+const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1689,6 +1689,11 @@ $profiles[$key] = [
 'bslFallbackCatIds' => array_key_exists('bslFallbackCatIds', $_POST)
     ? array_values(array_filter(array_map('intval', json_decode((string)$_POST['bslFallbackCatIds'], true) ?: []), function($v){return $v>0;}))
     : (array)($profiles[$key]['bslFallbackCatIds'] ?? []),
+// v8.56: دستهٔ ووکامرس مخصوص این پروفایل — مثل باسلام، اگر در درخواست
+// نباشد مقدار قبلی حفظ می‌شود تا ذخیره‌های جزئی آن را صفر نکنند.
+'wooCategoryId' => array_key_exists('wooCategoryId', $_POST)
+    ? (int)$_POST['wooCategoryId']
+    : (int)($profiles[$key]['wooCategoryId'] ?? 0),
 'updatedAt' => time()
 ];
 if (saveProfiles($profiles)) {
@@ -2761,7 +2766,21 @@ $title = preg_replace('~\s+~u', ' ', $title);
 return md5('title:' . $title . '|' . ($p['price'] ?? ''));
 }
 
-function cssToXpath(string $css): string {
+/**
+ * v8.56: شرط تطبیق یک کلاس CSS در XPath.
+ *
+ * حالت پیش‌فرض contains(@class,'x') است که «شامل بودن» را چک می‌کند، نه
+ * برابری. یعنی سلکتور .price به کلاس price_filter نوار کناری هم می‌خورد و
+ * .p تقریباً به هر چیزی. حالت دقیق کلاس را بین دو فاصله می‌گذارد تا فقط
+ * کلاس واقعی مطابقت کند — همان کاری که مرورگر می‌کند.
+ */
+function xpClassCond(string $class, bool $strict): string {
+    return $strict
+        ? "contains(concat(' ',normalize-space(@class),' '),' " . $class . " ')"
+        : "contains(@class,'" . $class . "')";
+}
+
+function cssToXpath(string $css, bool $strictClass = false): string {
 $css = trim($css);
 if (!$css) return '';
 
@@ -2772,7 +2791,7 @@ return "//*[@id='" . $m[1] . "']";
 if (preg_match('~^([\w]+)?((?:\.[\w-]+)+)$~', $css, $m)) {
 $tag = $m[1] ?: '*';
 $classes = array_filter(explode('.', $m[2]));
-$cond = implode(' and ', array_map(fn($c) => "contains(@class,'$c')", $classes));
+$cond = implode(' and ', array_map(fn($c) => xpClassCond($c, $strictClass), $classes));
 return "//" . $tag . "[$cond]";
 }
 
@@ -2798,7 +2817,7 @@ $tag = $m[1] ?: '*';
 $class = isset($m[2]) ? ltrim($m[2], '.') : '';
 $xpath .= ($i === 0 ? '//' : '//');
 $xpath .= $tag;
-if ($class) $xpath .= "[contains(@class,'$class')]";
+if ($class) $xpath .= '[' . xpClassCond($class, $strictClass) . ']';
 }
 }
 return $xpath;
@@ -2862,23 +2881,51 @@ return make_absolute_url($m[1], $baseUrl);
 return '';
 }
 
+/**
+ * v8.56: یک فیلد را فقط داخل ظرف خودش پیدا می‌کند.
+ *
+ * باگ قدیمی: اگر جست‌وجوی نسبی («.//...») چیزی پیدا نمی‌کرد، خط بعدی همان
+ * عبارت را بدون نقطه اجرا می‌کرد. در XPath عبارتی که با // شروع شود از ریشهٔ
+ * سند شروع می‌شود و آرگومان دومِ query کاملاً نادیده گرفته می‌شود. یعنی
+ * محصولی که قیمت یا عکس نداشت، قیمت و عکس اولین المان مشابه در کل صفحه را
+ * برمی‌داشت — معمولاً ویجت فیلتر قیمت یا لوگوی نوار کناری. نتیجه: قیمت غلط
+ * روی محصول ناموجود و عکس تکراری روی همهٔ محصولات.
+ *
+ * حالا اگر تطبیق دقیق چیزی نداد، فقط حالت غیردقیقِ همان کلاس (contains) و
+ * باز هم محدود به همین ظرف امتحان می‌شود؛ هیچ‌وقت از ظرف بیرون نمی‌رویم.
+ */
+function queryInside(DOMXPath $xp, DOMNode $container, string $css): ?DOMNodeList {
+    foreach ([true, false] as $strict) {
+        $xpath = cssToXpath($css, $strict);
+        if ($xpath === '') continue;
+        // '//x' → './/x' تا جست‌وجو از همین ظرف شروع شود نه از ریشهٔ سند
+        $rel = (strpos($xpath, '//') === 0) ? '.' . $xpath : $xpath;
+        $nodes = @$xp->query($rel, $container);
+        if ($nodes && $nodes->length) return $nodes;
+    }
+    return null;
+}
+
 function parse_with_selectors(string $html, string $baseUrl, array $sel): array {
 [$dom, $xp] = load_dom($html);
 $products = [];
 
-$containerXpath = cssToXpath($sel['container'] ?? '');
+// ظرف با تطبیق دقیقِ کلاس، وگرنه هر عنصری که نامش شامل آن رشته باشد ظرف حساب می‌شود
+$containerXpath = cssToXpath($sel['container'] ?? '', true);
 if (!$containerXpath) return [];
 
 $containers = @$xp->query($containerXpath);
+if (!$containers || $containers->length === 0) {
+    $containerXpath = cssToXpath($sel['container'] ?? '', false);
+    $containers = $containerXpath ? @$xp->query($containerXpath) : null;
+}
 if (!$containers || $containers->length === 0) return [];
 
 foreach ($containers as $container) {
 $p = ['title' => '', 'price' => '', 'link' => '', 'image' => '', 'sku' => ''];
 
 if (!empty($sel['title'])) {
-$xpath = cssToXpath($sel['title']);
-$nodes = @$xp->query('.' . $xpath, $container);
-if (!$nodes || !$nodes->length) $nodes = @$xp->query($xpath, $container);
+$nodes = queryInside($xp, $container, $sel['title']);
 if ($nodes && $nodes->length) {
 $p['title'] = normalize_text($nodes->item(0)->textContent);
 }
@@ -2898,9 +2945,7 @@ break;
 }
 
 if (!empty($sel['price'])) {
-$xpath = cssToXpath($sel['price']);
-$nodes = @$xp->query('.' . $xpath, $container);
-if (!$nodes || !$nodes->length) $nodes = @$xp->query($xpath, $container);
+$nodes = queryInside($xp, $container, $sel['price']);
 if ($nodes && $nodes->length) {
 $p['price'] = extractPrice($nodes->item(0)->textContent);
 }
@@ -2917,9 +2962,7 @@ if ($price) { $p['price'] = $price; break; }
 }
 
 if (!empty($sel['link'])) {
-$xpath = cssToXpath($sel['link']);
-$nodes = @$xp->query('.' . $xpath, $container);
-if (!$nodes || !$nodes->length) $nodes = @$xp->query($xpath, $container);
+$nodes = queryInside($xp, $container, $sel['link']);
 if ($nodes && $nodes->length && $nodes->item(0) instanceof DOMElement) {
 $p['link'] = extractSmartLink($nodes->item(0), $xp, $baseUrl);
 }
@@ -2930,9 +2973,7 @@ $p['link'] = extractSmartLink($container, $xp, $baseUrl);
 }
 
 if (!empty($sel['image'])) {
-$xpath = cssToXpath($sel['image']);
-$nodes = @$xp->query('.' . $xpath, $container);
-if (!$nodes || !$nodes->length) $nodes = @$xp->query($xpath, $container);
+$nodes = queryInside($xp, $container, $sel['image']);
 if ($nodes && $nodes->length && $nodes->item(0) instanceof DOMElement) {
 foreach (['data-src', 'data-lazy-src', 'data-original', 'src'] as $attr) {
 $v = $nodes->item(0)->getAttribute($attr);
@@ -4447,10 +4488,22 @@ $wooQueueId='cron_woo_'.$key.'_'.$now;
 // و اجرای بعدی محصولات اجرای قبلی را می‌فرستاد.
 $wooQFile=__DIR__.'/woo_queue_products_'.$wooQueueId.'.json';
 @file_put_contents($wooQFile,json_encode($wooSend,JSON_UNESCAPED_UNICODE),LOCK_EX);
+// v8.56: دستهٔ ووکامرس این پروفایل، وگرنه دستهٔ پیش‌فرض تنظیمات عمومی
+$wooCatId=(int)($profile['wooCategoryId']??0);
+if($wooCatId<=0)$wooCatId=(int)($cn['woocommerce']['default_category']??0);
+// v8.56: در یک اجرای کران ممکن است چند پروفایل صف شوند. قبلاً همه با
+// وضعیت «running» ثبت می‌شدند و هرکدام روی فایل مشترک می‌نوشتند؛ نتیجه
+// این بود که محصولاتِ آخرین پروفایل با تنظیماتِ اولین پروفایل ارسال
+// می‌شد (از جمله دستهٔ اشتباه). فقط یک ردیف در هر لحظه running است.
+$wooBusy=false;
+foreach($wooQueue['entries'] as $qe0){if(($qe0['status']??'')==='running'){$wooBusy=true;break;}}
+$wooStatus=$wooBusy?'waiting':'running';
+if($wooStatus==='running'){
 @file_put_contents(WOO_PRODUCTS_FILE,json_encode($wooSend,JSON_UNESCAPED_UNICODE),LOCK_EX);
-$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>'running','products_file'=>$wooQFile,'total'=>count($wooSend),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$now,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'only_changed'=>$wooOnlyChanged,'config'=>['title_suffix'=>$wooSuffix]];
+}
+$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>$wooStatus,'products_file'=>$wooQFile,'total'=>count($wooSend),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$wooStatus==='running'?$now:0,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'only_changed'=>$wooOnlyChanged,'config'=>['title_suffix'=>$wooSuffix,'category_id'=>$wooCatId]];
 wooWriteQueue($wooQueue);
-$pResult['woo']='queued';$pResult['woo_total']=count($wooSend);
+$pResult['woo']='queued';$pResult['woo_total']=count($wooSend);$pResult['woo_status']=$wooStatus;
 }
 } else { $pResult['woo'] = $wooOnlyChanged ? 'no_changes' : 'no_products'; }
 $syncState[$key]=['lastRun'=>$now,'status'=>'running_woo','price_sig'=>$priceSig];
@@ -4933,6 +4986,43 @@ if (isset($_GET['selftest'])) {
               ['8.34', 'retire_run']] as [$v, $ep]) {
         $add($v, 'اندپوینت ?' . $ep, strpos($selfSrc, "'" . $ep . "'") !== false);
     }
+
+    // v8.56: پارسر واقعاً داخل ظرف محصول می‌ماند؟
+    // این همان باگی است که باعث می‌شد قیمتِ ویجت کناری روی محصول بی‌قیمت
+    // بنشیند. اینجا با یک صفحهٔ کوچک ساختگی، رفتار واقعی سنجیده می‌شود.
+    if (function_exists('parse_with_selectors')) {
+        $tHtml = '<html><body>'
+               . '<div class="widget"><span class="price">۹۹۹,۹۹۹ تومان</span>'
+               . '<img class="pimg" src="http://t.test/sidebar.jpg"></div>'
+               . '<div class="p"><h2 class="ptitle">کالای بی‌قیمت</h2></div>'
+               . '<div class="p"><h2 class="ptitle">کالای سالم</h2>'
+               . '<span class="price">۵۰۰,۰۰۰ تومان</span>'
+               . '<img class="pimg" src="http://t.test/ok.jpg"></div>'
+               . '</body></html>';
+        $tSel = ['container' => '.p', 'title' => '.ptitle', 'price' => '.price', 'image' => '.pimg'];
+        $tOut = array_values(parse_with_selectors($tHtml, 'http://t.test/', $tSel));
+        $noLeakPrice = isset($tOut[0]) && trim((string)$tOut[0]['price']) === '';
+        $noLeakImage = isset($tOut[0]) && trim((string)$tOut[0]['image']) === '';
+        $goodKept    = isset($tOut[1]) && extractPriceNum($tOut[1]['price']) === 500000;
+        $add('8.56', 'قیمت از ویجت کناری به محصول نشت نمی‌کند', $noLeakPrice,
+             $noLeakPrice ? 'محصول بی‌قیمت، بی‌قیمت ماند' : 'نشت: ' . ($tOut[0]['price'] ?? '?'));
+        $add('8.56', 'عکس از نوار کناری به محصول نشت نمی‌کند', $noLeakImage,
+             $noLeakImage ? 'محصول بی‌عکس، بی‌عکس ماند' : 'نشت: ' . ($tOut[0]['image'] ?? '?'));
+        $add('8.56', 'محصول سالم قیمت درست خودش را می‌گیرد', $goodKept);
+    }
+
+    // v8.56: تطبیق دقیق کلاس — .price نباید به price_filter بخورد
+    if (function_exists('cssToXpath')) {
+        $xpStrict = cssToXpath('.price', true);
+        $add('8.56', 'تطبیق دقیق کلاس در سلکتورها',
+             strpos($xpStrict, 'normalize-space') !== false, $xpStrict);
+    }
+
+    // v8.56: دستهٔ ووکامرس برای هر پروفایل ذخیره و خوانده می‌شود
+    $add('8.56', 'دستهٔ ووکامرس مخصوص هر پروفایل',
+         strpos($selfSrc, 'wooCategoryId') !== false && strpos($selfSrc, 'wooProfileCatId') !== false);
+    $add('8.56', 'دستهٔ صف ووکامرس به ارسال‌کننده می‌رسد',
+         strpos($selfSrc, '$wooSendCatId') !== false);
 
     // ۴) بررسی منطقی محافظ ایمنی — واقعاً اجرا می‌شود، نه فقط وجود دارد
     if (function_exists('retireGuard')) {
@@ -6943,6 +7033,9 @@ $titleSuffix=trim($_POST['title_suffix']??'');
 $startIndex=max(0,(int)($_POST['start_index']??0));
 $skipKeys=json_decode($_POST['skip_keys']??'[]',true)?:[];
 $skipMap=array_flip($skipKeys);
+// v8.56: دستهٔ ووکامرس این ارسال — از درخواست، وگرنه دستهٔ پیش‌فرض عمومی
+$wooStreamCatId=array_key_exists('category_id',$_POST)?(int)$_POST['category_id']:-1;
+if($wooStreamCatId<0)$wooStreamCatId=(int)($w['default_category']??0);
 
 $isWooResume=$startIndex>0;
 if($isWooResume){$prevWooP=readProgress(WOO_PROGRESS_FILE);$sent=(int)($prevWooP['sent']??0);$updated=(int)($prevWooP['updated']??0);$skipped=(int)($prevWooP['skipped']??0);$fail=(int)($prevWooP['failed']??0);}else{$sent=0;$fail=0;$skipped=0;$updated=0;}
@@ -6970,12 +7063,20 @@ if($titleSuffix!==''&&$pTitle!==''&&strpos($pTitle,$titleSuffix)===false){$pTitl
 if(isset($skipMap[$pKey])){$skipped++;send_sse('send_skip',['key'=>$pKey,'remote_id'=>0,'title'=>$pTitle,'reason'=>'قبلاً ارسال شده']);continue;}
 send_sse('send_progress',['current'=>$n,'total'=>$total,'title'=>mb_substr($pTitle,0,50),'index'=>$i]);
 send_sse_ping();
+// v8.56: همان محافظ مسیر بک‌اند — بدون قیمت ارسال نکن
+if((int)preg_replace('/[^0-9]/','',$pPrice)<=0){
+$skipped++;
+send_sse('send_skip',['key'=>$pKey,'remote_id'=>0,'title'=>$pTitle,'reason'=>'بدون قیمت — ارسال نشد','image'=>$p['image']??'','price'=>$pPrice,'category'=>'','link'=>$p['link']??'']);
+send_sse('send_info',['msg'=>"[$n] ⏭ بدون قیمت — رد شد"]);
+continue;
+}
 send_sse('send_info',['msg'=>"[$n/$total] بررسی: ".mb_substr($pTitle,0,60)." | قیمت: $pPrice"]);
 $wp=['name'=>$pTitle,'type'=>'simple','regular_price'=>$pPrice,'status'=>$w['default_status']??'draft','manage_stock'=>!empty($w['manage_stock']),'stock_quantity'=>(int)($w['stock_quantity']??10)];
 if(!empty($p['short_desc']))$wp['short_description']=$p['short_desc'];
 if(!empty($p['long_desc']))$wp['description']=$p['long_desc'];
 if(!empty($p['sku']))$wp['sku']=$p['sku'];
-if(!empty($w['default_category']))$wp['categories']=[['id'=>(int)$w['default_category']]];
+// v8.56: دستهٔ این پروفایل، وگرنه دستهٔ پیش‌فرض
+if($wooStreamCatId>0)$wp['categories']=[['id'=>$wooStreamCatId]];
 
 $wooImgId=0;
 if(!empty($p['image'])){
@@ -7146,10 +7247,20 @@ exit;
 $total=count($pd);$sent=0;$updated=0;$skipped=0;$fail=0;
 $bslDelayMs=max(0,(int)($cn['basalam']['delay_ms']??500));
 // v8.21: Read title_suffix from the running woo queue entry config
+// v8.56: دستهٔ همین صف هم از همان‌جا خوانده می‌شود تا هر پروفایل بتواند
+// دستهٔ ووکامرس خودش را داشته باشد.
 $wooTitleSuffix='';
+$wooQueueCatId=-1;
 $wooQueue=wooReadQueue();
-foreach($wooQueue['entries'] as $qe){if($qe['status']==='running'&&!empty($qe['config']['title_suffix'])){$wooTitleSuffix=trim($qe['config']['title_suffix']);break;}}
+foreach($wooQueue['entries'] as $qe){
+if(($qe['status']??'')!=='running')continue;
+if(!empty($qe['config']['title_suffix']))$wooTitleSuffix=trim($qe['config']['title_suffix']);
+if(isset($qe['config']['category_id']))$wooQueueCatId=(int)$qe['config']['category_id'];
+break;
+}
 if($wooTitleSuffix===''){$wooTitleSuffix=trim($cn['basalam']['title_suffix']??'');}
+// دستهٔ مؤثر: دستهٔ صف (پروفایل) و در نبودش دستهٔ پیش‌فرض تنظیمات عمومی
+$wooSendCatId=$wooQueueCatId>=0?$wooQueueCatId:(int)($w['default_category']??0);
 $GLOBALS['_currentProductLink']='';
 
 wooBackendProgress(0,0,0,0,$total,0,'',['✅ [v8.22 woo_backend] شروع — '.$total.' محصول']);
@@ -7174,11 +7285,24 @@ $card=['title'=>$pTitle,'image'=>$p['image']??'','price'=>$pPrice,'category'=>''
 
 if($pTitle===''){wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ❌ عنوان خالی");$fail++;$wooFailedList[]=array_merge(['title'=>'','key'=>$pKey,'error'=>'عنوان خالی'],$card);continue;}
 
+// v8.56: محصول بدون قیمت نباید ارسال شود.
+// باسلام از قدیم این محافظ را داشت ولی ووکامرس نداشت؛ نتیجه این بود که
+// محصول ناموجود با قیمت صفر ساخته می‌شد و بدتر: روی محصول موجود در
+// ووکامرس هم PUT با regular_price=0 می‌رفت و قیمت درست را پاک می‌کرد.
+$pPriceNum=(int)preg_replace('/[^0-9]/','',$pPrice);
+if($pPriceNum<=0){
+$skipped++;
+$wooSkippedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'reason'=>'بدون قیمت — ارسال نشد تا قیمت مقصد خراب نشود'],$card);
+wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⏭ بدون قیمت — رد شد: $pTitle");
+continue;
+}
+
 $wp=['name'=>$pTitle,'type'=>'simple','regular_price'=>$pPrice,'status'=>$w['default_status']??'draft','manage_stock'=>!empty($w['manage_stock']),'stock_quantity'=>(int)($w['stock_quantity']??10)];
 if(!empty($p['short_desc']))$wp['short_description']=$p['short_desc'];
 if(!empty($p['long_desc']))$wp['description']=$p['long_desc'];
 if(!empty($p['sku']))$wp['sku']=$p['sku'];
-if(!empty($w['default_category']))$wp['categories']=[['id'=>(int)$w['default_category']]];
+// v8.56: دستهٔ همین پروفایل، نه فقط دستهٔ سراسری
+if($wooSendCatId>0)$wp['categories']=[['id'=>$wooSendCatId]];
 
 $existing=null;
 if($pTitle!==''){
@@ -7410,6 +7534,11 @@ if($queueId===''){echo json_encode(['ok'=>false,'error'=>'queue_id خالی'],JS
 $qFile=__DIR__.'/woo_queue_products_'.$queueId.'.json';
 if(!file_exists($qFile)){echo json_encode(['ok'=>false,'error'=>'فایل محصولات یافت نشد'],JSON_UNESCAPED_UNICODE);exit;}
 $queue=wooReadQueue();
+// v8.56: اگر ردیف دیگری در حال اجراست، این یکی باید منتظر بماند. وگرنه
+// فایل مشترک محصولات بازنویسی می‌شود و ارسال جاری نصفه‌کاره عوض می‌شود.
+$wooBusyNow=false;
+foreach($queue['entries'] as $qe0){if(($qe0['status']??'')==='running'){$wooBusyNow=true;break;}}
+if($wooBusyNow)$startImm=false;
 $status=$startImm?'running':'waiting';
 
 if($startImm){
@@ -7434,7 +7563,15 @@ echo json_encode(['ok'=>false,'duplicate'=>true,'queue_id'=>$dupE['id']??'',
 'error'=>'این پروفایل هم‌اکنون در صف ووکامرس است'],JSON_UNESCAPED_UNICODE);exit;
 }
 }
-$entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['title_suffix'=>$wooTitleSuffix]];
+// v8.56: دستهٔ ووکامرس مخصوص پروفایل — اولویت: درخواست، بعد خود پروفایل،
+// و در آخر دستهٔ پیش‌فرض تنظیمات عمومی. صفر یعنی «تعیین نشده».
+$wooCatIn=(int)($_POST['category_id']??0);
+if($wooCatIn<=0&&$pKeyIn!==''){
+$__pf2=$__pf??loadProfiles();
+$wooCatIn=(int)($__pf2[$pKeyIn]['wooCategoryId']??0);
+}
+if($wooCatIn<=0)$wooCatIn=(int)(loadConnections()['woocommerce']['default_category']??0);
+$entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['title_suffix'=>$wooTitleSuffix,'category_id'=>$wooCatIn]];
 $queue['entries'][]=$entry;
 wooWriteQueue($queue);
 echo json_encode(['ok'=>true,'queue_id'=>$queueId,'status'=>$status,'position'=>count($queue['entries']),'start_now'=>$startImm,'queue_count'=>count($queue['entries'])],JSON_UNESCAPED_UNICODE);
@@ -7458,18 +7595,23 @@ $e['done_at']=time();
 }
 unset($e);
 
-$nextEntry=null;
-foreach($queue['entries'] as &$e){
+// v8.56: با ارجاع کار نکن — «$nextEntry=$e» یک کپی می‌ساخت و تغییر وضعیت
+// هیچ‌وقت در صف ذخیره نمی‌شد. ردیف بعدی روی «waiting» می‌ماند و ارسال‌کننده
+// چون هیچ ردیف runningای نمی‌دید، تنظیمات آن ردیف (از جمله دسته) را
+// برنمی‌داشت و به پیش‌فرض عمومی برمی‌گشت.
+$nextIdx=-1;
+foreach($queue['entries'] as $i=>$e){
 if($e['status']==='waiting'||($e['status']==='running'&&($e['current']??0)<=0)){
-$nextEntry=$e;break;
+$nextIdx=$i;break;
 }
 }
-unset($e);
-if($nextEntry){
+if($nextIdx>=0){
 @unlink(WOO_PRODUCTS_FILE);
-@copy($nextEntry['products_file'],WOO_PRODUCTS_FILE);
-$nextEntry['status']='running';
-$nextEntry['started_at']=time();
+@copy($queue['entries'][$nextIdx]['products_file'],WOO_PRODUCTS_FILE);
+@unlink(WOO_PROGRESS_FILE);@unlink(WOO_STOP_FILE);
+$queue['entries'][$nextIdx]['status']='running';
+$queue['entries'][$nextIdx]['started_at']=time();
+$nextEntry=$queue['entries'][$nextIdx];
 wooWriteQueue($queue);
 echo json_encode(['ok'=>true,'next_id'=>$nextEntry['id'],'total'=>$nextEntry['total'],'msg'=>'شروع فرآیند بعدی از صف ووکامرس'],JSON_UNESCAPED_UNICODE);
 }else{
@@ -11285,6 +11427,19 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
     </div>
 
     <div class="card settings-card">
+        <div class="section-title">🛒 دسته‌بندی ووکامرس (این پروفایل)</div>
+        <div style="font-size:11px;color:#64748b;margin-bottom:8px">💡 دستهٔ مختص این پروفایل در ووکامرس. اگر «پیش‌فرض تنظیمات عمومی» بماند، همان دستهٔ منوی 🛒 ووکامرس استفاده می‌شود.</div>
+        <div class="row" style="align-items:center">
+            <label>دسته ووکامرس:</label>
+            <select id="wooProfileCatId" onchange="scheduleSave();updateWooProfileCatHint()" style="flex:1">
+                <option value="0">— پیش‌فرض تنظیمات عمومی —</option>
+            </select>
+            <button class="btn btn-gray" onclick="loadWooProfileCats()" style="flex:0;padding:8px">🔄</button>
+        </div>
+        <div id="wooProfileCatHint" style="font-size:11px;color:#64748b;margin-top:6px"></div>
+    </div>
+
+    <div class="card settings-card">
         <div class="section-title">🏪 دسته‌بندی باسلام (این پروفایل)</div>
         <div style="font-size:11px;color:#64748b;margin-bottom:8px">💡 دسته‌بندی مختص این پروفایل. اگر تنظیم نشود، دسته پیش‌فرض تنظیمات عمومی استفاده می‌شود.</div>
         <div class="row" style="align-items:center">
@@ -12324,6 +12479,10 @@ function applyProfile(p) {
         bslProfileFallbackCats=[];
         renderBslProfileFallbackCats([]);
     }
+    // v8.56: دستهٔ ووکامرس این پروفایل
+    wooProfileCatId=parseInt(p.wooCategoryId||0)||0;
+    renderWooProfileCats(wooProfileCatId);
+    if(wooProfileCatId>0&&wooAllCats.length===0)loadCats();
 }
 
 function collectProfileData() {
@@ -12359,7 +12518,9 @@ function collectProfileData() {
             || parseInt(($('bsCat')||{}).value||'0')
             || 0,
         // v8.17: Per-profile fallback categories
-        bslFallbackCatIds: Array.isArray(bslProfileFallbackCats)?bslProfileFallbackCats:[]
+        bslFallbackCatIds: Array.isArray(bslProfileFallbackCats)?bslProfileFallbackCats:[],
+        // v8.56: دستهٔ ووکامرس مخصوص همین پروفایل
+        wooCategoryId: parseInt(($('wooProfileCatId')||{}).value||'0')||wooProfileCatId||0
     };
 }
 
@@ -13713,6 +13874,17 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.56', t:'رفع ارسال محصول بدون عکس و بدون قیمت + دستهٔ ووکامرس برای هر پروفایل', items:[
+    'باگ اصلی: اگر محصولی در صفحهٔ مبدأ قیمت یا عکس نداشت، مقدارِ اولین المان مشابه در کل صفحه برداشته می‌شد',
+    'علت: در XPath عبارتی که با // شروع شود از ریشهٔ سند می‌گردد و محدودهٔ ظرف نادیده گرفته می‌شود',
+    'نتیجه‌اش این بود: قیمت ویجت «فیلتر قیمت» یا لوگوی نوار کناری روی محصول می‌نشست، یا محصول با قیمت صفر می‌رفت',
+    'حالا جست‌وجوی هر فیلد همیشه داخل ظرف همان محصول می‌ماند',
+    'تطبیق کلاس دقیق شد: سلکتور .price دیگر به کلاس price_filter نمی‌خورد',
+    'محافظ ارسال: محصول با قیمت صفر دیگر به ووکامرس فرستاده نمی‌شود (باسلام از قبل این محافظ را داشت)',
+    'مهم‌تر: دیگر روی محصول موجود در ووکامرس، قیمت صفر نوشته نمی‌شود و قیمت درست پاک نمی‌گردد',
+    'بازگشت تنظیم گمشده: «دستهٔ ووکامرس» حالا برای هر پروفایل جداگانه تنظیم می‌شود',
+    'اگر خالی بماند، همان دستهٔ پیش‌فرض منوی 🛒 ووکامرس استفاده می‌شود'
+  ]},
   {v:'8.55', t:'ضدتکرار صف‌ها، تنظیمات عمومی، و رفع باگ بازهٔ همگام‌سازی', items:[
     'رفع باگ: پروفایلی که قبلاً «هر بار فراخوانی» بود، با وجود تنظیم بازه باز هم هر بار اجرا می‌شد',
     'علت: منو مقدار صفر را نادیده می‌گرفت و ۳۶۰۰ نشان می‌داد، پس ذخیره‌ای هم رخ نمی‌داد',
@@ -15507,7 +15679,40 @@ function pollBslProgress() {
     }).catch(()=>{setTimeout(pollBslProgress, 2000);});
 }
 
-function loadCats(){fetch('',{method:'POST',body:new URLSearchParams('action=woo_categories')}).then(r=>r.json()).then(d=>{if(d.ok&&d.categories){const s=$('wcCat'),v=s.value;s.innerHTML='<option value="0">--</option>';d.categories.forEach(c=>s.innerHTML+='<option value="'+c.id+'">'+esc(c.name)+' ('+c.count+')</option>');if(v)s.value=v;}}).catch(()=>{});}
+function loadCats(){fetch('',{method:'POST',body:new URLSearchParams('action=woo_categories')}).then(r=>r.json()).then(d=>{if(d.ok&&d.categories){wooAllCats=d.categories;const s=$('wcCat'),v=s.value;s.innerHTML='<option value="0">--</option>';d.categories.forEach(c=>s.innerHTML+='<option value="'+c.id+'">'+esc(c.name)+' ('+c.count+')</option>');if(v)s.value=v;renderWooProfileCats(wooProfileCatId);}}).catch(()=>{});}
+/* v8.56: دستهٔ ووکامرس مخصوص هر پروفایل.
+   تا اینجا فقط یک دستهٔ سراسری در منوی 🛒 ووکامرس بود و همهٔ پروفایل‌ها
+   محصولاتشان را در همان دسته می‌ریختند. */
+let wooAllCats=[];
+let wooProfileCatId=0;
+function renderWooProfileCats(selectedId){
+    const s=$('wooProfileCatId');if(!s)return;
+    if(selectedId===undefined||selectedId===null)selectedId=wooProfileCatId||0;
+    wooProfileCatId=parseInt(selectedId)||0;
+    let html='<option value="0">— پیش‌فرض تنظیمات عمومی —</option>';
+    wooAllCats.forEach(c=>{html+='<option value="'+c.id+'">'+esc(c.name)+' ('+c.count+')</option>';});
+    // اگر دسته‌ها هنوز نرسیده‌اند، شناسهٔ ذخیره‌شده را نگه دار تا ذخیرهٔ
+    // خودکار آن را با صفر جایگزین نکند (همان باگی که در باسلام v8.43 بود)
+    if(wooProfileCatId>0&&!wooAllCats.some(c=>c.id===wooProfileCatId)){
+        html+='<option value="'+wooProfileCatId+'">#'+wooProfileCatId+'</option>';
+    }
+    s.innerHTML=html;
+    s.value=String(wooProfileCatId);
+    updateWooProfileCatHint();
+}
+function loadWooProfileCats(){loadCats();}
+function updateWooProfileCatHint(){
+    const s=$('wooProfileCatId'),h=$('wooProfileCatHint');if(!s||!h)return;
+    wooProfileCatId=parseInt(s.value)||0;
+    if(wooProfileCatId>0){
+        const c=wooAllCats.find(x=>x.id===wooProfileCatId);
+        h.textContent='✓ این پروفایل در دستهٔ '+(c?c.name:'#'+wooProfileCatId)+' ارسال می‌شود';
+        h.style.color='#4ade80';
+    }else{
+        h.textContent='از دستهٔ پیش‌فرض تنظیمات عمومی استفاده می‌شود';
+        h.style.color='#64748b';
+    }
+}
 function getSendP(){
 const d=[];order.forEach(k=>{
     const p=products.get(k);if(!p)return;
@@ -15543,6 +15748,8 @@ function queueWooSend(ps){
             fd2.append('profile_key',($('profileSelect')&&$('profileSelect').value)||'');
             fd2.append('profile_name',($('profileName')&&$('profileName').value)||'');
             fd2.append('title_suffix',$('titleSuffix')?$('titleSuffix').value.trim():'');
+            // v8.56: دستهٔ ووکامرس همین پروفایل؛ ۰ یعنی از پیش‌فرض عمومی استفاده کن
+            fd2.append('category_id',String(parseInt(($('wooProfileCatId')||{}).value||'0')||0));
             fetch('?woo_queue_add=1',{method:'POST',body:fd2}).then(r=>r.json()).then(d=>{
                 if(!d.ok){showToast('خطا: '+d.error,1);return;}
                 showToast('✓ '+toFa(totalSaved)+' محصول در صف ووکامرس — سرورساید');
@@ -16423,6 +16630,25 @@ function pauseBslQueue(qid){
     fetch('?bsl_queue_pause=1&queue_id='+encodeURIComponent(qid)).then(r=>r.json()).then(d=>{
         if(d.ok){showToast('⏸ ارسال متوقف شد');checkBslQueue();bSend=false;}
         else{showToast('خطا در توقف: '+d.error,1);}
+    }).catch(()=>{showToast('خطا شبکه',1);});
+}
+/* v8.56: دکمهٔ «▶ ادامه» روی ردیف متوقف‌شده وجود داشت ولی این تابع هیچ‌وقت
+   نوشته نشده بود، پس کلیک روی آن فقط یک ReferenceError در کنسول می‌داد.
+   سرویس bsl_queue_resume از قبل آماده بود. */
+function resumeBslQueue(qid){
+    $('bSS').textContent='ادامهٔ ارسال...';
+    fetch('?bsl_queue_resume=1&queue_id='+encodeURIComponent(qid)).then(r=>r.json()).then(d=>{
+        if(!d.ok){showToast('خطا در ادامه: '+(d.error||'ردیف متوقف‌شده یافت نشد'),1);return;}
+        showToast('▶ ادامه از محصول '+toFa((d.current||0)+1));
+        bSend=true;
+        window._currentBslQueueId=qid;
+        bslReportData={sent:[],updated:[],skipped:[],failed:[]};
+        bslLastLogCount=0;bslLastCardCount=0;bslLastUpdateTime=0;
+        $('bSB').classList.add('hidden');$('bSBlegacy').classList.add('hidden');$('bST').classList.remove('hidden');
+        $('bP').classList.remove('hidden');$('bR').classList.remove('hidden');$('bSM').classList.remove('hidden');
+        fetch('?action=bsl_backend',{method:'GET'}).catch(()=>{});
+        checkBslQueue();
+        setTimeout(pollBslProgress,1000);
     }).catch(()=>{showToast('خطا شبکه',1);});
 }
 function startBslServer(qid){
