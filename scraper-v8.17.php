@@ -31,7 +31,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.54';
+const APP_VERSION = '8.55';
 const APP_VERSION_DATE = '1405/05/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -41,6 +41,51 @@ $json = @file_get_contents(EXTRACT_QUEUE_FILE);
 $q = json_decode($json ?: '', true) ?: [];
 if (!isset($q['entries'])) $q['entries'] = [];
 return $q;
+}
+
+/* =====================================================================
+ *  v8.55: جلوگیری از ورود دوبارهٔ یک پروفایل به صف
+ *
+ *  اگر پروفایلی هنوز در صف است (در حال اجرا یا در انتظار)، افزودن دوبارهٔ
+ *  همان پروفایل فقط کار تکراری می‌سازد و در بدترین حالت دو پردازش موازی
+ *  روی یک فهرست محصولات.
+ * ===================================================================== */
+
+/** وضعیت‌هایی که یعنی «هنوز تمام نشده» */
+function queueActiveStatuses(): array {
+    return ['running', 'waiting', 'paused'];
+}
+
+/** آیا این پروفایل هم‌اکنون در صف داده‌شده هست؟ */
+function queueHasProfile(array $entries, string $profileKey, int $staleAfter = 0): ?array {
+    if ($profileKey === '') return null;
+    $now = time();
+    $active = queueActiveStatuses();
+    foreach ($entries as $e) {
+        if (!is_array($e)) continue;
+        if ((string)($e['profile_key'] ?? '') !== $profileKey) continue;
+        if (!in_array((string)($e['status'] ?? ''), $active, true)) continue;
+        // ردیف رهاشده نباید تا ابد جلوی پروفایل را بگیرد
+        if ($staleAfter > 0) {
+            $ts = (int)($e['started_at'] ?? 0);
+            if ($ts > 0 && ($now - $ts) > $staleAfter) continue;
+        }
+        return $e;
+    }
+    return null;
+}
+
+/** آیا این محافظ روشن است؟ پیش‌فرض: روشن */
+function queueDedupOn(?array $cn = null): bool {
+    $cn = $cn ?? loadConnections();
+    return !isset($cn['queue_dedup']) || !empty($cn['queue_dedup']);
+}
+
+/** بعد از چند ثانیه یک ردیف رهاشده حساب می‌شود */
+function queueDedupStale(?array $cn = null): int {
+    $cn = $cn ?? loadConnections();
+    $v = (int)($cn['queue_dedup_stale'] ?? 7200);
+    return $v > 0 ? max(300, $v) : 0;
 }
 
 function extractWriteQueue(array $queue): void {
@@ -103,10 +148,16 @@ function extractReportFile(string $queueId): string {
 
 function extractSaveReport(string $queueId, array $data): void {
     @file_put_contents(extractReportFile($queueId), json_encode($data, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    // v8.55: تعداد گزارش‌های نگه‌داشته‌شده از تنظیمات عمومی خوانده می‌شود
+    $keep = 20;
+    if (is_file(CONNECTIONS_FILE)) {
+        $c = json_decode((string)@file_get_contents(CONNECTIONS_FILE), true);
+        if (is_array($c) && !empty($c['keep_reports'])) $keep = max(1, min(200, (int)$c['keep_reports']));
+    }
     $all = glob(__DIR__ . '/extract_report_*.json') ?: [];
-    if (count($all) > 20) {
+    if (count($all) > $keep) {
         usort($all, fn($a, $b) => filemtime($b) <=> filemtime($a));
-        foreach (array_slice($all, 20) as $old) @unlink($old);
+        foreach (array_slice($all, $keep) as $old) @unlink($old);
     }
 }
 
@@ -1604,7 +1655,12 @@ $profiles = loadProfiles();
 $detailSelectors = json_decode($_POST['detailSelectors'] ?? '{}', true) ?: [];
 $productsData = json_decode($_POST['products'] ?? '[]', true) ?: [];
 $productsOrder = json_decode($_POST['productsOrder'] ?? '[]', true) ?: [];
-$syncConfig = json_decode($_POST['syncConfig'] ?? '{}', true) ?: [];
+// v8.55: اگر syncConfig در درخواست نباشد، تنظیم قبلی حفظ شود.
+// قبلاً هر ذخیرهٔ جزئی، بازهٔ همگام‌سازی را پاک می‌کرد و پروفایل
+// دوباره «هر بار فراخوانی» می‌شد.
+$syncConfig = array_key_exists('syncConfig', $_POST)
+    ? (json_decode((string)$_POST['syncConfig'], true) ?: [])
+    : (array)($profiles[$key]['syncConfig'] ?? []);
 $profiles[$key] = [
 'url' => $url,
 'name' => trim($_POST['name'] ?? '') ?: parse_url($url, PHP_URL_HOST),
@@ -3648,6 +3704,11 @@ if (isset($_POST['ping_every'])) $conn['ping_every'] = max(0, (int)$_POST['ping_
 // v8.38: یادآوری موارد بی‌جواب
 if (isset($_POST['notif_remind_after'])) $conn['notif_remind_after'] = max(0, (int)$_POST['notif_remind_after']);
 if (isset($_POST['notif_remind_max']))   $conn['notif_remind_max']   = max(0, (int)$_POST['notif_remind_max']);
+// v8.55: تنظیمات عمومی
+if (isset($_POST['queue_dedup']))       $conn['queue_dedup']       = !empty($_POST['queue_dedup']) && $_POST['queue_dedup'] !== 'false';
+if (isset($_POST['queue_dedup_stale'])) $conn['queue_dedup_stale'] = max(0, (int)$_POST['queue_dedup_stale']);
+if (isset($_POST['cron_lock_min']))     $conn['cron_lock_min']     = max(1, min(240, (int)$_POST['cron_lock_min']));
+if (isset($_POST['keep_reports']))      $conn['keep_reports']      = max(1, min(200, (int)$_POST['keep_reports']));
 echo json_encode(['ok'=>saveConnections($conn),'message'=>'ذخیره شد'], JSON_UNESCAPED_UNICODE); exit;
 }
 
@@ -3892,6 +3953,17 @@ return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'error'=>'سلکتوره
 }
 
 $queue=extractReadQueue();
+// v8.55: اگر همین پروفایل هنوز در صف استخراج است، دوباره اضافه نشود
+if(queueDedupOn()){
+$dup=queueHasProfile($queue['entries'],$profileKey,queueDedupStale());
+if($dup!==null){
+$msg='این پروفایل هم‌اکنون در صف استخراج است ('.($dup['status']??'').')';
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'error'=>$msg,
+'total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['⏭ '.$msg],'total_log_count'=>1]);
+return ['__early_sent'=>$emitEarlyResponse,'ok'=>false,'error'=>$msg,
+'duplicate'=>true,'queue_id'=>$dup['id']??''];
+}
+}
 $queueId='ex_'.$profileKey.'_'.time();
 $queue['entries'][]=['id'=>$queueId,'status'=>'running','profile_key'=>$profileKey,'url'=>$url,'profile_name'=>$profile['name']??$profileKey,'started_at'=>time(),'products_count'=>0,'total'=>0,'current'=>0,'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,'trigger'=>$trigger];
 extractWriteQueue($queue);
@@ -4267,7 +4339,8 @@ header('Content-Type: application/json; charset=UTF-8');
 // قفل ضد هم‌پوشانی — یک اجرای طولانی نباید با اجرای بعدی تداخل کند
 $cronLock = __DIR__ . '/.cron_run.lock';
 $lockAge  = is_file($cronLock) ? (time() - (int)@filemtime($cronLock)) : PHP_INT_MAX;
-if ($lockAge < 1800) {
+$cronLockSec = max(60, (int)(loadConnections()['cron_lock_min'] ?? 30) * 60);
+if ($lockAge < $cronLockSec) {
     // v8.37: حتی وقتی به‌خاطر قفل رد می‌شویم هم پینگ بفرست — وگرنه یک قفلِ
     // گیرکرده دقیقاً شبیه «کران‌جاب اصلاً اجرا نمی‌شود» به نظر می‌رسد.
     $cnLock = loadConnections();
@@ -4363,6 +4436,12 @@ $wooSend = $wooOnlyChanged ? $changedProducts : $orderedProducts;
 if(!empty($wooSend)){
 $wooSuffix=trim($profile['titleSuffix']??'') ?: trim($cn['basalam']['title_suffix']??'');
 $wooQueue=wooReadQueue();
+// v8.55: همین پروفایل اگر در صف ووکامرس هست، دوباره اضافه نشود
+$wooDup=queueDedupOn($cn)?queueHasProfile($wooQueue['entries'],$key,queueDedupStale($cn)):null;
+if($wooDup!==null){
+$pResult['woo']='already_queued';
+$pResult['woo_queue_id']=$wooDup['id']??'';
+}else{
 $wooQueueId='cron_woo_'.$key.'_'.$now;
 // v8.36: فایل مخصوص همین اجرا — قبلاً همه روی WOO_PRODUCTS_FILE می‌نوشتند
 // و اجرای بعدی محصولات اجرای قبلی را می‌فرستاد.
@@ -4372,6 +4451,7 @@ $wooQFile=__DIR__.'/woo_queue_products_'.$wooQueueId.'.json';
 $wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>'running','products_file'=>$wooQFile,'total'=>count($wooSend),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$now,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'only_changed'=>$wooOnlyChanged,'config'=>['title_suffix'=>$wooSuffix]];
 wooWriteQueue($wooQueue);
 $pResult['woo']='queued';$pResult['woo_total']=count($wooSend);
+}
 } else { $pResult['woo'] = $wooOnlyChanged ? 'no_changes' : 'no_products'; }
 $syncState[$key]=['lastRun'=>$now,'status'=>'running_woo','price_sig'=>$priceSig];
 }
@@ -4393,10 +4473,18 @@ if ($profileCatId > 0) $catId = $profileCatId;
 $profileFallbackCats = $profile['bslFallbackCatIds'] ?? [];
 $allFallbackCats = array_values(array_unique(array_merge($profileFallbackCats, $fallbackCats)));
 $queue = bslReadQueue();
+// v8.55: از ورود دوبارهٔ همین پروفایل به صف باسلام جلوگیری کن
+$bslDup = queueDedupOn($cn) ? queueHasProfile($queue['entries'], $key, queueDedupStale($cn)) : null;
+if ($bslDup !== null) {
+    @unlink($qFile);
+    $pResult['bsl'] = 'already_queued';
+    $pResult['bsl_queue_id'] = $bslDup['id'] ?? '';
+} else {
 $queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
 bslWriteQueue($queue);
 $syncState[$key] = ['lastRun' => $now, 'status' => 'queued_bsl', 'price_sig' => $priceSig];
 $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
+}
 } else { $pResult['bsl'] = 'file_save_error'; }
 } else { $pResult['bsl'] = $bslOnlyChanged ? 'no_changes' : 'no_products'; }
 }
@@ -4684,6 +4772,35 @@ if (isset($_GET['suffix_notify'])) {
     }
     echo json_encode(['ok' => true, 'delivery' => notifSend($cn, suffixReportMsg($rep))],
         JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** v8.55: نمای کلی هر سه صف — کدام پروفایل کجاست */
+if (isset($_GET['queues_overview'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $profs = loadProfiles();
+    $active = queueActiveStatuses();
+    $mk = function (array $entries) use ($profs, $active) {
+        $out = ['total' => count($entries), 'active' => 0, 'profiles' => []];
+        foreach ($entries as $e) {
+            if (!is_array($e)) continue;
+            $st = (string)($e['status'] ?? '');
+            if (!in_array($st, $active, true)) continue;
+            $out['active']++;
+            $k = (string)($e['profile_key'] ?? '');
+            $out['profiles'][] = ['key' => $k, 'status' => $st,
+                'name' => (string)($e['profile_name'] ?? ($profs[$k]['name'] ?? $k))];
+        }
+        return $out;
+    };
+    $ex = extractReadQueue();
+    $bs = bslReadQueue();
+    $wo = wooReadQueue();
+    echo json_encode(['ok' => true, 'dedup' => queueDedupOn(),
+        'stale_after' => queueDedupStale(),
+        'queues' => ['extract' => $mk($ex['entries'] ?? []),
+                     'bsl' => $mk($bs['entries'] ?? []),
+                     'woo' => $mk($wo['entries'] ?? [])]], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -7308,6 +7425,15 @@ $wooTitleSuffix=trim($_POST['title_suffix']??'');
 $pKeyIn=trim((string)($_POST['profile_key']??''));
 $pNameIn=trim((string)($_POST['profile_name']??''));
 if($pKeyIn!==''&&$pNameIn===''){$__pf=loadProfiles();$pNameIn=(string)($__pf[$pKeyIn]['name']??$pKeyIn);}
+// v8.55: جلوگیری از ورودی تکراری همان پروفایل
+if($pKeyIn!==''&&queueDedupOn()&&empty($_POST['force'])){
+$dupE=queueHasProfile($queue['entries'],$pKeyIn,queueDedupStale());
+if($dupE!==null){
+@unlink($qFile);
+echo json_encode(['ok'=>false,'duplicate'=>true,'queue_id'=>$dupE['id']??'',
+'error'=>'این پروفایل هم‌اکنون در صف ووکامرس است'],JSON_UNESCAPED_UNICODE);exit;
+}
+}
 $entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['title_suffix'=>$wooTitleSuffix]];
 $queue['entries'][]=$entry;
 wooWriteQueue($queue);
@@ -8189,6 +8315,15 @@ $cn['basalam']['retry_delay_ms']=$retryDelayMs;
 $pKeyIn=trim((string)($_POST['profile_key']??''));
 $pNameIn=trim((string)($_POST['profile_name']??''));
 if($pKeyIn!==''&&$pNameIn===''){$__pf=loadProfiles();$pNameIn=(string)($__pf[$pKeyIn]['name']??$pKeyIn);}
+// v8.55: همین پروفایل اگر در صف است، ورودی تازه ساخته نشود
+if($pKeyIn!==''&&queueDedupOn($cn)&&empty($_POST['force'])){
+$dupE=queueHasProfile($queue['entries'],$pKeyIn,queueDedupStale($cn));
+if($dupE!==null){
+@unlink($qFile);
+echo json_encode(['ok'=>false,'duplicate'=>true,'queue_id'=>$dupE['id']??'',
+'error'=>'این پروفایل هم‌اکنون در صف باسلام است'],JSON_UNESCAPED_UNICODE);exit;
+}
+}
 $entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'paused_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs]];
 $queue['entries'][]=$entry;
 bslWriteQueue($queue);
@@ -10833,6 +10968,45 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
 </div>
 <div id="retireR" style="margin-top:8px"></div>
+</div></div>
+
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>⚙️ تنظیمات عمومی</h3><span class="cst off" id="genS">—</span><span class="arrow">▼</span></div>
+<div class="smenu-body">
+
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:5px">🚦 صف‌ها</div>
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer;margin-bottom:4px">
+<input type="checkbox" id="qDedup" onchange="updateGenBadge()" checked style="width:15px;height:15px">
+<span>جلوگیری از ورود دوبارهٔ یک پروفایل به صف</span></label>
+<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:6px;padding-right:21px">
+اگر پروفایلی هنوز در صف استخراج، باسلام یا ووکامرس باشد، دوباره اضافه نمی‌شود.
+از کار تکراری و ارسال موازی روی یک فهرست جلوگیری می‌کند.
+</div>
+<div class="crow"><label>ردیف رهاشده بعد از:</label>
+<input type="number" id="qDedupStale" value="120" min="5" style="max-width:80px" dir="ltr">
+<span style="font-size:10px;color:#64748b">دقیقه · ۰ = هرگز</span></div>
+<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:8px">
+ردیفی که این‌قدر بی‌حرکت مانده، دیگر جلوی افزودن دوباره را نمی‌گیرد.
+</div>
+
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin:10px 0 5px;padding-top:8px;border-top:1px solid #334155">⏱ کران‌جاب</div>
+<div class="crow"><label>قفل ضد هم‌پوشانی:</label>
+<input type="number" id="cronLockMin" value="30" min="1" max="240" style="max-width:80px" dir="ltr">
+<span style="font-size:10px;color:#64748b">دقیقه</span></div>
+<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:8px">
+تا این مدت، اجرای تازهٔ کران صبر می‌کند تا اجرای قبلی تمام شود.
+</div>
+
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin:10px 0 5px;padding-top:8px;border-top:1px solid #334155">🗄 نگهداری</div>
+<div class="crow"><label>گزارش‌های استخراج:</label>
+<input type="number" id="keepReports" value="20" min="1" max="200" style="max-width:80px" dir="ltr">
+<span style="font-size:10px;color:#64748b">آخرین چند مورد نگه داشته شود</span></div>
+
+<div class="cact">
+<button class="btn btn-gray" onclick="genQueueStatus()" style="flex:1">🔎 وضعیت صف‌ها</button>
+<button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
+</div>
+<div id="genR" style="margin-top:8px"></div>
 </div></div>
 
 <div class="smenu">
@@ -13539,6 +13713,16 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.55', t:'ضدتکرار صف‌ها، تنظیمات عمومی، و رفع باگ بازهٔ همگام‌سازی', items:[
+    'رفع باگ: پروفایلی که قبلاً «هر بار فراخوانی» بود، با وجود تنظیم بازه باز هم هر بار اجرا می‌شد',
+    'علت: منو مقدار صفر را نادیده می‌گرفت و ۳۶۰۰ نشان می‌داد، پس ذخیره‌ای هم رخ نمی‌داد',
+    'علت دوم: هر ذخیرهٔ جزئی، کل syncConfig را پاک می‌کرد و بازه به صفر برمی‌گشت',
+    'هر پروفایلی که در صف استخراج، باسلام یا ووکامرس باشد، دوباره اضافه نمی‌شود',
+    'ردیف رهاشده بعد از مدت تعیین‌شده دیگر مانع نمی‌شود',
+    'بخش جدید «⚙️ تنظیمات عمومی» در منوی همبرگری',
+    'گزینه‌ها: ضدتکرار صف، آستانهٔ ردیف رهاشده، قفل کران‌جاب، تعداد گزارش‌های نگه‌داشته‌شده',
+    'دکمهٔ «وضعیت صف‌ها» نشان می‌دهد هر پروفایل در کدام صف است'
+  ]},
   {v:'8.54', t:'مرتب‌سازی منو — هر قابلیت بخش خودش را دارد', items:[
     'بخش «محصولات رفته از مبدأ» بیش از حد شلوغ شده بود و چهار قابلیت نامرتبط تویش جمع بود',
     'دکمه‌های آمار ته آن بخش بودند و بدون اسکرول دیده نمی‌شدند',
@@ -14170,6 +14354,38 @@ function sfxSend(){
     const bad=Object.keys(d.delivery||{}).filter(k=>d.delivery[k]!=='sent');
     showToast(bad.length?('⚠ ناموفق: '+bad.join('، ')):'✓ گزارش فرستاده شد',bad.length?1:0);
   }).catch(()=>showToast('خطا شبکه',1));
+}
+
+/* v8.55: تنظیمات عمومی */
+function updateGenBadge(){
+  const el=$('genS'),cb=$('qDedup');
+  if(!el||!cb)return;
+  el.textContent=cb.checked?'ضدتکرار روشن':'ضدتکرار خاموش';
+  el.className='cst '+(cb.checked?'on':'off');
+}
+
+function genQueueStatus(){
+  const box=$('genR');
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ ...</div>';
+  fetch('?queues_overview=1').then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا</div>';return;}
+    const nm={extract:'استخراج',bsl:'باسلام',woo:'ووکامرس'};
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
+    ['extract','bsl','woo'].forEach(k=>{
+      const q=d.queues[k]||{};
+      h+='<div style="border-top:1px solid #1e293b;padding:4px 0">'
+        +'<b style="color:#e2e8f0">'+nm[k]+'</b> '
+        +'<span style="color:#94a3b8">فعال: '+toFa(q.active||0)+' · کل: '+toFa(q.total||0)+'</span>';
+      (q.profiles||[]).forEach(p=>{
+        h+='<div style="color:#cbd5e1;padding-right:10px">• '+esc(p.name||p.key||'—')
+          +' <span style="color:#64748b">('+esc(p.status)+')</span></div>';
+      });
+      h+='</div>';
+    });
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا</div>';});
 }
 
 /* v8.48: رابط حافظهٔ یادگیری دسته‌بندی */
@@ -14906,7 +15122,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
@@ -14914,7 +15130,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
@@ -17143,7 +17359,9 @@ function loadProfileSyncConfig(){
         if(d.ok&&d.profile&&d.profile.syncConfig){
             const sc=d.profile.syncConfig;
             $('profileSyncEn').checked=!!sc.enabled;
-            if(sc.interval)$('profileSyncInterval').value=sc.interval;
+            // v8.55: صفر یک مقدار معتبر است («هر بار فراخوانی»). شرط قبلی
+            // آن را رد می‌کرد و منو ۳۶۰۰ نشان می‌داد در حالی که ذخیره صفر بود.
+            if(sc.interval!==undefined&&sc.interval!==null)$('profileSyncInterval').value=String(sc.interval);
             if(sc.target)$('profileSyncTarget').value=sc.target;
             // v7.81: Load add/update checkboxes
             $('profileSyncWooAddUpdate').checked=!!sc.wooAddUpdate;
@@ -17206,7 +17424,8 @@ applyProfile=function(p){
     _origApplyProfile(p);
     if(p.syncConfig){
         $('profileSyncEn').checked=!!p.syncConfig.enabled;
-        if(p.syncConfig.interval)$('profileSyncInterval').value=p.syncConfig.interval;
+        // v8.55: همان اصلاح — صفر نباید نادیده گرفته شود
+        if(p.syncConfig.interval!==undefined&&p.syncConfig.interval!==null)$('profileSyncInterval').value=String(p.syncConfig.interval);
         if(p.syncConfig.target)$('profileSyncTarget').value=p.syncConfig.target;
         // v7.81: Load add/update checkboxes
         $('profileSyncWooAddUpdate').checked=!!p.syncConfig.wooAddUpdate;
