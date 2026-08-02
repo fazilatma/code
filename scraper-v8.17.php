@@ -15,6 +15,9 @@ const PROFILES_FILE = __DIR__ . '/profiles.json';
 const CONNECTIONS_FILE = __DIR__ . '/connections.json';
 const BSL_PROGRESS_FILE = __DIR__ . '/bsl_progress.json';
 const BSL_STOP_FILE = __DIR__ . '/bsl_stop_signal.json';
+// v8.57: تا این مدت بعد از فشردن «توقف»، هیچ ارسال تازه‌ای شروع نمی‌شود.
+// بدون این، رابط کاربری بلافاصله بعد از توقف دوباره ارسال را راه می‌انداخت.
+const BSL_STOP_HOLD_SEC = 900;
 const WOO_PROGRESS_FILE = __DIR__ . '/woo_progress.json';
 const WOO_STOP_FILE = __DIR__ . '/woo_stop_signal.json';
 const SYNC_STATE_FILE = __DIR__ . '/sync_state.json';
@@ -31,7 +34,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.56';
+const APP_VERSION = '8.57';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -954,6 +957,38 @@ if(!empty($upResult['ok']))return $upResult;
 }
 
 return['ok'=>0,'error'=>'تصویر آپلود نشد — 3 تلاش ناموفق (فایل، مستقیم، پراکسی)'];
+}
+
+/**
+ * v8.57: تصویر محصول را برای ووکامرس آماده می‌کند.
+ *
+ * چرا لازم شد: کلید ووکامرس (ck_/cs_) فقط روی مسیرهای wc/v3 معتبر است و
+ * هستهٔ وردپرس آن را کاربر نمی‌شناسد. برای همین آپلود به wp/v2/media با
+ * ۴۰۱ رد می‌شد و محصول بی‌تصویر ساخته می‌شد. خودِ ووکامرس می‌تواند تصویر
+ * را از روی آدرس بردارد (side-load) و همان کلید برایش کافی است.
+ *
+ * اول آپلود مستقیم به کتابخانهٔ رسانه امتحان می‌شود (اگر سایت اجازه بدهد
+ * نتیجه‌اش تمیزتر است)، و اگر نشد آدرس تصویر مستقیم به ووکامرس داده
+ * می‌شود. خروجی همان آرایه‌ای است که در فیلد images محصول می‌نشیند.
+ */
+function wooImagePayload(array $w, string $imgUrl, ?string &$note = null): array {
+    $imgUrl = trim($imgUrl);
+    if ($imgUrl === '') { $note = 'بدون تصویر — آدرس خالی'; return []; }
+
+    $up = wooUploadImage($w['store_url'], $w['consumer_key'], $w['consumer_secret'], $imgUrl);
+    if (!empty($up['ok']) && (int)($up['media_id'] ?? 0) > 0) {
+        $note = 'تصویر در کتابخانهٔ رسانه (Media#' . (int)$up['media_id'] . ')';
+        return [['id' => (int)$up['media_id']]];
+    }
+
+    // آدرس باید از بیرون قابل دسترس باشد، وگرنه ووکامرس هم نمی‌تواند بگیردش
+    if (!preg_match('~^https?://~i', $imgUrl)) {
+        $note = 'تصویر ناموفق — آدرس نامعتبر: ' . mb_substr($imgUrl, 0, 60);
+        return [];
+    }
+    $note = 'تصویر با آدرس به ووکامرس سپرده شد (آپلود مستقیم نشد: '
+          . mb_substr((string)($up['error'] ?? '?'), 0, 60) . ')';
+    return [['src' => $imgUrl]];
 }
 
 function detectImageFormat(string $data): string {
@@ -5011,6 +5046,30 @@ if (isset($_GET['selftest'])) {
         $add('8.56', 'محصول سالم قیمت درست خودش را می‌گیرد', $goodKept);
     }
 
+    // v8.57: تصویر ووکامرس — وقتی آپلود به کتابخانهٔ رسانه ممکن نیست،
+    // آدرس باید به خود ووکامرس سپرده شود، نه اینکه محصول بی‌تصویر برود.
+    if (function_exists('wooImagePayload')) {
+        $noteImg = null;
+        $wBad = ['store_url' => 'http://127.0.0.1:9/', 'consumer_key' => 'ck', 'consumer_secret' => 'cs'];
+        $payload = wooImagePayload($wBad, 'https://example.test/pic.jpg', $noteImg);
+        $srcFallback = !empty($payload[0]['src']);
+        $add('8.57', 'تصویر: در نبودِ آپلود، آدرس به ووکامرس سپرده می‌شود', $srcFallback,
+             $srcFallback ? 'images[0].src' : 'خالی برگشت');
+        $noteEmpty = null;
+        $add('8.57', 'تصویر: آدرس خالی چیزی نمی‌فرستد', wooImagePayload($wBad, '', $noteEmpty) === []);
+    }
+
+    // v8.57: ارسال‌کنندهٔ باسلام نباید تنظیمات عمومی را بازنویسی کند
+    $clobber = substr_count($selfSrc, '$cn[' . "'basalam'" . '][' . "'category_id'" . ']=');
+    $add('8.57', 'ارسال باسلام تنظیمات عمومی را خراب نمی‌کند', $clobber <= 1,
+         $clobber . ' نقطهٔ نوشتن');
+    $add('8.57', 'صف باسلام: نگه‌داشتِ توقف تعریف شده', defined('BSL_STOP_HOLD_SEC'),
+         defined('BSL_STOP_HOLD_SEC') ? BSL_STOP_HOLD_SEC . ' ثانیه' : '');
+    // رشته را تکه‌تکه می‌سازیم تا خودآزمون خودش را پیدا نکند (درس v8.35)
+    $add('8.57', 'ارسال‌کنندهٔ باسلام دیگر خودش کار نمی‌سازد',
+         strpos($selfSrc, 'auto-sync ' . 'entry created') === false);
+    $add('8.57', 'افزودن به صف وقتی ارسالی در جریان است', strpos($selfSrc, '$bslBusy') !== false);
+
     // v8.56: تطبیق دقیق کلاس — .price نباید به price_filter بخورد
     if (function_exists('cssToXpath')) {
         $xpStrict = cssToXpath('.price', true);
@@ -7078,23 +7137,11 @@ if(!empty($p['sku']))$wp['sku']=$p['sku'];
 // v8.56: دستهٔ این پروفایل، وگرنه دستهٔ پیش‌فرض
 if($wooStreamCatId>0)$wp['categories']=[['id'=>$wooStreamCatId]];
 
-$wooImgId=0;
-if(!empty($p['image'])){
-send_sse('send_info',['msg'=>"[$n] 📥 آپلود تصویر به مدیا..."]);
-$upResult=wooUploadImage($w['store_url'],$w['consumer_key'],$w['consumer_secret'],$p['image']);
-if(!empty($upResult['ok'])){
-$wooImgId=(int)$upResult['media_id'];
-$wp['images']=[['id'=>$wooImgId]];
-send_sse('send_info',['msg'=>"[$n] ✓ تصویر آپلود شد (Media#$wooImgId)"]);
-}else{
-send_sse('send_info',['msg'=>"[$n] ⚠️ آپلود تصویر ناموفق: ".mb_substr($upResult['error']??'',0,80)." - محصول بدون تصویر ارسال می‌شود..."]);
-
-}
-}
-else{
-// v8.21: Log when image URL is empty
-send_sse('send_info',['msg'=>"[$n] ⚠️ بدون تصویر — URL خالی"]);
-}
+// v8.57: آپلود مستقیم، و اگر نشد آدرس را به ووکامرس بسپار
+$imgNote=null;
+$wooStreamImgs=wooImagePayload($w,(string)($p['image']??''),$imgNote);
+if(!empty($wooStreamImgs))$wp['images']=$wooStreamImgs;
+if($imgNote)send_sse('send_info',['msg'=>"[$n] 🖼 ".$imgNote]);
 $existing=null;
 if($pTitle!==''){
 $sep='products?search='.urlencode($pTitle).'&status=any&per_page=10';
@@ -7150,17 +7197,9 @@ send_sse('send_info',['msg'=>"[$n] ⚡ آپدیت: قیمت $exPrice → $pPrice
 $wpUpdate=['regular_price'=>$pPrice,'stock_quantity'=>$newStock];
 if(!empty($p['short_desc']))$wpUpdate['short_description']=$p['short_desc'];
 if(!empty($p['long_desc']))$wpUpdate['description']=$p['long_desc'];
-if(!empty($p['image'])){
-if($wooImgId>0){
-$wpUpdate['images']=[['id'=>$wooImgId]];
-}else{
-$upResult2=wooUploadImage($w['store_url'],$w['consumer_key'],$w['consumer_secret'],$p['image']);
-if(!empty($upResult2['ok'])){
-$wpUpdate['images']=[['id'=>(int)$upResult2['media_id']]];
-}else{
-
-}
-}
+// v8.57: تصویر محصول موجود را فقط وقتی می‌فرستیم که مقصد تصویری ندارد
+if(!empty($wooStreamImgs)&&empty($existing['images'])){
+$wpUpdate['images']=$wooStreamImgs;
 }
 if(!empty($p['sku']))$wpUpdate['sku']=$p['sku'];
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$existing['id'],$wpUpdate);
@@ -7338,16 +7377,21 @@ wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 continue;
 }
 
-$wooImgId=0;
-if(!empty($p['image'])){
-$upResult=wooUploadImage($w['store_url'],$w['consumer_key'],$w['consumer_secret'],$p['image']);
-if(!empty($upResult['ok'])){$wooImgId=(int)$upResult['media_id'];}
+// v8.57: اگر محصول مقصد از قبل تصویر دارد، دست نزن. فقط وقتی تصویر
+// ندارد یا ما تصویر تازه داریم، تصویر را می‌فرستیم — و اگر آپلود مستقیم
+// نشد، آدرس را به خود ووکامرس می‌سپاریم.
+$wooUpdImgs=[];
+$exHasImg=!empty($existing['images'])&&is_array($existing['images']);
+if(!empty($p['image'])&&!$exHasImg){
+$imgNote=null;
+$wooUpdImgs=wooImagePayload($w,(string)$p['image'],$imgNote);
+if($imgNote)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 ".$imgNote);
 }
 
 $wpUpdate=['regular_price'=>$pPrice,'stock_quantity'=>$newStock];
 if(!empty($p['short_desc']))$wpUpdate['short_description']=$p['short_desc'];
 if(!empty($p['long_desc']))$wpUpdate['description']=$p['long_desc'];
-if($wooImgId>0)$wpUpdate['images']=[['id'=>$wooImgId]];
+if(!empty($wooUpdImgs))$wpUpdate['images']=$wooUpdImgs;
 if(!empty($p['sku']))$wpUpdate['sku']=$p['sku'];
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$exId,$wpUpdate);
 if($r['ok']&&!empty($r['body']['id'])){
@@ -7360,20 +7404,11 @@ wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 }
 }else{
 
-$wooImgId=0;
-if(!empty($p['image'])){
-$upResult=wooUploadImage($w['store_url'],$w['consumer_key'],$w['consumer_secret'],$p['image']);
-if(!empty($upResult['ok'])){
-$wooImgId=(int)$upResult['media_id'];
-$wp['images']=[['id'=>$wooImgId]];
-wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✓ تصویر آپلود شد (Media#$wooImgId)");
-}else{
-wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚠️ تصویر ناموفق: ".mb_substr($upResult['error']??'',0,60));
-}
-}else{
-// v8.21: Log when image URL is empty
-wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚠️ بدون تصویر — URL خالی");
-}
+// v8.57: آپلود مستقیم و در نبودش سپردن آدرس به ووکامرس
+$imgNote=null;
+$wooNewImgs=wooImagePayload($w,(string)($p['image']??''),$imgNote);
+if(!empty($wooNewImgs))$wp['images']=$wooNewImgs;
+if($imgNote)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 ".$imgNote);
 
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'POST','products',$wp);
 if($r['ok']&&!empty($r['body']['id'])){
@@ -7413,16 +7448,27 @@ header('Content-Type: application/json; charset=UTF-8');
 $prevProgress=readProgress(BSL_PROGRESS_FILE);
 writeProgress(BSL_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'sent'=>$prevProgress['sent']??0,'updated'=>$prevProgress['updated']??0,'skipped'=>$prevProgress['skipped']??0,'failed'=>$prevProgress['failed']??0,'total'=>$prevProgress['total']??0,'current'=>$prevProgress['current']??0,'last_title'=>'','started_at'=>$prevProgress['started_at']??0,'recent_log'=>['❌ ارسال توسط کاربر متوقف شد'],'total_log_count'=>($prevProgress['total_log_count']??0)+1,'sent_details'=>$prevProgress['sent_details']??[],'updated_details'=>$prevProgress['updated_details']??[],'skipped_details'=>$prevProgress['skipped_details']??[],'failed_details'=>$prevProgress['failed_details']??[]]);
 
+// v8.57: «توقف» یعنی همه چیز بایستد. قبلاً فقط ردیف در حال اجرا بسته
+// می‌شد و ردیف‌های منتظر سر جایشان می‌ماندند، پس اولین پینگ بعدی صف را
+// دوباره راه می‌انداخت و کاربر می‌دید ارسال متوقف نشده.
 $queue=bslReadQueue();
+$stopPaused=0;
 foreach($queue['entries'] as &$e){
 if($e['status']==='running'){
 $e['status']='failed';
 $e['sent']=$prevProgress['sent']??0;$e['updated']=$prevProgress['updated']??0;$e['skipped']=$prevProgress['skipped']??0;$e['failed']=$prevProgress['failed']??0;$e['current']=$prevProgress['current']??0;
+}elseif($e['status']==='waiting'){
+$e['status']='paused';
+$e['paused_at']=time();
+$stopPaused++;
 }
 }
 unset($e);
 bslWriteQueue($queue);
-echo json_encode(['ok'=>true,'msg'=>'فرآیند متوقف شد'],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'paused'=>$stopPaused,
+'msg'=>$stopPaused>0
+?('فرآیند متوقف شد — '.$stopPaused.' ردیف صف هم موقتاً نگه داشته شد')
+:'فرآیند متوقف شد'],JSON_UNESCAPED_UNICODE);
 exit;
 }
 
@@ -8434,6 +8480,13 @@ $qFile=__DIR__.'/bsl_queue_products_'.$queueId.'.json';
 if(!file_exists($qFile)){echo json_encode(['ok'=>false,'error'=>'فایل محصولات یافت نشد'],JSON_UNESCAPED_UNICODE);exit;}
 $queue=bslReadQueue();
 $startImm=!empty($_POST['start_immediately']);
+// v8.57: اگر ارسال دیگری در جریان است، این یکی باید در صف بماند.
+// قبلاً هر افزودنی «running» می‌شد و روی فایل مشترک محصولات می‌نوشت؛
+// نتیجه این بود که ارسال در حال اجرا وسط کار محصولات پروفایل تازه را
+// می‌فرستاد — دقیقاً همان «پروفایل دیگری می‌رود» که گزارش شده بود.
+$bslBusy=false;
+foreach($queue['entries'] as $qe0){if(($qe0['status']??'')==='running'){$bslBusy=true;break;}}
+if($bslBusy)$startImm=false;
 $status=$startImm?'running':'waiting';
 
 if($startImm){
@@ -8444,15 +8497,12 @@ if(!$copyOk){echo json_encode(['ok'=>false,'error'=>'خطا در کپی فایل
 
 $verifyProducts=json_decode(@file_get_contents(BSL_PRODUCTS_FILE)?:'',true)?:[];
 if(empty($verifyProducts)){echo json_encode(['ok'=>false,'error'=>'فایل محصولات خالی است بعد از کپی'],JSON_UNESCAPED_UNICODE);exit;}
-$cn=loadConnections();
-if(!isset($cn['basalam']))$cn['basalam']=[];
-$cn['basalam']['category_id']=$catId;
-$cn['basalam']['auto_category']=$autoCat;
-$cn['basalam']['title_suffix']=$titleSuffix;
-$cn['basalam']['delay_ms']=$delayMs;
-$cn['basalam']['retry_delay_ms']=$retryDelayMs;
-@file_put_contents(CONNECTIONS_FILE,json_encode($cn,JSON_UNESCAPED_UNICODE),LOCK_EX);
+// v8.57: تنظیمات این ارسال دیگر روی connections.json نوشته نمی‌شود.
+// قبلاً دستهٔ همین صف، دستهٔ پیش‌فرض کاربر را در تنظیمات عمومی بازنویسی
+// می‌کرد و بعد از یک ارسال، «دستهٔ اصلی» و «دسته خودکار» و پسوند عنوان
+// عوض شده بودند. ارسال‌کننده تنظیمات را از خود ردیف صف می‌خواند.
 }
+$cn=loadConnections();
 // v8.36: نام و کلید پروفایل را نگه می‌داریم تا در صف معلوم باشد چه چیزی می‌رود
 $pKeyIn=trim((string)($_POST['profile_key']??''));
 $pNameIn=trim((string)($_POST['profile_name']??''));
@@ -8466,7 +8516,22 @@ echo json_encode(['ok'=>false,'duplicate'=>true,'queue_id'=>$dupE['id']??'',
 'error'=>'این پروفایل هم‌اکنون در صف باسلام است'],JSON_UNESCAPED_UNICODE);exit;
 }
 }
-$entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'paused_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs]];
+// v8.57: دستهٔ پروفایل و دسته‌های جایگزینش هم در خود ردیف صف ذخیره شوند،
+// تا ارسال‌کننده لازم نباشد سراغ تنظیمات عمومی برود.
+$fbIn=json_decode((string)($_POST['fallback_cat_ids']??'[]'),true);
+if(!is_array($fbIn))$fbIn=[];
+$fbIn=array_values(array_filter(array_map('intval',$fbIn),function($v){return $v>0;}));
+if(empty($fbIn)&&$pKeyIn!==''){
+$__pf3=$__pf??loadProfiles();
+$fbIn=array_values(array_filter(array_map('intval',(array)($__pf3[$pKeyIn]['bslFallbackCatIds']??[])),function($v){return $v>0;}));
+}
+if(empty($fbIn))$fbIn=array_values(array_filter(array_map('intval',(array)($cn['basalam']['fallback_cat_ids']??[])),function($v){return $v>0;}));
+if($catId<=0&&$pKeyIn!==''){
+$__pf4=$__pf3??($__pf??loadProfiles());
+$catId=(int)($__pf4[$pKeyIn]['bslCategoryId']??0);
+}
+if($catId<=0)$catId=(int)($cn['basalam']['category_id']??0);
+$entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'paused_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs,'fallback_cat_ids'=>$fbIn]];
 $queue['entries'][]=$entry;
 bslWriteQueue($queue);
 echo json_encode(['ok'=>true,'queue_id'=>$queueId,'status'=>$status,'position'=>count($queue['entries']),'start_now'=>$startImm,'queue_count'=>count($queue['entries'])],JSON_UNESCAPED_UNICODE);
@@ -8490,29 +8555,24 @@ $e['done_at']=time();
 }
 unset($e);
 
-$nextEntry=null;
-foreach($queue['entries'] as &$e){
+// v8.57: با اندیس کار کن نه با کپی. «$nextEntry=$e» یک رونوشت می‌ساخت و
+// تغییر وضعیت به running هیچ‌وقت ذخیره نمی‌شد؛ ردیف روی waiting می‌ماند و
+// ارسال‌کننده تنظیماتش را برنمی‌داشت.
+$nextIdx2=-1;
+foreach($queue['entries'] as $i=>$e){
 if($e['status']==='waiting'||($e['status']==='running'&&($e['current']??0)<=0)){
-$nextEntry=$e;break;
+$nextIdx2=$i;break;
 }
 }
-unset($e);
-if($nextEntry){
-
+if($nextIdx2>=0){
 @unlink(BSL_PRODUCTS_FILE);
-@copy($nextEntry['products_file'],BSL_PRODUCTS_FILE);
-$nextEntry['status']='running';
-$nextEntry['started_at']=time();
+@unlink(BSL_PROGRESS_FILE);@unlink(BSL_STOP_FILE);
+@copy($queue['entries'][$nextIdx2]['products_file'],BSL_PRODUCTS_FILE);
+$queue['entries'][$nextIdx2]['status']='running';
+$queue['entries'][$nextIdx2]['started_at']=time();
+$nextEntry=$queue['entries'][$nextIdx2];
 bslWriteQueue($queue);
-
-$cn=loadConnections();
-if(!isset($cn['basalam']))$cn['basalam']=[];
-$cn['basalam']['category_id']=$nextEntry['config']['category_id']??0;
-$cn['basalam']['auto_category']=$nextEntry['config']['auto_category']??false;
-$cn['basalam']['title_suffix']=$nextEntry['config']['title_suffix']??'';
-$cn['basalam']['delay_ms']=$nextEntry['config']['delay_ms']??500;
-$cn['basalam']['retry_delay_ms']=$nextEntry['config']['retry_delay_ms']??1000;
-@file_put_contents(CONNECTIONS_FILE,json_encode($cn,JSON_UNESCAPED_UNICODE),LOCK_EX);
+// v8.57: تنظیمات عمومی کاربر دیگر بازنویسی نمی‌شود
 echo json_encode(['ok'=>true,'next_id'=>$nextEntry['id'],'total'=>$nextEntry['total'],'products_file'=>$nextEntry['products_file'],'config'=>$nextEntry['config'],'msg'=>'شروع فرآیند بعدی از صف'],JSON_UNESCAPED_UNICODE);
 }else{
 bslWriteQueue($queue);
@@ -8662,15 +8722,9 @@ $found=true;
 
 @unlink(BSL_PRODUCTS_FILE);
 @copy($e['products_file'],BSL_PRODUCTS_FILE);
-
-$cn=loadConnections();
-if(!isset($cn['basalam']))$cn['basalam']=[];
-$cn['basalam']['category_id']=$e['config']['category_id']??0;
-$cn['basalam']['auto_category']=$e['config']['auto_category']??false;
-$cn['basalam']['title_suffix']=$e['config']['title_suffix']??'';
-$cn['basalam']['delay_ms']=$e['config']['delay_ms']??500;
-$cn['basalam']['retry_delay_ms']=$e['config']['retry_delay_ms']??1000;
-@file_put_contents(CONNECTIONS_FILE,json_encode($cn,JSON_UNESCAPED_UNICODE),LOCK_EX);
+// v8.57: ادامهٔ دستی یعنی کاربر می‌خواهد — نگه‌داشتِ توقف برداشته شود.
+// تنظیمات عمومی هم بازنویسی نمی‌شود.
+@unlink(BSL_STOP_FILE);
 
 writeProgress(BSL_PROGRESS_FILE,['running'=>true,'done'=>false,'paused'=>false,'sent'=>$e['sent'],'updated'=>$e['updated'],'skipped'=>$e['skipped'],'failed'=>$e['failed'],'total'=>$e['total'],'current'=>$e['current'],'last_title'=>'','started_at'=>$e['started_at'],'recent_log'=>['🔄 ادامه ارسال از محصول #'.($e['current']+1)],'total_log_count'=>($e['total_log_count']??0)+1,'sent_details'=>$e['sent_details']??[],'updated_details'=>$e['updated_details']??[],'skipped_details'=>$e['skipped_details']??[],'failed_details'=>$e['failed_details']??[]]);
 break;
@@ -8751,15 +8805,17 @@ $queue=bslReadQueue();
 $entry=null;$entryIdx=null;
 foreach($queue['entries'] as $i=>$e){if($e['id']===$queueId){$entry=$e;$entryIdx=$i;break;}}
 if(!$entry){echo json_encode(['ok'=>false,'error'=>'ورودی یافت نشد'],JSON_UNESCAPED_UNICODE);exit;}
-if($entry['status']!=='waiting'){echo json_encode(['ok'=>false,'error'=>'ورودی در وضعیت waiting نیست'],JSON_UNESCAPED_UNICODE);exit;}
+// v8.57: ردیف «paused» (نگه‌داشته‌شده با دکمهٔ توقف) هم باید قابل شروع باشد
+if($entry['status']!=='waiting'&&$entry['status']!=='paused'){echo json_encode(['ok'=>false,'error'=>'ورودی در وضعیت waiting نیست'],JSON_UNESCAPED_UNICODE);exit;}
+// v8.57: ارسال دیگری در جریان نباشد
+foreach($queue['entries'] as $qeR){if(($qeR['status']??'')==='running'){echo json_encode(['ok'=>false,'error'=>'یک ارسال دیگر در حال اجراست — اول آن را متوقف یا تمام کنید'],JSON_UNESCAPED_UNICODE);exit;}}
+// شروع دستی یعنی کاربر واقعاً می‌خواهد؛ پس نگه‌داشتِ توقف برداشته می‌شود
 @unlink(BSL_PROGRESS_FILE);@unlink(BSL_STOP_FILE);@unlink(BSL_PRODUCTS_FILE);
 if(!file_exists($entry['products_file'])){echo json_encode(['ok'=>false,'error'=>'فایل محصولات یافت نشد'],JSON_UNESCAPED_UNICODE);exit;}
 @copy($entry['products_file'],BSL_PRODUCTS_FILE);
 $queue['entries'][$entryIdx]['status']='running';$queue['entries'][$entryIdx]['started_at']=time();
 bslWriteQueue($queue);
-$cn=loadConnections();if(!isset($cn['basalam']))$cn['basalam']=[];
-$cn['basalam']['category_id']=$entry['config']['category_id']??0;$cn['basalam']['auto_category']=$entry['config']['auto_category']??false;$cn['basalam']['title_suffix']=$entry['config']['title_suffix']??'';$cn['basalam']['delay_ms']=$entry['config']['delay_ms']??500;$cn['basalam']['retry_delay_ms']=$entry['config']['retry_delay_ms']??1000;
-@file_put_contents(CONNECTIONS_FILE,json_encode($cn,JSON_UNESCAPED_UNICODE),LOCK_EX);
+// v8.57: تنظیمات عمومی بازنویسی نمی‌شود — ارسال‌کننده از config همین ردیف می‌خواند
 echo json_encode(['ok'=>true,'queue_id'=>$queueId,'total'=>$entry['total']],JSON_UNESCAPED_UNICODE);exit;
 }
 
@@ -8779,9 +8835,7 @@ $sent=(int)($progress['sent']??$entry['sent']??0);$updated=(int)($progress['upda
 @unlink(BSL_PROGRESS_FILE);@unlink(BSL_STOP_FILE);@unlink(BSL_PRODUCTS_FILE);
 if(!file_exists($entry['products_file'])){echo json_encode(['ok'=>false,'error'=>'فایل محصولات یافت نشد'],JSON_UNESCAPED_UNICODE);exit;}
 @copy($entry['products_file'],BSL_PRODUCTS_FILE);
-$cn=loadConnections();if(!isset($cn['basalam']))$cn['basalam']=[];
-$cn['basalam']['category_id']=$entry['config']['category_id']??0;$cn['basalam']['auto_category']=$entry['config']['auto_category']??false;$cn['basalam']['title_suffix']=$entry['config']['title_suffix']??'';$cn['basalam']['delay_ms']=$entry['config']['delay_ms']??500;$cn['basalam']['retry_delay_ms']=$entry['config']['retry_delay_ms']??1000;
-@file_put_contents(CONNECTIONS_FILE,json_encode($cn,JSON_UNESCAPED_UNICODE),LOCK_EX);
+// v8.57: تنظیمات عمومی بازنویسی نمی‌شود
 echo json_encode(['ok'=>true,'queue_id'=>$queueId,'total'=>$entry['total'],'current'=>$current,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$failed],JSON_UNESCAPED_UNICODE);exit;
 }
 
@@ -8871,6 +8925,22 @@ exit;
 
 if(isset($_GET['action']) && $_GET['action'] === 'bsl_backend'){
 
+// v8.57: اگر کاربر تازه دکمهٔ توقف را زده، اصلاً شروع نکن.
+// باگ: این اندپوینت چند خط پایین‌تر سیگنال توقف را پاک می‌کرد و بعد کار را
+// از سر می‌گرفت. رابط کاربری هم بعد از توقف، برای «ادامهٔ صف» یا «بازیابی
+// کار گیرکرده» دوباره همین آدرس را صدا می‌زد. نتیجه: دکمهٔ توقف عملاً بی‌اثر
+// بود و ارسال با ردیف بعدی ادامه پیدا می‌کرد.
+if(file_exists(BSL_STOP_FILE)){
+$stopAge=time()-(int)@filemtime(BSL_STOP_FILE);
+if($stopAge<=BSL_STOP_HOLD_SEC){
+header('Content-Type: application/json; charset=UTF-8');
+echo json_encode(['ok'=>true,'stopped'=>true,'started'=>false,
+'msg'=>'ارسال توسط کاربر متوقف شده — برای شروع دوباره، از دکمهٔ صف استفاده کنید'],JSON_UNESCAPED_UNICODE);
+exit;
+}
+@unlink(BSL_STOP_FILE);   // سیگنال خیلی قدیمی، جامانده است
+}
+
 $bslLockFile=__DIR__.'/bsl_backend.lock';
 $bslLockFp=fopen($bslLockFile,'w');
 if(!flock($bslLockFp,LOCK_EX|LOCK_NB)){
@@ -8940,165 +9010,17 @@ $nextEntry=$e;$nextIdx=$i;break;
 unset($e);
 
 if(!$nextEntry){
-
-$profiles = loadProfiles();
-$syncState = loadSyncState();
-$now = time();
-$cn = loadConnections();
-$autoCreated = 0;
-$autoLog = [];
-$diagProfiles = [];
-
-foreach ($profiles as $key => $profile) {
-$syncCfg = $profile['syncConfig'] ?? [];
-$diagEntry = [
-'key' => $key,
-'name' => $profile['name'] ?? $key,
-'sync_enabled' => !empty($syncCfg['enabled']),
-'sync_target' => $syncCfg['target'] ?? 'woo',
-'sync_interval' => (int)($syncCfg['interval'] ?? 3600),
-'has_products' => !empty($profile['products']),
-'products_raw_count' => is_array($profile['products']??[]) ? count($profile['products']??[]) : 0,
-'productsOrder_count' => is_array($profile['productsOrder']??[]) ? count($profile['productsOrder']??[]) : 0,
-'sync_lastRun' => (int)($syncState[$key]['lastRun']??0),
-'reason' => '',
-];
-
-if (empty($syncCfg['enabled'])) {
-$diagEntry['reason'] = 'sync not enabled';
-$diagProfiles[] = $diagEntry; continue;
-}
-
-$target = $syncCfg['target'] ?? 'woo';
-if ($target === 'woo') {
-$diagEntry['reason'] = 'target=woo (only WooCommerce, skipped by bsl_backend)';
-$diagProfiles[] = $diagEntry; continue;
-}
-
-$interval = (int)($syncCfg['interval'] ?? 3600);
-$lastRun = (int)($syncState[$key]['lastRun'] ?? 0);
-if ($interval > 0 && ($now - $lastRun < $interval)) {
-$remaining = $interval - ($now - $lastRun);
-$remainingMin = ceil($remaining / 60);
-$remainingStr = $remainingMin >= 60 ? (floor($remainingMin/60).' ساعت '.($remainingMin%60).' دقیقه') : ($remainingMin.' دقیقه');
-$diagEntry['reason'] = 'هنوز زمانش نرسیده — '.$remainingStr.' مانده (interval='.$interval.'s, lastRun='.$lastRun.', now='.$now.')';
-$diagProfiles[] = $diagEntry; continue;
-}
-
-$rawProducts = $profile['products'] ?? [];
-if (empty($rawProducts)) {
-$diagEntry['reason'] = 'no products saved in profile';
-$diagProfiles[] = $diagEntry; continue;
-}
-
-$orderedProducts = [];
-$productsOrder = $profile['productsOrder'] ?? [];
-$diagRawType = 'unknown';
-if (!empty($rawProducts)) {
-
-$firstEntry = $rawProducts[0] ?? reset($rawProducts) ?? null;
-if (is_array($firstEntry)) {
-if (isset($firstEntry[0]) && isset($firstEntry[1])) {
-$diagRawType = 'map_entries [[key,data],...]';
-} elseif (isset($firstEntry['title']) || isset($firstEntry['price']) || isset($firstEntry['image'])) {
-$diagRawType = 'flat_objects [{title,...},{title,...},...]';
-} else {
-$diagRawType = 'unknown_array_format (keys='.implode(',',array_keys($firstEntry)).')';
-}
-} elseif (is_string($firstEntry)) {
-$diagRawType = 'string_keys';
-}
-}
-if (!empty($productsOrder) && is_array($productsOrder)) {
-
-$prodMap = [];
-foreach ($rawProducts as $entry) {
-if (is_array($entry) && count($entry) >= 2) {
-$prodMap[$entry[0]] = $entry[1];
-}
-}
-foreach ($productsOrder as $pk) {
-if (isset($prodMap[$pk])) {
-$orderedProducts[] = $prodMap[$pk];
-}
-}
-} else {
-
-foreach ($rawProducts as $entry) {
-if (is_array($entry) && count($entry) >= 2 && is_string($entry[0])) {
-
-$orderedProducts[] = $entry[1];
-} elseif (is_array($entry) && (isset($entry['title']) || isset($entry['price']) || isset($entry['image']))) {
-
-$orderedProducts[] = $entry;
-}
-}
-}
-
-$diagEntry['raw_products_type'] = $diagRawType;
-$diagEntry['ordered_products_count'] = count($orderedProducts);
-
-if (empty($orderedProducts)) {
-$diagEntry['reason'] = 'products conversion failed (0 ordered products from '.count($rawProducts).' raw products, type='.$diagRawType.')';
-$diagProfiles[] = $diagEntry; continue;
-}
-
-$queueId = 'sync_' . $key . '_' . $now;
-$qFile = __DIR__ . '/bsl_queue_products_' . $queueId . '.json';
-$saveOk = @file_put_contents($qFile, json_encode($orderedProducts, JSON_UNESCAPED_UNICODE), LOCK_EX);
-if (!$saveOk) { $autoLog[] = '⚠️ خطا ذخیره فایل محصولات پروفایل '.$key; continue; }
-
-$catId = (int)($cn['basalam']['category_id'] ?? 0);
-$autoCat = !empty($cn['basalam']['auto_category']);
-$titleSuffix = trim($profile['titleSuffix'] ?? '') ?: trim($cn['basalam']['title_suffix'] ?? '');
-
-$diagEntry['reason'] = '✅ auto-sync entry created ('.count($orderedProducts).' products)';
-$diagEntry['queue_id'] = $queueId;
-$diagProfiles[] = $diagEntry;
-
-$entry = [
-'id' => $queueId,
-'status' => 'waiting',
-'products_file' => $qFile,
-'total' => count($orderedProducts),
-'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0,
-'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0,
-'config' => [
-'category_id' => $catId,
-'auto_category' => $autoCat,
-'title_suffix' => $titleSuffix,
-],
-'profile_key' => $key,
-'profile_name' => $profile['name'] ?? $key,
-'auto_sync' => true,
-];
-$queue['entries'][] = $entry;
-$autoCreated++;
-$autoLog[] = '✅ پروفایل "'.$profile['name'].'" ('.count($orderedProducts).' محصول) به صف اضافه شد';
-
-$syncState[$key] = ['lastRun' => $now, 'status' => 'queued'];
-}
-
-if ($autoCreated > 0) {
-bslWriteQueue($queue);
-saveSyncState($syncState);
-
-foreach ($queue['entries'] as $i => &$e) {
-if ($e['status'] === 'waiting') {
-$nextEntry = $e;
-$nextIdx = $i;
-break;
-}
-}
-unset($e);
-}
-
-if (!$nextEntry) {
+// v8.57: صف خالی یعنی کاری نیست — تمام.
+//
+// تا اینجا اگر صف خالی بود، این اندپوینت خودش می‌گشت و از روی پروفایل‌های
+// «سینک فعال» یک ورودی می‌ساخت و بلافاصله می‌فرستاد. نتیجه‌اش دقیقاً همان
+// چیزی بود که گزارش شد: کاربر ارسال پروفایل الف را می‌زد و پروفایل ب
+// می‌رفت، یا با صف خالی ناگهان ارسالی شروع می‌شد که کسی نخواسته بود.
+// زمان‌بندی خودکار کار کران‌جاب (cron_run) است، نه کار ارسال‌کننده.
 bslWriteQueue($queue);
 header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(['ok'=>true,'msg'=>'صف خالی — هیچ ورودی برای پردازش نیست','started'=>false,'processed'=>0,'auto_created'=>$autoCreated,'auto_log'=>$autoLog,'diag_profiles'=>$diagProfiles,'diag_total_profiles'=>count($profiles)],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'msg'=>'صف خالی — هیچ ورودی برای پردازش نیست','started'=>false,'processed'=>0],JSON_UNESCAPED_UNICODE);
 exit;
-}
 }
 
 $bslQueueId=$nextEntry['id'];
@@ -9134,14 +9056,21 @@ echo json_encode(['ok'=>false,'error'=>'فایل محصولات خالی','queue
 exit;
 }
 
+// v8.57: تنظیمات این ارسال فقط در حافظه اعمال می‌شود، نه روی فایل تنظیمات.
+// قبلاً همین‌جا دستهٔ پیش‌فرض کاربر، «دستهٔ خودکار» و پسوند عنوانِ عمومی با
+// مقادیر همین صف بازنویسی و روی دیسک ذخیره می‌شد. بعد از یک ارسال، کاربر
+// می‌دید دسته‌بندی اصلی‌اش عوض شده — همان «ذخیره/لود نشدن دسته‌بندی‌ها».
 $cn=loadConnections();
 if(!isset($cn['basalam']))$cn['basalam']=[];
-$cn['basalam']['category_id']=$nextEntry['config']['category_id']??0;
-$cn['basalam']['auto_category']=$nextEntry['config']['auto_category']??false;
-$cn['basalam']['title_suffix']=$nextEntry['config']['title_suffix']??'';
-$cn['basalam']['delay_ms']=$nextEntry['config']['delay_ms']??500;
-$cn['basalam']['retry_delay_ms']=$nextEntry['config']['retry_delay_ms']??1000;
-@file_put_contents(CONNECTIONS_FILE,json_encode($cn,JSON_UNESCAPED_UNICODE),LOCK_EX);
+$qCfg=$nextEntry['config']??[];
+if(isset($qCfg['category_id']))   $cn['basalam']['category_id']=(int)$qCfg['category_id'];
+if(isset($qCfg['auto_category'])) $cn['basalam']['auto_category']=!empty($qCfg['auto_category']);
+if(isset($qCfg['title_suffix']))  $cn['basalam']['title_suffix']=(string)$qCfg['title_suffix'];
+if(isset($qCfg['delay_ms']))      $cn['basalam']['delay_ms']=(int)$qCfg['delay_ms'];
+if(isset($qCfg['retry_delay_ms']))$cn['basalam']['retry_delay_ms']=(int)$qCfg['retry_delay_ms'];
+if(!empty($qCfg['fallback_cat_ids'])&&is_array($qCfg['fallback_cat_ids'])){
+$cn['basalam']['fallback_cat_ids']=$qCfg['fallback_cat_ids'];
+}
 
 $queue['entries'][$nextIdx]['status']='running';
 $queue['entries'][$nextIdx]['started_at']=$startedAt;
@@ -13874,6 +13803,22 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.57', t:'رفع ارسال بدون عکس در ووکامرس و بازسازی کامل صف باسلام', items:[
+    'عکس ووکامرس: کلید ck_/cs_ فقط روی مسیرهای wc/v3 معتبر است و هستهٔ وردپرس آن را کاربر نمی‌شناسد',
+    'برای همین آپلود به wp/v2/media با ۴۰۱ رد می‌شد و محصول بی‌تصویر ساخته می‌شد',
+    'حالا اگر آپلود مستقیم نشد، آدرس تصویر به خود ووکامرس سپرده می‌شود تا آن را بردارد',
+    'اگر محصول در مقصد از قبل تصویر دارد، دیگر تصویرش دستکاری نمی‌شود',
+    'باسلام: تنظیمات هر ارسال دیگر روی تنظیمات عمومی نوشته نمی‌شود',
+    'قبلاً بعد از هر ارسال، دستهٔ پیش‌فرض و «دستهٔ خودکار» و پسوند عنوانِ کاربر عوض شده بود',
+    'باسلام: افزودن پروفایل دوم وقتی ارسالی در جریان است، حالا واقعاً در صف می‌ماند',
+    'قبلاً ردیف تازه هم running می‌شد و روی فایل مشترک می‌نوشت، پس پروفایل اشتباه ارسال می‌شد',
+    'باسلام: دکمهٔ توقف واقعاً متوقف می‌کند — ردیف‌های منتظر هم نگه داشته می‌شوند',
+    'قبلاً ارسال‌کننده سیگنال توقف را پاک می‌کرد و بلافاصله با ردیف بعدی ادامه می‌داد',
+    'باسلام: با صف خالی دیگر خودش از روی پروفایل‌ها کار نمی‌سازد — زمان‌بندی کار کران است',
+    'همین باعث می‌شد ناگهان پروفایلی ارسال شود که کاربر انتخابش نکرده بود',
+    'دکمهٔ ارسال باسلام حالا اول دستهٔ همین پروفایل را می‌خواند، بعد دستهٔ عمومی',
+    'دستهٔ پروفایل و دسته‌های جایگزینش داخل خود ردیف صف ذخیره می‌شوند'
+  ]},
   {v:'8.56', t:'رفع ارسال محصول بدون عکس و بدون قیمت + دستهٔ ووکامرس برای هر پروفایل', items:[
     'باگ اصلی: اگر محصولی در صفحهٔ مبدأ قیمت یا عکس نداشت، مقدارِ اولین المان مشابه در کل صفحه برداشته می‌شد',
     'علت: در XPath عبارتی که با // شروع شود از ریشهٔ سند می‌گردد و محدودهٔ ظرف نادیده گرفته می‌شود',
@@ -16262,8 +16207,19 @@ function queueBslSend(ps,catId){
             fd2.append('start_immediately','1');
             fd2.append('profile_key',($('profileSelect')&&$('profileSelect').value)||'');
             fd2.append('profile_name',($('profileName')&&$('profileName').value)||'');
+            // v8.57: دسته‌های جایگزین همین پروفایل هم همراه صف بروند
+            fd2.append('fallback_cat_ids',JSON.stringify(Array.isArray(bslProfileFallbackCats)?bslProfileFallbackCats:[]));
             fetch('?bsl_queue_add=1',{method:'POST',body:fd2}).then(r=>r.json()).then(d=>{
                 if(!d.ok){showToast('\u062e\u0637\u0627: '+d.error,1);return;}
+                // v8.57: اگر ارسال دیگری در جریان بود، سرور این یکی را در صف
+                // گذاشته. قبلاً رابط کاربری در هر حالت وانمود می‌کرد ارسال
+                // شروع شده و کاربر فکر می‌کرد پروفایلش دارد می‌رود.
+                if(d.status==='waiting'){
+                    showToast('📋 ارسال دیگری در جریان است — «'+(($('profileName')&&$('profileName').value)||'این پروفایل')+'» در صف قرار گرفت');
+                    $('bSS').textContent='📋 در صف — بعد از پایان ارسال فعلی خودکار شروع می‌شود';
+                    checkBslQueue();
+                    return;
+                }
                 showToast('\u2713 '+toFa(totalSaved)+' \u0645\u062d\u0635\u0648\u0644 \u062f\u0631 \u0635\u0641 \u2014 \u0633\u0631\u0648\u0631\u0633\u0627\u06cc\u062f');
                 // Initialize visual UI
                 bSend=true;
@@ -16299,8 +16255,12 @@ function queueBslSend(ps,catId){
 }
 // v7.51: sendBsl ALWAYS queues — buttons stay visible, operation goes to queue
 function sendBsl(){
-const catId=parseInt($('bsCat')&&$('bsCat').value)||0;
-if(catId<=0){showToast('ابتدا دسته‌بندی باسلام را انتخاب کنید!',1);return;}
+// v8.57: اول دستهٔ همین پروفایل، بعد دستهٔ پیش‌فرض عمومی.
+// قبلاً فقط دستهٔ عمومی خوانده می‌شد و دستهٔ پروفایل نادیده گرفته می‌شد.
+const profCat=parseInt(($('bslProfileCatId')||{}).value||'0')||bslProfileSelectedCatId||0;
+const globalCat=parseInt(($('bsCat')||{}).value||'0')||0;
+const catId=profCat>0?profCat:globalCat;
+if(catId<=0){showToast('ابتدا دسته‌بندی باسلام را انتخاب کنید (دستهٔ پروفایل یا دستهٔ پیش‌فرض)',1);return;}
 const ps=getSendP();
 if(!ps.length){showToast('محصولی نیست',1);return;}
 queueBslSend(ps,catId);
@@ -16745,9 +16705,9 @@ function renderWooQueue(q){
     const entries=q.entries||[];
     if(entries.length===0){list.innerHTML='<span style="color:#64748b">صف خالی — برای افزودن، دکمه «🚀 ارسال ووکامرس» را کلیک کنید</span>';return;}
     section.style.display='block';
-    const statusLabels={waiting:'⏳ در صف',running:'🔄 در حال ارسال',done:'✅ انجام شد',failed:'❌ خطا'};
-    const statusColors={waiting:'#fbbf24',running:'#a78bfa',done:'#4ade80',failed:'#f87171'};
-    const statusBg={waiting:'#42200630',running:'#7c3aed20',done:'#14532d20',failed:'#7f1d1d20'};
+    const statusLabels={waiting:'⏳ در صف',running:'🔄 در حال ارسال',paused:'⏸ متوقف',done:'✅ انجام شد',failed:'❌ خطا'};
+    const statusColors={waiting:'#fbbf24',running:'#a78bfa',paused:'#fb923c',done:'#4ade80',failed:'#f87171'};
+    const statusBg={waiting:'#42200630',running:'#7c3aed20',paused:'#7c2d1220',done:'#14532d20',failed:'#7f1d1d20'};
     let html='';
     entries.forEach(e=>{
         let progText='';let progPercent=0;
