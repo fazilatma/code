@@ -1,8 +1,12 @@
-# PHP runtime and build artifacts
-*.php~
+```
+# Compiled and build artifacts
+*.pyc
+__pycache__/
 
-# Dependencies and packages
+# Dependencies
+node_modules/
 vendor/
+composer.lock
 
 # Logs and temp files
 *.log
@@ -21,3 +25,4 @@ vendor/
 # OS generated files
 .DS_Store
 Thumbs.db
+```

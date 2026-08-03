@@ -6519,6 +6519,40 @@ function reconRun(array $cn, string $target, bool $apply = false,
             usleep(200000);
         }
     }
+
+    // v8.58: حذف محصولات بدون تصویر از ووکامرس
+    if ($target === 'woo' && $apply) {
+        reconProgress(['log_add' => ['🖼 بررسی محصولات بدون تصویر...']]);
+        $noImageCount = 0;
+        foreach ($remote as $r) {
+            $hasImage = !empty($r['images']) && is_array($r['images']) && count($r['images']) > 0;
+            if (!$hasImage) {
+                $noImageCount++;
+                $d = ['id' => $r['id'], 'title' => $r['title'], 'price' => $r['price']];
+                $w = $cn['woocommerce'];
+                $okRow = false;
+                if ($mode === 'delete') {
+                    $rDel = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'DELETE', 'products/' . $d['id'] . '?force=false');
+                } elseif ($mode === 'outofstock') {
+                    $rDel = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'PUT', 'products/' . $d['id'], ['stock_status' => 'outofstock', 'stock_quantity' => 0]);
+                } else {
+                    $rDel = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'PUT', 'products/' . $d['id'], ['status' => 'draft']);
+                }
+                $okRow = !empty($rDel['ok']);
+                if ($okRow) $out['deleted_noimage'] = ($out['deleted_noimage'] ?? 0) + 1;
+                else $out['failed_noimage'] = ($out['failed_noimage'] ?? 0) + 1;
+                reconProgress(['log_add' => [($okRow ? '🗑 ' : '❌ ') . 'بدون تصویر: ' . mb_substr($d['title'], 0, 45)]]);
+                usleep(150000);
+            }
+        }
+        if ($noImageCount > 0) {
+            reconProgress(['log_add' => ['✅ بررسی پایان یافت: ' . $noImageCount . ' محصول بدون تصویر']]);
+        }
+    }
+
     return $out;
 }
 
