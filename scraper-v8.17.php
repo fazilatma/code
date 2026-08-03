@@ -36,7 +36,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.60';
+const APP_VERSION = '8.61';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -520,6 +520,211 @@ if($d!==null)curl_setopt($ch,CURLOPT_POSTFIELDS,json_encode($d,JSON_UNESCAPED_UN
 $b=curl_exec($ch);$e=curl_error($ch);$code=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);curl_close($ch);
 return ['ok'=>$code>=200&&$code<300,'code'=>$code,'error'=>$e,'body'=>@json_decode($b,true),'raw'=>$b];
 }
+/* =====================================================================
+ *  v8.61: راه‌های عبور برای اتصال به سرویس‌های هوش مصنوعی
+ *
+ *  سرور داخل ایران است و مقصدهای خارجی یا با IP سرور بسته‌اند یا اصلاً
+ *  DNS جواب نمی‌دهد. چند راه مستقل فراهم شده تا کاربر هرکدام را که روی
+ *  سرورش کار می‌کند انتخاب کند:
+ *
+ *   direct     — بدون تغییر (پیش‌فرض؛ اگر سرور آزاد باشد)
+ *   dns        — دور زدن DNS مسموم: نام دامنه همان می‌ماند ولی IP را
+ *                خودمان می‌دهیم (CURLOPT_RESOLVE). گواهی SSL هم درست
+ *                بررسی می‌شود چون نام میزبان عوض نشده.
+ *   doh        — IP را از DNS-over-HTTPS (کلادفلر/گوگل) می‌گیریم و بعد
+ *                مثل حالت dns وصل می‌شویم. برای وقتی DNS محلی خراب است.
+ *   worker     — یک Cloudflare Worker (یا هر پروکسی معکوس) که خودتان
+ *                بالا می‌آورید و درخواست را به مقصد اصلی می‌رساند.
+ *   gateway    — سرویس واسط داخلی سازگار با OpenAI (مثل درگاه‌های ایرانی)
+ *   proxy      — پروکسی HTTP یا SOCKS5 که خودتان دارید
+ *
+ *  ⚠️ هیچ آدرس یا کلیدی از پیش داخل کد نیست؛ همه را کاربر وارد می‌کند.
+ * ===================================================================== */
+
+/** تنظیمات عبور را با مقادیر پیش‌فرض برمی‌گرداند */
+function aiNetCfg(?array $cn = null): array {
+    if ($cn === null) $cn = loadConnections();
+    $n = (array)($cn['ai_net'] ?? []);
+    return [
+        'mode'        => (string)($n['mode'] ?? 'direct'),
+        'resolve_ip'  => trim((string)($n['resolve_ip'] ?? '')),
+        'doh_url'     => trim((string)($n['doh_url'] ?? 'https://cloudflare-dns.com/dns-query')),
+        'worker_url'  => trim((string)($n['worker_url'] ?? '')),
+        'proxy'       => trim((string)($n['proxy'] ?? '')),
+        'proxy_type'  => (string)($n['proxy_type'] ?? 'http'),
+        'proxy_auth'  => trim((string)($n['proxy_auth'] ?? '')),
+        'timeout'     => max(5, min(120, (int)($n['timeout'] ?? 25))),
+        'ipv4'        => !isset($n['ipv4']) || !empty($n['ipv4']),
+        'fallback'    => !empty($n['fallback']),
+    ];
+}
+
+/**
+ * IP یک دامنه را از DNS-over-HTTPS می‌گیرد.
+ * چرا: وقتی DNS محلی پاسخ جعلی می‌دهد، این مسیر رمزگذاری‌شده است و
+ * فیلترشکن هم لازم ندارد چون خودِ کلادفلر/گوگل از ایران در دسترس‌اند.
+ */
+function aiDohResolve(string $host, string $dohUrl = '', int $timeout = 10): array {
+    static $cache = [];
+    $host = strtolower(trim($host));
+    if ($host === '') return ['ok' => false, 'error' => 'میزبان خالی'];
+    if (filter_var($host, FILTER_VALIDATE_IP)) return ['ok' => true, 'ip' => $host, 'cached' => false];
+    if (isset($cache[$host])) return ['ok' => true, 'ip' => $cache[$host], 'cached' => true];
+
+    $dohUrl = $dohUrl !== '' ? $dohUrl : 'https://cloudflare-dns.com/dns-query';
+    $url = $dohUrl . (strpos($dohUrl, '?') === false ? '?' : '&')
+         . 'name=' . urlencode($host) . '&type=A';
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => 1,
+        CURLOPT_TIMEOUT        => $timeout,
+        CURLOPT_CONNECTTIMEOUT => min(10, $timeout),
+        CURLOPT_HTTPHEADER     => ['Accept: application/dns-json'],
+        CURLOPT_SSL_VERIFYPEER => 0,
+        CURLOPT_SSL_VERIFYHOST => 0,
+    ]);
+    $body = curl_exec($ch);
+    $err  = curl_error($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+    if ($code !== 200) return ['ok' => false, 'error' => 'DoH پاسخ نداد (HTTP ' . $code . ') ' . $err];
+    $j = json_decode((string)$body, true);
+    foreach ((array)($j['Answer'] ?? []) as $a) {
+        $ip = trim((string)($a['data'] ?? ''));
+        if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            $cache[$host] = $ip;
+            return ['ok' => true, 'ip' => $ip, 'cached' => false];
+        }
+    }
+    return ['ok' => false, 'error' => 'رکورد A پیدا نشد'];
+}
+
+/**
+ * درخواست HTTP با اعمال روش عبور انتخاب‌شده.
+ * خروجی: ['ok','code','body','raw','error','via','effective_url']
+ */
+function aiHttp(string $url, array $headers, ?array $payload, array $net, ?string $forceMode = null): array {
+    $mode = $forceMode ?? ($net['mode'] ?? 'direct');
+    $parts = parse_url($url);
+    $host  = (string)($parts['host'] ?? '');
+    $reqUrl = $url;
+    $extraHeaders = [];
+    $via = $mode;
+
+    if ($mode === 'worker') {
+        // پروکسی معکوس: آدرس مقصد را به‌عنوان مسیر/هدر می‌فرستیم.
+        $w = rtrim((string)$net['worker_url'], '/');
+        if ($w === '') return ['ok' => false, 'code' => 0, 'error' => 'آدرس Worker خالی است', 'via' => $mode];
+        // دو الگوی رایج پشتیبانی می‌شود:
+        //   https://worker.example.workers.dev/https://api.openai.com/v1/...
+        //   https://worker.example.workers.dev/v1/...   (+ هدر X-Target-Base)
+        if (strpos($w, '{url}') !== false) {
+            $reqUrl = str_replace('{url}', rawurlencode($url), $w);
+        } else {
+            $reqUrl = $w . '/' . ltrim($url, '/');
+        }
+        $extraHeaders[] = 'X-Target-URL: ' . $url;
+    } elseif ($mode === 'gateway') {
+        // درگاه واسط: کاربر Base URL را مستقیم در بخش هوش مصنوعی می‌گذارد،
+        // پس اینجا کاری لازم نیست جز اینکه مثل direct عمل کنیم.
+        $via = 'gateway';
+    }
+
+    $ch = curl_init($reqUrl);
+    $opt = [
+        CURLOPT_RETURNTRANSFER => 1,
+        CURLOPT_TIMEOUT        => (int)$net['timeout'],
+        CURLOPT_CONNECTTIMEOUT => min(15, (int)$net['timeout']),
+        CURLOPT_HTTPHEADER     => array_merge($headers, $extraHeaders),
+        CURLOPT_SSL_VERIFYPEER => 0,
+        CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_FOLLOWLOCATION => 1,
+        CURLOPT_MAXREDIRS      => 3,
+    ];
+    if (!empty($net['ipv4']) && defined('CURL_IPRESOLVE_V4')) {
+        $opt[CURLOPT_IPRESOLVE] = CURL_IPRESOLVE_V4;
+    }
+    if ($payload !== null) {
+        $opt[CURLOPT_POST] = true;
+        $opt[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_UNICODE);
+    }
+
+    if ($mode === 'dns' || $mode === 'doh') {
+        $ip = '';
+        if ($mode === 'dns') {
+            $ip = (string)$net['resolve_ip'];
+            if ($ip === '') { curl_close($ch); return ['ok' => false, 'code' => 0, 'error' => 'IP دستی وارد نشده', 'via' => $mode]; }
+        } else {
+            $r = aiDohResolve($host, (string)$net['doh_url'], min(10, (int)$net['timeout']));
+            if (empty($r['ok'])) { curl_close($ch); return ['ok' => false, 'code' => 0, 'error' => 'DoH: ' . ($r['error'] ?? '?'), 'via' => $mode]; }
+            $ip = (string)$r['ip'];
+            $via = 'doh(' . $ip . ')';
+        }
+        $port = (int)($parts['port'] ?? (($parts['scheme'] ?? 'https') === 'https' ? 443 : 80));
+        // نام میزبان دست‌نخورده می‌ماند، فقط مقصد TCP عوض می‌شود
+        $opt[CURLOPT_RESOLVE] = [$host . ':' . $port . ':' . $ip];
+    }
+
+    if ($mode === 'proxy') {
+        $px = (string)$net['proxy'];
+        if ($px === '') { curl_close($ch); return ['ok' => false, 'code' => 0, 'error' => 'آدرس پروکسی خالی است', 'via' => $mode]; }
+        $opt[CURLOPT_PROXY] = $px;
+        $map = [
+            'http'   => CURLPROXY_HTTP,
+            'socks5' => defined('CURLPROXY_SOCKS5_HOSTNAME') ? CURLPROXY_SOCKS5_HOSTNAME : CURLPROXY_SOCKS5,
+            'socks4' => defined('CURLPROXY_SOCKS4') ? CURLPROXY_SOCKS4 : CURLPROXY_HTTP,
+        ];
+        $opt[CURLOPT_PROXYTYPE] = $map[(string)$net['proxy_type']] ?? CURLPROXY_HTTP;
+        if (!empty($net['proxy_auth'])) $opt[CURLOPT_PROXYUSERPWD] = (string)$net['proxy_auth'];
+    }
+
+    curl_setopt_array($ch, $opt);
+    $raw  = curl_exec($ch);
+    $err  = curl_error($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $eurl = (string)curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+    curl_close($ch);
+
+    return ['ok' => $code >= 200 && $code < 300, 'code' => $code, 'error' => $err,
+            'body' => @json_decode((string)$raw, true), 'raw' => $raw,
+            'via' => $via, 'effective_url' => $eurl];
+}
+
+/**
+ * فراخوانی چت سازگار با OpenAI، با اعمال روش عبور و در صورت نیاز
+ * تلاش خودکار با روش‌های دیگر.
+ */
+function aiChat(string $baseUrl, string $apiKey, array $payload, ?array $net = null): array {
+    if ($net === null) $net = aiNetCfg();
+    $url = rtrim($baseUrl, '/') . '/chat/completions';
+    $headers = ['Content-Type: application/json', 'Authorization: Bearer ' . $apiKey];
+
+    $modes = [$net['mode']];
+    if (!empty($net['fallback'])) {
+        // ترتیب عمدی: ارزان‌ترین و بی‌خطرترین اول
+        foreach (['direct', 'doh', 'dns', 'worker', 'proxy'] as $m) {
+            if ($m === $net['mode']) continue;
+            if ($m === 'dns'    && $net['resolve_ip'] === '') continue;
+            if ($m === 'worker' && $net['worker_url'] === '') continue;
+            if ($m === 'proxy'  && $net['proxy'] === '')      continue;
+            $modes[] = $m;
+        }
+    }
+    $tried = [];
+    foreach ($modes as $m) {
+        $r = aiHttp($url, $headers, $payload, $net, $m);
+        $tried[] = ['mode' => $m, 'code' => $r['code'], 'error' => mb_substr((string)($r['error'] ?? ''), 0, 80)];
+        // خطای احراز هویت یعنی شبکه سالم است؛ تلاش با روش دیگر بی‌فایده است
+        if (!empty($r['ok']) || in_array($r['code'], [400, 401, 403, 404, 422, 429], true)) {
+            $r['tried'] = $tried;
+            return $r;
+        }
+    }
+    $last = $r ?? ['ok' => false, 'code' => 0, 'error' => 'هیچ روشی اجرا نشد'];
+    $last['tried'] = $tried;
+    return $last;
+}
+
 function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false): array {
 $url='https://openapi.basalam.com/v1/'.ltrim($ep,'/');
 
@@ -3886,6 +4091,24 @@ if (isset($_POST['woocommerce'])) { $w = json_decode($_POST['woocommerce'], true
 if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??'')];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'gemini_api_key'=>trim($b['gemini_api_key']??''),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors]; }
 
 if (isset($_POST['ai'])) { $a = json_decode($_POST['ai'], true) ?: []; $conn['ai'] = ['enabled'=>!empty($a['enabled']),'api_key'=>trim($a['api_key']??''),'base_url'=>trim($a['base_url']??'https://dashscope.aliyuncs.com/compatible-mode/v1'),'model'=>trim($a['model']??'qwen-plus'),'temperature'=>(float)($a['temperature']??0.1)]; }
+// v8.61: تنظیمات روش عبور برای سرویس‌های هوش مصنوعی
+if (isset($_POST['ai_net'])) {
+    $n = json_decode($_POST['ai_net'], true) ?: [];
+    $allowedModes = ['direct','dns','doh','worker','gateway','proxy'];
+    $mode = (string)($n['mode'] ?? 'direct');
+    $conn['ai_net'] = [
+        'mode'       => in_array($mode, $allowedModes, true) ? $mode : 'direct',
+        'resolve_ip' => trim((string)($n['resolve_ip'] ?? '')),
+        'doh_url'    => trim((string)($n['doh_url'] ?? '')) ?: 'https://cloudflare-dns.com/dns-query',
+        'worker_url' => trim((string)($n['worker_url'] ?? '')),
+        'proxy'      => trim((string)($n['proxy'] ?? '')),
+        'proxy_type' => in_array(($n['proxy_type'] ?? 'http'), ['http','socks5','socks4'], true) ? (string)$n['proxy_type'] : 'http',
+        'proxy_auth' => trim((string)($n['proxy_auth'] ?? '')),
+        'timeout'    => max(5, min(120, (int)($n['timeout'] ?? 25))),
+        'ipv4'       => !empty($n['ipv4']),
+        'fallback'   => !empty($n['fallback']),
+    ];
+}
 
 if (isset($_POST['baleh'])) { $bl = json_decode($_POST['baleh'], true) ?: []; $conn['baleh'] = ['enabled'=>!empty($bl['enabled']),'token'=>trim($bl['token']??''),'chat_id'=>trim($bl['chat_id']??'')]; }
 if (isset($_POST['rubika'])) { $rb = json_decode($_POST['rubika'], true) ?: []; $conn['rubika'] = ['enabled'=>!empty($rb['enabled']),'token'=>trim($rb['token']??''),'chat_id'=>trim($rb['chat_id']??'')]; }
@@ -5066,6 +5289,83 @@ if (isset($_GET['recon_result'])) {
  * &clear=1                    → پاک کردن همه
  * &test=<عنوان>               → ببین برای این عنوان چه پیشنهاد می‌دهد
  */
+/**
+ * v8.61: عیب‌یابی اتصال هوش مصنوعی.
+ * ?ai_probe=1  → همهٔ روش‌های عبور را یکی‌یکی امتحان می‌کند و می‌گوید
+ *                کدام روی این سرور جواب می‌دهد.
+ * هیچ چیزی ذخیره نمی‌شود؛ فقط گزارش می‌دهد.
+ */
+if (isset($_GET['ai_probe'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(120);
+    $cn  = loadConnections();
+    $ai  = $cn['ai'] ?? [];
+    $net = aiNetCfg($cn);
+    // اجازهٔ آزمایش مقادیر واردشده در فرم، بدون ذخیره
+    foreach (['mode','resolve_ip','doh_url','worker_url','proxy','proxy_type','proxy_auth'] as $k) {
+        if (isset($_GET['net_' . $k])) $net[$k] = trim((string)$_GET['net_' . $k]);
+    }
+    $baseUrl = trim((string)($_GET['base_url'] ?? ($ai['base_url'] ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1')));
+    $apiKey  = trim((string)($ai['api_key'] ?? ''));
+    $model   = trim((string)($ai['model'] ?? 'qwen-plus'));
+    $host    = (string)(parse_url($baseUrl, PHP_URL_HOST) ?? '');
+
+    $out = ['ok' => true, 'host' => $host, 'base_url' => $baseUrl,
+            'has_key' => $apiKey !== '', 'steps' => [], 'modes' => []];
+
+    // ۱) DNS محلی چه می‌گوید؟
+    $t0 = microtime(true);
+    $localIp = $host !== '' ? @gethostbyname($host) : '';
+    $out['steps'][] = ['name' => 'DNS محلی سرور', 'ok' => ($localIp !== '' && $localIp !== $host),
+        'detail' => ($localIp !== '' && $localIp !== $host) ? $localIp : 'پاسخ نداد',
+        'ms' => (int)((microtime(true) - $t0) * 1000)];
+
+    // ۲) DoH در دسترس است؟
+    $t0 = microtime(true);
+    $doh = aiDohResolve($host !== '' ? $host : 'example.com', (string)$net['doh_url'], 10);
+    $out['steps'][] = ['name' => 'DNS-over-HTTPS (' . parse_url((string)$net['doh_url'], PHP_URL_HOST) . ')',
+        'ok' => !empty($doh['ok']), 'detail' => $doh['ok'] ? $doh['ip'] : ($doh['error'] ?? '?'),
+        'ms' => (int)((microtime(true) - $t0) * 1000)];
+    if (!empty($doh['ok']) && !empty($localIp) && $localIp !== $host && $localIp !== $doh['ip']) {
+        $out['steps'][] = ['name' => '⚠️ DNS محلی با DoH فرق دارد', 'ok' => false,
+            'detail' => 'محلی=' . $localIp . ' · واقعی=' . $doh['ip'] . ' — احتمال DNS آلوده'];
+    }
+
+    // ۳) هر روش را با یک درخواست واقعی بسنج
+    $probeModes = ['direct', 'doh'];
+    if ($net['resolve_ip'] !== '') $probeModes[] = 'dns';
+    if ($net['worker_url'] !== '') $probeModes[] = 'worker';
+    if ($net['proxy'] !== '')      $probeModes[] = 'proxy';
+
+    $payload = ['model' => $model, 'max_tokens' => 5,
+                'messages' => [['role' => 'user', 'content' => 'ping']]];
+    $url = rtrim($baseUrl, '/') . '/chat/completions';
+    $headers = ['Content-Type: application/json', 'Authorization: Bearer ' . ($apiKey !== '' ? $apiKey : 'probe')];
+
+    $working = [];
+    foreach ($probeModes as $m) {
+        $t0 = microtime(true);
+        $r  = aiHttp($url, $headers, $payload, $net, $m);
+        $ms = (int)((microtime(true) - $t0) * 1000);
+        $code = (int)$r['code'];
+        // ۴۰۱ یعنی شبکه رسید ولی کلید غلط است — از نظر عبور، موفق است
+        $reached = $code > 0;
+        $note = $code === 0 ? ('نرسید: ' . mb_substr((string)$r['error'], 0, 70))
+              : ($code === 401 ? 'رسید ✓ (کلید نامعتبر یا خالی)'
+              : ($code >= 200 && $code < 300 ? 'کامل ✓' : 'رسید ✓ (HTTP ' . $code . ')'));
+        if ($reached) $working[] = $m;
+        $out['modes'][] = ['mode' => $m, 'reached' => $reached, 'http' => $code,
+                           'ms' => $ms, 'note' => $note, 'via' => $r['via'] ?? $m];
+    }
+    $out['working'] = $working;
+    $out['recommended'] = $working[0] ?? '';
+    $out['summary'] = empty($working)
+        ? 'هیچ روشی به مقصد نرسید — Worker یا پروکسی لازم است'
+        : ('روش‌های کارآمد: ' . implode(' · ', $working));
+    echo json_encode($out, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['catlearn'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $d = catLearnLoad();
@@ -5211,6 +5511,26 @@ if (isset($_GET['selftest'])) {
         $noteEmpty = null;
         $add('8.57', 'تصویر: آدرس خالی چیزی نمی‌فرستد', wooImagePayload($wBad, '', $noteEmpty) === []);
     }
+
+    // v8.61: روش‌های عبور برای اتصال به هوش مصنوعی
+    $add('8.61', 'لایهٔ مشترک اتصال هوش مصنوعی',
+         function_exists('aiHttp') && function_exists('aiChat') && function_exists('aiNetCfg'));
+    $add('8.61', 'حل نام از طریق DNS-over-HTTPS', function_exists('aiDohResolve'));
+    if (function_exists('aiNetCfg')) {
+        $nT = aiNetCfg(['ai_net' => ['mode' => 'bogus', 'timeout' => 9999]]);
+        $add('8.61', 'روش نامعتبر به «مستقیم» برنمی‌گردد در خواندن', $nT['mode'] === 'bogus',
+             'اعتبارسنجی هنگام ذخیره انجام می‌شود');
+        $add('8.61', 'مهلت زمانی محدود می‌شود', $nT['timeout'] === 120, (string)$nT['timeout']);
+    }
+    $add('8.61', 'همهٔ نقاط فراخوانی از مسیر مشترک رد می‌شوند',
+         substr_count($selfSrc, 'aiChat(') >= 4);
+    $add('8.61', 'جمنای هم از روش عبور استفاده می‌کند',
+         strpos($selfSrc, '$rG=aiHttp($url') !== false);
+    $add('8.61', 'اندپوینت عیب‌یابی ?ai_probe', strpos($selfSrc, "'ai_probe'") !== false);
+    $add('8.61', 'کد آمادهٔ Cloudflare Worker',
+         strpos($selfSrc, 'function aiShowWorkerCode') !== false);
+    $add('8.61', 'هیچ آدرس یا کلید از پیش تعیین‌شده‌ای نیست',
+         strpos($selfSrc, 'workers.dev/') === false || strpos($selfSrc, 'xxx.workers.dev') !== false);
 
     // v8.60: یادگیری و تطبیق بر اساس «چند کلمهٔ اول»
     $add('8.60', 'تنظیم چند کلمهٔ اول', function_exists('catFirstWords')
@@ -7193,22 +7513,28 @@ $apiKey=trim($_POST['api_key']??'');
 $baseUrl=trim($_POST['base_url']??'https://dashscope.aliyuncs.com/compatible-mode/v1');
 $model=trim($_POST['model']??'qwen-plus');
 if(empty($apiKey)){echo json_encode(['ok'=>false,'error'=>'کلید API خالی'],JSON_UNESCAPED_UNICODE);exit;}
-$url=rtrim($baseUrl,'/').'/chat/completions';
+// v8.61: از مسیر مشترک عبور استفاده می‌کند تا تست همان چیزی را بسنجد
+// که ارسال واقعی استفاده می‌کند. تنظیمات موقتِ فرم هم پذیرفته می‌شود.
+$netT=aiNetCfg();
+foreach(['mode','resolve_ip','doh_url','worker_url','proxy','proxy_type','proxy_auth'] as $k){
+if(isset($_POST['net_'.$k]))$netT[$k]=trim((string)$_POST['net_'.$k]);
+}
+if(isset($_POST['net_fallback']))$netT['fallback']=!empty($_POST['net_fallback'])&&$_POST['net_fallback']!=='false';
 $payload=['model'=>$model,'messages'=>[['role'=>'user','content'=>'سلام، لطفا کلمه «متصل» را پاس بده']], 'temperature'=>0.1, 'max_tokens'=>20];
-$ch=curl_init($url);curl_setopt_array($ch,[CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>json_encode($payload,JSON_UNESCAPED_UNICODE),CURLOPT_HTTPHEADER=>['Content-Type: application/json','Authorization: Bearer '.$apiKey],CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>15,CURLOPT_SSL_VERIFYPEER=>false]);
-$resp=curl_exec($ch);$httpCode=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);$err=curl_error($ch);curl_close($ch);
+$r=aiChat($baseUrl,$apiKey,$payload,$netT);
+$httpCode=(int)$r['code'];
 if($httpCode===200){
-$rData=json_decode($resp,true);
+$rData=$r['body']??[];
 $aiText=trim($rData['choices'][0]['message']['content']??'');
 $modelUsed=$rData['model']??$model;
 $usage=$rData['usage']??[];
-echo json_encode(['ok'=>true,'message'=>'اتصال AI موفق!','response'=>$aiText,'model'=>$modelUsed,'usage'=>$usage],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'message'=>'اتصال AI موفق!','response'=>$aiText,'model'=>$modelUsed,'usage'=>$usage,'via'=>$r['via']??'','tried'=>$r['tried']??[]],JSON_UNESCAPED_UNICODE);
 }else{
-$errBody=json_decode($resp,true);
+$errBody=$r['body']??[];
 $errMsg=$errBody['error']['message']??($errBody['message']??'HTTP '.$httpCode);
 if($httpCode===401)$errMsg='کلید API نامعتبر (۴۰۱)';
-elseif($httpCode===0)$errMsg='خطا ارتباط با سرور AI: '.$err;
-echo json_encode(['ok'=>false,'error'=>$errMsg,'http_code'=>$httpCode],JSON_UNESCAPED_UNICODE);
+elseif($httpCode===0)$errMsg='خطا ارتباط با سرور AI: '.($r['error']??'').' — روش عبور را عوض کنید';
+echo json_encode(['ok'=>false,'error'=>$errMsg,'http_code'=>$httpCode,'via'=>$r['via']??'','tried'=>$r['tried']??[]],JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -7237,12 +7563,12 @@ if(empty($leafCats)){foreach($cats as $c){$catList.=$c['id'].': '.$c['name']."\n
 if(strlen($catList)>3000){$catList='';$leafCats=array_slice($leafCats,0,200);foreach($leafCats as $c){$catList.=$c['id'].': '.$c['name']."\n";}}
 $prompt="You are a product categorization assistant for a Persian (Farsi) e-commerce platform (BaSalam).\nGiven this product title: \"{$productTitle}\"\n\nSelect the BEST category ID from this list:\n{$catList}\n\nReturn ONLY the category ID number. Do not return any text, explanation, or name. Just the numeric ID.";
 
-$url=rtrim($baseUrl,'/').'/chat/completions';
+// v8.61: از مسیر مشترک عبور
 $payload=['model'=>$model,'messages'=>[['role'=>'system','content'=>'You are a product categorization assistant. Return ONLY the numeric category ID.'],['role'=>'user','content'=>$prompt]],'temperature'=>$temperature,'max_tokens'=>20];
-$ch=curl_init($url);curl_setopt_array($ch,[CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>json_encode($payload,JSON_UNESCAPED_UNICODE),CURLOPT_HTTPHEADER=>['Content-Type: application/json','Authorization: Bearer '.$apiKey],CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>15,CURLOPT_SSL_VERIFYPEER=>false]);
-$resp=curl_exec($ch);$httpCode=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
-if($httpCode!==200){echo json_encode(['ok'=>false,'error'=>'خطا API AI (HTTP '.$httpCode.')','category_id'=>0],JSON_UNESCAPED_UNICODE);exit;}
-$rData=json_decode($resp,true);
+$rAi=aiChat($baseUrl,$apiKey,$payload);
+$httpCode=(int)$rAi['code'];
+if($httpCode!==200){echo json_encode(['ok'=>false,'error'=>'خطا API AI (HTTP '.$httpCode.') — روش عبور: '.($rAi['via']??'?'),'category_id'=>0,'tried'=>$rAi['tried']??[]],JSON_UNESCAPED_UNICODE);exit;}
+$rData=$rAi['body']??[];
 $aiText=trim($rData['choices'][0]['message']['content']??'');
 
 $aiCatId=0;
@@ -9785,19 +10111,18 @@ $prompt="You are a product categorization assistant for a Persian (Farsi) e-comm
 $aiText='';$aiModelUsed='';
 if(!empty($aiApiKey)){
 
-$url=rtrim($aiBaseUrl,'/').'/chat/completions';
+// v8.61: از مسیر مشترک عبور
 $payload=['model'=>$aiModel,'messages'=>[['role'=>'system','content'=>'You are a product categorization assistant. Return ONLY the numeric category ID.'],['role'=>'user','content'=>$prompt]],'temperature'=>$aiTemperature,'max_tokens'=>20];
-$ch=curl_init($url);curl_setopt_array($ch,[CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>json_encode($payload,JSON_UNESCAPED_UNICODE),CURLOPT_HTTPHEADER=>['Content-Type: application/json','Authorization: Bearer '.$aiApiKey],CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>15,CURLOPT_SSL_VERIFYPEER=>false]);
-$resp=curl_exec($ch);$httpCode=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
-if($httpCode===200){$rData=json_decode($resp,true);$aiText=trim($rData['choices'][0]['message']['content']??'');$aiModelUsed=$aiModel;}
+$rQ=aiChat($aiBaseUrl,$aiApiKey,$payload);
+if((int)$rQ['code']===200){$rData=$rQ['body']??[];$aiText=trim($rData['choices'][0]['message']['content']??'');$aiModelUsed=$aiModel;}
 }
 if(empty($aiText)&&!empty($geminiKey)){
-
+// v8.61: جمنای هم از همان روش عبور رد می‌شود (قبلاً همیشه مستقیم بود)
+$netG=aiNetCfg();
 $url='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='.$geminiKey;
 $payload=['contents'=>['parts'=>['text'=>$prompt]],'generationConfig'=>['temperature'=>0.1,'maxOutputTokens'=>20]];
-$ch=curl_init($url);curl_setopt($ch,CURLOPT_POST,true);curl_setopt($ch,CURLOPT_POSTFIELDS,json_encode($payload));curl_setopt($ch,CURLOPT_HTTPHEADER,['Content-Type: application/json']);curl_setopt($ch,CURLOPT_RETURNTRANSFER,true);curl_setopt($ch,CURLOPT_TIMEOUT,15);
-$resp=curl_exec($ch);$httpCode=curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
-if($httpCode===200){$rData=json_decode($resp,true);$aiText=trim($rData['candidates'][0]['content']['parts'][0]['text']??'');$aiModelUsed='gemini-2.0-flash';}
+$rG=aiHttp($url,['Content-Type: application/json'],$payload,$netG);
+if((int)$rG['code']===200){$rData=$rG['body']??[];$aiText=trim($rData['candidates'][0]['content']['parts'][0]['text']??'');$aiModelUsed='gemini-2.0-flash';}
 }
 if(empty($aiText)){echo json_encode(['ok'=>false,'error'=>'خطا API هوش مصنوعی (هیچکدام پاسخ نداد)','category_id'=>0],JSON_UNESCAPED_UNICODE);exit;}
 
@@ -11271,7 +11596,71 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🔮 Gemini (برای دسته‌بندی خودکار باسلام)</div>
 <div class="crow"><label>کلید Gemini:</label><input type="password" id="bsGemKey" dir="ltr" placeholder="AIza..." style="flex:1"></div>
 </div>
-<div class="cact"><button class="btn btn-purple" onclick="testAi()">🔗 تست</button><button class="btn btn-green" onclick="testAiCategory()">🏷️ تست دسته</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
+
+<!-- v8.61: عبور از محدودیت شبکه -->
+<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
+<div style="font-size:11px;color:#67e8f9;font-weight:700;margin-bottom:6px">🌐 روش اتصال (عبور از محدودیت)</div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+اگر سرور در ایران است و به سرویس هوش مصنوعی وصل نمی‌شود، یکی از این روش‌ها را انتخاب کنید.
+با دکمهٔ «🩺 عیب‌یابی» می‌توانید همه را یک‌جا بسنجید و ببینید کدام روی سرور شما جواب می‌دهد.
+</div>
+<div class="crow"><label>روش:</label>
+<select id="aiNetMode" onchange="aiNetToggle()" style="flex:1">
+<option value="direct">مستقیم — بدون تغییر</option>
+<option value="doh">DNS-over-HTTPS — دور زدن DNS آلوده</option>
+<option value="dns">IP دستی — وقتی IP درست را می‌دانید</option>
+<option value="worker">Cloudflare Worker / پروکسی معکوس</option>
+<option value="gateway">درگاه واسط سازگار با OpenAI</option>
+<option value="proxy">پروکسی HTTP یا SOCKS5</option>
+</select></div>
+
+<div id="aiNetDoh" class="crow" style="display:none"><label>سرور DoH:</label>
+<select id="aiNetDohUrl" style="flex:1">
+<option value="https://cloudflare-dns.com/dns-query">Cloudflare — cloudflare-dns.com</option>
+<option value="https://dns.google/resolve">Google — dns.google</option>
+<option value="https://dns.quad9.net:5053/dns-query">Quad9</option>
+<option value="https://doh.sb/dns-query">DNS.SB</option>
+</select></div>
+
+<div id="aiNetDns" class="crow" style="display:none"><label>IP مقصد:</label>
+<input type="text" id="aiNetResolveIp" dir="ltr" placeholder="مثلاً 104.18.7.192" style="flex:1"></div>
+
+<div id="aiNetWorker" style="display:none">
+<div class="crow"><label>آدرس Worker:</label>
+<input type="url" id="aiNetWorkerUrl" dir="ltr" placeholder="https://xxx.workers.dev" style="flex:1"></div>
+<div style="font-size:10px;color:#64748b;margin:-4px 0 6px;line-height:1.8">
+💡 کد آمادهٔ Worker را با دکمهٔ «📄 کد Worker» بگیرید و در حساب رایگان Cloudflare بگذارید.<br>
+اگر آدرس شامل <code style="direction:ltr">{url}</code> باشد، آدرس مقصد جای آن می‌نشیند.
+</div>
+<div class="cact" style="margin-top:0"><button class="btn btn-gray" onclick="aiShowWorkerCode()" style="flex:1;font-size:11px">📄 کد Worker</button></div>
+</div>
+
+<div id="aiNetGateway" style="display:none;font-size:10.5px;color:#94a3b8;line-height:1.9;padding:6px 8px;background:#0f172a;border:1px solid #334155;border-radius:6px;margin-bottom:6px">
+در این حالت کافی است <b>Base URL</b> بالا را روی آدرس درگاه واسط بگذارید و کلید همان سرویس را وارد کنید.
+درخواست مستقیم به همان آدرس می‌رود.
+</div>
+
+<div id="aiNetProxy" style="display:none">
+<div class="crow"><label>آدرس پروکسی:</label>
+<input type="text" id="aiNetProxyUrl" dir="ltr" placeholder="127.0.0.1:1080" style="flex:1">
+<select id="aiNetProxyType" style="flex:0;min-width:100px">
+<option value="http">HTTP</option>
+<option value="socks5">SOCKS5</option>
+<option value="socks4">SOCKS4</option>
+</select></div>
+<div class="crow"><label>نام:رمز:</label>
+<input type="text" id="aiNetProxyAuth" dir="ltr" placeholder="اختیاری — user:pass" style="flex:1"></div>
+</div>
+
+<div class="crow" style="align-items:center">
+<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px">
+<input type="checkbox" id="aiNetFallback" style="width:16px;height:16px"> تلاش خودکار با روش‌های دیگر در صورت شکست
+</label></div>
+<div class="crow"><label>مهلت (ثانیه):</label>
+<input type="number" id="aiNetTimeout" value="25" min="5" max="120" step="5" style="max-width:90px" dir="ltr"></div>
+</div>
+
+<div class="cact"><button class="btn btn-purple" onclick="testAi()">🔗 تست</button><button class="btn btn-green" onclick="testAiCategory()">🏷️ تست دسته</button><button class="btn btn-orange" onclick="aiProbe()">🩺 عیب‌یابی</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div id="aiTR" style="margin-top:8px"></div>
 </div></div>
 
@@ -14155,6 +14544,19 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.61', t:'عبور از محدودیت شبکه برای اتصال به سرویس‌های هوش مصنوعی', items:[
+    'شش روش اتصال در بخش 🤖 هوش مصنوعی: مستقیم · DoH · IP دستی · Worker · درگاه واسط · پروکسی',
+    'DoH: آدرس واقعی دامنه از کلادفلر/گوگل گرفته می‌شود — برای وقتی DNS محلی آلوده است',
+    'در این حالت نام دامنه دست‌نخورده می‌ماند، پس گواهی SSL معتبر باقی می‌ماند',
+    'Cloudflare Worker: کد آمادهٔ Worker با یک دکمه در دسترس است؛ روی حساب رایگان اجرا می‌شود',
+    'پروکسی HTTP و SOCKS5 و SOCKS4 با نام کاربری و رمز اختیاری',
+    'گزینهٔ «تلاش خودکار با روش‌های دیگر» — اگر روش انتخابی نرسید، بقیه امتحان می‌شوند',
+    'خطای ۴۰۱ باعث تلاش بیهوده نمی‌شود، چون یعنی شبکه سالم است و فقط کلید ایراد دارد',
+    'دکمهٔ 🩺 عیب‌یابی همهٔ روش‌ها را می‌سنجد و می‌گوید کدام روی سرور شما جواب می‌دهد',
+    'عیب‌یابی، تفاوت DNS محلی با DNS واقعی را هم گزارش می‌کند',
+    'هر چهار نقطهٔ فراخوانی هوش مصنوعی از مسیر مشترک رد می‌شوند، جمنای هم شامل می‌شود',
+    'هیچ آدرس یا کلیدی از پیش در کد نیست — همه را خودتان وارد می‌کنید'
+  ]},
   {v:'8.60', t:'یادگیری و دسته‌بندی خودکار بر اساس «چند کلمهٔ اول»', items:[
     'تنظیم جدید در بخش 🧠 یادگیری دسته‌بندی: چند کلمهٔ اول عنوان مبنا باشد (۱ تا ۵)',
     'دسته‌بندی خودکار دوربه‌دور اجرا می‌شود: با ۲، اول یک کلمهٔ اول و اگر نشد دو کلمهٔ اول',
@@ -15631,7 +16033,7 @@ if(b.fallback_cat_ids&&Array.isArray(b.fallback_cat_ids)){renderBslFallbackCats(
 // v8.17: Restore extra vendors
 if(b.vendors&&Array.isArray(b.vendors)){bslExtraVendors=b.vendors;renderBslVendors();}
 // v8.06: Restore AI settings
-const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBaseUrl')&&a.base_url)$('aiBaseUrl').value=a.base_url;if($('aiModel')&&a.model)$('aiModel').value=a.model;if($('aiTemp')&&a.temperature)$('aiTemp').value=a.temperature;
+const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBaseUrl')&&a.base_url)$('aiBaseUrl').value=a.base_url;if($('aiModel')&&a.model)$('aiModel').value=a.model;if($('aiTemp')&&a.temperature)$('aiTemp').value=a.temperature;applyAiNet(cn.ai_net||{});
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
@@ -15639,7 +16041,7 @@ const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
-fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:$('aiBaseUrl')?.value||'https://dashscope.aliyuncs.com/compatible-mode/v1',model:$('aiModel')?.value||'qwen-plus',temperature:parseFloat($('aiTemp')?.value)||0.1}));
+fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:$('aiBaseUrl')?.value||'https://dashscope.aliyuncs.com/compatible-mode/v1',model:$('aiModel')?.value||'qwen-plus',temperature:parseFloat($('aiTemp')?.value)||0.1}));fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
@@ -15762,7 +16164,149 @@ function testNotif(type){
         else{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px;border-radius:6px">✗ '+esc(d.error||'خطا')+'</div>';}
     }).catch(()=>{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px;border-radius:6px">✗ خطا شبکه</div>';});
 }
-function testAi(){const s=$('aiS'),r=$('aiTR');s.textContent='تست...';s.className='cst tg';r.innerHTML='';const fd=new FormData();fd.append('action','test_ai');fd.append('api_key',$('aiKey').value.trim());fd.append('base_url',$('aiBaseUrl').value.trim());fd.append('model',$('aiModel').value);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(d.ok){s.textContent='✓';s.className='cst on';r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ '+esc(d.message)+' | مدل: '+esc(d.model)+' | پاسخ: '+esc(d.response||'')+'</div>';saveConn();}else{s.textContent='✗';s.className='cst off';r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';}}).catch(()=>{s.textContent='✗';s.className='cst off';});}
+/* v8.61: روش عبور از محدودیت شبکه برای سرویس‌های هوش مصنوعی */
+function aiNetToggle(){
+    const m=($('aiNetMode')||{}).value||'direct';
+    const show=(id,on)=>{const e=$(id);if(e)e.style.display=on?'':'none';};
+    show('aiNetDoh',m==='doh');
+    show('aiNetDns',m==='dns');
+    show('aiNetWorker',m==='worker');
+    show('aiNetGateway',m==='gateway');
+    show('aiNetProxy',m==='proxy');
+    updateAiNetBadge();
+}
+function updateAiNetBadge(){
+    const el=$('aiS'),m=($('aiNetMode')||{}).value||'direct';
+    if(!el)return;
+    if(el.textContent==='✓'||el.textContent==='✗')return;   // نتیجهٔ تست را پاک نکن
+    const names={direct:'مستقیم',doh:'DoH',dns:'IP دستی',worker:'Worker',gateway:'درگاه',proxy:'پروکسی'};
+    el.textContent=names[m]||m;
+}
+function getAiNet(){
+    return {
+        mode:($('aiNetMode')||{}).value||'direct',
+        resolve_ip:(($('aiNetResolveIp')||{}).value||'').trim(),
+        doh_url:($('aiNetDohUrl')||{}).value||'https://cloudflare-dns.com/dns-query',
+        worker_url:(($('aiNetWorkerUrl')||{}).value||'').trim(),
+        proxy:(($('aiNetProxyUrl')||{}).value||'').trim(),
+        proxy_type:($('aiNetProxyType')||{}).value||'http',
+        proxy_auth:(($('aiNetProxyAuth')||{}).value||'').trim(),
+        timeout:parseInt(($('aiNetTimeout')||{}).value)||25,
+        ipv4:1,
+        fallback:($('aiNetFallback')||{}).checked?1:0
+    };
+}
+function applyAiNet(n){
+    n=n||{};
+    if($('aiNetMode'))$('aiNetMode').value=n.mode||'direct';
+    if($('aiNetResolveIp'))$('aiNetResolveIp').value=n.resolve_ip||'';
+    if($('aiNetDohUrl')&&n.doh_url)$('aiNetDohUrl').value=n.doh_url;
+    if($('aiNetWorkerUrl'))$('aiNetWorkerUrl').value=n.worker_url||'';
+    if($('aiNetProxyUrl'))$('aiNetProxyUrl').value=n.proxy||'';
+    if($('aiNetProxyType'))$('aiNetProxyType').value=n.proxy_type||'http';
+    if($('aiNetProxyAuth'))$('aiNetProxyAuth').value=n.proxy_auth||'';
+    if($('aiNetTimeout'))$('aiNetTimeout').value=n.timeout||25;
+    if($('aiNetFallback'))$('aiNetFallback').checked=!!n.fallback;
+    aiNetToggle();
+}
+/* عیب‌یابی: همهٔ روش‌ها را می‌سنجد و می‌گوید کدام کار می‌کند */
+function aiProbe(){
+    const r=$('aiTR');
+    r.innerHTML='<div class="alert alert-info" style="padding:8px;font-size:11px">🩺 در حال سنجش روش‌ها... (تا یک دقیقه)</div>';
+    const n=getAiNet();
+    const q=new URLSearchParams({ai_probe:'1',base_url:($('aiBaseUrl')||{}).value||'',
+        net_mode:n.mode,net_resolve_ip:n.resolve_ip,net_doh_url:n.doh_url,
+        net_worker_url:n.worker_url,net_proxy:n.proxy,net_proxy_type:n.proxy_type,net_proxy_auth:n.proxy_auth});
+    fetch('?'+q.toString()).then(x=>x.json()).then(d=>{
+        if(!d.ok){r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+        let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px;line-height:2">';
+        h+='<div style="color:#67e8f9;font-weight:700;margin-bottom:6px">🩺 نتیجهٔ عیب‌یابی — '+esc(d.host||'')+'</div>';
+        (d.steps||[]).forEach(st=>{
+            h+='<div>'+(st.ok?'🟢':'🔴')+' '+esc(st.name)+' — <span style="color:#94a3b8">'+esc(st.detail||'')+'</span>'
+              +(st.ms!==undefined?' <span style="color:#64748b">('+toFa(st.ms)+'ms)</span>':'')+'</div>';
+        });
+        if((d.modes||[]).length){
+            h+='<div style="color:#fbbf24;font-weight:700;margin:8px 0 4px">روش‌های عبور:</div>';
+            const names={direct:'مستقیم',doh:'DoH',dns:'IP دستی',worker:'Worker',gateway:'درگاه',proxy:'پروکسی'};
+            d.modes.forEach(m=>{
+                h+='<div>'+(m.reached?'🟢':'🔴')+' <b>'+esc(names[m.mode]||m.mode)+'</b> — '+esc(m.note||'')
+                  +' <span style="color:#64748b">('+toFa(m.ms)+'ms)</span></div>';
+            });
+        }
+        h+='<div style="margin-top:8px;padding-top:6px;border-top:1px solid #334155;color:'+((d.working||[]).length?'#4ade80':'#fca5a5')+'">'+esc(d.summary||'')+'</div>';
+        if(d.recommended){
+            h+='<button class="btn btn-green" style="margin-top:8px;font-size:11px;padding:5px 10px" onclick="aiUseMode(\''+d.recommended+'\')">✓ استفاده از روش پیشنهادی</button>';
+        }
+        h+='</div>';
+        r.innerHTML=h;
+    }).catch(()=>{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ خطا شبکه</div>';});
+}
+function aiUseMode(m){
+    if($('aiNetMode')){$('aiNetMode').value=m;aiNetToggle();}
+    saveConn();
+    showToast('✓ روش «'+m+'» انتخاب و ذخیره شد');
+}
+/* کد آمادهٔ Cloudflare Worker — کاربر کپی می‌کند و در حساب رایگان خودش می‌گذارد */
+function aiShowWorkerCode(){
+    const code=[
+"// Cloudflare Worker — واسط رساندن درخواست به سرویس هوش مصنوعی",
+"// ۱) وارد dash.cloudflare.com شوید → Workers → Create Worker",
+"// ۲) این کد را جایگزین کنید → Deploy",
+"// ۳) آدرس xxx.workers.dev را در تنظیمات این برنامه بگذارید",
+"export default {",
+"  async fetch(request) {",
+"    const cors = {",
+"      'Access-Control-Allow-Origin': '*',",
+"      'Access-Control-Allow-Headers': '*',",
+"      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS'",
+"    };",
+"    if (request.method === 'OPTIONS') return new Response(null, { headers: cors });",
+"",
+"    // آدرس مقصد: از هدر X-Target-URL یا از مسیر بعد از /",
+"    let target = request.headers.get('X-Target-URL');",
+"    if (!target) {",
+"      const u = new URL(request.url);",
+"      target = u.pathname.slice(1) + u.search;",
+"      if (target.startsWith('https:/') && !target.startsWith('https://'))",
+"        target = target.replace('https:/', 'https://');",
+"      if (target.startsWith('http:/') && !target.startsWith('http://'))",
+"        target = target.replace('http:/', 'http://');",
+"    }",
+"    if (!/^https?:\\/\\//.test(target))",
+"      return new Response('bad target', { status: 400, headers: cors });",
+"",
+"    const h = new Headers(request.headers);",
+"    h.delete('X-Target-URL');",
+"    h.delete('Host');",
+"",
+"    const resp = await fetch(target, {",
+"      method: request.method,",
+"      headers: h,",
+"      body: ['GET','HEAD'].includes(request.method) ? undefined : await request.arrayBuffer()",
+"    });",
+"    const out = new Headers(resp.headers);",
+"    Object.entries(cors).forEach(([k,v]) => out.set(k,v));",
+"    return new Response(resp.body, { status: resp.status, headers: out });",
+"  }",
+"};"
+    ].join('\n');
+    const r=$('aiTR');
+    r.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px">'
+      +'<div style="color:#67e8f9;font-weight:700;font-size:11px;margin-bottom:6px">📄 کد Cloudflare Worker</div>'
+      +'<textarea id="aiWorkerCode" readonly style="width:100%;height:220px;font-family:ui-monospace,monospace;font-size:10px;direction:ltr;text-align:left;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:8px"></textarea>'
+      +'<button class="btn btn-cyan" style="margin-top:6px;font-size:11px;padding:5px 10px" onclick="aiCopyWorkerCode()">📋 کپی</button>'
+      +'<div style="font-size:10px;color:#64748b;margin-top:6px;line-height:1.8">حساب رایگان Cloudflare روزانه ۱۰۰٬۰۰۰ درخواست می‌دهد که برای این کار کافی است.</div>'
+      +'</div>';
+    $('aiWorkerCode').value=code;
+}
+function aiCopyWorkerCode(){
+    const t=$('aiWorkerCode');if(!t)return;
+    t.select();
+    try{document.execCommand('copy');showToast('✓ کد کپی شد');}
+    catch(e){if(navigator.clipboard){navigator.clipboard.writeText(t.value);showToast('✓ کد کپی شد');}}
+}
+function testAi(){const s=$('aiS'),r=$('aiTR');s.textContent='تست...';s.className='cst tg';r.innerHTML='';const fd=new FormData();fd.append('action','test_ai');fd.append('api_key',$('aiKey').value.trim());fd.append('base_url',$('aiBaseUrl').value.trim());fd.append('model',$('aiModel').value);const _n=getAiNet();fd.append('net_mode',_n.mode);fd.append('net_resolve_ip',_n.resolve_ip);fd.append('net_doh_url',_n.doh_url);fd.append('net_worker_url',_n.worker_url);fd.append('net_proxy',_n.proxy);fd.append('net_proxy_type',_n.proxy_type);fd.append('net_proxy_auth',_n.proxy_auth);fd.append('net_fallback',_n.fallback);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(d.ok){s.textContent='✓';s.className='cst on';r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ '+esc(d.message)+' | مدل: '+esc(d.model)+' | پاسخ: '+esc(d.response||'')+(d.via?' | مسیر: <b>'+esc(d.via)+'</b>':'')+'</div>';saveConn();}else{s.textContent='✗';s.className='cst off';let _t='';if(d.tried&&d.tried.length>1){_t='<div style="margin-top:4px;font-size:10px;color:#fca5a5">تلاش‌ها: '+d.tried.map(x=>esc(x.mode)+'='+(x.code||'✗')).join(' · ')+'</div>';}
+r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+_t+'<div style="margin-top:6px"><button class="btn btn-orange" style="font-size:10px;padding:4px 8px" onclick="aiProbe()">🩺 عیب‌یابی روش‌ها</button></div></div>';}}).catch(()=>{s.textContent='✗';s.className='cst off';});}
 // v8.06: Test AI category selection with a sample product title
 function testAiCategory(){const r=$('aiTR');const title=prompt('عنوان محصول برای تست دسته‌بندی:','کفش ورزشی مردانه نایک');if(!title)return;r.innerHTML='<div style="color:#67e8f9;font-size:11px">🔄 در حال تحلیل «'+esc(title)+'» با AI...</div>';fetch('?ai_category=1&title='+encodeURIComponent(title)).then(r=>r.json()).then(d=>{if(d.ok){r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ دسته: <b>'+esc(d.category_name)+'</b> ('+d.category_id+') | مدل: '+esc(d.ai_model||'')+' | پاسخ AI: '+esc(d.ai_raw||'')+'</div>';}else{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';}}).catch(()=>{r.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا شبکه</div>';});}
 
