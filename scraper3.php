@@ -16846,6 +16846,24 @@ function showBslQueueDetail(qid){
         const failedMap={};
         (e.failed_details||[]).forEach(f=>{failedMap[f.key||f.title]=f;});
         let detailHtml='';
+        // نمایش اطلاعات پروفایل و دسته‌بندی‌ها
+        detailHtml+='<div style="padding:10px;background:#0f172a;border-radius:8px;margin-bottom:12px;border:1px solid #334155">';
+        detailHtml+='<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">';
+        if(e.profile_name){
+            detailHtml+='<span style="color:#67e8f9;font-size:11px;background:#0e749020;padding:4px 8px;border-radius:4px">👤 پروفایل: '+esc(e.profile_name)+'</span>';
+        }
+        if(e.config){
+            if(e.config.category_id&&e.config.category_id>0){
+                detailHtml+='<span style="color:#a78bfa;font-size:11px;background:#7c3aed20;padding:4px 8px;border-radius:4px">📁 دسته اصلی: '+toFa(e.config.category_id)+'</span>';
+            }
+            if(e.config.auto_category){
+                detailHtml+='<span style="color:#22d3ee;font-size:11px;background:#0e749020;padding:4px 8px;border-radius:4px">🤖 دسته‌بندی خودکار</span>';
+            }
+            if(e.config.fallback_cat_ids&&e.config.fallback_cat_ids.length>0){
+                detailHtml+='<span style="color:#fbbf24;font-size:11px;background:#78350f20;padding:4px 8px;border-radius:4px">📂 دسته‌های جایگزین: '+e.config.fallback_cat_ids.map(id=>toFa(id)).join('، ')+'</span>';
+            }
+        }
+        detailHtml+='</div></div>';
         detailHtml+='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;padding:10px;background:#0f172a;border-radius:8px">';
         detailHtml+='<div style="text-align:center"><b style="color:#4ade80;font-size:16px">'+toFa(e.sent||0)+'</b><div style="color:#64748b;font-size:10px">✅ جدید</div></div>';
         detailHtml+='<div style="text-align:center"><b style="color:#facc15;font-size:16px">'+toFa(e.updated||0)+'</b><div style="color:#64748b;font-size:10px">⚡ آپدیت</div></div>';
