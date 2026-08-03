@@ -27,6 +27,8 @@ const WOO_PRODUCTS_FILE = __DIR__ . '/woo_products_temp.json';
 const BSL_QUEUE_FILE = __DIR__ . '/bsl_queue.json';
 const EXTRACT_PROGRESS_FILE = __DIR__ . '/extract_progress.json';
 const CATLEARN_FILE = __DIR__ . '/category_learning.json';   // v8.48
+// v8.60: سقف «چند کلمهٔ اول» برای یادگیری و تطبیق خودکار دسته‌بندی
+const CATLEARN_MAX_WORDS = 5;
 const RECON_PROGRESS_FILE = __DIR__ . '/recon_progress.json'; // v8.49
 const SUFFIX_PROGRESS_FILE = __DIR__ . '/suffix_progress.json'; // v8.53
 const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
@@ -34,7 +36,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.59';
+const APP_VERSION = '8.60';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -587,19 +589,51 @@ return $catId;
 
 /** کلمهٔ اولِ معنادار عنوان را برمی‌گرداند */
 function catFirstWord(string $title): string {
-    $n = preg_replace('/[0-9!@#$%^&*()+=\[\]{}|\\\\:;"\'<>,.?\/_\-–—…·«»]/u', ' ',
+    return catFirstWords($title, 1);
+}
+
+/**
+ * v8.60: «چند کلمهٔ اول» عنوان، به‌عنوان کلید یادگیری.
+ *
+ * با n=1 همان رفتار قدیمی («کفش») و با n=2 کلید دقیق‌تر («کفش ورزشی»).
+ * کلمات تبلیغاتی ابتدای عنوان نادیده گرفته می‌شوند تا «خرید کفش ورزشی»
+ * و «کفش ورزشی» یک کلید بدهند.
+ */
+function catFirstWords(string $title, int $n = 1): string {
+    $n = max(1, min(CATLEARN_MAX_WORDS, $n));
+    $s = preg_replace('/[0-9!@#$%^&*()+=\[\]{}|\\\\:;"\'<>,.?\/_\-–—…·«»]/u', ' ',
                       mb_strtolower(trim($title), 'UTF-8'));
-    $n = preg_replace('/\s{2,}/u', ' ', trim($n));
-    if ($n === '') return '';
+    $s = preg_replace('/\s{2,}/u', ' ', trim($s));
+    if ($s === '') return '';
     $skip = ['خرید', 'فروش', 'قیمت', 'ارسال', 'رایگان', 'تخفیف', 'ویژه', 'جدید', 'اصل', 'اصلی'];
-    foreach (preg_split('/\s+/u', $n) as $w) {
+    $out = [];
+    foreach (preg_split('/\s+/u', $s) as $w) {
         $w = trim($w);
         if (mb_strlen($w, 'UTF-8') < 2) continue;
         if (in_array($w, $skip, true)) continue;   // کلمات تبلیغاتی ابتدای عنوان
-        return $w;
+        $out[] = $w;
+        if (count($out) >= $n) break;
     }
-    return '';
+    return implode(' ', $out);
 }
+
+/**
+ * v8.60: تعداد کلمه‌های تنظیم‌شده برای یادگیری و دسته‌بندی خودکار.
+ * ۱ یعنی همان رفتار قدیمی. ۲ یعنی دور اول با یک کلمه، دور دوم با دو کلمه.
+ */
+function catLearnWordCount(?array $cn = null): int {
+    if ($cn === null) {
+        static $cached = null;
+        if ($cached !== null) return $cached;
+        $cn = is_file(CONNECTIONS_FILE)
+            ? (json_decode((string)@file_get_contents(CONNECTIONS_FILE), true) ?: [])
+            : [];
+        $cached = max(1, min(CATLEARN_MAX_WORDS, (int)($cn['catlearn_words'] ?? 1)));
+        return $cached;
+    }
+    return max(1, min(CATLEARN_MAX_WORDS, (int)($cn['catlearn_words'] ?? 1)));
+}
+
 
 function catLearnLoad(): array {
     if (!is_file(CATLEARN_FILE)) return [];
@@ -617,17 +651,29 @@ function catLearnSave(array $d): void {
  * عوض شد، انتخاب تازه‌تر و پرتکرارتر برنده شود.
  */
 function catLearnRecord(string $title, int $catId, string $catName = ''): bool {
-    $w = catFirstWord($title);
-    if ($w === '' || $catId <= 0) return false;
+    if ($catId <= 0) return false;
+    // v8.60: کلید را برای همهٔ طول‌های ۱..N ثبت کن. اینطور جست‌وجوی دقیق
+    // (چند کلمه) و جست‌وجوی عمومی (یک کلمه) هر دو جواب می‌دهند و تنظیم
+    // بعداً هم قابل تغییر است بدون اینکه آموخته‌ها بی‌فایده شوند.
+    $maxN = catLearnWordCount();
+    $keys = [];
+    for ($i = 1; $i <= $maxN; $i++) {
+        $k = catFirstWords($title, $i);
+        if ($k !== '' && !in_array($k, $keys, true)) $keys[] = $k;
+    }
+    if (empty($keys)) return false;
     $d = catLearnLoad();
-    if (!isset($d[$w]) || !is_array($d[$w])) $d[$w] = ['cats' => [], 'n' => 0];
-    $k = (string)$catId;
-    $prev = $d[$w]['cats'][$k] ?? ['n' => 0, 'name' => ''];
-    $d[$w]['cats'][$k] = ['n' => (int)$prev['n'] + 1,
-                          'name' => $catName !== '' ? $catName : (string)($prev['name'] ?? ''),
-                          'at' => time()];
-    $d[$w]['n'] = (int)($d[$w]['n'] ?? 0) + 1;
-    $d[$w]['last'] = time();
+    foreach ($keys as $w) {
+        if (!isset($d[$w]) || !is_array($d[$w])) $d[$w] = ['cats' => [], 'n' => 0];
+        $k = (string)$catId;
+        $prev = $d[$w]['cats'][$k] ?? ['n' => 0, 'name' => ''];
+        $d[$w]['cats'][$k] = ['n' => (int)$prev['n'] + 1,
+                              'name' => $catName !== '' ? $catName : (string)($prev['name'] ?? ''),
+                              'at' => time()];
+        $d[$w]['n'] = (int)($d[$w]['n'] ?? 0) + 1;
+        $d[$w]['last'] = time();
+        $d[$w]['words'] = count(preg_split('/\s+/u', $w));
+    }
     // سقف حجم: ۱۰۰۰ کلمه، قدیمی‌ترها حذف می‌شوند
     if (count($d) > 1000) {
         uasort($d, fn($a, $b) => (int)($b['last'] ?? 0) <=> (int)($a['last'] ?? 0));
@@ -637,12 +683,10 @@ function catLearnRecord(string $title, int $catId, string $catName = ''): bool {
     return true;
 }
 
-/** دستهٔ آموخته‌شده برای کلمهٔ اولِ این عنوان، یا ۰ */
-function catLearnLookup(string $title, ?array $learned = null): int {
-    $w = catFirstWord($title);
-    if ($w === '') return 0;
-    $d = $learned ?? catLearnLoad();
-    $row = $d[$w] ?? null;
+/** بهترین دسته برای یک کلیدِ مشخص، یا ۰ */
+function catLearnBestFor(string $key, array $d): int {
+    if ($key === '') return 0;
+    $row = $d[$key] ?? null;
     if (!is_array($row) || empty($row['cats'])) return 0;
     $bestId = 0; $bestN = 0; $bestAt = 0;
     foreach ($row['cats'] as $cid => $info) {
@@ -655,7 +699,63 @@ function catLearnLookup(string $title, ?array $learned = null): int {
     return $bestId;
 }
 
-function autoMatchBslCategory(string $productTitle, array $flatCategories): int {
+/**
+ * دستهٔ آموخته‌شده برای این عنوان، یا ۰.
+ *
+ * v8.60: اگر تنظیم «چند کلمهٔ اول» بیشتر از ۱ باشد، از دقیق‌ترین حالت
+ * (بیشترین کلمه) شروع می‌کند و به سمت عمومی‌تر پایین می‌آید. یعنی
+ * «کفش ورزشی» بر «کفش» مقدم است، و اگر چیزی برای دو کلمه ثبت نشده باشد
+ * به یک کلمه برمی‌گردد. $maxWords برای اجرای دور‌به‌دور استفاده می‌شود.
+ */
+function catLearnLookup(string $title, ?array $learned = null, ?int $maxWords = null): int {
+    $d = $learned ?? catLearnLoad();
+    $n = $maxWords !== null ? max(1, min(CATLEARN_MAX_WORDS, $maxWords)) : catLearnWordCount();
+    for ($i = $n; $i >= 1; $i--) {
+        $id = catLearnBestFor(catFirstWords($title, $i), $d);
+        if ($id > 0) return $id;
+    }
+    return 0;
+}
+
+/**
+ * v8.60: تطبیق خودکار دسته، دوربه‌دور.
+ *
+ * تنظیم «چند کلمهٔ اول» می‌گوید حداکثر چند دور اجرا شود:
+ *   n=1 → فقط یک دور با کلمهٔ اول (رفتار قدیمی)
+ *   n=2 → دور اول با یک کلمهٔ اول؛ اگر نتیجه‌ای نداد، دور دوم با دو کلمهٔ اول
+ * در هر دور، اول حافظهٔ یادگیریِ همان طول بررسی می‌شود و بعد امتیازدهی
+ * روی نام دسته‌ها با وزنِ سه‌برابر برای همان چند کلمهٔ ابتدایی.
+ */
+function autoMatchBslCategory(string $productTitle, array $flatCategories, ?int $maxWords = null): int {
+    $rounds = $maxWords !== null
+        ? max(1, min(CATLEARN_MAX_WORDS, $maxWords))
+        : catLearnWordCount();
+
+    // v8.60: حافظهٔ یادگیری قبل از همهٔ دورهای حدس بررسی می‌شود، از دقیق‌ترین
+    // کلید (بیشترین کلمه) به عمومی‌ترین. اگر این کار را نمی‌کردیم، حدسِ دور
+    // اول می‌توانست جلوی انتخابِ آموخته‌شدهٔ دو کلمه‌ای را بگیرد و اصلاح دستی
+    // کاربر هیچ‌وقت اثر نکند.
+    if ($flatCategories) {
+        $learned = catLearnLoad();
+        for ($i = $rounds; $i >= 1; $i--) {
+            $lid = catLearnBestFor(catFirstWords($productTitle, $i), $learned);
+            if ($lid <= 0) continue;
+            foreach ($flatCategories as $c) {
+                if ((int)($c['id'] ?? 0) === $lid) return $lid;
+            }
+        }
+    }
+
+    // بعد حدسِ الگوریتم، دوربه‌دور: اول یک کلمه، بعد دو کلمه، ...
+    for ($r = 1; $r <= $rounds; $r++) {
+        $id = autoMatchBslCategoryRound($productTitle, $flatCategories, $r);
+        if ($id > 0) return $id;
+    }
+    return 0;
+}
+
+/** یک دور تطبیق با «$wordsN کلمهٔ اول» به‌عنوان کلمهٔ کلیدی پروزن */
+function autoMatchBslCategoryRound(string $productTitle, array $flatCategories, int $wordsN = 1): int {
 
 $norm=preg_replace('/[0-9!@#$%^&*()+=\[\]{}|\\\\:;"\'<>,.?\/_\-–—…·«»]/u',' ',mb_strtolower(trim($productTitle),'UTF-8'));
 $norm=preg_replace('/\s{2,}/u',' ',$norm);
@@ -666,13 +766,16 @@ if(empty($pWords))return 0;
 
 // v8.48: اول حافظهٔ یادگیری. اگر کاربر قبلاً برای این کلمهٔ اول دسته‌ای
 // انتخاب کرده، همان برنده است — انتخاب انسان بر حدس الگوریتم مقدم است.
-$learnedId=catLearnLookup($productTitle);
+// v8.60: در هر دور فقط کلیدِ همان طول بررسی می‌شود.
+$learnedId=catLearnBestFor(catFirstWords($productTitle,$wordsN),catLearnLoad());
 if($learnedId>0){
 foreach($flatCategories as $c){if((int)($c['id']??0)===$learnedId)return $learnedId;}
 }
 
 // v8.48: کلمهٔ اول نوع کالا را می‌گوید و بقیه صفت‌اند، پس وزنش بیشتر است
-$firstWord=catFirstWord($productTitle);
+// v8.60: با تنظیم چندکلمه‌ای، همان چند کلمهٔ ابتدایی وزن بیشتر می‌گیرند
+$leadWords=array_filter(preg_split('/\s+/u',catFirstWords($productTitle,$wordsN)));
+$firstWord=$leadWords[0]??'';
 
 $bestScore=0;$bestCatId=0;
 foreach($flatCategories as $cat){
@@ -685,7 +788,8 @@ $overlap=0;
 foreach($pWords as $pw){
 $pwLen=mb_strlen($pw,'UTF-8');
 // v8.48: تطبیق روی کلمهٔ اول سه برابر ارزش دارد
-$wMul=($firstWord!==''&&$pw===$firstWord)?3:1;
+// v8.60: در دور چندکلمه‌ای، همهٔ کلمات ابتدایی همین وزن را می‌گیرند
+$wMul=in_array($pw,$leadWords,true)?3:1;
 foreach($catWords as $cw){
 $cw=trim($cw);$cwLen=mb_strlen($cw,'UTF-8');
 
@@ -3806,6 +3910,8 @@ if (isset($_POST['queue_dedup']))       $conn['queue_dedup']       = !empty($_PO
 if (isset($_POST['queue_dedup_stale'])) $conn['queue_dedup_stale'] = max(0, (int)$_POST['queue_dedup_stale']);
 if (isset($_POST['cron_lock_min']))     $conn['cron_lock_min']     = max(1, min(240, (int)$_POST['cron_lock_min']));
 if (isset($_POST['keep_reports']))      $conn['keep_reports']      = max(1, min(200, (int)$_POST['keep_reports']));
+// v8.60: چند کلمهٔ اول برای یادگیری و دسته‌بندی خودکار
+if (isset($_POST['catlearn_words']))    $conn['catlearn_words']    = max(1, min(CATLEARN_MAX_WORDS, (int)$_POST['catlearn_words']));
 echo json_encode(['ok'=>saveConnections($conn),'message'=>'ذخیره شد'], JSON_UNESCAPED_UNICODE); exit;
 }
 
@@ -4783,8 +4889,14 @@ if (isset($_GET['catlearn_bulk'])) {
         if ($t === '') continue;
         $cid = catLearnLookup($t, $learned);
         if ($cid > 0) {
+            // v8.60: کلیدی که واقعاً جواب داد را گزارش کن، نه همیشه یک کلمه
+            $usedKey = catFirstWord($t);
+            for ($i = catLearnWordCount(); $i >= 1; $i--) {
+                $k = catFirstWords($t, $i);
+                if (catLearnBestFor($k, $learned) === $cid) { $usedKey = $k; break; }
+            }
             $out[] = ['id' => (int)($r['id'] ?? 0), 'title' => $t,
-                      'word' => catFirstWord($t), 'cat_id' => $cid];
+                      'word' => $usedKey, 'cat_id' => $cid];
         }
     }
     echo json_encode(['ok' => true, 'matches' => $out, 'count' => count($out)],
@@ -4971,7 +5083,15 @@ if (isset($_GET['catlearn'])) {
     }
     $test = trim((string)($_GET['test'] ?? ''));
     if ($test !== '') {
+        // v8.60: هر دور را جداگانه نشان بده تا معلوم شود کدام طول جواب داد
+        $maxN = catLearnWordCount();
+        $rounds = [];
+        for ($i = 1; $i <= $maxN; $i++) {
+            $k = catFirstWords($test, $i);
+            $rounds[] = ['words' => $i, 'key' => $k, 'cat_id' => catLearnBestFor($k, $d)];
+        }
         echo json_encode(['ok' => true, 'title' => $test, 'first_word' => catFirstWord($test),
+            'word_count' => $maxN, 'rounds' => $rounds,
             'learned_cat' => catLearnLookup($test, $d)], JSON_UNESCAPED_UNICODE); exit;
     }
 
@@ -5091,6 +5211,28 @@ if (isset($_GET['selftest'])) {
         $noteEmpty = null;
         $add('8.57', 'تصویر: آدرس خالی چیزی نمی‌فرستد', wooImagePayload($wBad, '', $noteEmpty) === []);
     }
+
+    // v8.60: یادگیری و تطبیق بر اساس «چند کلمهٔ اول»
+    $add('8.60', 'تنظیم چند کلمهٔ اول', function_exists('catFirstWords')
+         && function_exists('catLearnWordCount') && defined('CATLEARN_MAX_WORDS'));
+    if (function_exists('catFirstWords')) {
+        $t60 = 'خرید کفش ورزشی مردانه';
+        $one = catFirstWords($t60, 1);
+        $two = catFirstWords($t60, 2);
+        $add('8.60', 'یک کلمهٔ اول (کلمات تبلیغاتی رد می‌شوند)', $one === 'کفش', $one);
+        $add('8.60', 'دو کلمهٔ اول', $two === 'کفش ورزشی', $two);
+        $add('8.60', 'سازگاری: catFirstWord همان یک کلمه است', catFirstWord($t60) === $one);
+        $add('8.60', 'سقف تعداد کلمه رعایت می‌شود',
+             catLearnWordCount(['catlearn_words' => 99]) === CATLEARN_MAX_WORDS);
+        $add('8.60', 'مقدار کمتر از ۱ به ۱ اصلاح می‌شود',
+             catLearnWordCount(['catlearn_words' => 0]) === 1);
+    }
+    $add('8.60', 'تطبیق خودکار دوربه‌دور', function_exists('autoMatchBslCategoryRound'));
+    $add('8.60', 'حافظهٔ یادگیری قبل از حدس بررسی می‌شود',
+         strpos($selfSrc, 'catLearnBestFor(catFirstWords($productTitle, $i), $learned)') !== false);
+    $add('8.60', 'همین منطق در سمت مرورگر هم هست',
+         strpos($selfSrc, 'function catFirstWordsJS') !== false
+         && strpos($selfSrc, 'function autoMatchBslCategoryRoundJS') !== false);
 
     // v8.59: دکمهٔ توقف باسلام باید واقعاً به سرویس وصل باشد
     $stopWired = preg_match('~function stopBslProcess\(\)\{[\s\S]{0,1200}?bsl_stop=1~', $selfSrc) === 1;
@@ -11298,11 +11440,28 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div></div>
 
 <div class="smenu">
-<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🧠 یادگیری دسته‌بندی</h3><span class="arrow">▼</span></div>
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🧠 یادگیری دسته‌بندی</h3><span class="cst off" id="catWordsBadge">۱ کلمه</span><span class="arrow">▼</span></div>
 <div class="smenu-body">
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
-هر بار دستهٔ محصولی را دستی اصلاح کنید، سیستم کلمهٔ اولِ عنوان را با آن دسته به خاطر می‌سپارد
+هر بار دستهٔ محصولی را دستی اصلاح کنید، سیستم چند کلمهٔ اولِ عنوان را با آن دسته به خاطر می‌سپارد
 و دفعهٔ بعد خودش همان را پیشنهاد می‌دهد.
+</div>
+<!-- v8.60: چند کلمهٔ اول -->
+<div class="crow" style="align-items:center">
+<label>چند کلمهٔ اول:</label>
+<select id="catLearnWords" onchange="saveConn();updateCatWordsBadge()" style="flex:1">
+<option value="1">۱ کلمه — فقط کلمهٔ اول</option>
+<option value="2">۲ کلمه — اول ۱ کلمه، بعد ۲ کلمه</option>
+<option value="3">۳ کلمه — تا سه کلمهٔ اول</option>
+<option value="4">۴ کلمه</option>
+<option value="5">۵ کلمه</option>
+</select>
+</div>
+<div style="font-size:10.5px;color:#64748b;margin:-2px 0 8px;line-height:1.8">
+💡 دسته‌بندی خودکار دوربه‌دور اجرا می‌شود: اگر ۲ باشد، اول با «کلمهٔ اول» تلاش می‌کند
+و اگر نتیجه‌ای نداد، دور بعد با «دو کلمهٔ اول».<br>
+🧠 یادگیری هم برای همهٔ طول‌های ۱ تا همین عدد ثبت می‌شود، پس تغییر این تنظیم
+آموخته‌های قبلی را بی‌فایده نمی‌کند.
 </div>
 <div class="cact">
 <button class="btn btn-gray" onclick="catLearnShow()" style="flex:1">📚 آموخته‌ها</button>
@@ -13996,6 +14155,18 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.60', t:'یادگیری و دسته‌بندی خودکار بر اساس «چند کلمهٔ اول»', items:[
+    'تنظیم جدید در بخش 🧠 یادگیری دسته‌بندی: چند کلمهٔ اول عنوان مبنا باشد (۱ تا ۵)',
+    'دسته‌بندی خودکار دوربه‌دور اجرا می‌شود: با ۲، اول یک کلمهٔ اول و اگر نشد دو کلمهٔ اول',
+    'یادگیری برای همهٔ طول‌های ۱ تا همان عدد ثبت می‌شود',
+    'پس تغییر این تنظیم، آموخته‌های قبلی را بی‌فایده نمی‌کند',
+    'در جست‌وجو، کلید دقیق‌تر مقدم است: «کفش ورزشی» بر «کفش»',
+    'اگر کلید بلند ثبت نشده باشد، خودکار به کلید کوتاه‌تر برمی‌گردد',
+    'اصلاح دستی کاربر همیشه بر حدس الگوریتم مقدم است، حتی اگر حدسِ دور اول زودتر جواب بدهد',
+    'در هر دور، همان چند کلمهٔ ابتدایی وزن سه‌برابر می‌گیرند نه فقط کلمهٔ اول',
+    'همین منطق در سمت مرورگر هم پیاده شد تا پیشنهادهای فاز ۲ با سرور یکی باشد',
+    'با مقدار ۱ رفتار دقیقاً مثل قبل است'
+  ]},
   {v:'8.59', t:'دکمهٔ توقف باسلام واقعاً کار می‌کند، شناسهٔ دستی دستهٔ ووکامرس، و دستهٔ پروفایل در کادر ارسال', items:[
     'باگ اصلی توقف: دکمهٔ ⏹ هیچ‌وقت سرویس ?bsl_stop را صدا نمی‌زد',
     'فقط دکمه‌ها را پنهان می‌کرد و متغیر مرورگر را عوض می‌کرد؛ ارسال سرورساید بی‌خبر ادامه می‌داد',
@@ -14695,6 +14866,15 @@ function updateGenBadge(){
   if(!el||!cb)return;
   el.textContent=cb.checked?'ضدتکرار روشن':'ضدتکرار خاموش';
   el.className='cst '+(cb.checked?'on':'off');
+}
+/* v8.60: نشانگر «چند کلمهٔ اول» کنار عنوان بخش یادگیری */
+function updateCatWordsBadge(){
+  const el=$('catWordsBadge'),s=$('catLearnWords');
+  if(!el||!s)return;
+  const n=parseInt(s.value)||1;
+  catLearnWordsCfg=n;
+  el.textContent=toFa(n)+' کلمه';
+  el.className='cst '+(n>1?'on':'off');
 }
 
 function genQueueStatus(){
@@ -15455,7 +15635,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
@@ -15463,7 +15643,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
@@ -19020,31 +19200,60 @@ function bslPhase2FixAll(){
     })();
 }
 // v7.48: Improved autoMatchBslCategoryJS — word-boundary matching
-function autoMatchBslCategoryJS(title,cats){
+/* v8.60: «چند کلمهٔ اول» عنوان — معادل catFirstWords در PHP */
+let catLearnWordsCfg=1;
+function catFirstWordsJS(title,n){
+    n=Math.max(1,Math.min(5,parseInt(n)||1));
+    const s=(title||'').toLowerCase()
+        .replace(/[0-9!@#$%^&*()+=\[\]{}|\\:;"'<>,.?/_\-–—…·«»]/g,' ')
+        .replace(/\s{2,}/g,' ').trim();
+    if(!s)return '';
+    const skip=['خرید','فروش','قیمت','ارسال','رایگان','تخفیف','ویژه','جدید','اصل','اصلی'];
+    const out=[];
+    for(const w of s.split(/\s+/)){
+        if(w.length<2||skip.includes(w))continue;
+        out.push(w);
+        if(out.length>=n)break;
+    }
+    return out.join(' ');
+}
+/* v8.60: دوربه‌دور — اول ۱ کلمه، بعد ۲ کلمه، تا سقف تنظیم‌شده */
+function autoMatchBslCategoryJS(title,cats,maxWords){
+    const rounds=Math.max(1,Math.min(5,parseInt(maxWords)||catLearnWordsCfg||1));
+    for(let r=1;r<=rounds;r++){
+        const id=autoMatchBslCategoryRoundJS(title,cats,r);
+        if(id>0)return id;
+    }
+    return 0;
+}
+function autoMatchBslCategoryRoundJS(title,cats,wordsN){
     const norm=title.toLowerCase().replace(/[0-9!@#$%^&*()+=\[\]{}|\\:;"<>,.?/_\-–—…·«»]/g,' ').replace(/\s{2,}/g,' ');
     const stop=['و','با','از','برای','در','یک','این','آن','که','هم','است','بود','شد','کن','کرد','باید','دیگر','قیمت','فروش','ارسال','رایگان','تخفیف','ویژه','نو','جدید','ست','بسته','دار','تکه','عدد','پک','سایز','رنگ','کد','اصلی','مخصوص','تک','فرد','نوع','مدل','خط','سری','متفرقه','کرانه','تن'];
     const words=norm.split(/\s+/).filter(w=>w.length>=2&&!stop.includes(w));
     if(!words.length)return 0;
+    // v8.60: کلمات ابتدایی همین دور، وزن سه‌برابر می‌گیرند (مثل سمت PHP)
+    const lead=catFirstWordsJS(title,wordsN||1).split(/\s+/).filter(Boolean);
     let best=0,bestId=0;
     cats.forEach(c=>{
         const catNorm=(c.name||'').toLowerCase().replace(/[0-9()]/g,' ').replace(/\s{2,}/g,' ').trim();
         const cw=catNorm.split(/\s+/).filter(w=>w.length>=2);
         let score=0;
         words.forEach(pw=>{
+            const wMul=lead.includes(pw)?3:1;
             cw.forEach(ccw=>{
                 // 1) Exact word match
-                if(pw===ccw){score+=3;return;}
+                if(pw===ccw){score+=3*wMul;return;}
                 // 2) v7.48: Word-boundary substring only — "صندل" matches "صندل" in "کفش صندل" but NOT "صندلی"
                 if(pw.length<ccw.length){
                     // pw at start of ccw
                     if(ccw.startsWith(pw)){
                         const nextChar=ccw[pw.length];
-                        if(nextChar===' '||nextChar==='\u200c'){score+=2;return;}
+                        if(nextChar===' '||nextChar==='\u200c'){score+=2*wMul;return;}
                     }
                     // pw at end of ccw
                     if(ccw.endsWith(pw)){
                         const prevChar=ccw[ccw.length-pw.length-1];
-                        if(prevChar===' '||prevChar==='\u200c'){score+=2;return;}
+                        if(prevChar===' '||prevChar==='\u200c'){score+=2*wMul;return;}
                     }
                 }
                 // pw longer than ccw — ccw must appear with word boundaries in pw
@@ -19052,7 +19261,7 @@ function autoMatchBslCategoryJS(title,cats){
                     const pos=pw.indexOf(ccw);
                     const beforeOk=pos===0||pw[pos-1]===' ';
                     const afterOk=pos+ccw.length===pw.length||pw[pos+ccw.length]===' ';
-                    if(beforeOk&&afterOk){score+=1.5;return;}
+                    if(beforeOk&&afterOk){score+=1.5*wMul;return;}
                 }
             });
         });
