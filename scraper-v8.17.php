@@ -34,7 +34,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.57';
+const APP_VERSION = '8.58';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -957,6 +957,25 @@ if(!empty($upResult['ok']))return $upResult;
 }
 
 return['ok'=>0,'error'=>'تصویر آپلود نشد — 3 تلاش ناموفق (فایل، مستقیم، پراکسی)'];
+}
+
+/**
+ * v8.58: آیا خطای ووکامرس مربوط به تصویر است؟
+ *
+ * وقتی ووکامرس نتواند تصویر را از روی آدرس بردارد (هات‌لینک بسته، ۴۰۳،
+ * تایم‌اوت)، کل درخواست ساخت محصول را رد می‌کند. یعنی یک تصویرِ نگرفتنی
+ * باعث می‌شد اصلاً محصولی ساخته نشود. با تشخیص این خطا، همان محصول را
+ * بدون تصویر دوباره می‌فرستیم تا دست‌کم محصول ساخته شود.
+ */
+function wooIsImageError(array $r): bool {
+    $code = (string)($r['body']['code'] ?? '');
+    $msg  = (string)($r['body']['message'] ?? '');
+    if ($code !== '' && stripos($code, 'image') !== false) return true;
+    foreach (['remote image', 'invalid image', 'image_upload', 'upload_error',
+              'not a valid image', 'error getting remote'] as $needle) {
+        if (stripos($msg, $needle) !== false) return true;
+    }
+    return false;
 }
 
 /**
@@ -4481,6 +4500,18 @@ $wooOnlyChanged = !empty($syncCfg['wooAddUpdate']);
 $bslOnlyChanged = !empty($syncCfg['bslAddUpdate']);
 $changedKeys = ($wooOnlyChanged || $bslOnlyChanged) ? syncChangedKeys($exRes ?? []) : null;
 
+// v8.58: اگر استخراج انجام نشده باشد، فهرست تغییرات وجود ندارد.
+// تا اینجا در آن حالت فیلتر کنار گذاشته می‌شد و «کل» محصولات دوباره
+// فرستاده می‌شد — یعنی تیک «افزودن/آپدیت» دقیقاً در همان پروفایل‌هایی
+// که استخراجشان شکست می‌خورد (سلکتور ذخیره‌نشده، ردیف جامانده در صف،
+// سایت مبدأ خراب) بی‌اثر می‌شد. این همان «بعضی پروفایل‌ها توجهی نمی‌کنند»
+// بود. تیک یعنی «فقط تغییرات»؛ وقتی تغییری معلوم نیست، چیزی هم نباید برود.
+$extractOk = !empty($exRes['ok']);
+if (($wooOnlyChanged || $bslOnlyChanged) && !$extractOk) {
+    $changedKeys = [];                       // فهرست خالی = چیزی برای ارسال نیست
+    $pResult['add_update_hold'] = $pResult['extract_error'] ?? 'استخراج انجام نشد';
+}
+
 // v8.44: اگر ضریب/درصد قیمت یا پسوند عنوان دستی عوض شده باشد، قیمت
 // «همهٔ» محصولات عوض شده — حتی آن‌هایی که سایت مبدأ تغییرشان نداده.
 // در این حالت فیلتر «فقط تغییرات» باید یک بار کنار گذاشته شود، وگرنه
@@ -5057,6 +5088,30 @@ if (isset($_GET['selftest'])) {
              $srcFallback ? 'images[0].src' : 'خالی برگشت');
         $noteEmpty = null;
         $add('8.57', 'تصویر: آدرس خالی چیزی نمی‌فرستد', wooImagePayload($wBad, '', $noteEmpty) === []);
+    }
+
+    // v8.58: تصویر — تکراریِ بی‌تصویر باید تصویر بگیرد، و تصویرِ نگرفتنی
+    // نباید کل محصول را از بین ببرد.
+    $add('8.58', 'تشخیص خطای تصویر ووکامرس', function_exists('wooIsImageError'));
+    if (function_exists('wooIsImageError')) {
+        $imgErr = wooIsImageError(['body' => ['code' => 'woocommerce_product_image_upload_error',
+                                              'message' => 'Error getting remote image http://x/a.jpg']]);
+        $notErr = wooIsImageError(['body' => ['code' => 'woocommerce_rest_invalid_id',
+                                              'message' => 'Invalid ID.']]);
+        $add('8.58', 'خطای تصویر شناسایی می‌شود', $imgErr);
+        $add('8.58', 'خطاهای دیگر با تصویر اشتباه گرفته نمی‌شوند', !$notErr);
+    }
+    $add('8.58', 'تکراریِ بدون تصویر رد نمی‌شود', strpos($selfSrc, '$needImg') !== false);
+    // v8.58: تیک افزودن/آپدیت وقتی استخراج نشده
+    $add('8.58', 'تیک افزودن/آپدیت با استخراج ناموفق نگه داشته می‌شود',
+         strpos($selfSrc, 'add_update_hold') !== false);
+    // v8.58: نام دسته‌های هر وظیفه برای مودال صف
+    $add('8.58', 'نام دسته‌بندی وظیفهٔ صف باسلام', function_exists('bslQueueCatInfo'));
+    if (function_exists('bslQueueCatInfo')) {
+        $ciT = bslQueueCatInfo(['category_id' => 0, 'auto_category' => true,
+                                'fallback_cat_ids' => [5, 6], 'title_suffix' => '| تست']);
+        $add('8.58', 'دستهٔ تعیین‌نشده درست گزارش می‌شود', $ciT['main'] === null);
+        $add('8.58', 'دسته‌های جایگزین شمرده می‌شوند', count($ciT['fallback']) === 2);
     }
 
     // v8.57: ارسال‌کنندهٔ باسلام نباید تنظیمات عمومی را بازنویسی کند
@@ -7187,12 +7242,16 @@ $exPrice=trim((string)($existing['regular_price']??''));
 $exStock=(int)($existing['stock_quantity']??0);
 $newStock=(int)($w['stock_quantity']??10);
 send_sse('send_info',['msg'=>"[$n] تکراری یافت شد: ID#$exId | قیمت: $exPrice | موجودی: $exStock"]);
-if($exPrice===$pPrice&&$exStock===$newStock){
+// v8.58: اگر مقصد تصویر ندارد، «تکراری» حساب نکن — تصویر را اضافه کن
+$exHasImgS=!empty($existing['images'])&&is_array($existing['images']);
+$needImgS=!$exHasImgS&&!empty($p['image']);
+if($exPrice===$pPrice&&$exStock===$newStock&&!$needImgS){
 $skipped++;
 send_sse('send_skip',['key'=>$pKey,'remote_id'=>$existing['id'],'title'=>$pTitle,'reason'=>'تکرار: نام+قیمت+موجودی یکسان','image'=>$p['image']??'','price'=>$pPrice,'price_unit'=>$priceUnit,'category'=>'','link'=>$p['link']??'']);
 send_sse('send_info',['msg'=>"[$n] ⏭ رد شد - تکرار دقیق"]);
 usleep(100000);continue;
 }else{
+if($needImgS)send_sse('send_info',['msg'=>"[$n] 🖼 تکراری ولی بدون تصویر — تصویر اضافه می‌شود"]);
 send_sse('send_info',['msg'=>"[$n] ⚡ آپدیت: قیمت $exPrice → $pPrice | موجودی $exStock → $newStock"]);
 $wpUpdate=['regular_price'=>$pPrice,'stock_quantity'=>$newStock];
 if(!empty($p['short_desc']))$wpUpdate['short_description']=$p['short_desc'];
@@ -7203,6 +7262,12 @@ $wpUpdate['images']=$wooStreamImgs;
 }
 if(!empty($p['sku']))$wpUpdate['sku']=$p['sku'];
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$existing['id'],$wpUpdate);
+// v8.58: تصویرِ نگرفتنی نباید کل آپدیت را از بین ببرد
+if(!$r['ok']&&!empty($wpUpdate['images'])&&wooIsImageError($r)){
+send_sse('send_info',['msg'=>"[$n] ⚠️ ووکامرس تصویر را نگرفت — آپدیت بدون تصویر"]);
+unset($wpUpdate['images']);
+$r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$existing['id'],$wpUpdate);
+}
 if($r['ok']&&!empty($r['body']['id'])){
 $updated++;
 send_sse('send_update',['key'=>$pKey,'remote_id'=>$r['body']['id'],'title'=>$r['body']['name']??$pTitle,'edit_url'=>rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$r['body']['id'].'&action=edit','old_price'=>$exPrice,'new_price'=>$pPrice,'update_reason'=>'تغییر قیمت: '.$exPrice.' → '.$pPrice]);
@@ -7218,6 +7283,12 @@ usleep(150000);continue;
 }
 send_sse('send_info',['msg'=>"[$n] 🆕 محصول جدید - ایجاد..."]);
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'POST','products',$wp);
+// v8.58: اگر ووکامرس فقط به‌خاطر تصویر رد کرد، بدون تصویر بساز
+if(!$r['ok']&&!empty($wp['images'])&&wooIsImageError($r)){
+send_sse('send_info',['msg'=>"[$n] ⚠️ ووکامرس تصویر را نگرفت — ساخت بدون تصویر"]);
+unset($wp['images']);
+$r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'POST','products',$wp);
+}
 if($r['ok']&&!empty($r['body']['id'])){
 $sent++;
 send_sse('send_ok',['key'=>$pKey,'remote_id'=>$r['body']['id'],'title'=>$r['body']['name']??'','edit_url'=>rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$r['body']['id'].'&action=edit']);
@@ -7371,18 +7442,25 @@ $exStock=(int)($existing['stock_quantity']??0);
 $newStock=(int)($w['stock_quantity']??10);
 $editUrl=rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$exId.'&action=edit';
 
-if($exPrice===$pPrice&&$exStock===$newStock){
+// v8.58: «تکراری» فقط وقتی که تصویر هم سر جایش باشد.
+// قبلاً محصولی که قیمت و موجودی‌اش یکی بود ولی در ووکامرس تصویر نداشت،
+// رد می‌شد و برای همیشه بی‌تصویر می‌ماند — این همان «هنوز بدون تصویر است».
+$exHasImg=!empty($existing['images'])&&is_array($existing['images']);
+$needImg=!$exHasImg&&!empty($p['image']);
+if($exPrice===$pPrice&&$exStock===$newStock&&!$needImg){
 $skipped++;$wooSkippedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$exId,'reason'=>'تکرار: نام+قیمت+موجودی یکسان','edit_url'=>$editUrl],$card);
 wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⏭ تکرار: $pTitle");
 continue;
+}
+if($needImg&&$exPrice===$pPrice&&$exStock===$newStock){
+wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 تکراری ولی بدون تصویر — تصویر اضافه می‌شود");
 }
 
 // v8.57: اگر محصول مقصد از قبل تصویر دارد، دست نزن. فقط وقتی تصویر
 // ندارد یا ما تصویر تازه داریم، تصویر را می‌فرستیم — و اگر آپلود مستقیم
 // نشد، آدرس را به خود ووکامرس می‌سپاریم.
 $wooUpdImgs=[];
-$exHasImg=!empty($existing['images'])&&is_array($existing['images']);
-if(!empty($p['image'])&&!$exHasImg){
+if($needImg){
 $imgNote=null;
 $wooUpdImgs=wooImagePayload($w,(string)$p['image'],$imgNote);
 if($imgNote)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 ".$imgNote);
@@ -7394,6 +7472,13 @@ if(!empty($p['long_desc']))$wpUpdate['description']=$p['long_desc'];
 if(!empty($wooUpdImgs))$wpUpdate['images']=$wooUpdImgs;
 if(!empty($p['sku']))$wpUpdate['sku']=$p['sku'];
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$exId,$wpUpdate);
+// v8.58: اگر فقط تصویر مقصر بود، بدون تصویر دوباره تلاش کن تا بقیهٔ
+// تغییرات (قیمت/موجودی) از دست نرود.
+if(!$r['ok']&&!empty($wpUpdate['images'])&&wooIsImageError($r)){
+wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚠️ ووکامرس تصویر را نگرفت — آپدیت بدون تصویر");
+unset($wpUpdate['images']);
+$r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$exId,$wpUpdate);
+}
 if($r['ok']&&!empty($r['body']['id'])){
 $updated++;$wooUpdatedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$r['body']['id'],'edit_url'=>$editUrl,'changes'=>'قیمت '.$exPrice.'→'.$pPrice,'update_reason'=>'تغییر قیمت: '.$exPrice.' → '.$pPrice],$card);
 wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚡ آپدیت: ID#{$r['body']['id']}");
@@ -7411,6 +7496,14 @@ if(!empty($wooNewImgs))$wp['images']=$wooNewImgs;
 if($imgNote)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 ".$imgNote);
 
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'POST','products',$wp);
+// v8.58: ووکامرس اگر نتواند تصویر را از آدرس بردارد، کل ساخت محصول را رد
+// می‌کند. در آن صورت محصول را بدون تصویر بساز — محصولِ بی‌تصویر بهتر از
+// نبودِ محصول است، و در اجرای بعدی تصویر دوباره تلاش می‌شود.
+if(!$r['ok']&&!empty($wp['images'])&&wooIsImageError($r)){
+wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚠️ ووکامرس تصویر را نگرفت — ساخت بدون تصویر");
+unset($wp['images']);
+$r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'POST','products',$wp);
+}
 if($r['ok']&&!empty($r['body']['id'])){
 $editUrl=rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$r['body']['id'].'&action=edit';
 $sent++;$wooSentList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$r['body']['id'],'edit_url'=>$editUrl,'price'=>$pPrice],$card);
@@ -8357,6 +8450,63 @@ echo json_encode(['ok'=>true,'bsl_temp_deleted'=>$bslDel,'woo_temp_deleted'=>$wo
 exit;
 }
 
+/**
+ * v8.58: نام دسته‌بندی‌های یک وظیفهٔ صف باسلام.
+ *
+ * تا اینجا مودال هر وظیفه فقط آمار و فهرست محصولات را نشان می‌داد و
+ * معلوم نبود این وظیفه با کدام دسته ارسال شده. حالا دستهٔ اصلی، حالت
+ * «دستهٔ خودکار» و دسته‌های جایگزین با نام برگردانده می‌شوند.
+ *
+ * درخت دسته‌ها یک بار گرفته و کنار فایل کش می‌شود؛ اگر شبکه در دسترس
+ * نبود، همان شناسه‌ها بدون نام برمی‌گردند و مودال باز می‌ماند.
+ */
+function bslCatNameMapCached(): array {
+    static $map = null;
+    if ($map !== null) return $map;
+    $map = [];
+    $cacheFile = __DIR__ . '/bsl_cat_names.json';
+    if (is_file($cacheFile) && (time() - (int)@filemtime($cacheFile)) < 86400) {
+        $d = json_decode((string)@file_get_contents($cacheFile), true);
+        if (is_array($d) && $d) { $map = $d; return $map; }
+    }
+    $cn = loadConnections();
+    $tk = (string)($cn['basalam']['token'] ?? '');
+    if ($tk === '') return $map;
+    $r = bslReq($tk, 'GET', 'categories');
+    if (empty($r['ok'])) return $map;
+    $walk = function ($items) use (&$walk, &$map) {
+        foreach ((array)$items as $c) {
+            $id = (int)($c['id'] ?? 0);
+            if ($id > 0) $map[$id] = trim((string)($c['title'] ?? $c['name'] ?? ''));
+            if (!empty($c['children']) && is_array($c['children'])) $walk($c['children']);
+        }
+    };
+    $walk($r['body']['data'] ?? $r['body'] ?? []);
+    if ($map) @file_put_contents($cacheFile, json_encode($map, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    return $map;
+}
+
+function bslQueueCatInfo(array $cfg): array {
+    $names   = bslCatNameMapCached();
+    $mainId  = (int)($cfg['category_id'] ?? 0);
+    $autoCat = !empty($cfg['auto_category']);
+    $label   = function (int $id) use ($names) {
+        $n = $names[$id] ?? '';
+        return ['id' => $id, 'name' => $n !== '' ? $n : ('#' . $id)];
+    };
+    $fallback = [];
+    foreach ((array)($cfg['fallback_cat_ids'] ?? []) as $fid) {
+        $fid = (int)$fid;
+        if ($fid > 0) $fallback[] = $label($fid);
+    }
+    return [
+        'main'          => $mainId > 0 ? $label($mainId) : null,
+        'auto_category' => $autoCat,
+        'fallback'      => $fallback,
+        'title_suffix'  => trim((string)($cfg['title_suffix'] ?? '')),
+    ];
+}
+
 function bslReadQueue(): array {
 clearstatcache(true,BSL_QUEUE_FILE);
 if(!file_exists(BSL_QUEUE_FILE)) return ['entries'=>[]];
@@ -8771,6 +8921,9 @@ $entry['started_at']=$progress['started_at']??$entry['started_at'];
 
 $products=@json_decode(@file_get_contents($entry['products_file']??'')?:'[]',true)?:[];
 $entry['products']=$products;
+// v8.58: نام دسته‌بندی‌های همین وظیفه را هم برگردان تا بالای مودال
+// نشان داده شود. شناسهٔ تنها برای کاربر معنایی ندارد.
+$entry['cat_info']=bslQueueCatInfo($entry['config']??[]);
 echo json_encode(['ok'=>true,'entry'=>$entry],JSON_UNESCAPED_UNICODE);
 exit;
 }
@@ -13803,6 +13956,17 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.58', t:'دستهٔ هر وظیفه در مودال صف، تصویر ووکامرس، و احترام به تیک افزودن/آپدیت', items:[
+    'بالای مودال هر وظیفهٔ صف باسلام، دسته‌بندی‌های همان وظیفه با نام نمایش داده می‌شود',
+    'دستهٔ اصلی، وضعیت دستهٔ خودکار، دسته‌های جایگزین و پسوند عنوان — همه با نام، نه فقط شناسه',
+    'تصویر ووکامرس، علت اول: محصولی که قیمت و موجودی‌اش یکی بود «تکراری» رد می‌شد',
+    'اگر همان محصول در ووکامرس تصویر نداشت، برای همیشه بی‌تصویر می‌ماند — حالا تصویرش اضافه می‌شود',
+    'تصویر ووکامرس، علت دوم: اگر ووکامرس نمی‌توانست تصویر را از آدرس بردارد، کل محصول رد می‌شد',
+    'حالا اگر فقط تصویر مقصر باشد، محصول بدون تصویر ساخته می‌شود و اجرای بعدی دوباره تلاش می‌کند',
+    'تیک «افزودن/آپدیت»: وقتی استخراج انجام نمی‌شد، فیلتر کنار می‌رفت و کل محصولات دوباره می‌رفت',
+    'برای پروفایل بدون سلکتور، پروفایل جامانده در صف، یا سایت مبدأ خراب، تیک عملاً بی‌اثر بود',
+    'حالا اگر فهرست تغییرات معلوم نباشد، هیچ چیز فرستاده نمی‌شود و علتش در گزارش می‌آید'
+  ]},
   {v:'8.57', t:'رفع ارسال بدون عکس در ووکامرس و بازسازی کامل صف باسلام', items:[
     'عکس ووکامرس: کلید ck_/cs_ فقط روی مسیرهای wc/v3 معتبر است و هستهٔ وردپرس آن را کاربر نمی‌شناسد',
     'برای همین آپلود به wp/v2/media با ۴۰۱ رد می‌شد و محصول بی‌تصویر ساخته می‌شد',
@@ -16812,6 +16976,25 @@ function showBslQueueDetail(qid){
         const failedMap={};
         (e.failed_details||[]).forEach(f=>{failedMap[f.key||f.title]=f;});
         let detailHtml='';
+        /* v8.58: بالای مودال، دسته‌بندی‌های اعمال‌شده روی همین وظیفه.
+           قبلاً معلوم نبود این وظیفه با کدام دسته رفته است. */
+        const ci=e.cat_info||{};
+        detailHtml+='<div style="margin-bottom:12px;padding:10px;background:#0f172a;border:1px solid #334155;border-radius:8px;font-size:11.5px;line-height:2">';
+        detailHtml+='<div style="color:#67e8f9;font-weight:700;margin-bottom:4px">📂 دسته‌بندی این وظیفه</div>';
+        if(e.profile_name)detailHtml+='<div style="color:#94a3b8">پروفایل: <b style="color:#e2e8f0">'+esc(e.profile_name)+'</b></div>';
+        if(ci.main){
+            detailHtml+='<div style="color:#94a3b8">دستهٔ اصلی: <b style="color:#4ade80">'+esc(ci.main.name)+'</b> <span style="color:#64748b;font-family:ui-monospace,monospace">#'+ci.main.id+'</span></div>';
+        }else{
+            detailHtml+='<div style="color:#fca5a5">دستهٔ اصلی: تعیین نشده</div>';
+        }
+        detailHtml+='<div style="color:#94a3b8">دستهٔ خودکار: <b style="color:'+(ci.auto_category?'#4ade80':'#64748b')+'">'+(ci.auto_category?'روشن':'خاموش')+'</b></div>';
+        if(ci.fallback&&ci.fallback.length>0){
+            detailHtml+='<div style="color:#94a3b8">دسته‌های جایگزین: '+ci.fallback.map(f=>'<b style="color:#fbbf24">'+esc(f.name)+'</b> <span style="color:#64748b;font-family:ui-monospace,monospace">#'+f.id+'</span>').join(' · ')+'</div>';
+        }else{
+            detailHtml+='<div style="color:#64748b">دسته‌های جایگزین: ندارد</div>';
+        }
+        if(ci.title_suffix)detailHtml+='<div style="color:#94a3b8">پسوند عنوان: <b style="color:#e2e8f0">'+esc(ci.title_suffix)+'</b></div>';
+        detailHtml+='</div>';
         detailHtml+='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;padding:10px;background:#0f172a;border-radius:8px">';
         detailHtml+='<div style="text-align:center"><b style="color:#4ade80;font-size:16px">'+toFa(e.sent||0)+'</b><div style="color:#64748b;font-size:10px">✅ جدید</div></div>';
         detailHtml+='<div style="text-align:center"><b style="color:#facc15;font-size:16px">'+toFa(e.updated||0)+'</b><div style="color:#64748b;font-size:10px">⚡ آپدیت</div></div>';

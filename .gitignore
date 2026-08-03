@@ -35,6 +35,7 @@ last_notification_check.json
 
 # v8.48: category learning memory (runtime)
 category_learning.json
+bsl_cat_names.json
 
 # v8.49: recon runtime state
 recon_progress.json
