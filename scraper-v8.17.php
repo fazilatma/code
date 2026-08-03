@@ -1335,138 +1335,6 @@ function wooIsImageError(array $r): bool {
  * نتیجه‌اش تمیزتر است)، و اگر نشد آدرس تصویر مستقیم به ووکامرس داده
  * می‌شود. خروجی همان آرایه‌ای است که در فیلد images محصول می‌نشیند.
  */
-/* =====================================================================
- *  v8.63: پل افزونهٔ وردپرس (Scraper Bridge)
- *
- *  مشکل: کلید ووکامرس فقط روی wc/v3 معتبر است، پس آپلود به wp/v2/media
- *  رد می‌شود؛ و سپردن آدرس تصویر به ووکامرس هم وقتی سایت مبدأ هات‌لینک
- *  را بسته یا سرور وردپرس دسترسی بیرونی ندارد شکست می‌خورد.
- *
- *  راه‌حل: افزونهٔ کوچکی روی وردپرس (پوشهٔ wp-plugin در همین مخزن) که
- *  مسیر wp-json/wc-scraper/v1/... را باز می‌کند. چون فضای نام با «wc-»
- *  شروع می‌شود، خودِ ووکامرس آن را با همان consumer key/secret احراز
- *  هویت می‌کند و کلید تازه‌ای لازم نیست.
- *
- *  ما بایت‌های تصویر را اینجا می‌گیریم و base64 می‌فرستیم؛ سرور وردپرس
- *  اصلاً لازم نیست به اینترنت وصل شود.
- * ===================================================================== */
-
-/** درخواست به افزونهٔ پل */
-function wooBridgeReq(array $w, string $method, string $ep, ?array $body = null, int $timeout = 60): array {
-    $url = rtrim((string)($w['store_url'] ?? ''), '/') . '/wp-json/wc-scraper/v1/' . ltrim($ep, '/');
-    $ch = curl_init($url);
-    $opt = [
-        CURLOPT_RETURNTRANSFER => 1, CURLOPT_FOLLOWLOCATION => 1,
-        CURLOPT_CONNECTTIMEOUT => 10, CURLOPT_TIMEOUT => $timeout,
-        CURLOPT_SSL_VERIFYPEER => 0, CURLOPT_SSL_VERIFYHOST => 0,
-        CURLOPT_USERPWD => ($w['consumer_key'] ?? '') . ':' . ($w['consumer_secret'] ?? ''),
-        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Accept: application/json'],
-        CURLOPT_CUSTOMREQUEST => $method,
-    ];
-    if ($body !== null) $opt[CURLOPT_POSTFIELDS] = json_encode($body, JSON_UNESCAPED_UNICODE);
-    curl_setopt_array($ch, $opt);
-    $raw = curl_exec($ch);
-    $err = curl_error($ch);
-    $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-    curl_close($ch);
-    return ['ok' => $code >= 200 && $code < 300, 'code' => $code, 'error' => $err,
-            'body' => @json_decode((string)$raw, true), 'raw' => $raw];
-}
-
-/**
- * آیا افزونهٔ پل روی این فروشگاه نصب و در دسترس است؟
- * نتیجه چند دقیقه کش می‌شود تا هر محصول یک درخواست اضافه نزند.
- */
-function wooBridgeAvailable(array $w, bool $force = false): bool {
-    static $cache = null;
-    if ($cache !== null && !$force) return $cache;
-    $cn = loadConnections();
-    $mode = (string)($cn['woocommerce']['bridge_mode'] ?? 'auto');
-    if ($mode === 'off') { $cache = false; return false; }
-
-    $f = __DIR__ . '/woo_bridge_state.json';
-    if (!$force && is_file($f) && (time() - (int)@filemtime($f)) < 600) {
-        $d = json_decode((string)@file_get_contents($f), true);
-        if (is_array($d) && isset($d['ok'])) { $cache = (bool)$d['ok']; return $cache; }
-    }
-    $r = wooBridgeReq($w, 'GET', 'ping', null, 15);
-    $ok = !empty($r['ok']) && !empty($r['body']['ok']);
-    @file_put_contents($f, json_encode([
-        'ok' => $ok, 'at' => time(), 'code' => $r['code'],
-        'version' => $r['body']['version'] ?? null,
-        'wc' => $r['body']['wc'] ?? null,
-        'error' => $ok ? '' : mb_substr((string)($r['body']['message'] ?? $r['error'] ?? ('HTTP ' . $r['code'])), 0, 120),
-    ], JSON_UNESCAPED_UNICODE), LOCK_EX);
-    $cache = $ok;
-    return $ok;
-}
-
-/** بایت‌های تصویر را برمی‌گرداند (از کش محلی یا با دانلود) */
-function wooFetchImageBytes(string $imgUrl, string $productLink = ''): array {
-    $imgUrl = trim(html_entity_decode($imgUrl, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
-    if ($imgUrl === '' || preg_match('~^(data:|blob:|javascript:|#)~i', $imgUrl)) {
-        return ['ok' => false, 'error' => 'آدرس نامعتبر'];
-    }
-    $local = saveImageLocal($imgUrl, $productLink);
-    if ($local && is_file($local) && filesize($local) > 200) {
-        $d = @file_get_contents($local);
-        if ($d !== false && isImageData($d)) {
-            $conv = convertToSupportedFormat($d);
-            if (!empty($conv['ok'])) $d = $conv['data'];
-            return ['ok' => true, 'data' => $d, 'ext' => detectImageFormat($d) ?: 'jpg'];
-        }
-    }
-    return ['ok' => false, 'error' => 'دانلود تصویر ناموفق'];
-}
-
-/**
- * ساخت/به‌روزرسانی محصول از راه افزونهٔ پل، همراه با تصویر.
- * خروجی null یعنی پل در دسترس نیست و باید مسیر عادی wc/v3 استفاده شود.
- */
-function wooBridgeSend(array $w, array $fields, string $imgUrl = '', string $productLink = '',
-                       int $productId = 0, ?string &$note = null): ?array {
-    if (!wooBridgeAvailable($w)) return null;
-    $payload = $fields;
-    if ($productId > 0) $payload['product_id'] = $productId;
-    if ($imgUrl !== '') {
-        $img = wooFetchImageBytes($imgUrl, $productLink);
-        if (!empty($img['ok'])) {
-            $payload['image_b64'] = base64_encode($img['data']);
-            $payload['image_name'] = 'product-' . substr(md5($imgUrl), 0, 10) . '.' . $img['ext'];
-        } else {
-            // بگذار خود وردپرس آدرس را امتحان کند
-            $payload['image_url'] = $imgUrl;
-        }
-    }
-    $r = wooBridgeReq($w, 'POST', 'product', $payload, 120);
-    if (empty($r['ok'])) {
-        $note = 'پل ناموفق (HTTP ' . (int)$r['code'] . ') — مسیر عادی امتحان می‌شود';
-        return null;   // برگرد به مسیر wc/v3
-    }
-    $b = $r['body'] ?? [];
-    $note = 'از راه افزونهٔ پل — ' . (string)($b['image'] ?? '');
-    return ['ok' => true, 'id' => (int)($b['product_id'] ?? 0), 'created' => !empty($b['created']),
-            'image_id' => (int)($b['image_id'] ?? 0), 'image' => (string)($b['image'] ?? ''),
-            'edit_url' => (string)($b['edit_url'] ?? ''), 'via' => 'bridge'];
-}
-
-/** فقط وصل کردن تصویر به محصول موجود، از راه پل */
-function wooBridgeAttachImage(array $w, int $productId, string $imgUrl, string $productLink = '', ?string &$note = null): ?array {
-    if ($productId <= 0 || $imgUrl === '' || !wooBridgeAvailable($w)) return null;
-    $payload = ['product_id' => $productId];
-    $img = wooFetchImageBytes($imgUrl, $productLink);
-    if (!empty($img['ok'])) {
-        $payload['image_b64'] = base64_encode($img['data']);
-        $payload['image_name'] = 'product-' . substr(md5($imgUrl), 0, 10) . '.' . $img['ext'];
-    } else {
-        $payload['image_url'] = $imgUrl;
-    }
-    $r = wooBridgeReq($w, 'POST', 'attach-image', $payload, 120);
-    if (empty($r['ok'])) { $note = 'پل ناموفق (HTTP ' . (int)$r['code'] . ')'; return null; }
-    $note = 'از راه افزونهٔ پل — ' . (string)($r['body']['image'] ?? '');
-    return ['ok' => true, 'image_id' => (int)($r['body']['image_id'] ?? 0), 'via' => 'bridge'];
-}
-
 function wooImagePayload(array $w, string $imgUrl, ?string &$note = null): array {
     $imgUrl = trim($imgUrl);
     if ($imgUrl === '') { $note = 'بدون تصویر — آدرس خالی'; return []; }
@@ -4253,7 +4121,7 @@ exit;
 if (($_POST['action'] ?? '') === 'save_connections') {
 header('Content-Type: application/json; charset=UTF-8');
 $conn = loadConnections();
-if (isset($_POST['woocommerce'])) { $w = json_decode($_POST['woocommerce'], true) ?: []; $bm = (string)($w['bridge_mode'] ?? 'auto'); $conn['woocommerce'] = ['enabled'=>!empty($w['enabled']),'store_url'=>trim($w['store_url']??''),'consumer_key'=>trim($w['consumer_key']??''),'consumer_secret'=>trim($w['consumer_secret']??''),'default_category'=>(int)($w['default_category']??0),'default_status'=>$w['default_status']??'draft','stock_quantity'=>(int)($w['stock_quantity']??10),'manage_stock'=>!empty($w['manage_stock']),'bridge_mode'=>in_array($bm,['auto','off'],true)?$bm:'auto']; }
+if (isset($_POST['woocommerce'])) { $w = json_decode($_POST['woocommerce'], true) ?: []; $conn['woocommerce'] = ['enabled'=>!empty($w['enabled']),'store_url'=>trim($w['store_url']??''),'consumer_key'=>trim($w['consumer_key']??''),'consumer_secret'=>trim($w['consumer_secret']??''),'default_category'=>(int)($w['default_category']??0),'default_status'=>$w['default_status']??'draft','stock_quantity'=>(int)($w['stock_quantity']??10),'manage_stock'=>!empty($w['manage_stock'])]; }
 if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??'')];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'gemini_api_key'=>trim($b['gemini_api_key']??''),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors]; }
 
 if (isset($_POST['ai'])) { $a = json_decode($_POST['ai'], true) ?: []; $conn['ai'] = ['enabled'=>!empty($a['enabled']),'api_key'=>trim($a['api_key']??''),'base_url'=>trim($a['base_url']??'https://dashscope.aliyuncs.com/compatible-mode/v1'),'model'=>trim($a['model']??'qwen-plus'),'temperature'=>(float)($a['temperature']??0.1)]; }
@@ -5676,50 +5544,6 @@ if (isset($_GET['recon_result'])) {
  *                کدام روی این سرور جواب می‌دهد.
  * هیچ چیزی ذخیره نمی‌شود؛ فقط گزارش می‌دهد.
  */
-/**
- * v8.63: وضعیت افزونهٔ پل وردپرس.
- * ?bridge_check=1  → آیا نصب است؟ چه نسخه‌ای؟ چه کاربری؟
- */
-if (isset($_GET['bridge_check'])) {
-    header('Content-Type: application/json; charset=UTF-8');
-    @set_time_limit(60);
-    $cn = loadConnections();
-    $w = $cn['woocommerce'] ?? [];
-    if (empty($w['store_url'])) {
-        echo json_encode(['ok' => false, 'error' => 'آدرس ووکامرس تنظیم نشده'], JSON_UNESCAPED_UNICODE); exit;
-    }
-    $r = wooBridgeReq($w, 'GET', 'ping', null, 20);
-    $b = $r['body'] ?? [];
-    $installed = !empty($r['ok']) && !empty($b['ok']);
-    // کش را تازه کن تا ارسال بعدی همین را ببیند
-    wooBridgeAvailable($w, true);
-    $hint = '';
-    if (!$installed) {
-        if ((int)$r['code'] === 404) $hint = 'افزونه نصب نیست یا فعال نشده — فایل wp-plugin/scraper-bridge.php را در وردپرس نصب کنید';
-        elseif ((int)$r['code'] === 401 || (int)$r['code'] === 403) $hint = 'کلید ووکامرس اجازهٔ ویرایش محصول ندارد — کلید را Read/Write بسازید';
-        elseif ((int)$r['code'] === 0) $hint = 'سرور ووکامرس در دسترس نیست: ' . mb_substr((string)$r['error'], 0, 80);
-        else $hint = 'پاسخ غیرمنتظره: HTTP ' . (int)$r['code'];
-    }
-    echo json_encode(['ok' => true, 'installed' => $installed, 'http' => (int)$r['code'],
-        'version' => $b['version'] ?? null, 'wc' => $b['wc'] ?? null, 'wp' => $b['wp'] ?? null,
-        'user' => $b['user'] ?? null, 'can_upload' => $b['can_upload'] ?? null,
-        'max_upload' => $b['max_upload'] ?? null, 'hint' => $hint,
-        'mode' => (string)($w['bridge_mode'] ?? 'auto')], JSON_UNESCAPED_UNICODE);
-    exit;
-}
-
-/** v8.63: متن افزونه برای دانلود — ?bridge_code=1 */
-if (isset($_GET['bridge_code'])) {
-    $f = __DIR__ . '/wp-plugin/scraper-bridge.php';
-    header('Content-Type: text/plain; charset=UTF-8');
-    if (is_file($f)) { readfile($f); }
-    else {
-        echo "فایل افزونه کنار این اسکریپت نیست.\n";
-        echo "آن را از مخزن بردارید: wp-plugin/scraper-bridge.php\n";
-    }
-    exit;
-}
-
 if (isset($_GET['ai_probe'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @set_time_limit(120);
@@ -5982,23 +5806,16 @@ if (isset($_GET['selftest'])) {
         $add('8.57', 'تصویر: آدرس خالی چیزی نمی‌فرستد', wooImagePayload($wBad, '', $noteEmpty) === []);
     }
 
-    // v8.63: افزونهٔ پل وردپرس
-    $add('8.63', 'کلاینت افزونهٔ پل', function_exists('wooBridgeReq')
-         && function_exists('wooBridgeSend') && function_exists('wooBridgeAttachImage'));
-    $add('8.63', 'تشخیص خودکار نصب افزونه', function_exists('wooBridgeAvailable'));
-    $add('8.63', 'گرفتن بایت‌های تصویر برای ارسال مستقیم', function_exists('wooFetchImageBytes'));
-    $add('8.63', 'فضای نام با wc- تا ووکامرس احراز هویت کند',
-         strpos($selfSrc, 'wp-json/wc-scraper/v1/') !== false);
-    $add('8.63', 'اندپوینت ?bridge_check', strpos($selfSrc, "'bridge_check'") !== false);
-    $add('8.63', 'مسیر ساخت محصول از پل رد می‌شود', strpos($selfSrc, '$bridged=wooBridgeSend(') !== false);
-    $add('8.63', 'عکس‌دار کردن هم از پل استفاده می‌کند',
-         substr_count($selfSrc, 'wooBridgeAttachImage(') >= 3);
-    // فایل افزونه لازم نیست کنار اسکریپت باشد — روی وردپرس نصب می‌شود.
-    // اگر باشد، دکمهٔ «دانلود متن افزونه» هم کار می‌کند.
-    $pf = __DIR__ . '/wp-plugin/scraper-bridge.php';
-    $add('8.63', 'متن افزونه برای دانلود در دسترس است', true,
-         is_file($pf) ? (round(filesize($pf) / 1024, 1) . ' KB — ?bridge_code=1')
-                      : 'کنار اسکریپت نیست (اختیاری) — از مخزن: wp-plugin/scraper-bridge.php');
+    // v8.63: تصویر جدا از ساخت محصول وصل می‌شود
+    $noInlineCreate = strpos($selfSrc, "if(!empty(\$wooNewImgs))\$wp['images']=\$wooNewImgs;") === false
+                   && strpos($selfSrc, "if(!empty(\$wooStreamImgs))\$wp['images']=\$wooStreamImgs;") === false;
+    $add('8.63', 'تصویر داخل درخواست ساخت محصول نمی‌رود', $noInlineCreate);
+    $add('8.63', 'تصویر با درخواست جدا وصل می‌شود (روش عکس‌دار کردن)',
+         strpos($selfSrc, "wooEditProduct(\$w,\$newId,['images'=>\$wooNewImgs])") !== false
+         && strpos($selfSrc, "wooEditProduct(\$w,\$newId,['images'=>\$wooStreamImgs])") !== false);
+    // رشته تکه‌تکه، تا خودآزمون خودش را پیدا نکند (درس v8.35)
+    $add('8.63', 'افزونهٔ وردپرس نسخهٔ قبل برگردانده شد',
+         strpos($selfSrc, 'woo' . 'Bridge' . 'Send(') === false);
 
     // v8.62: ویرایش مستقیم محصولات، عکس‌دار کردن، گزارش شبانه
     $add('8.62', 'موتور ویرایش گروهی', function_exists('bulkEditRun') && function_exists('bulkEditMsg'));
@@ -7534,17 +7351,6 @@ function photoFixRun(array $cn, bool $dry = false, string $onlyProfile = '', int
             }
             $note = null;
             $GLOBALS['_currentProductLink'] = '';
-            // v8.63: اگر افزونهٔ پل هست، تصویر را مستقیم به آن بسپار
-            $bNote = null;
-            $ba = wooBridgeAttachImage($w, $pid, (string)$hit['image'], '', $bNote);
-            if ($ba !== null) {
-                $out['fixed']++;
-                if (count($out['items']) < 200) $out['items'][] = ['id' => $pid,
-                    'title' => mb_substr($name, 0, 60), 'status' => '✅ عکس‌دار شد (پل)',
-                    'profile' => $hit['profile']];
-                usleep(200000);
-                continue;
-            }
             $payload = wooImagePayload($w, (string)$hit['image'], $note);
             if (empty($payload)) {
                 $out['failed']++;
@@ -8802,10 +8608,9 @@ if(!empty($p['sku']))$wp['sku']=$p['sku'];
 // v8.56: دستهٔ این پروفایل، وگرنه دستهٔ پیش‌فرض
 if($wooStreamCatId>0)$wp['categories']=[['id'=>$wooStreamCatId]];
 
-// v8.57: آپلود مستقیم، و اگر نشد آدرس را به ووکامرس بسپار
+// v8.63: تصویر جدا از ساخت محصول وصل می‌شود (روش «عکس‌دار کردن»)
 $imgNote=null;
 $wooStreamImgs=wooImagePayload($w,(string)($p['image']??''),$imgNote);
-if(!empty($wooStreamImgs))$wp['images']=$wooStreamImgs;
 if($imgNote)send_sse('send_info',['msg'=>"[$n] 🖼 ".$imgNote]);
 $existing=null;
 if($pTitle!==''){
@@ -8893,16 +8698,18 @@ usleep(150000);continue;
 }
 send_sse('send_info',['msg'=>"[$n] 🆕 محصول جدید - ایجاد..."]);
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'POST','products',$wp);
-// v8.58: اگر ووکامرس فقط به‌خاطر تصویر رد کرد، بدون تصویر بساز
-if(!$r['ok']&&!empty($wp['images'])&&wooIsImageError($r)){
-send_sse('send_info',['msg'=>"[$n] ⚠️ ووکامرس تصویر را نگرفت — ساخت بدون تصویر"]);
-unset($wp['images']);
-$r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'POST','products',$wp);
-}
 if($r['ok']&&!empty($r['body']['id'])){
+$newId=(int)$r['body']['id'];
+// v8.63: تصویر با یک PUT جدا — همان روشی که در «عکس‌دار کردن» جواب می‌دهد
+if(!empty($wooStreamImgs)){
+$iu=wooEditProduct($w,$newId,['images'=>$wooStreamImgs]);
+send_sse('send_info',['msg'=>!empty($iu['ok'])
+?"[$n] 🖼 تصویر وصل شد"
+:"[$n] ⚠️ تصویر وصل نشد (HTTP ".(int)($iu['code']??0).") — با «عکس‌دار کردن» قابل تکمیل است"]);
+}
 $sent++;
-send_sse('send_ok',['key'=>$pKey,'remote_id'=>$r['body']['id'],'title'=>$r['body']['name']??'','edit_url'=>rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$r['body']['id'].'&action=edit']);
-send_sse('send_info',['msg'=>"[$n] ✅ ایجاد موفق: ID#{$r['body']['id']} - ".mb_substr($r['body']['name']??'',0,40)]);
+send_sse('send_ok',['key'=>$pKey,'remote_id'=>$newId,'title'=>$r['body']['name']??'','edit_url'=>rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$newId.'&action=edit']);
+send_sse('send_info',['msg'=>"[$n] ✅ ایجاد موفق: ID#".$newId." - ".mb_substr($r['body']['name']??'',0,40)]);
 }else{
 $fail++;
 $errBody=$r['body']??[];
@@ -9070,19 +8877,10 @@ wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 // ندارد یا ما تصویر تازه داریم، تصویر را می‌فرستیم — و اگر آپلود مستقیم
 // نشد، آدرس را به خود ووکامرس می‌سپاریم.
 $wooUpdImgs=[];
-$bridgedImg=false;
 if($needImg){
-// v8.63: اول از راه افزونهٔ پل — بایت‌ها را خودمان می‌فرستیم
-$bNote=null;
-$ba=wooBridgeAttachImage($w,(int)$exId,(string)$p['image'],(string)($p['link']??''),$bNote);
-if($ba!==null){
-$bridgedImg=true;
-wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🔌 ".(string)$bNote);
-}else{
 $imgNote=null;
 $wooUpdImgs=wooImagePayload($w,(string)$p['image'],$imgNote);
 if($imgNote)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 ".$imgNote);
-}
 }
 
 $wpUpdate=['regular_price'=>$pPrice,'stock_quantity'=>$newStock];
@@ -9108,39 +8906,38 @@ wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 }
 }else{
 
-// v8.63: اگر افزونهٔ پل نصب باشد، محصول و تصویر با هم از آن راه می‌روند.
-// بایت‌های تصویر را خودمان می‌فرستیم، پس نه wp/v2/media لازم است نه
-// دسترسی بیرونی سرور وردپرس.
-$bridgeNote=null;
-$bridged=wooBridgeSend($w,$wp,(string)($p['image']??''),(string)($p['link']??''),0,$bridgeNote);
-if($bridged!==null){
-if($bridgeNote)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🔌 ".$bridgeNote);
-$editUrl=$bridged['edit_url']?:(rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$bridged['id'].'&action=edit');
-$sent++;$wooSentList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$bridged['id'],'edit_url'=>$editUrl,'price'=>$pPrice],$card);
-wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✅ ایجاد (پل): ID#".$bridged['id']);
-usleep(max(100000,$bslDelayMs*1000));
-continue;
-}
-
 // v8.57: آپلود مستقیم و در نبودش سپردن آدرس به ووکامرس
+// v8.63: تصویر دیگر همراه خودِ POST نمی‌رود.
+//
+// چرا عوض شد: ساختن محصول با images[] داخل همان درخواست، مسیر دیگری در
+// ووکامرس است و روی خیلی از فروشگاه‌ها رد می‌شود — و بدتر، کل محصول را
+// می‌اندازد. همان تصویر اگر بعد از ساخته‌شدن محصول با یک PUT جدا وصل
+// شود، قبول می‌شود. این دقیقاً همان روشی است که «عکس‌دار کردن محصولات»
+// استفاده می‌کند و کار می‌کند، پس اینجا هم همان را به کار می‌بریم.
 $imgNote=null;
 $wooNewImgs=wooImagePayload($w,(string)($p['image']??''),$imgNote);
-if(!empty($wooNewImgs))$wp['images']=$wooNewImgs;
 if($imgNote)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 ".$imgNote);
 
+// محصول اول بدون تصویر ساخته می‌شود تا هیچ‌وقت به‌خاطر تصویر رد نشود
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'POST','products',$wp);
-// v8.58: ووکامرس اگر نتواند تصویر را از آدرس بردارد، کل ساخت محصول را رد
-// می‌کند. در آن صورت محصول را بدون تصویر بساز — محصولِ بی‌تصویر بهتر از
-// نبودِ محصول است، و در اجرای بعدی تصویر دوباره تلاش می‌شود.
-if(!$r['ok']&&!empty($wp['images'])&&wooIsImageError($r)){
-wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚠️ ووکامرس تصویر را نگرفت — ساخت بدون تصویر");
-unset($wp['images']);
-$r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'POST','products',$wp);
-}
 if($r['ok']&&!empty($r['body']['id'])){
-$editUrl=rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$r['body']['id'].'&action=edit';
-$sent++;$wooSentList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$r['body']['id'],'edit_url'=>$editUrl,'price'=>$pPrice],$card);
-wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✅ ایجاد: ID#{$r['body']['id']}");
+$newId=(int)$r['body']['id'];
+$editUrl=rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$newId.'&action=edit';
+// حالا تصویر را جداگانه وصل کن — همان کاری که «عکس‌دار کردن» می‌کند
+$imgDone='';
+if(!empty($wooNewImgs)){
+$iu=wooEditProduct($w,$newId,['images'=>$wooNewImgs]);
+if(!empty($iu['ok'])){
+$imgDone=' + تصویر';
+wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 تصویر وصل شد");
+}else{
+// محصول سر جایش می‌ماند؛ «عکس‌دار کردن» بعداً دوباره تلاش می‌کند
+$imgDone=' (بدون تصویر)';
+wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚠️ تصویر وصل نشد (HTTP ".(int)($iu['code']??0).") — با «🖼 عکس‌دار کردن» قابل تکمیل است");
+}
+}
+$sent++;$wooSentList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$newId,'edit_url'=>$editUrl,'price'=>$pPrice],$card);
+wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✅ ایجاد: ID#".$newId.$imgDone);
 }else{
 $errBody=$r['body']??[];
 $errMsg=mb_substr($errBody['message']??($errBody['error']??($r['error']??json_encode($errBody,JSON_UNESCAPED_UNICODE))),0,150);
@@ -12706,25 +12503,6 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label style="font-size:11px">شناسه دستی:</label><input type="number" id="wcCatManual" min="0" step="1" placeholder="مثلاً ۱۲۳" dir="ltr" style="max-width:140px" oninput="applyWcCatManual()"><button class="btn btn-cyan" onclick="applyWcCatManual(1)" style="flex:0;padding:8px;font-size:11px">✓ اعمال</button></div>
 <div style="font-size:10px;color:#64748b;margin:-4px 0 6px">💡 شناسهٔ عددی دسته را می‌توانید مستقیم بنویسید — در وردپرس: محصولات ← دسته‌ها</div>
 <div class="crow"><label><input type="checkbox" id="wcMS"> موجودی</label><input type="number" id="wcSQ" value="10" style="max-width:100px"></div>
-<!-- v8.63: افزونهٔ پل وردپرس -->
-<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
-<div style="font-size:11px;color:#67e8f9;font-weight:700;margin-bottom:6px">🔌 افزونهٔ پل وردپرس (برای تصویر مطمئن)</div>
-<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.9">
-کلید ووکامرس اجازهٔ آپلود به کتابخانهٔ رسانه را ندارد، و اگر سایت مبدأ هات‌لینک را بسته باشد
-ووکامرس هم نمی‌تواند تصویر را بردارد. با نصب این افزونهٔ کوچک، خودِ اسکرپر بایت‌های تصویر را
-می‌فرستد و مشکل تصویر برای همیشه حل می‌شود.
-</div>
-<div class="crow"><label>حالت:</label>
-<select id="wcBridgeMode" style="flex:1">
-<option value="auto">خودکار — اگر افزونه نصب باشد از آن استفاده کن</option>
-<option value="off">خاموش — فقط مسیر عادی API</option>
-</select></div>
-<div class="cact">
-<button class="btn btn-purple" onclick="bridgeCheck()" style="flex:1">🔍 بررسی نصب</button>
-<button class="btn btn-gray" onclick="bridgeShowGuide()" style="flex:1">📄 راهنما و کد افزونه</button>
-</div>
-<div id="wcBridgeR" style="margin-top:8px"></div>
-</div>
 <div class="cact"><button class="btn btn-purple" onclick="testWoo()">🔗 تست</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div id="wcTR" style="margin-top:8px"></div>
 </div></div>
@@ -15795,18 +15573,15 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
-  {v:'8.63', t:'افزونهٔ پل وردپرس — راه‌حل قطعی مشکل تصویر', items:[
-    'بله، شدنی بود و ساخته شد: افزونهٔ کوچک wp-plugin/scraper-bridge.php',
-    'چرا لازم بود: کلید ووکامرس روی wp/v2/media معتبر نیست (۴۰۱)',
-    'و اگر سایت مبدأ هات‌لینک را بسته باشد، سپردن آدرس به ووکامرس هم رد می‌شود (۴۰۰)',
-    'با افزونه، خودِ اسکرپر بایت‌های تصویر را می‌گیرد و base64 می‌فرستد',
-    'سرور وردپرس دیگر لازم نیست به اینترنت وصل شود — تحریم و هات‌لینک بی‌اثر می‌شوند',
-    'کلید تازه‌ای لازم نیست: فضای نام با «wc-» شروع می‌شود و ووکامرس همان کلید فعلی را می‌پذیرد',
-    'محصول و تصویر با هم در یک درخواست ساخته می‌شوند',
-    'دکمهٔ 🔍 بررسی نصب در منوی ووکامرس: نسخه، کاربر، دسترسی آپلود و سقف حجم را نشان می‌دهد',
-    'اگر افزونه نصب نباشد، همه‌چیز مثل قبل با مسیر عادی API کار می‌کند',
-    'گزینهٔ «حالت: خاموش» برای وقتی نمی‌خواهید از افزونه استفاده شود',
-    'عکس‌دار کردن گروهی هم از همین مسیر رد می‌شود'
+  {v:'8.63', t:'ارسال تصویر با همان روشی که «عکس‌دار کردن» جواب می‌دهد', items:[
+    'افزونهٔ وردپرس نسخهٔ قبل برگردانده شد — لازم نبود',
+    'علت واقعی پیدا شد: ساختن محصول با images[] داخل همان درخواست POST، مسیر دیگری در ووکامرس است',
+    'همان تصویر اگر بعد از ساخته‌شدن محصول با یک درخواست جدا وصل شود، قبول می‌شود',
+    'دقیقاً همان کاری که بخش «🖼 عکس‌دار کردن» می‌کند و درست کار می‌کرد',
+    'حالا محصول اول بدون تصویر ساخته می‌شود و بعد تصویر وصل می‌شود',
+    'نتیجه: محصول هیچ‌وقت به‌خاطر تصویر رد نمی‌شود، و تصویر هم سر جایش می‌نشیند',
+    'اگر وصل کردن تصویر شکست بخورد، محصول سالم می‌ماند و با دکمهٔ «عکس‌دار کردن» قابل تکمیل است',
+    'همین اصلاح در مسیر ارسال زنده (SSE) هم اعمال شد'
   ]},
   {v:'8.62', t:'ویرایش مستقیم محصولات، عکس‌دار کردن، و گزارش شبانه', items:[
     'بخش جدید ✏️ ویرایش محصولات مقصد — تکی یا گروهی، روی ووکامرس و باسلام',
@@ -17600,7 +17375,7 @@ renderChangelog();
 // ========== Connection JS ==========
 let wSend=false,bSend=false,cn={woocommerce:{},basalam:{}},extractPollTimer=null,extractModalTimer=null;
 function loadConn(){fetch('',{method:'POST',body:new URLSearchParams('action=load_connections')}).then(r=>r.json()).then(d=>{if(d.ok){cn=d.connections;applyCn();}}).catch(()=>{});}
-function applyCn(){const w=cn.woocommerce||{},b=cn.basalam||{};if(w.store_url&&$('wcUrl'))$('wcUrl').value=w.store_url;if(w.consumer_key&&$('wcCK'))$('wcCK').value=w.consumer_key;if(w.consumer_secret&&$('wcCS'))$('wcCS').value=w.consumer_secret;if(w.default_status&&$('wcSt'))$('wcSt').value=w.default_status;if(w.default_category&&$('wcCat'))$('wcCat').value=w.default_category;if($('wcBridgeMode'))$('wcBridgeMode').value=w.bridge_mode||'auto';if($('wcMS'))$('wcMS').checked=!!w.manage_stock;if(w.stock_quantity&&$('wcSQ'))$('wcSQ').value=w.stock_quantity;if(b.token&&$('bsTk'))$('bsTk').value=b.token;if(b.vendor_id&&$('bsVid'))$('bsVid').value=b.vendor_id;if(b.preparation_days&&$('bsPD'))$('bsPD').value=b.preparation_days;if(b.weight&&$('bsW'))$('bsW').value=b.weight;if($('bsPW')&&b.package_weight)$('bsPW').value=b.package_weight;if(b.stock&&$('bsSt'))$('bsSt').value=b.stock;// v7.48: Restore category in searchable dropdown
+function applyCn(){const w=cn.woocommerce||{},b=cn.basalam||{};if(w.store_url&&$('wcUrl'))$('wcUrl').value=w.store_url;if(w.consumer_key&&$('wcCK'))$('wcCK').value=w.consumer_key;if(w.consumer_secret&&$('wcCS'))$('wcCS').value=w.consumer_secret;if(w.default_status&&$('wcSt'))$('wcSt').value=w.default_status;if(w.default_category&&$('wcCat'))$('wcCat').value=w.default_category;if($('wcMS'))$('wcMS').checked=!!w.manage_stock;if(w.stock_quantity&&$('wcSQ'))$('wcSQ').value=w.stock_quantity;if(b.token&&$('bsTk'))$('bsTk').value=b.token;if(b.vendor_id&&$('bsVid'))$('bsVid').value=b.vendor_id;if(b.preparation_days&&$('bsPD'))$('bsPD').value=b.preparation_days;if(b.weight&&$('bsW'))$('bsW').value=b.weight;if($('bsPW')&&b.package_weight)$('bsPW').value=b.package_weight;if(b.stock&&$('bsSt'))$('bsSt').value=b.stock;// v7.48: Restore category in searchable dropdown
 if(b.category_id){$('bsCat').value=String(b.category_id);bslSelectedCatId=b.category_id;if(bslAllCats.length>0){renderBslCatDropdown(bslAllCats,b.category_id);}else{loadBslCats();}}else{$('bsCat').value='0';bslSelectedCatId=0;if($('bsCatSearch'))$('bsCatSearch').value='';}
 if($('bsAutoCat'))$('bsAutoCat').checked=!!b.auto_category;if($('bsGemKey')&&b.gemini_api_key)$('bsGemKey').value=b.gemini_api_key;if($('bsDelayMs')&&b.delay_ms)$('bsDelayMs').value=b.delay_ms;if($('bsRetryDelayMs')&&b.retry_delay_ms)$('bsRetryDelayMs').value=b.retry_delay_ms;
 // v8.17: Restore global fallback categories
@@ -17614,7 +17389,7 @@ const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enable
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
 const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
-function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10,bridge_mode:($('wcBridgeMode')?.value)||'auto'}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
+function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
 fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:$('aiBaseUrl')?.value||'https://dashscope.aliyuncs.com/compatible-mode/v1',model:$('aiModel')?.value||'qwen-plus',temperature:parseFloat($('aiTemp')?.value)||0.1}));fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
@@ -17628,47 +17403,6 @@ if($('wcN'))$('wcN').textContent=toFa(n)+'/'+toFa(total);
 if($('bsN'))$('bsN').textContent=toFa(n)+'/'+toFa(total);
 }
 const _u=update;update=function(){_u();updN();};
-/* ============ v8.63: افزونهٔ پل وردپرس ============ */
-function bridgeCheck(){
-  const r=$('wcBridgeR');
-  r.innerHTML='<div class="alert alert-info" style="padding:8px;font-size:11px">🔍 در حال بررسی...</div>';
-  fetch('?bridge_check=1').then(x=>x.json()).then(d=>{
-    if(!d.ok){r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
-    if(d.installed){
-      r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px;line-height:1.9">'
-        +'✅ افزونهٔ پل نصب و فعال است<br>'
-        +'نسخه: <b>'+esc(d.version||'?')+'</b>'
-        +(d.wc?' · ووکامرس '+esc(d.wc):'')+(d.wp?' · وردپرس '+esc(d.wp):'')+'<br>'
-        +'کاربر: <b>'+esc(d.user||'?')+'</b> · آپلود فایل: '+(d.can_upload?'✅ مجاز':'❌ غیرمجاز')
-        +(d.max_upload?(' · سقف: '+toFa(Math.round(d.max_upload/1048576))+'MB'):'')
-        +'<br><span style="color:#4ade80">از این پس تصویرها از راه افزونه می‌روند</span></div>';
-    }else{
-      r.innerHTML='<div style="background:#42200630;border:1px solid #f59e0b;color:#fbbf24;padding:8px;font-size:11px;line-height:1.9">'
-        +'⚠️ افزونهٔ پل در دسترس نیست (HTTP '+toFa(d.http)+')<br>'
-        +esc(d.hint||'')+'<br>'
-        +'<span style="color:#94a3b8">ارسال با مسیر عادی API ادامه می‌یابد.</span>'
-        +'<div style="margin-top:6px"><button class="btn btn-cyan" style="font-size:10px;padding:4px 8px" onclick="bridgeShowGuide()">📄 راهنمای نصب</button></div></div>';
-    }
-  }).catch(()=>{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ خطا شبکه</div>';});
-}
-function bridgeShowGuide(){
-  const r=$('wcBridgeR');
-  r.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px;line-height:2">'
-    +'<div style="color:#67e8f9;font-weight:700;margin-bottom:6px">📄 نصب افزونهٔ پل — سه قدم</div>'
-    +'<div><b>۱.</b> فایل <code style="direction:ltr">scraper-bridge.php</code> را بگیرید '
-    +'(<a href="?bridge_code=1" target="_blank" style="color:#60a5fa">دانلود متن افزونه</a>)</div>'
-    +'<div><b>۲.</b> در وردپرس: <b>افزونه‌ها ← افزودن ← بارگذاری افزونه</b>. '
-    +'اگر فایل تکی است، آن را داخل یک پوشه به نام <code style="direction:ltr">scraper-bridge</code> بگذارید، '
-    +'از پوشه یک فایل zip بسازید و همان را بارگذاری کنید.<br>'
-    +'<span style="color:#94a3b8">راه دیگر: فایل را با FTP در '
-    +'<code style="direction:ltr">wp-content/plugins/scraper-bridge/</code> بگذارید.</span></div>'
-    +'<div><b>۳.</b> افزونه را <b>فعال</b> کنید، بعد اینجا «🔍 بررسی نصب» را بزنید.</div>'
-    +'<div style="margin-top:8px;padding-top:6px;border-top:1px solid #334155;color:#94a3b8">'
-    +'🔑 کلید تازه‌ای لازم نیست. افزونه مسیرش را با پیشوند <code style="direction:ltr">wc-</code> ثبت می‌کند '
-    +'و ووکامرس همان consumer key/secret فعلی را برایش می‌پذیرد.<br>'
-    +'⚠️ کلید باید دسترسی <b>خواندن/نوشتن</b> داشته باشد.</div>'
-    +'</div>';
-}
 function testWoo(){const s=$('wcS'),r=$('wcTR');s.textContent='\u062a\u0633\u062a...';s.className='cst tg';r.innerHTML='';const fd=new FormData();fd.append('action','test_woo');fd.append('store_url',$('wcUrl').value.trim());fd.append('consumer_key',$('wcCK').value.trim());fd.append('consumer_secret',$('wcCS').value.trim());fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(d.ok){s.textContent='\u2713';s.className='cst on';r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">\u2713 '+esc(d.message)+(d.version?' | WC '+esc(d.version):'')+'</div>';saveConn();loadCats();}else{s.textContent='\u2717';s.className='cst off';r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">\u2717 '+esc(d.error||'\u062e\u0637\u0627')+'</div>';}}).catch(()=>{s.textContent='\u2717';s.className='cst off';});}
 // v7.48: Searchable category dropdown for BaSalam
 let bslAllCats=[];
