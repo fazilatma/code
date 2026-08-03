@@ -34,7 +34,7 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.58';
+const APP_VERSION = '8.59';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -524,6 +524,8 @@ $url='https://openapi.basalam.com/v1/'.ltrim($ep,'/');
 $maxRetries=3;$retryDelay=3;
 for($attempt=1;$attempt<=$maxRetries;$attempt++){
 
+// v8.59: کش stat را پاک کن، وگرنه سیگنال توقفِ تازه دیده نمی‌شود
+clearstatcache(true,BSL_STOP_FILE);
 if(file_exists(BSL_STOP_FILE)){return ['ok'=>false,'code'=>0,'error'=>'stopped','body'=>null,'raw'=>''];}
 $ch=curl_init($url);
 $h=['Accept: application/json','Authorization: Bearer '.$tk];
@@ -5090,6 +5092,24 @@ if (isset($_GET['selftest'])) {
         $add('8.57', 'تصویر: آدرس خالی چیزی نمی‌فرستد', wooImagePayload($wBad, '', $noteEmpty) === []);
     }
 
+    // v8.59: دکمهٔ توقف باسلام باید واقعاً به سرویس وصل باشد
+    $stopWired = preg_match('~function stopBslProcess\(\)\{[\s\S]{0,1200}?bsl_stop=1~', $selfSrc) === 1;
+    $add('8.59', 'دکمهٔ توقف باسلام به سرویس وصل است', $stopWired,
+         $stopWired ? '?bsl_stop=1' : 'فقط وضعیت مرورگر عوض می‌شد');
+    $add('8.59', 'حلقهٔ ارسال کش stat را پاک می‌کند',
+         substr_count($selfSrc, 'clearstatcache(true,BSL_STOP_FILE)') >= 3);
+    // v8.59: شناسهٔ دستی دستهٔ ووکامرس
+    $add('8.59', 'شناسهٔ دستی دستهٔ ووکامرس (پروفایل)',
+         strpos($selfSrc, 'wooProfileCatManual') !== false
+         && strpos($selfSrc, 'function applyWooProfileCatManual') !== false);
+    $add('8.59', 'شناسهٔ دستی دستهٔ ووکامرس (پیش‌فرض عمومی)',
+         strpos($selfSrc, 'wcCatManual') !== false
+         && strpos($selfSrc, 'function applyWcCatManual') !== false);
+    // v8.59: دستهٔ پروفایل در کادر ارسال باسلام
+    $add('8.59', 'دستهٔ باسلام پروفایل در کادر ارسال نمایش داده می‌شود',
+         strpos($selfSrc, 'function syncBslSendBoxCats') !== false
+         && strpos($selfSrc, 'syncBslSendBoxCats(p.bslCategoryId') !== false);
+
     // v8.58: تصویر — تکراریِ بی‌تصویر باید تصویر بگیرد، و تصویرِ نگرفتنی
     // نباید کل محصول را از بین ببرد.
     $add('8.58', 'تشخیص خطای تصویر ووکامرس', function_exists('wooIsImageError'));
@@ -7160,8 +7180,9 @@ send_sse('send_info',['msg'=>'شروع ارسال '.$total.' محصول به و�
 foreach($pd as $i=>$p){
 if($i<$startIndex){continue;}
 
+clearstatcache(true,BSL_STOP_FILE);
 if(file_exists(BSL_STOP_FILE)){
-@unlink(BSL_STOP_FILE);
+// v8.59: سیگنال را نگه دار تا نگه‌داشتِ توقف بی‌اثر نشود
 bslUpdateProgress($sent,$updated,$skipped,$fail,$total,$i,mb_substr($pTitle??'',0,30),['❌ فرآیند توسط کاربر متوقف شد']);
 writeProgress(BSL_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'current'=>$i,'started_at'=>$GLOBALS['startedAt'],'recent_log'=>['❌ فرآیند متوقف شد'],'total_log_count'=>1,'sent_details'=>$bslSentList,'updated_details'=>$bslUpdatedList,'skipped_details'=>$bslSkippedList,'failed_details'=>$bslFailedList]);
 exit;
@@ -9271,7 +9292,13 @@ $bslExisting=[];$bslExistingNorm=[];$bslArchivedMap=[];
 // v8.22: Phase 1 removed — per-product search replaces bulk loading
 
 foreach($pd as $i=>$p){
-if(file_exists(BSL_STOP_FILE)){@unlink(BSL_STOP_FILE);
+// v8.59: نتیجهٔ file_exists در PHP کش می‌شود؛ بدون پاک‌کردن کش ممکن است
+// حلقه سیگنال توقفِ تازه‌نوشته‌شده را چند دور نبیند.
+clearstatcache(true,BSL_STOP_FILE);
+if(file_exists(BSL_STOP_FILE)){
+// v8.59: فایل توقف را پاک نکن — نگه‌داشتِ ۱۵ دقیقه‌ای باید سر جایش
+// بماند وگرنه اولین پینگ بعدی صف را دوباره راه می‌اندازد. دکمه‌های
+// «شروع» و «ادامه» خودشان آن را برمی‌دارند.
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$i,'',['❌ متوقف #'.($i+1)]);
 writeProgress(BSL_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'current'=>$i,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$bslQueueId,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>count($bslLog),'sent_details'=>$bslSentList,'updated_details'=>$bslUpdatedList,'skipped_details'=>$bslSkippedList,'failed_details'=>$bslFailedList]);
 $queue=bslReadQueue();foreach($queue['entries'] as &$qe){if($qe['id']===$bslQueueId&&$qe['status']==='running'){$qe['status']='failed';$qe['done_at']=time();break;}}unset($qe);bslWriteQueue($queue);
@@ -10007,8 +10034,8 @@ bslUpdateProgress(0,0,0,0,$total,0,'',['دریافت لیست محصولات ف�
 $bslPage=1;$bslMore=true;$maxDupPages=20;
 while($bslMore&&$bslPage<=$maxDupPages){
 
+clearstatcache(true,BSL_STOP_FILE);
 if(file_exists(BSL_STOP_FILE)){
-@unlink(BSL_STOP_FILE);
 bslUpdateProgress($sent,$updated,$skipped,$fail,$total,0,'',['❌ فرآیند متوقف شد']);
 writeProgress(BSL_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'current'=>0,'started_at'=>$GLOBALS['startedAt'],'recent_log'=>['❌ فرآیند متوقف شد'],'total_log_count'=>1,'sent_details'=>$bslSentList,'updated_details'=>$bslUpdatedList,'skipped_details'=>$bslSkippedList,'failed_details'=>$bslFailedList]);
 exit;
@@ -11061,7 +11088,10 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>Key:</label><input id="wcCK" placeholder="ck_..." dir="ltr"></div>
 <div class="crow"><label>Secret:</label><input type="password" id="wcCS" placeholder="cs_..." dir="ltr"></div>
 <div class="crow"><label>وضعیت:</label><select id="wcSt"><option value="draft">پیش‌نویس</option><option value="publish">منتشر</option></select></div>
-<div class="crow"><label>دسته:</label><select id="wcCat"><option value="0">--</option></select><button class="btn btn-gray" onclick="loadCats()" style="flex:0;padding:8px">🔄</button></div>
+<div class="crow"><label>دسته:</label><select id="wcCat" onchange="syncWcCatManual()"><option value="0">--</option></select><button class="btn btn-gray" onclick="loadCats()" style="flex:0;padding:8px">🔄</button></div>
+<!-- v8.59: ورود دستی شناسهٔ دسته، وقتی فهرست لود نمی‌شود یا دسته در آن نیست -->
+<div class="crow"><label style="font-size:11px">شناسه دستی:</label><input type="number" id="wcCatManual" min="0" step="1" placeholder="مثلاً ۱۲۳" dir="ltr" style="max-width:140px" oninput="applyWcCatManual()"><button class="btn btn-cyan" onclick="applyWcCatManual(1)" style="flex:0;padding:8px;font-size:11px">✓ اعمال</button></div>
+<div style="font-size:10px;color:#64748b;margin:-4px 0 6px">💡 شناسهٔ عددی دسته را می‌توانید مستقیم بنویسید — در وردپرس: محصولات ← دسته‌ها</div>
 <div class="crow"><label><input type="checkbox" id="wcMS"> موجودی</label><input type="number" id="wcSQ" value="10" style="max-width:100px"></div>
 <div class="cact"><button class="btn btn-purple" onclick="testWoo()">🔗 تست</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div id="wcTR" style="margin-top:8px"></div>
@@ -11518,6 +11548,14 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
             </select>
             <button class="btn btn-gray" onclick="loadWooProfileCats()" style="flex:0;padding:8px">🔄</button>
         </div>
+        <!-- v8.59: ورود دستی شناسه، برای وقتی فهرست دسته‌ها لود نمی‌شود -->
+        <div class="row" style="align-items:center;margin-top:6px">
+            <label style="font-size:11px;color:#94a3b8">یا شناسه دستی:</label>
+            <input type="number" id="wooProfileCatManual" min="0" step="1" placeholder="مثلاً ۱۲۳"
+                   style="flex:1;max-width:150px" dir="ltr" oninput="applyWooProfileCatManual()">
+            <button class="btn btn-cyan" onclick="applyWooProfileCatManual(1)" style="flex:0;padding:8px;font-size:11px">✓ اعمال</button>
+        </div>
+        <div style="font-size:10.5px;color:#64748b;margin-top:4px">💡 اگر فهرست بالا خالی است یا دستهٔ موردنظر در آن نیست، شناسهٔ عددی دسته را مستقیم بنویسید. شناسه را در وردپرس، بخش محصولات ← دسته‌ها می‌بینید.</div>
         <div id="wooProfileCatHint" style="font-size:11px;color:#64748b;margin-top:6px"></div>
     </div>
 
@@ -12565,6 +12603,8 @@ function applyProfile(p) {
     wooProfileCatId=parseInt(p.wooCategoryId||0)||0;
     renderWooProfileCats(wooProfileCatId);
     if(wooProfileCatId>0&&wooAllCats.length===0)loadCats();
+    // v8.59: همان دسته‌ها را در کادر بالای «ارسال باسلام» هم نشان بده
+    syncBslSendBoxCats(p.bslCategoryId||0,p.bslFallbackCatIds||[]);
 }
 
 function collectProfileData() {
@@ -13956,6 +13996,18 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.59', t:'دکمهٔ توقف باسلام واقعاً کار می‌کند، شناسهٔ دستی دستهٔ ووکامرس، و دستهٔ پروفایل در کادر ارسال', items:[
+    'باگ اصلی توقف: دکمهٔ ⏹ هیچ‌وقت سرویس ?bsl_stop را صدا نمی‌زد',
+    'فقط دکمه‌ها را پنهان می‌کرد و متغیر مرورگر را عوض می‌کرد؛ ارسال سرورساید بی‌خبر ادامه می‌داد',
+    'سرویس توقف از قدیم وجود داشت — ووکامرس صدایش می‌زد ولی باسلام نه',
+    'حالا دکمه سیگنال توقف را روی سرور می‌گذارد و وظیفهٔ در حال اجرا وسط کار می‌ایستد',
+    'کش stat هم پاک می‌شود، وگرنه حلقه سیگنال تازه را چند دور نمی‌دید',
+    'سیگنال توقف دیگر پاک نمی‌شود تا نگه‌داشتِ ۱۵ دقیقه‌ای بی‌اثر نشود',
+    'شناسهٔ دستی دسته‌بندی ووکامرس، هم برای هر پروفایل و هم برای دستهٔ پیش‌فرض عمومی',
+    'برای وقتی فهرست دسته‌ها لود نمی‌شود یا دستهٔ موردنظر در آن نیست',
+    'دسته‌بندی‌های باسلامِ پروفایل حالا در کادر بالای «ارسال باسلام» هم نشان داده می‌شوند',
+    'اگر درخت دسته‌ها دیر برسد، اول شناسه و بعد نام دسته نمایش داده می‌شود'
+  ]},
   {v:'8.58', t:'دستهٔ هر وظیفه در مودال صف، تصویر ووکامرس، و احترام به تیک افزودن/آپدیت', items:[
     'بالای مودال هر وظیفهٔ صف باسلام، دسته‌بندی‌های همان وظیفه با نام نمایش داده می‌شود',
     'دستهٔ اصلی، وضعیت دستهٔ خودکار، دسته‌های جایگزین و پسوند عنوان — همه با نام، نه فقط شناسه',
@@ -15424,7 +15476,16 @@ function testWoo(){const s=$('wcS'),r=$('wcTR');s.textContent='\u062a\u0633\u062
 let bslAllCats=[];
 let bslSelectedCatId=0;
 let bslSelectedCatName='';
-function loadBslCats(){fetch('',{method:'POST',body:new URLSearchParams('action=bsl_categories')}).then(r=>r.json()).then(d=>{if(d.ok&&d.categories){bslAllCats=d.categories;const savedCatId=parseInt($('bsCat').value)||0;renderBslCatDropdown(bslAllCats,savedCatId);initBslFallbackCatSearch();initBslProfileFallbackCatSearch();}}).catch(()=>{});}
+function loadBslCats(){fetch('',{method:'POST',body:new URLSearchParams('action=bsl_categories')}).then(r=>r.json()).then(d=>{if(d.ok&&d.categories){bslAllCats=d.categories;
+/* v8.59: بعد از رسیدن دسته‌ها، دستهٔ همین پروفایل اولویت دارد بر آنچه در
+   کادر ارسال مانده — وگرنه نام دستهٔ پروفایل هیچ‌وقت آنجا ظاهر نمی‌شد. */
+const profCat=bslProfileSelectedCatId||parseInt(($('bslProfileCatId')||{}).value||'0')||0;
+const savedCatId=profCat>0?profCat:(parseInt($('bsCat').value)||0);
+renderBslCatDropdown(bslAllCats,savedCatId);initBslFallbackCatSearch();initBslProfileFallbackCatSearch();
+const profFb=Array.isArray(bslProfileFallbackCats)&&bslProfileFallbackCats.length>0?bslProfileFallbackCats:null;
+if(profFb)renderBslFallbackCats(profFb);
+if(Array.isArray(bslFallbackCatIds)&&bslFallbackCatIds.length>0)renderBslFallbackCats(bslFallbackCatIds);
+}}).catch(()=>{});}
 function renderBslCatDropdown(cats,selectedId){
     bslSelectedCatId=selectedId||0;
     $('bsCat').value=String(bslSelectedCatId);
@@ -15452,8 +15513,41 @@ function bslSelectCat(catId){
     $('bsCat').value=String(catId);
     const sc=bslAllCats.find(c=>c.id===catId);
     if(sc){bslSelectedCatName=sc.name;$('bsCatSearch').value=sc.name+' ('+sc.id+')';}
-    else{bslSelectedCatName='';$('bsCatSearch').value='';}
+    else{bslSelectedCatName=''; $('bsCatSearch').value=catId>0?('#'+catId):'';}
     $('bsCatList').style.display='none';
+}
+/* v8.59: دسته‌بندی‌های پروفایل را در کادر «ارسال باسلام» هم نشان بده.
+   تا اینجا دستهٔ پروفایل فقط در تب تنظیمات دیده می‌شد و کادر بالای بخش
+   ارسال خالی می‌ماند، پس معلوم نبود ارسال با کدام دسته انجام می‌شود.
+   وقتی دسته‌ها دیر می‌رسند، بعد از رسیدنشان دوباره صدا زده می‌شود. */
+function syncBslSendBoxCats(catId,fallbackIds){
+    catId=parseInt(catId)||0;
+    fallbackIds=Array.isArray(fallbackIds)?fallbackIds.map(x=>parseInt(x)||0).filter(x=>x>0):[];
+    if(catId>0){
+        bslSelectedCatId=catId;
+        if($('bsCat'))$('bsCat').value=String(catId);
+        if($('bsCatSearch')){
+            const c=(bslAllCats||[]).find(x=>x.id===catId);
+            bslSelectedCatName=c?c.name:'';
+            $('bsCatSearch').value=c?(c.name+' ('+c.id+')'):('#'+catId);
+        }
+    }
+    // دسته‌های جایگزین هم از پروفایل بیایند، نه فقط از تنظیمات عمومی
+    if(fallbackIds.length>0)renderBslFallbackCats(fallbackIds);
+    // اگر درخت دسته‌ها هنوز نرسیده، بعد از رسیدن نام‌ها را جایگزین کن
+    if((catId>0||fallbackIds.length>0)&&(!bslAllCats||bslAllCats.length===0)){
+        if(!window.__bslSendBoxRetry){
+            window.__bslSendBoxRetry=1;
+            let t=0;
+            const iv=setInterval(()=>{
+                t++;
+                if(bslAllCats&&bslAllCats.length>0){
+                    clearInterval(iv);window.__bslSendBoxRetry=0;
+                    syncBslSendBoxCats(catId,fallbackIds);
+                }else if(t>25){clearInterval(iv);window.__bslSendBoxRetry=0;}
+            },400);
+        }
+    }
 }
 // v7.48: Search input event handlers
 document.addEventListener('DOMContentLoaded',function(){
@@ -15794,6 +15888,28 @@ function loadCats(){fetch('',{method:'POST',body:new URLSearchParams('action=woo
    محصولاتشان را در همان دسته می‌ریختند. */
 let wooAllCats=[];
 let wooProfileCatId=0;
+/* v8.59: شناسهٔ دستی برای دستهٔ پیش‌فرض ووکامرس (منوی 🛒).
+   اگر شناسه در فهرست نباشد، به‌عنوان گزینه اضافه می‌شود تا انتخاب بماند. */
+function applyWcCatManual(commit){
+    const inp=$('wcCatManual'),s=$('wcCat');if(!inp||!s)return;
+    const raw=(inp.value||'').trim();
+    if(raw===''){if(commit)showToast('شناسه‌ای وارد نشده',1);return;}
+    const id=parseInt(raw)||0;
+    if(id<0){showToast('شناسه نامعتبر',1);return;}
+    if(id>0&&!Array.from(s.options).some(o=>parseInt(o.value)===id)){
+        const c=wooAllCats.find(x=>x.id===id);
+        s.insertAdjacentHTML('beforeend','<option value="'+id+'">'+(c?esc(c.name):'#'+id)+'</option>');
+    }
+    s.value=String(id);
+    if(commit){
+        inp.value='';
+        saveConn();
+        const c=wooAllCats.find(x=>x.id===id);
+        showToast(id>0?('✓ دستهٔ پیش‌فرض '+(c?c.name:'#'+id)+' ذخیره شد'):'✓ دستهٔ پیش‌فرض پاک شد');
+    }
+}
+/* وقتی از فهرست انتخاب می‌شود، کادر دستی خالی شود تا گیج‌کننده نباشد */
+function syncWcCatManual(){const inp=$('wcCatManual');if(inp)inp.value='';}
 function renderWooProfileCats(selectedId){
     const s=$('wooProfileCatId');if(!s)return;
     if(selectedId===undefined||selectedId===null)selectedId=wooProfileCatId||0;
@@ -15810,6 +15926,24 @@ function renderWooProfileCats(selectedId){
     updateWooProfileCatHint();
 }
 function loadWooProfileCats(){loadCats();}
+/* v8.59: ورود دستی شناسهٔ دستهٔ ووکامرس برای این پروفایل.
+   وقتی فروشگاه فهرست دسته‌ها را برنمی‌گرداند (کلید محدود، افزونهٔ امنیتی،
+   تعداد زیاد دسته)، کاربر باید بتواند شناسه را مستقیم بنویسد. */
+function applyWooProfileCatManual(commit){
+    const inp=$('wooProfileCatManual');if(!inp)return;
+    const raw=(inp.value||'').trim();
+    if(raw===''){if(commit)showToast('شناسه‌ای وارد نشده',1);return;}
+    const id=parseInt(raw)||0;
+    if(id<0){showToast('شناسه نامعتبر',1);return;}
+    wooProfileCatId=id;
+    renderWooProfileCats(id);          // شناسه را در فهرست جا می‌اندازد
+    if(commit){
+        inp.value='';
+        const c=wooAllCats.find(x=>x.id===id);
+        showToast(id>0?('✓ دستهٔ '+(c?c.name:'#'+id)+' برای این پروفایل ثبت شد'):'✓ به پیش‌فرض عمومی برگشت');
+    }
+    scheduleSave();
+}
 function updateWooProfileCatHint(){
     const s=$('wooProfileCatId'),h=$('wooProfileCatHint');if(!s||!h)return;
     wooProfileCatId=parseInt(s.value)||0;
@@ -16433,18 +16567,36 @@ queueBslSend(ps,catId);
 // v7.51: Stop — just set bSend=false, JS stops sending next products
 // In client-driven mode, there's no PHP process to kill
 function stopBslProcess(){
-    if(!bSend)return;
+    /* v8.59: باگ اصلی — این تابع فقط وضعیت مرورگر را عوض می‌کرد و هیچ‌وقت
+       سرویس ?bsl_stop را صدا نمی‌زد. سرویس از قدیم وجود داشت (ووکامرس هم
+       دقیقاً همین را صدا می‌زند) ولی هیچ‌جای رابط کاربری به آن وصل نبود.
+       نتیجه: ارسالِ سرورساید بی‌خبر ادامه می‌داد و فقط دکمه‌ها پنهان می‌شدند.
+       شرط !bSend هم برداشته شد؛ اگر ارسالی روی سرور مانده باشد باید بشود
+       متوقفش کرد حتی وقتی مرورگر فکر می‌کند چیزی در جریان نیست. */
     bSend=false;
     $('bST').classList.add('hidden');
-    $('bSS').textContent='⏹ متوقف';
-    showToast('⏹ ارسال متوقف شد');
+    $('bSS').textContent='⏹ در حال توقف...';
+    fetch('?bsl_stop=1').then(r=>r.json()).then(d=>{
+        if(d.ok){
+            $('bSS').textContent='⏹ متوقف شد'+(d.paused>0?' — '+toFa(d.paused)+' ردیف صف نگه داشته شد':'');
+            showToast('⏹ '+(d.msg||'ارسال متوقف شد'));
+        }else{
+            $('bSS').textContent='⚠️ توقف ناموفق';
+            showToast('خطا در توقف: '+(d.error||'نامشخص'),1);
+        }
+        $('bSB').classList.remove('hidden');$('bSBlegacy').classList.remove('hidden');
+        checkBslQueue();
+    }).catch(()=>{
+        $('bSS').textContent='⚠️ خطای شبکه هنگام توقف';
+        showToast('خطا شبکه',1);
+        checkBslQueue();
+    });
     if(bslQueueRunner){
         // Mark the queue entry as failed/paused
         fetch('?bsl_queue_update_progress=1&queue_id='+encodeURIComponent(bslQueueRunner.id)+
             '&sent='+bslQueueRunner.sent+'&updated='+bslQueueRunner.updated+'&skipped='+bslQueueRunner.skipped+'&failed='+bslQueueRunner.failed+'&current='+bslQueueRunner.current,
             {method:'POST'}).then(()=>{checkBslQueue();}).catch(()=>{});
         bslQueueRunner=null;
-        checkBslQueue();
     }
 }
 function finB(s,u,k,f,t){$('bSS').textContent='✓ '+toFa(s)+' جدید | '+toFa(u)+' آپدیت | '+toFa(k)+' تکراری | '+toFa(f)+' خطا';showToast('✓ '+s+' جدید, '+u+' آپدیت, '+k+' تکراری, '+f+' خطا');}
