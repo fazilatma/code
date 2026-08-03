@@ -46,3 +46,12 @@ recon.lock
 suffix_progress.json
 suffix_result.json
 suffix.lock
+
+# v8.62: runtime state for bulk edit / photo fix / nightly digest
+bulkedit_progress.json
+bulkedit_result.json
+photofix_progress.json
+photofix_result.json
+digest_state.json
+bulkedit.lock
+photofix.lock

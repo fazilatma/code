@@ -34,9 +34,13 @@ const SUFFIX_PROGRESS_FILE = __DIR__ . '/suffix_progress.json'; // v8.53
 const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
+const BULKEDIT_PROGRESS_FILE = __DIR__ . '/bulkedit_progress.json';   // v8.62
+const BULKEDIT_RESULT_FILE   = __DIR__ . '/bulkedit_result.json';     // v8.62
+const PHOTOFIX_PROGRESS_FILE = __DIR__ . '/photofix_progress.json';   // v8.62
+const DIGEST_STATE_FILE      = __DIR__ . '/digest_state.json';        // v8.62
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.61';
+const APP_VERSION = '8.62';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -840,10 +844,40 @@ function catLearnWordCount(?array $cn = null): int {
 }
 
 
+/**
+ * v8.62: حافظهٔ یادگیری کنار خودِ فایل کد ذخیره می‌شود (__DIR__).
+ *
+ * به‌روزرسانی درجا آموخته‌ها را از بین نمی‌برد — این را با تست سنجیدیم.
+ * چیزی که آموخته‌ها را «گم» می‌کند، نصب فایل در پوشهٔ دیگر است. در آن
+ * حالت اگر فایل یادگیریِ نصب قبلی در همان پوشه پیدا شود، یک بار به‌طور
+ * خودکار برداشته می‌شود تا زحمت کاربر هدر نرود.
+ */
 function catLearnLoad(): array {
-    if (!is_file(CATLEARN_FILE)) return [];
+    if (!is_file(CATLEARN_FILE)) {
+        $adopted = catLearnAdoptSibling();
+        if ($adopted !== null) return $adopted;
+        return [];
+    }
     $d = json_decode((string)@file_get_contents(CATLEARN_FILE), true);
     return is_array($d) ? $d : [];
+}
+
+/** دنبال حافظهٔ جامانده از نصب قبلی در همان پوشه می‌گردد */
+function catLearnAdoptSibling(): ?array {
+    static $tried = false;
+    if ($tried) return null;
+    $tried = true;
+    $best = null; $bestTs = 0;
+    foreach (glob(__DIR__ . '/category_learning*.json') ?: [] as $f) {
+        if ($f === CATLEARN_FILE) continue;
+        $d = json_decode((string)@file_get_contents($f), true);
+        if (!is_array($d) || empty($d)) continue;
+        $ts = (int)@filemtime($f);
+        if ($ts > $bestTs) { $bestTs = $ts; $best = $d; }
+    }
+    if ($best === null) return null;
+    catLearnSave($best);          // از این به بعد زیر نام جدید ادامه می‌دهد
+    return $best;
 }
 
 function catLearnSave(array $d): void {
@@ -4135,6 +4169,11 @@ if (isset($_POST['cron_lock_min']))     $conn['cron_lock_min']     = max(1, min(
 if (isset($_POST['keep_reports']))      $conn['keep_reports']      = max(1, min(200, (int)$_POST['keep_reports']));
 // v8.60: چند کلمهٔ اول برای یادگیری و دسته‌بندی خودکار
 if (isset($_POST['catlearn_words']))    $conn['catlearn_words']    = max(1, min(CATLEARN_MAX_WORDS, (int)$_POST['catlearn_words']));
+// v8.62: گزارش شبانه
+if (isset($_POST['digest_enabled']))    $conn['digest_enabled']    = !empty($_POST['digest_enabled']) && $_POST['digest_enabled'] !== 'false';
+if (isset($_POST['digest_hour']))       $conn['digest_hour']       = max(0, min(23, (int)$_POST['digest_hour']));
+if (isset($_POST['digest_hours']))      $conn['digest_hours']      = max(1, min(168, (int)$_POST['digest_hours']));
+if (isset($_POST['digest_tz']))         $conn['digest_tz']         = trim((string)$_POST['digest_tz']);
 echo json_encode(['ok'=>saveConnections($conn),'message'=>'ذخیره شد'], JSON_UNESCAPED_UNICODE); exit;
 }
 
@@ -4969,12 +5008,222 @@ if ($stallWake) {
 $notifyResult = bslCheckNotifications($cn);
 if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
 
+// v8.62: گزارش شبانه — اگر ساعتش رسیده و امروز فرستاده نشده
+$digRes = digestMaybeSend($cn, $now);
+if (!empty($digRes['sent'])) $results['digest'] = $digRes['totals'] ?? 'sent';
+elseif (!empty($digRes['skipped']) && $digRes['skipped'] !== 'not_due') $results['digest'] = $digRes['skipped'];
+
 // v8.37: پینگ — آخرین کار، تا خلاصهٔ همین اجرا را هم بتواند گزارش کند
 $pingRes = notifCronPing($cn, $results);
 if (!empty($pingRes['sent'])) $results['ping'] = 'sent';
 elseif (!empty($pingRes['skipped'])) $results['ping'] = $pingRes['skipped'];
 
 echo json_encode($results, JSON_UNESCAPED_UNICODE); exit;
+}
+
+/* =====================================================================
+ *  v8.62: اندپوینت‌های ویرایش گروهی / عکس‌دار کردن / گزارش شبانه
+ * ===================================================================== */
+
+/** فهرست محصولات مقصد برای انتخاب — ?dest_list=1&target=woo|bsl&page=1&q=... */
+if (isset($_GET['dest_list'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(120);
+    $cn = loadConnections();
+    $target = (string)($_GET['target'] ?? 'woo');
+    $page = max(1, (int)($_GET['page'] ?? 1));
+    $q = trim((string)($_GET['q'] ?? ''));
+    $rows = [];
+    if ($target === 'woo') {
+        $w = $cn['woocommerce'] ?? [];
+        if (empty($w['store_url'])) { echo json_encode(['ok' => false, 'error' => 'تنظیمات ووکامرس ناقص'], JSON_UNESCAPED_UNICODE); exit; }
+        $ep = 'products?per_page=50&status=any&page=' . $page . ($q !== '' ? '&search=' . urlencode($q) : '');
+        $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET', $ep);
+        if (empty($r['ok'])) { echo json_encode(['ok' => false, 'error' => 'خطا ' . (int)$r['code']], JSON_UNESCAPED_UNICODE); exit; }
+        foreach ((array)$r['body'] as $p) {
+            $rows[] = ['id' => (int)($p['id'] ?? 0), 'title' => (string)($p['name'] ?? ''),
+                'price' => (int)preg_replace('~[^0-9]~', '', (string)($p['regular_price'] ?? '0')),
+                'stock' => $p['stock_quantity'], 'status' => (string)($p['status'] ?? ''),
+                'has_image' => !empty($p['images']),
+                'link' => rtrim((string)$w['store_url'], '/') . '/wp-admin/post.php?post=' . (int)$p['id'] . '&action=edit'];
+        }
+    } else {
+        $bs = $cn['basalam'] ?? []; $tk = (string)($bs['token'] ?? ''); $vid = (int)($bs['vendor_id'] ?? 0);
+        if ($tk === '' || $vid <= 0) { echo json_encode(['ok' => false, 'error' => 'تنظیمات باسلام ناقص'], JSON_UNESCAPED_UNICODE); exit; }
+        $ep = 'vendors/' . $vid . '/products?per_page=50&page=' . $page
+            . '&statuses=2976&statuses=3790&statuses=3568&statuses=3567'
+            . ($q !== '' ? '&search=' . rawurlencode($q) : '');
+        $r = bslReq($tk, 'GET', $ep);
+        if (empty($r['ok'])) { echo json_encode(['ok' => false, 'error' => 'خطا ' . (int)$r['code']], JSON_UNESCAPED_UNICODE); exit; }
+        $sm = bslStatusMap();
+        foreach ((array)($r['body']['data'] ?? $r['body'] ?? []) as $p) {
+            $st = (int)($p['status']['id'] ?? $p['status'] ?? 0);
+            $pr = (int)($p['price'] ?? $p['primary_price'] ?? 0);
+            $rows[] = ['id' => (int)($p['id'] ?? 0), 'title' => (string)($p['title'] ?? $p['name'] ?? ''),
+                'price' => $pr > 0 ? (int)round($pr / 10) : 0,   // ریال → تومان
+                'stock' => $p['stock'] ?? null, 'status' => $sm[$st] ?? (string)$st,
+                'status_id' => $st, 'has_image' => !empty($p['photo']),
+                'link' => 'https://basalam.com/p/' . (int)($p['id'] ?? 0)];
+        }
+    }
+    echo json_encode(['ok' => true, 'target' => $target, 'page' => $page,
+        'count' => count($rows), 'products' => $rows], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** ویرایش گروهی — ?bulk_edit=1  (POST: target, ids, ops, dry, notify) */
+if (isset($_GET['bulk_edit'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $lockFile = __DIR__ . '/bulkedit.lock';
+    $lockFp = fopen($lockFile, 'c');
+    if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
+        if ($lockFp) fclose($lockFp);
+        echo json_encode(['ok' => false, 'error' => 'یک ویرایش گروهی در حال اجراست', 'running' => true], JSON_UNESCAPED_UNICODE); exit;
+    }
+    @set_time_limit(0); @ignore_user_abort(true);
+    $cn = loadConnections();
+    $target = (string)($_POST['target'] ?? 'woo');
+    $ids = json_decode((string)($_POST['ids'] ?? '[]'), true);
+    if (!is_array($ids)) $ids = [];
+    $ops = json_decode((string)($_POST['ops'] ?? '{}'), true);
+    if (!is_array($ops)) $ops = [];
+    $dry = !empty($_POST['dry']);
+    $notify = !empty($_POST['notify']);
+    if ($target !== 'woo' && $target !== 'bsl') {
+        flock($lockFp, LOCK_UN); fclose($lockFp); @unlink($lockFile);
+        echo json_encode(['ok' => false, 'error' => 'مقصد نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
+    }
+
+    @unlink(BULKEDIT_PROGRESS_FILE);
+    bulkProgress(['running' => true, 'done' => false, 'target' => $target, 'dry' => $dry,
+        'total' => count($ids), 'current' => 0, 'started_at' => time(),
+        'log_add' => ['✏️ شروع ویرایش ' . count($ids) . ' محصول — ' . ($target === 'woo' ? 'ووکامرس' : 'باسلام') . ($dry ? ' (پیش‌نمایش)' : '')]]);
+
+    $early = json_encode(['ok' => true, 'started' => true, 'total' => count($ids)], JSON_UNESCAPED_UNICODE);
+    header('Connection: close'); header('Content-Length: ' . strlen($early));
+    echo $early; @ob_flush(); @flush();
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+    register_shutdown_function(function () use ($lockFp, $lockFile) {
+        @flock($lockFp, LOCK_UN); @fclose($lockFp); @unlink($lockFile);
+    });
+
+    try { $res = bulkEditRun($cn, $target, $ids, $ops, $dry); }
+    catch (Throwable $e) {
+        bulkProgress(['running' => false, 'done' => true, 'error' => $e->getMessage(),
+            'log_add' => ['❌ خطا: ' . $e->getMessage()]]); exit;
+    }
+    if ($notify && !$dry) {
+        $why = notifPrereq($cn);
+        if ($why === null) { $res['delivery'] = notifSend($cn, bulkEditMsg($res));
+            bulkProgress(['log_add' => ['📤 گزارش به پیام‌رسان‌ها فرستاده شد']]); }
+        else { $res['notify_error'] = $why; bulkProgress(['log_add' => ['⚠️ ارسال نشد: ' . $why]]); }
+    }
+    @file_put_contents(BULKEDIT_RESULT_FILE, json_encode($res, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    bulkProgress(['running' => false, 'done' => true, 'changed' => $res['changed'],
+        'deleted' => $res['deleted'], 'failed' => $res['failed'], 'skipped' => $res['skipped'],
+        'log_add' => ['✅ پایان — ' . $res['changed'] . ' ویرایش، ' . $res['deleted'] . ' حذف/بایگانی، ' . $res['failed'] . ' خطا']]);
+    exit;
+}
+
+if (isset($_GET['bulk_status'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $st = [];
+    if (is_file(BULKEDIT_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(BULKEDIT_PROGRESS_FILE), true);
+        if (is_array($d)) $st = $d;
+    }
+    echo json_encode(['ok' => true, 'status' => $st], JSON_UNESCAPED_UNICODE); exit;
+}
+if (isset($_GET['bulk_result'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $d = is_file(BULKEDIT_RESULT_FILE)
+        ? json_decode((string)@file_get_contents(BULKEDIT_RESULT_FILE), true) : null;
+    echo json_encode(['ok' => is_array($d), 'result' => $d], JSON_UNESCAPED_UNICODE); exit;
+}
+
+/** عکس‌دار کردن محصولات ووکامرس — ?photo_fix=1[&dry=1][&profile=key][&notify=1] */
+if (isset($_GET['photo_fix'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $lockFile = __DIR__ . '/photofix.lock';
+    $lockFp = fopen($lockFile, 'c');
+    if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
+        if ($lockFp) fclose($lockFp);
+        echo json_encode(['ok' => false, 'error' => 'یک اجرا در جریان است', 'running' => true], JSON_UNESCAPED_UNICODE); exit;
+    }
+    @set_time_limit(0); @ignore_user_abort(true);
+    $cn = loadConnections();
+    $dry = !empty($_GET['dry']);
+    $onlyProfile = trim((string)($_GET['profile'] ?? ''));
+    $notify = !empty($_GET['notify']);
+
+    @unlink(PHOTOFIX_PROGRESS_FILE);
+    photoFixProgress(['running' => true, 'done' => false, 'dry' => $dry, 'started_at' => time(),
+        'log_add' => ['🖼 شروع عکس‌دار کردن' . ($dry ? ' (پیش‌نمایش)' : '')]]);
+
+    $early = json_encode(['ok' => true, 'started' => true, 'dry' => $dry], JSON_UNESCAPED_UNICODE);
+    header('Connection: close'); header('Content-Length: ' . strlen($early));
+    echo $early; @ob_flush(); @flush();
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+    register_shutdown_function(function () use ($lockFp, $lockFile) {
+        @flock($lockFp, LOCK_UN); @fclose($lockFp); @unlink($lockFile);
+    });
+
+    try { $res = photoFixRun($cn, $dry, $onlyProfile); }
+    catch (Throwable $e) {
+        photoFixProgress(['running' => false, 'done' => true, 'error' => $e->getMessage(),
+            'log_add' => ['❌ خطا: ' . $e->getMessage()]]); exit;
+    }
+    if ($notify && !$dry) {
+        $why = notifPrereq($cn);
+        if ($why === null) { $res['delivery'] = notifSend($cn, photoFixMsg($res));
+            photoFixProgress(['log_add' => ['📤 گزارش فرستاده شد']]); }
+        else { $res['notify_error'] = $why; }
+    }
+    @file_put_contents(__DIR__ . '/photofix_result.json', json_encode($res, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    photoFixProgress(['running' => false, 'done' => true, 'fixed' => $res['fixed'] ?? 0,
+        'failed' => $res['failed'] ?? 0, 'unmatched' => $res['unmatched'] ?? 0,
+        'result_ok' => !empty($res['ok']),
+        'log_add' => [empty($res['ok']) ? ('❌ ' . ($res['error'] ?? 'ناموفق'))
+                     : ('✅ پایان — ' . (int)$res['fixed'] . ' محصول عکس‌دار شد')]]);
+    exit;
+}
+
+if (isset($_GET['photo_status'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $st = [];
+    if (is_file(PHOTOFIX_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(PHOTOFIX_PROGRESS_FILE), true);
+        if (is_array($d)) $st = $d;
+    }
+    $res = is_file(__DIR__ . '/photofix_result.json')
+        ? json_decode((string)@file_get_contents(__DIR__ . '/photofix_result.json'), true) : null;
+    echo json_encode(['ok' => true, 'status' => $st, 'result' => $res], JSON_UNESCAPED_UNICODE); exit;
+}
+
+/** گزارش شبانه — ?digest=1 پیش‌نمایش · &send=1 ارسال فوری */
+if (isset($_GET['digest'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(120);
+    $cn = loadConnections();
+    $hours = max(1, min(168, (int)($_GET['hours'] ?? ($cn['digest_hours'] ?? 24))));
+    $d = digestBuild($cn, $hours);
+    $msg = digestMsg($d);
+    $out = ['ok' => true, 'data' => $d, 'message' => $msg,
+            'state' => digestLoadState(),
+            'enabled' => !empty($cn['digest_enabled']),
+            'hour' => (int)($cn['digest_hour'] ?? 23)];
+    if (!empty($_GET['send'])) {
+        $why = notifPrereq($cn);
+        if ($why !== null) { $out['sent'] = false; $out['error'] = $why; }
+        else {
+            $out['delivery'] = notifSend($cn, $msg);
+            $out['sent'] = true;
+            $st = digestLoadState();
+            $st['last_date'] = date('Y-m-d'); $st['last_at'] = time();
+            digestSaveState($st);
+        }
+    }
+    echo json_encode($out, JSON_UNESCAPED_UNICODE); exit;
 }
 
 /**
@@ -5366,9 +5615,54 @@ if (isset($_GET['ai_probe'])) {
     exit;
 }
 
+/**
+ * v8.62: درون‌ریزی حافظهٔ یادگیری.
+ * اگر فایل کد را با نام یا در پوشهٔ دیگری نصب کنید، آموخته‌ها همراهش
+ * نمی‌آیند چون کنار خودِ فایل ذخیره می‌شوند. با این دو اندپوینت می‌شود
+ * حافظه را از نصب قبلی بیرون کشید و در نصب تازه ریخت.
+ */
+if (($_POST['action'] ?? '') === 'catlearn_import') {
+    header('Content-Type: application/json; charset=UTF-8');
+    $inc = json_decode((string)($_POST['data'] ?? '{}'), true);
+    if (!is_array($inc) || empty($inc)) {
+        echo json_encode(['ok' => false, 'error' => 'داده‌ای برای درون‌ریزی نیست'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $replace = !empty($_POST['replace']);
+    $cur = $replace ? [] : catLearnLoad();
+    $added = 0; $merged = 0;
+    foreach ($inc as $w => $row) {
+        $w = (string)$w;
+        if ($w === '' || !is_array($row) || empty($row['cats']) || !is_array($row['cats'])) continue;
+        if (!isset($cur[$w])) { $cur[$w] = $row; $added++; continue; }
+        // ادغام: شمارش‌ها جمع می‌شوند تا انتخاب پرتکرارتر برنده بماند
+        foreach ($row['cats'] as $cid => $info) {
+            $cid = (string)$cid;
+            $prevN = (int)($cur[$w]['cats'][$cid]['n'] ?? 0);
+            $cur[$w]['cats'][$cid] = [
+                'n'    => $prevN + (int)($info['n'] ?? 0),
+                'name' => (string)($info['name'] ?? ($cur[$w]['cats'][$cid]['name'] ?? '')),
+                'at'   => max((int)($info['at'] ?? 0), (int)($cur[$w]['cats'][$cid]['at'] ?? 0)),
+            ];
+        }
+        $cur[$w]['n'] = (int)($cur[$w]['n'] ?? 0) + (int)($row['n'] ?? 0);
+        $cur[$w]['last'] = max((int)($cur[$w]['last'] ?? 0), (int)($row['last'] ?? 0));
+        $merged++;
+    }
+    catLearnSave($cur);
+    echo json_encode(['ok' => true, 'added' => $added, 'merged' => $merged,
+        'total' => count($cur), 'replaced' => $replace], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['catlearn'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $d = catLearnLoad();
+
+    // v8.62: برون‌بری کامل برای انتقال به نصب دیگر
+    if (!empty($_GET['export'])) {
+        echo json_encode(['ok' => true, 'count' => count($d), 'file' => CATLEARN_FILE,
+            'exported_at' => time(), 'data' => $d], JSON_UNESCAPED_UNICODE); exit;
+    }
 
     $forget = trim((string)($_GET['forget'] ?? ''));
     if ($forget !== '') {
@@ -5510,6 +5804,38 @@ if (isset($_GET['selftest'])) {
              $srcFallback ? 'images[0].src' : 'خالی برگشت');
         $noteEmpty = null;
         $add('8.57', 'تصویر: آدرس خالی چیزی نمی‌فرستد', wooImagePayload($wBad, '', $noteEmpty) === []);
+    }
+
+    // v8.62: ویرایش مستقیم محصولات، عکس‌دار کردن، گزارش شبانه
+    $add('8.62', 'موتور ویرایش گروهی', function_exists('bulkEditRun') && function_exists('bulkEditMsg'));
+    $add('8.62', 'ویرایش تکی ووکامرس و باسلام',
+         function_exists('wooEditProduct') && function_exists('bslEditProduct'));
+    $add('8.62', 'بایگانی باسلام به‌جای حذف (API حذف ندارد)', function_exists('bslArchiveProduct'));
+    $add('8.62', 'هیچ DELETE بی‌اثری روی محصول باسلام نمانده',
+         !preg_match("~bslReq\\(\\\$tk\\s*,\\s*'DELETE'\\s*,\\s*'products/~", $selfSrc));
+    $add('8.62', 'حذف ووکامرس با انتخاب زباله‌دان یا همیشگی', function_exists('wooDeleteProduct'));
+    $add('8.62', 'ویرایش گروهی رسمی باسلام (batch-updates)', function_exists('bslBatchUpdate'));
+    if (function_exists('editApplyPrice')) {
+        $ok1 = editApplyPrice('inc', '10%', 100000) === 110000;
+        $ok2 = editApplyPrice('dec', '10%', 100000) === 90000;
+        $ok3 = editApplyPrice('set', '55000', 100000) === 55000;
+        $ok4 = editApplyPrice('inc', '5000', 100000) === 105000;
+        $ok5 = editApplyPrice('bogus', '1', 100) === null;
+        $add('8.62', 'محاسبهٔ قیمت درصدی و مبلغی', $ok1 && $ok2 && $ok3 && $ok4 && $ok5);
+    }
+    $add('8.62', 'عکس‌دار کردن محصولات ووکامرس',
+         function_exists('photoFixRun') && function_exists('photoFixIndex'));
+    $add('8.62', 'گزارش شبانه', function_exists('digestBuild') && function_exists('digestMsg')
+         && function_exists('digestMaybeSend'));
+    if (function_exists('digestDue')) {
+        $offCn = ['digest_enabled' => false];
+        $add('8.62', 'گزارش شبانه وقتی خاموش است نمی‌رود', digestDue($offCn, time()) === false);
+    }
+    $add('8.62', 'گزارش شبانه به کران وصل است', strpos($selfSrc, 'digestMaybeSend($cn, $now)') !== false);
+    $add('8.62', 'پشتیبان و بازیابی آموخته‌ها',
+         strpos($selfSrc, "'catlearn_import'") !== false && function_exists('catLearnAdoptSibling'));
+    foreach (['dest_list', 'bulk_edit', 'photo_fix', 'digest'] as $ep) {
+        $add('8.62', 'اندپوینت ?' . $ep, strpos($selfSrc, "'" . $ep . "'") !== false);
     }
 
     // v8.61: روش‌های عبور برای اتصال به هوش مصنوعی
@@ -6502,6 +6828,114 @@ function retireGuard(int $removed, int $total, array $cfg): array {
 }
 
 /** یک محصول ووکامرس را با عنوان پیدا می‌کند */
+/* =====================================================================
+ *  v8.62: ویرایش مستقیم محصولات روی مقصد (ووکامرس و باسلام)
+ *
+ *  ⚠️ نکتهٔ مهم دربارهٔ «حذف» در باسلام:
+ *  در OpenAPI رسمی باسلام هیچ متد DELETE برای محصول وجود ندارد؛ فقط
+ *  PATCH /v1/products/{id} و PATCH /v1/vendors/{vid}/products/batch-updates.
+ *  یعنی حذف همیشگی ذاتاً در API نیست. کاری که واقعاً می‌شود کرد، عوض
+ *  کردن وضعیت است:
+ *      2976 فعال · 3790 غیرفعال · 4184 بایگانی
+ *  «بایگانی» نزدیک‌ترین چیز به حذف است و محصول را از غرفه برمی‌دارد.
+ *  فراخوانی‌های DELETE قبلی روی اندپوینتی می‌رفتند که وجود ندارد و
+ *  فقط ۴۰۴ می‌گرفتند — یعنی حذف باسلام هیچ‌وقت کار نمی‌کرده است.
+ * ===================================================================== */
+
+/** وضعیت‌های محصول باسلام */
+function bslStatusMap(): array {
+    return [2976 => 'فعال', 3567 => 'تأیید نشده', 3568 => 'در انتظار',
+            3790 => 'غیرفعال', 4184 => 'بایگانی'];
+}
+
+/**
+ * یک محصول باسلام را ویرایش می‌کند.
+ * $fields می‌تواند شامل primary_price، stock، status، name، description،
+ * brief، preparation_days، weight و ... باشد.
+ */
+function bslEditProduct(string $tk, int $vid, int $pid, array $fields): array {
+    if ($pid <= 0 || empty($fields)) return ['ok' => false, 'code' => 0, 'error' => 'ورودی ناقص'];
+    $r = bslReq($tk, 'PATCH', 'products/' . $pid, $fields);
+    // بعضی نصب‌ها فقط مسیر زیر غرفه را قبول می‌کنند
+    if ((int)($r['code'] ?? 0) === 404 && $vid > 0) {
+        $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $pid, $fields);
+    }
+    return $r;
+}
+
+/**
+ * «حذف» محصول باسلام = بایگانی کردن (4184).
+ * چون API حذف واقعی ندارد، این تنها راه برداشتن محصول از غرفه است.
+ */
+function bslArchiveProduct(string $tk, int $vid, int $pid): array {
+    $r = bslEditProduct($tk, $vid, $pid, ['status' => 4184]);
+    if (!empty($r['ok'])) $r['archived'] = true;
+    return $r;
+}
+
+/**
+ * ویرایش گروهی باسلام با اندپوینت رسمی batch-updates.
+ * هر آیتم باید id داشته باشد؛ بقیهٔ فیلدها اختیاری‌اند.
+ * در دسته‌های ۵۰تایی فرستاده می‌شود تا درخواست خیلی بزرگ نشود.
+ */
+function bslBatchUpdate(string $tk, int $vid, array $items): array {
+    $items = array_values(array_filter($items, fn($i) => (int)($i['id'] ?? 0) > 0));
+    if (empty($items) || $vid <= 0) return ['ok' => false, 'done' => 0, 'error' => 'ورودی خالی'];
+    $done = 0; $failed = 0; $errors = [];
+    foreach (array_chunk($items, 50) as $chunk) {
+        $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/batch-updates', ['data' => $chunk]);
+        if (!empty($r['ok'])) { $done += count($chunk); }
+        else {
+            // اگر گروهی نشد، تک‌تک امتحان کن تا یک محصول خراب کل دسته را نبرد
+            foreach ($chunk as $one) {
+                $id = (int)$one['id']; unset($one['id']);
+                $r2 = bslEditProduct($tk, $vid, $id, $one);
+                if (!empty($r2['ok'])) $done++;
+                else { $failed++; if (count($errors) < 10) $errors[] = '#' . $id . ' → ' . (int)($r2['code'] ?? 0); }
+            }
+        }
+        usleep(200000);
+    }
+    return ['ok' => $failed === 0, 'done' => $done, 'failed' => $failed, 'errors' => $errors];
+}
+
+/** یک محصول ووکامرس را ویرایش می‌کند */
+function wooEditProduct(array $w, int $pid, array $fields): array {
+    if ($pid <= 0 || empty($fields)) return ['ok' => false, 'code' => 0, 'error' => 'ورودی ناقص'];
+    return wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                  'PUT', 'products/' . $pid, $fields);
+}
+
+/**
+ * حذف محصول ووکامرس.
+ * $force=false یعنی به زباله‌دان (برگشت‌پذیر)، true یعنی نابودی همیشگی.
+ * برخلاف باسلام، ووکامرس واقعاً حذف دائمی دارد.
+ */
+function wooDeleteProduct(array $w, int $pid, bool $force = false): array {
+    if ($pid <= 0) return ['ok' => false, 'code' => 0, 'error' => 'شناسه نامعتبر'];
+    return wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                  'DELETE', 'products/' . $pid . '?force=' . ($force ? 'true' : 'false'));
+}
+
+/**
+ * قیمت تازه را از روی دستور کاربر می‌سازد.
+ *   set:12000   → همین عدد
+ *   inc:10%     → ۱۰٪ گران‌تر     ·  dec:10%  → ۱۰٪ ارزان‌تر
+ *   inc:5000    → ۵۰۰۰ اضافه      ·  dec:5000 → ۵۰۰۰ کم
+ * خروجی null یعنی دستور نامفهوم بود و نباید چیزی نوشته شود.
+ */
+function editApplyPrice(string $op, string $val, int $current): ?int {
+    $val = trim(persianToEnglish($val));
+    $isPct = substr($val, -1) === '%';
+    $num = (float)preg_replace('~[^0-9.\-]~', '', $val);
+    if ($op === 'set') return $num > 0 ? (int)round($num) : null;
+    if ($current <= 0) return null;
+    $delta = $isPct ? ($current * $num / 100) : $num;
+    if ($op === 'inc') return max(0, (int)round($current + $delta));
+    if ($op === 'dec') return max(0, (int)round($current - $delta));
+    return null;
+}
+
 function wooFindByTitle(array $w, string $title): ?array {
     if ($title === '') return null;
     $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET',
@@ -6579,16 +7013,18 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
             else {
                 $id = (int)$ex['id'];
                 if ($mode === 'delete') {
-                    $r = bslReq($tk, 'DELETE', 'products/' . $id);
-                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'DELETE', 'vendors/' . $vid . '/products/' . $id);
+                    // v8.62: باسلام حذف واقعی ندارد — بایگانی نزدیک‌ترین معادل است.
+                    // قبلاً DELETE به اندپوینتی می‌رفت که وجود ندارد و همیشه ۴۰۴ می‌شد.
+                    $r = bslArchiveProduct($tk, $vid, $id);
                 } elseif ($mode === 'outofstock') {
-                    $r = bslReq($tk, 'PATCH', 'products/' . $id, ['stock' => 0]);
-                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $id, ['stock' => 0]);
+                    $r = bslEditProduct($tk, $vid, $id, ['stock' => 0]);
                 } else {
-                    $r = bslReq($tk, 'PATCH', 'products/' . $id, ['status' => 3790]);   // غیرفعال
-                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $id, ['status' => 3790]);
+                    $r = bslEditProduct($tk, $vid, $id, ['status' => 3790]);   // غیرفعال
                 }
-                if (!empty($r['ok'])) { $out['retired']++; $row['bsl'] = 'انجام شد #' . $id; }
+                if (!empty($r['ok'])) {
+                    $out['retired']++;
+                    $row['bsl'] = ($mode === 'delete' ? 'بایگانی شد #' : 'انجام شد #') . $id;
+                }
                 else { $out['failed']++; $row['bsl'] = 'خطا ' . (int)($r['code'] ?? 0); }
             }
         }
@@ -6636,6 +7072,487 @@ function suffixProfiles(): array {
                   'suffix' => $sfx, 'target' => (string)($p['syncConfig']['target'] ?? 'woo')];
     }
     return $out;
+}
+
+/* =====================================================================
+ *  v8.62: ویرایش گروهی و تکی محصولات مقصد — سمت سرور
+ *
+ *  همه‌چیز پس‌زمینه اجرا می‌شود: مرورگر بسته شود هم ادامه دارد، پیشرفت
+ *  در فایل نوشته می‌شود و در پایان گزارش به پیام‌رسان‌ها می‌رود.
+ * ===================================================================== */
+
+function bulkProgress(array $patch): void {
+    $cur = [];
+    if (is_file(BULKEDIT_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(BULKEDIT_PROGRESS_FILE), true);
+        if (is_array($d)) $cur = $d;
+    }
+    $log = is_array($cur['log'] ?? null) ? $cur['log'] : [];
+    if (isset($patch['log_add'])) {
+        foreach ((array)$patch['log_add'] as $l) $log[] = ['t' => time(), 'm' => (string)$l];
+        if (count($log) > 300) $log = array_slice($log, -300);
+        unset($patch['log_add']);
+    }
+    $cur = array_merge($cur, $patch);
+    $cur['log'] = $log; $cur['ts'] = time();
+    @file_put_contents(BULKEDIT_PROGRESS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/**
+ * اجرای ویرایش گروهی.
+ *
+ * $target  woo | bsl
+ * $ids     فهرست شناسه‌های محصول در مقصد
+ * $ops     ['price'=>['op'=>'inc','val'=>'10%'], 'stock'=>5, 'status'=>'draft',
+ *           'desc'=>'...', 'short_desc'=>'...', 'delete'=>true, 'force'=>false]
+ * $dry     فقط پیش‌نمایش، بدون تغییر واقعی
+ */
+function bulkEditRun(array $cn, string $target, array $ids, array $ops, bool $dry = false): array {
+    $out = ['ok' => true, 'target' => $target, 'total' => count($ids), 'changed' => 0,
+            'deleted' => 0, 'skipped' => 0, 'failed' => 0, 'dry' => $dry, 'items' => [],
+            'started_at' => time()];
+    $ids = array_values(array_filter(array_map('intval', $ids), fn($v) => $v > 0));
+    if (empty($ids)) { $out['ok'] = false; $out['error'] = 'محصولی انتخاب نشده'; return $out; }
+
+    $w  = $cn['woocommerce'] ?? [];
+    $bs = $cn['basalam'] ?? [];
+    $tk = (string)($bs['token'] ?? ''); $vid = (int)($bs['vendor_id'] ?? 0);
+    if ($target === 'woo' && empty($w['store_url'])) { $out['ok'] = false; $out['error'] = 'تنظیمات ووکامرس ناقص'; return $out; }
+    if ($target === 'bsl' && ($tk === '' || $vid <= 0)) { $out['ok'] = false; $out['error'] = 'تنظیمات باسلام ناقص'; return $out; }
+
+    $wantDelete = !empty($ops['delete']);
+    $n = 0;
+    foreach ($ids as $pid) {
+        $n++;
+        if ($n % 5 === 1 || $n === count($ids)) {
+            bulkProgress(['current' => $n, 'total' => count($ids),
+                'changed' => $out['changed'], 'deleted' => $out['deleted'],
+                'failed' => $out['failed'], 'skipped' => $out['skipped']]);
+        }
+        $row = ['id' => $pid];
+
+        // ---- وضعیت فعلی محصول را بگیر تا درصد قیمت درست حساب شود ----
+        $curPrice = 0; $title = '';
+        if ($target === 'woo') {
+            $g = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET', 'products/' . $pid);
+            if (empty($g['ok'])) { $out['failed']++; $row['error'] = 'یافت نشد (' . (int)$g['code'] . ')'; $out['items'][] = $row; continue; }
+            $gb = $g['body'] ?? [];
+            $curPrice = (int)preg_replace('~[^0-9]~', '', (string)($gb['regular_price'] ?? '0'));
+            $title = (string)($gb['name'] ?? '');
+        } else {
+            $g = bslReq($tk, 'GET', 'products/' . $pid);
+            $gb = $g['body'] ?? [];
+            $curPrice = (int)($gb['price'] ?? $gb['primary_price'] ?? 0);
+            // باسلام ریالی است و کاربر تومانی فکر می‌کند
+            if ($curPrice > 0) $curPrice = (int)round($curPrice / 10);
+            $title = (string)($gb['title'] ?? $gb['name'] ?? '');
+        }
+        $row['title'] = mb_substr($title, 0, 60);
+        $row['old_price'] = $curPrice;
+
+        // ---- حذف ----
+        if ($wantDelete) {
+            if ($dry) {
+                $row['action'] = $target === 'bsl' ? 'بایگانی می‌شود' : 'حذف می‌شود';
+                $out['items'][] = $row; $out['deleted']++; continue;
+            }
+            if ($target === 'woo') {
+                $r = wooDeleteProduct($w, $pid, !empty($ops['force']));
+                $row['action'] = !empty($ops['force']) ? 'حذف همیشگی' : 'به زباله‌دان';
+            } else {
+                $r = bslArchiveProduct($tk, $vid, $pid);
+                $row['action'] = 'بایگانی (باسلام حذف همیشگی ندارد)';
+            }
+            if (!empty($r['ok'])) { $out['deleted']++; }
+            else { $out['failed']++; $row['error'] = 'خطا ' . (int)($r['code'] ?? 0); }
+            $out['items'][] = $row;
+            usleep(250000);
+            continue;
+        }
+
+        // ---- ساخت فیلدهای تغییر ----
+        $fields = [];
+        if (!empty($ops['price']) && is_array($ops['price'])) {
+            $np = editApplyPrice((string)($ops['price']['op'] ?? ''), (string)($ops['price']['val'] ?? ''), $curPrice);
+            if ($np !== null && $np !== $curPrice) {
+                $row['new_price'] = $np;
+                $row['pct'] = $curPrice > 0 ? round(($np - $curPrice) / $curPrice * 100, 1) : 0;
+                if ($target === 'woo') $fields['regular_price'] = (string)$np;
+                else $fields['primary_price'] = $np * 10;   // باسلام ریالی
+            }
+        }
+        if (isset($ops['stock']) && $ops['stock'] !== '') {
+            $st = (int)$ops['stock'];
+            if ($target === 'woo') { $fields['manage_stock'] = true; $fields['stock_quantity'] = $st;
+                                     $fields['stock_status'] = $st > 0 ? 'instock' : 'outofstock'; }
+            else $fields['stock'] = $st;
+            $row['stock'] = $st;
+        }
+        if (!empty($ops['status'])) {
+            $s = (string)$ops['status'];
+            if ($target === 'woo') { $fields['status'] = in_array($s, ['publish','draft','private','pending'], true) ? $s : 'draft'; }
+            else { $sm = bslStatusMap(); $si = (int)$s; if (isset($sm[$si])) $fields['status'] = $si; }
+            $row['status'] = $s;
+        }
+        if (isset($ops['desc']) && $ops['desc'] !== '') {
+            if ($target === 'woo') $fields['description'] = (string)$ops['desc'];
+            else $fields['description'] = (string)$ops['desc'];
+            $row['desc'] = true;
+        }
+        if (isset($ops['short_desc']) && $ops['short_desc'] !== '') {
+            if ($target === 'woo') $fields['short_description'] = (string)$ops['short_desc'];
+            else $fields['brief'] = mb_substr((string)$ops['short_desc'], 0, 250);
+            $row['short_desc'] = true;
+        }
+        if (!empty($ops['title_prefix']) || !empty($ops['title_suffix'])) {
+            $nt = (string)($ops['title_prefix'] ?? '') . $title . (string)($ops['title_suffix'] ?? '');
+            $nt = trim($nt);
+            if ($nt !== '' && $nt !== $title) {
+                if ($target === 'woo') $fields['name'] = $nt; else $fields['name'] = mb_substr($nt, 0, 120);
+                $row['new_title'] = mb_substr($nt, 0, 60);
+            }
+        }
+
+        if (empty($fields)) { $out['skipped']++; $row['action'] = 'تغییری لازم نبود'; $out['items'][] = $row; continue; }
+        if ($dry) { $row['action'] = 'آماده: ' . implode('، ', array_keys($fields)); $out['items'][] = $row; $out['changed']++; continue; }
+
+        $r = $target === 'woo' ? wooEditProduct($w, $pid, $fields) : bslEditProduct($tk, $vid, $pid, $fields);
+        if (!empty($r['ok'])) { $out['changed']++; $row['action'] = 'انجام شد'; }
+        else { $out['failed']++; $row['error'] = 'خطا ' . (int)($r['code'] ?? 0) . ' ' . mb_substr((string)($r['body']['message'] ?? ''), 0, 60); }
+        $out['items'][] = $row;
+        usleep(250000);
+    }
+    $out['finished_at'] = time();
+    return $out;
+}
+
+/** پیام گزارش ویرایش گروهی برای پیام‌رسان */
+function bulkEditMsg(array $r): string {
+    $t = ($r['target'] ?? '') === 'woo' ? 'ووکامرس' : 'باسلام';
+    $m = "✏️ ویرایش گروهی — {$t}\n";
+    if (!empty($r['dry'])) $m .= "(پیش‌نمایش — چیزی تغییر نکرد)\n";
+    $m .= "───────────────\n";
+    $m .= "کل: " . (int)($r['total'] ?? 0) . "\n";
+    if ((int)($r['changed'] ?? 0) > 0) $m .= "✅ ویرایش شد: " . (int)$r['changed'] . "\n";
+    if ((int)($r['deleted'] ?? 0) > 0) {
+        $m .= (($r['target'] ?? '') === 'bsl' ? "🗄 بایگانی شد: " : "🗑 حذف شد: ") . (int)$r['deleted'] . "\n";
+    }
+    if ((int)($r['skipped'] ?? 0) > 0) $m .= "⏭ بدون تغییر: " . (int)$r['skipped'] . "\n";
+    if ((int)($r['failed'] ?? 0) > 0)  $m .= "❌ خطا: " . (int)$r['failed'] . "\n";
+    $priced = array_values(array_filter($r['items'] ?? [], fn($i) => isset($i['new_price'])));
+    if ($priced) {
+        $m .= "\n💰 نمونهٔ تغییر قیمت:\n";
+        foreach (array_slice($priced, 0, 5) as $i) {
+            $sign = ($i['pct'] ?? 0) >= 0 ? '+' : '';
+            $m .= '• ' . mb_substr((string)$i['title'], 0, 34) . ' — '
+                . number_format((int)$i['old_price']) . ' → ' . number_format((int)$i['new_price'])
+                . ' (' . $sign . $i['pct'] . "٪)\n";
+        }
+    }
+    return $m;
+}
+
+/* =====================================================================
+ *  v8.62: عکس‌دار کردن محصولات ووکامرس از روی پروفایل‌ها
+ *
+ *  محصولاتی که بی‌تصویر در ووکامرس نشسته‌اند (چه به‌خاطر باگ‌های قدیمی
+ *  آپلود، چه به‌خاطر تصویر نگرفتنی) با تطبیق عنوان به تصویرِ همان محصول
+ *  در پروفایل وصل می‌شوند. از همان مسیر wooImagePayload استفاده می‌کند،
+ *  پس اگر آپلود مستقیم نشد، آدرس به خود ووکامرس سپرده می‌شود.
+ * ===================================================================== */
+
+function photoFixProgress(array $patch): void {
+    $cur = [];
+    if (is_file(PHOTOFIX_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(PHOTOFIX_PROGRESS_FILE), true);
+        if (is_array($d)) $cur = $d;
+    }
+    $log = is_array($cur['log'] ?? null) ? $cur['log'] : [];
+    if (isset($patch['log_add'])) {
+        foreach ((array)$patch['log_add'] as $l) $log[] = ['t' => time(), 'm' => (string)$l];
+        if (count($log) > 300) $log = array_slice($log, -300);
+        unset($patch['log_add']);
+    }
+    $cur = array_merge($cur, $patch);
+    $cur['log'] = $log; $cur['ts'] = time();
+    @file_put_contents(PHOTOFIX_PROGRESS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/** نگاشت «عنوان نرمال‌شده → تصویر» از روی همهٔ پروفایل‌ها */
+function photoFixIndex(?string $onlyProfile = null): array {
+    $idx = [];
+    foreach (loadProfiles() as $key => $p) {
+        if ($onlyProfile !== null && $onlyProfile !== '' && $key !== $onlyProfile) continue;
+        $suffix = trim((string)($p['titleSuffix'] ?? ''));
+        foreach (profileOrderedProducts($p, null, false) as $prod) {
+            if (!is_array($prod)) continue;
+            $img = trim((string)($prod['image'] ?? ''));
+            if ($img === '') continue;
+            $t = trim((string)($prod['title'] ?? $prod['name'] ?? ''));
+            if ($t === '') continue;
+            foreach ([$t, ($suffix !== '' ? trim($t . ' ' . $suffix) : $t)] as $variant) {
+                $k = bslNormalizeTitle($variant);
+                if ($k !== '' && !isset($idx[$k])) $idx[$k] = ['image' => $img, 'profile' => $p['name'] ?? $key];
+            }
+        }
+    }
+    return $idx;
+}
+
+/**
+ * محصولات بی‌تصویر ووکامرس را پیدا و از روی پروفایل عکس‌دار می‌کند.
+ * $dry فقط گزارش می‌دهد.
+ */
+function photoFixRun(array $cn, bool $dry = false, string $onlyProfile = '', int $maxItems = 2000): array {
+    $w = $cn['woocommerce'] ?? [];
+    $out = ['ok' => true, 'scanned' => 0, 'missing' => 0, 'matched' => 0, 'fixed' => 0,
+            'failed' => 0, 'unmatched' => 0, 'dry' => $dry, 'items' => [], 'started_at' => time()];
+    if (empty($w['store_url'])) { $out['ok'] = false; $out['error'] = 'تنظیمات ووکامرس ناقص'; return $out; }
+
+    $idx = photoFixIndex($onlyProfile !== '' ? $onlyProfile : null);
+    $out['index_size'] = count($idx);
+    if (empty($idx)) { $out['ok'] = false; $out['error'] = 'در پروفایل‌ها تصویری پیدا نشد'; return $out; }
+    photoFixProgress(['log_add' => ['🗂 ' . count($idx) . ' تصویر از پروفایل‌ها فهرست شد']]);
+
+    $page = 1;
+    while ($page <= 100 && $out['scanned'] < $maxItems) {
+        $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET',
+                    'products?per_page=100&page=' . $page . '&status=any');
+        if (empty($r['ok']) || !is_array($r['body'] ?? null) || empty($r['body'])) break;
+        foreach ($r['body'] as $p) {
+            $out['scanned']++;
+            $imgs = $p['images'] ?? [];
+            if (!empty($imgs) && is_array($imgs)) continue;    // تصویر دارد
+            $out['missing']++;
+            $pid = (int)($p['id'] ?? 0);
+            $name = trim((string)($p['name'] ?? ''));
+            $hit = $idx[bslNormalizeTitle($name)] ?? null;
+            if ($hit === null) {
+                $out['unmatched']++;
+                if (count($out['items']) < 200) $out['items'][] = ['id' => $pid, 'title' => mb_substr($name, 0, 60), 'status' => 'در پروفایل‌ها نبود'];
+                continue;
+            }
+            $out['matched']++;
+            if ($dry) {
+                if (count($out['items']) < 200) $out['items'][] = ['id' => $pid, 'title' => mb_substr($name, 0, 60),
+                    'status' => 'آماده', 'profile' => $hit['profile'], 'image' => $hit['image']];
+                continue;
+            }
+            $note = null;
+            $GLOBALS['_currentProductLink'] = '';
+            $payload = wooImagePayload($w, (string)$hit['image'], $note);
+            if (empty($payload)) {
+                $out['failed']++;
+                if (count($out['items']) < 200) $out['items'][] = ['id' => $pid, 'title' => mb_substr($name, 0, 60), 'status' => 'تصویر آماده نشد: ' . (string)$note];
+                continue;
+            }
+            $u = wooEditProduct($w, $pid, ['images' => $payload]);
+            if (empty($u['ok']) && wooIsImageError($u)) {
+                $out['failed']++;
+                if (count($out['items']) < 200) $out['items'][] = ['id' => $pid, 'title' => mb_substr($name, 0, 60), 'status' => 'ووکامرس تصویر را نگرفت'];
+                continue;
+            }
+            if (!empty($u['ok'])) { $out['fixed']++;
+                if (count($out['items']) < 200) $out['items'][] = ['id' => $pid, 'title' => mb_substr($name, 0, 60), 'status' => '✅ عکس‌دار شد', 'profile' => $hit['profile']]; }
+            else { $out['failed']++;
+                if (count($out['items']) < 200) $out['items'][] = ['id' => $pid, 'title' => mb_substr($name, 0, 60), 'status' => 'خطا ' . (int)$u['code']]; }
+            usleep(200000);
+        }
+        photoFixProgress(['scanned' => $out['scanned'], 'missing' => $out['missing'],
+            'fixed' => $out['fixed'], 'failed' => $out['failed'], 'unmatched' => $out['unmatched'],
+            'log_add' => ['📄 صفحهٔ ' . $page . ' — بررسی‌شده ' . $out['scanned'] . '، بی‌تصویر ' . $out['missing'] . '، درست‌شده ' . $out['fixed']]]);
+        if (count($r['body']) < 100) break;
+        $page++;
+    }
+    $out['finished_at'] = time();
+    return $out;
+}
+
+function photoFixMsg(array $r): string {
+    $m = "🖼 عکس‌دار کردن محصولات ووکامرس\n";
+    if (!empty($r['dry'])) $m .= "(پیش‌نمایش — چیزی تغییر نکرد)\n";
+    $m .= "───────────────\n";
+    $m .= "بررسی‌شده: " . (int)($r['scanned'] ?? 0) . "\n";
+    $m .= "بی‌تصویر: " . (int)($r['missing'] ?? 0) . "\n";
+    $m .= "✅ عکس‌دار شد: " . (int)($r['fixed'] ?? 0) . "\n";
+    if ((int)($r['unmatched'] ?? 0) > 0) $m .= "❓ در پروفایل‌ها نبود: " . (int)$r['unmatched'] . "\n";
+    if ((int)($r['failed'] ?? 0) > 0)    $m .= "❌ ناموفق: " . (int)$r['failed'] . "\n";
+    return $m;
+}
+
+/* =====================================================================
+ *  v8.62: گزارش شبانهٔ تفصیلی (پیش‌فرض ساعت ۲۳)
+ *
+ *  از گزارش‌های استخراج هر پروفایل، محصولات اضافه‌شده، تغییر قیمت‌داده و
+ *  حذف‌شده را جمع می‌کند و با میزان و درصد تغییر می‌فرستد. وضعیت ارسال
+ *  به ووکامرس و باسلام هم از صف‌ها خوانده می‌شود.
+ *
+ *  کران‌جاب هر پنج دقیقه اجرا می‌شود، پس اینجا فقط تصمیم می‌گیریم که
+ *  «آیا الان وقتش هست و امروز فرستاده‌ایم یا نه».
+ * ===================================================================== */
+
+function digestLoadState(): array {
+    if (!is_file(DIGEST_STATE_FILE)) return [];
+    $d = json_decode((string)@file_get_contents(DIGEST_STATE_FILE), true);
+    return is_array($d) ? $d : [];
+}
+function digestSaveState(array $s): void {
+    @file_put_contents(DIGEST_STATE_FILE, json_encode($s, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/** آیا الان باید گزارش شبانه برود؟ */
+function digestDue(array $cn, int $now): bool {
+    if (empty($cn['digest_enabled'])) return false;
+    $hour = max(0, min(23, (int)($cn['digest_hour'] ?? 23)));
+    // ساعت محلی سرور؛ اگر منطقهٔ زمانی تنظیم شده باشد همان اعمال می‌شود
+    $tz = trim((string)($cn['digest_tz'] ?? ''));
+    if ($tz !== '') { $old = @date_default_timezone_get(); @date_default_timezone_set($tz); }
+    $h = (int)date('G', $now);
+    $today = date('Y-m-d', $now);
+    if ($tz !== '' && isset($old)) @date_default_timezone_set($old);
+
+    if ($h < $hour) return false;                    // هنوز نرسیده
+    $st = digestLoadState();
+    if (($st['last_date'] ?? '') === $today) return false;   // امروز فرستاده شده
+    return true;
+}
+
+/**
+ * جمع‌آوری آمار همهٔ پروفایل‌ها از گزارش‌های استخراج امروز.
+ * $sinceHours بازهٔ زمانی که گزارش‌ها را از آن می‌خوانیم.
+ */
+function digestBuild(array $cn, int $sinceHours = 24): array {
+    $since = time() - $sinceHours * 3600;
+    $profiles = loadProfiles();
+    $out = ['ok' => true, 'since' => $since, 'hours' => $sinceHours,
+            'profiles' => [], 'tot_new' => 0, 'tot_changed' => 0, 'tot_removed' => 0,
+            'tot_up' => 0, 'tot_down' => 0, 'sum_pct' => 0.0, 'n_pct' => 0];
+
+    // آخرین گزارش هر پروفایل در بازه
+    $byProfile = [];
+    foreach (glob(__DIR__ . '/extract_report_*.json') ?: [] as $f) {
+        $ts = (int)@filemtime($f);
+        if ($ts < $since) continue;
+        $d = json_decode((string)@file_get_contents($f), true);
+        if (!is_array($d)) continue;
+        $pk = (string)($d['profile_key'] ?? '');
+        $pn = (string)($d['profile_name'] ?? $pk);
+        $key = $pk !== '' ? $pk : $pn;
+        if ($key === '') continue;
+        if (!isset($byProfile[$key]) || $ts > $byProfile[$key]['_ts']) {
+            $d['_ts'] = $ts; $d['_name'] = $pn !== '' ? $pn : $key;
+            $byProfile[$key] = $d;
+        }
+    }
+
+    foreach ($byProfile as $key => $d) {
+        $new = (array)($d['new_items'] ?? []);
+        $chg = (array)($d['changed_items'] ?? []);
+        $rem = (array)($d['removed_items'] ?? []);
+        $up = 0; $down = 0; $pctSum = 0.0; $pctN = 0;
+        foreach ($chg as $c) {
+            if (($c['dir'] ?? '') === 'up') $up++; else $down++;
+            if (isset($c['pct'])) { $pctSum += (float)$c['pct']; $pctN++; }
+        }
+        $row = [
+            'name' => (string)$d['_name'],
+            'at' => (int)$d['_ts'],
+            'extracted' => (int)($d['extracted'] ?? 0),
+            'new' => count($new), 'changed' => count($chg), 'removed' => count($rem),
+            'up' => $up, 'down' => $down,
+            'avg_pct' => $pctN > 0 ? round($pctSum / $pctN, 1) : 0,
+            'new_items' => array_slice($new, 0, 5),
+            'changed_items' => array_slice($chg, 0, 5),
+            'removed_items' => array_slice($rem, 0, 5),
+        ];
+        $out['profiles'][] = $row;
+        $out['tot_new'] += $row['new']; $out['tot_changed'] += $row['changed'];
+        $out['tot_removed'] += $row['removed'];
+        $out['tot_up'] += $up; $out['tot_down'] += $down;
+        $out['sum_pct'] += $pctSum; $out['n_pct'] += $pctN;
+    }
+    $out['avg_pct'] = $out['n_pct'] > 0 ? round($out['sum_pct'] / $out['n_pct'], 1) : 0;
+
+    // وضعیت ارسال به مقصدها در همین بازه
+    foreach ([['woo', wooReadQueue()], ['bsl', bslReadQueue()]] as [$k, $q]) {
+        $sent = 0; $upd = 0; $skip = 0; $fail = 0; $rows = 0;
+        foreach ((array)($q['entries'] ?? []) as $e) {
+            $at = (int)($e['done_at'] ?? $e['started_at'] ?? 0);
+            if ($at < $since) continue;
+            $rows++;
+            $sent += (int)($e['sent'] ?? 0); $upd += (int)($e['updated'] ?? 0);
+            $skip += (int)($e['skipped'] ?? 0); $fail += (int)($e['failed'] ?? 0);
+        }
+        $out[$k] = ['rows' => $rows, 'sent' => $sent, 'updated' => $upd,
+                    'skipped' => $skip, 'failed' => $fail];
+    }
+    return $out;
+}
+
+/** متن گزارش شبانه */
+function digestMsg(array $d): string {
+    $m = "🌙 گزارش شبانهٔ محصولات\n";
+    $m .= '🗓 ' . date('Y-m-d H:i') . ' · ' . (int)($d['hours'] ?? 24) . " ساعت گذشته\n";
+    $m .= "═══════════════\n";
+    $m .= "📊 مجموع همهٔ پروفایل‌ها\n";
+    $m .= '🆕 اضافه‌شده: ' . (int)$d['tot_new'] . "\n";
+    $m .= '💰 تغییر قیمت: ' . (int)$d['tot_changed']
+        . ' (↑' . (int)$d['tot_up'] . ' ↓' . (int)$d['tot_down'] . ")\n";
+    if ((int)$d['tot_changed'] > 0) {
+        $s = $d['avg_pct'] >= 0 ? '+' : '';
+        $m .= '   میانگین تغییر: ' . $s . $d['avg_pct'] . "٪\n";
+    }
+    $m .= '❌ حذف‌شده از مبدأ: ' . (int)$d['tot_removed'] . "\n";
+
+    $wo = $d['woo'] ?? []; $bs = $d['bsl'] ?? [];
+    if ((int)($wo['rows'] ?? 0) > 0 || (int)($bs['rows'] ?? 0) > 0) {
+        $m .= "\n📤 ارسال به مقصد\n";
+        if ((int)($wo['rows'] ?? 0) > 0) {
+            $m .= '🛒 ووکامرس: ' . (int)$wo['sent'] . ' جدید · ' . (int)$wo['updated'] . ' آپدیت'
+                . ((int)$wo['failed'] > 0 ? ' · ❌' . (int)$wo['failed'] : '') . "\n";
+        }
+        if ((int)($bs['rows'] ?? 0) > 0) {
+            $m .= '🏪 باسلام: ' . (int)$bs['sent'] . ' جدید · ' . (int)$bs['updated'] . ' آپدیت'
+                . ((int)$bs['failed'] > 0 ? ' · ❌' . (int)$bs['failed'] : '') . "\n";
+        }
+    }
+
+    foreach ((array)$d['profiles'] as $p) {
+        if ((int)$p['new'] === 0 && (int)$p['changed'] === 0 && (int)$p['removed'] === 0) continue;
+        $m .= "\n───────────────\n📁 " . $p['name'] . "\n";
+        $m .= '   🆕 ' . (int)$p['new'] . '  💰 ' . (int)$p['changed']
+            . ' (↑' . (int)$p['up'] . ' ↓' . (int)$p['down'] . ')  ❌ ' . (int)$p['removed'] . "\n";
+        foreach ((array)$p['changed_items'] as $c) {
+            $sign = ($c['dir'] ?? '') === 'up' ? '📈' : '📉';
+            $pc = isset($c['pct']) ? (((float)$c['pct'] >= 0 ? '+' : '') . $c['pct'] . '٪') : '';
+            $m .= '   ' . $sign . ' ' . mb_substr((string)($c['title'] ?? ''), 0, 30)
+                . ' ' . (string)($c['old_price'] ?? '') . '→' . (string)($c['new_price'] ?? '')
+                . ' ' . $pc . "\n";
+        }
+        foreach ((array)$p['new_items'] as $c) {
+            $m .= '   🆕 ' . mb_substr((string)($c['title'] ?? ''), 0, 34) . "\n";
+        }
+        foreach ((array)$p['removed_items'] as $c) {
+            $m .= '   ❌ ' . mb_substr((string)($c['title'] ?? ''), 0, 34) . "\n";
+        }
+    }
+    if (empty($d['profiles'])) $m .= "\n(در این بازه گزارش استخراجی ثبت نشده)\n";
+    return $m;
+}
+
+/** اگر وقتش باشد، گزارش شبانه را می‌فرستد */
+function digestMaybeSend(array $cn, int $now): array {
+    if (!digestDue($cn, $now)) return ['sent' => false, 'skipped' => 'not_due'];
+    $why = notifPrereq($cn);
+    if ($why !== null) return ['sent' => false, 'skipped' => $why];
+    $d = digestBuild($cn, max(1, min(168, (int)($cn['digest_hours'] ?? 24))));
+    $res = notifSend($cn, digestMsg($d));
+    $st = digestLoadState();
+    $st['last_date'] = date('Y-m-d', $now);
+    $st['last_at'] = $now;
+    $st['last_totals'] = ['new' => $d['tot_new'], 'changed' => $d['tot_changed'], 'removed' => $d['tot_removed']];
+    digestSaveState($st);
+    return ['sent' => true, 'delivery' => $res, 'totals' => $st['last_totals']];
 }
 
 function suffixProgress(array $patch): void {
@@ -7036,11 +7953,10 @@ function reconRun(array $cn, string $target, bool $apply = false,
             } else {
                 $tk = (string)$cn['basalam']['token']; $vid = (int)$cn['basalam']['vendor_id'];
                 if ($mode === 'delete') {
-                    $r = bslReq($tk, 'DELETE', 'products/' . $d['id']);
-                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'DELETE', 'vendors/' . $vid . '/products/' . $d['id']);
+                    // v8.62: باسلام حذف واقعی ندارد؛ بایگانی می‌کنیم
+                    $r = bslArchiveProduct($tk, $vid, (int)$d['id']);
                 } elseif ($mode === 'outofstock') {
-                    $r = bslReq($tk, 'PATCH', 'products/' . $d['id'], ['stock' => 0]);
-                    if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $d['id'], ['stock' => 0]);
+                    $r = bslEditProduct($tk, $vid, (int)$d['id'], ['stock' => 0]);
                 } else {
                     $r = bslReq($tk, 'PATCH', 'products/' . $d['id'], ['status' => 3790]);
                     if ((int)($r['code'] ?? 0) === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $d['id'], ['status' => 3790]);
@@ -8728,12 +9644,14 @@ if(empty($bs['token'])||empty($bs['vendor_id'])){echo json_encode(['ok'=>false,'
 $tk=$bs['token'];$vid=(int)$bs['vendor_id'];
 $productId=(int)($_GET['product_id']??0);
 if($productId<=0){echo json_encode(['ok'=>false,'error'=>'شناسه محصول نامعتبر'],JSON_UNESCAPED_UNICODE);exit;}
-$r=bslReq($tk,'DELETE','products/'.$productId);
-if($r['code']===404)$r=bslReq($tk,'DELETE','vendors/'.$vid.'/products/'.$productId);
+// v8.62: باسلام متد DELETE برای محصول ندارد. تا امروز این کد به اندپوینتی
+// می‌رفت که وجود ندارد و همیشه ۴۰۴ می‌گرفت، یعنی حذف هیچ‌وقت انجام نمی‌شد.
+// معادل واقعی، بایگانی کردن است (وضعیت ۴۱۸۴).
+$r=bslArchiveProduct($tk,$vid,$productId);
 if($r['ok']||$r['code']===204||$r['code']===200){
-echo json_encode(['ok'=>true,'msg'=>'محصول #'.$productId.' حذف شد'],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'archived'=>true,'msg'=>'محصول #'.$productId.' بایگانی شد (باسلام حذف همیشگی ندارد)'],JSON_UNESCAPED_UNICODE);
 }else{
-echo json_encode(['ok'=>false,'error'=>'حذف ناموفق ('.$r['code'].'): '.($r['body']['message']??$r['body']['error']??'خطا')],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>false,'error'=>'بایگانی ناموفق ('.$r['code'].'): '.($r['body']['message']??$r['body']['error']??'خطا')],JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -8759,11 +9677,11 @@ $deleted=0;$failed=0;$total=count($ids);
 foreach($ids as $idx=>$pId){
 $pId=(int)$pId;
 if($pId<=0){$failed++;$sse(['type'=>'item','idx'=>$idx+1,'total'=>$total,'pId'=>$pId,'status'=>'failed','msg'=>'شناسه نامعتبر']);continue;}
-$r=bslReq($tk,'DELETE','products/'.$pId);
-if($r['code']===404)$r=bslReq($tk,'DELETE','vendors/'.$vid.'/products/'.$pId);
+// v8.62: بایگانی، چون باسلام حذف واقعی ندارد
+$r=bslArchiveProduct($tk,$vid,$pId);
 if($r['ok']||$r['code']===204||$r['code']===200){
 $deleted++;
-$sse(['type'=>'item','idx'=>$idx+1,'total'=>$total,'pId'=>$pId,'status'=>'deleted','msg'=>'حذف شد']);
+$sse(['type'=>'item','idx'=>$idx+1,'total'=>$total,'pId'=>$pId,'status'=>'deleted','msg'=>'بایگانی شد']);
 }else{
 $failed++;
 $errDetail=($r['body']['message']??$r['body']['error']??'خطا');
@@ -11856,7 +12774,86 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <button class="btn btn-gray" onclick="catLearnShow()" style="flex:1">📚 آموخته‌ها</button>
 <button class="btn btn-gray" onclick="catLearnTest()" style="flex:1">🧪 آزمایش عنوان</button>
 </div>
+<!-- v8.62: پشتیبان‌گیری آموخته‌ها -->
+<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:6px;line-height:1.8">
+💾 آموخته‌ها کنار همین فایل ذخیره می‌شوند. به‌روزرسانی درجا آن‌ها را پاک نمی‌کند،
+ولی اگر فایل را با <b>نام یا پوشهٔ دیگری</b> نصب کنید همراهش نمی‌آیند.
+قبل از تغییر نام، یک نسخهٔ پشتیبان بگیرید.
+</div>
+<div class="cact">
+<button class="btn btn-cyan" onclick="catLearnExport()" style="flex:1">⬇️ پشتیبان</button>
+<button class="btn btn-green" onclick="catLearnImportPrompt()" style="flex:1">⬆️ بازیابی</button>
+</div>
+</div>
 <div id="catLearnR" style="margin-top:8px"></div>
+</div></div>
+
+<!-- v8.62: ویرایش مستقیم محصولات مقصد -->
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>✏️ ویرایش محصولات مقصد</h3><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+ویرایش تکی یا گروهی محصولات روی ووکامرس و باسلام: قیمت، موجودی، وضعیت، توضیحات و حذف.
+همه‌چیز سمت سرور اجرا می‌شود و گزارش به پیام‌رسان‌ها می‌رود.
+</div>
+<div class="cact">
+<button class="btn btn-purple" onclick="editorOpen('woo')" style="flex:1">🛒 ویرایش ووکامرس</button>
+<button class="btn btn-cyan" onclick="editorOpen('bsl')" style="flex:1">🏪 ویرایش باسلام</button>
+</div>
+<div style="font-size:10px;color:#fbbf24;margin-top:6px;line-height:1.8">
+⚠️ باسلام در API خود «حذف همیشگی» ندارد؛ نزدیک‌ترین کار <b>بایگانی</b> است که محصول را از غرفه برمی‌دارد.
+در ووکامرس هم حذف به زباله‌دان می‌رود مگر گزینهٔ حذف همیشگی را بزنید.
+</div>
+</div></div>
+
+<!-- v8.62: عکس‌دار کردن محصولات ووکامرس -->
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🖼 عکس‌دار کردن محصولات ووکامرس</h3><span class="cst off" id="photoS">—</span><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+محصولات بی‌تصویر ووکامرس را پیدا می‌کند و از روی تصویر همان محصول در پروفایل‌ها عکس‌دار می‌کند.
+تطبیق بر اساس عنوان انجام می‌شود (با و بدون پسوند پروفایل).
+</div>
+<div class="crow"><label>پروفایل:</label>
+<select id="photoProfile" style="flex:1"><option value="">همهٔ پروفایل‌ها</option></select></div>
+<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin:4px 0;cursor:pointer">
+<input type="checkbox" id="photoNotify" style="width:14px;height:14px"> ارسال گزارش به پیام‌رسان</label>
+<div class="cact">
+<button class="btn btn-gray" onclick="photoRun(1)" style="flex:1">👁 پیش‌نمایش</button>
+<button class="btn btn-green" onclick="photoRun(0)" style="flex:1">🖼 اجرا</button>
+</div>
+<div id="photoR" style="margin-top:8px"></div>
+</div></div>
+
+<!-- v8.62: گزارش شبانه -->
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🌙 گزارش شبانهٔ محصولات</h3><span class="cst off" id="digestS">خاموش</span><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+هر شب یک گزارش تفصیلی از همهٔ پروفایل‌ها به پیام‌رسان‌ها می‌رود:
+محصولات اضافه‌شده، تغییر قیمت‌ها با میزان و درصد، و حذف‌شده‌ها — هم روی سایت مبدأ و هم ووکامرس و باسلام.
+</div>
+<div class="crow" style="align-items:center">
+<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
+<input type="checkbox" id="digestEnabled" onchange="saveConn();updateDigestBadge()" style="width:16px;height:16px"> فعال
+</label></div>
+<div class="crow"><label>ساعت ارسال:</label>
+<select id="digestHour" onchange="saveConn();updateDigestBadge()" style="flex:1"></select></div>
+<div class="crow"><label>بازهٔ گزارش:</label>
+<select id="digestHours" onchange="saveConn()" style="flex:1">
+<option value="24">۲۴ ساعت گذشته</option>
+<option value="48">۲ روز گذشته</option>
+<option value="168">۷ روز گذشته</option>
+</select></div>
+<div style="font-size:10px;color:#64748b;margin:-2px 0 8px;line-height:1.8">
+⏰ ارسال به کران‌جاب وابسته است؛ اگر کران هر ۵ دقیقه اجرا شود، گزارش در همان ساعت می‌رود.
+</div>
+<div class="cact">
+<button class="btn btn-gray" onclick="digestPreview()" style="flex:1">👁 پیش‌نمایش</button>
+<button class="btn btn-green" onclick="digestSendNow()" style="flex:1">📤 ارسال فوری</button>
+</div>
+<div id="digestR" style="margin-top:8px"></div>
 </div></div>
 
 <div class="smenu">
@@ -12987,6 +13984,13 @@ function renderProfileDropdown() {
         opt.textContent = p.name;
         sel.appendChild(opt);
     });
+    // v8.62: همان فهرست برای «عکس‌دار کردن» — آنجا کلید پروفایل لازم است نه URL
+    const ph = $('photoProfile');
+    if (ph) {
+        let h = '<option value="">همهٔ پروفایل‌ها</option>';
+        profiles.forEach(p => { h += '<option value="' + esc(p.key) + '">' + esc(p.name) + '</option>'; });
+        ph.innerHTML = h;
+    }
 }
 renderProfileDropdown();
 
@@ -14544,6 +15548,23 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.62', t:'ویرایش مستقیم محصولات، عکس‌دار کردن، و گزارش شبانه', items:[
+    'بخش جدید ✏️ ویرایش محصولات مقصد — تکی یا گروهی، روی ووکامرس و باسلام',
+    'تغییر قیمت (مقدار ثابت، درصدی یا مبلغی)، موجودی، وضعیت، توضیحات و عنوان',
+    'پیش‌نمایش قبل از اعمال، تا ببینید دقیقاً چه چیزی عوض می‌شود',
+    '🔴 مهم: باسلام در API خود اصلاً متد DELETE برای محصول ندارد',
+    'کد قبلی DELETE می‌فرستاد به اندپوینتی که وجود ندارد و همیشه ۴۰۴ می‌گرفت — یعنی حذف هیچ‌وقت انجام نمی‌شد',
+    'حالا «حذف» در باسلام یعنی بایگانی (وضعیت ۴۱۸۴) که محصول را از غرفه برمی‌دارد',
+    'در ووکامرس هر دو حالت هست: زباله‌دان (برگشت‌پذیر) و حذف همیشگی',
+    'بخش جدید 🖼 عکس‌دار کردن محصولات ووکامرس از روی تصویر همان محصول در پروفایل‌ها',
+    'بخش جدید 🌙 گزارش شبانه — هر شب ساعت دلخواه (پیش‌فرض ۲۳)',
+    'گزارش شامل اضافه‌شده‌ها، تغییر قیمت با میزان و درصد، و حذف‌شده‌ها — به تفکیک هر پروفایل',
+    'وضعیت ارسال به ووکامرس و باسلام هم در همان گزارش می‌آید',
+    'همهٔ این عملیات سمت سرور اجرا می‌شوند و گزارششان به پیام‌رسان‌ها می‌رود',
+    'یادگیری: به‌روزرسانی درجا آموخته‌ها را پاک نمی‌کند (با تست سنجیده شد)',
+    'ولی نصب با نام یا پوشهٔ دیگر، آن‌ها را جا می‌گذارد — چون کنار فایل ذخیره می‌شوند',
+    'دکمهٔ ⬇️ پشتیبان و ⬆️ بازیابی اضافه شد، و فایل جامانده در همان پوشه خودکار برداشته می‌شود'
+  ]},
   {v:'8.61', t:'عبور از محدودیت شبکه برای اتصال به سرویس‌های هوش مصنوعی', items:[
     'شش روش اتصال در بخش 🤖 هوش مصنوعی: مستقیم · DoH · IP دستی · Worker · درگاه واسط · پروکسی',
     'DoH: آدرس واقعی دامنه از کلادفلر/گوگل گرفته می‌شود — برای وقتی DNS محلی آلوده است',
@@ -15304,6 +16325,300 @@ function genQueueStatus(){
 }
 
 /* v8.48: رابط حافظهٔ یادگیری دسته‌بندی */
+/* ============ v8.62: ویرایشگر محصولات مقصد ============ */
+let edTarget='woo', edPage=1, edRows=[], edSel=new Set(), edTimer=null;
+
+function editorOpen(target){
+  edTarget=target; edPage=1; edSel=new Set(); edRows=[];
+  let m=document.getElementById('edModal');
+  if(!m){
+    m=document.createElement('div');
+    m.id='edModal';
+    m.className='bsl-modal-overlay';
+    m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:100000;display:flex;align-items:center;justify-content:center;padding:12px';
+    m.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:12px;width:min(1000px,96vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden">'
+      +'<div style="padding:12px 16px;background:#1e293b;border-bottom:1px solid #334155;display:flex;justify-content:space-between;align-items:center">'
+      +'<h2 id="edTitle" style="margin:0;font-size:15px;color:#e2e8f0">✏️ ویرایش محصولات</h2>'
+      +'<button class="btn btn-gray" onclick="editorClose()" style="padding:4px 10px">✕</button></div>'
+      +'<div id="edBody" style="padding:12px 16px;overflow-y:auto;flex:1"></div></div>';
+    document.body.appendChild(m);
+  }
+  m.style.display='flex';
+  $('edTitle').textContent=target==='woo'?'✏️ ویرایش محصولات ووکامرس':'✏️ ویرایش محصولات باسلام';
+  editorRender();
+  editorLoad();
+}
+function editorClose(){
+  const m=document.getElementById('edModal');if(m)m.style.display='none';
+  if(edTimer){clearInterval(edTimer);edTimer=null;}
+}
+function editorRender(){
+  const b=$('edBody');if(!b)return;
+  const isBsl=edTarget==='bsl';
+  b.innerHTML=
+   '<div class="row" style="align-items:center;gap:6px">'
+   +'<input type="text" id="edQ" placeholder="جستجوی عنوان..." style="flex:1" onkeydown="if(event.key===\'Enter\'){edPage=1;editorLoad();}">'
+   +'<button class="btn btn-blue" onclick="edPage=1;editorLoad()">🔍 جستجو</button>'
+   +'<button class="btn btn-gray" onclick="editorPage(-1)">‹</button>'
+   +'<span id="edPageN" style="color:#94a3b8;font-size:12px">۱</span>'
+   +'<button class="btn btn-gray" onclick="editorPage(1)">›</button></div>'
+   +'<div id="edList" style="max-height:38vh;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:6px;background:#111c31;margin-bottom:10px">در حال بارگذاری...</div>'
+   +'<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">'
+   +'<button class="btn btn-gray" onclick="editorSelAll(1)" style="font-size:11px;padding:4px 10px">انتخاب همه</button>'
+   +'<button class="btn btn-gray" onclick="editorSelAll(0)" style="font-size:11px;padding:4px 10px">لغو انتخاب</button>'
+   +'<span id="edSelN" style="color:#67e8f9;font-size:12px;font-weight:700">۰ انتخاب‌شده</span></div>'
+   +'<div style="border-top:1px solid #334155;padding-top:10px">'
+   +'<div style="color:#fbbf24;font-weight:700;font-size:12px;margin-bottom:8px">تغییرات روی انتخاب‌شده‌ها</div>'
+   +'<div class="row" style="align-items:center"><label style="min-width:70px">💰 قیمت:</label>'
+   +'<select id="edPriceOp" style="flex:0;min-width:130px"><option value="">بدون تغییر</option>'
+   +'<option value="set">مقدار ثابت</option><option value="inc">افزایش</option><option value="dec">کاهش</option></select>'
+   +'<input type="text" id="edPriceVal" placeholder="مثلاً 10% یا 5000" dir="ltr" style="flex:1"></div>'
+   +'<div class="row" style="align-items:center"><label style="min-width:70px">📦 موجودی:</label>'
+   +'<input type="number" id="edStock" placeholder="خالی = بدون تغییر" dir="ltr" style="flex:1"></div>'
+   +'<div class="row" style="align-items:center"><label style="min-width:70px">🏷 وضعیت:</label>'
+   +'<select id="edStatus" style="flex:1"><option value="">بدون تغییر</option>'
+   +(isBsl
+      ?'<option value="2976">فعال</option><option value="3790">غیرفعال</option><option value="4184">بایگانی</option>'
+      :'<option value="publish">منتشر</option><option value="draft">پیش‌نویس</option><option value="private">خصوصی</option>')
+   +'</select></div>'
+   +'<div class="row" style="align-items:center"><label style="min-width:70px">📝 توضیح کوتاه:</label>'
+   +'<input type="text" id="edShort" placeholder="خالی = بدون تغییر" style="flex:1"></div>'
+   +'<div class="row" style="align-items:flex-start"><label style="min-width:70px">📄 توضیحات:</label>'
+   +'<textarea id="edDesc" placeholder="خالی = بدون تغییر" style="flex:1;height:60px"></textarea></div>'
+   +'<div class="row" style="align-items:center"><label style="min-width:70px">🔤 عنوان:</label>'
+   +'<input type="text" id="edPrefix" placeholder="پیشوند" style="flex:1">'
+   +'<input type="text" id="edSuffix" placeholder="پسوند" style="flex:1"></div>'
+   +'<div style="border-top:1px solid #7f1d1d;margin-top:8px;padding-top:8px">'
+   +'<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#fca5a5;cursor:pointer">'
+   +'<input type="checkbox" id="edDelete" onchange="editorDelToggle()" style="width:16px;height:16px">'
+   +(isBsl?'🗄 بایگانی کردن (باسلام حذف همیشگی ندارد)':'🗑 حذف محصولات')+'</label>'
+   +(isBsl?'':'<label id="edForceWrap" style="display:none;align-items:center;gap:6px;font-size:11px;color:#f87171;margin-top:4px;cursor:pointer">'
+      +'<input type="checkbox" id="edForce" style="width:14px;height:14px"> حذف همیشگی (برگشت‌ناپذیر)</label>')
+   +'</div>'
+   +'<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin-top:8px;cursor:pointer">'
+   +'<input type="checkbox" id="edNotify" style="width:14px;height:14px"> ارسال گزارش به پیام‌رسان</label>'
+   +'<div class="cact" style="margin-top:10px">'
+   +'<button class="btn btn-gray" onclick="editorRun(1)" style="flex:1">👁 پیش‌نمایش</button>'
+   +'<button class="btn btn-green" onclick="editorRun(0)" style="flex:1">✓ اعمال</button></div>'
+   +'<div id="edResult" style="margin-top:10px"></div></div>';
+}
+function editorDelToggle(){
+  const w=$('edForceWrap');
+  if(w)w.style.display=($('edDelete')&&$('edDelete').checked)?'flex':'none';
+}
+function editorPage(d){
+  const n=edPage+d; if(n<1)return; edPage=n; editorLoad();
+}
+function editorLoad(){
+  const l=$('edList');if(!l)return;
+  l.innerHTML='در حال بارگذاری...';
+  const q=new URLSearchParams({dest_list:'1',target:edTarget,page:String(edPage)});
+  const s=($('edQ')||{}).value||''; if(s.trim())q.set('q',s.trim());
+  fetch('?'+q.toString()).then(r=>r.json()).then(d=>{
+    if(!d.ok){l.innerHTML='<div style="color:#fca5a5">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    edRows=d.products||[];
+    if($('edPageN'))$('edPageN').textContent=toFa(edPage);
+    if(!edRows.length){l.innerHTML='<div style="color:#64748b">محصولی نیست</div>';return;}
+    let h='';
+    edRows.forEach(p=>{
+      const on=edSel.has(p.id);
+      h+='<label style="display:flex;align-items:center;gap:8px;padding:5px 6px;border-bottom:1px solid #1e293b;cursor:pointer;font-size:11.5px">'
+        +'<input type="checkbox" '+(on?'checked':'')+' onchange="editorPick('+p.id+',this.checked)" style="width:15px;height:15px">'
+        +'<span style="flex:1;color:#e2e8f0">'+esc(p.title||'')+'</span>'
+        +'<span style="color:#fbbf24;font-family:ui-monospace,monospace">'+toFa(Number(p.price||0).toLocaleString('en-US'))+'</span>'
+        +'<span style="color:#94a3b8;min-width:46px;text-align:center">'+(p.stock===null||p.stock===undefined?'—':toFa(p.stock))+'</span>'
+        +'<span style="color:#64748b;min-width:60px">'+esc(String(p.status||''))+'</span>'
+        +(p.has_image?'':'<span title="بدون تصویر">🖼️❌</span>')
+        +'</label>';
+    });
+    l.innerHTML=h;
+    editorCount();
+  }).catch(()=>{l.innerHTML='<div style="color:#fca5a5">✗ خطا شبکه</div>';});
+}
+function editorPick(id,on){ if(on)edSel.add(id); else edSel.delete(id); editorCount(); }
+function editorSelAll(on){
+  edRows.forEach(p=>{ if(on)edSel.add(p.id); else edSel.delete(p.id); });
+  editorLoad();
+}
+function editorCount(){ if($('edSelN'))$('edSelN').textContent=toFa(edSel.size)+' انتخاب‌شده'; }
+function editorRun(dry){
+  if(edSel.size===0){showToast('محصولی انتخاب نشده',1);return;}
+  const ops={};
+  const po=($('edPriceOp')||{}).value||'';
+  const pv=(($('edPriceVal')||{}).value||'').trim();
+  if(po&&pv)ops.price={op:po,val:pv};
+  const st=(($('edStock')||{}).value||'').trim();
+  if(st!=='')ops.stock=parseInt(st)||0;
+  const su=($('edStatus')||{}).value||''; if(su)ops.status=su;
+  const sd=(($('edShort')||{}).value||'').trim(); if(sd)ops.short_desc=sd;
+  const dd=(($('edDesc')||{}).value||'').trim(); if(dd)ops.desc=dd;
+  const pf=(($('edPrefix')||{}).value||'').trim(); if(pf)ops.title_prefix=pf+' ';
+  const sf=(($('edSuffix')||{}).value||'').trim(); if(sf)ops.title_suffix=' '+sf;
+  const del=$('edDelete')&&$('edDelete').checked;
+  if(del){ops.delete=true; if($('edForce')&&$('edForce').checked)ops.force=true;}
+  if(!del&&Object.keys(ops).length===0){showToast('هیچ تغییری تعیین نشده',1);return;}
+  if(!dry){
+    const what=del?(edTarget==='bsl'?'بایگانی':'حذف'):'ویرایش';
+    if(!confirm(what+' '+edSel.size+' محصول؟ این کار روی مقصد اعمال می‌شود.'))return;
+  }
+  const fd=new FormData();
+  fd.append('target',edTarget);
+  fd.append('ids',JSON.stringify(Array.from(edSel)));
+  fd.append('ops',JSON.stringify(ops));
+  if(dry)fd.append('dry','1');
+  if(!dry&&$('edNotify')&&$('edNotify').checked)fd.append('notify','1');
+  $('edResult').innerHTML='<div class="alert alert-info" style="padding:8px;font-size:11px">در حال اجرا...</div>';
+  fetch('?bulk_edit=1',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    if(!d.ok){$('edResult').innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    if(edTimer)clearInterval(edTimer);
+    edTimer=setInterval(editorPoll,1500);
+    editorPoll();
+  }).catch(()=>{$('edResult').innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ خطا شبکه</div>';});
+}
+function editorPoll(){
+  fetch('?bulk_status=1').then(r=>r.json()).then(d=>{
+    const st=d.status||{},box=$('edResult');if(!box)return;
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px;line-height:1.9">';
+    h+='<div style="color:#67e8f9;font-weight:700">'+(st.running?'⏳ در حال اجرا':'✅ پایان')+(st.dry?' (پیش‌نمایش)':'')+'</div>';
+    h+='<div>'+toFa(st.current||0)+'/'+toFa(st.total||0)
+      +' · ویرایش: <b style="color:#4ade80">'+toFa(st.changed||0)+'</b>'
+      +' · حذف/بایگانی: <b style="color:#fb923c">'+toFa(st.deleted||0)+'</b>'
+      +' · بدون تغییر: '+toFa(st.skipped||0)
+      +(st.failed?' · خطا: <b style="color:#f87171">'+toFa(st.failed)+'</b>':'')+'</div>';
+    (st.log||[]).slice(-4).forEach(l=>{h+='<div style="color:#94a3b8;font-size:10px">'+esc(l.m||'')+'</div>';});
+    h+='</div>';
+    box.innerHTML=h;
+    if(!st.running){
+      if(edTimer){clearInterval(edTimer);edTimer=null;}
+      fetch('?bulk_result=1').then(r=>r.json()).then(rr=>{
+        const res=rr.result;if(!res||!res.items)return;
+        let t='<div style="margin-top:6px;max-height:220px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:6px;background:#111c31">';
+        res.items.slice(0,120).forEach(i=>{
+          const bad=i.error?'#fca5a5':'#cbd5e1';
+          t+='<div style="font-size:10.5px;color:'+bad+'">• #'+i.id+' '+esc(i.title||'')
+            +(i.new_price!==undefined?(' — '+toFa(Number(i.old_price).toLocaleString('en-US'))+'→'+toFa(Number(i.new_price).toLocaleString('en-US'))+' ('+(i.pct>=0?'+':'')+i.pct+'٪)'):'')
+            +(i.action?(' — '+esc(i.action)):'')+(i.error?(' — '+esc(i.error)):'')+'</div>';
+        });
+        t+='</div>';
+        box.innerHTML+=t;
+        if(!res.dry)editorLoad();
+      }).catch(()=>{});
+    }
+  }).catch(()=>{});
+}
+
+/* ============ v8.62: پشتیبان‌گیری آموخته‌ها ============ */
+function catLearnExport(){
+  const r=$('catLearnR');
+  r.innerHTML='<div class="alert alert-info" style="padding:8px;font-size:11px">در حال آماده‌سازی...</div>';
+  fetch('?catlearn=1&export=1').then(x=>x.json()).then(d=>{
+    if(!d.ok){r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    const txt=JSON.stringify(d.data);
+    r.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px">'
+      +'<div style="color:#67e8f9;font-weight:700;font-size:11px;margin-bottom:6px">💾 پشتیبان '+toFa(d.count)+' کلمه</div>'
+      +'<textarea id="catLearnBak" readonly style="width:100%;height:120px;font-family:ui-monospace,monospace;font-size:10px;direction:ltr;text-align:left;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:8px"></textarea>'
+      +'<div style="font-size:10px;color:#64748b;margin-top:6px">این متن را جایی نگه دارید. بعد از نصب با نام جدید، با «⬆️ بازیابی» برگردانید.</div>'
+      +'<button class="btn btn-cyan" style="margin-top:6px;font-size:11px;padding:5px 10px" onclick="catLearnCopyBak()">📋 کپی</button></div>';
+    $('catLearnBak').value=txt;
+  }).catch(()=>{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ خطا شبکه</div>';});
+}
+function catLearnCopyBak(){
+  const t=$('catLearnBak');if(!t)return;t.select();
+  try{document.execCommand('copy');showToast('✓ کپی شد');}
+  catch(e){if(navigator.clipboard){navigator.clipboard.writeText(t.value);showToast('✓ کپی شد');}}
+}
+function catLearnImportPrompt(){
+  const r=$('catLearnR');
+  r.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px">'
+    +'<div style="color:#4ade80;font-weight:700;font-size:11px;margin-bottom:6px">⬆️ بازیابی آموخته‌ها</div>'
+    +'<textarea id="catLearnIn" placeholder=\'{"کفش":{...}}\' style="width:100%;height:110px;font-family:ui-monospace,monospace;font-size:10px;direction:ltr;text-align:left;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:8px"></textarea>'
+    +'<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin:6px 0;cursor:pointer">'
+    +'<input type="checkbox" id="catLearnReplace" style="width:14px;height:14px"> جایگزینی کامل (به‌جای ادغام)</label>'
+    +'<button class="btn btn-green" style="font-size:11px;padding:5px 10px" onclick="catLearnImport()">✓ بازیابی</button></div>';
+}
+function catLearnImport(){
+  const t=$('catLearnIn');if(!t||!t.value.trim()){showToast('چیزی وارد نشده',1);return;}
+  let parsed;try{parsed=JSON.parse(t.value.trim());}catch(e){showToast('JSON نامعتبر',1);return;}
+  const fd=new FormData();
+  fd.append('action','catlearn_import');
+  fd.append('data',JSON.stringify(parsed));
+  if($('catLearnReplace')&&$('catLearnReplace').checked)fd.append('replace','1');
+  fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    if(d.ok){showToast('✓ '+toFa(d.added)+' تازه، '+toFa(d.merged)+' ادغام — کل '+toFa(d.total));catLearnShow();}
+    else showToast('خطا: '+(d.error||''),1);
+  }).catch(()=>showToast('خطا شبکه',1));
+}
+
+/* ============ v8.62: عکس‌دار کردن محصولات ووکامرس ============ */
+let photoTimer=null;
+function photoRun(dry){
+  const r=$('photoR');
+  const q=new URLSearchParams({photo_fix:'1'});
+  if(dry)q.set('dry','1');
+  const pf=($('photoProfile')||{}).value||'';
+  if(pf)q.set('profile',pf);
+  if(!dry&&$('photoNotify')&&$('photoNotify').checked)q.set('notify','1');
+  if(!dry&&!confirm('تصویر محصولات بی‌عکس ووکامرس از روی پروفایل‌ها تکمیل شود؟'))return;
+  r.innerHTML='<div class="alert alert-info" style="padding:8px;font-size:11px">🖼 شروع شد — پیشرفت زنده...</div>';
+  fetch('?'+q.toString()).then(x=>x.json()).then(d=>{
+    if(!d.ok){r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    if(photoTimer)clearInterval(photoTimer);
+    photoTimer=setInterval(photoPoll,2000);
+    photoPoll();
+  }).catch(()=>{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ خطا شبکه</div>';});
+}
+function photoPoll(){
+  fetch('?photo_status=1').then(x=>x.json()).then(d=>{
+    const st=d.status||{},res=d.result||null,r=$('photoR');
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px;line-height:1.9">';
+    h+='<div style="color:#67e8f9;font-weight:700">🖼 '+(st.running?'در حال اجرا...':'پایان')+(st.dry?' (پیش‌نمایش)':'')+'</div>';
+    h+='<div>بررسی‌شده: <b>'+toFa(st.scanned||0)+'</b> · بی‌تصویر: <b style="color:#fbbf24">'+toFa(st.missing||0)+'</b>'
+      +' · عکس‌دار شد: <b style="color:#4ade80">'+toFa(st.fixed||0)+'</b>'
+      +(st.unmatched?' · بی‌تطبیق: <b style="color:#94a3b8">'+toFa(st.unmatched)+'</b>':'')
+      +(st.failed?' · خطا: <b style="color:#f87171">'+toFa(st.failed)+'</b>':'')+'</div>';
+    (st.log||[]).slice(-6).forEach(l=>{h+='<div style="color:#94a3b8;font-size:10px">'+esc(l.m||'')+'</div>';});
+    if(res&&res.items&&res.items.length){
+      h+='<div style="margin-top:6px;max-height:200px;overflow-y:auto;border-top:1px solid #334155;padding-top:6px">';
+      res.items.slice(0,60).forEach(i=>{h+='<div style="font-size:10px;color:#cbd5e1">• '+esc(i.title||'')+' — <span style="color:#94a3b8">'+esc(i.status||'')+'</span></div>';});
+      h+='</div>';
+    }
+    h+='</div>';
+    r.innerHTML=h;
+    if($('photoS')){$('photoS').textContent=st.running?'در حال اجرا':(st.fixed?toFa(st.fixed)+' عکس‌دار':'—');
+      $('photoS').className='cst '+(st.running?'tg':(st.fixed?'on':'off'));}
+    if(!st.running&&photoTimer){clearInterval(photoTimer);photoTimer=null;}
+  }).catch(()=>{});
+}
+
+/* ============ v8.62: گزارش شبانه ============ */
+function updateDigestBadge(){
+  const el=$('digestS'),en=$('digestEnabled'),h=$('digestHour');
+  if(!el||!en)return;
+  el.textContent=en.checked?('ساعت '+toFa((h&&h.value)||23)):'خاموش';
+  el.className='cst '+(en.checked?'on':'off');
+}
+function digestPreview(){
+  const r=$('digestR');
+  r.innerHTML='<div class="alert alert-info" style="padding:8px;font-size:11px">در حال ساخت گزارش...</div>';
+  fetch('?digest=1').then(x=>x.json()).then(d=>{
+    if(!d.ok){r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ خطا</div>';return;}
+    r.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px">'
+      +'<div style="color:#67e8f9;font-weight:700;font-size:11px;margin-bottom:6px">👁 پیش‌نمایش گزارش</div>'
+      +'<pre style="white-space:pre-wrap;font-size:10.5px;color:#e2e8f0;max-height:320px;overflow-y:auto;margin:0">'+esc(d.message||'')+'</pre>'
+      +(d.state&&d.state.last_date?'<div style="font-size:10px;color:#64748b;margin-top:6px">آخرین ارسال: '+esc(d.state.last_date)+'</div>':'')
+      +'</div>';
+  }).catch(()=>{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ خطا شبکه</div>';});
+}
+function digestSendNow(){
+  if(!confirm('گزارش همین حالا به پیام‌رسان‌ها فرستاده شود؟'))return;
+  const r=$('digestR');
+  r.innerHTML='<div class="alert alert-info" style="padding:8px;font-size:11px">در حال ارسال...</div>';
+  fetch('?digest=1&send=1').then(x=>x.json()).then(d=>{
+    if(d.sent){r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ گزارش فرستاده شد</div>';showToast('✓ ارسال شد');}
+    else r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'ارسال نشد')+'</div>';
+  }).catch(()=>{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ خطا شبکه</div>';});
+}
+
 function catLearnShow(){
   const box=$('catLearnR');
   if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ ...</div>';
@@ -16037,7 +17352,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
@@ -16045,7 +17360,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
