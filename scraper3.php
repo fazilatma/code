@@ -15664,6 +15664,14 @@ function loadCats(){fetch('',{method:'POST',body:new URLSearchParams('action=woo
    محصولاتشان را در همان دسته می‌ریختند. */
 let wooAllCats=[];
 let wooProfileCatId=0;
+
+/** پیدا کردن نام دسته از روی شناسه — برای نمایش در مودال‌ها */
+function getCategoryName(catId){
+    if(!catId||catId<=0)return '';
+    const c=wooAllCats.find(x=>x.id===catId);
+    return c?c.name:'';
+}
+
 function renderWooProfileCats(selectedId){
     const s=$('wooProfileCatId');if(!s)return;
     if(selectedId===undefined||selectedId===null)selectedId=wooProfileCatId||0;
@@ -16854,13 +16862,18 @@ function showBslQueueDetail(qid){
         }
         if(e.config){
             if(e.config.category_id&&e.config.category_id>0){
-                detailHtml+='<span style="color:#a78bfa;font-size:11px;background:#7c3aed20;padding:4px 8px;border-radius:4px">📁 دسته اصلی: '+toFa(e.config.category_id)+'</span>';
+                const catName = getCategoryName(e.config.category_id);
+                detailHtml+='<span style="color:#a78bfa;font-size:11px;background:#7c3aed20;padding:4px 8px;border-radius:4px">📁 دسته اصلی: '+toFa(e.config.category_id)+(catName?' — '+esc(catName):'')+'</span>';
             }
             if(e.config.auto_category){
                 detailHtml+='<span style="color:#22d3ee;font-size:11px;background:#0e749020;padding:4px 8px;border-radius:4px">🤖 دسته‌بندی خودکار</span>';
             }
             if(e.config.fallback_cat_ids&&e.config.fallback_cat_ids.length>0){
-                detailHtml+='<span style="color:#fbbf24;font-size:11px;background:#78350f20;padding:4px 8px;border-radius:4px">📂 دسته‌های جایگزین: '+e.config.fallback_cat_ids.map(id=>toFa(id)).join('، ')+'</span>';
+                const fallbackNames = e.config.fallback_cat_ids.map(id => {
+                    const nm = getCategoryName(id);
+                    return toFa(id)+(nm?' — '+esc(nm):'');
+                });
+                detailHtml+='<span style="color:#fbbf24;font-size:11px;background:#78350f20;padding:4px 8px;border-radius:4px">📂 دسته‌های جایگزین: '+fallbackNames.join('، ')+'</span>';
             }
         }
         detailHtml+='</div></div>';
