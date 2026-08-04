@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.71';
+const APP_VERSION = '8.72';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1701,6 +1701,20 @@ function wooFindExisting(array $w, string $title, string $suffix = '', string $p
 function bslFindExisting(string $tk, int $vid, string $title, string $productKey = ''): ?array {
     $q = bslNormalizeTitle($title);
     $statuses = '&statuses=2976&statuses=3790&statuses=3567&statuses=3568&statuses=4184';
+    // v8.72: اول شناسهٔ ثبت‌شده. باسلام می‌گوید «نام قبلاً برای محصول دیگری
+    // انتخاب شده» — یعنی عنوانِ ذخیره‌شده در غرفه ممکن است اصلاً شبیه عنوان
+    // ما نباشد و هیچ جست‌وجویی پیدایش نکند. ولی شناسه‌اش را از ارسال قبلی
+    // داریم، پس مستقیم همان را می‌خوانیم.
+    if ($productKey !== '') {
+        $mapped = (int)((remoteMapLoad()['bsl'][$productKey]['id'] ?? 0));
+        if ($mapped > 0) {
+            $one = bslReq($tk, 'GET', 'products/' . $mapped);
+            $row = $one['body']['data'] ?? ($one['body'] ?? null);
+            if (!empty($one['ok']) && is_array($row) && (int)($row['id'] ?? 0) > 0) return $row;
+            // حتی اگر خواندن مستقیم جواب نداد، خودِ شناسه برای PATCH کافی است
+            return ['id' => $mapped, 'title' => $title, '__from_ledger' => true];
+        }
+    }
     foreach (array_unique([$q, trim($title)]) as $term) {
         if ($term === '') continue;
         $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=50'
@@ -7354,6 +7368,34 @@ if (isset($_GET['selftest'])) {
         foreach (explode("\n", $selfSrc) as $l) if (strlen($l) > 6000) return false;
         return true;
     })());
+    /* ---------- v8.72ب: پیام دقیق باسلام و شناسهٔ دفترچه ---------- */
+    // «نام کالا تکراری است و قبلا برای محصول دیگری انتخاب کرده‌اید»
+    $add('8.72', 'پیام دقیق تکراری باسلام شناسایی می‌شود', (function () {
+        $msg = '!نام کالا تکراری است و قبلا برای محصول دیگری انتخاب کرده‌اید';
+        return mb_stripos($msg, 'تکرار') !== false;
+    })());
+    $add('8.72', 'جست‌وجوی باسلام اول شناسهٔ ثبت‌شده را می‌خواند',
+         strpos($selfSrc, "remoteMapLoad()['bsl'][\$productKey]['id']") !== false);
+    $add('8.72', 'شناسهٔ دفترچه حتی بدون خواندن موفق کافی است',
+         strpos($selfSrc, "'__from_ledger' => true") !== false);
+
+    /* ---------- v8.72: ارسال تکی هم محصول موجود را پیدا می‌کند ---------- */
+    // جست‌وجوی ارسال تکی باید همهٔ وضعیت‌ها را ببیند، نه فقط فعال/غیرفعال
+    $add('8.72', 'ارسال تکی از جست‌وجوی کامل استفاده می‌کند',
+         substr_count($selfSrc, 'bslFind' . 'Existing($tk,$vid,$pTitle') >= 3);
+    $add('8.72', 'ارسال تکی بعد از خطای تکراری دوباره می‌گردد',
+         strpos($selfSrc, 'if($dupName&&!$exBsl){') !== false);
+    $add('8.72', 'آپدیت پس از تکراری، محتوای تازه را می‌برد',
+         substr_count($selfSrc, 'bslApply' . 'Content($bu,$p)') >= 3);
+    if (function_exists('bslFindExisting')) {
+        $rf = new ReflectionFunction('bslFindExisting');
+        $add('8.72', 'جست‌وجوی باسلام کلید محصول را هم می‌گیرد',
+             $rf->getNumberOfParameters() >= 4);
+    }
+    // همهٔ وضعیت‌ها در جست‌وجوی مشترک
+    $add('8.72', 'جست‌وجوی مشترک همهٔ وضعیت‌های باسلام را می‌بیند',
+         strpos($selfSrc, 'statuses=2976&statuses=3790&statuses=3567&statuses=3568&statuses=4184') !== false);
+
     /* ---------- v8.71: پیدا کردن محصول موجود، به‌جای خطای تکراری ---------- */
     $add('8.71', 'توابع تطبیق محصول موجود هستند',
          function_exists('findRemoteByTitle') && function_exists('findRemoteById')
@@ -13525,6 +13567,10 @@ $nTitle=bslNormalizeTitle($pTitle);
 if(isset($bslExisting[$pTitle]))$exBsl=$bslExisting[$pTitle];
 if(!$exBsl&&isset($bslExistingNorm[$nTitle]))$exBsl=$bslExistingNorm[$nTitle];
 if(!$exBsl&&$nTitle!==''){foreach($bslExistingNorm as $ek=>$ev){if($ek!==''&&($nTitle==$ek||mb_strpos($nTitle,$ek,0,'UTF-8')!==false||mb_strpos($ek,$nTitle,0,'UTF-8')!==false)){$exBsl=$ev;break;}}}
+// v8.72: جست‌وجوی بالا فقط وضعیت فعال و غیرفعال را می‌دید. محصول
+// بایگانی‌شده یا در انتظار تأیید پیدا نمی‌شد، پس مسیر «ایجاد» می‌رفت
+// و باسلام با «نام تکراری (۴۲۲)» ردش می‌کرد — نه ساخته می‌شد نه آپدیت.
+if(!$exBsl)$exBsl=bslFindExisting($tk,$vid,$pTitle,(string)$pKey);
 
 if($exBsl){
 $exId=$exBsl['id']??0;
@@ -13637,10 +13683,17 @@ if(is_array($emCheck))$emCheck=json_encode($emCheck,JSON_UNESCAPED_UNICODE);
 if(!$dupName&&$emCheck&&(mb_stripos($emCheck,'نام تکرار')!==false||mb_stripos($emCheck,'duplicate name')!==false||mb_stripos($emCheck,'already exists')!==false||mb_stripos($emCheck,'تکراری')!==false))$dupName=true;
 
 if(!$dupName&&$r['code']===422)$dupName=true;
-if($dupName&&$exBsl){
+// v8.72: باسلام می‌گوید تکراری ولی جست‌وجو محصول را پیدا نکرده بود
+// (مثلاً بایگانی‌شده یا در انتظار تأیید). دوباره بگرد تا آپدیت شود.
+if($dupName&&!$exBsl){
+$exBsl=bslFindExisting($tk,$vid,$pTitle,(string)$pKey);
+if($exBsl)$exId=(int)($exBsl['id']??0);
+}
+if($dupName&&$exBsl&&!empty($exId)){
 
 $bu=['primary_price'=>$pn,'stock'=>(int)($bs['stock']??10),'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100))];
 if((int)($bs['stock']??10)<=0)$bu['status']=3790;else $bu['status']=2976;
+bslApplyContent($bu,$p);   // v8.72: توضیحات و تنوع‌های تازه هم بروند
 if($pid){$bu['photo']=$pid;$bu['photos']=(!empty($galIds)?$galIds:[$pid]);}
 if($buCatId>0)$bu['category_id']=$buCatId;
 $r3=bslReq($tk,'PATCH','products/'.$exId,$bu);
@@ -18491,6 +18544,20 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.72', t:'ارسال تکی هم محصول موجود را پیدا می‌کند — ادامهٔ رفع خطای تکراری', items:[
+    '🐞 در نسخهٔ ۸.۷۱ فقط مسیرهای صف اصلاح شده بودند، ولی «ارسال تکی» جا مانده بود',
+    'ارسال تکی همان مسیری است که دکمه‌های پنجرهٔ صف و «تلاش دوباره» صدا می‌زنند',
+    'جست‌وجوی آن فقط وضعیت فعال و غیرفعال را می‌دید',
+    'یعنی محصول بایگانی‌شده یا در انتظار تأیید پیدا نمی‌شد، مسیر ایجاد می‌رفت و باسلام «نام تکراری (۴۲۲)» می‌داد',
+    '✅ حالا اگر جست‌وجوی اول چیزی نیافت، جست‌وجوی کامل روی همهٔ وضعیت‌ها انجام می‌شود',
+    '✅ و اگر باسلام باز هم گفت تکراری، دوباره می‌گردد و به‌جای رد کردن، آپدیت می‌کند',
+    'محصول بایگانی‌شده در همین مسیر دوباره فعال می‌شود',
+    'توضیحات، گالری و تنوع‌های تازه هم در همین آپدیت می‌روند',
+    '🔑 پیام دقیق باسلام: «نام کالا تکراری است و قبلا برای محصول دیگری انتخاب کرده‌اید»',
+    'یعنی ممکن است عنوان ذخیره‌شده در غرفه اصلاً شبیه عنوان ما نباشد و هیچ جست‌وجویی پیدایش نکند',
+    'برای همین حالا اول شناسهٔ ثبت‌شده در دفترچه خوانده می‌شود، بعد جست‌وجو',
+    'اگر محصول قبلاً یک بار با موفقیت ارسال شده باشد، شناسه‌اش را داریم و مستقیم آپدیت می‌شود'
+  ]},
   {v:'8.71', t:'رفع خطای «محصول تکراری» باسلام و «خطای ایجاد» ووکامرس', items:[
     '🐞 علت پیدا شد: تطبیق محصول موجود با مقایسهٔ دقیقِ رشته انجام می‌شد',
     'ولی مقصد عنوان را عیناً همان‌طور که فرستادیم نگه نمی‌دارد:',
