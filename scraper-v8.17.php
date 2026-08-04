@@ -38,9 +38,15 @@ const BULKEDIT_PROGRESS_FILE = __DIR__ . '/bulkedit_progress.json';   // v8.62
 const BULKEDIT_RESULT_FILE   = __DIR__ . '/bulkedit_result.json';     // v8.62
 const PHOTOFIX_PROGRESS_FILE = __DIR__ . '/photofix_progress.json';   // v8.62
 const DIGEST_STATE_FILE      = __DIR__ . '/digest_state.json';        // v8.62
+// v8.64: سقف تصاویر هر محصول. باید بالای فایل باشد — const سطح بالا در PHP
+// بالا برده نمی‌شود و اندپوینت‌هایی که زودتر اجرا می‌شوند به آن نیاز دارند.
+const GALLERY_MAX_IMAGES = 30;
+const AUTOREPLY_RULES_FILE = __DIR__ . '/autoreply_rules.json';       // v8.64
+const AUTOREPLY_STATE_FILE = __DIR__ . '/autoreply_state.json';       // v8.64
+const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.63';
+const APP_VERSION = '8.64';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1355,6 +1361,47 @@ function wooImagePayload(array $w, string $imgUrl, ?string &$note = null): array
     return [['src' => $imgUrl]];
 }
 
+/**
+ * v8.64: چند تصویر را برای ووکامرس آماده می‌کند.
+ *
+ * همان منطق wooImagePayload، ولی روی فهرست. عکس اول شاخص محصول می‌شود
+ * و بقیه در گالری می‌نشینند — این ترتیبی است که ووکامرس خودش می‌فهمد.
+ * عکسی که آماده نشود ساکت رد می‌شود تا یک آدرس خراب کل گالری را نیندازد.
+ */
+function wooGalleryPayload(array $w, array $imgUrls, ?string &$note = null): array {
+    $out = []; $okN = 0; $badN = 0; $firstNote = null;
+    foreach (galleryDedupe($imgUrls) as $u) {
+        $n1 = null;
+        $one = wooImagePayload($w, (string)$u, $n1);
+        if ($firstNote === null) $firstNote = $n1;
+        if (!empty($one)) { $out[] = $one[0]; $okN++; } else { $badN++; }
+    }
+    if ($okN === 0) { $note = $firstNote ?? 'هیچ تصویری آماده نشد'; return []; }
+    $note = $okN . ' تصویر آماده شد' . ($badN > 0 ? ' (' . $badN . ' ناموفق)' : '')
+          . ($firstNote ? ' — ' . $firstNote : '');
+    return $out;
+}
+
+/**
+ * فهرست تصاویر یک محصول را به‌ترتیب برمی‌گرداند: عکس اصلی اول، بعد گالری.
+ * هم شکل جدید (images) و هم قدیمی (فقط image) را می‌فهمد.
+ */
+function productImageList(array $p): array {
+    $list = [];
+    $main = trim((string)($p['image'] ?? ''));
+    if ($main !== '') $list[] = $main;
+    $imgs = $p['images'] ?? null;
+    if (is_string($imgs)) $imgs = json_decode($imgs, true);
+    if (is_array($imgs)) {
+        foreach ($imgs as $u) {
+            if (is_array($u)) $u = (string)($u['src'] ?? ($u['url'] ?? ''));
+            $u = trim((string)$u);
+            if ($u !== '') $list[] = $u;
+        }
+    }
+    return galleryDedupe($list);
+}
+
 function detectImageFormat(string $data): string {
 if(strlen($data)<4)return '';
 $sig=substr($data,0,4);
@@ -1608,6 +1655,31 @@ $log[]='product page fetch failed';
 }
 
 return['ok'=>0,'error'=>'تصویر آپلود نشد ['.implode(' | ',$log).']'];
+}
+
+/**
+ * v8.64: چند تصویر را به باسلام آپلود می‌کند.
+ *
+ * باسلام برای هر محصول یک photo (شاخص) و یک آرایهٔ photos می‌گیرد که
+ * هر دو شناسهٔ فایل آپلودشده‌اند. آپلود کند است، پس یک سقف دارد و
+ * تصویری که آپلود نشود ساکت رد می‌شود تا کل محصول از دست نرود.
+ *
+ * خروجی: ['ok'=>bool,'main'=>int|null,'ids'=>[int...],'ok_n'=>int,'fail_n'=>int,'note'=>string]
+ */
+function bslUploadMany(string $tk, array $imgUrls, int $max = 10): array {
+    $ids = []; $failN = 0; $firstErr = '';
+    foreach (galleryDedupe($imgUrls, max(1, $max)) as $u) {
+        $up = bslUpload($tk, (string)$u);
+        if (!empty($up['ok']) && !empty($up['file_id'])) { $ids[] = (int)$up['file_id']; continue; }
+        $failN++;
+        if ($firstErr === '') $firstErr = mb_substr((string)($up['error'] ?? '?'), 0, 80);
+    }
+    $okN = count($ids);
+    return ['ok' => $okN > 0, 'main' => $okN > 0 ? $ids[0] : null, 'ids' => $ids,
+            'ok_n' => $okN, 'fail_n' => $failN,
+            'note' => $okN > 0
+                ? ($okN . ' تصویر آپلود شد' . ($failN > 0 ? ' (' . $failN . ' ناموفق)' : ''))
+                : ('هیچ تصویری آپلود نشد' . ($firstErr !== '' ? ' — ' . $firstErr : ''))];
 }
 
 function fetch_html(string $url, int $timeout = 25): array {
@@ -2068,6 +2140,10 @@ $profiles[$key] = [
 'pagVal' => $_POST['pagVal'] ?? '',
 'selectors' => json_decode($_POST['selectors'] ?? '{}', true) ?: [],
 'detailSelectors' => $detailSelectors,
+// v8.64: تنظیمات گالری چندعکسی — اگر در درخواست نباشد مقدار قبلی می‌ماند
+'gallery' => array_key_exists('gallery', $_POST)
+    ? galleryNormalizeCfg($_POST['gallery'])
+    : galleryNormalizeCfg($profiles[$key]['gallery'] ?? []),
 'titleSuffix' => $_POST['titleSuffix'] ?? '',
 'priceMode' => $_POST['priceMode'] ?? 'none',
 'priceVal' => (float)($_POST['priceVal'] ?? 0),
@@ -2308,6 +2384,75 @@ $suggestions['image'] = [
 
 echo json_encode(['ok' => true, 'suggestions' => $suggestions], JSON_UNESCAPED_UNICODE);
 exit;
+}
+
+/**
+ * v8.64: آزمایش گالری روی یک صفحهٔ محصول واقعی.
+ * ?gallery_test=<آدرس صفحهٔ محصول>&gallery=<JSON تنظیمات>
+ * چیزی ذخیره نمی‌کند؛ فقط می‌گوید چند عکس و کدام‌ها پیدا شد.
+ */
+if (!empty($_GET['gallery_test'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(60);
+    $url = trim((string)$_GET['gallery_test']);
+    if (!filter_var($url, FILTER_VALIDATE_URL)) {
+        echo json_encode(['ok' => false, 'error' => 'آدرس نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $cfg = galleryNormalizeCfg($_GET['gallery'] ?? ($_POST['gallery'] ?? []));
+    if (!$cfg['enabled']) {
+        echo json_encode(['ok' => false, 'error' => 'حالت گالری خاموش است'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $res = fetch_html($url, 20);
+    if (empty($res['ok'])) {
+        echo json_encode(['ok' => false, 'error' => 'صفحه باز نشد: '
+            . mb_substr((string)($res['error'] ?? 'خطا'), 0, 120)], JSON_UNESCAPED_UNICODE); exit;
+    }
+    [$gd, $gx] = load_dom($res['html']);
+    $g = galleryExtract($gx, null, $res['url'], $cfg);
+    echo json_encode(['ok' => true, 'mode' => $g['mode'], 'count' => count($g['images']),
+        'tried' => $g['tried'], 'note' => $g['note'], 'images' => $g['images'],
+        'page' => $res['url']], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/**
+ * v8.64: پیشنهاد خودکار «باکس عکس‌ها» روی یک صفحهٔ محصول.
+ * ?gallery_suggest=<آدرس> — چند سلکتور نامزد را با تعداد عکسشان برمی‌گرداند.
+ */
+if (!empty($_GET['gallery_suggest'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(60);
+    $url = trim((string)$_GET['gallery_suggest']);
+    if (!filter_var($url, FILTER_VALIDATE_URL)) {
+        echo json_encode(['ok' => false, 'error' => 'آدرس نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $res = fetch_html($url, 20);
+    if (empty($res['ok'])) {
+        echo json_encode(['ok' => false, 'error' => 'صفحه باز نشد'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    [$gd, $gx] = load_dom($res['html']);
+    // نامزدهای رایج گالری در ووکامرس و قالب‌های ایرانی
+    $cands = ['.woocommerce-product-gallery', '.flex-control-thumbs', '.product-gallery',
+              '.product-images', '.thumbnails', '.gallery', '.swiper-wrapper',
+              '.slick-track', '.owl-stage', '.product-thumbs', '.image-gallery',
+              '.pro-gallery', '.product-photos', '.detail-gallery'];
+    $out = [];
+    foreach ($cands as $c) {
+        $xpq = cssToXpath($c, false);
+        if ($xpq === '') continue;
+        $ns = @$gx->query($xpq);
+        if (!$ns || !$ns->length) continue;
+        $imgs = [];
+        foreach ($ns as $b) foreach (galleryImgsInside($gx, $b, $res['url']) as $u) $imgs[] = $u;
+        $imgs = galleryDedupe($imgs);
+        if (count($imgs) < 2) continue;      // یک عکس یعنی گالری نیست
+        $out[] = ['selector' => $c, 'count' => count($imgs),
+                  'sample' => array_slice($imgs, 0, 4)];
+    }
+    usort($out, fn($a, $b) => $b['count'] <=> $a['count']);
+    echo json_encode(['ok' => true, 'page' => $res['url'], 'suggestions' => $out],
+        JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
 if (!empty($_GET['suggest_detail_selectors'])) {
@@ -3305,6 +3450,218 @@ function queryInside(DOMXPath $xp, DOMNode $container, string $css): ?DOMNodeLis
     return null;
 }
 
+/* =====================================================================
+ *  v8.64: گالری — چند عکس از صفحهٔ جزئیات محصول
+ *
+ *  تا اینجا هر محصول فقط یک تصویر داشت. سه راه برای برداشتن بقیهٔ
+ *  عکس‌ها اضافه شده که همگی به همین توابع می‌رسند:
+ *
+ *   auto   — یک سلکتور به «باکس عکس‌ها» (گالری/اسلایدر) می‌دهید و هر
+ *            تصویری که داخلش باشد برداشته می‌شود. تعداد از پیش معلوم
+ *            نیست؛ هرچه بود.
+ *   manual — چند سلکتور جدا، با خط جدید یا «|» از هم جدا شده.
+ *   number — یک الگو با {n} می‌دهید مثل `.slide-{n} img` و بازهٔ عددی؛
+ *            جای {n} عدد می‌گذارد و تا وقتی پیدا شود جلو می‌رود.
+ *
+ *  در همهٔ حالت‌ها ترتیب حفظ می‌شود، تکراری‌ها حذف می‌شوند و آدرس‌ها
+ *  مطلق می‌شوند.
+ * ===================================================================== */
+
+/**
+ * آدرس تصویر را از یک المان بیرون می‌کشد.
+ * ترتیب صفت‌ها مهم است: نسخهٔ باکیفیت (data-zoom / data-large) قبل از
+ * src که معمولاً بندانگشتی است.
+ */
+function galleryImgFromNode(?DOMNode $node, string $baseUrl): string {
+    if (!$node instanceof DOMElement) return '';
+    $attrs = ['data-zoom-image', 'data-large_image', 'data-large-image', 'data-full',
+              'data-original', 'data-lazy-src', 'data-lazy', 'data-src', 'src', 'href', 'content'];
+    foreach ($attrs as $a) {
+        $v = trim((string)$node->getAttribute($a));
+        if ($v === '' || !url_is_image($v)) continue;
+        $abs = make_absolute_url($v, $baseUrl);
+        if ($abs !== '') return $abs;
+    }
+    // srcset: بزرگ‌ترین عرض را بردار
+    $ss = trim((string)$node->getAttribute('srcset'));
+    if ($ss !== '') {
+        $best = ''; $bestW = -1;
+        foreach (explode(',', $ss) as $cand) {
+            $parts = preg_split('~\s+~', trim($cand));
+            if (!$parts || $parts[0] === '') continue;
+            $w = isset($parts[1]) ? (int)rtrim($parts[1], 'wx') : 0;
+            if ($w > $bestW) { $bestW = $w; $best = $parts[0]; }
+        }
+        if ($best !== '' && url_is_image($best)) {
+            $abs = make_absolute_url($best, $baseUrl);
+            if ($abs !== '') return $abs;
+        }
+    }
+    return '';
+}
+
+/** همهٔ تصاویر داخل یک المان (خودش هم اگر img/a باشد) */
+function galleryImgsInside(DOMXPath $xp, DOMNode $box, string $baseUrl): array {
+    $out = [];
+    $self = galleryImgFromNode($box, $baseUrl);
+    if ($self !== '') $out[] = $self;
+    foreach (['.//img', './/source', './/a[@href]', './/*[@data-src]',
+              './/*[@data-large_image]', './/*[@data-zoom-image]'] as $q) {
+        $ns = @$xp->query($q, $box);
+        if (!$ns) continue;
+        foreach ($ns as $n) {
+            $u = galleryImgFromNode($n, $baseUrl);
+            if ($u !== '') $out[] = $u;
+        }
+    }
+    return $out;
+}
+
+/** حذف تکراری‌ها با حفظ ترتیب، و اعمال سقف */
+function galleryDedupe(array $urls, int $max = GALLERY_MAX_IMAGES): array {
+    $seen = []; $out = [];
+    foreach ($urls as $u) {
+        $u = trim((string)$u);
+        if ($u === '') continue;
+        // آدرس‌هایی که فقط در اندازه فرق دارند (-150x150) یکی حساب می‌شوند
+        $norm = preg_replace('~-\d{2,4}x\d{2,4}(?=\.[a-z]{3,4}(\?|$))~i', '', $u);
+        $norm = preg_replace('~[?#].*$~', '', $norm);
+        if (isset($seen[$norm])) continue;
+        $seen[$norm] = true;
+        $out[] = $u;
+        if (count($out) >= $max) break;
+    }
+    return $out;
+}
+
+/**
+ * تنظیمات گالری را به شکل استاندارد درمی‌آورد.
+ * ورودی می‌تواند از پروفایل (آرایه) یا از درخواست (JSON) بیاید.
+ */
+function galleryNormalizeCfg($raw): array {
+    if (is_string($raw)) $raw = json_decode($raw, true);
+    if (!is_array($raw)) $raw = [];
+    $mode = (string)($raw['mode'] ?? 'off');
+    if (!in_array($mode, ['off', 'auto', 'manual', 'number'], true)) $mode = 'off';
+    return [
+        'mode'      => $mode,
+        'enabled'   => $mode !== 'off',
+        'box'       => trim((string)($raw['box'] ?? '')),
+        'selectors' => trim((string)($raw['selectors'] ?? '')),
+        'pattern'   => trim((string)($raw['pattern'] ?? '')),
+        'from'      => max(0, (int)($raw['from'] ?? 1)),
+        'to'        => max(0, (int)($raw['to'] ?? 10)),
+        'max'       => max(1, min(GALLERY_MAX_IMAGES, (int)($raw['max'] ?? GALLERY_MAX_IMAGES))),
+        'skip_first'=> !empty($raw['skip_first']),
+    ];
+}
+
+/** سلکتورهای حالت دستی: با خط جدید، کاما یا | جدا می‌شوند */
+function gallerySplitSelectors(string $s): array {
+    $parts = preg_split('~[\r\n|]+~u', $s);
+    $out = [];
+    foreach ((array)$parts as $p) {
+        $p = trim((string)$p);
+        if ($p !== '') $out[] = $p;
+    }
+    return $out;
+}
+
+/**
+ * تصاویر گالری یک صفحهٔ محصول را برمی‌گرداند.
+ * $ctx اگر داده شود جست‌وجو داخل همان المان محدود می‌شود.
+ * خروجی: ['images'=>[...], 'mode'=>..., 'tried'=>N, 'note'=>'...']
+ */
+function galleryExtract(DOMXPath $xp, ?DOMNode $ctx, string $baseUrl, array $cfg): array {
+    $cfg = galleryNormalizeCfg($cfg);
+    $res = ['images' => [], 'mode' => $cfg['mode'], 'tried' => 0, 'note' => ''];
+    if (!$cfg['enabled']) { $res['note'] = 'خاموش'; return $res; }
+    $urls = [];
+
+    if ($cfg['mode'] === 'auto') {
+        if ($cfg['box'] === '') { $res['note'] = 'سلکتور باکس عکس‌ها خالی است'; return $res; }
+        $boxes = $ctx !== null
+            ? queryInside($xp, $ctx, $cfg['box'])
+            : @$xp->query(cssToXpath($cfg['box'], true) ?: '//none');
+        if ((!$boxes || !$boxes->length) && $ctx === null) {
+            $boxes = @$xp->query(cssToXpath($cfg['box'], false) ?: '//none');
+        }
+        if (!$boxes || !$boxes->length) { $res['note'] = 'باکس عکس‌ها پیدا نشد'; return $res; }
+        $res['tried'] = $boxes->length;
+        foreach ($boxes as $b) {
+            foreach (galleryImgsInside($xp, $b, $baseUrl) as $u) $urls[] = $u;
+        }
+        $res['note'] = 'باکس پیدا شد — ' . $boxes->length . ' ظرف';
+
+    } elseif ($cfg['mode'] === 'manual') {
+        $sels = gallerySplitSelectors($cfg['selectors']);
+        if (!$sels) { $res['note'] = 'هیچ سلکتوری وارد نشده'; return $res; }
+        $res['tried'] = count($sels);
+        $hit = 0;
+        foreach ($sels as $s) {
+            $ns = $ctx !== null ? queryInside($xp, $ctx, $s)
+                                : @$xp->query(cssToXpath($s, true) ?: '//none');
+            if ((!$ns || !$ns->length) && $ctx === null) $ns = @$xp->query(cssToXpath($s, false) ?: '//none');
+            if (!$ns || !$ns->length) continue;
+            $hit++;
+            foreach ($ns as $n) {
+                $u = galleryImgFromNode($n, $baseUrl);
+                if ($u !== '') { $urls[] = $u; continue; }
+                foreach (galleryImgsInside($xp, $n, $baseUrl) as $u2) $urls[] = $u2;
+            }
+        }
+        $res['note'] = $hit . ' از ' . count($sels) . ' سلکتور نتیجه داد';
+
+    } elseif ($cfg['mode'] === 'number') {
+        $pat = $cfg['pattern'];
+        if ($pat === '' || mb_strpos($pat, '{n}') === false) {
+            $res['note'] = 'الگو باید {n} داشته باشد'; return $res;
+        }
+        $from = $cfg['from']; $to = max($from, $cfg['to']);
+        // سقف منطقی تا حلقه بی‌جهت طولانی نشود
+        if ($to - $from > GALLERY_MAX_IMAGES * 2) $to = $from + GALLERY_MAX_IMAGES * 2;
+        $miss = 0; $hit = 0;
+        for ($i = $from; $i <= $to; $i++) {
+            $res['tried']++;
+            $s = str_replace('{n}', (string)$i, $pat);
+            $ns = $ctx !== null ? queryInside($xp, $ctx, $s)
+                                : @$xp->query(cssToXpath($s, true) ?: '//none');
+            if ((!$ns || !$ns->length) && $ctx === null) $ns = @$xp->query(cssToXpath($s, false) ?: '//none');
+            if (!$ns || !$ns->length) {
+                // سه شمارهٔ پشت‌سرهم که پیدا نشد یعنی گالری تمام شده
+                if (++$miss >= 3 && $hit > 0) break;
+                continue;
+            }
+            $miss = 0; $hit++;
+            foreach ($ns as $n) {
+                $u = galleryImgFromNode($n, $baseUrl);
+                if ($u !== '') { $urls[] = $u; continue; }
+                foreach (galleryImgsInside($xp, $n, $baseUrl) as $u2) $urls[] = $u2;
+            }
+        }
+        $res['note'] = $hit . ' شماره از ' . $res['tried'] . ' امتحان‌شده نتیجه داد';
+    }
+
+    $imgs = galleryDedupe($urls, $cfg['max']);
+    if ($cfg['skip_first'] && count($imgs) > 1) $imgs = array_slice($imgs, 1);
+    $res['images'] = $imgs;
+    return $res;
+}
+
+/**
+ * گالری را روی محصول می‌نشاند.
+ * تصویر اصلی همیشه اولین عضو فهرست است تا مقصد آن را شاخص بگذارد.
+ */
+function galleryApplyToProduct(array &$p, array $imgs): int {
+    $main = trim((string)($p['image'] ?? ''));
+    $all = galleryDedupe(array_merge($main !== '' ? [$main] : [], $imgs));
+    if (!$all) return 0;
+    $p['image'] = $all[0];
+    $p['images'] = $all;
+    $p['images_count'] = count($all);
+    return count($all);
+}
+
 function parse_with_selectors(string $html, string $baseUrl, array $sel): array {
 [$dom, $xp] = load_dom($html);
 $products = [];
@@ -3737,8 +4094,10 @@ while (@ob_get_level()) @ob_end_clean();
 
 $keys = isset($_GET['keys']) ? array_filter(explode(',', $_GET['keys'])) : [];
 $detailSelectors = isset($_GET['detailSelectors']) ? json_decode($_GET['detailSelectors'], true) : [];
+// v8.64: تنظیمات گالری هم از همین‌جا می‌آید
+$galCfg = galleryNormalizeCfg($_POST['gallery'] ?? ($_GET['gallery'] ?? []));
 
-if (empty($keys) || empty($detailSelectors)) {
+if (empty($keys) || (empty($detailSelectors) && !$galCfg['enabled'])) {
 send_sse('error', ['message' => 'Invalid parameters']);
 send_sse('done', []);
 exit;
@@ -3825,6 +4184,19 @@ $allFound = false;
 if (!isset($extracted['image']) || $extracted['image'] === '') {
 $extraImg = extractImageFromHtml($res['html'], $productUrl);
 if ($extraImg) $extracted['image'] = $extraImg;
+}
+
+// v8.64: گالری — بقیهٔ عکس‌های صفحهٔ محصول
+if ($galCfg['enabled']) {
+$gal = galleryExtract($xp, null, $res['url'], $galCfg);
+if (!empty($gal['images'])) {
+$tmp = ['image' => (string)($extracted['image'] ?? '')];
+galleryApplyToProduct($tmp, $gal['images']);
+$extracted['image'] = $tmp['image'];
+$extracted['images'] = $tmp['images'];
+$extracted['images_count'] = $tmp['images_count'];
+}
+$extracted['gallery_note'] = (string)$gal['note'];
 }
 
 if ($allFound || $retry >= 2) break;
@@ -4169,6 +4541,22 @@ if (isset($_POST['cron_lock_min']))     $conn['cron_lock_min']     = max(1, min(
 if (isset($_POST['keep_reports']))      $conn['keep_reports']      = max(1, min(200, (int)$_POST['keep_reports']));
 // v8.60: چند کلمهٔ اول برای یادگیری و دسته‌بندی خودکار
 if (isset($_POST['catlearn_words']))    $conn['catlearn_words']    = max(1, min(CATLEARN_MAX_WORDS, (int)$_POST['catlearn_words']));
+// v8.64: پاسخ خودکار به پیام مشتریان
+if (isset($_POST['autoreply'])) {
+    $ar = json_decode((string)$_POST['autoreply'], true) ?: [];
+    $conn['autoreply'] = [
+        'enabled'       => !empty($ar['enabled']),
+        'grace_min'     => max(0, min(1440, (int)($ar['grace_min'] ?? 10))),
+        'per_chat_min'  => max(0, min(10080, (int)($ar['per_chat_min'] ?? 180))),
+        'max_per_run'   => max(1, min(50, (int)($ar['max_per_run'] ?? 5))),
+        'only_offhours' => !empty($ar['only_offhours']),
+        'work_from'     => max(0, min(23, (int)($ar['work_from'] ?? 9))),
+        'work_to'       => max(0, min(23, (int)($ar['work_to'] ?? 21))),
+        'sign'          => mb_substr(trim((string)($ar['sign'] ?? '')), 0, 120),
+        'notify'        => !empty($ar['notify']),
+        'scan_limit'    => max(5, min(50, (int)($ar['scan_limit'] ?? 20))),
+    ];
+}
 // v8.62: گزارش شبانه
 if (isset($_POST['digest_enabled']))    $conn['digest_enabled']    = !empty($_POST['digest_enabled']) && $_POST['digest_enabled'] !== 'false';
 if (isset($_POST['digest_hour']))       $conn['digest_hour']       = max(0, min(23, (int)$_POST['digest_hour']));
@@ -4500,15 +4888,21 @@ if($page>1&&$newCount===0)break;
 usleep(500000);
 }
 
+// v8.64: اگر گالری روشن است، صفحهٔ همهٔ محصولات باید باز شود — نه فقط
+// آن‌هایی که عکس یا قیمت ندارند. وگرنه محصولی که یک عکس دارد هرگز
+// بقیهٔ عکس‌هایش را نمی‌گیرد.
+$galleryCfg=galleryNormalizeCfg($profile['gallery']??[]);
 $needDetail=[];
 foreach($allProducts as $key=>$p){
-if((empty($p['image'])||empty($p['price']))&&!empty($p['link'])){
+if(empty($p['link']))continue;
+if($galleryCfg['enabled']||empty($p['image'])||empty($p['price'])){
 $needDetail[$key]=$p;
 }
 }
 $detailTotal=count($needDetail);
 $detailDone=0;
-if($detailTotal>0&&!empty($detailSelectors)){
+$galleryFound=0;$galleryImgsTotal=0;
+if($detailTotal>0&&(!empty($detailSelectors)||$galleryCfg['enabled'])){
 $logs=['🔍 فاز ۲: دریافت جزئیات '.$detailTotal.' محصول...'];
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'recent_log'=>$logs,'total_log_count'=>$totalPages+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>0,'detail_total'=>$detailTotal]);
 
@@ -4552,9 +4946,19 @@ $imgUrl=$ogImg->item(0)->nodeValue;
 if($imgUrl&&url_is_image($imgUrl))$allProducts[$key]['image']=make_absolute_url($imgUrl,$dr['url']);
 }
 }
+
+// v8.64: گالری — بقیهٔ عکس‌های همین صفحهٔ محصول
+if($galleryCfg['enabled']){
+$gal=galleryExtract($xp2,null,$dr['url'],$galleryCfg);
+if(!empty($gal['images'])){
+$nImg=galleryApplyToProduct($allProducts[$key],$gal['images']);
+if($nImg>1){$galleryFound++;$galleryImgsTotal+=$nImg;}
+}
+}
 }
 if($detailDone%5===0||$detailDone==$detailTotal){
 $logs=['🔍 جزئیات '.$detailDone.'/'.$detailTotal.' — '.mb_substr($p['title']??$key,0,40)];
+if($galleryCfg['enabled'])$logs[]='🖼 گالری: '.$galleryFound.' محصول چندعکسی، مجموع '.$galleryImgsTotal.' تصویر';
 // قیمت‌ها در این مرحله ممکن است تکمیل شوند، پس مقایسه دوباره محاسبه می‌شود
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
 writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'recent_log'=>$logs,'total_log_count'=>$totalPages+$detailDone,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal],$liveCmp));
@@ -4722,6 +5126,8 @@ function prepareForSend(array $profile, string $key, array $p): array {
         'price'       => $raw,
         'price_unit'  => $unit,
         'image'       => (string)($p['image'] ?? ''),
+        // v8.64: گالری — بقیهٔ عکس‌های محصول همراهش می‌روند
+        'images'      => productImageList($p),
         'sku'         => (string)($p['sku'] ?? ''),
         'short_desc'  => (string)($p['shortDesc'] ?? ($p['short_desc'] ?? '')),
         'long_desc'   => (string)($p['longDesc'] ?? ($p['long_desc'] ?? '')),
@@ -5007,6 +5413,24 @@ if ($stallWake) {
 
 $notifyResult = bslCheckNotifications($cn);
 if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
+
+// v8.64: پاسخ خودکار به پیام مشتریان — بعد از اعلان‌ها، تا اول خبر برسد
+// و بعد ربات جواب دهد. مهلت ادب داخل خود موتور رعایت می‌شود.
+if (arCfg($cn)['enabled']) {
+    try {
+        $arRes = autoReplyRun($cn, false);
+        if (!empty($arRes['replied']) || !empty($arRes['failed'])) {
+            $results['autoreply'] = ['replied' => (int)$arRes['replied'],
+                                     'failed' => (int)$arRes['failed'],
+                                     'checked' => (int)$arRes['checked']];
+            if (arCfg($cn)['notify'] && (int)$arRes['replied'] > 0) notifSend($cn, arMsg($arRes));
+        } elseif (!empty($arRes['error'])) {
+            $results['autoreply'] = ['error' => $arRes['error']];
+        }
+    } catch (Throwable $e) {
+        $results['autoreply'] = ['error' => $e->getMessage()];
+    }
+}
 
 // v8.62: گزارش شبانه — اگر ساعتش رسیده و امروز فرستاده نشده
 $digRes = digestMaybeSend($cn, $now);
@@ -5301,12 +5725,16 @@ if (isset($_GET['recon'])) {
     $mode = (string)($_GET['mode'] ?? ($cn['retire_mode'] ?? 'off'));
     if (!isset(retireModes()[$mode])) $mode = 'off';
     $fixPrice = !isset($_GET['fix_price']) || $_GET['fix_price'] !== '0';
+    // v8.64: همهٔ پروفایل‌ها، نه فقط آن‌هایی که همگام‌سازی دوره‌ای دارند
+    $allProf = !empty($_GET['all_profiles']);
 
     @unlink(RECON_PROGRESS_FILE);
     reconProgress(['running' => true, 'done' => false, 'target' => $target,
-        'apply' => $apply, 'mode' => $mode, 'started_at' => time(), 'phase' => 'start',
+        'apply' => $apply, 'mode' => $mode, 'all_profiles' => $allProf,
+        'started_at' => time(), 'phase' => 'start',
         'log_add' => [($apply ? '🚀 شروع اعمال تغییرات' : '🔍 شروع بررسی') . ' — '
-            . ($target === 'woo' ? 'ووکامرس' : 'باسلام')]]);
+            . ($target === 'woo' ? 'ووکامرس' : 'باسلام')
+            . ($allProf ? ' · همهٔ پروفایل‌ها' : ' · فقط پروفایل‌های همگام‌شونده')]]);
 
     // پاسخ فوری، بعد ادامهٔ کار در پس‌زمینه
     $early = json_encode(['ok' => true, 'started' => true, 'target' => $target],
@@ -5322,7 +5750,7 @@ if (isset($_GET['recon'])) {
     });
 
     try {
-        $res = reconRun($cn, $target, $apply, $mode, $fixPrice);
+        $res = reconRun($cn, $target, $apply, $mode, $fixPrice, $allProf);
     } catch (Throwable $e) {
         reconProgress(['running' => false, 'done' => true, 'error' => $e->getMessage(),
             'log_add' => ['❌ خطا: ' . $e->getMessage()]]);
@@ -5513,12 +5941,101 @@ if (isset($_GET['queues_overview'])) {
 if (isset($_GET['recon_status'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $st = reconProgressRead();
+    // v8.64: اگر اجرا وسط راه مرده باشد (تایم‌اوت PHP، ری‌استارت سرور)،
+    // فایل پیشرفت برای همیشه running می‌ماند و رابط کاربری بی‌نهایت
+    // می‌چرخد — همان «کار نمی‌کند». اگر ۳ دقیقه هیچ به‌روزرسانی نبود،
+    // اجرا مرده حساب می‌شود و علتش گفته می‌شود.
+    if (!empty($st['running']) && empty($st['done'])) {
+        $idle = time() - (int)($st['ts'] ?? 0);
+        if ($idle > 180) {
+            $st['running'] = false; $st['done'] = true; $st['stalled'] = $idle;
+            $st['result_ok'] = false;
+            $st['error'] = 'اجرا بدون پایان متوقف شد (' . $idle . ' ثانیه بی‌حرکت) — '
+                . 'احتمالاً محدودیت زمان اجرای PHP روی این میزبان. '
+                . 'دوباره امتحان کنید یا با تعداد صفحهٔ کمتر.';
+            $log = is_array($st['log'] ?? null) ? $st['log'] : [];
+            $log[] = ['t' => time(), 'm' => '⛔ ' . $st['error']];
+            $st['log'] = $log;
+            @file_put_contents(RECON_PROGRESS_FILE, json_encode($st, JSON_UNESCAPED_UNICODE), LOCK_EX);
+        }
+    }
     $since = max(0, (int)($_GET['since'] ?? 0));
     $log = is_array($st['log'] ?? null) ? $st['log'] : [];
     $st['log_total'] = count($log);
     $st['log'] = $since > 0 ? array_slice($log, $since) : array_slice($log, -60);
     $st['ok'] = true;
     echo json_encode($st, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v8.64: اندپوینت‌های پاسخ خودکار به پیام مشتریان
+ *   ?ar_rules=1                   → خواندن قواعد و تنظیمات
+ *   POST action=ar_save_rules     → ذخیرهٔ قواعد
+ *   ?ar_run=1[&dry=1][&now=1]     → اجرا (dry فقط پیش‌نمایش)
+ *   ?ar_test=1&text=...           → کدام قاعده به این متن می‌خورد
+ *   ?ar_log=1                     → آخرین پاسخ‌های خودکار
+ * ===================================================================== */
+if (isset($_GET['ar_rules'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cnAR = loadConnections();
+    // ?defaults=1 قواعد کارخانه را برمی‌گرداند بدون اینکه چیزی را ذخیره کند
+    $rulesAR = !empty($_GET['defaults']) ? arDefaultRules() : arLoadRules();
+    echo json_encode(['ok' => true, 'rules' => $rulesAR, 'cfg' => arCfg($cnAR),
+        'saved' => is_file(AUTOREPLY_RULES_FILE),
+        'offhours_now' => arIsOffHours(arCfg($cnAR), time())], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (($_POST['action'] ?? '') === 'ar_save_rules') {
+    header('Content-Type: application/json; charset=UTF-8');
+    $rules = json_decode((string)($_POST['rules'] ?? '[]'), true);
+    if (!is_array($rules)) { echo json_encode(['ok' => false, 'error' => 'قواعد نامعتبر'], JSON_UNESCAPED_UNICODE); exit; }
+    $ok = arSaveRules($rules);
+    echo json_encode(['ok' => $ok, 'count' => count($rules),
+        'error' => $ok ? '' : 'نوشتن فایل قواعد ناموفق بود'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['ar_test'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $txt = (string)($_GET['text'] ?? '');
+    if (trim($txt) === '') { echo json_encode(['ok' => false, 'error' => 'متن خالی است'], JSON_UNESCAPED_UNICODE); exit; }
+    $rules = arLoadRules();
+    $hit = arPickRule($rules, $txt);
+    $all = [];
+    foreach ($rules as $r) {
+        $all[] = ['id' => $r['id'] ?? '', 'on' => !empty($r['on']),
+                  'match' => arRuleMatches($r, $txt)];
+    }
+    $cfgAR = arCfg();
+    echo json_encode(['ok' => true, 'normalized' => arNormText($txt),
+        'rule' => $hit['id'] ?? '', 'reply' => $hit
+            ? ($hit['reply'] . ($cfgAR['sign'] !== '' ? "\n" . $cfgAR['sign'] : '')) : '',
+        'checked' => $all], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['ar_log'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $stAR = arLoadState();
+    echo json_encode(['ok' => true, 'log' => array_slice(arLogRead(), 0, 30),
+        'last_run' => (int)($stAR['last_run'] ?? 0), 'daily' => $stAR['daily'] ?? []],
+        JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['ar_run'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(180);
+    $cnAR = loadConnections();
+    $dryAR = !empty($_GET['dry']);
+    // ?now=1 یعنی مهلت ادب را نادیده بگیر — برای وقتی کاربر دستی اجرا می‌کند
+    $resAR = autoReplyRun($cnAR, $dryAR, !empty($_GET['now']));
+    if (!$dryAR && !empty($resAR['ok']) && (int)$resAR['replied'] > 0 && arCfg($cnAR)['notify']) {
+        $resAR['delivery'] = notifSend($cnAR, arMsg($resAR));
+    }
+    echo json_encode($resAR, JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -5816,6 +6333,133 @@ if (isset($_GET['selftest'])) {
     // رشته تکه‌تکه، تا خودآزمون خودش را پیدا نکند (درس v8.35)
     $add('8.63', 'افزونهٔ وردپرس نسخهٔ قبل برگردانده شد',
          strpos($selfSrc, 'woo' . 'Bridge' . 'Send(') === false);
+
+    /* ---------- v8.64: گالری چندعکسی ---------- */
+    $add('8.64', 'توابع گالری موجودند',
+         function_exists('galleryExtract') && function_exists('galleryNormalizeCfg')
+         && function_exists('galleryDedupe') && function_exists('galleryApplyToProduct'));
+    $add('8.64', 'سقف تصاویر بالای فایل تعریف شده', defined('GALLERY_MAX_IMAGES'));
+    if (function_exists('galleryDedupe')) {
+        // بندانگشتی و اصلِ یک عکس نباید دو تا شمرده شوند
+        $dd = galleryDedupe(['http://x/a-150x150.jpg', 'http://x/a.jpg', 'http://x/b.jpg']);
+        $add('8.64', 'نسخهٔ بندانگشتی و اصلی یک عکس تکراری حساب می‌شود', count($dd) === 2);
+        $add('8.64', 'سقف تعداد تصاویر رعایت می‌شود',
+             count(galleryDedupe(['http://x/1.jpg','http://x/2.jpg','http://x/3.jpg'], 2)) === 2);
+    }
+    if (function_exists('galleryNormalizeCfg')) {
+        $gOff = galleryNormalizeCfg(['mode' => 'off']);
+        $gOn  = galleryNormalizeCfg(['mode' => 'auto', 'box' => '.g']);
+        $add('8.64', 'حالت خاموش گالری غیرفعال است', empty($gOff['enabled']));
+        $add('8.64', 'حالت خودکار گالری فعال می‌شود', !empty($gOn['enabled']) && $gOn['box'] === '.g');
+        $add('8.64', 'حالت نامعتبر به خاموش برمی‌گردد',
+             galleryNormalizeCfg(['mode' => 'chaos'])['mode'] === 'off');
+    }
+    if (function_exists('galleryExtract')) {
+        $gHtml = '<div class="gg"><img src="/1.jpg"><img data-src="/2.jpg"></div>'
+               . '<div class="slide-1"><img src="/s1.jpg"></div><div class="slide-2"><img src="/s2.jpg"></div>';
+        [$gDom, $gXp] = load_dom($gHtml);
+        $gA = galleryExtract($gXp, null, 'http://t.test/p', ['mode' => 'auto', 'box' => '.gg']);
+        $add('8.64', 'حالت خودکار عکس‌های داخل باکس را می‌گیرد', count($gA['images']) === 2);
+        $gN = galleryExtract($gXp, null, 'http://t.test/p',
+              ['mode' => 'number', 'pattern' => '.slide-{n} img', 'from' => 1, 'to' => 5]);
+        $add('8.64', 'حالت شماره‌دار با {n} کار می‌کند', count($gN['images']) === 2);
+        $gM = galleryExtract($gXp, null, 'http://t.test/p',
+              ['mode' => 'manual', 'selectors' => ".slide-1 img\n.slide-2 img"]);
+        $add('8.64', 'حالت دستی چند سلکتور را می‌خواند', count($gM['images']) === 2);
+        $gBad = galleryExtract($gXp, null, 'http://t.test/p', ['mode' => 'number', 'pattern' => '.x img']);
+        $add('8.64', 'الگوی بدون {n} رد می‌شود', count($gBad['images']) === 0);
+        $add('8.64', 'آدرس‌ها مطلق می‌شوند',
+             !empty($gA['images'][0]) && strpos($gA['images'][0], 'http://t.test/') === 0);
+    }
+    if (function_exists('productImageList')) {
+        $pl = productImageList(['image' => 'http://x/a.jpg', 'images' => ['http://x/b.jpg', 'http://x/a.jpg']]);
+        $add('8.64', 'عکس شاخص اول فهرست می‌ماند', ($pl[0] ?? '') === 'http://x/a.jpg' && count($pl) === 2);
+        $add('8.64', 'محصول قدیمی بدون images هم کار می‌کند',
+             productImageList(['image' => 'http://x/z.jpg']) === ['http://x/z.jpg']);
+    }
+    $add('8.64', 'ارسال چند عکس به ووکامرس', function_exists('wooGalleryPayload'));
+    $add('8.64', 'ارسال چند عکس به باسلام', function_exists('bslUploadMany'));
+    $add('8.64', 'گالری در ذخیرهٔ پروفایل JSON می‌شود',
+         strpos($selfSrc, "k === '" . 'gallery' . "'") !== false);
+
+    /* ---------- v8.64: پاسخ خودکار ---------- */
+    $add('8.64', 'موتور پاسخ خودکار موجود است',
+         function_exists('autoReplyRun') && function_exists('arPickRule')
+         && function_exists('bslSendChatMessage'));
+    if (function_exists('arNormText')) {
+        $add('8.64', 'ی و ک عربی در تطبیق یکسان می‌شوند',
+             arNormText('مرسي كلي') === arNormText('مرسی کلی'));
+        $add('8.64', 'علائم نگارشی مانع تطبیق نمی‌شوند',
+             arNormText('سلام!!!') === 'سلام');
+    }
+    if (function_exists('arRuleMatches')) {
+        $rGreet = ['match' => 'contains', 'triggers' => "سلام\nدرود"];
+        $add('8.64', 'قاعدهٔ «شامل کلمه» می‌خورد', arRuleMatches($rGreet, 'سلام وقت بخیر'));
+        $add('8.64', 'کلمهٔ نامرتبط نمی‌خورد', !arRuleMatches($rGreet, 'قیمت این چند است'));
+        $add('8.64', 'حالت «همیشه» همیشه می‌خورد',
+             arRuleMatches(['match' => 'always', 'triggers' => ''], 'هر چیزی'));
+        $add('8.64', 'حالت «دقیقاً همین» فقط با برابری می‌خورد',
+             arRuleMatches(['match' => 'exact', 'triggers' => 'سلام'], 'سلام')
+             && !arRuleMatches(['match' => 'exact', 'triggers' => 'سلام'], 'سلام علیکم'));
+    }
+    if (function_exists('arPickRule')) {
+        $rs = [['id' => 'a', 'on' => true, 'match' => 'contains', 'triggers' => 'سلام', 'reply' => 'س', 'priority' => 10],
+               ['id' => 'z', 'on' => true, 'match' => 'always', 'triggers' => '', 'reply' => 'ز', 'priority' => 99],
+               ['id' => 'off', 'on' => false, 'match' => 'contains', 'triggers' => 'سلام', 'reply' => 'خ', 'priority' => 1]];
+        $add('8.64', 'اولویت رعایت می‌شود و قاعدهٔ خاموش نادیده می‌ماند',
+             (arPickRule($rs, 'سلام')['id'] ?? '') === 'a');
+        $add('8.64', 'قاعدهٔ پیش‌فرض وقتی چیزی نخورد اجرا می‌شود',
+             (arPickRule($rs, 'یک متن دیگر')['id'] ?? '') === 'z');
+        $add('8.64', 'قاعدهٔ بدون پاسخ انتخاب نمی‌شود',
+             arPickRule([['id' => 'e', 'on' => true, 'match' => 'always', 'reply' => '']], 'هرچه') === null);
+    }
+    if (function_exists('arIsOffHours')) {
+        $cOH = ['work_from' => 9, 'work_to' => 21];
+        $add('8.64', 'ساعت کاری روز درست تشخیص داده می‌شود',
+             !arIsOffHours($cOH, mktime(14, 0, 0, 1, 1, 2025))
+             && arIsOffHours($cOH, mktime(3, 0, 0, 1, 1, 2025)));
+        $add('8.64', 'شیفت شب (۲۲ تا ۶) هم درست است',
+             !arIsOffHours(['work_from' => 22, 'work_to' => 6], mktime(23, 0, 0, 1, 1, 2025)));
+        $add('8.64', 'ساعت یکسان یعنی ۲۴ ساعته',
+             !arIsOffHours(['work_from' => 0, 'work_to' => 0], mktime(4, 0, 0, 1, 1, 2025)));
+    }
+    $add('8.64', 'ارسال پیام از مسیر رسمی چت باسلام',
+         strpos($selfSrc, "'chats/' . \$chatId . '/messages'") !== false);
+    $add('8.64', 'پاسخ خودکار به کران وصل است',
+         strpos($selfSrc, 'auto' . 'ReplyRun($cn, false)') !== false);
+    $add('8.64', 'قواعد پیش‌فرض حداقل یک محرک سلام و تشکر دارند', (function () {
+        if (!function_exists('arDefaultRules')) return false;
+        $ids = array_column(arDefaultRules(), 'id');
+        return in_array('greet', $ids, true) && in_array('thanks', $ids, true);
+    })());
+
+    /* ---------- v8.64: مغایرت‌گیری ---------- */
+    if (function_exists('reconNormTitle')) {
+        $add('8.64', 'انتیتی HTML مانع تطبیق مغایرت‌گیری نمی‌شود',
+             reconNormTitle('کیف &amp; کفش') === reconNormTitle('کیف & کفش'));
+        $add('8.64', 'ی و ک عربی در مغایرت‌گیری یکسان‌اند',
+             reconNormTitle('شلوار جين آبي') === reconNormTitle('شلوار جین آبی'));
+        $add('8.64', 'نیم‌فاصله و فاصلهٔ سخت یکسان‌اند',
+             reconNormTitle("کفش\u{200c}ورزشی") === reconNormTitle("کفش ورزشی")
+             && reconNormTitle("روسری\u{00a0}ابریشم") === reconNormTitle('روسری ابریشم'));
+        $add('8.64', 'خط تیره و علائم تفاوت نمی‌سازند',
+             reconNormTitle('کیف — چرم') === reconNormTitle('کیف چرم'));
+        $add('8.64', 'عنوان‌های واقعاً متفاوت هنوز متفاوت‌اند',
+             reconNormTitle('کیف چرم') !== reconNormTitle('کفش چرم'));
+    }
+    $add('8.64', 'مغایرت‌گیری می‌تواند همهٔ پروفایل‌ها را بخواند', (function () {
+        if (!function_exists('reconExpected')) return false;
+        $rp = new ReflectionFunction('reconExpected');
+        return $rp->getNumberOfParameters() >= 2;
+    })());
+    $add('8.64', 'گزینهٔ همهٔ پروفایل‌ها در رابط کاربری هست',
+         strpos($selfSrc, 'recon' . 'AllProfiles') !== false);
+    $add('8.64', 'اجرای گیرکردهٔ مغایرت‌گیری تشخیص داده می‌شود',
+         strpos($selfSrc, "\$st['stalled']") !== false);
+    $add('8.64', 'شرح تفکیکی پروفایل‌ها در نتیجه می‌آید',
+         strpos($selfSrc, "'profile_stats'") !== false);
+    $add('8.64', 'محصول بی‌قیمت مبدأ مغایرت شمرده نمی‌شود',
+         strpos($selfSrc, "\$out['no_src_price']") !== false);
 
     // v8.62: ویرایش مستقیم محصولات، عکس‌دار کردن، گزارش شبانه
     $add('8.62', 'موتور ویرایش گروهی', function_exists('bulkEditRun') && function_exists('bulkEditMsg'));
@@ -6440,6 +7084,357 @@ function bslChatMsg(array $n, string $head = '💬 پیام مشتری باسل�
     return $s . "\nپیام: " . mb_substr($n['text'], 0, 700);
 }
 
+/* =====================================================================
+ *  v8.64: پاسخ خودکار به پیام مشتریان باسلام
+ *
+ *  هر قاعده یک «محرک» دارد (چند کلمه یا عبارت) و یک «پاسخ». وقتی پیام
+ *  خوانده‌نشدهٔ مشتری با یکی از محرک‌ها بخورد، همان پاسخ برایش فرستاده
+ *  می‌شود. مهم‌ترین تصمیم‌های طراحی:
+ *
+ *   • تأخیر ادب (grace) — پیش‌فرض چند دقیقه صبر می‌کند تا اگر خودِ
+ *     غرفه‌دار جواب داد، ربات وسط حرف نپرد. با ۰ دقیقه فوری جواب می‌دهد.
+ *   • هر گفتگو در یک بازهٔ زمانی فقط یک بار پاسخ خودکار می‌گیرد، و هر
+ *     قاعده هم سقف روزانه دارد — تا حلقهٔ پاسخ‌به‌پاسخ راه نیفتد.
+ *   • ساعت کاری — می‌شود گفت فقط بیرون ساعت کاری جواب بده (وقتی آدم
+ *     نیست)، یا همیشه.
+ *   • قاعدهٔ «پیش‌فرض» (بدون محرک) برای وقتی هیچ‌کدام نخورد.
+ *   • حالت آزمایشی: هیچ پیامی فرستاده نمی‌شود، فقط می‌گوید چه می‌کرد.
+ *
+ *  ⚠️ تنها فرستندهٔ واقعی bslSendChatMessage است و فقط از یک نقطه صدا
+ *  زده می‌شود، تا «پیش‌نمایش» هیچ‌وقت به‌اشتباه ارسال نکند.
+ * ===================================================================== */
+
+/** متن را برای تطبیق ساده می‌کند: بدون اعراب، بدون ی/ک عربی، بدون علائم */
+function arNormText(string $t): string {
+    $t = persianToEnglish($t);
+    // ي ك عربی → ی ک فارسی، حذف اعراب و نیم‌فاصله
+    $t = str_replace(['ي', 'ك', 'ة', 'ۀ', 'أ', 'إ', 'آ', 'ؤ'],
+                     ['ی', 'ک', 'ه', 'ه', 'ا', 'ا', 'ا', 'و'], $t);
+    $t = preg_replace('~[\x{064B}-\x{065F}\x{0670}\x{200c}\x{200f}\x{200e}]~u', '', $t);
+    $t = preg_replace('~[^\p{L}\p{N}\s]~u', ' ', $t);
+    $t = preg_replace('~\s+~u', ' ', $t);
+    return trim(mb_strtolower($t, 'UTF-8'));
+}
+
+/** قواعد پیش‌فرض — فقط وقتی هنوز چیزی ذخیره نشده */
+function arDefaultRules(): array {
+    return [
+        ['id' => 'greet', 'on' => true, 'match' => 'contains',
+         'triggers' => "سلام\nدرود\nوقت بخیر\nروز بخیر",
+         'reply' => 'سلام و وقت بخیر 🌷 در خدمتم، بفرمایید.', 'priority' => 10, 'daily_max' => 100],
+        ['id' => 'thanks', 'on' => true, 'match' => 'contains',
+         'triggers' => "ممنون\nمرسی\nسپاس\nتشکر\nلطف کردید\nدمت گرم",
+         'reply' => 'خواهش می‌کنم 🙏 خوشحالم که راضی بودید.', 'priority' => 10, 'daily_max' => 100],
+        ['id' => 'price', 'on' => false, 'match' => 'contains',
+         'triggers' => "قیمت\nچند\nهزینه\nتخفیف",
+         'reply' => 'قیمت همان است که روی صفحهٔ محصول نوشته شده. اگر محصول خاصی مدنظرتان است، لینکش را بفرستید.',
+         'priority' => 20, 'daily_max' => 50],
+        ['id' => 'send', 'on' => false, 'match' => 'contains',
+         'triggers' => "ارسال\nپست\nکی می‌رسه\nچند روزه\nتیپاکس",
+         'reply' => 'سفارش‌ها معمولاً ۱ تا ۳ روز کاری بعد از ثبت ارسال می‌شوند و کد رهگیری برایتان می‌آید.',
+         'priority' => 20, 'daily_max' => 50],
+        ['id' => 'bye', 'on' => false, 'match' => 'contains',
+         'triggers' => "خداحافظ\nخدانگهدار\nفعلا",
+         'reply' => 'خدانگهدار 🌹 هر وقت سؤالی داشتید در خدمتم.', 'priority' => 30, 'daily_max' => 100],
+        ['id' => 'fallback', 'on' => false, 'match' => 'always',
+         'triggers' => '',
+         'reply' => 'پیام شما رسید 🙏 در اولین فرصت پاسخ می‌دهم.', 'priority' => 99, 'daily_max' => 30],
+    ];
+}
+
+/** تنظیمات پاسخ خودکار با پیش‌فرض‌ها */
+function arCfg(?array $cn = null): array {
+    if ($cn === null) $cn = loadConnections();
+    $a = (array)($cn['autoreply'] ?? []);
+    return [
+        'enabled'      => !empty($a['enabled']),
+        'grace_min'    => max(0, min(1440, (int)($a['grace_min'] ?? 10))),
+        'per_chat_min' => max(0, min(10080, (int)($a['per_chat_min'] ?? 180))),
+        'max_per_run'  => max(1, min(50, (int)($a['max_per_run'] ?? 5))),
+        'only_offhours'=> !empty($a['only_offhours']),
+        'work_from'    => max(0, min(23, (int)($a['work_from'] ?? 9))),
+        'work_to'      => max(0, min(23, (int)($a['work_to'] ?? 21))),
+        'sign'         => trim((string)($a['sign'] ?? '')),
+        'notify'       => !empty($a['notify']),
+        'scan_limit'   => max(5, min(50, (int)($a['scan_limit'] ?? 20))),
+    ];
+}
+
+function arLoadRules(): array {
+    if (!is_file(AUTOREPLY_RULES_FILE)) return arDefaultRules();
+    $d = json_decode((string)@file_get_contents(AUTOREPLY_RULES_FILE), true);
+    if (!is_array($d) || !isset($d['rules']) || !is_array($d['rules'])) return arDefaultRules();
+    return $d['rules'];
+}
+
+function arSaveRules(array $rules): bool {
+    $clean = [];
+    foreach ($rules as $r) {
+        if (!is_array($r)) continue;
+        $m = (string)($r['match'] ?? 'contains');
+        if (!in_array($m, ['contains', 'exact', 'starts', 'regex', 'always'], true)) $m = 'contains';
+        $id = preg_replace('~[^A-Za-z0-9_-]~', '', (string)($r['id'] ?? ''));
+        if ($id === '') $id = 'r' . substr(md5(json_encode($r) . mt_rand()), 0, 8);
+        $clean[] = [
+            'id'        => $id,
+            'on'        => !empty($r['on']),
+            'match'     => $m,
+            'triggers'  => trim((string)($r['triggers'] ?? '')),
+            'reply'     => trim((string)($r['reply'] ?? '')),
+            'priority'  => max(1, min(999, (int)($r['priority'] ?? 50))),
+            'daily_max' => max(0, min(1000, (int)($r['daily_max'] ?? 50))),
+        ];
+    }
+    return @file_put_contents(AUTOREPLY_RULES_FILE,
+        json_encode(['rules' => $clean, 'saved_at' => time()], JSON_UNESCAPED_UNICODE),
+        LOCK_EX) !== false;
+}
+
+function arLoadState(): array {
+    if (!is_file(AUTOREPLY_STATE_FILE)) return ['chats' => [], 'daily' => [], 'day' => ''];
+    $d = json_decode((string)@file_get_contents(AUTOREPLY_STATE_FILE), true);
+    if (!is_array($d)) return ['chats' => [], 'daily' => [], 'day' => ''];
+    $d['chats'] = is_array($d['chats'] ?? null) ? $d['chats'] : [];
+    $d['daily'] = is_array($d['daily'] ?? null) ? $d['daily'] : [];
+    return $d;
+}
+
+function arSaveState(array $st): void {
+    // گفتگوهای قدیمی‌تر از ۳۰ روز لازم نیستند
+    $cut = time() - 30 * 86400;
+    foreach ($st['chats'] as $k => $v) {
+        if ((int)($v['at'] ?? 0) < $cut) unset($st['chats'][$k]);
+    }
+    @file_put_contents(AUTOREPLY_STATE_FILE, json_encode($st, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/** شمارندهٔ روزانهٔ هر قاعده — با عوض شدن روز صفر می‌شود */
+function arDailyCount(array &$st, string $ruleId, int $now): int {
+    $today = date('Y-m-d', $now);
+    if (($st['day'] ?? '') !== $today) { $st['day'] = $today; $st['daily'] = []; }
+    return (int)($st['daily'][$ruleId] ?? 0);
+}
+
+function arDailyBump(array &$st, string $ruleId, int $now): void {
+    $today = date('Y-m-d', $now);
+    if (($st['day'] ?? '') !== $today) { $st['day'] = $today; $st['daily'] = []; }
+    $st['daily'][$ruleId] = (int)($st['daily'][$ruleId] ?? 0) + 1;
+}
+
+/** آیا این لحظه «بیرون ساعت کاری» است؟ */
+function arIsOffHours(array $cfg, int $now): bool {
+    $h = (int)date('G', $now);
+    $f = $cfg['work_from']; $t = $cfg['work_to'];
+    if ($f === $t) return false;                       // ۲۴ ساعته
+    if ($f < $t)  return !($h >= $f && $h < $t);       // مثلاً ۹ تا ۲۱
+    return !($h >= $f || $h < $t);                     // شیفت شب، مثلاً ۲۲ تا ۶
+}
+
+/** آیا متن با این قاعده می‌خورد؟ */
+function arRuleMatches(array $rule, string $text): bool {
+    $m = (string)($rule['match'] ?? 'contains');
+    if ($m === 'always') return true;
+    $norm = arNormText($text);
+    if ($norm === '') return false;
+    foreach (preg_split('~[\r\n|]+~u', (string)($rule['triggers'] ?? '')) as $trig) {
+        $trig = trim((string)$trig);
+        if ($trig === '') continue;
+        if ($m === 'regex') {
+            if (@preg_match('~' . str_replace('~', '\~', $trig) . '~ui', $text)) return true;
+            continue;
+        }
+        $tn = arNormText($trig);
+        if ($tn === '') continue;
+        if ($m === 'exact'  && $norm === $tn) return true;
+        if ($m === 'starts' && mb_strpos($norm, $tn) === 0) return true;
+        if ($m === 'contains') {
+            // مرز کلمه، تا «چند» داخل «چندین» بی‌خود نخورد
+            if (preg_match('~(^|\s)' . preg_quote($tn, '~') . '(\s|$)~u', $norm)) return true;
+            // عبارت‌های چندکلمه‌ای بدون مرز هم پذیرفته‌اند
+            if (mb_strpos($tn, ' ') !== false && mb_strpos($norm, $tn) !== false) return true;
+        }
+    }
+    return false;
+}
+
+/** اولین قاعده‌ای که می‌خورد، به ترتیب اولویت */
+function arPickRule(array $rules, string $text): ?array {
+    $on = array_values(array_filter($rules, fn($r) => !empty($r['on']) && trim((string)($r['reply'] ?? '')) !== ''));
+    usort($on, fn($a, $b) => ((int)($a['priority'] ?? 50)) <=> ((int)($b['priority'] ?? 50)));
+    foreach ($on as $r) if (arRuleMatches($r, $text)) return $r;
+    return null;
+}
+
+/** ارسال واقعی یک پیام به گفتگوی باسلام */
+function bslSendChatMessage(string $tk, int $chatId, string $text): array {
+    if ($chatId <= 0 || trim($text) === '') return ['ok' => false, 'error' => 'ورودی نامعتبر'];
+    // طبق openapi چت باسلام: content.text + message_type
+    $body = ['content' => ['text' => mb_substr($text, 0, 3000)], 'message_type' => 'text'];
+    $r = bslReq($tk, 'POST', 'chats/' . $chatId . '/messages', $body);
+    return ['ok' => !empty($r['ok']), 'code' => (int)($r['code'] ?? 0),
+            'error' => bslApiError($r, 'ارسال پیام ناموفق', 'chats/{id}/messages', 'customer.chat.write'),
+            'body' => $r['body'] ?? null];
+}
+
+/** آخرین ۲۰ پاسخ خودکار، برای نمایش در رابط کاربری */
+function arLogAdd(array $row): void {
+    $log = [];
+    if (is_file(AUTOREPLY_LOG_FILE)) {
+        $d = json_decode((string)@file_get_contents(AUTOREPLY_LOG_FILE), true);
+        if (is_array($d)) $log = $d;
+    }
+    $row['at'] = time();
+    $log[] = $row;
+    if (count($log) > 60) $log = array_slice($log, -60);
+    @file_put_contents(AUTOREPLY_LOG_FILE, json_encode($log, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+function arLogRead(): array {
+    if (!is_file(AUTOREPLY_LOG_FILE)) return [];
+    $d = json_decode((string)@file_get_contents(AUTOREPLY_LOG_FILE), true);
+    return is_array($d) ? array_reverse($d) : [];
+}
+
+/**
+ * موتور پاسخ خودکار.
+ *
+ * $dry=true یعنی هیچ چیزی فرستاده و ذخیره نمی‌شود — فقط گزارش می‌دهد که
+ * چه اتفاقی می‌افتاد. همان مسیر و همان تصمیم‌ها، فقط بدون ارسال.
+ */
+function autoReplyRun(array $cn, bool $dry = false, bool $ignoreGrace = false): array {
+    $now = time();
+    $cfg = arCfg($cn);
+    $out = ['ok' => true, 'dry' => $dry, 'checked' => 0, 'replied' => 0, 'skipped' => 0,
+            'failed' => 0, 'items' => [], 'at' => $now];
+
+    if (!$cfg['enabled'] && !$dry) { $out['ok'] = false; $out['error'] = 'پاسخ خودکار خاموش است'; return $out; }
+    $tk = (string)($cn['basalam']['token'] ?? '');
+    if ($tk === '') { $out['ok'] = false; $out['error'] = 'توکن باسلام تنظیم نشده'; return $out; }
+
+    $rules = arLoadRules();
+    if (!array_filter($rules, fn($r) => !empty($r['on']))) {
+        $out['ok'] = false; $out['error'] = 'هیچ قاعدهٔ فعالی وجود ندارد'; return $out;
+    }
+    if ($cfg['only_offhours'] && !arIsOffHours($cfg, $now)) {
+        $out['skipped_all'] = 'داخل ساعت کاری — پاسخ خودکار فقط بیرون ساعت کاری فعال است';
+        return $out;
+    }
+
+    $r = bslReq($tk, 'GET', 'chats?limit=' . $cfg['scan_limit'] . '&order_by=updated_at');
+    if (empty($r['ok'])) {
+        $out['ok'] = false;
+        $out['error'] = bslApiError($r, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read');
+        return $out;
+    }
+    $rows = $r['body']['data']['chats'] ?? ($r['body']['data'] ?? []);
+    if (!is_array($rows)) $rows = [];
+
+    $st = arLoadState();
+    $myId = bslMyUserId($tk);
+
+    foreach ($rows as $c) {
+        if (!is_array($c)) continue;
+        if ($out['replied'] >= $cfg['max_per_run']) break;
+        $nc = bslNormalizeChat($c);
+        $chatId = (int)$nc['chat_id'];
+        if ($chatId <= 0) continue;
+        $out['checked']++;
+        $row = ['chat_id' => $chatId, 'who' => $nc['who'], 'text' => mb_substr($nc['text'], 0, 90)];
+
+        // فقط گفتگویی که پیام خوانده‌نشده دارد
+        if ((int)$nc['unseen'] <= 0) { $out['skipped']++; continue; }
+
+        $lm = is_array($c['last_message'] ?? null) ? $c['last_message'] : [];
+        // اگر آخرین پیام مال خودمان است یعنی جواب داده‌ایم
+        if ($myId > 0 && (int)($lm['sender']['id'] ?? 0) === $myId) {
+            $out['skipped']++; continue;
+        }
+        // فقط پیام متنی — عکس و فاکتور و سفارش را دست نمی‌زنیم
+        $mt = (string)($lm['message_type'] ?? 'text');
+        if ($mt !== '' && $mt !== 'text') {
+            $row['skip'] = 'پیام متنی نیست (' . $mt . ')'; $out['items'][] = $row; $out['skipped']++; continue;
+        }
+
+        // تأخیر ادب — به ادمین فرصت بده خودش جواب دهد
+        $msgAt = strtotime((string)($lm['created_at'] ?? ($nc['updated_at'] ?: ''))) ?: 0;
+        if (!$ignoreGrace && $cfg['grace_min'] > 0 && $msgAt > 0
+            && ($now - $msgAt) < $cfg['grace_min'] * 60) {
+            $row['skip'] = 'هنوز در مهلت ' . $cfg['grace_min'] . ' دقیقه‌ای ادمین';
+            $out['items'][] = $row; $out['skipped']++; continue;
+        }
+
+        // یک گفتگو در بازهٔ تعیین‌شده فقط یک پاسخ خودکار می‌گیرد
+        $prev = $st['chats']['c' . $chatId] ?? null;
+        if ($prev && $cfg['per_chat_min'] > 0
+            && ($now - (int)($prev['at'] ?? 0)) < $cfg['per_chat_min'] * 60) {
+            $row['skip'] = 'به‌تازگی پاسخ خودکار گرفته';
+            $out['items'][] = $row; $out['skipped']++; continue;
+        }
+        // همان پیام قبلی، دوباره جواب نده
+        $lastId = (int)($lm['id'] ?? 0);
+        if ($prev && $lastId > 0 && (int)($prev['msg_id'] ?? 0) === $lastId) {
+            $row['skip'] = 'برای همین پیام قبلاً پاسخ رفته';
+            $out['items'][] = $row; $out['skipped']++; continue;
+        }
+
+        $text = (string)($lm['content']['text'] ?? $nc['text']);
+        $rule = arPickRule($rules, $text);
+        if ($rule === null) { $row['skip'] = 'هیچ قاعده‌ای نخورد'; $out['items'][] = $row; $out['skipped']++; continue; }
+
+        $rid = (string)$rule['id'];
+        $dmax = (int)($rule['daily_max'] ?? 0);
+        if ($dmax > 0 && arDailyCount($st, $rid, $now) >= $dmax) {
+            $row['skip'] = 'سقف روزانهٔ قاعدهٔ «' . $rid . '» پر شده';
+            $out['items'][] = $row; $out['skipped']++; continue;
+        }
+
+        $reply = (string)$rule['reply'];
+        if ($cfg['sign'] !== '') $reply .= "\n" . $cfg['sign'];
+        $row['rule'] = $rid;
+        $row['reply'] = mb_substr($reply, 0, 160);
+
+        if ($dry) {
+            $row['status'] = 'ارسال می‌شد';
+            $out['items'][] = $row; $out['replied']++;
+            continue;
+        }
+
+        $send = bslSendChatMessage($tk, $chatId, $reply);
+        if (!empty($send['ok'])) {
+            $out['replied']++;
+            $row['status'] = '✅ ارسال شد';
+            $st['chats']['c' . $chatId] = ['at' => $now, 'msg_id' => $lastId, 'rule' => $rid];
+            arDailyBump($st, $rid, $now);
+            arLogAdd(['chat_id' => $chatId, 'who' => $nc['who'], 'rule' => $rid,
+                      'in' => mb_substr($text, 0, 120), 'out' => mb_substr($reply, 0, 160)]);
+        } else {
+            $out['failed']++;
+            $row['status'] = '❌ ' . mb_substr((string)($send['error'] ?? 'خطا'), 0, 90);
+        }
+        $out['items'][] = $row;
+        usleep(400000);
+    }
+
+    if (!$dry) { $st['last_run'] = $now; arSaveState($st); }
+    return $out;
+}
+
+/** خلاصهٔ پاسخ‌های خودکار برای پیام‌رسان */
+function arMsg(array $r): string {
+    $m = "🤖 پاسخ خودکار به پیام مشتریان\n";
+    if (!empty($r['dry'])) $m .= "(پیش‌نمایش — چیزی ارسال نشد)\n";
+    $m .= "───────────────\n";
+    $m .= 'بررسی‌شده: ' . (int)$r['checked'] . "\n";
+    $m .= '✅ پاسخ داده شد: ' . (int)$r['replied'] . "\n";
+    if ((int)$r['skipped'] > 0) $m .= '⏭ رد شد: ' . (int)$r['skipped'] . "\n";
+    if ((int)$r['failed'] > 0)  $m .= '❌ ناموفق: ' . (int)$r['failed'] . "\n";
+    foreach (array_slice($r['items'] ?? [], 0, 6) as $it) {
+        if (empty($it['rule'])) continue;
+        $m .= '• ' . ($it['who'] ?? '') . ' → «' . ($it['rule'] ?? '') . '»' . "\n";
+    }
+    return $m;
+}
+
 /**
  * بررسی سفارش‌های جدید.
  * $test=true یعنی حالت آزمایشی: وضعیت ذخیره نمی‌شود تا اجرای بعدی هم
@@ -7059,9 +8054,33 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
  * ===================================================================== */
 
 /** عنوان را برای مقایسه یکدست می‌کند */
+/**
+ * v8.64: نرمال‌سازی عنوان برای مقایسه با مقصد.
+ *
+ * نسخهٔ قبلی فقط فاصله‌ها را جمع می‌کرد و کوچک می‌نوشت. نتیجه این بود که
+ * محصولی که در پروفایل «کیف چرم & کفش» بود، در ووکامرس با «&amp;» ذخیره
+ * شده و «در هیچ پروفایلی نیست» گزارش می‌شد. همین اتفاق برای ی/ک عربی
+ * (که خیلی از فروشگاه‌ها موقع ذخیره تبدیل می‌کنند)، نیم‌فاصله و فاصلهٔ
+ * سخت (NBSP) هم می‌افتاد. یعنی مغایرت‌گیری روی داده‌های واقعی تقریباً
+ * همه‌چیز را «اضافی» می‌دید و اگر کاربر «حذف» می‌زد فاجعه بود.
+ *
+ * حالا قبل از مقایسه: انتیتی‌های HTML باز می‌شوند، ارقام فارسی/عربی به
+ * لاتین، حروف عربی به فارسی، نیم‌فاصله و فاصله‌های نامرئی به فاصلهٔ
+ * ساده، و علائم نگارشی حذف می‌شوند.
+ */
 function reconNormTitle(string $t): string {
-    $t = trim($t);
+    $t = html_entity_decode($t, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $t = persianToEnglish($t);
+    $t = str_replace(['ي', 'ك', 'ة', 'ۀ', 'أ', 'إ', 'ؤ'],
+                     ['ی', 'ک', 'ه', 'ه', 'ا', 'ا', 'و'], $t);
+    // نیم‌فاصله، فاصلهٔ سخت و نشانه‌های جهت‌دهی → فاصلهٔ ساده
+    $t = preg_replace('~[\x{200c}\x{200d}\x{200e}\x{200f}\x{00a0}\x{feff}]~u', ' ', $t);
+    // اعراب
+    $t = preg_replace('~[\x{064B}-\x{065F}\x{0670}]~u', '', $t);
+    // علائم نگارشی و جداکننده‌ها — «&» و «-» و «—» نباید تفاوت بسازند
+    $t = preg_replace('~[^\p{L}\p{N}\s]~u', ' ', $t);
     $t = preg_replace('~\s+~u', ' ', $t);
+    $t = trim($t);
     return function_exists('mb_strtolower') ? mb_strtolower($t, 'UTF-8') : strtolower($t);
 }
 
@@ -7762,22 +8781,46 @@ function reconProgressRead(): array {
     return is_array($d) ? $d : ['running' => false, 'done' => false, 'log' => []];
 }
 
-/** فهرست محصولات نهاییِ همهٔ پروفایل‌های دارای همگام‌سازی دوره‌ای */
-function reconExpected(string $target): array {
+/**
+ * فهرست محصولات نهاییِ پروفایل‌ها برای مقایسه با مقصد.
+ *
+ * v8.64: تا اینجا فقط پروفایل‌هایی خوانده می‌شدند که «همگام‌سازی دوره‌ای»
+ * آن‌ها روشن بود. کسی که محصولاتش را دستی می‌فرستد هیچ‌وقت این تیک را
+ * نمی‌زند، پس مغایرت‌گیری برایش با پیام «هیچ پروفایلی پیدا نشد» تمام
+ * می‌شد — دقیقاً همان «کار نمی‌کند». حالا $allProfiles=true همهٔ
+ * پروفایل‌ها را می‌خواند.
+ *
+ * $stats اگر داده شود، شرح تفکیکی هر پروفایل داخلش نوشته می‌شود تا در
+ * گزارش زنده دیده شود.
+ */
+function reconExpected(string $target, bool $allProfiles = false, ?array &$stats = null): array {
     $out = [];
+    $stats = ['profiles' => [], 'used' => 0, 'skipped' => 0, 'no_products' => 0];
     foreach (loadProfiles() as $key => $profile) {
         $sc = $profile['syncConfig'] ?? [];
-        if (empty($sc['enabled'])) continue;                 // فقط تیک‌خورده‌ها
+        $name = (string)($profile['name'] ?? $key);
+        $syncOn = !empty($sc['enabled']);
         $t = (string)($sc['target'] ?? 'woo');
-        if ($t !== 'both' && $t !== $target) continue;       // مقصد باید بخواند
+        $targetOk = ($t === 'both' || $t === $target);
+        if (!$allProfiles) {
+            if (!$syncOn)    { $stats['skipped']++; $stats['profiles'][] = ['name' => $name, 'n' => 0, 'why' => 'همگام‌سازی دوره‌ای خاموش']; continue; }
+            if (!$targetOk)  { $stats['skipped']++; $stats['profiles'][] = ['name' => $name, 'n' => 0, 'why' => 'مقصدش این نیست']; continue; }
+        }
+        $n = 0; $noPrice = 0;
         foreach (profileOrderedProducts($profile) as $p) {
             $title = reconNormTitle((string)($p['title'] ?? ''));
             if ($title === '') continue;
             $price = (int)($p['final_price'] ?? 0);
+            if ($price <= 0) $noPrice++;
+            $n++;
             if (isset($out[$title]) && (int)$out[$title]['price'] > 0) continue;
-            $out[$title] = ['price' => $price, 'profile' => $profile['name'] ?? $key,
+            $out[$title] = ['price' => $price, 'profile' => $name,
                             'key' => (string)($p['key'] ?? '')];
         }
+        if ($n === 0) { $stats['no_products']++; $stats['profiles'][] = ['name' => $name, 'n' => 0, 'why' => 'محصولی ندارد']; continue; }
+        $stats['used']++;
+        $stats['profiles'][] = ['name' => $name, 'n' => $n, 'no_price' => $noPrice,
+                                'why' => $syncOn ? '' : 'بدون همگام‌سازی دوره‌ای'];
     }
     return $out;
 }
@@ -7798,8 +8841,13 @@ function reconFetchWoo(array $w, int $maxPages = 60): array {
                        'price' => (int)preg_replace('~[^\d]~', '', (string)($pr['regular_price'] ?? '0')),
                        'status' => (string)($pr['status'] ?? '')];
         }
+        // v8.64: نمونهٔ واقعی از عنوان‌های مقصد — برای وقتی تطبیق نمی‌خورد
+        $fLog = ['📄 صفحهٔ ' . $page . ': ' . count($batch) . ' محصول (مجموع ' . count($rows) . ')'];
+        if ($page === 1) {
+            foreach (array_slice($rows, 0, 3) as $s) $fLog[] = '  • ' . mb_substr($s['title'], 0, 50);
+        }
         reconProgress(['phase' => 'fetch', 'fetched' => count($rows), 'page' => $page,
-            'log_add' => ['📄 صفحهٔ ' . $page . ': ' . count($batch) . ' محصول (مجموع ' . count($rows) . ')']]);
+            'log_add' => $fLog]);
         if (count($batch) < 100) break;
         usleep(150000);
     }
@@ -7826,8 +8874,12 @@ function reconFetchBsl(string $tk, int $vid, int $maxPages = 60): array {
                        'status' => (int)(is_array($pr['status'] ?? null)
                                    ? ($pr['status']['value'] ?? 0) : ($pr['status'] ?? 0))];
         }
+        $fLog = ['📄 صفحهٔ ' . $page . ': ' . count($batch) . ' محصول (مجموع ' . count($rows) . ')'];
+        if ($page === 1) {
+            foreach (array_slice($rows, 0, 3) as $s) $fLog[] = '  • ' . mb_substr($s['title'], 0, 50);
+        }
         reconProgress(['phase' => 'fetch', 'fetched' => count($rows), 'page' => $page,
-            'log_add' => ['📄 صفحهٔ ' . $page . ': ' . count($batch) . ' محصول (مجموع ' . count($rows) . ')']]);
+            'log_add' => $fLog]);
         if (count($batch) < 100) break;
         usleep(150000);
     }
@@ -7839,19 +8891,41 @@ function reconFetchBsl(string $tk, int $vid, int $maxPages = 60): array {
  * $mode برای موارد اضافی: off | draft | outofstock | delete
  */
 function reconRun(array $cn, string $target, bool $apply = false,
-                  string $mode = 'off', bool $fixPrice = true): array {
+                  string $mode = 'off', bool $fixPrice = true, bool $allProfiles = false): array {
     $out = ['ok' => true, 'target' => $target, 'apply' => $apply, 'mode' => $mode,
+            'all_profiles' => $allProfiles,
             'expected' => 0, 'remote' => 0, 'extra' => [], 'price_diff' => [],
             'matched' => 0, 'matched_items' => [], 'deleted' => 0, 'repriced' => 0, 'failed' => 0];
 
-    reconProgress(['phase' => 'profiles', 'log_add' => ['🔎 خواندن پروفایل‌های دارای همگام‌سازی دوره‌ای...']]);
-    $expected = reconExpected($target);
+    reconProgress(['phase' => 'profiles', 'log_add' => [$allProfiles
+        ? '🔎 خواندن همهٔ پروفایل‌ها...'
+        : '🔎 خواندن پروفایل‌های دارای همگام‌سازی دوره‌ای...']]);
+    $pstats = null;
+    $expected = reconExpected($target, $allProfiles, $pstats);
     $out['expected'] = count($expected);
-    reconProgress(['phase' => 'profiles', 'expected' => count($expected),
-        'log_add' => ['✅ ' . count($expected) . ' محصول از پروفایل‌ها جمع شد']]);
+    $out['profile_stats'] = $pstats;
+
+    // v8.64: شرح تفکیکی هر پروفایل در گزارش زنده — تا معلوم باشد چرا
+    // عددها این‌طور شده‌اند و کدام پروفایل کنار گذاشته شد.
+    $plog = [];
+    foreach (($pstats['profiles'] ?? []) as $ps) {
+        $plog[] = ($ps['n'] > 0 ? '  ✓ ' : '  ⏭ ') . $ps['name']
+            . ($ps['n'] > 0 ? (' — ' . $ps['n'] . ' محصول'
+                . (!empty($ps['no_price']) ? ' (' . $ps['no_price'] . ' بدون قیمت)' : '')
+                . (!empty($ps['why']) ? ' · ' . $ps['why'] : ''))
+              : ' — ' . ($ps['why'] ?? ''));
+    }
+    $plog[] = '✅ ' . count($expected) . ' عنوان یکتا از '
+            . (int)($pstats['used'] ?? 0) . ' پروفایل جمع شد'
+            . ((int)($pstats['skipped'] ?? 0) > 0 ? ' · ' . (int)$pstats['skipped'] . ' پروفایل کنار گذاشته شد' : '');
+    reconProgress(['phase' => 'profiles', 'expected' => count($expected), 'log_add' => $plog]);
+
     if (!$expected) {
         $out['ok'] = false;
-        $out['error'] = 'هیچ پروفایلی با همگام‌سازی دوره‌ای برای این مقصد پیدا نشد';
+        $out['error'] = $allProfiles
+            ? 'هیچ پروفایلی محصولی برای مقایسه ندارد — اول استخراج کنید'
+            : 'هیچ پروفایلی با همگام‌سازی دوره‌ای برای این مقصد پیدا نشد — گزینهٔ «همهٔ پروفایل‌ها» را بزنید';
+        $out['hint_all_profiles'] = !$allProfiles && (int)($pstats['skipped'] ?? 0) > 0;
         return $out;
     }
 
@@ -7877,32 +8951,64 @@ function reconRun(array $cn, string $target, bool $apply = false,
     }
 
     // دسته‌بندی
+    // v8.64: مقایسه هم گزارش زنده دارد — هر ۲۵ محصول یک به‌روزرسانی، و
+    // چند نمونهٔ واقعی از هر دسته، تا کاربر ببیند دقیقاً چه اتفاقی می‌افتد.
+    $cmpN = 0; $sampleExtra = []; $sampleDiff = []; $noPriceN = 0;
     foreach ($remote as $r) {
+        $cmpN++;
         $key = reconNormTitle($r['title']);
         if (!isset($expected[$key])) {
             $out['extra'][] = ['id' => $r['id'], 'title' => $r['title'], 'price' => $r['price']];
-            continue;
-        }
-        $want = (int)$expected[$key]['price'];
-        $have = $target === 'bsl' ? (int)($r['price_toman'] ?? 0) : (int)$r['price'];
-        if ($want > 0 && $have !== $want) {
-            $out['price_diff'][] = ['id' => $r['id'], 'title' => $r['title'],
-                'from' => $have, 'to' => $want, 'profile' => $expected[$key]['profile']];
+            if (count($sampleExtra) < 5) $sampleExtra[] = '  🗑 ' . mb_substr($r['title'], 0, 45);
         } else {
-            $out['matched']++;
-            // v8.50: فهرست یکسان‌ها هم نگه داشته می‌شود تا شمارندهٔ آن قابل کلیک باشد
-            if (count($out['matched_items']) < 500) {
-                $out['matched_items'][] = ['id' => $r['id'], 'title' => $r['title'], 'price' => $have];
+            $want = (int)$expected[$key]['price'];
+            $have = $target === 'bsl' ? (int)($r['price_toman'] ?? 0) : (int)$r['price'];
+            if ($want <= 0) {
+                // قیمت مبدأ صفر است — مغایرت حساب نمی‌شود، وگرنه همه‌چیز صفر می‌شد
+                $noPriceN++;
+                $out['matched']++;
+                if (count($out['matched_items']) < 500) {
+                    $out['matched_items'][] = ['id' => $r['id'], 'title' => $r['title'], 'price' => $have];
+                }
+            } elseif ($have !== $want) {
+                $out['price_diff'][] = ['id' => $r['id'], 'title' => $r['title'],
+                    'from' => $have, 'to' => $want, 'profile' => $expected[$key]['profile']];
+                if (count($sampleDiff) < 5) $sampleDiff[] = '  💰 ' . mb_substr($r['title'], 0, 38)
+                    . ' — ' . number_format($have) . ' → ' . number_format($want);
+            } else {
+                $out['matched']++;
+                // v8.50: فهرست یکسان‌ها هم نگه داشته می‌شود تا شمارندهٔ آن قابل کلیک باشد
+                if (count($out['matched_items']) < 500) {
+                    $out['matched_items'][] = ['id' => $r['id'], 'title' => $r['title'], 'price' => $have];
+                }
             }
         }
+        if ($cmpN % 25 === 0) {
+            reconProgress(['phase' => 'compare', 'cur' => $cmpN, 'cur_total' => count($remote),
+                'extra' => count($out['extra']), 'diff' => count($out['price_diff']),
+                'matched' => $out['matched'],
+                'log_add' => ['⚖️ مقایسه ' . $cmpN . '/' . count($remote)
+                    . ' — اضافی ' . count($out['extra'])
+                    . '، مغایرت ' . count($out['price_diff'])
+                    . '، یکسان ' . $out['matched']]]);
+        }
     }
+    $out['no_src_price'] = $noPriceN;
 
+    $doneLog = ['📊 اضافی: ' . count($out['extra'])
+        . ' · مغایرت قیمت: ' . count($out['price_diff'])
+        . ' · یکسان: ' . $out['matched']];
+    if ($noPriceN > 0) $doneLog[] = 'ℹ️ ' . $noPriceN . ' محصول در مبدأ قیمت ندارد — قیمتشان مقایسه نشد';
+    if ($sampleDiff)  { $doneLog[] = 'نمونهٔ مغایرت قیمت:';  foreach ($sampleDiff as $l) $doneLog[] = $l; }
+    if ($sampleExtra) { $doneLog[] = 'نمونهٔ «در هیچ پروفایلی نیست»:'; foreach ($sampleExtra as $l) $doneLog[] = $l; }
+    if (count($out['extra']) > 0 && count($out['extra']) === count($remote)) {
+        $doneLog[] = '⚠️ هیچ محصولی تطبیق نخورد — احتمالاً عنوان‌های مقصد با پروفایل فرق دارند '
+                   . '(پسوند پروفایل یا تغییر نام). قبل از «حذف»، فهرست را ببینید.';
+    }
     reconProgress(['phase' => $apply ? 'apply' : 'done',
         'extra' => count($out['extra']), 'diff' => count($out['price_diff']),
-        'matched' => $out['matched'],
-        'log_add' => ['📊 اضافی: ' . count($out['extra'])
-            . ' · مغایرت قیمت: ' . count($out['price_diff'])
-            . ' · یکسان: ' . $out['matched']]]);
+        'matched' => $out['matched'], 'cur' => 0, 'cur_total' => 0,
+        'log_add' => $doneLog]);
 
     if (!$apply) return $out;
 
@@ -8609,8 +9715,9 @@ if(!empty($p['sku']))$wp['sku']=$p['sku'];
 if($wooStreamCatId>0)$wp['categories']=[['id'=>$wooStreamCatId]];
 
 // v8.63: تصویر جدا از ساخت محصول وصل می‌شود (روش «عکس‌دار کردن»)
+// v8.64: و همهٔ عکس‌های گالری، نه فقط اولی
 $imgNote=null;
-$wooStreamImgs=wooImagePayload($w,(string)($p['image']??''),$imgNote);
+$wooStreamImgs=wooGalleryPayload($w,productImageList($p),$imgNote);
 if($imgNote)send_sse('send_info',['msg'=>"[$n] 🖼 ".$imgNote]);
 $existing=null;
 if($pTitle!==''){
@@ -8879,7 +9986,8 @@ wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 $wooUpdImgs=[];
 if($needImg){
 $imgNote=null;
-$wooUpdImgs=wooImagePayload($w,(string)$p['image'],$imgNote);
+// v8.64: همهٔ عکس‌های محصول
+$wooUpdImgs=wooGalleryPayload($w,productImageList($p),$imgNote);
 if($imgNote)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 ".$imgNote);
 }
 
@@ -8914,8 +10022,9 @@ wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 // می‌اندازد. همان تصویر اگر بعد از ساخته‌شدن محصول با یک PUT جدا وصل
 // شود، قبول می‌شود. این دقیقاً همان روشی است که «عکس‌دار کردن محصولات»
 // استفاده می‌کند و کار می‌کند، پس اینجا هم همان را به کار می‌بریم.
+// v8.64: همهٔ عکس‌های محصول، نه فقط اولی
 $imgNote=null;
-$wooNewImgs=wooImagePayload($w,(string)($p['image']??''),$imgNote);
+$wooNewImgs=wooGalleryPayload($w,productImageList($p),$imgNote);
 if($imgNote)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 ".$imgNote);
 
 // محصول اول بدون تصویر ساخته می‌شود تا هیچ‌وقت به‌خاطر تصویر رد نشود
@@ -11610,8 +12719,11 @@ if($buCatId<=0&&$autoCat&&!empty($bslFlatCats)){$_ac=autoMatchBslCategory($pTitl
 if($buCatId<=0)$buCatId=(int)($bs['category_id']??0);
 if($buCatId>0)$bu['category_id']=$buCatId;
 $pid=null;
-if(!empty($p['image'])){$up=bslUpload($tk,$p['image']);if(!empty($up['ok']))$pid=$up['file_id'];}
-if($pid){$bu['photo']=$pid;$bu['photos']=[$pid];}
+// v8.64: همهٔ عکس‌های محصول در آپدیت هم می‌روند
+$updIds=[];
+$imgListU=productImageList($p);
+if($imgListU){$umU=bslUploadMany($tk,$imgListU,(int)($bs['max_photos']??10));if(!empty($umU['ok'])){$pid=$umU['main'];$updIds=$umU['ids'];}}
+if($pid){$bu['photo']=$pid;$bu['photos']=($updIds?:[$pid]);}
 $r=bslReq($tk,'PATCH','products/'.$exId,$bu);
 if($r['code']===404){$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$exId,$bu);}
 if($r['ok']&&!empty($r['body']['id'])){
@@ -11691,16 +12803,24 @@ bslUpdateProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30
 usleep(500000);continue;
 }
 
-$pid=null;
-if(!empty($p['image'])){$up=bslUpload($tk,$p['image']);if(!empty($up['ok']))$pid=$up['file_id'];else{$up2=bslUpload($tk,$p['image']);if(!empty($up2['ok']))$pid=$up2['file_id'];}}
+// v8.64: همهٔ عکس‌های محصول آپلود می‌شوند، نه فقط اولی
+$pid=null;$galIds=[];
+$imgListB=productImageList($p);
+if($imgListB){
+$umB=bslUploadMany($tk,$imgListB,(int)($bs['max_photos']??10));
+if(!empty($umB['ok'])){$pid=$umB['main'];$galIds=$umB['ids'];}
+if(count($imgListB)>1)bslUpdateProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 گالری: ".$umB['note']);
+}
+if(!$pid&&!empty($p['image'])){$up2=bslUpload($tk,$p['image']);if(!empty($up2['ok'])){$pid=$up2['file_id'];$galIds=[$pid];}}
 
 if(!$pid&&!empty($p['link'])){
 $srcPage=fetch_html($p['link'],15);
 if(!empty($srcPage['ok'])&&!empty($srcPage['html'])){
 $freshImgUrl=extractImageFromHtml($srcPage['html'],$p['link']);
-if($freshImgUrl){$up3=bslUpload($tk,$freshImgUrl);if(!empty($up3['ok']))$pid=$up3['file_id'];}
+if($freshImgUrl){$up3=bslUpload($tk,$freshImgUrl);if(!empty($up3['ok'])){$pid=$up3['file_id'];$galIds=[$pid];}}
 }
 }
+if(!$galIds&&$pid)$galIds=[$pid];
 
 if(!$pid){
 bslUpdateProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚠️ تصویر آپلود نشد — ارسال بدون تصویر (غیرفعال)");
@@ -11745,8 +12865,9 @@ if($autoCatId>0){$catId=$autoCatId;bslUpdateProgress($sent,$updated,$skipped,$fa
 }
 $bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>(int)($bs['stock']??10),'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId];
 
-if(mb_strlen($bsBrief)>=3 && mb_strlen($bsDesc)>=3){$bp['photo']=$pid;$bp['photos']=[$pid];$bp['status']=2976;}
-else{$bp['photo']=$pid;$bp['photos']=[$pid];$bp['status']=3790;}
+// v8.64: photos شامل همهٔ عکس‌های آپلودشده است، نه فقط شاخص
+if(mb_strlen($bsBrief)>=3 && mb_strlen($bsDesc)>=3){$bp['photo']=$pid;$bp['photos']=($galIds?:[$pid]);$bp['status']=2976;}
+else{$bp['photo']=$pid;$bp['photos']=($galIds?:[$pid]);$bp['status']=3790;}
 if(!empty($p['sku']))$bp['sku']=$p['sku'];
 $r=bslReq($tk,'POST','vendors/'.$vid.'/products',$bp);
 if($r['ok']&&!empty($r['body']['id'])){
@@ -11848,7 +12969,7 @@ elseif(!empty($p['short_desc']))$bu['description']=strip_tags($p['short_desc']);
 
 if(empty($bu['category_id'])&&$autoCat&&!empty($bslFlatCats)){$_ac=autoMatchBslCategory($pTitle,$bslFlatCats);if($_ac>0)$bu['category_id']=$_ac;}
 elseif((int)($bs['category_id']??0)>0)$bu['category_id']=(int)($bs['category_id']??0);
-if($pid){$bu['photo']=$pid;$bu['photos']=[$pid];}
+if($pid){$bu['photo']=$pid;$bu['photos']=(!empty($galIds)?$galIds:[$pid]);}
 $r3=bslReq($tk,'PATCH','products/'.$dupId,$bu);
 if($r3['code']===404){$r3=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$dupId,$bu);}
 if($r3['ok']&&!empty($r3['body']['id'])){
@@ -12764,6 +13885,12 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 محصولی که در هیچ پروفایلی نیست، و محصولی که قیمتش مغایرت دارد.
 اول فقط گزارش می‌گیرد؛ اعمال تغییرات با تأیید شماست.
 </div>
+<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin-bottom:6px;cursor:pointer">
+<input type="checkbox" id="reconAllProfiles" checked style="width:14px;height:14px">
+<span>همهٔ پروفایل‌ها (نه فقط آن‌هایی که همگام‌سازی دوره‌ای دارند)</span></label>
+<div style="font-size:10px;color:#64748b;margin:-2px 0 8px;line-height:1.8">
+💡 اگر محصولات را دستی می‌فرستید، این گزینه باید روشن باشد؛ وگرنه گزارش خالی درمی‌آید.
+</div>
 <div class="cact">
 <button class="btn btn-purple" onclick="reconScan('woo')" style="flex:1">🛒 بررسی ووکامرس</button>
 <button class="btn btn-cyan" onclick="reconScan('bsl')" style="flex:1">🏪 بررسی باسلام</button>
@@ -12849,6 +13976,90 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <button class="btn btn-green" onclick="photoRun(0)" style="flex:1">🖼 اجرا</button>
 </div>
 <div id="photoR" style="margin-top:8px"></div>
+</div></div>
+
+<!-- v8.64: پاسخ خودکار به پیام مشتریان -->
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🤖 پاسخ خودکار به مشتریان</h3><span class="cst off" id="arS">خاموش</span><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+به پیام‌های مشتریان در باسلام خودکار جواب می‌دهد — «سلام» ← «سلام و وقت بخیر»، «ممنون» ← «خواهش می‌کنم».
+هر قاعده را می‌توانید اضافه، ویرایش یا حذف کنید.
+</div>
+<div class="crow" style="align-items:center">
+<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
+<input type="checkbox" id="arEnabled" onchange="arSaveCfg()" style="width:16px;height:16px"> فعال
+</label></div>
+
+<div class="crow" style="align-items:center">
+<label>مهلت ادمین:</label>
+<input type="number" id="arGrace" min="0" max="1440" value="10" onchange="arSaveCfg()" style="flex:1">
+<span style="font-size:10px;color:#64748b">دقیقه</span></div>
+<div style="font-size:10px;color:#64748b;margin:-2px 0 8px;line-height:1.8">
+⏱ اگر تا این مدت خودتان جواب ندادید، ربات جواب می‌دهد. <b>۰</b> یعنی فوری.
+</div>
+
+<div class="crow" style="align-items:center">
+<label>فاصلهٔ هر گفتگو:</label>
+<input type="number" id="arPerChat" min="0" max="10080" value="180" onchange="arSaveCfg()" style="flex:1">
+<span style="font-size:10px;color:#64748b">دقیقه</span></div>
+<div style="font-size:10px;color:#64748b;margin:-2px 0 8px;line-height:1.8">
+🔁 یک گفتگو در این بازه فقط یک پاسخ خودکار می‌گیرد — جلوی حلقهٔ پاسخ‌به‌پاسخ را می‌گیرد.
+</div>
+
+<div class="crow" style="align-items:center">
+<label>سقف هر اجرا:</label>
+<input type="number" id="arMaxRun" min="1" max="50" value="5" onchange="arSaveCfg()" style="flex:1">
+<label style="flex:0 0 auto">بررسی:</label>
+<input type="number" id="arScan" min="5" max="50" value="20" onchange="arSaveCfg()" style="flex:1"></div>
+
+<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin:6px 0;cursor:pointer">
+<input type="checkbox" id="arOffHours" onchange="arSaveCfg();arToggleHours()" style="width:14px;height:14px">
+<span>فقط بیرون ساعت کاری جواب بده</span></label>
+<div id="arHoursRow" class="crow hidden" style="align-items:center">
+<label>ساعت کاری از:</label>
+<select id="arFrom" onchange="arSaveCfg()" style="flex:1"></select>
+<label style="flex:0 0 auto">تا:</label>
+<select id="arTo" onchange="arSaveCfg()" style="flex:1"></select>
+</div>
+
+<div class="crow"><label>امضا:</label>
+<input type="text" id="arSign" placeholder="اختیاری — مثلاً: (پاسخ خودکار)" onchange="arSaveCfg()" style="flex:1"></div>
+
+<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin:4px 0;cursor:pointer">
+<input type="checkbox" id="arNotify" onchange="arSaveCfg()" style="width:14px;height:14px">
+<span>📤 گزارش پاسخ‌ها به پیام‌رسان</span></label>
+
+<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+<span style="font-size:12px;color:#67e8f9;font-weight:700">📋 قواعد پاسخ</span>
+<button class="btn btn-green" onclick="arAddRule()" style="font-size:10px;padding:4px 9px">➕ قاعدهٔ جدید</button>
+</div>
+<div id="arRules"></div>
+<div class="cact">
+<button class="btn btn-cyan" onclick="arSaveRules()" style="flex:1">💾 ذخیرهٔ قواعد</button>
+<button class="btn btn-gray" onclick="arResetRules()" style="flex:0 0 auto">↩️ پیش‌فرض</button>
+</div>
+</div>
+
+<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
+<div class="crow">
+<input type="text" id="arTestText" placeholder="یک پیام نمونه بنویسید…" style="flex:1"
+       onkeydown="if(event.key==='Enter')arTest()">
+<button class="btn btn-purple" onclick="arTest()" style="flex:0 0 auto">🧪 آزمایش</button>
+</div>
+<div class="cact">
+<button class="btn btn-gray" onclick="arRun(1)" style="flex:1">👁 پیش‌نمایش روی گفتگوهای واقعی</button>
+<button class="btn btn-green" onclick="arRun(0)" style="flex:1">🚀 اجرای فوری</button>
+</div>
+<div class="cact">
+<button class="btn btn-gray" onclick="arShowLog()" style="flex:1">📜 پاسخ‌های اخیر</button>
+</div>
+<div style="font-size:10px;color:#fbbf24;margin-top:4px;line-height:1.8">
+⚠️ «پیش‌نمایش» هیچ پیامی نمی‌فرستد. اجرای دوره‌ای به کران‌جاب وابسته است.
+</div>
+</div>
+<div id="arR" style="margin-top:8px"></div>
 </div></div>
 
 <!-- v8.62: گزارش شبانه -->
@@ -13295,6 +14506,84 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
             <button class="btn btn-gray" onclick="clearDetailSel()">🗑️</button>
         </div>
         <div id="detailFieldsList" style="margin-top:12px"></div>
+    </div>
+
+    <!-- v8.64: گالری — چند عکس از صفحهٔ جزئیات محصول -->
+    <div class="card" style="margin-top:14px;border-color:#ec4899">
+        <div class="section-title" style="color:#f9a8d4">🖼 چند عکس از صفحهٔ محصول (گالری)</div>
+        <div class="alert" style="background:#500724;border:1px solid #ec4899;color:#fbcfe8">
+            💡 پیش‌فرض هر محصول فقط یک عکس دارد. اینجا می‌توانید بقیهٔ عکس‌های صفحهٔ محصول را هم بردارید.
+            عکس اول شاخص محصول می‌شود و بقیه در گالری مقصد می‌نشینند.
+        </div>
+        <div class="row" style="align-items:center">
+            <label style="flex:0 0 78px">روش:</label>
+            <select id="galMode" onchange="galModeChanged()" style="flex:1">
+                <option value="off">خاموش — فقط یک عکس</option>
+                <option value="auto">📦 خودکار از باکس عکس‌ها</option>
+                <option value="manual">✍️ سلکتورهای دستی</option>
+                <option value="number">🔢 الگوی شماره‌دار</option>
+            </select>
+        </div>
+
+        <div id="galAutoBox" class="hidden">
+            <div style="font-size:10.5px;color:#94a3b8;margin:6px 0;line-height:1.8">
+                سلکتور <b>ظرف گالری</b> را بدهید (نه خودِ عکس‌ها). هر تصویری داخلش باشد برداشته می‌شود
+                و تعدادش از قبل لازم نیست معلوم باشد.
+            </div>
+            <div class="row">
+                <input type="text" id="galBox" placeholder="مثال: .woocommerce-product-gallery" oninput="galChanged()">
+            </div>
+            <div class="row">
+                <button class="btn btn-purple" onclick="gallerySuggest()" style="flex:1">💡 پیشنهاد باکس</button>
+            </div>
+            <div id="galSuggest"></div>
+        </div>
+
+        <div id="galManualBox" class="hidden">
+            <div style="font-size:10.5px;color:#94a3b8;margin:6px 0;line-height:1.8">
+                هر سلکتور را در یک خط بنویسید (یا با <code>|</code> جدا کنید).
+                هم می‌توانید مستقیم به <code>img</code> اشاره کنید، هم به ظرفی که عکس داخلش است.
+            </div>
+            <textarea id="galSelectors" rows="4" oninput="galChanged()"
+                placeholder="‎.gallery-1 img&#10;.gallery-2 img&#10;.thumb-3 img"
+                style="width:100%;background:#0f172a;border:1px solid #475569;color:#fff;padding:8px;border-radius:8px;font-family:monospace;font-size:11px;direction:ltr"></textarea>
+        </div>
+
+        <div id="galNumberBox" class="hidden">
+            <div style="font-size:10.5px;color:#94a3b8;margin:6px 0;line-height:1.8">
+                اگر سلکتور عکس‌ها شماره‌دار است، الگو را با <code>{n}</code> بنویسید.
+                جای <code>{n}</code> عدد گذاشته می‌شود و تا وقتی عکسی پیدا شود جلو می‌رود.
+            </div>
+            <div class="row">
+                <input type="text" id="galPattern" placeholder="مثال: .slide-{n} img" oninput="galChanged()"
+                       style="direction:ltr;font-family:monospace">
+            </div>
+            <div class="row" style="align-items:center">
+                <label style="flex:0 0 40px">از:</label>
+                <input type="number" id="galFrom" value="1" min="0" max="99" oninput="galChanged()" style="flex:1">
+                <label style="flex:0 0 40px">تا:</label>
+                <input type="number" id="galTo" value="10" min="1" max="99" oninput="galChanged()" style="flex:1">
+            </div>
+        </div>
+
+        <div id="galCommon" class="hidden">
+            <div class="row" style="align-items:center;margin-top:6px">
+                <label style="flex:0 0 78px">حداکثر عکس:</label>
+                <input type="number" id="galMax" value="10" min="1" max="30" oninput="galChanged()" style="flex:1">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;flex:1">
+                    <input type="checkbox" id="galSkipFirst" onchange="galChanged()" style="width:14px;height:14px">
+                    <span>عکس اول را رد کن</span>
+                </label>
+            </div>
+            <div class="row">
+                <button class="btn btn-pink" onclick="galleryTest()" style="flex:1">🧪 آزمایش روی یک محصول</button>
+            </div>
+            <div style="font-size:10px;color:#fbbf24;line-height:1.8">
+                ⚠️ با روشن بودن گالری، هنگام استخراج صفحهٔ <b>همهٔ</b> محصولات باز می‌شود (نه فقط بی‌عکس‌ها)،
+                پس استخراج کندتر می‌شود.
+            </div>
+            <div id="galTestR" style="margin-top:6px"></div>
+        </div>
     </div>
 
     <div class="iframe-size-bar" style="margin-top:14px">
@@ -13839,6 +15128,132 @@ function updateDetailSelector(key, val) {
     scheduleSave();
 }
 
+/* =====================================================================
+ *  v8.64: گالری چندعکسی — رابط کاربری
+ * ===================================================================== */
+
+/** تنظیمات گالری را از فرم می‌خواند */
+function galCollect() {
+    const g = id => $(id) || {};
+    return {
+        mode:       (g('galMode').value || 'off'),
+        box:        (g('galBox').value || '').trim(),
+        selectors:  (g('galSelectors').value || '').trim(),
+        pattern:    (g('galPattern').value || '').trim(),
+        from:       parseInt(g('galFrom').value || '1') || 1,
+        to:         parseInt(g('galTo').value || '10') || 10,
+        max:        parseInt(g('galMax').value || '10') || 10,
+        skip_first: !!g('galSkipFirst').checked
+    };
+}
+
+/** تنظیمات ذخیره‌شده را در فرم می‌نشاند */
+function galApply(cfg) {
+    cfg = cfg || {};
+    const set = (id, v) => { const e = $(id); if (e) e.value = v; };
+    set('galMode', cfg.mode || 'off');
+    set('galBox', cfg.box || '');
+    set('galSelectors', cfg.selectors || '');
+    set('galPattern', cfg.pattern || '');
+    set('galFrom', cfg.from !== undefined ? cfg.from : 1);
+    set('galTo', cfg.to !== undefined ? cfg.to : 10);
+    set('galMax', cfg.max !== undefined ? cfg.max : 10);
+    if ($('galSkipFirst')) $('galSkipFirst').checked = !!cfg.skip_first;
+    galModeChanged(true);
+}
+
+/** با تغییر روش، فقط جعبهٔ همان روش نشان داده می‌شود */
+function galModeChanged(silent) {
+    const m = ($('galMode') || {}).value || 'off';
+    const show = (id, on) => { const e = $(id); if (e) e.classList.toggle('hidden', !on); };
+    show('galAutoBox',   m === 'auto');
+    show('galManualBox', m === 'manual');
+    show('galNumberBox', m === 'number');
+    show('galCommon',    m !== 'off');
+    if (!silent) galChanged();
+}
+
+function galChanged() { markDirty(); scheduleSave(); }
+
+/** آدرس یک محصول نمونه از نتایج فعلی */
+function galSampleUrl() {
+    for (const [k, p] of products) if (p.link) return p.link;
+    return null;
+}
+
+/** پیشنهاد سلکتور «باکس عکس‌ها» از روی یک صفحهٔ محصول واقعی */
+function gallerySuggest() {
+    const url = galSampleUrl();
+    const box = $('galSuggest');
+    if (!url) { showToast('ابتدا محصولات را استخراج کنید', true); return; }
+    if (box) box.innerHTML = '<div style="color:#93c5fd;font-size:11px;padding:4px 0">⏳ بررسی صفحهٔ محصول...</div>';
+    fetch('?gallery_suggest=' + encodeURIComponent(url))
+        .then(r => r.json())
+        .then(d => {
+            if (!box) return;
+            if (!d.ok) { box.innerHTML = '<div style="color:#fca5a5;font-size:11px">✗ ' + esc(d.error || 'خطا') + '</div>'; return; }
+            const rows = d.suggestions || [];
+            if (!rows.length) {
+                box.innerHTML = '<div style="color:#fbbf24;font-size:11px;line-height:1.8">'
+                    + 'گالری شناخته‌شده‌ای پیدا نشد. با «باز کردن نمونه» ظرف عکس‌ها را دستی انتخاب کنید '
+                    + 'یا از روش سلکتور دستی استفاده کنید.</div>';
+                return;
+            }
+            let h = '<div style="font-size:10.5px;color:#94a3b8;margin:6px 0">روی هرکدام بزنید تا انتخاب شود:</div>';
+            rows.forEach(s => {
+                h += '<div class="suggest-item" onclick="galPick(\'' + esc(s.selector).replace(/'/g, "\\'") + '\')" '
+                   + 'style="display:flex;justify-content:space-between;gap:8px;align-items:center;direction:ltr">'
+                   + '<span style="color:#f9a8d4">' + esc(s.selector) + '</span>'
+                   + '<span style="color:#86efac;flex:0 0 auto">' + toFa(s.count) + ' عکس</span></div>';
+            });
+            box.innerHTML = '<div class="suggest-list">' + h + '</div>';
+        })
+        .catch(e => { if (box) box.innerHTML = '<div style="color:#f87171;font-size:11px">✗ ' + esc(e.message) + '</div>'; });
+}
+
+function galPick(sel) {
+    if ($('galBox')) $('galBox').value = sel;
+    const b = $('galSuggest'); if (b) b.innerHTML = '';
+    galChanged();
+    showToast('✓ باکس انتخاب شد — حالا آزمایش کنید');
+}
+
+/** آزمایش تنظیمات فعلی روی یک صفحهٔ محصول واقعی */
+function galleryTest() {
+    const url = galSampleUrl();
+    const box = $('galTestR');
+    if (!url) { showToast('ابتدا محصولات را استخراج کنید', true); return; }
+    const cfg = galCollect();
+    if (cfg.mode === 'off') { showToast('اول یک روش انتخاب کنید', true); return; }
+    if (box) box.innerHTML = '<div style="color:#93c5fd;font-size:11px">⏳ آزمایش روی: ' + esc(url.substring(0, 60)) + '</div>';
+    fetch('?gallery_test=' + encodeURIComponent(url) + '&gallery=' + encodeURIComponent(JSON.stringify(cfg)))
+        .then(r => r.json())
+        .then(d => {
+            if (!box) return;
+            if (!d.ok) { box.innerHTML = '<div style="color:#fca5a5;font-size:11px;background:#7f1d1d20;padding:6px 8px;border-radius:6px">✗ ' + esc(d.error || 'خطا') + '</div>'; return; }
+            let h = '<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
+            h += '<div style="color:' + (d.count > 0 ? '#4ade80' : '#fbbf24') + ';font-weight:700;margin-bottom:4px">'
+               + (d.count > 0 ? '✅ ' + toFa(d.count) + ' عکس پیدا شد' : '⚠️ هیچ عکسی پیدا نشد') + '</div>';
+            h += '<div style="color:#94a3b8;font-size:10px;margin-bottom:6px">' + esc(d.note || '') + '</div>';
+            if (d.images && d.images.length) {
+                h += '<div style="display:flex;gap:5px;flex-wrap:wrap">';
+                d.images.slice(0, 12).forEach((u, i) => {
+                    h += '<div style="position:relative"><img src="?image_proxy=' + encodeURIComponent(u) + '" '
+                       + 'style="width:62px;height:62px;object-fit:cover;border-radius:6px;border:1px solid '
+                       + (i === 0 ? '#22c55e' : '#334155') + '" title="' + esc(u) + '">'
+                       + '<span style="position:absolute;bottom:1px;right:2px;background:#000a;color:#fff;font-size:9px;padding:0 3px;border-radius:3px">'
+                       + toFa(i + 1) + '</span></div>';
+                });
+                h += '</div>';
+                if (d.count > 12) h += '<div style="color:#64748b;font-size:10px;margin-top:4px">و ' + toFa(d.count - 12) + ' عکس دیگر</div>';
+                h += '<div style="color:#86efac;font-size:10px;margin-top:5px">🟢 قاب سبز = عکس شاخص محصول</div>';
+            }
+            h += '</div>';
+            box.innerHTML = h;
+        })
+        .catch(e => { if (box) box.innerHTML = '<div style="color:#f87171;font-size:11px">✗ ' + esc(e.message) + '</div>'; });
+}
+
 function clearDetailSel() {
     if (!confirm('پاک کردن همه سلکتورهای صفحه جزئیات؟')) return;
     DETAIL_FIELDS.forEach(f => detailSel[f.key] = {enabled:false, selector:''});
@@ -14091,6 +15506,7 @@ function applyProfile(p) {
         });
         renderDetailFieldsList();
     }
+    galApply(p.gallery || {});           // v8.64
 
     updatePagUI();
 
@@ -14196,6 +15612,7 @@ function collectProfileData() {
         pagVal: $('pagVal').value,
         selectors: {...sel},
         detailSelectors: JSON.parse(JSON.stringify(detailSel)),
+        gallery: galCollect(),                       // v8.64
         titleSuffix: $('titleSuffix').value,
         priceMode: $('priceMode').value,
         priceVal: parseFloat($('priceVal').value) || 0,
@@ -14231,7 +15648,7 @@ function saveProfileSilent() {
     fd.append('action', 'save_profile');
     for (const k in data) {
         // v7.66: syncConfig must also be JSON.stringify'd — otherwise FormData converts object to "[object Object]"
-        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'bslFallbackCatIds') {
+        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'bslFallbackCatIds' || k === 'gallery') {
             fd.append(k, JSON.stringify(data[k]));
         } else {
             fd.append(k, data[k]);
@@ -14277,7 +15694,7 @@ function saveProfile() {
     fd.append('action', 'save_profile');
     for (const k in data) {
         // v7.66: syncConfig must also be JSON.stringify'd — otherwise "[object Object]"
-        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'bslFallbackCatIds') {
+        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'bslFallbackCatIds' || k === 'gallery') {
             fd.append(k, JSON.stringify(data[k]));
         } else {
             fd.append(k, data[k]);
@@ -14638,7 +16055,10 @@ function renderCard(p,k){
   }
   // v8.40: نشان جدید/آپدیت
   const _st=prodStatus(p);
-  const html=`<div class="thumb">${p.image?`<img class="lazy-img" data-src="?image_proxy=${encodeURIComponent(p.image)}" loading="lazy">`:'<div class="noimg">بدون تصویر</div>'}</div>
+  // v8.64: نشان تعداد عکس‌های گالری
+  const _nImg=(p.images&&p.images.length)||0;
+  const _galBadge=_nImg>1?`<span style="position:absolute;bottom:4px;left:4px;background:#000b;color:#f9a8d4;font-size:9px;font-weight:700;padding:1px 6px;border-radius:10px">🖼 ${toFa(_nImg)}</span>`:'';
+  const html=`<div class="thumb" style="position:relative">${p.image?`<img class="lazy-img" data-src="?image_proxy=${encodeURIComponent(p.image)}" loading="lazy">`:'<div class="noimg">بدون تصویر</div>'}${_galBadge}</div>
   <div class="pbody"><div class="ptitle">${statusBadge(_st)}${esc(title||'بدون عنوان')}</div>
   ${shortDesc ? `<div class="pdetail-short">${esc(shortDesc)}</div>` : ''}
   ${origDiffers ? `<span class="price-orig">${esc(origPrice)}</span>` : ''}
@@ -15334,8 +16754,11 @@ function finish(){running=false;if(es){es.close();es=null;}$('startBtn').classLi
 function startDetailExtraction(){
     if(detailRunning)return;
     const enabledFields = getEnabledDetailFields();
-    if (enabledFields.length === 0) {
-        showToast('ابتدا فیلدهای مورد نظر را فعال کنید', true);
+    // v8.64: گالری هم به تنهایی دلیل کافی برای باز کردن صفحهٔ محصول است
+    const galCfg = galCollect();
+    const galOn = galCfg.mode !== 'off';
+    if (enabledFields.length === 0 && !galOn) {
+        showToast('ابتدا فیلدهای مورد نظر یا گالری را فعال کنید', true);
         switchMainTab('selectors');
         return;
     }
@@ -15347,6 +16770,8 @@ function startDetailExtraction(){
     const keys = order.filter(k => {
         const p = products.get(k);
         if (!p.link) return false;
+        // با گالری روشن، محصولی که هنوز چند عکس ندارد باید بررسی شود
+        if (galOn && !(p.images && p.images.length > 1)) return true;
         return enabledFields.some(f => !p[f.key]);
     });
 
@@ -15375,6 +16800,7 @@ function startDetailExtraction(){
 
     const fd = new FormData();
     fd.append('urlMap', JSON.stringify(urlMap));
+    fd.append('gallery', JSON.stringify(galCfg));      // v8.64
 
     fetch('?detail_stream=1&' + params.toString(), {method:'POST', body:fd})
         .then(response => {
@@ -15430,6 +16856,13 @@ function parseSSEEvent(ev) {
                         added++;
                     }
                 });
+                // v8.64: گالری
+                if (Array.isArray(d.images) && d.images.length) {
+                    p.images = d.images;
+                    p.images_count = d.images.length;
+                    if (d.image) p.image = d.image;
+                    added++;
+                }
                 products.set(d.key, p);
                 if (added > 0) {
                     renderCard(p, d.key);
@@ -15573,6 +17006,35 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.64', t:'گالری چندعکسی، پاسخ خودکار به مشتریان، و درست شدن مغایرت‌گیری', items:[
+    '🖼 بخش جدید «چند عکس از صفحهٔ محصول» در تب سلکتورها — سه روش',
+    'خودکار: سلکتور باکس عکس‌ها را می‌دهید و هرچه داخلش باشد برداشته می‌شود، تعدادش هم لازم نیست از قبل معلوم باشد',
+    'دستی: چند سلکتور جدا، هر کدام در یک خط',
+    'شماره‌دار: الگویی مثل ‎.slide-{n} img می‌دهید و بازهٔ عددی؛ تا وقتی عکس پیدا شود جلو می‌رود',
+    'دکمهٔ «پیشنهاد باکس» گالری‌های رایج را روی صفحهٔ محصول شما پیدا می‌کند',
+    'دکمهٔ «آزمایش» عکس‌های پیداشده را همان‌جا نشان می‌دهد — قاب سبز یعنی عکس شاخص',
+    'عکس‌ها در ووکامرس و باسلام هر دو ارسال می‌شوند؛ اولی شاخص، بقیه گالری',
+    'srcset و data-zoom و data-large هم خوانده می‌شوند تا نسخهٔ باکیفیت برداشته شود',
+    'نسخهٔ بندانگشتی و اصلی یک عکس (‎-150x150) تکراری حساب می‌شوند',
+    '🤖 بخش جدید «پاسخ خودکار به مشتریان» — سلام ← سلام و وقت بخیر، ممنون ← خواهش می‌کنم',
+    'قواعد قابل افزودن، ویرایش و حذف؛ با حالت‌های شامل کلمه، دقیقاً همین، شروع با، regex و پیش‌فرض',
+    'مهلت ادمین: تا چند دقیقه صبر می‌کند؛ اگر خودتان جواب دادید ربات وسط حرف نمی‌پرد',
+    'فاصلهٔ هر گفتگو، سقف روزانهٔ هر قاعده و سقف هر اجرا — جلوی حلقهٔ پاسخ‌به‌پاسخ را می‌گیرد',
+    'گزینهٔ «فقط بیرون ساعت کاری» برای وقتی کسی پشت پیام‌ها نیست',
+    'تطبیق روی متن نرمال‌شده انجام می‌شود: ی/ک عربی، ارقام فارسی و نیم‌فاصله مشکلی نمی‌سازند',
+    'پیام غیرمتنی (عکس، فاکتور، سفارش) و گفتگویی که خودتان آخرین پیامش را داده‌اید دست نمی‌خورد',
+    '«پیش‌نمایش» روی گفتگوهای واقعی اجرا می‌شود ولی هیچ پیامی نمی‌فرستد',
+    'اجرای دوره‌ای به کران‌جاب وصل شد و گزارشش به پیام‌رسان می‌رود',
+    '🔍 مغایرت‌گیری: دو علت واقعی «کار نمی‌کند» پیدا و رفع شد',
+    'یک: فقط پروفایل‌های دارای همگام‌سازی دوره‌ای خوانده می‌شدند — هرکس دستی می‌فرستاد گزارش خالی می‌گرفت',
+    'حالا تیک «همهٔ پروفایل‌ها» هست و پیش‌فرض روشن است',
+    'دو: مقایسهٔ عنوان‌ها خام بود؛ ‎&amp; در ووکامرس، ی/ک عربی، نیم‌فاصله و فاصلهٔ سخت باعث می‌شد محصول «اضافی» دیده شود',
+    'با «حذف» زدن روی چنین گزارشی می‌شد کل فروشگاه را خالی کرد — حالا عنوان‌ها قبل از مقایسه نرمال می‌شوند',
+    'گزارش زندهٔ تفصیلی: سهم هر پروفایل، نمونهٔ عنوان‌های مقصد، نمونهٔ مغایرت‌ها، و پیشرفت لحظه‌ای مقایسه',
+    'اگر هیچ محصولی تطبیق نخورد، هشدار صریح می‌آید تا اشتباهی «حذف» نزنید',
+    'محصول بی‌قیمت در مبدأ دیگر «مغایرت قیمت» شمرده نمی‌شود',
+    'اجرای نیمه‌مردهٔ مغایرت‌گیری بعد از ۳ دقیقه بی‌حرکتی تشخیص داده می‌شود — رابط کاربری دیگر بی‌نهایت نمی‌چرخد'
+  ]},
   {v:'8.63', t:'ارسال تصویر با همان روشی که «عکس‌دار کردن» جواب می‌دهد', items:[
     'افزونهٔ وردپرس نسخهٔ قبل برگردانده شد — لازم نبود',
     'علت واقعی پیدا شد: ساختن محصول با images[] داخل همان درخواست POST، مسیر دیگری در ووکامرس است',
@@ -15986,12 +17448,16 @@ function reconScan(target){reconStart(target,false,'off',1);}
 function reconStart(target,apply,mode,fixPrice){
   const box=$('reconR');
   let q='?recon=1&target='+encodeURIComponent(target);
+  // v8.64: همهٔ پروفایل‌ها یا فقط همگام‌شونده‌ها
+  if(($('reconAllProfiles')||{}).checked)q+='&all_profiles=1';
   if(apply)q+='&apply=1&mode='+encodeURIComponent(mode||'off')+'&fix_price='+(fixPrice?1:0);
   if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال شروع...</div>';
   fetch(q).then(r=>r.json()).then(d=>{
     if(!d.ok){
       if(box)box.innerHTML='<div style="color:#fca5a5;font-size:11px;background:#7f1d1d20;'
-        +'padding:6px 8px;border-radius:6px">✗ '+esc(d.error||'خطا')+'</div>';
+        +'padding:6px 8px;border-radius:6px">✗ '+esc(d.error||'خطا')
+        +(d.running?'<div style="color:#94a3b8;margin-top:4px">اگر گیر کرده، تا ۳ دقیقه دیگر خودش آزاد می‌شود.</div>':'')
+        +'</div>';
       return;
     }
     reconWatch(target);
@@ -16011,14 +17477,21 @@ function reconWatch(target){
     +'<div id="reconLog" style="max-height:190px;overflow:auto;font-family:ui-monospace,monospace;'
     +'font-size:10.5px;line-height:1.8;direction:rtl;background:#111c31;border-radius:6px;padding:6px"></div>'
     +'</div>';
-  const tick=()=>{
+      const tick=()=>{
     fetch('?recon_status=1&since='+reconSeen).then(r=>r.json()).then(st=>{
       const logEl=$('reconLog');
       if(logEl&&st.log&&st.log.length){
         st.log.forEach(l=>{
           const d=document.createElement('div');
-          d.style.color='#cbd5e1';
-          d.textContent=l.m;
+          // v8.64: رنگ سطر بر اساس محتوا، تا گزارش زنده خوانا باشد
+          const m=l.m||'';
+          d.style.color = /^⛔|❌|🛑|⚠️/.test(m) ? '#fca5a5'
+                        : /^✅|^💰|^🗑/.test(m)  ? '#86efac'
+                        : /^\s+[•✓⏭🗑💰]/.test(m) ? '#94a3b8'
+                        : /^📊|^⚖️/.test(m)      ? '#93c5fd'
+                        : '#cbd5e1';
+          if(/^\s/.test(m))d.style.paddingRight='10px';
+          d.textContent=m;
           logEl.appendChild(d);
         });
         logEl.scrollTop=logEl.scrollHeight;
@@ -16043,7 +17516,18 @@ function reconWatch(target){
           :'<span style="color:#4ade80">✅ پایان</span>';
         fetch('?recon_result=1').then(r=>r.json()).then(res=>{
           reconLast=res;
-          if(!res.ok)return;
+          if(!res.ok){
+            // v8.64: وقتی نتیجه‌ای نیست، بگو چرا و چه کاری می‌شود کرد
+            const b=$('reconR');
+            if(b&&res.hint_all_profiles){
+              b.insertAdjacentHTML('beforeend',
+                '<div style="background:#78350f30;border:1px solid #f59e0b;border-radius:8px;'
+                +'padding:8px;margin-top:6px;font-size:11px;color:#fcd34d;line-height:1.8">'
+                +'💡 پروفایل‌هایی هست ولی «همگام‌سازی دوره‌ای» ندارند. تیک '
+                +'<b>«همهٔ پروفایل‌ها»</b> را بزنید و دوباره بررسی کنید.</div>');
+            }
+            return;
+          }
           res.applied=!!st.apply;
           const b=$('reconR');
           if(b)b.innerHTML=reconReport(res,target)
@@ -16053,7 +17537,13 @@ function reconWatch(target){
       }else if(h){
         const ph={start:'شروع',profiles:'خواندن پروفایل‌ها',fetch:'دریافت از مقصد',
                   compare:'مقایسه',apply:'اعمال تغییرات'}[st.phase]||'در حال اجرا';
-        h.innerHTML='⏳ '+esc(ph)+'...';
+        // v8.64: جزئیات زندهٔ همان لحظه، نه فقط نام مرحله
+        let extra='';
+        if(st.phase==='fetch'&&st.fetched)extra=' — '+toFa(st.fetched)+' محصول از صفحهٔ '+toFa(st.page||1);
+        else if(st.cur&&st.cur_total)extra=' — '+toFa(st.cur)+' از '+toFa(st.cur_total);
+        const secs=st.started_at?Math.max(0,Math.floor(Date.now()/1000)-st.started_at):0;
+        h.innerHTML='⏳ '+esc(ph)+esc(extra)
+          +(secs?'<span style="color:#64748b;font-size:10px"> · '+toFa(secs)+' ثانیه</span>':'');
       }
     }).catch(()=>{});
   };
@@ -16086,6 +17576,31 @@ function reconReport(d,target){
   if(d.skipped_delete){
     h+='<div style="color:#fca5a5;background:#7f1d1d20;padding:5px 7px;border-radius:6px;margin:4px 0">'
       +'🛑 حذف انجام نشد: '+esc(d.skipped_delete)+'</div>';
+  }
+  // v8.64: شرح تفکیکی پروفایل‌ها و هشدار «هیچ‌چیز تطبیق نخورد»
+  const ps=d.profile_stats||{};
+  if(ps.profiles&&ps.profiles.length){
+    h+='<details style="margin-top:6px"><summary style="cursor:pointer;color:#94a3b8;font-size:10.5px">'
+      +'📋 '+toFa(ps.used||0)+' پروفایل استفاده شد'
+      +((ps.skipped||0)?(' · '+toFa(ps.skipped)+' کنار گذاشته شد'):'')+'</summary>'
+      +'<div style="padding:5px 8px 0;font-size:10px;line-height:1.9">';
+    ps.profiles.forEach(p=>{
+      h+='<div style="color:'+(p.n>0?'#cbd5e1':'#64748b')+'">'+(p.n>0?'✓ ':'⏭ ')+esc(p.name||'')
+        +(p.n>0?(' — '+toFa(p.n)+' محصول'+(p.no_price?(' ('+toFa(p.no_price)+' بدون قیمت)'):'')):'')
+        +(p.why?' <span style="color:#64748b">· '+esc(p.why)+'</span>':'')+'</div>';
+    });
+    h+='</div></details>';
+  }
+  if(d.no_src_price>0){
+    h+='<div style="color:#94a3b8;font-size:10.5px;margin-top:4px">ℹ️ '+toFa(d.no_src_price)
+      +' محصول در مبدأ قیمت ندارد — قیمتشان مقایسه نشد</div>';
+  }
+  if(nExtra>0&&nRem>0&&nExtra===nRem){
+    h+='<div style="background:#7f1d1d30;border:1px solid #ef4444;border-radius:8px;padding:7px;'
+      +'margin-top:5px;font-size:10.5px;color:#fca5a5;line-height:1.8">'
+      +'⚠️ <b>هیچ محصولی تطبیق نخورد.</b> یعنی عنوان‌های مقصد با پروفایل یکی نیستند '
+      +'(پسوند پروفایل، تغییر نام دستی، یا پروفایل اشتباه). '
+      +'قبل از هر اقدامی روی «اضافی» بزنید و فهرست را ببینید.</div>';
   }
   if(!nExtra&&!nDiff)h+='<div style="color:#4ade80;margin-top:4px">✓ همه‌چیز هماهنگ است</div>';
   if(!d.applied&&(nExtra||nDiff)){
@@ -16188,6 +17703,232 @@ function reconApply(target){
   msg+='\n\nادامه می‌دهید؟';
   if(!confirm(msg))return;
   reconStart(target,true,mode,fix);
+}
+
+/* =====================================================================
+ *  v8.64: پاسخ خودکار به پیام مشتریان — رابط کاربری
+ * ===================================================================== */
+var arRules=[], arLoaded=false;
+
+const AR_MATCH={contains:'شامل کلمه',exact:'دقیقاً همین',starts:'شروع با',regex:'الگوی regex',always:'همیشه (پیش‌فرض)'};
+
+function arCollectCfg(){
+  const g=id=>$(id)||{};
+  return {
+    enabled:      !!g('arEnabled').checked,
+    grace_min:    parseInt(g('arGrace').value||'10')||0,
+    per_chat_min: parseInt(g('arPerChat').value||'180')||0,
+    max_per_run:  parseInt(g('arMaxRun').value||'5')||5,
+    scan_limit:   parseInt(g('arScan').value||'20')||20,
+    only_offhours:!!g('arOffHours').checked,
+    work_from:    parseInt(g('arFrom').value||'9')||0,
+    work_to:      parseInt(g('arTo').value||'21')||0,
+    sign:         (g('arSign').value||'').trim(),
+    notify:       !!g('arNotify').checked
+  };
+}
+
+function arApplyCfg(c){
+  c=c||{};
+  const set=(id,v)=>{const e=$(id);if(e)e.value=v;};
+  const chk=(id,v)=>{const e=$(id);if(e)e.checked=!!v;};
+  // ساعت‌ها یک بار پر می‌شوند
+  ['arFrom','arTo'].forEach(id=>{
+    const e=$(id); if(!e||e.options.length)return;
+    let h=''; for(let i=0;i<24;i++)h+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';
+    e.innerHTML=h;
+  });
+  chk('arEnabled',c.enabled);
+  set('arGrace',c.grace_min!==undefined?c.grace_min:10);
+  set('arPerChat',c.per_chat_min!==undefined?c.per_chat_min:180);
+  set('arMaxRun',c.max_per_run!==undefined?c.max_per_run:5);
+  set('arScan',c.scan_limit!==undefined?c.scan_limit:20);
+  chk('arOffHours',c.only_offhours);
+  set('arFrom',String(c.work_from!==undefined?c.work_from:9));
+  set('arTo',String(c.work_to!==undefined?c.work_to:21));
+  set('arSign',c.sign||'');
+  chk('arNotify',c.notify);
+  arToggleHours();
+  arBadge();
+}
+
+function arToggleHours(){
+  const r=$('arHoursRow');
+  if(r)r.classList.toggle('hidden',!($('arOffHours')||{}).checked);
+}
+
+function arBadge(){
+  const b=$('arS'); if(!b)return;
+  const on=($('arEnabled')||{}).checked;
+  const nOn=arRules.filter(r=>r.on).length;
+  b.textContent=on?('فعال · '+toFa(nOn)+' قاعده'):'خاموش';
+  b.className='cst '+(on?'on':'off');
+}
+
+function arSaveCfg(){arBadge();saveConn();}
+
+/** قواعد و تنظیمات را از سرور می‌گیرد */
+function arLoad(force){
+  if(arLoaded&&!force)return Promise.resolve();
+  return fetch('?ar_rules=1').then(r=>r.json()).then(d=>{
+    if(!d.ok)return;
+    arRules=d.rules||[];
+    arLoaded=true;
+    arApplyCfg(d.cfg||{});
+    arRenderRules();
+  }).catch(()=>{});
+}
+
+function arRenderRules(){
+  const box=$('arRules'); if(!box)return;
+  if(!arRules.length){box.innerHTML='<div style="color:#64748b;font-size:11px;padding:8px;text-align:center">قاعده‌ای نیست — «قاعدهٔ جدید» را بزنید</div>';arBadge();return;}
+  const sorted=arRules.map((r,i)=>({r,i})).sort((a,b)=>(a.r.priority||50)-(b.r.priority||50));
+  let h='';
+  sorted.forEach(({r,i})=>{
+    const isAlways=r.match==='always';
+    h+='<div style="background:#0f172a;border:1px solid '+(r.on?'#22c55e55':'#334155')+';border-radius:8px;padding:8px;margin-bottom:7px">';
+    h+='<div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">';
+    h+='<label class="switch" style="flex:0 0 auto"><input type="checkbox" '+(r.on?'checked':'')
+      +' onchange="arSetRule('+i+',\'on\',this.checked)"><span class="slider"></span></label>';
+    h+='<select onchange="arSetRule('+i+',\'match\',this.value)" style="flex:1;font-size:10.5px;padding:3px">';
+    for(const k in AR_MATCH)h+='<option value="'+k+'"'+(r.match===k?' selected':'')+'>'+AR_MATCH[k]+'</option>';
+    h+='</select>';
+    h+='<input type="number" value="'+(r.priority||50)+'" min="1" max="999" title="اولویت — کمتر یعنی زودتر بررسی می‌شود" '
+      +'onchange="arSetRule('+i+',\'priority\',this.value)" style="flex:0 0 52px;font-size:10.5px;padding:3px">';
+    h+='<button class="btn btn-red" onclick="arDelRule('+i+')" style="flex:0 0 auto;font-size:10px;padding:3px 7px">🗑</button>';
+    h+='</div>';
+    if(!isAlways){
+      h+='<textarea rows="2" placeholder="محرک‌ها — هر کدام در یک خط" oninput="arSetRule('+i+',\'triggers\',this.value)" '
+        +'style="width:100%;background:#111c31;border:1px solid #475569;color:#e2e8f0;padding:5px;border-radius:6px;font-size:11px;direction:rtl;margin-bottom:4px">'
+        +esc(r.triggers||'')+'</textarea>';
+    }else{
+      h+='<div style="font-size:10px;color:#fbbf24;margin-bottom:4px">این قاعده وقتی هیچ قاعدهٔ دیگری نخورد اجرا می‌شود — اولویتش را بالا (عدد بزرگ) بگذارید.</div>';
+    }
+    h+='<textarea rows="2" placeholder="پاسخ خودکار" oninput="arSetRule('+i+',\'reply\',this.value)" '
+      +'style="width:100%;background:#111c31;border:1px solid #a855f7;color:#e9d5ff;padding:5px;border-radius:6px;font-size:11px;direction:rtl">'
+      +esc(r.reply||'')+'</textarea>';
+    h+='<div style="display:flex;gap:6px;align-items:center;margin-top:4px;font-size:10px;color:#64748b">'
+      +'<span>سقف روزانه:</span><input type="number" value="'+(r.daily_max!==undefined?r.daily_max:50)+'" min="0" max="1000" '
+      +'onchange="arSetRule('+i+',\'daily_max\',this.value)" style="width:64px;font-size:10px;padding:2px">'
+      +'<span style="color:#475569">۰ = بی‌نهایت</span></div>';
+    h+='</div>';
+  });
+  box.innerHTML=h;
+  arBadge();
+}
+
+function arSetRule(i,field,val){
+  if(!arRules[i])return;
+  if(field==='priority'||field==='daily_max')val=parseInt(val)||0;
+  arRules[i][field]=val;
+  if(field==='on'||field==='match')arRenderRules();
+  else arBadge();
+}
+
+function arAddRule(){
+  arRules.push({id:'r'+Date.now().toString(36),on:true,match:'contains',
+                triggers:'',reply:'',priority:50,daily_max:50});
+  arRenderRules();
+}
+
+function arDelRule(i){
+  if(!arRules[i])return;
+  if(!confirm('این قاعده حذف شود؟'))return;
+  arRules.splice(i,1);
+  arRenderRules();
+}
+
+function arResetRules(){
+  if(!confirm('همهٔ قواعد به حالت پیش‌فرض برگردند؟ (تغییرات ذخیره‌نشده از بین می‌رود)'))return;
+  fetch('?ar_rules=1&defaults=1').then(r=>r.json()).then(d=>{
+    if(!d.ok){showToast('خطا',true);return;}
+    arRules=d.rules||[];
+    arRenderRules();
+    showToast('✓ پیش‌فرض‌ها بارگذاری شد — برای ثبت، «ذخیرهٔ قواعد» را بزنید');
+  }).catch(()=>showToast('خطا در ارتباط',true));
+}
+
+function arSaveRules(){
+  const bad=arRules.filter(r=>r.on&&!(r.reply||'').trim());
+  if(bad.length){showToast('قاعدهٔ فعال بدون پاسخ وجود دارد',true);return;}
+  const fd=new FormData();
+  fd.append('action','ar_save_rules');
+  fd.append('rules',JSON.stringify(arRules));
+  fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    showToast(d.ok?('✓ '+toFa(d.count)+' قاعده ذخیره شد'):('خطا: '+(d.error||'')),!d.ok);
+    if(d.ok)arSaveCfg();
+  }).catch(()=>showToast('خطا در ارتباط',true));
+}
+
+function arTest(){
+  const t=($('arTestText')||{}).value||'';
+  const box=$('arR');
+  if(!t.trim()){showToast('یک متن بنویسید',true);return;}
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ بررسی...</div>';
+  fetch('?ar_test=1&text='+encodeURIComponent(t)).then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px;font-size:11px;line-height:1.9">';
+    if(d.rule){
+      h+='<div style="color:#4ade80;font-weight:700">✅ قاعدهٔ «'+esc(d.rule)+'» می‌خورد</div>';
+      h+='<div style="background:#111c31;border-right:3px solid #a855f7;padding:6px 8px;border-radius:6px;margin-top:5px;color:#e9d5ff;white-space:pre-wrap">'+esc(d.reply)+'</div>';
+    }else{
+      h+='<div style="color:#fbbf24">⚠️ هیچ قاعده‌ای به این متن نخورد — پاسخی فرستاده نمی‌شود</div>';
+    }
+    h+='<div style="color:#64748b;font-size:10px;margin-top:5px">متن نرمال‌شده: '+esc(d.normalized||'')+'</div>';
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ '+esc(e.message)+'</div>';});
+}
+
+function arRun(dry){
+  const box=$('arR');
+  if(!dry&&!confirm('پاسخ خودکار همین حالا روی گفتگوهای واقعی اجرا شود؟\nپیام‌ها واقعاً ارسال می‌شوند.'))return;
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ '+(dry?'پیش‌نمایش':'اجرا')+'...</div>';
+  fetch('?ar_run=1'+(dry?'&dry=1':'&now=1')).then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px;background:#7f1d1d20;padding:6px 8px;border-radius:6px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px;font-size:11px;line-height:1.9">';
+    h+='<div style="color:#67e8f9;font-weight:700">🤖 '+(d.dry?'پیش‌نمایش — چیزی ارسال نشد':'اجرا شد')+'</div>';
+    h+='<div>بررسی‌شده: <b>'+toFa(d.checked||0)+'</b>'
+      +' · '+(d.dry?'ارسال می‌شد':'پاسخ داده شد')+': <b style="color:#4ade80">'+toFa(d.replied||0)+'</b>'
+      +' · رد شد: <b style="color:#94a3b8">'+toFa(d.skipped||0)+'</b>'
+      +((d.failed||0)?' · خطا: <b style="color:#f87171">'+toFa(d.failed)+'</b>':'')+'</div>';
+    if(d.skipped_all)h+='<div style="color:#fbbf24">⏸ '+esc(d.skipped_all)+'</div>';
+    (d.items||[]).slice(0,20).forEach(it=>{
+      h+='<div style="border-top:1px solid #1e293b;padding-top:4px;margin-top:4px">'
+        +'<div style="color:#e2e8f0">👤 '+esc(it.who||'')+' <span style="color:#64748b;font-size:10px">#'+toFa(it.chat_id||0)+'</span></div>'
+        +'<div style="color:#94a3b8;font-size:10px">💬 '+esc(it.text||'')+'</div>';
+      if(it.rule)h+='<div style="color:#a78bfa;font-size:10px">↳ «'+esc(it.rule)+'» — '+esc(it.status||'')+'</div>';
+      else if(it.skip)h+='<div style="color:#64748b;font-size:10px">⏭ '+esc(it.skip)+'</div>';
+      h+='</div>';
+    });
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ '+esc(e.message)+'</div>';});
+}
+
+function arShowLog(){
+  const box=$('arR');
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ ...</div>';
+  fetch('?ar_log=1').then(r=>r.json()).then(d=>{
+    if(!box)return;
+    const rows=d.log||[];
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px;font-size:11px;line-height:1.9">';
+    h+='<div style="color:#67e8f9;font-weight:700">📜 پاسخ‌های خودکار اخیر ('+toFa(rows.length)+')</div>';
+    if(d.last_run)h+='<div style="color:#64748b;font-size:10px">آخرین اجرا: '+esc(new Date(d.last_run*1000).toLocaleString('fa-IR'))+'</div>';
+    if(!rows.length)h+='<div style="color:#64748b;padding:8px 0">هنوز پاسخ خودکاری فرستاده نشده</div>';
+    rows.forEach(l=>{
+      h+='<div style="border-top:1px solid #1e293b;padding-top:4px;margin-top:4px">'
+        +'<div style="color:#e2e8f0">👤 '+esc(l.who||'')+' <span style="color:#64748b;font-size:10px">'
+        +esc(new Date((l.at||0)*1000).toLocaleString('fa-IR'))+'</span></div>'
+        +'<div style="color:#94a3b8;font-size:10px">💬 '+esc(l.in||'')+'</div>'
+        +'<div style="color:#a78bfa;font-size:10px">↳ '+esc(l.out||'')+' <span style="color:#475569">«'+esc(l.rule||'')+'»</span></div>'
+        +'</div>';
+    });
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ '+esc(e.message)+'</div>';});
 }
 
 /* =====================================================================
@@ -17388,14 +19129,15 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
 const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
-updN();if(b.token&&bslAllCats.length===0){loadBslCats();}}
+updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
+arApplyCfg(cn.autoreply||{});arLoad();}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
 // v8.06: Save AI settings
 fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:$('aiBaseUrl')?.value||'https://dashscope.aliyuncs.com/compatible-mode/v1',model:$('aiModel')?.value||'qwen-plus',temperature:parseFloat($('aiTemp')?.value)||0.1}));fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});

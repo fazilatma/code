@@ -47,6 +47,11 @@ suffix_progress.json
 suffix_result.json
 suffix.lock
 
+# v8.64: auto-reply rules, state and log (runtime)
+autoreply_rules.json
+autoreply_state.json
+autoreply_log.json
+
 # v8.62: runtime state for bulk edit / photo fix / nightly digest
 bulkedit_progress.json
 bulkedit_result.json
