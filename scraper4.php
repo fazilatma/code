@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.69';
+const APP_VERSION = '8.70';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1971,7 +1971,18 @@ function vc_load(): array {
     $d = vc_defaults();
     if (!is_file(VC_FILE)) return $d;
     $j = json_decode((string)@file_get_contents(VC_FILE), true);
-    return is_array($j) ? array_merge($d, $j) : $d;
+    if (!is_array($j)) return $d;
+    $c = array_merge($d, $j);
+    // v8.70: مسیر ذخیره‌شده از قبلِ تغییرِ نام فایل، مسیر اشتباه است.
+    // بدون این، به‌روزرسانی برای همیشه فایل قدیمی مخزن را می‌سنجید و
+    // «به‌روز هستید» می‌گفت، در حالی که نسخهٔ تازه هرگز نصب نمی‌شد.
+    $saved = trim((string)($c['path'] ?? ''));
+    $self  = basename(__FILE__);
+    if ($saved === '' || ($saved !== $self && basename($saved) !== $self
+        && preg_match('~^scraper[-_v0-9.]*\.php$~i', basename($saved)))) {
+        $c['path'] = $self;
+    }
+    return $c;
 }
 
 function vc_save(array $c): bool {
@@ -6484,6 +6495,42 @@ if (isset($_GET['recon_status'])) {
  *   &rebuild=woo|bsl              → بازسازی از روی عنوان‌های فعلی مقصد
  *   &clear=woo|bsl                → پاک کردن
  */
+/**
+ * v8.70: بررسی امنیت نصب.
+ * ?sec_check=1 — آیا فایل‌های داده از طریق وب قابل خواندن‌اند؟
+ * خودِ سرور به خودش درخواست می‌زند تا واقعیت را ببیند، نه حدس.
+ */
+if (isset($_GET['sec_check'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(60);
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host   = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
+    $dir    = rtrim(str_replace('\\', '/', dirname((string)($_SERVER['SCRIPT_NAME'] ?? '/'))), '/');
+    $base   = $scheme . '://' . $host . $dir . '/';
+    $checks = []; $exposed = 0;
+    foreach (['connections.json', 'profiles.json', 'category_learning.json',
+              'remote_map.json', 'autoreply_rules.json'] as $f) {
+        if (!is_file(__DIR__ . '/' . $f)) { $checks[] = ['file' => $f, 'state' => 'nofile']; continue; }
+        $ch = curl_init($base . $f);
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => 1, CURLOPT_TIMEOUT => 8,
+            CURLOPT_SSL_VERIFYPEER => 0, CURLOPT_SSL_VERIFYHOST => 0, CURLOPT_NOBODY => false]);
+        $body = (string)curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        // اگر ۲۰۰ برگردد و محتوایش JSON باشد یعنی واقعاً لو رفته
+        $isOpen = ($code >= 200 && $code < 300) && $body !== ''
+                  && (json_decode($body, true) !== null || $body[0] === '{' || $body[0] === '[');
+        if ($isOpen) $exposed++;
+        $checks[] = ['file' => $f, 'state' => $isOpen ? 'open' : 'protected', 'http' => $code];
+    }
+    echo json_encode(['ok' => true, 'base' => $base, 'exposed' => $exposed,
+        'checks' => $checks, 'htaccess' => is_file(__DIR__ . '/.htaccess'),
+        'advice' => $exposed > 0
+            ? 'فایل‌های داده از اینترنت قابل خواندن‌اند — فایل htaccess-sample.txt را با نام .htaccess کنار همین فایل بگذارید'
+            : 'فایل‌های داده از بیرون قابل خواندن نیستند'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['remote_map'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @set_time_limit(180);
@@ -7167,6 +7214,19 @@ if (isset($_GET['selftest'])) {
         foreach (explode("\n", $selfSrc) as $l) if (strlen($l) > 6000) return false;
         return true;
     })());
+    /* ---------- v8.70: مسیر به‌روزرسانی، نوار نسخه، بررسی امنیت ---------- */
+    $add('8.70', 'مسیر کهنهٔ به‌روزرسانی خودش اصلاح می‌شود',
+         strpos($selfSrc, "\$c['path'] = \$self;") !== false);
+    if (function_exists('vc_defaults')) {
+        $add('8.70', 'پیش‌فرض مسیر، نام واقعی فایل است',
+             (vc_defaults()['path'] ?? '') === basename(__FILE__));
+    }
+    $add('8.70', 'نوار نسخه بالای صفحه هست',
+         strpos($selfSrc, 'id="verBanner"') !== false);
+    $add('8.70', 'اندپوینت بررسی امنیت هست',
+         strpos($selfSrc, "_GET['sec" . "_check']") !== false
+         && strpos($selfSrc, 'function sec' . 'Check(') !== false);
+
     /* ---------- v8.69: آپدیت محتوای تازه روی محصولات موجود ---------- */
     $add('8.69', 'توابع تشخیص تغییر محتوا موجودند',
          function_exists('contentChanges') && function_exists('contentNorm')
@@ -14475,6 +14535,24 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
   <span id="profileStatus" class="profile-indicator unsaved">جدید</span>
 </h1>
 
+<!-- v8.70: نوار «این فایل چه دارد».
+     وقتی هاست فایل را حذف می‌کند و نسخهٔ قدیمی دوباره آپلود می‌شود، از
+     ظاهر برنامه معلوم نیست کدام نسخه بالاست و کاربر دنبال قابلیتی می‌گردد
+     که در فایلِ روی هاست اصلاً وجود ندارد. این نوار همان لحظه می‌گوید. -->
+<div id="verBanner" style="background:#0f172a;border:1px solid #334155;border-right:4px solid #22c55e;
+     border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:11.5px;line-height:1.9;color:#cbd5e1">
+  <b style="color:#4ade80">نسخهٔ فایلِ روی این هاست: v<?=APP_VERSION?></b>
+  <span style="color:#64748b">·</span>
+  <span style="color:#94a3b8">این نسخه شامل:</span>
+  <span style="color:#86efac">🎨 تنوع‌ها</span> ·
+  <span style="color:#86efac">🖼 گالری چندعکسی</span> ·
+  <span style="color:#86efac">🖥 پنل انتخاب بیرونی</span> ·
+  <span style="color:#86efac">↩ پروفایل پیش‌فرض</span> ·
+  <span style="color:#86efac">🔄 آپدیت محتوای تکراری‌ها</span>
+  <button class="btn btn-gray" onclick="this.parentNode.style.display='none'"
+          style="float:left;font-size:10px;padding:2px 8px">بستن</button>
+</div>
+
 <div class="main-tabs" id="mainTabs">
     <button class="main-tab active" data-tab="start" onclick="switchMainTab('start')">
         <span class="t-icon">🎯</span>
@@ -14842,6 +14920,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 
 <div class="cact">
 <button class="btn btn-gray" onclick="genQueueStatus()" style="flex:1">🔎 وضعیت صف‌ها</button>
+<button class="btn btn-orange" onclick="secCheck()" style="flex:1">🔒 بررسی امنیت</button>
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
 </div>
 <div id="genR" style="margin-top:8px"></div>
@@ -18183,6 +18262,16 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.70', t:'رفع باگ به‌روزرسانی بعد از تغییر نام فایل، و ابزار تشخیص نصب', items:[
+    '🐞 باگ مهم: بعد از تغییر نام فایل به scraper4.php، تنظیمات ذخیره‌شدهٔ قبلی هنوز نام قدیمی را نگه داشته بود',
+    'یعنی «بررسی نسخه» فایل قدیمی مخزن را می‌سنجید و همیشه می‌گفت «به‌روز هستید» — نسخهٔ تازه هرگز نصب نمی‌شد',
+    'حالا اگر مسیر ذخیره‌شده با نام واقعی فایل نخواند، خودش اصلاح می‌شود (نام‌های سفارشی دست‌نخورده می‌مانند)',
+    '📋 نوار «این فایل چه دارد» بالای صفحه: نسخه و فهرست قابلیت‌های همین فایل',
+    'اگر هاست فایل را حذف کند و نسخهٔ قدیمی برگردد، از همین نوار می‌فهمید — نه از نبودِ یک دکمه',
+    '🔒 دکمهٔ «بررسی امنیت» در تنظیمات عمومی',
+    'سرور به خودش درخواست می‌زند و می‌گوید آیا connections.json و بقیه از اینترنت قابل خواندن‌اند یا نه',
+    'فایل نمونهٔ htaccess-sample.txt به مخزن اضافه شد — با نام .htaccess کنار فایل بگذارید'
+  ]},
   {v:'8.69', t:'محصول موجود با محتوای تازه آپدیت می‌شود، نه اینکه «تکراری» رد شود', items:[
     '🔄 تا اینجا تصمیم «تکراری است» فقط قیمت و موجودی را می‌سنجید',
     'یعنی اگر بعد از استخراج تازه توضیحات کامل‌تر شده بود، گالری چند عکس گرفته بود یا تنوع اضافه شده بود، آن اطلاعات هیچ‌وقت به مقصد نمی‌رسید',
@@ -19373,6 +19462,36 @@ function updateCatWordsBadge(){
   catLearnWordsCfg=n;
   el.textContent=toFa(n)+' کلمه';
   el.className='cst '+(n>1?'on':'off');
+}
+
+/* v8.70: بررسی امنیت نصب — آیا فایل‌های داده از وب خوانده می‌شوند؟ */
+function secCheck(){
+  const box=$('genR')||$('watchdogR');
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ بررسی دسترسی به فایل‌های داده...</div>';
+  fetch('?sec_check=1').then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    const bad=(d.exposed||0)>0;
+    let h='<div style="background:#0f172a;border:1px solid '+(bad?'#ef4444':'#22c55e')
+      +';border-radius:8px;padding:9px;font-size:11px;line-height:1.9">';
+    h+='<div style="color:'+(bad?'#fca5a5':'#4ade80')+';font-weight:700">'
+      +(bad?('🔴 '+toFa(d.exposed)+' فایل داده از اینترنت قابل خواندن است'):'🟢 فایل‌های داده محافظت شده‌اند')+'</div>';
+    (d.checks||[]).forEach(c=>{
+      const ico=c.state==='open'?'🔴':(c.state==='protected'?'🟢':'⚪');
+      const txt=c.state==='open'?'قابل خواندن از وب!':(c.state==='protected'?'محافظت‌شده':'وجود ندارد');
+      h+='<div style="color:'+(c.state==='open'?'#fca5a5':'#94a3b8')+'">'+ico+' '+esc(c.file)+' — '+txt+'</div>';
+    });
+    h+='<div style="color:#94a3b8;margin-top:5px">'+esc(d.advice||'')+'</div>';
+    if(bad){
+      h+='<div style="color:#fbbf24;font-size:10.5px;margin-top:5px;line-height:1.8">'
+        +'⚠️ <b>connections.json</b> شامل توکن باسلام و کلید ووکامرس شماست. '
+        +'فایل <code>htaccess-sample.txt</code> را از مخزن بردارید، نامش را به <code>.htaccess</code> '
+        +'تغییر دهید و کنار همین فایل آپلود کنید.</div>';
+    }
+    h+='<div style="color:#475569;font-size:10px;margin-top:4px">htaccess موجود: '+(d.htaccess?'بله':'خیر')+'</div>';
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ '+esc(e.message)+'</div>';});
 }
 
 function genQueueStatus(){

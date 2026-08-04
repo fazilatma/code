@@ -1,0 +1,55 @@
+# ─────────────────────────────────────────────────────────────
+#  نمونهٔ .htaccess برای پوشه‌ای که scraper4.php در آن است
+#
+#  این فایل را با نام دقیق  .htaccess  (با نقطهٔ ابتدا) کنار
+#  scraper4.php آپلود کنید.
+#
+#  دو کار می‌کند:
+#   ۱) فایل‌های دادهٔ JSON را از دسترس مرورگر خارج می‌کند.
+#      بدون این، هرکسی می‌تواند connections.json را باز کند و
+#      توکن باسلام و کلید ووکامرس شما را بردارد.
+#   ۲) کل پوشه را پشت رمز می‌برد (بخش دوم، اختیاری ولی توصیه‌شده).
+# ─────────────────────────────────────────────────────────────
+
+# ── ۱) فایل‌های داده هرگز از طریق وب خوانده نشوند ──────────────
+<FilesMatch "\.(json|lock|log|bak|sql)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# پوشهٔ پشتیبان‌ها هم همین‌طور
+<FilesMatch "^(profiles|connections|sync_state|category_learning|remote_map|autoreply_rules|autoreply_state|autoreply_log)\.json$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+</FilesMatch>
+
+# فهرست‌شدن محتویات پوشه غیرفعال شود
+Options -Indexes
+
+# ── ۲) رمز گذاشتن روی کل پوشه (اختیاری، توصیه‌شده) ────────────
+#  برای فعال کردن:
+#   الف) در سی‌پنل → Directory Privacy یک کاربر بسازید،
+#        یا با دستور زیر روی SSH:
+#           htpasswd -c /home/USERNAME/.htpasswd myuser
+#   ب) مسیر زیر را به مسیر واقعی خودتان تغییر دهید
+#   ج) چهار خط زیر را از حالت کامنت خارج کنید (# را بردارید)
+#
+# AuthType Basic
+# AuthName "Panel"
+# AuthUserFile /home/USERNAME/.htpasswd
+# Require valid-user
+
+# ── نکته دربارهٔ کران‌جاب ──────────────────────────────────────
+#  اگر بخش ۲ را فعال کنید، کران‌جاب هم باید رمز را بفرستد:
+#     */5 * * * * curl -s -u myuser:mypass "https://example.com/scraper4.php?cron_run" > /dev/null
+#
+#  یا این‌طور فقط کران را از رمز مستثنا کنید (کمی امن‌تر از باز گذاشتن کامل):
+# <If "%{QUERY_STRING} =~ /cron_run/">
+#     Require all granted
+# </If>
