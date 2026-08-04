@@ -44,9 +44,12 @@ const GALLERY_MAX_IMAGES = 30;
 const AUTOREPLY_RULES_FILE = __DIR__ . '/autoreply_rules.json';       // v8.64
 const AUTOREPLY_STATE_FILE = __DIR__ . '/autoreply_state.json';       // v8.64
 const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
+// v8.65: دفترچهٔ «کلید محصول ↔ شناسهٔ مقصد». تطبیق با عنوان شکننده است؛
+// محصولی که در مقصد تغییر نام بدهد دیگر پیدا نمی‌شود. شناسه هرگز عوض نمی‌شود.
+const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.64';
+const APP_VERSION = '8.65';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -5976,6 +5979,73 @@ if (isset($_GET['recon_status'])) {
  *   ?ar_test=1&text=...           → کدام قاعده به این متن می‌خورد
  *   ?ar_log=1                     → آخرین پاسخ‌های خودکار
  * ===================================================================== */
+/**
+ * v8.65: دفترچهٔ شناسهٔ مقصد.
+ *   ?remote_map=1                 → خلاصه
+ *   &rebuild=woo|bsl              → بازسازی از روی عنوان‌های فعلی مقصد
+ *   &clear=woo|bsl                → پاک کردن
+ */
+if (isset($_GET['remote_map'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(180);
+    $clr = (string)($_GET['clear'] ?? '');
+    if ($clr === 'woo' || $clr === 'bsl') {
+        $m = remoteMapLoad(); $m[$clr] = []; remoteMapSave($m);
+        echo json_encode(['ok' => true, 'cleared' => $clr], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $rb = (string)($_GET['rebuild'] ?? '');
+    if ($rb === 'woo' || $rb === 'bsl') {
+        // یک بار با عنوان تطبیق می‌دهیم و شناسه‌ها را ثبت می‌کنیم، تا از این
+        // به بعد تغییر نام محصول دیگر تطبیق را خراب نکند.
+        $cnR = loadConnections();
+        $st = null;
+        $exp = reconExpected($rb, true, $st);
+        $byTitleKey = [];
+        foreach (loadProfiles() as $pk => $pv) {
+            foreach (profileOrderedProducts($pv) as $pp) {
+                $t = reconNormTitle((string)($pp['title'] ?? ''));
+                $kk = trim((string)($pp['key'] ?? ''));
+                if ($t !== '' && $kk !== '' && !isset($byTitleKey[$t])) $byTitleKey[$t] = ['key' => $kk, 'title' => $pp['title'] ?? ''];
+            }
+        }
+        if ($rb === 'woo') {
+            $w = $cnR['woocommerce'] ?? [];
+            if (empty($w['store_url'])) { echo json_encode(['ok' => false, 'error' => 'تنظیمات ووکامرس ناقص'], JSON_UNESCAPED_UNICODE); exit; }
+            $remote = reconFetchWoo($w);
+        } else {
+            $tk = (string)($cnR['basalam']['token'] ?? ''); $vid = (int)($cnR['basalam']['vendor_id'] ?? 0);
+            if ($tk === '' || $vid <= 0) { echo json_encode(['ok' => false, 'error' => 'تنظیمات باسلام ناقص'], JSON_UNESCAPED_UNICODE); exit; }
+            $remote = reconFetchBsl($tk, $vid);
+        }
+        $rows = [];
+        foreach ($remote as $r) {
+            $t = reconNormTitle((string)$r['title']);
+            if (!isset($byTitleKey[$t])) continue;
+            $rows[] = ['key' => $byTitleKey[$t]['key'], 'remote_id' => (int)$r['id'],
+                       'title' => (string)$r['title']];
+        }
+        $n = remoteMapRecord($rb, $rows);
+        echo json_encode(['ok' => true, 'rebuilt' => $rb, 'recorded' => $n,
+            'remote_seen' => count($remote), 'profile_titles' => count($byTitleKey),
+            'note' => $n . ' شناسه ثبت شد — از این به بعد تغییر نام محصول تطبیق را خراب نمی‌کند'],
+            JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $m = remoteMapLoad();
+    $sample = [];
+    foreach (['woo', 'bsl'] as $t) {
+        $i = 0;
+        foreach ($m[$t] as $k => $v) {
+            if ($i++ >= 5) break;
+            $sample[$t][] = ['key' => mb_substr($k, 0, 10), 'id' => (int)($v['id'] ?? 0),
+                             'title' => (string)($v['title'] ?? '')];
+        }
+    }
+    echo json_encode(['ok' => true, 'woo' => count($m['woo']), 'bsl' => count($m['bsl']),
+        'sample' => $sample], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['ar_rules'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $cnAR = loadConnections();
@@ -6467,6 +6537,42 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "'profile_stats'") !== false);
     $add('8.64', 'محصول بی‌قیمت مبدأ مغایرت شمرده نمی‌شود',
          strpos($selfSrc, "\$out['no_src_price']") !== false);
+
+    /* ---------- v8.65: دفترچهٔ شناسهٔ مقصد ---------- */
+    $add('8.65', 'توابع دفترچهٔ شناسه موجودند',
+         function_exists('remoteMapLoad') && function_exists('remoteMapRecord')
+         && function_exists('remoteMapById'));
+    $add('8.65', 'فایل دفترچه تعریف شده', defined('REMOTEMAP_FILE'));
+    if (function_exists('remoteMapRecord') && function_exists('remoteMapById')) {
+        // روی فایل واقعی می‌نویسیم و بعد برش می‌گردانیم تا وضعیت کاربر خراب نشود
+        $bak = is_file(REMOTEMAP_FILE) ? @file_get_contents(REMOTEMAP_FILE) : null;
+        $n = remoteMapRecord('woo', [
+            ['key' => 'selftest_k1', 'remote_id' => 991, 'title' => 'آزمون یک'],
+            ['key' => 'selftest_k2', 'remote_id' => 992, 'title' => 'آزمون دو'],
+            ['key' => '',            'remote_id' => 993],           // بدون کلید — نباید ثبت شود
+            ['key' => 'selftest_k4', 'remote_id' => 0],             // بدون شناسه — نباید ثبت شود
+        ], 'p_test');
+        $add('8.65', 'فقط ردیف‌های معتبر ثبت می‌شوند', $n === 2);
+        $byId = remoteMapById('woo');
+        $add('8.65', 'نگاشت معکوس شناسه به کلید درست است',
+             ($byId[991] ?? '') === 'selftest_k1' && ($byId[992] ?? '') === 'selftest_k2');
+        $add('8.65', 'مقصد اشتباه چیزی ثبت نمی‌کند',
+             remoteMapRecord('bogus', [['key' => 'x', 'remote_id' => 1]]) === 0);
+        if ($bak !== null) @file_put_contents(REMOTEMAP_FILE, $bak, LOCK_EX);
+        else @unlink(REMOTEMAP_FILE);
+    }
+    $add('8.65', 'هر سه فرستنده شناسه را ثبت می‌کنند',
+         substr_count($selfSrc, 'remoteMap' . 'Record(') >= 4);
+    $add('8.65', 'مغایرت‌گیری اول با شناسه تطبیق می‌دهد',
+         strpos($selfSrc, "\$out['matched_by_id']") !== false);
+    $add('8.65', 'آمار پسوند هم از شناسه کمک می‌گیرد',
+         strpos($selfSrc, 'sfxIdMap') !== false);
+    $add('8.65', 'عکس‌دار کردن از شناسه کمک می‌گیرد',
+         strpos($selfSrc, 'pfIdMap') !== false);
+    $add('8.65', 'عکس‌دار کردن کل گالری را می‌فرستد',
+         strpos($selfSrc, 'wooGallery' . 'Payload($w, $imgsHit') !== false);
+    $add('8.65', 'اندپوینت بازسازی دفترچه هست',
+         strpos($selfSrc, "_GET['remote" . "_map']") !== false);
 
     // v8.62: ویرایش مستقیم محصولات، عکس‌دار کردن، گزارش شبانه
     $add('8.62', 'موتور ویرایش گروهی', function_exists('bulkEditRun') && function_exists('bulkEditMsg'));
@@ -8075,6 +8181,71 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
  * لاتین، حروف عربی به فارسی، نیم‌فاصله و فاصله‌های نامرئی به فاصلهٔ
  * ساده، و علائم نگارشی حذف می‌شوند.
  */
+/* =====================================================================
+ *  v8.65: دفترچهٔ شناسهٔ مقصد
+ *
+ *  تا اینجا مغایرت‌گیری، آمار پسوند و عکس‌دار کردن، محصول را با «عنوان»
+ *  در مقصد پیدا می‌کردند. مشکل این است که عنوان تغییر می‌کند: یک ویرایش
+ *  دستی در پنل ووکامرس، یا پسوندی که بعداً عوض شود، و آن محصول ناگهان
+ *  «در هیچ پروفایلی نیست» گزارش می‌شود. اگر کاربر روی چنین گزارشی حذف
+ *  بزند، محصول سالم پاک می‌شود.
+ *
+ *  هر بار که چیزی با موفقیت ارسال یا آپدیت می‌شود، شناسهٔ مقصد کنار
+ *  کلید محصول ثبت می‌شود. کلید محصول از روی آدرس صفحهٔ مبدأ ساخته شده و
+ *  با تغییر عنوان عوض نمی‌شود. از آن به بعد تطبیق اول با شناسه انجام
+ *  می‌شود و عنوان فقط راه دوم است.
+ * ===================================================================== */
+
+function remoteMapLoad(): array {
+    if (!is_file(REMOTEMAP_FILE)) return ['woo' => [], 'bsl' => []];
+    $d = json_decode((string)@file_get_contents(REMOTEMAP_FILE), true);
+    if (!is_array($d)) return ['woo' => [], 'bsl' => []];
+    $d['woo'] = is_array($d['woo'] ?? null) ? $d['woo'] : [];
+    $d['bsl'] = is_array($d['bsl'] ?? null) ? $d['bsl'] : [];
+    return $d;
+}
+
+function remoteMapSave(array $m): bool {
+    return @file_put_contents(REMOTEMAP_FILE, json_encode($m, JSON_UNESCAPED_UNICODE), LOCK_EX) !== false;
+}
+
+/**
+ * فهرست «کلید → شناسه» را برای یک مقصد ثبت می‌کند.
+ * $rows همان sent_details/updated_details است: هر ردیف key و remote_id دارد.
+ */
+function remoteMapRecord(string $target, array $rows, string $profileKey = ''): int {
+    if ($target !== 'woo' && $target !== 'bsl') return 0;
+    $add = [];
+    foreach ($rows as $r) {
+        if (!is_array($r)) continue;
+        $k = trim((string)($r['key'] ?? ''));
+        $id = (int)($r['remote_id'] ?? 0);
+        if ($k === '' || $id <= 0) continue;
+        $add[$k] = ['id' => $id, 'title' => mb_substr((string)($r['title'] ?? ''), 0, 120),
+                    'profile' => $profileKey, 'at' => time()];
+    }
+    if (!$add) return 0;
+    $m = remoteMapLoad();
+    foreach ($add as $k => $v) $m[$target][$k] = $v;
+    // سقف منطقی تا فایل بی‌نهایت رشد نکند
+    if (count($m[$target]) > 20000) {
+        uasort($m[$target], fn($a, $b) => ((int)($b['at'] ?? 0)) <=> ((int)($a['at'] ?? 0)));
+        $m[$target] = array_slice($m[$target], 0, 20000, true);
+    }
+    remoteMapSave($m);
+    return count($add);
+}
+
+/** نگاشت معکوس: شناسهٔ مقصد → کلید محصول */
+function remoteMapById(string $target): array {
+    $out = [];
+    foreach ((remoteMapLoad()[$target] ?? []) as $k => $v) {
+        $id = (int)($v['id'] ?? 0);
+        if ($id > 0) $out[$id] = $k;
+    }
+    return $out;
+}
+
 function reconNormTitle(string $t): string {
     $t = html_entity_decode($t, ENT_QUOTES | ENT_HTML5, 'UTF-8');
     $t = persianToEnglish($t);
@@ -8316,8 +8487,9 @@ function photoFixProgress(array $patch): void {
 }
 
 /** نگاشت «عنوان نرمال‌شده → تصویر» از روی همهٔ پروفایل‌ها */
-function photoFixIndex(?string $onlyProfile = null): array {
+function photoFixIndex(?string $onlyProfile = null, ?array &$byKey = null): array {
     $idx = [];
+    $byKey = [];   // v8.65: همان تصویرها، این بار با کلید محصول
     foreach (loadProfiles() as $key => $p) {
         if ($onlyProfile !== null && $onlyProfile !== '' && $key !== $onlyProfile) continue;
         $suffix = trim((string)($p['titleSuffix'] ?? ''));
@@ -8325,11 +8497,15 @@ function photoFixIndex(?string $onlyProfile = null): array {
             if (!is_array($prod)) continue;
             $img = trim((string)($prod['image'] ?? ''));
             if ($img === '') continue;
+            $rec = ['image' => $img, 'profile' => $p['name'] ?? $key,
+                    'images' => productImageList($prod)];
+            $pk = trim((string)($prod['key'] ?? ''));
+            if ($pk !== '' && !isset($byKey[$pk])) $byKey[$pk] = $rec;
             $t = trim((string)($prod['title'] ?? $prod['name'] ?? ''));
             if ($t === '') continue;
             foreach ([$t, ($suffix !== '' ? trim($t . ' ' . $suffix) : $t)] as $variant) {
                 $k = bslNormalizeTitle($variant);
-                if ($k !== '' && !isset($idx[$k])) $idx[$k] = ['image' => $img, 'profile' => $p['name'] ?? $key];
+                if ($k !== '' && !isset($idx[$k])) $idx[$k] = $rec;
             }
         }
     }
@@ -8346,10 +8522,15 @@ function photoFixRun(array $cn, bool $dry = false, string $onlyProfile = '', int
             'failed' => 0, 'unmatched' => 0, 'dry' => $dry, 'items' => [], 'started_at' => time()];
     if (empty($w['store_url'])) { $out['ok'] = false; $out['error'] = 'تنظیمات ووکامرس ناقص'; return $out; }
 
-    $idx = photoFixIndex($onlyProfile !== '' ? $onlyProfile : null);
+    $pfByKey = null;
+    $idx = photoFixIndex($onlyProfile !== '' ? $onlyProfile : null, $pfByKey);
     $out['index_size'] = count($idx);
     if (empty($idx)) { $out['ok'] = false; $out['error'] = 'در پروفایل‌ها تصویری پیدا نشد'; return $out; }
-    photoFixProgress(['log_add' => ['🗂 ' . count($idx) . ' تصویر از پروفایل‌ها فهرست شد']]);
+    // v8.65: تطبیق با شناسهٔ ثبت‌شده، برای محصولی که در ووکامرس تغییر نام داده
+    $pfIdMap = remoteMapById('woo');
+    $out['by_id'] = 0;
+    photoFixProgress(['log_add' => ['🗂 ' . count($idx) . ' تصویر از پروفایل‌ها فهرست شد'
+        . (count($pfIdMap) ? ' · ' . count($pfIdMap) . ' شناسهٔ ثبت‌شده' : '')]]);
 
     $page = 1;
     while ($page <= 100 && $out['scanned'] < $maxItems) {
@@ -8364,6 +8545,11 @@ function photoFixRun(array $cn, bool $dry = false, string $onlyProfile = '', int
             $pid = (int)($p['id'] ?? 0);
             $name = trim((string)($p['name'] ?? ''));
             $hit = $idx[bslNormalizeTitle($name)] ?? null;
+            if ($hit === null && $pid > 0 && isset($pfIdMap[$pid])
+                && isset($pfByKey[$pfIdMap[$pid]])) {
+                $hit = $pfByKey[$pfIdMap[$pid]];   // عنوان عوض شده، شناسه نه
+                $out['by_id']++;
+            }
             if ($hit === null) {
                 $out['unmatched']++;
                 if (count($out['items']) < 200) $out['items'][] = ['id' => $pid, 'title' => mb_substr($name, 0, 60), 'status' => 'در پروفایل‌ها نبود'];
@@ -8377,7 +8563,9 @@ function photoFixRun(array $cn, bool $dry = false, string $onlyProfile = '', int
             }
             $note = null;
             $GLOBALS['_currentProductLink'] = '';
-            $payload = wooImagePayload($w, (string)$hit['image'], $note);
+            $imgsHit = !empty($hit['images']) && is_array($hit['images'])
+                     ? $hit['images'] : [(string)$hit['image']];
+            $payload = wooGalleryPayload($w, $imgsHit, $note);
             if (empty($payload)) {
                 $out['failed']++;
                 if (count($out['items']) < 200) $out['items'][] = ['id' => $pid, 'title' => mb_substr($name, 0, 60), 'status' => 'تصویر آماده نشد: ' . (string)$note];
@@ -8702,11 +8890,29 @@ function suffixReport(array $cn, string $target): array {
 
     suffixProgress(['log_add' => ['⚖️ تفکیک بر اساس پسوند...'], 'remote' => count($rows)]);
 
-    $out = []; $claimed = [];
+    // v8.65: محصولی که در مقصد تغییر نام داده پسوند پروفایل را ندارد و در
+    // آمار گم می‌شد. شناسهٔ ثبت‌شده می‌گوید مال کدام پروفایل است.
+    $sfxIdMap = remoteMapById($target === 'bsl' ? 'bsl' : 'woo');
+    $sfxKeyOwner = [];
+    foreach (loadProfiles() as $pk => $pv) {
+        foreach (profileOrderedProducts($pv, null, false) as $pp) {
+            $kk = trim((string)($pp['key'] ?? ''));
+            if ($kk !== '') $sfxKeyOwner[$kk] = $pk;
+        }
+    }
+    $out = []; $claimed = []; $byIdTotal = 0;
     foreach ($wanted as $p) {
         $c = ['approved' => 0, 'rejected' => 0, 'pending' => 0, 'inactive' => 0, 'archived' => 0];
         foreach ($rows as $i => $r) {
-            if (!suffixMatches($r['title'], $p['suffix'])) continue;
+            $ok = suffixMatches($r['title'], $p['suffix']);
+            if (!$ok) {
+                $rid = (int)($r['id'] ?? 0);
+                if ($rid > 0 && isset($sfxIdMap[$rid])
+                    && ($sfxKeyOwner[$sfxIdMap[$rid]] ?? '') === $p['key']) {
+                    $ok = true; $byIdTotal++;
+                }
+            }
+            if (!$ok) continue;
             $claimed[$i] = true;
             if ($target === 'bsl') {
                 $st = (int)($r['status'] ?? 0);
@@ -8732,8 +8938,10 @@ function suffixReport(array $cn, string $target): array {
         suffixProgress(['log_add' => ['• ' . $p['name'] . ' («' . $p['suffix'] . '»): ' . $total . ' محصول']]);
     }
     $unmatched = count($rows) - count($claimed);
+    if ($byIdTotal > 0) suffixProgress(['log_add' => ['🔗 ' . $byIdTotal
+        . ' محصول با شناسهٔ ثبت‌شده به پروفایلش وصل شد (پسوند در عنوانشان نبود)']]);
     return ['ok' => true, 'target' => $target, 'remote_total' => count($rows),
-            'unmatched' => $unmatched, 'profiles' => $out];
+            'unmatched' => $unmatched, 'matched_by_id' => $byIdTotal, 'profiles' => $out];
 }
 
 /** متن گزارش برای پیام‌رسان‌ها */
@@ -8802,7 +9010,7 @@ function reconProgressRead(): array {
  */
 function reconExpected(string $target, bool $allProfiles = false, ?array &$stats = null): array {
     $out = [];
-    $stats = ['profiles' => [], 'used' => 0, 'skipped' => 0, 'no_products' => 0];
+    $stats = ['profiles' => [], 'used' => 0, 'skipped' => 0, 'no_products' => 0, 'by_key' => []];
     foreach (loadProfiles() as $key => $profile) {
         $sc = $profile['syncConfig'] ?? [];
         $name = (string)($profile['name'] ?? $key);
@@ -8815,6 +9023,12 @@ function reconExpected(string $target, bool $allProfiles = false, ?array &$stats
         }
         $n = 0; $noPrice = 0;
         foreach (profileOrderedProducts($profile) as $p) {
+            // v8.65: همان رکورد، این بار با کلید محصول — برای تطبیق با شناسهٔ مقصد
+            $pk = trim((string)($p['key'] ?? ''));
+            if ($pk !== '' && !isset($stats['by_key'][$pk])) {
+                $stats['by_key'][$pk] = ['price' => (int)($p['final_price'] ?? 0),
+                                         'profile' => $name, 'key' => $pk];
+            }
             $title = reconNormTitle((string)($p['title'] ?? ''));
             if ($title === '') continue;
             $price = (int)($p['final_price'] ?? 0);
@@ -8960,15 +9174,27 @@ function reconRun(array $cn, string $target, bool $apply = false,
     // دسته‌بندی
     // v8.64: مقایسه هم گزارش زنده دارد — هر ۲۵ محصول یک به‌روزرسانی، و
     // چند نمونهٔ واقعی از هر دسته، تا کاربر ببیند دقیقاً چه اتفاقی می‌افتد.
+    // v8.65: اول با شناسهٔ ثبت‌شده تطبیق بده، بعد با عنوان.
+    // محصولی که در مقصد تغییر نام داده، با عنوان پیدا نمی‌شود ولی شناسه‌اش
+    // همان است — بدون این، «اضافی» گزارش می‌شد و با حذف از بین می‌رفت.
+    $idMap  = remoteMapById($target);
+    $byKey  = is_array($pstats['by_key'] ?? null) ? $pstats['by_key'] : [];
+    $byIdN  = 0;
     $cmpN = 0; $sampleExtra = []; $sampleDiff = []; $noPriceN = 0;
     foreach ($remote as $r) {
         $cmpN++;
+        $rid = (int)($r['id'] ?? 0);
         $key = reconNormTitle($r['title']);
-        if (!isset($expected[$key])) {
+        $hit = $expected[$key] ?? null;
+        if ($hit === null && $rid > 0 && isset($idMap[$rid]) && isset($byKey[$idMap[$rid]])) {
+            $hit = $byKey[$idMap[$rid]];
+            $byIdN++;
+        }
+        if ($hit === null) {
             $out['extra'][] = ['id' => $r['id'], 'title' => $r['title'], 'price' => $r['price']];
             if (count($sampleExtra) < 5) $sampleExtra[] = '  🗑 ' . mb_substr($r['title'], 0, 45);
         } else {
-            $want = (int)$expected[$key]['price'];
+            $want = (int)$hit['price'];
             $have = $target === 'bsl' ? (int)($r['price_toman'] ?? 0) : (int)$r['price'];
             if ($want <= 0) {
                 // قیمت مبدأ صفر است — مغایرت حساب نمی‌شود، وگرنه همه‌چیز صفر می‌شد
@@ -8979,7 +9205,7 @@ function reconRun(array $cn, string $target, bool $apply = false,
                 }
             } elseif ($have !== $want) {
                 $out['price_diff'][] = ['id' => $r['id'], 'title' => $r['title'],
-                    'from' => $have, 'to' => $want, 'profile' => $expected[$key]['profile']];
+                    'from' => $have, 'to' => $want, 'profile' => (string)($hit['profile'] ?? '')];
                 if (count($sampleDiff) < 5) $sampleDiff[] = '  💰 ' . mb_substr($r['title'], 0, 38)
                     . ' — ' . number_format($have) . ' → ' . number_format($want);
             } else {
@@ -9001,10 +9227,14 @@ function reconRun(array $cn, string $target, bool $apply = false,
         }
     }
     $out['no_src_price'] = $noPriceN;
+    $out['matched_by_id'] = $byIdN;
+    $out['id_map_size'] = count($idMap);
 
     $doneLog = ['📊 اضافی: ' . count($out['extra'])
         . ' · مغایرت قیمت: ' . count($out['price_diff'])
         . ' · یکسان: ' . $out['matched']];
+    if ($byIdN > 0) $doneLog[] = '🔗 ' . $byIdN . ' محصول با شناسهٔ ثبت‌شده تطبیق خورد '
+        . '(عنوانشان در مقصد عوض شده بود)';
     if ($noPriceN > 0) $doneLog[] = 'ℹ️ ' . $noPriceN . ' محصول در مبدأ قیمت ندارد — قیمتشان مقایسه نشد';
     if ($sampleDiff)  { $doneLog[] = 'نمونهٔ مغایرت قیمت:';  foreach ($sampleDiff as $l) $doneLog[] = $l; }
     if ($sampleExtra) { $doneLog[] = 'نمونهٔ «در هیچ پروفایلی نیست»:'; foreach ($sampleExtra as $l) $doneLog[] = $l; }
@@ -9892,11 +10122,13 @@ $bslDelayMs=max(0,(int)($cn['basalam']['delay_ms']??500));
 // دستهٔ ووکامرس خودش را داشته باشد.
 $wooTitleSuffix='';
 $wooQueueCatId=-1;
+$wooQueueProfileKey='';   // v8.65: برای ثبت در دفترچهٔ شناسه‌ها
 $wooQueue=wooReadQueue();
 foreach($wooQueue['entries'] as $qe){
 if(($qe['status']??'')!=='running')continue;
 if(!empty($qe['config']['title_suffix']))$wooTitleSuffix=trim($qe['config']['title_suffix']);
 if(isset($qe['config']['category_id']))$wooQueueCatId=(int)$qe['config']['category_id'];
+$wooQueueProfileKey=(string)($qe['profile_key']??'');
 break;
 }
 if($wooTitleSuffix===''){$wooTitleSuffix=trim($cn['basalam']['title_suffix']??'');}
@@ -10065,6 +10297,8 @@ usleep(max(100000,$bslDelayMs*1000));
 }
 
 $finalLog='پایان: '.$sent.' جدید, '.$updated.' آپدیت, '.$skipped.' تکراری, '.$fail.' خطا';
+// v8.65: شناسهٔ مقصد را کنار کلید محصول نگه دار تا تطبیق بعدی به عنوان وابسته نباشد
+remoteMapRecord('woo',array_merge($wooSentList,$wooUpdatedList),(string)($wooQueueProfileKey??''));
 writeProgress(WOO_PROGRESS_FILE,['running'=>false,'done'=>true,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'current'=>$total,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>[$finalLog],'total_log_count'=>count($wooLog)+1,'sent_details'=>$wooSentList,'updated_details'=>$wooUpdatedList,'skipped_details'=>$wooSkippedList,'failed_details'=>$wooFailedList]);
 
 $queue=wooReadQueue();
@@ -12119,6 +12353,7 @@ bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'','Phase 3: '.$i
 $finalLog="پایان: $sent جدید, $updated آپدیت, $skipped تکراری, $fail خطا | Phase3: $imgRetryFixed تصویر اصلاح";
 $bslLog[]=$finalLog;
 @unlink(BSL_PRODUCTS_FILE);
+remoteMapRecord('bsl',array_merge($bslSentList,$bslUpdatedList),(string)($nextEntry['profile_key']??''));
 $finalProgress=['running'=>false,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'last_title'=>'','current'=>$total,'done'=>true,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$bslQueueId,'recent_log'=>$bslLog,'total_log_count'=>count($bslLog),'log'=>$finalLog,'sent_details'=>$bslSentList,'updated_details'=>$bslUpdatedList,'skipped_details'=>$bslSkippedList,'failed_details'=>$bslFailedList];
 writeProgress(BSL_PROGRESS_FILE,$finalProgress);
 
@@ -13154,6 +13389,7 @@ $bslLog[]=$finalLog;
 
 if($fromFile)@unlink(BSL_PRODUCTS_FILE);
 
+remoteMapRecord('bsl',array_merge($bslSentList,$bslUpdatedList));
 $finalProgress=['running'=>false,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'last_title'=>'','current'=>$total,'done'=>true,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>$bslLog,'total_log_count'=>count($bslLog),'log'=>$finalLog,'sent_details'=>$bslSentList,'updated_details'=>$bslUpdatedList,'skipped_details'=>$bslSkippedList,'failed_details'=>$bslFailedList];
 if($bslQueueId!=='')$finalProgress['queue_id']=$bslQueueId;
 writeProgress(BSL_PROGRESS_FILE,$finalProgress);
@@ -13920,6 +14156,20 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="cact">
 <button class="btn btn-purple" onclick="reconScan('woo')" style="flex:1">🛒 بررسی ووکامرس</button>
 <button class="btn btn-cyan" onclick="reconScan('bsl')" style="flex:1">🏪 بررسی باسلام</button>
+</div>
+<!-- v8.65: دفترچهٔ شناسه‌ها -->
+<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:6px;line-height:1.8">
+🔗 <b>دفترچهٔ شناسه‌ها:</b> تطبیق با عنوان شکننده است — محصولی که در مقصد تغییر نام بدهد
+«اضافی» گزارش می‌شود و با حذف از بین می‌رود. از این نسخه، شناسهٔ هر محصول هنگام ارسال ثبت
+می‌شود. برای محصولاتی که <b>قبلاً</b> فرستاده‌اید، یک بار «بازسازی» را بزنید.
+</div>
+<div class="cact">
+<button class="btn btn-gray" onclick="rmapShow()" style="flex:1">📇 وضعیت</button>
+<button class="btn btn-teal" onclick="rmapRebuild('woo')" style="flex:1">🔗 بازسازی ووکامرس</button>
+<button class="btn btn-teal" onclick="rmapRebuild('bsl')" style="flex:1">🔗 بازسازی باسلام</button>
+</div>
+<div id="rmapR" style="margin-top:6px"></div>
 </div>
 <div id="reconR" style="margin-top:8px"></div>
 </div></div>
@@ -17032,6 +17282,19 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.65', t:'تطبیق با شناسهٔ مقصد — محصول تغییرنام‌داده دیگر گم نمی‌شود', items:[
+    '🔗 مشکل: مغایرت‌گیری، آمار پسوند و عکس‌دار کردن، محصول را با «عنوان» پیدا می‌کردند',
+    'کافی بود عنوان محصولی در پنل ووکامرس یا باسلام دستی عوض شود تا «در هیچ پروفایلی نیست» گزارش شود',
+    'و اگر روی همان گزارش «حذف» می‌زدید، محصول سالم پاک می‌شد',
+    'حالا هنگام هر ارسال یا آپدیت موفق، شناسهٔ مقصد کنار کلید محصول ثبت می‌شود',
+    'کلید محصول از روی آدرس صفحهٔ مبدأ ساخته می‌شود و با تغییر عنوان عوض نمی‌شود',
+    'تطبیق اول با شناسه انجام می‌شود و عنوان فقط راه دوم است',
+    'در گزارش می‌بینید چند محصول با شناسه تطبیق خورده‌اند — یعنی عنوانشان عوض شده بوده',
+    'برای محصولاتی که قبلاً فرستاده‌اید، دکمهٔ «🔗 بازسازی» یک بار شناسه‌ها را از روی عنوان‌های فعلی ثبت می‌کند',
+    'بازسازی هیچ چیزی را تغییر نمی‌دهد؛ فقط یاد می‌گیرد کدام محصول مقصد مال کدام محصول پروفایل است',
+    'همین اصلاح در آمار پسوند هم اعمال شد: محصولی که پسوند پروفایل را از دست داده باز هم شمرده می‌شود',
+    '🖼 «عکس‌دار کردن» هم دیگر فقط یک عکس نمی‌فرستد — کل گالری محصول را وصل می‌کند'
+  ]},
   {v:'8.64', t:'گالری چندعکسی، پاسخ خودکار به مشتریان، و درست شدن مغایرت‌گیری', items:[
     '🖼 بخش جدید «چند عکس از صفحهٔ محصول» در تب سلکتورها — سه روش',
     'خودکار: سلکتور باکس عکس‌ها را می‌دهید و هرچه داخلش باشد برداشته می‌شود، تعدادش هم لازم نیست از قبل معلوم باشد',
@@ -17471,6 +17734,52 @@ function reconLabel(t){return t==='woo'?'ووکامرس':'باسلام';}
 /** گام ۱: فقط گزارش، بدون هیچ تغییری */
 function reconScan(target){reconStart(target,false,'off',1);}
 
+/* v8.65: دفترچهٔ شناسهٔ مقصد */
+function rmapShow(){
+  const box=$('rmapR');
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ ...</div>';
+  fetch('?remote_map=1').then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    const tot=(d.woo||0)+(d.bsl||0);
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px;line-height:1.9">';
+    h+='<div style="color:#67e8f9;font-weight:700">📇 شناسه‌های ثبت‌شده</div>';
+    h+='<div>🛒 ووکامرس: <b style="color:'+((d.woo||0)?'#4ade80':'#94a3b8')+'">'+toFa(d.woo||0)+'</b>'
+      +' · 🏪 باسلام: <b style="color:'+((d.bsl||0)?'#4ade80':'#94a3b8')+'">'+toFa(d.bsl||0)+'</b></div>';
+    if(!tot){
+      h+='<div style="color:#fbbf24;font-size:10.5px;margin-top:4px">'
+        +'هنوز چیزی ثبت نشده. با هر ارسال خودکار پر می‌شود، یا همین حالا «بازسازی» را بزنید.</div>';
+    }
+    ['woo','bsl'].forEach(t=>{
+      const rows=(d.sample||{})[t]||[];
+      rows.forEach(s=>{h+='<div style="color:#94a3b8;font-size:10px">'
+        +(t==='woo'?'🛒':'🏪')+' #'+toFa(s.id)+' — '+esc(s.title||'')+'</div>';});
+    });
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ '+esc(e.message)+'</div>';});
+}
+
+function rmapRebuild(target){
+  const box=$('rmapR');
+  const lbl=target==='woo'?'ووکامرس':'باسلام';
+  if(!confirm('شناسهٔ محصولات '+lbl+' از روی عنوان‌های فعلی ثبت شود؟\n\n'
+    +'این کار چیزی را تغییر نمی‌دهد؛ فقط یاد می‌گیرد کدام محصول مقصد مال کدام محصول پروفایل است.\n'
+    +'بهتر است قبل از تغییر نام محصولات انجام شود.'))return;
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ خواندن محصولات '+esc(lbl)+'...</div>';
+  fetch('?remote_map=1&rebuild='+encodeURIComponent(target)).then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px;background:#7f1d1d20;padding:6px 8px;border-radius:6px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px;line-height:1.9">';
+    h+='<div style="color:#4ade80;font-weight:700">✅ بازسازی '+esc(lbl)+'</div>';
+    h+='<div>محصولات مقصد: <b>'+toFa(d.remote_seen||0)+'</b> · عنوان‌های پروفایل: <b>'+toFa(d.profile_titles||0)+'</b></div>';
+    h+='<div>🔗 شناسهٔ ثبت‌شده: <b style="color:#4ade80">'+toFa(d.recorded||0)+'</b></div>';
+    if(!(d.recorded||0))h+='<div style="color:#fbbf24;font-size:10.5px">هیچ عنوانی تطبیق نخورد — یعنی عنوان‌های مقصد با پروفایل فرق دارند.</div>';
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ '+esc(e.message)+'</div>';});
+}
+
 /** v8.49: شروع در پس‌زمینه و سپس دنبال کردن گزارش زنده */
 function reconStart(target,apply,mode,fixPrice){
   const box=$('reconR');
@@ -17617,6 +17926,10 @@ function reconReport(d,target){
         +(p.why?' <span style="color:#64748b">· '+esc(p.why)+'</span>':'')+'</div>';
     });
     h+='</div></details>';
+  }
+  if(d.matched_by_id>0){
+    h+='<div style="color:#86efac;font-size:10.5px;margin-top:4px">🔗 '+toFa(d.matched_by_id)
+      +' محصول با شناسهٔ ثبت‌شده تطبیق خورد — عنوانشان در مقصد عوض شده بود</div>';
   }
   if(d.no_src_price>0){
     h+='<div style="color:#94a3b8;font-size:10.5px;margin-top:4px">ℹ️ '+toFa(d.no_src_price)

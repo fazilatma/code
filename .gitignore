@@ -60,3 +60,6 @@ photofix_result.json
 digest_state.json
 bulkedit.lock
 photofix.lock
+
+# v8.65: product key to destination id ledger (runtime)
+remote_map.json
