@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.70';
+const APP_VERSION = '8.71';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1232,7 +1232,21 @@ return $result;
 
 function bslNormalizeTitle(string $t): string {
 
+// v8.71: انتیتی‌های HTML باز شوند. باسلام و ووکامرس «&» را «&amp;»
+// ذخیره می‌کنند و بدون این، محصولِ موجود پیدا نمی‌شد و ارسال با
+// خطای «محصول تکراری» شکست می‌خورد.
+$t=html_entity_decode($t,ENT_QUOTES|ENT_HTML5,'UTF-8');
+
 $t=str_replace(['۰','۱','۲','۳','۴','۵','۶','۷','۸','۹'],['0','1','2','3','4','5','6','7','8','9'],$t);
+$t=str_replace(['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'],['0','1','2','3','4','5','6','7','8','9'],$t);
+
+// v8.71: حروف عربی به فارسی — خیلی از قالب‌ها موقع ذخیره تبدیل می‌کنند
+$t=str_replace(['ي','ك','ة','ۀ','أ','إ','ؤ'],['ی','ک','ه','ه','ا','ا','و'],$t);
+
+// v8.71: نیم‌فاصله، فاصلهٔ سخت و نشانه‌های جهت‌دهی → فاصلهٔ ساده
+$t=preg_replace('~[\x{200c}\x{200d}\x{200e}\x{200f}\x{00a0}\x{feff}]~u',' ',$t);
+// اعراب
+$t=preg_replace('~[\x{064B}-\x{065F}\x{0670}]~u','',$t);
 
 $t=preg_replace('/[\-–—…·«»]/u','',$t);
 
@@ -1575,6 +1589,132 @@ function bslRemoteContent(array $ex): array {
         'images_count' => $nPhotos,
         'sku'          => (string)($rev['sku'] ?? ($ex['sku'] ?? '')),
     ];
+}
+
+/* =====================================================================
+ *  v8.71: پیدا کردن محصول موجود در نتیجهٔ جست‌وجو
+ *
+ *  باگ گزارش‌شده: «موقع ارسال محصول آپدیت‌شده، ووکامرس خطای ایجاد و
+ *  باسلام خطای محصول تکراری می‌داد.»
+ *
+ *  علت: تطبیق با مقایسهٔ دقیقِ رشته انجام می‌شد. ولی مقصد عنوان را
+ *  عیناً همان‌طور که فرستادیم نگه نمی‌دارد:
+ *    • ووکامرس «&» را «&amp;» ذخیره می‌کند
+ *    • خیلی از قالب‌ها ی/ک عربی را به فارسی (یا برعکس) تبدیل می‌کنند
+ *    • نیم‌فاصله و فاصلهٔ سخت جای فاصلهٔ ساده می‌نشیند
+ *  پس محصولِ موجود پیدا نمی‌شد، مسیر «ایجاد» می‌رفت و مقصد آن را
+ *  به‌عنوان تکراری رد می‌کرد. یعنی محصول نه ساخته می‌شد نه آپدیت.
+ *
+ *  حالا اول تطبیق دقیق، بعد تطبیق نرمال‌شده (همان نرمال‌سازی‌ای که
+ *  مغایرت‌گیری از v8.64 استفاده می‌کند) و در نهایت شناسهٔ ثبت‌شده.
+ * ===================================================================== */
+
+/**
+ * در فهرست نتایج جست‌وجو، محصول متناظر با این عنوان را پیدا می‌کند.
+ * $rows آرایه‌ای از محصولات مقصد است؛ $nameKey نام کلید عنوان.
+ * $altTitle عنوان جایگزین (مثلاً بدون پسوند پروفایل).
+ */
+function findRemoteByTitle(array $rows, string $title, string $altTitle = '',
+                           string $nameKey = 'name', ?string &$how = null): ?array {
+    $how = '';
+    if (!$rows) return null;
+    $t = trim($title);
+    $alt = trim($altTitle);
+    // ۱) تطبیق دقیق — سریع‌ترین و مطمئن‌ترین
+    foreach ($rows as $r) {
+        if (!is_array($r)) continue;
+        $n = trim((string)($r[$nameKey] ?? ($r['title'] ?? '')));
+        if ($n !== '' && ($n === $t || ($alt !== '' && $n === $alt))) { $how = 'exact'; return $r; }
+    }
+    // ۲) تطبیق نرمال‌شده — &amp;، ی/ک عربی، نیم‌فاصله و علائم را نادیده می‌گیرد
+    $nt  = reconNormTitle($t);
+    $nal = $alt !== '' ? reconNormTitle($alt) : '';
+    if ($nt !== '' || $nal !== '') {
+        foreach ($rows as $r) {
+            if (!is_array($r)) continue;
+            $n = reconNormTitle(trim((string)($r[$nameKey] ?? ($r['title'] ?? ''))));
+            if ($n === '') continue;
+            if ($n === $nt || ($nal !== '' && $n === $nal)) { $how = 'normalized'; return $r; }
+        }
+    }
+    return null;
+}
+
+/**
+ * محصول را با شناسهٔ ثبت‌شده در دفترچه پیدا می‌کند.
+ * وقتی عنوان در مقصد دستی عوض شده باشد، تنها راه همین است.
+ */
+function findRemoteById(array $rows, string $target, string $productKey): ?array {
+    if ($productKey === '' || !$rows) return null;
+    $map = remoteMapLoad()[$target] ?? [];
+    $want = (int)($map[$productKey]['id'] ?? 0);
+    if ($want <= 0) return null;
+    foreach ($rows as $r) {
+        if (is_array($r) && (int)($r['id'] ?? 0) === $want) return $r;
+    }
+    return null;
+}
+
+/**
+ * v8.71: آیا ووکامرس محصول را به‌خاطر «از قبل موجود بودن» رد کرد؟
+ * رایج‌ترین حالت تکراری بودن SKU است، ولی پیام‌های دیگری هم می‌آید.
+ */
+function wooIsDuplicateError(array $r): bool {
+    $code = strtolower((string)($r['body']['code'] ?? ''));
+    $msg  = (string)($r['body']['message'] ?? '');
+    foreach (['duplicate', 'invalid_sku', 'already', 'exists'] as $needle) {
+        if ($code !== '' && strpos($code, $needle) !== false) return true;
+    }
+    foreach (['قبلا موجود', 'از قبل موجود', 'تکرار', 'duplicate',
+              'already exists', 'invalid or duplicated sku'] as $needle) {
+        if ($msg !== '' && mb_stripos($msg, $needle) !== false) return true;
+    }
+    return false;
+}
+
+/**
+ * v8.71: محصول موجود را در ووکامرس پیدا می‌کند.
+ * دو جست‌وجو (با و بدون پسوند) و سه روش تطبیق: دقیق، نرمال‌شده، شناسه.
+ */
+function wooFindExisting(array $w, string $title, string $suffix = '', string $productKey = ''): ?array {
+    $tries = [$title];
+    $base = $suffix !== '' ? trim(str_replace($suffix, '', $title)) : '';
+    if ($base !== '' && $base !== $title) $tries[] = $base;
+    foreach ($tries as $q) {
+        if (trim($q) === '') continue;
+        $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET',
+                    'products?search=' . urlencode($q) . '&status=any&per_page=20');
+        if (empty($r['ok']) || !is_array($r['body'] ?? null)) continue;
+        $how = '';
+        $hit = findRemoteByTitle($r['body'], $title, $base, 'name', $how);
+        if ($hit) return $hit;
+        $byId = findRemoteById($r['body'], 'woo', $productKey);
+        if ($byId) return $byId;
+    }
+    return null;
+}
+
+/**
+ * v8.71: محصول موجود را در باسلام پیدا می‌کند.
+ * چند وضعیت و چند عبارت جست‌وجو، با تطبیق نرمال‌شده و شناسهٔ ثبت‌شده.
+ */
+function bslFindExisting(string $tk, int $vid, string $title, string $productKey = ''): ?array {
+    $q = bslNormalizeTitle($title);
+    $statuses = '&statuses=2976&statuses=3790&statuses=3567&statuses=3568&statuses=4184';
+    foreach (array_unique([$q, trim($title)]) as $term) {
+        if ($term === '') continue;
+        $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=50'
+             . $statuses . '&search=' . urlencode($term));
+        if (empty($r['ok'])) continue;
+        $rows = $r['body']['data'] ?? [];
+        if (!is_array($rows) || !$rows) continue;
+        $how = '';
+        $hit = findRemoteByTitle($rows, $title, '', 'title', $how);
+        if ($hit) return $hit;
+        $byId = findRemoteById($rows, 'bsl', $productKey);
+        if ($byId) return $byId;
+    }
+    return null;
 }
 
 function detectImageFormat(string $data): string {
@@ -7214,6 +7354,53 @@ if (isset($_GET['selftest'])) {
         foreach (explode("\n", $selfSrc) as $l) if (strlen($l) > 6000) return false;
         return true;
     })());
+    /* ---------- v8.71: پیدا کردن محصول موجود، به‌جای خطای تکراری ---------- */
+    $add('8.71', 'توابع تطبیق محصول موجود هستند',
+         function_exists('findRemoteByTitle') && function_exists('findRemoteById')
+         && function_exists('wooFindExisting') && function_exists('bslFindExisting')
+         && function_exists('wooIsDuplicateError'));
+    if (function_exists('findRemoteByTitle')) {
+        $rows = [['id' => 1, 'name' => 'کیف چرم &amp; کفش'],
+                 ['id' => 2, 'name' => 'شلوار جين آبي'],
+                 ['id' => 3, 'name' => "کفش\u{200c}ورزشی"]];
+        $h = '';
+        $add('8.71', 'انتیتی &amp; مانع تطبیق نیست',
+             (findRemoteByTitle($rows, 'کیف چرم & کفش', '', 'name', $h)['id'] ?? 0) === 1);
+        $add('8.71', 'ی و ک عربی مانع تطبیق نیست',
+             (findRemoteByTitle($rows, 'شلوار جین آبی', '', 'name', $h)['id'] ?? 0) === 2);
+        $add('8.71', 'نیم‌فاصله مانع تطبیق نیست',
+             (findRemoteByTitle($rows, 'کفش ورزشی', '', 'name', $h)['id'] ?? 0) === 3);
+        $add('8.71', 'تطبیق دقیق اولویت دارد',
+             (findRemoteByTitle([['id' => 9, 'name' => 'الف'], ['id' => 8, 'name' => 'الف']],
+              'الف', '', 'name', $h)['id'] ?? 0) === 9 && $h === 'exact');
+        $add('8.71', 'محصول نامرتبط تطبیق نمی‌خورد',
+             findRemoteByTitle($rows, 'یک چیز کاملا دیگر', '', 'name', $h) === null);
+        $add('8.71', 'تطبیق با عنوان بدون پسوند',
+             (findRemoteByTitle([['id' => 5, 'name' => 'کفش']], 'کفش — فروشگاه', 'کفش', 'name', $h)['id'] ?? 0) === 5);
+    }
+    if (function_exists('bslNormalizeTitle')) {
+        $add('8.71', 'نرمال‌ساز باسلام انتیتی را باز می‌کند',
+             bslNormalizeTitle('کیف &amp; کفش') === bslNormalizeTitle('کیف & کفش'));
+        $add('8.71', 'نرمال‌ساز باسلام ی/ک عربی را یکسان می‌کند',
+             bslNormalizeTitle('جين آبي') === bslNormalizeTitle('جین آبی'));
+        $add('8.71', 'نرمال‌ساز باسلام نیم‌فاصله را یکسان می‌کند',
+             bslNormalizeTitle("کفش\u{200c}ورزشی") === bslNormalizeTitle('کفش ورزشی'));
+        $add('8.71', 'عنوان‌های واقعاً متفاوت هنوز فرق دارند',
+             bslNormalizeTitle('کیف چرم') !== bslNormalizeTitle('کفش چرم'));
+    }
+    if (function_exists('wooIsDuplicateError')) {
+        $add('8.71', 'خطای تکراری ووکامرس شناسایی می‌شود',
+             wooIsDuplicateError(['body' => ['code' => 'product_invalid_sku']])
+             && wooIsDuplicateError(['body' => ['message' => 'محصول از قبل موجود است']]));
+        $add('8.71', 'خطای دیگر تکراری حساب نمی‌شود',
+             !wooIsDuplicateError(['body' => ['code' => 'rest_forbidden', 'message' => 'دسترسی ندارید']]));
+    }
+    $add('8.71', 'ووکامرس بعد از خطای تکراری آپدیت می‌کند',
+         strpos($selfSrc, 'wooIsDuplicate' . 'Error($r)') !== false
+         && strpos($selfSrc, 'آپدیت شد به‌جای ایجاد') !== false);
+    $add('8.71', 'باسلام بعد از خطای تکراری دوباره جستجو می‌کند',
+         strpos($selfSrc, 'bslFind' . 'Existing($tk,$vid,$pTitle') !== false);
+
     /* ---------- v8.70: مسیر به‌روزرسانی، نوار نسخه، بررسی امنیت ---------- */
     $add('8.70', 'مسیر کهنهٔ به‌روزرسانی خودش اصلاح می‌شود',
          strpos($selfSrc, "\$c['path'] = \$self;") !== false);
@@ -10908,17 +11095,27 @@ if($pTitle!==''){
 $sep='products?search='.urlencode($pTitle).'&status=any&per_page=10';
 $sr=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'GET',$sep);
 if($sr['ok']&&is_array($sr['body'])){
-foreach($sr['body'] as $ep){
-if(isset($ep['name'])&&trim($ep['name'])===$pTitle){$existing=$ep;break;}
+// v8.71: تطبیق دقیق، بعد نرمال‌شده (&amp;، ی/ک عربی، نیم‌فاصله)
+$baseTitle=$wooTitleSuffix!==''?trim(str_replace($wooTitleSuffix,'',$pTitle)):'';
+$how='';
+$existing=findRemoteByTitle($sr['body'],$pTitle,$baseTitle,'name',$how);
+if($existing&&$how==='normalized')wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✓ یافت شد با تطبیق نرمال‌شده (عنوان مقصد کمی فرق دارد)");
+elseif($existing&&$baseTitle!==''&&trim((string)($existing['name']??''))===$baseTitle)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✓ یافت شد با عنوان بدون پسوند");
+// v8.71: اگر باز پیدا نشد، شناسهٔ ثبت‌شده را امتحان کن — عنوان مقصد عوض شده
+if(!$existing){
+$byId=findRemoteById($sr['body'],'woo',(string)$pKey);
+if($byId){$existing=$byId;wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✓ یافت شد با شناسهٔ ثبت‌شده (عنوان مقصد عوض شده)");}
 }
-// v8.21: Search without suffix for dedup
-if(!$existing && $wooTitleSuffix!==''){
-$baseTitle=trim(str_replace($wooTitleSuffix,'',$pTitle));
-if($baseTitle!=='' && $baseTitle!==$pTitle){
-foreach($sr['body'] as $ep){
-$epName=trim($ep['title']??$ep['name']??'');
-if($epName===$baseTitle || $epName===$pTitle){$existing=$ep;wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✓ یافت شد با عنوان بدون پسوند");break;}
 }
+// v8.71: جست‌وجوی دوم بدون پسوند — وقتی موتور جست‌وجوی مقصد با عنوان کامل چیزی نیافت
+if(!$existing&&$wooTitleSuffix!==''){
+$bt=trim(str_replace($wooTitleSuffix,'',$pTitle));
+if($bt!==''&&$bt!==$pTitle){
+$sr2=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'GET','products?search='.urlencode($bt).'&status=any&per_page=10');
+if($sr2['ok']&&is_array($sr2['body'])){
+$h2='';
+$existing=findRemoteByTitle($sr2['body'],$pTitle,$bt,'name',$h2);
+if($existing)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✓ یافت شد با جستجوی بدون پسوند");
 }
 }
 }
@@ -11024,6 +11221,28 @@ wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 }else{
 $errBody=$r['body']??[];
 $errMsg=mb_substr($errBody['message']??($errBody['error']??($r['error']??json_encode($errBody,JSON_UNESCAPED_UNICODE))),0,150);
+// v8.71: اگر ووکامرس گفت «از قبل هست»، یعنی جست‌وجو پیدایش نکرده بود.
+// به‌جای شکست، همان محصول را پیدا کن و آپدیتش کن.
+if(wooIsDuplicateError($r)){
+wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🔁 مقصد گفت تکراری — جستجوی محصول موجود برای آپدیت...");
+$dupRow=wooFindExisting($w,$pTitle,$wooTitleSuffix,(string)$pKey);
+if($dupRow){
+$dupId=(int)($dupRow['id']??0);
+$wpFix=['regular_price'=>$pPrice,'stock_quantity'=>(int)($w['stock_quantity']??10)];
+if(!empty($p['short_desc']))$wpFix['short_description']=$p['short_desc'];
+if(!empty($p['long_desc']))$wpFix['description']=$p['long_desc'];
+if(!empty($wooNewImgs))$wpFix['images']=$wooNewImgs;
+$_at=wooVariationAttributes($p); if($_at)$wpFix['attributes']=$_at;
+$rf=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$dupId,$wpFix);
+if(empty($rf['ok'])&&!empty($wpFix['images'])&&wooIsImageError($rf)){unset($wpFix['images']);$rf=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$dupId,$wpFix);}
+if(!empty($rf['ok'])&&!empty($rf['body']['id'])){
+$updated++;$wooUpdatedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$dupId,'edit_url'=>rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$dupId.'&action=edit','changes'=>'آپدیت پس از خطای تکراری','update_reason'=>'محصول از قبل موجود بود'],$card);
+wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✅ آپدیت شد به‌جای ایجاد: ID#".$dupId);
+usleep(max(100000,$bslDelayMs*1000));continue;
+}
+}
+wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚠️ تکراری بود ولی محصول موجود پیدا نشد");
+}
 $fail++;$wooFailedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'error'=>'خطای ایجاد: '.$errMsg],$card);
 wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ❌ ایجاد: $errMsg");
 }
@@ -12964,12 +13183,22 @@ $em=$r['body']['error_description']??($r['body']['message']??($r['body']['error'
 $dupName=false;$msgs=$r['body']['messages']??[];
 if(is_array($msgs)){foreach($msgs as $m){$f=$m['fields']??[];$mt=$m['message']??'';if(in_array('name',$f)&&(mb_stripos($mt,'تکرار')!==false||mb_stripos($mt,'duplicate')!==false||mb_stripos($mt,'already')!==false))$dupName=true;}}
 
-if(!$dupName&&(mb_stripos($em,'نام تکرار')!==false||mb_stripos($em,'duplicate name')!==false||mb_stripos($em,'already exists')!==false))$dupName=true;
+if(!$dupName&&(mb_stripos($em,'نام تکرار')!==false||mb_stripos($em,'duplicate name')!==false||mb_stripos($em,'already exists')!==false||mb_stripos($em,'تکراری')!==false))$dupName=true;
+// v8.71: باسلام می‌گوید تکراری ولی جست‌وجوی ما محصول را پیدا نکرده بود.
+// دقیقاً همین حالت باعث می‌شد محصول نه ساخته شود نه آپدیت. حالا دوباره
+// و با تطبیق نرمال‌شده دنبالش می‌گردیم.
+if($dupName&&!$exBsl){
+bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🔁 باسلام گفت تکراری — جستجوی دوباره برای آپدیت...");
+$exBsl=bslFindExisting($tk,$vid,$pTitle,(string)$pKey);
+if($exBsl){$exId=(int)($exBsl['id']??0);bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✓ پیدا شد: ID#$exId");}
+else bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚠️ تکراری بود ولی محصول موجود پیدا نشد");
+}
 if($dupName&&$exBsl){
 
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚡ نام تکراری → آپدیت اجباری...");
 $bu2=['primary_price'=>$pn,'stock'=>(int)($cn['basalam']['stock']??10),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'status'=>2976];
 if($catId>0)$bu2['category_id']=$catId;
+bslApplyContent($bu2,$p);   // v8.71: توضیحات و تنوع‌های تازه هم بروند
 if($pid){$bu2['photo']=$pid;$bu2['photos']=(!empty($galIdsB)?$galIdsB:[$pid]);}
 $r2=bslReq($tk,'PATCH','products/'.$exId,$bu2);if($r2['code']===404)$r2=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$exId,$bu2);
 if($r2['ok']&&!empty($r2['body']['id'])){ $updated++;$bslUpdatedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$exId,'changes'=>'آپدیت اجباری (نام تکراری)'],$card);bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚡ آپدیت اجباری #{$exId}");}
@@ -18262,6 +18491,21 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.71', t:'رفع خطای «محصول تکراری» باسلام و «خطای ایجاد» ووکامرس', items:[
+    '🐞 علت پیدا شد: تطبیق محصول موجود با مقایسهٔ دقیقِ رشته انجام می‌شد',
+    'ولی مقصد عنوان را عیناً همان‌طور که فرستادیم نگه نمی‌دارد:',
+    '· ووکامرس «&» را «&amp;» ذخیره می‌کند',
+    '· خیلی از قالب‌ها ی و ک عربی را به فارسی تبدیل می‌کنند (یا برعکس)',
+    '· نیم‌فاصله و فاصلهٔ سخت جای فاصلهٔ ساده می‌نشیند',
+    'نتیجه: محصولِ موجود پیدا نمی‌شد، مسیر «ایجاد» می‌رفت، و مقصد آن را تکراری رد می‌کرد',
+    'یعنی محصول نه ساخته می‌شد و نه آپدیت — دقیقاً همان چیزی که گزارش کردید',
+    '✅ حالا تطبیق سه مرحله‌ای است: دقیق، بعد نرمال‌شده، بعد شناسهٔ ثبت‌شده',
+    '✅ اگر مقصد باز هم گفت «تکراری»، برنامه دوباره دنبال محصول می‌گردد و آپدیتش می‌کند',
+    'در ووکامرس: پیدا کردن با دو جست‌وجو (با و بدون پسوند) و آپدیت به‌جای شکست',
+    'در باسلام: جست‌وجوی دوباره روی همهٔ وضعیت‌ها، حتی وقتی جست‌وجوی اول چیزی نیافته بود',
+    'نرمال‌ساز عنوان باسلام هم اصلاح شد و انتیتی، ی/ک عربی و نیم‌فاصله را می‌فهمد',
+    'در آپدیت اجباریِ پس از خطای تکراری، توضیحات و تنوع‌های تازه هم فرستاده می‌شوند'
+  ]},
   {v:'8.70', t:'رفع باگ به‌روزرسانی بعد از تغییر نام فایل، و ابزار تشخیص نصب', items:[
     '🐞 باگ مهم: بعد از تغییر نام فایل به scraper4.php، تنظیمات ذخیره‌شدهٔ قبلی هنوز نام قدیمی را نگه داشته بود',
     'یعنی «بررسی نسخه» فایل قدیمی مخزن را می‌سنجید و همیشه می‌گفت «به‌روز هستید» — نسخهٔ تازه هرگز نصب نمی‌شد',
