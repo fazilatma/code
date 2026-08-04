@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.68';
+const APP_VERSION = '8.69';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1427,6 +1427,154 @@ function productImageList(array $p): array {
         }
     }
     return galleryDedupe($list);
+}
+
+/* =====================================================================
+ *  v8.69: تشخیص «محتوا عوض شده» برای محصولی که از قبل در مقصد هست
+ *
+ *  تا اینجا تصمیمِ «تکراری است، رد کن» فقط قیمت و موجودی را می‌سنجید.
+ *  یعنی اگر بعد از استخراج تازه، توضیحات کامل‌تر شده بود، گالری چند عکس
+ *  گرفته بود یا تنوع‌ها اضافه شده بودند، محصول «تکراری» شمرده می‌شد و
+ *  آن اطلاعات هیچ‌وقت به مقصد نمی‌رسید.
+ *
+ *  حالا هر فیلدی که در مبدأ مقدار دارد با همتای مقصد مقایسه می‌شود.
+ *  اصل محافظه‌کارانه: چیزی که در مبدأ خالی است هرگز باعث آپدیت نمی‌شود
+ *  و روی مقصد را پاک نمی‌کند — فقط داده‌ی تازه اضافه یا اصلاح می‌شود.
+ * ===================================================================== */
+
+/** متن را برای مقایسه ساده می‌کند: بدون تگ، بدون فاصلهٔ اضافه */
+function contentNorm(?string $s): string {
+    $s = (string)$s;
+    if ($s === '') return '';
+    $s = html_entity_decode(strip_tags($s), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $s = preg_replace('~[\x{200c}\x{200f}\x{200e}\x{00a0}]~u', ' ', $s);
+    $s = preg_replace('~\s+~u', ' ', $s);
+    return trim(mb_strtolower($s, 'UTF-8'));
+}
+
+/** آیا کاربر «آپدیت محتوا» را خاموش کرده؟ پیش‌فرض روشن است. */
+function contentSyncOn(?array $cn = null): bool {
+    if ($cn === null) $cn = loadConnections();
+    return !isset($cn['content_sync']) || !empty($cn['content_sync']);
+}
+
+/**
+ * مقایسهٔ محتوای محصول مبدأ با محصول مقصد.
+ *
+ * $remote باید کلیدهای نرمال‌شده داشته باشد:
+ *   short_desc, long_desc, images_count, variations_text, sku
+ * هر کلیدی که null باشد یعنی «نمی‌دانیم» و نادیده گرفته می‌شود.
+ *
+ * خروجی فهرست تغییرات به فارسی است؛ آرایهٔ خالی یعنی چیزی عوض نشده.
+ */
+function contentChanges(array $p, array $remote): array {
+    $out = [];
+
+    $srcShort = contentNorm((string)($p['short_desc'] ?? ''));
+    if ($srcShort !== '' && array_key_exists('short_desc', $remote)) {
+        if (contentNorm((string)$remote['short_desc']) !== $srcShort) $out[] = 'توضیح کوتاه';
+    }
+
+    $srcLong = contentNorm((string)($p['long_desc'] ?? ''));
+    if ($srcLong !== '' && array_key_exists('long_desc', $remote)) {
+        if (contentNorm((string)$remote['long_desc']) !== $srcLong) $out[] = 'توضیح بلند';
+    }
+
+    // گالری: فقط وقتی مبدأ عکسِ بیشتری دارد. کمتر بودن دلیل آپدیت نیست،
+    // چون ممکن است خود کاربر در مقصد عکس اضافه کرده باشد.
+    if (array_key_exists('images_count', $remote)) {
+        $srcN = count(productImageList($p));
+        $remN = (int)$remote['images_count'];
+        if ($srcN > $remN) $out[] = 'گالری (' . $remN . '→' . $srcN . ' عکس)';
+    }
+
+    $srcVar = contentNorm((string)($p['variations_text'] ?? ''));
+    if ($srcVar !== '' && array_key_exists('variations_text', $remote)) {
+        if (contentNorm((string)$remote['variations_text']) !== $srcVar) $out[] = 'تنوع‌ها';
+    }
+
+    $srcSku = trim((string)($p['sku'] ?? ''));
+    if ($srcSku !== '' && array_key_exists('sku', $remote)) {
+        if (trim((string)$remote['sku']) !== $srcSku) $out[] = 'SKU';
+    }
+
+    return $out;
+}
+
+/** شکل نرمال‌شدهٔ محصول ووکامرس برای contentChanges */
+function wooRemoteContent(array $ex): array {
+    $imgs = is_array($ex['images'] ?? null) ? $ex['images'] : [];
+    return [
+        'short_desc'      => (string)($ex['short_description'] ?? ''),
+        'long_desc'       => (string)($ex['description'] ?? ''),
+        'images_count'    => count($imgs),
+        'sku'             => (string)($ex['sku'] ?? ''),
+    ];
+}
+
+/**
+ * تنوع‌ها را به «ویژگی»های ووکامرس تبدیل می‌کند.
+ * محصول ساده می‌ماند (تبدیل به variable کار سنگینی است و نیاز به ساختن
+ * هر ترکیب دارد)، ولی گزینه‌ها روی صفحهٔ محصول دیده می‌شوند.
+ */
+function wooVariationAttributes(array $p): array {
+    $groups = $p['variation_groups'] ?? null;
+    if (!is_array($groups) || !$groups) {
+        $vals = $p['variations'] ?? null;
+        if (is_string($vals)) $vals = array_filter(array_map('trim', explode('،', $vals)));
+        if (!is_array($vals) || !$vals) return [];
+        $groups = [['name' => 'ویژگی', 'values' => array_values($vals)]];
+    }
+    $out = []; $pos = 0;
+    foreach ($groups as $g) {
+        if (!is_array($g)) continue;
+        $vals = array_values(array_filter(array_map(
+            fn($v) => trim((string)$v), (array)($g['values'] ?? []))));
+        if (!$vals) continue;
+        $name = trim((string)($g['name'] ?? ''));
+        if ($name === '') $name = 'ویژگی ' . ($pos + 1);
+        $out[] = ['name' => mb_substr($name, 0, 60), 'position' => $pos++,
+                  'visible' => true, 'variation' => false,
+                  'options' => array_slice($vals, 0, 30)];
+    }
+    return $out;
+}
+
+/**
+ * توضیحات و تنوع‌های تازه را روی بستهٔ آپدیت باسلام می‌نشاند.
+ * فقط چیزی که در مبدأ مقدار دارد نوشته می‌شود، تا آپدیت هیچ‌وقت
+ * توضیحات موجود مقصد را با رشتهٔ خالی پاک نکند.
+ */
+function bslApplyContent(array &$bu, array $p): void {
+    $brief = trim(strip_tags((string)($p['short_desc'] ?? '')));
+    $desc  = trim((string)($p['long_desc'] ?? ''));
+    // تنوع‌ها اگر باشند به انتهای توضیح اضافه می‌شوند؛ باسلام برای
+    // محصول ساده جای جداگانه‌ای برای گزینه‌ها ندارد.
+    $varTxt = trim((string)($p['variations_text'] ?? ''));
+    if ($varTxt !== '') {
+        $line = 'گزینه‌های موجود: ' . $varTxt;
+        if ($desc !== '' && mb_strpos($desc, $varTxt) === false) $desc .= "\n" . $line;
+        elseif ($desc === '') $desc = $line;
+    }
+    if ($brief !== '') $bu['brief'] = mb_substr($brief, 0, 250);
+    if ($desc !== '')  $bu['description'] = $desc;
+    $sku = trim((string)($p['sku'] ?? ''));
+    if ($sku !== '') $bu['sku'] = $sku;
+}
+
+/** شکل نرمال‌شدهٔ محصول باسلام برای contentChanges */
+function bslRemoteContent(array $ex): array {
+    $rev = (is_array($ex['revision'] ?? null) && isset($ex['revision']['data'])
+            && is_array($ex['revision']['data'])) ? $ex['revision']['data'] : [];
+    $photos = $rev['photos'] ?? ($ex['photos'] ?? []);
+    $nPhotos = is_array($photos) ? count($photos) : 0;
+    if ($nPhotos === 0 && !empty($rev['photo'] ?? ($ex['photo'] ?? null))) $nPhotos = 1;
+    return [
+        'short_desc'   => (string)($rev['brief'] ?? ($ex['brief'] ?? '')),
+        'long_desc'    => (string)($rev['description'] ?? ($ex['description'] ?? '')),
+        'images_count' => $nPhotos,
+        'sku'          => (string)($rev['sku'] ?? ($ex['sku'] ?? '')),
+    ];
 }
 
 function detectImageFormat(string $data): string {
@@ -4875,6 +5023,8 @@ if (isset($_POST['queue_dedup']))       $conn['queue_dedup']       = !empty($_PO
 if (isset($_POST['queue_dedup_stale'])) $conn['queue_dedup_stale'] = max(0, (int)$_POST['queue_dedup_stale']);
 if (isset($_POST['cron_lock_min']))     $conn['cron_lock_min']     = max(1, min(240, (int)$_POST['cron_lock_min']));
 if (isset($_POST['keep_reports']))      $conn['keep_reports']      = max(1, min(200, (int)$_POST['keep_reports']));
+// v8.69: آپدیت محتوای تازه روی محصولات موجود (پیش‌فرض روشن)
+if (isset($_POST['content_sync']))      $conn['content_sync']      = !empty($_POST['content_sync']) && $_POST['content_sync'] !== 'false';
 // v8.60: چند کلمهٔ اول برای یادگیری و دسته‌بندی خودکار
 if (isset($_POST['catlearn_words']))    $conn['catlearn_words']    = max(1, min(CATLEARN_MAX_WORDS, (int)$_POST['catlearn_words']));
 // v8.64: پاسخ خودکار به پیام مشتریان
@@ -5477,6 +5627,11 @@ function prepareForSend(array $profile, string $key, array $p): array {
         'weight'      => (string)($p['weight'] ?? ''),
         'link'        => (string)($p['link'] ?? ''),
         'orig_price'  => (string)($p['origPrice'] ?? ($p['originalPrice'] ?? '')),
+        // v8.69: تنوع‌ها هم باید به ارسال‌کننده برسند
+        'variations'       => is_array($p['variations'] ?? null) ? $p['variations'] : [],
+        'variation_groups' => is_array($p['variation_groups'] ?? null) ? $p['variation_groups'] : [],
+        'variations_text'  => (string)($p['variations_text']
+                              ?? (is_array($p['variations'] ?? null) ? implode('، ', $p['variations']) : '')),
     ];
 }
 
@@ -7012,6 +7167,62 @@ if (isset($_GET['selftest'])) {
         foreach (explode("\n", $selfSrc) as $l) if (strlen($l) > 6000) return false;
         return true;
     })());
+    /* ---------- v8.69: آپدیت محتوای تازه روی محصولات موجود ---------- */
+    $add('8.69', 'توابع تشخیص تغییر محتوا موجودند',
+         function_exists('contentChanges') && function_exists('contentNorm')
+         && function_exists('wooRemoteContent') && function_exists('bslRemoteContent')
+         && function_exists('bslApplyContent') && function_exists('wooVariationAttributes'));
+    if (function_exists('contentChanges')) {
+        $src = ['short_desc' => 'توضیح تازه', 'long_desc' => 'شرح تازه',
+                'image' => 'http://x/1.jpg', 'images' => ['http://x/1.jpg', 'http://x/2.jpg'],
+                'variations_text' => 'قرمز، آبی', 'sku' => 'S1'];
+        $same = ['short_desc' => 'توضیح تازه', 'long_desc' => 'شرح تازه',
+                 'images_count' => 2, 'variations_text' => 'قرمز، آبی', 'sku' => 'S1'];
+        $add('8.69', 'محتوای یکسان تغییر گزارش نمی‌دهد', contentChanges($src, $same) === []);
+        $old = $same; $old['long_desc'] = 'شرح قدیمی';
+        $add('8.69', 'توضیح عوض‌شده تشخیص داده می‌شود',
+             in_array('توضیح بلند', contentChanges($src, $old), true));
+        $few = $same; $few['images_count'] = 1;
+        $add('8.69', 'گالری بزرگ‌تر تشخیص داده می‌شود',
+             (bool)array_filter(contentChanges($src, $few), fn($c) => mb_strpos($c, 'گالری') === 0));
+        $more = $same; $more['images_count'] = 5;
+        $add('8.69', 'عکس بیشترِ مقصد باعث آپدیت نمی‌شود',
+             !array_filter(contentChanges($src, $more), fn($c) => mb_strpos($c, 'گالری') === 0));
+        $novar = $same; $novar['variations_text'] = '';
+        $add('8.69', 'تنوع تازه تشخیص داده می‌شود',
+             in_array('تنوع‌ها', contentChanges($src, $novar), true));
+        // مبدأ خالی هرگز نباید مقصد را پاک کند
+        $empty = ['short_desc' => '', 'long_desc' => '', 'sku' => ''];
+        $add('8.69', 'مبدأ خالی باعث آپدیت نمی‌شود',
+             contentChanges($empty, ['short_desc' => 'چیزی', 'long_desc' => 'چیزی', 'sku' => 'X']) === []);
+    }
+    if (function_exists('contentNorm')) {
+        $add('8.69', 'مقایسهٔ متن به تگ و فاصله حساس نیست',
+             contentNorm('<p>سلام   دنیا</p>') === contentNorm('سلام دنیا'));
+    }
+    if (function_exists('bslApplyContent')) {
+        $bu = []; bslApplyContent($bu, ['short_desc' => 'کوتاه', 'long_desc' => 'بلند',
+                                        'variations_text' => 'قرمز، آبی', 'sku' => 'S9']);
+        $add('8.69', 'بستهٔ باسلام توضیح و تنوع می‌گیرد',
+             ($bu['brief'] ?? '') === 'کوتاه' && mb_strpos($bu['description'] ?? '', 'قرمز، آبی') !== false
+             && ($bu['sku'] ?? '') === 'S9');
+        $bu2 = []; bslApplyContent($bu2, []);
+        $add('8.69', 'مبدأ خالی چیزی روی باسلام نمی‌نویسد', $bu2 === []);
+    }
+    if (function_exists('wooVariationAttributes')) {
+        $at = wooVariationAttributes(['variation_groups' => [['name' => 'رنگ', 'values' => ['قرمز', 'آبی']]]]);
+        $add('8.69', 'تنوع به ویژگی ووکامرس تبدیل می‌شود',
+             count($at) === 1 && ($at[0]['name'] ?? '') === 'رنگ' && count($at[0]['options'] ?? []) === 2);
+        $add('8.69', 'بدون تنوع، ویژگی‌ای ساخته نمی‌شود', wooVariationAttributes([]) === []);
+    }
+    // ۵ مسیر: ووکامرس (صف + زنده) و باسلام (صف + تکی + زنده)
+    $add('8.69', 'هر پنج مسیر ارسال محتوا را می‌سنجند',
+         substr_count($selfSrc, 'content' . 'Changes($p,') === 5);
+    $add('8.69', 'تنوع‌ها در بستهٔ ارسال قرار می‌گیرند',
+         strpos($selfSrc, "'variations_text'  =>") !== false);
+    $add('8.69', 'کلید خاموش‌کردن آپدیت محتوا هست',
+         function_exists('contentSyncOn') && strpos($selfSrc, "content" . "_sync") !== false);
+
     $add('8.68', 'توابع خطرناک در فایل نیست', (function () use ($selfSrc) {
         foreach (['ev' . 'al(', 'base64' . '_decode', 'shell' . '_exec', 'sy' . 'stem(',
                   'pass' . 'thru', 'proc' . '_open', 'create' . '_function', 'gz' . 'inflate'] as $bad) {
@@ -10450,9 +10661,12 @@ send_sse('send_info',['msg'=>"[$n] تکراری یافت شد: ID#$exId | قیم
 // v8.58: اگر مقصد تصویر ندارد، «تکراری» حساب نکن — تصویر را اضافه کن
 $exHasImgS=!empty($existing['images'])&&is_array($existing['images']);
 $needImgS=!$exHasImgS&&!empty($p['image']);
-if($exPrice===$pPrice&&$exStock===$newStock&&!$needImgS){
+// v8.69: محتوای تازه هم دلیل آپدیت است
+$contentDiffS=contentSyncOn($cn)?contentChanges($p,wooRemoteContent($existing)):[];
+if($contentDiffS)send_sse('send_info',['msg'=>"[$n] 🔄 محتوای تازه: ".implode('، ',$contentDiffS)]);
+if($exPrice===$pPrice&&$exStock===$newStock&&!$needImgS&&!$contentDiffS){
 $skipped++;
-send_sse('send_skip',['key'=>$pKey,'remote_id'=>$existing['id'],'title'=>$pTitle,'reason'=>'تکرار: نام+قیمت+موجودی یکسان','image'=>$p['image']??'','price'=>$pPrice,'price_unit'=>$priceUnit,'category'=>'','link'=>$p['link']??'']);
+send_sse('send_skip',['key'=>$pKey,'remote_id'=>$existing['id'],'title'=>$pTitle,'reason'=>'تکرار: نام+قیمت+موجودی+محتوا یکسان','image'=>$p['image']??'','price'=>$pPrice,'price_unit'=>$priceUnit,'category'=>'','link'=>$p['link']??'']);
 send_sse('send_info',['msg'=>"[$n] ⏭ رد شد - تکرار دقیق"]);
 usleep(100000);continue;
 }else{
@@ -10462,10 +10676,15 @@ $wpUpdate=['regular_price'=>$pPrice,'stock_quantity'=>$newStock];
 if(!empty($p['short_desc']))$wpUpdate['short_description']=$p['short_desc'];
 if(!empty($p['long_desc']))$wpUpdate['description']=$p['long_desc'];
 // v8.57: تصویر محصول موجود را فقط وقتی می‌فرستیم که مقصد تصویری ندارد
-if(!empty($wooStreamImgs)&&empty($existing['images'])){
+// v8.69: یا وقتی گالری مبدأ عکس بیشتری دارد
+$galGrewS=false;
+foreach($contentDiffS as $_cd){ if(mb_strpos($_cd,'گالری')===0){$galGrewS=true;break;} }
+if(!empty($wooStreamImgs)&&(empty($existing['images'])||$galGrewS)){
 $wpUpdate['images']=$wooStreamImgs;
 }
 if(!empty($p['sku']))$wpUpdate['sku']=$p['sku'];
+$wooAttrsS=wooVariationAttributes($p);
+if($wooAttrsS)$wpUpdate['attributes']=$wooAttrsS;
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$existing['id'],$wpUpdate);
 // v8.58: تصویرِ نگرفتنی نباید کل آپدیت را از بین ببرد
 if(!$r['ok']&&!empty($wpUpdate['images'])&&wooIsImageError($r)){
@@ -10569,6 +10788,7 @@ $bslDelayMs=max(0,(int)($cn['basalam']['delay_ms']??500));
 $wooTitleSuffix='';
 $wooQueueCatId=-1;
 $wooQueueProfileKey='';   // v8.65: برای ثبت در دفترچهٔ شناسه‌ها
+$wooContentSync=contentSyncOn($cn);   // v8.69: آپدیت محتوای تازه
 $wooQueue=wooReadQueue();
 foreach($wooQueue['entries'] as $qe){
 if(($qe['status']??'')!=='running')continue;
@@ -10656,11 +10876,14 @@ $editUrl=rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$exId.'&action=ed
 // رد می‌شد و برای همیشه بی‌تصویر می‌ماند — این همان «هنوز بدون تصویر است».
 $exHasImg=!empty($existing['images'])&&is_array($existing['images']);
 $needImg=!$exHasImg&&!empty($p['image']);
-if($exPrice===$pPrice&&$exStock===$newStock&&!$needImg){
-$skipped++;$wooSkippedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$exId,'reason'=>'تکرار: نام+قیمت+موجودی یکسان','edit_url'=>$editUrl],$card);
+// v8.69: محتوای تازه (توضیحات، گالری، تنوع، SKU) هم دلیل آپدیت است
+$contentDiff=$wooContentSync?contentChanges($p,wooRemoteContent($existing)):[];
+if($exPrice===$pPrice&&$exStock===$newStock&&!$needImg&&!$contentDiff){
+$skipped++;$wooSkippedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$exId,'reason'=>'تکرار: نام+قیمت+موجودی+محتوا یکسان','edit_url'=>$editUrl],$card);
 wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⏭ تکرار: $pTitle");
 continue;
 }
+if($contentDiff)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🔄 محتوای تازه: ".implode('، ',$contentDiff));
 if($needImg&&$exPrice===$pPrice&&$exStock===$newStock){
 wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 تکراری ولی بدون تصویر — تصویر اضافه می‌شود");
 }
@@ -10668,8 +10891,11 @@ wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 // v8.57: اگر محصول مقصد از قبل تصویر دارد، دست نزن. فقط وقتی تصویر
 // ندارد یا ما تصویر تازه داریم، تصویر را می‌فرستیم — و اگر آپلود مستقیم
 // نشد، آدرس را به خود ووکامرس می‌سپاریم.
+// v8.69: گالریِ تازه هم فرستاده می‌شود، نه فقط وقتی مقصد بی‌عکس است
+$galGrew=false;
+foreach($contentDiff as $_cd){ if(mb_strpos($_cd,'گالری')===0){$galGrew=true;break;} }
 $wooUpdImgs=[];
-if($needImg){
+if($needImg||$galGrew){
 $imgNote=null;
 // v8.64: همهٔ عکس‌های محصول
 $wooUpdImgs=wooGalleryPayload($w,productImageList($p),$imgNote);
@@ -10681,6 +10907,9 @@ if(!empty($p['short_desc']))$wpUpdate['short_description']=$p['short_desc'];
 if(!empty($p['long_desc']))$wpUpdate['description']=$p['long_desc'];
 if(!empty($wooUpdImgs))$wpUpdate['images']=$wooUpdImgs;
 if(!empty($p['sku']))$wpUpdate['sku']=$p['sku'];
+// v8.69: تنوع‌ها به‌صورت ویژگی محصول ووکامرس
+$wooAttrs=wooVariationAttributes($p);
+if($wooAttrs)$wpUpdate['attributes']=$wooAttrs;
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$exId,$wpUpdate);
 // v8.58: اگر فقط تصویر مقصر بود، بدون تصویر دوباره تلاش کن تا بقیهٔ
 // تغییرات (قیمت/موجودی) از دست نرود.
@@ -12593,12 +12822,17 @@ continue;
 $needUpdate=false;$updateChanges=[];
 if($exPrice!=$pn){$needUpdate=true;$updateChanges[]='قیمت '.($exPrice/10).'→'.($pn/10).' تومان';}
 if($exStock!=$newStock){$needUpdate=true;$updateChanges[]='موجودی';}
+// v8.69: محتوای تازه (توضیحات، گالری، تنوع، SKU) هم آپدیت می‌خواهد
+$bslContentDiff=contentSyncOn($cn)?contentChanges($p,bslRemoteContent($exBsl)):[];
+if($bslContentDiff){$needUpdate=true;foreach($bslContentDiff as $_cd)$updateChanges[]=$_cd;}
 
-if(!$needUpdate){$skipped++;$bslSkippedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$exId,'reason'=>'تکرار (قیمت+موجودی یکسان)'],$card);bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⏭ تکرار (یکسان)");continue;}
+if(!$needUpdate){$skipped++;$bslSkippedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$exId,'reason'=>'تکرار (قیمت+موجودی+محتوا یکسان)'],$card);bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⏭ تکرار (یکسان)");continue;}
 
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚡ آپدیت: ".implode(',',$updateChanges));
 $bu=['primary_price'=>$pn,'stock'=>$newStock,'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100))];
 if($newStock<=0)$bu['status']=3790;else $bu['status']=2976;if($catId>0)$bu['category_id']=$catId;
+// v8.69: توضیحات و تنوع‌های تازه هم در همین آپدیت می‌روند
+bslApplyContent($bu,$p);
 // v8.64: همهٔ عکس‌های محصول
 $pid=null;$galU=[];$imgU=productImageList($p);
 if($imgU){$umU2=bslUploadMany($tk,$imgU,(int)($cn['basalam']['max_photos']??10));if(!empty($umU2['ok'])){$pid=$umU2['main'];$galU=$umU2['ids'];}}
@@ -13021,6 +13255,9 @@ if($exStock!=$newStock){$needUpdate=true;$changes[]='موجودی '.$exStock.'�
 if($exTitle!==''&&$exTitle!==$pTitle&&bslNormalizeTitle($exTitle)!==bslNormalizeTitle($pTitle)){$needUpdate=true;$changes[]='عنوان';}
 if($newStock<=0){$needUpdate=true;$changes[]='ناموجود';}
 if($exStatusVal===3567){$needUpdate=true;$changes[]='re-submit';}
+// v8.69: محتوای تازه
+$cdOne=contentSyncOn($cn)?contentChanges($p,bslRemoteContent($exBsl)):[];
+if($cdOne){$needUpdate=true;foreach($cdOne as $_c)$changes[]=$_c;}
 
 if($exStatusVal===3790||$exStatusVal===3568||$exStatusVal===4184){
 $needUpdate=true;
@@ -13035,7 +13272,7 @@ echo json_encode(['ok'=>true,'action'=>'skip','key'=>$pKey,'title'=>$pTitle,'rem
 $bu=['primary_price'=>$pn,'stock'=>$newStock,'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100))];
 if($newStock<=0)$bu['status']=3790;else $bu['status']=2976;
 if($exTitle!==''&&$exTitle!==$pTitle&&bslNormalizeTitle($exTitle)!==bslNormalizeTitle($pTitle))$bu['name']=mb_substr($pTitle,0,120);
-if(!empty($p['long_desc']))$bu['description']=$p['long_desc'];elseif(!empty($p['short_desc']))$bu['description']=strip_tags($p['short_desc']);
+bslApplyContent($bu,$p);   // v8.69: توضیحات کوتاه/بلند، تنوع‌ها و SKU
 
 $buCatId=(int)($bs['category_id']??0);if($buCatId<=0&&$autoCat&&!empty($bslFlatCats)){$_ac=autoMatchBslCategory($pTitle,$bslFlatCats);if($_ac>0)$buCatId=$_ac;}if($buCatId>0)$bu['category_id']=$buCatId;
 // v8.64: همهٔ عکس‌های محصول
@@ -13962,6 +14199,9 @@ if($exPrice!=$pn){$needUpdate=true;$updateLog.=' قیمت '.$exPrice.'→'.$pn;}
 if($exStock!=$newStock){$needUpdate=true;$updateLog.=' موجودی '.$exStock.'→'.$newStock;}
 if($newStock<=0){$needUpdate=true;$updateLog.=' ناموجود';}
 if($exStatusVal===3567){$needUpdate=true;$updateLog.=' re-submit';}
+// v8.69: محتوای تازه
+$cdStream=contentSyncOn($cn)?contentChanges($p,bslRemoteContent($exBsl)):[];
+if($cdStream){$needUpdate=true;$updateLog.=' '.implode('،',$cdStream);}
 
 if($exStatusVal===3790||$exStatusVal===3568||$exStatusVal===4184){
 $needUpdate=true;
@@ -13974,6 +14214,7 @@ if(!$needUpdate){$skipped++;send_sse('send_skip',['key'=>$pKey,'title'=>$pTitle,
 send_sse('send_info',['msg'=>'['.$n.'] آپدیت ID#'.$exId.$updateLog]);
 $bu=['primary_price'=>$pn,'stock'=>$newStock,'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100))];
 if($newStock<=0){$bu['status']=3790;}else{$bu['status']=2976;}
+bslApplyContent($bu,$p);   // v8.69: توضیحات، تنوع‌ها و SKU تازه
 
 $buCatId=(int)($bs['category_id']??0);if($buCatId<=0&&$autoCat&&!empty($bslFlatCats)){$_ac=autoMatchBslCategory($pTitle,$bslFlatCats);if($_ac>0)$buCatId=$_ac;}
 if($buCatId<=0)$buCatId=(int)($bs['category_id']??0);
@@ -14588,6 +14829,16 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>گزارش‌های استخراج:</label>
 <input type="number" id="keepReports" value="20" min="1" max="200" style="max-width:80px" dir="ltr">
 <span style="font-size:10px;color:#64748b">آخرین چند مورد نگه داشته شود</span></div>
+
+<!-- v8.69: آپدیت محتوای تازه روی محصولات موجود -->
+<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin:8px 0 2px;cursor:pointer">
+<input type="checkbox" id="contentSync" checked onchange="saveConn()" style="width:14px;height:14px">
+<span>🔄 محصولات موجود را با محتوای تازه آپدیت کن</span></label>
+<div style="font-size:10px;color:#64748b;margin:0 0 8px;line-height:1.8">
+اگر بعد از استخراج تازه، توضیحات کامل‌تر شده، گالری عکس بیشتری گرفته یا تنوع اضافه شده باشد،
+محصول «تکراری» رد نمی‌شود و همان اطلاعات روی مقصد به‌روز می‌شود.
+فیلدی که در مبدأ خالی باشد هیچ‌وقت روی مقصد را پاک نمی‌کند.
+</div>
 
 <div class="cact">
 <button class="btn btn-gray" onclick="genQueueStatus()" style="flex:1">🔎 وضعیت صف‌ها</button>
@@ -17932,6 +18183,19 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.69', t:'محصول موجود با محتوای تازه آپدیت می‌شود، نه اینکه «تکراری» رد شود', items:[
+    '🔄 تا اینجا تصمیم «تکراری است» فقط قیمت و موجودی را می‌سنجید',
+    'یعنی اگر بعد از استخراج تازه توضیحات کامل‌تر شده بود، گالری چند عکس گرفته بود یا تنوع اضافه شده بود، آن اطلاعات هیچ‌وقت به مقصد نمی‌رسید',
+    'حالا توضیح کوتاه، توضیح بلند، تعداد عکس‌های گالری، تنوع‌ها و SKU هم مقایسه می‌شوند',
+    'هر کدام که فرق داشته باشد، محصول آپدیت می‌شود و در گزارش می‌نویسد دقیقاً چه چیزی عوض شده',
+    '🛡 اصل محافظه‌کارانه: فیلدی که در مبدأ خالی است هرگز باعث آپدیت نمی‌شود و روی مقصد را پاک نمی‌کند',
+    'گالری فقط وقتی آپدیت می‌شود که مبدأ عکس بیشتری داشته باشد — عکسی که خودتان در مقصد اضافه کرده‌اید حذف نمی‌شود',
+    'در ووکامرس تنوع‌ها به «ویژگی محصول» تبدیل می‌شوند و روی صفحهٔ محصول دیده می‌شوند',
+    'در باسلام توضیحات و SKU آپدیت می‌شوند و گزینه‌ها به انتهای توضیح اضافه می‌شوند',
+    'هر پنج مسیر ارسال پوشش داده شد: ووکامرس (صف و زنده) و باسلام (صف، تکی و زنده)',
+    '⚙️ گزینهٔ «محصولات موجود را با محتوای تازه آپدیت کن» در تنظیمات عمومی — پیش‌فرض روشن',
+    'اگر خاموشش کنید، دقیقاً مثل قبل فقط قیمت و موجودی مبنا خواهد بود'
+  ]},
   {v:'8.68', t:'تنوع‌ها، پنل کنترل بیرونی، پروفایل پیش‌فرض و کاهش حساسیت اسکنر هاست', items:[
     '📄 نام فایل به scraper4.php تغییر کرد؛ مسیر به‌روزرسانی هم خودکار از نام واقعی فایل خوانده می‌شود',
     '🛡 هاست فایل را حذف می‌کرد: خط ۲۴ کیلوبایتی CSS شکسته شد (قوی‌ترین نشانهٔ «کد مبهم‌سازی‌شده» برای اسکنرها)',
@@ -20163,7 +20427,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
 arApplyCfg(cn.autoreply||{});arLoad();}
 function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
@@ -20172,7 +20436,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
@@ -20815,7 +21079,7 @@ const d=[];order.forEach(k=>{
     // v7.82: Detect price unit (Rial vs Toman) from original price string
     const priceStr=(p.price||'').toString();
     const priceUnit=priceStr.includes('ریال')||priceStr.includes('ر.ی')?'rial':'toman';
-    d.push({key:k,title:getFinalTitle(rawTitle),final_price:String(fp),price_unit:priceUnit,image:p.image||'',sku:p.sku||'',short_desc:p.shortDesc||'',long_desc:p.longDesc||'',weight:p.weight||'',link:p.link||'',orig_price:p.origPrice||p.originalPrice||''});
+    d.push({key:k,title:getFinalTitle(rawTitle),final_price:String(fp),price_unit:priceUnit,image:p.image||'',images:p.images||[],sku:p.sku||'',short_desc:p.shortDesc||'',long_desc:p.longDesc||'',weight:p.weight||'',link:p.link||'',orig_price:p.origPrice||p.originalPrice||'',variations:p.variations||[],variation_groups:p.variation_groups||[],variations_text:p.variations_text||''});
 });
 if(d.length>0)console.log('getSendP: total='+d.length+', withPrice='+d.filter(x=>parseInt(x.final_price)>0).length);
 if(d.length>0){
@@ -22690,7 +22954,7 @@ function sendImportToWoo(){
         final_price:p.final_price||String(extractNumber(p.price)),
         price_unit:(p.price||'').toString().includes('ریال')||(p.price||'').toString().includes('ر.ی')?'rial':'toman',
         image:p.image||'',sku:p.sku||'',
-        short_desc:p.shortDesc||'',long_desc:p.longDesc||'',weight:''
+        short_desc:p.shortDesc||'',long_desc:p.longDesc||'',weight:'',images:p.images||[],variations:p.variations||[],variation_groups:p.variation_groups||[],variations_text:p.variations_text||''
     }));
     if(!ps.length){showToast('محصولی نیست',true);return;}
     switchMainTab('send');
@@ -22716,7 +22980,7 @@ function sendImportToBsl(){
         final_price:p.final_price||String(extractNumber(p.price)),
         price_unit:(p.price||'').toString().includes('ریال')||(p.price||'').toString().includes('ر.ی')?'rial':'toman',
         image:p.image||'',sku:p.sku||'',
-        short_desc:p.shortDesc||'',long_desc:p.longDesc||'',weight:''
+        short_desc:p.shortDesc||'',long_desc:p.longDesc||'',weight:'',images:p.images||[],variations:p.variations||[],variation_groups:p.variation_groups||[],variations_text:p.variations_text||''
     }));
     if(!ps.length){showToast('\u0645\u062d\u0635\u0648\u0644\u06cc \u0646\u06cc\u0633\u062a',true);return;}
     // v7.56: Use client-driven queue instead of server-side stream (was stopping after some products)
