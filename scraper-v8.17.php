@@ -6379,6 +6379,13 @@ if (isset($_GET['selftest'])) {
     }
     $add('8.64', 'ارسال چند عکس به ووکامرس', function_exists('wooGalleryPayload'));
     $add('8.64', 'ارسال چند عکس به باسلام', function_exists('bslUploadMany'));
+    // هیچ مسیر ارسالی نباید فقط یک عکس بفرستد — الگو تکه‌تکه (درس v8.35)
+    $add('8.64', 'هیچ مسیر باسلامی تک‌عکسی نمانده',
+         strpos($selfSrc, "photos'" . '=>[$pid]') === false
+         && strpos($selfSrc, "photos'" . ']=[$pid]') === false);
+    // رشته تکه‌تکه، وگرنه همین خط خودش را هم می‌شمارد (درس v8.35)
+    $add('8.64', 'همهٔ مسیرهای ارسال ووکامرس گالری می‌فرستند',
+         substr_count($selfSrc, 'wooGallery' . 'Payload($w,productImageList($p)') === 3);
     $add('8.64', 'گالری در ذخیرهٔ پروفایل JSON می‌شود',
          strpos($selfSrc, "k === '" . 'gallery' . "'") !== false);
 
@@ -11886,7 +11893,10 @@ $statusLabel=$exStatusVal===3790?'غیرفعال':($exStatusVal===4184?'بایگ
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🔄 بازفعال‌سازی از {$statusLabel} (status=$exStatusVal) → ID#$exId");
 $bu=['primary_price'=>$pn,'stock'=>$newStock,'status'=>2976,'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100))];
 if($catId>0)$bu['category_id']=$catId;
-$pid=null;if(!empty($p['image'])){$_up=bslUpload($tk,$p['image']);if(!empty($_up['ok']))$pid=$_up['file_id'];}if($pid){$bu['photo']=$pid;$bu['photos']=[$pid];}
+// v8.64: همهٔ عکس‌های محصول
+$pid=null;$galU=[];$imgU=productImageList($p);
+if($imgU){$umU2=bslUploadMany($tk,$imgU,(int)($cn['basalam']['max_photos']??10));if(!empty($umU2['ok'])){$pid=$umU2['main'];$galU=$umU2['ids'];}}
+if($pid){$bu['photo']=$pid;$bu['photos']=(!empty($galU)?$galU:[$pid]);}
 $r=bslReq($tk,'PATCH','products/'.$exId,$bu);if($r['code']===404)$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$exId,$bu);
 if($r['ok']&&!empty($r['body']['id'])){
 $updated++;$bslUpdatedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$exId,'changes'=>'بازفعال‌سازی از '.$statusLabel,'update_reason'=>'بازفعال‌سازی (status='.$exStatusVal.'→2976)'],$card);
@@ -11909,7 +11919,10 @@ if(!$needUpdate){$skipped++;$bslSkippedList[]=array_merge(['title'=>$pTitle,'key
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚡ آپدیت: ".implode(',',$updateChanges));
 $bu=['primary_price'=>$pn,'stock'=>$newStock,'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100))];
 if($newStock<=0)$bu['status']=3790;else $bu['status']=2976;if($catId>0)$bu['category_id']=$catId;
-$pid=null;if(!empty($p['image'])){$_up=bslUpload($tk,$p['image']);if(!empty($_up['ok']))$pid=$_up['file_id'];}if($pid){$bu['photo']=$pid;$bu['photos']=[$pid];}
+// v8.64: همهٔ عکس‌های محصول
+$pid=null;$galU=[];$imgU=productImageList($p);
+if($imgU){$umU2=bslUploadMany($tk,$imgU,(int)($cn['basalam']['max_photos']??10));if(!empty($umU2['ok'])){$pid=$umU2['main'];$galU=$umU2['ids'];}}
+if($pid){$bu['photo']=$pid;$bu['photos']=(!empty($galU)?$galU:[$pid]);}
 $r=bslReq($tk,'PATCH','products/'.$exId,$bu);if($r['code']===404)$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$exId,$bu);
 if($r['ok']&&!empty($r['body']['id'])){ $updated++;$bslUpdatedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$exId,'changes'=>'آپدیت'],$card);bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚡ آپدیت #{$exId}");continue;}
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] PATCH ناموفک → جایگزینی...");
@@ -11917,7 +11930,12 @@ $rUnpub=bslReq($tk,'PATCH','products/'.$exId,['status'=>3790]);if($rUnpub['code'
 $replaceTitle=$pTitle;if(!$rUnpub['ok'])$replaceTitle=mb_substr($pTitle,0,110).' (v'.date('ymdHi').')';$pTitle=$replaceTitle;
 }
 
-$pid=null;if(!empty($p['image'])){ $up=bslUpload($tk,$p['image']);if(!empty($up['ok']))$pid=$up['file_id'];else{$up2=bslUpload($tk,$p['image']);if(!empty($up2['ok']))$pid=$up2['file_id'];}}
+// v8.64: همهٔ عکس‌های محصول، نه فقط اولی
+$pid=null;$galIdsB=[];
+$imgListBk=productImageList($p);
+if($imgListBk){$umBk=bslUploadMany($tk,$imgListBk,(int)($cn['basalam']['max_photos']??10));if(!empty($umBk['ok'])){$pid=$umBk['main'];$galIdsB=$umBk['ids'];}
+if(count($imgListBk)>1)bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🖼 گالری: ".$umBk['note']);}
+if(!$pid&&!empty($p['image'])){$up2=bslUpload($tk,$p['image']);if(!empty($up2['ok'])){$pid=$up2['file_id'];$galIdsB=[$pid];}}
 
 if(!$pid&&!empty($p['link'])){
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🔄 تصویر آپلود نشد — تلاش از سایت مبدأ...");
@@ -11927,7 +11945,7 @@ $freshImgUrl=extractImageFromHtml($srcPage['html'],$p['link']);
 if($freshImgUrl){
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 📷 تصویر جدید از سایت مبدأ: ".mb_substr($freshImgUrl,0,50));
 $up3=bslUpload($tk,$freshImgUrl);
-if(!empty($up3['ok']))$pid=$up3['file_id'];
+if(!empty($up3['ok'])){$pid=$up3['file_id'];$galIdsB=[$pid];}
 }
 }
 }
@@ -11962,7 +11980,7 @@ bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 usleep($bslDelayMs*1000);continue;
 }
 $bsBrief=trim(strip_tags($p['short_desc']??''));$bsDesc=trim($p['long_desc']??'');if($bsBrief==='')$bsBrief=trim(strip_tags($pTitle));if($bsDesc==='')$bsDesc=$bsBrief;
-$bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>(int)($cn['basalam']['stock']??10),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'photo'=>$pid,'photos'=>[$pid]];
+$bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>(int)($cn['basalam']['stock']??10),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'photo'=>$pid,'photos'=>(!empty($galIdsB)?$galIdsB:[$pid])];
 if(mb_strlen($bsBrief)>=3&&mb_strlen($bsDesc)>=3)$bp['status']=2976;else $bp['status']=3790;if(!empty($p['sku']))$bp['sku']=$p['sku'];
 $r=bslReq($tk,'POST','vendors/'.$vid.'/products',$bp);
 if($r['ok']&&!empty($r['body']['id'])){ $sent++;$bslSentList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$r['body']['id']],$card);bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✅ #{$r['body']['id']}");
@@ -11978,7 +11996,7 @@ if($dupName&&$exBsl){
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚡ نام تکراری → آپدیت اجباری...");
 $bu2=['primary_price'=>$pn,'stock'=>(int)($cn['basalam']['stock']??10),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'status'=>2976];
 if($catId>0)$bu2['category_id']=$catId;
-if($pid){$bu2['photo']=$pid;$bu2['photos']=[$pid];}
+if($pid){$bu2['photo']=$pid;$bu2['photos']=(!empty($galIdsB)?$galIdsB:[$pid]);}
 $r2=bslReq($tk,'PATCH','products/'.$exId,$bu2);if($r2['code']===404)$r2=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$exId,$bu2);
 if($r2['ok']&&!empty($r2['body']['id'])){ $updated++;$bslUpdatedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$exId,'changes'=>'آپدیت اجباری (نام تکراری)'],$card);bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚡ آپدیت اجباری #{$exId}");}
 else{ $skipped++;$bslSkippedList[]=['title'=>$pTitle,'key'=>$pKey,'reason'=>'نام تکراری — آپدیت شکست'];bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⏭ نام تکراری — آپدیت شکست");}
@@ -12339,8 +12357,10 @@ if($exTitle!==''&&$exTitle!==$pTitle&&bslNormalizeTitle($exTitle)!==bslNormalize
 if(!empty($p['long_desc']))$bu['description']=$p['long_desc'];elseif(!empty($p['short_desc']))$bu['description']=strip_tags($p['short_desc']);
 
 $buCatId=(int)($bs['category_id']??0);if($buCatId<=0&&$autoCat&&!empty($bslFlatCats)){$_ac=autoMatchBslCategory($pTitle,$bslFlatCats);if($_ac>0)$buCatId=$_ac;}if($buCatId>0)$bu['category_id']=$buCatId;
-$pid=null;if(!empty($p['image'])){$_up=bslUpload($tk,$p['image']);if(!empty($_up['ok']))$pid=$_up['file_id'];}
-if($pid){$bu['photo']=$pid;$bu['photos']=[$pid];}
+// v8.64: همهٔ عکس‌های محصول
+$pid=null;$galS=[];$imgS=productImageList($p);
+if($imgS){$umS=bslUploadMany($tk,$imgS,(int)($bs['max_photos']??10));if(!empty($umS['ok'])){$pid=$umS['main'];$galS=$umS['ids'];}}
+if($pid){$bu['photo']=$pid;$bu['photos']=(!empty($galS)?$galS:[$pid]);}
 
 $r=bslReq($tk,'PATCH','products/'.$exId,$bu);
 if($r['code']===404)$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$exId,$bu);
@@ -12393,7 +12413,7 @@ if($catId>0&&!empty($cData)&&is_array($cData)){$catId=findLeafCategory($catId,$c
 
 $cardCatId=$catId;
 $cardCatName=bslCatNameById($catId);
-$bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>(int)($bs['stock']??10),'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'photo'=>$pid,'photos'=>[$pid]];
+$bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>(int)($bs['stock']??10),'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'photo'=>$pid,'photos'=>(!empty($galS)?$galS:[$pid])];
 if(mb_strlen($bsBrief)>=3&&mb_strlen($bsDesc)>=3)$bp['status']=2976;else $bp['status']=3790;
 if(!empty($p['sku']))$bp['sku']=$p['sku'];
 $r=bslReq($tk,'POST','vendors/'.$vid.'/products',$bp);
@@ -12414,7 +12434,7 @@ if($dupName&&$exBsl){
 
 $bu=['primary_price'=>$pn,'stock'=>(int)($bs['stock']??10),'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100))];
 if((int)($bs['stock']??10)<=0)$bu['status']=3790;else $bu['status']=2976;
-if($pid){$bu['photo']=$pid;$bu['photos']=[$pid];}
+if($pid){$bu['photo']=$pid;$bu['photos']=(!empty($galIds)?$galIds:[$pid]);}
 if($buCatId>0)$bu['category_id']=$buCatId;
 $r3=bslReq($tk,'PATCH','products/'.$exId,$bu);
 if($r3['code']===404)$r3=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$exId,$bu);
@@ -12672,8 +12692,10 @@ if(!empty($p['long_desc']))$bu['description']=$p['long_desc'];
 elseif(!empty($p['short_desc']))$bu['description']=strip_tags($p['short_desc']);
 if(mb_strlen($bsBrief??'')>=3)$bu['brief']=mb_substr($bsBrief??$pTitle,0,250);
 $pid=null;
-if(!empty($p['image'])){$_up=bslUpload($tk,$p['image']);if(!empty($_up['ok']))$pid=$_up['file_id'];else{$_up2=bslUpload($tk,$p['image']);if(!empty($_up2['ok']))$pid=$_up2['file_id'];}}
-if($pid){$bu['photo']=$pid;$bu['photos']=[$pid];}
+// v8.64: همهٔ عکس‌های محصول
+$galE=[];$imgE=productImageList($p);
+if($imgE){$umE=bslUploadMany($tk,$imgE,(int)($bs['max_photos']??10));if(!empty($umE['ok'])){$pid=$umE['main'];$galE=$umE['ids'];}}
+if($pid){$bu['photo']=$pid;$bu['photos']=(!empty($galE)?$galE:[$pid]);}
 $r=bslReq($tk,'PATCH','products/'.$exId,$bu);
 if($r['code']===404){$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$exId,$bu);}
 if($r['ok']&&!empty($r['body']['id'])){
@@ -12759,7 +12781,7 @@ $bp2=['name'=>mb_substr($replaceTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),
 
 $pid2=$pid??null;
 if(!$pid2&&!empty($p['image'])){$_up=bslUpload($tk,$p['image']);if(!empty($_up['ok']))$pid2=$_up['file_id'];else{$_up2=bslUpload($tk,$p['image']);if(!empty($_up2['ok']))$pid2=$_up2['file_id'];}}
-if($pid2){$bp2['photo']=$pid2;$bp2['photos']=[$pid2];$bp2['status']=2976;}
+if($pid2){$bp2['photo']=$pid2;$bp2['photos']=(($pid2===($pid??null)&&!empty($galIds))?$galIds:[$pid2]);$bp2['status']=2976;}
 else{
 
 $bp2['status']=3790;
@@ -12989,7 +13011,7 @@ $dupTitle=$pTitle;
 if(!$rUnpubDup['ok']){$dupTitle=mb_substr($pTitle,0,100).' #'.substr(md5($pTitle.$pn.time()),0,6);}
 
 $bpDup=['name'=>mb_substr($dupTitle,0,120),'brief'=>mb_substr(trim(strip_tags($p['short_desc']??$pTitle)),0,250),'description'=>trim($p['long_desc']??strip_tags($p['short_desc']??$pTitle)),'primary_price'=>$pn,'stock'=>(int)($bs['stock']??10),'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId];
-if($pid){$bpDup['photo']=$pid;$bpDup['photos']=[$pid];$bpDup['status']=2976;}
+if($pid){$bpDup['photo']=$pid;$bpDup['photos']=(!empty($galIds)?$galIds:[$pid]);$bpDup['status']=2976;}
 else{$bpDup['status']=3790;}
 if(!empty($p['sku']))$bpDup['sku']=$p['sku'];
 $rDupPost=bslReq($tk,'POST','vendors/'.$vid.'/products',$bpDup);
@@ -13275,8 +13297,10 @@ $buCatId=(int)($bs['category_id']??0);if($buCatId<=0&&$autoCat&&!empty($bslFlatC
 if($buCatId<=0)$buCatId=(int)($bs['category_id']??0);
 if($buCatId>0)$bu['category_id']=$buCatId;
 
-$pid=null;if(!empty($p['image'])){send_sse('send_info',['msg'=>'['.$n.'] آپلود تصویر...']);$up=bslUpload($tk,$p['image']);if(!empty($up['ok']))$pid=$up['file_id'];else{$up2=bslUpload($tk,$p['image']);if(!empty($up2['ok']))$pid=$up2['file_id'];}}
-if($pid){$bu['photo']=$pid;$bu['photos']=[$pid];}
+// v8.64: همهٔ عکس‌های محصول
+$pid=null;$galC=[];$imgC=productImageList($p);
+if($imgC){send_sse('send_info',['msg'=>'['.$n.'] آپلود '.count($imgC).' تصویر...']);$umC=bslUploadMany($tk,$imgC,(int)($bs['max_photos']??10));if(!empty($umC['ok'])){$pid=$umC['main'];$galC=$umC['ids'];}send_sse('send_info',['msg'=>'['.$n.'] 🖼 '.$umC['note']]);}
+if($pid){$bu['photo']=$pid;$bu['photos']=(!empty($galC)?$galC:[$pid]);}
 
 $r=bslReq($tk,'PATCH','products/'.$exId,$bu);
 if($r['code']===404){$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$exId,$bu);}
@@ -13297,7 +13321,7 @@ if(!$rUnpub['ok']){$replaceTitle=mb_substr($pTitle,0,100).' #'.substr(md5($pTitl
 $bsBrief=trim(strip_tags($p['short_desc']??$pTitle));$bsDesc=trim($p['long_desc']??$bsBrief);
 $catId=$buCatId;if($catId<=0)$catId=(int)($bs['category_id']??0);
 $bp2=['name'=>mb_substr($replaceTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>$newStock,'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId];
-if($pid){$bp2['photo']=$pid;$bp2['photos']=[$pid];$bp2['status']=2976;}else{$bp2['status']=3790;}
+if($pid){$bp2['photo']=$pid;$bp2['photos']=(!empty($galC)?$galC:[$pid]);$bp2['status']=2976;}else{$bp2['status']=3790;}
 $r2=bslReq($tk,'POST','vendors/'.$vid.'/products',$bp2);
 if($r2['ok']&&!empty($r2['body']['id'])){
 $sent++;send_sse('send_ok',['key'=>$pKey,'title'=>$pTitle,'remote_id'=>$r2['body']['id'],'edit_url'=>'']);
@@ -13309,7 +13333,9 @@ usleep(500000);
 continue;
 }
 
-$pid=null;if(!empty($p['image'])){send_sse('send_info',['msg'=>'['.$n.'] آپلود تصویر...']);$up=bslUpload($tk,$p['image']);if(!empty($up['ok']))$pid=$up['file_id'];else{$up2=bslUpload($tk,$p['image']);if(!empty($up2['ok']))$pid=$up2['file_id'];}}
+// v8.64: همهٔ عکس‌های محصول
+$pid=null;$galC=[];$imgC=productImageList($p);
+if($imgC){send_sse('send_info',['msg'=>'['.$n.'] آپلود '.count($imgC).' تصویر...']);$umC=bslUploadMany($tk,$imgC,(int)($bs['max_photos']??10));if(!empty($umC['ok'])){$pid=$umC['main'];$galC=$umC['ids'];}send_sse('send_info',['msg'=>'['.$n.'] 🖼 '.$umC['note']]);}
 if(!$pid){
 
 send_sse('send_info',['msg'=>'['.$n.'] ⚠️ تصویر آپلود نشد — ارسال بدون تصویر (غیرفعال)']);
@@ -13346,7 +13372,7 @@ if($bsDesc==='')$bsDesc=$bsBrief;
 $catId=(int)($bs['category_id']??0);
 if($catId<=0&&$autoCat&&!empty($bslFlatCats)){$_ac=autoMatchBslCategory($pTitle,$bslFlatCats);if($_ac>0)$catId=$_ac;}
 
-$bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>(int)($bs['stock']??10),'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'photo'=>$pid,'photos'=>[$pid],'status'=>2976];
+$bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>(int)($bs['stock']??10),'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'photo'=>$pid,'photos'=>(!empty($galC)?$galC:[$pid]),'status'=>2976];
 if(!empty($p['sku']))$bp['sku']=$p['sku'];
 
 send_sse('send_info',['msg'=>'['.$n.'] ایجاد: '.mb_substr($pTitle,0,40)]);
@@ -13368,7 +13394,7 @@ if($foundExisting){
 $dupId=$foundExisting['id']??'?';
 send_sse('send_info',['msg'=>'['.$n.'] نام تکراری → آپدیت ID#'.$dupId]);
 $bu=['primary_price'=>$pn,'stock'=>(int)($bs['stock']??10),'status'=>2976,'category_id'=>$catId,'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100))];
-if($pid){$bu['photo']=$pid;$bu['photos']=[$pid];}
+if($pid){$bu['photo']=$pid;$bu['photos']=(!empty($galC)?$galC:[$pid]);}
 $r3=bslReq($tk,'PATCH','products/'.$dupId,$bu);
 if($r3['code']===404){$r3=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$dupId,$bu);}
 if($r3['ok']){$updated++;send_sse('send_update',['key'=>$pKey,'title'=>$pTitle,'remote_id'=>$dupId,'old_price'=>0,'new_price'=>$pn,'edit_url'=>'']);}
@@ -17014,6 +17040,7 @@ const CHANGELOG = [
     'دکمهٔ «پیشنهاد باکس» گالری‌های رایج را روی صفحهٔ محصول شما پیدا می‌کند',
     'دکمهٔ «آزمایش» عکس‌های پیداشده را همان‌جا نشان می‌دهد — قاب سبز یعنی عکس شاخص',
     'عکس‌ها در ووکامرس و باسلام هر دو ارسال می‌شوند؛ اولی شاخص، بقیه گالری',
+    'همهٔ مسیرهای ارسال پوشش داده شدند: صف اصلی باسلام، ارسال زنده، ارسال تکی و ووکامرس',
     'srcset و data-zoom و data-large هم خوانده می‌شوند تا نسخهٔ باکیفیت برداشته شود',
     'نسخهٔ بندانگشتی و اصلی یک عکس (‎-150x150) تکراری حساب می‌شوند',
     '🤖 بخش جدید «پاسخ خودکار به مشتریان» — سلام ← سلام و وقت بخیر، ممنون ← خواهش می‌کنم',
