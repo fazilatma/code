@@ -8,7 +8,7 @@ on:
       - arena/019fb317-code
       - main
     paths:
-      - 'scraper-v8.17.php'
+      - 'scraper4.php'
       - 'deploy.php'
   workflow_dispatch:        # امکان اجرای دستی از تب Actions
 

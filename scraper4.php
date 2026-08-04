@@ -1,7 +1,31 @@
 <?php
+/**
+ * اسکرپر محصولات و همگام‌ساز ووکامرس / باسلام
+ * ---------------------------------------------------------------
+ * این فایل یک ابزار مدیریت فروشگاه است: محصولات را از یک سایت
+ * مبدأ می‌خواند و با فروشگاه ووکامرس یا غرفهٔ باسلام همگام می‌کند.
+ *
+ * توضیح برای اسکنر امنیتی هاست و بازبین انسانی:
+ *  • هیچ کد رمزگذاری‌شده، فشرده یا مبهم‌سازی‌شده‌ای در این فایل نیست.
+ *  • هیچ‌کدام از توابع اجرای دستور سیستمی، اجرای کد پویا، یا رمزگشایی
+ *    و بازکردنِ کدِ فشرده در این فایل به کار نرفته است. (فهرست کامل در
+ *    فایل HOST-SECURITY-FA.md کنار همین فایل آمده است.)
+ *  • هیچ کد اجرایی از اینترنت دانلود و اجرا نمی‌شود.
+ *  • این فایل هیچ‌وقت خودش را بازنویسی نمی‌کند؛ به‌روزرسانی کار
+ *    فایل جداگانهٔ deploy.php است که کاربر خودش اجرا می‌کند.
+ *  • درخواست‌های شبکه فقط با cURL و فقط به سرویس‌هایی می‌رود که
+ *    کاربر در تنظیمات وارد کرده است (فروشگاه خودش، API باسلام).
+ *  • نوشتن روی دیسک محدود به فایل‌های JSON کنار همین فایل است
+ *    (تنظیمات، صف ارسال و گزارش‌ها) و پوشهٔ uploads برای تصاویر.
+ *
+ * مجوز: استفادهٔ شخصی صاحب فروشگاه.
+ */
 
+// خطاها به کاربر نمایش داده نمی‌شوند چون خروجی بیشتر اندپوینت‌ها JSON
+// است و یک اخطار PHP وسط پاسخ، آن را برای مرورگر غیرقابل خواندن می‌کند.
 ini_set('display_errors', '0');
 error_reporting(0);
+// عملیات همگام‌سازی طولانی است و نباید وسط کار توسط وب‌سرور قطع شود.
 set_time_limit(0);
 ini_set('memory_limit', '512M');
 ini_set('post_max_size', '256M');
@@ -49,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.67';
+const APP_VERSION = '8.68';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1785,7 +1809,9 @@ function vc_defaults(): array {
         'check_on_load' => false,
         'repo'          => 'fazilatma/code',
         'branch'        => 'main',
-        'path'          => 'scraper-v8.17.php',
+        // v8.68: نام فایل در مخزن. اگر فایل را با نام دیگری نصب کرده‌اید،
+        // خودِ همان نام مبنا قرار می‌گیرد تا به‌روزرسانی دنبال فایل اشتباه نگردد.
+        'path'          => basename(__FILE__),
         'github_token'  => '',
         'deploy_file'   => 'deploy.php',
         'deploy_token'  => '',
@@ -2617,42 +2643,27 @@ $script = <<<'SCRIPT'
 .__nav:disabled{opacity:.35;cursor:not-allowed}
 .__gal{outline:3px dashed #ec4899!important;outline-offset:1px}
 .__cnt{background:#0f172a;color:#f9a8d4;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:700}
-.__hint{color:#e9d5ff;font-size:11px;padding:0 14px 6px}
-body{padding-top:132px!important}
+/* v8.68: نوار وضعیت شناور و کم‌ارتفاع — دیگر ارتفاع صفحه را نمی‌خورد */
+.__bar{position:fixed;top:0;left:0;right:0;padding:0;opacity:.96}
+.__bar .__row{padding:5px 10px}
+.__bar.__off{display:none}
+body{padding-top:0!important}
 </style>
-<div class="__bar">
-<div class="__row">
-  <select id="__m">
-    <option value="shortDesc">📝 توضیحات کوتاه</option>
-    <option value="longDesc">📄 توضیحات بلند</option>
-    <option value="sku">🏷️ SKU</option>
-    <option value="category">📂 دسته‌بندی</option>
-    <option value="tags">🔖 برچسب‌ها</option>
-    <option value="weight">⚖️ وزن</option>
-    <option value="stock">📦 موجودی</option>
-    <option value="brand">🏭 برند</option>
-    <option value="galleryBox">🖼 باکس گالری (همهٔ عکس‌ها)</option>
-    <option value="galleryOne">➕ افزودن تک‌عکس به گالری</option>
-    <option value="image">🌆 عکس اصلی</option>
-  </select>
-  <span class="__sel" id="__sel">کلیک کنید...</span>
-  <button class="ok" onclick="__done()">✅ اتمام</button>
-  <button class="no" onclick="parent.postMessage({type:'cancel_detail'},'*')">✕</button>
-</div>
-<div class="__row2">
-  <button class="__nav" id="__up"   onclick="__go('up')"    title="انتخاب عنصر والد">⬆ والد</button>
-  <button class="__nav" id="__down" onclick="__go('down')"  title="انتخاب اولین فرزند">⬇ فرزند</button>
-  <button class="__nav" id="__prev" onclick="__go('prev')"  title="عنصر قبلی هم‌سطح">◀ قبلی</button>
-  <button class="__nav" id="__next" onclick="__go('next')"  title="عنصر بعدی هم‌سطح">بعدی ▶</button>
-  <span class="__tag" id="__tag">-</span>
-  <span class="__cnt" id="__cnt" style="display:none"></span>
-  <span id="__preview" class="__preview">در انتظار انتخاب...</span>
-</div>
-<div class="__hint" id="__hint">روی هر بخش کلیک کنید. با ⬆ والد می‌توانید ظرف بزرگ‌تر را بگیرید. <span id="__ver" style="opacity:.65"></span></div>
+<!-- v8.68: نوار کنترل از داخل صفحه بیرون رفت و به پنجرهٔ والد منتقل شد.
+     قبلاً یک نوار ثابت بالای صفحه بود و body یک padding-top بزرگ می‌گرفت،
+     پس در ارتفاع‌های کم عملاً چیزی از خود صفحهٔ محصول دیده نمی‌شد.
+     حالا فقط یک نوار وضعیت کوچک و شناور می‌ماند که قابل پنهان شدن است. -->
+<div class="__bar" id="__bar">
+  <div class="__row">
+    <span class="__sel" id="__sel">روی عنصر دلخواه کلیک کنید…</span>
+    <span class="__tag" id="__tag">-</span>
+    <span class="__cnt" id="__cnt" style="display:none"></span>
+    <button class="__nav" onclick="__hideBar()" title="پنهان کردن این نوار">✕</button>
+  </div>
 </div>
 <script>
 (function(){
-var S={},cur=null,picked=null;
+var S={},cur=null,picked=null;var MODE='shortDesc';
 var GAL=[];   // v8.66: سلکتورهای تک‌عکسِ انتخاب‌شده برای گالری
 
 /**
@@ -2769,6 +2780,20 @@ function getPreview(el, mode){
     var u=getImageUrl(el);
     return u?u.split('/').pop().substring(0,60):'';
   }
+  // v8.68: تنوع‌ها — گزینه‌ها را جدا نشان بده، نه متن به‌هم‌چسبیده
+  if(mode==='variations'){
+    var vals=[],seen={};
+    var nodes=el.querySelectorAll('option,input[type=radio],li,label,button,[data-value]');
+    Array.prototype.forEach.call(nodes,function(n){
+      var v=(n.getAttribute&&(n.getAttribute('data-value')||n.getAttribute('value')||n.getAttribute('title')))||n.textContent||'';
+      v=String(v).replace(/\s+/g,' ').trim();
+      if(!v||v.length>60)return;
+      if(/^(انتخاب کنید|choose an option|select|---?)$/i.test(v))return;
+      var k=v.toLowerCase(); if(seen[k])return; seen[k]=1; vals.push(v);
+    });
+    if(!vals.length){var t=(el.textContent||'').replace(/\s+/g,' ').trim();return t.substring(0,80);}
+    return vals.length+' گزینه: '+vals.slice(0,8).join(' · ');
+  }
   if(mode==='shortDesc'||mode==='longDesc'){
     var t=(el.textContent||'').replace(/\s+/g,' ').trim();
     return t||'(خالی)';
@@ -2797,7 +2822,7 @@ function getPreview(el, mode){
 
 function selectEl(el){
   if(!el||el.tagName=='BODY'||el.tagName=='HTML'||el.closest('.__bar'))return;
-  var m=document.getElementById('__m').value;
+  var m=MODE;
   var s=gs(el);
   if(picked)picked.classList.remove('__s');
   el.classList.add('__s');
@@ -2812,30 +2837,28 @@ function selectEl(el){
     S[m]=s;
   }
 
-  document.getElementById('__sel').textContent=s;
-  document.getElementById('__tag').textContent=el.tagName.toLowerCase()+(el.className?' .'+Array.from(el.classList).slice(0,2).join('.'):'');
+  var _se=document.getElementById('__sel');if(_se)_se.textContent=s;
+  var _tg=document.getElementById('__tag');if(_tg)_tg.textContent=el.tagName.toLowerCase()+(el.className?' .'+Array.from(el.classList).slice(0,2).join('.'):'');
   __paintGallery(m);
   __navState();
 
-  // شمارندهٔ عکس/تطبیق
+  // شمارندهٔ عکس/تطبیق روی نوار کوچک داخل صفحه
   var cntEl=document.getElementById('__cnt');
   var nMatch=countMatch(s);
-  if(m==='galleryBox'){
-    var n=countImgs(el);
-    cntEl.style.display='';
-    cntEl.textContent='🖼 '+n+' عکس'+(nMatch>1?(' · سلکتور به '+nMatch+' ظرف می‌خورد'):'');
-  }else if(m==='galleryOne'){
-    cntEl.style.display='';
-    cntEl.textContent='➕ '+countGalImgs(GAL)+' عکس · '+GAL.length+' سلکتور';
-  }else{
-    cntEl.style.display=nMatch>1?'':'none';
-    cntEl.textContent=nMatch>1?('⚠ '+nMatch+' تطبیق'):'';
+  if(cntEl){
+    if(m==='galleryBox'){
+      cntEl.style.display='';
+      cntEl.textContent='🖼 '+countImgs(el)+' عکس'+(nMatch>1?(' · '+nMatch+' ظرف'):'');
+    }else if(m==='galleryOne'){
+      cntEl.style.display='';
+      cntEl.textContent='➕ '+countGalImgs(GAL)+' عکس';
+    }else{
+      cntEl.style.display=nMatch>1?'':'none';
+      cntEl.textContent=nMatch>1?('⚠ '+nMatch+' تطبیق'):'';
+    }
   }
-
-  var preview=getPreview(el,m);
-  var previewEl=document.getElementById('__preview');
-  previewEl.textContent=(preview||'(خالی)').substring(0,150);
-  previewEl.className='__preview '+(preview?'':'__preview-warn');
+  // v8.68: وضعیت کامل به پنجرهٔ والد می‌رود تا کنترل‌های بیرونی به‌روز شوند
+  __report();
 }
 
 /** رنگ‌آمیزی تصاویری که با انتخاب فعلی برداشته می‌شوند */
@@ -2858,7 +2881,7 @@ function __paintGallery(m){
 
 /** v8.66: حرکت در درخت — والد / فرزند / هم‌سطح */
 function __go(dir){
-  if(!picked){document.getElementById('__hint').textContent='اول روی یک عنصر کلیک کنید.';return;}
+  if(!picked){__post('picker_hint',{msg:'اول روی یک عنصر کلیک کنید.'});return;}
   var t=null;
   if(dir==='up')   t=picked.parentElement;
   if(dir==='down') t=picked.firstElementChild;
@@ -2867,10 +2890,10 @@ function __go(dir){
   // از نوار خودمان و ریشه رد شو
   while(t&&(t.closest&&t.closest('.__bar'))) t=(dir==='prev')?t.previousElementSibling:t.nextElementSibling;
   if(!t||t.tagName==='BODY'||t.tagName==='HTML'){
-    document.getElementById('__hint').textContent='در این جهت عنصری نیست.';
+    __post('picker_hint',{msg:'در این جهت عنصری نیست.'});
     return;
   }
-  document.getElementById('__hint').textContent='روی هر بخش کلیک کنید. با ⬆ والد می‌توانید ظرف بزرگ‌تر را بگیرید.';
+  __post('picker_hint',{msg:''});
   selectEl(t);
   try{ t.scrollIntoView({block:'center',behavior:'smooth'}); }catch(e){}
 }
@@ -2901,34 +2924,50 @@ document.addEventListener('click',function(e){
   selectEl(e.target);
 },true);
 
-// v8.66: با عوض شدن حالت، راهنما و رنگ‌آمیزی هم عوض می‌شود
-document.getElementById('__m').addEventListener('change',function(){
-  var m=this.value;
-  var h=document.getElementById('__hint');
-  if(m==='galleryBox')      h.textContent='🖼 روی ظرفی کلیک کنید که همهٔ عکس‌ها داخلش هستند (نه خود عکس). با ⬆ والد بزرگ‌ترش کنید تا همهٔ عکس‌ها صورتی شوند.';
-  else if(m==='galleryOne') h.textContent='➕ روی هر عکسی که می‌خواهید کلیک کنید — چند بار. هر کدام به فهرست اضافه می‌شود.';
-  else if(m==='image')      h.textContent='🌆 روی عکس اصلی محصول کلیک کنید.';
-  else                      h.textContent='روی هر بخش کلیک کنید. با ⬆ والد می‌توانید ظرف بزرگ‌تر را بگیرید.';
-  __paintGallery(m);
-  var c=document.getElementById('__cnt');
-  if(m==='galleryOne'){c.style.display='';c.textContent='➕ '+countGalImgs(GAL)+' عکس · '+GAL.length+' سلکتور';}
-});
+window.__hideBar=function(){var b=document.getElementById('__bar');if(b)b.classList.add('__off');};
 
-// v8.66: پاک کردن فهرست تک‌عکس‌ها با کلید Escape
-document.addEventListener('keydown',function(e){
-  if(e.key==='Escape'&&document.getElementById('__m').value==='galleryOne'){
-    GAL=[];delete S.galleryOne;__paintGallery('galleryOne');
-    document.getElementById('__cnt').textContent='➕ 0 عکس · 0 سلکتور';
-    document.getElementById('__hint').textContent='فهرست عکس‌ها پاک شد.';
+/* v8.68: کنترل‌ها به پنجرهٔ والد رفتند. این iframe فقط فرمان می‌گیرد و
+   وضعیت را برمی‌گرداند، پس ارتفاع صفحهٔ محصول دیگر خورده نمی‌شود. */
+function __post(t,d){ try{ parent.postMessage(Object.assign({type:t},d||{}),'*'); }catch(e){} }
+
+function __report(){
+  __post('picker_state',{
+    mode:MODE, sel:S[MODE]||'', gal:GAL.slice(),
+    tag:picked?picked.tagName.toLowerCase():'',
+    nav:{up:!!(picked&&picked.parentElement&&picked.parentElement.tagName!=='BODY'),
+         down:!!(picked&&picked.firstElementChild),
+         prev:!!(picked&&picked.previousElementSibling),
+         next:!!(picked&&picked.nextElementSibling)},
+    imgs:MODE==='galleryBox'?countImgs(picked):(MODE==='galleryOne'?countGalImgs(GAL):0),
+    matches:countMatch(S[MODE]||''),
+    preview:picked?String(getPreview(picked,MODE)||'').substring(0,150):'',
+    all:S
+  });
+}
+
+window.addEventListener('message',function(e){
+  var d=e.data||{};
+  if(d.type==='picker_mode'){
+    MODE=String(d.mode||'shortDesc');
+    __paintGallery(MODE);
+    __report();
+  }else if(d.type==='picker_go'){
+    __go(String(d.dir||'up'));
+  }else if(d.type==='picker_clear_gal'){
+    GAL=[];delete S.galleryOne;__paintGallery('galleryOne');__report();
+  }else if(d.type==='picker_done'){
+    if(GAL.length)S.galleryOne=GAL.join('\n');
+    __post('detail_selectors',{data:S});
   }
 });
 
 window.__done=function(){
   if(GAL.length)S.galleryOne=GAL.join('\n');
-  parent.postMessage({type:'detail_selectors',data:S},'*');
+  __post('detail_selectors',{data:S});
 };
 
 __navState();
+__post('picker_ready',{});
 })();
 </script>
 SCRIPT;
@@ -3846,6 +3885,113 @@ function galleryApplyToProduct(array &$p, array $imgs): int {
     return count($all);
 }
 
+/* =====================================================================
+ *  v8.68: تنوع‌های محصول (variations) — رنگ، سایز و مانند آن
+ *
+ *  سایت‌های مختلف تنوع را جور دیگری نشان می‌دهند: گاهی <select> با
+ *  <option>، گاهی دکمه یا برچسب (li/span/label)، گاهی رادیو باتن با
+ *  متن کنارش. یک سلکتور به «ظرفِ گزینه‌ها» داده می‌شود و همهٔ مقادیر
+ *  از هر شکلی که باشند بیرون کشیده می‌شوند.
+ * ===================================================================== */
+
+/** مقدار قابل نمایش یک گزینهٔ تنوع را از المان بیرون می‌کشد */
+function variationValueOf(?DOMNode $n): string {
+    if (!$n instanceof DOMElement) return '';
+    $tag = strtolower($n->tagName);
+    // ورودی‌های فرم: مقدار در صفت است نه در متن
+    if ($tag === 'input' || $tag === 'option') {
+        foreach (['data-value', 'value', 'title', 'aria-label'] as $a) {
+            $v = trim((string)$n->getAttribute($a));
+            if ($v !== '' && strtolower($v) !== 'choose an option') return $v;
+        }
+    }
+    // دکمه/برچسب رنگ: مقدار معمولاً در data-* یا title است
+    foreach (['data-value', 'data-title', 'data-slug', 'title', 'aria-label'] as $a) {
+        $v = trim((string)$n->getAttribute($a));
+        if ($v !== '') return $v;
+    }
+    $t = normalize_text($n->textContent ?? '');
+    return $t;
+}
+
+/** آیا این مقدار به‌درد نمی‌خورد؟ (متن‌های راهنما و جای‌خالی) */
+function variationIsNoise(string $v): bool {
+    if ($v === '') return true;
+    if (mb_strlen($v) > 60) return true;
+    $bad = ['انتخاب کنید', 'یک گزینه را انتخاب کنید', 'choose an option',
+            'select option', 'انتخاب گزینه', '---', '--', 'select'];
+    $lv = mb_strtolower($v, 'UTF-8');
+    foreach ($bad as $b) if ($lv === mb_strtolower($b, 'UTF-8')) return true;
+    return false;
+}
+
+/**
+ * همهٔ تنوع‌های داخل یک ظرف.
+ * خروجی فهرست رشته‌های یکتا به ترتیب ظاهر شدن.
+ */
+function variationsInside(DOMXPath $xp, DOMNode $box): array {
+    $out = []; $seen = [];
+    $push = function ($v) use (&$out, &$seen) {
+        $v = trim($v);
+        if (variationIsNoise($v)) return;
+        $k = mb_strtolower($v, 'UTF-8');
+        if (isset($seen[$k])) return;
+        $seen[$k] = true; $out[] = $v;
+    };
+    // ۱) اگر خود ظرف select است یا داخلش select هست
+    foreach (['.//option', './/input[@type="radio"]', './/input[@type="checkbox"]'] as $q) {
+        $ns = @$xp->query($q, $box);
+        if ($ns) foreach ($ns as $n) $push(variationValueOf($n));
+    }
+    if ($out) return $out;
+    // ۲) دکمه/برچسب: فرزندان مستقیمِ قابل کلیک
+    foreach (['.//li', './/label', './/button', './/a', './/span[@data-value]',
+              './/*[contains(@class,"swatch")]', './/*[contains(@class,"variation")]'] as $q) {
+        $ns = @$xp->query($q, $box);
+        if ($ns) foreach ($ns as $n) $push(variationValueOf($n));
+        if (count($out) > 1) return $out;
+    }
+    // ۳) در نهایت خود ظرف یک گزینه است
+    if (!$out) $push(variationValueOf($box));
+    return $out;
+}
+
+/**
+ * تنوع‌ها را با سلکتور داده‌شده از صفحه بیرون می‌کشد.
+ * سلکتور می‌تواند چندتایی باشد (هر خط یک گروه، مثل رنگ و سایز جدا).
+ */
+function variationsExtract(DOMXPath $xp, ?DOMNode $ctx, string $selStr): array {
+    $groups = []; $flat = []; $seen = [];
+    foreach (preg_split('~[\r\n|]+~u', $selStr) as $one) {
+        $one = trim((string)$one);
+        if ($one === '') continue;
+        $boxes = $ctx !== null ? queryInside($xp, $ctx, $one)
+                               : @$xp->query(cssToXpath($one, true) ?: '//none');
+        if ((!$boxes || !$boxes->length) && $ctx === null) {
+            $boxes = @$xp->query(cssToXpath($one, false) ?: '//none');
+        }
+        if (!$boxes || !$boxes->length) continue;
+        foreach ($boxes as $b) {
+            $vals = variationsInside($xp, $b);
+            if (!$vals) continue;
+            // نام گروه: از label یا صفت name اگر باشد
+            $name = '';
+            foreach (['data-name', 'name', 'aria-label', 'data-attribute_name'] as $a) {
+                if ($b instanceof DOMElement) {
+                    $nv = trim((string)$b->getAttribute($a));
+                    if ($nv !== '') { $name = $nv; break; }
+                }
+            }
+            $groups[] = ['name' => $name, 'values' => $vals];
+            foreach ($vals as $v) {
+                $k = mb_strtolower($v, 'UTF-8');
+                if (!isset($seen[$k])) { $seen[$k] = true; $flat[] = $v; }
+            }
+        }
+    }
+    return ['groups' => $groups, 'values' => $flat, 'count' => count($flat)];
+}
+
 function parse_with_selectors(string $html, string $baseUrl, array $sel): array {
 [$dom, $xp] = load_dom($html);
 $products = [];
@@ -4324,6 +4470,17 @@ foreach ($detailSelectors as $field => $config) {
 if (empty($config['enabled']) || empty($config['selector'])) continue;
 
 if (isset($extracted[$field]) && $extracted[$field] !== '') continue;
+
+// v8.68: تنوع‌ها فهرست‌اند، مسیر جدا
+if ($field === 'variations') {
+$vr = variationsExtract($xp, null, (string)$config['selector']);
+if (!empty($vr['values'])) {
+$extracted['variations'] = $vr['values'];
+$extracted['variation_groups'] = $vr['groups'];
+$extracted['variations_text'] = implode('، ', $vr['values']);
+}
+continue;
+}
 
 $xpath = cssToXpath($config['selector']);
 if (!$xpath) continue;
@@ -5097,6 +5254,16 @@ if($dr['ok']){
 
 foreach($detailSelectors as $field=>$selStr){
 if(empty($selStr))continue;
+// v8.68: تنوع‌ها فهرست‌اند نه یک متن، پس مسیر جداگانه دارند
+if($field==='variations'){
+$vr=variationsExtract($xp2,null,$selStr);
+if(!empty($vr['values'])){
+$allProducts[$key]['variations']=$vr['values'];
+$allProducts[$key]['variation_groups']=$vr['groups'];
+$allProducts[$key]['variations_text']=implode('، ',$vr['values']);
+}
+continue;
+}
 $xPath=cssToXpath($selStr);
 $ns=@$xp2->query($xPath);
 if($ns&&$ns->length){
@@ -6785,16 +6952,73 @@ if (isset($_GET['selftest'])) {
     $add('8.66', 'آدرس نمونه از یک تابع مشترک می‌آید',
          strpos($selfSrc, 'function detailSample' . 'Url(') !== false);
 
-    /* ---------- v8.67: نسخه داخل انتخابگر ---------- */
-    $add('8.67', 'نسخه در نوار انتخابگر تزریق می‌شود',
-         strpos($selfSrc, 'id="__ver"') !== false
-         && strpos($selfSrc, "'v' . APP_VERSION") !== false);
     // دکمه‌های حرکت در انتخابگر فهرست هم باید تعریف شده باشند
     $add('8.67', 'دکمه‌های والد/فرزند انتخابگر فهرست تعریف شده‌اند',
          strpos($selfSrc, 'window.__go' . 'Parent=function') !== false
          && strpos($selfSrc, 'window.__go' . 'Child=function') !== false
          && strpos($selfSrc, 'window.__go' . 'Prev=function') !== false
          && strpos($selfSrc, 'window.__go' . 'Next=function') !== false);
+
+    /* ---------- v8.68: تنوع‌ها، پنل بیرونی، پروفایل پیش‌فرض ---------- */
+    $add('8.68', 'توابع تنوع موجودند',
+         function_exists('variationsExtract') && function_exists('variationsInside')
+         && function_exists('variationValueOf') && function_exists('variationIsNoise'));
+    if (function_exists('variationIsNoise')) {
+        $add('8.68', 'متن راهنما به‌عنوان تنوع شمرده نمی‌شود',
+             variationIsNoise('انتخاب کنید') && variationIsNoise('Choose an option')
+             && variationIsNoise('') && !variationIsNoise('قرمز'));
+    }
+    if (function_exists('variationsExtract')) {
+        [$vd, $vx] = load_dom('<div class="v" data-name="رنگ"><select>'
+            . '<option value="">انتخاب کنید</option><option value="قرمز">قرمز</option>'
+            . '<option value="آبی">آبی</option></select></div>'
+            . '<ul class="s" data-name="سایز"><li data-value="38">38</li><li data-value="39">39</li></ul>');
+        $v1 = variationsExtract($vx, null, '.v');
+        $add('8.68', 'تنوع از select خوانده می‌شود و جای‌خالی حذف می‌شود',
+             $v1['values'] === ['قرمز', 'آبی']);
+        $v2 = variationsExtract($vx, null, '.s');
+        $add('8.68', 'تنوع از فهرست دکمه‌ای خوانده می‌شود', $v2['values'] === ['38', '39']);
+        $v3 = variationsExtract($vx, null, ".v\n.s");
+        $add('8.68', 'چند گروه تنوع با هم', count($v3['groups']) === 2 && $v3['count'] === 4);
+        $add('8.68', 'نام گروه از data-name برداشته می‌شود',
+             ($v3['groups'][0]['name'] ?? '') === 'رنگ' && ($v3['groups'][1]['name'] ?? '') === 'سایز');
+        $add('8.68', 'سلکتور بی‌نتیجه چیزی برنمی‌گرداند',
+             variationsExtract($vx, null, '.nope')['count'] === 0);
+    }
+    $add('8.68', 'تنوع‌ها به فهرست فیلدهای جزئیات اضافه شد',
+         strpos($selfSrc, "{key:'variations'") !== false);
+    $add('8.68', 'هر دو استخراج‌کننده تنوع را می‌فهمند',
+         substr_count($selfSrc, "variations" . "Extract(\$xp2") === 1
+         && substr_count($selfSrc, "variations" . "Extract(\$xp,") >= 1);
+    // پنل کنترل بیرون از پیش‌نمایش
+    $add('8.68', 'پنل کنترل انتخابگر بیرون از iframe است',
+         strpos($selfSrc, 'id="pickerPanel"') !== false
+         && strpos($selfSrc, 'function pkSetMode(') !== false
+         && strpos($selfSrc, 'function pkGo(') !== false);
+    $add('8.68', 'صفحهٔ نمونه دیگر padding بزرگ نمی‌گیرد',
+         strpos($selfSrc, 'body{padding-top:0!important}') !== false);
+    $add('8.68', 'ارتباط دوطرفهٔ پنل و صفحهٔ نمونه',
+         strpos($selfSrc, "'picker_mode'") !== false
+         && strpos($selfSrc, "'picker_state'") !== false
+         && strpos($selfSrc, "'picker_go'") !== false);
+    // آخرین پروفایل
+    $add('8.68', 'آخرین پروفایل ذخیره و بازیابی می‌شود',
+         strpos($selfSrc, 'function restoreLast' . 'Profile(') !== false
+         && strpos($selfSrc, 'LAST_PROFILE_KEY') !== false);
+    // نام فایل و ردپای اسکنر
+    $add('8.68', 'مسیر به‌روزرسانی به نام واقعی فایل وابسته است',
+         strpos($selfSrc, "'path'          => basename(__FILE__)") !== false);
+    $add('8.68', 'خط بسیار بلند (نشانهٔ مبهم‌سازی) در فایل نیست', (function () use ($selfSrc) {
+        foreach (explode("\n", $selfSrc) as $l) if (strlen($l) > 6000) return false;
+        return true;
+    })());
+    $add('8.68', 'توابع خطرناک در فایل نیست', (function () use ($selfSrc) {
+        foreach (['ev' . 'al(', 'base64' . '_decode', 'shell' . '_exec', 'sy' . 'stem(',
+                  'pass' . 'thru', 'proc' . '_open', 'create' . '_function', 'gz' . 'inflate'] as $bad) {
+            if (strpos($selfSrc, $bad) !== false) return false;
+        }
+        return true;
+    })());
 
     // v8.62: ویرایش مستقیم محصولات، عکس‌دار کردن، گزارش شبانه
     $add('8.62', 'موتور ویرایش گروهی', function_exists('bulkEditRun') && function_exists('bulkEditMsg'));
@@ -13969,7 +14193,37 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>اسکرپر ووکامرس v8.22</title>
-<style>*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}body{font-family:Tahoma,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:12px;padding-bottom:90px;padding-top:56px;direction:rtl}.container{max-width:1400px;margin:0 auto}h1{font-size:18px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}input,select{background:#0f172a;border:1px solid #475569;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%}input[type="checkbox"]{width:auto}select{min-width:90px;width:auto}.btn{padding:11px 14px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;transition:.15s;white-space:nowrap}.btn:hover{opacity:.9}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:not-allowed}.btn-blue{background:linear-gradient(135deg,#3b82f6,#06b6d4);color:#000}.btn-red{background:#ef4444;color:#fff}.btn-green{background:#22c55e;color:#000}.btn-purple{background:#a855f7;color:#fff}.btn-orange{background:#f97316;color:#000}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:#eab308;color:#000}.btn-cyan{background:#06b6d4;color:#000}.btn-teal{background:#14b8a6;color:#000}.btn-pink{background:#ec4899;color:#fff}.btn-indigo{background:#6366f1;color:#fff}.hidden{display:none!important}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}.stat{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.stat b{font-size:20px;display:block}.stat span{color:#64748b;font-size:10px}.progress{height:5px;background:#334155;border-radius:5px;margin:10px 0;overflow:hidden}.progress-bar{height:100%;background:linear-gradient(90deg,#3b82f6,#a855f7);width:0;transition:.3s}.progress-bar.pink{background:linear-gradient(90deg,#ec4899,#f59e0b)}.status{color:#94a3b8;font-size:12px;margin-bottom:8px}.logs{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:140px;overflow-y:auto;font-family:monospace;font-size:11px;margin-bottom:10px;direction:ltr;text-align:left}.log{padding:2px 0;border-bottom:1px solid #1e293b}.log-ok{color:#4ade80}.log-err{color:#f87171}.log-info{color:#60a5fa}.log-detail{color:#f0abfc}.main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #334155;display:flex;z-index:1000;box-shadow:0 -4px 20px rgba(0,0,0,.5);padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:10px 4px 8px;border:none;background:transparent;color:#64748b;font-size:11px;font-family:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative;transition:color .2s}.main-tab .t-icon{font-size:20px}.main-tab .t-label{font-weight:600}.main-tab.active{color:#3b82f6;background:#1e293b}.main-tab .badge{position:absolute;top:4px;right:calc(50% - 20px);background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:10px;min-width:16px;text-align:center}.main-tab .badge.ok{background:#22c55e;color:#000}.tab-pane{display:none;animation:fadeIn .3s ease}.tab-pane.active{display:block}@keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.sub-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.sub-tab.active{background:#3b82f6;color:#000}.mode-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.mode-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.mode-tab.active{background:#3b82f6;color:#000}.visual-container{display:grid;grid-template-columns:1fr;gap:14px}.iframe-wrap{background:#0f172a;border:1px solid #334155;border-radius:0 0 10px 10px;overflow:auto;height:600px;position:relative;resize:vertical;min-height:300px;max-height:95vh}.iframe-wrap iframe{width:100%;height:100%;border:none;background:#fff;min-height:100%}.iframe-wrap .if-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:13px}.iframe-size-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#1e293b;border:1px solid #334155;border-radius:10px 10px 0 0;font-size:12px;color:#94a3b8}.iframe-size-bar input[type=range]{flex:1;cursor:pointer}.iframe-size-bar .size-val{color:#67e8f9;font-weight:700;min-width:50px;text-align:center;font-size:13px}.iframe-size-bar label{cursor:pointer;color:#94a3b8}.selector-panel{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px}.selector-panel h3{margin:0 0 10px;font-size:14px;color:#67e8f9}.sel-item{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.sel-item.has{border-color:#22c55e;background:#14532d20}.sel-item.has label{color:#4ade80}.sel-item label{display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px;color:#94a3b8}.sel-item input{width:100%;font-family:monospace;font-size:11px;padding:6px 8px}.sel-item .sel-preview{font-size:10px;color:#86efac;padding:4px 8px;background:#0f172a;border:1px solid #22c55e;border-radius:4px;margin-top:6px;font-family:Tahoma,sans-serif;word-break:break-word;max-height:60px;overflow:hidden;line-height:1.4}.sel-item .sel-preview.price-prev{color:#fbbf24;border-color:#f59e0b;font-family:monospace;direction:ltr;text-align:left}.sel-item .sel-preview.link-prev{color:#a78bfa;border-color:#8b5cf6;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.img-prev{color:#f472b6;border-color:#ec4899;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.empty{color:#fca5a5;border-color:#ef4444;background:#7f1d1d30}.sel-item .sel-actions-row{display:flex;gap:4px;margin-top:6px}.sel-item .sel-actions-row .btn{padding:4px 8px;font-size:10px;flex:1}.sel-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}.suggest-list{max-height:150px;overflow-y:auto;background:#1e293b;border:1px solid #334155;border-radius:6px;margin-top:6px}.suggest-item{padding:8px;font-size:11px;cursor:pointer;font-family:monospace;border-bottom:1px solid #334155}.suggest-item:hover{background:#334155}.detail-field{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.detail-field.enabled{border-color:#a855f7;background:#2d1b4e}.detail-field-row{display:flex;gap:8px;align-items:center;margin-bottom:6px}.detail-field-row .fname{flex:0 0 110px;font-size:12px;font-weight:700;color:#c4b5fd}.detail-field-row .ftoggle{flex:0 0 auto}.detail-field-row .fselector{flex:1;font-family:monospace;font-size:11px;padding:6px 8px}.detail-field-meta{font-size:10px;color:#64748b;display:flex;gap:10px;align-items:center}.detail-field-meta .preview{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}.product{background:#1e293b;border:1px solid #334155;border-radius:12px;overflow:hidden}.thumb{height:140px;background:linear-gradient(135deg,#1e3a5f,#312e81);display:flex;align-items:center;justify-content:center}.thumb img{width:100%;height:100%;object-fit:cover}.noimg{color:#64748b;font-weight:600;font-size:11px}.pbody{padding:10px}.ptitle{font-weight:700;font-size:12px;margin-bottom:6px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:36px}.pdetail-short{font-size:10px;color:#cbd5e1;line-height:1.4;margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-height:30px}.price{display:inline-block;padding:4px 8px;background:#166534;color:#86efac;border-radius:6px;font-weight:700;font-size:12px;margin-bottom:4px}.price-orig{display:block;font-size:10px;color:#64748b;text-decoration:line-through;margin-bottom:4px;direction:ltr;text-align:right;font-family:monospace}.no-price{background:#7f1d1d;color:#fca5a5}.plink{display:block;text-align:center;padding:6px;background:#1e3a5f;border-radius:6px;color:#60a5fa;text-decoration:none;font-weight:600;font-size:11px}.table-wrap{overflow-x:auto;border:1px solid #334155;border-radius:10px}table{width:100%;border-collapse:collapse;font-size:12px;min-width:750px}th,td{padding:8px 10px;text-align:right;border-bottom:1px solid #334155}th{background:#1e3a5f;color:#93c5fd;font-size:10px}.td-orig{color:#94a3b8;text-decoration:line-through;font-size:11px;font-family:monospace;direction:ltr;text-align:right}.td-detail{font-size:10px;color:#cbd5e1;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.text-view{position:relative}.text-content{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px;font-family:monospace;font-size:11px;white-space:pre-wrap;max-height:400px;overflow:auto;direction:ltr;text-align:left}.copy-btn{position:absolute;top:6px;left:6px}.copied{background:#22c55e!important}.alert{padding:10px;border-radius:8px;margin-bottom:10px;font-size:12px}.alert-info{background:#1e3a5f;border:1px solid #3b82f6;color:#93c5fd}.alert-purple{background:#3b0764;border:1px solid #a855f7;color:#e9d5ff}.alert-success{background:#14532d;border:1px solid #22c55e;color:#86efac}.settings-card h3{margin-bottom:12px;font-size:14px;color:#67e8f9}.profile-row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}.profile-row select{flex:2;min-width:150px;font-weight:600}.profile-row input{flex:1;min-width:120px}.profile-row .btn{flex:0 0 auto}.profile-indicator{display:inline-block;padding:3px 8px;border-radius:4px;font-size:10px}.saved{background:#14532d;color:#86efac;border:1px solid #22c55e}.unsaved{background:#78350f;color:#fbbf24;border:1px solid #f59e0b}.toast{position:fixed;top:80px;left:50%;transform:translateX(-50%);background:#14532d;color:#86efac;padding:12px 20px;border-radius:8px;border:1px solid #22c55e;box-shadow:0 8px 20px rgba(0,0,0,.5);z-index:99999;font-weight:700;font-size:12px;opacity:0;transition:opacity .3s,top .3s;pointer-events:none;max-width:90%;text-align:center}.toast.show{opacity:1;top:60px}.toast.error{background:#7f1d1d;color:#fca5a5;border-color:#ef4444}.row label{color:#94a3b8;font-size:12px;min-width:80px;display:flex;align-items:center}input[type="checkbox"]{margin-left:5px}.section-title{font-size:13px;color:#67e8f9;margin-bottom:8px;font-weight:700;display:flex;align-items:center;gap:6px}.section-title.purple{color:#c4b5fd}.empty-state{text-align:center;padding:40px 20px;color:#64748b}.empty-state .icon{font-size:48px;margin-bottom:10px;opacity:.5}.empty-state p{font-size:13px}.switch{position:relative;display:inline-block;width:36px;height:20px}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;inset:0;background:#475569;transition:.2s;border-radius:20px}.slider:before{position:absolute;content:"";height:14px;width:14px;right:3px;bottom:3px;background:#fff;transition:.2s;border-radius:50%}input:checked+.slider{background:#a855f7}input:checked+.slider:before{transform:translateX(-16px)}.cc{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.cc.wc{border-color:#7c3aed}.cc.bs{border-color:#0891b2}.cch{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;cursor:pointer}.cch h3{font-size:14px;margin:0;display:flex;align-items:center;gap:6px}.ccb{overflow:hidden}.ccb.collapsed{max-height:0!important;padding:0;margin:0;overflow:hidden}.cst{display:inline-block;padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700}.cst.on{background:#14532d;color:#86efac}.cst.off{background:#475569;color:#94a3b8}.cst.tg{background:#78350f;color:#fbbf24}.crow{display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap}.crow label{min-width:100px;color:#94a3b8;font-size:12px;flex-shrink:0}.crow input,.crow select{flex:1;min-width:150px}.cact{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.sres{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:500px;overflow-y:auto;font-size:11px;margin-top:10px}.sres .ok2{color:#4ade80;padding:2px 0;border-bottom:1px solid #1e293b}.sres .no2{color:#f87171;padding:2px 0;border-bottom:1px solid #1e293b}.sres a{color:#60a5fa;text-decoration:none}.scard{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:8px;margin:4px 0;display:flex;gap:8px;align-items:flex-start;transition:border-color .2s}.scard:hover{border-color:#475569}.scard-img{width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0;background:#0f172a}.scard-noimg{width:48px;height:48px;border-radius:6px;flex-shrink:0;background:#0f172a;display:flex;align-items:center;justify-content:center;color:#475569;font-size:18px}.scard-body{flex:1;min-width:0;direction:rtl}.scard-title{color:#e2e8f0;font-weight:700;font-size:11px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl}.scard-meta{display:flex;gap:6px;flex-wrap:wrap;font-size:10px;margin-bottom:2px;direction:rtl}.scard-meta span{display:inline-flex;align-items:center;gap:2px}.scard-price{color:#4ade80;font-family:monospace;font-size:10px;direction:ltr}.scard-cat{color:#c084fc;font-size:9px}.scard-unit{color:#64748b;font-size:9px}.scard-result{font-size:10px;font-weight:700;margin-top:2px}.scard-ok{color:#4ade80}.scard-up{color:#facc15}.scard-skip{color:#94a3b8}.scard-fail{color:#f87171}.scard.scard-ok{border-left:3px solid #4ade80}.scard.scard-up{border-left:3px solid #facc15}.scard.scard-skip{border-left:3px solid #94a3b8}.scard.scard-fail{border-left:3px solid #f87171}.scard-err{color:#f87171;font-size:9px;margin-top:2px;direction:rtl;background:#7f1d1d20;padding:1px 6px;border-radius:3px}.scard-reason{color:#fbbf24;font-size:9px;margin-top:2px;direction:rtl;background:#42200620;padding:1px 6px;border-radius:3px}.scard-rid{color:#60a5fa;font-size:9px;direction:ltr}.ssum{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:10px}.ssum .si{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.ssum .si b{font-size:18px;display:block}.ssum .si span{color:#64748b;font-size:10px}@media(min-width:900px){body{padding:16px;padding-bottom:16px}h1{font-size:22px}.main-tabs{position:static;border-top:none;box-shadow:none;background:#1e293b;border:1px solid #334155;border-radius:12px;margin-bottom:14px;padding:3px}.main-tab{padding:12px;border-radius:8px;flex-direction:row;gap:8px;font-size:13px}.main-tab .t-icon{font-size:16px}.main-tab.active{background:#3b82f6}.main-tab .badge{position:static;margin-right:4px;min-width:auto}.visual-container{grid-template-columns:1fr 320px}.grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.btn{padding:10px 16px}.profile-row{flex-wrap:nowrap}}.bsl-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100001;display:flex;align-items:center;justify-content:center;padding:10px}.bsl-modal{background:#0f172a;border:1px solid #334155;border-radius:14px;max-width:95vw;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;width:900px}.bsl-modal-head{padding:12px 16px;background:#1e293b;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between}.bsl-modal-head h2{margin:0;font-size:15px;color:#67e8f9}.bsl-modal-body{overflow:auto;flex:1;padding:8px}.bsl-modal-table{width:100%;border-collapse:collapse;font-size:11px}.bsl-modal-table th{background:#1e293b;color:#67e8f9;padding:8px;text-align:center;font-size:11px;border:1px solid #334155;white-space:nowrap}.bsl-modal-table td{padding:6px 8px;border:1px solid #1e293b;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bsl-modal-table td.td-name{max-width:none;white-space:normal;overflow:visible;line-height:1.4;font-size:12px;direction:rtl;unicode-bidi:plaintext}.bsl-modal-table tr:hover td{background:#1e293b80}.bsl-modal-table .td-id{color:#94a3b8;font-family:monospace;text-align:center}.bsl-modal-table .td-price{color:#fbbf24;font-family:monospace;text-align:center;direction:ltr}.bsl-modal-table .td-stock{color:#22c55e;text-align:center}.bsl-modal-table .td-status{text-align:center}.bsl-modal-table .td-img{width:40px;height:40px;object-fit:cover;border-radius:4px}.bsl-modal-pager{padding:8px 16px;background:#1e293b;border-top:1px solid #334155;display:flex;align-items:center;justify-content:center;gap:8px}.bsl-tabs{display:flex;gap:2px;padding:0 12px;background:#1e293b;border-bottom:1px solid #334155;flex-wrap:wrap;direction:rtl}.bsl-tab{padding:6px 12px;font-size:11px;color:#94a3b8;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap;border-radius:6px 6px 0 0}.bsl-tab:hover{color:#e2e8f0;background:#334155}.bsl-tab.active{color:#67e8f9;border-bottom-color:#67e8f9;background:#0f172a;font-weight:700}.bsl-tab .tab-count{font-size:9px;color:#64748b;margin-right:2px}.hamburger-btn{position:fixed;top:10px;left:10px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.hamburger-btn:hover{background:#334155}.hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:1;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}.smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}.live-cnt{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:8px 0}.live-cnt .lc{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;cursor:pointer;transition:.15s;display:flex;flex-direction:column;gap:1px}.live-cnt .lc:hover{background:#1e293b;transform:translateY(-1px)}.live-cnt .lc b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.live-cnt .lc span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.live-cnt .lc i{font-size:9px;font-style:normal;font-family:ui-monospace,monospace}@media(max-width:620px){.live-cnt{grid-template-columns:repeat(3,1fr)}}.pdir{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700}.pdir-up{background:#7f1d1d;color:#fca5a5}.pdir-down{background:#14532d;color:#86efac}.pdir-same{background:#334155;color:#94a3b8}.app-ver{display:inline-block;background:#0f172a;border:1px solid #334155;color:#67e8f9;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;font-family:ui-monospace,monospace;cursor:pointer;transition:.15s;vertical-align:middle}.app-ver:hover{border-color:#67e8f9;background:#0e749020}.app-ver.upd{border-color:#f59e0b;color:#fbbf24;background:#42200630;animation:verPulse 2s ease-in-out infinite}@keyframes verPulse{0%,100%{opacity:1}50%{opacity:.55}}.vc-drop{position:absolute;top:100%;left:0;right:0;background:#0f172a;border:1px solid #475569;border-radius:8px;max-height:220px;overflow-y:auto;z-index:60;display:none;margin-top:3px;box-shadow:0 6px 18px rgba(0,0,0,.5)}.vc-drop.open{display:block}.vc-opt{padding:8px 10px;cursor:pointer;font-size:11px;font-family:monospace;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;gap:8px;direction:ltr;text-align:left}.vc-opt:last-child{border-bottom:none}.vc-opt:hover{background:#1e3a5f}.vc-opt .vc-meta{color:#64748b;font-size:10px;flex:0 0 auto}.vc-drop .vc-none{padding:10px;color:#64748b;font-size:11px;text-align:center}.pbadge{display:inline-block;font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:4px;vertical-align:middle}.pb-new{background:#14532d;color:#86efac}.pb-chg{background:#78350f;color:#fcd34d}.rf-btn{background:#1e293b;border:1px solid #334155;color:#94a3b8;font-size:11px;font-family:inherit;padding:5px 10px;border-radius:6px;cursor:pointer;transition:.15s}.rf-btn:hover{background:#334155}.rf-btn.on{background:#1e3a5f;border-color:#3b82f6;color:#93c5fd;font-weight:700}.product.is-new{border-color:#22c55e}.product.is-chg{border-color:#f59e0b}.p2-card{border:1px solid #475569;border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#0f172a}.p2-card.p2-ok{border-color:#22c55e;background:#14532d33}.p2-card.p2-err{border-color:#ef4444;background:#7f1d1d26}.p2-title{font-size:12.5px;font-weight:700;color:#e2e8f0;margin-bottom:3px;line-height:1.6}.p2-id{font-size:10px;color:#64748b;font-family:ui-monospace,monospace}.p2-reason{font-size:10.5px;color:#94a3b8;margin-bottom:8px;line-height:1.6}.p2-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.p2-actions .btn{font-size:11px;padding:5px 10px}.p2-auto{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.p2-hint{font-size:10.5px;color:#fbbf24}.p2-search{position:relative;flex:1;min-width:170px;max-width:280px}.p2-search input[type=text]{width:100%;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:11px;direction:rtl}.p2-list{display:none;position:absolute;top:100%;left:0;right:0;max-height:200px;overflow-y:auto;background:#1e293b;border:1px solid #475569;border-radius:6px;z-index:100002;direction:rtl}.p2-status{margin-top:6px;font-size:11px}.p2-ai{margin-top:5px;font-size:10.5px;line-height:1.9}.p2-ok-txt{color:#4ade80;font-weight:700}.p2-err-txt{color:#fca5a5}.rc-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:6px}.rc-cell{background:#111c31;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;display:flex;flex-direction:column;gap:2px}.rc-cell b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.rc-cell span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rc-cell.rc-on{cursor:pointer;transition:.15s}.rc-cell.rc-on:hover{background:#1e293b;border-color:#60a5fa;transform:translateY(-1px)}.sfx-card{display:flex;gap:10px;align-items:flex-start;background:#111c31;border:1px solid #334155;border-radius:8px;padding:9px;margin-bottom:7px}.sfx-pie{flex:0 0 auto;line-height:0}.sfx-info{flex:1;min-width:0}.sfx-name{color:#e2e8f0;font-weight:700;margin-bottom:3px;line-height:1.6}.sfx-sfx{color:#67e8f9;font-size:10px;font-weight:400}.sfx-total{color:#94a3b8;margin-bottom:4px}.sfx-row{display:flex;align-items:center;gap:6px;line-height:1.9}.sfx-row i{width:9px;height:9px;border-radius:2px;flex:0 0 auto;display:inline-block}.sfx-row span{color:#cbd5e1}.sfx-row b{color:#e2e8f0;font-family:ui-monospace,monospace}.sfx-row .sfx-pct{color:#64748b;font-size:10px;margin-right:auto}@media(max-width:620px){.sfx-card{flex-direction:column;align-items:center;text-align:center}.sfx-row{justify-content:center}.sfx-row .sfx-pct{margin-right:6px}}@media(max-width:620px){.rc-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:620px){.p2-actions{flex-direction:column;align-items:stretch}.p2-search{max-width:none}.p2-auto{max-width:none}}</style>
+<style>
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}body{font-family:Tahoma,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:12px;padding-bottom:90px;padding-top:56px;direction:rtl}.container{max-width:1400px;margin:0 auto}h1{font-size:18px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}input,select{background:#0f172a;border:1px solid #475569;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%}input[type="checkbox"]{width:auto}select{min-width:90px;width:auto}
+.btn{padding:11px 14px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;transition:.15s;white-space:nowrap}.btn:hover{opacity:.9}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:not-allowed}.btn-blue{background:linear-gradient(135deg,#3b82f6,#06b6d4);color:#000}.btn-red{background:#ef4444;color:#fff}.btn-green{background:#22c55e;color:#000}.btn-purple{background:#a855f7;color:#fff}.btn-orange{background:#f97316;color:#000}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:#eab308;color:#000}.btn-cyan{background:#06b6d4;color:#000}.btn-teal{background:#14b8a6;color:#000}.btn-pink{background:#ec4899;color:#fff}.btn-indigo{background:#6366f1;color:#fff}.hidden{display:none!important}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.stat{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.stat b{font-size:20px;display:block}.stat span{color:#64748b;font-size:10px}.progress{height:5px;background:#334155;border-radius:5px;margin:10px 0;overflow:hidden}.progress-bar{height:100%;background:linear-gradient(90deg,#3b82f6,#a855f7);width:0;transition:.3s}.progress-bar.pink{background:linear-gradient(90deg,#ec4899,#f59e0b)}.status{color:#94a3b8;font-size:12px;margin-bottom:8px}.logs{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:140px;overflow-y:auto;font-family:monospace;font-size:11px;margin-bottom:10px;direction:ltr;text-align:left}.log{padding:2px 0;border-bottom:1px solid #1e293b}.log-ok{color:#4ade80}.log-err{color:#f87171}.log-info{color:#60a5fa}.log-detail{color:#f0abfc}
+.main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #334155;display:flex;z-index:1000;box-shadow:0 -4px 20px rgba(0,0,0,.5);padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:10px 4px 8px;border:none;background:transparent;color:#64748b;font-size:11px;font-family:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative;transition:color .2s}.main-tab .t-icon{font-size:20px}.main-tab .t-label{font-weight:600}.main-tab.active{color:#3b82f6;background:#1e293b}.main-tab .badge{position:absolute;top:4px;right:calc(50% - 20px);background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:10px;min-width:16px;text-align:center}.main-tab .badge.ok{background:#22c55e;color:#000}.tab-pane{display:none;animation:fadeIn .3s ease}.tab-pane.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.sub-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.sub-tab.active{background:#3b82f6;color:#000}.mode-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.mode-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.mode-tab.active{background:#3b82f6;color:#000}.visual-container{display:grid;grid-template-columns:1fr;gap:14px}
+.iframe-wrap{background:#0f172a;border:1px solid #334155;border-radius:0 0 10px 10px;overflow:auto;height:600px;position:relative;resize:vertical;min-height:300px;max-height:95vh}.iframe-wrap iframe{width:100%;height:100%;border:none;background:#fff;min-height:100%}.iframe-wrap .if-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:13px}.iframe-size-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#1e293b;border:1px solid #334155;border-radius:10px 10px 0 0;font-size:12px;color:#94a3b8}.iframe-size-bar input[type=range]{flex:1;cursor:pointer}.iframe-size-bar .size-val{color:#67e8f9;font-weight:700;min-width:50px;text-align:center;font-size:13px}.iframe-size-bar label{cursor:pointer;color:#94a3b8}.selector-panel{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px}
+.selector-panel h3{margin:0 0 10px;font-size:14px;color:#67e8f9}.sel-item{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.sel-item.has{border-color:#22c55e;background:#14532d20}.sel-item.has label{color:#4ade80}.sel-item label{display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px;color:#94a3b8}.sel-item input{width:100%;font-family:monospace;font-size:11px;padding:6px 8px}.sel-item .sel-preview{font-size:10px;color:#86efac;padding:4px 8px;background:#0f172a;border:1px solid #22c55e;border-radius:4px;margin-top:6px;font-family:Tahoma,sans-serif;word-break:break-word;max-height:60px;overflow:hidden;line-height:1.4}.sel-item .sel-preview.price-prev{color:#fbbf24;border-color:#f59e0b;font-family:monospace;direction:ltr;text-align:left}
+.sel-item .sel-preview.link-prev{color:#a78bfa;border-color:#8b5cf6;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.img-prev{color:#f472b6;border-color:#ec4899;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.empty{color:#fca5a5;border-color:#ef4444;background:#7f1d1d30}.sel-item .sel-actions-row{display:flex;gap:4px;margin-top:6px}.sel-item .sel-actions-row .btn{padding:4px 8px;font-size:10px;flex:1}.sel-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}.suggest-list{max-height:150px;overflow-y:auto;background:#1e293b;border:1px solid #334155;border-radius:6px;margin-top:6px}.suggest-item{padding:8px;font-size:11px;cursor:pointer;font-family:monospace;border-bottom:1px solid #334155}.suggest-item:hover{background:#334155}
+.detail-field{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.detail-field.enabled{border-color:#a855f7;background:#2d1b4e}.detail-field-row{display:flex;gap:8px;align-items:center;margin-bottom:6px}.detail-field-row .fname{flex:0 0 110px;font-size:12px;font-weight:700;color:#c4b5fd}.detail-field-row .ftoggle{flex:0 0 auto}.detail-field-row .fselector{flex:1;font-family:monospace;font-size:11px;padding:6px 8px}.detail-field-meta{font-size:10px;color:#64748b;display:flex;gap:10px;align-items:center}.detail-field-meta .preview{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}.product{background:#1e293b;border:1px solid #334155;border-radius:12px;overflow:hidden}
+.thumb{height:140px;background:linear-gradient(135deg,#1e3a5f,#312e81);display:flex;align-items:center;justify-content:center}.thumb img{width:100%;height:100%;object-fit:cover}.noimg{color:#64748b;font-weight:600;font-size:11px}.pbody{padding:10px}.ptitle{font-weight:700;font-size:12px;margin-bottom:6px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:36px}.pdetail-short{font-size:10px;color:#cbd5e1;line-height:1.4;margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-height:30px}.price{display:inline-block;padding:4px 8px;background:#166534;color:#86efac;border-radius:6px;font-weight:700;font-size:12px;margin-bottom:4px}
+.price-orig{display:block;font-size:10px;color:#64748b;text-decoration:line-through;margin-bottom:4px;direction:ltr;text-align:right;font-family:monospace}.no-price{background:#7f1d1d;color:#fca5a5}.plink{display:block;text-align:center;padding:6px;background:#1e3a5f;border-radius:6px;color:#60a5fa;text-decoration:none;font-weight:600;font-size:11px}.table-wrap{overflow-x:auto;border:1px solid #334155;border-radius:10px}table{width:100%;border-collapse:collapse;font-size:12px;min-width:750px}th,td{padding:8px 10px;text-align:right;border-bottom:1px solid #334155}th{background:#1e3a5f;color:#93c5fd;font-size:10px}.td-orig{color:#94a3b8;text-decoration:line-through;font-size:11px;font-family:monospace;direction:ltr;text-align:right}.td-detail{font-size:10px;color:#cbd5e1;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.text-view{position:relative}
+.text-content{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px;font-family:monospace;font-size:11px;white-space:pre-wrap;max-height:400px;overflow:auto;direction:ltr;text-align:left}.copy-btn{position:absolute;top:6px;left:6px}.copied{background:#22c55e!important}.alert{padding:10px;border-radius:8px;margin-bottom:10px;font-size:12px}.alert-info{background:#1e3a5f;border:1px solid #3b82f6;color:#93c5fd}.alert-purple{background:#3b0764;border:1px solid #a855f7;color:#e9d5ff}.alert-success{background:#14532d;border:1px solid #22c55e;color:#86efac}.settings-card h3{margin-bottom:12px;font-size:14px;color:#67e8f9}.profile-row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}.profile-row select{flex:2;min-width:150px;font-weight:600}.profile-row input{flex:1;min-width:120px}.profile-row .btn{flex:0 0 auto}
+.profile-indicator{display:inline-block;padding:3px 8px;border-radius:4px;font-size:10px}.saved{background:#14532d;color:#86efac;border:1px solid #22c55e}.unsaved{background:#78350f;color:#fbbf24;border:1px solid #f59e0b}.toast{position:fixed;top:80px;left:50%;transform:translateX(-50%);background:#14532d;color:#86efac;padding:12px 20px;border-radius:8px;border:1px solid #22c55e;box-shadow:0 8px 20px rgba(0,0,0,.5);z-index:99999;font-weight:700;font-size:12px;opacity:0;transition:opacity .3s,top .3s;pointer-events:none;max-width:90%;text-align:center}.toast.show{opacity:1;top:60px}.toast.error{background:#7f1d1d;color:#fca5a5;border-color:#ef4444}.row label{color:#94a3b8;font-size:12px;min-width:80px;display:flex;align-items:center}input[type="checkbox"]{margin-left:5px}.section-title{font-size:13px;color:#67e8f9;margin-bottom:8px;font-weight:700;display:flex;align-items:center;gap:6px}
+.section-title.purple{color:#c4b5fd}.empty-state{text-align:center;padding:40px 20px;color:#64748b}.empty-state .icon{font-size:48px;margin-bottom:10px;opacity:.5}.empty-state p{font-size:13px}.switch{position:relative;display:inline-block;width:36px;height:20px}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;inset:0;background:#475569;transition:.2s;border-radius:20px}.slider:before{position:absolute;content:"";height:14px;width:14px;right:3px;bottom:3px;background:#fff;transition:.2s;border-radius:50%}input:checked+.slider{background:#a855f7}input:checked+.slider:before{transform:translateX(-16px)}.cc{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.cc.wc{border-color:#7c3aed}.cc.bs{border-color:#0891b2}.cch{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;cursor:pointer}
+.cch h3{font-size:14px;margin:0;display:flex;align-items:center;gap:6px}.ccb{overflow:hidden}.ccb.collapsed{max-height:0!important;padding:0;margin:0;overflow:hidden}.cst{display:inline-block;padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700}.cst.on{background:#14532d;color:#86efac}.cst.off{background:#475569;color:#94a3b8}.cst.tg{background:#78350f;color:#fbbf24}.crow{display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap}.crow label{min-width:100px;color:#94a3b8;font-size:12px;flex-shrink:0}.crow input,.crow select{flex:1;min-width:150px}.cact{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.sres{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:500px;overflow-y:auto;font-size:11px;margin-top:10px}.sres .ok2{color:#4ade80;padding:2px 0;border-bottom:1px solid #1e293b}
+.sres .no2{color:#f87171;padding:2px 0;border-bottom:1px solid #1e293b}.sres a{color:#60a5fa;text-decoration:none}.scard{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:8px;margin:4px 0;display:flex;gap:8px;align-items:flex-start;transition:border-color .2s}.scard:hover{border-color:#475569}.scard-img{width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0;background:#0f172a}.scard-noimg{width:48px;height:48px;border-radius:6px;flex-shrink:0;background:#0f172a;display:flex;align-items:center;justify-content:center;color:#475569;font-size:18px}.scard-body{flex:1;min-width:0;direction:rtl}.scard-title{color:#e2e8f0;font-weight:700;font-size:11px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl}.scard-meta{display:flex;gap:6px;flex-wrap:wrap;font-size:10px;margin-bottom:2px;direction:rtl}
+.scard-meta span{display:inline-flex;align-items:center;gap:2px}.scard-price{color:#4ade80;font-family:monospace;font-size:10px;direction:ltr}.scard-cat{color:#c084fc;font-size:9px}.scard-unit{color:#64748b;font-size:9px}.scard-result{font-size:10px;font-weight:700;margin-top:2px}.scard-ok{color:#4ade80}.scard-up{color:#facc15}.scard-skip{color:#94a3b8}.scard-fail{color:#f87171}.scard.scard-ok{border-left:3px solid #4ade80}.scard.scard-up{border-left:3px solid #facc15}.scard.scard-skip{border-left:3px solid #94a3b8}.scard.scard-fail{border-left:3px solid #f87171}.scard-err{color:#f87171;font-size:9px;margin-top:2px;direction:rtl;background:#7f1d1d20;padding:1px 6px;border-radius:3px}.scard-reason{color:#fbbf24;font-size:9px;margin-top:2px;direction:rtl;background:#42200620;padding:1px 6px;border-radius:3px}.scard-rid{color:#60a5fa;font-size:9px;direction:ltr}
+.ssum{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:10px}.ssum .si{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.ssum .si b{font-size:18px;display:block}.ssum .si span{color:#64748b;font-size:10px}@media(min-width:900px){body{padding:16px;padding-bottom:16px}h1{font-size:22px}.main-tabs{position:static;border-top:none;box-shadow:none;background:#1e293b;border:1px solid #334155;border-radius:12px;margin-bottom:14px;padding:3px}.main-tab{padding:12px;border-radius:8px;flex-direction:row;gap:8px;font-size:13px}.main-tab .t-icon{font-size:16px}.main-tab.active{background:#3b82f6}.main-tab .badge{position:static;margin-right:4px;min-width:auto}.visual-container{grid-template-columns:1fr 320px}.grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.btn{padding:10px 16px}.profile-row{flex-wrap:nowrap}}
+.bsl-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100001;display:flex;align-items:center;justify-content:center;padding:10px}.bsl-modal{background:#0f172a;border:1px solid #334155;border-radius:14px;max-width:95vw;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;width:900px}.bsl-modal-head{padding:12px 16px;background:#1e293b;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between}.bsl-modal-head h2{margin:0;font-size:15px;color:#67e8f9}.bsl-modal-body{overflow:auto;flex:1;padding:8px}.bsl-modal-table{width:100%;border-collapse:collapse;font-size:11px}.bsl-modal-table th{background:#1e293b;color:#67e8f9;padding:8px;text-align:center;font-size:11px;border:1px solid #334155;white-space:nowrap}
+.bsl-modal-table td{padding:6px 8px;border:1px solid #1e293b;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bsl-modal-table td.td-name{max-width:none;white-space:normal;overflow:visible;line-height:1.4;font-size:12px;direction:rtl;unicode-bidi:plaintext}.bsl-modal-table tr:hover td{background:#1e293b80}.bsl-modal-table .td-id{color:#94a3b8;font-family:monospace;text-align:center}.bsl-modal-table .td-price{color:#fbbf24;font-family:monospace;text-align:center;direction:ltr}.bsl-modal-table .td-stock{color:#22c55e;text-align:center}.bsl-modal-table .td-status{text-align:center}.bsl-modal-table .td-img{width:40px;height:40px;object-fit:cover;border-radius:4px}.bsl-modal-pager{padding:8px 16px;background:#1e293b;border-top:1px solid #334155;display:flex;align-items:center;justify-content:center;gap:8px}
+.bsl-tabs{display:flex;gap:2px;padding:0 12px;background:#1e293b;border-bottom:1px solid #334155;flex-wrap:wrap;direction:rtl}.bsl-tab{padding:6px 12px;font-size:11px;color:#94a3b8;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap;border-radius:6px 6px 0 0}.bsl-tab:hover{color:#e2e8f0;background:#334155}.bsl-tab.active{color:#67e8f9;border-bottom-color:#67e8f9;background:#0f172a;font-weight:700}.bsl-tab .tab-count{font-size:9px;color:#64748b;margin-right:2px}.hamburger-btn{position:fixed;top:10px;left:10px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.hamburger-btn:hover{background:#334155}
+.hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:1;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}
+.smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}.live-cnt{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:8px 0}.live-cnt .lc{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;cursor:pointer;transition:.15s;display:flex;flex-direction:column;gap:1px}
+.live-cnt .lc:hover{background:#1e293b;transform:translateY(-1px)}.live-cnt .lc b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.live-cnt .lc span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.live-cnt .lc i{font-size:9px;font-style:normal;font-family:ui-monospace,monospace}@media(max-width:620px){.live-cnt{grid-template-columns:repeat(3,1fr)}}.pdir{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700}.pdir-up{background:#7f1d1d;color:#fca5a5}.pdir-down{background:#14532d;color:#86efac}.pdir-same{background:#334155;color:#94a3b8}.app-ver{display:inline-block;background:#0f172a;border:1px solid #334155;color:#67e8f9;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;font-family:ui-monospace,monospace;cursor:pointer;transition:.15s;vertical-align:middle}
+.app-ver:hover{border-color:#67e8f9;background:#0e749020}.app-ver.upd{border-color:#f59e0b;color:#fbbf24;background:#42200630;animation:verPulse 2s ease-in-out infinite}@keyframes verPulse{0%,100%{opacity:1}50%{opacity:.55}}.vc-drop{position:absolute;top:100%;left:0;right:0;background:#0f172a;border:1px solid #475569;border-radius:8px;max-height:220px;overflow-y:auto;z-index:60;display:none;margin-top:3px;box-shadow:0 6px 18px rgba(0,0,0,.5)}.vc-drop.open{display:block}.vc-opt{padding:8px 10px;cursor:pointer;font-size:11px;font-family:monospace;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;gap:8px;direction:ltr;text-align:left}.vc-opt:last-child{border-bottom:none}.vc-opt:hover{background:#1e3a5f}.vc-opt .vc-meta{color:#64748b;font-size:10px;flex:0 0 auto}.vc-drop .vc-none{padding:10px;color:#64748b;font-size:11px;text-align:center}
+.pbadge{display:inline-block;font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:4px;vertical-align:middle}.pb-new{background:#14532d;color:#86efac}.pb-chg{background:#78350f;color:#fcd34d}.rf-btn{background:#1e293b;border:1px solid #334155;color:#94a3b8;font-size:11px;font-family:inherit;padding:5px 10px;border-radius:6px;cursor:pointer;transition:.15s}.rf-btn:hover{background:#334155}.rf-btn.on{background:#1e3a5f;border-color:#3b82f6;color:#93c5fd;font-weight:700}.product.is-new{border-color:#22c55e}.product.is-chg{border-color:#f59e0b}.p2-card{border:1px solid #475569;border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#0f172a}.p2-card.p2-ok{border-color:#22c55e;background:#14532d33}.p2-card.p2-err{border-color:#ef4444;background:#7f1d1d26}.p2-title{font-size:12.5px;font-weight:700;color:#e2e8f0;margin-bottom:3px;line-height:1.6}
+.p2-id{font-size:10px;color:#64748b;font-family:ui-monospace,monospace}.p2-reason{font-size:10.5px;color:#94a3b8;margin-bottom:8px;line-height:1.6}.p2-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.p2-actions .btn{font-size:11px;padding:5px 10px}.p2-auto{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.p2-hint{font-size:10.5px;color:#fbbf24}.p2-search{position:relative;flex:1;min-width:170px;max-width:280px}.p2-search input[type=text]{width:100%;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:11px;direction:rtl}.p2-list{display:none;position:absolute;top:100%;left:0;right:0;max-height:200px;overflow-y:auto;background:#1e293b;border:1px solid #475569;border-radius:6px;z-index:100002;direction:rtl}.p2-status{margin-top:6px;font-size:11px}.p2-ai{margin-top:5px;font-size:10.5px;line-height:1.9}
+.p2-ok-txt{color:#4ade80;font-weight:700}.p2-err-txt{color:#fca5a5}.rc-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:6px}.rc-cell{background:#111c31;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;display:flex;flex-direction:column;gap:2px}.rc-cell b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.rc-cell span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rc-cell.rc-on{cursor:pointer;transition:.15s}.rc-cell.rc-on:hover{background:#1e293b;border-color:#60a5fa;transform:translateY(-1px)}.sfx-card{display:flex;gap:10px;align-items:flex-start;background:#111c31;border:1px solid #334155;border-radius:8px;padding:9px;margin-bottom:7px}.sfx-pie{flex:0 0 auto;line-height:0}.sfx-info{flex:1;min-width:0}.sfx-name{color:#e2e8f0;font-weight:700;margin-bottom:3px;line-height:1.6}
+.sfx-sfx{color:#67e8f9;font-size:10px;font-weight:400}.sfx-total{color:#94a3b8;margin-bottom:4px}.sfx-row{display:flex;align-items:center;gap:6px;line-height:1.9}.sfx-row i{width:9px;height:9px;border-radius:2px;flex:0 0 auto;display:inline-block}.sfx-row span{color:#cbd5e1}.sfx-row b{color:#e2e8f0;font-family:ui-monospace,monospace}.sfx-row .sfx-pct{color:#64748b;font-size:10px;margin-right:auto}@media(max-width:620px){.sfx-card{flex-direction:column;align-items:center;text-align:center}.sfx-row{justify-content:center}.sfx-row .sfx-pct{margin-right:6px}}@media(max-width:620px){.rc-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:620px){.p2-actions{flex-direction:column;align-items:stretch}.p2-search{max-width:none}.p2-auto{max-width:none}}
+</style>
 </head>
 <body>
 <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleSettingsPanel()">☰</button>
@@ -15086,10 +15340,50 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
         </div>
     </div>
 
+    <!-- v8.68: کنترل‌های انتخاب، بیرون از پنجرهٔ پیش‌نمایش.
+         قبلاً یک نوار ثابت داخل خودِ صفحهٔ محصول بود و بخش زیادی از
+         ارتفاع را می‌گرفت؛ در ارتفاع کم عملاً چیزی برای کلیک نمی‌ماند. -->
+    <div class="card hidden" id="pickerPanel" style="margin-top:14px;border-color:#a855f7;padding:10px">
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:7px">
+            <label style="flex:0 0 auto;font-size:11px;color:#c4b5fd;font-weight:700">🎯 انتخاب:</label>
+            <select id="pkMode" onchange="pkSetMode(this.value)" style="flex:1;min-width:170px">
+                <option value="shortDesc">📝 توضیحات کوتاه</option>
+                <option value="longDesc">📄 توضیحات بلند</option>
+                <option value="sku">🏷️ SKU</option>
+                <option value="category">📂 دسته‌بندی</option>
+                <option value="tags">🔖 برچسب‌ها</option>
+                <option value="weight">⚖️ وزن</option>
+                <option value="stock">📦 موجودی</option>
+                <option value="brand">🏭 برند</option>
+                <option value="variations">🎨 تنوع‌ها (رنگ/سایز)</option>
+                <option value="galleryBox">🖼 باکس گالری (همهٔ عکس‌ها)</option>
+                <option value="galleryOne">➕ افزودن تک‌عکس به گالری</option>
+                <option value="image">🌆 عکس اصلی</option>
+            </select>
+            <button class="btn btn-green" onclick="pkDone()" style="flex:0 0 auto;font-size:11px;padding:7px 12px">✅ اتمام</button>
+            <button class="btn btn-gray"  onclick="pkClose()" style="flex:0 0 auto;font-size:11px;padding:7px 10px">✕</button>
+        </div>
+        <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+            <button class="btn btn-purple" id="pkUp"   onclick="pkGo('up')"   style="font-size:11px;padding:6px 10px" title="عنصر والد">⬆ والد</button>
+            <button class="btn btn-purple" id="pkDown" onclick="pkGo('down')" style="font-size:11px;padding:6px 10px" title="اولین فرزند">⬇ فرزند</button>
+            <button class="btn btn-purple" id="pkPrev" onclick="pkGo('prev')" style="font-size:11px;padding:6px 10px" title="هم‌سطح قبلی">◀ قبلی</button>
+            <button class="btn btn-purple" id="pkNext" onclick="pkGo('next')" style="font-size:11px;padding:6px 10px" title="هم‌سطح بعدی">بعدی ▶</button>
+            <button class="btn btn-gray" id="pkClearGal" onclick="pkClearGal()" style="font-size:11px;padding:6px 10px;display:none">🗑 پاک کردن عکس‌ها</button>
+            <span id="pkCnt" style="font-size:11px;color:#f9a8d4;font-weight:700"></span>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <code id="pkSel" style="flex:1;min-width:150px;background:#0f172a;color:#f0abfc;padding:5px 8px;border-radius:6px;font-size:11px;direction:ltr;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">—</code>
+            <span id="pkTag" style="background:#4c1d95;color:#e9d5ff;padding:3px 8px;border-radius:4px;font-size:10px;font-family:monospace">-</span>
+        </div>
+        <div id="pkPrev2" style="margin-top:6px;font-size:11px;color:#86efac;background:#0f172a;border:1px solid #22c55e;border-radius:6px;padding:5px 8px;min-height:26px;word-break:break-word">در انتظار انتخاب...</div>
+        <div id="pkHint" style="margin-top:5px;font-size:10.5px;color:#94a3b8;line-height:1.8">روی هر بخش از صفحهٔ زیر کلیک کنید. با <b>⬆ والد</b> می‌توانید ظرف بزرگ‌تر را بگیرید.</div>
+    </div>
+
     <div class="iframe-size-bar" style="margin-top:14px">
         <span>📏 ارتفاع:</span>
-        <input type="range" id="detailIframeSlider" min="300" max="1200" value="600" step="50" oninput="setDetailIframeHeight(this.value)">
-        <span class="size-val" id="detailIframeSizeVal">600</span>
+        <input type="range" id="detailIframeSlider" min="300" max="2400" value="900" step="50" oninput="setDetailIframeHeight(this.value)">
+        <span class="size-val" id="detailIframeSizeVal">900</span>
+        <button class="btn btn-gray" onclick="setDetailIframeHeight(Math.max(300,(window.innerHeight-160)))" style="font-size:10px;padding:4px 8px">📐 اندازهٔ پنجره</button>
     </div>
     <div class="iframe-wrap hidden" id="detailFrameWrap">
         <iframe id="detailFrame"></iframe>
@@ -15235,7 +15529,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="section-title" style="color:#22d3ee">🔄 سینک دوره‌ای (همگام‌سازی خودکار)</div>
 <div class="alert alert-info" style="margin-bottom:8px;font-size:11px">💡 هر پروفایل می‌تواند سینک دوره‌ای خود را داشته باشد. تنظیمات سینک در تب «شروع» بخش پروفایل انجام می‌شود.<br>
 🔗 برای فعال‌سازی سینک خودکار از سرور، یک <b>cron job</b> به آدرس زیر اضافه کنید:<br>
-<code style="background:#0f172a;padding:2px 8px;border-radius:4px;font-size:10px;direction:ltr">*/5 * * * * curl -s "https://yourdomain.com/scraper-v8.22.php?cron_run" > /dev/null</code>
+<code style="background:#0f172a;padding:2px 8px;border-radius:4px;font-size:10px;direction:ltr">*/5 * * * * curl -s "https://yourdomain.com/scraper4.php?cron_run" > /dev/null</code>
 </div>
 <div id="syncProfilesList" style="margin-bottom:10px"></div>
 <div class="cact">
@@ -15402,6 +15696,10 @@ const DETAIL_FIELDS = [
     // پشتیبانی می‌کردند ولی هیچ‌جا در رابط کاربری قابل تنظیم نبود، پس عملاً
     // مرده بود. برای صفحاتی که عکس اصلی فقط در صفحهٔ محصول است لازم است.
     {key:'image',     label:'عکس اصلی',        icon:'🌆'},
+    // v8.68: تنوع‌ها (variations) — مثل رنگ و سایز. یک سلکتور به ظرفی
+    // می‌دهید که گزینه‌ها داخلش هستند (select، رادیو، یا فهرست دکمه‌ای)
+    // و همهٔ مقادیر برداشته می‌شوند.
+    {key:'variations',label:'تنوع‌ها (رنگ/سایز)', icon:'🎨', multi:true},
 ];
 let detailSel = {};
 DETAIL_FIELDS.forEach(f => detailSel[f.key] = {enabled:false, selector:''});
@@ -15783,14 +16081,21 @@ function openDetailProxy() {
     const sampleUrl = detailSampleUrl();
     if (!sampleUrl) return;
     $('detailFrameWrap').classList.remove('hidden');
+    // v8.68: پنل کنترل بیرونی هم باز شود
+    const pp = $('pickerPanel'); if (pp) pp.classList.remove('hidden');
+    // ارتفاع پیش‌فرض را به اندازهٔ پنجره بزرگ کن تا فضای کلیک کم نباشد
+    setDetailIframeHeight(Math.max(500, window.innerHeight - 160));
     $('detailFrame').src = '?detail_proxy=' + encodeURIComponent(sampleUrl);
     $('detailStatus').textContent = '⏳ در حال باز کردن صفحهٔ نمونه...';
     switchMainTab('selectors');
     // v8.66: اگر پروکسی خطا بدهد، iframe سفید می‌ماند و کاربر نمی‌فهمد چه شد
     const fr = $('detailFrame');
-    fr.onload = () => { $('detailStatus').textContent = '✓ روی فیلدهای دلخواه کلیک کنید — برای گالری، حالت 🖼 را از فهرست بالای صفحه انتخاب کنید'; };
+    fr.onload = () => {
+        $('detailStatus').textContent = '✓ نوع فیلد را از پنل بالا انتخاب کنید، بعد روی صفحه کلیک کنید';
+        pkSetMode(($('pkMode') || {}).value || 'shortDesc');
+    };
     fr.onerror = () => { $('detailStatus').textContent = '✗ صفحهٔ نمونه باز نشد'; };
-    setTimeout(() => $('detailFrameWrap').scrollIntoView({behavior:'smooth',block:'center'}), 200);
+    setTimeout(() => { const p = $('pickerPanel') || $('detailFrameWrap'); p.scrollIntoView({behavior:'smooth',block:'start'}); }, 200);
 }
 
 function suggestDetailSelectors() {
@@ -15941,23 +16246,60 @@ function renderProfileDropdown() {
 }
 renderProfileDropdown();
 
+/* =====================================================================
+ *  v8.68: آخرین پروفایل باز، پیش‌فرض دفعهٔ بعد
+ *
+ *  تا اینجا هر بار صفحه رفرش می‌شد، فهرست خالی بود و باید دوباره
+ *  پروفایل را از کشویی انتخاب می‌کردید. آدرس آخرین پروفایل در همین
+ *  مرورگر ذخیره می‌شود (نه روی سرور، چون به کاربر و دستگاه مربوط است)
+ *  و موقع باز شدن دوباره بارگذاری می‌شود.
+ * ===================================================================== */
+const LAST_PROFILE_KEY = 'scraper_last_profile_url';
+
+function rememberProfile(url) {
+    try { if (url) localStorage.setItem(LAST_PROFILE_KEY, url); } catch (e) {}
+}
+function forgetProfile() {
+    try { localStorage.removeItem(LAST_PROFILE_KEY); } catch (e) {}
+}
+function lastProfileUrl() {
+    try { return localStorage.getItem(LAST_PROFILE_KEY) || ''; } catch (e) { return ''; }
+}
+
+/** موقع باز شدن صفحه، آخرین پروفایل را برگردان */
+function restoreLastProfile() {
+    const url = lastProfileUrl();
+    if (!url) return;
+    // فقط اگر هنوز در فهرست پروفایل‌ها هست (ممکن است حذف شده باشد)
+    if (!profiles.some(p => p.url === url)) { forgetProfile(); return; }
+    const sel = $('profileSelect');
+    if (sel) sel.value = url;
+    $('url').value = url;
+    loadProfileFromServer(url, true);
+}
+
 function selectProfile(url) {
     if (!url) return;
     $('url').value = url;
+    rememberProfile(url);
     loadProfileFromServer(url);
 }
 
-function loadProfileFromServer(url) {
+function loadProfileFromServer(url, silent) {
     fetch('?load_profile=' + encodeURIComponent(url))
         .then(r => r.json())
         .then(d => {
             if (d.ok && d.profile) {
                 applyProfile(d.profile);
-            } else {
+                rememberProfile(url);            // v8.68
+                if (silent) showToast('↩ آخرین پروفایل بازیابی شد: ' + (d.profile.name || url));
+            } else if (!silent) {
                 showToast('پروفایل یافت نشد', true);
+            } else {
+                forgetProfile();                 // پروفایل دیگر نیست
             }
         })
-        .catch(() => showToast('خطا در بارگذاری', true));
+        .catch(() => { if (!silent) showToast('خطا در بارگذاری', true); });
 }
 
 function applyProfile(p) {
@@ -16254,6 +16596,7 @@ function deleteProfile() {
                 profiles = profiles.filter(p => p.url !== url);
                 renderProfileDropdown();
                 $('profileSelect').value = '';
+                if (lastProfileUrl() === url) forgetProfile();   // v8.68
                 currentProfileKey = null;
                 const s = $('profileStatus');
                 s.textContent = 'جدید';
@@ -16277,7 +16620,57 @@ function setMode(m){
   }
 }
 
-function setDetailIframeHeight(h){const w=$('detailFrameWrap');if(!w)return;w.style.height=h+'px';$('detailIframeSizeVal').textContent=h;}
+function setDetailIframeHeight(h){const w=$('detailFrameWrap');if(!w)return;h=Math.max(300,parseInt(h)||600);w.style.height=h+'px';$('detailIframeSizeVal').textContent=toFa(h);const s=$('detailIframeSlider');if(s&&String(s.value)!==String(h))s.value=h;}
+
+/* =====================================================================
+ *  v8.68: کنترل‌های انتخابگر، بیرون از پنجرهٔ پیش‌نمایش
+ *
+ *  نوار قبلی داخل خودِ iframe بود و با padding-top حدود ۱۳۰ پیکسل از
+ *  ارتفاع صفحهٔ محصول را می‌خورد. حالا کنترل‌ها در پنل والد هستند و از
+ *  طریق postMessage با صفحه حرف می‌زنند.
+ * ===================================================================== */
+function pkFrame(){ const f=$('detailFrame'); return f&&f.contentWindow?f.contentWindow:null; }
+function pkSend(type,extra){ const w=pkFrame(); if(w)try{w.postMessage(Object.assign({type},extra||{}),'*');}catch(e){} }
+
+function pkSetMode(m){
+  pkSend('picker_mode',{mode:m});
+  const hints={
+    galleryBox:'🖼 روی ظرفی کلیک کنید که همهٔ عکس‌ها داخلش هستند (نه خود عکس). با ⬆ والد بزرگ‌ترش کنید تا همهٔ عکس‌ها صورتی شوند.',
+    galleryOne:'➕ روی هر عکسی که می‌خواهید کلیک کنید — چند بار. هر کدام به فهرست اضافه می‌شود.',
+    variations:'🎨 روی ظرفی کلیک کنید که گزینه‌های رنگ یا سایز داخلش هستند (select، دکمه‌ها یا فهرست).',
+    image:'🌆 روی عکس اصلی محصول کلیک کنید.'
+  };
+  const h=$('pkHint');
+  if(h)h.innerHTML=hints[m]||'روی هر بخش از صفحهٔ زیر کلیک کنید. با <b>⬆ والد</b> می‌توانید ظرف بزرگ‌تر را بگیرید.';
+  const cg=$('pkClearGal'); if(cg)cg.style.display=(m==='galleryOne')?'':'none';
+}
+function pkGo(dir){ pkSend('picker_go',{dir}); }
+function pkClearGal(){ pkSend('picker_clear_gal',{}); }
+function pkDone(){ pkSend('picker_done',{}); }
+function pkClose(){
+  $('detailFrameWrap').classList.add('hidden');
+  $('detailFrame').src='about:blank';
+  const p=$('pickerPanel'); if(p)p.classList.add('hidden');
+}
+
+/** وضعیتی که iframe گزارش می‌دهد را روی پنل می‌نشاند */
+function pkApplyState(st){
+  const set=(id,v)=>{const e=$(id);if(e)e.textContent=v;};
+  set('pkSel', st.sel||'—');
+  set('pkTag', st.tag||'-');
+  set('pkPrev2', st.preview||'(خالی)');
+  const c=$('pkPrev2');
+  if(c)c.style.color=st.preview?'#86efac':'#fbbf24';
+  let cnt='';
+  if(st.mode==='galleryBox')      cnt='🖼 '+toFa(st.imgs||0)+' عکس'+((st.matches||0)>1?(' · '+toFa(st.matches)+' ظرف'):'');
+  else if(st.mode==='galleryOne') cnt='➕ '+toFa(st.imgs||0)+' عکس · '+toFa((st.gal||[]).length)+' سلکتور';
+  else if((st.matches||0)>1)      cnt='⚠ '+toFa(st.matches)+' تطبیق';
+  set('pkCnt', cnt);
+  const nav=st.nav||{};
+  [['pkUp','up'],['pkDown','down'],['pkPrev','prev'],['pkNext','next']].forEach(([id,k])=>{
+    const b=$(id); if(b)b.disabled=!nav[k];
+  });
+}
 function setIframeHeight(h){const w=$('iframeWrap');if(!w)return;w.style.height=h+'px';$('iframeSizeVal').textContent=h;scheduleSave();}
 function loadVisual(){
   const url=$('url').value.trim();
@@ -16373,6 +16766,14 @@ window.addEventListener('message',e=>{
     updateStartVisBtn();
     scheduleSave();
     showToast('✓ سلکتورها دریافت شد');
+  } else if(e.data && e.data.type==='picker_ready'){
+    // v8.68: صفحهٔ نمونه آماده شد — حالت فعلی پنل را به آن بگو
+    pkSetMode(($('pkMode')||{}).value||'shortDesc');
+  } else if(e.data && e.data.type==='picker_state'){
+    pkApplyState(e.data);
+  } else if(e.data && e.data.type==='picker_hint'){
+    if(e.data.msg){const h=$('pkHint');if(h)h.textContent=e.data.msg;}
+    else pkSetMode(($('pkMode')||{}).value||'shortDesc');
   } else if(e.data && e.data.type==='detail_selectors'){
     const data = e.data.data || {};
     let applied = 0, galMsg = '';
@@ -16382,6 +16783,7 @@ window.addEventListener('message',e=>{
             applied++;
         }
     }
+    // v8.68: تنوع‌ها یک فیلد عادی جزئیات است و در حلقهٔ بالا ذخیره می‌شود
     // v8.66: انتخاب‌های گالری به تنظیمات گالری می‌روند، نه به فیلدهای جزئیات
     if (data.galleryBox) {
         galApply(Object.assign(galCollect(), {mode:'auto', box:data.galleryBox}));
@@ -16408,8 +16810,7 @@ window.addEventListener('message',e=>{
   } else if(e.data && e.data.type==='cancel'){
     $('vFrame').src='about:blank';
   } else if(e.data && e.data.type==='cancel_detail'){
-    $('detailFrameWrap').classList.add('hidden');
-    $('detailFrame').src='about:blank';
+    pkClose();
   }
 });
 
@@ -17531,6 +17932,24 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.68', t:'تنوع‌ها، پنل کنترل بیرونی، پروفایل پیش‌فرض و کاهش حساسیت اسکنر هاست', items:[
+    '📄 نام فایل به scraper4.php تغییر کرد؛ مسیر به‌روزرسانی هم خودکار از نام واقعی فایل خوانده می‌شود',
+    '🛡 هاست فایل را حذف می‌کرد: خط ۲۴ کیلوبایتی CSS شکسته شد (قوی‌ترین نشانهٔ «کد مبهم‌سازی‌شده» برای اسکنرها)',
+    'بلندترین خط از ۲۴۷۱۶ به کمتر از ۳۰۰۰ کاراکتر رسید؛ خودِ CSS دست‌نخورده است',
+    'سرآیند توضیحی بالای فایل اضافه شد تا بازبین انسانی هاست بفهمد این ابزار چیست',
+    'راهنمای کامل و متن تیکت برای پشتیبانی هاست در فایل HOST-SECURITY-FA.md',
+    '🎨 «تنوع‌ها» به سلکتورهای صفحهٔ جزئیات اضافه شد — رنگ، سایز و مانند آن',
+    'هر شکلی را می‌فهمد: select با option، فهرست دکمه‌ای، رادیو باتن و برچسب رنگ',
+    'چند گروه با هم پشتیبانی می‌شود (هر خط یک سلکتور) و نام گروه از data-name خوانده می‌شود',
+    'متن‌های راهنما مثل «انتخاب کنید» به‌عنوان تنوع شمرده نمی‌شوند',
+    '🖥 کنترل‌های انتخاب از داخل صفحهٔ نمونه بیرون آمدند و به یک پنل جدا بالای پیش‌نمایش رفتند',
+    'قبلاً نوار کنترل داخل خود صفحه بود و حدود ۱۳۰ پیکسل از ارتفاع را می‌خورد',
+    'حالا فقط یک نوار وضعیت باریک می‌ماند که با ✕ قابل پنهان کردن است',
+    'حداکثر ارتفاع اسلایدر از ۱۲۰۰ به ۲۴۰۰ رسید و دکمهٔ «اندازهٔ پنجره» اضافه شد',
+    'با باز شدن نمونه، ارتفاع خودکار روی اندازهٔ پنجرهٔ شما تنظیم می‌شود',
+    '↩ آخرین پروفایلی که باز کرده‌اید، با رفرش صفحه دوباره بارگذاری می‌شود',
+    'اگر آن پروفایل حذف شده باشد، حافظه خودش پاک می‌شود و خطا نمی‌دهد'
+  ]},
   {v:'8.67', t:'نمایش نسخه داخل انتخابگر، برای تشخیص فایل قدیمی روی هاست', items:[
     '🔢 شمارهٔ نسخه داخل نوار انتخابگر صفحهٔ محصول نوشته می‌شود',
     'اگر گزینه‌های 🖼 گالری را در فهرست نمی‌بینید، یعنی فایل روی هاست هنوز قدیمی است',
@@ -21120,6 +21539,8 @@ function finishBslClient(s,u,k,f,t){
 }
 
 loadConn();
+// v8.68: آخرین پروفایل باز را برگردان
+try{ restoreLastProfile(); }catch(e){}
 // v8.06: Auto-restore WooCommerce progress on page load
 checkWooProgress();
 // v7.48: Offline category matching — apply autoMatchBslCategory to all products
