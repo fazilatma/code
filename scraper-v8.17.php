@@ -49,7 +49,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.66';
+const APP_VERSION = '8.67';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2648,7 +2648,7 @@ body{padding-top:132px!important}
   <span class="__cnt" id="__cnt" style="display:none"></span>
   <span id="__preview" class="__preview">در انتظار انتخاب...</span>
 </div>
-<div class="__hint" id="__hint">روی هر بخش کلیک کنید. با ⬆ والد می‌توانید ظرف بزرگ‌تر را بگیرید.</div>
+<div class="__hint" id="__hint">روی هر بخش کلیک کنید. با ⬆ والد می‌توانید ظرف بزرگ‌تر را بگیرید. <span id="__ver" style="opacity:.65"></span></div>
 </div>
 <script>
 (function(){
@@ -2932,6 +2932,13 @@ __navState();
 })();
 </script>
 SCRIPT;
+
+// v8.67: نسخه را داخل نوار انتخابگر بنویس. اگر کاربر فایل را روی هاست
+// به‌روز نکرده باشد، همین‌جا معلوم می‌شود که نسخهٔ قدیمی باز شده و
+// نبودِ گزینه‌های گالری از همان است، نه از خرابی.
+$script = str_replace('id="__ver" style="opacity:.65">',
+    'id="__ver" style="opacity:.65">v' . APP_VERSION . ' · اگر گزینه‌های 🖼 گالری را نمی‌بینید، فایل روی هاست قدیمی است',
+    $script);
 
 $html = preg_replace('~</body>~i', $script . '</body>', $html);
 if (stripos($html, '</body>') === false) $html .= $script;
@@ -6777,6 +6784,17 @@ if (isset($_GET['selftest'])) {
     }
     $add('8.66', 'آدرس نمونه از یک تابع مشترک می‌آید',
          strpos($selfSrc, 'function detailSample' . 'Url(') !== false);
+
+    /* ---------- v8.67: نسخه داخل انتخابگر ---------- */
+    $add('8.67', 'نسخه در نوار انتخابگر تزریق می‌شود',
+         strpos($selfSrc, 'id="__ver"') !== false
+         && strpos($selfSrc, "'v' . APP_VERSION") !== false);
+    // دکمه‌های حرکت در انتخابگر فهرست هم باید تعریف شده باشند
+    $add('8.67', 'دکمه‌های والد/فرزند انتخابگر فهرست تعریف شده‌اند',
+         strpos($selfSrc, 'window.__go' . 'Parent=function') !== false
+         && strpos($selfSrc, 'window.__go' . 'Child=function') !== false
+         && strpos($selfSrc, 'window.__go' . 'Prev=function') !== false
+         && strpos($selfSrc, 'window.__go' . 'Next=function') !== false);
 
     // v8.62: ویرایش مستقیم محصولات، عکس‌دار کردن، گزارش شبانه
     $add('8.62', 'موتور ویرایش گروهی', function_exists('bulkEditRun') && function_exists('bulkEditMsg'));
@@ -17513,6 +17531,13 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.67', t:'نمایش نسخه داخل انتخابگر، برای تشخیص فایل قدیمی روی هاست', items:[
+    '🔢 شمارهٔ نسخه داخل نوار انتخابگر صفحهٔ محصول نوشته می‌شود',
+    'اگر گزینه‌های 🖼 گالری را در فهرست نمی‌بینید، یعنی فایل روی هاست هنوز قدیمی است',
+    'همان‌جا نوشته می‌شود تا لازم نباشد جای دیگری دنبال علت بگردید',
+    'گزینه‌های گالری و دکمه‌های والد/فرزند از نسخهٔ ۸.۶۶ اضافه شده‌اند',
+    'همهٔ ۵۷ دکمهٔ منوی همبرگری با پاسخ واقعی سرور آزمایش شدند — هیچ خطای JSON یا استثنایی نماند'
+  ]},
   {v:'8.66', t:'بازبینی انتخابگر صفحهٔ جزئیات و رفع تداخل منوی همبرگری', items:[
     '🖼 حالت «باکس گالری» و «افزودن تک‌عکس» به فهرست انتخابگر صفحهٔ محصول اضافه شد',
     'قبلاً گالری فقط با تایپ دستی سلکتور قابل تنظیم بود و در انتخابگر اصلاً نبود',
