@@ -49,7 +49,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.65';
+const APP_VERSION = '8.66';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2613,7 +2613,12 @@ $script = <<<'SCRIPT'
 .__preview{background:#0f172a;padding:6px 10px;border-radius:4px;font-size:11px;color:#86efac;max-width:500px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid #22c55e;font-weight:700}
 .__preview-warn{background:#78350f;color:#fbbf24;border-color:#f59e0b}
 .__preview-err{background:#7f1d1d;color:#fca5a5;border-color:#ef4444}
-body{padding-top:100px!important}
+.__nav{background:#4c1d95!important;padding:6px 9px!important;font-weight:700}
+.__nav:disabled{opacity:.35;cursor:not-allowed}
+.__gal{outline:3px dashed #ec4899!important;outline-offset:1px}
+.__cnt{background:#0f172a;color:#f9a8d4;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:700}
+.__hint{color:#e9d5ff;font-size:11px;padding:0 14px 6px}
+body{padding-top:132px!important}
 </style>
 <div class="__bar">
 <div class="__row">
@@ -2626,27 +2631,89 @@ body{padding-top:100px!important}
     <option value="weight">⚖️ وزن</option>
     <option value="stock">📦 موجودی</option>
     <option value="brand">🏭 برند</option>
+    <option value="galleryBox">🖼 باکس گالری (همهٔ عکس‌ها)</option>
+    <option value="galleryOne">➕ افزودن تک‌عکس به گالری</option>
+    <option value="image">🌆 عکس اصلی</option>
   </select>
   <span class="__sel" id="__sel">کلیک کنید...</span>
   <button class="ok" onclick="__done()">✅ اتمام</button>
   <button class="no" onclick="parent.postMessage({type:'cancel_detail'},'*')">✕</button>
 </div>
 <div class="__row2">
+  <button class="__nav" id="__up"   onclick="__go('up')"    title="انتخاب عنصر والد">⬆ والد</button>
+  <button class="__nav" id="__down" onclick="__go('down')"  title="انتخاب اولین فرزند">⬇ فرزند</button>
+  <button class="__nav" id="__prev" onclick="__go('prev')"  title="عنصر قبلی هم‌سطح">◀ قبلی</button>
+  <button class="__nav" id="__next" onclick="__go('next')"  title="عنصر بعدی هم‌سطح">بعدی ▶</button>
   <span class="__tag" id="__tag">-</span>
+  <span class="__cnt" id="__cnt" style="display:none"></span>
   <span id="__preview" class="__preview">در انتظار انتخاب...</span>
 </div>
+<div class="__hint" id="__hint">روی هر بخش کلیک کنید. با ⬆ والد می‌توانید ظرف بزرگ‌تر را بگیرید.</div>
 </div>
 <script>
 (function(){
 var S={},cur=null,picked=null;
+var GAL=[];   // v8.66: سلکتورهای تک‌عکسِ انتخاب‌شده برای گالری
 
+/**
+ * v8.66: ساخت سلکتور.
+ * ترتیب عوض شد: id قبل از class می‌آید چون یکتاست و قابل اعتمادتر است.
+ * قبلاً اگر عنصری هم id و هم کلاس داشت، کلاس انتخاب می‌شد و روی صفحه‌ای
+ * که چند عنصر همان کلاس را داشتند، سلکتور به عنصر اشتباه می‌خورد.
+ */
 function gs(el){
   if(!el||el.tagName=='BODY'||el.tagName=='HTML')return'';
   var t=el.tagName.toLowerCase();
-  var c=Array.from(el.classList).filter(function(x){return !x.startsWith('__')&&x.length<40});
+  if(el.id&&el.id.length<40&&!/^__/.test(el.id)&&!/^\d/.test(el.id))return t+'#'+el.id;
+  var c=Array.from(el.classList).filter(function(x){
+    // کلاس‌های حالت و کلاس‌های ساخته‌شدهٔ خودمان به درد سلکتور نمی‌خورند
+    return !x.startsWith('__')&&x.length<40&&x.length>1
+      &&!/^(active|open|show|hide|hidden|selected|current|is-|js-|has-)/.test(x);
+  });
   if(c.length)return t+'.'+c.slice(0,3).join('.');
-  if(el.id&&el.id.length<30&&!/^__/.test(el.id))return t+'#'+el.id;
+  // نه id دارد نه کلاس: با والدِ کلاس‌دار مسیر بساز تا یکتا شود
+  var p=el.parentElement,depth=0;
+  while(p&&depth<4){
+    var pc=Array.from(p.classList).filter(function(x){return !x.startsWith('__')&&x.length>1&&x.length<40});
+    if(p.id&&!/^__/.test(p.id))return p.tagName.toLowerCase()+'#'+p.id+' '+t;
+    if(pc.length)return p.tagName.toLowerCase()+'.'+pc[0]+' '+t;
+    p=p.parentElement;depth++;
+  }
   return t;
+}
+
+/** چند تصویر داخل این عنصر هست؟ برای بازخورد باکس گالری */
+function countImgs(el){
+  if(!el)return 0;
+  if(el.tagName==='IMG')return 1;
+  try{ return el.querySelectorAll('img,source,[data-src],[data-large_image]').length; }catch(e){ return 0; }
+}
+
+/** همهٔ عناصری که سلکتور فعلی به آن‌ها می‌خورد — برای نشان دادن دقت انتخاب */
+function countMatch(sel){
+  if(!sel)return 0;
+  try{ return document.querySelectorAll(sel).length; }catch(e){ return 0; }
+}
+
+/**
+ * چند «تصویر» با فهرست سلکتورهای گالری برداشته می‌شود.
+ * سلکتورها ممکن است کلی باشند (مثلاً div.slide img که به هر سه عکس می‌خورد)،
+ * پس شمردن خودِ سلکتورها گمراه‌کننده است — عکس‌های یکتا شمرده می‌شوند.
+ */
+function countGalImgs(list){
+  var seen={},n=0;
+  (list||[]).forEach(function(sel){
+    try{
+      Array.prototype.forEach.call(document.querySelectorAll(sel),function(x){
+        var els=x.tagName==='IMG'?[x]:Array.prototype.slice.call(x.querySelectorAll('img'));
+        els.forEach(function(im){
+          var u=getImageUrl(im)||im.getAttribute('src')||'';
+          if(u&&!seen[u]){seen[u]=1;n++;}
+        });
+      });
+    }catch(e){}
+  });
+  return n;
 }
 
 function extractPrice(t){
@@ -2691,6 +2758,17 @@ function getImageUrl(el){
 
 function getPreview(el, mode){
   if(!el)return '';
+  // v8.66: پیش‌نمایش حالت‌های تصویری
+  if(mode==='galleryBox'){
+    var n=countImgs(el);
+    if(!n)return '';
+    var first=getImageUrl(el);
+    return n+' عکس داخل این ظرف'+(first?(' — نمونه: '+first.split('/').pop().substring(0,40)):'');
+  }
+  if(mode==='galleryOne'||mode==='image'){
+    var u=getImageUrl(el);
+    return u?u.split('/').pop().substring(0,60):'';
+  }
   if(mode==='shortDesc'||mode==='longDesc'){
     var t=(el.textContent||'').replace(/\s+/g,' ').trim();
     return t||'(خالی)';
@@ -2724,14 +2802,86 @@ function selectEl(el){
   if(picked)picked.classList.remove('__s');
   el.classList.add('__s');
   el.classList.remove('__h');
-  picked=el;S[m]=s;
+  picked=el;
+
+  // v8.66: حالت‌های گالری جداگانه ذخیره می‌شوند
+  if(m==='galleryOne'){
+    if(GAL.indexOf(s)<0)GAL.push(s);
+    S.galleryOne=GAL.join('\n');
+  }else{
+    S[m]=s;
+  }
+
   document.getElementById('__sel').textContent=s;
   document.getElementById('__tag').textContent=el.tagName.toLowerCase()+(el.className?' .'+Array.from(el.classList).slice(0,2).join('.'):'');
+  __paintGallery(m);
+  __navState();
+
+  // شمارندهٔ عکس/تطبیق
+  var cntEl=document.getElementById('__cnt');
+  var nMatch=countMatch(s);
+  if(m==='galleryBox'){
+    var n=countImgs(el);
+    cntEl.style.display='';
+    cntEl.textContent='🖼 '+n+' عکس'+(nMatch>1?(' · سلکتور به '+nMatch+' ظرف می‌خورد'):'');
+  }else if(m==='galleryOne'){
+    cntEl.style.display='';
+    cntEl.textContent='➕ '+countGalImgs(GAL)+' عکس · '+GAL.length+' سلکتور';
+  }else{
+    cntEl.style.display=nMatch>1?'':'none';
+    cntEl.textContent=nMatch>1?('⚠ '+nMatch+' تطبیق'):'';
+  }
 
   var preview=getPreview(el,m);
   var previewEl=document.getElementById('__preview');
   previewEl.textContent=(preview||'(خالی)').substring(0,150);
   previewEl.className='__preview '+(preview?'':'__preview-warn');
+}
+
+/** رنگ‌آمیزی تصاویری که با انتخاب فعلی برداشته می‌شوند */
+function __paintGallery(m){
+  Array.prototype.forEach.call(document.querySelectorAll('.__gal'),function(x){x.classList.remove('__gal');});
+  try{
+    if(m==='galleryBox'&&picked){
+      Array.prototype.forEach.call(picked.querySelectorAll('img'),function(im){im.classList.add('__gal');});
+      if(picked.tagName==='IMG')picked.classList.add('__gal');
+    }else if(m==='galleryOne'){
+      GAL.forEach(function(sel){
+        Array.prototype.forEach.call(document.querySelectorAll(sel),function(x){
+          if(x.tagName==='IMG')x.classList.add('__gal');
+          else Array.prototype.forEach.call(x.querySelectorAll('img'),function(im){im.classList.add('__gal');});
+        });
+      });
+    }
+  }catch(e){}
+}
+
+/** v8.66: حرکت در درخت — والد / فرزند / هم‌سطح */
+function __go(dir){
+  if(!picked){document.getElementById('__hint').textContent='اول روی یک عنصر کلیک کنید.';return;}
+  var t=null;
+  if(dir==='up')   t=picked.parentElement;
+  if(dir==='down') t=picked.firstElementChild;
+  if(dir==='prev') t=picked.previousElementSibling;
+  if(dir==='next') t=picked.nextElementSibling;
+  // از نوار خودمان و ریشه رد شو
+  while(t&&(t.closest&&t.closest('.__bar'))) t=(dir==='prev')?t.previousElementSibling:t.nextElementSibling;
+  if(!t||t.tagName==='BODY'||t.tagName==='HTML'){
+    document.getElementById('__hint').textContent='در این جهت عنصری نیست.';
+    return;
+  }
+  document.getElementById('__hint').textContent='روی هر بخش کلیک کنید. با ⬆ والد می‌توانید ظرف بزرگ‌تر را بگیرید.';
+  selectEl(t);
+  try{ t.scrollIntoView({block:'center',behavior:'smooth'}); }catch(e){}
+}
+window.__go=__go;
+
+function __navState(){
+  var d=function(id,on){var b=document.getElementById(id);if(b)b.disabled=!on;};
+  d('__up',   !!(picked&&picked.parentElement&&picked.parentElement.tagName!=='BODY'));
+  d('__down', !!(picked&&picked.firstElementChild));
+  d('__prev', !!(picked&&picked.previousElementSibling));
+  d('__next', !!(picked&&picked.nextElementSibling));
 }
 
 document.addEventListener('mouseover',function(e){
@@ -2751,10 +2901,34 @@ document.addEventListener('click',function(e){
   selectEl(e.target);
 },true);
 
+// v8.66: با عوض شدن حالت، راهنما و رنگ‌آمیزی هم عوض می‌شود
+document.getElementById('__m').addEventListener('change',function(){
+  var m=this.value;
+  var h=document.getElementById('__hint');
+  if(m==='galleryBox')      h.textContent='🖼 روی ظرفی کلیک کنید که همهٔ عکس‌ها داخلش هستند (نه خود عکس). با ⬆ والد بزرگ‌ترش کنید تا همهٔ عکس‌ها صورتی شوند.';
+  else if(m==='galleryOne') h.textContent='➕ روی هر عکسی که می‌خواهید کلیک کنید — چند بار. هر کدام به فهرست اضافه می‌شود.';
+  else if(m==='image')      h.textContent='🌆 روی عکس اصلی محصول کلیک کنید.';
+  else                      h.textContent='روی هر بخش کلیک کنید. با ⬆ والد می‌توانید ظرف بزرگ‌تر را بگیرید.';
+  __paintGallery(m);
+  var c=document.getElementById('__cnt');
+  if(m==='galleryOne'){c.style.display='';c.textContent='➕ '+countGalImgs(GAL)+' عکس · '+GAL.length+' سلکتور';}
+});
+
+// v8.66: پاک کردن فهرست تک‌عکس‌ها با کلید Escape
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&document.getElementById('__m').value==='galleryOne'){
+    GAL=[];delete S.galleryOne;__paintGallery('galleryOne');
+    document.getElementById('__cnt').textContent='➕ 0 عکس · 0 سلکتور';
+    document.getElementById('__hint').textContent='فهرست عکس‌ها پاک شد.';
+  }
+});
+
 window.__done=function(){
+  if(GAL.length)S.galleryOne=GAL.join('\n');
   parent.postMessage({type:'detail_selectors',data:S},'*');
 };
 
+__navState();
 })();
 </script>
 SCRIPT;
@@ -4156,15 +4330,10 @@ $value = preg_replace('~\s+~', ' ', $value);
 $extracted[$field] = $value;
 } elseif ($field === 'image') {
 
-$imgAttrs = ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-zoom-image'];
-$imgVal = '';
-foreach ($imgAttrs as $attr) {
-$v = $node->getAttribute($attr);
-if ($v && !preg_match('/placeholder|1x1|blank|spinner|loading|dummy/i', $v)) {
-$imgVal = make_absolute_url($v, $res['url']);
-break;
-}
-}
+// v8.66: همان تابع مشترک گالری — نسخهٔ باکیفیت (data-zoom/data-large) را
+// به بندانگشتیِ src ترجیح می‌دهد و srcset را هم می‌فهمد. قبلاً src اول
+// بررسی می‌شد و همیشه همان تصویر کوچک برداشته می‌شد.
+$imgVal = galleryImgFromNode($node, $res['url']);
 if ($imgVal) {
 $extracted[$field] = $imgVal;
 } else {
@@ -4926,13 +5095,10 @@ $ns=@$xp2->query($xPath);
 if($ns&&$ns->length){
 $val='';
 if($field==='image'){
-$el=$ns->item(0);
-$src=$el->getAttribute('src')??$el->getAttribute('data-src')??$el->getAttribute('data-lazy-src')??'';
-if($src)$val=make_absolute_url($src,$dr['url']);
-if(!$val){
-$content=$el->getAttribute('content');
-if($content&&url_is_image($content))$val=make_absolute_url($content,$dr['url']);
-}
+// v8.66: getAttribute در DOMElement رشتهٔ خالی برمی‌گرداند نه null، پس ??
+// هیچ‌وقت به data-src نمی‌رسید و عکس‌های lazy از دست می‌رفتند.
+// حالا از همان تابع مشترک گالری استفاده می‌شود که srcset را هم می‌فهمد.
+$val=galleryImgFromNode($ns->item(0),$dr['url']);
 }elseif($field==='price'){
 $val=extractPrice($ns->item(0)->textContent);
 }else{
@@ -5628,7 +5794,11 @@ if (isset($_GET['photo_status'])) {
 }
 
 /** گزارش شبانه — ?digest=1 پیش‌نمایش · &send=1 ارسال فوری */
-if (isset($_GET['digest'])) {
+// v8.66: این نگهبان باید «فقط» وقتی بگیرد که خودِ digest درخواست شده باشد.
+// باگ: bsl_notify_selected هم پارامتر digest می‌فرستد (۰ یا ۱) و چون isset
+// در هر دو حالت درست است، دکمهٔ «ارسال انتخاب‌شده‌ها به پیام‌رسان» همیشه
+// اینجا می‌افتاد و به‌جای ارسال، گزارش شبانه را برمی‌گرداند.
+if (isset($_GET['digest']) && !isset($_GET['bsl_notify_selected'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @set_time_limit(120);
     $cn = loadConnections();
@@ -6573,6 +6743,40 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'wooGallery' . 'Payload($w, $imgsHit') !== false);
     $add('8.65', 'اندپوینت بازسازی دفترچه هست',
          strpos($selfSrc, "_GET['remote" . "_map']") !== false);
+
+    /* ---------- v8.66: بازبینی سلکتورهای صفحهٔ جزئیات و منوی همبرگری ---------- */
+    // نگهبان digest نباید جلوی bsl_notify_selected را بگیرد
+    $add('8.66', 'ارسال انتخاب‌شده‌ها با گزارش شبانه تداخل ندارد',
+         strpos($selfSrc, "isset(\$_GET['digest']) && !isset(\$_GET['bsl_notify_selected'])") !== false);
+    // انتخابگر صفحهٔ محصول
+    $add('8.66', 'حالت باکس گالری در انتخابگر هست',
+         strpos($selfSrc, 'value="gallery' . 'Box"') !== false);
+    $add('8.66', 'حالت افزودن تک‌عکس در انتخابگر هست',
+         strpos($selfSrc, 'value="gallery' . 'One"') !== false);
+    $add('8.66', 'دکمه‌های والد/فرزند/هم‌سطح در انتخابگر هست',
+         strpos($selfSrc, "__go('up')") !== false && strpos($selfSrc, "__go('down')") !== false
+         && strpos($selfSrc, "__go('prev')") !== false && strpos($selfSrc, "__go('next')") !== false);
+    $add('8.66', 'انتخاب‌های گالری به تنظیمات گالری می‌روند',
+         strpos($selfSrc, 'data.gallery' . 'Box') !== false
+         && strpos($selfSrc, 'data.gallery' . 'One') !== false);
+    // فیلد عکس اصلی که سال‌ها در بک‌اند بود ولی در رابط کاربری نبود
+    $add('8.66', 'فیلد عکس اصلی به فهرست جزئیات اضافه شد',
+         strpos($selfSrc, "{key:'image',     label:'عکس اصلی'") !== false);
+    // باگ getAttribute: رشتهٔ خالی است نه null
+    $add('8.66', 'استخراج عکس جزئیات از تابع مشترک استفاده می‌کند',
+         substr_count($selfSrc, 'galleryImgFrom' . 'Node($ns->item(0)') === 1
+         && substr_count($selfSrc, 'galleryImgFrom' . 'Node($node, $res') === 1);
+    // رشته تکه‌تکه، وگرنه همین خط خودش را پیدا می‌کند (درس v8.35)
+    $add('8.66', 'زنجیرهٔ ?? روی getAttribute دیگر نمانده',
+         strpos($selfSrc, "getAttribute('src')" . "??") === false);
+    if (function_exists('galleryImgFromNode')) {
+        [$d66, $x66] = load_dom('<img id="i1" src="/ph.png" data-src="/s-150x150.jpg" data-large_image="/big.jpg">');
+        $n66 = $x66->query('//img')->item(0);
+        $add('8.66', 'نسخهٔ باکیفیت به بندانگشتی ترجیح داده می‌شود',
+             galleryImgFromNode($n66, 'http://t.test/p') === 'http://t.test/big.jpg');
+    }
+    $add('8.66', 'آدرس نمونه از یک تابع مشترک می‌آید',
+         strpos($selfSrc, 'function detailSample' . 'Url(') !== false);
 
     // v8.62: ویرایش مستقیم محصولات، عکس‌دار کردن، گزارش شبانه
     $add('8.62', 'موتور ویرایش گروهی', function_exists('bulkEditRun') && function_exists('bulkEditMsg'));
@@ -14774,7 +14978,9 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
     <div class="card" style="margin-top:14px;border-color:#a855f7">
         <div class="section-title purple">📄 سلکتورهای صفحه جزئیات محصول</div>
         <div class="alert alert-purple">
-            💡 ابتدا حداقل یک محصول را در لیست استخراج کنید، سپس با دکمه زیر صفحه نمونه آن را باز کنید و روی هر فیلد کلیک کنید.
+            💡 ابتدا حداقل یک محصول را در لیست استخراج کنید، سپس با دکمه زیر صفحه نمونه آن را باز کنید و روی هر فیلد کلیک کنید.<br>
+            🖼 <b>گالری هم از همان‌جا:</b> در فهرست بالای صفحهٔ نمونه، «باکس گالری» یا «افزودن تک‌عکس» را انتخاب کنید.
+            با دکمه‌های <b>⬆ والد</b> و <b>⬇ فرزند</b> می‌توانید دقیقاً همان ظرفی را بگیرید که همهٔ عکس‌ها داخلش هستند.
         </div>
         <div class="row">
             <button class="btn btn-pink" onclick="openDetailProxy()" style="flex:1" id="detailProxyBtn">🎯 باز کردن نمونه</button>
@@ -15174,6 +15380,10 @@ const DETAIL_FIELDS = [
     {key:'weight',    label:'وزن',             icon:'⚖️'},
     {key:'stock',     label:'موجودی',          icon:'📦'},
     {key:'brand',     label:'برند',            icon:'🏭'},
+    // v8.66: هر دو استخراج‌کننده (بک‌اند و SSE) از قدیم فیلد image را
+    // پشتیبانی می‌کردند ولی هیچ‌جا در رابط کاربری قابل تنظیم نبود، پس عملاً
+    // مرده بود. برای صفحاتی که عکس اصلی فقط در صفحهٔ محصول است لازم است.
+    {key:'image',     label:'عکس اصلی',        icon:'🌆'},
 ];
 let detailSel = {};
 DETAIL_FIELDS.forEach(f => detailSel[f.key] = {enabled:false, selector:''});
@@ -15452,16 +15662,13 @@ function galModeChanged(silent) {
 function galChanged() { markDirty(); scheduleSave(); }
 
 /** آدرس یک محصول نمونه از نتایج فعلی */
-function galSampleUrl() {
-    for (const [k, p] of products) if (p.link) return p.link;
-    return null;
-}
+function galSampleUrl() { return detailSampleUrl(); }
 
 /** پیشنهاد سلکتور «باکس عکس‌ها» از روی یک صفحهٔ محصول واقعی */
 function gallerySuggest() {
     const url = galSampleUrl();
     const box = $('galSuggest');
-    if (!url) { showToast('ابتدا محصولات را استخراج کنید', true); return; }
+    if (!url) return;
     if (box) box.innerHTML = '<div style="color:#93c5fd;font-size:11px;padding:4px 0">⏳ بررسی صفحهٔ محصول...</div>';
     fetch('?gallery_suggest=' + encodeURIComponent(url))
         .then(r => r.json())
@@ -15498,7 +15705,7 @@ function galPick(sel) {
 function galleryTest() {
     const url = galSampleUrl();
     const box = $('galTestR');
-    if (!url) { showToast('ابتدا محصولات را استخراج کنید', true); return; }
+    if (!url) return;
     const cfg = galCollect();
     if (cfg.mode === 'off') { showToast('اول یک روش انتخاب کنید', true); return; }
     if (box) box.innerHTML = '<div style="color:#93c5fd;font-size:11px">⏳ آزمایش روی: ' + esc(url.substring(0, 60)) + '</div>';
@@ -15540,31 +15747,37 @@ function clearDetailSel() {
     scheduleSave();
 }
 
+/**
+ * v8.66: یک نقطهٔ واحد برای پیدا کردن آدرس نمونه.
+ * قبلاً سه جا همین حلقه تکرار شده بود و پیامشان هم گمراه‌کننده بود:
+ * وقتی محصول بود ولی هیچ‌کدام «لینک» نداشتند، باز هم می‌گفت «استخراج کنید».
+ */
+function detailSampleUrl(silent) {
+    for (const [k, p] of products) if (p && p.link) return p.link;
+    if (!silent) {
+        if (products.size === 0) showToast('ابتدا محصولات را استخراج کنید', true);
+        else showToast('هیچ محصولی لینک ندارد — سلکتور «🔗 لینک» را تنظیم و دوباره استخراج کنید', true);
+    }
+    return null;
+}
+
 function openDetailProxy() {
-    let sampleUrl = null;
-    for (const [k, p] of products) {
-        if (p.link) { sampleUrl = p.link; break; }
-    }
-    if (!sampleUrl) {
-        showToast('ابتدا محصولات را استخراج کنید', true);
-        return;
-    }
+    const sampleUrl = detailSampleUrl();
+    if (!sampleUrl) return;
     $('detailFrameWrap').classList.remove('hidden');
     $('detailFrame').src = '?detail_proxy=' + encodeURIComponent(sampleUrl);
-    $('detailStatus').textContent = '✓ روی فیلدهای دلخواه کلیک کنید';
+    $('detailStatus').textContent = '⏳ در حال باز کردن صفحهٔ نمونه...';
     switchMainTab('selectors');
+    // v8.66: اگر پروکسی خطا بدهد، iframe سفید می‌ماند و کاربر نمی‌فهمد چه شد
+    const fr = $('detailFrame');
+    fr.onload = () => { $('detailStatus').textContent = '✓ روی فیلدهای دلخواه کلیک کنید — برای گالری، حالت 🖼 را از فهرست بالای صفحه انتخاب کنید'; };
+    fr.onerror = () => { $('detailStatus').textContent = '✗ صفحهٔ نمونه باز نشد'; };
     setTimeout(() => $('detailFrameWrap').scrollIntoView({behavior:'smooth',block:'center'}), 200);
 }
 
 function suggestDetailSelectors() {
-    let sampleUrl = null;
-    for (const [k, p] of products) {
-        if (p.link) { sampleUrl = p.link; break; }
-    }
-    if (!sampleUrl) {
-        showToast('ابتدا محصولات را استخراج کنید', true);
-        return;
-    }
+    const sampleUrl = detailSampleUrl();
+    if (!sampleUrl) return;
     $('detailStatus').textContent = 'در حال تحلیل صفحه جزئیات...';
     fetch('?suggest_detail_selectors=' + encodeURIComponent(sampleUrl))
         .then(r => r.json())
@@ -16144,18 +16357,36 @@ window.addEventListener('message',e=>{
     showToast('✓ سلکتورها دریافت شد');
   } else if(e.data && e.data.type==='detail_selectors'){
     const data = e.data.data || {};
-    let applied = 0;
+    let applied = 0, galMsg = '';
     for (const k of Object.keys(data)) {
         if (data[k] && DETAIL_FIELDS.some(f => f.key === k)) {
             detailSel[k] = {enabled: true, selector: data[k]};
             applied++;
         }
     }
+    // v8.66: انتخاب‌های گالری به تنظیمات گالری می‌روند، نه به فیلدهای جزئیات
+    if (data.galleryBox) {
+        galApply(Object.assign(galCollect(), {mode:'auto', box:data.galleryBox}));
+        galMsg = ' · باکس گالری تنظیم شد';
+        applied++;
+    } else if (data.galleryOne) {
+        const n = data.galleryOne.split('\n').filter(x=>x.trim()).length;
+        galApply(Object.assign(galCollect(), {mode:'manual', selectors:data.galleryOne}));
+        galMsg = ' · ' + toFa(n) + ' عکس گالری';
+        applied++;
+    }
+    if (data.image) {
+        // عکس اصلی جزو سلکتورهای فهرست است، نه صفحهٔ جزئیات
+        sel.image = data.image;
+        if ($('selImage')) $('selImage').value = data.image;
+        applied++;
+    }
     renderDetailFieldsList();
     refreshViews();
     scheduleSave();
-    showToast(`✓ ${applied} فیلد انتخاب شد`);
-    $('detailStatus').textContent = `✓ ${applied} فیلد دریافت شد`;
+    showToast(`✓ ${applied} مورد انتخاب شد` + galMsg);
+    $('detailStatus').textContent = `✓ ${applied} مورد دریافت شد` + galMsg;
+    if (galMsg) setTimeout(()=>{ const b=$('galTestR'); if(b) galleryTest(); }, 300);
   } else if(e.data && e.data.type==='cancel'){
     $('vFrame').src='about:blank';
   } else if(e.data && e.data.type==='cancel_detail'){
@@ -17282,6 +17513,26 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.66', t:'بازبینی انتخابگر صفحهٔ جزئیات و رفع تداخل منوی همبرگری', items:[
+    '🖼 حالت «باکس گالری» و «افزودن تک‌عکس» به فهرست انتخابگر صفحهٔ محصول اضافه شد',
+    'قبلاً گالری فقط با تایپ دستی سلکتور قابل تنظیم بود و در انتخابگر اصلاً نبود',
+    '⬆⬇◀▶ دکمه‌های والد، فرزند و هم‌سطح — برای وقتی کلیک روی عنصر دقیق سخت است',
+    'با ⬆ والد می‌توانید از یک عکس به ظرف گالری برسید؛ عکس‌های داخلش صورتی می‌شوند',
+    'شمارندهٔ زنده: چند عکس داخل انتخاب فعلی است و سلکتور به چند عنصر می‌خورد',
+    'در حالت تک‌عکس، هر بار کلیک یک عکس اضافه می‌کند و Escape فهرست را پاک می‌کند',
+    'انتخاب‌های گالری مستقیم به تنظیمات گالری می‌روند و آزمایش خودکار اجرا می‌شود',
+    '🌆 فیلد «عکس اصلی» به سلکتورهای صفحهٔ جزئیات اضافه شد',
+    'هر دو استخراج‌کننده از قدیم این فیلد را می‌خواندند ولی هیچ‌جا قابل تنظیم نبود — عملاً کد مرده',
+    '🐞 باگ: getAttribute در PHP رشتهٔ خالی برمی‌گرداند نه null، پس زنجیرهٔ ?? هیچ‌وقت به data-src نمی‌رسید',
+    'یعنی عکس محصولات lazy-load همیشه placeholder برداشته می‌شد',
+    'حالا هر دو مسیر از تابع مشترک گالری استفاده می‌کنند که srcset و data-large_image را هم می‌فهمد',
+    'و نسخهٔ باکیفیت به بندانگشتی ترجیح داده می‌شود (قبلاً src اول بررسی می‌شد)',
+    '🐞 باگ منو: دکمهٔ «ارسال انتخاب‌شده‌ها به پیام‌رسان» همیشه گزارش شبانه را برمی‌گرداند',
+    'علت: هر دو از پارامتر digest استفاده می‌کردند و isset در حالت digest=0 هم درست بود',
+    'ساخت سلکتور بازبینی شد: id قبل از کلاس (چون یکتاست) و کلاس‌های حالت مثل active نادیده گرفته می‌شوند',
+    'عنصر بدون id و کلاس، مسیرش از والد ساخته می‌شود تا سلکتور یکتا بماند',
+    'پیام «ابتدا محصولات را استخراج کنید» وقتی محصول هست ولی لینک ندارد، اصلاح شد'
+  ]},
   {v:'8.65', t:'تطبیق با شناسهٔ مقصد — محصول تغییرنام‌داده دیگر گم نمی‌شود', items:[
     '🔗 مشکل: مغایرت‌گیری، آمار پسوند و عکس‌دار کردن، محصول را با «عنوان» پیدا می‌کردند',
     'کافی بود عنوان محصولی در پنل ووکامرس یا باسلام دستی عوض شود تا «در هیچ پروفایلی نیست» گزارش شود',
