@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.76';
+const APP_VERSION = '8.77';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3032,10 +3032,10 @@ body{padding-top:0!important}
      بدون برگشتن به پنل بالای صفحه انجام شود. -->
 <div class="__pop" id="__pop">
   <div class="__prow">
+    <!-- v8.77: فلش‌های خواهر/برادر برداشته شدند — عملاً استفاده نمی‌شدند
+         و فقط نوار را شلوغ می‌کردند. کلیدهای → ← هنوز کار می‌کنند. -->
     <button class="__pb" id="__pup"   onclick="__go('up')"   title="والد (کلید ↑)">⬆</button>
     <button class="__pb" id="__pdn"   onclick="__go('down')" title="فرزند (کلید ↓)">⬇</button>
-    <button class="__pb" id="__pprev" onclick="__go('prev')" title="قبلی (کلید →)">▶</button>
-    <button class="__pb" id="__pnext" onclick="__go('next')" title="بعدی (کلید ←)">◀</button>
     <span class="__psep"></span>
     <button class="__pb" id="__pfprev" onclick="__field(-1)" title="فیلد قبلی (Shift+Tab)">‹</button>
     <button class="__pb __pfld" id="__pfld" onclick="__field(1)" title="فیلد بعدی (کلید Tab یا Space)">—</button>
@@ -3366,10 +3366,9 @@ function __placePop(el,sel,nMatch,mode){
   pop.style.top=(Math.max(sy+2,top)-oy)+'px';
   pop.style.left=(left-ox)+'px';
   var d=function(id,on){var b=document.getElementById(id);if(b)b.disabled=!on;};
+  // v8.77: فقط والد/فرزند روی نوار مانده‌اند
   d('__pup',   !!(el.parentElement&&el.parentElement.tagName!=='BODY'));
   d('__pdn',   !!el.firstElementChild);
-  d('__pprev', !!el.previousElementSibling);
-  d('__pnext', !!el.nextElementSibling);
 }
 
 /** رنگ‌آمیزی تصاویری که با انتخاب فعلی برداشته می‌شوند */
@@ -3751,10 +3750,9 @@ body{padding-top:130px!important}
 <!-- v8.76: نوار شناور کنار المان انتخاب‌شده -->
 <div class="__pop" id="__pop">
   <div class="__prow">
+    <!-- v8.77: فلش‌های خواهر/برادر برداشته شدند؛ کلیدهای → ← باقی‌اند -->
     <button class="__pb" id="__pup"   onclick="__goParent()" title="والد (کلید ↑)">⬆</button>
     <button class="__pb" id="__pdn"   onclick="__goChild()"  title="فرزند (کلید ↓)">⬇</button>
-    <button class="__pb" id="__pprev" onclick="__goPrev()"   title="قبلی (کلید →)">▶</button>
-    <button class="__pb" id="__pnext" onclick="__goNext()"   title="بعدی (کلید ←)">◀</button>
     <span class="__psep"></span>
     <button class="__pb" id="__pfprev" onclick="__vField(-1)" title="فیلد قبلی (Shift+Tab)">‹</button>
     <button class="__pb __pfld" id="__pfld" onclick="__vField(1)" title="فیلد بعدی (Tab یا Space)">—</button>
@@ -4063,10 +4061,9 @@ function __placePop(el,sel,mode){
   pop.style.top=(Math.max(sy+136,top)-oy)+'px';
   pop.style.left=(left-ox)+'px';
   var d=function(id,on){var b=document.getElementById(id);if(b)b.disabled=!on;};
+  // v8.77: فقط والد/فرزند روی نوار مانده‌اند
   d('__pup',   !!(el.parentElement&&el.parentElement.tagName!=='BODY'));
   d('__pdn',   !!el.firstElementChild);
-  d('__pprev', !!el.previousElementSibling);
-  d('__pnext', !!el.nextElementSibling);
 }
 
 /** v8.76: عوض کردن فیلد از داخل خود صفحه */
@@ -4102,6 +4099,7 @@ function __vField(step){
   }
   updateUI();
   updatePreview(picked||cur,pick);
+  __vpReport();         // v8.77
 }
 
 /* نوار باید موقع اسکرول و تغییر اندازه چسبیده به المان بماند */
@@ -4132,6 +4130,7 @@ function selectEl(el){
   updateUI();
   updatePreview(el,m);
   __placePop(el,s,m);   // v8.76
+  __vpReport();         // v8.77: پنل بیرونی هم به‌روز شود
 }
 
 document.addEventListener('mouseover',function(e){
@@ -4281,6 +4280,50 @@ window.__done=function(){
   if(target){target.postMessage({type:'selectors',data:S},'*');}
   if(__fp==='1'){setTimeout(function(){window.close();},500);}
 };
+
+/* =====================================================================
+ *  v8.77: گفت‌وگو با پنل بیرونی.
+ *  سلکتور جزئیات این را از ۸.۶۸ داشت؛ پیش‌نمایش فهرست نداشت و کنترل‌هایش
+ *  فقط داخل خود صفحه بود. نام پیام‌ها vp_* است تا با picker_* قاطی نشود،
+ *  چون هر دو iframe به یک پنجرهٔ والد پیام می‌دهند.
+ * ===================================================================== */
+function __vpPost(t,d){ try{ parent.postMessage(Object.assign({type:t},d||{}),'*'); }catch(e){} }
+function __vpReport(){
+  var m=document.getElementById('__m').value;
+  var el=picked||null;
+  var pv='';
+  if(el){
+    try{
+      if(m==='title')      pv=cleanTitle(el.textContent);
+      else if(m==='price') pv=extractPrice(el.textContent);
+      else if(m==='link')  pv=(findSmartLink(el)||{}).url||'';
+      else if(m==='image') pv=(getImageUrl(el)||{}).url||'';
+      else                 pv=countSimilar(el)+' المان مشابه';
+    }catch(e){pv='';}
+  }
+  __vpPost('vp_state',{
+    mode:m, sel:S[m]||'', tag:el?elInfo(el):'',
+    nav:{up:!!(el&&el.parentElement&&el.parentElement.tagName!=='BODY'),
+         down:!!(el&&el.firstElementChild)},
+    matches:el?countSimilar(el):0,
+    preview:String(pv||'').substring(0,150),
+    all:S
+  });
+}
+window.addEventListener('message',function(e){
+  var d=e.data||{};
+  if(d.type==='vp_mode'){
+    var sel=document.getElementById('__m');
+    if(sel){ sel.value=String(d.mode||'container'); sel.dispatchEvent(new Event('change')); }
+    __vpReport();
+  }else if(d.type==='vp_go'){
+    if(d.dir==='up')        __goParent();
+    else if(d.dir==='down') __goChild();
+    else if(d.dir==='prev') __goPrev();
+    else if(d.dir==='next') __goNext();
+  }
+});
+__vpPost('vp_ready',{});
 
 })();
 </script>
@@ -5326,7 +5369,6 @@ break;
 }
 
 [$dom, $xp] = load_dom($res['html']);
-$allFound = true;
 
 foreach ($detailSelectors as $field => $config) {
 if (empty($config['enabled']) || empty($config['selector'])) continue;
@@ -5374,9 +5416,6 @@ $extracted[$field] = $value;
 }
 }
 
-if (!isset($extracted[$field]) || $extracted[$field] === '') {
-$allFound = false;
-}
 }
 
 if (!isset($extracted['image']) || $extracted['image'] === '') {
@@ -5397,13 +5436,21 @@ $extracted['images_count'] = $tmp['images_count'];
 $extracted['gallery_note'] = (string)$gal['note'];
 }
 
-if ($allFound || $retry >= 2) break;
-
-send_sse('detail_progress', ['current' => $processed, 'total' => $total, 'key' => $key, 'retry' => $retry + 1]);
-usleep(300000);
+/* v8.77: قبلاً اگر «هر» سلکتور فعالی روی صفحه چیزی پیدا نمی‌کرد،
+   کلِ صفحه دو بار دیگر هم گرفته می‌شد. صفحه ثابت است و بار دوم و سوم
+   دقیقاً همان HTML برمی‌گردد، پس آن فیلد باز هم پیدا نمی‌شد — یعنی
+   سه برابر ترافیک و سه برابر زمان، بدون هیچ سودی. این خیلی عادی است:
+   کافی است یک محصول SKU یا برند یا تنوع نداشته باشد.
+   تلاش دوباره فقط برای خطای شبکه معنی دارد که بالاتر انجام می‌شود. */
+break;
 }
 
 send_sse('detail_extracted', $extracted);
+
+/* هر چند محصول یک کیپ‌الایو بفرست. بقیهٔ حلقه‌های SSE این را داشتند و
+   این یکی نداشت؛ روی هاست‌هایی که پروکسی جلویشان است، نبودِ بایت در
+   چند ده ثانیه یعنی قطع اتصال و کاربر «گیر کردن روی ۵۰» می‌بیند. */
+if ($processed % 5 === 0) send_sse_ping();
 usleep(150000);
 }
 
@@ -7921,9 +7968,10 @@ if (isset($_GET['selftest'])) {
     $add('8.75', 'نوار کنترل کنار المان در صفحه هست',
          strpos($selfSrc, 'id="__p' . 'op"') !== false
          && strpos($selfSrc, 'function __place' . 'Pop(') !== false);
-    $add('8.75', 'دکمه‌های والد/فرزند/کناری روی همان نوار هستند',
-         strpos($selfSrc, 'id="__pup"') !== false && strpos($selfSrc, 'id="__pdn"') !== false
-         && strpos($selfSrc, 'id="__pprev"') !== false && strpos($selfSrc, 'id="__pnext"') !== false);
+    // v8.77: فلش‌های کناری حذف شدند، پس این چک فقط والد/فرزند را می‌سنجد
+    $add('8.75', 'دکمه‌های والد/فرزند روی همان نوار هستند',
+         strpos($selfSrc, 'id="__p' . 'up"') !== false
+         && strpos($selfSrc, 'id="__p' . 'dn"') !== false);
     $add('8.75', 'میان‌برهای صفحه‌کلید تعریف شده‌اند',
          strpos($selfSrc, "ArrowUp:'up'") !== false
          && strpos($selfSrc, "ArrowDown:'down'") !== false);
@@ -7941,6 +7989,48 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.77: نمونهٔ قابل‌انتخاب، پنل فهرست، حذف فلش‌ها، توقف استخراج ---------- */
+    // فلش‌های خواهر/برادر از هر دو نوار شناور و از پنل جزئیات حذف شدند
+    $add('8.77', 'فلش‌های خواهر/برادر از نوارها برداشته شده‌اند',
+         strpos($selfSrc, 'id="__pp' . 'rev"') === false
+         && strpos($selfSrc, 'id="__pn' . 'ext"') === false
+         && strpos($selfSrc, 'id="pk' . 'Prev" onclick') === false);
+    $add('8.77', 'دکمه‌های والد و فرزند سر جایشان مانده‌اند',
+         substr_count($selfSrc, 'id="__p' . 'up"') === 2
+         && substr_count($selfSrc, 'id="__p' . 'dn"') === 2);
+    // کلیدهای → ← باید کار کنند حتی وقتی دکمه‌ای نیست
+    $add('8.77', 'میان‌بر کلیدی هم‌سطح‌ها هنوز هست',
+         strpos($selfSrc, "ArrowRight:'prev'") !== false
+         && strpos($selfSrc, "e.key==='ArrowRight'") !== false);
+    // پنل بیرونی برای پیش‌نمایش فهرست محصولات
+    $add('8.77', 'پیش‌نمایش فهرست پنل کنترل بیرونی دارد',
+         strpos($selfSrc, 'id="vp' . 'Panel"') !== false
+         && strpos($selfSrc, 'id="vp' . 'Mode"') !== false
+         && strpos($selfSrc, 'function vpApply' . 'State(') !== false);
+    $add('8.77', 'پروتکل پیام پنل فهرست دوطرفه است',
+         strpos($selfSrc, "'vp_' . 'state'") !== false || (
+            strpos($selfSrc, "__vpPost('vp_st" . "ate'") !== false
+            && strpos($selfSrc, "d.type==='vp_m" . "ode'") !== false
+            && strpos($selfSrc, "d.type==='vp_" . "go'") !== false));
+    $add('8.77', 'نام پیام‌های دو انتخابگر قاطی نمی‌شود',
+         strpos($selfSrc, "type==='vp_st" . "ate'") !== false
+         && strpos($selfSrc, "type==='picker_st" . "ate'") !== false);
+    // نمونهٔ صفحهٔ جزئیات باید قابل عوض کردن باشد
+    $add('8.77', 'نمونهٔ سلکتور جزئیات قابل انتخاب است',
+         strpos($selfSrc, 'function useAsDetail' . 'Sample(') !== false
+         && strpos($selfSrc, 'function detailSample' . 'Step(') !== false
+         && strpos($selfSrc, 'let detailSample' . 'Key') !== false);
+    $add('8.77', 'نمونهٔ انتخاب‌شده در آدرس پروکسی استفاده می‌شود',
+         strpos($selfSrc, 'if (detailSample' . 'Key) {') !== false);
+    // استخراج تفصیلی: صفحه دیگر سه بار گرفته نمی‌شود
+    $add('8.77', 'صفحهٔ محصول برای فیلد نبود، دوباره گرفته نمی‌شود',
+         strpos($selfSrc, '$all' . 'Found') === false);
+    $add('8.77', 'استخراج تفصیلی کیپ‌الایو می‌فرستد',
+         strpos($selfSrc, '$processed % 5 === 0) send_sse_' . 'ping()') !== false);
+    $add('8.77', 'نگهبان توقف استخراج تفصیلی هست',
+         strpos($selfSrc, 'detailLast' . 'Beat') !== false
+         && strpos($selfSrc, 'detailWa' . 'tch') !== false);
 
     /* ---------- v8.76: کل کار سلکتور بدون برگشتن به بالای صفحه ---------- */
     // انتخاب فیلد آمد داخل خود صفحه، در هر دو انتخابگر
@@ -16408,7 +16498,9 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
     <div class="card">
         <div class="section-title">🎨 سلکتورهای لیست محصولات</div>
         <div class="alert alert-info">
-            💡 <b>نکته مهم:</b> در پنجره پایین، پس از کلیک روی هر المان، یک <b>پیش‌نمایش زنده</b> از متنی که در خروجی نمایش داده می‌شود را می‌بینید. اگر متن اشتباه بود، از دکمه‌های ⬆⬇⬅➡ برای تغییر المان استفاده کنید.
+            💡 <b>نکته مهم:</b> پس از کلیک روی هر المان، یک <b>پیش‌نمایش زنده</b> از متنی که در خروجی می‌آید می‌بینید.
+            اگر متن اشتباه بود با <b>⬆ والد</b> و <b>⬇ فرزند</b> المان را عوض کنید — چه از نوار کنار خود المان، چه از پنل زیر.
+            کلیدهای <b>↑ ↓</b> و برای همسایه‌ها <b>→ ←</b> هم کار می‌کنند.
         </div>
         <div class="row" style="align-items:center;gap:12px;margin-bottom:8px">
             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#94a3b8;font-size:12px">
@@ -16471,6 +16563,33 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
                 <span>📏 ارتفاع:</span>
                 <input type="range" id="iframeSizeSlider" min="300" max="1200" value="600" step="50" oninput="setIframeHeight(this.value)">
                 <span class="size-val" id="iframeSizeVal">600</span>
+            </div>
+            <!-- v8.77: همان کنترل‌های بیرونیِ سلکتور جزئیات، این‌بار برای
+                 پیش‌نمایش فهرست محصولات. تا حالا این پیش‌نمایش هیچ کنترل
+                 بیرونی نداشت و فقط نوار داخل خودِ صفحه بود. -->
+            <div class="card" id="vpPanel" style="margin:0 0 8px;border-color:#3b82f6;padding:9px">
+                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+                    <label style="flex:0 0 auto;font-size:11px;color:#93c5fd;font-weight:700">🎯 انتخاب:</label>
+                    <select id="vpMode" onchange="vpSetMode(this.value)" style="flex:1;min-width:150px">
+                        <option value="container">📦 کانتینر</option>
+                        <option value="title">📝 عنوان</option>
+                        <option value="price">💰 قیمت</option>
+                        <option value="link">🔗 لینک</option>
+                        <option value="image">🖼️ تصویر</option>
+                    </select>
+                    <button class="btn btn-teal" onclick="vpNextField()" style="flex:0 0 auto;font-size:11px;padding:7px 10px" title="رفتن به فیلد بعدیِ پرنشده">⏭ بعدی</button>
+                </div>
+                <div id="vpChips" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px"></div>
+                <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+                    <button class="btn btn-blue" id="vpUp"   onclick="vpGo('up')"   style="font-size:11px;padding:6px 10px" title="عنصر والد">⬆ والد</button>
+                    <button class="btn btn-blue" id="vpDown" onclick="vpGo('down')" style="font-size:11px;padding:6px 10px" title="اولین فرزند">⬇ فرزند</button>
+                    <span id="vpCnt" style="font-size:11px;color:#93c5fd;font-weight:700"></span>
+                </div>
+                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                    <code id="vpSel" style="flex:1;min-width:140px;background:#0f172a;color:#bfdbfe;padding:5px 8px;border-radius:6px;font-size:11px;direction:ltr;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">—</code>
+                    <span id="vpTag" style="background:#1e3a5f;color:#bfdbfe;padding:3px 8px;border-radius:4px;font-size:10px;font-family:monospace">-</span>
+                </div>
+                <div id="vpPv" style="margin-top:6px;font-size:11px;color:#86efac;background:#0f172a;border:1px solid #22c55e;border-radius:6px;padding:5px 8px;min-height:26px;word-break:break-word">در انتظار انتخاب...</div>
             </div>
             <div class="iframe-wrap" id="iframeWrap">
                 <iframe id="vFrame"></iframe>
@@ -16544,6 +16663,8 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
             <button class="btn btn-purple" onclick="suggestDetailSelectors()" style="flex:1">💡 پیشنهاد</button>
             <button class="btn btn-gray" onclick="clearDetailSel()">🗑️</button>
         </div>
+        <!-- v8.77: کدام محصول به‌عنوان نمونه باز شده و امکان عوض کردنش -->
+        <div id="detailSampleBar" style="margin-top:8px;font-size:11px;color:#cbd5e1;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px 9px;line-height:1.9"></div>
         <div id="detailFieldsList" style="margin-top:12px"></div>
     </div>
 
@@ -16655,8 +16776,6 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
         <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
             <button class="btn btn-purple" id="pkUp"   onclick="pkGo('up')"   style="font-size:11px;padding:6px 10px" title="عنصر والد">⬆ والد</button>
             <button class="btn btn-purple" id="pkDown" onclick="pkGo('down')" style="font-size:11px;padding:6px 10px" title="اولین فرزند">⬇ فرزند</button>
-            <button class="btn btn-purple" id="pkPrev" onclick="pkGo('prev')" style="font-size:11px;padding:6px 10px" title="هم‌سطح قبلی">◀ قبلی</button>
-            <button class="btn btn-purple" id="pkNext" onclick="pkGo('next')" style="font-size:11px;padding:6px 10px" title="هم‌سطح بعدی">بعدی ▶</button>
             <button class="btn btn-gray" id="pkClearGal" onclick="pkClearGal()" style="font-size:11px;padding:6px 10px;display:none">🗑 پاک کردن عکس‌ها</button>
             <span id="pkCnt" style="font-size:11px;color:#f9a8d4;font-weight:700"></span>
         </div>
@@ -16971,6 +17090,8 @@ try{var d=document.getElementById('_dbg');if(d)d.insertAdjacentHTML('beforeend',
 <script>
 const $=id=>document.getElementById(id);
 let es=null,detailEs=null,products=new Map(),order=[],pages=0,details=0,running=false,detailRunning=false,mode='auto';
+// v8.77: نگهبانِ توقفِ استخراج تفصیلی
+let detailWatch=null, detailLastBeat=0;
 let sel={container:'',title:'',price:'',link:'',image:''};
 const DETAIL_FIELDS = [
     {key:'shortDesc', label:'توضیحات کوتاه', icon:'📝'},
@@ -17179,6 +17300,9 @@ function getEnabledDetailFields() {
 }
 
 function renderDetailFieldsList() {
+    // v8.77: نوار نمونه هم همین‌جا تازه شود تا قبل از باز کردن پیش‌نمایش
+    // هم معلوم باشد کدام محصول نمونه است
+    try { renderSampleBar(); } catch (e) {}
     const container = $('detailFieldsList');
     if (!container) return;
     let html = '';
@@ -17357,8 +17481,33 @@ function clearDetailSel() {
  * قبلاً سه جا همین حلقه تکرار شده بود و پیامشان هم گمراه‌کننده بود:
  * وقتی محصول بود ولی هیچ‌کدام «لینک» نداشتند، باز هم می‌گفت «استخراج کنید».
  */
+/* v8.77: کدام محصول به‌عنوان نمونه باز شود.
+   قبلاً همیشه «اولین محصولِ دارای لینک» بود. مشکلش این بود که آن یکی
+   ممکن است اصلاً تنوع یا گالری نداشته باشد، و آن‌وقت نمی‌شد سلکتورِ
+   تنوع/گالری را انتخاب کرد. حالا کاربر می‌تواند نمونه را عوض کند. */
+let detailSampleKey = null;
+
+/** فهرست محصولاتی که لینک دارند — برای انتخاب نمونه */
+function detailSampleList() {
+    const out = [];
+    for (const k of order) {
+        const p = products.get(k);
+        if (p && p.link) out.push([k, p]);
+    }
+    // اگر order هنوز پر نشده، از خود نقشه بخوان
+    if (!out.length) for (const [k, p] of products) if (p && p.link) out.push([k, p]);
+    return out;
+}
+
 function detailSampleUrl(silent) {
-    for (const [k, p] of products) if (p && p.link) return p.link;
+    // اگر کاربر نمونه‌ای انتخاب کرده و هنوز معتبر است، همان
+    if (detailSampleKey) {
+        const p = products.get(detailSampleKey);
+        if (p && p.link) return p.link;
+        detailSampleKey = null;
+    }
+    const list = detailSampleList();
+    if (list.length) return list[0][1].link;
     if (!silent) {
         if (products.size === 0) showToast('ابتدا محصولات را استخراج کنید', true);
         else showToast('هیچ محصولی لینک ندارد — سلکتور «🔗 لینک» را تنظیم و دوباره استخراج کنید', true);
@@ -17366,9 +17515,59 @@ function detailSampleUrl(silent) {
     return null;
 }
 
-function openDetailProxy() {
+/** برچسب نمونهٔ فعلی، برای نشان دادن در پنل */
+function detailSampleLabel() {
+    const list = detailSampleList();
+    if (!list.length) return '';
+    let idx = list.findIndex(([k]) => k === detailSampleKey);
+    if (idx < 0) idx = 0;
+    const p = list[idx][1];
+    return (idx + 1) + '/' + list.length + ' — ' + String(p.title || p.link || '').substring(0, 45);
+}
+
+/** نمونهٔ بعدی/قبلی — برای وقتی این یکی تنوع یا گالری ندارد */
+function detailSampleStep(step) {
+    const list = detailSampleList();
+    if (list.length < 2) { showToast('محصول دیگری با لینک وجود ندارد', true); return; }
+    let idx = list.findIndex(([k]) => k === detailSampleKey);
+    if (idx < 0) idx = 0;
+    idx = ((idx + step) % list.length + list.length) % list.length;
+    detailSampleKey = list[idx][0];
+    renderSampleBar();
+    openDetailProxy(true);
+}
+
+/* v8.77: «همین محصول را نمونه کن» از روی کارت نتایج.
+   این همان چیزی است که نبودش آزار می‌داد: نمونه همیشه اولین محصول بود و
+   اگر آن یکی تنوع یا گالری نداشت، راهی برای عوض کردنش نبود. */
+function useAsDetailSample(k) {
+    const p = products.get(k);
+    if (!p || !p.link) { showToast('این محصول لینک ندارد', true); return; }
+    detailSampleKey = k;
+    showToast('🎯 نمونه عوض شد — ' + String(p.title || '').substring(0, 30));
+    openDetailProxy();
+}
+
+/** نوار کوچک «نمونهٔ فعلی» بالای پیش‌نمایش جزئیات */
+function renderSampleBar() {
+    const b = $('detailSampleBar');
+    if (!b) return;
+    const list = detailSampleList();
+    if (!list.length) { b.innerHTML = ''; return; }
+    b.innerHTML = '<span style="color:#94a3b8">🎯 نمونه:</span> '
+      + '<b style="color:#f9a8d4">' + esc(detailSampleLabel()) + '</b>'
+      + ' <button class="btn btn-gray" onclick="detailSampleStep(-1)" style="font-size:10px;padding:2px 7px">قبلی</button>'
+      + ' <button class="btn btn-gray" onclick="detailSampleStep(1)" style="font-size:10px;padding:2px 7px">بعدی ⏭</button>'
+      + '<div style="color:#64748b;font-size:10px;margin-top:3px">اگر این محصول تنوع یا گالری ندارد، با «بعدی» یکی دیگر را باز کنید.</div>';
+}
+
+function openDetailProxy(keepScroll) {
+    /* v8.77: اگر در پیش‌نمایش بالا روی یک محصول کلیک کرده‌اید، همان
+       باز می‌شود. قبلاً همیشه اولین محصول فهرست باز می‌شد، حتی وقتی
+       شما محصول دیگری را در نظر داشتید. */
     const sampleUrl = detailSampleUrl();
     if (!sampleUrl) return;
+    renderSampleBar();
     $('detailFrameWrap').classList.remove('hidden');
     // v8.68: پنل کنترل بیرونی هم باز شود
     const pp = $('pickerPanel'); if (pp) pp.classList.remove('hidden');
@@ -17384,7 +17583,9 @@ function openDetailProxy() {
         pkSetMode(($('pkMode') || {}).value || 'shortDesc');
     };
     fr.onerror = () => { $('detailStatus').textContent = '✗ صفحهٔ نمونه باز نشد'; };
-    setTimeout(() => { const p = $('pickerPanel') || $('detailFrameWrap'); p.scrollIntoView({behavior:'smooth',block:'start'}); }, 200);
+    // v8.77: موقع عوض کردن نمونه، صفحه را دوباره بالا نپران
+    if (!keepScroll)
+        setTimeout(() => { const p = $('pickerPanel') || $('detailFrameWrap'); p.scrollIntoView({behavior:'smooth',block:'start'}); }, 200);
 }
 
 function suggestDetailSelectors() {
@@ -17994,7 +18195,8 @@ function pkApplyState(st){
   else if((st.matches||0)>1)      cnt='⚠ '+toFa(st.matches)+' تطبیق';
   set('pkCnt', cnt);
   const nav=st.nav||{};
-  [['pkUp','up'],['pkDown','down'],['pkPrev','prev'],['pkNext','next']].forEach(([id,k])=>{
+  // v8.77: دکمه‌های هم‌سطح از پنل برداشته شدند
+  [['pkUp','up'],['pkDown','down']].forEach(([id,k])=>{
     const b=$(id); if(b)b.disabled=!nav[k];
   });
   // v8.75: کدام فیلدها تا حالا پر شده‌اند
@@ -18007,6 +18209,60 @@ function pkApplyState(st){
   if(pb)pb.textContent=n?('✓ '+toFa(n)+' فیلد انتخاب شده'):'';
 }
 function setIframeHeight(h){const w=$('iframeWrap');if(!w)return;w.style.height=h+'px';$('iframeSizeVal').textContent=h;scheduleSave();}
+
+/* =====================================================================
+ *  v8.77: کنترل‌های بیرونی پیش‌نمایش فهرست محصولات.
+ *  سلکتور جزئیات از ۸.۶۸ پنل بیرونی داشت ولی این یکی نداشت و همهٔ
+ *  کارها فقط از نوار داخل صفحه انجام می‌شد. پروتکل پیام همان است.
+ * ===================================================================== */
+const VP_FIELDS=[['container','کانتینر'],['title','عنوان'],['price','قیمت'],
+                 ['link','لینک'],['image','تصویر']];
+function vpFrame(){ const f=$('vFrame'); return f&&f.contentWindow?f.contentWindow:null; }
+function vpSend(type,extra){ const w=vpFrame(); if(w)try{w.postMessage(Object.assign({type},extra||{}),'*');}catch(e){} }
+function vpSetMode(m){ vpSend('vp_mode',{mode:m}); }
+function vpGo(dir){ vpSend('vp_go',{dir}); }
+
+var vpFilled={};
+function vpNextField(){
+  const sel=$('vpMode'); if(!sel)return;
+  const opts=[...sel.options].map(o=>o.value);
+  const cur=opts.indexOf(sel.value);
+  for(let i=1;i<=opts.length;i++){
+    const v=opts[(cur+i)%opts.length];
+    if(!vpFilled[v]){ sel.value=v; vpSetMode(v); return; }
+  }
+  showToast('همهٔ سلکتورها انتخاب شده‌اند ✓');
+}
+function vpRenderChips(){
+  const box=$('vpChips'); if(!box)return;
+  let h='';
+  VP_FIELDS.forEach(([k,label])=>{
+    const on=!!vpFilled[k];
+    h+='<span onclick="$(\'vpMode\').value=\''+k+'\';vpSetMode(\''+k+'\')" '
+      +'style="cursor:pointer;font-size:10px;padding:2px 7px;border-radius:10px;'
+      +'border:1px solid '+(on?'#22c55e':'#475569')+';color:'+(on?'#86efac':'#64748b')+';'
+      +'background:'+(on?'#14532d40':'transparent')+'">'+(on?'✓ ':'')+esc(label)+'</span>';
+  });
+  box.innerHTML=h;
+}
+/** وضعیتی که iframe فهرست گزارش می‌دهد را روی پنل می‌نشاند */
+function vpApplyState(st){
+  const set=(id,v)=>{const e=$(id);if(e)e.textContent=v;};
+  set('vpSel', st.sel||'—');
+  set('vpTag', st.tag||'-');
+  set('vpPv',  st.preview||'(خالی)');
+  const c=$('vpPv'); if(c)c.style.color=st.preview?'#86efac':'#fbbf24';
+  set('vpCnt', (st.matches||0)>1?('🔢 '+toFa(st.matches)+' مشابه'):'');
+  const nav=st.nav||{};
+  [['vpUp','up'],['vpDown','down']].forEach(([id,k])=>{
+    const b=$(id); if(b)b.disabled=!nav[k];
+  });
+  vpFilled={};
+  const all=st.all||{};
+  for(const k in all){ if(String(all[k]||'').trim()!=='')vpFilled[k]=1; }
+  vpRenderChips();
+  const ms=$('vpMode'); if(ms&&st.mode&&ms.value!==st.mode)ms.value=st.mode;
+}
 function loadVisual(){
   const url=$('url').value.trim();
   if(!url){showToast('URL وارد کنید',true);return;}
@@ -18148,6 +18404,11 @@ window.addEventListener('message',e=>{
     showToast(`✓ ${applied} مورد انتخاب شد` + galMsg);
     $('detailStatus').textContent = `✓ ${applied} مورد دریافت شد` + galMsg;
     if (galMsg) setTimeout(()=>{ const b=$('galTestR'); if(b) galleryTest(); }, 300);
+  } else if(e.data && e.data.type==='vp_state'){
+    // v8.77: وضعیت پیش‌نمایش فهرست روی پنل بیرونی
+    vpApplyState(e.data);
+  } else if(e.data && e.data.type==='vp_ready'){
+    vpSetMode(($('vpMode')||{}).value||'container');
   } else if(e.data && e.data.type==='cancel'){
     $('vFrame').src='about:blank';
   } else if(e.data && e.data.type==='cancel_detail'){
@@ -18330,7 +18591,8 @@ function renderCard(p,k){
   ${shortDesc ? `<div class="pdetail-short">${esc(shortDesc)}</div>` : ''}
   ${origDiffers ? `<span class="price-orig">${esc(origPrice)}</span>` : ''}
   <div class="price ${price!=='0'?'':'no-price'}">${price!=='0'?esc(price):'؟'}</div>
-  ${p.link?`<a class="plink" href="${esc(p.link)}" target="_blank">مشاهده</a>`:''}</div>`;
+  ${p.link?`<a class="plink" href="${esc(p.link)}" target="_blank">مشاهده</a>
+  <button class="btn btn-pink" onclick="useAsDetailSample('${_k}')" style="font-size:9.5px;padding:3px 7px;margin-top:4px;width:100%" title="همین محصول را در سلکتور جزئیات باز کن">🎯 نمونهٔ سلکتور</button>`:''}</div>`;
   // v8.41: محصول تازه هرگز نباید به‌خاطر فیلترِ اجرای قبلی پنهان شود
   if(resultFilter!=='all'&&Object.keys(prodStatusMap).length===0)resetResultFilter();
   const _cls='product'+(_st==='new'?' is-new':_st==='changed'?' is-chg':'');
@@ -19069,6 +19331,28 @@ function startDetailExtraction(){
     fd.append('urlMap', JSON.stringify(urlMap));
     fd.append('gallery', JSON.stringify(galCfg));      // v8.64
 
+    /* v8.77: نگهبان توقف. تا حالا اگر اتصال وسط کار می‌مُرد (هاست،
+       پروکسی، یا صفحه‌ای که جواب نمی‌داد) نوار پیشرفت همان‌جا می‌ماند و
+       معلوم نبود کار تمام شده یا گیر کرده. حالا اگر ۹۰ ثانیه هیچ بایتی
+       نیاید، خودش اعلام می‌کند و می‌گوید از کجا ادامه بدهید. */
+    detailLastBeat = Date.now();
+    clearInterval(detailWatch);
+    detailWatch = setInterval(() => {
+        if (!detailRunning) { clearInterval(detailWatch); return; }
+        const idle = Math.round((Date.now() - detailLastBeat) / 1000);
+        if (idle >= 90) {
+            clearInterval(detailWatch);
+            log('⏱ ارتباط قطع شد — ' + idle + ' ثانیه هیچ پاسخی نیامد', 'err');
+            $('detailStatus').textContent = '⚠ ارتباط قطع شد. دوباره «استخراج تفصیلی» را بزنید — '
+                + 'محصولات استخراج‌شده حفظ شده‌اند و از همان‌جا ادامه می‌دهد.';
+            showToast('ارتباط قطع شد — دوباره بزنید تا ادامه دهد', true);
+            finishDetailExtraction();
+        } else if (idle >= 25) {
+            $('detailStatus').textContent = '⏳ ' + toFa(idle) + ' ثانیه منتظر پاسخ سرور... '
+                + '(صفحهٔ محصول کند است یا جواب نمی‌دهد)';
+        }
+    }, 5000);
+
     fetch('?detail_stream=1&' + params.toString(), {method:'POST', body:fd})
         .then(response => {
             const reader = response.body.getReader();
@@ -19077,6 +19361,7 @@ function startDetailExtraction(){
 
             function read() {
                 reader.read().then(({done, value}) => {
+                    detailLastBeat = Date.now();   // v8.77
                     if (done) {
                         finishDetailExtraction();
                         return;
@@ -19158,6 +19443,7 @@ function stopDetailExtraction(){
 
 function finishDetailExtraction(){
     detailRunning = false;
+    clearInterval(detailWatch); detailWatch = null;   // v8.77
     $('btnExtractDetail').classList.remove('hidden');
     $('btnStopDetail').classList.add('hidden');
     // v7.81: Show comparison report after extraction
@@ -19273,6 +19559,30 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.77', t:'نمونهٔ قابل‌انتخاب، کنترل بیرونی برای پیش‌نمایش بالا، و رفع گیر کردن استخراج', items:[
+    '🎯 «باز کردن نمونه» دیگر همیشه اولین محصول را باز نمی‌کند',
+    'روی هر کارت محصول دکمهٔ «🎯 نمونهٔ سلکتور» آمد — همان را باز می‌کند',
+    'زیر دکمهٔ «باز کردن نمونه» هم دکمه‌های «قبلی / بعدی ⏭» هست',
+    'اگر محصولی که باز شده تنوع یا گالری ندارد، با یک کلیک بروید سراغ محصول بعدی',
+    'قبلاً اگر اولین محصول تنوع نداشت، اصلاً راهی برای انتخاب سلکتورِ تنوع نبود',
+    '🖥 پیش‌نمایش بالا (فهرست محصولات) هم کنترل بیرونی گرفت',
+    'انتخاب فیلد، ⬆ والد، ⬇ فرزند، نشانگر فیلدهای پرشده و پیش‌نمایش زنده — همه بیرون از قاب',
+    'تا حالا فقط سلکتور جزئیات این پنل را داشت',
+    '🧹 فلش‌های ◀ ▶ خواهر/برادر از هر دو نوار برداشته شدند',
+    'عملاً استفاده نمی‌شدند و فقط نوار را شلوغ می‌کردند',
+    'کلیدهای → و ← هنوز کار می‌کنند، پس چیزی از دست نرفته',
+    '🐞 گیر کردن استخراج تفصیلی روی عددی مثل ۵۰ — علتش پیدا شد:',
+    'اگر «هر» سلکتور فعالی روی صفحهٔ محصول چیزی پیدا نمی‌کرد، کل صفحه سه بار گرفته می‌شد',
+    'صفحه ثابت است و بار دوم و سوم همان HTML برمی‌گردد، پس آن فیلد باز هم پیدا نمی‌شد',
+    'یعنی سه برابر ترافیک و سه برابر زمان، بدون هیچ سودی',
+    'کافی بود یک محصول SKU یا برند یا تنوع نداشته باشد تا این اتفاق بیفتد',
+    '✅ حالا صفحه یک بار گرفته می‌شود؛ تلاش دوباره فقط برای خطای واقعی شبکه است',
+    '✅ کیپ‌الایو اضافه شد — بقیهٔ استخراج‌ها داشتند و این یکی نداشت',
+    'روی هاست‌هایی که پروکسی جلویشان است، نبودِ بایت یعنی قطع اتصال',
+    '✅ نگهبان توقف: اگر ۹۰ ثانیه پاسخی نیاید، خودش می‌گوید ارتباط قطع شده',
+    'از ۲۵ ثانیه به بعد هم می‌گوید چند ثانیه است منتظر مانده',
+    'دوباره زدن «استخراج تفصیلی» از همان‌جا ادامه می‌دهد — محصولات تمام‌شده دوباره گرفته نمی‌شوند'
+  ]},
   {v:'8.76', t:'کل کار سلکتور بدون برگشتن به بالای صفحه — انتخاب فیلد هم آمد کنار المان', items:[
     '🎯 در ۸.۷۵ دکمه‌های والد/فرزند کنار المان آمدند، ولی «انتخاب اینکه دارید کدام فیلد را می‌گیرید» هنوز در پنل بالای صفحه بود',
     'یعنی برای هر فیلد باز هم یک بار تا بالا و یک بار تا پایین اسکرول می‌کردید — همان چیزی که خسته‌کننده بود',
