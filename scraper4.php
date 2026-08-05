@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.75';
+const APP_VERSION = '8.76';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2987,14 +2987,27 @@ $script = <<<'SCRIPT'
 body{padding-top:0!important}
 /* v8.75: نوار کوچک چسبیده به خودِ المان انتخاب‌شده.
    قبلاً برای هر «والد/فرزند» باید تا بالای صفحه اسکرول می‌کردید. */
-.__pop{position:absolute;z-index:2147483647;display:none;gap:3px;align-items:center;
+.__pop{position:absolute;z-index:2147483647;display:none;flex-direction:column;gap:2px;
   background:#1e1b4b;border:1px solid #a855f7;border-radius:7px;padding:3px 4px;
   box-shadow:0 4px 14px rgba(0,0,0,.55);font:12px Tahoma,sans-serif;direction:rtl;
   white-space:nowrap;cursor:default}
 .__pop.__on{display:flex}
+/* v8.76: دو ردیف — ردیف بالا کنترل، ردیف پایین سلکتور و پیش‌نمایش */
+.__prow{display:flex;gap:3px;align-items:center}
+.__prow2{display:flex;gap:4px;align-items:center;max-width:430px}
+.__psep{width:1px;height:15px;background:#6d28d9;margin:0 2px;flex:0 0 auto}
 .__pop b{background:#4c1d95;color:#e9d5ff;padding:2px 6px;border-radius:4px;
   font:11px ui-monospace,monospace;font-weight:400;max-width:190px;overflow:hidden;
   text-overflow:ellipsis}
+/* v8.76: نام فیلدی که همین حالا دارید انتخابش می‌کنید — تا برای عوض کردنش
+   لازم نباشد تا بالای صفحه اسکرول کنید */
+.__pfld{background:#7e22ce!important;color:#fff!important;min-width:78px;text-align:center;
+  font:11px Tahoma,sans-serif!important;font-weight:700!important;max-width:150px}
+.__pfld.__fdone{background:#166534!important;color:#bbf7d0!important}
+.__pop em{font-style:normal;color:#86efac;font-size:10.5px;max-width:235px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;background:#052e16;border:1px solid #14532d;
+  border-radius:4px;padding:1px 5px}
+.__pop em.__warn{color:#fbbf24;background:#3f2d05;border-color:#78350f}
 .__pb{background:#6b21a8;color:#fff;border:1px solid #7e22ce;border-radius:5px;
   padding:3px 7px;font:12px Tahoma,sans-serif;cursor:pointer;line-height:1.4}
 .__pb:hover{background:#a855f7}
@@ -3014,20 +3027,70 @@ body{padding-top:0!important}
     <button class="__nav" onclick="__hideBar()" title="پنهان کردن این نوار">✕</button>
   </div>
 </div>
-<!-- v8.75: کنترل‌ها دقیقاً بالای المان انتخاب‌شده ظاهر می‌شوند -->
+<!-- v8.75: کنترل‌ها دقیقاً بالای المان انتخاب‌شده ظاهر می‌شوند
+     v8.76: انتخاب فیلد و پیش‌نمایش هم آمدند داخل همین نوار، تا کل کار
+     بدون برگشتن به پنل بالای صفحه انجام شود. -->
 <div class="__pop" id="__pop">
-  <button class="__pb" id="__pup"   onclick="__go('up')"   title="والد (کلید ↑)">⬆</button>
-  <button class="__pb" id="__pdn"   onclick="__go('down')" title="فرزند (کلید ↓)">⬇</button>
-  <button class="__pb" id="__pprev" onclick="__go('prev')" title="قبلی (کلید →)">▶</button>
-  <button class="__pb" id="__pnext" onclick="__go('next')" title="بعدی (کلید ←)">◀</button>
-  <i id="__pcnt"></i>
-  <b id="__psel">—</b>
-  <button class="__pb __okb" onclick="__done()" title="اتمام و ارسال (کلید Enter)">✓</button>
+  <div class="__prow">
+    <button class="__pb" id="__pup"   onclick="__go('up')"   title="والد (کلید ↑)">⬆</button>
+    <button class="__pb" id="__pdn"   onclick="__go('down')" title="فرزند (کلید ↓)">⬇</button>
+    <button class="__pb" id="__pprev" onclick="__go('prev')" title="قبلی (کلید →)">▶</button>
+    <button class="__pb" id="__pnext" onclick="__go('next')" title="بعدی (کلید ←)">◀</button>
+    <span class="__psep"></span>
+    <button class="__pb" id="__pfprev" onclick="__field(-1)" title="فیلد قبلی (Shift+Tab)">‹</button>
+    <button class="__pb __pfld" id="__pfld" onclick="__field(1)" title="فیلد بعدی (کلید Tab یا Space)">—</button>
+    <button class="__pb" id="__pfnext" onclick="__field(1)" title="فیلد بعدی (Tab)">›</button>
+    <span class="__psep"></span>
+    <i id="__pcnt"></i>
+    <button class="__pb __okb" onclick="__done()" title="اتمام و ارسال (کلید Enter)">✓</button>
+  </div>
+  <div class="__prow2">
+    <b id="__psel">—</b>
+    <em id="__ppv"></em>
+    <span id="__ver" style="opacity:.65"></span>
+  </div>
 </div>
 <script>
 (function(){
 var S={},cur=null,picked=null;var MODE='shortDesc';
 var GAL=[];   // v8.66: سلکتورهای تک‌عکسِ انتخاب‌شده برای گالری
+
+/* v8.76: همان فهرست فیلدهای پنل والد، این‌بار داخل خود صفحه.
+   قبلاً برای عوض کردن فیلد باید تا بالای صفحه اسکرول می‌کردید، یک گزینه
+   از منو برمی‌داشتید و دوباره تا محل المان پایین می‌آمدید. */
+var FIELDS=[
+  ['shortDesc','توضیح کوتاه'],['longDesc','توضیح بلند'],['sku','SKU'],
+  ['category','دسته‌بندی'],['tags','برچسب‌ها'],['weight','وزن'],
+  ['stock','موجودی'],['brand','برند'],['variations','تنوع‌ها'],
+  ['galleryBox','باکس گالری'],['galleryOne','تک‌عکس گالری'],['image','عکس اصلی']
+];
+function fieldLabel(k){
+  for(var i=0;i<FIELDS.length;i++)if(FIELDS[i][0]===k)return FIELDS[i][1];
+  return k;
+}
+function fieldIndex(k){
+  for(var i=0;i<FIELDS.length;i++)if(FIELDS[i][0]===k)return i;
+  return 0;
+}
+
+/**
+ * v8.76: رفتن به فیلد بعدی/قبلی از داخل خود صفحه.
+ * جهت +1 فیلدهای پرنشده را ترجیح می‌دهد، چون کار طبیعی «بعدی چه مانده؟» است؛
+ * ولی اگر همه پر باشند باز هم می‌چرخد تا بشود ویرایش کرد.
+ */
+function __field(step){
+  var n=FIELDS.length, i=fieldIndex(MODE), pick=null;
+  if(step>0){
+    for(var k=1;k<=n;k++){
+      var c=FIELDS[(i+k)%n][0];
+      if(!String(S[c]||'').trim()){pick=c;break;}
+    }
+  }
+  if(!pick)pick=FIELDS[((i+step)%n+n)%n][0];
+  __setMode(pick);
+  // پنل والد هم باید همین فیلد را نشان بدهد وگرنه دو جا دو چیز می‌گویند
+  __post('picker_field',{mode:pick});
+}
 
 /**
  * v8.66: ساخت سلکتور.
@@ -3231,30 +3294,77 @@ function selectEl(el){
  * اگر بالای المان جا نبود، می‌رود زیرش؛ و افقی داخل صفحه نگه داشته می‌شود
  * تا هیچ‌وقت نصفه بیرون نیفتد.
  */
-function __placePop(el,sel,nMatch,mode){
-  var pop=document.getElementById('__pop');
-  if(!pop||!el)return;
+/**
+ * v8.76: نوشتن محتوای نوار، جدا از جاگذاری آن.
+ * قبلاً هر دو کار داخل __placePop بود و آن تابع بدون «المان انتخاب‌شده»
+ * زود برمی‌گشت؛ نتیجه این بود که با Tab یا Esc فیلد عوض می‌شد ولی روی نوار
+ * هیچ چیزی تغییر نمی‌کرد و معلوم نبود الان روی کدام فیلد هستید.
+ */
+function __popMeta(el,sel,nMatch,mode){
   var sEl=document.getElementById('__psel');
-  if(sEl)sEl.textContent=sel||'—';
+  if(sEl)sEl.textContent=sel||'— برای این فیلد هنوز چیزی انتخاب نشده —';
+  // نام فیلد جاری روی خود نوار؛ سبز یعنی قبلاً پر شده
+  var fEl=document.getElementById('__pfld');
+  if(fEl){
+    fEl.textContent=fieldLabel(mode);
+    if(String(S[mode]||'').trim())fEl.classList.add('__fdone');
+    else fEl.classList.remove('__fdone');
+    var done=0;
+    for(var q=0;q<FIELDS.length;q++)if(String(S[FIELDS[q][0]]||'').trim())done++;
+    fEl.title='فیلد جاری — '+done+' از '+FIELDS.length+' پر شده. کلیک = فیلد بعدیِ خالی (Tab)';
+  }
+  // پیش‌نمایش همان چیزی که برداشته می‌شود، کنار دست کاربر
+  var pv=document.getElementById('__ppv');
+  if(pv){
+    var txt='';
+    if(el){ try{ txt=String(getPreview(el,mode)||''); }catch(e){ txt=''; } }
+    pv.textContent=el?(txt?txt.substring(0,90):'(خالی)'):'روی عنصر دلخواه کلیک کنید';
+    if(txt)pv.classList.remove('__warn'); else pv.classList.add('__warn');
+  }
   var cEl=document.getElementById('__pcnt');
   if(cEl){
-    if(mode==='galleryBox')      cEl.textContent='🖼'+countImgs(el);
+    if(mode==='galleryBox')      cEl.textContent=el?('🖼'+countImgs(el)):'';
     else if(mode==='galleryOne') cEl.textContent='➕'+countGalImgs(GAL);
     else                         cEl.textContent=(nMatch>1?('⚠'+nMatch):'');
   }
+}
+
+function __placePop(el,sel,nMatch,mode){
+  var pop=document.getElementById('__pop');
+  if(!pop)return;
+  __popMeta(el,sel,nMatch,mode);
+  if(!el)return;
   pop.classList.add('__on');
   var r=el.getBoundingClientRect();
   var sx=window.pageXOffset||document.documentElement.scrollLeft||0;
   var sy=window.pageYOffset||document.documentElement.scrollTop||0;
   var pw=pop.offsetWidth||260, ph=pop.offsetHeight||28;
+  /* v8.76: نوار با position:absolute نسبت به «نزدیک‌ترین والدِ جای‌گرفته»
+     می‌نشیند، نه نسبت به صفحه. خیلی از قالب‌ها روی body یا یک wrapper
+     position:relative دارند و در آن صورت نوار با فاصلهٔ آن wrapper جابه‌جا
+     و از کنار المان پرت می‌شد. مبدأ واقعی را اندازه می‌گیریم و کم می‌کنیم. */
+  var ox=0,oy=0;
+  try{
+    var op=pop.offsetParent;
+    if(op&&op!==document.body&&op!==document.documentElement){
+      var orc=op.getBoundingClientRect();
+      ox=orc.left+sx; oy=orc.top+sy;
+    }else if(op===document.body){
+      var bs=window.getComputedStyle(document.body);
+      if(bs&&bs.position!=='static'){
+        var brc=document.body.getBoundingClientRect();
+        ox=brc.left+sx; oy=brc.top+sy;
+      }
+    }
+  }catch(e){}
   var top=r.top+sy-ph-6;
   if(r.top-ph-6<0)top=r.bottom+sy+6;            // جا نبود → برو زیرش
   var left=r.left+sx;
   var maxL=sx+document.documentElement.clientWidth-pw-8;
   if(left>maxL)left=maxL;
   if(left<sx+4)left=sx+4;
-  pop.style.top=Math.max(sy+2,top)+'px';
-  pop.style.left=left+'px';
+  pop.style.top=(Math.max(sy+2,top)-oy)+'px';
+  pop.style.left=(left-ox)+'px';
   var d=function(id,on){var b=document.getElementById(id);if(b)b.disabled=!on;};
   d('__pup',   !!(el.parentElement&&el.parentElement.tagName!=='BODY'));
   d('__pdn',   !!el.firstElementChild);
@@ -3309,12 +3419,37 @@ function __go(dir){
 /* v8.75: میان‌برهای صفحه‌کلید — دست از موس برداشته نمی‌شود.
    ↑ والد · ↓ فرزند · → قبلی · ← بعدی · Enter اتمام · Esc پنهان کردن */
 document.addEventListener('keydown',function(e){
-  if(!picked)return;
   var t=e.target;
   if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable))return;
+  /* v8.76: Tab بین فیلدها می‌چرخد و به المان دست نمی‌زند، پس حتی وقتی هنوز
+     چیزی انتخاب نشده هم باید کار کند. بقیهٔ کلیدها به المان نیاز دارند. */
+  if(e.key==='Tab'){
+    e.preventDefault();e.stopPropagation();
+    __field(e.shiftKey?-1:1);
+    return;
+  }
+  if(!picked)return;
   var map={ArrowUp:'up',ArrowDown:'down',ArrowRight:'prev',ArrowLeft:'next'};
   if(map[e.key]){e.preventDefault();e.stopPropagation();__go(map[e.key]);return;}
+  // v8.76: Space = ثبت همین المان و پریدن به فیلد بعدیِ خالی
+  if(e.key===' '||e.key==='Spacebar'){
+    e.preventDefault();e.stopPropagation();
+    __field(1);
+    return;
+  }
   if(e.key==='Enter'){e.preventDefault();__done();return;}
+  // v8.76: Esc انتخاب فعلی همین فیلد را پس می‌گیرد (نه کل کار را)
+  if(e.key==='Escape'){
+    e.preventDefault();e.stopPropagation();
+    if(MODE==='galleryOne'){GAL=[];delete S.galleryOne;__paintGallery('galleryOne');}
+    else delete S[MODE];
+    if(picked)picked.classList.remove('__s');
+    picked=null;
+    var pop=document.getElementById('__pop');if(pop)pop.classList.remove('__on');
+    __post('picker_hint',{msg:'انتخاب «'+fieldLabel(MODE)+'» پاک شد.'});
+    __report();
+    return;
+  }
 },true);
 
 /* نوار باید موقع اسکرول و تغییر اندازه، چسبیده به المان بماند */
@@ -3361,6 +3496,47 @@ window.__hideBar=function(){var b=document.getElementById('__bar');if(b)b.classL
    وضعیت را برمی‌گرداند، پس ارتفاع صفحهٔ محصول دیگر خورده نمی‌شود. */
 function __post(t,d){ try{ parent.postMessage(Object.assign({type:t},d||{}),'*'); }catch(e){} }
 
+/**
+ * v8.76: یک مسیر واحد برای عوض کردن فیلد — چه از پنل والد بیاید چه از
+ * دکمهٔ داخل صفحه. قبلاً فقط داخل شنوندهٔ پیام بود و دکمهٔ درون‌صفحه‌ای
+ * نمی‌توانست از آن استفاده کند.
+ */
+function __setMode(m){
+  MODE=String(m||'shortDesc');
+  __paintGallery(MODE);
+  // اگر این فیلد قبلاً انتخاب شده، همان را دوباره نشان بده
+  try{
+    if(S[MODE]){
+      var prev=document.querySelector(String(S[MODE]).split('\n')[0]);
+      if(prev){
+        if(picked)picked.classList.remove('__s');
+        prev.classList.add('__s'); picked=prev;
+        __placePop(prev,S[MODE],countMatch(S[MODE]),MODE);
+        var r=prev.getBoundingClientRect(),vh=window.innerHeight||600;
+        if(r.top<60||r.bottom>vh-20)prev.scrollIntoView({block:'center'});
+      }
+    }else if(picked){
+      // فیلد تازه است ولی المانی در دست داریم: نوار همان‌جا بماند تا
+      // بشود بدون کلیک دوباره، همین المان را برای فیلد جدید ثبت کرد
+      __placePop(picked,'',0,MODE);
+    }else{
+      /* v8.76: هیچ المانی در دست نیست. نوار را پنهان نمی‌کنیم بلکه نام فیلد
+         جدید را رویش می‌نویسیم، وگرنه با Tab فیلد عوض می‌شد و کاربر هیچ
+         نشانه‌ای نمی‌دید. اگر هنوز هیچ‌جا جای نگرفته، بالای صفحه بنشیند. */
+      __popMeta(null,'',0,MODE);
+      var pop=document.getElementById('__pop');
+      if(pop){
+        pop.classList.add('__on');
+        if(!pop.style.top){
+          var sy0=window.pageYOffset||document.documentElement.scrollTop||0;
+          pop.style.top=(sy0+8)+'px'; pop.style.left='8px';
+        }
+      }
+    }
+  }catch(e){}
+  __report();
+}
+
 function __report(){
   __post('picker_state',{
     mode:MODE, sel:S[MODE]||'', gal:GAL.slice(),
@@ -3379,25 +3555,7 @@ function __report(){
 window.addEventListener('message',function(e){
   var d=e.data||{};
   if(d.type==='picker_mode'){
-    MODE=String(d.mode||'shortDesc');
-    __paintGallery(MODE);
-    // v8.75: اگر این فیلد قبلاً انتخاب شده، همان را دوباره نشان بده
-    try{
-      if(S[MODE]){
-        var prev=document.querySelector(S[MODE]);
-        if(prev){
-          if(picked)picked.classList.remove('__s');
-          prev.classList.add('__s'); picked=prev;
-          __placePop(prev,S[MODE],countMatch(S[MODE]),MODE);
-          var r=prev.getBoundingClientRect(),vh=window.innerHeight||600;
-          if(r.top<60||r.bottom>vh-20)prev.scrollIntoView({block:'center'});
-        }
-      }else{
-        var pop=document.getElementById('__pop');
-        if(pop&&!picked)pop.classList.remove('__on');
-      }
-    }catch(e){}
-    __report();
+    __setMode(String(d.mode||'shortDesc'));
   }else if(d.type==='picker_go'){
     __go(String(d.dir||'up'));
   }else if(d.type==='picker_clear_gal'){
@@ -3422,8 +3580,14 @@ SCRIPT;
 // v8.67: نسخه را داخل نوار انتخابگر بنویس. اگر کاربر فایل را روی هاست
 // به‌روز نکرده باشد، همین‌جا معلوم می‌شود که نسخهٔ قدیمی باز شده و
 // نبودِ گزینه‌های گالری از همان است، نه از خرابی.
+/* v8.67: نسخه را داخل نوار انتخابگر بنویس تا اگر فایل روی هاست قدیمی
+   مانده باشد همان‌جا معلوم شود.
+   v8.76: این جایگزینی از ۸.۶۸ تا حالا بی‌اثر بود — بازچینی نوار عنصرِ
+   «__ver» را برداشته بود و str_replace چیزی برای پیدا کردن نداشت، پس
+   شمارهٔ نسخه هیچ‌وقت نمایش داده نمی‌شد. عنصر برگشت و رشتهٔ جست‌وجو
+   کوتاه شد تا به بازچینی‌های بعدی حساس نباشد. */
 $script = str_replace('id="__ver" style="opacity:.65">',
-    'id="__ver" style="opacity:.65">v' . APP_VERSION . ' · اگر گزینه‌های 🖼 گالری را نمی‌بینید، فایل روی هاست قدیمی است',
+    'id="__ver" style="opacity:.65">v' . APP_VERSION,
     $script);
 
 $html = preg_replace('~</body>~i', $script . '</body>', $html);
@@ -3533,6 +3697,33 @@ $script = <<<'SCRIPT'
 .__preview-warn{background:#78350f!important;color:#fbbf24!important;border-color:#f59e0b!important}
 .__preview-err{background:#7f1d1d!important;color:#fca5a5!important;border-color:#ef4444!important}
 body{padding-top:130px!important}
+/* v8.76: همان نوار چسبیده به المان که در سلکتور جزئیات هست، این‌جا هم
+   اضافه شد. تا حالا دکمه‌های والد/فرزند فقط بالای صفحه بودند و برای هر
+   قدم در درخت باید تا بالا اسکرول می‌کردید. */
+.__pop{position:absolute;z-index:2147483647;display:none;flex-direction:column;gap:2px;
+  background:#0b1220;border:1px solid #3b82f6;border-radius:7px;padding:3px 4px;
+  box-shadow:0 4px 14px rgba(0,0,0,.55);font:12px Tahoma,sans-serif;direction:rtl;
+  white-space:nowrap;cursor:default}
+.__pop.__on{display:flex}
+.__prow{display:flex;gap:3px;align-items:center}
+.__prow2{display:flex;gap:4px;align-items:center;max-width:430px}
+.__psep{width:1px;height:15px;background:#1e40af;margin:0 2px;flex:0 0 auto}
+.__pb{background:#1e3a5f;color:#fff;border:1px solid #3b82f6;border-radius:5px;
+  padding:3px 7px;font:12px Tahoma,sans-serif;cursor:pointer;line-height:1.4}
+.__pb:hover{background:#3b82f6}
+.__pb:disabled{opacity:.3;cursor:not-allowed}
+.__pb.__okb{background:#22c55e;border-color:#22c55e;color:#04210f;font-weight:700}
+.__pfld{background:#1d4ed8!important;color:#fff!important;min-width:70px;text-align:center;
+  font-weight:700!important;max-width:150px}
+.__pfld.__fdone{background:#166534!important;color:#bbf7d0!important}
+.__pop b{background:#1e293b;color:#bfdbfe;padding:2px 6px;border-radius:4px;
+  font:11px ui-monospace,monospace;font-weight:400;max-width:190px;overflow:hidden;
+  text-overflow:ellipsis}
+.__pop i{font-style:normal;color:#93c5fd;font-size:11px;padding:0 3px}
+.__pop em{font-style:normal;color:#86efac;font-size:10.5px;max-width:235px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;background:#052e16;border:1px solid #14532d;
+  border-radius:4px;padding:1px 5px}
+.__pop em.__warn{color:#fbbf24;background:#3f2d05;border-color:#78350f}
 </style>
 <div class="__bar">
 <div class="__row">
@@ -3556,6 +3747,27 @@ body{padding-top:130px!important}
   <span class="__preview-label" id="__prevLabel">پیش‌نمایش:</span>
   <span id="__preview" class="__preview">در انتظار انتخاب...</span>
 </div>
+</div>
+<!-- v8.76: نوار شناور کنار المان انتخاب‌شده -->
+<div class="__pop" id="__pop">
+  <div class="__prow">
+    <button class="__pb" id="__pup"   onclick="__goParent()" title="والد (کلید ↑)">⬆</button>
+    <button class="__pb" id="__pdn"   onclick="__goChild()"  title="فرزند (کلید ↓)">⬇</button>
+    <button class="__pb" id="__pprev" onclick="__goPrev()"   title="قبلی (کلید →)">▶</button>
+    <button class="__pb" id="__pnext" onclick="__goNext()"   title="بعدی (کلید ←)">◀</button>
+    <span class="__psep"></span>
+    <button class="__pb" id="__pfprev" onclick="__vField(-1)" title="فیلد قبلی (Shift+Tab)">‹</button>
+    <button class="__pb __pfld" id="__pfld" onclick="__vField(1)" title="فیلد بعدی (Tab یا Space)">—</button>
+    <button class="__pb" id="__pfnext" onclick="__vField(1)" title="فیلد بعدی (Tab)">›</button>
+    <span class="__psep"></span>
+    <i id="__pcnt"></i>
+    <button class="__pb __okb" onclick="__done()" title="اتمام (کلید Enter)">✓</button>
+  </div>
+  <div class="__prow2">
+    <b id="__psel">—</b>
+    <em id="__ppv"></em>
+    <span id="__ver" style="opacity:.65"></span>
+  </div>
 </div>
 <script>
 (function(){
@@ -3781,8 +3993,134 @@ function updatePreview(el,mode){
   }
 }
 
+/* v8.76: نوار شناور کنار المان — دقیقاً همان رفتار سلکتور جزئیات */
+var VFIELDS=[['container','کانتینر'],['title','عنوان'],['price','قیمت'],
+             ['link','لینک'],['image','تصویر']];
+function vLabel(k){for(var i=0;i<VFIELDS.length;i++)if(VFIELDS[i][0]===k)return VFIELDS[i][1];return k;}
+function vIndex(k){for(var i=0;i<VFIELDS.length;i++)if(VFIELDS[i][0]===k)return i;return 0;}
+
+function __popMeta(el,sel,mode){
+  var sEl=document.getElementById('__psel');
+  if(sEl)sEl.textContent=sel||'— برای این فیلد هنوز چیزی انتخاب نشده —';
+  var fEl=document.getElementById('__pfld');
+  if(fEl){
+    fEl.textContent=vLabel(mode);
+    if(String(S[mode]||'').trim())fEl.classList.add('__fdone');
+    else fEl.classList.remove('__fdone');
+    var done=0;
+    for(var q=0;q<VFIELDS.length;q++)if(String(S[VFIELDS[q][0]]||'').trim())done++;
+    fEl.title='فیلد جاری — '+done+' از '+VFIELDS.length+' پر شده. کلیک = فیلد بعدی (Tab)';
+  }
+  var cEl=document.getElementById('__pcnt');
+  if(cEl)cEl.textContent=el?(countSimilar(el)+' مشابه'):'';
+  var pv=document.getElementById('__ppv');
+  if(!pv)return;
+  var txt='';
+  if(el){
+    try{
+      if(mode==='title')      txt=cleanTitle(el.textContent);
+      else if(mode==='price') txt=extractPrice(el.textContent);
+      else if(mode==='link')  txt=(findSmartLink(el)||{}).url||'';
+      else if(mode==='image') txt=(getImageUrl(el)||{}).url||'';
+      else                    txt=countSimilar(el)+' المان مشابه';
+    }catch(e){txt='';}
+  }
+  pv.textContent=el?(txt?String(txt).substring(0,90):'(چیزی پیدا نشد)'):'روی عنصر دلخواه کلیک کنید';
+  if(txt)pv.classList.remove('__warn'); else pv.classList.add('__warn');
+}
+
+function __placePop(el,sel,mode){
+  var pop=document.getElementById('__pop');
+  if(!pop)return;
+  __popMeta(el,sel,mode);
+  if(!el)return;
+  pop.classList.add('__on');
+  var r=el.getBoundingClientRect();
+  var sx=window.pageXOffset||document.documentElement.scrollLeft||0;
+  var sy=window.pageYOffset||document.documentElement.scrollTop||0;
+  var pw=pop.offsetWidth||260, ph=pop.offsetHeight||28;
+  /* مبدأ واقعیِ position:absolute را حساب کن — قالب‌هایی که روی body یا
+     یک wrapper، position غیر static دارند وگرنه نوار را جابه‌جا می‌کنند */
+  var ox=0,oy=0;
+  try{
+    var op=pop.offsetParent;
+    if(op&&op!==document.body&&op!==document.documentElement){
+      var orc=op.getBoundingClientRect(); ox=orc.left+sx; oy=orc.top+sy;
+    }else if(op===document.body){
+      var bs=window.getComputedStyle(document.body);
+      if(bs&&bs.position!=='static'){
+        var brc=document.body.getBoundingClientRect(); ox=brc.left+sx; oy=brc.top+sy;
+      }
+    }
+  }catch(e){}
+  // نوار بالای صفحه ۱۳۰ پیکسل ارتفاع دارد؛ زیرش پنهان نشو
+  var top=r.top+sy-ph-6;
+  if(r.top-ph-6<134)top=r.bottom+sy+6;
+  var left=r.left+sx;
+  var maxL=sx+document.documentElement.clientWidth-pw-8;
+  if(left>maxL)left=maxL;
+  if(left<sx+4)left=sx+4;
+  pop.style.top=(Math.max(sy+136,top)-oy)+'px';
+  pop.style.left=(left-ox)+'px';
+  var d=function(id,on){var b=document.getElementById(id);if(b)b.disabled=!on;};
+  d('__pup',   !!(el.parentElement&&el.parentElement.tagName!=='BODY'));
+  d('__pdn',   !!el.firstElementChild);
+  d('__pprev', !!el.previousElementSibling);
+  d('__pnext', !!el.nextElementSibling);
+}
+
+/** v8.76: عوض کردن فیلد از داخل خود صفحه */
+function __vField(step){
+  var sel=document.getElementById('__m');
+  if(!sel)return;
+  var n=VFIELDS.length,i=vIndex(sel.value),pick=null;
+  if(step>0){
+    for(var k=1;k<=n;k++){
+      var c=VFIELDS[(i+k)%n][0];
+      if(!String(S[c]||'').trim()){pick=c;break;}
+    }
+  }
+  if(!pick)pick=VFIELDS[((i+step)%n+n)%n][0];
+  sel.value=pick;
+  var el=E[pick]||null;
+  if(el){
+    if(picked&&picked!==el)picked.classList.remove('__s');
+    el.classList.add('__s'); picked=el;
+    __placePop(el,S[pick]||gs(el),pick);
+    var r=el.getBoundingClientRect(),vh=window.innerHeight||600;
+    if(r.top<140||r.bottom>vh-20)el.scrollIntoView({block:'center'});
+  }else{
+    __popMeta(null,'',pick);
+    var pop=document.getElementById('__pop');
+    if(pop){
+      pop.classList.add('__on');
+      if(!pop.style.top){
+        var sy0=window.pageYOffset||document.documentElement.scrollTop||0;
+        pop.style.top=(sy0+140)+'px'; pop.style.left='8px';
+      }
+    }
+  }
+  updateUI();
+  updatePreview(picked||cur,pick);
+}
+
+/* نوار باید موقع اسکرول و تغییر اندازه چسبیده به المان بماند */
+var __rp=null;
+function __repos(){
+  if(!picked)return;
+  clearTimeout(__rp);
+  __rp=setTimeout(function(){
+    try{
+      var m=document.getElementById('__m').value;
+      __placePop(picked,S[m]||gs(picked),m);
+    }catch(e){}
+  },40);
+}
+window.addEventListener('scroll',__repos,true);
+window.addEventListener('resize',__repos);
+
 function selectEl(el){
-  if(!el||el.tagName=='BODY'||el.tagName=='HTML'||el.closest('.__bar'))return;
+  if(!el||el.tagName=='BODY'||el.tagName=='HTML'||el.closest('.__bar')||el.closest('.__pop'))return;
   var m=document.getElementById('__m').value;
   var s=gs(el);
   if(E[m])E[m].classList.remove('__s');
@@ -3793,10 +4131,11 @@ function selectEl(el){
   document.getElementById('__sel').textContent=s||'(none)';
   updateUI();
   updatePreview(el,m);
+  __placePop(el,s,m);   // v8.76
 }
 
 document.addEventListener('mouseover',function(e){
-  if(e.target.closest('.__bar'))return;
+  if(e.target.closest('.__bar')||e.target.closest('.__pop'))return;
   if(cur&&cur!==picked)cur.classList.remove('__h');
   cur=e.target;
   if(cur!==picked)cur.classList.add('__h');
@@ -3809,13 +4148,52 @@ document.addEventListener('mouseout',function(e){
 },true);
 
 document.addEventListener('click',function(e){
-  if(e.target.closest('.__bar'))return;
+  if(e.target.closest('.__bar')||e.target.closest('.__pop'))return;
   e.preventDefault();e.stopPropagation();
   selectEl(e.target);
 },true);
 
+/* v8.76: میان‌برهای صفحه‌کلید — همان‌هایی که در سلکتور جزئیات هست.
+   ↑ والد · ↓ فرزند · → قبلی · ← بعدی · Tab فیلد بعدی · Space ثبت و بعدی
+   · Esc پاک کردن همین فیلد · Enter اتمام */
+document.addEventListener('keydown',function(e){
+  var t=e.target;
+  if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.tagName==='SELECT'||t.isContentEditable))return;
+  if(e.key==='Tab'){e.preventDefault();e.stopPropagation();__vField(e.shiftKey?-1:1);return;}
+  if(!picked)return;
+  if(e.key==='ArrowUp')   {e.preventDefault();e.stopPropagation();__goParent();return;}
+  if(e.key==='ArrowDown') {e.preventDefault();e.stopPropagation();__goChild();return;}
+  if(e.key==='ArrowRight'){e.preventDefault();e.stopPropagation();__goPrev();return;}
+  if(e.key==='ArrowLeft') {e.preventDefault();e.stopPropagation();__goNext();return;}
+  if(e.key===' '||e.key==='Spacebar'){e.preventDefault();e.stopPropagation();__vField(1);return;}
+  if(e.key==='Enter'){e.preventDefault();e.stopPropagation();__done();return;}
+  if(e.key==='Escape'){
+    e.preventDefault();e.stopPropagation();
+    var m=document.getElementById('__m').value;
+    delete S[m];
+    if(E[m]){E[m].classList.remove('__s');delete E[m];}
+    picked=null;
+    var pop=document.getElementById('__pop');if(pop)pop.classList.remove('__on');
+    updateUI();
+    return;
+  }
+},true);
+
 document.getElementById('__m').addEventListener('change',function(){
   updatePreview(picked||cur,this.value);
+  // v8.76: نوار شناور هم باید فیلد تازه را نشان بدهد و اگر قبلاً برای این
+  // فیلد چیزی انتخاب شده، همان را دوباره برگرداند
+  var m=this.value,el=E[m]||null;
+  if(el){
+    if(picked&&picked!==el)picked.classList.remove('__s');
+    el.classList.add('__s'); picked=el;
+    __placePop(el,S[m]||gs(el),m);
+  }else{
+    __popMeta(null,'',m);
+    var pop=document.getElementById('__pop');
+    if(pop&&!picked)pop.classList.remove('__on');
+  }
+  updateUI();
 });
 
 window.__goParent=function(){
@@ -3826,7 +4204,10 @@ window.__goParent=function(){
     if(el===picked)el.classList.remove('__s');
     el.classList.remove('__h');
     selectEl(p);
-    p.scrollIntoView({behavior:'smooth',block:'center'});
+    /* v8.76: فقط وقتی اسکرول کن که المان از دید بیرون باشد؛ اسکرول
+       همیشگی باعث می‌شد صفحه زیر دست کاربر مدام بپرد. */
+    try{var __r=p.getBoundingClientRect(),__vh=window.innerHeight||600;
+      if(__r.top<140||__r.bottom>__vh-20)p.scrollIntoView({block:'center'});}catch(_e){}
   }
 };
 
@@ -3838,7 +4219,10 @@ window.__goChild=function(){
     if(el===picked)el.classList.remove('__s');
     el.classList.remove('__h');
     selectEl(children[0]);
-    children[0].scrollIntoView({behavior:'smooth',block:'center'});
+    /* v8.76: فقط وقتی اسکرول کن که المان از دید بیرون باشد؛ اسکرول
+       همیشگی باعث می‌شد صفحه زیر دست کاربر مدام بپرد. */
+    try{var __r=children[0].getBoundingClientRect(),__vh=window.innerHeight||600;
+      if(__r.top<140||__r.bottom>__vh-20)children[0].scrollIntoView({block:'center'});}catch(_e){}
   }
 };
 
@@ -3853,7 +4237,10 @@ window.__goPrev=function(){
     if(el===picked)el.classList.remove('__s');
     el.classList.remove('__h');
     selectEl(prev);
-    prev.scrollIntoView({behavior:'smooth',block:'center'});
+    /* v8.76: فقط وقتی اسکرول کن که المان از دید بیرون باشد؛ اسکرول
+       همیشگی باعث می‌شد صفحه زیر دست کاربر مدام بپرد. */
+    try{var __r=prev.getBoundingClientRect(),__vh=window.innerHeight||600;
+      if(__r.top<140||__r.bottom>__vh-20)prev.scrollIntoView({block:'center'});}catch(_e){}
   }
 };
 
@@ -3868,7 +4255,10 @@ window.__goNext=function(){
     if(el===picked)el.classList.remove('__s');
     el.classList.remove('__h');
     selectEl(next);
-    next.scrollIntoView({behavior:'smooth',block:'center'});
+    /* v8.76: فقط وقتی اسکرول کن که المان از دید بیرون باشد؛ اسکرول
+       همیشگی باعث می‌شد صفحه زیر دست کاربر مدام بپرد. */
+    try{var __r=next.getBoundingClientRect(),__vh=window.innerHeight||600;
+      if(__r.top<140||__r.bottom>__vh-20)next.scrollIntoView({block:'center'});}catch(_e){}
   }
 };
 
@@ -3901,6 +4291,12 @@ SCRIPT;
 // __isFull هیچ‌وقت '1' نمی‌شد و در حالت تمام‌صفحه جلوی باز شدن لینک‌ها
 // گرفته نمی‌شد. مقدارها بعد از ساخت heredoc جایگزین می‌شوند.
 // جای هر جانگهدار PHP داخل اسکریپت، مقدار واقعی گذاشته می‌شود.
+// v8.76: شمارهٔ نسخه در انتخابگر فهرست هم نوشته شود — تا حالا فقط
+// انتخابگر جزئیات این را داشت و آن هم از ۸.۶۸ بی‌اثر شده بود.
+$script = str_replace('id="__ver" style="opacity:.65">',
+    'id="__ver" style="opacity:.65">v' . APP_VERSION,
+    $script);
+
 $vpVals = [$fullMode ? '1' : '0', (string)($fullPageInspect ?? '0')];
 $vpIdx = 0;
 $script = preg_replace_callback(
@@ -7523,8 +7919,8 @@ if (isset($_GET['selftest'])) {
     })());
     /* ---------- v8.75: کنترل‌های چسبیده به المان و میان‌برها ---------- */
     $add('8.75', 'نوار کنترل کنار المان در صفحه هست',
-         strpos($selfSrc, 'id="__pop"') !== false
-         && strpos($selfSrc, 'function __placePop(') !== false);
+         strpos($selfSrc, 'id="__p' . 'op"') !== false
+         && strpos($selfSrc, 'function __place' . 'Pop(') !== false);
     $add('8.75', 'دکمه‌های والد/فرزند/کناری روی همان نوار هستند',
          strpos($selfSrc, 'id="__pup"') !== false && strpos($selfSrc, 'id="__pdn"') !== false
          && strpos($selfSrc, 'id="__pprev"') !== false && strpos($selfSrc, 'id="__pnext"') !== false);
@@ -7544,7 +7940,56 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'function pkNextField(') !== false
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
-         strpos($selfSrc, 'var prev=document.querySelector(S[MODE])') !== false);
+         strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.76: کل کار سلکتور بدون برگشتن به بالای صفحه ---------- */
+    // انتخاب فیلد آمد داخل خود صفحه، در هر دو انتخابگر
+    $add('8.76', 'نام و تعویض فیلد روی نوار شناور هست',
+         substr_count($selfSrc, 'id="__pf' . 'ld"') === 2
+         && substr_count($selfSrc, 'id="__pf' . 'prev"') === 2
+         && substr_count($selfSrc, 'id="__pf' . 'next"') === 2);
+    $add('8.76', 'هر دو انتخابگر تابع چرخش فیلد دارند',
+         strpos($selfSrc, 'function __field(step)') !== false
+         && strpos($selfSrc, 'function __vField(step)') !== false);
+    $add('8.76', 'پیش‌نمایش زندهٔ همان فیلد روی نوار است',
+         substr_count($selfSrc, 'id="__p' . 'pv"') === 2);
+    // نوشتن محتوای نوار از جاگذاری‌اش جدا شد، وگرنه بدون المانِ انتخاب‌شده
+    // با Tab فیلد عوض می‌شد و هیچ نشانه‌ای روی صفحه دیده نمی‌شد
+    $add('8.76', 'محتوای نوار جدا از جاگذاری آن نوشته می‌شود',
+         substr_count($selfSrc, 'function __pop' . 'Meta(') === 2);
+    $add('8.76', 'Tab بدون انتخاب قبلی هم فیلد را عوض می‌کند',
+         strpos($selfSrc, "if(e.key==='Tab')") !== false
+         && strpos($selfSrc, 'if(!picked)return;') !== false);
+    $add('8.76', 'Space ثبت و رفتن به فیلد بعدی',
+         substr_count($selfSrc, "e.key===' '||e.key===" . "'Spacebar'") === 2);
+    $add('8.76', 'Esc فقط همین فیلد را پاک می‌کند نه همه را',
+         substr_count($selfSrc, "e.key==='Escape'") >= 2);
+    // position:absolute نسبت به نزدیک‌ترین والدِ جای‌گرفته می‌نشیند، نه صفحه
+    $add('8.76', 'مبدأ جاگذاری نوار اصلاح شده است',
+         substr_count($selfSrc, 'pop.offset' . 'Parent') === 2
+         && substr_count($selfSrc, "bs.position!==" . "'static'") === 2);
+    $add('8.76', 'انتخابگر فهرست هم نوار چسبیده دارد',
+         substr_count($selfSrc, 'function __place' . 'Pop(') === 2
+         && strpos($selfSrc, 'var VFIE' . 'LDS=[') !== false);
+    $add('8.76', 'انتخابگر فهرست میان‌بر صفحه‌کلید دارد',
+         strpos($selfSrc, "if(e.key==='ArrowUp')   {e.preventDefault()") !== false);
+    $add('8.76', 'در فهرست هم اسکرول فقط بیرون از دید انجام می‌شود',
+         substr_count($selfSrc, '__r.top<140||__r.bottom>' . '__vh-20') === 4);
+    $add('8.76', 'فیلد از داخل صفحه به پنل والد هم گزارش می‌شود',
+         strpos($selfSrc, "__post('picker_field'") !== false
+         && strpos($selfSrc, "type==='picker_field'") !== false);
+    $add('8.76', 'راهنمای حالت از فرستادن فرمان جدا شد',
+         strpos($selfSrc, 'function pkModeHint(') !== false);
+    $add('8.76', 'نوار شناور فهرست زیر نوار بالایی پنهان نمی‌شود',
+         strpos($selfSrc, 'Math.max(sy+136,top)') !== false);
+    /* نمایش نسخه داخل انتخابگر از ۸.۶۸ بی‌اثر شده بود: بازچینی نوار عنصر
+       __ver را برداشته بود و str_replace هدفی برای پیدا کردن نداشت. اینجا
+       هم وجود عنصر و هم وجود جایگزینی در هر دو انتخابگر سنجیده می‌شود،
+       چون هرکدام تنها باشد باز هم چیزی نشان داده نمی‌شود. */
+    $add('8.76', 'شمارهٔ نسخه در هر دو انتخابگر واقعاً نوشته می‌شود',
+         // دو عنصر در دو نوار + دو جفت رشتهٔ جست‌وجو/جایگزینی
+         substr_count($selfSrc, '<span id="__' . 'ver"') === 2
+         && substr_count($selfSrc, "str_replace('id=\"__" . "ver\"") === 2);
 
     /* ---------- v8.74: کلیک در پیش‌نمایش، انتخاب کند نه ناوبری ---------- */
     // nowdoc جانگهدار PHP را اجرا نمی‌کند؛ باید بعد از ساخت جایگزین شود
@@ -15057,7 +15502,8 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
   <span style="color:#86efac">🖼 گالری چندعکسی</span> ·
   <span style="color:#86efac">🖥 پنل انتخاب بیرونی</span> ·
   <span style="color:#86efac">↩ پروفایل پیش‌فرض</span> ·
-  <span style="color:#86efac">🔄 آپدیت محتوای تکراری‌ها</span>
+  <span style="color:#86efac">🔄 آپدیت محتوای تکراری‌ها</span> ·
+  <span style="color:#86efac">🎯 نوار سلکتور چسبیده به المان + میان‌برها</span>
   <button class="btn btn-gray" onclick="this.parentNode.style.display='none'"
           style="float:left;font-size:10px;padding:2px 8px">بستن</button>
 </div>
@@ -17475,8 +17921,9 @@ function setDetailIframeHeight(h){const w=$('detailFrameWrap');if(!w)return;h=Ma
 function pkFrame(){ const f=$('detailFrame'); return f&&f.contentWindow?f.contentWindow:null; }
 function pkSend(type,extra){ const w=pkFrame(); if(w)try{w.postMessage(Object.assign({type},extra||{}),'*');}catch(e){} }
 
-function pkSetMode(m){
-  pkSend('picker_mode',{mode:m});
+/* v8.76: راهنما و دکمهٔ گالری از فرستادن فرمان جدا شدند، چون وقتی خودِ
+   صفحه فیلد را عوض کرده باشد فقط باید متن به‌روز شود، نه فرمان دوباره. */
+function pkModeHint(m){
   const hints={
     galleryBox:'🖼 روی ظرفی کلیک کنید که همهٔ عکس‌ها داخلش هستند (نه خود عکس). با ⬆ والد بزرگ‌ترش کنید تا همهٔ عکس‌ها صورتی شوند.',
     galleryOne:'➕ روی هر عکسی که می‌خواهید کلیک کنید — چند بار. هر کدام به فهرست اضافه می‌شود.',
@@ -17485,9 +17932,14 @@ function pkSetMode(m){
   };
   const h=$('pkHint');
   if(h)h.innerHTML=(hints[m]||'روی هر بخش از صفحهٔ زیر کلیک کنید.')
-    +' <span style="color:#c4b5fd">کنترل‌ها بالای همان المان ظاهر می‌شوند — '
-    +'با کلیدهای <b>↑</b> والد، <b>↓</b> فرزند، <b>→ ←</b> کناری‌ها و <b>Enter</b> اتمام.</span>';
+    +' <span style="color:#c4b5fd">همهٔ کنترل‌ها بالای همان المان هستند — '
+    +'<b>↑</b> والد، <b>↓</b> فرزند، <b>→ ←</b> کناری‌ها، <b>Tab</b> فیلد بعدی، '
+    +'<b>Space</b> ثبت و بعدی، <b>Esc</b> پاک کردن، <b>Enter</b> اتمام.</span>';
   const cg=$('pkClearGal'); if(cg)cg.style.display=(m==='galleryOne')?'':'none';
+}
+function pkSetMode(m){
+  pkSend('picker_mode',{mode:m});
+  pkModeHint(m);
 }
 function pkGo(dir){ pkSend('picker_go',{dir}); }
 function pkClearGal(){ pkSend('picker_clear_gal',{}); }
@@ -17654,6 +18106,12 @@ window.addEventListener('message',e=>{
     pkSetMode(($('pkMode')||{}).value||'shortDesc');
   } else if(e.data && e.data.type==='picker_state'){
     pkApplyState(e.data);
+  } else if(e.data && e.data.type==='picker_field'){
+    // v8.76: فیلد از داخل خود صفحه عوض شد — منوی پنل را هم‌تراز کن.
+    // pkSetMode را صدا نمی‌زنیم چون خودِ iframe همین حالا عوضش کرده و
+    // فرستادن دوبارهٔ فرمان باعث رفت‌وبرگشت بی‌جا می‌شود.
+    const ms=$('pkMode'); if(ms)ms.value=e.data.mode||'shortDesc';
+    pkModeHint(e.data.mode||'shortDesc');
   } else if(e.data && e.data.type==='picker_hint'){
     if(e.data.msg){const h=$('pkHint');if(h)h.textContent=e.data.msg;}
     else pkSetMode(($('pkMode')||{}).value||'shortDesc');
@@ -18815,6 +19273,29 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.76', t:'کل کار سلکتور بدون برگشتن به بالای صفحه — انتخاب فیلد هم آمد کنار المان', items:[
+    '🎯 در ۸.۷۵ دکمه‌های والد/فرزند کنار المان آمدند، ولی «انتخاب اینکه دارید کدام فیلد را می‌گیرید» هنوز در پنل بالای صفحه بود',
+    'یعنی برای هر فیلد باز هم یک بار تا بالا و یک بار تا پایین اسکرول می‌کردید — همان چیزی که خسته‌کننده بود',
+    '✅ حالا نام فیلد جاری روی همان نوار کوچک نوشته می‌شود و با ‹ › همان‌جا عوض می‌شود',
+    'دکمهٔ وسط، خودش به اولین فیلدِ خالی می‌پرد؛ فیلدهای پرشده سبز نشان داده می‌شوند',
+    'شمارندهٔ «۳ از ۱۲ پر شده» روی همان دکمه است',
+    '👁 پیش‌نمایش زنده هم آمد روی نوار: همان لحظه می‌بینید چه متنی/قیمتی/لینکی برداشته می‌شود',
+    'قبلاً برای دیدن پیش‌نمایش باید به پنل بالای صفحه نگاه می‌کردید',
+    '⌨️ میان‌برهای تازه:',
+    '· Tab فیلد بعدیِ خالی   · Shift+Tab فیلد قبلی   · Space ثبت و رفتن به بعدی',
+    '· Esc فقط انتخاب همین فیلد را پس می‌گیرد (نه کل کار را)',
+    'Tab حتی وقتی هنوز چیزی انتخاب نکرده‌اید هم کار می‌کند',
+    '🖼 سلکتور فهرست (کانتینر/عنوان/قیمت/لینک/تصویر) هم دقیقاً همین نوار را گرفت',
+    'تا حالا دکمه‌های والد/فرزندش فقط بالای صفحه بودند و برای هر قدم باید اسکرول می‌کردید',
+    'میان‌برهای صفحه‌کلید و پیش‌نمایش زنده هم به آن اضافه شد',
+    'اسکرول خودکارش هم مثل سلکتور جزئیات فقط وقتی انجام می‌شود که المان از دید بیرون باشد',
+    '🐞 باگ جاگذاری نوار: نوار با position:absolute نسبت به «نزدیک‌ترین والدِ جای‌گرفته» می‌نشیند، نه نسبت به صفحه',
+    'در قالب‌هایی که روی body یا یک wrapper مقدار position دارند، نوار با فاصله از المان پرت می‌شد',
+    'حالا مبدأ واقعی اندازه‌گیری و کسر می‌شود',
+    '🐞 باگ دوم: نام فیلد فقط وقتی نوشته می‌شد که المانی انتخاب شده باشد',
+    'پس با Tab یا Esc فیلد عوض می‌شد و هیچ نشانه‌ای روی صفحه دیده نمی‌شد',
+    'نوشتن محتوای نوار از جاگذاری آن جدا شد'
+  ]},
   {v:'8.75', t:'انتخاب سلکتور سریع‌تر: کنترل‌ها کنار خودِ المان و میان‌برهای صفحه‌کلید', items:[
     '🎯 دکمه‌های ⬆ والد · ⬇ فرزند · ▶◀ کناری‌ها حالا دقیقاً بالای همان المانی ظاهر می‌شوند که انتخاب کرده‌اید',
     'دیگر برای هر بار بالا و پایین رفتن در درخت، لازم نیست تا بالای صفحه اسکرول کنید',
