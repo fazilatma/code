@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.81';
+const APP_VERSION = '8.82';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -8427,6 +8427,39 @@ if (isset($_GET['selftest'])) {
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
 
+    /* ---------- v8.82: جست‌وجو در مدیریت محصولات ---------- */
+    /* محصولی که «بازگردانی ناموفق» می‌خورد در هیچ سربرگی پیدا نمی‌شد:
+       کادر جست‌وجو در سربرگ «همه» اصلاً ساخته نمی‌شد و آن کادر هم فقط
+       ردیف‌های همان صفحه را فیلتر می‌کرد، نه کل غرفه را. */
+    $add('8.82', 'اندپوینت محصولات پارامتر جست‌وجو می‌پذیرد',
+         strpos($selfSrc, "\$q=trim((string)(\$_GET['q']??''));") !== false
+         && strpos($selfSrc, "\$url.='&ti" . "tle='.urlencode(\$q);") !== false);
+    $add('8.82', 'جست‌وجو با شناسهٔ عددی مستقیم محصول را می‌خواند',
+         strpos($selfSrc, "\$one=bslReq(\$tk,'GET','products/'.\$searchId);") !== false);
+    $add('8.82', 'اگر سرور چیزی نداد، کل غرفه گشته می‌شود',
+         strpos($selfSrc, "\$foundBy='de" . "ep'") !== false
+         && strpos($selfSrc, 'reconNormTitle(stripProductCode($q))') !== false);
+    $add('8.82', 'جست‌وجوی عمیق همهٔ وضعیت‌ها را می‌بیند',
+         strpos($selfSrc, 'foreach(bslAllStatuses() as $sv){$allSt') !== false);
+    // رابط کاربری
+    $add('8.82', 'کادر جست‌وجو در همهٔ سربرگ‌ها هست',
+         strpos($selfSrc, 'id="bslServer' . 'Search"') !== false
+         && strpos($selfSrc, 'function bslServerSearch' . 'Go(') !== false);
+    // رشته تکه‌تکه، وگرنه همین خط خودش را پیدا می‌کند (درس v8.35)
+    $add('8.82', 'سربرگ «همه» هم قابل مدیریت شد',
+         substr_count($selfSrc, "'pending','archived','a" . "ll'].includes(activeTab)") === 1);
+    $add('8.82', 'جست‌وجو عبارت را به سرور می‌فرستد',
+         strpos($selfSrc, "'&q='+encodeURIComponent(_q)") !== false);
+    $add('8.82', 'عوض شدن سربرگ، جست‌وجو را پاک می‌کند',
+         strpos($selfSrc, "bslModalState.q='';          // v8.82") !== false);
+    // خطای بازگردانی باید شناسه داشته باشد تا قابل پیگیری باشد
+    $add('8.82', 'خطای بازگردانی ناموفق شناسه و وضعیت را می‌نویسد',
+         strpos($selfSrc, "'بازگردانی ناموفق (شناسه '.\$exId") !== false
+         && strpos($selfSrc, "'remote_id'=>(int)\$exId,'status_value'=>\$exStatusVal") !== false);
+    $add('8.82', 'دکمهٔ پیدا کردن روی محصول ناموفق هست',
+         strpos($selfSrc, 'function bslOpenAnd' . 'Search(') !== false
+         && strpos($selfSrc, 'پیدا کردن در غرفه') !== false);
+
     /* ---------- v8.81: نگه داشتن جزئیات + تنوع‌های تصویری و قیمت‌دار ---------- */
     /* استخراج دوباره، $allProducts را از صفر و فقط از روی صفحهٔ فهرست
        می‌ساخت و همان را ذخیره می‌کرد؛ پس گالری، تنوع‌ها و توضیحاتی که قبلاً
@@ -12992,18 +13025,78 @@ $statusMap=[
 'all'=>['2976','3790','3567','3568','4184','2977','2978','3248','4221'],
 ];
 $statusValues=$statusMap[$statusParam]??$statusMap['active'];
+/* v8.82: جست‌وجو سمت سرور.
+   تا حالا فیلتر فقط روی همان ردیف‌هایی بود که در مرورگر نمایش داده شده
+   بودند. اگر محصول در صفحهٔ چهارمِ فهرست بود، جست‌وجو پیدایش نمی‌کرد و
+   کاربر فکر می‌کرد اصلاً وجود ندارد — دقیقاً همان چیزی که موقع دیدن
+   «بازگردانی ناموفق» پیش می‌آمد. */
+$q=trim((string)($_GET['q']??''));
+$searchId=(int)preg_replace('~[^0-9]~','',$q);
+
+/* اگر عدد وارد شده، ممکن است شناسهٔ محصول باشد؛ مستقیم بخوانش.
+   محصولی که وضعیتش در هیچ‌کدام از سربرگ‌ها نیست، فقط از این راه پیدا می‌شود. */
+if($q!==''&&$searchId>0&&mb_strlen($q)<=12&&preg_match('~^\s*\d+\s*$~',$q)){
+$one=bslReq($tk,'GET','products/'.$searchId);
+$row=$one['body']['data']??($one['body']??null);
+if(!empty($one['ok'])&&is_array($row)&&(int)($row['id']??0)>0){
+$cats=[];
+$cr=bslReq($tk,'GET','categories');
+if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
+echo json_encode(['ok'=>true,'products'=>[$row],'page'=>1,'total_page'=>1,'total_count'=>1,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'found_by'=>'id'],JSON_UNESCAPED_UNICODE);
+exit;
+}
+}
+
 $url='vendors/'.$vid.'/products?page='.$page.'&per_page='.$perPage;
 foreach($statusValues as $sv){$url.='&statuses='.$sv;}
+if($q!==''){$url.='&title='.urlencode($q);}
 $r=bslReq($tk,'GET',$url);
 if(!$r['ok']){echo json_encode(['ok'=>false,'error'=>'خطا در دریافت ('.($r['code']??'?').') '.mb_substr($r['raw']??'',0,200)],JSON_UNESCAPED_UNICODE);exit;}
 $data=$r['body']['data']??[];
 $totalPage=(int)($r['body']['total_page']??1);
 $totalCount=(int)($r['body']['total_count']??0);
+$foundBy=$q!==''?'title':'';
+
+/* v8.82: فیلتر «title» سمت باسلام تطبیق سادهٔ رشته‌ای است و به نیم‌فاصله،
+   ی/ک عربی و پسوند «(کد: ۱)» حساس. مقایسهٔ خودمان همهٔ این‌ها را یکسان
+   می‌بیند، پس اگر سرور چیزی برنگرداند خودمان کل غرفه را می‌گردیم.
+   محصولی که «بازگردانی ناموفق» خورده دقیقاً همین‌جا گم می‌شد. */
+if($q!==''&&empty($data)){
+$want=reconNormTitle($q);
+$wantBare=reconNormTitle(stripProductCode($q));
+$hits=[];
+$allSt='';foreach(bslAllStatuses() as $sv){$allSt.='&statuses='.$sv;}
+for($pg=1;$pg<=25;$pg++){
+$sr=bslReq($tk,'GET','vendors/'.$vid.'/products?page='.$pg.'&per_page=100'.$allSt);
+if(empty($sr['ok']))break;
+$rows=$sr['body']['data']??[];
+if(!is_array($rows)||!$rows)break;
+foreach($rows as $row){
+if(!is_array($row))continue;
+$t=(string)($row['title']??'');
+$nt=reconNormTitle($t);
+$nb=reconNormTitle(stripProductCode($t));
+if($nt===''&&$nb==='')continue;
+if($nt===$want||$nb===$wantBare
+   ||($want!==''&&mb_strpos($nt,$want)!==false)
+   ||($wantBare!==''&&mb_strpos($nb,$wantBare)!==false)){
+$hits[]=$row;
+}
+}
+$tp=(int)($sr['body']['total_page']??1);
+if($pg>=max(1,$tp))break;
+if(count($hits)>=$perPage)break;
+}
+if($hits){
+$data=array_slice($hits,0,$perPage);
+$totalPage=1;$totalCount=count($hits);$foundBy='deep';
+}
+}
 
 $cats=[];
 $cr=bslReq($tk,'GET','categories');
 if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
-echo json_encode(['ok'=>true,'products'=>$data,'page'=>$page,'total_page'=>$totalPage,'total_count'=>$totalCount,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'products'=>$data,'page'=>$page,'total_page'=>$totalPage,'total_count'=>$totalCount,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'q'=>$q,'found_by'=>$foundBy],JSON_UNESCAPED_UNICODE);
 exit;
 }
 
@@ -14497,8 +14590,13 @@ bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 }else{
 
 $em=$r['body']['error_description']??($r['body']['message']??($r['body']['error']??''));if(is_array($em))$em=json_encode($em,JSON_UNESCAPED_UNICODE);
-$fail++;$bslFailedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'error'=>'بازگردانی ناموفق: '.mb_substr($em??'',0,100)],$card);
-bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ❌ بازگردانی ناموفق: ".mb_substr($em??'',0,80));
+/* v8.82: شناسه و وضعیت محصول را داخل خطا بنویس.
+   قبلاً فقط «بازگردانی ناموفق» گفته می‌شد و کاربر هیچ راهی نداشت محصول
+   را در غرفه پیدا کند — نه در سربرگ فعال بود، نه غیرفعال، نه تأیید نشده.
+   با داشتن شناسه می‌شود مستقیم در کادر جست‌وجوی مدیریت محصولات یافتش. */
+$fail++;$bslFailedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>(int)$exId,'status_value'=>$exStatusVal,
+ 'error'=>'بازگردانی ناموفق (شناسه '.$exId.' · وضعیت '.$exStatusVal.' '.$statusLabel.'): '.mb_substr($em??'',0,90)],$card);
+bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ❌ بازگردانی ناموفق ID#{$exId} (وضعیت {$exStatusVal}): ".mb_substr($em??'',0,70));
 }
 continue;
 }
@@ -20253,6 +20351,23 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.82', t:'جستجوی سراسری در مدیریت محصولات — محصولاتی که هیچ‌جا پیدا نمی‌شدند', items:[
+    '🔍 کادر جستجو حالا در همهٔ سربرگ‌ها هست، از جمله «📋 همه»',
+    'قبلاً در سربرگ «همه» اصلاً ساخته نمی‌شد — این ایراد اصلی بود',
+    '🐞 و آن کادر قدیمی فقط ردیف‌های همان صفحه را فیلتر می‌کرد، نه کل غرفه',
+    'یعنی اگر محصول در صفحهٔ چهارم بود، جستجو پیدایش نمی‌کرد',
+    '✅ حالا جستجو سمت سرور انجام می‌شود و کل غرفه را می‌گردد',
+    '🔢 با شناسهٔ عددی هم می‌شود جستجو کرد — محصول مستقیم خوانده می‌شود',
+    'این تنها راهِ رسیدن به محصولی است که وضعیتش هیچ سربرگی ندارد',
+    '🧠 اگر باسلام چیزی برنگرداند، خودمان کل غرفه را می‌گردیم',
+    'چون فیلتر باسلام به نیم‌فاصله، ی/ک عربی و پسوند «(کد: ۱)» حساس است ولی مقایسهٔ ما نیست',
+    'جستجو همیشه همهٔ نُه وضعیت را می‌بیند، حتی آن‌هایی که سربرگ ندارند',
+    '⚙️ سربرگ «همه» هم قابل مدیریت شد تا محصول پیداشده همان‌جا قابل تغییر باشد',
+    '🐞 خطای «بازگردانی ناموفق» حالا شناسه و وضعیت محصول را می‌نویسد',
+    'قبلاً فقط می‌گفت ناموفق و هیچ راهی برای پیدا کردن محصول نبود',
+    '🔍 روی هر محصول ناموفق، دکمهٔ «پیدا کردن در غرفه» اضافه شد',
+    'با یک کلیک، مدیریت محصولات باز می‌شود و همان محصول را نشان می‌دهد'
+  ]},
   {v:'8.81', t:'رفع پاک شدن عکس‌ها و تنوع‌های استخراج‌شده + تنوع رنگ تصویری و قیمت‌های متغیر', items:[
     '🐞 چرا داده‌ها پاک می‌شدند — پیدا شد و با تست بازسازی شد:',
     'هر استخراج، فهرست محصولات را از صفر می‌ساخت و همان را ذخیره می‌کرد',
@@ -25481,7 +25596,7 @@ collectProfileData=function(){
 refreshSyncStatus();
 refreshExtractQueue();
 // v7.23: BaSalam Products Modal (fixed API response structure)
-let bslModalState={page:1,totalPage:1,totalCount:0,perPage:50,activeTab:'active'};
+let bslModalState={page:1,totalPage:1,totalCount:0,perPage:50,activeTab:'active',q:'',foundBy:''};
 const BSL_TABS=[
     {key:'active',label:'✅ فعال',statuses:['2976']},
     {key:'approved',label:'🟢 تأیید شده',statuses:['2976']},
@@ -25498,12 +25613,16 @@ function showBslProductsModal(page,tab){
     bslModalState.activeTab=tab;
     bslModalState.page=page;
     // Fetch products for this tab
-    fetch('?bsl_products=1&page='+page+'&per_page='+bslModalState.perPage+'&status='+tab).then(r=>r.json()).then(d=>{
+    // v8.82: عبارت جست‌وجو به سرور می‌رود، نه فقط فیلتر روی همین صفحه
+    const _q=bslModalState.q||'';
+    fetch('?bsl_products=1&page='+page+'&per_page='+bslModalState.perPage+'&status='+tab
+          +(_q?('&q='+encodeURIComponent(_q)):'')).then(r=>r.json()).then(d=>{
         if(!d||!d.ok){showToast(d?.error||'خطا در دریافت محصولات',1);return;}
         bslModalState.totalPage=d.total_page||1;
         bslModalState.totalCount=d.total_count||0;
+        bslModalState.foundBy=d.found_by||'';
         if(d.categories)window._bslModalCats=d.categories;
-        bslTabCounts[tab]=d.total_count||0;
+        if(!_q)bslTabCounts[tab]=d.total_count||0;
         renderBslModal(d.products||[]);
         // v8.06: Preload counts for other tabs (fire-and-forget, page 1 only)
         BSL_TABS.forEach(t=>{
@@ -25520,9 +25639,33 @@ function bslChangePerPage(val){
     bslModalState.page=1;
     showBslProductsModal(1,bslModalState.activeTab);
 }
+/* v8.82: جست‌وجو در کل غرفه.
+   موقع جست‌وجو عمداً به سربرگ «همه» می‌رویم، چون محصولی که دنبالش
+   می‌گردید ممکن است در وضعیتی باشد که هیچ سربرگی نشانش نمی‌دهد. */
+/* v8.82: مدیریت محصولات را باز کن و مستقیم دنبال همین محصول بگرد */
+function bslOpenAndSearch(term){
+    bslModalState.q=String(term||'').trim();
+    bslModalState.page=1;
+    bslModalState.activeTab='all';
+    showBslProductsModal(1,'all');
+}
+function bslServerSearchGo(){
+    const el=document.getElementById('bslServerSearch');
+    const q=(el?el.value:'').trim();
+    bslModalState.q=q;
+    bslModalState.page=1;
+    if(q)bslModalState.activeTab='all';
+    showBslProductsModal(1,bslModalState.activeTab);
+}
+function bslServerSearchClear(){
+    bslModalState.q='';
+    bslModalState.page=1;
+    showBslProductsModal(1,bslModalState.activeTab);
+}
 function switchBslTab(tab){
     bslModalState.activeTab=tab;
     bslModalState.page=1;
+    bslModalState.q='';          // v8.82: سربرگ عوض شد یعنی جست‌وجو تمام
     showBslProductsModal(1,tab);
 }
 function updateBslTabCounts(){
@@ -25540,7 +25683,10 @@ function renderBslModal(products){
     const pg=bslModalState.page;
     const tp=bslModalState.totalPage;
     const activeTab=bslModalState.activeTab;
-    const isManageable=['active','inactive','not_approved','pending','archived'].includes(activeTab);
+    /* v8.82: «همه» و «تأیید شده» هم قابل مدیریت شدند. محصولی که با
+       جست‌وجو پیدا می‌شود باید همان‌جا قابل فعال/غیرفعال کردن باشد،
+       وگرنه پیدا کردنش فایده‌ای ندارد. */
+    const isManageable=['active','approved','inactive','not_approved','pending','archived','all'].includes(activeTab);
     let html='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslModal()">';
     html+='<div class="bsl-modal">';
     html+='<div class="bsl-modal-head"><h2>\u{1F3EA} \u0645\u062F\u06CC\u0631\u06CC\u062A \u062C\u0627\u0645\u0639 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0628\u0627\u0633\u0644\u0627\u0645 ('+toFa(total)+' \u0645\u062D\u0635\u0648\u0644)</h2><div style="display:flex;gap:4px"><button class="btn btn-red" style="font-size:11px;padding:4px 8px" onclick="bslFindDuplicates()">\u{1F50D} \u062A\u06A9\u0631\u0627\u0631\u06CC\u200C\u0647\u0627</button><button class=\"btn btn-purple\" style=\"font-size:11px;padding:4px 8px\" onclick=\"bslPhase2Check()\" title=\"اصلاح دستهٔ محصولات رد شده\">🔄 فاز ۲</button><button class="btn btn-cyan" style="font-size:11px;padding:4px 8px" onclick="bslStatusOverview()">\u{1F4CA} \u0648\u0636\u0639\u06CC\u062A</button><button class="btn btn-gray" onclick="closeBslModal()">\u2715</button></div></div>';
@@ -25560,7 +25706,27 @@ function renderBslModal(products){
     [50,100,200,500,1000].forEach(v=>{html+='<option value="'+v+'"'+(bslModalState.perPage===v?' selected':'')+'>'+toFa(v)+'</option>';});
     html+='</select>';
     html+='<span style="color:#94a3b8;font-size:11px">محصول در هر صفحه</span>';
+    /* v8.82: جست‌وجوی سراسری — روی همهٔ سربرگ‌ها از جمله «همه».
+       قبلاً کادر جست‌وجو فقط در سربرگ‌های قابل‌مدیریت ساخته می‌شد و در
+       «همه» اصلاً وجود نداشت؛ ضمناً فقط ردیف‌های همین صفحه را فیلتر
+       می‌کرد، پس محصولی که در صفحهٔ چهارم بود پیدا نمی‌شد. */
+    html+='<span style="flex:1"></span>';
+    html+='<input type="text" id="bslServerSearch" value="'+esc(bslModalState.q||'')+'" '
+        +'placeholder="جستجو در کل غرفه: نام یا شناسهٔ محصول…" '
+        +'onkeydown="if(event.key===\'Enter\')bslServerSearchGo()" '
+        +'style="flex:2;min-width:190px;padding:5px 9px;border:1px solid #3b82f6;border-radius:6px;'
+        +'background:#0f172a;color:#e2e8f0;font-size:12px;direction:rtl">';
+    html+='<button class="btn btn-blue" style="font-size:11px;padding:4px 10px" onclick="bslServerSearchGo()">🔍 جستجو</button>';
+    if(bslModalState.q)
+        html+='<button class="btn btn-gray" style="font-size:11px;padding:4px 8px" onclick="bslServerSearchClear()">✕ پاک</button>';
     html+='</div>';
+    if(bslModalState.q){
+        const fb=bslModalState.foundBy;
+        const how=fb==='id'?'با شناسه':(fb==='deep'?'با جست‌وجوی عمیق در کل غرفه':'با نام');
+        html+='<div style="padding:5px 10px;background:#0c2a4d;border-bottom:1px solid #1e40af;font-size:11px;color:#93c5fd">'
+            +'🔍 نتیجهٔ جستجوی «<b>'+esc(bslModalState.q)+'</b>» — '+toFa(total)+' محصول '+how
+            +' · <span style="color:#94a3b8">جستجو در همهٔ وضعیت‌ها انجام می‌شود، حتی وضعیت‌هایی که سربرگ ندارند</span></div>';
+    }
     html+='<div class="bsl-modal-body">';
     // v8.06: Search bar + toolbar for manageable tabs
     if(isManageable&&products.length>0){
@@ -26843,9 +27009,18 @@ function renderSendCard(d){
     let catStr=d.category||'—';
     let errStr=d.error?'<div class="scard-err">⚠️ '+esc(d.error)+'</div>':'';
     let ridStr=d.remote_id?'<div class="scard-rid">'+(d.edit_url?'<a href="'+esc(d.edit_url)+'" target="_blank">🔗</a> ':'')+'#'+d.remote_id+'</div>':'';
+    /* v8.82: روی محصول ناموفق، یک دکمه که همان را در مدیریت محصولات باز
+       می‌کند. تا حالا کاربر شناسه را می‌دید ولی راهی برای رسیدن به محصول
+       نداشت و در هیچ سربرگی پیدایش نمی‌کرد. */
+    let findStr='';
+    if(d.result==='fail'){
+        const term=d.remote_id?String(d.remote_id):(d.title||'');
+        if(term)findStr='<div style="margin-top:3px"><button class="btn btn-blue" style="font-size:9px;padding:2px 7px" '
+            +'onclick="bslOpenAndSearch('+JSON.stringify(String(term))+')">🔍 پیدا کردن در غرفه</button></div>';
+    }
     let changesStr=d.changes?'<span style="color:#facc15;font-size:9px">('+esc(d.changes)+')</span>':'';
     let reasonStr=(d.result==='update'&&(d.update_reason||d.changes))?'<div class="scard-reason">📋 علت آپدیت: '+esc(d.update_reason||d.changes)+'</div>':'';
-    return '<div class="scard scard-'+d.result+'">'+img+'<div class="scard-body"><div class="scard-title">'+esc(d.title||'—')+'</div><div class="scard-meta"><span class="scard-price">💰 '+priceStr+'</span><span class="scard-cat">📂 '+esc(catStr)+'</span>'+(d.link?'<span><a href="'+esc(d.link)+'" target="_blank" style="color:#60a5fa">🔗</a></span>':'')+'</div><div class="scard-result '+rc2+'">'+ri2+' '+changesStr+'</div>'+reasonStr+errStr+ridStr+'</div></div>';
+    return '<div class="scard scard-'+d.result+'">'+img+'<div class="scard-body"><div class="scard-title">'+esc(d.title||'—')+'</div><div class="scard-meta"><span class="scard-price">💰 '+priceStr+'</span><span class="scard-cat">📂 '+esc(catStr)+'</span>'+(d.link?'<span><a href="'+esc(d.link)+'" target="_blank" style="color:#60a5fa">🔗</a></span>':'')+'</div><div class="scard-result '+rc2+'">'+ri2+' '+changesStr+'</div>'+reasonStr+errStr+ridStr+findStr+'</div></div>';
 }
 </script>
 </body>
