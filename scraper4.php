@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.77';
+const APP_VERSION = '8.78';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -5889,7 +5889,14 @@ elseif ($field === 'shortDesc') $shortDesc = trim($val);
 elseif ($field === 'longDesc') $longDesc = trim($val);
 }
 if (!$title && !$link) continue;
-$key = md5('import:' . $title . '|' . $price . '|' . $count);
+/* v8.78: کلید محصول درون‌ریزی‌شده حالا با همان فرمول محصولات اسکرپ‌شده
+   ساخته می‌شود. قبلاً md5('import:'.عنوان.'|'.قیمت.'|'.شمارهٔ ردیف) بود که
+   سه ایراد داشت: با عوض شدن قیمت یا جابه‌جا شدن ردیف، کلید عوض می‌شد و
+   همان محصول دوباره اضافه می‌شد؛ محصولی که هم اسکرپ و هم درون‌ریزی شده
+   بود دو کلید متفاوت می‌گرفت و دو بار ارسال می‌شد؛ و دفتر remote_map هم
+   نمی‌توانست آن را به محصول مقصد وصل کند. حالا اگر لینک باشد کلید از
+   روی لینک ساخته می‌شود، دقیقاً مثل مسیر اسکرپ. */
+$key = productKey(['link' => $link, 'title' => $title, 'price' => $price]);
 $products[] = [
 'key' => $key,
 'title' => $title,
@@ -7989,6 +7996,43 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.78: جزئیات محصولات درون‌ریزی‌شده ---------- */
+    // کلید محصول وارد شده باید با همان فرمول محصول اسکرپ‌شده ساخته شود،
+    // وگرنه با تغییر قیمت یا جابه‌جایی ردیف، محصول تکراری ساخته می‌شود
+    $add('8.78', 'کلید درون‌ریزی از فرمول مشترک می‌آید',
+         strpos($selfSrc, "\$key = product" . "Key(['link' => \$link") !== false
+         && strpos($selfSrc, "md5('imp" . "ort:' . \$title") === false);
+    if (function_exists('productKey')) {
+        $sameLink = productKey(['link' => 'https://s.test/p/1', 'title' => 'الف', 'price' => '100'])
+                 === productKey(['link' => 'https://s.test/p/1', 'title' => 'ب',  'price' => '999']);
+        $add('8.78', 'کلید فقط به لینک بند است نه قیمت و عنوان', $sameLink);
+        $trailing = productKey(['link' => 'https://s.test/p/1/', 'title' => 'x'])
+                 === productKey(['link' => 'https://s.test/p/1',  'title' => 'x']);
+        $add('8.78', 'اسلش آخر و پارامتر، کلید را عوض نمی‌کند', $trailing
+             && productKey(['link' => 'https://s.test/p/1?a=2', 'title' => 'x'])
+                === productKey(['link' => 'https://s.test/p/1', 'title' => 'x']));
+    }
+    $add('8.78', 'ستون لینک در نگاشت خودکار شناسایی می‌شود',
+         strpos($selfSrc, "'link' => ['url','لینک','link'") !== false);
+    // رابط کاربری: باز کردن صفحهٔ محصولِ ردیف وارد شده در همان انتخابگر
+    $add('8.78', 'دکمهٔ باز کردن صفحهٔ محصول در تب درون‌ریزی هست',
+         strpos($selfSrc, 'function importOpenDetail' . 'Picker(') !== false
+         && strpos($selfSrc, 'id="impDetail' . 'Box"') !== false);
+    $add('8.78', 'استخراج جزئیات از تب درون‌ریزی هم صدا زده می‌شود',
+         strpos($selfSrc, 'function importExtract' . 'Details(') !== false
+         && strpos($selfSrc, 'function importSuggest' . 'Detail(') !== false);
+    // مسیر مشترک، نه کپی: باید همان startDetailExtraction را صدا بزند
+    $add('8.78', 'استخراج درون‌ریزی از مسیر مشترک استفاده می‌کند',
+         strpos($selfSrc, 'startDetailExtrac' . 'tion();') !== false
+         && strpos($selfSrc, 'function importSyncTo' . 'Products(') !== false);
+    $add('8.78', 'نبودِ لینک به کاربر گفته می‌شود',
+         strpos($selfSrc, 'id="impNoLink' . 'Box"') !== false
+         && strpos($selfSrc, 'function importLinked' . 'Count(') !== false);
+    // md5 در جاوااسکریپت وجود ندارد؛ این فراخوانی باید رفته باشد
+    $add('8.78', 'فراخوانی md5 جاوااسکریپتی حذف شده',
+         strpos($selfSrc, "md5('imp:'" . " + p.title") === false
+         && strpos($selfSrc, 'p.key||md' . '5(') === false);
 
     /* ---------- v8.77: نمونهٔ قابل‌انتخاب، پنل فهرست، حذف فلش‌ها، توقف استخراج ---------- */
     // فلش‌های خواهر/برادر از هر دو نوار شناور و از پنل جزئیات حذف شدند
@@ -16956,7 +17000,9 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
         <div class="section-title">📥 آپلود فایل CSV/Excel محصولات</div>
         <div class="alert alert-info" style="margin-bottom:10px;font-size:11px">
             💡 فایل CSV یا Excel را آپلود کنید. ستون‌ها به صورت خودکار شناسایی و نگاشت می‌شوند.<br>
-            فرمت‌های مجاز: CSV, XLS (Excel XML), XLSX
+            فرمت‌های مجاز: CSV, XLS (Excel XML), XLSX<br>
+            <span style="color:#f9a8d4">🎯 اگر فایل ستون <b>لینک صفحهٔ محصول</b> داشته باشد، می‌توانید بعد از وارد کردن،
+            همان صفحه را باز کنید و توضیحات، تنوع‌ها و گالری را با کلیک انتخاب کنید — درست مثل سایت اسکرپ‌شده.</span>
         </div>
         <div class="row" style="align-items:center">
             <input type="file" id="importFile" accept=".csv,.xls,.xlsx,.xml" style="flex:1">
@@ -17045,10 +17091,35 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
         </div>
 
         <div id="importProductsPreview" style="max-height:300px;overflow-y:auto;margin-bottom:10px;border:1px solid #334155;border-radius:6px"></div>
+
+        <!-- v8.78: اگر فایل ستون «لینک محصول» داشته باشد، می‌شود دقیقاً مثل
+             سایت اسکرپ‌شده، صفحهٔ محصول را باز کرد و جزئیات را انتخاب کرد. -->
+        <div id="impDetailBox" class="hidden" style="margin-bottom:10px;padding:10px;background:#3b0764;border:1px solid #a855f7;border-radius:8px">
+            <div style="font-weight:700;font-size:12px;color:#e9d5ff;margin-bottom:6px">🎯 انتخاب جزئیات از روی صفحهٔ محصول</div>
+            <div style="font-size:11px;color:#c4b5fd;line-height:1.9;margin-bottom:8px">
+                <span id="impLinkCount"></span>
+                صفحهٔ محصول از روی همین لینک‌ها باز می‌شود و می‌توانید توضیحات، تنوع‌ها، گالری و بقیهٔ فیلدها را
+                با کلیک انتخاب کنید — دقیقاً مثل سایت اسکرپ‌شده.
+            </div>
+            <div class="row">
+                <button class="btn btn-pink" onclick="importOpenDetailPicker()" style="flex:2">🎯 باز کردن صفحهٔ محصول و انتخاب جزئیات</button>
+                <button class="btn btn-purple" onclick="importSuggestDetail()" style="flex:1">💡 پیشنهاد خودکار</button>
+            </div>
+            <div id="impDetailStatus" style="font-size:11px;color:#c4b5fd;margin-top:6px"></div>
+        </div>
+        <div id="impNoLinkBox" class="hidden" style="margin-bottom:10px;padding:9px;background:#78350f;border:1px solid #f59e0b;border-radius:8px;font-size:11px;color:#fcd34d;line-height:1.9">
+            ⚠️ هیچ‌کدام از ردیف‌ها لینک صفحهٔ محصول ندارند، پس نمی‌شود جزئیات را از صفحهٔ محصول برداشت.
+            اگر فایل شما ستون آدرس دارد، در «🗺️ نگاشت ستون‌ها» آن را به <b>🔗 لینک محصول</b> وصل کنید و دوباره وارد کنید.
+        </div>
+
         <div class="row">
             <button class="btn btn-purple" onclick="sendImportToWoo()" style="flex:1">🚀 ارسال به ووکامرس</button>
             <button class="btn btn-cyan" onclick="sendImportToBsl()" style="flex:1">🚀 ارسال به باسلام</button>
             <button class="btn btn-green" onclick="addImportToResults()" style="flex:1">➕ افزودن به نتایج</button>
+        </div>
+        <!-- v8.78: استخراج تفصیلی مستقیم روی محصولات درون‌ریزی‌شده -->
+        <div class="row" id="impExtractRow" style="margin-top:6px">
+            <button class="btn btn-pink" onclick="importExtractDetails()" id="btnImpExtract" style="flex:1">🔍 استخراج جزئیات از صفحات محصول</button>
         </div>
         <div class="progress hidden" id="impProgress"><div class="progress-bar" id="impProgressBar"></div></div>
         <div class="status" id="impStatus" style="color:#c4b5fd"></div>
@@ -19559,6 +19630,24 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.78', t:'محصولات درون‌ریزی‌شده هم مثل سایت اسکرپ‌شده، جزئیاتشان از صفحهٔ محصول انتخاب می‌شود', items:[
+    '📥 اگر فایل اکسل یا CSV ستون «لینک صفحهٔ محصول» داشته باشد، حالا همان صفحه باز می‌شود',
+    'در تب درون‌ریزی، بعد از وارد کردن، جعبهٔ «🎯 انتخاب جزئیات از روی صفحهٔ محصول» ظاهر می‌شود',
+    'دکمهٔ «باز کردن صفحهٔ محصول» صفحه را در همان انتخابگر جزئیات باز می‌کند',
+    'همان‌جا توضیحات، تنوع‌ها، گالری، برند و بقیهٔ فیلدها را با کلیک انتخاب می‌کنید',
+    'دقیقاً همان انتخابگر و همان استخراج‌کننده — چیز جداگانه‌ای ساخته نشد، پس هر بهبودی آنجا اینجا هم هست',
+    '🔍 دکمهٔ «استخراج جزئیات از صفحات محصول» هم اضافه شد که روی همهٔ ردیف‌های لینک‌دار اجرا می‌شود',
+    '💡 «پیشنهاد خودکار» هم از روی همان لینکِ فایل کار می‌کند',
+    'اگر هیچ ردیفی لینک نداشته باشد، به‌جای سکوت می‌گوید ستون آدرس را در نگاشت وصل کنید',
+    '🐞 کلید محصول درون‌ریزی‌شده اشتباه ساخته می‌شد:',
+    'قبلاً از روی عنوان + قیمت + شمارهٔ ردیف بود',
+    'یعنی با تغییر قیمت در فایل، یا فقط جابه‌جا شدن ردیف‌ها، همان محصول دوباره اضافه می‌شد',
+    'و محصولی که هم اسکرپ و هم درون‌ریزی شده بود، دو کلید جدا می‌گرفت و دو بار ارسال می‌شد',
+    'دفتر remote_map هم نمی‌توانست آن را به محصول مقصد وصل کند',
+    '✅ حالا اگر لینک باشد، کلید از روی لینک ساخته می‌شود — همان فرمول مسیر اسکرپ',
+    '🐞 در «افزودن به نتایج» تابع md5 جاوااسکریپتی صدا زده می‌شد که اصلاً وجود ندارد',
+    'چون بک‌اند همیشه کلید می‌داد آن خط هرگز اجرا نمی‌شد و باگ پنهان مانده بود'
+  ]},
   {v:'8.77', t:'نمونهٔ قابل‌انتخاب، کنترل بیرونی برای پیش‌نمایش بالا، و رفع گیر کردن استخراج', items:[
     '🎯 «باز کردن نمونه» دیگر همیشه اولین محصول را باز نمی‌کند',
     'روی هر کارت محصول دکمهٔ «🎯 نمونهٔ سلکتور» آمد — همان را باز می‌کند',
@@ -24400,7 +24489,11 @@ function processImport(){
         if($('impPriceMode2')&&$('impPriceMode'))$('impPriceMode2').value=$('impPriceMode').value;
         if($('impPriceVal2')&&$('impPriceVal'))$('impPriceVal2').value=$('impPriceVal').value;
         if($('impRoundPrice2')&&$('impRoundPrice'))$('impRoundPrice2').value=$('impRoundPrice').value;
-        $('importProcessStatus').textContent='✓ '+toFa(d.count)+' محصول وارد شد';
+        // v8.78: اگر لینک صفحهٔ محصول آمده، جعبهٔ «انتخاب جزئیات» را نشان بده
+        importRefreshDetailBox();
+        const _nl=importLinkedCount();
+        $('importProcessStatus').textContent='✓ '+toFa(d.count)+' محصول وارد شد'
+            +(_nl?(' · '+toFa(_nl)+' تا لینک صفحهٔ محصول دارند'):'');
         showToast('✓ '+d.count+' محصول وارد شد');
     }).catch(e=>{$('importProcessStatus').textContent='❌ خطا';$('btnProcessImport').disabled=false;});
 }
@@ -24451,6 +24544,99 @@ function renderImportProductsPreview(){
     h+='</tbody></table>';c.innerHTML=h;
 }
 
+/* =====================================================================
+ *  v8.78: جزئیات محصولات درون‌ریزی‌شده از روی صفحهٔ خودشان
+ *
+ *  محصول درون‌ریزی‌شده اگر ستون «لینک محصول» داشته باشد، از نظر ما هیچ
+ *  فرقی با محصول اسکرپ‌شده ندارد: هر دو یک لینک صفحهٔ محصول دارند. پس
+ *  به‌جای ساختن یک مسیر جدا، محصول را وارد همان نقشهٔ products می‌کنیم و
+ *  از همان انتخابگر و همان استخراج‌کنندهٔ تفصیلی استفاده می‌کنیم.
+ * ===================================================================== */
+
+/** چند تا از ردیف‌های وارد شده لینک صفحهٔ محصول دارند */
+function importLinkedCount(){
+    return importProducts.filter(p => p && p.link && String(p.link).trim()).length;
+}
+
+/** وضعیت جعبهٔ «انتخاب جزئیات» را بعد از هر بار وارد کردن به‌روز کن */
+function importRefreshDetailBox(){
+    const n = importLinkedCount();
+    const box = $('impDetailBox'), no = $('impNoLinkBox'), row = $('impExtractRow');
+    if(box) box.classList.toggle('hidden', n === 0);
+    if(no)  no.classList.toggle('hidden', n > 0 || !importProducts.length);
+    if(row) row.style.display = n > 0 ? '' : 'none';
+    const c = $('impLinkCount');
+    if(c) c.innerHTML = '<b style="color:#f9a8d4">' + toFa(n) + ' محصول</b> لینک صفحه دارد. ';
+}
+
+/**
+ * محصولات وارد شده را داخل نقشهٔ اصلی می‌گذارد تا بقیهٔ برنامه ببیندشان.
+ * همان کاری که «➕ افزودن به نتایج» می‌کند، ولی بی‌صدا و بدون عوض کردن تب،
+ * چون این‌جا فقط می‌خواهیم انتخابگر جزئیات چیزی برای باز کردن داشته باشد.
+ */
+function importSyncToProducts(){
+    let added = 0;
+    importProducts.forEach(p => {
+        const key = p.key;
+        if(!key) return;
+        if(!products.has(key)){ products.set(key, p); order.push(key); added++; }
+        else Object.assign(products.get(key), p);
+    });
+    return added;
+}
+
+/** صفحهٔ محصولِ یک ردیف درون‌ریزی‌شده را در انتخابگر جزئیات باز می‌کند */
+function importOpenDetailPicker(){
+    if(!importProducts.length){ showToast('ابتدا فایل را وارد کنید', true); return; }
+    if(!importLinkedCount()){
+        showToast('هیچ ردیفی لینک صفحهٔ محصول ندارد', true);
+        return;
+    }
+    importSyncToProducts();
+    // اولین محصولِ دارای لینک نمونه شود
+    const first = importProducts.find(p => p && p.link && String(p.link).trim());
+    if(first && first.key) detailSampleKey = first.key;
+    refreshViews();
+    scheduleSave();
+    $('impDetailStatus').textContent = '✓ صفحهٔ محصول در تب «سلکتورها» باز شد';
+    // openDetailProxy خودش تب را عوض می‌کند و نوار نمونه را می‌کشد
+    openDetailProxy();
+}
+
+/** پیشنهاد خودکار سلکتورهای جزئیات، از روی همان لینکِ فایل */
+function importSuggestDetail(){
+    if(!importLinkedCount()){ showToast('هیچ ردیفی لینک ندارد', true); return; }
+    importSyncToProducts();
+    const first = importProducts.find(p => p && p.link && String(p.link).trim());
+    if(first && first.key) detailSampleKey = first.key;
+    refreshViews();
+    $('impDetailStatus').textContent = '⏳ در حال تحلیل صفحهٔ محصول...';
+    switchMainTab('selectors');
+    suggestDetailSelectors();
+}
+
+/**
+ * استخراج تفصیلی روی محصولات درون‌ریزی‌شده.
+ * همان startDetailExtraction است — عمداً کپی نشده تا هر اصلاحی که آن‌جا
+ * انجام می‌شود (مثل رفع گیر کردن در v8.77) این‌جا هم اثر کند.
+ */
+function importExtractDetails(){
+    if(!importLinkedCount()){ showToast('هیچ ردیفی لینک صفحهٔ محصول ندارد', true); return; }
+    const n = importSyncToProducts();
+    refreshViews();
+    scheduleSave();
+    const enabled = getEnabledDetailFields();
+    const galOn = galCollect().mode !== 'off';
+    if(!enabled.length && !galOn){
+        showToast('اول با «🎯 باز کردن صفحهٔ محصول» فیلدها را انتخاب کنید', true);
+        importOpenDetailPicker();
+        return;
+    }
+    $('impDetailStatus').textContent = '🔍 استخراج جزئیات شروع شد — نتیجه در تب «نتایج»';
+    switchMainTab('results');
+    startDetailExtraction();
+}
+
 function addImportToResults(){
     if(!importProducts.length){showToast('محصولی نیست',true);return;}
     if($('impTitleSuffix2')&&$('impTitleSuffix'))$('impTitleSuffix').value=$('impTitleSuffix2').value;
@@ -24458,15 +24644,11 @@ function addImportToResults(){
     if($('impPriceVal2')&&$('impPriceVal'))$('impPriceVal').value=$('impPriceVal2').value;
     if($('impRoundPrice2')&&$('impRoundPrice'))$('impRoundPrice').value=$('impRoundPrice2').value;
     applyImportPriceAdjust();
-    let added=0;
-    importProducts.forEach(p=>{
-        const key=p.key||md5('imp:'+p.title);
-        if(!products.has(key)){
-            products.set(key,p);
-            order.push(key);
-            added++;
-        }
-    });
+    /* v8.78: قبلاً اینجا برای محصولِ بی‌کلید md5() صدا زده می‌شد که در
+       جاوااسکریپت اصلاً وجود ندارد و استثنا می‌داد؛ فقط چون بک‌اند همیشه
+       کلید می‌داد، این خط هیچ‌وقت اجرا نمی‌شد و باگ پنهان مانده بود.
+       حالا همان مسیر مشترکِ importSyncToProducts استفاده می‌شود. */
+    const added = importSyncToProducts();
     refreshViews();
     switchMainTab('results');
     showToast('✓ '+toFa(added)+' محصول به نتایج اضافه شد');
