@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.84';
+const APP_VERSION = '8.85';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1643,6 +1643,65 @@ function wooVariationAttributes(array $p): array {
                   'options' => array_slice($vals, 0, 30)];
     }
     return $out;
+}
+
+/**
+ * v8.85: نام دستهٔ استخراج‌شده را به شناسهٔ دستهٔ ووکامرس تبدیل می‌کند.
+ *
+ * فیلد «دسته‌بندی» از صفحهٔ محصول برداشته می‌شد ولی هیچ‌وقت به ووکامرس
+ * نمی‌رفت؛ دسته همیشه همان یکی بود که در تنظیمات پروفایل انتخاب شده بود.
+ * اینجا نام با فهرست دسته‌های مقصد تطبیق داده می‌شود (با همان نرمال‌سازی
+ * عنوان که برای محصولات به کار می‌رود، تا نیم‌فاصله و ی/ک عربی مانع نشود)
+ * و اگر نبود، در صورت اجازه ساخته می‌شود.
+ *
+ * فهرست دسته‌ها یک بار خوانده و در حافظه نگه داشته می‌شود.
+ */
+function wooCategoryIds(array $w, $raw, bool $create = true): array {
+    static $cache = null;         // نام نرمال‌شده => id
+    static $failed = false;
+    if ($raw === null || $raw === '' || $raw === []) return [];
+
+    // ورودی می‌تواند رشتهٔ «الف، ب» یا آرایه باشد
+    $names = is_array($raw) ? $raw : preg_split('~[،,>|/]+~u', (string)$raw);
+    $names = array_values(array_filter(array_map(function ($s) {
+        $s = trim(preg_replace('~\s+~u', ' ', (string)$s));
+        return mb_strlen($s) > 0 && mb_strlen($s) <= 80 ? $s : '';
+    }, $names)));
+    if (!$names) return [];
+
+    if ($cache === null) {
+        $cache = [];
+        for ($page = 1; $page <= 10; $page++) {
+            $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET',
+                        'products/categories?per_page=100&page=' . $page);
+            if (empty($r['ok']) || !is_array($r['body']) || !$r['body']) {
+                if ($page === 1) $failed = true;
+                break;
+            }
+            foreach ($r['body'] as $c) {
+                $nm = reconNormTitle((string)($c['name'] ?? ''));
+                $id = (int)($c['id'] ?? 0);
+                if ($nm !== '' && $id > 0 && !isset($cache[$nm])) $cache[$nm] = $id;
+            }
+            if (count($r['body']) < 100) break;
+        }
+    }
+    if ($failed) return [];
+
+    $ids = [];
+    foreach ($names as $nm) {
+        $key = reconNormTitle($nm);
+        if ($key === '') continue;
+        if (isset($cache[$key])) { $ids[] = $cache[$key]; continue; }
+        if (!$create) continue;
+        $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'POST',
+                    'products/categories', ['name' => $nm]);
+        $newId = (int)($r['body']['id'] ?? 0);
+        // اگر ووکامرس بگوید «از قبل هست»، شناسه را از خودِ خطا بردار
+        if ($newId <= 0) $newId = (int)($r['body']['data']['resource_id'] ?? 0);
+        if ($newId > 0) { $cache[$key] = $newId; $ids[] = $newId; }
+    }
+    return array_values(array_unique(array_filter($ids)));
 }
 
 /**
@@ -3415,6 +3474,94 @@ function countGalImgs(list){
   return n;
 }
 
+/* =====================================================================
+ *  v8.85: همان منطق استخراج تنوع که سمت سرور اجرا می‌شود، این‌بار داخل
+ *  انتخابگر — تا «پیش‌نمایش» دقیقاً خروجی نهایی را نشان بدهد و کاربر
+ *  قبل از ذخیره ببیند چه چیزی برداشته می‌شود.
+ * ===================================================================== */
+function __varNoise(v){
+  if(!v)return true;
+  if(v.length>60)return true;
+  var bad=['انتخاب کنید','یک گزینه را انتخاب کنید','choose an option',
+           'select option','انتخاب گزینه','---','--','select'];
+  var lv=v.toLowerCase();
+  for(var i=0;i<bad.length;i++)if(lv===bad[i].toLowerCase())return true;
+  return false;
+}
+/** مقدار یک گزینه — آینهٔ variationValueOf در PHP */
+function __varValueOf(n){
+  if(!n||n.nodeType!==1)return '';
+  var tag=n.tagName.toLowerCase(),a,v,i;
+  if(tag==='input'||tag==='option'){
+    var f1=['data-value','value','title','aria-label'];
+    for(i=0;i<f1.length;i++){v=(n.getAttribute(f1[i])||'').trim();
+      if(v&&v.toLowerCase()!=='choose an option')return v;}
+  }
+  var f2=['data-value','data-title','data-slug','data-color','data-colour',
+          'data-name','data-option','data-original-title','title','aria-label','alt'];
+  for(i=0;i<f2.length;i++){v=(n.getAttribute(f2[i])||'').trim();if(v)return v;}
+  var t=(n.textContent||'').replace(/\s+/g,' ').trim();
+  if(t)return t;
+  // رنگ به‌صورت عکس: alt/title، بعد نام فایل
+  var img=tag==='img'?n:n.querySelector('img');
+  if(img){
+    var f3=['alt','title','data-title'];
+    for(i=0;i<f3.length;i++){v=(img.getAttribute(f3[i])||'').trim();if(v)return v;}
+    var f4=['src','data-src','data-lazy-src'];
+    for(i=0;i<f4.length;i++){
+      var src=(img.getAttribute(f4[i])||'').trim();
+      if(!src)continue;
+      var b=src.replace(/[?#].*$/,'').split('/').pop()
+              .replace(/\.(png|jpe?g|gif|webp|svg|avif)$/i,'')
+              .replace(/[-_]|%20/g,' ').trim();
+      if(b&&!/^\d+$/.test(b)&&b.length<=40)return b;
+    }
+  }
+  var st=(n.getAttribute('style')||'');
+  var m=st.match(/background(?:-color)?\s*:\s*([^;]+)/i);
+  if(m&&m[1].indexOf('url(')<0)return m[1].trim();
+  var cm=(n.getAttribute('class')||'').match(/(?:color|colour|swatch)[-_]([a-z]{3,20})/i);
+  if(cm)return cm[1];
+  return '';
+}
+/** فهرست گزینه‌ها — آینهٔ variationsInside در PHP */
+function __varValues(box){
+  if(!box)return [];
+  var out=[],seen={};
+  function push(v){
+    v=(v||'').trim();
+    if(__varNoise(v))return;
+    var k=v.toLowerCase();
+    if(seen[k])return; seen[k]=1; out.push(v);
+  }
+  ['option','input[type=radio]','input[type=checkbox]'].forEach(function(q){
+    Array.prototype.forEach.call(box.querySelectorAll(q),function(n){push(__varValueOf(n));});
+  });
+  if(out.length)return out;
+  var sels=['li','label','button','a','span[data-value]','[class*=swatch]',
+            '[class*=variation]','[class*=color]','[class*=colour]',
+            '[class*=attribute]','[data-attribute_name]','img'];
+  for(var i=0;i<sels.length;i++){
+    Array.prototype.forEach.call(box.querySelectorAll(sels[i]),function(n){push(__varValueOf(n));});
+    if(out.length>1)return out;
+  }
+  // فرزندان تکرارشونده (مثل مانتو پاتریس: هر رنگ یک div با عکس و برچسب)
+  if(out.length<=1){
+    var kids=Array.prototype.filter.call(box.children,function(c){
+      return ['SCRIPT','STYLE','BR'].indexOf(c.tagName)<0;});
+    if(kids.length>1){
+      var multi=[];
+      kids.forEach(function(c){var v=(__varValueOf(c)||'').trim();
+        if(v&&!__varNoise(v))multi.push(v);});
+      var uniq={},nu=0;
+      multi.forEach(function(v){if(!uniq[v]){uniq[v]=1;nu++;}});
+      if(nu>1){out=[];seen={};multi.forEach(push);if(out.length>1)return out;}
+    }
+  }
+  if(!out.length)push(__varValueOf(box));
+  return out;
+}
+
 function extractPrice(t){
   t=t.replace(/\s+/g,' ').trim();
   // v7.82: Match number with unit — pick longest
@@ -3470,17 +3617,16 @@ function getPreview(el, mode){
   }
   // v8.68: تنوع‌ها — گزینه‌ها را جدا نشان بده، نه متن به‌هم‌چسبیده
   if(mode==='variations'){
-    var vals=[],seen={};
-    var nodes=el.querySelectorAll('option,input[type=radio],li,label,button,[data-value]');
-    Array.prototype.forEach.call(nodes,function(n){
-      var v=(n.getAttribute&&(n.getAttribute('data-value')||n.getAttribute('value')||n.getAttribute('title')))||n.textContent||'';
-      v=String(v).replace(/\s+/g,' ').trim();
-      if(!v||v.length>60)return;
-      if(/^(انتخاب کنید|choose an option|select|---?)$/i.test(v))return;
-      var k=v.toLowerCase(); if(seen[k])return; seen[k]=1; vals.push(v);
-    });
-    if(!vals.length){var t=(el.textContent||'').replace(/\s+/g,' ').trim();return t.substring(0,80);}
-    return vals.length+' گزینه: '+vals.slice(0,8).join(' · ');
+    /* v8.85: پیش‌نمایش باید همان چیزی را نشان دهد که در نهایت ذخیره و به
+       مقصد فرستاده می‌شود، نه یک حدسِ سرانگشتی. منطق زیر همان مراحل
+       variationsInside/variationValueOf سمت PHP است، تا آنچه اینجا
+       می‌بینید دقیقاً همان خروجی واقعی باشد. */
+    var vv=__varValues(el);
+    if(!vv.length){
+      var t=(el.textContent||'').replace(/\s+/g,' ').trim();
+      return t?('چیزی پیدا نشد — متن ظرف: '+t.substring(0,60)):'(خالی)';
+    }
+    return vv.length+' گزینه ← '+vv.join(' · ');
   }
   if(mode==='shortDesc'||mode==='longDesc'){
     var t=(el.textContent||'').replace(/\s+/g,' ').trim();
@@ -3809,6 +3955,9 @@ function __report(){
     imgs:MODE==='galleryBox'?countImgs(picked):(MODE==='galleryOne'?countGalImgs(GAL):0),
     matches:countMatch(S[MODE]||''),
     preview:picked?String(getPreview(picked,MODE)||'').substring(0,150):'',
+    // v8.85: فهرست کاملِ تنوع‌ها، جدا از متن کوتاه‌شدهٔ پیش‌نمایش، تا پنل
+    // بتواند خروجی نهایی را کامل و گزینه‌به‌گزینه نشان دهد
+    vars:(MODE==='variations'&&picked)?__varValues(picked).slice(0,60):null,
     all:S
   });
 }
@@ -5241,6 +5390,34 @@ function variationsInside(DOMXPath $xp, DOMNode $box): array {
         $ns = @$xp->query($q, $box);
         if ($ns) foreach ($ns as $n) $push(variationValueOf($n));
         if (count($out) > 1) return $out;
+    }
+    /* v8.85: ظرفی که گزینه‌هایش با <div> تکرارشونده ساخته شده‌اند.
+       مثل «مانتو پاتریس»: هر رنگ یک div است که داخلش یک بندانگشتی و یک
+       برچسب جدا دارد. هیچ‌کدام از الگوهای بالا به آن div نمی‌خورد، پس
+       تصویرِ بی‌نام برداشته می‌شد و در نهایت متنِ کلِ ظرف به‌عنوان یک
+       گزینهٔ سرِهم‌شده برمی‌گشت («آبی نفتی سبز یشمی»). حالا اگر ظرف چند
+       فرزندِ هم‌شکل دارد، هرکدام یک گزینه حساب می‌شود. */
+    if (count($out) <= 1) {
+        $kids = [];
+        foreach ($box->childNodes as $c) {
+            if ($c instanceof DOMElement
+                && !in_array(strtolower($c->tagName), ['script', 'style', 'br'], true)) $kids[] = $c;
+        }
+        if (count($kids) > 1) {
+            $multi = [];
+            foreach ($kids as $c) {
+                $v = variationValueOf($c);
+                $v = trim($v);
+                if ($v === '' || variationIsNoise($v)) continue;
+                $multi[] = $v;
+            }
+            // فقط وقتی قبول کن که واقعاً چند گزینهٔ متمایز به دست آمده
+            if (count(array_unique($multi)) > 1) {
+                $out = []; $seen = [];
+                foreach ($multi as $v) $push($v);
+                if (count($out) > 1) return $out;
+            }
+        }
     }
     // ۳) در نهایت خود ظرف یک گزینه است
     if (!$out) $push(variationValueOf($box));
@@ -8448,6 +8625,55 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.85: تنوع و دسته در ووکامرس + پیش‌نمایش خروجی تنوع ---------- */
+    /* تنوع‌ها فقط در مسیر آپدیت به‌عنوان attributes می‌رفتند، پس محصول
+       تازه‌ساخته بدون رنگ و سایز می‌رفت. */
+    $add('8.85', 'تنوع‌ها موقع ساخت محصول ووکامرس هم فرستاده می‌شوند',
+         // رشته تکه‌تکه، وگرنه همین خط خودش را می‌شمارد (درس v8.35)
+         substr_count($selfSrc, '$_atNew=wooVariationAttribu' . 'tes($p);') === 2
+         && substr_count($selfSrc, "\$wp['attribu" . "tes']=\$_atNew;") === 2);
+    // دستهٔ استخراج‌شده تا حالا هیچ‌جا به ووکامرس نمی‌رفت
+    $add('8.85', 'تابع تبدیل نام دسته به شناسه وجود دارد',
+         function_exists('wooCategoryIds'));
+    $add('8.85', 'دستهٔ استخراج‌شده در ساخت و آپدیت اعمال می‌شود',
+         substr_count($selfSrc, "wooCategoryIds(\$w,\$p['category']??'')") === 4);
+    $add('8.85', 'تطبیق نام دسته با همان نرمال‌سازی عنوان انجام می‌شود',
+         strpos($selfSrc, '$nm = reconNormTitle((string)($c[\'name\'] ?? \'\'));') !== false);
+    // پیش‌نمایش تنوع باید همان خروجی نهایی باشد
+    $add('8.85', 'انتخابگر همان منطق استخراج تنوع را دارد',
+         strpos($selfSrc, 'function __varVal' . 'ues(box){') !== false
+         && strpos($selfSrc, 'function __varValu' . 'eOf(n){') !== false);
+    $add('8.85', 'فهرست کامل تنوع‌ها به پنل گزارش می‌شود',
+         strpos($selfSrc, 'vars:(MODE===\'variations\'&&picked)?__varVal' . 'ues(picked)') !== false);
+    $add('8.85', 'پنل خروجی نهایی تنوع را گزینه‌به‌گزینه نشان می‌دهد',
+         strpos($selfSrc, '✅ خروجی نهایی — ') !== false);
+    /* ظرفی که گزینه‌هایش <div> تکرارشونده‌اند (مثل مانتو پاتریس) قبلاً
+       متنِ سرِهم‌شدهٔ کل ظرف را یک گزینه می‌داد. */
+    $add('8.85', 'فرزندان تکرارشونده هرکدام یک گزینه می‌شوند',
+         strpos($selfSrc, 'if (count(array_unique($multi)) > 1)') !== false);
+    if (function_exists('variationsExtract')) {
+        $doc = new DOMDocument();
+        @$doc->loadHTML('<?xml encoding="UTF-8"><div class="c">'
+            . '<div class="i"><img src="/1.jpg" alt="مشکی"></div>'
+            . '<div class="i"><img src="/2.jpg" alt="کرم"></div></div>');
+        $vx = new DOMXPath($doc);
+        $vr = variationsExtract($vx, null, '.c');
+        $add('8.85', 'رنگِ روی بندانگشتی درست خوانده می‌شود',
+             ($vr['values'] ?? []) === ['مشکی', 'کرم'],
+             implode('،', $vr['values'] ?? []));
+        /* حالت مانتو پاتریس: هر گزینه یک div با بندانگشتی و برچسبِ جدا.
+           بدون منطق «فرزندان تکرارشونده»، متن هر دو به هم می‌چسبید و یک
+           گزینهٔ سرِهم‌شده برمی‌گشت — پس رفتار سنجیده می‌شود نه فقط کد. */
+        $doc2 = new DOMDocument();
+        @$doc2->loadHTML('<?xml encoding="UTF-8"><div class="c">'
+            . '<div class="i"><span><img src="/1.webp"></span><span>آبی نفتی</span></div>'
+            . '<div class="i"><span><img src="/2.webp"></span><span>سبز یشمی</span></div></div>');
+        $vr2 = variationsExtract(new DOMXPath($doc2), null, '.c');
+        $add('8.85', 'گزینه‌های چند-فرزندی به هم نمی‌چسبند',
+             ($vr2['values'] ?? []) === ['آبی نفتی', 'سبز یشمی'],
+             implode('،', $vr2['values'] ?? []));
+    }
 
     /* ---------- v8.84: دکمهٔ «پیدا کردن در غرفه» و ستون گالری ---------- */
     /* JSON.stringify رشته را با کوتیشن دوتایی می‌پیچد و onclick هم با
@@ -12362,6 +12588,15 @@ if(!empty($p['long_desc']))$wp['description']=$p['long_desc'];
 if(!empty($p['sku']))$wp['sku']=$p['sku'];
 // v8.56: دستهٔ این پروفایل، وگرنه دستهٔ پیش‌فرض
 if($wooStreamCatId>0)$wp['categories']=[['id'=>$wooStreamCatId]];
+/* v8.85: تنوع‌ها موقع «ساخت» محصول هم بروند. تا حالا فقط در مسیر آپدیت
+   به‌عنوان attributes فرستاده می‌شدند، پس محصول تازه بدون رنگ و سایز
+   ساخته می‌شد و تنها با یک ارسال دوم تکمیل می‌شد. */
+$_atNew=wooVariationAttributes($p);
+if($_atNew)$wp['attributes']=$_atNew;
+/* v8.85: دستهٔ استخراج‌شده از صفحهٔ محصول، اگر باشد، بر دستهٔ ثابت
+   پروفایل ارجح است — همان چیزی که کاربر خواسته. */
+$_catNew=wooCategoryIds($w,$p['category']??'');
+if($_catNew)$wp['categories']=array_map(fn($i)=>['id'=>$i],$_catNew);
 
 // v8.63: تصویر جدا از ساخت محصول وصل می‌شود (روش «عکس‌دار کردن»)
 // v8.64: و همهٔ عکس‌های گالری، نه فقط اولی
@@ -12440,6 +12675,9 @@ $wpUpdate['images']=$wooStreamImgs;
 if(!empty($p['sku']))$wpUpdate['sku']=$p['sku'];
 $wooAttrsS=wooVariationAttributes($p);
 if($wooAttrsS)$wpUpdate['attributes']=$wooAttrsS;
+// v8.85: دستهٔ استخراج‌شده در آپدیت هم اعمال شود
+$_catUpd=wooCategoryIds($w,$p['category']??'');
+if($_catUpd)$wpUpdate['categories']=array_map(fn($i)=>['id'=>$i],$_catUpd);
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$existing['id'],$wpUpdate);
 // v8.58: تصویرِ نگرفتنی نباید کل آپدیت را از بین ببرد
 if(!$r['ok']&&!empty($wpUpdate['images'])&&wooIsImageError($r)){
@@ -12597,6 +12835,12 @@ if(!empty($p['long_desc']))$wp['description']=$p['long_desc'];
 if(!empty($p['sku']))$wp['sku']=$p['sku'];
 // v8.56: دستهٔ همین پروفایل، نه فقط دستهٔ سراسری
 if($wooSendCatId>0)$wp['categories']=[['id'=>$wooSendCatId]];
+// v8.85: تنوع‌ها موقع ساخت محصول (نه فقط آپدیت)
+$_atNew=wooVariationAttributes($p);
+if($_atNew)$wp['attributes']=$_atNew;
+// v8.85: دستهٔ استخراج‌شده بر دستهٔ ثابت پروفایل ارجح است
+$_catNew=wooCategoryIds($w,$p['category']??'');
+if($_catNew)$wp['categories']=array_map(fn($i)=>['id'=>$i],$_catNew);
 
 $existing=null;
 if($pTitle!==''){
@@ -12675,6 +12919,9 @@ if(!empty($p['sku']))$wpUpdate['sku']=$p['sku'];
 // v8.69: تنوع‌ها به‌صورت ویژگی محصول ووکامرس
 $wooAttrs=wooVariationAttributes($p);
 if($wooAttrs)$wpUpdate['attributes']=$wooAttrs;
+// v8.85: دستهٔ استخراج‌شده در آپدیت هم اعمال شود
+$_catUpd=wooCategoryIds($w,$p['category']??'');
+if($_catUpd)$wpUpdate['categories']=array_map(fn($i)=>['id'=>$i],$_catUpd);
 $r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'PUT','products/'.$exId,$wpUpdate);
 // v8.58: اگر فقط تصویر مقصر بود، بدون تصویر دوباره تلاش کن تا بقیهٔ
 // تغییرات (قیمت/موجودی) از دست نرود.
@@ -19048,9 +19295,31 @@ function pkApplyState(st){
   const set=(id,v)=>{const e=$(id);if(e)e.textContent=v;};
   set('pkSel', st.sel||'—');
   set('pkTag', st.tag||'-');
-  set('pkPrev2', st.preview||'(خالی)');
+  /* v8.85: برای تنوع‌ها، به‌جای یک خط متن، همان خروجی نهایی را
+     گزینه‌به‌گزینه نشان بده — این دقیقاً همان چیزی است که ذخیره و به
+     ووکامرس/باسلام فرستاده می‌شود. */
   const c=$('pkPrev2');
-  if(c)c.style.color=st.preview?'#86efac':'#fbbf24';
+  if(st.mode==='variations'&&Array.isArray(st.vars)){
+    if(st.vars.length){
+      let vh='<div style="color:#c4b5fd;font-size:10px;margin-bottom:3px">'
+        +'✅ خروجی نهایی — '+toFa(st.vars.length)+' گزینه'
+        +' <span style="color:#64748b">(همین‌ها ذخیره و ارسال می‌شوند)</span></div>'
+        +'<div style="display:flex;gap:3px;flex-wrap:wrap">';
+      st.vars.forEach(v=>{
+        vh+='<span style="background:#1e1b4b;border:1px solid #6d28d9;color:#e9d5ff;'
+          +'border-radius:10px;padding:1px 7px;font-size:10px">'+esc(v)+'</span>';
+      });
+      vh+='</div><div style="margin-top:4px;font-size:9.5px;color:#64748b;direction:ltr;'
+        +'text-align:left;word-break:break-all">'+esc(st.vars.join('، '))+'</div>';
+      if(c){c.innerHTML=vh;c.style.color='';}
+    }else if(c){
+      c.textContent='⚠ هیچ گزینه‌ای پیدا نشد — ظرف دیگری را امتحان کنید (⬆ والد)';
+      c.style.color='#fbbf24';
+    }
+  }else{
+    set('pkPrev2', st.preview||'(خالی)');
+    if(c)c.style.color=st.preview?'#86efac':'#fbbf24';
+  }
   let cnt='';
   if(st.mode==='galleryBox')      cnt='🖼 '+toFa(st.imgs||0)+' عکس'+((st.matches||0)>1?(' · '+toFa(st.matches)+' ظرف'):'');
   else if(st.mode==='galleryOne') cnt='➕ '+toFa(st.imgs||0)+' عکس · '+toFa((st.gal||[]).length)+' سلکتور';
@@ -20461,6 +20730,25 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.85', t:'تنوع و دسته‌بندی به ووکامرس + پیش‌نمایش خروجی نهایی تنوع‌ها', items:[
+    '🎨 تنوع‌ها حالا موقع «ساخت» محصول در ووکامرس هم فرستاده می‌شوند',
+    'تا حالا فقط در مسیر آپدیت به‌عنوان attributes می‌رفتند',
+    'یعنی محصول تازه بدون رنگ و سایز ساخته می‌شد و فقط با ارسال دوم کامل می‌شد',
+    '📂 دسته‌بندیِ استخراج‌شده از صفحهٔ محصول، به ووکامرس فرستاده می‌شود',
+    'این فیلد از قبل در جزئیات جمع می‌شد ولی هیچ‌وقت به مقصد نمی‌رفت',
+    'نام دسته با فهرست دسته‌های فروشگاه تطبیق داده می‌شود؛ اگر نبود، ساخته می‌شود',
+    'تطبیق با همان نرمال‌سازی عنوان است، پس نیم‌فاصله و ی/ک عربی مانع نمی‌شود',
+    'چند دسته در یک فیلد (با ویرگول یا /) هم پشتیبانی می‌شود',
+    'اگر محصول دسته نداشت، همان دستهٔ ثابتِ پروفایل مثل قبل اعمال می‌شود',
+    '👁 پیش‌نمایش تنوع‌ها حالا دقیقاً «خروجی نهایی» را نشان می‌دهد',
+    'همان منطقی که سمت سرور اجرا می‌شود، داخل انتخابگر هم اجرا می‌شود',
+    'در پنل، گزینه‌ها یکی‌یکی به شکل برچسب دیده می‌شوند به‌علاوهٔ متن نهایی',
+    'تست تأیید می‌کند خروجی انتخابگر و خروجی سرور مو‌به‌مو یکی است',
+    '🐞 تنوع‌هایی که هر گزینه‌شان یک div با بندانگشتی و برچسب جداست:',
+    'مثل «مانتو پاتریس» — قبلاً متن همهٔ گزینه‌ها به هم می‌چسبید',
+    'و یک گزینهٔ سرِهم‌شده مثل «آبی نفتیسبز یشمی» تولید می‌شد',
+    'حالا هر فرزند یک گزینهٔ جداگانه است'
+  ]},
   {v:'8.84', t:'رفع خطای دکمهٔ «پیدا کردن در غرفه» + ستون گالری در نمای جدولی', items:[
     '🐞 خطای Unexpected end of input روی دکمهٔ «پیدا کردن در غرفه» — علتش:',
     'مقدار با JSON.stringify ساخته می‌شد که رشته را داخل «کوتیشن دوتایی» می‌گذارد',
