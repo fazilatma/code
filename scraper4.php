@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.78';
+const APP_VERSION = '8.79';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -762,8 +762,25 @@ function aiChat(string $baseUrl, string $apiKey, array $payload, ?array $net = n
     return $last;
 }
 
+/**
+ * v8.79: پایهٔ آدرس از فایل اتصالات خوانده می‌شود تا بشود مسیر ارسال را
+ * روی یک سرور آزمایشی سنجید. اگر تنظیم نشده باشد — یعنی همیشه در حالت
+ * عادی — همان دروازهٔ رسمی باسلام استفاده می‌شود.
+ */
+function bslApiBase(): string {
+    static $base = null;
+    if ($base !== null) return $base;
+    $b = '';
+    if (function_exists('loadConnections')) {
+        $cn = loadConnections();
+        $b = trim((string)($cn['basalam']['api_base'] ?? ''));
+    }
+    if ($b === '' || !preg_match('~^https?://~i', $b)) $b = 'https://openapi.basalam.com/v1/';
+    return $base = rtrim($b, '/') . '/';
+}
+
 function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false): array {
-$url='https://openapi.basalam.com/v1/'.ltrim($ep,'/');
+$url=bslApiBase().ltrim($ep,'/');
 
 $maxRetries=3;$retryDelay=3;
 for($attempt=1;$attempt<=$maxRetries;$attempt++){
@@ -1680,6 +1697,39 @@ function findRemoteById(array $rows, string $target, string $productKey): ?array
 }
 
 /**
+ * v8.79: آیا باسلام محصول را به‌خاطر تکراری بودن نام رد کرد؟
+ *
+ * شکل واقعی پاسخ (۴۲۲) که کاربر فرستاده بود:
+ *   {"http_status":422,"messages":[{"code":0,"fields":["name"],
+ *     "message":"!نام کالا تکراری است و قبلا برای محصول دیگری انتخاب کرده‌اید"}]}
+ *
+ * قبلاً همین تشخیص در دو جا به‌صورت درون‌خطی نوشته شده بود و مسیر سومی
+ * (ایجاد بدون تصویر) اصلاً آن را نداشت. حالا یک تابع مشترک است.
+ */
+function bslIsDuplicateName(array $r): bool {
+    if (!empty($r['ok'])) return false;
+    $msgs = $r['body']['messages'] ?? [];
+    if (is_array($msgs)) {
+        foreach ($msgs as $m) {
+            if (!is_array($m)) continue;
+            $fields = (array)($m['fields'] ?? []);
+            $text   = (string)($m['message'] ?? '');
+            if (!in_array('name', $fields, true) && !in_array('title', $fields, true)) continue;
+            foreach (['تکرار', 'duplicate', 'already', 'exists'] as $needle) {
+                if (mb_stripos($text, $needle) !== false) return true;
+            }
+        }
+    }
+    $em = $r['body']['error_description'] ?? ($r['body']['message'] ?? ($r['body']['error'] ?? ''));
+    if (is_array($em)) $em = json_encode($em, JSON_UNESCAPED_UNICODE);
+    $em = (string)$em;
+    foreach (['نام تکرار', 'تکراری', 'duplicate name', 'already exists'] as $needle) {
+        if ($em !== '' && mb_stripos($em, $needle) !== false) return true;
+    }
+    return false;
+}
+
+/**
  * v8.71: آیا ووکامرس محصول را به‌خاطر «از قبل موجود بودن» رد کرد؟
  * رایج‌ترین حالت تکراری بودن SKU است، ولی پیام‌های دیگری هم می‌آید.
  */
@@ -1739,10 +1789,14 @@ function bslFindExisting(string $tk, int $vid, string $title, string $productKey
             return ['id' => $mapped, 'title' => $title, '__from_ledger' => true];
         }
     }
+    /* v8.79: پارامتر درست «title» است نه «search». باسلام پارامتر ناشناخته
+       را بی‌صدا نادیده می‌گیرد، پس تا حالا این درخواست یک صفحهٔ دلخواه از
+       غرفه را برمی‌گرداند و تطبیق عنوان تقریباً همیشه شکست می‌خورد. همین
+       باعث می‌شد «تکراری است» بگیریم ولی محصول موجود پیدا نشود. */
     foreach (array_unique([$q, trim($title)]) as $term) {
         if ($term === '') continue;
         $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=50'
-             . $statuses . '&search=' . urlencode($term));
+             . $statuses . '&title=' . urlencode($term));
         if (empty($r['ok'])) continue;
         $rows = $r['body']['data'] ?? [];
         if (!is_array($rows) || !$rows) continue;
@@ -1751,6 +1805,35 @@ function bslFindExisting(string $tk, int $vid, string $title, string $productKey
         if ($hit) return $hit;
         $byId = findRemoteById($rows, 'bsl', $productKey);
         if ($byId) return $byId;
+    }
+
+    /* v8.79: آخرین راه — پیمایش کل غرفه.
+       فیلتر «title» سمت باسلام تطبیق سادهٔ رشته‌ای است و به نیم‌فاصله،
+       ی/ک عربی و علائم حساس است؛ ولی مقایسهٔ ما (reconNormTitle) همهٔ
+       این‌ها را یکسان می‌بیند. پس محصولی که واقعاً همان است می‌تواند از
+       فیلتر سمت سرور رد شود. چون فقط وقتی به اینجا می‌رسیم که باسلام
+       گفته «تکراری است»، هزینهٔ این پیمایش به‌جاست: بدون آن، محصول نه
+       ساخته می‌شود نه آپدیت. */
+    $want = reconNormTitle($title);
+    if ($want === '') return null;
+    for ($page = 1; $page <= 20; $page++) {
+        $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=100&page=' . $page . $statuses);
+        if (empty($r['ok'])) break;
+        $rows = $r['body']['data'] ?? [];
+        if (!is_array($rows) || !$rows) break;
+        $how = '';
+        $hit = findRemoteByTitle($rows, $title, '', 'title', $how);
+        if ($hit) return $hit;
+        $byId = findRemoteById($rows, 'bsl', $productKey);
+        if ($byId) return $byId;
+        // بدون پسوند کد محصول هم بسنج — «(کد: ۱)» در مقصد ممکن است نباشد
+        foreach ($rows as $row) {
+            if (!is_array($row)) continue;
+            $rt = reconNormTitle(stripProductCode((string)($row['title'] ?? '')));
+            if ($rt !== '' && $rt === reconNormTitle(stripProductCode($title))) return $row;
+        }
+        $tp = (int)($r['body']['total_page'] ?? 1);
+        if ($page >= max(1, $tp)) break;
     }
     return null;
 }
@@ -6740,9 +6823,10 @@ if (isset($_GET['dest_list'])) {
     } else {
         $bs = $cn['basalam'] ?? []; $tk = (string)($bs['token'] ?? ''); $vid = (int)($bs['vendor_id'] ?? 0);
         if ($tk === '' || $vid <= 0) { echo json_encode(['ok' => false, 'error' => 'تنظیمات باسلام ناقص'], JSON_UNESCAPED_UNICODE); exit; }
+        // v8.79: پارامتر جست‌وجوی باسلام «title» است نه «search»
         $ep = 'vendors/' . $vid . '/products?per_page=50&page=' . $page
             . '&statuses=2976&statuses=3790&statuses=3568&statuses=3567'
-            . ($q !== '' ? '&search=' . rawurlencode($q) : '');
+            . ($q !== '' ? '&title=' . rawurlencode($q) : '');
         $r = bslReq($tk, 'GET', $ep);
         if (empty($r['ok'])) { echo json_encode(['ok' => false, 'error' => 'خطا ' . (int)$r['code']], JSON_UNESCAPED_UNICODE); exit; }
         $sm = bslStatusMap();
@@ -7996,6 +8080,55 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.79: خطای «نام کالا تکراری است» ---------- */
+    /* ریشه: پارامتر جست‌وجوی فهرست محصولات باسلام «title» است، ولی ما
+       «search» می‌فرستادیم. باسلام پارامتر ناشناخته را بی‌صدا نادیده
+       می‌گیرد، پس یک صفحهٔ دلخواه برمی‌گشت، تطبیق عنوان شکست می‌خورد،
+       مسیر «ایجاد» می‌رفت و ۴۲۲ می‌گرفت. */
+    $add('8.79', 'هیچ فراخوانی باسلام از پارامتر search استفاده نمی‌کند',
+         !preg_match('~vendors/[^\']*\bsearch=~', $selfSrc));
+    $add('8.79', 'جست‌وجوی محصول باسلام با پارامتر title است',
+         substr_count($selfSrc, "&ti" . "tle='.urlencode(") >= 3
+         && strpos($selfSrc, "\$statuses . '&ti" . "tle=' . urlencode(\$term)") !== false);
+    // ووکامرس پارامترش واقعاً search است و نباید عوض شده باشد
+    $add('8.79', 'جست‌وجوی ووکامرس دست‌نخورده مانده',
+         strpos($selfSrc, "'products?sea" . "rch=' . urlencode(\$title)") !== false);
+    $add('8.79', 'تشخیص نام تکراری یک تابع مشترک است',
+         function_exists('bslIsDuplicateName')
+         && substr_count($selfSrc, 'bslIsDuplicate' . 'Name(') >= 3);
+    if (function_exists('bslIsDuplicateName')) {
+        // همان پاسخی که کاربر فرستاده بود
+        $real = ['ok' => false, 'code' => 422, 'body' => ['http_status' => 422, 'messages' => [
+            ['code' => 0, 'fields' => ['name'],
+             'message' => '!نام کالا تکراری است و قبلا برای محصول دیگری انتخاب کرده‌اید']]]];
+        $add('8.79', 'پاسخ ۴۲۲ واقعی باسلام تکراری تشخیص داده می‌شود',
+             bslIsDuplicateName($real));
+        $add('8.79', 'پاسخ موفق تکراری شمرده نمی‌شود',
+             !bslIsDuplicateName(['ok' => true, 'body' => ['id' => 5]]));
+        $add('8.79', 'خطای بی‌ربط تکراری شمرده نمی‌شود',
+             !bslIsDuplicateName(['ok' => false, 'body' => ['messages' => [
+                 ['fields' => ['price'], 'message' => 'قیمت نامعتبر است']]]]));
+        $add('8.79', 'خطای انگلیسی duplicate هم شناخته می‌شود',
+             bslIsDuplicateName(['ok' => false, 'body' => ['messages' => [
+                 ['fields' => ['name'], 'message' => 'duplicate name']]]]));
+    }
+    // مسیر «ایجاد بدون تصویر» هم باید بازیابی کند، نه اینکه شکست بدهد
+    $add('8.79', 'مسیر ایجاد بدون تصویر هم از تکراری بازیابی می‌کند',
+         strpos($selfSrc, 'آپدیت پس از خطای نام تکراری (بدون تصویر)') !== false);
+    // بارگذاری کورکورانهٔ صفحهٔ اول غرفه برداشته شد
+    $add('8.79', 'بارگذاری صفحهٔ اولِ بی‌فیلتر در ارسال تکی حذف شده',
+         strpos($selfSrc, "\$lr=bslReq(\$tk,'GET','vendors/'.\$vid.'/products?page=1&per_page=100&statuses=2976&statuses=3790')") === false);
+    $add('8.79', 'پیمایش کامل غرفه به‌عنوان آخرین راه هست',
+         strpos($selfSrc, 'آخرین راه — پیمایش کل غرفه') !== false);
+    // پایهٔ آدرس قابل تنظیم است تا مسیر ارسال واقعاً آزمایش‌پذیر باشد
+    $add('8.79', 'پایهٔ آدرس باسلام از یک نقطه می‌آید',
+         function_exists('bslApiBase')
+         && substr_count($selfSrc, 'openapi.basalam' . '.com') === 1);
+    if (function_exists('bslApiBase')) {
+        $add('8.79', 'بدون تنظیم، همان دروازهٔ رسمی استفاده می‌شود',
+             strpos(bslApiBase(), 'openapi.basalam' . '.com') !== false);
+    }
 
     /* ---------- v8.78: جزئیات محصولات درون‌ریزی‌شده ---------- */
     // کلید محصول وارد شده باید با همان فرمول محصول اسکرپ‌شده ساخته شود،
@@ -13887,7 +14020,7 @@ elseif(isset($bslExistingNorm[$nTitle])){$exBsl=$bslExistingNorm[$nTitle];}
 else{
 // Search for this product in BaSalam
 $searchQ=bslNormalizeTitle($pTitle);
-$sr=bslReq($tk,'GET','vendors/'.$vid.'/products?per_page=20&search='.urlencode($searchQ));
+$sr=bslReq($tk,'GET','vendors/'.$vid.'/products?per_page=20&title='.urlencode($searchQ));
 if($sr['ok']){$srData=$sr['body']['data']??[];if(is_array($srData)){
 foreach($srData as $sp){$sn=trim($sp['title']??$sp['name']??'');$snn=bslNormalizeTitle($sn);
 if($sn===$pTitle||$snn===$nTitle){$exBsl=$sp;$bslExisting[$sn]=$sp;$bslExistingNorm[$snn]=$sp;break;}
@@ -13900,7 +14033,7 @@ foreach($srData as $sp){$sn=trim($sp['title']??$sp['name']??'');if($sn!==''){$bs
 }}
 // Also check archived/inactive products if not found
 if(!$exBsl){
-$ar=bslReq($tk,'GET','vendors/'.$vid.'/products?per_page=20&statuses=4184&statuses=3790&search='.urlencode($searchQ));
+$ar=bslReq($tk,'GET','vendors/'.$vid.'/products?per_page=20&statuses=4184&statuses=3790&title='.urlencode($searchQ));
 if($ar['ok']){$arData=$ar['body']['data']??[];if(is_array($arData)){
 foreach($arData as $ap){$an=trim($ap['title']??$ap['name']??'');$ann=bslNormalizeTitle($an);
 if($an===$pTitle||$ann===$nTitle||($ann!==''&&$nTitle!==''&&(mb_strpos($nTitle,$ann,0,'UTF-8')!==false||mb_strpos($ann,$nTitle,0,'UTF-8')!==false))){
@@ -14028,10 +14161,9 @@ if($r['ok']&&!empty($r['body']['id'])){ $sent++;$bslSentList[]=array_merge(['tit
 }else{
 
 $em=$r['body']['error_description']??($r['body']['message']??($r['body']['error']??null));if(is_array($em))$em=json_encode($em,JSON_UNESCAPED_UNICODE);if(!$em)$em=mb_substr($r['raw']??('HTTP'.$r['code']),0,300);
-$dupName=false;$msgs=$r['body']['messages']??[];
-if(is_array($msgs)){foreach($msgs as $m){$f=$m['fields']??[];$mt=$m['message']??'';if(in_array('name',$f)&&(mb_stripos($mt,'تکرار')!==false||mb_stripos($mt,'duplicate')!==false||mb_stripos($mt,'already')!==false))$dupName=true;}}
-
-if(!$dupName&&(mb_stripos($em,'نام تکرار')!==false||mb_stripos($em,'duplicate name')!==false||mb_stripos($em,'already exists')!==false||mb_stripos($em,'تکراری')!==false))$dupName=true;
+// v8.79: تشخیص «نام تکراری» به تابع مشترک منتقل شد تا هر سه مسیر ارسال
+// یک رفتار داشته باشند؛ قبلاً درون‌خطی بود و مسیر سوم اصلاً نداشتش.
+$dupName=bslIsDuplicateName($r);
 // v8.71: باسلام می‌گوید تکراری ولی جست‌وجوی ما محصول را پیدا نکرده بود.
 // دقیقاً همین حالت باعث می‌شد محصول نه ساخته شود نه آپدیت. حالا دوباره
 // و با تطبیق نرمال‌شده دنبالش می‌گردیم.
@@ -14362,10 +14494,15 @@ if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=functio
 bslSetCatNameMap($bslFlatCats);
 
 $bslExisting=[];$bslExistingNorm=[];
-$lr=bslReq($tk,'GET','vendors/'.$vid.'/products?page=1&per_page=100&statuses=2976&statuses=3790');
-if($lr['ok']){$lrData=$lr['body']['data']??[];if(is_array($lrData)){foreach($lrData as $bp){$bn=trim($bp['title']??$bp['name']??'');if($bn!==''){$bslExisting[$bn]=$bp;$nn=bslNormalizeTitle($bn);if($nn!==$bn)$bslExistingNorm[$nn]=$bp;}}}}
-
-$searchR=bslReq($tk,'GET','vendors/'.$vid.'/products?page=1&per_page=100&statuses=2976&statuses=3790&search='.urlencode(bslNormalizeTitle($pTitle)));
+/* v8.79: بارگذاری کورکورانهٔ «صفحهٔ اول غرفه» برداشته شد.
+   فقط ۱۰۰ محصول اولِ فعال و غیرفعال را می‌گرفت و اسمش را می‌گذاشت
+   «محصولات موجود»؛ در غرفه‌ای با بیش از ۱۰۰ کالا، هر چیزی که در صفحهٔ
+   دوم به بعد بود اصلاً دیده نمی‌شد و محصول از نو ساخته می‌شد — که همان
+   خطای «نام تکراری» را می‌گرفت. جست‌وجوی عنوان‌محورِ پایین به‌علاوهٔ
+   bslFindExisting همین کار را دقیق‌تر و ارزان‌تر انجام می‌دهند. */
+$searchR=bslReq($tk,'GET','vendors/'.$vid.'/products?page=1&per_page=100'
+  .'&statuses=2976&statuses=3790&statuses=3567&statuses=3568&statuses=4184'
+  .'&title='.urlencode(bslNormalizeTitle($pTitle)));
 if($searchR['ok']){$srData=$searchR['body']['data']??[];if(is_array($srData)){foreach($srData as $bp){$bn=trim($bp['title']??$bp['name']??'');if($bn!==''){if(!isset($bslExisting[$bn])){$bslExisting[$bn]=$bp;$nn=bslNormalizeTitle($bn);if($nn!==$bn)$bslExistingNorm[$nn]=$bp;}}}}}
 
 $exBsl=null;
@@ -14460,6 +14597,27 @@ echo json_encode(['ok'=>true,'action'=>'send','key'=>$pKey,'title'=>$pTitle,'rem
 }
 $em=$r['body']['error_description']??$r['body']['message']??$r['body']['error']??'';
 if(is_array($em))$em=json_encode($em,JSON_UNESCAPED_UNICODE);
+/* v8.79: این مسیرِ «ایجاد بدون تصویر» هم می‌تواند خطای نام تکراری بگیرد،
+   ولی تا حالا بدون هیچ تلاشی برای بازیابی، شکست گزارش می‌کرد. بدتر اینکه
+   پیام واقعی باسلام پشت جملهٔ «تصویر آپلود نشد» پنهان می‌شد و کاربر فکر
+   می‌کرد مشکل از عکس است. حالا مثل مسیر اصلی، محصول موجود پیدا و آپدیت
+   می‌شود. */
+if(bslIsDuplicateName($r)){
+$exDup=bslFindExisting($tk,$vid,$pTitle,(string)$pKey);
+if($exDup&&(int)($exDup['id']??0)>0){
+$exDupId=(int)$exDup['id'];
+$bu3=['primary_price'=>$pn,'stock'=>(int)($bs['stock']??10),'preparation_days'=>(int)($bs['preparation_days']??3),'weight'=>(int)($bs['weight']??500),'package_weight'=>(int)($bs['package_weight']??((int)($bs['weight']??500)+100)),'status'=>2976];
+if($catId>0)$bu3['category_id']=$catId;
+bslApplyContent($bu3,$p);
+$rd=bslReq($tk,'PATCH','products/'.$exDupId,$bu3);
+if($rd['code']===404)$rd=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$exDupId,$bu3);
+if(!empty($rd['ok'])){
+remoteMapRecord('bsl',(string)$pKey,$exDupId,$pTitle);
+echo json_encode(['ok'=>true,'action'=>'update','key'=>$pKey,'title'=>$pTitle,'remote_id'=>$exDupId,'image'=>$cardImg,'price'=>$cardPrice,'price_unit'=>$priceUnit,'category_id'=>$cardCatId,'category'=>$cardCatName,'link'=>$cardLink,'changes'=>'آپدیت پس از خطای نام تکراری (بدون تصویر)'],JSON_UNESCAPED_UNICODE);exit;
+}
+}
+echo json_encode(['ok'=>false,'action'=>'fail','error'=>'نام تکراری است ولی محصول موجود پیدا نشد — «🔗 بازسازی» را بزنید: '.mb_substr($em,0,120),'key'=>$pKey,'title'=>$pTitle,'image'=>$cardImg,'price'=>$cardPrice,'price_unit'=>$priceUnit,'category_id'=>$cardCatId,'category'=>$cardCatName,'link'=>$cardLink],JSON_UNESCAPED_UNICODE);exit;
+}
 echo json_encode(['ok'=>false,'action'=>'fail','error'=>'تصویر آپلود نشد + ایجاد بدون تصویر هم ناموفق: '.mb_substr($em,0,150),'key'=>$pKey,'title'=>$pTitle,'image'=>$cardImg,'price'=>$cardPrice,'price_unit'=>$priceUnit,'category_id'=>$cardCatId,'category'=>$cardCatName,'link'=>$cardLink],JSON_UNESCAPED_UNICODE);exit;
 }
 $bsBrief=trim(strip_tags($p['short_desc']??''));$bsDesc=trim($p['long_desc']??'');
@@ -15312,7 +15470,7 @@ if(isset($bslExisting[$pTitle])){$exBsl=$bslExisting[$pTitle];}
 elseif(isset($bslExistingNorm[$nTitle])){$exBsl=$bslExistingNorm[$nTitle];}
 else{
 $searchQ=bslNormalizeTitle($pTitle);
-$sr=bslReq($tk,'GET','vendors/'.$vid.'/products?per_page=20&search='.urlencode($searchQ));
+$sr=bslReq($tk,'GET','vendors/'.$vid.'/products?per_page=20&title='.urlencode($searchQ));
 if($sr['ok']){$srData=$sr['body']['data']??[];if(is_array($srData)){
 foreach($srData as $sp){$sn=trim($sp['title']??$sp['name']??'');$snn=bslNormalizeTitle($sn);
 if($sn===$pTitle||$snn===$nTitle){$exBsl=$sp;$bslExisting[$sn]=$sp;$bslExistingNorm[$snn]=$sp;break;}
@@ -15321,7 +15479,7 @@ if($snn!==''&&$nTitle!==''&&(mb_strpos($nTitle,$snn,0,'UTF-8')!==false||mb_strpo
 foreach($srData as $sp){$sn=trim($sp['title']??$sp['name']??'');if($sn!==''){$bslExisting[$sn]=$sp;$snn=bslNormalizeTitle($sn);if($snn!==$sn)$bslExistingNorm[$snn]=$sp;}}
 }}
 if(!$exBsl){
-$ar=bslReq($tk,'GET','vendors/'.$vid.'/products?per_page=20&statuses=4184&statuses=3790&search='.urlencode($searchQ));
+$ar=bslReq($tk,'GET','vendors/'.$vid.'/products?per_page=20&statuses=4184&statuses=3790&title='.urlencode($searchQ));
 if($ar['ok']){$arData=$ar['body']['data']??[];if(is_array($arData)){
 foreach($arData as $ap){$an=trim($ap['title']??$ap['name']??'');$ann=bslNormalizeTitle($an);
 if($an===$pTitle||$ann===$nTitle||($ann!==''&&$nTitle!==''&&(mb_strpos($nTitle,$ann,0,'UTF-8')!==false||mb_strpos($ann,$nTitle,0,'UTF-8')!==false))){
@@ -19630,6 +19788,24 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.79', t:'ریشهٔ خطای «نام کالا تکراری است» پیدا شد: پارامتر جست‌وجو اشتباه بود', items:[
+    '🔍 در مستندات رسمی باسلام، فیلتر فهرست محصولات غرفه «title» است، نه «search»',
+    'ما «search» می‌فرستادیم و باسلام پارامتر ناشناخته را بی‌صدا نادیده می‌گیرد',
+    'یعنی به‌جای نتیجهٔ جست‌وجو، یک صفحهٔ دلخواه از غرفه برمی‌گشت',
+    'تطبیق عنوان تقریباً همیشه شکست می‌خورد → مسیر «ایجاد» → خطای ۴۲۲ تکراری',
+    'این توضیح می‌دهد چرا اصلاحات ۸.۷۱ تا ۸.۷۳ اثر نکردند: منطق درست بود ولی داده‌ای که می‌گرفت اشتباه بود',
+    '✅ هر شش فراخوانی باسلام به «title» اصلاح شد (ووکامرس دست نخورد — آنجا واقعاً search است)',
+    '🐞 در ارسال تکی، «صفحهٔ اولِ غرفه» کورکورانه بار می‌شد و اسمش «محصولات موجود» بود',
+    'در غرفه‌ای با بیش از ۱۰۰ کالا، هرچه در صفحهٔ دوم به بعد بود اصلاً دیده نمی‌شد',
+    'حذف شد؛ جست‌وجوی عنوان‌محور همان کار را دقیق‌تر و ارزان‌تر انجام می‌دهد',
+    '🐞 مسیر «ایجاد بدون تصویر» اصلاً بازیابی نداشت و مستقیم شکست گزارش می‌کرد',
+    'بدتر: پیام واقعی باسلام پشت جملهٔ «تصویر آپلود نشد» پنهان می‌شد و کاربر فکر می‌کرد مشکل از عکس است',
+    'حالا این مسیر هم محصول موجود را پیدا و آپدیت می‌کند',
+    '🔁 آخرین راه: اگر باسلام گفت تکراری ولی جست‌وجو چیزی پیدا نکرد، کل غرفه پیمایش می‌شود',
+    'چون فیلتر سمت باسلام به نیم‌فاصله و ی/ک عربی حساس است ولی مقایسهٔ ما نیست',
+    'پسوند «(کد: ۱)» هم در این مقایسه نادیده گرفته می‌شود',
+    '🧹 تشخیص «نام تکراری» یک تابع مشترک شد؛ قبلاً دو جا تکراری بود و مسیر سوم نداشتش'
+  ]},
   {v:'8.78', t:'محصولات درون‌ریزی‌شده هم مثل سایت اسکرپ‌شده، جزئیاتشان از صفحهٔ محصول انتخاب می‌شود', items:[
     '📥 اگر فایل اکسل یا CSV ستون «لینک صفحهٔ محصول» داشته باشد، حالا همان صفحه باز می‌شود',
     'در تب درون‌ریزی، بعد از وارد کردن، جعبهٔ «🎯 انتخاب جزئیات از روی صفحهٔ محصول» ظاهر می‌شود',
