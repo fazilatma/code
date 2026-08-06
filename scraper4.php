@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.83';
+const APP_VERSION = '8.84';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -8448,6 +8448,28 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.84: دکمهٔ «پیدا کردن در غرفه» و ستون گالری ---------- */
+    /* JSON.stringify رشته را با کوتیشن دوتایی می‌پیچد و onclick هم با
+       کوتیشن دوتایی بسته می‌شود؛ مرورگر هندلر را سرِ اولین کوتیشنِ داخلی
+       می‌بُرید و Unexpected end of input می‌داد. */
+    $add('8.84', 'مقدار onclick دیگر با JSON.stringify ساخته نمی‌شود',
+         strpos($selfSrc, 'bslOpenAndSearch(\'+JSON.string' . 'ify(') === false);
+    $add('8.84', 'کمک‌تابع امن‌سازی ویژگی وجود دارد',
+         strpos($selfSrc, 'function jsA' . 'ttr(s){') !== false
+         && strpos($selfSrc, "bslOpenAndSearch(\\''+jsA" . "ttr(term)+'\\')") !== false);
+    // esc() کوتیشن دوتایی را فرار نمی‌دهد، پس jsAttr باید خودش این کار را بکند
+    $add('8.84', 'کوتیشن دوتایی و تکی هر دو خنثی می‌شوند',
+         strpos($selfSrc, ".replace(/\"/g,'&qu" . "ot;')") !== false
+         && strpos($selfSrc, '.replace(/\'/g,"\\\\\'")') !== false);
+    // ستون گالری در نمای جدولی
+    $add('8.84', 'سربرگ گالری به جدول اضافه شده',
+         strpos($selfSrc, '<th>🖼 گال' . 'ری</th>') !== false);
+    $add('8.84', 'سلول گالری در ردیف‌ها ساخته می‌شود',
+         strpos($selfSrc, "class=\"td-g" . "al\"") !== false
+         && strpos($selfSrc, 'const _imgs=Array.isArray(p.images)') !== false);
+    $add('8.84', 'گالری در نمای متنی هم هست',
+         strpos($selfSrc, '| URL | Image | Gal' . 'lery') !== false);
 
     /* ---------- v8.83: پاک شدن گالری بعد از استخراج خودکار ---------- */
     /* استخراج خودکار روی سرور گالری را اضافه می‌کرد، ولی تبِ بازِ مرورگر
@@ -19392,6 +19414,24 @@ function update(){
 // v8.06: Safe scroll — only scrolls the element if it's visible and has overflow (prevents mobile auto-scroll)
 function scrollElBottom(el){if(!el)return;try{if(el.scrollHeight>el.clientHeight&&el.scrollHeight>0){const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<80;if(nearBottom)el.scrollTop=el.scrollHeight;}}catch(e){}}
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+/**
+ * v8.84: مقدار امن برای گذاشتن داخل رشتهٔ تک‌کوتیشنیِ یک ویژگی onclick.
+ *
+ * esc() از textContent/innerHTML استفاده می‌کند و «کوتیشن دوتایی» را
+ * فرار نمی‌دهد؛ چون در متن عادی مشکلی ندارد. ولی داخل onclick="..."
+ * همان یک کوتیشنِ فرارنداده، ویژگی را زودتر می‌بندد و مرورگر هندلر را
+ * نصفه می‌خواند — همان خطای «Unexpected end of input».
+ * اینجا هر چیزی که می‌تواند از ویژگی یا از رشته بیرون بزند خنثی می‌شود.
+ */
+function jsAttr(s){
+  return String(s==null?'':s)
+    .replace(/\\/g,'\\\\')      // اول بک‌اسلش، وگرنه فرارهای بعدی خراب می‌شوند
+    .replace(/'/g,"\\'")        // رشتهٔ تک‌کوتیشنی را نبند
+    .replace(/"/g,'&quot;')     // ویژگیِ دوکوتیشنی را نبند
+    .replace(/&(?!quot;)/g,'&amp;')
+    .replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/[\r\n]+/g,' ');   // خط جدید داخل ویژگی، هندلر را می‌شکند
+}
 
 /**
  * v8.42: کلید محصول را مطمئن می‌کند.
@@ -19462,8 +19502,27 @@ function renderRow(p,i,k){
 
   // v8.40: نشان جدید/آپدیت کنار عنوان
   const _st=prodStatus(p);
+  /* v8.84: ستون گالری — تعداد عکس‌ها با پیش‌نمایش کوچک.
+     تا حالا فقط «تصویر شاخص» در جدول بود و معلوم نمی‌شد کدام محصول
+     گالری چندعکسی دارد و کدام ندارد؛ همان چیزی که موقع بررسی پاک شدن
+     گالری‌ها لازم بود. */
+  const _imgs=Array.isArray(p.images)?p.images.filter(Boolean):[];
+  const _n=_imgs.length;
+  let galTd;
+  if(_n>1){
+      const thumbs=_imgs.slice(0,4).map(u=>
+          `<img src="?image_proxy=${encodeURIComponent(u)}" loading="lazy" `
+        + `style="width:22px;height:22px;object-fit:cover;border-radius:3px;border:1px solid #334155">`).join('');
+      galTd=`<td class="td-gal" title="${esc(_imgs.join('\n'))}">`
+          + `<div style="display:flex;gap:2px;align-items:center">`
+          + `<b style="color:#f9a8d4;font-size:10px">🖼 ${toFa(_n)}</b>${thumbs}`
+          + (_n>4?`<span style="color:#64748b;font-size:9px">+${toFa(_n-4)}</span>`:'')
+          + `</div></td>`;
+  }else{
+      galTd=`<td class="td-gal" style="color:#64748b;font-size:10px">${_n===1?'۱ عکس':'—'}</td>`;
+  }
   const html=`<td>${toFa(i)}</td><td>${statusBadge(_st)}${esc(title)}</td><td class="td-orig">${esc(origPrice)}</td><td style="direction:ltr;text-align:right">${esc(price)}</td>
-  <td>${p.link?`<a href="${esc(p.link)}" target="_blank">لینک</a>`:'-'}</td><td style="direction:ltr;text-align:left;font-size:9px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.image||'')}">${esc(p.image||'-')}</td>${detailTds}${customTd}`;
+  <td>${p.link?`<a href="${esc(p.link)}" target="_blank">لینک</a>`:'-'}</td><td style="direction:ltr;text-align:left;font-size:9px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.image||'')}">${esc(p.image||'-')}</td>${galTd}${detailTds}${customTd}`;
   if(el){el.innerHTML=html;el.style.display=matchFilter(_st)?'':'none';}
   else{const tr=document.createElement('tr');tr.dataset.k=_k;tr.innerHTML=html;
        tr.style.display=matchFilter(_st)?'':'none';$('tBody').appendChild(tr);}
@@ -19472,7 +19531,8 @@ function renderRow(p,i,k){
 function updateTableHeaders() {
     let thead = $('tBody').parentElement.querySelector('thead tr');
     if(!thead) return;
-    let baseHeaders = '<th>#</th><th>عنوان</th><th>قیمت اولیه</th><th>قیمت نهایی</th><th>لینک</th><th>تصویر</th>';
+    // v8.84: ستون گالری بعد از «تصویر» می‌آید — همان ترتیبی که renderRow می‌سازد
+    let baseHeaders = '<th>#</th><th>عنوان</th><th>قیمت اولیه</th><th>قیمت نهایی</th><th>لینک</th><th>تصویر</th><th>🖼 گالری</th>';
     const enabledFields = getEnabledDetailFields();
     enabledFields.forEach(f => {
         baseHeaders += `<th>${f.icon} ${esc(f.label)}</th>`;
@@ -19548,7 +19608,8 @@ function removeBelowMinPrice() {
 }
 
 function genTxt(){
-  let headers = '# | Title | Original | Final | URL | Image';
+  // v8.84: ستون گالری در نمای متنی هم بیاید تا با جدول یکی باشد
+  let headers = '# | Title | Original | Final | URL | Image | Gallery';
   const enabledFields = getEnabledDetailFields();
   enabledFields.forEach(f => headers += ` | ${f.label}`);
   if (isCustomColEnabled()) headers += ` | ${getCustomColName()}`;
@@ -19556,7 +19617,8 @@ function genTxt(){
   order.forEach((k,i)=>{
       const p=products.get(k);
       if(!p)return;
-      let row = `${i+1} | ${(getFinalTitle(p.title)||'').substring(0,25)} | ${getOriginalPrice(p.price)} | ${getFinalPrice(p.price)} | ${p.link||'-'} | ${p.image||'-'}`;
+      const _gn=Array.isArray(p.images)?p.images.filter(Boolean).length:0;
+      let row = `${i+1} | ${(getFinalTitle(p.title)||'').substring(0,25)} | ${getOriginalPrice(p.price)} | ${getFinalPrice(p.price)} | ${p.link||'-'} | ${p.image||'-'} | ${_gn>1?(_gn+' imgs'):(_gn===1?'1':'-')}`;
       enabledFields.forEach(f => {
           let val = p[f.key] || '';
           if (f.key === 'shortDesc' || f.key === 'longDesc') val = shortText(stripHtml(val), 40);
@@ -20399,6 +20461,22 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.84', t:'رفع خطای دکمهٔ «پیدا کردن در غرفه» + ستون گالری در نمای جدولی', items:[
+    '🐞 خطای Unexpected end of input روی دکمهٔ «پیدا کردن در غرفه» — علتش:',
+    'مقدار با JSON.stringify ساخته می‌شد که رشته را داخل «کوتیشن دوتایی» می‌گذارد',
+    'ولی خودِ onclick هم با کوتیشن دوتایی بسته می‌شود',
+    'پس مرورگر هندلر را سرِ اولین کوتیشنِ داخلی می‌بُرید و می‌شد «bslOpenAndSearch(»',
+    'با هر عنوانی خراب می‌شد، نه فقط بعضی‌ها — در تست هر ۷ حالت شکست خورد',
+    '✅ حالا کمک‌تابع jsAttr مقدار را برای داخل ویژگی امن می‌کند',
+    '🐞 یک ایراد دوم هم موقع تست پیدا شد: تابع esc موجود، کوتیشن دوتایی را فرار نمی‌دهد',
+    'پس عنوان‌هایی که خودشان کوتیشن دارند باز هم دکمه را می‌شکستند',
+    'jsAttr هر دو نوع کوتیشن، بک‌اسلش و خط جدید را خنثی می‌کند',
+    '🖼 ستون گالری به نمای جدولی تب نتایج اضافه شد:',
+    'تعداد عکس‌ها با پیش‌نمایش کوچک تا ۴ تصویر و نشانگر «+n» برای بقیه',
+    'با نگه داشتن موس روی سلول، فهرست کامل آدرس‌ها دیده می‌شود',
+    'محصول بدون گالری با «—» مشخص می‌شود تا یک‌نگاهی معلوم باشد کدام محصول گالری ندارد',
+    'در نمای متنی هم ستون Gallery اضافه شد تا با جدول یکی باشد'
+  ]},
   {v:'8.83', t:'رفع پاک شدن گالری عکس‌ها بعد از هر استخراج خودکار', items:[
     '🐞 چرا فقط گالری پاک می‌شد و توضیحات و تنوع‌ها نه — علت پیدا شد:',
     'استخراج خودکار روی سرور اجرا می‌شود و گالری را به محصولات اضافه می‌کند',
@@ -27076,8 +27154,14 @@ function renderSendCard(d){
     let findStr='';
     if(d.result==='fail'){
         const term=d.remote_id?String(d.remote_id):(d.title||'');
+        /* v8.84: قبلاً مقدار با JSON.stringify داخل onclick گذاشته می‌شد.
+           JSON.stringify رشته را با «کوتیشن دوتایی» می‌پیچد، ولی خودِ
+           onclick هم با کوتیشن دوتایی بسته می‌شود؛ پس مرورگر هندلر را سرِ
+           اولین کوتیشنِ داخلی می‌بُرید و می‌شد «bslOpenAndSearch(» که
+           همان خطای Unexpected end of input را می‌داد. حالا مثل بقیهٔ
+           جاهای فایل، مقدار esc می‌شود و داخل کوتیشن تکی می‌نشیند. */
         if(term)findStr='<div style="margin-top:3px"><button class="btn btn-blue" style="font-size:9px;padding:2px 7px" '
-            +'onclick="bslOpenAndSearch('+JSON.stringify(String(term))+')">🔍 پیدا کردن در غرفه</button></div>';
+            +'onclick="bslOpenAndSearch(\''+jsAttr(term)+'\')">🔍 پیدا کردن در غرفه</button></div>';
     }
     let changesStr=d.changes?'<span style="color:#facc15;font-size:9px">('+esc(d.changes)+')</span>':'';
     let reasonStr=(d.result==='update'&&(d.update_reason||d.changes))?'<div class="scard-reason">📋 علت آپدیت: '+esc(d.update_reason||d.changes)+'</div>':'';
