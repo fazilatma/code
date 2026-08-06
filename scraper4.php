@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.80';
+const APP_VERSION = '8.81';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -157,6 +157,56 @@ function extractPrevMap(array $profile): array {
  * برخی مسیرها آن‌ها را رشته فرض می‌کردند و در نتیجه هرگز اعمال نمی‌شدند.
  * این تابع هر دو شکل را به نگاشت سادهٔ field => selector تبدیل می‌کند.
  */
+/**
+ * v8.81: داده‌های صفحهٔ محصول را از اجرای قبلی نگه می‌دارد.
+ *
+ * صفحهٔ فهرست فقط عنوان، قیمت، لینک و یک عکس دارد. گالری، تنوع‌ها،
+ * توضیحات، SKU، وزن و برند فقط با باز کردن صفحهٔ محصول به دست می‌آیند.
+ * چون هر اجرا $allProducts را از صفر و فقط از روی فهرست می‌سازد، بدون
+ * این ادغام همهٔ آن داده‌ها موقع ذخیره دور ریخته می‌شدند — حتی وقتی
+ * محصول اصلاً تغییری نکرده بود.
+ *
+ * قاعده: مقدار تازه فقط وقتی برنده است که واقعاً چیزی داشته باشد.
+ * قیمت و عنوان همیشه از اجرای تازه می‌آیند چون کار اصلی همین است.
+ */
+function extractMergeDetail(array $fresh, array $prev): array {
+    // فیلدهایی که فقط از صفحهٔ محصول می‌آیند
+    $carry = ['shortDesc', 'longDesc', 'sku', 'brand', 'weight', 'stock',
+              'category', 'tags', 'variations_text'];
+    foreach ($carry as $f) {
+        $new = $fresh[$f] ?? '';
+        if (is_string($new)) $new = trim($new);
+        if (($new === '' || $new === null) && isset($prev[$f]) && $prev[$f] !== '' && $prev[$f] !== null) {
+            $fresh[$f] = $prev[$f];
+        }
+    }
+    // فهرست‌ها: اگر اجرای تازه چیزی نگرفته، قبلی را نگه دار
+    foreach (['variations', 'variation_groups', 'variation_prices'] as $f) {
+        if (empty($fresh[$f]) && !empty($prev[$f]) && is_array($prev[$f])) $fresh[$f] = $prev[$f];
+    }
+    // v8.81: بازهٔ قیمت تنوع‌ها هم نباید هر بار صفر شود
+    foreach (['price_min', 'price_max', 'price_varies'] as $f) {
+        if (empty($fresh[$f]) && !empty($prev[$f])) $fresh[$f] = $prev[$f];
+    }
+    /* گالری: فقط وقتی جایگزین کن که تازه‌تر واقعاً بیشتر باشد. یک عکسِ
+       صفحهٔ فهرست نباید گالری چندعکسیِ قبلی را از بین ببرد. */
+    $newImgs = is_array($fresh['images'] ?? null) ? $fresh['images'] : [];
+    $oldImgs = is_array($prev['images'] ?? null) ? $prev['images'] : [];
+    if (count($oldImgs) > count($newImgs)) {
+        $fresh['images'] = $oldImgs;
+        $fresh['images_count'] = count($oldImgs);
+    } elseif ($newImgs) {
+        $fresh['images_count'] = count($newImgs);
+    }
+    // عکس شاخص: اگر فهرست عکسی نداد، قبلی سر جایش بماند
+    if (empty($fresh['image']) && !empty($prev['image'])) $fresh['image'] = $prev['image'];
+    // نشانه‌های داخلی که نباید هر بار صفر شوند
+    foreach (['_imgCached', '_imgValid'] as $f) {
+        if (!isset($fresh[$f]) && isset($prev[$f])) $fresh[$f] = $prev[$f];
+    }
+    return $fresh;
+}
+
 function extractNormalizeDetailSelectors($raw): array {
     if (!is_array($raw)) return [];
     $out = [];
@@ -5001,12 +5051,130 @@ function variationValueOf(?DOMNode $n): string {
         }
     }
     // دکمه/برچسب رنگ: مقدار معمولاً در data-* یا title است
-    foreach (['data-value', 'data-title', 'data-slug', 'title', 'aria-label'] as $a) {
+    foreach (['data-value', 'data-title', 'data-slug', 'data-color', 'data-colour',
+              'data-name', 'data-option', 'data-original-title', 'title', 'aria-label',
+              'alt'] as $a) {
         $v = trim((string)$n->getAttribute($a));
         if ($v !== '') return $v;
     }
     $t = normalize_text($n->textContent ?? '');
-    return $t;
+    if ($t !== '') return $t;
+
+    /* v8.81: تنوع رنگ که با «عکس» نشان داده می‌شود، نه با متن.
+       خیلی از فروشگاه‌ها رنگ را یک مربع رنگی یا تصویر کوچک می‌گذارند؛
+       آن عنصر نه متن دارد نه data-value، پس تا حالا کاملاً از قلم
+       می‌افتاد و کاربر می‌دید «تنوع‌ها خالی است». */
+    // ۱) تصویر داخلش: alt یا title یا نام فایل
+    $img = null;
+    if (strtolower($n->tagName) === 'img') $img = $n;
+    else {
+        $q = @(new DOMXPath($n->ownerDocument))->query('.//img', $n);
+        if ($q && $q->length) $img = $q->item(0);
+    }
+    if ($img instanceof DOMElement) {
+        foreach (['alt', 'title', 'data-title'] as $a) {
+            $v = trim((string)$img->getAttribute($a));
+            if ($v !== '') return $v;
+        }
+        foreach (['src', 'data-src', 'data-lazy-src'] as $a) {
+            $src = trim((string)$img->getAttribute($a));
+            if ($src === '') continue;
+            $base = preg_replace('~[?#].*$~', '', $src);
+            $base = basename($base);
+            $base = preg_replace('~\.(png|jpe?g|gif|webp|svg|avif)$~i', '', $base);
+            // نام فایل‌های بی‌معنی مثل 1.png یا thumb-2 به درد نمی‌خورند
+            $base = trim(str_replace(['-', '_', '%20'], ' ', $base));
+            if ($base !== '' && !preg_match('~^\d+$~', $base) && mb_strlen($base) <= 40) {
+                return $base;
+            }
+        }
+    }
+    // ۲) رنگ در استایل: background-color یا background
+    $style = trim((string)$n->getAttribute('style'));
+    if ($style !== '' && preg_match('~background(?:-color)?\s*:\s*([^;]+)~i', $style, $m)) {
+        $c = trim($m[1]);
+        if ($c !== '' && stripos($c, 'url(') === false) return $c;
+    }
+    // ۳) کلاسی که نام رنگ را در خودش دارد، مثل swatch-color-red
+    $cls = trim((string)$n->getAttribute('class'));
+    if ($cls !== '' && preg_match('~(?:color|colour|swatch)[-_]([a-z]{3,20})~i', $cls, $m)) {
+        return $m[1];
+    }
+    return '';
+}
+
+/**
+ * v8.81: قیمتِ مخصوصِ یک گزینهٔ تنوع.
+ *
+ * در خیلی از فروشگاه‌ها با کلیک روی سایز یا رنگ، قیمت عوض می‌شود. آن قیمت
+ * تقریباً همیشه از قبل داخل خود صفحه هست — در یک صفت data روی همان دکمه —
+ * و جاوااسکریپت فقط نمایشش می‌دهد. پس بدون اجرای JS هم می‌شود خواندش.
+ */
+function variationPriceOf(?DOMNode $n): int {
+    if (!$n instanceof DOMElement) return 0;
+    foreach (['data-price', 'data-product-price', 'data-value-price', 'data-amount',
+              'data-price-amount', 'data-regular-price', 'data-sale-price',
+              'data-variation-price', 'data-new-price'] as $a) {
+        $v = trim((string)$n->getAttribute($a));
+        if ($v === '') continue;
+        $num = extractPriceNum($v);
+        if ($num > 0) return $num;
+    }
+    return 0;
+}
+
+/**
+ * v8.81: قیمت‌های هر گزینه را از ظرف تنوع بیرون می‌کشد.
+ *
+ * خروجی: ['prices' => [مقدار => قیمت], 'min' => .., 'max' => ..]
+ * اگر هیچ گزینه‌ای قیمت نداشت، آرایه خالی برمی‌گردد و رفتار قبلی حفظ می‌شود.
+ */
+function variationPrices(DOMXPath $xp, DOMNode $box): array {
+    $map = [];
+    foreach (['.//option', './/input[@type="radio"]', './/li', './/label',
+              './/button', './/a', './/*[@data-price]'] as $q) {
+        $ns = @$xp->query($q, $box);
+        if (!$ns) continue;
+        foreach ($ns as $n) {
+            $price = variationPriceOf($n);
+            if ($price <= 0) continue;
+            $label = variationValueOf($n);
+            if ($label === '' || variationIsNoise($label)) continue;
+            if (!isset($map[$label])) $map[$label] = $price;
+        }
+    }
+    if (!$map) return ['prices' => [], 'min' => 0, 'max' => 0];
+    $vals = array_values($map);
+    return ['prices' => $map, 'min' => min($vals), 'max' => max($vals)];
+}
+
+/**
+ * v8.81: کل صفحهٔ محصول را برای جدول قیمتِ تنوع‌ها می‌گردد.
+ *
+ * ووکامرس همهٔ ترکیب‌ها را در صفت data-product_variations روی فرم می‌گذارد.
+ * این دقیق‌ترین منبع است چون خود فروشگاه آن را برای همان کار می‌سازد.
+ */
+function variationPriceTable(DOMXPath $xp): array {
+    $out = [];
+    $forms = @$xp->query('//*[@data-product_variations]');
+    if ($forms) foreach ($forms as $f) {
+        if (!$f instanceof DOMElement) continue;
+        $raw = $f->getAttribute('data-product_variations');
+        if ($raw === '' || $raw === 'false') continue;
+        $rows = json_decode(html_entity_decode($raw, ENT_QUOTES, 'UTF-8'), true);
+        if (!is_array($rows)) continue;
+        foreach ($rows as $row) {
+            if (!is_array($row)) continue;
+            $price = extractPriceNum((string)($row['display_price']
+                     ?? ($row['display_regular_price'] ?? '')));
+            if ($price <= 0) continue;
+            $attrs = $row['attributes'] ?? [];
+            $label = is_array($attrs) ? trim(implode(' / ', array_filter(array_map('strval', $attrs)))) : '';
+            if ($label === '') continue;
+            $out[$label] = $price;
+        }
+    }
+    return $out;
 }
 
 /** آیا این مقدار به‌درد نمی‌خورد؟ (متن‌های راهنما و جای‌خالی) */
@@ -5040,8 +5208,14 @@ function variationsInside(DOMXPath $xp, DOMNode $box): array {
     }
     if ($out) return $out;
     // ۲) دکمه/برچسب: فرزندان مستقیمِ قابل کلیک
+    /* v8.81: عناصر رنگ‌نما هم اضافه شدند — swatch/color/attribute و خودِ
+       img. در بسیاری از قالب‌ها رنگ یک <img> یا یک <span> رنگی است که
+       نه متن دارد نه data-value، و با فهرست قبلی اصلاً دیده نمی‌شد. */
     foreach (['.//li', './/label', './/button', './/a', './/span[@data-value]',
-              './/*[contains(@class,"swatch")]', './/*[contains(@class,"variation")]'] as $q) {
+              './/*[contains(@class,"swatch")]', './/*[contains(@class,"variation")]',
+              './/*[contains(@class,"color")]', './/*[contains(@class,"colour")]',
+              './/*[contains(@class,"attribute")]', './/*[@data-attribute_name]',
+              './/img'] as $q) {
         $ns = @$xp->query($q, $box);
         if ($ns) foreach ($ns as $n) $push(variationValueOf($n));
         if (count($out) > 1) return $out;
@@ -5077,14 +5251,39 @@ function variationsExtract(DOMXPath $xp, ?DOMNode $ctx, string $selStr): array {
                     if ($nv !== '') { $name = $nv; break; }
                 }
             }
-            $groups[] = ['name' => $name, 'values' => $vals];
+            // v8.81: قیمت مخصوص هر گزینه، اگر روی صفحه باشد
+            $pr = variationPrices($xp, $b);
+            $g = ['name' => $name, 'values' => $vals];
+            if (!empty($pr['prices'])) {
+                $g['prices'] = $pr['prices'];
+                $g['price_min'] = $pr['min'];
+                $g['price_max'] = $pr['max'];
+            }
+            $groups[] = $g;
             foreach ($vals as $v) {
                 $k = mb_strtolower($v, 'UTF-8');
                 if (!isset($seen[$k])) { $seen[$k] = true; $flat[] = $v; }
             }
         }
     }
-    return ['groups' => $groups, 'values' => $flat, 'count' => count($flat)];
+    /* v8.81: جدول ترکیب‌های ووکامرس دقیق‌تر از حدس‌زدن از روی دکمه‌هاست،
+       پس اگر بود، همان مبنا قرار می‌گیرد. */
+    $table = variationPriceTable($xp);
+    $allPrices = $table;
+    foreach ($groups as $g) {
+        foreach (($g['prices'] ?? []) as $lbl => $pv) {
+            if (!isset($allPrices[$lbl])) $allPrices[$lbl] = $pv;
+        }
+    }
+    $res = ['groups' => $groups, 'values' => $flat, 'count' => count($flat)];
+    if ($allPrices) {
+        $pv = array_values($allPrices);
+        $res['prices'] = $allPrices;
+        $res['price_min'] = min($pv);
+        $res['price_max'] = max($pv);
+        $res['price_varies'] = min($pv) !== max($pv);
+    }
+    return $res;
 }
 
 function parse_with_selectors(string $html, string $baseUrl, array $sel): array {
@@ -5572,6 +5771,13 @@ if (!empty($vr['values'])) {
 $extracted['variations'] = $vr['values'];
 $extracted['variation_groups'] = $vr['groups'];
 $extracted['variations_text'] = implode('، ', $vr['values']);
+// v8.81: قیمت هر گزینه، وقتی با کلیک روی تنوع قیمت عوض می‌شود
+if (!empty($vr['prices'])) {
+$extracted['variation_prices'] = $vr['prices'];
+$extracted['price_min'] = $vr['price_min'];
+$extracted['price_max'] = $vr['price_max'];
+$extracted['price_varies'] = !empty($vr['price_varies']);
+}
 }
 continue;
 }
@@ -6283,6 +6489,19 @@ if(function_exists('fastcgi_finish_request')){fastcgi_finish_request();}
 @ob_flush();@flush();
 }
 
+/* v8.81: نقشهٔ محصولات اجرای قبلی، همین اول ساخته می‌شود.
+   تا حالا فقط بعد از استخراج و صرفاً برای «آمار مقایسه» ساخته می‌شد و
+   هیچ‌وقت با نتیجهٔ تازه ادغام نمی‌شد. چون $allProducts از نو و فقط از
+   روی صفحهٔ فهرست پر می‌شود، هر چیزی که در فاز جزئیات به دست آمده بود —
+   گالری، تنوع‌ها، توضیحات، SKU، برند — موقع ذخیره پاک می‌شد. */
+$prevByKey=[];
+if(!empty($prevProducts)){
+$pfe=reset($prevProducts);
+if(is_array($pfe)&&count($pfe)>=2&&is_string($pfe[0])){
+foreach($prevProducts as $entry){if(is_array($entry)&&count($entry)>=2)$prevByKey[$entry[0]]=$entry[1];}
+}else{$prevByKey=$prevProducts;}
+}
+
 $allProducts=[];$seenKeys=[];$nextUrl=null;$totalPages=0;
 for($page=1;$page<=$maxPages;$page++){
 if(file_exists(EXTRACT_STOP_FILE)){@unlink(EXTRACT_STOP_FILE);
@@ -6332,6 +6551,15 @@ if($page>1&&$newCount===0)break;
 usleep(500000);
 }
 
+/* v8.81: جزئیاتِ اجرای قبلی را برگردان، قبل از اینکه تصمیم بگیریم کدام
+   محصول لازم است دوباره باز شود. صفحهٔ فهرست فقط عنوان، قیمت، لینک و یک
+   عکس دارد؛ بقیه فقط از صفحهٔ محصول می‌آید. اگر اینجا ادغام نکنیم، همان
+   داده‌ها موقع ذخیره دور ریخته می‌شوند. */
+foreach($allProducts as $key=>$p){
+if(!isset($prevByKey[$key])||!is_array($prevByKey[$key]))continue;
+$allProducts[$key]=extractMergeDetail($p,$prevByKey[$key]);
+}
+
 // v8.64: اگر گالری روشن است، صفحهٔ همهٔ محصولات باید باز شود — نه فقط
 // آن‌هایی که عکس یا قیمت ندارند. وگرنه محصولی که یک عکس دارد هرگز
 // بقیهٔ عکس‌هایش را نمی‌گیرد.
@@ -6339,6 +6567,10 @@ $galleryCfg=galleryNormalizeCfg($profile['gallery']??[]);
 $needDetail=[];
 foreach($allProducts as $key=>$p){
 if(empty($p['link']))continue;
+/* v8.81: محصولی که گالری‌اش را قبلاً گرفته‌ایم دوباره باز نمی‌شود.
+   پیش از این با روشن بودن گالری، هر بار همهٔ صفحات محصول از نو گرفته
+   می‌شد که هم کند بود و هم بی‌دلیل. */
+if($galleryCfg['enabled']&&count($p['images']??[])>1&&!empty($p['image'])&&!empty($p['price']))continue;
 if($galleryCfg['enabled']||empty($p['image'])||empty($p['price'])){
 $needDetail[$key]=$p;
 }
@@ -6369,6 +6601,13 @@ if(!empty($vr['values'])){
 $allProducts[$key]['variations']=$vr['values'];
 $allProducts[$key]['variation_groups']=$vr['groups'];
 $allProducts[$key]['variations_text']=implode('، ',$vr['values']);
+// v8.81: قیمت هر گزینه
+if(!empty($vr['prices'])){
+$allProducts[$key]['variation_prices']=$vr['prices'];
+$allProducts[$key]['price_min']=$vr['price_min'];
+$allProducts[$key]['price_max']=$vr['price_max'];
+$allProducts[$key]['price_varies']=!empty($vr['price_varies']);
+}
 }
 continue;
 }
@@ -8187,6 +8426,49 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.81: نگه داشتن جزئیات + تنوع‌های تصویری و قیمت‌دار ---------- */
+    /* استخراج دوباره، $allProducts را از صفر و فقط از روی صفحهٔ فهرست
+       می‌ساخت و همان را ذخیره می‌کرد؛ پس گالری، تنوع‌ها و توضیحاتی که قبلاً
+       از صفحهٔ محصول گرفته شده بود بی‌صدا پاک می‌شد. */
+    $add('8.81', 'تابع ادغام جزئیاتِ اجرای قبلی هست', function_exists('extractMergeDetail'));
+    if (function_exists('extractMergeDetail')) {
+        $prevRich = ['images' => ['a', 'b', 'c'], 'images_count' => 3,
+                     'variations' => ['قرمز', 'آبی'], 'shortDesc' => 'قبلی',
+                     'sku' => 'S1', 'brand' => 'ب', 'image' => 'a'];
+        $freshThin = ['title' => 't', 'price' => '۱۰۰', 'image' => 'a', 'images' => ['a']];
+        $m = extractMergeDetail($freshThin, $prevRich);
+        $add('8.81', 'گالری قبلی با یک عکسِ فهرست پاک نمی‌شود',
+             count($m['images'] ?? []) === 3 && (int)($m['images_count'] ?? 0) === 3);
+        $add('8.81', 'تنوع‌ها و توضیحات قبلی حفظ می‌شوند',
+             ($m['variations'] ?? []) === ['قرمز', 'آبی'] && ($m['shortDesc'] ?? '') === 'قبلی'
+             && ($m['sku'] ?? '') === 'S1' && ($m['brand'] ?? '') === 'ب');
+        $richer = extractMergeDetail(['images' => ['a', 'b', 'c', 'd']], ['images' => ['a', 'b']]);
+        $add('8.81', 'گالری غنی‌ترِ تازه جایگزین قبلی می‌شود',
+             count($richer['images'] ?? []) === 4 && (int)($richer['images_count'] ?? 0) === 4);
+        $upd = extractMergeDetail(['shortDesc' => 'تازه'], ['shortDesc' => 'قبلی']);
+        $add('8.81', 'مقدار تازه، مقدار قبلی را کنار می‌زند',
+             ($upd['shortDesc'] ?? '') === 'تازه');
+    }
+    $add('8.81', 'ادغام قبل از تصمیمِ باز کردن صفحه انجام می‌شود',
+         strpos($selfSrc, '$allProducts[$key]=extractMerge' . 'Detail($p,$prevByKey[$key]);') !== false);
+    $add('8.81', 'محصولی که گالری کاملش را دارد دوباره باز نمی‌شود',
+         strpos($selfSrc, "count(\$p['images']??[])>1&&!empty(\$p['image'])") !== false);
+    // تنوع رنگ که با عکس یا مربع رنگی نشان داده می‌شود
+    $add('8.81', 'مقدار تنوع از عکس و استایل هم خوانده می‌شود',
+         strpos($selfSrc, "'data-colour'") !== false
+         && strpos($selfSrc, 'background(?:-color)?') !== false);
+    $add('8.81', 'عناصر رنگ‌نما در جست‌وجوی تنوع هستند',
+         strpos($selfSrc, './/*[contains(@class,"colo' . 'r")]') !== false
+         && strpos($selfSrc, "'.//i" . "mg'") !== false);
+    // قیمتی که با انتخاب تنوع عوض می‌شود
+    $add('8.81', 'توابع قیمت تنوع موجودند',
+         function_exists('variationPriceOf') && function_exists('variationPrices')
+         && function_exists('variationPriceTable'));
+    $add('8.81', 'قیمت تنوع در محصول ذخیره می‌شود',
+         substr_count($selfSrc, "'variation_pri" . "ces'") >= 1
+         && substr_count($selfSrc, "variation_pri" . "ces]") >= 0
+         && strpos($selfSrc, "price_var" . "ies") !== false);
 
     /* ---------- v8.80: تکراری همیشه یعنی آپدیت ---------- */
     /* enum رسمی باسلام نُه وضعیت دارد ولی ما فقط پنج‌تا را پرس‌وجو
@@ -19971,6 +20253,26 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.81', t:'رفع پاک شدن عکس‌ها و تنوع‌های استخراج‌شده + تنوع رنگ تصویری و قیمت‌های متغیر', items:[
+    '🐞 چرا داده‌ها پاک می‌شدند — پیدا شد و با تست بازسازی شد:',
+    'هر استخراج، فهرست محصولات را از صفر می‌ساخت و همان را ذخیره می‌کرد',
+    'صفحهٔ فهرست فقط عنوان، قیمت، لینک و یک عکس دارد',
+    'گالری، تنوع‌ها، توضیحات، SKU و برند فقط از صفحهٔ محصول می‌آیند',
+    'محصولی که عکس و قیمتش سر جایش بود، صفحه‌اش دوباره باز نمی‌شد',
+    'پس آن فیلدها در نتیجهٔ تازه نبودند و موقع ذخیره دور ریخته می‌شدند',
+    'در تست، ۹ فیلد از ۹ فیلد پاک می‌شد — حالا هر ۹ تا سالم می‌مانند',
+    '✅ داده‌های اجرای قبلی قبل از ذخیره ادغام می‌شوند',
+    '✅ ولی مقدار تازه همیشه برنده است — گالری غنی‌تر جایگزین قبلی می‌شود',
+    '⚡ محصولی که گالری کاملش را دارد دیگر بی‌دلیل دوباره باز نمی‌شود (استخراج سریع‌تر)',
+    '🎨 تنوع رنگ که با «عکس» نشان داده می‌شود:',
+    'تا حالا اگر رنگ یک تصویر یا مربع رنگی بود، نه متن داشت نه data-value و کاملاً از قلم می‌افتاد',
+    'حالا از alt و title عکس، از نام فایل تصویر، از background-color و از نام کلاس خوانده می‌شود',
+    '💰 تنوع‌هایی که با کلیک، قیمت را عوض می‌کنند:',
+    'این قیمت‌ها تقریباً همیشه از قبل داخل صفحه هستند و JS فقط نمایششان می‌دهد',
+    'حالا از data-price و صفت‌های مشابه روی هر دکمه خوانده می‌شوند',
+    'جدول کامل ترکیب‌های ووکامرس (data-product_variations) هم پشتیبانی می‌شود',
+    'کمترین و بیشترین قیمت ذخیره می‌شود و محصول با «قیمت متغیر» علامت می‌خورد'
+  ]},
   {v:'8.80', t:'خطای «نام کالا تکراری» از این به بعد همیشه به آپدیت ختم می‌شود', items:[
     '🎯 خواستهٔ شما: هر وقت خطای محصول تکراری آمد، محصول با PATCH آپدیت شود — انجام شد',
     '🐞 چرا ۸.۷۹ کافی نبود: فهرست رسمی وضعیت‌های باسلام نُه‌تاست، ما فقط پنج‌تا را می‌پرسیدیم',
