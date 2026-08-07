@@ -58,6 +58,7 @@ bulkedit_result.json
 photofix_progress.json
 photofix_result.json
 digest_state.json
+cron_last_run.json
 bulkedit.lock
 photofix.lock
 

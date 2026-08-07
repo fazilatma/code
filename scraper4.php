@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.91';
+const APP_VERSION = '8.92';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7472,6 +7472,27 @@ header('Content-Type: application/json; charset=UTF-8');
 @set_time_limit(0);
 @ignore_user_abort(true);
 
+/* v8.92: «اجرای الان» مثل دکمهٔ «استخراج بک‌اند» رفتار کند.
+   کران‌جاب واقعی باید منتظر بماند تا curl نتیجه را بگیرد، ولی دکمهٔ
+   مرورگر نباید تا پایان کل کار بلوکه بماند: تا حالا پاسخ فقط وقتی
+   می‌آمد که همه‌چیز — استخراج، بازنشستگی، ارسال، اعلان — تمام شده
+   بود. روی یک پروفایل بزرگ این یعنی چند دقیقه انتظار، و اگر مرورگر
+   یا هاست وسط راه قطع می‌کرد، به نظر می‌رسید دکمه اصلاً کار نکرده.
+   با bg=1 همان الگوی استخراج بک‌اند اجرا می‌شود: پاسخ فوری، کار در
+   پس‌زمینه، پیشرفت از همان فایل و همان صف خوانده می‌شود. */
+if (!empty($_POST['bg']) || !empty($_GET['bg'])) {
+    while (@ob_get_level()) @ob_end_clean();
+    $bgResp = json_encode(['ok' => true, 'started' => true, 'bg' => true],
+                          JSON_UNESCAPED_UNICODE);
+    header('Content-Length: ' . strlen($bgResp));
+    header('Connection: close');
+    echo $bgResp;
+    if (function_exists('fastcgi_finish_request')) { fastcgi_finish_request(); }
+    @ob_flush(); @flush();
+    // از این به بعد چیزی چاپ نمی‌شود؛ خروجی نهایی فقط در فایل پیشرفت و صف می‌نشیند
+    define('CRON_BG', true);
+}
+
 // قفل ضد هم‌پوشانی — یک اجرای طولانی نباید با اجرای بعدی تداخل کند
 $cronLock = __DIR__ . '/.cron_run.lock';
 $lockAge  = is_file($cronLock) ? (time() - (int)@filemtime($cronLock)) : PHP_INT_MAX;
@@ -7704,7 +7725,28 @@ $pingRes = notifCronPing($cn, $results);
 if (!empty($pingRes['sent'])) $results['ping'] = 'sent';
 elseif (!empty($pingRes['skipped'])) $results['ping'] = $pingRes['skipped'];
 
+/* v8.92: در حالت پس‌زمینه پاسخ قبلاً فرستاده شده و اتصال بسته است.
+   چاپ دوباره یعنی JSON دوتکه؛ خلاصه در فایل کران می‌نشیند تا مرورگر
+   بعد از پایانِ رصد بتواند بخواندش. */
+if (defined('CRON_BG')) {
+    @file_put_contents(__DIR__ . '/cron_last_run.json',
+        json_encode($results, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    exit;
+}
 echo json_encode($results, JSON_UNESCAPED_UNICODE); exit;
+}
+
+/* v8.92: خلاصهٔ آخرین اجرای پس‌زمینهٔ کران — «اجرای الان» بعد از تمام
+   شدن کار همین را می‌خواند تا همان گزارشی را نشان دهد که قبلاً مستقیم
+   از پاسخ می‌گرفت. */
+if (isset($_GET['cron_last'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $f = __DIR__ . '/cron_last_run.json';
+    if (!is_file($f)) { echo json_encode(['ok' => false, 'error' => 'هنوز اجرایی ثبت نشده'], JSON_UNESCAPED_UNICODE); exit; }
+    $d = json_decode((string)@file_get_contents($f), true);
+    if (!is_array($d)) { echo json_encode(['ok' => false, 'error' => 'گزارش ناخوانا'], JSON_UNESCAPED_UNICODE); exit; }
+    $d['finished_at'] = (int)@filemtime($f);
+    echo json_encode($d, JSON_UNESCAPED_UNICODE); exit;
 }
 
 /* =====================================================================
@@ -8993,6 +9035,46 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.92: یک موتور استخراج، نه سه تا ---------- */
+    /* «استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که گالری، تنوع، سلکتورهای
+       جزئیات، ذخیره‌سازی سمت سرور و صف نداشت. «اجرای الان» هم انسدادی بود.
+       حالا هر سه از یک نقطه رد می‌شوند. */
+    /* هر دو شاخه (ذخیره‌شده و ذخیره‌نشده) باید به موتور بک‌اند برسند —
+       شمارش می‌شود تا اگر یکی‌شان به استریم برگردد اینجا لو برود. */
+    $add('8.92', 'استخراج اتوماتیک از مسیر بک‌اند می‌رود نه استریم',
+         strpos($selfSrc, 'function startAuto' . 'Extract(){') !== false
+         && substr_count($selfSrc, 'backendExtractFor(url,' . "'▶ استخراج اتوماتیک") === 2);
+    $add('8.92', 'استخراج اتوماتیک دیگر EventSource استریم را صدا نمی‌زند',
+         preg_match('~function startAutoExtract\(\)\{.*?\n\}~s', $selfSrc, $_m92)
+         && strpos($_m92[0], 'start(true)') === false
+         && strpos($_m92[0], 'stream=1') === false);
+    $add('8.92', 'تابع مشترک شروع استخراج از مرورگر هست',
+         strpos($selfSrc, 'function backendExtract' . 'For(url,panelTitle){') !== false);
+    $add('8.92', 'دکمهٔ استخراج بک‌اند هم از همان تابع مشترک رد می‌شود',
+         preg_match('~function startBackendSync\(\)\{.*?\n\}~s', $selfSrc, $_m92b)
+         && strpos($_m92b[0], 'backendExtractFor(') !== false
+         && strpos($_m92b[0], 'action=backend_extract') === false);
+    $add('8.92', 'تغییر ذخیره‌نشده قبل از شروع ذخیره می‌شود',
+         strpos($selfSrc, "showToast('💾 ذخیره شد — " . "شروع استخراج...')") !== false);
+    // اجرای الان: پس‌زمینه مثل دکمهٔ بک‌اند
+    $add('8.92', 'کران حالت پس‌زمینه دارد',
+         strpos($selfSrc, "if (!empty(\$_POST['bg']) || !empty(\$_GET['bg'])) {") !== false
+         && strpos($selfSrc, "define('CRON_" . "BG', true);") !== false);
+    $add('8.92', 'کران پس‌زمینه پاسخ را دوبار چاپ نمی‌کند',
+         strpos($selfSrc, "if (defined('CRON_" . "BG')) {") !== false
+         && strpos($selfSrc, 'cron_last_run.json') !== false);
+    $add('8.92', 'اندپوینت خواندن خلاصهٔ آخرین اجرای کران',
+         strpos($selfSrc, "isset(\$_GET['cron_" . "last'])") !== false);
+    $add('8.92', 'اجرای الان با bg=1 شلیک می‌کند و منتظر نمی‌ماند',
+         preg_match('~function runSyncNow\(\)\{.*?\n\}~s', $selfSrc, $_m92c)
+         && strpos($_m92c[0], "fd.append('bg','1')") !== false
+         && strpos($_m92c[0], 'cronWatchFinish()') !== false);
+    $add('8.92', 'پایان اجرای پس‌زمینه رصد و گزارش می‌شود',
+         strpos($selfSrc, 'function cronWatch' . 'Finish(){') !== false
+         && strpos($selfSrc, 'function renderCron' . 'Result(d){') !== false);
+    $add('8.92', 'گزارش کهنهٔ اجرای قبلی به‌جای اجرای تازه نشان داده نمی‌شود',
+         strpos($selfSrc, 'if(age>' . '90)return;') !== false);
 
     /* ---------- v8.91: توقف واقعی صف + محافظ‌های پاک شدن داده ---------- */
     /* سه علتِ جدا که هر سه به یک نتیجه می‌رسیدند: کاری که بسته نمی‌شود و
@@ -18085,7 +18167,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
         <div id="autoCtrl">
             <div class="row">
                 <button class="btn btn-blue" id="startBtn" onclick="startAutoExtract()" style="flex:1">▶ استخراج اتوماتیک</button>
-                <button class="btn btn-gray" id="startManualBtn" onclick="start()" style="flex:1">شروع بدون سلکتور</button>
+                <button class="btn btn-gray" id="startManualBtn" onclick="start()" style="flex:1" title="حالت آزمایشی: بدون سلکتور حدس می‌زند. گالری، تنوع و فیلدهای جزئیات را نمی‌گیرد و روی پروفایل ذخیره نمی‌کند.">شروع بدون سلکتور (آزمایشی)</button>
                 <button class="btn btn-red hidden" id="stopBtn" onclick="stop()" style="flex:1">⏹ توقف</button>
                 <button class="btn btn-gray" onclick="reset()">↺</button>
             </div>
@@ -20378,19 +20460,24 @@ function clearSel(){
   scheduleSave();
 }
 
-// v7.41: Start extraction from selectors tab
+/* v7.41: Start extraction from selectors tab
+   v8.92: این دکمه هم مثل «استخراج اتوماتیک» به موتور بک‌اند وصل شد.
+   وگرنه همان استخراج ناقصِ بدون گالری و بدون تنوع را اجرا می‌کرد و
+   نتیجه‌اش به این بستگی داشت که کاربر کدام دکمه را زده — که دلیلی
+   ندارد فرق کند. */
 function startFromSelectors(){
   if(!sel.container){showToast('ابتدا کانتینر را انتخاب کنید!',true);return;}
   if(!sel.title){showToast('ابتدا سلکتور عنوان را انتخاب کنید!',true);return;}
   if(!$('url').value.trim()){showToast('ابتدا آدرس سایت را وارد کنید!',true);return;}
   switchMainTab('start');
-  setTimeout(() => start(true), 300);
+  startAutoExtract();
 }
 
 function startVisual(){
   if(!sel.container){showToast('کانتینر انتخاب کنید',true);return;}
+  if(!$('url').value.trim()){showToast('ابتدا آدرس سایت را وارد کنید!',true);return;}
   switchMainTab('start');
-  setTimeout(() => start(true), 300);
+  startAutoExtract();
 }
 
 function log(m,t='info'){
@@ -20697,6 +20784,36 @@ function switchView(v){
 // v7.81: Backend Extract — server-side scraping from source supplier website
 // NOT sending to BaSalam/WooCommerce — only extracting products and saving to profile
 // Triggers ?action=backend_extract endpoint which does PHP-side scraping
+/**
+ * v8.92: تنها راه شروع یک استخراج از مرورگر.
+ *
+ * سه دکمه («استخراج اتوماتیک»، «استخراج بک‌اند»، «اجرای الان») همگی از
+ * همین‌جا رد می‌شوند تا رفتارشان نتواند از هم جدا بیفتد. قبلاً هرکدام
+ * کد خودش را داشت و دو تای‌شان اصلاً به موتور اصلی نمی‌رسیدند.
+ */
+function backendExtractFor(url,panelTitle){
+    if(!url){showToast('URL وارد کنید',1);return;}
+    // سلکتورها از روی نسخهٔ ذخیره‌شده بررسی می‌شوند، چون موتور بک‌اند
+    // هم دقیقاً همان را می‌خواند — نه چیزی که در فرم باز است.
+    fetch('?load_profile='+encodeURIComponent(url)).then(r=>r.json()).then(d=>{
+        if(!d.ok||!d.profile){showToast('خطا: پروفایل یافت نشد — اول ذخیره کنید',1);return;}
+        const prof=d.profile||{};
+        const sels=prof.selectors||{};
+        if(!sels.container||sels.container===''){
+            showToast('⚠️ سلکتورها ذخیره نشده — ابتدا سلکتور انتخاب و پروفایل را ذخیره کنید',1);
+            switchMainTab('selectors');
+            return;
+        }
+        openExtractPanel(panelTitle||'⚡ استخراج بک‌اند — پیشرفت زنده');
+        const galOn=((prof.gallery||{}).mode||'off')!=='off';
+        const nDet=Object.keys(prof.detailSelectors||{}).length;
+        showToast('⚡ شروع — گالری '+(galOn?'روشن':'خاموش')+(nDet?(' · '+toFa(nDet)+' فیلد جزئیات'):''));
+        // Trigger backend extract endpoint (fire-and-forget)
+        fetch('?action=backend_extract&profile_key='+encodeURIComponent(profileKey(url)),{method:'GET'}).catch(()=>{});
+        watchExtractProgress();
+    }).catch(()=>{showToast('خطا شبکه',1);});
+}
+
 function startBackendSync(){
     const sel=$('profileSelect');
     // Need a profile with saved selectors to know what/how to scrape
@@ -20705,23 +20822,7 @@ function startBackendSync(){
         switchMainTab('profiles');
         return;
     }
-    // Check if selectors are saved in the profile
-    const url=sel.value.trim();
-    showToast('⚡ شروع استخراج بک‌اند...');
-    // First check if profile has selectors
-    fetch('?load_profile='+encodeURIComponent(url)).then(r=>r.json()).then(d=>{
-        if(!d.ok||!d.profile){showToast('خطا: پروفایل یافت نشد',1);return;}
-        const prof=d.profile||{};
-        const sels=prof.selectors||{};
-        if(!sels.container||sels.container===''){
-            showToast('⚠️ سلکتورها ذخیره نشده — ابتدا با فرانت‌اند استخراج کنید',1);
-            return;
-        }
-        openExtractPanel('⚡ استخراج بک‌اند — پیشرفت زنده');
-        // Trigger backend extract endpoint (fire-and-forget)
-        fetch('?action=backend_extract&profile_key='+encodeURIComponent(profileKey(url)),{method:'GET'}).catch(()=>{});
-        watchExtractProgress();
-    }).catch(()=>{showToast('خطا شبکه',1);});
+    backendExtractFor(sel.value.trim(),'⚡ استخراج بک‌اند — پیشرفت زنده');
 }
 
 /**
@@ -21225,6 +21326,22 @@ function profileKey(url){
         return host+(path?'_'+path:'');
     }catch(e){return '';}
 }
+/**
+ * v8.92: «استخراج اتوماتیک» دقیقاً همان کاری را می‌کند که دکمهٔ
+ * «⚡ استخراج بک‌اند» می‌کند — انگار خودش آن دکمه را می‌زند.
+ *
+ * تا ۸.۹۱ این دکمه مسیر کاملاً جداگانه‌ای می‌رفت: `?stream=1` که یک
+ * موتور استخراج دومِ مستقل بود. آن موتور:
+ *   • گالری نمی‌گرفت (galleryExtract در آن مسیر اصلاً صدا زده نمی‌شد)
+ *   • تنوع‌ها را نمی‌گرفت
+ *   • سلکتورهای صفحهٔ جزئیات را اصلاً نمی‌خواند
+ *   • هیچ‌چیز را روی سرور ذخیره نمی‌کرد — ذخیره را به مرورگر می‌سپرد
+ *   • ردیف صف، فایل پیشرفت، گزارش و نگهبان نداشت
+ *
+ * نتیجه‌اش این بود که همهٔ محافظ‌هایی که برای گم نشدن گالری نوشته شده
+ * بودند (۸.۸۱، ۸.۸۳، ۸.۹۱) روی این دکمه اثری نداشتند، چون اصلاً از آن
+ * کد عبور نمی‌کرد. حالا یک موتور بیشتر وجود ندارد.
+ */
 function startAutoExtract(){
     if(running) return;
     const url=$('url').value.trim();
@@ -21240,9 +21357,17 @@ function startAutoExtract(){
         switchMainTab('selectors');
         return;
     }
-    if (isDirty) saveProfileSilent();
-    switchMainTab('start');
-    setTimeout(() => start(true), 300);
+    /* پروفایل باید قبل از شروع روی دیسک باشد: موتور بک‌اند سلکتورها و
+       تنظیم گالری را از فایل پروفایل می‌خواند، نه از فرم مرورگر. اگر
+       تغییر ذخیره‌نشده‌ای هست، اول ذخیره‌اش کن و بعد شروع کن — وگرنه
+       استخراج با سلکتورهای قدیمی اجرا می‌شود. */
+    if(isDirty){
+        saveProfileSilent();
+        showToast('💾 ذخیره شد — شروع استخراج...');
+        setTimeout(()=>backendExtractFor(url,'▶ استخراج اتوماتیک — پیشرفت زنده'),900);
+    }else{
+        backendExtractFor(url,'▶ استخراج اتوماتیک — پیشرفت زنده');
+    }
 }
 
 function start(useSel=false){
@@ -21572,6 +21697,26 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.92', t:'یک موتور استخراج به‌جای سه تا — همهٔ دکمه‌ها یک مسیر می‌روند', items:[
+    '🔧 تا حالا سه کدِ استخراج جداگانه وجود داشت و فقط یکی‌شان کامل بود:',
+    '«▶ استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که یک موتور دوم بود:',
+    'گالری نمی‌گرفت · تنوع نمی‌گرفت · سلکتورهای جزئیات را اصلاً نمی‌خواند',
+    'هیچ‌چیز را روی سرور ذخیره نمی‌کرد · ردیف صف و فایل پیشرفت نداشت',
+    'یعنی همهٔ محافظ‌های ۸.۸۱ و ۸.۸۳ و ۸.۹۱ روی این دکمه بی‌اثر بودند،',
+    'چون اصلاً از آن کد عبور نمی‌کرد — این ریشهٔ پاک شدن گالری‌ها بود',
+    '✅ حالا «استخراج اتوماتیک» دقیقاً همان دکمهٔ «⚡ استخراج بک‌اند» را می‌زند',
+    '✅ اگر تغییر ذخیره‌نشده باشد، اول ذخیره می‌شود بعد استخراج شروع می‌شود',
+    '(موتور بک‌اند سلکتورها را از فایل پروفایل می‌خواند، نه از فرم باز)',
+    '🔧 دکمهٔ «▶ اجرای الان» هم مسیر متفاوتی داشت:',
+    'درخواست را می‌فرستاد و تا پایان کل کران منتظر می‌ماند — استخراج،',
+    'بازنشستگی، ارسال و اعلان‌ها همه در یک درخواست. روی پروفایل بزرگ',
+    'چند دقیقه طول می‌کشید و پنل پیشرفت در تمام آن مدت خالی بود',
+    'اگر هاست یا مرورگر وسط راه قطع می‌کرد، به نظر می‌رسید دکمه کار نکرده',
+    '✅ حالا در پس‌زمینه اجرا می‌شود و پیشرفت را از همان فایل و همان صف',
+    'می‌خواند که دکمهٔ بک‌اند استفاده می‌کند؛ خلاصه در پایان نشان داده می‌شود',
+    'ℹ️ کران‌جاب واقعی بدون تغییر ماند و همچنان منتظر پاسخ می‌ماند',
+    '🆕 پیام شروع می‌گوید گالری روشن است یا نه و چند فیلد جزئیات فعال است',
+  ]},
   {v:'8.91', t:'وظیفهٔ گیرکرده که با توقف بسته نمی‌شد + علت واقعی پاک شدن گالری‌ها', items:[
     '🐞 دکمهٔ توقف ردیف صف را نمی‌بست:',
     'توقف فقط یک فایل سیگنال می‌نوشت — اگر پردازهٔ استخراج دیگر زنده نبود',
@@ -26528,15 +26673,59 @@ function toggleSync(){
 function startSyncTimer(){
     // Deprecated - sync is now per-profile via cron_run
 }
+/**
+ * v8.92: «اجرای الان» هم دقیقاً الگوی دکمهٔ «استخراج بک‌اند» را دارد.
+ *
+ * تا ۸.۹۱ این دکمه درخواست را می‌فرستاد و تا پایانِ کل کران منتظر
+ * پاسخ می‌ماند — استخراج، بازنشستگی، ارسال و اعلان‌ها همه در یک
+ * درخواست. روی پروفایل بزرگ چند دقیقه طول می‌کشید و در تمام آن مدت
+ * پنل پیشرفت خالی بود؛ اگر هاست یا مرورگر وسط راه قطع می‌کرد، به نظر
+ * می‌رسید دکمه هیچ کاری نکرده، در حالی که کار روی سرور ادامه داشت.
+ *
+ * حالا با bg=1 پاسخ فوری می‌آید، کار در پس‌زمینه ادامه پیدا می‌کند و
+ * پیشرفت از همان فایل و همان صفی خوانده می‌شود که دکمهٔ بک‌اند
+ * استفاده می‌کند. خلاصهٔ نهایی از cron_last خوانده می‌شود.
+ */
 function runSyncNow(){
-    // v8.28: دقیقاً همان پنل و همان رصد زندهٔ دکمهٔ «استخراج بک‌اند»
     $('syncStatus').textContent='🔄 در حال اجرای کران جاب...';
     $('syncStatus').style.color='#67e8f9';
     openExtractPanel('🔄 اجرای کران جاب — استخراج و ارسال');
     watchExtractProgress();
     const fd=new FormData();
     fd.append('action','cron_run');
+    fd.append('bg','1');
     fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){showToast('❌ خطا در اجرای کران',1);$('syncStatus').textContent='❌ خطا';$('syncStatus').style.color='#f87171';return;}
+        showToast('⚡ کران در پس‌زمینه شروع شد');
+        $('syncStatus').textContent='🔄 در حال اجرا در پس‌زمینه...';
+        cronWatchFinish();
+    }).catch(()=>{
+        $('syncStatus').textContent='❌ خطا در اجرای کران';
+        $('syncStatus').style.color='#f87171';
+        showToast('❌ خطا شبکه',1);
+    });
+}
+
+/* منتظر می‌ماند تا اجرای پس‌زمینه تمام شود، بعد خلاصه را نشان می‌دهد.
+   معیار پایان همان چیزی است که پنل پیشرفت می‌بیند: done شدن فایل
+   پیشرفت. سقف انتظار می‌گذاریم تا اگر چیزی خراب شد تا ابد نچرخد. */
+function cronWatchFinish(){
+    let tries=0;
+    const iv=setInterval(()=>{
+        tries++;
+        if(tries>1200){clearInterval(iv);return;}   // ۲۰ دقیقه سقف
+        fetch('?cron_last=1').then(r=>r.json()).then(d=>{
+            if(!d||!d.profiles)return;              // هنوز چیزی ثبت نشده
+            const age=Math.floor(Date.now()/1000)-(d.finished_at||0);
+            if(age>90)return;                       // مالِ اجرای قبلی است
+            clearInterval(iv);
+            renderCronResult(d);
+        }).catch(()=>{});
+    },2000);
+}
+
+function renderCronResult(d){
+    {
         if(!d||!d.profiles){showToast('❌ خطا در اجرای کران',1);$('syncStatus').textContent='❌ خطا';$('syncStatus').style.color='#f87171';return;}
         const profiles=d.profiles||[];
         const synced=profiles.filter(p=>p.status==='syncing');
@@ -26596,11 +26785,7 @@ function runSyncNow(){
         if(list&&html)list.innerHTML=html;
         // Refresh sync status after a short delay
         setTimeout(()=>refreshSyncStatus(),3000);
-    }).catch(e=>{
-        $('syncStatus').textContent='❌ خطا در اجرای کران';
-        $('syncStatus').style.color='#f87171';
-        showToast('❌ خطا شبکه',1);
-    });
+    }
 }
 
 if ($('url').value) {
