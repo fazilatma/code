@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.86';
+const APP_VERSION = '8.87';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -6373,8 +6373,8 @@ exit;
 if (($_POST['action'] ?? '') === 'save_connections') {
 header('Content-Type: application/json; charset=UTF-8');
 $conn = loadConnections();
-if (isset($_POST['woocommerce'])) { $w = json_decode($_POST['woocommerce'], true) ?: []; $conn['woocommerce'] = ['enabled'=>!empty($w['enabled']),'store_url'=>trim($w['store_url']??''),'consumer_key'=>trim($w['consumer_key']??''),'consumer_secret'=>trim($w['consumer_secret']??''),'default_category'=>(int)($w['default_category']??0),'default_status'=>$w['default_status']??'draft','stock_quantity'=>(int)($w['stock_quantity']??10),'manage_stock'=>!empty($w['manage_stock'])]; }
-if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??'')];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'gemini_api_key'=>trim($b['gemini_api_key']??''),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors]; }
+if (isset($_POST['woocommerce'])) { $w = json_decode($_POST['woocommerce'], true) ?: []; $conn['woocommerce'] = ['enabled'=>!empty($w['enabled']),'store_url'=>trim($w['store_url']??''),'consumer_key'=>trim($w['consumer_key']??''),'consumer_secret'=>trim($w['consumer_secret']??''),'default_category'=>(int)($w['default_category']??0),'default_status'=>$w['default_status']??'draft','stock_quantity'=>(int)($w['stock_quantity']??10),'manage_stock'=>!empty($w['manage_stock']),'price_mode'=>in_array(($w['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$w['price_mode']:'none','price_val'=>(float)($w['price_val']??0),'price_round'=>max(0,(int)($w['price_round']??0))]; }
+if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??'')];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'gemini_api_key'=>trim($b['gemini_api_key']??''),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors,'price_mode'=>in_array(($b['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$b['price_mode']:'none','price_val'=>(float)($b['price_val']??0),'price_round'=>max(0,(int)($b['price_round']??0))]; }
 
 if (isset($_POST['ai'])) { $a = json_decode($_POST['ai'], true) ?: []; $conn['ai'] = ['enabled'=>!empty($a['enabled']),'api_key'=>trim($a['api_key']??''),'base_url'=>trim($a['base_url']??'https://dashscope.aliyuncs.com/compatible-mode/v1'),'model'=>trim($a['model']??'qwen-plus'),'temperature'=>(float)($a['temperature']??0.1)]; }
 // v8.61: تنظیمات روش عبور برای سرویس‌های هوش مصنوعی
@@ -7030,6 +7030,42 @@ function profileFinalPrice(array $profile, $rawPrice): int {
     return $final;
 }
 
+/**
+ * v8.87: تعدیل قیمت مخصوص یک مقصد، روی قیمت نهاییِ پروفایل.
+ *
+ * تا حالا فقط یک تنظیم قیمت وجود داشت که برای هر دو مقصد یکی بود. ولی
+ * حاشیهٔ سود ووکامرس و باسلام یکی نیست (کارمزد باسلام، هزینهٔ ارسال و …)
+ * و کاربر می‌خواهد برای هر مقصد درصد جداگانه بگذارد.
+ *
+ * این تابع روی «قیمت نهاییِ» محاسبه‌شده اعمال می‌شود، نه روی قیمت خام،
+ * تا تنظیم پروفایل هم سر جایش بماند و این یکی فقط تفاوت مقصد را بگذارد.
+ *
+ * $cfg: ['mode'=>'none|percent|multiplier', 'val'=>float, 'round'=>int]
+ */
+function destAdjustPrice(int $base, array $cfg): int {
+    if ($base <= 0) return 0;
+    $mode = (string)($cfg['mode'] ?? 'none');
+    $val  = (float)($cfg['val'] ?? 0);
+    $out  = $base;
+    if ($mode === 'percent')        $out = $base * (1 + ($val / 100));
+    elseif ($mode === 'multiplier') $out = $val > 0 ? $base * $val : $base;
+    $out = (int)round($out);
+    $round = (int)($cfg['round'] ?? 0);
+    if ($round > 0) $out = (int)(round($out / $round) * $round);
+    // قیمت هیچ‌وقت نباید منفی یا صفر شود؛ درصدِ منفیِ بزرگ نباید محصول را خراب کند
+    return $out > 0 ? $out : $base;
+}
+
+/** تنظیمات تعدیل قیمت یک مقصد را از فایل اتصالات می‌خواند */
+function destPriceCfg(array $cn, string $dest): array {
+    $d = $cn[$dest] ?? [];
+    return [
+        'mode'  => (string)($d['price_mode'] ?? 'none'),
+        'val'   => (float)($d['price_val'] ?? 0),
+        'round' => (int)($d['price_round'] ?? 0),
+    ];
+}
+
 /** امضای تنظیمات قیمت — اگر عوض شود یعنی قیمت همهٔ محصولات عوض شده */
 function profilePriceSignature(array $profile): string {
     return (string)($profile['priceMode'] ?? 'none') . '|'
@@ -7342,6 +7378,45 @@ if ($stallWake) {
                 . (int)($w['current'] ?? 0) . '/' . (int)($w['total'] ?? 0) . ') — '
                 . (!empty($w['resumed']) ? 'خودکار ادامه داده شد ✅' : 'ادامه ناموفق ❌'));
         }
+    }
+}
+
+/* v8.87: نگهبان استخراج.
+   صف ارسال از ۸.۳۳ نگهبان داشت ولی استخراج نداشت: اگر اجرای خودکار وسط
+   کار می‌مُرد (تایم‌اوت هاست، ری‌استارت PHP، قطع شبکه)، ردیف برای همیشه
+   «در حال اجرا» می‌ماند و ردیف‌های بعدی هم راه نمی‌افتادند. علامت‌خوردنِ
+   «خطا» هم فقط وقتی اتفاق می‌افتاد که کسی صفحهٔ صف را باز کند. */
+if ($stallWake) {
+    $exProg = readProgress(EXTRACT_PROGRESS_FILE);
+    $exQ = extractReadQueue();
+    $exNow = time();
+    $exDirty = false; $exStuck = null;
+    foreach ($exQ['entries'] as $qi => $qe) {
+        if (($qe['status'] ?? '') !== 'running') continue;
+        $ts = (int)($exProg['last_progress_ts'] ?? 0);
+        if ($ts <= 0) $ts = (int)($qe['started_at'] ?? 0);
+        $idle = $ts > 0 ? ($exNow - $ts) : PHP_INT_MAX;
+        $alive = !empty($exProg['running']) && empty($exProg['done']);
+        if ($alive && $idle <= $stallCfg) continue;
+        if ($idle <= $stallCfg) continue;
+        $exQ['entries'][$qi]['status'] = 'failed';
+        $exQ['entries'][$qi]['error'] = 'بی‌حرکت ماند (' . $idle . ' ثانیه) — نگهبان بست';
+        $exQ['entries'][$qi]['done_at'] = $exNow;
+        $exDirty = true;
+        $exStuck = ['idle' => $idle, 'profile' => (string)($qe['profile_name'] ?? ($qe['profile_key'] ?? '')),
+                    'key' => (string)($qe['profile_key'] ?? '')];
+    }
+    if ($exDirty) {
+        extractWriteQueue($exQ);
+        // فایل پیشرفت هم بسته شود وگرنه رابط کاربری «در حال اجرا» نشان می‌دهد
+        if (!empty($exProg['running'])) {
+            $exProg['running'] = false; $exProg['done'] = true; $exProg['stalled'] = true;
+            writeProgress(EXTRACT_PROGRESS_FILE, $exProg);
+        }
+        $results['extract_watchdog'] = $exStuck;
+        notifRunFailure($cn, 'نگهبان استخراج', $exStuck['profile'] ?: 'استخراج',
+            'استخراج ' . (int)$exStuck['idle'] . ' ثانیه بی‌حرکت بود و بسته شد. '
+            . 'اجرای بعدی طبق زمان‌بندی از سر گرفته می‌شود.');
     }
 }
 
@@ -8665,6 +8740,42 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.87: تعدیل قیمت هر مقصد + نگهبان استخراج ---------- */
+    $add('8.87', 'تابع تعدیل قیمت مقصد موجود است',
+         function_exists('destAdjustPrice') && function_exists('destPriceCfg'));
+    if (function_exists('destAdjustPrice')) {
+        $add('8.87', 'درصد مثبت درست حساب می‌شود',
+             destAdjustPrice(250000, ['mode'=>'percent','val'=>20]) === 300000);
+        $add('8.87', 'درصد منفی درست حساب می‌شود',
+             destAdjustPrice(200000, ['mode'=>'percent','val'=>-15]) === 170000);
+        $add('8.87', 'ضریب درست حساب می‌شود',
+             destAdjustPrice(200000, ['mode'=>'multiplier','val'=>1.5]) === 300000);
+        $add('8.87', 'گرد کردن اعمال می‌شود',
+             destAdjustPrice(237000, ['mode'=>'percent','val'=>12,'round'=>5000]) === 265000);
+        $add('8.87', 'بدون تنظیم، قیمت دست‌نخورده می‌ماند',
+             destAdjustPrice(250000, ['mode'=>'none']) === 250000);
+        // درصد منفیِ بزرگ یا ضریب صفر نباید قیمت را نابود کند
+        $add('8.87', 'قیمت هیچ‌وقت صفر یا منفی نمی‌شود',
+             destAdjustPrice(250000, ['mode'=>'percent','val'=>-200]) > 0
+             && destAdjustPrice(250000, ['mode'=>'multiplier','val'=>0]) === 250000);
+        $add('8.87', 'قیمت صفر همان صفر می‌ماند',
+             destAdjustPrice(0, ['mode'=>'percent','val'=>50]) === 0);
+    }
+    $add('8.87', 'هر دو مقصد تعدیل قیمت خودشان را اعمال می‌کنند',
+         strpos($selfSrc, '$wooPriceCfg=destPrice' . "Cfg(\$cn,'woocommerce')") !== false
+         && strpos($selfSrc, '$bslPriceCfg=destPrice' . "Cfg(\$cn,'basalam')") !== false);
+    $add('8.87', 'تنظیمات قیمت مقصد ذخیره و بازیابی می‌شوند',
+         substr_count($selfSrc, "'price_mo" . "de'=>in_array(") === 2
+         && strpos($selfSrc, "\$('wcPMo" . "de')") !== false);
+    $add('8.87', 'پیش‌نمایش تعدیل قیمت در تنظیمات هست',
+         strpos($selfSrc, 'function destPricePre' . 'view(pre){') !== false);
+    // نگهبان استخراج: تا ۸.۸۶ فقط صف ارسال نگهبان داشت
+    $add('8.87', 'نگهبان استخراج در کران‌جاب هست',
+         strpos($selfSrc, "\$results['extract_watch" . "dog']") !== false
+         && strpos($selfSrc, 'نگهبان استخراج') !== false);
+    $add('8.87', 'نگهبان استخراج فایل پیشرفت را هم می‌بندد',
+         strpos($selfSrc, "\$exProg['running'] = false; \$exProg['done'] = true;") !== false);
 
     /* ---------- v8.86: نجات گالری وقتی کلید نمی‌خورد ---------- */
     /* ۸.۸۳ فقط وقتی محصول را نجات می‌داد که کلیدش عیناً روی دیسک باشد.
@@ -12911,6 +13022,13 @@ $wooQueueProfileKey=(string)($qe['profile_key']??'');
 break;
 }
 if($wooTitleSuffix===''){$wooTitleSuffix=trim($cn['basalam']['title_suffix']??'');}
+// v8.87: تعدیل قیمت مخصوص ووکامرس (جدا از تنظیم قیمت پروفایل)
+$wooPriceCfg=destPriceCfg($cn,'woocommerce');
+if($wooPriceCfg['mode']!=='none'){
+wooBackendProgress(0,0,0,0,0,0,'','💰 تعدیل قیمت ووکامرس: '
+  .($wooPriceCfg['mode']==='percent'?(($wooPriceCfg['val']>=0?'+':'').$wooPriceCfg['val'].'%'):('×'.$wooPriceCfg['val']))
+  .($wooPriceCfg['round']>0?(' · گرد به '.$wooPriceCfg['round']):''));
+}
 // دستهٔ مؤثر: دستهٔ صف (پروفایل) و در نبودش دستهٔ پیش‌فرض تنظیمات عمومی
 $wooSendCatId=$wooQueueCatId>=0?$wooQueueCatId:(int)($w['default_category']??0);
 $GLOBALS['_currentProductLink']='';
@@ -12927,6 +13045,12 @@ exit;
 
 $pTitle=trim($p['title']??$p['name']??'');
 $pPrice=(string)($p['final_price']??'0');
+/* v8.87: درصد/ضریب مخصوص ووکامرس روی قیمت نهایی اعمال می‌شود.
+   تنظیم قیمت پروفایل سر جایش می‌ماند؛ این فقط تفاوت مقصد را می‌گذارد. */
+if($wooPriceCfg['mode']!=='none'){
+$_pb=(int)preg_replace('/[^0-9]/','',$pPrice);
+if($_pb>0)$pPrice=(string)destAdjustPrice($_pb,$wooPriceCfg);
+}
 $pKey=$p['key']??'';
 $n=$i+1;
 $GLOBALS['_currentProductLink']=$p['link']??'';
@@ -14886,6 +15010,8 @@ exit;
 // می‌دید دسته‌بندی اصلی‌اش عوض شده — همان «ذخیره/لود نشدن دسته‌بندی‌ها».
 $cn=loadConnections();
 if(!isset($cn['basalam']))$cn['basalam']=[];
+// v8.87: تعدیل قیمت مخصوص باسلام
+$bslPriceCfg=destPriceCfg($cn,'basalam');
 $qCfg=$nextEntry['config']??[];
 if(isset($qCfg['category_id']))   $cn['basalam']['category_id']=(int)$qCfg['category_id'];
 if(isset($qCfg['auto_category'])) $cn['basalam']['auto_category']=!empty($qCfg['auto_category']);
@@ -14955,6 +15081,9 @@ $queue=bslReadQueue();foreach($queue['entries'] as &$qe){if($qe['id']===$bslQueu
 @unlink(BSL_PRODUCTS_FILE);exit;
 }
 $pTitle=trim($p['title']??$p['name']??'');$pKey=$p['key']??'';$n=$i+1;$pn=(int)preg_replace("/[^0-9]/","",(string)($p['final_price']??'0'));
+/* v8.87: تعدیل قیمت مخصوص باسلام — قرینهٔ همان چیزی که برای ووکامرس هست.
+   قبل از تبدیل تومان→ریال اعمال می‌شود تا درصد روی عدد نمایشیِ کاربر باشد. */
+if(($bslPriceCfg['mode']??'none')!=='none'&&$pn>0)$pn=destAdjustPrice($pn,$bslPriceCfg);
 
 $GLOBALS['_currentProductLink']=$p['link']??'';
 
@@ -16928,6 +17057,14 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label style="font-size:11px">شناسه دستی:</label><input type="number" id="wcCatManual" min="0" step="1" placeholder="مثلاً ۱۲۳" dir="ltr" style="max-width:140px" oninput="applyWcCatManual()"><button class="btn btn-cyan" onclick="applyWcCatManual(1)" style="flex:0;padding:8px;font-size:11px">✓ اعمال</button></div>
 <div style="font-size:10px;color:#64748b;margin:-4px 0 6px">💡 شناسهٔ عددی دسته را می‌توانید مستقیم بنویسید — در وردپرس: محصولات ← دسته‌ها</div>
 <div class="crow"><label><input type="checkbox" id="wcMS"> موجودی</label><input type="number" id="wcSQ" value="10" style="max-width:100px"></div>
+<!-- v8.87: تعدیل قیمت مخصوص همین مقصد، جدا از تنظیم قیمت پروفایل -->
+<div style="margin-top:8px;padding:8px;background:#0f172a;border:1px solid #475569;border-radius:8px">
+<div style="font-weight:700;font-size:11.5px;color:#fbbf24;margin-bottom:6px">💰 تعدیل قیمت مخصوص این مقصد</div>
+<div style="font-size:10.5px;color:#94a3b8;line-height:1.8;margin-bottom:6px">مثلاً برای پوشش کارمزد درگاه یا حاشیهٔ سود متفاوت ووکامرس. روی <b>قیمت نهایی</b> اعمال می‌شود، پس تنظیم قیمت پروفایل سر جایش می‌ماند.</div>
+<div class="crow"><label>روش:</label><select id="wcPMode" onchange="destPricePreview('wc')" style="flex:1"><option value="none">بدون تغییر</option><option value="percent">درصد (مثلاً ۲۰ یا ۲۰-)</option><option value="multiplier">ضریب (مثلاً ۱٫۵)</option></select><input type="number" id="wcPVal" value="0" step="0.01" oninput="destPricePreview('wc')" style="max-width:110px"></div>
+<div class="crow"><label>گرد کردن:</label><select id="wcPRound" onchange="destPricePreview('wc')" style="flex:1"><option value="0">بدون گرد کردن</option><option value="1000">هزار</option><option value="5000">۵ هزار</option><option value="10000">ده هزار</option><option value="50000">۵۰ هزار</option><option value="100000">صد هزار</option></select></div>
+<div id="wcPPrev" style="font-size:11px;color:#4ade80;margin-top:4px">بدون تغییر</div>
+</div>
 <div class="cact"><button class="btn btn-purple" onclick="testWoo()">🔗 تست</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div id="wcTR" style="margin-top:8px"></div>
 </div></div>
@@ -16948,6 +17085,14 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 <div style="font-size:10px;color:#64748b;margin-bottom:8px">غرفه پیش‌فرض (فوقانی) همان تنظیمات توکن/غرفه بالاست. غرفه‌های اضافی در ارسال همزمان استفاده می‌شوند.</div>
 <div id="bslVendorsList" style="display:flex;flex-direction:column;gap:6px"></div>
+</div>
+<!-- v8.87: تعدیل قیمت مخصوص همین مقصد، جدا از تنظیم قیمت پروفایل -->
+<div style="margin-top:8px;padding:8px;background:#0f172a;border:1px solid #475569;border-radius:8px">
+<div style="font-weight:700;font-size:11.5px;color:#fbbf24;margin-bottom:6px">💰 تعدیل قیمت مخصوص این مقصد</div>
+<div style="font-size:10.5px;color:#94a3b8;line-height:1.8;margin-bottom:6px">مثلاً برای پوشش کارمزد باسلام یا هزینهٔ ارسال. روی <b>قیمت نهایی</b> اعمال می‌شود، پس تنظیم قیمت پروفایل سر جایش می‌ماند.</div>
+<div class="crow"><label>روش:</label><select id="bsPMode" onchange="destPricePreview('bs')" style="flex:1"><option value="none">بدون تغییر</option><option value="percent">درصد (مثلاً ۲۰ یا ۲۰-)</option><option value="multiplier">ضریب (مثلاً ۱٫۵)</option></select><input type="number" id="bsPVal" value="0" step="0.01" oninput="destPricePreview('bs')" style="max-width:110px"></div>
+<div class="crow"><label>گرد کردن:</label><select id="bsPRound" onchange="destPricePreview('bs')" style="flex:1"><option value="0">بدون گرد کردن</option><option value="1000">هزار</option><option value="5000">۵ هزار</option><option value="10000">ده هزار</option><option value="50000">۵۰ هزار</option><option value="100000">صد هزار</option></select></div>
+<div id="bsPPrev" style="font-size:11px;color:#4ade80;margin-top:4px">بدون تغییر</div>
 </div>
 <div class="cact"><button class="btn btn-cyan" onclick="testBsl()">🔗 تست</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div id="bsTR" style="margin-top:8px"></div>
@@ -20850,6 +20995,21 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.87', t:'درصد قیمت جداگانه برای هر مقصد + نگهبان استخراج', items:[
+    '💰 حالا ووکامرس و باسلام هرکدام درصد/ضریب قیمت خودشان را دارند',
+    'در «⚙️ منبع و نصب‌کننده» زیر تنظیمات هر مقصد، بخش «تعدیل قیمت مخصوص این مقصد»',
+    'روش: درصد (مثلاً ۲۰ یا ۲۰-) یا ضریب (مثلاً ۱٫۵) به‌علاوهٔ گرد کردن',
+    'روی «قیمت نهایی» اعمال می‌شود، پس تنظیم قیمت پروفایل دست‌نخورده می‌ماند',
+    'پیش‌نمایش زنده روی یک قیمت نمونه نشان می‌دهد نتیجه چه می‌شود',
+    '🛡 محافظ: درصد منفیِ بزرگ یا ضریب صفر، قیمت را صفر یا منفی نمی‌کند',
+    'محصول بی‌قیمت هم مثل قبل ارسال نمی‌شود',
+    '🩺 نگهبان استخراج اضافه شد — تا حالا فقط صف ارسال نگهبان داشت',
+    'اگر استخراج خودکار وسط کار بمیرد (تایم‌اوت هاست، ری‌استارت PHP، قطع شبکه)،',
+    'ردیف برای همیشه «در حال اجرا» می‌ماند و ردیف‌های بعدی هم راه نمی‌افتند',
+    'قبلاً فقط وقتی کسی صفحهٔ صف را باز می‌کرد، بعد از ۱۵ دقیقه «خطا» می‌خورد',
+    'حالا کران‌جاب خودش تشخیص می‌دهد، ردیف را می‌بندد و اعلان می‌فرستد',
+    'اجرای زنده و اجرای تازه‌شروع‌شده دست نمی‌خورند'
+  ]},
   {v:'8.86', t:'رفع باقی‌ماندهٔ پاک شدن گالری — وقتی کلید محصول نمی‌خورد', items:[
     '🐞 چرا با وجود اصلاح ۸.۸۳ باز هم گالری پاک می‌شد:',
     'آن اصلاح محصول را فقط وقتی نجات می‌داد که «کلیدش» عیناً روی دیسک باشد',
@@ -23391,7 +23551,7 @@ renderChangelog();
 // ========== Connection JS ==========
 let wSend=false,bSend=false,cn={woocommerce:{},basalam:{}},extractPollTimer=null,extractModalTimer=null;
 function loadConn(){fetch('',{method:'POST',body:new URLSearchParams('action=load_connections')}).then(r=>r.json()).then(d=>{if(d.ok){cn=d.connections;applyCn();}}).catch(()=>{});}
-function applyCn(){const w=cn.woocommerce||{},b=cn.basalam||{};if(w.store_url&&$('wcUrl'))$('wcUrl').value=w.store_url;if(w.consumer_key&&$('wcCK'))$('wcCK').value=w.consumer_key;if(w.consumer_secret&&$('wcCS'))$('wcCS').value=w.consumer_secret;if(w.default_status&&$('wcSt'))$('wcSt').value=w.default_status;if(w.default_category&&$('wcCat'))$('wcCat').value=w.default_category;if($('wcMS'))$('wcMS').checked=!!w.manage_stock;if(w.stock_quantity&&$('wcSQ'))$('wcSQ').value=w.stock_quantity;if(b.token&&$('bsTk'))$('bsTk').value=b.token;if(b.vendor_id&&$('bsVid'))$('bsVid').value=b.vendor_id;if(b.preparation_days&&$('bsPD'))$('bsPD').value=b.preparation_days;if(b.weight&&$('bsW'))$('bsW').value=b.weight;if($('bsPW')&&b.package_weight)$('bsPW').value=b.package_weight;if(b.stock&&$('bsSt'))$('bsSt').value=b.stock;// v7.48: Restore category in searchable dropdown
+function applyCn(){const w=cn.woocommerce||{},b=cn.basalam||{};if(w.store_url&&$('wcUrl'))$('wcUrl').value=w.store_url;if(w.consumer_key&&$('wcCK'))$('wcCK').value=w.consumer_key;if(w.consumer_secret&&$('wcCS'))$('wcCS').value=w.consumer_secret;if(w.default_status&&$('wcSt'))$('wcSt').value=w.default_status;if(w.default_category&&$('wcCat'))$('wcCat').value=w.default_category;if($('wcMS'))$('wcMS').checked=!!w.manage_stock;if(w.stock_quantity&&$('wcSQ'))$('wcSQ').value=w.stock_quantity;if($('wcPMode'))$('wcPMode').value=w.price_mode||'none';if($('wcPVal'))$('wcPVal').value=(w.price_val!==undefined?w.price_val:0);if($('wcPRound'))$('wcPRound').value=String(w.price_round||0);if($('bsPMode'))$('bsPMode').value=b.price_mode||'none';if($('bsPVal'))$('bsPVal').value=(b.price_val!==undefined?b.price_val:0);if($('bsPRound'))$('bsPRound').value=String(b.price_round||0);try{destPricePreview('wc');destPricePreview('bs');}catch(e){}if(b.token&&$('bsTk'))$('bsTk').value=b.token;if(b.vendor_id&&$('bsVid'))$('bsVid').value=b.vendor_id;if(b.preparation_days&&$('bsPD'))$('bsPD').value=b.preparation_days;if(b.weight&&$('bsW'))$('bsW').value=b.weight;if($('bsPW')&&b.package_weight)$('bsPW').value=b.package_weight;if(b.stock&&$('bsSt'))$('bsSt').value=b.stock;// v7.48: Restore category in searchable dropdown
 if(b.category_id){$('bsCat').value=String(b.category_id);bslSelectedCatId=b.category_id;if(bslAllCats.length>0){renderBslCatDropdown(bslAllCats,b.category_id);}else{loadBslCats();}}else{$('bsCat').value='0';bslSelectedCatId=0;if($('bsCatSearch'))$('bsCatSearch').value='';}
 if($('bsAutoCat'))$('bsAutoCat').checked=!!b.auto_category;if($('bsGemKey')&&b.gemini_api_key)$('bsGemKey').value=b.gemini_api_key;if($('bsDelayMs')&&b.delay_ms)$('bsDelayMs').value=b.delay_ms;if($('bsRetryDelayMs')&&b.retry_delay_ms)$('bsRetryDelayMs').value=b.retry_delay_ms;
 // v8.17: Restore global fallback categories
@@ -23406,7 +23566,33 @@ const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.ena
 const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
 arApplyCfg(cn.autoreply||{});arLoad();}
-function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors}));
+/* v8.87: پیش‌نمایش زندهٔ تعدیل قیمت مقصد.
+   روی یک قیمت نمونه نشان می‌دهد نتیجه چه می‌شود، تا قبل از ذخیره معلوم
+   باشد درصد درست وارد شده یا نه (مثلاً ۲۰- به‌جای ۲۰). */
+function destAdjustPreviewNum(base,mode,val,round){
+  if(!(base>0))return 0;
+  let out=base;
+  if(mode==='percent')out=base*(1+(val/100));
+  else if(mode==='multiplier')out=val>0?base*val:base;
+  out=Math.round(out);
+  if(round>0)out=Math.round(out/round)*round;
+  return out>0?out:base;
+}
+function destPricePreview(pre){
+  const mEl=$(pre+'PMode'),vEl=$(pre+'PVal'),rEl=$(pre+'PRound'),out=$(pre+'PPrev');
+  if(!mEl||!out)return;
+  const mode=mEl.value,val=parseFloat(vEl&&vEl.value)||0,round=parseInt(rEl&&rEl.value)||0;
+  if(mode==='none'){out.textContent='بدون تغییر';out.style.color='#94a3b8';return;}
+  const sample=250000;
+  const res=destAdjustPreviewNum(sample,mode,val,round);
+  const diff=res-sample;
+  const pct=sample>0?Math.round(diff/sample*1000)/10:0;
+  out.style.color=diff>0?'#4ade80':(diff<0?'#fbbf24':'#94a3b8');
+  out.textContent='نمونه: '+toFa(sample.toLocaleString('en-US'))+' → '
+    +toFa(res.toLocaleString('en-US'))
+    +'  ('+(diff>=0?'+':'')+toFa(pct)+'٪)';
+}
+function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10,price_mode:($('wcPMode')||{}).value||'none',price_val:parseFloat(($('wcPVal')||{}).value)||0,price_round:parseInt(($('wcPRound')||{}).value)||0}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors,price_mode:($('bsPMode')||{}).value||'none',price_val:parseFloat(($('bsPVal')||{}).value)||0,price_round:parseInt(($('bsPRound')||{}).value)||0}));
 // v8.06: Save AI settings
 fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:$('aiBaseUrl')?.value||'https://dashscope.aliyuncs.com/compatible-mode/v1',model:$('aiModel')?.value||'qwen-plus',temperature:parseFloat($('aiTemp')?.value)||0.1}));fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
