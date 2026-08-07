@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.85';
+const APP_VERSION = '8.86';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2799,17 +2799,57 @@ $productsOrder = json_decode($_POST['productsOrder'] ?? '[]', true) ?: [];
    می‌شد. توضیحات و تنوع‌ها سالم می‌ماندند چون در تب هم بودند؛ فقط
    چیزهایی گم می‌شدند که سمت سرور اضافه شده بودند.
    حالا همان تابع ادغامِ استخراج اینجا هم به کار می‌رود. */
+/* v8.86: تطبیق فقط با «کلید» کافی نبود.
+   ۸.۸۳ محصول را وقتی نجات می‌داد که کلیدش عیناً روی دیسک باشد. ولی سه
+   حالت واقعی هست که کلید نمی‌خورد و گالری باز هم پاک می‌شد:
+   ۱) تبِ قدیمی کلیدِ فرمولِ قبلی را دارد (یا لینک پارامتر گرفته)،
+   ۲) ردیف بدون کلید فرستاده می‌شود،
+   ۳) محصولات به‌شکل آرایهٔ تخت می‌آیند، نه جفتِ [کلید، داده].
+   حالا اگر کلید نخورد، با لینک و بعد با عنوانِ نرمال‌شده هم می‌گردیم. */
 if ($productsData && function_exists('extractMergeDetail')) {
-    $prevOnDisk = [];
+    $prevOnDisk = []; $prevByLink = []; $prevByTitle = [];
     foreach ((array)($profiles[$key]['products'] ?? []) as $e) {
-        if (is_array($e) && count($e) >= 2 && is_string($e[0]) && is_array($e[1])) $prevOnDisk[$e[0]] = $e[1];
+        $pk = null; $pv = null;
+        if (is_array($e) && count($e) >= 2 && is_string($e[0]) && is_array($e[1])) {
+            $pk = $e[0]; $pv = $e[1];
+        } elseif (is_array($e) && isset($e['title'])) {           // شکل تخت
+            $pv = $e; $pk = (string)($e['key'] ?? '');
+        }
+        if (!is_array($pv)) continue;
+        if ($pk !== null && $pk !== '') $prevOnDisk[$pk] = $pv;
+        $lnk = trim((string)($pv['link'] ?? ''));
+        if ($lnk !== '') {
+            $lnk = rtrim(preg_replace('~[?#].*$~', '', $lnk), '/');
+            if (!isset($prevByLink[$lnk])) $prevByLink[$lnk] = $pv;
+        }
+        $ttl = function_exists('reconNormTitle') ? reconNormTitle((string)($pv['title'] ?? '')) : '';
+        if ($ttl !== '' && !isset($prevByTitle[$ttl])) $prevByTitle[$ttl] = $pv;
     }
-    if ($prevOnDisk) {
+    if ($prevOnDisk || $prevByLink || $prevByTitle) {
         foreach ($productsData as $i => $entry) {
-            if (!is_array($entry) || count($entry) < 2) continue;
-            $k = (string)$entry[0];
-            if (!is_array($entry[1]) || !isset($prevOnDisk[$k])) continue;
-            $productsData[$i][1] = extractMergeDetail($entry[1], $prevOnDisk[$k]);
+            // هر دو شکل پذیرفته می‌شود: [کلید، داده] و شیءِ تخت
+            $isPair = is_array($entry) && count($entry) >= 2 && is_array($entry[1] ?? null);
+            $cur = $isPair ? $entry[1] : (is_array($entry) ? $entry : null);
+            if (!is_array($cur)) continue;
+
+            $k = $isPair ? (string)$entry[0] : (string)($cur['key'] ?? '');
+            $prev = ($k !== '' && isset($prevOnDisk[$k])) ? $prevOnDisk[$k] : null;
+            if ($prev === null) {
+                $lnk = trim((string)($cur['link'] ?? ''));
+                if ($lnk !== '') {
+                    $lnk = rtrim(preg_replace('~[?#].*$~', '', $lnk), '/');
+                    if (isset($prevByLink[$lnk])) $prev = $prevByLink[$lnk];
+                }
+            }
+            if ($prev === null && function_exists('reconNormTitle')) {
+                $ttl = reconNormTitle((string)($cur['title'] ?? ''));
+                if ($ttl !== '' && isset($prevByTitle[$ttl])) $prev = $prevByTitle[$ttl];
+            }
+            if ($prev === null) continue;
+
+            $merged = extractMergeDetail($cur, $prev);
+            if ($isPair) $productsData[$i][1] = $merged;
+            else         $productsData[$i]    = $merged;
         }
     }
 }
@@ -8626,6 +8666,85 @@ if (isset($_GET['selftest'])) {
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
 
+    /* ---------- v8.86: نجات گالری وقتی کلید نمی‌خورد ---------- */
+    /* ۸.۸۳ فقط وقتی محصول را نجات می‌داد که کلیدش عیناً روی دیسک باشد.
+       سه حالت واقعی می‌ماند که کلید نمی‌خورد و گالری باز هم پاک می‌شد. */
+    $add('8.86', 'تطبیق با لینک و عنوان هم انجام می‌شود',
+         strpos($selfSrc, '$prevByLink') !== false
+         && strpos($selfSrc, '$prevByTitle') !== false);
+    $add('8.86', 'شکل آرایهٔ تخت هم پشتیبانی می‌شود',
+         strpos($selfSrc, '$isPair = is_array($entry) && count($entry) >= 2') !== false
+         && strpos($selfSrc, 'else         $productsData[$i]    = $merged;') !== false);
+    $add('8.86', 'لینک قبل از تطبیق نرمال می‌شود',
+         substr_count($selfSrc, "rtrim(preg_replace('~[?#].*\$~', '', \$lnk), '/')") === 2);
+    if (function_exists('extractMergeDetail') && function_exists('reconNormTitle')) {
+        // همان کاری که مسیر ذخیره می‌کند: تبِ بی‌گالری روی نسخهٔ پرگالری
+        $m = extractMergeDetail(
+            ['title' => 'کفش', 'price' => '۱۰', 'image' => 'm.jpg'],
+            ['title' => 'کفش', 'images' => ['a', 'b', 'c'], 'images_count' => 3]);
+        $add('8.86', 'گالری دیسک روی ذخیرهٔ بی‌گالری حفظ می‌شود',
+             count($m['images'] ?? []) === 3 && (int)($m['images_count'] ?? 0) === 3);
+        // عنوانِ نرمال‌شده باید کلید تطبیق بسازد حتی با ی/ک عربی
+        $add('8.86', 'عنوان عربی و فارسی یک کلید تطبیق می‌سازند',
+             reconNormTitle('كفش ورزشي') === reconNormTitle('کفش ورزشی'));
+
+        /* v8.86: رفتار واقعیِ مسیر ذخیره سنجیده می‌شود، نه فقط وجود کد.
+           همان منطق save_profile روی یک نمونهٔ ساختگی اجرا می‌شود تا اگر
+           تطبیقِ لینک/عنوان برداشته شود، همین‌جا قرمز شود. */
+        $mergeLike = function (array $incoming, array $onDisk) {
+            $byKey = []; $byLink = []; $byTitle = [];
+            foreach ($onDisk as $e) {
+                $pk = null; $pv = null;
+                if (count($e) >= 2 && is_string($e[0]) && is_array($e[1])) { $pk = $e[0]; $pv = $e[1]; }
+                elseif (isset($e['title'])) { $pv = $e; $pk = (string)($e['key'] ?? ''); }
+                if (!is_array($pv)) continue;
+                if ($pk !== null && $pk !== '') $byKey[$pk] = $pv;
+                $l = trim((string)($pv['link'] ?? ''));
+                if ($l !== '') { $l = rtrim(preg_replace('~[?#].*$~', '', $l), '/');
+                                 if (!isset($byLink[$l])) $byLink[$l] = $pv; }
+                $t = reconNormTitle((string)($pv['title'] ?? ''));
+                if ($t !== '' && !isset($byTitle[$t])) $byTitle[$t] = $pv;
+            }
+            $out = [];
+            foreach ($incoming as $entry) {
+                $isPair = count($entry) >= 2 && is_array($entry[1] ?? null);
+                $cur = $isPair ? $entry[1] : $entry;
+                $k = $isPair ? (string)$entry[0] : (string)($cur['key'] ?? '');
+                $prev = ($k !== '' && isset($byKey[$k])) ? $byKey[$k] : null;
+                if ($prev === null) {
+                    $l = trim((string)($cur['link'] ?? ''));
+                    if ($l !== '') { $l = rtrim(preg_replace('~[?#].*$~', '', $l), '/');
+                                     if (isset($byLink[$l])) $prev = $byLink[$l]; }
+                }
+                if ($prev === null) {
+                    $t = reconNormTitle((string)($cur['title'] ?? ''));
+                    if ($t !== '' && isset($byTitle[$t])) $prev = $byTitle[$t];
+                }
+                $out[] = $prev === null ? $cur : extractMergeDetail($cur, $prev);
+            }
+            return $out;
+        };
+        $disk = [['GOODKEY', ['title' => 'کفش ورزشی', 'link' => 'http://s.test/p/1',
+                              'images' => ['a', 'b', 'c'], 'images_count' => 3]]];
+        // کلید عوض شده ولی لینک همان است
+        $r1 = $mergeLike([['OTHERKEY', ['title' => 'کفش ورزشی',
+              'link' => 'http://s.test/p/1?utm=x', 'image' => 'm']]], $disk);
+        $add('8.86', 'کلیدِ متفاوت با تطبیق لینک نجات می‌یابد',
+             count($r1[0]['images'] ?? []) === 3);
+        // نه کلید نه لینک — فقط عنوان، آن هم با حروف عربی
+        $r2 = $mergeLike([['', ['title' => 'كفش ورزشي', 'image' => 'm']]], $disk);
+        $add('8.86', 'بدون کلید و لینک، عنوان نجاتش می‌دهد',
+             count($r2[0]['images'] ?? []) === 3);
+        // شکل تخت
+        $r3 = $mergeLike([['key' => 'GOODKEY', 'title' => 'کفش ورزشی', 'image' => 'm']], $disk);
+        $add('8.86', 'شکل تخت هم ادغام می‌شود',
+             count($r3[0]['images'] ?? []) === 3);
+        // محصول واقعاً تازه نباید گالری کسی را بگیرد
+        $r4 = $mergeLike([['NEW', ['title' => 'یک چیز کاملا دیگر', 'image' => 'n']]], $disk);
+        $add('8.86', 'محصول تازه گالری بی‌ربط نمی‌گیرد',
+             empty($r4[0]['images']));
+    }
+
     /* ---------- v8.85: تنوع و دسته در ووکامرس + پیش‌نمایش خروجی تنوع ---------- */
     /* تنوع‌ها فقط در مسیر آپدیت به‌عنوان attributes می‌رفتند، پس محصول
        تازه‌ساخته بدون رنگ و سایز می‌رفت. */
@@ -8701,8 +8820,9 @@ if (isset($_GET['selftest'])) {
     /* استخراج خودکار روی سرور گالری را اضافه می‌کرد، ولی تبِ بازِ مرورگر
        نسخهٔ قدیمیِ محصولات را داشت و اولین ذخیره همان را می‌نوشت. فقط
        گالری گم می‌شد چون تنها چیزی بود که سمت سرور اضافه شده بود. */
+    // v8.86: نام متغیرها موقع گسترش تطبیق عوض شد؛ چک روی خودِ فراخوانی است
     $add('8.83', 'ذخیرهٔ پروفایل، محصولات را با نسخهٔ روی دیسک ادغام می‌کند',
-         strpos($selfSrc, '$productsData[$i][1] = extractMerge' . 'Detail($entry[1], $prevOnDisk[$k]);') !== false);
+         strpos($selfSrc, '$merged = extractMerge' . 'Detail($cur, $prev);') !== false);
     $add('8.83', 'ادغام فقط وقتی انجام می‌شود که محصولی فرستاده شده باشد',
          strpos($selfSrc, 'if ($productsData && function_exists(\'extractMerge' . 'Detail\'))') !== false);
     if (function_exists('extractMergeDetail')) {
@@ -20730,6 +20850,22 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.86', t:'رفع باقی‌ماندهٔ پاک شدن گالری — وقتی کلید محصول نمی‌خورد', items:[
+    '🐞 چرا با وجود اصلاح ۸.۸۳ باز هم گالری پاک می‌شد:',
+    'آن اصلاح محصول را فقط وقتی نجات می‌داد که «کلیدش» عیناً روی دیسک باشد',
+    'ولی سه حالت واقعی هست که کلید نمی‌خورد:',
+    '· تبِ قدیمی کلید فرمول قبلی را دارد، یا لینک پارامتری مثل utm گرفته',
+    '· ردیف بدون کلید فرستاده می‌شود',
+    '· محصولات به شکل آرایهٔ تخت می‌آیند، نه جفت [کلید، داده]',
+    'در هر سه حالت، ادغام انجام نمی‌شد و گالریِ روی دیسک با نسخهٔ بی‌گالریِ تب جایگزین می‌شد',
+    '✅ حالا اگر کلید نخورد، با «لینک محصول» و بعد با «عنوان نرمال‌شده» هم می‌گردیم',
+    'لینک قبل از تطبیق از پارامتر و اسلش آخر پاک می‌شود',
+    'عنوان با همان نرمال‌سازی همیشگی سنجیده می‌شود، پس ی/ک عربی و نیم‌فاصله مانع نیست',
+    '✅ شکل آرایهٔ تخت هم پشتیبانی شد',
+    '🛡 کارهای عمدی همچنان کار می‌کنند:',
+    'پاک کردن نتایج، حذف یک محصول، ویرایش عنوان و قیمت، و گالری بزرگ‌ترِ تب',
+    'محصول واقعاً تازه هم گالری بی‌ربط نمی‌گیرد'
+  ]},
   {v:'8.85', t:'تنوع و دسته‌بندی به ووکامرس + پیش‌نمایش خروجی نهایی تنوع‌ها', items:[
     '🎨 تنوع‌ها حالا موقع «ساخت» محصول در ووکامرس هم فرستاده می‌شوند',
     'تا حالا فقط در مسیر آپدیت به‌عنوان attributes می‌رفتند',
