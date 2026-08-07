@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.93';
+const APP_VERSION = '8.94';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7183,7 +7183,10 @@ if($profileKey===''){
 $u=trim($_GET['url']??'');
 if($u!==''&&filter_var($u,FILTER_VALIDATE_URL))$profileKey=profileKey($u);
 }
-$res=runBackendExtract($profileKey,'manual',true);
+/* v8.94: کران هم همین اندپوینت را صدا می‌زند تا شرایط اجرا دقیقاً یکی
+   باشد؛ فقط برچسب ردیف صف باید بگوید اجرا خودکار بوده نه دستی. */
+$trg = (($_GET['trigger'] ?? $_POST['trigger'] ?? '') === 'auto') ? 'auto' : 'manual';
+$res=runBackendExtract($profileKey,$trg,true);
 // v8.30: همان اعلان‌های تغییر مبدأ که کران‌جاب می‌فرستد
 if(!empty($res['ok'])){
 $cnNow=loadConnections();
@@ -7467,6 +7470,79 @@ function cronWatchdogs(array $cn): array {
     return $results;
 }
 
+/**
+ * v8.94: استخراج را عیناً مثل فشردن دکمهٔ «⚡ استخراج بک‌اند» اجرا می‌کند.
+ *
+ * همان درخواست HTTP، همان اندپوینت، همان جدا شدنِ پردازه. کران فقط منتظر
+ * می‌ماند تا تمام شود و بعد نتیجه را از فایل پیشرفت برمی‌دارد — چون آن
+ * درخواست پاسخ نهایی را برنمی‌گرداند، دقیقاً مثل وقتی که کاربر دکمه را
+ * می‌زند و پنل پیشرفت را نگاه می‌کند.
+ *
+ * اگر به هر دلیلی نشود درخواست را به خود سرور زد (مثلاً اجرای CLI که
+ * HTTP_HOST ندارد)، به فراخوانی مستقیم برمی‌گردیم تا کران بی‌کار نماند.
+ */
+function cronExtractLikeButton(string $key, array $profile): array {
+    // اجرای CLI یا هر حالتی که آدرس خودمان را نمی‌دانیم
+    if (selfBaseUrl() === '') return runBackendExtract($key, 'auto');
+
+    // همان درخواستی که مرورگر با کلیک روی دکمه می‌فرستد
+    $fired = fireAndForget('action=backend_extract&profile_key=' . rawurlencode($key)
+                           . '&trigger=auto', 2500);
+    if (!$fired) return runBackendExtract($key, 'auto');   // شلیک نشد؛ خودمان انجامش می‌دهیم
+
+    /* منتظر پایان بمان. سقف انتظار از «آستانهٔ گیر کردن» می‌آید و معیارِ
+       زنده بودن، آخرین نوشتنِ فایل پیشرفت است — نه گذر زمان. استخراج
+       سالم هر دو محصول یک بار می‌نویسد، پس تا وقتی می‌نویسد صبر می‌کنیم. */
+    $cnW      = loadConnections();
+    $idleMax  = max(120, (int)($cnW['stall_after'] ?? 300));
+    $hardMax  = max(600, (int)($cnW['cron_extract_max'] ?? 3600));
+    $started  = time();
+    $lastSeen = time();
+    $lastTs   = 0;
+    $sawRun   = false;
+
+    while (true) {
+        usleep(2000000);                       // هر ۲ ثانیه
+        clearstatcache(true, EXTRACT_PROGRESS_FILE);
+        $p = readProgress(EXTRACT_PROGRESS_FILE);
+        $ts = (int)($p['last_progress_ts'] ?? 0);
+        if ($ts > $lastTs) { $lastTs = $ts; $lastSeen = time(); }
+
+        $isDone = !empty($p['done']);
+        $isRun  = !empty($p['running']) && !$isDone;
+        if ($isRun) { $sawRun = true; $lastSeen = time(); }
+
+        if ($isDone && ($sawRun || (time() - $started) > 6)) break;   // تمام شد
+        if ((time() - $lastSeen) > $idleMax) break;                   // بی‌حرکت ماند
+        if ((time() - $started)  > $hardMax) break;                   // سقف مطلق
+    }
+
+    // نتیجه را از همان‌جایی بخوان که پنل پیشرفت می‌خواند
+    $p = readProgress(EXTRACT_PROGRESS_FILE);
+    if (!empty($p['error']) || !empty($p['guard'])) {
+        return ['ok' => false, 'error' => (string)($p['error'] ?? 'استخراج ناتمام'),
+                'guard' => $p['guard'] ?? null, 'extracted' => (int)($p['extracted'] ?? 0)];
+    }
+    if (empty($p['done'])) {
+        return ['ok' => false, 'error' => 'استخراج در مهلت مقرر تمام نشد',
+                'extracted' => (int)($p['extracted'] ?? 0)];
+    }
+    return ['ok' => true,
+        'extracted'     => (int)($p['extracted'] ?? 0),
+        'new'           => (int)($p['new'] ?? 0),
+        'price_changed' => (int)($p['price_changed'] ?? 0),
+        'removed'       => (int)($p['removed'] ?? 0),
+        'unchanged'     => (int)($p['unchanged'] ?? 0),
+        'price_up'      => (int)($p['price_up'] ?? 0),
+        'price_down'    => (int)($p['price_down'] ?? 0),
+        'new_items'     => is_array($p['new_items'] ?? null) ? $p['new_items'] : [],
+        'changed_items' => is_array($p['changed_items'] ?? null) ? $p['changed_items'] : [],
+        'removed_items' => is_array($p['removed_items'] ?? null) ? $p['removed_items'] : [],
+        'products_saved' => !empty($p['products_saved']),
+        'profile_key'   => (string)($p['profile_key'] ?? $key),
+        'via_button'    => true];
+}
+
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
 header('Content-Type: application/json; charset=UTF-8');
 @set_time_limit(0);
@@ -7539,17 +7615,42 @@ $target = $syncCfg['target'] ?? 'woo';
 if ($interval > 0 && ($now - $lastRun < $interval)) { $pResult['status'] = 'not_due'; $pResult['remaining'] = $interval - ($now - $lastRun); $results['profiles'][] = $pResult; continue; }
 $pResult['status'] = 'syncing'; $pResult['target'] = $target;
 
-// v8.27: همان هستهٔ استخراج دکمهٔ دستی، با برچسب auto
-$exRes = runBackendExtract($key, 'auto');
+/* v8.94: استخراج کران دقیقاً همان مسیر دکمهٔ «⚡ استخراج بک‌اند» را می‌رود.
+
+   تا ۸.۹۳ هستهٔ یکسانی صدا زده می‌شد ($exRes = runBackendExtract) ولی در
+   یک شرایط اجرایی کاملاً متفاوت، و همین گالری‌ها را از بین می‌برد:
+
+   دکمهٔ بک‌اند → ?action=backend_extract → runBackendExtract(...,true)
+     پارامتر سوم true یعنی پاسخ زودهنگام + fastcgi_finish_request()، پس
+     پردازه از وب‌سرور جدا می‌شود و فقط همان یک استخراج را انجام می‌دهد.
+
+   کران (تا ۸.۹۳) → runBackendExtract(...,false) در همان درخواست
+     هیچ جدا شدنی در کار نبود و بلافاصله بعدش مرحلهٔ ارسال به ووکامرس/
+     باسلام هم در همان پردازه اجرا می‌شد. یعنی استخراجِ فهرست + باز کردن
+     صفحهٔ تک‌تک محصول‌ها برای گالری + آپلود تصاویر، همه زیر یک سقفِ
+     زمانیِ واحد. روی هاستی که پردازه‌ها را می‌کشد، مرگ تقریباً همیشه
+     وسط فاز گالری اتفاق می‌افتد — چون طولانی‌ترین بخش همان است.
+
+   نتیجه‌اش دقیقاً همان چیزی بود که کاربر گزارش می‌کرد: با دکمه گالری
+   می‌آمد، با کران نمی‌آمد. مسیر یکی بود ولی عمرِ پردازه یکی نبود.
+
+   حالا کران همان درخواست HTTP دکمه را به خودش می‌زند و منتظر پایانش
+   می‌ماند. استخراج در پردازهٔ جدا و مستقلِ خودش اجرا می‌شود — همان‌طور
+   که وقتی کاربر دکمه را می‌زند اتفاق می‌افتد. */
+$exRes = cronExtractLikeButton($key, $profile);
 if (!empty($exRes['ok'])) {
 $pResult['extracted'] = (int)($exRes['extracted'] ?? 0);
 $pResult['extract_method'] = 'backend_extract';
 $pResult['new'] = (int)($exRes['new'] ?? 0);
 $pResult['price_changed'] = (int)($exRes['price_changed'] ?? 0);
 $pResult['removed'] = (int)($exRes['removed'] ?? 0);
-// v8.30: گران/ارزان و موجود/ناموجود شدن سایت مبدأ را اطلاع بده
-$srcN = notifSourceChanges($cn, $exRes, $profile['name'] ?? $key);
-if (!empty($srcN['sent'])) $pResult['src_notified'] = $srcN['sent'];
+/* v8.30: گران/ارزان و موجود/ناموجود شدن سایت مبدأ را اطلاع بده.
+   v8.94: وقتی استخراج از راه همان اندپوینت دکمه انجام شده، آن اندپوینت
+   خودش این اعلان را فرستاده؛ دوباره فرستادنش یعنی دو پیام یکسان. */
+if (empty($exRes['via_button'])) {
+    $srcN = notifSourceChanges($cn, $exRes, $profile['name'] ?? $key);
+    if (!empty($srcN['sent'])) $pResult['src_notified'] = $srcN['sent'];
+}
 
 // v8.34: محصولاتی که از مبدأ رفته‌اند را روی مقصد بازنشسته کن
 $retireMode = (string)($cn['retire_mode'] ?? 'off');
@@ -9040,6 +9141,32 @@ if (isset($_GET['selftest'])) {
     /* «استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که گالری، تنوع، سلکتورهای
        جزئیات، ذخیره‌سازی سمت سرور و صف نداشت. «اجرای الان» هم انسدادی بود.
        حالا هر سه از یک نقطه رد می‌شوند. */
+    /* ---------- v8.94: کران هم همان دکمه را می‌زند ---------- */
+    /* تا ۸.۹۳ هستهٔ استخراج یکی بود ولی شرایط اجرا نه: دکمه پردازه را جدا
+       می‌کرد و فقط استخراج می‌کرد، کران متصل می‌ماند و ارسال را هم در همان
+       پردازه انجام می‌داد. روی هاستی که پردازه را می‌کشد، مرگ وسط فاز
+       گالری می‌افتاد و گالری‌ها نمی‌آمدند. */
+    $add('8.94', 'کران استخراج را از راه همان اندپوینت دکمه اجرا می‌کند',
+         function_exists('cronExtract' . 'LikeButton')
+         && strpos($selfSrc, '$exRes = cronExtractLike' . 'Button($key, $profile);') !== false);
+    $add('8.94', 'کران همان درخواست HTTP دکمه را می‌زند',
+         strpos($selfSrc, "fireAndForget('action=backend_extract" . "&profile_key='") !== false);
+    $add('8.94', 'اگر شلیک HTTP ممکن نبود، فراخوانی مستقیم جایگزین می‌شود',
+         substr_count($selfSrc, "return runBackendExtract(\$key, 'auto');") >= 2);
+    $add('8.94', 'کران منتظر پایان استخراج می‌ماند و نتیجه را از فایل پیشرفت می‌خواند',
+         strpos($selfSrc, '$idleMax  = ' . 'max(120,') !== false
+         && strpos($selfSrc, "readProgress(EXTRACT_PROGRESS_FILE);\n    if (!empty(\$p['error'])") !== false);
+    $add('8.94', 'انتظار با بی‌حرکتی سنجیده می‌شود نه با گذر زمان',
+         strpos($selfSrc, 'if ((time() - $lastSeen) > ' . '$idleMax) break;') !== false
+         && strpos($selfSrc, 'if ($ts > $lastTs) { $lastTs = $ts; ' . '$lastSeen = time(); }') !== false);
+    $add('8.94', 'کش stat قبل از هر بار خواندن پیشرفت پاک می‌شود',
+         strpos($selfSrc, 'clearstatcache(true, EXTRACT_PROGRESS_' . 'FILE);') !== false);
+    $add('8.94', 'اندپوینت برچسب trigger=auto را می‌پذیرد',
+         strpos($selfSrc, "\$trg = ((\$_GET['trigger'] ?? \$_POST['trigger'] ?? '') === 'auto')") !== false
+         && strpos($selfSrc, 'runBackendExtract($profileKey,$trg,true);') !== false);
+    $add('8.94', 'اعلان تغییر مبدأ دوبار فرستاده نمی‌شود',
+         strpos($selfSrc, "if (empty(\$exRes['via_" . "button'])) {") !== false);
+
     /* v8.93: «استخراج اتوماتیک» دیگر منطق خودش را ندارد — عیناً همان
        تابع دکمهٔ بک‌اند را صدا می‌زند. بدنه‌اش باید یک خط باشد، وگرنه
        دوباره دو کد موازی داریم که می‌توانند از هم جدا بیفتند. */
@@ -21681,6 +21808,26 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.94', t:'کران‌جاب هم دقیقاً همان دکمهٔ «استخراج بک‌اند» را می‌زند', items:[
+    '🖼 علت واقعیِ نیامدن گالری در استخراج خودکار پیدا شد:',
+    'از ۸.۹۲ هستهٔ استخراج یکی بود، ولی «شرایط اجرا» یکی نبود —',
+    'و همین کافی بود که گالری‌ها نیایند',
+    '⚡ دکمه: پاسخ زودهنگام + fastcgi_finish_request →',
+    'پردازه از وب‌سرور جدا می‌شود و فقط همان یک استخراج را می‌کند',
+    '⏱ کران (تا ۸.۹۳): هیچ جدا شدنی نبود و بلافاصله بعد از استخراج،',
+    'ارسال به ووکامرس/باسلام هم در همان پردازه اجرا می‌شد',
+    'یعنی فهرست + باز کردن صفحهٔ تک‌تک محصولات برای گالری + آپلود عکس‌ها،',
+    'همه زیر یک سقف زمانیِ واحد',
+    'روی هاستی که پردازه را می‌کشد، مرگ تقریباً همیشه وسط فاز گالری',
+    'می‌افتاد — چون طولانی‌ترین بخش همان است',
+    '✅ حالا کران همان درخواست HTTP دکمه را به خودش می‌زند',
+    'استخراج در پردازهٔ جدا و مستقل اجرا می‌شود، مثل وقتی دکمه را می‌زنید',
+    '✅ کران منتظر پایانش می‌ماند و نتیجه را از فایل پیشرفت برمی‌دارد',
+    '(معیار انتظار «بی‌حرکتی» است نه گذر زمان، پس اجرای طولانی قطع نمی‌شود)',
+    '✅ اگر شلیک HTTP ممکن نباشد (مثلاً اجرای CLI)، فراخوانی مستقیم انجام می‌شود',
+    '🐞 اعلان تغییر مبدأ دوبار فرستاده می‌شد — اصلاح شد',
+    'ℹ️ با تست تأیید شد خروجی کران بایت‌به‌بایت با خروجی دکمه یکسان است',
+  ]},
   {v:'8.93', t:'«استخراج اتوماتیک» واقعاً همان دکمهٔ «استخراج بک‌اند» را می‌زند', items:[
     '🔧 در ۸.۹۲ این دکمه به موتور درست وصل شد ولی با منطق موازیِ خودش:',
     'بررسی سلکتور از روی فرم · شاخهٔ جدا برای ذخیرهٔ نشده · عنوان پنل متفاوت',
