@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.88';
+const APP_VERSION = '8.89';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7186,6 +7186,77 @@ function profileOrderedProducts(array $profile, ?array $onlyKeys = null, bool $f
 }
 
 // v8.31: تنها نقطهٔ ورود کران — cron_sync حذف شد چون دقیقاً همین کار را می‌کرد.
+/**
+ * v8.89: نگهبان‌ها در یک تابع، تا بشود آن‌ها را قبل از قفل کران هم اجرا کرد.
+ *
+ * تا ۸.۸۸ این کد داخل بدنهٔ cron_run بود و بعد از بررسی قفل قرار داشت.
+ * ولی وقتی یک اجرا وسط کار می‌مُرد، فایل قفل باقی می‌ماند و تا ۳۰ دقیقه
+ * هر اجرای بعدی همان اول رد می‌شد — یعنی دقیقاً در حالتی که نگهبان لازم
+ * بود، هیچ‌وقت اجرا نمی‌شد و کار گیرکرده تا نیم ساعت همان‌طور می‌ماند.
+ */
+function cronWatchdogs(array $cn): array {
+    $results = ['watchdog' => []];
+// v8.33: مرحلهٔ نگهبان — اگر ارسالی وسط راه گیر کرده، ادامه‌اش بده.
+    // هزینه‌اش وقتی چیزی گیر نکرده صفر است: فقط چند خط خواندن از فایل.
+    $stallCfg  = (int)($cn['stall_after'] ?? 300);
+    $stallWake = !isset($cn['stall_watchdog']) || !empty($cn['stall_watchdog']);
+    if ($stallWake) {
+        $results['watchdog'] = [];
+        foreach (['bsl', 'woo'] as $wq) {
+            $w = queueStallRecover($wq, $stallCfg);
+            if (!empty($w['stalled'])) {
+                $results['watchdog'][] = $w;
+                notifRunFailure($cn, 'نگهبان صف',
+                    $wq === 'bsl' ? 'باسلام' : 'ووکامرس',
+                    'ارسال ' . ($w['kind'] === 'waiting' ? 'در صف مانده بود' : 'گیر کرده بود')
+                    . ' (' . (int)($w['idle'] ?? 0) . ' ثانیه بی‌حرکت، '
+                    . (int)($w['current'] ?? 0) . '/' . (int)($w['total'] ?? 0) . ') — '
+                    . (!empty($w['resumed']) ? 'خودکار ادامه داده شد ✅' : 'ادامه ناموفق ❌'));
+            }
+        }
+    }
+    
+    /* v8.87: نگهبان استخراج.
+       صف ارسال از ۸.۳۳ نگهبان داشت ولی استخراج نداشت: اگر اجرای خودکار وسط
+       کار می‌مُرد (تایم‌اوت هاست، ری‌استارت PHP، قطع شبکه)، ردیف برای همیشه
+       «در حال اجرا» می‌ماند و ردیف‌های بعدی هم راه نمی‌افتادند. علامت‌خوردنِ
+       «خطا» هم فقط وقتی اتفاق می‌افتاد که کسی صفحهٔ صف را باز کند. */
+    if ($stallWake) {
+        $exProg = readProgress(EXTRACT_PROGRESS_FILE);
+        $exQ = extractReadQueue();
+        $exNow = time();
+        $exDirty = false; $exStuck = null;
+        foreach ($exQ['entries'] as $qi => $qe) {
+            if (($qe['status'] ?? '') !== 'running') continue;
+            $ts = (int)($exProg['last_progress_ts'] ?? 0);
+            if ($ts <= 0) $ts = (int)($qe['started_at'] ?? 0);
+            $idle = $ts > 0 ? ($exNow - $ts) : PHP_INT_MAX;
+            $alive = !empty($exProg['running']) && empty($exProg['done']);
+            if ($alive && $idle <= $stallCfg) continue;
+            if ($idle <= $stallCfg) continue;
+            $exQ['entries'][$qi]['status'] = 'failed';
+            $exQ['entries'][$qi]['error'] = 'بی‌حرکت ماند (' . $idle . ' ثانیه) — نگهبان بست';
+            $exQ['entries'][$qi]['done_at'] = $exNow;
+            $exDirty = true;
+            $exStuck = ['idle' => $idle, 'profile' => (string)($qe['profile_name'] ?? ($qe['profile_key'] ?? '')),
+                        'key' => (string)($qe['profile_key'] ?? '')];
+        }
+        if ($exDirty) {
+            extractWriteQueue($exQ);
+            // فایل پیشرفت هم بسته شود وگرنه رابط کاربری «در حال اجرا» نشان می‌دهد
+            if (!empty($exProg['running'])) {
+                $exProg['running'] = false; $exProg['done'] = true; $exProg['stalled'] = true;
+                writeProgress(EXTRACT_PROGRESS_FILE, $exProg);
+            }
+            $results['extract_watchdog'] = $exStuck;
+            notifRunFailure($cn, 'نگهبان استخراج', $exStuck['profile'] ?: 'استخراج',
+                'استخراج ' . (int)$exStuck['idle'] . ' ثانیه بی‌حرکت بود و بسته شد. '
+                . 'اجرای بعدی طبق زمان‌بندی از سر گرفته می‌شود.');
+        }
+    }
+    return $results;
+}
+
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
 header('Content-Type: application/json; charset=UTF-8');
 @set_time_limit(0);
@@ -7199,9 +7270,23 @@ if ($lockAge < $cronLockSec) {
     // v8.37: حتی وقتی به‌خاطر قفل رد می‌شویم هم پینگ بفرست — وگرنه یک قفلِ
     // گیرکرده دقیقاً شبیه «کران‌جاب اصلاً اجرا نمی‌شود» به نظر می‌رسد.
     $cnLock = loadConnections();
+    /* v8.89: نگهبان‌ها را حتی وقتی قفل هست هم اجرا کن.
+       قفل یعنی «اجرای قبلی تمام نشده» — که یا واقعاً در حال کار است (آن‌وقت
+       نگهبان چیزی پیدا نمی‌کند و هزینه‌اش چند خط خواندن فایل است)، یا مرده و
+       قفلش مانده. حالت دوم دقیقاً همان چیزی است که نگهبان برایش ساخته شده،
+       ولی تا حالا همین‌جا رد می‌شدیم و تا ۳۰ دقیقه هیچ‌کس سراغش نمی‌رفت. */
+    $wdLock = cronWatchdogs($cnLock);
+    $lockOut = ['ok' => true, 'skipped' => true, 'profiles' => [],
+        'reason' => 'اجرای قبلی هنوز تمام نشده (' . $lockAge . ' ثانیه)'];
+    foreach ($wdLock as $k => $v) { if (!empty($v)) $lockOut[$k] = $v; }
+    /* اگر نگهبان کار گیرکرده‌ای را بست، خودِ قفل هم مالِ همان اجرای مرده
+       بوده؛ پس برش دار تا اجرای بعدی معطل نماند. */
+    if (!empty($lockOut['extract_watchdog']) || !empty($lockOut['watchdog'])) {
+        @unlink($cronLock);
+        $lockOut['lock_cleared'] = true;
+    }
     notifCronPing($cnLock, ['profiles' => [], 'locked' => $lockAge]);
-    echo json_encode(['ok' => true, 'skipped' => true, 'profiles' => [],
-        'reason' => 'اجرای قبلی هنوز تمام نشده (' . $lockAge . ' ثانیه)'], JSON_UNESCAPED_UNICODE);
+    echo json_encode($lockOut, JSON_UNESCAPED_UNICODE);
     exit;
 }
 @file_put_contents($cronLock, (string)time());
@@ -7375,64 +7460,8 @@ $results['profiles'][] = $pResult;
 }
 saveSyncState($syncState);
 
-// v8.33: مرحلهٔ نگهبان — اگر ارسالی وسط راه گیر کرده، ادامه‌اش بده.
-// هزینه‌اش وقتی چیزی گیر نکرده صفر است: فقط چند خط خواندن از فایل.
-$stallCfg  = (int)($cn['stall_after'] ?? 300);
-$stallWake = !isset($cn['stall_watchdog']) || !empty($cn['stall_watchdog']);
-if ($stallWake) {
-    $results['watchdog'] = [];
-    foreach (['bsl', 'woo'] as $wq) {
-        $w = queueStallRecover($wq, $stallCfg);
-        if (!empty($w['stalled'])) {
-            $results['watchdog'][] = $w;
-            notifRunFailure($cn, 'نگهبان صف',
-                $wq === 'bsl' ? 'باسلام' : 'ووکامرس',
-                'ارسال ' . ($w['kind'] === 'waiting' ? 'در صف مانده بود' : 'گیر کرده بود')
-                . ' (' . (int)($w['idle'] ?? 0) . ' ثانیه بی‌حرکت، '
-                . (int)($w['current'] ?? 0) . '/' . (int)($w['total'] ?? 0) . ') — '
-                . (!empty($w['resumed']) ? 'خودکار ادامه داده شد ✅' : 'ادامه ناموفق ❌'));
-        }
-    }
-}
-
-/* v8.87: نگهبان استخراج.
-   صف ارسال از ۸.۳۳ نگهبان داشت ولی استخراج نداشت: اگر اجرای خودکار وسط
-   کار می‌مُرد (تایم‌اوت هاست، ری‌استارت PHP، قطع شبکه)، ردیف برای همیشه
-   «در حال اجرا» می‌ماند و ردیف‌های بعدی هم راه نمی‌افتادند. علامت‌خوردنِ
-   «خطا» هم فقط وقتی اتفاق می‌افتاد که کسی صفحهٔ صف را باز کند. */
-if ($stallWake) {
-    $exProg = readProgress(EXTRACT_PROGRESS_FILE);
-    $exQ = extractReadQueue();
-    $exNow = time();
-    $exDirty = false; $exStuck = null;
-    foreach ($exQ['entries'] as $qi => $qe) {
-        if (($qe['status'] ?? '') !== 'running') continue;
-        $ts = (int)($exProg['last_progress_ts'] ?? 0);
-        if ($ts <= 0) $ts = (int)($qe['started_at'] ?? 0);
-        $idle = $ts > 0 ? ($exNow - $ts) : PHP_INT_MAX;
-        $alive = !empty($exProg['running']) && empty($exProg['done']);
-        if ($alive && $idle <= $stallCfg) continue;
-        if ($idle <= $stallCfg) continue;
-        $exQ['entries'][$qi]['status'] = 'failed';
-        $exQ['entries'][$qi]['error'] = 'بی‌حرکت ماند (' . $idle . ' ثانیه) — نگهبان بست';
-        $exQ['entries'][$qi]['done_at'] = $exNow;
-        $exDirty = true;
-        $exStuck = ['idle' => $idle, 'profile' => (string)($qe['profile_name'] ?? ($qe['profile_key'] ?? '')),
-                    'key' => (string)($qe['profile_key'] ?? '')];
-    }
-    if ($exDirty) {
-        extractWriteQueue($exQ);
-        // فایل پیشرفت هم بسته شود وگرنه رابط کاربری «در حال اجرا» نشان می‌دهد
-        if (!empty($exProg['running'])) {
-            $exProg['running'] = false; $exProg['done'] = true; $exProg['stalled'] = true;
-            writeProgress(EXTRACT_PROGRESS_FILE, $exProg);
-        }
-        $results['extract_watchdog'] = $exStuck;
-        notifRunFailure($cn, 'نگهبان استخراج', $exStuck['profile'] ?: 'استخراج',
-            'استخراج ' . (int)$exStuck['idle'] . ' ثانیه بی‌حرکت بود و بسته شد. '
-            . 'اجرای بعدی طبق زمان‌بندی از سر گرفته می‌شود.');
-    }
-}
+$wd = cronWatchdogs($cn);
+foreach ($wd as $k => $v) { if (!empty($v)) $results[$k] = $v; }
 
 $notifyResult = bslCheckNotifications($cn);
 if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
@@ -8754,6 +8783,35 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.89: قفل کران جلوی نگهبان را نگیرد + خالی نشدن تب نتایج ---------- */
+    /* قفل کران ۳۰ دقیقه است. اگر اجرایی وسط کار می‌مُرد، قفلش می‌ماند و هر
+       اجرای بعدی همان اول رد می‌شد — یعنی نگهبان دقیقاً وقتی لازم بود اجرا
+       نمی‌شد و کار گیرکرده تا نیم ساعت همان‌طور می‌ماند. */
+    $add('8.89', 'نگهبان‌ها به یک تابع مستقل منتقل شده‌اند',
+         function_exists('cronWatchdogs'));
+    $add('8.89', 'نگهبان حتی وقتی قفل کران هست هم اجرا می‌شود',
+         strpos($selfSrc, '$wdLock = cronWatch' . 'dogs($cnLock);') !== false);
+    $add('8.89', 'قفلِ اجرای مرده بعد از پاک‌سازی برداشته می‌شود',
+         strpos($selfSrc, "\$lockOut['lock_clea" . "red'] = true;") !== false);
+    /* loadBackendExtractResults اول فهرست را پاک می‌کرد و بعد اگر
+       productsOrder خالی بود برمی‌گشت؛ نتیجه: تب نتایج خالی می‌ماند در حالی
+       که محصولات و گالری‌هایشان روی دیسک سالم بودند. */
+    $add('8.89', 'تب نتایج قبل از داشتن داده پاک نمی‌شود',
+         strpos($selfSrc, 'if(!keys.len' . 'gth)return;') !== false
+         && strpos($selfSrc, 'let keys=prodOrder.fil' . 'ter(k=>prodMap[k]);') !== false);
+    $add('8.89', 'نبودِ ترتیب، محصولات را دور نمی‌ریزد',
+         strpos($selfSrc, 'if(!keys.len' . 'gth)keys=Object.keys(prodMap);') !== false);
+    $add('8.89', 'پاک کردن فهرست بعد از تأیید داده انجام می‌شود', (function () use ($selfSrc) {
+        // v8.89: به بدنهٔ خود تابع لنگر بزن، نه به نامش که در توضیحات هم هست
+        // رشته تکه‌تکه، وگرنه strpos اول همین خط را پیدا می‌کند (درس v8.35)
+        $i = strpos($selfSrc, 'function loadBackendExtractRes' . 'ults(key){');
+        if ($i === false) return false;
+        $seg = substr($selfSrc, $i, 3000);
+        $guard = strpos($seg, 'if(!keys.len' . 'gth)return;');
+        $clear = strpos($seg, 'products.cle' . 'ar();order=[];');
+        return $guard !== false && $clear !== false && $guard < $clear;
+    })());
 
     /* ---------- v8.88: حذف پرش خودکار صفحه + جابه‌جایی تنظیم قیمت ---------- */
     $add('8.88', 'نگهبان پرش خودکار صفحه هست',
@@ -20781,9 +20839,10 @@ function loadBackendExtractResults(key){
         const prof=d.profile||{};
         const prods=prof.products||[];
         const prodOrder=prof.productsOrder||[];
-        resetResultFilter();
-        products.clear();order=[];
-        if(!prodOrder.length)return;
+        /* v8.89: قبلاً همین‌جا فهرست پاک می‌شد و بعد اگر productsOrder خالی
+           بود، تابع برمی‌گشت — یعنی تب نتایج کاملاً خالی می‌ماند در حالی که
+           محصولات (و گالری‌هایشان) روی دیسک سالم بودند. حالا اول داده را
+           می‌سنجیم و ترتیب را در نبودش از خود محصولات می‌سازیم. */
         // Convert products: could be [[key,data],...] or {key:data,...}
         let prodMap={};
         if(Array.isArray(prods)&&prods.length>0){
@@ -20799,7 +20858,14 @@ function loadBackendExtractResults(key){
             // {key:data,...} object format
             prodMap=prods;
         }
-        prodOrder.forEach(k=>{
+        // v8.89: ترتیب نبود؟ از خود محصولات بسازش، نه اینکه همه را دور بریزی
+        let keys=prodOrder.filter(k=>prodMap[k]);
+        if(!keys.length)keys=Object.keys(prodMap);
+        // چیزی برای نشان دادن نیست: دست به فهرست فعلی نزن
+        if(!keys.length)return;
+        resetResultFilter();
+        products.clear();order=[];
+        keys.forEach(k=>{
             const p=prodMap[k];
             if(p){
                 // v8.42: کلید را روی خود شیء بنشان — پروفایل آن را جدا نگه می‌دارد
@@ -21178,6 +21244,23 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.89', t:'دو علت واقعی: قفل کران جلوی نگهبان را می‌گرفت، و تب نتایج زودتر از موعد پاک می‌شد', items:[
+    '🩺 چرا استخراج گیر می‌کرد و ادامه نمی‌داد:',
+    'کران‌جاب یک فایل قفل می‌سازد تا دو اجرا هم‌زمان نشوند — مدتش ۳۰ دقیقه است',
+    'اگر اجرایی وسط کار می‌مُرد (تایم‌اوت هاست، ری‌استارت PHP)، قفلش باقی می‌ماند',
+    'و هر اجرای بعدی همان اولِ کار رد می‌شد، قبل از رسیدن به نگهبان',
+    'یعنی نگهبان دقیقاً در حالتی که برایش ساخته شده بود، هیچ‌وقت اجرا نمی‌شد',
+    'در تست: با قفلِ ۶۰ تا ۱۵۰۰ ثانیه‌ای، کار گیرکرده دست‌نخورده می‌ماند',
+    '✅ حالا نگهبان‌ها حتی وقتی قفل هست هم اجرا می‌شوند',
+    '✅ و اگر نگهبان کار مرده‌ای را ببندد، قفلِ همان اجرا هم برداشته می‌شود',
+    '🖼 چرا گالری‌ها از تب نتایج پاک می‌شدند:',
+    'بعد از استخراج بک‌اند، تب نتایج پروفایل را از سرور دوباره می‌خواند',
+    'ولی اول فهرست را پاک می‌کرد و بعد اگر «ترتیب محصولات» خالی بود، برمی‌گشت',
+    'نتیجه: تب نتایج کاملاً خالی، در حالی که محصولات و گالری‌ها روی دیسک سالم بودند',
+    '✅ حالا اول داده سنجیده می‌شود و بعد فهرست پاک می‌شود',
+    '✅ اگر ترتیب نبود، از خود محصولات ساخته می‌شود — چیزی دور ریخته نمی‌شود',
+    '📌 داده‌های روی دیسک هیچ‌وقت آسیب ندیده بودند؛ مشکل در نمایش بود'
+  ]},
   {v:'8.88', t:'حذف پرش خودکار صفحه روی موبایل + جابه‌جایی تعدیل قیمت به تب تنظیمات', items:[
     '📱 پرش‌های خودکار صفحه روی موبایل خاموش شد',
     'عوض کردن تب دیگر صفحه را به بالا نمی‌پراند',
