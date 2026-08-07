@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.90';
+const APP_VERSION = '8.91';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2853,6 +2853,36 @@ if ($productsData && function_exists('extractMergeDetail')) {
         }
     }
 }
+/* =====================================================================
+   v8.91: تنظیماتِ پرزحمت را یک فرمِ پرنشده پاک نکند.
+
+   این دومین علتِ «سلکتورهای گالری فراموش می‌شوند» بود. ذخیرهٔ خودکار
+   هر ۲ ثانیه بعد از هر تغییر کوچکی اجرا می‌شود و هرچه در فرم است را
+   می‌فرستد. اگر آن لحظه فرم هنوز پر نشده باشد — تبی که تازه باز شده و
+   پروفایل هنوز از سرور نیامده، تبِ باز مانده از دیروز، رفرشی که وسط
+   بارگذاری قطع شده — سلکتورها و تنظیم گالری خالی می‌رفتند و روی نسخهٔ
+   سالمِ روی دیسک می‌نشستند. کاربر هیچ کاری نکرده بود، ولی «روش گالری»
+   برمی‌گشت روی «خاموش» و استخراج بعدی دیگر گالری نمی‌گرفت.
+
+   تفاوت «فرم پر نشده» و «کاربر عمداً پاک کرده» از روی سلکتور اصلیِ
+   فهرست فهمیده می‌شود: بدون container اصلاً استخراجی در کار نیست، پس
+   چنین درخواستی نمی‌تواند یک ذخیرهٔ معنادار باشد. وقتی container هست،
+   خاموش کردن گالری کاملاً محترم است.
+   ===================================================================== */
+$selectorsIn  = json_decode($_POST['selectors'] ?? '{}', true) ?: [];
+$selectorsOld = (array)($profiles[$key]['selectors'] ?? []);
+$formIsBlank  = empty($selectorsIn['container']) && !empty($selectorsOld['container']);
+$selectorsFinal = $formIsBlank ? $selectorsOld : $selectorsIn;
+if ($formIsBlank && empty($detailSelectors)) {
+    $detailSelectors = (array)($profiles[$key]['detailSelectors'] ?? []);
+}
+$galleryIn  = array_key_exists('gallery', $_POST)
+    ? galleryNormalizeCfg($_POST['gallery'])
+    : galleryNormalizeCfg($profiles[$key]['gallery'] ?? []);
+$galleryOld = galleryNormalizeCfg($profiles[$key]['gallery'] ?? []);
+// گالریِ خاموشِ خالی از یک فرمِ پرنشده، تنظیم قبلی را از بین نبرد
+$galleryFinal = ($formIsBlank && !$galleryIn['enabled'] && $galleryOld['enabled'])
+    ? $galleryOld : $galleryIn;
 // v8.55: اگر syncConfig در درخواست نباشد، تنظیم قبلی حفظ شود.
 // قبلاً هر ذخیرهٔ جزئی، بازهٔ همگام‌سازی را پاک می‌کرد و پروفایل
 // دوباره «هر بار فراخوانی» می‌شد.
@@ -2865,12 +2895,10 @@ $profiles[$key] = [
 'pages' => max(1, min(100, (int)($_POST['pages'] ?? 10))),
 'pagType' => $_POST['pagType'] ?? 'query_page',
 'pagVal' => $_POST['pagVal'] ?? '',
-'selectors' => json_decode($_POST['selectors'] ?? '{}', true) ?: [],
+'selectors' => $selectorsFinal,
 'detailSelectors' => $detailSelectors,
 // v8.64: تنظیمات گالری چندعکسی — اگر در درخواست نباشد مقدار قبلی می‌ماند
-'gallery' => array_key_exists('gallery', $_POST)
-    ? galleryNormalizeCfg($_POST['gallery'])
-    : galleryNormalizeCfg($profiles[$key]['gallery'] ?? []),
+'gallery' => $galleryFinal,
 'titleSuffix' => $_POST['titleSuffix'] ?? '',
 'priceMode' => $_POST['priceMode'] ?? 'none',
 'priceVal' => (float)($_POST['priceVal'] ?? 0),
@@ -6592,15 +6620,29 @@ $queue=extractReadQueue();
 $progress=readProgress(EXTRACT_PROGRESS_FILE);
 // v8.20: اگر پردازش قطع شده باشد (مثلاً timeout سرور)، ردیف نباید برای
 // همیشه «در حال اجرا» بماند؛ بعد از ۱۵ دقیقه بی‌پاسخی «خطا» علامت می‌خورد.
+/* v8.91: معیار عوض شد — «سنِ ردیف» به «مدت بی‌حرکتی».
+   قاعدهٔ قبلی سن ردیف را می‌سنجید، یعنی اجرای سالمی که ۲۰ دقیقه طول
+   می‌کشید (گالری روشن = باز کردن صفحهٔ همهٔ محصولات) وسط کار «خطا»
+   می‌خورد. برعکسش هم بد بود: ردیفی که در ثانیهٔ اول مرده بود، ۱۵ دقیقه
+   «در حال استخراج» می‌ماند و چون محافظ تکراری‌نبودن آن را می‌دید، اجرای
+   بعدی هم راه نمی‌افتاد.
+   حالا معیار این است که آخرین بار کِی چیزی نوشته شده. اجرای زنده هر دو
+   محصول یک بار می‌نویسد، پس بی‌حرکتیِ طولانی یعنی واقعاً مرده. */
 $dirty=false;
 $now=time();
+$exIdleMax=max(120,(int)(loadConnections()['stall_after']??300));
 foreach($queue['entries'] as &$qe){
     if(($qe['status']??'')!=='running')continue;
-    $alive=!empty($progress['running'])&&!($progress['done']??false);
-    $age=$now-(int)($qe['started_at']??$now);
-    if(!$alive&&$age>900){
+    /* پردازه‌ای که مرده، خودش running=true را در فایل پیشرفت جا گذاشته —
+       دقیقاً چون فرصت نکرده done بنویسد. پس «زنده بودن» را نمی‌شود از
+       همان فایل پرسید؛ تنها شاهد قابل اعتماد، زمان آخرین نوشتن است. */
+    $mine=((string)($progress['queue_id']??''))===((string)($qe['id']??''));
+    $ts=$mine?(int)($progress['last_progress_ts']??0):0;
+    if($ts<=0)$ts=(int)($qe['started_at']??$now);
+    $idle=$now-$ts;
+    if($idle>$exIdleMax){
         $qe['status']='failed';
-        $qe['error']='پردازش نیمه‌کاره رها شد (وقفهٔ سرور؟)';
+        $qe['error']='پردازش نیمه‌کاره رها شد ('.$idle.' ثانیه بی‌حرکت — وقفهٔ سرور؟)';
         $qe['done_at']=$now;
         $dirty=true;
     }
@@ -6662,7 +6704,30 @@ header('Content-Type: application/json; charset=UTF-8');
 @file_put_contents(EXTRACT_STOP_FILE,json_encode(['stop'=>true,'time'=>time()],LOCK_EX));
 $prev=readProgress(EXTRACT_PROGRESS_FILE);
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'total'=>$prev['total']??0,'current'=>$prev['current']??0,'started_at'=>$prev['started_at']??0,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>1,'extracted'=>$prev['extracted']??0,'new'=>$prev['new']??0,'price_changed'=>$prev['price_changed']??0,'removed'=>$prev['removed']??0,'unchanged'=>$prev['unchanged']??0,'products_saved'=>false]);
-echo json_encode(['ok'=>true],JSON_UNESCAPED_UNICODE);exit;
+
+/* v8.91: خودِ ردیف صف هم بسته شود.
+   تا اینجا «توقف» فقط یک فایل سیگنال می‌نوشت و فایل پیشرفت را می‌بست.
+   اگر پردازهٔ استخراج زنده بود سیگنال را می‌دید و ردیف را می‌بست، ولی
+   وقتی آن پردازه دیگر وجود نداشت — تایم‌اوت هاست، ری‌استارت PHP، بسته
+   شدن تب — هیچ‌کس ردیف را نمی‌بست. نتیجه: ردیف تا ابد «در حال استخراج»
+   می‌ماند و چون محافظ تکراری‌نبودن همان پروفایل را در صف می‌دید، اجرای
+   بعدی هم رد می‌شد. یعنی دقیقاً همان «با دکمهٔ توقف هم متوقف نمی‌شود».
+   حالا توقف صریحاً ردیف را «متوقف» علامت می‌زند. */
+$stopQid=trim((string)($_GET['queue_id']??''));
+$queue=extractReadQueue();
+$stopped=[];$now=time();
+foreach($queue['entries'] as &$qe){
+    if(($qe['status']??'')!=='running')continue;
+    if($stopQid!==''&&($qe['id']??'')!==$stopQid)continue;
+    $qe['status']='paused';
+    $qe['error']='با دکمهٔ توقف متوقف شد';
+    $qe['done_at']=$now;
+    $qe['stopped_by_user']=true;
+    $stopped[]=$qe['id']??'';
+}
+unset($qe);
+if($stopped)extractWriteQueue($queue);
+echo json_encode(['ok'=>true,'stopped'=>$stopped],JSON_UNESCAPED_UNICODE);exit;
 }
 
 if(isset($_GET['poll_extract'])){
@@ -6720,7 +6785,11 @@ return ['__early_sent'=>$emitEarlyResponse,'ok'=>false,'error'=>$msg,
 'duplicate'=>true,'queue_id'=>$dup['id']??''];
 }
 }
-$queueId='ex_'.$profileKey.'_'.time();
+/* v8.91: شناسه فقط تا ثانیه دقت داشت. دو اجرای پشت‌سرهمِ یک پروفایل
+   (که وقتی اجرای اول فوراً شکست می‌خورد کاملاً عادی است) شناسهٔ یکسان
+   می‌گرفتند؛ آن‌وقت به‌روزرسانی وضعیت روی ردیف اشتباهی می‌نشست و گزارش
+   هر کدام گزارش دیگری را بازنویسی می‌کرد. */
+$queueId='ex_'.$profileKey.'_'.time().'_'.substr(bin2hex(random_bytes(3)),0,6);
 $queue['entries'][]=['id'=>$queueId,'status'=>'running','profile_key'=>$profileKey,'url'=>$url,'profile_name'=>$profile['name']??$profileKey,'started_at'=>time(),'products_count'=>0,'total'=>0,'current'=>0,'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,'trigger'=>$trigger];
 extractWriteQueue($queue);
 
@@ -6755,7 +6824,7 @@ foreach($prevProducts as $entry){if(is_array($entry)&&count($entry)>=2)$prevByKe
 }else{$prevByKey=$prevProducts;}
 }
 
-$allProducts=[];$seenKeys=[];$nextUrl=null;$totalPages=0;
+$allProducts=[];$seenKeys=[];$nextUrl=null;$totalPages=0;$fetchFail='';
 for($page=1;$page<=$maxPages;$page++){
 if(file_exists(EXTRACT_STOP_FILE)){@unlink(EXTRACT_STOP_FILE);
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'total'=>count($allProducts),'current'=>$page,'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>2,'extracted'=>count($allProducts)]);
@@ -6771,7 +6840,10 @@ $totalPages=$page;
 $logs=['📄 صفحه '.$page.': '.($res['ok']?'✓':'✗').' — '.mb_substr($pageUrl,0,60)];
 if(!$res['ok']){
 $logs[]='❌ خطا: '.mb_substr($res['error']??'HTTP error',0,80);
-writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>0,'current'=>$page,'started_at'=>$startedAt,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>false]);
+// v8.91: علت شکست صفحهٔ اول را نگه دار تا محافظِ پایین بداند
+// «صفر محصول» به‌خاطر قطعی بوده، نه به‌خاطر خالی شدن فروشگاه.
+if($page===1)$fetchFail='صفحهٔ اول باز نشد: '.mb_substr($res['error']??('HTTP '.(int)($res['code']??0)),0,60);
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>0,'current'=>$page,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>false]);
 if($page===1)break;
 else continue;
 }
@@ -6787,7 +6859,7 @@ $newCount++;
 $logs[]='✓ +'.($newCount).' محصول (کل: '.count($allProducts).')';
 // v8.22: مقایسهٔ زنده — شمارنده‌ها و لیست‌ها همان لحظه محاسبه می‌شوند
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
-writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages,'current'=>$page,'started_at'=>$startedAt,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>true,'page_new'=>$newCount,'page_total'=>count($allProducts)],$liveCmp));
+writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages,'current'=>$page,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>true,'page_new'=>$newCount,'page_total'=>count($allProducts)],$liveCmp));
 
 if($pagType==='next_selector'&&!empty($pagVal)){
 [$dom,$xp]=load_dom($res['html']);
@@ -6802,6 +6874,46 @@ $nextUrl=make_absolute_url($href,$res['url']);
 }
 if($page>1&&$newCount===0)break;
 usleep(500000);
+}
+
+/* =====================================================================
+   v8.91: محافظ «استخراج بی‌نتیجه چیزی را پاک نکند»
+
+   این علتِ واقعیِ ناپدید شدن گالری‌ها بود و سلکتورها هیچ ربطی به آن
+   نداشتند. سناریو دقیقاً این است:
+
+     ۱) اجرای خودکار شروع می‌شود.
+     ۲) سایت مبدأ همان لحظه در دسترس نیست — 503، تایم‌اوت، قطعی DNS،
+        یا فایروالی که ربات را چند دقیقه بلاک کرده. هر سایتی این را
+        روزی چند بار دارد.
+     ۳) حلقهٔ بالا از صفحهٔ اول بیرون می‌زند و $allProducts خالی می‌ماند.
+     ۴) کد پایین همان آرایهٔ خالی را در پروفایل می‌نوشت.
+
+   نتیجه: کل محصولات پروفایل با همهٔ گالری‌ها، تنوع‌ها و توضیحاتی که
+   ساعت‌ها طول کشیده بود، در یک لحظه صفر می‌شد. چون اجرای بعدی دوباره
+   محصولات را از فهرست پیدا می‌کرد، محصول‌ها برمی‌گشتند — ولی بدون گالری،
+   چون گالری فقط از صفحهٔ محصول می‌آید و «ادغام با اجرای قبلی» دیگر
+   چیزی برای ادغام نداشت. برای همین به نظر می‌رسید «سلکتورهای گالری
+   پاک شده‌اند»، در حالی که سلکتورها سر جایشان بودند.
+
+   قاعده: اگر قبلاً محصول داشتیم و حالا هیچ نداریم، به این اجرا اعتماد
+   نکن. چیزی ذخیره نکن و علتش را بگو. یک فروشگاه واقعاً خالی‌شده هم با
+   اجرای بعدی و پیام صریح قابل تشخیص است — ولی داده‌ای که رفته برنمی‌گردد.
+   ===================================================================== */
+if(empty($allProducts)&&!empty($prevByKey)){
+$_why=$fetchFail!==''?$fetchFail:'صفحهٔ فهرست باز شد ولی هیچ محصولی با سلکتورها پیدا نشد';
+$_guardLog=['🛡 استخراج بی‌نتیجه بود — داده‌های قبلی دست‌نخورده ماند'];
+$_guardLog[]='   • علت: '.$_why;
+$_guardLog[]='   • '.count($prevByKey).' محصول ذخیره‌شده حفظ شد (گالری و جزئیاتشان پاک نشد)';
+$_guardLog[]='   • اگر سایت مبدأ واقعاً خالی شده، اجرای بعدی هم همین را می‌گوید';
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>$maxPages,'current'=>$totalPages,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$_guardLog,'total_log_count'=>count($_guardLog),'extracted'=>0,'error'=>'استخراج بی‌نتیجه — '.$_why,'guard'=>'empty_result','kept'=>count($prevByKey),'products_saved'=>false]);
+$queue=extractReadQueue();
+foreach($queue['entries'] as &$qe){if(($qe['id']??'')===$queueId){$qe['status']='failed';$qe['error']='بی‌نتیجه — '.$_why.' · '.count($prevByKey).' محصول قبلی حفظ شد';$qe['done_at']=time();break;}}unset($qe);
+extractWriteQueue($queue);
+notifRunFailure(loadConnections(),'استخراج',$profile['name']??$profileKey,
+  'استخراج هیچ محصولی برنگرداند و متوقف شد تا داده‌های قبلی پاک نشوند. علت: '.$_why);
+return ['__early_sent'=>$emitEarlyResponse,'ok'=>false,'error'=>'استخراج بی‌نتیجه — '.$_why,
+        'guard'=>'empty_result','kept'=>count($prevByKey)];
 }
 
 /* v8.81: جزئیاتِ اجرای قبلی را برگردان، قبل از اینکه تصمیم بگیریم کدام
@@ -7005,11 +7117,26 @@ $priceDown=$finalCmp['price_down'];
 
 $productsData=[];$productsOrder=array_keys($allProducts);
 foreach($allProducts as $key=>$p){$productsData[]=[$key,$p];}
-$profile['products']=$productsData;
-$profile['productsOrder']=$productsOrder;
-$profile['updatedAt']=time();
-$profiles[$profileKey??profileKey($url)]=$profile;
-saveProfiles($profiles);
+/* v8.91: پروفایل را دوباره از دیسک بخوان و فقط محصولات را روی آن بنویس.
+
+   سومین علتِ گم شدن تنظیمات. $profiles همان نسخه‌ای است که در ثانیهٔ
+   اولِ اجرا خوانده شد. یک استخراج با گالری روشن چند دقیقه تا چند ساعت
+   طول می‌کشد و در تمام آن مدت کاربر بیدار است: سلکتور گالری را عوض
+   می‌کند، دستهٔ مقصد را تنظیم می‌کند، پروفایل دیگری را ویرایش می‌کند.
+   نوشتنِ آن نسخهٔ کهنه، همهٔ آن تغییرات را — و حتی پروفایل‌های دیگر را —
+   به عقب برمی‌گرداند. کاربر می‌دید تنظیمی که خودش نیم ساعت پیش ذخیره
+   کرده بود، بی‌دلیل به حالت قبل برگشته.
+
+   حالا فقط چیزی نوشته می‌شود که واقعاً حاصل این اجراست. */
+$pkFinal=$profileKey!==''?$profileKey:profileKey($url);
+$profilesNow=loadProfiles();
+$profileOnDisk=is_array($profilesNow[$pkFinal]??null)?$profilesNow[$pkFinal]:$profile;
+$profileOnDisk['products']=$productsData;
+$profileOnDisk['productsOrder']=$productsOrder;
+$profileOnDisk['updatedAt']=time();
+$profilesNow[$pkFinal]=$profileOnDisk;
+saveProfiles($profilesNow);
+$profiles=$profilesNow;$profile=$profileOnDisk;
 
 /* v8.90: خلاصهٔ پایانی، جزئیات فاز ۲ را هم نگه دارد.
    قبلاً این نوشتن آخر، همهٔ لاگ و شمارنده‌های جزئیات را پاک می‌کرد و
@@ -7306,11 +7433,16 @@ function cronWatchdogs(array $cn): array {
         $exDirty = false; $exStuck = null;
         foreach ($exQ['entries'] as $qi => $qe) {
             if (($qe['status'] ?? '') !== 'running') continue;
-            $ts = (int)($exProg['last_progress_ts'] ?? 0);
+            /* v8.91: همان اصلاحی که در extract_queue_status انجام شد.
+               زمان پیشرفت فقط وقتی به این ردیف مربوط است که فایل پیشرفت
+               هم مالِ همین ردیف باشد؛ وگرنه اجرای بعدی، ردیفِ رهاشدهٔ
+               قبلی را «تازه» نشان می‌داد و نگهبان هیچ‌وقت نمی‌بستش.
+               شرط $alive هم برداشته شد: پردازهٔ مرده دقیقاً به این دلیل
+               running=true جا می‌گذارد که فرصت نکرده done بنویسد. */
+            $mine = ((string)($exProg['queue_id'] ?? '')) === ((string)($qe['id'] ?? ''));
+            $ts = $mine ? (int)($exProg['last_progress_ts'] ?? 0) : 0;
             if ($ts <= 0) $ts = (int)($qe['started_at'] ?? 0);
             $idle = $ts > 0 ? ($exNow - $ts) : PHP_INT_MAX;
-            $alive = !empty($exProg['running']) && empty($exProg['done']);
-            if ($alive && $idle <= $stallCfg) continue;
             if ($idle <= $stallCfg) continue;
             $exQ['entries'][$qi]['status'] = 'failed';
             $exQ['entries'][$qi]['error'] = 'بی‌حرکت ماند (' . $idle . ' ثانیه) — نگهبان بست';
@@ -8861,6 +8993,43 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.91: توقف واقعی صف + محافظ‌های پاک شدن داده ---------- */
+    /* سه علتِ جدا که هر سه به یک نتیجه می‌رسیدند: کاری که بسته نمی‌شود و
+       گالری‌هایی که ناپدید می‌شوند. هر کدام اینجا جداگانه پاس می‌شود. */
+    $add('8.91', 'دکمهٔ توقف خودِ ردیف صف را می‌بندد',
+         strpos($selfSrc, "\$qe['stopped_by_" . "user']=true;") !== false
+         && strpos($selfSrc, "\$stopQid=trim((string)(\$_GET['queue_" . "id']??''));") !== false);
+    $add('8.91', 'توقف می‌تواند یک ردیف مشخص را هدف بگیرد',
+         strpos($selfSrc, "if(\$stopQid!==''&&(\$qe['id']??'')!==\$stopQid)cont" . 'inue;') !== false);
+    $add('8.91', 'رابط کاربری شناسهٔ ردیف را با توقف می‌فرستد',
+         strpos($selfSrc, "'?extract_stop=1&queue_id='+encodeURIComp" . 'onent(qid') !== false);
+    $add('8.91', 'ردیف مرده با بی‌حرکتی سنجیده می‌شود نه با سنِ ردیف',
+         strpos($selfSrc, '$exIdleMax=max(120,(int)(loadConnections()' . "['stall_after']??300));") !== false
+         && strpos($selfSrc, 'ثانیه بی‌حرکت — وقفهٔ سرور؟') !== false);
+    $add('8.91', 'فایل پیشرفت در فاز فهرست هم زمان می‌نویسد',
+         substr_count($selfSrc, "'last_progress_ts'=>time(),'queue_id'=>\$queueId") >= 2);
+    // محافظ ۱: استخراج بی‌نتیجه چیزی را پاک نکند
+    $add('8.91', 'استخراج بی‌نتیجه داده‌های قبلی را نگه می‌دارد',
+         strpos($selfSrc, 'if(empty($allProducts)&&!empty($prevBy' . 'Key)){') !== false
+         && strpos($selfSrc, "'guard'=>'empty_" . "result'") !== false);
+    $add('8.91', 'علت بی‌نتیجه بودن ثبت و گزارش می‌شود',
+         strpos($selfSrc, '$fetchFail=\'صفحهٔ اول باز نشد: \'') !== false
+         && strpos($selfSrc, 'استخراج بی‌نتیجه بود — داده‌های قبلی دست‌نخورده ماند') !== false);
+    // محافظ ۲: فرمِ پرنشده سلکتورها را پاک نکند
+    $add('8.91', 'فرمِ بدون سلکتور اصلی نسخهٔ دیسک را پاک نمی‌کند',
+         strpos($selfSrc, '$formIsBlank  = empty($selectorsIn[\'contai' . 'ner\'])') !== false
+         && strpos($selfSrc, '$selectorsFinal = $formIsBlank ? $selectors' . 'Old : $selectorsIn;') !== false);
+    $add('8.91', 'گالریِ خاموشِ یک فرم پرنشده تنظیم قبلی را نمی‌برد',
+         strpos($selfSrc, '$galleryFinal = ($formIsBlank && !$galleryIn[\'enab' . 'led\']') !== false);
+    $add('8.91', 'سلکتورهای جزئیات هم در فرم پرنشده حفظ می‌شوند',
+         strpos($selfSrc, 'if ($formIsBlank && empty($detailSelec' . 'tors)) {') !== false);
+    // محافظ ۳: پایان استخراج نسخهٔ کهنه را ننویسد
+    $add('8.91', 'پایان استخراج پروفایل را دوباره از دیسک می‌خواند',
+         strpos($selfSrc, '$profilesNow=loadProfiles();' . "\n" . '$profileOnDisk=') !== false
+         && strpos($selfSrc, '$profilesNow[$pkFinal]=$profile' . 'OnDisk;') !== false);
+    $add('8.91', 'ردیف متوقف‌شدهٔ کاربر از ردیف گیرکرده جدا نشان داده می‌شود',
+         strpos($selfSrc, "e.stopped_by_user?'با دکمهٔ توقف " . "متوقف شد'") !== false);
 
     /* ---------- v8.90: لاگ گویای جزئیات + شمارندهٔ تصاویر در صف ---------- */
     /* لاگ فاز ۲ فقط «۵ از ۲۰» می‌گفت: شکست باز شدن صفحه بی‌صدا رد می‌شد و
@@ -20584,7 +20753,11 @@ function watchExtractProgress(){
     extractPollTimer=setInterval(pollExtractProgress,1500);
 }
 function stopBackendExtract(){
-    fetch('?extract_stop=1').catch(()=>{});
+    // v8.91: پاسخ را بخوان و صف را بلافاصله تازه کن، تا اگر ردیف مرده
+    // بسته شد کاربر همان لحظه ببیند و منتظر نماند.
+    fetch('?extract_stop=1').then(r=>r.json()).then(()=>{
+        refreshExtractQueue();
+    }).catch(()=>{});
     if(extractPollTimer)clearInterval(extractPollTimer);
     $('extractStatusText').textContent='⏹ متوقف شد';
     $('extractProgress').classList.add('hidden');
@@ -20607,7 +20780,7 @@ function renderExtractQueue(entries, progress){
         list.innerHTML='<span style="color:#64748b">صف خالی — برای افزودن، دکمه «⚡ استخراج بک‌اند» را کلیک کنید</span>';
         return;
     }
-    const statusLabels={waiting:'⏳ در صف',running:'🔄 در حال استخراج',paused:'⏸ متوقف',done:'✅ انجام شد',failed:'❌ خطا'};
+    const statusLabels={waiting:'⏳ در صف',running:'🔄 در حال استخراج',paused:'⏹ متوقف شد',done:'✅ انجام شد',failed:'❌ خطا'};
     const statusColors={waiting:'#fbbf24',running:'#a855f7',paused:'#f97316',done:'#4ade80',failed:'#f87171'};
     const statusBg={waiting:'#42200630',running:'#7c3aed20',paused:'#c2410c20',done:'#14532d20',failed:'#7f1d1d20'};
 
@@ -20653,7 +20826,10 @@ function renderExtractQueue(entries, progress){
             }
         }else if(st==='paused'){
             progPercent=total>0?Math.round(current/total*100):0;
-            progText=toFa(current)+'/'+toFa(total)+' — متوقف';
+            // v8.91: ردیفی که کاربر متوقف کرده با ردیف گیرکرده فرق دارد
+            progText=(total>0?(toFa(current)+'/'+toFa(total)+' — '):'')
+                    +(e.stopped_by_user?'با دکمهٔ توقف متوقف شد':'متوقف');
+            if(products>0)progText+=' | '+toFa(products)+' محصول تا این لحظه';
         }else if(st==='done'){
             progPercent=100;
             progText='✓ '+toFa(products)+' محصول | '+toFa(newC)+' جدید | '+toFa(chgC)+' تغییر قیمت | '
@@ -20746,8 +20922,13 @@ function clearExtractQueueDone(){
 
 function stopExtractQueue(qid){
     if(!confirm('استخراج در حال اجرا متوقف شود؟'))return;
-    fetch('?extract_stop=1').then(()=>{
-        showToast('⏹ درخواست توقف ارسال شد');
+    /* v8.91: شناسهٔ ردیف هم فرستاده می‌شود تا سرور بتواند دقیقاً همان را
+       ببندد. تا حالا فقط یک سیگنال کلی می‌رفت و اگر پردازه مرده بود،
+       ردیف تا ابد «در حال استخراج» می‌ماند. */
+    fetch('?extract_stop=1&queue_id='+encodeURIComponent(qid||'')).then(r=>r.json()).then(d=>{
+        const n=(d&&d.stopped&&d.stopped.length)||0;
+        showToast(n>0?'⏹ متوقف شد':'⏹ درخواست توقف ارسال شد');
+        refreshExtractQueue();
         setTimeout(refreshExtractQueue,1200);
     }).catch(()=>showToast('خطا شبکه',1));
 }
@@ -21391,6 +21572,30 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.91', t:'وظیفهٔ گیرکرده که با توقف بسته نمی‌شد + علت واقعی پاک شدن گالری‌ها', items:[
+    '🐞 دکمهٔ توقف ردیف صف را نمی‌بست:',
+    'توقف فقط یک فایل سیگنال می‌نوشت — اگر پردازهٔ استخراج دیگر زنده نبود',
+    '(تایم‌اوت هاست، ری‌استارت PHP، بسته شدن تب) هیچ‌کس ردیف را نمی‌بست',
+    'ردیف تا ابد «در حال استخراج» می‌ماند و چون محافظ تکراری‌نبودن آن را',
+    'می‌دید، اجرای بعدی همان پروفایل هم رد می‌شد',
+    'حالا توقف صریحاً ردیف را «متوقف» علامت می‌زند',
+    '🐞 ردیف مرده ۱۵ دقیقه «در حال اجرا» می‌ماند:',
+    'معیار از «سنِ ردیف» به «مدت بی‌حرکتی» عوض شد',
+    'اجرای سالمِ طولانی دیگر وسط کار «خطا» نمی‌خورد، و اجرای مرده',
+    'بعد از آستانهٔ گیر کردن (پیش‌فرض ۵ دقیقه) بسته می‌شود',
+    '🖼 علت واقعی پاک شدن گالری‌ها پیدا شد — سلکتورها سالم بودند:',
+    '۱) استخراجی که هیچ محصولی برنمی‌گرداند، آرایهٔ خالی را ذخیره می‌کرد.',
+    'یک قطعی چنددقیقه‌ای سایت مبدأ (۵۰۳، تایم‌اوت، بلاک موقت) کافی بود',
+    'تا کل محصولات با گالری‌هایشان صفر شود. اجرای بعدی محصولات را',
+    'برمی‌گرداند ولی بدون گالری — چون گالری فقط از صفحهٔ محصول می‌آید',
+    'حالا استخراج بی‌نتیجه چیزی ذخیره نمی‌کند و علتش را گزارش می‌دهد',
+    '۲) ذخیرهٔ خودکار با فرمِ پرنشده، سلکتورها و تنظیم گالری را خالی می‌کرد',
+    'حالا فرمِ بدون سلکتور اصلی نمی‌تواند نسخهٔ سالم روی دیسک را پاک کند',
+    '(خاموش کردن عمدی گالری همچنان کار می‌کند)',
+    '۳) پایان استخراج، نسخهٔ کهنهٔ پروفایل را می‌نوشت و تغییراتی که کاربر',
+    'حین اجرا داده بود — و حتی پروفایل‌های دیگر — به عقب برمی‌گشت',
+    'حالا فقط محصولات نوشته می‌شوند، روی نسخهٔ تازهٔ دیسک',
+  ]},
   {v:'8.90', t:'لاگ گویای مرحلهٔ جزئیات + شمارندهٔ تصاویر در صف استخراج', items:[
     '📋 لاگ فاز جزئیات حالا می‌گوید واقعاً چه می‌گذرد:',
     'قبلاً فقط «۵ از ۲۰» بود و معلوم نمی‌شد چه چیزی به دست آمده',
