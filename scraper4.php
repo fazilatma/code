@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.89';
+const APP_VERSION = '8.90';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -6831,8 +6831,22 @@ $needDetail[$key]=$p;
 $detailTotal=count($needDetail);
 $detailDone=0;
 $galleryFound=0;$galleryImgsTotal=0;
+/* v8.90: شمارنده‌های تفصیلی تا لاگ بگوید واقعاً چه اتفاقی افتاد، نه فقط
+   «۵ از ۲۰». تا حالا اگر صفحه‌ای باز نمی‌شد یا سلکتوری چیزی پیدا نمی‌کرد،
+   هیچ ردی در لاگ نمی‌ماند و کاربر فقط می‌دید کار کند است. */
+$detailOk=0;$detailFail=0;$detailFields=0;$detailNoField=0;$varFound=0;$imgMain=0;
+$failSamples=[];$emptySamples=[];
+$detailLog=[];   // چند خط آخر، برای نمایش در نوار پیشرفت
+$pushLog=function(string $line) use (&$detailLog){
+    $detailLog[]=$line;
+    if(count($detailLog)>6)$detailLog=array_slice($detailLog,-6);
+};
 if($detailTotal>0&&(!empty($detailSelectors)||$galleryCfg['enabled'])){
-$logs=['🔍 فاز ۲: دریافت جزئیات '.$detailTotal.' محصول...'];
+$_wantFields=[];
+foreach($detailSelectors as $_f=>$_sv){ if(!empty($_sv))$_wantFields[]=$_f; }
+$logs=['🔍 فاز ۲ — باز کردن صفحهٔ محصول‌ها: '.$detailTotal.' محصول'];
+$logs[]='   • فیلدها: '.($_wantFields?implode('، ',$_wantFields):'—')
+        .($galleryCfg['enabled']?(' · گالری: روشن ('.$galleryCfg['mode'].')'):' · گالری: خاموش');
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'recent_log'=>$logs,'total_log_count'=>$totalPages+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>0,'detail_total'=>$detailTotal]);
 
 foreach($needDetail as $key=>$p){
@@ -6841,8 +6855,11 @@ writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'cancelled'=>true];
 }
 $detailDone++;
+$_pTitle=mb_substr(trim((string)($p['title']??$key)),0,42);
+$_gotFields=0;$_gotImgs=0;$_gotVars=0;
 $dr=fetch_html($p['link'],10);
 if($dr['ok']){
+$detailOk++;
 [$dom2,$xp2]=load_dom($dr['html']);
 
 foreach($detailSelectors as $field=>$selStr){
@@ -6854,6 +6871,7 @@ if(!empty($vr['values'])){
 $allProducts[$key]['variations']=$vr['values'];
 $allProducts[$key]['variation_groups']=$vr['groups'];
 $allProducts[$key]['variations_text']=implode('، ',$vr['values']);
+$_gotVars=count($vr['values']);$varFound++;$_gotFields++;
 // v8.81: قیمت هر گزینه
 if(!empty($vr['prices'])){
 $allProducts[$key]['variation_prices']=$vr['prices'];
@@ -6878,7 +6896,7 @@ $val=extractPrice($ns->item(0)->textContent);
 }else{
 $val=trim($ns->item(0)->textContent);
 }
-if($val)$allProducts[$key][$field]=$val;
+if($val){$allProducts[$key][$field]=$val;$_gotFields++;if($field==='image')$imgMain++;}
 }
 }
 
@@ -6895,19 +6913,64 @@ if($galleryCfg['enabled']){
 $gal=galleryExtract($xp2,null,$dr['url'],$galleryCfg);
 if(!empty($gal['images'])){
 $nImg=galleryApplyToProduct($allProducts[$key],$gal['images']);
+$_gotImgs=$nImg;
 if($nImg>1){$galleryFound++;$galleryImgsTotal+=$nImg;}
 }
 }
+$detailFields+=$_gotFields;
+if($_gotFields===0&&$_gotImgs<=1){
+$detailNoField++;
+if(count($emptySamples)<3)$emptySamples[]=$_pTitle;
 }
-if($detailDone%5===0||$detailDone==$detailTotal){
-$logs=['🔍 جزئیات '.$detailDone.'/'.$detailTotal.' — '.mb_substr($p['title']??$key,0,40)];
-if($galleryCfg['enabled'])$logs[]='🖼 گالری: '.$galleryFound.' محصول چندعکسی، مجموع '.$galleryImgsTotal.' تصویر';
+$pushLog('  ✓ '.$_pTitle.' — '
+  .($_gotFields?($_gotFields.' فیلد'):'بدون فیلد')
+  .($_gotVars?(' · '.$_gotVars.' تنوع'):'')
+  .($_gotImgs>1?(' · 🖼 '.$_gotImgs.' عکس'):($_gotImgs===1?' · ۱ عکس':'')));
+}else{
+/* v8.90: تا حالا شکست باز کردن صفحه بی‌صدا رد می‌شد و کاربر نمی‌فهمید
+   چرا محصول جزئیات نگرفت. حالا علتش در لاگ می‌آید. */
+$detailFail++;
+$_err=trim((string)($dr['error']??''));
+if($_err==='')$_err='HTTP '.(int)($dr['code']??0);
+if(count($failSamples)<3)$failSamples[]=$_pTitle.' ('.mb_substr($_err,0,40).')';
+$pushLog('  ✗ '.$_pTitle.' — صفحه باز نشد: '.mb_substr($_err,0,50));
+}
+/* v8.90: هر ۲ محصول به‌روزرسانی کن (قبلاً هر ۵ تا) و به‌جای یک خط
+   خشک، بگو چه چیزی به دست آمده و چه چیزی نه. */
+if($detailDone%2===0||$detailDone==$detailTotal){
+$_pct=$detailTotal>0?(int)round($detailDone/$detailTotal*100):0;
+$logs=['🔍 جزئیات '.$detailDone.' از '.$detailTotal.' ('.$_pct.'٪)'];
+$_sum='   • ✅ '.$detailOk.' صفحه باز شد';
+if($detailFail>0)$_sum.=' · ❌ '.$detailFail.' باز نشد';
+if($detailFields>0)$_sum.=' · 🏷 '.$detailFields.' فیلد';
+if($varFound>0)$_sum.=' · 🎨 '.$varFound.' محصول تنوع‌دار';
+$logs[]=$_sum;
+if($galleryCfg['enabled']){
+$logs[]='   • 🖼 گالری: '.$galleryFound.' محصول چندعکسی · مجموع '.$galleryImgsTotal.' تصویر'
+        .($galleryFound>0?(' · میانگین '.round($galleryImgsTotal/max(1,$galleryFound),1).' عکس'):'');
+}
+if($detailNoField>0)$logs[]='   • ⚠️ '.$detailNoField.' محصول هیچ فیلدی نداد'
+        .($emptySamples?(' — مثل: '.implode('، ',$emptySamples)):'');
+if($failSamples)$logs[]='   • ✗ نمونهٔ خطا: '.implode(' | ',$failSamples);
+foreach($detailLog as $_dl)$logs[]=$_dl;
 // قیمت‌ها در این مرحله ممکن است تکمیل شوند، پس مقایسه دوباره محاسبه می‌شود
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
-writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'recent_log'=>$logs,'total_log_count'=>$totalPages+$detailDone,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal],$liveCmp));
+writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>$logs,'total_log_count'=>$totalPages+$detailDone,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
 }
 usleep(200000);
 }
+/* v8.90: جمع‌بندی پایان فاز ۲ — یک نگاه و می‌فهمی چه شد. */
+$_sumLines=['✅ فاز ۲ تمام شد — '.$detailDone.' محصول بررسی شد'];
+$_sumLines[]='   • ✅ '.$detailOk.' صفحه باز شد'
+  .($detailFail>0?(' · ❌ '.$detailFail.' باز نشد'):'')
+  .' · 🏷 '.$detailFields.' فیلد استخراج شد';
+if($galleryCfg['enabled'])
+$_sumLines[]='   • 🖼 گالری: '.$galleryImgsTotal.' تصویر از '.$galleryFound.' محصول';
+if($varFound>0)$_sumLines[]='   • 🎨 '.$varFound.' محصول تنوع دارد';
+if($detailNoField>0)$_sumLines[]='   • ⚠️ '.$detailNoField.' محصول هیچ فیلدی نداد — سلکتورهای جزئیات را بررسی کنید';
+if($detailFail>0&&$failSamples)$_sumLines[]='   • ✗ '.implode(' | ',$failSamples);
+$liveCmp=extractLiveCompare($allProducts,$livePrevMap);
+writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>$_sumLines,'total_log_count'=>$totalPages+$detailDone+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
 }
 
 $newCount=0;$priceChanged=0;$unchanged=0;$removedCount=0;
@@ -6948,8 +7011,23 @@ $profile['updatedAt']=time();
 $profiles[$profileKey??profileKey($url)]=$profile;
 saveProfiles($profiles);
 
-$finalLog=['✅ استخراج بک‌اند تکمیل: '.count($allProducts).' محصول (🆕'.$newCount.' 💰'.$priceChanged.' ❌'.$removedCount.' ⏭'.$unchanged.')'];
-writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$finalLog,'total_log_count'=>$totalPages+$detailTotal+1,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url),'total_pages'=>$totalPages]);
+/* v8.90: خلاصهٔ پایانی، جزئیات فاز ۲ را هم نگه دارد.
+   قبلاً این نوشتن آخر، همهٔ لاگ و شمارنده‌های جزئیات را پاک می‌کرد و
+   کاربر فقط یک خط «تکمیل شد» می‌دید — یعنی همان چیزی که می‌خواست بداند
+   (چند صفحه باز شد، چند عکس آمد، چه چیزی نیامد) از بین می‌رفت. */
+$finalLog=['✅ استخراج تکمیل شد — '.count($allProducts).' محصول'];
+$finalLog[]='   • 🆕 '.$newCount.' جدید · 💰 '.$priceChanged.' تغییر قیمت · ❌ '.$removedCount.' حذف‌شده · ⏭ '.$unchanged.' بدون تغییر';
+if($detailTotal>0){
+$finalLog[]='   • 🔍 جزئیات: '.$detailOk.' صفحه باز شد'
+  .($detailFail>0?(' · '.$detailFail.' باز نشد'):'')
+  .' · '.$detailFields.' فیلد';
+if($galleryCfg['enabled'])
+$finalLog[]='   • 🖼 گالری: '.$galleryImgsTotal.' تصویر از '.$galleryFound.' محصول';
+if($varFound>0)$finalLog[]='   • 🎨 '.$varFound.' محصول تنوع دارد';
+if($detailNoField>0)$finalLog[]='   • ⚠️ '.$detailNoField.' محصول هیچ فیلدی نداد — سلکتورها را بررسی کنید';
+if($failSamples)$finalLog[]='   • ✗ '.implode(' | ',$failSamples);
+}
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$finalLog,'total_log_count'=>$totalPages+$detailTotal+1,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url),'total_pages'=>$totalPages,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'detail_total'=>$detailTotal,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound]);
 
 $queue=extractReadQueue();
 // v8.25: نتیجهٔ کامل هر اجرا جداگانه ذخیره می‌شود تا مودالِ کارهای
@@ -6966,7 +7044,7 @@ extractSaveReport($queueId, [
     'finished_at'   => time(),
 ]);
 
-foreach($queue['entries'] as &$qe){if($qe['id']===$queueId){$qe['status']='done';$qe['products_count']=count($allProducts);$qe['total']=count($allProducts);$qe['current']=count($allProducts);$qe['done_at']=time();$qe['new']=$newCount;$qe['price_changed']=$priceChanged;$qe['removed']=$removedCount;$qe['unchanged']=$unchanged;$qe['price_up']=$priceUp;$qe['price_down']=$priceDown;$qe['has_report']=true;break;}}unset($qe);
+foreach($queue['entries'] as &$qe){if($qe['id']===$queueId){$qe['status']='done';$qe['products_count']=count($allProducts);$qe['total']=count($allProducts);$qe['current']=count($allProducts);$qe['done_at']=time();$qe['new']=$newCount;$qe['price_changed']=$priceChanged;$qe['removed']=$removedCount;$qe['unchanged']=$unchanged;$qe['price_up']=$priceUp;$qe['price_down']=$priceDown;$qe['gallery_images']=$galleryImgsTotal;$qe['gallery_products']=$galleryFound;$qe['detail_ok']=$detailOk;$qe['detail_fail']=$detailFail;$qe['detail_fields']=$detailFields;$qe['variation_products']=$varFound;$qe['has_report']=true;break;}}unset($qe);
 extractWriteQueue($queue);
 
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>true,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url)];
@@ -8783,6 +8861,38 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.90: لاگ گویای جزئیات + شمارندهٔ تصاویر در صف ---------- */
+    /* لاگ فاز ۲ فقط «۵ از ۲۰» می‌گفت: شکست باز شدن صفحه بی‌صدا رد می‌شد و
+       معلوم نبود چه فیلدی به دست آمده. حالا هر اتفاق شمرده و گزارش می‌شود. */
+    $add('8.90', 'شمارنده‌های فاز جزئیات وجود دارند',
+         strpos($selfSrc, '$detailOk=0;$detailFail=0;') !== false
+         && strpos($selfSrc, '$failSamples=[];$emptySamples=[];') !== false);
+    $add('8.90', 'شکست باز شدن صفحه در لاگ ثبت می‌شود',
+         strpos($selfSrc, 'صفحه باز نشد: ') !== false
+         && strpos($selfSrc, '$detailFail++;') !== false);
+    $add('8.90', 'محصول بدون فیلد هشدار می‌گیرد',
+         strpos($selfSrc, 'هیچ فیلدی نداد') !== false
+         && strpos($selfSrc, '$detailNoField++;') !== false);
+    $add('8.90', 'به‌روزرسانی لاگ هر ۲ محصول است نه ۵',
+         strpos($selfSrc, 'if($detailDone%2===0||$detailDone==$detail' . 'Total){') !== false);
+    $add('8.90', 'خلاصهٔ پایانی جزئیات را پاک نمی‌کند',
+         strpos($selfSrc, '🔍 جزئیات: ') !== false
+         && strpos($selfSrc, "'✅ استخراج تکمیل شد — '") !== false);
+    // شمارنده‌ها باید هم در فایل پیشرفت و هم روی ردیف صف بنشینند
+    $add('8.90', 'شمارنده‌ها در فایل پیشرفت نوشته می‌شوند',
+         substr_count($selfSrc, "'gallery_ima" . "ges'=>\$galleryImgsTotal") >= 3);
+    $add('8.90', 'ردیف صف شمارندهٔ تصاویر را نگه می‌دارد',
+         strpos($selfSrc, "\$qe['gallery_ima" . "ges']=\$galleryImgsTotal;") !== false
+         && strpos($selfSrc, "\$qe['detail_" . "ok']=\$detailOk;") !== false);
+    // نمایش در مودال صف
+    $add('8.90', 'مودال صف شمارندهٔ تصاویر را می‌خواند',
+         strpos($selfSrc, 'const galImgs=(live&&live.gallery_images)') !== false
+         && strpos($selfSrc, 'const galProds=(live&&live.gallery_products)') !== false);
+    $add('8.90', 'نشان‌های شمارشی روی ردیف صف ساخته می‌شوند',
+         strpos($selfSrc, "'🖼 '+toFa(galImgs)+' تصویر'") !== false);
+    $add('8.90', 'ردیف در حال اجرا پیشرفت فاز جزئیات را نشان می‌دهد',
+         strpos($selfSrc, "live.phase==='detail'&&detTot>0") !== false);
 
     /* ---------- v8.89: قفل کران جلوی نگهبان را نگیرد + خالی نشدن تب نتایج ---------- */
     /* قفل کران ۳۰ دقیقه است. اگر اجرایی وسط کار می‌مُرد، قفلش می‌ماند و هر
@@ -20513,6 +20623,16 @@ function renderExtractQueue(entries, progress){
         const chgC=(live&&live.price_changed)||e.price_changed||0;
         const remC=(live&&live.removed)||e.removed||0;
         const unchC=(live&&live.unchanged)||e.unchanged||0;
+        /* v8.90: شمارندهٔ تصاویر — هم برای ردیف در حال اجرا (از progress)
+           و هم برای ردیف تمام‌شده (از خود ردیف صف). */
+        const galImgs=(live&&live.gallery_images)||e.gallery_images||0;
+        const galProds=(live&&live.gallery_products)||e.gallery_products||0;
+        const dOk=(live&&live.detail_ok)||e.detail_ok||0;
+        const dFail=(live&&live.detail_fail)||e.detail_fail||0;
+        const dFields=(live&&live.detail_fields)||e.detail_fields||0;
+        const varProds=(live&&live.variation_products)||e.variation_products||0;
+        const detCur=(live&&live.detail_current)||0;
+        const detTot=(live&&live.detail_total)||0;
 
         let progText='', progPercent=0;
         if(st==='running'){
@@ -20523,6 +20643,14 @@ function renderExtractQueue(entries, progress){
                 progText='در حال آماده‌سازی...';
             }
             if(products>0)progText+=' | '+toFa(products)+'📦 '+toFa(newC)+'🆕 '+toFa(chgC)+'💰 '+toFa(remC)+'❌';
+            // v8.90: وقتی فاز جزئیات در جریان است، پیشرفت همان را نشان بده
+            if(live&&live.phase==='detail'&&detTot>0){
+                progText='🔍 جزئیات '+toFa(detCur)+'/'+toFa(detTot);
+                if(galImgs>0)progText+=' | 🖼 '+toFa(galImgs)+' تصویر';
+                if(dFail>0)progText+=' | ❌ '+toFa(dFail);
+            }else if(galImgs>0){
+                progText+=' | 🖼 '+toFa(galImgs);
+            }
         }else if(st==='paused'){
             progPercent=total>0?Math.round(current/total*100):0;
             progText=toFa(current)+'/'+toFa(total)+' — متوقف';
@@ -20530,6 +20658,9 @@ function renderExtractQueue(entries, progress){
             progPercent=100;
             progText='✓ '+toFa(products)+' محصول | '+toFa(newC)+' جدید | '+toFa(chgC)+' تغییر قیمت | '
                     +toFa(remC)+' حذف‌شده | '+toFa(unchC)+' بدون تغییر';
+            // v8.90: تصاویر استخراج‌شده هم در خلاصهٔ ردیف تمام‌شده
+            if(galImgs>0)progText+=' | 🖼 '+toFa(galImgs)+' تصویر'
+                +(galProds>0?(' از '+toFa(galProds)+' محصول'):'');
         }else if(st==='waiting'){
             progText=total>0?(toFa(total)+' محصول — منتظر شروع'):'منتظر شروع';
         }else if(st==='failed'){
@@ -20566,6 +20697,22 @@ function renderExtractQueue(entries, progress){
 
         // ردیف ۳: متن پیشرفت
         if(progText)html+='<div style="color:#94a3b8;font-size:10px;margin-top:3px">'+progText+'</div>';
+
+        /* v8.90: نشان‌های شمارشی — تصاویر، فیلدها، تنوع‌ها و شکست‌ها.
+           تا حالا فقط تعداد محصول دیده می‌شد و معلوم نبود از دل جزئیات چه
+           چیزی واقعاً بیرون آمده. */
+        if(galImgs>0||dFields>0||varProds>0||dFail>0){
+            const badge=(bg,fg,txt)=>'<span style="background:'+bg+';color:'+fg
+                +';font-size:9.5px;padding:1px 6px;border-radius:9px;white-space:nowrap">'+txt+'</span>';
+            html+='<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">';
+            if(galImgs>0)  html+=badge('#500724','#f9a8d4','🖼 '+toFa(galImgs)+' تصویر'
+                                 +(galProds>0?(' / '+toFa(galProds)+' محصول'):''));
+            if(dFields>0)  html+=badge('#1e1b4b','#c4b5fd','🏷 '+toFa(dFields)+' فیلد');
+            if(varProds>0) html+=badge('#164e63','#67e8f9','🎨 '+toFa(varProds)+' تنوع‌دار');
+            if(dOk>0)      html+=badge('#14532d','#86efac','✅ '+toFa(dOk)+' صفحه');
+            if(dFail>0)    html+=badge('#7f1d1d','#fca5a5','❌ '+toFa(dFail)+' باز نشد');
+            html+='</div>';
+        }
 
         // ردیف ۴: زمان سپری‌شده یا زمان پایان
         if(st==='running'&&e.started_at>0){
@@ -21244,6 +21391,24 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.90', t:'لاگ گویای مرحلهٔ جزئیات + شمارندهٔ تصاویر در صف استخراج', items:[
+    '📋 لاگ فاز جزئیات حالا می‌گوید واقعاً چه می‌گذرد:',
+    'قبلاً فقط «۵ از ۲۰» بود و معلوم نمی‌شد چه چیزی به دست آمده',
+    'اول کار: چند محصول، کدام فیلدها، گالری روشن است یا نه',
+    'حین کار: چند صفحه باز شد · چند باز نشد · چند فیلد · چند تنوع · چند تصویر',
+    'برای هر محصول یک خط: ✓ نام — ۳ فیلد · ۲ تنوع · 🖼 ۴ عکس',
+    '🐞 شکست باز شدن صفحهٔ محصول تا حالا بی‌صدا رد می‌شد',
+    'حالا با علتش در لاگ می‌آید: «✗ نام محصول — صفحه باز نشد: HTTP 500»',
+    '⚠️ محصولی که هیچ فیلدی نداد هشدار می‌گیرد تا بفهمید سلکتور اشتباه است',
+    '⏱ به‌روزرسانی هر ۲ محصول انجام می‌شود (قبلاً هر ۵ تا)',
+    '🐞 خلاصهٔ پایانی، لاگ جزئیات را پاک می‌کرد و فقط یک خط «تکمیل شد» می‌ماند',
+    'حالا جمع‌بندی کامل تا آخر باقی می‌ماند',
+    '🖼 شمارندهٔ تصاویر به مودال صف استخراج اضافه شد:',
+    'ردیف در حال اجرا: پیشرفت فاز جزئیات و تعداد تصاویر تا این لحظه',
+    'ردیف تمام‌شده: «🖼 ۴۷ تصویر از ۱۱ محصول» در خلاصه',
+    'نشان‌های رنگی: تصاویر · فیلدها · محصولات تنوع‌دار · صفحات باز‌نشده',
+    'اگر گالری نبود، نشان صفر نشان داده نمی‌شود'
+  ]},
   {v:'8.89', t:'دو علت واقعی: قفل کران جلوی نگهبان را می‌گرفت، و تب نتایج زودتر از موعد پاک می‌شد', items:[
     '🩺 چرا استخراج گیر می‌کرد و ادامه نمی‌داد:',
     'کران‌جاب یک فایل قفل می‌سازد تا دو اجرا هم‌زمان نشوند — مدتش ۳۰ دقیقه است',
