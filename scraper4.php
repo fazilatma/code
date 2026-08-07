@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.87';
+const APP_VERSION = '8.88';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3414,6 +3414,13 @@ body{padding-top:0!important}
 <script>
 (function(){
 var S={},cur=null,picked=null;var MODE='shortDesc';
+/* v8.88: روی موبایل، صفحه را خودکار جابه‌جا نکن.
+   حرکت در درخت المان‌ها هر بار صفحه را وسط‌چین می‌کرد؛ روی صفحهٔ کوچک
+   این یعنی کاربر مدام جای خودش را گم می‌کند. نوار شناور کنار المان
+   می‌ماند، پس دیدنِ انتخاب بدون پرش هم ممکن است. */
+function __mob(){try{return (window.innerWidth||document.documentElement.clientWidth||0)<=820;}catch(e){return false;}}
+function __mayScroll(){try{var v=localStorage.getItem('scraper_autoscroll');if(v==='1')return true;if(v==='0')return false;}catch(e){}return !__mob();}
+function __softScroll(el,o){if(!el||!__mayScroll())return;try{el.scrollIntoView(o||{block:'center'});}catch(e){}}
 var GAL=[];   // v8.66: سلکتورهای تک‌عکسِ انتخاب‌شده برای گالری
 
 /* v8.76: همان فهرست فیلدهای پنل والد، این‌بار داخل خود صفحه.
@@ -3858,7 +3865,7 @@ function __go(dir){
   try{
     var r=t.getBoundingClientRect();
     var vh=window.innerHeight||document.documentElement.clientHeight;
-    if(r.top<60||r.bottom>vh-20) t.scrollIntoView({block:'center',behavior:'smooth'});
+    if(r.top<60||r.bottom>vh-20) __softScroll(t,{block:'center',behavior:'smooth'});
     setTimeout(function(){ __placePop(t,S[MODE]||gs(t),countMatch(gs(t)),MODE); },320);
   }catch(e){}
 }
@@ -3960,7 +3967,7 @@ function __setMode(m){
         prev.classList.add('__s'); picked=prev;
         __placePop(prev,S[MODE],countMatch(S[MODE]),MODE);
         var r=prev.getBoundingClientRect(),vh=window.innerHeight||600;
-        if(r.top<60||r.bottom>vh-20)prev.scrollIntoView({block:'center'});
+        if(r.top<60||r.bottom>vh-20)__softScroll(prev,{block:'center'});
       }
     }else if(picked){
       // فیلد تازه است ولی المانی در دست داریم: نوار همان‌جا بماند تا
@@ -4221,6 +4228,13 @@ body{padding-top:130px!important}
 <script>
 (function(){
 var S={container:'',title:'',price:'',link:'',image:''},E={},cur=null,picked=null;
+/* v8.88: روی موبایل، صفحه را خودکار جابه‌جا نکن.
+   حرکت در درخت المان‌ها هر بار صفحه را وسط‌چین می‌کرد؛ روی صفحهٔ کوچک
+   این یعنی کاربر مدام جای خودش را گم می‌کند. نوار شناور کنار المان
+   می‌ماند، پس دیدنِ انتخاب بدون پرش هم ممکن است. */
+function __mob(){try{return (window.innerWidth||document.documentElement.clientWidth||0)<=820;}catch(e){return false;}}
+function __mayScroll(){try{var v=localStorage.getItem('scraper_autoscroll');if(v==='1')return true;if(v==='0')return false;}catch(e){}return !__mob();}
+function __softScroll(el,o){if(!el||!__mayScroll())return;try{el.scrollIntoView(o||{block:'center'});}catch(e){}}
 var __isFull='<?php echo $fullMode?"1":"0";?>';
 var __fp='<?php echo $fullPageInspect??'0';?>';
 if(__isFull==='1'){
@@ -4536,7 +4550,7 @@ function __vField(step){
     el.classList.add('__s'); picked=el;
     __placePop(el,S[pick]||gs(el),pick);
     var r=el.getBoundingClientRect(),vh=window.innerHeight||600;
-    if(r.top<140||r.bottom>vh-20)el.scrollIntoView({block:'center'});
+    if(r.top<140||r.bottom>vh-20)__softScroll(el,{block:'center'});
   }else{
     __popMeta(null,'',pick);
     var pop=document.getElementById('__pop');
@@ -4657,7 +4671,7 @@ window.__goParent=function(){
     /* v8.76: فقط وقتی اسکرول کن که المان از دید بیرون باشد؛ اسکرول
        همیشگی باعث می‌شد صفحه زیر دست کاربر مدام بپرد. */
     try{var __r=p.getBoundingClientRect(),__vh=window.innerHeight||600;
-      if(__r.top<140||__r.bottom>__vh-20)p.scrollIntoView({block:'center'});}catch(_e){}
+      if(__r.top<140||__r.bottom>__vh-20)__softScroll(p,{block:'center'});}catch(_e){}
   }
 };
 
@@ -4672,7 +4686,7 @@ window.__goChild=function(){
     /* v8.76: فقط وقتی اسکرول کن که المان از دید بیرون باشد؛ اسکرول
        همیشگی باعث می‌شد صفحه زیر دست کاربر مدام بپرد. */
     try{var __r=children[0].getBoundingClientRect(),__vh=window.innerHeight||600;
-      if(__r.top<140||__r.bottom>__vh-20)children[0].scrollIntoView({block:'center'});}catch(_e){}
+      if(__r.top<140||__r.bottom>__vh-20)__softScroll(children[0],{block:'center'});}catch(_e){}
   }
 };
 
@@ -4690,7 +4704,7 @@ window.__goPrev=function(){
     /* v8.76: فقط وقتی اسکرول کن که المان از دید بیرون باشد؛ اسکرول
        همیشگی باعث می‌شد صفحه زیر دست کاربر مدام بپرد. */
     try{var __r=prev.getBoundingClientRect(),__vh=window.innerHeight||600;
-      if(__r.top<140||__r.bottom>__vh-20)prev.scrollIntoView({block:'center'});}catch(_e){}
+      if(__r.top<140||__r.bottom>__vh-20)__softScroll(prev,{block:'center'});}catch(_e){}
   }
 };
 
@@ -4708,7 +4722,7 @@ window.__goNext=function(){
     /* v8.76: فقط وقتی اسکرول کن که المان از دید بیرون باشد؛ اسکرول
        همیشگی باعث می‌شد صفحه زیر دست کاربر مدام بپرد. */
     try{var __r=next.getBoundingClientRect(),__vh=window.innerHeight||600;
-      if(__r.top<140||__r.bottom>__vh-20)next.scrollIntoView({block:'center'});}catch(_e){}
+      if(__r.top<140||__r.bottom>__vh-20)__softScroll(next,{block:'center'});}catch(_e){}
   }
 };
 
@@ -8740,6 +8754,62 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="pkChips"') !== false);
     $add('8.75', 'انتخاب قبلیِ هر فیلد دوباره نشان داده می‌شود',
          strpos($selfSrc, 'var prev=document.querySelector(String(S[MODE])') !== false);
+
+    /* ---------- v8.88: حذف پرش خودکار صفحه + جابه‌جایی تنظیم قیمت ---------- */
+    $add('8.88', 'نگهبان پرش خودکار صفحه هست',
+         strpos($selfSrc, 'function isMobile' . 'View(){') !== false
+         && strpos($selfSrc, 'function autoScroll' . 'Allowed(){') !== false
+         && strpos($selfSrc, 'function softScrollInto' . 'View(el,opts){') !== false);
+    // هیچ فراخوانی مستقیمِ scrollIntoView نباید بیرون از کمک‌تابع‌ها بماند
+    $add('8.88', 'همهٔ پرش‌ها از نگهبان رد می‌شوند', (function () use ($selfSrc) {
+        $raw = 0;
+        foreach (explode("\n", $selfSrc) as $ln) {
+            if (strpos($ln, 'scrollInto' . 'View(') === false) continue;
+            if (strpos($ln, 'softScrollInto' . 'View') !== false) continue;
+            if (strpos($ln, '__softScroll') !== false) continue;
+            if (strpos($ln, '__iScroll') !== false) continue;
+            if (strpos($ln, 'el.scrollInto' . 'View(opts') !== false) continue;  // خود کمک‌تابع
+            if (strpos($ln, 'Removed scrollInto' . 'View') !== false) continue;  // یادداشت قدیمی
+            $raw++;
+        }
+        return $raw === 0;
+    })());
+    /* window.scrollTo هم باید فقط از داخل کمک‌تابع صدا زده شود، وگرنه
+       یک بازگشتِ ساده به حالت قبل بی‌صدا از چک‌ها رد می‌شد. */
+    $add('8.88', 'اسکرول به بالای صفحه هم از نگهبان رد می‌شود',
+         strpos($selfSrc, 'softScroll' . 'To({top:0') !== false
+         && (function () use ($selfSrc) {
+             $raw = 0;
+             foreach (explode("\n", $selfSrc) as $ln) {
+                 if (strpos($ln, 'window.scroll' . 'To(') === false) continue;
+                 if (strpos($ln, 'softScroll' . 'To') !== false) continue;
+                 if (strpos($ln, 'try{ window.scroll' . 'To(opts)') !== false) continue; // خود کمک‌تابع
+                 $raw++;
+             }
+             return $raw === 0;
+         })());
+    $add('8.88', 'هر دو انتخابگر نگهبان مخصوص خودشان را دارند',
+         substr_count($selfSrc, 'function __softScr' . 'oll(el,o)') === 2
+         && substr_count($selfSrc, 'function __mayScr' . 'oll()') === 2);
+    $add('8.88', 'بازرس چسباندنی هم روی موبایل نمی‌پرد',
+         strpos($selfSrc, 'function __iScroll(el)') !== false);
+    $add('8.88', 'کاربر می‌تواند پرش خودکار را روشن کند',
+         strpos($selfSrc, 'id="autoScroll' . 'On"') !== false
+         && strpos($selfSrc, 'function setAutoScroll' . 'Pref(on){') !== false
+         && strpos($selfSrc, 'initAutoScroll' . 'Pref();') !== false);
+    /* تعدیل قیمت مقصد باید کنار بقیهٔ تنظیمات قیمت باشد، نه در منوی
+       همبرگری؛ آن‌جا کاربر دنبالش نمی‌گردد. */
+    $add('8.88', 'تعدیل قیمت مقصد در تب تنظیمات است نه منوی همبرگری',
+         strpos($selfSrc, '🎯 تعدیل جداگانه برای هر مقصد') !== false
+         && strpos($selfSrc, 'تعدیل قیمت مخصوص ' . 'همین مقصد') === false);
+    $add('8.88', 'هر دو مقصد در همان کارت مدیریت قیمت‌اند', (function () use ($selfSrc) {
+        $a = strpos($selfSrc, '💰 مدیریت ' . 'قیمت');
+        $b = strpos($selfSrc, '📋 ستون ' . 'سفارشی');
+        if ($a === false || $b === false || $b <= $a) return false;
+        $card = substr($selfSrc, $a, $b - $a);
+        return strpos($card, 'id="wcP' . 'Mode"') !== false
+            && strpos($card, 'id="bsP' . 'Mode"') !== false;
+    })());
 
     /* ---------- v8.87: تعدیل قیمت هر مقصد + نگهبان استخراج ---------- */
     $add('8.87', 'تابع تعدیل قیمت مقصد موجود است',
@@ -17057,14 +17127,6 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label style="font-size:11px">شناسه دستی:</label><input type="number" id="wcCatManual" min="0" step="1" placeholder="مثلاً ۱۲۳" dir="ltr" style="max-width:140px" oninput="applyWcCatManual()"><button class="btn btn-cyan" onclick="applyWcCatManual(1)" style="flex:0;padding:8px;font-size:11px">✓ اعمال</button></div>
 <div style="font-size:10px;color:#64748b;margin:-4px 0 6px">💡 شناسهٔ عددی دسته را می‌توانید مستقیم بنویسید — در وردپرس: محصولات ← دسته‌ها</div>
 <div class="crow"><label><input type="checkbox" id="wcMS"> موجودی</label><input type="number" id="wcSQ" value="10" style="max-width:100px"></div>
-<!-- v8.87: تعدیل قیمت مخصوص همین مقصد، جدا از تنظیم قیمت پروفایل -->
-<div style="margin-top:8px;padding:8px;background:#0f172a;border:1px solid #475569;border-radius:8px">
-<div style="font-weight:700;font-size:11.5px;color:#fbbf24;margin-bottom:6px">💰 تعدیل قیمت مخصوص این مقصد</div>
-<div style="font-size:10.5px;color:#94a3b8;line-height:1.8;margin-bottom:6px">مثلاً برای پوشش کارمزد درگاه یا حاشیهٔ سود متفاوت ووکامرس. روی <b>قیمت نهایی</b> اعمال می‌شود، پس تنظیم قیمت پروفایل سر جایش می‌ماند.</div>
-<div class="crow"><label>روش:</label><select id="wcPMode" onchange="destPricePreview('wc')" style="flex:1"><option value="none">بدون تغییر</option><option value="percent">درصد (مثلاً ۲۰ یا ۲۰-)</option><option value="multiplier">ضریب (مثلاً ۱٫۵)</option></select><input type="number" id="wcPVal" value="0" step="0.01" oninput="destPricePreview('wc')" style="max-width:110px"></div>
-<div class="crow"><label>گرد کردن:</label><select id="wcPRound" onchange="destPricePreview('wc')" style="flex:1"><option value="0">بدون گرد کردن</option><option value="1000">هزار</option><option value="5000">۵ هزار</option><option value="10000">ده هزار</option><option value="50000">۵۰ هزار</option><option value="100000">صد هزار</option></select></div>
-<div id="wcPPrev" style="font-size:11px;color:#4ade80;margin-top:4px">بدون تغییر</div>
-</div>
 <div class="cact"><button class="btn btn-purple" onclick="testWoo()">🔗 تست</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div id="wcTR" style="margin-top:8px"></div>
 </div></div>
@@ -17085,14 +17147,6 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 <div style="font-size:10px;color:#64748b;margin-bottom:8px">غرفه پیش‌فرض (فوقانی) همان تنظیمات توکن/غرفه بالاست. غرفه‌های اضافی در ارسال همزمان استفاده می‌شوند.</div>
 <div id="bslVendorsList" style="display:flex;flex-direction:column;gap:6px"></div>
-</div>
-<!-- v8.87: تعدیل قیمت مخصوص همین مقصد، جدا از تنظیم قیمت پروفایل -->
-<div style="margin-top:8px;padding:8px;background:#0f172a;border:1px solid #475569;border-radius:8px">
-<div style="font-weight:700;font-size:11.5px;color:#fbbf24;margin-bottom:6px">💰 تعدیل قیمت مخصوص این مقصد</div>
-<div style="font-size:10.5px;color:#94a3b8;line-height:1.8;margin-bottom:6px">مثلاً برای پوشش کارمزد باسلام یا هزینهٔ ارسال. روی <b>قیمت نهایی</b> اعمال می‌شود، پس تنظیم قیمت پروفایل سر جایش می‌ماند.</div>
-<div class="crow"><label>روش:</label><select id="bsPMode" onchange="destPricePreview('bs')" style="flex:1"><option value="none">بدون تغییر</option><option value="percent">درصد (مثلاً ۲۰ یا ۲۰-)</option><option value="multiplier">ضریب (مثلاً ۱٫۵)</option></select><input type="number" id="bsPVal" value="0" step="0.01" oninput="destPricePreview('bs')" style="max-width:110px"></div>
-<div class="crow"><label>گرد کردن:</label><select id="bsPRound" onchange="destPricePreview('bs')" style="flex:1"><option value="0">بدون گرد کردن</option><option value="1000">هزار</option><option value="5000">۵ هزار</option><option value="10000">ده هزار</option><option value="50000">۵۰ هزار</option><option value="100000">صد هزار</option></select></div>
-<div id="bsPPrev" style="font-size:11px;color:#4ade80;margin-top:4px">بدون تغییر</div>
 </div>
 <div class="cact"><button class="btn btn-cyan" onclick="testBsl()">🔗 تست</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div id="bsTR" style="margin-top:8px"></div>
@@ -17271,6 +17325,17 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>⚙️ تنظیمات عمومی</h3><span class="cst off" id="genS">—</span><span class="arrow">▼</span></div>
 <div class="smenu-body">
+
+<!-- v8.88: پرش خودکار صفحه، مخصوصاً روی موبایل آزاردهنده است -->
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:5px">📱 نمایش</div>
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer;margin-bottom:4px">
+<input type="checkbox" id="autoScrollOn" onchange="setAutoScrollPref(this.checked)" style="width:15px;height:15px">
+<span>پرش خودکار صفحه (اسکرول خودکار)</span></label>
+<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:10px;padding-right:21px">
+وقتی تب عوض می‌شود یا در درخت المان‌ها بالا و پایین می‌روید، صفحه خودش جابه‌جا می‌شود.
+<b>روی موبایل به‌صورت پیش‌فرض خاموش است</b> چون جای دست شما را گم می‌کند.
+اگر لازم داشتید همین‌جا روشنش کنید.
+</div>
 
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:5px">🚦 صف‌ها</div>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer;margin-bottom:4px">
@@ -17762,6 +17827,74 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
             💡 <b>درصد:</b> ۲۰ = افزایش ۲۰٪ | -۱۰ = کاهش ۱۰٪<br>
             💡 <b>ضریب:</b> ۱.۵ = ۵۰٪ افزایش | ۰.۹ = ۱۰٪ کاهش<br>
             💡 <b>گرد کردن:</b> بعد از اعمال درصد/ضریب به نزدیک‌ترین ضریب گرد می‌شود
+        </div>
+
+        <!-- v8.88: تعدیل جداگانه برای هر مقصد — همان‌جایی که بقیهٔ تنظیمات
+             قیمت هست، نه در منوی همبرگری. -->
+        <div style="margin-top:14px;padding-top:12px;border-top:1px dashed #475569">
+            <div style="font-weight:700;font-size:12px;color:#fbbf24;margin-bottom:4px">
+                🎯 تعدیل جداگانه برای هر مقصد
+            </div>
+            <div style="font-size:10.5px;color:#94a3b8;line-height:1.9;margin-bottom:10px">
+                تنظیم بالا برای همهٔ مقصدها یکسان است. اگر حاشیهٔ سود ووکامرس و باسلام فرق دارد
+                (مثلاً کارمزد باسلام یا هزینهٔ ارسال)، این‌جا برای هرکدام جداگانه تعیین کنید.
+                <span style="color:#c4b5fd">روی <b>قیمت نهاییِ</b> بالا اعمال می‌شود، پس آن تنظیم سر جایش می‌ماند.</span>
+                <br>پس از تغییر، دکمهٔ <b>💾 ذخیره</b> را بزنید.
+            </div>
+
+            <div style="padding:9px;background:#0f172a;border:1px solid #6d28d9;border-radius:8px;margin-bottom:8px">
+                <div style="font-weight:700;font-size:11.5px;color:#c4b5fd;margin-bottom:6px">🛒 ووکامرس</div>
+                <div class="row" style="align-items:center">
+                    <label style="min-width:62px">روش:</label>
+                    <select id="wcPMode" onchange="destPricePreview('wc')" style="flex:1">
+                        <option value="none">بدون تغییر</option>
+                        <option value="percent">درصد (مثلاً ۲۰ یا ۲۰-)</option>
+                        <option value="multiplier">ضریب (مثلاً ۱٫۵)</option>
+                    </select>
+                    <input type="number" id="wcPVal" value="0" step="0.01" oninput="destPricePreview('wc')" style="max-width:110px">
+                </div>
+                <div class="row" style="align-items:center;margin-top:6px">
+                    <label style="min-width:62px">گرد کردن:</label>
+                    <select id="wcPRound" onchange="destPricePreview('wc')" style="flex:1">
+                        <option value="0">بدون گرد کردن</option>
+                        <option value="1000">هزار (1,000)</option>
+                        <option value="5000">۵ هزار (5,000)</option>
+                        <option value="10000">ده هزار (10,000)</option>
+                        <option value="50000">۵۰ هزار (50,000)</option>
+                        <option value="100000">صد هزار (100,000)</option>
+                    </select>
+                </div>
+                <div id="wcPPrev" style="font-size:11px;color:#94a3b8;margin-top:6px">بدون تغییر</div>
+            </div>
+
+            <div style="padding:9px;background:#0f172a;border:1px solid #0e7490;border-radius:8px">
+                <div style="font-weight:700;font-size:11.5px;color:#67e8f9;margin-bottom:6px">🏪 باسلام</div>
+                <div class="row" style="align-items:center">
+                    <label style="min-width:62px">روش:</label>
+                    <select id="bsPMode" onchange="destPricePreview('bs')" style="flex:1">
+                        <option value="none">بدون تغییر</option>
+                        <option value="percent">درصد (مثلاً ۲۰ یا ۲۰-)</option>
+                        <option value="multiplier">ضریب (مثلاً ۱٫۵)</option>
+                    </select>
+                    <input type="number" id="bsPVal" value="0" step="0.01" oninput="destPricePreview('bs')" style="max-width:110px">
+                </div>
+                <div class="row" style="align-items:center;margin-top:6px">
+                    <label style="min-width:62px">گرد کردن:</label>
+                    <select id="bsPRound" onchange="destPricePreview('bs')" style="flex:1">
+                        <option value="0">بدون گرد کردن</option>
+                        <option value="1000">هزار (1,000)</option>
+                        <option value="5000">۵ هزار (5,000)</option>
+                        <option value="10000">ده هزار (10,000)</option>
+                        <option value="50000">۵۰ هزار (50,000)</option>
+                        <option value="100000">صد هزار (100,000)</option>
+                    </select>
+                </div>
+                <div id="bsPPrev" style="font-size:11px;color:#94a3b8;margin-top:6px">بدون تغییر</div>
+            </div>
+
+            <div class="row" style="margin-top:8px">
+                <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیرهٔ تعدیل قیمت مقصدها</button>
+            </div>
         </div>
     </div>
 
@@ -18548,7 +18681,8 @@ function scheduleSave() {
 function switchMainTab(name) {
     document.querySelectorAll('.main-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
-    window.scrollTo({top:0,behavior:'smooth'});
+    // v8.88: روی موبایل صفحه را به بالا نپران
+    softScrollTo({top:0,behavior:'smooth'});
     try { history.replaceState(null, '', '#' + name); } catch(e) {}
 }
 // v8.17: Settings panel toggle
@@ -18959,7 +19093,8 @@ function openDetailProxy(keepScroll) {
     fr.onerror = () => { $('detailStatus').textContent = '✗ صفحهٔ نمونه باز نشد'; };
     // v8.77: موقع عوض کردن نمونه، صفحه را دوباره بالا نپران
     if (!keepScroll)
-        setTimeout(() => { const p = $('pickerPanel') || $('detailFrameWrap'); p.scrollIntoView({behavior:'smooth',block:'start'}); }, 200);
+        setTimeout(() => { const p = $('pickerPanel') || $('detailFrameWrap');
+                           softScrollIntoView(p, {behavior:'smooth',block:'start'}); }, 200);
 }
 
 function suggestDetailSelectors() {
@@ -19865,6 +20000,8 @@ var style=document.createElement('style');style.textContent='*{cursor:crosshair!
 document.head.appendChild(style);
 bar.innerHTML='<div style="display:flex;gap:8px;align-items:center;padding:8px 14px;flex-wrap:wrap"><select id="__insp_m" style="padding:7px 12px;border-radius:6px;border:1px solid #475569;background:#334155;color:#fff;font:inherit;cursor:pointer"><option value="container">📦 کانتینر</option><option value="title">📝 عنوان</option><option value="price">💰 قیمت</option><option value="link">🔗 لینک</option><option value="image">🖼️ تصویر</option></select><span id="__insp_sel" style="background:#0f172a;padding:5px 10px;border-radius:4px;font-family:monospace;font-size:11px;color:#67e8f9;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">کلیک کنید...</span><button id="__insp_ok" style="padding:7px 12px;border-radius:6px;border:1px solid #475569;background:#334155;color:#fff;font:inherit;cursor:pointer">✓ بعدی</button><button id="__insp_done" style="padding:7px 12px;border-radius:6px;border:1px solid #22c55e;background:#22c55e;color:#000;font:inherit;cursor:pointer;font-weight:bold">✅ کپی همه</button><button id="__insp_close" style="padding:7px 12px;border-radius:6px;border:1px solid #ef4444;background:#ef4444;color:#fff;font:inherit;cursor:pointer">✕</button></div><div style="display:flex;gap:6px;align-items:center;padding:4px 14px 8px;flex-wrap:wrap;border-top:1px solid #334155"><button id="__insp_up" style="padding:5px 10px;border-radius:6px;border:1px solid #3b82f6;background:#1e3a5f;color:#93c5fd;font:inherit;cursor:pointer;font-weight:700">⬆</button><button id="__insp_down" style="padding:5px 10px;border-radius:6px;border:1px solid #3b82f6;background:#1e3a5f;color:#93c5fd;font:inherit;cursor:pointer;font-weight:700">⬇</button><button id="__insp_prev" style="padding:5px 10px;border-radius:6px;border:1px solid #3b82f6;background:#1e3a5f;color:#93c5fd;font:inherit;cursor:pointer;font-weight:700">⬅</button><button id="__insp_next" style="padding:5px 10px;border-radius:6px;border:1px solid #3b82f6;background:#1e3a5f;color:#93c5fd;font:inherit;cursor:pointer;font-weight:700">➡</button><span id="__insp_tag" style="background:#312e81;padding:3px 8px;border-radius:4px;font-family:monospace;font-size:11px;color:#c4b5fd">-</span><span id="__insp_cnt" style="background:#0f172a;padding:2px 8px;border-radius:4px;font-size:11px;color:#f59e0b"></span></div><div style="display:flex;gap:6px;align-items:center;padding:4px 14px 8px;flex-wrap:wrap;border-top:1px solid #1e293b;background:#0f172a"><span style="font-size:10px;color:#64748b">پیش‌نمایش:</span><span id="__insp_preview" style="background:#0f172a;padding:6px 10px;border-radius:4px;font-size:11px;color:#86efac;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid #22c55e;font-weight:700;min-width:100px;direction:ltr;text-align:left">در انتظار انتخاب...</span></div>';
 document.body.appendChild(bar);
+/* v8.88: روی موبایل صفحه را خودکار وسط‌چین نکن */
+function __iScroll(el){try{var w=window.innerWidth||document.documentElement.clientWidth||0;if(w<=820)return;el.scrollIntoView({behavior:'smooth',block:'center'});}catch(e){}}
 function selectEl(el){if(!el||el.tagName=='BODY'||el.tagName=='HTML'||el.closest('#__insp_bar'))return;var m=document.getElementById('__insp_m').value;var s=gs(el);if(E[m])E[m].classList.remove('__is');if(picked)picked.classList.remove('__ih');el.classList.add('__is');el.classList.remove('__ih');E[m]=el;S[m]=s;picked=el;document.getElementById('__insp_sel').textContent=s||'(none)';document.getElementById('__insp_tag').textContent=elInfo(el);var n=countSimilar(el);document.getElementById('__insp_cnt').textContent=n?n+' مشابه':'';var p=document.getElementById('__insp_preview');if(m==='container'){p.textContent='تعداد: '+n;p.style.color=n>=2?'#86efac':'#fbbf24';}else if(m==='title'){p.textContent=(el.textContent||'').trim().substring(0,80);p.style.color='#60a5fa';}else if(m==='price'){p.textContent=(el.textContent||'').trim().substring(0,50);p.style.color='#fbbf24';}else if(m==='link'){var a=el.tagName==='A'?el.getAttribute('href'):'';if(!a){var aEl=el.querySelector('a[href]');a=aEl?aEl.getAttribute('href'):'';}p.textContent=a||'(لینک یافت نشد)';p.style.color=a?'#a78bfa':'#fca5a5';}else if(m==='image'){var img=el.tagName==='IMG'?el.getAttribute('src'):'';if(!img){var imgEl=el.querySelector('img');img=imgEl?imgEl.getAttribute('src'):'';}p.textContent=img||'(تصویر یافت نشد)';p.style.color=img?'#f472b6':'#fca5a5';}}
 document.addEventListener('mouseover',function(e){if(e.target.closest('#__insp_bar'))return;if(cur&&cur!==picked)cur.classList.remove('__ih');cur=e.target;if(cur!==picked)cur.classList.add('__ih');},true);
 document.addEventListener('mouseout',function(e){if(e.target&&e.target!==picked)e.target.classList.remove('__ih');},true);
@@ -19872,10 +20009,10 @@ document.addEventListener('click',function(e){if(e.target.closest('#__insp_bar')
 document.getElementById('__insp_ok').onclick=function(){var m=document.getElementById('__insp_m').value;if(!S[m]){alert('ابتدا المانی انتخاب کنید');return;}var i=fields.indexOf(m);if(i<fields.length-1){document.getElementById('__insp_m').value=fields[i+1];picked=null;}};
 document.getElementById('__insp_done').onclick=function(){if(!S.container){alert('کانتینر را انتخاب کنید');return;}var t='';for(var k in S){if(S[k])t+=labels[k]+': '+S[k]+'\n';}navigator.clipboard.writeText(t).then(function(){alert('✅ سلکتورها کپی شد:\n\n'+t);}).catch(function(){prompt('سلکتورها را کپی کنید:',t);});};
 document.getElementById('__insp_close').onclick=function(){bar.remove();style.remove();if(picked)picked.classList.remove('__ih');for(var k in E)if(E[k])E[k].classList.remove('__is');};
-document.getElementById('__insp_up').onclick=function(){var el=picked||cur;if(!el)return;var p=el.parentElement;if(p&&p.tagName!=='BODY'&&p.tagName!=='HTML'&&!p.closest('#__insp_bar')){if(el===picked)el.classList.remove('__is');el.classList.remove('__ih');selectEl(p);p.scrollIntoView({behavior:'smooth',block:'center'});}};
-document.getElementById('__insp_down').onclick=function(){var el=picked||cur;if(!el)return;var ch=Array.from(el.children).filter(function(c){return !c.id||c.id!=='__insp_bar'});if(ch.length>0){if(el===picked)el.classList.remove('__is');el.classList.remove('__ih');selectEl(ch[0]);ch[0].scrollIntoView({behavior:'smooth',block:'center'});}};
-document.getElementById('__insp_prev').onclick=function(){var el=picked||cur;if(!el)return;var prev=el.previousElementSibling;if(prev){if(el===picked)el.classList.remove('__is');el.classList.remove('__ih');selectEl(prev);prev.scrollIntoView({behavior:'smooth',block:'center'});}};
-document.getElementById('__insp_next').onclick=function(){var el=picked||cur;if(!el)return;var next=el.nextElementSibling;if(next){if(el===picked)el.classList.remove('__is');el.classList.remove('__ih');selectEl(next);next.scrollIntoView({behavior:'smooth',block:'center'});}};
+document.getElementById('__insp_up').onclick=function(){var el=picked||cur;if(!el)return;var p=el.parentElement;if(p&&p.tagName!=='BODY'&&p.tagName!=='HTML'&&!p.closest('#__insp_bar')){if(el===picked)el.classList.remove('__is');el.classList.remove('__ih');selectEl(p);__iScroll(p);}};
+document.getElementById('__insp_down').onclick=function(){var el=picked||cur;if(!el)return;var ch=Array.from(el.children).filter(function(c){return !c.id||c.id!=='__insp_bar'});if(ch.length>0){if(el===picked)el.classList.remove('__is');el.classList.remove('__ih');selectEl(ch[0]);__iScroll(ch[0]);}};
+document.getElementById('__insp_prev').onclick=function(){var el=picked||cur;if(!el)return;var prev=el.previousElementSibling;if(prev){if(el===picked)el.classList.remove('__is');el.classList.remove('__ih');selectEl(prev);__iScroll(prev);}};
+document.getElementById('__insp_next').onclick=function(){var el=picked||cur;if(!el)return;var next=el.nextElementSibling;if(next){if(el===picked)el.classList.remove('__is');el.classList.remove('__ih');selectEl(next);__iScroll(next);}};
 document.body.style.paddingTop=(bar.offsetHeight+10)+'px';
 })();`;
     const bookmarklet='javascript:'+script;
@@ -19947,6 +20084,52 @@ function update(){
 
 // v8.06: Safe scroll — only scrolls the element if it's visible and has overflow (prevents mobile auto-scroll)
 function scrollElBottom(el){if(!el)return;try{if(el.scrollHeight>el.clientHeight&&el.scrollHeight>0){const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<80;if(nearBottom)el.scrollTop=el.scrollHeight;}}catch(e){}}
+/* =====================================================================
+ *  v8.88: جلوگیری از پرش‌های خودکار صفحه روی موبایل.
+ *
+ *  چند جای برنامه صفحه را خودکار جابه‌جا می‌کردند: عوض کردن تب صفحه را
+ *  به بالا می‌پراند، باز کردن نمونهٔ سلکتور صفحه را پایین می‌کشید، و
+ *  حرکت در درخت المان‌ها هر بار صفحه را وسط‌چین می‌کرد. روی دسکتاپ
+ *  تحمل‌پذیر است ولی روی موبایل — که صفحه کوچک است و کاربر با انگشت
+ *  جای خودش را نگه داشته — آزاردهنده است و کار را از دست کاربر می‌گیرد.
+ *
+ *  اینجا یک نقطهٔ واحد گذاشته شده تا همهٔ آن جاها از یک قاعده پیروی کنند
+ *  و بشود با یک تنظیم خاموش/روشنش کرد.
+ * ===================================================================== */
+function isMobileView(){
+  try{
+    if(window.matchMedia&&window.matchMedia('(max-width: 820px)').matches)return true;
+    return (window.innerWidth||document.documentElement.clientWidth||0)<=820;
+  }catch(e){ return false; }
+}
+/** آیا اجازهٔ پرش خودکار صفحه هست؟ پیش‌فرض روی موبایل: نه */
+function autoScrollAllowed(){
+  try{
+    const v=localStorage.getItem('scraper_autoscroll');
+    if(v==='1')return true;      // کاربر صریحاً روشن کرده
+    if(v==='0')return false;     // کاربر صریحاً خاموش کرده
+  }catch(e){}
+  return !isMobileView();
+}
+/** جای گذاشتنِ scrollIntoView — روی موبایل بی‌صدا کاری نمی‌کند */
+function softScrollIntoView(el,opts){
+  if(!el||!autoScrollAllowed())return false;
+  try{ el.scrollIntoView(opts||{block:'center'}); return true; }catch(e){ return false; }
+}
+/** جای گذاشتنِ window.scrollTo */
+function softScrollTo(opts){
+  if(!autoScrollAllowed())return false;
+  try{ window.scrollTo(opts); return true; }catch(e){ return false; }
+}
+function setAutoScrollPref(on){
+  try{ localStorage.setItem('scraper_autoscroll', on?'1':'0'); }catch(e){}
+  showToast(on?'پرش خودکار صفحه روشن شد':'پرش خودکار صفحه خاموش شد');
+}
+/** تیک را با وضعیت فعلی هم‌تراز کن (پیش‌فرض موبایل: خاموش) */
+function initAutoScrollPref(){
+  const el=document.getElementById('autoScrollOn');
+  if(el)el.checked=autoScrollAllowed();
+}
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
 /**
  * v8.84: مقدار امن برای گذاشتن داخل رشتهٔ تک‌کوتیشنیِ یک ویژگی onclick.
@@ -20995,6 +21178,21 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.88', t:'حذف پرش خودکار صفحه روی موبایل + جابه‌جایی تعدیل قیمت به تب تنظیمات', items:[
+    '📱 پرش‌های خودکار صفحه روی موبایل خاموش شد',
+    'عوض کردن تب دیگر صفحه را به بالا نمی‌پراند',
+    'باز کردن نمونهٔ سلکتور دیگر صفحه را پایین نمی‌کشد',
+    'حرکت در درخت المان‌ها (⬆ والد / ⬇ فرزند) دیگر صفحه را وسط‌چین نمی‌کند',
+    'بازرس چسباندنی (بوکمارکلت) هم روی موبایل نمی‌پرد',
+    'جمعاً ۱۲ نقطه که صفحه را جابه‌جا می‌کردند، همه از یک نگهبان رد می‌شوند',
+    'روی دسکتاپ رفتار قبلی دست‌نخورده است (مرز: عرض ۸۲۰ پیکسل)',
+    '⚙️ اگر خواستید روشنش کنید: منوی همبرگری ← تنظیمات عمومی ← «پرش خودکار صفحه»',
+    'انتخاب شما ذخیره می‌شود و بر تشخیص خودکار اولویت دارد',
+    '💰 «تعدیل جداگانه برای هر مقصد» از منوی همبرگری برداشته شد',
+    'حالا سر جای درستش است: تب «تنظیمات» ← کارت «💰 مدیریت قیمت»',
+    'یعنی همهٔ تنظیمات قیمت — پروفایل و مقصدها — کنار هم دیده می‌شوند',
+    'عملکردش عوض نشده؛ فقط جایش درست شد'
+  ]},
   {v:'8.87', t:'درصد قیمت جداگانه برای هر مقصد + نگهبان استخراج', items:[
     '💰 حالا ووکامرس و باسلام هرکدام درصد/ضریب قیمت خودشان را دارند',
     'در «⚙️ منبع و نصب‌کننده» زیر تنظیمات هر مقصد، بخش «تعدیل قیمت مخصوص این مقصد»',
@@ -23686,6 +23884,7 @@ function syncBslSendBoxCats(catId,fallbackIds){
 }
 // v7.48: Search input event handlers
 document.addEventListener('DOMContentLoaded',function(){
+    try{ initAutoScrollPref(); }catch(e){}   // v8.88
     const si=$('bsCatSearch');
     if(si){
         si.addEventListener('focus',function(){renderBslCatFilter(this.value);$('bsCatList').style.display='block';});
