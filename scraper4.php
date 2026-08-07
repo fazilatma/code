@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.94';
+const APP_VERSION = '8.95';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7485,62 +7485,67 @@ function cronExtractLikeButton(string $key, array $profile): array {
     // اجرای CLI یا هر حالتی که آدرس خودمان را نمی‌دانیم
     if (selfBaseUrl() === '') return runBackendExtract($key, 'auto');
 
-    // همان درخواستی که مرورگر با کلیک روی دکمه می‌فرستد
-    $fired = fireAndForget('action=backend_extract&profile_key=' . rawurlencode($key)
-                           . '&trigger=auto', 2500);
-    if (!$fired) return runBackendExtract($key, 'auto');   // شلیک نشد؛ خودمان انجامش می‌دهیم
-
-    /* منتظر پایان بمان. سقف انتظار از «آستانهٔ گیر کردن» می‌آید و معیارِ
-       زنده بودن، آخرین نوشتنِ فایل پیشرفت است — نه گذر زمان. استخراج
-       سالم هر دو محصول یک بار می‌نویسد، پس تا وقتی می‌نویسد صبر می‌کنیم. */
-    $cnW      = loadConnections();
-    $idleMax  = max(120, (int)($cnW['stall_after'] ?? 300));
-    $hardMax  = max(600, (int)($cnW['cron_extract_max'] ?? 3600));
-    $started  = time();
-    $lastSeen = time();
-    $lastTs   = 0;
-    $sawRun   = false;
-
-    while (true) {
-        usleep(2000000);                       // هر ۲ ثانیه
-        clearstatcache(true, EXTRACT_PROGRESS_FILE);
-        $p = readProgress(EXTRACT_PROGRESS_FILE);
-        $ts = (int)($p['last_progress_ts'] ?? 0);
-        if ($ts > $lastTs) { $lastTs = $ts; $lastSeen = time(); }
-
-        $isDone = !empty($p['done']);
-        $isRun  = !empty($p['running']) && !$isDone;
-        if ($isRun) { $sawRun = true; $lastSeen = time(); }
-
-        if ($isDone && ($sawRun || (time() - $started) > 6)) break;   // تمام شد
-        if ((time() - $lastSeen) > $idleMax) break;                   // بی‌حرکت ماند
-        if ((time() - $started)  > $hardMax) break;                   // سقف مطلق
+    /* v8.95: اگر استخراجِ همین پروفایل از اجرای قبلیِ کران هنوز در جریان
+       است، دوباره شلیک نکن — فقط بگو هنوز تمام نشده. */
+    $pNow = readProgress(EXTRACT_PROGRESS_FILE);
+    if (!empty($pNow['running']) && empty($pNow['done'])
+        && (string)($pNow['profile_key'] ?? '') === $key) {
+        return ['ok' => false, 'pending' => true, 'error' => 'استخراج هنوز در جریان است',
+                'extracted' => (int)($pNow['extracted'] ?? 0)];
     }
 
-    // نتیجه را از همان‌جایی بخوان که پنل پیشرفت می‌خواند
-    $p = readProgress(EXTRACT_PROGRESS_FILE);
-    if (!empty($p['error']) || !empty($p['guard'])) {
-        return ['ok' => false, 'error' => (string)($p['error'] ?? 'استخراج ناتمام'),
-                'guard' => $p['guard'] ?? null, 'extracted' => (int)($p['extracted'] ?? 0)];
+    /* v8.95: نتیجهٔ استخراجی که اجرای قبلیِ کران شروع کرده بود.
+       چون منتظر نمی‌مانیم، نتیجه در «همین» اجرا آماده نیست؛ در اجرای
+       بعدی از فایل پیشرفت برداشته می‌شود و آن‌وقت ارسال انجام می‌گیرد.
+
+       مهم: هر نتیجه فقط «یک بار» مصرف می‌شود. مهر زمانیِ آخرین نتیجهٔ
+       مصرف‌شده در sync_state نگه داشته می‌شود، وگرنه هر اجرای کران همان
+       نتیجهٔ قدیمی را دوباره می‌دید و محصولات را بارها می‌فرستاد. */
+    $stAll     = loadSyncState();
+    $consumed  = (int)($stAll[$key]['extract_consumed_ts'] ?? 0);
+    $ready = null;
+    if (!empty($pNow['done']) && (string)($pNow['profile_key'] ?? '') === $key
+        && !empty($pNow['products_saved'])
+        && (int)($pNow['last_progress_ts'] ?? 0) > $consumed) {
+        $ready = ['ok' => true,
+            'extracted'     => (int)($pNow['extracted'] ?? 0),
+            'new'           => (int)($pNow['new'] ?? 0),
+            'price_changed' => (int)($pNow['price_changed'] ?? 0),
+            'removed'       => (int)($pNow['removed'] ?? 0),
+            'unchanged'     => (int)($pNow['unchanged'] ?? 0),
+            'price_up'      => (int)($pNow['price_up'] ?? 0),
+            'price_down'    => (int)($pNow['price_down'] ?? 0),
+            'new_items'     => is_array($pNow['new_items'] ?? null) ? $pNow['new_items'] : [],
+            'changed_items' => is_array($pNow['changed_items'] ?? null) ? $pNow['changed_items'] : [],
+            'removed_items' => is_array($pNow['removed_items'] ?? null) ? $pNow['removed_items'] : [],
+            'products_saved' => true,
+            'profile_key'   => $key,
+            'via_button'    => true,
+            'from_previous_run' => true];
+        // همین‌جا مصرف‌شده علامت بخورد تا اجرای بعدی دوباره نفرستدش
+        if (!isset($stAll[$key]) || !is_array($stAll[$key])) $stAll[$key] = [];
+        $stAll[$key]['extract_consumed_ts'] = (int)($pNow['last_progress_ts'] ?? time());
+        saveSyncState($stAll);
     }
-    if (empty($p['done'])) {
-        return ['ok' => false, 'error' => 'استخراج در مهلت مقرر تمام نشد',
-                'extracted' => (int)($p['extracted'] ?? 0)];
+
+    /* همان درخواستی که مرورگر با کلیک روی دکمه می‌فرستد.
+       v8.95: و بعدش منتظر نمی‌مانیم — این نکتهٔ حیاتی است. اگر کران
+       بنشیند و صبر کند، یک worker را تا پایان کار اشغال می‌کند در حالی
+       که خودِ استخراج به worker دومی نیاز دارد. روی هاست اشتراکی که
+       چند worker بیشتر ندارد این یعنی بن‌بست: کران منتظر استخراجی است
+       که هرگز نوبت اجرا نمی‌گیرد. با تست واقعی روی HTTP همین اتفاق افتاد
+       و کران «استخراج در مهلت مقرر تمام نشد» می‌داد در حالی که استخراج
+       سالم انجام شده بود.
+       پس شلیک می‌کنیم و می‌رویم؛ ارسال در اجرای بعدیِ کران انجام می‌شود
+       که چند دقیقهٔ دیگر خودش می‌آید. */
+    if ($ready === null) {
+        $fired = fireAndForget('action=backend_extract&profile_key=' . rawurlencode($key)
+                               . '&trigger=auto', 2500);
+        if (!$fired) return runBackendExtract($key, 'auto');   // شلیک نشد؛ خودمان انجامش می‌دهیم
+        return ['ok' => false, 'started' => true, 'via_button' => true,
+                'error' => 'استخراج در پس‌زمینه شروع شد — ارسال در اجرای بعدی کران'];
     }
-    return ['ok' => true,
-        'extracted'     => (int)($p['extracted'] ?? 0),
-        'new'           => (int)($p['new'] ?? 0),
-        'price_changed' => (int)($p['price_changed'] ?? 0),
-        'removed'       => (int)($p['removed'] ?? 0),
-        'unchanged'     => (int)($p['unchanged'] ?? 0),
-        'price_up'      => (int)($p['price_up'] ?? 0),
-        'price_down'    => (int)($p['price_down'] ?? 0),
-        'new_items'     => is_array($p['new_items'] ?? null) ? $p['new_items'] : [],
-        'changed_items' => is_array($p['changed_items'] ?? null) ? $p['changed_items'] : [],
-        'removed_items' => is_array($p['removed_items'] ?? null) ? $p['removed_items'] : [],
-        'products_saved' => !empty($p['products_saved']),
-        'profile_key'   => (string)($p['profile_key'] ?? $key),
-        'via_button'    => true];
+    return $ready;
 }
 
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
@@ -7788,7 +7793,24 @@ $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
 // تکرار شود، نه در هر اجرای بعدی.
 if (!isset($syncState[$key])) $syncState[$key] = ['lastRun' => $now, 'status' => 'idle'];
 $syncState[$key]['price_sig'] = $priceSig;
+/* v8.95: وقتی استخراج فقط «شروع» شده و نتیجه‌اش هنوز نیامده، این اجرا
+   کامل نبوده. اگر lastRun جلو برود، اجرای بعدی «هنوز نوبت نیست» می‌گوید
+   و نتیجهٔ آمادهٔ استخراج تا یک بازهٔ کامل معطل می‌ماند. پس نوبت را نگه
+   می‌داریم تا اجرای بعدی بتواند نتیجه را بردارد و ارسال کند. */
+if (!empty($exRes['started']) || !empty($exRes['pending'])) {
+    $syncState[$key]['lastRun'] = (int)($syncState[$key]['lastRun'] ?? 0);
+    $syncState[$key]['status']  = 'extracting';
+}
 $results['profiles'][] = $pResult;
+}
+/* v8.95: مهر «نتیجهٔ مصرف‌شده» را که cronExtractLikeButton نوشته حفظ کن —
+   $syncState از قبل از آن نوشتن خوانده شده و بدون این ادغام پاکش می‌کرد. */
+$stFresh = loadSyncState();
+foreach ($stFresh as $k => $v) {
+    if (isset($v['extract_consumed_ts'])) {
+        if (!isset($syncState[$k]) || !is_array($syncState[$k])) $syncState[$k] = $v;
+        else $syncState[$k]['extract_consumed_ts'] = $v['extract_consumed_ts'];
+    }
 }
 saveSyncState($syncState);
 
@@ -9153,14 +9175,27 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "fireAndForget('action=backend_extract" . "&profile_key='") !== false);
     $add('8.94', 'اگر شلیک HTTP ممکن نبود، فراخوانی مستقیم جایگزین می‌شود',
          substr_count($selfSrc, "return runBackendExtract(\$key, 'auto');") >= 2);
-    $add('8.94', 'کران منتظر پایان استخراج می‌ماند و نتیجه را از فایل پیشرفت می‌خواند',
-         strpos($selfSrc, '$idleMax  = ' . 'max(120,') !== false
-         && strpos($selfSrc, "readProgress(EXTRACT_PROGRESS_FILE);\n    if (!empty(\$p['error'])") !== false);
-    $add('8.94', 'انتظار با بی‌حرکتی سنجیده می‌شود نه با گذر زمان',
-         strpos($selfSrc, 'if ((time() - $lastSeen) > ' . '$idleMax) break;') !== false
-         && strpos($selfSrc, 'if ($ts > $lastTs) { $lastTs = $ts; ' . '$lastSeen = time(); }') !== false);
-    $add('8.94', 'کش stat قبل از هر بار خواندن پیشرفت پاک می‌شود',
-         strpos($selfSrc, 'clearstatcache(true, EXTRACT_PROGRESS_' . 'FILE);') !== false);
+    /* v8.95: کران هرگز منتظر درخواستِ خودش نمی‌ماند.
+       انتظار مسدودکننده یک worker را اشغال می‌کرد در حالی که استخراج به
+       worker دومی نیاز داشت؛ روی هاست اشتراکی با worker کم این بن‌بست
+       می‌شد. با تست روی HTTP واقعی دیده شد: استخراج سالم انجام می‌شد ولی
+       کران «در مهلت مقرر تمام نشد» می‌داد. */
+    $add('8.95', 'کران منتظر درخواست خودش نمی‌ماند (بن‌بست worker)',
+         !preg_match('~while \(true\) \{\s*\n\s*usleep\(2000000\)~', $selfSrc)
+         && strpos($selfSrc, "'error' => 'استخراج در پس‌زمینه شروع شد") !== false);
+    $add('8.95', 'نتیجهٔ آمادهٔ اجرای قبلی در اجرای بعدی مصرف می‌شود',
+         strpos($selfSrc, "'from_previous_" . "run' => true];") !== false
+         && strpos($selfSrc, "\$consumed  = (int)(\$stAll[\$key]['extract_consumed" . "_ts'] ?? 0);") !== false);
+    $add('8.95', 'هر نتیجه فقط یک بار مصرف می‌شود',
+         strpos($selfSrc, "\$stAll[\$key]['extract_consumed_ts'] = (int)(\$pNow['last_progress" . "_ts'] ?? time());") !== false);
+    $add('8.95', 'مهر مصرف‌شده با ذخیرهٔ پایانی کران پاک نمی‌شود',
+         strpos($selfSrc, '$stFresh = ' . 'loadSyncState();') !== false
+         && strpos($selfSrc, "\$syncState[\$k]['extract_consumed_ts'] = \$v['extract_consumed" . "_ts'];") !== false);
+    $add('8.95', 'وقتی استخراج فقط شروع شده، نوبت اجرا جلو نمی‌رود',
+         strpos($selfSrc, "if (!empty(\$exRes['started']) || !empty(\$exRes['pend" . "ing'])) {") !== false
+         && strpos($selfSrc, "\$syncState[\$key]['status']  = 'extract" . "ing';") !== false);
+    $add('8.95', 'استخراجِ در جریان دوباره شلیک نمی‌شود',
+         strpos($selfSrc, "return ['ok' => false, 'pending' => true, " . "'error' => 'استخراج هنوز در جریان است',") !== false);
     $add('8.94', 'اندپوینت برچسب trigger=auto را می‌پذیرد',
          strpos($selfSrc, "\$trg = ((\$_GET['trigger'] ?? \$_POST['trigger'] ?? '') === 'auto')") !== false
          && strpos($selfSrc, 'runBackendExtract($profileKey,$trg,true);') !== false);
@@ -21808,6 +21843,22 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.95', t:'کران واقعاً همان دکمه را می‌زند — بدون بن‌بست انتظار', items:[
+    '🐞 در ۸.۹۴ کران درخواست دکمه را می‌زد ولی بعدش «منتظر» می‌ماند:',
+    'انتظار مسدودکننده یک worker را اشغال می‌کرد، در حالی که خودِ استخراج',
+    'به worker دوم نیاز داشت. روی هاست اشتراکی با worker کم = بن‌بست',
+    'کران می‌گفت «استخراج در مهلت مقرر تمام نشد» در حالی که استخراج',
+    'کاملاً سالم انجام شده بود و گالری‌ها هم آمده بودند',
+    '⚠️ این را تست قبلی من نگرفت چون در محیط تست، درخواست به خود سرور',
+    'اصلاً برقرار نمی‌شد و همیشه مسیر جایگزین (کد قدیمی) اجرا می‌شد',
+    'حالا تست روی یک سرور HTTP واقعی انجام می‌شود',
+    '✅ کران شلیک می‌کند و برمی‌گردد — دقیقاً مثل خود دکمه',
+    '✅ استخراج در پردازهٔ مستقل خودش کامل می‌شود (گالری، تنوع، جزئیات)',
+    '✅ اجرای بعدی کران نتیجهٔ آماده را برمی‌دارد و ارسال را انجام می‌دهد',
+    '✅ هر نتیجه فقط یک بار مصرف می‌شود، پس محصولات دوبار فرستاده نمی‌شوند',
+    '✅ تا وقتی نتیجه مصرف نشده، نوبت اجرا جلو نمی‌رود',
+    '✅ اگر استخراجی در جریان باشد، دوباره شلیک نمی‌شود',
+  ]},
   {v:'8.94', t:'کران‌جاب هم دقیقاً همان دکمهٔ «استخراج بک‌اند» را می‌زند', items:[
     '🖼 علت واقعیِ نیامدن گالری در استخراج خودکار پیدا شد:',
     'از ۸.۹۲ هستهٔ استخراج یکی بود، ولی «شرایط اجرا» یکی نبود —',
