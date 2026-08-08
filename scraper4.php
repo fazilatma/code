@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.94';
+const APP_VERSION = '8.98';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -6451,6 +6451,8 @@ if (isset($_POST['retire_max_count'])) $conn['retire_max_count'] = max(1, (int)$
 // v8.33: تنظیمات نگهبان صف
 if (isset($_POST['stall_watchdog'])) $conn['stall_watchdog'] = !empty($_POST['stall_watchdog']) && $_POST['stall_watchdog'] !== 'false';
 if (isset($_POST['stall_after']))    $conn['stall_after']    = max(60, (int)$_POST['stall_after']);
+// v8.97: سقف زمانی فاز جزئیات در هر نوبت — جلوی کشته شدن پردازه توسط هاست
+if (isset($_POST['detail_budget_sec'])) $conn['detail_budget_sec'] = max(0, min(3600, (int)$_POST['detail_budget_sec']));
 // v8.37: فاصلهٔ پینگ کران (دقیقه) — صفر یعنی هر اجرا
 if (isset($_POST['ping_every'])) $conn['ping_every'] = max(0, (int)$_POST['ping_every']);
 // v8.38: یادآوری موارد بی‌جواب
@@ -6732,7 +6734,40 @@ echo json_encode(['ok'=>true,'stopped'=>$stopped],JSON_UNESCAPED_UNICODE);exit;
 
 if(isset($_GET['poll_extract'])){
 header('Content-Type: application/json; charset=UTF-8');
+clearstatcache(true,EXTRACT_PROGRESS_FILE);
 $p=readProgress(EXTRACT_PROGRESS_FILE);
+/* v8.97: استخراج دستی هم نگهبان می‌خواهد.
+
+   نگهبان فقط داخل کران بود، پس وقتی استخراجِ دستی وسط کار می‌مُرد
+   (که روی این هاست عادی است) نه فایل پیشرفت بسته می‌شد نه ردیف صف —
+   مرورگر تا ابد «در حال استخراج» نشان می‌داد و کاربر فکر می‌کرد
+   نگهبانی در کار نیست. این اندپوینت همان چیزی است که مرورگر هر ۱.۵
+   ثانیه صدا می‌زند، پس بهترین جا برای تشخیص است. */
+if(!empty($p['running'])&&empty($p['done'])){
+    $_pTs=(int)($p['last_progress_ts']??($p['started_at']??0));
+    $_pIdle=$_pTs>0?(time()-$_pTs):PHP_INT_MAX;
+    $_pMax=max(120,(int)(loadConnections()['stall_after']??300));
+    if($_pIdle>$_pMax){
+        $p['running']=false;$p['done']=true;$p['stalled']=true;
+        $p['error']='استخراج '.$_pIdle.' ثانیه بی‌حرکت ماند — پردازه توسط سرور بسته شده';
+        $p['recent_log']=array_merge((array)($p['recent_log']??[]),
+            ['⛔ پردازش نیمه‌کاره رها شد ('.$_pIdle.' ثانیه بی‌حرکت)',
+             '   • کارِ انجام‌شده تا این لحظه ذخیره شده — از دست نرفته',
+             '   • دوباره استخراج بزنید تا از همان‌جا ادامه دهد']);
+        writeProgress(EXTRACT_PROGRESS_FILE,$p);
+        // ردیف صف هم بسته شود، وگرنه «در حال اجرا» می‌ماند
+        $_q=extractReadQueue();$_qd=false;
+        foreach($_q['entries'] as &$_qe){
+            if(($_qe['status']??'')!=='running')continue;
+            if(((string)($p['queue_id']??''))!==''&&((string)($_qe['id']??''))!==((string)$p['queue_id']))continue;
+            $_qe['status']='failed';
+            $_qe['error']='بی‌حرکت ماند ('.$_pIdle.' ثانیه) — نگهبان بست';
+            $_qe['done_at']=time();$_qd=true;
+        }
+        unset($_qe);
+        if($_qd)extractWriteQueue($_q);
+    }
+}
 echo json_encode($p,JSON_UNESCAPED_UNICODE);exit;
 }
 
@@ -6929,18 +6964,30 @@ usleep(500000);
    نکن. چیزی ذخیره نکن و علتش را بگو. یک فروشگاه واقعاً خالی‌شده هم با
    اجرای بعدی و پیام صریح قابل تشخیص است — ولی داده‌ای که رفته برنمی‌گردد.
    ===================================================================== */
-if(empty($allProducts)&&!empty($prevByKey)){
+/* v8.98: پروفایل خالی هم باید علتش را بگوید.
+
+   تا اینجا این محافظ فقط وقتی کار می‌کرد که از قبل محصولی داشتیم. اگر
+   پروفایل تازه بود و صفحهٔ فهرست باز نمی‌شد (تایم‌اوت، ۵۰۳، سلکتور
+   اشتباه)، اجرا بی‌صدا با صفر محصول «تکمیل» می‌شد و کاربر فقط می‌دید
+   هیچ‌چیز استخراج نشده، بدون هیچ توضیحی. */
+if(empty($allProducts)){
 $_why=$fetchFail!==''?$fetchFail:'صفحهٔ فهرست باز شد ولی هیچ محصولی با سلکتورها پیدا نشد';
-$_guardLog=['🛡 استخراج بی‌نتیجه بود — داده‌های قبلی دست‌نخورده ماند'];
+$_kept=count($prevByKey);
+$_guardLog=[$_kept>0
+    ?'🛡 استخراج بی‌نتیجه بود — داده‌های قبلی دست‌نخورده ماند'
+    :'❌ استخراج هیچ محصولی پیدا نکرد'];
 $_guardLog[]='   • علت: '.$_why;
-$_guardLog[]='   • '.count($prevByKey).' محصول ذخیره‌شده حفظ شد (گالری و جزئیاتشان پاک نشد)';
+if($_kept>0)$_guardLog[]='   • '.$_kept.' محصول ذخیره‌شده حفظ شد (گالری و جزئیاتشان پاک نشد)';
+else $_guardLog[]='   • سلکتور «کانتینر» را روی صفحهٔ فهرست بررسی کنید، یا سایت مبدأ در دسترس نبوده';
 $_guardLog[]='   • اگر سایت مبدأ واقعاً خالی شده، اجرای بعدی هم همین را می‌گوید';
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>$maxPages,'current'=>$totalPages,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$_guardLog,'total_log_count'=>count($_guardLog),'extracted'=>0,'error'=>'استخراج بی‌نتیجه — '.$_why,'guard'=>'empty_result','kept'=>count($prevByKey),'products_saved'=>false]);
 $queue=extractReadQueue();
-foreach($queue['entries'] as &$qe){if(($qe['id']??'')===$queueId){$qe['status']='failed';$qe['error']='بی‌نتیجه — '.$_why.' · '.count($prevByKey).' محصول قبلی حفظ شد';$qe['done_at']=time();break;}}unset($qe);
+foreach($queue['entries'] as &$qe){if(($qe['id']??'')===$queueId){$qe['status']='failed';$qe['error']='بی‌نتیجه — '.$_why.($_kept>0?(' · '.$_kept.' محصول قبلی حفظ شد'):'');$qe['done_at']=time();break;}}unset($qe);
 extractWriteQueue($queue);
 notifRunFailure(loadConnections(),'استخراج',$profile['name']??$profileKey,
-  'استخراج هیچ محصولی برنگرداند و متوقف شد تا داده‌های قبلی پاک نشوند. علت: '.$_why);
+  ($_kept>0
+    ?'استخراج هیچ محصولی برنگرداند و متوقف شد تا داده‌های قبلی پاک نشوند. علت: '
+    :'استخراج هیچ محصولی پیدا نکرد. علت: ').$_why);
 return ['__early_sent'=>$emitEarlyResponse,'ok'=>false,'error'=>'استخراج بی‌نتیجه — '.$_why,
         'guard'=>'empty_result','kept'=>count($prevByKey)];
 }
@@ -6986,6 +7033,8 @@ $galleryFound=0;$galleryImgsTotal=0;
    هیچ ردی در لاگ نمی‌ماند و کاربر فقط می‌دید کار کند است. */
 $detailOk=0;$detailFail=0;$detailFields=0;$detailNoField=0;$varFound=0;$imgMain=0;
 $failSamples=[];$emptySamples=[];
+// v8.97: وقتی فاز جزئیات اصلاً اجرا نشود هم باید تعریف‌شده باشد
+$_ranOut=false;
 $detailLog=[];   // چند خط آخر، برای نمایش در نوار پیشرفت
 $pushLog=function(string $line) use (&$detailLog){
     $detailLog[]=$line;
@@ -6994,12 +7043,62 @@ $pushLog=function(string $line) use (&$detailLog){
 if($detailTotal>0&&(!empty($detailSelectors)||$galleryCfg['enabled'])){
 $_wantFields=[];
 foreach($detailSelectors as $_f=>$_sv){ if(!empty($_sv))$_wantFields[]=$_f; }
+
+/* v8.97: فاز جزئیات باید «قبل» از سقف زمانی هاست تمیز تمام شود.
+
+   این علت واقعی کرش بود و همهٔ تلاش‌های ۸.۹۴ تا ۸.۹۶ کنارش رد شدند.
+   حساب سرانگشتی: هر محصول یک درخواست HTTP است (تا ۱۰ ثانیه تایم‌اوت)
+   به‌علاوهٔ ۰.۲ ثانیه مکث. برای ۵۰۰ محصول یعنی ۱۷ دقیقه در حالت متوسط
+   و بیش از یک ساعت اگر مبدأ کند باشد. هیچ هاست اشتراکی‌ای چنین
+   درخواستی را زنده نگه نمی‌دارد؛ پردازه وسط کار کشته می‌شود.
+
+   set_time_limit(0) هم کمکی نمی‌کند، چون آنچه پردازه را می‌کشد
+   معمولاً max_execution_time نیست بلکه سقف خودِ وب‌سرور است
+   (FcgidIOTimeout / proxy_read_timeout / request_terminate_timeout)
+   و آن از داخل PHP قابل تغییر نیست.
+
+   پس به‌جای جنگیدن با سقف، زودتر از آن می‌ایستیم: تا هر جا که رسیدیم
+   کار می‌کنیم، ذخیره می‌کنیم و «ناتمام» علامت می‌زنیم. اجرای بعدی —
+   چه کران چه دکمه — از همان‌جا ادامه می‌دهد، چون needDetail فقط
+   محصولاتی را برمی‌دارد که هنوز گالری/فیلد ندارند. */
+$cn0=loadConnections();
+$_budget=(int)($cn0['detail_budget_sec']??0);
+if($_budget<=0){
+    // اگر تنظیم نشده، از max_execution_time حدس بزن و حاشیهٔ امن بگذار
+    $_ini=(int)@ini_get('max_execution_time');
+    $_budget=$_ini>0?max(30,(int)($_ini*0.7)):90;
+}
+$_budget=max(20,min(3600,$_budget));
+/* v8.98: مهلت از «شروع فاز جزئیات» حساب می‌شود، نه از شروع کل اجرا.
+
+   در ۸.۹۷ نوشته بودم $startedAt + $budget که $startedAt لحظهٔ شروع کل
+   استخراج است. ولی قبل از فاز جزئیات، فاز فهرست اجرا می‌شود که خودش
+   می‌تواند دقایقی طول بکشد (هر صفحه تا ۲۰ ثانیه تایم‌اوت + نیم ثانیه
+   مکث، ضربدر تعداد صفحات). اگر فهرست به‌تنهایی بودجه را می‌خورد، همان
+   اولین تکرارِ فاز جزئیات می‌دید که مهلت گذشته و بی‌درنگ break می‌کرد —
+   یعنی «حتی یک محصول هم جزئیات نمی‌گرفت».
+
+   دکمهٔ دستی سالم به نظر می‌رسید چون معمولاً روی فروشگاه کوچک و
+   تک‌صفحه‌ای امتحان می‌شد و فهرستش سریع تمام می‌شد. */
+$_detailStart=time();
+$_deadline=$_detailStart+$_budget;
+$_ranOut=false;
+/* محافظ: حداقل چند محصول در هر نوبت باید پردازش شود، وگرنه اگر بودجه
+   کوچک و مبدأ کند باشد هر نوبت صفر محصول جلو می‌رویم و کار هرگز تمام
+   نمی‌شود. */
+$_minPerRun=3;
+
 $logs=['🔍 فاز ۲ — باز کردن صفحهٔ محصول‌ها: '.$detailTotal.' محصول'];
 $logs[]='   • فیلدها: '.($_wantFields?implode('، ',$_wantFields):'—')
         .($galleryCfg['enabled']?(' · گالری: روشن ('.$galleryCfg['mode'].')'):' · گالری: خاموش');
+$logs[]='   • ⏱ سقف زمانی این نوبت: '.$_budget.' ثانیه — بقیه در نوبت بعد ادامه می‌یابد';
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'recent_log'=>$logs,'total_log_count'=>$totalPages+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>0,'detail_total'=>$detailTotal]);
 
 foreach($needDetail as $key=>$p){
+/* v8.97: وقت تمام شد؟ تمیز بیرون بیا، نه اینکه منتظر بمانی تا هاست بکشد.
+   v8.98: ولی حداقل چند محصول باید انجام شود، وگرنه پیشرفتی حاصل نمی‌شود
+   و هر نوبت دقیقاً از همان جای قبل شروع می‌کند. */
+if($detailDone>=$_minPerRun&&time()>=$_deadline){$_ranOut=true;break;}
 if(file_exists(EXTRACT_STOP_FILE)){@unlink(EXTRACT_STOP_FILE);
 /* v8.94: کاربر توقف زد — کارِ تا اینجا را نگه دار و نشانهٔ «نیمه‌کاره»
    را بردار، وگرنه محافظِ ارسال تا ابد بسته می‌ماند. */
@@ -7125,12 +7224,18 @@ if($detailDone%5===0){
 }
 usleep(200000);
 }
-/* v8.94: پایان فاز جزئیات — قبل از هر کار دیگری ذخیره کن */
+/* v8.94: پایان فاز جزئیات — قبل از هر کار دیگری ذخیره کن.
+   v8.97: اگر وقت تمام شده و کار ناتمام مانده، نشانه را «detail» بگذار
+   نه «detail_done»، تا اجرای بعدی بداند باید ادامه بدهد. */
 extractCheckpoint($pkFinal,$allProducts,
-    ['_extract_stage'=>'detail_done','_extract_stage_at'=>time(),
+    ['_extract_stage'=>$_ranOut?'detail':'detail_done','_extract_stage_at'=>time(),
      '_extract_detail_done'=>$detailDone,'_extract_detail_total'=>$detailTotal]);
 /* v8.90: جمع‌بندی پایان فاز ۲ — یک نگاه و می‌فهمی چه شد. */
-$_sumLines=['✅ فاز ۲ تمام شد — '.$detailDone.' محصول بررسی شد'];
+$_sumLines=$_ranOut
+  ? ['⏸ فاز ۲ نیمه‌تمام ماند — '.$detailDone.' از '.$detailTotal.' محصول بررسی شد',
+     '   • ⏱ سقف زمانی این نوبت پر شد؛ بقیه در اجرای بعدی ادامه می‌یابد',
+     '   • هیچ‌چیز از دست نرفت — کار انجام‌شده ذخیره شد']
+  : ['✅ فاز ۲ تمام شد — '.$detailDone.' محصول بررسی شد'];
 $_sumLines[]='   • ✅ '.$detailOk.' صفحه باز شد'
   .($detailFail>0?(' · ❌ '.$detailFail.' باز نشد'):'')
   .' · 🏷 '.$detailFields.' فیلد استخراج شد';
@@ -7194,7 +7299,10 @@ $profileOnDisk['productsOrder']=$productsOrder;
 $profileOnDisk['updatedAt']=time();
 /* v8.94: کار تمام شد — نشانهٔ «نیمه‌کاره» برداشته شود، وگرنه محافظِ
    ارسال تا ابد بسته می‌ماند و هیچ محصولی هرگز فرستاده نمی‌شود. */
-$profileOnDisk['_extract_stage']='complete';
+/* v8.97: اگر فاز جزئیات به‌خاطر سقف زمانی ناتمام مانده، «complete»
+   ننویس — وگرنه اجرای بعدی فکر می‌کند کار تمام شده و بقیهٔ محصولات
+   هیچ‌وقت گالری نمی‌گیرند، و دروازهٔ ارسال هم زودتر از موعد باز می‌شود. */
+$profileOnDisk['_extract_stage']=(!empty($_ranOut))?'detail':'complete';
 $profileOnDisk['_extract_stage_at']=time();
 $profileOnDisk['_extract_detail_done']=$detailDone;
 $profileOnDisk['_extract_detail_total']=$detailTotal;
@@ -7593,6 +7701,20 @@ $syncState = loadSyncState();
 $cn = loadConnections();
 // v8.37: ok صریح، تا ابزارهای بیرونی بتوانند موفقیت اجرا را تشخیص دهند
 $results = ['ok' => true, 'time' => $now, 'profiles' => []];
+
+/* v8.97: نگهبان‌ها «اول» اجرا می‌شوند، نه آخر.
+
+   تا اینجا cronWatchdogs بعد از حلقهٔ پروفایل‌ها صدا زده می‌شد. ولی
+   دقیقاً همان حلقه است که استخراج را اجرا می‌کند و روی هاست وسط کار
+   کشته می‌شود — یعنی در همان حالتی که نگهبان لازم است، هرگز به آن
+   نمی‌رسیدیم. کاربر گزارش داد «گویا نگهبان صف اصلاً وجود ندارد» و
+   دقیقاً همین بود.
+
+   حالا اول کارهای گیرکرده آزاد می‌شوند و بعد سراغ کار تازه می‌رویم.
+   هزینه‌اش وقتی چیزی گیر نکرده چند خط خواندن فایل است. */
+$wdEarly = cronWatchdogs($cn);
+foreach ($wdEarly as $k => $v) { if (!empty($v)) $results[$k] = $v; }
+
 foreach ($profiles as $key => $profile) {
 $syncCfg = $profile['syncConfig'] ?? [];
 $pResult = ['key' => $key, 'name' => $profile['name'] ?? $key];
@@ -7804,8 +7926,11 @@ $results['profiles'][] = $pResult;
 }
 saveSyncState($syncState);
 
+/* v8.97: نگهبان قبل از حلقه اجرا شد؛ این اجرای دوم برای چیزهایی است که
+   «در همین نوبت» گیر کرده‌اند (مثلاً ارسالی که همین حالا صف شد و
+   نگرفت). نتیجهٔ اجرای اول را پاک نمی‌کند. */
 $wd = cronWatchdogs($cn);
-foreach ($wd as $k => $v) { if (!empty($v)) $results[$k] = $v; }
+foreach ($wd as $k => $v) { if (!empty($v) && empty($results[$k])) $results[$k] = $v; }
 
 $notifyResult = bslCheckNotifications($cn);
 if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
@@ -9153,6 +9278,53 @@ if (isset($_GET['selftest'])) {
     /* «استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که گالری، تنوع، سلکتورهای
        جزئیات، ذخیره‌سازی سمت سرور و صف نداشت. «اجرای الان» هم انسدادی بود.
        حالا هر سه از یک نقطه رد می‌شوند. */
+    /* ---------- v8.98: مهلت از شروع فاز جزئیات، نه شروع کل اجرا ---------- */
+    /* در ۸.۹۷ مهلت را از $startedAt حساب کرده بودم که لحظهٔ شروع کل
+       استخراج است. فاز فهرست قبل از آن اجرا می‌شود و می‌تواند دقایقی
+       طول بکشد؛ اگر بودجه را می‌خورد، فاز جزئیات همان تکرار اول break
+       می‌شد و حتی یک محصول هم جزئیات نمی‌گرفت. */
+    $add('8.98', 'مهلت فاز جزئیات از شروع همان فاز حساب می‌شود',
+         strpos($selfSrc, '$_detailStart=' . 'time();') !== false
+         && strpos($selfSrc, '$_deadline=$_detailStart+' . '$_budget;') !== false
+         && strpos($selfSrc, '$_deadline=$startedAt+' . '$_budget;') === false);
+    $add('8.98', 'حداقل چند محصول در هر نوبت تضمین می‌شود',
+         strpos($selfSrc, '$_minPerRun=' . '3;') !== false
+         && strpos($selfSrc, 'if($detailDone>=$_minPerRun&&time()>=$_deadline)' . '{$_ranOut=true;break;}') !== false);
+    $add('8.98', 'پروفایل خالی هم علت بی‌نتیجه بودن را می‌گوید',
+         strpos($selfSrc, 'if(empty(' . '$allProducts)){') !== false
+         && strpos($selfSrc, '❌ استخراج هیچ محصولی پیدا ' . 'نکرد') !== false);
+    $add('8.98', 'پیام راهنما برای پروفایل بدون محصول قبلی',
+         strpos($selfSrc, 'سلکتور «کانتینر» را روی صفحهٔ فهرست بررسی ' . 'کنید') !== false);
+
+    /* ---------- v8.97: سقف زمانی فاز جزئیات + نگهبانی که واقعاً اجرا می‌شود ---------- */
+    /* علت واقعی کرش: فاز جزئیات برای هر محصول یک درخواست HTTP می‌زند
+       (تا ۱۰ ثانیه) و برای صدها محصول از یک ساعت هم می‌گذرد. هیچ هاست
+       اشتراکی‌ای چنین درخواستی را زنده نگه نمی‌دارد. */
+    $add('8.97', 'فاز جزئیات سقف زمانی دارد',
+         strpos($selfSrc, '$_deadline=$_detailStart+' . '$_budget;') !== false
+         && strpos($selfSrc, 'time()>=$_deadline){$_ranOut=true;' . 'break;}') !== false);
+    $add('8.97', 'سقف زمانی از تنظیمات یا max_execution_time می‌آید',
+         strpos($selfSrc, "\$_budget=(int)(\$cn0['detail_budget_" . "sec']??0);") !== false
+         && strpos($selfSrc, "\$_ini=(int)@ini_get('max_execution_" . "time');") !== false);
+    $add('8.97', 'سقف زمانی کران‌پذیر است و حداقل دارد',
+         strpos($selfSrc, '$_budget=max(20,min(3600,' . '$_budget));') !== false);
+    $add('8.97', 'اجرای ناتمام «complete» علامت نمی‌خورد',
+         strpos($selfSrc, "(!empty(\$_ranOut))?'detail':'comp" . "lete';") !== false);
+    $add('8.97', 'تنظیم سقف در رابط کاربری هست',
+         strpos($selfSrc, 'id="detail' . 'Budget"') !== false
+         && strpos($selfSrc, "fd.append('detail_budget_sec'") !== false);
+    // نگهبان‌ها باید قبل از حلقهٔ پروفایل‌ها اجرا شوند، وگرنه کرشِ همان حلقه از آن‌ها رد می‌شود
+    $add('8.97', 'نگهبان کران قبل از حلقهٔ پروفایل‌ها اجرا می‌شود',
+         (($_p97a = strpos($selfSrc, '$wdEarly = cron' . 'Watchdogs($cn);')) !== false)
+         && (($_p97b = strpos($selfSrc, 'foreach ($profiles as $key => $profile) {', $_p97a)) !== false)
+         && $_p97a < $_p97b);
+    $add('8.97', 'استخراج دستی هم نگهبان دارد',
+         strpos($selfSrc, "\$p['error']='استخراج '.\$_pIdle.' ثانیه بی‌حرکت ماند") !== false
+         && strpos($selfSrc, "\$_qe['error']='بی‌حرکت ماند ('.\$_pIdle.' ثانیه) — نگهبان " . "بست';") !== false);
+    $add('8.97', 'نگهبان دستی اجرای زنده را نمی‌بندد',
+         strpos($selfSrc, '$_pMax=max(120,(int)(loadConnections()' . "['stall_after']??300));") !== false
+         && strpos($selfSrc, 'if($_pIdle>' . '$_pMax){') !== false);
+
     /* ---------- v8.94: نقطهٔ امن + مرحلهٔ جدای جزئیات ---------- */
     /* ذخیره فقط یک بار و در انتها انجام می‌شد، پس مرگ وسط فاز جزئیات
        همه‌چیز را دور می‌ریخت — حتی محصولات فاز فهرست. */
@@ -9164,7 +9336,7 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'if($detailDone%5' . '===0){') !== false
          && strpos($selfSrc, "'_extract_stage'=>'det" . "ail','_extract_stage_at'=>time(),") !== false);
     $add('8.94', 'پایان فاز جزئیات هم نقطهٔ امن دارد',
-         strpos($selfSrc, "'_extract_stage'=>'detail_" . "done'") !== false);
+         strpos($selfSrc, "\$_ranOut?'detail':'detail_" . "done'") !== false);
     $add('8.94', 'نقطهٔ امن پروفایل را از دیسک می‌خواند و فقط محصولات را می‌نویسد',
          strpos($selfSrc, '$profilesNow = loadProfiles();' . "\n    if (!isset(\$profilesNow[\$pkFinal])") !== false);
     $add('8.94', 'کران تا تمام نشدن جزئیات ارسال نمی‌کند',
@@ -9180,7 +9352,7 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, '$stageAge <= ' . '$stageStale;') !== false
          && strpos($selfSrc, "\$pResult['detail_stal" . "led'] = \$stageAge;") !== false);
     $add('8.94', 'پایان کامل، نشانهٔ نیمه‌کاره را برمی‌دارد',
-         strpos($selfSrc, "\$profileOnDisk['_extract_stage']='comp" . "lete';") !== false);
+         strpos($selfSrc, "\$profileOnDisk['_extract_stage']=(!empty(\$_ranOut))?'detail':'comp" . "lete';") !== false);
     $add('8.94', 'توقف کاربر هم دروازهٔ ارسال را باز می‌گذارد',
          strpos($selfSrc, "'_extract_stage'=>'stop" . "ped'") !== false);
 
@@ -9240,7 +9412,7 @@ if (isset($_GET['selftest'])) {
          substr_count($selfSrc, "'last_progress_ts'=>time(),'queue_id'=>\$queueId") >= 2);
     // محافظ ۱: استخراج بی‌نتیجه چیزی را پاک نکند
     $add('8.91', 'استخراج بی‌نتیجه داده‌های قبلی را نگه می‌دارد',
-         strpos($selfSrc, 'if(empty($allProducts)&&!empty($prevBy' . 'Key)){') !== false
+         strpos($selfSrc, 'if(empty(' . '$allProducts)){') !== false
          && strpos($selfSrc, "'guard'=>'empty_" . "result'") !== false);
     $add('8.91', 'علت بی‌نتیجه بودن ثبت و گزارش می‌شود',
          strpos($selfSrc, '$fetchFail=\'صفحهٔ اول باز نشد: \'') !== false
@@ -17958,6 +18130,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 <div class="crow"><label>فعال:</label><input type="checkbox" id="stallWatchdog" onchange="updateStallBadge()" checked style="width:16px;height:16px"></div>
 <div class="crow"><label>آستانه (ثانیه):</label><input type="number" id="stallAfter" value="300" min="60" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">بی‌حرکتی بیش از این = گیر کرده</span></div>
+<div class="crow"><label>سقف فاز جزئیات (ثانیه):</label><input type="number" id="detailBudget" value="0" min="0" max="3600" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = خودکار · هر نوبت تا این مدت جزئیات می‌گیرد و بقیه را به نوبت بعد می‌سپارد</span></div>
 <div class="cact">
 <button class="btn btn-gray" onclick="watchdogCheck()" style="flex:1">🔎 بررسی حالا</button>
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
@@ -21825,6 +21998,39 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.98', t:'🩹 رفع اشکال ۸.۹۷ — استخراج خودکار حتی یک محصول هم جزئیات نمی‌گرفت', items:[
+    '🐞 اشتباه من در ۸.۹۷: مهلت فاز جزئیات را از «شروع کل اجرا» حساب کردم',
+    'ولی قبل از فاز جزئیات، فاز فهرست اجرا می‌شود که خودش وقت می‌برد',
+    '(هر صفحه تا ۲۰ ثانیه تایم‌اوت + نیم ثانیه مکث، ضربدر تعداد صفحات)',
+    'اگر فهرست به‌تنهایی بودجه را می‌خورد، فاز جزئیات همان تکرار اول',
+    'بیرون می‌زد — یعنی صفر محصول جزئیات و گالری می‌گرفت',
+    '⚡ دکمهٔ دستی سالم به نظر می‌رسید چون معمولاً روی فروشگاه کوچک',
+    'و تک‌صفحه‌ای امتحان می‌شد و فهرستش سریع تمام می‌شد',
+    '✅ مهلت حالا از لحظهٔ شروع خودِ فاز جزئیات حساب می‌شود',
+    '✅ حداقل ۳ محصول در هر نوبت تضمین می‌شود، تا حتی با مبدأ خیلی کند',
+    'هر نوبت پیشرفتی حاصل شود و کار بالاخره تمام شود',
+    '🔎 استخراج بی‌نتیجه روی پروفایل تازه هم حالا علتش را می‌گوید:',
+    'قبلاً فقط وقتی پیام می‌داد که از قبل محصولی داشتید؛ روی پروفایل خالی',
+    'بی‌صدا با صفر محصول «تکمیل» می‌شد بدون هیچ توضیحی',
+  ]},
+  {v:'8.97', t:'🩹 علت واقعی کرش وسط گالری‌ها + نگهبانی که واقعاً اجرا می‌شود', items:[
+    '🐞 چرا وسط فاز جزئیات کرش می‌کرد — حساب ساده‌ای که زودتر نکرده بودم:',
+    'هر محصول یک درخواست HTTP است (تا ۱۰ ثانیه تایم‌اوت) + ۰.۲ ثانیه مکث',
+    'برای ۵۰۰ محصول یعنی ۱۷ دقیقه در حالت متوسط و بیش از یک ساعت اگر مبدأ کند باشد',
+    'هیچ هاست اشتراکی‌ای چنین درخواستی را زنده نگه نمی‌دارد',
+    'set_time_limit(0) هم بی‌فایده است، چون کشنده سقف خودِ وب‌سرور است نه PHP',
+    '✅ حالا فاز جزئیات سقف زمانی دارد: تا هر جا رسید کار می‌کند،',
+    'ذخیره می‌کند، «ناتمام» علامت می‌زند و اجرای بعدی از همان‌جا ادامه می‌دهد',
+    '✅ پیش‌فرض خودکار است (۷۰٪ max_execution_time) و در تنظیمات قابل تغییر',
+    '⚠️ «نگهبان صف وجود ندارد» — درست بود، دو دلیل داشت:',
+    '۱) نگهبان کران «بعد از» حلقهٔ پروفایل‌ها اجرا می‌شد،',
+    'یعنی دقیقاً همان حلقه‌ای که کرش می‌کرد — پس هیچ‌وقت به نگهبان نمی‌رسیدیم',
+    'حالا اول نگهبان اجرا می‌شود، بعد کار تازه',
+    '۲) استخراج دستی اصلاً نگهبان نداشت؛ اگر وسط کار می‌مُرد،',
+    'مرورگر تا ابد «در حال استخراج» نشان می‌داد',
+    'حالا همان درخواستی که مرورگر هر ۱.۵ ثانیه می‌زند، اجرای مرده را تشخیص',
+    'می‌دهد، فایل پیشرفت و ردیف صف را می‌بندد و علتش را می‌گوید',
+  ]},
   {v:'8.94', t:'مرحلهٔ جزئیات جدا شد و کارِ انجام‌شده مرتب ذخیره می‌شود', items:[
     '↩️ تغییرات ۸.۹۴ تا ۸.۹۶ قبلی برگردانده شد — آن راه (قفل و درخواست',
     'به خود سرور) استخراج را خراب می‌کرد. این بار از ریشه حل شده است.',
@@ -24516,7 +24722,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
 arApplyCfg(cn.autoreply||{});arLoad();}
 /* v8.87: پیش‌نمایش زندهٔ تعدیل قیمت مقصد.
@@ -24551,7 +24757,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
