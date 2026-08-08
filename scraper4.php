@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.96';
+const APP_VERSION = '8.94';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -6742,76 +6742,37 @@ echo json_encode($p,JSON_UNESCAPED_UNICODE);exit;
  * یکسان باشد و صف/پیشرفت/گزارش در هر دو حالت ثبت شود. تنها تفاوت،
  * برچسب trigger است که در ردیف صف ذخیره می‌شود.
  */
+/**
+ * v8.94: محصولات را همین حالا روی دیسک بنویس، بدون اینکه منتظر پایان کار بمانیم.
+ *
+ * تا ۸.۹۳ ذخیره فقط یک بار و در انتهای همه‌چیز انجام می‌شد. یعنی اگر
+ * پردازه وسط فاز جزئیات می‌مُرد — که روی هاستی که پردازه‌ها را می‌کشد
+ * دقیقاً همان‌جا اتفاق می‌افتد، چون طولانی‌ترین بخش است — تمام کار
+ * انجام‌شده دور ریخته می‌شد. محصولات از فاز فهرست هم ذخیره نمی‌شدند،
+ * چه رسد به گالری‌هایی که تا آن لحظه جمع شده بود.
+ *
+ * حالا هر چند محصول یک بار «نقطهٔ امن» ثبت می‌شود. اگر کار نیمه‌کاره
+ * بماند، دفعهٔ بعد از همان‌جا ادامه پیدا می‌کند نه از صفر.
+ *
+ * همان قاعدهٔ ۸.۹۱ رعایت می‌شود: پروفایل دوباره از دیسک خوانده می‌شود و
+ * فقط محصولات روی آن نوشته می‌شوند، تا تنظیماتی که کاربر حین اجرا عوض
+ * کرده — و پروفایل‌های دیگر — به عقب برنگردند.
+ */
+function extractCheckpoint(string $pkFinal, array $allProducts, array $extra = []): void {
+    if ($pkFinal === '') return;
+    $productsData = [];
+    foreach ($allProducts as $k => $p) $productsData[] = [$k, $p];
+    $profilesNow = loadProfiles();
+    if (!isset($profilesNow[$pkFinal]) || !is_array($profilesNow[$pkFinal])) return;
+    $profilesNow[$pkFinal]['products']      = $productsData;
+    $profilesNow[$pkFinal]['productsOrder'] = array_keys($allProducts);
+    $profilesNow[$pkFinal]['updatedAt']     = time();
+    foreach ($extra as $k => $v) $profilesNow[$pkFinal][$k] = $v;
+    saveProfiles($profilesNow);
+}
+
 function runBackendExtract(string $profileKey, string $trigger = 'manual', bool $emitEarlyResponse = false): array {
 @set_time_limit(0); @ignore_user_abort(true);
-
-/* v8.96: قفل واقعی، تا یک استخراج در جریان را چیزی قطع نکند.
-
-   این علتِ نیامدن عکس‌ها با کران بود. سطر بعدی فایل پیشرفت را پاک
-   می‌کند؛ یعنی هر اجرای تازه، اجرای در جریان را عملاً بی‌صدا می‌کُشد.
-   با دکمه مشکلی پیش نمی‌آمد چون کاربر دو بار پشت‌سرهم کلیک نمی‌کند،
-   ولی کران هر چند دقیقه یک بار می‌آید: تیک اول استخراج را شروع می‌کرد،
-   فاز گالری چند دقیقه طول می‌کشید، و تیک بعدی از راه می‌رسید و درست
-   وسط همان فاز، اجرای اول را از بین می‌برد. محصولات از فاز فهرست
-   ذخیره شده بودند، عکس‌های گالری نه.
-
-   محافظ ۸.۹۵ قرار بود جلوی این را بگیرد ولی کار نمی‌کرد، چون
-   profile_key را از فایل پیشرفت می‌خواند و آن فیلد فقط در نوشتنِ
-   *پایانی* وجود داشت — در حین اجرا هیچ‌وقت. حالا هم آن فیلد در همهٔ
-   نوشتن‌ها هست و هم این قفل مستقل از آن کار می‌کند. */
-$exLockFile = __DIR__ . '/.extract_run.lock';
-
-/* دو محافظ روی هم، چون هیچ‌کدام به تنهایی کافی نیست:
-
-   ۱) نشانهٔ زنده بودن: فایل پیشرفت می‌گوید اجرایی در جریان است و همین
-      چند ثانیه پیش چیزی نوشته. این مستقل از flock کار می‌کند — و flock
-      روی لینوکس «مشورتی» است و در بعضی محیط‌ها بین دو handle قابل
-      اتکا نیست. اگر اجرای قبلی مرده باشد، دیگر چیزی نمی‌نویسد و این
-      شرط خودبه‌خود باز می‌شود؛ پس قفلِ جامانده بن‌بست نمی‌سازد.
-   ۲) flock واقعی: برای وقتی دو درخواست دقیقاً هم‌زمان می‌رسند و هنوز
-      هیچ‌کدام چیزی ننوشته‌اند. */
-$exAliveMax = max(60, (int)(loadConnections()['stall_after'] ?? 300));
-$pLive = readProgress(EXTRACT_PROGRESS_FILE);
-if (!empty($pLive['running']) && empty($pLive['done'])) {
-    $liveTs  = (int)($pLive['last_progress_ts'] ?? ($pLive['started_at'] ?? 0));
-    $liveAge = $liveTs > 0 ? (time() - $liveTs) : PHP_INT_MAX;
-    if ($liveAge <= $exAliveMax) {
-        $liveKey = (string)($pLive['profile_key'] ?? '');
-        return ['__early_sent'=>false, 'ok'=>false, 'busy'=>true,
-                'busy_key'=>$liveKey, 'busy_age'=>$liveAge,
-                'error'=>'استخراج دیگری در جریان است'
-                         . ($liveKey !== '' ? ' (' . $liveKey . ')' : '')
-                         . ' — ' . $liveAge . ' ثانیه پیش فعال بوده'];
-    }
-    // بی‌حرکت مانده: پردازه‌اش مرده، می‌شود جایش را گرفت
-}
-
-$exLockFp = @fopen($exLockFile, 'c+');
-if ($exLockFp) {
-    if (!@flock($exLockFp, LOCK_EX | LOCK_NB)) {
-        // کسی دیگر در حال استخراج است — به کارش دست نزن
-        $busy = trim((string)@stream_get_contents($exLockFp));
-        @fclose($exLockFp);
-        $busyKey = ''; $busyAge = 0;
-        if ($busy !== '' && ($bj = json_decode($busy, true)) && is_array($bj)) {
-            $busyKey = (string)($bj['key'] ?? '');
-            $busyAge = max(0, time() - (int)($bj['at'] ?? time()));
-        }
-        return ['__early_sent'=>false, 'ok'=>false, 'busy'=>true,
-                'busy_key'=>$busyKey, 'busy_age'=>$busyAge,
-                'error'=>'استخراج دیگری در جریان است'
-                         . ($busyKey !== '' ? ' (' . $busyKey . ')' : '')
-                         . ($busyAge > 0 ? ' — ' . $busyAge . ' ثانیه' : '')];
-    }
-    @ftruncate($exLockFp, 0); @rewind($exLockFp);
-    @fwrite($exLockFp, json_encode(['key'=>$profileKey,'at'=>time(),'trigger'=>$trigger]));
-    @fflush($exLockFp);
-    // قفل تا پایان همین پردازه نگه داشته می‌شود، حتی با fatal یا تایم‌اوت
-    register_shutdown_function(function () use ($exLockFp, $exLockFile) {
-        @flock($exLockFp, LOCK_UN); @fclose($exLockFp); @unlink($exLockFile);
-    });
-}
-
 @unlink(EXTRACT_PROGRESS_FILE); @unlink(EXTRACT_STOP_FILE);
 
 $startedAt=time();
@@ -6863,7 +6824,7 @@ extractWriteQueue($queue);
 
 // v8.22: نسخهٔ قبلی را همین ابتدا بخوان تا مقایسه بتواند زنده انجام شود
 $livePrevMap=extractPrevMap($profile);
-writeProgress(EXTRACT_PROGRESS_FILE,['profile_key'=>$profileKey,'running'=>true,'done'=>false,'total'=>0,'current'=>0,'started_at'=>$startedAt,'queue_id'=>$queueId,'recent_log'=>['⏳ شروع استخراج بک‌اند...'],'total_log_count'=>1,'extracted'=>0,'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,'price_up'=>0,'price_down'=>0,'url'=>$url,'profile_name'=>$profile['name']??$profileKey]);
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>0,'current'=>0,'started_at'=>$startedAt,'queue_id'=>$queueId,'recent_log'=>['⏳ شروع استخراج بک‌اند...'],'total_log_count'=>1,'extracted'=>0,'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,'price_up'=>0,'price_down'=>0,'url'=>$url,'profile_name'=>$profile['name']??$profileKey]);
 
 // v8.27: پاسخ زودهنگام فقط برای درخواست مرورگر معنا دارد تا کاربر منتظر
 // نماند و بقیهٔ کار در پس‌زمینه ادامه یابد. وقتی کران‌جاب این تابع را
@@ -6895,7 +6856,7 @@ foreach($prevProducts as $entry){if(is_array($entry)&&count($entry)>=2)$prevByKe
 $allProducts=[];$seenKeys=[];$nextUrl=null;$totalPages=0;$fetchFail='';
 for($page=1;$page<=$maxPages;$page++){
 if(file_exists(EXTRACT_STOP_FILE)){@unlink(EXTRACT_STOP_FILE);
-writeProgress(EXTRACT_PROGRESS_FILE,['profile_key'=>$profileKey,'running'=>false,'done'=>true,'cancelled'=>true,'total'=>count($allProducts),'current'=>$page,'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>2,'extracted'=>count($allProducts)]);
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'total'=>count($allProducts),'current'=>$page,'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>2,'extracted'=>count($allProducts)]);
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'cancelled'=>true];
 }
 if($page===1){$pageUrl=$url;}
@@ -6911,7 +6872,7 @@ $logs[]='❌ خطا: '.mb_substr($res['error']??'HTTP error',0,80);
 // v8.91: علت شکست صفحهٔ اول را نگه دار تا محافظِ پایین بداند
 // «صفر محصول» به‌خاطر قطعی بوده، نه به‌خاطر خالی شدن فروشگاه.
 if($page===1)$fetchFail='صفحهٔ اول باز نشد: '.mb_substr($res['error']??('HTTP '.(int)($res['code']??0)),0,60);
-writeProgress(EXTRACT_PROGRESS_FILE,['profile_key'=>$profileKey,'running'=>true,'done'=>false,'total'=>0,'current'=>$page,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>false]);
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>0,'current'=>$page,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>false]);
 if($page===1)break;
 else continue;
 }
@@ -6927,7 +6888,7 @@ $newCount++;
 $logs[]='✓ +'.($newCount).' محصول (کل: '.count($allProducts).')';
 // v8.22: مقایسهٔ زنده — شمارنده‌ها و لیست‌ها همان لحظه محاسبه می‌شوند
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
-writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['profile_key'=>$profileKey,'running'=>true,'done'=>false,'total'=>$maxPages,'current'=>$page,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>true,'page_new'=>$newCount,'page_total'=>count($allProducts)],$liveCmp));
+writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages,'current'=>$page,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>true,'page_new'=>$newCount,'page_total'=>count($allProducts)],$liveCmp));
 
 if($pagType==='next_selector'&&!empty($pagVal)){
 [$dom,$xp]=load_dom($res['html']);
@@ -6974,7 +6935,7 @@ $_guardLog=['🛡 استخراج بی‌نتیجه بود — داده‌های 
 $_guardLog[]='   • علت: '.$_why;
 $_guardLog[]='   • '.count($prevByKey).' محصول ذخیره‌شده حفظ شد (گالری و جزئیاتشان پاک نشد)';
 $_guardLog[]='   • اگر سایت مبدأ واقعاً خالی شده، اجرای بعدی هم همین را می‌گوید';
-writeProgress(EXTRACT_PROGRESS_FILE,['profile_key'=>$profileKey,'running'=>false,'done'=>true,'total'=>$maxPages,'current'=>$totalPages,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$_guardLog,'total_log_count'=>count($_guardLog),'extracted'=>0,'error'=>'استخراج بی‌نتیجه — '.$_why,'guard'=>'empty_result','kept'=>count($prevByKey),'products_saved'=>false]);
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>$maxPages,'current'=>$totalPages,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$_guardLog,'total_log_count'=>count($_guardLog),'extracted'=>0,'error'=>'استخراج بی‌نتیجه — '.$_why,'guard'=>'empty_result','kept'=>count($prevByKey),'products_saved'=>false]);
 $queue=extractReadQueue();
 foreach($queue['entries'] as &$qe){if(($qe['id']??'')===$queueId){$qe['status']='failed';$qe['error']='بی‌نتیجه — '.$_why.' · '.count($prevByKey).' محصول قبلی حفظ شد';$qe['done_at']=time();break;}}unset($qe);
 extractWriteQueue($queue);
@@ -6992,6 +6953,15 @@ foreach($allProducts as $key=>$p){
 if(!isset($prevByKey[$key])||!is_array($prevByKey[$key]))continue;
 $allProducts[$key]=extractMergeDetail($p,$prevByKey[$key]);
 }
+
+/* v8.94: مرحلهٔ ۱ تمام شد — همین‌جا ذخیره کن.
+
+   این نقطهٔ امنِ اول است. فاز بعدی (باز کردن صفحهٔ تک‌تک محصول‌ها برای
+   گالری و جزئیات) طولانی‌ترین بخش کار است و روی هاست ما معمولاً همان‌جا
+   پردازه کشته می‌شود. تا ۸.۹۳ در آن حالت هیچ‌چیز ذخیره نشده بود — حتی
+   خودِ محصولاتی که از صفحهٔ فهرست به دست آمده بودند. */
+$pkFinal=$profileKey!==''?$profileKey:profileKey($url);
+extractCheckpoint($pkFinal,$allProducts,['_extract_stage'=>'list_done','_extract_stage_at'=>time()]);
 
 // v8.64: اگر گالری روشن است، صفحهٔ همهٔ محصولات باید باز شود — نه فقط
 // آن‌هایی که عکس یا قیمت ندارند. وگرنه محصولی که یک عکس دارد هرگز
@@ -7027,11 +6997,16 @@ foreach($detailSelectors as $_f=>$_sv){ if(!empty($_sv))$_wantFields[]=$_f; }
 $logs=['🔍 فاز ۲ — باز کردن صفحهٔ محصول‌ها: '.$detailTotal.' محصول'];
 $logs[]='   • فیلدها: '.($_wantFields?implode('، ',$_wantFields):'—')
         .($galleryCfg['enabled']?(' · گالری: روشن ('.$galleryCfg['mode'].')'):' · گالری: خاموش');
-writeProgress(EXTRACT_PROGRESS_FILE,['profile_key'=>$profileKey,'running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'recent_log'=>$logs,'total_log_count'=>$totalPages+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>0,'detail_total'=>$detailTotal]);
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'recent_log'=>$logs,'total_log_count'=>$totalPages+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>0,'detail_total'=>$detailTotal]);
 
 foreach($needDetail as $key=>$p){
 if(file_exists(EXTRACT_STOP_FILE)){@unlink(EXTRACT_STOP_FILE);
-writeProgress(EXTRACT_PROGRESS_FILE,['profile_key'=>$profileKey,'running'=>false,'done'=>true,'cancelled'=>true,'extracted'=>count($allProducts),'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>$totalPages+$detailDone+1]);
+/* v8.94: کاربر توقف زد — کارِ تا اینجا را نگه دار و نشانهٔ «نیمه‌کاره»
+   را بردار، وگرنه محافظِ ارسال تا ابد بسته می‌ماند. */
+extractCheckpoint($pkFinal,$allProducts,
+    ['_extract_stage'=>'stopped','_extract_stage_at'=>time(),
+     '_extract_detail_done'=>$detailDone,'_extract_detail_total'=>$detailTotal]);
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'extracted'=>count($allProducts),'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>$totalPages+$detailDone+1]);
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'cancelled'=>true];
 }
 $detailDone++;
@@ -7135,10 +7110,25 @@ if($failSamples)$logs[]='   • ✗ نمونهٔ خطا: '.implode(' | ',$failSa
 foreach($detailLog as $_dl)$logs[]=$_dl;
 // قیمت‌ها در این مرحله ممکن است تکمیل شوند، پس مقایسه دوباره محاسبه می‌شود
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
-writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['profile_key'=>$profileKey,'running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>$logs,'total_log_count'=>$totalPages+$detailDone,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
+writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>$logs,'total_log_count'=>$totalPages+$detailDone,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
+}
+/* v8.94: هر ۵ محصول، کارِ انجام‌شده روی دیسک بنشیند.
+
+   نوشتن فایل پیشرفت فقط برای نمایش است؛ خودِ گالری‌ها در $allProducts
+   می‌مانند و تا ۸.۹۳ فقط در انتها ذخیره می‌شدند. اگر هاست وسط این حلقه
+   پردازه را می‌کشت، همهٔ عکس‌های جمع‌شده دور ریخته می‌شد.
+   حالا بدترین حالت، از دست رفتن کارِ ۵ محصول آخر است. */
+if($detailDone%5===0){
+    extractCheckpoint($pkFinal,$allProducts,
+        ['_extract_stage'=>'detail','_extract_stage_at'=>time(),
+         '_extract_detail_done'=>$detailDone,'_extract_detail_total'=>$detailTotal]);
 }
 usleep(200000);
 }
+/* v8.94: پایان فاز جزئیات — قبل از هر کار دیگری ذخیره کن */
+extractCheckpoint($pkFinal,$allProducts,
+    ['_extract_stage'=>'detail_done','_extract_stage_at'=>time(),
+     '_extract_detail_done'=>$detailDone,'_extract_detail_total'=>$detailTotal]);
 /* v8.90: جمع‌بندی پایان فاز ۲ — یک نگاه و می‌فهمی چه شد. */
 $_sumLines=['✅ فاز ۲ تمام شد — '.$detailDone.' محصول بررسی شد'];
 $_sumLines[]='   • ✅ '.$detailOk.' صفحه باز شد'
@@ -7150,7 +7140,7 @@ if($varFound>0)$_sumLines[]='   • 🎨 '.$varFound.' محصول تنوع دا�
 if($detailNoField>0)$_sumLines[]='   • ⚠️ '.$detailNoField.' محصول هیچ فیلدی نداد — سلکتورهای جزئیات را بررسی کنید';
 if($detailFail>0&&$failSamples)$_sumLines[]='   • ✗ '.implode(' | ',$failSamples);
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
-writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['profile_key'=>$profileKey,'running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>$_sumLines,'total_log_count'=>$totalPages+$detailDone+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
+writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>$_sumLines,'total_log_count'=>$totalPages+$detailDone+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
 }
 
 $newCount=0;$priceChanged=0;$unchanged=0;$removedCount=0;
@@ -7195,13 +7185,19 @@ foreach($allProducts as $key=>$p){$productsData[]=[$key,$p];}
    به عقب برمی‌گرداند. کاربر می‌دید تنظیمی که خودش نیم ساعت پیش ذخیره
    کرده بود، بی‌دلیل به حالت قبل برگشته.
 
-   حالا فقط چیزی نوشته می‌شود که واقعاً حاصل این اجراست. */
-$pkFinal=$profileKey!==''?$profileKey:profileKey($url);
+   حالا فقط چیزی نوشته می‌شود که واقعاً حاصل این اجراست.
+   v8.94: $pkFinal بالاتر — قبل از اولین نقطهٔ امن — تعیین شده است. */
 $profilesNow=loadProfiles();
 $profileOnDisk=is_array($profilesNow[$pkFinal]??null)?$profilesNow[$pkFinal]:$profile;
 $profileOnDisk['products']=$productsData;
 $profileOnDisk['productsOrder']=$productsOrder;
 $profileOnDisk['updatedAt']=time();
+/* v8.94: کار تمام شد — نشانهٔ «نیمه‌کاره» برداشته شود، وگرنه محافظِ
+   ارسال تا ابد بسته می‌ماند و هیچ محصولی هرگز فرستاده نمی‌شود. */
+$profileOnDisk['_extract_stage']='complete';
+$profileOnDisk['_extract_stage_at']=time();
+$profileOnDisk['_extract_detail_done']=$detailDone;
+$profileOnDisk['_extract_detail_total']=$detailTotal;
 $profilesNow[$pkFinal]=$profileOnDisk;
 saveProfiles($profilesNow);
 $profiles=$profilesNow;$profile=$profileOnDisk;
@@ -7251,10 +7247,7 @@ if($profileKey===''){
 $u=trim($_GET['url']??'');
 if($u!==''&&filter_var($u,FILTER_VALIDATE_URL))$profileKey=profileKey($u);
 }
-/* v8.94: کران هم همین اندپوینت را صدا می‌زند تا شرایط اجرا دقیقاً یکی
-   باشد؛ فقط برچسب ردیف صف باید بگوید اجرا خودکار بوده نه دستی. */
-$trg = (($_GET['trigger'] ?? $_POST['trigger'] ?? '') === 'auto') ? 'auto' : 'manual';
-$res=runBackendExtract($profileKey,$trg,true);
+$res=runBackendExtract($profileKey,'manual',true);
 // v8.30: همان اعلان‌های تغییر مبدأ که کران‌جاب می‌فرستد
 if(!empty($res['ok'])){
 $cnNow=loadConnections();
@@ -7538,124 +7531,6 @@ function cronWatchdogs(array $cn): array {
     return $results;
 }
 
-/**
- * v8.94: استخراج را عیناً مثل فشردن دکمهٔ «⚡ استخراج بک‌اند» اجرا می‌کند.
- *
- * همان درخواست HTTP، همان اندپوینت، همان جدا شدنِ پردازه. کران فقط منتظر
- * می‌ماند تا تمام شود و بعد نتیجه را از فایل پیشرفت برمی‌دارد — چون آن
- * درخواست پاسخ نهایی را برنمی‌گرداند، دقیقاً مثل وقتی که کاربر دکمه را
- * می‌زند و پنل پیشرفت را نگاه می‌کند.
- *
- * اگر به هر دلیلی نشود درخواست را به خود سرور زد (مثلاً اجرای CLI که
- * HTTP_HOST ندارد)، به فراخوانی مستقیم برمی‌گردیم تا کران بی‌کار نماند.
- */
-/**
- * v8.96: آیا همین حالا استخراجی در جریان است؟
- *
- * با تلاش برای گرفتن همان قفلی که runBackendExtract می‌گیرد سنجیده
- * می‌شود. اگر قفل آزاد بود یعنی کسی مشغول نیست، و بلافاصله رهایش
- * می‌کنیم. برخلاف خواندن فایل پیشرفت، این روش با پردازهٔ مرده گمراه
- * نمی‌شود: قفل با پایان پردازه خودبه‌خود آزاد می‌شود.
- */
-function extractIsBusy(): bool {
-    /* همان دو محافظِ runBackendExtract، به همان ترتیب. */
-    clearstatcache(true, EXTRACT_PROGRESS_FILE);
-    $p = readProgress(EXTRACT_PROGRESS_FILE);
-    if (!empty($p['running']) && empty($p['done'])) {
-        $ts  = (int)($p['last_progress_ts'] ?? ($p['started_at'] ?? 0));
-        $age = $ts > 0 ? (time() - $ts) : PHP_INT_MAX;
-        $max = max(60, (int)(loadConnections()['stall_after'] ?? 300));
-        if ($age <= $max) return true;      // زنده و مشغول
-    }
-    $f = __DIR__ . '/.extract_run.lock';
-    if (!is_file($f)) return false;
-    $fp = @fopen($f, 'c+');
-    if (!$fp) return false;
-    if (@flock($fp, LOCK_EX | LOCK_NB)) {   // آزاد بود => کسی مشغول نیست
-        @flock($fp, LOCK_UN); @fclose($fp);
-        return false;
-    }
-    @fclose($fp);
-    return true;
-}
-
-function cronExtractLikeButton(string $key, array $profile): array {
-    // اجرای CLI یا هر حالتی که آدرس خودمان را نمی‌دانیم
-    if (selfBaseUrl() === '') return runBackendExtract($key, 'auto');
-
-    /* v8.95: اگر استخراجی هنوز در جریان است، دوباره شلیک نکن.
-       v8.96: معیار عوض شد. قبلاً فقط فایل پیشرفت خوانده می‌شد و شرطش
-       profile_key بود — فیلدی که در حین اجرا اصلاً نوشته نمی‌شد، پس
-       محافظ هیچ‌وقت فعال نمی‌شد و تیک بعدی کران استخراجِ در جریان را
-       وسط فاز گالری می‌کشت. حالا اول قفل واقعی پرسیده می‌شود.
-       ضمناً هر استخراجی (حتی پروفایل دیگر) دلیل کافی برای صبر است،
-       چون استخراج‌ها یک فایل پیشرفت مشترک دارند. */
-    if (extractIsBusy()) {
-        $pRun = readProgress(EXTRACT_PROGRESS_FILE);
-        return ['ok' => false, 'pending' => true, 'error' => 'استخراج دیگری در جریان است',
-                'extracted' => (int)($pRun['extracted'] ?? 0)];
-    }
-    $pNow = readProgress(EXTRACT_PROGRESS_FILE);
-    if (!empty($pNow['running']) && empty($pNow['done'])
-        && (string)($pNow['profile_key'] ?? '') === $key) {
-        return ['ok' => false, 'pending' => true, 'error' => 'استخراج هنوز در جریان است',
-                'extracted' => (int)($pNow['extracted'] ?? 0)];
-    }
-
-    /* v8.95: نتیجهٔ استخراجی که اجرای قبلیِ کران شروع کرده بود.
-       چون منتظر نمی‌مانیم، نتیجه در «همین» اجرا آماده نیست؛ در اجرای
-       بعدی از فایل پیشرفت برداشته می‌شود و آن‌وقت ارسال انجام می‌گیرد.
-
-       مهم: هر نتیجه فقط «یک بار» مصرف می‌شود. مهر زمانیِ آخرین نتیجهٔ
-       مصرف‌شده در sync_state نگه داشته می‌شود، وگرنه هر اجرای کران همان
-       نتیجهٔ قدیمی را دوباره می‌دید و محصولات را بارها می‌فرستاد. */
-    $stAll     = loadSyncState();
-    $consumed  = (int)($stAll[$key]['extract_consumed_ts'] ?? 0);
-    $ready = null;
-    if (!empty($pNow['done']) && (string)($pNow['profile_key'] ?? '') === $key
-        && !empty($pNow['products_saved'])
-        && (int)($pNow['last_progress_ts'] ?? 0) > $consumed) {
-        $ready = ['ok' => true,
-            'extracted'     => (int)($pNow['extracted'] ?? 0),
-            'new'           => (int)($pNow['new'] ?? 0),
-            'price_changed' => (int)($pNow['price_changed'] ?? 0),
-            'removed'       => (int)($pNow['removed'] ?? 0),
-            'unchanged'     => (int)($pNow['unchanged'] ?? 0),
-            'price_up'      => (int)($pNow['price_up'] ?? 0),
-            'price_down'    => (int)($pNow['price_down'] ?? 0),
-            'new_items'     => is_array($pNow['new_items'] ?? null) ? $pNow['new_items'] : [],
-            'changed_items' => is_array($pNow['changed_items'] ?? null) ? $pNow['changed_items'] : [],
-            'removed_items' => is_array($pNow['removed_items'] ?? null) ? $pNow['removed_items'] : [],
-            'products_saved' => true,
-            'profile_key'   => $key,
-            'via_button'    => true,
-            'from_previous_run' => true];
-        // همین‌جا مصرف‌شده علامت بخورد تا اجرای بعدی دوباره نفرستدش
-        if (!isset($stAll[$key]) || !is_array($stAll[$key])) $stAll[$key] = [];
-        $stAll[$key]['extract_consumed_ts'] = (int)($pNow['last_progress_ts'] ?? time());
-        saveSyncState($stAll);
-    }
-
-    /* همان درخواستی که مرورگر با کلیک روی دکمه می‌فرستد.
-       v8.95: و بعدش منتظر نمی‌مانیم — این نکتهٔ حیاتی است. اگر کران
-       بنشیند و صبر کند، یک worker را تا پایان کار اشغال می‌کند در حالی
-       که خودِ استخراج به worker دومی نیاز دارد. روی هاست اشتراکی که
-       چند worker بیشتر ندارد این یعنی بن‌بست: کران منتظر استخراجی است
-       که هرگز نوبت اجرا نمی‌گیرد. با تست واقعی روی HTTP همین اتفاق افتاد
-       و کران «استخراج در مهلت مقرر تمام نشد» می‌داد در حالی که استخراج
-       سالم انجام شده بود.
-       پس شلیک می‌کنیم و می‌رویم؛ ارسال در اجرای بعدیِ کران انجام می‌شود
-       که چند دقیقهٔ دیگر خودش می‌آید. */
-    if ($ready === null) {
-        $fired = fireAndForget('action=backend_extract&profile_key=' . rawurlencode($key)
-                               . '&trigger=auto', 2500);
-        if (!$fired) return runBackendExtract($key, 'auto');   // شلیک نشد؛ خودمان انجامش می‌دهیم
-        return ['ok' => false, 'started' => true, 'via_button' => true,
-                'error' => 'استخراج در پس‌زمینه شروع شد — ارسال در اجرای بعدی کران'];
-    }
-    return $ready;
-}
-
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
 header('Content-Type: application/json; charset=UTF-8');
 @set_time_limit(0);
@@ -7728,42 +7603,33 @@ $target = $syncCfg['target'] ?? 'woo';
 if ($interval > 0 && ($now - $lastRun < $interval)) { $pResult['status'] = 'not_due'; $pResult['remaining'] = $interval - ($now - $lastRun); $results['profiles'][] = $pResult; continue; }
 $pResult['status'] = 'syncing'; $pResult['target'] = $target;
 
-/* v8.94: استخراج کران دقیقاً همان مسیر دکمهٔ «⚡ استخراج بک‌اند» را می‌رود.
+/* v8.94: مرحلهٔ جزئیاتِ نیمه‌کاره را اول تمام کن، بعد سراغ ارسال برو.
 
-   تا ۸.۹۳ هستهٔ یکسانی صدا زده می‌شد ($exRes = runBackendExtract) ولی در
-   یک شرایط اجرایی کاملاً متفاوت، و همین گالری‌ها را از بین می‌برد:
+   اگر اجرای قبلی وسط فاز جزئیات کشته شده باشد، محصولات روی دیسک هستند
+   ولی نیمی‌شان هنوز گالری ندارند. در آن حالت این نوبت فقط استخراج را
+   دوباره اجرا می‌کند تا جزئیات کامل شود و ارسال یک نوبت صبر می‌کند؛
+   وگرنه محصول بدون عکس به مقصد می‌رفت.
 
-   دکمهٔ بک‌اند → ?action=backend_extract → runBackendExtract(...,true)
-     پارامتر سوم true یعنی پاسخ زودهنگام + fastcgi_finish_request()، پس
-     پردازه از وب‌سرور جدا می‌شود و فقط همان یک استخراج را انجام می‌دهد.
+   این بررسی باید «قبل» از اجرای استخراج انجام شود، چون خودِ استخراج در
+   پایانش نشانه را روی complete می‌گذارد و بعد از آن دیگر چیزی برای
+   تشخیص باقی نمی‌ماند. */
+$stagePrev   = (string)($profile['_extract_stage'] ?? '');
+$stagePrevAge = time() - (int)($profile['_extract_stage_at'] ?? 0);
+$stageStale  = max(120, (int)($cn['stall_after'] ?? 300));
+$detailWasUnfinished = in_array($stagePrev, ['list_done', 'detail'], true)
+                       && $stagePrevAge <= $stageStale;
 
-   کران (تا ۸.۹۳) → runBackendExtract(...,false) در همان درخواست
-     هیچ جدا شدنی در کار نبود و بلافاصله بعدش مرحلهٔ ارسال به ووکامرس/
-     باسلام هم در همان پردازه اجرا می‌شد. یعنی استخراجِ فهرست + باز کردن
-     صفحهٔ تک‌تک محصول‌ها برای گالری + آپلود تصاویر، همه زیر یک سقفِ
-     زمانیِ واحد. روی هاستی که پردازه‌ها را می‌کشد، مرگ تقریباً همیشه
-     وسط فاز گالری اتفاق می‌افتد — چون طولانی‌ترین بخش همان است.
-
-   نتیجه‌اش دقیقاً همان چیزی بود که کاربر گزارش می‌کرد: با دکمه گالری
-   می‌آمد، با کران نمی‌آمد. مسیر یکی بود ولی عمرِ پردازه یکی نبود.
-
-   حالا کران همان درخواست HTTP دکمه را به خودش می‌زند و منتظر پایانش
-   می‌ماند. استخراج در پردازهٔ جدا و مستقلِ خودش اجرا می‌شود — همان‌طور
-   که وقتی کاربر دکمه را می‌زند اتفاق می‌افتد. */
-$exRes = cronExtractLikeButton($key, $profile);
+// v8.27: همان هستهٔ استخراج دکمهٔ دستی، با برچسب auto
+$exRes = runBackendExtract($key, 'auto');
 if (!empty($exRes['ok'])) {
 $pResult['extracted'] = (int)($exRes['extracted'] ?? 0);
 $pResult['extract_method'] = 'backend_extract';
 $pResult['new'] = (int)($exRes['new'] ?? 0);
 $pResult['price_changed'] = (int)($exRes['price_changed'] ?? 0);
 $pResult['removed'] = (int)($exRes['removed'] ?? 0);
-/* v8.30: گران/ارزان و موجود/ناموجود شدن سایت مبدأ را اطلاع بده.
-   v8.94: وقتی استخراج از راه همان اندپوینت دکمه انجام شده، آن اندپوینت
-   خودش این اعلان را فرستاده؛ دوباره فرستادنش یعنی دو پیام یکسان. */
-if (empty($exRes['via_button'])) {
-    $srcN = notifSourceChanges($cn, $exRes, $profile['name'] ?? $key);
-    if (!empty($srcN['sent'])) $pResult['src_notified'] = $srcN['sent'];
-}
+// v8.30: گران/ارزان و موجود/ناموجود شدن سایت مبدأ را اطلاع بده
+$srcN = notifSourceChanges($cn, $exRes, $profile['name'] ?? $key);
+if (!empty($srcN['sent'])) $pResult['src_notified'] = $srcN['sent'];
 
 // v8.34: محصولاتی که از مبدأ رفته‌اند را روی مقصد بازنشسته کن
 $retireMode = (string)($cn['retire_mode'] ?? 'off');
@@ -7815,6 +7681,39 @@ if ($pricingChanged && $changedKeys !== null) {
     $pResult['pricing_from'] = $lastSig;
     $pResult['pricing_to'] = $priceSig;
 }
+
+/* v8.94: دروازهٔ ارسال — مرحلهٔ جزئیات باید تمام شده باشد.
+
+   دو حالت جلوی ارسال را می‌گیرند:
+
+   ۱) اجرای قبلی وسط فاز جزئیات کشته شده بود ($detailWasUnfinished که
+      «قبل» از استخراج این نوبت سنجیده شد). همین نوبت جزئیات را کامل
+      کرد، ولی محافظه‌کارانه یک نوبت صبر می‌کنیم تا نتیجه تثبیت شود.
+   ۲) خودِ همین نوبت وسط فاز جزئیات مانده — یعنی استخراج تمام نشده و
+      نشانه هنوز روی list_done یا detail است.
+
+   بدون این دروازه، محصولاتی که هنوز گالری نگرفته‌اند به مقصد می‌رفتند و
+   محصول بی‌عکس در فروشگاه می‌نشست. */
+$stageNow   = (string)($profile['_extract_stage'] ?? '');
+$stageAge   = time() - (int)($profile['_extract_stage_at'] ?? 0);
+$stageStale = max(120, (int)($cn['stall_after'] ?? 300));
+$stageOpen  = in_array($stageNow, ['list_done', 'detail'], true) && $stageAge <= $stageStale;
+
+if ($stageOpen || $detailWasUnfinished) {
+    $pResult['status'] = 'detail_pending';
+    $pResult['detail_done']  = (int)($profile['_extract_detail_done'] ?? 0);
+    $pResult['detail_total'] = (int)($profile['_extract_detail_total'] ?? 0);
+    $pResult['note'] = $stageOpen
+        ? 'مرحلهٔ جزئیات هنوز تمام نشده — ارسال در نوبت بعدی'
+        : 'جزئیاتِ نیمه‌کارهٔ اجرای قبلی همین حالا کامل شد — ارسال در نوبت بعدی';
+    if (!isset($syncState[$key])) $syncState[$key] = [];
+    $syncState[$key]['status']    = 'detail_pending';
+    $syncState[$key]['price_sig'] = profilePriceSignature($profile);
+    $results['profiles'][] = $pResult;
+    continue;
+}
+// نشانهٔ بی‌حرکتِ جامانده: اجرایش مرده، با همین چیزی که هست جلو می‌رویم
+if (in_array($stageNow, ['list_done', 'detail'], true)) $pResult['detail_stalled'] = $stageAge;
 
 $orderedProducts = profileOrderedProducts($profile);
 $changedProducts = $changedKeys === null
@@ -7901,24 +7800,7 @@ $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
 // تکرار شود، نه در هر اجرای بعدی.
 if (!isset($syncState[$key])) $syncState[$key] = ['lastRun' => $now, 'status' => 'idle'];
 $syncState[$key]['price_sig'] = $priceSig;
-/* v8.95: وقتی استخراج فقط «شروع» شده و نتیجه‌اش هنوز نیامده، این اجرا
-   کامل نبوده. اگر lastRun جلو برود، اجرای بعدی «هنوز نوبت نیست» می‌گوید
-   و نتیجهٔ آمادهٔ استخراج تا یک بازهٔ کامل معطل می‌ماند. پس نوبت را نگه
-   می‌داریم تا اجرای بعدی بتواند نتیجه را بردارد و ارسال کند. */
-if (!empty($exRes['started']) || !empty($exRes['pending'])) {
-    $syncState[$key]['lastRun'] = (int)($syncState[$key]['lastRun'] ?? 0);
-    $syncState[$key]['status']  = 'extracting';
-}
 $results['profiles'][] = $pResult;
-}
-/* v8.95: مهر «نتیجهٔ مصرف‌شده» را که cronExtractLikeButton نوشته حفظ کن —
-   $syncState از قبل از آن نوشتن خوانده شده و بدون این ادغام پاکش می‌کرد. */
-$stFresh = loadSyncState();
-foreach ($stFresh as $k => $v) {
-    if (isset($v['extract_consumed_ts'])) {
-        if (!isset($syncState[$k]) || !is_array($syncState[$k])) $syncState[$k] = $v;
-        else $syncState[$k]['extract_consumed_ts'] = $v['extract_consumed_ts'];
-    }
 }
 saveSyncState($syncState);
 
@@ -9271,74 +9153,36 @@ if (isset($_GET['selftest'])) {
     /* «استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که گالری، تنوع، سلکتورهای
        جزئیات، ذخیره‌سازی سمت سرور و صف نداشت. «اجرای الان» هم انسدادی بود.
        حالا هر سه از یک نقطه رد می‌شوند. */
-    /* ---------- v8.94: کران هم همان دکمه را می‌زند ---------- */
-    /* تا ۸.۹۳ هستهٔ استخراج یکی بود ولی شرایط اجرا نه: دکمه پردازه را جدا
-       می‌کرد و فقط استخراج می‌کرد، کران متصل می‌ماند و ارسال را هم در همان
-       پردازه انجام می‌داد. روی هاستی که پردازه را می‌کشد، مرگ وسط فاز
-       گالری می‌افتاد و گالری‌ها نمی‌آمدند. */
-    $add('8.94', 'کران استخراج را از راه همان اندپوینت دکمه اجرا می‌کند',
-         function_exists('cronExtract' . 'LikeButton')
-         && strpos($selfSrc, '$exRes = cronExtractLike' . 'Button($key, $profile);') !== false);
-    $add('8.94', 'کران همان درخواست HTTP دکمه را می‌زند',
-         strpos($selfSrc, "fireAndForget('action=backend_extract" . "&profile_key='") !== false);
-    $add('8.94', 'اگر شلیک HTTP ممکن نبود، فراخوانی مستقیم جایگزین می‌شود',
-         substr_count($selfSrc, "return runBackendExtract(\$key, 'auto');") >= 2);
-    /* v8.95: کران هرگز منتظر درخواستِ خودش نمی‌ماند.
-       انتظار مسدودکننده یک worker را اشغال می‌کرد در حالی که استخراج به
-       worker دومی نیاز داشت؛ روی هاست اشتراکی با worker کم این بن‌بست
-       می‌شد. با تست روی HTTP واقعی دیده شد: استخراج سالم انجام می‌شد ولی
-       کران «در مهلت مقرر تمام نشد» می‌داد. */
-    /* ---------- v8.96: قفل استخراج — علت واقعی نیامدن عکس‌ها با کران ---------- */
-    /* runBackendExtract همان اول فایل پیشرفت را unlink می‌کند، پس هر اجرای
-       تازه اجرای در جریان را بی‌صدا می‌کشت. با دکمه پیش نمی‌آمد، با کران
-       هر چند دقیقه یک بار. محافظ ۸.۹۵ کار نمی‌کرد چون profile_key را از
-       فایل پیشرفت می‌خواند و آن فیلد فقط در نوشتنِ پایانی وجود داشت. */
-    $add('8.96', 'فایل پیشرفت در حین اجرا هم profile_key دارد',
-         substr_count($selfSrc, "'profile_key'=>\$profileKey,'") >= 9);
-    $add('8.96', 'استخراج قفل انحصاری می‌گیرد',
-         strpos($selfSrc, "\$exLockFile = __DIR__ . '/.extract_run" . ".lock';") !== false
-         && strpos($selfSrc, 'flock($exLockFp, LOCK_EX | ' . 'LOCK_NB)') !== false);
-    /* هر دو محافظ باید پیام «مشغول» بدهند: نشانهٔ زنده بودن و قفل. */
-    $add('8.96', 'اجرای دوم به‌جای کشتن اولی، رد می‌شود',
-         substr_count($selfSrc, "'error'=>'استخراج دیگری در " . "جریان است'") === 2
-         && substr_count($selfSrc, "'ok'=>false, 'busy'=>" . "true,") === 2);
-    $add('8.96', 'قفل قبل از پاک کردن فایل پیشرفت گرفته می‌شود',
-         (($_p96a = strpos($selfSrc, '$exLockFile = __DIR__')) !== false)
-         && (($_p96b = strpos($selfSrc, '@unlink(EXTRACT_PROGRESS_FILE); @unlink(EXTRACT_STOP_FILE);', $_p96a)) !== false)
-         && $_p96a < $_p96b);
-    $add('8.96', 'قفل با پایان پردازه آزاد می‌شود',
-         strpos($selfSrc, 'register_shutdown_function(function () use ($exLockFp, ' . '$exLockFile)') !== false);
-    $add('8.96', 'تابع پرسیدن وضعیت اشغال هست',
-         function_exists('extractIs' . 'Busy')
-         && strpos($selfSrc, 'if (extractIs' . 'Busy()) {') !== false);
-    /* نشانهٔ زنده بودن، مستقل از flock — چون flock روی لینوکس مشورتی است */
-    $add('8.96', 'محافظ زنده بودن مستقل از قفل هم هست',
-         strpos($selfSrc, '$exAliveMax = max(60, (int)(loadConnections()' . "['stall_after'] ?? 300));") !== false
-         && strpos($selfSrc, 'if ($liveAge <= ' . '$exAliveMax) {') !== false);
-    $add('8.96', 'اجرای مرده بن‌بست نمی‌سازد',
-         strpos($selfSrc, '// بی‌حرکت مانده: پردازه‌اش مرده، می‌شود ' . 'جایش را گرفت') !== false);
-
-    $add('8.95', 'کران منتظر درخواست خودش نمی‌ماند (بن‌بست worker)',
-         !preg_match('~while \(true\) \{\s*\n\s*usleep\(2000000\)~', $selfSrc)
-         && strpos($selfSrc, "'error' => 'استخراج در پس‌زمینه شروع شد") !== false);
-    $add('8.95', 'نتیجهٔ آمادهٔ اجرای قبلی در اجرای بعدی مصرف می‌شود',
-         strpos($selfSrc, "'from_previous_" . "run' => true];") !== false
-         && strpos($selfSrc, "\$consumed  = (int)(\$stAll[\$key]['extract_consumed" . "_ts'] ?? 0);") !== false);
-    $add('8.95', 'هر نتیجه فقط یک بار مصرف می‌شود',
-         strpos($selfSrc, "\$stAll[\$key]['extract_consumed_ts'] = (int)(\$pNow['last_progress" . "_ts'] ?? time());") !== false);
-    $add('8.95', 'مهر مصرف‌شده با ذخیرهٔ پایانی کران پاک نمی‌شود',
-         strpos($selfSrc, '$stFresh = ' . 'loadSyncState();') !== false
-         && strpos($selfSrc, "\$syncState[\$k]['extract_consumed_ts'] = \$v['extract_consumed" . "_ts'];") !== false);
-    $add('8.95', 'وقتی استخراج فقط شروع شده، نوبت اجرا جلو نمی‌رود',
-         strpos($selfSrc, "if (!empty(\$exRes['started']) || !empty(\$exRes['pend" . "ing'])) {") !== false
-         && strpos($selfSrc, "\$syncState[\$key]['status']  = 'extract" . "ing';") !== false);
-    $add('8.95', 'استخراجِ در جریان دوباره شلیک نمی‌شود',
-         strpos($selfSrc, "return ['ok' => false, 'pending' => true, " . "'error' => 'استخراج هنوز در جریان است',") !== false);
-    $add('8.94', 'اندپوینت برچسب trigger=auto را می‌پذیرد',
-         strpos($selfSrc, "\$trg = ((\$_GET['trigger'] ?? \$_POST['trigger'] ?? '') === 'auto')") !== false
-         && strpos($selfSrc, 'runBackendExtract($profileKey,$trg,true);') !== false);
-    $add('8.94', 'اعلان تغییر مبدأ دوبار فرستاده نمی‌شود',
-         strpos($selfSrc, "if (empty(\$exRes['via_" . "button'])) {") !== false);
+    /* ---------- v8.94: نقطهٔ امن + مرحلهٔ جدای جزئیات ---------- */
+    /* ذخیره فقط یک بار و در انتها انجام می‌شد، پس مرگ وسط فاز جزئیات
+       همه‌چیز را دور می‌ریخت — حتی محصولات فاز فهرست. */
+    $add('8.94', 'تابع ثبت نقطهٔ امن هست',
+         function_exists('extract' . 'Checkpoint'));
+    $add('8.94', 'بعد از فاز فهرست ذخیره می‌شود',
+         strpos($selfSrc, "extractCheckpoint(\$pkFinal,\$allProducts,['_extract_stage'=>'list_" . "done'") !== false);
+    $add('8.94', 'حین فاز جزئیات هر ۵ محصول ذخیره می‌شود',
+         strpos($selfSrc, 'if($detailDone%5' . '===0){') !== false
+         && strpos($selfSrc, "'_extract_stage'=>'det" . "ail','_extract_stage_at'=>time(),") !== false);
+    $add('8.94', 'پایان فاز جزئیات هم نقطهٔ امن دارد',
+         strpos($selfSrc, "'_extract_stage'=>'detail_" . "done'") !== false);
+    $add('8.94', 'نقطهٔ امن پروفایل را از دیسک می‌خواند و فقط محصولات را می‌نویسد',
+         strpos($selfSrc, '$profilesNow = loadProfiles();' . "\n    if (!isset(\$profilesNow[\$pkFinal])") !== false);
+    $add('8.94', 'کران تا تمام نشدن جزئیات ارسال نمی‌کند',
+         strpos($selfSrc, "\$pResult['status'] = 'detail_pen" . "ding';") !== false
+         && strpos($selfSrc, 'if ($stageOpen || ' . '$detailWasUnfinished) {') !== false);
+    /* نشانه باید «قبل» از اجرای استخراج خوانده شود، وگرنه خودِ استخراج
+       آن را روی complete می‌گذارد و دروازه هیچ‌وقت بسته نمی‌شود. */
+    $add('8.94', 'وضعیت نیمه‌کاره قبل از اجرای استخراج سنجیده می‌شود',
+         (($_p94a = strpos($selfSrc, '$detailWasUnfinished = in_array($stagePrev')) !== false)
+         && (($_p94b = strpos($selfSrc, "\$exRes = runBackendExtract(\$key, 'auto');", $_p94a)) !== false)
+         && $_p94a < $_p94b);
+    $add('8.94', 'مرحلهٔ جزئیاتِ بی‌حرکت، ارسال را تا ابد نمی‌بندد',
+         strpos($selfSrc, '$stageAge <= ' . '$stageStale;') !== false
+         && strpos($selfSrc, "\$pResult['detail_stal" . "led'] = \$stageAge;") !== false);
+    $add('8.94', 'پایان کامل، نشانهٔ نیمه‌کاره را برمی‌دارد',
+         strpos($selfSrc, "\$profileOnDisk['_extract_stage']='comp" . "lete';") !== false);
+    $add('8.94', 'توقف کاربر هم دروازهٔ ارسال را باز می‌گذارد',
+         strpos($selfSrc, "'_extract_stage'=>'stop" . "ped'") !== false);
 
     /* v8.93: «استخراج اتوماتیک» دیگر منطق خودش را ندارد — عیناً همان
        تابع دکمهٔ بک‌اند را صدا می‌زند. بدنه‌اش باید یک خط باشد، وگرنه
@@ -21981,60 +21825,24 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
-  {v:'8.96', t:'🖼 علت قطعی نیامدن عکس‌ها با کران — اجرای بعدی، اجرای در جریان را می‌کشت', items:[
-    '🐞 ریشهٔ مشکل پیدا شد و با تست بازتولید شد:',
-    'runBackendExtract همان خط اولش فایل پیشرفت را پاک می‌کند،',
-    'یعنی هر اجرای تازه، اجرای در جریان را بی‌صدا از بین می‌برد',
-    '⚡ با دکمه پیش نمی‌آمد چون کاربر دو بار پشت‌سرهم کلیک نمی‌کند',
-    '⏱ با کران هر چند دقیقه یک بار پیش می‌آمد:',
-    'تیک اول استخراج را شروع می‌کرد · فاز گالری چند دقیقه طول می‌کشید',
-    'تیک بعدی می‌رسید و درست وسط همان فاز، اجرای اول را می‌کشت',
-    'محصولات از فاز فهرست ذخیره شده بودند، عکس‌های گالری نه',
-    '⚠️ محافظ ۸.۹۵ قرار بود همین را بگیرد ولی اصلاً کار نمی‌کرد:',
-    'profile_key را از فایل پیشرفت می‌خواند، ولی آن فیلد فقط در نوشتنِ',
-    'پایانی وجود داشت — در حین اجرا هیچ‌وقت. پس شرط هرگز درست نمی‌شد',
-    '✅ حالا هر ۹ نوشتنِ حین اجرا profile_key دارند',
-    '✅ استخراج قفل انحصاری می‌گیرد؛ اجرای دوم رد می‌شود نه اینکه اولی را بکشد',
-    '✅ محافظ دولایه: نشانهٔ زنده بودن + قفل واقعی',
-    '(چون flock روی لینوکس مشورتی است و به‌تنهایی قابل اتکا نیست)',
-    '✅ اجرای مرده بن‌بست نمی‌سازد — بعد از آستانهٔ بی‌حرکتی کنار می‌رود',
-    '✅ قفل با پایان پردازه آزاد می‌شود، حتی با fatal یا تایم‌اوت',
-  ]},
-  {v:'8.95', t:'کران واقعاً همان دکمه را می‌زند — بدون بن‌بست انتظار', items:[
-    '🐞 در ۸.۹۴ کران درخواست دکمه را می‌زد ولی بعدش «منتظر» می‌ماند:',
-    'انتظار مسدودکننده یک worker را اشغال می‌کرد، در حالی که خودِ استخراج',
-    'به worker دوم نیاز داشت. روی هاست اشتراکی با worker کم = بن‌بست',
-    'کران می‌گفت «استخراج در مهلت مقرر تمام نشد» در حالی که استخراج',
-    'کاملاً سالم انجام شده بود و گالری‌ها هم آمده بودند',
-    '⚠️ این را تست قبلی من نگرفت چون در محیط تست، درخواست به خود سرور',
-    'اصلاً برقرار نمی‌شد و همیشه مسیر جایگزین (کد قدیمی) اجرا می‌شد',
-    'حالا تست روی یک سرور HTTP واقعی انجام می‌شود',
-    '✅ کران شلیک می‌کند و برمی‌گردد — دقیقاً مثل خود دکمه',
-    '✅ استخراج در پردازهٔ مستقل خودش کامل می‌شود (گالری، تنوع، جزئیات)',
-    '✅ اجرای بعدی کران نتیجهٔ آماده را برمی‌دارد و ارسال را انجام می‌دهد',
-    '✅ هر نتیجه فقط یک بار مصرف می‌شود، پس محصولات دوبار فرستاده نمی‌شوند',
-    '✅ تا وقتی نتیجه مصرف نشده، نوبت اجرا جلو نمی‌رود',
-    '✅ اگر استخراجی در جریان باشد، دوباره شلیک نمی‌شود',
-  ]},
-  {v:'8.94', t:'کران‌جاب هم دقیقاً همان دکمهٔ «استخراج بک‌اند» را می‌زند', items:[
-    '🖼 علت واقعیِ نیامدن گالری در استخراج خودکار پیدا شد:',
-    'از ۸.۹۲ هستهٔ استخراج یکی بود، ولی «شرایط اجرا» یکی نبود —',
-    'و همین کافی بود که گالری‌ها نیایند',
-    '⚡ دکمه: پاسخ زودهنگام + fastcgi_finish_request →',
-    'پردازه از وب‌سرور جدا می‌شود و فقط همان یک استخراج را می‌کند',
-    '⏱ کران (تا ۸.۹۳): هیچ جدا شدنی نبود و بلافاصله بعد از استخراج،',
-    'ارسال به ووکامرس/باسلام هم در همان پردازه اجرا می‌شد',
-    'یعنی فهرست + باز کردن صفحهٔ تک‌تک محصولات برای گالری + آپلود عکس‌ها،',
-    'همه زیر یک سقف زمانیِ واحد',
-    'روی هاستی که پردازه را می‌کشد، مرگ تقریباً همیشه وسط فاز گالری',
-    'می‌افتاد — چون طولانی‌ترین بخش همان است',
-    '✅ حالا کران همان درخواست HTTP دکمه را به خودش می‌زند',
-    'استخراج در پردازهٔ جدا و مستقل اجرا می‌شود، مثل وقتی دکمه را می‌زنید',
-    '✅ کران منتظر پایانش می‌ماند و نتیجه را از فایل پیشرفت برمی‌دارد',
-    '(معیار انتظار «بی‌حرکتی» است نه گذر زمان، پس اجرای طولانی قطع نمی‌شود)',
-    '✅ اگر شلیک HTTP ممکن نباشد (مثلاً اجرای CLI)، فراخوانی مستقیم انجام می‌شود',
-    '🐞 اعلان تغییر مبدأ دوبار فرستاده می‌شد — اصلاح شد',
-    'ℹ️ با تست تأیید شد خروجی کران بایت‌به‌بایت با خروجی دکمه یکسان است',
+  {v:'8.94', t:'مرحلهٔ جزئیات جدا شد و کارِ انجام‌شده مرتب ذخیره می‌شود', items:[
+    '↩️ تغییرات ۸.۹۴ تا ۸.۹۶ قبلی برگردانده شد — آن راه (قفل و درخواست',
+    'به خود سرور) استخراج را خراب می‌کرد. این بار از ریشه حل شده است.',
+    '🖼 علت واقعی نیامدن عکس‌ها با کران:',
+    'ذخیره فقط یک بار و در «انتهای همه‌چیز» انجام می‌شد',
+    'یعنی: فهرست ← [هیچ ذخیره‌ای] ← فاز جزئیات ← [هیچ ذخیره‌ای] ← ذخیره',
+    'روی هاستی که پردازه را می‌کشد، مرگ همیشه وسط فاز جزئیات می‌افتد',
+    '(چون طولانی‌ترین بخش است) و آن‌وقت هیچ‌چیز ذخیره نمی‌شد —',
+    'حتی محصولاتی که از صفحهٔ فهرست به دست آمده بودند',
+    'با دکمه مشکلی نبود چون پردازه‌اش جدا و بدون مرحلهٔ ارسال است',
+    '✅ حالا «نقطهٔ امن» ثبت می‌شود: بعد از فاز فهرست، و هر ۵ محصول',
+    '✅ اگر کار نیمه‌کاره بماند، دفعهٔ بعد از همان‌جا ادامه می‌دهد نه از صفر',
+    '✅ بدترین حالت، از دست رفتن کارِ ۵ محصول آخر است',
+    '📦 مرحلهٔ جزئیات حالا مرحلهٔ مستقلی است:',
+    'کران تا وقتی جزئیات تمام نشده، ارسال نمی‌کند',
+    'پس محصول نیمه‌کاره (بدون گالری) به مقصد نمی‌رود',
+    'اگر مرحلهٔ جزئیات بی‌حرکت بماند، بعد از آستانهٔ گیر کردن رها می‌شود',
+    'تا ارسال تا ابد معطل نماند',
   ]},
   {v:'8.93', t:'«استخراج اتوماتیک» واقعاً همان دکمهٔ «استخراج بک‌اند» را می‌زند', items:[
     '🔧 در ۸.۹۲ این دکمه به موتور درست وصل شد ولی با منطق موازیِ خودش:',

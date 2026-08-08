@@ -21,7 +21,6 @@ _backups/
 .cron_sync.lock
 extract_report_*.json
 .cron_run.lock
-.extract_run.lock
 
 # v8.33: runtime locks for the send workers
 bsl_backend.lock
