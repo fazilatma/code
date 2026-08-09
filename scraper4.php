@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.05';
+const APP_VERSION = '9.06';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -466,6 +466,48 @@ if (!file_exists($file)) return ['running'=>false,'sent'=>0,'updated'=>0,'skippe
 $d = @json_decode(@file_get_contents($file) ?: '', true);
 return is_array($d) ? $d : ['running'=>false,'total_log_count'=>0];
 }
+/**
+ * v9.06: پاسخ را همین حالا ببند و کار را جدا از مرورگر/کران ادامه بده.
+ *
+ * این تفاوتِ واقعیِ «دکمهٔ دستی کار می‌کند ولی کران‌جاب نه» بود.
+ * دکمهٔ دستی از مسیری می‌رفت که fastcgi_finish_request صدا می‌زد: اتصال
+ * بسته می‌شد و PHP آزادانه تا آخر کار ادامه می‌داد. کران‌جاب اتصال را تا
+ * پایان همهٔ کارها باز نگه می‌داشت، و وب‌سرور سرِ سقفِ خودش
+ * (FcgidIOTimeout / proxy_read_timeout / LiteSpeed) پردازه را می‌کشت —
+ * معمولاً وسط فاز جزئیات. نتیجه: فقط فهرست پایه ذخیره می‌شد.
+ *
+ * fastcgi_finish_request روی PHP-FPM هست ولی روی LiteSpeed (که هاست‌های
+ * اشتراکی ایران بیشتر همان را دارند) نیست؛ آنجا litespeed_finish_request
+ * همان کار را می‌کند. اگر هیچ‌کدام نبود، Connection: close به‌علاوهٔ
+ * flush کلاینت را رها می‌کند و ignore_user_abort کار را زنده نگه می‌دارد.
+ */
+function finishRequestNow(string $body = '', string $type = 'application/json; charset=UTF-8'): void {
+    if (defined('REQ_DETACHED')) return;
+    @set_time_limit(0);
+    @ignore_user_abort(true);
+    while (@ob_get_level()) @ob_end_clean();
+    if (!headers_sent()) {
+        header('Content-Type: ' . $type);
+        header('Content-Length: ' . strlen($body));
+        header('Connection: close');
+    }
+    echo $body;
+    if (function_exists('fastcgi_finish_request'))      { fastcgi_finish_request(); }
+    elseif (function_exists('litespeed_finish_request')) { litespeed_finish_request(); }
+    @ob_flush(); @flush();
+    define('REQ_DETACHED', true);
+}
+
+/** خروجی کران: اگر اتصال بسته شده، به فایل برود نه به اتصالِ مرده */
+function cronEmit(array $results): void {
+    if (defined('REQ_DETACHED')) {
+        @file_put_contents(__DIR__ . '/cron_last_run.json',
+            json_encode($results, JSON_UNESCAPED_UNICODE), LOCK_EX);
+        return;
+    }
+    echo json_encode($results, JSON_UNESCAPED_UNICODE);
+}
+
 function loadConnections(): array {
 if (!file_exists(CONNECTIONS_FILE)) return ['woocommerce'=>[],'basalam'=>['token'=>'','vendor_id'=>0,'preparation_days'=>3,'weight'=>500,'package_weight'=>600,'stock'=>10,'category_id'=>0,'auto_category'=>false]];
 $d = @json_decode(@file_get_contents(CONNECTIONS_FILE) ?: '', true);
@@ -7494,11 +7536,16 @@ writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'
    می‌مانند و تا ۸.۹۳ فقط در انتها ذخیره می‌شدند. اگر هاست وسط این حلقه
    پردازه را می‌کشت، همهٔ عکس‌های جمع‌شده دور ریخته می‌شد.
    حالا بدترین حالت، از دست رفتن کارِ ۵ محصول آخر است. */
-if($detailDone%5===0){
-    extractCheckpoint($pkFinal,$allProducts,
-        ['_extract_stage'=>'detail','_extract_stage_at'=>time(),
-         '_extract_detail_done'=>$detailDone,'_extract_detail_total'=>$detailTotal]);
-}
+/* v9.06: هر محصول، نه هر ۵ محصول.
+
+   با فاصلهٔ ۵ تایی، اگر پردازه قبل از پنجمین محصول کشته می‌شد، کارِ
+   هر چهار محصول قبلی هم دور ریخته می‌شد و اجرای بعدی از صفر شروع
+   می‌کرد. روی هاستی که هر بار وسط فاز جزئیات می‌مُرد، این یعنی هیچ
+   گالری‌ای هرگز روی دیسک نمی‌نشست — همان چیزی که کاربر می‌دید.
+   هزینهٔ نوشتن یک فایل در برابر یک درخواست HTTP ناچیز است. */
+extractCheckpoint($pkFinal,$allProducts,
+    ['_extract_stage'=>'detail','_extract_stage_at'=>time(),
+     '_extract_detail_done'=>$detailDone,'_extract_detail_total'=>$detailTotal]);
 usleep(200000);
 }
 /* v8.94: پایان فاز جزئیات — قبل از هر کار دیگری ذخیره کن.
@@ -7952,18 +7999,32 @@ header('Content-Type: application/json; charset=UTF-8');
    یا هاست وسط راه قطع می‌کرد، به نظر می‌رسید دکمه اصلاً کار نکرده.
    با bg=1 همان الگوی استخراج بک‌اند اجرا می‌شود: پاسخ فوری، کار در
    پس‌زمینه، پیشرفت از همان فایل و همان صف خوانده می‌شود. */
-if (!empty($_POST['bg']) || !empty($_GET['bg'])) {
-    while (@ob_get_level()) @ob_end_clean();
-    $bgResp = json_encode(['ok' => true, 'started' => true, 'bg' => true],
-                          JSON_UNESCAPED_UNICODE);
-    header('Content-Length: ' . strlen($bgResp));
-    header('Connection: close');
-    echo $bgResp;
-    if (function_exists('fastcgi_finish_request')) { fastcgi_finish_request(); }
-    @ob_flush(); @flush();
-    // از این به بعد چیزی چاپ نمی‌شود؛ خروجی نهایی فقط در فایل پیشرفت و صف می‌نشیند
-    define('CRON_BG', true);
-}
+/* v9.06: اتصال «همیشه» همین ابتدا بسته می‌شود — نه فقط با bg=1.
+
+   این علتِ واقعیِ «دکمهٔ دستی همه‌چیز را می‌آورد ولی کران فقط فهرست را»
+   بود. دکمهٔ دستی از runBackendExtract با emitEarlyResponse=true رد
+   می‌شد و همان‌جا fastcgi_finish_request صدا می‌خورد: اتصال بسته،
+   پردازه جدا، کار تا آخر ادامه. کران هر دو گام را با
+   emitEarlyResponse=false صدا می‌زند، پس اتصال از اولین بایت تا آخرین
+   کار باز می‌ماند و وب‌سرور سرِ سقفِ خودش پردازه را می‌کشد. سقفِ
+   وب‌سرور از داخل PHP قابل تغییر نیست و set_time_limit(0) جلویش را
+   نمی‌گیرد.
+
+   گام ۱ (فهرست) کوتاه است و تمام می‌شود؛ گام ۲ (جزئیات) برای هر محصول
+   یک درخواست HTTP می‌زند و دقیقاً همان‌جاست که کشته می‌شود. برای همین
+   کاربر فهرست پایه را می‌دید و هیچ گالری‌ای نه.
+
+   حالا کران هم مثل دکمهٔ دستی رفتار می‌کند: پاسخ فوری، اتصال بسته، کار
+   در پس‌زمینه. curlِ کران‌جاب هم بلافاصله پاسخ ۲۰۰ می‌گیرد و بسته
+   می‌شود — که برای کران‌جاب مطلوب هم هست، چون سرویس‌های کران معمولاً
+   خودشان سقف چنددقیقه‌ای دارند و اتصال طولانی را قطع می‌کنند.
+   خلاصهٔ نهایی در cron_last_run.json می‌نشیند و با ?cron_last خوانده
+   می‌شود. */
+$_cronBg = !empty($_POST['bg']) || !empty($_GET['bg']);
+finishRequestNow(json_encode(['ok' => true, 'started' => true, 'bg' => $_cronBg,
+    'detached' => true, 'note' => 'اجرا در پس‌زمینه ادامه دارد — نتیجه در cron_last_run.json'],
+    JSON_UNESCAPED_UNICODE));
+if ($_cronBg) define('CRON_BG', true);
 
 // قفل ضد هم‌پوشانی — یک اجرای طولانی نباید با اجرای بعدی تداخل کند
 $cronLock = __DIR__ . '/.cron_run.lock';
@@ -7989,7 +8050,8 @@ if ($lockAge < $cronLockSec) {
         $lockOut['lock_cleared'] = true;
     }
     notifCronPing($cnLock, ['profiles' => [], 'locked' => $lockAge]);
-    echo json_encode($lockOut, JSON_UNESCAPED_UNICODE);
+    // v9.06: اتصال بالاتر بسته شده — خروجی به فایل می‌رود، نه به اتصالِ مرده
+    cronEmit($lockOut);
     exit;
 }
 @file_put_contents($cronLock, (string)time());
@@ -8326,13 +8388,11 @@ elseif (!empty($pingRes['skipped'])) $results['ping'] = $pingRes['skipped'];
 
 /* v8.92: در حالت پس‌زمینه پاسخ قبلاً فرستاده شده و اتصال بسته است.
    چاپ دوباره یعنی JSON دوتکه؛ خلاصه در فایل کران می‌نشیند تا مرورگر
-   بعد از پایانِ رصد بتواند بخواندش. */
-if (defined('CRON_BG')) {
-    @file_put_contents(__DIR__ . '/cron_last_run.json',
-        json_encode($results, JSON_UNESCAPED_UNICODE), LOCK_EX);
-    exit;
-}
-echo json_encode($results, JSON_UNESCAPED_UNICODE); exit;
+   بعد از پایانِ رصد بتواند بخواندش.
+   v9.06: حالا اتصال «همیشه» بسته است، پس همیشه همین مسیر است. خلاصه در
+   cron_last_run.json می‌نشیند و با ?cron_last خوانده می‌شود. */
+cronEmit($results);
+exit;
 }
 
 /* v8.92: خلاصهٔ آخرین اجرای پس‌زمینهٔ کران — «اجرای الان» بعد از تمام
@@ -9727,6 +9787,24 @@ if (isset($_GET['selftest'])) {
     /* ---------- v9.02: انتخاب محصول برای فاز جزئیات ---------- */
     /* با گالری خاموش و سلکتورهای جزئیات روشن، هیچ محصولی انتخاب نمی‌شد
        چون شرط فقط «عکس یا قیمت ندارد» را می‌سنجید. */
+    /* ---------- v9.06: کران هم مثل دکمهٔ دستی اتصال را می‌بندد ---------- */
+    $add('9.06', 'تابع جداکنندهٔ اتصال وجود دارد',
+         function_exists('finishRequest' . 'Now') && function_exists('cron' . 'Emit'));
+    $add('9.06', 'از litespeed_finish_request هم پشتیبانی می‌شود',
+         strpos($selfSrc, "function_exists('litespeed_finish_" . "request')") !== false);
+    $add('9.06', 'کران اتصال را بدون شرط bg می‌بندد',
+         strpos($selfSrc, 'finishRequestNow(json_encode([\'ok\' => true, \'started\' => true, \'bg\' => $_cronBg,') !== false
+         && strpos($selfSrc, 'if (!empty($_POST[\'bg\']) || !empty($_GET[\'bg\'])) {' . "\n" . '    while (@ob_get_level())') === false);
+    $add('9.06', 'خروجی کران روی اتصالِ بسته چاپ نمی‌شود',
+         strpos($selfSrc, 'cron' . 'Emit($results);') !== false
+         && strpos($selfSrc, 'cron' . 'Emit($lockOut);') !== false);
+    $add('9.06', 'جداسازی فقط یک بار انجام می‌شود',
+         strpos($selfSrc, "if (defined('REQ_DETA" . "CHED')) return;") !== false);
+    /* هر محصول ذخیره شود، نه هر ۵ تا — وگرنه کشته‌شدن پردازه کار
+       چند محصول را با هم دور می‌ریزد. */
+    $add('9.06', 'ذخیره بعد از هر محصول انجام می‌شود',
+         strpos($selfSrc, 'if($detailDone%' . '5===0){') === false);
+
     $add('9.02', 'فیلدهای خواسته‌شدهٔ خالی باعث باز شدن صفحهٔ محصول می‌شوند',
          strpos($selfSrc, '$_fieldMissing=false;') !== false
          && strpos($selfSrc, 'if($galleryCfg[\'enabled\']||$_fieldMissing||empty($p[\'image\'])') !== false);
@@ -9862,8 +9940,10 @@ if (isset($_GET['selftest'])) {
          function_exists('extract' . 'Checkpoint'));
     $add('8.94', 'بعد از فاز فهرست ذخیره می‌شود',
          strpos($selfSrc, "extractCheckpoint(\$pkFinal,\$allProducts,['_extract_stage'=>'list_" . "done'") !== false);
-    $add('8.94', 'حین فاز جزئیات هر ۵ محصول ذخیره می‌شود',
-         strpos($selfSrc, 'if($detailDone%5' . '===0){') !== false
+    /* v9.06: فاصلهٔ ۵ تایی برداشته شد — حالا بعد از «هر» محصول ذخیره
+       می‌شود، چون کشته‌شدن پردازه قبل از پنجمی کار همه را دور می‌ریخت. */
+    $add('9.06', 'حین فاز جزئیات بعد از هر محصول ذخیره می‌شود',
+         strpos($selfSrc, 'if($detailDone%5' . '===0){') === false
          && strpos($selfSrc, "'_extract_stage'=>'det" . "ail','_extract_stage_at'=>time(),") !== false);
     $add('8.94', 'پایان فاز جزئیات هم نقطهٔ امن دارد',
          strpos($selfSrc, "\$_ranOut?'detail':'detail_" . "done'") !== false);
@@ -9910,11 +9990,15 @@ if (isset($_GET['selftest'])) {
     $add('8.92', 'تغییر ذخیره‌نشده قبل از شروع ذخیره می‌شود',
          strpos($selfSrc, "showToast('💾 ذخیره شد — " . "شروع استخراج...')") !== false);
     // اجرای الان: پس‌زمینه مثل دکمهٔ بک‌اند
-    $add('8.92', 'کران حالت پس‌زمینه دارد',
-         strpos($selfSrc, "if (!empty(\$_POST['bg']) || !empty(\$_GET['bg'])) {") !== false
-         && strpos($selfSrc, "define('CRON_" . "BG', true);") !== false);
-    $add('8.92', 'کران پس‌زمینه پاسخ را دوبار چاپ نمی‌کند',
-         strpos($selfSrc, "if (defined('CRON_" . "BG')) {") !== false
+    /* v9.06: bg دیگر شرطِ جدا شدن نیست — کران «همیشه» جدا می‌شود، چون
+       اتصالِ باز همان چیزی بود که وب‌سرور را وادار به کشتن پردازه
+       می‌کرد. bg فقط تعیین می‌کند خلاصه کجا نوشته شود. */
+    $add('9.06', 'کران بدون توجه به bg اتصال را می‌بندد',
+         strpos($selfSrc, '$_cronBg = !empty($_POST[\'bg\']) || !empty($_GET[\'bg\']);') !== false
+         && strpos($selfSrc, 'if ($_cronBg) define(\'CRON_' . 'BG\', true);') !== false);
+    $add('9.06', 'کران پاسخ را دوبار چاپ نمی‌کند',
+         strpos($selfSrc, 'function cron' . 'Emit(array $results): void {') !== false
+         && strpos($selfSrc, 'cron' . 'Emit($results);') !== false
          && strpos($selfSrc, 'cron_last_run.json') !== false);
     $add('8.92', 'اندپوینت خواندن خلاصهٔ آخرین اجرای کران',
          strpos($selfSrc, "isset(\$_GET['cron_" . "last'])") !== false);
@@ -22657,6 +22741,31 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.06', t:'🎯 چرا دستی کار می‌کرد و کران‌جاب نه — علت پیدا شد', items:[
+    'گزارش شما: «دکمهٔ استخراج بک‌اند همهٔ محصولات و جزئیات و گالری را',
+    'کامل می‌آورد اما دقیقاً بعد از آن، استخراج خودکار فقط فهرست پایه',
+    'را می‌آورد و مرحلهٔ دوم اصلاً اجرا نمی‌شود.»',
+    '🔍 علت یک تفاوت مکانیکی بود، نه منطقی — و در کد پیدا شد:',
+    '• دکمهٔ دستی → runBackendExtract با emitEarlyResponse=true',
+    '  یعنی fastcgi_finish_request صدا می‌شد: اتصال بسته، پردازه جدا،',
+    '  کار تا آخر ادامه می‌یافت. برای همین همیشه کامل بود.',
+    '• کران‌جاب → همان تابع با emitEarlyResponse=false',
+    '  یعنی اتصال HTTP از اولین بایت تا آخرین کار باز می‌ماند.',
+    '⚠️ وب‌سرور سرِ سقفِ خودش پردازه را می‌کشد',
+    '(FcgidIOTimeout / proxy_read_timeout / LiteSpeed) و این سقف از',
+    'داخل PHP قابل تغییر نیست — set_time_limit(0) جلویش را نمی‌گیرد.',
+    'گام ۱ (فهرست) کوتاه است و تمام می‌شد؛ گام ۲ (جزئیات) برای هر',
+    'محصول یک درخواست HTTP می‌زند و دقیقاً همان‌جا کشته می‌شد.',
+    '✅ حالا کران هم مثل دکمهٔ دستی اتصال را همان ابتدا می‌بندد',
+    'و کار را جدا ادامه می‌دهد — دیگر bg=1 لازم نیست.',
+    '✅ پشتیبانی از litespeed_finish_request اضافه شد — هاست‌های',
+    'اشتراکی ایران معمولاً LiteSpeed‌اند و fastcgi_finish_request ندارند.',
+    '✅ ذخیره حالا بعد از «هر» محصول است، نه هر ۵ محصول: اگر پردازه',
+    'باز هم کشته شود، کار انجام‌شده روی دیسک می‌ماند و اجرای بعدی',
+    'از همان‌جا ادامه می‌دهد (قبلاً تا ۴ محصول کار دور ریخته می‌شد).',
+    '📄 خلاصهٔ اجرا در cron_last_run.json می‌نشیند و با ?cron_last',
+    'خوانده می‌شود؛ خروجی curlِ کران حالا فوری برمی‌گردد.'
+  ]},
   {v:'9.05', t:'🐞 پیام «همه از قبل کامل بودند» دروغ می‌گفت', items:[
     'شما گزارش دادید: مودال می‌گوید «هیچ محصولی نیاز به باز شدن نداشت»',
     'در حالی که هیچ گالری و جزئیاتی استخراج نشده — و حق داشتید',
