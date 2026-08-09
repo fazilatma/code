@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.98';
+const APP_VERSION = '8.99';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3157,7 +3157,10 @@ if (!empty($_GET['gallery_test'])) {
     if (!$cfg['enabled']) {
         echo json_encode(['ok' => false, 'error' => 'حالت گالری خاموش است'], JSON_UNESCAPED_UNICODE); exit;
     }
-    $res = fetch_html($url, 20);
+    /* v8.99: همان مهلت قابل تنظیم پراکسی — این هم از روی سرور می‌گیرد */
+    $_sgT = (int)(loadConnections()['proxy_timeout_sec'] ?? 0);
+    if ($_sgT <= 0) $_sgT = 45;
+    $res = fetch_html($url, max(10, min(180, $_sgT)));
     if (empty($res['ok'])) {
         echo json_encode(['ok' => false, 'error' => 'صفحه باز نشد: '
             . mb_substr((string)($res['error'] ?? 'خطا'), 0, 120)], JSON_UNESCAPED_UNICODE); exit;
@@ -3181,7 +3184,10 @@ if (!empty($_GET['gallery_suggest'])) {
     if (!filter_var($url, FILTER_VALIDATE_URL)) {
         echo json_encode(['ok' => false, 'error' => 'آدرس نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
     }
-    $res = fetch_html($url, 20);
+    /* v8.99: همان مهلت قابل تنظیم پراکسی — این هم از روی سرور می‌گیرد */
+    $_sgT = (int)(loadConnections()['proxy_timeout_sec'] ?? 0);
+    if ($_sgT <= 0) $_sgT = 45;
+    $res = fetch_html($url, max(10, min(180, $_sgT)));
     if (empty($res['ok'])) {
         echo json_encode(['ok' => false, 'error' => 'صفحه باز نشد'], JSON_UNESCAPED_UNICODE); exit;
     }
@@ -3301,13 +3307,34 @@ if (!empty($_GET['detail_proxy'])) {
 $url = trim($_GET['detail_proxy']);
 if (!filter_var($url, FILTER_VALIDATE_URL)) { http_response_code(400); echo 'Invalid URL'; exit; }
 
-$res = fetch_html($url, 15);
+/* v8.99: همان مهلت قابل تنظیم و همان تلاش دوم که در visual_proxy هست —
+   انتخابگر جزئیات هم از روی سرور صفحه را می‌گیرد و همان محدودیت را دارد. */
+$cnDP = loadConnections();
+$dpTimeout = (int)($cnDP['proxy_timeout_sec'] ?? 0);
+if ($dpTimeout <= 0) $dpTimeout = 45;
+$dpTimeout = max(10, min(180, $dpTimeout));
+
+$res = fetch_html($url, $dpTimeout);
+if (!$res['ok']) {
+    $e1 = (string)($res['error'] ?? '');
+    if (stripos($e1, 'timed out') !== false || stripos($e1, 'timeout') !== false
+        || stripos($e1, 'Empty') !== false) {
+        $res = fetch_html($url, min(180, $dpTimeout * 2));
+    }
+}
 if (!$res['ok']) {
 http_response_code(500);
 $err = $res['error'] ?? 'Unknown';
-if (stripos($err, 'resolve') !== false) echo 'DNS Error: domain not found';
-elseif (stripos($err, 'timed out') !== false) echo 'Timeout: server not responding';
-else echo 'Failed: ' . h($err);
+$_dpHint = '<div style="margin-top:22px;padding:14px 16px;background:#1e293b;border:1px solid #334155;border-radius:10px;line-height:2;font-size:13px;color:#cbd5e1">'
+  . 'صفحه را <b>سرور</b> می‌گیرد، نه مرورگر شما — پس این خطا یعنی مسیر شبکهٔ سرور به این سایت کند یا محدود است.<br>'
+  . 'در تنظیمات ← <b>مهلت بارگذاری صفحه</b> را بالاتر ببرید (الان ' . (int)$dpTimeout . ' ثانیه، دو بار تلاش شد).'
+  . '</div>';
+$_dpTitle = (stripos($err, 'resolve') !== false) ? '❌ دامنه پیدا نشد'
+          : ((stripos($err, 'timed out') !== false || stripos($err, 'timeout') !== false)
+             ? '⏱ خطای تایم‌اوت' : '❌ بارگذاری ناموفق');
+echo '<html><body style="background:#0f172a;color:#fbbf24;font-family:Tahoma;padding:40px;direction:rtl">'
+   . '<h2>' . $_dpTitle . '</h2><p><b>سرورِ ما</b> نتوانست <b>' . h($url) . '</b> را بگیرد.</p>'
+   . '<p style="color:#94a3b8">پیام: ' . h($err) . '</p>' . $_dpHint . '</body></html>';
 exit;
 }
 $html = $res['html'];
@@ -4089,13 +4116,48 @@ if (!empty($_GET['visual_proxy'])) {
 $url = trim($_GET['visual_proxy']);
 if (!filter_var($url, FILTER_VALIDATE_URL)) { http_response_code(400); echo 'Invalid URL'; exit; }
 
-$res = fetch_html($url, 20);
+/* v8.99: مهلت طولانی‌تر و یک تلاش دوم.
+
+   کاربر گزارش داد «بارگذاری صفحه» تایم‌اوت می‌دهد ولی «بارگذاری مستقیم»
+   همان صفحه را کامل باز می‌کند. این دو اصلاً یک کار نمی‌کنند:
+
+     بارگذاری مستقیم → مرورگرِ شما صفحه را می‌گیرد (از ایران، با DNS و
+                        مسیر شبکهٔ خودتان)
+     بارگذاری صفحه   → سرورِ ما صفحه را می‌گیرد و بعد به شما می‌دهد
+
+   پس تایم‌اوت یعنی «سرور من نتوانست»، نه «سایت خراب است». روی هاست
+   ایرانی این خیلی عادی است: مسیر شبکهٔ دیتاسنتر کندتر است، بعضی مقصدها
+   محدود شده‌اند، و سایت‌های سنگین بیش از ۲۰ ثانیه طول می‌کشند.
+
+   مهلت حالا قابل تنظیم است (پیش‌فرض ۴۵ ثانیه به‌جای ۲۰) و اگر بار اول
+   فقط به‌خاطر کندی نشد، یک بار دیگر با مهلت بیشتر تلاش می‌شود. */
+$cnVP = loadConnections();
+$vpTimeout = (int)($cnVP['proxy_timeout_sec'] ?? 0);
+if ($vpTimeout <= 0) $vpTimeout = 45;
+$vpTimeout = max(10, min(180, $vpTimeout));
+
+$res = fetch_html($url, $vpTimeout);
+if (!$res['ok']) {
+    $e1 = (string)($res['error'] ?? '');
+    // فقط برای کندی دوباره تلاش کن؛ برای DNS/۴۰۴ تلاش دوم بی‌فایده است
+    if (stripos($e1, 'timed out') !== false || stripos($e1, 'timeout') !== false
+        || stripos($e1, 'Empty') !== false) {
+        $res = fetch_html($url, min(180, $vpTimeout * 2));
+    }
+}
 if (!$res['ok']) {
 http_response_code(500);
 $err = $res['error'] ?? 'Unknown';
-if (stripos($err, 'resolve') !== false) echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:40px;direction:rtl"><h2>❌ خطا در دسترسی</h2><p>آدرس <b>'.h($url).'</b> قابل دسترسی نیست.</p><p style="color:#94a3b8">دلیل: سرور DNS قادر به یافتن دامنه نیست. ممکن است دامنه منقضی یا مشکل SSL داشته باشد.</p></body></html>';
-elseif (stripos($err, 'timed out') !== false || stripos($err, 'timeout') !== false) echo '<html><body style="background:#0f172a;color:#fbbf24;font-family:Tahoma;padding:40px;direction:rtl"><h2>⏱ خطای تایم‌اوت</h2><p>سرور <b>'.h($url).'</b> پاسخ نمی‌دهد.</p><p style="color:#94a3b8">سرور مقصد خیلی کند یا از دسترس خارج شده.</p></body></html>';
-else echo 'Failed: ' . h($err);
+$_vpHint = '<div style="margin-top:26px;padding:16px 18px;background:#1e293b;border:1px solid #334155;border-radius:10px;line-height:2;font-size:13px;color:#cbd5e1">'
+  . '<b style="color:#e2e8f0">چه کنم؟</b><br>'
+  . '۱) دکمهٔ <b style="color:#4ade80">🌐 بارگذاری مستقیم</b> را بزنید — صفحه را مرورگر خودتان می‌گیرد، نه سرور. برای انتخاب سلکتور کاملاً کافی است.<br>'
+  . '۲) اگر سایت فقط کند است: در تنظیمات ← <b>مهلت بارگذاری صفحه</b> را بالاتر ببرید (الان '
+  . (int)$vpTimeout . ' ثانیه، دو بار تلاش شد).<br>'
+  . '۳) اگر سرور شما در ایران است، ممکن است مسیر شبکه به این سایت محدود باشد؛ در این حالت «بارگذاری مستقیم» تنها راه است.'
+  . '</div>';
+if (stripos($err, 'resolve') !== false) echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:40px;direction:rtl"><h2>❌ خطا در دسترسی</h2><p>آدرس <b>'.h($url).'</b> از روی <b>سرور</b> قابل دسترسی نیست.</p><p style="color:#94a3b8">دلیل: سرور DNS قادر به یافتن دامنه نیست. ممکن است دامنه منقضی یا مشکل SSL داشته باشد.</p>'.$_vpHint.'</body></html>';
+elseif (stripos($err, 'timed out') !== false || stripos($err, 'timeout') !== false) echo '<html><body style="background:#0f172a;color:#fbbf24;font-family:Tahoma;padding:40px;direction:rtl"><h2>⏱ خطای تایم‌اوت</h2><p><b>سرورِ ما</b> نتوانست <b>'.h($url).'</b> را در '.(int)$vpTimeout.' ثانیه بگیرد.</p><p style="color:#94a3b8">این یعنی مشکل از مسیر شبکهٔ سرور است، نه از سایت. برای همین «بارگذاری مستقیم» کار می‌کند: آنجا مرورگر خودتان صفحه را می‌گیرد.</p>'.$_vpHint.'</body></html>';
+else echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:40px;direction:rtl"><h2>❌ بارگذاری ناموفق</h2><p>سرور نتوانست <b>'.h($url).'</b> را بگیرد.</p><p style="color:#94a3b8">پیام: '.h($err).'</p>'.$_vpHint.'</body></html>';
 exit;
 }
 
@@ -6453,6 +6515,8 @@ if (isset($_POST['stall_watchdog'])) $conn['stall_watchdog'] = !empty($_POST['st
 if (isset($_POST['stall_after']))    $conn['stall_after']    = max(60, (int)$_POST['stall_after']);
 // v8.97: سقف زمانی فاز جزئیات در هر نوبت — جلوی کشته شدن پردازه توسط هاست
 if (isset($_POST['detail_budget_sec'])) $conn['detail_budget_sec'] = max(0, min(3600, (int)$_POST['detail_budget_sec']));
+// v8.99: مهلت گرفتن صفحه از روی سرور (انتخابگر بصری و انتخابگر جزئیات)
+if (isset($_POST['proxy_timeout_sec'])) $conn['proxy_timeout_sec'] = max(0, min(180, (int)$_POST['proxy_timeout_sec']));
 // v8.37: فاصلهٔ پینگ کران (دقیقه) — صفر یعنی هر اجرا
 if (isset($_POST['ping_every'])) $conn['ping_every'] = max(0, (int)$_POST['ping_every']);
 // v8.38: یادآوری موارد بی‌جواب
@@ -9278,6 +9342,27 @@ if (isset($_GET['selftest'])) {
     /* «استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که گالری، تنوع، سلکتورهای
        جزئیات، ذخیره‌سازی سمت سرور و صف نداشت. «اجرای الان» هم انسدادی بود.
        حالا هر سه از یک نقطه رد می‌شوند. */
+    /* ---------- v8.99: مهلت بارگذاری صفحه در انتخابگرها ---------- */
+    /* «بارگذاری صفحه» را سرور انجام می‌دهد و «بارگذاری مستقیم» را مرورگر.
+       پس تایم‌اوت یعنی سرور نتوانست، نه اینکه سایت خراب باشد. */
+    $add('8.99', 'مهلت پراکسی قابل تنظیم است',
+         strpos($selfSrc, "\$vpTimeout = (int)(\$cnVP['proxy_timeout" . "_sec'] ?? 0);") !== false
+         && strpos($selfSrc, "\$dpTimeout = (int)(\$cnDP['proxy_timeout" . "_sec'] ?? 0);") !== false);
+    $add('8.99', 'پیش‌فرض مهلت از ۲۰ به ۴۵ ثانیه رسید',
+         strpos($selfSrc, 'if ($vpTimeout <= 0) $vpTimeout = ' . '45;') !== false
+         && strpos($selfSrc, 'if ($dpTimeout <= 0) $dpTimeout = ' . '45;') !== false
+         && substr_count($selfSrc, '$res = fetch_html($url, ' . '20);') === 0);
+    $add('8.99', 'در صورت کندی یک بار دیگر تلاش می‌شود',
+         substr_count($selfSrc, '$res = fetch_html($url, min' . '(180,') === 2);
+    $add('8.99', 'خطا توضیح می‌دهد که مشکل از سرور است نه سایت',
+         strpos($selfSrc, 'بارگذاری مستقیم</b> را بزنید — صفحه را مرورگر خودتان ' . 'می‌گیرد') !== false);
+    $add('8.99', 'تنظیم مهلت در رابط کاربری هست',
+         strpos($selfSrc, 'id="proxy' . 'Timeout"') !== false
+         && strpos($selfSrc, "fd.append('proxy_timeout" . "_sec'") !== false);
+    $add('8.99', 'مهلت کران‌پذیر است',
+         strpos($selfSrc, '$vpTimeout = max(10, min(180, ' . '$vpTimeout));') !== false
+         && strpos($selfSrc, '$dpTimeout = max(10, min(180, ' . '$dpTimeout));') !== false);
+
     /* ---------- v8.98: مهلت از شروع فاز جزئیات، نه شروع کل اجرا ---------- */
     /* در ۸.۹۷ مهلت را از $startedAt حساب کرده بودم که لحظهٔ شروع کل
        استخراج است. فاز فهرست قبل از آن اجرا می‌شود و می‌تواند دقایقی
@@ -18131,6 +18216,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>فعال:</label><input type="checkbox" id="stallWatchdog" onchange="updateStallBadge()" checked style="width:16px;height:16px"></div>
 <div class="crow"><label>آستانه (ثانیه):</label><input type="number" id="stallAfter" value="300" min="60" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">بی‌حرکتی بیش از این = گیر کرده</span></div>
 <div class="crow"><label>سقف فاز جزئیات (ثانیه):</label><input type="number" id="detailBudget" value="0" min="0" max="3600" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = خودکار · هر نوبت تا این مدت جزئیات می‌گیرد و بقیه را به نوبت بعد می‌سپارد</span></div>
+<div class="crow"><label>مهلت بارگذاری صفحه (ثانیه):</label><input type="number" id="proxyTimeout" value="45" min="10" max="180" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">برای «🔄 بارگذاری صفحه» در تب سلکتور · اگر تایم‌اوت می‌دهد بالاتر ببرید</span></div>
 <div class="cact">
 <button class="btn btn-gray" onclick="watchdogCheck()" style="flex:1">🔎 بررسی حالا</button>
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
@@ -21998,6 +22084,20 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'8.99', t:'رفع تایم‌اوت «بارگذاری صفحه» در تب سلکتور', items:[
+    '🔍 چرا «بارگذاری مستقیم» کار می‌کند ولی «بارگذاری صفحه» تایم‌اوت می‌دهد:',
+    'این دو اصلاً یک کار نمی‌کنند —',
+    '🌐 بارگذاری مستقیم: مرورگرِ شما صفحه را می‌گیرد',
+    '🔄 بارگذاری صفحه: سرورِ ما صفحه را می‌گیرد و به شما می‌دهد',
+    'پس تایم‌اوت یعنی «سرور نتوانست»، نه «سایت خراب است»',
+    'روی هاست ایرانی عادی است: مسیر شبکهٔ دیتاسنتر کندتر است',
+    '✅ مهلت از ۲۰ به ۴۵ ثانیه رسید و در تنظیمات قابل تغییر شد',
+    '✅ اگر بار اول فقط به‌خاطر کندی نشد، یک بار دیگر با مهلت دوبرابر تلاش می‌شود',
+    '✅ صفحهٔ خطا حالا می‌گوید مشکل کجاست و چه باید کرد',
+    '(قبلاً فقط می‌گفت «سرور مقصد پاسخ نمی‌دهد» که گمراه‌کننده بود)',
+    'ℹ️ انتخابگر صفحهٔ جزئیات هم همین اصلاح را گرفت',
+    '💡 نکته: برای انتخاب سلکتور، «بارگذاری مستقیم» کاملاً کافی است',
+  ]},
   {v:'8.98', t:'🩹 رفع اشکال ۸.۹۷ — استخراج خودکار حتی یک محصول هم جزئیات نمی‌گرفت', items:[
     '🐞 اشتباه من در ۸.۹۷: مهلت فاز جزئیات را از «شروع کل اجرا» حساب کردم',
     'ولی قبل از فاز جزئیات، فاز فهرست اجرا می‌شود که خودش وقت می‌برد',
@@ -24722,7 +24822,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
 arApplyCfg(cn.autoreply||{});arLoad();}
 /* v8.87: پیش‌نمایش زندهٔ تعدیل قیمت مقصد.
@@ -24757,7 +24857,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
