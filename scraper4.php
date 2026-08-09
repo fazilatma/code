@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.00';
+const APP_VERSION = '9.01';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -6994,7 +6994,20 @@ function extractCheckpoint(string $pkFinal, array $allProducts, array $extra = [
     saveProfiles($profilesNow);
 }
 
-function runBackendExtract(string $profileKey, string $trigger = 'manual', bool $emitEarlyResponse = false): array {
+/**
+ * v9.01: استخراج در مراحل جدا.
+ *
+ * $phase:
+ *   'all'    — فهرست + جزئیات، مثل همیشه (دکمهٔ دستی)
+ *   'list'   — فقط صفحهٔ فهرست؛ فاز جزئیات اصلاً اجرا نمی‌شود
+ *   'detail' — فقط جزئیاتِ محصولاتی که روی دیسک هستند و هنوز کامل نیستند
+ *
+ * چرا: کاربر می‌خواهد کران‌جاب اول فهرست را بگیرد، بعد «استخراج تفصیلی»
+ * را جدا اجرا کند و تازه بعد از آن سراغ ارسال برود. با این پارامتر هر سه
+ * از یک موتور می‌گذرند و رفتارشان نمی‌تواند از هم جدا بیفتد.
+ */
+function runBackendExtract(string $profileKey, string $trigger = 'manual', bool $emitEarlyResponse = false, string $phase = 'all'): array {
+if (!in_array($phase, ['all', 'list', 'detail'], true)) $phase = 'all';
 @set_time_limit(0); @ignore_user_abort(true);
 @unlink(EXTRACT_PROGRESS_FILE); @unlink(EXTRACT_STOP_FILE);
 
@@ -7077,7 +7090,22 @@ foreach($prevProducts as $entry){if(is_array($entry)&&count($entry)>=2)$prevByKe
 }
 
 $allProducts=[];$seenKeys=[];$nextUrl=null;$totalPages=0;$fetchFail='';
-for($page=1;$page<=$maxPages;$page++){
+/* v9.01: در حالت «فقط جزئیات» صفحهٔ فهرست اصلاً باز نمی‌شود؛ محصولات
+   همان‌هایی هستند که اجرای قبلی روی دیسک گذاشته. اینطور مرحلهٔ جزئیات
+   یک گام مستقل است و یک بار دیگر کل فهرست را نمی‌گیرد. */
+if($phase==='detail'){
+    $allProducts=$prevByKey;
+    foreach($allProducts as $_k=>$_v)$seenKeys[$_k]=1;
+    $totalPages=0;
+    if(empty($allProducts)){
+        writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>0,'current'=>0,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>['⏭ محصولی برای گرفتن جزئیات نیست — اول استخراج فهرست را اجرا کنید'],'total_log_count'=>1,'extracted'=>0,'products_saved'=>false]);
+        $queue=extractReadQueue();
+        foreach($queue['entries'] as &$qe){if(($qe['id']??'')===$queueId){$qe['status']='done';$qe['done_at']=time();$qe['products_count']=0;break;}}unset($qe);
+        extractWriteQueue($queue);
+        return ['__early_sent'=>$emitEarlyResponse,'ok'=>true,'extracted'=>0,'phase'=>'detail','note'=>'فهرستی وجود ندارد'];
+    }
+}
+for($page=1;$phase!=='detail'&&$page<=$maxPages;$page++){
 if(file_exists(EXTRACT_STOP_FILE)){@unlink(EXTRACT_STOP_FILE);
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'total'=>count($allProducts),'current'=>$page,'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>2,'extracted'=>count($allProducts)]);
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'cancelled'=>true];
@@ -7158,7 +7186,7 @@ usleep(500000);
    پروفایل تازه بود و صفحهٔ فهرست باز نمی‌شد (تایم‌اوت، ۵۰۳، سلکتور
    اشتباه)، اجرا بی‌صدا با صفر محصول «تکمیل» می‌شد و کاربر فقط می‌دید
    هیچ‌چیز استخراج نشده، بدون هیچ توضیحی. */
-if(empty($allProducts)){
+if(empty($allProducts)&&$phase!=='detail'){
 $_why=$fetchFail!==''?$fetchFail:'صفحهٔ فهرست باز شد ولی هیچ محصولی با سلکتورها پیدا نشد';
 $_kept=count($prevByKey);
 $_guardLog=[$_kept>0
@@ -7228,7 +7256,7 @@ $pushLog=function(string $line) use (&$detailLog){
     $detailLog[]=$line;
     if(count($detailLog)>6)$detailLog=array_slice($detailLog,-6);
 };
-if($detailTotal>0&&(!empty($detailSelectors)||$galleryCfg['enabled'])){
+if($phase!=='list'&&$detailTotal>0&&(!empty($detailSelectors)||$galleryCfg['enabled'])){
 $_wantFields=[];
 foreach($detailSelectors as $_f=>$_sv){ if(!empty($_sv))$_wantFields[]=$_f; }
 
@@ -7500,7 +7528,10 @@ $profileOnDisk['updatedAt']=time();
 /* v8.97: اگر فاز جزئیات به‌خاطر سقف زمانی ناتمام مانده، «complete»
    ننویس — وگرنه اجرای بعدی فکر می‌کند کار تمام شده و بقیهٔ محصولات
    هیچ‌وقت گالری نمی‌گیرند، و دروازهٔ ارسال هم زودتر از موعد باز می‌شود. */
-$profileOnDisk['_extract_stage']=(!empty($_ranOut))?'detail':'complete';
+/* v9.01: اجرای «فقط فهرست» تمام‌شده حساب نمی‌شود — هنوز مرحلهٔ جزئیات
+   مانده. با نشانهٔ list_done، هم دروازهٔ ارسال بسته می‌ماند و هم اجرای
+   بعدی می‌داند باید جزئیات را بگیرد. */
+$profileOnDisk['_extract_stage']=($phase==='list')?'list_done':((!empty($_ranOut))?'detail':'complete');
 $profileOnDisk['_extract_stage_at']=time();
 $profileOnDisk['_extract_detail_done']=$detailDone;
 $profileOnDisk['_extract_detail_total']=$detailTotal;
@@ -7553,7 +7584,11 @@ if($profileKey===''){
 $u=trim($_GET['url']??'');
 if($u!==''&&filter_var($u,FILTER_VALIDATE_URL))$profileKey=profileKey($u);
 }
-$res=runBackendExtract($profileKey,'manual',true);
+/* v9.01: همان اندپوینت می‌تواند فقط فهرست یا فقط جزئیات را اجرا کند.
+   ?phase=list | detail | all — پیش‌فرض all، پس رفتار دکمهٔ دستی عوض نمی‌شود. */
+$phaseIn = (string)($_GET['phase'] ?? $_POST['phase'] ?? 'all');
+if (!in_array($phaseIn, ['all','list','detail'], true)) $phaseIn = 'all';
+$res=runBackendExtract($profileKey,'manual',true,$phaseIn);
 // v8.30: همان اعلان‌های تغییر مبدأ که کران‌جاب می‌فرستد
 if(!empty($res['ok'])){
 $cnNow=loadConnections();
@@ -7939,8 +7974,38 @@ $stageStale  = max(120, (int)($cn['stall_after'] ?? 300));
 $detailWasUnfinished = in_array($stagePrev, ['list_done', 'detail'], true)
                        && $stagePrevAge <= $stageStale;
 
-// v8.27: همان هستهٔ استخراج دکمهٔ دستی، با برچسب auto
-$exRes = runBackendExtract($key, 'auto');
+/* v9.01: کران سه گام جدا برمی‌دارد — فهرست، جزئیات، ارسال.
+
+   خواستهٔ کاربر: «بعد از استخراج خودکار، دکمهٔ استخراج تفصیلی اجرا شود
+   و بعد برود سراغ ارسال». همان کاری که خودش دستی می‌کند.
+
+   چرا جدا بهتر است: مرحلهٔ جزئیات برای هر محصول یک درخواست HTTP می‌زند
+   و طولانی‌ترین بخش کار است. وقتی در گام خودش اجرا شود، هر گام کوتاه‌تر
+   از سقف زمانی هاست می‌ماند و اگر یکی نیمه‌کاره ماند، بقیه از دست
+   نمی‌روند. ترتیب هم تضمین می‌شود: هیچ محصولی بدون گالری فرستاده نمی‌شود.
+
+   گام ۱ فقط وقتی اجرا می‌شود که مرحلهٔ قبلی تمام شده باشد؛ اگر اجرای
+   قبلی وسط جزئیات مانده، مستقیم همان را ادامه می‌دهیم. */
+$stepMode = ($stagePrev === 'list_done' || $stagePrev === 'detail') ? 'detail' : 'list';
+$exRes = runBackendExtract($key, 'auto', false, $stepMode);
+$pResult['step'] = $stepMode;
+
+/* گام ۲: بلافاصله بعد از فهرست، «استخراج تفصیلی» را همین‌جا اجرا کن —
+   دقیقاً مثل زدن دکمهٔ آن در تب نتایج. اگر وقت هاست اجازه ندهد، خودِ
+   فاز جزئیات تمیز می‌ایستد و نوبت بعدی ادامه می‌دهد. */
+if ($stepMode === 'list' && !empty($exRes['ok'])) {
+    $dRes = runBackendExtract($key, 'auto', false, 'detail');
+    $pResult['detail_step'] = !empty($dRes['ok']) ? 'ok' : ('failed: ' . (string)($dRes['error'] ?? '?'));
+    if (!empty($dRes['ok'])) {
+        // نتیجهٔ نهایی همان اجرای جزئیات است؛ آمار مقایسه از آن می‌آید
+        foreach (['extracted','new','price_changed','removed','unchanged',
+                  'price_up','price_down','new_items','changed_items','removed_items'] as $_kk) {
+            if (isset($dRes[$_kk])) $exRes[$_kk] = $dRes[$_kk];
+        }
+    }
+    $profiles = loadProfiles();
+    $profile  = $profiles[$key] ?? $profile;
+}
 if (!empty($exRes['ok'])) {
 $pResult['extracted'] = (int)($exRes['extracted'] ?? 0);
 $pResult['extract_method'] = 'backend_extract';
@@ -8019,13 +8084,15 @@ $stageAge   = time() - (int)($profile['_extract_stage_at'] ?? 0);
 $stageStale = max(120, (int)($cn['stall_after'] ?? 300));
 $stageOpen  = in_array($stageNow, ['list_done', 'detail'], true) && $stageAge <= $stageStale;
 
-if ($stageOpen || $detailWasUnfinished) {
+/* v9.01: حالا که کران خودش گام جزئیات را اجرا می‌کند، معیار فقط وضعیت
+   «همین لحظه» است. اگر مرحلهٔ جزئیات واقعاً تمام شده (complete یا
+   detail_done)، دلیلی برای معطل کردن ارسال نیست — حتی اگر اجرای قبلی
+   نیمه‌کاره مانده بود، چون همین نوبت تمامش کرد. */
+if ($stageOpen) {
     $pResult['status'] = 'detail_pending';
     $pResult['detail_done']  = (int)($profile['_extract_detail_done'] ?? 0);
     $pResult['detail_total'] = (int)($profile['_extract_detail_total'] ?? 0);
-    $pResult['note'] = $stageOpen
-        ? 'مرحلهٔ جزئیات هنوز تمام نشده — ارسال در نوبت بعدی'
-        : 'جزئیاتِ نیمه‌کارهٔ اجرای قبلی همین حالا کامل شد — ارسال در نوبت بعدی';
+    $pResult['note'] = 'مرحلهٔ جزئیات هنوز تمام نشده — ارسال در نوبت بعدی';
     if (!isset($syncState[$key])) $syncState[$key] = [];
     $syncState[$key]['status']    = 'detail_pending';
     $syncState[$key]['price_sig'] = profilePriceSignature($profile);
@@ -9510,6 +9577,30 @@ if (isset($_GET['selftest'])) {
     /* «استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که گالری، تنوع، سلکتورهای
        جزئیات، ذخیره‌سازی سمت سرور و صف نداشت. «اجرای الان» هم انسدادی بود.
        حالا هر سه از یک نقطه رد می‌شوند. */
+    /* ---------- v9.01: کران سه گام جدا — فهرست، جزئیات، ارسال ---------- */
+    $add('9.01', 'موتور استخراج پارامتر مرحله دارد',
+         strpos($selfSrc, "string \$phase = 'all'): array {") !== false
+         && strpos($selfSrc, "if (!in_array(\$phase, ['all', 'list', 'detail'], true)) \$phase = 'all';") !== false);
+    $add('9.01', 'حالت فقط-فهرست فاز جزئیات را اجرا نمی‌کند',
+         strpos($selfSrc, "if(\$phase!=='list'&&\$detailTotal>0&&") !== false);
+    $add('9.01', 'حالت فقط-جزئیات صفحهٔ فهرست را دوباره نمی‌گیرد',
+         strpos($selfSrc, "for(\$page=1;\$phase!=='detail'&&\$page<=\$maxPages;\$page++){") !== false
+         && strpos($selfSrc, "if(\$phase==='detail'){
+    \$allProducts=\$prevByKey;") !== false);
+    $add('9.01', 'اجرای فقط-فهرست «تمام‌شده» علامت نمی‌خورد',
+         strpos($selfSrc, "\$profileOnDisk['_extract_stage']=(\$phase==='list')?'list_" . "done'") !== false);
+    $add('9.01', 'محافظ بی‌نتیجه در حالت جزئیات دخالت نمی‌کند',
+         strpos($selfSrc, "if(empty(\$allProducts)&&\$phase!=='det" . "ail'){") !== false);
+    $add('9.01', 'کران اول فهرست بعد جزئیات را اجرا می‌کند',
+         strpos($selfSrc, "\$stepMode = (\$stagePrev === 'list_done' || \$stagePrev === 'detail') ? 'detail' : 'list';") !== false
+         && strpos($selfSrc, "\$dRes = runBackendExtract(\$key, 'auto', false, 'det" . "ail');") !== false);
+    $add('9.01', 'دروازهٔ ارسال بعد از گام جزئیات باز می‌شود',
+         strpos($selfSrc, 'if ($stageOpen) {') !== false
+         && strpos($selfSrc, 'if ($stageOpen || $detailWas' . 'Unfinished) {') === false);
+    $add('9.01', 'اندپوینت پارامتر phase را می‌پذیرد',
+         strpos($selfSrc, "\$phaseIn = (string)(\$_GET['phase'] ?? \$_POST['phase'] ?? 'all');") !== false
+         && strpos($selfSrc, 'runBackendExtract($profileKey,' . "'manual',true,\$phaseIn);") !== false);
+
     /* ---------- v9.00: راه عبور برای سایت مبدأ ---------- */
     $add('9.00', 'تنظیمات عبور سایت مبدأ جدا از هوش مصنوعی',
          function_exists('src' . 'NetCfg') && function_exists('src' . 'NetApplies'));
@@ -9584,7 +9675,7 @@ if (isset($_GET['selftest'])) {
     $add('8.97', 'سقف زمانی کران‌پذیر است و حداقل دارد',
          strpos($selfSrc, '$_budget=max(20,min(3600,' . '$_budget));') !== false);
     $add('8.97', 'اجرای ناتمام «complete» علامت نمی‌خورد',
-         strpos($selfSrc, "(!empty(\$_ranOut))?'detail':'comp" . "lete';") !== false);
+         strpos($selfSrc, "(!empty(\$_ranOut))?'detail':'comp" . "lete')") !== false);
     $add('8.97', 'تنظیم سقف در رابط کاربری هست',
          strpos($selfSrc, 'id="detail' . 'Budget"') !== false
          && strpos($selfSrc, "fd.append('detail_budget_sec'") !== false);
@@ -9614,20 +9705,23 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "\$_ranOut?'detail':'detail_" . "done'") !== false);
     $add('8.94', 'نقطهٔ امن پروفایل را از دیسک می‌خواند و فقط محصولات را می‌نویسد',
          strpos($selfSrc, '$profilesNow = loadProfiles();' . "\n    if (!isset(\$profilesNow[\$pkFinal])") !== false);
+    /* v9.01: شرط ساده شد — حالا که کران خودش گام جزئیات را اجرا می‌کند،
+       فقط وضعیت همین لحظه مهم است. */
     $add('8.94', 'کران تا تمام نشدن جزئیات ارسال نمی‌کند',
          strpos($selfSrc, "\$pResult['status'] = 'detail_pen" . "ding';") !== false
-         && strpos($selfSrc, 'if ($stageOpen || ' . '$detailWasUnfinished) {') !== false);
+         && strpos($selfSrc, 'if ($stage' . 'Open) {') !== false);
     /* نشانه باید «قبل» از اجرای استخراج خوانده شود، وگرنه خودِ استخراج
        آن را روی complete می‌گذارد و دروازه هیچ‌وقت بسته نمی‌شود. */
     $add('8.94', 'وضعیت نیمه‌کاره قبل از اجرای استخراج سنجیده می‌شود',
          (($_p94a = strpos($selfSrc, '$detailWasUnfinished = in_array($stagePrev')) !== false)
-         && (($_p94b = strpos($selfSrc, "\$exRes = runBackendExtract(\$key, 'auto');", $_p94a)) !== false)
+         && (($_p94b = strpos($selfSrc, '$exRes = runBackendExtract($key, ' . "'auto', false, \$stepMode);", $_p94a)) !== false)
          && $_p94a < $_p94b);
     $add('8.94', 'مرحلهٔ جزئیاتِ بی‌حرکت، ارسال را تا ابد نمی‌بندد',
          strpos($selfSrc, '$stageAge <= ' . '$stageStale;') !== false
          && strpos($selfSrc, "\$pResult['detail_stal" . "led'] = \$stageAge;") !== false);
     $add('8.94', 'پایان کامل، نشانهٔ نیمه‌کاره را برمی‌دارد',
-         strpos($selfSrc, "\$profileOnDisk['_extract_stage']=(!empty(\$_ranOut))?'detail':'comp" . "lete';") !== false);
+         strpos($selfSrc, "\$profileOnDisk['_extract_stage']=(\$phase==='list')") !== false
+         && strpos($selfSrc, ":'comp" . "lete');") !== false);
     $add('8.94', 'توقف کاربر هم دروازهٔ ارسال را باز می‌گذارد',
          strpos($selfSrc, "'_extract_stage'=>'stop" . "ped'") !== false);
 
@@ -22300,6 +22394,23 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.01', t:'کران‌جاب سه گام جدا برمی‌دارد: فهرست ← جزئیات ← ارسال', items:[
+    '🎯 خواستهٔ شما: بعد از استخراج خودکار، «استخراج تفصیلی» اجرا شود',
+    'و تازه بعد از آن برود سراغ ارسال — همان کاری که دستی می‌کنید',
+    '✅ حالا کران دقیقاً همین سه گام را برمی‌دارد:',
+    '۱) استخراج فهرست — فقط صفحهٔ فهرست، سریع و کوتاه',
+    '۲) استخراج تفصیلی — همان کاری که دکمهٔ 🔍 در تب نتایج می‌کند',
+    '۳) ارسال — فقط بعد از تمام شدن گام ۲',
+    '💡 چرا جدا بهتر است:',
+    'گام جزئیات برای هر محصول یک درخواست HTTP می‌زند و طولانی‌ترین بخش است',
+    'وقتی در گام خودش اجرا شود، هر گام کوتاه‌تر از سقف زمانی هاست می‌ماند',
+    'و اگر یکی نیمه‌کاره ماند، بقیه از دست نمی‌روند',
+    '🖼 ترتیب تضمین می‌شود: هیچ محصولی بدون گالری فرستاده نمی‌شود',
+    '🔁 اگر اجرای قبلی وسط جزئیات مانده باشد، نوبت بعدی مستقیم همان را',
+    'ادامه می‌دهد و فهرست را دوباره نمی‌گیرد',
+    '🔧 موتور استخراج حالا پارامتر مرحله دارد: ?phase=list یا detail یا all',
+    '(پیش‌فرض all — پس رفتار دکمهٔ دستی هیچ تغییری نکرده)',
+  ]},
   {v:'9.00', t:'🌐 عبور از محدودیت سایت مبدأ + تشخیص بلاک شدن IP', items:[
     '🔍 چرا «استخراج خودکار گالری نمی‌گیرد ولی دستی می‌گیرد»:',
     'اگر سایت مبدأ IP هاست را بلاک کرده باشد، صفحهٔ فهرست معمولاً',
