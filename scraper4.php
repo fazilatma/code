@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.01';
+const APP_VERSION = '9.02';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7230,14 +7230,34 @@ extractCheckpoint($pkFinal,$allProducts,['_extract_stage'=>'list_done','_extract
 // آن‌هایی که عکس یا قیمت ندارند. وگرنه محصولی که یک عکس دارد هرگز
 // بقیهٔ عکس‌هایش را نمی‌گیرد.
 $galleryCfg=galleryNormalizeCfg($profile['gallery']??[]);
+/* v9.02: انتخاب محصولاتی که باید صفحه‌شان باز شود.
+
+   باگی که کاربر گزارش کرد: وقتی گالری خاموش بود ولی سلکتورهای جزئیات
+   تنظیم شده بودند، این حلقه هیچ‌کس را انتخاب نمی‌کرد. شرط قدیمی فقط
+   «عکس یا قیمت ندارد» را می‌سنجید، و محصولی که هر دو را از صفحهٔ فهرست
+   گرفته بود کنار گذاشته می‌شد — یعنی توضیحات، SKU، برند و تنوع‌ها هرگز
+   استخراج نمی‌شدند و مرحلهٔ جزئیات عملاً کاری نمی‌کرد.
+
+   قاعدهٔ درست: اگر فیلدی از صفحهٔ محصول خواسته شده و هنوز نداریمش،
+   باید صفحه را باز کنیم. */
+$_wantKeys=[];
+foreach($detailSelectors as $_f=>$_sv){ if(!empty($_sv))$_wantKeys[]=$_f; }
 $needDetail=[];
 foreach($allProducts as $key=>$p){
 if(empty($p['link']))continue;
 /* v8.81: محصولی که گالری‌اش را قبلاً گرفته‌ایم دوباره باز نمی‌شود.
    پیش از این با روشن بودن گالری، هر بار همهٔ صفحات محصول از نو گرفته
    می‌شد که هم کند بود و هم بی‌دلیل. */
-if($galleryCfg['enabled']&&count($p['images']??[])>1&&!empty($p['image'])&&!empty($p['price']))continue;
-if($galleryCfg['enabled']||empty($p['image'])||empty($p['price'])){
+$_galDone=$galleryCfg['enabled']&&count($p['images']??[])>1&&!empty($p['image'])&&!empty($p['price']);
+// کدام فیلدِ خواسته‌شده هنوز خالی است؟
+$_fieldMissing=false;
+foreach($_wantKeys as $_wk){
+    if($_wk==='variations'){ if(empty($p['variations'])){$_fieldMissing=true;break;} continue; }
+    $_cur=$p[$_wk]??'';
+    if(is_array($_cur)?empty($_cur):(trim((string)$_cur)==='')){$_fieldMissing=true;break;}
+}
+if($_galDone&&!$_fieldMissing)continue;          // هم گالری دارد هم فیلدها
+if($galleryCfg['enabled']||$_fieldMissing||empty($p['image'])||empty($p['price'])){
 $needDetail[$key]=$p;
 }
 }
@@ -7995,7 +8015,19 @@ $pResult['step'] = $stepMode;
    فاز جزئیات تمیز می‌ایستد و نوبت بعدی ادامه می‌دهد. */
 if ($stepMode === 'list' && !empty($exRes['ok'])) {
     $dRes = runBackendExtract($key, 'auto', false, 'detail');
-    $pResult['detail_step'] = !empty($dRes['ok']) ? 'ok' : ('failed: ' . (string)($dRes['error'] ?? '?'));
+    /* v9.02: «ok» به‌تنهایی گمراه‌کننده بود — وقتی هیچ محصولی برای باز
+       کردن انتخاب نمی‌شد هم ok گزارش می‌شد. حالا تعداد واقعی می‌آید. */
+    if (!empty($dRes['ok'])) {
+        $_dp = readProgress(EXTRACT_PROGRESS_FILE);
+        $_dDone = (int)($_dp['detail_current'] ?? 0);
+        $_dTot  = (int)($_dp['detail_total'] ?? 0);
+        $pResult['detail_step']  = $_dTot > 0 ? ('ok ' . $_dDone . '/' . $_dTot) : 'nothing_to_do';
+        $pResult['detail_pages'] = (int)($_dp['detail_ok'] ?? 0);
+        $pResult['detail_fail']  = (int)($_dp['detail_fail'] ?? 0);
+        $pResult['gallery_images'] = (int)($_dp['gallery_images'] ?? 0);
+    } else {
+        $pResult['detail_step'] = 'failed: ' . (string)($dRes['error'] ?? '?');
+    }
     if (!empty($dRes['ok'])) {
         // نتیجهٔ نهایی همان اجرای جزئیات است؛ آمار مقایسه از آن می‌آید
         foreach (['extracted','new','price_changed','removed','unchanged',
@@ -9577,6 +9609,23 @@ if (isset($_GET['selftest'])) {
     /* «استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که گالری، تنوع، سلکتورهای
        جزئیات، ذخیره‌سازی سمت سرور و صف نداشت. «اجرای الان» هم انسدادی بود.
        حالا هر سه از یک نقطه رد می‌شوند. */
+    /* ---------- v9.02: انتخاب محصول برای فاز جزئیات ---------- */
+    /* با گالری خاموش و سلکتورهای جزئیات روشن، هیچ محصولی انتخاب نمی‌شد
+       چون شرط فقط «عکس یا قیمت ندارد» را می‌سنجید. */
+    $add('9.02', 'فیلدهای خواسته‌شدهٔ خالی باعث باز شدن صفحهٔ محصول می‌شوند',
+         strpos($selfSrc, '$_fieldMissing=false;') !== false
+         && strpos($selfSrc, 'if($galleryCfg[\'enabled\']||$_fieldMissing||empty($p[\'image\'])') !== false);
+    $add('9.02', 'فهرست فیلدهای خواسته‌شده قبل از حلقه ساخته می‌شود',
+         strpos($selfSrc, '$_want' . 'Keys=[];') !== false
+         && strpos($selfSrc, 'foreach($_wantKeys as ' . '$_wk){') !== false);
+    $add('9.02', 'تنوع‌ها جداگانه سنجیده می‌شوند',
+         strpos($selfSrc, "if(\$_wk==='variations'){ if(empty(\$p['variations']))") !== false);
+    $add('9.02', 'محصولی که هم گالری دارد هم فیلدها دوباره باز نمی‌شود',
+         strpos($selfSrc, 'if($_galDone&&!$_field' . 'Missing)continue;') !== false);
+    $add('9.02', 'گزارش گام جزئیات تعداد واقعی را می‌گوید',
+         strpos($selfSrc, "'nothing_to_" . "do'") !== false
+         && strpos($selfSrc, "\$pResult['detail_pages']") !== false);
+
     /* ---------- v9.01: کران سه گام جدا — فهرست، جزئیات، ارسال ---------- */
     $add('9.01', 'موتور استخراج پارامتر مرحله دارد',
          strpos($selfSrc, "string \$phase = 'all'): array {") !== false
@@ -22394,6 +22443,21 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.02', t:'🐞 مرحلهٔ جزئیات وقتی گالری خاموش بود هیچ محصولی را باز نمی‌کرد', items:[
+    'شما درست حدس زدید که مرحلهٔ جزئیات اجرا نمی‌شود — ولی علتش',
+    'سمت سرور نبودن نبود؛ خودِ انتخابِ محصول اشتباه بود:',
+    '🔍 شرط انتخاب فقط می‌سنجید «عکس یا قیمت ندارد»',
+    'پس محصولی که هر دو را از صفحهٔ فهرست گرفته بود، کنار گذاشته می‌شد',
+    'و توضیحات، SKU، برند و تنوع‌ها هرگز استخراج نمی‌شدند',
+    'با گالری روشن مشکلی نبود (چون گالری همه را انتخاب می‌کرد)،',
+    'ولی با گالری خاموش مرحلهٔ جزئیات عملاً هیچ کاری نمی‌کرد',
+    '✅ حالا اگر فیلدی از صفحهٔ محصول خواسته شده و هنوز نداریمش،',
+    'صفحهٔ آن محصول باز می‌شود',
+    '✅ محصولی که هم گالری دارد هم همهٔ فیلدها، دوباره باز نمی‌شود',
+    '📊 گزارش کران هم صادق شد: قبلاً همیشه «ok» می‌گفت حتی وقتی',
+    'صفر محصول باز شده بود. حالا «ok ۴/۴» یا «nothing_to_do» می‌گوید',
+    'و تعداد صفحه‌های باز شده و تصاویر را هم گزارش می‌کند',
+  ]},
   {v:'9.01', t:'کران‌جاب سه گام جدا برمی‌دارد: فهرست ← جزئیات ← ارسال', items:[
     '🎯 خواستهٔ شما: بعد از استخراج خودکار، «استخراج تفصیلی» اجرا شود',
     'و تازه بعد از آن برود سراغ ارسال — همان کاری که دستی می‌کنید',
