@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.06';
+const APP_VERSION = '9.07';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -9787,6 +9787,30 @@ if (isset($_GET['selftest'])) {
     /* ---------- v9.02: انتخاب محصول برای فاز جزئیات ---------- */
     /* با گالری خاموش و سلکتورهای جزئیات روشن، هیچ محصولی انتخاب نمی‌شد
        چون شرط فقط «عکس یا قیمت ندارد» را می‌سنجید. */
+    /* ---------- v9.07: دکمهٔ استخراج تفصیلی سرورساید شد ---------- */
+    /* علت ریشه‌ای «کران گالری نمی‌آورد»: نتیجهٔ این دکمه فقط در حافظهٔ
+       مرورگر می‌نشست و هرگز روی دیسک نمی‌رفت، پس کران که از دیسک
+       می‌خواند چیزی پیدا نمی‌کرد. */
+    $add('9.07', 'دکمهٔ استخراج تفصیلی موتور سرور را صدا می‌زند',
+         strpos($selfSrc, 'onclick="startDetailExtraction' . 'Server()"') !== false
+         && strpos($selfSrc, 'function startDetailExtraction' . 'Server(){') !== false);
+    $add('9.07', 'دکمه دیگر استریم مرورگری را اجرا نمی‌کند',
+         strpos($selfSrc, 'onclick="startDetailExtract' . 'ion()"') === false);
+    $add('9.07', 'فاز از طریق backendExtractFor به اندپوینت می‌رسد',
+         strpos($selfSrc, 'function backendExtractFor(url,panelTitle,' . 'phase){') !== false
+         && strpos($selfSrc, "'?action=backend_extract&phase='+encodeURIComp" . 'onent(ph)') !== false);
+    $add('9.07', 'استخراج تفصیلی با فاز detail شلیک می‌شود',
+         preg_match('~function startDetailExtractionServer\(\)\{.*?\n\}~s', $selfSrc, $_m97)
+         && strpos($_m97[0], "'det" . "ail'") !== false
+         && strpos($_m97[0], 'backendExtract' . 'For(url,') !== false);
+    /* موتور سرور از دیسک می‌خواند، پس آنچه در مرورگر است باید اول
+       بنشیند وگرنه گام جزئیات روی نسخهٔ قدیمی اجرا می‌شود. */
+    $add('9.07', 'قبل از اجرای سرور، کار مرورگر ذخیره می‌شود',
+         preg_match('~function startDetailExtractionServer\(\)\{.*?\n\}~s', $selfSrc, $_m97b)
+         && strpos($_m97b[0], 'saveProfile' . 'Silent()') !== false);
+    $add('9.07', 'پروفایل بدون محصول صریح هشدار می‌دهد',
+         strpos($selfSrc, "if(ph==='det" . "ail'&&!(prof.products&&prof.products.length)){") !== false);
+
     /* ---------- v9.06: کران هم مثل دکمهٔ دستی اتصال را می‌بندد ---------- */
     $add('9.06', 'تابع جداکنندهٔ اتصال وجود دارد',
          function_exists('finishRequest' . 'Now') && function_exists('cron' . 'Emit'));
@@ -9979,8 +10003,10 @@ if (isset($_GET['selftest'])) {
          preg_match('~function startAutoExtract\(\)\{.*?\n\}~s', $selfSrc, $_m92)
          && strpos($_m92[0], 'start(true)') === false
          && strpos($_m92[0], 'stream=1') === false);
+    /* v9.07: امضا یک پارامتر phase گرفت تا «استخراج تفصیلی» هم از همین
+       مسیر مشترک رد شود، به‌جای استریم مرورگری جداگانه. */
     $add('8.92', 'تابع مشترک شروع استخراج از مرورگر هست',
-         strpos($selfSrc, 'function backendExtract' . 'For(url,panelTitle){') !== false);
+         strpos($selfSrc, 'function backendExtract' . 'For(url,panelTitle,phase){') !== false);
     $add('8.92', 'دکمهٔ استخراج بک‌اند هم از همان تابع مشترک رد می‌شود',
          preg_match('~function startBackendSync\(\)\{.*?\n\}~s', $selfSrc, $_m92b)
          && strpos($_m92b[0], 'backendExtractFor(') !== false
@@ -19669,7 +19695,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
             <button class="sub-tab" data-v="text" onclick="switchView('text')">📝 متن</button>
         </div>
         <div class="row">
-            <button class="btn btn-pink" onclick="startDetailExtraction()" id="btnExtractDetail" style="flex:2">🔍 استخراج تفصیلی</button>
+            <button class="btn btn-pink" onclick="startDetailExtractionServer()" id="btnExtractDetail" style="flex:2" title="روی سرور اجرا می‌شود — بستن صفحه کار را قطع نمی‌کند">🔍 استخراج تفصیلی (سرور)</button>
             <button class="btn btn-orange" onclick="fetchMissingImages()" id="btnFetchMissing" style="flex:2">🖼️ دریافت و آماده‌سازی تصاویر</button>
             <button class="btn btn-red hidden" onclick="stopFetchMissing()" id="btnStopFetchMissing" style="flex:1">⏹</button>
             <button class="btn btn-red hidden" onclick="stopDetailExtraction()" id="btnStopDetail" style="flex:1">⏹ توقف</button>
@@ -21755,7 +21781,7 @@ function switchView(v){
  * همین‌جا رد می‌شوند تا رفتارشان نتواند از هم جدا بیفتد. قبلاً هرکدام
  * کد خودش را داشت و دو تای‌شان اصلاً به موتور اصلی نمی‌رسیدند.
  */
-function backendExtractFor(url,panelTitle){
+function backendExtractFor(url,panelTitle,phase){
     if(!url){showToast('URL وارد کنید',1);return;}
     // سلکتورها از روی نسخهٔ ذخیره‌شده بررسی می‌شوند، چون موتور بک‌اند
     // هم دقیقاً همان را می‌خواند — نه چیزی که در فرم باز است.
@@ -21768,14 +21794,69 @@ function backendExtractFor(url,panelTitle){
             switchMainTab('selectors');
             return;
         }
+        /* v9.07: فاز جزئیات روی محصولاتی کار می‌کند که «روی دیسک» هستند.
+           اگر پروفایل ذخیره‌شده هنوز محصولی ندارد، گام جزئیات چیزی برای
+           باز کردن پیدا نمی‌کند و کاربر یک اجرای بی‌صدا می‌بیند. */
+        const ph=phase||'all';
+        if(ph==='detail'&&!(prof.products&&prof.products.length)){
+            showToast('⚠️ هنوز محصولی روی سرور ذخیره نشده — اول «استخراج بک‌اند» را بزنید',1);
+            return;
+        }
         openExtractPanel(panelTitle||'⚡ استخراج بک‌اند — پیشرفت زنده');
         const galOn=((prof.gallery||{}).mode||'off')!=='off';
         const nDet=Object.keys(prof.detailSelectors||{}).length;
-        showToast('⚡ شروع — گالری '+(galOn?'روشن':'خاموش')+(nDet?(' · '+toFa(nDet)+' فیلد جزئیات'):''));
+        if(ph==='detail'){
+            showToast('🔍 استخراج تفصیلی روی سرور شروع شد — گالری '+(galOn?'روشن':'خاموش')
+                +(nDet?(' · '+toFa(nDet)+' فیلد'):''));
+        }else{
+            showToast('⚡ شروع — گالری '+(galOn?'روشن':'خاموش')+(nDet?(' · '+toFa(nDet)+' فیلد جزئیات'):''));
+        }
         // Trigger backend extract endpoint (fire-and-forget)
-        fetch('?action=backend_extract&profile_key='+encodeURIComponent(profileKey(url)),{method:'GET'}).catch(()=>{});
+        fetch('?action=backend_extract&phase='+encodeURIComponent(ph)
+              +'&profile_key='+encodeURIComponent(profileKey(url)),{method:'GET'}).catch(()=>{});
         watchExtractProgress();
     }).catch(()=>{showToast('خطا شبکه',1);});
+}
+
+/**
+ * v9.07: «استخراج تفصیلی» روی سرور اجرا می‌شود، نه در مرورگر.
+ *
+ * تشخیص کاربر درست بود: این دکمه سرورساید نبود. تا ۹.۰۶ یک استریم SSE
+ * باز می‌کرد (detail_stream) و نتیجهٔ هر محصول را فقط داخل products
+ * مرورگر می‌نوشت. دو پیامد داشت:
+ *
+ *   ۱) با ریفرش، بستن تب، خواب گوشی یا قطع لحظه‌ای شبکه، کل کار قطع
+ *      می‌شد — چون هیچ پردازه‌ای روی سرور مالکِ کار نبود.
+ *   ۲) خودِ detail_stream هیچ‌وقت روی دیسک چیزی نمی‌نوشت. ذخیره فقط
+ *      وقتی اتفاق می‌افتاد که بعداً saveProfileSilent صدا زده شود، و
+ *      finishDetailExtraction آن را صدا نمی‌زد. یعنی گالری‌ها تا وقتی
+ *      تب باز بود دیده می‌شدند ولی روی سرور نبودند — و کران‌جاب که
+ *      محصولات را از دیسک می‌خواند، طبیعتاً چیزی پیدا نمی‌کرد.
+ *
+ * حالا همان موتوری اجرا می‌شود که کران استفاده می‌کند (phase=detail):
+ * روی سرور، جدا از مرورگر، با ذخیره بعد از هر محصول. بستن صفحه کار را
+ * قطع نمی‌کند و پیشرفت از فایل خوانده می‌شود.
+ */
+function startDetailExtractionServer(){
+    const url=($('url')&&$('url').value.trim())
+              ||($('profileSelect')&&$('profileSelect').value.trim())||'';
+    if(!url){
+        showToast('⚠️ ابتدا پروفایل را انتخاب یا ذخیره کنید',1);
+        switchMainTab('profiles');
+        return;
+    }
+    const go=()=>backendExtractFor(url,'🔍 استخراج تفصیلی (سرور) — پیشرفت زنده','detail');
+    /* موتور سرور محصولات و سلکتورها را از دیسک می‌خواند. اگر چیزی در
+       مرورگر تغییر کرده یا محصولات هنوز ذخیره نشده‌اند، اول بنشیند. */
+    const needSave=(typeof isDirty!=='undefined'&&isDirty)
+                   ||(typeof products!=='undefined'&&products.size>0);
+    if(needSave&&typeof saveProfileSilent==='function'){
+        saveProfileSilent();
+        showToast('💾 ذخیره روی سرور — شروع استخراج تفصیلی...');
+        setTimeout(go,900);
+        return;
+    }
+    go();
 }
 
 function startBackendSync(){
@@ -22741,6 +22822,26 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.07', t:'🎯 «استخراج تفصیلی» حالا واقعاً سرورساید است', items:[
+    'تشخیص شما درست بود: این دکمه سرورساید نبود و با ریفرش قطع می‌شد.',
+    '🔍 و همین علت اصلیِ «کران گالری نمی‌آورد» بود:',
+    '• دکمه یک استریم SSE باز می‌کرد (detail_stream) و نتیجهٔ هر محصول',
+    '  را فقط داخل حافظهٔ مرورگر می‌نوشت.',
+    '• خودِ detail_stream هیچ‌وقت روی دیسک چیزی ذخیره نمی‌کرد —',
+    '  در کل آن اندپوینت حتی یک saveProfiles وجود نداشت.',
+    '• ذخیره فقط با saveProfileSilent انجام می‌شد، ولی',
+    '  finishDetailExtraction هرگز صدایش نمی‌زد.',
+    '⚠️ نتیجه: گالری‌ها تا وقتی تب باز بود دیده می‌شدند، ولی روی سرور',
+    'نبودند. کران‌جاب محصولات را از دیسک می‌خواند، پس چیزی پیدا نمی‌کرد',
+    'و درست می‌گفت «همه از قبل کامل بودند» یا هیچ گالری‌ای نمی‌آورد.',
+    'برای همین هر بار به نظر می‌رسید دستی کار می‌کند و خودکار نه.',
+    '✅ دکمه حالا همان موتور کران را با phase=detail روی سرور اجرا',
+    'می‌کند: جدا از مرورگر، با ذخیره بعد از هر محصول.',
+    '✅ بستن تب، ریفرش، خواب گوشی یا قطع شبکه دیگر کار را قطع نمی‌کند.',
+    '✅ قبل از شروع، محصولات و سلکتورها روی سرور ذخیره می‌شوند.',
+    '✅ اگر پروفایل روی سرور محصولی نداشته باشد، صریح می‌گوید',
+    'به‌جای اینکه بی‌صدا هیچ کاری نکند.'
+  ]},
   {v:'9.06', t:'🎯 چرا دستی کار می‌کرد و کران‌جاب نه — علت پیدا شد', items:[
     'گزارش شما: «دکمهٔ استخراج بک‌اند همهٔ محصولات و جزئیات و گالری را',
     'کامل می‌آورد اما دقیقاً بعد از آن، استخراج خودکار فقط فهرست پایه',
