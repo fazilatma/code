@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.03';
+const APP_VERSION = '9.04';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7083,7 +7083,7 @@ return ['__early_sent'=>$emitEarlyResponse,'ok'=>false,'error'=>$msg,
    می‌گرفتند؛ آن‌وقت به‌روزرسانی وضعیت روی ردیف اشتباهی می‌نشست و گزارش
    هر کدام گزارش دیگری را بازنویسی می‌کرد. */
 $queueId='ex_'.$profileKey.'_'.time().'_'.substr(bin2hex(random_bytes(3)),0,6);
-$queue['entries'][]=['id'=>$queueId,'status'=>'running','profile_key'=>$profileKey,'url'=>$url,'profile_name'=>$profile['name']??$profileKey,'started_at'=>time(),'products_count'=>0,'total'=>0,'current'=>0,'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,'trigger'=>$trigger];
+$queue['entries'][]=['id'=>$queueId,'status'=>'running','profile_key'=>$profileKey,'url'=>$url,'profile_name'=>$profile['name']??$profileKey,'started_at'=>time(),'products_count'=>0,'total'=>0,'current'=>0,'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,'trigger'=>$trigger,'phase'=>$phase];
 extractWriteQueue($queue);
 
 // v8.22: نسخهٔ قبلی را همین ابتدا بخوان تا مقایسه بتواند زنده انجام شود
@@ -7525,8 +7525,14 @@ writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'
 $newCount=0;$priceChanged=0;$unchanged=0;$removedCount=0;
 $newItems=[];$changedItems=[];$removedItems=[];
 
+/* v9.04: در حالت «فقط جزئیات» مبنای مقایسه همان محصولاتی است که این
+   اجرا رویشان کار کرده، نه نسخهٔ قبل‌تر. وگرنه چون گام فهرست جداگانه
+   ذخیره کرده بود، مقایسه همه را «حذف‌شده» می‌دید و کران گزارش
+   removed=6 می‌داد در حالی که هیچ محصولی حذف نشده بود. */
 $prevMap=[];
-if(!empty($prevProducts)){
+if($phase==='detail'){
+    $prevMap=$prevByKey;
+}elseif(!empty($prevProducts)){
 $firstEntry=reset($prevProducts);
 if(is_array($firstEntry)&&count($firstEntry)>=2&&is_string($firstEntry[0])){
 
@@ -7603,7 +7609,7 @@ if($varFound>0)$finalLog[]='   • 🎨 '.$varFound.' محصول تنوع دار
 if($detailNoField>0)$finalLog[]='   • ⚠️ '.$detailNoField.' محصول هیچ فیلدی نداد — سلکتورها را بررسی کنید';
 if($failSamples)$finalLog[]='   • ✗ '.implode(' | ',$failSamples);
 }
-writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$finalLog,'total_log_count'=>$totalPages+$detailTotal+1,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url),'total_pages'=>$totalPages,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'detail_total'=>$detailTotal,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound]);
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$finalLog,'total_log_count'=>$totalPages+$detailTotal+1,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url),'total_pages'=>$totalPages,'detail_current'=>$detailDone,'phase'=>($detailTotal>0?'detail':'list'),'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'detail_total'=>$detailTotal,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound]);
 
 $queue=extractReadQueue();
 // v8.25: نتیجهٔ کامل هر اجرا جداگانه ذخیره می‌شود تا مودالِ کارهای
@@ -7620,7 +7626,7 @@ extractSaveReport($queueId, [
     'finished_at'   => time(),
 ]);
 
-foreach($queue['entries'] as &$qe){if($qe['id']===$queueId){$qe['status']='done';$qe['products_count']=count($allProducts);$qe['total']=count($allProducts);$qe['current']=count($allProducts);$qe['done_at']=time();$qe['new']=$newCount;$qe['price_changed']=$priceChanged;$qe['removed']=$removedCount;$qe['unchanged']=$unchanged;$qe['price_up']=$priceUp;$qe['price_down']=$priceDown;$qe['gallery_images']=$galleryImgsTotal;$qe['gallery_products']=$galleryFound;$qe['detail_ok']=$detailOk;$qe['detail_fail']=$detailFail;$qe['detail_fields']=$detailFields;$qe['variation_products']=$varFound;$qe['has_report']=true;break;}}unset($qe);
+foreach($queue['entries'] as &$qe){if($qe['id']===$queueId){$qe['status']='done';$qe['products_count']=count($allProducts);$qe['total']=count($allProducts);$qe['current']=count($allProducts);$qe['done_at']=time();$qe['new']=$newCount;$qe['price_changed']=$priceChanged;$qe['removed']=$removedCount;$qe['unchanged']=$unchanged;$qe['price_up']=$priceUp;$qe['price_down']=$priceDown;$qe['gallery_images']=$galleryImgsTotal;$qe['gallery_products']=$galleryFound;$qe['detail_ok']=$detailOk;$qe['detail_fail']=$detailFail;$qe['detail_fields']=$detailFields;$qe['variation_products']=$varFound;$qe['detail_total']=$detailTotal;$qe['has_report']=true;break;}}unset($qe);
 extractWriteQueue($queue);
 
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>true,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url)];
@@ -8058,8 +8064,14 @@ if ($stepMode === 'list') {
        کردن انتخاب نمی‌شد هم ok گزارش می‌شد. حالا تعداد واقعی می‌آید. */
     if (!empty($dRes['ok'])) {
         $_dp = readProgress(EXTRACT_PROGRESS_FILE);
-        $_dDone = (int)($_dp['detail_current'] ?? 0);
+        /* v9.04: detail_current را از فایل پیشرفت بخوان ولی اگر نبود از
+           detail_total کمک بگیر — وگرنه گزارش «ok 0/6» می‌داد در حالی که
+           هر ۶ محصول انجام شده بود. */
         $_dTot  = (int)($_dp['detail_total'] ?? 0);
+        $_dDone = (int)($_dp['detail_current'] ?? 0);
+        if ($_dDone === 0 && (int)($_dp['detail_ok'] ?? 0) > 0) {
+            $_dDone = (int)$_dp['detail_ok'] + (int)($_dp['detail_fail'] ?? 0);
+        }
         $pResult['detail_step']  = $_dTot > 0 ? ('ok ' . $_dDone . '/' . $_dTot) : 'nothing_to_do';
         $pResult['detail_pages'] = (int)($_dp['detail_ok'] ?? 0);
         $pResult['detail_fail']  = (int)($_dp['detail_fail'] ?? 0);
@@ -9648,6 +9660,25 @@ if (isset($_GET['selftest'])) {
     /* «استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که گالری، تنوع، سلکتورهای
        جزئیات، ذخیره‌سازی سمت سرور و صف نداشت. «اجرای الان» هم انسدادی بود.
        حالا هر سه از یک نقطه رد می‌شوند. */
+    /* ---------- v9.04: گزارش دیدنیِ مرحلهٔ ۲ ---------- */
+    $add('9.04', 'ردیف صف مرحلهٔ خود را ثبت می‌کند',
+         strpos($selfSrc, "'trigger'=>\$trigger,'phase'=>\$phase];") !== false);
+    $add('9.04', 'نشان مرحله در مودال صف',
+         strpos($selfSrc, 'مرحله ۲: ' . 'جزئیات') !== false
+         && strpos($selfSrc, 'مرحله ۱: ' . 'فهرست') !== false);
+    $add('9.04', 'پنل گزارش مرحلهٔ ۲ هست',
+         strpos($selfSrc, 'function renderPhase2' . 'Report(queueId){') !== false
+         && strpos($selfSrc, "id=\"extractModalPhase2\"") !== false);
+    $add('9.04', 'شمارندهٔ جزئیات در نوشتن پایانی هم می‌آید',
+         strpos($selfSrc, "'total_pages'=>\$totalPages,'detail_current'=>\$detailDone,") !== false);
+    $add('9.04', 'گزارش کران عدد واقعی می‌دهد نه صفر',
+         strpos($selfSrc, "if (\$_dDone === 0 && (int)(\$_dp['detail_ok'] ?? 0) > 0) {") !== false);
+    $add('9.04', 'حالت جزئیات مبنای مقایسه را درست می‌گیرد',
+         strpos($selfSrc, "if(\$phase==='detail'){
+    \$prevMap=\$prevByKey;") !== false);
+    $add('9.04', 'ردیف صف تعداد کل جزئیات را نگه می‌دارد',
+         strpos($selfSrc, "\$qe['detail_total']=\$detailTotal;") !== false);
+
     /* ---------- v9.03: گام جزئیات همیشه بعد از فهرست اجرا شود ---------- */
     $add('9.03', 'گام جزئیات شرطی به موفقیت گام فهرست ندارد',
          strpos($selfSrc, "if (\$stepMode === 'list') {") !== false
@@ -21785,6 +21816,13 @@ function renderExtractQueue(entries, progress){
         }else if(e.trigger==='manual'){
             html+='<span style="color:#a78bfa;font-size:10px;background:#4c1d9520;padding:1px 6px;border-radius:4px">👤 دستی</span>';
         }
+        /* v9.04: کدام مرحله؟ بدون این، ردیف «فهرست» با شمارندهٔ صفرِ
+           جزئیات شبیه یک اجرای ناموفق به نظر می‌رسید. */
+        if(e.phase==='list'){
+            html+='<span style="color:#fbbf24;font-size:10px;background:#42200630;padding:1px 6px;border-radius:4px">📄 مرحله ۱: فهرست</span>';
+        }else if(e.phase==='detail'){
+            html+='<span style="color:#f9a8d4;font-size:10px;background:#50072430;padding:1px 6px;border-radius:4px">🔍 مرحله ۲: جزئیات</span>';
+        }
         if(e.profile_name)html+='<span style="color:#94a3b8;font-size:10px">'+esc(e.profile_name)+'</span>';
         if(products>0)html+='<span style="color:#e2e8f0;font-weight:600;font-size:12px">'+toFa(products)+' محصول</span>';
         html+='</div>';
@@ -21879,11 +21917,73 @@ function showExtractLogModal(queueId){
         +'<button class="btn btn-gray" onclick="closeExtractLogModal()" style="font-size:10px;padding:4px 8px">✕</button>'
         +'</div>'
         +'<div id="extractModalCounters" class="live-cnt"></div>'
+        +'<div id="extractModalPhase2"></div>'
         +'<div id="extractModalLog" style="font-size:11px;max-height:45vh;overflow-y:auto;margin-top:10px">بارگذاری...</div>'
         +'</div>';
     // v8.25: شمارنده‌های قابل کلیک این اجرا را بارگذاری کن
     loadExtractModalCounters(queueId);
+    renderPhase2Report(queueId);
     pollExtractLogModal();
+}
+
+/**
+ * v9.04: گزارش صریح مرحلهٔ ۲ (استخراج تفصیلی).
+ *
+ * تا حالا معلوم نبود این مرحله اصلاً اجرا شده یا نه — کاربر فقط می‌دید
+ * گالری نیامده و نمی‌توانست بفهمد کجای کار ایراد دارد. حالا همان
+ * عددهایی که موتور ثبت کرده مستقیم نشان داده می‌شوند.
+ */
+function renderPhase2Report(queueId){
+    const box=$('extractModalPhase2');
+    if(!box)return;
+    fetch('?extract_queue_status=1').then(r=>r.json()).then(d=>{
+        const rows=(d&&d.entries)||[];
+        const e=rows.find(x=>x.id===queueId);
+        if(!e){box.innerHTML='';return;}
+        const live=(e.status==='running'&&d.progress&&d.progress.running)?d.progress:null;
+        const pages=(live&&live.detail_ok)||e.detail_ok||0;
+        const fail =(live&&live.detail_fail)||e.detail_fail||0;
+        const flds =(live&&live.detail_fields)||e.detail_fields||0;
+        const imgs =(live&&live.gallery_images)||e.gallery_images||0;
+        const gprd =(live&&live.gallery_products)||e.gallery_products||0;
+        const vars =(live&&live.variation_products)||e.variation_products||0;
+        const tot  =(live&&live.detail_total)||e.detail_total||0;
+
+        const phaseLbl = e.phase==='list' ? '📄 مرحله ۱ — استخراج فهرست'
+                       : (e.phase==='detail' ? '🔍 مرحله ۲ — استخراج تفصیلی'
+                                             : '⚡ استخراج کامل (فهرست + جزئیات)');
+        let h='<div style="margin-top:10px;padding:10px 12px;background:#0f172a;border:1px solid #334155;border-radius:10px">';
+        h+='<div style="font-weight:700;font-size:12px;color:#f9a8d4;margin-bottom:6px">'+phaseLbl+'</div>';
+
+        if(e.phase==='list'){
+            h+='<div style="font-size:11px;color:#94a3b8;line-height:1.9">'
+             +'این ردیف فقط صفحهٔ فهرست را گرفته — گرفتن گالری و فیلدها کار مرحلهٔ ۲ است.<br>'
+             +'ردیف «🔍 مرحله ۲» را در همین صف ببینید.</div>';
+        }else if(pages===0&&fail===0&&tot===0){
+            h+='<div style="font-size:11px;color:#fbbf24;line-height:1.9">'
+             +'⏭ هیچ محصولی نیاز به باز شدن نداشت.<br>'
+             +'یعنی همهٔ محصولات از قبل گالری و فیلدهای خواسته‌شده را داشتند.</div>';
+        }else{
+            const cell=(bg,fg,big,lbl)=>'<div style="background:'+bg+';border-radius:8px;padding:7px;text-align:center">'
+                +'<b style="color:'+fg+';font-size:15px">'+toFa(big)+'</b>'
+                +'<br><span style="color:#94a3b8;font-size:9.5px">'+lbl+'</span></div>';
+            h+='<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px">';
+            h+=cell('#14532d20','#4ade80',pages,'✅ صفحه باز شد');
+            h+=cell(fail>0?'#7f1d1d20':'#1e293b',fail>0?'#f87171':'#475569',fail,'❌ باز نشد');
+            h+=cell('#1e1b4b','#c4b5fd',flds,'🏷 فیلد');
+            h+=cell('#50072430','#f9a8d4',imgs,'🖼 تصویر');
+            h+=cell('#164e6320','#67e8f9',vars,'🎨 تنوع‌دار');
+            h+='</div>';
+            h+='<div style="font-size:10.5px;color:#94a3b8;margin-top:7px;line-height:1.9">';
+            if(tot>0)h+='از '+toFa(tot)+' محصولی که لازم بود باز شود، '+toFa(pages)+' موفق بود.<br>';
+            if(gprd>0)h+='🖼 '+toFa(imgs)+' تصویر از '+toFa(gprd)+' محصول جمع شد.<br>';
+            if(imgs===0)h+='<span style="color:#fbbf24">⚠️ هیچ تصویر گالری‌ای جمع نشد — سلکتور «باکس گالری» یا دسترسی سرور به صفحهٔ محصول را بررسی کنید.</span><br>';
+            if(fail>0)h+='<span style="color:#f87171">⛔ '+toFa(fail)+' صفحه باز نشد — اگر ۴۰۳/۴۲۹ بود یعنی IP سرور بلاک شده.</span>';
+            h+='</div>';
+        }
+        h+='</div>';
+        box.innerHTML=h;
+    }).catch(()=>{});
 }
 
 /**
@@ -22494,6 +22594,20 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.04', t:'گزارش واقعی مرحلهٔ ۲ در مودال و کارت صف', items:[
+    '👁 حالا می‌توانید ببینید مرحلهٔ جزئیات واقعاً چه کرده:',
+    'در مودال صف، پنل «🔍 مرحله ۲ — استخراج تفصیلی» اضافه شد با پنج شمارنده:',
+    'صفحه باز شد · باز نشد · فیلد · تصویر · تنوع‌دار',
+    'و اگر تصویری جمع نشده باشد، صریح می‌گوید کجا را بررسی کنید',
+    '🏷 هر ردیف صف حالا نشان می‌دهد مرحلهٔ ۱ است یا مرحلهٔ ۲',
+    '(قبلاً ردیف فهرست با شمارندهٔ صفرِ جزئیات شبیه شکست به نظر می‌رسید)',
+    '🐞 گزارش کران «ok ۰/۶» می‌داد در حالی که هر ۶ محصول انجام شده بود —',
+    'چون نوشتن پایانیِ فایل پیشرفت شمارندهٔ detail_current را نداشت',
+    '🐞 در حالت «فقط جزئیات» مقایسه همهٔ محصولات را «حذف‌شده» می‌شمرد',
+    'چون مبنای مقایسه نسخهٔ قبل از گام فهرست بود',
+    '🧪 با یک کپی محلی از books.toscrape.com تست شد (سندباکس اینترنت ندارد):',
+    'ok ۶/۶ · ۲۴ تصویر · ۶ محصول با گالری · removed=۰',
+  ]},
   {v:'9.03', t:'گام «استخراج تفصیلی» بدون قید و شرط بعد از فهرست اجرا می‌شود', items:[
     '🐞 دو چیز جلوی اجرای گام جزئیات را می‌گرفت — هر دو برطرف شد:',
     '۱) این گام فقط وقتی اجرا می‌شد که گام فهرست «موفق» برگردد.',
