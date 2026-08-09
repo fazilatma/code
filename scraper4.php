@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.04';
+const APP_VERSION = '9.05';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7270,9 +7270,13 @@ $galleryCfg=galleryNormalizeCfg($profile['gallery']??[]);
    باید صفحه را باز کنیم. */
 $_wantKeys=[];
 foreach($detailSelectors as $_f=>$_sv){ if(!empty($_sv))$_wantKeys[]=$_f; }
+/* v9.05: چرا هیچ محصولی انتخاب نشد؟ سه علتِ کاملاً متفاوت وجود دارد و
+   تا حالا هر سه یک پیام می‌گرفتند: «همه از قبل کامل بودند». این پیام
+   وقتی گالری اصلاً نیامده کاملاً گمراه‌کننده است. حالا شمرده می‌شوند. */
+$_noLink=0;$_alreadyDone=0;
 $needDetail=[];
 foreach($allProducts as $key=>$p){
-if(empty($p['link']))continue;
+if(empty($p['link'])){$_noLink++;continue;}
 /* v8.81: محصولی که گالری‌اش را قبلاً گرفته‌ایم دوباره باز نمی‌شود.
    پیش از این با روشن بودن گالری، هر بار همهٔ صفحات محصول از نو گرفته
    می‌شد که هم کند بود و هم بی‌دلیل. */
@@ -7284,7 +7288,7 @@ foreach($_wantKeys as $_wk){
     $_cur=$p[$_wk]??'';
     if(is_array($_cur)?empty($_cur):(trim((string)$_cur)==='')){$_fieldMissing=true;break;}
 }
-if($_galDone&&!$_fieldMissing)continue;          // هم گالری دارد هم فیلدها
+if($_galDone&&!$_fieldMissing){$_alreadyDone++;continue;}   // هم گالری دارد هم فیلدها
 if($galleryCfg['enabled']||$_fieldMissing||empty($p['image'])||empty($p['price'])){
 $needDetail[$key]=$p;
 }
@@ -7304,6 +7308,15 @@ $pushLog=function(string $line) use (&$detailLog){
     $detailLog[]=$line;
     if(count($detailLog)>6)$detailLog=array_slice($detailLog,-6);
 };
+/* v9.05: اگر فاز جزئیات اجرا نمی‌شود، دلیلش را ثبت کن. سکوت باعث شد
+   کاربر پیام «همه از قبل کامل بودند» ببیند در حالی که گالری نیامده بود. */
+$_skipWhy='';
+if($phase==='list')                                   $_skipWhy='';           // عمدی
+elseif(empty($detailSelectors)&&!$galleryCfg['enabled']) $_skipWhy='no_config';
+elseif($detailTotal===0&&$_noLink>0&&$_alreadyDone===0)  $_skipWhy='no_link';
+elseif($detailTotal===0&&$_alreadyDone>0)                $_skipWhy='already_done';
+elseif($detailTotal===0)                                 $_skipWhy='nothing_selected';
+
 if($phase!=='list'&&$detailTotal>0&&(!empty($detailSelectors)||$galleryCfg['enabled'])){
 $_wantFields=[];
 foreach($detailSelectors as $_f=>$_sv){ if(!empty($_sv))$_wantFields[]=$_f; }
@@ -7609,7 +7622,7 @@ if($varFound>0)$finalLog[]='   • 🎨 '.$varFound.' محصول تنوع دار
 if($detailNoField>0)$finalLog[]='   • ⚠️ '.$detailNoField.' محصول هیچ فیلدی نداد — سلکتورها را بررسی کنید';
 if($failSamples)$finalLog[]='   • ✗ '.implode(' | ',$failSamples);
 }
-writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$finalLog,'total_log_count'=>$totalPages+$detailTotal+1,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url),'total_pages'=>$totalPages,'detail_current'=>$detailDone,'phase'=>($detailTotal>0?'detail':'list'),'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'detail_total'=>$detailTotal,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound]);
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$finalLog,'total_log_count'=>$totalPages+$detailTotal+1,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url),'total_pages'=>$totalPages,'detail_current'=>$detailDone,'detail_skip_why'=>$_skipWhy,'detail_no_link'=>$_noLink,'detail_already'=>$_alreadyDone,'phase'=>($detailTotal>0?'detail':'list'),'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'detail_total'=>$detailTotal,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound]);
 
 $queue=extractReadQueue();
 // v8.25: نتیجهٔ کامل هر اجرا جداگانه ذخیره می‌شود تا مودالِ کارهای
@@ -7626,7 +7639,7 @@ extractSaveReport($queueId, [
     'finished_at'   => time(),
 ]);
 
-foreach($queue['entries'] as &$qe){if($qe['id']===$queueId){$qe['status']='done';$qe['products_count']=count($allProducts);$qe['total']=count($allProducts);$qe['current']=count($allProducts);$qe['done_at']=time();$qe['new']=$newCount;$qe['price_changed']=$priceChanged;$qe['removed']=$removedCount;$qe['unchanged']=$unchanged;$qe['price_up']=$priceUp;$qe['price_down']=$priceDown;$qe['gallery_images']=$galleryImgsTotal;$qe['gallery_products']=$galleryFound;$qe['detail_ok']=$detailOk;$qe['detail_fail']=$detailFail;$qe['detail_fields']=$detailFields;$qe['variation_products']=$varFound;$qe['detail_total']=$detailTotal;$qe['has_report']=true;break;}}unset($qe);
+foreach($queue['entries'] as &$qe){if($qe['id']===$queueId){$qe['status']='done';$qe['products_count']=count($allProducts);$qe['total']=count($allProducts);$qe['current']=count($allProducts);$qe['done_at']=time();$qe['new']=$newCount;$qe['price_changed']=$priceChanged;$qe['removed']=$removedCount;$qe['unchanged']=$unchanged;$qe['price_up']=$priceUp;$qe['price_down']=$priceDown;$qe['gallery_images']=$galleryImgsTotal;$qe['gallery_products']=$galleryFound;$qe['detail_ok']=$detailOk;$qe['detail_fail']=$detailFail;$qe['detail_fields']=$detailFields;$qe['variation_products']=$varFound;$qe['detail_total']=$detailTotal;$qe['detail_skip_why']=$_skipWhy;$qe['detail_no_link']=$_noLink;$qe['detail_already']=$_alreadyDone;$qe['has_report']=true;break;}}unset($qe);
 extractWriteQueue($queue);
 
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>true,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url)];
@@ -9660,6 +9673,26 @@ if (isset($_GET['selftest'])) {
     /* «استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که گالری، تنوع، سلکتورهای
        جزئیات، ذخیره‌سازی سمت سرور و صف نداشت. «اجرای الان» هم انسدادی بود.
        حالا هر سه از یک نقطه رد می‌شوند. */
+    /* ---------- v9.05: چرا هیچ محصولی انتخاب نشد ---------- */
+    /* پیام «همه از قبل کامل بودند» برای هر سه علت گفته می‌شد — حتی وقتی
+       هیچ گالری‌ای نیامده بود. یعنی گزارش دروغ می‌گفت. */
+    $add('9.05', 'علت انتخاب‌نشدن محصول شمرده می‌شود',
+         strpos($selfSrc, '$_noLink=0;$_already' . 'Done=0;') !== false
+         && strpos($selfSrc, "if(empty(\$p['link'])){\$_noLink++;cont" . 'inue;}') !== false);
+    $add('9.05', 'سه علت جدا از هم تشخیص داده می‌شوند',
+         strpos($selfSrc, "\$_skipWhy='no_" . "config';") !== false
+         && strpos($selfSrc, "\$_skipWhy='no_" . "link';") !== false
+         && strpos($selfSrc, "\$_skipWhy='already_" . "done';") !== false);
+    $add('9.05', 'علت در فایل پیشرفت و ردیف صف ثبت می‌شود',
+         substr_count($selfSrc, "'detail_skip_why'") >= 1
+         && strpos($selfSrc, "\$qe['detail_skip_why']=\$_skipWhy;") !== false);
+    $add('9.05', 'مودال به‌جای پیام ثابت، علت واقعی را می‌گوید',
+         strpos($selfSrc, 'const why=e.detail_skip' . "_why||'';") !== false
+         && strpos($selfSrc, 'محصول «لینک» ' . 'ندارند') !== false);
+    $add('9.05', 'راهنمای عملی برای هر علت',
+         strpos($selfSrc, 'سلکتور «🔗 لینک» را تنظیم ' . 'کنید') !== false
+         && strpos($selfSrc, 'نه سلکتور جزئیات تنظیم شده و نه گالری روشن ' . 'است') !== false);
+
     /* ---------- v9.04: گزارش دیدنیِ مرحلهٔ ۲ ---------- */
     $add('9.04', 'ردیف صف مرحلهٔ خود را ثبت می‌کند',
          strpos($selfSrc, "'trigger'=>\$trigger,'phase'=>\$phase];") !== false);
@@ -9703,7 +9736,7 @@ if (isset($_GET['selftest'])) {
     $add('9.02', 'تنوع‌ها جداگانه سنجیده می‌شوند',
          strpos($selfSrc, "if(\$_wk==='variations'){ if(empty(\$p['variations']))") !== false);
     $add('9.02', 'محصولی که هم گالری دارد هم فیلدها دوباره باز نمی‌شود',
-         strpos($selfSrc, 'if($_galDone&&!$_field' . 'Missing)continue;') !== false);
+         strpos($selfSrc, 'if($_galDone&&!$_field' . 'Missing){$_alreadyDone++;continue;}') !== false);
     $add('9.02', 'گزارش گام جزئیات تعداد واقعی را می‌گوید',
          strpos($selfSrc, "'nothing_to_" . "do'") !== false
          && strpos($selfSrc, "\$pResult['detail_pages']") !== false);
@@ -21960,9 +21993,39 @@ function renderPhase2Report(queueId){
              +'این ردیف فقط صفحهٔ فهرست را گرفته — گرفتن گالری و فیلدها کار مرحلهٔ ۲ است.<br>'
              +'ردیف «🔍 مرحله ۲» را در همین صف ببینید.</div>';
         }else if(pages===0&&fail===0&&tot===0){
-            h+='<div style="font-size:11px;color:#fbbf24;line-height:1.9">'
-             +'⏭ هیچ محصولی نیاز به باز شدن نداشت.<br>'
-             +'یعنی همهٔ محصولات از قبل گالری و فیلدهای خواسته‌شده را داشتند.</div>';
+            /* v9.05: قبلاً همیشه می‌گفت «همه از قبل کامل بودند» — که وقتی
+               گالری اصلاً نیامده دروغ است. حالا علت واقعی گفته می‌شود. */
+            const why=e.detail_skip_why||'';
+            const noLink=e.detail_no_link||0, already=e.detail_already||0;
+            let msg='', color='#fbbf24';
+            if(why==='no_config'){
+                color='#f87171';
+                msg='⛔ نه سلکتور جزئیات تنظیم شده و نه گالری روشن است.<br>'
+                   +'برای همین این مرحله کاری نداشت. در تب سلکتورها،'
+                   +' «سلکتورهای صفحهٔ جزئیات» یا «🖼 گالری» را تنظیم کنید.';
+            }else if(why==='no_link'){
+                color='#f87171';
+                msg='⛔ هیچ‌کدام از '+toFa(noLink)+' محصول «لینک» ندارند.<br>'
+                   +'بدون لینک نمی‌شود صفحهٔ محصول را باز کرد، پس گالری و جزئیات'
+                   +' هرگز استخراج نمی‌شوند.<br>'
+                   +'<b>راه‌حل:</b> در تب سلکتورها سلکتور «🔗 لینک» را تنظیم کنید'
+                   +' و یک بار استخراج فهرست را دوباره بزنید.';
+            }else if(why==='already_done'){
+                msg='⏭ هر '+toFa(already)+' محصول از قبل گالری و همهٔ فیلدهای'
+                   +' خواسته‌شده را داشتند، پس دوباره باز نشدند.<br>'
+                   +'اگر گالری‌ها را نمی‌بینید، یعنی داده روی دیسک هست ولی جای'
+                   +' دیگری گم می‌شود — گزارش را بفرستید.';
+            }else if(why==='nothing_selected'){
+                color='#f87171';
+                msg='⛔ محصولی برای باز کردن انتخاب نشد'
+                   +(noLink>0?(' ('+toFa(noLink)+' محصول بدون لینک)'):'')
+                   +(already>0?(' · '+toFa(already)+' محصول از قبل کامل'):'')+'.';
+            }else{
+                msg='⏭ این مرحله چیزی برای انجام نداشت.'
+                   +(noLink>0?('<br>⚠️ '+toFa(noLink)+' محصول لینک ندارند.'):'')
+                   +(already>0?('<br>'+toFa(already)+' محصول از قبل کامل بودند.'):'');
+            }
+            h+='<div style="font-size:11px;color:'+color+';line-height:1.9">'+msg+'</div>';
         }else{
             const cell=(bg,fg,big,lbl)=>'<div style="background:'+bg+';border-radius:8px;padding:7px;text-align:center">'
                 +'<b style="color:'+fg+';font-size:15px">'+toFa(big)+'</b>'
@@ -22594,6 +22657,18 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.05', t:'🐞 پیام «همه از قبل کامل بودند» دروغ می‌گفت', items:[
+    'شما گزارش دادید: مودال می‌گوید «هیچ محصولی نیاز به باز شدن نداشت»',
+    'در حالی که هیچ گالری و جزئیاتی استخراج نشده — و حق داشتید',
+    '🔍 سه علتِ کاملاً متفاوت وجود دارد که همگی «صفر محصول» می‌دهند،',
+    'ولی هر سه یک پیام می‌گرفتند:',
+    '۱) محصولات «لینک» ندارند → بدون لینک صفحهٔ محصول باز نمی‌شود',
+    '۲) نه سلکتور جزئیات تنظیم شده نه گالری روشن است',
+    '۳) واقعاً همه از قبل کامل بودند',
+    '✅ حالا هر کدام پیام و راهنمای خودش را دارد',
+    'مثلاً: «هیچ‌کدام از ۲۰ محصول لینک ندارند — سلکتور 🔗 لینک را تنظیم کنید»',
+    '📊 شمارندهٔ محصولات بدون لینک و محصولات از قبل کامل هم ثبت می‌شود',
+  ]},
   {v:'9.04', t:'گزارش واقعی مرحلهٔ ۲ در مودال و کارت صف', items:[
     '👁 حالا می‌توانید ببینید مرحلهٔ جزئیات واقعاً چه کرده:',
     'در مودال صف، پنل «🔍 مرحله ۲ — استخراج تفصیلی» اضافه شد با پنج شمارنده:',
