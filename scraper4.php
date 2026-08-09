@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '8.99';
+const APP_VERSION = '9.00';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2334,9 +2334,83 @@ function bslUploadMany(string $tk, array $imgUrls, int $max = 10): array {
                 : ('هیچ تصویری آپلود نشد' . ($firstErr !== '' ? ' — ' . $firstErr : ''))];
 }
 
+/**
+ * v9.00: تنظیمات عبور برای «سایت مبدأ» — جدا از تنظیمات هوش مصنوعی.
+ *
+ * چرا لازم شد: سرور در ایران است و دو مشکل جدا پیش می‌آید.
+ *   ۱) بعضی سایت‌ها از ایران اصلاً باز نمی‌شوند (DNS مسموم یا مسیر بسته).
+ *   ۲) سایت مبدأ به‌خاطر درخواست مکرر، IP هاست را بلاک می‌کند (۴۰۳/۴۲۹).
+ *
+ * برای مشکل اول همان ابزارهای بخش هوش مصنوعی جواب می‌دهند (DoH، IP دستی،
+ * پروکسی، Worker). برای مشکل دوم هیچ DNSی کمک نمی‌کند — بلاک روی IP است،
+ * نه روی نام — و تنها راه‌ها یا کند کردن درخواست‌ها است یا عبور از یک
+ * پروکسی/Worker که IP دیگری دارد.
+ */
+function srcNetCfg(?array $cn = null): array {
+    if ($cn === null) $cn = loadConnections();
+    $n = (array)($cn['src_net'] ?? []);
+    // اگر کاربر چیزی تنظیم نکرده، از تنظیمات هوش مصنوعی قرض می‌گیریم
+    $ai = (array)($cn['ai_net'] ?? []);
+    $pick = function (string $k, $def) use ($n, $ai) {
+        if (array_key_exists($k, $n) && trim((string)$n[$k]) !== '') return $n[$k];
+        if (!empty($n['inherit_ai']) && array_key_exists($k, $ai)) return $ai[$k];
+        return $def;
+    };
+    $mode = (string)($n['mode'] ?? 'direct');
+    if ($mode === 'inherit') $mode = (string)($ai['mode'] ?? 'direct');
+    return [
+        'mode'       => in_array($mode, ['direct','doh','dns','proxy','worker'], true) ? $mode : 'direct',
+        'resolve_ip' => trim((string)$pick('resolve_ip', '')),
+        'doh_url'    => trim((string)$pick('doh_url', 'https://cloudflare-dns.com/dns-query')),
+        'worker_url' => trim((string)$pick('worker_url', '')),
+        'proxy'      => trim((string)$pick('proxy', '')),
+        'proxy_type' => (string)$pick('proxy_type', 'http'),
+        'proxy_auth' => trim((string)$pick('proxy_auth', '')),
+        'ipv4'       => !isset($n['ipv4']) || !empty($n['ipv4']),
+        // فاصلهٔ بین درخواست‌ها به یک دامنه — ضد بلاک شدن IP
+        'gap_ms'     => max(0, min(10000, (int)($n['gap_ms'] ?? 0))),
+        // فقط برای همین دامنه‌ها عبور اعمال شود (خالی = همه)
+        'hosts'      => trim((string)($n['hosts'] ?? '')),
+    ];
+}
+
+/** آیا برای این دامنه باید از راه عبور استفاده کنیم؟ */
+function srcNetApplies(array $net, string $host): bool {
+    if ($net['mode'] === 'direct') return false;
+    $list = trim($net['hosts']);
+    if ($list === '') return true;                 // همهٔ دامنه‌ها
+    $host = strtolower($host);
+    foreach (preg_split('~[\s,;\r\n]+~', strtolower($list)) as $h) {
+        $h = trim($h);
+        if ($h === '') continue;
+        if ($host === $h || substr($host, -strlen('.' . $h)) === '.' . $h) return true;
+    }
+    return false;
+}
+
+/**
+ * v9.00: فاصلهٔ ادب بین درخواست‌ها به یک دامنه.
+ * وقتی سایت مبدأ IP هاست را بلاک کرده، تندتر زدن فقط بلاک را طولانی‌تر
+ * می‌کند. این تابع بین دو درخواست به یک دامنه کمی صبر می‌کند.
+ */
+function srcPace(string $host, int $gapMs): void {
+    if ($gapMs <= 0 || $host === '') return;
+    static $last = [];
+    $now = microtime(true);
+    if (isset($last[$host])) {
+        $wait = ($gapMs / 1000) - ($now - $last[$host]);
+        if ($wait > 0) usleep((int)($wait * 1000000));
+    }
+    $last[$host] = microtime(true);
+}
+
 function fetch_html(string $url, int $timeout = 25): array {
 $ch = curl_init($url);
 $parsed=parse_url($url);$origin=($parsed['scheme']??'https').'://'.($parsed['host']??'');
+/* v9.00: راه عبور برای سایت مبدأ، اگر کاربر تنظیم کرده باشد */
+$__srcHost = strtolower((string)($parsed['host'] ?? ''));
+$__srcNet = function_exists('loadConnections') ? srcNetCfg() : ['mode'=>'direct','gap_ms'=>0,'hosts'=>''];
+srcPace($__srcHost, (int)($__srcNet['gap_ms'] ?? 0));
 curl_setopt_array($ch, [
 CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 5,
 CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => $timeout, CURLOPT_ENCODING => '',
@@ -2359,6 +2433,40 @@ CURLOPT_HTTPHEADER => [
 'Upgrade-Insecure-Requests: 1',
 ],
 ]);
+/* v9.00: راه عبور را اعمال کن — DoH / IP دستی / پروکسی / Worker.
+   نام میزبان دست‌نخورده می‌ماند و فقط مقصد TCP عوض می‌شود، پس سایت
+   همان درخواست همیشگی را می‌بیند. */
+if (srcNetApplies($__srcNet, $__srcHost)) {
+    $__m = (string)$__srcNet['mode'];
+    if ($__m === 'dns' || $__m === 'doh') {
+        $__ip = '';
+        if ($__m === 'dns') $__ip = (string)$__srcNet['resolve_ip'];
+        elseif (function_exists('aiDohResolve')) {
+            $__r = aiDohResolve($__srcHost, (string)$__srcNet['doh_url'], min(10, $timeout));
+            if (!empty($__r['ok'])) $__ip = (string)$__r['ip'];
+        }
+        if ($__ip !== '') {
+            $__port = ((parse_url($url, PHP_URL_SCHEME) ?: 'https') === 'https') ? 443 : 80;
+            curl_setopt($ch, CURLOPT_RESOLVE, [$__srcHost . ':' . $__port . ':' . $__ip]);
+        }
+    } elseif ($__m === 'proxy' && $__srcNet['proxy'] !== '') {
+        curl_setopt($ch, CURLOPT_PROXY, (string)$__srcNet['proxy']);
+        $__map = ['http' => CURLPROXY_HTTP,
+                  'socks5' => defined('CURLPROXY_SOCKS5_HOSTNAME') ? CURLPROXY_SOCKS5_HOSTNAME : CURLPROXY_SOCKS5,
+                  'socks4' => defined('CURLPROXY_SOCKS4') ? CURLPROXY_SOCKS4 : CURLPROXY_HTTP];
+        curl_setopt($ch, CURLOPT_PROXYTYPE, $__map[(string)$__srcNet['proxy_type']] ?? CURLPROXY_HTTP);
+        if ($__srcNet['proxy_auth'] !== '') curl_setopt($ch, CURLOPT_PROXYUSERPWD, (string)$__srcNet['proxy_auth']);
+    } elseif ($__m === 'worker' && $__srcNet['worker_url'] !== '') {
+        $__w = rtrim((string)$__srcNet['worker_url'], '/');
+        $__u = (strpos($__w, '{url}') !== false)
+             ? str_replace('{url}', rawurlencode($url), $__w)
+             : $__w . '/' . ltrim($url, '/');
+        curl_setopt($ch, CURLOPT_URL, $__u);
+    }
+    if (!empty($__srcNet['ipv4']) && defined('CURL_IPRESOLVE_V4')) {
+        curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    }
+}
 $body = curl_exec($ch);
 $err = curl_error($ch);
 $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
@@ -6517,6 +6625,22 @@ if (isset($_POST['stall_after']))    $conn['stall_after']    = max(60, (int)$_PO
 if (isset($_POST['detail_budget_sec'])) $conn['detail_budget_sec'] = max(0, min(3600, (int)$_POST['detail_budget_sec']));
 // v8.99: مهلت گرفتن صفحه از روی سرور (انتخابگر بصری و انتخابگر جزئیات)
 if (isset($_POST['proxy_timeout_sec'])) $conn['proxy_timeout_sec'] = max(0, min(180, (int)$_POST['proxy_timeout_sec']));
+/* v9.00: راه عبور برای «سایت مبدأ» — جدا از هوش مصنوعی */
+if (isset($_POST['src_net'])) {
+    $sn = json_decode($_POST['src_net'], true) ?: [];
+    $conn['src_net'] = [
+        'mode'       => in_array(($sn['mode'] ?? 'direct'), ['direct','doh','dns','proxy','worker'], true) ? (string)$sn['mode'] : 'direct',
+        'resolve_ip' => trim((string)($sn['resolve_ip'] ?? '')),
+        'doh_url'    => trim((string)($sn['doh_url'] ?? '')),
+        'worker_url' => trim((string)($sn['worker_url'] ?? '')),
+        'proxy'      => trim((string)($sn['proxy'] ?? '')),
+        'proxy_type' => in_array(($sn['proxy_type'] ?? 'http'), ['http','socks5','socks4'], true) ? (string)$sn['proxy_type'] : 'http',
+        'proxy_auth' => trim((string)($sn['proxy_auth'] ?? '')),
+        'gap_ms'     => max(0, min(10000, (int)($sn['gap_ms'] ?? 0))),
+        'hosts'      => trim((string)($sn['hosts'] ?? '')),
+        'inherit_ai' => !empty($sn['inherit_ai']),
+    ];
+}
 // v8.37: فاصلهٔ پینگ کران (دقیقه) — صفر یعنی هر اجرا
 if (isset($_POST['ping_every'])) $conn['ping_every'] = max(0, (int)$_POST['ping_every']);
 // v8.38: یادآوری موارد بی‌جواب
@@ -7308,6 +7432,16 @@ $_sumLines[]='   • 🖼 گالری: '.$galleryImgsTotal.' تصویر از '.$g
 if($varFound>0)$_sumLines[]='   • 🎨 '.$varFound.' محصول تنوع دارد';
 if($detailNoField>0)$_sumLines[]='   • ⚠️ '.$detailNoField.' محصول هیچ فیلدی نداد — سلکتورهای جزئیات را بررسی کنید';
 if($detailFail>0&&$failSamples)$_sumLines[]='   • ✗ '.implode(' | ',$failSamples);
+/* v9.00: اگر همهٔ صفحه‌ها بسته بودند و علتش ۴۰۳/۴۲۹ بود، یعنی سایت مبدأ
+   IP سرور را بلاک کرده. این حالت دقیقاً شبیه «گالری استخراج نمی‌شود» به
+   نظر می‌رسد ولی ربطی به سلکتور ندارد، پس صریح گفته می‌شود. */
+$_blockHint='';
+foreach($failSamples as $_fs){ if(strpos($_fs,'403')!==false||strpos($_fs,'429')!==false){$_blockHint=$_fs;break;} }
+if($detailOk===0&&$detailFail>0&&$_blockHint!==''){
+$_sumLines[]='   • ⛔ سایت مبدأ صفحهٔ محصولات را به سرور نمی‌دهد (۴۰۳/۴۲۹)';
+$_sumLines[]='   • یعنی IP هاست بلاک یا محدود شده — سلکتورها سالم‌اند';
+$_sumLines[]='   • تنظیمات ← «اتصال به سایت مبدأ»: فاصلهٔ بین درخواست‌ها را زیاد کنید یا پروکسی بگذارید';
+}
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
 writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>$_sumLines,'total_log_count'=>$totalPages+$detailDone+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
 }
@@ -8775,6 +8909,40 @@ if (isset($_GET['recon_result'])) {
  *                کدام روی این سرور جواب می‌دهد.
  * هیچ چیزی ذخیره نمی‌شود؛ فقط گزارش می‌دهد.
  */
+/* v9.00: آزمایش اتصال به سایت مبدأ با تنظیمات فعلی.
+   می‌گوید صفحهٔ فهرست و یک صفحهٔ محصول از روی سرور باز می‌شوند یا نه —
+   چون همین دو تا هستند که استخراج به آن‌ها نیاز دارد. */
+if (isset($_GET['src_probe'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $u = trim((string)($_GET['url'] ?? ''));
+    if ($u === '' || !filter_var($u, FILTER_VALIDATE_URL)) {
+        echo json_encode(['ok' => false, 'error' => 'آدرس نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $net = srcNetCfg();
+    $host = strtolower((string)parse_url($u, PHP_URL_HOST));
+    $t0 = microtime(true);
+    $r = fetch_html($u, 30);
+    $ms = (int)round((microtime(true) - $t0) * 1000);
+    $out = ['ok' => !empty($r['ok']), 'code' => (int)($r['code'] ?? 0),
+            'ms' => $ms, 'host' => $host,
+            'mode' => $net['mode'], 'applies' => srcNetApplies($net, $host),
+            'gap_ms' => (int)$net['gap_ms'],
+            'error' => (string)($r['error'] ?? ''),
+            'bytes' => strlen((string)($r['html'] ?? ''))];
+    $code = (int)($r['code'] ?? 0);
+    if ($code === 403 || $code === 429) {
+        $out['diagnosis'] = 'سایت مبدأ درخواست سرور را رد کرد (' . $code . ') — یعنی IP هاست بلاک یا محدود شده. '
+                          . 'تغییر DNS اینجا فایده ندارد؛ فاصلهٔ بین درخواست‌ها را زیاد کنید یا پروکسی بگذارید.';
+    } elseif (!empty($r['ok'])) {
+        $out['diagnosis'] = 'اتصال سالم است — صفحه در ' . $ms . ' میلی‌ثانیه گرفته شد.';
+    } elseif (stripos((string)$r['error'], 'resolve') !== false) {
+        $out['diagnosis'] = 'نام دامنه از روی سرور پیدا نشد — اینجا DoH یا IP دستی کمک می‌کند.';
+    } else {
+        $out['diagnosis'] = 'اتصال برقرار نشد: ' . (string)$r['error'];
+    }
+    echo json_encode($out, JSON_UNESCAPED_UNICODE); exit;
+}
+
 if (isset($_GET['ai_probe'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @set_time_limit(120);
@@ -9342,6 +9510,28 @@ if (isset($_GET['selftest'])) {
     /* «استخراج اتوماتیک» مسیر ?stream=1 را می‌رفت که گالری، تنوع، سلکتورهای
        جزئیات، ذخیره‌سازی سمت سرور و صف نداشت. «اجرای الان» هم انسدادی بود.
        حالا هر سه از یک نقطه رد می‌شوند. */
+    /* ---------- v9.00: راه عبور برای سایت مبدأ ---------- */
+    $add('9.00', 'تنظیمات عبور سایت مبدأ جدا از هوش مصنوعی',
+         function_exists('src' . 'NetCfg') && function_exists('src' . 'NetApplies'));
+    $add('9.00', 'فاصلهٔ ادب بین درخواست‌ها به یک دامنه',
+         function_exists('src' . 'Pace')
+         && strpos($selfSrc, 'srcPace($__srcHost, (int)($__srcNet[' . "'gap_ms'] ?? 0));") !== false);
+    $add('9.00', 'راه عبور در fetch_html اعمال می‌شود',
+         strpos($selfSrc, 'if (srcNetApplies($__srcNet, ' . '$__srcHost)) {') !== false
+         && strpos($selfSrc, 'curl_setopt($ch, CURLOPT_RESOLVE, [$__srcHost' . " . ':'") !== false);
+    $add('9.00', 'فیلتر دامنه کار می‌کند',
+         strpos($selfSrc, "if (\$list === '') return true;") !== false);
+    $add('9.00', 'اندپوینت آزمایش اتصال مبدأ',
+         strpos($selfSrc, "isset(\$_GET['src_" . "probe'])") !== false);
+    $add('9.00', 'تشخیص بلاک IP صریح است و DNS را وعده نمی‌دهد',
+         strpos($selfSrc, 'تغییر DNS اینجا فایده ندارد؛ فاصلهٔ بین درخواست‌ها را زیاد ' . 'کنید') !== false);
+    $add('9.00', 'لاگ استخراج بلاک شدن IP را اعلام می‌کند',
+         strpos($selfSrc, 'سایت مبدأ صفحهٔ محصولات را به سرور نمی‌دهد ' . '(۴۰۳/۴۲۹)') !== false);
+    $add('9.00', 'تنظیمات مبدأ در رابط کاربری هست',
+         strpos($selfSrc, 'id="srcNet' . 'Mode"') !== false
+         && strpos($selfSrc, "fd.append('src_" . "net'") !== false
+         && strpos($selfSrc, 'function srcNet' . 'Test(){') !== false);
+
     /* ---------- v8.99: مهلت بارگذاری صفحه در انتخابگرها ---------- */
     /* «بارگذاری صفحه» را سرور انجام می‌دهد و «بارگذاری مستقیم» را مرورگر.
        پس تایم‌اوت یعنی سرور نتوانست، نه اینکه سایت خراب باشد. */
@@ -18217,6 +18407,32 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>آستانه (ثانیه):</label><input type="number" id="stallAfter" value="300" min="60" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">بی‌حرکتی بیش از این = گیر کرده</span></div>
 <div class="crow"><label>سقف فاز جزئیات (ثانیه):</label><input type="number" id="detailBudget" value="0" min="0" max="3600" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = خودکار · هر نوبت تا این مدت جزئیات می‌گیرد و بقیه را به نوبت بعد می‌سپارد</span></div>
 <div class="crow"><label>مهلت بارگذاری صفحه (ثانیه):</label><input type="number" id="proxyTimeout" value="45" min="10" max="180" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">برای «🔄 بارگذاری صفحه» در تب سلکتور · اگر تایم‌اوت می‌دهد بالاتر ببرید</span></div>
+<div style="margin-top:14px;padding:12px;background:#0f172a;border:1px solid #334155;border-radius:10px">
+<div style="font-weight:700;color:#f9a8d4;margin-bottom:8px">🌐 اتصال به سایت مبدأ</div>
+<div style="font-size:10.5px;color:#94a3b8;line-height:1.9;margin-bottom:8px">
+اگر سایتی از روی سرور باز نمی‌شود، یا به‌خاطر درخواست زیاد IP هاست را بلاک کرده (خطای ۴۰۳/۴۲۹).<br>
+<b style="color:#fbbf24">توجه:</b> اگر IP بلاک شده، تغییر DNS فایده ندارد — بلاک روی IP است نه روی نام دامنه.
+در آن حالت «فاصلهٔ بین درخواست‌ها» یا «پروکسی» را استفاده کنید.
+</div>
+<div class="crow"><label>روش:</label>
+<select id="srcNetMode" style="flex:1">
+<option value="direct">مستقیم (پیش‌فرض)</option>
+<option value="doh">DoH — گرفتن IP از DNS رمزگذاری‌شده</option>
+<option value="dns">IP دستی</option>
+<option value="proxy">پروکسی HTTP/SOCKS5</option>
+<option value="worker">Worker / پروکسی معکوس</option>
+</select></div>
+<div class="crow"><label>فاصلهٔ درخواست‌ها (ms):</label><input type="number" id="srcNetGap" value="0" min="0" max="10000" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = بدون فاصله · برای سایتی که بلاک می‌کند ۱۵۰۰ تا ۳۰۰۰ بگذارید</span></div>
+<div class="crow"><label>IP دستی:</label><input type="text" id="srcNetIp" placeholder="مثال: 104.21.0.1" style="flex:1" dir="ltr"></div>
+<div class="crow"><label>آدرس DoH:</label><input type="text" id="srcNetDoh" placeholder="https://cloudflare-dns.com/dns-query" style="flex:1" dir="ltr"></div>
+<div class="crow"><label>پروکسی:</label><input type="text" id="srcNetProxy" placeholder="host:port" style="flex:1" dir="ltr">
+<select id="srcNetProxyType" style="max-width:110px"><option value="http">HTTP</option><option value="socks5">SOCKS5</option><option value="socks4">SOCKS4</option></select></div>
+<div class="crow"><label>کاربر:رمز پروکسی:</label><input type="text" id="srcNetProxyAuth" placeholder="user:pass" style="flex:1" dir="ltr"></div>
+<div class="crow"><label>Worker:</label><input type="text" id="srcNetWorker" placeholder="https://xxx.workers.dev  یا  .../{url}" style="flex:1" dir="ltr"></div>
+<div class="crow"><label>فقط این دامنه‌ها:</label><input type="text" id="srcNetHosts" placeholder="خالی = همه · مثال: shop.ir, example.com" style="flex:1" dir="ltr"></div>
+<div class="row"><button class="btn btn-purple" onclick="srcNetTest()" style="flex:1">🧪 آزمایش روی آدرس پروفایل</button></div>
+<div id="srcNetResult" style="margin-top:6px;font-size:11px"></div>
+</div>
 <div class="cact">
 <button class="btn btn-gray" onclick="watchdogCheck()" style="flex:1">🔎 بررسی حالا</button>
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
@@ -22084,6 +22300,24 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.00', t:'🌐 عبور از محدودیت سایت مبدأ + تشخیص بلاک شدن IP', items:[
+    '🔍 چرا «استخراج خودکار گالری نمی‌گیرد ولی دستی می‌گیرد»:',
+    'اگر سایت مبدأ IP هاست را بلاک کرده باشد، صفحهٔ فهرست معمولاً',
+    'باز می‌شود (سبک‌تر یا کش‌شده) ولی صفحهٔ تک‌تک محصولات ۴۰۳/۴۲۹ می‌دهد',
+    'نتیجه: محصولات استخراج می‌شوند اما بدون گالری — دقیقاً همان چیزی',
+    'که دیده‌اید. کران هر چند دقیقه می‌زند و بلاک می‌ماند؛ دکمهٔ دستی',
+    'گاه‌به‌گاه زده می‌شود و ممکن است زیر سقف محدودیت رد شود',
+    '✅ حالا لاگ صریح می‌گوید: «سایت مبدأ صفحهٔ محصولات را به سرور نمی‌دهد»',
+    '🆕 تنظیمات ← «اتصال به سایت مبدأ»:',
+    '• فاصلهٔ بین درخواست‌ها (ms) — مؤثرترین راه برای بلاک شدن به‌خاطر تکرار',
+    '• پروکسی HTTP/SOCKS5 — تنها راه واقعی عوض کردن IP',
+    '• Worker / پروکسی معکوس',
+    '• DoH و IP دستی — برای سایتی که از ایران باز نمی‌شود (نه برای بلاک IP)',
+    '• فیلتر دامنه: عبور فقط برای سایت‌هایی که مشخص می‌کنید',
+    '🧪 دکمهٔ «آزمایش روی آدرس پروفایل» می‌گوید مشکل دقیقاً چیست',
+    '⚠️ صادقانه: اگر IP بلاک شده، DNS و DoH فایده‌ای ندارند —',
+    'بلاک روی IP است نه روی نام دامنه. ابزار درست پروکسی یا فاصله است.',
+  ]},
   {v:'8.99', t:'رفع تایم‌اوت «بارگذاری صفحه» در تب سلکتور', items:[
     '🔍 چرا «بارگذاری مستقیم» کار می‌کند ولی «بارگذاری صفحه» تایم‌اوت می‌دهد:',
     'این دو اصلاً یک کار نمی‌کنند —',
@@ -24822,7 +25056,7 @@ const a=cn.ai||{};if($('aiKey')&&a.api_key)$('aiKey').value=a.api_key;if($('aiBa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
 arApplyCfg(cn.autoreply||{});arLoad();}
 /* v8.87: پیش‌نمایش زندهٔ تعدیل قیمت مقصد.
@@ -24857,7 +25091,7 @@ fd.append('ai',JSON.stringify({enabled:1,api_key:$('aiKey')?.value||'',base_url:
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
@@ -27149,6 +27383,64 @@ function startSyncTimer(){
  * پیشرفت از همان فایل و همان صفی خوانده می‌شود که دکمهٔ بک‌اند
  * استفاده می‌کند. خلاصهٔ نهایی از cron_last خوانده می‌شود.
  */
+/* v9.00: تنظیمات ذخیره‌شدهٔ اتصال مبدأ را در فرم می‌نشاند */
+function srcNetApply(sn){
+    sn=sn||{};
+    const set=(id,v)=>{const e=$(id);if(e)e.value=v;};
+    set('srcNetMode',      sn.mode||'direct');
+    set('srcNetGap',       sn.gap_ms||0);
+    set('srcNetIp',        sn.resolve_ip||'');
+    set('srcNetDoh',       sn.doh_url||'');
+    set('srcNetProxy',     sn.proxy||'');
+    set('srcNetProxyType', sn.proxy_type||'http');
+    set('srcNetProxyAuth', sn.proxy_auth||'');
+    set('srcNetWorker',    sn.worker_url||'');
+    set('srcNetHosts',     sn.hosts||'');
+}
+
+/* v9.00: تنظیمات اتصال به سایت مبدأ را از فرم می‌خواند */
+function srcNetCollect(){
+    const g=id=>$(id)||{};
+    return {
+        mode:       g('srcNetMode').value||'direct',
+        gap_ms:     parseInt(g('srcNetGap').value||'0')||0,
+        resolve_ip: (g('srcNetIp').value||'').trim(),
+        doh_url:    (g('srcNetDoh').value||'').trim(),
+        proxy:      (g('srcNetProxy').value||'').trim(),
+        proxy_type: g('srcNetProxyType').value||'http',
+        proxy_auth: (g('srcNetProxyAuth').value||'').trim(),
+        worker_url: (g('srcNetWorker').value||'').trim(),
+        hosts:      (g('srcNetHosts').value||'').trim()
+    };
+}
+
+/* v9.00: آزمایش اتصال به سایت مبدأ با تنظیمات فعلی */
+function srcNetTest(){
+    const box=$('srcNetResult'); if(!box)return;
+    const url=($('url')&&$('url').value.trim())
+            ||($('profileSelect')&&$('profileSelect').value.trim())||'';
+    if(!url){box.innerHTML='<span style="color:#f87171">اول آدرس پروفایل را وارد کنید</span>';return;}
+    box.innerHTML='<span style="color:#94a3b8">⏳ در حال آزمایش...</span>';
+    // اول تنظیمات را ذخیره کن تا آزمایش با همین مقادیر انجام شود
+    if(typeof saveConn==='function')saveConn();
+    setTimeout(()=>{
+        fetch('?src_probe=1&url='+encodeURIComponent(url)).then(r=>r.json()).then(d=>{
+            if(!d){box.innerHTML='<span style="color:#f87171">پاسخی نیامد</span>';return;}
+            const okc=d.ok?'#4ade80':'#f87171';
+            let h='<div style="padding:8px;background:#1e293b;border-radius:8px;line-height:1.9">';
+            h+='<b style="color:'+okc+'">'+(d.ok?'✅ موفق':'❌ ناموفق')+'</b>';
+            if(d.code)h+=' <span style="color:#94a3b8">— کد '+toFa(d.code)+'</span>';
+            if(d.ms)h+=' <span style="color:#64748b">· '+toFa(d.ms)+'ms</span>';
+            h+='<br><span style="color:#cbd5e1">'+esc(d.diagnosis||'')+'</span>';
+            h+='<br><span style="color:#64748b;font-size:10px">روش: '+esc(d.mode||'direct')
+             +(d.applies?' (اعمال شد)':' (اعمال نشد)')
+             +' · فاصله: '+toFa(d.gap_ms||0)+'ms · حجم: '+toFa(d.bytes||0)+' بایت</span>';
+            h+='</div>';
+            box.innerHTML=h;
+        }).catch(()=>{box.innerHTML='<span style="color:#f87171">خطای شبکه</span>';});
+    },600);
+}
+
 function runSyncNow(){
     $('syncStatus').textContent='🔄 در حال اجرای کران جاب...';
     $('syncStatus').style.color='#67e8f9';
