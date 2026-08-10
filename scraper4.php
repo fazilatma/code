@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.08';
+const APP_VERSION = '9.09';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7170,7 +7170,11 @@ if($phase==='detail'){
     if(empty($allProducts)){
         writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>0,'current'=>0,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>['⏭ محصولی برای گرفتن جزئیات نیست — اول استخراج فهرست را اجرا کنید'],'total_log_count'=>1,'extracted'=>0,'products_saved'=>false]);
         $queue=extractReadQueue();
-        foreach($queue['entries'] as &$qe){if(($qe['id']??'')===$queueId){$qe['status']='done';$qe['done_at']=time();$qe['products_count']=0;break;}}unset($qe);
+        /* v9.09: این مسیر ردیف را بدون هیچ توضیحی می‌بست. مودال آن‌وقت
+           به پیام عمومی «این مرحله چیزی برای انجام نداشت» می‌افتاد —
+           دقیقاً همان چیزی که کاربر دید، در حالی که علت مشخص بود:
+           پروفایل روی دیسک محصولی ندارد. */
+        foreach($queue['entries'] as &$qe){if(($qe['id']??'')===$queueId){$qe['status']='done';$qe['done_at']=time();$qe['products_count']=0;$qe['detail_skip_why']='no_products';$qe['detail_total']=0;$qe['detail_no_link']=0;$qe['detail_already']=0;break;}}unset($qe);
         extractWriteQueue($queue);
         return ['__early_sent'=>$emitEarlyResponse,'ok'=>true,'extracted'=>0,'phase'=>'detail','note'=>'فهرستی وجود ندارد'];
     }
@@ -7665,6 +7669,16 @@ $finalLog[]='   • 🔍 جزئیات: '.$detailOk.' صفحه باز شد'
   .' · '.$detailFields.' فیلد';
 if($galleryCfg['enabled'])
 $finalLog[]='   • 🖼 گالری: '.$galleryImgsTotal.' تصویر از '.$galleryFound.' محصول';
+/* v9.09: گالری روشن بود، صفحه‌ها هم باز شدند، ولی هیچ عکسی نیامد.
+   تا حالا این حالت «موفق» گزارش می‌شد و کاربر فقط می‌دید گالری خالی
+   است بدون هیچ توضیحی. علت تقریباً همیشه یکی از این دوتاست: سلکتور
+   «کادر گالری» با ساختار صفحهٔ محصول نمی‌خواند، یا عکس‌ها با
+   جاوااسکریپت بعداً تزریق می‌شوند و در HTML خام نیستند. */
+if($galleryCfg['enabled']&&$detailOk>0&&$galleryImgsTotal===0){
+$finalLog[]='   • ⛔ گالری روشن است ولی هیچ تصویری پیدا نشد'
+  .($galleryCfg['box']!==''?(' — کادر گالری: '.mb_substr($galleryCfg['box'],0,40)):' — کادر گالری تنظیم نشده');
+$finalLog[]='   • یعنی سلکتور کادر با صفحهٔ محصول نمی‌خواند، یا عکس‌ها با جاوااسکریپت می‌آیند';
+}
 if($varFound>0)$finalLog[]='   • 🎨 '.$varFound.' محصول تنوع دارد';
 if($detailNoField>0)$finalLog[]='   • ⚠️ '.$detailNoField.' محصول هیچ فیلدی نداد — سلکتورها را بررسی کنید';
 if($failSamples)$finalLog[]='   • ✗ '.implode(' | ',$failSamples);
@@ -7686,7 +7700,7 @@ extractSaveReport($queueId, [
     'finished_at'   => time(),
 ]);
 
-foreach($queue['entries'] as &$qe){if($qe['id']===$queueId){$qe['status']='done';$qe['products_count']=count($allProducts);$qe['total']=count($allProducts);$qe['current']=count($allProducts);$qe['done_at']=time();$qe['new']=$newCount;$qe['price_changed']=$priceChanged;$qe['removed']=$removedCount;$qe['unchanged']=$unchanged;$qe['price_up']=$priceUp;$qe['price_down']=$priceDown;$qe['gallery_images']=$galleryImgsTotal;$qe['gallery_products']=$galleryFound;$qe['detail_ok']=$detailOk;$qe['detail_fail']=$detailFail;$qe['detail_fields']=$detailFields;$qe['variation_products']=$varFound;$qe['detail_total']=$detailTotal;$qe['detail_skip_why']=$_skipWhy;$qe['detail_no_link']=$_noLink;$qe['detail_already']=$_alreadyDone;$qe['has_report']=true;break;}}unset($qe);
+foreach($queue['entries'] as &$qe){if($qe['id']===$queueId){$qe['status']='done';$qe['products_count']=count($allProducts);$qe['total']=count($allProducts);$qe['current']=count($allProducts);$qe['done_at']=time();$qe['new']=$newCount;$qe['price_changed']=$priceChanged;$qe['removed']=$removedCount;$qe['unchanged']=$unchanged;$qe['price_up']=$priceUp;$qe['price_down']=$priceDown;$qe['gallery_images']=$galleryImgsTotal;$qe['gallery_products']=$galleryFound;$qe['detail_ok']=$detailOk;$qe['detail_fail']=$detailFail;$qe['detail_fields']=$detailFields;$qe['variation_products']=$varFound;$qe['detail_total']=$detailTotal;$qe['detail_skip_why']=$_skipWhy;$qe['detail_no_link']=$_noLink;$qe['detail_already']=$_alreadyDone;$qe['gallery_blank']=($galleryCfg['enabled']&&$detailOk>0&&$galleryImgsTotal===0)?1:0;$qe['gallery_box']=(string)$galleryCfg['box'];$qe['has_report']=true;break;}}unset($qe);
 extractWriteQueue($queue);
 
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>true,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url)];
@@ -9875,6 +9889,20 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "if (defined('REQ_DETA" . "CHED')) return;") !== false);
     /* هر محصول ذخیره شود، نه هر ۵ تا — وگرنه کشته‌شدن پردازه کار
        چند محصول را با هم دور می‌ریزد. */
+    /* ---------- v9.09: هر بسته شدن ردیف باید علتش را بگوید ---------- */
+    $add('9.09', 'مسیر «محصولی روی سرور نیست» علت ثبت می‌کند',
+         strpos($selfSrc, "\$qe['detail_skip_why']='no_pro" . "ducts';") !== false);
+    $add('9.09', 'مودال علت no_products را توضیح می‌دهد',
+         strpos($selfSrc, "why==='no_pro" . "ducts'") !== false);
+    /* گالری روشن + صفحه باز شد + صفر عکس = خرابی خاموش. باید داد بزند. */
+    $add('9.09', 'گالری بی‌نتیجه در لاگ صریح گزارش می‌شود',
+         strpos($selfSrc, "if(\$galleryCfg['enabled']&&\$detailOk>0&&\$galleryImgsTotal===0){") !== false);
+    $add('9.09', 'گالری بی‌نتیجه روی ردیف صف ثبت می‌شود',
+         strpos($selfSrc, "\$qe['gallery_bl" . "ank']=") !== false
+         && strpos($selfSrc, "\$qe['gallery_b" . "ox']=") !== false);
+    $add('9.09', 'مودال سلکتور کادر گالری را نشان می‌دهد',
+         strpos($selfSrc, 'esc(e.gallery_box||' . "'(تنظیم نشده)')") !== false);
+
     /* ---------- v9.08: قفلِ جامانده کل تیک کران را رد نکند ---------- */
     /* پردازه‌ای که هاست می‌کشد، قفل را جا می‌گذارد؛ با معیار «سن»، هر
        تیک تا ۳۰ دقیقه رد می‌شد و گام جزئیات هرگز شروع نمی‌شد. */
@@ -22248,10 +22276,20 @@ function renderPhase2Report(queueId){
                 msg='⛔ محصولی برای باز کردن انتخاب نشد'
                    +(noLink>0?(' ('+toFa(noLink)+' محصول بدون لینک)'):'')
                    +(already>0?(' · '+toFa(already)+' محصول از قبل کامل'):'')+'.';
+            }else if(why==='no_products'){
+                color='#f87171';
+                msg='⛔ روی سرور هیچ محصولی ذخیره نشده بود، پس مرحلهٔ جزئیات'
+                   +' چیزی برای باز کردن نداشت.<br>'
+                   +'<b>راه‌حل:</b> اول «⚡ استخراج بک‌اند» را بزنید تا فهرست'
+                   +' روی سرور بنشیند، بعد استخراج تفصیلی.';
             }else{
+                /* v9.09: این پیام عمومی یعنی موتور علتی ثبت نکرده — که
+                   خودش یک نشانه است، نه یک وضعیت عادی. */
                 msg='⏭ این مرحله چیزی برای انجام نداشت.'
                    +(noLink>0?('<br>⚠️ '+toFa(noLink)+' محصول لینک ندارند.'):'')
-                   +(already>0?('<br>'+toFa(already)+' محصول از قبل کامل بودند.'):'');
+                   +(already>0?('<br>'+toFa(already)+' محصول از قبل کامل بودند.'):'')
+                   +'<br><span style="color:#64748b">اگر گالری نیامده، این ردیف مالِ'
+                   +' مرحلهٔ فهرست است؛ ردیف «🔍 مرحله ۲» را ببینید.</span>';
             }
             h+='<div style="font-size:11px;color:'+color+';line-height:1.9">'+msg+'</div>';
         }else{
@@ -22268,7 +22306,19 @@ function renderPhase2Report(queueId){
             h+='<div style="font-size:10.5px;color:#94a3b8;margin-top:7px;line-height:1.9">';
             if(tot>0)h+='از '+toFa(tot)+' محصولی که لازم بود باز شود، '+toFa(pages)+' موفق بود.<br>';
             if(gprd>0)h+='🖼 '+toFa(imgs)+' تصویر از '+toFa(gprd)+' محصول جمع شد.<br>';
-            if(imgs===0)h+='<span style="color:#fbbf24">⚠️ هیچ تصویر گالری‌ای جمع نشد — سلکتور «باکس گالری» یا دسترسی سرور به صفحهٔ محصول را بررسی کنید.</span><br>';
+            /* v9.09: وقتی صفحه‌ها باز شده‌اند ولی عکسی نیامده، علت تقریباً
+               همیشه سلکتور کادر گالری است — پس خودش را نشان بده. */
+            if(imgs===0&&pages>0){
+                h+='<span style="color:#f87171">⛔ '+toFa(pages)+' صفحهٔ محصول باز شد ولی'
+                 +' هیچ تصویر گالری‌ای پیدا نشد.</span><br>';
+                h+='<span style="color:#fbbf24">کادر گالری: <code style="direction:ltr;display:inline-block">'
+                 +esc(e.gallery_box||'(تنظیم نشده)')+'</code></span><br>';
+                h+='<span style="color:#94a3b8">یعنی این سلکتور با ساختار صفحهٔ محصول نمی‌خواند،'
+                 +' یا عکس‌ها با جاوااسکریپت تزریق می‌شوند و در HTML خام نیستند.'
+                 +' یک صفحهٔ محصول را در تب سلکتورها باز کنید و کادر گالری را دوباره انتخاب کنید.</span><br>';
+            }else if(imgs===0){
+                h+='<span style="color:#fbbf24">⚠️ هیچ تصویر گالری‌ای جمع نشد — سلکتور «باکس گالری» یا دسترسی سرور به صفحهٔ محصول را بررسی کنید.</span><br>';
+            }
             if(fail>0)h+='<span style="color:#f87171">⛔ '+toFa(fail)+' صفحه باز نشد — اگر ۴۰۳/۴۲۹ بود یعنی IP سرور بلاک شده.</span>';
             h+='</div>';
         }
@@ -22885,6 +22935,22 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.09', t:'🔍 پیام «چیزی برای انجام نداشت» علتش را می‌گوید', items:[
+    'گزارش شما: مودال گفت «⏭ این مرحله چیزی برای انجام نداشت» ولی',
+    'استخراج تفصیلی اجرا نشد و گالری نیامد.',
+    '🔍 تیتر آن کادر «⚡ استخراج کامل (فهرست + جزئیات)» بود — یعنی آن',
+    'ردیف مالِ دکمهٔ دستی بود، نه گام جزئیاتِ کران. کران ردیف‌هایش را',
+    'با برچسب «📄 مرحله ۱» و «🔍 مرحله ۲» می‌سازد.',
+    '⚠️ و آن پیام عمومی وقتی می‌آمد که موتور هیچ علتی ثبت نکرده بود.',
+    'یک مسیر پیدا شد که ردیف را بدون هیچ توضیحی می‌بست: وقتی روی سرور',
+    'محصولی ذخیره نشده باشد. حالا علت no_products ثبت و نمایش داده',
+    'می‌شود با راه‌حلش.',
+    '✅ مهم‌تر: حالتی که «صفحهٔ محصول باز شد ولی هیچ عکسی نیامد» تا حالا',
+    'موفق گزارش می‌شد. حالا صریح هشدار می‌دهد و خودِ سلکتور کادر گالری',
+    'را نشان می‌دهد، چون علت تقریباً همیشه همان است — یا عکس‌ها با',
+    'جاوااسکریپت تزریق می‌شوند و در HTML خام سرور وجود ندارند.',
+    '✅ پیام عمومی حالا یادآوری می‌کند ردیف «🔍 مرحله ۲» را ببینید.'
+  ]},
   {v:'9.08', t:'🔓 قفلِ جامانده، کل اجرای کران را رد می‌کرد', items:[
     'گزارش شما: استخراج تفصیلی سرورساید شد ولی کران هنوز بعد از فهرست',
     'گام جزئیات را اجرا نمی‌کند.',
