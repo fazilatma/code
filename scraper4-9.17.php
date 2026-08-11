@@ -78,7 +78,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.16';
+const APP_VERSION = '9.17';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -10664,6 +10664,18 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'id="bkR' . 'epo"') !== false
          && strpos($selfSrc, 'function bkRun' . 'Now(){') !== false
          && strpos($selfSrc, 'function bkRest' . 'ore(src,name){') !== false);
+    /* v9.17: پنل بکاپ باید «داخل» بخش منبع و نصب‌کننده باشد.
+
+       ترتیبِ ساده کافی نیست: «اولین ووکامرسِ بعد از بکاپ» همیشه پیدا
+       می‌شود، حتی اگر بکاپ را بیرون ببرید. معیار درست فاصله است —
+       پنل بکاپ باید بلافاصله بعد از دکمهٔ «بکاپ ورک‌اسپیس هاست»
+       بیاید، یعنی هنوز داخل بدنهٔ همان بخش است. */
+    $add('9.17', 'بکاپ زیرمجموعهٔ منبع و نصب‌کننده است',
+         (($_p17a = strpos($selfSrc, 'onclick="vcOpen' . 'Backup()"')) !== false)
+         && (($_p17b = strpos($selfSrc, '💾 بکاپ و بازیابی داده‌' . 'ها', $_p17a)) !== false)
+         && ($_p17b - $_p17a) < 900);
+    $add('9.17', 'بکاپ دیگر بخش مستقل بالای تنظیمات نیست',
+         strpos($selfSrc, 'toggleSmenu(this);bkRefresh()' . '"><h3>💾') === false);
 
     /* ---------- v9.15: اجرای خط فرمان ---------- */
     $add('9.15', 'اجرای خط فرمان تشخیص داده می‌شود',
@@ -19413,80 +19425,6 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="settings-panel-body" style="padding:0">
 
 <div class="smenu">
-<!-- v9.16: بکاپ کامل پوشه روی گیت‌هاب و بازیابی -->
-<div class="smenu-hdr" onclick="toggleSmenu(this);bkRefresh()"><h3>💾 بکاپ و بازیابی</h3><span class="cst off" id="bkBadge">—</span><span class="arrow">▼</span></div>
-<div class="smenu-body">
-  <div style="font-size:10.5px;color:#94a3b8;line-height:1.8;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px 10px;margin-bottom:10px">
-    پروفایل‌ها و تنظیمات در <code style="direction:ltr">profiles.json</code> و
-    <code style="direction:ltr">connections.json</code> هستند و در گیت نگه‌داری نمی‌شوند.
-    اینجا می‌توانید همهٔ محتوای پوشه را در یک مخزن گیت‌هاب بکاپ بگیرید و هر وقت لازم شد برگردانید.
-    <b style="color:#fbbf24">مخزن را حتماً خصوصی بسازید</b> — این فایل‌ها توکن و داده‌های شما را دارند.
-  </div>
-
-  <div class="crow"><label>مخزن</label>
-    <input type="text" id="bkRepo" placeholder="username/repo-name" dir="ltr"></div>
-  <div class="crow"><label>برنچ</label>
-    <input type="text" id="bkBranch" placeholder="main" dir="ltr"></div>
-  <div class="crow"><label>پوشه</label>
-    <input type="text" id="bkPath" placeholder="backups" dir="ltr"></div>
-  <div class="crow"><label>توکن</label>
-    <input type="password" id="bkToken" placeholder="ghp_..." dir="ltr"></div>
-  <div style="font-size:10px;color:#64748b;margin:-4px 0 8px;line-height:1.7">
-    توکن با دسترسی <code style="direction:ltr">repo</code> (یا Fine-grained با اجازهٔ Contents: Read and write).
-    توکن فقط روی هاست ذخیره می‌شود و هیچ‌وقت نمایش داده نمی‌شود.
-  </div>
-
-  <div class="crow" style="align-items:center">
-    <label style="min-width:auto;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
-      <input type="checkbox" id="bkIncData" checked> داده‌ها (پروفایل‌ها، تنظیمات، صف‌ها)</label>
-  </div>
-  <div class="crow" style="align-items:center">
-    <label style="min-width:auto;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
-      <input type="checkbox" id="bkIncCode"> همهٔ فایل‌های پوشه (کد و مستندات)</label>
-  </div>
-  <div class="crow" style="align-items:center">
-    <label style="min-width:auto;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
-      <input type="checkbox" id="bkAuto"> بکاپ خودکار با کران‌جاب</label>
-    <input type="number" id="bkEvery" min="1" max="720" value="24" style="max-width:70px" dir="ltr">
-    <span style="font-size:11px;color:#94a3b8">ساعت یک‌بار</span>
-  </div>
-  <div class="crow" style="align-items:center">
-    <label style="min-width:auto;font-size:12px">نگه‌داری</label>
-    <input type="number" id="bkKeep" min="1" max="200" value="20" style="max-width:70px" dir="ltr">
-    <span style="font-size:11px;color:#94a3b8">نسخهٔ آخر</span>
-  </div>
-
-  <div class="cact">
-    <button class="btn btn-cyan" onclick="bkSaveCfg()" style="flex:1">💾 ذخیره تنظیمات</button>
-    <button class="btn btn-green" onclick="bkRunNow()" style="flex:1">⬆ بکاپ همین حالا</button>
-  </div>
-  <div class="status" id="bkStatus" style="margin-top:8px;text-align:center">—</div>
-
-  <div class="smenu-hdr" onclick="toggleSmenu(this);bkRefresh()" style="padding:9px 0;border-top:1px solid #1e293b;margin-top:10px">
-    <h3 style="font-size:12px;color:#94a3b8">♻️ بازیابی از بکاپ</h3><span class="arrow">▼</span></div>
-  <div class="smenu-body" style="padding:0">
-    <div style="font-size:10.5px;color:#fbbf24;line-height:1.7;margin-bottom:8px">
-      ⚠️ بازیابی، فایل‌های فعلی را جایگزین می‌کند. از هر فایلی که عوض شود یک کپی با پسوند
-      <code style="direction:ltr">.before-restore</code> کنارش می‌ماند.
-    </div>
-    <div class="cact" style="margin-bottom:8px">
-      <button class="btn btn-gray" onclick="bkRefresh()" style="flex:1;font-size:11px">🔄 فهرست محلی</button>
-      <button class="btn btn-gray" onclick="bkRemoteList()" style="flex:1;font-size:11px">☁️ فهرست گیت‌هاب</button>
-    </div>
-    <div id="bkList" style="font-size:11px;color:#94a3b8">—</div>
-
-    <div style="border-top:1px solid #1e293b;margin-top:10px;padding-top:8px">
-      <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">بازیابی از فایل روی کامپیوتر:</div>
-      <input type="file" id="bkFile" accept=".json" style="font-size:11px">
-      <button class="btn btn-orange" onclick="bkRestoreUpload()" style="width:100%;margin-top:6px;font-size:11px">♻️ بازیابی از این فایل</button>
-    </div>
-  </div>
-
-  <div class="smenu-hdr" onclick="toggleSmenu(this)" style="padding:9px 0;border-top:1px solid #1e293b">
-    <h3 style="font-size:12px;color:#94a3b8">📋 گزارش بکاپ‌ها</h3><span class="arrow">▼</span></div>
-  <div class="smenu-body" style="padding:0"><div id="bkLog" style="font-size:10.5px;color:#94a3b8">—</div></div>
-</div>
-
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>📜 تغییرات نسخه‌ها</h3><span class="cst off">v<?=APP_VERSION?></span><span class="arrow">▼</span></div>
 <div class="smenu-body">
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
@@ -19565,6 +19503,81 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 (مثل <code>connections.json</code>) به‌صورت خودکار کنار گذاشته می‌شوند.
 </div>
 <button class="btn btn-teal" onclick="vcOpenBackup()" style="width:100%;padding:10px">☁️ باز کردن پنل بکاپ هاست</button>
+
+<!-- v9.16: بکاپ کامل پوشه روی گیت‌هاب و بازیابی -->
+<div class="smenu-hdr" onclick="toggleSmenu(this);bkRefresh()" style="padding:9px 0;border-top:1px solid #1e293b">
+<h3 style="font-size:12px;color:#94a3b8">💾 بکاپ و بازیابی داده‌ها</h3><span class="cst off" id="bkBadge">—</span><span class="arrow">▼</span></div>
+<div class="smenu-body" style="padding:0">
+  <div style="font-size:10.5px;color:#94a3b8;line-height:1.8;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px 10px;margin-bottom:10px">
+    پروفایل‌ها و تنظیمات در <code style="direction:ltr">profiles.json</code> و
+    <code style="direction:ltr">connections.json</code> هستند و در گیت نگه‌داری نمی‌شوند.
+    اینجا می‌توانید همهٔ محتوای پوشه را در یک مخزن گیت‌هاب بکاپ بگیرید و هر وقت لازم شد برگردانید.
+    <b style="color:#fbbf24">مخزن را حتماً خصوصی بسازید</b> — این فایل‌ها توکن و داده‌های شما را دارند.
+  </div>
+
+  <div class="crow"><label>مخزن</label>
+    <input type="text" id="bkRepo" placeholder="username/repo-name" dir="ltr"></div>
+  <div class="crow"><label>برنچ</label>
+    <input type="text" id="bkBranch" placeholder="main" dir="ltr"></div>
+  <div class="crow"><label>پوشه</label>
+    <input type="text" id="bkPath" placeholder="backups" dir="ltr"></div>
+  <div class="crow"><label>توکن</label>
+    <input type="password" id="bkToken" placeholder="ghp_..." dir="ltr"></div>
+  <div style="font-size:10px;color:#64748b;margin:-4px 0 8px;line-height:1.7">
+    توکن با دسترسی <code style="direction:ltr">repo</code> (یا Fine-grained با اجازهٔ Contents: Read and write).
+    توکن فقط روی هاست ذخیره می‌شود و هیچ‌وقت نمایش داده نمی‌شود.
+  </div>
+
+  <div class="crow" style="align-items:center">
+    <label style="min-width:auto;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
+      <input type="checkbox" id="bkIncData" checked> داده‌ها (پروفایل‌ها، تنظیمات، صف‌ها)</label>
+  </div>
+  <div class="crow" style="align-items:center">
+    <label style="min-width:auto;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
+      <input type="checkbox" id="bkIncCode"> همهٔ فایل‌های پوشه (کد و مستندات)</label>
+  </div>
+  <div class="crow" style="align-items:center">
+    <label style="min-width:auto;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
+      <input type="checkbox" id="bkAuto"> بکاپ خودکار با کران‌جاب</label>
+    <input type="number" id="bkEvery" min="1" max="720" value="24" style="max-width:70px" dir="ltr">
+    <span style="font-size:11px;color:#94a3b8">ساعت یک‌بار</span>
+  </div>
+  <div class="crow" style="align-items:center">
+    <label style="min-width:auto;font-size:12px">نگه‌داری</label>
+    <input type="number" id="bkKeep" min="1" max="200" value="20" style="max-width:70px" dir="ltr">
+    <span style="font-size:11px;color:#94a3b8">نسخهٔ آخر</span>
+  </div>
+
+  <div class="cact">
+    <button class="btn btn-cyan" onclick="bkSaveCfg()" style="flex:1">💾 ذخیره تنظیمات</button>
+    <button class="btn btn-green" onclick="bkRunNow()" style="flex:1">⬆ بکاپ همین حالا</button>
+  </div>
+  <div class="status" id="bkStatus" style="margin-top:8px;text-align:center">—</div>
+
+  <div class="smenu-hdr" onclick="toggleSmenu(this);bkRefresh()" style="padding:9px 0;border-top:1px solid #1e293b;margin-top:10px">
+    <h3 style="font-size:12px;color:#94a3b8">♻️ بازیابی از بکاپ</h3><span class="arrow">▼</span></div>
+  <div class="smenu-body" style="padding:0">
+    <div style="font-size:10.5px;color:#fbbf24;line-height:1.7;margin-bottom:8px">
+      ⚠️ بازیابی، فایل‌های فعلی را جایگزین می‌کند. از هر فایلی که عوض شود یک کپی با پسوند
+      <code style="direction:ltr">.before-restore</code> کنارش می‌ماند.
+    </div>
+    <div class="cact" style="margin-bottom:8px">
+      <button class="btn btn-gray" onclick="bkRefresh()" style="flex:1;font-size:11px">🔄 فهرست محلی</button>
+      <button class="btn btn-gray" onclick="bkRemoteList()" style="flex:1;font-size:11px">☁️ فهرست گیت‌هاب</button>
+    </div>
+    <div id="bkList" style="font-size:11px;color:#94a3b8">—</div>
+
+    <div style="border-top:1px solid #1e293b;margin-top:10px;padding-top:8px">
+      <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">بازیابی از فایل روی کامپیوتر:</div>
+      <input type="file" id="bkFile" accept=".json" style="font-size:11px">
+      <button class="btn btn-orange" onclick="bkRestoreUpload()" style="width:100%;margin-top:6px;font-size:11px">♻️ بازیابی از این فایل</button>
+    </div>
+  </div>
+
+  <div class="smenu-hdr" onclick="toggleSmenu(this)" style="padding:9px 0;border-top:1px solid #1e293b">
+    <h3 style="font-size:12px;color:#94a3b8">📋 گزارش بکاپ‌ها</h3><span class="arrow">▼</span></div>
+  <div class="smenu-body" style="padding:0"><div id="bkLog" style="font-size:10.5px;color:#94a3b8">—</div></div>
+</div>
 </div>
 </div>
 </div>
@@ -23983,6 +23996,17 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.17', t:'🗂 بکاپ و بازیابی به «منبع و نصب‌کننده» منتقل شد', items:[
+    'خواستهٔ شما: این دو بخش ادغام شوند.',
+    'هر دو با یک چیز سروکار دارند — مخزن گیت‌هاب و توکنش — پس جدا بودنشان',
+    'یعنی دو جای مختلف برای یک موضوع.',
+    '✅ حالا «💾 بکاپ و بازیابی داده‌ها» زیرمجموعهٔ «⚙️ منبع و نصب‌کننده»',
+    'است، درست زیر «☁️ بکاپ ورک‌اسپیس هاست» که کار مشابهی می‌کند.',
+    '📍 مسیرش: تنظیمات (☰) ← 🔄 نسخهٔ کد ← ⚙️ منبع و نصب‌کننده',
+    'ــ همان‌جا سه چیز کنار هم است: نصب نسخهٔ جدید، بکاپ ورک‌اسپیس،',
+    'و بکاپ/بازیابی داده‌ها.',
+    'هیچ قابلیتی حذف یا عوض نشده — فقط جایش تغییر کرده.'
+  ]},
   {v:'9.16', t:'💾 بکاپ کامل پوشه روی گیت‌هاب و بازیابی', items:[
     'خواستهٔ شما بعد از پاک شدن همهٔ پروفایل‌ها روی هاست.',
     '⚠️ چرا این اتفاق افتاد: profiles.json و connections.json عمداً در',
