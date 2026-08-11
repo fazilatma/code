@@ -64,3 +64,10 @@ photofix.lock
 
 # v8.65: product key to destination id ledger (runtime)
 remote_map.json
+
+# v9.16: backup engine runtime state (never commit secrets or bundles)
+.backup-config.json
+.backup-log.json
+_backups/
+*.before-restore
+arena-fixtures/
