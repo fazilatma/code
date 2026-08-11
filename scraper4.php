@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.12';
+const APP_VERSION = '9.13';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -8096,6 +8096,107 @@ if (isset($_GET['whoami'])) {
     exit;
 }
 
+
+/**
+ * v9.13: حلقهٔ «استخراج دوره‌ای جزئیات» — یک کد، دو نقطهٔ فراخوانی.
+ *
+ * تا ۹.۱۲ این حلقه فقط در مسیر عادی کران بود، یعنی پشتِ قفل ضد
+ * هم‌پوشانی. اگر قفل برداشته نمی‌شد، هرگز اجرا نمی‌شد. حالا وقتی تیک
+ * به‌خاطر قفل رد می‌شود هم صدا زده می‌شود.
+ *
+ * $locked فقط برای گزارش است تا در لاگ معلوم باشد این اجرا زیر قفل
+ * انجام شده. رفتار یکسان است — عمداً، تا دو مسیر نتوانند از هم جدا
+ * بیفتند، همان درسی که از سه نسخهٔ قبل گرفتیم.
+ */
+function cronDetailSyncPass(array $cn, bool $locked = false): array {
+    $now       = time();
+    $profiles  = loadProfiles();
+    $syncState = loadSyncState();
+    $out = [];
+    foreach ($profiles as $dKey => $dProfile) {
+        $dCfg = $dProfile['detailSync'] ?? [];
+        if (empty($dCfg['enabled'])) continue;
+        $dRow = ['key' => $dKey, 'name' => $dProfile['name'] ?? $dKey];
+        $dInterval = max(0, (int)($dCfg['interval'] ?? 3600));
+        $dLast = (int)($syncState[$dKey]['detailLastRun'] ?? 0);
+        if ($dInterval > 0 && ($now - $dLast) < $dInterval) {
+            $dRow['status'] = 'not_due';
+            $dRow['remaining'] = $dInterval - ($now - $dLast);
+            /* v9.11: «هنوز نوبتش نشده» هم باید دیده شود.
+               تا اینجا این حالت هیچ ردی در صف نمی‌گذاشت، پس از دید کاربر
+               فرقی با «اصلاً اجرا نشد» نداشت و دقیقاً همین باعث شد گزارش
+               بدهد «انگار هیچ اتفاقی نمی‌افتد». حالا یک ردیف اطلاع‌رسان
+               می‌نشیند که می‌گوید چقدر تا نوبت بعدی مانده. */
+            detailSyncNote($dKey, $dProfile['name'] ?? $dKey,
+                '⏳ استخراج دوره‌ای جزئیات — هنوز نوبتش نشده',
+                ['   • دوره: ' . detailSyncIntervalLabel($dInterval),
+                 '   • آخرین اجرا: ' . ($dLast > 0 ? jdate_fa($dLast) : 'هنوز اجرا نشده'),
+                 '   • نوبت بعدی تا ' . detailSyncDur($dInterval - ($now - $dLast)) . ' دیگر'],
+                'not_due');
+            $out[] = $dRow;
+            continue;
+        }
+        $dScopeAll = (($dCfg['scope'] ?? 'missing') === 'all');
+        $dRow['scope'] = $dScopeAll ? 'all' : 'missing';
+        /* اگر هنوز محصولی روی دیسک نیست، اول فهرست را بگیر — وگرنه فاز
+           جزئیات چیزی برای باز کردن ندارد و کاربر یک اجرای بی‌صدا می‌بیند. */
+        if (empty($dProfile['products'])) {
+            $dRow['pre_list'] = true;
+            runBackendExtract($dKey, 'auto', false, 'list');
+        }
+        $dRes = runBackendExtract($dKey, 'auto', false, 'detail', $dScopeAll);
+        $dProg = readProgress(EXTRACT_PROGRESS_FILE);
+        $dTot  = (int)($dProg['detail_total'] ?? 0);
+        $dDone = (int)($dProg['detail_current'] ?? 0);
+        if ($dDone === 0 && (int)($dProg['detail_ok'] ?? 0) > 0) {
+            $dDone = (int)$dProg['detail_ok'] + (int)($dProg['detail_fail'] ?? 0);
+        }
+        $dRow['status']         = !empty($dRes['ok']) ? 'done' : 'failed';
+        if (empty($dRes['ok'])) $dRow['error'] = (string)($dRes['error'] ?? '?');
+        $dRow['detail']         = $dTot > 0 ? ($dDone . '/' . $dTot) : 'nothing_to_do';
+        $dRow['pages_opened']   = (int)($dProg['detail_ok'] ?? 0);
+        $dRow['pages_failed']   = (int)($dProg['detail_fail'] ?? 0);
+        $dRow['fields']         = (int)($dProg['detail_fields'] ?? 0);
+        $dRow['gallery_images'] = (int)($dProg['gallery_images'] ?? 0);
+        $dRow['variations']     = (int)($dProg['variation_products'] ?? 0);
+        if (!empty($dProg['detail_skip_why'])) $dRow['skip_why'] = (string)$dProg['detail_skip_why'];
+        /* v9.11: خلاصهٔ خوانا از همین اجرا، در خودِ صف استخراج.
+           ردیفِ اصلی را runBackendExtract ساخته؛ این یکی کنارش می‌نشیند و
+           به زبان آدمیزاد می‌گوید چه شد و اگر چیزی نیامده، چرا. */
+        $_dNote = ['   • دامنه: ' . ($dScopeAll ? 'همهٔ محصولات (گالری از نو)' : 'فقط محصولات ناقص'),
+                   '   • دوره: ' . detailSyncIntervalLabel($dInterval)];
+        if ($locked) $_dNote[] = '   • 🔓 با وجود قفلِ اجرای قبلی انجام شد (v9.13)';
+        if (!empty($dRow['pre_list'])) $_dNote[] = '   • فهرست هم اول گرفته شد (پروفایل خالی بود)';
+        if (!empty($dRes['ok'])) {
+            $_dNote[] = '   • 🔍 ' . (int)($dProg['detail_ok'] ?? 0) . ' صفحهٔ محصول باز شد'
+                      . (((int)($dProg['detail_fail'] ?? 0)) > 0 ? (' · ' . (int)$dProg['detail_fail'] . ' باز نشد') : '');
+            $_dNote[] = '   • 🖼 ' . (int)($dProg['gallery_images'] ?? 0) . ' تصویر گالری · 🏷 '
+                      . (int)($dProg['detail_fields'] ?? 0) . ' فیلد · 🎨 '
+                      . (int)($dProg['variation_products'] ?? 0) . ' محصول تنوع‌دار';
+            if ($dTot === 0) {
+                $_wh = (string)($dProg['detail_skip_why'] ?? '');
+                $_dNote[] = '   • ⚠️ هیچ محصولی برای باز کردن انتخاب نشد'
+                    . ($_wh === 'no_config'   ? ' — نه سلکتور جزئیات تنظیم شده نه گالری روشن است' : '')
+                    . ($_wh === 'no_link'     ? ' — محصولات «لینک» ندارند' : '')
+                    . ($_wh === 'already_done'? ' — همه از قبل کامل بودند (برای گرفتن دوبارهٔ گالری، دامنه را «همهٔ محصولات» بگذارید)' : '')
+                    . ($_wh === 'no_products' ? ' — روی سرور محصولی ذخیره نشده' : '');
+            }
+        } else {
+            $_dNote[] = '   • ❌ ' . mb_substr((string)($dRes['error'] ?? 'خطای نامشخص'), 0, 120);
+        }
+        detailSyncNote($dKey, $dProfile['name'] ?? $dKey,
+            (!empty($dRes['ok']) ? '🔍 استخراج دوره‌ای جزئیات — اجرا شد' : '🔍 استخراج دوره‌ای جزئیات — ناموفق'),
+            $_dNote, (string)($dProg['detail_skip_why'] ?? ''));
+        if (!isset($syncState[$dKey])) $syncState[$dKey] = [];
+        $syncState[$dKey]['detailLastRun'] = time();
+        $out[] = $dRow;
+        // پروفایل تازه‌شده را بردار تا حلقهٔ همگام‌سازی نسخهٔ کهنه را نبیند
+        $profiles = loadProfiles();
+    }
+    saveSyncState($syncState);
+        return $out;
+}
+
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
 header('Content-Type: application/json; charset=UTF-8');
 @set_time_limit(0);
@@ -8205,6 +8306,23 @@ if ($lockAge < $cronLockSec) {
         @unlink($cronLock);
         $lockOut['lock_cleared'] = true;
     }
+    /* v9.13: «استخراج دوره‌ای جزئیات» پشت این قفل نماند.
+
+       علتِ «دکمهٔ اجرای حالا کار می‌کند ولی کران نه» همین بود. دکمه
+       مستقیم backend_extract را صدا می‌زند و اصلاً به این قفل نمی‌رسد؛
+       کران‌جاب باید از آن رد شود. اگر اجرای قبلی هنوز تمام نشده — یا
+       بدتر، هاست کشته باشدش و قفلش مانده باشد ولی هنوز به آستانهٔ
+       بی‌حرکتی نرسیده باشد — کل تیک همین‌جا خارج می‌شد و حلقهٔ جزئیات
+       که پایین‌تر است هرگز اجرا نمی‌شد. روی هاستی که هر چند دقیقه
+       پردازه را می‌کشد، این وضعیت می‌تواند بی‌پایان تکرار شود.
+
+       چرا امن است که این یکی را اجرا کنیم: قفل برای جلوگیری از
+       هم‌پوشانی «ارسال» است — دو بار فرستادن یک محصول به مقصد. فاز
+       جزئیات چیزی نمی‌فرستد؛ فقط صفحهٔ محصول را می‌خواند و روی دیسک
+       می‌نویسد، و خودش با محافظ تکراری‌نبودنِ صف و نشانهٔ مرحله در
+       برابر اجرای هم‌زمان محافظت می‌شود. ارسال همچنان پشت قفل می‌ماند. */
+    $lockOut['detail_sync'] = cronDetailSyncPass($cnLock, true);
+    if (empty($lockOut['detail_sync'])) unset($lockOut['detail_sync']);
     notifCronPing($cnLock, ['profiles' => [], 'locked' => $lockAge]);
     // v9.06: اتصال بالاتر بسته شده — خروجی به فایل می‌رود، نه به اتصالِ مرده
     cronEmit($lockOut);
@@ -8250,88 +8368,11 @@ foreach ($wdEarly as $k => $v) { if (!empty($v)) $results[$k] = $v; }
 
    زمان‌بندی خودش را هم جدا نگه می‌دارد (کلید detail در فایل وضعیت) تا
    دورهٔ جزئیات با دورهٔ همگام‌سازی قاطی نشود. */
-$results['detail_sync'] = [];
-foreach ($profiles as $dKey => $dProfile) {
-    $dCfg = $dProfile['detailSync'] ?? [];
-    if (empty($dCfg['enabled'])) continue;
-    $dRow = ['key' => $dKey, 'name' => $dProfile['name'] ?? $dKey];
-    $dInterval = max(0, (int)($dCfg['interval'] ?? 3600));
-    $dLast = (int)($syncState[$dKey]['detailLastRun'] ?? 0);
-    if ($dInterval > 0 && ($now - $dLast) < $dInterval) {
-        $dRow['status'] = 'not_due';
-        $dRow['remaining'] = $dInterval - ($now - $dLast);
-        /* v9.11: «هنوز نوبتش نشده» هم باید دیده شود.
-           تا اینجا این حالت هیچ ردی در صف نمی‌گذاشت، پس از دید کاربر
-           فرقی با «اصلاً اجرا نشد» نداشت و دقیقاً همین باعث شد گزارش
-           بدهد «انگار هیچ اتفاقی نمی‌افتد». حالا یک ردیف اطلاع‌رسان
-           می‌نشیند که می‌گوید چقدر تا نوبت بعدی مانده. */
-        detailSyncNote($dKey, $dProfile['name'] ?? $dKey,
-            '⏳ استخراج دوره‌ای جزئیات — هنوز نوبتش نشده',
-            ['   • دوره: ' . detailSyncIntervalLabel($dInterval),
-             '   • آخرین اجرا: ' . ($dLast > 0 ? jdate_fa($dLast) : 'هنوز اجرا نشده'),
-             '   • نوبت بعدی تا ' . detailSyncDur($dInterval - ($now - $dLast)) . ' دیگر'],
-            'not_due');
-        $results['detail_sync'][] = $dRow;
-        continue;
-    }
-    $dScopeAll = (($dCfg['scope'] ?? 'missing') === 'all');
-    $dRow['scope'] = $dScopeAll ? 'all' : 'missing';
-    /* اگر هنوز محصولی روی دیسک نیست، اول فهرست را بگیر — وگرنه فاز
-       جزئیات چیزی برای باز کردن ندارد و کاربر یک اجرای بی‌صدا می‌بیند. */
-    if (empty($dProfile['products'])) {
-        $dRow['pre_list'] = true;
-        runBackendExtract($dKey, 'auto', false, 'list');
-    }
-    $dRes = runBackendExtract($dKey, 'auto', false, 'detail', $dScopeAll);
-    $dProg = readProgress(EXTRACT_PROGRESS_FILE);
-    $dTot  = (int)($dProg['detail_total'] ?? 0);
-    $dDone = (int)($dProg['detail_current'] ?? 0);
-    if ($dDone === 0 && (int)($dProg['detail_ok'] ?? 0) > 0) {
-        $dDone = (int)$dProg['detail_ok'] + (int)($dProg['detail_fail'] ?? 0);
-    }
-    $dRow['status']         = !empty($dRes['ok']) ? 'done' : 'failed';
-    if (empty($dRes['ok'])) $dRow['error'] = (string)($dRes['error'] ?? '?');
-    $dRow['detail']         = $dTot > 0 ? ($dDone . '/' . $dTot) : 'nothing_to_do';
-    $dRow['pages_opened']   = (int)($dProg['detail_ok'] ?? 0);
-    $dRow['pages_failed']   = (int)($dProg['detail_fail'] ?? 0);
-    $dRow['fields']         = (int)($dProg['detail_fields'] ?? 0);
-    $dRow['gallery_images'] = (int)($dProg['gallery_images'] ?? 0);
-    $dRow['variations']     = (int)($dProg['variation_products'] ?? 0);
-    if (!empty($dProg['detail_skip_why'])) $dRow['skip_why'] = (string)$dProg['detail_skip_why'];
-    /* v9.11: خلاصهٔ خوانا از همین اجرا، در خودِ صف استخراج.
-       ردیفِ اصلی را runBackendExtract ساخته؛ این یکی کنارش می‌نشیند و
-       به زبان آدمیزاد می‌گوید چه شد و اگر چیزی نیامده، چرا. */
-    $_dNote = ['   • دامنه: ' . ($dScopeAll ? 'همهٔ محصولات (گالری از نو)' : 'فقط محصولات ناقص'),
-               '   • دوره: ' . detailSyncIntervalLabel($dInterval)];
-    if (!empty($dRow['pre_list'])) $_dNote[] = '   • فهرست هم اول گرفته شد (پروفایل خالی بود)';
-    if (!empty($dRes['ok'])) {
-        $_dNote[] = '   • 🔍 ' . (int)($dProg['detail_ok'] ?? 0) . ' صفحهٔ محصول باز شد'
-                  . (((int)($dProg['detail_fail'] ?? 0)) > 0 ? (' · ' . (int)$dProg['detail_fail'] . ' باز نشد') : '');
-        $_dNote[] = '   • 🖼 ' . (int)($dProg['gallery_images'] ?? 0) . ' تصویر گالری · 🏷 '
-                  . (int)($dProg['detail_fields'] ?? 0) . ' فیلد · 🎨 '
-                  . (int)($dProg['variation_products'] ?? 0) . ' محصول تنوع‌دار';
-        if ($dTot === 0) {
-            $_wh = (string)($dProg['detail_skip_why'] ?? '');
-            $_dNote[] = '   • ⚠️ هیچ محصولی برای باز کردن انتخاب نشد'
-                . ($_wh === 'no_config'   ? ' — نه سلکتور جزئیات تنظیم شده نه گالری روشن است' : '')
-                . ($_wh === 'no_link'     ? ' — محصولات «لینک» ندارند' : '')
-                . ($_wh === 'already_done'? ' — همه از قبل کامل بودند (برای گرفتن دوبارهٔ گالری، دامنه را «همهٔ محصولات» بگذارید)' : '')
-                . ($_wh === 'no_products' ? ' — روی سرور محصولی ذخیره نشده' : '');
-        }
-    } else {
-        $_dNote[] = '   • ❌ ' . mb_substr((string)($dRes['error'] ?? 'خطای نامشخص'), 0, 120);
-    }
-    detailSyncNote($dKey, $dProfile['name'] ?? $dKey,
-        (!empty($dRes['ok']) ? '🔍 استخراج دوره‌ای جزئیات — اجرا شد' : '🔍 استخراج دوره‌ای جزئیات — ناموفق'),
-        $_dNote, (string)($dProg['detail_skip_why'] ?? ''));
-    if (!isset($syncState[$dKey])) $syncState[$dKey] = [];
-    $syncState[$dKey]['detailLastRun'] = time();
-    $results['detail_sync'][] = $dRow;
-    // پروفایل تازه‌شده را بردار تا حلقهٔ همگام‌سازی نسخهٔ کهنه را نبیند
-    $profiles = loadProfiles();
-}
+/* v9.13: همان حلقه، حالا از تابع مشترک. */
+$results['detail_sync'] = cronDetailSyncPass($cn, false);
 if (empty($results['detail_sync'])) unset($results['detail_sync']);
-saveSyncState($syncState);
+$profiles  = loadProfiles();
+$syncState = loadSyncState();
 
 foreach ($profiles as $key => $profile) {
 $syncCfg = $profile['syncConfig'] ?? [];
@@ -10085,6 +10126,24 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "if (defined('REQ_DETA" . "CHED')) return;") !== false);
     /* هر محصول ذخیره شود، نه هر ۵ تا — وگرنه کشته‌شدن پردازه کار
        چند محصول را با هم دور می‌ریزد. */
+    /* ---------- v9.13: قفل، استخراج دوره‌ای را متوقف نکند ---------- */
+    /* دکمه به قفل نمی‌رسد ولی کران می‌رسد — همین باعث شد یکی کار کند و
+       دیگری نه. حالا هر دو از یک تابع رد می‌شوند. */
+    $add('9.13', 'حلقهٔ استخراج دوره‌ای تابع مشترک دارد',
+         function_exists('cronDetailSync' . 'Pass'));
+    $add('9.13', 'مسیر قفل هم استخراج دوره‌ای را اجرا می‌کند',
+         strpos($selfSrc, "\$lockOut['detail_sync'] = cronDetailSync" . 'Pass($cnLock, true);') !== false);
+    $add('9.13', 'مسیر عادی هم از همان تابع رد می‌شود',
+         strpos($selfSrc, "\$results['detail_sync'] = cronDetailSync" . 'Pass($cn, false);') !== false);
+    /* اجرای زیر قفل باید در گزارش قابل تشخیص باشد */
+    $add('9.13', 'اجرای زیر قفل در لاگ نشانه می‌گذارد',
+         strpos($selfSrc, 'با وجود قفلِ اجرای قبلی انجام ' . 'شد') !== false);
+    /* ارسال نباید از قفل خارج شده باشد — فقط جزئیات */
+    $add('9.13', 'ارسال همچنان پشت قفل می‌ماند',
+         (($_p913 = strpos($selfSrc, "\$lockOut['detail_sync'] = cronDetailSync" . 'Pass')) !== false)
+         && strpos($selfSrc, 'cronEmit($lockOut);', $_p913) !== false
+         && strpos($selfSrc, 'wooWriteQueue', $_p913) > strpos($selfSrc, 'cronEmit($lockOut);', $_p913));
+
     /* ---------- v9.12: تشخیص نسخهٔ فایلِ اجراشونده ---------- */
     $add('9.12', 'اندپوینت whoami هست و کش نمی‌شود',
          strpos($selfSrc, "isset(\$_GET['who" . "ami'])") !== false
@@ -10152,8 +10211,12 @@ if (isset($_GET['selftest'])) {
     $add('9.10', 'پروفایل بدون محصول اول فهرست را می‌گیرد',
          strpos($selfSrc, "if (empty(\$dProfile['pro" . "ducts'])) {") !== false
          && strpos($selfSrc, "runBackendExtract(\$dKey, 'auto', false, 'li" . "st');") !== false);
+    /* v9.13: حلقه به تابع مشترک منتقل شد، پس ردیف‌ها در $out جمع می‌شوند
+       و نتیجه در هر دو مسیر (عادی و زیرِ قفل) به گزارش می‌نشیند. */
     $add('9.10', 'نتیجهٔ استخراج دوره‌ای در گزارش کران می‌آید',
-         substr_count($selfSrc, "\$results['detail_s" . "ync'][] = \$dRow;") >= 2);
+         substr_count($selfSrc, '$out[] = $dRow;') >= 2
+         && strpos($selfSrc, "\$results['detail_sync'] = cronDetailSync" . 'Pass') !== false
+         && strpos($selfSrc, "\$lockOut['detail_sync'] = cronDetailSync" . 'Pass') !== false);
 
     /* ---------- v9.09: هر بسته شدن ردیف باید علتش را بگوید ---------- */
     $add('9.09', 'مسیر «محصولی روی سرور نیست» علت ثبت می‌کند',
@@ -23280,6 +23343,25 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.13', t:'🔓 قفل کران دیگر جلوی استخراج دوره‌ای جزئیات را نمی‌گیرد', items:[
+    'گزارش شما: «دکمهٔ اجرای حالا کار می‌کند اما با کران‌جاب اجرا نمی‌شود».',
+    '🔍 این تفاوت دقیقاً علت را نشان داد:',
+    '• دکمه مستقیم backend_extract را صدا می‌زند و اصلاً به قفلِ کران',
+    '  نمی‌رسد — برای همین همیشه کار می‌کرد.',
+    '• کران‌جاب باید از قفل ضد هم‌پوشانی رد شود. اگر اجرای قبلی تمام',
+    '  نشده بود — یا هاست کشته بودش و قفلش مانده بود ولی هنوز به آستانهٔ',
+    '  بی‌حرکتی نرسیده بود — کل تیک همان‌جا خارج می‌شد.',
+    '⚠️ حلقهٔ استخراج دوره‌ای پایین‌تر از آن نقطه بود، پس هرگز اجرا',
+    'نمی‌شد. روی هاستی که هر چند دقیقه پردازه را می‌کشد، این وضعیت',
+    'می‌تواند بی‌پایان تکرار شود و دقیقاً شبیه «هیچ اتفاقی نمی‌افتد» است.',
+    '✅ حالا حتی وقتی تیک به‌خاطر قفل رد می‌شود، استخراج دوره‌ای جزئیات',
+    'اجرا می‌شود.',
+    '🔒 چرا امن است: قفل برای جلوگیری از دوباره‌فرستادن محصول به مقصد',
+    'است. فاز جزئیات چیزی نمی‌فرستد — فقط صفحهٔ محصول را می‌خواند و روی',
+    'دیسک می‌نویسد. «ارسال» همچنان پشت قفل می‌ماند.',
+    '🧩 هر دو مسیر از یک تابع مشترک رد می‌شوند تا نتوانند از هم جدا',
+    'بیفتند؛ اجرای زیر قفل در لاگ صف با نشان 🔓 مشخص می‌شود.'
+  ]},
   {v:'9.12', t:'🔎 بفهمید کدام فایل واقعاً روی هاست اجرا می‌شود', items:[
     'گزارش شما: «هنوز کد ۹.۱۰ را نشان می‌دهد».',
     '🔍 بررسی کردم: کد داخل مخزن قطعاً ۹.۱۱ بود — هر پنج جایی که نسخه',
