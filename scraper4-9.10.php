@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.09';
+const APP_VERSION = '9.10';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3039,6 +3039,16 @@ $galleryFinal = ($formIsBlank && !$galleryIn['enabled'] && $galleryOld['enabled'
 $syncConfig = array_key_exists('syncConfig', $_POST)
     ? (json_decode((string)$_POST['syncConfig'], true) ?: [])
     : (array)($profiles[$key]['syncConfig'] ?? []);
+/* v9.10: «استخراج دوره‌ای جزئیات» — همان محافظِ syncConfig، وگرنه هر
+   ذخیرهٔ جزئی (که این کلید را نمی‌فرستد) تنظیم را پاک می‌کرد. */
+$detailSyncIn = array_key_exists('detailSync', $_POST)
+    ? (json_decode((string)$_POST['detailSync'], true) ?: [])
+    : (array)($profiles[$key]['detailSync'] ?? []);
+$detailSync = [
+    'enabled'  => !empty($detailSyncIn['enabled']),
+    'interval' => max(0, (int)($detailSyncIn['interval'] ?? 3600)),
+    'scope'    => (($detailSyncIn['scope'] ?? 'missing') === 'all') ? 'all' : 'missing',
+];
 $profiles[$key] = [
 'url' => $url,
 'name' => trim($_POST['name'] ?? '') ?: parse_url($url, PHP_URL_HOST),
@@ -3061,6 +3071,7 @@ $profiles[$key] = [
 'products' => $productsData,
 'productsOrder' => $productsOrder,
 'syncConfig' => $syncConfig,
+'detailSync' => $detailSync,          // v9.10
 // v8.43: اگر این فیلدها در درخواست نباشند، مقدار قبلی حفظ شود.
 // قبلاً هر ذخیره‌ای که آن‌ها را نمی‌فرستاد، دستهٔ پروفایل را صفر می‌کرد.
 'bslCategoryId' => array_key_exists('bslCategoryId', $_POST)
@@ -5485,8 +5496,13 @@ function galleryExtract(DOMXPath $xp, ?DOMNode $ctx, string $baseUrl, array $cfg
  * گالری را روی محصول می‌نشاند.
  * تصویر اصلی همیشه اولین عضو فهرست است تا مقصد آن را شاخص بگذارد.
  */
-function galleryApplyToProduct(array &$p, array $imgs): int {
-    $main = trim((string)($p['image'] ?? ''));
+/* v9.10: $replace برای «دامنهٔ همهٔ محصولات».
+   عکس شاخصِ قبلی معمولاً به گالری اضافه می‌شود تا مقصد آن را اول
+   بگذارد. ولی وقتی کاربر عمداً خواسته گالری از نو گرفته شود، آن عکسِ
+   قدیمی — که ممکن است اصلاً دیگر روی صفحهٔ محصول نباشد — نباید بماند؛
+   وگرنه گالری تازه همیشه یک عکسِ مرده همراه دارد. */
+function galleryApplyToProduct(array &$p, array $imgs, bool $replace = false): int {
+    $main = $replace ? '' : trim((string)($p['image'] ?? ''));
     $all = galleryDedupe(array_merge($main !== '' ? [$main] : [], $imgs));
     if (!$all) return 0;
     $p['image'] = $all[0];
@@ -7048,7 +7064,7 @@ function extractCheckpoint(string $pkFinal, array $allProducts, array $extra = [
  * را جدا اجرا کند و تازه بعد از آن سراغ ارسال برود. با این پارامتر هر سه
  * از یک موتور می‌گذرند و رفتارشان نمی‌تواند از هم جدا بیفتد.
  */
-function runBackendExtract(string $profileKey, string $trigger = 'manual', bool $emitEarlyResponse = false, string $phase = 'all'): array {
+function runBackendExtract(string $profileKey, string $trigger = 'manual', bool $emitEarlyResponse = false, string $phase = 'all', bool $forceAll = false): array {
 if (!in_array($phase, ['all', 'list', 'detail'], true)) $phase = 'all';
 @set_time_limit(0); @ignore_user_abort(true);
 @unlink(EXTRACT_PROGRESS_FILE); @unlink(EXTRACT_STOP_FILE);
@@ -7321,8 +7337,14 @@ foreach($detailSelectors as $_f=>$_sv){ if(!empty($_sv))$_wantKeys[]=$_f; }
    وقتی گالری اصلاً نیامده کاملاً گمراه‌کننده است. حالا شمرده می‌شوند. */
 $_noLink=0;$_alreadyDone=0;
 $needDetail=[];
+/* v9.10: دامنهٔ «همهٔ محصولات». وقتی استخراج دوره‌ای جزئیات با
+   scope=all اجرا شود، محصولی که قبلاً گالری گرفته هم دوباره باز
+   می‌شود — برای وقتی که سلکتور گالری عوض شده یا مبدأ عکس‌ها را
+   به‌روز کرده است. */
+$_forceAll=($phase==='detail'&&$forceAll);
 foreach($allProducts as $key=>$p){
 if(empty($p['link'])){$_noLink++;continue;}
+if($_forceAll){$needDetail[$key]=$p;continue;}
 /* v8.81: محصولی که گالری‌اش را قبلاً گرفته‌ایم دوباره باز نمی‌شود.
    پیش از این با روشن بودن گالری، هر بار همهٔ صفحات محصول از نو گرفته
    می‌شد که هم کند بود و هم بی‌دلیل. */
@@ -7489,7 +7511,7 @@ if($imgUrl&&url_is_image($imgUrl))$allProducts[$key]['image']=make_absolute_url(
 if($galleryCfg['enabled']){
 $gal=galleryExtract($xp2,null,$dr['url'],$galleryCfg);
 if(!empty($gal['images'])){
-$nImg=galleryApplyToProduct($allProducts[$key],$gal['images']);
+$nImg=galleryApplyToProduct($allProducts[$key],$gal['images'],$_forceAll);
 $_gotImgs=$nImg;
 if($nImg>1){$galleryFound++;$galleryImgsTotal+=$nImg;}
 }
@@ -8139,6 +8161,66 @@ if (!empty($results_lockReaped)) $results['lock_reaped'] = true;
    هزینه‌اش وقتی چیزی گیر نکرده چند خط خواندن فایل است. */
 $wdEarly = cronWatchdogs($cn);
 foreach ($wdEarly as $k => $v) { if (!empty($v)) $results[$k] = $v; }
+
+/* =====================================================================
+   v9.10: استخراج دوره‌ای جزئیات — حلقهٔ مستقل، قبل از همگام‌سازی.
+
+   خواستهٔ کاربر: یک تیک و یک دراپ‌داون دورهٔ جدا، که با اجرای دوره‌ای‌اش
+   «همهٔ جزئیات» گرفته شود — گالری، تنوع‌ها، دسته‌بندی، توضیحات و بقیه.
+
+   چرا حلقهٔ جدا و چرا «قبل» از حلقهٔ همگام‌سازی: حلقهٔ پایین در همان
+   خط اولش اگر syncConfig.enabled خاموش باشد پروفایل را رد می‌کند. پس
+   اگر این کار را داخل آن حلقه می‌گذاشتم، کسی که فقط می‌خواهد جزئیات
+   دوره‌ای بگیرد و چیزی به مقصد نفرستد، هیچ‌وقت اجرا نمی‌شد. جدا بودن
+   یعنی این دو قابلیت واقعاً مستقل‌اند.
+
+   زمان‌بندی خودش را هم جدا نگه می‌دارد (کلید detail در فایل وضعیت) تا
+   دورهٔ جزئیات با دورهٔ همگام‌سازی قاطی نشود. */
+$results['detail_sync'] = [];
+foreach ($profiles as $dKey => $dProfile) {
+    $dCfg = $dProfile['detailSync'] ?? [];
+    if (empty($dCfg['enabled'])) continue;
+    $dRow = ['key' => $dKey, 'name' => $dProfile['name'] ?? $dKey];
+    $dInterval = max(0, (int)($dCfg['interval'] ?? 3600));
+    $dLast = (int)($syncState[$dKey]['detailLastRun'] ?? 0);
+    if ($dInterval > 0 && ($now - $dLast) < $dInterval) {
+        $dRow['status'] = 'not_due';
+        $dRow['remaining'] = $dInterval - ($now - $dLast);
+        $results['detail_sync'][] = $dRow;
+        continue;
+    }
+    $dScopeAll = (($dCfg['scope'] ?? 'missing') === 'all');
+    $dRow['scope'] = $dScopeAll ? 'all' : 'missing';
+    /* اگر هنوز محصولی روی دیسک نیست، اول فهرست را بگیر — وگرنه فاز
+       جزئیات چیزی برای باز کردن ندارد و کاربر یک اجرای بی‌صدا می‌بیند. */
+    if (empty($dProfile['products'])) {
+        $dRow['pre_list'] = true;
+        runBackendExtract($dKey, 'auto', false, 'list');
+    }
+    $dRes = runBackendExtract($dKey, 'auto', false, 'detail', $dScopeAll);
+    $dProg = readProgress(EXTRACT_PROGRESS_FILE);
+    $dTot  = (int)($dProg['detail_total'] ?? 0);
+    $dDone = (int)($dProg['detail_current'] ?? 0);
+    if ($dDone === 0 && (int)($dProg['detail_ok'] ?? 0) > 0) {
+        $dDone = (int)$dProg['detail_ok'] + (int)($dProg['detail_fail'] ?? 0);
+    }
+    $dRow['status']         = !empty($dRes['ok']) ? 'done' : 'failed';
+    if (empty($dRes['ok'])) $dRow['error'] = (string)($dRes['error'] ?? '?');
+    $dRow['detail']         = $dTot > 0 ? ($dDone . '/' . $dTot) : 'nothing_to_do';
+    $dRow['pages_opened']   = (int)($dProg['detail_ok'] ?? 0);
+    $dRow['pages_failed']   = (int)($dProg['detail_fail'] ?? 0);
+    $dRow['fields']         = (int)($dProg['detail_fields'] ?? 0);
+    $dRow['gallery_images'] = (int)($dProg['gallery_images'] ?? 0);
+    $dRow['variations']     = (int)($dProg['variation_products'] ?? 0);
+    if (!empty($dProg['detail_skip_why'])) $dRow['skip_why'] = (string)$dProg['detail_skip_why'];
+    if (!isset($syncState[$dKey])) $syncState[$dKey] = [];
+    $syncState[$dKey]['detailLastRun'] = time();
+    $results['detail_sync'][] = $dRow;
+    // پروفایل تازه‌شده را بردار تا حلقهٔ همگام‌سازی نسخهٔ کهنه را نبیند
+    $profiles = loadProfiles();
+}
+if (empty($results['detail_sync'])) unset($results['detail_sync']);
+saveSyncState($syncState);
 
 foreach ($profiles as $key => $profile) {
 $syncCfg = $profile['syncConfig'] ?? [];
@@ -9889,6 +9971,39 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "if (defined('REQ_DETA" . "CHED')) return;") !== false);
     /* هر محصول ذخیره شود، نه هر ۵ تا — وگرنه کشته‌شدن پردازه کار
        چند محصول را با هم دور می‌ریزد. */
+    /* ---------- v9.10: استخراج دوره‌ای جزئیات ---------- */
+    $add('9.10', 'بخش استخراج دوره‌ای جزئیات در تب شروع هست',
+         strpos($selfSrc, 'id="profileDetail' . 'En"') !== false
+         && strpos($selfSrc, 'id="profileDetail' . 'Interval"') !== false
+         && strpos($selfSrc, 'id="profileDetail' . 'Scope"') !== false);
+    $add('9.10', 'دراپ‌داون دوره همان گزینه‌های همگام‌سازی را دارد',
+         substr_count($selfSrc, '<option value="604800">هر هفته</option>') >= 2
+         && substr_count($selfSrc, '<option value="0">🔄 هنگام فراخوانی اندپوینت</option>') >= 2);
+    $add('9.10', 'تنظیمات جزئیات جمع و ذخیره می‌شود',
+         strpos($selfSrc, 'function getDetailSync' . 'Config(){') !== false
+         && strpos($selfSrc, 'd.detailSync=getDetailSync' . 'Config();') !== false
+         && strpos($selfSrc, "k === 'detailS" . "ync'") !== false);
+    $add('9.10', 'ذخیرهٔ جزئی تنظیم دوره‌ای را پاک نمی‌کند',
+         strpos($selfSrc, "\$detailSyncIn = array_key_exists('detailS" . "ync', \$_POST)") !== false
+         && strpos($selfSrc, "'detailSync' => \$detailS" . "ync,") !== false);
+    /* حلقه باید «قبل» از حلقهٔ همگام‌سازی باشد، وگرنه پروفایلی که
+       همگام‌سازی‌اش خاموش است هرگز جزئیات دوره‌ای نمی‌گیرد. */
+    $add('9.10', 'حلقهٔ جزئیات قبل از حلقهٔ همگام‌سازی اجرا می‌شود',
+         (($_p910a = strpos($selfSrc, "\$dCfg = \$dProfile['detailS" . "ync'] ?? [];")) !== false)
+         && (($_p910b = strpos($selfSrc, "\$syncCfg = \$profile['syncCon" . "fig'] ?? [];", $_p910a)) !== false)
+         && $_p910a < $_p910b);
+    $add('9.10', 'زمان‌بندی جزئیات از همگام‌سازی جداست',
+         strpos($selfSrc, "\$syncState[\$dKey]['detailLast" . "Run'] = time();") !== false
+         && strpos($selfSrc, "(int)(\$syncState[\$dKey]['detailLast" . "Run'] ?? 0);") !== false);
+    $add('9.10', 'دامنهٔ «همه» صفحهٔ هر محصول را دوباره باز می‌کند',
+         strpos($selfSrc, '$_forceAll=($phase===\'det' . 'ail\'&&$forceAll);') !== false
+         && strpos($selfSrc, 'if($_forceAll){$needDetail[$key]=$p;cont' . 'inue;}') !== false);
+    $add('9.10', 'پروفایل بدون محصول اول فهرست را می‌گیرد',
+         strpos($selfSrc, "if (empty(\$dProfile['pro" . "ducts'])) {") !== false
+         && strpos($selfSrc, "runBackendExtract(\$dKey, 'auto', false, 'li" . "st');") !== false);
+    $add('9.10', 'نتیجهٔ استخراج دوره‌ای در گزارش کران می‌آید',
+         substr_count($selfSrc, "\$results['detail_s" . "ync'][] = \$dRow;") >= 2);
+
     /* ---------- v9.09: هر بسته شدن ردیف باید علتش را بگوید ---------- */
     $add('9.09', 'مسیر «محصولی روی سرور نیست» علت ثبت می‌کند',
          strpos($selfSrc, "\$qe['detail_skip_why']='no_pro" . "ducts';") !== false);
@@ -9935,8 +10050,10 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, "\$pResult['detail_pages']") !== false);
 
     /* ---------- v9.01: کران سه گام جدا — فهرست، جزئیات، ارسال ---------- */
+    /* v9.10: امضا یک پارامتر forceAll هم گرفت (دامنهٔ «همهٔ محصولات»
+       در استخراج دوره‌ای جزئیات)، پس دیگر به 'all'): { ختم نمی‌شود. */
     $add('9.01', 'موتور استخراج پارامتر مرحله دارد',
-         strpos($selfSrc, "string \$phase = 'all'): array {") !== false
+         strpos($selfSrc, "string \$phase = 'all', bool \$forceAll = false): array {") !== false
          && strpos($selfSrc, "if (!in_array(\$phase, ['all', 'list', 'detail'], true)) \$phase = 'all';") !== false);
     $add('9.01', 'حالت فقط-فهرست فاز جزئیات را اجرا نمی‌کند',
          strpos($selfSrc, "if(\$phase!=='list'&&\$detailTotal>0&&") !== false);
@@ -19215,6 +19332,44 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
             </div>
             <div id="profileSyncStatus" style="font-size:10px;color:#64748b;margin-top:6px"></div>
         </div>
+
+        <!-- v9.10: استخراج دوره‌ای جزئیات — مستقل از همگام‌سازی -->
+        <div style="margin-top:10px;padding:10px;background:#0f172a;border:1px solid #334155;border-radius:8px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                    <input type="checkbox" id="profileDetailEn" onchange="scheduleSave();updateDetailSyncStatusText()">
+                    <b style="color:#f9a8d4">🔍 استخراج دوره‌ای جزئیات</b>
+                </label>
+            </div>
+            <div class="row" style="margin-bottom:6px;align-items:center">
+                <label style="min-width:80px;font-size:12px;color:#94a3b8">دوره:</label>
+                <select id="profileDetailInterval" onchange="scheduleSave();updateDetailSyncStatusText()" style="flex:1">
+                    <option value="0">🔄 هنگام فراخوانی اندپوینت</option>
+                    <option value="1800">هر ۳۰ دقیقه</option>
+                    <option value="3600" selected>هر ۱ ساعت</option>
+                    <option value="7200">هر ۲ ساعت</option>
+                    <option value="10800">هر ۳ ساعت</option>
+                    <option value="21600">هر ۶ ساعت</option>
+                    <option value="43200">هر ۱۲ ساعت</option>
+                    <option value="86400">هر روز</option>
+                    <option value="604800">هر هفته</option>
+                </select>
+            </div>
+            <div class="row" style="margin-bottom:4px;align-items:center">
+                <label style="min-width:80px;font-size:12px;color:#94a3b8">دامنه:</label>
+                <select id="profileDetailScope" onchange="scheduleSave();updateDetailSyncStatusText()" style="flex:1">
+                    <option value="missing" selected>فقط محصولات ناقص (سریع‌تر)</option>
+                    <option value="all">همهٔ محصولات — گالری‌ها از نو گرفته شوند</option>
+                </select>
+            </div>
+            <div style="font-size:10px;color:#64748b;line-height:1.7;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px 8px;margin-top:4px">
+                💡 با این تیک، کران‌جاب مستقل از همگام‌سازی، صفحهٔ تک‌تک محصولات را باز می‌کند و
+                <b>تصاویر گالری، تنوع‌ها، دسته‌بندی، توضیحات، SKU، برند، وزن و موجودی</b> را می‌گیرد.
+                همان کاری که دکمهٔ «🔍 استخراج تفصیلی (سرور)» می‌کند، ولی دوره‌ای و خودکار.
+                کار روی سرور انجام می‌شود و بستن مرورگر قطعش نمی‌کند.
+            </div>
+            <div id="profileDetailStatus" style="font-size:10px;color:#64748b;margin-top:6px"></div>
+        </div>
     </div>
 
     <div class="card">
@@ -20996,7 +21151,7 @@ function saveProfileSilent() {
     fd.append('action', 'save_profile');
     for (const k in data) {
         // v7.66: syncConfig must also be JSON.stringify'd — otherwise FormData converts object to "[object Object]"
-        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'bslFallbackCatIds' || k === 'gallery') {
+        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'detailSync' || k === 'bslFallbackCatIds' || k === 'gallery') {
             fd.append(k, JSON.stringify(data[k]));
         } else {
             fd.append(k, data[k]);
@@ -21042,7 +21197,7 @@ function saveProfile() {
     fd.append('action', 'save_profile');
     for (const k in data) {
         // v7.66: syncConfig must also be JSON.stringify'd — otherwise "[object Object]"
-        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'bslFallbackCatIds' || k === 'gallery') {
+        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'detailSync' || k === 'bslFallbackCatIds' || k === 'gallery') {
             fd.append(k, JSON.stringify(data[k]));
         } else {
             fd.append(k, data[k]);
@@ -22935,6 +23090,27 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.10', t:'🔍 بخش تازه: استخراج دوره‌ای جزئیات', items:[
+    'خواستهٔ شما: یک بخش با تیک و دراپ‌داون دوره، در تب شروع، بعد از',
+    '«همگام‌سازی دوره‌ای» — که با اجرای دوره‌ای‌اش همهٔ جزئیات بیاید.',
+    '✅ ساخته شد: «🔍 استخراج دوره‌ای جزئیات» با همان دراپ‌داون دوره',
+    '(از «هنگام فراخوانی اندپوینت» تا «هر هفته») و یک دراپ‌داون دامنه:',
+    '• فقط محصولات ناقص (سریع‌تر) — پیش‌فرض',
+    '• همهٔ محصولات — گالری‌ها از نو گرفته شوند',
+    'دومی برای وقتی است که سلکتور گالری را عوض کرده‌اید یا مبدأ',
+    'عکس‌ها را به‌روز کرده؛ محصولی که قبلاً گالری داشت هم دوباره باز می‌شود.',
+    '🎯 مهم: این قابلیت کاملاً مستقل از همگام‌سازی است.',
+    'حلقهٔ کران «قبل» از حلقهٔ همگام‌سازی اجرا می‌شود، چون آن حلقه در',
+    'خط اولش پروفایل‌های بدون همگام‌سازی را رد می‌کند. یعنی می‌توانید',
+    'جزئیات را دوره‌ای بگیرید بدون اینکه چیزی به مقصد فرستاده شود.',
+    'زمان‌بندی‌اش هم جداست، پس با دورهٔ همگام‌سازی قاطی نمی‌شود.',
+    '📦 چه چیزهایی می‌آید: تصاویر گالری، تنوع‌ها (رنگ/سایز)، دسته‌بندی،',
+    'توضیحات کوتاه و بلند، SKU، برچسب‌ها، وزن، موجودی، برند و عکس اصلی.',
+    '✅ اگر پروفایل هنوز محصولی روی سرور ندارد، اول فهرست گرفته می‌شود',
+    'تا اجرا بی‌صدا نماند.',
+    '📄 نتیجه در خروجی کران زیر کلید detail_sync می‌آید: چند صفحه باز شد،',
+    'چند تصویر گالری، چند فیلد، چند محصول تنوع‌دار.'
+  ]},
   {v:'9.09', t:'🔍 پیام «چیزی برای انجام نداشت» علتش را می‌گوید', items:[
     'گزارش شما: مودال گفت «⏭ این مرحله چیزی برای انجام نداشت» ولی',
     'استخراج تفصیلی اجرا نشد و گالری نیامد.',
@@ -28657,6 +28833,31 @@ function getSyncConfig(){
         bslAddUpdate:$('profileSyncBslAddUpdate').checked
     };
 }
+/* v9.10: تنظیمات «استخراج دوره‌ای جزئیات».
+   عمداً جدا از syncConfig نگه داشته شده تا روشن/خاموش کردن یکی روی
+   دیگری اثر نگذارد — کاربر می‌تواند جزئیات را دوره‌ای بگیرد بدون اینکه
+   چیزی به مقصد فرستاده شود، یا برعکس. */
+function getDetailSyncConfig(){
+    const iv=parseInt($('profileDetailInterval')?$('profileDetailInterval').value:'3600');
+    return {
+        enabled:!!($('profileDetailEn')&&$('profileDetailEn').checked),
+        interval:isNaN(iv)?3600:iv,
+        scope:($('profileDetailScope')&&$('profileDetailScope').value)||'missing'
+    };
+}
+function updateDetailSyncStatusText(){
+    const box=$('profileDetailStatus');
+    if(!box)return;
+    if(!($('profileDetailEn')&&$('profileDetailEn').checked)){box.textContent='';return;}
+    const sel=$('profileDetailInterval');
+    const intv=sel?sel.options[sel.selectedIndex].text:'';
+    const scope=($('profileDetailScope')&&$('profileDetailScope').value)==='all'
+        ? 'همهٔ محصولات' : 'فقط محصولات ناقص';
+    box.innerHTML='<span style="color:#f9a8d4">🔍 فعال</span> — '+esc(intv)+' · '+esc(scope)
+        +'<br><span style="color:#64748b">نیازمند کران‌جاب روی '
+        +'<code style="direction:ltr">?cron_run</code> است.</span>';
+}
+
 // v7.81: Update sync status text when any sync config changes
 function updateSyncStatusText(){
     const en=$('profileSyncEn').checked;
@@ -28707,12 +28908,20 @@ applyProfile=function(p){
         $('profileSyncBslAddUpdate').checked=false;
         $('profileSyncStatus').textContent='';
     }
+    // v9.10: تنظیمات استخراج دوره‌ای جزئیات
+    const dc=p.detailSync||{};
+    if($('profileDetailEn'))$('profileDetailEn').checked=!!dc.enabled;
+    if($('profileDetailInterval')&&dc.interval!==undefined&&dc.interval!==null)
+        $('profileDetailInterval').value=String(dc.interval);
+    if($('profileDetailScope')&&dc.scope)$('profileDetailScope').value=dc.scope;
+    updateDetailSyncStatusText();
 };
 // Override collectProfileData to include syncConfig
 const _origCollectProfileData=collectProfileData;
 collectProfileData=function(){
     const d=_origCollectProfileData();
     d.syncConfig=getSyncConfig();
+    d.detailSync=getDetailSyncConfig();   // v9.10
     return d;
 };
 // ========== Auto-Continue Send Logic ==========
