@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.10';
+const APP_VERSION = '9.11';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -233,6 +233,48 @@ function extractPriceNum($price): int {
  * v8.25: گزارش کامل هر اجرای استخراج را کنار صف نگه می‌دارد تا بعداً
  * قابل مرور باشد. فقط ۲۰ گزارش آخر می‌ماند تا دیسک پر نشود.
  */
+/* =====================================================================
+   v9.11: ردیف اطلاع‌رسان برای «استخراج دوره‌ای جزئیات».
+
+   خودِ اجرا از runBackendExtract می‌گذرد و ردیف صف خودش را می‌سازد.
+   ولی حالت‌هایی که اجرا «انجام نمی‌شود» — نوبتش نشده، پروفایل محصول
+   ندارد — هیچ ردی نمی‌گذاشتند. از دید کاربر این دقیقاً شبیه «هیچ
+   اتفاقی نمی‌افتد» است. این تابع یک ردیف تمام‌شده با لاگ می‌نشاند تا
+   در همان صف استخراج دیده شود.
+   ===================================================================== */
+function detailSyncDur(int $sec): string {
+    $sec = max(0, $sec);
+    if ($sec < 60)    return $sec . ' ثانیه';
+    if ($sec < 3600)  return (int)round($sec / 60) . ' دقیقه';
+    if ($sec < 86400) return (int)round($sec / 3600) . ' ساعت';
+    return (int)round($sec / 86400) . ' روز';
+}
+function detailSyncIntervalLabel(int $sec): string {
+    if ($sec <= 0) return 'هر بار فراخوانی کران';
+    return 'هر ' . detailSyncDur($sec);
+}
+/** تاریخ و ساعت خوانا برای لاگ — بدون وابستگی به افزونهٔ تقویم */
+function jdate_fa(int $ts): string {
+    return date('Y/m/d H:i', $ts);
+}
+function detailSyncNote(string $profileKey, string $profileName,
+                        string $title, array $lines, string $why): void {
+    $qid = 'dsync_' . preg_replace('~[^A-Za-z0-9_.-]~', '_', $profileKey)
+         . '_' . time() . '_' . substr(bin2hex(random_bytes(3)), 0, 6);
+    $q = extractReadQueue();
+    $q['entries'][] = [
+        'id' => $qid, 'status' => 'done', 'profile_key' => $profileKey,
+        'profile_name' => $profileName, 'started_at' => time(), 'done_at' => time(),
+        'products_count' => 0, 'total' => 0, 'current' => 0,
+        'trigger' => 'auto', 'phase' => 'detail_sync',
+        'detail_skip_why' => $why, 'note_only' => true,
+        'note_title' => $title, 'note_lines' => $lines,
+    ];
+    // فقط ۳۰ ردیف آخر بماند تا فایل صف بی‌نهایت بزرگ نشود
+    if (count($q['entries']) > 30) $q['entries'] = array_slice($q['entries'], -30);
+    extractWriteQueue($q);
+}
+
 function extractReportFile(string $queueId): string {
     $safe = preg_replace('~[^A-Za-z0-9_.-]~', '_', $queueId);
     return __DIR__ . '/extract_report_' . $safe . '.json';
@@ -7738,7 +7780,9 @@ if($u!==''&&filter_var($u,FILTER_VALIDATE_URL))$profileKey=profileKey($u);
    ?phase=list | detail | all — پیش‌فرض all، پس رفتار دکمهٔ دستی عوض نمی‌شود. */
 $phaseIn = (string)($_GET['phase'] ?? $_POST['phase'] ?? 'all');
 if (!in_array($phaseIn, ['all','list','detail'], true)) $phaseIn = 'all';
-$res=runBackendExtract($profileKey,'manual',true,$phaseIn);
+/* v9.11: دامنهٔ «همهٔ محصولات» از دکمهٔ اجرای فوریِ استخراج دوره‌ای */
+$forceAllIn = !empty($_GET['force_all']) || !empty($_POST['force_all']);
+$res=runBackendExtract($profileKey,'manual',true,$phaseIn,$forceAllIn);
 // v8.30: همان اعلان‌های تغییر مبدأ که کران‌جاب می‌فرستد
 if(!empty($res['ok'])){
 $cnNow=loadConnections();
@@ -8186,6 +8230,17 @@ foreach ($profiles as $dKey => $dProfile) {
     if ($dInterval > 0 && ($now - $dLast) < $dInterval) {
         $dRow['status'] = 'not_due';
         $dRow['remaining'] = $dInterval - ($now - $dLast);
+        /* v9.11: «هنوز نوبتش نشده» هم باید دیده شود.
+           تا اینجا این حالت هیچ ردی در صف نمی‌گذاشت، پس از دید کاربر
+           فرقی با «اصلاً اجرا نشد» نداشت و دقیقاً همین باعث شد گزارش
+           بدهد «انگار هیچ اتفاقی نمی‌افتد». حالا یک ردیف اطلاع‌رسان
+           می‌نشیند که می‌گوید چقدر تا نوبت بعدی مانده. */
+        detailSyncNote($dKey, $dProfile['name'] ?? $dKey,
+            '⏳ استخراج دوره‌ای جزئیات — هنوز نوبتش نشده',
+            ['   • دوره: ' . detailSyncIntervalLabel($dInterval),
+             '   • آخرین اجرا: ' . ($dLast > 0 ? jdate_fa($dLast) : 'هنوز اجرا نشده'),
+             '   • نوبت بعدی تا ' . detailSyncDur($dInterval - ($now - $dLast)) . ' دیگر'],
+            'not_due');
         $results['detail_sync'][] = $dRow;
         continue;
     }
@@ -8213,6 +8268,32 @@ foreach ($profiles as $dKey => $dProfile) {
     $dRow['gallery_images'] = (int)($dProg['gallery_images'] ?? 0);
     $dRow['variations']     = (int)($dProg['variation_products'] ?? 0);
     if (!empty($dProg['detail_skip_why'])) $dRow['skip_why'] = (string)$dProg['detail_skip_why'];
+    /* v9.11: خلاصهٔ خوانا از همین اجرا، در خودِ صف استخراج.
+       ردیفِ اصلی را runBackendExtract ساخته؛ این یکی کنارش می‌نشیند و
+       به زبان آدمیزاد می‌گوید چه شد و اگر چیزی نیامده، چرا. */
+    $_dNote = ['   • دامنه: ' . ($dScopeAll ? 'همهٔ محصولات (گالری از نو)' : 'فقط محصولات ناقص'),
+               '   • دوره: ' . detailSyncIntervalLabel($dInterval)];
+    if (!empty($dRow['pre_list'])) $_dNote[] = '   • فهرست هم اول گرفته شد (پروفایل خالی بود)';
+    if (!empty($dRes['ok'])) {
+        $_dNote[] = '   • 🔍 ' . (int)($dProg['detail_ok'] ?? 0) . ' صفحهٔ محصول باز شد'
+                  . (((int)($dProg['detail_fail'] ?? 0)) > 0 ? (' · ' . (int)$dProg['detail_fail'] . ' باز نشد') : '');
+        $_dNote[] = '   • 🖼 ' . (int)($dProg['gallery_images'] ?? 0) . ' تصویر گالری · 🏷 '
+                  . (int)($dProg['detail_fields'] ?? 0) . ' فیلد · 🎨 '
+                  . (int)($dProg['variation_products'] ?? 0) . ' محصول تنوع‌دار';
+        if ($dTot === 0) {
+            $_wh = (string)($dProg['detail_skip_why'] ?? '');
+            $_dNote[] = '   • ⚠️ هیچ محصولی برای باز کردن انتخاب نشد'
+                . ($_wh === 'no_config'   ? ' — نه سلکتور جزئیات تنظیم شده نه گالری روشن است' : '')
+                . ($_wh === 'no_link'     ? ' — محصولات «لینک» ندارند' : '')
+                . ($_wh === 'already_done'? ' — همه از قبل کامل بودند (برای گرفتن دوبارهٔ گالری، دامنه را «همهٔ محصولات» بگذارید)' : '')
+                . ($_wh === 'no_products' ? ' — روی سرور محصولی ذخیره نشده' : '');
+        }
+    } else {
+        $_dNote[] = '   • ❌ ' . mb_substr((string)($dRes['error'] ?? 'خطای نامشخص'), 0, 120);
+    }
+    detailSyncNote($dKey, $dProfile['name'] ?? $dKey,
+        (!empty($dRes['ok']) ? '🔍 استخراج دوره‌ای جزئیات — اجرا شد' : '🔍 استخراج دوره‌ای جزئیات — ناموفق'),
+        $_dNote, (string)($dProg['detail_skip_why'] ?? ''));
     if (!isset($syncState[$dKey])) $syncState[$dKey] = [];
     $syncState[$dKey]['detailLastRun'] = time();
     $results['detail_sync'][] = $dRow;
@@ -8451,7 +8532,10 @@ wooWriteQueue($wooQueue);
 $pResult['woo']='queued';$pResult['woo_total']=count($wooSend);$pResult['woo_status']=$wooStatus;
 }
 } else { $pResult['woo'] = $wooOnlyChanged ? 'no_changes' : 'no_products'; }
-$syncState[$key]=['lastRun'=>$now,'status'=>'running_woo','price_sig'=>$priceSig];
+/* v9.11: کلیدهای دیگرِ همین پروفایل نباید پاک شوند. این انتساب کل
+   ردیف را جایگزین می‌کرد و detailLastRun (زمان‌بندی استخراج دوره‌ای
+   جزئیات) را می‌انداخت — یعنی دورهٔ آن هر بار از صفر شروع می‌شد. */
+$syncState[$key]=array_merge(is_array($syncState[$key]??null)?$syncState[$key]:[],['lastRun'=>$now,'status'=>'running_woo','price_sig'=>$priceSig]);
 }
 if ($target === 'bsl' || $target === 'both') {
 // v8.39: با تیک «افزودن/آپدیت باسلام» فقط تغییرات ارسال می‌شود
@@ -8480,7 +8564,7 @@ if ($bslDup !== null) {
 } else {
 $queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
 bslWriteQueue($queue);
-$syncState[$key] = ['lastRun' => $now, 'status' => 'queued_bsl', 'price_sig' => $priceSig];
+$syncState[$key] = array_merge(is_array($syncState[$key] ?? null) ? $syncState[$key] : [], ['lastRun' => $now, 'status' => 'queued_bsl', 'price_sig' => $priceSig]);   // v9.11
 $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
 }
 } else { $pResult['bsl'] = 'file_save_error'; }
@@ -9971,6 +10055,32 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "if (defined('REQ_DETA" . "CHED')) return;") !== false);
     /* هر محصول ذخیره شود، نه هر ۵ تا — وگرنه کشته‌شدن پردازه کار
        چند محصول را با هم دور می‌ریزد. */
+    /* ---------- v9.11: دیده شدن استخراج دوره‌ای در صف ---------- */
+    /* مرحلهٔ ارسال کل ردیف وضعیت را بازنویسی می‌کرد و زمان‌بندی
+       استخراج دوره‌ای را پاک می‌کرد. */
+    $add('9.11', 'ارسال، زمان‌بندی استخراج دوره‌ای را پاک نمی‌کند',
+         substr_count($selfSrc, 'array_merge(is_array($syncState[$key]') >= 2
+         && strpos($selfSrc, "\$syncState[\$key]=['lastRun'=>\$now,'status'=>'running_w" . "oo'") === false);
+    $add('9.11', 'ردیف گزارشی برای صف ساخته می‌شود',
+         function_exists('detailSync' . 'Note')
+         && strpos($selfSrc, "'phase' => 'detail_s" . "ync',") !== false
+         && strpos($selfSrc, "'note_on" . "ly' => true,") !== false);
+    $add('9.11', 'حالت «نوبتش نشده» هم ردیف می‌گذارد',
+         strpos($selfSrc, "'⏳ استخراج دوره‌ای جزئیات — هنوز نوبتش " . "نشده',") !== false
+         && strpos($selfSrc, "'not_d" . "ue');") !== false);
+    $add('9.11', 'خلاصهٔ هر اجرا در صف ثبت می‌شود',
+         strpos($selfSrc, '$_dNote[] = ' . "'   • 🖼 '") !== false
+         && strpos($selfSrc, 'استخراج دوره‌ای جزئیات — اجرا ' . 'شد') !== false);
+    $add('9.11', 'رابط کاربری ردیف گزارشی را می‌شناسد',
+         strpos($selfSrc, "e.phase==='detail_s" . "ync'") !== false
+         && substr_count($selfSrc, 'if(e.note_on' . 'ly){') >= 2);
+    $add('9.11', 'دکمهٔ اجرای فوری هست و فاز جزئیات را می‌فرستد',
+         strpos($selfSrc, 'function runDetailSync' . 'Now(){') !== false
+         && strpos($selfSrc, 'onclick="runDetailSync' . 'Now()"') !== false);
+    $add('9.11', 'اندپوینت دامنهٔ همه را می‌پذیرد',
+         strpos($selfSrc, "\$forceAllIn = !empty(\$_GET['force_a" . "ll'])") !== false
+         && strpos($selfSrc, 'runBackendExtract($profileKey,' . "'manual',true,\$phaseIn,\$forceAllIn);") !== false);
+
     /* ---------- v9.10: استخراج دوره‌ای جزئیات ---------- */
     $add('9.10', 'بخش استخراج دوره‌ای جزئیات در تب شروع هست',
          strpos($selfSrc, 'id="profileDetail' . 'En"') !== false
@@ -10071,9 +10181,11 @@ if (isset($_GET['selftest'])) {
     $add('9.01', 'دروازهٔ ارسال بعد از گام جزئیات باز می‌شود',
          strpos($selfSrc, 'if ($stageOpen) {') !== false
          && strpos($selfSrc, 'if ($stageOpen || $detailWas' . 'Unfinished) {') === false);
+    /* v9.11: فراخوانی یک آرگومان force_all هم گرفت (دکمهٔ اجرای فوریِ
+       استخراج دوره‌ای)، پس دیگر به $phaseIn); ختم نمی‌شود. */
     $add('9.01', 'اندپوینت پارامتر phase را می‌پذیرد',
          strpos($selfSrc, "\$phaseIn = (string)(\$_GET['phase'] ?? \$_POST['phase'] ?? 'all');") !== false
-         && strpos($selfSrc, 'runBackendExtract($profileKey,' . "'manual',true,\$phaseIn);") !== false);
+         && strpos($selfSrc, 'runBackendExtract($profileKey,' . "'manual',true,\$phaseIn,\$forceAllIn);") !== false);
 
     /* ---------- v9.00: راه عبور برای سایت مبدأ ---------- */
     $add('9.00', 'تنظیمات عبور سایت مبدأ جدا از هوش مصنوعی',
@@ -19368,6 +19480,9 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
                 همان کاری که دکمهٔ «🔍 استخراج تفصیلی (سرور)» می‌کند، ولی دوره‌ای و خودکار.
                 کار روی سرور انجام می‌شود و بستن مرورگر قطعش نمی‌کند.
             </div>
+            <div class="row" style="margin-top:6px">
+                <button class="btn btn-pink" onclick="runDetailSyncNow()" style="flex:1;font-size:11px">▶ اجرای همین حالا (بدون انتظار دوره)</button>
+            </div>
             <div id="profileDetailStatus" style="font-size:10px;color:#64748b;margin-top:6px"></div>
         </div>
     </div>
@@ -22247,6 +22362,14 @@ function renderExtractQueue(entries, progress){
         }else if(st==='failed'){
             progText=e.error?esc(e.error):'استخراج ناتمام ماند';
         }
+        /* v9.11: ردیف گزارشیِ استخراج دوره‌ای — متن خودش را دارد و
+           شمارنده‌های محصول برایش بی‌معناست. */
+        if(e.note_only){
+            progText='<b style="color:#f9a8d4">'+esc(e.note_title||'')+'</b>'
+                +(Array.isArray(e.note_lines)&&e.note_lines.length
+                    ?('<br>'+e.note_lines.map(l=>esc(l)).join('<br>')):'');
+            progPercent=0;
+        }
 
         html+='<div onclick="showExtractLogModal(\''+esc(e.id)+'\')" style="cursor:pointer;padding:8px 10px;border:1px solid #334155;border-radius:8px;margin:4px 0;background:'+statusBg[st]+';transition:background 0.2s" onmouseover="this.style.borderColor=\'#a855f7\'" onmouseout="this.style.borderColor=\'#334155\'">';
 
@@ -22266,6 +22389,9 @@ function renderExtractQueue(entries, progress){
             html+='<span style="color:#fbbf24;font-size:10px;background:#42200630;padding:1px 6px;border-radius:4px">📄 مرحله ۱: فهرست</span>';
         }else if(e.phase==='detail'){
             html+='<span style="color:#f9a8d4;font-size:10px;background:#50072430;padding:1px 6px;border-radius:4px">🔍 مرحله ۲: جزئیات</span>';
+        }else if(e.phase==='detail_sync'){
+            // v9.11: ردیف گزارشِ «استخراج دوره‌ای جزئیات»
+            html+='<span style="color:#f9a8d4;font-size:10px;background:#50072430;padding:1px 6px;border-radius:4px">🔍 استخراج دوره‌ای جزئیات</span>';
         }
         if(e.profile_name)html+='<span style="color:#94a3b8;font-size:10px">'+esc(e.profile_name)+'</span>';
         if(products>0)html+='<span style="color:#e2e8f0;font-weight:600;font-size:12px">'+toFa(products)+' محصول</span>';
@@ -22279,7 +22405,7 @@ function renderExtractQueue(entries, progress){
         html+='</div></div>';
 
         // ردیف ۲: نوار پیشرفت
-        if(progPercent>0||st==='running'||st==='paused'||st==='done'){
+        if(!e.note_only&&(progPercent>0||st==='running'||st==='paused'||st==='done')){
             html+='<div style="margin-top:4px"><div style="height:4px;background:#1e293b;border-radius:2px;overflow:hidden"><div style="height:100%;background:'+statusColors[st]+';width:'+progPercent+'%;border-radius:2px;transition:width 0.5s"></div></div></div>';
         }
 
@@ -22289,7 +22415,7 @@ function renderExtractQueue(entries, progress){
         /* v8.90: نشان‌های شمارشی — تصاویر، فیلدها، تنوع‌ها و شکست‌ها.
            تا حالا فقط تعداد محصول دیده می‌شد و معلوم نبود از دل جزئیات چه
            چیزی واقعاً بیرون آمده. */
-        if(galImgs>0||dFields>0||varProds>0||dFail>0){
+        if(!e.note_only&&(galImgs>0||dFields>0||varProds>0||dFail>0)){
             const badge=(bg,fg,txt)=>'<span style="background:'+bg+';color:'+fg
                 +';font-size:9.5px;padding:1px 6px;border-radius:9px;white-space:nowrap">'+txt+'</span>';
             html+='<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">';
@@ -22384,6 +22510,20 @@ function renderPhase2Report(queueId){
         const rows=(d&&d.entries)||[];
         const e=rows.find(x=>x.id===queueId);
         if(!e){box.innerHTML='';return;}
+        /* v9.11: ردیف گزارشیِ استخراج دوره‌ای — متن آماده دارد و
+           شمارنده‌های فاز ۲ برایش معنا ندارد. */
+        if(e.note_only){
+            let nh='<div style="margin-top:10px;padding:10px 12px;background:#0f172a;border:1px solid #334155;border-radius:10px">';
+            nh+='<div style="font-weight:700;font-size:12px;color:#f9a8d4;margin-bottom:6px">'+esc(e.note_title||'')+'</div>';
+            nh+='<div style="font-size:11px;color:#cbd5e1;line-height:2">'
+              +((e.note_lines||[]).map(l=>esc(l)).join('<br>'))+'</div>';
+            nh+='<div style="font-size:10px;color:#64748b;margin-top:8px">'
+              +'این ردیف گزارشِ «استخراج دوره‌ای جزئیات» است. ردیف‌های «🔍 مرحله ۲: جزئیات» '
+              +'کار واقعی استخراج را نشان می‌دهند.</div>';
+            nh+='</div>';
+            box.innerHTML=nh;
+            return;
+        }
         const live=(e.status==='running'&&d.progress&&d.progress.running)?d.progress:null;
         const pages=(live&&live.detail_ok)||e.detail_ok||0;
         const fail =(live&&live.detail_fail)||e.detail_fail||0;
@@ -23090,6 +23230,22 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.11', t:'👁 استخراج دوره‌ای جزئیات حالا در صف دیده می‌شود', items:[
+    'گزارش شما: «انگار اتفاقی نمی‌افتد» و خواستید جزئیات وظیفه و لاگ‌ها',
+    'در بخش صف استخراج بیاید.',
+    '🐞 یک باگ واقعی پیدا شد: مرحلهٔ ارسال، کل ردیف وضعیت پروفایل را',
+    'بازنویسی می‌کرد و detailLastRun را پاک می‌کرد. یعنی زمان‌بندی',
+    'استخراج دوره‌ای هر بار از صفر شروع می‌شد و روی دوره‌های بلند',
+    'عملاً هیچ‌وقت به نوبتش نمی‌رسید. حالا فقط کلیدهای خودش به‌روز می‌شوند.',
+    '👁 حالت «هنوز نوبتش نشده» تا حالا هیچ ردی نمی‌گذاشت — از دید شما',
+    'با «اصلاً اجرا نشد» فرقی نداشت. حالا یک ردیف در صف می‌نشیند و',
+    'می‌گوید دوره چقدر است، آخرین اجرا کی بوده و چقدر تا نوبت بعدی مانده.',
+    '📋 بعد از هر اجرا هم یک ردیف خلاصه با برچسب «🔍 استخراج دوره‌ای',
+    'جزئیات» اضافه می‌شود: چند صفحه باز شد، چند تصویر گالری، چند فیلد،',
+    'چند محصول تنوع‌دار — و اگر چیزی نیامد، دقیقاً چرا.',
+    '▶ دکمهٔ «اجرای همین حالا» اضافه شد تا بدون انتظار برای دوره',
+    'بتوانید تنظیمات را همان لحظه آزمایش کنید.'
+  ]},
   {v:'9.10', t:'🔍 بخش تازه: استخراج دوره‌ای جزئیات', items:[
     'خواستهٔ شما: یک بخش با تیک و دراپ‌داون دوره، در تب شروع، بعد از',
     '«همگام‌سازی دوره‌ای» — که با اجرای دوره‌ای‌اش همهٔ جزئیات بیاید.',
@@ -28844,6 +29000,29 @@ function getDetailSyncConfig(){
         interval:isNaN(iv)?3600:iv,
         scope:($('profileDetailScope')&&$('profileDetailScope').value)||'missing'
     };
+}
+/* v9.11: اجرای فوری همین قابلیت، بدون منتظر ماندن برای دوره.
+   بدون این، تنها راه آزمودنِ تنظیمات صبر کردن تا نوبت بعدی بود و
+   کاربر نمی‌توانست بفهمد اصلاً کار می‌کند یا نه. */
+function runDetailSyncNow(){
+    const url=($('url')&&$('url').value.trim())
+              ||($('profileSelect')&&$('profileSelect').value.trim())||'';
+    if(!url){showToast('⚠️ ابتدا پروفایل را انتخاب کنید',1);return;}
+    if(!($('profileDetailEn')&&$('profileDetailEn').checked)){
+        showToast('⚠️ اول تیک «استخراج دوره‌ای جزئیات» را بزنید',1);return;
+    }
+    const go=()=>{
+        const scope=($('profileDetailScope')&&$('profileDetailScope').value)||'missing';
+        openExtractPanel('🔍 استخراج دوره‌ای جزئیات — اجرای فوری');
+        showToast('🔍 شروع شد — دامنه: '+(scope==='all'?'همهٔ محصولات':'فقط ناقص‌ها'));
+        fetch('?action=backend_extract&phase=detail&force_all='+(scope==='all'?'1':'0')
+              +'&profile_key='+encodeURIComponent(profileKey(url)),{method:'GET'}).catch(()=>{});
+        watchExtractProgress();
+    };
+    if(typeof saveProfileSilent==='function'){
+        saveProfileSilent();
+        setTimeout(go,900);
+    }else go();
 }
 function updateDetailSyncStatusText(){
     const box=$('profileDetailStatus');
