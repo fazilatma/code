@@ -73,7 +73,7 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.11';
+const APP_VERSION = '9.12';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -8066,6 +8066,36 @@ function cronWatchdogs(array $cn): array {
     return $results;
 }
 
+/* v9.12: «کدام فایل واقعاً اجرا می‌شود؟»
+
+   چند نوبت پیش آمد که نسخهٔ تازه ساخته و پوش شده بود ولی مرورگر نسخهٔ
+   قدیمی را نشان می‌داد. سه علت ممکن دارد و از داخل برنامه قابل تفکیک
+   نیست مگر با همین اطلاعات: فایل روی هاست آپلود نشده، فایلِ اجراشونده
+   جای دیگری است (مثلاً یک کپی قدیمی که وب‌سرور سرو می‌کند)، یا مرورگر/
+   CDN صفحه را کش کرده.
+
+   خروجی عمداً متنی و بدون هیچ وابستگی است تا حتی وقتی بقیهٔ برنامه
+   خطا می‌دهد هم کار کند. */
+if (isset($_GET['whoami'])) {
+    header('Content-Type: text/plain; charset=UTF-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    $f = __FILE__;
+    echo "نسخهٔ کدِ در حال اجرا: v" . APP_VERSION . "\n";
+    echo "تاریخ نسخه: " . APP_VERSION_DATE . "\n\n";
+    echo "مسیر فایلِ اجراشونده: " . $f . "\n";
+    echo "حجم فایل: " . (int)@filesize($f) . " بایت\n";
+    echo "آخرین تغییر فایل: " . date('Y/m/d H:i:s', (int)@filemtime($f)) . "\n";
+    echo "اثر انگشت فایل (md5): " . (string)@md5_file($f) . "\n\n";
+    echo "زمان سرور: " . date('Y/m/d H:i:s') . "\n";
+    echo "PHP: " . PHP_VERSION . " · SAPI: " . PHP_SAPI . "\n";
+    echo "کش کد (opcache): "
+       . (function_exists('opcache_get_status') ? 'در دسترس' : 'ندارد') . "\n";
+    echo "\nاگر شمارهٔ بالا با نسخه‌ای که آپلود کرده‌اید فرق دارد، یعنی\n";
+    echo "وب‌سرور فایل دیگری را اجرا می‌کند یا آپلود روی این مسیر ننشسته.\n";
+    exit;
+}
+
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
 header('Content-Type: application/json; charset=UTF-8');
 @set_time_limit(0);
@@ -10055,6 +10085,17 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "if (defined('REQ_DETA" . "CHED')) return;") !== false);
     /* هر محصول ذخیره شود، نه هر ۵ تا — وگرنه کشته‌شدن پردازه کار
        چند محصول را با هم دور می‌ریزد. */
+    /* ---------- v9.12: تشخیص نسخهٔ فایلِ اجراشونده ---------- */
+    $add('9.12', 'اندپوینت whoami هست و کش نمی‌شود',
+         strpos($selfSrc, "isset(\$_GET['who" . "ami'])") !== false
+         && strpos($selfSrc, "'Cache-Control: no-store, no-cache, must-revalidate, max-age=0'") !== false);
+    $add('9.12', 'whoami مسیر و اثر انگشت فایل را می‌گوید',
+         strpos($selfSrc, 'اثر انگشت فایل (md' . '5): ') !== false
+         && strpos($selfSrc, 'مسیر فایلِ اجرا' . 'شونده: ') !== false);
+    $add('9.12', 'بنر، تاریخ و اثر انگشت فایل را نشان می‌دهد',
+         strpos($selfSrc, 'h(substr((string)@md5_' . 'file(__FILE__), 0, 8))?>') !== false
+         && strpos($selfSrc, 'h(date(\'Y/m/d H:i\', (int)@file' . 'mtime(__FILE__)))?>') !== false);
+
     /* ---------- v9.11: دیده شدن استخراج دوره‌ای در صف ---------- */
     /* مرحلهٔ ارسال کل ردیف وضعیت را بازنویسی می‌کرد و زمان‌بندی
        استخراج دوره‌ای را پاک می‌کرد. */
@@ -18689,6 +18730,15 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
      border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:11.5px;line-height:1.9;color:#cbd5e1">
   <b style="color:#4ade80">نسخهٔ فایلِ روی این هاست: v<?=APP_VERSION?></b>
   <span style="color:#64748b">·</span>
+  <?php /* v9.12: زمان و اثر انگشت خودِ فایل. اگر نسخهٔ تازه را آپلود
+           کرده‌اید ولی این تاریخ قدیمی است، فایل روی هاست عوض نشده یا
+           وب‌سرور نسخهٔ دیگری را اجرا می‌کند. */ ?>
+  <span style="color:#64748b;font-size:10px">آپلودشده
+    <?=h(date('Y/m/d H:i', (int)@filemtime(__FILE__)))?>
+    · <code style="direction:ltr"><?=h(substr((string)@md5_file(__FILE__), 0, 8))?></code>
+    · <a href="?whoami=1" target="_blank" style="color:#67e8f9">بررسی نسخهٔ اجراشونده</a>
+  </span>
+  <span style="color:#64748b">·</span>
   <span style="color:#94a3b8">این نسخه شامل:</span>
   <span style="color:#86efac">🎨 تنوع‌ها</span> ·
   <span style="color:#86efac">🖼 گالری چندعکسی</span> ·
@@ -23230,6 +23280,22 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.12', t:'🔎 بفهمید کدام فایل واقعاً روی هاست اجرا می‌شود', items:[
+    'گزارش شما: «هنوز کد ۹.۱۰ را نشان می‌دهد».',
+    '🔍 بررسی کردم: کد داخل مخزن قطعاً ۹.۱۱ بود — هر پنج جایی که نسخه',
+    'نمایش داده می‌شود (نوار بالا، بنر، خودآزمون، تغییرات) ۹.۱۱ می‌گفتند.',
+    'پس فایل روی هاست شما هنوز عوض نشده بوده، نه اینکه نسخه ساخته نشده.',
+    '⚠️ سه علت ممکن دارد و از ظاهر برنامه قابل تشخیص نبود:',
+    '۱) فایل تازه روی هاست آپلود نشده (یا در مسیر دیگری نشسته)',
+    '۲) وب‌سرور فایل دیگری را اجرا می‌کند — مثلاً کپی قدیمی',
+    '۳) مرورگر یا CDN صفحهٔ قدیمی را کش کرده',
+    '✅ حالا بنر بالای صفحه، تاریخ آپلود و اثر انگشت خودِ فایل را نشان',
+    'می‌دهد. اگر نسخهٔ تازه را گذاشته‌اید ولی تاریخ قدیمی است، یعنی',
+    'آپلود روی این مسیر ننشسته.',
+    '✅ آدرس <code>?whoami=1</code> اضافه شد: مسیر دقیق فایل، حجم،',
+    'زمان تغییر، md5 و نسخه — بدون کش. با این یک آدرس معلوم می‌شود',
+    'مشکل از آپلود است یا از کش مرورگر.'
+  ]},
   {v:'9.11', t:'👁 استخراج دوره‌ای جزئیات حالا در صف دیده می‌شود', items:[
     'گزارش شما: «انگار اتفاقی نمی‌افتد» و خواستید جزئیات وظیفه و لاگ‌ها',
     'در بخش صف استخراج بیاید.',
