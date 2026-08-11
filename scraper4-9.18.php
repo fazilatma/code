@@ -78,7 +78,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.17';
+const APP_VERSION = '9.18';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -8135,6 +8135,12 @@ if (isset($_GET['backup_status'])) {
     usort($local, fn($a, $b) => $b['at'] <=> $a['at']);
     $log = is_file(BACKUP_LOG_FILE)
         ? (json_decode((string)@file_get_contents(BACKUP_LOG_FILE), true) ?: []) : [];
+    /* v9.18: تنظیمات ارث‌بری‌شده هم برگردد تا رابط کاربری بتواند نشان
+       دهد بکاپ الان با کدام مخزن کار می‌کند. توکن فقط بله/خیر. */
+    $vcNow = vc_load();
+    $c['vc'] = ['repo' => (string)($vcNow['repo'] ?? ''),
+                'branch' => (string)($vcNow['branch'] ?? ''),
+                'has_token' => trim((string)($vcNow['github_token'] ?? '')) !== ''];
     echo json_encode(['ok' => true, 'cfg' => $c, 'local' => $local,
         'log' => array_slice(array_reverse($log), 0, 12),
         'data_files' => backupDataFiles(), 'code_files' => count(backupCodeFiles())],
@@ -8143,19 +8149,32 @@ if (isset($_GET['backup_status'])) {
 }
 if (($_POST['action'] ?? '') === 'backup_save_cfg') {
     header('Content-Type: application/json; charset=UTF-8');
-    $c = backupCfg();
-    // توکن خالی یعنی «دست نزن» — تا ماسکِ نمایش، توکن واقعی را پاک نکند
-    $tok = trim((string)($_POST['token'] ?? ''));
-    if ($tok !== '' && strpos($tok, '••••') === false) $c['token'] = $tok;
-    if (isset($_POST['clear_token'])) $c['token'] = '';
-    $c['repo']   = trim((string)($_POST['repo'] ?? $c['repo']));
-    $c['branch'] = trim((string)($_POST['branch'] ?? $c['branch'])) ?: 'main';
-    $c['path']   = trim((string)($_POST['path'] ?? $c['path']), '/');
+    /* v9.18: آنچه روی دیسک می‌نشیند، نه آنچه از نصب‌کننده به ارث رسیده.
+       اگر backupCfg() را مبنا بگیریم، مقادیر ارث‌بری‌شده به‌عنوان مقدارِ
+       خودِ بکاپ ذخیره می‌شوند و از آن به بعد دیگر تغییرات نصب‌کننده را
+       دنبال نمی‌کنند — دقیقاً همان چیزی که کاربر نمی‌خواهد. */
+    $c = is_file(BACKUP_CFG_FILE)
+        ? (json_decode((string)@file_get_contents(BACKUP_CFG_FILE), true) ?: [])
+        : [];
+    $c['own_repo'] = !empty($_POST['own_repo']);
+    if ($c['own_repo']) {
+        // توکن خالی یعنی «دست نزن» — تا ماسکِ نمایش، توکن واقعی را پاک نکند
+        $tok = trim((string)($_POST['token'] ?? ''));
+        if ($tok !== '' && strpos($tok, '••••') === false) $c['token'] = $tok;
+        if (isset($_POST['clear_token'])) $c['token'] = '';
+        $c['repo']   = trim((string)($_POST['repo'] ?? ($c['repo'] ?? '')));
+        $c['branch'] = trim((string)($_POST['branch'] ?? ($c['branch'] ?? ''))) ?: 'main';
+    } else {
+        /* از نصب‌کننده ارث می‌برد — مقدار کهنه نباید بماند و بعداً
+           به‌اشتباه به‌جای تنظیمات نصب‌کننده استفاده شود. */
+        unset($c['repo'], $c['branch'], $c['token']);
+    }
+    $c['path']   = trim((string)($_POST['path'] ?? ($c['path'] ?? 'backups')), '/');
     $c['include_data'] = !empty($_POST['include_data']);
     $c['include_code'] = !empty($_POST['include_code']);
     $c['auto']         = !empty($_POST['auto']);
-    $c['auto_every_h'] = max(1, (int)($_POST['auto_every_h'] ?? $c['auto_every_h']));
-    $c['keep']         = max(1, (int)($_POST['keep'] ?? $c['keep']));
+    $c['auto_every_h'] = max(1, (int)($_POST['auto_every_h'] ?? ($c['auto_every_h'] ?? 24)));
+    $c['keep']         = max(1, (int)($_POST['keep'] ?? ($c['keep'] ?? 20)));
     echo json_encode(['ok' => backupSaveCfg($c)], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -8471,15 +8490,40 @@ function b64dec(string $enc) {
     return $f($enc, true);
 }
 
+/* v9.18: مخزن و توکن از «منبع و نصب‌کننده» می‌آید.
+
+   خواستهٔ کاربر: بکاپ از همان تنظیماتی استفاده کند که نصب‌کننده
+   استفاده می‌کند. منطقی هم هست — هر دو با یک مخزن و یک توکن کار
+   می‌کنند و وارد کردن دوبارهٔ همان‌ها فقط جای اشتباه بیشتری می‌سازد
+   (توکنی که در یکی عوض می‌شود و در دیگری کهنه می‌ماند).
+
+   حالا مخزن، برنچ و توکن پیش‌فرض از .versioncheck.json خوانده می‌شوند.
+   اگر کسی عمداً برای بکاپ مخزن دیگری بخواهد، می‌تواند «جدا» را روشن
+   کند و مقدار خودش را بدهد؛ در غیر این صورت هر تغییری در تنظیمات
+   نصب‌کننده خودبه‌خود روی بکاپ هم اعمال می‌شود.
+
+   فقط «پوشه» جداست، چون بکاپ نباید کنار کد بنشیند. */
 function backupCfg(): array {
     $d = is_file(BACKUP_CFG_FILE)
         ? (json_decode((string)@file_get_contents(BACKUP_CFG_FILE), true) ?: [])
         : [];
+    $vc = function_exists('vc_load') ? vc_load() : [];
+    $own = !empty($d['own_repo']);          // مخزن جدا برای بکاپ
+    $repo   = $own ? (string)($d['repo'] ?? '')   : (string)($vc['repo'] ?? '');
+    $branch = $own ? (string)($d['branch'] ?? '') : (string)($vc['branch'] ?? 'main');
+    $token  = $own ? (string)($d['token'] ?? '')  : (string)($vc['github_token'] ?? '');
+    /* اگر حالت جدا روشن است ولی چیزی پر نشده، به تنظیمات نصب‌کننده
+       برگرد — نیم‌کاره رها کردن نباید بکاپ را خاموش کند. */
+    if ($repo   === '') $repo   = (string)($vc['repo'] ?? '');
+    if ($branch === '') $branch = (string)($vc['branch'] ?? 'main');
+    if ($token  === '') $token  = (string)($vc['github_token'] ?? '');
     return [
-        'token'   => (string)($d['token'] ?? ''),
-        'repo'    => (string)($d['repo'] ?? ''),      // owner/name
-        'branch'  => (string)($d['branch'] ?? 'main'),
+        'token'   => $token,
+        'repo'    => $repo,                          // owner/name
+        'branch'  => $branch ?: 'main',
         'path'    => trim((string)($d['path'] ?? 'backups'), '/'),
+        'own_repo'=> $own,
+        'from_installer' => !$own,
         'include_data' => !isset($d['include_data']) || !empty($d['include_data']),
         'include_code' => !empty($d['include_code']),
         'auto'    => !empty($d['auto']),
@@ -10670,6 +10714,23 @@ if (isset($_GET['selftest'])) {
        می‌شود، حتی اگر بکاپ را بیرون ببرید. معیار درست فاصله است —
        پنل بکاپ باید بلافاصله بعد از دکمهٔ «بکاپ ورک‌اسپیس هاست»
        بیاید، یعنی هنوز داخل بدنهٔ همان بخش است. */
+    /* ---------- v9.18: بکاپ از تنظیمات نصب‌کننده ارث می‌برد ---------- */
+    $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
+         strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
+         && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
+    $add('9.18', 'حالت مخزن جدا وجود دارد',
+         strpos($selfSrc, "\$own = !empty(\$d['own_r" . "epo']);") !== false
+         && strpos($selfSrc, 'id="bkOwn' . 'Repo"') !== false);
+    /* اگر حالت جدا روشن ولی خالی باشد، نباید بکاپ خاموش شود */
+    $add('9.18', 'مقدار خالیِ مخزن جدا به نصب‌کننده برمی‌گردد',
+         strpos($selfSrc, "if (\$repo   === '') \$repo   = (string)(\$vc['repo'] ?? '');") !== false);
+    /* ذخیره نباید مقدارِ ارث‌بری‌شده را به‌عنوان مقدار خودِ بکاپ بنویسد */
+    $add('9.18', 'ذخیره، مقدار ارث‌بری‌شده را ثابت نمی‌کند',
+         strpos($selfSrc, "unset(\$c['repo'], \$c['branch'], \$c['tok" . "en']);") !== false);
+    $add('9.18', 'رابط کاربری مخزن ارث‌بری‌شده را نشان می‌دهد',
+         strpos($selfSrc, 'id="bkVc' . 'Repo"') !== false
+         && strpos($selfSrc, "\$c['vc'] = ['repo' =>") !== false);
+
     $add('9.17', 'بکاپ زیرمجموعهٔ منبع و نصب‌کننده است',
          (($_p17a = strpos($selfSrc, 'onclick="vcOpen' . 'Backup()"')) !== false)
          && (($_p17b = strpos($selfSrc, '💾 بکاپ و بازیابی داده‌' . 'ها', $_p17a)) !== false)
@@ -19515,17 +19576,33 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
     <b style="color:#fbbf24">مخزن را حتماً خصوصی بسازید</b> — این فایل‌ها توکن و داده‌های شما را دارند.
   </div>
 
-  <div class="crow"><label>مخزن</label>
-    <input type="text" id="bkRepo" placeholder="username/repo-name" dir="ltr"></div>
-  <div class="crow"><label>برنچ</label>
-    <input type="text" id="bkBranch" placeholder="main" dir="ltr"></div>
+  <!-- v9.18: مخزن و توکن از تنظیمات بالا (منبع و نصب‌کننده) می‌آید -->
+  <div id="bkInherit" style="font-size:11px;color:#94a3b8;line-height:1.9;background:#0f172a;border:1px solid #334155;border-right:3px solid #22d3ee;border-radius:8px;padding:8px 10px;margin-bottom:8px">
+    <b style="color:#67e8f9">از تنظیمات «⚙️ منبع و نصب‌کننده» استفاده می‌شود</b><br>
+    <span style="color:#64748b">مخزن:</span> <code id="bkVcRepo" style="direction:ltr">—</code>
+    <span style="color:#64748b">·</span> <span style="color:#64748b">برنچ:</span> <code id="bkVcBranch" style="direction:ltr">—</code><br>
+    <span style="color:#64748b">توکن:</span> <span id="bkVcToken">—</span>
+  </div>
+  <div class="crow" style="align-items:center">
+    <label style="min-width:auto;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
+      <input type="checkbox" id="bkOwnRepo" onchange="bkToggleOwn()"> مخزن جدا برای بکاپ</label>
+  </div>
+  <div id="bkOwnBox" style="display:none">
+    <div class="crow"><label>مخزن</label>
+      <input type="text" id="bkRepo" placeholder="username/repo-name" dir="ltr"></div>
+    <div class="crow"><label>برنچ</label>
+      <input type="text" id="bkBranch" placeholder="main" dir="ltr"></div>
+    <div class="crow"><label>توکن</label>
+      <input type="password" id="bkToken" placeholder="ghp_..." dir="ltr"></div>
+    <div style="font-size:10px;color:#64748b;margin:-4px 0 8px;line-height:1.7">
+      توکن با دسترسی <code style="direction:ltr">repo</code> (یا Fine-grained با اجازهٔ Contents: Read and write).
+      اگر خالی بماند، از توکن نصب‌کننده استفاده می‌شود.
+    </div>
+  </div>
   <div class="crow"><label>پوشه</label>
     <input type="text" id="bkPath" placeholder="backups" dir="ltr"></div>
-  <div class="crow"><label>توکن</label>
-    <input type="password" id="bkToken" placeholder="ghp_..." dir="ltr"></div>
   <div style="font-size:10px;color:#64748b;margin:-4px 0 8px;line-height:1.7">
-    توکن با دسترسی <code style="direction:ltr">repo</code> (یا Fine-grained با اجازهٔ Contents: Read and write).
-    توکن فقط روی هاست ذخیره می‌شود و هیچ‌وقت نمایش داده نمی‌شود.
+    پوشه همیشه جداست تا بکاپ‌ها کنار کد ننشینند.
   </div>
 
   <div class="crow" style="align-items:center">
@@ -23996,6 +24073,21 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.18', t:'🔗 بکاپ از همان مخزن و توکن نصب‌کننده استفاده می‌کند', items:[
+    'خواستهٔ شما: بکاپ از همان تنظیمات «منبع و نصب‌کننده» استفاده کند.',
+    'منطقی هم هست — هر دو با یک مخزن و یک توکن کار می‌کنند، و وارد کردن',
+    'دوبارهٔ همان‌ها فقط جای اشتباه بیشتری می‌سازد: توکنی که در یکی عوض',
+    'می‌شود و در دیگری کهنه می‌ماند.',
+    '✅ حالا مخزن، برنچ و توکن مستقیم از تنظیمات نصب‌کننده خوانده',
+    'می‌شوند. هر تغییری آنجا، خودبه‌خود روی بکاپ هم اعمال می‌شود.',
+    '👁 همان بالای پنل نشان داده می‌شود که الان با کدام مخزن و برنچ کار',
+    'می‌کند و توکن تنظیم شده یا نه — پس معلوم است چه چیزی به ارث رسیده.',
+    '📁 فقط «پوشه» جدا ماند، تا بکاپ‌ها کنار کد ننشینند.',
+    '⚙️ اگر عمداً مخزن دیگری برای بکاپ می‌خواهید، تیک «مخزن جدا برای',
+    'بکاپ» را بزنید و مقدار خودتان را بدهید. اگر آن را روشن کنید ولی',
+    'خالی بگذارید، باز هم به تنظیمات نصب‌کننده برمی‌گردد تا بکاپ',
+    'به‌خاطر یک فیلد نیمه‌کاره خاموش نشود.'
+  ]},
   {v:'9.17', t:'🗂 بکاپ و بازیابی به «منبع و نصب‌کننده» منتقل شد', items:[
     'خواستهٔ شما: این دو بخش ادغام شوند.',
     'هر دو با یک چیز سروکار دارند — مخزن گیت‌هاب و توکنش — پس جدا بودنشان',
@@ -26656,10 +26748,21 @@ function bkRefresh(){
     fetch('?backup_status=1').then(r=>r.json()).then(d=>{
         if(!d||!d.ok)return;
         const c=d.cfg||{};
-        if($('bkRepo')&&!$('bkRepo').value)$('bkRepo').value=c.repo||'';
-        if($('bkBranch')&&!$('bkBranch').value)$('bkBranch').value=c.branch||'main';
+        /* v9.18: مقادیر ارث‌بری‌شده از «منبع و نصب‌کننده» */
+        const vc=c.vc||{};
+        if($('bkVcRepo'))$('bkVcRepo').textContent=vc.repo||'— تنظیم نشده';
+        if($('bkVcBranch'))$('bkVcBranch').textContent=vc.branch||'main';
+        if($('bkVcToken')){
+            $('bkVcToken').innerHTML=vc.has_token
+                ?'<span style="color:#4ade80">ذخیره شده ✓</span>'
+                :'<span style="color:#fbbf24">تنظیم نشده — برای مخزن خصوصی لازم است</span>';
+        }
+        if($('bkOwnRepo'))$('bkOwnRepo').checked=!!c.own_repo;
+        bkToggleOwn();
+        if($('bkRepo')&&!$('bkRepo').value&&c.own_repo)$('bkRepo').value=c.repo||'';
+        if($('bkBranch')&&!$('bkBranch').value&&c.own_repo)$('bkBranch').value=c.branch||'main';
         if($('bkPath')&&!$('bkPath').value)$('bkPath').value=c.path||'backups';
-        if($('bkToken'))$('bkToken').placeholder=c.token?('ذخیره شده '+c.token):'ghp_...';
+        if($('bkToken'))$('bkToken').placeholder=(c.own_repo&&c.token)?('ذخیره شده '+c.token):'ghp_...';
         if($('bkIncData'))$('bkIncData').checked=!!c.include_data;
         if($('bkIncCode'))$('bkIncCode').checked=!!c.include_code;
         if($('bkAuto'))$('bkAuto').checked=!!c.auto;
@@ -26701,14 +26804,25 @@ function bkRefresh(){
         if($('bkLog'))$('bkLog').innerHTML=lg||'<span style="color:#64748b">—</span>';
     }).catch(()=>{});
 }
+/* v9.18: فیلدهای مخزن فقط وقتی معنا دارند که «مخزن جدا» روشن باشد */
+function bkToggleOwn(){
+    const on=!!(($('bkOwnRepo')||{}).checked);
+    const box=$('bkOwnBox'), inh=$('bkInherit');
+    if(box)box.style.display=on?'block':'none';
+    if(inh)inh.style.opacity=on?'0.45':'1';
+}
 function bkSaveCfg(){
     const fd=new FormData();
     fd.append('action','backup_save_cfg');
-    fd.append('repo',($('bkRepo')||{}).value||'');
-    fd.append('branch',($('bkBranch')||{}).value||'main');
+    const own=!!(($('bkOwnRepo')||{}).checked);
+    if(own){
+        fd.append('own_repo','1');
+        fd.append('repo',($('bkRepo')||{}).value||'');
+        fd.append('branch',($('bkBranch')||{}).value||'main');
+        const t=($('bkToken')||{}).value||'';
+        if(t)fd.append('token',t);
+    }
     fd.append('path',($('bkPath')||{}).value||'backups');
-    const t=($('bkToken')||{}).value||'';
-    if(t)fd.append('token',t);
     if(($('bkIncData')||{}).checked)fd.append('include_data','1');
     if(($('bkIncCode')||{}).checked)fd.append('include_code','1');
     if(($('bkAuto')||{}).checked)fd.append('auto','1');
