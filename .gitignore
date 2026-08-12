@@ -1,1 +1,8 @@
 
+coding-agent/sessions/*.json
+coding-agent/workspace/*
+!coding-agent/workspace/.gitkeep
+coding-agent/workspace/.tmp_run_*
+__pycache__/
+*.pyc
+.DS_Store
