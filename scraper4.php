@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.25';
-const APP_VERSION_DATE = '1405/05/27';
+const APP_VERSION = '9.26';
+const APP_VERSION_DATE = '1405/05/28';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -615,7 +615,7 @@ function writeJsonFile(string $path, $data): array {
 }
 
 function writeProgress(string $file, array $data): void {
-@file_put_contents($file, json_encode($data, JSON_UNESCAPED_UNICODE), LOCK_EX);
+writeJsonFile($file, $data);
 }
 function readProgress(string $file): array {
 if (!file_exists($file)) return ['running'=>false,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'total'=>0,'last_title'=>'','last_index'=>0,'done'=>false,'started_at'=>0,'total_log_count'=>0];
@@ -1037,8 +1037,7 @@ function aiProvidersLoad(): array {
 }
 /** فهرست ارائه‌دهنده‌ها را ذخیره می‌کند */
 function aiProvidersSave(array $p): bool {
-    return @file_put_contents(AI_PROVIDERS_FILE,
-        json_encode($p, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX) !== false;
+    return writeJsonFile(AI_PROVIDERS_FILE, $p)['ok'];
 }
 /* =====================================================================
  *  v9.24: حالتِ کارِ پس‌زمینهٔ «تست مدل‌ها»
@@ -1053,7 +1052,7 @@ function aiTestStateLoad(): array {
 }
 function aiTestStateSave(array $st): void {
     $st['updated_at'] = time();
-    @file_put_contents(AI_TEST_STATE_FILE, json_encode($st, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    writeJsonFile(AI_TEST_STATE_FILE, $st);
 }
 /** آیا یک درخواستِ پاسخ‌نشده واقعاً «قطع/ناپذیر» بود (نه خطای منطقی API)؟ */
 function aiTestNetworkFailure(array $r): array {
@@ -11261,6 +11260,13 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'خطا در نوشتن فایل') !== false);
     $add('9.25', 'علت خطا در storage_errors.log ثبت می‌شود',
          strpos($selfSrc, 'storage_errors' . '.log') !== false);
+
+    /* ---------- v9.26: ذخیرهٔ ai_providers نیز مقاوم ---------- */
+    $add('9.26', 'ai_providers با writeJsonFile ذخیره می‌شود',
+         strpos($selfSrc, 'writeJsonFile(AI_PROVIDERS_FILE') !== false);
+    $add('9.26', 'writeProgress و aiTestStateSave مقاوم شدند',
+         strpos($selfSrc, 'writeJsonFile($file, $data)') !== false
+         && strpos($selfSrc, 'writeJsonFile(AI_TEST_STATE_FILE') !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
@@ -24919,6 +24925,18 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.26', t:'💾 ذخیرهٔ ai_providers.json هم مقاوم شد (ترموکس)', items:[
+    'گزارش شما: ذخیرهٔ فایل JSON ارائه‌دهنده‌های هوش مصنوعی خطا می‌داد و',
+    'در storage_errors.log فقط پیام «قفل پشتیبانی نشد، بدون قفل ذخیره شد»',
+    'برای profiles/connections دیده می‌شد — ولی خودِ ai_providers.json',
+    'هنوز از مسیر مستقیم با LOCK_EX نوشته می‌شد و روی استوریج گوشی شکست',
+    'می‌خورد.',
+    '🐞 aiProvidersSave() از تابع مقاوم writeJsonFile استفاده نمی‌کرد و',
+    'مستقیم @file_put_contents(..., LOCK_EX) می‌زد.',
+    '✅ حالا aiProvidersSave()، writeProgress() و aiTestStateSave() هم از',
+    'writeJsonFile عبور می‌کنند: اول با قفل، و اگر قفل پشتیبانی نشد بدون',
+    'قفل — پس ذخیرهٔ ai_providers.json روی گوشی هم کار می‌کند.'
+  ]},
   {v:'9.25', t:'💾 رفع «خطا در نوشتن فایل» روی گوشی/ترموکس + گزارش دقیق علت', items:[
     'گزارش شما: فایل را در گوشی با ترموکس اجرا کردید و هر ذخیره‌ای —',
     'حتی ذخیرهٔ پروفایل — «خطا در نوشتن فایل» می‌داد.',
