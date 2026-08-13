@@ -82,8 +82,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.22';
-const APP_VERSION_DATE = '1405/05/24';
+const APP_VERSION = '9.23';
+const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -11146,6 +11146,17 @@ if (isset($_GET['selftest'])) {
          function_exists('aiFreeFallback' . 'Config')
          && strpos($selfSrc, 'bonsai') !== false);
 
+    /* ---------- v9.23: جدول مودالِ نتیجهٔ زندهٔ تست ---------- */
+    $add('9.23', 'تست همهٔ مدل‌ها با پیام «سلام» ارسال می‌شود',
+         strpos($selfSrc, "'content' => 'سلا" . "م'") !== false
+         || strpos($selfSrc, "'content'=>'سلا" . "م'") !== false);
+    $add('9.23', 'مودال جدولِ زندهٔ نتایج تست وجود دارد',
+         strpos($selfSrc, 'function aiOpenTest' . 'Modal') !== false
+         && strpos($selfSrc, 'aiTestTb' . 'ody') !== false
+         && strpos($selfSrc, 'aiCloseTest' . 'Modal') !== false);
+    $add('9.23', 'دکمهٔ «نتایج تست» در رابط هست',
+         strpos($selfSrc, 'نتایج تس' . 'ت') !== false);
+
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
          && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
@@ -15786,7 +15797,8 @@ foreach ($providers as $pid => &$p) {
         $aiSse(['type'=>'progress', 'provider'=>$pid, 'providerName'=>$p['name']??$pid,
             'model'=>$mid, 'index'=>$tested+1]);
         $t0 = microtime(true);
-        $r = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>'پاسخ فقط با کلمه «متصل» بده.']], 'temperature'=>0.1, 'max_tokens'=>10], aiNetCfg());
+        // v9.23: پیام تست «سلام» فرستاده می‌شود
+        $r = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>'سلام']], 'temperature'=>0.3, 'max_tokens'=>30], aiNetCfg());
         $latency = (int)round((microtime(true) - $t0) * 1000);
         $code = (int)$r['code'];
         $ok = $code === 200;
@@ -20332,7 +20344,8 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <select id="aiModelSel" onchange="aiSelectModel()" style="flex:1"><option value="">—</option></select></div>
 <div class="crow"><label>تست همه:</label>
 <input type="number" id="aiTestPerProvider" value="50" min="1" max="500" style="max-width:80px" dir="ltr" title="سقف مدلِ آزموده‌شده به‌ازای هر ارائه‌دهنده">
-<button class="btn btn-green" onclick="aiTestAll()" style="flex:1">🧪 تست همهٔ مدل‌ها</button></div>
+<button class="btn btn-green" onclick="aiTestAll()" style="flex:1">🧪 تست همهٔ مدل‌ها</button>
+<button class="btn btn-blue" onclick="aiTestAll()" style="flex:1" title="باز کردن جدول زندهٔ نتایج تست با ارسال پیام «سلام»">📊 نتایج تست</button></div>
 <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;cursor:pointer;margin-bottom:6px">
 <input type="checkbox" id="aiTestOnlyUntested" style="width:14px;height:14px"> فقط مدل‌های تست‌نشده</label>
 
@@ -24711,6 +24724,17 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.23', t:'📊 جدول مودالِ نتیجهٔ زندهٔ تست همهٔ مدل‌ها', items:[
+    'خواستهٔ شما: یک جدول مودال برای نتیجهٔ زندهٔ «تست همهٔ مدل‌ها» که با',
+    'ارسال پیام «سلام» انجام شود و با زدن دکمهٔ «نتایج تست» باز شود.',
+    '🧪 تست همهٔ مدل‌ها حالا با ارسال پیام «سلام» به هر مدل انجام می‌شود.',
+    '📊 دکمهٔ «نتایج تست» اضافه شد که یک مودال جدولی باز می‌کند و نتایج را',
+    'به‌صورت زنده نشان می‌دهد: شماره، وضعیت (⏳/🟢/🔴)، ارائه‌دهنده، مدل،',
+    'تأخیر و پاسخ/خطا — هر ردیف همان لحظه که تستش تمام می‌شود به‌روز می‌شود.',
+    '👁 در بالای جدول شمارندهٔ زندهٔ «کل / در دسترس / ناموفق / در انتظار»',
+    'و پیام ارسالی «سلام» دیده می‌شود. بستن مودال جریان تست را هم قطع می‌کند.',
+    '✅ نتیجهٔ هر تست همچنان کنار مدل ذخیره می‌شود تا در فهرست مدل‌ها هم دیده شود.'
+  ]},
   {v:'9.22', t:'🤖 هوش مصنوعی برای دسته‌بندی و پاسخ به مشتریان', items:[
     'خواستهٔ شما: بخش «🔮 Gemini» حذف شود؛ از مدل‌های هوش مصنوعی برای',
     'دسته‌بندی و پاسخ به مشتریان استفاده شود؛ بخش AI مرتب‌تر شود؛ و',
@@ -28398,35 +28422,101 @@ function aiTestOne(pid,mid){
         aiLoadProviders();
     }).catch(()=>{});
 }
+/* v9.23: مودال جدولِ زندهٔ «تست همهٔ مدل‌ها» — با ارسال پیام «سلام».
+   هر ردیف = یک مدل؛ ستون‌ها: وضعیت، ارائه‌دهنده، مدل، تأخیر، پاسخ/خطا. */
+function aiOpenTestModal(){
+    let m=document.getElementById('aiTestModal');if(m)m.remove();
+    m=document.createElement('div');
+    m.id='aiTestModal';
+    m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.72);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px';
+    m.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:12px;width:min(1100px,96vw);max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5)">'
+      +'<div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #334155;flex:0 0 auto">'
+      +'<span style="font-size:14px">🧪</span><b style="color:#67e8f9;flex:1">نتایج زندهٔ تست همهٔ مدل‌ها</b>'
+      +'<span id="aiTestCur" style="color:#fbbf24;font-size:11px"></span>'
+      +'<button class="btn btn-gray" onclick="aiCloseTestModal()" style="font-size:11px;padding:4px 10px">✕ بستن</button></div>'
+      +'<div style="display:flex;gap:16px;padding:8px 16px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;color:#94a3b8;flex-wrap:wrap">'
+      +'<span>کل: <b id="aiTestTot" style="color:#e2e8f0">۰</b></span>'
+      +'<span>🟢 در دسترس: <b id="aiTestOk" style="color:#4ade80">۰</b></span>'
+      +'<span>🔴 ناموفق: <b id="aiTestFail" style="color:#f87171">۰</b></span>'
+      +'<span>⏳ در انتظار: <b id="aiTestWait" style="color:#fbbf24">۰</b></span>'
+      +'<span style="color:#64748b">پیام ارسالی: <b dir="ltr">«سلام»</b></span></div>'
+      +'<div style="flex:1;overflow:auto;padding:0">'
+      +'<table style="width:100%;border-collapse:collapse;font-size:11px">'
+      +'<thead><tr style="background:#1e293b;position:sticky;top:0;color:#94a3b8">'
+      +'<th style="padding:8px;text-align:center;width:34px">#</th>'
+      +'<th style="padding:8px;text-align:center;width:44px">وضعیت</th>'
+      +'<th style="padding:8px;text-align:right">ارائه‌دهنده</th>'
+      +'<th style="padding:8px;text-align:left;direction:ltr">مدل</th>'
+      +'<th style="padding:8px;text-align:center;width:70px">تأخیر</th>'
+      +'<th style="padding:8px;text-align:right">پاسخ / خطا</th>'
+      +'</tr></thead><tbody id="aiTestTbody"></tbody></table></div>'
+      +'</div>';
+    m.addEventListener('click',function(e){if(e.target===m)aiCloseTestModal();});
+    document.body.appendChild(m);
+}
+function aiCloseTestModal(){
+    if(window._aiTestES){try{window._aiTestES.close();}catch(_){}window._aiTestES=null;}
+    const m=document.getElementById('aiTestModal');if(m)m.remove();
+    aiLoadProviders();
+}
 function aiTestAll(){
     const per=$('aiTestPerProvider')?parseInt($('aiTestPerProvider').value)||50:50;
     const only=$('aiTestOnlyUntested')&&$('aiTestOnlyUntested').checked?1:0;
-    const r=$('aiTR');if(!r)return;
-    r.innerHTML='<div id="aiTestAllBox" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px;max-height:300px;overflow-y:auto"></div>';
-    const box=$('aiTestAllBox');if(box)box.innerHTML='<div style="color:#67e8f9">🧪 در حال تست مدل‌ها... (این کار چند دقیقه طول می‌کشد)</div>';
+    aiOpenTestModal();
+    const tbody=$('aiTestTbody');if(!tbody)return;
+    tbody.innerHTML='';
+    const rowMap={};
+    let n=0,ok=0,fail=0,wait=0;
+    function updCounters(){
+        if($('aiTestTot'))$('aiTestTot').textContent=toFa(n);
+        if($('aiTestOk'))$('aiTestOk').textContent=toFa(ok);
+        if($('aiTestFail'))$('aiTestFail').textContent=toFa(fail);
+        if($('aiTestWait'))$('aiTestWait').textContent=toFa(wait);
+    }
+    function ensureRow(d){
+        const key=(d.provider||'')+'::'+(d.model||'');
+        if(rowMap[key])return rowMap[key];
+        n++;wait++;
+        const tr=document.createElement('tr');
+        tr.style.borderBottom='1px solid #1e293b';
+        tr.innerHTML='<td style="padding:6px;text-align:center;color:#64748b">'+toFa(n)+'</td>'
+          +'<td style="padding:6px;text-align:center"><span class="aiSt">⏳</span></td>'
+          +'<td style="padding:6px;text-align:right;color:#94a3b8">'+esc(d.providerName||d.provider||'')+'</td>'
+          +'<td style="padding:6px;text-align:left;direction:ltr;color:#e2e8f0;word-break:break-all">'+esc(d.model||'')+'</td>'
+          +'<td style="padding:6px;text-align:center;color:#64748b" class="aiLat">—</td>'
+          +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiRes">…</td>';
+        tbody.appendChild(tr);
+        updCounters();
+        return rowMap[key]={tr:tr};
+    }
     const es=new EventSource('?ai_test_all=1&per_provider='+per+'&only_untested='+only);
     window._aiTestES=es;
-    let tested=0,avail=0,fail=0;
     es.onmessage=function(e){
         let d;try{d=JSON.parse(e.data);}catch(_){return;}
-        if(!box)return;
         if(d.type==='progress'){
-            box.innerHTML='<div style="color:#67e8f9">🧪 در حال تست... <b dir="ltr">'+esc(d.model||'')+'</b> ('+esc(d.providerName||'')+')</div>';
+            if($('aiTestCur'))$('aiTestCur').textContent='در حال تست: '+esc(d.model||'')+' ('+esc(d.providerName||'')+')';
         }else if(d.type==='item'){
-            tested++;
-            if(d.ok)avail++;else fail++;
-            const line=document.createElement('div');
-            line.style.cssText='padding:2px 0;direction:ltr;text-align:left;border-bottom:1px solid #1e293b';
-            line.innerHTML='<span style="color:'+(d.ok?'#4ade80':'#f87171')+'">'+(d.ok?'🟢':'🔴')+'</span> <b>'+esc(d.model)+'</b> <span style="color:#94a3b8">('+toFa(d.latencyMs)+'ms)</span>'+(d.error?' <span style="color:#f87171">'+esc(d.error)+'</span>':'');
-            box.appendChild(line);
-            box.scrollTop=box.scrollHeight;
+            const r=ensureRow(d);
+            wait--;if(d.ok)ok++;else fail++;
+            r.tr.querySelector('.aiSt').textContent=d.ok?'🟢':'🔴';
+            r.tr.querySelector('.aiSt').style.color=d.ok?'#4ade80':'#f87171';
+            const lat=r.tr.querySelector('.aiLat');if(lat)lat.textContent=(d.latencyMs>0)?(toFa(d.latencyMs)+'ms'):'—';
+            const res=r.tr.querySelector('.aiRes');
+            if(res){
+                if(d.ok)res.innerHTML='<span style="color:#4ade80">✓ پاسخ گرفت</span>';
+                else res.innerHTML='<span style="color:#f87171">'+esc(d.error||'خطا')+'</span>';
+            }
+            if($('aiTestCur'))$('aiTestCur').textContent='';
+            updCounters();
         }else if(d.type==='done'){
-            box.innerHTML='<div style="color:#4ade80;font-weight:700">🏁 تمام شد — '+toFa(d.tested)+' تست · 🟢 '+toFa(d.available)+' · 🔴 '+toFa(d.failed)+'</div>'+box.innerHTML;
+            if($('aiTestCur'))$('aiTestCur').textContent='🏁 تمام شد';
             es.close();window._aiTestES=null;
-            aiLoadProviders();
         }
     };
-    es.onerror=function(){if(box)box.innerHTML+='<div style="color:#f87171">✗ خطای اتصال به جریان تست</div>';es.close();window._aiTestES=null;};
+    es.onerror=function(){
+        es.close();window._aiTestES=null;
+        if($('aiTestCur'))$('aiTestCur').textContent='⚠️ اتصال قطع شد — نتایج تا اینجا ذخیره شد';
+    };
 }
 // v8.06: Test AI category selection with a sample product title
 function testAiCategory(){const r=$('aiTR');const title=prompt('عنوان محصول برای تست دسته‌بندی:','کفش ورزشی مردانه نایک');if(!title)return;r.innerHTML='<div style="color:#67e8f9;font-size:11px">🔄 در حال تحلیل «'+esc(title)+'» با AI...</div>';fetch('?ai_category=1&title='+encodeURIComponent(title)).then(r=>r.json()).then(d=>{if(d.ok){r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ دسته: <b>'+esc(d.category_name)+'</b> ('+d.category_id+') | مدل: '+esc(d.ai_model||'')+' | پاسخ AI: '+esc(d.ai_raw||'')+'</div>';}else{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';}}).catch(()=>{r.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا شبکه</div>';});}
