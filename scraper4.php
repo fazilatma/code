@@ -82,8 +82,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.21';
-const APP_VERSION_DATE = '1405/05/23';
+const APP_VERSION = '9.22';
+const APP_VERSION_DATE = '1405/05/24';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1131,11 +1131,57 @@ function aiActiveConfig(): array {
     return ['provider' => null, 'model' => ''];
 }
 
-/** فراخوانی چت با ارائه‌دهندهٔ فعال */
+/**
+ * v9.21: مدل رایگانِ مطمئن (بک‌آپ).
+ * اگر مدل فعال شکست بخورد (محدودیت نرخ، خطا، قطعی)، به سراغ یک مدل
+ * رایگان می‌رویم تا اتوماسیون (دسته‌بندی / پاسخ به مشتری) «هیچ‌وقت
+ * خطا ندهد». مدل Bonsai (Ternary-Bonsai) همیشه رایگان در نظر گرفته
+ * می‌شود و اولویت دارد.
+ */
+function aiFreeFallbackConfig(): array {
+    $providers = aiProvidersLoad();
+    $prefer = ['Prism-ML/Ternary-Bonsai-27B', 'ternary-bonsai', 'bonsai'];
+    foreach ($providers as $p) {
+        if (($p['enabled'] ?? true) === false) continue;
+        foreach ($p['models'] as $m) {
+            $id = (string)($m['id'] ?? '');
+            $low = strtolower($id);
+            foreach ($prefer as $kw) {
+                if ($low !== '' && stripos($low, strtolower($kw)) !== false) {
+                    return ['provider' => $p, 'model' => $id, 'via' => 'bonsai'];
+                }
+            }
+        }
+    }
+    // هر مدلِ آزاد (free:true) دیگر هم قابل قبول است
+    foreach ($providers as $p) {
+        if (($p['enabled'] ?? true) === false) continue;
+        foreach ($p['models'] as $m) {
+            if (!empty($m['free'])) return ['provider' => $p, 'model' => (string)$m['id'], 'via' => 'free'];
+        }
+    }
+    return ['provider' => null, 'model' => '', 'via' => ''];
+}
+
+/** فراخوانی چت با ارائه‌دهندهٔ فعال + بک‌آپ خودکارِ مدل رایگان */
 function aiActiveChat(array $payload): array {
     $cfg = aiActiveConfig();
     if (empty($cfg['provider'])) return ['ok' => false, 'code' => 0, 'error' => 'هیچ ارائه‌دهندهٔ هوش مصنوعی فعال و دارای مدلی تنظیم نشده'];
-    return aiProviderCall($cfg['provider'], $cfg['model'], $payload, aiNetCfg());
+    $net = aiNetCfg();
+    $r = aiProviderCall($cfg['provider'], $cfg['model'], $payload, $net);
+    // اگر موفق بود یا خطای قطعیِ منطقی (مثل 400) داد که fallback کمکی نمی‌کند، برگردان
+    if (!empty($r['ok'])) return $r;
+    $code = (int)$r['code'];
+    $fb = aiFreeFallbackConfig();
+    if (!empty($fb['provider']) && $fb['model'] !== $cfg['model']) {
+        $r2 = aiProviderCall($fb['provider'], $fb['model'], $payload, $net);
+        if (!empty($r2['ok'])) {
+            $r2['via'] = ($r2['via'] ?? 'direct') . '·backup:' . $fb['via'];
+            $r2['backup'] = ['provider' => $fb['provider']['id'] ?? '', 'model' => $fb['model']];
+            return $r2;
+        }
+    }
+    return $r;
 }
 
 /** نرمال‌سازی فرمتِ درون‌ریزی‌شدهٔ JSON به ساختار داخلی provider */
@@ -1160,7 +1206,8 @@ function aiNormalizeProviders($raw): array {
                 'name'           => trim((string)($m['name'] ?? $mid)),
                 'toolCalling'    => !empty($m['toolCalling']),
                 'vision'         => !empty($m['vision']),
-                'free'           => !empty($m['free']),
+                // v9.21: Bonsai همیشه رایگان است
+                'free'           => (stripos($mid, 'bonsai') !== false || stripos($mid, 'ternary') !== false) ? true : !empty($m['free']),
                 'maxInputTokens' => (int)($m['maxInputTokens'] ?? 0),
                 'maxOutputTokens'=> (int)($m['maxOutputTokens'] ?? 0),
                 'tested'         => !empty($m['tested']),
@@ -7035,7 +7082,7 @@ if (($_POST['action'] ?? '') === 'save_connections') {
 header('Content-Type: application/json; charset=UTF-8');
 $conn = loadConnections();
 if (isset($_POST['woocommerce'])) { $w = json_decode($_POST['woocommerce'], true) ?: []; $conn['woocommerce'] = ['enabled'=>!empty($w['enabled']),'store_url'=>trim($w['store_url']??''),'consumer_key'=>trim($w['consumer_key']??''),'consumer_secret'=>trim($w['consumer_secret']??''),'default_category'=>(int)($w['default_category']??0),'default_status'=>$w['default_status']??'draft','stock_quantity'=>(int)($w['stock_quantity']??10),'manage_stock'=>!empty($w['manage_stock']),'price_mode'=>in_array(($w['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$w['price_mode']:'none','price_val'=>(float)($w['price_val']??0),'price_round'=>max(0,(int)($w['price_round']??0))]; }
-if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??'')];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'gemini_api_key'=>trim($b['gemini_api_key']??''),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors,'price_mode'=>in_array(($b['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$b['price_mode']:'none','price_val'=>(float)($b['price_val']??0),'price_round'=>max(0,(int)($b['price_round']??0))]; }
+if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??'')];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors,'price_mode'=>in_array(($b['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$b['price_mode']:'none','price_val'=>(float)($b['price_val']??0),'price_round'=>max(0,(int)($b['price_round']??0))]; }
 
 if (isset($_POST['ai'])) { $a = json_decode($_POST['ai'], true) ?: []; $conn['ai'] = ['enabled'=>!empty($a['enabled']),'api_key'=>trim($a['api_key']??''),'base_url'=>trim($a['base_url']??'https://dashscope.aliyuncs.com/compatible-mode/v1'),'model'=>trim($a['model']??'qwen-plus'),'temperature'=>(float)($a['temperature']??0.1)]; }
 // v8.61: تنظیمات روش عبور برای سرویس‌های هوش مصنوعی
@@ -7118,6 +7165,8 @@ if (isset($_POST['autoreply'])) {
         'sign'          => mb_substr(trim((string)($ar['sign'] ?? '')), 0, 120),
         'notify'        => !empty($ar['notify']),
         'scan_limit'    => max(5, min(50, (int)($ar['scan_limit'] ?? 20))),
+        // v9.21: وقتی هیچ قاعده‌ای نخورد، با هوش مصنوعی (مدل فعال) پاسخ بده
+        'ai_reply'      => !empty($ar['ai_reply']),
     ];
 }
 // v8.62: گزارش شبانه
@@ -11086,6 +11135,17 @@ if (isset($_GET['selftest'])) {
     $add('9.21', 'دسته‌بندی خودکار از ارائه‌دهندهٔ فعال استفاده می‌کند',
          strpos($selfSrc, 'aiActive' . 'Chat($payload)') !== false);
 
+    /* ---------- v9.22: حذف Gemini + پاسخ هوش مصنوعی به مشتریان ---------- */
+    $add('9.22', 'گزینهٔ Gemini (بازگشتی) حذف شده',
+         strpos($selfSrc, 'bsGem' . 'Key') === false
+         && strpos($selfSrc, 'gemini_api' . '_key') === false);
+    $add('9.22', 'پاسخ خودکار با هوش مصنوعی در دسترس است',
+         strpos($selfSrc, 'ai_reply') !== false
+         && function_exists('arAiReply' . 'Text'));
+    $add('9.22', 'بک‌آپ خودکار مدل رایگان Bonsai',
+         function_exists('aiFreeFallback' . 'Config')
+         && strpos($selfSrc, 'bonsai') !== false);
+
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
          && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
@@ -13021,6 +13081,7 @@ function arCfg(?array $cn = null): array {
         'sign'         => trim((string)($a['sign'] ?? '')),
         'notify'       => !empty($a['notify']),
         'scan_limit'   => max(5, min(50, (int)($a['scan_limit'] ?? 20))),
+        'ai_reply'     => !empty($a['ai_reply']),
     ];
 }
 
@@ -13070,6 +13131,31 @@ function arSaveState(array $st): void {
         if ((int)($v['at'] ?? 0) < $cut) unset($st['chats'][$k]);
     }
     @file_put_contents(AUTOREPLY_STATE_FILE, json_encode($st, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/**
+ * v9.21: تولید پاسخ با هوش مصنوعی (مدل فعال، با بک‌آپ مدل رایگان Bonsai).
+ * وقتی هیچ قاعدهٔ دستی‌ای به پیام مشتری نمی‌خورد و «پاسخ هوش مصنوعی»
+ * روشن باشد، یک پاسخ کوتاه و مؤدبانهٔ فارسی از ارائه‌دهندهٔ فعال می‌گیریم.
+ * خروجی ['ok'=>bool, 'text'=>string, 'error'=>string]
+ */
+function arAiReplyText(string $text): array {
+    $text = trim((string)$text);
+    if ($text === '') return ['ok' => false, 'text' => '', 'error' => 'پیام خالی'];
+    $prompt = "تو دستیار پاسخ‌گویی یک فروشگاه اینترنتی هستی. مشتری این پیام را فرستاده:\n\"{$text}\"\n\n"
+            . "با یک پاسخ کوتاه، مؤدبانه و حرفه‌ای به فارسی پاسخ بده (حداکثر ۲-۳ جمله). "
+            . "سؤال را اگر می‌دانید پاسخش را بده، وگرنه بگو همکاران به‌زودی پاسخ می‌دهند. "
+            . "چیزی خارج از نقش پشتیبانی ننویس.";
+    $r = aiActiveChat(['messages' => [
+        ['role' => 'system', 'content' => 'You are a friendly Persian e-commerce customer support assistant. Reply briefly and politely in Persian.'],
+        ['role' => 'user', 'content' => $prompt],
+    ], 'temperature' => 0.5, 'max_tokens' => 160]);
+    if (empty($r['ok'])) return ['ok' => false, 'text' => '', 'error' => mb_substr((string)($r['error'] ?? 'خطا'), 0, 120)];
+    $body = $r['body'] ?? [];
+    $reply = trim((string)($body['choices'][0]['message']['content'] ?? ''));
+    if ($reply === '') return ['ok' => false, 'text' => '', 'error' => 'پاسخ خالی از مدل'];
+    $reply = preg_replace('/\s+/u', ' ', $reply);
+    return ['ok' => true, 'text' => mb_substr($reply, 0, 500), 'error' => ''];
 }
 
 /** شمارندهٔ روزانهٔ هر قاعده — با عوض شدن روز صفر می‌شود */
@@ -13243,16 +13329,33 @@ function autoReplyRun(array $cn, bool $dry = false, bool $ignoreGrace = false): 
 
         $text = (string)($lm['content']['text'] ?? $nc['text']);
         $rule = arPickRule($rules, $text);
-        if ($rule === null) { $row['skip'] = 'هیچ قاعده‌ای نخورد'; $out['items'][] = $row; $out['skipped']++; continue; }
-
-        $rid = (string)$rule['id'];
-        $dmax = (int)($rule['daily_max'] ?? 0);
-        if ($dmax > 0 && arDailyCount($st, $rid, $now) >= $dmax) {
+        $aiMode = false;
+        if ($rule === null && !empty($cfg['ai_reply'])) {
+            // v9.21: هیچ قاعده‌ای نخورد ولی «پاسخ هوش مصنوعی» روشن است
+            $aiMode = true;
+            $rid = 'ai';
+            $dmax = 0;
+        } elseif ($rule === null) {
+            $row['skip'] = 'هیچ قاعده‌ای نخورد'; $out['items'][] = $row; $out['skipped']++; continue;
+        } else {
+            $rid = (string)$rule['id'];
+            $dmax = (int)($rule['daily_max'] ?? 0);
+        }
+        if (!$aiMode && $dmax > 0 && arDailyCount($st, $rid, $now) >= $dmax) {
             $row['skip'] = 'سقف روزانهٔ قاعدهٔ «' . $rid . '» پر شده';
             $out['items'][] = $row; $out['skipped']++; continue;
         }
 
-        $reply = (string)$rule['reply'];
+        if ($aiMode) {
+            $aiRes = arAiReplyText($text);
+            if (empty($aiRes['ok'])) {
+                $row['skip'] = 'پاسخ هوش مصنوعی ناموفق: ' . mb_substr((string)($aiRes['error'] ?? 'خطا'), 0, 80);
+                $out['items'][] = $row; $out['skipped']++; continue;
+            }
+            $reply = $aiRes['text'];
+        } else {
+            $reply = (string)$rule['reply'];
+        }
         if ($cfg['sign'] !== '') $reply .= "\n" . $cfg['sign'];
         $row['rule'] = $rid;
         $row['reply'] = mb_substr($reply, 0, 160);
@@ -13268,9 +13371,14 @@ function autoReplyRun(array $cn, bool $dry = false, bool $ignoreGrace = false): 
             $out['replied']++;
             $row['status'] = '✅ ارسال شد';
             $st['chats']['c' . $chatId] = ['at' => $now, 'msg_id' => $lastId, 'rule' => $rid];
-            arDailyBump($st, $rid, $now);
-            arLogAdd(['chat_id' => $chatId, 'who' => $nc['who'], 'rule' => $rid,
-                      'in' => mb_substr($text, 0, 120), 'out' => mb_substr($reply, 0, 160)]);
+            if ($aiMode) {
+                arLogAdd(['chat_id' => $chatId, 'who' => $nc['who'], 'rule' => 'ai',
+                          'in' => mb_substr($text, 0, 120), 'out' => mb_substr($reply, 0, 160)]);
+            } else {
+                arDailyBump($st, $rid, $now);
+                arLogAdd(['chat_id' => $chatId, 'who' => $nc['who'], 'rule' => $rid,
+                          'in' => mb_substr($text, 0, 120), 'out' => mb_substr($reply, 0, 160)]);
+            }
         } else {
             $out['failed']++;
             $row['status'] = '❌ ' . mb_substr((string)($send['error'] ?? 'خطا'), 0, 90);
@@ -18461,13 +18569,12 @@ if (isset($_GET['bsl_ai_category'])) {
 header('Content-Type: application/json; charset=UTF-8');
 $cn=loadConnections();$bs=$cn['basalam']??[];
 $productTitle=trim($_GET['title']??'');
-/* v9.20: از ارائه‌دهندهٔ فعال استفاده می‌شود */
+/* v9.21: از ارائه‌دهندهٔ فعال استفاده می‌شود — گزینهٔ Gemini حذف شد */
 $_aiCfg=aiActiveConfig();
 $aiModel = $_aiCfg['model'] ?? '';
 $aiTemperature=(float)0.1;
-$geminiKey=trim($bs['gemini_api_key']??$_GET['api_key']??'');
 if(empty($productTitle)){echo json_encode(['ok'=>false,'error'=>'عنوان محصول خالی','category_id'=>0],JSON_UNESCAPED_UNICODE);exit;}
-if(empty($_aiCfg['provider'])&&empty($geminiKey)){echo json_encode(['ok'=>false,'error'=>'هیچ ارائه‌دهندهٔ هوش مصنوعی فعالی تنظیم نشده','category_id'=>0],JSON_UNESCAPED_UNICODE);exit;}
+if(empty($_aiCfg['provider'])){echo json_encode(['ok'=>false,'error'=>'هیچ ارائه‌دهندهٔ هوش مصنوعی فعالی تنظیم نشده','category_id'=>0],JSON_UNESCAPED_UNICODE);exit;}
 
 $tk=$bs['token']??'';
 $cats=[];
@@ -18489,20 +18596,12 @@ $prompt="You are a product categorization assistant for a Persian (Farsi) e-comm
 $aiText='';$aiModelUsed='';
 if(!empty($_aiCfg['provider'])){
 
-// v9.20: از مسیر مشترک عبور با ارائه‌دهندهٔ فعال
+// v9.21: از مسیر مشترک عبور با ارائه‌دهندهٔ فعال (با بک‌آپ مدل رایگان)
 $payload=['messages'=>[['role'=>'system','content'=>'You are a product categorization assistant. Return ONLY the numeric category ID.'],['role'=>'user','content'=>$prompt]],'temperature'=>$aiTemperature,'max_tokens'=>20];
 $rQ=aiActiveChat($payload);
 if((int)$rQ['code']===200){$rData=$rQ['body']??[];$aiText=trim($rData['choices'][0]['message']['content']??'');$aiModelUsed=$aiModel;}
 }
-if(empty($aiText)&&!empty($geminiKey)){
-// v8.61: جمنای هم از همان روش عبور رد می‌شود (قبلاً همیشه مستقیم بود)
-$netG=aiNetCfg();
-$url='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='.$geminiKey;
-$payload=['contents'=>['parts'=>['text'=>$prompt]],'generationConfig'=>['temperature'=>0.1,'maxOutputTokens'=>20]];
-$rG=aiHttp($url,['Content-Type: application/json'],$payload,$netG);
-if((int)$rG['code']===200){$rData=$rG['body']??[];$aiText=trim($rData['candidates'][0]['content']['parts'][0]['text']??'');$aiModelUsed='gemini-2.0-flash';}
-}
-if(empty($aiText)){echo json_encode(['ok'=>false,'error'=>'خطا API هوش مصنوعی (هیچکدام پاسخ نداد)','category_id'=>0],JSON_UNESCAPED_UNICODE);exit;}
+if(empty($aiText)){echo json_encode(['ok'=>false,'error'=>'خطا API هوش مصنوعی: '.mb_substr((string)($rQ['error']??'هیچکدام پاسخ نداد'),0,120),'category_id'=>0],JSON_UNESCAPED_UNICODE);exit;}
 
 $aiCatId=0;
 if(preg_match('/\d+/',$aiText,$m)){$aiCatId=(int)$m[0];}
@@ -20241,11 +20340,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div id="aiModelsList" style="max-height:260px;overflow-y:auto;border:1px solid #334155;border-radius:6px;background:#0f172a;margin-bottom:6px">
 <div style="padding:8px;color:#64748b;font-size:11px">هنوز ارائه‌دهنده‌ای درون‌ریزی نشده.</div>
 </div>
-
-<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
-<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🔮 Gemini (بازگشتی برای دسته‌بندی خودکار باسلام)</div>
-<div class="crow"><label>کلید Gemini:</label><input type="password" id="bsGemKey" dir="ltr" placeholder="AIza..." style="flex:1"></div>
-</div>
+<div id="aiUseInfo" style="font-size:10.5px;color:#94a3b8;line-height:1.8;margin-bottom:8px;padding:6px 8px;background:#111c31;border:1px solid #1e293b;border-radius:6px"></div>
 
 <!-- v8.61: عبور از محدودیت شبکه -->
 <div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
@@ -20675,6 +20770,10 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 
 <div class="crow"><label>امضا:</label>
 <input type="text" id="arSign" placeholder="اختیاری — مثلاً: (پاسخ خودکار)" onchange="arSaveCfg()" style="flex:1"></div>
+
+<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#a5f3fc;margin:4px 0;cursor:pointer" title="وقتی هیچ قاعدهٔ دستی‌ای به پیام نخورد، با مدل هوش مصنوعیِ فعال پاسخ می‌دهد">
+<input type="checkbox" id="arAiReply" onchange="arSaveCfg()" style="width:14px;height:14px">
+<span>🤖 وقتی قاعده‌ای نخورد با هوش مصنوعی پاسخ بده</span></label>
 
 <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin:4px 0;cursor:pointer">
 <input type="checkbox" id="arNotify" onchange="arSaveCfg()" style="width:14px;height:14px">
@@ -24612,6 +24711,23 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.22', t:'🤖 هوش مصنوعی برای دسته‌بندی و پاسخ به مشتریان', items:[
+    'خواستهٔ شما: بخش «🔮 Gemini» حذف شود؛ از مدل‌های هوش مصنوعی برای',
+    'دسته‌بندی و پاسخ به مشتریان استفاده شود؛ بخش AI مرتب‌تر شود؛ و',
+    'مدل Bonsai همیشه رایگان و بدون خطا باشد.',
+    '🗑️ بخش «🔮 Gemini (بازگشتی)» کاملاً حذف شد — هم از رابط کاربری و هم',
+    'از منطق دسته‌بندی. دسته‌بندی خودکار حالا فقط از «مدل فعال» می‌آید.',
+    '💬 پاسخ به مشتریان: در بخش «پاسخ خودکار» گزینهٔ «🤖 وقتی قاعده‌ای',
+    'نخورد با هوش مصنوعی پاسخ بده» اضافه شد. وقتی هیچ قاعدهٔ دستی‌ای به',
+    'پیام مشتری نخورد، با مدل فعالِ هوش مصنوعی یک پاسخ کوتاه و مؤدبانهٔ',
+    'فارسی ساخته و ارسال می‌شود.',
+    '🧭 بخش هوش مصنوعی مرتب‌تر شد: زیر بخش مدل‌ها یک نوار راهنما آمده که',
+    'می‌گوید «مدل فعال» الان چیست و برای دسته‌بندی و پاسخ به مشتریان',
+    'استفاده می‌شود.',
+    '🆓 مدل Bonsai همیشه رایگان در نظر گرفته می‌شود و به‌عنوان بک‌آپ است:',
+    'اگر مدل فعال هنگام دسته‌بندی یا پاسخ به مشتری خطا بدهد، خودکار به',
+    'مدل رایگان (Bonsai) برمی‌گردد تا کار هیچ‌وقت خطا ندهد.'
+  ]},
   {v:'9.21', t:'🤖 بازنویسی کامل بخش هوش مصنوعی — چند-ارائه‌دهنده', items:[
     'خواستهٔ شما: بر اساس فایل JSON تنظیمات، هوش مصنوعی‌ها را برای',
     'اتوماسیون سایت فعال کن؛ دکمهٔ درون‌ریزی JSON بگذار؛ تست همهٔ مدل‌ها',
@@ -26294,7 +26410,8 @@ function arCollectCfg(){
     work_from:    parseInt(g('arFrom').value||'9')||0,
     work_to:      parseInt(g('arTo').value||'21')||0,
     sign:         (g('arSign').value||'').trim(),
-    notify:       !!g('arNotify').checked
+    notify:       !!g('arNotify').checked,
+    ai_reply:     !!g('arAiReply').checked
   };
 }
 
@@ -26318,6 +26435,7 @@ function arApplyCfg(c){
   set('arTo',String(c.work_to!==undefined?c.work_to:21));
   set('arSign',c.sign||'');
   chk('arNotify',c.notify);
+  chk('arAiReply',c.ai_reply);
   arToggleHours();
   arBadge();
 }
@@ -27880,7 +27998,7 @@ let wSend=false,bSend=false,cn={woocommerce:{},basalam:{}},extractPollTimer=null
 function loadConn(){fetch('',{method:'POST',body:new URLSearchParams('action=load_connections')}).then(r=>r.json()).then(d=>{if(d.ok){cn=d.connections;applyCn();}}).catch(()=>{});}
 function applyCn(){const w=cn.woocommerce||{},b=cn.basalam||{};if(w.store_url&&$('wcUrl'))$('wcUrl').value=w.store_url;if(w.consumer_key&&$('wcCK'))$('wcCK').value=w.consumer_key;if(w.consumer_secret&&$('wcCS'))$('wcCS').value=w.consumer_secret;if(w.default_status&&$('wcSt'))$('wcSt').value=w.default_status;if(w.default_category&&$('wcCat'))$('wcCat').value=w.default_category;if($('wcMS'))$('wcMS').checked=!!w.manage_stock;if(w.stock_quantity&&$('wcSQ'))$('wcSQ').value=w.stock_quantity;if($('wcPMode'))$('wcPMode').value=w.price_mode||'none';if($('wcPVal'))$('wcPVal').value=(w.price_val!==undefined?w.price_val:0);if($('wcPRound'))$('wcPRound').value=String(w.price_round||0);if($('bsPMode'))$('bsPMode').value=b.price_mode||'none';if($('bsPVal'))$('bsPVal').value=(b.price_val!==undefined?b.price_val:0);if($('bsPRound'))$('bsPRound').value=String(b.price_round||0);try{destPricePreview('wc');destPricePreview('bs');}catch(e){}if(b.token&&$('bsTk'))$('bsTk').value=b.token;if(b.vendor_id&&$('bsVid'))$('bsVid').value=b.vendor_id;if(b.preparation_days&&$('bsPD'))$('bsPD').value=b.preparation_days;if(b.weight&&$('bsW'))$('bsW').value=b.weight;if($('bsPW')&&b.package_weight)$('bsPW').value=b.package_weight;if(b.stock&&$('bsSt'))$('bsSt').value=b.stock;// v7.48: Restore category in searchable dropdown
 if(b.category_id){$('bsCat').value=String(b.category_id);bslSelectedCatId=b.category_id;if(bslAllCats.length>0){renderBslCatDropdown(bslAllCats,b.category_id);}else{loadBslCats();}}else{$('bsCat').value='0';bslSelectedCatId=0;if($('bsCatSearch'))$('bsCatSearch').value='';}
-if($('bsAutoCat'))$('bsAutoCat').checked=!!b.auto_category;if($('bsGemKey')&&b.gemini_api_key)$('bsGemKey').value=b.gemini_api_key;if($('bsDelayMs')&&b.delay_ms)$('bsDelayMs').value=b.delay_ms;if($('bsRetryDelayMs')&&b.retry_delay_ms)$('bsRetryDelayMs').value=b.retry_delay_ms;
+if($('bsAutoCat'))$('bsAutoCat').checked=!!b.auto_category;if($('bsDelayMs')&&b.delay_ms)$('bsDelayMs').value=b.delay_ms;if($('bsRetryDelayMs')&&b.retry_delay_ms)$('bsRetryDelayMs').value=b.retry_delay_ms;
 // v8.17: Restore global fallback categories
 if(b.fallback_cat_ids&&Array.isArray(b.fallback_cat_ids)){renderBslFallbackCats(b.fallback_cat_ids);}
 // v8.17: Restore extra vendors
@@ -27920,7 +28038,7 @@ function destPricePreview(pre){
     +toFa(res.toLocaleString('en-US'))
     +'  ('+(diff>=0?'+':'')+toFa(pct)+'٪)';
 }
-function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10,price_mode:($('wcPMode')||{}).value||'none',price_val:parseFloat(($('wcPVal')||{}).value)||0,price_round:parseInt(($('wcPRound')||{}).value)||0}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,gemini_api_key:$('bsGemKey')?.value||'',delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors,price_mode:($('bsPMode')||{}).value||'none',price_val:parseFloat(($('bsPVal')||{}).value)||0,price_round:parseInt(($('bsPRound')||{}).value)||0}));
+function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10,price_mode:($('wcPMode')||{}).value||'none',price_val:parseFloat(($('wcPVal')||{}).value)||0,price_round:parseInt(($('wcPRound')||{}).value)||0}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors,price_mode:($('bsPMode')||{}).value||'none',price_val:parseFloat(($('bsPVal')||{}).value)||0,price_round:parseInt(($('bsPRound')||{}).value)||0}));
 // v8.06: Save AI settings
 fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
@@ -28209,10 +28327,20 @@ function aiCurrentProvider(){
     const sel=$('aiProviderSel');const id=sel?sel.value:'';
     return (aiProvData.providers||[]).find(p=>p.id===id)||null;
 }
+function aiUpdateUseInfo(){
+    const el=$('aiUseInfo');if(!el)return;
+    const sel=aiProvData.selected||{};
+    const p=(aiProvData.providers||[]).find(x=>x.id===sel.provider);
+    if(!p){el.innerHTML='<span style="color:#94a3b8">هیچ مدل فعالی انتخاب نشده — از این مدل‌ها برای دسته‌بندی خودکار و پاسخ به مشتریان استفاده می‌شود.</span>';return;}
+    el.innerHTML='<span style="color:#67e8f9">⚡ مدل فعال:</span> <b dir="ltr">'+esc(sel.model||'')+'</b> <span style="color:#64748b">('+esc(p.name||p.id)+')</span>'
+      +'<div style="margin-top:2px">از این مدل برای <b style="color:#c4b5fd">دسته‌بندی خودکار</b> و <b style="color:#c4b5fd">پاسخ به مشتریان</b> استفاده می‌شود.'
+      +' اگر خطا بدهد، خودکار به مدل رایگان <b style="color:#4ade80">Bonsai</b> برمی‌گردد.</div>';
+}
 function aiRenderModels(){
     const msel=$('aiModelSel');if(!msel)return;
     const p=aiCurrentProvider();
     msel.innerHTML='<option value="">—</option>';
+    aiUpdateUseInfo();
     if(!p){const box=$('aiModelsList');if(box)box.innerHTML='<div style="padding:8px;color:#64748b;font-size:11px">ارائه‌دهنده‌ای انتخاب نشده.</div>';return;}
     (p.models||[]).forEach(m=>msel.add(new Option(esc(m.name||m.id),esc(m.id))));
     if(aiProvData.selected.provider===p.id&&aiProvData.selected.model)msel.value=aiProvData.selected.model;
@@ -29430,12 +29558,10 @@ function offlineCatMatch(){
     if(matched>0){showToast('✓ '+matched+' محصول دسته‌بندی شد');saveConn();}
     else{showToast('هیچ محصول دسته‌بندی نشد — لolojistica نام‌ها با دسته‌ها همخوانی ندارند',1);}
 }
-// v7.48: Online AI category matching — call Gemini Flash API for each product
+// v7.48: Online AI category matching — uses the active AI provider (v9.21)
 function onlineCatMatch(){
     const ps=getSendP();
     if(!ps.length){showToast('محصولی نیست',1);return;}
-    const gemKey=$('bsGemKey')?.value||'';
-    if(!gemKey){showToast('ابتدا کلید Gemini را وارد کنید!',1);return;}
     if(!bslAllCats.length){loadBslCats();showToast('ابتدا دسته‌ها را بارگذاری کنید',1);return;}
     let i=0,matched=0;
     $('bSS').textContent='دسته‌بندی AI: 0/'+ps.length;
@@ -29443,7 +29569,7 @@ function onlineCatMatch(){
         if(i>=ps.length){$('bSS').textContent='✓ '+matched+' دسته‌بندی AI';showToast('✓ '+matched+' محصول با AI دسته‌بندی شد');saveConn();return;}
         const p=ps[i];
         $('bSS').textContent='دسته‌بندی AI: '+i+'/'+ps.length;
-        fetch('?bsl_ai_category=1&title='+encodeURIComponent(p.title)+'&api_key='+encodeURIComponent(gemKey)).then(r=>r.json()).then(d=>{
+        fetch('?bsl_ai_category=1&title='+encodeURIComponent(p.title)).then(r=>r.json()).then(d=>{
             if(d.ok&&d.category_id>0){
                 bslSelectedCatId=d.category_id;
                 $('bsCat').value=String(d.category_id);
