@@ -92,6 +92,189 @@ function fetch_html(string $url, int $timeout = 25): array {
     return ['ok' => true, 'error' => '', 'code' => $code, 'url' => $finalUrl, 'html' => $body];
 }
 
+/* =============================================================
+ * WooCommerce Store API support
+ * Uses /wp-json/wc/store/v1/products when the target site exposes
+ * it, which gives exact prices, SKU, stock, categories and
+ * attributes instead of guessing them from the HTML.
+ * ============================================================= */
+
+function store_api_base(string $url): string {
+    $parts = parse_url($url);
+    if (!$parts || empty($parts['host'])) return '';
+    $root = ($parts['scheme'] ?? 'https') . '://' . $parts['host'] . (isset($parts['port']) ? ':' . $parts['port'] : '');
+    return $root . '/wp-json/wc/store/v1/products';
+}
+
+function fetch_json(string $url, int $timeout = 20): array {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 5,
+        CURLOPT_CONNECTTIMEOUT => 10, CURLOPT_TIMEOUT => $timeout, CURLOPT_ENCODING => '',
+        CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_HEADER => true,
+        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+        CURLOPT_HTTPHEADER => ['Accept: application/json', 'Accept-Language: fa,en;q=0.9'],
+    ]);
+    $raw = curl_exec($ch);
+    $err = curl_error($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $hsize = (int)curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    curl_close($ch);
+
+    if ($raw === false || $raw === '') {
+        return ['ok' => false, 'error' => $err ?: 'Empty', 'code' => $code, 'data' => null, 'totalPages' => 0];
+    }
+
+    $headerText = substr($raw, 0, $hsize);
+    $body = substr($raw, $hsize);
+
+    $totalPages = 0;
+    if (preg_match('~^x-wp-totalpages:\s*(\d+)~im', $headerText, $m)) {
+        $totalPages = (int)$m[1];
+    }
+
+    if ($code >= 400) {
+        return ['ok' => false, 'error' => 'HTTP ' . $code, 'code' => $code, 'data' => null, 'totalPages' => $totalPages];
+    }
+
+    $data = json_decode($body, true);
+    if (!is_array($data)) {
+        return ['ok' => false, 'error' => 'Invalid JSON', 'code' => $code, 'data' => null, 'totalPages' => $totalPages];
+    }
+    return ['ok' => true, 'error' => '', 'code' => $code, 'data' => $data, 'totalPages' => $totalPages];
+}
+
+/** Convert a Store API minor-unit amount ("125000", minor unit 0/2) to a plain number string. */
+function store_api_amount($raw, int $minorUnit): string {
+    if ($raw === null || $raw === '') return '';
+    $n = (float)$raw;
+    if ($minorUnit > 0) $n = $n / pow(10, $minorUnit);
+    if (abs($n - round($n)) < 0.00001) return (string)(int)round($n);
+    return rtrim(rtrim(number_format($n, $minorUnit, '.', ''), '0'), '.');
+}
+
+/** Map one Store API product object onto the scraper's internal product shape. */
+function map_store_api_product(array $item, string $baseUrl): array {
+    $prices = is_array($item['prices'] ?? null) ? $item['prices'] : [];
+    $minor = (int)($prices['currency_minor_unit'] ?? 0);
+    $suffix = trim((string)($prices['currency_suffix'] ?? ''));
+    $symbol = trim((string)($prices['currency_symbol'] ?? ''));
+    $unit = $suffix ?: $symbol;
+
+    $regular = store_api_amount($prices['regular_price'] ?? null, $minor);
+    $sale    = store_api_amount($prices['sale_price'] ?? null, $minor);
+    $current = store_api_amount($prices['price'] ?? null, $minor);
+
+    $priceNum = $current !== '' ? $current : $regular;
+    $priceStr = $priceNum === '' ? '' : trim($priceNum . ($unit !== '' ? ' ' . $unit : ''));
+
+    $images = [];
+    foreach ((array)($item['images'] ?? []) as $img) {
+        $src = is_array($img) ? ($img['src'] ?? '') : '';
+        if ($src && url_is_image($src)) $images[] = make_absolute_url($src, $baseUrl);
+    }
+
+    $cats = [];
+    foreach ((array)($item['categories'] ?? []) as $c) {
+        if (!empty($c['name'])) $cats[] = normalize_text($c['name']);
+    }
+    $tags = [];
+    foreach ((array)($item['tags'] ?? []) as $t) {
+        if (!empty($t['name'])) $tags[] = normalize_text($t['name']);
+    }
+
+    $attrs = [];
+    foreach ((array)($item['attributes'] ?? []) as $a) {
+        $name = normalize_text((string)($a['name'] ?? ''));
+        if ($name === '') continue;
+        $terms = [];
+        foreach ((array)($a['terms'] ?? []) as $term) {
+            if (!empty($term['name'])) $terms[] = normalize_text($term['name']);
+        }
+        if (!$terms) continue;
+        $attrs[] = [
+            'name'    => $name,
+            'values'  => $terms,
+            'visible' => 1,
+            'global'  => !empty($a['taxonomy']) ? 1 : 0,
+        ];
+    }
+
+    $brand = '';
+    foreach ((array)($item['brands'] ?? []) as $b) {
+        if (!empty($b['name'])) { $brand = normalize_text($b['name']); break; }
+    }
+
+    $inStock = array_key_exists('is_in_stock', $item) ? (!empty($item['is_in_stock']) ? '1' : '0') : '';
+    $stockQty = $item['low_stock_remaining'] ?? null;
+
+    return [
+        'title'      => normalize_text((string)($item['name'] ?? '')),
+        'price'      => $priceStr,
+        'link'       => make_absolute_url((string)($item['permalink'] ?? ''), $baseUrl),
+        'image'      => $images[0] ?? '',
+        'sku'        => normalize_text((string)($item['sku'] ?? '')),
+        'shortDesc'  => trim((string)($item['short_description'] ?? '')),
+        'longDesc'   => trim((string)($item['description'] ?? '')),
+        'category'   => implode(', ', $cats),
+        'tags'       => implode(', ', $tags),
+        'brand'      => $brand,
+        'stock'      => $inStock === '1' ? 'موجود' : ($inStock === '0' ? 'ناموجود' : ''),
+        'weight'     => '',
+        // WooCommerce-export extras
+        'wooId'      => (int)($item['id'] ?? 0),
+        'wooType'    => !empty($item['variation']) ? 'variation' : (!empty($item['has_options']) ? 'variable' : 'simple'),
+        'regular'    => $regular,
+        'sale'       => ($sale !== '' && $sale !== $regular) ? $sale : '',
+        'inStock'    => $inStock,
+        'stockQty'   => is_numeric($stockQty) ? (string)(int)$stockQty : '',
+        'gallery'    => array_slice($images, 1),
+        'attributes' => $attrs,
+        'onSale'     => !empty($item['on_sale']) ? 1 : 0,
+        'source'     => 'store_api',
+    ];
+}
+
+/** Probe a site once to see whether the Store API is usable. */
+if (!empty($_GET['detect_store_api'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $url = trim($_GET['detect_store_api']);
+    if (!filter_var($url, FILTER_VALIDATE_URL)) {
+        echo json_encode(['ok' => false, 'error' => 'Invalid URL']);
+        exit;
+    }
+    $endpoint = store_api_base($url);
+    if (!$endpoint) {
+        echo json_encode(['ok' => false, 'error' => 'Bad host']);
+        exit;
+    }
+    $res = fetch_json($endpoint . '?per_page=1', 15);
+    if (!$res['ok'] || !is_array($res['data']) || !count($res['data']) || !isset($res['data'][0]['id'])) {
+        echo json_encode([
+            'ok' => false,
+            'available' => false,
+            'endpoint' => $endpoint,
+            'error' => $res['error'] ?: 'No products returned',
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $sample = map_store_api_product($res['data'][0], $url);
+    echo json_encode([
+        'ok' => true,
+        'available' => true,
+        'endpoint' => $endpoint,
+        'totalPages' => $res['totalPages'],
+        'sample' => [
+            'title' => $sample['title'],
+            'price' => $sample['price'],
+            'sku' => $sample['sku'],
+            'category' => $sample['category'],
+        ],
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (!empty($_GET['image_proxy'])) {
     $url = trim($_GET['image_proxy']);
     if (!filter_var($url, FILTER_VALIDATE_URL)) { http_response_code(400); exit; }
@@ -163,6 +346,7 @@ if (($_POST['action'] ?? '') === 'save_profile') {
         'useCustomCol' => !empty($_POST['useCustomCol']),
         'customColName' => $_POST['customColName'] ?? '',
         'customColVal' => $_POST['customColVal'] ?? '',
+        'useStoreApi' => filter_var($_POST['useStoreApi'] ?? false, FILTER_VALIDATE_BOOLEAN),
         'updatedAt' => time()
     ];
     if (saveProfiles($profiles)) {
@@ -1597,6 +1781,66 @@ if (isset($_GET['stream'])) {
     $allProducts = [];
     $seenKeys = [];
     $nextUrl = null;
+
+    /* ---------- Fast path: WooCommerce Store API ---------- */
+    $useApi = ($_GET['useStoreApi'] ?? '') === '1';
+    if ($useApi) {
+        $endpoint = store_api_base($url);
+        $perPage = 100;
+        $apiOk = false;
+
+        for ($page = 1; $page <= $maxPages; $page++) {
+            $apiUrl = $endpoint . '?per_page=' . $perPage . '&page=' . $page;
+            $res = fetch_json($apiUrl, 25);
+
+            send_sse('page', ['page' => $page, 'url' => $apiUrl, 'ok' => $res['ok']]);
+
+            if (!$res['ok'] || !is_array($res['data'])) {
+                if ($page === 1) {
+                    send_sse('notice', ['message' => 'Store API در دسترس نیست (' . $res['error'] . ')']);
+                } else {
+                    send_sse('notice', ['message' => 'توقف Store API در صفحه ' . $page . ': ' . $res['error']]);
+                }
+                break;
+            }
+            if (!count($res['data'])) break;
+
+            $apiOk = true;
+            $newCount = 0;
+            foreach ($res['data'] as $item) {
+                if (!is_array($item)) continue;
+                $p = map_store_api_product($item, $url);
+                if (!$p['title'] && !$p['link']) continue;
+                $key = productKey($p);
+                if (isset($seenKeys[$key])) continue;
+                $seenKeys[$key] = 1;
+                $allProducts[$key] = $p;
+                $newCount++;
+                send_sse('product', array_merge($p, ['key' => $key]));
+            }
+
+            send_sse('page_done', ['page' => $page, 'new' => $newCount, 'total' => count($allProducts)]);
+
+            // X-WP-TotalPages is authoritative. Only fall back to the
+            // "short page means last page" heuristic when it is absent,
+            // otherwise a store that caps per_page below our request
+            // would make us stop after the first page.
+            if ($res['totalPages'] > 0) {
+                if ($page >= $res['totalPages']) break;
+            } elseif (count($res['data']) < $perPage) {
+                break;
+            }
+            usleep(150000);
+        }
+
+        if ($apiOk) {
+            send_sse('complete', ['total' => count($allProducts), 'products' => array_values($allProducts), 'via' => 'store_api']);
+            send_sse('done', []);
+            exit;
+        }
+        // otherwise fall through to the regular HTML scraper
+        send_sse('notice', ['message' => '↩ بازگشت خودکار به حالت HTML']);
+    }
     
     for ($page = 1; $page <= $maxPages; $page++) {
         if ($page === 1) {
@@ -1714,6 +1958,90 @@ if (isset($_GET['stream'])) {
     
     send_sse('complete', ['total' => count($allProducts), 'products' => array_values($allProducts)]);
     send_sse('done', []);
+    exit;
+}
+
+/* WooCommerce Product CSV Importer compatible export.
+ * Column names follow the official import schema so the file can be
+ * dropped straight into Products > Import in any WooCommerce store. */
+if (($_POST['action'] ?? '') === 'woo_csv') {
+    $products = json_decode($_POST['products'] ?? '[]', true) ?: [];
+    $published = ($_POST['wooPublished'] ?? '1') === '1' ? 1 : 0;
+    $defaultCat = trim($_POST['wooCategory'] ?? '');
+
+    // How many attribute column groups do we need?
+    $maxAttrs = 0;
+    foreach ($products as $p) {
+        $n = is_array($p['attributes'] ?? null) ? count($p['attributes']) : 0;
+        if ($n > $maxAttrs) $maxAttrs = $n;
+    }
+    $maxAttrs = min($maxAttrs, 5);
+
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="woocommerce-products-' . date('Ymd-His') . '.csv"');
+    echo "\xEF\xBB\xBF";
+    $out = fopen('php://output', 'w');
+
+    $headers = [
+        'Type', 'SKU', 'Name', 'Published', 'Is featured?', 'Visibility in catalog',
+        'Short description', 'Description', 'In stock?', 'Stock', 'Weight (kg)',
+        'Regular price', 'Sale price', 'Categories', 'Tags', 'Images', 'External URL',
+    ];
+    for ($i = 1; $i <= $maxAttrs; $i++) {
+        $headers[] = "Attribute $i name";
+        $headers[] = "Attribute $i value(s)";
+        $headers[] = "Attribute $i visible";
+        $headers[] = "Attribute $i global";
+    }
+    fputcsv($out, $headers);
+
+    foreach ($products as $p) {
+        $cats = trim((string)($p['category'] ?? ''));
+        if ($cats === '' && $defaultCat !== '') $cats = $defaultCat;
+
+        $images = trim((string)($p['image'] ?? ''));
+        if (!empty($p['gallery']) && is_array($p['gallery'])) {
+            $extra = array_filter($p['gallery']);
+            if ($extra) $images = trim($images . ', ' . implode(', ', $extra), ', ');
+        }
+
+        $row = [
+            $p['wooType'] ?? 'simple',
+            $p['sku'] ?? '',
+            $p['title'] ?? '',
+            $published,
+            0,
+            'visible',
+            strip_tags((string)($p['shortDesc'] ?? '')),
+            (string)($p['longDesc'] ?? ''),
+            (string)($p['inStock'] ?? '1'),
+            (string)($p['stockQty'] ?? ''),
+            preg_replace('~[^\d.]~', '', (string)($p['weight'] ?? '')),
+            (string)($p['regular'] ?? ''),
+            (string)($p['sale'] ?? ''),
+            $cats,
+            (string)($p['tags'] ?? ''),
+            $images,
+            (string)($p['link'] ?? ''),
+        ];
+
+        $attrs = is_array($p['attributes'] ?? null) ? array_slice($p['attributes'], 0, $maxAttrs) : [];
+        for ($i = 0; $i < $maxAttrs; $i++) {
+            if (isset($attrs[$i]) && is_array($attrs[$i])) {
+                $a = $attrs[$i];
+                $vals = is_array($a['values'] ?? null) ? implode(', ', $a['values']) : (string)($a['values'] ?? '');
+                $row[] = (string)($a['name'] ?? '');
+                $row[] = $vals;
+                $row[] = isset($a['visible']) ? (int)$a['visible'] : 1;
+                $row[] = isset($a['global']) ? (int)$a['global'] : 0;
+            } else {
+                $row[] = ''; $row[] = ''; $row[] = ''; $row[] = '';
+            }
+        }
+
+        fputcsv($out, $row);
+    }
+    fclose($out);
     exit;
 }
 
@@ -2025,6 +2353,23 @@ input:checked+.slider:before{transform:translateX(-16px)}
         </div>
     </div>
 
+    <div class="card" id="storeApiCard" style="border-color:#22c55e">
+        <div class="section-title" style="color:#4ade80">⚡ WooCommerce Store API</div>
+        <div class="alert alert-info">
+            💡 اگر سایت هدف ووکامرس باشد، به جای خواندن HTML مستقیماً از API رسمی می‌خواند:
+            قیمت دقیق، SKU، موجودی، دسته‌بندی، برچسب و ویژگی‌ها — بسیار سریع‌تر و بدون نیاز به سلکتور.
+        </div>
+        <div class="row">
+            <button class="btn btn-green" onclick="detectStoreApi()" id="btnDetectApi" style="flex:1">🔎 بررسی پشتیبانی</button>
+        </div>
+        <div class="row" style="align-items:center">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="useStoreApi" onchange="scheduleSave()"> استفاده از Store API
+            </label>
+        </div>
+        <div class="status" id="storeApiStatus" style="color:#4ade80">بررسی نشده</div>
+    </div>
+
     <div class="card">
         <div class="mode-tabs">
             <button class="mode-tab active" onclick="setMode('auto')">🤖 خودکار</button>
@@ -2226,6 +2571,9 @@ input:checked+.slider:before{transform:translateX(-16px)}
             <button class="btn btn-gray" onclick="copyCSV()" style="flex:1">📋 کپی</button>
             <button class="btn btn-green" onclick="dlCSV()" style="flex:1">📄 CSV</button>
             <button class="btn btn-purple" onclick="dlExcel()" style="flex:1">📊 Excel</button>
+        </div>
+        <div class="row">
+            <button class="btn btn-orange" onclick="dlWooCSV()" style="flex:1" title="خروجی سازگار با Products → Import در ووکامرس">🛒 CSV ووکامرس (Import)</button>
         </div>
         <div id="vGrid" class="grid">
             <div class="empty-state" id="emptyState">
@@ -2648,6 +2996,10 @@ function applyProfile(p) {
     $('useCustomCol').checked = !!p.useCustomCol;
     $('customColName').value = p.customColName || 'وضعیت';
     $('customColVal').value = p.customColVal || 'موجود';
+    if ($('useStoreApi')) {
+        $('useStoreApi').checked = !!p.useStoreApi;
+        $('storeApiStatus').textContent = p.useStoreApi ? '✓ فعال (از پروفایل)' : 'بررسی نشده';
+    }
     
     if (p.selectors) {
         sel = {...sel, ...p.selectors};
@@ -2710,7 +3062,8 @@ function collectProfileData() {
         minPrice: parseInt($('minPrice').value) || 10000,
         useCustomCol: $('useCustomCol').checked,
         customColName: $('customColName').value,
-        customColVal: $('customColVal').value
+        customColVal: $('customColVal').value,
+        useStoreApi: isStoreApiOn()
     };
 }
 
@@ -3169,6 +3522,10 @@ function start(useSel=false){
     sUrl+='&selectors='+encodeURIComponent(JSON.stringify(sel));
     log('🎯 سلکتور: '+sel.container,'info');
   }
+  if(isStoreApiOn()){
+    sUrl+='&useStoreApi=1';
+    log('⚡ حالت Store API','info');
+  }
   
   es=new EventSource(sUrl);
   
@@ -3185,6 +3542,7 @@ function start(useSel=false){
       showToast(`✓ ${d.total} محصول استخراج شد`);
       switchMainTab('results');
   });
+  es.addEventListener('notice',e=>{if(e.data)log('ℹ '+JSON.parse(e.data).message,'info');});
   es.addEventListener('error',e=>{if(e.data)log('❌ '+JSON.parse(e.data).message,'err');});
   es.addEventListener('done',finish);
   es.onerror=()=>{if(running)finish();};
@@ -3401,6 +3759,101 @@ function dl(action){
 }
 function dlCSV(){dl('csv');}
 function dlExcel(){dl('excel');}
+
+/* ---------- WooCommerce Store API ---------- */
+function isStoreApiOn(){
+    return $('useStoreApi') && $('useStoreApi').checked;
+}
+
+function detectStoreApi(){
+    const url = $('url').value.trim();
+    if (!url) { showToast('ابتدا URL را وارد کنید', true); return; }
+
+    const btn = $('btnDetectApi');
+    btn.disabled = true;
+    $('storeApiStatus').textContent = 'در حال بررسی...';
+
+    fetch('?detect_store_api=' + encodeURIComponent(url))
+        .then(r => r.json())
+        .then(d => {
+            if (d.available) {
+                $('useStoreApi').checked = true;
+                const s = d.sample || {};
+                $('storeApiStatus').innerHTML =
+                    '✓ پشتیبانی می‌شود' +
+                    (s.title ? '<br><span style="color:#94a3b8;font-size:11px">نمونه: ' + esc(s.title) +
+                        (s.price ? ' — ' + esc(s.price) : '') + '</span>' : '');
+                log('⚡ Store API فعال شد: ' + d.endpoint, 'ok');
+                showToast('✓ Store API پشتیبانی می‌شود');
+                scheduleSave();
+            } else {
+                $('useStoreApi').checked = false;
+                $('storeApiStatus').textContent = '✗ پشتیبانی نمی‌شود — از حالت HTML استفاده کنید';
+                log('ℹ Store API در دسترس نیست: ' + (d.error || ''), 'info');
+                showToast('Store API در دسترس نیست', true);
+            }
+        })
+        .catch(() => {
+            $('storeApiStatus').textContent = '✗ خطا در بررسی';
+            showToast('خطا در بررسی', true);
+        })
+        .finally(() => { btn.disabled = false; });
+}
+
+function dlWooCSV(){
+    if (products.size === 0) { showToast('ابتدا محصولات را استخراج کنید', true); return; }
+
+    let exportData = [];
+    let missingPrice = 0;
+    order.forEach(k => {
+        const p = products.get(k);
+        const finalNum = getFinalPriceNum(p.price);
+        if (!finalNum) missingPrice++;
+        // Respect the price rules configured in the settings tab.
+        const regular = finalNum ? String(finalNum) : (p.regular || '');
+        let sale = '';
+        if (p.sale && p.regular && finalNum) {
+            const ratio = parseFloat(p.sale) / parseFloat(p.regular);
+            if (ratio > 0 && ratio < 1) sale = String(Math.round(finalNum * ratio));
+        }
+        exportData.push({
+            wooType:   p.wooType || 'simple',
+            sku:       p.sku || '',
+            title:     getFinalTitle(p.title),
+            shortDesc: p.shortDesc || '',
+            longDesc:  p.longDesc || '',
+            inStock:   (p.inStock === '' || p.inStock === undefined) ? '1' : p.inStock,
+            stockQty:  p.stockQty || '',
+            weight:    p.weight || '',
+            regular:   regular,
+            sale:      sale,
+            category:  p.category || '',
+            tags:      p.tags || '',
+            image:     p.image || '',
+            gallery:   p.gallery || [],
+            link:      p.link || '',
+            attributes: p.attributes || []
+        });
+    });
+
+    const f = document.createElement('form');
+    f.method = 'POST';
+    f.innerHTML = `<input type="hidden" name="action" value="woo_csv">
+                   <input type="hidden" name="products">
+                   <input type="hidden" name="wooPublished" value="1">
+                   <input type="hidden" name="wooCategory" value="">`;
+    f.querySelector('[name="products"]').value = JSON.stringify(exportData);
+    document.body.appendChild(f);
+    f.submit();
+    f.remove();
+
+    if (missingPrice > 0) {
+        showToast(`⚠ ${missingPrice} محصول بدون قیمت صادر شد`, true);
+    } else {
+        showToast('✓ خروجی ووکامرس آماده شد');
+    }
+    log(`🛒 خروجی CSV ووکامرس: ${exportData.length} محصول`, 'ok');
+}
 
 renderDetailFieldsList();
 

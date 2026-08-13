@@ -1,1 +1,73 @@
 
+profiles.json
+connections.json
+bsl_progress.json
+bsl_stop_signal.json
+woo_progress.json
+woo_stop_signal.json
+sync_state.json
+bsl_products_temp.json
+woo_queue.json
+woo_products_temp.json
+bsl_queue.json
+extract_progress.json
+extract_stop_signal.json
+extract_queue.json
+uploads/
+_backups/
+.deploy-config.json
+.deploy-log.json
+.versioncheck.json
+.cron_sync.lock
+extract_report_*.json
+.cron_run.lock
+
+# v8.33: runtime locks for the send workers
+bsl_backend.lock
+woo_backend.lock
+
+# v8.36: per-queue product files (one per send)
+bsl_queue_products_*.json
+woo_queue_products_*.json
+
+# v8.38: per-item notification state (runtime)
+last_notification_check.json
+
+# v8.48: category learning memory (runtime)
+category_learning.json
+bsl_cat_names.json
+
+# v8.49: recon runtime state
+recon_progress.json
+recon_result.json
+recon.lock
+
+# v8.53: suffix report runtime state
+suffix_progress.json
+suffix_result.json
+suffix.lock
+
+# v8.64: auto-reply rules, state and log (runtime)
+autoreply_rules.json
+autoreply_state.json
+autoreply_log.json
+
+# v8.62: runtime state for bulk edit / photo fix / nightly digest
+bulkedit_progress.json
+bulkedit_result.json
+photofix_progress.json
+photofix_result.json
+digest_state.json
+cron_last_run.json
+bulkedit.lock
+photofix.lock
+
+# v8.65: product key to destination id ledger (runtime)
+remote_map.json
+
+# v9.16: backup engine runtime state (never commit secrets or bundles)
+.backup-config.json
+.backup-log.json
+_backups/
+*.before-restore
+arena-fixtures/
