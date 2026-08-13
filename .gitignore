@@ -74,3 +74,7 @@ arena-fixtures/
 
 # v9.20: AI providers config (secrets + large model lists)
 ai_providers.json
+
+# v9.24: AI model test server-side progress
+ai_test_state.json
+ai_test_stop.json

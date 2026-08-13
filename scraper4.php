@@ -61,6 +61,11 @@ const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
    connections.json نگه داشته می‌شود چون چند صد مدل و کلید API دارد و
    «تست همهٔ مدل‌ها» آن را تکه‌تکه به‌روز می‌کند. */
 const AI_PROVIDERS_FILE = __DIR__ . '/ai_providers.json';
+/* v9.24: تست مدل‌ها به‌صورت کار پس‌زمینهٔ سمت سرور اجرا می‌شود تا بعد از
+   ریفرش یا بستن پنجره ادامه پیدا کند. پیشرفت در این فایل می‌نشیند و
+   مرورگر آن را poll می‌کند؛ فایل توقف برای قطع صریح اجرا. */
+const AI_TEST_STATE_FILE = __DIR__ . '/ai_test_state.json';
+const AI_TEST_STOP_FILE  = __DIR__ . '/ai_test_stop.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 const BULKEDIT_PROGRESS_FILE = __DIR__ . '/bulkedit_progress.json';   // v8.62
 const BULKEDIT_RESULT_FILE   = __DIR__ . '/bulkedit_result.json';     // v8.62
@@ -82,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.23';
-const APP_VERSION_DATE = '1405/05/25';
+const APP_VERSION = '9.24';
+const APP_VERSION_DATE = '1405/05/26';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1001,6 +1006,45 @@ function aiProvidersLoad(): array {
 function aiProvidersSave(array $p): bool {
     return @file_put_contents(AI_PROVIDERS_FILE,
         json_encode($p, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX) !== false;
+}
+/* =====================================================================
+ *  v9.24: حالتِ کارِ پس‌زمینهٔ «تست مدل‌ها»
+ *
+ *  تست به‌صورت یک پردازهٔ جدا از مرورگر (detached) اجرا می‌شود؛ پس از
+ *  ریفرش یا بستن پنجره ادامه پیدا می‌کند. مرورگر فقط وضعیت را poll می‌کند.
+ * ===================================================================== */
+function aiTestStateLoad(): array {
+    if (!is_file(AI_TEST_STATE_FILE)) return ['running' => false, 'done' => false, 'items' => []];
+    $d = json_decode((string)@file_get_contents(AI_TEST_STATE_FILE), true);
+    return is_array($d) ? $d : ['running' => false, 'done' => false, 'items' => []];
+}
+function aiTestStateSave(array $st): void {
+    $st['updated_at'] = time();
+    @file_put_contents(AI_TEST_STATE_FILE, json_encode($st, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+/** آیا یک درخواستِ پاسخ‌نشده واقعاً «قطع/ناپذیر» بود (نه خطای منطقی API)؟ */
+function aiTestNetworkFailure(array $r): array {
+    $code = (int)($r['code'] ?? 0);
+    $err  = strtolower((string)($r['error'] ?? ''));
+    $cat  = 'ok'; $label = ''; $reachable = true;
+    if ($code === 0 && $err !== '') {
+        $reachable = false;
+        if (strpos($err, 'resolve') !== false)            { $cat = 'dns';    $label = 'DNS — دامنه‌ای که قابل‌حل نیست (مسموم/بسته)'; }
+        elseif (strpos($err, 'timed out') !== false)      { $cat = 'timeout';$label = 'تایم‌اوت — سرور پاسخ نداد'; }
+        elseif (strpos($err, 'refused') !== false)        { $cat = 'refused';$label = 'اتصال رد شد (Connection refused)'; }
+        elseif (strpos($err, 'connect') !== false)        { $cat = 'connect';$label = 'برقراری اتصال ناموفق'; }
+        elseif (strpos($err, 'ssl') !== false)            { $cat = 'ssl';    $label = 'خطای SSL/TLS'; }
+        else                                              { $cat = 'network';$label = 'خطای شبکه: ' . mb_substr($r['error'], 0, 80); }
+    } elseif ($code > 0) {
+        if ($code === 401)      { $cat = 'auth';   $label = 'کلید API نامعتبر (401)'; }
+        elseif ($code === 403)  { $cat = 'forbidden'; $label = 'دسترسی رد شد (403) — IP هاست احتمالاً بلاک است'; }
+        elseif ($code === 404)  { $cat = 'notfound';$label = 'مدل/اندپوینت پیدا نشد (404)'; }
+        elseif ($code === 429)  { $cat = 'ratelimit';$label = 'محدودیت نرخ (429)'; }
+        elseif ($code === 400)  { $cat = 'badreq'; $label = 'درخواست نامعتبر (400)'; }
+        elseif ($code === 422)  { $cat = 'badreq'; $label = 'درخواست نامعتبر (422)'; }
+        else                    { $cat = 'http';   $label = 'HTTP ' . $code; }
+    }
+    return ['code' => $code, 'cat' => $cat, 'label' => $label, 'reachable' => $reachable, 'error' => (string)($r['error'] ?? '')];
 }
 /** انتخاب فعال {provider,model} را از connections می‌خواند */
 function aiSelected(): array {
@@ -11157,6 +11201,19 @@ if (isset($_GET['selftest'])) {
     $add('9.23', 'دکمهٔ «نتایج تست» در رابط هست',
          strpos($selfSrc, 'نتایج تس' . 'ت') !== false);
 
+    /* ---------- v9.24: تست سرور-ساید ادامه‌دار + تشخیص دسترسی ---------- */
+    $add('9.24', 'تست مدل‌ها به‌صورت کارِ پس‌زمینهٔ سرور اجرا می‌شود',
+         function_exists('aiRunTest' . 'Background')
+         && strpos($selfSrc, "isset(\$_GET['ai_test_st" . "atus'])") !== false
+         && strpos($selfSrc, "isset(\$_GET['ai_test_st" . "op'])") !== false
+         && strpos($selfSrc, "isset(\$_GET['ai_test_st" . "art'])") !== false);
+    $add('9.24', 'طبقه‌بندی خطای دسترسی به اندپوینت وجود دارد',
+         function_exists('aiTestNetwork' . 'Failure')
+         && strpos($selfSrc, 'reachable') !== false
+         && strpos($selfSrc, 'aiTestDi' . 'ag') !== false);
+    $add('9.24', 'بعد از ریفرش، تست در حال اجرا ادامه می‌یابد',
+         strpos($selfSrc, 'aiResumeTestModal' . 'OnLoad') !== false);
+
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
          && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
@@ -15775,29 +15832,64 @@ echo json_encode(['ok'=>true, 'model'=>$mid, 'provider'=>$pid, 'available'=>$ok,
 exit;
 }
 /* تست همهٔ مدل‌های فعال (SSE) — با سقف به‌ازای هر ارائه‌دهنده */
-if (isset($_GET['ai_test_all'])) {
-header('Content-Type: text/event-stream; charset=UTF-8');
-header('Cache-Control: no-cache'); header('X-Accel-Buffering: no');
-while (@ob_get_level()) @ob_end_clean();
-$aiSse = function ($data) { echo 'data: ' . json_encode($data, JSON_UNESCAPED_UNICODE) . "\n\n"; @ob_flush(); @flush(); };
-$per = max(1, min(500, (int)($_GET['per_provider'] ?? 50)));
-$onlyUntested = !empty($_GET['only_untested']);
-$providers = aiProvidersLoad();
-$tested = 0; $available = 0; $failed = 0; $skipped = 0;
-foreach ($providers as $pid => &$p) {
-    if (($p['enabled'] ?? true) === false) continue;
-    $models = &$p['models'];
-    $n = 0;
-    foreach ($models as $i => $m) {
-        if ($n >= $per) { $skipped += count($models) - $n; break; }
-        $mid = (string)($m['id'] ?? '');
-        if ($mid === '') continue;
-        if ($onlyUntested && !empty($m['tested'])) { $n++; continue; }
-        $n++;
-        $aiSse(['type'=>'progress', 'provider'=>$pid, 'providerName'=>$p['name']??$pid,
-            'model'=>$mid, 'index'=>$tested+1]);
+/* =====================================================================
+ *  v9.24: تست مدل‌ها به‌صورت کارِ پس‌زمینهٔ سمت سرور
+ *
+ *  ?ai_test_start=1  → شروع تست در پس‌زمینه (جدا از مرورگر) + پاسخ فوری
+ *  ?ai_test_all=1    → نامِ سازگار (همان شروع) برای نسخه‌های قبلی
+ *  ?ai_test_status=1 → وضعیت فعلی کار (poll شده توسط مرورگر)
+ *  ?ai_test_stop=1   → سیگنال توقف صریح
+ * ===================================================================== */
+if (isset($_GET['ai_test_status'])) {
+header('Content-Type: application/json; charset=UTF-8');
+echo json_encode(aiTestStateLoad(), JSON_UNESCAPED_UNICODE);
+exit;
+}
+if (isset($_GET['ai_test_stop'])) {
+@file_put_contents(AI_TEST_STOP_FILE, json_encode(['stop'=>true,'time'=>time()], LOCK_EX));
+$st = aiTestStateLoad();
+$st['stopping'] = true;
+aiTestStateSave($st);
+header('Content-Type: application/json; charset=UTF-8');
+echo json_encode(['ok'=>true,'stopping'=>true], JSON_UNESCAPED_UNICODE);
+exit;
+}
+
+/* هستهٔ اجرای تست — یک تابع تا هم از مسیر پس‌زمینه و هم از مسیر هم‌زمان استفاده کند */
+function aiRunTestBackground(int $per, bool $onlyUntested): array {
+    @set_time_limit(0); @ignore_user_abort(true);
+    @unlink(AI_TEST_STOP_FILE);
+    $providers = aiProvidersLoad();
+    $st = ['running'=>true,'done'=>false,'stopped'=>false,'started_at'=>time(),'updated_at'=>time(),
+           'per_provider'=>$per,'only_untested'=>$onlyUntested,
+           'total'=>0,'tested'=>0,'available'=>0,'failed'=>0,'skipped'=>0,
+           'current'=>['provider'=>'','model'=>''],'items'=>[],'diag'=>[],'summary'=>''];
+    // شمارش کل مدل‌های هدف
+    $queue = [];
+    foreach ($providers as $pid => $p) {
+        if (($p['enabled'] ?? true) === false) continue;
+        $n = 0;
+        foreach ($p['models'] as $m) {
+            $mid = (string)($m['id'] ?? '');
+            if ($mid === '') continue;
+            if ($onlyUntested && !empty($m['tested'])) continue;
+            if ($n >= $per) { $st['skipped']++; $n++; continue; }
+            $n++;
+            $queue[] = ['pid'=>$pid, 'mid'=>$mid];
+        }
+    }
+    $st['total'] = count($queue);
+    aiTestStateSave($st);
+    foreach ($queue as $q) {
+        // توقف صریح
+        if (is_file(AI_TEST_STOP_FILE)) { $st['stopped'] = true; break; }
+        $pid = $q['pid']; $mid = $q['mid'];
+        $p = $providers[$pid] ?? null;
+        if (!$p) continue;
+        $st['current'] = ['provider'=>$pid, 'model'=>$mid];
+        aiTestStateSave($st);
         $t0 = microtime(true);
-        // v9.23: پیام تست «سلام» فرستاده می‌شود
+        // پیام تست «سلام»
         $r = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>'سلام']], 'temperature'=>0.3, 'max_tokens'=>30], aiNetCfg());
         $latency = (int)round((microtime(true) - $t0) * 1000);
         $code = (int)$r['code'];
@@ -15805,22 +15897,77 @@ foreach ($providers as $pid => &$p) {
         $body = $r['body'] ?? [];
         $response = $ok ? (string)($body['choices'][0]['message']['content'] ?? '') : '';
         $err = $ok ? '' : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
-        $models[$i]['tested'] = true;
-        $models[$i]['available'] = $ok;
-        $models[$i]['rateLimited'] = in_array($code, [429], true);
-        $models[$i]['testDetails'] = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300),
-            'response'=>mb_substr((string)$response,0,300), 'latencyMs'=>$latency, 'testedAt'=>gmdate('c')];
-        $tested++;
-        if ($ok) $available++; else $failed++;
+        // تشخیص قابل‌دسترس‌نبودن اندپوینت
+        $diag = aiTestNetworkFailure($r);
+        $diag['label'] = $ok ? 'در دسترس' : ($diag['label'] !== '' ? $diag['label'] : ('HTTP '.$code));
+        $diag['ok'] = $ok;
+        $diag['latencyMs'] = $latency;
+        if (!isset($st['diag'][$pid])) $st['diag'][$pid] = ['reachable'=>true,'categories'=>[],'samples'=>0];
+        $st['diag'][$pid]['samples']++;
+        if (!$ok) {
+            $st['diag'][$pid]['categories'][$diag['cat']] = ($st['diag'][$pid]['categories'][$diag['cat']] ?? 0) + 1;
+            if ($diag['cat'] === 'dns' || $diag['cat'] === 'timeout' || $diag['cat'] === 'refused'
+                || $diag['cat'] === 'connect' || $diag['cat'] === 'ssl' || $diag['cat'] === 'network') {
+                $st['diag'][$pid]['reachable'] = false;
+                $st['diag'][$pid]['first_error'] = $diag['error'];
+            }
+        }
+        $st['diag'][$pid]['last_label'] = $diag['label'];
+        // ذخیرهٔ نتیجه در provider
+        if (isset($providers[$pid]['models'])) {
+            foreach ($providers[$pid]['models'] as $i => $m) {
+                if (($m['id'] ?? '') === $mid) {
+                    $providers[$pid]['models'][$i]['tested'] = true;
+                    $providers[$pid]['models'][$i]['available'] = $ok;
+                    $providers[$pid]['models'][$i]['rateLimited'] = in_array($code, [429], true);
+                    $providers[$pid]['models'][$i]['testDetails'] = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300),
+                        'response'=>mb_substr((string)$response,0,300), 'latencyMs'=>$latency, 'testedAt'=>gmdate('c')];
+                    break;
+                }
+            }
+        }
+        $st['tested']++;
+        if ($ok) $st['available']++; else $st['failed']++;
+        $st['items'][] = ['provider'=>$pid, 'providerName'=>$p['name']??$pid, 'model'=>$mid,
+            'ok'=>$ok, 'latencyMs'=>$latency, 'error'=>mb_substr((string)$err,0,120),
+            'cat'=>$diag['cat'], 'label'=>$diag['label']];
+        if (count($st['items']) > 1000) $st['items'] = array_slice($st['items'], -1000);
+        $st['current'] = ['provider'=>'', 'model'=>''];
         // هر ۳ مدل ذخیره کن تا اگر پردازه کشته شد کار حفظ شود
-        if ($tested % 3 === 0) aiProvidersSave($providers);
-        $aiSse(['type'=>'item', 'provider'=>$pid, 'providerName'=>$p['name']??$pid,
-            'model'=>$mid, 'ok'=>$ok, 'latencyMs'=>$latency, 'error'=>mb_substr((string)$err,0,120)]);
-        usleep(150000);
+        if ($st['tested'] % 3 === 0) { aiProvidersSave($providers); aiTestStateSave($st); }
+        usleep(120000);
     }
+    aiProvidersSave($providers);
+    $st['running'] = false;
+    $st['done'] = true;
+    $st['summary'] = $st['stopped']
+        ? 'توقف خواسته شد — '.$st['tested'].' تست انجام شد'
+        : 'تمام شد — '.$st['tested'].' تست · 🟢 '.$st['available'].' · 🔴 '.$st['failed'];
+    aiTestStateSave($st);
+    @unlink(AI_TEST_STOP_FILE);
+    return $st;
 }
-aiProvidersSave($providers);
-$aiSse(['type'=>'done', 'tested'=>$tested, 'available'=>$available, 'failed'=>$failed, 'skipped'=>$skipped]);
+
+if (isset($_GET['ai_test_start']) || isset($_GET['ai_test_all'])) {
+header('Content-Type: application/json; charset=UTF-8');
+$per = max(1, min(500, (int)($_GET['per_provider'] ?? 50)));
+$onlyUntested = !empty($_GET['only_untested']);
+// اگر کاری در حال اجراست، دوباره شروع نکن
+$cur = aiTestStateLoad();
+if (!empty($cur['running'])) {
+    echo json_encode(['ok'=>false,'running'=>true,'error'=>'تست مدل‌ها در حال اجراست — برای شروع تازه اول متوقفش کنید (?)'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+$detach = !isset($_GET['sync']);
+finishRequestNow(json_encode(['ok'=>true,'started'=>true,'background'=>$detach,
+    'note'=>'تست در پس‌زمینهٔ سرور ادامه دارد — می‌توانید صفحه را ببندید'], JSON_UNESCAPED_UNICODE));
+if (!$detach) {
+    // حالت هم‌زمان برای تست/عیب‌یابی
+    aiRunTestBackground($per, $onlyUntested);
+    exit;
+}
+// پس از جدا شدن از مرورگر، اجرای واقعی ادامه می‌یابد
+aiRunTestBackground($per, $onlyUntested);
 exit;
 }
 
@@ -24724,6 +24871,23 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.24', t:'🖥 تست مدل‌ها به‌صورت سرور-ساید ادامه‌دار + تشخیص دسترسی', items:[
+    'خواستهٔ شما: تست مدل‌ها سمت سرور اجرا شود تا بعد از ریفرش یا بستن',
+    'پنجره ادامه پیدا کند؛ و اینکه از کجا بفهمیم هاست به اندپوینت ارائه‌دهنده',
+    'دسترسی ندارد.',
+    '🖥 تست حالا یک کارِ پس‌زمینهٔ سمت سرور است: با زدن «تست همهٔ مدل‌ها»',
+    'درخواست فوری بسته می‌شود و خودِ تست در سرور ادامه می‌یابد. مرورگر',
+    'فقط وضعیت را poll می‌کند؛ بستن یا ریفرش پنجره، تست را قطع نمی‌کند.',
+    '↩️ اگر بعد از ریفرش کار هنوز در حال اجراست، مودال خودکار باز می‌شود و',
+    'پیشرفت از همان‌جا ادامه می‌یابد.',
+    '⏹ دکمهٔ «توقف» اضافه شد تا اجرای جاری صریح متوقف شود.',
+    '🔍 تشخیص دسترسی: برای هر ارائه‌دهنده خطاها طبقه‌بندی می‌شود — DNS',
+    '(دامنه قابل‌حل نیست)، تایم‌اوت، اتصال رد شده، SSL، 401 (کلید نامعتبر)،',
+    '403 (IP هاست بلاک)، 404 (مدل نیست)، 429 (محدودیت نرخ). اگر همهٔ مدل‌های',
+    'یک ارائه‌دهنده با خطای شبکه شکست بخورند، در پایین مودال هشدار داده',
+    'می‌شود که هاست به آن ارائه‌دهنده دسترسی ندارد و پیشنهاد عوض کردن',
+    'روش اتصال (DoH/پروکسی/Worker) داده می‌شود.'
+  ]},
   {v:'9.23', t:'📊 جدول مودالِ نتیجهٔ زندهٔ تست همهٔ مدل‌ها', items:[
     'خواستهٔ شما: یک جدول مودال برای نتیجهٔ زندهٔ «تست همهٔ مدل‌ها» که با',
     'ارسال پیام «سلام» انجام شود و با زدن دکمهٔ «نتایج تست» باز شود.',
@@ -28030,6 +28194,8 @@ if(b.vendors&&Array.isArray(b.vendors)){bslExtraVendors=b.vendors;renderBslVendo
 // v9.20: AI settings — چند-ارائه‌دهنده
 applyAiNet(cn.ai_net||{});
 aiLoadProviders();
+// v9.24: اگر تست مدل‌ها در حال اجراست (مثلاً بعد از ریفرش)، مودال را ادامه بده
+if(typeof aiResumeTestModalOnLoad==='function')setTimeout(aiResumeTestModalOnLoad,1500);
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
@@ -28433,6 +28599,7 @@ function aiOpenTestModal(){
       +'<div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #334155;flex:0 0 auto">'
       +'<span style="font-size:14px">🧪</span><b style="color:#67e8f9;flex:1">نتایج زندهٔ تست همهٔ مدل‌ها</b>'
       +'<span id="aiTestCur" style="color:#fbbf24;font-size:11px"></span>'
+      +'<button class="btn btn-red" onclick="aiTestStop()" style="font-size:11px;padding:4px 10px">⏹ توقف</button>'
       +'<button class="btn btn-gray" onclick="aiCloseTestModal()" style="font-size:11px;padding:4px 10px">✕ بستن</button></div>'
       +'<div style="display:flex;gap:16px;padding:8px 16px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;color:#94a3b8;flex-wrap:wrap">'
       +'<span>کل: <b id="aiTestTot" style="color:#e2e8f0">۰</b></span>'
@@ -28450,14 +28617,100 @@ function aiOpenTestModal(){
       +'<th style="padding:8px;text-align:center;width:70px">تأخیر</th>'
       +'<th style="padding:8px;text-align:right">پاسخ / خطا</th>'
       +'</tr></thead><tbody id="aiTestTbody"></tbody></table></div>'
+      +'<div id="aiTestDiag" style="flex:0 0 auto;padding:0 16px 10px"></div>'
       +'</div>';
     m.addEventListener('click',function(e){if(e.target===m)aiCloseTestModal();});
     document.body.appendChild(m);
 }
 function aiCloseTestModal(){
-    if(window._aiTestES){try{window._aiTestES.close();}catch(_){}window._aiTestES=null;}
+    // فقط poll را قطع می‌کنیم؛ کارِ سرور به‌صورت پس‌زمینه ادامه دارد
+    if(window._aiPollTimer){clearInterval(window._aiPollTimer);window._aiPollTimer=null;}
     const m=document.getElementById('aiTestModal');if(m)m.remove();
     aiLoadProviders();
+}
+function aiTestStop(){
+    fetch('?ai_test_stop=1').then(r=>r.json()).then(()=>{
+        if($('aiTestCur'))$('aiTestCur').textContent='⏹ در حال توقف...';
+    }).catch(()=>{});
+}
+/* v9.24: وضعیت کارِ پس‌زمینه را poll می‌کند و جدول را به‌روز می‌کند */
+function aiPollTest(){
+    if(window._aiPollTimer)return;
+    window._aiPollTimer=setInterval(()=>{
+        fetch('?ai_test_status=1').then(r=>r.json()).then(st=>{
+            aiRenderTestState(st);
+            if(!st.running&&st.done){
+                if(window._aiPollTimer){clearInterval(window._aiPollTimer);window._aiPollTimer=null;}
+                aiLoadProviders();
+            }
+        }).catch(()=>{});
+    },1200);
+}
+let aiTestRows={},aiTestTotCount=0,aiTestOkCount=0,aiTestFailCount=0,aiTestWaitCount=0;
+function aiTestRenderCounters(){
+    if($('aiTestTot'))$('aiTestTot').textContent=toFa(aiTestTotCount);
+    if($('aiTestOk'))$('aiTestOk').textContent=toFa(aiTestOkCount);
+    if($('aiTestFail'))$('aiTestFail').textContent=toFa(aiTestFailCount);
+    if($('aiTestWait'))$('aiTestWait').textContent=toFa(aiTestWaitCount);
+}
+function aiEnsureTestRow(d){
+    const tbody=$('aiTestTbody');if(!tbody)return null;
+    const key=(d.provider||'')+'::'+(d.model||'');
+    if(aiTestRows[key])return aiTestRows[key];
+    aiTestTotCount++;aiTestWaitCount++;
+    const tr=document.createElement('tr');
+    tr.style.borderBottom='1px solid #1e293b';
+    tr.innerHTML='<td style="padding:6px;text-align:center;color:#64748b">'+toFa(aiTestTotCount)+'</td>'
+      +'<td style="padding:6px;text-align:center"><span class="aiSt">⏳</span></td>'
+      +'<td style="padding:6px;text-align:right;color:#94a3b8">'+esc(d.providerName||d.provider||'')+'</td>'
+      +'<td style="padding:6px;text-align:left;direction:ltr;color:#e2e8f0;word-break:break-all">'+esc(d.model||'')+'</td>'
+      +'<td style="padding:6px;text-align:center;color:#64748b" class="aiLat">—</td>'
+      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiRes">…</td>';
+    tbody.appendChild(tr);
+    aiTestRenderCounters();
+    return aiTestRows[key]={tr:tr};
+}
+function aiSetTestRow(d){
+    const r=aiEnsureTestRow(d);
+    if(!r)return;
+    if(d.ok!==undefined){ if(aiTestWaitCount>0)aiTestWaitCount--; if(d.ok)aiTestOkCount++; else aiTestFailCount++; }
+    r.tr.querySelector('.aiSt').textContent=d.ok?'🟢':'🔴';
+    r.tr.querySelector('.aiSt').style.color=d.ok?'#4ade80':'#f87171';
+    const lat=r.tr.querySelector('.aiLat');if(lat)lat.textContent=(d.latencyMs>0)?(toFa(d.latencyMs)+'ms'):'—';
+    const res=r.tr.querySelector('.aiRes');
+    if(res){
+        if(d.ok)res.innerHTML='<span style="color:#4ade80">✓ پاسخ گرفت</span>';
+        else res.innerHTML='<span style="color:#f87171" title="'+esc(d.label||'')+'">'+esc(d.error||d.label||'خطا')+'</span>';
+    }
+    aiTestRenderCounters();
+}
+function aiRenderTestState(st){
+    if(!st)return;
+    if(st.current&&st.current.model&&$('aiTestCur'))$('aiTestCur').textContent='در حال تست: '+esc(st.current.model);
+    else if(st.done&&$('aiTestCur'))$('aiTestCur').textContent='🏁 '+esc(st.summary||'تمام شد');
+    else if(st.stopping&&$('aiTestCur'))$('aiTestCur').textContent='⏹ در حال توقف...';
+    // اگر هنوز ردیفی ساخته نشده و آیتم‌هایی هست، ابتدا کل ردیف‌ها را از روی total بساز
+    if(aiTestTotCount===0&&st.total>0){
+        const tbody=$('aiTestTbody');if(tbody)tbody.innerHTML='';
+        aiTestTotCount=0;aiTestWaitCount=0;aiTestOkCount=0;aiTestFailCount=0;aiTestRows={};
+        if(st.total>0)aiTestWaitCount=st.total;
+        aiTestRenderCounters();
+    }
+    (st.items||[]).forEach(it=>aiSetTestRow(it));
+    if(st.done){ if($('aiTestCur'))$('aiTestCur').textContent='🏁 '+esc(st.summary||'تمام شد'); }
+    // خلاصهٔ عیب‌یابی (قابل‌دسترس‌نبودن اندپوینت‌ها)
+    const db=$('aiTestDiag');
+    if(db&&st.diag){
+        const unreach=Object.entries(st.diag).filter(([,d])=>d&&d.reachable===false);
+        if(unreach.length){
+            db.innerHTML='<div style="margin-top:8px;padding:8px;background:#3b1e1e;border:1px solid #ef4444;border-radius:6px;font-size:11px;color:#fca5a5">'
+              +'<b>⚠️ هاست به این ارائه‌دهنده‌ها دسترسی ندارد:</b><br>'
+              +unreach.map(([id,d])=>'• <b dir="ltr">'+esc(id)+'</b>: '+esc(d.first_error||d.last_label||'')).join('<br>')
+              +'<br><span style="color:#fbbf24">این معمولاً DNS بسته/مسموم، تایم‌اوت یا بلاک IP هاست است. روش اتصال (DoH/پروکسی/Worker) را عوض کنید.</span></div>';
+        } else {
+            db.innerHTML='';
+        }
+    }
 }
 function aiTestAll(){
     const per=$('aiTestPerProvider')?parseInt($('aiTestPerProvider').value)||50:50;
@@ -28465,58 +28718,18 @@ function aiTestAll(){
     aiOpenTestModal();
     const tbody=$('aiTestTbody');if(!tbody)return;
     tbody.innerHTML='';
-    const rowMap={};
-    let n=0,ok=0,fail=0,wait=0;
-    function updCounters(){
-        if($('aiTestTot'))$('aiTestTot').textContent=toFa(n);
-        if($('aiTestOk'))$('aiTestOk').textContent=toFa(ok);
-        if($('aiTestFail'))$('aiTestFail').textContent=toFa(fail);
-        if($('aiTestWait'))$('aiTestWait').textContent=toFa(wait);
-    }
-    function ensureRow(d){
-        const key=(d.provider||'')+'::'+(d.model||'');
-        if(rowMap[key])return rowMap[key];
-        n++;wait++;
-        const tr=document.createElement('tr');
-        tr.style.borderBottom='1px solid #1e293b';
-        tr.innerHTML='<td style="padding:6px;text-align:center;color:#64748b">'+toFa(n)+'</td>'
-          +'<td style="padding:6px;text-align:center"><span class="aiSt">⏳</span></td>'
-          +'<td style="padding:6px;text-align:right;color:#94a3b8">'+esc(d.providerName||d.provider||'')+'</td>'
-          +'<td style="padding:6px;text-align:left;direction:ltr;color:#e2e8f0;word-break:break-all">'+esc(d.model||'')+'</td>'
-          +'<td style="padding:6px;text-align:center;color:#64748b" class="aiLat">—</td>'
-          +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiRes">…</td>';
-        tbody.appendChild(tr);
-        updCounters();
-        return rowMap[key]={tr:tr};
-    }
-    const es=new EventSource('?ai_test_all=1&per_provider='+per+'&only_untested='+only);
-    window._aiTestES=es;
-    es.onmessage=function(e){
-        let d;try{d=JSON.parse(e.data);}catch(_){return;}
-        if(d.type==='progress'){
-            if($('aiTestCur'))$('aiTestCur').textContent='در حال تست: '+esc(d.model||'')+' ('+esc(d.providerName||'')+')';
-        }else if(d.type==='item'){
-            const r=ensureRow(d);
-            wait--;if(d.ok)ok++;else fail++;
-            r.tr.querySelector('.aiSt').textContent=d.ok?'🟢':'🔴';
-            r.tr.querySelector('.aiSt').style.color=d.ok?'#4ade80':'#f87171';
-            const lat=r.tr.querySelector('.aiLat');if(lat)lat.textContent=(d.latencyMs>0)?(toFa(d.latencyMs)+'ms'):'—';
-            const res=r.tr.querySelector('.aiRes');
-            if(res){
-                if(d.ok)res.innerHTML='<span style="color:#4ade80">✓ پاسخ گرفت</span>';
-                else res.innerHTML='<span style="color:#f87171">'+esc(d.error||'خطا')+'</span>';
-            }
-            if($('aiTestCur'))$('aiTestCur').textContent='';
-            updCounters();
-        }else if(d.type==='done'){
-            if($('aiTestCur'))$('aiTestCur').textContent='🏁 تمام شد';
-            es.close();window._aiTestES=null;
-        }
-    };
-    es.onerror=function(){
-        es.close();window._aiTestES=null;
-        if($('aiTestCur'))$('aiTestCur').textContent='⚠️ اتصال قطع شد — نتایج تا اینجا ذخیره شد';
-    };
+    aiTestTotCount=0;aiTestOkCount=0;aiTestFailCount=0;aiTestWaitCount=0;aiTestRows={};
+    fetch('?ai_test_start=1&per_provider='+per+'&only_untested='+only).then(r=>r.json()).then(d=>{
+        if(d&&d.running&&!d.ok){ if($('aiTestCur'))$('aiTestCur').textContent='در حال اجراست — ادامهٔ آن را نشان می‌دهم'; }
+        else if($('aiTestCur'))$('aiTestCur').textContent='شروع تست در پس‌زمینهٔ سرور...';
+        aiPollTest();
+    }).catch(()=>{ if($('aiTestCur'))$('aiTestCur').textContent='خطا در شروع تست'; });
+}
+/* v9.24: بعد از ریفرش، اگر کاری در حال اجراست مودال را باز کن و ادامه بده */
+function aiResumeTestModalOnLoad(){
+    fetch('?ai_test_status=1').then(r=>r.json()).then(st=>{
+        if(st&&st.running){ aiOpenTestModal(); aiPollTest(); }
+    }).catch(()=>{});
 }
 // v8.06: Test AI category selection with a sample product title
 function testAiCategory(){const r=$('aiTR');const title=prompt('عنوان محصول برای تست دسته‌بندی:','کفش ورزشی مردانه نایک');if(!title)return;r.innerHTML='<div style="color:#67e8f9;font-size:11px">🔄 در حال تحلیل «'+esc(title)+'» با AI...</div>';fetch('?ai_category=1&title='+encodeURIComponent(title)).then(r=>r.json()).then(d=>{if(d.ok){r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ دسته: <b>'+esc(d.category_name)+'</b> ('+d.category_id+') | مدل: '+esc(d.ai_model||'')+' | پاسخ AI: '+esc(d.ai_raw||'')+'</div>';}else{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';}}).catch(()=>{r.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا شبکه</div>';});}
