@@ -71,3 +71,6 @@ remote_map.json
 _backups/
 *.before-restore
 arena-fixtures/
+
+# v9.20: AI providers config (secrets + large model lists)
+ai_providers.json
