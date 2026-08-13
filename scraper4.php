@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.24';
-const APP_VERSION_DATE = '1405/05/26';
+const APP_VERSION = '9.25';
+const APP_VERSION_DATE = '1405/05/27';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -577,8 +577,41 @@ return is_array($data) ? $data : [];
 }
 
 function saveProfiles(array $profiles): bool {
-$json = json_encode($profiles, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-return @file_put_contents(PROFILES_FILE, $json, LOCK_EX) !== false;
+return writeJsonFile(PROFILES_FILE, $profiles)['ok'];
+}
+/* =====================================================================
+ *  v9.24: نوشتن JSON به‌صورت مقاوم + گزارش دقیق علت خطا
+ *
+ *  در گوشی/ترموکس (حافظهٔ FUSE اندروید یا استوریج مشترک) گاهی
+ *  flock/LOCK_EX پشتیبانی نمی‌شود و file_put_contents با LOCK_EX بی‌صدا
+ *  شکست می‌خورد — همان «خطا در نوشتن فایل» که بدون علت دیده می‌شد.
+ *  این تابع اول با قفل تلاش می‌کند، اگر نشد بدون قفل می‌نویسد، و اگر
+ *  باز هم نشد علت واقعی (مجوز پوشه، خطای json_encode و...) را برمی‌گرداند.
+ *  خروجی: ['ok'=>bool, 'error'=>string]
+ * ===================================================================== */
+function writeJsonFile(string $path, $data): array {
+    $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    if ($json === false) {
+        $msg = 'json_encode ناموفق: ' . json_last_error_msg();
+        @file_put_contents(__DIR__ . '/storage_errors.log', date('Y-m-d H:i:s') . ' | ' . $path . ' | ' . $msg . "\n", FILE_APPEND);
+        return ['ok' => false, 'error' => $msg];
+    }
+    // ۱) تلاش با قفل
+    $r = @file_put_contents($path, $json, LOCK_EX);
+    if ($r !== false) return ['ok' => true, 'error' => ''];
+    $errLock = error_get_last()['message'] ?? 'LOCK_EX';
+    // ۲) تلاش بدون قفل (حافظه‌های FUSE/استوریج اندروید)
+    $r = @file_put_contents($path, $json);
+    if ($r !== false) {
+        @file_put_contents(__DIR__ . '/storage_errors.log', date('Y-m-d H:i:s') . ' | ' . $path . " | قفل پشتیبانی نشد، بدون قفل ذخیره شد: " . $errLock . "\n", FILE_APPEND);
+        return ['ok' => true, 'error' => ''];
+    }
+    $errFinal = error_get_last()['message'] ?? 'خطای نامشخص';
+    $dir = dirname($path);
+    $writable = is_writable($dir) ? 'بله' : 'خیر';
+    $msg = 'نوشتن ناموفق: ' . $errFinal . ' | پوشهٔ ' . $dir . ' قابل نوشتن: ' . $writable;
+    @file_put_contents(__DIR__ . '/storage_errors.log', date('Y-m-d H:i:s') . ' | ' . $path . ' | ' . $msg . "\n", FILE_APPEND);
+    return ['ok' => false, 'error' => $msg];
 }
 
 function writeProgress(string $file, array $data): void {
@@ -678,7 +711,7 @@ $d = @json_decode(@file_get_contents(CONNECTIONS_FILE) ?: '', true);
 return is_array($d) ? $d : ['woocommerce'=>[],'basalam'=>[]];
 }
 function saveConnections(array $c): bool {
-return @file_put_contents(CONNECTIONS_FILE, json_encode($c, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX) !== false;
+return writeJsonFile(CONNECTIONS_FILE, $c)['ok'];
 }
 function loadSyncState(): array {
 if (!file_exists(SYNC_STATE_FILE)) return [];
@@ -686,7 +719,7 @@ $d = @json_decode(@file_get_contents(SYNC_STATE_FILE) ?: '', true);
 return is_array($d) ? $d : [];
 }
 function saveSyncState(array $s): bool {
-return @file_put_contents(SYNC_STATE_FILE, json_encode($s, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX) !== false;
+return writeJsonFile(SYNC_STATE_FILE, $s)['ok'];
 }
 function parseCSVFile(string $filePath): array {
 $rows = [];
@@ -3569,10 +3602,12 @@ $profiles[$key] = [
     : (int)($profiles[$key]['wooCategoryId'] ?? 0),
 'updatedAt' => time()
 ];
-if (saveProfiles($profiles)) {
+$_saved = writeJsonFile(PROFILES_FILE, $profiles);
+if ($_saved['ok']) {
 echo json_encode(['ok' => true, 'key' => $key, 'message' => 'پروفایل ذخیره شد', 'selectors' => $profiles[$key]['selectors'] ?? [], 'has_selectors' => !empty($profiles[$key]['selectors']['container'])]);
 } else {
-echo json_encode(['ok' => false, 'error' => 'خطا در نوشتن فایل']);
+// v9.24: علت واقعی را به کاربر بدهیم (ترموکس/استوریج معمولاً قفل یا مجوز است)
+echo json_encode(['ok' => false, 'error' => 'خطا در نوشتن فایل: ' . ($_saved['error'] ?? 'نامشخص')]);
 }
 exit;
 }
@@ -7218,7 +7253,10 @@ if (isset($_POST['digest_enabled']))    $conn['digest_enabled']    = !empty($_PO
 if (isset($_POST['digest_hour']))       $conn['digest_hour']       = max(0, min(23, (int)$_POST['digest_hour']));
 if (isset($_POST['digest_hours']))      $conn['digest_hours']      = max(1, min(168, (int)$_POST['digest_hours']));
 if (isset($_POST['digest_tz']))         $conn['digest_tz']         = trim((string)$_POST['digest_tz']);
-echo json_encode(['ok'=>saveConnections($conn),'message'=>'ذخیره شد'], JSON_UNESCAPED_UNICODE); exit;
+$_savedC = writeJsonFile(CONNECTIONS_FILE, $conn);
+if ($_savedC['ok']) echo json_encode(['ok'=>true,'message'=>'ذخیره شد'], JSON_UNESCAPED_UNICODE);
+else echo json_encode(['ok'=>false,'error'=>'خطا در ذخیره: '.($_savedC['error']??'نامشخص')], JSON_UNESCAPED_UNICODE);
+exit;
 }
 
 if (($_POST['action'] ?? '') === 'upload_import') {
@@ -11213,6 +11251,17 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'aiTestDi' . 'ag') !== false);
     $add('9.24', 'بعد از ریفرش، تست در حال اجرا ادامه می‌یابد',
          strpos($selfSrc, 'aiResumeTestModal' . 'OnLoad') !== false);
+
+    /* ---------- v9.25: ذخیرهٔ مقاوم JSON + گزارش علت (ترموکس) ---------- */
+    $add('9.25', 'ذخیرهٔ مقاوم با fallback بدون قفل و گزارش علت',
+         function_exists('writeJsonFile')
+         && strpos($selfSrc, 'writeJsonFile(PROFILES_FILE') !== false
+         && strpos($selfSrc, "\\$errLock = error_get_last()") !== false);
+    $add('9.25', 'پیام خطای ذخیره علت واقعی را نشان می‌دهد',
+         strpos($selfSrc, "خطا در نوشتن فایل: ' . (\\$_saved['error']") !== false
+         || strpos($selfSrc, "خطا در نوشتن فایل:") !== false);
+    $add('9.25', 'علت خطا در storage_errors.log ثبت می‌شود',
+         strpos($selfSrc, 'storage_errors' . '.log') !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
@@ -24871,6 +24920,20 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.25', t:'💾 رفع «خطا در نوشتن فایل» روی گوشی/ترموکس + گزارش دقیق علت', items:[
+    'گزارش شما: فایل را در گوشی با ترموکس اجرا کردید و هر ذخیره‌ای —',
+    'حتی ذخیرهٔ پروفایل — «خطا در نوشتن فایل» می‌داد.',
+    '🐞 علت: کد ذخیره با @file_put_contents(..., LOCK_EX) می‌نوشت و در',
+    'حافظهٔ FUSE/استوریج اندروید (یا سطوحی که flock پشتیبانی نمی‌کنند)',
+    'قفل LOCK_EX بی‌صدا شکست می‌خورد — پس همهٔ ذخیره‌ها خطا می‌دادند حتی',
+    'وقتی پوشه قابل نوشتن بود.',
+    '✅ حالا تابع writeJsonFile اول با قفل تلاش می‌کند؛ اگر قفل پشتیبانی',
+    'نشد، بدون قفل ذخیره می‌کند. اگر باز هم نشد، علت واقعی را می‌گوید:',
+    'مجوز پوشه، خطای json_encode و...',
+    '📄 علت هر خطا در فایل کناری storage_errors.log هم نوشته می‌شود تا',
+    'روی گوشی با یک فایل ساده ببینید دقیقاً کجا و چرا شکست خورده.',
+    '🔍 این اصلاح روی ذخیرهٔ پروفایل، اتصالات و وضعیت اعمال شد.'
+  ]},
   {v:'9.24', t:'🖥 تست مدل‌ها به‌صورت سرور-ساید ادامه‌دار + تشخیص دسترسی', items:[
     'خواستهٔ شما: تست مدل‌ها سمت سرور اجرا شود تا بعد از ریفرش یا بستن',
     'پنجره ادامه پیدا کند؛ و اینکه از کجا بفهمیم هاست به اندپوینت ارائه‌دهنده',

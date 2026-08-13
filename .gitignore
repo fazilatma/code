@@ -78,3 +78,6 @@ ai_providers.json
 # v9.24: AI model test server-side progress
 ai_test_state.json
 ai_test_stop.json
+
+# v9.25: storage write error log
+storage_errors.log
