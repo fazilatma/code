@@ -11256,10 +11256,9 @@ if (isset($_GET['selftest'])) {
     $add('9.25', 'ذخیرهٔ مقاوم با fallback بدون قفل و گزارش علت',
          function_exists('writeJsonFile')
          && strpos($selfSrc, 'writeJsonFile(PROFILES_FILE') !== false
-         && strpos($selfSrc, "\\$errLock = error_get_last()") !== false);
+         && strpos($selfSrc, 'errLock = error_get_last') !== false);
     $add('9.25', 'پیام خطای ذخیره علت واقعی را نشان می‌دهد',
-         strpos($selfSrc, "خطا در نوشتن فایل: ' . (\\$_saved['error']") !== false
-         || strpos($selfSrc, "خطا در نوشتن فایل:") !== false);
+         strpos($selfSrc, 'خطا در نوشتن فایل') !== false);
     $add('9.25', 'علت خطا در storage_errors.log ثبت می‌شود',
          strpos($selfSrc, 'storage_errors' . '.log') !== false);
 
