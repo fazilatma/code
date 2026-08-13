@@ -78,7 +78,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.18';
+const APP_VERSION = '9.19';
 const APP_VERSION_DATE = '1405/05/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -210,6 +210,73 @@ function extractMergeDetail(array $fresh, array $prev): array {
         if (!isset($fresh[$f]) && isset($prev[$f])) $fresh[$f] = $prev[$f];
     }
     return $fresh;
+}
+
+/**
+ * v9.19: HTML توضیحات را با ساختار نگه می‌دارد ولی از خطرناک‌ها پاک می‌کند.
+ *
+ * چرا اصلاً HTML: تا ۹.۱۸ توضیحات با textContent برداشته می‌شد و همهٔ
+ * تگ‌ها می‌رفتند. نتیجه این بود که پاراگراف‌ها و آیتم‌های فهرست به هم
+ * می‌چسبیدند («پاراگراف اولویژگی یک») و در فروشگاه مقصد یک تودهٔ متن
+ * بی‌ساختار می‌نشست، در حالی که ووکامرس خودش HTML را رندر می‌کند.
+ *
+ * چرا پاک‌سازی: محتوا از یک سایت بیرونی می‌آید و مستقیم در فروشگاه شما
+ * منتشر می‌شود. script و iframe و onclick باید حذف شوند وگرنه هر چیزی
+ * که مبدأ در صفحه‌اش داشته باشد به فروشگاه شما هم می‌رسد.
+ *
+ * لینک‌ها و عکس‌ها مطلق می‌شوند تا بعد از انتقال هم کار کنند.
+ */
+function detailCleanHtml(?DOMNode $node, string $baseUrl = ''): string {
+    if (!$node) return '';
+    $doc = $node->ownerDocument;
+    if (!$doc) return '';
+    $clone = $node->cloneNode(true);
+    $tmp = new DOMDocument('1.0', 'UTF-8');
+    $tmp->appendChild($tmp->importNode($clone, true));
+    $xp = new DOMXPath($tmp);
+
+    // ۱) تگ‌هایی که کلاً باید بروند، با محتوایشان
+    foreach (['script','style','iframe','object','embed','form','input',
+              'button','noscript','svg','link','meta'] as $bad) {
+        $nodes = $xp->query('//' . $bad);
+        if (!$nodes) continue;
+        for ($i = $nodes->length - 1; $i >= 0; $i--) {
+            $n = $nodes->item($i);
+            if ($n && $n->parentNode) $n->parentNode->removeChild($n);
+        }
+    }
+    // ۲) صفت‌های خطرناک و استایل‌های درون‌خطی
+    $all = $xp->query('//*');
+    if ($all) {
+        foreach ($all as $el) {
+            if (!($el instanceof DOMElement)) continue;
+            $drop = [];
+            foreach (iterator_to_array($el->attributes ?? []) as $attr) {
+                $an = strtolower($attr->nodeName);
+                $av = trim((string)$attr->nodeValue);
+                if (strpos($an, 'on') === 0) { $drop[] = $attr->nodeName; continue; }
+                if ($an === 'style' || $an === 'class' || $an === 'id') { $drop[] = $attr->nodeName; continue; }
+                // javascript: و data: در href/src
+                if (($an === 'href' || $an === 'src')
+                    && preg_match('~^\s*(javascript|data|vbscript):~i', $av)) {
+                    $drop[] = $attr->nodeName; continue;
+                }
+                if (($an === 'href' || $an === 'src') && $baseUrl !== '' && $av !== '') {
+                    $el->setAttribute($attr->nodeName, make_absolute_url($av, $baseUrl));
+                }
+            }
+            foreach ($drop as $d) $el->removeAttribute($d);
+        }
+    }
+    $html = '';
+    foreach ($tmp->documentElement ? [$tmp->documentElement] : [] as $root) {
+        foreach ($root->childNodes as $child) $html .= $tmp->saveHTML($child);
+    }
+    $html = trim(preg_replace('~\s+~u', ' ', $html));
+    /* اگر بعد از پاک‌سازی چیز معناداری نماند (مثلاً کل محتوا داخل یک
+       script بوده)، به متن خام برگرد تا فیلد خالی نماند. */
+    if (trim(strip_tags($html)) === '') return trim($node->textContent);
+    return $html;
 }
 
 function extractNormalizeDetailSelectors($raw): array {
@@ -7580,6 +7647,18 @@ if($field==='image'){
 $val=galleryImgFromNode($ns->item(0),$dr['url']);
 }elseif($field==='price'){
 $val=extractPrice($ns->item(0)->textContent);
+}elseif($field==='shortDesc'||$field==='longDesc'){
+/* v9.19: توضیحات با ساختارشان برداشته می‌شوند، نه به‌صورت متن خام.
+
+   textContent همهٔ تگ‌ها را دور می‌ریخت و متنِ پاراگراف‌ها و آیتم‌های
+   فهرست به هم می‌چسبید: «پاراگراف اولویژگی یکویژگی دو». مقصد
+   (ووکامرس) خودش HTML را رندر می‌کند، پس نگه داشتن ساختار هم درست‌تر
+   است هم خواناتر.
+
+   ولی HTML خامِ سایت مبدأ را نمی‌شود مستقیم فرستاد: اسکریپت، استایل،
+   iframe و رویدادهای onclick باید بروند. detailCleanHtml همین کار را
+   می‌کند و اگر بعد از پاک‌سازی چیزی نماند، به متن خام برمی‌گردد. */
+$val=detailCleanHtml($ns->item(0),$dr['url']);
 }else{
 $val=trim($ns->item(0)->textContent);
 }
@@ -10715,6 +10794,22 @@ if (isset($_GET['selftest'])) {
        پنل بکاپ باید بلافاصله بعد از دکمهٔ «بکاپ ورک‌اسپیس هاست»
        بیاید، یعنی هنوز داخل بدنهٔ همان بخش است. */
     /* ---------- v9.18: بکاپ از تنظیمات نصب‌کننده ارث می‌برد ---------- */
+    /* ---------- v9.19: توضیحات با ساختار، ولی پاک‌شده ---------- */
+    $add('9.19', 'توضیحات با HTML برداشته می‌شوند نه متن خام',
+         function_exists('detailClean' . 'Html')
+         && strpos($selfSrc, "\$field==='shortDesc'||\$field==='longD" . "esc'") !== false);
+    /* محتوای بیرونی مستقیم در فروشگاه منتشر می‌شود — باید پاک شود */
+    $add('9.19', 'تگ‌های خطرناک از توضیحات حذف می‌شوند',
+         strpos($selfSrc, "'scr" . "ipt','style','iframe','object','embed','form','input'") !== false);
+    $add('9.19', 'رویدادها و javascript: حذف می‌شوند',
+         strpos($selfSrc, "if (strpos(\$an, 'on') === 0)") !== false
+         && strpos($selfSrc, "^\\s*(javascript|data|vbscript):") !== false);
+    $add('9.19', 'لینک و عکس داخل توضیحات مطلق می‌شوند',
+         strpos($selfSrc, "\$el->setAttribute(\$attr->nodeName, make_absolute_url(\$av, \$baseUrl));") !== false);
+    /* اگر همه‌چیز پاک شد، فیلد نباید خالی بماند */
+    $add('9.19', 'پاک‌سازی کامل به متن خام برمی‌گردد',
+         strpos($selfSrc, "if (trim(strip_tags(\$html)) === '') return trim(\$node->textContent);") !== false);
+
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
          && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
@@ -24073,6 +24168,26 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.19', t:'📝 توضیحات دیگر به‌هم‌چسبیده نمی‌آیند', items:[
+    'توصیه‌ای که فرستادید را بررسی کردم. ادعای اصلی‌اش درست نبود:',
+    'گفته بود «استخراج تفصیلی هرگز در مسیر کران فراخوانی نمی‌شود» و',
+    'باید تابع تازه‌ای نوشت. تست کردم — کران آن را اجرا می‌کند و از',
+    'نسخهٔ ۹.۰۱ پارامتر phase=detail دارد. یک تیک کران روی سایت آزمایشی',
+    'هر ۳ محصول را با گالری، توضیحات و SKU آورد.',
+    '✅ ولی یک ایراد واقعی را درست دیده بود: توضیحات با textContent',
+    'برداشته می‌شدند، یعنی همهٔ تگ‌ها دور ریخته می‌شد.',
+    '⚠️ نتیجه‌اش این بود که متن پاراگراف‌ها و آیتم‌های فهرست به هم',
+    'می‌چسبید — «پاراگراف اولویژگی یکویژگی دو» — و در فروشگاه مقصد یک',
+    'تودهٔ متن بی‌ساختار می‌نشست.',
+    '✅ حالا توضیحات کوتاه و بلند با ساختارشان برداشته می‌شوند:',
+    'پاراگراف، فهرست، پررنگ و ایتالیک سر جایشان می‌مانند.',
+    '🔐 ولی HTML سایت مبدأ مستقیم منتشر نمی‌شود: script، iframe، form،',
+    'رویدادهای onclick و لینک‌های javascript: حذف می‌شوند. استایل و',
+    'کلاس هم می‌روند تا با قالب فروشگاه شما تداخل نکنند.',
+    '🔗 لینک‌ها و عکس‌های داخل توضیحات مطلق می‌شوند تا بعد از انتقال',
+    'هم کار کنند.',
+    'اگر بعد از پاک‌سازی چیزی نماند، به متن خام برمی‌گردد تا فیلد خالی نشود.'
+  ]},
   {v:'9.18', t:'🔗 بکاپ از همان مخزن و توکن نصب‌کننده استفاده می‌کند', items:[
     'خواستهٔ شما: بکاپ از همان تنظیمات «منبع و نصب‌کننده» استفاده کند.',
     'منطقی هم هست — هر دو با یک مخزن و یک توکن کار می‌کنند، و وارد کردن',
