@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.26';
-const APP_VERSION_DATE = '1405/05/28';
+const APP_VERSION = '9.27';
+const APP_VERSION_DATE = '1405/05/29';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -10504,7 +10504,7 @@ if (isset($_GET['ai_probe'])) {
         'detail' => ($localIp !== '' && $localIp !== $host) ? $localIp : 'پاسخ نداد',
         'ms' => (int)((microtime(true) - $t0) * 1000)];
 
-    // ۲) DoH در دسترس است؟
+    // ۲) DoH در دسترس است؟ (فقط حلِ DNS — هنوز به اندپوینت وصل نشده)
     $t0 = microtime(true);
     $doh = aiDohResolve($host !== '' ? $host : 'example.com', (string)$net['doh_url'], 10);
     $out['steps'][] = ['name' => 'DNS-over-HTTPS (' . parse_url((string)$net['doh_url'], PHP_URL_HOST) . ')',
@@ -10532,9 +10532,14 @@ if (isset($_GET['ai_probe'])) {
         $r  = aiHttp($url, $headers, $payload, $net, $m);
         $ms = (int)((microtime(true) - $t0) * 1000);
         $code = (int)$r['code'];
-        // ۴۰۱ یعنی شبکه رسید ولی کلید غلط است — از نظر عبور، موفق است
+        // 401 یعنی شبکه رسید ولی کلید غلط است — از نظر عبور، موفق است
         $reached = $code > 0;
-        $note = $code === 0 ? ('نرسید: ' . mb_substr((string)$r['error'], 0, 70))
+        // v9.26: «DNS حل شد ولی اتصال برقرار نشد» یعنی خودِ IP مقصد بلاک است
+        $connNote = '';
+        if ($m === 'doh' && $code === 0) {
+            $connNote = ' ⚠️ DoH دامنه را حل کرد ولی اتصال به IP مقصد برقرار نشد — DNS سالم است ولی مسیر IP بسته است؛ پروکسی/Worker لازم است';
+        }
+        $note = $code === 0 ? ('نرسید: ' . mb_substr((string)$r['error'], 0, 70) . $connNote)
               : ($code === 401 ? 'رسید ✓ (کلید نامعتبر یا خالی)'
               : ($code >= 200 && $code < 300 ? 'کامل ✓' : 'رسید ✓ (HTTP ' . $code . ')'));
         if ($reached) $working[] = $m;
@@ -10544,7 +10549,7 @@ if (isset($_GET['ai_probe'])) {
     $out['working'] = $working;
     $out['recommended'] = $working[0] ?? '';
     $out['summary'] = empty($working)
-        ? 'هیچ روشی به مقصد نرسید — Worker یا پروکسی لازم است'
+        ? 'هیچ روشی به مقصد نرسید — Worker یا پروکسی لازم است (DoH فقط DNS را حل می‌کند، نه مسیر IP)'
         : ('روش‌های کارآمد: ' . implode(' · ', $working));
     echo json_encode($out, JSON_UNESCAPED_UNICODE);
     exit;
@@ -11267,6 +11272,11 @@ if (isset($_GET['selftest'])) {
     $add('9.26', 'writeProgress و aiTestStateSave مقاوم شدند',
          strpos($selfSrc, 'writeJsonFile($file, $data)') !== false
          && strpos($selfSrc, 'writeJsonFile(AI_TEST_STATE_FILE') !== false);
+
+    /* ---------- v9.27: تشخیص شفاف DoH ---------- */
+    $add('9.27', 'در عیب‌یابی، DoH بدون اتصال واقعی سبز نمی‌شود',
+         strpos($selfSrc, 'DoH فقط DNS را حل می') !== false
+         && strpos($selfSrc, 'مسیر IP بسته است') !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
@@ -24925,6 +24935,18 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.27', t:'🔍 تشخیص شفاف DoH: چراغ سبز فقط DNS را نشان می‌دهد', items:[
+    'گزارش شما: روش DoH (گوگل) چراغش سبز شد ولی هنگام تست مدل‌ها هنوز',
+    '«عدم دسترسی به اندپوینت» می‌دهد.',
+    '🐞 در عیب‌یابی، «DoH در دسترس است» فقط یعنی DNS دامنه را از گوگل',
+    'حل کرده — نه اینکه به خودِ API مقصد وصل شده باشد. پس سبز بودن DoH',
+    'لزوماً به معنی کارکردن واقعی نیست.',
+    '✅ حالا پیام عیب‌یابی شفاف است: اگر DoH دامنه را حل کند ولی درخواست',
+    'واقعی به IP مقصد (پورت 443) برقرار نشود، صریح می‌گوید «DNS سالم است',
+    'ولی مسیر IP بسته است — پروکسی/Worker لازم است».',
+    '💡 خلاصه: DoH فقط DNS را دور می‌زند؛ اگر خودِ IP مقصد هم بلاک/محدود',
+    'باشد، به پروکسی یا Worker نیاز دارید.'
+  ]},
   {v:'9.26', t:'💾 ذخیرهٔ ai_providers.json هم مقاوم شد (ترموکس)', items:[
     'گزارش شما: ذخیرهٔ فایل JSON ارائه‌دهنده‌های هوش مصنوعی خطا می‌داد و',
     'در storage_errors.log فقط پیام «قفل پشتیبانی نشد، بدون قفل ذخیره شد»',
