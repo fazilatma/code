@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.32';
-const APP_VERSION_DATE = '1405/06/03';
+const APP_VERSION = '9.33';
+const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1227,10 +1227,19 @@ function aiProviderCall(array $p, string $model, array $payload, ?array $net = n
     if ($apiKey !== '') $headers[] = 'Authorization: Bearer ' . $apiKey;
     $body = $payload;
     $body['model'] = $model;
+    /* v9.33: ترتیب روش‌ها — همیشه «مستقیم» و «DoH» را به‌ترتیب امتحان می‌کنیم.
+       دلیل: بعضی سایت‌ها IP هاست را بلاک می‌کنند؛ مستقیم با تایم‌اوت/خطای
+       شبکه fail می‌شود و DoH (که DNS را دور می‌زند و گاهی به IP دیگری وصل
+       می‌شود) می‌تواند جواب دهد. پس: روشِ انتخاب‌شده اول، سپس مستقیم و DoH
+       (هرکدام که استفاده نشده)، و بعد dns/worker/proxy اگر «تلاش خودکار»
+       روشن باشد. در اولین موفقیت یا خطای منطقی (4xx/429) متوقف می‌شویم. */
     $modes = [$net['mode']];
+    foreach (['direct', 'doh'] as $m) {
+        if (!in_array($m, $modes, true)) $modes[] = $m;
+    }
     if (!empty($net['fallback'])) {
-        foreach (['direct', 'doh', 'dns', 'worker', 'proxy'] as $m) {
-            if ($m === $net['mode']) continue;
+        foreach (['dns', 'worker', 'proxy'] as $m) {
+            if (in_array($m, $modes, true)) continue;
             if ($m === 'dns'    && $net['resolve_ip'] === '') continue;
             if ($m === 'worker' && $net['worker_url'] === '') continue;
             if ($m === 'proxy'  && $net['proxy'] === '')      continue;
@@ -7310,8 +7319,12 @@ if (isset($_POST['autoreply'])) {
         'sign'          => mb_substr(trim((string)($ar['sign'] ?? '')), 0, 120),
         'notify'        => !empty($ar['notify']),
         'scan_limit'    => max(5, min(50, (int)($ar['scan_limit'] ?? 20))),
-        // v9.21: وقتی هیچ قاعده‌ای نخورد، با هوش مصنوعی (مدل فعال) پاسخ بده
-        'ai_reply'      => !empty($ar['ai_reply']),
+        // v9.33: وقتی هیچ قاعده‌ای نخورد، یکی از سه حالت:
+        //   none    → بدون پاسخ
+        //   premade → پاسخ از پیش آماده (fallback_text)
+        //   ai      → پاسخ با هوش مصنوعی (مدل فعال)
+        'fallback'      => in_array(($ar['fallback'] ?? ''), ['none','premade','ai'], true) ? $ar['fallback'] : 'none',
+        'fallback_text' => mb_substr(trim((string)($ar['fallback_text'] ?? '')), 0, 500),
     ];
 }
 // v8.62: گزارش شبانه
@@ -11416,6 +11429,17 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "'cf_url'") !== false
          && strpos($selfSrc, 'cf_detail') !== false);
 
+    /* ---------- v9.33: حالت جایگزین پاسخ + تلاش خودکار DoH ---------- */
+    $add('9.33', 'پاسخ خودکار سه حالت جایگزین دارد',
+         strpos($selfSrc, "'fallback'") !== false
+         && strpos($selfSrc, "'premade'") !== false
+         && strpos($selfSrc, 'fallback_text') !== false);
+    $add('9.33', 'DoH به‌طور خودکار بعد از مستقیم امتحان می‌شود',
+         strpos($selfSrc, "foreach (['direct', 'doh']") !== false
+         && strpos($selfSrc, "\$modes[] = \$m;") !== false);
+    $add('9.33', 'سازگاری با حالت قدیمی ai_reply حفظ شده',
+         strpos($selfSrc, "ai_reply") !== false);
+
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
          && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
@@ -13351,7 +13375,15 @@ function arCfg(?array $cn = null): array {
         'sign'         => trim((string)($a['sign'] ?? '')),
         'notify'       => !empty($a['notify']),
         'scan_limit'   => max(5, min(50, (int)($a['scan_limit'] ?? 20))),
-        'ai_reply'     => !empty($a['ai_reply']),
+        // v9.33: حالت جایگزین وقتی قاعده‌ای نخورد.
+        // سازگاری با نسخهٔ قبل: اگر fallback تنظیم نشده ولی ai_reply روشن بود،
+        // یعنی کاربر قبلاً «پاسخ با هوش مصنوعی» را انتخاب کرده بود.
+        'fallback'     => (function () use ($a) {
+            $f = (string)($a['fallback'] ?? '');
+            if (in_array($f, ['none','premade','ai'], true)) return $f;
+            return !empty($a['ai_reply']) ? 'ai' : 'none';
+        })(),
+        'fallback_text'=> trim((string)($a['fallback_text'] ?? '')),
     ];
 }
 
@@ -13599,14 +13631,18 @@ function autoReplyRun(array $cn, bool $dry = false, bool $ignoreGrace = false): 
 
         $text = (string)($lm['content']['text'] ?? $nc['text']);
         $rule = arPickRule($rules, $text);
-        $aiMode = false;
-        if ($rule === null && !empty($cfg['ai_reply'])) {
-            // v9.21: هیچ قاعده‌ای نخورد ولی «پاسخ هوش مصنوعی» روشن است
-            $aiMode = true;
-            $rid = 'ai';
-            $dmax = 0;
-        } elseif ($rule === null) {
-            $row['skip'] = 'هیچ قاعده‌ای نخورد'; $out['items'][] = $row; $out['skipped']++; continue;
+        $aiMode = false; $premadeMode = false;
+        if ($rule === null) {
+            // v9.33: وقتی هیچ قاعده‌ای نخورد، طبق حالت جایگزین رفتار کن
+            $fbMode = (string)($cfg['fallback'] ?? 'none');
+            if ($fbMode === 'ai') {
+                $aiMode = true; $rid = 'ai'; $dmax = 0;
+            } elseif ($fbMode === 'premade' && $cfg['fallback_text'] !== '') {
+                $premadeMode = true; $rid = 'premade'; $dmax = 0;
+            } else {
+                $row['skip'] = 'هیچ قاعده‌ای نخورد (حالت: بدون پاسخ)';
+                $out['items'][] = $row; $out['skipped']++; continue;
+            }
         } else {
             $rid = (string)$rule['id'];
             $dmax = (int)($rule['daily_max'] ?? 0);
@@ -13623,6 +13659,8 @@ function autoReplyRun(array $cn, bool $dry = false, bool $ignoreGrace = false): 
                 $out['items'][] = $row; $out['skipped']++; continue;
             }
             $reply = $aiRes['text'];
+        } elseif ($premadeMode) {
+            $reply = (string)$cfg['fallback_text'];
         } else {
             $reply = (string)$rule['reply'];
         }
@@ -21161,9 +21199,23 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>امضا:</label>
 <input type="text" id="arSign" placeholder="اختیاری — مثلاً: (پاسخ خودکار)" onchange="arSaveCfg()" style="flex:1"></div>
 
-<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#a5f3fc;margin:4px 0;cursor:pointer" title="وقتی هیچ قاعدهٔ دستی‌ای به پیام نخورد، با مدل هوش مصنوعیِ فعال پاسخ می‌دهد">
-<input type="checkbox" id="arAiReply" onchange="arSaveCfg()" style="width:14px;height:14px">
-<span>🤖 وقتی قاعده‌ای نخورد با هوش مصنوعی پاسخ بده</span></label>
+<!-- v9.33: وقتی هیچ قاعده‌ای نخورد، یکی از سه حالت -->
+<div style="margin-top:6px;padding-top:6px;border-top:1px solid #1e293b">
+<div style="font-size:11px;color:#f9a8d4;font-weight:700;margin-bottom:4px">💬 وقتی هیچ قاعده‌ای نخورد:</div>
+<div class="crow" style="align-items:center">
+<select id="arFallback" onchange="arFallbackToggle();arSaveCfg()" style="flex:1">
+<option value="none">بدون پاسخ</option>
+<option value="premade">پاسخ از پیش آماده</option>
+<option value="ai">پاسخ با هوش مصنوعی</option>
+</select></div>
+<div id="arFallbackTextRow" class="crow" style="display:none;align-items:flex-start">
+<label>متن پاسخ:</label>
+<textarea id="arFallbackText" rows="2" placeholder="مثلاً: پیام شما رسید 🙏 در اولین فرصت پاسخ می‌دهم." onchange="arSaveCfg()" style="flex:1;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px;font-size:11px"></textarea>
+</div>
+<div id="arFallbackAiHint" style="display:none;font-size:10px;color:#94a3b8;line-height:1.8;padding:4px 0">
+🤖 با مدل هوش مصنوعیِ فعال پاسخ می‌دهد (برای دسته‌بندی و پاسخ به مشتری استفاده می‌شود).
+</div>
+</div>
 
 <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin:4px 0;cursor:pointer">
 <input type="checkbox" id="arNotify" onchange="arSaveCfg()" style="width:14px;height:14px">
@@ -25101,6 +25153,20 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.33', t:'🔁 پاسخ خودکار با ۳ حالت جایگزین + تلاش خودکار DoH', items:[
+    'خواستهٔ شما: در پاسخ خودکار به مشتری، سه حالت «بدون پاسخ»، «پاسخ از',
+    'پیش آماده» و «پاسخ با هوش مصنوعی» را بگذاریم.',
+    '✅ بخش پاسخ خودکار حالا یک گزینهٔ «وقتی هیچ قاعده‌ای نخورد» دارد:',
+    '   • بدون پاسخ → فقط رد می‌شود',
+    '   • پاسخ از پیش آماده → متن دلخواه شما (پیش‌فرض: «پیام شما رسید...»)،',
+    '   • پاسخ با هوش مصنوعی → با مدلِ فعال (با بک‌آپ Bonsai)',
+    '🧠 هر دو حالت (آماده و هوش مصنوعی) از تنظیمات قبلی سازگاری دارند.',
+    '🌐 درخواست‌های هوش مصنوعی حالا به‌طور خودکار «مستقیم» را اول و اگر',
+    'fail شد «DoH» را امتحان می‌کنند — برای وقتی که سایت IP هاست را بلاک',
+    'کرده است و DoH می‌تواند از DNSِ سالم به IPِ درست برسد.',
+    '💡 نکته: DoH فقط DNS را دور می‌زند؛ اگر خودِ IP مقصد هم بلاک باشد،',
+    'باز هم به Worker یا پروکسی نیاز است.'
+  ]},
   {v:'9.32', t:'🛰 رفع «No route for that URI» در Cloudflare', items:[
     'گزارش شما: دکمهٔ تست خطای «No route for that URI» می‌داد.',
     '🐞 علت: این خطای Cloudflare (کد 7000) یعنی مسیر URL مدل اشتباه است.',
@@ -26928,7 +26994,8 @@ function arCollectCfg(){
     work_to:      parseInt(g('arTo').value||'21')||0,
     sign:         (g('arSign').value||'').trim(),
     notify:       !!g('arNotify').checked,
-    ai_reply:     !!g('arAiReply').checked
+    fallback:     (g('arFallback').value||'none'),
+    fallback_text:(g('arFallbackText').value||'').trim()
   };
 }
 
@@ -26952,9 +27019,18 @@ function arApplyCfg(c){
   set('arTo',String(c.work_to!==undefined?c.work_to:21));
   set('arSign',c.sign||'');
   chk('arNotify',c.notify);
-  chk('arAiReply',c.ai_reply);
+  set('arFallback',c.fallback||'none');
+  set('arFallbackText',c.fallback_text||'');
+  arFallbackToggle();
   arToggleHours();
   arBadge();
+}
+function arFallbackToggle(){
+  const v=($('arFallback')||{}).value||'none';
+  const tr=$('arFallbackTextRow');
+  const hi=$('arFallbackAiHint');
+  if(tr)tr.style.display=(v==='premade')?'':'none';
+  if(hi)hi.style.display=(v==='ai')?'':'none';
 }
 
 function arToggleHours(){
