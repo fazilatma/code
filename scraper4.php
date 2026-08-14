@@ -89,8 +89,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.39';
-const APP_VERSION_DATE = '1405/06/10';
+const APP_VERSION = '9.40';
+const APP_VERSION_DATE = '1405/06/11';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -9054,14 +9054,35 @@ function cronDetailSyncPass(array $cn, bool $locked = false): array {
        صفر بود، خودِ همین موضوع یک ردیف در صف می‌گذارد. */
     $_dsSeen = 0; $_dsOff = [];
     foreach ($profiles as $dKey => $dProfile) {
-        $dCfg = $dProfile['detailSync'] ?? [];
-        if (empty($dCfg['enabled'])) {
+        $dCfg   = (array)($dProfile['detailSync'] ?? []);
+        $sCfg   = (array)($dProfile['syncConfig'] ?? []);
+        $dsOn   = !empty($dCfg['enabled']);
+        $syncOn = !empty($sCfg['enabled']);
+        /* v9.40: پروفایلِ «سینک خودکار» هم در همین گذرِ زودهنگام جزئیات
+           می‌گیرد — نه فقط پروفایلِ «استخراج دوره‌ای جزئیات».
+
+           علتِ «کران فاز جزئیات را اجرا نمی‌کند»: در مسیرِ عادیِ کران،
+           جزئیاتِ پروفایلِ sync آخرِ حلقهٔ همگام‌سازی اجرا می‌شود — بعد از
+           بکاپ، نگهبان و خودِ فاز فهرست. روی هاستِ اشتراکی، پردازه‌ای که
+           بعد از بستنِ اتصال (finishRequestNow) ادامه می‌دهد اغلب وسطِ آن
+           مسیرِ طولانی کشته می‌شود و به جزئیات نمی‌رسد. دکمه‌های «اجرای
+           الان» کار می‌کنند چون همین کار را زودتر/در بستری که زنده می‌ماند
+           انجام می‌دهند.
+
+           این گذرِ زودهنگام جزئیاتِ پروفایلِ sync را همان ابتدای کران —
+           حتی زیرِ قفل (زیرا جزئیات چیزی نمی‌فرستد) — انجام می‌دهد، تا اگر
+           پردازه بعداً کشته شود، جزئیات از قبل رفته باشد. در پروفایلِ
+           sync، دامنه «فقط محصولات ناقص» است (گالریِ کامل دوباره از نو
+           نمی‌شود مگر اینکه تیک «استخراج دوره‌ای جزئیات» با دامنهٔ
+           «همهٔ محصولات» روشن باشد). */
+        if (!$dsOn && !$syncOn) {
             $_dsOff[] = (string)($dProfile['name'] ?? $dKey);
             continue;
         }
         $_dsSeen++;
-        $dRow = ['key' => $dKey, 'name' => $dProfile['name'] ?? $dKey];
-        $dInterval = max(0, (int)($dCfg['interval'] ?? 3600));
+        $dRow = ['key' => $dKey, 'name' => $dProfile['name'] ?? $dKey, 'auto' => ($syncOn && !$dsOn)];
+        // دورهٔ جزئیات: اگر تیک دوره‌ای روشن است همان‌جا، وگرنه با دورهٔ خودِ سینک
+        $dInterval = max(0, (int)($dsOn ? ($dCfg['interval'] ?? 3600) : ($sCfg['interval'] ?? 3600)));
         $dLast = (int)($syncState[$dKey]['detailLastRun'] ?? 0);
         if ($dInterval > 0 && ($now - $dLast) < $dInterval) {
             $dRow['status'] = 'not_due';
@@ -9080,7 +9101,9 @@ function cronDetailSyncPass(array $cn, bool $locked = false): array {
             $out[] = $dRow;
             continue;
         }
-        $dScopeAll = (($dCfg['scope'] ?? 'missing') === 'all');
+        // دامنهٔ «همهٔ محصولات» فقط وقتی معنا دارد که تیک «استخراج دوره‌ای
+        // جزئیات» روشن باشد؛ در پروفایلِ صرفاً-sync همیشه «فقط ناقص‌ها».
+        $dScopeAll = $dsOn && (($dCfg['scope'] ?? 'missing') === 'all');
         $dRow['scope'] = $dScopeAll ? 'all' : 'missing';
         /* v9.20: ردیفِ «در حال اجرا» همین ابتدا در صف می‌نشیند.
            تا اینجا تنها ردیفِ اطلاع‌رسان بعد از تمام شدنِ runBackendExtract
@@ -9120,6 +9143,7 @@ function cronDetailSyncPass(array $cn, bool $locked = false): array {
            به زبان آدمیزاد می‌گوید چه شد و اگر چیزی نیامده، چرا. */
         $_dNote = ['   • دامنه: ' . ($dScopeAll ? 'همهٔ محصولات (گالری از نو)' : 'فقط محصولات ناقص'),
                    '   • دوره: ' . detailSyncIntervalLabel($dInterval)];
+        if (!empty($dRow['auto'])) $_dNote[] = '   • 🤖 همراهِ خودکارِ سینکِ پروفایل (فقط محصولات ناقص)';
         if ($locked) $_dNote[] = '   • 🔓 با وجود قفلِ اجرای قبلی انجام شد (v9.13)';
         if (!empty($dRow['pre_list'])) $_dNote[] = '   • فهرست هم اول گرفته شد (پروفایل خالی بود)';
         if (!empty($dRes['ok'])) {
@@ -9158,14 +9182,13 @@ function cronDetailSyncPass(array $cn, bool $locked = false): array {
     if ($_dsSeen === 0) {
         $_offList = array_slice($_dsOff, 0, 6);
         detailSyncNote('', 'همهٔ پروفایل‌ها',
-            '⚠️ استخراج دوره‌ای جزئیات — هیچ پروفایلی روشن نیست',
+            '⚠️ استخراج دوره‌ای جزئیات — هیچ پروفایلی سینک/جزئیات روشن ندارد',
             ['   • کران اجرا شد و ' . count($_dsOff) . ' پروفایل را بررسی کرد',
-             '   • ولی در هیچ‌کدام تیک «🔍 استخراج دوره‌ای جزئیات» ذخیره نشده'
+             '   • ولی هیچ‌کدام نه «سینک خودکار» روشن دارند نه «استخراج دوره‌ای جزئیات»'
                . ($locked ? ' (این اجرا زیر قفل بود)' : ''),
-             ($_offList ? ('   • بدون تیک: ' . implode('، ', $_offList)
+             ($_offList ? ('   • بدون فعال بودن: ' . implode('، ', $_offList)
                  . (count($_dsOff) > 6 ? ' و ...' : '')) : '   • هیچ پروفایلی وجود ندارد'),
-             '   • اگر تیک را زده‌اید: تب شروع → تیک را بزنید و «💾» را بزنید،',
-             '     بعد صفحه را تازه کنید و ببینید تیک هنوز خورده است'],
+             '   • برای استخراج جزئیات خودکار، حداقل «سینک خودکار» یا «استخراج دوره‌ای جزئیات» را در پروفایل روشن کنید'],
             'none_enabled');
     }
     saveSyncState($syncState);
@@ -11824,6 +11847,12 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "'detail_only'") !== false
          && strpos($selfSrc, 'syncConfig') !== false
          && strpos($selfSrc, "'phase' => 'detail'") !== false);
+
+    /* ---------- v9.40: جزئیاتِ پروفایلِ sync در گذرِ زودهنگام کران ---------- */
+    $add('9.40', 'جزئیات پروفایلِ sync در ابتدای کران (زیر قفل هم) اجرا می‌شود',
+         strpos($selfSrc, '$syncOn') !== false
+         && strpos($selfSrc, '$dsOn') !== false
+         && strpos($selfSrc, '$dScopeAll') !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
