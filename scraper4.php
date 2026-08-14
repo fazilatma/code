@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.29';
-const APP_VERSION_DATE = '1405/05/31';
+const APP_VERSION = '9.30';
+const APP_VERSION_DATE = '1405/06/01';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1132,13 +1132,34 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
     $acct = $m[1];
     $target = 'https://api.cloudflare.com/client/v4/accounts/' . rawurlencode($acct)
             . '/ai/run/' . ltrim($model, '/');
+    // ۱) بدنهٔ اولیه با prompt (سازگار با اکثر مدل‌های Cloudflare)
     $prompt = '';
     foreach ((array)($payload['messages'] ?? []) as $msg) {
         if (is_array($msg) && isset($msg['content'])) $prompt .= (string)$msg['content'] . "\n";
     }
+    $prompt = trim($prompt);
+    $maxTok = (int)($payload['max_tokens'] ?? 0);
+    $body = ['prompt' => $prompt];
+    if ($maxTok > 0) $body['max_tokens'] = $maxTok;
     $headers = ['Content-Type: application/json'];
     if ($apiKey !== '') $headers[] = 'Authorization: Bearer ' . $apiKey;
-    $r = aiHttp($target, $headers, ['prompt' => trim($prompt)], $net, 'direct');
+
+    $r = aiHttp($target, $headers, $body, $net, 'direct');
+    $code = (int)$r['code'];
+    /* v9.30: بعضی مدل‌های چت جدیدتر Cloudflare (مثل llama-3.1-8b-instruct-fast)
+       گاهی به جای {prompt} به {messages} نیاز دارند و با {prompt} خطای 400
+       می‌دهند، در حالی که برنامهٔ دیگری که مستقیماً messages می‌فرستد کار
+       می‌کند. پس اگر با prompt 400 گرفت، دوباره با messages تلاش می‌کنیم. */
+    if ($code === 400 || $code === 422) {
+        $messages = array_values((array)($payload['messages'] ?? []));
+        if (!empty($messages)) {
+            $body2 = ['messages' => $messages];
+            if ($maxTok > 0) $body2['max_tokens'] = $maxTok;
+            $r2 = aiHttp($target, $headers, $body2, $net, 'direct');
+            if ((int)$r2['code'] === 200) $r = $r2;
+            else $r = $r2; // هم پیام خطای جدید را نگه دار (ممکن است دقیق‌تر باشد)
+        }
+    }
     if (!empty($r['ok'])) {
         $result = $r['body']['result'] ?? [];
         $text = (string)($result['response'] ?? '');
@@ -11321,10 +11342,17 @@ if (isset($_GET['selftest'])) {
     $add('9.29', 'تشخیص «مشکل روش اتصال» در تست مدل‌ها',
          strpos($selfSrc, "'net_issue'") !== false
          && strpos($selfSrc, "'net_hint'") !== false
-         && strpos($selfSrc, "\$dnet['mode'] = 'direct'") !== false);
+         && strpos($selfSrc, '$dnet[' . "'mode'] = 'direct'") !== false);
     $add('9.29', 'پیام مودال مشکل روش را جدا نشان می‌دهد',
          strpos($selfSrc, 'net_issue===true') !== false
          && strpos($selfSrc, 'netIssues') !== false);
+
+    /* ---------- v9.30: fallback به messages برای Cloudflare 400 ---------- */
+    $add('9.30', 'Cloudflare با fallback به بدنهٔ messages خطای 400 را حل می‌کند',
+         strpos($selfSrc, '$body2 = [') !== false
+         && strpos($selfSrc, 'code === 400') !== false);
+    $add('9.30', 'max_tokens به Cloudflare پاس داده می‌شود',
+         strpos($selfSrc, 'max_tokens') !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
@@ -25003,6 +25031,17 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.30', t:'☁️ رفع خطای ۴۰۰ Cloudflare با fallback به بدنهٔ messages', items:[
+    'گزارش شما: همین مدل Cloudflare (مثل @cf/llama-3.1-8b-instruct-fast) با',
+    'برنامهٔ دیگری روی هاست جواب «سلام» را می‌دهد ولی اینجا با دکمهٔ تست،',
+    'خطای 400 می‌دهد — در حالی که عیب‌یابی «کامل ✓» می‌گفت.',
+    '🐞 علت: بعضی مدل‌های چت جدیدتر Cloudflare به بدنهٔ {messages} نیاز',
+    'دارند، نه {prompt}؛ ما با {prompt} می‌فرستادیم و 400 می‌گرفتیم. عیب‌یابی',
+    'فقط به api.cloudflare.com می‌رسید، پس به نظر موفق بود.',
+    '✅ حالا اگر با {prompt} خطای 400/422 گرفتیم، خودکار دوباره با {messages}',
+    'تلاش می‌کنیم و پاسخ را نرمال‌سازی می‌کنیم.',
+    '💡 پیام خطا هم دقیق‌تر نمایش داده می‌شود تا علت واقعی مشخص باشد.'
+  ]},
   {v:'9.29', t:'🧠 تشخیص «مشکل روش اتصال» جدا از «دسترسی هاست»', items:[
     'گزارش شما: عیب‌یابی می‌گفت «مستقیم کامل ✓» ولی در تست مدل‌ها هنوز',
     '«هاست به ارائه‌دهنده دسترسی ندارد» نشان می‌داد.',
