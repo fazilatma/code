@@ -89,8 +89,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.40';
-const APP_VERSION_DATE = '1405/06/11';
+const APP_VERSION = '9.41';
+const APP_VERSION_DATE = '1405/06/12';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -9511,6 +9511,36 @@ header('Content-Type: application/json; charset=UTF-8');
    خودشان سقف چنددقیقه‌ای دارند و اتصال طولانی را قطع می‌کنند.
    خلاصهٔ نهایی در cron_last_run.json می‌نشیند و با ?cron_last خوانده
    می‌شود. */
+/* v9.41: فاز جزئیات را «قبل از» جدا شدن از اتصال، هم‌زمان اجرا کن.
+
+   سرنخِ کاربر: وقتی آدرس ?cron_run را در مرورگر می‌زند، استخراج جزئیات
+   کار می‌کند، اما وقتی همین آدرس توسط cron-job.org (یا هر درخواستِ
+   خارجی) فرستاده می‌شود، فاز جزئیات اجرا نمی‌شود.
+
+   علت: پایین‌تر finishRequestNow() اتصال را می‌بندد و بقیهٔ کار — از
+   جمله فاز جزئیات — باید در پردازهٔ جدا شده در پس‌زمینه ادامه پیدا کند.
+   مرورگرِ باز آن پردازه را زنده نگه می‌دارد (یا حداقل هاست فرصت می‌دهد)،
+   ولی وقتی یک سرویسِ کرانِ خارجی درخواست می‌زند، هاست همان لحظه که پاسخ
+   داده شد و کلاینت رفت، کارگرِ PHP-FPM/LiteSpeed را آزاد می‌کند و کارِ
+   پس‌زمینه قبل از رسیدن به فاز جزئیات کشته می‌شود.
+
+   راه‌حل: همین ابتدای کران — قبل از finishRequestNow — فاز جزئیات را
+   به‌صورت هم‌زمان اجرا می‌کنیم. این فاز فقط محصولاتِ ناقص را باز می‌کند
+   (ارزان است) و چیزی به مقصد نمی‌فرستد، پس هم زیرِ قفل امن است و هم اگر
+   بعد از پاسخ پردازه کشته شود، جزئیات از قبل انجام شده است. نتیجه در
+   $preDetail نگه داشته می‌شود و مسیرهای قفل/اصلی پایین به‌جای دوباره
+   صدا زدن، از همین استفاده می‌کنند (dedup بر اساس detailLastRun هم
+   از اجرای دوباره جلوگیری می‌کند). */
+$cnDet = loadConnections();
+$preDetail = null;
+try {
+    $preDetail = cronDetailSyncPass($cnDet, false);
+} catch (Throwable $e) {
+    // حتی اگر فاز جزئیات خطا بدهد، نباید کل کران (و پاسخِ آن) بشکند
+    $preDetail = null;
+}
+if (empty($preDetail)) $preDetail = null;
+
 $_cronBg = !empty($_POST['bg']) || !empty($_GET['bg']);
 finishRequestNow(json_encode(['ok' => true, 'started' => true, 'bg' => $_cronBg,
     'detached' => true, 'note' => 'اجرا در پس‌زمینه ادامه دارد — نتیجه در cron_last_run.json'],
@@ -9601,7 +9631,7 @@ if ($lockAge < $cronLockSec) {
        جزئیات چیزی نمی‌فرستد؛ فقط صفحهٔ محصول را می‌خواند و روی دیسک
        می‌نویسد، و خودش با محافظ تکراری‌نبودنِ صف و نشانهٔ مرحله در
        برابر اجرای هم‌زمان محافظت می‌شود. ارسال همچنان پشت قفل می‌ماند. */
-    $lockOut['detail_sync'] = cronDetailSyncPass($cnLock, true);
+    $lockOut['detail_sync'] = $preDetail ?? cronDetailSyncPass($cnLock, true);
     if (empty($lockOut['detail_sync'])) unset($lockOut['detail_sync']);
     notifCronPing($cnLock, ['profiles' => [], 'locked' => $lockAge]);
     // v9.06: اتصال بالاتر بسته شده — خروجی به فایل می‌رود، نه به اتصالِ مرده
@@ -9641,7 +9671,7 @@ if (!empty($results_lockReaped)) $results['lock_reaped'] = true;
    اگر وسطِ همان فرآیند پردازه کشته شود، به این حلقه هیچ‌وقت نمی‌رسیدیم و
    جزئیات بی‌رد می‌مرد — دقیقاً همان «اصلاً اجرا نمی‌شود» که کاربر می‌دید.
    حالا ردیفِ جزئیات در همان صفِ استخراج زود و مطمئن می‌نشیند. */
-$results['detail_sync'] = cronDetailSyncPass($cn, false);
+$results['detail_sync'] = $preDetail ?? cronDetailSyncPass($cn, false);
 if (empty($results['detail_sync'])) unset($results['detail_sync']);
 
 /* v8.97: نگهبان‌ها «اول» اجرا می‌شوند، نه آخر.
@@ -11853,6 +11883,12 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, '$syncOn') !== false
          && strpos($selfSrc, '$dsOn') !== false
          && strpos($selfSrc, '$dScopeAll') !== false);
+
+    /* ---------- v9.41: فاز جزئیات قبل از جدا شدن از اتصال اجرا می‌شود ---------- */
+    $add('9.41', 'جزئیات قبل از finishRequestNow اجرا می‌شود (سازگار با cron-job.org)',
+         strpos($selfSrc, '$preDetail = cronDetailSyncPass($cnDet, false);') !== false
+         && strpos($selfSrc, '$lockOut[\'detail_sync\'] = $preDetail ??') !== false
+         && strpos($selfSrc, '$results[\'detail_sync\'] = $preDetail ??') !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
