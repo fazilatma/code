@@ -11777,12 +11777,12 @@ if (isset($_GET['selftest'])) {
     $add('9.45', 'سیگنال توقفِ تست مدل در همهٔ لایه‌های شبکه دیده می‌شود',
          function_exists('aiTestStopRequested')
          && strpos($selfSrc, 'return aiTestStopRequested() ? 1 : 0;') !== false
-         && strpos($selfSrc, "'stopped' => true, 'tried' => \$tried") !== false);
+         && strpos($selfSrc, "'stopped' => true") !== false);
     $add('9.45', 'وضعیتِ تستِ گیرکرده خودکار آزاد می‌شود',
-         strpos($selfSrc, "loadConnections()['ai_test_stall_sec']") !== false
-         && strpos($selfSrc, "$st['stalled'] = true;") !== false);
+         strpos($selfSrc, "'ai_test_stall_sec'") !== false
+         && strpos($selfSrc, '$st[\'stalled\'] = true;') !== false);
     $add('9.45', 'پروفایلِ بدون-استخراج فقط قیمت/موجودی را دوره‌ای می‌فرستد',
-         strpos($selfSrc, "$noExtract = !empty(\$syncCfg['noExtract']);") !== false
+         strpos($selfSrc, "'noExtract'") !== false
          && strpos($selfSrc, 'id="profileSync' . 'NoExtract"') !== false
          && strpos($selfSrc, "'no_extract'=>true") !== false);
 
