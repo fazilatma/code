@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.30';
-const APP_VERSION_DATE = '1405/06/01';
+const APP_VERSION = '9.31';
+const APP_VERSION_DATE = '1405/06/02';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1123,6 +1123,23 @@ function aiProviderEndpoint(array $p, string $model = ''): array {
 }
 
 /** فراخوانی native Cloudflare و نرمال‌سازی پاسخ به شکل OpenAI */
+/** استخراج پیام خطای Cloudflare از پاسخ خطا */
+function aiCloudflareError(array $r): string {
+    $b = $r['body'] ?? [];
+    if (is_array($b) && !empty($b['errors']) && is_array($b['errors'])) {
+        foreach ($b['errors'] as $e) {
+            if (is_array($e) && !empty($e['message'])) {
+                $m = trim((string)$e['message']);
+                $ic = (int)($e['internalCode'] ?? ($e['code'] ?? 0));
+                if ($ic === 5007) $m = 'مدل در Cloudflare وجود ندارد (No such model) — نام دقیق مدل مثل @cf/meta/... را بررسی کنید. ' . $m;
+                return $m;
+            }
+        }
+    }
+    if (is_array($b) && !empty($b['message'])) return (string)$b['message'];
+    return '';
+}
+
 function aiCloudflareCall(array $p, string $model, array $payload, array $net): array {
     $apiKey = trim((string)($p['apiKey'] ?? ''));
     $url = trim((string)($p['url'] ?? ''));
@@ -1130,40 +1147,50 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
         return ['ok' => false, 'code' => 0, 'error' => 'شمارهٔ حساب Cloudflare در آدرس پیدا نشد', 'via' => 'direct'];
     }
     $acct = $m[1];
+    // نام مدل را نرمال کن: اگر با @cf/ شروع شده ولی بخش /meta/ را ندارد،
+    // احتمالاً اشتباه است؛ اما فقط وقتی که خودِ نام داده‌شده در Cloudflare نیست
+    // خودکار اصلاح نمی‌کنیم — فقط در پیام خطا راهنمایی می‌دهیم.
     $target = 'https://api.cloudflare.com/client/v4/accounts/' . rawurlencode($acct)
             . '/ai/run/' . ltrim($model, '/');
-    // ۱) بدنهٔ اولیه با prompt (سازگار با اکثر مدل‌های Cloudflare)
+    $messages = array_values((array)($payload['messages'] ?? []));
     $prompt = '';
-    foreach ((array)($payload['messages'] ?? []) as $msg) {
+    foreach ($messages as $msg) {
         if (is_array($msg) && isset($msg['content'])) $prompt .= (string)$msg['content'] . "\n";
     }
     $prompt = trim($prompt);
     $maxTok = (int)($payload['max_tokens'] ?? 0);
-    $body = ['prompt' => $prompt];
-    if ($maxTok > 0) $body['max_tokens'] = $maxTok;
     $headers = ['Content-Type: application/json'];
     if ($apiKey !== '') $headers[] = 'Authorization: Bearer ' . $apiKey;
 
-    $r = aiHttp($target, $headers, $body, $net, 'direct');
-    $code = (int)$r['code'];
-    /* v9.30: بعضی مدل‌های چت جدیدتر Cloudflare (مثل llama-3.1-8b-instruct-fast)
-       گاهی به جای {prompt} به {messages} نیاز دارند و با {prompt} خطای 400
-       می‌دهند، در حالی که برنامهٔ دیگری که مستقیماً messages می‌فرستد کار
-       می‌کند. پس اگر با prompt 400 گرفت، دوباره با messages تلاش می‌کنیم. */
-    if ($code === 400 || $code === 422) {
-        $messages = array_values((array)($payload['messages'] ?? []));
-        if (!empty($messages)) {
-            $body2 = ['messages' => $messages];
-            if ($maxTok > 0) $body2['max_tokens'] = $maxTok;
-            $r2 = aiHttp($target, $headers, $body2, $net, 'direct');
-            if ((int)$r2['code'] === 200) $r = $r2;
-            else $r = $r2; // هم پیام خطای جدید را نگه دار (ممکن است دقیق‌تر باشد)
-        }
+    /* استراتژی: اول با {prompt} امتحان می‌کنیم (سازگار با اکثر مدل‌ها)، و اگر
+       خطای 400/422 گرفتیم، دوباره با {messages} تلاش می‌کنیم (برخی مدل‌های چت
+       فقط messages می‌پذیرند). max_tokens هم در هر دو پاس داده می‌شود. */
+    $attempts = [];
+    $bodyA = ['prompt' => $prompt];
+    if ($maxTok > 0) $bodyA['max_tokens'] = $maxTok;
+    $attempts[] = $bodyA;
+    if (!empty($messages)) {
+        $bodyB = ['messages' => $messages];
+        if ($maxTok > 0) $bodyB['max_tokens'] = $maxTok;
+        $attempts[] = $bodyB;
     }
+    $last = null;
+    foreach ($attempts as $ab) {
+        $rr = aiHttp($target, $headers, $ab, $net, 'direct');
+        $last = $rr;
+        if ((int)$rr['code'] === 200) { $r = $rr; break; }
+    }
+    if (!isset($r)) $r = $last ?: ['ok' => false, 'code' => 0, 'error' => 'بدون پاسخ', 'body' => null];
+    // اگر همهٔ تلاش‌ها شکست خورد، پیام خطای Cloudflare را (اگر هست) استخراج کن
     if (!empty($r['ok'])) {
         $result = $r['body']['result'] ?? [];
         $text = (string)($result['response'] ?? '');
         $r['body'] = ['choices' => [['message' => ['content' => $text]]], 'model' => $model, 'usage' => []];
+        $r['cf_tried'] = count($attempts);
+    } else {
+        $cfErr = aiCloudflareError($r);
+        if ($cfErr !== '') $r['cf_error'] = $cfErr;
+        $r['cf_tried'] = count($attempts);
     }
     return $r;
 }
@@ -11349,10 +11376,18 @@ if (isset($_GET['selftest'])) {
 
     /* ---------- v9.30: fallback به messages برای Cloudflare 400 ---------- */
     $add('9.30', 'Cloudflare با fallback به بدنهٔ messages خطای 400 را حل می‌کند',
-         strpos($selfSrc, '$body2 = [') !== false
-         && strpos($selfSrc, 'code === 400') !== false);
+         strpos($selfSrc, 'messages' . "'] => ") !== false
+         && strpos($selfSrc, 'cf_tried') !== false);
     $add('9.30', 'max_tokens به Cloudflare پاس داده می‌شود',
          strpos($selfSrc, 'max_tokens') !== false);
+
+    /* ---------- v9.31: دکمهٔ تست «سلام» + نمایش خطای واقعی Cloudflare ---------- */
+    $add('9.31', 'دکمهٔ تست پیام «سلام» می‌فرستد',
+         strpos($selfSrc, "'content' => 'سلا" . "م'") !== false
+         || strpos($selfSrc, "'content'=>'سلا" . "م'") !== false);
+    $add('9.31', 'پیام خطای واقعی Cloudflare نمایش داده می‌شود',
+         function_exists('aiCloudflare' . 'Error')
+         && strpos($selfSrc, "'cf_error'") !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
@@ -15868,7 +15903,7 @@ if ($provider === null) {
 if ($provider === null) { echo json_encode(['ok'=>false,'error'=>'هیچ ارائه‌دهندهٔ هوش مصنوعی تنظیم نشده — ابتدا JSON را درون‌ریزی کنید'],JSON_UNESCAPED_UNICODE); exit; }
 if ($modelId === '') $modelId = $provider['models'][0]['id'] ?? '';
 if ($modelId === '') { echo json_encode(['ok'=>false,'error'=>'ارائه‌دهنده مدلی ندارد'],JSON_UNESCAPED_UNICODE); exit; }
-$payload=['messages'=>[['role'=>'user','content'=>'سلام، لطفا کلمه «متصل» را پاس بده']], 'temperature'=>0.1, 'max_tokens'=>20];
+$payload=['messages'=>[['role'=>'user','content'=>'سلام']], 'temperature'=>0.1, 'max_tokens'=>30];
 $r=aiProviderCall($provider,$modelId,$payload,$netT);
 $httpCode=(int)$r['code'];
 if($httpCode===200){
@@ -15880,9 +15915,11 @@ echo json_encode(['ok'=>true,'message'=>'اتصال AI موفق!','response'=>$a
 }else{
 $errBody=$r['body']??[];
 $errMsg=$errBody['error']['message']??($errBody['message']??'HTTP '.$httpCode);
+// v9.30: پیام خطای دقیق Cloudflare را نشان بده (قبلاً فقط «HTTP 400» می‌آمد)
+if (!empty($r['cf_error'])) $errMsg = $r['cf_error'];
 if($httpCode===401)$errMsg='کلید API نامعتبر (۴۰۱)';
 elseif($httpCode===0)$errMsg='خطا ارتباط با سرور AI: '.($r['error']??'').' — روش عبور را عوض کنید';
-echo json_encode(['ok'=>false,'error'=>$errMsg,'http_code'=>$httpCode,'via'=>$r['via']??'','tried'=>$r['tried']??[],'provider'=>$provider['name']??$providerId],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>false,'error'=>$errMsg,'http_code'=>$httpCode,'via'=>$r['via']??'','tried'=>$r['tried']??[],'provider'=>$provider['name']??$providerId,'cf_tried'=>$r['cf_tried']??null],JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -25031,6 +25068,19 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.31', t:'🔗 دکمهٔ تست پیام «سلام» می‌فرستد + نمایش خطای واقعی Cloudflare', items:[
+    'خواستهٔ شما: دکمهٔ «تست» کنار «تست دسته» پیام «سلام» را ارسال کند.',
+    '✅ حالا همین‌طور است — پیام تست «سلام» است.',
+    '🔍 همچنین علت خطای 400 را شفاف کردیم: Cloudflare خطای «No such model»',
+    'را با HTTP 400 برمی‌گرداند و پیامش در میدان errors[0].message است که',
+    'قبلاً خوانده نمی‌شد و فقط «HTTP 400» دیده می‌شد.',
+    '✅ حالا تابع aiCloudflareCall هم {prompt} و هم {messages} را امتحان',
+    'می‌کند (برخی مدل‌های چت فقط messages می‌پذیرند) و پیام واقعی خطا',
+    'نمایش داده می‌شود.',
+    '💡 اگر «مدل در Cloudflare وجود ندارد» دیدید، یعنی نام دقیق مدل را',
+    'بررسی کنید — مثلاً درست آن @cf/meta/llama-3.1-8b-instruct-fast است',
+    '(بخش /meta/ مهم است) نه بدون آن.'
+  ]},
   {v:'9.30', t:'☁️ رفع خطای ۴۰۰ Cloudflare با fallback به بدنهٔ messages', items:[
     'گزارش شما: همین مدل Cloudflare (مثل @cf/llama-3.1-8b-instruct-fast) با',
     'برنامهٔ دیگری روی هاست جواب «سلام» را می‌دهد ولی اینجا با دکمهٔ تست،',
