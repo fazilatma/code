@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.28';
-const APP_VERSION_DATE = '1405/05/30';
+const APP_VERSION = '9.29';
+const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -11317,6 +11317,15 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'd.provider_name') !== false
          && strpos($selfSrc, 'd.model') !== false);
 
+    /* ---------- v9.29: تشخیص مشکل روش اتصال جدا از دسترسی هاست ---------- */
+    $add('9.29', 'تشخیص «مشکل روش اتصال» در تست مدل‌ها',
+         strpos($selfSrc, "'net_issue'") !== false
+         && strpos($selfSrc, "'net_hint'") !== false
+         && strpos($selfSrc, "\$dnet['mode'] = 'direct'") !== false);
+    $add('9.29', 'پیام مودال مشکل روش را جدا نشان می‌دهد',
+         strpos($selfSrc, 'net_issue===true') !== false
+         && strpos($selfSrc, 'netIssues') !== false);
+
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
          && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
@@ -16007,6 +16016,26 @@ function aiRunTestBackground(int $per, bool $onlyUntested): array {
         $diag['latencyMs'] = $latency;
         if (!isset($st['diag'][$pid])) $st['diag'][$pid] = ['reachable'=>true,'categories'=>[],'samples'=>0];
         $st['diag'][$pid]['samples']++;
+        /* v9.29: اگر با «روش اتصال فعلی» fail شد ولی با «مستقیم» روی همان مدل
+           موفق شد، یعنی خودِ هاست به اندپوینت دسترسی دارد و مشکل از روش اتصال
+           (مثلاً DoH که روی این شبکه به سرور DNS هم وصل نمی‌شود) است. آن را
+           «مشکل روش» علامت بزن تا پیام گمراه‌کنندهٔ «هاست دسترسی ندارد» نیاید. */
+        $netIssue = false;
+        if (!$ok) {
+            $netCfg = aiNetCfg();
+            $dnet = $netCfg; $dnet['mode'] = 'direct';
+            $rd = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>'سلام']], 'temperature'=>0.3, 'max_tokens'=>30], $dnet);
+            if ((int)$rd['code'] === 200) $netIssue = true;
+        }
+        if ($netIssue) {
+            $st['diag'][$pid]['net_issue'] = true;
+            $st['diag'][$pid]['mode'] = (string)(aiNetCfg()['mode'] ?? 'direct');
+            $st['diag'][$pid]['net_hint'] = 'روش اتصال فعلی روی این شبکه کار نمی‌کند ولی «مستقیم» جواب می‌دهد — روش را روی «مستقیم» بگذارید یا یک Worker/پروکسی سالم اضافه کنید';
+            // روش اتصال را موقتاً مستقیم کن تا خودِ مدل رد نشود
+            $r = $rd; $ok = true; $code = (int)$rd['code']; $response = (string)($rd['body']['choices'][0]['message']['content'] ?? '');
+        } else {
+            $st['diag'][$pid]['net_issue'] = false;
+        }
         if (!$ok) {
             $st['diag'][$pid]['categories'][$diag['cat']] = ($st['diag'][$pid]['categories'][$diag['cat']] ?? 0) + 1;
             if ($diag['cat'] === 'dns' || $diag['cat'] === 'timeout' || $diag['cat'] === 'refused'
@@ -24974,6 +25003,20 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.29', t:'🧠 تشخیص «مشکل روش اتصال» جدا از «دسترسی هاست»', items:[
+    'گزارش شما: عیب‌یابی می‌گفت «مستقیم کامل ✓» ولی در تست مدل‌ها هنوز',
+    '«هاست به ارائه‌دهنده دسترسی ندارد» نشان می‌داد.',
+    '🐞 علت: وقتی روش اتصال روی DoH بود و DoH روی این شبکه به خودِ سرور DNS',
+    '(مثل cloudflare-dns.com) وصل نمی‌شد، همهٔ مدل‌ها fail می‌شدند و پیام',
+    '«هاست دسترسی ندارد» می‌آمد — در حالی که خودِ هاست با «مستقیم»',
+    'واقعاً به اندپوینت می‌رسید.',
+    '✅ حالا در تست، اگر مدل با «روش فعلی» fail شود ولی با «مستقیم» روی',
+    'همان مدل موفق شود، علامت «مشکل روش اتصال» ثبت می‌شود نه «مشکل هاست».',
+    '👁 پیام مودال حالا این دو حالت را جدا می‌کند: اگر مشکل از روش اتصال',
+    'باشد می‌گوید «روش فعلی روی این شبکه کار نمی‌کند؛ مستقیم جواب می‌دهد».',
+    '💡 توصیه: چون مستقیم روی شبکهٔ شما کار می‌کند، روش اتصال را روی',
+    '«مستقیم» بگذارید — DoH به دردی نمی‌خورد اگر به سرور DNS هم وصل نشود.'
+  ]},
   {v:'9.28', t:'🛠 عیب‌یابی از «ارائه‌دهندهٔ فعال» استفاده می‌کند', items:[
     'گزارش شما: عیب‌یابی می‌گفت «میزبان خالی» و «URL rejected: No host part»',
     'و هیچ روشی کار نمی‌کرد.',
@@ -28852,11 +28895,17 @@ function aiRenderTestState(st){
     }
     (st.items||[]).forEach(it=>aiSetTestRow(it));
     if(st.done){ if($('aiTestCur'))$('aiTestCur').textContent='🏁 '+esc(st.summary||'تمام شد'); }
-    // خلاصهٔ عیب‌یابی (قابل‌دسترس‌نبودن اندپوینت‌ها)
+    // خلاصهٔ عیب‌یابی (قابل‌دسترس‌نبودن اندپوینت‌ها / مشکل روش اتصال)
     const db=$('aiTestDiag');
     if(db&&st.diag){
-        const unreach=Object.entries(st.diag).filter(([,d])=>d&&d.reachable===false);
-        if(unreach.length){
+        const netIssues=Object.entries(st.diag).filter(([,d])=>d&&d.net_issue===true);
+        const unreach=Object.entries(st.diag).filter(([,d])=>d&&d.reachable===false&&d.net_issue!==true);
+        if(netIssues.length){
+            db.innerHTML='<div style="margin-top:8px;padding:8px;background:#422006;border:1px solid #f59e0b;border-radius:6px;font-size:11px;color:#fcd34d">'
+              +'<b>⚠️ روش اتصال فعلی روی این شبکه کار نمی‌کند:</b><br>'
+              +netIssues.map(([id,d])=>'• <b dir="ltr">'+esc(id)+'</b>: '+esc(d.net_hint||d.first_error||'')).join('<br>')
+              +'<br><span style="color:#fbbf24">خودِ هاست به اندپوینت دسترسی دارد (مستقیم جواب می‌دهد). روش اتصال را روی «مستقیم» بگذارید، یا یک Worker/پروکسی سالم اضافه کنید.</span></div>';
+        } else if(unreach.length){
             db.innerHTML='<div style="margin-top:8px;padding:8px;background:#3b1e1e;border:1px solid #ef4444;border-radius:6px;font-size:11px;color:#fca5a5">'
               +'<b>⚠️ هاست به این ارائه‌دهنده‌ها دسترسی ندارد:</b><br>'
               +unreach.map(([id,d])=>'• <b dir="ltr">'+esc(id)+'</b>: '+esc(d.first_error||d.last_label||'')).join('<br>')
