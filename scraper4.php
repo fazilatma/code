@@ -89,8 +89,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.38';
-const APP_VERSION_DATE = '1405/06/09';
+const APP_VERSION = '9.39';
+const APP_VERSION_DATE = '1405/06/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -9654,6 +9654,37 @@ foreach ($wdEarly as $k => $v) { if (!empty($v)) $results[$k] = $v; }
    یا با curl:  ?cron_run&only=detail */
 if ((string)($_GET['only'] ?? $_POST['only'] ?? '') === 'detail') {
     $results['only'] = 'detail';
+    /* v9.39: حالت «فقط جزئیات» فقط پروفایل‌هایی را که تیک «استخراج دوره‌ای
+       جزئیات» دارند می‌گرفت و از پروفایل‌هایی که «سینک خودکار» روشن دارند
+       رد می‌شد — چون در این حالت از حلقهٔ اصلی پروفایل‌ها عبور نمی‌کردیم.
+       نتیجه این بود که با `cron_run detail` هیچ ردیفی برای پروفایلِ sync
+       ساخته نمی‌شد و جزئیات هرگز اجرا نمی‌شد. حالا در این حالت هم برای
+       پروفایل‌های sync (که جزئیاتِ خود را در گامِ دومِ حلقهٔ عادی می‌گیرند)
+       فاز جزئیات اجرا می‌شود و در sync_state علامت می‌خورد، تا اگر این کران
+       دوباره اجرا شد، دوباره‌کاری نکند. */
+    $nowD = time();
+    foreach ($profiles as $pKey => $pProf) {
+        $dSyncCfg = (array)($pProf['detailSync'] ?? []);
+        $sSyncCfg = (array)($pProf['syncConfig'] ?? []);
+        // پروفایلی که حداقل یکی از دو زمان‌بند را روشن دارد جزئیات می‌خواهد
+        if (empty($dSyncCfg['enabled']) && empty($sSyncCfg['enabled'])) continue;
+        $intervalD = max(0, (int)($dSyncCfg['interval'] ?? 3600));
+        $lastD = (int)($syncState[$pKey]['detailLastRun'] ?? 0);
+        // اگر تازه اجرا شده، نوبتش نرسیده — همین‌جا رد کن
+        if ($intervalD > 0 && ($nowD - $lastD) < $intervalD) continue;
+        if (!isset($syncState[$pKey])) $syncState[$pKey] = [];
+        // فهرست اگر هنوز روی دیسک نباشد لازم است، وگرنه جزئیات کاری ندارد
+        if (empty($pProf['products'])) runBackendExtract($pKey, 'auto', false, 'list');
+        $dRes = runBackendExtract($pKey, 'auto', false, 'detail');
+        $syncState[$pKey]['detailLastRun'] = $nowD;
+        $results['detail_only'][] = [
+            'key' => $pKey, 'name' => $pProf['name'] ?? $pKey,
+            'ok' => !empty($dRes['ok']),
+            'error' => empty($dRes['ok']) ? (string)($dRes['error'] ?? '?') : '',
+        ];
+        $profiles = loadProfiles();   // پروفایل تازه‌شده را بگیر
+    }
+    saveSyncState($syncState);
     cronEmit($results);
     exit;
 }
@@ -11787,6 +11818,12 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "'ai_candidates_category'") !== false
          && strpos($selfSrc, "'ai_candidates_reply'") !== false
          && strpos($selfSrc, 'function aiCandidateReply(') !== false);
+
+    /* ---------- v9.39: کرانِ فقط-جزئیات برای پروفایل‌های sync ---------- */
+    $add('9.39', 'حالت فقط-جزئیات پروفایل‌های sync را هم می‌گیرد',
+         strpos($selfSrc, "'detail_only'") !== false
+         && strpos($selfSrc, 'syncConfig') !== false
+         && strpos($selfSrc, "'phase' => 'detail'") !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
