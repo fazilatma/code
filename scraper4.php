@@ -21318,9 +21318,13 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 چند مدل کاندید برای <b>دسته‌بندی</b> و <b>پاسخ خودکار</b> انتخاب کنید؛ در آزمون‌ها پاسخِ همهٔ کاندیدها کنار هم می‌آید تا بهترین را برگزینید. هر انتخاب به‌صورت «رأی» ثبت می‌شود و مدلی که از نظر آماری بهترین است به‌عنوان <b>مدل مستر</b> (مرجعِ قضاوت بقیه) به‌صورت خودکار انتخاب می‌شود.
 </div>
 <div class="crow" style="align-items:center">
-<label style="flex:0 0 auto">افزودن از مدل فعال بالا:</label>
-<button class="btn btn-green" onclick="aiCandAddFromSel()" style="flex:1;font-size:11px">➕ افزودن به کاندیدها</button>
-</div>
+<label style="flex:0 0 auto">ارائه‌دهنده:</label>
+<select id="aiCandProvSel" onchange="aiCandProvChange()" style="flex:1"><option value="">— انتخاب —</option></select></div>
+<div class="crow" style="align-items:center">
+<label style="flex:0 0 auto">مدل کاندید:</label>
+<select id="aiCandModelSel" style="flex:1"><option value="">—</option></select>
+<button class="btn btn-green" onclick="aiCandAddSel()" style="flex:0 0 auto;font-size:11px">➕ افزودن</button></div>
+<div style="font-size:10px;color:#64748b;margin:-2px 0 6px;line-height:1.6">ارائه‌دهنده و مدل را همین‌جا انتخاب و «➕ افزودن» را بزنید — نیازی به جابه‌جایی با منوی بالا نیست.</div>
 <div id="aiCandList" style="max-height:220px;overflow-y:auto;border:1px solid #334155;border-radius:6px;background:#0f172a;margin-bottom:6px">
 <div style="padding:8px;color:#64748b;font-size:11px">کاندیدی نیست — مدل فعال را انتخاب و «➕ افزودن» بزنید.</div>
 </div>
@@ -29737,10 +29741,41 @@ function aiCandAddFromSel(){
   if(!pid||!mid){showToast('اول از بالای همین بخش یک ارائه‌دهنده و مدل فعال انتخاب کنید',1);return;}
   aiCandSave(pid+'::'+mid,null,false);
 }
+/* v9.38: دراپ‌داون‌های اختصاصی افزودن کاندید (ارائه‌دهنده + مدل) */
+function aiCandFillSel(){
+  const ps=$('aiCandProvSel'); if(!ps)return;
+  const cur=ps.value||((aiProvData&&aiProvData.selected&&aiProvData.selected.provider)||'');
+  ps.innerHTML='<option value="">— انتخاب —</option>';
+  ((aiProvData&&aiProvData.providers)||[]).forEach(p=>{
+    const n=(p.models||[]).length;
+    ps.add(new Option(esc(p.name)+(n?' ('+toFa(n)+' مدل)':''),esc(p.id)));
+  });
+  if(cur&&[...ps.options].some(o=>o.value===cur))ps.value=cur;
+  aiCandFillModels();
+}
+function aiCandFillModels(){
+  const ms=$('aiCandModelSel'); if(!ms)return;
+  const pid=($('aiCandProvSel')||{}).value||'';
+  const p=((aiProvData&&aiProvData.providers)||[]).find(x=>x.id===pid);
+  ms.innerHTML='<option value="">—</option>';
+  if(!p)return;
+  (p.models||[]).forEach(m=>ms.add(new Option(esc(m.name||m.id),esc(m.id))));
+  // مدل فعالِ همین ارائه‌دهنده را پیش‌فرض بگذار
+  if(aiProvData&&aiProvData.selected&&aiProvData.selected.provider===pid&&aiProvData.selected.model)
+    ms.value=aiProvData.selected.model;
+}
+function aiCandProvChange(){aiCandFillModels();}
+function aiCandAddSel(){
+  const pid=($('aiCandProvSel')||{}).value||'';
+  const mid=($('aiCandModelSel')||{}).value||'';
+  if(!pid||!mid){showToast('ارائه‌دهنده و مدل کاندید را انتخاب کنید',1);return;}
+  aiCandSave(pid+'::'+mid,null,false);
+}
 function aiCandRemove(key){if(confirm('این مدل از کاندیدها حذف شود؟'))aiCandSave(null,key,false);}
 function aiCandSetPin(){aiCandSave(null,null,true);}
 function aiCandRender(){
   aiCandLoad(d=>{
+    aiCandFillSel();
     const box=$('aiCandList'); if(!box)return;
     const c=d.candidates||[];
     if(!c.length){box.innerHTML='<div style="padding:8px;color:#64748b;font-size:11px">کاندیدی نیست — مدل فعال را انتخاب و «➕ افزودن» بزنید.</div>';}
@@ -29897,6 +29932,7 @@ function aiRenderProviders(){
     if(!target||![...(sel.options)].some(o=>o.value===target))target=aiProvData.selected.provider||'';
     if(target)sel.value=target;
     aiRenderModels();
+    aiCandFillSel();
 }
 function aiCurrentProvider(){
     const sel=$('aiProviderSel');const id=sel?sel.value:'';
