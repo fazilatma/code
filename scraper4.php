@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.33';
-const APP_VERSION_DATE = '1405/06/04';
+const APP_VERSION = '9.34';
+const APP_VERSION_DATE = '1405/06/05';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -10466,16 +10466,33 @@ if (isset($_GET['ar_test'])) {
     $txt = (string)($_GET['text'] ?? '');
     if (trim($txt) === '') { echo json_encode(['ok' => false, 'error' => 'متن خالی است'], JSON_UNESCAPED_UNICODE); exit; }
     $rules = arLoadRules();
-    $hit = arPickRule($rules, $txt);
+    $cfgAR = arCfg();
     $all = [];
     foreach ($rules as $r) {
         $all[] = ['id' => $r['id'] ?? '', 'on' => !empty($r['on']),
                   'match' => arRuleMatches($r, $txt)];
     }
-    $cfgAR = arCfg();
+    /* v9.34: اولویت جدید — اول هوش مصنوعی، اگر خطا داد قواعد، اگر هیچ
+       قاعده‌ای نخورد بدون پاسخ. در حالت آزمایش، هوش مصنوعی واقعاً صدا زده
+       می‌شود تا نتیجهٔ واقعی بدهد. */
+    $aiRes = arAiReplyText($txt);
+    $aiOk = !empty($aiRes['ok']);
+    $aiText = $aiOk ? ($aiRes['text'] . ($cfgAR['sign'] !== '' ? "\n" . $cfgAR['sign'] : '')) : '';
+    $aiErr = $aiOk ? '' : (string)($aiRes['error'] ?? 'خطا');
+    $hit = null; $ruleReply = ''; $ruleId = '';
+    if (!$aiOk) {
+        $hit = arPickRule($rules, $txt);
+        if ($hit) {
+            $ruleId = (string)$hit['id'];
+            $ruleReply = $hit['reply'] . ($cfgAR['sign'] !== '' ? "\n" . $cfgAR['sign'] : '');
+        }
+    }
+    $finalReply = $aiOk ? $aiText : $ruleReply;
+    $source = $aiOk ? 'ai' : ($hit ? 'rule' : 'none');
     echo json_encode(['ok' => true, 'normalized' => arNormText($txt),
-        'rule' => $hit['id'] ?? '', 'reply' => $hit
-            ? ($hit['reply'] . ($cfgAR['sign'] !== '' ? "\n" . $cfgAR['sign'] : '')) : '',
+        'ai_ok' => $aiOk, 'ai_error' => $aiErr, 'ai_reply' => $aiText,
+        'rule' => $ruleId, 'rule_reply' => $ruleReply,
+        'source' => $source, 'reply' => $finalReply,
         'checked' => $all], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -11439,6 +11456,15 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, "\$modes[] = \$m;") !== false);
     $add('9.33', 'سازگاری با حالت قدیمی ai_reply حفظ شده',
          strpos($selfSrc, "ai_reply") !== false);
+
+    /* ---------- v9.34: اولویت پاسخ AI ← قواعد ← بدون پاسخ ---------- */
+    $add('9.34', 'اولویت پاسخ‌دهی هوش مصنوعی اول است',
+         strpos($selfSrc, 'aiMode = true') !== false
+         && strpos($selfSrc, 'هیچ قاعده‌ای نخورد و هوش مصنوعی هم پاسخ نداد') !== false);
+    $add('9.34', 'آزمایش، زنجیرهٔ جدید را اجرا می‌کند',
+         strpos($selfSrc, "'ai_ok'") !== false
+         && strpos($selfSrc, "'source'") !== false
+         && strpos($selfSrc, "'ai_error'") !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
@@ -13630,43 +13656,45 @@ function autoReplyRun(array $cn, bool $dry = false, bool $ignoreGrace = false): 
         }
 
         $text = (string)($lm['content']['text'] ?? $nc['text']);
-        $rule = arPickRule($rules, $text);
-        $aiMode = false; $premadeMode = false;
-        if ($rule === null) {
-            // v9.33: وقتی هیچ قاعده‌ای نخورد، طبق حالت جایگزین رفتار کن
-            $fbMode = (string)($cfg['fallback'] ?? 'none');
-            if ($fbMode === 'ai') {
-                $aiMode = true; $rid = 'ai'; $dmax = 0;
-            } elseif ($fbMode === 'premade' && $cfg['fallback_text'] !== '') {
-                $premadeMode = true; $rid = 'premade'; $dmax = 0;
+        /* v9.34: اولویت جدید پاسخ‌دهی:
+           ۱) اول با هوش مصنوعی (مدل فعال، با بک‌آپ Bonsai) جواب بده.
+           ۲) اگر هوش مصنوعی خطا/خالی داد، از قواعد استفاده کن.
+           ۳) اگر هیچ قاعده‌ای نخورد، پاسخی نفرست. */
+        $aiMode = true;
+        $rid = 'ai'; $dmax = 0;
+        $premadeMode = false;
+        $reply = '';
+        $aiError = '';
+        if ($aiMode) {
+            $aiRes = arAiReplyText($text);
+            if (!empty($aiRes['ok'])) {
+                $reply = $aiRes['text'];
+                $rid = 'ai';
             } else {
-                $row['skip'] = 'هیچ قاعده‌ای نخورد (حالت: بدون پاسخ)';
-                $out['items'][] = $row; $out['skipped']++; continue;
+                $aiError = (string)($aiRes['error'] ?? 'خطا');
+                // هوش مصنوعی نتوانست → سراغ قواعد برو
+                $rule = arPickRule($rules, $text);
+                if ($rule !== null) {
+                    $rid = (string)$rule['id'];
+                    $dmax = (int)($rule['daily_max'] ?? 0);
+                    $reply = (string)$rule['reply'];
+                    $aiMode = false;
+                } else {
+                    // نه هوش مصنوعی نه قاعده → بدون پاسخ
+                    $row['skip'] = 'هیچ قاعده‌ای نخورد و هوش مصنوعی هم پاسخ نداد';
+                    $out['items'][] = $row; $out['skipped']++;
+                    continue;
+                }
             }
-        } else {
-            $rid = (string)$rule['id'];
-            $dmax = (int)($rule['daily_max'] ?? 0);
         }
         if (!$aiMode && $dmax > 0 && arDailyCount($st, $rid, $now) >= $dmax) {
             $row['skip'] = 'سقف روزانهٔ قاعدهٔ «' . $rid . '» پر شده';
             $out['items'][] = $row; $out['skipped']++; continue;
         }
-
-        if ($aiMode) {
-            $aiRes = arAiReplyText($text);
-            if (empty($aiRes['ok'])) {
-                $row['skip'] = 'پاسخ هوش مصنوعی ناموفق: ' . mb_substr((string)($aiRes['error'] ?? 'خطا'), 0, 80);
-                $out['items'][] = $row; $out['skipped']++; continue;
-            }
-            $reply = $aiRes['text'];
-        } elseif ($premadeMode) {
-            $reply = (string)$cfg['fallback_text'];
-        } else {
-            $reply = (string)$rule['reply'];
-        }
         if ($cfg['sign'] !== '') $reply .= "\n" . $cfg['sign'];
         $row['rule'] = $rid;
         $row['reply'] = mb_substr($reply, 0, 160);
+        if ($aiError !== '') $row['ai_error'] = $aiError;
 
         if ($dry) {
             $row['status'] = 'ارسال می‌شد';
@@ -21199,21 +21227,13 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>امضا:</label>
 <input type="text" id="arSign" placeholder="اختیاری — مثلاً: (پاسخ خودکار)" onchange="arSaveCfg()" style="flex:1"></div>
 
-<!-- v9.33: وقتی هیچ قاعده‌ای نخورد، یکی از سه حالت -->
+<!-- v9.34: اولویت پاسخ‌دهی — هوش مصنوعی → قواعد → بدون پاسخ -->
 <div style="margin-top:6px;padding-top:6px;border-top:1px solid #1e293b">
-<div style="font-size:11px;color:#f9a8d4;font-weight:700;margin-bottom:4px">💬 وقتی هیچ قاعده‌ای نخورد:</div>
-<div class="crow" style="align-items:center">
-<select id="arFallback" onchange="arFallbackToggle();arSaveCfg()" style="flex:1">
-<option value="none">بدون پاسخ</option>
-<option value="premade">پاسخ از پیش آماده</option>
-<option value="ai">پاسخ با هوش مصنوعی</option>
-</select></div>
-<div id="arFallbackTextRow" class="crow" style="display:none;align-items:flex-start">
-<label>متن پاسخ:</label>
-<textarea id="arFallbackText" rows="2" placeholder="مثلاً: پیام شما رسید 🙏 در اولین فرصت پاسخ می‌دهم." onchange="arSaveCfg()" style="flex:1;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px;font-size:11px"></textarea>
-</div>
-<div id="arFallbackAiHint" style="display:none;font-size:10px;color:#94a3b8;line-height:1.8;padding:4px 0">
-🤖 با مدل هوش مصنوعیِ فعال پاسخ می‌دهد (برای دسته‌بندی و پاسخ به مشتری استفاده می‌شود).
+<div style="font-size:10.5px;color:#a5f3fc;line-height:1.8;padding:4px 0">
+🤖 ترتیب پاسخ‌دهی به پیام مشتری:
+<br>۱) اول <b>هوش مصنوعی</b> (مدلِ فعال، با بک‌آپ Bonsai) جواب می‌دهد.
+<br>۲) اگر هوش مصنوعی خطا بدهد، از <b>قواعد</b> استفاده می‌شود.
+<br>۳) اگر هیچ قاعده‌ای نخورد، <b>پاسخی فرستاده نمی‌شود</b>.
 </div>
 </div>
 
@@ -25153,6 +25173,21 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.34', t:'🤖 اولویت پاسخ: هوش مصنوعی ← قواعد ← بدون پاسخ', items:[
+    'خواستهٔ شما: اول هوش مصنوعی جواب بدهد، اگر خطا داد قواعد، و اگر',
+    'هیچ قاعده‌ای نخورد پاسخی نفرستد. همچنین دکمهٔ «آزمایش» در بخش پاسخ',
+    'خودکار کار نمی‌کرد.',
+    '🐞 دکمهٔ آزمایش فقط قواعد را بررسی می‌کرد و رفتار جدید هوش مصنوعی را',
+    'نشان نمی‌داد؛ برای همین نتیجه‌ای که می‌خواستید نمی‌داد.',
+    '✅ اولویت پاسخ‌دهی حالا این است:',
+    '   ۱) اول با هوش مصنوعی (مدل فعال، با بک‌آپ Bonsai) جواب می‌دهد،',
+    '   ۲) اگر هوش مصنوعی خطا/خالی داد، از قواعد استفاده می‌شود،',
+    '   ۳) اگر هیچ قاعده‌ای نخورد، پاسخی فرستاده نمی‌شود.',
+    '🧪 دکمهٔ «آزمایش» حالا همین زنجیره را واقعاً اجرا می‌کند و نشان می‌دهد',
+    'منبع پاسخ (هوش مصنوعی / قاعده / بدون پاسخ) و متن پاسخ را.',
+    '🗑️ منوی «بدون پاسخ / آماده / هوش مصنوعی» حذف شد چون رفتار جدید',
+    'همیشه «هوش مصنوعی اول» است و آن انتخاب دیگر کاربرد ندارد.'
+  ]},
   {v:'9.33', t:'🔁 پاسخ خودکار با ۳ حالت جایگزین + تلاش خودکار DoH', items:[
     'خواستهٔ شما: در پاسخ خودکار به مشتری، سه حالت «بدون پاسخ»، «پاسخ از',
     'پیش آماده» و «پاسخ با هوش مصنوعی» را بگذاریم.',
@@ -26994,8 +27029,6 @@ function arCollectCfg(){
     work_to:      parseInt(g('arTo').value||'21')||0,
     sign:         (g('arSign').value||'').trim(),
     notify:       !!g('arNotify').checked,
-    fallback:     (g('arFallback').value||'none'),
-    fallback_text:(g('arFallbackText').value||'').trim()
   };
 }
 
@@ -27019,18 +27052,8 @@ function arApplyCfg(c){
   set('arTo',String(c.work_to!==undefined?c.work_to:21));
   set('arSign',c.sign||'');
   chk('arNotify',c.notify);
-  set('arFallback',c.fallback||'none');
-  set('arFallbackText',c.fallback_text||'');
-  arFallbackToggle();
   arToggleHours();
   arBadge();
-}
-function arFallbackToggle(){
-  const v=($('arFallback')||{}).value||'none';
-  const tr=$('arFallbackTextRow');
-  const hi=$('arFallbackAiHint');
-  if(tr)tr.style.display=(v==='premade')?'':'none';
-  if(hi)hi.style.display=(v==='ai')?'':'none';
 }
 
 function arToggleHours(){
@@ -27145,16 +27168,19 @@ function arTest(){
   const t=($('arTestText')||{}).value||'';
   const box=$('arR');
   if(!t.trim()){showToast('یک متن بنویسید',true);return;}
-  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ بررسی...</div>';
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ بررسی (اول هوش مصنوعی، بعد قواعد)...</div>';
   fetch('?ar_test=1&text='+encodeURIComponent(t)).then(r=>r.json()).then(d=>{
     if(!box)return;
     if(!d.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
     let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px;font-size:11px;line-height:1.9">';
-    if(d.rule){
-      h+='<div style="color:#4ade80;font-weight:700">✅ قاعدهٔ «'+esc(d.rule)+'» می‌خورد</div>';
+    if(d.source==='ai'){
+      h+='<div style="color:#67e8f9;font-weight:700">🤖 پاسخ با هوش مصنوعی</div>';
+      h+='<div style="background:#111c31;border-right:3px solid #3b82f6;padding:6px 8px;border-radius:6px;margin-top:5px;color:#bfdbfe;white-space:pre-wrap">'+esc(d.reply)+'</div>';
+    }else if(d.source==='rule'){
+      h+='<div style="color:#fbbf24;font-weight:700">🤖 هوش مصنوعی نتوانست ('+esc(d.ai_error||'خطا')+') → قاعدهٔ «'+esc(d.rule)+'» می‌خورد</div>';
       h+='<div style="background:#111c31;border-right:3px solid #a855f7;padding:6px 8px;border-radius:6px;margin-top:5px;color:#e9d5ff;white-space:pre-wrap">'+esc(d.reply)+'</div>';
     }else{
-      h+='<div style="color:#fbbf24">⚠️ هیچ قاعده‌ای به این متن نخورد — پاسخی فرستاده نمی‌شود</div>';
+      h+='<div style="color:#f87171">✖ هوش مصنوعی نتوانست ('+esc(d.ai_error||'خطا')+') و هیچ قاعده‌ای هم نخورد — پاسخی فرستاده نمی‌شود</div>';
     }
     h+='<div style="color:#64748b;font-size:10px;margin-top:5px">متن نرمال‌شده: '+esc(d.normalized||'')+'</div>';
     h+='</div>';
