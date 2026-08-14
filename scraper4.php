@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.31';
-const APP_VERSION_DATE = '1405/06/02';
+const APP_VERSION = '9.32';
+const APP_VERSION_DATE = '1405/06/03';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1147,11 +1147,23 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
         return ['ok' => false, 'code' => 0, 'error' => 'شمارهٔ حساب Cloudflare در آدرس پیدا نشد', 'via' => 'direct'];
     }
     $acct = $m[1];
-    // نام مدل را نرمال کن: اگر با @cf/ شروع شده ولی بخش /meta/ را ندارد،
-    // احتمالاً اشتباه است؛ اما فقط وقتی که خودِ نام داده‌شده در Cloudflare نیست
-    // خودکار اصلاح نمی‌کنیم — فقط در پیام خطا راهنمایی می‌دهیم.
-    $target = 'https://api.cloudflare.com/client/v4/accounts/' . rawurlencode($acct)
-            . '/ai/run/' . ltrim($model, '/');
+    $base = 'https://api.cloudflare.com/client/v4/accounts/' . rawurlencode($acct) . '/ai/run/';
+
+    // v9.32: فهرست نام‌های مدلِ امتحان‌شده.
+    // خیلی از مدل‌های وارده فقط @cf/llama-... دارند در حالی که مسیر درست
+    // @cf/meta/llama-... است (بخش org). اگر اولی جواب نداد، دوم را هم امتحان کن.
+    $modelIds = [];
+    $modelIds[] = ltrim($model, '/');
+    $baseModel = $modelIds[0];
+    if (preg_match('~^@cf/llama~i', $baseModel)) {
+        $alt = preg_replace('~^@cf/llama~i', '@cf/meta/llama', $baseModel);
+        if ($alt !== $baseModel && !in_array($alt, $modelIds, true)) $modelIds[] = $alt;
+    } elseif (preg_match('~^@cf/qwen~i', $baseModel)) {
+        $alt = preg_replace('~^@cf/qwen~i', '@cf/qwen/qwen', $baseModel);
+        if ($alt !== $baseModel && !in_array($alt, $modelIds, true)) $modelIds[] = $alt;
+    }
+    $modelIds = array_values(array_unique($modelIds));
+
     $messages = array_values((array)($payload['messages'] ?? []));
     $prompt = '';
     foreach ($messages as $msg) {
@@ -1162,35 +1174,42 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
     $headers = ['Content-Type: application/json'];
     if ($apiKey !== '') $headers[] = 'Authorization: Bearer ' . $apiKey;
 
-    /* استراتژی: اول با {prompt} امتحان می‌کنیم (سازگار با اکثر مدل‌ها)، و اگر
-       خطای 400/422 گرفتیم، دوباره با {messages} تلاش می‌کنیم (برخی مدل‌های چت
-       فقط messages می‌پذیرند). max_tokens هم در هر دو پاس داده می‌شود. */
-    $attempts = [];
-    $bodyA = ['prompt' => $prompt];
-    if ($maxTok > 0) $bodyA['max_tokens'] = $maxTok;
-    $attempts[] = $bodyA;
-    if (!empty($messages)) {
-        $bodyB = ['messages' => $messages];
-        if ($maxTok > 0) $bodyB['max_tokens'] = $maxTok;
-        $attempts[] = $bodyB;
-    }
-    $last = null;
-    foreach ($attempts as $ab) {
-        $rr = aiHttp($target, $headers, $ab, $net, 'direct');
-        $last = $rr;
-        if ((int)$rr['code'] === 200) { $r = $rr; break; }
+    /* هر نام مدل را با دو بدنهٔ {prompt} و {messages} امتحان می‌کنیم تا
+       هم «No route» (نام غلط) هم «400» (بدنهٔ نامناسب) پوشش داده شود. */
+    $last = null; $r = null; $tried = [];
+    foreach ($modelIds as $mid) {
+        $target = $base . $mid;
+        $bodies = [];
+        $bA = ['prompt' => $prompt];
+        if ($maxTok > 0) $bA['max_tokens'] = $maxTok;
+        $bodies[] = $bA;
+        if (!empty($messages)) {
+            $bB = ['messages' => $messages];
+            if ($maxTok > 0) $bB['max_tokens'] = $maxTok;
+            $bodies[] = $bB;
+        }
+        foreach ($bodies as $ab) {
+            $rr = aiHttp($target, $headers, $ab, $net, 'direct');
+            $last = $rr;
+            $tried[] = ['url' => $target, 'body' => array_keys($ab), 'code' => (int)$rr['code']];
+            if ((int)$rr['code'] === 200) { $r = $rr; break 2; }
+        }
     }
     if (!isset($r)) $r = $last ?: ['ok' => false, 'code' => 0, 'error' => 'بدون پاسخ', 'body' => null];
-    // اگر همهٔ تلاش‌ها شکست خورد، پیام خطای Cloudflare را (اگر هست) استخراج کن
+    $r['cf_url'] = $base . $modelIds[0];
+    $r['cf_tried_models'] = $modelIds;
+    $r['cf_tried'] = count($tried);
     if (!empty($r['ok'])) {
         $result = $r['body']['result'] ?? [];
         $text = (string)($result['response'] ?? '');
         $r['body'] = ['choices' => [['message' => ['content' => $text]]], 'model' => $model, 'usage' => []];
-        $r['cf_tried'] = count($attempts);
     } else {
         $cfErr = aiCloudflareError($r);
         if ($cfErr !== '') $r['cf_error'] = $cfErr;
-        $r['cf_tried'] = count($attempts);
+        // اگر هیچ تلاشی جواب نداد و نام مدل با مسیر درست فرق داشت، راهنمایی بده
+        if (count($modelIds) > 1 && $r['cf_error'] === '') {
+            $r['cf_error'] = 'مدل «' . $modelIds[0] . '» یافت نشد. مسیر درست ممکن است «' . $modelIds[1] . '» باشد — نام مدل را در فایل JSON اصلاح کنید.';
+        }
     }
     return $r;
 }
@@ -11389,6 +11408,14 @@ if (isset($_GET['selftest'])) {
          function_exists('aiCloudflare' . 'Error')
          && strpos($selfSrc, "'cf_error'") !== false);
 
+    /* ---------- v9.32: رفع «No route for that URI» ---------- */
+    $add('9.32', 'چند نام مدل احتمالی Cloudflare امتحان می‌شود',
+         strpos($selfSrc, "'cf_tried_models'") !== false
+         && strpos($selfSrc, '@cf/meta/llama') !== false);
+    $add('9.32', 'آدرس دقیق درخواست نمایش داده می‌شود',
+         strpos($selfSrc, "'cf_url'") !== false
+         && strpos($selfSrc, 'cf_detail') !== false);
+
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
          && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
@@ -15919,7 +15946,13 @@ $errMsg=$errBody['error']['message']??($errBody['message']??'HTTP '.$httpCode);
 if (!empty($r['cf_error'])) $errMsg = $r['cf_error'];
 if($httpCode===401)$errMsg='کلید API نامعتبر (۴۰۱)';
 elseif($httpCode===0)$errMsg='خطا ارتباط با سرور AI: '.($r['error']??'').' — روش عبور را عوض کنید';
-echo json_encode(['ok'=>false,'error'=>$errMsg,'http_code'=>$httpCode,'via'=>$r['via']??'','tried'=>$r['tried']??[],'provider'=>$provider['name']??$providerId,'cf_tried'=>$r['cf_tried']??null],JSON_UNESCAPED_UNICODE);
+// v9.32: آدرس دقیق و مدل‌های امتحان‌شده را هم بده تا قابل‌تشخیص باشد
+$cfInfo = '';
+if (!empty($r['cf_url'])) $cfInfo = ' | آدرس: ' . $r['cf_url'];
+if (!empty($r['cf_tried_models']) && is_array($r['cf_tried_models'])) {
+    $cfInfo .= ' | مدل‌های امتحان‌شده: ' . implode(', ', $r['cf_tried_models']);
+}
+echo json_encode(['ok'=>false,'error'=>$errMsg,'http_code'=>$httpCode,'via'=>$r['via']??'','tried'=>$r['tried']??[],'provider'=>$provider['name']??$providerId,'cf_tried'=>$r['cf_tried']??null,'cf_url'=>$r['cf_url']??null,'cf_tried_models'=>$r['cf_tried_models']??null,'cf_detail'=>$cfInfo],JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -25068,6 +25101,18 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.32', t:'🛰 رفع «No route for that URI» در Cloudflare', items:[
+    'گزارش شما: دکمهٔ تست خطای «No route for that URI» می‌داد.',
+    '🐞 علت: این خطای Cloudflare (کد 7000) یعنی مسیر URL مدل اشتباه است.',
+    'خیلی از مدل‌های وارده فقط @cf/llama-... دارند در حالی که مسیر درست',
+    '@cf/meta/llama-... است (بخش org وسط مسیر مهم است).',
+    '✅ حالا aiCloudflareCall چند نامِ مدلِ احتمالی را امتحان می‌کند: اول',
+    'همان واردشده، و اگر جواب نداد با @cf/meta/... و @cf/qwen/...',
+    'هم تلاش می‌کند. بدنهٔ {prompt} و {messages} هم هر دو امتحان می‌شوند.',
+    '🔍 آدرس دقیق درخواست و مدل‌های امتحان‌شده در پیام خطای دکمهٔ تست',
+    'نمایش داده می‌شود تا ببینید دقیقاً به چه آدرسی زده شده است.',
+    '💡 اگر باز خطا داد، نام دقیق مدل را از فهرست رسمی Cloudflare بگیرید'
+  ]},
   {v:'9.31', t:'🔗 دکمهٔ تست پیام «سلام» می‌فرستد + نمایش خطای واقعی Cloudflare', items:[
     'خواستهٔ شما: دکمهٔ «تست» کنار «تست دسته» پیام «سلام» را ارسال کند.',
     '✅ حالا همین‌طور است — پیام تست «سلام» است.',
@@ -28782,7 +28827,7 @@ function aiCopyWorkerCode(){
     catch(e){if(navigator.clipboard){navigator.clipboard.writeText(t.value);showToast('✓ کد کپی شد');}}
 }
 function testAi(){const s=$('aiS'),r=$('aiTR');const pid=$('aiProviderSel')?$('aiProviderSel').value:'',mid=$('aiModelSel')?$('aiModelSel').value:'';if(!pid||!mid){r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ ابتدا یک ارائه‌دهنده و مدل فعال انتخاب کنید</div>';return;}s.textContent='تست...';s.className='cst tg';r.innerHTML='';const fd=new FormData();fd.append('action','test_ai');fd.append('provider_id',pid);fd.append('model_id',mid);const _n=getAiNet();fd.append('net_mode',_n.mode);fd.append('net_resolve_ip',_n.resolve_ip);fd.append('net_doh_url',_n.doh_url);fd.append('net_worker_url',_n.worker_url);fd.append('net_proxy',_n.proxy);fd.append('net_proxy_type',_n.proxy_type);fd.append('net_proxy_auth',_n.proxy_auth);fd.append('net_fallback',_n.fallback);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(d.ok){s.textContent='✓';s.className='cst on';r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ '+esc(d.message)+' | مدل: '+esc(d.model)+' | پاسخ: '+esc(d.response||'')+(d.via?' | مسیر: <b>'+esc(d.via)+'</b>':'')+'</div>';aiTestOne(pid,mid);}else{s.textContent='✗';s.className='cst off';let _t='';if(d.tried&&d.tried.length>1){_t='<div style="margin-top:4px;font-size:10px;color:#fca5a5">تلاش‌ها: '+d.tried.map(x=>esc(x.mode)+'='+(x.code||'✗')).join(' · ')+'</div>';}
-r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+_t+'<div style="margin-top:6px"><button class="btn btn-orange" style="font-size:10px;padding:4px 8px" onclick="aiProbe()">🩺 عیب‌یابی روش‌ها</button></div></div>';}}).catch(()=>{s.textContent='✗';s.className='cst off';});}
+r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+_t+(d.cf_detail?'<div style="margin-top:4px;font-size:10px;color:#fbbf24;direction:ltr;text-align:left">'+esc(d.cf_detail)+'</div>':'')+'<div style="margin-top:6px"><button class="btn btn-orange" style="font-size:10px;padding:4px 8px" onclick="aiProbe()">🩺 عیب‌یابی روش‌ها</button></div></div>';}}).catch(()=>{s.textContent='✗';s.className='cst off';});}
 /* ============ v9.20: مدیریت چند-ارائه‌دهندهٔ هوش مصنوعی ============ */
 let aiProvData={providers:[],selected:{provider:'',model:''}};
 function aiLoadProviders(){fetch('?ai_providers_status=1').then(r=>r.json()).then(d=>{if(d&&d.ok){aiProvData=d;aiRenderProviders();}else{if(d&&d.error)showToast('خطا: '+d.error,1);}}).catch(()=>{});}
