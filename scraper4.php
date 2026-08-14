@@ -11308,10 +11308,10 @@ if (isset($_GET['selftest'])) {
 
     /* ---------- v9.28: عیب‌یابی از ارائه‌دهندهٔ فعال ---------- */
     $add('9.28', 'عیب‌یابی از ارائه‌دهندهٔ فعال endpoint می‌گیرد',
-         strpos($selfSrc, '\$_ac = aiActive' . 'Config()') !== false
-         && strpos($selfSrc, "\\$probeUrl = (string)(\\$ep['url']") !== false);
+         strpos($selfSrc, '$_ac = aiActive' . 'Config()') !== false
+         && strpos($selfSrc, 'probeUrl = (string)($ep[' . "'url'") !== false);
     $add('9.28', 'پیش‌فرض قدیمی به‌عنوان پشتیبان حفظ شده',
-         strpos($selfSrc, "if (\\$probeUrl === '') {") !== false
+         strpos($selfSrc, 'if ($probeUrl === ') !== false
          && strpos($selfSrc, 'base_url') !== false);
     $add('9.28', 'عیب‌یابی نام ارائه‌دهنده و مدل را نشان می‌دهد',
          strpos($selfSrc, 'd.provider_name') !== false
