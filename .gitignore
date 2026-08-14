@@ -79,5 +79,8 @@ ai_providers.json
 ai_test_state.json
 ai_test_stop.json
 
+# v9.38: candidate-model vote database (leaderboard / master model)
+ai_votes.json
+
 # v9.25: storage write error log
 storage_errors.log

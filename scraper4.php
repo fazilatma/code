@@ -66,6 +66,8 @@ const AI_PROVIDERS_FILE = __DIR__ . '/ai_providers.json';
    مرورگر آن را poll می‌کند؛ فایل توقف برای قطع صریح اجرا. */
 const AI_TEST_STATE_FILE = __DIR__ . '/ai_test_state.json';
 const AI_TEST_STOP_FILE  = __DIR__ . '/ai_test_stop.json';
+// v9.38: پایگاه رایِ «مدل کاندید» — کدام مدل در آزمون‌ها بهتر جواب داده
+const AI_VOTES_FILE = __DIR__ . '/ai_votes.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 const BULKEDIT_PROGRESS_FILE = __DIR__ . '/bulkedit_progress.json';   // v8.62
 const BULKEDIT_RESULT_FILE   = __DIR__ . '/bulkedit_result.json';     // v8.62
@@ -1334,6 +1336,191 @@ function aiActiveChat(array $payload, ?array $net = null): array {
         }
     }
     return $r;
+}
+
+/* =====================================================================
+ *  v9.38: مدل‌های کاندید + مدل مستر + پایگاه رای
+ *
+ *  ادمین چند «مدل کاندید» (برای دسته‌بندی و پاسخ خودکار) انتخاب می‌کند و
+ *  در آزمون‌ها، پاسخِ همهٔ کاندیدها کنار هم می‌آید تا بهترین را برگزیند.
+ *  هر انتخاب یک «رأی» ثبت می‌شود و از آمار این رأی‌ها یک «مدل مستر»
+ *  (بهترین از نظر آماری) انتخاب می‌شود که به‌عنوان مرجعِ قضاوتِ بقیه
+ *  مدل‌ها استفاده می‌شود.
+ * ===================================================================== */
+
+/** کلید یکتا برای یک کاندید: «provider::model» */
+function aiCandKey(string $provider, string $model): string {
+    return $provider . '::' . $model;
+}
+
+/** فهرست مدل‌های کاندید از connections: [{provider,model,key}] */
+function aiCandidates(): array {
+    $cn = loadConnections();
+    $raw = (array)($cn['ai_candidates'] ?? []);
+    $providers = aiProvidersLoad();
+    $out = []; $seen = [];
+    foreach ($raw as $c) {
+        if (!is_array($c)) continue;
+        $p = trim((string)($c['provider'] ?? ''));
+        $m = trim((string)($c['model'] ?? ''));
+        if ($p === '' || $m === '') continue;
+        $key = aiCandKey($p, $m);
+        if (isset($seen[$key])) continue;
+        $seen[$key] = 1;
+        $pname = isset($providers[$p]) ? ($providers[$p]['name'] ?? $p) : $p;
+        $out[] = ['provider' => $p, 'model' => $m, 'key' => $key, 'providerName' => $pname];
+    }
+    return $out;
+}
+
+/** ذخیرهٔ فهرست کاندیدها در connections */
+function aiCandidatesSave(array $list): bool {
+    $clean = [];
+    $providers = aiProvidersLoad();
+    $seen = [];
+    foreach ($list as $c) {
+        if (!is_array($c)) continue;
+        $p = trim((string)($c['provider'] ?? ''));
+        $m = trim((string)($c['model'] ?? ''));
+        if ($p === '' || $m === '' || !isset($providers[$p])) continue;
+        // مطمئن شو مدل واقعاً در این ارائه‌دهنده هست
+        $found = false;
+        foreach ($providers[$p]['models'] as $mm) { if (($mm['id'] ?? '') === $m) { $found = true; break; } }
+        if (!$found) continue;
+        $key = aiCandKey($p, $m);
+        if (isset($seen[$key])) continue;
+        $seen[$key] = 1;
+        $clean[] = ['provider' => $p, 'model' => $m];
+    }
+    $cn = loadConnections();
+    $cn['ai_candidates'] = $clean;
+    return saveConnections($cn);
+}
+
+/** خواندن پایگاه رای */
+function aiVotesLoad(): array {
+    if (!is_file(AI_VOTES_FILE)) return ['updated_at' => 0, 'scores' => [], 'history' => [], 'pin' => '', 'master' => ''];
+    $d = json_decode((string)@file_get_contents(AI_VOTES_FILE), true);
+    if (!is_array($d)) return ['updated_at' => 0, 'scores' => [], 'history' => [], 'pin' => '', 'master' => ''];
+    $d['scores']  = is_array($d['scores'] ?? null) ? $d['scores'] : [];
+    $d['history'] = is_array($d['history'] ?? null) ? $d['history'] : [];
+    $d['pin']     = (string)($d['pin'] ?? '');
+    $d['master']  = (string)($d['master'] ?? '');
+    return $d;
+}
+function aiVotesSave(array $v): void {
+    $v['updated_at'] = time();
+    writeJsonFile(AI_VOTES_FILE, $v);
+}
+/** امتیاز یک مدل = برد ÷ کل شرکت‌ها */
+function aiScoreOf(array $s): float {
+    $wins = (int)($s['wins'] ?? 0);
+    $votes = (int)($s['votes'] ?? 0);
+    if ($votes <= 0) return 0;
+    return round($wins / $votes, 3);
+}
+/** مدل مستر = سنجاقِ دستی (pin) یا بهترین از نظر آماری میان کاندیدها */
+function aiMasterKey(): string {
+    $v = aiVotesLoad();
+    if ($v['pin'] !== '') return $v['pin'];
+    $cands = aiCandidates();
+    if (!$cands) return '';
+    $best = ''; $bestS = -1.0;
+    foreach ($cands as $c) {
+        $s = aiScoreOf($v['scores'][$c['key']] ?? []);
+        if ($s > $bestS) { $bestS = $s; $best = $c['key']; }
+    }
+    return $best !== '' ? $best : $cands[0]['key'];
+}
+
+/** ثبت یک رأی: task=category|autoreply، winner=key برنده، candidates=همهٔ keys */
+function aiVoteRecord(string $task, string $input, string $winner, array $candidates): array {
+    $v = aiVotesLoad();
+    $cands = $candidates;
+    if (!in_array($winner, $cands, true)) $cands[] = $winner;
+    // برد و شرکت
+    foreach ($cands as $k) {
+        if (!isset($v['scores'][$k]) || !is_array($v['scores'][$k])) $v['scores'][$k] = ['wins' => 0, 'losses' => 0, 'votes' => 0, 'last_at' => 0];
+        $v['scores'][$k]['votes'] = (int)($v['scores'][$k]['votes'] ?? 0) + 1;
+        $v['scores'][$k]['last_at'] = time();
+        if ($k === $winner) $v['scores'][$k]['wins'] = (int)($v['scores'][$k]['wins'] ?? 0) + 1;
+        else                $v['scores'][$k]['losses'] = (int)($v['scores'][$k]['losses'] ?? 0) + 1;
+        $v['scores'][$k]['score'] = aiScoreOf($v['scores'][$k]);
+    }
+    // تاریخچه (سقف ۳۰۰)
+    $v['history'][] = ['at' => time(), 'task' => $task, 'input' => mb_substr($input, 0, 150),
+                       'winner' => $winner, 'candidates' => $cands];
+    if (count($v['history']) > 300) $v['history'] = array_slice($v['history'], -300);
+    // مستر به‌روزرسانی می‌شود
+    $v['master'] = aiMasterKey();
+    aiVotesSave($v);
+    return $v;
+}
+
+/** دسته‌بندی یک کاندید خاص (برای آزمون چند-کاندیدی) */
+function aiCandidateCategory(array $p, string $model, string $title, array $cats,
+                              array $leafCats, string $catList, ?array $net = null): array {
+    if ($net === null) $net = aiNetCfg();
+    $t0 = microtime(true);
+    $prompt = "You are a product categorization assistant for a Persian (Farsi) e-commerce platform (BaSalam).\n"
+            . "Given this product title: \"" . $title . "\"\n\n"
+            . "Select the BEST category ID from this list:\n" . $catList . "\n\n"
+            . "Return ONLY the category ID number. Do not return any text, explanation, or name. Just the numeric ID.";
+    $payload = ['messages' => [
+        ['role' => 'system', 'content' => 'You are a product categorization assistant. Return ONLY the numeric category ID.'],
+        ['role' => 'user', 'content' => $prompt],
+    ], 'temperature' => 0.1, 'max_tokens' => 20];
+    $r = aiProviderCall($p, $model, $payload, $net);
+    $lat = (int)round((microtime(true) - $t0) * 1000);
+    if ((int)$r['code'] !== 200) {
+        $err = $r['body']['error']['message'] ?? ($r['body']['message'] ?? ($r['error'] ?? ('HTTP ' . $r['code'])));
+        if (!empty($r['cf_error'])) $err = $r['cf_error'];
+        return ['ok' => false, 'category_id' => 0, 'category_name' => '', 'ai_text' => '', 'error' => mb_substr((string)$err, 0, 160), 'latency' => $lat, 'model' => $model];
+    }
+    $text = trim((string)($r['body']['choices'][0]['message']['content'] ?? ''));
+    $id = 0;
+    if (preg_match('/\d+/', $text, $m)) $id = (int)$m[0];
+    $id = findLeafCategory($id, $cats);
+    $valid = false; $name = '';
+    foreach ($cats as $c) { if ((int)$c['id'] === $id) { $valid = true; $name = $c['name']; break; } }
+    if (!$valid && $id > 0) {
+        $id = autoMatchBslCategory($title, $cats);
+        if ($id > 0) { $valid = true; foreach ($cats as $c) { if ((int)$c['id'] === $id) { $name = $c['name']; break; } } }
+    }
+    return ['ok' => $valid, 'category_id' => $id, 'category_name' => $name,
+            'ai_text' => $text, 'error' => '', 'latency' => $lat, 'model' => $model];
+}
+
+/** پاسخ خودکار یک کاندید خاص (برای آزمون چند-کاندیدی) */
+function aiCandidateReply(array $p, string $model, string $text, ?int $timeoutSec = null): array {
+    $text = trim((string)$text);
+    if ($text === '') return ['ok' => false, 'text' => '', 'error' => 'پیام خالی', 'latency' => 0, 'model' => $model];
+    $arCfg = arCfg();
+    if ((string)($arCfg['ai_system_mode'] ?? 'default') === 'custom' && trim((string)($arCfg['ai_system_text'] ?? '')) !== '') {
+        $system = trim((string)$arCfg['ai_system_text']);
+    } else {
+        $system = 'تو دستیار پاسخ‌گویی یک فروشگاه اینترنتی هستی و به پیام‌های مشتریان به زبان فارسی پاسخ می‌دهی. '
+                . 'پاسخ‌ها باید کوتاه، مؤدبانه و حرفه‌ای باشند (حداکثر ۲-۳ جمله). '
+                . 'اگر پاسخ سؤال را نمی‌دانی، بگو همکاران به‌زودی پاسخ می‌دهند. '
+                . 'چیزی خارج از نقش پشتیبانی ننویس.';
+    }
+    $prompt = "مشتری این پیام را فرستاده:\n\"" . $text . "\"\n\n"
+            . "با توجه به دستورالعمل‌ات، همین حالا پاسخ مناسب را بده.";
+    $net = aiNetCfg();
+    if ($timeoutSec !== null && $timeoutSec > 0) $net['timeout'] = max(5, min(30, (int)$timeoutSec));
+    $t0 = microtime(true);
+    $r = aiProviderCall($p, $model, ['messages' => [
+        ['role' => 'system', 'content' => $system],
+        ['role' => 'user', 'content' => $prompt],
+    ], 'temperature' => 0.5, 'max_tokens' => 160], $net);
+    $lat = (int)round((microtime(true) - $t0) * 1000);
+    if (empty($r['ok'])) return ['ok' => false, 'text' => '', 'error' => mb_substr((string)($r['error'] ?? 'خطا'), 0, 120), 'latency' => $lat, 'model' => $model];
+    $body = $r['body'] ?? [];
+    $reply = trim((string)($body['choices'][0]['message']['content'] ?? ''));
+    if ($reply === '') return ['ok' => false, 'text' => '', 'error' => 'پاسخ خالی از مدل', 'latency' => $lat, 'model' => $model];
+    $reply = preg_replace('/\s+/u', ' ', $reply);
+    $modelName = (string)($body['model'] ?? $model);
+    return ['ok' => true, 'text' => mb_substr($reply, 0, 500), 'error' => '', 'latency' => $lat, 'model' => $modelName];
 }
 
 /** نرمال‌سازی فرمتِ درون‌ریزی‌شدهٔ JSON به ساختار داخلی provider */
@@ -11586,6 +11773,21 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "else { // rules_first (پیش‌فرض)") !== false
          && strpos($selfSrc, 'arPickRule($rules, $text)') !== false);
 
+    /* ---------- v9.38: مدل‌های کاندید + مدل مستر ---------- */
+    $add('9.38', 'چند مدل کاندید قابل افزودن/حذف است',
+         strpos($selfSrc, "'ai_candidates'") !== false
+         && strpos($selfSrc, 'function aiCandidates(') !== false
+         && strpos($selfSrc, "'ai_candidates_save'") !== false);
+    $add('9.38', 'پایگاه رای و مدل مسترِ آماری وجود دارد',
+         strpos($selfSrc, 'AI_VOTES_FILE') !== false
+         && strpos($selfSrc, 'function aiVoteRecord(') !== false
+         && strpos($selfSrc, 'function aiMasterKey(') !== false
+         && strpos($selfSrc, "'ai_vote'") !== false);
+    $add('9.38', 'آزمون چند-کاندیدی دسته‌بندی و پاسخ خودکار',
+         strpos($selfSrc, "'ai_candidates_category'") !== false
+         && strpos($selfSrc, "'ai_candidates_reply'") !== false
+         && strpos($selfSrc, 'function aiCandidateReply(') !== false);
+
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
          && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
@@ -16448,6 +16650,136 @@ aiRunTestBackground($per, $onlyUntested);
 exit;
 }
 
+/* =====================================================================
+ *  v9.38: مدل‌های کاندید + مدل مستر — مدیریت، آزمون چند-مدلی و رأی
+ * ===================================================================== */
+/* وضعیت کاندیدها + امتیازات + مستر */
+if (isset($_GET['ai_candidates'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cands = aiCandidates();
+    $v = aiVotesLoad();
+    $master = aiMasterKey();
+    $providers = aiProvidersLoad();
+    $items = [];
+    foreach ($cands as $c) {
+        $mn = $c['model'];
+        if (isset($providers[$c['provider']])) {
+            foreach ($providers[$c['provider']]['models'] as $mm) {
+                if (($mm['id'] ?? '') === $c['model']) { $mn = $mm['name'] ?? $c['model']; break; }
+            }
+        }
+        $s = $v['scores'][$c['key']] ?? ['wins' => 0, 'losses' => 0, 'votes' => 0];
+        $items[] = ['provider' => $c['provider'], 'model' => $c['model'], 'key' => $c['key'],
+                    'providerName' => $c['providerName'], 'modelName' => $mn,
+                    'wins' => (int)($s['wins'] ?? 0), 'losses' => (int)($s['losses'] ?? 0),
+                    'votes' => (int)($s['votes'] ?? 0), 'score' => aiScoreOf($s)];
+    }
+    usort($items, fn($a, $b) => $b['score'] <=> $a['score']);
+    echo json_encode(['ok' => true, 'candidates' => $items, 'master' => $master,
+        'pin' => $v['pin'], 'history' => array_slice(array_reverse($v['history']), 0, 50)],
+        JSON_UNESCAPED_UNICODE);
+    exit;
+}
+/* ذخیرهٔ کاندیدها + سنجاقِ مستر */
+if (($_POST['action'] ?? '') === 'ai_candidates_save') {
+    header('Content-Type: application/json; charset=UTF-8');
+    $list = json_decode((string)($_POST['candidates'] ?? '[]'), true);
+    $ok = is_array($list) && aiCandidatesSave($list);
+    // سنجاقِ مستر فقط وقتی به‌روزرسانی شود که صریحاً همراه درخواست آمده باشد
+    // (افزودن/حذف یک کاندید نباید سنجاقِ دستیِ مستر را پاک کند)
+    $pinProvided = isset($_POST['pin']);
+    $pin = $pinProvided ? trim((string)$_POST['pin']) : '';
+    if ($ok && $pinProvided) {
+        $v = aiVotesLoad();
+        $valid = false;
+        foreach (aiCandidates() as $c) { if ($c['key'] === $pin) { $valid = true; break; } }
+        $v['pin'] = $valid ? $pin : '';
+        $v['master'] = aiMasterKey();
+        aiVotesSave($v);
+    }
+    echo json_encode(['ok' => $ok, 'error' => $ok ? '' : 'خطا در ذخیرهٔ کاندیدها'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+/* ثبت رأی برای یک آزمون */
+if (($_POST['action'] ?? '') === 'ai_vote') {
+    header('Content-Type: application/json; charset=UTF-8');
+    $task = in_array((string)($_POST['task'] ?? ''), ['category', 'autoreply'], true) ? $_POST['task'] : 'category';
+    $input = (string)($_POST['input'] ?? '');
+    $winner = trim((string)($_POST['winner'] ?? ''));
+    $cands = json_decode((string)($_POST['candidates'] ?? '[]'), true);
+    if ($winner === '' || !is_array($cands)) { echo json_encode(['ok' => false, 'error' => 'رأی نامعتبر'], JSON_UNESCAPED_UNICODE); exit; }
+    $v = aiVoteRecord($task, $input, $winner, array_map('strval', $cands));
+    echo json_encode(['ok' => true, 'master' => $v['master'], 'pin' => $v['pin'],
+        'scores' => $v['scores']], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+/* آزمون دسته‌بندی با همهٔ کاندیدها — پاسخ هر مدل جدا می‌آید */
+if (isset($_GET['ai_candidates_category'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(180);
+    $title = trim((string)($_GET['title'] ?? ''));
+    if ($title === '') { echo json_encode(['ok' => false, 'error' => 'عنوان محصول خالی'], JSON_UNESCAPED_UNICODE); exit; }
+    $cands = aiCandidates();
+    if (!$cands) { echo json_encode(['ok' => false, 'error' => 'هیچ مدل کاندیدی انتخاب نشده — اول در بخش 🤖 چند مدل کاندید اضافه کنید'], JSON_UNESCAPED_UNICODE); exit; }
+    $cn = loadConnections(); $tk = (string)($cn['basalam']['token'] ?? '');
+    $cats = [];
+    if (!empty($tk)) {
+        $cr = bslReq($tk, 'GET', 'categories');
+        if ($cr['ok']) {
+            $cData = $cr['body']['data'] ?? [];
+            if (is_array($cData)) {
+                $cFlat = function ($items, $lv = 0) use (&$cFlat) {
+                    $o = []; foreach ($items as $c) {
+                        $t = trim($c['title'] ?? $c['name'] ?? ''); $id = (int)($c['id'] ?? 0);
+                        if ($id > 0) $o[] = ['id' => $id, 'name' => $t, 'level' => $lv];
+                        $ch = $c['children'] ?? []; if (is_array($ch) && count($ch) > 0) { foreach ($cFlat($ch, $lv + 1) as $s) $o[] = $s; }
+                    } return $o;
+                };
+                $cats = $cFlat($cData, 0);
+            }
+        }
+    }
+    if (!$cats) { echo json_encode(['ok' => false, 'error' => 'دسته‌بندی‌های باسلام در دسترس نیست'], JSON_UNESCAPED_UNICODE); exit; }
+    $catList = ''; $leafCats = [];
+    foreach ($cats as $c) { if (($c['level'] ?? 0) >= 2) { $catList .= $c['id'] . ': ' . $c['name'] . "\n"; $leafCats[] = $c; } }
+    if (!$leafCats) { foreach ($cats as $c) { $catList .= $c['id'] . ': ' . $c['name'] . "\n"; $leafCats[] = $c; } }
+    if (strlen($catList) > 3000) { $catList = ''; $leafCats = array_slice($leafCats, 0, 200); foreach ($leafCats as $c) { $catList .= $c['id'] . ': ' . $c['name'] . "\n"; } }
+    $providers = aiProvidersLoad();
+    $net = aiNetCfg();
+    $items = [];
+    foreach ($cands as $c) {
+        $p = $providers[$c['provider']] ?? null;
+        if (!$p) continue;
+        $res = aiCandidateCategory($p, $c['model'], $title, $cats, $leafCats, $catList, $net);
+        $res['key'] = $c['key'];
+        $res['providerName'] = $c['providerName'];
+        $items[] = $res;
+    }
+    echo json_encode(['ok' => true, 'title' => $title, 'master' => aiMasterKey(), 'items' => $items], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+/* آزمون پاسخ خودکار با همهٔ کاندیدها */
+if (isset($_GET['ai_candidates_reply'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(180);
+    $msg = trim((string)($_GET['msg'] ?? ($_GET['text'] ?? '')));
+    if ($msg === '') { echo json_encode(['ok' => false, 'error' => 'پیام خالی است'], JSON_UNESCAPED_UNICODE); exit; }
+    $cands = aiCandidates();
+    if (!$cands) { echo json_encode(['ok' => false, 'error' => 'هیچ مدل کاندیدی انتخاب نشده'], JSON_UNESCAPED_UNICODE); exit; }
+    $providers = aiProvidersLoad();
+    $items = [];
+    foreach ($cands as $c) {
+        $p = $providers[$c['provider']] ?? null;
+        if (!$p) continue;
+        $res = aiCandidateReply($p, $c['model'], $msg, 8);
+        $res['key'] = $c['key'];
+        $res['providerName'] = $c['providerName'];
+        $items[] = $res;
+    }
+    echo json_encode(['ok' => true, 'master' => aiMasterKey(), 'items' => $items], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['ai_category'])) {
 header('Content-Type: application/json; charset=UTF-8');
 $cn=loadConnections();$bs=$cn['basalam']??[];
@@ -20978,6 +21310,35 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div style="padding:8px;color:#64748b;font-size:11px">هنوز ارائه‌دهنده‌ای درون‌ریزی نشده.</div>
 </div>
 <div id="aiUseInfo" style="font-size:10.5px;color:#94a3b8;line-height:1.8;margin-bottom:8px;padding:6px 8px;background:#111c31;border:1px solid #1e293b;border-radius:6px"></div>
+
+<!-- v9.38: مدل‌های کاندید + مدل مستر -->
+<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🏆 مدل‌های کاندید + مدل مستر</div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:6px;line-height:1.7">
+چند مدل کاندید برای <b>دسته‌بندی</b> و <b>پاسخ خودکار</b> انتخاب کنید؛ در آزمون‌ها پاسخِ همهٔ کاندیدها کنار هم می‌آید تا بهترین را برگزینید. هر انتخاب به‌صورت «رأی» ثبت می‌شود و مدلی که از نظر آماری بهترین است به‌عنوان <b>مدل مستر</b> (مرجعِ قضاوت بقیه) به‌صورت خودکار انتخاب می‌شود.
+</div>
+<div class="crow" style="align-items:center">
+<label style="flex:0 0 auto">افزودن از مدل فعال بالا:</label>
+<button class="btn btn-green" onclick="aiCandAddFromSel()" style="flex:1;font-size:11px">➕ افزودن به کاندیدها</button>
+</div>
+<div id="aiCandList" style="max-height:220px;overflow-y:auto;border:1px solid #334155;border-radius:6px;background:#0f172a;margin-bottom:6px">
+<div style="padding:8px;color:#64748b;font-size:11px">کاندیدی نیست — مدل فعال را انتخاب و «➕ افزودن» بزنید.</div>
+</div>
+<div class="crow" style="align-items:center">
+<label style="flex:0 0 auto">مدل مستر:</label>
+<select id="aiMasterPin" onchange="aiCandSetPin()" style="flex:1">
+<option value="">خودکار (بهترین آمار)</option>
+</select></div>
+<div style="font-size:10px;color:#94a3b8;margin:2px 0 6px;line-height:1.7" id="aiMasterInfo">هنوز داده‌ای نیست — با آزمون‌ها، مستر به‌صورت خودکار مشخص می‌شود.</div>
+<div class="cact">
+<button class="btn btn-purple" onclick="aiCandCategoryTest()" style="flex:1">🏷️ تست دسته همهٔ کاندیدها</button>
+<button class="btn btn-blue" onclick="aiCandReplyTest()" style="flex:1">💬 تست پاسخ همهٔ کاندیدها</button>
+</div>
+<div class="cact" style="margin-top:0">
+<button class="btn btn-gray" onclick="aiCandLeaderboard()" style="flex:1">📊 جدول امتیازات (رأی‌ها)</button>
+</div>
+<div id="aiCandR" style="margin-top:6px"></div>
+</div>
 
 <!-- v8.61: عبور از محدودیت شبکه -->
 <div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
@@ -29342,7 +29703,188 @@ function testAi(){const s=$('aiS'),r=$('aiTR');const pid=$('aiProviderSel')?$('a
 r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+_t+(d.cf_detail?'<div style="margin-top:4px;font-size:10px;color:#fbbf24;direction:ltr;text-align:left">'+esc(d.cf_detail)+'</div>':'')+'<div style="margin-top:6px"><button class="btn btn-orange" style="font-size:10px;padding:4px 8px" onclick="aiProbe()">🩺 عیب‌یابی روش‌ها</button></div></div>';}}).catch(()=>{s.textContent='✗';s.className='cst off';});}
 /* ============ v9.20: مدیریت چند-ارائه‌دهندهٔ هوش مصنوعی ============ */
 let aiProvData={providers:[],selected:{provider:'',model:''}};
-function aiLoadProviders(){fetch('?ai_providers_status=1').then(r=>r.json()).then(d=>{if(d&&d.ok){aiProvData=d;aiRenderProviders();}else{if(d&&d.error)showToast('خطا: '+d.error,1);}}).catch(()=>{});}
+function aiLoadProviders(){fetch('?ai_providers_status=1').then(r=>r.json()).then(d=>{if(d&&d.ok){aiProvData=d;aiRenderProviders();}else{if(d&&d.error)showToast('خطا: '+d.error,1);}}).catch(()=>{});aiCandRender();}
+/* ============ v9.38: مدل‌های کاندید + مدل مستر + پایگاه رای ============ */
+var aiCandData=null;
+var aiCandCtx={task:'category',input:'',keys:[],items:[]};
+function aiCandLoad(cb){
+  fetch('?ai_candidates=1').then(r=>r.json()).then(d=>{aiCandData=d||{candidates:[],master:'',pin:'',history:[]};if(cb)cb(aiCandData);}).catch(()=>{});
+}
+function aiCandSave(addKey,removeKey,isPin){
+  fetch('?ai_candidates=1').then(r=>r.json()).then(d=>{
+    let list=((d&&d.candidates)||[]).map(c=>({provider:c.provider,model:c.model}));
+    if(addKey){
+      const i=addKey.indexOf('::');
+      if(i>0){const pp=addKey.slice(0,i),mm=addKey.slice(i+2);if(!list.find(x=>x.provider===pp&&x.model===mm))list.push({provider:pp,model:mm});}
+    }
+    if(removeKey){
+      const i=removeKey.indexOf('::');
+      if(i>0){const pp=removeKey.slice(0,i),mm=removeKey.slice(i+2);list=list.filter(x=>!(x.provider===pp&&x.model===mm));}
+    }
+    const fd=new FormData();
+    fd.append('action','ai_candidates_save');
+    fd.append('candidates',JSON.stringify(list));
+    if(isPin)fd.append('pin',($('aiMasterPin')||{}).value||'');
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(res=>{
+      if(res&&res.ok){showToast(isPin?'✓ مدل مستر ثبت شد':'✓ کاندیدها ذخیره شد');aiCandRender();}
+      else showToast('خطا: '+((res&&res.error)||'نامشخص'),true);
+    }).catch(()=>showToast('خطا در ارتباط',true));
+  }).catch(()=>showToast('خطا در ارتباط',true));
+}
+function aiCandAddFromSel(){
+  const pid=($('aiProviderSel')||{}).value||'';
+  const mid=($('aiModelSel')||{}).value||'';
+  if(!pid||!mid){showToast('اول از بالای همین بخش یک ارائه‌دهنده و مدل فعال انتخاب کنید',1);return;}
+  aiCandSave(pid+'::'+mid,null,false);
+}
+function aiCandRemove(key){if(confirm('این مدل از کاندیدها حذف شود؟'))aiCandSave(null,key,false);}
+function aiCandSetPin(){aiCandSave(null,null,true);}
+function aiCandRender(){
+  aiCandLoad(d=>{
+    const box=$('aiCandList'); if(!box)return;
+    const c=d.candidates||[];
+    if(!c.length){box.innerHTML='<div style="padding:8px;color:#64748b;font-size:11px">کاندیدی نیست — مدل فعال را انتخاب و «➕ افزودن» بزنید.</div>';}
+    else{
+      let h='';
+      c.forEach(x=>{
+        const isM=(x.key===d.master);
+        h+='<div style="display:flex;gap:6px;align-items:center;padding:6px 8px;border-bottom:1px solid #1e293b;font-size:11px">'
+          +'<span style="flex:1;color:'+(isM?'#4ade80':'#e2e8f0')+'">'+esc(x.providerName)+' · <span dir="ltr">'+esc(x.modelName||x.model)+'</span>'
+          +(isM?' <span style="color:#fbbf24;font-size:9px">⭐ مستر</span>':'')
+          +'<span style="color:#64748b;font-size:9px"> | '+(x.votes?('🏅 '+toFa(x.wins)+'/'+toFa(x.votes)+' ('+Math.round(x.score*100)+'٪)'):'بدون رای')+'</span></span>'
+          +'<button class="btn btn-red" onclick="aiCandRemove(\''+esc(x.key)+'\')" style="font-size:10px;padding:2px 6px">🗑</button></div>';
+      });
+      box.innerHTML=h;
+    }
+    const ms=$('aiMasterPin');
+    if(ms){
+      let o='<option value="">خودکار (بهترین آمار)</option>';
+      c.forEach(x=>{o+='<option value="'+esc(x.key)+'"'+(d.pin===x.key?' selected':'')+'>'+esc(x.providerName+' / '+(x.modelName||x.model))+'</option>';});
+      ms.innerHTML=o;
+    }
+    const mi=$('aiMasterInfo');
+    if(mi){
+      if(d.master){
+        const m=c.find(x=>x.key===d.master);
+        mi.innerHTML='⭐ مدل مستر: <b>'+esc(m?(m.providerName+' / '+(m.modelName||m.model)):d.master)+'</b>'
+          +(d.pin?' (سنجاق دستی)':' — به‌صورت خودکار از بهترین آمار')
+          +' — در آزمون‌ها، پاسخِ مستر به‌عنوان مرجعِ مقایسه نشان داده می‌شود.';
+      }else{mi.innerHTML='هنوز مستری نیست — با آزمون‌ها به‌صورت خودکار مشخص می‌شود.';}
+    }
+  });
+}
+function aiCandVote(task,idx){
+  const it=(aiCandCtx.items||[])[idx];
+  if(!it)return;
+  const fd=new FormData();
+  fd.append('action','ai_vote');
+  fd.append('task',task);
+  fd.append('input',aiCandCtx.input||'');
+  fd.append('winner',it.key);
+  fd.append('candidates',JSON.stringify(aiCandCtx.keys||[]));
+  fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    showToast(d&&d.ok?('✓ رأی ثبت شد — مستر: '+((d.master||'').split('::')[1]||d.master||'?')):('خطا: '+((d&&d.error)||'نامشخص')),!d||!d.ok);
+    if(d&&d.ok)aiCandRender();
+  }).catch(()=>showToast('خطا در ثبت رأی',true));
+}
+function aiCandCategoryTest(){
+  const title=prompt('عنوان محصول برای تست دسته‌بندی با همهٔ کاندیدها:','کفش ورزشی مردانه نایک');
+  if(!title)return;
+  const r=$('aiCandR');
+  if(r)r.innerHTML='<div style="color:#93c5fd;font-size:11px">🔄 در حال تحلیل «'+esc(title)+'» با همهٔ کاندیدها...</div>';
+  fetch('?ai_candidates_category=1&title='+encodeURIComponent(title)).then(rr=>rr.json()).then(d=>{
+    if(!r)return;
+    if(!d.ok){r.innerHTML='<div style="color:#fca5a5;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    const items=d.items||[];
+    aiCandCtx={task:'category',input:title,keys:items.map(x=>x.key),items:items};
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px;font-size:11px;line-height:1.9">'
+      +'<div style="color:#67e8f9;font-weight:700">🏷️ دسته‌بندی «'+esc(d.title)+'» توسط '+toFa(items.length)+' کاندید</div>'
+      +'<div style="color:#94a3b8;font-size:10px;margin-bottom:6px">پاسخی که دسته‌اش درست‌تر بود را «برگزیدن» بزنید تا به‌صورت رای ثبت شود و آمار مدل مستر به‌روز شود.</div>';
+    items.forEach((it,idx)=>{
+      const isM=(it.key===d.master);
+      h+='<div style="border:1px solid '+(isM?'#fbbf24':'#334155')+';border-radius:8px;padding:7px;margin-bottom:6px;background:#111c31">'
+        +'<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">'
+        +'<span style="color:'+(isM?'#fbbf24':'#e2e8f0')+';font-weight:700">'+(idx+1)+'. '+esc(it.providerName)+(isM?' <span style="color:#fbbf24;font-size:9px">⭐ مستر</span>':'')+'</span>'
+        +'<span style="color:#64748b;font-size:9px" dir="ltr">'+esc(it.model)+' · '+toFa(it.latency||0)+'ms</span></div>'
+        +'<div style="margin-top:4px">'+((it.ok&&it.category_name)
+            ? '✅ دسته: <b style="color:#4ade80">'+esc(it.category_name)+'</b> (#'+it.category_id+')'
+            : '<span style="color:#f87171">✗ '+(it.error||'پاسخ نامعتبر')+'</span>')+'</div>'
+        +(it.ai_text?'<div style="color:#94a3b8;font-size:10px;direction:ltr;text-align:left;white-space:pre-wrap;margin-top:3px">'+esc(it.ai_text)+'</div>':'')
+        +'<button class="btn btn-green" style="margin-top:6px;font-size:10px;padding:3px 10px" onclick="aiCandVote(\'category\','+idx+')">✓ برگزیدن (رای)</button>'
+        +'</div>';
+    });
+    h+='</div>';
+    r.innerHTML=h;
+  }).catch(()=>{if(r)r.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا شبکه</div>';});
+}
+function aiCandReplyTest(){
+  let m=document.getElementById('aiCandReplyModal');if(m)m.remove();
+  m=document.createElement('div');m.id='aiCandReplyModal';m.className='bsl-modal-overlay';
+  m.innerHTML='<div class="bsl-modal" style="width:860px">'
+    +'<div class="bsl-modal-head"><h2>💬 تست پاسخ همهٔ کاندیدها</h2>'
+    +'<button class="btn btn-gray" onclick="aiCandReplyClose()" style="font-size:11px;padding:4px 9px">✕</button></div>'
+    +'<div style="padding:10px 14px;background:#1e293b;border-bottom:1px solid #334155;display:flex;gap:8px;align-items:center">'
+    +'<input type="text" id="aiCandReplyInput" placeholder="پیام مشتری را بنویسید…" '
+    +'onkeydown="if(event.key===\'Enter\')aiCandReplyRun()" style="flex:1;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:9px 12px;font-size:13px">'
+    +'<button class="btn btn-green" onclick="aiCandReplyRun()" style="font-size:12px;padding:9px 16px">➤ مقایسه</button></div>'
+    +'<div class="bsl-modal-body" id="aiCandReplyBody" style="min-height:300px;max-height:60vh;overflow:auto;padding:12px"></div></div>';
+  m.addEventListener('click',function(e){if(e.target===m)aiCandReplyClose();});
+  document.body.appendChild(m);
+  setTimeout(()=>{const i=$('aiCandReplyInput');if(i)i.focus();},50);
+}
+function aiCandReplyClose(){const m=document.getElementById('aiCandReplyModal');if(m)m.remove();}
+function aiCandReplyRun(){
+  const inp=$('aiCandReplyInput');const t=(inp?inp.value:'').trim();if(!t){if(inp)inp.focus();return;}
+  const body=$('aiCandReplyBody'); if(!body)return;
+  body.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال پرسیدن از همهٔ کاندیدها...</div>';
+  fetch('?ai_candidates_reply=1&msg='+encodeURIComponent(t)).then(r=>r.json()).then(d=>{
+    if(!body)return;
+    if(!d.ok){body.innerHTML='<div style="color:#fca5a5;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    const items=d.items||[];
+    aiCandCtx={task:'autoreply',input:t,keys:items.map(x=>x.key),items:items};
+    let h='<div style="font-size:11px;color:#67e8f9;font-weight:700;margin-bottom:8px">💬 «'+esc(t)+'» — پاسخ '+toFa(items.length)+' کاندید (مستر ⭐ مرجعِ مقایسه)</div>';
+    items.forEach((it,idx)=>{
+      const isM=(it.key===d.master);
+      h+='<div style="border:1px solid '+(isM?'#fbbf24':'#334155')+';border-radius:8px;padding:8px;margin-bottom:8px;background:#111c31">'
+        +'<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">'
+        +'<span style="color:'+(isM?'#fbbf24':'#e2e8f0')+';font-weight:700">'+esc(it.providerName)+(isM?' <span style="font-size:9px;color:#fbbf24">⭐ مستر</span>':'')+'</span>'
+        +'<span style="color:#64748b;font-size:9px" dir="ltr">'+esc(it.model||'')+' · '+toFa(it.latency||0)+'ms</span></div>'
+        +'<div style="margin-top:5px;color:'+(it.ok?'#e9d5ff':'#f87171')+';white-space:pre-wrap;font-size:12px">'+esc(it.ok?it.text:(it.error||'پاسخی نیامد'))+'</div>'
+        +'<button class="btn btn-green" style="margin-top:6px;font-size:10px;padding:3px 10px" onclick="aiCandVote(\'autoreply\','+idx+')">✓ این بهتر بود (رای)</button>'
+        +'</div>';
+    });
+    body.innerHTML=h;
+  }).catch(()=>{if(body)body.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا شبکه</div>';});
+}
+function aiCandLeaderboard(){
+  aiCandLoad(d=>{
+    const r=$('aiCandR'); if(!r)return;
+    const c=d.candidates||[];
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px;font-size:11px;line-height:1.8">'
+      +'<div style="color:#67e8f9;font-weight:700">📊 جدول امتیازات مدل‌های کاندید</div>';
+    if(!c.length){h+='<div style="color:#64748b;padding:8px 0">کاندیدی نیست.</div>';}
+    else{
+      h+='<table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:11px">'
+        +'<tr style="background:#1e293b;color:#94a3b8"><th style="padding:5px;text-align:right">مدل</th><th>برد</th><th>شرکت</th><th>درصد برد</th><th>مستر</th></tr>';
+      c.forEach(x=>{
+        const pct=x.votes?Math.round(x.score*100)+'٪':'—';
+        h+='<tr style="border-bottom:1px solid #1e293b"><td style="padding:5px;color:#e2e8f0">'+esc(x.providerName)+' · <span dir="ltr">'+esc(x.modelName||x.model)+'</span></td>'
+          +'<td style="padding:5px;text-align:center;color:#4ade80">'+toFa(x.wins)+'</td>'
+          +'<td style="padding:5px;text-align:center;color:#94a3b8">'+toFa(x.votes)+'</td>'
+          +'<td style="padding:5px;text-align:center;color:#fbbf24">'+pct+'</td>'
+          +'<td style="padding:5px;text-align:center">'+(x.key===d.master?'⭐':'')+'</td></tr>';
+      });
+      h+='</table>';
+    }
+    h+='<div style="color:#94a3b8;font-size:10px;margin-top:6px">آخرین رأی‌ها:</div>';
+    (d.history||[]).slice(0,10).forEach(hi=>{
+      h+='<div style="color:#64748b;font-size:10px;border-top:1px solid #1e293b;padding-top:3px;margin-top:3px">'
+        +(hi.task==='category'?'🏷️':'💬')+' «'+esc(hi.input)+'» → برنده: <span dir="ltr">'+esc(hi.winner)+'</span></div>';
+    });
+    h+='</div>';
+    r.innerHTML=h;
+  });
+}
 function aiRenderProviders(){
     const sel=$('aiProviderSel');if(!sel)return;
     const cur=sel.value||aiProvData.selected.provider||'';
@@ -29581,7 +30123,19 @@ function aiResumeTestModalOnLoad(){
     }).catch(()=>{});
 }
 // v8.06: Test AI category selection with a sample product title
-function testAiCategory(){const r=$('aiTR');const title=prompt('عنوان محصول برای تست دسته‌بندی:','کفش ورزشی مردانه نایک');if(!title)return;r.innerHTML='<div style="color:#67e8f9;font-size:11px">🔄 در حال تحلیل «'+esc(title)+'» با AI...</div>';fetch('?ai_category=1&title='+encodeURIComponent(title)).then(r=>r.json()).then(d=>{if(d.ok){r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ دسته: <b>'+esc(d.category_name)+'</b> ('+d.category_id+') | مدل: '+esc(d.ai_model||'')+' | پاسخ AI: '+esc(d.ai_raw||'')+'</div>';}else{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';}}).catch(()=>{r.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا شبکه</div>';});}
+function testAiCategory(){
+  /* v9.38: اگر مدل کاندید داریم، همهٔ آن‌ها را با هم تست می‌کنیم تا بهترین را
+     برگزینیم؛ وگرنه همان تست تک‌مدلیِ قدیمی انجام می‌شود. */
+  aiCandLoad(d=>{
+    if((d.candidates||[]).length>0){aiCandCategoryTest();return;}
+    const r=$('aiTR');const title=prompt('عنوان محصول برای تست دسته‌بندی:','کفش ورزشی مردانه نایک');if(!title)return;
+    r.innerHTML='<div style="color:#67e8f9;font-size:11px">🔄 در حال تحلیل «'+esc(title)+'» با AI...</div>';
+    fetch('?ai_category=1&title='+encodeURIComponent(title)).then(rr=>rr.json()).then(dd=>{
+      if(dd.ok){r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ دسته: <b>'+esc(dd.category_name)+'</b> ('+dd.category_id+') | مدل: '+esc(dd.ai_model||'')+' | پاسخ AI: '+esc(dd.ai_raw||'')+'</div>';}
+      else{r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(dd.error||'خطا')+'</div>';}
+    }).catch(()=>{r.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا شبکه</div>';});
+  });
+}
 
 function testBsl(){const s=$('bsS'),r=$('bsTR');s.textContent='\u062a\u0633\u062a...';s.className='cst tg';r.innerHTML='';const fd=new FormData();fd.append('action','test_basalam');fd.append('token',$('bsTk').value.trim());fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
 if(d.ok){s.textContent='\u2713';s.className='cst on';r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">\u2713 '+esc(d.message)+' | '+esc(d.vendor_title||'')+'</div>';if(d.vendor_id&&!$('bsVid').value)$('bsVid').value=d.vendor_id;saveConn();
