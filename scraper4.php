@@ -89,8 +89,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.41';
-const APP_VERSION_DATE = '1405/06/12';
+const APP_VERSION = '9.42';
+const APP_VERSION_DATE = '1405/06/13';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -11890,6 +11890,12 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, '$lockOut[\'detail_sync\'] = $preDetail ??') !== false
          && strpos($selfSrc, '$results[\'detail_sync\'] = $preDetail ??') !== false);
 
+    /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
+    $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
+         strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
+         && strpos($selfSrc, "'stop' => true") !== false
+         && strpos($selfSrc, 'AI_TEST_STOP_FILE') !== false);
+
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
          && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
@@ -16607,13 +16613,17 @@ echo json_encode(aiTestStateLoad(), JSON_UNESCAPED_UNICODE);
 exit;
 }
 if (isset($_GET['ai_test_stop'])) {
-@file_put_contents(AI_TEST_STOP_FILE, json_encode(['stop'=>true,'time'=>time()], LOCK_EX));
-$st = aiTestStateLoad();
-$st['stopping'] = true;
-aiTestStateSave($st);
-header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(['ok'=>true,'stopping'=>true], JSON_UNESCAPED_UNICODE);
-exit;
+    /* v9.42: فایل توقف را مقاوم بنویس — writeJsonFile اول با قفل تلاش می‌کند
+       و اگر قفل روی FUSE/ترموکس پشتیبانی نشد، بدون قفل می‌نویسد. قبلاً با
+       LOCK_EX مستقیم اگر نوشتن بی‌صدا fail می‌شد، پردازهٔ پس‌زمینه هیچ‌وقت
+       توقف را نمی‌دید. */
+    writeJsonFile(AI_TEST_STOP_FILE, ['stop' => true, 'time' => time()]);
+    $st = aiTestStateLoad();
+    $st['stopping'] = true;
+    aiTestStateSave($st);
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode(['ok' => true, 'stopping' => true], JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
 /* هستهٔ اجرای تست — یک تابع تا هم از مسیر پس‌زمینه و هم از مسیر هم‌زمان استفاده کند */
@@ -16642,7 +16652,12 @@ function aiRunTestBackground(int $per, bool $onlyUntested): array {
     $st['total'] = count($queue);
     aiTestStateSave($st);
     foreach ($queue as $q) {
-        // توقف صریح
+        // توقف صریح — v9.42: کش stat را پاک کن وگرنه سیگنال توقفِ تازه دیده
+        // نمی‌شود. فایل توقف را یک پردازهٔ جدا (درخواست مرورگر) می‌سازد؛ PHP
+        // نتیجهٔ is_file را برای طولِ این پردازه کش می‌کند و اگر اولین بررسی
+        // «فایل نیست» بود، دکمهٔ توقف تا پایان کار بی‌اثر می‌ماند. همین الگوی
+        // clearstatcache در bslReq برای BSL_STOP_FILE از قبل هست.
+        clearstatcache(true, AI_TEST_STOP_FILE);
         if (is_file(AI_TEST_STOP_FILE)) { $st['stopped'] = true; break; }
         $pid = $q['pid']; $mid = $q['mid'];
         $p = $providers[$pid] ?? null;
