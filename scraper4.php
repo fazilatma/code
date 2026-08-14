@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.43';
+const APP_VERSION = '9.44';
 const APP_VERSION_DATE = '1405/06/13';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -316,48 +316,10 @@ function extractPriceNum($price): int {
  * v8.25: گزارش کامل هر اجرای استخراج را کنار صف نگه می‌دارد تا بعداً
  * قابل مرور باشد. فقط ۲۰ گزارش آخر می‌ماند تا دیسک پر نشود.
  */
-/* =====================================================================
-   v9.11: ردیف اطلاع‌رسان برای «استخراج دوره‌ای جزئیات».
-
-   خودِ اجرا از runBackendExtract می‌گذرد و ردیف صف خودش را می‌سازد.
-   ولی حالت‌هایی که اجرا «انجام نمی‌شود» — نوبتش نشده، پروفایل محصول
-   ندارد — هیچ ردی نمی‌گذاشتند. از دید کاربر این دقیقاً شبیه «هیچ
-   اتفاقی نمی‌افتد» است. این تابع یک ردیف تمام‌شده با لاگ می‌نشاند تا
-   در همان صف استخراج دیده شود.
-   ===================================================================== */
-function detailSyncDur(int $sec): string {
-    $sec = max(0, $sec);
-    if ($sec < 60)    return $sec . ' ثانیه';
-    if ($sec < 3600)  return (int)round($sec / 60) . ' دقیقه';
-    if ($sec < 86400) return (int)round($sec / 3600) . ' ساعت';
-    return (int)round($sec / 86400) . ' روز';
-}
-function detailSyncIntervalLabel(int $sec): string {
-    if ($sec <= 0) return 'هر بار فراخوانی کران';
-    return 'هر ' . detailSyncDur($sec);
-}
 /** تاریخ و ساعت خوانا برای لاگ — بدون وابستگی به افزونهٔ تقویم */
 function jdate_fa(int $ts): string {
     return date('Y/m/d H:i', $ts);
 }
-function detailSyncNote(string $profileKey, string $profileName,
-                        string $title, array $lines, string $why): void {
-    $qid = 'dsync_' . preg_replace('~[^A-Za-z0-9_.-]~', '_', $profileKey)
-         . '_' . time() . '_' . substr(bin2hex(random_bytes(3)), 0, 6);
-    $q = extractReadQueue();
-    $q['entries'][] = [
-        'id' => $qid, 'status' => 'done', 'profile_key' => $profileKey,
-        'profile_name' => $profileName, 'started_at' => time(), 'done_at' => time(),
-        'products_count' => 0, 'total' => 0, 'current' => 0,
-        'trigger' => 'auto', 'phase' => 'detail_sync',
-        'detail_skip_why' => $why, 'note_only' => true,
-        'note_title' => $title, 'note_lines' => $lines,
-    ];
-    // فقط ۳۰ ردیف آخر بماند تا فایل صف بی‌نهایت بزرگ نشود
-    if (count($q['entries']) > 30) $q['entries'] = array_slice($q['entries'], -30);
-    extractWriteQueue($q);
-}
-
 function extractReportFile(string $queueId): string {
     $safe = preg_replace('~[^A-Za-z0-9_.-]~', '_', $queueId);
     return __DIR__ . '/extract_report_' . $safe . '.json';
@@ -687,20 +649,12 @@ function cronSummaryText(array $r): string {
     $L[] = '=== اجرای کران — ' . date('Y/m/d H:i:s') . ' (v' . APP_VERSION . ') ===';
     if (!empty($r['skipped'])) $L[] = '⏭ رد شد: ' . (string)($r['reason'] ?? '');
     if (!empty($r['lock_reaped'])) $L[] = '🔓 قفل اجرای مردهٔ قبلی برداشته شد';
-    foreach ((array)($r['detail_sync'] ?? []) as $d) {
-        $L[] = '🔍 استخراج دوره‌ای جزئیات — ' . (string)($d['name'] ?? '?')
-             . ': ' . (string)($d['status'] ?? '?')
-             . (isset($d['detail']) ? ('  جزئیات=' . $d['detail']) : '')
-             . (isset($d['gallery_images']) ? ('  تصویر=' . (int)$d['gallery_images']) : '')
-             . (isset($d['remaining']) ? ('  نوبت بعدی تا ' . (int)$d['remaining'] . 'ث') : '')
-             . (isset($d['skip_why']) ? ('  علت=' . $d['skip_why']) : '');
-    }
     foreach ((array)($r['profiles'] ?? []) as $p) {
         $L[] = '📦 ' . (string)($p['name'] ?? '?') . ': ' . (string)($p['status'] ?? '?')
              . (isset($p['step']) ? ('  گام=' . $p['step']) : '')
              . (isset($p['detail_step']) ? ('  جزئیات=' . $p['detail_step']) : '');
     }
-    if (empty($r['detail_sync']) && empty($r['profiles']) && empty($r['skipped'])) {
+    if (empty($r['profiles']) && empty($r['skipped'])) {
         $L[] = 'هیچ پروفایلی کاری نداشت.';
     }
     $L[] = 'جزئیات کامل در cron_last_run.json و در «صف استخراج» برنامه.';
@@ -3828,16 +3782,6 @@ $galleryFinal = ($formIsBlank && !$galleryIn['enabled'] && $galleryOld['enabled'
 $syncConfig = array_key_exists('syncConfig', $_POST)
     ? (json_decode((string)$_POST['syncConfig'], true) ?: [])
     : (array)($profiles[$key]['syncConfig'] ?? []);
-/* v9.10: «استخراج دوره‌ای جزئیات» — همان محافظِ syncConfig، وگرنه هر
-   ذخیرهٔ جزئی (که این کلید را نمی‌فرستد) تنظیم را پاک می‌کرد. */
-$detailSyncIn = array_key_exists('detailSync', $_POST)
-    ? (json_decode((string)$_POST['detailSync'], true) ?: [])
-    : (array)($profiles[$key]['detailSync'] ?? []);
-$detailSync = [
-    'enabled'  => !empty($detailSyncIn['enabled']),
-    'interval' => max(0, (int)($detailSyncIn['interval'] ?? 3600)),
-    'scope'    => (($detailSyncIn['scope'] ?? 'missing') === 'all') ? 'all' : 'missing',
-];
 $profiles[$key] = [
 'url' => $url,
 'name' => trim($_POST['name'] ?? '') ?: parse_url($url, PHP_URL_HOST),
@@ -3860,7 +3804,6 @@ $profiles[$key] = [
 'products' => $productsData,
 'productsOrder' => $productsOrder,
 'syncConfig' => $syncConfig,
-'detailSync' => $detailSync,          // v9.10
 // v8.43: اگر این فیلدها در درخواست نباشند، مقدار قبلی حفظ شود.
 // قبلاً هر ذخیره‌ای که آن‌ها را نمی‌فرستاد، دستهٔ پروفایل را صفر می‌کرد.
 'bslCategoryId' => array_key_exists('bslCategoryId', $_POST)
@@ -7873,6 +7816,78 @@ function extractCheckpoint(string $pkFinal, array $allProducts, array $extra = [
  * را جدا اجرا کند و تازه بعد از آن سراغ ارسال برود. با این پارامتر هر سه
  * از یک موتور می‌گذرند و رفتارشان نمی‌تواند از هم جدا بیفتد.
  */
+/* v9.44: استخراج جزئیاتِ یک محصول به‌صورت درجا (inline) — بجای «فاز ۲»ی جداگانه.
+   وقتی محصول از فهرست گرفته می‌شود، همین‌جا صفحهٔ خودش باز و جزئیاتش (فیلدها،
+   گالری، تنوع‌ها) استخراج می‌شود. چون کران‌جاب (cron-job.org) منتظر کارِ
+   پس‌زمینه نمی‌ماند، اگر جزئیات «بعداً» و در نوبتِ جدا اجرا شود ممکن است هرگز
+   کامل نشود؛ درحالی‌که این‌جا به‌محض استخراج هر محصول کامل می‌شود و چک‌پوینتِ
+   هر محصول همان لحظه نوشته می‌شود. */
+function extractProductDetailInline(array &$allProducts, string $key, array $detailSelectors, array $galleryCfg, bool $forceAll): array {
+    $out = ['ok' => false, 'opened' => false, 'fields' => 0, 'imgs' => 0, 'vars' => 0, 'error' => ''];
+    if (!isset($allProducts[$key])) return $out;
+    $p = &$allProducts[$key];
+    if (empty($p['link'])) return $out;
+    $out['opened'] = true;
+    $dr = fetch_html($p['link'], 10);
+    if (!$dr['ok']) {
+        $out['error'] = trim((string)($dr['error'] ?? ''));
+        if ($out['error'] === '') $out['error'] = 'HTTP ' . (int)($dr['code'] ?? 0);
+        return $out;
+    }
+    $out['ok'] = true;
+    [$dom2, $xp2] = load_dom($dr['html']);
+    $fields = 0; $imgs = 0; $vars = 0;
+    foreach ($detailSelectors as $field => $selStr) {
+        if (empty($selStr)) continue;
+        if ($field === 'variations') {
+            $vr = variationsExtract($xp2, null, $selStr);
+            if (!empty($vr['values'])) {
+                $p['variations'] = $vr['values'];
+                $p['variation_groups'] = $vr['groups'];
+                $p['variations_text'] = implode('، ', $vr['values']);
+                $vars = count($vr['values']); $fields++;
+                if (!empty($vr['prices'])) {
+                    $p['variation_prices'] = $vr['prices'];
+                    $p['price_min'] = $vr['price_min'];
+                    $p['price_max'] = $vr['price_max'];
+                    $p['price_varies'] = !empty($vr['price_varies']);
+                }
+            }
+            continue;
+        }
+        $xPath = cssToXpath($selStr);
+        $ns = @$xp2->query($xPath);
+        if ($ns && $ns->length) {
+            $val = '';
+            if ($field === 'image') {
+                $val = galleryImgFromNode($ns->item(0), $dr['url']);
+            } elseif ($field === 'price') {
+                $val = extractPrice($ns->item(0)->textContent);
+            } elseif ($field === 'shortDesc' || $field === 'longDesc') {
+                $val = detailCleanHtml($ns->item(0), $dr['url']);
+            } else {
+                $val = trim($ns->item(0)->textContent);
+            }
+            if ($val) { $p[$field] = $val; $fields++; }
+        }
+    }
+    if (empty($p['image'])) {
+        $ogImg = @$xp2->query("//meta[@property='og:image']/@content");
+        if ($ogImg && $ogImg->length) {
+            $imgUrl = $ogImg->item(0)->nodeValue;
+            if ($imgUrl && url_is_image($imgUrl)) $p['image'] = make_absolute_url($imgUrl, $dr['url']);
+        }
+    }
+    if ($galleryCfg['enabled']) {
+        $gal = galleryExtract($xp2, null, $dr['url'], $galleryCfg);
+        if (!empty($gal['images'])) {
+            $imgs = galleryApplyToProduct($p, $gal['images'], $forceAll);
+        }
+    }
+    $out['fields'] = $fields; $out['imgs'] = $imgs; $out['vars'] = $vars;
+    return $out;
+}
+
 function runBackendExtract(string $profileKey, string $trigger = 'manual', bool $emitEarlyResponse = false, string $phase = 'all', bool $forceAll = false): array {
 if (!in_array($phase, ['all', 'list', 'detail'], true)) $phase = 'all';
 @set_time_limit(0); @ignore_user_abort(true);
@@ -8004,6 +8019,16 @@ if($phase==='detail'){
         return ['__early_sent'=>$emitEarlyResponse,'ok'=>true,'extracted'=>0,'phase'=>'detail','note'=>'فهرستی وجود ندارد'];
     }
 }
+/* v9.44: جزئیات «هم‌زمان با» استخراج هر محصول انجام می‌شود — بجای فاز ۲ی جداگانه.
+   چون کران‌جاب (cron-job.org) منتظر کارِ پس‌زمینه نمی‌ماند، جزئیات نباید در
+   نوبتی جدا و بعداً اجرا شود که ممکن است هرگز به آن نرسد. اینجا هر محصول
+   به‌محض گرفتن از فهرست، صفحهٔ خودش هم باز و کامل می‌شود (فقط اگر ناقص باشد —
+   دامنهٔ «فقط ناقص‌ها»). */
+$galleryCfg=galleryNormalizeCfg($profile['gallery']??[]);
+$_wantKeys=[];
+foreach($detailSelectors as $_f=>$_sv){ if(!empty($_sv))$_wantKeys[]=$_f; }
+$_inlineDetailDone=0;   // شمارندهٔ جزئیاتِ درجایِ همین اجرا (برای چک‌پوینت)
+$pkFinal=$profileKey!==''?$profileKey:profileKey($url);
 for($page=1;$phase!=='detail'&&$page<=$maxPages;$page++){
 if(file_exists(EXTRACT_STOP_FILE)){@unlink(EXTRACT_STOP_FILE);
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'total'=>count($allProducts),'current'=>$page,'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>2,'extracted'=>count($allProducts)]);
@@ -8034,6 +8059,31 @@ if(isset($seenKeys[$key]))continue;
 $seenKeys[$key]=1;
 $allProducts[$key]=$p;
 $newCount++;
+/* v9.44: استخراج جزئیاتِ همین محصول، همین‌لحظه (درجا) — بجای فاز ۲ی جداگانه.
+   فقط اگر ناقص باشد (دامنهٔ «فقط ناقص‌ها»): گالری روشن است یا فیلدی خواسته‌شده
+   هنوز خالی است یا عکس/قیمت ندارد. برای تصمیم‌گیری، دادهٔ اجرای قبلی هم ادغام
+   می‌شود تا محصولی که قبلاً کامل شده دوباره باز نشود. صفحهٔ محصول باز و
+   فیلدها/گالری/تنوع‌ها استخراج می‌شود؛ بعد هر محصول چک‌پوینت می‌شود تا اگر
+   هاست وسط کار کشته شد، محصولاتِ تا آن لحظه کامل روی دیسک بمانند. */
+$_mrg = (isset($prevByKey[$key]) && is_array($prevByKey[$key]))
+    ? extractMergeDetail($p, $prevByKey[$key]) : $p;
+$_galDoneNow = $galleryCfg['enabled']
+    && count($p['images'] ?? ($_mrg['images'] ?? [])) > 1
+    && !empty($p['image'] ?? $_mrg['image'] ?? '')
+    && !empty($p['price'] ?? $_mrg['price'] ?? '');
+$_fieldMissingNow = false;
+foreach ($_wantKeys as $_wk) {
+    if ($_wk === 'variations') { if (empty($_mrg['variations'])) { $_fieldMissingNow = true; break; } continue; }
+    $_cur = $_mrg[$_wk] ?? '';
+    if (is_array($_cur) ? empty($_cur) : (trim((string)$_cur) === '')) { $_fieldMissingNow = true; break; }
+}
+if (!($_galDoneNow && !$_fieldMissingNow)) {
+    $_inlineDetailDone++;
+    extractProductDetailInline($allProducts, $key, $detailSelectors, $galleryCfg, false);
+    extractCheckpoint($pkFinal, $allProducts,
+        ['_extract_stage' => 'detail', '_extract_stage_at' => time(),
+         '_extract_detail_done' => $_inlineDetailDone, '_extract_detail_total' => 0]);
+}
 }
 $logs[]='✓ +'.($newCount).' محصول (کل: '.count($allProducts).')';
 // v8.22: مقایسهٔ زنده — شمارنده‌ها و لیست‌ها همان لحظه محاسبه می‌شوند
@@ -9041,172 +9091,6 @@ if (isset($_GET['whoami'])) {
 }
 
 
-/**
- * v9.13: حلقهٔ «استخراج دوره‌ای جزئیات» — یک کد، دو نقطهٔ فراخوانی.
- *
- * تا ۹.۱۲ این حلقه فقط در مسیر عادی کران بود، یعنی پشتِ قفل ضد
- * هم‌پوشانی. اگر قفل برداشته نمی‌شد، هرگز اجرا نمی‌شد. حالا وقتی تیک
- * به‌خاطر قفل رد می‌شود هم صدا زده می‌شود.
- *
- * $locked فقط برای گزارش است تا در لاگ معلوم باشد این اجرا زیر قفل
- * انجام شده. رفتار یکسان است — عمداً، تا دو مسیر نتوانند از هم جدا
- * بیفتند، همان درسی که از سه نسخهٔ قبل گرفتیم.
- */
-function cronDetailSyncPass(array $cn, bool $locked = false): array {
-    $now       = time();
-    $profiles  = loadProfiles();
-    $syncState = loadSyncState();
-    $out = [];
-    /* v9.14: نقطهٔ کورِ باقی‌مانده.
-
-       تا اینجا اگر هیچ پروفایلی تیک «استخراج دوره‌ای جزئیات» نداشت،
-       این حلقه بی‌صدا رد می‌شد و هیچ ردی نمی‌گذاشت. از دید کاربر این
-       دقیقاً شبیه «کران اصلاً اجرا نمی‌شود» است، در حالی که کران اجرا
-       شده و فقط چیزی برای انجام پیدا نکرده. حالا شمرده می‌شود و اگر
-       صفر بود، خودِ همین موضوع یک ردیف در صف می‌گذارد. */
-    $_dsSeen = 0; $_dsOff = [];
-    foreach ($profiles as $dKey => $dProfile) {
-        $dCfg   = (array)($dProfile['detailSync'] ?? []);
-        $sCfg   = (array)($dProfile['syncConfig'] ?? []);
-        $dsOn   = !empty($dCfg['enabled']);
-        $syncOn = !empty($sCfg['enabled']);
-        /* v9.40: پروفایلِ «سینک خودکار» هم در همین گذرِ زودهنگام جزئیات
-           می‌گیرد — نه فقط پروفایلِ «استخراج دوره‌ای جزئیات».
-
-           علتِ «کران فاز جزئیات را اجرا نمی‌کند»: در مسیرِ عادیِ کران،
-           جزئیاتِ پروفایلِ sync آخرِ حلقهٔ همگام‌سازی اجرا می‌شود — بعد از
-           بکاپ، نگهبان و خودِ فاز فهرست. روی هاستِ اشتراکی، پردازه‌ای که
-           بعد از بستنِ اتصال (finishRequestNow) ادامه می‌دهد اغلب وسطِ آن
-           مسیرِ طولانی کشته می‌شود و به جزئیات نمی‌رسد. دکمه‌های «اجرای
-           الان» کار می‌کنند چون همین کار را زودتر/در بستری که زنده می‌ماند
-           انجام می‌دهند.
-
-           این گذرِ زودهنگام جزئیاتِ پروفایلِ sync را همان ابتدای کران —
-           حتی زیرِ قفل (زیرا جزئیات چیزی نمی‌فرستد) — انجام می‌دهد، تا اگر
-           پردازه بعداً کشته شود، جزئیات از قبل رفته باشد. در پروفایلِ
-           sync، دامنه «فقط محصولات ناقص» است (گالریِ کامل دوباره از نو
-           نمی‌شود مگر اینکه تیک «استخراج دوره‌ای جزئیات» با دامنهٔ
-           «همهٔ محصولات» روشن باشد). */
-        if (!$dsOn && !$syncOn) {
-            $_dsOff[] = (string)($dProfile['name'] ?? $dKey);
-            continue;
-        }
-        $_dsSeen++;
-        $dRow = ['key' => $dKey, 'name' => $dProfile['name'] ?? $dKey, 'auto' => ($syncOn && !$dsOn)];
-        // دورهٔ جزئیات: اگر تیک دوره‌ای روشن است همان‌جا، وگرنه با دورهٔ خودِ سینک
-        $dInterval = max(0, (int)($dsOn ? ($dCfg['interval'] ?? 3600) : ($sCfg['interval'] ?? 3600)));
-        $dLast = (int)($syncState[$dKey]['detailLastRun'] ?? 0);
-        if ($dInterval > 0 && ($now - $dLast) < $dInterval) {
-            $dRow['status'] = 'not_due';
-            $dRow['remaining'] = $dInterval - ($now - $dLast);
-            /* v9.11: «هنوز نوبتش نشده» هم باید دیده شود.
-               تا اینجا این حالت هیچ ردی در صف نمی‌گذاشت، پس از دید کاربر
-               فرقی با «اصلاً اجرا نشد» نداشت و دقیقاً همین باعث شد گزارش
-               بدهد «انگار هیچ اتفاقی نمی‌افتد». حالا یک ردیف اطلاع‌رسان
-               می‌نشیند که می‌گوید چقدر تا نوبت بعدی مانده. */
-            detailSyncNote($dKey, $dProfile['name'] ?? $dKey,
-                '⏳ استخراج دوره‌ای جزئیات — هنوز نوبتش نشده',
-                ['   • دوره: ' . detailSyncIntervalLabel($dInterval),
-                 '   • آخرین اجرا: ' . ($dLast > 0 ? jdate_fa($dLast) : 'هنوز اجرا نشده'),
-                 '   • نوبت بعدی تا ' . detailSyncDur($dInterval - ($now - $dLast)) . ' دیگر'],
-                'not_due');
-            $out[] = $dRow;
-            continue;
-        }
-        // دامنهٔ «همهٔ محصولات» فقط وقتی معنا دارد که تیک «استخراج دوره‌ای
-        // جزئیات» روشن باشد؛ در پروفایلِ صرفاً-sync همیشه «فقط ناقص‌ها».
-        $dScopeAll = $dsOn && (($dCfg['scope'] ?? 'missing') === 'all');
-        $dRow['scope'] = $dScopeAll ? 'all' : 'missing';
-        /* v9.20: ردیفِ «در حال اجرا» همین ابتدا در صف می‌نشیند.
-           تا اینجا تنها ردیفِ اطلاع‌رسان بعد از تمام شدنِ runBackendExtract
-           نوشته می‌شد؛ اگر هاست وسط همان فاز طولانی پردازه را می‌کشت، هیچ
-           ردی در صف نمی‌ماند و کاربر می‌دید «کران کاری نمی‌کند». حالا حتی
-           اگر همین‌جا کشته شویم، صف نشان می‌دهد جزئیات شروع شده بود. */
-        detailSyncNote($dKey, $dProfile['name'] ?? $dKey,
-            '🔍 استخراج دوره‌ای جزئیات — در حال اجرا...',
-            ['   • دامنه: ' . ($dScopeAll ? 'همهٔ محصولات (گالری از نو)' : 'فقط محصولات ناقص'),
-             '   • دوره: ' . detailSyncIntervalLabel($dInterval),
-             '   • اگر این ردیف همین‌طور «در حال اجرا» ماند، یعنی پردازه بعد از شروع کشته شده — کران را به صورت خط فرمان اجرا کنید:'],
-            'running');
-        /* اگر هنوز محصولی روی دیسک نیست، اول فهرست را بگیر — وگرنه فاز
-           جزئیات چیزی برای باز کردن ندارد و کاربر یک اجرای بی‌صدا می‌بیند. */
-        if (empty($dProfile['products'])) {
-            $dRow['pre_list'] = true;
-            runBackendExtract($dKey, 'auto', false, 'list');
-        }
-        $dRes = runBackendExtract($dKey, 'auto', false, 'detail', $dScopeAll);
-        $dProg = readProgress(EXTRACT_PROGRESS_FILE);
-        $dTot  = (int)($dProg['detail_total'] ?? 0);
-        $dDone = (int)($dProg['detail_current'] ?? 0);
-        if ($dDone === 0 && (int)($dProg['detail_ok'] ?? 0) > 0) {
-            $dDone = (int)$dProg['detail_ok'] + (int)($dProg['detail_fail'] ?? 0);
-        }
-        $dRow['status']         = !empty($dRes['ok']) ? 'done' : 'failed';
-        if (empty($dRes['ok'])) $dRow['error'] = (string)($dRes['error'] ?? '?');
-        $dRow['detail']         = $dTot > 0 ? ($dDone . '/' . $dTot) : 'nothing_to_do';
-        $dRow['pages_opened']   = (int)($dProg['detail_ok'] ?? 0);
-        $dRow['pages_failed']   = (int)($dProg['detail_fail'] ?? 0);
-        $dRow['fields']         = (int)($dProg['detail_fields'] ?? 0);
-        $dRow['gallery_images'] = (int)($dProg['gallery_images'] ?? 0);
-        $dRow['variations']     = (int)($dProg['variation_products'] ?? 0);
-        if (!empty($dProg['detail_skip_why'])) $dRow['skip_why'] = (string)$dProg['detail_skip_why'];
-        /* v9.11: خلاصهٔ خوانا از همین اجرا، در خودِ صف استخراج.
-           ردیفِ اصلی را runBackendExtract ساخته؛ این یکی کنارش می‌نشیند و
-           به زبان آدمیزاد می‌گوید چه شد و اگر چیزی نیامده، چرا. */
-        $_dNote = ['   • دامنه: ' . ($dScopeAll ? 'همهٔ محصولات (گالری از نو)' : 'فقط محصولات ناقص'),
-                   '   • دوره: ' . detailSyncIntervalLabel($dInterval)];
-        if (!empty($dRow['auto'])) $_dNote[] = '   • 🤖 همراهِ خودکارِ سینکِ پروفایل (فقط محصولات ناقص)';
-        if ($locked) $_dNote[] = '   • 🔓 با وجود قفلِ اجرای قبلی انجام شد (v9.13)';
-        if (!empty($dRow['pre_list'])) $_dNote[] = '   • فهرست هم اول گرفته شد (پروفایل خالی بود)';
-        if (!empty($dRes['ok'])) {
-            $_dNote[] = '   • 🔍 ' . (int)($dProg['detail_ok'] ?? 0) . ' صفحهٔ محصول باز شد'
-                      . (((int)($dProg['detail_fail'] ?? 0)) > 0 ? (' · ' . (int)$dProg['detail_fail'] . ' باز نشد') : '');
-            $_dNote[] = '   • 🖼 ' . (int)($dProg['gallery_images'] ?? 0) . ' تصویر گالری · 🏷 '
-                      . (int)($dProg['detail_fields'] ?? 0) . ' فیلد · 🎨 '
-                      . (int)($dProg['variation_products'] ?? 0) . ' محصول تنوع‌دار';
-            if ($dTot === 0) {
-                $_wh = (string)($dProg['detail_skip_why'] ?? '');
-                $_dNote[] = '   • ⚠️ هیچ محصولی برای باز کردن انتخاب نشد'
-                    . ($_wh === 'no_config'   ? ' — نه سلکتور جزئیات تنظیم شده نه گالری روشن است' : '')
-                    . ($_wh === 'no_link'     ? ' — محصولات «لینک» ندارند' : '')
-                    . ($_wh === 'already_done'? ' — همه از قبل کامل بودند (برای گرفتن دوبارهٔ گالری، دامنه را «همهٔ محصولات» بگذارید)' : '')
-                    . ($_wh === 'no_products' ? ' — روی سرور محصولی ذخیره نشده' : '');
-            }
-        } else {
-            $_dNote[] = '   • ❌ ' . mb_substr((string)($dRes['error'] ?? 'خطای نامشخص'), 0, 120);
-        }
-        detailSyncNote($dKey, $dProfile['name'] ?? $dKey,
-            (!empty($dRes['ok']) ? '🔍 استخراج دوره‌ای جزئیات — اجرا شد' : '🔍 استخراج دوره‌ای جزئیات — ناموفق'),
-            $_dNote, (string)($dProg['detail_skip_why'] ?? ''));
-        if (!isset($syncState[$dKey])) $syncState[$dKey] = [];
-        $syncState[$dKey]['detailLastRun'] = time();
-        $out[] = $dRow;
-        // پروفایل تازه‌شده را بردار تا حلقهٔ همگام‌سازی نسخهٔ کهنه را نبیند
-        $profiles = loadProfiles();
-    }
-    /* v9.14: هیچ پروفایلی تیک نداشت — این هم یک خبر است، نه سکوت.
-
-       بدون این ردیف، «تیک را زدم ولی کران کاری نمی‌کند» و «تیک اصلاً
-       روی دیسک ذخیره نشده» از بیرون یکسان به نظر می‌رسند. حالا ردیف
-       می‌گوید کران اجرا شده، چند پروفایل دیده و کدام‌ها تیک نداشتند —
-       یعنی اگر پروفایل شما در همین فهرست باشد، مشکل ذخیره‌شدن تیک است
-       نه اجرای کران. */
-    if ($_dsSeen === 0) {
-        $_offList = array_slice($_dsOff, 0, 6);
-        detailSyncNote('', 'همهٔ پروفایل‌ها',
-            '⚠️ استخراج دوره‌ای جزئیات — هیچ پروفایلی سینک/جزئیات روشن ندارد',
-            ['   • کران اجرا شد و ' . count($_dsOff) . ' پروفایل را بررسی کرد',
-             '   • ولی هیچ‌کدام نه «سینک خودکار» روشن دارند نه «استخراج دوره‌ای جزئیات»'
-               . ($locked ? ' (این اجرا زیر قفل بود)' : ''),
-             ($_offList ? ('   • بدون فعال بودن: ' . implode('، ', $_offList)
-                 . (count($_dsOff) > 6 ? ' و ...' : '')) : '   • هیچ پروفایلی وجود ندارد'),
-             '   • برای استخراج جزئیات خودکار، حداقل «سینک خودکار» یا «استخراج دوره‌ای جزئیات» را در پروفایل روشن کنید'],
-            'none_enabled');
-    }
-    saveSyncState($syncState);
-        return $out;
-}
-
 /* =====================================================================
    v9.15: پشتیبانی از اجرای خط فرمان (PHP CLI).
 
@@ -9476,9 +9360,6 @@ if (isCliRun()) {
     $_cliCmd  = ltrim($_cliCmd, '?');                          // ?cron_run هم قبول
     if ($_cliCmd === '' || $_cliCmd === 'cron' || $_cliCmd === 'cron_run') {
         $_GET['cron_run'] = '1';
-    } elseif ($_cliCmd === 'detail' || $_cliCmd === 'detail_sync') {
-        $_GET['cron_run'] = '1';
-        $_GET['only'] = 'detail';
     } elseif ($_cliCmd === 'whoami') {
         $_GET['whoami'] = '1';
     } elseif ($_cliCmd === 'backup') {
@@ -9486,7 +9367,6 @@ if (isCliRun()) {
     } else {
         $_GET['cron_run'] = '1';
     }
-    if (($_cliArgs[1] ?? '') === 'detail') $_GET['only'] = 'detail';
 }
 
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
@@ -9543,15 +9423,9 @@ header('Content-Type: application/json; charset=UTF-8');
    $preDetail نگه داشته می‌شود و مسیرهای قفل/اصلی پایین به‌جای دوباره
    صدا زدن، از همین استفاده می‌کنند (dedup بر اساس detailLastRun هم
    از اجرای دوباره جلوگیری می‌کند). */
-$cnDet = loadConnections();
-$preDetail = null;
-try {
-    $preDetail = cronDetailSyncPass($cnDet, false);
-} catch (Throwable $e) {
-    // حتی اگر فاز جزئیات خطا بدهد، نباید کل کران (و پاسخِ آن) بشکند
-    $preDetail = null;
-}
-if (empty($preDetail)) $preDetail = null;
+/* v9.44: «استخراج دوره‌ای جزئیات» حذف شد — جزئیات حالا به‌صورت درجا و هم‌زمان
+   با استخراجِ هر محصول در runBackendExtract گرفته می‌شود، پس دیگر نیازی به
+   این گذرِ جداگانه در ابتدای کران نیست. */
 
 $_cronBg = !empty($_POST['bg']) || !empty($_GET['bg']);
 finishRequestNow(json_encode(['ok' => true, 'started' => true, 'bg' => $_cronBg,
@@ -9643,8 +9517,6 @@ if ($lockAge < $cronLockSec) {
        جزئیات چیزی نمی‌فرستد؛ فقط صفحهٔ محصول را می‌خواند و روی دیسک
        می‌نویسد، و خودش با محافظ تکراری‌نبودنِ صف و نشانهٔ مرحله در
        برابر اجرای هم‌زمان محافظت می‌شود. ارسال همچنان پشت قفل می‌ماند. */
-    $lockOut['detail_sync'] = $preDetail ?? cronDetailSyncPass($cnLock, true);
-    if (empty($lockOut['detail_sync'])) unset($lockOut['detail_sync']);
     notifCronPing($cnLock, ['profiles' => [], 'locked' => $lockAge]);
     // v9.06: اتصال بالاتر بسته شده — خروجی به فایل می‌رود، نه به اتصالِ مرده
     cronEmit($lockOut);
@@ -9683,8 +9555,6 @@ if (!empty($results_lockReaped)) $results['lock_reaped'] = true;
    اگر وسطِ همان فرآیند پردازه کشته شود، به این حلقه هیچ‌وقت نمی‌رسیدیم و
    جزئیات بی‌رد می‌مرد — دقیقاً همان «اصلاً اجرا نمی‌شود» که کاربر می‌دید.
    حالا ردیفِ جزئیات در همان صفِ استخراج زود و مطمئن می‌نشیند. */
-$results['detail_sync'] = $preDetail ?? cronDetailSyncPass($cn, false);
-if (empty($results['detail_sync'])) unset($results['detail_sync']);
 
 /* v8.97: نگهبان‌ها «اول» اجرا می‌شوند، نه آخر.
 
@@ -9712,47 +9582,6 @@ if (!empty($_bkCfg['auto'])) {
 
 $wdEarly = cronWatchdogs($cn);
 foreach ($wdEarly as $k => $v) { if (!empty($v)) $results[$k] = $v; }
-
-/* v9.15: «فقط جزئیات» — برای وقتی که می‌خواهید یک کران‌جاب جدا فقط
-   استخراج دوره‌ای جزئیات را اجرا کند و کاری به ارسال نداشته باشد:
-       php scraper4.php cron_run detail
-   یا با curl:  ?cron_run&only=detail */
-if ((string)($_GET['only'] ?? $_POST['only'] ?? '') === 'detail') {
-    $results['only'] = 'detail';
-    /* v9.39: حالت «فقط جزئیات» فقط پروفایل‌هایی را که تیک «استخراج دوره‌ای
-       جزئیات» دارند می‌گرفت و از پروفایل‌هایی که «سینک خودکار» روشن دارند
-       رد می‌شد — چون در این حالت از حلقهٔ اصلی پروفایل‌ها عبور نمی‌کردیم.
-       نتیجه این بود که با `cron_run detail` هیچ ردیفی برای پروفایلِ sync
-       ساخته نمی‌شد و جزئیات هرگز اجرا نمی‌شد. حالا در این حالت هم برای
-       پروفایل‌های sync (که جزئیاتِ خود را در گامِ دومِ حلقهٔ عادی می‌گیرند)
-       فاز جزئیات اجرا می‌شود و در sync_state علامت می‌خورد، تا اگر این کران
-       دوباره اجرا شد، دوباره‌کاری نکند. */
-    $nowD = time();
-    foreach ($profiles as $pKey => $pProf) {
-        $dSyncCfg = (array)($pProf['detailSync'] ?? []);
-        $sSyncCfg = (array)($pProf['syncConfig'] ?? []);
-        // پروفایلی که حداقل یکی از دو زمان‌بند را روشن دارد جزئیات می‌خواهد
-        if (empty($dSyncCfg['enabled']) && empty($sSyncCfg['enabled'])) continue;
-        $intervalD = max(0, (int)($dSyncCfg['interval'] ?? 3600));
-        $lastD = (int)($syncState[$pKey]['detailLastRun'] ?? 0);
-        // اگر تازه اجرا شده، نوبتش نرسیده — همین‌جا رد کن
-        if ($intervalD > 0 && ($nowD - $lastD) < $intervalD) continue;
-        if (!isset($syncState[$pKey])) $syncState[$pKey] = [];
-        // فهرست اگر هنوز روی دیسک نباشد لازم است، وگرنه جزئیات کاری ندارد
-        if (empty($pProf['products'])) runBackendExtract($pKey, 'auto', false, 'list');
-        $dRes = runBackendExtract($pKey, 'auto', false, 'detail');
-        $syncState[$pKey]['detailLastRun'] = $nowD;
-        $results['detail_only'][] = [
-            'key' => $pKey, 'name' => $pProf['name'] ?? $pKey,
-            'ok' => !empty($dRes['ok']),
-            'error' => empty($dRes['ok']) ? (string)($dRes['error'] ?? '?') : '',
-        ];
-        $profiles = loadProfiles();   // پروفایل تازه‌شده را بگیر
-    }
-    saveSyncState($syncState);
-    cronEmit($results);
-    exit;
-}
 
 /* پروفایل‌ها و وضعیت دوباره خوانده می‌شوند تا همگام‌سازیِ پایین نسخهٔ
    کهنه (یا پروفایلِ تازه‌ای که همین تیک عوضش کرده) را نبیند. */
@@ -11884,23 +11713,15 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, "'ai_candidates_reply'") !== false
          && strpos($selfSrc, 'function aiCandidateReply(') !== false);
 
-    /* ---------- v9.39: کرانِ فقط-جزئیات برای پروفایل‌های sync ---------- */
-    $add('9.39', 'حالت فقط-جزئیات پروفایل‌های sync را هم می‌گیرد',
-         strpos($selfSrc, "'detail_only'") !== false
-         && strpos($selfSrc, 'syncConfig') !== false
-         && strpos($selfSrc, "'phase' => 'detail'") !== false);
-
-    /* ---------- v9.40: جزئیاتِ پروفایلِ sync در گذرِ زودهنگام کران ---------- */
-    $add('9.40', 'جزئیات پروفایلِ sync در ابتدای کران (زیر قفل هم) اجرا می‌شود',
-         strpos($selfSrc, '$syncOn') !== false
-         && strpos($selfSrc, '$dsOn') !== false
-         && strpos($selfSrc, '$dScopeAll') !== false);
-
-    /* ---------- v9.41: فاز جزئیات قبل از جدا شدن از اتصال اجرا می‌شود ---------- */
-    $add('9.41', 'جزئیات قبل از finishRequestNow اجرا می‌شود (سازگار با cron-job.org)',
-         strpos($selfSrc, '$preDetail = cronDetailSyncPass($cnDet, false);') !== false
-         && strpos($selfSrc, '$lockOut[\'detail_sync\'] = $preDetail ??') !== false
-         && strpos($selfSrc, '$results[\'detail_sync\'] = $preDetail ??') !== false);
+    /* ---------- v9.44: جزئیات هم‌زمان با استخراج هر محصول ---------- */
+    $add('9.44', 'جزئیات در همان حلقهٔ فهرست و به‌محض استخراج هر محصول گرفته می‌شود',
+         function_exists('extractProductDetailInline')
+         && strpos($selfSrc, 'extractProductDetailInline($allProducts') !== false
+         && strpos($selfSrc, "'_inlineDetailDone'") !== false);
+    $add('9.44', 'بخش «استخراج دوره‌ای جزئیات» حذف شده است',
+         !function_exists('cronDetailSyncPass')
+         && !function_exists('detailSyncNote')
+         && strpos($selfSrc, 'id="profileDetail' . 'En"') === false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -11943,43 +11764,9 @@ if (isset($_GET['selftest'])) {
     $add('9.15', 'آرگومان‌های خط فرمان به اندپوینت نگاشت می‌شوند',
          strpos($selfSrc, "\$_cliArgv = (array)(\$GLOBALS['argv'] ?? \$_SERVER['argv'] ?? []);") !== false
          && strpos($selfSrc, "\$_GET['cron_run'] = '1';") !== false);
-    $add('9.15', 'حالت فقط-جزئیات از خط فرمان',
-         strpos($selfSrc, "\$_cliCmd === 'detail' || \$_cliCmd === 'detail_sync'") !== false
-         && strpos($selfSrc, "(string)(\$_GET['only'] ?? \$_POST['only'] ?? '') === 'detail'") !== false);
     $add('9.15', 'خروجی خط فرمان خلاصهٔ خوانا است نه HTML',
          function_exists('cronSummary' . 'Text')
          && strpos($selfSrc, 'if (isCliRun()) { echo cronSummary' . 'Text($results); return; }') !== false);
-
-    /* ---------- v9.14: کران در هر حالت کارت لاگ بگذارد ---------- */
-    /* اگر هیچ پروفایلی تیک نداشت، حلقه بی‌صدا رد می‌شد و «کران اجرا
-       نشده» با «تیک ذخیره نشده» یکسان به نظر می‌رسید. */
-    $add('9.14', 'پروفایل‌های بدون تیک شمرده می‌شوند',
-         strpos($selfSrc, '$_dsSeen = 0; $_dsOff' . ' = [];') !== false
-         && strpos($selfSrc, '$_dsSe' . 'en++;') !== false);
-    $add('9.14', 'نبودِ هیچ پروفایلِ روشن هم کارت می‌گذارد',
-         strpos($selfSrc, 'if ($_dsSeen ===' . ' 0) {') !== false
-         && strpos($selfSrc, "'none_enab" . "led');") !== false);
-    $add('9.14', 'کارت نام پروفایل‌های بدون تیک را می‌گوید',
-         strpos($selfSrc, '$_offList = array_slice($_dsOff,' . ' 0, 6);') !== false
-         && strpos($selfSrc, "'   • بدون تیک" . ": '") !== false);
-
-    /* ---------- v9.13: قفل، استخراج دوره‌ای را متوقف نکند ---------- */
-    /* دکمه به قفل نمی‌رسد ولی کران می‌رسد — همین باعث شد یکی کار کند و
-       دیگری نه. حالا هر دو از یک تابع رد می‌شوند. */
-    $add('9.13', 'حلقهٔ استخراج دوره‌ای تابع مشترک دارد',
-         function_exists('cronDetailSync' . 'Pass'));
-    $add('9.13', 'مسیر قفل هم استخراج دوره‌ای را اجرا می‌کند',
-         strpos($selfSrc, "\$lockOut['detail_sync'] = cronDetailSync" . 'Pass($cnLock, true);') !== false);
-    $add('9.13', 'مسیر عادی هم از همان تابع رد می‌شود',
-         strpos($selfSrc, "\$results['detail_sync'] = cronDetailSync" . 'Pass($cn, false);') !== false);
-    /* اجرای زیر قفل باید در گزارش قابل تشخیص باشد */
-    $add('9.13', 'اجرای زیر قفل در لاگ نشانه می‌گذارد',
-         strpos($selfSrc, 'با وجود قفلِ اجرای قبلی انجام ' . 'شد') !== false);
-    /* ارسال نباید از قفل خارج شده باشد — فقط جزئیات */
-    $add('9.13', 'ارسال همچنان پشت قفل می‌ماند',
-         (($_p913 = strpos($selfSrc, "\$lockOut['detail_sync'] = cronDetailSync" . 'Pass')) !== false)
-         && strpos($selfSrc, 'cronEmit($lockOut);', $_p913) !== false
-         && strpos($selfSrc, 'wooWriteQueue', $_p913) > strpos($selfSrc, 'cronEmit($lockOut);', $_p913));
 
     /* ---------- v9.12: تشخیص نسخهٔ فایلِ اجراشونده ---------- */
     $add('9.12', 'اندپوینت whoami هست و کش نمی‌شود',
@@ -11991,69 +11778,6 @@ if (isset($_GET['selftest'])) {
     $add('9.12', 'بنر، تاریخ و اثر انگشت فایل را نشان می‌دهد',
          strpos($selfSrc, 'h(substr((string)@md5_' . 'file(__FILE__), 0, 8))?>') !== false
          && strpos($selfSrc, 'h(date(\'Y/m/d H:i\', (int)@file' . 'mtime(__FILE__)))?>') !== false);
-
-    /* ---------- v9.11: دیده شدن استخراج دوره‌ای در صف ---------- */
-    /* مرحلهٔ ارسال کل ردیف وضعیت را بازنویسی می‌کرد و زمان‌بندی
-       استخراج دوره‌ای را پاک می‌کرد. */
-    $add('9.11', 'ارسال، زمان‌بندی استخراج دوره‌ای را پاک نمی‌کند',
-         substr_count($selfSrc, 'array_merge(is_array($syncState[$key]') >= 2
-         && strpos($selfSrc, "\$syncState[\$key]=['lastRun'=>\$now,'status'=>'running_w" . "oo'") === false);
-    $add('9.11', 'ردیف گزارشی برای صف ساخته می‌شود',
-         function_exists('detailSync' . 'Note')
-         && strpos($selfSrc, "'phase' => 'detail_s" . "ync',") !== false
-         && strpos($selfSrc, "'note_on" . "ly' => true,") !== false);
-    $add('9.11', 'حالت «نوبتش نشده» هم ردیف می‌گذارد',
-         strpos($selfSrc, "'⏳ استخراج دوره‌ای جزئیات — هنوز نوبتش " . "نشده',") !== false
-         && strpos($selfSrc, "'not_d" . "ue');") !== false);
-    $add('9.11', 'خلاصهٔ هر اجرا در صف ثبت می‌شود',
-         strpos($selfSrc, '$_dNote[] = ' . "'   • 🖼 '") !== false
-         && strpos($selfSrc, 'استخراج دوره‌ای جزئیات — اجرا ' . 'شد') !== false);
-    $add('9.11', 'رابط کاربری ردیف گزارشی را می‌شناسد',
-         strpos($selfSrc, "e.phase==='detail_s" . "ync'") !== false
-         && substr_count($selfSrc, 'if(e.note_on' . 'ly){') >= 2);
-    $add('9.11', 'دکمهٔ اجرای فوری هست و فاز جزئیات را می‌فرستد',
-         strpos($selfSrc, 'function runDetailSync' . 'Now(){') !== false
-         && strpos($selfSrc, 'onclick="runDetailSync' . 'Now()"') !== false);
-    $add('9.11', 'اندپوینت دامنهٔ همه را می‌پذیرد',
-         strpos($selfSrc, "\$forceAllIn = !empty(\$_GET['force_a" . "ll'])") !== false
-         && strpos($selfSrc, 'runBackendExtract($profileKey,' . "'manual',true,\$phaseIn,\$forceAllIn);") !== false);
-
-    /* ---------- v9.10: استخراج دوره‌ای جزئیات ---------- */
-    $add('9.10', 'بخش استخراج دوره‌ای جزئیات در تب شروع هست',
-         strpos($selfSrc, 'id="profileDetail' . 'En"') !== false
-         && strpos($selfSrc, 'id="profileDetail' . 'Interval"') !== false
-         && strpos($selfSrc, 'id="profileDetail' . 'Scope"') !== false);
-    $add('9.10', 'دراپ‌داون دوره همان گزینه‌های همگام‌سازی را دارد',
-         substr_count($selfSrc, '<option value="604800">هر هفته</option>') >= 2
-         && substr_count($selfSrc, '<option value="0">🔄 هنگام فراخوانی اندپوینت</option>') >= 2);
-    $add('9.10', 'تنظیمات جزئیات جمع و ذخیره می‌شود',
-         strpos($selfSrc, 'function getDetailSync' . 'Config(){') !== false
-         && strpos($selfSrc, 'd.detailSync=getDetailSync' . 'Config();') !== false
-         && strpos($selfSrc, "k === 'detailS" . "ync'") !== false);
-    $add('9.10', 'ذخیرهٔ جزئی تنظیم دوره‌ای را پاک نمی‌کند',
-         strpos($selfSrc, "\$detailSyncIn = array_key_exists('detailS" . "ync', \$_POST)") !== false
-         && strpos($selfSrc, "'detailSync' => \$detailS" . "ync,") !== false);
-    /* حلقه باید «قبل» از حلقهٔ همگام‌سازی باشد، وگرنه پروفایلی که
-       همگام‌سازی‌اش خاموش است هرگز جزئیات دوره‌ای نمی‌گیرد. */
-    $add('9.10', 'حلقهٔ جزئیات قبل از حلقهٔ همگام‌سازی اجرا می‌شود',
-         (($_p910a = strpos($selfSrc, "\$dCfg = \$dProfile['detailS" . "ync'] ?? [];")) !== false)
-         && (($_p910b = strpos($selfSrc, "\$syncCfg = \$profile['syncCon" . "fig'] ?? [];", $_p910a)) !== false)
-         && $_p910a < $_p910b);
-    $add('9.10', 'زمان‌بندی جزئیات از همگام‌سازی جداست',
-         strpos($selfSrc, "\$syncState[\$dKey]['detailLast" . "Run'] = time();") !== false
-         && strpos($selfSrc, "(int)(\$syncState[\$dKey]['detailLast" . "Run'] ?? 0);") !== false);
-    $add('9.10', 'دامنهٔ «همه» صفحهٔ هر محصول را دوباره باز می‌کند',
-         strpos($selfSrc, '$_forceAll=($phase===\'det' . 'ail\'&&$forceAll);') !== false
-         && strpos($selfSrc, 'if($_forceAll){$needDetail[$key]=$p;cont' . 'inue;}') !== false);
-    $add('9.10', 'پروفایل بدون محصول اول فهرست را می‌گیرد',
-         strpos($selfSrc, "if (empty(\$dProfile['pro" . "ducts'])) {") !== false
-         && strpos($selfSrc, "runBackendExtract(\$dKey, 'auto', false, 'li" . "st');") !== false);
-    /* v9.13: حلقه به تابع مشترک منتقل شد، پس ردیف‌ها در $out جمع می‌شوند
-       و نتیجه در هر دو مسیر (عادی و زیرِ قفل) به گزارش می‌نشیند. */
-    $add('9.10', 'نتیجهٔ استخراج دوره‌ای در گزارش کران می‌آید',
-         substr_count($selfSrc, '$out[] = $dRow;') >= 2
-         && strpos($selfSrc, "\$results['detail_sync'] = cronDetailSync" . 'Pass') !== false
-         && strpos($selfSrc, "\$lockOut['detail_sync'] = cronDetailSync" . 'Pass') !== false);
 
     /* ---------- v9.09: هر بسته شدن ردیف باید علتش را بگوید ---------- */
     $add('9.09', 'مسیر «محصولی روی سرور نیست» علت ثبت می‌کند',
@@ -22095,47 +21819,6 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
             </div>
             <div id="profileSyncStatus" style="font-size:10px;color:#64748b;margin-top:6px"></div>
         </div>
-
-        <!-- v9.10: استخراج دوره‌ای جزئیات — مستقل از همگام‌سازی -->
-        <div style="margin-top:10px;padding:10px;background:#0f172a;border:1px solid #334155;border-radius:8px">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-                <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                    <input type="checkbox" id="profileDetailEn" onchange="scheduleSave();updateDetailSyncStatusText()">
-                    <b style="color:#f9a8d4">🔍 استخراج دوره‌ای جزئیات</b>
-                </label>
-            </div>
-            <div class="row" style="margin-bottom:6px;align-items:center">
-                <label style="min-width:80px;font-size:12px;color:#94a3b8">دوره:</label>
-                <select id="profileDetailInterval" onchange="scheduleSave();updateDetailSyncStatusText()" style="flex:1">
-                    <option value="0">🔄 هنگام فراخوانی اندپوینت</option>
-                    <option value="1800">هر ۳۰ دقیقه</option>
-                    <option value="3600" selected>هر ۱ ساعت</option>
-                    <option value="7200">هر ۲ ساعت</option>
-                    <option value="10800">هر ۳ ساعت</option>
-                    <option value="21600">هر ۶ ساعت</option>
-                    <option value="43200">هر ۱۲ ساعت</option>
-                    <option value="86400">هر روز</option>
-                    <option value="604800">هر هفته</option>
-                </select>
-            </div>
-            <div class="row" style="margin-bottom:4px;align-items:center">
-                <label style="min-width:80px;font-size:12px;color:#94a3b8">دامنه:</label>
-                <select id="profileDetailScope" onchange="scheduleSave();updateDetailSyncStatusText()" style="flex:1">
-                    <option value="missing" selected>فقط محصولات ناقص (سریع‌تر)</option>
-                    <option value="all">همهٔ محصولات — گالری‌ها از نو گرفته شوند</option>
-                </select>
-            </div>
-            <div style="font-size:10px;color:#64748b;line-height:1.7;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px 8px;margin-top:4px">
-                💡 با این تیک، کران‌جاب مستقل از همگام‌سازی، صفحهٔ تک‌تک محصولات را باز می‌کند و
-                <b>تصاویر گالری، تنوع‌ها، دسته‌بندی، توضیحات، SKU، برند، وزن و موجودی</b> را می‌گیرد.
-                همان کاری که دکمهٔ «🔍 استخراج تفصیلی (سرور)» می‌کند، ولی دوره‌ای و خودکار.
-                کار روی سرور انجام می‌شود و بستن مرورگر قطعش نمی‌کند.
-            </div>
-            <div class="row" style="margin-top:6px">
-                <button class="btn btn-pink" onclick="runDetailSyncNow()" style="flex:1;font-size:11px">▶ اجرای همین حالا (بدون انتظار دوره)</button>
-            </div>
-            <div id="profileDetailStatus" style="font-size:10px;color:#64748b;margin-top:6px"></div>
-        </div>
     </div>
 
     <div class="card">
@@ -23917,7 +23600,7 @@ function saveProfileSilent() {
     fd.append('action', 'save_profile');
     for (const k in data) {
         // v7.66: syncConfig must also be JSON.stringify'd — otherwise FormData converts object to "[object Object]"
-        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'detailSync' || k === 'bslFallbackCatIds' || k === 'gallery') {
+        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'bslFallbackCatIds' || k === 'gallery') {
             fd.append(k, JSON.stringify(data[k]));
         } else {
             fd.append(k, data[k]);
@@ -23963,7 +23646,7 @@ function saveProfile() {
     fd.append('action', 'save_profile');
     for (const k in data) {
         // v7.66: syncConfig must also be JSON.stringify'd — otherwise "[object Object]"
-        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'detailSync' || k === 'bslFallbackCatIds' || k === 'gallery') {
+        if (k === 'selectors' || k === 'detailSelectors' || k === 'products' || k === 'productsOrder' || k === 'syncConfig' || k === 'bslFallbackCatIds' || k === 'gallery') {
             fd.append(k, JSON.stringify(data[k]));
         } else {
             fd.append(k, data[k]);
@@ -25040,9 +24723,6 @@ function renderExtractQueue(entries, progress){
             html+='<span style="color:#fbbf24;font-size:10px;background:#42200630;padding:1px 6px;border-radius:4px">📄 مرحله ۱: فهرست</span>';
         }else if(e.phase==='detail'){
             html+='<span style="color:#f9a8d4;font-size:10px;background:#50072430;padding:1px 6px;border-radius:4px">🔍 مرحله ۲: جزئیات</span>';
-        }else if(e.phase==='detail_sync'){
-            // v9.11: ردیف گزارشِ «استخراج دوره‌ای جزئیات»
-            html+='<span style="color:#f9a8d4;font-size:10px;background:#50072430;padding:1px 6px;border-radius:4px">🔍 استخراج دوره‌ای جزئیات</span>';
         }
         if(e.profile_name)html+='<span style="color:#94a3b8;font-size:10px">'+esc(e.profile_name)+'</span>';
         if(products>0)html+='<span style="color:#e2e8f0;font-weight:600;font-size:12px">'+toFa(products)+' محصول</span>';
@@ -26269,42 +25949,14 @@ const CHANGELOG = [
     'زمان تغییر، md5 و نسخه — بدون کش. با این یک آدرس معلوم می‌شود',
     'مشکل از آپلود است یا از کش مرورگر.'
   ]},
-  {v:'9.11', t:'👁 استخراج دوره‌ای جزئیات حالا در صف دیده می‌شود', items:[
-    'گزارش شما: «انگار اتفاقی نمی‌افتد» و خواستید جزئیات وظیفه و لاگ‌ها',
-    'در بخش صف استخراج بیاید.',
-    '🐞 یک باگ واقعی پیدا شد: مرحلهٔ ارسال، کل ردیف وضعیت پروفایل را',
-    'بازنویسی می‌کرد و detailLastRun را پاک می‌کرد. یعنی زمان‌بندی',
-    'استخراج دوره‌ای هر بار از صفر شروع می‌شد و روی دوره‌های بلند',
-    'عملاً هیچ‌وقت به نوبتش نمی‌رسید. حالا فقط کلیدهای خودش به‌روز می‌شوند.',
-    '👁 حالت «هنوز نوبتش نشده» تا حالا هیچ ردی نمی‌گذاشت — از دید شما',
-    'با «اصلاً اجرا نشد» فرقی نداشت. حالا یک ردیف در صف می‌نشیند و',
-    'می‌گوید دوره چقدر است، آخرین اجرا کی بوده و چقدر تا نوبت بعدی مانده.',
-    '📋 بعد از هر اجرا هم یک ردیف خلاصه با برچسب «🔍 استخراج دوره‌ای',
-    'جزئیات» اضافه می‌شود: چند صفحه باز شد، چند تصویر گالری، چند فیلد،',
-    'چند محصول تنوع‌دار — و اگر چیزی نیامد، دقیقاً چرا.',
-    '▶ دکمهٔ «اجرای همین حالا» اضافه شد تا بدون انتظار برای دوره',
-    'بتوانید تنظیمات را همان لحظه آزمایش کنید.'
-  ]},
-  {v:'9.10', t:'🔍 بخش تازه: استخراج دوره‌ای جزئیات', items:[
-    'خواستهٔ شما: یک بخش با تیک و دراپ‌داون دوره، در تب شروع، بعد از',
-    '«همگام‌سازی دوره‌ای» — که با اجرای دوره‌ای‌اش همهٔ جزئیات بیاید.',
-    '✅ ساخته شد: «🔍 استخراج دوره‌ای جزئیات» با همان دراپ‌داون دوره',
-    '(از «هنگام فراخوانی اندپوینت» تا «هر هفته») و یک دراپ‌داون دامنه:',
-    '• فقط محصولات ناقص (سریع‌تر) — پیش‌فرض',
-    '• همهٔ محصولات — گالری‌ها از نو گرفته شوند',
-    'دومی برای وقتی است که سلکتور گالری را عوض کرده‌اید یا مبدأ',
-    'عکس‌ها را به‌روز کرده؛ محصولی که قبلاً گالری داشت هم دوباره باز می‌شود.',
-    '🎯 مهم: این قابلیت کاملاً مستقل از همگام‌سازی است.',
-    'حلقهٔ کران «قبل» از حلقهٔ همگام‌سازی اجرا می‌شود، چون آن حلقه در',
-    'خط اولش پروفایل‌های بدون همگام‌سازی را رد می‌کند. یعنی می‌توانید',
-    'جزئیات را دوره‌ای بگیرید بدون اینکه چیزی به مقصد فرستاده شود.',
-    'زمان‌بندی‌اش هم جداست، پس با دورهٔ همگام‌سازی قاطی نمی‌شود.',
-    '📦 چه چیزهایی می‌آید: تصاویر گالری، تنوع‌ها (رنگ/سایز)، دسته‌بندی،',
-    'توضیحات کوتاه و بلند، SKU، برچسب‌ها، وزن، موجودی، برند و عکس اصلی.',
-    '✅ اگر پروفایل هنوز محصولی روی سرور ندارد، اول فهرست گرفته می‌شود',
-    'تا اجرا بی‌صدا نماند.',
-    '📄 نتیجه در خروجی کران زیر کلید detail_sync می‌آید: چند صفحه باز شد،',
-    'چند تصویر گالری، چند فیلد، چند محصول تنوع‌دار.'
+  {v:'9.44', t:'🔍 استخراج جزئیات هم‌زمان با فهرست', items:[
+    'بخش «استخراج دوره‌ای جزئیات» حذف شد: جزئیات حالا در همان حلقهٔ',
+    'فهرست و به‌محض استخراجِ هر محصول گرفته می‌شود.',
+    '🔍 چون کران‌جاب (مثل cron-job.org) منتظر کارِ پس‌زمینه نمی‌ماند،',
+    'نوبتِ جدا برای جزئیات ممکن بود هرگز اجرا نشود. حالا هر محصول همان',
+    'لحظه کامل می‌شود و دیگر به گذرِ دوره‌ای نیاز نیست.',
+    '📦 همهٔ جزئیات (گالری، تنوع‌ها، دسته‌بندی، توضیحات، SKU، وزن، موجودی)',
+    'فقط برای محصولِ ناقص و همان لحظه استخراج می‌شود.'
   ]},
   {v:'9.09', t:'🔍 پیام «چیزی برای انجام نداشت» علتش را می‌گوید', items:[
     'گزارش شما: مودال گفت «⏭ این مرحله چیزی برای انجام نداشت» ولی',
@@ -32820,54 +32472,6 @@ function getSyncConfig(){
         bslAddUpdate:$('profileSyncBslAddUpdate').checked
     };
 }
-/* v9.10: تنظیمات «استخراج دوره‌ای جزئیات».
-   عمداً جدا از syncConfig نگه داشته شده تا روشن/خاموش کردن یکی روی
-   دیگری اثر نگذارد — کاربر می‌تواند جزئیات را دوره‌ای بگیرد بدون اینکه
-   چیزی به مقصد فرستاده شود، یا برعکس. */
-function getDetailSyncConfig(){
-    const iv=parseInt($('profileDetailInterval')?$('profileDetailInterval').value:'3600');
-    return {
-        enabled:!!($('profileDetailEn')&&$('profileDetailEn').checked),
-        interval:isNaN(iv)?3600:iv,
-        scope:($('profileDetailScope')&&$('profileDetailScope').value)||'missing'
-    };
-}
-/* v9.11: اجرای فوری همین قابلیت، بدون منتظر ماندن برای دوره.
-   بدون این، تنها راه آزمودنِ تنظیمات صبر کردن تا نوبت بعدی بود و
-   کاربر نمی‌توانست بفهمد اصلاً کار می‌کند یا نه. */
-function runDetailSyncNow(){
-    const url=($('url')&&$('url').value.trim())
-              ||($('profileSelect')&&$('profileSelect').value.trim())||'';
-    if(!url){showToast('⚠️ ابتدا پروفایل را انتخاب کنید',1);return;}
-    if(!($('profileDetailEn')&&$('profileDetailEn').checked)){
-        showToast('⚠️ اول تیک «استخراج دوره‌ای جزئیات» را بزنید',1);return;
-    }
-    const go=()=>{
-        const scope=($('profileDetailScope')&&$('profileDetailScope').value)||'missing';
-        openExtractPanel('🔍 استخراج دوره‌ای جزئیات — اجرای فوری');
-        showToast('🔍 شروع شد — دامنه: '+(scope==='all'?'همهٔ محصولات':'فقط ناقص‌ها'));
-        fetch('?action=backend_extract&phase=detail&force_all='+(scope==='all'?'1':'0')
-              +'&profile_key='+encodeURIComponent(profileKey(url)),{method:'GET'}).catch(()=>{});
-        watchExtractProgress();
-    };
-    if(typeof saveProfileSilent==='function'){
-        saveProfileSilent();
-        setTimeout(go,900);
-    }else go();
-}
-function updateDetailSyncStatusText(){
-    const box=$('profileDetailStatus');
-    if(!box)return;
-    if(!($('profileDetailEn')&&$('profileDetailEn').checked)){box.textContent='';return;}
-    const sel=$('profileDetailInterval');
-    const intv=sel?sel.options[sel.selectedIndex].text:'';
-    const scope=($('profileDetailScope')&&$('profileDetailScope').value)==='all'
-        ? 'همهٔ محصولات' : 'فقط محصولات ناقص';
-    box.innerHTML='<span style="color:#f9a8d4">🔍 فعال</span> — '+esc(intv)+' · '+esc(scope)
-        +'<br><span style="color:#64748b">نیازمند کران‌جاب روی '
-        +'<code style="direction:ltr">?cron_run</code> است.</span>';
-}
-
 // v7.81: Update sync status text when any sync config changes
 function updateSyncStatusText(){
     const en=$('profileSyncEn').checked;
@@ -32918,20 +32522,12 @@ applyProfile=function(p){
         $('profileSyncBslAddUpdate').checked=false;
         $('profileSyncStatus').textContent='';
     }
-    // v9.10: تنظیمات استخراج دوره‌ای جزئیات
-    const dc=p.detailSync||{};
-    if($('profileDetailEn'))$('profileDetailEn').checked=!!dc.enabled;
-    if($('profileDetailInterval')&&dc.interval!==undefined&&dc.interval!==null)
-        $('profileDetailInterval').value=String(dc.interval);
-    if($('profileDetailScope')&&dc.scope)$('profileDetailScope').value=dc.scope;
-    updateDetailSyncStatusText();
 };
 // Override collectProfileData to include syncConfig
 const _origCollectProfileData=collectProfileData;
 collectProfileData=function(){
     const d=_origCollectProfileData();
     d.syncConfig=getSyncConfig();
-    d.detailSync=getDetailSyncConfig();   // v9.10
     return d;
 };
 // ========== Auto-Continue Send Logic ==========
