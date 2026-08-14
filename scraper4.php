@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.27';
-const APP_VERSION_DATE = '1405/05/29';
+const APP_VERSION = '9.28';
+const APP_VERSION_DATE = '1405/05/30';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -10489,12 +10489,40 @@ if (isset($_GET['ai_probe'])) {
     foreach (['mode','resolve_ip','doh_url','worker_url','proxy','proxy_type','proxy_auth'] as $k) {
         if (isset($_GET['net_' . $k])) $net[$k] = trim((string)$_GET['net_' . $k]);
     }
-    $baseUrl = trim((string)($_GET['base_url'] ?? ($ai['base_url'] ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1')));
-    $apiKey  = trim((string)($ai['api_key'] ?? ''));
-    $model   = trim((string)($ai['model'] ?? 'qwen-plus'));
-    $host    = (string)(parse_url($baseUrl, PHP_URL_HOST) ?? '');
+    /* v9.27: از «ارائه‌دهندهٔ فعال» آدرس واقعی و کلید/مدل را بگیر.
+       تا ۹.۲۶ این بخش به فیلدهای تک-AI قدیمی (base_url) وابسته بود که در
+       بازنویسی چند-ارائه‌دهنده حذف شدند — برای همین host خالی می‌آمد و
+       عیب‌یابی همیشه «میزبان خالی» می‌گفت. حالا از خودِ ارائه‌دهندهٔ فعال
+       و مدلِ فعال استفاده می‌شود. */
+    $probeUrl = '';
+    $apiKey   = '';
+    $model    = '';
+    $provId   = '';
+    $provName = '';
+    $_ac = aiActiveConfig();
+    if (!empty($_ac['provider'])) {
+        $provId   = (string)($_ac['provider']['id'] ?? '');
+        $provName = (string)($_ac['provider']['name'] ?? $provId);
+        $apiKey   = trim((string)($_ac['provider']['apiKey'] ?? ''));
+        $model    = (string)($_ac['model'] ?? '');
+        $ep = aiProviderEndpoint($_ac['provider'], $model);
+        // برای تستِ عیب‌یابی، آدرس chat/completions را می‌سنجیم
+        $probeUrl = (string)($ep['url'] ?? '');
+        // Cloudflare آدرس مستقیم مدل می‌دهد؛ برای هاست هم همان را بگیر
+        if ($probeUrl === '') $probeUrl = (string)($_ac['provider']['url'] ?? '');
+    }
+    // سازگاری: اگر ارائه‌دهنده‌ای نیست، به مقادیر قدیمی برگرد
+    if ($probeUrl === '') {
+        $baseUrl0 = trim((string)($_GET['base_url'] ?? ($ai['base_url'] ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1')));
+        $probeUrl = rtrim($baseUrl0, '/') . '/chat/completions';
+        $apiKey   = $apiKey !== '' ? $apiKey : trim((string)($ai['api_key'] ?? ''));
+        $model    = $model !== '' ? $model : trim((string)($ai['model'] ?? 'qwen-plus'));
+    }
+    $host = (string)(parse_url($probeUrl, PHP_URL_HOST) ?? '');
+    $port = (int)(parse_url($probeUrl, PHP_URL_PORT) ?? (parse_url($probeUrl, PHP_URL_SCHEME) === 'https' ? 443 : 80));
 
-    $out = ['ok' => true, 'host' => $host, 'base_url' => $baseUrl,
+    $out = ['ok' => true, 'host' => $host, 'port' => $port, 'base_url' => $probeUrl,
+            'provider' => $provId, 'provider_name' => $provName, 'model' => $model,
             'has_key' => $apiKey !== '', 'steps' => [], 'modes' => []];
 
     // ۱) DNS محلی چه می‌گوید؟
@@ -10523,7 +10551,7 @@ if (isset($_GET['ai_probe'])) {
 
     $payload = ['model' => $model, 'max_tokens' => 5,
                 'messages' => [['role' => 'user', 'content' => 'ping']]];
-    $url = rtrim($baseUrl, '/') . '/chat/completions';
+    $url = $probeUrl; // v9.27: از ارائه‌دهندهٔ فعال گرفته شد
     $headers = ['Content-Type: application/json', 'Authorization: Bearer ' . ($apiKey !== '' ? $apiKey : 'probe')];
 
     $working = [];
@@ -11277,6 +11305,17 @@ if (isset($_GET['selftest'])) {
     $add('9.27', 'در عیب‌یابی، DoH بدون اتصال واقعی سبز نمی‌شود',
          strpos($selfSrc, 'DoH فقط DNS را حل می') !== false
          && strpos($selfSrc, 'مسیر IP بسته است') !== false);
+
+    /* ---------- v9.28: عیب‌یابی از ارائه‌دهندهٔ فعال ---------- */
+    $add('9.28', 'عیب‌یابی از ارائه‌دهندهٔ فعال endpoint می‌گیرد',
+         strpos($selfSrc, '\$_ac = aiActive' . 'Config()') !== false
+         && strpos($selfSrc, "\\$probeUrl = (string)(\\$ep['url']") !== false);
+    $add('9.28', 'پیش‌فرض قدیمی به‌عنوان پشتیبان حفظ شده',
+         strpos($selfSrc, "if (\\$probeUrl === '') {") !== false
+         && strpos($selfSrc, 'base_url') !== false);
+    $add('9.28', 'عیب‌یابی نام ارائه‌دهنده و مدل را نشان می‌دهد',
+         strpos($selfSrc, 'd.provider_name') !== false
+         && strpos($selfSrc, 'd.model') !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
@@ -24935,6 +24974,17 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.28', t:'🛠 عیب‌یابی از «ارائه‌دهندهٔ فعال» استفاده می‌کند', items:[
+    'گزارش شما: عیب‌یابی می‌گفت «میزبان خالی» و «URL rejected: No host part»',
+    'و هیچ روشی کار نمی‌کرد.',
+    '🐞 علت: عیب‌یابی (ai_probe) هنوز به فیلدهای تک-AI قدیمی (base_url) وابسته',
+    'بود که در بازنویسی چند-ارائه‌دهنده حذف شدند — پس host خالی می‌آمد.',
+    '✅ حالا عیب‌یابی آدرس، کلید و مدل را از «ارائه‌دهندهٔ فعال» می‌گیرد.',
+    '👁 عنوان عیب‌یابی حالا نام ارائه‌دهنده و مدل فعال را هم نشان می‌دهد تا',
+    'مشخص باشد دقیقاً چه چیزی سنجیده می‌شود.',
+    '💡 با این اصلاح، نتیجهٔ عیب‌یابی قابل اعتماد است و نشان می‌دهد آیا',
+    'به اندپوینت واقعیِ همان ارائه‌دهنده می‌رسید یا نه.'
+  ]},
   {v:'9.27', t:'🔍 تشخیص شفاف DoH: چراغ سبز فقط DNS را نشان می‌دهد', items:[
     'گزارش شما: روش DoH (گوگل) چراغش سبز شد ولی هنگام تست مدل‌ها هنوز',
     '«عدم دسترسی به اندپوینت» می‌دهد.',
@@ -28506,13 +28556,15 @@ function aiProbe(){
     const r=$('aiTR');
     r.innerHTML='<div class="alert alert-info" style="padding:8px;font-size:11px">🩺 در حال سنجش روش‌ها... (تا یک دقیقه)</div>';
     const n=getAiNet();
-    const q=new URLSearchParams({ai_probe:'1',base_url:($('aiBaseUrl')||{}).value||'',
+    // v9.27: base_url دیگر از فیلد حذف‌شده فرستاده نمی‌شود؛ سمت سرور از ارائه‌دهندهٔ فعال می‌گیرد
+    const q=new URLSearchParams({ai_probe:'1',
         net_mode:n.mode,net_resolve_ip:n.resolve_ip,net_doh_url:n.doh_url,
         net_worker_url:n.worker_url,net_proxy:n.proxy,net_proxy_type:n.proxy_type,net_proxy_auth:n.proxy_auth});
     fetch('?'+q.toString()).then(x=>x.json()).then(d=>{
         if(!d.ok){r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
         let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px;line-height:2">';
         h+='<div style="color:#67e8f9;font-weight:700;margin-bottom:6px">🩺 نتیجهٔ عیب‌یابی — '+esc(d.host||'')+'</div>';
+        if(d.provider_name)h+='<div style="color:#94a3b8;margin-bottom:6px">ارائه‌دهنده: '+esc(d.provider_name)+' · مدل: <span dir="ltr">'+esc(d.model||'')+'</span></div>';
         (d.steps||[]).forEach(st=>{
             h+='<div>'+(st.ok?'🟢':'🔴')+' '+esc(st.name)+' — <span style="color:#94a3b8">'+esc(st.detail||'')+'</span>'
               +(st.ms!==undefined?' <span style="color:#64748b">('+toFa(st.ms)+'ms)</span>':'')+'</div>';
