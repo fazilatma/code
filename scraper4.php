@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.34';
-const APP_VERSION_DATE = '1405/06/05';
+const APP_VERSION = '9.35';
+const APP_VERSION_DATE = '1405/06/06';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1316,10 +1316,10 @@ function aiFreeFallbackConfig(): array {
 }
 
 /** فراخوانی چت با ارائه‌دهندهٔ فعال + بک‌آپ خودکارِ مدل رایگان */
-function aiActiveChat(array $payload): array {
+function aiActiveChat(array $payload, ?array $net = null): array {
     $cfg = aiActiveConfig();
     if (empty($cfg['provider'])) return ['ok' => false, 'code' => 0, 'error' => 'هیچ ارائه‌دهندهٔ هوش مصنوعی فعال و دارای مدلی تنظیم نشده'];
-    $net = aiNetCfg();
+    if ($net === null) $net = aiNetCfg();
     $r = aiProviderCall($cfg['provider'], $cfg['model'], $payload, $net);
     // اگر موفق بود یا خطای قطعیِ منطقی (مثل 400) داد که fallback کمکی نمی‌کند، برگردان
     if (!empty($r['ok'])) return $r;
@@ -10474,8 +10474,11 @@ if (isset($_GET['ar_test'])) {
     }
     /* v9.34: اولویت جدید — اول هوش مصنوعی، اگر خطا داد قواعد، اگر هیچ
        قاعده‌ای نخورد بدون پاسخ. در حالت آزمایش، هوش مصنوعی واقعاً صدا زده
-       می‌شود تا نتیجهٔ واقعی بدهد. */
-    $aiRes = arAiReplyText($txt);
+       می‌شود تا نتیجهٔ واقعی بدهد.
+       v9.35: مهلت کوتاه (۸ ثانیه) تا دکمهٔ آزمایش هرگز کاربر را معطل نکند
+       و سریع جواب بدهد — اگر هوش مصنوعی دیر جواب بدهد، قواعد امتحان می‌شوند. */
+    @set_time_limit(40);
+    $aiRes = arAiReplyText($txt, 8);
     $aiOk = !empty($aiRes['ok']);
     $aiText = $aiOk ? ($aiRes['text'] . ($cfgAR['sign'] !== '' ? "\n" . $cfgAR['sign'] : '')) : '';
     $aiErr = $aiOk ? '' : (string)($aiRes['error'] ?? 'خطا');
@@ -11465,6 +11468,12 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "'ai_ok'") !== false
          && strpos($selfSrc, "'source'") !== false
          && strpos($selfSrc, "'ai_error'") !== false);
+
+    /* ---------- v9.35: مهلت کوتاه برای دکمهٔ آزمایش ---------- */
+    $add('9.35', 'آزمایش با مهلت کوتاه اجرا می‌شود',
+         strpos($selfSrc, 'timeoutSec') !== false
+         && strpos($selfSrc, 'aiActiveChat(array') !== false
+         && strpos($selfSrc, '@set_time_limit(40)') !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
@@ -13467,17 +13476,22 @@ function arSaveState(array $st): void {
  * روشن باشد، یک پاسخ کوتاه و مؤدبانهٔ فارسی از ارائه‌دهندهٔ فعال می‌گیریم.
  * خروجی ['ok'=>bool, 'text'=>string, 'error'=>string]
  */
-function arAiReplyText(string $text): array {
+function arAiReplyText(string $text, ?int $timeoutSec = null): array {
     $text = trim((string)$text);
     if ($text === '') return ['ok' => false, 'text' => '', 'error' => 'پیام خالی'];
     $prompt = "تو دستیار پاسخ‌گویی یک فروشگاه اینترنتی هستی. مشتری این پیام را فرستاده:\n\"{$text}\"\n\n"
             . "با یک پاسخ کوتاه، مؤدبانه و حرفه‌ای به فارسی پاسخ بده (حداکثر ۲-۳ جمله). "
             . "سؤال را اگر می‌دانید پاسخش را بده، وگرنه بگو همکاران به‌زودی پاسخ می‌دهند. "
             . "چیزی خارج از نقش پشتیبانی ننویس.";
+    $net = aiNetCfg();
+    // v9.35: اگر مهلت داده شد (مثلاً برای دکمهٔ آزمایش که نباید کاربر را معطل
+    // کند)، همان مهلتِ کوتاه روی همهٔ تلاش‌ها اعمال می‌شود تا حداکثر در
+    // (timeout × روش‌ها) ثانیه جواب برگردد و دکمه هرگز «کار نمی‌کند» نشود.
+    if ($timeoutSec !== null && $timeoutSec > 0) $net['timeout'] = max(5, min(30, (int)$timeoutSec));
     $r = aiActiveChat(['messages' => [
         ['role' => 'system', 'content' => 'You are a friendly Persian e-commerce customer support assistant. Reply briefly and politely in Persian.'],
         ['role' => 'user', 'content' => $prompt],
-    ], 'temperature' => 0.5, 'max_tokens' => 160]);
+    ], 'temperature' => 0.5, 'max_tokens' => 160], $net);
     if (empty($r['ok'])) return ['ok' => false, 'text' => '', 'error' => mb_substr((string)($r['error'] ?? 'خطا'), 0, 120)];
     $body = $r['body'] ?? [];
     $reply = trim((string)($body['choices'][0]['message']['content'] ?? ''));
@@ -25173,6 +25187,19 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.35', t:'⚡ دکمهٔ آزمایش پاسخ خودکار دیگر گیر نمی‌کند', items:[
+    'گزارش شما: دکمهٔ «آزمایش» کنار «پیش‌نمایش روی گفتگوهای واقعی» هنوز',
+    'جواب نمی‌داد و چیزی تولید نمی‌کرد.',
+    '🐞 علت: دکمهٔ آزمایش، هوش مصنوعی را با مهلتِ عادی (تا ۲۵ ثانیه به‌ازای',
+    'هر روش، و گاهی چند روش) صدا می‌زد. اگر ارائه‌دهنده در دسترس نبود یا',
+    'کند بود، درخواست ده‌ها ثانیه بلوکه می‌شد و از دید کاربر «هیچ اتفاقی',
+    'نمی‌افتد» بود.',
+    '✅ حالا دکمهٔ آزمایش با مهلت کوتاه (۸ ثانیه) هوش مصنوعی را صدا می‌زند:',
+    'اگر جواب نداد، سریع قواعد را امتحان می‌کند و نتیجه را نشان می‌دهد —',
+    'پس همیشه یک جواب (هوش مصنوعی / قاعده / بدون پاسخ) می‌گیرید.',
+    '🧪 تابع arAiReplyText حالا می‌تواند مهلت دلخواه بگیرد و aiActiveChat',
+    'تنظیمات عبورِ دلخواه را می‌پذیرد.'
+  ]},
   {v:'9.34', t:'🤖 اولویت پاسخ: هوش مصنوعی ← قواعد ← بدون پاسخ', items:[
     'خواستهٔ شما: اول هوش مصنوعی جواب بدهد، اگر خطا داد قواعد، و اگر',
     'هیچ قاعده‌ای نخورد پاسخی نفرستد. همچنین دکمهٔ «آزمایش» در بخش پاسخ',
