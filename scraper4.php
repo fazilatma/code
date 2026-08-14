@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.35';
-const APP_VERSION_DATE = '1405/06/06';
+const APP_VERSION = '9.36';
+const APP_VERSION_DATE = '1405/06/07';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -10509,6 +10509,51 @@ if (isset($_GET['ar_log'])) {
     exit;
 }
 
+/* v9.36: محیط چتِ آزمایش پاسخ خودکار (مودال).
+   مثل ar_test ولی با اطلاعات بیشتر برای نمایش در یک پنجرهٔ چت:
+   منبع (هوش مصنوعی / قاعده / بدون پاسخ)، مدلِ استفاده‌شده، تأخیر، و پیام خطا. */
+if (isset($_GET['ar_chat'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(40);
+    $txt = (string)($_GET['msg'] ?? ($_GET['text'] ?? ''));
+    if (trim($txt) === '') { echo json_encode(['ok' => false, 'error' => 'متن خالی است'], JSON_UNESCAPED_UNICODE); exit; }
+    $rules = arLoadRules();
+    $cfgAR = arCfg();
+    $t0 = microtime(true);
+    $aiRes = arAiReplyText($txt, 8);
+    $latMs = (int)round((microtime(true) - $t0) * 1000);
+    $aiOk = !empty($aiRes['ok']);
+    $aiText = $aiOk ? ($aiRes['text'] . ($cfgAR['sign'] !== '' ? "\n" . $cfgAR['sign'] : '')) : '';
+    $aiErr = $aiOk ? '' : (string)($aiRes['error'] ?? 'خطا');
+    $modelUsed = (string)($aiRes['model'] ?? '');
+    $hit = null; $ruleReply = ''; $ruleId = '';
+    if (!$aiOk) {
+        $hit = arPickRule($rules, $txt);
+        if ($hit) {
+            $ruleId = (string)$hit['id'];
+            $ruleReply = $hit['reply'] . ($cfgAR['sign'] !== '' ? "\n" . $cfgAR['sign'] : '');
+        }
+    }
+    $finalReply = $aiOk ? $aiText : $ruleReply;
+    $source = $aiOk ? 'ai' : ($hit ? 'rule' : 'none');
+    echo json_encode([
+        'ok' => true,
+        'source' => $source,
+        'reply' => $finalReply,
+        'ai_ok' => $aiOk,
+        'ai_error' => $aiErr,
+        'model' => $modelUsed,
+        'rule' => $ruleId,
+        'latency_ms' => $latMs,
+        'matched_rules' => array_values(array_filter(array_map(function ($r) use ($txt) {
+            return ['id' => $r['id'] ?? '', 'reply' => $r['reply'] ?? ''];
+        }, $rules), function ($x) use ($txt) {
+            return $x['reply'] !== '';
+        })),
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['ar_run'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @set_time_limit(180);
@@ -11474,6 +11519,16 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'timeoutSec') !== false
          && strpos($selfSrc, 'aiActiveChat(array') !== false
          && strpos($selfSrc, '@set_time_limit(40)') !== false);
+
+    /* ---------- v9.36: پنجرهٔ چتِ آزمایش پاسخ خودکار ---------- */
+    $add('9.36', 'محیط چتِ مودال برای آزمایش پاسخ خودکار وجود دارد',
+         strpos($selfSrc, 'function arOpenChat' . 'Test') !== false
+         && strpos($selfSrc, 'arChatModal') !== false
+         && strpos($selfSrc, "'ar_chat'" . "]) !== false") !== false);
+    $add('9.36', 'اندپوینت چت آزمایش پاسخ خودکار هست',
+         strpos($selfSrc, 'ar_chat') !== false
+         && strpos($selfSrc, "'source'") !== false
+         && strpos($selfSrc, "'latency_ms'") !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
@@ -13492,12 +13547,13 @@ function arAiReplyText(string $text, ?int $timeoutSec = null): array {
         ['role' => 'system', 'content' => 'You are a friendly Persian e-commerce customer support assistant. Reply briefly and politely in Persian.'],
         ['role' => 'user', 'content' => $prompt],
     ], 'temperature' => 0.5, 'max_tokens' => 160], $net);
-    if (empty($r['ok'])) return ['ok' => false, 'text' => '', 'error' => mb_substr((string)($r['error'] ?? 'خطا'), 0, 120)];
+    if (empty($r['ok'])) return ['ok' => false, 'text' => '', 'error' => mb_substr((string)($r['error'] ?? 'خطا'), 0, 120), 'model' => ''];
     $body = $r['body'] ?? [];
     $reply = trim((string)($body['choices'][0]['message']['content'] ?? ''));
-    if ($reply === '') return ['ok' => false, 'text' => '', 'error' => 'پاسخ خالی از مدل'];
+    if ($reply === '') return ['ok' => false, 'text' => '', 'error' => 'پاسخ خالی از مدل', 'model' => ''];
     $reply = preg_replace('/\s+/u', ' ', $reply);
-    return ['ok' => true, 'text' => mb_substr($reply, 0, 500), 'error' => ''];
+    $modelName = (string)($body['model'] ?? ($r['model'] ?? ($r['backup']['model'] ?? '')));
+    return ['ok' => true, 'text' => mb_substr($reply, 0, 500), 'error' => '', 'model' => $modelName];
 }
 
 /** شمارندهٔ روزانهٔ هر قاعده — با عوض شدن روز صفر می‌شود */
@@ -21268,10 +21324,13 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 
 <div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
-<div class="crow">
+<div class="cact">
+<button class="btn btn-purple" onclick="arOpenChatTest()" style="flex:1">💬 آزمایش در پنجرهٔ چت</button>
+</div>
+<div class="crow" style="margin-top:6px">
 <input type="text" id="arTestText" placeholder="یک پیام نمونه بنویسید…" style="flex:1"
        onkeydown="if(event.key==='Enter')arTest()">
-<button class="btn btn-purple" onclick="arTest()" style="flex:0 0 auto">🧪 آزمایش</button>
+<button class="btn btn-purple" onclick="arTest()" style="flex:0 0 auto">🧪 سریع</button>
 </div>
 <div class="cact">
 <button class="btn btn-gray" onclick="arRun(1)" style="flex:1">👁 پیش‌نمایش روی گفتگوهای واقعی</button>
@@ -25187,6 +25246,21 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.36', t:'💬 پنجرهٔ چتِ آزمایش پاسخ خودکار (مودال پیشرفته)', items:[
+    'گزارش شما: دکمهٔ آزمایش همچنان چیزی نشان نمی‌داد، در حالی که «تست»',
+    'و «تست دسته» در بخش هوش مصنوعی درست کار می‌کردند.',
+    '🐞 دکمهٔ آزمایش به ناحیهٔ کوچکِ کنار فرم وابسته بود و نتیجهٔ هوش',
+    'مصنوعی را به‌خوبی نشان نمی‌داد.',
+    '✅ یک «محیط چت» کامل در یک پنجرهٔ مودال ساخته شد:',
+    '   • دکمهٔ «💬 آزمایش در پنجرهٔ چت» اضافه شد.',
+    '   • یک گفتگوی حباب‌دار مثل چت واقعی: پیام مشتری ← پاسخ خودکار.',
+    '   • برای هر پیام مشخص می‌شود پاسخ از کجا آمد: 🤖 هوش مصنوعی',
+    '     (با نام مدل) / 📋 قاعده (وقتی هوش مصنوعی خطا داد) / 🚫 بدون پاسخ.',
+    '   • زمان پاسخ (ms)، خطای هوش مصنوعی، و چند الگوی آماده.',
+    '   • پاک کردن گفتگو و دکمه‌های نمونه (سلام / قیمت / تشکر / ارسال / بی‌ربط).',
+    '🧪 این پنجره همان اولویت واقعی (هوش مصنوعی ← قواعد ← بدون پاسخ) را',
+    'با مهلت کوتاه اجرا می‌کند، پس همیشه جواب می‌دهد.'
+  ]},
   {v:'9.35', t:'⚡ دکمهٔ آزمایش پاسخ خودکار دیگر گیر نمی‌کند', items:[
     'گزارش شما: دکمهٔ «آزمایش» کنار «پیش‌نمایش روی گفتگوهای واقعی» هنوز',
     'جواب نمی‌داد و چیزی تولید نمی‌کرد.',
@@ -27213,6 +27287,106 @@ function arTest(){
     h+='</div>';
     box.innerHTML=h;
   }).catch(e=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ '+esc(e.message)+'</div>';});
+}
+
+/* ============ v9.36: محیط چتِ آزمایش پاسخ خودکار (مودال) ============ */
+let arChatBusy=false;
+function arOpenChatTest(){
+  let m=document.getElementById('arChatModal');if(m)m.remove();
+  m=document.createElement('div');
+  m.id='arChatModal';
+  m.className='bsl-modal-overlay';
+  m.innerHTML='<div class="bsl-modal" style="width:820px">'
+    +'<div class="bsl-modal-head"><h2>💬 آزمایش پاسخ خودکار</h2>'
+    +'<div style="display:flex;gap:6px;align-items:center">'
+    +'<span id="arChatStat" style="font-size:11px;color:#64748b"></span>'
+    +'<button class="btn btn-red" onclick="arChatClear()" style="font-size:11px;padding:4px 9px">🗑 پاک کردن</button>'
+    +'<button class="btn btn-gray" onclick="arCloseChatTest()" style="font-size:11px;padding:4px 9px">✕</button>'
+    +'</div></div>'
+    +'<div class="bsl-modal-body" id="arChatBody" style="min-height:380px;max-height:55vh;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:10px"></div>'
+    +'<div style="padding:10px 14px;background:#1e293b;border-top:1px solid #334155">'
+    +'<div style="display:flex;gap:8px;align-items:center">'
+    +'<input type="text" id="arChatInput" placeholder="پیام مشتری را بنویسید و Enter بزنید…" '
+    +'onkeydown="if(event.key===\'Enter\')arChatSend()" style="flex:1;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:9px 12px;font-size:13px">'
+    +'<button class="btn btn-green" onclick="arChatSend()" style="font-size:12px;padding:9px 16px">➤ ارسال</button>'
+    +'</div>'
+    +'<div style="display:flex;gap:6px;margin-top:6px;align-items:center;flex-wrap:wrap">'
+    +'<span style="font-size:10px;color:#64748b">الگوی پاسخ:</span>'
+    +'<button class="btn btn-gray" onclick="arChatFill(\'سلام، این محصول موجوده؟\')" style="font-size:10px;padding:3px 8px">سلام</button>'
+    +'<button class="btn btn-gray" onclick="arChatFill(\'قیمت این چنده؟\')" style="font-size:10px;padding:3px 8px">قیمت</button>'
+    +'<button class="btn btn-gray" onclick="arChatFill(\'ممنونم\')" style="font-size:10px;padding:3px 8px">تشکر</button>'
+    +'<button class="btn btn-gray" onclick="arChatFill(\'ارسال چند روزه است؟\')" style="font-size:10px;padding:3px 8px">ارسال</button>'
+    +'<button class="btn btn-gray" onclick="arChatFill(\'یک سوال کاملاً جدید و بی‌ربط\')" style="font-size:10px;padding:3px 8px">بی‌ربط</button>'
+    +'</div></div></div>';
+  m.addEventListener('click',function(e){if(e.target===m)arCloseChatTest();});
+  document.body.appendChild(m);
+  const body=$('arChatBody');
+  if(body)body.innerHTML='<div style="color:#64748b;font-size:11px;text-align:center;padding:30px">یک پیام بنویسید تا ببینید پاسخ‌خودکار چگونه جواب می‌دهد.</div>';
+  setTimeout(()=>{const i=$('arChatInput');if(i)i.focus();},50);
+}
+function arCloseChatTest(){const m=document.getElementById('arChatModal');if(m)m.remove();}
+function arChatFill(t){const i=$('arChatInput');if(i){i.value=t;i.focus();}}
+function arChatClear(){
+  const body=$('arChatBody');if(body)body.innerHTML='<div style="color:#64748b;font-size:11px;text-align:center;padding:30px">یک پیام بنویسید تا ببینید پاسخ‌خودکار چگونه جواب می‌دهد.</div>';
+  if($('arChatStat'))$('arChatStat').textContent='';
+}
+function arChatBubble(role,html,meta){
+  const body=$('arChatBody');if(!body)return;
+  const d=document.createElement('div');
+  d.style.cssText='max-width:80%;padding:9px 12px;border-radius:12px;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word;align-self:'+(role==='user'?'flex-end':'flex-start');
+  d.style.background=role==='user'?'#1e3a5f':'#1e293b';
+  d.style.border=role==='user'?'1px solid #2563eb':'1px solid #334155';
+  d.style.color=role==='user'?'#bfdbfe':'#e2e8f0';
+  if(meta)d.style.borderTop=(role==='user'?'2px':'0')+' solid transparent';
+  d.innerHTML=html;
+  if(meta){
+    const mt=document.createElement('div');
+    mt.style.cssText='font-size:10px;color:#64748b;margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center';
+    mt.innerHTML=meta;
+    d.appendChild(mt);
+  }
+  body.appendChild(d);
+  body.scrollTop=body.scrollHeight;
+}
+function arChatTyping(){
+  const body=$('arChatBody');if(!body)return;
+  const d=document.createElement('div');
+  d.id='arChatTyping';
+  d.style.cssText='max-width:60%;padding:9px 14px;border-radius:12px;font-size:12px;background:#111c31;border:1px solid #334155;color:#94a3b8;align-self:flex-start';
+  d.textContent='⏳ در حال بررسی...';
+  body.appendChild(d);
+  body.scrollTop=body.scrollHeight;
+}
+function arChatSend(){
+  if(arChatBusy)return;
+  const inp=$('arChatInput');if(!inp)return;
+  const t=inp.value.trim();if(!t){inp.focus();return;}
+  inp.value='';
+  arChatBubble('user',esc(t),'<span style="color:#93c5fd">👤 مشتری</span>');
+  arChatTyping();
+  arChatBusy=true;
+  if($('arChatStat'))$('arChatStat').textContent='⏳ در حال پاسخ...';
+  fetch('?ar_chat=1&msg='+encodeURIComponent(t)).then(r=>r.json()).then(d=>{
+    const ty=$('arChatTyping');if(ty)ty.remove();
+    arChatBusy=false;
+    if($('arChatStat'))$('arChatStat').textContent='';
+    if(!d.ok){arChatBubble('bot','<span style="color:#f87171">✗ '+esc(d.error||'خطا')+'</span>');return;}
+    const src=d.source||'none';
+    let icon,color,label;
+    if(src==='ai'){icon='🤖';color='#67e8f9';label='هوش مصنوعی'+(d.model?' · <span dir="ltr">'+esc(d.model)+'</span>':'');}
+    else if(src==='rule'){icon='📋';color='#fbbf24';label='قاعده «'+esc(d.rule)+'» (هوش مصنوعی خطا داد)';}
+    else{icon='🚫';color='#f87171';label='بدون پاسخ (هوش مصنوعی خطا داد و قاعده‌ای نخورد)';}
+    const replyHtml = d.reply ? esc(d.reply)
+        : '<span style="color:#f87171">پاسخی ارسال نشد — '+esc(d.ai_error||'')+'</span>';
+    arChatBubble('bot','<div style="font-weight:700;color:'+color+';font-size:12px;margin-bottom:4px">'+icon+' '+label+'</div>'+replyHtml,
+      '<span style="color:#64748b">⏱ '+toFa(d.latency_ms||0)+'ms</span>'
+      +(d.ai_error?'<span style="color:#f87171" title="'+esc(d.ai_error)+'">⚠️ خطای AI</span>':''));
+  }).catch(e=>{
+    const ty=$('arChatTyping');if(ty)ty.remove();
+    arChatBusy=false;
+    if($('arChatStat'))$('arChatStat').textContent='';
+    arChatBubble('bot','<span style="color:#f87171">✗ خطای شبکه: '+esc(e.message)+'</span>');
+  });
 }
 
 function arRun(dry){
