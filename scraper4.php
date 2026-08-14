@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.42';
+const APP_VERSION = '9.43';
 const APP_VERSION_DATE = '1405/06/13';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1007,6 +1007,18 @@ function aiHttp(string $url, array $headers, ?array $payload, array $net, ?strin
     }
 
     curl_setopt_array($ch, $opt);
+    /* v9.43: اگر کاربر «توقف تست مدل‌ها» را زده، این درخواست شبکه را همین حالا
+       قطع کن. CURLOPT_PROGRESSFUNCTION مرتباً (در طول هر انتقال) صدا زده می‌شود و
+       اگر فایل توقف ساخته شده باشد، برگرداندنِ غیرصفر باعث می‌شود curl فوراً با
+       خطای abort بایستد. بدون این، وقتی مدل/اندپوینت غیرقابل‌دسترس است، هر فراخوانی
+       تا سقف تایم‌اوت (و چند روشِ اتصال پشت‌سرهم) بلاک می‌شود و دکمهٔ توقف تا پایانِ
+       همان فراخوانی هیچ اثری ندارد. کش stat هم پاک می‌شود تا فایلِ تازه دیده شود. */
+    curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+    curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, function ($ch2, $dlt, $dltT, $ult, $ultT) {
+        clearstatcache(true, AI_TEST_STOP_FILE);
+        if (is_file(AI_TEST_STOP_FILE)) return 1;   // غیرصفر → abort
+        return 0;
+    });
     $raw  = curl_exec($ch);
     $err  = curl_error($ch);
     $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
@@ -11895,6 +11907,11 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
          && strpos($selfSrc, "'stop' => true") !== false
          && strpos($selfSrc, 'AI_TEST_STOP_FILE') !== false);
+
+    /* ---------- v9.43: توقفِ فوریِ درخواستِ شبکهٔ در حال اجرا ---------- */
+    $add('9.43', 'درخواست شبکهٔ در حال اجرا با abort قطع می‌شود تا دکمهٔ توقف فوری عمل کند',
+         strpos($selfSrc, 'CURLOPT_PROGRESSFUNCTION') !== false
+         && strpos($selfSrc, 'if (is_file(AI_TEST_STOP_FILE)) return 1;') !== false);
 
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
