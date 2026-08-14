@@ -89,8 +89,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.44';
-const APP_VERSION_DATE = '1405/06/13';
+const APP_VERSION = '9.45';
+const APP_VERSION_DATE = '1405/06/14';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -865,10 +865,18 @@ function aiDohResolve(string $host, string $dohUrl = '', int $timeout = 10): arr
         CURLOPT_SSL_VERIFYPEER => 0,
         CURLOPT_SSL_VERIFYHOST => 0,
     ]);
+    /* v9.45: خودِ درخواست DoH هم می‌تواند روی سرورِ DNSِ بسته/مسموم قفل شود
+       (تا سقف $timeout ثانیه). با همین progress-callback، اگر «توقف تست
+       مدل‌ها» زده شده باشد، آن هم abort می‌شود تا کل حلقهٔ تست گیر نکند. */
+    curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+    curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, function ($ch2, $dlt, $dltT, $ult, $ultT) {
+        return aiTestStopRequested() ? 1 : 0;
+    });
     $body = curl_exec($ch);
     $err  = curl_error($ch);
     $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     curl_close($ch);
+    if (aiTestStopRequested()) return ['ok' => false, 'error' => 'stopped'];   // v9.45
     if ($code !== 200) return ['ok' => false, 'error' => 'DoH پاسخ نداد (HTTP ' . $code . ') ' . $err];
     $j = json_decode((string)$body, true);
     foreach ((array)($j['Answer'] ?? []) as $a) {
@@ -969,9 +977,7 @@ function aiHttp(string $url, array $headers, ?array $payload, array $net, ?strin
        همان فراخوانی هیچ اثری ندارد. کش stat هم پاک می‌شود تا فایلِ تازه دیده شود. */
     curl_setopt($ch, CURLOPT_NOPROGRESS, false);
     curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, function ($ch2, $dlt, $dltT, $ult, $ultT) {
-        clearstatcache(true, AI_TEST_STOP_FILE);
-        if (is_file(AI_TEST_STOP_FILE)) return 1;   // غیرصفر → abort
-        return 0;
+        return aiTestStopRequested() ? 1 : 0;   // غیرصفر → abort
     });
     $raw  = curl_exec($ch);
     $err  = curl_error($ch);
@@ -1021,6 +1027,13 @@ function aiTestStateLoad(): array {
 function aiTestStateSave(array $st): void {
     $st['updated_at'] = time();
     writeJsonFile(AI_TEST_STATE_FILE, $st);
+}
+/* v9.45: آیا «توقف تست مدل‌ها» درخواست شده؟ کش stat را پاک می‌کند تا فایلِ
+   تازه‌ساخته‌شده هم دیده شود (همان الگوی bslReq). این یک نقطهٔ مشترک است تا
+   همهٔ حلقه‌های شبکه — نه فقط aiHttp — سیگنال توقف را ببینند. */
+function aiTestStopRequested(): bool {
+    clearstatcache(true, AI_TEST_STOP_FILE);
+    return is_file(AI_TEST_STOP_FILE);
 }
 /** آیا یک درخواستِ پاسخ‌نشده واقعاً «قطع/ناپذیر» بود (نه خطای منطقی API)؟ */
 function aiTestNetworkFailure(array $r): array {
@@ -1157,12 +1170,16 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
             $bodies[] = $bB;
         }
         foreach ($bodies as $ab) {
+            if (aiTestStopRequested()) {   // v9.45
+                return ['ok' => false, 'code' => 0, 'error' => 'stopped', 'stopped' => true, 'cf_tried_models' => $modelIds];
+            }
             $rr = aiHttp($target, $headers, $ab, $net, 'direct');
             $last = $rr;
             $tried[] = ['url' => $target, 'body' => array_keys($ab), 'code' => (int)$rr['code']];
             if ((int)$rr['code'] === 200) { $r = $rr; break 2; }
         }
     }
+    if (aiTestStopRequested()) return ['ok' => false, 'code' => 0, 'error' => 'stopped', 'stopped' => true];   // v9.45
     if (!isset($r)) $r = $last ?: ['ok' => false, 'code' => 0, 'error' => 'بدون پاسخ', 'body' => null];
     $r['cf_url'] = $base . $modelIds[0];
     $r['cf_tried_models'] = $modelIds;
@@ -1216,8 +1233,17 @@ function aiProviderCall(array $p, string $model, array $payload, ?array $net = n
     }
     $tried = [];
     foreach ($modes as $m) {
+        /* v9.45: اگر وسطِ امتحانِ روش‌های مختلفِ اتصال، کاربر «توقف» را زده
+           باشد، فوراً بیرون بیا — نه اینکه به سراغ روشِ بعدی برود. بدون این،
+           هر روشِ بلاک‌شده یکی‌یکی تا تایم‌اوت می‌سوخت و دکمهٔ توقف بی‌اثر بود. */
+        if (aiTestStopRequested()) {
+            return ['ok' => false, 'code' => 0, 'error' => 'stopped', 'stopped' => true, 'tried' => $tried];
+        }
         $r = aiHttp($ep['url'], $headers, $body, $net, $m);
         $tried[] = ['mode' => $m, 'code' => $r['code'], 'error' => mb_substr((string)($r['error'] ?? ''), 0, 80)];
+        if (aiTestStopRequested()) {
+            return ['ok' => false, 'code' => 0, 'error' => 'stopped', 'stopped' => true, 'tried' => $tried];
+        }
         if (!empty($r['ok']) || in_array($r['code'], [400, 401, 403, 404, 422, 429], true)) {
             $r['tried'] = $tried;
             return $r;
@@ -9597,7 +9623,25 @@ $lastRun = (int)($syncState[$key]['lastRun'] ?? 0);
 $target = $syncCfg['target'] ?? 'woo';
 if ($interval > 0 && ($now - $lastRun < $interval)) { $pResult['status'] = 'not_due'; $pResult['remaining'] = $interval - ($now - $lastRun); $results['profiles'][] = $pResult; continue; }
 $pResult['status'] = 'syncing'; $pResult['target'] = $target;
-
+/* v9.45: پروفایل‌های واردشده با اکسل/CSV — بدون استخراج، فقط آپدیت قیمت/موجودی.
+   وقتی تیک «بدون استخراج» روشن است، مرحلهٔ استخراج (فهرست/جزئیات) کاملاً رد
+   می‌شود و فقط محصولاتِ ازقبل‌داشته با قیمت و موجودیِ فعلی‌شان دوره‌ای به مقصد
+   ارسال می‌شوند (طبق دورهٔ خودِ همگام‌سازی). برای این پروفایل‌ها استخراج نه
+   لازم است نه ممکن (هیچ URL/سلکتوری ندارند). */
+$noExtract = !empty($syncCfg['noExtract']);
+if ($noExtract) {
+    $pResult['step'] = 'no_extract';
+    $pResult['no_extract'] = true;
+    $pResult['extracted'] = 0;
+    // برای ارسالِ «فقط محصولاتِ موجود»، exRes را موفق و بدون تغییراتِ جدید بگذار
+    $exRes = ['ok'=>true, 'extracted'=>0, 'no_extract'=>true,
+              'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,
+              'new_items'=>[],'changed_items'=>[],'removed_items'=>[],
+              'price_up'=>0,'price_down'=>0];
+    // گیتِ ارسال را باز کن: در حافظه (نه روی دیسک) نشانه را complete بگذار
+    $profile['_extract_stage'] = 'complete';
+    $profile['_extract_stage_at'] = time();
+} else {
 /* v8.94: مرحلهٔ جزئیاتِ نیمه‌کاره را اول تمام کن، بعد سراغ ارسال برو.
 
    اگر اجرای قبلی وسط فاز جزئیات کشته شده باشد، محصولات روی دیسک هستند
@@ -9702,6 +9746,7 @@ $profile  = $profiles[$key] ?? $profile;
 $pResult['extract_error'] = $exRes['error'] ?? 'خطای نامشخص';
 notifRunFailure($cn, 'استخراج', $profile['name'] ?? $key, $pResult['extract_error']);
 }
+}   // پایانِ else حالتِ عادی (مقابل noExtract) — v9.45
 
 // Now get products from profile (either freshly scraped or previously saved)
 // v8.39: اگر تیک «افزودن/آپدیت» فعال باشد، فقط محصولات جدید و
@@ -9709,6 +9754,11 @@ notifRunFailure($cn, 'استخراج', $profile['name'] ?? $key, $pResult['extra
 $wooOnlyChanged = !empty($syncCfg['wooAddUpdate']);
 $bslOnlyChanged = !empty($syncCfg['bslAddUpdate']);
 $changedKeys = ($wooOnlyChanged || $bslOnlyChanged) ? syncChangedKeys($exRes ?? []) : null;
+/* v9.45: در پروفایلِ بدون-استخراج، هیچ مقایسه‌ای با مبدأ نیست که بگوییم کدام
+   محصول «تغییر کرده». پس فیلتر «فقط تغییرات» را کنار بگذار و همهٔ محصولاتِ موجود
+   را بفرست تا قیمت و موجودی‌شان دوره‌ای به‌روز شود — این دقیقاً خواستهٔ کاربر
+   برای پروفایل‌های اکسل/CSV است. */
+if (!empty($noExtract)) $changedKeys = null;
 
 // v8.58: اگر استخراج انجام نشده باشد، فهرست تغییرات وجود ندارد.
 // تا اینجا در آن حالت فیلتر کنار گذاشته می‌شد و «کل» محصولات دوباره
@@ -11722,6 +11772,19 @@ if (isset($_GET['selftest'])) {
          !function_exists('cronDetailSyncPass')
          && !function_exists('detailSyncNote')
          && strpos($selfSrc, 'id="profileDetail' . 'En"') === false);
+
+    /* ---------- v9.45: توقفِ مطمئنِ تست مدل‌ها + «بدون استخراج» ---------- */
+    $add('9.45', 'سیگنال توقفِ تست مدل در همهٔ لایه‌های شبکه دیده می‌شود',
+         function_exists('aiTestStopRequested')
+         && strpos($selfSrc, 'return aiTestStopRequested() ? 1 : 0;') !== false
+         && strpos($selfSrc, "'stopped' => true, 'tried' => \$tried") !== false);
+    $add('9.45', 'وضعیتِ تستِ گیرکرده خودکار آزاد می‌شود',
+         strpos($selfSrc, "loadConnections()['ai_test_stall_sec']") !== false
+         && strpos($selfSrc, "$st['stalled'] = true;") !== false);
+    $add('9.45', 'پروفایلِ بدون-استخراج فقط قیمت/موجودی را دوره‌ای می‌فرستد',
+         strpos($selfSrc, "$noExtract = !empty(\$syncCfg['noExtract']);") !== false
+         && strpos($selfSrc, 'id="profileSync' . 'NoExtract"') !== false
+         && strpos($selfSrc, "'no_extract'=>true") !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -16350,7 +16413,26 @@ exit;
  * ===================================================================== */
 if (isset($_GET['ai_test_status'])) {
 header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(aiTestStateLoad(), JSON_UNESCAPED_UNICODE);
+$st = aiTestStateLoad();
+/* v9.45: نگهبانِ گیرکردن. اگر پردازهٔ پس‌زمینه مرده باشد (کشته شده)،
+   running تا ابد true می‌ماند و مرورگر بی‌نهایت poll می‌کند. وقتی چند دقیقه
+   است هیچ به‌روزرسانی‌ای (updated_at) نیامده، یعنی پردازه دیگر زنده نیست —
+   آن را «متوقف شده» علامت بزن تا رابط کاربری رها شود. همین الگو در جای‌های
+   دیگر (extractProgress و... ) هم هست. */
+if (!empty($st['running']) && empty($st['done'])) {
+    $stAt = (int)($st['updated_at'] ?? $st['started_at'] ?? 0);
+    $idle = $stAt > 0 ? (time() - $stAt) : PHP_INT_MAX;
+    $stall = max(120, (int)(loadConnections()['ai_test_stall_sec'] ?? 300));
+    if ($idle > $stall) {
+        $st['running'] = false;
+        $st['done'] = true;
+        $st['stopped'] = true;
+        $st['stalled'] = true;
+        $st['summary'] = 'گیر کرد (پردازهٔ پس‌زمینه دیگر پاسخ نمی‌دهد) — متوقف شد';
+        aiTestStateSave($st);
+    }
+}
+echo json_encode($st, JSON_UNESCAPED_UNICODE);
 exit;
 }
 if (isset($_GET['ai_test_stop'])) {
@@ -16362,6 +16444,18 @@ if (isset($_GET['ai_test_stop'])) {
     $st = aiTestStateLoad();
     $st['stopping'] = true;
     aiTestStateSave($st);
+    /* v9.45: اگر پردازهٔ پس‌زمینه دیگر زنده نباشد (کشته شده)، هیچ‌کس نمی‌آید
+       running را false کند و رابط کاربری تا ابد «در حال اجراست» نشان می‌داد.
+       اینجا حالت را مستقیم «متوقف شده» می‌کنیم تا poll مرورگر همان لحظه ببیند
+       کار تمام شده. پردازهٔ زنده هم وقتی سیگنال توقف را می‌بیند خودش همان
+       نتیجه را می‌نویسد (همان مقدار). */
+    if (!empty($st['running']) && empty($st['done'])) {
+        $st['running'] = false;
+        $st['done'] = true;
+        $st['stopped'] = true;
+        $st['summary'] = 'توقف خواسته شد';
+        aiTestStateSave($st);
+    }
     header('Content-Type: application/json; charset=UTF-8');
     echo json_encode(['ok' => true, 'stopping' => true], JSON_UNESCAPED_UNICODE);
     exit;
@@ -16408,6 +16502,12 @@ function aiRunTestBackground(int $per, bool $onlyUntested): array {
         $t0 = microtime(true);
         // پیام تست «سلام»
         $r = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>'سلام']], 'temperature'=>0.3, 'max_tokens'=>30], aiNetCfg());
+        /* v9.45: اگر فراخوانی به‌خاطر توقف abort شد، همین‌جا خارج شو —
+           منتظر پردازشِ نتیجهٔ «stopped» نباش. */
+        if (!empty($r['stopped']) || aiTestStopRequested()) {
+            $st['stopped'] = true;
+            break;
+        }
         $latency = (int)round((microtime(true) - $t0) * 1000);
         $code = (int)$r['code'];
         $ok = $code === 200;
@@ -16427,9 +16527,14 @@ function aiRunTestBackground(int $per, bool $onlyUntested): array {
            «مشکل روش» علامت بزن تا پیام گمراه‌کنندهٔ «هاست دسترسی ندارد» نیاید. */
         $netIssue = false;
         if (!$ok) {
+            if (aiTestStopRequested()) {   // v9.45
+                $st['stopped'] = true;
+                break;
+            }
             $netCfg = aiNetCfg();
             $dnet = $netCfg; $dnet['mode'] = 'direct';
             $rd = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>'سلام']], 'temperature'=>0.3, 'max_tokens'=>30], $dnet);
+            if (aiTestStopRequested()) { $st['stopped'] = true; break; }
             if ((int)$rd['code'] === 200) $netIssue = true;
         }
         if ($netIssue) {
@@ -21795,6 +21900,15 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
                     <option value="bsl">باسلام</option>
                     <option value="both">هر دو</option>
                 </select>
+            </div>
+
+            <div class="row" style="margin-bottom:4px;align-items:center">
+                <label style="min-width:80px;font-size:12px;color:#94a3b8">🚫 استخراج:</label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px">
+                    <input type="checkbox" id="profileSyncNoExtract" onchange="scheduleSave();updateSyncStatusText()">
+                    <span style="color:#fbbf24">بدون استخراج — فقط آپدیت دوره‌ای قیمت و موجودی</span>
+                    <span style="color:#64748b;font-size:9px">(برای پروفایل‌های واردشده با اکسل/CSV)</span>
+                </label>
             </div>
 
             <div class="row" style="margin-bottom:4px;align-items:center">
@@ -32451,11 +32565,14 @@ function loadProfileSyncConfig(){
             // v7.81: Load add/update checkboxes
             $('profileSyncWooAddUpdate').checked=!!sc.wooAddUpdate;
             $('profileSyncBslAddUpdate').checked=!!sc.bslAddUpdate;
+            // v9.45: بدون استخراج (پروفایل‌های اکسل/CSV)
+            if($('profileSyncNoExtract'))$('profileSyncNoExtract').checked=!!sc.noExtract;
             updateSyncStatusText();
         }else{
             $('profileSyncEn').checked=false;
             $('profileSyncWooAddUpdate').checked=false;
             $('profileSyncBslAddUpdate').checked=false;
+            if($('profileSyncNoExtract'))$('profileSyncNoExtract').checked=false;
             $('profileSyncStatus').textContent='';
         }
     }).catch(()=>{});
@@ -32469,7 +32586,9 @@ function getSyncConfig(){
         target:$('profileSyncTarget').value||'woo',
         // v7.81: Add/Update mode checkboxes — stored in profile for future use
         wooAddUpdate:$('profileSyncWooAddUpdate').checked,
-        bslAddUpdate:$('profileSyncBslAddUpdate').checked
+        bslAddUpdate:$('profileSyncBslAddUpdate').checked,
+        // v9.45: بدون استخراج — فقط آپدیت دوره‌ای قیمت/موجودی (پروفایل‌های اکسل/CSV)
+        noExtract:!!($('profileSyncNoExtract')&&$('profileSyncNoExtract').checked)
     };
 }
 // v7.81: Update sync status text when any sync config changes
@@ -32479,7 +32598,8 @@ function updateSyncStatusText(){
     const intv=$('profileSyncInterval').options[$('profileSyncInterval').selectedIndex].text;
     const wm=$('profileSyncWooAddUpdate').checked?'➕🔄 ووکامرس':'🆕 ووکامرس';
     const bm=$('profileSyncBslAddUpdate').checked?'➕🔄 باسلام':'🆕 باسلام';
-    $('profileSyncStatus').textContent='✓ سینک فعال ('+intv+') | '+wm+' | '+bm;
+    const ne=($('profileSyncNoExtract')&&$('profileSyncNoExtract').checked)?' 🚫بدون استخراج':'';
+    $('profileSyncStatus').textContent='✓ سینک فعال ('+intv+') | '+wm+' | '+bm+ne;
 }
 function refreshSyncStatus(){
     fetch('?sync_status=1').then(r=>r.json()).then(d=>{
@@ -32515,11 +32635,14 @@ applyProfile=function(p){
         // v7.81: Load add/update checkboxes
         $('profileSyncWooAddUpdate').checked=!!p.syncConfig.wooAddUpdate;
         $('profileSyncBslAddUpdate').checked=!!p.syncConfig.bslAddUpdate;
+        // v9.45: بدون استخراج (پروفایل‌های اکسل/CSV)
+        if($('profileSyncNoExtract'))$('profileSyncNoExtract').checked=!!p.syncConfig.noExtract;
         updateSyncStatusText();
     }else{
         $('profileSyncEn').checked=false;
         $('profileSyncWooAddUpdate').checked=false;
         $('profileSyncBslAddUpdate').checked=false;
+        if($('profileSyncNoExtract'))$('profileSyncNoExtract').checked=false;
         $('profileSyncStatus').textContent='';
     }
 };
