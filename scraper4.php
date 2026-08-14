@@ -87,8 +87,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.36';
-const APP_VERSION_DATE = '1405/06/07';
+const APP_VERSION = '9.37';
+const APP_VERSION_DATE = '1405/06/08';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -7325,6 +7325,9 @@ if (isset($_POST['autoreply'])) {
         //   ai      → پاسخ با هوش مصنوعی (مدل فعال)
         'fallback'      => in_array(($ar['fallback'] ?? ''), ['none','premade','ai'], true) ? $ar['fallback'] : 'none',
         'fallback_text' => mb_substr(trim((string)($ar['fallback_text'] ?? '')), 0, 500),
+        // v9.37: پیام سیستمیِ هوش مصنوعی — default (پیش‌فرض) یا custom (سفارشی)
+        'ai_system_mode' => in_array((string)($ar['ai_system_mode'] ?? 'default'), ['default','custom'], true) ? $ar['ai_system_mode'] : 'default',
+        'ai_system_text' => mb_substr(trim((string)($ar['ai_system_text'] ?? '')), 0, 2000),
     ];
 }
 // v8.62: گزارش شبانه
@@ -11530,6 +11533,16 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, "'source'") !== false
          && strpos($selfSrc, "'latency_ms'") !== false);
 
+    /* ---------- v9.37: تب‌ها + پیام سیستمیِ هوش مصنوعی ---------- */
+    $add('9.37', 'بخش پاسخ خودکار تب‌دار است',
+         strpos($selfSrc, 'function arTab(btn){') !== false
+         && strpos($selfSrc, "data-ar-tab") !== false
+         && strpos($selfSrc, "'ar-pane'") !== false);
+    $add('9.37', 'پیام سیستمیِ هوش مصنوعی قابل انتخاب/سفارشی است',
+         strpos($selfSrc, "'ai_system_mode'") !== false
+         && strpos($selfSrc, 'function arAiSysToggle') !== false
+         && strpos($selfSrc, 'ai_system_text') !== false);
+
     $add('9.18', 'مخزن و توکن بکاپ از نصب‌کننده خوانده می‌شود',
          strpos($selfSrc, "\$vc = function_exists('vc_lo" . "ad') ? vc_load() : [];") !== false
          && strpos($selfSrc, "(string)(\$vc['github_to" . "ken'] ?? '')") !== false);
@@ -13474,6 +13487,9 @@ function arCfg(?array $cn = null): array {
             return !empty($a['ai_reply']) ? 'ai' : 'none';
         })(),
         'fallback_text'=> trim((string)($a['fallback_text'] ?? '')),
+        // v9.37: پیام سیستمیِ هوش مصنوعی
+        'ai_system_mode' => in_array((string)($a['ai_system_mode'] ?? 'default'), ['default','custom'], true) ? $a['ai_system_mode'] : 'default',
+        'ai_system_text' => trim((string)($a['ai_system_text'] ?? '')),
     ];
 }
 
@@ -13534,17 +13550,25 @@ function arSaveState(array $st): void {
 function arAiReplyText(string $text, ?int $timeoutSec = null): array {
     $text = trim((string)$text);
     if ($text === '') return ['ok' => false, 'text' => '', 'error' => 'پیام خالی'];
-    $prompt = "تو دستیار پاسخ‌گویی یک فروشگاه اینترنتی هستی. مشتری این پیام را فرستاده:\n\"{$text}\"\n\n"
-            . "با یک پاسخ کوتاه، مؤدبانه و حرفه‌ای به فارسی پاسخ بده (حداکثر ۲-۳ جمله). "
-            . "سؤال را اگر می‌دانید پاسخش را بده، وگرنه بگو همکاران به‌زودی پاسخ می‌دهند. "
-            . "چیزی خارج از نقش پشتیبانی ننویس.";
+    // v9.37: پیام سیستمیِ هوش مصنوعی — پیش‌فرض یا سفارشی از تنظیمات
+    $arCfg = arCfg();
+    if ((string)($arCfg['ai_system_mode'] ?? 'default') === 'custom' && trim((string)($arCfg['ai_system_text'] ?? '')) !== '') {
+        $system = trim((string)$arCfg['ai_system_text']);
+    } else {
+        $system = 'تو دستیار پاسخ‌گویی یک فروشگاه اینترنتی هستی و به پیام‌های مشتریان به زبان فارسی پاسخ می‌دهی. '
+                . 'پاسخ‌ها باید کوتاه، مؤدبانه و حرفه‌ای باشند (حداکثر ۲-۳ جمله). '
+                . 'اگر پاسخ سؤال را نمی‌دانی، بگو همکاران به‌زودی پاسخ می‌دهند. '
+                . 'چیزی خارج از نقش پشتیبانی ننویس.';
+    }
+    $prompt = "مشتری این پیام را فرستاده:\n\"{$text}\"\n\n"
+            . "با توجه به دستورالعمل‌ات، همین حالا پاسخ مناسب را بده.";
     $net = aiNetCfg();
     // v9.35: اگر مهلت داده شد (مثلاً برای دکمهٔ آزمایش که نباید کاربر را معطل
     // کند)، همان مهلتِ کوتاه روی همهٔ تلاش‌ها اعمال می‌شود تا حداکثر در
     // (timeout × روش‌ها) ثانیه جواب برگردد و دکمه هرگز «کار نمی‌کند» نشود.
     if ($timeoutSec !== null && $timeoutSec > 0) $net['timeout'] = max(5, min(30, (int)$timeoutSec));
     $r = aiActiveChat(['messages' => [
-        ['role' => 'system', 'content' => 'You are a friendly Persian e-commerce customer support assistant. Reply briefly and politely in Persian.'],
+        ['role' => 'system', 'content' => $system],
         ['role' => 'user', 'content' => $prompt],
     ], 'temperature' => 0.5, 'max_tokens' => 160], $net);
     if (empty($r['ok'])) return ['ok' => false, 'text' => '', 'error' => mb_substr((string)($r['error'] ?? 'خطا'), 0, 120), 'model' => ''];
@@ -21255,35 +21279,36 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="smenu-body">
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
 به پیام‌های مشتریان در باسلام خودکار جواب می‌دهد — «سلام» ← «سلام و وقت بخیر»، «ممنون» ← «خواهش می‌کنم».
-هر قاعده را می‌توانید اضافه، ویرایش یا حذف کنید.
 </div>
+<!-- v9.37: تب‌ها -->
+<div class="ar-tabs" style="display:flex;gap:4px;margin-bottom:10px;border-bottom:1px solid #334155;padding-bottom:0;flex-wrap:wrap">
+<button class="btn btn-blue ar-tab active" data-ar-tab="settings" onclick="arTab(this)" style="flex:1;font-size:11px;padding:6px 4px">⚙️ تنظیمات</button>
+<button class="btn btn-gray ar-tab" data-ar-tab="ai" onclick="arTab(this)" style="flex:1;font-size:11px;padding:6px 4px">🤖 هوش مصنوعی</button>
+<button class="btn btn-gray ar-tab" data-ar-tab="rules" onclick="arTab(this)" style="flex:1;font-size:11px;padding:6px 4px">📋 قواعد</button>
+<button class="btn btn-gray ar-tab" data-ar-tab="run" onclick="arTab(this)" style="flex:1;font-size:11px;padding:6px 4px">🚀 آزمایش</button>
+</div>
+
+<!-- ===== تب تنظیمات ===== -->
+<div class="ar-pane" data-ar-pane="settings">
 <div class="crow" style="align-items:center">
 <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
 <input type="checkbox" id="arEnabled" onchange="arSaveCfg()" style="width:16px;height:16px"> فعال
 </label></div>
-
 <div class="crow" style="align-items:center">
 <label>مهلت ادمین:</label>
 <input type="number" id="arGrace" min="0" max="1440" value="10" onchange="arSaveCfg()" style="flex:1">
 <span style="font-size:10px;color:#64748b">دقیقه</span></div>
-<div style="font-size:10px;color:#64748b;margin:-2px 0 8px;line-height:1.8">
-⏱ اگر تا این مدت خودتان جواب ندادید، ربات جواب می‌دهد. <b>۰</b> یعنی فوری.
-</div>
-
+<div style="font-size:10px;color:#64748b;margin:-2px 0 8px;line-height:1.8">⏱ اگر تا این مدت خودتان جواب ندادید، ربات جواب می‌دهد. <b>۰</b> یعنی فوری.</div>
 <div class="crow" style="align-items:center">
 <label>فاصلهٔ هر گفتگو:</label>
 <input type="number" id="arPerChat" min="0" max="10080" value="180" onchange="arSaveCfg()" style="flex:1">
 <span style="font-size:10px;color:#64748b">دقیقه</span></div>
-<div style="font-size:10px;color:#64748b;margin:-2px 0 8px;line-height:1.8">
-🔁 یک گفتگو در این بازه فقط یک پاسخ خودکار می‌گیرد — جلوی حلقهٔ پاسخ‌به‌پاسخ را می‌گیرد.
-</div>
-
+<div style="font-size:10px;color:#64748b;margin:-2px 0 8px;line-height:1.8">🔁 یک گفتگو در این بازه فقط یک پاسخ خودکار می‌گیرد — جلوی حلقهٔ پاسخ‌به‌پاسخ را می‌گیرد.</div>
 <div class="crow" style="align-items:center">
 <label>سقف هر اجرا:</label>
 <input type="number" id="arMaxRun" min="1" max="50" value="5" onchange="arSaveCfg()" style="flex:1">
 <label style="flex:0 0 auto">بررسی:</label>
 <input type="number" id="arScan" min="5" max="50" value="20" onchange="arSaveCfg()" style="flex:1"></div>
-
 <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin:6px 0;cursor:pointer">
 <input type="checkbox" id="arOffHours" onchange="arSaveCfg();arToggleHours()" style="width:14px;height:14px">
 <span>فقط بیرون ساعت کاری جواب بده</span></label>
@@ -21293,25 +21318,44 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <label style="flex:0 0 auto">تا:</label>
 <select id="arTo" onchange="arSaveCfg()" style="flex:1"></select>
 </div>
-
 <div class="crow"><label>امضا:</label>
 <input type="text" id="arSign" placeholder="اختیاری — مثلاً: (پاسخ خودکار)" onchange="arSaveCfg()" style="flex:1"></div>
+<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin:4px 0;cursor:pointer">
+<input type="checkbox" id="arNotify" onchange="arSaveCfg()" style="width:14px;height:14px">
+<span>📤 گزارش پاسخ‌ها به پیام‌رسان</span></label>
+</div>
 
-<!-- v9.34: اولویت پاسخ‌دهی — هوش مصنوعی → قواعد → بدون پاسخ -->
-<div style="margin-top:6px;padding-top:6px;border-top:1px solid #1e293b">
-<div style="font-size:10.5px;color:#a5f3fc;line-height:1.8;padding:4px 0">
+<!-- ===== تب هوش مصنوعی ===== -->
+<div class="ar-pane" data-ar-pane="ai" style="display:none">
+<div style="font-size:10.5px;color:#a5f3fc;line-height:1.8;padding:4px 0;margin-bottom:8px">
 🤖 ترتیب پاسخ‌دهی به پیام مشتری:
 <br>۱) اول <b>هوش مصنوعی</b> (مدلِ فعال، با بک‌آپ Bonsai) جواب می‌دهد.
 <br>۲) اگر هوش مصنوعی خطا بدهد، از <b>قواعد</b> استفاده می‌شود.
 <br>۳) اگر هیچ قاعده‌ای نخورد، <b>پاسخی فرستاده نمی‌شود</b>.
 </div>
+<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
+<div style="font-size:11px;color:#f9a8d4;font-weight:700;margin-bottom:6px">🧠 پیام سیستمیِ هوش مصنوعی</div>
+<div style="font-size:10px;color:#64748b;margin-bottom:6px;line-height:1.7">
+به هوش مصنوعی می‌گوید <b>چگونه به مشتری پاسخ بدهد</b>. «پیش‌فرض» برای همه کافی است؛ یا متن خودتان را بنویسید.
+</div>
+<div class="crow" style="align-items:center">
+<select id="arAiSysMode" onchange="arAiSysToggle();arSaveCfg()" style="flex:1">
+<option value="default">پیام سیستمیِ پیش‌فرض سیستم</option>
+<option value="custom">پیام سیستمیِ سفارشی (خودم می‌نویسم)</option>
+</select></div>
+<div id="arAiSysTextRow" class="crow" style="display:none;align-items:flex-start">
+<label style="flex:0 0 auto">متن:</label>
+<textarea id="arAiSysText" rows="4" placeholder="مثلاً: تو دستیار فروشگاه هستی؛ همیشه با لحن صمیمی جواب بده و تخفیف‌های امروز را یادآوری کن…" onchange="arSaveCfg()" style="flex:1;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px;font-size:11px"></textarea>
+</div>
+<div id="arAiSysDefaultHint" style="display:none;font-size:10px;color:#94a3b8;line-height:1.8;padding:4px 0">
+پیش‌فرض: «تو دستیار پاسخ‌گویی یک فروشگاه اینترنتی هستی و به پیام‌های مشتریان به زبان فارسی پاسخ می‌دهی. پاسخ‌ها باید کوتاه، مؤدبانه و حرفه‌ای باشند (حداکثر ۲-۳ جمله)…»
+</div>
+</div>
+<div class="cact"><button class="btn btn-purple" onclick="arOpenChatTest()" style="flex:1">💬 آزمایش در پنجرهٔ چت</button></div>
 </div>
 
-<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin:4px 0;cursor:pointer">
-<input type="checkbox" id="arNotify" onchange="arSaveCfg()" style="width:14px;height:14px">
-<span>📤 گزارش پاسخ‌ها به پیام‌رسان</span></label>
-
-<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
+<!-- ===== تب قواعد ===== -->
+<div class="ar-pane" data-ar-pane="rules" style="display:none">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
 <span style="font-size:12px;color:#67e8f9;font-weight:700">📋 قواعد پاسخ</span>
 <button class="btn btn-green" onclick="arAddRule()" style="font-size:10px;padding:4px 9px">➕ قاعدهٔ جدید</button>
@@ -21323,11 +21367,9 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </div>
 </div>
 
-<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
-<div class="cact">
-<button class="btn btn-purple" onclick="arOpenChatTest()" style="flex:1">💬 آزمایش در پنجرهٔ چت</button>
-</div>
-<div class="crow" style="margin-top:6px">
+<!-- ===== تب آزمایش/اجرا ===== -->
+<div class="ar-pane" data-ar-pane="run" style="display:none">
+<div class="crow" style="margin-top:2px">
 <input type="text" id="arTestText" placeholder="یک پیام نمونه بنویسید…" style="flex:1"
        onkeydown="if(event.key==='Enter')arTest()">
 <button class="btn btn-purple" onclick="arTest()" style="flex:0 0 auto">🧪 سریع</button>
@@ -21343,6 +21385,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 ⚠️ «پیش‌نمایش» هیچ پیامی نمی‌فرستد. اجرای دوره‌ای به کران‌جاب وابسته است.
 </div>
 </div>
+
 <div id="arR" style="margin-top:8px"></div>
 </div></div>
 
@@ -25246,6 +25289,20 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.37', t:'🗂 بخش پاسخ خودکار تب‌دار + پیام سیستمیِ هوش مصنوعی', items:[
+    'خواستهٔ شما: بخش پاسخ خودکار خیلی طولانی بود؛ تب‌دارش کنید و یک',
+    'قسمت برای انتخاب پیام سیستمیِ هوش مصنوعی (پیش‌فرض یا سفارشی) اضافه کنید.',
+    '🗂 بخش پاسخ خودکار حالا به ۴ تب مرتب شده:',
+    '   • ⚙️ تنظیمات (فعال، مهلت ادمین، فاصلهٔ گفتگو، سقف، ساعت کاری، امضا، اعلان)',
+    '   • 🤖 هوش مصنوعی (ترتیب پاسخ + پیام سیستمی)',
+    '   • 📋 قواعد (قواعد پاسخ + ذخیره/پیش‌فرض)',
+    '   • 🚀 آزمایش (آزمایش سریع، پنجرهٔ چت، پیش‌نمایش، اجرای فوری، پاسخ‌های اخیر)',
+    '🧠 در تب «هوش مصنوعی» یک انتخاب اضافه شد:',
+    '   • «پیام سیستمیِ پیش‌فرض سیستم» — همان رفتار استاندارد پشتیبانی،',
+    '   • «پیام سیستمیِ سفارشی» — متنی که خودتان می‌نویسید تا به هوش',
+    '     مصنوعی بگوید چگونه پاسخ دهد (لحن، اطلاعات فروشگاه، و...).',
+    '   پیام سیستمیِ انتخابی در همان حلقهٔ واقعی پاسخ خودکار هم استفاده می‌شود.'
+  ]},
   {v:'9.36', t:'💬 پنجرهٔ چتِ آزمایش پاسخ خودکار (مودال پیشرفته)', items:[
     'گزارش شما: دکمهٔ آزمایش همچنان چیزی نشان نمی‌داد، در حالی که «تست»',
     'و «تست دسته» در بخش هوش مصنوعی درست کار می‌کردند.',
@@ -27130,6 +27187,8 @@ function arCollectCfg(){
     work_to:      parseInt(g('arTo').value||'21')||0,
     sign:         (g('arSign').value||'').trim(),
     notify:       !!g('arNotify').checked,
+    ai_system_mode:(g('arAiSysMode').value||'default'),
+    ai_system_text:(g('arAiSysText').value||'').trim()
   };
 }
 
@@ -27153,13 +27212,33 @@ function arApplyCfg(c){
   set('arTo',String(c.work_to!==undefined?c.work_to:21));
   set('arSign',c.sign||'');
   chk('arNotify',c.notify);
+  set('arAiSysMode',c.ai_system_mode||'default');
+  set('arAiSysText',c.ai_system_text||'');
+  arAiSysToggle();
   arToggleHours();
   arBadge();
+}
+function arAiSysToggle(){
+  const v=($('arAiSysMode')||{}).value||'default';
+  const tr=$('arAiSysTextRow');
+  const dh=$('arAiSysDefaultHint');
+  if(tr)tr.style.display=(v==='custom')?'':'none';
+  if(dh)dh.style.display=(v==='default')?'':'none';
 }
 
 function arToggleHours(){
   const r=$('arHoursRow');
   if(r)r.classList.toggle('hidden',!($('arOffHours')||{}).checked);
+}
+/* v9.37: تغییر تب‌های بخش پاسخ خودکار */
+function arTab(btn){
+  if(!btn)return;
+  const tab=btn.getAttribute('data-ar-tab');
+  document.querySelectorAll('.ar-tab').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.ar-pane').forEach(p=>{
+    p.style.display=(p.getAttribute('data-ar-pane')===tab)?'':'none';
+  });
 }
 
 function arBadge(){
