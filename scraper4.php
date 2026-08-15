@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.48';
+const APP_VERSION = '9.49';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -11898,6 +11898,21 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, '/ai/v1/chat/completions') !== false
          && strpos($selfSrc, '!$viaChat') !== false);
 
+    /* ---------- v9.49: دسته‌بندی همهٔ کاندیدها + اصلاح بقیه با مستر ---------- */
+    $add('9.49', 'نتیجهٔ «تست دستهٔ همهٔ کاندیدها» در مودال نشان داده می‌شود',
+         strpos($selfSrc, 'aiCandCatModal') !== false
+         && strpos($selfSrc, 'function aiCandCatRun') !== false
+         && strpos($selfSrc, 'function aiCandCatVote') !== false);
+    $add('9.49', 'رأیِ دسته‌بندیِ برنده در حافظهٔ یادگیری هم ثبت می‌شود',
+         strpos($selfSrc, "catLearnRecord(\$input, \$catId, trim((string)(\$_POST['cat_name'] ?? '')))") !== false);
+    $add('9.49', 'در مودال فاز ۲ دکمهٔ «همهٔ کاندیدها» و «اصلاح بقیه با مستر» اضافه شد',
+         strpos($selfSrc, 'function p2AskCandidates') !== false
+         && strpos($selfSrc, 'function p2CandPick') !== false
+         && strpos($selfSrc, 'function bslMasterFixAll') !== false
+         && strpos($selfSrc, "?bsl_master_fix=1'") !== false);
+    $add('9.49', 'عنوان «مدیریت جامع محصولات باسلام» در بالاترین ردیفِ تمام‌عرض مودال می‌نشیند',
+         strpos($selfSrc, 'style="flex-direction:column;align-items:stretch;gap:7px;padding:10px 14px"') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -16784,8 +16799,19 @@ if (($_POST['action'] ?? '') === 'ai_vote') {
     $cands = json_decode((string)($_POST['candidates'] ?? '[]'), true);
     if ($winner === '' || !is_array($cands)) { echo json_encode(['ok' => false, 'error' => 'رأی نامعتبر'], JSON_UNESCAPED_UNICODE); exit; }
     $v = aiVoteRecord($task, $input, $winner, array_map('strval', $cands));
+    // v9.49: اگر رأیِ دسته‌بندی است و دستهٔ برنده هم داده شد، همان را در
+    // حافظهٔ یادگیری ثبت کن تا «اصلاح بقیه با مستر» و مسیرهای بعدی از آن
+    // استفاده کنند. (برندهٔ واقعی جایی است که کاربر برگزیده؛ مستر فقط مرجع است.)
+    if ($task === 'category' && $input !== '') {
+        $catId = (int)($_POST['cat_id'] ?? 0);
+        if ($catId > 0) {
+            $v['learned'] = catLearnRecord($input, $catId, trim((string)($_POST['cat_name'] ?? '')));
+            $v['learn_word'] = catFirstWord($input);
+        }
+    }
     echo json_encode(['ok' => true, 'master' => $v['master'], 'pin' => $v['pin'],
-        'scores' => $v['scores']], JSON_UNESCAPED_UNICODE);
+        'scores' => $v['scores'], 'learned' => $v['learned'] ?? false,
+        'learn_word' => $v['learn_word'] ?? ''], JSON_UNESCAPED_UNICODE);
     exit;
 }
 /* آزمون دسته‌بندی با همهٔ کاندیدها — پاسخ هر مدل جدا می‌آید */
@@ -18105,6 +18131,107 @@ $sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'st
 usleep(500000);
 }
 $sse(['type'=>'done','fixed'=>$fixed,'failed'=>$failed,'no_ai'=>$noAi,'no_cat'=>$noCat,'total'=>$total,'msg'=>'✅ اصلاح شد: '.$fixed.' | بدون AI: '.$noAi.' | دسته یافت نشد: '.$noCat.' | ناموفق: '.$failed.' (از '.$total.' محصول)']);
+if(function_exists('fastcgi_finish_request'))fastcgi_finish_request();
+exit;
+}
+
+/* v9.49: «اصلاح بقیه با مستر» — برای محصولاتِ تأیید نشده (به دلیل دستهٔ
+   اشتباه) از مدل مستر (بهترین کاندید از نظر آمار رأی‌ها) می‌پرسد و دستهٔ
+   پیشنهادی را اعمال می‌کند؛ هر بار رأی ثبت می‌شود و همان دسته هم در
+   حافظهٔ یادگیری می‌نشیند تا دفعهٔ بعد همین انتخاب برای بقیهٔ محصولاتِ
+   هم‌کلمه به‌کار برود. SSE مثل bsl_fix_ai_cat_batch. */
+if(isset($_GET['bsl_master_fix'])){
+header('Content-Type: text/event-stream; charset=UTF-8');
+header('Cache-Control: no-cache');
+header('Connection: keep-alive');
+header('X-Accel-Buffering: no');
+set_time_limit(0);ignore_user_abort(true);
+$cn=loadConnections();$bs=$cn['basalam']??[];
+if(empty($bs['token'])||empty($bs['vendor_id'])){
+echo "data: ".json_encode(['type'=>'error','msg'=>'تنظیمات باسلام ناقص'],JSON_UNESCAPED_UNICODE)."\n\n";if(ob_get_level())ob_flush();flush();exit;
+}
+$tk=$bs['token'];$vid=(int)$bs['vendor_id'];
+$sse=function($d){echo "data: ".json_encode($d,JSON_UNESCAPED_UNICODE)."\n\n";if(ob_get_level())ob_flush();flush();};
+$sse(['type'=>'step','msg'=>'دریافت مدل مستر و کاندیدها...']);
+$cands=aiCandidates();
+if(empty($cands)){
+$sse(['type'=>'error','msg'=>'هیچ مدل کاندیدی انتخاب نشده — اول در بخش 🤖 چند مدل کاندید اضافه کنید']);exit;
+}
+$providers=aiProvidersLoad();
+$masterKey=aiMasterKey();
+$master=null;
+foreach($cands as $c){ if($c['key']===$masterKey){$master=$c;break;} }
+if($master===null)$master=$cands[0];
+$mp=$providers[$master['provider']]??null;
+if($mp===null){
+$sse(['type'=>'error','msg'=>'ارائه‌دهندهٔ مدل مستر یافت نشد']);exit;
+}
+$sse(['type'=>'step','msg'=>'مستر: '.$master['providerName'].' / '.$master['model']]);
+$net=aiNetCfg();
+$candKeys=array_map(function($c){return $c['key'];},$cands);
+
+$sse(['type'=>'step','msg'=>'دریافت دسته‌بندی‌ها از باسلام...']);
+$cats=[];
+$cr=bslReq($tk,'GET','categories');
+if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
+if(empty($cats)){
+$sse(['type'=>'error','msg'=>'دسته‌بندی‌ها بارگذاری نشد']);exit;
+}
+bslSetCatNameMap($cats);
+$catList='';$leafCats=[];
+foreach($cats as $c){if(($c['level']??0)>=2){$catList.=$c['id'].': '.$c['name']."\n";$leafCats[]=$c;}}
+if(empty($leafCats)){foreach($cats as $c){$catList.=$c['id'].': '.$c['name']."\n";$leafCats[]=$c;}}
+if(strlen($catList)>3000){$catList='';$leafCats=array_slice($leafCats,0,200);foreach($leafCats as $c){$catList.=$c['id'].': '.$c['name']."\n";}}
+$sse(['type'=>'step','msg'=>count($cats).' دسته دریافت شد']);
+
+$sse(['type'=>'step','msg'=>'دریافت محصولات ردشده (تأیید نشده)...']);
+$allProducts=[];
+for($pg=1;$pg<=20;$pg++){
+$r=bslReq($tk,'GET','vendors/'.$vid.'/products?page='.$pg.'&per_page=100&statuses=3567');
+if(!$r['ok'])break;
+$data=$r['body']['data']??[];
+if(empty($data))break;
+$tp=max(1,(int)($r['body']['total_page']??1));
+foreach($data as $p)$allProducts[]=$p;
+if($pg>=$tp)break;
+}
+$total=count($allProducts);
+$sse(['type'=>'start','total'=>$total,'msg'=>'شروع مشورت با مستر برای '.count($allProducts).' محصول...']);
+$fixed=0;$failed=0;$noCat=0;$idx=0;
+foreach($allProducts as $p){
+$idx++;
+$pId=(int)($p['id']??0);
+$pName=trim($p['title']??$p['name']??'');
+$sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'step'=>'ask_master']);
+if($pName===''){
+$failed++;
+$sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'failed','msg'=>'عنوان محصول خالی']);continue;
+}
+$res=aiCandidateCategory($mp,$master['model'],$pName,$cats,$leafCats,$catList,$net);
+$catId=(int)($res['category_id']??0);
+$catName=(string)($res['category_name']??'');
+if(empty($res['ok'])||$catId<=0){
+$noCat++;
+$sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'no_cat','msg'=>'مستر دستهٔ معتبری نداد','err'=>(string)($res['error']??'')]);continue;
+}
+$sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'step'=>'patching','catId'=>$catId,'catName'=>$catName]);
+$bu=['category_id'=>$catId,'status'=>3568];
+$r2=bslReq($tk,'PATCH','products/'.$pId,$bu);
+if($r2['code']===404)$r2=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$pId,$bu);
+if($r2['ok']&&!empty($r2['body']['id'])){
+$fixed++;
+// رأی و یادگیری: همین انتخابِ مستر، مرجعِ کاندیدها و یادگیریِ بعدی شود
+aiVoteRecord('category',$pName,$masterKey,$candKeys);
+catLearnRecord($pName,$catId,$catName);
+$sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'fixed','catId'=>$catId,'catName'=>$catName,'msg'=>'اصلاح شد و ارسال به بررسی مجدد: '.$catName.' ('.$catId.')']);
+}else{
+$failed++;
+$errDetail=($r2['body']['message']??($r2['body']['error']??''));
+$sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'failed','catId'=>$catId,'catName'=>$catName,'msg'=>'PATCH ناموفق: '.$errDetail]);
+}
+usleep(500000);
+}
+$sse(['type'=>'done','fixed'=>$fixed,'failed'=>$failed,'no_cat'=>$noCat,'total'=>$total,'msg'=>'✅ اصلاح با مستر انجام شد: '.$fixed.' | دسته نیافت: '.$noCat.' | ناموفق: '.$failed.' (از '.$total.')']);
 if(function_exists('fastcgi_finish_request'))fastcgi_finish_request();
 exit;
 }
@@ -25829,6 +25956,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.49', t:'🏷️ دسته‌بندیِ همهٔ کاندیدها + اصلاح بقیه با مستر', items:[
+    'خواستهٔ شما: نتیجهٔ «تست دستهٔ همهٔ کاندیدها» قبلاً داخل همان بخش هوش', 'مصنوعی می‌آمد و در موبایل جایی نداشت؛ و در بخش «تأیید نشده» می‌خواستید', 'برای هر محصولِ ردشده، دسته‌بندیِ همهٔ کاندیدها فهرست شود تا بهترین را', 'خودتان برگزینید و در دیتابیس یادگیری بنشیند و بقیه هم با مستر اصلاح شوند.', '✅ نتیجهٔ تستِ دسته‌بندی حالا در یک مودال باز می‌شود و هر پاسخ را با', '«برگزیدن + یادگیری» هم رأیِ مستر می‌دهد و هم دسته را برای بقیه می‌آموزد.', '✅ در مودال فاز ۲ برای هر محصولِ ردشده دکمهٔ «🏷️ همهٔ کاندیدها» اضافه شد:', 'دسته‌بندیِ هر مدل کاندید را کنار هم می‌آورد؛ برگزیدنِ هرکدام → رأی مستر +', 'اصلاحِ محصول در باسلام + یادگیری، و بعد محصولاتِ هم‌کلمه هم پیشنهاد می‌شوند.', '✅ دکمهٔ «🎯 اصلاح بقیه با مستر»: با مدل مستر (بهترین کاندید از نظر آمار', 'رأی‌ها) مشورت و بقیهٔ محصولاتِ تأییدنشده را دسته‌بندی و اصلاح می‌کند؛', 'هر اصلاح هم رأی و هم یادگیری ثبت می‌شود.', '✅ عنوان «مدیریت جامع محصولات باسلام» در بالاترین ردیفِ تمام‌عرض مودال', 'نشست و دکمه‌ها ردیفِ پایین‌اند تا مودال به‌جای رشدِ عمودی، افقی باز شود.'],},
   {v:'9.48', t:'☁️ رفعِ مدل‌های Cloudflare Workers AI', items:[
     'گزارش شما: در کانفیگ شما فقط بعضی مدل‌های Cloudflare کار می‌کردند ولی', 'در تستِ جدا همهٔ ۸۱ مدل ok بودند. ریشهٔ کار: اسکریپت هر مدل را native', 'با آدرس ai/run/نام‌مدل صدا می‌زند، در حالی که Cloudflare برای هر مدل', 'مسیرِ کاملِ org را می‌خواهد (مثل @cf/google/gemma-...، @cf/openai/', 'gpt-oss-...، @cf/moonshotai/kimi-...، @cf/meta/llama-...) و در تستِ جدا', 'همه به یک مدلِ درست حل می‌شدند.', '✅ جدول org اضافه شد: اگر نامِ واردشده فقط @cf/<name> باشد (بدون بخش org)،', 'برای خانواده‌های شناخته‌شده (gemma، gpt-oss، kimi، glm، deepseek، mistral،', 'llama، qwen، bge، granite و...) مسیرِ org-دار هم ساخته و خودکار امتحان می‌شود.', '✅ پشتیبانِ اندپوینت OpenAI-compatible خودِ Cloudflare (ai/v1/chat/completions):', 'اگر مسیر native با هیچ نامی جواب نداد، یک بار با همین اندپوینت که نام مدل', 'را داخل بدنهٔ JSON می‌گیرد و خروجیِ استاندارد OpenAI می‌دهد دوباره تلاش می‌شود.'],},
   {v:'9.45', t:'⏹ توقفِ «تست همهٔ مدل‌ها» + پروفایلِ بدون-استخراج', items:[
@@ -29936,19 +30065,36 @@ function aiCandVote(task,idx){
     if(d&&d.ok)aiCandRender();
   }).catch(()=>showToast('خطا در ثبت رأی',true));
 }
+/* v9.49: نتیجهٔ «تست دستهٔ همهٔ کاندیدها» حالا در یک مودال نشان داده می‌شود
+   (نه داخل همان بخش که در موبایل جایی نداشت). برگزیدنِ هر پاسخ هم رأیِ مدل
+   مستر را ثبت می‌کند و هم دسته را در حافظهٔ یادگیری می‌نشاند. */
 function aiCandCategoryTest(){
-  const title=prompt('عنوان محصول برای تست دسته‌بندی با همهٔ کاندیدها:','کفش ورزشی مردانه نایک');
-  if(!title)return;
-  const r=$('aiCandR');
-  if(r)r.innerHTML='<div style="color:#93c5fd;font-size:11px">🔄 در حال تحلیل «'+esc(title)+'» با همهٔ کاندیدها...</div>';
+  let m=document.getElementById('aiCandCatModal');if(m)m.remove();
+  m=document.createElement('div');m.id='aiCandCatModal';m.className='bsl-modal-overlay';
+  m.innerHTML='<div class="bsl-modal" style="width:880px">'
+    +'<div class="bsl-modal-head"><h2>🏷️ تست دسته‌بندی همهٔ کاندیدها</h2>'
+    +'<button class="btn btn-gray" onclick="aiCandCatClose()" style="font-size:11px;padding:4px 9px">✕</button></div>'
+    +'<div style="padding:10px 14px;background:#1e293b;border-bottom:1px solid #334155;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+    +'<input type="text" id="aiCandCatInput" placeholder="عنوان محصول را بنویسید... (مثلاً: کفش ورزشی مردانه)" '
+    +'onkeydown="if(event.key===\'Enter\')aiCandCatRun()" style="flex:1;min-width:220px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:9px 12px;font-size:13px;direction:rtl">'
+    +'<button class="btn btn-green" onclick="aiCandCatRun()" style="font-size:12px;padding:9px 16px">➤ مقایسه</button></div>'
+    +'<div class="bsl-modal-body" id="aiCandCatBody" style="min-height:300px;max-height:62vh;overflow:auto;padding:12px"></div></div>';
+  m.addEventListener('click',function(e){if(e.target===m)aiCandCatClose();});
+  document.body.appendChild(m);
+  setTimeout(()=>{const i=$('aiCandCatInput');if(i)i.focus();},50);
+}
+function aiCandCatClose(){const m=document.getElementById('aiCandCatModal');if(m)m.remove();}
+function aiCandCatRun(){
+  const inp=$('aiCandCatInput');const title=(inp?inp.value:'').trim();if(!title){if(inp)inp.focus();return;}
+  const body=$('aiCandCatBody'); if(!body)return;
+  body.innerHTML='<div style="color:#93c5fd;font-size:11px">🔄 در حال تحلیل «'+esc(title)+'» با همهٔ کاندیدها...</div>';
   fetch('?ai_candidates_category=1&title='+encodeURIComponent(title)).then(rr=>rr.json()).then(d=>{
-    if(!r)return;
-    if(!d.ok){r.innerHTML='<div style="color:#fca5a5;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    if(!body)return;
+    if(!d||!d.ok){body.innerHTML='<div style="color:#fca5a5;font-size:11px">✗ '+esc((d&&d.error)||'خطا')+'</div>';return;}
     const items=d.items||[];
     aiCandCtx={task:'category',input:title,keys:items.map(x=>x.key),items:items};
-    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px;font-size:11px;line-height:1.9">'
-      +'<div style="color:#67e8f9;font-weight:700">🏷️ دسته‌بندی «'+esc(d.title)+'» توسط '+toFa(items.length)+' کاندید</div>'
-      +'<div style="color:#94a3b8;font-size:10px;margin-bottom:6px">پاسخی که دسته‌اش درست‌تر بود را «برگزیدن» بزنید تا به‌صورت رای ثبت شود و آمار مدل مستر به‌روز شود.</div>';
+    let h='<div style="color:#67e8f9;font-weight:700;font-size:12px;margin-bottom:6px">🏷️ دسته‌بندی «'+esc(d.title)+'» توسط '+toFa(items.length)+' کاندید</div>'
+      +'<div style="color:#94a3b8;font-size:10px;margin-bottom:8px">پاسخی که دسته‌اش درست‌تر بود را «برگزیدن + یادگیری» بزنید؛ هم رأیِ مستر ثبت می‌شود و هم این دسته برای محصولات هم‌کلمه آموخته می‌شود.</div>';
     items.forEach((it,idx)=>{
       const isM=(it.key===d.master);
       h+='<div style="border:1px solid '+(isM?'#fbbf24':'#334155')+';border-radius:8px;padding:7px;margin-bottom:6px;background:#111c31">'
@@ -29959,12 +30105,28 @@ function aiCandCategoryTest(){
             ? '✅ دسته: <b style="color:#4ade80">'+esc(it.category_name)+'</b> (#'+it.category_id+')'
             : '<span style="color:#f87171">✗ '+(it.error||'پاسخ نامعتبر')+'</span>')+'</div>'
         +(it.ai_text?'<div style="color:#94a3b8;font-size:10px;direction:ltr;text-align:left;white-space:pre-wrap;margin-top:3px">'+esc(it.ai_text)+'</div>':'')
-        +'<button class="btn btn-green" style="margin-top:6px;font-size:10px;padding:3px 10px" onclick="aiCandVote(\'category\','+idx+')">✓ برگزیدن (رای)</button>'
+        +'<button class="btn btn-green" style="margin-top:6px;font-size:10px;padding:3px 10px" onclick="aiCandCatVote('+idx+')">✓ برگزیدن + یادگیری</button>'
         +'</div>';
     });
-    h+='</div>';
-    r.innerHTML=h;
-  }).catch(()=>{if(r)r.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا شبکه</div>';});
+    h+='<div style="color:#64748b;font-size:10px;margin-top:6px">⭐ = مدل مستر (مرجع مقایسه). انتخاب شما همان رایِ مستر را به‌روز می‌کند.</div>';
+    body.innerHTML=h;
+  }).catch(()=>{if(body)body.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا شبکه</div>';});
+}
+function aiCandCatVote(idx){
+  const it=(aiCandCtx.items||[])[idx];
+  if(!it){showToast('نتیجهٔ کاندید یافت نشد',1);return;}
+  const fd=new FormData();
+  fd.append('action','ai_vote');
+  fd.append('task','category');
+  fd.append('input',aiCandCtx.input||'');
+  fd.append('winner',it.key);
+  fd.append('candidates',JSON.stringify(aiCandCtx.keys||[]));
+  fd.append('cat_id',String(it.category_id||0));
+  fd.append('cat_name',it.category_name||'');
+  fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    showToast(d&&d.ok?('✓ رأی ثبت شد — مستر: '+((d.master||'').split('::')[1]||d.master||'?')):('خطا: '+((d&&d.error)||'نامشخص')),!d||!d.ok);
+    if(d&&d.ok)aiCandRender();
+  }).catch(()=>showToast('خطا در ثبت رأی',true));
 }
 function aiCandReplyTest(){
   let m=document.getElementById('aiCandReplyModal');if(m)m.remove();
@@ -32979,7 +33141,13 @@ function renderBslModal(products){
     const isManageable=['active','approved','inactive','not_approved','pending','archived','all'].includes(activeTab);
     let html='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslModal()">';
     html+='<div class="bsl-modal">';
-    html+='<div class="bsl-modal-head"><h2>\u{1F3EA} \u0645\u062F\u06CC\u0631\u06CC\u062A \u062C\u0627\u0645\u0639 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0628\u0627\u0633\u0644\u0627\u0645 ('+toFa(total)+' \u0645\u062D\u0635\u0648\u0644)</h2><div style="display:flex;gap:4px"><button class="btn btn-red" style="font-size:11px;padding:4px 8px" onclick="bslFindDuplicates()">\u{1F50D} \u062A\u06A9\u0631\u0627\u0631\u06CC\u200C\u0647\u0627</button><button class=\"btn btn-purple\" style=\"font-size:11px;padding:4px 8px\" onclick=\"bslPhase2Check()\" title=\"اصلاح دستهٔ محصولات رد شده\">🔄 فاز ۲</button><button class="btn btn-cyan" style="font-size:11px;padding:4px 8px" onclick="bslStatusOverview()">\u{1F4CA} \u0648\u0636\u0639\u06CC\u062A</button><button class="btn btn-gray" onclick="closeBslModal()">\u2715</button></div></div>';
+    /* v9.49: عنوان در بالاترین ردیفِ تمام‌عرض مودال می‌نشیند و دکمه‌های
+       عملیات در ردیفِ پایینِ جدا — تا مودال به‌جای رشدِ عمودی (در موبایل)
+       افقی باز شود و فضای کمتری بگیرد. */
+    html+='<div class="bsl-modal-head" style="flex-direction:column;align-items:stretch;gap:7px;padding:10px 14px">';
+    html+='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="font-size:15px;flex:1;min-width:0">\u{1F3EA} \u0645\u062F\u06CC\u0631\u06CC\u062A \u062C\u0627\u0645\u0639 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0628\u0627\u0633\u0644\u0627\u0645 ('+toFa(total)+' \u0645\u062D\u0635\u0648\u0644)</h2><button class="btn btn-gray" onclick="closeBslModal()">\u2715</button></div>';
+    html+='<div style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn btn-red" style="font-size:11px;padding:4px 8px" onclick="bslFindDuplicates()">\u{1F50D} \u062A\u06A9\u0631\u0627\u0631\u06CC\u200C\u0647\u0627</button><button class="btn btn-purple" style="font-size:11px;padding:4px 8px" onclick="bslPhase2Check()" title="اصلاح دستهٔ محصولات رد شده">🔄 فاز ۲</button><button class="btn btn-cyan" style="font-size:11px;padding:4px 8px" onclick="bslStatusOverview()">\u{1F4CA} \u0648\u0636\u0639\u06CC\u062A</button></div>';
+    html+='</div>';
     // Tabs
     html+='<div class="bsl-tabs">';
     BSL_TABS.forEach(t=>{
@@ -33801,6 +33969,9 @@ function showPhase2Modal(rejected,cats){
       +'🧠 اعمال آموخته‌ها</button>'
       +'<button class="btn btn-cyan" onclick="p2AskAiAll()" id="p2AiAllBtn" '
       +'style="font-size:11px;padding:5px 10px">🤖 پیشنهاد AI برای همه</button>'
+      +'<button class="btn btn-orange" onclick="bslMasterFixAll()" id="p2MasterBtn" '
+      +'style="font-size:11px;padding:5px 10px" title="با مدل مستر (بهترین کاندید از نظر آمار) مشورت و بقیهٔ محصولاتِ ردشده را دسته‌بندی و اصلاح کن">'
+      +'🎯 اصلاح بقیه با مستر</button>'
       +'</div>';
     h+='<div class="bsl-modal-body" style="max-height:64vh;overflow:auto;padding:10px">';
     if(!rows.length){
@@ -33825,6 +33996,12 @@ function showPhase2Modal(rejected,cats){
         h+='<button class="btn btn-cyan" id="p2ai-'+p.id+'" '
          + 'onclick="p2AskAi('+p.id+')" style="font-size:11px;padding:5px 9px">'
          + '🤖 پیشنهاد هوش مصنوعی</button>';
+        // v9.49: پیشنهاد همهٔ کاندیدها — جواب دسته‌بندیِ هر مدل کاندید را کنار
+        // هم می‌آورد تا بهترین را برگزینید (رأی مستر + یادگیری + اصلاح محصول)
+        h+='<button class="btn btn-purple" id="p2cand-'+p.id+'" '
+         + 'onclick="p2AskCandidates('+p.id+')" style="font-size:11px;padding:5px 9px" '
+         + 'title="دسته‌بندی همهٔ کاندیدها برای این محصول">'
+         + '🏷️ همهٔ کاندیدها</button>';
         h+=  '<div class="p2-search">'
            + '<input type="hidden" id="cat-'+p.id+'" value="0">'
            + '<input type="text" id="catSearch-'+p.id+'" placeholder="جستجوی دسته..." autocomplete="off">'
@@ -33903,6 +34080,109 @@ function p2AskAi(pid){
       if(box)box.innerHTML='<span style="color:#fca5a5">🤖 خطای شبکه</span>';
     });
 }
+
+/* =====================================================================
+ *  v9.49: دسته‌بندیِ همهٔ کاندیدها برای هر محصولِ تأیید‌نشده + اصلاح بقیه با مستر
+ * ===================================================================== */
+
+/** v9.49: پیشنهاد دسته‌بندی همهٔ کاندیدها برای یک محصولِ تأیید‌نشده */
+function p2AskCandidates(pid){
+  const row=(window._phase2Rows||[]).find(x=>String(x.id)===String(pid));
+  if(!row){showToast('محصول یافت نشد',1);return;}
+  const box=document.getElementById('p2aiBox-'+pid);
+  const btn=document.getElementById('p2cand-'+pid);
+  if(btn){btn.disabled=true;btn.textContent='⏳ ...';}
+  if(box)box.innerHTML='<span style="color:#93c5fd">🏷️ در حال پرسیدن از همهٔ کاندیدها...</span>';
+  return fetch('?ai_candidates_category=1&title='+encodeURIComponent(row.title||''))
+    .then(r=>r.json()).then(d=>{
+      if(btn){btn.disabled=false;btn.textContent='🏷️ همهٔ کاندیدها';}
+      if(!box)return d;
+      if(!d||!d.ok){box.innerHTML='<span style="color:#fca5a5">🏷️ '+esc((d&&d.error)||'خطا')+'</span>';return d;}
+      const items=d.items||[];
+      aiCandCtx={task:'category',input:d.title||row.title||'',keys:items.map(x=>x.key),items:items};
+      let h='<div style="background:#1e1b4b;border:1px solid #4338ca;border-radius:8px;padding:7px;font-size:11px">'
+        +'<div style="color:#c4b5fd;font-weight:700;margin-bottom:4px">🏷️ دسته‌بندی «'+esc(d.title)+'» توسط '+toFa(items.length)+' کاندید — بهترین را برگزینید:</div>';
+      items.forEach((it,idx)=>{
+        const isM=(it.key===d.master);
+        h+='<div style="border:1px solid '+(isM?'#fbbf24':'#334155')+';border-radius:6px;padding:6px;margin-bottom:4px;background:#111c31">'
+          +'<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">'
+          +'<span style="color:'+(isM?'#fbbf24':'#e2e8f0')+';font-weight:700">'+(idx+1)+'. '+esc(it.providerName)+(isM?' ⭐':'')+'</span>'
+          +'<span style="color:#64748b;font-size:9px" dir="ltr">'+esc(it.model)+' · '+toFa(it.latency||0)+'ms</span></div>'
+          +'<div style="margin-top:3px">'+((it.ok&&it.category_name)
+            ? '✅ <b style="color:#4ade80">'+esc(it.category_name)+'</b> (#'+it.category_id+')'
+            : '<span style="color:#f87171">✗ '+(it.error||'پاسخ نامعتبر')+'</span>')+'</div>'
+          +'<button class="btn btn-green" style="margin-top:5px;font-size:10px;padding:2px 9px" onclick="p2CandPick('+pid+','+idx+')">✓ برگزیدن + اصلاح</button>'
+          +'</div>';
+      });
+      h+='</div>';
+      box.innerHTML=h;
+      return d;
+    }).catch(()=>{ if(btn){btn.disabled=false;btn.textContent='🏷️ همهٔ کاندیدها';} if(box)box.innerHTML='<span style="color:#fca5a5">🏷️ خطای شبکه</span>'; });
+}
+
+/** v9.49: برگزیدن پاسخ یک کاندید برای یک محصولِ تأیید‌نشده — رأی مستر + یادگیری + اصلاح */
+function p2CandPick(pid, idx){
+  const it=(aiCandCtx.items||[])[idx];
+  if(!it){showToast('نتیجهٔ کاندید یافت نشد',1);return;}
+  if(!it.ok||!it.category_id){showToast('این کاندید دستهٔ معتبری نداد',1);return;}
+  // ۱) رأیِ مدل مستر (با همین دسته → یادگیری هم ثبت می‌شود)
+  const fd=new FormData();
+  fd.append('action','ai_vote');
+  fd.append('task','category');
+  fd.append('input',aiCandCtx.input||'');
+  fd.append('winner',it.key);
+  fd.append('candidates',JSON.stringify(aiCandCtx.keys||[]));
+  fd.append('cat_id',String(it.category_id));
+  fd.append('cat_name',it.category_name||'');
+  fetch('',{method:'POST',body:fd}).catch(()=>{});
+  // ۲) اصلاح + یادگیریِ خودِ محصول (PATCH باسلام + catLearnRecord)
+  bslFixCat(pid, it.category_id, it.category_id);
+  // ۳) بعد از یادگیری، بقیهٔ محصولات با همان کلمهٔ اول را هم پیشنهاد بده
+  if(it.category_name)setTimeout(()=>p2SuggestSameWord(catFirstWordsJS((aiCandCtx.input||''),1)),700);
+}
+
+/** v9.49: با مدل مستر مشورت و بقیهٔ محصولاتِ تأیید‌نشده را دسته‌بندی و اصلاح کن */
+function bslMasterFixAll(){
+  const btn=document.getElementById('p2MasterBtn');
+  if(btn){btn.disabled=true;btn.textContent='⏳ ...';}
+  let modal=document.getElementById('bslMasterFixModal');
+  if(modal)modal.remove();
+  modal=document.createElement('div');modal.id='bslMasterFixModal';
+  modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslMasterFixModal()"><div class="bsl-modal" style="width:800px"><div class="bsl-modal-head"><h2>🎯 اصلاح بقیه با مستر — گزارش زنده</h2><button class="btn btn-gray" onclick="closeBslMasterFixModal()">✕</button></div><div class="bsl-modal-body" style="padding:0"><div id="bslMasterFixLog" style="max-height:62vh;overflow-y:auto;padding:8px;font-size:11px;direction:rtl"></div></div><div class="bsl-modal-pager"><button class="btn btn-gray" onclick="closeBslMasterFixModal()">بستن</button></div></div></div>';
+  document.body.appendChild(modal);
+  const logEl=document.getElementById('bslMasterFixLog');
+  const addRow=function(html){const d=document.createElement('div');d.style.cssText='padding:4px 6px;border-bottom:1px solid #1e293b;direction:rtl';d.innerHTML=html;logEl.appendChild(d);logEl.scrollTop=logEl.scrollHeight;};
+  addRow('<span style="color:#67e8f9">ℹ️ در حال مشورت با مدل مستر برای همهٔ محصولات ردشده...</span>');
+  const evtSrc=new EventSource('?bsl_master_fix=1');
+  window._bslMasterEvtSrc=evtSrc;
+  evtSrc.onmessage=function(e){
+    try{
+      const d=JSON.parse(e.data);
+      if(d.type==='step'){addRow('<span style="color:#67e8f9">ℹ️ '+esc(d.msg)+'</span>');}
+      else if(d.type==='start'){addRow('<span style="color:#c4b5fd;font-weight:700">🚀 '+esc(d.msg)+'</span>');}
+      else if(d.type==='progress'){
+        const idx=d.idx||0,tot=d.total||0;
+        if(d.step==='ask_master'){addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+esc(d.pName||'')+' — مشورت با مستر...</span>');}
+        else if(d.step==='patching'){addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+esc(d.pName||'')+' — اعمال: '+esc(d.catName||'')+' ('+d.catId+')...</span>');}
+      }
+      else if(d.type==='item'){
+        if(d.status==='fixed'){addRow('<span style="color:#4ade80;font-weight:700">✅ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' → '+esc(d.catName||'')+' ('+d.catId+')</span>');}
+        else if(d.status==='no_cat'){addRow('<span style="color:#fbbf24">⚠️ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' — مستر دستهٔ معتبری نداد'+(d.err?' ('+esc(d.err)+')':'')+'</span>');}
+        else if(d.status==='failed'){addRow('<span style="color:#f87171">❌ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' — '+esc(d.msg||'')+'</span>');}
+      }
+      else if(d.type==='done'){
+        addRow('<span style="color:#4ade80;font-weight:700">🏁 '+esc(d.msg)+'</span>');
+        showToast('✅ اصلاح با مستر: '+toFa(d.fixed||0)+' محصول');
+        evtSrc.close();
+        if(btn){btn.disabled=false;btn.textContent='🎯 اصلاح بقیه با مستر';}
+        if((d.fixed||0)>0)setTimeout(()=>{closeBslMasterFixModal();bslPhase2Check();},2000);
+      }
+      else if(d.type==='error'){addRow('<span style="color:#f87171">❌ '+esc(d.msg)+'</span>');evtSrc.close();if(btn){btn.disabled=false;btn.textContent='🎯 اصلاح بقیه با مستر';}}
+    }catch(ex){}
+  };
+  evtSrc.onerror=function(){addRow('<span style="color:#f87171">❌ خطای شبکه — اتصال قطع شد</span>');evtSrc.close();if(btn){btn.disabled=false;btn.textContent='🎯 اصلاح بقیه با مستر';}};
+}
+function closeBslMasterFixModal(){const m=document.getElementById('bslMasterFixModal');if(m)m.remove();const evtSrc=window._bslMasterEvtSrc;if(evtSrc)evtSrc.close();}
 
 /** پیشنهاد هوش مصنوعی برای همهٔ موارد باقی‌مانده، یکی‌یکی */
 function p2AskAiAll(){
