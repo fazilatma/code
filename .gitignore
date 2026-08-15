@@ -84,3 +84,4 @@ ai_votes.json
 
 # v9.25: storage write error log
 storage_errors.log
+changes_log.json
