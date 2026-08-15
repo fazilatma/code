@@ -89,8 +89,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.45';
-const APP_VERSION_DATE = '1405/06/14';
+const APP_VERSION = '9.47';
+const APP_VERSION_DATE = '1405/06/15';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -8739,6 +8739,33 @@ function destPriceCfg(array $cn, string $dest): array {
     ];
 }
 
+/* v9.47: فهرست غرفه‌های باسلام (پیش‌فرض + اضافی) برای دراپ‌داون «انتخاب غرفه».
+   هر غرفه: ['vendor_id'=>int,'token'=>string,'shop_name'=>string]. */
+function bslAllShops(array $cn): array {
+    $out = [];
+    $b = $cn['basalam'] ?? [];
+    $defTok = trim((string)($b['token'] ?? ''));
+    $defVid = (int)($b['vendor_id'] ?? 0);
+    $defName = trim((string)($b['shop_name'] ?? ''));
+    if ($defName === '') $defName = 'غرفهٔ پیش‌فرض';
+    if ($defTok !== '' && $defVid > 0) {
+        $out[] = ['vendor_id' => $defVid, 'token' => $defTok, 'shop_name' => $defName];
+    }
+    $vs = $b['vendors'] ?? [];
+    if (is_array($vs)) {
+        foreach ($vs as $v) {
+            if (!is_array($v)) continue;
+            $vid = (int)($v['vendor_id'] ?? 0);
+            $tok = trim((string)($v['token'] ?? ''));
+            if ($vid <= 0 || $tok === '') continue;
+            $name = trim((string)($v['shop_name'] ?? ($v['name'] ?? '')));
+            if ($name === '') $name = 'غرفهٔ ' . $vid;
+            $out[] = ['vendor_id' => $vid, 'token' => $tok, 'shop_name' => $name];
+        }
+    }
+    return $out;
+}
+
 /** امضای تنظیمات قیمت — اگر عوض شود یعنی قیمت همهٔ محصولات عوض شده */
 function profilePriceSignature(array $profile): string {
     return (string)($profile['priceMode'] ?? 'none') . '|'
@@ -11785,6 +11812,14 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "'noExtract'") !== false
          && strpos($selfSrc, 'id="profileSync' . 'NoExtract"') !== false
          && strpos($selfSrc, "'no_extract'=>true") !== false);
+
+    /* ---------- v9.47: دراپ‌داون انتخاب غرفه در مدیریت محصولات باسلام ---------- */
+    $add('9.47', 'دراپ‌داون انتخاب غرفه (با آیتم «همه» پیش‌فرض) در مدیریت محصولات باسلام',
+         function_exists('bslAllShops')
+         && strpos($selfSrc, "'shop_id'") !== false
+         && strpos($selfSrc, "'shops'=>\$allShops") !== false
+         && strpos($selfSrc, 'bslShopSelect') !== false
+         && strpos($selfSrc, 'function bslChangeShop') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -17636,9 +17671,22 @@ if (isset($_GET['bsl_products'])) {
 header('Content-Type: application/json; charset=UTF-8');
 $cn=loadConnections();$bs=$cn['basalam']??[];
 if(empty($bs['token'])||empty($bs['vendor_id'])){echo json_encode(['ok'=>false,'error'=>'تنظیمات باسلام ناقص'],JSON_UNESCAPED_UNICODE);exit;}
-$tk=$bs['token'];$vid=(int)$bs['vendor_id'];
 $page=max(1,(int)($_GET['page']??1));
 $perPage=min(1000,max(10,(int)($_GET['per_page']??50)));
+/* v9.47: انتخاب غرفه. مقدار «all» یا خالی یعنی همهٔ غرفه‌های فعال؛
+   در غیر این صورت شناسهٔ غرفهٔ مشخص. */
+$shopParam=(string)($_GET['shop_id']??'');
+$allShops=bslAllShops($cn);
+$shops=[];
+if($shopParam===''||$shopParam==='all'||$shopParam==='0'){
+    $shops=$allShops;
+}else{
+    foreach($allShops as $sp){ if((int)($sp['vendor_id']??0)===(int)$shopParam){ $shops[]=$sp; break; } }
+    if(empty($shops))$shops=$allShops;   // ناشناخته → همه
+}
+if(empty($shops)){echo json_encode(['ok'=>false,'error'=>'هیچ غرفه‌ای تنظیم نشده'],JSON_UNESCAPED_UNICODE);exit;}
+// غرفهٔ فعلی (برای دراپ‌داون) — پیش‌فرض همان غرفهٔ اول یا انتخاب‌شده
+$curShopId=$shopParam===''||$shopParam==='all'||$shopParam==='0'?0:(int)$shopParam;
 
 $statusParam=$_GET['status']??'active';
 $statusMap=[
@@ -17659,29 +17707,53 @@ $statusValues=$statusMap[$statusParam]??$statusMap['active'];
 $q=trim((string)($_GET['q']??''));
 $searchId=(int)preg_replace('~[^0-9]~','',$q);
 
+/* v9.47: حلقهٔ روی غرفه‌های انتخاب‌شده — هر محصول با shop/shop_name برچسب می‌خورد
+   تا در مودال معلوم باشد مالِ کدام غرفه است. */
+$data=[];$totalPage=1;$totalCount=0;$foundBy=$q!==''?'title':'';$cats=[];
+$isAll=count($shops)>1;
+
 /* اگر عدد وارد شده، ممکن است شناسهٔ محصول باشد؛ مستقیم بخوانش.
    محصولی که وضعیتش در هیچ‌کدام از سربرگ‌ها نیست، فقط از این راه پیدا می‌شود. */
 if($q!==''&&$searchId>0&&mb_strlen($q)<=12&&preg_match('~^\s*\d+\s*$~',$q)){
-$one=bslReq($tk,'GET','products/'.$searchId);
+$foundOne=null;
+foreach($shops as $sp){
+$sTk=(string)$sp['token'];$sVid=(int)$sp['vendor_id'];
+$one=bslReq($sTk,'GET','products/'.$searchId);
 $row=$one['body']['data']??($one['body']??null);
 if(!empty($one['ok'])&&is_array($row)&&(int)($row['id']??0)>0){
-$cats=[];
-$cr=bslReq($tk,'GET','categories');
+if(is_array($row)){$row['shop']=$sVid;$row['shop_name']=(string)($sp['shop_name']??'');}
+$foundOne=$row;break;
+}
+}
+if($foundOne){
+$cr=bslReq($shops[0]['token'],'GET','categories');
 if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
-echo json_encode(['ok'=>true,'products'=>[$row],'page'=>1,'total_page'=>1,'total_count'=>1,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'found_by'=>'id'],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'products'=>[$foundOne],'page'=>1,'total_page'=>1,'total_count'=>1,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'found_by'=>'id','shop_id'=>$curShopId,'shops'=>$allShops],JSON_UNESCAPED_UNICODE);
 exit;
 }
 }
 
-$url='vendors/'.$vid.'/products?page='.$page.'&per_page='.$perPage;
+/* فهرست عادی — برای هر غرفهٔ انتخاب‌شده صفحه را می‌گیریم و جمع می‌کنیم.
+   در حالت «همه» از هر غرفه همان صفحه را می‌گیریم و برچسب غرفه می‌زنیم. */
+foreach($shops as $sp){
+$sTk=(string)$sp['token'];$sVid=(int)$sp['vendor_id'];
+if($sTk===''||$sVid<=0)continue;
+$url='vendors/'.$sVid.'/products?page='.$page.'&per_page='.$perPage;
 foreach($statusValues as $sv){$url.='&statuses='.$sv;}
 if($q!==''){$url.='&title='.urlencode($q);}
-$r=bslReq($tk,'GET',$url);
-if(!$r['ok']){echo json_encode(['ok'=>false,'error'=>'خطا در دریافت ('.($r['code']??'?').') '.mb_substr($r['raw']??'',0,200)],JSON_UNESCAPED_UNICODE);exit;}
-$data=$r['body']['data']??[];
-$totalPage=(int)($r['body']['total_page']??1);
-$totalCount=(int)($r['body']['total_count']??0);
-$foundBy=$q!==''?'title':'';
+$r=bslReq($sTk,'GET',$url);
+if(!$r['ok']){continue;}
+$rows=$r['body']['data']??[];
+if(is_array($rows)){
+foreach($rows as $row){
+if(is_array($row)){$row['shop']=$sVid;$row['shop_name']=(string)($sp['shop_name']??'');$data[]=$row;}
+}
+}
+$totalCount+=(int)($r['body']['total_count']??0);
+$tp=(int)($r['body']['total_page']??1);
+if(!$isAll){$totalPage=$tp;}
+if(!$isAll&&!empty($r['ok'])&&$tp>1)$totalPage=$tp;
+}
 
 /* v8.82: فیلتر «title» سمت باسلام تطبیق سادهٔ رشته‌ای است و به نیم‌فاصله،
    ی/ک عربی و پسوند «(کد: ۱)» حساس. مقایسهٔ خودمان همهٔ این‌ها را یکسان
@@ -17692,8 +17764,11 @@ $want=reconNormTitle($q);
 $wantBare=reconNormTitle(stripProductCode($q));
 $hits=[];
 $allSt='';foreach(bslAllStatuses() as $sv){$allSt.='&statuses='.$sv;}
+foreach($shops as $sp){
+$sTk=(string)$sp['token'];$sVid=(int)$sp['vendor_id'];
+if($sTk===''||$sVid<=0)continue;
 for($pg=1;$pg<=25;$pg++){
-$sr=bslReq($tk,'GET','vendors/'.$vid.'/products?page='.$pg.'&per_page=100'.$allSt);
+$sr=bslReq($sTk,'GET','vendors/'.$sVid.'/products?page='.$pg.'&per_page=100'.$allSt);
 if(empty($sr['ok']))break;
 $rows=$sr['body']['data']??[];
 if(!is_array($rows)||!$rows)break;
@@ -17706,12 +17781,14 @@ if($nt===''&&$nb==='')continue;
 if($nt===$want||$nb===$wantBare
    ||($want!==''&&mb_strpos($nt,$want)!==false)
    ||($wantBare!==''&&mb_strpos($nb,$wantBare)!==false)){
+$row['shop']=$sVid;$row['shop_name']=(string)($sp['shop_name']??'');
 $hits[]=$row;
 }
 }
 $tp=(int)($sr['body']['total_page']??1);
 if($pg>=max(1,$tp))break;
 if(count($hits)>=$perPage)break;
+}
 }
 if($hits){
 $data=array_slice($hits,0,$perPage);
@@ -17720,9 +17797,9 @@ $totalPage=1;$totalCount=count($hits);$foundBy='deep';
 }
 
 $cats=[];
-$cr=bslReq($tk,'GET','categories');
+$cr=bslReq($shops[0]['token']??'', 'GET','categories');
 if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
-echo json_encode(['ok'=>true,'products'=>$data,'page'=>$page,'total_page'=>$totalPage,'total_count'=>$totalCount,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'q'=>$q,'found_by'=>$foundBy],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'products'=>$data,'page'=>$page,'total_page'=>$totalPage,'total_count'=>$totalCount,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'q'=>$q,'found_by'=>$foundBy,'shop_id'=>$curShopId,'shops'=>$allShops],JSON_UNESCAPED_UNICODE);
 exit;
 }
 
@@ -32718,7 +32795,7 @@ collectProfileData=function(){
 refreshSyncStatus();
 refreshExtractQueue();
 // v7.23: BaSalam Products Modal (fixed API response structure)
-let bslModalState={page:1,totalPage:1,totalCount:0,perPage:50,activeTab:'active',q:'',foundBy:''};
+let bslModalState={page:1,totalPage:1,totalCount:0,perPage:50,activeTab:'active',q:'',foundBy:'',shopId:0,shops:[]};
 const BSL_TABS=[
     {key:'active',label:'✅ فعال',statuses:['2976']},
     {key:'approved',label:'🟢 تأیید شده',statuses:['2976']},
@@ -32738,18 +32815,23 @@ function showBslProductsModal(page,tab){
     // v8.82: عبارت جست‌وجو به سرور می‌رود، نه فقط فیلتر روی همین صفحه
     const _q=bslModalState.q||'';
     fetch('?bsl_products=1&page='+page+'&per_page='+bslModalState.perPage+'&status='+tab
+          +'&shop_id='+encodeURIComponent(String(bslModalState.shopId||0))
           +(_q?('&q='+encodeURIComponent(_q)):'')).then(r=>r.json()).then(d=>{
         if(!d||!d.ok){showToast(d?.error||'خطا در دریافت محصولات',1);return;}
         bslModalState.totalPage=d.total_page||1;
         bslModalState.totalCount=d.total_count||0;
         bslModalState.foundBy=d.found_by||'';
         if(d.categories)window._bslModalCats=d.categories;
+        // v9.47: فهرست غرفه‌ها و غرفهٔ انتخاب‌شده از پاسخ
+        if(Array.isArray(d.shops))bslModalState.shops=d.shops;
+        if(d.shop_id!==undefined)bslModalState.shopId=d.shop_id;
         if(!_q)bslTabCounts[tab]=d.total_count||0;
         renderBslModal(d.products||[]);
         // v8.06: Preload counts for other tabs (fire-and-forget, page 1 only)
         BSL_TABS.forEach(t=>{
             if(t.key!==tab&&bslTabCounts[t.key]===undefined){
-                fetch('?bsl_products=1&page=1&per_page=1&status='+t.key).then(r2=>r2.json()).then(d2=>{
+                fetch('?bsl_products=1&page=1&per_page=1&status='+t.key
+                      +'&shop_id='+encodeURIComponent(String(bslModalState.shopId||0))).then(r2=>r2.json()).then(d2=>{
                     if(d2&&d2.ok){bslTabCounts[t.key]=d2.total_count||0;updateBslTabCounts();}
                 }).catch(()=>{});
             }
@@ -32759,6 +32841,13 @@ function showBslProductsModal(page,tab){
 function bslChangePerPage(val){
     bslModalState.perPage=parseInt(val)||50;
     bslModalState.page=1;
+    showBslProductsModal(1,bslModalState.activeTab);
+}
+/* v9.47: تغییر غرفه در مدیریت محصولات — 0 یعنی «همه» */
+function bslChangeShop(val){
+    bslModalState.shopId=parseInt(val)||0;
+    bslModalState.page=1;
+    bslModalState.q='';
     showBslProductsModal(1,bslModalState.activeTab);
 }
 /* v8.82: جست‌وجو در کل غرفه.
@@ -32823,6 +32912,17 @@ function renderBslModal(products){
     html+='</div>';
     // v8.17: Per-page selector
     html+='<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:#0f172a;border-bottom:1px solid #334155">';
+    // v9.47: دراپ‌داون انتخاب غرفه — آیتم «همه» پیش‌فرض
+    html+='<span style="color:#94a3b8;font-size:11px">🏪 غرفه:</span>';
+    html+='<select id="bslShopSelect" onchange="bslChangeShop(this.value)" style="padding:4px 8px;border:1px solid #475569;border-radius:6px;background:#1e293b;color:#e2e8f0;font-size:12px;direction:rtl">';
+    html+='<option value="0"'+(bslModalState.shopId===0?' selected':'')+'>🌐 همه</option>';
+    (bslModalState.shops||[]).forEach(s=>{
+        const sid=parseInt(s.vendor_id)||0;
+        if(!sid)return;
+        const nm=s.shop_name||('غرفهٔ '+sid);
+        html+='<option value="'+sid+'"'+(bslModalState.shopId===sid?' selected':'')+'>'+esc(nm)+'</option>';
+    });
+    html+='</select>';
     html+='<span style="color:#94a3b8;font-size:11px">نمایش:</span>';
     html+='<select id="bslPerPageSelect" onchange="bslChangePerPage(this.value)" style="padding:4px 8px;border:1px solid #475569;border-radius:6px;background:#1e293b;color:#e2e8f0;font-size:12px;direction:ltr">';
     [50,100,200,500,1000].forEach(v=>{html+='<option value="'+v+'"'+(bslModalState.perPage===v?' selected':'')+'>'+toFa(v)+'</option>';});
@@ -32936,7 +33036,8 @@ function renderBslModal(products){
         if(isManageable)html+='<td style="text-align:center" onclick="event.stopPropagation()"><input type="checkbox" class="bsl-row-cb" data-pid="'+(p.id??'')+'" onchange="bslRowCheck(this)"></td>';
         html+='<td class="td-id">'+esc(String(p.id??''))+'</td>';
         html+='<td style="text-align:center">'+img+'</td>';
-        html+='<td class="td-name" title="'+esc(pName)+'">'+esc(pName)+'</td>';
+        const pShop=(p.shop_name||'');
+        html+='<td class="td-name" title="'+esc(pName)+'">'+esc(pName)+(pShop?'<div style="color:#22d3ee;font-size:9px;margin-top:1px">🏪 '+esc(pShop)+'</div>':'')+'</td>';
         html+='<td class="td-price">'+toFa(String(pPrice))+'</td>';
         html+='<td class="td-stock">'+toFa(String(pInv))+'</td>';
         html+='<td class="td-status" style="color:'+stColor+'">'+st+'</td>';
