@@ -89,8 +89,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.47';
-const APP_VERSION_DATE = '1405/06/15';
+const APP_VERSION = '9.48';
+const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1133,15 +1133,61 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
     // v9.32: فهرست نام‌های مدلِ امتحان‌شده.
     // خیلی از مدل‌های وارده فقط @cf/llama-... دارند در حالی که مسیر درست
     // @cf/meta/llama-... است (بخش org). اگر اولی جواب نداد، دوم را هم امتحان کن.
+    // v9.48: همین قاعده به همهٔ خانواده‌های Cloudflare تعمیم داده شد — نه فقط
+    // llama/qwen. Cloudflare Workers AI نام هر مدل را با بخشِ org کامل می‌خواهد
+    // (مثل @cf/google/gemma-...، @cf/openai/gpt-oss-...، @cf/moonshotai/kimi-...،
+    // @cf/mistral/mistral-... و...). کانفیگِ کاربران معمولاً فقط @cf/<name> دارد
+    // و بخش org جا می‌ماند؛ در تستِ جدا هم چون همه به یک مدلِ درست حل می‌شدند
+    // کار می‌کردند. اینجا اگر نامِ واردشده بخش org نداشته باشد، برای خانواده‌های
+    // شناخته‌شده نسخهٔ org-دار هم ساخته و امتحان می‌شود.
     $modelIds = [];
     $modelIds[] = ltrim($model, '/');
     $baseModel = $modelIds[0];
-    if (preg_match('~^@cf/llama~i', $baseModel)) {
-        $alt = preg_replace('~^@cf/llama~i', '@cf/meta/llama', $baseModel);
-        if ($alt !== $baseModel && !in_array($alt, $modelIds, true)) $modelIds[] = $alt;
-    } elseif (preg_match('~^@cf/qwen~i', $baseModel)) {
-        $alt = preg_replace('~^@cf/qwen~i', '@cf/qwen/qwen', $baseModel);
-        if ($alt !== $baseModel && !in_array($alt, $modelIds, true)) $modelIds[] = $alt;
+    // اگر نام از قبل بخش org دارد (یعنی بعد از @cf/ یک '/' هست) اصلاح لازم نیست.
+    $after = preg_replace('~^@cf/~i', '', $baseModel);
+    if ($after !== '' && strpos($after, '/') === false) {
+        // ترتیب مهم است: خاص‌ترها قبل از عام‌ترها
+        $orgRules = [
+            'gemma-sea-lion'   => 'aisingapore',
+            'mistral-small'    => 'mistralai',
+            'llama-guard'      => 'meta',
+            'gpt-oss'          => 'openai',
+            'deepseek'         => 'deepseek-ai',
+            'nemotron'         => 'nvidia',
+            'moondream'        => 'moondream',
+            'embeddinggemma'   => 'google',
+            'hermes'           => 'nousresearch',
+            'uform'            => 'unum-cloud',
+            'plamo'            => 'pfnet',
+            'granite'          => 'ibm-granite',
+            'kimi'             => 'moonshotai',
+            'gemma'            => 'google',
+            'mistral'          => 'mistral',
+            'glm'              => 'zai-org',
+            'phi'              => 'microsoft',
+            'bge'              => 'baai',
+            'llama'            => 'meta',
+            'qwen'             => 'qwen',
+            'qwq'              => 'qwen',
+            'sqlcoder'         => 'defog',
+            'florence'         => 'microsoft',
+            'llava'            => 'llava-hf',
+        ];
+        $cfAlt = null;
+        foreach ($orgRules as $kw => $org) {
+            if (stripos($after, $kw) === 0) {
+                $cfAlt = '@cf/' . $org . '/' . $after;
+                break;
+            }
+        }
+        if ($cfAlt !== null && $cfAlt !== $baseModel && !in_array($cfAlt, $modelIds, true)) {
+            $modelIds[] = $cfAlt;
+        }
+        // برای llama علاوه بر «meta»، گزینهٔ «meta-llama» را هم امتحان کن
+        if (stripos($after, 'llama') === 0) {
+            $alt2 = '@cf/meta-llama/' . $after;
+            if (!in_array($alt2, $modelIds, true)) $modelIds[] = $alt2;
+        }
     }
     $modelIds = array_values(array_unique($modelIds));
 
@@ -1157,7 +1203,7 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
 
     /* هر نام مدل را با دو بدنهٔ {prompt} و {messages} امتحان می‌کنیم تا
        هم «No route» (نام غلط) هم «400» (بدنهٔ نامناسب) پوشش داده شود. */
-    $last = null; $r = null; $tried = [];
+    $last = null; $r = null; $tried = []; $viaChat = false;
     foreach ($modelIds as $mid) {
         $target = $base . $mid;
         $bodies = [];
@@ -1180,14 +1226,36 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
         }
     }
     if (aiTestStopRequested()) return ['ok' => false, 'code' => 0, 'error' => 'stopped', 'stopped' => true];   // v9.45
+    /* v9.48: اگر مسیر native (ai/run/...) با هیچ نامی جواب نداد و پیام‌هایی
+       هست، یک بار از اندپوینت OpenAI-compatible خودِ Cloudflare
+       (ai/v1/chat/completions) استفاده کن. این اندپوینت نام مدل را داخل بدنهٔ
+       JSON می‌گیرد و خروجیِ استاندارد OpenAI را برمی‌گرداند؛ خیلی از ابزارهای
+       تستِ خارجی با همین مسیر همهٔ مدل‌ها را ok گزارش می‌دهند. */
+    if (empty($r['ok']) && !empty($messages)) {
+        $chatUrl = 'https://api.cloudflare.com/client/v4/accounts/' . rawurlencode($acct) . '/ai/v1/chat/completions';
+        foreach ($modelIds as $mid2) {
+            if (aiTestStopRequested()) {
+                return ['ok' => false, 'code' => 0, 'error' => 'stopped', 'stopped' => true, 'cf_tried_models' => $modelIds];
+            }
+            $cb = ['model' => $mid2, 'messages' => $messages];
+            if ($maxTok > 0) $cb['max_tokens'] = $maxTok;
+            $rr = aiHttp($chatUrl, $headers, $cb, $net, 'direct');
+            $tried[] = ['url' => $chatUrl, 'body' => 'chat-' . $mid2, 'code' => (int)$rr['code']];
+            if ((int)$rr['code'] === 200) { $r = $rr; $viaChat = true; break; }
+        }
+    }
     if (!isset($r)) $r = $last ?: ['ok' => false, 'code' => 0, 'error' => 'بدون پاسخ', 'body' => null];
     $r['cf_url'] = $base . $modelIds[0];
     $r['cf_tried_models'] = $modelIds;
     $r['cf_tried'] = count($tried);
     if (!empty($r['ok'])) {
-        $result = $r['body']['result'] ?? [];
-        $text = (string)($result['response'] ?? '');
-        $r['body'] = ['choices' => [['message' => ['content' => $text]]], 'model' => $model, 'usage' => []];
+        if (!$viaChat) {
+            $result = $r['body']['result'] ?? [];
+            $text = (string)($result['response'] ?? '');
+            $r['body'] = ['choices' => [['message' => ['content' => $text]]], 'model' => $model, 'usage' => []];
+        } else {
+            $r['body']['model'] = $r['body']['model'] ?? $model;
+        }
     } else {
         $cfErr = aiCloudflareError($r);
         if ($cfErr !== '') $r['cf_error'] = $cfErr;
@@ -11820,6 +11888,15 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, "'shops'=>\$allShops") !== false
          && strpos($selfSrc, 'bslShopSelect') !== false
          && strpos($selfSrc, 'function bslChangeShop') !== false);
+
+    /* ---------- v9.48: خودکارسازی مسیر مدل‌های Cloudflare ---------- */
+    $add('9.48', 'نام مدل‌های Cloudflare بدون بخش org با جدول org به مسیر کامل اصلاح می‌شوند',
+         strpos($selfSrc, '$orgRules') !== false
+         && strpos($selfSrc, "'deepseek-ai'") !== false
+         && strpos($selfSrc, "'moonshotai'") !== false);
+    $add('9.48', 'پشتیبانِ اندپوینت OpenAI-compatible خودِ Cloudflare (ai/v1/chat/completions)',
+         strpos($selfSrc, '/ai/v1/chat/completions') !== false
+         && strpos($selfSrc, '!$viaChat') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -25752,6 +25829,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.48', t:'☁️ رفعِ مدل‌های Cloudflare Workers AI', items:[
+    'گزارش شما: در کانفیگ شما فقط بعضی مدل‌های Cloudflare کار می‌کردند ولی', 'در تستِ جدا همهٔ ۸۱ مدل ok بودند. ریشهٔ کار: اسکریپت هر مدل را native', 'با آدرس ai/run/نام‌مدل صدا می‌زند، در حالی که Cloudflare برای هر مدل', 'مسیرِ کاملِ org را می‌خواهد (مثل @cf/google/gemma-...، @cf/openai/', 'gpt-oss-...، @cf/moonshotai/kimi-...، @cf/meta/llama-...) و در تستِ جدا', 'همه به یک مدلِ درست حل می‌شدند.', '✅ جدول org اضافه شد: اگر نامِ واردشده فقط @cf/<name> باشد (بدون بخش org)،', 'برای خانواده‌های شناخته‌شده (gemma، gpt-oss، kimi، glm، deepseek، mistral،', 'llama، qwen، bge، granite و...) مسیرِ org-دار هم ساخته و خودکار امتحان می‌شود.', '✅ پشتیبانِ اندپوینت OpenAI-compatible خودِ Cloudflare (ai/v1/chat/completions):', 'اگر مسیر native با هیچ نامی جواب نداد، یک بار با همین اندپوینت که نام مدل', 'را داخل بدنهٔ JSON می‌گیرد و خروجیِ استاندارد OpenAI می‌دهد دوباره تلاش می‌شود.'],},
   {v:'9.45', t:'⏹ توقفِ «تست همهٔ مدل‌ها» + پروفایلِ بدون-استخراج', items:[
     'گزارش شما: عملیات «تست همهٔ مدل‌ها» هنوز متوقف نمی‌شد و گیر می‌کرد.',
     '🐞 سیگنال توقف فقط در یک لایه دیده می‌شد؛ درخواستِ DoH، حلقهٔ روش‌های',
