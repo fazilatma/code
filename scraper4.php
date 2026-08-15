@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.49';
+const APP_VERSION = '9.50';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -11912,6 +11912,16 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, "?bsl_master_fix=1'") !== false);
     $add('9.49', 'عنوان «مدیریت جامع محصولات باسلام» در بالاترین ردیفِ تمام‌عرض مودال می‌نشیند',
          strpos($selfSrc, 'style="flex-direction:column;align-items:stretch;gap:7px;padding:10px 14px"') !== false);
+
+    /* ---------- v9.50: انتخابِ مدل مستر بر اساس آمارِ دسته‌بندیِ صحیح فاز ۲ ---------- */
+    $add('9.50', 'تأییدِ دسته‌بندیِ صحیح در فاز ۲، رأیِ کاندیدِ پیش‌بینی‌کننده را ثبت می‌کند',
+         strpos($selfSrc, 'function p2RecordCandVote') !== false
+         && strpos($selfSrc, '_phase2CandResults') !== false
+         && strpos($selfSrc, 'p2RecordCandVote(productId, useCatId, _cn)') !== false);
+    $add('9.50', 'مدل مستر از میان کاندیدها بر اساس بهترین درصدِ بردِ همین رأی‌ها برگزیده می‌شود',
+         function_exists('aiMasterKey')
+         && strpos($selfSrc, 'function aiMasterKey') !== false
+         && strpos($selfSrc, 'aiScoreOf($v[\'scores\']') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -25956,6 +25966,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.50', t:'🎯 انتخابِ مدل مستر بر اساس آمارِ دسته‌بندیِ صحیح فاز ۲', items:[
+    'خواستهٔ شما: مدل مستر (که «اصلاح بقیه با مستر» و دسته‌بندی با آن انجام', 'می‌شود) باید بر اساس آمارِ دسته‌بندی‌هایِ صحیحِ تأییدشده در فاز ۲ انتخاب', 'شود، نه فقط به‌صورت پیش‌فرض یا با رأی‌های اندک.', '✅ حالا هر بار که یک دستهٔ صحیح در فاز ۲ تأیید می‌شود (با «همهٔ کاندیدها»،', 'دکمهٔ خودکار، انتخاب دستی یا آموخته‌ها)، رأیِ کاندید(هایی) که همان دسته را', 'پیش‌بینی کرده بودند ثبت می‌شود.', '✅ چون پاسخِ همهٔ کاندیدها برای هر محصول ذخیره می‌شود، اگر دستهٔ تأییدشده', 'با پیش‌بینیِ یک کاندید یکسان باشد، آن کاندید «برنده» می‌شود و در آمارِ', 'درصدِ بردِ مستر محاسبه می‌شود.', '✅ مدل مستر همچنان = سنجاقِ دستی، یا بهترینِ کاندیدها از نظر درصدِ بردِ', 'همین رأی‌های دسته‌بندیِ صحیح (wins/votes). با رأی‌های بیشتر، مستر دقیق‌تر', 'و هم‌راستا با دسته‌بندی‌هایِ درستی که خودتان در فاز ۲ تأیید کرده‌اید می‌شود.'],},
   {v:'9.49', t:'🏷️ دسته‌بندیِ همهٔ کاندیدها + اصلاح بقیه با مستر', items:[
     'خواستهٔ شما: نتیجهٔ «تست دستهٔ همهٔ کاندیدها» قبلاً داخل همان بخش هوش', 'مصنوعی می‌آمد و در موبایل جایی نداشت؛ و در بخش «تأیید نشده» می‌خواستید', 'برای هر محصولِ ردشده، دسته‌بندیِ همهٔ کاندیدها فهرست شود تا بهترین را', 'خودتان برگزینید و در دیتابیس یادگیری بنشیند و بقیه هم با مستر اصلاح شوند.', '✅ نتیجهٔ تستِ دسته‌بندی حالا در یک مودال باز می‌شود و هر پاسخ را با', '«برگزیدن + یادگیری» هم رأیِ مستر می‌دهد و هم دسته را برای بقیه می‌آموزد.', '✅ در مودال فاز ۲ برای هر محصولِ ردشده دکمهٔ «🏷️ همهٔ کاندیدها» اضافه شد:', 'دسته‌بندیِ هر مدل کاندید را کنار هم می‌آورد؛ برگزیدنِ هرکدام → رأی مستر +', 'اصلاحِ محصول در باسلام + یادگیری، و بعد محصولاتِ هم‌کلمه هم پیشنهاد می‌شوند.', '✅ دکمهٔ «🎯 اصلاح بقیه با مستر»: با مدل مستر (بهترین کاندید از نظر آمار', 'رأی‌ها) مشورت و بقیهٔ محصولاتِ تأییدنشده را دسته‌بندی و اصلاح می‌کند؛', 'هر اصلاح هم رأی و هم یادگیری ثبت می‌شود.', '✅ عنوان «مدیریت جامع محصولات باسلام» در بالاترین ردیفِ تمام‌عرض مودال', 'نشست و دکمه‌ها ردیفِ پایین‌اند تا مودال به‌جای رشدِ عمودی، افقی باز شود.'],},
   {v:'9.48', t:'☁️ رفعِ مدل‌های Cloudflare Workers AI', items:[
@@ -34100,6 +34112,11 @@ function p2AskCandidates(pid){
       if(!d||!d.ok){box.innerHTML='<span style="color:#fca5a5">🏷️ '+esc((d&&d.error)||'خطا')+'</span>';return d;}
       const items=d.items||[];
       aiCandCtx={task:'category',input:d.title||row.title||'',keys:items.map(x=>x.key),items:items};
+      // v9.50: پاسخ همهٔ کاندیدها را برای همین محصول نگه می‌داریم تا وقتی کاربر
+      // دستهٔ صحیح را تأیید کرد، رأیِ کاندید(هایی) که همان دسته را پیش‌بینی
+      // کرده بودند ثبت شود و مدل مستر بر اساس همین آمارِ صحیح انتخاب شود.
+      if(!window._phase2CandResults)window._phase2CandResults={};
+      window._phase2CandResults[String(pid)]={title:d.title||row.title||'',keys:items.map(x=>x.key),items:items};
       let h='<div style="background:#1e1b4b;border:1px solid #4338ca;border-radius:8px;padding:7px;font-size:11px">'
         +'<div style="color:#c4b5fd;font-weight:700;margin-bottom:4px">🏷️ دسته‌بندی «'+esc(d.title)+'» توسط '+toFa(items.length)+' کاندید — بهترین را برگزینید:</div>';
       items.forEach((it,idx)=>{
@@ -34120,25 +34137,44 @@ function p2AskCandidates(pid){
     }).catch(()=>{ if(btn){btn.disabled=false;btn.textContent='🏷️ همهٔ کاندیدها';} if(box)box.innerHTML='<span style="color:#fca5a5">🏷️ خطای شبکه</span>'; });
 }
 
-/** v9.49: برگزیدن پاسخ یک کاندید برای یک محصولِ تأیید‌نشده — رأی مستر + یادگیری + اصلاح */
+/* v9.50: برگزیدن پاسخ یک کاندید برای یک محصولِ تأیید‌نشده.
+   رأیِ مستر اینجا جدا ثبت نمی‌شود؛ اصلاحِ محصول از bslFixCat می‌رود و همان‌جا
+   (پس از موفقیت) p2RecordCandVote کاندید(هایی) را که این دستهٔ صحیح را
+   پیش‌بینی کرده بودند می‌برد تا تکراری نشود. */
 function p2CandPick(pid, idx){
   const it=(aiCandCtx.items||[])[idx];
   if(!it){showToast('نتیجهٔ کاندید یافت نشد',1);return;}
   if(!it.ok||!it.category_id){showToast('این کاندید دستهٔ معتبری نداد',1);return;}
-  // ۱) رأیِ مدل مستر (با همین دسته → یادگیری هم ثبت می‌شود)
-  const fd=new FormData();
-  fd.append('action','ai_vote');
-  fd.append('task','category');
-  fd.append('input',aiCandCtx.input||'');
-  fd.append('winner',it.key);
-  fd.append('candidates',JSON.stringify(aiCandCtx.keys||[]));
-  fd.append('cat_id',String(it.category_id));
-  fd.append('cat_name',it.category_name||'');
-  fetch('',{method:'POST',body:fd}).catch(()=>{});
-  // ۲) اصلاح + یادگیریِ خودِ محصول (PATCH باسلام + catLearnRecord)
+  // اصلاح + یادگیریِ خودِ محصول (PATCH باسلام + catLearnRecord + رأیِ کاندیدِ درست)
   bslFixCat(pid, it.category_id, it.category_id);
-  // ۳) بعد از یادگیری، بقیهٔ محصولات با همان کلمهٔ اول را هم پیشنهاد بده
+  // بعد از یادگیری، بقیهٔ محصولات با همان کلمهٔ اول را هم پیشنهاد بده
   if(it.category_name)setTimeout(()=>p2SuggestSameWord(catFirstWordsJS((aiCandCtx.input||''),1)),700);
+}
+
+/* v9.50: بر اساس آمارِ دسته‌بندیِ صحیحِ تأییدشده در فاز ۲، رأیِ کاندیدهایی را
+   که همان دسته را پیش‌بینی کرده بودند ثبت کن تا مدل مستر (بهترین از نظر
+   درصدِ بردِ همین رأی‌ها) بر اساس همین آمار انتخاب شود. اگر کاندیدی آن دسته
+   را پیش‌بینی نکرده باشد، رأیی ثبت نمی‌شود. */
+function p2RecordCandVote(pid, catId, catName){
+  const rec=window._phase2CandResults&&window._phase2CandResults[String(pid)];
+  if(!rec||!rec.items||!rec.keys||!rec.keys.length)return;
+  if(!catId)return;
+  const input=rec.title||'';
+  const matches=(rec.items||[]).filter(it=>it.ok&&String(it.category_id)===String(catId));
+  if(!matches.length)return;
+  matches.forEach(it=>{
+    const fd=new FormData();
+    fd.append('action','ai_vote');
+    fd.append('task','category');
+    fd.append('input',input);
+    fd.append('winner',it.key);
+    fd.append('candidates',JSON.stringify(rec.keys));
+    fd.append('cat_id',String(catId));
+    fd.append('cat_name',catName||it.category_name||'');
+    fetch('',{method:'POST',body:fd}).catch(()=>{});
+  });
+  // آمارِ مستر و فهرست کاندیدها را تازه کن (پس از ثبت رأی‌ها)
+  setTimeout(()=>{if(typeof aiCandRender==='function')aiCandRender();},400);
 }
 
 /** v9.49: با مدل مستر مشورت و بقیهٔ محصولاتِ تأیید‌نشده را دسته‌بندی و اصلاح کن */
@@ -34444,6 +34480,9 @@ function bslFixCat(productId,catId,autoCatId){
             // v8.51: همین الان که یک دسته دستی ثبت شد، ببین چند مورد دیگر
             // با همان کلمهٔ اول هست و پیشنهادشان را روی کارت نشان بده.
             if(d.learned&&d.learn_word)setTimeout(()=>p2SuggestSameWord(d.learn_word),300);
+            // v9.50: این تأییدِ دسته‌بندیِ صحیح در فاز ۲ را به آمارِ کاندیدها
+            // وصل کن تا مدل مستر بر اساس این آمارِ صحیح انتخاب شود.
+            p2RecordCandVote(productId, useCatId, _cn);
         }else{
             const msg=(d&&d.error)?d.error:'خطای نامشخص';
             showToast('❌ '+msg,1);
