@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.57';
+const APP_VERSION = '9.58';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12080,6 +12080,15 @@ if (isset($_GET['selftest'])) {
     $add('9.57', 'پاسخِ خالیِ ۲۰۰ در جدول به‌جای «✓ پاسخ گرفت» به‌صورت «⚠️ بدون پاسخ» نشان داده می‌شود',
          strpos($selfSrc, '⚠️ بدون پاسخ') !== false);
 
+    /* ---------- v9.58: نمایش جدول + بازآرایی بخش هوش مصنوعی ---------- */
+    $add('9.58', 'دکمهٔ «نمایش جدول» به‌جای «تست تازه» — بدون شروعِ تستِ تازه',
+         strpos($selfSrc, 'function aiShowTestTable') !== false
+         && strpos($selfSrc, 'onclick="aiShowTestTable()"') !== false
+         && strpos($selfSrc, '📊 نمایش جدول') !== false);
+    $add('9.58', 'بخش هوش مصنوعی به کادرهای منطقی (ارائه‌دهنده/تست/کاندید/اتصال) دسته‌بندی شده است',
+         substr_count($selfSrc, 'background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px') >= 3
+         && strpos($selfSrc, '<!-- ══ بخش ۲: تست مدل‌ها ══ -->') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -21763,6 +21772,10 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🤖 هوش مصنوعی</h3><span class="cst off" id="aiS">غیرمتصل</span><span class="arrow">▼</span></div>
 <div class="smenu-body">
 <!-- v9.20: چند-ارائه‌دهنده — درون‌ریزی JSON، انتخاب مدل فعال، تست همه -->
+<!-- v9.58: بازآرایی مفهومی/بصری — بخش‌بندی منطقی: ارائه‌دهنده → تست → کاندید → اتصال -->
+
+<!-- ══ بخش ۱: ارائه‌دهنده‌ها ══ -->
+<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px">
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🧠 ارائه‌دهنده‌ها (Providers)</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
 فهرست ارائه‌دهنده‌ها (Ollama، OpenRouter، Groq، Hugging Face و...) را به‌صورت فایل JSON درون‌ریزی کنید.
@@ -21778,15 +21791,22 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <textarea id="aiImportBox" rows="6" dir="ltr" spellcheck="false" style="width:100%;font-family:ui-monospace,monospace;font-size:10px;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px" placeholder='{\n  "openrouter": { "name":"OpenRouter", "url":"...", "apiKey":"...", "models":[ {...} ] }\n}'></textarea>
 <div class="cact" style="margin-top:4px"><button class="btn btn-cyan" onclick="aiImportFromText()" style="flex:1;font-size:11px">✓ درون‌ریزی</button></div>
 </div>
-
 <div class="crow"><label>ارائه‌دهنده:</label>
 <select id="aiProviderSel" onchange="aiSelectProvider()" style="flex:1"><option value="">— درون‌ریزی کنید —</option></select></div>
 <div class="crow"><label>مدل فعال:</label>
 <select id="aiModelSel" onchange="aiSelectModel()" style="flex:1"><option value="">—</option></select></div>
-<div class="crow"><label>تست همه:</label>
+</div>
+
+<!-- ══ بخش ۲: تست مدل‌ها ══ -->
+<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px">
+<div style="font-size:11px;color:#67e8f9;font-weight:700;margin-bottom:6px">🧪 تست مدل‌ها</div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+همهٔ مدل‌های فعال را با یک پیام و یک عنوانِ محصول برای دسته‌بندی آزمایش کنید تا «در دسترس» بودن و پاسخِ هرکدام مشخص شود.
+</div>
+<div class="crow"><label>سقف/ارائه‌دهنده:</label>
 <input type="number" id="aiTestPerProvider" value="50" min="1" max="500" style="max-width:80px" dir="ltr" title="سقف مدلِ آزموده‌شده به‌ازای هر ارائه‌دهنده">
-<button class="btn btn-green" onclick="aiTestStartContinue()" style="flex:1" title="اگر تستی در حال اجراست ادامه می‌دهد، وگرنه تستِ تازه شروع می‌کند">▶ شروع / ادامه</button>
-<button class="btn btn-blue" onclick="aiTestAll()" style="flex:1" title="شروعِ تازهٔ تست همهٔ مدل‌ها و باز کردن جدول زندهٔ نتایج">🧪 تست تازه</button></div>
+<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;cursor:pointer">
+<input type="checkbox" id="aiTestOnlyUntested" style="width:14px;height:14px"> فقط تست‌نشده</label></div>
 <div class="crow" style="margin-top:4px"><label>پیام تست:</label>
 <input type="text" id="aiTestMsg" value="سلام" dir="rtl" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px"
 placeholder="مثلاً: سلام" title="پیامی که به هر مدل فرستاده می‌شود (پیش‌فرض: سلام)"></div>
@@ -21796,23 +21816,29 @@ placeholder="مثلاً: ادو پرفیوم" title="عنوان محصولی ک�
 <div class="crow" style="margin-top:4px"><label>تاخیر بین تست‌ها:</label>
 <input type="number" id="aiTestDelay" value="120" min="0" max="60000" step="50" dir="ltr" style="max-width:110px;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px"
 title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری از ریت‌لیمیت — مثلاً ۱۰۰۰ یعنی یک ثانیه">
-<span style="font-size:10.5px;color:#64748b">میلی‌ثانیه (برای جلوگیری از ریت‌لیمیت)</span></div>
-<div class="cact" style="margin-top:4px"><button class="btn btn-orange" onclick="aiCandAddAvailable()" style="flex:1" title="همهٔ مدل‌هایی که تیک سبز (در دسترس) گرفته‌اند را یک‌جا به فهرست کاندیدها اضافه می‌کند">➕ افزودن همهٔ مدل‌های در دسترس به کاندیدها</button></div>
-<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;cursor:pointer;margin-bottom:6px">
-<input type="checkbox" id="aiTestOnlyUntested" style="width:14px;height:14px"> فقط مدل‌های تست‌نشده</label>
+<span style="font-size:10.5px;color:#64748b">ms · جلوگیری از ریت‌لیمیت</span></div>
+<div class="cact" style="margin-top:6px">
+<button class="btn btn-green" onclick="aiTestStartContinue()" style="flex:1" title="اگر تستی در حال اجراست ادامه می‌دهد، وگرنه تستِ تازه شروع می‌کند">▶ شروع / ادامه</button>
+<button class="btn btn-blue" onclick="aiShowTestTable()" style="flex:1" title="باز کردن جدولِ نتایجِ تست بدون شروعِ تستِ تازه">📊 نمایش جدول</button>
+</div>
+</div>
 
-<!-- فهرست مدل‌های ارائه‌دهندهٔ انتخابی با نتیجهٔ تست -->
+<!-- ══ بخش ۳: مدل‌های ارائه‌دهندهٔ انتخابی ══ -->
+<div style="margin-bottom:10px">
+<div style="font-size:11px;color:#94a3b8;font-weight:700;margin-bottom:6px">📋 مدل‌های ارائه‌دهندهٔ انتخاب‌شده</div>
 <div id="aiModelsList" style="max-height:260px;overflow-y:auto;border:1px solid #334155;border-radius:6px;background:#0f172a;margin-bottom:6px">
 <div style="padding:8px;color:#64748b;font-size:11px">هنوز ارائه‌دهنده‌ای درون‌ریزی نشده.</div>
 </div>
-<div id="aiUseInfo" style="font-size:10.5px;color:#94a3b8;line-height:1.8;margin-bottom:8px;padding:6px 8px;background:#111c31;border:1px solid #1e293b;border-radius:6px"></div>
+<div id="aiUseInfo" style="font-size:10.5px;color:#94a3b8;line-height:1.8;padding:6px 8px;background:#111c31;border:1px solid #1e293b;border-radius:6px"></div>
+</div>
 
 <!-- v9.38: مدل‌های کاندید + مدل مستر -->
-<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
+<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px">
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🏆 مدل‌های کاندید + مدل مستر</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:6px;line-height:1.7">
 چند مدل کاندید برای <b>دسته‌بندی</b> و <b>پاسخ خودکار</b> انتخاب کنید؛ در آزمون‌ها پاسخِ همهٔ کاندیدها کنار هم می‌آید تا بهترین را برگزینید. هر انتخاب به‌صورت «رأی» ثبت می‌شود و مدلی که از نظر آماری بهترین است به‌عنوان <b>مدل مستر</b> (مرجعِ قضاوت بقیه) به‌صورت خودکار انتخاب می‌شود.
 </div>
+<div class="cact" style="margin-top:0"><button class="btn btn-orange" onclick="aiCandAddAvailable()" style="flex:1" title="همهٔ مدل‌هایی که تیک سبز (در دسترس) گرفته‌اند را یک‌جا به فهرست کاندیدها اضافه می‌کند">➕ افزودن همهٔ مدل‌های در دسترس به کاندیدها</button></div>
 <div class="crow" style="align-items:center">
 <label style="flex:0 0 auto">ارائه‌دهنده:</label>
 <select id="aiCandProvSel" onchange="aiCandProvChange()" style="flex:1"><option value="">— انتخاب —</option></select></div>
@@ -26213,6 +26239,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.58', t:'🧭 بازآراییِ بخش هوش مصنوعی + دکمهٔ «نمایش جدول»', items:[
+    'خواستهٔ شما: به‌جای دکمهٔ «تست تازه»، دکمهٔ «نمایش جدول» بگذاریم و بخش هوش', 'مصنوعی را از نظر منطقی/بصری/مفهومی بازبینی کنیم.', '✅ دکمهٔ «📊 نمایش جدول» جایگزین «تست تازه» شد: جدولِ نتایجِ ذخیره‌شده را', 'باز می‌کند و نشان می‌دهد بدون شروعِ تستِ تازه؛ اگر تستی در جریان باشد همان', 'جا زنده به‌روز می‌شود.', '✅ بخش هوش مصنوعی به چند کادرِ منطقی و مجزا دسته‌بندی شد:', '۱) 🧠 ارائه‌دهنده‌ها (درون‌ریزی JSON + انتخاب ارائه‌دهنده/مدل فعال)', '۲) 🧪 تست مدل‌ها (سقف، پیام، دسته، تاخیر، فقط-تست‌نشده + شروع/ادامه و نمایش جدول)', '۳) 📋 مدل‌های ارائه‌دهندهٔ انتخاب‌شده (فهرست با تیک سبز/قرمز)', '۴) 🏆 مدل‌های کاندید + مستر (با دکمهٔ افزودنِ همهٔ در دسترس)', '۵) 🌐 روش اتصال (عبور از محدودیت)', '✅ هر کادر پس‌زمینه و حاشیهٔ مجزا دارد تا دسته‌ها از نظر بصری هم از هم جدا', 'دیده شوند و مکانِ هر تنظیم واضح‌تر باشد.'],},
   {v:'9.57', t:'🔍 رفعِ «پاسخ داده» بدونِ پاسخ واقعی (مدل‌های reasoning)', items:[
     'گزارش شما: مدل‌های Together و تعدادی دیگر «سبز/در دسترس» می‌شوند و «پاسخ', 'داده» می‌نویسند اما متنِ پاسخی تولید نمی‌کنند.', '🐞 ریشهٔ کار: این مدل‌ها reasoning هستند (gpt-oss، qwen، nemotron، liquid،', 'bonsai، cohere-reasoning و...). با سقفِ توکنِ خیلی کم (۳۰) همهٔ توکن‌ها را', 'صرفِ «فکر کردن» می‌کنند (reasoning / reasoning_content) و هرگز به فیلدِ', 'content نمی‌رسند؛ پس پاسخِ متن خالی برمی‌گشت.', '✅ سقفِ توکنِ تست مدل‌ها از ۳۰ به ۳۰۰ بالا رفت تا این مدل‌ها فرصتِ تمامِ', 'فکر کردن و تولیدِ پاسخِ واقعی را داشته باشند.', '✅ استخراجِ متنِ پاسخ حالا اگر content خالی بود، reasoning یا', 'reasoning_content را برمی‌گرداند تا حداقل فرایندِ فکر هم دیده شود.', '✅ اگر باز هم مدلی ۲۰۰ داد ولی هیچ محتوایی نداشت، در جدول به‌جای «✓ پاسخ', 'گرفت» بی‌محتوا، هشدارِ «⚠️ بدون پاسخ» نشان داده می‌شود.'],},
   {v:'9.56', t:'⏱ تاخیر قابل‌تنظیم بین تست‌های مدل برای جلوگیری از ریت‌لیمیت', items:[
@@ -30802,6 +30830,34 @@ function aiTestAll(){
         else if($('aiTestCur'))$('aiTestCur').textContent='شروع تست در پس‌زمینهٔ سرور...';
         aiPollTest();
     }).catch(()=>{ if($('aiTestCur'))$('aiTestCur').textContent='خطا در شروع تست'; });
+}
+/* v9.58: «نمایش جدول» — مودالِ نتایج را باز می‌کند و نتایجِ ذخیره‌شدهٔ آخر را
+   نشان می‌دهد، بدون شروعِ تستِ تازه. اگر تستی در حال اجراست، همان‌جا ادامه را
+   پایش می‌کند. */
+function aiShowTestTable(){
+    aiOpenTestModal();
+    // مقادیرِ جاری را از فیلدها تازه کن (در صورت تغییر)
+    aiTestMsgVal=($('aiTestMsg')&&$('aiTestMsg').value.trim())||'سلام';
+    aiTestCatVal=($('aiTestCat')&&$('aiTestCat').value.trim())||'ادو پرفیوم';
+    aiTestDelayVal=Math.max(0,parseInt(($('aiTestDelay')&&$('aiTestDelay').value)||'120',10)||120);
+    fetch('?ai_test_status=1').then(r=>r.json()).then(st=>{
+        // نتایجِ ذخیره‌شده را (اگر هست) رندر کن
+        if(st){
+            if(st.items&&st.items.length){
+                const tbody=$('aiTestTbody'); if(tbody)tbody.innerHTML='';
+                aiTestTotCount=0;aiTestOkCount=0;aiTestFailCount=0;aiTestWaitCount=0;aiTestRows={};
+                aiRenderTestState(st);
+            }
+            if(st.running){
+                if($('aiTestCur'))$('aiTestCur').textContent='در حال اجراست — نتایج زنده به‌روز می‌شوند';
+                aiPollTest();
+            }else if(st.done&&$('aiTestCur')){
+                $('aiTestCur').textContent='🏁 '+esc(st.summary||'پایان تست');
+            }else{
+                if($('aiTestCur'))$('aiTestCur').textContent='هنوز تستی اجرا نشده — دکمهٔ «▶ شروع / ادامه» را بزنید';
+            }
+        }
+    }).catch(()=>{ if($('aiTestCur'))$('aiTestCur').textContent='خطا در خواندن وضعیت'; });
 }
 /* v9.24: بعد از ریفرش، اگر کاری در حال اجراست مودال را باز کن و ادامه بده */
 function aiResumeTestModalOnLoad(){
