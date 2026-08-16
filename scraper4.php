@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.51';
+const APP_VERSION = '9.52';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -11933,6 +11933,23 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'v9.51: محافظه‌کارانه شد') !== false
          && strpos($selfSrc, '-–—' . '|') === false);
 
+    /* ---------- v9.52: دو فیلدِ پیام/دستهٔ تست + دو ستونِ پاسخ در جدول ---------- */
+    $add('9.52', 'فیلدِ پیام تست (پیش‌فرض «سلام») در بخش تست مدل‌ها',
+         strpos($selfSrc, 'id="aiTestMsg"') !== false
+         && strpos($selfSrc, "value=\"سلام\"") !== false);
+    $add('9.52', 'فیلدِ دستهٔ تست (پیش‌فرض «ادو پرفیوم») در بخش تست مدل‌ها',
+         strpos($selfSrc, 'id="aiTestCat"') !== false
+         && strpos($selfSrc, "value=\"ادو پرفیوم\"") !== false);
+    $add('9.52', 'جدول نتایجِ تست مدل‌ها ستون‌های «پاسخ پیام» و «پاسخ دسته» دارد',
+         strpos($selfSrc, 'aiMsgRes') !== false
+         && strpos($selfSrc, 'aiCatRes') !== false
+         && strpos($selfSrc, "پاسخ پیام") !== false
+         && strpos($selfSrc, "پاسخ دسته") !== false);
+    $add('9.52', 'تستِ انبوه و تک‌مدلی، پیام و دستهٔ قابل‌تنظیم را به مدل می‌فرستد',
+         strpos($selfSrc, 'aiRunTestCategory') !== false
+         && strpos($selfSrc, "aiRunTestBackground(\$per, \$onlyUntested, \$testMsg, \$testCat)") !== false
+         && strpos($selfSrc, "&msg=" . "'+encodeURIComponent(aiTestMsgVal)") !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -16522,8 +16539,13 @@ foreach ($providers[$pid]['models'] as $i => $m) {
     if (($m['id'] ?? '') === $mid) { $found = true; break; }
 }
 if (!$found) { echo json_encode(['ok'=>false,'error'=>'مدل یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+// v9.52: پیام تست و دستهٔ تستِ قابل‌تنظیم (پیش‌فرض «سلام» و «ادو پرفیوم»)
+$testMsg = trim((string)($_POST['msg'] ?? 'سلام'));
+if ($testMsg === '') $testMsg = 'سلام';
+$testCat = trim((string)($_POST['cat'] ?? 'ادو پرفیوم'));
+if ($testCat === '') $testCat = 'ادو پرفیوم';
 $t0 = microtime(true);
-$payload = ['messages'=>[['role'=>'user','content'=>'پاسخ فقط با کلمه «متصل» بده.']], 'temperature'=>0.1, 'max_tokens'=>10];
+$payload = ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>30];
 $r = aiProviderCall($providers[$pid], $mid, $payload, aiNetCfg());
 $latency = (int)round((microtime(true) - $t0) * 1000);
 $code = (int)$r['code'];
@@ -16532,7 +16554,9 @@ $body = $r['body'] ?? [];
 $response = $ok ? (string)($body['choices'][0]['message']['content'] ?? '') : '';
 $err = $ok ? '' : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
 $rateLimited = in_array($code, [429], true);
+$catResponse = aiRunTestCategory($providers[$pid], $mid, $testCat, aiTestCategoryData());
 $details = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300), 'response'=>mb_substr((string)$response,0,300),
+            'catResponse'=>(string)$catResponse, 'testMsg'=>$testMsg, 'testCat'=>$testCat,
             'latencyMs'=>$latency, 'testedAt'=>gmdate('c')];
 foreach ($providers[$pid]['models'] as $i => $m) {
     if (($m['id'] ?? '') === $mid) {
@@ -16546,7 +16570,7 @@ foreach ($providers[$pid]['models'] as $i => $m) {
 aiProvidersSave($providers);
 echo json_encode(['ok'=>true, 'model'=>$mid, 'provider'=>$pid, 'available'=>$ok,
     'rateLimited'=>$rateLimited, 'latencyMs'=>$latency, 'code'=>$code, 'error'=>$err,
-    'response'=>mb_substr($response,0,200)], JSON_UNESCAPED_UNICODE);
+    'response'=>mb_substr($response,0,200), 'catResponse'=>(string)$catResponse], JSON_UNESCAPED_UNICODE);
 exit;
 }
 /* تست همهٔ مدل‌های فعال (SSE) — با سقف به‌ازای هر ارائه‌دهنده */
@@ -16608,11 +16632,55 @@ if (isset($_GET['ai_test_stop'])) {
     exit;
 }
 
+/* v9.52: دادهٔ دسته‌بندی برای «تست دسته» — دسته‌های برگِ باسلام را یک‌بار
+   می‌گیرد و برای همهٔ مدل‌ها به‌کار می‌برد تا در تستِ انبوه دوباره‌دوباره
+   درخواستِ categories نرود. اگر توکن باسلام نباشد null برمی‌گردد. */
+function aiTestCategoryData(): ?array {
+    $cn = loadConnections(); $bs = $cn['basalam'] ?? [];
+    $tk = trim((string)($bs['token'] ?? ''));
+    if ($tk === '') return null;
+    $cats = [];
+    $cr = bslReq($tk, 'GET', 'categories');
+    if ($cr['ok']) {
+        $cData = $cr['body']['data'] ?? [];
+        if (is_array($cData)) {
+            $cFlat = function ($items, $lv = 0) use (&$cFlat) {
+                $o = []; foreach ($items as $c) {
+                    $t = trim($c['title'] ?? $c['name'] ?? ''); $id = (int)($c['id'] ?? 0);
+                    if ($id > 0) $o[] = ['id' => $id, 'name' => $t, 'level' => $lv];
+                    $ch = $c['children'] ?? []; if (is_array($ch) && count($ch) > 0) { foreach ($cFlat($ch, $lv + 1) as $s) $o[] = $s; }
+                } return $o;
+            };
+            $cats = $cFlat($cData, 0);
+        }
+    }
+    if (!$cats) return null;
+    $catList = ''; $leafCats = [];
+    foreach ($cats as $c) { if (($c['level'] ?? 0) >= 2) { $catList .= $c['id'] . ': ' . $c['name'] . "\n"; $leafCats[] = $c; } }
+    if (!$leafCats) { foreach ($cats as $c) { $catList .= $c['id'] . ': ' . $c['name'] . "\n"; $leafCats[] = $c; } }
+    if (strlen($catList) > 3000) { $catList = ''; $leafCats = array_slice($leafCats, 0, 200); foreach ($leafCats as $c) { $catList .= $c['id'] . ': ' . $c['name'] . "\n"; } }
+    return ['cats' => $cats, 'leafCats' => $leafCats, 'catList' => $catList];
+}
+
+/* v9.52: اجرای تستِ دسته‌بندی برای یک مدل و خلاصه‌سازی نتیجه به رشتهٔ کوتاه.
+   اگر catData نباشد یا عنوان خالی باشد null برمی‌گردد. */
+function aiRunTestCategory(array $p, string $mid, string $testCat, ?array $catData, ?array $net = null): ?string {
+    if ($testCat === '' || !$catData) return null;
+    if ($net === null) $net = aiNetCfg();
+    $res = aiCandidateCategory($p, $mid, $testCat, $catData['cats'], $catData['leafCats'], $catData['catList'], $net);
+    if (!empty($res['ok']) && !empty($res['category_name'])) return $res['category_name'] . ' (#' . $res['category_id'] . ')';
+    if (!empty($res['category_id'])) return '#' . $res['category_id'];
+    if (!empty($res['error'])) return 'خطا: ' . mb_substr((string)$res['error'], 0, 80);
+    if (!empty($res['ai_text'])) return mb_substr(trim((string)$res['ai_text']), 0, 80);
+    return '';
+}
+
 /* هستهٔ اجرای تست — یک تابع تا هم از مسیر پس‌زمینه و هم از مسیر هم‌زمان استفاده کند */
-function aiRunTestBackground(int $per, bool $onlyUntested): array {
+function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'سلام', string $testCat = 'ادو پرفیوم'): array {
     @set_time_limit(0); @ignore_user_abort(true);
     @unlink(AI_TEST_STOP_FILE);
     $providers = aiProvidersLoad();
+    $catData = aiTestCategoryData();
     $st = ['running'=>true,'done'=>false,'stopped'=>false,'started_at'=>time(),'updated_at'=>time(),
            'per_provider'=>$per,'only_untested'=>$onlyUntested,
            'total'=>0,'tested'=>0,'available'=>0,'failed'=>0,'skipped'=>0,
@@ -16647,8 +16715,8 @@ function aiRunTestBackground(int $per, bool $onlyUntested): array {
         $st['current'] = ['provider'=>$pid, 'model'=>$mid];
         aiTestStateSave($st);
         $t0 = microtime(true);
-        // پیام تست «سلام»
-        $r = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>'سلام']], 'temperature'=>0.3, 'max_tokens'=>30], aiNetCfg());
+        // پیام تست (پیش‌فرض «سلام»)
+        $r = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>30], aiNetCfg());
         /* v9.45: اگر فراخوانی به‌خاطر توقف abort شد، همین‌جا خارج شو —
            منتظر پردازشِ نتیجهٔ «stopped» نباش. */
         if (!empty($r['stopped']) || aiTestStopRequested()) {
@@ -16680,7 +16748,7 @@ function aiRunTestBackground(int $per, bool $onlyUntested): array {
             }
             $netCfg = aiNetCfg();
             $dnet = $netCfg; $dnet['mode'] = 'direct';
-            $rd = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>'سلام']], 'temperature'=>0.3, 'max_tokens'=>30], $dnet);
+            $rd = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>30], $dnet);
             if (aiTestStopRequested()) { $st['stopped'] = true; break; }
             if ((int)$rd['code'] === 200) $netIssue = true;
         }
@@ -16702,6 +16770,8 @@ function aiRunTestBackground(int $per, bool $onlyUntested): array {
             }
         }
         $st['diag'][$pid]['last_label'] = $diag['label'];
+        // v9.52: تستِ دسته‌بندی برای همین مدل (پیش‌فرض «ادو پرفیوم»)
+        $catResponse = aiRunTestCategory($p, $mid, $testCat, $catData);
         // ذخیرهٔ نتیجه در provider
         if (isset($providers[$pid]['models'])) {
             foreach ($providers[$pid]['models'] as $i => $m) {
@@ -16710,7 +16780,8 @@ function aiRunTestBackground(int $per, bool $onlyUntested): array {
                     $providers[$pid]['models'][$i]['available'] = $ok;
                     $providers[$pid]['models'][$i]['rateLimited'] = in_array($code, [429], true);
                     $providers[$pid]['models'][$i]['testDetails'] = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300),
-                        'response'=>mb_substr((string)$response,0,300), 'latencyMs'=>$latency, 'testedAt'=>gmdate('c')];
+                        'response'=>mb_substr((string)$response,0,300), 'catResponse'=>(string)$catResponse,
+                        'testMsg'=>$testMsg, 'testCat'=>$testCat, 'latencyMs'=>$latency, 'testedAt'=>gmdate('c')];
                     break;
                 }
             }
@@ -16719,7 +16790,8 @@ function aiRunTestBackground(int $per, bool $onlyUntested): array {
         if ($ok) $st['available']++; else $st['failed']++;
         $st['items'][] = ['provider'=>$pid, 'providerName'=>$p['name']??$pid, 'model'=>$mid,
             'ok'=>$ok, 'latencyMs'=>$latency, 'error'=>mb_substr((string)$err,0,120),
-            'cat'=>$diag['cat'], 'label'=>$diag['label']];
+            'cat'=>$diag['cat'], 'label'=>$diag['label'],
+            'msgResponse'=>mb_substr($response,0,150), 'catResponse'=>mb_substr((string)$catResponse,0,150)];
         if (count($st['items']) > 1000) $st['items'] = array_slice($st['items'], -1000);
         $st['current'] = ['provider'=>'', 'model'=>''];
         // هر ۳ مدل ذخیره کن تا اگر پردازه کشته شد کار حفظ شود
@@ -16741,6 +16813,11 @@ if (isset($_GET['ai_test_start']) || isset($_GET['ai_test_all'])) {
 header('Content-Type: application/json; charset=UTF-8');
 $per = max(1, min(500, (int)($_GET['per_provider'] ?? 50)));
 $onlyUntested = !empty($_GET['only_untested']);
+// v9.52: پیام تست و دستهٔ تستِ قابل‌تنظیم (پیش‌فرض «سلام» و «ادو پرفیوم»)
+$testMsg = trim((string)($_GET['msg'] ?? 'سلام'));
+if ($testMsg === '') $testMsg = 'سلام';
+$testCat = trim((string)($_GET['cat'] ?? 'ادو پرفیوم'));
+if ($testCat === '') $testCat = 'ادو پرفیوم';
 // اگر کاری در حال اجراست، دوباره شروع نکن
 $cur = aiTestStateLoad();
 if (!empty($cur['running'])) {
@@ -16752,11 +16829,11 @@ finishRequestNow(json_encode(['ok'=>true,'started'=>true,'background'=>$detach,
     'note'=>'تست در پس‌زمینهٔ سرور ادامه دارد — می‌توانید صفحه را ببندید'], JSON_UNESCAPED_UNICODE));
 if (!$detach) {
     // حالت هم‌زمان برای تست/عیب‌یابی
-    aiRunTestBackground($per, $onlyUntested);
+    aiRunTestBackground($per, $onlyUntested, $testMsg, $testCat);
     exit;
 }
 // پس از جدا شدن از مرورگر، اجرای واقعی ادامه می‌یابد
-aiRunTestBackground($per, $onlyUntested);
+aiRunTestBackground($per, $onlyUntested, $testMsg, $testCat);
 exit;
 }
 
@@ -21572,7 +21649,13 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>تست همه:</label>
 <input type="number" id="aiTestPerProvider" value="50" min="1" max="500" style="max-width:80px" dir="ltr" title="سقف مدلِ آزموده‌شده به‌ازای هر ارائه‌دهنده">
 <button class="btn btn-green" onclick="aiTestAll()" style="flex:1">🧪 تست همهٔ مدل‌ها</button>
-<button class="btn btn-blue" onclick="aiTestAll()" style="flex:1" title="باز کردن جدول زندهٔ نتایج تست با ارسال پیام «سلام»">📊 نتایج تست</button></div>
+<button class="btn btn-blue" onclick="aiTestAll()" style="flex:1" title="باز کردن جدول زندهٔ نتایج تست">📊 نتایج تست</button></div>
+<div class="crow" style="margin-top:4px"><label>پیام تست:</label>
+<input type="text" id="aiTestMsg" value="سلام" dir="rtl" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px"
+placeholder="مثلاً: سلام" title="پیامی که به هر مدل فرستاده می‌شود (پیش‌فرض: سلام)"></div>
+<div class="crow" style="margin-top:4px"><label>دستهٔ تست:</label>
+<input type="text" id="aiTestCat" value="ادو پرفیوم" dir="rtl" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px"
+placeholder="مثلاً: ادو پرفیوم" title="عنوان محصولی که دسته‌بندیِ آن با هر مدل سنجیده می‌شود (پیش‌فرض: ادو پرفیوم)"></div>
 <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;cursor:pointer;margin-bottom:6px">
 <input type="checkbox" id="aiTestOnlyUntested" style="width:14px;height:14px"> فقط مدل‌های تست‌نشده</label>
 
@@ -25983,6 +26066,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.52', t:'🧪 دو فیلدِ پیام/دستهٔ تست + دو ستونِ پاسخ در نتایجِ تست مدل‌ها', items:[
+    'خواستهٔ شما: در بخش «تست مدل‌های هوش مصنوعی» دو فیلد برای تست پیام و تست', 'دسته‌بندی اضافه شود و جدول نتایج، پاسخِ هر کدام را جدا نشان دهد.', '✅ دو فیلد قابل‌تنظیم اضافه شد: «پیام تست» (پیش‌فرض: سلام) و «دستهٔ تست»', '(پیش‌فرض: ادو پرفیوم) — هم در بخش بیرونی و هم داخل مودالِ نتایج.', '✅ جدولِ «تست همهٔ مدل‌ها» حالا دو ستونِ جدا دارد: «پاسخ پیام» و «پاسخ دسته».', 'برای هر مدل، هم پیام فرستاده می‌شود و هم عنوانِ دستهٔ تست به مدل داده می‌شود', 'تا دسته‌بندیِ پیشنهادی‌اش (نام/شناسهٔ دستهٔ باسلام) را برگرداند.', '✅ این در «تست همهٔ مدل‌ها»، «تست تک‌مدلی» (🔗 تست) و نمایشِ زندهٔ جدول اعمال', 'می‌شود؛ مقدارِ پیام/دسته را هر جا عوض کنید برای همه یکسان می‌ماند.', '✅ پاسخِ دسته به‌همراه پاسخِ پیام در testDetails هر مدل ذخیره می‌شود.'],},
   {v:'9.51', t:'🧹 رفعِ حذفِ اشتباهیِ محصولاتِ متفاوت در «حذف تکراری ووکامرس»', items:[
     'گزارش شما: کارتریج‌های مختلف اچ‌پی (مثل HP 131A و HP 128A و HP 304A) در', 'بخش «حذف محصولات تکراری ووکامرس» با هم «تکراری» دیده و حذف می‌شدند، در', 'حالی که محصولاتِ واقعاً متفاوتی‌اند.', '🐞 ریشهٔ کار: نرمال‌سازیِ نام برای تشخیصِ تکراری خیلی پرخاشگر بود — هر چیزی', 'را از اولین پرانتز/خط‌تیره/اسلش و از اولین کلمهٔ صفت (رنگ/سایز/مدل/مشکی/...)', 'به بعد حذف می‌کرد؛ برای همین همهٔ کارتریج‌های اچ‌پی به «کارتریج اچ پی»', 'می‌رسیدند و با هم تکراری حساب می‌شدند.', '✅ حالا فقط پسوندِ کدِ افزوده‌شده توسط خودِ اسکرپر (مثل «(کد:۱)»، «(کد: ۱۲۳)»)', 'که در انتهای عنوان می‌نشیند برداشته می‌شود؛ بقیهٔ عنوان — برند، شمارهٔ مدل', '(HP 131A)، رنگ، سایز و شناسه‌ها — دست‌نخورده می‌ماند.', '✅ نتیجه: فقط همان نامِ یکسان واقعی (با همان کد) تکراری شمرده می‌شود؛', 'محصولاتِ متفاوت دیگر با هم تکراری و حذف نمی‌شوند.'],},
   {v:'9.50', t:'🎯 انتخابِ مدل مستر بر اساس آمارِ دسته‌بندیِ صحیح فاز ۲', items:[
@@ -30305,12 +30390,17 @@ function aiImportText(txt){
 }
 function aiImportFromText(){const t=$('aiImportBox');if(t)aiImportText(t.value);}
 function aiTestOne(pid,mid){
+    // v9.52: پیام و دستهٔ تست را از فیلدهای جاری می‌گیرد (مودال یا بخش بیرونی)
+    const msg=($('aiTestMsg')&&$('aiTestMsg').value.trim())||'سلام';
+    const cat=($('aiTestCat')&&$('aiTestCat').value.trim())||'ادو پرفیوم';
     const fd=new FormData();fd.append('action','ai_test_one');fd.append('provider_id',pid);fd.append('model_id',mid);
+    fd.append('msg',msg);fd.append('cat',cat);
     fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
         const r=$('aiTR');if(r){
             const ok=d&&d.available;
             r.innerHTML='<div style="background:'+(ok?'#14532d':'#7f1d1d')+';color:'+(ok?'#86efac':'#fca5a5')+';padding:8px;font-size:11px">'
-              +(ok?'✓':'✗')+' <b dir="ltr">'+esc(mid)+'</b> — '+(ok?('پاسخ: '+esc(d.response||'')):esc(d.error||'خطا'))
+              +(ok?'✓':'✗')+' <b dir="ltr">'+esc(mid)+'</b> — '+(ok?('پاسخ پیام: '+esc(d.response||'')):esc(d.error||'خطا'))
+              +(d.catResponse?'<div style="margin-top:3px;color:#c4b5fd">🏷️ دسته: '+esc(d.catResponse)+'</div>':'')
               +' <span style="color:#94a3b8">('+toFa(d.latencyMs||0)+'ms)</span></div>';
         }
         aiLoadProviders();
@@ -30329,12 +30419,18 @@ function aiOpenTestModal(){
       +'<span id="aiTestCur" style="color:#fbbf24;font-size:11px"></span>'
       +'<button class="btn btn-red" onclick="aiTestStop()" style="font-size:11px;padding:4px 10px">⏹ توقف</button>'
       +'<button class="btn btn-gray" onclick="aiCloseTestModal()" style="font-size:11px;padding:4px 10px">✕ بستن</button></div>'
-      +'<div style="display:flex;gap:16px;padding:8px 16px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;color:#94a3b8;flex-wrap:wrap">'
+      +'<div style="display:flex;gap:16px;padding:8px 16px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;color:#94a3b8;flex-wrap:wrap;align-items:center">'
       +'<span>کل: <b id="aiTestTot" style="color:#e2e8f0">۰</b></span>'
       +'<span>🟢 در دسترس: <b id="aiTestOk" style="color:#4ade80">۰</b></span>'
       +'<span>🔴 ناموفق: <b id="aiTestFail" style="color:#f87171">۰</b></span>'
-      +'<span>⏳ در انتظار: <b id="aiTestWait" style="color:#fbbf24">۰</b></span>'
-      +'<span style="color:#64748b">پیام ارسالی: <b dir="ltr">«سلام»</b></span></div>'
+      +'<span>⏳ در انتظار: <b id="aiTestWait" style="color:#fbbf24">۰</b></span></div>'
+      // v9.52: دو فیلد قابل ویرایش برای پیام و دستهٔ تست در مودال
+      +'<div style="display:flex;gap:10px;padding:8px 16px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;flex-wrap:wrap;align-items:center">'
+      +'<span style="color:#94a3b8">پیام تست:</span>'
+      +'<input id="aiTestMsg" value="'+esc(aiTestMsgVal||'سلام')+'" dir="rtl" style="flex:1;min-width:140px;padding:4px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px">'
+      +'<span style="color:#94a3b8">دستهٔ تست:</span>'
+      +'<input id="aiTestCat" value="'+esc(aiTestCatVal||'ادو پرفیوم')+'" dir="rtl" style="flex:1;min-width:140px;padding:4px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px">'
+      +'</div>'
       +'<div style="flex:1;overflow:auto;padding:0">'
       +'<table style="width:100%;border-collapse:collapse;font-size:11px">'
       +'<thead><tr style="background:#1e293b;position:sticky;top:0;color:#94a3b8">'
@@ -30343,7 +30439,8 @@ function aiOpenTestModal(){
       +'<th style="padding:8px;text-align:right">ارائه‌دهنده</th>'
       +'<th style="padding:8px;text-align:left;direction:ltr">مدل</th>'
       +'<th style="padding:8px;text-align:center;width:70px">تأخیر</th>'
-      +'<th style="padding:8px;text-align:right">پاسخ / خطا</th>'
+      +'<th style="padding:8px;text-align:right">پاسخ پیام</th>'
+      +'<th style="padding:8px;text-align:right">پاسخ دسته</th>'
       +'</tr></thead><tbody id="aiTestTbody"></tbody></table></div>'
       +'<div id="aiTestDiag" style="flex:0 0 auto;padding:0 16px 10px"></div>'
       +'</div>';
@@ -30375,6 +30472,7 @@ function aiPollTest(){
     },1200);
 }
 let aiTestRows={},aiTestTotCount=0,aiTestOkCount=0,aiTestFailCount=0,aiTestWaitCount=0;
+let aiTestMsgVal='سلام',aiTestCatVal='ادو پرفیوم';
 function aiTestRenderCounters(){
     if($('aiTestTot'))$('aiTestTot').textContent=toFa(aiTestTotCount);
     if($('aiTestOk'))$('aiTestOk').textContent=toFa(aiTestOkCount);
@@ -30393,7 +30491,8 @@ function aiEnsureTestRow(d){
       +'<td style="padding:6px;text-align:right;color:#94a3b8">'+esc(d.providerName||d.provider||'')+'</td>'
       +'<td style="padding:6px;text-align:left;direction:ltr;color:#e2e8f0;word-break:break-all">'+esc(d.model||'')+'</td>'
       +'<td style="padding:6px;text-align:center;color:#64748b" class="aiLat">—</td>'
-      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiRes">…</td>';
+      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiMsgRes">…</td>'
+      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiCatRes">…</td>';
     tbody.appendChild(tr);
     aiTestRenderCounters();
     return aiTestRows[key]={tr:tr};
@@ -30405,10 +30504,16 @@ function aiSetTestRow(d){
     r.tr.querySelector('.aiSt').textContent=d.ok?'🟢':'🔴';
     r.tr.querySelector('.aiSt').style.color=d.ok?'#4ade80':'#f87171';
     const lat=r.tr.querySelector('.aiLat');if(lat)lat.textContent=(d.latencyMs>0)?(toFa(d.latencyMs)+'ms'):'—';
-    const res=r.tr.querySelector('.aiRes');
-    if(res){
-        if(d.ok)res.innerHTML='<span style="color:#4ade80">✓ پاسخ گرفت</span>';
-        else res.innerHTML='<span style="color:#f87171" title="'+esc(d.label||'')+'">'+esc(d.error||d.label||'خطا')+'</span>';
+    // v9.52: پاسخِ پیام و پاسخِ دستهٔ هر مدل در دو ستونِ جدا
+    const mr=r.tr.querySelector('.aiMsgRes');
+    if(mr){
+        if(d.ok)mr.innerHTML='<span style="color:#4ade80" title="'+esc(d.msgResponse||'')+'">'+esc((d.msgResponse||'✓ پاسخ گرفت'))+'</span>';
+        else mr.innerHTML='<span style="color:#f87171" title="'+esc(d.label||'')+'">'+esc(d.error||d.label||'خطا')+'</span>';
+    }
+    const cr=r.tr.querySelector('.aiCatRes');
+    if(cr){
+        if(d.catResponse)cr.innerHTML='<span style="color:#a78bfa">'+esc(d.catResponse)+'</span>';
+        else cr.innerHTML='<span style="color:#64748b">—</span>';
     }
     aiTestRenderCounters();
 }
@@ -30449,11 +30554,15 @@ function aiRenderTestState(st){
 function aiTestAll(){
     const per=$('aiTestPerProvider')?parseInt($('aiTestPerProvider').value)||50:50;
     const only=$('aiTestOnlyUntested')&&$('aiTestOnlyUntested').checked?1:0;
+    // v9.52: پیام و دستهٔ تستِ قابل‌تنظیم — برای نمایش در مودال هم نگه می‌داریم
+    aiTestMsgVal=($('aiTestMsg')&&$('aiTestMsg').value.trim())||'سلام';
+    aiTestCatVal=($('aiTestCat')&&$('aiTestCat').value.trim())||'ادو پرفیوم';
     aiOpenTestModal();
     const tbody=$('aiTestTbody');if(!tbody)return;
     tbody.innerHTML='';
     aiTestTotCount=0;aiTestOkCount=0;aiTestFailCount=0;aiTestWaitCount=0;aiTestRows={};
-    fetch('?ai_test_start=1&per_provider='+per+'&only_untested='+only).then(r=>r.json()).then(d=>{
+    fetch('?ai_test_start=1&per_provider='+per+'&only_untested='+only
+        +'&msg='+encodeURIComponent(aiTestMsgVal)+'&cat='+encodeURIComponent(aiTestCatVal)).then(r=>r.json()).then(d=>{
         if(d&&d.running&&!d.ok){ if($('aiTestCur'))$('aiTestCur').textContent='در حال اجراست — ادامهٔ آن را نشان می‌دهم'; }
         else if($('aiTestCur'))$('aiTestCur').textContent='شروع تست در پس‌زمینهٔ سرور...';
         aiPollTest();
