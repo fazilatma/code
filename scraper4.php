@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.56';
+const APP_VERSION = '9.57';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1285,17 +1285,27 @@ function aiExtractText($body): string {
     if (is_array($c)) {
         foreach ($c as $ch) {
             if (!is_array($ch)) continue;
-            // message.content (OpenAI)
-            if (isset($ch['message']['content']) && trim((string)$ch['message']['content']) !== '')
-                return (string)$ch['message']['content'];
-            // message.content که آرایهٔ قطعه‌ای است (Responses/چندبخشی)
-            if (isset($ch['message']['content']) && is_array($ch['message']['content'])) {
-                $t = '';
-                foreach ($ch['message']['content'] as $seg) {
-                    if (is_array($seg) && isset($seg['text'])) $t .= (string)$seg['text'];
-                    elseif (is_string($seg)) $t .= $seg;
+            $msg = $ch['message'] ?? null;
+            if (is_array($msg)) {
+                // message.content (OpenAI)
+                if (isset($msg['content']) && trim((string)$msg['content']) !== '')
+                    return (string)$msg['content'];
+                // message.content که آرایهٔ قطعه‌ای است (Responses/چندبخشی)
+                if (isset($msg['content']) && is_array($msg['content'])) {
+                    $t = '';
+                    foreach ($msg['content'] as $seg) {
+                        if (is_array($seg) && isset($seg['text'])) $t .= (string)$seg['text'];
+                        elseif (is_string($seg)) $t .= $seg;
+                    }
+                    if (trim($t) !== '') return $t;
                 }
-                if (trim($t) !== '') return $t;
+                // v9.57: اگر content خالی/تهی بود ولی reasoning یا reasoning_content
+                // پر بود (مدل‌های استدلالی مثل gpt-oss، qwen، nemotron، bonsai،
+                // cohere-reasoning) آن را برگردان تا حداقل «فکر کردن» دیده شود.
+                foreach (['reasoning', 'reasoning_content'] as $rk) {
+                    if (isset($msg[$rk]) && trim((string)$msg[$rk]) !== '')
+                        return (string)$msg[$rk];
+                }
             }
             // choices[0].text (سرویس‌هایی مثل Together/Cohere/Ollama-compat)
             if (isset($ch['text']) && trim((string)$ch['text']) !== '')
@@ -12062,6 +12072,14 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'int $delayMs = 120') !== false
          && strpos($selfSrc, 'usleep($delayMs * 1000)') !== false);
 
+    /* ---------- v9.57: رفعِ «پاسخ داده» بی‌محتوا برای مدل‌های reasoning ---------- */
+    $add('9.57', 'سقف توکنِ تست مدل‌ها به ۳۰۰ بالا رفت (چهار مسیر) تا مدل‌های reasoning به پاسخ برسند',
+         substr_count($selfSrc, "max_tokens'=>300") >= 4);
+    $add('9.57', 'استخراجِ پاسخ، content خالی را با reasoning/reasoning_content جایگزین می‌کند',
+         strpos($selfSrc, "foreach (['reasoning', 'reasoning_content'] as \$rk)") !== false);
+    $add('9.57', 'پاسخِ خالیِ ۲۰۰ در جدول به‌جای «✓ پاسخ گرفت» به‌صورت «⚠️ بدون پاسخ» نشان داده می‌شود',
+         strpos($selfSrc, '⚠️ بدون پاسخ') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -16567,7 +16585,7 @@ if ($provider === null) {
 if ($provider === null) { echo json_encode(['ok'=>false,'error'=>'هیچ ارائه‌دهندهٔ هوش مصنوعی تنظیم نشده — ابتدا JSON را درون‌ریزی کنید'],JSON_UNESCAPED_UNICODE); exit; }
 if ($modelId === '') $modelId = $provider['models'][0]['id'] ?? '';
 if ($modelId === '') { echo json_encode(['ok'=>false,'error'=>'ارائه‌دهنده مدلی ندارد'],JSON_UNESCAPED_UNICODE); exit; }
-$payload=['messages'=>[['role'=>'user','content'=>'سلام']], 'temperature'=>0.1, 'max_tokens'=>30];
+$payload=['messages'=>[['role'=>'user','content'=>'سلام']], 'temperature'=>0.1, 'max_tokens'=>300];
 $r=aiProviderCall($provider,$modelId,$payload,$netT);
 $httpCode=(int)$r['code'];
 if($httpCode===200){
@@ -16657,7 +16675,10 @@ if ($testMsg === '') $testMsg = 'سلام';
 $testCat = trim((string)($_POST['cat'] ?? 'ادو پرفیوم'));
 if ($testCat === '') $testCat = 'ادو پرفیوم';
 $t0 = microtime(true);
-$payload = ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>30];
+// v9.57: سقف توکن برای تست بالاتر رفت (۳۰۰) — مدل‌های reasoning (مثل gpt-oss،
+// qwen، nemotron و...) اول روی «فکر کردن» توکن می‌سوزانند و اگر سقف پایین باشد
+// (۳۰) هیچ‌وقت به content نمی‌رسند و پاسخِ خالی برمی‌گردد.
+$payload = ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>300];
 $r = aiProviderCall($providers[$pid], $mid, $payload, aiNetCfg());
 $latency = (int)round((microtime(true) - $t0) * 1000);
 $code = (int)$r['code'];
@@ -16828,8 +16849,8 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
         $st['current'] = ['provider'=>$pid, 'model'=>$mid];
         aiTestStateSave($st);
         $t0 = microtime(true);
-        // پیام تست (پیش‌فرض «سلام»)
-        $r = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>30], aiNetCfg());
+        // پیام تست (پیش‌فرض «سلام») — v9.57: سقف توکن ۳۰۰ برای مدل‌های reasoning
+        $r = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>300], aiNetCfg());
         /* v9.45: اگر فراخوانی به‌خاطر توقف abort شد، همین‌جا خارج شو —
            منتظر پردازشِ نتیجهٔ «stopped» نباش. */
         if (!empty($r['stopped']) || aiTestStopRequested()) {
@@ -16861,7 +16882,7 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
             }
             $netCfg = aiNetCfg();
             $dnet = $netCfg; $dnet['mode'] = 'direct';
-            $rd = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>30], $dnet);
+            $rd = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>300], $dnet);   // v9.57
             if (aiTestStopRequested()) { $st['stopped'] = true; break; }
             if ((int)$rd['code'] === 200) $netIssue = true;
         }
@@ -26192,6 +26213,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.57', t:'🔍 رفعِ «پاسخ داده» بدونِ پاسخ واقعی (مدل‌های reasoning)', items:[
+    'گزارش شما: مدل‌های Together و تعدادی دیگر «سبز/در دسترس» می‌شوند و «پاسخ', 'داده» می‌نویسند اما متنِ پاسخی تولید نمی‌کنند.', '🐞 ریشهٔ کار: این مدل‌ها reasoning هستند (gpt-oss، qwen، nemotron، liquid،', 'bonsai، cohere-reasoning و...). با سقفِ توکنِ خیلی کم (۳۰) همهٔ توکن‌ها را', 'صرفِ «فکر کردن» می‌کنند (reasoning / reasoning_content) و هرگز به فیلدِ', 'content نمی‌رسند؛ پس پاسخِ متن خالی برمی‌گشت.', '✅ سقفِ توکنِ تست مدل‌ها از ۳۰ به ۳۰۰ بالا رفت تا این مدل‌ها فرصتِ تمامِ', 'فکر کردن و تولیدِ پاسخِ واقعی را داشته باشند.', '✅ استخراجِ متنِ پاسخ حالا اگر content خالی بود، reasoning یا', 'reasoning_content را برمی‌گرداند تا حداقل فرایندِ فکر هم دیده شود.', '✅ اگر باز هم مدلی ۲۰۰ داد ولی هیچ محتوایی نداشت، در جدول به‌جای «✓ پاسخ', 'گرفت» بی‌محتوا، هشدارِ «⚠️ بدون پاسخ» نشان داده می‌شود.'],},
   {v:'9.56', t:'⏱ تاخیر قابل‌تنظیم بین تست‌های مدل برای جلوگیری از ریت‌لیمیت', items:[
     'خواستهٔ شما: یک فیلد قابل‌تنظیم برای ایجاد تاخیر بین تست‌های مدل اضافه شود', 'تا از ریت‌لیمیت (محدودیت نرخ) جلوگیری کند.', '✅ فیلد «تاخیر بین تست‌ها» (به‌میلی‌ثانیه، پیش‌فرض ۱۲۰) بعد از فیلدِ دستهٔ', 'تست اضافه شد — هم در بخش بیرونی و هم داخل مودالِ نتایجِ زنده.', '✅ همان مقدارِ تاخیر به تستِ انبوه فرستاده می‌شود و بین هر مدل مکث می‌کند؛', 'اگر خطای ۴۲۹ (rate limited) می‌گرفتید، این عدد را بالا ببرید (مثلاً ۱۰۰۰ =', 'یک ثانیه بین هر تست). مقدار صفر یعنی بدون تاخیر.'],},
   {v:'9.55', t:'🏆 افزودن انبوهِ مدل‌های در دسترس به کاندیدها + حذفِ انتخابی کاندیدها', items:[
@@ -30709,7 +30732,14 @@ function aiSetTestRow(d){
     // v9.52: پاسخِ پیام و پاسخِ دستهٔ هر مدل در دو ستونِ جدا
     const mr=r.tr.querySelector('.aiMsgRes');
     if(mr){
-        if(d.ok)mr.innerHTML='<span style="color:#4ade80" title="'+esc(d.msgResponse||'')+'">'+esc((d.msgResponse||'✓ پاسخ گرفت'))+'</span>';
+        if(d.ok){
+            // v9.57: اگر پاسخِ متن خالی بود (مدل ۲۰۰ داد ولی content نداشت)،
+            // به‌جای «✓ پاسخ گرفت» بی‌محتوا، هشدارِ «بدون پاسخ» نشان بده.
+            if((d.msgResponse||'').trim())
+                mr.innerHTML='<span style="color:#4ade80" title="'+esc(d.msgResponse)+'">'+esc(d.msgResponse)+'</span>';
+            else
+                mr.innerHTML='<span style="color:#fbbf24" title="اتصال برقرار بود ولی مدل محتوایی برنگرداند (معمولاً مدل reasoning و سقفِ توکن)">⚠️ بدون پاسخ</span>';
+        }
         else mr.innerHTML='<span style="color:#f87171" title="'+esc(d.label||'')+'">'+esc(d.error||d.label||'خطا')+'</span>';
     }
     const cr=r.tr.querySelector('.aiCatRes');
