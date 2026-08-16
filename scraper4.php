@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.63';
+const APP_VERSION = '9.64';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12182,6 +12182,14 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="aiProviderToggle' . 'List"') !== false);
     $add('9.63', 'خاموش کردن ارائه‌دهندهٔ فعال، «فعال» را به یک ارائه‌دهندهٔ روشن دیگر می‌پرد',
          strpos($selfSrc, "if (\$on === false && aiSelected()['provider'] === \$pid)") !== false);
+
+    /* ---------- v9.64: سوییچِ «فقط سبزها» در جدولِ نتایجِ تست مدل‌ها ---------- */
+    $add('9.64', 'سوییچِ اسلایدریِ «فقط سبزها» در مودالِ نتایجِ تست مدل‌ها اضافه شده',
+         strpos($selfSrc, 'id="aiTestOnly' . 'Green"') !== false
+         && strpos($selfSrc, 'function aiTestToggle' . 'OnlyGreen(') !== false
+         && strpos($selfSrc, 'function aiTestApply' . 'GreenFilter(') !== false);
+    $add('9.64', 'با فعال بودنِ «فقط سبزها»، هر ردیفِ به‌روزرسانی‌شده هم بر اساس همان فیلتر نمایش داده می‌شود',
+         strpos($selfSrc, 'aiTestApply' . 'GreenFilter();   // v9.64') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -26418,6 +26426,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.64', t:'🔘 سوییچِ «فقط سبزها» در جدولِ نتایجِ تست مدل‌ها', items:[
+    'خواستهٔ شما: در جدولِ نتایجِ تستِ مدل‌های هوش مصنوعی، یک تیکِ اسلایدری برای', 'نمایشِ فقط مدل‌های دارای چراغ سبز (موفق/در دسترس) تعبیه شود.', '✅ در نوارِ آمارِ بالای مودالِ نتایج، یک سوییچِ اسلایدریِ «فقط سبزها» اضافه', 'شد.', '✅ وقتی روشن باشد، فقط ردیف‌های موفق (🟢) در جدول دیده می‌شوند و ردیف‌های', 'ناموفق (🔴) و در انتظار (⏳) پنهان می‌شوند.', '✅ هنگام تستِ زنده هم اگر سوییچ روشن باشد، هر ردیفی که تازه سبز/قرمز می‌شود', 'بر اساس همین فیلتر نمایش داده/مخفی می‌شود — لازم نیست منتظر پایانِ تست بمانید.', '✅ دوباره که خاموشش کنید همهٔ ردیف‌ها برمی‌گردند.'],},
   {v:'9.63', t:'🚦 روشن/خاموش کردن انفرادیِ ارائه‌دهنده‌های هوش مصنوعی', items:[
     'خواستهٔ شما: امکان فعال/غیرفعال کردن تک‌تکِ ارائه‌دهنده‌ها (و در نتیجهٔ', 'مدل‌هایشان) برای تعیینِ شمول در «تست مدل‌ها» فراهم شود.', '✅ در تب «ارائه‌دهنده‌ها» بخشِ «🚦 روشن/خاموش کردن ارائه‌دهنده‌ها» اضافه شد:', 'کنارِ هر ارائه‌دهنده یک تیک است که می‌توانید بزنید/بردارید و همان لحظه ذخیره', 'می‌شود.', '✅ ارائه‌دهنده‌ای که خاموش شود به‌همراهِ همهٔ مدل‌هایش از «تست مدل‌ها»', '(تست انبوه) کنار می‌رود — برای صرفه‌جویی در زمان و جلوگیری از ریت‌لیمیت،', 'فقط ارائه‌دهنده‌های روشن تست می‌شوند.', '✅ خاموش کردن، داده‌ها و کلیدها و مدل‌ها را پاک نمی‌کند؛ فقط از تست بیرون', 'می‌مانند و هر وقت تیک بزنید دوباره برمی‌گردند.', '✅ اگر ارائه‌دهندهٔ «فعال» (انتخاب اصلی اتوماسیون) خاموش شود، فعال به یک', 'ارائه‌دهندهٔ روشنِ دیگر می‌پرد تا دسته‌بندی/پاسخ خودکار بی‌درنگ از کار', 'نیفتد. شمارندهٔ «X روشن از Y» هم بالای فهرست نمایش داده می‌شود.'],},
   {v:'9.62', t:'💾 ذخیرهٔ تنظیمات فقط متن — حذف عکس‌های inline برای سبک شدن فایل', items:[
@@ -30942,7 +30952,14 @@ function aiOpenTestModal(){
     m=document.createElement('div');
     m.id='aiTestModal';
     m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.72);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px';
-    m.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:12px;width:min(1100px,96vw);max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5)">'
+    m.innerHTML='<style>'
+      // v9.64: سوییچِ اسلایدری «فقط سبزها» — نمایش فقط مدل‌های دارای چراغ سبز
+      +'.ai-switch{width:34px;height:20px;border-radius:20px;background:#334155;position:relative;display:inline-block;transition:background .2s;flex:0 0 auto;vertical-align:middle}'
+      +'.ai-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#e2e8f0;transition:transform .2s}'
+      +'.ai-switch-wrap input:checked + .ai-switch{background:#22c55e}'
+      +'.ai-switch-wrap input:checked + .ai-switch::after{transform:translateX(14px)}'
+      +'</style>'
+      +'<div style="background:#0f172a;border:1px solid #334155;border-radius:12px;width:min(1100px,96vw);max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5)">'
       +'<div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #334155;flex:0 0 auto">'
       +'<span style="font-size:14px">🧪</span><b style="color:#67e8f9;flex:1">نتایج زندهٔ تست همهٔ مدل‌ها</b>'
       +'<span id="aiTestCur" style="color:#fbbf24;font-size:11px"></span>'
@@ -30952,7 +30969,12 @@ function aiOpenTestModal(){
       +'<span>کل: <b id="aiTestTot" style="color:#e2e8f0">۰</b></span>'
       +'<span>🟢 در دسترس: <b id="aiTestOk" style="color:#4ade80">۰</b></span>'
       +'<span>🔴 ناموفق: <b id="aiTestFail" style="color:#f87171">۰</b></span>'
-      +'<span>⏳ در انتظار: <b id="aiTestWait" style="color:#fbbf24">۰</b></span></div>'
+      +'<span>⏳ در انتظار: <b id="aiTestWait" style="color:#fbbf24">۰</b></span>'
+      // v9.64: سوییچِ اسلایدریِ «فقط سبزها»
+      +'<label class="ai-switch-wrap" style="display:flex;align-items:center;gap:7px;cursor:pointer;margin-inline-start:auto;margin-left:auto">'
+      +'<span style="font-size:11px;color:#94a3b8">فقط سبزها</span>'
+      +'<input type="checkbox" id="aiTestOnlyGreen" onchange="aiTestToggleOnlyGreen(this.checked)" style="display:none">'
+      +'<span class="ai-switch"></span></label></div>'
       // v9.52: دو فیلد قابل ویرایش برای پیام و دستهٔ تست در مودال
       +'<div style="display:flex;gap:10px;padding:8px 16px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;flex-wrap:wrap;align-items:center">'
       +'<span style="color:#94a3b8">پیام تست:</span>'
@@ -31004,11 +31026,27 @@ function aiPollTest(){
 }
 let aiTestRows={},aiTestTotCount=0,aiTestOkCount=0,aiTestFailCount=0,aiTestWaitCount=0;
 let aiTestMsgVal='سلام',aiTestCatVal='ادو پرفیوم',aiTestDelayVal=120;
+// v9.64: فیلترِ «فقط سبزها» در جدولِ نتایجِ تست مدل‌ها
+let aiTestOnlyGreen=false;
 function aiTestRenderCounters(){
     if($('aiTestTot'))$('aiTestTot').textContent=toFa(aiTestTotCount);
     if($('aiTestOk'))$('aiTestOk').textContent=toFa(aiTestOkCount);
     if($('aiTestFail'))$('aiTestFail').textContent=toFa(aiTestFailCount);
     if($('aiTestWait'))$('aiTestWait').textContent=toFa(aiTestWaitCount);
+}
+/* v9.64: سوییچِ «فقط سبزها» — فقط ردیف‌های دارای چراغ سبز (موفق) را نشان بده */
+function aiTestToggleOnlyGreen(on){
+    aiTestOnlyGreen=!!on;
+    aiTestApplyGreenFilter();
+}
+function aiTestApplyGreenFilter(){
+    if(!aiTestOnlyGreen){ Object.values(aiTestRows).forEach(r=>{ if(r&&r.tr)r.tr.style.display=''; }); return; }
+    Object.values(aiTestRows).forEach(r=>{
+        if(!r||!r.tr)return;
+        const st=r.tr.querySelector('.aiSt');
+        const txt=st?st.textContent:'';
+        r.tr.style.display=(txt==='🟢')?'':'none';
+    });
 }
 function aiEnsureTestRow(d){
     const tbody=$('aiTestTbody');if(!tbody)return null;
@@ -31054,6 +31092,7 @@ function aiSetTestRow(d){
         else cr.innerHTML='<span style="color:#64748b">—</span>';
     }
     aiTestRenderCounters();
+    aiTestApplyGreenFilter();   // v9.64: با فعال بودن «فقط سبزها»، وضعیتِ این ردیف را هم اعمال کن
 }
 function aiRenderTestState(st){
     if(!st)return;
