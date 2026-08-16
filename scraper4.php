@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.53';
+const APP_VERSION = '9.54';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1271,6 +1271,77 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
  * فراخوانی یک مدل از یک ارائه‌دهنده با اعمال روش عبور و تلاش خودکار.
  * $payload باید بدون کلید model بیاید؛ مدل اینجا از آرگومان می‌آید.
  */
+
+/* v9.54: استخراج مقاومِ متنِ پاسخ از بدنهٔ JSONِ ارائه‌دهنده.
+   همهٔ ارائه‌دهنده‌ها دقیقاً OpenAI (choices[0].message.content) نیستند:
+   Together AI و چند سرویس دیگر محتوا را در قالب‌های دیگری برمی‌گردانند
+   (choices[0].text ، output.choices[0].text ، output_text ، output[0].message...).
+   این تابع چند ساختارِ رایج را امتحان می‌کند تا پاسخِ واقعی دیده شود و در
+   جدولِ تست به‌جای «پاسخ گرفت» بی‌محتوا، متنِ واقعی بیاید. */
+function aiExtractText($body): string {
+    if (!is_array($body)) return '';
+    // ۱) OpenAI / اکثر ارائه‌دهنده‌های سازگار
+    $c = $body['choices'] ?? null;
+    if (is_array($c)) {
+        foreach ($c as $ch) {
+            if (!is_array($ch)) continue;
+            // message.content (OpenAI)
+            if (isset($ch['message']['content']) && trim((string)$ch['message']['content']) !== '')
+                return (string)$ch['message']['content'];
+            // message.content که آرایهٔ قطعه‌ای است (Responses/چندبخشی)
+            if (isset($ch['message']['content']) && is_array($ch['message']['content'])) {
+                $t = '';
+                foreach ($ch['message']['content'] as $seg) {
+                    if (is_array($seg) && isset($seg['text'])) $t .= (string)$seg['text'];
+                    elseif (is_string($seg)) $t .= $seg;
+                }
+                if (trim($t) !== '') return $t;
+            }
+            // choices[0].text (سرویس‌هایی مثل Together/Cohere/Ollama-compat)
+            if (isset($ch['text']) && trim((string)$ch['text']) !== '')
+                return (string)$ch['text'];
+        }
+    }
+    // ۲) پاسخ‌های Responses/Items: output[] + output_text
+    if (isset($body['output_text']) && trim((string)$body['output_text']) !== '')
+        return (string)$body['output_text'];
+    if (isset($body['output']) && is_array($body['output'])) {
+        $t = '';
+        foreach ($body['output'] as $item) {
+            if (!is_array($item)) { if (is_string($item)) $t .= $item; continue; }
+            if (isset($item['text']) && is_string($item['text'])) $t .= $item['text'];
+            elseif (isset($item['content'])) {
+                $ct = $item['content'];
+                if (is_string($ct)) $t .= $ct;
+                elseif (is_array($ct)) { foreach ($ct as $seg) { if (is_array($seg) && isset($seg['text'])) $t .= (string)$seg['text']; } }
+            }
+        }
+        if (trim($t) !== '') return $t;
+    }
+    // ۳) output.choices[0].text (برخی اندپوینت‌های inference)
+    if (isset($body['output']['choices']) && is_array($body['output']['choices'])) {
+        foreach ($body['output']['choices'] as $ch) {
+            if (is_array($ch) && isset($ch['text']) && trim((string)$ch['text']) !== '')
+                return (string)$ch['text'];
+            if (is_array($ch) && isset($ch['message']['content']) && trim((string)$ch['message']['content']) !== '')
+                return (string)$ch['message']['content'];
+        }
+    }
+    // ۴) Cloudflare native: result.response
+    if (isset($body['result']['response']) && trim((string)$body['result']['response']) !== '')
+        return (string)$body['result']['response'];
+    // ۵) برخی سرویس‌ها پاسخ را مستقیم در «response» یا «text» می‌دهند
+    if (isset($body['response']) && is_string($body['response']) && trim($body['response']) !== '')
+        return $body['response'];
+    if (isset($body['text']) && is_string($body['text']) && trim($body['text']) !== '')
+        return $body['text'];
+    // ۶) data[0] (embedding/بعضی ابزارها)
+    if (isset($body['data']) && is_array($body['data']) && isset($body['data'][0]['text'])
+        && trim((string)$body['data'][0]['text']) !== '')
+        return (string)$body['data'][0]['text'];
+    return '';
+}
+
 function aiProviderCall(array $p, string $model, array $payload, ?array $net = null): array {
     if ($net === null) $net = aiNetCfg();
     $ep = aiProviderEndpoint($p, $model);
@@ -1537,7 +1608,7 @@ function aiCandidateCategory(array $p, string $model, string $title, array $cats
         if (!empty($r['cf_error'])) $err = $r['cf_error'];
         return ['ok' => false, 'category_id' => 0, 'category_name' => '', 'ai_text' => '', 'error' => mb_substr((string)$err, 0, 160), 'latency' => $lat, 'model' => $model];
     }
-    $text = trim((string)($r['body']['choices'][0]['message']['content'] ?? ''));
+    $text = trim(aiExtractText($r['body'] ?? []));   // v9.54: استخراج مقاوم
     $id = 0;
     if (preg_match('/\d+/', $text, $m)) $id = (int)$m[0];
     $id = findLeafCategory($id, $cats);
@@ -1576,7 +1647,7 @@ function aiCandidateReply(array $p, string $model, string $text, ?int $timeoutSe
     $lat = (int)round((microtime(true) - $t0) * 1000);
     if (empty($r['ok'])) return ['ok' => false, 'text' => '', 'error' => mb_substr((string)($r['error'] ?? 'خطا'), 0, 120), 'latency' => $lat, 'model' => $model];
     $body = $r['body'] ?? [];
-    $reply = trim((string)($body['choices'][0]['message']['content'] ?? ''));
+    $reply = trim(aiExtractText($body));   // v9.54: استخراج مقاوم
     if ($reply === '') return ['ok' => false, 'text' => '', 'error' => 'پاسخ خالی از مدل', 'latency' => $lat, 'model' => $model];
     $reply = preg_replace('/\s+/u', ' ', $reply);
     $modelName = (string)($body['model'] ?? $model);
@@ -11960,6 +12031,16 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'ادامهٔ تست در حال اجرا') !== false
          && strpos($selfSrc, 'aiResumeTestModalOnLoad') !== false);
 
+    /* ---------- v9.54: استخراج مقاومِ متنِ پاسخ (Together و سایر فرمت‌ها) ---------- */
+    $add('9.54', 'متنِ پاسخ از چند قالبِ رایج استخراج می‌شود (choices.text / output / output_text)',
+         strpos($selfSrc, 'function aiExtractText') !== false
+         && strpos($selfSrc, 'choices[0].text') !== false
+         && strpos($selfSrc, 'output_text') !== false
+         && strpos($selfSrc, 'output.choices[0].text') !== false);
+    $add('9.54', 'تستِ مدل‌ها و دسته‌بندی از aiExtractText استفاده می‌کنند',
+         strpos($selfSrc, '$response = $ok ? aiExtractText($body) : \'\'') !== false
+         && strpos($selfSrc, 'trim(aiExtractText($r[\'body\'] ?? []))') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -16561,7 +16642,7 @@ $latency = (int)round((microtime(true) - $t0) * 1000);
 $code = (int)$r['code'];
 $ok = $code === 200;
 $body = $r['body'] ?? [];
-$response = $ok ? (string)($body['choices'][0]['message']['content'] ?? '') : '';
+$response = $ok ? aiExtractText($body) : '';   // v9.54: استخراج مقاومِ متنِ پاسخ
 $err = $ok ? '' : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
 $rateLimited = in_array($code, [429], true);
 $catResponse = aiRunTestCategory($providers[$pid], $mid, $testCat, aiTestCategoryData());
@@ -16737,7 +16818,7 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
         $code = (int)$r['code'];
         $ok = $code === 200;
         $body = $r['body'] ?? [];
-        $response = $ok ? (string)($body['choices'][0]['message']['content'] ?? '') : '';
+        $response = $ok ? aiExtractText($body) : '';   // v9.54: استخراج مقاومِ متنِ پاسخ
         $err = $ok ? '' : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
         // تشخیص قابل‌دسترس‌نبودن اندپوینت
         $diag = aiTestNetworkFailure($r);
@@ -16767,7 +16848,7 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
             $st['diag'][$pid]['mode'] = (string)(aiNetCfg()['mode'] ?? 'direct');
             $st['diag'][$pid]['net_hint'] = 'روش اتصال فعلی روی این شبکه کار نمی‌کند ولی «مستقیم» جواب می‌دهد — روش را روی «مستقیم» بگذارید یا یک Worker/پروکسی سالم اضافه کنید';
             // روش اتصال را موقتاً مستقیم کن تا خودِ مدل رد نشود
-            $r = $rd; $ok = true; $code = (int)$rd['code']; $response = (string)($rd['body']['choices'][0]['message']['content'] ?? '');
+            $r = $rd; $ok = true; $code = (int)$rd['code']; $response = aiExtractText($rd['body'] ?? []);   // v9.54
         } else {
             $st['diag'][$pid]['net_issue'] = false;
         }
@@ -26076,6 +26157,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.54', t:'🧪 رفعِ نمایشِ پاسخِ مدل‌های Together AI (استخراج مقاومِ متنِ پاسخ)', items:[
+    'گزارش شما: مدل‌های Together AI «قابل اتصال» و رایگان‌اند ولی در جدولِ تست', 'فقط «پاسخ داده» می‌نوشت و متنِ پاسخ دیده نمی‌شد — چون فرمتِ پاسخشان', 'با OpenAI فرق دارد.', '🐞 ریشهٔ کار: همهٔ مدل‌ها از یک قالبِ واحد (choices[0].message.content)', 'خوانده می‌شدند؛ در حالی که Together AI و چند سرویس دیگر محتوا را در قالب‌های', 'دیگری برمی‌گردانند (choices[0].text ، output.choices[0].text ، output_text و...).', '✅ تابع مشترک aiExtractText اضافه شد که چند ساختارِ رایجِ پاسخ را امتحان می‌کند', '(OpenAI message.content ، choices[].text ، output[] / output_text ،', 'output.choices[].text ، Cloudflare result.response ، data[0].text و...).', '✅ این تابع حالا در تستِ تک‌مدلی، تستِ انبوه، دسته‌بندیِ کاندیدها و پاسخِ', 'خودکار استفاده می‌شود — پس متنِ واقعیِ پاسخِ Together AI و امثالش نمایش', 'داده می‌شود و دیگر فقط «پاسخ داده» نمی‌نویسد.'],},
   {v:'9.53', t:'▶ دکمهٔ «شروع / ادامه» برای تست مدل‌های هوش مصنوعی', items:[
     'خواستهٔ شما: یک دکمهٔ «شروع/ادامه» در بخش تست مدل‌ها اضافه شود.', '✅ دکمهٔ «▶ شروع / ادامه» در بخش «تست همه» اضافه شد.', 'اگر تستی در حال اجراست، فقط مودالِ زنده را باز می‌کند و همان کار را ادامه', 'می‌دهد (بدون شروعِ تازه و بدون از دست رفتنِ نتایجِ فعلی)؛ اگر هیچ تستی در', 'جریان نباشد، یک تستِ تازه با مقادیرِ جاریِ پیام/دسته شروع می‌کند.', 'دکمهٔ قبلی حالا «🧪 تست تازه» نام دارد که همیشه صریحاً یک تستِ نو می‌سازد.'],},
   {v:'9.52', t:'🧪 دو فیلدِ پیام/دستهٔ تست + دو ستونِ پاسخ در نتایجِ تست مدل‌ها', items:[
