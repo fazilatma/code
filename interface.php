@@ -1,6 +1,45 @@
 <?php
 declare(strict_types=1);
 
+/*
+ * SIMPLE CONFIGURATION — no PROXY_ALLOWED_HOSTS environment variable needed.
+ * Add the exact hostname of your Cloudflare Worker or another API here.
+ * Do not write https:// or a path; hostname only.
+ */
+const PROXY_TARGET_HOSTS = [
+    'ai.fazilat-ma.workers.dev',
+    'openrouter.ai',
+    'api.together.xyz',
+    'api.groq.com',
+    'router.huggingface.co',
+    'api.cloudflare.com',
+    'generativelanguage.googleapis.com',
+    'api.cerebras.ai',
+    'api.mistral.ai',
+    'api.cohere.com',
+    // Other common AI providers:
+    'api.openai.com',
+    'api.anthropic.com',
+    'api.x.ai',
+    'api.deepseek.com',
+    'api.perplexity.ai',
+];
+
+// Public HTTPS endpoints used by the dashboard's one-click connectivity test.
+// This test checks network reachability only and does not need or store API keys.
+const PROVIDER_TEST_URLS = [
+    'Cloudflare Worker' => 'https://ai.fazilat-ma.workers.dev/',
+    'OpenRouter' => 'https://openrouter.ai/api/v1/models',
+    'Together AI' => 'https://api.together.xyz/v1/models',
+    'Groq' => 'https://api.groq.com/openai/v1/models',
+    'Hugging Face' => 'https://router.huggingface.co/v1/models',
+    'Cloudflare API' => 'https://api.cloudflare.com/client/v4/',
+    'Google Gemini' => 'https://generativelanguage.googleapis.com/v1beta/models',
+    'Cerebras' => 'https://api.cerebras.ai/v1/models',
+    'Mistral' => 'https://api.mistral.ai/v1/models',
+    'Cohere' => 'https://api.cohere.com/v1/models',
+];
+
 /**
  * Secure transparent HTTP proxy for PHP 8+ / cURL.
  *
@@ -10,8 +49,8 @@ declare(strict_types=1);
  *   POST /proxy.php?url=https%3A%2F%2Fmy-worker.workers.dev%2Fendpoint
  *   POST /proxy.php?action=check     Dashboard connectivity-check API
  *
- * Required environment variable:
- *   PROXY_ALLOWED_HOSTS=api.example.com,my-worker.workers.dev,*.trusted-api.com
+ * Allowed proxy destinations are configured in PROXY_TARGET_HOSTS at the top
+ * of this file. The visual connectivity tester accepts any public HTTPS URL.
  *
  * Optional environment variables:
  *   PROXY_ALLOWED_ORIGIN=https://your-site.example   (default: no CORS header)
@@ -31,7 +70,7 @@ declare(strict_types=1);
  *
  * Security:
  * - Only HTTPS destinations are accepted.
- * - Destination hostname must be in PROXY_ALLOWED_HOSTS.
+ * - Proxy destination hostname must be in PROXY_TARGET_HOSTS.
  * - Private/reserved IP addresses and redirects are rejected.
  * - Do not use "*" as an allowed host on a public deployment.
  */
@@ -147,7 +186,7 @@ function normalizeHeaderName(string $name): string
     return strtolower(trim($name));
 }
 
-function checkDestination(string $url, array $allowedHosts): array
+function checkDestination(string $url, array $allowedHosts, bool $requireAllowedHost = false): array
 {
     $startedAt = microtime(true);
     $result = [
@@ -181,10 +220,11 @@ function checkDestination(string $url, array $allowedHosts): array
         $result['message'] = 'فقط پورت ۴۴۳ مجاز است.';
         return $result;
     }
-    if (!hostIsAllowed($host, $allowedHosts)) {
-        $result['message'] = 'دامنه در فهرست PROXY_ALLOWED_HOSTS نیست.';
+    if ($requireAllowedHost && !hostIsAllowed($host, $allowedHosts)) {
+        $result['message'] = 'این دامنه برای عبور درخواست از پروکسی تعریف نشده است.';
         return $result;
     }
+    // Connectivity checks may target any public HTTPS host; private/reserved IPs remain blocked.
     $result['allowed'] = true;
 
     $ips = resolvePublicIps($host);
@@ -235,6 +275,7 @@ function renderDashboard(array $allowedHosts): void
 {
     $rules = $allowedHosts === [] ? ['هنوز تنظیم نشده'] : array_values($allowedHosts);
     $rulesJson = json_encode($rules, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
+    $providerUrlsJson = json_encode(PROVIDER_TEST_URLS, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
     header('Content-Type: text/html; charset=utf-8');
     header('Cache-Control: no-store');
     $html = <<<'HTML'
@@ -247,23 +288,30 @@ function renderDashboard(array $allowedHosts): void
 <title>درگاه ارتباط API</title>
 <style>
 :root{--bg:#07111f;--panel:rgba(14,27,46,.78);--line:rgba(148,163,184,.16);--text:#ecf4ff;--muted:#94a8c3;--blue:#42a5ff;--cyan:#31d8c4;--green:#35d28b;--red:#ff667c;--amber:#f8bc4b;--shadow:0 24px 80px rgba(0,0,0,.38)}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 12% 4%,rgba(22,112,255,.18),transparent 30%),radial-gradient(circle at 88% 15%,rgba(35,211,189,.12),transparent 28%),var(--bg);color:var(--text);font-family:Tahoma,"Segoe UI",sans-serif;line-height:1.7}.orb{position:fixed;border-radius:50%;filter:blur(70px);opacity:.2;pointer-events:none}.o1{width:280px;height:280px;background:#166cff;left:-90px;top:28%}.o2{width:250px;height:250px;background:#0fd0ae;right:-110px;bottom:5%}.wrap{width:min(1120px,calc(100% - 32px));margin:auto;padding:42px 0 70px}.top{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:28px}.brand{display:flex;gap:14px;align-items:center}.logo{width:54px;height:54px;border-radius:17px;display:grid;place-items:center;background:linear-gradient(135deg,var(--blue),var(--cyan));box-shadow:0 12px 35px rgba(49,216,196,.2)}.logo svg{width:29px}.brand h1{font-size:clamp(21px,4vw,30px);margin:0}.brand p{margin:2px 0 0;color:var(--muted);font-size:13px}.badge{padding:8px 13px;border:1px solid rgba(53,210,139,.25);background:rgba(53,210,139,.08);color:#8df0bb;border-radius:999px;font-size:12px;white-space:nowrap}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-left:7px;box-shadow:0 0 12px var(--green)}.grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,.7fr);gap:18px}.card{background:var(--panel);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow);backdrop-filter:blur(18px)}.main{padding:25px}.side{padding:22px;height:max-content}.labelrow{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.labelrow label{font-weight:700}.hint{font-size:12px;color:var(--muted)}textarea{width:100%;min-height:155px;resize:vertical;border:1px solid var(--line);outline:none;border-radius:17px;background:rgba(3,11,23,.62);color:var(--text);padding:17px;font:13px/1.9 Consolas,monospace;direction:ltr;text-align:left;transition:.2s}textarea:focus{border-color:rgba(66,165,255,.65);box-shadow:0 0 0 4px rgba(66,165,255,.09)}.actions{display:flex;gap:10px;margin-top:13px}.btn{border:0;border-radius:14px;padding:11px 19px;color:white;font:700 13px Tahoma;cursor:pointer;transition:.2s}.btn:hover{transform:translateY(-1px)}.btn:disabled{opacity:.55;cursor:wait;transform:none}.primary{background:linear-gradient(120deg,#1879ee,#24b9cf);box-shadow:0 9px 25px rgba(24,121,238,.2)}.ghost{background:rgba(148,163,184,.09);border:1px solid var(--line);color:#c9d7e8}.rules{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.chip{direction:ltr;border:1px solid rgba(66,165,255,.18);background:rgba(66,165,255,.07);color:#b9dafa;border-radius:9px;padding:5px 8px;font:11px Consolas,monospace;overflow-wrap:anywhere}.side h2{font-size:15px;margin:0 0 4px}.side p{font-size:12px;color:var(--muted);margin:0}.divider{height:1px;background:var(--line);margin:19px 0}.mini{display:grid;grid-template-columns:1fr 1fr;gap:9px}.stat{background:rgba(3,11,23,.45);border:1px solid var(--line);border-radius:14px;padding:12px}.stat b{display:block;font-size:19px}.stat span{font-size:11px;color:var(--muted)}.results{margin-top:18px;display:grid;gap:10px}.empty{text-align:center;border:1px dashed rgba(148,163,184,.22);border-radius:17px;padding:27px;color:var(--muted);font-size:13px}.result{display:grid;grid-template-columns:42px minmax(0,1fr) auto;align-items:center;gap:13px;padding:14px;border-radius:17px;background:rgba(3,11,23,.46);border:1px solid var(--line);animation:in .35s ease both}.icon{width:39px;height:39px;border-radius:12px;display:grid;place-items:center;font-weight:bold}.ok .icon{background:rgba(53,210,139,.1);color:var(--green)}.bad .icon{background:rgba(255,102,124,.1);color:var(--red)}.warn .icon{background:rgba(248,188,75,.1);color:var(--amber)}.url{font:12px Consolas,monospace;direction:ltr;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.msg{font-size:11px;color:var(--muted);margin-top:3px}.meta{text-align:left;direction:ltr}.code{display:inline-block;padding:3px 7px;border-radius:7px;background:rgba(148,163,184,.09);font:11px Consolas}.latency{display:block;color:var(--muted);font-size:10px;margin-top:4px}.docs{margin-top:18px;padding:18px 20px}.docs h2{font-size:14px;margin:0 0 7px}.docs code{display:block;direction:ltr;text-align:left;overflow:auto;padding:12px;background:rgba(3,11,23,.5);border-radius:12px;color:#9ed8ff;font:11px/1.7 Consolas}.toast{position:fixed;left:20px;bottom:20px;padding:11px 15px;border-radius:12px;background:#17263a;border:1px solid var(--line);box-shadow:var(--shadow);font-size:12px;transform:translateY(90px);opacity:0;transition:.25s}.toast.show{transform:none;opacity:1}@keyframes in{from{opacity:0;transform:translateY(7px)}}@media(max-width:780px){.wrap{padding-top:24px}.top{align-items:flex-start}.badge{display:none}.grid{grid-template-columns:1fr}.main,.side{padding:18px}.result{grid-template-columns:39px minmax(0,1fr)}.meta{grid-column:2;text-align:right}.docs{padding:16px}}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 12% 4%,rgba(22,112,255,.18),transparent 30%),radial-gradient(circle at 88% 15%,rgba(35,211,189,.12),transparent 28%),var(--bg);color:var(--text);font-family:Tahoma,"Segoe UI",sans-serif;line-height:1.7}.orb{position:fixed;border-radius:50%;filter:blur(70px);opacity:.2;pointer-events:none}.o1{width:280px;height:280px;background:#166cff;left:-90px;top:28%}.o2{width:250px;height:250px;background:#0fd0ae;right:-110px;bottom:5%}.wrap{width:min(1120px,calc(100% - 32px));margin:auto;padding:42px 0 70px}.top{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:28px}.brand{display:flex;gap:14px;align-items:center}.logo{width:54px;height:54px;border-radius:17px;display:grid;place-items:center;background:linear-gradient(135deg,var(--blue),var(--cyan));box-shadow:0 12px 35px rgba(49,216,196,.2)}.logo svg{width:29px}.brand h1{font-size:clamp(21px,4vw,30px);margin:0}.brand p{margin:2px 0 0;color:var(--muted);font-size:13px}.badge{padding:8px 13px;border:1px solid rgba(53,210,139,.25);background:rgba(53,210,139,.08);color:#8df0bb;border-radius:999px;font-size:12px;white-space:nowrap}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-left:7px;box-shadow:0 0 12px var(--green)}.grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,.7fr);gap:18px}.card{background:var(--panel);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow);backdrop-filter:blur(18px)}.main{padding:25px}.side{padding:22px;height:max-content}.labelrow{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.labelrow label{font-weight:700}.hint{font-size:12px;color:var(--muted)}textarea{width:100%;min-height:155px;resize:vertical;border:1px solid var(--line);outline:none;border-radius:17px;background:rgba(3,11,23,.62);color:var(--text);padding:17px;font:13px/1.9 Consolas,monospace;direction:ltr;text-align:left;transition:.2s}textarea:focus{border-color:rgba(66,165,255,.65);box-shadow:0 0 0 4px rgba(66,165,255,.09)}.actions{display:flex;gap:10px;margin-top:13px}.btn{border:0;border-radius:14px;padding:11px 19px;color:white;font:700 13px Tahoma;cursor:pointer;transition:.2s}.btn:hover{transform:translateY(-1px)}.btn:disabled{opacity:.55;cursor:wait;transform:none}.primary{background:linear-gradient(120deg,#1879ee,#24b9cf);box-shadow:0 9px 25px rgba(24,121,238,.2)}.ghost{background:rgba(148,163,184,.09);border:1px solid var(--line);color:#c9d7e8}.rules{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.chip{direction:ltr;border:1px solid rgba(66,165,255,.18);background:rgba(66,165,255,.07);color:#b9dafa;border-radius:9px;padding:5px 8px;font:11px Consolas,monospace;overflow-wrap:anywhere}.side h2{font-size:15px;margin:0 0 4px}.side p{font-size:12px;color:var(--muted);margin:0}.divider{height:1px;background:var(--line);margin:19px 0}.mini{display:grid;grid-template-columns:1fr 1fr;gap:9px}.stat{background:rgba(3,11,23,.45);border:1px solid var(--line);border-radius:14px;padding:12px}.stat b{display:block;font-size:19px}.stat span{font-size:11px;color:var(--muted)}.results{margin-top:18px;display:grid;gap:10px}.empty{text-align:center;border:1px dashed rgba(148,163,184,.22);border-radius:17px;padding:27px;color:var(--muted);font-size:13px}.result{display:grid;grid-template-columns:42px minmax(0,1fr) auto;align-items:center;gap:13px;padding:14px;border-radius:17px;background:rgba(3,11,23,.46);border:1px solid var(--line);animation:in .35s ease both}.icon{width:39px;height:39px;border-radius:12px;display:grid;place-items:center;font-weight:bold}.ok .icon{background:rgba(53,210,139,.1);color:var(--green)}.bad .icon{background:rgba(255,102,124,.1);color:var(--red)}.warn .icon{background:rgba(248,188,75,.1);color:var(--amber)}.url{font:12px Consolas,monospace;direction:ltr;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.msg{font-size:11px;color:var(--muted);margin-top:3px}.meta{text-align:left;direction:ltr}.code{display:inline-block;padding:3px 7px;border-radius:7px;background:rgba(148,163,184,.09);font:11px Consolas}.latency{display:block;color:var(--muted);font-size:10px;margin-top:4px}.docs{margin-top:18px;padding:18px 20px}.docs h2{font-size:14px;margin:0 0 7px}.docs code{display:block;direction:ltr;text-align:left;overflow:auto;padding:12px;background:rgba(3,11,23,.5);border-radius:12px;color:#9ed8ff;font:11px/1.7 Consolas}.toast{position:fixed;left:20px;bottom:20px;padding:11px 15px;border-radius:12px;background:#17263a;border:1px solid var(--line);box-shadow:var(--shadow);font-size:12px;transform:translateY(90px);opacity:0;transition:.25s}.toast.show{transform:none;opacity:1}.tablink{font-family:Tahoma;cursor:pointer}.tabs{display:flex;gap:7px;margin:0 0 18px;padding:5px;width:max-content;max-width:100%;background:rgba(14,27,46,.72);border:1px solid var(--line);border-radius:14px}.tab{border:0;background:transparent;color:var(--muted);padding:9px 14px;border-radius:10px;font:12px Tahoma;cursor:pointer}.tab.active{color:white;background:linear-gradient(120deg,rgba(24,121,238,.72),rgba(36,185,207,.55));box-shadow:0 7px 22px rgba(0,0,0,.2)}.filepanel{height:calc(100vh - 185px);min-height:650px}.filepanel iframe{width:100%;height:100%;border:1px solid var(--line);border-radius:23px;background:#07111e;box-shadow:var(--shadow)}@keyframes in{from{opacity:0;transform:translateY(7px)}}@media(max-width:780px){.wrap{padding-top:24px}.top{align-items:flex-start}.badge{display:none}.grid{grid-template-columns:1fr}.main,.side{padding:18px}.result{grid-template-columns:39px minmax(0,1fr)}.meta{grid-column:2;text-align:right}.docs{padding:16px}}
 </style>
 </head>
 <body><div class="orb o1"></div><div class="orb o2"></div><main class="wrap">
-<header class="top"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8"><path d="M8 12h8M13 7l5 5-5 5"/><path d="M6 19a9 9 0 1 1 0-14"/></svg></div><div><h1>درگاه ارتباط API</h1><p>بررسی دسترسی خروجی سرور پارس‌پک به سرویس‌های خارجی</p></div></div><a class="badge" style="text-decoration:none" href="?panel=files">مدیریت فایل‌ها ←</a></header>
-<section class="grid"><div class="card main"><div class="labelrow"><label for="urls">آدرس‌های مورد نظر</label><span class="hint">حداکثر ۱۰ آدرس، هر کدام در یک خط</span></div><textarea id="urls" spellcheck="false" placeholder="https://api.example.com/health&#10;https://your-worker.workers.dev/"></textarea><div class="actions"><button class="btn primary" id="check">بررسی دسترسی</button><button class="btn ghost" id="clear">پاک‌کردن</button></div><div class="results" id="results"><div class="empty">نتیجه بررسی آدرس‌ها در این قسمت نمایش داده می‌شود.</div></div></div>
-<aside class="card side"><h2>دامنه‌های مجاز</h2><p>تنظیم‌شده در PROXY_ALLOWED_HOSTS</p><div class="rules" id="rules"></div><div class="divider"></div><div class="mini"><div class="stat"><b id="success">۰</b><span>قابل دسترسی</span></div><div class="stat"><b id="failed">۰</b><span>ناموفق / غیرمجاز</span></div></div><div class="divider"></div><p>این آزمایش از داخل سرور انجام می‌شود؛ بنابراین نتیجه، دسترسی واقعی PaaS به مقصد را نشان می‌دهد. پاسخ‌های HTTP مانند 401 یا 403 نیز یعنی ارتباط شبکه برقرار شده است.</p></aside></section>
-<section class="card docs"><h2>نمونه استفاده از پروکسی</h2><code>GET /proxy.php?url=https%3A%2F%2Fapi.example.com%2Fv1%2Fstatus</code></section></main><div class="toast" id="toast"></div>
+<header class="top"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8"><path d="M8 12h8M13 7l5 5-5 5"/><path d="M6 19a9 9 0 1 1 0-14"/></svg></div><div><h1>درگاه ارتباط API</h1><p>بررسی دسترسی خروجی سرور پارس‌پک به سرویس‌های خارجی</p></div></div><button class="badge tablink" data-tab="files">مدیریت فایل‌ها ←</button></header>
+<nav class="tabs"><button class="tab active" data-tab="proxy">بررسی دسترسی API</button><button class="tab" data-tab="files">فایل‌منیجر</button></nav><div id="proxyPanel" class="pagepanel">
+<section class="grid"><div class="card main"><div class="labelrow"><label for="urls">آدرس‌های مورد نظر</label><span class="hint">حداکثر ۱۰ آدرس، هر کدام در یک خط</span></div><textarea id="urls" spellcheck="false" placeholder="https://api.example.com/health&#10;https://your-worker.workers.dev/"></textarea><div class="actions"><button class="btn primary" id="check">بررسی دسترسی</button><button class="btn ghost" id="providers">تست همه ارائه‌دهندگان</button><button class="btn ghost" id="clear">پاک‌کردن</button></div><div class="results" id="results"><div class="empty">نتیجه بررسی آدرس‌ها در این قسمت نمایش داده می‌شود.</div></div></div>
+<aside class="card side"><h2>دامنه‌های مجاز</h2><p>مقصدهای مجاز پروکسی در ابتدای فایل</p><div class="rules" id="rules"></div><div class="divider"></div><div class="mini"><div class="stat"><b id="success">۰</b><span>قابل دسترسی</span></div><div class="stat"><b id="failed">۰</b><span>ناموفق / غیرمجاز</span></div></div><div class="divider"></div><p>این آزمایش از داخل سرور انجام می‌شود؛ بنابراین نتیجه، دسترسی واقعی PaaS به مقصد را نشان می‌دهد. پاسخ‌های HTTP مانند 401 یا 403 نیز یعنی ارتباط شبکه برقرار شده است.</p></aside></section>
+<section class="card docs"><h2>نمونه استفاده از پروکسی</h2><code>GET /proxy.php?url=https%3A%2F%2Fapi.example.com%2Fv1%2Fstatus</code></section></div><section id="filesPanel" class="pagepanel filepanel" hidden><iframe id="fileFrame" title="مدیریت فایل‌ها" data-src="?panel=files"></iframe></section></main><div class="toast" id="toast"></div>
 <script>
-const rules=__RULES__;const $=s=>document.querySelector(s);const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+const rules=__RULES__;const providerUrls=__PROVIDERS__;const $=s=>document.querySelector(s);const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 $('#rules').innerHTML=rules.map(x=>`<span class="chip">${esc(x)}</span>`).join('');
+function switchTab(name){const files=name==='files';$('#proxyPanel').hidden=files;$('#filesPanel').hidden=!files;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(files){const f=$('#fileFrame');if(!f.getAttribute('src'))f.src=f.dataset.src;location.hash='files'}else{history.replaceState(null,'',location.pathname+location.search)}}document.querySelectorAll('[data-tab]').forEach(x=>x.addEventListener('click',()=>switchTab(x.dataset.tab)));if(location.hash==='#files')switchTab('files');
 function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),2400)}
+$('#providers').onclick=()=>{$('#urls').value=Object.values(providerUrls).join('\n');$('#check').click()};
 $('#clear').onclick=()=>{$('#urls').value='';$('#results').innerHTML='<div class="empty">نتیجه بررسی آدرس‌ها در این قسمت نمایش داده می‌شود.</div>';$('#success').textContent='۰';$('#failed').textContent='۰'};
 $('#check').onclick=async()=>{const urls=$('#urls').value.split(/\n/).map(x=>x.trim()).filter(Boolean);if(!urls.length){toast('حداقل یک آدرس وارد کنید');return}if(urls.length>10){toast('حداکثر ۱۰ آدرس قابل بررسی است');return}const b=$('#check');b.disabled=true;b.textContent='در حال بررسی…';$('#results').innerHTML='<div class="empty">در حال برقراری ارتباط از داخل سرور…</div>';try{const r=await fetch('?action=check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls})});const d=await r.json();if(!r.ok)throw new Error(d.message||'خطای سرور');let good=0;$('#results').innerHTML=d.results.map(x=>{if(x.reachable)good++;const cls=x.reachable?(x.status>=200&&x.status<400?'ok':'warn'):'bad';const mark=x.reachable?'✓':'×';return `<article class="result ${cls}"><div class="icon">${mark}</div><div><div class="url" title="${esc(x.url)}">${esc(x.url)}</div><div class="msg">${esc(x.message)}${x.ip?' · '+esc(x.ip):''}</div></div><div class="meta"><span class="code">${x.status?'HTTP '+x.status:(x.allowed?'NO RESPONSE':'BLOCKED')}</span><span class="latency">${x.latency_ms!==null?x.latency_ms+' ms':'—'}</span></div></article>`}).join('');$('#success').textContent=good.toLocaleString('fa-IR');$('#failed').textContent=(d.results.length-good).toLocaleString('fa-IR')}catch(e){ $('#results').innerHTML=`<div class="empty">${esc(e.message)}</div>`;toast('بررسی انجام نشد')}finally{b.disabled=false;b.textContent='بررسی دسترسی'}};
 </script></body></html>
 HTML;
-    echo str_replace('__RULES__', $rulesJson ?: '[]', $html);
+    echo str_replace(
+        ['__RULES__', '__PROVIDERS__'],
+        [$rulesJson ?: '[]', $providerUrlsJson ?: '{}'],
+        $html
+    );
 }
 
 // ---------- Password-protected file manager ----------
@@ -416,7 +464,7 @@ HTML;
         return;
     }
 
-    $body = '<main class="wrap"><header class="top"><div class="brand"><div class="logo">▣</div><div><h1>مدیریت فایل‌ها</h1><p>فضای ذخیره‌سازی کنترل‌شده سرور</p></div></div><div><a class="btn" href="?">پنل API</a> <button class="btn danger" id="logout">خروج</button></div></header><section class="card"><div class="toolbar"><button class="btn primary" id="uploadBtn">آپلود فایل</button><button class="btn" id="newFolder">پوشه جدید</button><button class="btn" id="newFile">فایل جدید</button><button class="btn" id="refresh">تازه‌سازی</button><input type="file" id="picker" multiple></div><nav class="pathbar" id="crumbs"></nav><div class="drop" id="drop">فایل‌ها را برای آپلود در این قسمت رها کنید</div><div class="tablewrap"><table><thead><tr><th>نام</th><th>حجم</th><th>آخرین تغییر</th><th>دسترسی</th><th>عملیات</th></tr></thead><tbody id="rows"><tr><td colspan="5" class="loader">در حال بارگذاری…</td></tr></tbody></table></div></section></main>';
+    $body = '<main class="wrap"><header class="top"><div class="brand"><div class="logo">▣</div><div><h1>مدیریت فایل‌ها</h1><p>فضای ذخیره‌سازی کنترل‌شده سرور</p></div></div><div><a class="btn" href="?#proxy" target="_top">پنل API</a> <button class="btn danger" id="logout">خروج</button></div></header><section class="card"><div class="toolbar"><button class="btn primary" id="uploadBtn">آپلود فایل</button><button class="btn" id="newFolder">پوشه جدید</button><button class="btn" id="newFile">فایل جدید</button><button class="btn" id="refresh">تازه‌سازی</button><input type="file" id="picker" multiple></div><nav class="pathbar" id="crumbs"></nav><div class="drop" id="drop">فایل‌ها را برای آپلود در این قسمت رها کنید</div><div class="tablewrap"><table><thead><tr><th>نام</th><th>حجم</th><th>آخرین تغییر</th><th>دسترسی</th><th>عملیات</th></tr></thead><tbody id="rows"><tr><td colspan="5" class="loader">در حال بارگذاری…</td></tr></tbody></table></div></section></main>';
     $script = <<<'JS'
 const csrf=__CSRF__;let current='';const $=s=>document.querySelector(s);const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');setTimeout(()=>e.classList.remove('on'),2300)}function size(n){if(n===null)return'—';const u=['B','KB','MB','GB'];let i=0;while(n>=1024&&i<3){n/=1024;i++}return(n<10&&i?n.toFixed(1):Math.round(n))+' '+u[i]}
@@ -620,7 +668,7 @@ if (!extension_loaded('curl')) {
     sendJsonError(500, 'curl_missing', 'افزونه cURL روی PHP فعال نیست.');
 }
 
-$allowedHosts = array_values(array_filter(array_map('trim', explode(',', envString('PROXY_ALLOWED_HOSTS')))));
+$allowedHosts = array_values(array_filter(array_map('trim', PROXY_TARGET_HOSTS)));
 $action = isset($_GET['action']) && is_string($_GET['action']) ? $_GET['action'] : '';
 
 // Dashboard: opening proxy.php without parameters shows the visual access tester.
@@ -633,9 +681,6 @@ if ($method === 'GET' && $action === '' && !isset($_GET['url'])) {
 if ($action === 'check') {
     if ($method !== 'POST') {
         sendJsonError(405, 'method_not_allowed', 'برای بررسی دسترسی از POST استفاده کنید.');
-    }
-    if ($allowedHosts === []) {
-        sendJsonError(503, 'proxy_not_configured', 'متغیر PROXY_ALLOWED_HOSTS تنظیم نشده است.');
     }
     $rawCheckBody = file_get_contents('php://input', false, null, 0, 65537);
     if ($rawCheckBody === false || strlen($rawCheckBody) > 65536) {
@@ -684,7 +729,7 @@ if ($port !== 443) {
 }
 
 if ($allowedHosts === []) {
-    sendJsonError(503, 'proxy_not_configured', 'متغیر PROXY_ALLOWED_HOSTS تنظیم نشده است.');
+    sendJsonError(503, 'proxy_not_configured', 'فهرست PROXY_TARGET_HOSTS در ابتدای فایل خالی است.');
 }
 if (!hostIsAllowed($host, $allowedHosts)) {
     sendJsonError(403, 'host_not_allowed', 'دامنه مقصد در فهرست مجاز نیست.');
