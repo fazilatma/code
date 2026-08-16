@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.61';
+const APP_VERSION = '9.63';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -9199,7 +9199,9 @@ if (isset($_GET['backup_export'])) {
     $cfg = backupCfg();
     $cfg['include_data'] = true;
     $cfg['include_code'] = false;
-    $bundle = backupBuildBundle($cfg);
+    // v9.62: خروجی «تنظیمات» فقط متن باشد — بلوک‌های تصویرِ base64 حذف می‌شوند
+    // تا فایل سبک بماند و روی هاست‌های ضعیف هم آپلود/بارگذاری موفق باشد.
+    $bundle = backupBuildBundle($cfg, true);
     if (empty($bundle['files'])) {
         echo json_encode(['ok' => false, 'error' => 'هیچ فایل داده‌ای پیدا نشد — هنوز پروفایل/تنظیماتی ذخیره نشده'], JSON_UNESCAPED_UNICODE);
         exit;
@@ -9363,6 +9365,19 @@ function b64dec(string $enc) {
     $f = 'base64' . '_decode';
     return $f($enc, true);
 }
+/* v9.62: برای ذخیره/دانلود «تنظیمات کل سایت»، هر بلوکِ تصویرِ base64
+   (data:image/...;base64,XXXX) را از محتوای فایل‌های داده حذف می‌کند.
+   محصولاتِ استخراج‌شده می‌توانند عکس را به‌صورت inline (data URI) داخل
+   فیلدِ image نگه دارند و آن‌ها چند ده کیلوبایت تا چند مگابایت روی هم
+   حجم می‌دهند؛ برای همین فایلِ خروجیِ «ذخیرهٔ تنظیمات» گاهی ۱۳MB می‌شد و
+   آپلودِ آن در هاست‌های ضعیف شکست می‌خورد. با این پاک‌سازی، خروجی فقط
+   متن (تنظیمات/پروفایل/تاریخچه) می‌شود و عکس‌ها کنار می‌روند — عکس‌های
+   واقعی هرگز در این بسته نمی‌آمدند و برای بازیابی نیازی به آن‌ها نیست. */
+function backupStripImageData(string $content): string {
+    // data:image/<نوع>;base64,<بلوک> — خودِ بلوک فقط کاراکترهای base64 دارد
+    // (A-Za-z0-9 + / =) و هیچ خطِ خالی‌ای در آن نیست.
+    return preg_replace('~data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+~i', '', $content);
+}
 
 /* v9.18: مخزن و توکن از «منبع و نصب‌کننده» می‌آید.
 
@@ -9468,7 +9483,7 @@ function ghApi(string $token, string $method, string $url, ?array $body = null):
 }
 
 /** یک بستهٔ بکاپ می‌سازد: همهٔ فایل‌ها به‌صورت base64 داخل یک JSON */
-function backupBuildBundle(array $cfg): array {
+function backupBuildBundle(array $cfg, bool $stripImages = false): array {
     $files = backupFileList($cfg);
     $bundle = ['app' => 'scraper', 'version' => APP_VERSION,
                'created_at' => time(), 'created_at_h' => date('Y/m/d H:i:s'),
@@ -9479,6 +9494,11 @@ function backupBuildBundle(array $cfg): array {
         $p = __DIR__ . '/' . $f;
         $c = @file_get_contents($p);
         if ($c === false) continue;
+        // v9.62: حالتِ «فقط متن» — بلوک‌های تصویرِ base64 را حذف کن
+        if ($stripImages) {
+            $stripped = backupStripImageData($c);
+            if ($stripped !== $c) { $c = $stripped; $bundle['stripped_images'] = true; }
+        }
         $bytes += strlen($c);
         $bundle['files'][$f] = ['size' => strlen($c), 'b64' => b64enc($c)];
     }
@@ -12141,6 +12161,27 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, '.settings-panel.full .smenu-body.open' . '{max-height:none') !== false);
     $add('9.61', 'تبِ انتخاب‌شدهٔ هوش مصنوعی صریحاً display:block می‌گیرد تا هیچ تب‌ای خالی نماند',
          strpos($selfSrc, "===tab)?'blo" . "ck':'none';") !== false);
+
+    /* ---------- v9.62: ذخیرهٔ تنظیمات فقط متن (حذف عکس‌های base64) ---------- */
+    $add('9.62', 'تابعِ حذفِ بلوک‌های تصویرِ base64 از محتوای داده‌ها اضافه شده',
+         strpos($selfSrc, 'function backupStrip' . 'ImageData(') !== false
+         && strpos($selfSrc, "data:im" . "age/") !== false);
+    $add('9.62', 'دانلودِ «تنظیمات» با حالتِ فقط-متن ساخته می‌شود (stripImages روی backup_export)',
+         strpos($selfSrc, 'backupBuildBundle($cfg, true' . ');') !== false
+         && strpos($selfSrc, '$stripped = backupStrip' . 'ImageData($c)') !== false);
+    $add('9.62', 'بکاپِ کاملِ گیت‌هاب/محلی همچنان عکس‌ها را نگه می‌دارد (پیش‌فرض stripImages=false)',
+         strpos($selfSrc, 'function backupBuild' . 'Bundle(array $cfg, bool $stripImages = false)') !== false);
+
+    /* ---------- v9.63: روشن/خاموش کردن انفرادیِ ارائه‌دهنده‌های هوش مصنوعی ---------- */
+    $add('9.63', 'اندپوینتِ روشن/خاموش کردن یک ارائه‌دهنده (ai_toggle_provider) اضافه شده',
+         strpos($selfSrc, "=== 'ai_toggle_provider'") !== false
+         && strpos($selfSrc, "\$providers[\$pid]['enabled']") !== false);
+    $add('9.63', 'فهرست ارائه‌دهنده‌ها با تیکِ روشن/خاموش انفرادی در تب «ارائه‌دهنده‌ها»',
+         strpos($selfSrc, 'function aiRenderProvider' . 'Toggles()') !== false
+         && strpos($selfSrc, 'function aiToggle' . 'Provider(') !== false
+         && strpos($selfSrc, 'id="aiProviderToggle' . 'List"') !== false);
+    $add('9.63', 'خاموش کردن ارائه‌دهندهٔ فعال، «فعال» را به یک ارائه‌دهندهٔ روشن دیگر می‌پرد',
+         strpos($selfSrc, "if (\$on === false && aiSelected()['provider'] === \$pid)") !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -16717,6 +16758,27 @@ if (!isset($providers[$pid])) { echo json_encode(['ok'=>false,'error'=>'ارائ
 if ($mid === '') $mid = $providers[$pid]['models'][0]['id'] ?? '';
 aiSaveSelected($pid, $mid);
 echo json_encode(['ok'=>true,'provider'=>$pid,'model'=>$mid], JSON_UNESCAPED_UNICODE);
+exit;
+}
+/* v9.63: روشن/خاموش کردن انفرادیِ یک ارائه‌دهنده — ارائه‌دهندهٔ خاموش به‌همراهِ
+   همهٔ مدل‌هایش از «تست مدل‌ها» خارج می‌شود (تست انبوه ارائه‌دهنده‌های خاموش
+   را رد می‌کند) ولی داده‌ها و تنظیماتش باقی می‌ماند. */
+if (($_POST['action'] ?? '') === 'ai_toggle_provider') {
+header('Content-Type: application/json; charset=UTF-8');
+$pid = trim($_POST['provider_id'] ?? '');
+$providers = aiProvidersLoad();
+if (!isset($providers[$pid])) { echo json_encode(['ok'=>false,'error'=>'ارائه‌دهنده یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+$on = !empty($_POST['enabled']);
+$providers[$pid]['enabled'] = $on;
+$ok = aiProvidersSave($providers);
+// اگر این ارائه‌دهنده «فعال» (انتخاب اصلی اتوماسیون) بود و خاموش شد، فعال را عوض کن
+if ($on === false && aiSelected()['provider'] === $pid) {
+    $cfg = aiActiveConfig();
+    $np = is_array($cfg['provider']) ? ($cfg['provider']['id'] ?? '') : '';
+    $nm = $cfg['model'] ?? '';
+    if ($np !== '' && $np !== $pid) aiSaveSelected($np, $nm);
+}
+echo json_encode(['ok'=>$ok,'provider'=>$pid,'enabled'=>$on], JSON_UNESCAPED_UNICODE);
 exit;
 }
 /* تست یک مدل و ذخیرهٔ نتیجه در همان مدل */
@@ -21885,6 +21947,20 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <select id="aiProviderSel" onchange="aiSelectProvider()" style="flex:1"><option value="">— درون‌ریزی کنید —</option></select></div>
 <div class="crow"><label>مدل فعال:</label>
 <select id="aiModelSel" onchange="aiSelectModel()" style="flex:1"><option value="">—</option></select></div>
+<!-- v9.63: فهرست ارائه‌دهنده‌ها با تیکِ روشن/خاموش انفرادی — ارائه‌دهندهٔ خاموش
+     و همهٔ مدل‌هایش از «تست مدل‌ها» بیرون می‌ماند ولی داده‌ها پاک نمی‌شود. -->
+<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+<span style="font-size:12px;color:#67e8f9;font-weight:700">🚦 روشن/خاموش کردن ارائه‌دهنده‌ها</span>
+<span style="font-size:10px;color:#64748b" id="aiProvOnCount"></span>
+</div>
+<div style="font-size:10.5px;color:#94a3b8;margin-bottom:6px;line-height:1.7">
+ارائه‌دهنده‌های خاموش به‌همراهِ مدل‌هایشان در <b>تست مدل‌ها</b> شرکت نمی‌کنند (برای صرفه‌جویی در زمان و ریت‌لیمیت، فقط روشن‌ها را تست کنید). تیک را بزنید/بردارید — بلافاصله ذخیره می‌شود.
+</div>
+<div id="aiProviderToggleList" style="max-height:220px;overflow-y:auto;border:1px solid #334155;border-radius:6px;background:#0f172a">
+<div style="padding:8px;color:#64748b;font-size:11px">ارائه‌دهنده‌ای درون‌ریزی نشده.</div>
+</div>
+</div>
 </div>
 </div>
 
@@ -26342,6 +26418,10 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.63', t:'🚦 روشن/خاموش کردن انفرادیِ ارائه‌دهنده‌های هوش مصنوعی', items:[
+    'خواستهٔ شما: امکان فعال/غیرفعال کردن تک‌تکِ ارائه‌دهنده‌ها (و در نتیجهٔ', 'مدل‌هایشان) برای تعیینِ شمول در «تست مدل‌ها» فراهم شود.', '✅ در تب «ارائه‌دهنده‌ها» بخشِ «🚦 روشن/خاموش کردن ارائه‌دهنده‌ها» اضافه شد:', 'کنارِ هر ارائه‌دهنده یک تیک است که می‌توانید بزنید/بردارید و همان لحظه ذخیره', 'می‌شود.', '✅ ارائه‌دهنده‌ای که خاموش شود به‌همراهِ همهٔ مدل‌هایش از «تست مدل‌ها»', '(تست انبوه) کنار می‌رود — برای صرفه‌جویی در زمان و جلوگیری از ریت‌لیمیت،', 'فقط ارائه‌دهنده‌های روشن تست می‌شوند.', '✅ خاموش کردن، داده‌ها و کلیدها و مدل‌ها را پاک نمی‌کند؛ فقط از تست بیرون', 'می‌مانند و هر وقت تیک بزنید دوباره برمی‌گردند.', '✅ اگر ارائه‌دهندهٔ «فعال» (انتخاب اصلی اتوماسیون) خاموش شود، فعال به یک', 'ارائه‌دهندهٔ روشنِ دیگر می‌پرد تا دسته‌بندی/پاسخ خودکار بی‌درنگ از کار', 'نیفتد. شمارندهٔ «X روشن از Y» هم بالای فهرست نمایش داده می‌شود.'],},
+  {v:'9.62', t:'💾 ذخیرهٔ تنظیمات فقط متن — حذف عکس‌های inline برای سبک شدن فایل', items:[
+    'گزارش شما: موقع «ذخیرهٔ همهٔ تنظیمات» فایلِ خروجی ۱۳ مگابایت می‌شد که برای', 'آپلود/بارگذاری روی هاست‌ها و سرورهای ضعیف خیلی زیاد است.', '🐞 ریشهٔ کار: محصولاتِ استخراج‌شده می‌توانند عکس را به‌صورت inline', '(data:image/...;base64,XXXX) داخلِ خودِ فیلدِ image نگه دارند. این بلوک‌ها', 'چند ده کیلوبایت تا چند مگابایت روی هم حجم می‌دهند و چون فایلِ خروجی دوباره', 'base64 می‌شد، حجم باز هم بیشتر می‌رفت.', '✅ حالا خروجیِ «دانلود همهٔ تنظیمات و پروفایل‌ها» و اندپوینتِ backup_export', 'واردِ حالتِ «فقط متن» می‌شود: همهٔ بلوک‌های تصویرِ base64 از محتوای فایل‌های', 'داده حذف می‌شوند و فایل فقط متنِ تنظیمات/پروفایل/تاریخچه می‌ماند — سبک و', 'قابل آپلود روی هر هاستی.', '✅ عکس‌های واقعی همیشه در پوشهٔ uploads بودند و هیچ‌وقت داخل این بسته', 'نمی‌آمدند؛ پس حذفِ نسخهٔ inline برای بازیابی هیچ دادهٔ واقعی‌ای را کم نمی‌کند.', '⚠️ بکاپِ کاملِ گیت‌هاب/محلی (با دکمهٔ «بکاپ» در بخش گیت‌هاب) بدونِ تغییر،', 'همان رفتارِ قبلی را حفظ کرده است.'],},
   {v:'9.61', t:'⛶ دکمهٔ تمام‌عرضِ منو + رفعِ خالی بودنِ تب‌های هوش مصنوعی', items:[
     'خواستهٔ شما: یک دکمه کنار همبرگر (سه خط موازی) برای «تمام عرض کردن» منو و', 'محتویات آن اضافه شود.', '✅ دکمهٔ «⛶» کنار همبرگر اضافه شد؛ با کلیک روی آن، پنل تنظیمات به‌جای ۴۰۰', 'پیکسل، تمام عرض صفحه باز می‌شود و سقفِ ارتفاعِ بخش‌ها برداشته می‌شود تا همهٔ', 'محتوا در یک نگاه دیده شود (کلیک دوباره برمی‌گردد). اگر منو بسته باشد اول باز می‌شود.', '🐞 گزارش شما: بعد از تب‌دار شدن بخش هوش مصنوعی، محتویات همهٔ تب‌ها (تست،', 'مدل‌ها، کاندید، اتصال) خالی می‌شدند و دیده نمی‌شدند.', 'ریشهٔ کار: تابعِ تعویضِ تب، برای تبِ انتخاب‌شده display را خالی می‌گذاشت (یعنی', 'استایل درون‌خطی را برمی‌داشت). ولی فقط تبِ «ارائه‌دهنده‌ها» کلاس .active را', 'دارد که CSS آن را block می‌کند؛ بقیهٔ تب‌ها چنین کلاسی ندارند و با CSS پایه', 'display:none مخفی می‌ماندند — پس با کلیک رویشان صفحه خالی می‌شد.', '✅ حالا تبِ انتخاب‌شده صریحاً display:block می‌گیرد و همهٔ تب‌ها به‌درستی', 'محتوا و تنظیماتِ خودشان را نشان می‌دهند.'],},
   {v:'9.60', t:'🗂 بخش هوش مصنوعی تب‌دار و منظم شد', items:[
@@ -30738,6 +30818,42 @@ function aiRenderProviders(){
     if(target)sel.value=target;
     aiRenderModels();
     aiCandFillSel();
+    aiRenderProviderToggles();
+}
+// v9.63: فهرست ارائه‌دهنده‌ها با تیکِ روشن/خاموش انفرادی. خاموش کردن یعنی
+// ارائه‌دهنده و همهٔ مدل‌هایش از «تست مدل‌ها» کنار می‌روند (تست انبوه فقط
+// ارائه‌دهنده‌های روشن را می‌شمارد) ولی داده‌ها و کلیدها حفظ می‌شوند.
+function aiRenderProviderToggles(){
+    const list=document.getElementById('aiProviderToggleList');if(!list)return;
+    const provs=aiProvData.providers||[];
+    if(!provs.length){list.innerHTML='<div style="padding:8px;color:#64748b;font-size:11px">ارائه‌دهنده‌ای درون‌ریزی نشده.</div>';const c=document.getElementById('aiProvOnCount');if(c)c.textContent='';return;}
+    let html='';
+    let onCount=0;
+    provs.forEach(p=>{
+        const on=p.enabled!==false;
+        if(on)onCount++;
+        const mc=(p.models||[]).length;
+        html+='<label style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid #1e293b;cursor:pointer;'+(on?'':'opacity:.55')+'" title="خاموش: ارائه‌دهنده و مدل‌هایش در تست مدل‌ها شرکت نمی‌کنند">'
+           +'<input type="checkbox" style="width:15px;height:15px;flex:0 0 auto" '+(on?'checked':'')+' onchange="aiToggleProvider(\''+jsAttr(p.id)+'\',this.checked)">'
+           +'<span style="flex:1;min-width:0">'+esc(p.name||p.id)+'</span>'
+           +'<span style="color:#94a3b8;font-size:10px;white-space:nowrap" dir="ltr">'+toFa(mc)+' مدل</span>'
+           +'<span style="font-size:10px;'+(on?'color:#4ade80':'color:#f87171')+'" id="aiProvStat-'+esc(p.id)+'">'+(on?'✓ روشن':'✕ خاموش')+'</span>'
+           +'</label>';
+    });
+    list.innerHTML=html||'<div style="padding:8px;color:#64748b;font-size:11px">ارائه‌دهنده‌ای نیست.</div>';
+    const c=document.getElementById('aiProvOnCount');
+    if(c)c.textContent=onCount+' روشن از '+provs.length;
+}
+function aiToggleProvider(pid,on){
+    const fd=new FormData();
+    fd.append('action','ai_toggle_provider');
+    fd.append('provider_id',pid);
+    fd.append('enabled',on?'1':'0');
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){showToast('خطا در ذخیرهٔ وضعیت: '+((d&&d.error)||'؟'),1);}
+        else{showToast((on?'✓ «':'✕ «')+pid+'» '+(on?'روشن':'خاموش')+' شد');}
+        aiLoadProviders();   // برای به‌روزرسانی فهرست و شمارنده
+    }).catch(()=>{showToast('❌ خطا شبکه',1);});
 }
 function aiCurrentProvider(){
     const sel=$('aiProviderSel');const id=sel?sel.value:'';
