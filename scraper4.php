@@ -3364,24 +3364,6 @@ function srcPace(string $host, int $gapMs): void {
     $last[$host] = microtime(true);
 }
 
-/**
- * آدرس درخواست به Worker را می‌سازد.
- * دو قرارداد پشتیبانی می‌شود:
- *   ۱) الگوی قدیمی:  https://xxx.workers.dev/.../{url}
- *   ۲) API پارامتر:  https://xxx.workers.dev/?url=...  (پیش‌فرض — سازگار با
- *      cloudflare-worker.js همین ریپو، مثل proxy.fazilat-ma.workers.dev)
- */
-function srcWorkerUrl(string $workerUrl, string $targetUrl): string {
-    $w = rtrim($workerUrl, '/');
-    if (strpos($w, '{url}') !== false) {
-        return str_replace('{url}', rawurlencode($targetUrl), $w);
-    }
-    if (substr($w, -1) === '?') {
-        return $w . 'url=' . rawurlencode($targetUrl);
-    }
-    return $w . (strpos($w, '?') === false ? '?' : '&') . 'url=' . rawurlencode($targetUrl);
-}
-
 function fetch_html(string $url, int $timeout = 25): array {
 $ch = curl_init($url);
 $parsed=parse_url($url);$origin=($parsed['scheme']??'https').'://'.($parsed['host']??'');
@@ -3414,7 +3396,6 @@ CURLOPT_HTTPHEADER => [
 /* v9.00: راه عبور را اعمال کن — DoH / IP دستی / پروکسی / Worker.
    نام میزبان دست‌نخورده می‌ماند و فقط مقصد TCP عوض می‌شود، پس سایت
    همان درخواست همیشگی را می‌بیند. */
-$__wFinal = '';
 if (srcNetApplies($__srcNet, $__srcHost)) {
     $__m = (string)$__srcNet['mode'];
     if ($__m === 'dns' || $__m === 'doh') {
@@ -3437,18 +3418,10 @@ if (srcNetApplies($__srcNet, $__srcHost)) {
         if ($__srcNet['proxy_auth'] !== '') curl_setopt($ch, CURLOPT_PROXYUSERPWD, (string)$__srcNet['proxy_auth']);
     } elseif ($__m === 'worker' && $__srcNet['worker_url'] !== '') {
         $__w = rtrim((string)$__srcNet['worker_url'], '/');
-        $__u = srcWorkerUrl($__w, $url);
+        $__u = (strpos($__w, '{url}') !== false)
+             ? str_replace('{url}', rawurlencode($url), $__w)
+             : $__w . '/' . ltrim($url, '/');
         curl_setopt($ch, CURLOPT_URL, $__u);
-        /* ورکر همین ریپو (cloudflare-worker.js) با API پارامتر ?url= کار می‌کند و
-           آدرس نهایی مقصد (بعد از ریدایرکت‌ها) را در هدر X-Proxy-Final-Url
-           برمی‌گرداند؛ آن را بگیر تا لینک‌های نسبی روی آدرس واقعی حل شوند. */
-        $__wFinal = '';
-        curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($__ch2, $__line) use (&$__wFinal) {
-            if (stripos($__line, 'x-proxy-final-url:') === 0) {
-                $__wFinal = trim(substr($__line, strlen('x-proxy-final-url:')));
-            }
-            return strlen($__line);
-        });
     }
     if (!empty($__srcNet['ipv4']) && defined('CURL_IPRESOLVE_V4')) {
         curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
@@ -3458,7 +3431,6 @@ $body = curl_exec($ch);
 $err = curl_error($ch);
 $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
 $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL) ?: $url;
-if ($__wFinal !== '') $finalUrl = $__wFinal;   // آدرس واقعی مقصد از هدر ورکر
 curl_close($ch);
 if (!$body) return ['ok' => false, 'error' => $err ?: 'Empty', 'code' => $code, 'url' => $finalUrl, 'html' => ''];
 if ($code >= 400) return ['ok' => false, 'error' => 'HTTP ' . $code, 'code' => $code, 'url' => $finalUrl, 'html' => $body];
@@ -22337,15 +22309,16 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 <option value="direct">مستقیم (پیش‌فرض)</option>
 <option value="doh">DoH — گرفتن IP از DNS رمزگذاری‌شده</option>
 <option value="dns">IP دستی</option>
-<option value="proxy">پروکسی HTTP/SOCKS (آدرس در فیلد «پروکسی / ورکر»)</option>
-<option value="worker">Worker کلودفلر (آدرس در فیلد «پروکسی / ورکر»)</option>
+<option value="proxy">پروکسی HTTP/SOCKS5</option>
+<option value="worker">Worker / پروکسی معکوس</option>
 </select></div>
 <div class="crow"><label>فاصلهٔ درخواست‌ها (ms):</label><input type="number" id="srcNetGap" value="0" min="0" max="10000" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = بدون فاصله · برای سایتی که بلاک می‌کند ۱۵۰۰ تا ۳۰۰۰ بگذارید</span></div>
 <div class="crow"><label>IP دستی:</label><input type="text" id="srcNetIp" placeholder="مثال: 104.21.0.1" style="flex:1" dir="ltr"></div>
 <div class="crow"><label>آدرس DoH:</label><input type="text" id="srcNetDoh" placeholder="https://cloudflare-dns.com/dns-query" style="flex:1" dir="ltr"></div>
-<div class="crow"><label>پروکسی / ورکر:</label><input type="text" id="srcNetProxyField" placeholder="http://1.2.3.4:8080 · socks5://user:pass@1.2.3.4:1080 · https://proxy.fazilat-ma.workers.dev" style="flex:1" dir="ltr" oninput="refreshSrcNetDetect()"></div>
-<div id="srcNetDetect" style="font-size:10px;color:#94a3b8;margin:2px 0 4px"></div>
-<div class="crow"><label>کاربر:رمز پروکسی:</label><input type="text" id="srcNetProxyAuth" placeholder="user:pass (اختیاری، برای پروکسی بدون رمز در آدرس)" style="flex:1" dir="ltr"></div>
+<div class="crow"><label>پروکسی:</label><input type="text" id="srcNetProxy" placeholder="host:port" style="flex:1" dir="ltr">
+<select id="srcNetProxyType" style="max-width:110px"><option value="http">HTTP</option><option value="socks5">SOCKS5</option><option value="socks4">SOCKS4</option></select></div>
+<div class="crow"><label>کاربر:رمز پروکسی:</label><input type="text" id="srcNetProxyAuth" placeholder="user:pass" style="flex:1" dir="ltr"></div>
+<div class="crow"><label>Worker:</label><input type="text" id="srcNetWorker" placeholder="https://xxx.workers.dev  یا  .../{url}" style="flex:1" dir="ltr"></div>
 <div class="crow"><label>فقط این دامنه‌ها:</label><input type="text" id="srcNetHosts" placeholder="خالی = همه · مثال: shop.ir, example.com" style="flex:1" dir="ltr"></div>
 <div class="row"><button class="btn btn-purple" onclick="srcNetTest()" style="flex:1">🧪 آزمایش روی آدرس پروفایل</button></div>
 <div id="srcNetResult" style="margin-top:6px;font-size:11px"></div>
@@ -33302,58 +33275,25 @@ function srcNetApply(sn){
     set('srcNetGap',       sn.gap_ms||0);
     set('srcNetIp',        sn.resolve_ip||'');
     set('srcNetDoh',       sn.doh_url||'');
-    set('srcNetProxyField',(sn.mode==='worker'&&sn.worker_url)?sn.worker_url:(sn.proxy||''));
+    set('srcNetProxy',     sn.proxy||'');
+    set('srcNetProxyType', sn.proxy_type||'http');
     set('srcNetProxyAuth', sn.proxy_auth||'');
+    set('srcNetWorker',    sn.worker_url||'');
     set('srcNetHosts',     sn.hosts||'');
-    refreshSrcNetDetect();
-}
-
-/* فیلد واحد «پروکسی / ورکر»: نوع آدرس را خودکار تشخیص می‌دهد
-   (ورکر کلودفلر، پروکسی HTTP، SOCKS5 یا SOCKS4). */
-function srcNetDetect(val){
-    val=(val||'').trim();
-    if(!val) return null;
-    const low=val.toLowerCase();
-    let host='';
-    try{host=new URL(val).host.toLowerCase();}catch(e){}
-    if(host==='workers.dev'||host.endsWith('.workers.dev'))
-        return {mode:'worker', worker_url:val, proxy:'', proxy_type:'http', label:'ورکر کلودفلر (API پارامتر ?url=)'};
-    if(low.startsWith('socks5'))
-        return {mode:'proxy', worker_url:'', proxy:val, proxy_type:'socks5', label:'پروکسی SOCKS5'};
-    if(low.startsWith('socks4'))
-        return {mode:'proxy', worker_url:'', proxy:val, proxy_type:'socks4', label:'پروکسی SOCKS4'};
-    if(low.startsWith('http'))
-        return {mode:'proxy', worker_url:'', proxy:val, proxy_type:'http', label:'پروکسی HTTP'};
-    // بدون طرح‌واره → پروکسی HTTP
-    return {mode:'proxy', worker_url:'', proxy:'http://'+val, proxy_type:'http', label:'پروکسی HTTP'};
-}
-
-/* نشان دادن نتیجهٔ تشخیص خودکار زیر فیلد و هماهنگ‌کردن لیست «روش» */
-function refreshSrcNetDetect(){
-    const el=$('srcNetDetect');
-    const val=($('srcNetProxyField')&&$('srcNetProxyField').value||'').trim();
-    if(!el)return;
-    if(!val){el.innerHTML='';return;}
-    const d=srcNetDetect(val);
-    if(!d){el.innerHTML='';return;}
-    if($('srcNetMode'))$('srcNetMode').value=d.mode;
-    el.innerHTML='<span style="color:#4ade80">✓ تشخیص: '+d.label+'</span>'
-        +' — هنگام ذخیره، روش «'+(d.mode==='worker'?'worker':'proxy')+'» خودکار انتخاب می‌شود';
 }
 
 /* v9.00: تنظیمات اتصال به سایت مبدأ را از فرم می‌خواند */
 function srcNetCollect(){
     const g=id=>$(id)||{};
-    const d=srcNetDetect(g('srcNetProxyField').value);
     return {
-        mode:       d?d.mode:(g('srcNetMode').value||'direct'),
+        mode:       g('srcNetMode').value||'direct',
         gap_ms:     parseInt(g('srcNetGap').value||'0')||0,
         resolve_ip: (g('srcNetIp').value||'').trim(),
         doh_url:    (g('srcNetDoh').value||'').trim(),
-        proxy:      d?d.proxy:'',
-        proxy_type: d?d.proxy_type:'http',
+        proxy:      (g('srcNetProxy').value||'').trim(),
+        proxy_type: g('srcNetProxyType').value||'http',
         proxy_auth: (g('srcNetProxyAuth').value||'').trim(),
-        worker_url: d?d.worker_url:'',
+        worker_url: (g('srcNetWorker').value||'').trim(),
         hosts:      (g('srcNetHosts').value||'').trim()
     };
 }
