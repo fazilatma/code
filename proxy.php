@@ -11,6 +11,18 @@
  *    proxy.php                                      → داشبورد راهنما
  *    proxy.php?info=1                               → وضعیت به‌صورت JSON
  *
+ *  استفاده به‌عنوان پراکسی فوروارد (مثلاً در فیلد پروکسی اسکرپر):
+ *    - مقصدهای HTTP : خودکار از طریق درخواست absolute-form پشتیبانی می‌شود.
+ *    - مقصدهای HTTPS: به روش CONNECT نیاز دارد؛ روی Apache/LiteSpeed این
+ *      دو خط را در .htaccess کنار proxy.php بگذارید تا CONNECT به PHP برسد:
+ *
+ *          RewriteEngine On
+ *          RewriteCond %{REQUEST_METHOD} ^CONNECT$
+ *          RewriteRule ^(.*)$ /proxy.php?__connect__=$1 [L]
+ *
+ *      (روی nginx/php-fpm معمولاً CONNECT به PHP نمی‌رسد؛ در آن حالت از
+ *       حالت ?url= یا فیلد Worker اسکرپر استفاده کنید.)
+ *
  *  هدرهای کنترلی (اختیاری):
  *    X-Proxy-Key      → کلید محافظت (اگر تنظیم شده باشد)
  *    X-Proxy-UA       → بازنویسی User-Agent
@@ -64,6 +76,8 @@ $CONFIG = [
     'cache_enabled'     => false,                 // کش فایلی پاسخ‌ها
     'cache_ttl'         => 120,                   // مدت اعتبار کش (ثانیه)
     'cache_dir'         => __DIR__ . '/proxy-cache',
+    'connect_enabled'   => true,                  // پاسخ به CONNECT (پراکسی فوروارد برای HTTPS) — اگر درخواست به PHP برسد
+    'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
 define('PROXY_VERSION', '1.0.0');
@@ -474,19 +488,33 @@ function p_fallback_attempt(string $url, string $method, array $headers, string 
 // [۴] پردازش درخواست پراکسی
 // ---------------------------------------------------------------------
 
-function p_handle_proxy(): void {
+/** بررسی کلید محافظت (در صورت فعال بودن) */
+function p_check_proxy_key(): void {
     $cfg = $GLOBALS['CONFIG'];
-
-    // کلید محافظت
-    if ($cfg['proxy_key'] !== '') {
-        $key = isset($_GET['key']) ? (string)$_GET['key'] : (string)(p_in_header('X-Proxy-Key') ?? '');
-        if (!hash_equals($cfg['proxy_key'], $key)) {
-            p_error(401, 'bad_key', 'کلید پراکسی نامعتبر است');
-        }
+    if ($cfg['proxy_key'] === '') return;
+    $key = isset($_GET['key']) ? (string)$_GET['key'] : (string)(p_in_header('X-Proxy-Key') ?? '');
+    if (!hash_equals($cfg['proxy_key'], $key)) {
+        p_error(401, 'bad_key', 'کلید پراکسی نامعتبر است');
     }
+}
 
+/** حالت رله: proxy.php?url=... */
+function p_handle_proxy(): void {
+    p_check_proxy_key();
     $url = (string)($_GET['url'] ?? '');
     if ($url === '') p_error(400, 'missing_url', 'پارامتر url ارسال نشده است؛ نمونه: ?url=https://example.com');
+    p_relay_request($url);
+}
+
+/** حالت پراکسی فوروارد: درخواست absolute-form (مقصدهای HTTP) */
+function p_handle_forward(string $absoluteUrl): void {
+    p_check_proxy_key();
+    p_relay_request($absoluteUrl);
+}
+
+/** هستهٔ مشترک رله — از هر دو حالت بالا استفاده می‌شود */
+function p_relay_request(string $url): void {
+    $cfg = $GLOBALS['CONFIG'];
 
     $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (!in_array($method, ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'], true)) {
@@ -608,6 +636,209 @@ function p_emit_response(int $status, array $headers, string $body, string $fina
 }
 
 // ---------------------------------------------------------------------
+// [۴-ب] حالت پراکسی فوروارد (CONNECT + absolute-form)
+// ---------------------------------------------------------------------
+
+/**
+ * آیا درخواست به شکل absolute-form رسیده؟
+ * این شکلِ استاندارد پراکسی فوروارد برای مقصدهای HTTP است:
+ *   GET http://example.com/page HTTP/1.1
+ */
+function p_absolute_form_target(): string {
+    $ru = (string)($_SERVER['REQUEST_URI'] ?? '');
+    if (preg_match('~^https?://~i', $ru)) return $ru;
+    return '';
+}
+
+/** احراز هویت تونل CONNECT با Proxy-Authorization یا X-Proxy-Key */
+function p_tunnel_key_ok(): bool {
+    $cfg = $GLOBALS['CONFIG'];
+    if ($cfg['proxy_key'] === '') return true;
+    $pa = (string)(p_in_header('Proxy-Authorization') ?? '');
+    if (preg_match('~^Basic\s+(.+)$~i', trim($pa), $m)) {
+        $dec = base64_decode(trim($m[1]), true);
+        if ($dec !== false) {
+            $parts = explode(':', $dec, 2);
+            $user = $parts[0] ?? '';
+            if (hash_equals($cfg['proxy_key'], $user)) return true;
+        }
+    }
+    $xk = (string)(p_in_header('X-Proxy-Key') ?? '');
+    return $xk !== '' && hash_equals($cfg['proxy_key'], $xk);
+}
+
+/**
+ * تونل CONNECT — پراکسی فوروارد برای مقصدهای HTTPS.
+ *
+ * ⚠️ این مسیر فقط وقتی کار می‌کند که درخواست CONNECT به خودِ PHP برسد.
+ * در Apache/LiteSpeed این دو خط را در .htaccess کنار proxy.php بگذارید:
+ *
+ *     RewriteEngine On
+ *     RewriteCond %{REQUEST_METHOD} ^CONNECT$
+ *     RewriteRule ^(.*)$ /proxy.php?__connect__=$1 [L]
+ *
+ * (در nginx/php-fpm معمولاً CONNECT به PHP نمی‌رسد؛ برای آن حالت‌ها از
+ *  حالت رلهٔ ?url= یا فیلد Worker اسکرپر استفاده کنید.)
+ */
+function p_connect_tunnel(): void {
+    $cfg = $GLOBALS['CONFIG'];
+    if (empty($cfg['connect_enabled'])) {
+        p_error(405, 'connect_disabled', 'CONNECT در تنظیمات غیرفعال است');
+    }
+
+    if (!p_tunnel_key_ok()) {
+        http_response_code(407);
+        header('Proxy-Authenticate: Basic realm="php-single-file-proxy"');
+        header('Content-Type: text/plain; charset=utf-8');
+        echo '407 Proxy Authentication Required';
+        exit;
+    }
+
+    // مقصد: CONNECT host:port  یا  [ipv6]:port
+    $raw = trim((string)($_GET['__connect__'] ?? $_SERVER['REQUEST_URI'] ?? ''));
+    if ($raw !== '' && $raw[0] === '/') $raw = ltrim($raw, '/');
+    if (!preg_match('~^(?:\[([^\]]+)\]|([^:\s/]+)):(\d{1,5})$~', $raw, $m)) {
+        p_error(400, 'bad_connect_target', 'قالب CONNECT باید host:port باشد');
+    }
+    $host = strtolower(trim($m[1] !== '' ? $m[1] : $m[2], '[]'));
+    $port = (int)$m[3];
+    if ($host === '' || $port < 1 || $port > 65535) {
+        p_error(400, 'bad_connect_target', 'قالب CONNECT باید host:port باشد');
+    }
+
+    // همان سیاست‌های امنیتی حالت رله
+    p_check_domain($host);
+    if (!$cfg['allow_private_ips']) p_check_ips($host);
+
+    set_time_limit(0);
+    @ini_set('zlib.output_compression', '0');
+    while (ob_get_level() > 0) @ob_end_clean();
+
+    $remote = null;
+    $via = 'direct';
+
+    // زنجیره: اگر پراکسی بالادستی http تنظیم شده، اول از آن تونل بزن
+    if ($cfg['rotate_upstream']) {
+        foreach ((array)$cfg['upstream_proxies'] as $upStr) {
+            $u = parse_url((string)$upStr);
+            if (!is_array($u) || empty($u['host']) || (strtolower($u['scheme'] ?? 'http') !== 'http')) continue;
+            $uh = $u['host'];
+            $uport = (int)($u['port'] ?? 80);
+            $sock = @stream_socket_client("tcp://{$uh}:{$uport}", $eno, $estr, (int)$cfg['connect_timeout']);
+            if (!$sock) continue;
+            stream_set_timeout($sock, 15);
+            $auth = '';
+            if (!empty($u['user'])) {
+                $auth = 'Proxy-Authorization: Basic '
+                      . base64_encode(rawurldecode($u['user']) . ':' . rawurldecode($u['pass'] ?? '')) . "\r\n";
+            }
+            $req = "CONNECT {$host}:{$port} HTTP/1.1\r\nHost: {$host}:{$port}\r\n{$auth}\r\n";
+            @fwrite($sock, $req);
+            $resp = '';
+            $deadline = microtime(true) + 15;
+            while (!feof($sock) && strpos($resp, "\r\n\r\n") === false && microtime(true) < $deadline) {
+                $piece = @fread($sock, 1024);
+                if ($piece === false || $piece === '') { usleep(20000); continue; }
+                $resp .= $piece;
+            }
+            if (preg_match('~^HTTP/\S+\s+2\d\d~', $resp)) {
+                $remote = $sock;
+                $via = 'upstream';
+                break;
+            }
+            @fclose($sock);
+        }
+    }
+
+    if ($remote === null) {
+        $remote = @stream_socket_client("tcp://{$host}:{$port}", $eno, $estr, (int)$cfg['connect_timeout']);
+        if (!$remote) {
+            http_response_code(502);
+            header('Content-Type: text/plain; charset=utf-8');
+            echo '502 Tunnel failed: ' . ($estr !== '' ? $estr : "cannot connect to {$host}:{$port}");
+            exit;
+        }
+        $via = 'direct';
+    }
+
+    // پاسخ موفقیت تونل — از این پس بایت‌ها خام پمپ می‌شوند
+    header('HTTP/1.1 200 Connection Established');
+    header('X-Tunnel-Via: ' . $via);
+    header('Proxy-Agent: php-single-file-proxy/' . PROXY_VERSION);
+    header('Connection: keep-alive');
+    @ob_end_flush();
+    flush();
+
+    $chunk = 65536;
+    $maxIdle = max(10, (int)($cfg['tunnel_idle_timeout'] ?? 120));
+    stream_set_timeout($remote, 30);
+    stream_set_blocking($remote, false);
+
+    $in = @fopen('php://input', 'rb');
+    if ($in) @stream_set_blocking($in, false);
+
+    $idle = 0.0;
+    $last = microtime(true);
+    $running = true;
+
+    while ($running) {
+        if (connection_aborted()) break;
+        $now = microtime(true);
+        $idle += ($now - $last);
+        $last = $now;
+        if ($idle > $maxIdle) break;
+
+        $busy = false;
+
+        // ۱) مقصد → کلاینت
+        $r = [$remote]; $w = null; $e = null;
+        $n = @stream_select($r, $w, $e, 0, 50000);
+        if ($n === false) break;
+        if ($n > 0) {
+            $out = @fread($remote, $chunk);
+            if ($out !== false && $out !== '') {
+                echo $out;
+                flush();
+                $busy = true;
+            } elseif (feof($remote)) {
+                break;
+            }
+        }
+
+        // ۲) کلاینت → مقصد
+        if ($in) {
+            $data = @fread($in, $chunk);
+            if ($data !== false && $data !== '') {
+                $off = 0;
+                $len = strlen($data);
+                $giveup = microtime(true) + 10;
+                while ($off < $len) {
+                    $wrote = @fwrite($remote, substr($data, $off));
+                    if ($wrote === false || $wrote === 0) {
+                        if (microtime(true) > $giveup) { $running = false; break; }
+                        usleep(10000);
+                        continue;
+                    }
+                    $off += $wrote;
+                }
+                $busy = true;
+            } elseif (feof($in)) {
+                // بدنهٔ درخواست تمام شد — ممکن است کلاینت هنوز برای پاسخ صبر کند
+                fclose($in);
+                $in = null;
+            }
+        }
+
+        if ($busy) $idle = 0.0;
+        else usleep(10000);
+    }
+
+    if ($in) fclose($in);
+    if (is_resource($remote)) fclose($remote);
+    exit;
+}
+
+// ---------------------------------------------------------------------
 // [۵] داشبورد راهنما
 // ---------------------------------------------------------------------
 
@@ -719,6 +950,7 @@ a { color:var(--acc); }
 <li>لیست سفید/سیاه دامنه‌ها با پشتیبانی از الگوی <code>*.domain.com</code></li>
 <li>چرخش خودکار بین پراکسی‌های بالادستی (http و socks5) و تلاش مجدد روی خطاهای ۴۰۳/۴۲۹/۵۰۳</li>
 <li>فالبک خودکار به ورکر کلودفلر در صورت شکست اتصال به مقصد (قابل تغییر در تنظیمات)</li>
+<li>حالت پراکسی فوروارد: CONNECT برای HTTPS و absolute-form برای HTTP — قابل استفاده در فیلد پروکسی اسکرپر</li>
 <li>ریدایرکت‌ها به‌صورت امن دنبال می‌شوند و هر پرش دوباره اعتبارسنجی می‌شود</li>
 <li>رمزگشایی خودکار gzip / deflate / brotli — کش فایلی اختیاری — تزریق <code>&lt;base&gt;</code> برای لینک‌های نسبی</li>
 </ul>
@@ -772,6 +1004,8 @@ function p_info(): void {
         'blocked_count'    => count($cfg['blocked_domains']),
         'private_ips'      => (bool)$cfg['allow_private_ips'],
         'auth_required'    => $cfg['proxy_key'] !== '',
+        'connect_enabled'  => (bool)($cfg['connect_enabled'] ?? true),
+        'fallback_worker'  => p_fallback_url($cfg) !== '' ? p_fallback_url($cfg) : null,
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -781,7 +1015,8 @@ function p_info(): void {
 // ---------------------------------------------------------------------
 
 // حالت روتر php -S: فایل‌های استاتیک موجود را مستقیم سرو کن
-if (PHP_SAPI === 'cli-server') {
+// (فقط مسیرهای محلی؛ درخواست‌های absolute-form پراکسی فوروارد را رد نمی‌کنیم)
+if (PHP_SAPI === 'cli-server' && strpos((string)($_SERVER['REQUEST_URI'] ?? ''), 'http') !== 0) {
     $staticPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
     if ($staticPath !== '/' && $staticPath !== '/proxy.php' && $staticPath !== '/index.php'
         && is_file(__DIR__ . $staticPath)) {
@@ -789,13 +1024,27 @@ if (PHP_SAPI === 'cli-server') {
     }
 }
 
-if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') {
+$pReqMethod = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+
+if ($pReqMethod === 'OPTIONS') {
     header('Access-Control-Allow-Origin: *');
     header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS');
     header('Access-Control-Allow-Headers: *');
     header('Access-Control-Max-Age: 86400');
     http_response_code(204);
     exit;
+}
+
+// پراکسی فوروارد: CONNECT برای مقصدهای HTTPS
+if ($pReqMethod === 'CONNECT') {
+    p_connect_tunnel();
+}
+
+// پراکسی فوروارد: درخواست absolute-form برای مقصدهای HTTP
+// (مثل: GET http://example.com/page HTTP/1.1)
+$pAbsolute = p_absolute_form_target();
+if ($pAbsolute !== '') {
+    p_handle_forward($pAbsolute);
 }
 
 if (isset($_GET['info'])) {
