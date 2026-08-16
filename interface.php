@@ -40,6 +40,21 @@ const PROVIDER_TEST_URLS = [
     'Cohere' => 'https://api.cohere.com/v1/models',
 ];
 
+// Fixed destinations for the live "hi" model tester. API keys are accepted per
+// request from the browser and are never written to disk or session storage.
+const AI_TEST_PROVIDERS = [
+    'worker' => ['name' => 'Cloudflare Worker', 'url' => 'https://ai.fazilat-ma.workers.dev/v1/chat/completions'],
+    'openrouter' => ['name' => 'OpenRouter', 'url' => 'https://openrouter.ai/api/v1/chat/completions'],
+    'together' => ['name' => 'Together AI', 'url' => 'https://api.together.xyz/v1/chat/completions'],
+    'groq' => ['name' => 'Groq', 'url' => 'https://api.groq.com/openai/v1/chat/completions'],
+    'huggingface' => ['name' => 'Hugging Face', 'url' => 'https://router.huggingface.co/v1/chat/completions'],
+    'gemini' => ['name' => 'Google Gemini', 'url' => 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'],
+    'cerebras' => ['name' => 'Cerebras', 'url' => 'https://api.cerebras.ai/v1/chat/completions'],
+    'mistral' => ['name' => 'Mistral', 'url' => 'https://api.mistral.ai/v1/chat/completions'],
+    'cohere' => ['name' => 'Cohere', 'url' => 'https://api.cohere.com/compatibility/v1/chat/completions'],
+    'cloudflare' => ['name' => 'Cloudflare Workers AI', 'url' => 'https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{model}'],
+];
+
 /**
  * Secure transparent HTTP proxy for PHP 8+ / cURL.
  *
@@ -293,14 +308,14 @@ function renderDashboard(array $allowedHosts): void
 </head>
 <body><div class="orb o1"></div><div class="orb o2"></div><main class="wrap">
 <header class="top"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8"><path d="M8 12h8M13 7l5 5-5 5"/><path d="M6 19a9 9 0 1 1 0-14"/></svg></div><div><h1>درگاه ارتباط API</h1><p>بررسی دسترسی خروجی سرور پارس‌پک به سرویس‌های خارجی</p></div></div><button class="badge tablink" data-tab="files">مدیریت فایل‌ها ←</button></header>
-<nav class="tabs"><button class="tab active" data-tab="proxy">بررسی دسترسی API</button><button class="tab" data-tab="files">فایل‌منیجر</button></nav><div id="proxyPanel" class="pagepanel">
+<nav class="tabs"><button class="tab active" data-tab="proxy">بررسی دسترسی API</button><button class="tab" data-tab="models">تست زنده مدل‌ها</button><button class="tab" data-tab="files">فایل‌منیجر</button></nav><div id="proxyPanel" class="pagepanel">
 <section class="grid"><div class="card main"><div class="labelrow"><label for="urls">آدرس‌های مورد نظر</label><span class="hint">حداکثر ۱۰ آدرس، هر کدام در یک خط</span></div><textarea id="urls" spellcheck="false" placeholder="https://api.example.com/health&#10;https://your-worker.workers.dev/"></textarea><div class="actions"><button class="btn primary" id="check">بررسی دسترسی</button><button class="btn ghost" id="providers">تست همه ارائه‌دهندگان</button><button class="btn ghost" id="clear">پاک‌کردن</button></div><div class="results" id="results"><div class="empty">نتیجه بررسی آدرس‌ها در این قسمت نمایش داده می‌شود.</div></div></div>
 <aside class="card side"><h2>دامنه‌های مجاز</h2><p>مقصدهای مجاز پروکسی در ابتدای فایل</p><div class="rules" id="rules"></div><div class="divider"></div><div class="mini"><div class="stat"><b id="success">۰</b><span>قابل دسترسی</span></div><div class="stat"><b id="failed">۰</b><span>ناموفق / غیرمجاز</span></div></div><div class="divider"></div><p>این آزمایش از داخل سرور انجام می‌شود؛ بنابراین نتیجه، دسترسی واقعی PaaS به مقصد را نشان می‌دهد. پاسخ‌های HTTP مانند 401 یا 403 نیز یعنی ارتباط شبکه برقرار شده است.</p></aside></section>
-<section class="card docs"><h2>نمونه استفاده از پروکسی</h2><code>GET /proxy.php?url=https%3A%2F%2Fapi.example.com%2Fv1%2Fstatus</code></section></div><section id="filesPanel" class="pagepanel filepanel" hidden><iframe id="fileFrame" title="مدیریت فایل‌ها" data-src="?panel=files"></iframe></section></main><div class="toast" id="toast"></div>
+<section class="card docs"><h2>نمونه استفاده از پروکسی</h2><code>GET /proxy.php?url=https%3A%2F%2Fapi.example.com%2Fv1%2Fstatus</code></section></div><section id="modelsPanel" class="pagepanel filepanel" hidden><iframe id="modelsFrame" title="تست زنده مدل‌های هوش مصنوعی" data-src="?panel=models"></iframe></section><section id="filesPanel" class="pagepanel filepanel" hidden><iframe id="fileFrame" title="مدیریت فایل‌ها" data-src="?panel=files"></iframe></section></main><div class="toast" id="toast"></div>
 <script>
 const rules=__RULES__;const providerUrls=__PROVIDERS__;const $=s=>document.querySelector(s);const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 $('#rules').innerHTML=rules.map(x=>`<span class="chip">${esc(x)}</span>`).join('');
-function switchTab(name){const files=name==='files';$('#proxyPanel').hidden=files;$('#filesPanel').hidden=!files;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(files){const f=$('#fileFrame');if(!f.getAttribute('src'))f.src=f.dataset.src;location.hash='files'}else{history.replaceState(null,'',location.pathname+location.search)}}document.querySelectorAll('[data-tab]').forEach(x=>x.addEventListener('click',()=>switchTab(x.dataset.tab)));if(location.hash==='#files')switchTab('files');
+function switchTab(name){const files=name==='files',models=name==='models';$('#proxyPanel').hidden=files||models;$('#filesPanel').hidden=!files;$('#modelsPanel').hidden=!models;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(files||models){const f=$(files?'#fileFrame':'#modelsFrame');if(!f.getAttribute('src'))f.src=f.dataset.src;location.hash=name}else{history.replaceState(null,'',location.pathname+location.search)}}document.querySelectorAll('[data-tab]').forEach(x=>x.addEventListener('click',()=>switchTab(x.dataset.tab)));if(location.hash==='#files')switchTab('files');else if(location.hash==='#models')switchTab('models');
 function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),2400)}
 $('#providers').onclick=()=>{$('#urls').value=Object.values(providerUrls).join('\n');$('#check').click()};
 $('#clear').onclick=()=>{$('#urls').value='';$('#results').innerHTML='<div class="empty">نتیجه بررسی آدرس‌ها در این قسمت نمایش داده می‌شود.</div>';$('#success').textContent='۰';$('#failed').textContent='۰'};
@@ -312,6 +327,127 @@ HTML;
         [$rulesJson ?: '[]', $providerUrlsJson ?: '{}'],
         $html
     );
+}
+
+// ---------- Live AI model tester ----------
+function aiTestOne(array $input): array
+{
+    $providerId = is_string($input['provider'] ?? null) ? $input['provider'] : '';
+    $model = is_string($input['model'] ?? null) ? trim($input['model']) : '';
+    $apiKey = is_string($input['apiKey'] ?? null) ? trim($input['apiKey']) : '';
+    $account = is_string($input['accountId'] ?? null) ? trim($input['accountId']) : '';
+    if (!isset(AI_TEST_PROVIDERS[$providerId])) throw new RuntimeException('ارائه‌دهنده معتبر نیست.');
+    if ($model === '' || strlen($model) > 220 || !preg_match('#^[A-Za-z0-9@._:/~+-]+$#', $model)) throw new RuntimeException('شناسه مدل معتبر نیست.');
+    if (strlen($apiKey) > 1024) throw new RuntimeException('کلید API بیش از حد طولانی است.');
+    if ($providerId !== 'worker' && $apiKey === '') throw new RuntimeException('کلید API وارد نشده است.');
+
+    $provider = AI_TEST_PROVIDERS[$providerId];
+    $url = $provider['url'];
+    if ($providerId === 'cloudflare') {
+        if (!preg_match('/^[a-fA-F0-9]{32}$/', $account)) throw new RuntimeException('Account ID کلودفلر معتبر نیست.');
+        $url = str_replace(['{account}', '{model}'], [$account, $model], $url);
+    }
+    $parts = parse_url($url);
+    $host = strtolower((string) ($parts['host'] ?? ''));
+    $ips = resolvePublicIps($host);
+    if ($host === '' || $ips === []) throw new RuntimeException('مقصد به IP عمومی معتبر resolve نشد.');
+    $ip = $ips[array_rand($ips)];
+    $resolveAddress = str_contains($ip, ':') ? '[' . $ip . ']' : $ip;
+    $payload = $providerId === 'cloudflare'
+        ? ['messages' => [['role' => 'user', 'content' => 'hi']], 'max_tokens' => 8]
+        : ['model' => $model, 'messages' => [['role' => 'user', 'content' => 'hi']], 'max_tokens' => 8, 'stream' => false];
+    $headers = ['Content-Type: application/json', 'Accept: application/json'];
+    if ($apiKey !== '') $headers[] = 'Authorization: Bearer ' . $apiKey;
+
+    $responseHeaders = [];
+    $started = microtime(true);
+    $ch = curl_init($url);
+    if ($ch === false) throw new RuntimeException('راه‌اندازی cURL ناموفق بود.');
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        CURLOPT_HTTPHEADER => $headers,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 12,
+        CURLOPT_TIMEOUT => 60,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
+        CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+        CURLOPT_RESOLVE => [$host . ':443:' . $resolveAddress],
+        CURLOPT_USERAGENT => 'ParsPack-AI-Model-Tester/1.0',
+        CURLOPT_HEADERFUNCTION => static function ($ch, string $line) use (&$responseHeaders): int {
+            $pos = strpos($line, ':');
+            if ($pos !== false) $responseHeaders[strtolower(trim(substr($line, 0, $pos)))] = trim(substr($line, $pos + 1));
+            return strlen($line);
+        },
+    ]);
+    $body = curl_exec($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+    $latency = (int) round((microtime(true) - $started) * 1000);
+    if ($body === false) throw new RuntimeException($error !== '' ? $error : 'پاسخی دریافت نشد.');
+    $decoded = json_decode($body, true);
+    $answer = '';
+    if (is_array($decoded)) {
+        $candidate = $decoded['choices'][0]['message']['content'] ?? $decoded['result']['response'] ?? $decoded['result']['choices'][0]['message']['content'] ?? $decoded['error']['message'] ?? $decoded['message'] ?? '';
+        if (is_scalar($candidate)) $answer = (string) $candidate;
+    }
+    $excerpt = $answer !== '' ? $answer : trim(strip_tags($body));
+    if (function_exists('mb_substr')) $excerpt = mb_substr($excerpt, 0, 700); else $excerpt = substr($excerpt, 0, 700);
+    return [
+        'ok' => $status >= 200 && $status < 300,
+        'provider' => $providerId,
+        'providerName' => $provider['name'],
+        'model' => $model,
+        'status' => $status ?: null,
+        'latencyMs' => $latency,
+        'rateLimited' => $status === 429,
+        'response' => $excerpt,
+        'requestId' => $responseHeaders['x-request-id'] ?? $responseHeaders['cf-ray'] ?? null,
+    ];
+}
+
+function renderModelTester(): void
+{
+    $providers = [];
+    foreach (AI_TEST_PROVIDERS as $id => $p) $providers[$id] = $p['name'];
+    $providersJson = json_encode($providers, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
+    header('Content-Type: text/html; charset=utf-8');
+    header('Cache-Control: no-store');
+    $html = <<<'HTML'
+<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>تست زنده مدل‌ها</title><style>
+:root{--bg:#07111e;--card:#0e1d31e8;--line:#94a3b829;--text:#edf5ff;--muted:#91a5bf;--blue:#469fff;--cyan:#2bd8c0;--green:#35d38e;--red:#ff667d;--amber:#f5bb52}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 8% 0,#1764d326,transparent 28%),var(--bg);color:var(--text);font-family:Tahoma,"Segoe UI",sans-serif}.wrap{width:min(1320px,calc(100% - 24px));margin:auto;padding:24px 0 50px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;box-shadow:0 20px 65px #0005}.head{display:flex;justify-content:space-between;gap:15px;align-items:center;margin-bottom:16px}.head h1{font-size:21px;margin:0}.head p,.note{font-size:11px;color:var(--muted);margin:3px 0}.setup{padding:18px;display:grid;grid-template-columns:1.15fr .85fr;gap:16px}.label{font-size:12px;font-weight:bold;margin-bottom:7px}textarea{width:100%;height:170px;resize:vertical;border:1px solid var(--line);background:#071321;color:#dcecff;border-radius:14px;padding:12px;outline:none;font:11px/1.8 Consolas;direction:ltr;text-align:left}.keys{display:grid;grid-template-columns:1fr 1fr;gap:8px;max-height:220px;overflow:auto;padding-left:3px}.field{background:#07132199;border:1px solid var(--line);border-radius:12px;padding:8px}.field label{display:block;font-size:10px;color:var(--muted);margin-bottom:4px}.field input{width:100%;border:0;outline:0;background:transparent;color:white;font:11px Consolas;direction:ltr}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.btn{border:1px solid var(--line);background:#ffffff0b;color:white;border-radius:11px;padding:10px 13px;font:11px Tahoma;cursor:pointer}.btn.primary{border:0;background:linear-gradient(120deg,#287fea,#1db8c8);font-weight:bold}.btn.danger{color:#ff9ca9}.btn:disabled{opacity:.5;cursor:wait}.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:14px 0}.stat{padding:12px 14px}.stat b{display:block;font-size:20px}.stat span{font-size:10px;color:var(--muted)}.progress{height:5px;background:#ffffff0a;border-radius:9px;overflow:hidden;margin-top:8px}.bar{height:100%;width:0;background:linear-gradient(90deg,var(--blue),var(--cyan));transition:.2s}.tablecard{overflow:hidden}.tablewrap{overflow:auto;max-height:680px}table{width:100%;min-width:920px;border-collapse:collapse}th{position:sticky;top:0;z-index:2;background:#102139;text-align:right;padding:12px;font-size:10px;color:var(--muted);border-bottom:1px solid var(--line)}td{padding:11px 12px;border-bottom:1px solid #94a3b812;font-size:11px;vertical-align:top}tr:hover td{background:#ffffff05}.model{font:11px Consolas;direction:ltr;text-align:left;max-width:300px;overflow-wrap:anywhere}.pill{display:inline-block;padding:3px 7px;border-radius:99px;font-size:9px}.pending{background:#94a3b81b;color:#b7c6d8}.running{background:#469fff1b;color:#8dc8ff}.ok{background:#35d38e1b;color:#78e8ad}.bad{background:#ff667d1b;color:#ff9cab}.warn{background:#f5bb521b;color:#ffd581}.response{max-width:390px;color:#aebed2;white-space:pre-wrap;overflow-wrap:anywhere}.empty{text-align:center;padding:50px;color:var(--muted)}.file{display:none}@media(max-width:820px){.setup{grid-template-columns:1fr}.keys{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}.head{align-items:flex-start}}
+</style></head><body><main class="wrap"><header class="head"><div><h1>آزمایش زنده مدل‌های هوش مصنوعی</h1><p>برای هر مدل، پیام ثابت «hi» با حداکثر ۸ توکن خروجی و به‌صورت ترتیبی ارسال می‌شود.</p></div><span class="pill running">کلیدها ذخیره نمی‌شوند</span></header><section class="card setup"><div><div class="label">تنظیمات ارائه‌دهندگان را Paste یا فایل JSON را انتخاب کنید</div><textarea id="config" placeholder='{"groq":{"id":"groq","models":[{"id":"llama-3.1-8b-instant"}]}}'></textarea><div class="actions"><button class="btn" id="parse">استخراج مدل‌ها</button><button class="btn" id="fileBtn">انتخاب JSON</button><input class="file" id="file" type="file" accept="application/json,.json"><button class="btn danger" id="clear">پاک‌کردن نتایج</button></div><p class="note">کلیدهای apiKey موجود در JSON عمداً نادیده گرفته می‌شوند. کلیدهای Rotate‌شده را در سمت چپ وارد کنید.</p></div><div><div class="label">کلیدهای موقت این اجرا</div><div class="keys" id="keys"></div><div class="actions"><button class="btn primary" id="start" disabled>شروع تست ترتیبی</button><button class="btn danger" id="stop" disabled>توقف</button></div></div></section><section class="stats"><div class="card stat"><b id="total">۰</b><span>کل مدل‌ها</span></div><div class="card stat"><b id="done">۰</b><span>انجام‌شده</span></div><div class="card stat"><b id="success">۰</b><span>موفق</span></div><div class="card stat"><b id="failed">۰</b><span>ناموفق</span></div><div class="card stat"><b id="avg">—</b><span>میانگین تأخیر</span></div></section><div class="progress"><div class="bar" id="bar"></div></div><section class="card tablecard"><div class="tablewrap"><table><thead><tr><th>#</th><th>ارائه‌دهنده</th><th>مدل</th><th>وضعیت</th><th>HTTP</th><th>تأخیر</th><th>پاسخ / خطا</th></tr></thead><tbody id="rows"><tr><td colspan="7" class="empty">ابتدا فایل تنظیمات مدل‌ها را وارد کنید.</td></tr></tbody></table></div></section></main><script>
+const providers=__PROVIDERS__,badIds=new Set(['code','li','strong','tbody','td','th','thead','tr','ul','left','true','object','component','pricing','sup','preview-models','production-models','model-compression','frequently-asked-questions']);let jobs=[],stopped=false,running=false,stats={done:0,ok:0,lat:0};const $=s=>document.querySelector(s),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+$('#keys').innerHTML=Object.entries(providers).map(([id,n])=>`<div class="field"><label>${esc(n)} API Key</label><input type="password" data-key="${id}" autocomplete="off" placeholder="کلید جدید"></div>`).join('')+`<div class="field"><label>Cloudflare Account ID</label><input type="text" id="account" autocomplete="off" placeholder="32 hex characters"></div>`;
+function nfa(n){return Number(n).toLocaleString('fa-IR')}function validModel(x){return typeof x==='string'&&x.length>0&&x.length<=220&&/^[A-Za-z0-9@._:/~+-]+$/.test(x)&&!badIds.has(x)}function render(){stats={done:0,ok:0,lat:0};$('#total').textContent=nfa(jobs.length);$('#done').textContent=$('#success').textContent=$('#failed').textContent='۰';$('#avg').textContent='—';$('#bar').style.width='0';$('#rows').innerHTML=jobs.length?jobs.map((j,i)=>`<tr id="r${i}"><td>${nfa(i+1)}</td><td>${esc(providers[j.provider]||j.provider)}</td><td class="model">${esc(j.model)}</td><td class="state"><span class="pill pending">در انتظار</span></td><td class="http">—</td><td class="lat">—</td><td class="response">—</td></tr>`).join(''):'<tr><td colspan="7" class="empty">مدل معتبری پیدا نشد.</td></tr>';$('#start').disabled=!jobs.length}
+function parseConfig(){try{const cfg=JSON.parse($('#config').value),out=[],seen=new Set;for(const [key,p] of Object.entries(cfg)){if(!p||key==='ollama')continue;const id=providers[key]?key:(providers[p.id]?p.id:null);if(!id)continue;for(const m of Array.isArray(p.models)?p.models:[]){const model=typeof m==='string'?m:m?.id;if(!validModel(model))continue;const k=id+'|'+model;if(!seen.has(k)){seen.add(k);out.push({provider:id,model})}}}jobs=out;render()}catch(e){alert('JSON معتبر نیست: '+e.message)}}
+$('#parse').onclick=parseConfig;$('#fileBtn').onclick=()=>$('#file').click();$('#file').onchange=async e=>{const f=e.target.files[0];if(f){$('#config').value=await f.text();parseConfig()}};$('#clear').onclick=()=>{jobs=[];render();$('#config').value=''};$('#stop').onclick=()=>{stopped=true;$('#stop').disabled=true};
+async function test(job){const key=$(`[data-key="${job.provider}"]`)?.value||'';const account=$('#account').value.trim();const r=await fetch('?panel=models&ai_action=test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...job,apiKey:key,accountId:account})});const d=await r.json();if(!r.ok)throw new Error(d.message||'خطای سرور');return d}
+$('#start').onclick=async()=>{if(running)return;if(!confirm(`${jobs.length} درخواست API به‌صورت ترتیبی ارسال شود؟ این عملیات ممکن است هزینه داشته باشد.`))return;running=true;stopped=false;$('#start').disabled=true;$('#stop').disabled=false;for(let i=0;i<jobs.length&&!stopped;i++){const row=$(`#r${i}`);row.querySelector('.state').innerHTML='<span class="pill running">در حال تست</span>';row.scrollIntoView({block:'nearest'});try{const d=await test(jobs[i]);const cls=d.ok?'ok':(d.status===429?'warn':'bad');row.querySelector('.state').innerHTML=`<span class="pill ${cls}">${d.ok?'موفق':d.rateLimited?'محدود':'ناموفق'}</span>`;row.querySelector('.http').textContent=d.status||'—';row.querySelector('.lat').textContent=d.latencyMs+' ms';row.querySelector('.response').textContent=(d.response||'پاسخ خالی')+(d.requestId?'\nRequest ID: '+d.requestId:'');stats.ok+=d.ok?1:0;stats.lat+=d.latencyMs}catch(e){row.querySelector('.state').innerHTML='<span class="pill bad">خطا</span>';row.querySelector('.response').textContent=e.message}stats.done++;$('#done').textContent=nfa(stats.done);$('#success').textContent=nfa(stats.ok);$('#failed').textContent=nfa(stats.done-stats.ok);$('#avg').textContent=stats.done?Math.round(stats.lat/stats.done)+' ms':'—';$('#bar').style.width=(stats.done/jobs.length*100)+'%'}running=false;$('#stop').disabled=true;$('#start').disabled=false};
+</script></body></html>
+HTML;
+    echo str_replace('__PROVIDERS__', $providersJson ?: '{}', $html);
+}
+
+function handleModelTester(): void
+{
+    $action = isset($_GET['ai_action']) && is_string($_GET['ai_action']) ? $_GET['ai_action'] : '';
+    if ($action === '') {
+        renderModelTester();
+        exit;
+    }
+    if ($action !== 'test' || ($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fmJson(['ok' => false, 'message' => 'درخواست معتبر نیست.'], 405);
+    $raw = file_get_contents('php://input', false, null, 0, 8193);
+    $input = is_string($raw) ? json_decode($raw, true) : null;
+    if (!is_array($input) || strlen((string) $raw) > 8192) fmJson(['ok' => false, 'message' => 'ورودی معتبر نیست.'], 422);
+    try {
+        fmJson(aiTestOne($input));
+    } catch (Throwable $e) {
+        fmJson(['ok' => false, 'message' => $e->getMessage()], 400);
+    }
 }
 
 // ---------- Password-protected file manager ----------
@@ -666,6 +802,11 @@ if (isset($_GET['panel']) && $_GET['panel'] === 'files') {
 
 if (!extension_loaded('curl')) {
     sendJsonError(500, 'curl_missing', 'افزونه cURL روی PHP فعال نیست.');
+}
+
+if (isset($_GET['panel']) && $_GET['panel'] === 'models') {
+    handleModelTester();
+    exit;
 }
 
 $allowedHosts = array_values(array_filter(array_map('trim', PROXY_TARGET_HOSTS)));
