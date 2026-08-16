@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.59';
+const APP_VERSION = '9.60';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12121,6 +12121,17 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'function sxDownloadAll') !== false
          && strpos($selfSrc, 'function sxRestoreAll') !== false);
 
+    /* ---------- v9.60: تب‌بندیِ بخش هوش مصنوعی ---------- */
+    $add('9.60', 'بخش هوش مصنوعی تب‌دار شده است (ارائه‌دهنده/تست/مدل/کاندید/اتصال)',
+         strpos($selfSrc, 'function aiTab(tab)') !== false
+         && strpos($selfSrc, 'data-ai-panel') !== false
+         && strpos($selfSrc, 'ai-tab-btn') !== false
+         && strpos($selfSrc, 'ai-tabs-open') !== false);
+    $add('9.60', 'پنج تب برای دسترسی آسان به همهٔ بخش‌های هوش مصنوعی',
+         substr_count($selfSrc, 'data-ai-tab=') >= 5
+         && strpos($selfSrc, '🏆 کاندید + مستر') !== false
+         && strpos($selfSrc, '🌐 اتصال') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -21511,6 +21522,8 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 .bsl-tabs{display:flex;gap:2px;padding:0 12px;background:#1e293b;border-bottom:1px solid #334155;flex-wrap:wrap;direction:rtl}.bsl-tab{padding:6px 12px;font-size:11px;color:#94a3b8;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap;border-radius:6px 6px 0 0}.bsl-tab:hover{color:#e2e8f0;background:#334155}.bsl-tab.active{color:#67e8f9;border-bottom-color:#67e8f9;background:#0f172a;font-weight:700}.bsl-tab .tab-count{font-size:9px;color:#64748b;margin-right:2px}.hamburger-btn{position:fixed;top:10px;left:10px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.hamburger-btn:hover{background:#334155}
 .hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:1;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}
 .smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}.live-cnt{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:8px 0}.live-cnt .lc{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;cursor:pointer;transition:.15s;display:flex;flex-direction:column;gap:1px}
+/* v9.60: تب‌های بخش هوش مصنوعی */
+.smenu-body.open.ai-tabs-open{max-height:4000px}.ai-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;border-bottom:1px solid #334155;padding-bottom:6px;direction:rtl}.ai-tab-btn{padding:7px 12px;font-size:11px;color:#94a3b8;background:#111c31;border:1px solid #334155;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap;flex:1;min-width:80px;text-align:center}.ai-tab-btn:hover{background:#1e293b;color:#e2e8f0}.ai-tab-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6;font-weight:700}.ai-tab-panel{display:none}.ai-tab-panel.active{display:block}
 .live-cnt .lc:hover{background:#1e293b;transform:translateY(-1px)}.live-cnt .lc b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.live-cnt .lc span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.live-cnt .lc i{font-size:9px;font-style:normal;font-family:ui-monospace,monospace}@media(max-width:620px){.live-cnt{grid-template-columns:repeat(3,1fr)}}.pdir{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700}.pdir-up{background:#7f1d1d;color:#fca5a5}.pdir-down{background:#14532d;color:#86efac}.pdir-same{background:#334155;color:#94a3b8}.app-ver{display:inline-block;background:#0f172a;border:1px solid #334155;color:#67e8f9;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;font-family:ui-monospace,monospace;cursor:pointer;transition:.15s;vertical-align:middle}
 .app-ver:hover{border-color:#67e8f9;background:#0e749020}.app-ver.upd{border-color:#f59e0b;color:#fbbf24;background:#42200630;animation:verPulse 2s ease-in-out infinite}@keyframes verPulse{0%,100%{opacity:1}50%{opacity:.55}}.vc-drop{position:absolute;top:100%;left:0;right:0;background:#0f172a;border:1px solid #475569;border-radius:8px;max-height:220px;overflow-y:auto;z-index:60;display:none;margin-top:3px;box-shadow:0 6px 18px rgba(0,0,0,.5)}.vc-drop.open{display:block}.vc-opt{padding:8px 10px;cursor:pointer;font-size:11px;font-family:monospace;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;gap:8px;direction:ltr;text-align:left}.vc-opt:last-child{border-bottom:none}.vc-opt:hover{background:#1e3a5f}.vc-opt .vc-meta{color:#64748b;font-size:10px;flex:0 0 auto}.vc-drop .vc-none{padding:10px;color:#64748b;font-size:11px;text-align:center}
 .pbadge{display:inline-block;font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:4px;vertical-align:middle}.pb-new{background:#14532d;color:#86efac}.pb-chg{background:#78350f;color:#fcd34d}.rf-btn{background:#1e293b;border:1px solid #334155;color:#94a3b8;font-size:11px;font-family:inherit;padding:5px 10px;border-radius:6px;cursor:pointer;transition:.15s}.rf-btn:hover{background:#334155}.rf-btn.on{background:#1e3a5f;border-color:#3b82f6;color:#93c5fd;font-weight:700}.product.is-new{border-color:#22c55e}.product.is-chg{border-color:#f59e0b}.p2-card{border:1px solid #475569;border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#0f172a}.p2-card.p2-ok{border-color:#22c55e;background:#14532d33}.p2-card.p2-err{border-color:#ef4444;background:#7f1d1d26}.p2-title{font-size:12.5px;font-weight:700;color:#e2e8f0;margin-bottom:3px;line-height:1.6}
@@ -21826,12 +21839,19 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🤖 هوش مصنوعی</h3><span class="cst off" id="aiS">غیرمتصل</span><span class="arrow">▼</span></div>
-<div class="smenu-body">
-<!-- v9.20: چند-ارائه‌دهنده — درون‌ریزی JSON، انتخاب مدل فعال، تست همه -->
-<!-- v9.58: بازآرایی مفهومی/بصری — بخش‌بندی منطقی: ارائه‌دهنده → تست → کاندید → اتصال -->
+<div class="smenu-body ai-tabs-open">
+<!-- v9.60: بخش هوش مصنوعی به صورت تب‌دار — هر قابلیت در تب خودش -->
+<div class="ai-tabs">
+<div class="ai-tab-btn active" data-ai-tab="providers" onclick="aiTab('providers')">🧠 ارائه‌دهنده‌ها</div>
+<div class="ai-tab-btn" data-ai-tab="test" onclick="aiTab('test')">🧪 تست مدل‌ها</div>
+<div class="ai-tab-btn" data-ai-tab="models" onclick="aiTab('models')">📋 مدل‌ها</div>
+<div class="ai-tab-btn" data-ai-tab="candidates" onclick="aiTab('candidates')">🏆 کاندید + مستر</div>
+<div class="ai-tab-btn" data-ai-tab="net" onclick="aiTab('net')">🌐 اتصال</div>
+</div>
 
-<!-- ══ بخش ۱: ارائه‌دهنده‌ها ══ -->
-<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px">
+<!-- ══ تب ۱: ارائه‌دهنده‌ها ══ -->
+<div class="ai-tab-panel active" data-ai-panel="providers">
+<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px">
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🧠 ارائه‌دهنده‌ها (Providers)</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
 فهرست ارائه‌دهنده‌ها (Ollama، OpenRouter، Groq، Hugging Face و...) را به‌صورت فایل JSON درون‌ریزی کنید.
@@ -21852,9 +21872,11 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>مدل فعال:</label>
 <select id="aiModelSel" onchange="aiSelectModel()" style="flex:1"><option value="">—</option></select></div>
 </div>
+</div>
 
-<!-- ══ بخش ۲: تست مدل‌ها ══ -->
-<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px">
+<!-- ══ تب ۲: تست مدل‌ها ══ -->
+<div class="ai-tab-panel" data-ai-panel="test">
+<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px">
 <div style="font-size:11px;color:#67e8f9;font-weight:700;margin-bottom:6px">🧪 تست مدل‌ها</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
 همهٔ مدل‌های فعال را با یک پیام و یک عنوانِ محصول برای دسته‌بندی آزمایش کنید تا «در دسترس» بودن و پاسخِ هرکدام مشخص شود.
@@ -21878,18 +21900,22 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 <button class="btn btn-blue" onclick="aiShowTestTable()" style="flex:1" title="باز کردن جدولِ نتایجِ تست بدون شروعِ تستِ تازه">📊 نمایش جدول</button>
 </div>
 </div>
+</div>
 
-<!-- ══ بخش ۳: مدل‌های ارائه‌دهندهٔ انتخابی ══ -->
-<div style="margin-bottom:10px">
+<!-- ══ تب ۳: مدل‌های ارائه‌دهندهٔ انتخاب‌شده ══ -->
+<div class="ai-tab-panel" data-ai-panel="models">
+<div style="margin-bottom:6px">
 <div style="font-size:11px;color:#94a3b8;font-weight:700;margin-bottom:6px">📋 مدل‌های ارائه‌دهندهٔ انتخاب‌شده</div>
 <div id="aiModelsList" style="max-height:260px;overflow-y:auto;border:1px solid #334155;border-radius:6px;background:#0f172a;margin-bottom:6px">
 <div style="padding:8px;color:#64748b;font-size:11px">هنوز ارائه‌دهنده‌ای درون‌ریزی نشده.</div>
 </div>
 <div id="aiUseInfo" style="font-size:10.5px;color:#94a3b8;line-height:1.8;padding:6px 8px;background:#111c31;border:1px solid #1e293b;border-radius:6px"></div>
 </div>
+</div>
 
-<!-- v9.38: مدل‌های کاندید + مدل مستر -->
-<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px">
+<!-- ══ تب ۴: مدل‌های کاندید + مستر ══ -->
+<div class="ai-tab-panel" data-ai-panel="candidates">
+<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px">
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🏆 مدل‌های کاندید + مدل مستر</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:6px;line-height:1.7">
 چند مدل کاندید برای <b>دسته‌بندی</b> و <b>پاسخ خودکار</b> انتخاب کنید؛ در آزمون‌ها پاسخِ همهٔ کاندیدها کنار هم می‌آید تا بهترین را برگزینید. هر انتخاب به‌صورت «رأی» ثبت می‌شود و مدلی که از نظر آماری بهترین است به‌عنوان <b>مدل مستر</b> (مرجعِ قضاوت بقیه) به‌صورت خودکار انتخاب می‌شود.
@@ -21908,7 +21934,7 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 <span id="aiCandSelCount" style="color:#67e8f9">۰ انتخاب</span>
 <button class="btn btn-red" onclick="aiCandRemoveSelected()" style="font-size:10px;padding:3px 8px">🗑 حذف انتخاب‌شده‌ها</button>
 </div>
-<div id="aiCandList" style="max-height:220px;overflow-y:auto;border:1px solid #334155;border-radius:0 0 6px 6px;background:#0f172a;margin-bottom:6px">
+<div id="aiCandList" style="max-height:200px;overflow-y:auto;border:1px solid #334155;border-radius:0 0 6px 6px;background:#0f172a;margin-bottom:6px">
 <div style="padding:8px;color:#64748b;font-size:11px">کاندیدی نیست — مدل فعال را انتخاب و «➕ افزودن» بزنید.</div>
 </div>
 <div class="crow" style="align-items:center">
@@ -21926,9 +21952,11 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 </div>
 <div id="aiCandR" style="margin-top:6px"></div>
 </div>
+</div>
 
-<!-- v8.61: عبور از محدودیت شبکه -->
-<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
+<!-- ══ تب ۵: روش اتصال + تست/عیب‌یابی ══ -->
+<div class="ai-tab-panel" data-ai-panel="net">
+<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px">
 <div style="font-size:11px;color:#67e8f9;font-weight:700;margin-bottom:6px">🌐 روش اتصال (عبور از محدودیت)</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
 اگر سرور در ایران است و به سرویس هوش مصنوعی وصل نمی‌شود، یکی از این روش‌ها را انتخاب کنید.
@@ -21989,11 +22017,12 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 <div class="crow"><label>مهلت (ثانیه):</label>
 <input type="number" id="aiNetTimeout" value="25" min="5" max="120" step="5" style="max-width:90px" dir="ltr"></div>
 </div>
-
+<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
 <div class="cact"><button class="btn btn-purple" onclick="testAi()">🔗 تست</button><button class="btn btn-green" onclick="testAiCategory()">🏷️ تست دسته</button><button class="btn btn-orange" onclick="aiProbe()">🩺 عیب‌یابی</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div id="aiTR" style="margin-top:8px"></div>
-</div></div>
-
+</div>
+</div>
+</div>
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🔔 اعلان‌ها</h3><span class="cst off" id="balehS">غیرفعال</span><span class="arrow">▼</span></div>
 <div class="smenu-body">
@@ -26295,6 +26324,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.60', t:'🗂 بخش هوش مصنوعی تب‌دار و منظم شد', items:[
+    'گزارش شما: بعضی بخش‌های هوش مصنوعی (مثل «روش اتصال» و «تست دسته») پیدا', 'نمی‌شد. ریشهٔ کار: بخش هوش مصنوعی یک ستونِ بلندِ عمودی بود و وقتی از حدِ', 'ارتفاعِ منو بیشتر می‌شد، بخش‌های پایین بریده می‌شدند و دیده نمی‌شدند.', '✅ بخش هوش مصنوعی حالا به ۵ تب تقسیم شده است:', '۱) 🧠 ارائه‌دهنده‌ها (درون‌ریزی JSON + انتخاب مدل فعال)', '۲) 🧪 تست مدل‌ها (سقف، پیام، دسته، تاخیر + شروع/ادامه و نمایش جدول)', '۳) 📋 مدل‌ها (فهرست مدل‌های ارائه‌دهندهٔ انتخابی)', '۴) 🏆 کاندید + مستر (شامل «تست دسته همهٔ کاندیدها»، «تست پاسخ» و جدول امتیازات)', '۵) 🌐 اتصال (روش عبور از محدودیت + 🔗 تست، 🏷️ تست دسته، 🩺 عیب‌یابی، 💾 ذخیره)', '✅ هر تب فقط محتوای خودش را نشان می‌دهد، پس همه‌چیز مرتب و قابل‌دسترس است و', 'هیچ بخشی بریده یا پنهان نمی‌شود.'],},
   {v:'9.59', t:'💾 ذخیره و بازیابی همهٔ تنظیمات و پروفایل‌ها', items:[
     'خواستهٔ شما: یک بخش «ذخیره/دانلود و بازیابی همهٔ تنظیمات سایت (شامل', 'پروفایل‌ها و...)» در بالای منوی تنظیمات اضافه شود تا بعد از نوسازی هاست،', 'سرور یا PaaS به‌راحتی همه‌چیز برگردد.', '✅ بخش «💾 ذخیره و بازیابی همهٔ تنظیمات» به‌عنوان اولین آیتمِ منوی تنظیمات', '(☰ همبرگری) اضافه شد.', '✅ دکمهٔ «⬇ دانلود همهٔ تنظیمات و پروفایل‌ها» همهٔ داده‌ها را در یک فایل', '<code>settings_*.json</code> دانلود می‌کند: پروفایل‌ها، تنظیمات اتصال، صف‌ها،', 'حافظهٔ یادگیری دسته‌بندی، قواعد/وضعیت پاسخ خودکار، remote_map و بقیهٔ فایل‌های', 'داده — بدون نیاز به گیت‌هاب.', '✅ دکمهٔ «♻️ بارگذاری و بازیابی» همان فایل را انتخاب و همه‌چیز را برمی‌گرداند', '(از فایل‌های فعلی یک کپی .before-restore کنارشان می‌ماند) و صفحه را رفرش', 'می‌کند.', '✅ اندپوینتِ جدید <code>backup_export</code> بستهٔ داده را مستقیم دانلود می‌دهد.', '⚠️ این فایل حاوی کلیدها و داده‌های شماست؛ آن را امن نگه دارید.'],},
   {v:'9.58', t:'🧭 بازآراییِ بخش هوش مصنوعی + دکمهٔ «نمایش جدول»', items:[
@@ -30210,6 +30241,15 @@ function aiNetToggle(){
     show('aiNetGateway',m==='gateway');
     show('aiNetProxy',m==='proxy');
     updateAiNetBadge();
+}
+/* v9.60: تب‌بندیِ بخش هوش مصنوعی — هر تب یک پنل را نشان می‌دهد تا همه‌چیز
+   منظم و قابل‌دسترس باشد (قبلاً یک ستونِ بلند بود و بخش‌های پایین مثل «روش
+   اتصال» یا «تست دسته» بریده می‌شدند). */
+function aiTab(tab){
+    const btns=document.querySelectorAll('.ai-tab-btn');
+    btns.forEach(b=>{b.classList.toggle('active', b.getAttribute('data-ai-tab')===tab);});
+    const panels=document.querySelectorAll('.ai-tab-panel');
+    panels.forEach(p=>{p.style.display=(p.getAttribute('data-ai-panel')===tab)?'':'none';});
 }
 function updateAiNetBadge(){
     const el=$('aiS'),m=($('aiNetMode')||{}).value||'direct';
