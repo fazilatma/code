@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.54';
+const APP_VERSION = '9.55';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12041,6 +12041,17 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, '$response = $ok ? aiExtractText($body) : \'\'') !== false
          && strpos($selfSrc, 'trim(aiExtractText($r[\'body\'] ?? []))') !== false);
 
+    /* ---------- v9.55: افزودن انبوهِ مدل‌های در دسترس + حذف انتخابی کاندیدها ---------- */
+    $add('9.55', 'دکمهٔ «افزودن همهٔ مدل‌های در دسترس به کاندیدها»',
+         strpos($selfSrc, 'function aiCandAddAvailable') !== false
+         && strpos($selfSrc, 'onclick="aiCandAddAvailable()"') !== false);
+    $add('9.55', 'لیست کاندیدها: تیکِ انتخاب هر ردیف + «انتخاب همه» + «حذف انتخاب‌شده‌ها»',
+         strpos($selfSrc, 'aiCandSelectedKeys') !== false
+         && strpos($selfSrc, 'function aiCandToggleSelAll') !== false
+         && strpos($selfSrc, 'function aiCandRemoveSelected') !== false
+         && strpos($selfSrc, 'id="aiCandSelAll"') !== false
+         && strpos($selfSrc, 'aiCandSave(null,null,false,keys)') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -21747,6 +21758,7 @@ placeholder="مثلاً: سلام" title="پیامی که به هر مدل فر�
 <div class="crow" style="margin-top:4px"><label>دستهٔ تست:</label>
 <input type="text" id="aiTestCat" value="ادو پرفیوم" dir="rtl" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px"
 placeholder="مثلاً: ادو پرفیوم" title="عنوان محصولی که دسته‌بندیِ آن با هر مدل سنجیده می‌شود (پیش‌فرض: ادو پرفیوم)"></div>
+<div class="cact" style="margin-top:4px"><button class="btn btn-orange" onclick="aiCandAddAvailable()" style="flex:1" title="همهٔ مدل‌هایی که تیک سبز (در دسترس) گرفته‌اند را یک‌جا به فهرست کاندیدها اضافه می‌کند">➕ افزودن همهٔ مدل‌های در دسترس به کاندیدها</button></div>
 <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;cursor:pointer;margin-bottom:6px">
 <input type="checkbox" id="aiTestOnlyUntested" style="width:14px;height:14px"> فقط مدل‌های تست‌نشده</label>
 
@@ -21770,7 +21782,12 @@ placeholder="مثلاً: ادو پرفیوم" title="عنوان محصولی ک�
 <select id="aiCandModelSel" style="flex:1"><option value="">—</option></select>
 <button class="btn btn-green" onclick="aiCandAddSel()" style="flex:0 0 auto;font-size:11px">➕ افزودن</button></div>
 <div style="font-size:10px;color:#64748b;margin:-2px 0 6px;line-height:1.6">ارائه‌دهنده و مدل را همین‌جا انتخاب و «➕ افزودن» را بزنید — نیازی به جابه‌جایی با منوی بالا نیست.</div>
-<div id="aiCandList" style="max-height:220px;overflow-y:auto;border:1px solid #334155;border-radius:6px;background:#0f172a;margin-bottom:6px">
+<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#1e293b;border:1px solid #334155;border-bottom:none;border-radius:6px 6px 0 0;font-size:11px;color:#94a3b8">
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer;flex:1"><input type="checkbox" id="aiCandSelAll" onchange="aiCandToggleSelAll(this.checked)" style="width:14px;height:14px"> انتخاب همه</label>
+<span id="aiCandSelCount" style="color:#67e8f9">۰ انتخاب</span>
+<button class="btn btn-red" onclick="aiCandRemoveSelected()" style="font-size:10px;padding:3px 8px">🗑 حذف انتخاب‌شده‌ها</button>
+</div>
+<div id="aiCandList" style="max-height:220px;overflow-y:auto;border:1px solid #334155;border-radius:0 0 6px 6px;background:#0f172a;margin-bottom:6px">
 <div style="padding:8px;color:#64748b;font-size:11px">کاندیدی نیست — مدل فعال را انتخاب و «➕ افزودن» بزنید.</div>
 </div>
 <div class="crow" style="align-items:center">
@@ -26157,6 +26174,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.55', t:'🏆 افزودن انبوهِ مدل‌های در دسترس به کاندیدها + حذفِ انتخابی کاندیدها', items:[
+    'خواستهٔ شما: (۱) دکمه‌ای که همهٔ مدل‌هایِ تیکِ سبز (در دسترس، بدون خطا) را', 'یک‌جا به فهرست کاندیدها اضافه کند؛ (۲) در فهرست کاندیدها، تیکِ انتخابِ هر', 'ردیف + یک تیکِ «انتخاب همه» + دکمهٔ «حذف انتخاب‌شده‌ها».', '✅ دکمهٔ «➕ افزودن همهٔ مدل‌های در دسترس به کاندیدها» بعد از فیلدهایِ', 'تست اضافه شد: همهٔ مدل‌هایی که available=true (تیک سبز) دارند را یک‌جا به', 'کاندیدها می‌افزاید (بدون تکرارِ کاندیدهایِ موجود).', '✅ فهرست کاندیدها حالا در هر ردیف یک تیک دارد؛ بالای فهرست هم یک', '«انتخاب همه» و دکمهٔ «🗑 حذف انتخاب‌شده‌ها» هست که همهٔ ردیف‌هایِ تیک‌خورده', 'را یک‌جا حذف می‌کند.', '✅ این هم در افزودنِ انبوه و هم در حذفِ انتخابی از اندپوینتِ ذخیرهٔ', 'کاندیدها استفاده می‌شود.'],},
   {v:'9.54', t:'🧪 رفعِ نمایشِ پاسخِ مدل‌های Together AI (استخراج مقاومِ متنِ پاسخ)', items:[
     'گزارش شما: مدل‌های Together AI «قابل اتصال» و رایگان‌اند ولی در جدولِ تست', 'فقط «پاسخ داده» می‌نوشت و متنِ پاسخ دیده نمی‌شد — چون فرمتِ پاسخشان', 'با OpenAI فرق دارد.', '🐞 ریشهٔ کار: همهٔ مدل‌ها از یک قالبِ واحد (choices[0].message.content)', 'خوانده می‌شدند؛ در حالی که Together AI و چند سرویس دیگر محتوا را در قالب‌های', 'دیگری برمی‌گردانند (choices[0].text ، output.choices[0].text ، output_text و...).', '✅ تابع مشترک aiExtractText اضافه شد که چند ساختارِ رایجِ پاسخ را امتحان می‌کند', '(OpenAI message.content ، choices[].text ، output[] / output_text ،', 'output.choices[].text ، Cloudflare result.response ، data[0].text و...).', '✅ این تابع حالا در تستِ تک‌مدلی، تستِ انبوه، دسته‌بندیِ کاندیدها و پاسخِ', 'خودکار استفاده می‌شود — پس متنِ واقعیِ پاسخِ Together AI و امثالش نمایش', 'داده می‌شود و دیگر فقط «پاسخ داده» نمی‌نویسد.'],},
   {v:'9.53', t:'▶ دکمهٔ «شروع / ادامه» برای تست مدل‌های هوش مصنوعی', items:[
@@ -30168,16 +30187,17 @@ var aiCandCtx={task:'category',input:'',keys:[],items:[]};
 function aiCandLoad(cb){
   fetch('?ai_candidates=1').then(r=>r.json()).then(d=>{aiCandData=d||{candidates:[],master:'',pin:'',history:[]};if(cb)cb(aiCandData);}).catch(()=>{});
 }
-function aiCandSave(addKey,removeKey,isPin){
+function aiCandSave(addKey,removeKey,isPin,removeKeys){
   fetch('?ai_candidates=1').then(r=>r.json()).then(d=>{
     let list=((d&&d.candidates)||[]).map(c=>({provider:c.provider,model:c.model}));
     if(addKey){
       const i=addKey.indexOf('::');
       if(i>0){const pp=addKey.slice(0,i),mm=addKey.slice(i+2);if(!list.find(x=>x.provider===pp&&x.model===mm))list.push({provider:pp,model:mm});}
     }
-    if(removeKey){
-      const i=removeKey.indexOf('::');
-      if(i>0){const pp=removeKey.slice(0,i),mm=removeKey.slice(i+2);list=list.filter(x=>!(x.provider===pp&&x.model===mm));}
+    const rmKeys=removeKeys&&removeKeys.length?removeKeys:(removeKey?[removeKey]:[]);
+    if(rmKeys.length){
+      const rmSet=new Set(rmKeys);
+      list=list.filter(x=>!rmSet.has(x.provider+'::'+x.model));
     }
     const fd=new FormData();
     fd.append('action','ai_candidates_save');
@@ -30194,6 +30214,35 @@ function aiCandAddFromSel(){
   const mid=($('aiModelSel')||{}).value||'';
   if(!pid||!mid){showToast('اول از بالای همین بخش یک ارائه‌دهنده و مدل فعال انتخاب کنید',1);return;}
   aiCandSave(pid+'::'+mid,null,false);
+}
+/* v9.55: همهٔ مدل‌هایی که تیک سبز (available/در دسترس) گرفته‌اند را یک‌جا
+   به فهرست کاندیدها اضافه می‌کند. */
+function aiCandAddAvailable(){
+  const add=[];
+  ((aiProvData&&aiProvData.providers)||[]).forEach(p=>{
+    (p.models||[]).forEach(m=>{
+      if(m&&m.available && m.id && p.id) add.push(p.id+'::'+m.id);
+    });
+  });
+  if(!add.length){showToast('هیچ مدلِ در دسترسی نیست — اول مدل‌ها را تست کنید',1);return;}
+  fetch('?ai_candidates=1').then(r=>r.json()).then(d=>{
+    let list=((d&&d.candidates)||[]).map(c=>({provider:c.provider,model:c.model}));
+    let added=0;
+    add.forEach(k=>{
+      const i=k.indexOf('::');
+      if(i<=0)return;
+      const pp=k.slice(0,i), mm=k.slice(i+2);
+      if(!list.find(x=>x.provider===pp&&x.model===mm)){list.push({provider:pp,model:mm});added++;}
+    });
+    if(!added){showToast('همهٔ مدل‌های در دسترس از قبل کاندید هستند',0);return;}
+    const fd=new FormData();
+    fd.append('action','ai_candidates_save');
+    fd.append('candidates',JSON.stringify(list));
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(res=>{
+      showToast(res&&res.ok?('✓ '+added+' مدلِ در دسترس به کاندیدها اضافه شد'):('خطا: '+((res&&res.error)||'نامشخص')),!(res&&res.ok));
+      aiCandRender();
+    }).catch(()=>showToast('خطا در ارتباط',1));
+  }).catch(()=>showToast('خطا در ارتباط',1));
 }
 /* v9.38: دراپ‌داون‌های اختصاصی افزودن کاندید (ارائه‌دهنده + مدل) */
 function aiCandFillSel(){
@@ -30227,17 +30276,51 @@ function aiCandAddSel(){
 }
 function aiCandRemove(key){if(confirm('این مدل از کاندیدها حذف شود؟'))aiCandSave(null,key,false);}
 function aiCandSetPin(){aiCandSave(null,null,true);}
+/* v9.55: تیک زدن/برداشتن همهٔ کاندیدها + حذف کاندیدهایِ تیک‌خورده */
+let aiCandSelectedKeys=new Set();
+function aiCandToggleSelAll(checked){
+  aiCandSelectedKeys.clear();
+  const rows=document.querySelectorAll('.aiCandRow');
+  rows.forEach(r=>{
+    const key=r.getAttribute('data-key');
+    const cb=r.querySelector('.aiCandCb');
+    if(!key||!cb)return;
+    cb.checked=checked;
+    if(checked)aiCandSelectedKeys.add(key);
+  });
+  aiCandUpdateSelUI();
+}
+function aiCandRowCheck(cb,key){
+  if(!key)return;
+  if(cb.checked)aiCandSelectedKeys.add(key); else aiCandSelectedKeys.delete(key);
+  const all=$('aiCandSelAll');
+  const rows=document.querySelectorAll('.aiCandRow');
+  if(all){all.checked=aiCandSelectedKeys.size>0&&aiCandSelectedKeys.size===rows.length;}
+  aiCandUpdateSelUI();
+}
+function aiCandUpdateSelUI(){
+  const cnt=$('aiCandSelCount');
+  if(cnt)cnt.textContent=toFa(aiCandSelectedKeys.size)+' انتخاب';
+}
+function aiCandRemoveSelected(){
+  if(!aiCandSelectedKeys.size){showToast('هیچ کاندیدی انتخاب نشده',1);return;}
+  const keys=[...aiCandSelectedKeys];
+  if(!confirm(keys.length+' کاندید انتخاب‌شده حذف شود؟'))return;
+  aiCandSave(null,null,false,keys);
+}
 function aiCandRender(){
   aiCandLoad(d=>{
     aiCandFillSel();
     const box=$('aiCandList'); if(!box)return;
     const c=d.candidates||[];
+    aiCandSelectedKeys.clear();
     if(!c.length){box.innerHTML='<div style="padding:8px;color:#64748b;font-size:11px">کاندیدی نیست — مدل فعال را انتخاب و «➕ افزودن» بزنید.</div>';}
     else{
       let h='';
       c.forEach(x=>{
         const isM=(x.key===d.master);
-        h+='<div style="display:flex;gap:6px;align-items:center;padding:6px 8px;border-bottom:1px solid #1e293b;font-size:11px">'
+        h+='<div class="aiCandRow" data-key="'+esc(x.key)+'" style="display:flex;gap:6px;align-items:center;padding:6px 8px;border-bottom:1px solid #1e293b;font-size:11px">'
+          +'<input type="checkbox" class="aiCandCb" style="width:14px;height:14px;flex:0 0 auto" onchange="aiCandRowCheck(this,\''+esc(x.key)+'\')">'
           +'<span style="flex:1;color:'+(isM?'#4ade80':'#e2e8f0')+'">'+esc(x.providerName)+' · <span dir="ltr">'+esc(x.modelName||x.model)+'</span>'
           +(isM?' <span style="color:#fbbf24;font-size:9px">⭐ مستر</span>':'')
           +'<span style="color:#64748b;font-size:9px"> | '+(x.votes?('🏅 '+toFa(x.wins)+'/'+toFa(x.votes)+' ('+Math.round(x.score*100)+'٪)'):'بدون رای')+'</span></span>'
@@ -30245,6 +30328,8 @@ function aiCandRender(){
       });
       box.innerHTML=h;
     }
+    const all=$('aiCandSelAll'); if(all)all.checked=false;
+    aiCandUpdateSelUI();
     const ms=$('aiMasterPin');
     if(ms){
       let o='<option value="">خودکار (بهترین آمار)</option>';
