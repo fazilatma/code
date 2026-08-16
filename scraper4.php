@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.52';
+const APP_VERSION = '9.53';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -11950,6 +11950,16 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, "aiRunTestBackground(\$per, \$onlyUntested, \$testMsg, \$testCat)") !== false
          && strpos($selfSrc, "&msg=" . "'+encodeURIComponent(aiTestMsgVal)") !== false);
 
+    /* ---------- v9.53: دکمهٔ شروع/ادامهٔ تست مدل‌ها ---------- */
+    $add('9.53', 'دکمهٔ «شروع / ادامه» در بخش تست مدل‌ها',
+         strpos($selfSrc, 'function aiTestStartContinue') !== false
+         && strpos($selfSrc, 'id="aiTestStartContinue"') !== false
+         && strpos($selfSrc, '▶ شروع / ادامه') !== false);
+    $add('9.53', 'اگر تستی در حال اجراست، دکمهٔ شروع/ادامه آن را ادامه می‌دهد نه اینکه تازه شروع کند',
+         strpos($selfSrc, '?ai_test_status=1') !== false
+         && strpos($selfSrc, 'ادامهٔ تست در حال اجرا') !== false
+         && strpos($selfSrc, 'aiResumeTestModalOnLoad') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -21648,8 +21658,8 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <select id="aiModelSel" onchange="aiSelectModel()" style="flex:1"><option value="">—</option></select></div>
 <div class="crow"><label>تست همه:</label>
 <input type="number" id="aiTestPerProvider" value="50" min="1" max="500" style="max-width:80px" dir="ltr" title="سقف مدلِ آزموده‌شده به‌ازای هر ارائه‌دهنده">
-<button class="btn btn-green" onclick="aiTestAll()" style="flex:1">🧪 تست همهٔ مدل‌ها</button>
-<button class="btn btn-blue" onclick="aiTestAll()" style="flex:1" title="باز کردن جدول زندهٔ نتایج تست">📊 نتایج تست</button></div>
+<button class="btn btn-green" onclick="aiTestStartContinue()" style="flex:1" title="اگر تستی در حال اجراست ادامه می‌دهد، وگرنه تستِ تازه شروع می‌کند">▶ شروع / ادامه</button>
+<button class="btn btn-blue" onclick="aiTestAll()" style="flex:1" title="شروعِ تازهٔ تست همهٔ مدل‌ها و باز کردن جدول زندهٔ نتایج">🧪 تست تازه</button></div>
 <div class="crow" style="margin-top:4px"><label>پیام تست:</label>
 <input type="text" id="aiTestMsg" value="سلام" dir="rtl" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px"
 placeholder="مثلاً: سلام" title="پیامی که به هر مدل فرستاده می‌شود (پیش‌فرض: سلام)"></div>
@@ -26066,6 +26076,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.53', t:'▶ دکمهٔ «شروع / ادامه» برای تست مدل‌های هوش مصنوعی', items:[
+    'خواستهٔ شما: یک دکمهٔ «شروع/ادامه» در بخش تست مدل‌ها اضافه شود.', '✅ دکمهٔ «▶ شروع / ادامه» در بخش «تست همه» اضافه شد.', 'اگر تستی در حال اجراست، فقط مودالِ زنده را باز می‌کند و همان کار را ادامه', 'می‌دهد (بدون شروعِ تازه و بدون از دست رفتنِ نتایجِ فعلی)؛ اگر هیچ تستی در', 'جریان نباشد، یک تستِ تازه با مقادیرِ جاریِ پیام/دسته شروع می‌کند.', 'دکمهٔ قبلی حالا «🧪 تست تازه» نام دارد که همیشه صریحاً یک تستِ نو می‌سازد.'],},
   {v:'9.52', t:'🧪 دو فیلدِ پیام/دستهٔ تست + دو ستونِ پاسخ در نتایجِ تست مدل‌ها', items:[
     'خواستهٔ شما: در بخش «تست مدل‌های هوش مصنوعی» دو فیلد برای تست پیام و تست', 'دسته‌بندی اضافه شود و جدول نتایج، پاسخِ هر کدام را جدا نشان دهد.', '✅ دو فیلد قابل‌تنظیم اضافه شد: «پیام تست» (پیش‌فرض: سلام) و «دستهٔ تست»', '(پیش‌فرض: ادو پرفیوم) — هم در بخش بیرونی و هم داخل مودالِ نتایج.', '✅ جدولِ «تست همهٔ مدل‌ها» حالا دو ستونِ جدا دارد: «پاسخ پیام» و «پاسخ دسته».', 'برای هر مدل، هم پیام فرستاده می‌شود و هم عنوانِ دستهٔ تست به مدل داده می‌شود', 'تا دسته‌بندیِ پیشنهادی‌اش (نام/شناسهٔ دستهٔ باسلام) را برگرداند.', '✅ این در «تست همهٔ مدل‌ها»، «تست تک‌مدلی» (🔗 تست) و نمایشِ زندهٔ جدول اعمال', 'می‌شود؛ مقدارِ پیام/دسته را هر جا عوض کنید برای همه یکسان می‌ماند.', '✅ پاسخِ دسته به‌همراه پاسخِ پیام در testDetails هر مدل ذخیره می‌شود.'],},
   {v:'9.51', t:'🧹 رفعِ حذفِ اشتباهیِ محصولاتِ متفاوت در «حذف تکراری ووکامرس»', items:[
@@ -30573,6 +30585,24 @@ function aiResumeTestModalOnLoad(){
     fetch('?ai_test_status=1').then(r=>r.json()).then(st=>{
         if(st&&st.running){ aiOpenTestModal(); aiPollTest(); }
     }).catch(()=>{});
+}
+/* v9.53: دکمهٔ «شروع / ادامه» — اگر تستی در حال اجراست آن را ادامه می‌دهد
+   (مودالِ زنده را باز می‌کند و poll را ادامه می‌دهد، بدون شروعِ تازه)، و اگر
+   نه، یک تستِ تازه با مقادیرِ جاریِ پیام/دسته شروع می‌کند. */
+function aiTestStartContinue(){
+    const btn=document.getElementById('aiTestStartContinue');
+    if(btn){btn.disabled=true;const t=btn.textContent;btn.textContent='⏳ ...';setTimeout(()=>{btn.disabled=false;btn.textContent=t;},1500);}
+    fetch('?ai_test_status=1').then(r=>r.json()).then(st=>{
+        if(st&&st.running){
+            // در حال اجراست → ادامه بده
+            aiOpenTestModal();
+            aiPollTest();
+            if($('aiTestCur'))$('aiTestCur').textContent='ادامهٔ تست در حال اجرا...';
+        }else{
+            // نه → شروعِ تازه
+            aiTestAll();
+        }
+    }).catch(()=>{ aiTestAll(); });
 }
 // v8.06: Test AI category selection with a sample product title
 function testAiCategory(){
