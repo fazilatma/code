@@ -20,6 +20,15 @@ declare(strict_types=1);
  *   PROXY_MAX_BODY_BYTES=10485760                    (default: 10 MiB)
  *   PROXY_USER_AGENT=ParsPack-PHP-Proxy/1.0
  *
+ * File manager environment variables:
+ *   FILE_MANAGER_ROOT=/path/to/managed/storage
+ *   FILE_MANAGER_PASSWORD=use-a-long-random-password
+ *   FILE_MANAGER_MAX_UPLOAD_BYTES=20971520
+ *   FILE_MANAGER_BLOCKED_EXTENSIONS=php,phtml,phar,htaccess,user.ini
+ *
+ * File manager URL:
+ *   GET /proxy.php?panel=files
+ *
  * Security:
  * - Only HTTPS destinations are accepted.
  * - Destination hostname must be in PROXY_ALLOWED_HOSTS.
@@ -242,7 +251,7 @@ function renderDashboard(array $allowedHosts): void
 </style>
 </head>
 <body><div class="orb o1"></div><div class="orb o2"></div><main class="wrap">
-<header class="top"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8"><path d="M8 12h8M13 7l5 5-5 5"/><path d="M6 19a9 9 0 1 1 0-14"/></svg></div><div><h1>درگاه ارتباط API</h1><p>بررسی دسترسی خروجی سرور پارس‌پک به سرویس‌های خارجی</p></div></div><div class="badge"><i class="dot"></i> سرویس فعال است</div></header>
+<header class="top"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8"><path d="M8 12h8M13 7l5 5-5 5"/><path d="M6 19a9 9 0 1 1 0-14"/></svg></div><div><h1>درگاه ارتباط API</h1><p>بررسی دسترسی خروجی سرور پارس‌پک به سرویس‌های خارجی</p></div></div><a class="badge" style="text-decoration:none" href="?panel=files">مدیریت فایل‌ها ←</a></header>
 <section class="grid"><div class="card main"><div class="labelrow"><label for="urls">آدرس‌های مورد نظر</label><span class="hint">حداکثر ۱۰ آدرس، هر کدام در یک خط</span></div><textarea id="urls" spellcheck="false" placeholder="https://api.example.com/health&#10;https://your-worker.workers.dev/"></textarea><div class="actions"><button class="btn primary" id="check">بررسی دسترسی</button><button class="btn ghost" id="clear">پاک‌کردن</button></div><div class="results" id="results"><div class="empty">نتیجه بررسی آدرس‌ها در این قسمت نمایش داده می‌شود.</div></div></div>
 <aside class="card side"><h2>دامنه‌های مجاز</h2><p>تنظیم‌شده در PROXY_ALLOWED_HOSTS</p><div class="rules" id="rules"></div><div class="divider"></div><div class="mini"><div class="stat"><b id="success">۰</b><span>قابل دسترسی</span></div><div class="stat"><b id="failed">۰</b><span>ناموفق / غیرمجاز</span></div></div><div class="divider"></div><p>این آزمایش از داخل سرور انجام می‌شود؛ بنابراین نتیجه، دسترسی واقعی PaaS به مقصد را نشان می‌دهد. پاسخ‌های HTTP مانند 401 یا 403 نیز یعنی ارتباط شبکه برقرار شده است.</p></aside></section>
 <section class="card docs"><h2>نمونه استفاده از پروکسی</h2><code>GET /proxy.php?url=https%3A%2F%2Fapi.example.com%2Fv1%2Fstatus</code></section></main><div class="toast" id="toast"></div>
@@ -255,6 +264,329 @@ $('#check').onclick=async()=>{const urls=$('#urls').value.split(/\n/).map(x=>x.t
 </script></body></html>
 HTML;
     echo str_replace('__RULES__', $rulesJson ?: '[]', $html);
+}
+
+// ---------- Password-protected file manager ----------
+function fmJson(array $data, int $status = 200): void
+{
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+function fmInside(string $path, string $root): bool
+{
+    return $path === $root || str_starts_with($path, $root . DIRECTORY_SEPARATOR);
+}
+
+function fmRoot(): string
+{
+    $configured = envString('FILE_MANAGER_ROOT');
+    if ($configured === '') {
+        throw new RuntimeException('متغیر FILE_MANAGER_ROOT تنظیم نشده است.');
+    }
+    if (!str_starts_with($configured, DIRECTORY_SEPARATOR)) {
+        $configured = __DIR__ . DIRECTORY_SEPARATOR . $configured;
+    }
+    if (!is_dir($configured) && !@mkdir($configured, 0750, true)) {
+        throw new RuntimeException('ساخت پوشه ریشه فایل‌منیجر ممکن نیست.');
+    }
+    $root = realpath($configured);
+    if ($root === false || !is_dir($root)) {
+        throw new RuntimeException('مسیر ریشه فایل‌منیجر معتبر نیست.');
+    }
+    $root = rtrim($root, DIRECTORY_SEPARATOR);
+    if ($root === '') {
+        throw new RuntimeException('استفاده از ریشه سیستم‌عامل به‌عنوان FILE_MANAGER_ROOT مجاز نیست.');
+    }
+    return $root;
+}
+
+function fmCleanRel(string $relative): string
+{
+    if (str_contains($relative, "\0")) {
+        throw new RuntimeException('مسیر نامعتبر است.');
+    }
+    $relative = str_replace('\\', '/', trim($relative));
+    $parts = [];
+    foreach (explode('/', trim($relative, '/')) as $part) {
+        if ($part === '' || $part === '.') continue;
+        if ($part === '..') throw new RuntimeException('خروج از مسیر مجاز نیست.');
+        $parts[] = $part;
+    }
+    return implode('/', $parts);
+}
+
+function fmPath(string $relative, bool $mustExist = true): string
+{
+    $root = fmRoot();
+    $relative = fmCleanRel($relative);
+    if ($relative === '') return $root;
+    $candidate = $root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative);
+    if ($mustExist) {
+        $real = realpath($candidate);
+        if ($real === false || !fmInside($real, $root)) {
+            throw new RuntimeException('فایل یا پوشه پیدا نشد.');
+        }
+        return $real;
+    }
+    $parent = realpath(dirname($candidate));
+    if ($parent === false || !fmInside($parent, $root)) {
+        throw new RuntimeException('پوشه مقصد معتبر نیست.');
+    }
+    return $parent . DIRECTORY_SEPARATOR . basename($candidate);
+}
+
+function fmValidName(string $name): string
+{
+    $name = trim($name);
+    if ($name === '' || $name === '.' || $name === '..' || basename($name) !== $name || preg_match('/[\\x00-\\x1F\\x7F\\/\\\\]/u', $name)) {
+        throw new RuntimeException('نام انتخاب‌شده معتبر نیست.');
+    }
+    return $name;
+}
+
+function fmBlockedFile(string $name): bool
+{
+    $default = 'php,php3,php4,php5,php7,php8,phtml,phar,htaccess,user.ini';
+    $blocked = array_filter(array_map(fn($x) => strtolower(ltrim(trim($x), '.')), explode(',', envString('FILE_MANAGER_BLOCKED_EXTENSIONS', $default))));
+    $lower = strtolower($name);
+    if (in_array($lower, ['.htaccess', '.user.ini'], true)) return true;
+    return in_array(strtolower(pathinfo($name, PATHINFO_EXTENSION)), $blocked, true);
+}
+
+function fmDeleteTree(string $path): void
+{
+    if (is_link($path) || is_file($path)) {
+        if (!@unlink($path)) throw new RuntimeException('حذف فایل ممکن نشد.');
+        return;
+    }
+    $items = scandir($path);
+    if ($items === false) throw new RuntimeException('خواندن پوشه ممکن نشد.');
+    foreach ($items as $item) {
+        if ($item !== '.' && $item !== '..') fmDeleteTree($path . DIRECTORY_SEPARATOR . $item);
+    }
+    if (!@rmdir($path)) throw new RuntimeException('حذف پوشه ممکن نشد.');
+}
+
+function fmCopyTree(string $source, string $destination): void
+{
+    if (is_link($source)) throw new RuntimeException('کپی symbolic link مجاز نیست.');
+    if (is_file($source)) {
+        if (!@copy($source, $destination)) throw new RuntimeException('کپی فایل ممکن نشد.');
+        return;
+    }
+    if (!@mkdir($destination, 0750, false)) throw new RuntimeException('ساخت پوشه مقصد ممکن نشد.');
+    $items = scandir($source);
+    if ($items === false) throw new RuntimeException('خواندن پوشه ممکن نشد.');
+    foreach ($items as $item) {
+        if ($item !== '.' && $item !== '..') fmCopyTree($source . DIRECTORY_SEPARATOR . $item, $destination . DIRECTORY_SEPARATOR . $item);
+    }
+}
+
+function fmRequireCsrf(): void
+{
+    $sent = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? ($_POST['csrf'] ?? '');
+    $saved = $_SESSION['fm_csrf'] ?? '';
+    if (!is_string($sent) || !is_string($saved) || $saved === '' || !hash_equals($saved, $sent)) {
+        fmJson(['ok' => false, 'message' => 'نشست یا CSRF token معتبر نیست.'], 419);
+    }
+}
+
+function fmRender(bool $authenticated, string $message = ''): void
+{
+    $csrf = $authenticated ? (string) ($_SESSION['fm_csrf'] ?? '') : '';
+    $csrfJson = json_encode($csrf, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    $messageHtml = htmlspecialchars($message, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    header('Content-Type: text/html; charset=utf-8');
+    header('Cache-Control: no-store, private');
+    $html = <<<'HTML'
+<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>مدیریت فایل‌ها</title><style>
+:root{--bg:#07111e;--card:rgba(15,28,47,.88);--line:rgba(148,163,184,.16);--txt:#edf5ff;--muted:#91a5bf;--blue:#479dff;--cyan:#2bd8c0;--green:#3bd692;--red:#ff657a;--amber:#f6bb51}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 10% 5%,rgba(44,112,255,.18),transparent 28%),radial-gradient(circle at 92% 18%,rgba(43,216,192,.12),transparent 25%),var(--bg);color:var(--txt);font-family:Tahoma,"Segoe UI",sans-serif}.wrap{width:min(1180px,calc(100% - 28px));margin:auto;padding:30px 0 60px}.card{background:var(--card);border:1px solid var(--line);border-radius:22px;box-shadow:0 25px 80px rgba(0,0,0,.34);backdrop-filter:blur(18px)}.top{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:20px}.brand{display:flex;align-items:center;gap:12px}.logo{width:48px;height:48px;border-radius:15px;display:grid;place-items:center;background:linear-gradient(135deg,var(--blue),var(--cyan));font-size:23px}.brand h1{font-size:22px;margin:0}.brand p{font-size:12px;color:var(--muted);margin:2px 0}.btn{border:1px solid var(--line);background:rgba(148,163,184,.08);color:var(--txt);padding:10px 14px;border-radius:12px;font:12px Tahoma;cursor:pointer;transition:.2s}.btn:hover{transform:translateY(-1px);border-color:rgba(71,157,255,.4)}.primary{border:0;background:linear-gradient(120deg,#247be6,#22b8c9);font-weight:bold}.danger{color:#ff9bab}.toolbar{display:flex;flex-wrap:wrap;gap:8px;padding:15px}.pathbar{display:flex;align-items:center;gap:7px;overflow:auto;padding:14px 17px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);direction:ltr}.crumb{white-space:nowrap;color:#a8cffb;cursor:pointer;font:12px Consolas}.sep{color:#52657d}.drop{margin:15px;padding:18px;border:1px dashed rgba(71,157,255,.32);border-radius:15px;text-align:center;color:var(--muted);font-size:12px;transition:.2s}.drop.over{background:rgba(71,157,255,.09);border-color:var(--blue)}.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:730px}th{text-align:right;padding:12px 16px;color:var(--muted);font-size:11px;font-weight:normal;border-bottom:1px solid var(--line)}td{padding:12px 16px;border-bottom:1px solid rgba(148,163,184,.08);font-size:12px}tr:hover td{background:rgba(148,163,184,.035)}.name{display:flex;align-items:center;gap:10px;cursor:pointer;direction:ltr;text-align:left}.ico{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:rgba(71,157,255,.09);font-size:16px}.folder .ico{color:var(--amber);background:rgba(246,187,81,.08)}.muted{color:var(--muted)}.rowactions{display:flex;gap:5px}.ib{border:0;background:transparent;color:#9fb3ca;padding:5px 7px;cursor:pointer;border-radius:7px}.ib:hover{background:rgba(148,163,184,.1);color:white}.empty{text-align:center;padding:55px;color:var(--muted)}.login{width:min(430px,calc(100% - 30px));margin:12vh auto 0;padding:28px}.login h1{margin:0 0 6px}.login p{color:var(--muted);font-size:12px}.login input{width:100%;margin:16px 0 10px;background:#091525;border:1px solid var(--line);border-radius:13px;padding:13px;color:white;outline:none}.login input:focus{border-color:var(--blue)}.login .btn{width:100%;padding:13px}.error{color:#ff9aaa;font-size:12px}.toast{position:fixed;left:18px;bottom:18px;background:#17283e;border:1px solid var(--line);padding:11px 15px;border-radius:12px;font-size:12px;opacity:0;transform:translateY(70px);transition:.25s;box-shadow:0 15px 50px #0008}.toast.on{opacity:1;transform:none}.loader{padding:50px;text-align:center;color:var(--muted)}input[type=file]{display:none}@media(max-width:700px){.wrap{padding-top:18px}.brand p{display:none}.toolbar{padding:11px}.hide-sm{display:none}}
+</style></head><body>
+__BODY__
+<div class="toast" id="toast"></div><script>__SCRIPT__</script></body></html>
+HTML;
+
+    if (!$authenticated) {
+        $body = '<main class="login card"><div class="logo">▣</div><h1>ورود به مدیریت فایل‌ها</h1><p>برای ادامه، رمز مدیریتی تعریف‌شده در سرور را وارد کنید.</p>' . ($messageHtml !== '' ? '<div class="error">' . $messageHtml . '</div>' : '') . '<form method="post" action="?panel=files&fm_action=login"><input type="password" name="password" autocomplete="current-password" required placeholder="رمز مدیریت"><button class="btn primary" type="submit">ورود امن</button></form></main>';
+        echo str_replace(['__BODY__', '__SCRIPT__'], [$body, ''], $html);
+        return;
+    }
+
+    $body = '<main class="wrap"><header class="top"><div class="brand"><div class="logo">▣</div><div><h1>مدیریت فایل‌ها</h1><p>فضای ذخیره‌سازی کنترل‌شده سرور</p></div></div><div><a class="btn" href="?">پنل API</a> <button class="btn danger" id="logout">خروج</button></div></header><section class="card"><div class="toolbar"><button class="btn primary" id="uploadBtn">آپلود فایل</button><button class="btn" id="newFolder">پوشه جدید</button><button class="btn" id="newFile">فایل جدید</button><button class="btn" id="refresh">تازه‌سازی</button><input type="file" id="picker" multiple></div><nav class="pathbar" id="crumbs"></nav><div class="drop" id="drop">فایل‌ها را برای آپلود در این قسمت رها کنید</div><div class="tablewrap"><table><thead><tr><th>نام</th><th>حجم</th><th>آخرین تغییر</th><th>دسترسی</th><th>عملیات</th></tr></thead><tbody id="rows"><tr><td colspan="5" class="loader">در حال بارگذاری…</td></tr></tbody></table></div></section></main>';
+    $script = <<<'JS'
+const csrf=__CSRF__;let current='';const $=s=>document.querySelector(s);const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');setTimeout(()=>e.classList.remove('on'),2300)}function size(n){if(n===null)return'—';const u=['B','KB','MB','GB'];let i=0;while(n>=1024&&i<3){n/=1024;i++}return(n<10&&i?n.toFixed(1):Math.round(n))+' '+u[i]}
+async function api(action,data=null,method='POST'){const o={method,headers:{'X-CSRF-Token':csrf}};if(data&&method!=='GET'){if(data instanceof FormData)o.body=data;else{o.headers['Content-Type']='application/json';o.body=JSON.stringify(data)}}const r=await fetch(`?panel=files&fm_action=${encodeURIComponent(action)}`+(method==='GET'&&data?'&'+new URLSearchParams(data):''),o);const d=await r.json();if(!r.ok)throw new Error(d.message||'خطای سرور');return d}
+function crumbs(){const p=current?current.split('/'):[];let built='';let h='<span class="crumb" data-p="">ROOT</span>';for(const x of p){built+=(built?'/':'')+x;h+='<span class="sep">/</span><span class="crumb" data-p="'+esc(built)+'">'+esc(x)+'</span>'}$('#crumbs').innerHTML=h;document.querySelectorAll('.crumb').forEach(x=>x.onclick=()=>load(x.dataset.p))}
+async function load(path=''){current=path;crumbs();$('#rows').innerHTML='<tr><td colspan="5" class="loader">در حال بارگذاری…</td></tr>';try{const d=await api('list',{path},'GET');if(!d.items.length){$('#rows').innerHTML='<tr><td colspan="5" class="empty">این پوشه خالی است.</td></tr>';return}$('#rows').innerHTML=d.items.map(x=>`<tr><td><div class="name ${x.type==='folder'?'folder':''}" data-open="${esc(x.path)}" data-type="${x.type}"><span class="ico">${x.type==='folder'?'▰':'▤'}</span><span>${esc(x.name)}</span></div></td><td class="muted">${size(x.size)}</td><td class="muted">${esc(x.modified)}</td><td class="muted hide-sm">${esc(x.permissions)}</td><td><div class="rowactions">${x.type==='file'?`<button class="ib" data-act="download" data-p="${esc(x.path)}" title="دانلود">↓</button>`:''}<button class="ib" data-act="rename" data-p="${esc(x.path)}" data-name="${esc(x.name)}" title="تغییر نام">✎</button><button class="ib" data-act="copy" data-p="${esc(x.path)}" title="کپی">⧉</button><button class="ib" data-act="move" data-p="${esc(x.path)}" title="انتقال">↗</button><button class="ib" data-act="delete" data-p="${esc(x.path)}" title="حذف">×</button></div></td></tr>`).join('');bind()}catch(e){$('#rows').innerHTML=`<tr><td colspan="5" class="empty">${esc(e.message)}</td></tr>`}}
+function bind(){document.querySelectorAll('[data-open]').forEach(e=>e.onclick=()=>{if(e.dataset.type==='folder')load(e.dataset.open);else location.href='?panel=files&fm_action=download&path='+encodeURIComponent(e.dataset.open)});document.querySelectorAll('[data-act]').forEach(e=>e.onclick=async ev=>{ev.stopPropagation();const a=e.dataset.act,p=e.dataset.p;try{if(a==='download'){location.href='?panel=files&fm_action=download&path='+encodeURIComponent(p);return}if(a==='delete'){if(!confirm('این مورد و تمام محتوای آن حذف شود؟'))return;await api('delete',{path:p})}if(a==='rename'){const n=prompt('نام جدید:',e.dataset.name);if(!n)return;await api('rename',{path:p,name:n})}if(a==='copy'||a==='move'){const d=prompt('مسیر کامل مقصد نسبت به ROOT:',p);if(!d||d===p)return;await api(a,{source:p,destination:d})}toast('عملیات با موفقیت انجام شد');load(current)}catch(x){toast(x.message)}})}
+async function upload(files){if(!files.length)return;const f=new FormData();f.append('path',current);[...files].forEach(x=>f.append('files[]',x));try{const d=await api('upload',f);toast(d.message);load(current)}catch(e){toast(e.message)}}
+$('#uploadBtn').onclick=()=>$('#picker').click();$('#picker').onchange=e=>upload(e.target.files);$('#refresh').onclick=()=>load(current);$('#newFolder').onclick=async()=>{const n=prompt('نام پوشه جدید:');if(!n)return;try{await api('mkdir',{path:current,name:n});load(current)}catch(e){toast(e.message)}};$('#newFile').onclick=async()=>{const n=prompt('نام فایل جدید:');if(!n)return;try{await api('create',{path:current,name:n});load(current)}catch(e){toast(e.message)}};$('#logout').onclick=async()=>{await api('logout',{});location.reload()};const drop=$('#drop');['dragenter','dragover'].forEach(n=>drop.addEventListener(n,e=>{e.preventDefault();drop.classList.add('over')}));['dragleave','drop'].forEach(n=>drop.addEventListener(n,e=>{e.preventDefault();drop.classList.remove('over')}));drop.ondrop=e=>upload(e.dataTransfer.files);load();
+JS;
+    $script = str_replace('__CSRF__', $csrfJson ?: '""', $script);
+    echo str_replace(['__BODY__', '__SCRIPT__'], [$body, $script], $html);
+}
+
+function handleFileManager(): void
+{
+    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+    session_name('PARS_FM');
+    session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'secure' => $secure, 'httponly' => true, 'samesite' => 'Strict']);
+    session_start();
+    $action = isset($_GET['fm_action']) && is_string($_GET['fm_action']) ? $_GET['fm_action'] : '';
+    $password = envString('FILE_MANAGER_PASSWORD');
+    if ($password === '') {
+        fmRender(false, 'فایل‌منیجر غیرفعال است؛ FILE_MANAGER_PASSWORD را تنظیم کنید.');
+        exit;
+    }
+
+    if ($action === 'login' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+        $attempts = (int) ($_SESSION['fm_attempts'] ?? 0);
+        $lockedUntil = (int) ($_SESSION['fm_locked_until'] ?? 0);
+        if ($lockedUntil > time()) {
+            fmRender(false, 'تلاش‌های ناموفق زیاد است؛ کمی بعد دوباره امتحان کنید.');
+            exit;
+        }
+        $given = isset($_POST['password']) && is_string($_POST['password']) ? $_POST['password'] : '';
+        if (hash_equals($password, $given)) {
+            session_regenerate_id(true);
+            $_SESSION['fm_auth'] = true;
+            $_SESSION['fm_csrf'] = bin2hex(random_bytes(24));
+            $_SESSION['fm_attempts'] = 0;
+            header('Location: ?panel=files');
+            exit;
+        }
+        $attempts++;
+        $_SESSION['fm_attempts'] = $attempts;
+        if ($attempts >= 5) {
+            $_SESSION['fm_locked_until'] = time() + 300;
+            $_SESSION['fm_attempts'] = 0;
+        }
+        fmRender(false, 'رمز واردشده صحیح نیست.');
+        exit;
+    }
+
+    if (($_SESSION['fm_auth'] ?? false) !== true) {
+        fmRender(false);
+        exit;
+    }
+    if (!isset($_SESSION['fm_csrf'])) $_SESSION['fm_csrf'] = bin2hex(random_bytes(24));
+
+    try {
+        if ($action === 'download' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'GET') {
+            $path = fmPath((string) ($_GET['path'] ?? ''));
+            if (!is_file($path) || is_link($path)) throw new RuntimeException('فایل قابل دانلود نیست.');
+            header('Content-Type: application/octet-stream');
+            header('Content-Length: ' . filesize($path));
+            header("Content-Disposition: attachment; filename*=UTF-8''" . rawurlencode(basename($path)));
+            header('X-Content-Type-Options: nosniff');
+            readfile($path);
+            exit;
+        }
+
+        if ($action === 'list' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'GET') {
+            $rel = fmCleanRel((string) ($_GET['path'] ?? ''));
+            $dir = fmPath($rel);
+            if (!is_dir($dir)) throw new RuntimeException('مسیر یک پوشه نیست.');
+            $items = [];
+            foreach (scandir($dir) ?: [] as $name) {
+                if ($name === '.' || $name === '..') continue;
+                $full = $dir . DIRECTORY_SEPARATOR . $name;
+                if (is_link($full)) continue;
+                $isDir = is_dir($full);
+                $itemRel = ltrim(($rel !== '' ? $rel . '/' : '') . $name, '/');
+                $items[] = ['name' => $name, 'path' => $itemRel, 'type' => $isDir ? 'folder' : 'file', 'size' => $isDir ? null : (@filesize($full) ?: 0), 'modified' => date('Y-m-d H:i', @filemtime($full) ?: time()), 'permissions' => substr(sprintf('%o', @fileperms($full) ?: 0), -4)];
+            }
+            usort($items, fn($a, $b) => $a['type'] === $b['type'] ? strnatcasecmp($a['name'], $b['name']) : ($a['type'] === 'folder' ? -1 : 1));
+            fmJson(['ok' => true, 'path' => $rel, 'items' => $items]);
+        }
+
+        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+            fmRender(true);
+            exit;
+        }
+        fmRequireCsrf();
+        $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+        $data = str_starts_with($contentType, 'application/json') ? json_decode(file_get_contents('php://input') ?: '{}', true) : $_POST;
+        if (!is_array($data)) $data = [];
+
+        if ($action === 'logout') {
+            $_SESSION = [];
+            session_destroy();
+            fmJson(['ok' => true]);
+        }
+        if ($action === 'mkdir' || $action === 'create') {
+            $parentRel = fmCleanRel((string) ($data['path'] ?? ''));
+            $name = fmValidName((string) ($data['name'] ?? ''));
+            if ($action === 'create' && fmBlockedFile($name)) throw new RuntimeException('ساخت این نوع فایل به دلایل امنیتی مجاز نیست.');
+            $targetRel = ($parentRel !== '' ? $parentRel . '/' : '') . $name;
+            $target = fmPath($targetRel, false);
+            if (file_exists($target)) throw new RuntimeException('موردی با این نام وجود دارد.');
+            $ok = $action === 'mkdir' ? @mkdir($target, 0750) : @touch($target);
+            if (!$ok) throw new RuntimeException('ساخت مورد جدید ممکن نشد.');
+            fmJson(['ok' => true]);
+        }
+        if ($action === 'rename') {
+            $source = fmPath((string) ($data['path'] ?? ''));
+            if ($source === fmRoot()) throw new RuntimeException('تغییر نام ریشه مجاز نیست.');
+            $name = fmValidName((string) ($data['name'] ?? ''));
+            if (is_file($source) && fmBlockedFile($name)) throw new RuntimeException('این پسوند مجاز نیست.');
+            $dest = dirname($source) . DIRECTORY_SEPARATOR . $name;
+            if (file_exists($dest) || !@rename($source, $dest)) throw new RuntimeException('تغییر نام ممکن نشد.');
+            fmJson(['ok' => true]);
+        }
+        if ($action === 'delete') {
+            $path = fmPath((string) ($data['path'] ?? ''));
+            if ($path === fmRoot()) throw new RuntimeException('حذف ریشه مجاز نیست.');
+            fmDeleteTree($path);
+            fmJson(['ok' => true]);
+        }
+        if ($action === 'copy' || $action === 'move') {
+            $source = fmPath((string) ($data['source'] ?? ''));
+            if ($source === fmRoot()) throw new RuntimeException('انتقال یا کپی ریشه مجاز نیست.');
+            $destinationRel = fmCleanRel((string) ($data['destination'] ?? ''));
+            if ($destinationRel === '') throw new RuntimeException('مسیر مقصد نمی‌تواند ریشه باشد.');
+            $destination = fmPath($destinationRel, false);
+            if (file_exists($destination)) throw new RuntimeException('مقصد از قبل وجود دارد.');
+            if (is_file($source) && fmBlockedFile(basename($destination))) throw new RuntimeException('این پسوند مجاز نیست.');
+            if (is_dir($source) && fmInside($destination, $source)) throw new RuntimeException('پوشه را نمی‌توان داخل خودش قرار داد.');
+            if ($action === 'copy') fmCopyTree($source, $destination);
+            else {
+                if (!@rename($source, $destination)) {
+                    fmCopyTree($source, $destination);
+                    fmDeleteTree($source);
+                }
+            }
+            fmJson(['ok' => true]);
+        }
+        if ($action === 'upload') {
+            $parent = fmPath((string) ($data['path'] ?? ''));
+            if (!is_dir($parent)) throw new RuntimeException('مسیر آپلود معتبر نیست.');
+            $files = $_FILES['files'] ?? null;
+            if (!is_array($files) || !isset($files['name']) || !is_array($files['name'])) throw new RuntimeException('فایلی دریافت نشد.');
+            $max = envInt('FILE_MANAGER_MAX_UPLOAD_BYTES', 20 * 1024 * 1024, 1, 200 * 1024 * 1024);
+            $done = 0;
+            foreach ($files['name'] as $i => $rawName) {
+                $name = fmValidName(basename((string) $rawName));
+                if (fmBlockedFile($name)) throw new RuntimeException('آپلود فایل اجرایی یا تنظیماتی مجاز نیست: ' . $name);
+                if (($files['error'][$i] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) throw new RuntimeException('آپلود فایل ناموفق بود: ' . $name);
+                if ((int) ($files['size'][$i] ?? 0) > $max) throw new RuntimeException('حجم فایل بیش از حد مجاز است: ' . $name);
+                $target = $parent . DIRECTORY_SEPARATOR . $name;
+                if (file_exists($target)) throw new RuntimeException('فایل از قبل وجود دارد: ' . $name);
+                if (!is_uploaded_file($files['tmp_name'][$i]) || !@move_uploaded_file($files['tmp_name'][$i], $target)) throw new RuntimeException('ذخیره فایل ممکن نشد: ' . $name);
+                @chmod($target, 0640);
+                $done++;
+            }
+            fmJson(['ok' => true, 'message' => $done . ' فایل آپلود شد.']);
+        }
+        fmJson(['ok' => false, 'message' => 'عملیات ناشناخته است.'], 404);
+    } catch (Throwable $e) {
+        fmJson(['ok' => false, 'message' => $e->getMessage()], 400);
+    }
 }
 
 // ---------- CORS ----------
@@ -277,6 +609,11 @@ if ($method === 'OPTIONS') {
 if (!in_array($method, ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'], true)) {
     header('Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD');
     sendJsonError(405, 'method_not_allowed', 'این متد پشتیبانی نمی‌شود.');
+}
+
+if (isset($_GET['panel']) && $_GET['panel'] === 'files') {
+    handleFileManager();
+    exit;
 }
 
 if (!extension_loaded('curl')) {
