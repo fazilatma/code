@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.64';
+const APP_VERSION = '9.65';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12191,6 +12191,13 @@ if (isset($_GET['selftest'])) {
     $add('9.64', 'با فعال بودنِ «فقط سبزها»، هر ردیفِ به‌روزرسانی‌شده هم بر اساس همان فیلتر نمایش داده می‌شود',
          strpos($selfSrc, 'aiTestApply' . 'GreenFilter();   // v9.64') !== false);
 
+    /* ---------- v9.65: رفعِ خالی بودنِ تب‌های نوار پایین ---------- */
+    $add('9.65', 'اگر پنلِ درخواست‌شدهٔ تب وجود نداشته باشد، هیچ پنلی خالی نمی‌شود',
+         strpos($selfSrc, "const target=document.getElementById('pane-'+name);") !== false
+         && strpos($selfSrc, 'if(target){') !== false);
+    $add('9.65', 'profiles هنگام راه‌اندازی به‌صورت دفاعی به آرایه تبدیل می‌شود تا اسکریپت نایستد',
+         strpos($selfSrc, 'if(!Array.isArray(profiles)) profiles=[];') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -23645,7 +23652,13 @@ function scheduleSave() {
 
 function switchMainTab(name) {
     document.querySelectorAll('.main-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
-    document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
+    // v9.65: اگر پنلِ درخواست‌شده وجود نداشته باشد (مثلاً نامِ اشتباه)، هیچ پنلی را
+    // خالی نکن. قبلاً switchMainTab('profiles') همهٔ پنل‌ها را deactivate می‌کرد
+    // چون پنلی به نام pane-profiles وجود ندارد → کل محتوای تب‌ها خالی دیده می‌شد.
+    const target=document.getElementById('pane-'+name);
+    if(target){
+        document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p === target));
+    }
     // v8.88: روی موبایل صفحه را به بالا نپران
     softScrollTo({top:0,behavior:'smooth'});
     try { history.replaceState(null, '', '#' + name); } catch(e) {}
@@ -24196,6 +24209,9 @@ function onUrlChange() {
 }
 
 function renderProfileDropdown() {
+    // v9.65: اگر profiles.json خراب/غیر-آرایه باشد، کل اسکریپت هنگام راه‌اندازی
+    // با «profiles.forEach is not a function» می‌ایستد و محتوای تب‌ها خالی می‌ماند.
+    if(!Array.isArray(profiles)) profiles=[];
     const sel = $('profileSelect');
     sel.innerHTML = '<option value="">-- انتخاب سایت (' + profiles.length + ') --</option>';
     profiles.forEach(p => {
@@ -26426,6 +26442,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.65', t:'🛠 رفعِ «خالی بودنِ تب‌های نوار پایین» (منوی فوتر)', items:[
+    'گزارش شما: همهٔ تب‌های منوی فوتر (نوار پایین) صفحهٔ خالی نشان می‌دادند.', '✅ منطقِ تعویضِ تب‌ها را با یک شبیه‌ساز مرورگر (jsdom) بررسی کردم: خودِ تابع', 'درست کار می‌کند و هر تب پنلِ خودش را باز می‌کند.', '🐞 دو ریشهٔ احتمالیِ «خالی شدن» پیدا و رفع شد:', '۱) در دو مسیر (استخراج تفصیلی/همگام‌سازی بدون انتخابِ پروفایل) تابع با نامِ', 'profiles صدا زده می‌شد در حالی که پنلی به این نام وجود ندارد؛ نسخهٔ قبلیِ', 'تابع در این حالت همهٔ پنل‌ها را deactivate می‌کرد و محتوا خالی می‌شد. حالا اگر', 'پنلِ درخواست‌شده موجود نباشد، هیچ پنلی خالی نمی‌شود.', '۲) اگر فایلِ profiles.json خراب/غیر-آرایه می‌شد، هنگام راه‌اندازی کل اسکریپت', 'با خطای «forEach is not a function» می‌ایستاد و محتوای تب‌ها خالی می‌ماند.', 'حالا به‌صورت دفاعی به آرایه تبدیل می‌شود و برنامه بدون توقف بالا می‌آید.', '⚠️ اگر بعد از این باز هم تب‌ها خالی بودند، حتماً نسخهٔ v9.65 را واقعاً', 'جایگزین فایلِ روی هاست کرده و رفرشِ سخت (Ctrl+F5) بزنید؛ کشِ قدیمی مرورگر', 'نسخهٔ قبلی را نشان می‌دهد.'],},
   {v:'9.64', t:'🔘 سوییچِ «فقط سبزها» در جدولِ نتایجِ تست مدل‌ها', items:[
     'خواستهٔ شما: در جدولِ نتایجِ تستِ مدل‌های هوش مصنوعی، یک تیکِ اسلایدری برای', 'نمایشِ فقط مدل‌های دارای چراغ سبز (موفق/در دسترس) تعبیه شود.', '✅ در نوارِ آمارِ بالای مودالِ نتایج، یک سوییچِ اسلایدریِ «فقط سبزها» اضافه', 'شد.', '✅ وقتی روشن باشد، فقط ردیف‌های موفق (🟢) در جدول دیده می‌شوند و ردیف‌های', 'ناموفق (🔴) و در انتظار (⏳) پنهان می‌شوند.', '✅ هنگام تستِ زنده هم اگر سوییچ روشن باشد، هر ردیفی که تازه سبز/قرمز می‌شود', 'بر اساس همین فیلتر نمایش داده/مخفی می‌شود — لازم نیست منتظر پایانِ تست بمانید.', '✅ دوباره که خاموشش کنید همهٔ ردیف‌ها برمی‌گردند.'],},
   {v:'9.63', t:'🚦 روشن/خاموش کردن انفرادیِ ارائه‌دهنده‌های هوش مصنوعی', items:[
