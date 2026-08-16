@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.58';
+const APP_VERSION = '9.59';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -9190,6 +9190,27 @@ if (isset($_GET['backup_download'])) {
     readfile($p);
     exit;
 }
+/* v9.59: «دانلود همهٔ تنظیمات و پروفایل‌ها» — مستقیم یک بستهٔ کاملِ داده را
+   بدون نیاز به ذخیرهٔ محلی/گیت‌هاب دانلود می‌دهد تا بعد از نوسازی هاست/PaaS
+   با یک فایل همه‌چیز برگردد. فقط فایل‌های داده (پروفایل‌ها، تنظیمات، صف‌ها،
+   یادگیری و...) را شامل می‌شود؛ کد و کلیدهای حساس را نه. */
+if (isset($_GET['backup_export'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cfg = backupCfg();
+    $cfg['include_data'] = true;
+    $cfg['include_code'] = false;
+    $bundle = backupBuildBundle($cfg);
+    if (empty($bundle['files'])) {
+        echo json_encode(['ok' => false, 'error' => 'هیچ فایل داده‌ای پیدا نشد — هنوز پروفایل/تنظیماتی ذخیره نشده'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $bundle['kind'] = 'settings-export';
+    $name = 'settings_' . date('Ymd_His') . '.json';
+    header('Content-Disposition: attachment; filename="' . $name . '"');
+    header('Content-Length: ' . strlen(json_encode($bundle, JSON_UNESCAPED_UNICODE)));
+    echo json_encode($bundle, JSON_UNESCAPED_UNICODE);
+    exit;
+}
 /* فهرست بکاپ‌های موجود روی گیت‌هاب */
 if (isset($_GET['backup_remote_list'])) {
     header('Content-Type: application/json; charset=UTF-8');
@@ -12088,6 +12109,17 @@ if (isset($_GET['selftest'])) {
     $add('9.58', 'بخش هوش مصنوعی به کادرهای منطقی (ارائه‌دهنده/تست/کاندید/اتصال) دسته‌بندی شده است',
          substr_count($selfSrc, 'background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:10px') >= 3
          && strpos($selfSrc, '<!-- ══ بخش ۲: تست مدل‌ها ══ -->') !== false);
+
+    /* ---------- v9.59: ذخیره و بازیابی همهٔ تنظیمات (بالای منوی تنظیمات) ---------- */
+    $add('9.59', 'بخش «ذخیره و بازیابی همهٔ تنظیمات» در بالای منوی تنظیمات اضافه شده',
+         (strpos($selfSrc, 'id="sxDownloadAll"') !== false || strpos($selfSrc, 'sxDownloadAll()') !== false)
+         && strpos($selfSrc, 'sxRestoreAll()') !== false);
+    $add('9.59', 'اندپوینتِ دانلود مستقیمِ همهٔ داده‌ها (backup_export)',
+         strpos($selfSrc, 'if (isset($_GET[\'backup_export\']))') !== false
+         && strpos($selfSrc, "'kind' => 'settings-export'") !== false);
+    $add('9.59', 'دانلود و بازیابی همهٔ داده‌ها از طریق فایل‌های JS',
+         strpos($selfSrc, 'function sxDownloadAll') !== false
+         && strpos($selfSrc, 'function sxRestoreAll') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -21557,6 +21589,30 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="settings-panel-head"><h2>☰ تنظیمات عمومی</h2><button class="btn btn-gray" onclick="toggleSettingsPanel()" style="font-size:14px;padding:4px 10px">✕</button></div>
 <div class="settings-panel-body" style="padding:0">
 
+<!-- v9.59: ذخیره (دانلود) و بازیابی همهٔ تنظیمات — برای جابه‌جایی/نوسازی هاست یا PaaS -->
+<div class="smenu">
+<div class="smenu-hdr" style="background:linear-gradient(90deg,#134e4a,#0f172a)" onclick="toggleSmenu(this)"><h3>💾 ذخیره و بازیابی همهٔ تنظیمات</h3><span class="cst off" id="sxBadge">—</span><span class="arrow">▼</span></div>
+<div class="smenu-body" style="padding:0">
+<div style="font-size:10.5px;color:#94a3b8;line-height:1.8;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px 10px;margin-bottom:10px">
+همهٔ داده‌های این نصب — <b>پروفایل‌ها، تنظیمات اتصال، صف‌ها، حافظهٔ یادگیری دسته‌بندی، قواعد پاسخ خودکار و...</b> —
+را در یک فایل <code style="direction:ltr">settings_*.json</code> دانلود کنید و بعد از نوسازیِ هاست/سرور/PaaS
+با همین یک فایل دوباره بارگذاری کنید. <b style="color:#fbbf24">این فایل حاوی کلیدها و داده‌های شماست؛ آن را امن نگه دارید.</b>
+</div>
+<div class="cact" style="margin-top:0">
+<button class="btn btn-green" onclick="sxDownloadAll()" style="flex:1">⬇ دانلود همهٔ تنظیمات و پروفایل‌ها</button>
+</div>
+<div style="display:flex;gap:6px;align-items:center;margin-top:8px">
+<input type="file" id="sxFile" accept=".json" style="flex:1;font-size:10px">
+<button class="btn btn-orange" onclick="sxRestoreAll()" style="flex:0 0 auto;font-size:11px">♻️ بارگذاری و بازیابی</button>
+</div>
+<div style="font-size:10px;color:#64748b;margin-top:6px;line-height:1.7">
+بازیابی فایلِ فعلی را جایگزین می‌کند؛ از هر فایلِ عوض‌شده یک کپی <code style="direction:ltr">.before-restore</code> کنارش می‌ماند.
+بعد از بازیابی، صفحه را رفرش کنید.
+</div>
+<div class="status" id="sxStatus" style="margin-top:8px;text-align:center">—</div>
+</div>
+</div>
+
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>📜 تغییرات نسخه‌ها</h3><span class="cst off">v<?=APP_VERSION?></span><span class="arrow">▼</span></div>
 <div class="smenu-body">
@@ -26239,6 +26295,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.59', t:'💾 ذخیره و بازیابی همهٔ تنظیمات و پروفایل‌ها', items:[
+    'خواستهٔ شما: یک بخش «ذخیره/دانلود و بازیابی همهٔ تنظیمات سایت (شامل', 'پروفایل‌ها و...)» در بالای منوی تنظیمات اضافه شود تا بعد از نوسازی هاست،', 'سرور یا PaaS به‌راحتی همه‌چیز برگردد.', '✅ بخش «💾 ذخیره و بازیابی همهٔ تنظیمات» به‌عنوان اولین آیتمِ منوی تنظیمات', '(☰ همبرگری) اضافه شد.', '✅ دکمهٔ «⬇ دانلود همهٔ تنظیمات و پروفایل‌ها» همهٔ داده‌ها را در یک فایل', '<code>settings_*.json</code> دانلود می‌کند: پروفایل‌ها، تنظیمات اتصال، صف‌ها،', 'حافظهٔ یادگیری دسته‌بندی، قواعد/وضعیت پاسخ خودکار، remote_map و بقیهٔ فایل‌های', 'داده — بدون نیاز به گیت‌هاب.', '✅ دکمهٔ «♻️ بارگذاری و بازیابی» همان فایل را انتخاب و همه‌چیز را برمی‌گرداند', '(از فایل‌های فعلی یک کپی .before-restore کنارشان می‌ماند) و صفحه را رفرش', 'می‌کند.', '✅ اندپوینتِ جدید <code>backup_export</code> بستهٔ داده را مستقیم دانلود می‌دهد.', '⚠️ این فایل حاوی کلیدها و داده‌های شماست؛ آن را امن نگه دارید.'],},
   {v:'9.58', t:'🧭 بازآراییِ بخش هوش مصنوعی + دکمهٔ «نمایش جدول»', items:[
     'خواستهٔ شما: به‌جای دکمهٔ «تست تازه»، دکمهٔ «نمایش جدول» بگذاریم و بخش هوش', 'مصنوعی را از نظر منطقی/بصری/مفهومی بازبینی کنیم.', '✅ دکمهٔ «📊 نمایش جدول» جایگزین «تست تازه» شد: جدولِ نتایجِ ذخیره‌شده را', 'باز می‌کند و نشان می‌دهد بدون شروعِ تستِ تازه؛ اگر تستی در جریان باشد همان', 'جا زنده به‌روز می‌شود.', '✅ بخش هوش مصنوعی به چند کادرِ منطقی و مجزا دسته‌بندی شد:', '۱) 🧠 ارائه‌دهنده‌ها (درون‌ریزی JSON + انتخاب ارائه‌دهنده/مدل فعال)', '۲) 🧪 تست مدل‌ها (سقف، پیام، دسته، تاخیر، فقط-تست‌نشده + شروع/ادامه و نمایش جدول)', '۳) 📋 مدل‌های ارائه‌دهندهٔ انتخاب‌شده (فهرست با تیک سبز/قرمز)', '۴) 🏆 مدل‌های کاندید + مستر (با دکمهٔ افزودنِ همهٔ در دسترس)', '۵) 🌐 روش اتصال (عبور از محدودیت)', '✅ هر کادر پس‌زمینه و حاشیهٔ مجزا دارد تا دسته‌ها از نظر بصری هم از هم جدا', 'دیده شوند و مکانِ هر تنظیم واضح‌تر باشد.'],},
   {v:'9.57', t:'🔍 رفعِ «پاسخ داده» بدونِ پاسخ واقعی (مدل‌های reasoning)', items:[
@@ -29551,6 +29609,44 @@ function bkRestoreUpload(){
         bkRefresh();
     }).catch(()=>bkSet('❌ خطای شبکه','#f87171'));
 }
+
+/* v9.59: «دانلود همهٔ تنظیمات و پروفایل‌ها» از بالای منوی تنظیمات */
+function sxDownloadAll(){
+    sxSet('⏳ در حال بسته‌بندی داده‌ها...','#67e8f9');
+    fetch('?backup_export=1').then(r=>{
+        if(!r.ok)return r.json().then(d=>{throw new Error((d&&d.error)||('HTTP '+r.status));});
+        const cd=r.headers.get('Content-Disposition')||'';
+        const m=cd.match(/filename="?([^";]+)"?/);
+        const name=(m&&m[1])?m[1]:('settings_'+Date.now()+'.json');
+        return r.blob().then(b=>{return {blob:b,name:name};});
+    }).then(({blob,name})=>{
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a');
+        a.href=url;a.download=name;
+        document.body.appendChild(a);a.click();
+        document.body.removeChild(a);URL.revokeObjectURL(url);
+        sxSet('✅ دانلود شد: <code style="direction:ltr">'+esc(name)+'</code> — آن را امن نگه دارید','#4ade80');
+        showToast('✅ فایل تنظیمات دانلود شد');
+    }).catch(e=>sxSet('❌ '+esc(e.message||'خطا'),'#f87171'));
+}
+/* v9.59: «بارگذاری و بازیابی» از بالای منوی تنظیمات */
+function sxRestoreAll(){
+    const f=($('sxFile')||{}).files;
+    if(!f||!f.length){showToast('اول فایل تنظیمات را انتخاب کنید',1);return;}
+    if(!confirm('همهٔ تنظیمات و پروفایل‌ها از این فایل بارگذاری و جایگزین شوند؟\nاز فایل‌های فعلی یک کپی .before-restore کنارشان می‌ماند.'))return;
+    const fd=new FormData();
+    fd.append('action','backup_restore');
+    fd.append('source','upload');
+    fd.append('file',f[0]);
+    sxSet('⏳ در حال بارگذاری و بازیابی...','#67e8f9');
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){sxSet('❌ '+esc((d&&d.error)||'بازیابی نشد'),'#f87171');return;}
+        sxSet('✅ '+toFa((d.restored||[]).length)+' فایل بارگذاری شد — صفحه را رفرش کنید','#4ade80');
+        showToast('✅ تنظیمات بازیابی شد — صفحه را رفرش کنید');
+        setTimeout(()=>location.reload(),1200);
+    }).catch(()=>sxSet('❌ خطای شبکه','#f87171'));
+}
+function sxSet(m,color){const e=$('sxStatus');if(e)e.innerHTML=m&&color?('<span style="color:'+color+'">'+m+'</span>'):m;}
 
 function renderChangelog(){
   const box=$('changelogBox');
