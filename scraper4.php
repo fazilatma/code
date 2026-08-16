@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.60';
+const APP_VERSION = '9.61';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12132,6 +12132,16 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, '🏆 کاندید + مستر') !== false
          && strpos($selfSrc, '🌐 اتصال') !== false);
 
+    /* ---------- v9.61: دکمهٔ تمام‌عرض منو + رفعِ خالی بودنِ تب‌های هوش مصنوعی ---------- */
+    $add('9.61', 'دکمهٔ «تمام عرض کردن منو» (⛶) کنار همبرگر اضافه شده',
+         strpos($selfSrc, 'class="fullwidth' . '-btn" id="full' . 'Btn"') !== false
+         && strpos($selfSrc, 'function toggleFull' . 'Settings(') !== false);
+    $add('9.61', 'پنل تنظیمات در حالت تمام‌عرض، عرضِ کامل صفحه و بی‌سقف می‌شود',
+         strpos($selfSrc, '.settings-panel.full' . '{width:100vw') !== false
+         && strpos($selfSrc, '.settings-panel.full .smenu-body.open' . '{max-height:none') !== false);
+    $add('9.61', 'تبِ انتخاب‌شدهٔ هوش مصنوعی صریحاً display:block می‌گیرد تا هیچ تب‌ای خالی نماند',
+         strpos($selfSrc, "===tab)?'blo" . "ck':'none';") !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -21520,6 +21530,9 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 .bsl-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100001;display:flex;align-items:center;justify-content:center;padding:10px}.bsl-modal{background:#0f172a;border:1px solid #334155;border-radius:14px;max-width:95vw;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;width:900px}.bsl-modal-head{padding:12px 16px;background:#1e293b;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between}.bsl-modal-head h2{margin:0;font-size:15px;color:#67e8f9}.bsl-modal-body{overflow:auto;flex:1;padding:8px}.bsl-modal-table{width:100%;border-collapse:collapse;font-size:11px}.bsl-modal-table th{background:#1e293b;color:#67e8f9;padding:8px;text-align:center;font-size:11px;border:1px solid #334155;white-space:nowrap}
 .bsl-modal-table td{padding:6px 8px;border:1px solid #1e293b;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bsl-modal-table td.td-name{max-width:none;white-space:normal;overflow:visible;line-height:1.4;font-size:12px;direction:rtl;unicode-bidi:plaintext}.bsl-modal-table tr:hover td{background:#1e293b80}.bsl-modal-table .td-id{color:#94a3b8;font-family:monospace;text-align:center}.bsl-modal-table .td-price{color:#fbbf24;font-family:monospace;text-align:center;direction:ltr}.bsl-modal-table .td-stock{color:#22c55e;text-align:center}.bsl-modal-table .td-status{text-align:center}.bsl-modal-table .td-img{width:40px;height:40px;object-fit:cover;border-radius:4px}.bsl-modal-pager{padding:8px 16px;background:#1e293b;border-top:1px solid #334155;display:flex;align-items:center;justify-content:center;gap:8px}
 .bsl-tabs{display:flex;gap:2px;padding:0 12px;background:#1e293b;border-bottom:1px solid #334155;flex-wrap:wrap;direction:rtl}.bsl-tab{padding:6px 12px;font-size:11px;color:#94a3b8;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap;border-radius:6px 6px 0 0}.bsl-tab:hover{color:#e2e8f0;background:#334155}.bsl-tab.active{color:#67e8f9;border-bottom-color:#67e8f9;background:#0f172a;font-weight:700}.bsl-tab .tab-count{font-size:9px;color:#64748b;margin-right:2px}.hamburger-btn{position:fixed;top:10px;left:10px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.hamburger-btn:hover{background:#334155}
+/* v9.61: دکمهٔ «تمام‌عرض کردن منو» کنار همبرگر — پنل تنظیمات را به‌جای
+   ۴۰۰ پیکسل، تمام عرض صفحه می‌کند تا همهٔ محتوا/بخش‌ها در یک نگاه باز شوند. */
+.fullwidth-btn{position:fixed;top:10px;left:60px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.fullwidth-btn:hover{background:#334155}.fullwidth-btn.active{background:#7c3aed;color:#fff}.settings-panel.full{width:100vw;max-width:100vw;left:0}.settings-panel.full .smenu-body.open{max-height:none;overflow:visible}
 .hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:1;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}
 .smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}.live-cnt{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:8px 0}.live-cnt .lc{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;cursor:pointer;transition:.15s;display:flex;flex-direction:column;gap:1px}
 /* v9.60: تب‌های بخش هوش مصنوعی */
@@ -21534,6 +21547,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 </head>
 <body>
 <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleSettingsPanel()">☰</button>
+<button class="fullwidth-btn" id="fullBtn" onclick="toggleFullSettings()" title="تمام عرض کردن منو و محتویات آن">⛶</button>
 <div class="container">
 <h1>🛒 اسکرپر
   <span class="app-ver" id="appVer" title="نسخهٔ کد — برای بررسی به‌روزرسانی کلیک کنید"
@@ -23554,6 +23568,10 @@ function switchMainTab(name) {
 }
 // v8.17: Settings panel toggle
 function toggleSettingsPanel(){const p=document.getElementById('settingsPanel');const o=document.getElementById('settingsOverlay');const b=document.getElementById('hamburgerBtn');if(p.classList.contains('open')){p.classList.remove('open');o.classList.remove('open');if(b)b.classList.remove('active');}else{p.classList.add('open');o.classList.add('open');if(b)b.classList.add('active');}}
+// v9.61: تمام‌عرض کردن پنل تنظیمات (منو و محتویاتش). اگر منو بسته باشد اول باز
+// می‌شود؛ کلاس .full روی پنل عرض را به 100vw و سقف‌های .smenu-body را بی‌سقف می‌کند
+// تا هیچ بخشی گیر و بریده نماند.
+function toggleFullSettings(){const p=document.getElementById('settingsPanel');const b=document.getElementById('fullBtn');if(!p)return;if(!p.classList.contains('open')){toggleSettingsPanel();}const full=p.classList.toggle('full');if(b)b.classList.toggle('active',full);}
 function toggleSmenu(hdr){const isOpen=hdr.classList.contains('open');hdr.classList.toggle('open');const body=hdr.nextElementSibling;if(body){if(isOpen){body.classList.remove('open');}else{body.classList.add('open');}}}
 // v8.17: Per-profile fallback categories
 let bslProfileFallbackCats=[];
@@ -26324,6 +26342,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.61', t:'⛶ دکمهٔ تمام‌عرضِ منو + رفعِ خالی بودنِ تب‌های هوش مصنوعی', items:[
+    'خواستهٔ شما: یک دکمه کنار همبرگر (سه خط موازی) برای «تمام عرض کردن» منو و', 'محتویات آن اضافه شود.', '✅ دکمهٔ «⛶» کنار همبرگر اضافه شد؛ با کلیک روی آن، پنل تنظیمات به‌جای ۴۰۰', 'پیکسل، تمام عرض صفحه باز می‌شود و سقفِ ارتفاعِ بخش‌ها برداشته می‌شود تا همهٔ', 'محتوا در یک نگاه دیده شود (کلیک دوباره برمی‌گردد). اگر منو بسته باشد اول باز می‌شود.', '🐞 گزارش شما: بعد از تب‌دار شدن بخش هوش مصنوعی، محتویات همهٔ تب‌ها (تست،', 'مدل‌ها، کاندید، اتصال) خالی می‌شدند و دیده نمی‌شدند.', 'ریشهٔ کار: تابعِ تعویضِ تب، برای تبِ انتخاب‌شده display را خالی می‌گذاشت (یعنی', 'استایل درون‌خطی را برمی‌داشت). ولی فقط تبِ «ارائه‌دهنده‌ها» کلاس .active را', 'دارد که CSS آن را block می‌کند؛ بقیهٔ تب‌ها چنین کلاسی ندارند و با CSS پایه', 'display:none مخفی می‌ماندند — پس با کلیک رویشان صفحه خالی می‌شد.', '✅ حالا تبِ انتخاب‌شده صریحاً display:block می‌گیرد و همهٔ تب‌ها به‌درستی', 'محتوا و تنظیماتِ خودشان را نشان می‌دهند.'],},
   {v:'9.60', t:'🗂 بخش هوش مصنوعی تب‌دار و منظم شد', items:[
     'گزارش شما: بعضی بخش‌های هوش مصنوعی (مثل «روش اتصال» و «تست دسته») پیدا', 'نمی‌شد. ریشهٔ کار: بخش هوش مصنوعی یک ستونِ بلندِ عمودی بود و وقتی از حدِ', 'ارتفاعِ منو بیشتر می‌شد، بخش‌های پایین بریده می‌شدند و دیده نمی‌شدند.', '✅ بخش هوش مصنوعی حالا به ۵ تب تقسیم شده است:', '۱) 🧠 ارائه‌دهنده‌ها (درون‌ریزی JSON + انتخاب مدل فعال)', '۲) 🧪 تست مدل‌ها (سقف، پیام، دسته، تاخیر + شروع/ادامه و نمایش جدول)', '۳) 📋 مدل‌ها (فهرست مدل‌های ارائه‌دهندهٔ انتخابی)', '۴) 🏆 کاندید + مستر (شامل «تست دسته همهٔ کاندیدها»، «تست پاسخ» و جدول امتیازات)', '۵) 🌐 اتصال (روش عبور از محدودیت + 🔗 تست، 🏷️ تست دسته، 🩺 عیب‌یابی، 💾 ذخیره)', '✅ هر تب فقط محتوای خودش را نشان می‌دهد، پس همه‌چیز مرتب و قابل‌دسترس است و', 'هیچ بخشی بریده یا پنهان نمی‌شود.'],},
   {v:'9.59', t:'💾 ذخیره و بازیابی همهٔ تنظیمات و پروفایل‌ها', items:[
@@ -30249,7 +30269,13 @@ function aiTab(tab){
     const btns=document.querySelectorAll('.ai-tab-btn');
     btns.forEach(b=>{b.classList.toggle('active', b.getAttribute('data-ai-tab')===tab);});
     const panels=document.querySelectorAll('.ai-tab-panel');
-    panels.forEach(p=>{p.style.display=(p.getAttribute('data-ai-panel')===tab)?'':'none';});
+    // v9.61: قبلاً اینجا برای تبِ انتخاب‌شده display='' می‌گذاشتیم که یعنی
+    // «استایل درون‌خطی را بردار». ولی فقط تبِ «ارائه‌دهنده‌ها» کلاس .active را
+    // دارد (CSS آن را display:block می‌کند)؛ بقیهٔ تب‌ها چنین کلاسی ندارند و با
+    // CSS پایه display:none می‌ماندند. نتیجه: با کلیک روی «تست/مدل‌ها/کاندید/
+    // اتصال» هیچ محتوایی دیده نمی‌شد (تب‌ها خالی). حالا برای تبِ انتخاب‌شده
+    // صریحاً display:block می‌گذاریم تا حتی تب‌های بدون کلاس .active هم باز شوند.
+    panels.forEach(p=>{p.style.display=(p.getAttribute('data-ai-panel')===tab)?'block':'none';});
 }
 function updateAiNetBadge(){
     const el=$('aiS'),m=($('aiNetMode')||{}).value||'direct';
