@@ -19,10 +19,10 @@
  *    X-Proxy-Time     → تایم‌اوت سفارشی (ثانیه، حداکثر ۳۰۰)
  *
  *  فالبک ورکر کلودفلر:
- *    اگر اتصال به مقصد ناموفق باشد، درخواست از طریق fallback_proxy
- *    (پیش‌فرض: https://proxy.fazilat-ma.workers.dev) رله می‌شود.
- *    ورکر باید همان API پارامتر ?url= را داشته باشد — کد آماده در
- *    cloudflare-worker.js.
+ *    اگر اتصال به مقصد ناموفق باشد، درخواست از طریق cloudflare_worker_url
+ *    (پیش‌فرض: https://proxy.fazilat-ma.workers.dev — اولین تنظیم در
+ *    $CONFIG) رله می‌شود. ورکر باید همان API پارامتر ?url= را داشته
+ *    باشد — کد آماده در cloudflare-worker.js.
  * =====================================================================
  */
 
@@ -30,6 +30,19 @@
 // [۱] تنظیمات — این بخش را مطابق نیاز خودتان تغییر دهید
 // ---------------------------------------------------------------------
 $CONFIG = [
+
+    // ╔══════════════════════════════════════════════════════════════╗
+    // ║  ☁️  آدرس ورکر کلودفلر  —  همین‌جا بگذارید یا عوض کنید        ║
+    // ╠══════════════════════════════════════════════════════════════╣
+    // ║  اگر اتصال مستقیم (یا از طریق پراکسی‌های بالادستی) به مقصد   ║
+    // ║  ناموفق باشد، درخواست به‌صورت خودکار از این ورکر رله می‌شود. ║
+    // ║  ورکر باید API پارامتر ?url= داشته باشد (کد آماده در فایل     ║
+    // ║  cloudflare-worker.js).  خالی = غیرفعال.                     ║
+    // ╚══════════════════════════════════════════════════════════════╝
+    'cloudflare_worker_url' => 'https://proxy.fazilat-ma.workers.dev',
+
+    'fallback_key'      => '',                    // کلید ورکر فالبک (اگر ورکر کلید داشته باشد)
+    'fallback_on_statuses' => [],                 // اگر مقصد این وضعیت‌ها را هم داد از فالبک استفاده کن؛ نمونه: [403, 451]
     'proxy_key'         => '',                    // کلید محافظت؛ خالی = بدون نیاز به کلید
     'allowed_domains'   => [],                    // لیست سفید؛ خالی = همهٔ دامنه‌ها مجاز. نمونه: ['barfbox.ir', '*.digikala.com']
     'blocked_domains'   => ['localhost', '127.0.0.1', '0.0.0.0'],
@@ -37,10 +50,6 @@ $CONFIG = [
     'rotate_upstream'   => true,                  // چرخش خودکار بین پراکسی‌های بالادستی
     'direct_first'      => true,                  // false = فقط از پراکسی بالادستی عبور کن، مستقیم تلاش نکن
     'retry_statuses'    => [403, 429, 503],       // اگر مقصد این وضعیت‌ها را داد، با پراکسی بالادستی بعدی دوباره تلاش کن
-    // فالبک ورکر کلودفلر (قابل تغییر) — در صورت شکست اتصال به مقصد از آن عبور می‌کند
-    'fallback_proxy'    => 'https://proxy.fazilat-ma.workers.dev', // خالی = غیرفعال
-    'fallback_key'      => '',                    // کلید ورکر فالبک (اگر ورکر کلید داشته باشد)
-    'fallback_on_statuses' => [],                 // اگر مقصد این وضعیت‌ها را هم داد از فالبک استفاده کن؛ نمونه: [403, 451]
     'timeout'           => 30,                    // تایم‌اوت کل هر درخواست (ثانیه)
     'connect_timeout'   => 10,                    // تایم‌اوت اتصال
     'max_redirects'     => 5,                     // حداکثر تعداد ریدایرکت
@@ -398,13 +407,24 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
 }
 
 /**
+ * آدرس مؤثر ورکر فالبک:
+ * اولویت با cloudflare_worker_url است؛ fallback_proxy (نام قدیمی) هم
+ * برای سازگاری پشتیبانی می‌شود.
+ */
+function p_fallback_url(array $cfg): string {
+    $fb = trim((string)($cfg['cloudflare_worker_url'] ?? ''));
+    if ($fb === '') $fb = trim((string)($cfg['fallback_proxy'] ?? ''));
+    return $fb;
+}
+
+/**
  * تلاش از طریق فالبک (ورکر کلودفلر با API پارامتر ?url=).
  * کنترل‌هدرها به‌صورت X-Proxy-* به ورکر منتقل می‌شوند تا مقصد
  * همان User-Agent/Referer/Cookie را ببیند.
  */
 function p_fallback_attempt(string $url, string $method, array $headers, string $body, int $timeout): ?array {
     $cfg = $GLOBALS['CONFIG'];
-    $fb = trim((string)$cfg['fallback_proxy']);
+    $fb = p_fallback_url($cfg);
     if ($fb === '') return null;
     if (!preg_match('~^https?://~i', $fb)) $fb = 'https://' . $fb;
 
@@ -602,9 +622,9 @@ function p_dashboard(): void {
     $blockedCount = count($cfg['blocked_domains']);
     $keyState = $cfg['proxy_key'] === '' ? 'بدون کلید' : 'فعال';
     $phpVersion = PHP_VERSION;
-    $fallbackState = trim((string)$cfg['fallback_proxy']) === '' ? 'غیرفعال' : 'فعال';
+    $fallbackState = p_fallback_url($cfg) === '' ? 'غیرفعال' : 'فعال';
     $fallbackHost = '—';
-    $fbParts = parse_url((string)$cfg['fallback_proxy']);
+    $fbParts = parse_url(p_fallback_url($cfg));
     if (!empty($fbParts['host'])) $fallbackHost = h($fbParts['host']);
 
     $statusHtml = "<div class='cards'>"
