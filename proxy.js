@@ -16,7 +16,14 @@
  *    PORT, PROXY_KEY, PROXY_ALLOWED_DOMAINS, PROXY_BLOCKED_DOMAINS,
  *    PROXY_UPSTREAM, PROXY_DIRECT_FIRST, PROXY_ALLOW_PRIVATE, PROXY_CACHE,
  *    PROXY_CACHE_DIR, PROXY_CACHE_TTL, PROXY_TIMEOUT, PROXY_MAX_SIZE,
- *    PROXY_INJECT_BASE, PROXY_VERIFY_SSL, PROXY_USER_AGENT, PROXY_REFERER
+ *    PROXY_INJECT_BASE, PROXY_VERIFY_SSL, PROXY_USER_AGENT, PROXY_REFERER,
+ *    PROXY_FALLBACK, PROXY_FALLBACK_KEY, PROXY_FALLBACK_ON_STATUSES
+ *
+ *  فالبک ورکر کلودفلر:
+ *    اگر اتصال به مقصد (مستقیم و از طریق پراکسی‌های بالادستی) ناموفق
+ *    باشد، درخواست از طریق PROXY_FALLBACK (پیش‌فرض:
+ *    https://proxy.fazilat-ma.workers.dev) رله می‌شود. ورکر باید همان
+ *    API پارامتر ?url= را داشته باشد — کد آماده در cloudflare-worker.js.
  * =====================================================================
  */
 
@@ -49,6 +56,10 @@ const CONFIG = {
   rotateUpstream: true,
   directFirst: env.PROXY_DIRECT_FIRST !== '0', // 0 = فقط از پراکسی بالادستی عبور کن، مستقیم تلاش نکن
   retryStatuses: [403, 429, 503],
+  // فالبک ورکر کلودفلر (قابل تغییر)
+  fallbackProxy: env.PROXY_FALLBACK !== undefined ? env.PROXY_FALLBACK : 'https://proxy.fazilat-ma.workers.dev',
+  fallbackKey: env.PROXY_FALLBACK_KEY || '',
+  fallbackOnStatuses: splitList(env.PROXY_FALLBACK_ON_STATUSES).map(Number).filter((n) => Number.isInteger(n)),
   timeout: parseInt(env.PROXY_TIMEOUT || '30', 10),
   connectTimeout: 10,
   maxRedirects: 5,
@@ -425,9 +436,59 @@ async function rotateAttempt(target, method, headers, body, timeoutSec) {
   for (const proxy of attempts) {
     const res = await requestOnce(target, method, headers, body, proxy, timeoutSec);
     last = res;
-    if (!res.error && !CONFIG.retryStatuses.includes(res.status)) return res;
+    if (!res.error
+        && !CONFIG.retryStatuses.includes(res.status)
+        && !CONFIG.fallbackOnStatuses.includes(res.status)) {
+      return res; // پاسخ قابل‌قبول
+    }
   }
+
+  // فالبک: اگر اتصال به مقصد ناموفق بود (یا وضعیت قابل‌فالبک دریافت شد)،
+  // از ورکر کلودفلر عبور کن
+  if (last && (last.error || CONFIG.fallbackOnStatuses.includes(last.status))) {
+    const fb = await fallbackAttempt(target, method, headers, body, timeoutSec);
+    if (fb && !fb.error) return fb;
+  }
+
   return last || { status: 502, headers: {}, body: '', error: 'نامشخص' };
+}
+
+/**
+ * تلاش از طریق فالبک (ورکر کلودفلر با API پارامتر ?url=).
+ * کنترل‌هدرها به‌صورت X-Proxy-* به ورکر منتقل می‌شوند تا مقصد
+ * همان User-Agent/Referer/Cookie را ببیند.
+ */
+async function fallbackAttempt(target, method, headers, body, timeoutSec) {
+  const fbRaw = (CONFIG.fallbackProxy || '').trim();
+  if (!fbRaw) return null;
+
+  let fb;
+  try {
+    fb = new URL(fbRaw);
+  } catch {
+    return null; // آدرس فالبک نامعتبر → نادیده بگیر
+  }
+
+  // جلوگیری از حلقه: اگر فالبک همان مقصد باشد (هاست + پورت)، استفاده نشود
+  const fbPort = fb.port ? parseInt(fb.port, 10) : (fb.protocol === 'https:' ? 443 : 80);
+  const tPort = target.port ? parseInt(target.port, 10) : (target.protocol === 'https:' ? 443 : 80);
+  if (fb.hostname.toLowerCase() === target.hostname.toLowerCase() && fbPort === tPort) return null;
+
+  fb.searchParams.set('url', target.toString());
+
+  const ctrl = {
+    'user-agent': CONFIG.userAgent,
+    'x-proxy-ua': headers['user-agent'] || CONFIG.userAgent,
+  };
+  if (headers['referer']) ctrl['x-proxy-referer'] = headers['referer'];
+  if (headers['cookie']) ctrl['x-proxy-cookie'] = headers['cookie'];
+  if (headers['content-type']) ctrl['content-type'] = headers['content-type'];
+  if (headers['accept']) ctrl['accept'] = headers['accept'];
+  if (CONFIG.fallbackKey) ctrl['x-proxy-key'] = CONFIG.fallbackKey;
+
+  const res = await requestOnce(fb, method, ctrl, body, null, timeoutSec);
+  if (res.error) return null; // ورکر هم در دسترس نبود → خطای اصلی را برگردان
+  return res;
 }
 
 // ---------------------------------------------------------------------
@@ -519,9 +580,10 @@ async function handleProxy(req, res) {
     }
     if (!result || result.error) return pError(res, 502, 'too_many_redirects', 'تعداد ریدایرکت‌ها بیش از حد مجاز است');
 
-    // تزریق <base> برای HTML
+    // تزریق <base> برای HTML (اگر زنجیرهٔ فالبک قبلاً تزریق نکرده باشد)
     const ct = (result.headers['content-type'] || []).join(' ').toLowerCase();
-    if (CONFIG.injectBase && ct.includes('text/html') && result.body) {
+    if (CONFIG.injectBase && ct.includes('text/html') && result.body
+        && !result.body.includes('data-proxy-base')) {
       result.body = injectBase(result.body, cur.toString());
     }
 
@@ -566,11 +628,15 @@ function dashboard() {
     upstreamCount: CONFIG.upstreamProxies.length,
     allowedCount: CONFIG.allowedDomains.length,
     blockedCount: CONFIG.blockedDomains.length,
+    fallbackState: CONFIG.fallbackProxy ? 'فعال' : 'غیرفعال',
   };
+  let fallbackHost = '—';
+  try { fallbackHost = CONFIG.fallbackProxy ? new URL(CONFIG.fallbackProxy).hostname : '—'; } catch { /* ignore */ }
   const cards = `
     <div class="card"><div class="card-v">${process.version}</div><div class="card-l">نسخهٔ Node</div></div>
     <div class="card"><div class="card-v ok">فعال</div><div class="card-l">پروتکل http/https</div></div>
     <div class="card"><div class="card-v">${st.upstreamCount}</div><div class="card-l">پراکسی بالادستی</div></div>
+    <div class="card"><div class="card-v ${st.fallbackState === 'فعال' ? 'ok' : ''}" title="${fallbackHost}">${st.fallbackState}</div><div class="card-l">فالبک کلودفلر</div></div>
     <div class="card"><div class="card-v">${st.cacheState}</div><div class="card-l">کش</div></div>
     <div class="card"><div class="card-v">${st.keyState}</div><div class="card-l">کلید محافظت</div></div>
     <div class="card"><div class="card-v">${st.allowedCount} / ${st.blockedCount}</div><div class="card-l">سفید / سیاه</div></div>`;
@@ -653,6 +719,7 @@ a { color:var(--acc); }
 <li>محافظ SSRF — اتصال به IPهای داخلی/خصوصی مسدود است (در تنظیمات قابل تغییر)</li>
 <li>لیست سفید/سیاه دامنه‌ها با پشتیبانی از الگوی <code>*.domain.com</code></li>
 <li>چرخش خودکار بین پراکسی‌های بالادستی (http) و تلاش مجدد روی خطاهای ۴۰۳/۴۲۹/۵۰۳</li>
+<li>فالبک خودکار به ورکر کلودفلر در صورت شکست اتصال به مقصد (قابل تغییر با <code>PROXY_FALLBACK</code>)</li>
 <li>اتصال مستقیم با IP رزولوشده برای جلوگیری از DNS rebinding</li>
 <li>رمزگشایی خودکار gzip / deflate / brotli — کش فایلی اختیاری — تزریق <code>&lt;base&gt;</code> برای لینک‌های نسبی</li>
 </ul>

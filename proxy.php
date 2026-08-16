@@ -17,6 +17,12 @@
  *    X-Proxy-Referer  → بازنویسی Referer
  *    X-Proxy-Cookie   → ارسال کوکی به مقصد
  *    X-Proxy-Time     → تایم‌اوت سفارشی (ثانیه، حداکثر ۳۰۰)
+ *
+ *  فالبک ورکر کلودفلر:
+ *    اگر اتصال به مقصد ناموفق باشد، درخواست از طریق fallback_proxy
+ *    (پیش‌فرض: https://proxy.fazilat-ma.workers.dev) رله می‌شود.
+ *    ورکر باید همان API پارامتر ?url= را داشته باشد — کد آماده در
+ *    cloudflare-worker.js.
  * =====================================================================
  */
 
@@ -31,6 +37,10 @@ $CONFIG = [
     'rotate_upstream'   => true,                  // چرخش خودکار بین پراکسی‌های بالادستی
     'direct_first'      => true,                  // false = فقط از پراکسی بالادستی عبور کن، مستقیم تلاش نکن
     'retry_statuses'    => [403, 429, 503],       // اگر مقصد این وضعیت‌ها را داد، با پراکسی بالادستی بعدی دوباره تلاش کن
+    // فالبک ورکر کلودفلر (قابل تغییر) — در صورت شکست اتصال به مقصد از آن عبور می‌کند
+    'fallback_proxy'    => 'https://proxy.fazilat-ma.workers.dev', // خالی = غیرفعال
+    'fallback_key'      => '',                    // کلید ورکر فالبک (اگر ورکر کلید داشته باشد)
+    'fallback_on_statuses' => [],                 // اگر مقصد این وضعیت‌ها را هم داد از فالبک استفاده کن؛ نمونه: [403, 451]
     'timeout'           => 30,                    // تایم‌اوت کل هر درخواست (ثانیه)
     'connect_timeout'   => 10,                    // تایم‌اوت اتصال
     'max_redirects'     => 5,                     // حداکثر تعداد ریدایرکت
@@ -363,17 +373,81 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
         array_unshift($attempts, null); // تلاش مستقیم اول (بدون پراکسی)
     }
     $retryStatuses = array_map('intval', $cfg['retry_statuses']);
+    $fallbackStatuses = array_map('intval', $cfg['fallback_on_statuses']);
     $last = null;
 
     foreach ($attempts as $proxy) {
         $res = p_curl_once($url, $method, $headers, $body, $proxy, $timeout);
         $last = $res;
-        if ($res['error'] === null && !in_array($res['status'], $retryStatuses, true)) {
+        if ($res['error'] === null
+            && !in_array($res['status'], $retryStatuses, true)
+            && !in_array($res['status'], $fallbackStatuses, true)) {
             return $res; // پاسخ قابل‌قبول
         }
         // خطا یا وضعیت قابل‌تلاش‌مجدد → با پراکسی بعدی ادامه بده
     }
+
+    // فالبک: اگر اتصال به مقصد ناموفق بود (یا وضعیت قابل‌فالبک دریافت شد)،
+    // از ورکر کلودفلر عبور کن
+    if ($last !== null && ($last['error'] !== null || in_array($last['status'], $fallbackStatuses, true))) {
+        $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
+        if ($fb !== null && $fb['error'] === null) return $fb;
+    }
+
     return $last ?? ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'نامشخص'];
+}
+
+/**
+ * تلاش از طریق فالبک (ورکر کلودفلر با API پارامتر ?url=).
+ * کنترل‌هدرها به‌صورت X-Proxy-* به ورکر منتقل می‌شوند تا مقصد
+ * همان User-Agent/Referer/Cookie را ببیند.
+ */
+function p_fallback_attempt(string $url, string $method, array $headers, string $body, int $timeout): ?array {
+    $cfg = $GLOBALS['CONFIG'];
+    $fb = trim((string)$cfg['fallback_proxy']);
+    if ($fb === '') return null;
+    if (!preg_match('~^https?://~i', $fb)) $fb = 'https://' . $fb;
+
+    $fbParts = parse_url($fb);
+    $targetParts = parse_url($url);
+    // جلوگیری از حلقه: اگر فالبک همان مقصد باشد (هاست + پورت)، استفاده نشود
+    $fbScheme = strtolower($fbParts['scheme'] ?? 'https');
+    $tScheme = strtolower($targetParts['scheme'] ?? 'https');
+    $fbPort = isset($fbParts['port']) ? (int)$fbParts['port'] : ($fbScheme === 'https' ? 443 : 80);
+    $tPort = isset($targetParts['port']) ? (int)$targetParts['port'] : ($tScheme === 'https' ? 443 : 80);
+    if (!empty($fbParts['host']) && !empty($targetParts['host'])
+        && strcasecmp($fbParts['host'], $targetParts['host']) === 0 && $fbPort === $tPort) {
+        return null;
+    }
+
+    $sep = (strpos($fb, '?') === false) ? '?' : '&';
+    $fbUrl = $fb . $sep . 'url=' . rawurlencode($url);
+
+    // استخراج کنترل‌هدرها از هدرهای مقصد
+    $effectiveUa = $cfg['user_agent'];
+    $referer = $cfg['referer'];
+    $cookie = null;
+    $contentType = null;
+    $accept = null;
+    foreach ($headers as $h) {
+        if (preg_match('~^User-Agent:\s*(.+)$~i', $h, $m)) $effectiveUa = trim($m[1]);
+        elseif (preg_match('~^Referer:\s*(.+)$~i', $h, $m)) $referer = trim($m[1]);
+        elseif (preg_match('~^Cookie:\s*(.+)$~i', $h, $m)) $cookie = trim($m[1]);
+        elseif (preg_match('~^Content-Type:\s*(.+)$~i', $h, $m)) $contentType = trim($m[1]);
+        elseif (preg_match('~^Accept:\s*(.+)$~i', $h, $m)) $accept = trim($m[1]);
+    }
+
+    $ctrl = [];
+    $ctrl[] = 'X-Proxy-UA: ' . $effectiveUa;
+    if ($referer !== '') $ctrl[] = 'X-Proxy-Referer: ' . $referer;
+    if ($cookie !== null && $cookie !== '') $ctrl[] = 'X-Proxy-Cookie: ' . $cookie;
+    if ($contentType !== null && $contentType !== '') $ctrl[] = 'Content-Type: ' . $contentType;
+    if ($accept !== null && $accept !== '') $ctrl[] = 'Accept: ' . $accept;
+    if (!empty($cfg['fallback_key'])) $ctrl[] = 'X-Proxy-Key: ' . $cfg['fallback_key'];
+
+    $res = p_curl_once($fbUrl, $method, $ctrl, $body, null, $timeout);
+    if ($res['error'] !== null) return null; // ورکر هم در دسترس نبود → خطای اصلی را برگردان
+    return $res;
 }
 
 // ---------------------------------------------------------------------
@@ -467,9 +541,10 @@ function p_handle_proxy(): void {
         p_error(502, 'too_many_redirects', 'تعداد ریدایرکت‌ها بیش از حد مجاز است');
     }
 
-    // تزریق <base> برای HTML
+    // تزریق <base> برای HTML (اگر زنجیرهٔ فالبک قبلاً تزریق نکرده باشد)
     $ct = strtolower(implode(' ', $result['headers']['content-type'] ?? []));
-    if ($cfg['inject_base'] && strpos($ct, 'text/html') !== false && $result['body'] !== '') {
+    if ($cfg['inject_base'] && strpos($ct, 'text/html') !== false && $result['body'] !== ''
+        && strpos($result['body'], 'data-proxy-base') === false) {
         $result['body'] = p_inject_base($result['body'], $final);
     }
 
@@ -527,11 +602,16 @@ function p_dashboard(): void {
     $blockedCount = count($cfg['blocked_domains']);
     $keyState = $cfg['proxy_key'] === '' ? 'بدون کلید' : 'فعال';
     $phpVersion = PHP_VERSION;
+    $fallbackState = trim((string)$cfg['fallback_proxy']) === '' ? 'غیرفعال' : 'فعال';
+    $fallbackHost = '—';
+    $fbParts = parse_url((string)$cfg['fallback_proxy']);
+    if (!empty($fbParts['host'])) $fallbackHost = h($fbParts['host']);
 
     $statusHtml = "<div class='cards'>"
         . "<div class='card'><div class='card-v'>" . h($phpVersion) . "</div><div class='card-l'>نسخهٔ PHP</div></div>"
         . "<div class='card'><div class='card-v " . ($curlOk ? 'ok' : 'bad') . "'>" . ($curlOk ? 'فعال' : 'غیرفعال!') . "</div><div class='card-l'>cURL</div></div>"
         . "<div class='card'><div class='card-v'>" . $upstreamCount . "</div><div class='card-l'>پراکسی بالادستی</div></div>"
+        . "<div class='card'><div class='card-v " . ($fallbackState === 'فعال' ? 'ok' : '') . "' title=\"" . $fallbackHost . "\">" . h($fallbackState) . "</div><div class='card-l'>فالبک کلودفلر</div></div>"
         . "<div class='card'><div class='card-v'>" . h($cacheState) . "</div><div class='card-l'>کش</div></div>"
         . "<div class='card'><div class='card-v'>" . h($keyState) . "</div><div class='card-l'>کلید محافظت</div></div>"
         . "<div class='card'><div class='card-v'>" . $allowedCount . ' / ' . $blockedCount . "</div><div class='card-l'>سفید / سیاه</div></div>"
@@ -618,6 +698,7 @@ a { color:var(--acc); }
 <li>محافظ SSRF — اتصال به IPهای داخلی/خصوصی مسدود است (در تنظیمات قابل تغییر)</li>
 <li>لیست سفید/سیاه دامنه‌ها با پشتیبانی از الگوی <code>*.domain.com</code></li>
 <li>چرخش خودکار بین پراکسی‌های بالادستی (http و socks5) و تلاش مجدد روی خطاهای ۴۰۳/۴۲۹/۵۰۳</li>
+<li>فالبک خودکار به ورکر کلودفلر در صورت شکست اتصال به مقصد (قابل تغییر در تنظیمات)</li>
 <li>ریدایرکت‌ها به‌صورت امن دنبال می‌شوند و هر پرش دوباره اعتبارسنجی می‌شود</li>
 <li>رمزگشایی خودکار gzip / deflate / brotli — کش فایلی اختیاری — تزریق <code>&lt;base&gt;</code> برای لینک‌های نسبی</li>
 </ul>
