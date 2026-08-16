@@ -1,0 +1,708 @@
+<?php
+/**
+ * =====================================================================
+ *  پراکسی سرور تک‌فایلی PHP — بدون هیچ وابستگی خارجی
+ *  فقط به اکستنشن cURL نیاز دارد (روی همهٔ هاست‌ها فعال است)
+ *  سازگار با PHP 7.4 به بالا
+ *
+ *  استفاده:
+ *    proxy.php?url=https://example.com/page          → GET
+ *    proxy.php?url=...  با متد POST/PUT/DELETE و بدنهٔ دلخواه
+ *    proxy.php                                      → داشبورد راهنما
+ *    proxy.php?info=1                               → وضعیت به‌صورت JSON
+ *
+ *  هدرهای کنترلی (اختیاری):
+ *    X-Proxy-Key      → کلید محافظت (اگر تنظیم شده باشد)
+ *    X-Proxy-UA       → بازنویسی User-Agent
+ *    X-Proxy-Referer  → بازنویسی Referer
+ *    X-Proxy-Cookie   → ارسال کوکی به مقصد
+ *    X-Proxy-Time     → تایم‌اوت سفارشی (ثانیه، حداکثر ۳۰۰)
+ * =====================================================================
+ */
+
+// ---------------------------------------------------------------------
+// [۱] تنظیمات — این بخش را مطابق نیاز خودتان تغییر دهید
+// ---------------------------------------------------------------------
+$CONFIG = [
+    'proxy_key'         => '',                    // کلید محافظت؛ خالی = بدون نیاز به کلید
+    'allowed_domains'   => [],                    // لیست سفید؛ خالی = همهٔ دامنه‌ها مجاز. نمونه: ['barfbox.ir', '*.digikala.com']
+    'blocked_domains'   => ['localhost', '127.0.0.1', '0.0.0.0'],
+    'upstream_proxies'  => [],                    // پراکسی‌های بالادستی برای چرخش. نمونه: ['http://user:pass@1.2.3.4:8080', 'socks5://5.6.7.8:1080']
+    'rotate_upstream'   => true,                  // چرخش خودکار بین پراکسی‌های بالادستی
+    'direct_first'      => true,                  // false = فقط از پراکسی بالادستی عبور کن، مستقیم تلاش نکن
+    'retry_statuses'    => [403, 429, 503],       // اگر مقصد این وضعیت‌ها را داد، با پراکسی بالادستی بعدی دوباره تلاش کن
+    'timeout'           => 30,                    // تایم‌اوت کل هر درخواست (ثانیه)
+    'connect_timeout'   => 10,                    // تایم‌اوت اتصال
+    'max_redirects'     => 5,                     // حداکثر تعداد ریدایرکت
+    'max_size'          => 50 * 1024 * 1024,      // حداکثر حجم پاسخ مقصد (بایت)
+    'max_body_size'     => 20 * 1024 * 1024,      // حداکثر حجم بدنهٔ درخواست ورودی (بایت)
+    'user_agent'        => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    'referer'           => '',                    // ریفرر پیش‌فرض؛ خالی = بدون ریفرر
+    'allow_private_ips' => false,                 // اتصال به IPهای داخلی (محافظ SSRF) — فقط برای تست محلی true کنید
+    'verify_ssl'        => true,                  // اعتبارسنجی گواهی SSL مقصد
+    'inject_base'       => true,                  // تزریق <base href> در پاسخ‌های HTML تا لینک‌های نسبی درست کار کنند
+    'forward_auth'      => false,                 // ارسال هدر Authorization کلاینت به مقصد
+    'cache_enabled'     => false,                 // کش فایلی پاسخ‌ها
+    'cache_ttl'         => 120,                   // مدت اعتبار کش (ثانیه)
+    'cache_dir'         => __DIR__ . '/proxy-cache',
+];
+
+define('PROXY_VERSION', '1.0.0');
+
+// پلی‌فیل توابع رشته‌ای برای PHP 7.4
+if (!function_exists('str_starts_with')) {
+    function str_starts_with(string $haystack, string $needle): bool {
+        return $needle === '' || strpos($haystack, $needle) === 0;
+    }
+}
+if (!function_exists('str_ends_with')) {
+    function str_ends_with(string $haystack, string $needle): bool {
+        return $needle === '' || substr($haystack, -strlen($needle)) === $needle;
+    }
+}
+if (!function_exists('str_contains')) {
+    function str_contains(string $haystack, string $needle): bool {
+        return $needle === '' || strpos($haystack, $needle) !== false;
+    }
+}
+
+// ---------------------------------------------------------------------
+// [۲] ابزارهای کمکی
+// ---------------------------------------------------------------------
+
+/** خروجی امن HTML */
+function h(string $s): string {
+    return htmlspecialchars($s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+/** پاسخ خطا به‌صورت JSON */
+function p_error(int $status, string $code, string $message): void {
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => false, 'error' => ['code' => $code, 'message' => $message]], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** دریافت مقدار هدر ورودی (بدون حساسیت به بزرگی حروف) */
+function p_in_header(string $name): ?string {
+    if (function_exists('getallheaders')) {
+        foreach (getallheaders() as $k => $v) {
+            if (strcasecmp($k, $name) === 0) return (string)$v;
+        }
+    }
+    $key = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
+    return isset($_SERVER[$key]) ? (string)$_SERVER[$key] : null;
+}
+
+/** بررسی اینکه IP خصوصی/داخلی است (محافظ SSRF) */
+function p_is_private_ip(string $ip): bool {
+    $ip = strtolower(trim($ip));
+    if (strpos($ip, '::ffff:') === 0) $ip = substr($ip, 7); // IPv4 نگاشت‌شده در IPv6
+
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        $n = ip2long($ip);
+        if ($n === false) return true;
+        $ranges = [
+            [ip2long('0.0.0.0'),      ip2long('0.255.255.255')],
+            [ip2long('10.0.0.0'),     ip2long('10.255.255.255')],
+            [ip2long('100.64.0.0'),   ip2long('100.127.255.255')],
+            [ip2long('127.0.0.0'),    ip2long('127.255.255.255')],
+            [ip2long('169.254.0.0'),  ip2long('169.254.255.255')],
+            [ip2long('172.16.0.0'),   ip2long('172.31.255.255')],
+            [ip2long('192.0.0.0'),    ip2long('192.0.0.255')],
+            [ip2long('192.0.2.0'),    ip2long('192.0.2.255')],
+            [ip2long('192.168.0.0'),  ip2long('192.168.255.255')],
+            [ip2long('198.18.0.0'),   ip2long('198.19.255.255')],
+            [ip2long('198.51.100.0'), ip2long('198.51.100.255')],
+            [ip2long('203.0.113.0'),  ip2long('203.0.113.255')],
+            [ip2long('224.0.0.0'),    ip2long('255.255.255.255')],
+        ];
+        foreach ($ranges as $r) {
+            if ($n >= $r[0] && $n <= $r[1]) return true;
+        }
+        return false;
+    }
+
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+        if ($ip === '::' || $ip === '::1') return true;
+        $hex = bin2hex(inet_pton($ip));
+        if ($hex === false) return true;
+        $first = hexdec(substr($hex, 0, 2)) & 0xFE;      // fc00::/7 → بیت هفتم صفر
+        if ($first === 0xFC) return true;
+        if (str_starts_with($hex, 'fe8') || str_starts_with($hex, 'fe9')
+            || str_starts_with($hex, 'fea') || str_starts_with($hex, 'feb')) return true; // fe80::/10
+        return false;
+    }
+
+    return true; // غیرقابل شناسایی → مسدود
+}
+
+/** تطبیق نام دامنه با الگو (پشتیبانی از *.example.com و پسوند) */
+function p_domain_matches(string $host, string $pattern): bool {
+    $host = strtolower(trim($host, '.'));
+    $pattern = strtolower(trim($pattern, '.'));
+    if ($pattern === '') return false;
+    if ($pattern === '*') return true;
+    if (strpos($pattern, '*.') === 0) {
+        $suffix = substr($pattern, 1); // '.example.com'
+        return str_ends_with($host, $suffix) && strlen($host) > strlen($suffix);
+    }
+    if ($pattern[0] === '.') {
+        return str_ends_with($host, $pattern);
+    }
+    return $host === $pattern;
+}
+
+/** اعتبارسنجی دامنه (لیست سفید/سیاه) */
+function p_check_domain(string $host): void {
+    foreach ($GLOBALS['CONFIG']['blocked_domains'] as $pattern) {
+        if (p_domain_matches($host, $pattern)) {
+            p_error(403, 'domain_blocked', "دامنهٔ «{$host}» در لیست سیاه است");
+        }
+    }
+    $allowed = $GLOBALS['CONFIG']['allowed_domains'];
+    if (!empty($allowed)) {
+        foreach ($allowed as $pattern) {
+            if (p_domain_matches($host, $pattern)) return;
+        }
+        p_error(403, 'domain_not_allowed', "دامنهٔ «{$host}» در لیست سفید نیست");
+    }
+}
+
+/** بررسی IPهای رزولوشده (محافظ SSRF / DNS rebinding) */
+function p_check_ips(string $host): void {
+    if ($GLOBALS['CONFIG']['allow_private_ips']) return;
+    $ips = @gethostbynamel($host);
+    if ($ips === false || empty($ips)) {
+        p_error(502, 'dns_failed', "رزولوش DNS برای «{$host}» ناموفق بود");
+    }
+    foreach ($ips as $ip) {
+        if (p_is_private_ip($ip)) {
+            p_error(403, 'private_ip_blocked', "آدرس داخلی/خصوصی ({$ip}) مسدود شد (محافظ SSRF)");
+        }
+    }
+}
+
+/** اعتبارسنجی کامل URL */
+function p_validate_url(string $url): array {
+    if (strlen($url) > 8192) p_error(400, 'url_too_long', 'طول URL بیش از حد مجاز است');
+    $parts = parse_url($url);
+    if ($parts === false || empty($parts['host'])) {
+        p_error(400, 'invalid_url', 'آدرس نامعتبر است؛ نمونهٔ درست: ?url=https://example.com/page');
+    }
+    $scheme = strtolower($parts['scheme'] ?? '');
+    if ($scheme !== 'http' && $scheme !== 'https') {
+        p_error(400, 'bad_scheme', 'فقط http و https پشتیبانی می‌شود');
+    }
+    $host = strtolower(trim($parts['host'], '[]'));
+    if ($host === '') p_error(400, 'invalid_url', 'میزبان نامعتبر است');
+    p_check_domain($host);
+    p_check_ips($host);
+    return ['url' => $url, 'host' => $host, 'scheme' => $scheme];
+}
+
+/** مطلق‌کردن URL نسبی ریدایرکت */
+function p_absolute_url(string $location, string $base): string {
+    if (preg_match('~^https?://~i', $location)) return $location;
+    $bp = parse_url($base);
+    if (!$bp || empty($bp['host'])) return '';
+    if (strpos($location, '//') === 0) return ($bp['scheme'] ?? 'https') . ':' . $location;
+    $root = ($bp['scheme'] ?? 'https') . '://' . $bp['host']
+          . (isset($bp['port']) ? ':' . $bp['port'] : '');
+    if ($location !== '' && $location[0] === '/') return $root . $location;
+    $dir = preg_replace('~/[^/]*$~', '/', $bp['path'] ?? '/');
+    return $root . $dir . $location;
+}
+
+/** تجزیهٔ هدرهای خام پاسخ cURL */
+function p_parse_headers(string $raw, string $url): array {
+    $lines = preg_split("~\r?\n~", $raw);
+    $status = 0;
+    $headers = [];
+    foreach ($lines as $line) {
+        if ($line === '') continue;
+        if (preg_match('~^HTTP/\S+\s+(\d{3})~', $line, $m)) {
+            $status = (int)$m[1];
+            continue;
+        }
+        if (strpos($line, ':') !== false) {
+            $parts = explode(':', $line, 2);
+            $k = strtolower(trim($parts[0]));
+            $v = trim($parts[1]);
+            if ($k === 'location' && !preg_match('~^https?://~i', $v)) {
+                $v = p_absolute_url($v, $url);
+            }
+            $headers[$k][] = $v;
+        }
+    }
+    return [$status, $headers];
+}
+
+/** تزریق <base> در HTML تا لینک‌های نسبی درست کار کنند */
+function p_inject_base(string $html, string $url): string {
+    $base = '<base href="' . htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '" data-proxy-base="1">';
+    if (preg_match('~</head\s*>~i', $html, $m, PREG_OFFSET_CAPTURE)) {
+        return substr($html, 0, $m[0][1]) . $base . substr($html, $m[0][1]);
+    }
+    return $base . $html;
+}
+
+/** کش فایلی */
+function p_cache_get(string $key): ?array {
+    $cfg = $GLOBALS['CONFIG'];
+    if (!$cfg['cache_enabled']) return null;
+    $metaFile = $cfg['cache_dir'] . '/' . $key . '.meta';
+    $bodyFile = $cfg['cache_dir'] . '/' . $key . '.body';
+    if (!is_file($metaFile) || !is_file($bodyFile)) return null;
+    $meta = json_decode((string)@file_get_contents($metaFile), true);
+    if (!is_array($meta) || (int)($meta['expires'] ?? 0) < time()) {
+        @unlink($metaFile); @unlink($bodyFile);
+        return null;
+    }
+    $body = @file_get_contents($bodyFile);
+    if ($body === false) return null;
+    return ['status' => (int)$meta['status'], 'headers' => $meta['headers'], 'body' => $body];
+}
+
+function p_cache_set(string $key, int $status, array $headers, string $body): void {
+    $cfg = $GLOBALS['CONFIG'];
+    if (!$cfg['cache_enabled']) return;
+    $dir = $cfg['cache_dir'];
+    if (!is_dir($dir) && !@mkdir($dir, 0755, true)) return;
+    if (!is_writable($dir)) return;
+    @file_put_contents($dir . '/' . $key . '.meta', json_encode([
+        'status' => $status, 'headers' => $headers, 'expires' => time() + (int)$cfg['cache_ttl'],
+    ]), LOCK_EX);
+    @file_put_contents($dir . '/' . $key . '.body', $body, LOCK_EX);
+}
+
+// ---------------------------------------------------------------------
+// [۳] هستهٔ پراکسی — ارسال درخواست به مقصد (با cURL)
+// ---------------------------------------------------------------------
+
+/**
+ * اجرای یک درخواست با cURL
+ * @return array{status:int, headers:array, body:string, error:?string}
+ */
+function p_curl_once(string $url, string $method, array $headers, string $body, ?string $proxy, int $timeout): array {
+    $cfg = $GLOBALS['CONFIG'];
+    $ch = curl_init($url);
+    if ($ch === false) return ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'راه‌اندازی cURL ناموفق بود'];
+
+    $received = 0;
+    $maxSize = (int)$cfg['max_size'];
+    $opts = [
+        CURLOPT_RETURNTRANSFER    => true,
+        CURLOPT_HEADER            => true,
+        CURLOPT_FOLLOWLOCATION    => false,
+        CURLOPT_CONNECTTIMEOUT    => (int)$cfg['connect_timeout'],
+        CURLOPT_TIMEOUT           => $timeout,
+        CURLOPT_USERAGENT         => $cfg['user_agent'],
+        CURLOPT_ENCODING          => '',   // رمزگشایی خودکار gzip/deflate/br
+        CURLOPT_SSL_VERIFYPEER    => (bool)$cfg['verify_ssl'],
+        CURLOPT_SSL_VERIFYHOST    => $cfg['verify_ssl'] ? 2 : 0,
+        CURLOPT_PROTOCOLS         => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+        CURLOPT_REDIR_PROTOCOLS   => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+        CURLOPT_HTTPHEADER        => $headers,
+        CURLOPT_MAXREDIRS         => 0,
+        CURLOPT_WRITEFUNCTION     => function ($ch, $chunk) use (&$received, $maxSize) {
+            $received += strlen($chunk);
+            if ($received > $maxSize) return 0; // قطع اتصال
+            return strlen($chunk);
+        },
+    ];
+    if ($cfg['referer'] !== '') $opts[CURLOPT_REFERER] = $cfg['referer'];
+    if ($proxy !== null && $proxy !== '') $opts[CURLOPT_PROXY] = $proxy;
+
+    $method = strtoupper($method);
+    if ($method === 'HEAD') {
+        $opts[CURLOPT_NOBODY] = true;
+    } elseif ($method !== 'GET') {
+        $opts[CURLOPT_CUSTOMREQUEST] = $method;
+        if ($body !== '') $opts[CURLOPT_POSTFIELDS] = $body;
+    }
+
+    curl_setopt_array($ch, $opts);
+    $resp = curl_exec($ch);
+    $errno = curl_errno($ch);
+    $error = $errno ? (curl_error($ch) ?: "خطای cURL شمارهٔ {$errno}") : null;
+    $info = curl_getinfo($ch);
+    curl_close($ch);
+
+    if ($resp === false || $resp === '') {
+        return ['status' => 502, 'headers' => [], 'body' => '', 'error' => $error ?? 'پاسخ خالی از مقصد'];
+    }
+    if ($received > $maxSize) {
+        return ['status' => 413, 'headers' => [], 'body' => '', 'error' => "حجم پاسخ بیش از حد مجاز ({$maxSize} بایت)"];
+    }
+
+    $headerSize = (int)($info['header_size'] ?? 0);
+    if ($headerSize <= 0 || $headerSize >= strlen($resp)) {
+        $headerSize = strpos($resp, "\r\n\r\n");
+        if ($headerSize === false) {
+            return ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'ساختار پاسخ مقصد نامعتبر است'];
+        }
+        $headerSize += 4;
+    }
+    $rawHeaders = substr($resp, 0, $headerSize);
+    $body = substr($resp, $headerSize);
+    $parsed = p_parse_headers($rawHeaders, $url);
+    $status = $parsed[0] ?: (int)($info['http_code'] ?? 0);
+    if ($status === 0) {
+        return ['status' => 502, 'headers' => [], 'body' => '', 'error' => $error ?? 'پاسخی از مقصد دریافت نشد'];
+    }
+    return ['status' => $status, 'headers' => $parsed[1], 'body' => $body, 'error' => null];
+}
+
+/** چرخش بین پراکسی‌های بالادستی: تلاش تا دریافت پاسخ قابل‌قبول */
+function p_rotate_attempt(string $url, string $method, array $headers, string $body, int $timeout): array {
+    $cfg = $GLOBALS['CONFIG'];
+    $list = $cfg['rotate_upstream'] ? $cfg['upstream_proxies'] : [];
+    $attempts = $list;
+    if ($cfg['direct_first'] || empty($attempts)) {
+        array_unshift($attempts, null); // تلاش مستقیم اول (بدون پراکسی)
+    }
+    $retryStatuses = array_map('intval', $cfg['retry_statuses']);
+    $last = null;
+
+    foreach ($attempts as $proxy) {
+        $res = p_curl_once($url, $method, $headers, $body, $proxy, $timeout);
+        $last = $res;
+        if ($res['error'] === null && !in_array($res['status'], $retryStatuses, true)) {
+            return $res; // پاسخ قابل‌قبول
+        }
+        // خطا یا وضعیت قابل‌تلاش‌مجدد → با پراکسی بعدی ادامه بده
+    }
+    return $last ?? ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'نامشخص'];
+}
+
+// ---------------------------------------------------------------------
+// [۴] پردازش درخواست پراکسی
+// ---------------------------------------------------------------------
+
+function p_handle_proxy(): void {
+    $cfg = $GLOBALS['CONFIG'];
+
+    // کلید محافظت
+    if ($cfg['proxy_key'] !== '') {
+        $key = isset($_GET['key']) ? (string)$_GET['key'] : (string)(p_in_header('X-Proxy-Key') ?? '');
+        if (!hash_equals($cfg['proxy_key'], $key)) {
+            p_error(401, 'bad_key', 'کلید پراکسی نامعتبر است');
+        }
+    }
+
+    $url = (string)($_GET['url'] ?? '');
+    if ($url === '') p_error(400, 'missing_url', 'پارامتر url ارسال نشده است؛ نمونه: ?url=https://example.com');
+
+    $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+    if (!in_array($method, ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'], true)) {
+        p_error(405, 'bad_method', "متد {$method} پشتیبانی نمی‌شود");
+    }
+
+    // تایم‌اوت سفارشی
+    $timeout = (int)$cfg['timeout'];
+    $t = p_in_header('X-Proxy-Time');
+    if ($t !== null && ctype_digit(trim($t))) {
+        $timeout = max(1, min(300, (int)trim($t)));
+    }
+
+    // بدنهٔ درخواست ورودی
+    $body = '';
+    $cl = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);
+    if ($cl > $cfg['max_body_size']) p_error(413, 'body_too_large', 'حجم بدنهٔ درخواست بیش از حد مجاز است');
+    if ($cl > 0) $body = (string)file_get_contents('php://input');
+
+    // هدرهای قابل ارسال به مقصد
+    $forward = [];
+    foreach (['Accept', 'Accept-Language', 'Content-Type', 'Range', 'If-None-Match', 'If-Modified-Since'] as $hd) {
+        $v = p_in_header($hd);
+        if ($v !== null && $v !== '') $forward[] = $hd . ': ' . $v;
+    }
+    if ($cfg['forward_auth']) {
+        $v = p_in_header('Authorization');
+        if ($v !== null && $v !== '') $forward[] = 'Authorization: ' . $v;
+    }
+    foreach (['X-Proxy-UA' => 'User-Agent', 'X-Proxy-Referer' => 'Referer', 'X-Proxy-Cookie' => 'Cookie'] as $from => $to) {
+        $v = p_in_header($from);
+        if ($v !== null && $v !== '') $forward[] = $to . ': ' . $v;
+    }
+
+    // اعتبارسنجی اولیه
+    p_validate_url($url);
+    $current = $url;
+    $final = $current;
+
+    // کش (فقط GET/HEAD)
+    $cacheKey = sha1($method . "\n" . $current . "\n" . $body);
+    $cached = ($method === 'GET' || $method === 'HEAD') ? p_cache_get($cacheKey) : null;
+    if ($cached !== null) {
+        p_emit_response($cached['status'], $cached['headers'], $cached['body'], $final, true);
+    }
+
+    // دنبال‌کردن ریدایرکت‌ها به‌صورت دستی (با اعتبارسنجی هر پرش)
+    $result = null;
+    for ($hop = 0; $hop <= (int)$cfg['max_redirects']; $hop++) {
+        p_validate_url($current); // دامنه + IP هر پرش دوباره چک می‌شود
+        $result = p_rotate_attempt($current, $method, $forward, $body, $timeout);
+        if ($result['error'] !== null) {
+            p_error($result['status'], 'upstream_failed', $result['error']);
+        }
+        $status = $result['status'];
+        if ($status >= 300 && $status < 400 && !empty($result['headers']['location'])) {
+            $loc = end($result['headers']['location']);
+            if ($loc === '' || $loc === false) p_error(502, 'bad_redirect', 'هدر Location ریدایرکت خالی است');
+            if ($status === 303 && $method !== 'GET' && $method !== 'HEAD') {
+                $method = 'GET';
+                $body = '';
+                $forward = [];
+            }
+            $current = $loc;
+            $final = $current;
+            continue;
+        }
+        $final = $current;
+        break;
+    }
+    if ($result === null || $result['error'] !== null) {
+        p_error(502, 'too_many_redirects', 'تعداد ریدایرکت‌ها بیش از حد مجاز است');
+    }
+
+    // تزریق <base> برای HTML
+    $ct = strtolower(implode(' ', $result['headers']['content-type'] ?? []));
+    if ($cfg['inject_base'] && strpos($ct, 'text/html') !== false && $result['body'] !== '') {
+        $result['body'] = p_inject_base($result['body'], $final);
+    }
+
+    if ($method === 'GET' && $result['status'] >= 200 && $result['status'] < 400) {
+        p_cache_set($cacheKey, $result['status'], $result['headers'], $result['body']);
+    }
+
+    p_emit_response($result['status'], $result['headers'], $result['body'], $final, false);
+}
+
+/** ارسال پاسخ نهایی به کلاینت */
+function p_emit_response(int $status, array $headers, string $body, string $finalUrl, bool $fromCache): void {
+    // CORS
+    header('Access-Control-Allow-Origin: *');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS');
+    header('Access-Control-Allow-Headers: *');
+    header('Access-Control-Max-Age: 86400');
+    header('Access-Control-Expose-Headers: X-Proxy-Final-Url, X-Proxy-Cache, X-Proxy-Final-Status');
+    header('X-Proxy-Final-Url: ' . $finalUrl);
+    header('X-Proxy-Cache: ' . ($fromCache ? 'HIT' : 'MISS'));
+    header('X-Proxy-Final-Status: ' . $status);
+
+    http_response_code($status);
+    $skip = ['content-length', 'content-encoding', 'transfer-encoding', 'connection', 'keep-alive'];
+    $sent = [];
+    foreach ($headers as $name => $values) {
+        $name = strtolower($name);
+        if (in_array($name, $skip, true)) continue;
+        foreach ($values as $v) {
+            if ($name === 'set-cookie') {
+                header("Set-Cookie: {$v}", false); // چند کوکی مجاز است
+            } elseif (!in_array($name, $sent, true)) {
+                header("{$name}: {$v}");
+                $sent[] = $name;
+            }
+        }
+    }
+    header('Content-Length: ' . strlen($body));
+    echo $body;
+    exit;
+}
+
+// ---------------------------------------------------------------------
+// [۵] داشبورد راهنما
+// ---------------------------------------------------------------------
+
+function p_dashboard(): void {
+    $cfg = $GLOBALS['CONFIG'];
+    $ver = PROXY_VERSION;
+    $curlOk = function_exists('curl_init');
+    $cacheDir = $cfg['cache_dir'];
+    $cacheState = !$cfg['cache_enabled'] ? 'غیرفعال' : ((is_dir($cacheDir) && is_writable($cacheDir)) || @mkdir($cacheDir, 0755, true) ? 'فعال' : 'بدون دسترسی');
+    $upstreamCount = count($cfg['upstream_proxies']);
+    $allowedCount = count($cfg['allowed_domains']);
+    $blockedCount = count($cfg['blocked_domains']);
+    $keyState = $cfg['proxy_key'] === '' ? 'بدون کلید' : 'فعال';
+    $phpVersion = PHP_VERSION;
+
+    $statusHtml = "<div class='cards'>"
+        . "<div class='card'><div class='card-v'>" . h($phpVersion) . "</div><div class='card-l'>نسخهٔ PHP</div></div>"
+        . "<div class='card'><div class='card-v " . ($curlOk ? 'ok' : 'bad') . "'>" . ($curlOk ? 'فعال' : 'غیرفعال!') . "</div><div class='card-l'>cURL</div></div>"
+        . "<div class='card'><div class='card-v'>" . $upstreamCount . "</div><div class='card-l'>پراکسی بالادستی</div></div>"
+        . "<div class='card'><div class='card-v'>" . h($cacheState) . "</div><div class='card-l'>کش</div></div>"
+        . "<div class='card'><div class='card-v'>" . h($keyState) . "</div><div class='card-l'>کلید محافظت</div></div>"
+        . "<div class='card'><div class='card-v'>" . $allowedCount . ' / ' . $blockedCount . "</div><div class='card-l'>سفید / سیاه</div></div>"
+        . "</div>";
+
+    echo <<<HTML
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>پراکسی سرور</title>
+<style>
+:root { --bg:#0f1420; --card:#171e2e; --line:#232c42; --txt:#e8ecf5; --mut:#8b94ad; --acc:#3d8bff; --ok:#2ecc71; --bad:#ff5c5c; }
+* { box-sizing:border-box; }
+body { margin:0; font-family:'Vazirmatn',Tahoma,sans-serif; background:var(--bg); color:var(--txt); line-height:1.8; }
+.wrap { max-width:900px; margin:0 auto; padding:24px 16px 64px; }
+h1 { font-size:1.5rem; margin:0 0 4px; }
+h1 span { color:var(--acc); }
+.sub { color:var(--mut); font-size:.9rem; margin-bottom:24px; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-bottom:28px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; text-align:center; }
+.card-v { font-size:1.15rem; font-weight:700; }
+.card-v.ok { color:var(--ok); } .card-v.bad { color:var(--bad); }
+.card-l { color:var(--mut); font-size:.78rem; }
+h2 { font-size:1.05rem; margin:28px 0 10px; border-bottom:1px solid var(--line); padding-bottom:8px; }
+code, pre { direction:ltr; background:#0b0f1a; border:1px solid var(--line); border-radius:8px; font-family:Consolas,monospace; }
+code { padding:2px 7px; font-size:.85rem; color:#9fd0ff; }
+pre { padding:12px 14px; overflow-x:auto; font-size:.82rem; margin:8px 0 16px; }
+.testbox { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+.testbox input { flex:1; min-width:240px; background:#0b0f1a; border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:10px 12px; direction:ltr; font-family:Consolas,monospace; }
+button { background:var(--acc); color:#fff; border:0; border-radius:8px; padding:10px 18px; cursor:pointer; font-family:inherit; }
+button:hover { filter:brightness(1.1); }
+#result { margin-top:14px; }
+#result pre { max-height:320px; overflow:auto; white-space:pre-wrap; word-break:break-all; }
+.meta { color:var(--mut); font-size:.82rem; }
+iframe { width:100%; height:420px; border:1px solid var(--line); border-radius:10px; background:#fff; margin-top:10px; }
+ul { padding-right:20px; }
+li { margin:4px 0; }
+a { color:var(--acc); }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>🛰️ پراکسی <span>سرور</span></h1>
+<div class="sub">نسخهٔ {$ver} — تک‌فایلی PHP، بدون وابستگی — پاسخ‌ها را از سمت سرور می‌گیرد تا IP و ساختار درخواست شما مخفی بماند.</div>
+{$statusHtml}
+
+<h2>🧪 تست سریع</h2>
+<div class="testbox">
+<input id="u" placeholder="https://example.com/page" value="https://registry.npmjs.org/express">
+<button onclick="run()">دریافت از طریق پراکسی</button>
+</div>
+<div id="result"></div>
+
+<h2>📡 روش استفاده</h2>
+<p>کافیست پارامتر <code>url</code> را بدهید؛ متد و بدنهٔ درخواست شما عیناً به مقصد ارسال می‌شود:</p>
+<pre>https://your-server.com/proxy.php?url=https://example.com/page</pre>
+<p>مثال با جاوااسکریپت (اسکرپر سمت مرورگر):</p>
+<pre>fetch('https://your-server.com/proxy.php?url=' + encodeURIComponent(target))
+  .then(r =&gt; r.text())
+  .then(html =&gt; console.log(html));</pre>
+<p>مثال با PHP (از داخل scraper.php):</p>
+<pre>&dollar;html = file_get_contents('https://your-server.com/proxy.php?url=' . urlencode(&dollar;target));</pre>
+<p>ارسال POST با بدنه:</p>
+<pre>fetch('https://your-server.com/proxy.php?url=' + encodeURIComponent(api), {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({a: 1})
+});</pre>
+
+<h2>🎛️ هدرهای کنترلی</h2>
+<ul>
+<li><code>X-Proxy-UA</code> — تغییر User-Agent ارسالی به مقصد</li>
+<li><code>X-Proxy-Referer</code> — تغییر Referer</li>
+<li><code>X-Proxy-Cookie</code> — ارسال کوکی به مقصد</li>
+<li><code>X-Proxy-Time</code> — تایم‌اوت سفارشی (ثانیه، حداکثر ۳۰۰)</li>
+<li><code>X-Proxy-Key</code> — کلید محافظت (اگر در تنظیمات فعال باشد)</li>
+</ul>
+<p>هدرهای پاسخ پراکسی: <code>X-Proxy-Final-Url</code> (آدرس نهایی پس از ریدایرکت‌ها)، <code>X-Proxy-Final-Status</code> و <code>X-Proxy-Cache</code>.</p>
+
+<h2>🛡️ امنیت و امکانات</h2>
+<ul>
+<li>محافظ SSRF — اتصال به IPهای داخلی/خصوصی مسدود است (در تنظیمات قابل تغییر)</li>
+<li>لیست سفید/سیاه دامنه‌ها با پشتیبانی از الگوی <code>*.domain.com</code></li>
+<li>چرخش خودکار بین پراکسی‌های بالادستی (http و socks5) و تلاش مجدد روی خطاهای ۴۰۳/۴۲۹/۵۰۳</li>
+<li>ریدایرکت‌ها به‌صورت امن دنبال می‌شوند و هر پرش دوباره اعتبارسنجی می‌شود</li>
+<li>رمزگشایی خودکار gzip / deflate / brotli — کش فایلی اختیاری — تزریق <code>&lt;base&gt;</code> برای لینک‌های نسبی</li>
+</ul>
+</div>
+<script>
+function run() {
+  var u = document.getElementById('u').value.trim();
+  var out = document.getElementById('result');
+  if (!u) { out.innerHTML = ''; return; }
+  out.innerHTML = '<div class="meta">در حال دریافت…</div>';
+  fetch('?url=' + encodeURIComponent(u))
+    .then(function (r) {
+      var info = 'وضعیت: ' + r.status + ' | نوع محتوا: ' + (r.headers.get('content-type') || '—') +
+                 ' | آدرس نهایی: ' + (r.headers.get('x-proxy-final-url') || '—') +
+                 ' | کش: ' + (r.headers.get('x-proxy-cache') || '—');
+      var ct = (r.headers.get('content-type') || '').toLowerCase();
+      if (ct.indexOf('text/html') !== -1) {
+        return r.text().then(function (t) {
+          out.innerHTML = '<div class="meta">' + info + '</div>' +
+            '<iframe srcdoc="' + t.replace(/"/g, '&quot;') + '"></iframe>' +
+            '<details><summary>مشاهدهٔ HTML خام</summary><pre>' + t.replace(/</g, '&lt;') + '</pre></details>';
+        });
+      }
+      return r.text().then(function (t) {
+        out.innerHTML = '<div class="meta">' + info + '</div><pre>' + t.replace(/</g, '&lt;') + '</pre>';
+      });
+    })
+    .catch(function (e) {
+      out.innerHTML = '<div class="meta">خطا: ' + e + '</div>';
+    });
+}
+</script>
+</body>
+</html>
+HTML;
+    exit;
+}
+
+function p_info(): void {
+    $cfg = $GLOBALS['CONFIG'];
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'ok'               => true,
+        'name'             => 'php-single-file-proxy',
+        'version'          => PROXY_VERSION,
+        'php'              => PHP_VERSION,
+        'curl'             => function_exists('curl_init'),
+        'cache_enabled'    => (bool)$cfg['cache_enabled'],
+        'upstream_count'   => count($cfg['upstream_proxies']),
+        'allowed_count'    => count($cfg['allowed_domains']),
+        'blocked_count'    => count($cfg['blocked_domains']),
+        'private_ips'      => (bool)$cfg['allow_private_ips'],
+        'auth_required'    => $cfg['proxy_key'] !== '',
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ---------------------------------------------------------------------
+// [۶] نقطهٔ ورود
+// ---------------------------------------------------------------------
+
+// حالت روتر php -S: فایل‌های استاتیک موجود را مستقیم سرو کن
+if (PHP_SAPI === 'cli-server') {
+    $staticPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
+    if ($staticPath !== '/' && $staticPath !== '/proxy.php' && $staticPath !== '/index.php'
+        && is_file(__DIR__ . $staticPath)) {
+        return false;
+    }
+}
+
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') {
+    header('Access-Control-Allow-Origin: *');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS');
+    header('Access-Control-Allow-Headers: *');
+    header('Access-Control-Max-Age: 86400');
+    http_response_code(204);
+    exit;
+}
+
+if (isset($_GET['info'])) {
+    p_info();
+}
+
+if (isset($_GET['url'])) {
+    p_handle_proxy();
+}
+
+p_dashboard();
