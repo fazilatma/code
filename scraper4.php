@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.55';
+const APP_VERSION = '9.56';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12052,6 +12052,16 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'id="aiCandSelAll"') !== false
          && strpos($selfSrc, 'aiCandSave(null,null,false,keys)') !== false);
 
+    /* ---------- v9.56: تاخیر قابل‌تنظیم بین تست‌ها برای جلوگیری از ریت‌لیمیت ---------- */
+    $add('9.56', 'فیلدِ «تاخیر بین تست‌ها» (میلی‌ثانیه) در بخش تست مدل‌ها',
+         strpos($selfSrc, 'id="aiTestDelay"') !== false
+         && strpos($selfSrc, 'تاخیر بین تست‌ها') !== false);
+    $add('9.56', 'مقدارِ تاخیر از فیلد خوانده و به تستِ انبوه ارسال می‌شود',
+         strpos($selfSrc, 'aiTestDelayVal') !== false
+         && strpos($selfSrc, "'&delay='+aiTestDelayVal") !== false
+         && strpos($selfSrc, 'int $delayMs = 120') !== false
+         && strpos($selfSrc, 'usleep($delayMs * 1000)') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -16778,13 +16788,14 @@ function aiRunTestCategory(array $p, string $mid, string $testCat, ?array $catDa
 }
 
 /* هستهٔ اجرای تست — یک تابع تا هم از مسیر پس‌زمینه و هم از مسیر هم‌زمان استفاده کند */
-function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'سلام', string $testCat = 'ادو پرفیوم'): array {
+function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'سلام', string $testCat = 'ادو پرفیوم', int $delayMs = 120): array {
     @set_time_limit(0); @ignore_user_abort(true);
     @unlink(AI_TEST_STOP_FILE);
     $providers = aiProvidersLoad();
     $catData = aiTestCategoryData();
+    $delayMs = max(0, min(60000, (int)$delayMs));   // v9.56: تاخیر بین هر تست (جلوگیری از ریت‌لیمیت)
     $st = ['running'=>true,'done'=>false,'stopped'=>false,'started_at'=>time(),'updated_at'=>time(),
-           'per_provider'=>$per,'only_untested'=>$onlyUntested,
+           'per_provider'=>$per,'only_untested'=>$onlyUntested,'delay_ms'=>$delayMs,
            'total'=>0,'tested'=>0,'available'=>0,'failed'=>0,'skipped'=>0,
            'current'=>['provider'=>'','model'=>''],'items'=>[],'diag'=>[],'summary'=>''];
     // شمارش کل مدل‌های هدف
@@ -16898,7 +16909,8 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
         $st['current'] = ['provider'=>'', 'model'=>''];
         // هر ۳ مدل ذخیره کن تا اگر پردازه کشته شد کار حفظ شود
         if ($st['tested'] % 3 === 0) { aiProvidersSave($providers); aiTestStateSave($st); }
-        usleep(120000);
+        // v9.56: تاخیر قابل‌تنظیم بین هر تست برای جلوگیری از ریت‌لیمیت
+        if ($delayMs > 0) usleep($delayMs * 1000);
     }
     aiProvidersSave($providers);
     $st['running'] = false;
@@ -16920,6 +16932,8 @@ $testMsg = trim((string)($_GET['msg'] ?? 'سلام'));
 if ($testMsg === '') $testMsg = 'سلام';
 $testCat = trim((string)($_GET['cat'] ?? 'ادو پرفیوم'));
 if ($testCat === '') $testCat = 'ادو پرفیوم';
+// v9.56: تاخیر بین هر تست (میلی‌ثانیه) — برای جلوگیری از ریت‌لیمیت
+$delayMs = max(0, min(60000, (int)($_GET['delay'] ?? 120)));
 // اگر کاری در حال اجراست، دوباره شروع نکن
 $cur = aiTestStateLoad();
 if (!empty($cur['running'])) {
@@ -16931,11 +16945,11 @@ finishRequestNow(json_encode(['ok'=>true,'started'=>true,'background'=>$detach,
     'note'=>'تست در پس‌زمینهٔ سرور ادامه دارد — می‌توانید صفحه را ببندید'], JSON_UNESCAPED_UNICODE));
 if (!$detach) {
     // حالت هم‌زمان برای تست/عیب‌یابی
-    aiRunTestBackground($per, $onlyUntested, $testMsg, $testCat);
+    aiRunTestBackground($per, $onlyUntested, $testMsg, $testCat, $delayMs);
     exit;
 }
 // پس از جدا شدن از مرورگر، اجرای واقعی ادامه می‌یابد
-aiRunTestBackground($per, $onlyUntested, $testMsg, $testCat);
+aiRunTestBackground($per, $onlyUntested, $testMsg, $testCat, $delayMs);
 exit;
 }
 
@@ -21758,6 +21772,10 @@ placeholder="مثلاً: سلام" title="پیامی که به هر مدل فر�
 <div class="crow" style="margin-top:4px"><label>دستهٔ تست:</label>
 <input type="text" id="aiTestCat" value="ادو پرفیوم" dir="rtl" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px"
 placeholder="مثلاً: ادو پرفیوم" title="عنوان محصولی که دسته‌بندیِ آن با هر مدل سنجیده می‌شود (پیش‌فرض: ادو پرفیوم)"></div>
+<div class="crow" style="margin-top:4px"><label>تاخیر بین تست‌ها:</label>
+<input type="number" id="aiTestDelay" value="120" min="0" max="60000" step="50" dir="ltr" style="max-width:110px;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px"
+title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری از ریت‌لیمیت — مثلاً ۱۰۰۰ یعنی یک ثانیه">
+<span style="font-size:10.5px;color:#64748b">میلی‌ثانیه (برای جلوگیری از ریت‌لیمیت)</span></div>
 <div class="cact" style="margin-top:4px"><button class="btn btn-orange" onclick="aiCandAddAvailable()" style="flex:1" title="همهٔ مدل‌هایی که تیک سبز (در دسترس) گرفته‌اند را یک‌جا به فهرست کاندیدها اضافه می‌کند">➕ افزودن همهٔ مدل‌های در دسترس به کاندیدها</button></div>
 <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;cursor:pointer;margin-bottom:6px">
 <input type="checkbox" id="aiTestOnlyUntested" style="width:14px;height:14px"> فقط مدل‌های تست‌نشده</label>
@@ -26174,6 +26192,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.56', t:'⏱ تاخیر قابل‌تنظیم بین تست‌های مدل برای جلوگیری از ریت‌لیمیت', items:[
+    'خواستهٔ شما: یک فیلد قابل‌تنظیم برای ایجاد تاخیر بین تست‌های مدل اضافه شود', 'تا از ریت‌لیمیت (محدودیت نرخ) جلوگیری کند.', '✅ فیلد «تاخیر بین تست‌ها» (به‌میلی‌ثانیه، پیش‌فرض ۱۲۰) بعد از فیلدِ دستهٔ', 'تست اضافه شد — هم در بخش بیرونی و هم داخل مودالِ نتایجِ زنده.', '✅ همان مقدارِ تاخیر به تستِ انبوه فرستاده می‌شود و بین هر مدل مکث می‌کند؛', 'اگر خطای ۴۲۹ (rate limited) می‌گرفتید، این عدد را بالا ببرید (مثلاً ۱۰۰۰ =', 'یک ثانیه بین هر تست). مقدار صفر یعنی بدون تاخیر.'],},
   {v:'9.55', t:'🏆 افزودن انبوهِ مدل‌های در دسترس به کاندیدها + حذفِ انتخابی کاندیدها', items:[
     'خواستهٔ شما: (۱) دکمه‌ای که همهٔ مدل‌هایِ تیکِ سبز (در دسترس، بدون خطا) را', 'یک‌جا به فهرست کاندیدها اضافه کند؛ (۲) در فهرست کاندیدها، تیکِ انتخابِ هر', 'ردیف + یک تیکِ «انتخاب همه» + دکمهٔ «حذف انتخاب‌شده‌ها».', '✅ دکمهٔ «➕ افزودن همهٔ مدل‌های در دسترس به کاندیدها» بعد از فیلدهایِ', 'تست اضافه شد: همهٔ مدل‌هایی که available=true (تیک سبز) دارند را یک‌جا به', 'کاندیدها می‌افزاید (بدون تکرارِ کاندیدهایِ موجود).', '✅ فهرست کاندیدها حالا در هر ردیف یک تیک دارد؛ بالای فهرست هم یک', '«انتخاب همه» و دکمهٔ «🗑 حذف انتخاب‌شده‌ها» هست که همهٔ ردیف‌هایِ تیک‌خورده', 'را یک‌جا حذف می‌کند.', '✅ این هم در افزودنِ انبوه و هم در حذفِ انتخابی از اندپوینتِ ذخیرهٔ', 'کاندیدها استفاده می‌شود.'],},
   {v:'9.54', t:'🧪 رفعِ نمایشِ پاسخِ مدل‌های Together AI (استخراج مقاومِ متنِ پاسخ)', items:[
@@ -30610,6 +30630,8 @@ function aiOpenTestModal(){
       +'<input id="aiTestMsg" value="'+esc(aiTestMsgVal||'سلام')+'" dir="rtl" style="flex:1;min-width:140px;padding:4px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px">'
       +'<span style="color:#94a3b8">دستهٔ تست:</span>'
       +'<input id="aiTestCat" value="'+esc(aiTestCatVal||'ادو پرفیوم')+'" dir="rtl" style="flex:1;min-width:140px;padding:4px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px">'
+      +'<span style="color:#94a3b8">تاخیر (ms):</span>'
+      +'<input id="aiTestDelay" type="number" value="'+esc(aiTestDelayVal||120)+'" min="0" max="60000" step="50" dir="ltr" style="width:90px;padding:4px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری از ریت‌لیمیت">'
       +'</div>'
       +'<div style="flex:1;overflow:auto;padding:0">'
       +'<table style="width:100%;border-collapse:collapse;font-size:11px">'
@@ -30652,7 +30674,7 @@ function aiPollTest(){
     },1200);
 }
 let aiTestRows={},aiTestTotCount=0,aiTestOkCount=0,aiTestFailCount=0,aiTestWaitCount=0;
-let aiTestMsgVal='سلام',aiTestCatVal='ادو پرفیوم';
+let aiTestMsgVal='سلام',aiTestCatVal='ادو پرفیوم',aiTestDelayVal=120;
 function aiTestRenderCounters(){
     if($('aiTestTot'))$('aiTestTot').textContent=toFa(aiTestTotCount);
     if($('aiTestOk'))$('aiTestOk').textContent=toFa(aiTestOkCount);
@@ -30737,12 +30759,15 @@ function aiTestAll(){
     // v9.52: پیام و دستهٔ تستِ قابل‌تنظیم — برای نمایش در مودال هم نگه می‌داریم
     aiTestMsgVal=($('aiTestMsg')&&$('aiTestMsg').value.trim())||'سلام';
     aiTestCatVal=($('aiTestCat')&&$('aiTestCat').value.trim())||'ادو پرفیوم';
+    // v9.56: تاخیر بین تست‌ها (میلی‌ثانیه)
+    aiTestDelayVal=Math.max(0,parseInt(($('aiTestDelay')&&$('aiTestDelay').value)||'120',10)||120);
     aiOpenTestModal();
     const tbody=$('aiTestTbody');if(!tbody)return;
     tbody.innerHTML='';
     aiTestTotCount=0;aiTestOkCount=0;aiTestFailCount=0;aiTestWaitCount=0;aiTestRows={};
     fetch('?ai_test_start=1&per_provider='+per+'&only_untested='+only
-        +'&msg='+encodeURIComponent(aiTestMsgVal)+'&cat='+encodeURIComponent(aiTestCatVal)).then(r=>r.json()).then(d=>{
+        +'&msg='+encodeURIComponent(aiTestMsgVal)+'&cat='+encodeURIComponent(aiTestCatVal)
+        +'&delay='+aiTestDelayVal).then(r=>r.json()).then(d=>{
         if(d&&d.running&&!d.ok){ if($('aiTestCur'))$('aiTestCur').textContent='در حال اجراست — ادامهٔ آن را نشان می‌دهم'; }
         else if($('aiTestCur'))$('aiTestCur').textContent='شروع تست در پس‌زمینهٔ سرور...';
         aiPollTest();
