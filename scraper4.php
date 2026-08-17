@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.74';
+const APP_VERSION = '9.75';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3342,6 +3342,18 @@ function srcNetCfg(?array $cn = null): array {
     ];
 }
 
+/* v9.75: اتصالِ «فقط همین پروفایل» را برای بارگذاریِ صفحه در تبِ سلکتورها اعمال
+   می‌کند. اگر تیک «اتصال غیرمستقیم»ِ پروفایل خاموش باشد → مستقیم (بدون توجه به
+   تنظیمِ سراسری src_net)؛ اگر روشن باشد → همان راهِ غیرمستقیمِ سراسری. */
+function srcNetSetProfileIndirect(?string $pk): void {
+    $on = false;
+    if ($pk !== '' && $pk !== null) {
+        $p = loadProfiles();
+        $on = !empty($p[$pk]['net_indirect']);
+    }
+    $GLOBALS['_srcNetProfileIndirect'] = $on;
+}
+
 /** آیا برای این دامنه باید از راه عبور استفاده کنیم؟ */
 function srcNetApplies(array $net, string $host): bool {
     if ($net['mode'] === 'direct') return false;
@@ -4396,6 +4408,9 @@ $dpTimeout = (int)($cnDP['proxy_timeout_sec'] ?? 0);
 if ($dpTimeout <= 0) $dpTimeout = 45;
 $dpTimeout = max(10, min(180, $dpTimeout));
 
+// v9.75: اتصالِ این صفحه را مطابقِ «اتصال غیرمستقیم»ِ پروفایلِ انتخاب‌شده بگذار
+srcNetSetProfileIndirect((string)($_GET['pk'] ?? ''));
+
 $res = fetch_html($url, $dpTimeout);
 if (!$res['ok']) {
     $e1 = (string)($res['error'] ?? '');
@@ -5217,6 +5232,9 @@ $cnVP = loadConnections();
 $vpTimeout = (int)($cnVP['proxy_timeout_sec'] ?? 0);
 if ($vpTimeout <= 0) $vpTimeout = 45;
 $vpTimeout = max(10, min(180, $vpTimeout));
+
+// v9.75: اتصالِ این صفحه را مطابقِ «اتصال غیرمستقیم»ِ پروفایلِ انتخاب‌شده بگذار
+srcNetSetProfileIndirect((string)($_GET['pk'] ?? ''));
 
 $res = fetch_html($url, $vpTimeout);
 if (!$res['ok']) {
@@ -9230,7 +9248,7 @@ function cronWatchdogs(array $cn): array {
         $exProg = readProgress(EXTRACT_PROGRESS_FILE);
         $exQ = extractReadQueue();
         $exNow = time();
-        $exDirty = false; $exStuck = null;
+        $exDirty = false; $exStuck = null; $exResumeKeys = [];
         foreach ($exQ['entries'] as $qi => $qe) {
             if (($qe['status'] ?? '') !== 'running') continue;
             /* v8.91: همان اصلاحی که در extract_queue_status انجام شد.
@@ -9244,24 +9262,30 @@ function cronWatchdogs(array $cn): array {
             if ($ts <= 0) $ts = (int)($qe['started_at'] ?? 0);
             $idle = $ts > 0 ? ($exNow - $ts) : PHP_INT_MAX;
             if ($idle <= $stallCfg) continue;
-            $exQ['entries'][$qi]['status'] = 'failed';
-            $exQ['entries'][$qi]['error'] = 'بی‌حرکت ماند (' . $idle . ' ثانیه) — نگهبان بست';
-            $exQ['entries'][$qi]['done_at'] = $exNow;
+            /* v9.75: به‌جای «بستن و رها کردن»، ردیفِ گیرکرده را از صف برمی‌داریم
+               (تا محافظِ تکراری، پروفایل را بلاک نکند) و همان پروفایل را برای
+               «ادامهٔ» فازِ ۱/۲ استخراج علامت می‌زنیم. خودِ استخراج با نشانهٔ
+               مرحله (_extract_stage) می‌داند از کجا ادامه دهد. */
+            $exKey = (string)($qe['profile_key'] ?? '');
+            unset($exQ['entries'][$qi]);
             $exDirty = true;
-            $exStuck = ['idle' => $idle, 'profile' => (string)($qe['profile_name'] ?? ($qe['profile_key'] ?? '')),
-                        'key' => (string)($qe['profile_key'] ?? '')];
+            $exStuck = ['idle' => $idle, 'profile' => (string)($qe['profile_name'] ?? $exKey),
+                        'key' => $exKey];
+            if ($exKey !== '') $exResumeKeys[] = $exKey;
         }
         if ($exDirty) {
+            $exQ['entries'] = array_values($exQ['entries']);
             extractWriteQueue($exQ);
-            // فایل پیشرفت هم بسته شود وگرنه رابط کاربری «در حال اجرا» نشان می‌دهد
+            // فایل پیشرفت هم باز شود وگرنه رابط کاربری «در حال اجرا» نشان می‌دهد
             if (!empty($exProg['running'])) {
                 $exProg['running'] = false; $exProg['done'] = true; $exProg['stalled'] = true;
                 writeProgress(EXTRACT_PROGRESS_FILE, $exProg);
             }
             $results['extract_watchdog'] = $exStuck;
+            $results['extract_resume'] = array_values(array_unique($exResumeKeys));
             notifRunFailure($cn, 'نگهبان استخراج', $exStuck['profile'] ?: 'استخراج',
-                'استخراج ' . (int)$exStuck['idle'] . ' ثانیه بی‌حرکت بود و بسته شد. '
-                . 'اجرای بعدی طبق زمان‌بندی از سر گرفته می‌شود.');
+                'استخراج ' . (int)$exStuck['idle'] . ' ثانیه بی‌حرکت بود — ردیفش برداشته شد و '
+                . 'همان پروفایل در همین نوبت ادامه داده می‌شود (از همان مرحله‌ای که مانده بود).');
         }
     }
     return $results;
@@ -10000,6 +10024,32 @@ foreach ($wdEarly as $k => $v) { if (!empty($v)) $results[$k] = $v; }
    کهنه (یا پروفایلِ تازه‌ای که همین تیک عوضش کرده) را نبیند. */
 $profiles  = loadProfiles();
 $syncState = loadSyncState();
+
+/* v9.75: اگر نگهبان، ردیفِ استخراجِ گیرکرده (فازِ ۱ فهرست یا فازِ ۲ جزئیات) را
+   برداشته باشد، همان پروفایل را همین‌جا «ادامه» می‌دهیم — نه اینکه صبر کنیم تا
+   نوبتِ بعدیِ زمان‌بندی برسد. فازِ مناسب از روی نشانهٔ مرحله انتخاب می‌شود:
+   اگر اجرای قبلی وسطِ جزئیات مانده باشد (stage=detail تازه) → detail؛ وگرنه → all
+   (فهرست + جزئیاتِ فقطِ محصولاتِ جدید/ناقص). ردیفی که اینجا دوباره ساخته می‌شود
+   در صف است، پس حلقهٔ پایین همان پروفایل را تکراری رد می‌کند و کارِ دوگانه پیش
+   نمی‌آید. */
+if (!empty($wdEarly['extract_resume'])) {
+    foreach (array_unique((array)$wdEarly['extract_resume']) as $_rk) {
+        if ($_rk === '') continue;
+        $_prR = $profiles[$_rk] ?? null;
+        $_phR = 'all';
+        if (is_array($_prR)) {
+            $_psR = (string)($_prR['_extract_stage'] ?? '');
+            $_psaR = time() - (int)($_prR['_extract_stage_at'] ?? 0);
+            $_staleR = max(120, (int)($cn['stall_after'] ?? 300));
+            if ($_psR === 'detail' && $_psaR <= $_staleR) $_phR = 'detail';
+        }
+        $_rr = runBackendExtract($_rk, 'watchdog_resume', false, $_phR);
+        $results['extract_resumed'][] = ['key' => $_rk, 'phase' => $_phR, 'ok' => !empty($_rr['ok'])];
+    }
+    // پروفایل‌ها و وضعیت را بعد از ادامه‌دادن دوباره بخوان تا حلقهٔ پایین نسخهٔ تازه ببیند
+    $profiles  = loadProfiles();
+    $syncState = loadSyncState();
+}
 
 foreach ($profiles as $key => $profile) {
 $syncCfg = $profile['syncConfig'] ?? [];
@@ -12433,6 +12483,17 @@ if (isset($_GET['selftest'])) {
     $add('9.74', 'بلوکِ درجای جزئیات فقط در فازِ غیر-لیست و فقط برای محصولِ ناقص اجرا می‌شود',
          strpos($selfSrc, "if(\$phase!=='list'){") !== false
          && strpos($selfSrc, 'if (!(\$_galDoneNow && !\$_fieldMissingNow)) {') !== false);
+
+    /* ---------- v9.75: نگهبانِ ادامه‌یافتِ استخراج + اتصالِ مستقیمِ تبِ سلکتورها ---------- */
+    $add('9.75', 'نگهبانِ استخراج ردیفِ گیرکرده را برمی‌دارد و همان پروفایل را برای ادامه علامت می‌زند',
+         strpos($selfSrc, "\$exResumeKeys[] = \$exKey;") !== false
+         && strpos($selfSrc, "runBackendExtract(\$_rk, 'watchdog_resume', false, \$_phR);") !== false);
+    $add('9.75', 'فازِ ادامه از روی نشانهٔ مرحله انتخاب می‌شود (detail یا all)',
+         strpos($selfSrc, "if (\$_psR === 'detail' && \$_psaR <= \$_staleR) \$_phR = 'detail';") !== false);
+    $add('9.75', 'بارگذاریِ صفحه در تبِ سلکتورها اتصالِش را مطابق «اتصال غیرمستقیم»ِ پروفایلِ فعلی می‌کند',
+         strpos($selfSrc, 'function srcNetSet' . 'ProfileIndirect(?string $pk)') !== false
+         && strpos($selfSrc, "srcNetSetProfileIndirect((string)(\$_GET['pk'] ?? ''));") !== false
+         && strpos($selfSrc, "&pk=' + encodeURIComponent(_pk)") !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -24448,7 +24509,10 @@ function openDetailProxy(keepScroll) {
     const pp = $('pickerPanel'); if (pp) pp.classList.remove('hidden');
     // ارتفاع پیش‌فرض را به اندازهٔ پنجره بزرگ کن تا فضای کلیک کم نباشد
     setDetailIframeHeight(Math.max(500, window.innerHeight - 160));
-    $('detailFrame').src = '?detail_proxy=' + encodeURIComponent(sampleUrl);
+    // v9.75: کلید پروفایلِ فعلی را بفرست تا اتصالِ صفحه مطابق «اتصال غیرمستقیم»ِ
+    // همین پروفایل باشد (خاموش = مستقیم). پروفایلِ فعلی = انتخابِ منو یا URL.
+    const _pk = profileKey(($('profileSelect')&&$('profileSelect').value)||($('url')&&$('url').value.trim())||'');
+    $('detailFrame').src = '?detail_proxy=' + encodeURIComponent(sampleUrl) + '&pk=' + encodeURIComponent(_pk);
     $('detailStatus').textContent = '⏳ در حال باز کردن صفحهٔ نمونه...';
     switchMainTab('selectors');
     // v8.66: اگر پروکسی خطا بدهد، iframe سفید می‌ماند و کاربر نمی‌فهمد چه شد
@@ -25172,7 +25236,9 @@ function loadVisual(){
   $('status').textContent='در حال بارگذاری...';
   $('directLoadBanner').classList.add('hidden');
   const full=$('fullMode')&&$('fullMode').checked?'&full=1':'';
-  $('vFrame').src='?visual_proxy='+encodeURIComponent(url)+full;
+  // v9.75: اتصالِ این صفحه را مطابق «اتصال غیرمستقیم»ِ پروفایلِ فعلی بگذار (خاموش = مستقیم)
+  const _pk=profileKey(url);
+  $('vFrame').src='?visual_proxy='+encodeURIComponent(url)+full+'&pk='+encodeURIComponent(_pk);
   $('vFrame').onload=()=>{
       if($('fullMode')&&$('fullMode').checked){
           $('status').textContent='⏳ رندر JS... صبر کنید';
@@ -25352,7 +25418,9 @@ function openFullPageInspector(){
     const url=$('url').value.trim();
     if(!url){showToast('URL وارد کنید',true);return;}
     const full=$('fullMode')&&$('fullMode').checked?'&full=1':'';
-    const w=window.open('?visual_proxy='+encodeURIComponent(url)+'&fullpage_inspect=1'+full,'_blank');
+    // v9.75: اتصالِ این صفحه را مطابق «اتصال غیرمستقیم»ِ پروفایلِ فعلی بگذار (خاموش = مستقیم)
+    const _pk=profileKey(url);
+    const w=window.open('?visual_proxy='+encodeURIComponent(url)+'&fullpage_inspect=1'+full+'&pk='+encodeURIComponent(_pk),'_blank');
     if(!w){showToast('⚠️ پاپ‌آپ مسدود شد — لطفاً پاپ‌آپ را فعال کنید',true);return;}
     showToast('🔍 صفحه بازرسی در تب جدید باز شد — المان‌ها را انتخاب کنید');
     $('status').textContent='🔍 صفحه بازرسی در تب جدید باز شد';
@@ -26829,6 +26897,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.75', t:'🩺 نگهبانِ استخراج (فازِ ۱/۲) که کارِ گیرکرده را «ادامه» می‌دهد + اتصالِ مستقیمِ تبِ سلکتورها', items:[
+    'خواستهٔ ۱: برای مراحلِ ۱ (فهرست) و ۲ (جزئیات) استخراج هم نگهبان گذاشته شود', 'که اگر وسطِ کار گیر کرد، «ادامه» دهد به‌جای اینکه بی‌خیالش شود.', '✅ نگهبانِ استخراج دیگر ردیفِ گیرکرده را فقط «بسته» نمی‌کند؛ آن را از صف', 'برمی‌دارد (تا محافظِ تکراری، پروفایل را بلاک نکند) و همان پروفایل را در', 'همان نوبتِ کران «ادامه» می‌دهد — از همان مرحله‌ای که مانده بود.', '✅ فازِ مناسب از روی نشانهٔ مرحله انتخاب می‌شود: اگر وسطِ جزئیات مانده', '(stage=detail تازه) → فازِ detail؛ وگرنه → all (فهرست + جزئیاتِ فقطِ', 'محصولاتِ جدید/ناقص).', 'خواستهٔ ۲: برای پروفایلی که تیک «اتصال غیرمستقیم»ش خاموش است، در تبِ', 'سلکتورها هنگامِ بارگذاریِ صفحه از اتصالِ مستقیم استفاده شود.', '✅ بارگذاریِ صفحه در تبِ سلکتورها (نمونهٔ جزئیات + بارگذاریِ صفحهٔ', 'بازرسی) حالا اتصالِش را مطابق «اتصال غیرمستقیم»ِ همان پروفایلِ انتخاب‌شده', 'می‌کند: اگر تیک خاموش باشد → مستقیم (بدون توجه به تنظیمِ سراسری)؛ اگر', 'روشن باشد → راهِ غیرمستقیمِ سراسری.', '✅ کلیدِ پروفایلِ فعلی به درخواستِ proxy اضافه شد تا سرور بداند کدام', 'پروفایل فعال است.'],},
   {v:'9.74', t:'✅ کران بعد از فهرست، جزئیاتِ فقطِ محصولاتِ جدید/ناقص را هم می‌گیرد', items:[
     'خواستهٔ شما: مرحلهٔ استخراجِ جزئیات، بعد از مرحلهٔ استخراجِ لیست، برای', 'محصولاتِ جدید یا محصولاتِ بدونِ جزئیات اجرا شود.', '✅ کران حالا فازِ «all» را اجرا می‌کند: اول فهرستِ تازه را می‌گیرد و ذخیره', 'می‌کند و بعد همان اجرا، صفحهٔ جزئیاتِ فقطِ محصولاتِ «ناقص» را باز می‌کند.', '✅ بلوکِ درجای جزئیات فقط وقتی محصول را باز می‌کند که ناقص باشد (گالریِ', 'چندعکسی یا فیلدِ خواسته‌شده هنوز خالی باشد) یا محصولِ تازه‌ای باشد که هنوز', 'جزئیات ندارد. محصولاتِ ازقبل‌کامل دوباره باز نمی‌شوند.', '✅ نتیجه: دیگر «هر کران همهٔ جزئیات را دوباره می‌گرفت» وجود ندارد؛ فقط', 'محصولاتِ جدید/ناقص کامل می‌شوند و بعد ارسال انجام می‌شود.', '✅ اگر اجرای قبلی وسطِ جزئیات کشته شده باشد (stage=detail تازه)، همان را با', 'فازِ detail ادامه می‌دهیم (بدون گرفتن دوبارهٔ فهرست) تا کارِ نیمه‌کاره', 'تمام شود.'],},
   {v:'9.73', t:'🐛 رفعِ نهاییِ «استخراج تفصیلی در هر کران» — کران حالا همیشه فقط فهرست (list) می‌گیرد', items:[
