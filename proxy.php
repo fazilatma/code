@@ -86,7 +86,7 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.0.0');
+define('PROXY_VERSION', '1.1.0');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -348,7 +348,9 @@ function p_curl_once(string $url, string $method, array $headers, string $body, 
     if ($ch === false) return ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'راه‌اندازی cURL ناموفق بود'];
 
     $received = 0;
-    $maxSize = (int)$cfg['max_size'];
+    $tooBig   = false;
+    $raw      = '';
+    $maxSize  = (int)$cfg['max_size'];
     $opts = [
         CURLOPT_RETURNTRANSFER    => true,
         CURLOPT_HEADER            => true,
@@ -363,10 +365,18 @@ function p_curl_once(string $url, string $method, array $headers, string $body, 
         CURLOPT_REDIR_PROTOCOLS   => CURLPROTO_HTTP | CURLPROTO_HTTPS,
         CURLOPT_HTTPHEADER        => $headers,
         CURLOPT_MAXREDIRS         => 0,
-        CURLOPT_WRITEFUNCTION     => function ($ch, $chunk) use (&$received, $maxSize) {
-            $received += strlen($chunk);
-            if ($received > $maxSize) return 0; // قطع اتصال
-            return strlen($chunk);
+        // نکتهٔ مهم: وقتی WRITEFUNCTION تنظیم شده، curl_exec به‌جای رشتهٔ
+        // پاسخ فقط true/false برمی‌گرداند؛ داده (هدرها + بدنه) باید همین‌جا
+        // در بافر جمع شود — وگرنه بدنه‌ای برای تجزیه وجود ندارد.
+        CURLOPT_WRITEFUNCTION     => function ($ch2, $chunk) use (&$received, &$raw, &$tooBig, $maxSize) {
+            $len = strlen($chunk);
+            if ($received + $len > $maxSize) {
+                $tooBig = true;
+                return 0; // قطع اتصال
+            }
+            $received += $len;
+            $raw .= $chunk;
+            return $len;
         },
     ];
     if ($cfg['referer'] !== '') $opts[CURLOPT_REFERER] = $cfg['referer'];
@@ -381,29 +391,36 @@ function p_curl_once(string $url, string $method, array $headers, string $body, 
     }
 
     curl_setopt_array($ch, $opts);
-    $resp = curl_exec($ch);
-    $errno = curl_errno($ch);
-    $error = $errno ? (curl_error($ch) ?: "خطای cURL شمارهٔ {$errno}") : null;
-    $info = curl_getinfo($ch);
+    $execOk = curl_exec($ch);
+    $errno  = curl_errno($ch);
+    $error  = $errno ? (curl_error($ch) ?: "خطای cURL شمارهٔ {$errno}") : null;
+    $info   = curl_getinfo($ch);
     curl_close($ch);
 
-    if ($resp === false || $resp === '') {
-        return ['status' => 502, 'headers' => [], 'body' => '', 'error' => $error ?? 'پاسخ خالی از مقصد'];
-    }
-    if ($received > $maxSize) {
+    if ($tooBig) {
         return ['status' => 413, 'headers' => [], 'body' => '', 'error' => "حجم پاسخ بیش از حد مجاز ({$maxSize} بایت)"];
     }
-
-    $headerSize = (int)($info['header_size'] ?? 0);
-    if ($headerSize <= 0 || $headerSize >= strlen($resp)) {
-        $headerSize = strpos($resp, "\r\n\r\n");
-        if ($headerSize === false) {
-            return ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'ساختار پاسخ مقصد نامعتبر است'];
-        }
-        $headerSize += 4;
+    if ($execOk === false || $raw === '') {
+        return ['status' => 502, 'headers' => [], 'body' => '', 'error' => $error ?? 'پاسخ خالی از مقصد'];
     }
-    $rawHeaders = substr($resp, 0, $headerSize);
-    $body = substr($resp, $headerSize);
+
+    // جدا کردن هدرها از بدنه: اول CRLFCRLF، بعد LF‌LF، بعد header_size خود cURL
+    $headerSize   = strpos($raw, "\r\n\r\n");
+    $headerEndLen = 4;
+    if ($headerSize === false) {
+        $headerSize   = strpos($raw, "\n\n");
+        $headerEndLen = 2;
+    }
+    if ($headerSize === false) {
+        $headerSize   = (int)($info['header_size'] ?? 0);
+        $headerEndLen = 0;
+        if ($headerSize <= 0 || $headerSize > strlen($raw)) $headerSize = -1;
+    }
+    if ($headerSize < 0) {
+        return ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'ساختار پاسخ مقصد نامعتبر است'];
+    }
+    $rawHeaders = substr($raw, 0, $headerSize);
+    $body = substr($raw, $headerSize + $headerEndLen);
     $parsed = p_parse_headers($rawHeaders, $url);
     $status = $parsed[0] ?: (int)($info['http_code'] ?? 0);
     if ($status === 0) {
