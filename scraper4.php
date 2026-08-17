@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.77';
+const APP_VERSION = '9.78';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12540,6 +12540,20 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'function srcNetFetch' . 'Attempt(') !== false
          && strpos($selfSrc, "if (!empty(\$__srcNet['fallback'])) {") !== false);
 
+    /* ---------- v9.78: تب سلکتورها — همهٔ بخش‌ها به منوی کشویی تبدیل شدند ---------- */
+    $add('9.78', 'بخش «سلکتورهای لیست محصولات» در تب سلکتورها منوی کشویی است',
+         strpos($selfSrc, 'id="pane-select' . 'ors">') !== false
+         && strpos($selfSrc, '🎨 سلکتورهای لیست محصولات</h3>') !== false
+         && strpos($selfSrc, 'smenu-body open sel-open') !== false);
+    $add('9.78', 'بخش «پیش‌نمایش زندهٔ صفحهٔ لیست» منوی کشویی جدا دارد',
+         strpos($selfSrc, '🖥 پیش‌نمایش زندهٔ صفحهٔ لیست و سلکتورها</h3>') !== false);
+    $add('9.78', 'بخش «سلکتورهای جزئیات» و «گالری» و «پیش‌نمایش جزئیات» هم منوی کشویی دارند',
+         strpos($selfSrc, '📄 سلکتورهای صفحهٔ جزئیات محصول</h3>') !== false
+         && strpos($selfSrc, 'گالری)</h3>') !== false
+         && strpos($selfSrc, '🔍 پیش‌نمایش صفحهٔ جزئیات</h3>') !== false);
+    $add('9.78', 'آکاردئون‌های تب سلکتورها ارتفاعِ بیشتری برای پیش‌نمایش باز دارند',
+         strpos($selfSrc, 'smenu-body.open.sel-open{max-height:12000px}') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -22031,7 +22045,8 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
    ۴۰۰ پیکسل، تمام عرض صفحه می‌کند تا همهٔ محتوا/بخش‌ها در یک نگاه باز شوند. */
 .fullwidth-btn{position:fixed;top:10px;left:60px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.fullwidth-btn:hover{background:#334155}.fullwidth-btn.active{background:#7c3aed;color:#fff}.settings-panel.full{width:100vw;max-width:100vw;left:0}.settings-panel.full .smenu-body.open{max-height:none;overflow:visible}
 .hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:1;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}
-.smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}.live-cnt{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:8px 0}.live-cnt .lc{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;cursor:pointer;transition:.15s;display:flex;flex-direction:column;gap:1px}
+.smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}/* v9.78: آکاردئون‌های تب سلکتورها بزرگ‌ترند (شامل پیش‌نمایش iframe) */
+.smenu-body.open.sel-open{max-height:12000px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}.live-cnt{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:8px 0}.live-cnt .lc{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;cursor:pointer;transition:.15s;display:flex;flex-direction:column;gap:1px}
 /* v9.60: تب‌های بخش هوش مصنوعی */
 .prof-net-switch .prof-net-slider{width:36px;height:20px;border-radius:20px;background:#334155;position:relative;display:inline-block;transition:background .2s;flex:0 0 auto;vertical-align:middle}.prof-net-switch .prof-net-slider::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#e2e8f0;transition:transform .2s}.prof-net-switch input:checked + .prof-net-slider{background:#22c55e}.prof-net-switch input:checked + .prof-net-slider::after{transform:translateX(16px)}.smenu-body.open.ai-tabs-open{max-height:4000px}.ai-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;border-bottom:1px solid #334155;padding-bottom:6px;direction:rtl}.ai-tab-btn{padding:7px 12px;font-size:11px;color:#94a3b8;background:#111c31;border:1px solid #334155;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap;flex:1;min-width:80px;text-align:center}.ai-tab-btn:hover{background:#1e293b;color:#e2e8f0}.ai-tab-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6;font-weight:700}.ai-tab-panel{display:none}.ai-tab-panel.active{display:block}
 .live-cnt .lc:hover{background:#1e293b;transform:translateY(-1px)}.live-cnt .lc b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.live-cnt .lc span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.live-cnt .lc i{font-size:9px;font-style:normal;font-family:ui-monospace,monospace}@media(max-width:620px){.live-cnt{grid-template-columns:repeat(3,1fr)}}.pdir{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700}.pdir-up{background:#7f1d1d;color:#fca5a5}.pdir-down{background:#14532d;color:#86efac}.pdir-same{background:#334155;color:#94a3b8}.app-ver{display:inline-block;background:#0f172a;border:1px solid #334155;color:#67e8f9;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;font-family:ui-monospace,monospace;cursor:pointer;transition:.15s;vertical-align:middle}
@@ -23400,6 +23415,11 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 </div>
 
 <div class="tab-pane" id="pane-selectors">
+    <!-- v9.78: همهٔ بخش‌های تب سلکتورها به منوی کشویی (آکاردئون) تبدیل شدند.
+         هر بخش با کلیک روی سربرگ باز/بسته می‌شود تا تب فشرده‌تر و مرتب‌تر باشد. -->
+    <div class="smenu" style="background:#111c31;border:1px solid #334155;border-radius:12px;margin-bottom:14px;overflow:hidden">
+        <div class="smenu-hdr" onclick="toggleSmenu(this)" style="background:linear-gradient(90deg,#1e3a5f,#0f172a)"><h3>🎨 سلکتورهای لیست محصولات</h3><span class="arrow">▼</span></div>
+        <div class="smenu-body open sel-open">
     <div class="card">
         <div class="section-title">🎨 سلکتورهای لیست محصولات</div>
         <div class="alert alert-info">
@@ -23461,7 +23481,12 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
             <button class="btn btn-blue" id="selStartBtn" onclick="startFromSelectors()" style="flex:1;font-size:14px;padding:10px">▶ شروع استخراج</button>
         </div>
     </div>
+        </div>
+    </div>
 
+    <div class="smenu" style="background:#111c31;border:1px solid #334155;border-radius:12px;margin-bottom:14px;overflow:hidden">
+        <div class="smenu-hdr" onclick="toggleSmenu(this)" style="background:linear-gradient(90deg,#0f172a,#134e4a)"><h3>🖥 پیش‌نمایش زندهٔ صفحهٔ لیست و سلکتورها</h3><span class="arrow">▼</span></div>
+        <div class="smenu-body open sel-open">
     <div class="visual-container">
         <div>
             <div class="iframe-size-bar">
@@ -23555,7 +23580,12 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
             </div>
         </div>
     </div>
+        </div>
+    </div>
 
+    <div class="smenu" style="background:#111c31;border:1px solid #334155;border-radius:12px;margin-bottom:14px;overflow:hidden">
+        <div class="smenu-hdr" onclick="toggleSmenu(this)" style="background:linear-gradient(90deg,#4c1d95,#0f172a)"><h3>📄 سلکتورهای صفحهٔ جزئیات محصول</h3><span class="arrow">▼</span></div>
+        <div class="smenu-body open sel-open">
     <div class="card" style="margin-top:14px;border-color:#a855f7">
         <div class="section-title purple">📄 سلکتورهای صفحه جزئیات محصول</div>
         <div class="alert alert-purple">
@@ -23572,8 +23602,13 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
         <div id="detailSampleBar" style="margin-top:8px;font-size:11px;color:#cbd5e1;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px 9px;line-height:1.9"></div>
         <div id="detailFieldsList" style="margin-top:12px"></div>
     </div>
+        </div>
+    </div>
 
     <!-- v8.64: گالری — چند عکس از صفحهٔ جزئیات محصول -->
+    <div class="smenu" style="background:#111c31;border:1px solid #334155;border-radius:12px;margin-bottom:14px;overflow:hidden">
+        <div class="smenu-hdr" onclick="toggleSmenu(this)" style="background:linear-gradient(90deg,#831843,#0f172a)"><h3>🖼 چند عکس از صفحهٔ محصول (گالری)</h3><span class="arrow">▼</span></div>
+        <div class="smenu-body sel-open">
     <div class="card" style="margin-top:14px;border-color:#ec4899">
         <div class="section-title" style="color:#f9a8d4">🖼 چند عکس از صفحهٔ محصول (گالری)</div>
         <div class="alert" style="background:#500724;border:1px solid #ec4899;color:#fbcfe8">
@@ -23650,6 +23685,8 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
             <div id="galTestR" style="margin-top:6px"></div>
         </div>
     </div>
+        </div>
+    </div>
 
     <!-- v8.68: کنترل‌های انتخاب، بیرون از پنجرهٔ پیش‌نمایش.
          قبلاً یک نوار ثابت داخل خودِ صفحهٔ محصول بود و بخش زیادی از
@@ -23692,6 +23729,9 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
         <div id="pkHint" style="margin-top:5px;font-size:10.5px;color:#94a3b8;line-height:1.8">روی هر بخش از صفحهٔ زیر کلیک کنید. با <b>⬆ والد</b> می‌توانید ظرف بزرگ‌تر را بگیرید.</div>
     </div>
 
+    <div class="smenu" style="background:#111c31;border:1px solid #334155;border-radius:12px;margin-bottom:14px;overflow:hidden">
+        <div class="smenu-hdr" onclick="toggleSmenu(this)" style="background:linear-gradient(90deg,#0f172a,#1e3a8a)"><h3>🔍 پیش‌نمایش صفحهٔ جزئیات</h3><span class="arrow">▼</span></div>
+        <div class="smenu-body open sel-open">
     <div class="iframe-size-bar" style="margin-top:14px">
         <span>📏 ارتفاع:</span>
         <input type="range" id="detailIframeSlider" min="300" max="2400" value="900" step="50" oninput="setDetailIframeHeight(this.value)">
@@ -23700,6 +23740,8 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
     </div>
     <div class="iframe-wrap hidden" id="detailFrameWrap">
         <iframe id="detailFrame"></iframe>
+    </div>
+        </div>
     </div>
 </div>
 
@@ -26963,6 +27005,14 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.78', t:'📂 تبِ سلکتورها: همهٔ بخش‌ها به منوی کشویی (آکاردئون) تبدیل شدند', items:[
+    'خواستهٔ شما: در تبِ سلکتورها همهٔ بخش‌ها به منوی کشویی تبدیل شوند تا', 'تب فشرده‌تر و مرتب‌تر شود و هر بخش فقط وقتی باز باشد که لازمش دارید.',
+    '✅ «سلکتورهای لیست محصولات» به یک منوی کشویی مستقل تبدیل شد.',
+    '✅ «پیش‌نمایش زندهٔ صفحهٔ لیست و سلکتورها» (iframe + کادر سلکتورها) به', 'یک منوی کشویی مستقل تبدیل شد — با بستنش، فضای تب آزاد می‌شود.',
+    '✅ «سلکتورهای صفحهٔ جزئیات محصول» به یک منوی کشویی مستقل تبدیل شد.',
+    '✅ «گالری تصاویر محصول» به یک منوی کشویی مستقل تبدیل شد (پیش‌فرض بسته).',
+    '✅ «پیش‌نمایش صفحهٔ جزئیات» هم به یک منوی کشویی مستقل تبدیل شد.',
+    '✅ هر سربرگ یک فلش دارد که با کلیک می‌چرخد؛ بخش‌های اصلی پیش‌فرض باز', 'اند و گالری بسته است. محتوا و ای‌دی‌های همهٔ کنترل‌ها دست‌نخورده مانده', 'و رفتار استخراج/بازرسی عوض نشده است.'],},
   {v:'9.77', t:'🌐 بخشِ مستقلِ «اتصال به سایت مبدأ» + تیکِ استفاده از روش‌های جایگزین در صورت شکست', items:[
     'گزارش شما: بخشِ «اتصال به سایت مبدأ» به‌نادرست داخلِ بخشِ «نگهبان صف» قرار', 'گرفته بود و باید بیرون بیاید و در یک بخشِ مستقلِ منظم قرار بگیرد.', '✅ این بخش حالا از «نگهبان صف ارسال» جدا و به یک بخشِ (سمنوی) مستقلِ «🌐', 'اتصال به سایت مبدأ» منتقل شد و ظاهرِ آن مرتب‌تر شد.', '✅ چیدمان جدید: بالا روشِ اصلی + فاصلهٔ درخواست‌ها؛ پایین «روش‌های جایگزین»', '(IP دستی، DoH، پروکسی، Worker) که هرکدام پر باشد «فعال» است.', 'خواستهٔ دوم: یک تیک برای «استفاده از گزینه‌های اتصالِ فعال دیگر در صورت', 'عدم موفقیت» تا اگر روشِ مستقیم به تایم‌اوت رسید، از روشِ فعالِ دیگر استفاده', 'شود.', '✅ تیکِ «🔁 اگر روش اصلی شکست خورد، روش‌های جایگزینِ فعال را هم امتحان کن»', 'اضافه شد.', '✅ وقتی روشن باشد و روشِ اصلی شکست بخورد (تایم‌اوت، قطع اتصال، یا بلاکِ', '۴۰۳/۴۲۹)، به ترتیبِ روش‌هایِ فعالِ دیگر امتحان می‌شود تا اولینِ موفق', 'برگردد.'],},
   {v:'9.76', t:'🔧 رفعِ ذخیره‌نشدنِ سوییچ «اتصال غیرمستقیم» پروفایل', items:[
