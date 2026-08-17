@@ -86,7 +86,7 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.1.0');
+define('PROXY_VERSION', '1.1.1');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -209,11 +209,8 @@ function p_check_domain(string $host): void {
 }
 
 /** بررسی IPهای رزولوشده (محافظ SSRF / DNS rebinding) */
-function p_check_ips(string $host): void {
-    if ($GLOBALS['CONFIG']['allow_private_ips']) return;
-
-    // زنجیرهٔ رزولوش: روی بعضی هاست‌ها gethostbynamel غیرفعال یا خراب است،
-    // در حالی که خود cURL می‌تواند دامنه را حل کند — پس چند راه امتحان می‌شود
+/** رزولوش همهٔ IPهای یک دامنه با زنجیرهٔ چندروشه (مقاوم در برابر هاست‌های محدود) */
+function p_resolve_host_ips(string $host): array {
     $ips = @gethostbynamel($host);
     if (!is_array($ips) || $ips === []) {
         $ips = [];
@@ -231,14 +228,43 @@ function p_check_ips(string $host): void {
             $ips = [$one];
         }
     }
+    return array_values(array_unique($ips));
+}
+
+/** بررسی سخت IPهای رزولوشده (محافظ SSRF / DNS rebinding) — برای تونل CONNECT */
+function p_check_ips(string $host): void {
+    if ($GLOBALS['CONFIG']['allow_private_ips']) return;
+    $ips = p_resolve_host_ips($host);
     if ($ips === []) {
         p_error(502, 'dns_failed', "رزولوش DNS برای «{$host}» ناموفق بود");
     }
-    foreach (array_unique($ips) as $ip) {
+    foreach ($ips as $ip) {
         if (p_is_private_ip($ip)) {
             p_error(403, 'private_ip_blocked', "آدرس داخلی/خصوصی ({$ip}) مسدود شد (محافظ SSRF)");
         }
     }
+}
+
+/**
+ * سیاست DNS مقصد:
+ *   ok       → دامنهٔ سالم؛ زنجیرهٔ عادی (مستقیم ← بالادستی ← ورکر)
+ *   blocked  → IP لفظیِ خصوصی؛ همیشه مسدود (محافظ SSRF)
+ *   filtered → دامنه‌ای که روی این سرور DNS آن مسموم/فیلتر است (به IP داخلی
+ *              مثل 10.10.34.35 یا 10.10.34.34 رزولوش می‌شود یا اصلاً حل
+ *              نمی‌شود)؛ اتصال مستقیم بی‌فایده است و باید از مسیر جایگزین
+ *              (پراکسی بالادستی یا ورکر کلودفلر) رفت
+ */
+function p_dns_policy(string $host): string {
+    if ($GLOBALS['CONFIG']['allow_private_ips']) return 'ok';
+    if (filter_var($host, FILTER_VALIDATE_IP)) {
+        return p_is_private_ip($host) ? 'blocked' : 'ok';
+    }
+    $ips = p_resolve_host_ips($host);
+    if ($ips === []) return 'filtered';
+    foreach ($ips as $ip) {
+        if (p_is_private_ip($ip)) return 'filtered';
+    }
+    return 'ok';
 }
 
 /** اعتبارسنجی کامل URL */
@@ -255,8 +281,14 @@ function p_validate_url(string $url): array {
     $host = strtolower(trim($parts['host'], '[]'));
     if ($host === '') p_error(400, 'invalid_url', 'میزبان نامعتبر است');
     p_check_domain($host);
-    p_check_ips($host);
-    return ['url' => $url, 'host' => $host, 'scheme' => $scheme];
+    // سیاست DNS جدا برگردانده می‌شود؛ فقط IP لفظیِ خصوصی همین‌جا مسدود می‌شود.
+    // دامنه‌های DNS-مسموم (مثل facebook.com روی هاست ایرانی) اجازهٔ عبور به
+    // مرحلهٔ بعد را دارند تا از مسیر جایگزین (ورکر کلودفلر) گرفته شوند.
+    $dns = p_dns_policy($host);
+    if ($dns === 'blocked') {
+        p_error(403, 'private_ip_blocked', "آدرس داخلی/خصوصی ({$host}) مسدود شد (محافظ SSRF)");
+    }
+    return ['url' => $url, 'host' => $host, 'scheme' => $scheme, 'dns' => $dns];
 }
 
 /** مطلق‌کردن URL نسبی ریدایرکت */
@@ -463,6 +495,31 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
 }
 
 /**
+ * مسیر جایگزین برای دامنه‌های DNS-مسموم/فیلترشده:
+ * اتصال مستقیم بی‌فایده است (به IP فیلترینگ می‌خورد)، پس بدون آن:
+ *   ۱) پراکسی‌های بالادستی — آن‌ها DNS را از شبکهٔ خودشان حل می‌کنند
+ *   ۲) ورکر کلودفلر — DNS را از شبکهٔ کلودفلر حل می‌کند
+ */
+function p_filtered_attempt(string $url, string $method, array $headers, string $body, int $timeout): array {
+    $cfg = $GLOBALS['CONFIG'];
+    if ($cfg['rotate_upstream']) {
+        foreach ((array)$cfg['upstream_proxies'] as $proxy) {
+            if ($proxy === null || $proxy === '') continue;
+            $res = p_curl_once($url, $method, $headers, $body, $proxy, $timeout);
+            if ($res['error'] === null) return $res;
+        }
+    }
+    $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
+    if ($fb !== null && $fb['error'] === null) return $fb;
+    return [
+        'status'  => 502,
+        'headers' => [],
+        'body'    => '',
+        'error'   => 'DNS مقصد روی این سرور فیلتر یا مسموم است و هیچ مسیر جایگزینی (پراکسی بالادستی یا ورکر کلودفلر) در دسترس نبود',
+    ];
+}
+
+/**
  * آدرس مؤثر ورکر فالبک:
  * اولویت با cloudflare_worker_url است؛ fallback_proxy (نام قدیمی) هم
  * برای سازگاری پشتیبانی می‌شود.
@@ -644,10 +701,19 @@ function p_relay_request(string $url): void {
     // دنبال‌کردن ریدایرکت‌ها به‌صورت دستی (با اعتبارسنجی هر پرش)
     $result = null;
     for ($hop = 0; $hop <= (int)$cfg['max_redirects']; $hop++) {
-        p_validate_url($current); // دامنه + IP هر پرش دوباره چک می‌شود
-        $result = p_rotate_attempt($current, $method, $forward, $body, $timeout);
-        if ($result['error'] !== null) {
-            p_error($result['status'], 'upstream_failed', $result['error']);
+        $v = p_validate_url($current); // دامنه + IP هر پرش دوباره چک می‌شود
+        if (($v['dns'] ?? 'ok') === 'filtered') {
+            // DNS مسموم/فیلتر (مثل facebook.com روی هاست ایرانی):
+            // اتصال مستقیم به IP فیلترینگ می‌خورد → مستقیم سراغ مسیر جایگزین
+            $result = p_filtered_attempt($current, $method, $forward, $body, $timeout);
+            if ($result['error'] !== null) {
+                p_error($result['status'], 'dns_filtered', $result['error']);
+            }
+        } else {
+            $result = p_rotate_attempt($current, $method, $forward, $body, $timeout);
+            if ($result['error'] !== null) {
+                p_error($result['status'], 'upstream_failed', $result['error']);
+            }
         }
         $status = $result['status'];
         if ($status >= 300 && $status < 400 && !empty($result['headers']['location'])) {
@@ -1034,6 +1100,7 @@ a { color:var(--acc); }
 <li>لیست سفید/سیاه دامنه‌ها با پشتیبانی از الگوی <code>*.domain.com</code></li>
 <li>چرخش خودکار بین پراکسی‌های بالادستی (http و socks5) و تلاش مجدد روی خطاهای ۴۰۳/۴۲۹/۵۰۳</li>
 <li>فالبک خودکار به ورکر کلودفلر در صورت شکست اتصال به مقصد (قابل تغییر در تنظیمات)</li>
+<li>شناسایی DNS مسموم/فیلترشده (مثل facebook.com روی هاست ایرانی) و عبور خودکار از ورکر کلودفلر یا پراکسی بالادستی</li>
 <li>حالت پراکسی فوروارد: CONNECT برای HTTPS و absolute-form برای HTTP — قابل استفاده در فیلد پروکسی اسکرپر</li>
 <li>سازگار با فیلد «Worker» اسکرپر: الگوی <code>?url={url}</code> و حالت مسیری، بدون هیچ تنظیم سروری</li>
 <li>ریدایرکت‌ها به‌صورت امن دنبال می‌شوند و هر پرش دوباره اعتبارسنجی می‌شود</li>
