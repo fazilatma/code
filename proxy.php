@@ -211,11 +211,30 @@ function p_check_domain(string $host): void {
 /** بررسی IPهای رزولوشده (محافظ SSRF / DNS rebinding) */
 function p_check_ips(string $host): void {
     if ($GLOBALS['CONFIG']['allow_private_ips']) return;
+
+    // زنجیرهٔ رزولوش: روی بعضی هاست‌ها gethostbynamel غیرفعال یا خراب است،
+    // در حالی که خود cURL می‌تواند دامنه را حل کند — پس چند راه امتحان می‌شود
     $ips = @gethostbynamel($host);
-    if ($ips === false || empty($ips)) {
+    if (!is_array($ips) || $ips === []) {
+        $ips = [];
+        $recs = @dns_get_record($host, DNS_A | DNS_AAAA);
+        if (is_array($recs)) {
+            foreach ($recs as $r) {
+                if (!empty($r['ip']))       $ips[] = (string)$r['ip'];
+                elseif (!empty($r['ipv6'])) $ips[] = (string)$r['ipv6'];
+            }
+        }
+    }
+    if ($ips === []) {
+        $one = @gethostbyname($host);
+        if ($one !== false && $one !== $host && filter_var($one, FILTER_VALIDATE_IP)) {
+            $ips = [$one];
+        }
+    }
+    if ($ips === []) {
         p_error(502, 'dns_failed', "رزولوش DNS برای «{$host}» ناموفق بود");
     }
-    foreach ($ips as $ip) {
+    foreach (array_unique($ips) as $ip) {
         if (p_is_private_ip($ip)) {
             p_error(403, 'private_ip_blocked', "آدرس داخلی/خصوصی ({$ip}) مسدود شد (محافظ SSRF)");
         }
@@ -529,19 +548,31 @@ function p_handle_relay_url(string $url): void {
  * برمی‌گرداند؛ در غیر این صورت خالی.
  */
 function p_path_style_url(): string {
-    $path = (string)(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/');
-    $self = (string)($_SERVER['SCRIPT_NAME'] ?? '');
+    $uri   = (string)($_SERVER['REQUEST_URI'] ?? '/');
+    $path  = (string)(parse_url($uri, PHP_URL_PATH) ?? '/');
+    $query = (string)(parse_url($uri, PHP_URL_QUERY) ?? '');
+    $self  = (string)($_SERVER['SCRIPT_NAME'] ?? '');
+
+    $rest = '';
     if ($self !== '' && $self !== '/') {
         $prefix = rtrim($self, '/');
         if (strpos($path, $prefix . '/') === 0) {
             $rest = substr($path, strlen($prefix) + 1);
-            if (preg_match('~^https?://~i', $rest)) return $rest;
-            return '';
         }
     }
-    // روتر/فال‌بک: هر مسیری که مستقیم با http(s):// شروع شود
-    if (preg_match('~^/(https?://.+)$~i', $path, $m)) return $m[1];
-    return '';
+    if ($rest === '') {
+        // روتر/فال‌بک: هر مسیری که مستقیم با http(s):// شروع شود
+        if (!preg_match('~^/(https?://.+)$~i', $path, $m)) return '';
+        $rest = $m[1];
+    }
+    if (!preg_match('~^https?://~i', $rest)) return '';
+
+    // در حالت مسیری، کوئریِ مقصد به کوئریِ درخواست بیرونی تبدیل می‌شود؛
+    // آن را به آدرس مقصد برگردان تا پارامترها (مثل ?page=2) حفظ شوند
+    if ($query !== '') {
+        $rest .= (strpos($rest, '?') === false ? '?' : '&') . $query;
+    }
+    return $rest;
 }
 
 /** هستهٔ مشترک رله — از هر دو حالت بالا استفاده می‌شود */
