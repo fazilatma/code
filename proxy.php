@@ -87,8 +87,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.1.3');
-define('PROXY_BUILD', '2026-08-17-01');
+define('PROXY_VERSION', '1.1.4');
+define('PROXY_BUILD', '2026-08-17-02');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -1083,6 +1083,8 @@ a { color:var(--acc); }
 <pre>https://your-server.com/proxy.php?url={url}</pre>
 <p>الگوی مسیری هم پشتیبانی می‌شود (بدون {url}):</p>
 <pre>https://your-server.com/proxy.php/https://example.com/page</pre>
+<p>تست اتصال شبکه به یک مقصد از خود سرور (بدون کلید — گزارش هر پرش زنجیره):</p>
+<pre>https://your-server.com/proxy.php?selftest=https%3A%2F%2Fapi.groq.com%2Fopenai%2Fv1%2Fmodels</pre>
 <p>مثال با جاوااسکریپت (اسکرپر سمت مرورگر):</p>
 <pre>fetch('https://your-server.com/proxy.php?url=' + encodeURIComponent(target))
   .then(r =&gt; r.text())
@@ -1154,6 +1156,71 @@ HTML;
     exit;
 }
 
+/**
+ * تست اتصال شبکه به یک مقصد از خود سرور — بدون کلید و بدون بدنه.
+ * هر پرش زنجیره (مستقیم ← بالادستی ← ورکر) جداگانه گزارش می‌شود تا
+ * معلوم شود کدام لایه کار می‌کند. «موفق» یعنی پاسخی از مقصد برگشته
+ * (حتی 401/403) — یعنی شبکه برقرار است.
+ */
+function p_selftest(): void {
+    $cfg = $GLOBALS['CONFIG'];
+    $target = (string)($_GET['selftest'] ?? '');
+    if ($target === '') p_error(400, 'missing_target', 'پارامتر selftest خالی است؛ نمونه: ?selftest=https%3A%2F%2Fapi.groq.com%2Fv1%2Fmodels');
+
+    $v = p_validate_url($target); // آدرس نامعتبر/مسدود با JSON خارج می‌شود
+    $timeout = max(5, min(20, (int)$cfg['timeout']));
+    $headers = ['Accept: */*'];
+    $attempts = [];
+    $ok = false;
+    $result = 'none';
+
+    $try = function (string $via, ?array $res, float $t0) use (&$attempts, &$ok, &$result) {
+        $attempts[] = [
+            'via'    => $via,
+            'status' => $res !== null ? $res['status'] : null,
+            'error'  => $res !== null ? $res['error'] : null,
+            'ms'     => (int)round((microtime(true) - $t0) * 1000),
+        ];
+        if ($res !== null && $res['error'] === null) { // هر پاسخ HTTP = شبکه برقرار است
+            $ok = true;
+            $result = $via;
+            return true;
+        }
+        return false;
+    };
+
+    if (($v['dns'] ?? 'ok') === 'ok') {
+        $t0 = microtime(true);
+        $try('direct', p_curl_once($target, 'GET', $headers, '', null, $timeout), $t0);
+    }
+    if (!$ok && $cfg['rotate_upstream']) {
+        foreach ((array)$cfg['upstream_proxies'] as $px) {
+            if ($px === null || $px === '') continue;
+            $t0 = microtime(true);
+            if ($try('upstream', p_curl_once($target, 'GET', $headers, '', $px, $timeout), $t0)) break;
+        }
+    }
+    if (!$ok) {
+        $t0 = microtime(true);
+        $fb = p_fallback_attempt($target, 'GET', $headers, '', $timeout);
+        if ($fb === null) {
+            $attempts[] = ['via' => 'worker', 'status' => null, 'error' => 'فالبک تنظیم نشده یا همان مقصد است', 'ms' => (int)round((microtime(true) - $t0) * 1000)];
+        } else {
+            $try('worker', $fb, $t0);
+        }
+    }
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'ok'       => $ok,
+        'target'   => $target,
+        'policy'   => $v['dns'] ?? 'ok',
+        'result'   => $result,
+        'attempts' => $attempts,
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 function p_info(): void {
     $cfg = $GLOBALS['CONFIG'];
     header('Content-Type: application/json; charset=utf-8');
@@ -1215,6 +1282,10 @@ if ($pAbsolute !== '') {
 
 if (isset($_GET['info'])) {
     p_info();
+}
+
+if (isset($_GET['selftest'])) {
+    p_selftest();
 }
 
 if (isset($_GET['url'])) {
