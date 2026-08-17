@@ -87,7 +87,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.1.2');
+define('PROXY_VERSION', '1.1.3');
+define('PROXY_BUILD', '2026-08-17-01');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -1160,6 +1161,7 @@ function p_info(): void {
         'ok'               => true,
         'name'             => 'php-single-file-proxy',
         'version'          => PROXY_VERSION,
+        'build'            => PROXY_BUILD,
         'php'              => PHP_VERSION,
         'curl'             => function_exists('curl_init'),
         'cache_enabled'    => (bool)$cfg['cache_enabled'],
