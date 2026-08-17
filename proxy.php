@@ -44,6 +44,13 @@
  *    (src/href/srcset/style/... و url داخل CSS) به سمت خود پراکسی بازنویسی
  *    می‌شوند تا کل صفحه — ساختار و تصاویر — از مسیر پراکسی رندر شود.
  *
+ *  تنظیمات از داشبورد (proxy-settings.json در کنار فایل):
+ *    آدرس ورکر کلودفلر و وضعیت بازنویسی URL از خود داشبورد قابل تغییرند؛
+ *    اولویت آن‌ها بالاتر از مقادیر داخل $CONFIG است.
+ *
+ *  مسیر عبور هر پاسخ در هدر X-Proxy-Route گزارش می‌شود:
+ *    direct (مستقیم) | upstream (پراکسی بالادستی) | worker (ورکر کلودفلر) | cache
+ *
  *  فالبک ورکر کلودفلر:
  *    اگر اتصال به مقصد ناموفق باشد، درخواست از طریق cloudflare_worker_url
  *    (پیش‌فرض: https://proxy.fazilat-ma.workers.dev — اولین تنظیم در
@@ -102,8 +109,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.1.5');
-define('PROXY_BUILD', '2026-08-17-03');
+define('PROXY_VERSION', '1.2.0');
+define('PROXY_BUILD', '2026-08-17-04');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -120,6 +127,51 @@ if (!function_exists('str_contains')) {
     function str_contains(string $haystack, string $needle): bool {
         return $needle === '' || strpos($haystack, $needle) !== false;
     }
+}
+
+// ---------------------------------------------------------------------
+// [۱-ب] تنظیمات ذخیره‌شده (از داشبورد قابل تغییر است)
+// proxy-settings.json در کنار فایل ساخته می‌شود و اولویت آن بالاتر از
+// مقادیر داخل $CONFIG است؛ با حذف فایل، به تنظیمات کد برمی‌گردید.
+// ---------------------------------------------------------------------
+
+const PROXY_SETTINGS_FILE = __DIR__ . '/proxy-settings.json';
+
+/** خواندن تنظیمات ذخیره‌شده؛ null یعنی «ذخیره نشده → از $CONFIG» */
+function p_load_settings(): array {
+    $out = ['cloudflare_worker_url' => null, 'rewrite_urls' => null];
+    if (!is_file(PROXY_SETTINGS_FILE)) return $out;
+    $j = @json_decode((string)@file_get_contents(PROXY_SETTINGS_FILE), true);
+    if (!is_array($j)) return $out;
+    if (array_key_exists('cloudflare_worker_url', $j)) $out['cloudflare_worker_url'] = trim((string)$j['cloudflare_worker_url']);
+    if (array_key_exists('rewrite_urls', $j)) $out['rewrite_urls'] = (bool)$j['rewrite_urls'];
+    return $out;
+}
+
+/** آدرس مؤثر ورکر کلودفلر: تنظیمات داشبورد ← $CONFIG ← خالی */
+function p_effective_worker_url(): string {
+    $s = p_load_settings();
+    if ($s['cloudflare_worker_url'] !== null) return $s['cloudflare_worker_url'];
+    $cfg = $GLOBALS['CONFIG'];
+    $fb = trim((string)($cfg['cloudflare_worker_url'] ?? ''));
+    if ($fb === '') $fb = trim((string)($cfg['fallback_proxy'] ?? ''));
+    return $fb;
+}
+
+/** آیا بازنویسی URL مؤثر است؟ تنظیمات داشبورد ← $CONFIG (هدر X-Proxy-Rewrite هم می‌تواند override کند) */
+function p_effective_rewrite(): bool {
+    $s = p_load_settings();
+    if ($s['rewrite_urls'] !== null) return $s['rewrite_urls'];
+    return !empty($GLOBALS['CONFIG']['rewrite_urls']);
+}
+
+/** ذخیرهٔ تنظیمات داشبورد */
+function p_save_settings(string $workerUrl, bool $rewrite): array {
+    $cur = p_load_settings();
+    $cur['cloudflare_worker_url'] = trim($workerUrl);
+    $cur['rewrite_urls'] = $rewrite;
+    $ok = @file_put_contents(PROXY_SETTINGS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX) !== false;
+    return ['ok' => $ok];
 }
 
 // ---------------------------------------------------------------------
@@ -373,7 +425,7 @@ function p_proxy_base_url(): string {
 
 /** آیا بازنویسی برای این درخواست فعال است؟ (تنظیم + هدر کنترل X-Proxy-Rewrite) */
 function p_rewrite_enabled(): bool {
-    $rw = !empty($GLOBALS['CONFIG']['rewrite_urls']);
+    $rw = p_effective_rewrite();
     $h = p_in_header('X-Proxy-Rewrite');
     if ($h !== null) $rw = trim((string)$h) === '1';
     return $rw;
@@ -592,6 +644,7 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
         if ($res['error'] === null
             && !in_array($res['status'], $retryStatuses, true)
             && !in_array($res['status'], $fallbackStatuses, true)) {
+            $res['via'] = ($proxy === null || $proxy === '') ? 'direct' : 'upstream';
             return $res; // پاسخ قابل‌قبول
         }
         // خطا یا وضعیت قابل‌تلاش‌مجدد → با پراکسی بعدی ادامه بده
@@ -601,7 +654,10 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
     // از ورکر کلودفلر عبور کن
     if ($last !== null && ($last['error'] !== null || in_array($last['status'], $fallbackStatuses, true))) {
         $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
-        if ($fb !== null && $fb['error'] === null) return $fb;
+        if ($fb !== null && $fb['error'] === null) {
+            $fb['via'] = 'worker';
+            return $fb;
+        }
     }
 
     return $last ?? ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'نامشخص'];
@@ -619,11 +675,17 @@ function p_filtered_attempt(string $url, string $method, array $headers, string 
         foreach ((array)$cfg['upstream_proxies'] as $proxy) {
             if ($proxy === null || $proxy === '') continue;
             $res = p_curl_once($url, $method, $headers, $body, $proxy, $timeout);
-            if ($res['error'] === null) return $res;
+            if ($res['error'] === null) {
+                $res['via'] = 'upstream';
+                return $res;
+            }
         }
     }
     $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
-    if ($fb !== null && $fb['error'] === null) return $fb;
+    if ($fb !== null && $fb['error'] === null) {
+        $fb['via'] = 'worker';
+        return $fb;
+    }
     return [
         'status'  => 502,
         'headers' => [],
@@ -638,9 +700,7 @@ function p_filtered_attempt(string $url, string $method, array $headers, string 
  * برای سازگاری پشتیبانی می‌شود.
  */
 function p_fallback_url(array $cfg): string {
-    $fb = trim((string)($cfg['cloudflare_worker_url'] ?? ''));
-    if ($fb === '') $fb = trim((string)($cfg['fallback_proxy'] ?? ''));
-    return $fb;
+    return p_effective_worker_url();
 }
 
 /**
@@ -818,7 +878,7 @@ function p_relay_request(string $url): void {
     $cacheKey = sha1($method . "\n" . $current . "\n" . $body);
     $cached = ($method === 'GET' || $method === 'HEAD') ? p_cache_get($cacheKey) : null;
     if ($cached !== null) {
-        p_emit_response($cached['status'], $cached['headers'], $cached['body'], $final, true);
+        p_emit_response($cached['status'], $cached['headers'], $cached['body'], $final, true, 'cache');
     }
 
     // دنبال‌کردن ریدایرکت‌ها به‌صورت دستی (با اعتبارسنجی هر پرش)
@@ -871,11 +931,11 @@ function p_relay_request(string $url): void {
         p_cache_set($cacheKey, $result['status'], $result['headers'], $result['body']);
     }
 
-    p_emit_response($result['status'], $result['headers'], $result['body'], $final, false);
+    p_emit_response($result['status'], $result['headers'], $result['body'], $final, false, (string)($result['via'] ?? 'direct'));
 }
 
 /** ارسال پاسخ نهایی به کلاینت */
-function p_emit_response(int $status, array $headers, string $body, string $finalUrl, bool $fromCache): void {
+function p_emit_response(int $status, array $headers, string $body, string $finalUrl, bool $fromCache, string $route = 'direct'): void {
     // بازنویسی URL در صورت فعال بودن: HTML و CSS از همین‌جا رد می‌شوند تا
     // تصاویر/استایل/اسکریپت‌ها هم از مسیر خود پراکسی لود شوند
     if (p_rewrite_enabled() && $body !== '') {
@@ -892,10 +952,11 @@ function p_emit_response(int $status, array $headers, string $body, string $fina
     header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS');
     header('Access-Control-Allow-Headers: *');
     header('Access-Control-Max-Age: 86400');
-    header('Access-Control-Expose-Headers: X-Proxy-Final-Url, X-Proxy-Cache, X-Proxy-Final-Status');
+    header('Access-Control-Expose-Headers: X-Proxy-Final-Url, X-Proxy-Cache, X-Proxy-Final-Status, X-Proxy-Route');
     header('X-Proxy-Final-Url: ' . $finalUrl);
     header('X-Proxy-Cache: ' . ($fromCache ? 'HIT' : 'MISS'));
     header('X-Proxy-Final-Status: ' . $status);
+    header('X-Proxy-Route: ' . $route);
 
     http_response_code($status);
     $skip = ['content-length', 'content-encoding', 'transfer-encoding', 'connection', 'keep-alive'];
@@ -1200,7 +1261,21 @@ a { color:var(--acc); }
 </div>
 <div id="result"></div>
 
-<h2>📡 روش استفاده</h2>
+<h2>⚙️ تنظیمات (در proxy-settings.json ذخیره می‌شود)</h2>
+<div class="crow" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+<label style="font-size:.85rem">آدرس ورکر کلودفلر:</label>
+<input id="cfgWorker" placeholder="https://proxy.fazilat-ma.workers.dev" style="flex:1;min-width:260px;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px 12px;direction:ltr;font-family:Consolas,monospace">
+</div>
+<div class="crow" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+<label style="display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer">
+<input type="checkbox" id="cfgRewrite" style="width:15px;height:15px"> بازنویسی کامل URL (تصاویر و CSS هم از پراکسی لود شوند)
+</label>
+</div>
+<div class="testbox">
+<button onclick="saveSettings()" style="flex:1">💾 ذخیره تنظیمات</button>
+<button onclick="loadSettings()" style="flex:1">↺ بارگذاری مجدد</button>
+</div>
+<div id="cfgStatus" class="meta" style="margin-bottom:8px"></div>
 <p>کافیست پارامتر <code>url</code> را بدهید؛ متد و بدنهٔ درخواست شما عیناً به مقصد ارسال می‌شود:</p>
 <pre>https://your-server.com/proxy.php?url=https://example.com/page</pre>
 <p>استفاده از داخل اسکرپر (فیلد «Worker») — بدون نیاز به هیچ تنظیم سروری:</p>
@@ -1245,9 +1320,23 @@ a { color:var(--acc); }
 <li>ریدایرکت‌ها به‌صورت امن دنبال می‌شوند و هر پرش دوباره اعتبارسنجی می‌شود</li>
 <li>رمزگشایی خودکار gzip / deflate / brotli — کش فایلی اختیاری — تزریق <code>&lt;base&gt;</code> برای لینک‌های نسبی</li>
 <li>بازنویسی کامل URL (<code>rewrite_urls</code>): تصاویر، CSS و JS هم از خود پراکسی لود می‌شوند — رندر کامل سایت‌های بلاک‌شده</li>
+<li>آدرس ورکر کلودفلر و بازنویسی URL از خود داشبورد قابل تغییرند (ذخیره در proxy-settings.json)</li>
+<li>هدر <code>X-Proxy-Route</code>: مسیر واقعی عبور هر پاسخ — مستقیم / بالادستی / ورکر کلودفلر / کش</li>
 </ul>
 </div>
 <script>
+var ROUTE_LABEL = {
+  direct:   '🟢 مستقیم (بدون واسطه)',
+  upstream: '🟡 پراکسی بالادستی',
+  worker:   '🔶 فالبک — ورکر کلودفلر',
+  cache:    '⚪ از کش',
+  '':       '—'
+};
+
+function routeLabel(r) {
+  return ROUTE_LABEL[r] || r || '—';
+}
+
 function run() {
   var u = document.getElementById('u').value.trim();
   var out = document.getElementById('result');
@@ -1255,7 +1344,10 @@ function run() {
   out.innerHTML = '<div class="meta">در حال دریافت…</div>';
   fetch('?url=' + encodeURIComponent(u))
     .then(function (r) {
-      var info = 'وضعیت: ' + r.status + ' | نوع محتوا: ' + (r.headers.get('content-type') || '—') +
+      var route = r.headers.get('x-proxy-route') || '';
+      var info = 'وضعیت: ' + r.status +
+                 ' | مسیر عبور: <b>' + routeLabel(route) + '</b>' +
+                 ' | نوع محتوا: ' + (r.headers.get('content-type') || '—') +
                  ' | آدرس نهایی: ' + (r.headers.get('x-proxy-final-url') || '—') +
                  ' | کش: ' + (r.headers.get('x-proxy-cache') || '—');
       var ct = (r.headers.get('content-type') || '').toLowerCase();
@@ -1274,6 +1366,41 @@ function run() {
       out.innerHTML = '<div class="meta">خطا: ' + e + '</div>';
     });
 }
+
+function saveSettings() {
+  var st = document.getElementById('cfgStatus');
+  var fd = new FormData();
+  fd.append('action', 'save_settings');
+  fd.append('worker_url', document.getElementById('cfgWorker').value.trim());
+  fd.append('rewrite', document.getElementById('cfgRewrite').checked ? '1' : '0');
+  st.textContent = 'در حال ذخیره…';
+  fetch('', { method: 'POST', body: fd })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d.ok) {
+        st.textContent = '✓ ذخیره شد — ورکر: ' + (d.worker_url || 'خالی (فالبک غیرفعال)')
+                       + ' — بازنویسی: ' + (d.rewrite_urls ? 'فعال' : 'غیرفعال')
+                       + (d.reload ? ' — صفحه را تازه کنید تا کارت وضعیت به‌روز شود' : '');
+        setTimeout(function () { location.reload(); }, 1200);
+      } else {
+        st.textContent = '✗ ' + (d.error || 'خطا در ذخیره');
+      }
+    })
+    .catch(function () { st.textContent = '✗ خطای شبکه'; });
+}
+
+function loadSettings() {
+  fetch('?settings')
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      document.getElementById('cfgWorker').value = d.worker_url || '';
+      document.getElementById('cfgRewrite').checked = !!d.rewrite_urls;
+      document.getElementById('cfgStatus').textContent = 'وضعیت فعلی: ورکر ' + (d.worker_url || 'خالی')
+        + ' — بازنویسی: ' + (d.rewrite_urls ? 'فعال' : 'غیرفعال');
+    })
+    .catch(function () {});
+}
+loadSettings();
 </script>
 </body>
 </html>
@@ -1364,6 +1491,18 @@ function p_info(): void {
         'auth_required'    => $cfg['proxy_key'] !== '',
         'connect_enabled'  => (bool)($cfg['connect_enabled'] ?? true),
         'fallback_worker'  => p_fallback_url($cfg) !== '' ? p_fallback_url($cfg) : null,
+        'rewrite_urls'     => p_effective_rewrite(),
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** گزارش تنظیمات مؤثر برای داشبورد */
+function p_settings_info(): void {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'ok'          => true,
+        'worker_url'  => p_effective_worker_url(),
+        'rewrite_urls'=> p_effective_rewrite(),
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -1407,6 +1546,30 @@ if ($pAbsolute !== '') {
 
 if (isset($_GET['info'])) {
     p_info();
+}
+
+if (isset($_GET['settings'])) {
+    p_settings_info();
+}
+
+if (($_POST['action'] ?? '') === 'save_settings') {
+    header('Content-Type: application/json; charset=utf-8');
+    p_check_proxy_key();
+    $workerRaw = trim((string)($_POST['worker_url'] ?? ''));
+    if ($workerRaw !== ''
+        && (!preg_match('~^https?://~i', $workerRaw) || !parse_url($workerRaw, PHP_URL_HOST))) {
+        p_error(400, 'bad_worker_url', 'آدرس ورکر باید https:// باشد یا خالی');
+    }
+    $rewrite = !empty($_POST['rewrite']) && $_POST['rewrite'] !== '0' && $_POST['rewrite'] !== 'false';
+    $res = p_save_settings($workerRaw, $rewrite);
+    if (empty($res['ok'])) p_error(500, 'save_failed', 'نوشتن proxy-settings.json ممکن نشد');
+    echo json_encode([
+        'ok'           => true,
+        'worker_url'   => p_effective_worker_url(),
+        'rewrite_urls' => p_effective_rewrite(),
+        'message'      => 'تنظیمات ذخیره شد',
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
 if (isset($_GET['selftest'])) {

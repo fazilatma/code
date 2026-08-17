@@ -87,3 +87,4 @@ storage_errors.log
 
 # پراکسی سرور: دایرکتوری کش
 proxy-cache/
+proxy-settings.json
