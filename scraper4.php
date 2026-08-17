@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.76';
+const APP_VERSION = '9.77';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3339,6 +3339,8 @@ function srcNetCfg(?array $cn = null): array {
         'gap_ms'     => max(0, min(10000, (int)($n['gap_ms'] ?? 0))),
         // فقط برای همین دامنه‌ها عبور اعمال شود (خالی = همه)
         'hosts'      => trim((string)($n['hosts'] ?? '')),
+        // v9.77: اگر روش اصلی شکست خورد، روش‌های جایگزینِ فعال را هم امتحان کن
+        'fallback'   => !empty($n['fallback']),
     ];
 }
 
@@ -3391,77 +3393,93 @@ function srcPace(string $host, int $gapMs): void {
     $last[$host] = microtime(true);
 }
 
-function fetch_html(string $url, int $timeout = 25): array {
-$ch = curl_init($url);
-$parsed=parse_url($url);$origin=($parsed['scheme']??'https').'://'.($parsed['host']??'');
-/* v9.00: راه عبور برای سایت مبدأ، اگر کاربر تنظیم کرده باشد */
-$__srcHost = strtolower((string)($parsed['host'] ?? ''));
-$__srcNet = function_exists('loadConnections') ? srcNetCfg() : ['mode'=>'direct','gap_ms'=>0,'hosts'=>''];
-srcPace($__srcHost, (int)($__srcNet['gap_ms'] ?? 0));
-curl_setopt_array($ch, [
-CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 5,
-CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => $timeout, CURLOPT_ENCODING => '',
-CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0,
-CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-CURLOPT_REFERER => $url,
-CURLOPT_COOKIEFILE => '',
-CURLOPT_HTTPHEADER => [
-'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-'Accept-Language: fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7',
-'Cache-Control: no-cache',
-'Origin: '.$origin,
-'Sec-Ch-Ua: "Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
-'Sec-Ch-Ua-Mobile: ?0',
-'Sec-Ch-Ua-Platform: "Windows"',
-'Sec-Fetch-Dest: document',
-'Sec-Fetch-Mode: navigate',
-'Sec-Fetch-Site: none',
-'Sec-Fetch-User: ?1',
-'Upgrade-Insecure-Requests: 1',
-],
-]);
-/* v9.00: راه عبور را اعمال کن — DoH / IP دستی / پروکسی / Worker.
-   نام میزبان دست‌نخورده می‌ماند و فقط مقصد TCP عوض می‌شود، پس سایت
-   همان درخواست همیشگی را می‌بیند. */
-if (srcNetApplies($__srcNet, $__srcHost)) {
-    $__m = (string)$__srcNet['mode'];
-    if ($__m === 'dns' || $__m === 'doh') {
-        $__ip = '';
-        if ($__m === 'dns') $__ip = (string)$__srcNet['resolve_ip'];
+function srcNetFetchAttempt(string $url, int $timeout, array $net, string $mode): array {
+    $parsed = parse_url($url); $origin = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '');
+    $host = strtolower((string)($parsed['host'] ?? ''));
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 5,
+        CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => $timeout, CURLOPT_ENCODING => '',
+        CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        CURLOPT_REFERER => $url, CURLOPT_COOKIEFILE => '',
+        CURLOPT_HTTPHEADER => [
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language: fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7', 'Cache-Control: no-cache', 'Origin: '.$origin,
+            'Sec-Ch-Ua: "Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"', 'Sec-Ch-Ua-Mobile: ?0',
+            'Sec-Ch-Ua-Platform: "Windows"', 'Sec-Fetch-Dest: document', 'Sec-Fetch-Mode: navigate',
+            'Sec-Fetch-Site: none', 'Sec-Fetch-User: ?1', 'Upgrade-Insecure-Requests: 1',
+        ],
+    ]);
+    if ($mode === 'dns' || $mode === 'doh') {
+        $ip = '';
+        if ($mode === 'dns') $ip = (string)($net['resolve_ip'] ?? '');
         elseif (function_exists('aiDohResolve')) {
-            $__r = aiDohResolve($__srcHost, (string)$__srcNet['doh_url'], min(10, $timeout));
-            if (!empty($__r['ok'])) $__ip = (string)$__r['ip'];
+            $r = aiDohResolve($host, (string)($net['doh_url'] ?? ''), min(10, $timeout));
+            if (!empty($r['ok'])) $ip = (string)$r['ip'];
         }
-        if ($__ip !== '') {
-            $__port = ((parse_url($url, PHP_URL_SCHEME) ?: 'https') === 'https') ? 443 : 80;
-            curl_setopt($ch, CURLOPT_RESOLVE, [$__srcHost . ':' . $__port . ':' . $__ip]);
+        if ($ip !== '') {
+            $port = ((parse_url($url, PHP_URL_SCHEME) ?: 'https') === 'https') ? 443 : 80;
+            curl_setopt($ch, CURLOPT_RESOLVE, [$host . ':' . $port . ':' . $ip]);
         }
-    } elseif ($__m === 'proxy' && $__srcNet['proxy'] !== '') {
-        curl_setopt($ch, CURLOPT_PROXY, (string)$__srcNet['proxy']);
-        $__map = ['http' => CURLPROXY_HTTP,
-                  'socks5' => defined('CURLPROXY_SOCKS5_HOSTNAME') ? CURLPROXY_SOCKS5_HOSTNAME : CURLPROXY_SOCKS5,
-                  'socks4' => defined('CURLPROXY_SOCKS4') ? CURLPROXY_SOCKS4 : CURLPROXY_HTTP];
-        curl_setopt($ch, CURLOPT_PROXYTYPE, $__map[(string)$__srcNet['proxy_type']] ?? CURLPROXY_HTTP);
-        if ($__srcNet['proxy_auth'] !== '') curl_setopt($ch, CURLOPT_PROXYUSERPWD, (string)$__srcNet['proxy_auth']);
-    } elseif ($__m === 'worker' && $__srcNet['worker_url'] !== '') {
-        $__w = rtrim((string)$__srcNet['worker_url'], '/');
-        $__u = (strpos($__w, '{url}') !== false)
-             ? str_replace('{url}', rawurlencode($url), $__w)
-             : $__w . '/' . ltrim($url, '/');
-        curl_setopt($ch, CURLOPT_URL, $__u);
+    } elseif ($mode === 'proxy' && !empty($net['proxy'])) {
+        curl_setopt($ch, CURLOPT_PROXY, (string)$net['proxy']);
+        $map = ['http' => CURLPROXY_HTTP,
+                'socks5' => defined('CURLPROXY_SOCKS5_HOSTNAME') ? CURLPROXY_SOCKS5_HOSTNAME : CURLPROXY_SOCKS5,
+                'socks4' => defined('CURLPROXY_SOCKS4') ? CURLPROXY_SOCKS4 : CURLPROXY_HTTP];
+        curl_setopt($ch, CURLOPT_PROXYTYPE, $map[(string)($net['proxy_type'] ?? 'http')] ?? CURLPROXY_HTTP);
+        if (!empty($net['proxy_auth'])) curl_setopt($ch, CURLOPT_PROXYUSERPWD, (string)$net['proxy_auth']);
+    } elseif ($mode === 'worker' && !empty($net['worker_url'])) {
+        $w = rtrim((string)$net['worker_url'], '/');
+        $u = (strpos($w, '{url}') !== false) ? str_replace('{url}', rawurlencode($url), $w) : $w . '/' . ltrim($url, '/');
+        curl_setopt($ch, CURLOPT_URL, $u);
     }
-    if (!empty($__srcNet['ipv4']) && defined('CURL_IPRESOLVE_V4')) {
+    if ($mode !== 'direct' && !empty($net['ipv4']) && defined('CURL_IPRESOLVE_V4')) {
         curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
     }
+    $body = curl_exec($ch); $err = curl_error($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL) ?: $url;
+    curl_close($ch);
+    return ['ok' => $body !== false && $code >= 200 && $code < 400,
+            'error' => $err ?: 'Empty', 'code' => $code, 'url' => $finalUrl,
+            'html' => $body === false ? '' : $body, 'mode' => $mode];
 }
-$body = curl_exec($ch);
-$err = curl_error($ch);
-$code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-$finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL) ?: $url;
-curl_close($ch);
-if (!$body) return ['ok' => false, 'error' => $err ?: 'Empty', 'code' => $code, 'url' => $finalUrl, 'html' => ''];
-if ($code >= 400) return ['ok' => false, 'error' => 'HTTP ' . $code, 'code' => $code, 'url' => $finalUrl, 'html' => $body];
-return ['ok' => true, 'error' => '', 'code' => $code, 'url' => $finalUrl, 'html' => $body];
+
+/* v9.00: راه عبور برای سایت مبدأ — DoH / IP دستی / پروکسی / Worker.
+   v9.77: اگر تیک «استفاده از روش‌های جایگزین» روشن باشد و روشِ اصلی شکست
+   بخورد (تایم‌اوت، اتصال، بلاک ۴۰۳/۴۲۹)، به ترتیبِ روش‌هایِ فعالِ دیگر هم
+   امتحان می‌شود تا اولین موفق برگردد. */
+function fetch_html(string $url, int $timeout = 25): array {
+    $__srcNet = function_exists('loadConnections') ? srcNetCfg() : ['mode'=>'direct','gap_ms'=>0,'hosts'=>'','fallback'=>false];
+    $parsed = parse_url($url); $__srcHost = strtolower((string)($parsed['host'] ?? ''));
+    srcPace($__srcHost, (int)($__srcNet['gap_ms'] ?? 0));
+
+    $modes = [];
+    // روش اصلی
+    if (srcNetApplies($__srcNet, $__srcHost)) $modes[] = (string)$__srcNet['mode'];
+    // روش‌های جایگزینِ فعال (فقط اگر تیک روشن باشد)
+    if (!empty($__srcNet['fallback'])) {
+        $order = ['doh','dns','proxy','worker'];
+        foreach ($order as $m) {
+            if (in_array($m, $modes, true)) continue;
+            if ($m === 'dns'    && trim((string)($__srcNet['resolve_ip'] ?? '')) === '') continue;
+            if ($m === 'doh'    && trim((string)($__srcNet['doh_url'] ?? '')) === '') continue;
+            if ($m === 'proxy'  && trim((string)($__srcNet['proxy'] ?? '')) === '') continue;
+            if ($m === 'worker' && trim((string)($__srcNet['worker_url'] ?? '')) === '') continue;
+            $modes[] = $m;
+        }
+    }
+    if (empty($modes)) $modes[] = 'direct';
+
+    $last = null;
+    foreach ($modes as $m) {
+        $last = srcNetFetchAttempt($url, $timeout, $__srcNet, $m);
+        if (!empty($last['ok'])) return $last;
+        // اگر خطای قطعیِ منطقی (مثل ۴۰۴/۴۰۰) بود، امتحانِ روشِ دیگر بی‌فایده است
+        if ($last['code'] > 0 && !in_array($last['code'], [403, 429], true)) break;
+    }
+    return $last ?? ['ok' => false, 'error' => 'Empty', 'code' => 0, 'url' => $url, 'html' => '', 'mode' => ''];
 }
 
 function extractImageFromHtml(string $html, string $pageUrl): string {
@@ -7643,6 +7661,8 @@ if (isset($_POST['src_net'])) {
         'gap_ms'     => max(0, min(10000, (int)($sn['gap_ms'] ?? 0))),
         'hosts'      => trim((string)($sn['hosts'] ?? '')),
         'inherit_ai' => !empty($sn['inherit_ai']),
+        // v9.77: اگر روش اصلی شکست خورد، روش‌های جایگزینِ فعال را هم امتحان کن
+        'fallback'   => !empty($sn['fallback']),
     ];
 }
 // v8.37: فاصلهٔ پینگ کران (دقیقه) — صفر یعنی هر اجرا
@@ -12508,6 +12528,17 @@ if (isset($_GET['selftest'])) {
     $add('9.76', 'بارگذاریِ سوییچ همهٔ شکل‌های مقدار (boolean و رشته‌های 1/0/true/false) را درست می‌خواند',
          strpos($selfSrc, "_ni==='1'" . "||_ni==='true'") !== false
          && strpos($selfSrc, 'function netIndirect' . 'On($v): bool') !== false);
+
+    /* ---------- v9.77: بخشِ مستقل اتصال مبدأ + تیکِ روش‌های جایگزین ---------- */
+    $add('9.77', 'بخشِ «اتصال به سایت مبدأ» از نگهبانِ صف جدا و مستقل شد',
+         strpos($selfSrc, 'id="srcNet' . 'Badge">') !== false
+         && strpos($selfSrc, '<h3>🩺 نگهبان' . ' صف ارسال</h3>') !== false);
+    $add('9.77', 'تیکِ «استفاده از روش‌های جایگزین در صورت شکست» در بخش اتصال مبدأ',
+         strpos($selfSrc, 'id="srcNetFall' . 'back"') !== false
+         && strpos($selfSrc, 'fallback:   !!(g(\'srcNetFallback\')' . '&&') !== false);
+    $add('9.77', 'fetch_html در صورت شکستِ روش اصلی، روش‌های جایگزینِ فعال را امتحان می‌کند',
+         strpos($selfSrc, 'function srcNetFetch' . 'Attempt(') !== false
+         && strpos($selfSrc, "if (!empty(\$__srcNet['fallback'])) {") !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -22680,32 +22711,7 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 <div class="crow"><label>آستانه (ثانیه):</label><input type="number" id="stallAfter" value="300" min="60" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">بی‌حرکتی بیش از این = گیر کرده</span></div>
 <div class="crow"><label>سقف فاز جزئیات (ثانیه):</label><input type="number" id="detailBudget" value="0" min="0" max="3600" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = خودکار · هر نوبت تا این مدت جزئیات می‌گیرد و بقیه را به نوبت بعد می‌سپارد</span></div>
 <div class="crow"><label>مهلت بارگذاری صفحه (ثانیه):</label><input type="number" id="proxyTimeout" value="45" min="10" max="180" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">برای «🔄 بارگذاری صفحه» در تب سلکتور · اگر تایم‌اوت می‌دهد بالاتر ببرید</span></div>
-<div style="margin-top:14px;padding:12px;background:#0f172a;border:1px solid #334155;border-radius:10px">
-<div style="font-weight:700;color:#f9a8d4;margin-bottom:8px">🌐 اتصال به سایت مبدأ</div>
-<div style="font-size:10.5px;color:#94a3b8;line-height:1.9;margin-bottom:8px">
-اگر سایتی از روی سرور باز نمی‌شود، یا به‌خاطر درخواست زیاد IP هاست را بلاک کرده (خطای ۴۰۳/۴۲۹).<br>
-<b style="color:#fbbf24">توجه:</b> اگر IP بلاک شده، تغییر DNS فایده ندارد — بلاک روی IP است نه روی نام دامنه.
-در آن حالت «فاصلهٔ بین درخواست‌ها» یا «پروکسی» را استفاده کنید.
-</div>
-<div class="crow"><label>روش:</label>
-<select id="srcNetMode" style="flex:1">
-<option value="direct">مستقیم (پیش‌فرض)</option>
-<option value="doh">DoH — گرفتن IP از DNS رمزگذاری‌شده</option>
-<option value="dns">IP دستی</option>
-<option value="proxy">پروکسی HTTP/SOCKS5</option>
-<option value="worker">Worker / پروکسی معکوس</option>
-</select></div>
-<div class="crow"><label>فاصلهٔ درخواست‌ها (ms):</label><input type="number" id="srcNetGap" value="0" min="0" max="10000" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = بدون فاصله · برای سایتی که بلاک می‌کند ۱۵۰۰ تا ۳۰۰۰ بگذارید</span></div>
-<div class="crow"><label>IP دستی:</label><input type="text" id="srcNetIp" placeholder="مثال: 104.21.0.1" style="flex:1" dir="ltr"></div>
-<div class="crow"><label>آدرس DoH:</label><input type="text" id="srcNetDoh" placeholder="https://cloudflare-dns.com/dns-query" style="flex:1" dir="ltr"></div>
-<div class="crow"><label>پروکسی:</label><input type="text" id="srcNetProxy" placeholder="host:port" style="flex:1" dir="ltr">
-<select id="srcNetProxyType" style="max-width:110px"><option value="http">HTTP</option><option value="socks5">SOCKS5</option><option value="socks4">SOCKS4</option></select></div>
-<div class="crow"><label>کاربر:رمز پروکسی:</label><input type="text" id="srcNetProxyAuth" placeholder="user:pass" style="flex:1" dir="ltr"></div>
-<div class="crow"><label>Worker:</label><input type="text" id="srcNetWorker" placeholder="https://xxx.workers.dev  یا  .../{url}" style="flex:1" dir="ltr"></div>
-<div class="crow"><label>فقط این دامنه‌ها:</label><input type="text" id="srcNetHosts" placeholder="خالی = همه · مثال: shop.ir, example.com" style="flex:1" dir="ltr"></div>
-<div class="row"><button class="btn btn-purple" onclick="srcNetTest()" style="flex:1">🧪 آزمایش روی آدرس پروفایل</button></div>
-<div id="srcNetResult" style="margin-top:6px;font-size:11px"></div>
-</div>
+
 <div class="cact">
 <button class="btn btn-gray" onclick="watchdogCheck()" style="flex:1">🔎 بررسی حالا</button>
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
@@ -22714,6 +22720,49 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 <button class="btn btn-gray" onclick="window.open('?selftest=1','_blank')" style="flex:1">🧾 خودآزمون نصب</button>
 </div>
 <div id="watchdogR" style="margin-top:8px"></div>
+</div></div>
+
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🌐 اتصال به سایت مبدأ</h3><span class="cst off" id="srcNetBadge">—</span><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#94a3b8;line-height:1.9;margin-bottom:10px">
+اگر سایتی از روی سرور باز نمی‌شود، یا به‌خاطر درخواست زیاد IP هاست را بلاک کرده (خطای ۴۰۳/۴۲۹).<br>
+<b style="color:#fbbf24">توجه:</b> اگر IP بلاک شده، تغییر DNS فایده ندارد — بلاک روی IP است نه روی نام دامنه.
+در آن حالت «فاصلهٔ بین درخواست‌ها» یا «پروکسی» را استفاده کنید.
+</div>
+<div class="crow"><label>روش اصلی:</label>
+<select id="srcNetMode" style="flex:1">
+<option value="direct">مستقیم (پیش‌فرض)</option>
+<option value="doh">DoH — گرفتن IP از DNS رمزگذاری‌شده</option>
+<option value="dns">IP دستی</option>
+<option value="proxy">پروکسی HTTP/SOCKS5</option>
+<option value="worker">Worker / پروکسی معکوس</option>
+</select></div>
+<div class="crow"><label>فاصلهٔ درخواست‌ها (ms):</label><input type="number" id="srcNetGap" value="0" min="0" max="10000" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = بدون فاصله · برای سایتی که بلاک می‌کند ۱۵۰۰ تا ۳۰۰۰ بگذارید</span></div>
+
+<div style="margin-top:12px;padding-top:10px;border-top:1px solid #1e293b;margin-bottom:4px">
+<div style="font-size:11px;color:#67e8f9;font-weight:700;margin-bottom:6px">🔁 روش‌های جایگزین (اختیاری)</div>
+<div style="font-size:10px;color:#94a3b8;margin-bottom:8px;line-height:1.7">
+هر روشی که فیلدش را پر کنید «فعال» است. اگر تیکِ پایین را بزنید، وقتی روشِ اصلی شکست خورد (تایم‌اوت یا بلاک)، به ترتیبِ همین‌ها امتحان می‌شود.
+</div>
+<div class="crow"><label>IP دستی:</label><input type="text" id="srcNetIp" placeholder="مثال: 104.21.0.1" style="flex:1" dir="ltr"></div>
+<div class="crow"><label>آدرس DoH:</label><input type="text" id="srcNetDoh" placeholder="https://cloudflare-dns.com/dns-query" style="flex:1" dir="ltr"></div>
+<div class="crow"><label>پروکسی:</label><input type="text" id="srcNetProxy" placeholder="host:port" style="flex:1" dir="ltr">
+<select id="srcNetProxyType" style="max-width:110px"><option value="http">HTTP</option><option value="socks5">SOCKS5</option><option value="socks4">SOCKS4</option></select></div>
+<div class="crow"><label>کاربر:رمز پروکسی:</label><input type="text" id="srcNetProxyAuth" placeholder="user:pass" style="flex:1" dir="ltr"></div>
+<div class="crow"><label>Worker:</label><input type="text" id="srcNetWorker" placeholder="https://xxx.workers.dev  یا  .../{url}" style="flex:1" dir="ltr"></div>
+<div class="crow"><label>فقط این دامنه‌ها:</label><input type="text" id="srcNetHosts" placeholder="خالی = همه · مثال: shop.ir, example.com" style="flex:1" dir="ltr"></div>
+<div class="crow" style="align-items:center">
+<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:#cbd5e1">
+<input type="checkbox" id="srcNetFallback" style="width:15px;height:15px">
+<span>🔁 اگر روش اصلی شکست خورد، روش‌های جایگزینِ فعال را هم امتحان کن</span>
+</label></div>
+</div>
+<div class="row" style="margin-top:6px"><button class="btn btn-purple" onclick="srcNetTest()" style="flex:1">🧪 آزمایش روی آدرس پروفایل</button></div>
+<div id="srcNetResult" style="margin-top:6px;font-size:11px"></div>
+<div class="cact">
+<button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
+</div>
 </div></div>
 
 <div class="smenu">
@@ -26914,6 +26963,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.77', t:'🌐 بخشِ مستقلِ «اتصال به سایت مبدأ» + تیکِ استفاده از روش‌های جایگزین در صورت شکست', items:[
+    'گزارش شما: بخشِ «اتصال به سایت مبدأ» به‌نادرست داخلِ بخشِ «نگهبان صف» قرار', 'گرفته بود و باید بیرون بیاید و در یک بخشِ مستقلِ منظم قرار بگیرد.', '✅ این بخش حالا از «نگهبان صف ارسال» جدا و به یک بخشِ (سمنوی) مستقلِ «🌐', 'اتصال به سایت مبدأ» منتقل شد و ظاهرِ آن مرتب‌تر شد.', '✅ چیدمان جدید: بالا روشِ اصلی + فاصلهٔ درخواست‌ها؛ پایین «روش‌های جایگزین»', '(IP دستی، DoH، پروکسی، Worker) که هرکدام پر باشد «فعال» است.', 'خواستهٔ دوم: یک تیک برای «استفاده از گزینه‌های اتصالِ فعال دیگر در صورت', 'عدم موفقیت» تا اگر روشِ مستقیم به تایم‌اوت رسید، از روشِ فعالِ دیگر استفاده', 'شود.', '✅ تیکِ «🔁 اگر روش اصلی شکست خورد، روش‌های جایگزینِ فعال را هم امتحان کن»', 'اضافه شد.', '✅ وقتی روشن باشد و روشِ اصلی شکست بخورد (تایم‌اوت، قطع اتصال، یا بلاکِ', '۴۰۳/۴۲۹)، به ترتیبِ روش‌هایِ فعالِ دیگر امتحان می‌شود تا اولینِ موفق', 'برگردد.'],},
   {v:'9.76', t:'🔧 رفعِ ذخیره‌نشدنِ سوییچ «اتصال غیرمستقیم» پروفایل', items:[
     'گزارش شما: سوییچِ اسلایدریِ «اتصال غیرمستقیم» در تنظیمات ذخیره نمی‌شود و', 'با هر رفرش به حالت قبلی برمی‌گردد.', '🐞 ریشه: سوییچ مقدارِ boolean (true/false) می‌فرستاد؛ FormData مقدارِ false', 'را به رشتهٔ «false» تبدیل می‌کرد و سرورِ PHP با تابع empty که «false» را', 'غیرخالی می‌داند، آن را true حساب می‌کرد. پس «خاموش» هرگز ذخیره نمی‌شد.', '✅ حالا سوییچ مقدارِ «1» یا «0» می‌فرستد که PHP درست تفسیر می‌کند.', '✅ هنگامِ بارگذاریِ پروفایل هم مقدار به‌درستی خوانده می‌شود (boolean یا رشتهٔ', "'1'/'0'/'true'/'false' — مخصوصاً برای داده‌های قدیمی).", '✅ مصرف‌کننده‌های سمت سرور (srcNetSetProfileIndirect و استخراج) هم با تابعِ', 'netIndirectOn همهٔ شکل‌ها را درست می‌فهمند.'],},
   {v:'9.75', t:'🩺 نگهبانِ استخراج (فازِ ۱/۲) که کارِ گیرکرده را «ادامه» می‌دهد + اتصالِ مستقیمِ تبِ سلکتورها', items:[
@@ -33766,6 +33817,8 @@ function srcNetApply(sn){
     set('srcNetProxyAuth', sn.proxy_auth||'');
     set('srcNetWorker',    sn.worker_url||'');
     set('srcNetHosts',     sn.hosts||'');
+    // v9.77: تیکِ «استفاده از روش‌های جایگزین در صورت شکست»
+    if($('srcNetFallback'))$('srcNetFallback').checked=!!sn.fallback;
 }
 
 /* v9.00: تنظیمات اتصال به سایت مبدأ را از فرم می‌خواند */
@@ -33780,7 +33833,9 @@ function srcNetCollect(){
         proxy_type: g('srcNetProxyType').value||'http',
         proxy_auth: (g('srcNetProxyAuth').value||'').trim(),
         worker_url: (g('srcNetWorker').value||'').trim(),
-        hosts:      (g('srcNetHosts').value||'').trim()
+        hosts:      (g('srcNetHosts').value||'').trim(),
+        // v9.77: استفاده از روش‌های جایگزین در صورت شکستِ روش اصلی
+        fallback:   !!(g('srcNetFallback')&&$('srcNetFallback').checked)
     };
 }
 
