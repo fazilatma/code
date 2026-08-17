@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.78';
+const APP_VERSION = '9.79';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12554,6 +12554,13 @@ if (isset($_GET['selftest'])) {
     $add('9.78', 'آکاردئون‌های تب سلکتورها ارتفاعِ بیشتری برای پیش‌نمایش باز دارند',
          strpos($selfSrc, 'smenu-body.open.sel-open{max-height:12000px}') !== false);
 
+    /* ---------- v9.79: توضیحاتِ داخلِ بخش‌های تب سلکتورها هم کشویی شدند ---------- */
+    $add('9.79', 'توضیحاتِ راهنما داخلِ بخش‌های تبِ سلکتورها با <details> کشویی شدند',
+         strpos($selfSrc, 'class="alert alert-info hint-' . 'collapse"') !== false
+         && strpos($selfSrc, 'class="alert alert-purple hint-' . 'collapse"') !== false);
+    $add('9.79', 'استایلِ کشوییِ توضیحات (فلش‌گردان) تعریف شد',
+         strpos($selfSrc, '.hint-collapse summary::before{content:"' . '▼"') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -22047,6 +22054,12 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 .hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:1;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}
 .smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}/* v9.78: آکاردئون‌های تب سلکتورها بزرگ‌ترند (شامل پیش‌نمایش iframe) */
 .smenu-body.open.sel-open{max-height:12000px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}.live-cnt{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:8px 0}.live-cnt .lc{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;cursor:pointer;transition:.15s;display:flex;flex-direction:column;gap:1px}
+/* v9.78: توضیحاتِ داخلِ بخش‌های تب سلکتورها هم کشویی شدند */
+.hint-collapse summary{cursor:pointer;font-size:12px;font-weight:700;list-style:none;display:flex;align-items:center;gap:6px;padding:4px 0}
+.hint-collapse summary::-webkit-details-marker{display:none}
+.hint-collapse summary::before{content:"▼";font-size:9px;color:#64748b;transition:transform .2s;display:inline-block}
+.hint-collapse[open] summary::before{transform:rotate(180deg)}
+.hint-collapse .hint-body{padding-top:6px}
 /* v9.60: تب‌های بخش هوش مصنوعی */
 .prof-net-switch .prof-net-slider{width:36px;height:20px;border-radius:20px;background:#334155;position:relative;display:inline-block;transition:background .2s;flex:0 0 auto;vertical-align:middle}.prof-net-switch .prof-net-slider::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#e2e8f0;transition:transform .2s}.prof-net-switch input:checked + .prof-net-slider{background:#22c55e}.prof-net-switch input:checked + .prof-net-slider::after{transform:translateX(16px)}.smenu-body.open.ai-tabs-open{max-height:4000px}.ai-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;border-bottom:1px solid #334155;padding-bottom:6px;direction:rtl}.ai-tab-btn{padding:7px 12px;font-size:11px;color:#94a3b8;background:#111c31;border:1px solid #334155;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap;flex:1;min-width:80px;text-align:center}.ai-tab-btn:hover{background:#1e293b;color:#e2e8f0}.ai-tab-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6;font-weight:700}.ai-tab-panel{display:none}.ai-tab-panel.active{display:block}
 .live-cnt .lc:hover{background:#1e293b;transform:translateY(-1px)}.live-cnt .lc b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.live-cnt .lc span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.live-cnt .lc i{font-size:9px;font-style:normal;font-family:ui-monospace,monospace}@media(max-width:620px){.live-cnt{grid-template-columns:repeat(3,1fr)}}.pdir{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700}.pdir-up{background:#7f1d1d;color:#fca5a5}.pdir-down{background:#14532d;color:#86efac}.pdir-same{background:#334155;color:#94a3b8}.app-ver{display:inline-block;background:#0f172a;border:1px solid #334155;color:#67e8f9;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;font-family:ui-monospace,monospace;cursor:pointer;transition:.15s;vertical-align:middle}
@@ -23422,11 +23435,14 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
         <div class="smenu-body open sel-open">
     <div class="card">
         <div class="section-title">🎨 سلکتورهای لیست محصولات</div>
-        <div class="alert alert-info">
-            💡 <b>نکته مهم:</b> پس از کلیک روی هر المان، یک <b>پیش‌نمایش زنده</b> از متنی که در خروجی می‌آید می‌بینید.
-            اگر متن اشتباه بود با <b>⬆ والد</b> و <b>⬇ فرزند</b> المان را عوض کنید — چه از نوار کنار خود المان، چه از پنل زیر.
-            کلیدهای <b>↑ ↓</b> و برای همسایه‌ها <b>→ ←</b> هم کار می‌کنند.
-        </div>
+        <details class="alert alert-info hint-collapse" open>
+            <summary>💡 نکته مهم — راهنمای انتخاب سلکتورها</summary>
+            <div class="hint-body">
+                💡 <b>نکته مهم:</b> پس از کلیک روی هر المان، یک <b>پیش‌نمایش زنده</b> از متنی که در خروجی می‌آید می‌بینید.
+                اگر متن اشتباه بود با <b>⬆ والد</b> و <b>⬇ فرزند</b> المان را عوض کنید — چه از نوار کنار خود المان، چه از پنل زیر.
+                کلیدهای <b>↑ ↓</b> و برای همسایه‌ها <b>→ ←</b> هم کار می‌کنند.
+            </div>
+        </details>
         <div class="row" style="align-items:center;gap:12px;margin-bottom:8px">
             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#94a3b8;font-size:12px">
                 <input type="checkbox" id="fullMode" onchange="scheduleSave()"> <b style="color:#fbbf24">⚡ بارگذاری کامل (JS)</b>
@@ -23588,11 +23604,14 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
         <div class="smenu-body open sel-open">
     <div class="card" style="margin-top:14px;border-color:#a855f7">
         <div class="section-title purple">📄 سلکتورهای صفحه جزئیات محصول</div>
-        <div class="alert alert-purple">
-            💡 ابتدا حداقل یک محصول را در لیست استخراج کنید، سپس با دکمه زیر صفحه نمونه آن را باز کنید و روی هر فیلد کلیک کنید.<br>
-            🖼 <b>گالری هم از همان‌جا:</b> در فهرست بالای صفحهٔ نمونه، «باکس گالری» یا «افزودن تک‌عکس» را انتخاب کنید.
-            با دکمه‌های <b>⬆ والد</b> و <b>⬇ فرزند</b> می‌توانید دقیقاً همان ظرفی را بگیرید که همهٔ عکس‌ها داخلش هستند.
-        </div>
+        <details class="alert alert-purple hint-collapse" open>
+            <summary>💡 راهنمای استخراج جزئیات</summary>
+            <div class="hint-body">
+                💡 ابتدا حداقل یک محصول را در لیست استخراج کنید، سپس با دکمه زیر صفحه نمونه آن را باز کنید و روی هر فیلد کلیک کنید.<br>
+                🖼 <b>گالری هم از همان‌جا:</b> در فهرست بالای صفحهٔ نمونه، «باکس گالری» یا «افزودن تک‌عکس» را انتخاب کنید.
+                با دکمه‌های <b>⬆ والد</b> و <b>⬇ فرزند</b> می‌توانید دقیقاً همان ظرفی را بگیرید که همهٔ عکس‌ها داخلش هستند.
+            </div>
+        </details>
         <div class="row">
             <button class="btn btn-pink" onclick="openDetailProxy()" style="flex:1" id="detailProxyBtn">🎯 باز کردن نمونه</button>
             <button class="btn btn-purple" onclick="suggestDetailSelectors()" style="flex:1">💡 پیشنهاد</button>
@@ -23611,10 +23630,13 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
         <div class="smenu-body sel-open">
     <div class="card" style="margin-top:14px;border-color:#ec4899">
         <div class="section-title" style="color:#f9a8d4">🖼 چند عکس از صفحهٔ محصول (گالری)</div>
-        <div class="alert" style="background:#500724;border:1px solid #ec4899;color:#fbcfe8">
-            💡 پیش‌فرض هر محصول فقط یک عکس دارد. اینجا می‌توانید بقیهٔ عکس‌های صفحهٔ محصول را هم بردارید.
-            عکس اول شاخص محصول می‌شود و بقیه در گالری مقصد می‌نشینند.
-        </div>
+        <details class="alert hint-collapse" style="background:#500724;border:1px solid #ec4899;color:#fbcfe8" open>
+            <summary>💡 راهنمای گالری تصاویر</summary>
+            <div class="hint-body">
+                💡 پیش‌فرض هر محصول فقط یک عکس دارد. اینجا می‌توانید بقیهٔ عکس‌های صفحهٔ محصول را هم بردارید.
+                عکس اول شاخص محصول می‌شود و بقیه در گالری مقصد می‌نشینند.
+            </div>
+        </details>
         <div class="row" style="align-items:center">
             <label style="flex:0 0 78px">روش:</label>
             <select id="galMode" onchange="galModeChanged()" style="flex:1">
@@ -23626,10 +23648,13 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
         </div>
 
         <div id="galAutoBox" class="hidden">
-            <div style="font-size:10.5px;color:#94a3b8;margin:6px 0;line-height:1.8">
-                سلکتور <b>ظرف گالری</b> را بدهید (نه خودِ عکس‌ها). هر تصویری داخلش باشد برداشته می‌شود
-                و تعدادش از قبل لازم نیست معلوم باشد.
-            </div>
+            <details class="hint-collapse" open>
+                <summary style="color:#94a3b8;font-size:10.5px">📖 راهنمای روش خودکار</summary>
+                <div class="hint-body" style="font-size:10.5px;color:#94a3b8;line-height:1.8">
+                    سلکتور <b>ظرف گالری</b> را بدهید (نه خودِ عکس‌ها). هر تصویری داخلش باشد برداشته می‌شود
+                    و تعدادش از قبل لازم نیست معلوم باشد.
+                </div>
+            </details>
             <div class="row">
                 <input type="text" id="galBox" placeholder="مثال: .woocommerce-product-gallery" oninput="galChanged()">
             </div>
@@ -23640,20 +23665,26 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
         </div>
 
         <div id="galManualBox" class="hidden">
-            <div style="font-size:10.5px;color:#94a3b8;margin:6px 0;line-height:1.8">
-                هر سلکتور را در یک خط بنویسید (یا با <code>|</code> جدا کنید).
-                هم می‌توانید مستقیم به <code>img</code> اشاره کنید، هم به ظرفی که عکس داخلش است.
-            </div>
+            <details class="hint-collapse" open>
+                <summary style="color:#94a3b8;font-size:10.5px">📖 راهنمای روش دستی</summary>
+                <div class="hint-body" style="font-size:10.5px;color:#94a3b8;line-height:1.8">
+                    هر سلکتور را در یک خط بنویسید (یا با <code>|</code> جدا کنید).
+                    هم می‌توانید مستقیم به <code>img</code> اشاره کنید، هم به ظرفی که عکس داخلش است.
+                </div>
+            </details>
             <textarea id="galSelectors" rows="4" oninput="galChanged()"
                 placeholder="‎.gallery-1 img&#10;.gallery-2 img&#10;.thumb-3 img"
                 style="width:100%;background:#0f172a;border:1px solid #475569;color:#fff;padding:8px;border-radius:8px;font-family:monospace;font-size:11px;direction:ltr"></textarea>
         </div>
 
         <div id="galNumberBox" class="hidden">
-            <div style="font-size:10.5px;color:#94a3b8;margin:6px 0;line-height:1.8">
-                اگر سلکتور عکس‌ها شماره‌دار است، الگو را با <code>{n}</code> بنویسید.
-                جای <code>{n}</code> عدد گذاشته می‌شود و تا وقتی عکسی پیدا شود جلو می‌رود.
-            </div>
+            <details class="hint-collapse" open>
+                <summary style="color:#94a3b8;font-size:10.5px">📖 راهنمای روش شماره‌دار</summary>
+                <div class="hint-body" style="font-size:10.5px;color:#94a3b8;line-height:1.8">
+                    اگر سلکتور عکس‌ها شماره‌دار است، الگو را با <code>{n}</code> بنویسید.
+                    جای <code>{n}</code> عدد گذاشته می‌شود و تا وقتی عکسی پیدا شود جلو می‌رود.
+                </div>
+            </details>
             <div class="row">
                 <input type="text" id="galPattern" placeholder="مثال: .slide-{n} img" oninput="galChanged()"
                        style="direction:ltr;font-family:monospace">
@@ -23678,10 +23709,13 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
             <div class="row">
                 <button class="btn btn-pink" onclick="galleryTest()" style="flex:1">🧪 آزمایش روی یک محصول</button>
             </div>
-            <div style="font-size:10px;color:#fbbf24;line-height:1.8">
-                ⚠️ با روشن بودن گالری، هنگام استخراج صفحهٔ <b>همهٔ</b> محصولات باز می‌شود (نه فقط بی‌عکس‌ها)،
-                پس استخراج کندتر می‌شود.
-            </div>
+            <details class="hint-collapse" open>
+                <summary style="font-size:10px;color:#fbbf24">⚠️ نکتهٔ سرعت استخراج</summary>
+                <div class="hint-body" style="font-size:10px;color:#fbbf24;line-height:1.8">
+                    با روشن بودن گالری، هنگام استخراج صفحهٔ <b>همهٔ</b> محصولات باز می‌شود (نه فقط بی‌عکس‌ها)،
+                    پس استخراج کندتر می‌شود.
+                </div>
+            </details>
             <div id="galTestR" style="margin-top:6px"></div>
         </div>
     </div>
@@ -27005,6 +27039,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.79', t:'📖 توضیحاتِ داخلِ بخش‌های تبِ سلکتورها هم کشویی شدند', items:[
+    'خواستهٔ شما: بعد از کشویی شدنِ بخش‌های تبِ سلکتورها، توضیحاتی که', 'داخلِ خودِ هر بخش بود هم منوی کشویی شوند تا جا بازتر و مرتب‌تر باشد.',
+    '✅ «راهنمای انتخاب سلکتورهای لیست» (نکتهٔ مهمِ پیش‌نمایش زنده) حالا', 'با یک سربرگِ «💡 نکته مهم» باز/بسته می‌شود (پیش‌فرض: باز).',
+    '✅ «راهنمای استخراج جزئیات» (بخش سلکتورهای صفحهٔ محصول) کشویی شد', '(پیش‌فرض: باز).',
+    '✅ «راهنمای گالری تصاویر» و «نکتهٔ سرعت استخراج» داخل گالری کشویی شدند.', '✅ توضیح هر یک از روش‌های گالری (خودکار/دستی/شماره‌دار) هم کشویی شد.', '✅ فلشِ ▼ با کلیک می‌چرخد؛ محتوا و ای‌دی‌های کنترلی دست‌نخورده‌اند.'],},
   {v:'9.78', t:'📂 تبِ سلکتورها: همهٔ بخش‌ها به منوی کشویی (آکاردئون) تبدیل شدند', items:[
     'خواستهٔ شما: در تبِ سلکتورها همهٔ بخش‌ها به منوی کشویی تبدیل شوند تا', 'تب فشرده‌تر و مرتب‌تر شود و هر بخش فقط وقتی باز باشد که لازمش دارید.',
     '✅ «سلکتورهای لیست محصولات» به یک منوی کشویی مستقل تبدیل شد.',
