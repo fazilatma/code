@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.66';
+const APP_VERSION = '9.67';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3318,6 +3318,14 @@ function srcNetCfg(?array $cn = null): array {
     };
     $mode = (string)($n['mode'] ?? 'direct');
     if ($mode === 'inherit') $mode = (string)($ai['mode'] ?? 'direct');
+    /* v9.67: اتصال غیرمستقیمِ «به‌ازای هر پروفایل».
+       وقتی این پروفایل به‌صورت صریح مستقیم را انتخاب کرده باشد
+       (net_indirect خاموش)، بدونِ توجه به تنظیم سراسری، مستقیم وصل می‌شود؛
+       وقتی روشن باشد، از همان روشِ غیرمستقیمِ تنظیم‌شده در src_net
+       (worker/پروکسی/DoH/...) استفاده می‌شود. مقدار پیش‌فرض: غیرفعال = مستقیم. */
+    if (array_key_exists('_srcNetProfileIndirect', $GLOBALS)) {
+        if (empty($GLOBALS['_srcNetProfileIndirect'])) $mode = 'direct';
+    }
     return [
         'mode'       => in_array($mode, ['direct','doh','dns','proxy','worker'], true) ? $mode : 'direct',
         'resolve_ip' => trim((string)$pick('resolve_ip', '')),
@@ -3992,6 +4000,10 @@ $profiles[$key] = [
 'wooCategoryId' => array_key_exists('wooCategoryId', $_POST)
     ? (int)$_POST['wooCategoryId']
     : (int)($profiles[$key]['wooCategoryId'] ?? 0),
+// v9.67: اتصال غیرمستقیمِ این پروفایل (فقط همین پروفایل). مقدار پیش‌فرض: غیرفعال = مستقیم.
+'net_indirect' => array_key_exists('net_indirect', $_POST)
+    ? !empty($_POST['net_indirect'])
+    : !empty($profiles[$key]['net_indirect']),
 'updatedAt' => time()
 ];
 $_saved = writeJsonFile(PROFILES_FILE, $profiles);
@@ -8072,6 +8084,9 @@ $startedAt=time();
 $profiles=loadProfiles();
 
 $profile=isset($profiles[$profileKey])?$profiles[$profileKey]:null;
+// v9.67: اتصال غیرمستقیمِ به‌ازای هر پروفایل — آفلاینِ هر فراخوانیِ استخراج
+// مقدارِ پیش‌فرض «مستقیم» (غیرفعال) است مگر اینکه پروفایل صریحاً روشن کرده باشد.
+$GLOBALS['_srcNetProfileIndirect'] = !empty($profile['net_indirect']);
 if(!$profile){
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'error'=>'پروفایل یافت نشد','total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['❌ پروفایل یافت نشد'],'total_log_count'=>1]);
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'error'=>'پروفایل یافت نشد'];
@@ -9891,48 +9906,18 @@ $stepMode = ($stagePrev === 'list_done' || $stagePrev === 'detail') ? 'detail' :
 $exRes = runBackendExtract($key, 'auto', false, $stepMode);
 $pResult['step'] = $stepMode;
 
-/* گام ۲: بلافاصله بعد از فهرست، «استخراج تفصیلی» را همین‌جا اجرا کن —
-   دقیقاً مثل زدن دکمهٔ آن در تب نتایج. اگر وقت هاست اجازه ندهد، خودِ
-   فاز جزئیات تمیز می‌ایستد و نوبت بعدی ادامه می‌دهد. */
-/* v9.03: گام جزئیات همیشه بعد از گام فهرست اجرا می‌شود — بدون شرط.
-
-   تا ۹.۰۲ این گام فقط وقتی اجرا می‌شد که گام فهرست ok برگردانده باشد.
-   ولی «ok نبودن» چند حالت دارد که هیچ‌کدام دلیل نمی‌شود جزئیات اجرا نشود:
-     • استخراج بی‌نتیجه بود (سایت لحظه‌ای در دسترس نبود) — محصولات قبلی
-       روی دیسک هستند و هنوز جزئیات می‌خواهند.
-     • پروفایل هم‌اکنون در صف است (محافظ تکراری) — باز هم محصولات
-       روی دیسک منتظر جزئیات‌اند.
-     • فهرست تغییری نکرده بود.
-   در همهٔ این‌ها محصولاتی هستند که فیلد یا گالری ندارند. پس گام جزئیات
-   بدون قید و شرط اجرا می‌شود؛ خودش اگر کاری نباشد بی‌درنگ برمی‌گردد. */
+/* v9.67: «استخراج تفصیلیِ جداگانه» در هر اجرای کران حذف شد.
+   کاربر قبلاً کران را طوری تنظیم کرده بود که با هر فراخوانی، استخراج
+   تفصیلی هم انجام دهد. آن تنظیم (استخراج دورهای جزئیات) حذف شده، ولی
+   این گامِ جداگانه هنوز در هر اجرا جزئیات را صدا می‌زد — همان چیزی که
+   گزارش شد. حالا جزئیات به‌صورت درجا و هم‌زمان با استخراج هر محصول در
+   خودِ runBackendExtract گرفته می‌شود (v9.44)، پس این گذرِ جداگانهٔ
+   «جزئیات بعد از هر فهرست» برداشته می‌شود تا کران فقط فهرست را بگیرد و
+   برود سراغ ارسال. فقط اگر اجرای قبلی وسط فاز جزئیات نیمه‌کاره مانده
+   باشد ($stagePrev == detail) همان را ادامه می‌دهیم تا محصولِ ناقص ارسال
+   نشود — این ادامهٔ کارِ ناتمام است، نه استخراج دوره‌ای. */
 if ($stepMode === 'list') {
-    $dRes = runBackendExtract($key, 'auto', false, 'detail');
-    /* v9.02: «ok» به‌تنهایی گمراه‌کننده بود — وقتی هیچ محصولی برای باز
-       کردن انتخاب نمی‌شد هم ok گزارش می‌شد. حالا تعداد واقعی می‌آید. */
-    if (!empty($dRes['ok'])) {
-        $_dp = readProgress(EXTRACT_PROGRESS_FILE);
-        /* v9.04: detail_current را از فایل پیشرفت بخوان ولی اگر نبود از
-           detail_total کمک بگیر — وگرنه گزارش «ok 0/6» می‌داد در حالی که
-           هر ۶ محصول انجام شده بود. */
-        $_dTot  = (int)($_dp['detail_total'] ?? 0);
-        $_dDone = (int)($_dp['detail_current'] ?? 0);
-        if ($_dDone === 0 && (int)($_dp['detail_ok'] ?? 0) > 0) {
-            $_dDone = (int)$_dp['detail_ok'] + (int)($_dp['detail_fail'] ?? 0);
-        }
-        $pResult['detail_step']  = $_dTot > 0 ? ('ok ' . $_dDone . '/' . $_dTot) : 'nothing_to_do';
-        $pResult['detail_pages'] = (int)($_dp['detail_ok'] ?? 0);
-        $pResult['detail_fail']  = (int)($_dp['detail_fail'] ?? 0);
-        $pResult['gallery_images'] = (int)($_dp['gallery_images'] ?? 0);
-    } else {
-        $pResult['detail_step'] = 'failed: ' . (string)($dRes['error'] ?? '?');
-    }
-    if (!empty($dRes['ok'])) {
-        // نتیجهٔ نهایی همان اجرای جزئیات است؛ آمار مقایسه از آن می‌آید
-        foreach (['extracted','new','price_changed','removed','unchanged',
-                  'price_up','price_down','new_items','changed_items','removed_items'] as $_kk) {
-            if (isset($dRes[$_kk])) $exRes[$_kk] = $dRes[$_kk];
-        }
-    }
+    // (گامِ جداگانهٔ جزئیات حذف شد — فقط پروفایلِ تازه‌شده را دوباره می‌خوانیم)
     $profiles = loadProfiles();
     $profile  = $profiles[$key] ?? $profile;
 }
@@ -10018,7 +10003,11 @@ if ($pricingChanged && $changedKeys !== null) {
 $stageNow   = (string)($profile['_extract_stage'] ?? '');
 $stageAge   = time() - (int)($profile['_extract_stage_at'] ?? 0);
 $stageStale = max(120, (int)($cn['stall_after'] ?? 300));
-$stageOpen  = in_array($stageNow, ['list_done', 'detail'], true) && $stageAge <= $stageStale;
+/* v9.67: دیگر بعد از گامِ فهرست، «list_done» باعث توقف ارسال نشود — چون گامِ
+   جداگانهٔ جزئیات از کران حذف شده و در حالت عادی مرحله «list_done» می‌ماند.
+   دروازه فقط وقتی بسته می‌شود که واقعاً وسطِ فاز جزئیات مانده باشیم
+   ($stageNow==='detail' و تازه) تا محصولِ نیمه‌کاره فرستاده نشود. */
+$stageOpen  = $stageNow === 'detail' && $stageAge <= $stageStale;
 
 /* v9.01: حالا که کران خودش گام جزئیات را اجرا می‌کند، معیار فقط وضعیت
    «همین لحظه» است. اگر مرحلهٔ جزئیات واقعاً تمام شده (complete یا
@@ -12203,6 +12192,19 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'id="settingsPanel">') !== false
          && strpos($selfSrc, 'بستنِ پنل تنظیمات (settingsPanel) با </div> اض' . 'افه شد') !== false
          && strpos($selfSrc, 'tab-pane active" id="pane-start') !== false);
+
+    /* ---------- v9.67: رفعِ استخراج تفصیلیِ ناخواسته در کران + اتصال غیرمستقیم هر پروفایل ---------- */
+    $add('9.67', 'گامِ جداگانهٔ «استخراج تفصیلی» بعد از هر گامِ فهرستِ کران حذف شد',
+         strpos($selfSrc, "if (\$stepMode === 'list') {") !== false
+         && strpos($selfSrc, 'گامِ جداگانهٔ جزئیات' . ' حذف شد') !== false);
+    $add('9.67', 'درِ ارسالِ کران به‌خاطرِ مرحلهٔ list_done دیگر بسته نمی‌شود (فقط وسطِ جزئیات)',
+         strpos($selfSrc, "\$stageOpen  = \$stageNow === 'detail' && \$stageAge <= \$stageStale;") !== false);
+    $add('9.67', 'اتصالِ غیرمستقیمِ به‌ازای هر پروفایل در srcNetCfg اعمال می‌شود',
+         strpos($selfSrc, "'_srcNetProfileIndirect'") !== false
+         && strpos($selfSrc, "empty(\$GLOBALS['_srcNetProfileIndirect'])") !== false);
+    $add('9.67', 'سوییچِ «اتصال غیرمستقیم» در تبِ شروع برای هر پروفایل',
+         strpos($selfSrc, 'id="profileNetIndirect"') !== false
+         && strpos($selfSrc, 'function updateProfile' . 'NetHint(') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -21619,7 +21621,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 .hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:1;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}
 .smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}.live-cnt{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:8px 0}.live-cnt .lc{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;cursor:pointer;transition:.15s;display:flex;flex-direction:column;gap:1px}
 /* v9.60: تب‌های بخش هوش مصنوعی */
-.smenu-body.open.ai-tabs-open{max-height:4000px}.ai-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;border-bottom:1px solid #334155;padding-bottom:6px;direction:rtl}.ai-tab-btn{padding:7px 12px;font-size:11px;color:#94a3b8;background:#111c31;border:1px solid #334155;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap;flex:1;min-width:80px;text-align:center}.ai-tab-btn:hover{background:#1e293b;color:#e2e8f0}.ai-tab-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6;font-weight:700}.ai-tab-panel{display:none}.ai-tab-panel.active{display:block}
+.prof-net-switch .prof-net-slider{width:36px;height:20px;border-radius:20px;background:#334155;position:relative;display:inline-block;transition:background .2s;flex:0 0 auto;vertical-align:middle}.prof-net-switch .prof-net-slider::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#e2e8f0;transition:transform .2s}.prof-net-switch input:checked + .prof-net-slider{background:#22c55e}.prof-net-switch input:checked + .prof-net-slider::after{transform:translateX(16px)}.smenu-body.open.ai-tabs-open{max-height:4000px}.ai-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;border-bottom:1px solid #334155;padding-bottom:6px;direction:rtl}.ai-tab-btn{padding:7px 12px;font-size:11px;color:#94a3b8;background:#111c31;border:1px solid #334155;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap;flex:1;min-width:80px;text-align:center}.ai-tab-btn:hover{background:#1e293b;color:#e2e8f0}.ai-tab-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6;font-weight:700}.ai-tab-panel{display:none}.ai-tab-panel.active{display:block}
 .live-cnt .lc:hover{background:#1e293b;transform:translateY(-1px)}.live-cnt .lc b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.live-cnt .lc span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.live-cnt .lc i{font-size:9px;font-style:normal;font-family:ui-monospace,monospace}@media(max-width:620px){.live-cnt{grid-template-columns:repeat(3,1fr)}}.pdir{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700}.pdir-up{background:#7f1d1d;color:#fca5a5}.pdir-down{background:#14532d;color:#86efac}.pdir-same{background:#334155;color:#94a3b8}.app-ver{display:inline-block;background:#0f172a;border:1px solid #334155;color:#67e8f9;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;font-family:ui-monospace,monospace;cursor:pointer;transition:.15s;vertical-align:middle}
 .app-ver:hover{border-color:#67e8f9;background:#0e749020}.app-ver.upd{border-color:#f59e0b;color:#fbbf24;background:#42200630;animation:verPulse 2s ease-in-out infinite}@keyframes verPulse{0%,100%{opacity:1}50%{opacity:.55}}.vc-drop{position:absolute;top:100%;left:0;right:0;background:#0f172a;border:1px solid #475569;border-radius:8px;max-height:220px;overflow-y:auto;z-index:60;display:none;margin-top:3px;box-shadow:0 6px 18px rgba(0,0,0,.5)}.vc-drop.open{display:block}.vc-opt{padding:8px 10px;cursor:pointer;font-size:11px;font-family:monospace;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;gap:8px;direction:ltr;text-align:left}.vc-opt:last-child{border-bottom:none}.vc-opt:hover{background:#1e3a5f}.vc-opt .vc-meta{color:#64748b;font-size:10px;flex:0 0 auto}.vc-drop .vc-none{padding:10px;color:#64748b;font-size:11px;text-align:center}
 .pbadge{display:inline-block;font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:4px;vertical-align:middle}.pb-new{background:#14532d;color:#86efac}.pb-chg{background:#78350f;color:#fcd34d}.rf-btn{background:#1e293b;border:1px solid #334155;color:#94a3b8;font-size:11px;font-family:inherit;padding:5px 10px;border-radius:6px;cursor:pointer;transition:.15s}.rf-btn:hover{background:#334155}.rf-btn.on{background:#1e3a5f;border-color:#3b82f6;color:#93c5fd;font-weight:700}.product.is-new{border-color:#22c55e}.product.is-chg{border-color:#f59e0b}.p2-card{border:1px solid #475569;border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#0f172a}.p2-card.p2-ok{border-color:#22c55e;background:#14532d33}.p2-card.p2-err{border-color:#ef4444;background:#7f1d1d26}.p2-title{font-size:12.5px;font-weight:700;color:#e2e8f0;margin-bottom:3px;line-height:1.6}
@@ -22694,6 +22696,19 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
                 محصولات حذف‌شده از مبدأ مسیر جداگانه دارند («🗂 محصولات رفته از مبدأ»).
             </div>
             <div id="profileSyncStatus" style="font-size:10px;color:#64748b;margin-top:6px"></div>
+            <div class="row" style="margin-top:8px;padding-top:8px;border-top:1px solid #1e293b;align-items:center">
+                <label style="min-width:80px;font-size:12px;color:#94a3b8">🌐 اتصال:</label>
+                <label class="prof-net-switch" style="display:flex;align-items:center;gap:8px;cursor:pointer;flex:1">
+                    <input type="checkbox" id="profileNetIndirect" onchange="scheduleSave()" style="display:none">
+                    <span class="prof-net-slider"></span>
+                    <span style="font-size:11px;color:#e2e8f0">اتصال غیرمستقیم</span>
+                    <span id="profileNetIndirectHint" style="font-size:9px;color:#64748b"></span>
+                </label>
+            </div>
+            <div style="font-size:9.5px;color:#64748b;line-height:1.6;margin-top:2px">
+                روشن = اتصال غیرمستقیم (بر اساس Worker/پروکسی/DoH که در «🌐 اتصال به سایت مبدأ» تنظیم کرده‌اید).
+                خاموش = مستقیم. پیش‌فرض: خاموش.
+            </div>
         </div>
     </div>
 
@@ -24477,7 +24492,9 @@ function collectProfileData() {
         // v8.17: Per-profile fallback categories
         bslFallbackCatIds: Array.isArray(bslProfileFallbackCats)?bslProfileFallbackCats:[],
         // v8.56: دستهٔ ووکامرس مخصوص همین پروفایل
-        wooCategoryId: parseInt(($('wooProfileCatId')||{}).value||'0')||wooProfileCatId||0
+        wooCategoryId: parseInt(($('wooProfileCatId')||{}).value||'0')||wooProfileCatId||0,
+        // v9.67: اتصال غیرمستقیمِ فقط همین پروفایل (پیش‌فرض: خاموش = مستقیم)
+        net_indirect: !!( $('profileNetIndirect') && $('profileNetIndirect').checked )
     };
 }
 
@@ -26450,6 +26467,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.67', t:'⏱ رفعِ استخراجِ تفصیلیِ ناخواسته در هر کران + 🌐 اتصالِ غیرمستقیمِ هر پروفایل', items:[
+    'گزارش شما: قبلاً «استخراج تفصیلیِ دوره‌ای» طوری تنظیم شده بود که با هر', 'فراخوانیِ کران‌جاب، جزئیات را هم استخراج کند. آن تنظیم حذف شده، ولی کدِ کران', 'هنوز در هر اجرا یک گامِ جداگانهٔ «استخراج تفصیلی» را صدا می‌زد.', '🐞 ریشه: یک بلوکِ قدیمی (گام ۲ / v9.03) بعد از هر گامِ فهرست، بدونِ قید و شرط', 'runBackendExtract(...,"detail") را اجرا می‌کرد.', '✅ این گامِ جداگانه حذف شد؛ کران فقط فهرست را می‌گیرد و به‌سراغ ارسال می‌رود.', 'درِ ارسال هم دیگر به‌خاطرِ مرحلهٔ list_done بسته نمی‌شود (فقط اگر واقعاً وسطِ', 'جزئیات مانده باشد برای جلوگیری از ارسالِ محصولِ ناقص).', 'خواستهٔ دوم: برای هر پروفایل یک تیکِ اسلایدری برای اتصالِ غیرمستقیم.', '✅ در تب «شروع» (بخش پروفایل) یک سوییچِ «🌐 اتصال غیرمستقیم» اضافه شد.', 'روشن = اتصالِ غیرمستقیم (بر اساس Worker/پروکسی/DoHِ تنظیم‌شده در «اتصال به', 'سایت مبدأ»)، خاموش = مستقیم. مقدار پیش‌فرض: خاموش (مستقیم).', '✅ این تنظیم فقط برای همان پروفایل اعمال می‌شود؛ پروفایل‌های دیگر را تحت', 'تأثیر قرار نمی‌دهد.'],},
   {v:'9.66', t:'🐛 رفعِ واقعیِ «صفحات/تب‌های خالی» — بسته‌نشدنِ پنل تنظیمات', items:[
     'گزارش شما: بعد از v9.65 باز هم فقط محتویاتِ منوی همبرگری دیده می‌شود و', 'محتویاتِ تب‌های اصلی خالی است.', '🐞 ریشهٔ اصلی (که v9.65 به آن نرسیده بود): در HTML، تگِ بستنِ پنل تنظیمات', '(settingsPanel) حذف شده بود. چون این پنل position:fixed و خارجِ صفحه بود،', 'مرورگر همهٔ تب‌های اصلی را داخلِ همین پنلِ مخفی قرار می‌داد؛ نتیجه: فقط منوی', 'همبرگری (که خودِ همان پنل است) محتوا نشان می‌داد و بقیهٔ صفحه خالی بود.', '✅ با یک تحلیلِ دقیقِ ساختارِ HTML (پارسرِ stack و شبیه‌سازِ مرورگر) پنل', 'تنظیمات حالا به‌درستی بسته می‌شود و هر شش تبِ اصلی (شروع/تنظیمات/سلکتورها/', 'نتایج/ارسال/درون‌ریزی) هم‌سطحِ آن داخلِ container قرار می‌گیرند و به‌درستی', 'نمایش داده می‌شوند.', '⚠️ حتماً نسخهٔ v9.66 را جایگزین فایلِ روی هاست کنید و رفرشِ سخت (Ctrl+F5)', 'بزنید تا کشِ قدیمیِ مرورگر نسخهٔ قبلیِ خراب را نشان ندهد.'],},
   {v:'9.65', t:'🛠 رفعِ «خالی بودنِ تب‌های نوار پایین» (منوی فوتر)', items:[
@@ -33815,7 +33834,19 @@ applyProfile=function(p){
         if($('profileSyncNoExtract'))$('profileSyncNoExtract').checked=false;
         $('profileSyncStatus').textContent='';
     }
+    // v9.67: اتصال غیرمستقیمِ این پروفایل (پیش‌فرض: خاموش = مستقیم)
+    if($('profileNetIndirect'))$('profileNetIndirect').checked=!!p.net_indirect;
+    updateProfileNetHint();
 };
+function updateProfileNetHint(){
+    const el=document.getElementById('profileNetIndirectHint');
+    if(!el)return;
+    const on=!!(document.getElementById('profileNetIndirect')&&document.getElementById('profileNetIndirect').checked);
+    el.textContent=on?'غیرمستقیم (Worker/پروکسی)':'مستقیم';
+    el.style.color=on?'#22c55e':'#94a3b8';
+}
+// hook the toggle's onchange to refresh the hint label (scheduleSave already wired in HTML)
+(function(){const t=document.getElementById('profileNetIndirect');if(t){t.addEventListener('change',updateProfileNetHint);}})();
 // Override collectProfileData to include syncConfig
 const _origCollectProfileData=collectProfileData;
 collectProfileData=function(){
