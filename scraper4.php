@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.75';
+const APP_VERSION = '9.76';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3345,11 +3345,18 @@ function srcNetCfg(?array $cn = null): array {
 /* v9.75: اتصالِ «فقط همین پروفایل» را برای بارگذاریِ صفحه در تبِ سلکتورها اعمال
    می‌کند. اگر تیک «اتصال غیرمستقیم»ِ پروفایل خاموش باشد → مستقیم (بدون توجه به
    تنظیمِ سراسری src_net)؛ اگر روشن باشد → همان راهِ غیرمستقیمِ سراسری. */
+/* v9.76: تفسیر درستِ مقدارِ «اتصال غیرمستقیم» — ممکن است boolean، رشتهٔ
+   '1'/'0' یا 'true'/'false' باشد (مخصوصاً از داده‌های قدیمی). */
+function netIndirectOn($v): bool {
+    if (is_bool($v)) return $v;
+    if ($v === 1 || $v === '1' || strtolower((string)$v) === 'true') return true;
+    return false;
+}
 function srcNetSetProfileIndirect(?string $pk): void {
     $on = false;
     if ($pk !== '' && $pk !== null) {
         $p = loadProfiles();
-        $on = !empty($p[$pk]['net_indirect']);
+        $on = netIndirectOn($p[$pk]['net_indirect'] ?? false);
     }
     $GLOBALS['_srcNetProfileIndirect'] = $on;
 }
@@ -8104,7 +8111,7 @@ $profiles=loadProfiles();
 $profile=isset($profiles[$profileKey])?$profiles[$profileKey]:null;
 // v9.67: اتصال غیرمستقیمِ به‌ازای هر پروفایل — آفلاینِ هر فراخوانیِ استخراج
 // مقدارِ پیش‌فرض «مستقیم» (غیرفعال) است مگر اینکه پروفایل صریحاً روشن کرده باشد.
-$GLOBALS['_srcNetProfileIndirect'] = !empty($profile['net_indirect']);
+$GLOBALS['_srcNetProfileIndirect'] = netIndirectOn($profile['net_indirect'] ?? false);
 if(!$profile){
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'error'=>'پروفایل یافت نشد','total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['❌ پروفایل یافت نشد'],'total_log_count'=>1]);
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'error'=>'پروفایل یافت نشد'];
@@ -12494,6 +12501,13 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'function srcNetSet' . 'ProfileIndirect(?string $pk)') !== false
          && strpos($selfSrc, "srcNetSetProfileIndirect((string)(\$_GET['pk'] ?? ''));") !== false
          && strpos($selfSrc, "&pk=' + encodeURIComponent(_pk)") !== false);
+
+    /* ---------- v9.76: رفعِ ذخیره‌نشدنِ سوییچ اتصال غیرمستقیم ---------- */
+    $add('9.76', 'سوییچِ «اتصال غیرمستقیم» مقدارِ 1/0 می‌فرستد تا خاموش هم ذخیره شود',
+         strpos($selfSrc, "net_indirect: ((\$('profileNetIndirect') && \$('profileNetIndirect').checked) ? '1' : '0')") !== false);
+    $add('9.76', 'بارگذاریِ سوییچ همهٔ شکل‌های مقدار (boolean و رشته‌های 1/0/true/false) را درست می‌خواند',
+         strpos($selfSrc, "_ni==='1'" . "||_ni==='true'") !== false
+         && strpos($selfSrc, 'function netIndirect' . 'On($v): bool') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -24920,7 +24934,10 @@ function collectProfileData() {
         // v8.56: دستهٔ ووکامرس مخصوص همین پروفایل
         wooCategoryId: parseInt(($('wooProfileCatId')||{}).value||'0')||wooProfileCatId||0,
         // v9.67: اتصال غیرمستقیمِ فقط همین پروفایل (پیش‌فرض: خاموش = مستقیم)
-        net_indirect: !!( $('profileNetIndirect') && $('profileNetIndirect').checked )
+        // v9.76: به‌جای boolean، '1'/'0' بفرست — FormData مقدار false را به رشتهٔ
+        // "false" تبدیل می‌کرد و سرور !empty("false") را true حساب می‌کرد؛ یعنی
+        // خاموش‌کردن هیچ‌وقت ذخیره نمی‌شد و بعد از رفرش برمی‌گشت.
+        net_indirect: (($('profileNetIndirect') && $('profileNetIndirect').checked) ? '1' : '0')
     };
 }
 
@@ -26897,6 +26914,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.76', t:'🔧 رفعِ ذخیره‌نشدنِ سوییچ «اتصال غیرمستقیم» پروفایل', items:[
+    'گزارش شما: سوییچِ اسلایدریِ «اتصال غیرمستقیم» در تنظیمات ذخیره نمی‌شود و', 'با هر رفرش به حالت قبلی برمی‌گردد.', '🐞 ریشه: سوییچ مقدارِ boolean (true/false) می‌فرستاد؛ FormData مقدارِ false', 'را به رشتهٔ «false» تبدیل می‌کرد و سرورِ PHP با تابع empty که «false» را', 'غیرخالی می‌داند، آن را true حساب می‌کرد. پس «خاموش» هرگز ذخیره نمی‌شد.', '✅ حالا سوییچ مقدارِ «1» یا «0» می‌فرستد که PHP درست تفسیر می‌کند.', '✅ هنگامِ بارگذاریِ پروفایل هم مقدار به‌درستی خوانده می‌شود (boolean یا رشتهٔ', "'1'/'0'/'true'/'false' — مخصوصاً برای داده‌های قدیمی).", '✅ مصرف‌کننده‌های سمت سرور (srcNetSetProfileIndirect و استخراج) هم با تابعِ', 'netIndirectOn همهٔ شکل‌ها را درست می‌فهمند.'],},
   {v:'9.75', t:'🩺 نگهبانِ استخراج (فازِ ۱/۲) که کارِ گیرکرده را «ادامه» می‌دهد + اتصالِ مستقیمِ تبِ سلکتورها', items:[
     'خواستهٔ ۱: برای مراحلِ ۱ (فهرست) و ۲ (جزئیات) استخراج هم نگهبان گذاشته شود', 'که اگر وسطِ کار گیر کرد، «ادامه» دهد به‌جای اینکه بی‌خیالش شود.', '✅ نگهبانِ استخراج دیگر ردیفِ گیرکرده را فقط «بسته» نمی‌کند؛ آن را از صف', 'برمی‌دارد (تا محافظِ تکراری، پروفایل را بلاک نکند) و همان پروفایل را در', 'همان نوبتِ کران «ادامه» می‌دهد — از همان مرحله‌ای که مانده بود.', '✅ فازِ مناسب از روی نشانهٔ مرحله انتخاب می‌شود: اگر وسطِ جزئیات مانده', '(stage=detail تازه) → فازِ detail؛ وگرنه → all (فهرست + جزئیاتِ فقطِ', 'محصولاتِ جدید/ناقص).', 'خواستهٔ ۲: برای پروفایلی که تیک «اتصال غیرمستقیم»ش خاموش است، در تبِ', 'سلکتورها هنگامِ بارگذاریِ صفحه از اتصالِ مستقیم استفاده شود.', '✅ بارگذاریِ صفحه در تبِ سلکتورها (نمونهٔ جزئیات + بارگذاریِ صفحهٔ', 'بازرسی) حالا اتصالِش را مطابق «اتصال غیرمستقیم»ِ همان پروفایلِ انتخاب‌شده', 'می‌کند: اگر تیک خاموش باشد → مستقیم (بدون توجه به تنظیمِ سراسری)؛ اگر', 'روشن باشد → راهِ غیرمستقیمِ سراسری.', '✅ کلیدِ پروفایلِ فعلی به درخواستِ proxy اضافه شد تا سرور بداند کدام', 'پروفایل فعال است.'],},
   {v:'9.74', t:'✅ کران بعد از فهرست، جزئیاتِ فقطِ محصولاتِ جدید/ناقص را هم می‌گیرد', items:[
@@ -34283,7 +34302,12 @@ applyProfile=function(p){
         $('profileSyncStatus').textContent='';
     }
     // v9.67: اتصال غیرمستقیمِ این پروفایل (پیش‌فرض: خاموش = مستقیم)
-    if($('profileNetIndirect'))$('profileNetIndirect').checked=!!p.net_indirect;
+    // v9.76: مقدار ممکن است boolean یا رشتهٔ '1'/'0'/'true'/'false' باشد؛ همه را
+    // درست بخوان تا سوییچ بعد از رفرش دقیقاً همان حالتی را نشان دهد که ذخیره شده.
+    if($('profileNetIndirect')){
+        const _ni=p.net_indirect;
+        $('profileNetIndirect').checked = (_ni===true||_ni===1||_ni==='1'||_ni==='true');
+    }
     updateProfileNetHint();
 };
 function updateProfileNetHint(){
