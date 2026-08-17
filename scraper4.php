@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.68';
+const APP_VERSION = '9.69';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -8985,6 +8985,84 @@ function bslShopPriceForProfile(array $profile, $rawPrice, array $shop, int $rou
     $r['eff_pct'] = $r['price'] > 0 ? round(($r['price'] - $src) / $src * 100, 1) : 0;
     return $r;
 }
+/* v9.69: ارسالِ چند-غرفه‌ای — یک محصول را در «یک غرفهٔ مشخص» بساز یا به‌روز کن.
+   برای هر غرفهٔ اضافی که قیمتِ خودش را دارد، همان منطقِ ارسالِ اصلی را اجرا
+   می‌کنیم: جست‌وجو (bslFindExisting) → اگر بود PATCH (با قیمتِ خودِ آن غرفه)؛
+   اگر نبود POST. این تابع خودش کامل است (بدون وابستگی به حلقهٔ اصلی) تا هر
+   غرفه با token و قیمتِ خودش پردازش شود. */
+function bslUpsertToShop(array $p, array $shop, array $opts): array {
+    $tk   = (string)($shop['token'] ?? '');
+    $vid  = (int)($shop['vendor_id'] ?? 0);
+    if ($tk === '' || $vid <= 0) return ['ok' => false, 'error' => 'غرفهٔ نامعتبر'];
+    $title = trim((string)($p['title'] ?? ($p['name'] ?? '')));
+    if ($title === '') return ['ok' => false, 'error' => 'عنوان خالی'];
+    $round  = (int)($opts['round'] ?? 0);
+    $profile= is_array($opts['profile'] ?? null) ? $opts['profile'] : null;
+    // قیمتِ این غرفه: لایهٔ پروفایل (اگر قیمتِ خام بود) + لایهٔ خودِ غرفه
+    $rawP  = (string)($p['price'] ?? ($p['orig_price'] ?? ''));
+    if ($profile && $rawP !== '' && extractPriceNum($rawP) > 0) {
+        $pf = bslShopPriceForProfile($profile, $rawP, $shop, $round);
+    } else {
+        $baseP = (int)preg_replace("/[^0-9]/", "", (string)($p['final_price'] ?? '0'));
+        if ($baseP <= 0) return ['ok' => false, 'error' => 'قیمت ۰'];
+        $pf = bslShopPriceFor($baseP, $shop, $round);
+    }
+    $priceToman = $pf['price'];
+    if ($priceToman <= 0) return ['ok' => false, 'error' => 'قیمت نامعتبر'];
+    $priceRial = (($p['price_unit'] ?? '') !== 'rial') ? $priceToman * 10 : $priceToman;
+
+    $stock   = (int)($opts['stock'] ?? 10);
+    $prepD   = (int)($opts['preparation_days'] ?? 3);
+    $weight  = (int)($opts['weight'] ?? 500);
+    $pkgW    = (int)($opts['package_weight'] ?? ($weight + 100));
+    $catId   = (int)($opts['category_id'] ?? 0);
+    $fallback= is_array($opts['fallback_cat_ids'] ?? null) ? $opts['fallback_cat_ids'] : [];
+    $autoCat = !empty($opts['auto_category']);
+    $flatCats= is_array($opts['flat_cats'] ?? null) ? $opts['flat_cats'] : [];
+    $cData   = is_array($opts['cdata'] ?? null) ? $opts['cdata'] : [];
+
+    $existing = bslFindExisting($tk, $vid, $title, (string)($p['key'] ?? ''));
+    $exId = is_array($existing) ? (int)($existing['id'] ?? 0) : 0;
+
+    if ($exId > 0) {
+        $bu = ['primary_price' => $priceRial, 'stock' => $stock, 'status' => 2976,
+               'preparation_days' => $prepD, 'weight' => $weight, 'package_weight' => $pkgW];
+        if ($catId > 0) $bu['category_id'] = $catId;
+        $r = bslReq($tk, 'PATCH', 'products/' . $exId, $bu);
+        if ($r['code'] === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $exId, $bu);
+        if (!empty($r['ok']) && !empty($r['body']['id'])) {
+            return ['ok' => true, 'id' => $exId, 'action' => 'updated'];
+        }
+        return ['ok' => false, 'error' => 'آپدیت در این غرفه ناموفق: ' . mb_substr((string)($r['body']['message'] ?? ($r['error'] ?? '?')), 0, 120)];
+    }
+
+    $catUsed = $catId;
+    if ($catUsed <= 0 && $autoCat && !empty($flatCats)) {
+        $_ac = autoMatchBslCategory($title, $flatCats);
+        if ($_ac > 0) $catUsed = $_ac;
+    }
+    if ($catUsed > 0 && !empty($cData) && is_array($cData)) $catUsed = findLeafCategory($catUsed, $cData);
+    $brief = trim(strip_tags((string)($p['short_desc'] ?? '')));
+    $desc  = trim((string)($p['long_desc'] ?? ''));
+    if ($brief === '') $brief = trim(strip_tags($title));
+    if ($desc === '')  $desc  = $brief;
+    $bp = ['name' => mb_substr($title, 0, 120), 'brief' => mb_substr($brief, 0, 250),
+           'description' => $desc, 'primary_price' => $priceRial, 'stock' => $stock,
+           'preparation_days' => $prepD, 'weight' => $weight, 'package_weight' => $pkgW,
+           'is_wholesale' => false, 'category_id' => $catUsed, 'status' => 3790];
+    if (!empty($p['sku'])) $bp['sku'] = $p['sku'];
+    $r = bslReq($tk, 'POST', 'vendors/' . $vid . '/products', $bp);
+    if (!empty($r['ok']) && !empty($r['body']['id'])) {
+        return ['ok' => true, 'id' => (int)$r['body']['id'], 'action' => 'created'];
+    }
+    $fb = bslTryCreateWithFallback($tk, $vid, $bp, $fallback, $title, $autoCat, $flatCats, $cData);
+    if (!empty($fb['ok']) && !empty($fb['body']['id'])) {
+        return ['ok' => true, 'id' => (int)$fb['body']['id'], 'action' => 'created'];
+    }
+    $em = $r['body']['message'] ?? $r['body']['error'] ?? ($r['error'] ?? '؟');
+    if (is_array($em)) $em = json_encode($em, JSON_UNESCAPED_UNICODE);
+    return ['ok' => false, 'error' => mb_substr((string)$em, 0, 140)];
+}
 
 /** امضای تنظیمات قیمت — اگر عوض شود یعنی قیمت همهٔ محصولات عوض شده */
 function profilePriceSignature(array $profile): string {
@@ -9958,7 +10036,16 @@ $detailWasUnfinished = in_array($stagePrev, ['list_done', 'detail'], true)
 
    گام ۱ فقط وقتی اجرا می‌شود که مرحلهٔ قبلی تمام شده باشد؛ اگر اجرای
    قبلی وسط جزئیات مانده، مستقیم همان را ادامه می‌دهیم. */
-$stepMode = ($stagePrev === 'list_done' || $stagePrev === 'detail') ? 'detail' : 'list';
+/* v9.69: رفعِ «استخراج دوره‌ای جزئیات» که هنوز در کران مانده بود.
+   قبلاً کران به‌صورت جدا list → detail → list → detail در هر فراخوانیِ دوم
+   یک پاسِ جداگانهٔ «detail» اجرا می‌کرد (چون بعد از گامِ فهرست، مرحلهٔ
+   list_done می‌شد و این شرط آن را به detail می‌برد). از v9.44 جزئیات
+   به‌صورت درجا و هم‌زمان با استخراجِ هر محصول در خودِ runBackendExtract
+   گرفته می‌شود، پس کران فقط باید «all» (فهرست + جزئیاتِ درجا برای محصولاتِ
+   ناقص) را اجرا کند — نه یک پاسِ جداگانهٔ دوره‌ایِ جزئیات.
+   استثنا: اگر اجرای قبلی وسطِ فاز جزئیات کشته شده باشد (stage=detail و تازه)،
+   همان را ادامه می‌دهیم تا محصولِ ناقص ارسال نشود. */
+$stepMode = ($stagePrev === 'detail' && $stagePrevAge <= $stageStale) ? 'detail' : 'all';
 $exRes = runBackendExtract($key, 'auto', false, $stepMode);
 $pResult['step'] = $stepMode;
 
@@ -12278,6 +12365,21 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, "'eff_pct' =>") !== false);
     $add('9.68', 'بعد از ارسال، قیمتِ محصولاتِ موجود در غرفه‌های اضافی با تعدیلِ دولایه به‌روز می‌شود',
          strpos($selfSrc, '"🏪 غرفهٔ \$sVid: قیمت \$shopFixed محصول' . '"') !== false);
+
+    /* ---------- v9.69: رفعِ کاملِ استخراج دوره‌ای جزئیات + ارسال چند-غرفه‌ای ---------- */
+    $add('9.69', 'کران فقط «all» را اجرا می‌کند؛ پاسِ جداگانهٔ detail فقط وسطِ جزئیاتِ نیمه‌کاره ادامه می‌یابد',
+         strpos($selfSrc, "\$stepMode = (\$stagePrev === 'detail' && \$stagePrevAge <= \$stageStale) ? 'detail' : 'all';") !== false);
+    $add('9.69', 'تابعِ bslUpsertToShop برای ساخت/به‌روزِ محصول در یک غرفهٔ مشخص',
+         strpos($selfSrc, 'function bslUpsert' . 'ToShop(array $p, array $shop, array $opts)') !== false
+         && strpos($selfSrc, "'action' => 'created'") !== false
+         && strpos($selfSrc, "'action' => 'updated'") !== false);
+    $add('9.69', 'تیکِ «ارسال به همهٔ غرفه‌ها» بالای دکمهٔ ارسال باسلام',
+         strpos($selfSrc, 'id="bsSendAll' . 'Shops"') !== false
+         && strpos($selfSrc, "'send_all_shops'=>!empty(\$_POST['send_all_shops'])") !== false
+         && strpos($selfSrc, "fd2.append('send_all_shops'") !== false);
+    $add('9.69', 'ارسال چند-غرفه‌ای با bslUpsertToShop روی غرفه‌های اضافی (وقتی تیک روشن است)',
+         strpos($selfSrc, 'bslUpsertToShop(\$p, \$__sh, \$__shopOpts)') !== false
+         && strpos($selfSrc, '"🏪 غرفهٔ \$sVid: \$shopCreated ساخته' . '"') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -19276,7 +19378,7 @@ $__pf4=$__pf3??($__pf??loadProfiles());
 $catId=(int)($__pf4[$pKeyIn]['bslCategoryId']??0);
 }
 if($catId<=0)$catId=(int)($cn['basalam']['category_id']??0);
-$entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'paused_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs,'fallback_cat_ids'=>$fbIn]];
+$entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'paused_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs,'fallback_cat_ids'=>$fbIn,'send_all_shops'=>!empty($_POST['send_all_shops'])]];
 $queue['entries'][]=$entry;
 bslWriteQueue($queue);
 echo json_encode(['ok'=>true,'queue_id'=>$queueId,'status'=>$status,'position'=>count($queue['entries']),'start_now'=>$startImm,'queue_count'=>count($queue['entries'])],JSON_UNESCAPED_UNICODE);
@@ -20089,44 +20191,80 @@ else{ $fail++;$bslFailedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'error
 /* v9.68: تعدیل قیمتِ غرفه‌های اضافی — «روش مناسب»: دو لایه.
    لایهٔ ۱: تعدیلِ خودِ پروفایل روی قیمتِ خام (هر پروفایل درصد/مقدارِ خودش را دارد).
    لایهٔ ۲: تعدیلِ مخصوصِ همان غرفه روی همان نتیجه (نه روی قیمتِ غرفهٔ پیش‌فرض).
-   بعد از ارسال به غرفهٔ پیش‌فرض، برای هر غرفهٔ اضافی محصولاتی که از قبل در آن
-   غرفه وجود دارند با همین قیمتِ دولایه به‌روزرسانی می‌شوند. */
+
+   v9.69: ارسالِ چند-غرفه‌ای. اگر تیک «ارسال به همهٔ غرفه‌ها» روشن باشد، برای هر
+   غرفهٔ اضافی محصولات را با bslUpsertToShop می‌سازیم/به‌روز می‌کنیم (جست‌وجو →
+   PATCH یا POST با قیمتِ خودِ آن غرفه). اگر تیک خاموش باشد، فقط مثل قبل قیمتِ
+   محصولاتِ ازقبل‌موجود در آن غرفه‌ها را با تعدیلِ دولایه به‌روز می‌کنیم. */
+$__sendAllShops = !empty($qCfg['send_all_shops']);
 $__cn2=loadConnections();
 $__profiles2=loadProfiles();
 $__profile2=($nextEntry['profile_key'] ?? '')!=='' ? ($__profiles2[$nextEntry['profile_key']] ?? null) : null;
 $__extraShops=bslAllShops($__cn2);
+$__shopOpts = [
+    'round' => (int)($__cn2['basalam']['price_round'] ?? 0),
+    'profile' => $__profile2,
+    'stock' => (int)($cn['basalam']['stock'] ?? 10),
+    'preparation_days' => (int)($cn['basalam']['preparation_days'] ?? 3),
+    'weight' => (int)($cn['basalam']['weight'] ?? 500),
+    'package_weight' => (int)($cn['basalam']['package_weight'] ?? ((int)($cn['basalam']['weight'] ?? 500) + 100)),
+    'category_id' => (int)($cn['basalam']['category_id'] ?? 0),
+    'auto_category' => $autoCat,
+    'fallback_cat_ids' => $bslFallbackCats,
+    'flat_cats' => $bslFlatCats,
+    'cdata' => $cData,
+];
 foreach($__extraShops as $__sh){
     if(!empty($__sh['is_default'])) continue;
     $sTk=(string)$__sh['token']; $sVid=(int)$__sh['vendor_id'];
     if($sTk===''||$sVid<=0) continue;
-    $shopRound=(int)($__cn2['basalam']['price_round']??0);
-    $shopFixed=0;
-    foreach($pd as $__i=>$p){
-        clearstatcache(true,BSL_STOP_FILE);
-        if(file_exists(BSL_STOP_FILE)) break;
-        $__pt=trim($p['title']??$p['name']??''); if($__pt==='')continue;
-        $__rawP=(string)($p['price']??($p['orig_price']??''));
-        // اگر قیمتِ خام در دسترس بود، لایهٔ پروفایل را هم اعمال کن؛ وگرنه
-        // از final_price (که از قبل تعدیلِ پروفایل را دارد) به‌عنوان پایه استفاده کن.
-        if($__rawP!=='' && extractPriceNum($__rawP)>0 && $__profile2){
-            $__pf=bslShopPriceForProfile($__profile2,$__rawP,$__sh,$shopRound);
-        } else {
-            $__baseP=(int)preg_replace("/[^0-9]/","",(string)($p['final_price']??'0'));
-            if($__baseP<=0)continue;
-            $__pf=bslShopPriceFor($__baseP,$__sh,$shopRound);
+    if($__sendAllShops){
+        $shopFixed=0; $shopCreated=0; $shopFail=0;
+        foreach($pd as $__i=>$p){
+            clearstatcache(true,BSL_STOP_FILE);
+            if(file_exists(BSL_STOP_FILE)) break;
+            $__res = bslUpsertToShop($p, $__sh, $__shopOpts);
+            if(!empty($__res['ok'])){
+                if($__res['action']==='created'){$shopCreated++;}
+                else {$shopFixed++;}
+                $updated++;
+            } else {
+                $shopFail++;
+                $bslFailedList[] = ['title'=>trim($p['title']??$p['name']??''),'key'=>$p['key']??'','error'=>'غرفه '.$sVid.': '.($__res['error']??'?')];
+            }
+            usleep(($bslDelayMs??500)*1000);
         }
-        if($__pf['price']<=0)continue;
-        $__found=bslFindExisting($sTk,$sVid,$__pt,(string)($p['key']??''));
-        if(!$__found||(int)($__found['id']??0)<=0) continue;
-        $__exId=(int)$__found['id'];
-        $__np=$__pf['price'];
-        if(($p['price_unit']??'')!=='rial')$__np=$__np*10;
-        $__ru=bslReq($sTk,'PATCH','products/'.$__exId,['primary_price'=>$__np]);
-        if($__ru['code']===404)$__ru=bslReq($sTk,'PATCH','vendors/'.$sVid.'/products/'.$__exId,['primary_price'=>$__np]);
-        if($__ru['ok']&&!empty($__ru['body']['id'])){ $shopFixed++; $updated++; }
-        usleep(($bslDelayMs??500)*1000);
+        if($shopFixed>0||$shopCreated>0||$shopFail>0)
+            bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',
+                "🏪 غرفهٔ $sVid: $shopCreated ساخته، $shopFixed آپدیت، $shopFail خطا");
+    } else {
+        $shopRound=(int)($__cn2['basalam']['price_round']??0);
+        $shopFixed=0;
+        foreach($pd as $__i=>$p){
+            clearstatcache(true,BSL_STOP_FILE);
+            if(file_exists(BSL_STOP_FILE)) break;
+            $__pt=trim($p['title']??$p['name']??''); if($__pt==='')continue;
+            $__rawP=(string)($p['price']??($p['orig_price']??''));
+            if($__rawP!=='' && extractPriceNum($__rawP)>0 && $__profile2){
+                $__pf=bslShopPriceForProfile($__profile2,$__rawP,$__sh,$shopRound);
+            } else {
+                $__baseP=(int)preg_replace("/[^0-9]/","",(string)($p['final_price']??'0'));
+                if($__baseP<=0)continue;
+                $__pf=bslShopPriceFor($__baseP,$__sh,$shopRound);
+            }
+            if($__pf['price']<=0)continue;
+            $__found=bslFindExisting($sTk,$sVid,$__pt,(string)($p['key']??''));
+            if(!$__found||(int)($__found['id']??0)<=0) continue;
+            $__exId=(int)$__found['id'];
+            $__np=$__pf['price'];
+            if(($p['price_unit']??'')!=='rial')$__np=$__np*10;
+            $__ru=bslReq($sTk,'PATCH','products/'.$__exId,['primary_price'=>$__np]);
+            if($__ru['code']===404)$__ru=bslReq($sTk,'PATCH','vendors/'.$sVid.'/products/'.$__exId,['primary_price'=>$__np]);
+            if($__ru['ok']&&!empty($__ru['body']['id'])){ $shopFixed++; $updated++; }
+            usleep(($bslDelayMs??500)*1000);
+        }
+        if($shopFixed>0)bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',"🏪 غرفهٔ $sVid: قیمت $shopFixed محصول با تعدیلِ خودِ آن غرفه (و لایهٔ پروفایل) به‌روز شد");
     }
-    if($shopFixed>0)bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',"🏪 غرفهٔ $sVid: قیمت $shopFixed محصول با تعدیلِ خودِ آن غرفه (و لایهٔ پروفایل) به‌روز شد");
 }
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'','🔍 فاز ۲: محصولات رد‌شده...');
 $catFixed=0;$catRetryFailed=0;$catRejected=[];
@@ -23506,6 +23644,13 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 </div>
 
 <div class="alert alert-info" style="margin-bottom:8px">💡 <b id="bsN">۰</b> محصول با قیمت از <span id="bsT2">۰</span> کل</div>
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:#c4b5fd">
+<input type="checkbox" id="bsSendAllShops" style="width:15px;height:15px">
+<span>🚚 ارسال به همهٔ غرفه‌ها</span>
+<span style="color:#64748b;font-size:9px">(پیش‌فرض + غرفه‌های اضافی، هرکدام با قیمتِ خودش)</span>
+</label>
+</div>
 <div class="cact"><button class="btn btn-cyan" id="bSB" onclick="sendBsl()" style="flex:1">🚀 ارسال باسلام</button><button class="btn btn-green" id="bSBlegacy" onclick="sendBslClient()" style="flex:1">🚀 ارسال فرات</button><button class="btn btn-orange hidden" id="bRB" onclick="sendBsl()" style="flex:1">🔄 تلاش مجدد</button><button class="btn btn-teal" onclick="showBslProductsModal()" style="flex-shrink:0;font-size:12px;padding:6px 10px">🏪 مدیریت جامع محصولات باسلام</button><button class="btn btn-red hidden" id="bST" onclick="stopBslProcess()">⏹ توقف</button></div>
 <div class="progress hidden" id="bP"><div class="progress-bar" id="bPB" style="background:linear-gradient(90deg,#0891b2,#22d3ee)"></div></div>
 <div class="status" id="bSS" style="color:#67e8f9"></div>
@@ -26632,6 +26777,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.69', t:'🐛 رفعِ کاملِ استخراجِ دوره‌ای جزئیات در کران + 🚚 ارسالِ چند-غرفه‌ای باسلام', items:[
+    'گزارش شما: با اینکه v9.67 گامِ جداگانهٔ جزئیات را حذف کرد، کران هنوز در', 'هر فراخوانیِ دوم یک پاسِ «استخراج تفصیلی» اجرا می‌کرد.', '🐞 ریشه: چون بعد از گامِ فهرست، مرحلهٔ list_done می‌شد، شرطِ stepMode کران را', 'به فازِ detail می‌برد — یعنی list → detail → list → detail در هر فراخوانیِ دوم.', '✅ حالا کران فقط «all» (فهرست + جزئیاتِ درجا برای محصولاتِ ناقص) را اجرا', 'می‌کند. پاسِ جداگانهٔ detail فقط وقتی ادامه می‌یابد که اجرای قبلی واقعاً وسطِ', 'جزئیات کشته شده باشد (تا محصولِ ناقص ارسال نشود). استخراجِ دوره‌ایِ اضافی', 'دیگر هیچ‌وقت اتفاق نمی‌افتد.', 'خواستهٔ دوم: ارسالِ چند-غرفه‌ای باسلام.', '✅ تیکِ «🚚 ارسال به همهٔ غرفه‌ها» بالای دکمهٔ ارسال باسلام اضافه شد.', '✅ اگر روشن باشد، بعد از ارسال به غرفهٔ پیش‌فرض، همان محصولات برای هر غرفهٔ', 'اضافی هم ساخته/به‌روز می‌شوند (تابعِ bslUpsertToShop: جست‌وجو → PATCH یا', 'POST با قیمتِ دولایهٔ خودِ همان غرفه).', '✅ اگر خاموش باشد، فقط مثل قبل قیمتِ محصولاتِ ازقبل‌موجود در غرفه‌های اضافی', 'با تعدیلِ خودشان به‌روز می‌شود (بدون ساخت).', '✅ انتخابِ این تیک در صفِ ارسال (config) ذخیره می‌شود تا برای ادامه/بازیابی', 'صف هم حفظ بماند.'],},
   {v:'9.68', t:'💰 تعدیل قیمتِ مخصوصِ هر غرفهٔ باسلام (روشِ دولایه) + نمایش درصدِ مؤثر', items:[
     'خواستهٔ شما: برای هر غرفهٔ باسلام یک تنظیمِ تعدیلِ قیمتِ مثبت/منفی (درصد یا', 'مقدار) اضافه شود و مشخص شود نسبت به قیمتِ پایهٔ محصول چند درصد افزایش/', 'کاهش خواهد داشت؛ با در نظر گرفتن اینکه هر پروفایل درصد/مقدارِ تعدیلِ خودش', 'را دارد.', '✅ غرفهٔ پیش‌فرض از قبل فیلدهای درصد/مقدار و پیش‌نمایشِ زنده داشت.', '✅ برای هر «غرفهٔ اضافی» در بخش «👥 غرفه‌های باسلام» دو فیلدِ تعدیل قیمت اضافه', 'شد: نوع (درصد/ضریب) و مقدار — همان لحظه درصدِ مؤثرِ «دولایه» نمایش داده می‌شود.', '✅ روشِ محاسبه «دولایه» است (مناسب برای غرفه‌های غیرپیش‌فرض):', '  ۱) اول تعدیلِ خودِ پروفایل روی قیمتِ خام اعمال می‌شود (هر پروفایل درصد/', 'مقدارِ خودش را دارد).', '  ۲) بعد تعدیلِ مخصوصِ همان غرفه روی همان نتیجه (نه روی قیمتِ غرفهٔ پیش‌فرض).', '✅ نمایشِ درصدِ مؤثر هم دولایه است: «پایه ۱۰۰ → ۱۵۶ (+۵۶٪) · غرفه: +۲۰٪» یعنی', 'هم لایهٔ پروفایل و هم سهمِ خودِ غرفه دیده می‌شود.', '✅ این مقادیر ذخیره و در ارسالِ باسلام استفاده می‌شوند؛ برای غرفه‌های اضافی،', 'محصولاتی که از قبل در آن غرفه هستند با همین قیمتِ دولایه به‌روزرسانی می‌شوند.', '✅ تابع‌های مشترک سمت سرور bslShopPriceFor و bslShopPriceForProfile هم اضافه', 'شدند که قیمت نهایی و درصدِ مؤثرِ دولایه را محاسبه می‌کنند.'],},
   {v:'9.67', t:'⏱ رفعِ استخراجِ تفصیلیِ ناخواسته در هر کران + 🌐 اتصالِ غیرمستقیمِ هر پروفایل', items:[
@@ -32350,6 +32497,8 @@ function queueBslSend(ps,catId){
             fd2.append('profile_name',($('profileName')&&$('profileName').value)||'');
             // v8.57: دسته‌های جایگزین همین پروفایل هم همراه صف بروند
             fd2.append('fallback_cat_ids',JSON.stringify(Array.isArray(bslProfileFallbackCats)?bslProfileFallbackCats:[]));
+            // v9.69: ارسال به همهٔ غرفه‌ها
+            fd2.append('send_all_shops',($('bsSendAllShops')&&$('bsSendAllShops').checked)?'1':'0');
             fetch('?bsl_queue_add=1',{method:'POST',body:fd2}).then(r=>r.json()).then(d=>{
                 if(!d.ok){showToast('\u062e\u0637\u0627: '+d.error,1);return;}
                 // v8.57: اگر ارسال دیگری در جریان بود، سرور این یکی را در صف
