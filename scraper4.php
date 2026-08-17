@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.67';
+const APP_VERSION = '9.68';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7565,7 +7565,7 @@ if (($_POST['action'] ?? '') === 'save_connections') {
 header('Content-Type: application/json; charset=UTF-8');
 $conn = loadConnections();
 if (isset($_POST['woocommerce'])) { $w = json_decode($_POST['woocommerce'], true) ?: []; $conn['woocommerce'] = ['enabled'=>!empty($w['enabled']),'store_url'=>trim($w['store_url']??''),'consumer_key'=>trim($w['consumer_key']??''),'consumer_secret'=>trim($w['consumer_secret']??''),'default_category'=>(int)($w['default_category']??0),'default_status'=>$w['default_status']??'draft','stock_quantity'=>(int)($w['stock_quantity']??10),'manage_stock'=>!empty($w['manage_stock']),'price_mode'=>in_array(($w['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$w['price_mode']:'none','price_val'=>(float)($w['price_val']??0),'price_round'=>max(0,(int)($w['price_round']??0))]; }
-if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??'')];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors,'price_mode'=>in_array(($b['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$b['price_mode']:'none','price_val'=>(float)($b['price_val']??0),'price_round'=>max(0,(int)($b['price_round']??0))]; }
+if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??''),'price_mode'=>in_array(($v['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$v['price_mode']:'none','price_val'=>(float)($v['price_val']??0)];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors,'price_mode'=>in_array(($b['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$b['price_mode']:'none','price_val'=>(float)($b['price_val']??0),'price_round'=>max(0,(int)($b['price_round']??0))]; }
 
 if (isset($_POST['ai'])) { $a = json_decode($_POST['ai'], true) ?: []; $conn['ai'] = ['enabled'=>!empty($a['enabled']),'api_key'=>trim($a['api_key']??''),'base_url'=>trim($a['base_url']??'https://dashscope.aliyuncs.com/compatible-mode/v1'),'model'=>trim($a['model']??'qwen-plus'),'temperature'=>(float)($a['temperature']??0.1)]; }
 // v8.61: تنظیمات روش عبور برای سرویس‌های هوش مصنوعی
@@ -8912,8 +8912,11 @@ function bslAllShops(array $cn): array {
     $defVid = (int)($b['vendor_id'] ?? 0);
     $defName = trim((string)($b['shop_name'] ?? ''));
     if ($defName === '') $defName = 'غرفهٔ پیش‌فرض';
+    $defPM = (string)($b['price_mode'] ?? 'none');
+    $defPV = (float)($b['price_val'] ?? 0);
     if ($defTok !== '' && $defVid > 0) {
-        $out[] = ['vendor_id' => $defVid, 'token' => $defTok, 'shop_name' => $defName];
+        $out[] = ['vendor_id' => $defVid, 'token' => $defTok, 'shop_name' => $defName,
+                  'is_default' => true, 'price_mode' => $defPM, 'price_val' => $defPV];
     }
     $vs = $b['vendors'] ?? [];
     if (is_array($vs)) {
@@ -8924,10 +8927,41 @@ function bslAllShops(array $cn): array {
             if ($vid <= 0 || $tok === '') continue;
             $name = trim((string)($v['shop_name'] ?? ($v['name'] ?? '')));
             if ($name === '') $name = 'غرفهٔ ' . $vid;
-            $out[] = ['vendor_id' => $vid, 'token' => $tok, 'shop_name' => $name];
+            $out[] = ['vendor_id' => $vid, 'token' => $tok, 'shop_name' => $name,
+                      'is_default' => false,
+                      'price_mode' => (string)($v['price_mode'] ?? 'none'),
+                      'price_val'  => (float)($v['price_val'] ?? 0)];
         }
     }
     return $out;
+}
+
+/* v9.68: تعدیل قیمتِ مخصوصِ هر غرفهٔ باسلام، «نسبت به غرفهٔ پیش‌فرض».
+   غرفهٔ پیش‌فرض خودش می‌تواند درصد/مقدار داشته باشد (price_mode/price_val
+   عمومی). برای غرفه‌های دیگر هم یک درصد/مقدارِ جدا ذخیره می‌شود که روی
+   «قیمتِ پایهٔ محصول» اعمال می‌شود — مثل غرفهٔ پیش‌فرض ولی با مقادیرِ خودش.
+
+   خروجی: ['price'=>قیمت نهایی، 'pct'=>درصدِ مؤثر نسبت به قیمت پایه]
+   مثال: قیمت پایه ۱۰۰، غرفهٔ پیش‌فرض +۳۰٪ (۱۳۰)؛ اگر غرفهٔ دوم +۲۰٪ بگذارد
+   روی همان پایه ۱۰۰ اعمال می‌شود → ۱۲۰ (pct=+۲۰). یعنی هر غرفه نسبت به
+   «قیمت پایه» مقدار خودش را دارد و نسبتِش به غرفهٔ پیش‌فرض مستقل است. */
+function bslShopPriceFor(int $basePrice, array $shop, int $round = 0): array {
+    if ($basePrice <= 0) return ['price' => 0, 'pct' => 0];
+    $mode = (string)($shop['price_mode'] ?? 'none');
+    $val  = (float)($shop['price_val'] ?? 0);
+    $out  = $basePrice;
+    $pct  = 0.0;
+    if ($mode === 'percent') {
+        $out = $basePrice * (1 + ($val / 100));
+        $pct = (float)$val;
+    } elseif ($mode === 'multiplier') {
+        $out = $val > 0 ? $basePrice * $val : $basePrice;
+        $pct = $val > 0 ? round(($val - 1) * 100, 1) : 0;
+    }
+    $out = (int)round($out);
+    if ($round > 0) $out = (int)(round($out / $round) * $round);
+    if ($out <= 0) $out = $basePrice;
+    return ['price' => $out, 'pct' => round($pct, 1)];
 }
 
 /** امضای تنظیمات قیمت — اگر عوض شود یعنی قیمت همهٔ محصولات عوض شده */
@@ -12205,6 +12239,19 @@ if (isset($_GET['selftest'])) {
     $add('9.67', 'سوییچِ «اتصال غیرمستقیم» در تبِ شروع برای هر پروفایل',
          strpos($selfSrc, 'id="profileNetIndirect"') !== false
          && strpos($selfSrc, 'function updateProfile' . 'NetHint(') !== false);
+
+    /* ---------- v9.68: تعدیل قیمتِ مخصوصِ هر غرفهٔ باسلام ---------- */
+    $add('9.68', 'فیلدهای تعدیل قیمت (درصد/مقدار) برای هر غرفهٔ اضافیِ باسلام',
+         strpos($selfSrc, 'bslVPMode_') !== false
+         && strpos($selfSrc, 'function bslVPrice' . 'Change(') !== false);
+    $add('9.68', 'نمایش درصدِ مؤثرِ هر غرفه نسبت به قیمتِ پایه (نمونه روی ۱۰۰)',
+         strpos($selfSrc, 'function bslShopPrice' . 'Preview(') !== false
+         && strpos($selfSrc, "'پایه ۱۰۰ → '") !== false);
+    $add('9.68', 'تابعِ مشترک سمت سرور bslShopPriceFor برای قیمتِ هر غرفه',
+         strpos($selfSrc, 'function bslShopPrice' . 'For(int $basePrice') !== false
+         && strpos($selfSrc, "'pct' =>") !== false);
+    $add('9.68', 'بعد از ارسال، قیمتِ محصولاتِ موجود در غرفه‌های اضافی با تعدیلِ خودشان به‌روز می‌شود',
+         strpos($selfSrc, '"🏪 غرفهٔ \$sVid: قیمت \$shopFixed محصول' . '"') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -20013,6 +20060,37 @@ else{ $fail++;$bslFailedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'error
 }
 }
 
+/* v9.68: تعدیل قیمتِ غرفه‌های اضافی. بعد از ارسال به غرفهٔ پیش‌فرض، برای هر
+   غرفهٔ اضافی، محصولاتی که از قبل در آن غرفه وجود دارند را با قیمتِ
+   تنظیم‌شدهٔ همان غرفه به‌روزرسانی می‌کنیم (جست‌وجو + PATCH قیمت). هر غرفه
+   نسبت به «قیمت پایه» مقدارِ خودش را دارد. */
+$__cn2=loadConnections();
+$__extraShops=bslAllShops($__cn2);
+foreach($__extraShops as $__sh){
+    if(!empty($__sh['is_default'])) continue;
+    $sTk=(string)$__sh['token']; $sVid=(int)$__sh['vendor_id'];
+    if($sTk===''||$sVid<=0) continue;
+    $shopRound=(int)($__cn2['basalam']['price_round']??0);
+    $shopFixed=0;
+    foreach($pd as $__i=>$p){
+        clearstatcache(true,BSL_STOP_FILE);
+        if(file_exists(BSL_STOP_FILE)) break;
+        $__pt=trim($p['title']??$p['name']??''); if($__pt==='')continue;
+        $__baseP=(int)preg_replace("/[^0-9]/","",(string)($p['final_price']??'0'));
+        if($__baseP<=0)continue;
+        $__pf=bslShopPriceFor($__baseP,$__sh,$shopRound);
+        $__found=bslFindExisting($sTk,$sVid,$__pt,(string)($p['key']??''));
+        if(!$__found||(int)($__found['id']??0)<=0) continue;
+        $__exId=(int)$__found['id'];
+        $__np=$__pf['price'];
+        if(($p['price_unit']??'')!=='rial')$__np=$__np*10;
+        $__ru=bslReq($sTk,'PATCH','products/'.$__exId,['primary_price'=>$__np]);
+        if($__ru['code']===404)$__ru=bslReq($sTk,'PATCH','vendors/'.$sVid.'/products/'.$__exId,['primary_price'=>$__np]);
+        if($__ru['ok']&&!empty($__ru['body']['id'])){ $shopFixed++; $updated++; }
+        usleep(($bslDelayMs??500)*1000);
+    }
+    if($shopFixed>0)bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',"🏪 غرفهٔ $sVid: قیمت $shopFixed محصول با تعدیلِ خودِ آن غرفه به‌روز شد");
+}
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'','🔍 فاز ۲: محصولات رد‌شده...');
 $catFixed=0;$catRetryFailed=0;$catRejected=[];
 if(!empty($bslFlatCats)){
@@ -23716,7 +23794,43 @@ let bslExtraVendors=[];
 function addBslVendor(){bslExtraVendors.push({vendor_id:0,token:'',name:'',shop_name:''});renderBslVendors();}
 function removeBslVendor(idx){if(!confirm('حذف این غرفه؟'))return;bslExtraVendors.splice(idx,1);renderBslVendors();}
 function testBslVendor(idx){const v=bslExtraVendors[idx];if(!v||!v.token){showToast('توکن خالی است',1);return;}const btn=document.getElementById('bslVTestBtn_'+idx);if(btn){btn.disabled=true;btn.textContent='⏳';}const fd=new FormData();fd.append('action','test_basalam');fd.append('token',v.token);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(btn){btn.disabled=false;btn.textContent='🔗';}if(d.ok){bslExtraVendors[idx].vendor_id=d.vendor_id||0;bslExtraVendors[idx].name=d.user_name||d.username||'';bslExtraVendors[idx].shop_name=d.vendor_title||'';renderBslVendors();showToast('✓ '+d.vendor_title+' (#'+d.vendor_id+')');}else{showToast('❌ '+(d.error||'خطا'),1);}}).catch(()=>{if(btn){btn.disabled=false;btn.textContent='🔗';}showToast('❌ خطا شبکه',1);});}
-function renderBslVendors(){const list=$('bslVendorsList');if(!list)return;list.innerHTML='';if(bslExtraVendors.length===0){list.innerHTML='<div style="color:#64748b;font-size:11px;text-align:center;padding:8px">غرفه اضافی وجود ندارد</div>';return;}bslExtraVendors.forEach((v,idx)=>{const card=document.createElement('div');card.style.cssText='background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px';const info=v.shop_name?'<div style="color:#22d3ee;font-size:11px;margin-bottom:4px">'+esc(v.shop_name)+' (#'+v.vendor_id+')</div>':'';const nameVal=v.name||'';card.innerHTML='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-size:11px;color:#fbbf24;font-weight:700">غرفه '+(idx+1)+'</span><button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="removeBslVendor('+idx+')">✕</button></div>'+info+'<div style="display:flex;gap:6px;margin-bottom:6px"><input type="text" id="bslVName_'+idx+'" value="'+esc(nameVal)+'" placeholder="نام" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px;direction:rtl" oninput="bslExtraVendors['+idx+'].name=this.value"></div><div style="display:flex;gap:6px;margin-bottom:6px"><input type="password" id="bslVToken_'+idx+'" value="'+esc(v.token||'')+'" placeholder="Token" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].token=this.value"></div><div style="display:flex;gap:6px"><input type="number" id="bslVVid_'+idx+'" value="'+(v.vendor_id||'')+'" placeholder="شماره غرفه" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].vendor_id=parseInt(this.value)||0"><button class="btn btn-cyan" id="bslVTestBtn_'+idx+'" style="font-size:10px;padding:4px 8px" onclick="testBslVendor('+idx+')">🔗 تست</button></div>';list.appendChild(card);});}
+function renderBslVendors(){const list=$('bslVendorsList');if(!list)return;list.innerHTML='';if(bslExtraVendors.length===0){list.innerHTML='<div style="color:#64748b;font-size:11px;text-align:center;padding:8px">غرفه اضافی وجود ندارد</div>';return;}bslExtraVendors.forEach((v,idx)=>{const card=document.createElement('div');card.style.cssText='background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px';const info=v.shop_name?'<div style="color:#22d3ee;font-size:11px;margin-bottom:4px">'+esc(v.shop_name)+' (#'+v.vendor_id+')</div>':'';const nameVal=v.name||'';const pm=v.price_mode||'none';const pv=v.price_val||0;card.innerHTML='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-size:11px;color:#fbbf24;font-weight:700">غرفه '+(idx+1)+'</span><button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="removeBslVendor('+idx+')">✕</button></div>'+info+'<div style="display:flex;gap:6px;margin-bottom:6px"><input type="text" id="bslVName_'+idx+'" value="'+esc(nameVal)+'" placeholder="نام" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px;direction:rtl" oninput="bslExtraVendors['+idx+'].name=this.value"></div><div style="display:flex;gap:6px;margin-bottom:6px"><input type="password" id="bslVToken_'+idx+'" value="'+esc(v.token||'')+'" placeholder="Token" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].token=this.value"></div><div style="display:flex;gap:6px"><input type="number" id="bslVVid_'+idx+'" value="'+(v.vendor_id||'')+'" placeholder="شماره غرفه" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].vendor_id=parseInt(this.value)||0"><button class="btn btn-cyan" id="bslVTestBtn_'+idx+'" style="font-size:10px;padding:4px 8px" onclick="testBslVendor('+idx+')">🔗 تست</button></div>'
+ // v9.68: تعدیل قیمتِ این غرفه (نسبت به قیمت پایهٔ محصول) + نمایش درصدِ مؤثر
+ +'<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e293b">'
+ +'<div style="font-size:10px;color:#94a3b8;margin-bottom:4px">💰 تعدیل قیمتِ این غرفه (روی قیمت پایه):</div>'
+ +'<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
+ +'<select id="bslVPMode_'+idx+'" onchange="bslVPriceChange('+idx+')" style="flex:1;min-width:120px;padding:5px 6px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:11px">'
+ +'<option value="none"'+(pm==='none'?' selected':'')+'>بدون تعدیل</option>'
+ +'<option value="percent"'+(pm==='percent'?' selected':'')+'>درصد (+/−)</option>'
+ +'<option value="multiplier"'+(pm==='multiplier'?' selected':'')+'>ضریب</option></select>'
+ +'<input type="number" id="bslVPV_'+idx+'" value="'+pv+'" step="0.01" oninput="bslVPriceChange('+idx+')" style="max-width:110px;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:11px;direction:ltr" placeholder="مقدار">'
+ +'<span id="bslVPEff_'+idx+'" style="font-size:10px;color:#94a3b8"></span></div>'
+ +'</div>';
+ if(pm!=='none'||pv!==0)bslVPriceChange(idx);
+ list.appendChild(card);});}
+// v9.68: وقتی تنظیم قیمتِ یک غرفهٔ اضافی عوض شد، مقدار را ذخیره و درصدِ مؤثر را نشان بده
+function bslVPriceChange(idx){
+    const v=bslExtraVendors[idx]; if(!v)return;
+    v.price_mode=($('bslVPMode_'+idx)||{}).value||'none';
+    v.price_val=parseFloat(($('bslVPV_'+idx)||{}).value)||0;
+    const eff=document.getElementById('bslVPEff_'+idx);
+    if(eff){
+        // نمونه روی قیمت پایهٔ ۱۰۰ برای نمایش درصدِ مؤثر
+        const sample=bslShopPricePreview(100,v.price_mode,v.price_val);
+        eff.textContent='پایه ۱۰۰ → '+toFa(sample.price)+(sample.pct!==0?(' ('+(sample.pct>0?'+':'')+toFa(sample.pct)+'٪)'):'');
+        eff.style.color=sample.pct>0?'#4ade80':(sample.pct<0?'#f87171':'#94a3b8');
+    }
+}
+// v9.68: محاسبهٔ قیمت نمونه/درصدِ مؤثر برای یک غرفه (معادل سمت سرور)
+function bslShopPricePreview(base,mode,val){
+    base=parseInt(base)||0; val=parseFloat(val)||0;
+    if(base<=0)return{price:0,pct:0};
+    let out=base,pct=0;
+    if(mode==='percent'){out=base*(1+val/100);pct=val;}
+    else if(mode==='multiplier'){out=val>0?base*val:base;pct=val>0?Math.round((val-1)*100*10)/10:0;}
+    out=Math.round(out); if(out<=0)out=base;
+    return{price:out,pct:Math.round(pct*10)/10};
+}
 // v8.17: Per-profile BaSalam category dropdown
 let bslProfileSelectedCatId=0;
 function renderBslProfileCatDropdown(cats,selectedId){const si=$('bslProfileCatSearch');const list=$('bslProfileCatList');if(!si||!list)return;/* v8.43: اگر بدون شناسه صدا زده شود (مثلاً دکمهٔ 🔄)، انتخاب فعلی نباید پاک شود */if(selectedId===undefined||selectedId===null)selectedId=bslProfileSelectedCatId||parseInt($('bslProfileCatId').value)||0;bslProfileSelectedCatId=selectedId||0;$('bslProfileCatId').value=String(bslProfileSelectedCatId);if(selectedId>0){const c=cats.find(x=>x.id===selectedId);if(c)si.value=c.name;}si.onfocus=function(){list.style.display='block';};si.onblur=function(){setTimeout(()=>{list.style.display='none';},200);};si.oninput=function(){const q=si.value.toLowerCase().trim();renderBslProfileCatList(cats,q);};renderBslProfileCatList(cats,'');}
@@ -26467,6 +26581,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.68', t:'💰 تعدیل قیمتِ مخصوصِ هر غرفهٔ باسلام + نمایش درصدِ مؤثر', items:[
+    'خواستهٔ شما: برای هر غرفهٔ باسلام، یک تنظیمِ تعدیلِ قیمتِ مثبت/منفی (درصد یا', 'مقدار) نسبت به غرفهٔ پیش‌فرض اضافه شود و مشخص شود نسبت به قیمتِ پایهٔ', 'محصول چند درصد افزایش/کاهش خواهد داشت.', '✅ غرفهٔ پیش‌فرض از قبل فیلدهای درصد/مقدار و پیش‌نمایشِ زنده داشت.', '✅ حالا برای هر «غرفهٔ اضافی» هم در بخش «👥 غرفه‌های باسلام» دو فیلدِ تعدیل', 'قیمت اضافه شد: نوع (درصد/ضریب) و مقدار — همان لحظه درصدِ مؤثر نسبت به قیمتِ', 'پایه (نمونه روی ۱۰۰) نمایش داده می‌شود.', '✅ منطق: هر غرفه مقدارِ خودش را روی «قیمت پایه» اعمال می‌کند. اگر غرفهٔ', 'پیش‌فرض +۳۰٪ باشد و غرفهٔ دوم +۲۰٪، غرفهٔ دوم نسبت به قیمت پایه +۲۰٪ دارد', '(نه روی قیمتِ غرفهٔ پیش‌فرض).', '✅ این مقادیر ذخیره و در ارسالِ باسلام استفاده می‌شوند؛ برای غرفه‌های اضافی،', 'محصولاتی که از قبل در آن غرفه هستند با قیمتِ تنظیم‌شدهٔ همان غرفه', 'به‌روزرسانی می‌شوند.', '✅ تابعِ مشترک سمت سرور bslShopPriceFor هم اضافه شد که قیمت نهایی و درصدِ', 'مؤثر را برای هر غرفه محاسبه می‌کند.'],},
   {v:'9.67', t:'⏱ رفعِ استخراجِ تفصیلیِ ناخواسته در هر کران + 🌐 اتصالِ غیرمستقیمِ هر پروفایل', items:[
     'گزارش شما: قبلاً «استخراج تفصیلیِ دوره‌ای» طوری تنظیم شده بود که با هر', 'فراخوانیِ کران‌جاب، جزئیات را هم استخراج کند. آن تنظیم حذف شده، ولی کدِ کران', 'هنوز در هر اجرا یک گامِ جداگانهٔ «استخراج تفصیلی» را صدا می‌زد.', '🐞 ریشه: یک بلوکِ قدیمی (گام ۲ / v9.03) بعد از هر گامِ فهرست، بدونِ قید و شرط', 'runBackendExtract(...,"detail") را اجرا می‌کرد.', '✅ این گامِ جداگانه حذف شد؛ کران فقط فهرست را می‌گیرد و به‌سراغ ارسال می‌رود.', 'درِ ارسال هم دیگر به‌خاطرِ مرحلهٔ list_done بسته نمی‌شود (فقط اگر واقعاً وسطِ', 'جزئیات مانده باشد برای جلوگیری از ارسالِ محصولِ ناقص).', 'خواستهٔ دوم: برای هر پروفایل یک تیکِ اسلایدری برای اتصالِ غیرمستقیم.', '✅ در تب «شروع» (بخش پروفایل) یک سوییچِ «🌐 اتصال غیرمستقیم» اضافه شد.', 'روشن = اتصالِ غیرمستقیم (بر اساس Worker/پروکسی/DoHِ تنظیم‌شده در «اتصال به', 'سایت مبدأ»)، خاموش = مستقیم. مقدار پیش‌فرض: خاموش (مستقیم).', '✅ این تنظیم فقط برای همان پروفایل اعمال می‌شود؛ پروفایل‌های دیگر را تحت', 'تأثیر قرار نمی‌دهد.'],},
   {v:'9.66', t:'🐛 رفعِ واقعیِ «صفحات/تب‌های خالی» — بسته‌نشدنِ پنل تنظیمات', items:[
