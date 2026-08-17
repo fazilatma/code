@@ -16,7 +16,7 @@
  * =====================================================================
  */
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -93,6 +93,7 @@ const HOP_BY_HOP = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade', 'content-length',
   'content-encoding', 'x-proxy-ua', 'x-proxy-referer', 'x-proxy-cookie', 'x-proxy-key',
+  'x-proxy-auth', 'x-proxy-api-key',
 ]);
 
 function buildForwardHeaders(request, env) {
@@ -105,6 +106,10 @@ function buildForwardHeaders(request, env) {
     const v = request.headers.get(h);
     if (v) out[h] = v;
   }
+  // کلید API باید تا مقصد نهایی همراه بماند — هدرهای میانیِ پراکسی اصلی
+  // (proxy.php) به نام‌های واقعی برگردانده می‌شوند:
+  if (request.headers.get('x-proxy-auth')) out['authorization'] = request.headers.get('x-proxy-auth');
+  if (request.headers.get('x-proxy-api-key')) out['x-api-key'] = request.headers.get('x-proxy-api-key');
   // بدون accept-encoding → پاسخ معمولاً فشرده نمی‌آید
   return out;
 }

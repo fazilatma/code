@@ -78,7 +78,8 @@ $CONFIG = [
     'allow_private_ips' => false,                 // اتصال به IPهای داخلی (محافظ SSRF) — فقط برای تست محلی true کنید
     'verify_ssl'        => true,                  // اعتبارسنجی گواهی SSL مقصد
     'inject_base'       => true,                  // تزریق <base href> در پاسخ‌های HTML تا لینک‌های نسبی درست کار کنند
-    'forward_auth'      => false,                 // ارسال هدر Authorization کلاینت به مقصد
+    'forward_auth'      => true,                  // ارسال هدر کلید API به مقصد — برای تست مدل‌های هوش مصنوعی لازم است؛ اگر لازم شد خاموش کنید
+    'forward_auth_headers' => ['Authorization', 'X-API-Key', 'api-key'], // هدرهای احراز هویتی که به مقصد ارسال می‌شوند
     'cache_enabled'     => false,                 // کش فایلی پاسخ‌ها
     'cache_ttl'         => 120,                   // مدت اعتبار کش (ثانیه)
     'cache_dir'         => __DIR__ . '/proxy-cache',
@@ -86,7 +87,7 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.1.1');
+define('PROXY_VERSION', '1.1.2');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -562,12 +563,16 @@ function p_fallback_attempt(string $url, string $method, array $headers, string 
     $cookie = null;
     $contentType = null;
     $accept = null;
+    $authValue = null;      // Authorization
+    $apiKeyValue = null;    // X-API-Key / api-key
     foreach ($headers as $h) {
         if (preg_match('~^User-Agent:\s*(.+)$~i', $h, $m)) $effectiveUa = trim($m[1]);
         elseif (preg_match('~^Referer:\s*(.+)$~i', $h, $m)) $referer = trim($m[1]);
         elseif (preg_match('~^Cookie:\s*(.+)$~i', $h, $m)) $cookie = trim($m[1]);
         elseif (preg_match('~^Content-Type:\s*(.+)$~i', $h, $m)) $contentType = trim($m[1]);
         elseif (preg_match('~^Accept:\s*(.+)$~i', $h, $m)) $accept = trim($m[1]);
+        elseif (preg_match('~^Authorization:\s*(.+)$~i', $h, $m)) $authValue = trim($m[1]);
+        elseif (preg_match('~^(?:X-API-Key|api-key):\s*(.+)$~i', $h, $m)) $apiKeyValue = trim($m[1]);
     }
 
     $ctrl = [];
@@ -576,6 +581,10 @@ function p_fallback_attempt(string $url, string $method, array $headers, string 
     if ($cookie !== null && $cookie !== '') $ctrl[] = 'X-Proxy-Cookie: ' . $cookie;
     if ($contentType !== null && $contentType !== '') $ctrl[] = 'Content-Type: ' . $contentType;
     if ($accept !== null && $accept !== '') $ctrl[] = 'Accept: ' . $accept;
+    // کلید API باید تا مقصد نهایی همراه درخواست بماند — ورکر ما این
+    // هدرهای میانی را به Authorization / x-api-key واقعی برمی‌گرداند
+    if ($authValue !== null && $authValue !== '') $ctrl[] = 'X-Proxy-Auth: ' . $authValue;
+    if ($apiKeyValue !== null && $apiKeyValue !== '') $ctrl[] = 'X-Proxy-Api-Key: ' . $apiKeyValue;
     if (!empty($cfg['fallback_key'])) $ctrl[] = 'X-Proxy-Key: ' . $cfg['fallback_key'];
 
     $res = p_curl_once($fbUrl, $method, $ctrl, $body, null, $timeout);
@@ -678,8 +687,10 @@ function p_relay_request(string $url): void {
         if ($v !== null && $v !== '') $forward[] = $hd . ': ' . $v;
     }
     if ($cfg['forward_auth']) {
-        $v = p_in_header('Authorization');
-        if ($v !== null && $v !== '') $forward[] = 'Authorization: ' . $v;
+        foreach ((array)$cfg['forward_auth_headers'] as $authHeader) {
+            $v = p_in_header((string)$authHeader);
+            if ($v !== null && $v !== '') $forward[] = $authHeader . ': ' . $v;
+        }
     }
     foreach (['X-Proxy-UA' => 'User-Agent', 'X-Proxy-Referer' => 'Referer', 'X-Proxy-Cookie' => 'Cookie'] as $from => $to) {
         $v = p_in_header($from);
@@ -1101,6 +1112,7 @@ a { color:var(--acc); }
 <li>چرخش خودکار بین پراکسی‌های بالادستی (http و socks5) و تلاش مجدد روی خطاهای ۴۰۳/۴۲۹/۵۰۳</li>
 <li>فالبک خودکار به ورکر کلودفلر در صورت شکست اتصال به مقصد (قابل تغییر در تنظیمات)</li>
 <li>شناسایی DNS مسموم/فیلترشده (مثل facebook.com روی هاست ایرانی) و عبور خودکار از ورکر کلودفلر یا پراکسی بالادستی</li>
+<li>انتقال کامل کلید API (Authorization / x-api-key) به مقصد — حتی از مسیر فالبک ورکر — برای تست مدل‌های هوش مصنوعی</li>
 <li>حالت پراکسی فوروارد: CONNECT برای HTTPS و absolute-form برای HTTP — قابل استفاده در فیلد پروکسی اسکرپر</li>
 <li>سازگار با فیلد «Worker» اسکرپر: الگوی <code>?url={url}</code> و حالت مسیری، بدون هیچ تنظیم سروری</li>
 <li>ریدایرکت‌ها به‌صورت امن دنبال می‌شوند و هر پرش دوباره اعتبارسنجی می‌شود</li>
