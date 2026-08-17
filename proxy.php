@@ -35,6 +35,14 @@
  *    X-Proxy-Referer  → بازنویسی Referer
  *    X-Proxy-Cookie   → ارسال کوکی به مقصد
  *    X-Proxy-Time     → تایم‌اوت سفارشی (ثانیه، حداکثر ۳۰۰)
+ *    X-Proxy-Rewrite  → 1/0 — فعال/غیرفعال‌کردن بازنویسی URL برای همین درخواست
+ *
+ *  رندر کامل صفحه از طریق پراکسی:
+ *    به‌صورت پیش‌فرض فقط <base> تزریق می‌شود؛ یعنی مرورگر تصاویر/CSS/JS را
+ *    مستقیم از خود مقصد می‌گیرد و اگر مقصد برای کاربر بلاک باشد، لود نمی‌شوند.
+ *    با 'rewrite_urls' => true (یا هدر X-Proxy-Rewrite: 1) همهٔ URLهای صفحه
+ *    (src/href/srcset/style/... و url داخل CSS) به سمت خود پراکسی بازنویسی
+ *    می‌شوند تا کل صفحه — ساختار و تصاویر — از مسیر پراکسی رندر شود.
  *
  *  فالبک ورکر کلودفلر:
  *    اگر اتصال به مقصد ناموفق باشد، درخواست از طریق cloudflare_worker_url
@@ -78,6 +86,13 @@ $CONFIG = [
     'allow_private_ips' => false,                 // اتصال به IPهای داخلی (محافظ SSRF) — فقط برای تست محلی true کنید
     'verify_ssl'        => true,                  // اعتبارسنجی گواهی SSL مقصد
     'inject_base'       => true,                  // تزریق <base href> در پاسخ‌های HTML تا لینک‌های نسبی درست کار کنند
+    // بازنویسی کامل URLها: وقتی روشن باشد، همهٔ منابع (تصاویر، CSS، JS، لینک‌ها)
+    // هم از خود پراکسی لود می‌شوند و برای سایت‌های بلاک‌شده صفحه کامل رندر می‌شود.
+    // (برای اسکرپر بهتر است خاموش بماند تا آدرس‌های اصلی دست‌نخورده بمانند؛
+    //  در این حالت فقط <base> تزریق می‌شود و مرورگر منابع را مستقیم می‌گیرد.)
+    // با هدر X-Proxy-Rewrite: 1 / 0 هم می‌توان به‌ازای هر درخواست تغییرش داد.
+    'rewrite_urls'      => false,
+    'rewrite_attrs'     => ['src', 'href', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'data-original', 'data-bg', 'action', 'formaction'],
     'forward_auth'      => true,                  // ارسال هدر کلید API به مقصد — برای تست مدل‌های هوش مصنوعی لازم است؛ اگر لازم شد خاموش کنید
     'forward_auth_headers' => ['Authorization', 'X-API-Key', 'api-key'], // هدرهای احراز هویتی که به مقصد ارسال می‌شوند
     'cache_enabled'     => false,                 // کش فایلی پاسخ‌ها
@@ -87,8 +102,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.1.4');
-define('PROXY_BUILD', '2026-08-17-02');
+define('PROXY_VERSION', '1.1.5');
+define('PROXY_BUILD', '2026-08-17-03');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -337,6 +352,102 @@ function p_inject_base(string $html, string $url): string {
         return substr($html, 0, $m[0][1]) . $base . substr($html, $m[0][1]);
     }
     return $base . $html;
+}
+
+/* ---------------------------------------------------------------------
+ * بازنویسی URL — رندر کامل صفحه از طریق خود پراکسی
+ * --------------------------------------------------------------------- */
+
+/** آدرس پایهٔ خود پراکسی (برای بازنویسی لینک‌ها به سمت همین اسکریپت) */
+function p_proxy_base_url(): string {
+    $https = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off')
+          || (int)($_SERVER['SERVER_PORT'] ?? 0) === 443;
+    $scheme = $https ? 'https' : 'http';
+    $host = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
+    if ($host === '') $host = 'localhost';
+    $self = str_replace('\\', '/', (string)($_SERVER['SCRIPT_NAME'] ?? '/proxy.php'));
+    if ($self === '' || $self === '/') $self = '/proxy.php';
+    $dir = rtrim(str_replace('\\', '/', dirname($self)), '/');
+    return $scheme . '://' . $host . ($dir === '' ? '' : $dir) . '/' . basename($self);
+}
+
+/** آیا بازنویسی برای این درخواست فعال است؟ (تنظیم + هدر کنترل X-Proxy-Rewrite) */
+function p_rewrite_enabled(): bool {
+    $rw = !empty($GLOBALS['CONFIG']['rewrite_urls']);
+    $h = p_in_header('X-Proxy-Rewrite');
+    if ($h !== null) $rw = trim((string)$h) === '1';
+    return $rw;
+}
+
+/** بازنویسی یک URL منفرد به آدرس پراکسی (در صورت نیاز) */
+function p_rewrite_url(string $url, string $pageUrl, string $proxyBase): string {
+    $url = trim(html_entity_decode($url, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+    if ($url === '') return $url;
+    if (preg_match('~^(data:|javascript:|mailto:|tel:|blob:|about:|chrome-extension:|#)~i', $url)) return $url;
+    $abs = p_absolute_url($url, $pageUrl);
+    if ($abs === '') return $url;
+    // از قبل پراکسی‌شده؟ دور دوم اعمال نکن
+    if (stripos($abs, $proxyBase . '?url=') === 0) return $abs;
+    return $proxyBase . '?url=' . rawurlencode($abs);
+}
+
+/** بازنویسی srcset (هر نامزد = «آدرس [توضیح…]») */
+function p_rewrite_srcset(string $val, string $pageUrl, string $proxyBase): string {
+    $parts = preg_split('~\s*,\s*~', $val);
+    foreach ($parts as $i => $part) {
+        if (preg_match('~^(\S+)(.*)$~s', $part, $m)) {
+            $parts[$i] = p_rewrite_url($m[1], $pageUrl, $proxyBase) . $m[2];
+        }
+    }
+    return implode(', ', $parts);
+}
+
+/** بازنویسی url(...) داخل CSS خام */
+function p_rewrite_css(string $css, string $cssUrl, string $proxyBase): string {
+    return preg_replace_callback('~url\(\s*(["\']?)([^)"\']+)\1\s*\)~i', function ($m) use ($cssUrl, $proxyBase) {
+        return 'url("' . p_rewrite_url($m[2], $cssUrl, $proxyBase) . '")';
+    }, $css);
+}
+
+/**
+ * بازنویسی کامل HTML:
+ *   - حذف <base>های موجود و گذاشتن base به سمت خود پراکسی (برای درخواست‌های JS)
+ *   - بازنویسی src/href/srcset/... به ?url= پراکسی
+ *   - بازنویسی url(...) داخل style های inline
+ */
+function p_rewrite_html(string $html, string $pageUrl, string $proxyBase): string {
+    $html = preg_replace('~<base\b[^>]*>~i', '', $html);
+    $base = '<base href="' . htmlspecialchars($proxyBase . '?url=' . rawurlencode($pageUrl), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '" data-proxy-base="1">';
+    if (preg_match('~<head\b[^>]*>~i', $html, $m, PREG_OFFSET_CAPTURE)) {
+        $pos = $m[0][1] + strlen($m[0][0]);
+        $html = substr($html, 0, $pos) . $base . substr($html, $pos);
+    } else {
+        $html = $base . $html;
+    }
+
+    $attrs = (array)($GLOBALS['CONFIG']['rewrite_attrs'] ?? ['src', 'href', 'srcset', 'poster', 'data-src']);
+    $pattern = '~\s(' . implode('|', array_map(function ($a) { return preg_quote($a, '~'); }, $attrs)) . ')\s*=\s*("([^"]*)"|\'([^\']*)\')~i';
+    $html = preg_replace_callback($pattern, function ($m) use ($pageUrl, $proxyBase) {
+        $attr = strtolower($m[1]);
+        $val = $m[3] !== '' ? $m[3] : ($m[4] ?? '');
+        $quote = $m[3] !== '' ? '"' : "'";
+        if ($val === '') return $m[0];
+        $new = $attr === 'srcset'
+            ? p_rewrite_srcset($val, $pageUrl, $proxyBase)
+            : p_rewrite_url($val, $pageUrl, $proxyBase);
+        if ($new === $val) return $m[0];
+        return ' ' . $attr . '=' . $quote . $new . $quote;
+    }, $html);
+
+    // style="...url(...)..."
+    $html = preg_replace_callback('~style\s*=\s*("([^"]*)"|\'([^\']*)\')~i', function ($m) use ($pageUrl, $proxyBase) {
+        $val = $m[2] !== '' ? $m[2] : ($m[3] ?? '');
+        $quote = $m[2] !== '' ? '"' : "'";
+        if (stripos($val, 'url(') === false) return $m[0];
+        return 'style=' . $quote . p_rewrite_css($val, $pageUrl, $proxyBase) . $quote;
+    }, $html);
+
+    return $html;
 }
 
 /** کش فایلی */
@@ -748,8 +859,10 @@ function p_relay_request(string $url): void {
     }
 
     // تزریق <base> برای HTML (اگر زنجیرهٔ فالبک قبلاً تزریق نکرده باشد)
+    // وقتی بازنویسی کامل فعال است، p_rewrite_html خودش base را می‌گذارد
     $ct = strtolower(implode(' ', $result['headers']['content-type'] ?? []));
-    if ($cfg['inject_base'] && strpos($ct, 'text/html') !== false && $result['body'] !== ''
+    if ($cfg['inject_base'] && !p_rewrite_enabled()
+        && strpos($ct, 'text/html') !== false && $result['body'] !== ''
         && strpos($result['body'], 'data-proxy-base') === false) {
         $result['body'] = p_inject_base($result['body'], $final);
     }
@@ -763,6 +876,17 @@ function p_relay_request(string $url): void {
 
 /** ارسال پاسخ نهایی به کلاینت */
 function p_emit_response(int $status, array $headers, string $body, string $finalUrl, bool $fromCache): void {
+    // بازنویسی URL در صورت فعال بودن: HTML و CSS از همین‌جا رد می‌شوند تا
+    // تصاویر/استایل/اسکریپت‌ها هم از مسیر خود پراکسی لود شوند
+    if (p_rewrite_enabled() && $body !== '') {
+        $ctEmit = strtolower(implode(' ', $headers['content-type'] ?? []));
+        if (strpos($ctEmit, 'text/html') !== false) {
+            $body = p_rewrite_html($body, $finalUrl, p_proxy_base_url());
+        } elseif (strpos($ctEmit, 'text/css') !== false) {
+            $body = p_rewrite_css($body, $finalUrl, p_proxy_base_url());
+        }
+    }
+
     // CORS
     header('Access-Control-Allow-Origin: *');
     header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS');
@@ -1120,6 +1244,7 @@ a { color:var(--acc); }
 <li>سازگار با فیلد «Worker» اسکرپر: الگوی <code>?url={url}</code> و حالت مسیری، بدون هیچ تنظیم سروری</li>
 <li>ریدایرکت‌ها به‌صورت امن دنبال می‌شوند و هر پرش دوباره اعتبارسنجی می‌شود</li>
 <li>رمزگشایی خودکار gzip / deflate / brotli — کش فایلی اختیاری — تزریق <code>&lt;base&gt;</code> برای لینک‌های نسبی</li>
+<li>بازنویسی کامل URL (<code>rewrite_urls</code>): تصاویر، CSS و JS هم از خود پراکسی لود می‌شوند — رندر کامل سایت‌های بلاک‌شده</li>
 </ul>
 </div>
 <script>
