@@ -8941,12 +8941,13 @@ function bslAllShops(array $cn): array {
    عمومی). برای غرفه‌های دیگر هم یک درصد/مقدارِ جدا ذخیره می‌شود که روی
    «قیمتِ پایهٔ محصول» اعمال می‌شود — مثل غرفهٔ پیش‌فرض ولی با مقادیرِ خودش.
 
-   خروجی: ['price'=>قیمت نهایی، 'pct'=>درصدِ مؤثر نسبت به قیمت پایه]
-   مثال: قیمت پایه ۱۰۰، غرفهٔ پیش‌فرض +۳۰٪ (۱۳۰)؛ اگر غرفهٔ دوم +۲۰٪ بگذارد
-   روی همان پایه ۱۰۰ اعمال می‌شود → ۱۲۰ (pct=+۲۰). یعنی هر غرفه نسبت به
-   «قیمت پایه» مقدار خودش را دارد و نسبتِش به غرفهٔ پیش‌فرض مستقل است. */
+   خروجی: ['price'=>قیمت نهاییِ این غرفه (تومان)، 'eff_pct'=>درصدِ مؤثرِ کلی نسبت به
+   قیمتِ پایهٔ خام، 'profile_pct'=>درصدِ تعدیلِ خودِ پروفایل، 'shop_pct'=>درصدِ این غرفه]
+
+   مثال: قیمت پایهٔ خام ۱۰۰؛ پروفایل +۳۰٪ (۱۳۰)؛ غرفهٔ دوم +۲۰٪ روی ۱۳۰ → ۱۵۶.
+   eff_pct = (۱۵۶-۱۰۰)/۱۰۰ = +۵۶٪ یعنی نسبت به قیمت پایهٔ خام مجموعاً +۵۶٪. */
 function bslShopPriceFor(int $basePrice, array $shop, int $round = 0): array {
-    if ($basePrice <= 0) return ['price' => 0, 'pct' => 0];
+    if ($basePrice <= 0) return ['price' => 0, 'pct' => 0, 'eff_pct' => 0, 'profile_pct' => 0, 'shop_pct' => 0];
     $mode = (string)($shop['price_mode'] ?? 'none');
     $val  = (float)($shop['price_val'] ?? 0);
     $out  = $basePrice;
@@ -8961,7 +8962,28 @@ function bslShopPriceFor(int $basePrice, array $shop, int $round = 0): array {
     $out = (int)round($out);
     if ($round > 0) $out = (int)(round($out / $round) * $round);
     if ($out <= 0) $out = $basePrice;
-    return ['price' => $out, 'pct' => round($pct, 1)];
+    return ['price' => $out, 'pct' => round($pct, 1), 'eff_pct' => 0, 'profile_pct' => 0, 'shop_pct' => round($pct, 1)];
+}
+
+/* v9.68: «روش مناسب» برای قیمتِ غرفه‌های غیرپیش‌فرض — احترام به تعدیلِ خودِ پروفایل.
+
+   هر پروفایل درصد/مقدارِ قیمتِ خودش را دارد (priceMode/priceVal). قیمتِ نهاییِ
+   یک غرفهٔ غیرپیش‌فرض باید «دو لایه» ساخته شود:
+     ۱) اول تعدیلِ خودِ پروفایل روی قیمتِ خام اعمال شود (profileFinalPrice)،
+     ۲) بعد تعدیلِ مخصوصِ آن غرفه روی همان نتیجه (نه روی قیمتِ غرفهٔ پیش‌فرض).
+
+   خروجی: ['price'=>قیمت نهاییِ تومان، 'eff_pct'=>درصدِ مؤثرِ کل نسبت به قیمتِ
+   پایهٔ خام، 'profile_pct'=>درصدِ خودِ پروفایل، 'shop_pct'=>درصدِ این غرفه].
+   مثال: پایهٔ خام ۱۰۰، پروفایل +۳۰٪ (۱۳۰)، غرفهٔ دوم +۲۰٪ روی ۱۳۰ → ۱۵۶.
+   eff_pct = (۱۵۶-۱۰۰)/۱۰۰ = +۵۶٪ یعنی نسبت به قیمت پایهٔ خام مجموعاً +۵۶٪. */
+function bslShopPriceForProfile(array $profile, $rawPrice, array $shop, int $round = 0): array {
+    $src = extractPriceNum($rawPrice);
+    if ($src <= 0) return ['price' => 0, 'eff_pct' => 0, 'profile_pct' => 0, 'shop_pct' => 0];
+    $base = profileFinalPrice($profile, $src);            // لایهٔ ۱: تعدیلِ خودِ پروفایل
+    $r = bslShopPriceFor($base, $shop, $round);           // لایهٔ ۲: تعدیلِ این غرفه
+    $r['profile_pct'] = $base > 0 ? round(($base - $src) / $src * 100, 1) : 0;
+    $r['eff_pct'] = $r['price'] > 0 ? round(($r['price'] - $src) / $src * 100, 1) : 0;
+    return $r;
 }
 
 /** امضای تنظیمات قیمت — اگر عوض شود یعنی قیمت همهٔ محصولات عوض شده */
@@ -12244,13 +12266,17 @@ if (isset($_GET['selftest'])) {
     $add('9.68', 'فیلدهای تعدیل قیمت (درصد/مقدار) برای هر غرفهٔ اضافیِ باسلام',
          strpos($selfSrc, 'bslVPMode_') !== false
          && strpos($selfSrc, 'function bslVPrice' . 'Change(') !== false);
-    $add('9.68', 'نمایش درصدِ مؤثرِ هر غرفه نسبت به قیمتِ پایه (نمونه روی ۱۰۰)',
-         strpos($selfSrc, 'function bslShopPrice' . 'Preview(') !== false
-         && strpos($selfSrc, "'پایه ۱۰۰ → '") !== false);
+    $add('9.68', 'نمایش درصدِ مؤثرِ دولایهٔ هر غرفه (لایهٔ پروفایل + لایهٔ غرفه) نسبت به قیمتِ پایه',
+         strpos($selfSrc, 'function bslCombined' . 'Preview(') !== false
+         && strpos($selfSrc, "'پایه ۱۰۰ → '") !== false
+         && strpos($selfSrc, "' · غرفه: '") !== false);
     $add('9.68', 'تابعِ مشترک سمت سرور bslShopPriceFor برای قیمتِ هر غرفه',
          strpos($selfSrc, 'function bslShopPrice' . 'For(int $basePrice') !== false
-         && strpos($selfSrc, "'pct' =>") !== false);
-    $add('9.68', 'بعد از ارسال، قیمتِ محصولاتِ موجود در غرفه‌های اضافی با تعدیلِ خودشان به‌روز می‌شود',
+         && strpos($selfSrc, "'shop_pct' =>") !== false);
+    $add('9.68', 'روشِ دولایه برای غرفه‌های غیرپیش‌فرض: لایهٔ پروفایل + لایهٔ غرفه (bslShopPriceForProfile)',
+         strpos($selfSrc, 'function bslShopPrice' . 'ForProfile(') !== false
+         && strpos($selfSrc, "'eff_pct' =>") !== false);
+    $add('9.68', 'بعد از ارسال، قیمتِ محصولاتِ موجود در غرفه‌های اضافی با تعدیلِ دولایه به‌روز می‌شود',
          strpos($selfSrc, '"🏪 غرفهٔ \$sVid: قیمت \$shopFixed محصول' . '"') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
@@ -20060,11 +20086,14 @@ else{ $fail++;$bslFailedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'error
 }
 }
 
-/* v9.68: تعدیل قیمتِ غرفه‌های اضافی. بعد از ارسال به غرفهٔ پیش‌فرض، برای هر
-   غرفهٔ اضافی، محصولاتی که از قبل در آن غرفه وجود دارند را با قیمتِ
-   تنظیم‌شدهٔ همان غرفه به‌روزرسانی می‌کنیم (جست‌وجو + PATCH قیمت). هر غرفه
-   نسبت به «قیمت پایه» مقدارِ خودش را دارد. */
+/* v9.68: تعدیل قیمتِ غرفه‌های اضافی — «روش مناسب»: دو لایه.
+   لایهٔ ۱: تعدیلِ خودِ پروفایل روی قیمتِ خام (هر پروفایل درصد/مقدارِ خودش را دارد).
+   لایهٔ ۲: تعدیلِ مخصوصِ همان غرفه روی همان نتیجه (نه روی قیمتِ غرفهٔ پیش‌فرض).
+   بعد از ارسال به غرفهٔ پیش‌فرض، برای هر غرفهٔ اضافی محصولاتی که از قبل در آن
+   غرفه وجود دارند با همین قیمتِ دولایه به‌روزرسانی می‌شوند. */
 $__cn2=loadConnections();
+$__profiles2=loadProfiles();
+$__profile2=($nextEntry['profile_key'] ?? '')!=='' ? ($__profiles2[$nextEntry['profile_key']] ?? null) : null;
 $__extraShops=bslAllShops($__cn2);
 foreach($__extraShops as $__sh){
     if(!empty($__sh['is_default'])) continue;
@@ -20076,9 +20105,17 @@ foreach($__extraShops as $__sh){
         clearstatcache(true,BSL_STOP_FILE);
         if(file_exists(BSL_STOP_FILE)) break;
         $__pt=trim($p['title']??$p['name']??''); if($__pt==='')continue;
-        $__baseP=(int)preg_replace("/[^0-9]/","",(string)($p['final_price']??'0'));
-        if($__baseP<=0)continue;
-        $__pf=bslShopPriceFor($__baseP,$__sh,$shopRound);
+        $__rawP=(string)($p['price']??($p['orig_price']??''));
+        // اگر قیمتِ خام در دسترس بود، لایهٔ پروفایل را هم اعمال کن؛ وگرنه
+        // از final_price (که از قبل تعدیلِ پروفایل را دارد) به‌عنوان پایه استفاده کن.
+        if($__rawP!=='' && extractPriceNum($__rawP)>0 && $__profile2){
+            $__pf=bslShopPriceForProfile($__profile2,$__rawP,$__sh,$shopRound);
+        } else {
+            $__baseP=(int)preg_replace("/[^0-9]/","",(string)($p['final_price']??'0'));
+            if($__baseP<=0)continue;
+            $__pf=bslShopPriceFor($__baseP,$__sh,$shopRound);
+        }
+        if($__pf['price']<=0)continue;
         $__found=bslFindExisting($sTk,$sVid,$__pt,(string)($p['key']??''));
         if(!$__found||(int)($__found['id']??0)<=0) continue;
         $__exId=(int)$__found['id'];
@@ -20089,7 +20126,7 @@ foreach($__extraShops as $__sh){
         if($__ru['ok']&&!empty($__ru['body']['id'])){ $shopFixed++; $updated++; }
         usleep(($bslDelayMs??500)*1000);
     }
-    if($shopFixed>0)bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',"🏪 غرفهٔ $sVid: قیمت $shopFixed محصول با تعدیلِ خودِ آن غرفه به‌روز شد");
+    if($shopFixed>0)bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',"🏪 غرفهٔ $sVid: قیمت $shopFixed محصول با تعدیلِ خودِ آن غرفه (و لایهٔ پروفایل) به‌روز شد");
 }
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'','🔍 فاز ۲: محصولات رد‌شده...');
 $catFixed=0;$catRetryFailed=0;$catRejected=[];
@@ -23815,21 +23852,35 @@ function bslVPriceChange(idx){
     v.price_val=parseFloat(($('bslVPV_'+idx)||{}).value)||0;
     const eff=document.getElementById('bslVPEff_'+idx);
     if(eff){
-        // نمونه روی قیمت پایهٔ ۱۰۰ برای نمایش درصدِ مؤثر
-        const sample=bslShopPricePreview(100,v.price_mode,v.price_val);
-        eff.textContent='پایه ۱۰۰ → '+toFa(sample.price)+(sample.pct!==0?(' ('+(sample.pct>0?'+':'')+toFa(sample.pct)+'٪)'):'');
-        eff.style.color=sample.pct>0?'#4ade80':(sample.pct<0?'#f87171':'#94a3b8');
+        // لایهٔ ۱: تعدیلِ خودِ پروفایل (از فرمِ پروفایل)
+        const profMode=($('priceMode')||{}).value||'none';
+        const profVal=parseFloat(($('priceVal')||{}).value)||0;
+        const sample=bslCombinedPreview(100,profMode,profVal,v.price_mode,v.price_val);
+        const effPct=sample.pct;
+        let t='پایه ۱۰۰ → '+toFa(sample.price)+' ('+(effPct>0?'+':'')+toFa(effPct)+'٪)';
+        if(sample.shopPct!==0)t+=' · غرفه: '+(sample.shopPct>0?'+':'')+toFa(sample.shopPct)+'٪';
+        eff.textContent=t;
+        eff.style.color=effPct>0?'#4ade80':(effPct<0?'#f87171':'#94a3b8');
+        eff.title='لایهٔ پروفایل: '+toFa(sample.profPct)+'٪ + لایهٔ این غرفه: '+toFa(sample.shopPct)+'٪';
     }
 }
-// v9.68: محاسبهٔ قیمت نمونه/درصدِ مؤثر برای یک غرفه (معادل سمت سرور)
-function bslShopPricePreview(base,mode,val){
-    base=parseInt(base)||0; val=parseFloat(val)||0;
-    if(base<=0)return{price:0,pct:0};
-    let out=base,pct=0;
-    if(mode==='percent'){out=base*(1+val/100);pct=val;}
-    else if(mode==='multiplier'){out=val>0?base*val:base;pct=val>0?Math.round((val-1)*100*10)/10:0;}
-    out=Math.round(out); if(out<=0)out=base;
-    return{price:out,pct:Math.round(pct*10)/10};
+// v9.68: محاسبهٔ قیمتِ نمونه/درصدِ مؤثر «دولایه» برای یک غرفه (معادل سمت سرور).
+// لایهٔ ۱ = تعدیلِ خودِ پروفایل، لایهٔ ۲ = تعدیلِ این غرفه. eff_pct نسبت به پایهٔ خام است.
+function bslCombinedPreview(base,profMode,profVal,shopMode,shopVal){
+    base=parseInt(base)||0; profVal=parseFloat(profVal)||0; shopVal=parseFloat(shopVal)||0;
+    if(base<=0)return{price:0,pct:0,profPct:0,shopPct:0};
+    // لایهٔ ۱: پروفایل
+    let p=base,ppct=0;
+    if(profMode==='percent'){p=base*(1+profVal/100);ppct=profVal;}
+    else if(profMode==='multiplier'){p=profVal>0?base*profVal:base;ppct=profVal>0?Math.round((profVal-1)*100*10)/10:0;}
+    p=Math.round(p); if(p<=0)p=base;
+    // لایهٔ ۲: این غرفه روی نتیجهٔ پروفایل
+    let out=p,spct=0;
+    if(shopMode==='percent'){out=p*(1+shopVal/100);spct=shopVal;}
+    else if(shopMode==='multiplier'){out=shopVal>0?p*shopVal:p;spct=shopVal>0?Math.round((shopVal-1)*100*10)/10:0;}
+    out=Math.round(out); if(out<=0)out=p;
+    const eff=base>0?Math.round((out-base)/base*100*10)/10:0;
+    return{price:out,pct:eff,profPct:Math.round(ppct*10)/10,shopPct:Math.round(spct*10)/10};
 }
 // v8.17: Per-profile BaSalam category dropdown
 let bslProfileSelectedCatId=0;
@@ -26581,8 +26632,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
-  {v:'9.68', t:'💰 تعدیل قیمتِ مخصوصِ هر غرفهٔ باسلام + نمایش درصدِ مؤثر', items:[
-    'خواستهٔ شما: برای هر غرفهٔ باسلام، یک تنظیمِ تعدیلِ قیمتِ مثبت/منفی (درصد یا', 'مقدار) نسبت به غرفهٔ پیش‌فرض اضافه شود و مشخص شود نسبت به قیمتِ پایهٔ', 'محصول چند درصد افزایش/کاهش خواهد داشت.', '✅ غرفهٔ پیش‌فرض از قبل فیلدهای درصد/مقدار و پیش‌نمایشِ زنده داشت.', '✅ حالا برای هر «غرفهٔ اضافی» هم در بخش «👥 غرفه‌های باسلام» دو فیلدِ تعدیل', 'قیمت اضافه شد: نوع (درصد/ضریب) و مقدار — همان لحظه درصدِ مؤثر نسبت به قیمتِ', 'پایه (نمونه روی ۱۰۰) نمایش داده می‌شود.', '✅ منطق: هر غرفه مقدارِ خودش را روی «قیمت پایه» اعمال می‌کند. اگر غرفهٔ', 'پیش‌فرض +۳۰٪ باشد و غرفهٔ دوم +۲۰٪، غرفهٔ دوم نسبت به قیمت پایه +۲۰٪ دارد', '(نه روی قیمتِ غرفهٔ پیش‌فرض).', '✅ این مقادیر ذخیره و در ارسالِ باسلام استفاده می‌شوند؛ برای غرفه‌های اضافی،', 'محصولاتی که از قبل در آن غرفه هستند با قیمتِ تنظیم‌شدهٔ همان غرفه', 'به‌روزرسانی می‌شوند.', '✅ تابعِ مشترک سمت سرور bslShopPriceFor هم اضافه شد که قیمت نهایی و درصدِ', 'مؤثر را برای هر غرفه محاسبه می‌کند.'],},
+  {v:'9.68', t:'💰 تعدیل قیمتِ مخصوصِ هر غرفهٔ باسلام (روشِ دولایه) + نمایش درصدِ مؤثر', items:[
+    'خواستهٔ شما: برای هر غرفهٔ باسلام یک تنظیمِ تعدیلِ قیمتِ مثبت/منفی (درصد یا', 'مقدار) اضافه شود و مشخص شود نسبت به قیمتِ پایهٔ محصول چند درصد افزایش/', 'کاهش خواهد داشت؛ با در نظر گرفتن اینکه هر پروفایل درصد/مقدارِ تعدیلِ خودش', 'را دارد.', '✅ غرفهٔ پیش‌فرض از قبل فیلدهای درصد/مقدار و پیش‌نمایشِ زنده داشت.', '✅ برای هر «غرفهٔ اضافی» در بخش «👥 غرفه‌های باسلام» دو فیلدِ تعدیل قیمت اضافه', 'شد: نوع (درصد/ضریب) و مقدار — همان لحظه درصدِ مؤثرِ «دولایه» نمایش داده می‌شود.', '✅ روشِ محاسبه «دولایه» است (مناسب برای غرفه‌های غیرپیش‌فرض):', '  ۱) اول تعدیلِ خودِ پروفایل روی قیمتِ خام اعمال می‌شود (هر پروفایل درصد/', 'مقدارِ خودش را دارد).', '  ۲) بعد تعدیلِ مخصوصِ همان غرفه روی همان نتیجه (نه روی قیمتِ غرفهٔ پیش‌فرض).', '✅ نمایشِ درصدِ مؤثر هم دولایه است: «پایه ۱۰۰ → ۱۵۶ (+۵۶٪) · غرفه: +۲۰٪» یعنی', 'هم لایهٔ پروفایل و هم سهمِ خودِ غرفه دیده می‌شود.', '✅ این مقادیر ذخیره و در ارسالِ باسلام استفاده می‌شوند؛ برای غرفه‌های اضافی،', 'محصولاتی که از قبل در آن غرفه هستند با همین قیمتِ دولایه به‌روزرسانی می‌شوند.', '✅ تابع‌های مشترک سمت سرور bslShopPriceFor و bslShopPriceForProfile هم اضافه', 'شدند که قیمت نهایی و درصدِ مؤثرِ دولایه را محاسبه می‌کنند.'],},
   {v:'9.67', t:'⏱ رفعِ استخراجِ تفصیلیِ ناخواسته در هر کران + 🌐 اتصالِ غیرمستقیمِ هر پروفایل', items:[
     'گزارش شما: قبلاً «استخراج تفصیلیِ دوره‌ای» طوری تنظیم شده بود که با هر', 'فراخوانیِ کران‌جاب، جزئیات را هم استخراج کند. آن تنظیم حذف شده، ولی کدِ کران', 'هنوز در هر اجرا یک گامِ جداگانهٔ «استخراج تفصیلی» را صدا می‌زد.', '🐞 ریشه: یک بلوکِ قدیمی (گام ۲ / v9.03) بعد از هر گامِ فهرست، بدونِ قید و شرط', 'runBackendExtract(...,"detail") را اجرا می‌کرد.', '✅ این گامِ جداگانه حذف شد؛ کران فقط فهرست را می‌گیرد و به‌سراغ ارسال می‌رود.', 'درِ ارسال هم دیگر به‌خاطرِ مرحلهٔ list_done بسته نمی‌شود (فقط اگر واقعاً وسطِ', 'جزئیات مانده باشد برای جلوگیری از ارسالِ محصولِ ناقص).', 'خواستهٔ دوم: برای هر پروفایل یک تیکِ اسلایدری برای اتصالِ غیرمستقیم.', '✅ در تب «شروع» (بخش پروفایل) یک سوییچِ «🌐 اتصال غیرمستقیم» اضافه شد.', 'روشن = اتصالِ غیرمستقیم (بر اساس Worker/پروکسی/DoHِ تنظیم‌شده در «اتصال به', 'سایت مبدأ»)، خاموش = مستقیم. مقدار پیش‌فرض: خاموش (مستقیم).', '✅ این تنظیم فقط برای همان پروفایل اعمال می‌شود؛ پروفایل‌های دیگر را تحت', 'تأثیر قرار نمی‌دهد.'],},
   {v:'9.66', t:'🐛 رفعِ واقعیِ «صفحات/تب‌های خالی» — بسته‌نشدنِ پنل تنظیمات', items:[
