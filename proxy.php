@@ -23,6 +23,12 @@
  *      (روی nginx/php-fpm معمولاً CONNECT به PHP نمی‌رسد؛ در آن حالت از
  *       حالت ?url= یا فیلد Worker اسکرپر استفاده کنید.)
  *
+ *  استفاده از داخل اسکرپر — فیلد «Worker» (بدون هیچ تنظیم سروری):
+ *      https://your-server.com/proxy.php?url={url}
+ *  یا بدون الگو (پشتیبانی مسیری هم اضافه شده):
+ *      https://your-server.com/proxy.php
+ *      → اسکرپر می‌سازد: /proxy.php/https://target/... و خودش تشخیص داده می‌شود
+ *
  *  هدرهای کنترلی (اختیاری):
  *    X-Proxy-Key      → کلید محافظت (اگر تنظیم شده باشد)
  *    X-Proxy-UA       → بازنویسی User-Agent
@@ -500,16 +506,42 @@ function p_check_proxy_key(): void {
 
 /** حالت رله: proxy.php?url=... */
 function p_handle_proxy(): void {
-    p_check_proxy_key();
     $url = (string)($_GET['url'] ?? '');
     if ($url === '') p_error(400, 'missing_url', 'پارامتر url ارسال نشده است؛ نمونه: ?url=https://example.com');
-    p_relay_request($url);
+    p_handle_relay_url($url);
 }
 
 /** حالت پراکسی فوروارد: درخواست absolute-form (مقصدهای HTTP) */
 function p_handle_forward(string $absoluteUrl): void {
+    p_handle_relay_url($absoluteUrl);
+}
+
+/** نقطهٔ مشترک هر دو حالت رله — بررسی کلید و اجرا */
+function p_handle_relay_url(string $url): void {
     p_check_proxy_key();
-    p_relay_request($absoluteUrl);
+    p_relay_request($url);
+}
+
+/**
+ * پشتیبانی از الگوی مسیری Worker اسکرپر (بدون {url}):
+ *   https://host/proxy.php/https://example.com/page
+ * اگر بعد از نام اسکریپت یک URL کامل http(s) آمده باشد همان را
+ * برمی‌گرداند؛ در غیر این صورت خالی.
+ */
+function p_path_style_url(): string {
+    $path = (string)(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/');
+    $self = (string)($_SERVER['SCRIPT_NAME'] ?? '');
+    if ($self !== '' && $self !== '/') {
+        $prefix = rtrim($self, '/');
+        if (strpos($path, $prefix . '/') === 0) {
+            $rest = substr($path, strlen($prefix) + 1);
+            if (preg_match('~^https?://~i', $rest)) return $rest;
+            return '';
+        }
+    }
+    // روتر/فال‌بک: هر مسیری که مستقیم با http(s):// شروع شود
+    if (preg_match('~^/(https?://.+)$~i', $path, $m)) return $m[1];
+    return '';
 }
 
 /** هستهٔ مشترک رله — از هر دو حالت بالا استفاده می‌شود */
@@ -921,6 +953,10 @@ a { color:var(--acc); }
 <h2>📡 روش استفاده</h2>
 <p>کافیست پارامتر <code>url</code> را بدهید؛ متد و بدنهٔ درخواست شما عیناً به مقصد ارسال می‌شود:</p>
 <pre>https://your-server.com/proxy.php?url=https://example.com/page</pre>
+<p>استفاده از داخل اسکرپر (فیلد «Worker») — بدون نیاز به هیچ تنظیم سروری:</p>
+<pre>https://your-server.com/proxy.php?url={url}</pre>
+<p>الگوی مسیری هم پشتیبانی می‌شود (بدون {url}):</p>
+<pre>https://your-server.com/proxy.php/https://example.com/page</pre>
 <p>مثال با جاوااسکریپت (اسکرپر سمت مرورگر):</p>
 <pre>fetch('https://your-server.com/proxy.php?url=' + encodeURIComponent(target))
   .then(r =&gt; r.text())
@@ -951,6 +987,7 @@ a { color:var(--acc); }
 <li>چرخش خودکار بین پراکسی‌های بالادستی (http و socks5) و تلاش مجدد روی خطاهای ۴۰۳/۴۲۹/۵۰۳</li>
 <li>فالبک خودکار به ورکر کلودفلر در صورت شکست اتصال به مقصد (قابل تغییر در تنظیمات)</li>
 <li>حالت پراکسی فوروارد: CONNECT برای HTTPS و absolute-form برای HTTP — قابل استفاده در فیلد پروکسی اسکرپر</li>
+<li>سازگار با فیلد «Worker» اسکرپر: الگوی <code>?url={url}</code> و حالت مسیری، بدون هیچ تنظیم سروری</li>
 <li>ریدایرکت‌ها به‌صورت امن دنبال می‌شوند و هر پرش دوباره اعتبارسنجی می‌شود</li>
 <li>رمزگشایی خودکار gzip / deflate / brotli — کش فایلی اختیاری — تزریق <code>&lt;base&gt;</code> برای لینک‌های نسبی</li>
 </ul>
@@ -1053,6 +1090,13 @@ if (isset($_GET['info'])) {
 
 if (isset($_GET['url'])) {
     p_handle_proxy();
+}
+
+// حالت رلهٔ مسیری: /proxy.php/https://example.com/page
+// (الگوی Worker اسکرپر بدون {url})
+$pPathUrl = p_path_style_url();
+if ($pPathUrl !== '') {
+    p_handle_relay_url($pPathUrl);
 }
 
 p_dashboard();
