@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.70';
+const APP_VERSION = '9.71';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -8965,25 +8965,41 @@ function bslShopPriceFor(int $basePrice, array $shop, int $round = 0): array {
     return ['price' => $out, 'pct' => round($pct, 1), 'eff_pct' => 0, 'profile_pct' => 0, 'shop_pct' => round($pct, 1)];
 }
 
-/* v9.68: «روش مناسب» برای قیمتِ غرفه‌های غیرپیش‌فرض — احترام به تعدیلِ خودِ پروفایل.
+/* v9.71: قیمتِ غرفه‌های غیرپیش‌فرض — «جمع ساده» (افزودنی) روی تعدیلِ خودِ پروفایل.
 
-   هر پروفایل درصد/مقدارِ قیمتِ خودش را دارد (priceMode/priceVal). قیمتِ نهاییِ
-   یک غرفهٔ غیرپیش‌فرض باید «دو لایه» ساخته شود:
-     ۱) اول تعدیلِ خودِ پروفایل روی قیمتِ خام اعمال شود (profileFinalPrice)،
-     ۲) بعد تعدیلِ مخصوصِ آن غرفه روی همان نتیجه (نه روی قیمتِ غرفهٔ پیش‌فرض).
+   خواستهٔ کاربر: تعدیلِ هر غرفهٔ غیرپیش‌فرض باید به‌صورت «کسر/اضافهٔ درصد یا
+   مقدار» روی تعدیلِ خودِ پروفایل اضافه شود. یعنی اگر غرفهٔ پیش‌فرض (پروفایل)
+   +۳۰٪ داشته باشد و غرفهٔ دوم +۵٪ بگذارد، افزایشِ نهایی برای آن پروفایل در
+   غرفهٔ دوم = ۳۵٪ (جمعِ سادهٔ ۳۰ و ۵).
+
+   برای هر دو «درصد» از جمعِ سادهٔ درصدها استفاده می‌شود؛ برای «ضریب» ابتدا به
+   درصد تبدیل می‌شود و بعد جمع می‌شود.
 
    خروجی: ['price'=>قیمت نهاییِ تومان، 'eff_pct'=>درصدِ مؤثرِ کل نسبت به قیمتِ
    پایهٔ خام، 'profile_pct'=>درصدِ خودِ پروفایل، 'shop_pct'=>درصدِ این غرفه].
-   مثال: پایهٔ خام ۱۰۰، پروفایل +۳۰٪ (۱۳۰)، غرفهٔ دوم +۲۰٪ روی ۱۳۰ → ۱۵۶.
-   eff_pct = (۱۵۶-۱۰۰)/۱۰۰ = +۵۶٪ یعنی نسبت به قیمت پایهٔ خام مجموعاً +۵۶٪. */
+   مثال: پایهٔ خام ۱۰۰، پروفایل +۳۰٪، غرفهٔ دوم +۵٪ → eff=۳۵٪ → قیمت ۱۳۵. */
 function bslShopPriceForProfile(array $profile, $rawPrice, array $shop, int $round = 0): array {
     $src = extractPriceNum($rawPrice);
     if ($src <= 0) return ['price' => 0, 'eff_pct' => 0, 'profile_pct' => 0, 'shop_pct' => 0];
-    $base = profileFinalPrice($profile, $src);            // لایهٔ ۱: تعدیلِ خودِ پروفایل
-    $r = bslShopPriceFor($base, $shop, $round);           // لایهٔ ۲: تعدیلِ این غرفه
-    $r['profile_pct'] = $base > 0 ? round(($base - $src) / $src * 100, 1) : 0;
-    $r['eff_pct'] = $r['price'] > 0 ? round(($r['price'] - $src) / $src * 100, 1) : 0;
-    return $r;
+    // درصدِ تعدیلِ خودِ پروفایل
+    $pm = (string)($profile['priceMode'] ?? 'none');
+    $pv = (float)($profile['priceVal'] ?? 0);
+    if ($pm === 'percent')         $ppct = (float)$pv;
+    elseif ($pm === 'multiplier')  $ppct = $pv > 0 ? ($pv - 1) * 100 : 0;
+    else                           $ppct = 0;
+    // درصدِ تعدیلِ این غرفه (روی همان مبنا)
+    $sm = (string)($shop['price_mode'] ?? 'none');
+    $sv = (float)($shop['price_val'] ?? 0);
+    if ($sm === 'percent')         $spct = (float)$sv;
+    elseif ($sm === 'multiplier')  $spct = $sv > 0 ? ($sv - 1) * 100 : 0;
+    else                           $spct = 0;
+    $eff = $ppct + $spct;                    // جمعِ ساده: ۳۰ + ۵ = ۳۵
+    $out = $src * (1 + ($eff / 100));
+    $out = (int)round($out);
+    if ($round > 0) $out = (int)(round($out / $round) * $round);
+    if ($out <= 0) $out = $src;
+    return ['price' => $out, 'eff_pct' => round($eff, 1),
+            'profile_pct' => round($ppct, 1), 'shop_pct' => round($spct, 1)];
 }
 /* v9.69: ارسالِ چند-غرفه‌ای — یک محصول را در «یک غرفهٔ مشخص» بساز یا به‌روز کن.
    برای هر غرفهٔ اضافی که قیمتِ خودش را دارد، همان منطقِ ارسالِ اصلی را اجرا
@@ -12381,6 +12397,13 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "\$stepMode = (\$stagePrev === 'detail' && \$stagePrevAge <= \$stageStale) ? 'detail' : 'list';") !== false);
     $add('9.70', 'درِ ارسال به‌خاطرِ مرحلهٔ list_done بسته نمی‌شود (فقط وسطِ جزئیاتِ نیمه‌کاره)',
          strpos($selfSrc, "\$stageOpen  = \$stageNow === 'detail' && \$stageAge <= \$stageStale;") !== false);
+
+    /* ---------- v9.71: جمعِ سادهٔ تعدیلِ غرفه با تعدیلِ پروفایل ---------- */
+    $add('9.71', 'تعدیلِ غرفه‌های غیرپیش‌فرض به‌صورت جمعِ ساده روی تعدیلِ پروفایل (مثل ۳۰+۵=۳۵)',
+         strpos($selfSrc, "\$eff = \$ppct + \$spct;") !== false
+         && strpos($selfSrc, '// جمعِ ساده: ۳۰' . ' + ۵ = ۳۵') !== false);
+    $add('9.71', 'پیش‌نمایشِ زنده همان جمعِ ساده را نشان می‌دهد',
+         strpos($selfSrc, 'const eff=Math.round((ppct' . '+spct)*10)/10;') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -24015,17 +24038,16 @@ function bslVPriceChange(idx){
 function bslCombinedPreview(base,profMode,profVal,shopMode,shopVal){
     base=parseInt(base)||0; profVal=parseFloat(profVal)||0; shopVal=parseFloat(shopVal)||0;
     if(base<=0)return{price:0,pct:0,profPct:0,shopPct:0};
-    // لایهٔ ۱: پروفایل
-    let p=base,ppct=0;
-    if(profMode==='percent'){p=base*(1+profVal/100);ppct=profVal;}
-    else if(profMode==='multiplier'){p=profVal>0?base*profVal:base;ppct=profVal>0?Math.round((profVal-1)*100*10)/10:0;}
-    p=Math.round(p); if(p<=0)p=base;
-    // لایهٔ ۲: این غرفه روی نتیجهٔ پروفایل
-    let out=p,spct=0;
-    if(shopMode==='percent'){out=p*(1+shopVal/100);spct=shopVal;}
-    else if(shopMode==='multiplier'){out=shopVal>0?p*shopVal:p;spct=shopVal>0?Math.round((shopVal-1)*100*10)/10:0;}
-    out=Math.round(out); if(out<=0)out=p;
-    const eff=base>0?Math.round((out-base)/base*100*10)/10:0;
+    // v9.71: جمعِ ساده — درصدِ پروفایل + درصدِ این غرفه (مثل ۳۰+۵=۳۵)
+    let ppct=0;
+    if(profMode==='percent'){ppct=profVal;}
+    else if(profMode==='multiplier'){ppct=profVal>0?Math.round((profVal-1)*100*10)/10:0;}
+    let spct=0;
+    if(shopMode==='percent'){spct=shopVal;}
+    else if(shopMode==='multiplier'){spct=shopVal>0?Math.round((shopVal-1)*100*10)/10:0;}
+    const eff=Math.round((ppct+spct)*10)/10;
+    let out=base*(1+eff/100);
+    out=Math.round(out); if(out<=0)out=base;
     return{price:out,pct:eff,profPct:Math.round(ppct*10)/10,shopPct:Math.round(spct*10)/10};
 }
 // v8.17: Per-profile BaSalam category dropdown
@@ -26778,6 +26800,8 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.71', t:'💰 تعدیلِ قیمتِ غرفه‌های غیرپیش‌فرض به‌صورت «جمعِ ساده» روی تعدیلِ خودِ پروفایل', items:[
+    'خواستهٔ شما: تعدیلِ هر غرفهٔ غیرپیش‌فرض باید «کسر/اضافهٔ درصد یا مقدار» نسبت', 'به تعدیلِ خودِ پروفایل باشد. مثال: اگر غرفهٔ پیش‌فرض (پروفایل) +۳۰٪ داشته', 'باشد و غرفهٔ دوم +۵٪ بگذارد، افزایشِ نهایی برای همان پروفایل در غرفهٔ دوم', '= ۳۵٪ (جمعِ سادهٔ ۳۰ و ۵).', '✅ منطقِ محاسبه به «جمعِ ساده» تغییر کرد: درصدِ تعدیلِ خودِ پروفایل + درصدِ', 'تعدیلِ آن غرفه (روی همان قیمتِ پایه). برای «ضریب» هم ابتدا به درصد تبدیل', 'می‌شود و بعد جمع می‌شود.', '✅ پیش‌نمایشِ زنده هم همان جمع را نشان می‌دهد: «پایه ۱۰۰ → ۱۳۵ (+۳۵٪) ·', 'غرفه: +۵٪» (یعنی سهمِ غرفه به‌صورتِ جمعی به پروفایل اضافه می‌شود).', '✅ این در هر دو مسیرِ ارسال (فقط-قیمتِ موجودها و ارسالِ چند-غرفه‌ای) اعمال', 'می‌شود.'],},
   {v:'9.70', t:'🐛 رفعِ قطعیِ «استخراج دوره‌ای جزئیات» در کران', items:[
     'گزارش شما: با اینکه v9.67 و v9.69 پاسِ جداگانهٔ جزئیات را حذف کردند، کران', 'باز هم در هر فراخوانی جزئیاتِ محصولات را استخراج می‌کرد.', '🐞 ریشهٔ واقعی: کران هنوز فازِ «all» را اجرا می‌کرد و از v9.44 جزئیات به‌صورت', 'درجا داخلِ همین فازِ all استخراج می‌شود. پس «all» یعنی در هر اجرا، برای هر', 'محصولِ ناقص صفحهٔ جزئیات باز می‌شد — همان «استخراج دوره‌ای جزئیات» که نباید', 'هیچ‌وقت در کران رخ دهد.', '✅ حالا حالتِ عادیِ کران «list» است: فقط فهرستِ تازه را می‌گیرد و ذخیره می‌کند؛', 'جزئیاتِ ازقبل‌ذخیره‌شده روی دیسک سر جایش می‌ماند و هیچ صفحهٔ جزئیاتی باز نمی‌شود.', '✅ استثنا: اگر اجرای قبلی وسطِ فاز جزئیات کشته شده باشد (stage=detail و تازه)،', 'همان را با «detail» ادامه می‌دهیم تا محصولِ ناقصِ بدونِ گالری ارسال نشود.', '✅ جزئیاتِ واقعی هر وقت بخواهید با دکمهٔ «استخراج تفصیلی» در تبِ نتایج (فازِ', 'all/detail) انجام می‌شود، نه خودکار در هر کران.'],},
   {v:'9.69', t:'🐛 رفعِ کاملِ استخراجِ دوره‌ای جزئیات در کران + 🚚 ارسالِ چند-غرفه‌ای باسلام', items:[
