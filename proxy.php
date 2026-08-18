@@ -107,8 +107,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.2.5');
-define('PROXY_BUILD', '2026-08-18-05');
+define('PROXY_VERSION', '1.2.6');
+define('PROXY_BUILD', '2026-08-18-06');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -1592,6 +1592,8 @@ table.ait td.ltr, table.ait th.ltr { direction:ltr; text-align:left; font-family
 .st-ok { color:var(--ok); font-weight:700; }
 .st-bad { color:var(--bad); font-weight:700; }
 .st-run { color:var(--acc); font-weight:700; }
+.aimodal { background:var(--card); border:1px solid var(--line); border-radius:14px; max-width:640px; width:92%; max-height:82vh; overflow:auto; padding:18px; box-shadow:0 20px 60px rgba(0,0,0,.55); }
+.aimodal pre { margin:0; padding:10px 12px; background:#0b0f1a; border:1px solid var(--line); border-radius:8px; max-height:230px; overflow:auto; white-space:pre-wrap; word-break:break-word; direction:ltr; text-align:left; font-size:.78rem; font-family:Consolas,monospace; }
 iframe { width:100%; height:420px; border:1px solid var(--line); border-radius:10px; background:#fff; margin-top:10px; }
 ul { padding-right:20px; }
 li { margin:4px 0; }
@@ -1699,6 +1701,15 @@ a { color:var(--acc); }
 </div>
 </div>
 <div id="aiProviders"></div>
+<div id="aiModalOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:999;align-items:flex-start;justify-content:center;padding:24px 8px" onclick="if(event.target===this)aiCloseModal()">
+<div class="aimodal">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:10px">
+<b id="aiModalTitle" style="font-size:1rem">نتیجهٔ تست</b>
+<button onclick="aiCloseModal()" style="padding:4px 12px;font-size:.85rem">✕</button>
+</div>
+<div id="aiModalBody"></div>
+</div>
+</div>
 
 <h2>💬 چت با مدل</h2>
 <div class="testbox">
@@ -1922,7 +1933,7 @@ function aiRowHtml(pid, m, model) {
     code = '—'; ms = '—'; via = '—';
     detCell = '<td class="ltr" style="color:var(--mut)">—</td>';
   }
-  return '<tr>'
+  return '<tr onclick="aiOpenModal(\'' + esc(pid) + '\',' + m + ')" style="cursor:pointer" title="کلیک برای مشاهدهٔ جزئیات کامل">'
     + '<td>' + (m + 1) + '</td>'
     + '<td class="ltr" title="' + esc(model.name || model.id) + '">' + esc(model.id) + '</td>'
     + '<td>' + st + '</td>'
@@ -1930,7 +1941,7 @@ function aiRowHtml(pid, m, model) {
     + '<td class="ltr">' + ms + '</td>'
     + '<td class="ltr">' + via + '</td>'
     + detCell
-    + '<td><button onclick="aiTest(\'' + esc(pid) + '\',' + m + ')" style="padding:3px 8px;font-size:.72rem">🧪</button></td>'
+    + '<td><button onclick="event.stopPropagation();aiTest(\'' + esc(pid) + '\',' + m + ')" style="padding:3px 8px;font-size:.72rem">🧪</button></td>'
     + '</tr>';
 }
 
@@ -1941,6 +1952,84 @@ function aiUpdateRow(pid, m) {
   if (!p || !p.models[m]) return;
   tb.rows[m].outerHTML = aiRowHtml(pid, m, p.models[m]);
 }
+
+// ---------- مودال نتیجهٔ تست ----------
+function aiOpenModal(pid, m) {
+  var p = aiFind(pid);
+  if (!p || !p.models[m]) return;
+  var model = p.models[m];
+  var res = AI_RES[pid + '_' + m];
+  document.getElementById('aiModalTitle').textContent = p.name + ' — ' + model.id;
+  var b = document.getElementById('aiModalBody');
+  var h = '';
+  h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">';
+  if (!res) {
+    h += '<span style="color:var(--mut);font-size:.8rem">هنوز تست نشده</span>';
+  } else if (res.running) {
+    h += '<span class="st-run" style="font-size:.8rem">⏳ در حال تست…</span>';
+  } else if (res.ok) {
+    h += '<span class="st-ok" style="font-size:.8rem">✓ موفق</span>';
+  } else {
+    h += '<span class="st-bad" style="font-size:.8rem">✗ ناموفق</span>';
+  }
+  h += '<span class="badge" style="background:#1d4ed8;color:#fff;padding:2px 10px;border-radius:999px;font-size:10px">' + esc(p.vendor) + '</span></div>';
+  h += '<table class="ait" style="min-width:0"><tbody>';
+  var fields = [
+    ['شناسهٔ مدل', model.id, true],
+    ['نام مدل', model.name || '—', false],
+    ['وضعیت HTTP', res && !res.running ? String(res.status) : '—', true],
+    ['زمان پاسخ', res && !res.running ? (res.ms || 0) + ' ms' : '—', true],
+    ['مسیر عبور', res && !res.running ? (res.via || 'direct') : '—', true],
+    ['پیام تست', '«سلام»', false],
+    ['کلید استفاده‌شده', 'کلید ۱', false]
+  ];
+  for (var i = 0; i < fields.length; i++) {
+    h += '<tr><td style="color:var(--mut);width:130px">' + fields[i][0] + '</td>'
+       + '<td class="ltr">' + esc(fields[i][1]) + '</td></tr>';
+  }
+  h += '</tbody></table>';
+  if (res && !res.running) {
+    h += '<div style="margin-top:12px;font-size:.8rem;color:var(--mut)">' + (res.ok ? 'پاسخ کامل مدل:' : 'جزئیات خطا:') + '</div>';
+    h += '<pre>' + esc(res.ok ? (res.content || '—') : (res.error || '—')) + '</pre>';
+  }
+  h += '<div class="testbox" style="margin-top:12px;margin-bottom:0">'
+     + '<button onclick="aiModalRetest(\'' + esc(pid) + '\',' + m + ')" style="flex:1">🧪 تست مجدد</button>'
+     + '<button onclick="aiCloseModal()" style="flex:1;background:#334155">بستن</button>'
+     + '</div>';
+  b.innerHTML = h;
+  document.getElementById('aiModalOverlay').style.display = 'flex';
+}
+
+function aiModalRetest(pid, m) {
+  var p = aiFind(pid);
+  if (!p || !p.models[m]) return;
+  AI_RES[pid + '_' + m] = { running: true };
+  aiUpdateRow(pid, m);
+  aiOpenModal(pid, m);
+  var fd = new FormData();
+  fd.append('action', 'ai_test_model');
+  fd.append('provider_id', pid);
+  fd.append('model_id', p.models[m].id);
+  fd.append('key_index', '0');
+  fd.append('test_message', 'سلام');
+  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
+    AI_RES[pid + '_' + m] = d;
+    aiUpdateRow(pid, m);
+    aiOpenModal(pid, m); // به‌روزرسانی زندهٔ مودال بعد از تست
+  }).catch(function () {
+    AI_RES[pid + '_' + m] = { ok: false, status: 0, ms: 0, via: '', error: 'خطای شبکه' };
+    aiUpdateRow(pid, m);
+    aiOpenModal(pid, m);
+  });
+}
+
+function aiCloseModal() {
+  var o = document.getElementById('aiModalOverlay');
+  if (o) o.style.display = 'none';
+}
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') aiCloseModal();
+});
 
 function aiTest(pid, midx) {
   var p = aiFind(pid);
