@@ -6,10 +6,11 @@ import { secureHeaders } from 'hono/secure-headers';
 import { config, assertConfig } from './config.js';
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
 import { DASHBOARD, DASHBOARD_JS, setupPage } from './dashboard.js';
-import { createBackup, createJob, deleteProfile, enqueueDueProfiles, getJob, getProfile, getState, listJobs, listProducts, listProfiles, migrate, pool, profileStats, reapStalledJobs, restoreBackup, saveProfile, setState, updateJob } from './db.js';
-import { DEFAULT_SELECTORS, type Profile } from './types.js';
+import { createBackup, createJob, deleteProfile, enqueueDueProfiles, getJob, getProfile, getState, listJobs, listProducts, listProfiles, migrate, pool, profileStats, reapStalledJobs, restoreBackup, saveProfile, setState, updateJob, upsertProduct } from './db.js';
+import { DEFAULT_SELECTORS, type Product, type Profile } from './types.js';
 import { safeFetch, safeText } from './network.js';
-import { testSelector } from './scraper.js';
+import { numberFromText, testSelector } from './scraper.js';
+import { createPhpSettingsBundle, decodePhpSettingsBundle, stateKeyForFile } from './settings-transfer.js';
 import { createVisualTicket, renderVisualSelector } from './visual.js';
 import { workerLoop, requestWorkerStop } from './processor.js';
 
@@ -88,6 +89,22 @@ app.get('/api/settings', async c => c.json({ ok:true, settings: await getState('
 app.post('/api/settings', async c => { const settings=await c.req.json(); await setState('settings',settings); return c.json({ok:true}); });
 app.get('/api/backup', async c => c.json(await createBackup(), 200, { 'content-disposition': `attachment; filename="scraper4-render-${Date.now()}.json"` }));
 app.post('/api/restore', async c => c.json({ok:true,result:await restoreBackup(await c.req.json())}));
+app.get('/api/settings-export', async c => {
+  const bundle=await createPhpSettingsBundle(new URL(c.req.url).host),stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,15);
+  return c.json(bundle,200,{'content-disposition':`attachment; filename="settings_${stamp}.json"`});
+});
+app.post('/api/settings-import', async c => {
+  const files=decodePhpSettingsBundle(await c.req.json());let profiles=0,products=0,states=0,connections=false;const warnings:string[]=[];
+  const rawProfiles=files['profiles.json'];
+  if(rawProfiles&&typeof rawProfiles==='object')for(const [id,raw] of Object.entries(rawProfiles as Record<string,any>)){
+    try{const profile=normalizeProfile({...raw,id});await saveProfile(profile);profiles++;for(const product of legacyProducts(raw?.products)){await upsertProduct(profile.id,product);products++;}}
+    catch(error){warnings.push(`${id}: ${error instanceof Error?error.message:String(error)}`)}
+  }
+  const rawConnections=files['connections.json'] as any;
+  if(rawConnections){const woo=rawConnections.woocommerce||rawConnections.woo||{},basalam=rawConnections.basalam||{},ai=rawConnections.ai||{};await saveConnections({woo:{url:woo.url||woo.store_url||'',key:woo.consumer_key||woo.ck||woo.key||'',secret:woo.consumer_secret||woo.cs||woo.secret||''},basalam:{token:basalam.token||'',vendorId:String(basalam.vendor_id||basalam.vendorId||''),api:basalam.api_base||basalam.api||'https://openapi.basalam.com/v1'},ai:{baseUrl:ai.base_url||ai.baseUrl||'',apiKey:ai.api_key||ai.apiKey||'',model:ai.model||''},notifications:rawConnections.notifications||{}});connections=true;}
+  for(const [file,value] of Object.entries(files)){const key=stateKeyForFile(file);if(key){await setState(key,value);states++;}}
+  return c.json({ok:true,format:'scraper4-php-compatible',imported:{profiles,products,states,connections},warnings});
+});
 app.get('/api/profile-stats', async c => c.json({ok:true,items:await profileStats()}));
 app.post('/api/queue-watchdog', async c => { const body=await c.req.json().catch(()=>({})) as any; return c.json({ok:true,reaped:await reapStalledJobs(Number(body.minutes)||30)}); });
 app.post('/api/source-test', async c => { const body=await c.req.json() as any; const result=await safeText(String(body.url||''),1_000_000); return c.json({ok:true,bytes:Buffer.byteLength(result.text),url:result.url,title:(result.text.match(/<title[^>]*>(.*?)<\/title>/is)?.[1]||'').replace(/<[^>]+>/g,'').trim()}); });
@@ -149,6 +166,12 @@ process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 function validTarget(value: string): 'none'|'woo'|'basalam'|'both' { return ['none','woo','basalam','both'].includes(value) ? value as any : 'none'; }
 function safeEqual(a: string, b: string): boolean { const aa=Buffer.from(a),bb=Buffer.from(b); return aa.length===bb.length && timingSafeEqual(aa,bb); }
 function idFromUrl(raw: string): string { const url = new URL(raw); return `${url.hostname}_${url.pathname}`.toLowerCase().replace(/[^a-z0-9_.-]+/g,'_').replace(/^_+|_+$/g,'').slice(0,120); }
+function legacyProducts(raw: unknown): Product[] {
+  const entries:Array<[string,any]>=[];
+  if(Array.isArray(raw))for(const item of raw){if(Array.isArray(item)&&item.length>=2)entries.push([String(item[0]),item[1]]);else if(item&&typeof item==='object')entries.push([String((item as any).sourceKey||(item as any).key||crypto.randomUUID()),item]);}
+  else if(raw&&typeof raw==='object')for(const [key,value] of Object.entries(raw as Record<string,any>))entries.push([key,value]);
+  return entries.filter(([,p])=>p&&p.title).map(([key,p])=>{const images=Array.isArray(p.images)?p.images.filter((x:unknown)=>typeof x==='string'&&!String(x).startsWith('data:')):[];const image=String(p.image||images[0]||'');if(image&&!images.includes(image)&&!image.startsWith('data:'))images.unshift(image);return{sourceKey:key,title:String(p.title),price:numberFromText(String(p.finalPrice??p.price??0)),priceText:String(p.priceText??p.price??''),url:String(p.url||p.link||''),image:image.startsWith('data:')?'':image,images,shortDesc:String(p.shortDesc||''),longDesc:String(p.longDesc||''),sku:String(p.sku||''),brand:String(p.brand||''),stock:p.stock==null?undefined:Number(p.stock),weight:p.weight==null?undefined:Number(p.weight),category:String(p.category||''),sourcePage:String(p.sourcePage||''),scrapedAt:new Date().toISOString()}});
+}
 function normalizeProfile(raw: any): Profile {
   const url = new URL(String(raw.url || '')); if (!['http:','https:'].includes(url.protocol)) throw new Error('Invalid profile URL');
   const now = new Date().toISOString(); const selectors = { ...DEFAULT_SELECTORS, ...(typeof raw.selectors === 'string' ? JSON.parse(raw.selectors) : raw.selectors || {}) };
