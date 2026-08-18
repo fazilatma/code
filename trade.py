@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION V6.9.0 ---
 VERSION = "6.9.0"
-NOBITEX_TOKEN = "0b0d4407b50770349fbab6abc0a906d3e6584d62"
+NOBITEX_TOKEN = os.environ.get("NOBITEX_TOKEN", "")
 CONFIG_FILE = "bot_config.json"
 LIVE_LOG_FILE = "live_trades_log.csv"
 SIM_LOG_FILE = "sim_trades_log.csv"

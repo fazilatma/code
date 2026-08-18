@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: scraper4-render
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run render:build
+    startCommand: npm run render:start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: 20.19.4
+      - key: DATABASE_URL
+        fromDatabase:
+          name: scraper4-db
+          property: connectionString
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: RUN_WORKER_IN_WEB
+        value: "true"
+      - key: WOO_URL
+        sync: false
+      - key: WOO_KEY
+        sync: false
+      - key: WOO_SECRET
+        sync: false
+      - key: BASALAM_TOKEN
+        sync: false
+      - key: BASALAM_VENDOR_ID
+        sync: false
+      - key: BASALAM_API
+        value: https://openapi.basalam.com/v1
+
+databases:
+  - name: scraper4-db
+    plan: free
+    databaseName: scraper4
+    user: scraper4

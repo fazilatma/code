@@ -84,3 +84,8 @@ ai_votes.json
 
 # v9.25: storage write error log
 storage_errors.log
+
+# Node/Render build artifacts
+node_modules/
+render-dist/
+.wrangler/
