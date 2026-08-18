@@ -8,6 +8,7 @@ import { DASHBOARD, DASHBOARD_JS, setupPage } from './dashboard.js';
 import { createJob, deleteProfile, enqueueDueProfiles, getJob, getProfile, listJobs, listProducts, listProfiles, migrate, pool, saveProfile, updateJob } from './db.js';
 import { DEFAULT_SELECTORS, type Profile } from './types.js';
 import { testSelector } from './scraper.js';
+import { createVisualTicket, renderVisualSelector } from './visual.js';
 import { workerLoop, requestWorkerStop } from './processor.js';
 
 let databaseReady = false;
@@ -30,17 +31,13 @@ async function initializeDatabase(): Promise<boolean> {
 await initializeDatabase();
 
 const app = new Hono();
-app.use('*', secureHeaders({
+const dashboardHeaders = secureHeaders({
   contentSecurityPolicy: {
-    defaultSrc: ["'self'"],
-    scriptSrc: ["'self'"],
-    styleSrc: ["'self'", "'unsafe-inline'"],
-    connectSrc: ["'self'"],
-    imgSrc: ["'self'", 'data:', 'https:'],
-    objectSrc: ["'none'"],
-    frameAncestors: ["'none'"]
+    defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"],
+    connectSrc: ["'self'"], imgSrc: ["'self'", 'data:', 'https:'], objectSrc: ["'none'"], frameAncestors: ["'none'"]
   }
-}));
+});
+app.use('*', async (c, next) => c.req.path === '/visual' ? next() : dashboardHeaders(c, next));
 app.use('/api/*', cors({ origin: origin => origin, allowHeaders: ['authorization','content-type'], allowMethods: ['GET','POST','PUT','DELETE'] }));
 app.onError((error, c) => { console.error(error); return c.json({ ok: false, error: error.message }, 500); });
 app.get('/health', c => c.json({
@@ -54,6 +51,19 @@ app.get('/health', c => c.json({
 }));
 app.get('/', c => c.html(databaseReady ? DASHBOARD : setupPage(databaseError)));
 app.get('/dashboard.js', c => c.body(DASHBOARD_JS, 200, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' }));
+app.get('/visual', async c => {
+  try {
+    const content = await renderVisualSelector(c.req.query('ticket') || '');
+    return c.html(content, 200, {
+      'cache-control': 'no-store',
+      'content-security-policy': "default-src 'none'; img-src https: http: data:; style-src 'unsafe-inline' https: http:; font-src https: http: data:; script-src 'unsafe-inline'; frame-ancestors 'self';",
+      'referrer-policy': 'no-referrer'
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return c.html(`<html dir="rtl"><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:30px"><h2>خطای انتخاب‌گر بصری</h2><p>${message.replace(/[&<>]/g, '')}</p></body></html>`, 400);
+  }
+});
 
 app.use('/api/*', async (c, next) => {
   if (!databaseReady) return c.json({ ok: false, error: 'Database is not configured', detail: databaseError, setup: 'Create Render PostgreSQL and set DATABASE_URL to its Internal Database URL.' }, 503);
@@ -63,6 +73,12 @@ app.use('/api/*', async (c, next) => {
   await next();
 });
 
+app.post('/api/visual-ticket', async c => {
+  const body = await c.req.json() as { url?: string };
+  const url = new URL(String(body.url || ''));
+  if (!['http:', 'https:'].includes(url.protocol)) return c.json({ ok: false, error: 'Invalid visual selector URL' }, 400);
+  return c.json({ ok: true, ticket: createVisualTicket(url.href), expiresIn: 300 });
+});
 app.get('/api/status', async c => c.json({ ok: true, profiles: (await listProfiles()).length, jobs: await listJobs(10), connections: {
   woo: Boolean(config.woo.url && config.woo.key && config.woo.secret), basalam: Boolean(config.basalam.token && config.basalam.vendorId)
 } }));
