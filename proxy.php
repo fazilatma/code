@@ -107,8 +107,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.2.3');
-define('PROXY_BUILD', '2026-08-18-03');
+define('PROXY_VERSION', '1.2.4');
+define('PROXY_BUILD', '2026-08-18-04');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -1579,6 +1579,18 @@ button:hover { filter:brightness(1.1); }
 #result { margin-top:14px; }
 #result pre { max-height:320px; overflow:auto; white-space:pre-wrap; word-break:break-all; }
 .meta { color:var(--mut); font-size:.82rem; }
+.aiacc { background:var(--card); border:1px solid var(--line); border-radius:12px; margin-bottom:10px; overflow:hidden; }
+.aiacc-hdr { display:flex; align-items:center; gap:10px; padding:11px 14px; cursor:pointer; flex-wrap:wrap; transition:background .15s; }
+.aiacc-hdr:hover { background:#1a2136; }
+.aiacc-arrow { color:var(--mut); width:14px; display:inline-block; font-size:.8rem; }
+.aiacc-body { border-top:1px solid var(--line); padding:12px 14px; }
+table.ait { width:100%; border-collapse:collapse; font-size:.76rem; margin-top:4px; }
+table.ait th, table.ait td { border:1px solid var(--line); padding:5px 8px; text-align:right; }
+table.ait th { background:#0b0f1a; color:var(--mut); }
+table.ait td.ltr, table.ait th.ltr { direction:ltr; text-align:left; font-family:Consolas,monospace; }
+.st-ok { color:var(--ok); font-weight:700; }
+.st-bad { color:var(--bad); font-weight:700; }
+.st-run { color:var(--acc); font-weight:700; }
 iframe { width:100%; height:420px; border:1px solid var(--line); border-radius:10px; background:#fff; margin-top:10px; }
 ul { padding-right:20px; }
 li { margin:4px 0; }
@@ -1675,6 +1687,8 @@ a { color:var(--acc); }
 <button onclick="aiExport()">📤 برون‌ریزی JSON</button>
 <button onclick="aiAddProvider()">➕ افزودن ارائه‌دهنده</button>
 <button onclick="aiLoad()">↺ بارگذاری مجدد</button>
+<button onclick="aiExpandAll(true)">⊞ باز کردن همه</button>
+<button onclick="aiExpandAll(false)">⊟ بستن همه</button>
 </div>
 <div id="aiImportBox" style="display:none;margin-bottom:12px">
 <textarea id="aiImportJson" rows="7" placeholder='{"openrouter":{"id":"openrouter","name":"OpenRouter","url":"https://openrouter.ai/api/v1","apiKey":"sk-...","enabled":true,"models":[...]}}' style="width:100%;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px;direction:ltr;font-family:Consolas,monospace;font-size:.8rem"></textarea>
@@ -1798,134 +1812,140 @@ function aiLoad() {
   }).catch(function () {});
 }
 
+var AI_RES = {};
+var AI_OPEN = {};
+var AI_RUNNING = {};
+
+function aiFind(pid) {
+  for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].id === pid) return AI_PROVIDERS[i];
+  return null;
+}
+
+function aiExpandAll(open) {
+  for (var i = 0; i < AI_PROVIDERS.length; i++) {
+    var pid = AI_PROVIDERS[i].id;
+    AI_OPEN[pid] = !!open;
+    var b = document.getElementById('body_' + pid);
+    var a = document.getElementById('arw_' + pid);
+    if (b) b.style.display = open ? '' : 'none';
+    if (a) a.textContent = open ? '▾' : '▸';
+  }
+}
+
+function aiToggle(pid) {
+  AI_OPEN[pid] = !AI_OPEN[pid];
+  var b = document.getElementById('body_' + pid);
+  var a = document.getElementById('arw_' + pid);
+  if (b) b.style.display = AI_OPEN[pid] ? '' : 'none';
+  if (a) a.textContent = AI_OPEN[pid] ? '▾' : '▸';
+}
+
 function aiRender() {
   var box = document.getElementById('aiProviders');
   var h = '';
   for (var i = 0; i < AI_PROVIDERS.length; i++) {
     var p = AI_PROVIDERS[i];
-    h += '<div class="card" style="padding:14px;margin-bottom:12px">'
-       + '<div class="row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+    var open = !!AI_OPEN[p.id];
+    h += '<div class="aiacc">'
+       + '<div class="aiacc-hdr" onclick="aiToggle(\'' + esc(p.id) + '\')">'
+       + '<span class="aiacc-arrow" id="arw_' + esc(p.id) + '">' + (open ? '▾' : '▸') + '</span>'
        + '<b>' + esc(p.name) + '</b>'
        + '<span class="badge" style="background:#1d4ed8;color:#fff;padding:2px 10px;border-radius:999px;font-size:10px">' + esc(p.vendor) + '</span>'
-       + '<label style="font-size:.8rem;display:flex;align-items:center;gap:5px;cursor:pointer">'
-       + '<input type="checkbox" id="en_' + esc(p.id) + '" ' + (p.enabled ? 'checked' : '') + ' style="width:14px;height:14px"> فعال</label>'
-       + '<span style="font-size:.75rem;color:var(--mut)">' + p.keys.length + ' کلید · ' + p.models.length + ' مدل · پیام تست: سلام</span>'
+       + '<span style="font-size:.72rem;color:var(--mut)">' + p.keys.length + ' کلید · ' + p.models.length + ' مدل</span>'
        + '<span style="flex:1"></span>'
-       + '<button onclick="aiTestAll(\'' + esc(p.id) + '\')">🧪 تست همه</button>'
-       + '<button onclick="aiProvSave(\'' + esc(p.id) + '\')">💾 ذخیره</button>'
-       + '<button onclick="aiProvDel(\'' + esc(p.id) + '\')">🗑️</button>'
+       + '<label style="font-size:.75rem;display:flex;align-items:center;gap:4px;cursor:pointer" onclick="event.stopPropagation()">'
+       + '<input type="checkbox" id="en_' + esc(p.id) + '" ' + (p.enabled ? 'checked' : '') + ' style="width:13px;height:13px"> فعال</label>'
+       + '<button onclick="event.stopPropagation();aiTestAll(\'' + esc(p.id) + '\')">🧪 تست همه</button>'
+       + '<button onclick="event.stopPropagation();aiProvSave(\'' + esc(p.id) + '\')">💾</button>'
+       + '<button onclick="event.stopPropagation();aiProvDel(\'' + esc(p.id) + '\')">🗑️</button>'
        + '</div>'
-       + '<div id="all_' + esc(p.id) + '" style="margin-top:6px;font-size:.78rem;color:var(--mut)"></div>'
-       + '<div class="row" style="display:flex;gap:6px;margin-top:8px"><input id="url_' + esc(p.id) + '" value="' + esc(p.url) + '" placeholder="https://api..." style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;direction:ltr;font-family:Consolas,monospace;font-size:.8rem"></div>'
-       + '<div style="margin-top:8px"><span style="font-size:.8rem;color:var(--mut)">کلیدهای API:</span> <button onclick="aiKeyAdd(\'' + esc(p.id) + '\')" style="padding:3px 10px">➕ کلید</button></div>'
-       + '<div id="keys_' + esc(p.id) + '">';
-    for (var k = 0; k < p.keys.length; k++) {
-      h += '<div class="row" style="display:flex;gap:6px;margin-top:5px">'
-         + '<input value="' + esc(p.keys[k].label) + '" placeholder="برچسب (اختیاری)" style="flex:0.4;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:6px 8px;font-size:.75rem">'
-         + '<input value="' + esc(p.keys[k].masked) + '" readonly style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--mut);border-radius:8px;padding:6px 8px;font-size:.75rem;direction:ltr">'
-         + '<button onclick="aiKeyDel(\'' + esc(p.id) + '\',' + k + ')">🗑️</button>'
-         + '</div>';
-    }
-    h += '</div>';
-    if (p.models.length > 0) {
-      h += '<details style="margin-top:8px"><summary style="cursor:pointer;font-size:.8rem;color:var(--mut)">مدل‌ها (' + p.models.length + ')</summary><div style="margin-top:6px">';
-      for (var m = 0; m < p.models.length; m++) {
-        h += '<div class="row" style="display:flex;gap:6px;align-items:center;margin-top:4px;font-size:.75rem">'
-           + '<span style="flex:1;direction:ltr;text-align:left">' + esc(p.models[m].id) + '</span>'
-           + '<span id="res_' + esc(p.id) + '_' + m + '" style="color:var(--mut)"></span>'
-           + '<button onclick="aiTest(\'' + esc(p.id) + '\',' + m + ')">🧪 تست</button>'
+       + '<div class="aiacc-body" id="body_' + esc(p.id) + '" style="' + (open ? '' : 'display:none') + '">'
+       + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'
+       + '<span style="font-size:.78rem;color:var(--mut)">آدرس:</span>'
+       + '<input id="url_' + esc(p.id) + '" value="' + esc(p.url) + '" placeholder="https://api..." style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;direction:ltr;font-family:Consolas,monospace;font-size:.78rem">'
+       + '</div>'
+       + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'
+       + '<span style="font-size:.78rem;color:var(--mut)">کلیدهای API:</span>'
+       + '<button onclick="aiKeyAdd(\'' + esc(p.id) + '\')" style="padding:3px 10px;font-size:.72rem">➕ کلید</button>'
+       + '</div>';
+    if (p.keys.length > 0) {
+      h += '<div style="margin-bottom:8px">';
+      for (var k = 0; k < p.keys.length; k++) {
+        h += '<div style="display:flex;gap:8px;margin-top:4px;font-size:.72rem;align-items:center">'
+           + '<span style="color:var(--mut);min-width:100px">' + (p.keys[k].label ? esc(p.keys[k].label) : ('کلید ' + (k + 1))) + '</span>'
+           + '<code style="flex:1;overflow:hidden;text-overflow:ellipsis">' + esc(p.keys[k].masked) + '</code>'
+           + '<button onclick="aiKeyDel(\'' + esc(p.id) + '\',' + k + ')" style="padding:2px 8px;font-size:.72rem">🗑️</button>'
            + '</div>';
       }
-      h += '</div></details>';
-    } else {
-      h += '<div style="margin-top:8px;font-size:.75rem;color:var(--mut)">مدلی ثبت نشده — مدل‌ها با «درون‌ریزی JSON» می‌آیند.</div>';
+      h += '</div>';
     }
-    h += '</div>';
+    h += '<div style="font-size:.78rem;color:var(--mut);margin:6px 0">مدل‌ها (' + p.models.length + ') — پیام تست: «سلام»</div>';
+    h += '<table class="ait"><thead><tr>'
+       + '<th style="width:32px">#</th>'
+       + '<th class="ltr">شناسهٔ مدل</th>'
+       + '<th style="width:82px">وضعیت</th>'
+       + '<th style="width:55px" class="ltr">کد</th>'
+       + '<th style="width:72px" class="ltr">زمان</th>'
+       + '<th style="width:80px" class="ltr">مسیر</th>'
+       + '<th class="ltr">پاسخ / خطا</th>'
+       + '<th style="width:60px"></th>'
+       + '</tr></thead><tbody id="mtb_' + esc(p.id) + '">';
+    if (p.models.length === 0) {
+      h += '<tr><td colspan="8" style="color:var(--mut)">مدلی ثبت نشده — با «درون‌ریزی JSON» مدل‌ها را بیاورید</td></tr>';
+    } else {
+      for (var m = 0; m < p.models.length; m++) h += aiRowHtml(p.id, m, p.models[m]);
+    }
+    h += '</tbody></table>'
+       + '<div id="all_' + esc(p.id) + '" style="margin-top:8px;font-size:.78rem;color:var(--mut)"></div>'
+       + '</div></div>';
   }
   box.innerHTML = h || '<div class="meta">ارائه‌دهنده‌ای نیست — «درون‌ریزی JSON» بزنید.</div>';
 }
 
-function aiImportOpen() {
-  var b = document.getElementById('aiImportBox');
-  b.style.display = (b.style.display === 'none') ? '' : 'none';
-}
-function aiImportFile() {
-  var f = document.getElementById('aiImportFile').files[0];
-  if (!f) return;
-  var r = new FileReader();
-  r.onload = function () { document.getElementById('aiImportJson').value = String(r.result); };
-  r.readAsText(f);
-}
-function aiImport() {
-  var fd = new FormData();
-  fd.append('action', 'ai_import');
-  fd.append('providers_json', document.getElementById('aiImportJson').value);
-  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
-    alert(d.ok ? ('✓ ' + d.count + ' ارائه‌دهنده درون‌ریزی شد') : ('✗ ' + (d.error.message || d.error || 'خطا')));
-    aiLoad();
-  });
-}
-function aiExport() { window.open('?ai=export', '_blank'); }
-
-function aiAddProvider() {
-  var name = prompt('نام ارائه‌دهنده (مثلاً openai):');
-  if (!name) return;
-  var id = String(name).toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
-  var fd = new FormData();
-  fd.append('action', 'ai_save_provider');
-  fd.append('id', id); fd.append('name', name); fd.append('vendor', 'customendpoint');
-  fd.append('url', 'https://api.example.com/v1'); fd.append('enabled', '1');
-  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) { if (d.ok) aiLoad(); });
+function aiRowHtml(pid, m, model) {
+  var res = AI_RES[pid + '_' + m];
+  var st, code, ms, via, detCell;
+  if (res && res.running) {
+    st = '<span class="st-run">⏳ در حال تست</span>';
+    code = '—'; ms = '—'; via = '—';
+    detCell = '<td class="ltr" style="color:var(--mut)">—</td>';
+  } else if (res) {
+    st = res.ok ? '<span class="st-ok">✓ موفق</span>' : '<span class="st-bad">✗ ناموفق</span>';
+    code = String(res.status || '0');
+    ms = String(res.ms || 0) + 'ms';
+    via = res.via || 'direct';
+    var det = res.ok ? (res.content || '') : (res.error || '');
+    detCell = '<td class="ltr" style="max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(det) + '">' + esc(det) + '</td>';
+  } else {
+    st = '<span style="color:var(--mut)">—</span>';
+    code = '—'; ms = '—'; via = '—';
+    detCell = '<td class="ltr" style="color:var(--mut)">—</td>';
+  }
+  return '<tr>'
+    + '<td>' + (m + 1) + '</td>'
+    + '<td class="ltr" title="' + esc(model.name || model.id) + '">' + esc(model.id) + '</td>'
+    + '<td>' + st + '</td>'
+    + '<td class="ltr">' + code + '</td>'
+    + '<td class="ltr">' + ms + '</td>'
+    + '<td class="ltr">' + via + '</td>'
+    + detCell
+    + '<td><button onclick="aiTest(\'' + esc(pid) + '\',' + m + ')" style="padding:3px 8px;font-size:.72rem">🧪</button></td>'
+    + '</tr>';
 }
 
-function aiProvSave(id) {
-  var en = document.getElementById('en_' + id).checked ? 1 : 0;
-  var url = document.getElementById('url_' + id).value;
-  var p = null;
-  for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].id === id) p = AI_PROVIDERS[i];
-  if (!p) return;
-  var fd = new FormData();
-  fd.append('action', 'ai_save_provider');
-  fd.append('id', id); fd.append('name', p.name); fd.append('vendor', p.vendor);
-  fd.append('url', url); fd.append('enabled', en);
-  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
-    alert(d.ok ? '✓ ذخیره شد' : '✗ خطا');
-    aiLoad();
-  });
-}
-
-function aiProvDel(id) {
-  if (!confirm('حذف «' + id + '»؟')) return;
-  var fd = new FormData();
-  fd.append('action', 'ai_delete_provider');
-  fd.append('id', id);
-  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function () { aiLoad(); });
-}
-
-function aiKeyAdd(id) {
-  var key = prompt('کلید API جدید برای ' + id + ':');
-  if (!key || !key.trim()) return;
-  var label = prompt('برچسب (اختیاری):') || '';
-  var fd = new FormData();
-  fd.append('action', 'ai_add_key');
-  fd.append('id', id); fd.append('key', key.trim()); fd.append('label', label);
-  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function () { aiLoad(); });
-}
-
-function aiKeyDel(id, idx) {
-  if (!confirm('حذف این کلید؟')) return;
-  var fd = new FormData();
-  fd.append('action', 'ai_del_key');
-  fd.append('id', id); fd.append('index', String(idx));
-  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function () { aiLoad(); });
+function aiUpdateRow(pid, m) {
+  var tb = document.getElementById('mtb_' + pid);
+  if (!tb || !tb.rows || !tb.rows[m]) return;
+  var p = aiFind(pid);
+  if (!p || !p.models[m]) return;
+  tb.rows[m].outerHTML = aiRowHtml(pid, m, p.models[m]);
 }
 
 function aiTest(pid, midx) {
-  var p = null;
-  for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].id === pid) p = AI_PROVIDERS[i];
-  if (!p) return;
-  var el = document.getElementById('res_' + pid + '_' + midx);
-  if (el) el.textContent = '⏳ …';
+  var p = aiFind(pid);
+  if (!p || !p.models[midx]) return;
+  AI_RES[pid + '_' + midx] = { running: true };
+  aiUpdateRow(pid, midx);
   var fd = new FormData();
   fd.append('action', 'ai_test_model');
   fd.append('provider_id', pid);
@@ -1933,47 +1953,56 @@ function aiTest(pid, midx) {
   fd.append('key_index', '0');
   fd.append('test_message', 'سلام');
   fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
-    if (el) el.textContent = d.ok
-      ? ('✓ ' + d.status + ' · ' + d.ms + 'ms · ' + (d.via || 'direct'))
-      : ('✗ ' + d.status + ' · ' + (d.error || ''));
-  }).catch(function () { if (el) el.textContent = 'خطای شبکه'; });
+    AI_RES[pid + '_' + midx] = d;
+    aiUpdateRow(pid, midx);
+  }).catch(function () {
+    AI_RES[pid + '_' + midx] = { ok: false, status: 0, ms: 0, via: '', error: 'خطای شبکه' };
+    aiUpdateRow(pid, midx);
+  });
 }
 
 function aiTestAll(pid) {
-  var p = null;
-  for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].id === pid) p = AI_PROVIDERS[i];
+  var p = aiFind(pid);
   if (!p) return;
   if (p.models.length === 0) { alert('این ارائه‌دهنده مدلی ندارد — با «درون‌ریزی JSON» مدل‌ها را بیاورید'); return; }
-  if (!confirm('تست همهٔ ' + p.models.length + ' مدل با پیام «سلام»؟\\nممکن است چند دقیقه طول بکشد.')) return;
-  for (var m = 0; m < p.models.length; m++) {
-    var el = document.getElementById('res_' + pid + '_' + m);
-    if (el) el.textContent = '⏳';
-  }
+  if (AI_RUNNING[pid]) { alert('یک تست گروهی در حال اجراست'); return; }
+  if (!confirm('تست همهٔ ' + p.models.length + ' مدل با پیام «سلام»؟' + ' ممکن است چند دقیقه طول بکشد.')) return;
+  AI_RUNNING[pid] = true;
   var sum = document.getElementById('all_' + pid);
-  if (sum) sum.textContent = 'در حال تست ' + p.models.length + ' مدل…';
-  var fd = new FormData();
-  fd.append('action', 'ai_test_all');
-  fd.append('provider_id', pid);
-  fd.append('key_index', '0');
-  fd.append('test_message', 'سلام');
-  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
-    if (!d || !d.results) { if (sum) sum.textContent = 'خطا در پاسخ'; return; }
-    for (var r2 = 0; r2 < d.results.length; r2++) {
-      var res = d.results[r2];
-      var idx = -1;
-      for (var m = 0; m < p.models.length; m++) if (p.models[m].id === res.model) idx = m;
-      if (idx >= 0) {
-        var el = document.getElementById('res_' + pid + '_' + idx);
-        if (el) el.textContent = res.ok
-          ? ('✓ ' + res.status + ' · ' + res.ms + 'ms · ' + (res.via || 'direct'))
-          : ('✗ ' + res.status + ' · ' + (res.error || ''));
-      }
+  var total = p.models.length;
+  for (var m = 0; m < total; m++) { AI_RES[pid + '_' + m] = { running: true }; aiUpdateRow(pid, m); }
+  var passed = 0, failed = 0;
+  function step(i) {
+    if (i >= total) {
+      AI_RUNNING[pid] = false;
+      if (sum) sum.innerHTML = 'تست کامل شد: <b style="color:#4ade80">' + passed + ' موفق</b>'
+        + (failed ? ' · <b style="color:#f87171">' + failed + ' ناموفق</b>' : '')
+        + ' از ' + total + ' — پیام تست: «سلام»';
+      return;
     }
-    if (sum) sum.innerHTML = 'تست کامل شد: <b style="color:#4ade80">' + d.passed + ' موفق</b>'
-      + (d.failed ? ' · <b style="color:#f87171">' + d.failed + ' ناموفق</b>' : '')
-      + ' از ' + d.total + ' — پیام تست: «' + esc(d.test_message) + '»';
-  }).catch(function () { if (sum) sum.textContent = 'خطای شبکه'; });
+    if (sum) sum.innerHTML = 'در حال تست ' + (i + 1) + ' از ' + total + ' … (موفق: ' + passed + ' · ناموفق: ' + failed + ')';
+    var m = i;
+    var fd = new FormData();
+    fd.append('action', 'ai_test_model');
+    fd.append('provider_id', pid);
+    fd.append('model_id', p.models[m].id);
+    fd.append('key_index', '0');
+    fd.append('test_message', 'سلام');
+    fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
+      AI_RES[pid + '_' + m] = d;
+      if (d.ok) passed++; else failed++;
+      aiUpdateRow(pid, m);
+      step(i + 1);
+    }).catch(function () {
+      AI_RES[pid + '_' + m] = { ok: false, status: 0, ms: 0, via: '', error: 'خطای شبکه' };
+      failed++;
+      aiUpdateRow(pid, m);
+      step(i + 1);
+    });
+  }
+  step(0);
 }
+
 
 // ---------- چت ----------
 var AI_CHAT_HIST = [];
