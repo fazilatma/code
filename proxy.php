@@ -107,8 +107,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.2.6');
-define('PROXY_BUILD', '2026-08-18-06');
+define('PROXY_VERSION', '1.2.7');
+define('PROXY_BUILD', '2026-08-18-07');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -1443,6 +1443,7 @@ function ai_interpret_result(array $res, int $ms): array {
         'ok' => $ok, 'status' => (int)$res['status'], 'ms' => $ms,
         'via' => (string)($res['via'] ?? ''), 'error' => $err,
         'content' => $ok ? $content : '',
+        'raw' => (string)($res['body'] ?? ''),
     ];
 }
 
@@ -1991,6 +1992,8 @@ function aiOpenModal(pid, m) {
   if (res && !res.running) {
     h += '<div style="margin-top:12px;font-size:.8rem;color:var(--mut)">' + (res.ok ? 'پاسخ کامل مدل:' : 'جزئیات خطا:') + '</div>';
     h += '<pre>' + esc(res.ok ? (res.content || '—') : (res.error || '—')) + '</pre>';
+    h += '<div style="margin-top:12px;font-size:.8rem;color:var(--mut)">پاسخ خام (Raw Response):</div>';
+    h += '<pre>' + esc(res.raw || '—') + '</pre>';
   }
   h += '<div class="testbox" style="margin-top:12px;margin-bottom:0">'
      + '<button onclick="aiModalRetest(\'' + esc(pid) + '\',' + m + ')" style="flex:1">🧪 تست مجدد</button>'
