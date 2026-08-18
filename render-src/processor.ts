@@ -1,4 +1,4 @@
-import { allProducts, claimJob, getProfile, markProfileRun, stopRequested, updateJob, upsertProduct } from './db.js';
+import { allProducts, claimJob, getProfile, markMissingProducts, markProfileRun, stopRequested, updateJob, upsertProduct } from './db.js';
 import { mapLimit, pageUrl, scrapeDetails, scrapeList, transformProduct } from './scraper.js';
 import { syncBasalam, syncWoo } from './sync.js';
 import type { Job, Product } from './types.js';
@@ -35,6 +35,7 @@ export async function processOneJob(): Promise<boolean> {
         });
         job.phase = 'save'; await save(job);
         for (const product of products) { const result = await upsertProduct(profile.id, product); result === 'added' ? job.added++ : job.updated++; }
+        const retired=await markMissingProducts(profile.id,products.map(p=>p.sourceKey));if(retired)append(job,`${retired} محصول دیگر در مبدأ دیده نشد`,'warning');
         await markProfileRun(profile.id);
         if (job.target !== 'none') await runSync(job, profile, products);
       }

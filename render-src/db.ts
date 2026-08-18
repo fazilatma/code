@@ -34,6 +34,8 @@ export async function migrate(): Promise<void> {
       updated_at timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY(profile_id, source_key)
     );
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS missing_since timestamptz;
     CREATE INDEX IF NOT EXISTS products_profile_updated_idx ON products(profile_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS products_title_idx ON products USING gin(to_tsvector('simple', title));
     CREATE TABLE IF NOT EXISTS jobs (
@@ -149,7 +151,7 @@ export async function stopRequested(id: string): Promise<boolean> {
 export async function upsertProduct(profileId: string, product: Product): Promise<'added' | 'updated'> {
   const { rows } = await pool.query('SELECT 1 FROM products WHERE profile_id=$1 AND source_key=$2', [profileId, product.sourceKey]);
   await pool.query(`INSERT INTO products(profile_id,source_key,data,title,price,source_url) VALUES($1,$2,$3,$4,$5,$6)
-    ON CONFLICT(profile_id,source_key) DO UPDATE SET data=EXCLUDED.data,title=EXCLUDED.title,price=EXCLUDED.price,source_url=EXCLUDED.source_url,updated_at=now()`,
+    ON CONFLICT(profile_id,source_key) DO UPDATE SET data=EXCLUDED.data,title=EXCLUDED.title,price=EXCLUDED.price,source_url=EXCLUDED.source_url,active=true,missing_since=NULL,updated_at=now()`,
     [profileId, product.sourceKey, JSON.stringify(product), product.title, product.price, product.url]);
   return rows[0] ? 'updated' : 'added';
 }
@@ -167,6 +169,9 @@ export async function allProducts(profileId: string): Promise<Product[]> {
   const { rows } = await pool.query('SELECT data FROM products WHERE profile_id=$1 ORDER BY updated_at', [profileId]);
   return rows.map(row => row.data);
 }
+
+export async function markMissingProducts(profileId:string,seenKeys:string[]):Promise<number>{if(!seenKeys.length)return 0;const result=await pool.query(`UPDATE products SET active=false,missing_since=COALESCE(missing_since,now()),updated_at=now() WHERE profile_id=$1 AND active=true AND NOT(source_key=ANY($2::text[]))`,[profileId,seenKeys]);return result.rowCount||0}
+export async function maintenanceRows(profileId=''):Promise<any[]>{const {rows}=await pool.query(`SELECT p.profile_id,p.source_key,p.data,p.title,p.price,p.source_url,p.remote_woo_id,p.remote_basalam_id,p.active,p.missing_since,COALESCE(json_agg(dm) FILTER(WHERE dm.remote_id IS NOT NULL),'[]') maps FROM products p LEFT JOIN destination_map dm ON dm.profile_id=p.profile_id AND dm.source_key=p.source_key WHERE ($1='' OR p.profile_id=$1) GROUP BY p.profile_id,p.source_key ORDER BY p.updated_at DESC`,[profileId]);return rows}
 
 export async function setRemoteId(profileId: string, sourceKey: string, target: 'woo'|'basalam', id: number): Promise<void> {
   const column = target === 'woo' ? 'remote_woo_id' : 'remote_basalam_id';
@@ -207,7 +212,7 @@ export async function restoreBackup(bundle: any): Promise<{ profiles: number; pr
   try {
     await client.query('BEGIN');
     for (const row of bundle.profiles || []) { await client.query(`INSERT INTO profiles(id,data,enabled,interval_minutes,last_run_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,COALESCE($6,now()),now()) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data,enabled=EXCLUDED.enabled,interval_minutes=EXCLUDED.interval_minutes,last_run_at=EXCLUDED.last_run_at,updated_at=now()`, [row.id,row.data,row.enabled,row.interval_minutes,row.last_run_at,row.created_at]); pCount++; }
-    for (const row of bundle.products || []) { await client.query(`INSERT INTO products(profile_id,source_key,data,title,price,source_url,remote_woo_id,remote_basalam_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,now()),now()) ON CONFLICT(profile_id,source_key) DO UPDATE SET data=EXCLUDED.data,title=EXCLUDED.title,price=EXCLUDED.price,source_url=EXCLUDED.source_url,remote_woo_id=EXCLUDED.remote_woo_id,remote_basalam_id=EXCLUDED.remote_basalam_id,updated_at=now()`, [row.profile_id,row.source_key,row.data,row.title,row.price,row.source_url,row.remote_woo_id,row.remote_basalam_id,row.created_at]); productCount++; }
+    for (const row of bundle.products || []) { await client.query(`INSERT INTO products(profile_id,source_key,data,title,price,source_url,remote_woo_id,remote_basalam_id,created_at,updated_at,active,missing_since) VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,now()),now(),COALESCE($10,true),$11) ON CONFLICT(profile_id,source_key) DO UPDATE SET data=EXCLUDED.data,title=EXCLUDED.title,price=EXCLUDED.price,source_url=EXCLUDED.source_url,remote_woo_id=EXCLUDED.remote_woo_id,remote_basalam_id=EXCLUDED.remote_basalam_id,active=EXCLUDED.active,missing_since=EXCLUDED.missing_since,updated_at=now()`, [row.profile_id,row.source_key,row.data,row.title,row.price,row.source_url,row.remote_woo_id,row.remote_basalam_id,row.created_at,row.active,row.missing_since]); productCount++; }
     for (const row of bundle.destinationMap || []) { await client.query(`INSERT INTO destination_map(profile_id,source_key,target,account_key,remote_id,updated_at) VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(profile_id,source_key,target,account_key) DO UPDATE SET remote_id=EXCLUDED.remote_id,updated_at=now()`,[row.profile_id,row.source_key,row.target,row.account_key,row.remote_id]); }
     for (const row of bundle.states || []) { await client.query(`INSERT INTO app_state(key,value,updated_at) VALUES($1,$2,now()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`, [row.key,row.value]); stateCount++; }
     await client.query('COMMIT'); return { profiles:pCount,products:productCount,states:stateCount };

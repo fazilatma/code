@@ -11,6 +11,7 @@ import { createBackup, createJob, deleteProfile, enqueueDueProfiles, getJob, get
 import { DEFAULT_SELECTORS, type Product, type Profile } from './types.js';
 import { safeFetch, safeText } from './network.js';
 import { sendNotification } from './notifications.js';
+import { bulkEdit, photoFix, rebuildMap, recon, retire } from './maintenance.js';
 import { numberFromText, testSelector } from './scraper.js';
 import { createPhpSettingsBundle, decodePhpSettingsBundle, stateKeyForFile } from './settings-transfer.js';
 import { createVisualTicket, renderVisualSelector } from './visual.js';
@@ -114,6 +115,11 @@ app.post('/api/settings-import', async c => {
   return c.json({ok:true,format:'scraper4-php-compatible',imported:{profiles,products,states,connections},warnings});
 });
 app.get('/api/profile-stats', async c => c.json({ok:true,items:await profileStats()}));
+app.post('/api/maintenance/recon/:target',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const body=await c.req.json().catch(()=>({})) as any;return c.json({ok:true,report:await recon(target as any,String(body.profileId||''))})});
+app.post('/api/maintenance/rebuild/:target',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const body=await c.req.json().catch(()=>({})) as any;return c.json(await rebuildMap(target as any,String(body.profileId||'')))});
+app.post('/api/maintenance/retire/:target',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const body=await c.req.json() as any,apply=body.confirm==='APPLY';return c.json(await retire(target as any,String(body.profileId||''),String(body.action||'report'),apply))});
+app.post('/api/maintenance/bulk/:target',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const body=await c.req.json() as any;return c.json(await bulkEdit(target as any,body,body.confirm==='APPLY'))});
+app.post('/api/maintenance/photo-fix',async c=>{const body=await c.req.json() as any;return c.json(await photoFix(String(body.profileId||''),body.confirm==='APPLY'))});
 app.post('/api/queue-watchdog', async c => { const body=await c.req.json().catch(()=>({})) as any; return c.json({ok:true,reaped:await reapStalledJobs(Number(body.minutes)||30)}); });
 app.post('/api/source-test', async c => { const body=await c.req.json() as any; const result=await safeText(String(body.url||''),1_000_000); return c.json({ok:true,bytes:Buffer.byteLength(result.text),url:result.url,title:(result.text.match(/<title[^>]*>(.*?)<\/title>/is)?.[1]||'').replace(/<[^>]+>/g,'').trim()}); });
 app.post('/api/test-connection/:target', async c => {
