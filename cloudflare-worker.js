@@ -16,7 +16,7 @@
  * =====================================================================
  */
 
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -160,6 +160,16 @@ async function doFetch(target, request, env) {
     if (bodyOut.byteLength > MAX_SIZE) {
       return json(413, { ok: false, error: { code: 'response_too_large', message: 'حجم پاسخ بیش از حد مجاز است' } });
     }
+
+    // v1.0.2: پاسخ‌های غیرمتنی (تصویر، فونت، باینری و…) باید دست‌نخورده عبور
+    // کنند؛ قبلاً همه‌چیز با TextDecoder به متن تبدیل می‌شد و تصاویر خراب می‌آمدند.
+    const isText = ct.includes('text/') || ct.includes('json')
+                || ct.includes('javascript') || ct.includes('xml')
+                || ct.includes('svg') || ct === '' ;
+    if (!isText) {
+      return new Response(bodyOut, { status: resp.status, headers: outHeaders });
+    }
+
     let text = new TextDecoder().decode(bodyOut);
     if (ct.includes('text/html') && text && !text.includes('data-proxy-base')) {
       const base = `<base href="${current.toString().replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-proxy-base="1">`;

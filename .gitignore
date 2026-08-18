@@ -88,3 +88,6 @@ storage_errors.log
 # پراکسی سرور: دایرکتوری کش
 proxy-cache/
 proxy-settings.json
+
+# پراکسی سرور: کانفیگ ارائه‌دهنده‌های هوش مصنوعی پنل
+ai-providers.json

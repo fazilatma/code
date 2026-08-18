@@ -95,10 +95,8 @@ $CONFIG = [
     'inject_base'       => true,                  // تزریق <base href> در پاسخ‌های HTML تا لینک‌های نسبی درست کار کنند
     // بازنویسی کامل URLها: وقتی روشن باشد، همهٔ منابع (تصاویر، CSS، JS، لینک‌ها)
     // هم از خود پراکسی لود می‌شوند و برای سایت‌های بلاک‌شده صفحه کامل رندر می‌شود.
-    // (برای اسکرپر بهتر است خاموش بماند تا آدرس‌های اصلی دست‌نخورده بمانند؛
-    //  در این حالت فقط <base> تزریق می‌شود و مرورگر منابع را مستقیم می‌گیرد.)
-    // با هدر X-Proxy-Rewrite: 1 / 0 هم می‌توان به‌ازای هر درخواست تغییرش داد.
-    'rewrite_urls'      => false,
+    // (برای اسکرپر اگر آدرس‌های اصلی لازم است، با هدر X-Proxy-Rewrite: 0 خاموش کنید.)
+    'rewrite_urls'      => true,
     'rewrite_attrs'     => ['src', 'href', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'data-original', 'data-bg', 'action', 'formaction'],
     'forward_auth'      => true,                  // ارسال هدر کلید API به مقصد — برای تست مدل‌های هوش مصنوعی لازم است؛ اگر لازم شد خاموش کنید
     'forward_auth_headers' => ['Authorization', 'X-API-Key', 'api-key'], // هدرهای احراز هویتی که به مقصد ارسال می‌شوند
@@ -109,8 +107,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.2.0');
-define('PROXY_BUILD', '2026-08-17-04');
+define('PROXY_VERSION', '1.2.1');
+define('PROXY_BUILD', '2026-08-18-01');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -1182,6 +1180,299 @@ function p_connect_tunnel(): void {
 }
 
 // ---------------------------------------------------------------------
+// [۵-آ] پنل هوش مصنوعی — تست مدل‌ها + چت + درون‌ریزی/برون‌ریزی JSON
+// تنظیمات در ai-providers.json کنار فایل ذخیره می‌شود.
+// ---------------------------------------------------------------------
+
+const AI_PROVIDERS_FILE = __DIR__ . '/ai-providers.json';
+
+/** ساختار پیش‌فرض — همان قالب کانفیگ شما با کلید خالی؛ کلیدها را خودتان درون‌ریزی کنید */
+function ai_providers_seed(): array {
+    return [
+        'ollama'      => ['id' => 'ollama', 'name' => 'Ollama', 'vendor' => 'ollama-models', 'url' => 'http://127.0.0.1:11434', 'apiKeys' => [], 'enabled' => false, 'models' => []],
+        'openrouter'  => ['id' => 'openrouter', 'name' => 'OpenRouter', 'vendor' => 'openrouter', 'url' => 'https://openrouter.ai/api/v1', 'apiKeys' => [], 'enabled' => true, 'models' => []],
+        'together'    => ['id' => 'together', 'name' => 'Together', 'vendor' => 'customendpoint', 'url' => 'https://api.together.xyz/v1/chat/completions', 'apiKeys' => [], 'enabled' => true, 'models' => []],
+        'groq'        => ['id' => 'groq', 'name' => 'Groq', 'vendor' => 'groq', 'url' => 'https://api.groq.com/openai/v1/chat/completions', 'apiKeys' => [], 'enabled' => true, 'models' => []],
+        'huggingface' => ['id' => 'huggingface', 'name' => 'Hugging Face', 'vendor' => 'huggingface', 'url' => 'https://router.huggingface.co/v1/chat/completions', 'apiKeys' => [], 'enabled' => true, 'models' => []],
+        'cloudflare'  => ['id' => 'cloudflare', 'name' => 'Cloudflare Workers AI', 'vendor' => 'customendpoint', 'url' => 'https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/run/{MODEL}', 'apiKeys' => [], 'enabled' => true, 'models' => []],
+        'gemini'      => ['id' => 'gemini', 'name' => 'Google AI Studio / Gemini', 'vendor' => 'customendpoint', 'url' => 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', 'apiKeys' => [], 'enabled' => true, 'models' => []],
+        'cerebras'    => ['id' => 'cerebras', 'name' => 'Cerebras', 'vendor' => 'customendpoint', 'url' => 'https://api.cerebras.ai/v1/chat/completions', 'apiKeys' => [], 'enabled' => true, 'models' => []],
+        'mistral'     => ['id' => 'mistral', 'name' => 'Mistral', 'vendor' => 'customendpoint', 'url' => 'https://api.mistral.ai/v1/chat/completions', 'apiKeys' => [], 'enabled' => true, 'models' => []],
+        'cohere'      => ['id' => 'cohere', 'name' => 'Cohere', 'vendor' => 'customendpoint', 'url' => 'https://api.cohere.com/compatibility/v1/chat/completions', 'apiKeys' => [], 'enabled' => true, 'models' => []],
+    ];
+}
+
+function ai_providers_load(): array {
+    if (!is_file(AI_PROVIDERS_FILE)) return ai_providers_seed();
+    $j = @json_decode((string)@file_get_contents(AI_PROVIDERS_FILE), true);
+    $d = is_array($j) ? $j : [];
+    if (isset($d['providers']) && is_array($d['providers'])) $d = $d['providers'];
+    return $d;
+}
+
+function ai_providers_save(array $providers): bool {
+    return @file_put_contents(AI_PROVIDERS_FILE, json_encode($providers, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT), LOCK_EX) !== false;
+}
+
+/** نرمال‌سازی یک ارائه‌دهنده — هم فرمت شما (apiKey) و هم چندکلیدی (apiKeys) را می‌پذیرد */
+function ai_provider_normalize(array $p): ?array {
+    $rawId = trim((string)($p['id'] ?? $p['name'] ?? ''));
+    if ($rawId === '') return null;
+    $id = strtolower((string)preg_replace('~[^a-z0-9_-]+~i', '-', $rawId));
+    $url = trim((string)($p['url'] ?? ''));
+    if (preg_match('~^\[([^\]]+)\]\(([^)]+)\)$~', $url, $m)) $url = trim($m[2]);
+    $keys = [];
+    if (!empty($p['apiKeys']) && is_array($p['apiKeys'])) {
+        foreach ($p['apiKeys'] as $k) {
+            $s = is_array($k) ? trim((string)($k['key'] ?? '')) : trim((string)$k);
+            if ($s !== '') $keys[] = ['key' => $s, 'label' => is_array($k) ? trim((string)($k['label'] ?? '')) : ''];
+        }
+    } elseif (!empty($p['apiKey'])) {
+        $keys[] = ['key' => trim((string)$p['apiKey']), 'label' => ''];
+    }
+    $models = [];
+    foreach ((array)($p['models'] ?? []) as $m) {
+        if (is_array($m) && !empty($m['id'])) $models[] = $m;
+    }
+    return [
+        'id'      => $id,
+        'name'    => trim((string)($p['name'] ?? $id)),
+        'vendor'  => trim((string)($p['vendor'] ?? 'customendpoint')),
+        'url'     => $url,
+        'apiKeys' => $keys,
+        'enabled' => !empty($p['enabled']),
+        'models'  => $models,
+    ];
+}
+
+/** ساخت آدرس chat/completions — منطق مشابه اسکرپر: /ai/run/ دست‌نخورده، ollama → /v1 */
+function ai_endpoint_url(array $p, string $model = ''): string {
+    $raw = trim((string)($p['url'] ?? ''));
+    if (preg_match('~^\[([^\]]+)\]\(([^)]+)\)$~', $raw, $m)) $raw = trim($m[2]);
+    if ($raw === '') return '';
+    if (stripos($raw, '/ai/run/') !== false) {
+        if ($model !== '' && strpos($raw, '{MODEL}') !== false) return str_replace('{MODEL}', rawurlencode($model), $raw);
+        return $raw;
+    }
+    $vendor = strtolower((string)($p['vendor'] ?? ''));
+    if ($vendor === 'ollama-models' || strpos($raw, '11434') !== false) {
+        return rtrim($raw, '/') . '/v1/chat/completions';
+    }
+    if (preg_match('~/chat/completions/?$~i', $raw)) return $raw;
+    return rtrim($raw, '/') . '/chat/completions';
+}
+
+/** استخراج متن پاسخ — هم فرمت OpenAI و هم Cloudflare (result.choices) */
+function ai_extract_content(array $body): string {
+    $c = $body['choices'][0]['message']['content'] ?? '';
+    if (is_string($c) && trim($c) !== '') return trim($c);
+    $c = $body['choices'][0]['message']['reasoning'] ?? '';
+    if (is_string($c) && trim($c) !== '') return trim($c);
+    $c = $body['result']['choices'][0]['message']['content'] ?? '';
+    if (is_string($c) && trim($c) !== '') return trim($c);
+    $c = $body['result']['response'] ?? '';
+    if (is_string($c) && trim($c) !== '') return trim($c);
+    $c = $body['response'] ?? '';
+    if (is_string($c) && trim($c) !== '') return trim($c);
+    $c = $body['data'][0]['text'] ?? '';
+    if (is_string($c) && trim($c) !== '') return trim($c);
+    return '';
+}
+
+/** درخواست AI از مسیر زنجیرهٔ خود پراکسی (مستقیم ← بالادستی ← ورکر کلودفلر) */
+function ai_proxy_call(string $url, string $apiKey, string $payloadJson): array {
+    $cfg = $GLOBALS['CONFIG'];
+    $headers = ['Content-Type: application/json', 'Accept: application/json'];
+    if ($apiKey !== '') $headers[] = 'Authorization: Bearer ' . $apiKey;
+    $timeout = max(30, min(180, (int)$cfg['timeout']));
+    $v = p_validate_url($url); // اعتبارسنجی امنیتی (دامنه/سیاست DNS)
+    $start = microtime(true);
+    if (($v['dns'] ?? 'ok') === 'filtered') {
+        $res = p_filtered_attempt($url, 'POST', $headers, $payloadJson, $timeout);
+    } else {
+        $res = p_rotate_attempt($url, 'POST', $headers, $payloadJson, $timeout);
+    }
+    return ['res' => $res, 'ms' => (int)round((microtime(true) - $start) * 1000)];
+}
+
+/** لیست ارائه‌دهنده‌ها (کلیدها ماسک‌شده) */
+function p_ai_providers_list(): void {
+    header('Content-Type: application/json; charset=utf-8');
+    $out = [];
+    foreach (ai_providers_load() as $p) {
+        $p = ai_provider_normalize((array)$p);
+        if ($p === null) continue;
+        $keys = [];
+        foreach ($p['apiKeys'] as $k) {
+            $s = (string)$k['key'];
+            $keys[] = ['label' => $k['label'], 'masked' => (strlen($s) > 8 ? substr($s, 0, 4) . '…' . substr($s, -4) : '•••')];
+        }
+        $out[] = [
+            'id' => $p['id'], 'name' => $p['name'], 'vendor' => $p['vendor'], 'url' => $p['url'],
+            'enabled' => $p['enabled'], 'keys' => $keys,
+            'models' => array_values(array_map(function ($m) { return ['id' => $m['id'] ?? '', 'name' => $m['name'] ?? ($m['id'] ?? '')]; }, $p['models'])),
+        ];
+    }
+    echo json_encode(['ok' => true, 'providers' => $out], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+/** برون‌ریزی JSON در قالب کانفیگ شما (apiKey + apiKeys) */
+function p_ai_export(): void {
+    $out = [];
+    foreach (ai_providers_load() as $p) {
+        $p = ai_provider_normalize((array)$p);
+        if ($p === null) continue;
+        $first = $p['apiKeys'][0]['key'] ?? '';
+        $entry = [
+            'id' => $p['id'], 'name' => $p['name'], 'vendor' => $p['vendor'], 'url' => $p['url'],
+            'apiKey' => $first, 'enabled' => $p['enabled'], 'models' => $p['models'],
+        ];
+        if (count($p['apiKeys']) > 1) $entry['apiKeys'] = $p['apiKeys'];
+        $out[$p['id']] = $entry;
+    }
+    $json = json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Content-Disposition: attachment; filename="ai-providers.json"');
+    echo $json;
+    exit;
+}
+
+/** درون‌ریزی — کل مجموعه جایگزین می‌شود (بعد از درون‌ریزی ذخیره هم می‌شود) */
+function p_ai_import(): void {
+    $jsonStr = trim((string)($_POST['providers_json'] ?? ''));
+    $parsed = json_decode($jsonStr, true);
+    if (!is_array($parsed)) p_error(400, 'bad_json', 'JSON نامعتبر: ' . json_last_error_msg());
+    if (isset($parsed['providers']) && is_array($parsed['providers'])) $parsed = $parsed['providers'];
+    $providers = [];
+    $count = 0;
+    foreach ($parsed as $key => $p) {
+        if (!is_array($p)) continue;
+        $p = ai_provider_normalize($p);
+        if ($p === null) continue;
+        $providers[$p['id']] = $p;
+        $count++;
+    }
+    if ($count === 0) p_error(400, 'no_providers', 'هیچ ارائه‌دهندهٔ معتبری در JSON پیدا نشد');
+    if (!ai_providers_save($providers)) p_error(500, 'save_failed', 'نوشتن ai-providers.json ممکن نشد');
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true, 'count' => $count], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** ذخیره/به‌روزرسانی مشخصات یک ارائه‌دهنده — کلیدها و مدل‌ها دست‌نخورده می‌مانند */
+function p_ai_save_provider(): void {
+    $id = strtolower(trim((string)($_POST['id'] ?? '')));
+    if ($id === '') p_error(400, 'bad_provider', 'شناسهٔ ارائه‌دهنده خالی است');
+    $providers = ai_providers_load();
+    $existing = isset($providers[$id]) ? (array)$providers[$id] : null;
+    $p = ai_provider_normalize([
+        'id' => $id,
+        'name' => $_POST['name'] ?? $id,
+        'vendor' => $_POST['vendor'] ?? 'customendpoint',
+        'url' => $_POST['url'] ?? '',
+        'enabled' => !empty($_POST['enabled']),
+        'apiKeys' => (array)($existing['apiKeys'] ?? []),
+        'models' => (array)($existing['models'] ?? []),
+    ]);
+    if ($p === null) p_error(400, 'bad_provider', 'شناسهٔ ارائه‌دهنده خالی است');
+    $providers[$p['id']] = $p;
+    if (!ai_providers_save($providers)) p_error(500, 'save_failed', 'نوشتن ai-providers.json ممکن نشد');
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true, 'id' => $p['id']], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** افزودن کلید API به یک ارائه‌دهنده */
+function p_ai_add_key(): void {
+    $id = strtolower(trim((string)($_POST['id'] ?? '')));
+    $key = trim((string)($_POST['key'] ?? ''));
+    if ($key === '') p_error(400, 'no_key', 'کلید خالی است');
+    $providers = ai_providers_load();
+    if (!isset($providers[$id])) p_error(404, 'no_provider', 'ارائه‌دهنده پیدا نشد');
+    $providers[$id]['apiKeys'] = (array)($providers[$id]['apiKeys'] ?? []);
+    $providers[$id]['apiKeys'][] = ['key' => $key, 'label' => trim((string)($_POST['label'] ?? ''))];
+    ai_providers_save($providers);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** حذف کلید API از یک ارائه‌دهنده */
+function p_ai_del_key(): void {
+    $id = strtolower(trim((string)($_POST['id'] ?? '')));
+    $idx = (int)($_POST['index'] ?? -1);
+    $providers = ai_providers_load();
+    if (!isset($providers[$id])) p_error(404, 'no_provider', 'ارائه‌دهنده پیدا نشد');
+    $keys = (array)($providers[$id]['apiKeys'] ?? []);
+    if (isset($keys[$idx])) unset($keys[$idx]);
+    $providers[$id]['apiKeys'] = array_values($keys);
+    ai_providers_save($providers);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** حذف ارائه‌دهنده */
+function p_ai_delete_provider(): void {
+    $id = strtolower(trim((string)($_POST['id'] ?? '')));
+    $providers = ai_providers_load();
+    if (isset($providers[$id])) unset($providers[$id]);
+    ai_providers_save($providers);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** اجرای تست مدل یا چت — خروجی مشترک */
+function p_ai_run(bool $isChat): void {
+    header('Content-Type: application/json; charset=utf-8');
+    $pid = trim((string)($_POST['provider_id'] ?? ''));
+    $mid = trim((string)($_POST['model_id'] ?? ''));
+    $ki  = max(0, (int)($_POST['key_index'] ?? 0));
+    $providers = ai_providers_load();
+    if (!isset($providers[$pid])) p_error(404, 'no_provider', 'ارائه‌دهنده پیدا نشد');
+    $p = ai_provider_normalize((array)$providers[$pid]);
+    $key = (string)($p['apiKeys'][$ki]['key'] ?? ($p['apiKeys'][0]['key'] ?? ''));
+    $url = ai_endpoint_url($p, $mid);
+    if ($url === '') p_error(400, 'no_url', 'آدرس ارائه‌دهنده خالی است');
+
+    if ($isChat) {
+        $messages = json_decode((string)($_POST['messages'] ?? '[]'), true) ?: [];
+        if ($messages === []) p_error(400, 'no_messages', 'پیامی برای چت نیست');
+        $payload = ['model' => $mid, 'messages' => $messages, 'max_tokens' => 800];
+    } else {
+        $payload = ['model' => $mid, 'messages' => [['role' => 'user', 'content' => 'سلام']], 'max_tokens' => 24];
+    }
+
+    $r = ai_proxy_call($url, $key, json_encode($payload, JSON_UNESCAPED_UNICODE));
+    $res = $r['res'];
+    $bodyArr = json_decode((string)$res['body'], true);
+    if (!is_array($bodyArr)) $bodyArr = [];
+    $content = ai_extract_content($bodyArr);
+    $ok = $res['error'] === null && (int)$res['status'] === 200 && $content !== '';
+    $err = '';
+    if (!$ok) {
+        if ($res['error'] !== null) $err = $res['error'];
+        elseif ((int)$res['status'] === 401) $err = 'کلید API نامعتبر (۴۰۱)';
+        elseif ((int)$res['status'] === 429) $err = 'محدودیت نرخ (۴۲۹)';
+        elseif ((int)$res['status'] === 402) $err = 'عدم موجودی/پرداخت (۴۰۲)';
+        else $err = trim((string)($bodyArr['error']['message'] ?? ($bodyArr['message'] ?? $bodyArr['error'] ?? '')));
+        if ($err === '') $err = 'HTTP ' . (int)$res['status'] . ($content !== '' ? ' — ' . $content : '');
+    }
+    echo json_encode([
+        'ok'      => $ok,
+        'status'  => (int)$res['status'],
+        'ms'      => $r['ms'],
+        'via'     => (string)($res['via'] ?? ''),
+        'content' => $ok ? $content : '',
+        'error'   => $ok ? '' : $err,
+        'model'   => $mid,
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+// ---------------------------------------------------------------------
 // [۵] داشبورد راهنما
 // ---------------------------------------------------------------------
 
@@ -1250,6 +1541,11 @@ a { color:var(--acc); }
 </head>
 <body>
 <div class="wrap">
+<div class="tabs" style="display:flex;gap:8px;margin-bottom:20px">
+<button id="tabBtnProxy" class="tabbtn" onclick="showPane('proxy')" style="flex:1;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--acc);color:#fff;cursor:pointer;font-family:inherit;font-weight:700">🛰️ پراکسی</button>
+<button id="tabBtnAi" class="tabbtn" onclick="showPane('ai')" style="flex:1;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--txt);cursor:pointer;font-family:inherit;font-weight:700">🤖 هوش مصنوعی</button>
+</div>
+<div id="pane-proxy">
 <h1>🛰️ پراکسی <span>سرور</span></h1>
 <div class="sub">نسخهٔ {$ver} — تک‌فایلی PHP، بدون وابستگی — پاسخ‌ها را از سمت سرور می‌گیرد تا IP و ساختار درخواست شما مخفی بماند.</div>
 {$statusHtml}
@@ -1323,6 +1619,38 @@ a { color:var(--acc); }
 <li>آدرس ورکر کلودفلر و بازنویسی URL از خود داشبورد قابل تغییرند (ذخیره در proxy-settings.json)</li>
 <li>هدر <code>X-Proxy-Route</code>: مسیر واقعی عبور هر پاسخ — مستقیم / بالادستی / ورکر کلودفلر / کش</li>
 </ul>
+</div>
+<div id="pane-ai" style="display:none">
+<h1>🤖 هوش <span>مصنوعی</span></h1>
+<div class="sub">تست مدل‌ها، مدیریت چند کلید API برای هر ارائه‌دهنده، درون‌ریزی/برون‌ریزی JSON و چت — همهٔ درخواست‌ها از زنجیرهٔ خود پراکسی عبور می‌کنند.</div>
+
+<div class="testbox">
+<button onclick="aiImportOpen()">📥 درون‌ریزی JSON</button>
+<button onclick="aiExport()">📤 برون‌ریزی JSON</button>
+<button onclick="aiAddProvider()">➕ افزودن ارائه‌دهنده</button>
+<button onclick="aiLoad()">↺ بارگذاری مجدد</button>
+</div>
+<div id="aiImportBox" style="display:none;margin-bottom:12px">
+<textarea id="aiImportJson" rows="7" placeholder='{"openrouter":{"id":"openrouter","name":"OpenRouter","url":"https://openrouter.ai/api/v1","apiKey":"sk-...","enabled":true,"models":[...]}}' style="width:100%;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px;direction:ltr;font-family:Consolas,monospace;font-size:.8rem"></textarea>
+<div class="testbox">
+<input type="file" id="aiImportFile" accept=".json,application/json" onchange="aiImportFile()" style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px">
+<button onclick="aiImport()">درون‌ریزی</button>
+</div>
+</div>
+<div id="aiProviders"></div>
+
+<h2>💬 چت با مدل</h2>
+<div class="testbox">
+<select id="aiChatProv" onchange="aiChatFill()" style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px"></select>
+<select id="aiChatModel" style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px"></select>
+<select id="aiChatKey" style="flex:0.6;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px"></select>
+</div>
+<div id="aiChatLog" style="height:340px;overflow:auto;background:#0b0f1a;border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px;font-size:.85rem"></div>
+<div class="testbox">
+<input id="aiChatMsg" placeholder="پیام خود را بنویسید..." style="flex:1;min-width:240px;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px 12px" onkeydown="if(event.key==='Enter')aiChatSend()">
+<button onclick="aiChatSend()">ارسال</button>
+</div>
+</div>
 </div>
 <script>
 var ROUTE_LABEL = {
@@ -1401,6 +1729,246 @@ function loadSettings() {
     .catch(function () {});
 }
 loadSettings();
+
+// ---------- تب‌ها ----------
+function showPane(name) {
+  document.getElementById('pane-proxy').style.display = (name === 'proxy') ? '' : 'none';
+  document.getElementById('pane-ai').style.display = (name === 'ai') ? '' : 'none';
+  var b1 = document.getElementById('tabBtnProxy'), b2 = document.getElementById('tabBtnAi');
+  b1.style.background = (name === 'proxy') ? 'var(--acc)' : 'var(--card)';
+  b1.style.color = (name === 'proxy') ? '#fff' : 'var(--txt)';
+  b2.style.background = (name === 'ai') ? 'var(--acc)' : 'var(--card)';
+  b2.style.color = (name === 'ai') ? '#fff' : 'var(--txt)';
+  if (name === 'ai') aiLoad();
+}
+
+// ---------- پنل هوش مصنوعی ----------
+var AI_PROVIDERS = {};
+function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function aiLoad() {
+  fetch('?ai=providers').then(function (r) { return r.json(); }).then(function (d) {
+    if (d && d.ok) { AI_PROVIDERS = d.providers || []; aiRender(); aiChatFill(); }
+  }).catch(function () {});
+}
+
+function aiRender() {
+  var box = document.getElementById('aiProviders');
+  var h = '';
+  for (var i = 0; i < AI_PROVIDERS.length; i++) {
+    var p = AI_PROVIDERS[i];
+    h += '<div class="card" style="padding:14px;margin-bottom:12px">'
+       + '<div class="row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+       + '<b>' + esc(p.name) + '</b>'
+       + '<span class="badge" style="background:#1d4ed8;color:#fff;padding:2px 10px;border-radius:999px;font-size:10px">' + esc(p.vendor) + '</span>'
+       + '<label style="font-size:.8rem;display:flex;align-items:center;gap:5px;cursor:pointer">'
+       + '<input type="checkbox" id="en_' + esc(p.id) + '" ' + (p.enabled ? 'checked' : '') + ' style="width:14px;height:14px"> فعال</label>'
+       + '<span style="font-size:.75rem;color:var(--mut)">' + p.keys.length + ' کلید · ' + p.models.length + ' مدل</span>'
+       + '<span style="flex:1"></span>'
+       + '<button onclick="aiProvSave(\'' + esc(p.id) + '\')">💾 ذخیره</button>'
+       + '<button onclick="aiProvDel(\'' + esc(p.id) + '\')">🗑️</button>'
+       + '</div>'
+       + '<div class="row" style="display:flex;gap:6px;margin-top:8px"><input id="url_' + esc(p.id) + '" value="' + esc(p.url) + '" placeholder="https://api..." style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;direction:ltr;font-family:Consolas,monospace;font-size:.8rem"></div>'
+       + '<div style="margin-top:8px"><span style="font-size:.8rem;color:var(--mut)">کلیدهای API:</span> <button onclick="aiKeyAdd(\'' + esc(p.id) + '\')" style="padding:3px 10px">➕ کلید</button></div>'
+       + '<div id="keys_' + esc(p.id) + '">';
+    for (var k = 0; k < p.keys.length; k++) {
+      h += '<div class="row" style="display:flex;gap:6px;margin-top:5px">'
+         + '<input value="' + esc(p.keys[k].label) + '" placeholder="برچسب (اختیاری)" style="flex:0.4;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:6px 8px;font-size:.75rem">'
+         + '<input value="' + esc(p.keys[k].masked) + '" readonly style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--mut);border-radius:8px;padding:6px 8px;font-size:.75rem;direction:ltr">'
+         + '<button onclick="aiKeyDel(\'' + esc(p.id) + '\',' + k + ')">🗑️</button>'
+         + '</div>';
+    }
+    h += '</div>';
+    if (p.models.length > 0) {
+      h += '<details style="margin-top:8px"><summary style="cursor:pointer;font-size:.8rem;color:var(--mut)">مدل‌ها (' + p.models.length + ')</summary><div style="margin-top:6px">';
+      for (var m = 0; m < p.models.length; m++) {
+        h += '<div class="row" style="display:flex;gap:6px;align-items:center;margin-top:4px;font-size:.75rem">'
+           + '<span style="flex:1;direction:ltr;text-align:left">' + esc(p.models[m].id) + '</span>'
+           + '<span id="res_' + esc(p.id) + '_' + m + '" style="color:var(--mut)"></span>'
+           + '<button onclick="aiTest(\'' + esc(p.id) + '\',' + m + ')">🧪 تست</button>'
+           + '</div>';
+      }
+      h += '</div></details>';
+    } else {
+      h += '<div style="margin-top:8px;font-size:.75rem;color:var(--mut)">مدلی ثبت نشده — مدل‌ها با «درون‌ریزی JSON» می‌آیند.</div>';
+    }
+    h += '</div>';
+  }
+  box.innerHTML = h || '<div class="meta">ارائه‌دهنده‌ای نیست — «درون‌ریزی JSON» بزنید.</div>';
+}
+
+function aiImportOpen() {
+  var b = document.getElementById('aiImportBox');
+  b.style.display = (b.style.display === 'none') ? '' : 'none';
+}
+function aiImportFile() {
+  var f = document.getElementById('aiImportFile').files[0];
+  if (!f) return;
+  var r = new FileReader();
+  r.onload = function () { document.getElementById('aiImportJson').value = String(r.result); };
+  r.readAsText(f);
+}
+function aiImport() {
+  var fd = new FormData();
+  fd.append('action', 'ai_import');
+  fd.append('providers_json', document.getElementById('aiImportJson').value);
+  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
+    alert(d.ok ? ('✓ ' + d.count + ' ارائه‌دهنده درون‌ریزی شد') : ('✗ ' + (d.error.message || d.error || 'خطا')));
+    aiLoad();
+  });
+}
+function aiExport() { window.open('?ai=export', '_blank'); }
+
+function aiAddProvider() {
+  var name = prompt('نام ارائه‌دهنده (مثلاً openai):');
+  if (!name) return;
+  var id = String(name).toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+  var fd = new FormData();
+  fd.append('action', 'ai_save_provider');
+  fd.append('id', id); fd.append('name', name); fd.append('vendor', 'customendpoint');
+  fd.append('url', 'https://api.example.com/v1'); fd.append('enabled', '1');
+  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) { if (d.ok) aiLoad(); });
+}
+
+function aiProvSave(id) {
+  var en = document.getElementById('en_' + id).checked ? 1 : 0;
+  var url = document.getElementById('url_' + id).value;
+  var p = null;
+  for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].id === id) p = AI_PROVIDERS[i];
+  if (!p) return;
+  var fd = new FormData();
+  fd.append('action', 'ai_save_provider');
+  fd.append('id', id); fd.append('name', p.name); fd.append('vendor', p.vendor);
+  fd.append('url', url); fd.append('enabled', en);
+  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
+    alert(d.ok ? '✓ ذخیره شد' : '✗ خطا');
+    aiLoad();
+  });
+}
+
+function aiProvDel(id) {
+  if (!confirm('حذف «' + id + '»؟')) return;
+  var fd = new FormData();
+  fd.append('action', 'ai_delete_provider');
+  fd.append('id', id);
+  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function () { aiLoad(); });
+}
+
+function aiKeyAdd(id) {
+  var key = prompt('کلید API جدید برای ' + id + ':');
+  if (!key || !key.trim()) return;
+  var label = prompt('برچسب (اختیاری):') || '';
+  var fd = new FormData();
+  fd.append('action', 'ai_add_key');
+  fd.append('id', id); fd.append('key', key.trim()); fd.append('label', label);
+  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function () { aiLoad(); });
+}
+
+function aiKeyDel(id, idx) {
+  if (!confirm('حذف این کلید؟')) return;
+  var fd = new FormData();
+  fd.append('action', 'ai_del_key');
+  fd.append('id', id); fd.append('index', String(idx));
+  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function () { aiLoad(); });
+}
+
+function aiTest(pid, midx) {
+  var p = null;
+  for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].id === pid) p = AI_PROVIDERS[i];
+  if (!p) return;
+  var el = document.getElementById('res_' + pid + '_' + midx);
+  if (el) el.textContent = '⏳ …';
+  var fd = new FormData();
+  fd.append('action', 'ai_test_model');
+  fd.append('provider_id', pid);
+  fd.append('model_id', p.models[midx].id);
+  fd.append('key_index', '0');
+  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
+    if (el) el.textContent = d.ok
+      ? ('✓ ' + d.status + ' · ' + d.ms + 'ms · ' + (d.via || 'direct'))
+      : ('✗ ' + d.status + ' · ' + (d.error || ''));
+  }).catch(function () { if (el) el.textContent = 'خطای شبکه'; });
+}
+
+// ---------- چت ----------
+var AI_CHAT_HIST = [];
+function aiChatFill() {
+  var ps = document.getElementById('aiChatProv'), ms = document.getElementById('aiChatModel'), ks = document.getElementById('aiChatKey');
+  ps.innerHTML = ''; ms.innerHTML = ''; ks.innerHTML = '';
+  for (var i = 0; i < AI_PROVIDERS.length; i++) {
+    var o = document.createElement('option');
+    o.value = AI_PROVIDERS[i].id; o.textContent = AI_PROVIDERS[i].name;
+    ps.appendChild(o);
+  }
+  aiChatFillModels();
+}
+function aiChatFillModels() {
+  var pid = document.getElementById('aiChatProv').value;
+  var ms = document.getElementById('aiChatModel'), ks = document.getElementById('aiChatKey');
+  ms.innerHTML = ''; ks.innerHTML = '';
+  var p = null;
+  for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].id === pid) p = AI_PROVIDERS[i];
+  if (!p) return;
+  for (var m = 0; m < p.models.length; m++) {
+    var o = document.createElement('option');
+    o.value = p.models[m].id; o.textContent = p.models[m].id;
+    ms.appendChild(o);
+  }
+  for (var k = 0; k < p.keys.length; k++) {
+    var o2 = document.createElement('option');
+    o2.value = String(k); o2.textContent = 'کلید ' + (k + 1) + (p.keys[k].label ? ' (' + p.keys[k].label + ')' : '');
+    ks.appendChild(o2);
+  }
+}
+function aiChatLog(role, text, meta) {
+  var log = document.getElementById('aiChatLog');
+  var d = document.createElement('div');
+  d.style.marginBottom = '8px';
+  d.style.maxWidth = '90%';
+  d.style.marginLeft = (role === 'user') ? 'auto' : '0';
+  d.style.marginRight = (role === 'user') ? '0' : 'auto';
+  d.style.background = (role === 'user') ? '#1d4ed8' : '#1e293b';
+  d.style.color = '#e8ecf5';
+  d.style.padding = '8px 12px';
+  d.style.borderRadius = '12px';
+  d.style.whiteSpace = 'pre-wrap';
+  d.innerHTML = esc(text) + (meta ? '<div style="font-size:.65rem;color:#94a3b8;margin-top:4px">' + meta + '</div>' : '');
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+function aiChatSend() {
+  var msg = document.getElementById('aiChatMsg').value.trim();
+  if (!msg) return;
+  var pid = document.getElementById('aiChatProv').value;
+  var mid = document.getElementById('aiChatModel').value;
+  if (!pid || !mid) { alert('اول ارائه‌دهنده و مدل را انتخاب کنید'); return; }
+  document.getElementById('aiChatMsg').value = '';
+  AI_CHAT_HIST.push({ role: 'user', content: msg });
+  aiChatLog('user', msg, '');
+  if (AI_CHAT_HIST.length > 20) AI_CHAT_HIST = AI_CHAT_HIST.slice(-20);
+  var fd = new FormData();
+  fd.append('action', 'ai_chat');
+  fd.append('provider_id', pid);
+  fd.append('model_id', mid);
+  fd.append('key_index', document.getElementById('aiChatKey').value || '0');
+  fd.append('messages', JSON.stringify(AI_CHAT_HIST));
+  aiChatLog('assistant', '⏳ …', '');
+  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
+    var log = document.getElementById('aiChatLog');
+    log.removeChild(log.lastChild);
+    if (d.ok) {
+      AI_CHAT_HIST.push({ role: 'assistant', content: d.content });
+      aiChatLog('assistant', d.content, d.status + ' · ' + d.ms + 'ms · مسیر: ' + (d.via || 'direct'));
+    } else {
+      aiChatLog('assistant', '✗ ' + (d.error || 'خطا'), d.status + ' · مسیر: ' + (d.via || ''));
+    }
+  }).catch(function () {
+    var log = document.getElementById('aiChatLog');
+    log.removeChild(log.lastChild);
+    aiChatLog('assistant', '✗ خطای شبکه', '');
+  });
+}
+
 </script>
 </body>
 </html>
@@ -1575,6 +2143,18 @@ if (($_POST['action'] ?? '') === 'save_settings') {
 if (isset($_GET['selftest'])) {
     p_selftest();
 }
+
+// پنل هوش مصنوعی
+if (($_GET['ai'] ?? '') === 'providers') p_ai_providers_list();
+if (($_GET['ai'] ?? '') === 'export')   p_ai_export();
+$aiAction = (string)($_POST['action'] ?? '');
+if ($aiAction === 'ai_import')         p_ai_import();
+if ($aiAction === 'ai_save_provider')  p_ai_save_provider();
+if ($aiAction === 'ai_delete_provider') p_ai_delete_provider();
+if ($aiAction === 'ai_add_key')        p_ai_add_key();
+if ($aiAction === 'ai_del_key')        p_ai_del_key();
+if ($aiAction === 'ai_test_model')     p_ai_run(false);
+if ($aiAction === 'ai_chat')           p_ai_run(true);
 
 if (isset($_GET['url'])) {
     p_handle_proxy();
