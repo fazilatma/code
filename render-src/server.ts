@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { secureHeaders } from 'hono/secure-headers';
 import { config, assertConfig } from './config.js';
+import { DASHBOARD, DASHBOARD_JS, setupPage } from './dashboard.js';
 import { createJob, deleteProfile, enqueueDueProfiles, getJob, getProfile, listJobs, listProducts, listProfiles, migrate, pool, saveProfile, updateJob } from './db.js';
 import { DEFAULT_SELECTORS, type Profile } from './types.js';
 import { testSelector } from './scraper.js';
@@ -29,7 +30,17 @@ async function initializeDatabase(): Promise<boolean> {
 await initializeDatabase();
 
 const app = new Hono();
-app.use('*', secureHeaders());
+app.use('*', secureHeaders({
+  contentSecurityPolicy: {
+    defaultSrc: ["'self'"],
+    scriptSrc: ["'self'"],
+    styleSrc: ["'self'", "'unsafe-inline'"],
+    connectSrc: ["'self'"],
+    imgSrc: ["'self'", 'data:', 'https:'],
+    objectSrc: ["'none'"],
+    frameAncestors: ["'none'"]
+  }
+}));
 app.use('/api/*', cors({ origin: origin => origin, allowHeaders: ['authorization','content-type'], allowMethods: ['GET','POST','PUT','DELETE'] }));
 app.onError((error, c) => { console.error(error); return c.json({ ok: false, error: error.message }, 500); });
 app.get('/health', c => c.json({
@@ -42,6 +53,7 @@ app.get('/health', c => c.json({
   time: new Date().toISOString()
 }));
 app.get('/', c => c.html(databaseReady ? DASHBOARD : setupPage(databaseError)));
+app.get('/dashboard.js', c => c.body(DASHBOARD_JS, 200, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' }));
 
 app.use('/api/*', async (c, next) => {
   if (!databaseReady) return c.json({ ok: false, error: 'Database is not configured', detail: databaseError, setup: 'Create Render PostgreSQL and set DATABASE_URL to its Internal Database URL.' }, 503);
@@ -117,13 +129,3 @@ function normalizeProfile(raw: any): Profile {
     basalamCategoryId: Number(raw.basalamCategoryId ?? raw.bslCategoryId)||0, syncWoo: Boolean(raw.syncWoo), syncBasalam: Boolean(raw.syncBasalam),
     intervalMinutes: Math.max(0,Number(raw.intervalMinutes)||0), lastRunAt: raw.lastRunAt || null, createdAt: raw.createdAt || now, updatedAt: now };
 }
-
-function setupPage(error: string): string {
-  const safeError = error.replace(/[&<>"']/g, value => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[value] || value);
-  return `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>راه‌اندازی Scraper 4</title><style>:root{color-scheme:dark}body{margin:0;background:#07111e;color:#e8eef8;font:15px Tahoma;line-height:2}main{max-width:780px;margin:40px auto;padding:25px}.card{background:#101e31;border:1px solid #29415f;border-radius:15px;padding:22px;margin-top:15px}h1{color:#38bdf8}code,pre{direction:ltr;text-align:left;background:#050b13;border-radius:8px;padding:10px;display:block;overflow:auto}.error{color:#fda4af;border-color:#be123c}b{color:#fcd34d}</style></head><body><main><h1>Scraper 4 روی Render اجرا شد</h1><div class="card error"><b>پایگاه داده هنوز متصل نیست</b><br>${safeError}</div><div class="card"><h2>راه‌اندازی در سه مرحله</h2><ol><li>در Render گزینه <b>New → PostgreSQL</b> را انتخاب و یک دیتابیس بسازید.</li><li>در صفحه دیتابیس مقدار <b>Internal Database URL</b> را کپی کنید.</li><li>در Web Service به <b>Environment</b> بروید و متغیر زیر را اضافه کنید:</li></ol><pre>DATABASE_URL = Internal Database URL</pre><p>همچنین یک مقدار تصادفی طولانی برای متغیر زیر تعریف کنید:</p><pre>ADMIN_TOKEN = a-long-random-secret</pre><p>پس از Save Changes، سرویس خودکار Restart می‌شود و جداول را می‌سازد.</p></div><div class="card"><b>نکته:</b> فایل render.yaml فقط هنگام ساخت سرویس از طریق Blueprint منابع را خودکار ایجاد می‌کند. اتصال یک Web Service موجود به GitHub باعث اجرای خودکار Blueprint نمی‌شود.</div></main></body></html>`;
-}
-
-const DASHBOARD = `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Scraper 4 Render</title><style>
-:root{color-scheme:dark;--bg:#07111e;--card:#101e31;--line:#29415f;--muted:#91a7c1;--blue:#38bdf8;--green:#34d399;--red:#fb7185}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0,#123757,var(--bg) 38%);font:14px Tahoma;color:#e8eef8}main{max-width:1100px;margin:auto;padding:22px}.top,.row{display:flex;align-items:center;justify-content:space-between;gap:10px}h1 b{color:var(--blue)}.card{background:#101e31ee;border:1px solid var(--line);border-radius:14px;padding:17px;margin-top:14px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.five{grid-template-columns:2fr repeat(4,1fr)}label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}input,select,button{width:100%;padding:9px;border-radius:8px;border:1px solid #34506e;background:#081522;color:#e8eef8;font:inherit}button{cursor:pointer;background:#075985;border-color:#0ea5e9;font-weight:bold}.green{background:#065f46}.red{background:#881337}.actions{display:flex;gap:6px}.actions button{width:auto}.item{padding:11px;border:1px solid #263e58;background:#081522;border-radius:9px;margin-top:8px}.item small{display:block;color:var(--muted);direction:ltr}.log{white-space:pre-wrap;background:#040b13;padding:12px;border-radius:9px;min-height:80px;max-height:400px;overflow:auto}@media(max-width:720px){.grid,.five{grid-template-columns:1fr}.top,.row{align-items:stretch;flex-direction:column}.actions{flex-wrap:wrap}}</style></head><body><main><div class="top"><h1>اسکرپر <b>۴</b> روی Render</h1><span>Node.js · Hono · PostgreSQL · Cheerio</span></div><div class="card grid"><div><label>ADMIN_TOKEN</label><input id="token" type="password"></div><button onclick="load()">اتصال</button></div><div class="card"><h2>پروفایل جدید</h2><div class="grid"><div><label>نام</label><input id="name"></div><div><label>URL</label><input id="url" dir="ltr"></div></div><div class="grid five" style="margin-top:10px"><div><label>محصول</label><input id="container" value="li.product" dir="ltr"></div><div><label>عنوان</label><input id="title" value="h2" dir="ltr"></div><div><label>قیمت</label><input id="price" value=".price" dir="ltr"></div><div><label>لینک</label><input id="link" value="a[href]" dir="ltr"></div><div><label>تصویر</label><input id="image" value="img" dir="ltr"></div></div><div class="grid" style="margin-top:10px"><div><label>تعداد صفحات</label><input id="pages" type="number" value="1"></div><div><label>اجرای دوره‌ای، دقیقه (۰=خاموش)</label><input id="interval" type="number" value="0"></div></div><button class="green" onclick="saveProfile()" style="margin-top:10px">ذخیره</button></div><div class="card"><h2>پروفایل‌ها</h2><div id="profiles"></div></div><div class="card"><h2>وضعیت</h2><div id="out" class="log">آماده</div></div></main><script>
-const $=id=>document.getElementById(id),H=()=>({'content-type':'application/json',authorization:'Bearer '+$('token').value});async function api(p,o={}){const r=await fetch(p,{...o,headers:{...H(),...(o.headers||{})}}),d=await r.json();if(!r.ok)throw Error(d.error||r.status);return d}function out(v){$('out').textContent=JSON.stringify(v,null,2)}async function load(){localStorage.s4rt=$('token').value;try{const d=await api('/api/profiles');$('profiles').innerHTML=d.profiles.map(p=>'<div class="item row"><div><b>'+esc(p.name)+'</b><small>'+esc(p.url)+'</small></div><div class="actions"><button onclick="run(\''+p.id+'\')">استخراج</button><button class="green" onclick="sync(\''+p.id+'\')">ارسال</button><button class="red" onclick="delp(\''+p.id+'\')">حذف</button></div></div>').join('')||'پروفایلی نیست';out(await api('/api/status'))}catch(e){out({error:e.message})}}async function saveProfile(){try{await api('/api/profiles',{method:'POST',body:JSON.stringify({name:$('name').value,url:$('url').value,pages:+$('pages').value,intervalMinutes:+$('interval').value,selectors:{container:$('container').value,title:$('title').value,price:$('price').value,link:$('link').value,image:$('image').value}})});load()}catch(e){out({error:e.message})}}async function run(id){try{const d=await api('/api/profiles/'+id+'/scrape',{method:'POST',body:'{}'});out(d);watch(d.job.id)}catch(e){out({error:e.message})}}async function sync(id){try{const d=await api('/api/profiles/'+id+'/sync',{method:'POST',body:JSON.stringify({target:'both'})});out(d);watch(d.job.id)}catch(e){out({error:e.message})}}function watch(id){const t=setInterval(async()=>{try{const d=await api('/api/jobs/'+id);out(d.job);if(!['queued','running'].includes(d.job.status))clearInterval(t)}catch(e){clearInterval(t)}},1500)}async function delp(id){if(confirm('حذف شود؟')){await api('/api/profiles/'+id,{method:'DELETE'});load()}}function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}$('token').value=localStorage.s4rt||'';load();
-</script></body></html>`;
