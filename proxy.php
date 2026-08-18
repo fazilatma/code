@@ -107,8 +107,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.2.4');
-define('PROXY_BUILD', '2026-08-18-04');
+define('PROXY_VERSION', '1.2.5');
+define('PROXY_BUILD', '2026-08-18-05');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -1584,8 +1584,9 @@ button:hover { filter:brightness(1.1); }
 .aiacc-hdr:hover { background:#1a2136; }
 .aiacc-arrow { color:var(--mut); width:14px; display:inline-block; font-size:.8rem; }
 .aiacc-body { border-top:1px solid var(--line); padding:12px 14px; }
-table.ait { width:100%; border-collapse:collapse; font-size:.76rem; margin-top:4px; }
-table.ait th, table.ait td { border:1px solid var(--line); padding:5px 8px; text-align:right; }
+.aitwrap { overflow-x:auto; -webkit-overflow-scrolling:touch; border:1px solid var(--line); border-radius:8px; margin-top:4px; }
+table.ait { width:100%; min-width:820px; border-collapse:collapse; font-size:.76rem; }
+table.ait th, table.ait td { border:1px solid var(--line); padding:5px 8px; text-align:right; white-space:nowrap; }
 table.ait th { background:#0b0f1a; color:var(--mut); }
 table.ait td.ltr, table.ait th.ltr { direction:ltr; text-align:left; font-family:Consolas,monospace; }
 .st-ok { color:var(--ok); font-weight:700; }
@@ -1701,9 +1702,9 @@ a { color:var(--acc); }
 
 <h2>💬 چت با مدل</h2>
 <div class="testbox">
-<select id="aiChatProv" onchange="aiChatFill()" style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px"></select>
-<select id="aiChatModel" style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px"></select>
-<select id="aiChatKey" style="flex:0.6;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px"></select>
+<select id="aiChatProv" onchange="aiChatFillModels()" style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px"></select>
+<select id="aiChatModel" onchange="AI_CHAT_SEL.model=this.value" style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px"></select>
+<select id="aiChatKey" onchange="AI_CHAT_SEL.key=this.value" style="flex:0.6;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px"></select>
 </div>
 <div id="aiChatLog" style="height:340px;overflow:auto;background:#0b0f1a;border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px;font-size:.85rem"></div>
 <div class="testbox">
@@ -1880,7 +1881,7 @@ function aiRender() {
       h += '</div>';
     }
     h += '<div style="font-size:.78rem;color:var(--mut);margin:6px 0">مدل‌ها (' + p.models.length + ') — پیام تست: «سلام»</div>';
-    h += '<table class="ait"><thead><tr>'
+    h += '<div class="aitwrap"><table class="ait"><thead><tr>'
        + '<th style="width:32px">#</th>'
        + '<th class="ltr">شناسهٔ مدل</th>'
        + '<th style="width:82px">وضعیت</th>'
@@ -1895,7 +1896,7 @@ function aiRender() {
     } else {
       for (var m = 0; m < p.models.length; m++) h += aiRowHtml(p.id, m, p.models[m]);
     }
-    h += '</tbody></table>'
+    h += '</tbody></table></div>'
        + '<div id="all_' + esc(p.id) + '" style="margin-top:8px;font-size:.78rem;color:var(--mut)"></div>'
        + '</div></div>';
   }
@@ -2006,19 +2007,31 @@ function aiTestAll(pid) {
 
 // ---------- چت ----------
 var AI_CHAT_HIST = [];
+var AI_CHAT_SEL = { prov: '', model: '', key: '0' };
+
 function aiChatFill() {
-  var ps = document.getElementById('aiChatProv'), ms = document.getElementById('aiChatModel'), ks = document.getElementById('aiChatKey');
-  ps.innerHTML = ''; ms.innerHTML = ''; ks.innerHTML = '';
+  var ps = document.getElementById('aiChatProv');
+  var prevProv = AI_CHAT_SEL.prov || ps.value;
+  ps.innerHTML = '';
   for (var i = 0; i < AI_PROVIDERS.length; i++) {
     var o = document.createElement('option');
     o.value = AI_PROVIDERS[i].id; o.textContent = AI_PROVIDERS[i].name;
     ps.appendChild(o);
   }
+  // حفظ انتخاب قبلی به‌جای بازنشانی به اولین ارائه‌دهنده
+  var pFound = false;
+  for (var j = 0; j < ps.options.length; j++) if (ps.options[j].value === prevProv) pFound = true;
+  if (pFound && prevProv) ps.value = prevProv;
+  AI_CHAT_SEL.prov = ps.value;
   aiChatFillModels();
 }
+
 function aiChatFillModels() {
   var pid = document.getElementById('aiChatProv').value;
+  AI_CHAT_SEL.prov = pid;
   var ms = document.getElementById('aiChatModel'), ks = document.getElementById('aiChatKey');
+  var prevModel = AI_CHAT_SEL.model;
+  var prevKey = (AI_CHAT_SEL.key !== undefined && AI_CHAT_SEL.key !== null) ? String(AI_CHAT_SEL.key) : '0';
   ms.innerHTML = ''; ks.innerHTML = '';
   var p = null;
   for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].id === pid) p = AI_PROVIDERS[i];
@@ -2028,11 +2041,21 @@ function aiChatFillModels() {
     o.value = p.models[m].id; o.textContent = p.models[m].id;
     ms.appendChild(o);
   }
+  // حفظ انتخاب قبلی مدل (اگر هنوز در ارائه‌دهندهٔ جدید وجود دارد)
+  var mFound = false;
+  for (var j2 = 0; j2 < ms.options.length; j2++) if (ms.options[j2].value === prevModel) mFound = true;
+  if (mFound && prevModel) ms.value = prevModel;
+  AI_CHAT_SEL.model = ms.value || '';
+
   for (var k = 0; k < p.keys.length; k++) {
     var o2 = document.createElement('option');
     o2.value = String(k); o2.textContent = 'کلید ' + (k + 1) + (p.keys[k].label ? ' (' + p.keys[k].label + ')' : '');
     ks.appendChild(o2);
   }
+  var kFound = false;
+  for (var j3 = 0; j3 < ks.options.length; j3++) if (ks.options[j3].value === prevKey) kFound = true;
+  if (kFound) ks.value = prevKey;
+  AI_CHAT_SEL.key = ks.value || '0';
 }
 function aiChatLog(role, text, meta) {
   var log = document.getElementById('aiChatLog');
@@ -2056,6 +2079,8 @@ function aiChatSend() {
   var pid = document.getElementById('aiChatProv').value;
   var mid = document.getElementById('aiChatModel').value;
   if (!pid || !mid) { alert('اول ارائه‌دهنده و مدل را انتخاب کنید'); return; }
+  AI_CHAT_SEL.prov = pid; AI_CHAT_SEL.model = mid;
+  AI_CHAT_SEL.key = document.getElementById('aiChatKey').value || '0';
   document.getElementById('aiChatMsg').value = '';
   AI_CHAT_HIST.push({ role: 'user', content: msg });
   aiChatLog('user', msg, '');
