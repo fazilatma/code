@@ -20,7 +20,8 @@
     "@hono/node-server": "^1.19.1",
     "cheerio": "^1.1.2",
     "hono": "^4.13.3",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "undici": "^7.29.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

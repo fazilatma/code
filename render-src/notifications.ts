@@ -1,0 +1,5 @@
+import { loadConnections } from './connections.js';
+import { safeFetch } from './network.js';
+
+export async function sendNotification(channel:'bale'|'rubika'|'webhook',text:string){const n=(await loadConnections()).notifications;if(channel==='bale'){if(!n.baleToken||!n.baleChatId)throw Error('توکن یا Chat ID بله خالی است');return send(`https://tapi.bale.ai/bot${n.baleToken}/sendMessage`,{chat_id:n.baleChatId,text})}if(channel==='rubika'){if(!n.rubikaToken||!n.rubikaChatId)throw Error('توکن یا Chat ID روبیکا خالی است');return send(`https://botapi.rubika.ir/v3/${n.rubikaToken}/sendMessage`,{chat_id:n.rubikaChatId,text})}if(!n.url)throw Error('Webhook URL خالی است');return send(n.url,{chat_id:n.chatId,text,token:n.token})}
+async function send(url:string,payload:unknown){const response=await safeFetch(url,{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify(payload)},1_000_000),body=await response.json().catch(()=>null);if(!response.ok)throw Error(`Notification HTTP ${response.status}`);return{ok:true,code:response.status,body}}

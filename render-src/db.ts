@@ -57,6 +57,15 @@ export async function migrate(): Promise<void> {
       updated_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS jobs_queue_idx ON jobs(status, created_at);
+    CREATE TABLE IF NOT EXISTS destination_map (
+      profile_id text NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+      source_key text NOT NULL,
+      target text NOT NULL,
+      account_key text NOT NULL DEFAULT 'default',
+      remote_id bigint NOT NULL,
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY(profile_id,source_key,target,account_key)
+    );
     CREATE TABLE IF NOT EXISTS app_state (
       key text PRIMARY KEY,
       value jsonb NOT NULL,
@@ -170,6 +179,9 @@ export async function getRemoteId(profileId: string, sourceKey: string, target: 
   return rows[0]?.id ? Number(rows[0].id) : null;
 }
 
+export async function getDestinationId(profileId:string,sourceKey:string,target:string,accountKey='default'):Promise<number|null>{const {rows}=await pool.query('SELECT remote_id FROM destination_map WHERE profile_id=$1 AND source_key=$2 AND target=$3 AND account_key=$4',[profileId,sourceKey,target,accountKey]);return rows[0]?.remote_id?Number(rows[0].remote_id):null}
+export async function setDestinationId(profileId:string,sourceKey:string,target:string,accountKey:string,remoteId:number):Promise<void>{await pool.query(`INSERT INTO destination_map(profile_id,source_key,target,account_key,remote_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT(profile_id,source_key,target,account_key) DO UPDATE SET remote_id=EXCLUDED.remote_id,updated_at=now()`,[profileId,sourceKey,target,accountKey,remoteId])}
+
 export async function markProfileRun(id: string): Promise<void> { await pool.query('UPDATE profiles SET last_run_at=now() WHERE id=$1', [id]); }
 
 export async function getState<T>(key: string, fallback: T): Promise<T> {
@@ -182,11 +194,11 @@ export async function setState(key: string, value: unknown): Promise<void> {
 }
 
 export async function createBackup(): Promise<Record<string, unknown>> {
-  const [profiles, products, jobs, states] = await Promise.all([
+  const [profiles, products, jobs, states, maps] = await Promise.all([
     pool.query('SELECT * FROM profiles ORDER BY created_at'), pool.query('SELECT * FROM products ORDER BY profile_id,created_at'),
-    pool.query('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 1000'), pool.query('SELECT * FROM app_state ORDER BY key')
+    pool.query('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 1000'), pool.query('SELECT * FROM app_state ORDER BY key'),pool.query('SELECT * FROM destination_map ORDER BY profile_id,target,account_key')
   ]);
-  return { app: 'scraper4-render', version: 1, createdAt: new Date().toISOString(), profiles: profiles.rows, products: products.rows, jobs: jobs.rows, states: states.rows };
+  return { app: 'scraper4-render', version: 1, createdAt: new Date().toISOString(), profiles: profiles.rows, products: products.rows, jobs: jobs.rows, states: states.rows, destinationMap:maps.rows };
 }
 
 export async function restoreBackup(bundle: any): Promise<{ profiles: number; products: number; states: number }> {
@@ -196,6 +208,7 @@ export async function restoreBackup(bundle: any): Promise<{ profiles: number; pr
     await client.query('BEGIN');
     for (const row of bundle.profiles || []) { await client.query(`INSERT INTO profiles(id,data,enabled,interval_minutes,last_run_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,COALESCE($6,now()),now()) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data,enabled=EXCLUDED.enabled,interval_minutes=EXCLUDED.interval_minutes,last_run_at=EXCLUDED.last_run_at,updated_at=now()`, [row.id,row.data,row.enabled,row.interval_minutes,row.last_run_at,row.created_at]); pCount++; }
     for (const row of bundle.products || []) { await client.query(`INSERT INTO products(profile_id,source_key,data,title,price,source_url,remote_woo_id,remote_basalam_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,now()),now()) ON CONFLICT(profile_id,source_key) DO UPDATE SET data=EXCLUDED.data,title=EXCLUDED.title,price=EXCLUDED.price,source_url=EXCLUDED.source_url,remote_woo_id=EXCLUDED.remote_woo_id,remote_basalam_id=EXCLUDED.remote_basalam_id,updated_at=now()`, [row.profile_id,row.source_key,row.data,row.title,row.price,row.source_url,row.remote_woo_id,row.remote_basalam_id,row.created_at]); productCount++; }
+    for (const row of bundle.destinationMap || []) { await client.query(`INSERT INTO destination_map(profile_id,source_key,target,account_key,remote_id,updated_at) VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(profile_id,source_key,target,account_key) DO UPDATE SET remote_id=EXCLUDED.remote_id,updated_at=now()`,[row.profile_id,row.source_key,row.target,row.account_key,row.remote_id]); }
     for (const row of bundle.states || []) { await client.query(`INSERT INTO app_state(key,value,updated_at) VALUES($1,$2,now()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`, [row.key,row.value]); stateCount++; }
     await client.query('COMMIT'); return { profiles:pCount,products:productCount,states:stateCount };
   } catch(error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
