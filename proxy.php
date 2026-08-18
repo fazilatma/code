@@ -53,6 +53,10 @@
  *    direct_fallback → مستقیم/بالادستی، روی هر خطا ورکر (پیش‌فرض)
  *    worker          → همهٔ درخواست‌ها مستقیم از ورکر کلودفلر
  *
+ *  تایم‌اوت کلی (قابل تنظیم از داشبورد — ذخیره در proxy-settings.json):
+ *    بودجهٔ زمانی کل زنجیره (مستقیم + بالادستی + ورکر) به ثانیه؛ هدر
+ *    X-Proxy-Time هم می‌تواند به‌ازای هر درخواست آن را override کند.
+ *
  *  مسیر عبور هر پاسخ در هدر X-Proxy-Route گزارش می‌شود:
  *    direct (مستقیم) | upstream (پراکسی بالادستی) | worker (ورکر کلودفلر) | cache
  *
@@ -121,8 +125,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.3.0');
-define('PROXY_BUILD', '2026-08-18-10');
+define('PROXY_VERSION', '1.3.1');
+define('PROXY_BUILD', '2026-08-18-11');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -151,7 +155,7 @@ const PROXY_SETTINGS_FILE = __DIR__ . '/proxy-settings.json';
 
 /** خواندن تنظیمات ذخیره‌شده؛ null یعنی «ذخیره نشده → از $CONFIG» */
 function p_load_settings(): array {
-    $out = ['cloudflare_worker_url' => null, 'rewrite_urls' => null, 'route_mode' => null];
+    $out = ['cloudflare_worker_url' => null, 'rewrite_urls' => null, 'route_mode' => null, 'timeout' => null];
     if (!is_file(PROXY_SETTINGS_FILE)) return $out;
     $j = @json_decode((string)@file_get_contents(PROXY_SETTINGS_FILE), true);
     if (!is_array($j)) return $out;
@@ -160,6 +164,9 @@ function p_load_settings(): array {
     if (array_key_exists('route_mode', $j)) {
         $out['route_mode'] = in_array((string)$j['route_mode'], ['direct', 'direct_fallback', 'worker'], true)
             ? (string)$j['route_mode'] : 'direct_fallback';
+    }
+    if (array_key_exists('timeout', $j)) {
+        $out['timeout'] = max(1, min(300, (int)$j['timeout']));
     }
     return $out;
 }
@@ -189,12 +196,40 @@ function p_effective_rewrite(): bool {
     return !empty($GLOBALS['CONFIG']['rewrite_urls']);
 }
 
+/**
+ * تایم‌اوت کلی مؤثر (ثانیه) — بودجهٔ زمانی کل زنجیره (مستقیم + بالادستی + ورکر).
+ * تنظیمات داشبورد ← $CONFIG ← ۳۰.
+ */
+function p_effective_timeout(): int {
+    $s = p_load_settings();
+    if ($s['timeout'] !== null) return $s['timeout'];
+    return max(1, min(300, (int)($GLOBALS['CONFIG']['timeout'] ?? 30)));
+}
+
+/**
+ * بودجهٔ زمانی باقی‌مانده تا مهلت (ثانیه، حداقل ۱).
+ * همهٔ تلاش‌های زنجیره از همین بودجهٔ مشترک مصرف می‌کنند.
+ */
+function p_budget_left(float $deadline): int {
+    return max(1, (int)ceil($deadline - microtime(true)));
+}
+
+/** اگر خطای اتصال از نوع تایم‌اوت بود، پیام تمیز «تایم‌اوت کلی» بده */
+function p_normalize_timeout(array $res): array {
+    if ($res['error'] !== null && stripos((string)$res['error'], 'timed out') !== false) {
+        $res['status'] = 504;
+        $res['error'] = 'تایم‌اوت کلی زنجیره — بودجهٔ زمانی تمام شد';
+    }
+    return $res;
+}
+
 /** ذخیرهٔ تنظیمات داشبورد */
-function p_save_settings(string $workerUrl, bool $rewrite, string $routeMode = 'direct_fallback'): array {
+function p_save_settings(string $workerUrl, bool $rewrite, string $routeMode = 'direct_fallback', ?int $timeout = null): array {
     $cur = p_load_settings();
     $cur['cloudflare_worker_url'] = trim($workerUrl);
     $cur['rewrite_urls'] = $rewrite;
     $cur['route_mode'] = in_array($routeMode, ['direct', 'direct_fallback', 'worker'], true) ? $routeMode : 'direct_fallback';
+    if ($timeout !== null) $cur['timeout'] = max(1, min(300, $timeout));
     $ok = @file_put_contents(PROXY_SETTINGS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX) !== false;
     return ['ok' => $ok];
 }
@@ -662,13 +697,18 @@ function p_curl_once(string $url, string $method, array $headers, string $body, 
 }
 
 /** چرخش بین پراکسی‌های بالادستی: تلاش تا دریافت پاسخ قابل‌قبول */
-function p_rotate_attempt(string $url, string $method, array $headers, string $body, int $timeout): array {
+function p_rotate_attempt(string $url, string $method, array $headers, string $body, float $deadline): array {
     $cfg = $GLOBALS['CONFIG'];
     $mode = p_effective_route_mode();
 
+    // مهلت سراسری تمام شده؟
+    if (microtime(true) > $deadline) {
+        return ['status' => 504, 'headers' => [], 'body' => '', 'error' => 'تایم‌اوت کلی زنجیره — بودجهٔ زمانی تمام شد'];
+    }
+
     // حالت «همیشه ورکر»: همهٔ درخواست‌ها — بیرونی و داخلی — مستقیم از ورکر
     if ($mode === 'worker') {
-        $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
+        $fb = p_fallback_attempt($url, $method, $headers, $body, $deadline);
         if ($fb !== null && $fb['error'] === null) {
             $fb['via'] = 'worker';
             return $fb;
@@ -688,7 +728,11 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
     $last = null;
 
     foreach ($attempts as $proxy) {
-        $res = p_curl_once($url, $method, $headers, $body, $proxy, $timeout);
+        if (microtime(true) > $deadline) {
+            return ['status' => 504, 'headers' => [], 'body' => '', 'error' => 'تایم‌اوت کلی زنجیره — بودجهٔ زمانی تمام شد'];
+        }
+        // هر تلاش فقط از بودجهٔ باقی‌ماندهٔ کل زنجیره استفاده می‌کند
+        $res = p_curl_once($url, $method, $headers, $body, $proxy, p_budget_left($deadline));
         $last = $res;
 
         if ($mode === 'direct') {
@@ -710,20 +754,23 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
     }
 
     if ($mode === 'direct') {
-        return $last ?? ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'نامشخص'];
+        return p_normalize_timeout($last ?? ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'نامشخص']);
     }
 
     // direct_fallback: روی هر خطایی (اتصال یا وضعیت ≥۴۰۰) ورکر کلودفلر
     if ($last !== null
         && ($last['error'] !== null || (int)$last['status'] >= 400 || in_array($last['status'], $fallbackStatuses, true))) {
-        $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
+        if (microtime(true) > $deadline) {
+            return ['status' => 504, 'headers' => [], 'body' => '', 'error' => 'تایم‌اوت کلی زنجیره — بودجهٔ زمانی تمام شد'];
+        }
+        $fb = p_fallback_attempt($url, $method, $headers, $body, $deadline);
         if ($fb !== null && $fb['error'] === null) {
             $fb['via'] = 'worker';
             return $fb;
         }
     }
 
-    return $last ?? ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'نامشخص'];
+    return p_normalize_timeout($last ?? ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'نامشخص']);
 }
 
 /**
@@ -732,21 +779,28 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
  *   ۱) پراکسی‌های بالادستی — آن‌ها DNS را از شبکهٔ خودشان حل می‌کنند
  *   ۲) ورکر کلودفلر — DNS را از شبکهٔ کلودفلر حل می‌کند
  */
-function p_filtered_attempt(string $url, string $method, array $headers, string $body, int $timeout): array {
+function p_filtered_attempt(string $url, string $method, array $headers, string $body, float $deadline): array {
     $cfg = $GLOBALS['CONFIG'];
     $mode = p_effective_route_mode();
 
+    if (microtime(true) > $deadline) {
+        return ['status' => 504, 'headers' => [], 'body' => '', 'error' => 'تایم‌اوت کلی زنجیره — بودجهٔ زمانی تمام شد'];
+    }
+
     if ($mode === 'direct') {
         // حالت مستقیم: بدون جایگزین — تلاش مستقیم (به IP فیلترینگ می‌خورد) و همان نتیجه برگردانده می‌شود
-        $res = p_curl_once($url, $method, $headers, $body, null, $timeout);
+        $res = p_curl_once($url, $method, $headers, $body, null, p_budget_left($deadline));
         if ($res['error'] === null) $res['via'] = 'direct';
-        return $res;
+        return p_normalize_timeout($res);
     }
 
     if ($mode === 'direct_fallback' && $cfg['rotate_upstream']) {
         foreach ((array)$cfg['upstream_proxies'] as $proxy) {
             if ($proxy === null || $proxy === '') continue;
-            $res = p_curl_once($url, $method, $headers, $body, $proxy, $timeout);
+            if (microtime(true) > $deadline) {
+                return ['status' => 504, 'headers' => [], 'body' => '', 'error' => 'تایم‌اوت کلی زنجیره — بودجهٔ زمانی تمام شد'];
+            }
+            $res = p_curl_once($url, $method, $headers, $body, $proxy, p_budget_left($deadline));
             if ($res['error'] === null && (int)$res['status'] < 400) {
                 $res['via'] = 'upstream';
                 return $res;
@@ -754,7 +808,7 @@ function p_filtered_attempt(string $url, string $method, array $headers, string 
         }
     }
 
-    $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
+    $fb = p_fallback_attempt($url, $method, $headers, $body, $deadline);
     if ($fb !== null && $fb['error'] === null) {
         $fb['via'] = 'worker';
         return $fb;
@@ -783,7 +837,7 @@ function p_fallback_url(array $cfg): string {
  * کنترل‌هدرها به‌صورت X-Proxy-* به ورکر منتقل می‌شوند تا مقصد
  * همان User-Agent/Referer/Cookie را ببیند.
  */
-function p_fallback_attempt(string $url, string $method, array $headers, string $body, int $timeout): ?array {
+function p_fallback_attempt(string $url, string $method, array $headers, string $body, float $deadline): ?array {
     $cfg = $GLOBALS['CONFIG'];
     $fb = p_fallback_url($cfg);
     if ($fb === '') return null;
@@ -834,7 +888,8 @@ function p_fallback_attempt(string $url, string $method, array $headers, string 
     if ($apiKeyValue !== null && $apiKeyValue !== '') $ctrl[] = 'X-Proxy-Api-Key: ' . $apiKeyValue;
     if (!empty($cfg['fallback_key'])) $ctrl[] = 'X-Proxy-Key: ' . $cfg['fallback_key'];
 
-    $res = p_curl_once($fbUrl, $method, $ctrl, $body, null, $timeout);
+    if (microtime(true) > $deadline) return null; // بودجهٔ زمانی تمام شده
+    $res = p_curl_once($fbUrl, $method, $ctrl, $body, null, p_budget_left($deadline));
     if ($res['error'] !== null) return null; // ورکر هم در دسترس نبود → خطای اصلی را برگردان
     return $res;
 }
@@ -914,12 +969,14 @@ function p_relay_request(string $url): void {
         p_error(405, 'bad_method', "متد {$method} پشتیبانی نمی‌شود");
     }
 
-    // تایم‌اوت سفارشی
-    $timeout = (int)$cfg['timeout'];
+    // تایم‌اوت کلی (بودجهٔ زمانی کل زنجیره: مستقیم + بالادستی + ورکر)
+    // از تنظیمات داشبورد ← $CONFIG؛ هدر X-Proxy-Time هم می‌تواند به‌ازای هر درخواست override کند
+    $timeout = p_effective_timeout();
     $t = p_in_header('X-Proxy-Time');
     if ($t !== null && ctype_digit(trim($t))) {
         $timeout = max(1, min(300, (int)trim($t)));
     }
+    $deadline = microtime(true) + $timeout;
 
     // بدنهٔ درخواست ورودی
     $body = '';
@@ -963,12 +1020,12 @@ function p_relay_request(string $url): void {
         if (($v['dns'] ?? 'ok') === 'filtered') {
             // DNS مسموم/فیلتر (مثل facebook.com روی هاست ایرانی):
             // اتصال مستقیم به IP فیلترینگ می‌خورد → مستقیم سراغ مسیر جایگزین
-            $result = p_filtered_attempt($current, $method, $forward, $body, $timeout);
+            $result = p_filtered_attempt($current, $method, $forward, $body, $deadline);
             if ($result['error'] !== null) {
                 p_error($result['status'], 'dns_filtered', $result['error']);
             }
         } else {
-            $result = p_rotate_attempt($current, $method, $forward, $body, $timeout);
+            $result = p_rotate_attempt($current, $method, $forward, $body, $deadline);
             if ($result['error'] !== null) {
                 p_error($result['status'], 'upstream_failed', $result['error']);
             }
@@ -1358,16 +1415,17 @@ function ai_extract_content(array $body): string {
 
 /** درخواست AI از مسیر زنجیرهٔ خود پراکسی (مستقیم ← بالادستی ← ورکر کلودفلر) */
 function ai_proxy_call(string $url, string $apiKey, string $payloadJson): array {
-    $cfg = $GLOBALS['CONFIG'];
     $headers = ['Content-Type: application/json', 'Accept: application/json'];
     if ($apiKey !== '') $headers[] = 'Authorization: Bearer ' . $apiKey;
-    $timeout = max(30, min(180, (int)$cfg['timeout']));
+    // بودجهٔ زمانی سراسری (تنظیمات داشبورد) — برای تست مدل‌ها حداقل ۳۰ ثانیه
+    $timeout = max(30, min(300, p_effective_timeout()));
+    $deadline = microtime(true) + $timeout;
     $v = p_validate_url($url); // اعتبارسنجی امنیتی (دامنه/سیاست DNS)
     $start = microtime(true);
     if (($v['dns'] ?? 'ok') === 'filtered') {
-        $res = p_filtered_attempt($url, 'POST', $headers, $payloadJson, $timeout);
+        $res = p_filtered_attempt($url, 'POST', $headers, $payloadJson, $deadline);
     } else {
-        $res = p_rotate_attempt($url, 'POST', $headers, $payloadJson, $timeout);
+        $res = p_rotate_attempt($url, 'POST', $headers, $payloadJson, $deadline);
     }
     return ['res' => $res, 'ms' => (int)round((microtime(true) - $start) * 1000)];
 }
@@ -1503,6 +1561,7 @@ function p_ai_delete_provider(): void {
 
 /** تفسیر مشترک نتیجهٔ یک درخواست AI: ok/status/ms/via/error/content */
 function ai_interpret_result(array $res, int $ms): array {
+    $res = p_normalize_timeout($res); // تایم‌اوت سطح cURL → پیام تمیز
     $bodyArr = json_decode((string)$res['body'], true);
     if (!is_array($bodyArr)) $bodyArr = [];
     $content = ai_extract_content($bodyArr);
@@ -1708,6 +1767,11 @@ a { color:var(--acc); }
 </div>
 <div id="cfgRouteHint" class="meta" style="margin-bottom:10px"></div>
 <div class="crow" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+<label style="font-size:.85rem">⏱️ تایم‌اوت کلی (ثانیه):</label>
+<input type="number" id="cfgTimeout" min="1" max="300" value="30" style="width:110px;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:9px 12px;direction:ltr;font-family:Consolas,monospace">
+<span style="font-size:.78rem;color:var(--mut)">بودجهٔ زمانی کل زنجیره (مستقیم + بالادستی + ورکر) — با هدر X-Proxy-Time هم قابل override است</span>
+</div>
+<div class="crow" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
 <label style="font-size:.85rem">آدرس ورکر کلودفلر:</label>
 <input id="cfgWorker" placeholder="https://proxy.fazilat-ma.workers.dev" style="flex:1;min-width:260px;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px 12px;direction:ltr;font-family:Consolas,monospace">
 </div>
@@ -1862,6 +1926,7 @@ function saveSettings() {
   fd.append('worker_url', document.getElementById('cfgWorker').value.trim());
   fd.append('rewrite', document.getElementById('cfgRewrite').checked ? '1' : '0');
   fd.append('route_mode', document.getElementById('cfgRoute').value || 'direct_fallback');
+  fd.append('timeout', document.getElementById('cfgTimeout').value || '30');
   st.textContent = 'در حال ذخیره…';
   fetch('', { method: 'POST', body: fd })
     .then(function (r) { return r.json(); })
@@ -1869,7 +1934,8 @@ function saveSettings() {
       if (d.ok) {
         st.textContent = '✓ ذخیره شد — ورکر: ' + (d.worker_url || 'خالی (فالبک غیرفعال)')
                        + ' — بازنویسی: ' + (d.rewrite_urls ? 'فعال' : 'غیرفعال')
-                       + ' — مسیر: ' + (d.route_mode || '');
+                       + ' — مسیر: ' + (d.route_mode || '')
+                       + ' — تایم‌اوت: ' + (d.timeout || '') + 's';
         setTimeout(function () { location.reload(); }, 1200);
       } else {
         st.textContent = '✗ ' + (d.error || 'خطا در ذخیره');
@@ -1896,10 +1962,13 @@ function loadSettings() {
       document.getElementById('cfgRewrite').checked = !!d.rewrite_urls;
       var rsel = document.getElementById('cfgRoute');
       if (d.route_mode) rsel.value = d.route_mode;
+      var tsel = document.getElementById('cfgTimeout');
+      if (tsel && d.timeout) tsel.value = d.timeout;
       routeHint();
       document.getElementById('cfgStatus').textContent = 'وضعیت فعلی: ورکر ' + (d.worker_url || 'خالی')
         + ' — بازنویسی: ' + (d.rewrite_urls ? 'فعال' : 'غیرفعال')
-        + ' — مسیر: ' + (d.route_mode || 'direct_fallback');
+        + ' — مسیر: ' + (d.route_mode || 'direct_fallback')
+        + ' — تایم‌اوت: ' + (d.timeout || '') + 's';
     })
     .catch(function () {});
 }
@@ -2321,7 +2390,8 @@ function p_selftest(): void {
     if ($target === '') p_error(400, 'missing_target', 'پارامتر selftest خالی است؛ نمونه: ?selftest=https%3A%2F%2Fapi.groq.com%2Fv1%2Fmodels');
 
     $v = p_validate_url($target); // آدرس نامعتبر/مسدود با JSON خارج می‌شود
-    $timeout = max(5, min(20, (int)$cfg['timeout']));
+    $timeout = max(5, min(20, p_effective_timeout()));
+    $deadline = microtime(true) + $timeout;
     $headers = ['Accept: */*'];
     $attempts = [];
     $ok = false;
@@ -2344,18 +2414,19 @@ function p_selftest(): void {
 
     if (($v['dns'] ?? 'ok') === 'ok') {
         $t0 = microtime(true);
-        $try('direct', p_curl_once($target, 'GET', $headers, '', null, $timeout), $t0);
+        $try('direct', p_curl_once($target, 'GET', $headers, '', null, p_budget_left($deadline)), $t0);
     }
     if (!$ok && $cfg['rotate_upstream']) {
         foreach ((array)$cfg['upstream_proxies'] as $px) {
             if ($px === null || $px === '') continue;
+            if (microtime(true) > $deadline) break;
             $t0 = microtime(true);
-            if ($try('upstream', p_curl_once($target, 'GET', $headers, '', $px, $timeout), $t0)) break;
+            if ($try('upstream', p_curl_once($target, 'GET', $headers, '', $px, p_budget_left($deadline)), $t0)) break;
         }
     }
     if (!$ok) {
         $t0 = microtime(true);
-        $fb = p_fallback_attempt($target, 'GET', $headers, '', $timeout);
+        $fb = p_fallback_attempt($target, 'GET', $headers, '', $deadline);
         if ($fb === null) {
             $attempts[] = ['via' => 'worker', 'status' => null, 'error' => 'فالبک تنظیم نشده یا همان مقصد است', 'ms' => (int)round((microtime(true) - $t0) * 1000)];
         } else {
@@ -2394,6 +2465,7 @@ function p_info(): void {
         'fallback_worker'  => p_fallback_url($cfg) !== '' ? p_fallback_url($cfg) : null,
         'rewrite_urls'     => p_effective_rewrite(),
         'route_mode'       => p_effective_route_mode(),
+        'timeout'          => p_effective_timeout(),
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -2406,6 +2478,7 @@ function p_settings_info(): void {
         'worker_url'  => p_effective_worker_url(),
         'rewrite_urls'=> p_effective_rewrite(),
         'route_mode'  => p_effective_route_mode(),
+        'timeout'     => p_effective_timeout(),
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -2465,13 +2538,15 @@ if (($_POST['action'] ?? '') === 'save_settings') {
     }
     $rewrite = !empty($_POST['rewrite']) && $_POST['rewrite'] !== '0' && $_POST['rewrite'] !== 'false';
     $routeMode = (string)($_POST['route_mode'] ?? 'direct_fallback');
-    $res = p_save_settings($workerRaw, $rewrite, $routeMode);
+    $timeoutVal = isset($_POST['timeout']) && ctype_digit((string)$_POST['timeout']) ? (int)$_POST['timeout'] : null;
+    $res = p_save_settings($workerRaw, $rewrite, $routeMode, $timeoutVal);
     if (empty($res['ok'])) p_error(500, 'save_failed', 'نوشتن proxy-settings.json ممکن نشد');
     echo json_encode([
         'ok'           => true,
         'worker_url'   => p_effective_worker_url(),
         'rewrite_urls' => p_effective_rewrite(),
         'route_mode'   => p_effective_route_mode(),
+        'timeout'      => p_effective_timeout(),
         'message'      => 'تنظیمات ذخیره شد',
     ], JSON_UNESCAPED_UNICODE);
     exit;
