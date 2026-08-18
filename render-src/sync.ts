@@ -1,10 +1,10 @@
-import { config } from './config.js';
+import { loadConnections } from './connections.js';
 import { getRemoteId, setRemoteId } from './db.js';
 import { safeFetch } from './network.js';
 import type { Product, Profile } from './types.js';
 
 export async function syncWoo(product: Product, profile: Profile): Promise<'created'|'updated'> {
-  const c = config.woo; if (!c.url || !c.key || !c.secret) throw new Error('WooCommerce environment variables are incomplete');
+  const c = (await loadConnections()).woo; if (!c.url || !c.key || !c.secret) throw new Error('تنظیمات ووکامرس در منوی همبرگری کامل نیست');
   const base = c.url.replace(/\/$/, '') + '/wp-json/wc/v3/products';
   const auth = `Basic ${Buffer.from(`${c.key}:${c.secret}`).toString('base64')}`;
   let id = await getRemoteId(profile.id, product.sourceKey, 'woo');
@@ -26,7 +26,7 @@ export async function syncWoo(product: Product, profile: Profile): Promise<'crea
 }
 
 export async function syncBasalam(product: Product, profile: Profile): Promise<'created'|'updated'> {
-  const c = config.basalam; if (!c.token || !c.vendorId) throw new Error('Basalam environment variables are incomplete');
+  const c = (await loadConnections()).basalam; if (!c.token || !c.vendorId) throw new Error('تنظیمات باسلام در منوی همبرگری کامل نیست');
   const existing = await getRemoteId(profile.id, product.sourceKey, 'basalam');
   const base = `${c.api}/vendors/${encodeURIComponent(c.vendorId)}/products`;
   const payload: any = { name: product.title, price: product.price, stock: product.stock ?? 10, description: product.longDesc || product.shortDesc || '',

@@ -18,18 +18,6 @@ services:
         generateValue: true
       - key: RUN_WORKER_IN_WEB
         value: "true"
-      - key: WOO_URL
-        sync: false
-      - key: WOO_KEY
-        sync: false
-      - key: WOO_SECRET
-        sync: false
-      - key: BASALAM_TOKEN
-        sync: false
-      - key: BASALAM_VENDOR_ID
-        sync: false
-      - key: BASALAM_API
-        value: https://openapi.basalam.com/v1
 
 databases:
   - name: scraper4-db

@@ -60,16 +60,9 @@ ADMIN_TOKEN=<long random value>
 RUN_WORKER_IN_WEB=true
 ```
 
-اتصال مقصد:
+اتصال‌های ووکامرس، باسلام، هوش مصنوعی و پیام‌رسان از داخل منوی همبرگری رابط کاربری ثبت می‌شوند و نیازی به Environment Variable ندارند. مقادیر محرمانه با AES-256-GCM و کلیدی مشتق‌شده از `ADMIN_TOKEN` در PostgreSQL ذخیره می‌شوند.
 
-```text
-WOO_URL
-WOO_KEY
-WOO_SECRET
-BASALAM_TOKEN
-BASALAM_VENDOR_ID
-BASALAM_API=https://openapi.basalam.com/v1
-```
+> پس از ذخیره اطلاعات اتصال، `ADMIN_TOKEN` را تغییر ندهید؛ تغییر آن باعث می‌شود خزانه قبلی قابل رمزگشایی نباشد. برای تغییر توکن مدیریت، ابتدا بکاپ بگیرید و پس از تغییر، اطلاعات اتصال را دوباره ثبت کنید.
 
 ## پردازش مستقل برای مقیاس بالاتر
 
