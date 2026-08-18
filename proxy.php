@@ -45,8 +45,13 @@
  *    می‌شوند تا کل صفحه — ساختار و تصاویر — از مسیر پراکسی رندر شود.
  *
  *  تنظیمات از داشبورد (proxy-settings.json در کنار فایل):
- *    آدرس ورکر کلودفلر و وضعیت بازنویسی URL از خود داشبورد قابل تغییرند؛
- *    اولویت آن‌ها بالاتر از مقادیر داخل $CONFIG است.
+ *    آدرس ورکر کلودفلر، وضعیت بازنویسی URL و «مسیر ترافیک» از خود داشبورد
+ *    قابل تغییرند؛ اولویت آن‌ها بالاتر از مقادیر داخل $CONFIG است.
+ *
+ *  مسیر ترافیک (route_mode) — برای همهٔ درخواست‌ها (بیرونی و داخلی):
+ *    direct          → مستقیم به مقصد؛ بدون فالبک
+ *    direct_fallback → مستقیم/بالادستی، روی هر خطا ورکر (پیش‌فرض)
+ *    worker          → همهٔ درخواست‌ها مستقیم از ورکر کلودفلر
  *
  *  مسیر عبور هر پاسخ در هدر X-Proxy-Route گزارش می‌شود:
  *    direct (مستقیم) | upstream (پراکسی بالادستی) | worker (ورکر کلودفلر) | cache
@@ -101,6 +106,11 @@ $CONFIG = [
     // هم از خود پراکسی لود می‌شوند و برای سایت‌های بلاک‌شده صفحه کامل رندر می‌شود.
     // (برای اسکرپر اگر آدرس‌های اصلی لازم است، با هدر X-Proxy-Rewrite: 0 خاموش کنید.)
     'rewrite_urls'      => true,
+    // مسیر ترافیک — برای همهٔ درخواست‌ها (بیرونی و داخلی):
+    //   direct         → فقط مستقیم به مقصد؛ هیچ فالبکی
+    //   direct_fallback→ مستقیم/بالادستی؛ روی هر خطا (اتصال یا ≥۴۰۰) ورکر کلودفلر
+    //   worker         → همهٔ درخواست‌ها مستقیم از ورکر کلودفلر
+    'route_mode'        => 'direct_fallback',
     'rewrite_attrs'     => ['src', 'href', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'data-original', 'data-bg', 'action', 'formaction'],
     'forward_auth'      => true,                  // ارسال هدر کلید API به مقصد — برای تست مدل‌های هوش مصنوعی لازم است؛ اگر لازم شد خاموش کنید
     'forward_auth_headers' => ['Authorization', 'X-API-Key', 'api-key'], // هدرهای احراز هویتی که به مقصد ارسال می‌شوند
@@ -111,8 +121,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.2.9');
-define('PROXY_BUILD', '2026-08-18-09');
+define('PROXY_VERSION', '1.3.0');
+define('PROXY_BUILD', '2026-08-18-10');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -141,23 +151,35 @@ const PROXY_SETTINGS_FILE = __DIR__ . '/proxy-settings.json';
 
 /** خواندن تنظیمات ذخیره‌شده؛ null یعنی «ذخیره نشده → از $CONFIG» */
 function p_load_settings(): array {
-    $out = ['cloudflare_worker_url' => null, 'rewrite_urls' => null];
+    $out = ['cloudflare_worker_url' => null, 'rewrite_urls' => null, 'route_mode' => null];
     if (!is_file(PROXY_SETTINGS_FILE)) return $out;
     $j = @json_decode((string)@file_get_contents(PROXY_SETTINGS_FILE), true);
     if (!is_array($j)) return $out;
     if (array_key_exists('cloudflare_worker_url', $j)) $out['cloudflare_worker_url'] = trim((string)$j['cloudflare_worker_url']);
     if (array_key_exists('rewrite_urls', $j)) $out['rewrite_urls'] = (bool)$j['rewrite_urls'];
+    if (array_key_exists('route_mode', $j)) {
+        $out['route_mode'] = in_array((string)$j['route_mode'], ['direct', 'direct_fallback', 'worker'], true)
+            ? (string)$j['route_mode'] : 'direct_fallback';
+    }
     return $out;
 }
 
-/** آدرس مؤثر ورکر کلودفلر: تنظیمات داشبورد ← $CONFIG ← خالی */
-function p_effective_worker_url(): string {
+/** حالت‌های مجاز مسیر ترافیک */
+function p_route_modes(): array {
+    return ['direct' => 'مستقیم به مقصد', 'direct_fallback' => 'مستقیم ← ورکر روی هر خطا', 'worker' => 'همیشه از ورکر'];
+}
+
+/**
+ * سیاست مسیر ترافیک مؤثر — برای همهٔ درخواست‌ها (بیرونی و داخلی):
+ *   direct         → فقط مستقیم؛ هیچ فالبکی
+ *   direct_fallback→ مستقیم/بالادستی، و روی هر خطایی (اتصال یا ≥۴۰۰) ورکر
+ *   worker         → همهٔ درخواست‌ها مستقیماً از ورکر کلودفلر
+ */
+function p_effective_route_mode(): string {
     $s = p_load_settings();
-    if ($s['cloudflare_worker_url'] !== null) return $s['cloudflare_worker_url'];
-    $cfg = $GLOBALS['CONFIG'];
-    $fb = trim((string)($cfg['cloudflare_worker_url'] ?? ''));
-    if ($fb === '') $fb = trim((string)($cfg['fallback_proxy'] ?? ''));
-    return $fb;
+    if ($s['route_mode'] !== null) return $s['route_mode'];
+    $m = (string)($GLOBALS['CONFIG']['route_mode'] ?? 'direct_fallback');
+    return in_array($m, ['direct', 'direct_fallback', 'worker'], true) ? $m : 'direct_fallback';
 }
 
 /** آیا بازنویسی URL مؤثر است؟ تنظیمات داشبورد ← $CONFIG (هدر X-Proxy-Rewrite هم می‌تواند override کند) */
@@ -168,12 +190,23 @@ function p_effective_rewrite(): bool {
 }
 
 /** ذخیرهٔ تنظیمات داشبورد */
-function p_save_settings(string $workerUrl, bool $rewrite): array {
+function p_save_settings(string $workerUrl, bool $rewrite, string $routeMode = 'direct_fallback'): array {
     $cur = p_load_settings();
     $cur['cloudflare_worker_url'] = trim($workerUrl);
     $cur['rewrite_urls'] = $rewrite;
+    $cur['route_mode'] = in_array($routeMode, ['direct', 'direct_fallback', 'worker'], true) ? $routeMode : 'direct_fallback';
     $ok = @file_put_contents(PROXY_SETTINGS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX) !== false;
     return ['ok' => $ok];
+}
+
+/** آدرس مؤثر ورکر کلودفلر: تنظیمات داشبورد ← $CONFIG ← خالی */
+function p_effective_worker_url(): string {
+    $s = p_load_settings();
+    if ($s['cloudflare_worker_url'] !== null) return $s['cloudflare_worker_url'];
+    $cfg = $GLOBALS['CONFIG'];
+    $fb = trim((string)($cfg['cloudflare_worker_url'] ?? ''));
+    if ($fb === '') $fb = trim((string)($cfg['fallback_proxy'] ?? ''));
+    return $fb;
 }
 
 // ---------------------------------------------------------------------
@@ -631,6 +664,21 @@ function p_curl_once(string $url, string $method, array $headers, string $body, 
 /** چرخش بین پراکسی‌های بالادستی: تلاش تا دریافت پاسخ قابل‌قبول */
 function p_rotate_attempt(string $url, string $method, array $headers, string $body, int $timeout): array {
     $cfg = $GLOBALS['CONFIG'];
+    $mode = p_effective_route_mode();
+
+    // حالت «همیشه ورکر»: همهٔ درخواست‌ها — بیرونی و داخلی — مستقیم از ورکر
+    if ($mode === 'worker') {
+        $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
+        if ($fb !== null && $fb['error'] === null) {
+            $fb['via'] = 'worker';
+            return $fb;
+        }
+        return [
+            'status' => 502, 'headers' => [], 'body' => '',
+            'error' => 'حالت «همیشه ورکر» فعال است ولی ورکر کلودفلر در دسترس نبود (آدرس: ' . p_effective_worker_url() . ')',
+        ];
+    }
+
     $list = $cfg['rotate_upstream'] ? $cfg['upstream_proxies'] : [];
     $attempts = $list;
     if ($cfg['direct_first'] || empty($attempts)) {
@@ -642,20 +690,30 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
     foreach ($attempts as $proxy) {
         $res = p_curl_once($url, $method, $headers, $body, $proxy, $timeout);
         $last = $res;
-        // پاسخ قابل‌قبول: بدون خطای اتصال و وضعیت زیر ۴۰۰
+
+        if ($mode === 'direct') {
+            // فقط مستقیم: هر پاسخ HTTP عیناً برگردانده می‌شود (حتی 4xx/5xx)
+            if ($res['error'] === null) {
+                $res['via'] = ($proxy === null || $proxy === '') ? 'direct' : 'upstream';
+                return $res;
+            }
+            continue; // فقط خطای اتصال → پراکسی بالادستی بعدی (بدون ورکر)
+        }
+
+        // direct_fallback: فقط پاسخ زیر ۴۰۰ قابل‌قبول است
         if ($res['error'] === null
             && (int)$res['status'] < 400
             && !in_array($res['status'], $fallbackStatuses, true)) {
             $res['via'] = ($proxy === null || $proxy === '') ? 'direct' : 'upstream';
             return $res;
         }
-        // هر خطایی (اتصال یا وضعیت ≥۴۰۰) → با پراکسی بالادستی بعدی ادامه بده
     }
 
-    // فالبک نهایی: روی هر خطایی — خطای اتصال یا هر وضعیت ≥۴۰۰
-    // (403 یعنی IP ممنوع، 404/410 یعنی دامنهٔ فیلترشده، 5xx یعنی خطای مقصد و…)
-    // از ورکر کلودفلر امتحان کن. این مسیر برای همهٔ فرستنده‌ها یکسان است
-    // (مرورگر، اسکریپر۴، cURL) چون همه از همین endpoint رله عبور می‌کنند.
+    if ($mode === 'direct') {
+        return $last ?? ['status' => 502, 'headers' => [], 'body' => '', 'error' => 'نامشخص'];
+    }
+
+    // direct_fallback: روی هر خطایی (اتصال یا وضعیت ≥۴۰۰) ورکر کلودفلر
     if ($last !== null
         && ($last['error'] !== null || (int)$last['status'] >= 400 || in_array($last['status'], $fallbackStatuses, true))) {
         $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
@@ -676,17 +734,26 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
  */
 function p_filtered_attempt(string $url, string $method, array $headers, string $body, int $timeout): array {
     $cfg = $GLOBALS['CONFIG'];
-    if ($cfg['rotate_upstream']) {
+    $mode = p_effective_route_mode();
+
+    if ($mode === 'direct') {
+        // حالت مستقیم: بدون جایگزین — تلاش مستقیم (به IP فیلترینگ می‌خورد) و همان نتیجه برگردانده می‌شود
+        $res = p_curl_once($url, $method, $headers, $body, null, $timeout);
+        if ($res['error'] === null) $res['via'] = 'direct';
+        return $res;
+    }
+
+    if ($mode === 'direct_fallback' && $cfg['rotate_upstream']) {
         foreach ((array)$cfg['upstream_proxies'] as $proxy) {
             if ($proxy === null || $proxy === '') continue;
             $res = p_curl_once($url, $method, $headers, $body, $proxy, $timeout);
-            // فقط پاسخ بدون خطا و زیر ۴۰۰ قابل‌قبول است؛ هر خطایی → ورکر
             if ($res['error'] === null && (int)$res['status'] < 400) {
                 $res['via'] = 'upstream';
                 return $res;
             }
         }
     }
+
     $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
     if ($fb !== null && $fb['error'] === null) {
         $fb['via'] = 'worker';
@@ -696,7 +763,9 @@ function p_filtered_attempt(string $url, string $method, array $headers, string 
         'status'  => 502,
         'headers' => [],
         'body'    => '',
-        'error'   => 'DNS مقصد روی این سرور فیلتر یا مسموم است و هیچ مسیر جایگزینی (پراکسی بالادستی یا ورکر کلودفلر) در دسترس نبود',
+        'error'   => ($mode === 'worker')
+            ? 'حالت «همیشه ورکر» فعال است ولی ورکر کلودفلر در دسترس نبود (آدرس: ' . p_effective_worker_url() . ')'
+            : 'DNS مقصد روی این سرور فیلتر یا مسموم است و هیچ مسیر جایگزینی (پراکسی بالادستی یا ورکر کلودفلر) در دسترس نبود',
     ];
 }
 
@@ -1552,6 +1621,7 @@ function p_dashboard(): void {
         . "<div class='card'><div class='card-v " . ($curlOk ? 'ok' : 'bad') . "'>" . ($curlOk ? 'فعال' : 'غیرفعال!') . "</div><div class='card-l'>cURL</div></div>"
         . "<div class='card'><div class='card-v'>" . $upstreamCount . "</div><div class='card-l'>پراکسی بالادستی</div></div>"
         . "<div class='card'><div class='card-v " . ($fallbackState === 'فعال' ? 'ok' : '') . "' title=\"" . $fallbackHost . "\">" . h($fallbackState) . "</div><div class='card-l'>فالبک کلودفلر</div></div>"
+        . "<div class='card'><div class='card-v'>" . h(p_route_modes()[p_effective_route_mode()] ?? p_effective_route_mode()) . "</div><div class='card-l'>مسیر ترافیک</div></div>"
         . "<div class='card'><div class='card-v'>" . h($cacheState) . "</div><div class='card-l'>کش</div></div>"
         . "<div class='card'><div class='card-v'>" . h($keyState) . "</div><div class='card-l'>کلید محافظت</div></div>"
         . "<div class='card'><div class='card-v'>" . $allowedCount . ' / ' . $blockedCount . "</div><div class='card-l'>سفید / سیاه</div></div>"
@@ -1628,6 +1698,15 @@ a { color:var(--acc); }
 <div id="result"></div>
 
 <h2>⚙️ تنظیمات (در proxy-settings.json ذخیره می‌شود)</h2>
+<div class="crow" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+<label style="font-size:1rem;font-weight:700;white-space:nowrap">🛣️ مسیر ترافیک:</label>
+<select id="cfgRoute" onchange="routeHint()" style="flex:1;min-width:280px;padding:13px 14px;font-size:1rem;font-weight:600;background:#0b0f1a;border:2px solid var(--acc);border-radius:12px;color:var(--txt);cursor:pointer;font-family:inherit">
+<option value="direct_fallback">🟠 مستقیم ← ورکر کلودفلر روی هر خطا (پیش‌فرض)</option>
+<option value="direct">🟢 مستقیم به مقصد — بدون فالبک</option>
+<option value="worker">🔶 همیشه از ورکر کلودفلر</option>
+</select>
+</div>
+<div id="cfgRouteHint" class="meta" style="margin-bottom:10px"></div>
 <div class="crow" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
 <label style="font-size:.85rem">آدرس ورکر کلودفلر:</label>
 <input id="cfgWorker" placeholder="https://proxy.fazilat-ma.workers.dev" style="flex:1;min-width:260px;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px 12px;direction:ltr;font-family:Consolas,monospace">
@@ -1782,6 +1861,7 @@ function saveSettings() {
   fd.append('action', 'save_settings');
   fd.append('worker_url', document.getElementById('cfgWorker').value.trim());
   fd.append('rewrite', document.getElementById('cfgRewrite').checked ? '1' : '0');
+  fd.append('route_mode', document.getElementById('cfgRoute').value || 'direct_fallback');
   st.textContent = 'در حال ذخیره…';
   fetch('', { method: 'POST', body: fd })
     .then(function (r) { return r.json(); })
@@ -1789,7 +1869,7 @@ function saveSettings() {
       if (d.ok) {
         st.textContent = '✓ ذخیره شد — ورکر: ' + (d.worker_url || 'خالی (فالبک غیرفعال)')
                        + ' — بازنویسی: ' + (d.rewrite_urls ? 'فعال' : 'غیرفعال')
-                       + (d.reload ? ' — صفحه را تازه کنید تا کارت وضعیت به‌روز شود' : '');
+                       + ' — مسیر: ' + (d.route_mode || '');
         setTimeout(function () { location.reload(); }, 1200);
       } else {
         st.textContent = '✗ ' + (d.error || 'خطا در ذخیره');
@@ -1798,14 +1878,28 @@ function saveSettings() {
     .catch(function () { st.textContent = '✗ خطای شبکه'; });
 }
 
+var ROUTE_HINTS = {
+  direct: 'همهٔ درخواست‌ها — بیرونی و داخلی — مستقیم به مقصد می‌روند؛ هیچ فالبکی اعمال نمی‌شود (حتی روی خطا).',
+  direct_fallback: 'درخواست‌ها اول مستقیم (و پراکسی‌های بالادستی) می‌روند؛ روی هر خطایی — قطعی اتصال یا هر وضعیت ۴۰۰ به بالا — از ورکر کلودفلر عبور می‌کنند.',
+  worker: 'همهٔ درخواست‌ها — بیرونی و داخلی — مستقیم از ورکر کلودفلر هدایت می‌شوند.'
+};
+function routeHint() {
+  var el = document.getElementById('cfgRouteHint');
+  if (el) el.textContent = ROUTE_HINTS[document.getElementById('cfgRoute').value] || '';
+}
+
 function loadSettings() {
   fetch('?settings')
     .then(function (r) { return r.json(); })
     .then(function (d) {
       document.getElementById('cfgWorker').value = d.worker_url || '';
       document.getElementById('cfgRewrite').checked = !!d.rewrite_urls;
+      var rsel = document.getElementById('cfgRoute');
+      if (d.route_mode) rsel.value = d.route_mode;
+      routeHint();
       document.getElementById('cfgStatus').textContent = 'وضعیت فعلی: ورکر ' + (d.worker_url || 'خالی')
-        + ' — بازنویسی: ' + (d.rewrite_urls ? 'فعال' : 'غیرفعال');
+        + ' — بازنویسی: ' + (d.rewrite_urls ? 'فعال' : 'غیرفعال')
+        + ' — مسیر: ' + (d.route_mode || 'direct_fallback');
     })
     .catch(function () {});
 }
@@ -2299,6 +2393,7 @@ function p_info(): void {
         'connect_enabled'  => (bool)($cfg['connect_enabled'] ?? true),
         'fallback_worker'  => p_fallback_url($cfg) !== '' ? p_fallback_url($cfg) : null,
         'rewrite_urls'     => p_effective_rewrite(),
+        'route_mode'       => p_effective_route_mode(),
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -2310,6 +2405,7 @@ function p_settings_info(): void {
         'ok'          => true,
         'worker_url'  => p_effective_worker_url(),
         'rewrite_urls'=> p_effective_rewrite(),
+        'route_mode'  => p_effective_route_mode(),
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -2368,12 +2464,14 @@ if (($_POST['action'] ?? '') === 'save_settings') {
         p_error(400, 'bad_worker_url', 'آدرس ورکر باید https:// باشد یا خالی');
     }
     $rewrite = !empty($_POST['rewrite']) && $_POST['rewrite'] !== '0' && $_POST['rewrite'] !== 'false';
-    $res = p_save_settings($workerRaw, $rewrite);
+    $routeMode = (string)($_POST['route_mode'] ?? 'direct_fallback');
+    $res = p_save_settings($workerRaw, $rewrite, $routeMode);
     if (empty($res['ok'])) p_error(500, 'save_failed', 'نوشتن proxy-settings.json ممکن نشد');
     echo json_encode([
         'ok'           => true,
         'worker_url'   => p_effective_worker_url(),
         'rewrite_urls' => p_effective_rewrite(),
+        'route_mode'   => p_effective_route_mode(),
         'message'      => 'تنظیمات ذخیره شد',
     ], JSON_UNESCAPED_UNICODE);
     exit;
