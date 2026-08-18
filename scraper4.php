@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.79';
+const APP_VERSION = '9.80';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -662,7 +662,7 @@ function cronSummaryText(array $r): string {
 }
 
 function loadConnections(): array {
-if (!file_exists(CONNECTIONS_FILE)) return ['woocommerce'=>[],'basalam'=>['token'=>'','vendor_id'=>0,'preparation_days'=>3,'weight'=>500,'package_weight'=>600,'stock'=>10,'category_id'=>0,'auto_category'=>false]];
+if (!file_exists(CONNECTIONS_FILE)) return ['woocommerce'=>[],'basalam'=>['token'=>'','vendor_id'=>0,'preparation_days'=>3,'weight'=>500,'package_weight'=>600,'stock'=>10,'category_id'=>0,'auto_category'=>false,'net_indirect'=>false]];
 $d = @json_decode(@file_get_contents(CONNECTIONS_FILE) ?: '', true);
 return is_array($d) ? $d : ['woocommerce'=>[],'basalam'=>[]];
 }
@@ -1789,29 +1789,126 @@ function bslApiBase(): string {
     return $base = rtrim($b, '/') . '/';
 }
 
+/* v9.80: سوییچ «اتصال غیرمستقیم» برای باسلام. وقتی روشن باشد، تبادل با باسلام
+   (که IP هاست را بلاک کرده) از همان روش‌های اتصالِ غیرمستقیمِ بخش «اتصال به
+   سایت مبدأ» (پروکسی، Worker، DoH، IP دستی) انجام می‌شود. */
+function bslNetCfg(?array $cn = null): array {
+    if ($cn === null) $cn = loadConnections();
+    $b = (array)($cn['basalam'] ?? []);
+    $indirect = !empty($b['net_indirect']);
+    // جزئیات روش‌های اتصال از src_net (اتصال به سایت مبدأ) وام گرفته می‌شود
+    $sn = [];
+    if (function_exists('srcNetCfg')) $sn = srcNetCfg($cn);
+    return [
+        'indirect'   => $indirect,
+        'mode'       => (string)($sn['mode'] ?? 'direct'),
+        'resolve_ip' => trim((string)($sn['resolve_ip'] ?? '')),
+        'doh_url'    => trim((string)($sn['doh_url'] ?? 'https://cloudflare-dns.com/dns-query')),
+        'worker_url' => trim((string)($sn['worker_url'] ?? '')),
+        'proxy'      => trim((string)($sn['proxy'] ?? '')),
+        'proxy_type' => (string)($sn['proxy_type'] ?? 'http'),
+        'proxy_auth' => trim((string)($sn['proxy_auth'] ?? '')),
+        'ipv4'       => !empty($sn['ipv4']),
+        // باسلام بلاک‌شده است؛ اگر روش اصلی جواب نداد، بقیهٔ روش‌های فعال هم
+        // امتحان می‌شوند (برخلاف src_net که به تیکِ «روش‌های جایگزین» وابسته است).
+        'fallback'   => true,
+    ];
+}
+
+/** اجرای یک درخواست باسلام با یک روشِ اتصال مشخص (direct/doh/dns/proxy/worker). */
+function bslReqMode(string $url, string $tk, string $m, $d, bool $mp, array $net, string $mode): array {
+    $ch = curl_init($url);
+    $h = ['Accept: application/json', 'Authorization: Bearer ' . $tk];
+    if (!$mp) $h[] = 'Content-Type: application/json';
+    $opt = [
+        CURLOPT_RETURNTRANSFER => 1, CURLOPT_FOLLOWLOCATION => 1,
+        CURLOPT_CONNECTTIMEOUT => 10, CURLOPT_TIMEOUT => 30,
+        CURLOPT_SSL_VERIFYPEER => 0, CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_HTTPHEADER => $h, CURLOPT_CUSTOMREQUEST => $m,
+    ];
+    if ($d !== null) $opt[CURLOPT_POSTFIELDS] = $mp ? $d : json_encode($d, JSON_UNESCAPED_UNICODE);
+
+    if ($mode === 'worker' && trim((string)($net['worker_url'] ?? '')) !== '') {
+        $w = rtrim((string)$net['worker_url'], '/');
+        $u = (strpos($w, '{url}') !== false) ? str_replace('{url}', rawurlencode($url), $w) : $w . '/' . ltrim($url, '/');
+        $opt[CURLOPT_URL] = $u;
+        $opt[CURLOPT_HTTPHEADER] = array_merge($h, ['X-Target-URL: ' . $url]);
+    }
+    $host = strtolower((string)(parse_url($url, PHP_URL_HOST) ?? ''));
+    if ($mode === 'dns' || $mode === 'doh') {
+        $ip = '';
+        if ($mode === 'dns') $ip = (string)($net['resolve_ip'] ?? '');
+        elseif (function_exists('aiDohResolve')) {
+            $r = aiDohResolve($host, (string)($net['doh_url'] ?? ''), 10);
+            if (!empty($r['ok'])) $ip = (string)$r['ip'];
+        }
+        if ($ip !== '') {
+            $port = ((parse_url($url, PHP_URL_SCHEME) ?: 'https') === 'https') ? 443 : 80;
+            $opt[CURLOPT_RESOLVE] = [$host . ':' . $port . ':' . $ip];
+        }
+    } elseif ($mode === 'proxy' && trim((string)($net['proxy'] ?? '')) !== '') {
+        $opt[CURLOPT_PROXY] = (string)$net['proxy'];
+        $map = ['http' => CURLPROXY_HTTP,
+                'socks5' => defined('CURLPROXY_SOCKS5_HOSTNAME') ? CURLPROXY_SOCKS5_HOSTNAME : CURLPROXY_SOCKS5,
+                'socks4' => defined('CURLPROXY_SOCKS4') ? CURLPROXY_SOCKS4 : CURLPROXY_HTTP];
+        $opt[CURLOPT_PROXYTYPE] = $map[(string)($net['proxy_type'] ?? 'http')] ?? CURLPROXY_HTTP;
+        if (trim((string)($net['proxy_auth'] ?? '')) !== '') $opt[CURLOPT_PROXYUSERPWD] = (string)$net['proxy_auth'];
+    }
+    if ($mode !== 'direct' && !empty($net['ipv4']) && defined('CURL_IPRESOLVE_V4')) {
+        $opt[CURLOPT_IPRESOLVE] = CURL_IPRESOLVE_V4;
+    }
+    curl_setopt_array($ch, $opt);
+    $b = curl_exec($ch); $e = curl_error($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+    return ['ok' => $code >= 200 && $code < 300, 'code' => $code, 'error' => $e,
+            'body' => @json_decode($b, true), 'raw' => $b, 'mode' => $mode];
+}
+
 function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false): array {
 $url=bslApiBase().ltrim($ep,'/');
+$net = function_exists('bslNetCfg') ? bslNetCfg() : ['indirect'=>false,'mode'=>'direct','fallback'=>false];
+
+// ترتیب روش‌ها: عادی مستقیم؛ اگر «اتصال غیرمستقیم» روشن باشد، اول روشِ تنظیم‌شده،
+// بعد روش‌های جایگزینِ فعال (DoH، IP دستی، پروکسی، Worker) و در نهایت مستقیم.
+$modes = ['direct'];
+if (!empty($net['indirect'])) {
+    $primary = (string)$net['mode'];
+    if ($primary !== 'direct') {
+        $modes = [$primary];
+        if (!empty($net['fallback'])) {
+            foreach (['doh','dns','proxy','worker'] as $mm) {
+                if (in_array($mm, $modes, true)) continue;
+                if ($mm === 'dns'    && trim((string)($net['resolve_ip'] ?? '')) === '') continue;
+                if ($mm === 'doh'    && trim((string)($net['doh_url'] ?? '')) === '') continue;
+                if ($mm === 'proxy'  && trim((string)($net['proxy'] ?? '')) === '') continue;
+                if ($mm === 'worker' && trim((string)($net['worker_url'] ?? '')) === '') continue;
+                $modes[] = $mm;
+            }
+        }
+        $modes[] = 'direct';
+    }
+}
 
 $maxRetries=3;$retryDelay=3;
+$last=['ok'=>false,'code'=>0,'error'=>'هیچ روشی اجرا نشد','body'=>null,'raw'=>''];
+foreach($modes as $mode){
+$r=['ok'=>false];
 for($attempt=1;$attempt<=$maxRetries;$attempt++){
-
 // v8.59: کش stat را پاک کن، وگرنه سیگنال توقفِ تازه دیده نمی‌شود
 clearstatcache(true,BSL_STOP_FILE);
 if(file_exists(BSL_STOP_FILE)){return ['ok'=>false,'code'=>0,'error'=>'stopped','body'=>null,'raw'=>''];}
-$ch=curl_init($url);
-$h=['Accept: application/json','Authorization: Bearer '.$tk];
-if(!$mp)$h[]='Content-Type: application/json';
-curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>1,CURLOPT_FOLLOWLOCATION=>1,CURLOPT_CONNECTTIMEOUT=>10,CURLOPT_TIMEOUT=>30,CURLOPT_SSL_VERIFYPEER=>0,CURLOPT_SSL_VERIFYHOST=>0,CURLOPT_HTTPHEADER=>$h,CURLOPT_CUSTOMREQUEST=>$m]);
-if($d!==null)curl_setopt($ch,CURLOPT_POSTFIELDS,$mp?$d:json_encode($d,JSON_UNESCAPED_UNICODE));
-$b=curl_exec($ch);$e=curl_error($ch);$code=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);curl_close($ch);
-
-if($code===0&&$attempt<$maxRetries&&$e!==''&&mb_strpos($e,'timed out')!==false||mb_strpos($e,'connection')!==false||mb_strpos($e,'resolve')!==false||mb_strpos($e,'refused')!==false){
-sleep($retryDelay);
-continue;
+$r=bslReqMode($url,$tk,$m,$d,$mp,$net,$mode);
+$last=$r;
+if($r['code']>0)break;                 // پاسخ گرفته شد (موفق یا خطای منطقی)؛ دوباره نمی‌زنیم
+if($attempt<$maxRetries&&$r['error']!=='')sleep($retryDelay);   // خطای شبکه → تلاش دوباره
 }
-return ['ok'=>$code>=200&&$code<300,'code'=>$code,'error'=>$e,'body'=>@json_decode($b,true),'raw'=>$b];
+$r['mode']=$mode;
+if(!empty($r['ok']))return $r;
+// خطای منطقی غیر از 403/429 یعنی شبکه سالم است؛ روشِ دیگر فایده‌ای ندارد
+if($r['code']>0&&!in_array($r['code'],[403,429],true))return $r;
 }
-return ['ok'=>false,'code'=>$code,'error'=>$e.' (after '.$maxRetries.' retries)','body'=>@json_decode($b,true),'raw'=>$b];
+return $last;
 }
 
 $bslCatNameMap_global=[];
@@ -7608,7 +7705,7 @@ if (($_POST['action'] ?? '') === 'save_connections') {
 header('Content-Type: application/json; charset=UTF-8');
 $conn = loadConnections();
 if (isset($_POST['woocommerce'])) { $w = json_decode($_POST['woocommerce'], true) ?: []; $conn['woocommerce'] = ['enabled'=>!empty($w['enabled']),'store_url'=>trim($w['store_url']??''),'consumer_key'=>trim($w['consumer_key']??''),'consumer_secret'=>trim($w['consumer_secret']??''),'default_category'=>(int)($w['default_category']??0),'default_status'=>$w['default_status']??'draft','stock_quantity'=>(int)($w['stock_quantity']??10),'manage_stock'=>!empty($w['manage_stock']),'price_mode'=>in_array(($w['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$w['price_mode']:'none','price_val'=>(float)($w['price_val']??0),'price_round'=>max(0,(int)($w['price_round']??0))]; }
-if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??''),'price_mode'=>in_array(($v['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$v['price_mode']:'none','price_val'=>(float)($v['price_val']??0)];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors,'price_mode'=>in_array(($b['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$b['price_mode']:'none','price_val'=>(float)($b['price_val']??0),'price_round'=>max(0,(int)($b['price_round']??0))]; }
+if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??''),'price_mode'=>in_array(($v['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$v['price_mode']:'none','price_val'=>(float)($v['price_val']??0)];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'net_indirect'=>!empty($b['net_indirect']),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors,'price_mode'=>in_array(($b['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$b['price_mode']:'none','price_val'=>(float)($b['price_val']??0),'price_round'=>max(0,(int)($b['price_round']??0))]; }
 
 if (isset($_POST['ai'])) { $a = json_decode($_POST['ai'], true) ?: []; $conn['ai'] = ['enabled'=>!empty($a['enabled']),'api_key'=>trim($a['api_key']??''),'base_url'=>trim($a['base_url']??'https://dashscope.aliyuncs.com/compatible-mode/v1'),'model'=>trim($a['model']??'qwen-plus'),'temperature'=>(float)($a['temperature']??0.1)]; }
 // v8.61: تنظیمات روش عبور برای سرویس‌های هوش مصنوعی
@@ -12560,6 +12657,18 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'class="alert alert-purple hint-' . 'collapse"') !== false);
     $add('9.79', 'استایلِ کشوییِ توضیحات (فلش‌گردان) تعریف شد',
          strpos($selfSrc, '.hint-collapse summary::before{content:"' . '▼"') !== false);
+
+    /* ---------- v9.80: تیکِ اتصال غیرمستقیم برای باسلام ---------- */
+    $add('9.80', 'تیکِ «اتصال غیرمستقیم» در بخشِ باسلامِ منوی همبرگری وجود دارد',
+         strpos($selfSrc, 'id="bsInd' . 'irect"') !== false);
+    $add('9.80', 'مقدارِ تیک در ذخیره‌سازیِ اتصالات (net_indirect) ثبت می‌شود',
+         strpos($selfSrc, "net_indirect:(\$('bsInd' . 'irect')?.checked)") !== false
+         || strpos($selfSrc, "net_indirect:\$('bsInd' . 'irect')?.checked||false") !== false
+         || strpos($selfSrc, "net_indirect:\$('bsInd' . 'irect')?.checked||false") !== false);
+    $add('9.80', 'bslReq با روشن بودنِ تیک، درخواست را از روش‌های اتصالِ غیرمستقیم رد می‌کند',
+         strpos($selfSrc, 'function bslNet' . 'Cfg(') !== false
+         && strpos($selfSrc, 'function bslReq' . 'Mode(') !== false
+         && strpos($selfSrc, 'bslReqMode($url,$tk,$m,$d,$mp,$net,$mode)') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -22364,6 +22473,11 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>وزن:</label><input type="number" id="bsW" value="500" style="max-width:120px"></div>
 <div class="crow"><label>وزن بسته:</label><input type="number" id="bsPW" value="600" min="0" style="flex:1"><small>گرم</small></div>
 <div class="crow"><label>موجودی:</label><input type="number" id="bsSt" value="10" style="max-width:100px"></div>
+<!-- v9.80: سوییچ «اتصال غیرمستقیم» برای باسلام — وقتی IP هاست بلاک شده، تبادل از روش‌های غیرمستقیم انجام شود -->
+<div class="crow" style="display:flex;align-items:flex-start;gap:8px">
+    <label style="flex:0 0 auto;min-width:0"><input type="checkbox" id="bsIndirect" style="width:14px;height:14px;margin-top:2px"> اتصال غیرمستقیم</label>
+    <span style="font-size:10px;color:#64748b;flex:1;line-height:1.7">تبادل با باسلام از طریق روش‌های اتصال غیرمستقیمِ بخش «اتصال به سایت مبدأ» (پروکسی، Worker، DoH...) انجام شود — وقتی IP هاست بلاک شده مفید است.</span>
+</div>
 <div style="margin-top:10px;padding-top:10px;border-top:1px solid #334155">
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
 <span style="font-size:12px;color:#fbbf24;font-weight:700">👥 غرفه‌های باسلام</span>
@@ -27039,6 +27153,9 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.80', t:'🌐 تیکِ «اتصال غیرمستقیم» برای باسلام — تبادل از روش‌های غیرمستقیم', items:[
+    'گزارش شما: باسلام هم IP هاست را بلاک کرده؛ خواستید یک تیک در بخشِ باسلامِ', 'منوی همبرگری بگذاریم تا با فعال‌شدنش، تبادل پیام با باسلام از روش‌هایِ', 'اتصالِ غیرمستقیم انجام شود.',
+    '✅ در منوی همبرگری ← «🏪 باسلام» یک تیکِ «اتصال غیرمستقیم» اضافه شد.', '✅ وقتی روشن باشد، همهٔ درخواست‌های باسلام (دریافت محصولات، ارسال، تست،', 'چت/پیام، وضعیت و...) اول از روشِ اتصالِ غیرمستقیمِ تنظیم‌شده در بخشِ', '«اتصال به سایت مبدأ» (پروکسی، Worker، DoH، IP دستی) رد می‌شوند.', '✅ اگر روشِ اصلی جواب نداد، روش‌هایِ فعالِ دیگر هم امتحان می‌شوند و در', 'نهایت یک بار مستقیم؛ در اولینِ موفق برمی‌گردد.', '✅ خطاهایِ منطقی (مثل ۴۰۱/۴۰۴) دیگرِ روش‌ها را امتحان نمی‌کند (بی‌فایده', 'است) ولی بلاکِ ۴۰۳/۴۲۹ و قطعِ شبکه باعث می‌شود روشِ بعدی امتحان شود.'],},
   {v:'9.79', t:'📖 توضیحاتِ داخلِ بخش‌های تبِ سلکتورها هم کشویی شدند', items:[
     'خواستهٔ شما: بعد از کشویی شدنِ بخش‌های تبِ سلکتورها، توضیحاتی که', 'داخلِ خودِ هر بخش بود هم منوی کشویی شوند تا جا بازتر و مرتب‌تر باشد.',
     '✅ «راهنمای انتخاب سلکتورهای لیست» (نکتهٔ مهمِ پیش‌نمایش زنده) حالا', 'با یک سربرگِ «💡 نکته مهم» باز/بسته می‌شود (پیش‌فرض: باز).',
@@ -30823,7 +30940,8 @@ renderChangelog();
 // ========== Connection JS ==========
 let wSend=false,bSend=false,cn={woocommerce:{},basalam:{}},extractPollTimer=null,extractModalTimer=null;
 function loadConn(){fetch('',{method:'POST',body:new URLSearchParams('action=load_connections')}).then(r=>r.json()).then(d=>{if(d.ok){cn=d.connections;applyCn();}}).catch(()=>{});}
-function applyCn(){const w=cn.woocommerce||{},b=cn.basalam||{};if(w.store_url&&$('wcUrl'))$('wcUrl').value=w.store_url;if(w.consumer_key&&$('wcCK'))$('wcCK').value=w.consumer_key;if(w.consumer_secret&&$('wcCS'))$('wcCS').value=w.consumer_secret;if(w.default_status&&$('wcSt'))$('wcSt').value=w.default_status;if(w.default_category&&$('wcCat'))$('wcCat').value=w.default_category;if($('wcMS'))$('wcMS').checked=!!w.manage_stock;if(w.stock_quantity&&$('wcSQ'))$('wcSQ').value=w.stock_quantity;if($('wcPMode'))$('wcPMode').value=w.price_mode||'none';if($('wcPVal'))$('wcPVal').value=(w.price_val!==undefined?w.price_val:0);if($('wcPRound'))$('wcPRound').value=String(w.price_round||0);if($('bsPMode'))$('bsPMode').value=b.price_mode||'none';if($('bsPVal'))$('bsPVal').value=(b.price_val!==undefined?b.price_val:0);if($('bsPRound'))$('bsPRound').value=String(b.price_round||0);try{destPricePreview('wc');destPricePreview('bs');}catch(e){}if(b.token&&$('bsTk'))$('bsTk').value=b.token;if(b.vendor_id&&$('bsVid'))$('bsVid').value=b.vendor_id;if(b.preparation_days&&$('bsPD'))$('bsPD').value=b.preparation_days;if(b.weight&&$('bsW'))$('bsW').value=b.weight;if($('bsPW')&&b.package_weight)$('bsPW').value=b.package_weight;if(b.stock&&$('bsSt'))$('bsSt').value=b.stock;// v7.48: Restore category in searchable dropdown
+function applyCn(){const w=cn.woocommerce||{},b=cn.basalam||{};if(w.store_url&&$('wcUrl'))$('wcUrl').value=w.store_url;if(w.consumer_key&&$('wcCK'))$('wcCK').value=w.consumer_key;if(w.consumer_secret&&$('wcCS'))$('wcCS').value=w.consumer_secret;if(w.default_status&&$('wcSt'))$('wcSt').value=w.default_status;if(w.default_category&&$('wcCat'))$('wcCat').value=w.default_category;if($('wcMS'))$('wcMS').checked=!!w.manage_stock;if(w.stock_quantity&&$('wcSQ'))$('wcSQ').value=w.stock_quantity;if($('wcPMode'))$('wcPMode').value=w.price_mode||'none';if($('wcPVal'))$('wcPVal').value=(w.price_val!==undefined?w.price_val:0);if($('wcPRound'))$('wcPRound').value=String(w.price_round||0);if($('bsPMode'))$('bsPMode').value=b.price_mode||'none';if($('bsPVal'))$('bsPVal').value=(b.price_val!==undefined?b.price_val:0);if($('bsPRound'))$('bsPRound').value=String(b.price_round||0);try{destPricePreview('wc');destPricePreview('bs');}catch(e){}if(b.token&&$('bsTk'))$('bsTk').value=b.token;if(b.vendor_id&&$('bsVid'))$('bsVid').value=b.vendor_id;if(b.preparation_days&&$('bsPD'))$('bsPD').value=b.preparation_days;if(b.weight&&$('bsW'))$('bsW').value=b.weight;if($('bsPW')&&b.package_weight)$('bsPW').value=b.package_weight;if(b.stock&&$('bsSt'))$('bsSt').value=b.stock;// v9.80: سوییچ «اتصال غیرمستقیم» باسلام
+if($('bsIndirect'))$('bsIndirect').checked=!!b.net_indirect;// v7.48: Restore category in searchable dropdown
 if(b.category_id){$('bsCat').value=String(b.category_id);bslSelectedCatId=b.category_id;if(bslAllCats.length>0){renderBslCatDropdown(bslAllCats,b.category_id);}else{loadBslCats();}}else{$('bsCat').value='0';bslSelectedCatId=0;if($('bsCatSearch'))$('bsCatSearch').value='';}
 if($('bsAutoCat'))$('bsAutoCat').checked=!!b.auto_category;if($('bsDelayMs')&&b.delay_ms)$('bsDelayMs').value=b.delay_ms;if($('bsRetryDelayMs')&&b.retry_delay_ms)$('bsRetryDelayMs').value=b.retry_delay_ms;
 // v8.17: Restore global fallback categories
@@ -30867,7 +30985,7 @@ function destPricePreview(pre){
     +toFa(res.toLocaleString('en-US'))
     +'  ('+(diff>=0?'+':'')+toFa(pct)+'٪)';
 }
-function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10,price_mode:($('wcPMode')||{}).value||'none',price_val:parseFloat(($('wcPVal')||{}).value)||0,price_round:parseInt(($('wcPRound')||{}).value)||0}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors,price_mode:($('bsPMode')||{}).value||'none',price_val:parseFloat(($('bsPVal')||{}).value)||0,price_round:parseInt(($('bsPRound')||{}).value)||0}));
+function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10,price_mode:($('wcPMode')||{}).value||'none',price_val:parseFloat(($('wcPVal')||{}).value)||0,price_round:parseInt(($('wcPRound')||{}).value)||0}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,net_indirect:$('bsIndirect')?.checked||false,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors,price_mode:($('bsPMode')||{}).value||'none',price_val:parseFloat(($('bsPVal')||{}).value)||0,price_round:parseInt(($('bsPRound')||{}).value)||0}));
 // v8.06: Save AI settings
 fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
