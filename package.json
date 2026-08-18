@@ -5,7 +5,7 @@
   "description": "Render-native product scraper and WooCommerce/Basalam synchronizer",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": "20.19.4"
   },
   "scripts": {
     "start": "node render-dist/server.js",

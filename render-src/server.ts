@@ -9,20 +9,42 @@ import { DEFAULT_SELECTORS, type Profile } from './types.js';
 import { testSelector } from './scraper.js';
 import { workerLoop, requestWorkerStop } from './processor.js';
 
-assertConfig();
-await migrate();
+let databaseReady = false;
+let databaseError = '';
+async function initializeDatabase(): Promise<boolean> {
+  try {
+    assertConfig();
+    await migrate();
+    await pool.query('SELECT 1');
+    databaseReady = true; databaseError = '';
+    console.log('PostgreSQL connected and schema is ready');
+    return true;
+  } catch (error) {
+    databaseReady = false;
+    databaseError = error instanceof Error ? error.message : String(error);
+    console.error(`DATABASE NOT READY: ${databaseError}`);
+    return false;
+  }
+}
+await initializeDatabase();
 
 const app = new Hono();
 app.use('*', secureHeaders());
 app.use('/api/*', cors({ origin: origin => origin, allowHeaders: ['authorization','content-type'], allowMethods: ['GET','POST','PUT','DELETE'] }));
 app.onError((error, c) => { console.error(error); return c.json({ ok: false, error: error.message }, 500); });
-app.get('/health', async c => {
-  await pool.query('SELECT 1');
-  return c.json({ ok: true, app: 'scraper4-render', runtime: process.version, workerInWeb: config.runWorkerInWeb, time: new Date().toISOString() });
-});
-app.get('/', c => c.html(DASHBOARD));
+app.get('/health', c => c.json({
+  ok: true,
+  app: 'scraper4-render',
+  runtime: process.version,
+  databaseReady,
+  databaseError: databaseReady ? null : databaseError,
+  workerInWeb: config.runWorkerInWeb,
+  time: new Date().toISOString()
+}));
+app.get('/', c => c.html(databaseReady ? DASHBOARD : setupPage(databaseError)));
 
 app.use('/api/*', async (c, next) => {
+  if (!databaseReady) return c.json({ ok: false, error: 'Database is not configured', detail: databaseError, setup: 'Create Render PostgreSQL and set DATABASE_URL to its Internal Database URL.' }, 503);
   if (!config.adminToken) return next();
   const auth = c.req.header('authorization') || '';
   if (!safeEqual(auth.replace(/^Bearer\s+/i, ''), config.adminToken)) return c.json({ ok: false, error: 'Unauthorized' }, 401);
@@ -66,12 +88,18 @@ app.post('/api/import-php', async c => {
 
 const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, info => console.log(`Scraper4 Render listening on http://${info.address}:${info.port}`));
 let scheduler: NodeJS.Timeout | undefined;
-if (config.runWorkerInWeb) {
+let backgroundStarted = false;
+function startBackground(): void {
+  if (!config.runWorkerInWeb || !databaseReady || backgroundStarted) return;
+  backgroundStarted = true;
   void workerLoop(config.workerPollMs);
   const schedule = async () => { try { const count = await enqueueDueProfiles(); if (count) console.log(`Scheduled ${count} profile(s)`); } catch (error) { console.error('Scheduler error', error); } };
   void schedule(); scheduler = setInterval(schedule, 60_000); scheduler.unref();
 }
-const shutdown = async () => { requestWorkerStop(); if (scheduler) clearInterval(scheduler); server.close(); await pool.end(); process.exit(0); };
+startBackground();
+const databaseRetry = setInterval(async () => { if (!databaseReady && config.databaseUrl && await initializeDatabase()) startBackground(); }, 30_000);
+databaseRetry.unref();
+const shutdown = async () => { requestWorkerStop(); clearInterval(databaseRetry); if (scheduler) clearInterval(scheduler); server.close(); await pool.end(); process.exit(0); };
 process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 
 function validTarget(value: string): 'none'|'woo'|'basalam'|'both' { return ['none','woo','basalam','both'].includes(value) ? value as any : 'none'; }
@@ -88,6 +116,11 @@ function normalizeProfile(raw: any): Profile {
     roundPrice: Math.max(0,Number(raw.roundPrice)||0), minPrice: Math.max(0,Number(raw.minPrice)||0), wooCategoryId: Number(raw.wooCategoryId)||0,
     basalamCategoryId: Number(raw.basalamCategoryId ?? raw.bslCategoryId)||0, syncWoo: Boolean(raw.syncWoo), syncBasalam: Boolean(raw.syncBasalam),
     intervalMinutes: Math.max(0,Number(raw.intervalMinutes)||0), lastRunAt: raw.lastRunAt || null, createdAt: raw.createdAt || now, updatedAt: now };
+}
+
+function setupPage(error: string): string {
+  const safeError = error.replace(/[&<>"']/g, value => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[value] || value);
+  return `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>راه‌اندازی Scraper 4</title><style>:root{color-scheme:dark}body{margin:0;background:#07111e;color:#e8eef8;font:15px Tahoma;line-height:2}main{max-width:780px;margin:40px auto;padding:25px}.card{background:#101e31;border:1px solid #29415f;border-radius:15px;padding:22px;margin-top:15px}h1{color:#38bdf8}code,pre{direction:ltr;text-align:left;background:#050b13;border-radius:8px;padding:10px;display:block;overflow:auto}.error{color:#fda4af;border-color:#be123c}b{color:#fcd34d}</style></head><body><main><h1>Scraper 4 روی Render اجرا شد</h1><div class="card error"><b>پایگاه داده هنوز متصل نیست</b><br>${safeError}</div><div class="card"><h2>راه‌اندازی در سه مرحله</h2><ol><li>در Render گزینه <b>New → PostgreSQL</b> را انتخاب و یک دیتابیس بسازید.</li><li>در صفحه دیتابیس مقدار <b>Internal Database URL</b> را کپی کنید.</li><li>در Web Service به <b>Environment</b> بروید و متغیر زیر را اضافه کنید:</li></ol><pre>DATABASE_URL = Internal Database URL</pre><p>همچنین یک مقدار تصادفی طولانی برای متغیر زیر تعریف کنید:</p><pre>ADMIN_TOKEN = a-long-random-secret</pre><p>پس از Save Changes، سرویس خودکار Restart می‌شود و جداول را می‌سازد.</p></div><div class="card"><b>نکته:</b> فایل render.yaml فقط هنگام ساخت سرویس از طریق Blueprint منابع را خودکار ایجاد می‌کند. اتصال یک Web Service موجود به GitHub باعث اجرای خودکار Blueprint نمی‌شود.</div></main></body></html>`;
 }
 
 const DASHBOARD = `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Scraper 4 Render</title><style>

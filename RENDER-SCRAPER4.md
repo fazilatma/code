@@ -11,6 +11,24 @@
 - صف تراکنشی PostgreSQL با `FOR UPDATE SKIP LOCKED`
 - Worker داخلی در همان Web Service برای راه‌اندازی ساده
 
+## خطای `DATABASE_URL is required`
+
+اگر Web Service را قبلاً به GitHub متصل کرده‌اید، Render فایل `render.yaml` را به‌عنوان Blueprint اجرا نمی‌کند؛ بنابراین PostgreSQL خودکار ساخته نمی‌شود. این مراحل را یک‌بار انجام دهید:
+
+1. در داشبورد Render گزینه **New → PostgreSQL** را بزنید.
+2. بعد از آماده‌شدن دیتابیس، **Internal Database URL** را کپی کنید.
+3. وارد Web Service اسکریپر شوید و در **Environment** این متغیر را اضافه کنید:
+   ```text
+   DATABASE_URL=<Internal Database URL>
+   ```
+4. یک Secret دیگر نیز بسازید:
+   ```text
+   ADMIN_TOKEN=<a long random value>
+   ```
+5. روی **Save Changes** بزنید. سرویس Restart می‌شود و جداول به‌صورت خودکار ساخته می‌شوند.
+
+نسخه جدید حتی بدون دیتابیس Crash نمی‌کند و صفحه راه‌اندازی را نشان می‌دهد، ولی استخراج تا زمان تعریف `DATABASE_URL` فعال نخواهد شد.
+
 ## استقرار سریع
 
 ### روش Blueprint
