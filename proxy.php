@@ -52,13 +52,14 @@
  *    direct (مستقیم) | upstream (پراکسی بالادستی) | worker (ورکر کلودفلر) | cache
  *
  *  فالبک ورکر کلودفلر:
- *    اگر اتصال به مقصد ناموفق باشد، درخواست از طریق cloudflare_worker_url
- *    (پیش‌فرض: https://proxy.fazilat-ma.workers.dev — اولین تنظیم در
- *    $CONFIG) رله می‌شود. علاوه بر خطاهای اتصال، وضعیت‌های
- *    fallback_on_statuses (پیش‌فرض: 403 — معمولاً به معنای ممنوع‌بودن
- *    IP هاست برای مقصد) هم پس از اتمام زنجیرهٔ مستقیم/بالادستی از ورکر
- *    عبور داده می‌شوند. ورکر باید همان API پارامتر ?url= را داشته
- *    باشد — کد آماده در cloudflare-worker.js.
+ *    اگر اتصال به مقصد ناموفق باشد یا هر خطای HTTP (۴۰۰ به بالا — مثلاً 403
+ *    یعنی IP ممنوع، 404 یعنی دامنهٔ فیلترشده، 5xx یعنی خطای مقصد) برگردد،
+ *    درخواست از طریق cloudflare_worker_url رله می‌شود (پیش‌فرض:
+ *    https://proxy.fazilat-ma.workers.dev — اولین تنظیم در $CONFIG).
+ *    این مکانیزم برای همهٔ فرستنده‌ها یکسان است: مرورگر، اسکریپر۴ یا هر
+ *    کلاینت دیگری که از همین endpoint (پارامتر ?url= یا حالت مسیری) عبور
+ *    کند. ورکر باید همان API پارامتر ?url= را داشته باشد — کد آماده در
+ *    cloudflare-worker.js.
  * =====================================================================
  */
 
@@ -78,7 +79,7 @@ $CONFIG = [
     'cloudflare_worker_url' => 'https://proxy.fazilat-ma.workers.dev',
 
     'fallback_key'      => '',                    // کلید ورکر فالبک (اگر ورکر کلید داشته باشد)
-    'fallback_on_statuses' => [403],             // اگر مقصد این وضعیت‌ها را داد از فالبک ورکر استفاده کن؛ 403 معمولاً یعنی IP هاست برای مقصد ممنوع است. نمونهٔ گسترده: [403, 451]
+    'fallback_on_statuses' => [403],             // وضعیت‌های اضافی برای فالبک ورکر؛ توجه: هر خطای ≥۴۰۰ و هر خطای اتصال خودکار از ورکر امتحان می‌شود — این لیست فقط برای وضعیت‌های خاص زیر ۴۰۰ است
     'proxy_key'         => '',                    // کلید محافظت؛ خالی = بدون نیاز به کلید
     'allowed_domains'   => [],                    // لیست سفید؛ خالی = همهٔ دامنه‌ها مجاز. نمونه: ['barfbox.ir', '*.digikala.com']
     'blocked_domains'   => ['localhost', '127.0.0.1', '0.0.0.0'],
@@ -110,8 +111,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.2.8');
-define('PROXY_BUILD', '2026-08-18-08');
+define('PROXY_VERSION', '1.2.9');
+define('PROXY_BUILD', '2026-08-18-09');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -635,25 +636,28 @@ function p_rotate_attempt(string $url, string $method, array $headers, string $b
     if ($cfg['direct_first'] || empty($attempts)) {
         array_unshift($attempts, null); // تلاش مستقیم اول (بدون پراکسی)
     }
-    $retryStatuses = array_map('intval', $cfg['retry_statuses']);
     $fallbackStatuses = array_map('intval', $cfg['fallback_on_statuses']);
     $last = null;
 
     foreach ($attempts as $proxy) {
         $res = p_curl_once($url, $method, $headers, $body, $proxy, $timeout);
         $last = $res;
+        // پاسخ قابل‌قبول: بدون خطای اتصال و وضعیت زیر ۴۰۰
         if ($res['error'] === null
-            && !in_array($res['status'], $retryStatuses, true)
+            && (int)$res['status'] < 400
             && !in_array($res['status'], $fallbackStatuses, true)) {
             $res['via'] = ($proxy === null || $proxy === '') ? 'direct' : 'upstream';
-            return $res; // پاسخ قابل‌قبول
+            return $res;
         }
-        // خطا یا وضعیت قابل‌تلاش‌مجدد → با پراکسی بعدی ادامه بده
+        // هر خطایی (اتصال یا وضعیت ≥۴۰۰) → با پراکسی بالادستی بعدی ادامه بده
     }
 
-    // فالبک: اگر اتصال به مقصد ناموفق بود (یا وضعیت قابل‌فالبک دریافت شد)،
-    // از ورکر کلودفلر عبور کن
-    if ($last !== null && ($last['error'] !== null || in_array($last['status'], $fallbackStatuses, true))) {
+    // فالبک نهایی: روی هر خطایی — خطای اتصال یا هر وضعیت ≥۴۰۰
+    // (403 یعنی IP ممنوع، 404/410 یعنی دامنهٔ فیلترشده، 5xx یعنی خطای مقصد و…)
+    // از ورکر کلودفلر امتحان کن. این مسیر برای همهٔ فرستنده‌ها یکسان است
+    // (مرورگر، اسکریپر۴، cURL) چون همه از همین endpoint رله عبور می‌کنند.
+    if ($last !== null
+        && ($last['error'] !== null || (int)$last['status'] >= 400 || in_array($last['status'], $fallbackStatuses, true))) {
         $fb = p_fallback_attempt($url, $method, $headers, $body, $timeout);
         if ($fb !== null && $fb['error'] === null) {
             $fb['via'] = 'worker';
@@ -676,7 +680,8 @@ function p_filtered_attempt(string $url, string $method, array $headers, string 
         foreach ((array)$cfg['upstream_proxies'] as $proxy) {
             if ($proxy === null || $proxy === '') continue;
             $res = p_curl_once($url, $method, $headers, $body, $proxy, $timeout);
-            if ($res['error'] === null) {
+            // فقط پاسخ بدون خطا و زیر ۴۰۰ قابل‌قبول است؛ هر خطایی → ورکر
+            if ($res['error'] === null && (int)$res['status'] < 400) {
                 $res['via'] = 'upstream';
                 return $res;
             }
@@ -1673,7 +1678,7 @@ a { color:var(--acc); }
 <li>محافظ SSRF — اتصال به IPهای داخلی/خصوصی مسدود است (در تنظیمات قابل تغییر)</li>
 <li>لیست سفید/سیاه دامنه‌ها با پشتیبانی از الگوی <code>*.domain.com</code></li>
 <li>چرخش خودکار بین پراکسی‌های بالادستی (http و socks5) و تلاش مجدد روی خطاهای ۴۰۳/۴۲۹/۵۰۳</li>
-<li>فالبک خودکار به ورکر کلودفلر در صورت شکست اتصال به مقصد یا خطای ۴۰۳ (IP ممنوع) — قابل تغییر در تنظیمات</li>
+<li>فالبک خودکار به ورکر کلودفلر روی «هر خطایی» — خطای اتصال یا هر وضعیت HTTP ≥۴۰۰ — برای همهٔ فرستنده‌ها (مرورگر، اسکریپر۴، cURL)</li>
 <li>شناسایی DNS مسموم/فیلترشده (مثل facebook.com روی هاست ایرانی) و عبور خودکار از ورکر کلودفلر یا پراکسی بالادستی</li>
 <li>انتقال کامل کلید API (Authorization / x-api-key) به مقصد — حتی از مسیر فالبک ورکر — برای تست مدل‌های هوش مصنوعی</li>
 <li>حالت پراکسی فوروارد: CONNECT برای HTTPS و absolute-form برای HTTP — قابل استفاده در فیلد پروکسی اسکرپر</li>
