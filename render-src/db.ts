@@ -172,6 +172,45 @@ export async function getRemoteId(profileId: string, sourceKey: string, target: 
 
 export async function markProfileRun(id: string): Promise<void> { await pool.query('UPDATE profiles SET last_run_at=now() WHERE id=$1', [id]); }
 
+export async function getState<T>(key: string, fallback: T): Promise<T> {
+  const { rows } = await pool.query('SELECT value FROM app_state WHERE key=$1', [key]);
+  return rows[0]?.value ?? fallback;
+}
+
+export async function setState(key: string, value: unknown): Promise<void> {
+  await pool.query(`INSERT INTO app_state(key,value,updated_at) VALUES($1,$2,now()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`, [key, JSON.stringify(value)]);
+}
+
+export async function createBackup(): Promise<Record<string, unknown>> {
+  const [profiles, products, jobs, states] = await Promise.all([
+    pool.query('SELECT * FROM profiles ORDER BY created_at'), pool.query('SELECT * FROM products ORDER BY profile_id,created_at'),
+    pool.query('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 1000'), pool.query('SELECT * FROM app_state ORDER BY key')
+  ]);
+  return { app: 'scraper4-render', version: 1, createdAt: new Date().toISOString(), profiles: profiles.rows, products: products.rows, jobs: jobs.rows, states: states.rows };
+}
+
+export async function restoreBackup(bundle: any): Promise<{ profiles: number; products: number; states: number }> {
+  if (!bundle || bundle.app !== 'scraper4-render' || bundle.version !== 1) throw new Error('Invalid Scraper 4 Render backup');
+  const client = await pool.connect(); let pCount=0, productCount=0, stateCount=0;
+  try {
+    await client.query('BEGIN');
+    for (const row of bundle.profiles || []) { await client.query(`INSERT INTO profiles(id,data,enabled,interval_minutes,last_run_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,COALESCE($6,now()),now()) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data,enabled=EXCLUDED.enabled,interval_minutes=EXCLUDED.interval_minutes,last_run_at=EXCLUDED.last_run_at,updated_at=now()`, [row.id,row.data,row.enabled,row.interval_minutes,row.last_run_at,row.created_at]); pCount++; }
+    for (const row of bundle.products || []) { await client.query(`INSERT INTO products(profile_id,source_key,data,title,price,source_url,remote_woo_id,remote_basalam_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,now()),now()) ON CONFLICT(profile_id,source_key) DO UPDATE SET data=EXCLUDED.data,title=EXCLUDED.title,price=EXCLUDED.price,source_url=EXCLUDED.source_url,remote_woo_id=EXCLUDED.remote_woo_id,remote_basalam_id=EXCLUDED.remote_basalam_id,updated_at=now()`, [row.profile_id,row.source_key,row.data,row.title,row.price,row.source_url,row.remote_woo_id,row.remote_basalam_id,row.created_at]); productCount++; }
+    for (const row of bundle.states || []) { await client.query(`INSERT INTO app_state(key,value,updated_at) VALUES($1,$2,now()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`, [row.key,row.value]); stateCount++; }
+    await client.query('COMMIT'); return { profiles:pCount,products:productCount,states:stateCount };
+  } catch(error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+}
+
+export async function profileStats(): Promise<any[]> {
+  const { rows } = await pool.query(`SELECT p.id,p.data->>'name' name,count(pr.*)::int products,count(pr.remote_woo_id)::int woo_mapped,count(pr.remote_basalam_id)::int basalam_mapped,max(pr.updated_at) last_product_at FROM profiles p LEFT JOIN products pr ON pr.profile_id=p.id GROUP BY p.id,p.data ORDER BY name`);
+  return rows;
+}
+
+export async function reapStalledJobs(minutes = 30): Promise<number> {
+  const result = await pool.query(`UPDATE jobs SET status='failed',phase='watchdog',error='Job was inactive and closed by watchdog',finished_at=now(),updated_at=now() WHERE status='running' AND updated_at < now()-make_interval(mins=>$1)`, [Math.max(5,minutes)]);
+  return result.rowCount || 0;
+}
+
 export async function enqueueDueProfiles(): Promise<number> {
   const { rows } = await pool.query(`SELECT id,data FROM profiles p WHERE enabled=true AND interval_minutes>0
     AND (last_run_at IS NULL OR last_run_at < now() - make_interval(mins => interval_minutes))

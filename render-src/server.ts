@@ -5,8 +5,9 @@ import { cors } from 'hono/cors';
 import { secureHeaders } from 'hono/secure-headers';
 import { config, assertConfig } from './config.js';
 import { DASHBOARD, DASHBOARD_JS, setupPage } from './dashboard.js';
-import { createJob, deleteProfile, enqueueDueProfiles, getJob, getProfile, listJobs, listProducts, listProfiles, migrate, pool, saveProfile, updateJob } from './db.js';
+import { createBackup, createJob, deleteProfile, enqueueDueProfiles, getJob, getProfile, getState, listJobs, listProducts, listProfiles, migrate, pool, profileStats, reapStalledJobs, restoreBackup, saveProfile, setState, updateJob } from './db.js';
 import { DEFAULT_SELECTORS, type Profile } from './types.js';
+import { safeFetch, safeText } from './network.js';
 import { testSelector } from './scraper.js';
 import { createVisualTicket, renderVisualSelector } from './visual.js';
 import { workerLoop, requestWorkerStop } from './processor.js';
@@ -82,6 +83,20 @@ app.post('/api/visual-ticket', async c => {
 app.get('/api/status', async c => c.json({ ok: true, profiles: (await listProfiles()).length, jobs: await listJobs(10), connections: {
   woo: Boolean(config.woo.url && config.woo.key && config.woo.secret), basalam: Boolean(config.basalam.token && config.basalam.vendorId)
 } }));
+app.get('/api/settings', async c => c.json({ ok:true, settings: await getState('settings', {}) }));
+app.post('/api/settings', async c => { const settings=await c.req.json(); await setState('settings',settings); return c.json({ok:true}); });
+app.get('/api/backup', async c => c.json(await createBackup(), 200, { 'content-disposition': `attachment; filename="scraper4-render-${Date.now()}.json"` }));
+app.post('/api/restore', async c => c.json({ok:true,result:await restoreBackup(await c.req.json())}));
+app.get('/api/profile-stats', async c => c.json({ok:true,items:await profileStats()}));
+app.post('/api/queue-watchdog', async c => { const body=await c.req.json().catch(()=>({})) as any; return c.json({ok:true,reaped:await reapStalledJobs(Number(body.minutes)||30)}); });
+app.post('/api/source-test', async c => { const body=await c.req.json() as any; const result=await safeText(String(body.url||''),1_000_000); return c.json({ok:true,bytes:Buffer.byteLength(result.text),url:result.url,title:(result.text.match(/<title[^>]*>(.*?)<\/title>/is)?.[1]||'').replace(/<[^>]+>/g,'').trim()}); });
+app.post('/api/test-connection/:target', async c => {
+  const target=c.req.param('target');
+  if(target==='woo') { if(!config.woo.url||!config.woo.key||!config.woo.secret) return c.json({ok:false,error:'WooCommerce environment variables are incomplete'},400); const auth=`Basic ${Buffer.from(`${config.woo.key}:${config.woo.secret}`).toString('base64')}`; const r=await safeFetch(config.woo.url.replace(/\/$/,'')+'/wp-json/wc/v3/system_status',{headers:{authorization:auth,accept:'application/json'}},2_000_000); return c.json({ok:r.ok,code:r.status}); }
+  if(target==='basalam') { if(!config.basalam.token) return c.json({ok:false,error:'BASALAM_TOKEN is empty'},400); const r=await safeFetch(config.basalam.api+'/categories',{headers:{authorization:`Bearer ${config.basalam.token}`,accept:'application/json'}},2_000_000); return c.json({ok:r.ok,code:r.status}); }
+  if(target==='ai') { const s=await getState<any>('settings',{}),ai=s.ai||{}; if(!ai.baseUrl||!ai.apiKey||!ai.model) return c.json({ok:false,error:'AI settings are incomplete'},400); const endpoint=String(ai.baseUrl).replace(/\/$/,'')+(String(ai.baseUrl).includes('/chat/completions')?'':'/chat/completions'); const r=await safeFetch(endpoint,{method:'POST',headers:{authorization:`Bearer ${ai.apiKey}`,'content-type':'application/json'},body:JSON.stringify({model:ai.model,messages:[{role:'user',content:'سلام'}],max_tokens:20})},2_000_000); return c.json({ok:r.ok,code:r.status,body:await r.json().catch(()=>null)}); }
+  return c.json({ok:false,error:'Unknown connection'},404);
+});
 app.get('/api/profiles', async c => c.json({ ok: true, profiles: await listProfiles() }));
 app.post('/api/profiles', async c => {
   const profile = normalizeProfile(await c.req.json()); return c.json({ ok: true, profile: await saveProfile(profile) });
