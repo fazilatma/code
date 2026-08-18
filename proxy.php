@@ -107,8 +107,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.2.1');
-define('PROXY_BUILD', '2026-08-18-01');
+define('PROXY_VERSION', '1.2.2');
+define('PROXY_BUILD', '2026-08-18-02');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -1424,6 +1424,28 @@ function p_ai_delete_provider(): void {
     exit;
 }
 
+/** تفسیر مشترک نتیجهٔ یک درخواست AI: ok/status/ms/via/error/content */
+function ai_interpret_result(array $res, int $ms): array {
+    $bodyArr = json_decode((string)$res['body'], true);
+    if (!is_array($bodyArr)) $bodyArr = [];
+    $content = ai_extract_content($bodyArr);
+    $ok = $res['error'] === null && (int)$res['status'] === 200 && $content !== '';
+    $err = '';
+    if (!$ok) {
+        if ($res['error'] !== null) $err = $res['error'];
+        elseif ((int)$res['status'] === 401) $err = 'کلید API نامعتبر (۴۰۱)';
+        elseif ((int)$res['status'] === 429) $err = 'محدودیت نرخ (۴۲۹)';
+        elseif ((int)$res['status'] === 402) $err = 'عدم موجودی/پرداخت (۴۰۲)';
+        else $err = trim((string)($bodyArr['error']['message'] ?? ($bodyArr['message'] ?? $bodyArr['error'] ?? '')));
+        if ($err === '') $err = 'HTTP ' . (int)$res['status'] . ($content !== '' ? ' — ' . $content : '');
+    }
+    return [
+        'ok' => $ok, 'status' => (int)$res['status'], 'ms' => $ms,
+        'via' => (string)($res['via'] ?? ''), 'error' => $err,
+        'content' => $ok ? $content : '',
+    ];
+}
+
 /** اجرای تست مدل یا چت — خروجی مشترک */
 function p_ai_run(bool $isChat): void {
     header('Content-Type: application/json; charset=utf-8');
@@ -1442,32 +1464,56 @@ function p_ai_run(bool $isChat): void {
         if ($messages === []) p_error(400, 'no_messages', 'پیامی برای چت نیست');
         $payload = ['model' => $mid, 'messages' => $messages, 'max_tokens' => 800];
     } else {
-        $payload = ['model' => $mid, 'messages' => [['role' => 'user', 'content' => 'سلام']], 'max_tokens' => 24];
+        // پیام تست استاندارد «سلام» — از کلاینت هم قابل بازنویسی است
+        $msg = trim((string)($_POST['test_message'] ?? 'سلام'));
+        if ($msg === '') $msg = 'سلام';
+        $payload = ['model' => $mid, 'messages' => [['role' => 'user', 'content' => $msg]], 'max_tokens' => 24];
     }
 
     $r = ai_proxy_call($url, $key, json_encode($payload, JSON_UNESCAPED_UNICODE));
-    $res = $r['res'];
-    $bodyArr = json_decode((string)$res['body'], true);
-    if (!is_array($bodyArr)) $bodyArr = [];
-    $content = ai_extract_content($bodyArr);
-    $ok = $res['error'] === null && (int)$res['status'] === 200 && $content !== '';
-    $err = '';
-    if (!$ok) {
-        if ($res['error'] !== null) $err = $res['error'];
-        elseif ((int)$res['status'] === 401) $err = 'کلید API نامعتبر (۴۰۱)';
-        elseif ((int)$res['status'] === 429) $err = 'محدودیت نرخ (۴۲۹)';
-        elseif ((int)$res['status'] === 402) $err = 'عدم موجودی/پرداخت (۴۰۲)';
-        else $err = trim((string)($bodyArr['error']['message'] ?? ($bodyArr['message'] ?? $bodyArr['error'] ?? '')));
-        if ($err === '') $err = 'HTTP ' . (int)$res['status'] . ($content !== '' ? ' — ' . $content : '');
+    $out = ai_interpret_result($r['res'], $r['ms']);
+    echo json_encode(array_merge($out, ['model' => $mid]), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+/** تست گروهی همهٔ مدل‌های یک ارائه‌دهنده با پیام «سلام» */
+function p_ai_test_all(): void {
+    header('Content-Type: application/json; charset=utf-8');
+    @set_time_limit(0); // لیست مدل‌ها ممکن است طولانی باشد
+    $pid = trim((string)($_POST['provider_id'] ?? ''));
+    $ki  = max(0, (int)($_POST['key_index'] ?? 0));
+    $msg = trim((string)($_POST['test_message'] ?? 'سلام'));
+    if ($msg === '') $msg = 'سلام';
+    $providers = ai_providers_load();
+    if (!isset($providers[$pid])) p_error(404, 'no_provider', 'ارائه‌دهنده پیدا نشد');
+    $p = ai_provider_normalize((array)$providers[$pid]);
+    $key = (string)($p['apiKeys'][$ki]['key'] ?? ($p['apiKeys'][0]['key'] ?? ''));
+    if ($key === '') p_error(400, 'no_key', 'برای این ارائه‌دهنده کلیدی تنظیم نشده است');
+    if (ai_endpoint_url($p, '') === '') p_error(400, 'no_url', 'آدرس ارائه‌دهنده خالی است');
+
+    $results = [];
+    foreach ((array)$p['models'] as $m) {
+        $mid = (string)($m['id'] ?? '');
+        if ($mid === '') continue;
+        $ep = ai_endpoint_url($p, $mid);
+        $payload = ['model' => $mid, 'messages' => [['role' => 'user', 'content' => $msg]], 'max_tokens' => 24];
+        $r = ai_proxy_call($ep, $key, json_encode($payload, JSON_UNESCAPED_UNICODE));
+        $out = ai_interpret_result($r['res'], $r['ms']);
+        $results[] = array_merge([
+            'model' => $mid,
+            'name'  => (string)($m['name'] ?? $mid),
+        ], $out);
+        if (connection_aborted()) break;
     }
+    $passed = 0;
+    foreach ($results as $x) if ($x['ok']) $passed++;
     echo json_encode([
-        'ok'      => $ok,
-        'status'  => (int)$res['status'],
-        'ms'      => $r['ms'],
-        'via'     => (string)($res['via'] ?? ''),
-        'content' => $ok ? $content : '',
-        'error'   => $ok ? '' : $err,
-        'model'   => $mid,
+        'ok'           => true,
+        'test_message' => $msg,
+        'total'        => count($results),
+        'passed'       => $passed,
+        'failed'       => count($results) - $passed,
+        'results'      => $results,
     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
@@ -1763,11 +1809,13 @@ function aiRender() {
        + '<span class="badge" style="background:#1d4ed8;color:#fff;padding:2px 10px;border-radius:999px;font-size:10px">' + esc(p.vendor) + '</span>'
        + '<label style="font-size:.8rem;display:flex;align-items:center;gap:5px;cursor:pointer">'
        + '<input type="checkbox" id="en_' + esc(p.id) + '" ' + (p.enabled ? 'checked' : '') + ' style="width:14px;height:14px"> فعال</label>'
-       + '<span style="font-size:.75rem;color:var(--mut)">' + p.keys.length + ' کلید · ' + p.models.length + ' مدل</span>'
+       + '<span style="font-size:.75rem;color:var(--mut)">' + p.keys.length + ' کلید · ' + p.models.length + ' مدل · پیام تست: سلام</span>'
        + '<span style="flex:1"></span>'
+       + '<button onclick="aiTestAll(\'' + esc(p.id) + '\')">🧪 تست همه</button>'
        + '<button onclick="aiProvSave(\'' + esc(p.id) + '\')">💾 ذخیره</button>'
        + '<button onclick="aiProvDel(\'' + esc(p.id) + '\')">🗑️</button>'
        + '</div>'
+       + '<div id="all_' + esc(p.id) + '" style="margin-top:6px;font-size:.78rem;color:var(--mut)"></div>'
        + '<div class="row" style="display:flex;gap:6px;margin-top:8px"><input id="url_' + esc(p.id) + '" value="' + esc(p.url) + '" placeholder="https://api..." style="flex:1;background:#0b0f1a;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;direction:ltr;font-family:Consolas,monospace;font-size:.8rem"></div>'
        + '<div style="margin-top:8px"><span style="font-size:.8rem;color:var(--mut)">کلیدهای API:</span> <button onclick="aiKeyAdd(\'' + esc(p.id) + '\')" style="padding:3px 10px">➕ کلید</button></div>'
        + '<div id="keys_' + esc(p.id) + '">';
@@ -1883,11 +1931,48 @@ function aiTest(pid, midx) {
   fd.append('provider_id', pid);
   fd.append('model_id', p.models[midx].id);
   fd.append('key_index', '0');
+  fd.append('test_message', 'سلام');
   fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
     if (el) el.textContent = d.ok
       ? ('✓ ' + d.status + ' · ' + d.ms + 'ms · ' + (d.via || 'direct'))
       : ('✗ ' + d.status + ' · ' + (d.error || ''));
   }).catch(function () { if (el) el.textContent = 'خطای شبکه'; });
+}
+
+function aiTestAll(pid) {
+  var p = null;
+  for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].id === pid) p = AI_PROVIDERS[i];
+  if (!p) return;
+  if (p.models.length === 0) { alert('این ارائه‌دهنده مدلی ندارد — با «درون‌ریزی JSON» مدل‌ها را بیاورید'); return; }
+  if (!confirm('تست همهٔ ' + p.models.length + ' مدل با پیام «سلام»؟\nممکن است چند دقیقه طول بکشد.')) return;
+  for (var m = 0; m < p.models.length; m++) {
+    var el = document.getElementById('res_' + pid + '_' + m);
+    if (el) el.textContent = '⏳';
+  }
+  var sum = document.getElementById('all_' + pid);
+  if (sum) sum.textContent = 'در حال تست ' + p.models.length + ' مدل…';
+  var fd = new FormData();
+  fd.append('action', 'ai_test_all');
+  fd.append('provider_id', pid);
+  fd.append('key_index', '0');
+  fd.append('test_message', 'سلام');
+  fetch('', { method: 'POST', body: fd }).then(function (r) { return r.json(); }).then(function (d) {
+    if (!d || !d.results) { if (sum) sum.textContent = 'خطا در پاسخ'; return; }
+    for (var r2 = 0; r2 < d.results.length; r2++) {
+      var res = d.results[r2];
+      var idx = -1;
+      for (var m = 0; m < p.models.length; m++) if (p.models[m].id === res.model) idx = m;
+      if (idx >= 0) {
+        var el = document.getElementById('res_' + pid + '_' + idx);
+        if (el) el.textContent = res.ok
+          ? ('✓ ' + res.status + ' · ' + res.ms + 'ms · ' + (res.via || 'direct'))
+          : ('✗ ' + res.status + ' · ' + (res.error || ''));
+      }
+    }
+    if (sum) sum.innerHTML = 'تست کامل شد: <b style="color:#4ade80">' + d.passed + ' موفق</b>'
+      + (d.failed ? ' · <b style="color:#f87171">' + d.failed + ' ناموفق</b>' : '')
+      + ' از ' + d.total + ' — پیام تست: «' + esc(d.test_message) + '»';
+  }).catch(function () { if (sum) sum.textContent = 'خطای شبکه'; });
 }
 
 // ---------- چت ----------
@@ -2154,6 +2239,7 @@ if ($aiAction === 'ai_delete_provider') p_ai_delete_provider();
 if ($aiAction === 'ai_add_key')        p_ai_add_key();
 if ($aiAction === 'ai_del_key')        p_ai_del_key();
 if ($aiAction === 'ai_test_model')     p_ai_run(false);
+if ($aiAction === 'ai_test_all')       p_ai_test_all();
 if ($aiAction === 'ai_chat')           p_ai_run(true);
 
 if (isset($_GET['url'])) {
