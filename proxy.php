@@ -107,8 +107,8 @@ $CONFIG = [
     'tunnel_idle_timeout' => 120,                 // سقف بیکاری تونل CONNECT (ثانیه)
 ];
 
-define('PROXY_VERSION', '1.2.2');
-define('PROXY_BUILD', '2026-08-18-02');
+define('PROXY_VERSION', '1.2.3');
+define('PROXY_BUILD', '2026-08-18-03');
 
 // پلی‌فیل توابع رشته‌ای برای PHP 7.4
 if (!function_exists('str_starts_with')) {
@@ -1944,7 +1944,7 @@ function aiTestAll(pid) {
   for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].id === pid) p = AI_PROVIDERS[i];
   if (!p) return;
   if (p.models.length === 0) { alert('این ارائه‌دهنده مدلی ندارد — با «درون‌ریزی JSON» مدل‌ها را بیاورید'); return; }
-  if (!confirm('تست همهٔ ' + p.models.length + ' مدل با پیام «سلام»؟\nممکن است چند دقیقه طول بکشد.')) return;
+  if (!confirm('تست همهٔ ' + p.models.length + ' مدل با پیام «سلام»؟\\nممکن است چند دقیقه طول بکشد.')) return;
   for (var m = 0; m < p.models.length; m++) {
     var el = document.getElementById('res_' + pid + '_' + m);
     if (el) el.textContent = '⏳';
