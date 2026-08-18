@@ -17,7 +17,7 @@ export async function syncWoo(product: Product, profile: Profile): Promise<'crea
     short_description: product.shortDesc || '', images: product.images.map(src => ({ src })) };
   if (product.stock !== undefined) Object.assign(payload, { manage_stock: true, stock_quantity: product.stock });
   if (product.weight) payload.weight = String(product.weight);
-  if (profile.wooCategoryId) payload.categories = [{ id: profile.wooCategoryId }];
+  const wooCategory=profile.wooCategoryId||c.categoryId;if(wooCategory) payload.categories = [{ id: wooCategory }];
   const response = await safeFetch(id ? `${base}/${id}` : base, { method: 'POST', headers: { authorization: auth, 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(payload) }, 3_000_000);
   const body = await response.json().catch(() => ({})) as any;
   if (!response.ok) throw new Error(`WooCommerce HTTP ${response.status}: ${body.message || JSON.stringify(body).slice(0,300)}`);
@@ -29,8 +29,8 @@ export async function syncBasalam(product: Product, profile: Profile): Promise<'
   const c = (await loadConnections()).basalam; if (!c.token || !c.vendorId) throw new Error('تنظیمات باسلام در منوی همبرگری کامل نیست');
   const existing = await getRemoteId(profile.id, product.sourceKey, 'basalam');
   const base = `${c.api}/vendors/${encodeURIComponent(c.vendorId)}/products`;
-  const payload: any = { name: product.title, price: product.price, stock: product.stock ?? 10, description: product.longDesc || product.shortDesc || '',
-    photo: product.image || undefined, category_id: profile.basalamCategoryId || undefined, weight: product.weight || 500, preparation_days: 3 };
+  const payload: any = { name: product.title, price: product.price, stock: product.stock ?? c.stock, description: product.longDesc || product.shortDesc || '',
+    photo: product.image || undefined, category_id: profile.basalamCategoryId || c.categoryId || undefined, weight: product.weight || c.weight, package_weight:c.packageWeight, preparation_days:c.preparationDays };
   const endpoint = existing ? `${base}/${existing}` : base;
   const response = await safeFetch(endpoint, { method: existing ? 'PATCH' : 'POST', headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(payload) }, 3_000_000);
   const body = await response.json().catch(() => ({})) as any;

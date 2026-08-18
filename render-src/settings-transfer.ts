@@ -26,8 +26,8 @@ export async function createPhpSettingsBundle(host='render'): Promise<PhpSetting
   addFile(files,'profiles.json',phpProfiles);
   const c=await loadConnections(true);
   addFile(files,'connections.json',{
-    woocommerce:{url:c.woo.url,consumer_key:c.woo.key,consumer_secret:c.woo.secret,ck:c.woo.key,cs:c.woo.secret},
-    basalam:{token:c.basalam.token,vendor_id:c.basalam.vendorId,api_base:c.basalam.api},
+    woocommerce:{url:c.woo.url,consumer_key:c.woo.key,consumer_secret:c.woo.secret,ck:c.woo.key,cs:c.woo.secret,category_id:c.woo.categoryId},
+    basalam:{token:c.basalam.token,vendor_id:c.basalam.vendorId,api_base:c.basalam.api,preparation_days:c.basalam.preparationDays,weight:c.basalam.weight,package_weight:c.basalam.packageWeight,stock:c.basalam.stock,category_id:c.basalam.categoryId,auto_category:c.basalam.autoCategory,net_indirect:c.basalam.netIndirect,shops:c.basalam.shops},
     ai:{base_url:c.ai.baseUrl,api_key:c.ai.apiKey,model:c.ai.model},
     notifications:c.notifications
   });

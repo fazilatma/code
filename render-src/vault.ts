@@ -2,19 +2,19 @@ import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:
 import { config } from './config.js';
 
 export type ConnectionVault = {
-  woo: { url: string; key: string; secret: string };
-  basalam: { token: string; vendorId: string; api: string };
+  woo: { url: string; key: string; secret: string; categoryId: number };
+  basalam: { token: string; vendorId: string; api: string; preparationDays:number; weight:number; packageWeight:number; stock:number; categoryId:number; autoCategory:boolean; netIndirect:boolean; shops:Array<{name:string;token:string;vendorId:string;pricePercent:number}> };
   ai: { baseUrl: string; apiKey: string; model: string };
-  notifications: { url: string; token: string; chatId: string };
+  notifications: { url: string; token: string; chatId: string; baleToken:string; baleChatId:string; rubikaToken:string; rubikaChatId:string };
 };
 
 type Envelope = { version: 1; salt: string; iv: string; tag: string; ciphertext: string };
 
 export const emptyConnections = (): ConnectionVault => ({
-  woo: { url: '', key: '', secret: '' },
-  basalam: { token: '', vendorId: '', api: 'https://openapi.basalam.com/v1' },
+  woo: { url: '', key: '', secret: '', categoryId:0 },
+  basalam: { token: '', vendorId: '', api: 'https://openapi.basalam.com/v1', preparationDays:3, weight:500, packageWeight:600, stock:10, categoryId:0, autoCategory:false, netIndirect:false, shops:[] },
   ai: { baseUrl: '', apiKey: '', model: '' },
-  notifications: { url: '', token: '', chatId: '' }
+  notifications: { url: '', token: '', chatId: '', baleToken:'', baleChatId:'', rubikaToken:'', rubikaChatId:'' }
 });
 
 function password(): string {
@@ -43,17 +43,20 @@ export function decryptVault(raw: unknown): ConnectionVault {
 
 export function environmentFallback(): ConnectionVault {
   const result=emptyConnections();
-  result.woo={url:config.woo.url,key:config.woo.key,secret:config.woo.secret};
-  result.basalam={token:config.basalam.token,vendorId:config.basalam.vendorId,api:config.basalam.api};
+  result.woo={...result.woo,url:config.woo.url,key:config.woo.key,secret:config.woo.secret};
+  result.basalam={...result.basalam,token:config.basalam.token,vendorId:config.basalam.vendorId,api:config.basalam.api};
   return result;
 }
 
 export function mergeConnections(base: ConnectionVault, input: any): ConnectionVault {
   const text=(value:unknown,fallback='')=>typeof value==='string'?value.trim():fallback;
+  const num=(value:unknown,fallback=0)=>Number.isFinite(Number(value))?Number(value):fallback;
+  const bool=(value:unknown,fallback=false)=>typeof value==='boolean'?value:fallback;
+  const shops=Array.isArray(input?.basalam?.shops)?input.basalam.shops.map((shop:any)=>({name:text(shop?.name),token:text(shop?.token),vendorId:text(shop?.vendorId),pricePercent:num(shop?.pricePercent)})):base.basalam.shops;
   return {
-    woo:{url:text(input?.woo?.url,base.woo.url).replace(/\/$/,''),key:text(input?.woo?.key,base.woo.key),secret:text(input?.woo?.secret,base.woo.secret)},
-    basalam:{token:text(input?.basalam?.token,base.basalam.token),vendorId:text(input?.basalam?.vendorId,base.basalam.vendorId),api:text(input?.basalam?.api,base.basalam.api).replace(/\/$/,'')||'https://openapi.basalam.com/v1'},
+    woo:{url:text(input?.woo?.url,base.woo.url).replace(/\/$/,''),key:text(input?.woo?.key,base.woo.key),secret:text(input?.woo?.secret,base.woo.secret),categoryId:num(input?.woo?.categoryId,base.woo.categoryId)},
+    basalam:{token:text(input?.basalam?.token,base.basalam.token),vendorId:text(input?.basalam?.vendorId,base.basalam.vendorId),api:text(input?.basalam?.api,base.basalam.api).replace(/\/$/,'')||'https://openapi.basalam.com/v1',preparationDays:num(input?.basalam?.preparationDays,base.basalam.preparationDays),weight:num(input?.basalam?.weight,base.basalam.weight),packageWeight:num(input?.basalam?.packageWeight,base.basalam.packageWeight),stock:num(input?.basalam?.stock,base.basalam.stock),categoryId:num(input?.basalam?.categoryId,base.basalam.categoryId),autoCategory:bool(input?.basalam?.autoCategory,base.basalam.autoCategory),netIndirect:bool(input?.basalam?.netIndirect,base.basalam.netIndirect),shops},
     ai:{baseUrl:text(input?.ai?.baseUrl,base.ai.baseUrl).replace(/\/$/,''),apiKey:text(input?.ai?.apiKey,base.ai.apiKey),model:text(input?.ai?.model,base.ai.model)},
-    notifications:{url:text(input?.notifications?.url,base.notifications.url),token:text(input?.notifications?.token,base.notifications.token),chatId:text(input?.notifications?.chatId,base.notifications.chatId)}
+    notifications:{url:text(input?.notifications?.url,base.notifications.url),token:text(input?.notifications?.token,base.notifications.token),chatId:text(input?.notifications?.chatId,base.notifications.chatId),baleToken:text(input?.notifications?.baleToken,base.notifications.baleToken),baleChatId:text(input?.notifications?.baleChatId,base.notifications.baleChatId),rubikaToken:text(input?.notifications?.rubikaToken,base.notifications.rubikaToken),rubikaChatId:text(input?.notifications?.rubikaChatId,base.notifications.rubikaChatId)}
   };
 }
