@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.84';
+const APP_VERSION = '9.85';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3543,19 +3543,24 @@ function srcNetFetchAttempt(string $url, int $timeout, array $net, string $mode)
     $parsed = parse_url($url); $origin = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '');
     $host = strtolower((string)($parsed['host'] ?? ''));
     $ch = curl_init($url);
+    // v9.85: هدرها را جدا نگه می‌داریم تا در حالتِ Worker هدرِ X-Target-URL هم
+    // اضافه شود (Workerِ معکوس برای اینکه بداند درخواست را به کدام آدرس بفرستد
+    // به همین هدر نیاز دارد). بدون آن، Worker آدرسِ مقصد را نمی‌داند و پاسخی
+    // برنمی‌گرداند → همان خطای «Empty» در «بارگذاری صفحه».
+    $headers = [
+        'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language: fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7', 'Cache-Control: no-cache', 'Origin: '.$origin,
+        'Sec-Ch-Ua: "Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"', 'Sec-Ch-Ua-Mobile: ?0',
+        'Sec-Ch-Ua-Platform: "Windows"', 'Sec-Fetch-Dest: document', 'Sec-Fetch-Mode: navigate',
+        'Sec-Fetch-Site: none', 'Sec-Fetch-User: ?1', 'Upgrade-Insecure-Requests: 1',
+    ];
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 5,
         CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => $timeout, CURLOPT_ENCODING => '',
         CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0,
         CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         CURLOPT_REFERER => $url, CURLOPT_COOKIEFILE => '',
-        CURLOPT_HTTPHEADER => [
-            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language: fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7', 'Cache-Control: no-cache', 'Origin: '.$origin,
-            'Sec-Ch-Ua: "Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"', 'Sec-Ch-Ua-Mobile: ?0',
-            'Sec-Ch-Ua-Platform: "Windows"', 'Sec-Fetch-Dest: document', 'Sec-Fetch-Mode: navigate',
-            'Sec-Fetch-Site: none', 'Sec-Fetch-User: ?1', 'Upgrade-Insecure-Requests: 1',
-        ],
+        CURLOPT_HTTPHEADER => $headers,
     ]);
     if ($mode === 'dns' || $mode === 'doh') {
         $ip = '';
@@ -3579,6 +3584,9 @@ function srcNetFetchAttempt(string $url, int $timeout, array $net, string $mode)
         $w = rtrim((string)$net['worker_url'], '/');
         $u = (strpos($w, '{url}') !== false) ? str_replace('{url}', rawurlencode($url), $w) : $w . '/' . ltrim($url, '/');
         curl_setopt($ch, CURLOPT_URL, $u);
+        // v9.85: هدرِ مقصدِ واقعی برای Workerِ معکوس (مثل بقیهٔ مسیرها)
+        $headers[] = 'X-Target-URL: ' . $url;
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     }
     if ($mode !== 'direct' && !empty($net['ipv4']) && defined('CURL_IPRESOLVE_V4')) {
         curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
@@ -12790,6 +12798,11 @@ if (isset($_GET['selftest'])) {
     $add('9.84', 'صفحهٔ خطا، روش‌هایِ امتحان‌شده را نشان می‌دهد',
          strpos($selfSrc, "\$res['tried']") !== false
          && strpos($selfSrc, 'روش‌های امتحان‌شده') !== false);
+
+    /* ---------- v9.85: هدرِ X-Target-URL برای Worker در مسیرِ مبدأ ---------- */
+    $add('9.85', 'srcNetFetchAttempt در حالتِ Worker هدرِ X-Target-URL را می‌فرستد',
+         strpos($selfSrc, "\$headers[] = 'X-Target-URL: ' . \$url;") !== false
+         && strpos($selfSrc, "} elseif (\$mode === 'worker' && !empty(\$net['worker_url'])) {") !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -27340,6 +27353,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.85', t:'🐞 ریشهٔ اصلی: نبودِ هدرِ X-Target-URL در مسیرِ Worker برای «بارگذاری صفحه»/استخراج', items:[
+    'گزارش شما: باز هم «بارگذاری صفحه» و ترافیکِ استخراج مستقیم می‌رفت یا با', 'خطای «Empty» مواجه می‌شد، در حالی که «تست مسیر» موفق بود.',
+    '🐞 این بار ریشهٔ واقعیِ تفاوت پیدا شد: «تست مسیر» از مسیرِ باسلام (bslReqMode)', 'می‌رود که هدرِ <code>X-Target-URL</code> را به Workerِ کلودفلر می‌فرستد —', 'همان هدری که Worker برای دانستنِ آدرسِ مقصد به آن نیاز دارد. اما «بارگذاری', 'صفحه» و استخراجِ مبدأ از مسیرِ دیگری (srcNetFetchAttempt/fetch_html)', 'می‌روند که این هدر را نمی‌فرستادند. نتیجه: Worker آدرسِ مقصد را نمی‌دانست،', 'پاسخی برنمی‌گرداند و با خطای «Empty» مواجه می‌شدیم — در حالی که تستِ همان', 'آدرس از مسیرِ دیگر موفق بود.',
+    '✅ هدرِ <code>X-Target-URL</code> به مسیرِ srcNetFetchAttempt (بارگذاریِ صفحه،', 'بارگذاریِ نمونهٔ جزئیات و استخراجِ لیست) هم اضافه شد. حالا هر سه مسیرِ', 'Worker (هوش مصنوعی، باسلام، مبدأ/سلکتورها) یکسان این هدر را می‌فرستند.',
+    '✅ با این رفع، وقتی «اتصال غیرمستقیم» با Worker فعال است، بارگذاریِ صفحه در', 'تبِ سلکتورها و استخراجِ لیست واقعاً از Workerِ کلودفلر عبور می‌کند و دیگر', 'خطای «Empty» نباید بیاید.'],},
   {v:'9.84', t:'🔗 یکپارچه‌سازیِ تیکِ باسلام با بارگذاریِ صفحه (سمتِ سرور) + دی‌اگنوسِ روش‌ها', items:[
     'گزارش شما: باز هم «بارگذاری صفحه» در تبِ سلکتورها مستقیم می‌رفت و خطای', '«Empty» می‌داد، در حالی که تیکِ اتصالِ غیرمستقیم روشن بود.',
     '🐞 ریشهٔ اصلی: «بارگذاری صفحه» و بارگذاریِ نمونهٔ جزئیات، صفحه را با', 'fetch_html (سمتِ سرور) می‌گیرند و fetch_html فقط سوییچِ «اتصال غیرمستقیم»ِ', 'پروفایل (تبِ شروع) را می‌خواند — نه تیکِ «اتصال غیرمستقیم»ِ باسلام (منوی', 'همبرگری). پس اگر آدرسِ بارگذاری‌شده خودِ باسلام بود و فقط تیکِ باسلام را', 'زده بودید، باز هم مستقیم می‌رفت.',
