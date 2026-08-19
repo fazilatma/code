@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-08-19T00:42:55.432Z",
+  "generatedAt": "2026-08-19T00:52:24.734Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 73,
-    "menuActions": 52
+    "routes": 78,
+    "menuActions": 61
   },
   "routes": [
     "GET /health",
@@ -25,6 +25,11 @@
     "POST /api/ai/call",
     "POST /api/ai/vote",
     "GET /api/ai/leaderboard",
+    "POST /api/ai/test-start",
+    "GET /api/ai/test-status",
+    "POST /api/ai/test-stop",
+    "POST /api/ai/candidates/:task",
+    "GET /api/ai/network-diagnostics",
     "POST /api/notifications/test",
     "GET /api/category-learning",
     "POST /api/category-learning/record",
@@ -84,8 +89,17 @@
     "ALL /scraper4.php"
   ],
   "menuActions": [
+    "ai-add-available",
+    "ai-add-candidate",
+    "ai-candidate-category",
+    "ai-candidate-reply",
+    "ai-clear-candidates",
     "ai-leaderboard",
-    "ai-test-all",
+    "ai-network-diagnostics",
+    "ai-test-start",
+    "ai-test-status",
+    "ai-test-stop",
+    "ai-toggle-paste",
     "ai-vote-master",
     "ar-log",
     "ar-preview",

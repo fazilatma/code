@@ -1,5 +1,14 @@
 # Render TypeScript changelog
 
+## 2.1.0 — 2026-08-19
+
+- Rebuilt the AI hamburger section as five PHP-style tabs: providers, tests, models, candidates/master and network.
+- Added JSON provider file/paste import, provider toggles and active provider/model selection.
+- Added background AI model testing with persisted progress, stop, resume/status and prior-result filtering.
+- Added OpenAI-compatible, Ollama and Cloudflare-style response handling.
+- Added candidate category/reply comparison, voting, leaderboard and master selection.
+- Added Direct, DoH, manual DNS, Proxy and Worker network diagnostics.
+
 ## 2.0.0 — 2026-08-19
 
 - Added authenticated `/scraper4.php` compatibility endpoint for legacy query and form clients.
