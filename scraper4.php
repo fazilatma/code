@@ -89,8 +89,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.80';
-const APP_VERSION_DATE = '1405/05/25';
+const APP_VERSION = '9.82';
+const APP_VERSION_DATE = '1405/05/28';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1865,7 +1865,7 @@ function bslReqMode(string $url, string $tk, string $m, $d, bool $mp, array $net
             'body' => @json_decode($b, true), 'raw' => $b, 'mode' => $mode];
 }
 
-function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false, ?array $net=null): array {
+function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false, ?array $net=null, bool $skipStop=false): array {
 $url=bslApiBase().ltrim($ep,'/');
 if($net===null)$net = function_exists('bslNetCfg') ? bslNetCfg() : ['indirect'=>false,'mode'=>'direct','fallback'=>false];
 
@@ -1896,8 +1896,11 @@ foreach($modes as $mode){
 $r=['ok'=>false];
 for($attempt=1;$attempt<=$maxRetries;$attempt++){
 // v8.59: کش stat را پاک کن، وگرنه سیگنال توقفِ تازه دیده نمی‌شود
+// v9.82: تست اتصال نباید به‌خاطر فایل توقفِ باقی‌مانده «stopped» بدهد
+if(!$skipStop){
 clearstatcache(true,BSL_STOP_FILE);
 if(file_exists(BSL_STOP_FILE)){return ['ok'=>false,'code'=>0,'error'=>'stopped','body'=>null,'raw'=>''];}
+}
 $r=bslReqMode($url,$tk,$m,$d,$mp,$net,$mode);
 $last=$r;
 if($r['code']>0)break;                 // پاسخ گرفته شد (موفق یا خطای منطقی)؛ دوباره نمی‌زنیم
@@ -12670,6 +12673,24 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'function bslReq' . 'Mode(') !== false
          && strpos($selfSrc, 'bslReqMode($url,$tk,$m,$d,$mp,$net,$mode)') !== false);
 
+    /* ---------- v9.81: تست غرفه تیک اتصال غیرمستقیم فرم را می‌خواند ---------- */
+    $add('9.81', 'test_basalam مقدار فعلی تیک «اتصال غیرمستقیم» فرم را می‌خواند',
+         strpos($selfSrc, "array_key_exists('net_ind" . "irect', \$_POST)") !== false);
+    $add('9.81', 'دکمه‌های تست غرفه (اصلی و اضافی) net_indirect را می‌فرستند',
+         strpos($selfSrc, "fd.append('net_ind" . "irect'") !== false);
+    $add('9.81', 'پاسخ خطای اتصال تست باسلام شامل curl_error و mode است',
+         strpos($selfSrc, "'curl_er" . "ror'=>trim((string)(\$r['error']??''))") !== false
+         && strpos($selfSrc, "'mode'=>(string)(\$r['mo" . "de']??'')") !== false);
+
+    /* ---------- v9.82: تست اتصال سیگنال توقف را نادیده می‌گیرد ---------- */
+    $add('9.82', 'bslReq پارامتر skipStop دارد تا بتوان سیگنال توقف را نادیده گرفت',
+         strpos($selfSrc, 'bool $skip' . 'Stop=false') !== false);
+    $add('9.82', 'test_basalam با skipStop=true صدا می‌شود تا فایل توقف تست را خراب نکند',
+         strpos($selfSrc, "bslReq(\$tk, 'GET', 'users/me', null, false, \$net, tr" . "ue)") !== false);
+    $add('9.82', 'وقتی skipStop روشن است، وجود فایل توقف باعث برگشت stopped نمی‌شود',
+         strpos($selfSrc, 'if(!$skip' . 'Stop){') !== false
+         && strpos($selfSrc, "error'=>'stop" . "ped'") !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -17091,7 +17112,7 @@ if ($net !== null && array_key_exists('net_indirect', $_POST)) {
     $v = $_POST['net_indirect'];
     $net['indirect'] = !empty($v) && $v !== 'false' && $v !== '0';
 }
-$r = bslReq($tk, 'GET', 'users/me', null, false, $net);
+$r = bslReq($tk, 'GET', 'users/me', null, false, $net, true);
 if ($r['ok']&&!empty($r['body'])) {
 $b=$r['body'];$v=$b['vendor']??[];
 $ivs=$b['info_verification_status']??null;
@@ -27163,6 +27184,24 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.82', t:'🛑 رفع خطای «جزئیات: stopped» در تست اتصال باسلام', items:[
+    'گزارش شما: دکمهٔ تست غرفه، به‌جای نتیجهٔ واقعی اتصال، «جزئیات: stopped»',
+    'نشان می‌داد.',
+    '🐞 ریشه: اگر فایل سیگنال توقف ارسال (bsl_stop_signal.json) از یک ارسالِ',
+    'قبلی باقی مانده باشد، bslReq فوراً error=stopped برمی‌گرداند و تست هم',
+    'همان را به‌عنوان خطای اتصال نشان می‌داد.',
+    '✅ پارامتر skipStop به bslReq اضافه شد.',
+    '✅ تست اتصال (test_basalam) با skipStop=true صدا می‌شود تا سیگنال توقف',
+    'دست‌نخورده بماند ولی جلوی تست را نگیرد.',
+    '✅ ارسال و همگام‌سازی همچنان با دیدن سیگنال توقف فوراً می‌ایستند.'],},
+  {v:'9.81', t:'🔗 تست غرفه، تیک «اتصال غیرمستقیم» فرم را رعایت می‌کند', items:[
+    'گزارش شما: دکمهٔ تست غرفه، تیک فعلی «اتصال غیرمستقیم» فرم را نادیده',
+    'می‌گرفت و همیشه با تنظیم ذخیره‌شده تست می‌کرد.',
+    '✅ test_basalam حالا مقدار net_indirect فرم را می‌خواند.',
+    '✅ bslReq پارامتر اختیاری $net گرفت.',
+    '✅ در خطای اتصال (HTTP 0) پاسخ شامل curl_error و mode است.',
+    '✅ testBsl و testBslVendor هر دو net_indirect را می‌فرستند و راهنمای',
+    'اتصال غیرمستقیم را نشان می‌دهند.'],},
   {v:'9.80', t:'🌐 تیکِ «اتصال غیرمستقیم» برای باسلام — تبادل از روش‌های غیرمستقیم', items:[
     'گزارش شما: باسلام هم IP هاست را بلاک کرده؛ خواستید یک تیک در بخشِ باسلامِ', 'منوی همبرگری بگذاریم تا با فعال‌شدنش، تبادل پیام با باسلام از روش‌هایِ', 'اتصالِ غیرمستقیم انجام شود.',
     '✅ در منوی همبرگری ← «🏪 باسلام» یک تیکِ «اتصال غیرمستقیم» اضافه شد.', '✅ وقتی روشن باشد، همهٔ درخواست‌های باسلام (دریافت محصولات، ارسال، تست،', 'چت/پیام، وضعیت و...) اول از روشِ اتصالِ غیرمستقیمِ تنظیم‌شده در بخشِ', '«اتصال به سایت مبدأ» (پروکسی، Worker، DoH، IP دستی) رد می‌شوند.', '✅ اگر روشِ اصلی جواب نداد، روش‌هایِ فعالِ دیگر هم امتحان می‌شوند و در', 'نهایت یک بار مستقیم؛ در اولینِ موفق برمی‌گردد.', '✅ خطاهایِ منطقی (مثل ۴۰۱/۴۰۴) دیگرِ روش‌ها را امتحان نمی‌کند (بی‌فایده', 'است) ولی بلاکِ ۴۰۳/۴۲۹ و قطعِ شبکه باعث می‌شود روشِ بعدی امتحان شود.'],},
