@@ -26,11 +26,13 @@ export async function ensureSchema(db: D1Database = getEnv().DB): Promise<void> 
   const key = db as unknown as object;
   let promise = ready.get(key);
   if (!promise) {
-    promise = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='profiles'").first<{name:string}>().then(async existing=>{
-      if(existing)return;
+    // Every statement in SCHEMA is idempotent. Running the full bootstrap once per
+    // isolate also repairs a partially initialized D1 database; checking for only
+    // one table could otherwise leave the remaining schema missing forever.
+    promise = (async () => {
       const statements=SCHEMA.split(';').map(sql=>sql.trim()).filter(Boolean).map(sql=>db.prepare(sql));
       await db.batch(statements);
-    }).catch(error => { ready.delete(key); throw error; });
+    })().catch(error => { ready.delete(key); throw error; });
     ready.set(key, promise);
   }
   await promise;

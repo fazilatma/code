@@ -21,9 +21,9 @@
     "worker:typecheck": "tsc -p tsconfig.worker.json --noEmit",
     "worker:dev": "wrangler dev --ip 0.0.0.0",
     "worker:test": "npm run worker:typecheck && npm run worker:build && node --test worker-tests/*.test.mjs",
-    "worker:deploy": "wrangler deploy",
-    "worker:db:local": "wrangler d1 migrations apply scraper4-db --local",
-    "worker:db:remote": "wrangler d1 migrations apply scraper4-db --remote"
+    "worker:deploy": "node scripts/deploy-cloudflare.mjs",
+    "worker:db:local": "wrangler d1 migrations apply DB --local",
+    "worker:db:remote": "wrangler d1 migrations apply DB --remote"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.1",

@@ -1,32 +1,34 @@
+# Keep this name stable: the draft Queue bindings below are provisioned as
+# scraper4-cloudflare-jobs and scraper4-cloudflare-jobs-dlq.
 name = "scraper4-cloudflare"
 main = "worker-src/main.ts"
 compatibility_date = "2026-08-19"
 workers_dev = true
 
-# Replace this placeholder after: npx wrangler d1 create scraper4-db
+# Draft bindings are provisioned and re-attached automatically by Wrangler.
+# No account resource IDs belong in source control.
 [[d1_databases]]
 binding = "DB"
-database_name = "scraper4-db"
-database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "migrations"
 
-# Create once with: npx wrangler queues create scraper4-jobs
+# JOBS_DLQ is intentionally also a producer binding. This makes Wrangler
+# provision the DLQ before it installs the JOBS consumer configuration.
 [[queues.producers]]
 binding = "JOBS"
-queue = "scraper4-jobs"
+
+[[queues.producers]]
+binding = "JOBS_DLQ"
 
 [[queues.consumers]]
-queue = "scraper4-jobs"
+queue = "scraper4-cloudflare-jobs"
 max_batch_size = 5
 max_batch_timeout = 5
 max_retries = 5
-dead_letter_queue = "scraper4-jobs-dlq"
+dead_letter_queue = "scraper4-cloudflare-jobs-dlq"
 max_concurrency = 2
 
-# Create once with: npx wrangler r2 bucket create scraper4-backups
 [[r2_buckets]]
 binding = "BACKUPS"
-bucket_name = "scraper4-backups"
 
 [triggers]
 crons = ["*/5 * * * *"]

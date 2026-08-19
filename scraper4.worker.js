@@ -2357,11 +2357,10 @@ async function ensureSchema(db = getEnv().DB) {
   const key2 = db;
   let promise = ready.get(key2);
   if (!promise) {
-    promise = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='profiles'").first().then(async (existing) => {
-      if (existing) return;
+    promise = (async () => {
       const statements = SCHEMA.split(";").map((sql) => sql.trim()).filter(Boolean).map((sql) => db.prepare(sql));
       await db.batch(statements);
-    }).catch((error) => {
+    })().catch((error) => {
       ready.delete(key2);
       throw error;
     });

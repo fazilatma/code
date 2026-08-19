@@ -55,3 +55,21 @@ test('D1 migration and runtime schema remain synchronized',async()=>{
   assert.equal(migration.replace(/^--[^\n]*\n/,'').trim(),schema);
   for(const table of ['profiles','products','jobs','destination_map','category_learning','autoreply_log','app_state'])assert.match(migration,new RegExp(`CREATE TABLE IF NOT EXISTS ${table}\\b`));
 });
+
+test('Cloudflare resources are automatically provisioned during deploy',async()=>{
+  const config=await readFile(new URL('../wrangler.toml',import.meta.url),'utf8');
+  const packageJson=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'));
+  const deployScript=await readFile(new URL('../scripts/deploy-cloudflare.mjs',import.meta.url),'utf8');
+
+  assert.match(config,/name\s*=\s*"scraper4-cloudflare"/);
+  assert.match(config,/\[\[d1_databases\]\][\s\S]*?binding\s*=\s*"DB"/);
+  assert.doesNotMatch(config,/\bdatabase_(?:id|name)\s*=/);
+  assert.match(config,/\[\[r2_buckets\]\]\s*\nbinding\s*=\s*"BACKUPS"/);
+  assert.doesNotMatch(config,/\bbucket_name\s*=/);
+  assert.match(config,/\[\[queues\.producers\]\]\s*\nbinding\s*=\s*"JOBS"/);
+  assert.match(config,/\[\[queues\.producers\]\]\s*\nbinding\s*=\s*"JOBS_DLQ"/);
+  assert.match(config,/queue\s*=\s*"scraper4-cloudflare-jobs"/);
+  assert.match(config,/dead_letter_queue\s*=\s*"scraper4-cloudflare-jobs-dlq"/);
+  assert.equal(packageJson.scripts['worker:deploy'],'node scripts/deploy-cloudflare.mjs');
+  assert.match(deployScript,/deploy[\s\S]*experimental-provision[\s\S]*d1[\s\S]*migrations[\s\S]*apply[\s\S]*DB[\s\S]*remote/);
+});
