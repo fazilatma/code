@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.82';
+const APP_VERSION = '9.83';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3429,6 +3429,11 @@ function srcNetCfg(?array $cn = null): array {
     if (array_key_exists('_srcNetProfileIndirect', $GLOBALS)) {
         if (empty($GLOBALS['_srcNetProfileIndirect'])) $mode = 'direct';
     }
+    // v9.83: سوییچِ «اتصال غیرمستقیم»ِ پروفایل (تبِ شروع / سلکتورها) روشن است.
+    // این یعنی حتی اگر روشِ اصلیِ سراسری «direct» باشد (فقط Worker/پروکسی پر شده)،
+    // باید روش‌هایِ غیرمستقیمِ پرشده امتحان شوند — نه مستقیم.
+    $forceIndirect = array_key_exists('_srcNetProfileIndirect', $GLOBALS)
+        && !empty($GLOBALS['_srcNetProfileIndirect']);
     return [
         'mode'       => in_array($mode, ['direct','doh','dns','proxy','worker'], true) ? $mode : 'direct',
         'resolve_ip' => trim((string)$pick('resolve_ip', '')),
@@ -3444,6 +3449,8 @@ function srcNetCfg(?array $cn = null): array {
         'hosts'      => trim((string)($n['hosts'] ?? '')),
         // v9.77: اگر روش اصلی شکست خورد، روش‌های جایگزینِ فعال را هم امتحان کن
         'fallback'   => !empty($n['fallback']),
+        // v9.83: پروفایل صریحاً خواسته است از مسیرِ غیرمستقیم برود
+        'force_indirect' => $forceIndirect,
     ];
 }
 
@@ -3571,12 +3578,14 @@ function fetch_html(string $url, int $timeout = 25): array {
     srcPace($__srcHost, (int)($__srcNet['gap_ms'] ?? 0));
 
     $modes = [];
-    // روش اصلی
-    if (srcNetApplies($__srcNet, $__srcHost)) $modes[] = (string)$__srcNet['mode'];
-    // روش‌های جایگزینِ فعال (فقط اگر تیک روشن باشد)
-    if (!empty($__srcNet['fallback'])) {
-        $order = ['doh','dns','proxy','worker'];
-        foreach ($order as $m) {
+    // v9.83: اگر پروفایلِ «اتصال غیرمستقیم» را روشن کرده باشد (یا در حالتِ سرورساید
+    // صفحهٔ سلکتورها)، حتی اگر روشِ اصلیِ سراسری «direct» باشد، همهٔ روش‌هایِ
+    // غیرمستقیمِ پرشده (Worker/پروکسی/DoH/IP دستی) امتحان می‌شوند و در نهایت
+    // مستقیم — دقیقاً مثل منطقِ bslReq برای باسلام.
+    if (!empty($__srcNet['force_indirect'])) {
+        $primary = (string)$__srcNet['mode'];
+        if ($primary !== 'direct') $modes[] = $primary;
+        foreach (['doh','dns','proxy','worker'] as $m) {
             if (in_array($m, $modes, true)) continue;
             if ($m === 'dns'    && trim((string)($__srcNet['resolve_ip'] ?? '')) === '') continue;
             if ($m === 'doh'    && trim((string)($__srcNet['doh_url'] ?? '')) === '') continue;
@@ -3584,8 +3593,23 @@ function fetch_html(string $url, int $timeout = 25): array {
             if ($m === 'worker' && trim((string)($__srcNet['worker_url'] ?? '')) === '') continue;
             $modes[] = $m;
         }
+        $modes[] = 'direct';
+    } else {
+        // حالتِ عادی: روشِ اصلی، و اگر تیکِ «روش‌های جایگزین» روشن باشد بقیه
+        if (srcNetApplies($__srcNet, $__srcHost)) $modes[] = (string)$__srcNet['mode'];
+        if (!empty($__srcNet['fallback'])) {
+            $order = ['doh','dns','proxy','worker'];
+            foreach ($order as $m) {
+                if (in_array($m, $modes, true)) continue;
+                if ($m === 'dns'    && trim((string)($__srcNet['resolve_ip'] ?? '')) === '') continue;
+                if ($m === 'doh'    && trim((string)($__srcNet['doh_url'] ?? '')) === '') continue;
+                if ($m === 'proxy'  && trim((string)($__srcNet['proxy'] ?? '')) === '') continue;
+                if ($m === 'worker' && trim((string)($__srcNet['worker_url'] ?? '')) === '') continue;
+                $modes[] = $m;
+            }
+        }
+        if (empty($modes)) $modes[] = 'direct';
     }
-    if (empty($modes)) $modes[] = 'direct';
 
     $last = null;
     foreach ($modes as $m) {
@@ -12713,6 +12737,14 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'function srcNetApply' . 'ProfileIfExists(') !== false
          && strpos($selfSrc, 'srcNetApplyProfileIfExists(profileKey($url))') !== false
          && strpos($selfSrc, "srcNetApplyProfileIfExists((string)(\$_GET['pk'] ?? ''))") !== false);
+
+    /* ---------- v9.83: رفعِ اتصالِ غیرمستقیمِ بارگذاریِ صفحه (سمتِ سرور) ---------- */
+    $add('9.83', 'srcNetCfg وقتی سوییچِ پروفایل روشن است پرچم force_indirect می‌دهد',
+         strpos($selfSrc, "'force_indirect' => \$forceIndirect,") !== false
+         && strpos($selfSrc, "\$forceIndirect = array_key_exists('_srcNetProfileIndirect', \$GLOBALS)") !== false);
+    $add('9.83', 'fetch_html در حالتِ force_indirect همهٔ روش‌هایِ غیرمستقیمِ پرشده را امتحان می‌کند',
+         strpos($selfSrc, "if (!empty(\$__srcNet['force_indirect'])) {") !== false
+         && strpos($selfSrc, "\$primary = (string)\$__srcNet['mode'];") !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -27263,6 +27295,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.83', t:'🖥 رفعِ اتصالِ غیرمستقیمِ بارگذاریِ صفحه در تبِ سلکتورها (سمتِ سرور)', items:[
+    'گزارش شما: با وجودِ فعال بودنِ «اتصال غیرمستقیم»ِ پروفایل، در تبِ سلکتورها با', 'زدنِ «بارگذاری صفحه» خطای «سرور نتوانست ... را بگیرد / پیام: Empty» می‌آمد', 'یعنی ترافیکِ آن پروفایل باز هم مستقیم رفته بود.',
+    '🐞 ریشه: «بارگذاری صفحه» در تبِ سلکتورها به‌صورتِ سمتِ سرور اجرا می‌شود', '(visual_proxy/detail_proxy که با fetch_html صفحه را از رویِ سرور می‌گیرند).', 'fetch_html فقط وقتی از روشِ غیرمستقیم می‌رفت که روشِ اصلیِ سراسریِ', '«اتصال به سایت مبدأ» خودش غیرمستقیم (مثلاً worker) بود؛ اگر روشِ اصلیِ', 'سراسری «direct» بود ولی فقط Worker/پروکسی پر شده بود، حتی با روشن بودنِ', 'سوییچِ پروفایل، درخواست مستقیم می‌رفت.',
+    '✅ حالا وقتی سوییچِ «اتصال غیرمستقیم»ِ پروفایل روشن باشد، fetch_html هم مثل', 'مسیرِ باسلام همهٔ روش‌هایِ غیرمستقیمِ پرشده (Worker، پروکسی، DoH، IP دستی)', 'را به‌ترتیب امتحان می‌کند و در نهایت یک بار مستقیم — حتی اگر روشِ اصلیِ', 'سراسری «direct» باشد.',
+    '✅ این اصلاح هم «بارگذاری صفحه» و «بارگذاریِ نمونهٔ جزئیات» (سمتِ سرور) و هم', 'بقیهٔ جاهایی که از fetch_html استفاده می‌کنند (استخراجِ لیست) را پوشش می‌دهد.', '✅ اگر پروفایلی وجود نداشته باشد یا سوییچ خاموش باشد، رفتارِ قبلیِ', '«اتصال به سایت مبدأ» دست‌نخورده می‌ماند.'],},
   {v:'9.82', t:'🔗 همهٔ ترافیکِ باسلام و استخراج از مسیر غیرمستقیم + دکمهٔ تست از مسیر غیرمستقیم', items:[
     'گزارش شما: دکمهٔ «تست مسیر» بای‌پس و موفقیتِ غیرمستقیم را می‌گفت ولی دکمهٔ', '«تست»ِ کناری هنوز «عدم موفقیت اتصال» می‌گفت؛ یعنی دکمهٔ تستِ باسلام از', 'مسیرِ غیرمستقیم نمی‌رفت. خواستید همهٔ ترافیکِ API باسلام از اتصالِ', 'غیرمستقیم رد شود.',
     '🐞 ریشه: دکمهٔ «تست» وضعیتِ تیک را از رویِ ذخیره‌شده (دیسک) می‌خواند؛', 'اگر تیک تازه زده/برداشته شده بود و هنوز «ذخیره» نزده بودید، سرور همان', 'مقدارِ قدیمی را می‌دید و مستقیم می‌رفت.',
