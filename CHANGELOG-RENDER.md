@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.12.0 — 2026-08-19
+
+- Added advisory-lock queue deduplication per profile and job kind.
+- Added persistent pause/resume controls and queue overview.
+- Added bounded exponential retries for transient network/429/5xx failures only.
+- Added attempts, maximum attempts and delayed availability timestamps.
+- Added detail-phase heartbeats and retry/queue state in the dashboard.
+
 ## 2.11.0 — 2026-08-19
 
 - Added a dedicated professional reports tab with profile/time filters and CSV export.

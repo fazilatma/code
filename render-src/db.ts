@@ -51,6 +51,9 @@ export async function migrate(): Promise<void> {
       updated integer NOT NULL DEFAULT 0,
       failed integer NOT NULL DEFAULT 0,
       stop_requested boolean NOT NULL DEFAULT false,
+      attempts integer NOT NULL DEFAULT 0,
+      max_attempts integer NOT NULL DEFAULT 3,
+      available_at timestamptz NOT NULL DEFAULT now(),
       error text,
       log jsonb NOT NULL DEFAULT '[]'::jsonb,
       created_at timestamptz NOT NULL DEFAULT now(),
@@ -58,7 +61,10 @@ export async function migrate(): Promise<void> {
       finished_at timestamptz,
       updated_at timestamptz NOT NULL DEFAULT now()
     );
-    CREATE INDEX IF NOT EXISTS jobs_queue_idx ON jobs(status, created_at);
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_attempts integer NOT NULL DEFAULT 3;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS available_at timestamptz NOT NULL DEFAULT now();
+    CREATE INDEX IF NOT EXISTS jobs_queue_idx ON jobs(status, available_at, created_at);
     CREATE TABLE IF NOT EXISTS product_changes (
       id bigserial PRIMARY KEY,
       job_id uuid REFERENCES jobs(id) ON DELETE SET NULL,
@@ -123,15 +129,13 @@ export async function deleteProfile(id: string): Promise<boolean> {
   return Boolean(result.rowCount);
 }
 
-export async function createJob(profileId: string, kind: Job['kind'], target: Job['target']): Promise<Job> {
-  const id = crypto.randomUUID();
-  const { rows } = await pool.query(`INSERT INTO jobs(id,profile_id,kind,target) VALUES($1,$2,$3,$4) RETURNING *`, [id, profileId, kind, target]);
-  return jobFromRow(rows[0]);
-}
+export async function createJob(profileId:string,kind:Job['kind'],target:Job['target']):Promise<Job>{const client=await pool.connect();try{await client.query('BEGIN');await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`${profileId}:${kind}`]);const active=await client.query(`SELECT * FROM jobs WHERE profile_id=$1 AND kind=$2 AND status IN('queued','running') ORDER BY created_at DESC LIMIT 1`,[profileId,kind]);if(active.rows[0]){await client.query('COMMIT');return jobFromRow(active.rows[0])}const id=crypto.randomUUID(),maxAttempts=Math.max(1,Math.min(10,Number(process.env.JOB_MAX_ATTEMPTS)||3)),{rows}=await client.query(`INSERT INTO jobs(id,profile_id,kind,target,max_attempts) VALUES($1,$2,$3,$4,$5) RETURNING *`,[id,profileId,kind,target,maxAttempts]);await client.query('COMMIT');return jobFromRow(rows[0])}catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}}
 
-export async function retryJob(id:string):Promise<Job|null>{const {rows}=await pool.query(`UPDATE jobs SET status='queued',phase='waiting',stop_requested=false,error=NULL,started_at=NULL,finished_at=NULL,processed=0,added=0,updated=0,failed=0,updated_at=now() WHERE id=$1 AND status IN ('failed','stopped','done') RETURNING *`,[id]);return rows[0]?jobFromRow(rows[0]):null}
+export async function retryJob(id:string):Promise<Job|null>{const {rows}=await pool.query(`UPDATE jobs SET status='queued',phase='waiting',stop_requested=false,error=NULL,attempts=0,available_at=now(),started_at=NULL,finished_at=NULL,processed=0,added=0,updated=0,failed=0,updated_at=now() WHERE id=$1 AND status IN ('failed','stopped','done') RETURNING *`,[id]);return rows[0]?jobFromRow(rows[0]):null}
 export async function deleteJob(id:string):Promise<boolean>{const result=await pool.query(`DELETE FROM jobs WHERE id=$1 AND status NOT IN ('running')`,[id]);return Boolean(result.rowCount)}
 export async function clearFinishedJobs():Promise<number>{const result=await pool.query(`DELETE FROM jobs WHERE status IN ('done','failed','stopped')`);return result.rowCount||0}
+export async function setQueuePaused(paused:boolean,reason=''){await setState('queue_control',{paused,reason,updatedAt:new Date().toISOString()});return queueOverview()}
+export async function queueOverview(){const [control,counts,next]=await Promise.all([getState<any>('queue_control',{paused:false}),pool.query(`SELECT status,count(*)::int count FROM jobs GROUP BY status`),pool.query(`SELECT id,profile_id,kind,target,available_at,attempts,max_attempts FROM jobs WHERE status='queued' ORDER BY available_at LIMIT 10`)]);return{control,counts:Object.fromEntries(counts.rows.map(x=>[x.status,x.count])),next:next.rows}}
 
 export async function getJob(id: string): Promise<Job | null> {
   const { rows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [id]);
@@ -147,9 +151,10 @@ export async function claimJob(): Promise<Job | null> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { rows } = await client.query(`SELECT id FROM jobs WHERE status='queued' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1`);
+    const control=await client.query(`SELECT value FROM app_state WHERE key='queue_control'`);if(control.rows[0]?.value?.paused){await client.query('COMMIT');return null}
+    const { rows } = await client.query(`SELECT id FROM jobs WHERE status='queued' AND available_at<=now() ORDER BY available_at,created_at FOR UPDATE SKIP LOCKED LIMIT 1`);
     if (!rows[0]) { await client.query('COMMIT'); return null; }
-    const result = await client.query(`UPDATE jobs SET status='running',phase='starting',started_at=now(),updated_at=now() WHERE id=$1 RETURNING *`, [rows[0].id]);
+    const result = await client.query(`UPDATE jobs SET status='running',phase='starting',attempts=attempts+1,started_at=COALESCE(started_at,now()),updated_at=now() WHERE id=$1 RETURNING *`, [rows[0].id]);
     await client.query('COMMIT');
     return jobFromRow(result.rows[0]);
   } catch (error) { await client.query('ROLLBACK'); throw error; }
@@ -157,7 +162,7 @@ export async function claimJob(): Promise<Job | null> {
 }
 
 export async function updateJob(id: string, patch: Partial<Job>): Promise<void> {
-  const allowed: Record<string, string> = { status: 'status', phase: 'phase', total: 'total', processed: 'processed', added: 'added', updated: 'updated', failed: 'failed', stopRequested: 'stop_requested', error: 'error', log: 'log', finishedAt: 'finished_at' };
+  const allowed: Record<string, string> = { status: 'status', phase: 'phase', total: 'total', processed: 'processed', added: 'added', updated: 'updated', failed: 'failed', stopRequested: 'stop_requested', error:'error',log:'log',finishedAt:'finished_at',availableAt:'available_at',attempts:'attempts',maxAttempts:'max_attempts' };
   const entries = Object.entries(patch).filter(([key]) => allowed[key]);
   if (!entries.length) return;
   const sets = entries.map(([key], i) => `${allowed[key]}=$${i + 2}`);
@@ -275,6 +280,6 @@ export async function enqueueDueProfiles(): Promise<number> {
 function jobFromRow(row: any): Job {
   return { id: row.id, profileId: row.profile_id, kind: row.kind, target: row.target, status: row.status, phase: row.phase,
     total: row.total, processed: row.processed, added: row.added, updated: row.updated, failed: row.failed,
-    stopRequested: row.stop_requested, error: row.error, log: row.log || [], createdAt: row.created_at.toISOString(),
+    stopRequested:row.stop_requested,attempts:Number(row.attempts||0),maxAttempts:Number(row.max_attempts||3),availableAt:row.available_at?.toISOString?.()||row.available_at||new Date().toISOString(),error:row.error,log:row.log||[],createdAt:row.created_at.toISOString(),
     startedAt: row.started_at?.toISOString() || null, finishedAt: row.finished_at?.toISOString() || null, updatedAt: row.updated_at.toISOString() };
 }

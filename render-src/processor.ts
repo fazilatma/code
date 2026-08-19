@@ -10,7 +10,7 @@ function append(job: Job, message: string, level = 'info'): void {
   job.log.push({ at: new Date().toISOString(), level, message });
   if (job.log.length > 200) job.log = job.log.slice(-200);
 }
-async function save(job: Job): Promise<void> { await updateJob(job.id, { status: job.status, phase: job.phase, total: job.total, processed: job.processed, added: job.added, updated: job.updated, failed: job.failed, error: job.error, log: job.log, finishedAt: job.finishedAt }); }
+async function save(job: Job): Promise<void> { await updateJob(job.id, { status: job.status, phase: job.phase, total: job.total, processed: job.processed, added: job.added, updated: job.updated, failed: job.failed, error:job.error,log:job.log,finishedAt:job.finishedAt,availableAt:job.availableAt,attempts:job.attempts,maxAttempts:job.maxAttempts }); }
 
 export async function processOneJob(): Promise<boolean> {
   const job = await claimJob(); if (!job) return false;
@@ -25,11 +25,7 @@ export async function processOneJob(): Promise<boolean> {
       }
       if (job.status !== 'stopped') {
         job.phase = 'details'; const products = [...found.values()]; await save(job);
-        await mapLimit(products, Math.max(1, Number(process.env.DETAIL_CONCURRENCY || 4)), async product => {
-          if (await stopRequested(job.id)) return;
-          try { await scrapeDetails(product, profile.selectors, !profile.netIndirect); }
-          catch (error) { job.failed++; append(job, `${product.title}: ${message(error)}`, 'error'); }
-        });
+        let detailDone=0;await mapLimit(products,Math.max(1,Number(process.env.DETAIL_CONCURRENCY||4)),async product=>{if(await stopRequested(job.id))return;try{await scrapeDetails(product,profile.selectors,!profile.netIndirect)}catch(error){job.failed++;append(job,`${product.title}: ${message(error)}`,'error')}finally{detailDone++;if(detailDone%5===0||detailDone===products.length){job.phase=`details ${detailDone}/${products.length}`;await save(job)}}});
         job.phase = 'save'; await save(job);
         let unchanged=0;for(const product of products){const result=await upsertProduct(profile.id,product,job.id);if(result==='added')job.added++;else if(result==='updated')job.updated++;else unchanged++}if(unchanged)append(job,`${unchanged} محصول بدون تغییر بود`);
         const retired=await markMissingProducts(profile.id,products.map(p=>p.sourceKey),job.id);if(retired)append(job,`${retired} محصول دیگر در مبدأ دیده نشد`,'warning');
@@ -41,8 +37,8 @@ export async function processOneJob(): Promise<boolean> {
     }
     if (job.status !== 'stopped') job.status = 'done';
     append(job, job.status === 'done' ? 'عملیات با موفقیت تمام شد' : 'عملیات متوقف شد');
-  } catch (error) { job.status = 'failed'; job.error = message(error); append(job, job.error, 'error'); }
-  job.finishedAt = new Date().toISOString(); job.phase = 'finished'; await save(job); return true;
+  }catch(error){job.error=message(error);append(job,job.error,'error');const stopped=await stopRequested(job.id);if(!stopped&&job.attempts<job.maxAttempts&&retryable(job.error)){const delay=Math.min(30*60_000,30_000*Math.pow(2,Math.max(0,job.attempts-1)));job.status='queued';job.phase='retry_wait';job.availableAt=new Date(Date.now()+delay).toISOString();append(job,`تلاش مجدد ${job.attempts+1}/${job.maxAttempts} بعد از ${Math.round(delay/1000)} ثانیه`,'warning');await save(job);return true}job.status=stopped?'stopped':'failed'}
+  job.finishedAt=new Date().toISOString();job.phase='finished';await save(job);return true;
 }
 
 async function runSync(job: Job, profile: Awaited<ReturnType<typeof getProfile>> & {}, products: Product[]): Promise<void> {
@@ -66,4 +62,5 @@ export async function workerLoop(pollMs: number): Promise<void> {
   console.log('Scraper worker stopped');
 }
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+const message=(error:unknown)=>error instanceof Error?error.message:String(error);
+const retryable=(error:string|null)=>/timeout|timed out|fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|HTTP (?:429|5\d\d)|network|socket|temporar/i.test(String(error||''));

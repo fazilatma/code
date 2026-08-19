@@ -76,6 +76,9 @@ export type Job = {
   updated: number;
   failed: number;
   stopRequested: boolean;
+  attempts: number;
+  maxAttempts: number;
+  availableAt: string;
   error: string | null;
   log: Array<{ at: string; level: string; message: string }>;
   createdAt: string;

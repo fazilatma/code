@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-08-19T02:36:20.957Z",
+  "generatedAt": "2026-08-19T02:46:02.686Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 98,
+    "routes": 101,
     "menuActions": 72
   },
   "routes": [
@@ -73,6 +73,9 @@
     "POST /api/destination/:target/:id/status",
     "DELETE /api/destination/:target/:id",
     "POST /api/products/:profileId/:sourceKey/sync/:target",
+    "GET /api/queue/overview",
+    "POST /api/queue/pause",
+    "POST /api/queue/resume",
     "POST /api/queue-watchdog",
     "POST /api/source-test",
     "POST /api/source-diagnostics",
