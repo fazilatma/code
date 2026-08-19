@@ -1,0 +1,237 @@
+{
+  "generatedAt": "2026-08-19T00:22:12.425Z",
+  "php": {
+    "getConditions": 150,
+    "postActions": 28
+  },
+  "typescript": {
+    "routes": 63,
+    "menuActions": 47
+  },
+  "routes": [
+    "GET /health",
+    "GET /",
+    "GET /dashboard.js",
+    "GET /visual",
+    "POST /api/visual-ticket",
+    "GET /api/status",
+    "GET /api/selftest",
+    "GET /api/parity",
+    "GET /api/connections",
+    "POST /api/connections",
+    "GET /api/ai/providers",
+    "POST /api/ai/test-all",
+    "POST /api/ai/call",
+    "POST /api/ai/vote",
+    "GET /api/ai/leaderboard",
+    "POST /api/notifications/test",
+    "GET /api/category-learning",
+    "POST /api/category-learning/record",
+    "POST /api/category-learning/test",
+    "POST /api/autoreply/test",
+    "POST /api/autoreply/run",
+    "GET /api/autoreply/log",
+    "POST /api/digest",
+    "GET /api/basalam/chats",
+    "GET /api/basalam/orders",
+    "GET /api/settings",
+    "POST /api/settings",
+    "GET /api/backup",
+    "POST /api/restore",
+    "GET /api/settings-export",
+    "POST /api/settings-import",
+    "GET /api/profile-stats",
+    "POST /api/maintenance/recon/:target",
+    "POST /api/maintenance/rebuild/:target",
+    "POST /api/maintenance/retire/:target",
+    "POST /api/maintenance/bulk/:target",
+    "POST /api/maintenance/photo-fix",
+    "GET /api/destination/:target/products",
+    "GET /api/destination/:target/overview",
+    "GET /api/destination/:target/duplicates",
+    "POST /api/destination/:target/:id/status",
+    "DELETE /api/destination/:target/:id",
+    "POST /api/products/:profileId/:sourceKey/sync/:target",
+    "POST /api/queue-watchdog",
+    "POST /api/source-test",
+    "POST /api/test-connection/:target",
+    "GET /api/categories/:target",
+    "GET /api/profiles",
+    "POST /api/profiles",
+    "DELETE /api/profiles/:id",
+    "POST /api/profiles/:id/scrape",
+    "POST /api/profiles/:id/sync",
+    "GET /api/jobs",
+    "GET /api/jobs/:id",
+    "POST /api/jobs/:id/stop",
+    "POST /api/jobs/:id/retry",
+    "DELETE /api/jobs/:id",
+    "DELETE /api/jobs",
+    "GET /api/profiles/:id/products",
+    "GET /api/profiles/:id/export.csv",
+    "POST /api/profiles/:id/import",
+    "POST /api/test-selector",
+    "POST /api/import-php"
+  ],
+  "menuActions": [
+    "ai-leaderboard",
+    "ai-test-all",
+    "ai-vote-master",
+    "ar-log",
+    "ar-preview",
+    "ar-run",
+    "ar-test",
+    "backup",
+    "bulk-apply",
+    "bulk-preview",
+    "cat-learn",
+    "cat-list",
+    "cat-test",
+    "chats",
+    "csv-export",
+    "dest-delete",
+    "dest-duplicates",
+    "dest-list",
+    "dest-overview",
+    "dest-status",
+    "digest-preview",
+    "digest-send",
+    "health",
+    "notify-bale",
+    "notify-rubika",
+    "notify-webhook",
+    "orders",
+    "parity",
+    "photo-apply",
+    "photo-preview",
+    "rebuild-basalam",
+    "rebuild-woo",
+    "recon-basalam",
+    "recon-woo",
+    "reload",
+    "retire-apply-basalam",
+    "retire-apply-woo",
+    "retire-preview-basalam",
+    "retire-preview-woo",
+    "save",
+    "save-connections",
+    "selftest",
+    "source-test",
+    "stats",
+    "test-basalam",
+    "test-woo",
+    "watchdog"
+  ],
+  "featureGroups": {
+    "profile": {
+      "phpItems": [
+        "profiles",
+        "load_profile",
+        "save_profile",
+        "delete_profile",
+        "all_profiles"
+      ],
+      "coveredByDedicatedTsRoute": 1
+    },
+    "extraction": {
+      "phpItems": [
+        "test_selector",
+        "suggest_selectors",
+        "suggest_detail_selectors",
+        "gallery_test",
+        "gallery_suggest",
+        "detail_stream",
+        "extract_stop",
+        "extract_report",
+        "extract_queue_status"
+      ],
+      "coveredByDedicatedTsRoute": 1
+    },
+    "importExport": {
+      "phpItems": [
+        "csv",
+        "excel",
+        "upload_import",
+        "process_import",
+        "export"
+      ],
+      "coveredByDedicatedTsRoute": 2
+    },
+    "woo": {
+      "phpItems": [
+        "woo_categories",
+        "woo_stream",
+        "woo_dedup_stream",
+        "woo_queue_status",
+        "woo_stop"
+      ],
+      "coveredByDedicatedTsRoute": 0
+    },
+    "basalam": {
+      "phpItems": [
+        "bsl_products",
+        "bsl_categories",
+        "basalam_stream",
+        "bsl_send_one",
+        "bsl_change_status",
+        "bsl_delete_product",
+        "bsl_find_duplicates",
+        "bsl_fix_cat",
+        "bsl_ai_category",
+        "bsl_rejected_cats",
+        "bsl_orders_list",
+        "bsl_chats_list"
+      ],
+      "coveredByDedicatedTsRoute": 0
+    },
+    "ai": {
+      "phpItems": [
+        "ai_providers_status",
+        "ai_test_all",
+        "ai_test_start",
+        "ai_test_status",
+        "ai_test_stop",
+        "ai_candidates",
+        "ai_category",
+        "ai_probe"
+      ],
+      "coveredByDedicatedTsRoute": 0
+    },
+    "maintenance": {
+      "phpItems": [
+        "recon",
+        "recon_status",
+        "bulk_edit",
+        "photo_fix",
+        "retire_run",
+        "suffix_report",
+        "remote_map"
+      ],
+      "coveredByDedicatedTsRoute": 2
+    },
+    "automation": {
+      "phpItems": [
+        "ar_rules",
+        "ar_test",
+        "ar_run",
+        "ar_log",
+        "digest",
+        "notif_test",
+        "queue_watchdog"
+      ],
+      "coveredByDedicatedTsRoute": 2
+    },
+    "deployment": {
+      "phpItems": [
+        "backup_export",
+        "backup_restore",
+        "backup_status",
+        "vc_check",
+        "vc_files",
+        "vc_branches",
+        "selftest"
+      ],
+      "coveredByDedicatedTsRoute": 1
+    }
+  }
+}
