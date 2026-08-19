@@ -2507,8 +2507,8 @@ async function listProducts(profileId, limit = 100, offset = 0, q = "") {
 async function allProducts(profileId) {
   return (await rows("SELECT data FROM products WHERE profile_id=? ORDER BY updated_at", [profileId])).map(productFromRow);
 }
-async function getProduct(profileId, sourceKey) {
-  const row = await statement("SELECT data FROM products WHERE profile_id=? AND source_key=?", [profileId, sourceKey]).first();
+async function getProduct(profileId, sourceKey2) {
+  const row = await statement("SELECT data FROM products WHERE profile_id=? AND source_key=?", [profileId, sourceKey2]).first();
   return row ? productFromRow(row) : null;
 }
 async function markMissingProducts(profileId, seenKeys) {
@@ -2528,20 +2528,20 @@ async function maintenanceRows(profileId = "") {
   }
   return productRows.map((row) => ({ ...row, data: json(row.data, {}), active: Boolean(row.active), maps: by.get(`${row.profile_id}\0${row.source_key}`) || [] }));
 }
-async function setRemoteId(profileId, sourceKey, target, id) {
+async function setRemoteId(profileId, sourceKey2, target, id) {
   const column = target === "woo" ? "remote_woo_id" : "remote_basalam_id";
-  await run(`UPDATE products SET ${column}=?,updated_at=? WHERE profile_id=? AND source_key=?`, [id, now(), profileId, sourceKey]);
+  await run(`UPDATE products SET ${column}=?,updated_at=? WHERE profile_id=? AND source_key=?`, [id, now(), profileId, sourceKey2]);
 }
-async function getRemoteId(profileId, sourceKey, target) {
-  const column = target === "woo" ? "remote_woo_id" : "remote_basalam_id", row = await statement(`SELECT ${column} AS id FROM products WHERE profile_id=? AND source_key=?`, [profileId, sourceKey]).first();
+async function getRemoteId(profileId, sourceKey2, target) {
+  const column = target === "woo" ? "remote_woo_id" : "remote_basalam_id", row = await statement(`SELECT ${column} AS id FROM products WHERE profile_id=? AND source_key=?`, [profileId, sourceKey2]).first();
   return row?.id ? Number(row.id) : null;
 }
-async function getDestinationId(profileId, sourceKey, target, accountKey = "default") {
-  const row = await statement("SELECT remote_id FROM destination_map WHERE profile_id=? AND source_key=? AND target=? AND account_key=?", [profileId, sourceKey, target, accountKey]).first();
+async function getDestinationId(profileId, sourceKey2, target, accountKey = "default") {
+  const row = await statement("SELECT remote_id FROM destination_map WHERE profile_id=? AND source_key=? AND target=? AND account_key=?", [profileId, sourceKey2, target, accountKey]).first();
   return row?.remote_id ? Number(row.remote_id) : null;
 }
-async function setDestinationId(profileId, sourceKey, target, accountKey, remoteId) {
-  await run(`INSERT INTO destination_map(profile_id,source_key,target,account_key,remote_id,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(profile_id,source_key,target,account_key) DO UPDATE SET remote_id=excluded.remote_id,updated_at=excluded.updated_at`, [profileId, sourceKey, target, accountKey, remoteId, now()]);
+async function setDestinationId(profileId, sourceKey2, target, accountKey, remoteId) {
+  await run(`INSERT INTO destination_map(profile_id,source_key,target,account_key,remote_id,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(profile_id,source_key,target,account_key) DO UPDATE SET remote_id=excluded.remote_id,updated_at=excluded.updated_at`, [profileId, sourceKey2, target, accountKey, remoteId, now()]);
 }
 async function markProfileRun(id) {
   await run("UPDATE profiles SET last_run_at=?,updated_at=? WHERE id=?", [now(), now(), id]);
@@ -2795,7 +2795,10 @@ function assertPublicUrl(raw2) {
 }
 async function limitedBody(response, maxBytes) {
   const declared = Number(response.headers.get("content-length") || 0);
-  if (declared > maxBytes) throw new Error(`Response exceeds ${maxBytes} bytes`);
+  if (declared > maxBytes) {
+    await response.body?.cancel();
+    throw new Error(`Response exceeds ${maxBytes} bytes`);
+  }
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader(), chunks = [];
   let total = 0;
@@ -2823,45 +2826,92 @@ async function limitedBody(response, maxBytes) {
   }
   return out;
 }
+function redirectedInit(init, from, to, status) {
+  let next = { ...init };
+  if (from.origin !== to.origin) {
+    const headers = new Headers(next.headers);
+    for (const name of ["authorization", "proxy-authorization", "cookie"]) headers.delete(name);
+    next = { ...next, headers };
+  }
+  if (status === 303 || (status === 301 || status === 302) && String(next.method || "GET").toUpperCase() === "POST") next = { ...next, method: "GET", body: void 0 };
+  return next;
+}
 async function safeFetch(raw2, init = {}, maxBytes) {
   let url = assertPublicUrl(raw2), requestInit = { ...init };
   const env = getEnv(), limit = Math.min(25e6, Math.max(1e3, maxBytes || Number(env.MAX_RESPONSE_BYTES) || 8e6));
   for (let redirects = 0; redirects < 5; redirects++) {
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort("timeout"), Math.max(1e3, Number(env.REQUEST_TIMEOUT_MS) || 25e3));
-    let response;
     try {
-      response = await fetch(url.href, { ...requestInit, redirect: "manual", signal: controller.signal, headers: { "user-agent": "Scraper4-Cloudflare/1.0", accept: "text/html,application/json;q=0.9,*/*;q=0.8", ...requestInit.headers } });
+      const response = await fetch(url.href, { ...requestInit, redirect: "manual", signal: controller.signal, headers: {
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        accept: "text/html,application/xhtml+xml,application/json;q=0.9,application/xml;q=0.8,*/*;q=0.5",
+        "accept-language": "fa-IR,fa;q=0.9,en-US;q=0.7,en;q=0.6",
+        "cache-control": "no-cache",
+        ...requestInit.headers
+      } });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        await response.body?.cancel();
+        if (!location) throw new Error("Redirect without location");
+        const nextUrl = assertPublicUrl(new URL(location, url).href);
+        requestInit = redirectedInit(requestInit, url, nextUrl, response.status);
+        url = nextUrl;
+        continue;
+      }
+      const body = await limitedBody(response, limit), headers = new Headers(response.headers);
+      headers.set("x-scraper-final-url", url.href);
+      return new Response(Uint8Array.from(body).buffer, { status: response.status, statusText: response.statusText, headers });
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error(`\u0645\u0647\u0644\u062A \u062F\u0631\u06CC\u0627\u0641\u062A ${url.href} \u062A\u0645\u0627\u0645 \u0634\u062F.`);
+      throw error;
     } finally {
       clearTimeout(timeout);
     }
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      const location = response.headers.get("location");
-      await response.body?.cancel();
-      if (!location) throw new Error("Redirect without location");
-      url = assertPublicUrl(new URL(location, url).href);
-      if (response.status === 303) {
-        requestInit = { ...requestInit, method: "GET", body: void 0 };
-      }
-      continue;
-    }
-    const body = await limitedBody(response, limit), headers = new Headers(response.headers);
-    headers.set("x-scraper-final-url", url.href);
-    return new Response(Uint8Array.from(body).buffer, { status: response.status, statusText: response.statusText, headers });
   }
   throw new Error("Too many redirects");
 }
+function asciiPrefix(bytes, limit = 8192) {
+  let value = "";
+  for (let i = 0; i < Math.min(limit, bytes.length); i++) value += String.fromCharCode(bytes[i]);
+  return value;
+}
+function responseEncoding(bytes, contentType) {
+  if (bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) return "utf-8";
+  if (bytes[0] === 255 && bytes[1] === 254) return "utf-16le";
+  if (bytes[0] === 254 && bytes[1] === 255) return "utf-16be";
+  const header = contentType.match(/charset\s*=\s*["']?([^\s;"']+)/i)?.[1];
+  if (header) return header.toLowerCase();
+  const prefix = asciiPrefix(bytes), meta = prefix.match(/<meta\b[^>]*charset\s*=\s*["']?([^\s;"'/>]+)/i)?.[1] || prefix.match(/<meta\b[^>]*content\s*=\s*["'][^"']*charset\s*=\s*([^\s;"']+)/i)?.[1];
+  return (meta || "utf-8").toLowerCase();
+}
+function decodeResponseBody(bytes, contentType = "") {
+  const label = responseEncoding(bytes, contentType);
+  try {
+    return new TextDecoder(label, { fatal: false }).decode(bytes);
+  } catch {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+}
+function ensureTextResponse(text, contentType, url) {
+  if (contentType && !/(?:text\/|json|xml|xhtml|javascript|octet-stream)/i.test(contentType)) throw new Error(`\u0646\u0648\u0639 \u067E\u0627\u0633\u062E \u0645\u0628\u062F\u0623 \u0628\u0631\u0627\u06CC \u0627\u0633\u062A\u062E\u0631\u0627\u062C \u0645\u0646\u0627\u0633\u0628 \u0646\u06CC\u0633\u062A (${contentType}).`);
+  const sample = text.slice(0, 2e5);
+  if (/(?:cf-chl-|challenge-platform|cdn-cgi\/challenge-platform|g-recaptcha|hcaptcha)/i.test(sample) || /<title[^>]*>\s*(?:Just a moment|Attention Required|Access denied)/i.test(sample)) throw new Error(`\u0635\u0641\u062D\u0647\u0654 \u0636\u062F\u0631\u0628\u0627\u062A/\u0686\u0627\u0644\u0634 \u0628\u0647\u200C\u062C\u0627\u06CC \u0645\u062D\u062A\u0648\u0627\u06CC \u0645\u062D\u0635\u0648\u0644 \u0627\u0632 ${url} \u062F\u0631\u06CC\u0627\u0641\u062A \u0634\u062F. \u0631\u0648\u0634 \u0627\u062A\u0635\u0627\u0644 \u063A\u06CC\u0631\u0645\u0633\u062A\u0642\u06CC\u0645 \u0631\u0627 \u0628\u0631\u0631\u0633\u06CC \u06A9\u0646\u06CC\u062F.`);
+}
+async function responseText(response, url) {
+  if (!response.ok) throw new Error(`HTTP ${response.status} from ${url}`);
+  const contentType = response.headers.get("content-type") || "", bytes = new Uint8Array(await response.arrayBuffer()), text = decodeResponseBody(bytes, contentType), finalUrl = response.headers.get("x-scraper-final-url") || url;
+  ensureTextResponse(text, contentType, finalUrl);
+  return { text, url: finalUrl, contentType };
+}
 async function safeText(raw2, maxBytes = 8e6) {
-  const response = await safeFetch(raw2, {}, maxBytes);
-  if (!response.ok) throw new Error(`HTTP ${response.status} from ${raw2}`);
-  return { text: textDecoder.decode(await response.arrayBuffer()), url: response.headers.get("x-scraper-final-url") || raw2, contentType: response.headers.get("content-type") || "" };
+  return responseText(await safeFetch(raw2, {}, maxBytes), raw2);
 }
 async function safeTextViaWorker(raw2, workerUrl, maxBytes = 8e6) {
   const target = assertPublicUrl(raw2).href, base = workerUrl.trim();
   if (!base) throw new Error("\u0628\u0631\u0627\u06CC \u0627\u062A\u0635\u0627\u0644 \u063A\u06CC\u0631\u0645\u0633\u062A\u0642\u06CC\u0645\u060C Worker URL \u0631\u0627 \u062F\u0631 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0631\u0648\u0634 \u0627\u062A\u0635\u0627\u0644 \u0648\u0627\u0631\u062F \u06A9\u0646\u06CC\u062F.");
   const gateway = base.includes("{url}") ? base.replace("{url}", encodeURIComponent(target)) : base.replace(/\/$/, "") + "/" + target.replace(/^\//, "");
-  const response = await safeFetch(gateway, { headers: { "x-target-url": target, accept: "text/html,application/xhtml+xml" } }, maxBytes);
-  if (!response.ok) throw new Error(`Indirect Worker HTTP ${response.status} for ${target}`);
-  return { text: textDecoder.decode(await response.arrayBuffer()), url: target, contentType: response.headers.get("content-type") || "" };
+  const response = await safeFetch(gateway, { headers: { "x-target-url": target, accept: "text/html,application/xhtml+xml" } }, maxBytes), result = await responseText(response, target);
+  return { ...result, url: target };
 }
 
 // worker-src/ai.ts
@@ -2872,10 +2922,108 @@ async function aiProviders() {
 async function aiCall(provider, model, prompt) {
   const ai = (await loadConnections()).ai;
   if (!provider.baseUrl || !provider.apiKey || !model) throw new Error("\u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0627\u0631\u0627\u0626\u0647\u200C\u062F\u0647\u0646\u062F\u0647/\u0645\u062F\u0644 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
-  const endpoint = provider.baseUrl + (provider.baseUrl.includes("/chat/completions") ? "" : "/chat/completions"), started = Date.now(), response = await networkFetch(endpoint, { method: "POST", headers: { authorization: `Bearer ${provider.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 400, temperature: 0.2 }) }, ai.network), body = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${body?.error?.message || body?.message || "AI error"}`);
-  const text = body?.choices?.[0]?.message?.content || body?.result?.response || body?.response || "";
-  return { ok: true, text: String(text), latencyMs: Date.now() - started, provider: provider.id, model };
+  const started = Date.now();
+  if (isCloudflareNative(provider.baseUrl)) return cloudflareCall(provider, model, prompt, ai.network, started);
+  const endpoint = openAiEndpoint(provider.baseUrl), reportedEndpoint = safeEndpoint(endpoint), payload = { model, messages: [{ role: "user", content: prompt }], max_tokens: 400, temperature: 0.2 };
+  const result = await requestAi(endpoint, payload, provider, ai.network);
+  if (result.networkError) {
+    const reason = safeError(result.networkError, endpoint, provider.apiKey);
+    throw new AiResponseError(reason, { ok: false, phase: "network", provider: provider.id, providerName: provider.name, model, prompt, endpoint: reportedEndpoint, latencyMs: Date.now() - started, raw: { error: reason } });
+  }
+  const response = result.response, body = result.body, latencyMs = Date.now() - started;
+  if (!response.ok) throw new AiResponseError(`HTTP ${response.status}: ${aiErrorMessage(body) || response.statusText || "AI error"}`, failureDetail(provider, model, prompt, reportedEndpoint, latencyMs, response, body));
+  return successDetail(provider, model, prompt, reportedEndpoint, latencyMs, response, body);
+}
+async function cloudflareCall(provider, model, prompt, network, started) {
+  const accountId = cloudflareAccountId(provider.baseUrl);
+  if (!accountId) throw new AiResponseError("\u0634\u0645\u0627\u0631\u0647\u0654 \u062D\u0633\u0627\u0628 Cloudflare \u062F\u0631 \u0622\u062F\u0631\u0633 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F", { ok: false, phase: "configuration", provider: provider.id, providerName: provider.name, model, prompt, endpoint: safeEndpoint(provider.baseUrl), latencyMs: Date.now() - started, raw: { error: "Cloudflare account ID was not found in base URL" } });
+  const models = cloudflareModelIds(model), base = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/`, messages = [{ role: "user", content: prompt }], attempts = [];
+  let last, lastEndpoint = base + models[0];
+  for (const modelId of models) {
+    const endpoint = base + modelId.replace(/^\/+/, ""), bodies = [{ label: "prompt", value: { prompt, max_tokens: 400 } }, { label: "messages", value: { messages, max_tokens: 400 } }];
+    for (const candidate of bodies) {
+      const result = await requestAi(endpoint, candidate.value, provider, network);
+      last = result;
+      lastEndpoint = endpoint;
+      const error = result.networkError ? safeError(result.networkError, endpoint, provider.apiKey) : result.response?.ok ? "" : aiErrorMessage(result.body) || result.response?.statusText || "Cloudflare AI error";
+      attempts.push({ endpoint: safeEndpoint(endpoint), body: Object.keys(candidate.value), model: modelId, httpStatus: result.response?.status, phase: result.networkError ? "network" : result.response?.ok ? "success" : "http", ...error ? { error } : {} });
+      if (result.response?.ok) return successDetail(provider, model, prompt, safeEndpoint(endpoint), Date.now() - started, result.response, result.body, { cloudflare: { mode: "native", resolvedModel: modelId, triedModels: models, attempts } });
+    }
+  }
+  const chatEndpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/v1/chat/completions`;
+  for (const modelId of models) {
+    const payload = { model: modelId, messages, max_tokens: 400 }, result = await requestAi(chatEndpoint, payload, provider, network);
+    last = result;
+    lastEndpoint = chatEndpoint;
+    const error = result.networkError ? safeError(result.networkError, chatEndpoint, provider.apiKey) : result.response?.ok ? "" : aiErrorMessage(result.body) || result.response?.statusText || "Cloudflare AI error";
+    attempts.push({ endpoint: safeEndpoint(chatEndpoint), body: `chat-${modelId}`, model: modelId, httpStatus: result.response?.status, phase: result.networkError ? "network" : result.response?.ok ? "success" : "http", ...error ? { error } : {} });
+    if (result.response?.ok) return successDetail(provider, model, prompt, safeEndpoint(chatEndpoint), Date.now() - started, result.response, result.body, { cloudflare: { mode: "openai-fallback", resolvedModel: modelId, triedModels: models, attempts } });
+  }
+  const latencyMs = Date.now() - started, cloudflare = { mode: "failed", triedModels: models, attempts };
+  if (last?.networkError) {
+    const reason = safeError(last.networkError, lastEndpoint, provider.apiKey);
+    throw new AiResponseError(reason, { ok: false, phase: "network", provider: provider.id, providerName: provider.name, model, prompt, endpoint: safeEndpoint(lastEndpoint), latencyMs, cloudflare, raw: { error: reason } });
+  }
+  const response = last?.response, status = response?.status || 0, body = last?.body, message2 = aiErrorMessage(body) || (models.length > 1 ? `\u0645\u062F\u0644 \xAB${models[0]}\xBB \u06CC\u0627\u0641\u062A \u0646\u0634\u062F\u061B \u0645\u0633\u06CC\u0631 org \u062F\u0627\u0631 \xAB${models[1]}\xBB \u0646\u06CC\u0632 \u0627\u0645\u062A\u062D\u0627\u0646 \u0634\u062F.` : "\u067E\u0627\u0633\u062E\u06CC \u0627\u0632 Cloudflare AI \u062F\u0631\u06CC\u0627\u0641\u062A \u0646\u0634\u062F.");
+  throw new AiResponseError(`HTTP ${status}: ${message2}`, { ...failureDetail(provider, model, prompt, safeEndpoint(lastEndpoint), latencyMs, response, body), cloudflare });
+}
+function isCloudflareNative(raw2) {
+  return /\/accounts\/[^/]+\/ai\/run(?:\/|$)/i.test(unmarkdownUrl(raw2));
+}
+function cloudflareAccountId(raw2) {
+  return unmarkdownUrl(raw2).match(/\/accounts\/([^/]+)\/ai\/run(?:\/|$)/i)?.[1] || "";
+}
+function unmarkdownUrl(raw2) {
+  const value = String(raw2 || "").trim(), match2 = value.match(/^\[[^\]]+\]\(([^)]+)\)$/);
+  return match2?.[1] || value;
+}
+function openAiEndpoint(raw2) {
+  const value = unmarkdownUrl(raw2), url = new URL(value);
+  if (/\/chat\/completions\/?$/i.test(url.pathname)) return url.toString();
+  if (url.port === "11434" && !/\/v1\/?$/i.test(url.pathname)) url.pathname = url.pathname.replace(/\/$/, "") + "/v1";
+  url.pathname = url.pathname.replace(/\/$/, "") + "/chat/completions";
+  return url.toString();
+}
+function cloudflareModelIds(raw2) {
+  const model = String(raw2 || "").trim().replace(/^\/+/, ""), out = [model], after = model.replace(/^@cf\//i, "");
+  if (after && after.indexOf("/") < 0) {
+    const rules = [["gemma-sea-lion", "aisingapore"], ["mistral-small", "mistralai"], ["llama-guard", "meta"], ["gpt-oss", "openai"], ["deepseek", "deepseek-ai"], ["nemotron", "nvidia"], ["moondream", "moondream"], ["embeddinggemma", "google"], ["hermes", "nousresearch"], ["uform", "unum-cloud"], ["plamo", "pfnet"], ["granite", "ibm-granite"], ["kimi", "moonshotai"], ["gemma", "google"], ["mistral", "mistral"], ["glm", "zai-org"], ["phi", "microsoft"], ["bge", "baai"], ["llama", "meta"], ["qwen", "qwen"], ["qwq", "qwen"], ["sqlcoder", "defog"], ["florence", "microsoft"], ["llava", "llava-hf"]];
+    const rule = rules.find(([prefix]) => after.toLowerCase().startsWith(prefix));
+    if (rule) out.push(`@cf/${rule[1]}/${after}`);
+    if (after.toLowerCase().startsWith("llama")) out.push(`@cf/meta-llama/${after}`);
+  }
+  return [...new Set(out.filter(Boolean))];
+}
+async function requestAi(endpoint, payload, provider, network) {
+  try {
+    const response = await networkFetch(endpoint, { method: "POST", headers: { authorization: `Bearer ${provider.apiKey}`, "content-type": "application/json" }, body: JSON.stringify(payload) }, network), rawText = await response.text(), body = parseResponse(rawText, provider.apiKey);
+    return { response, body, rawText };
+  } catch (error) {
+    return { networkError: error instanceof Error ? error.message : String(error) };
+  }
+}
+function successDetail(provider, model, prompt, endpoint, latencyMs, response, body, extra = {}) {
+  return { ok: true, text: extractAiText(body), latencyMs, provider: provider.id, providerName: provider.name, model, prompt, endpoint, httpStatus: response.status, httpStatusText: response.statusText, contentType: response.headers.get("content-type") || "", usage: body?.usage || body?.result?.usage || null, finishReason: body?.choices?.[0]?.finish_reason || "", raw: body, ...extra };
+}
+function failureDetail(provider, model, prompt, endpoint, latencyMs, response, body) {
+  return { ok: false, phase: "http", provider: provider.id, providerName: provider.name, model, prompt, endpoint, latencyMs, httpStatus: response?.status || 0, httpStatusText: response?.statusText || "", contentType: response?.headers.get("content-type") || "", raw: body ?? null };
+}
+function extractAiText(body) {
+  const content = body?.choices?.[0]?.message?.content;
+  if (typeof content === "string" && content.trim()) return content;
+  if (Array.isArray(content)) {
+    const joined = content.map((item) => typeof item === "string" ? item : item?.text || item?.content || "").join("");
+    if (joined.trim()) return joined;
+  }
+  for (const value of [body?.choices?.[0]?.text, body?.result?.response, body?.response, body?.output_text, body?.result?.text]) if (typeof value === "string" && value.trim()) return value;
+  return "";
+}
+function aiErrorMessage(body) {
+  if (body && Array.isArray(body.errors)) for (const error of body.errors) {
+    const message2 = String(error?.message || "").trim();
+    if (message2) return Number(error?.internalCode ?? error?.code) === 5007 ? `\u0645\u062F\u0644 \u062F\u0631 Cloudflare \u0648\u062C\u0648\u062F \u0646\u062F\u0627\u0631\u062F (No such model): ${message2}` : message2;
+  }
+  return String(body?.error?.message || body?.message || body?.error || "").trim();
 }
 async function testAllModels(prompt = "\u0633\u0644\u0627\u0645", onlyCandidates = false) {
   const ai = (await loadConnections()).ai, providers = await aiProviders(), wanted = new Set(ai.candidates), tasks = providers.filter((p) => p.enabled).flatMap((p) => p.models.map((model) => ({ p, model, key: `${p.id}::${model}` }))).filter((x) => !onlyCandidates || wanted.has(x.key)), results = [];
@@ -2886,12 +3034,57 @@ async function testAllModels(prompt = "\u0633\u0644\u0627\u0645", onlyCandidates
       try {
         results.push({ ...await aiCall(task.p, task.model, prompt), key: task.key });
       } catch (error) {
-        results.push({ ok: false, key: task.key, provider: task.p.id, model: task.model, error: error instanceof Error ? error.message : String(error) });
+        results.push(error instanceof AiResponseError ? { ...error.detail, key: task.key } : { ok: false, key: task.key, provider: task.p.id, providerName: task.p.name, model: task.model, prompt, error: error instanceof Error ? error.message : String(error) });
       }
     }
   }));
-  await setState("ai_test_results", { at: (/* @__PURE__ */ new Date()).toISOString(), results });
+  const saved = { at: (/* @__PURE__ */ new Date()).toISOString(), prompt, results };
+  await setState("ai_test_results", saved);
   return results;
+}
+async function getLastAiTestResults() {
+  return getState("ai_test_results", { at: null, prompt: "", results: [] });
+}
+var AiResponseError = class extends Error {
+  constructor(message2, detail) {
+    super(message2);
+    this.detail = detail;
+    detail.error = message2;
+  }
+};
+function parseResponse(raw2, secret2 = "") {
+  const limit = 5e4, safe = secret2 ? raw2.replaceAll(secret2, "[\u067E\u0646\u0647\u0627\u0646]") : raw2;
+  if (safe.length > limit) return { truncated: true, totalCharacters: safe.length, preview: safe.slice(0, limit) };
+  try {
+    return redactRaw(JSON.parse(safe));
+  } catch {
+    return safe;
+  }
+}
+function redactRaw(value) {
+  if (Array.isArray(value)) return value.map(redactRaw);
+  if (value && typeof value === "object") {
+    const result = {};
+    for (const [key2, item] of Object.entries(value)) result[key2] = /(?:authorization|api[_-]?key|token|secret|password|consumer[_-]?(?:key|secret))/i.test(key2) ? "[\u067E\u0646\u0647\u0627\u0646]" : redactRaw(item);
+    return result;
+  }
+  return value;
+}
+function safeEndpoint(raw2) {
+  try {
+    const url = new URL(raw2);
+    url.username = "";
+    url.password = "";
+    for (const key2 of [...url.searchParams.keys()]) if (/(?:key|token|secret|password|auth)/i.test(key2)) url.searchParams.set(key2, "[\u067E\u0646\u0647\u0627\u0646]");
+    return url.toString();
+  } catch {
+    return raw2.replace(/([?&](?:key|token|secret|password|auth)[^=]*=)[^&]+/gi, "$1[\u067E\u0646\u0647\u0627\u0646]");
+  }
+}
+function safeError(raw2, endpoint, apiKey) {
+  let value = String(raw2 || "").replaceAll(endpoint, safeEndpoint(endpoint));
+  if (apiKey) value = value.replaceAll(apiKey, "[\u067E\u0646\u0647\u0627\u0646]");
+  return value;
 }
 async function recordVote(task, winner, candidates) {
   const votes = await getState("ai_votes", { scores: {}, history: [] });
@@ -3129,78 +3322,184 @@ async function automationTick() {
 
 // worker-src/dashboard.ts
 var DASHBOARD = `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>\u0627\u0633\u06A9\u0631\u067E\u0631 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u0648 \u0628\u0627\u0633\u0644\u0627\u0645</title><style>
-*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}:root{color-scheme:dark;--bg:#0f172a;--card:#1e293b;--line:#334155;--input:#0f172a;--muted:#94a3b8;--blue:#3b82f6;--cyan:#06b6d4;--green:#22c55e;--red:#ef4444;--purple:#a855f7;--orange:#f97316;--yellow:#eab308}body{font-family:Tahoma,system-ui,sans-serif;background:var(--bg);color:#e2e8f0;min-height:100vh;padding:58px 12px 86px;direction:rtl}.container{max-width:1400px;margin:auto}.topbar{position:fixed;z-index:900;top:0;left:0;right:0;height:48px;background:#111c31ee;backdrop-filter:blur(12px);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 14px}.brand{font-weight:800;font-size:15px}.brand b{color:#67e8f9}.top-state{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:10px}.dot{width:8px;height:8px;border-radius:50%;background:#64748b}.dot.ok{background:var(--green);box-shadow:0 0 10px #22c55e}.dot.err{background:var(--red)}h1{font-size:18px;margin-bottom:12px}h2{font-size:15px;margin-bottom:10px}h3{font-size:13px;color:#67e8f9;margin-bottom:9px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}.card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}.field{flex:1;min-width:180px}.field.small{min-width:100px}.field label{display:block;color:var(--muted);font-size:10px;margin-bottom:5px}.field-hint{font-size:9px;color:#64748b;margin-top:4px;line-height:1.6}input,select,textarea{background:var(--input);border:1px solid #475569;color:#fff;padding:9px 11px;border-radius:8px;font-size:12px;font-family:inherit;width:100%}input:focus,select:focus,textarea:focus{outline:1px solid var(--cyan);border-color:var(--cyan)}input[type=checkbox]{width:auto;accent-color:var(--blue)}select{min-width:90px}.checks{display:flex;gap:14px;flex-wrap:wrap;padding:7px 0}.checks label{display:flex;gap:6px;align-items:center;color:#cbd5e1;font-size:11px}.btn{padding:9px 13px;border:0;border-radius:8px;font-weight:700;cursor:pointer;font-size:11px;font-family:inherit;white-space:nowrap}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:wait}.btn-blue{background:linear-gradient(135deg,var(--blue),var(--cyan));color:#001018}.btn-green{background:var(--green);color:#052e16}.btn-red{background:var(--red);color:#fff}.btn-purple{background:var(--purple);color:#fff}.btn-orange{background:var(--orange);color:#1c0a00}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:var(--yellow);color:#1c1500}.btn-sm{padding:5px 8px;font-size:9px}.main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172af5;border-top:1px solid var(--line);display:flex;z-index:1000;box-shadow:0 -4px 20px #0008;padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:9px 3px 7px;border:0;background:transparent;color:#64748b;font:11px Tahoma;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative}.main-tab .icon{font-size:19px}.main-tab.active{color:#60a5fa;background:#1e293b}.main-tab .badge{position:absolute;top:3px;right:calc(50% - 22px);background:var(--red);color:#fff;font-size:8px;padding:2px 5px;border-radius:8px}.tab-pane{display:none;animation:fade .2s}.tab-pane.active{display:block}@keyframes fade{from{opacity:.3;transform:translateY(4px)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px;overflow:auto}.sub-tab{flex:1;min-width:90px;padding:8px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:600 11px Tahoma;cursor:pointer}.sub-tab.active{background:var(--blue);color:#07111e}.notice{padding:10px 12px;border-radius:8px;margin-bottom:10px;font-size:11px;display:none}.notice.show{display:block}.notice.ok{background:#14532d;border:1px solid var(--green);color:#bbf7d0}.notice.error{background:#7f1d1d;border:1px solid var(--red);color:#fecaca}.notice.info{background:#1e3a5f;border:1px solid var(--blue);color:#bfdbfe}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.stat{background:#0f172a;border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center}.stat b{display:block;font-size:19px;color:#f8fafc}.stat span{font-size:9px;color:#64748b}.profile-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:9px}.profile{background:#0f172a;border:1px solid var(--line);border-radius:10px;padding:11px}.profile.selected{border-color:var(--cyan);box-shadow:0 0 0 1px #06b6d455}.profile-title{display:flex;justify-content:space-between;gap:8px;font-size:12px;font-weight:bold}.profile-url{direction:ltr;text-align:left;color:#64748b;font:9px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:6px 0}.profile-meta{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0}.chip{font-size:8px;padding:3px 6px;border-radius:8px;background:#1e3a5f;color:#93c5fd}.profile-actions{display:flex;gap:5px;flex-wrap:wrap}.selector-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px}.sel-item{background:#0f172a;border:1px solid var(--line);border-radius:8px;padding:9px}.sel-item.has{border-color:#16a34a}.sel-title{display:flex;justify-content:space-between;color:var(--muted);font-size:10px;margin-bottom:5px}.sel-item input{font:10px monospace;padding:7px}.sel-result{margin-top:5px;min-height:20px;padding:5px;border-radius:5px;background:#111c31;color:#86efac;font-size:9px;overflow:hidden}.products{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px}.product{background:#1e293b;border:1px solid var(--line);border-radius:11px;overflow:hidden}.thumb{height:135px;background:linear-gradient(135deg,#1e3a5f,#312e81);display:flex;align-items:center;justify-content:center;color:#64748b}.thumb img{width:100%;height:100%;object-fit:cover}.pbody{padding:9px}.ptitle{font-size:11px;font-weight:bold;line-height:1.55;height:35px;overflow:hidden}.price{display:inline-block;background:#166534;color:#86efac;padding:4px 7px;border-radius:6px;font-size:11px;margin:6px 0}.pmeta{font-size:9px;color:#64748b}.progress{height:5px;background:#334155;border-radius:5px;overflow:hidden;margin:7px 0}.bar{height:100%;background:linear-gradient(90deg,var(--blue),var(--purple));transition:.3s}.jobs{display:flex;flex-direction:column;gap:8px}.job{background:#0f172a;border:1px solid var(--line);border-radius:9px;padding:10px}.job-head{display:flex;justify-content:space-between;gap:8px}.job-status{font-size:9px;padding:3px 7px;border-radius:8px}.s-running,.s-queued{background:#1e3a5f;color:#93c5fd}.s-done{background:#14532d;color:#86efac}.s-failed,.s-stopped{background:#7f1d1d;color:#fca5a5}.logs{direction:ltr;text-align:left;background:#020617;border:1px solid var(--line);padding:9px;border-radius:7px;max-height:180px;overflow:auto;font:9px monospace;color:#94a3b8;margin-top:7px}.empty{text-align:center;padding:25px;color:#64748b}.settings-line{display:flex;justify-content:space-between;padding:9px;border-bottom:1px solid var(--line);font-size:11px}.on{color:#4ade80}.off{color:#f87171}.modal{position:fixed;z-index:2000;inset:0;background:#020617dd;display:none;padding:12px}.modal.open{display:flex}.modal-box{width:min(1500px,100%);height:calc(100vh - 24px);margin:auto;background:#1e293b;border:1px solid #475569;border-radius:12px;overflow:hidden;display:flex;flex-direction:column}.modal-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line)}.modal-head span{font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.modal iframe{flex:1;width:100%;border:0;background:#fff}.visual-loading{padding:25px;text-align:center;color:#67e8f9}.hamburger{position:fixed;z-index:1200;top:7px;left:9px;width:36px;height:36px;border:1px solid #475569;border-radius:9px;background:#1e293b;color:#fff;font-size:19px;cursor:pointer}.drawer-overlay{position:fixed;z-index:1290;inset:0;background:#0009;display:none}.drawer-overlay.open{display:block}.drawer{position:fixed;z-index:1300;top:0;bottom:0;left:-430px;width:410px;max-width:94vw;background:#0f172a;border-right:1px solid #475569;transition:left .25s;overflow:auto}.drawer.open{left:0}.drawer-head{position:sticky;z-index:2;top:0;background:#1e293b;border-bottom:1px solid #475569;padding:13px;display:flex;align-items:center;justify-content:space-between}.drawer-body{padding:10px}.menu-section{border-bottom:1px solid #1e293b}.menu-title{display:flex;align-items:center;justify-content:space-between;width:100%;padding:12px 8px;border:0;background:transparent;color:#e2e8f0;font:bold 12px Tahoma;cursor:pointer;text-align:right}.menu-title:hover{background:#1e293b}.menu-title i{color:#64748b}.menu-content{display:none;background:#111c31;border:1px solid #1e293b;border-radius:8px;padding:10px;margin-bottom:8px}.menu-section.open .menu-content{display:block}.menu-section.open .menu-title i{transform:rotate(180deg)}.menu-actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}.menu-text{font-size:9px;color:#94a3b8;line-height:1.8}.menu-content textarea{min-height:80px}.full-drawer{width:100%;max-width:100%}@media(max-width:700px){body{padding-left:8px;padding-right:8px}.stats{grid-template-columns:repeat(2,1fr)}.main-tab{font-size:9px}.main-tab .icon{font-size:17px}.field{min-width:100%}.card{padding:11px}.products{grid-template-columns:repeat(2,1fr)}}
-</style></head><body><button id="hamburgerBtn" class="hamburger" title="\u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0639\u0645\u0648\u0645\u06CC">\u2630</button><div id="drawerOverlay" class="drawer-overlay"></div><aside id="drawer" class="drawer"><div class="drawer-head"><b>\u2630 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0639\u0645\u0648\u0645\u06CC</b><div><button id="drawerFull" class="btn btn-gray btn-sm">\u26F6</button> <button id="drawerClose" class="btn btn-red btn-sm">\u2715</button></div></div><div id="menuSections" class="drawer-body"></div></aside><header class="topbar"><div class="brand">\u{1F6D2} \u0627\u0633\u06A9\u0631\u067E\u0631 <b>\u0648\u0648\u06A9\u0627\u0645\u0631\u0633 / \u0628\u0627\u0633\u0644\u0627\u0645</b></div><div class="top-state"><span id="topText">\u062F\u0631 \u0627\u0646\u062A\u0638\u0627\u0631 \u0627\u062A\u0635\u0627\u0644</span><i id="topDot" class="dot"></i></div></header><main class="container"><div id="notice" class="notice" role="status"></div>
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}:root{color-scheme:dark;--bg:#0f172a;--card:#1e293b;--line:#334155;--input:#0f172a;--muted:#94a3b8;--blue:#3b82f6;--cyan:#06b6d4;--green:#22c55e;--red:#ef4444;--purple:#a855f7;--orange:#f97316;--yellow:#eab308}body{font-family:Tahoma,system-ui,sans-serif;background:var(--bg);color:#e2e8f0;min-height:100vh;padding:58px 12px 86px;direction:rtl}.container{max-width:1400px;margin:auto}.topbar{position:fixed;z-index:900;top:0;left:0;right:0;height:48px;background:#111c31ee;backdrop-filter:blur(12px);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 14px}.brand{font-weight:800;font-size:15px}.brand b{color:#67e8f9}.top-state{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:10px}.dot{width:8px;height:8px;border-radius:50%;background:#64748b}.dot.ok{background:var(--green);box-shadow:0 0 10px #22c55e}.dot.err{background:var(--red)}h1{font-size:18px;margin-bottom:12px}h2{font-size:15px;margin-bottom:10px}h3{font-size:13px;color:#67e8f9;margin-bottom:9px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}.card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}.field{flex:1;min-width:180px}.field.small{min-width:100px}.field label{display:block;color:var(--muted);font-size:10px;margin-bottom:5px}.field-hint{font-size:9px;color:#64748b;margin-top:4px;line-height:1.6}input,select,textarea{background:var(--input);border:1px solid #475569;color:#fff;padding:9px 11px;border-radius:8px;font-size:12px;font-family:inherit;width:100%}input:focus,select:focus,textarea:focus{outline:1px solid var(--cyan);border-color:var(--cyan)}input[type=checkbox]{width:auto;accent-color:var(--blue)}select{min-width:90px}.checks{display:flex;gap:14px;flex-wrap:wrap;padding:7px 0}.checks label{display:flex;gap:6px;align-items:center;color:#cbd5e1;font-size:11px}.btn{padding:9px 13px;border:0;border-radius:8px;font-weight:700;cursor:pointer;font-size:11px;font-family:inherit;white-space:nowrap}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:wait}.btn-blue{background:linear-gradient(135deg,var(--blue),var(--cyan));color:#001018}.btn-green{background:var(--green);color:#052e16}.btn-red{background:var(--red);color:#fff}.btn-purple{background:var(--purple);color:#fff}.btn-orange{background:var(--orange);color:#1c0a00}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:var(--yellow);color:#1c1500}.btn-sm{padding:5px 8px;font-size:9px}.main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172af5;border-top:1px solid var(--line);display:flex;z-index:1000;box-shadow:0 -4px 20px #0008;padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:9px 3px 7px;border:0;background:transparent;color:#64748b;font:11px Tahoma;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative}.main-tab .icon{font-size:19px}.main-tab.active{color:#60a5fa;background:#1e293b}.main-tab .badge{position:absolute;top:3px;right:calc(50% - 22px);background:var(--red);color:#fff;font-size:8px;padding:2px 5px;border-radius:8px}.tab-pane{display:none;animation:fade .2s}.tab-pane.active{display:block}@keyframes fade{from{opacity:.3;transform:translateY(4px)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px;overflow:auto}.sub-tab{flex:1;min-width:90px;padding:8px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:600 11px Tahoma;cursor:pointer}.sub-tab.active{background:var(--blue);color:#07111e}.notice{padding:10px 12px;border-radius:8px;margin-bottom:10px;font-size:11px;display:none}.notice.show{display:block}.notice.ok{background:#14532d;border:1px solid var(--green);color:#bbf7d0}.notice.error{background:#7f1d1d;border:1px solid var(--red);color:#fecaca}.notice.info{background:#1e3a5f;border:1px solid var(--blue);color:#bfdbfe}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.stat{background:#0f172a;border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center}.stat b{display:block;font-size:19px;color:#f8fafc}.stat span{font-size:9px;color:#64748b}.profile-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:9px}.profile{background:#0f172a;border:1px solid var(--line);border-radius:10px;padding:11px}.profile.selected{border-color:var(--cyan);box-shadow:0 0 0 1px #06b6d455}.profile-title{display:flex;justify-content:space-between;gap:8px;font-size:12px;font-weight:bold}.profile-url{direction:ltr;text-align:left;color:#64748b;font:9px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:6px 0}.profile-meta{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0}.chip{font-size:8px;padding:3px 6px;border-radius:8px;background:#1e3a5f;color:#93c5fd}.profile-actions{display:flex;gap:5px;flex-wrap:wrap}.selector-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px}.sel-item{background:#0f172a;border:1px solid var(--line);border-radius:8px;padding:9px}.sel-item.has{border-color:#16a34a}.sel-title{display:flex;justify-content:space-between;color:var(--muted);font-size:10px;margin-bottom:5px}.sel-item input{font:10px monospace;padding:7px}.sel-result{margin-top:5px;min-height:20px;padding:5px;border-radius:5px;background:#111c31;color:#86efac;font-size:9px;overflow:hidden}.products{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px}.product{background:#1e293b;border:1px solid var(--line);border-radius:11px;overflow:hidden}.thumb{height:135px;background:linear-gradient(135deg,#1e3a5f,#312e81);display:flex;align-items:center;justify-content:center;color:#64748b}.thumb img{width:100%;height:100%;object-fit:cover}.pbody{padding:9px}.ptitle{font-size:11px;font-weight:bold;line-height:1.55;height:35px;overflow:hidden}.price{display:inline-block;background:#166534;color:#86efac;padding:4px 7px;border-radius:6px;font-size:11px;margin:6px 0}.pmeta{font-size:9px;color:#64748b}.progress{height:5px;background:#334155;border-radius:5px;overflow:hidden;margin:7px 0}.bar{height:100%;background:linear-gradient(90deg,var(--blue),var(--purple));transition:.3s}.jobs{display:flex;flex-direction:column;gap:8px}.job{background:#0f172a;border:1px solid var(--line);border-radius:9px;padding:10px}.job-head{display:flex;justify-content:space-between;gap:8px}.job-status{font-size:9px;padding:3px 7px;border-radius:8px}.s-running,.s-queued{background:#1e3a5f;color:#93c5fd}.s-done{background:#14532d;color:#86efac}.s-failed,.s-stopped{background:#7f1d1d;color:#fca5a5}.logs{direction:ltr;text-align:left;background:#020617;border:1px solid var(--line);padding:9px;border-radius:7px;max-height:180px;overflow:auto;font:9px monospace;color:#94a3b8;margin-top:7px}.empty{text-align:center;padding:25px;color:#64748b}.settings-line{display:flex;justify-content:space-between;padding:9px;border-bottom:1px solid var(--line);font-size:11px}.on{color:#4ade80}.off{color:#f87171}.modal{position:fixed;z-index:2000;inset:0;background:#020617dd;display:none;padding:12px}.modal.open{display:flex}.modal-box{width:min(1500px,100%);height:calc(100vh - 24px);margin:auto;background:#1e293b;border:1px solid #475569;border-radius:12px;overflow:hidden;display:flex;flex-direction:column}.modal-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line)}.modal-head span{font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.modal iframe{flex:1;width:100%;border:0;background:#fff}.visual-loading{padding:25px;text-align:center;color:#67e8f9}.hamburger{position:fixed;top:10px;left:10px;z-index:1200;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.hamburger:hover{background:#334155}.hamburger.active{background:#3b82f6;color:#000}.fullwidth-btn{position:fixed;top:10px;left:60px;z-index:1200;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.fullwidth-btn:hover{background:#334155}.fullwidth-btn.active{background:#7c3aed;color:#fff}.drawer-overlay{position:fixed;z-index:1290;inset:0;background:rgba(0,0,0,.5);display:none;opacity:0;transition:opacity .3s}.drawer-overlay.open{display:block;opacity:1}.drawer{position:fixed;z-index:1300;top:0;bottom:0;left:-420px;width:400px;max-width:90vw;background:#0f172a;border-right:1px solid #334155;transition:left .3s ease;overflow-y:auto}.drawer.open{left:0}.drawer.full-drawer{width:100vw;max-width:100vw;left:0}.drawer-head{position:sticky;z-index:2;top:0;background:#1e293b;border-bottom:1px solid #334155;padding:16px 20px;display:flex;align-items:center;justify-content:space-between}.drawer-head b{font-size:16px}.drawer-body{padding:0}.menu-section{border-bottom:1px solid #1e293b}.menu-title{display:flex;align-items:center;justify-content:space-between;width:100%;padding:14px 16px;border:0;background:transparent;color:#e2e8f0;font:bold 14px Tahoma;cursor:pointer;text-align:right;transition:background .15s}.menu-title:hover{background:#1e293b}.menu-title i{font-size:12px;color:#64748b;transition:transform .2s}.menu-content{max-height:0;overflow:hidden;padding:0 16px;transition:max-height .3s ease;background:transparent;border:0;border-radius:0;margin:0}.menu-section.open .menu-content{max-height:4000px;padding:0 16px 16px;overflow:auto}.full-drawer .menu-section.open .menu-content{max-height:none;overflow:visible}.menu-section.open .menu-title i{transform:rotate(180deg)}.menu-actions,.cact{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.menu-text{font-size:10.5px;color:#94a3b8;line-height:1.8}.crow{display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap}.crow>label:first-child{min-width:100px;color:#94a3b8;font-size:12px;flex-shrink:0}.crow input:not([type=checkbox]),.crow select{flex:1;min-width:150px}.crow.check-row>label{min-width:0}.cst{display:inline-block;padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700}.cst.on{background:#14532d;color:#86efac}.cst.off{background:#475569;color:#94a3b8}.cst.tg{background:#78350f;color:#fbbf24}.ai-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;border-bottom:1px solid #334155;padding-bottom:6px}.ai-tab-btn{padding:7px 12px;font-size:11px;color:#94a3b8;background:#111c31;border:1px solid #334155;border-radius:8px;cursor:pointer;flex:1;min-width:80px;text-align:center}.ai-tab-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6;font-weight:700}.ai-tab-panel{display:none}.ai-tab-panel.active{display:block}.visual-card{background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px;margin:8px 0}.visual-list{display:flex;flex-direction:column;gap:7px;margin-top:8px}.visual-row{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px}.visual-row-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.visual-row-meta{font-size:9px;color:#94a3b8;direction:ltr;text-align:left;word-break:break-all;margin-top:5px}.model-chips{display:flex;gap:5px;flex-wrap:wrap;margin:7px 0}.model-chip{display:flex;align-items:center;gap:5px;background:#1e3a5f;color:#bfdbfe;padding:4px 7px;border-radius:12px;font-size:9px}.model-chip button{border:0;background:transparent;color:#fca5a5;cursor:pointer}.result-modal{position:fixed;inset:0;z-index:6000;background:#020617dd;display:flex;align-items:center;justify-content:center;padding:14px}.result-box{width:min(1050px,97vw);max-height:92vh;background:#0f172a;border:1px solid #475569;border-radius:12px;box-shadow:0 24px 80px #000b;display:flex;flex-direction:column;overflow:hidden}.result-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #334155}.result-head b{flex:1;color:#67e8f9}.result-body{padding:14px;overflow:auto}.result-summary{padding:10px;border-radius:8px;margin-bottom:10px;font-size:12px}.result-summary.ok{background:#14532d;color:#bbf7d0}.result-summary.bad{background:#7f1d1d;color:#fecaca}.detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:7px}.detail-item{background:#111c31;border:1px solid #334155;border-radius:7px;padding:8px}.detail-item small{display:block;color:#64748b;margin-bottom:4px}.detail-item span{font-size:11px;word-break:break-word}.raw-block{direction:ltr;text-align:left;white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto;background:#020617;border:1px solid #334155;border-radius:8px;padding:10px;font:10px ui-monospace,monospace;color:#cbd5e1}.result-table{width:100%;border-collapse:collapse;font-size:11px}.result-table th{position:sticky;top:0;background:#1e293b;color:#94a3b8;padding:8px}.result-table td{padding:8px;border-bottom:1px solid #1e293b}.result-table tbody tr{cursor:pointer}.result-table tbody tr:hover{background:#1e293b}.help-box{background:#172554;border:1px solid #1d4ed8;color:#bfdbfe;border-radius:7px;padding:9px;font-size:10px;line-height:1.8;margin:8px 0}.menu-content textarea{min-height:80px}
+/* Modern destination workspace: compact enough for mobile, spacious on desktop. */
+body{background:radial-gradient(circle at 85% -10%,#17345e 0,transparent 32%),radial-gradient(circle at 5% 15%,#312e8144 0,transparent 25%),var(--bg)}.topbar{height:56px;background:#07111edb;border-color:#33415599;box-shadow:0 8px 32px #02061766}.card{background:linear-gradient(145deg,#1e293bee,#162033ee);box-shadow:0 12px 35px #02061724;border-color:#3b4d66;border-radius:16px}.btn{border-radius:10px;transition:transform .16s,filter .16s,box-shadow .16s}.btn:hover{filter:brightness(1.1);box-shadow:0 7px 22px #02061755;transform:translateY(-1px)}input,select,textarea{border-radius:10px;background:#091321;border-color:#41536d}.main-tabs{background:#07111ef2;backdrop-filter:blur(18px)}
+.dest-hero{position:relative;overflow:hidden;background:linear-gradient(120deg,#172554,#1e3a8a 55%,#0e7490);border:1px solid #38bdf855;border-radius:20px;padding:18px;margin-bottom:14px;box-shadow:0 18px 45px #02061755}.dest-hero:after{content:'';position:absolute;width:260px;height:260px;border-radius:50%;background:#67e8f922;left:-80px;top:-140px}.dest-hero h1{font-size:22px;margin:0 0 6px}.dest-hero p{font-size:11px;color:#dbeafe;line-height:1.9;max-width:720px}.dest-targets{display:flex;gap:7px;position:relative;z-index:1;margin-top:12px}.dest-target{border:1px solid #ffffff33;background:#ffffff12;color:#dbeafe;padding:9px 15px;border-radius:12px;font:700 11px Tahoma;cursor:pointer}.dest-target.active{background:#f8fafc;color:#0f172a;border-color:#fff;box-shadow:0 8px 22px #02061755}.dest-toolbar{display:grid;grid-template-columns:minmax(220px,2fr) repeat(3,minmax(130px,1fr)) auto;gap:8px;align-items:end}.dest-toolbar label,.bulk-grid label{display:block;font-size:9px;color:#94a3b8;margin-bottom:5px}.status-pills{display:flex;gap:6px;overflow:auto;padding:4px 0 12px}.status-pill{background:#0b1422;border:1px solid #334155;color:#94a3b8;border-radius:999px;padding:7px 11px;font:700 9px Tahoma;cursor:pointer;white-space:nowrap}.status-pill.active{color:#cffafe;border-color:#22d3ee;background:#164e63}.status-pill b{background:#ffffff15;padding:2px 6px;border-radius:10px;margin-right:4px}.dest-summary{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:10px 0}.dest-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:11px}.dest-product{position:relative;display:grid;grid-template-columns:92px 1fr;gap:11px;background:#0a1423;border:1px solid #334155;border-radius:15px;padding:10px;min-height:130px;transition:.18s}.dest-product:hover{border-color:#38bdf8;transform:translateY(-2px);box-shadow:0 15px 35px #02061766}.dest-product.selected{border-color:#22c55e;box-shadow:0 0 0 2px #22c55e33}.dest-image{width:92px;height:108px;border-radius:11px;object-fit:cover;background:linear-gradient(145deg,#1e3a5f,#312e81)}.dest-check{position:absolute;top:7px;right:7px;z-index:2;width:20px!important;height:20px;accent-color:#22c55e}.dest-title{font-size:11px;line-height:1.65;font-weight:800;padding-left:5px}.dest-price{font-size:14px;color:#86efac;font-weight:900;margin:6px 0}.dest-meta{font-size:9px;color:#94a3b8;line-height:1.8}.dest-reject{font-size:9px;color:#fecaca;background:#7f1d1d66;border-radius:7px;padding:5px;margin-top:5px}.dest-actions{display:flex;gap:5px;margin-top:7px;flex-wrap:wrap}.dest-pagination{display:flex;justify-content:center;align-items:center;gap:8px;margin:16px 0}.bulk-panel{border:1px solid #7c3aed66;background:linear-gradient(145deg,#1f1641aa,#111827);border-radius:16px;margin:12px 0;overflow:hidden}.bulk-panel summary{cursor:pointer;padding:13px 15px;font-size:12px;font-weight:800;color:#ddd6fe}.bulk-body{padding:0 14px 14px}.bulk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px}.bulk-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:11px}.dest-loading{min-height:240px;display:flex;align-items:center;justify-content:center;color:#67e8f9}.stage-list{display:grid;gap:8px}.stage-card{padding:10px;border-radius:9px;border:1px solid #334155;background:#111c31}.stage-card.ok{border-right:4px solid #22c55e}.stage-card.bad{border-right:4px solid #ef4444}.stage-card b{font-size:11px}.stage-card p{font-size:10px;color:#cbd5e1;line-height:1.8;margin-top:5px}.inline-form{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:9px}.inline-form .wide{grid-column:1/-1}.modal-note{font-size:10px;color:#94a3b8;line-height:1.9;margin-bottom:10px}.change-list{display:grid;gap:8px}.change-item{border-right:4px solid #38bdf8;background:#111c31;border-radius:10px;padding:10px;font-size:10px;line-height:1.9}.change-item time{color:#67e8f9;font-weight:700}.change-item b{color:#f8fafc}
+@media(min-width:1000px){body{padding-top:76px}.container{max-width:1540px}.main-tabs{top:0;bottom:auto;left:50%;right:auto;transform:translateX(-50%);width:min(680px,60vw);border:1px solid #334155;border-top:0;border-radius:0 0 16px 16px;box-shadow:0 10px 35px #02061788;padding:0 8px}.main-tab{padding:9px 7px}.topbar{padding:0 24px}.brand{font-size:16px}}
+@media(max-width:700px){body{padding-left:8px;padding-right:8px}.stats{grid-template-columns:repeat(2,1fr)}.main-tab{font-size:8px}.main-tab .icon{font-size:16px}.field{min-width:100%}.card{padding:11px}.products{grid-template-columns:repeat(2,1fr)}.dest-toolbar{grid-template-columns:1fr 1fr}.dest-toolbar>div:first-child{grid-column:1/-1}.dest-grid{grid-template-columns:1fr}.inline-form{grid-template-columns:1fr}.inline-form .wide{grid-column:auto}.dest-hero{padding:14px}.dest-hero h1{font-size:18px}.dest-product{grid-template-columns:82px 1fr}.dest-image{width:82px;height:100px}}
+</style></head><body><button id="hamburgerBtn" class="hamburger" title="\u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0639\u0645\u0648\u0645\u06CC">\u2630</button><button id="drawerFull" class="fullwidth-btn" title="\u062A\u0645\u0627\u0645 \u0639\u0631\u0636 \u06A9\u0631\u062F\u0646 \u0645\u0646\u0648 \u0648 \u0645\u062D\u062A\u0648\u06CC\u0627\u062A \u0622\u0646">\u26F6</button><div id="drawerOverlay" class="drawer-overlay"></div><aside id="drawer" class="drawer"><div class="drawer-head"><b>\u2630 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0639\u0645\u0648\u0645\u06CC</b><button id="drawerClose" class="btn btn-gray" style="font-size:14px;padding:4px 10px">\u2715</button></div><div id="menuSections" class="drawer-body"></div></aside><header class="topbar"><div class="brand">\u{1F6D2} \u0627\u0633\u06A9\u0631\u067E\u0631 <b>\u0648\u0648\u06A9\u0627\u0645\u0631\u0633 / \u0628\u0627\u0633\u0644\u0627\u0645</b></div><div class="top-state"><span id="topText">\u062F\u0631 \u0627\u0646\u062A\u0638\u0627\u0631 \u0627\u062A\u0635\u0627\u0644</span><i id="topDot" class="dot"></i></div></header><main class="container"><div id="notice" class="notice" role="status"></div>
 <section id="pane-home" class="tab-pane active"><div class="card"><div class="card-head"><h2>\u{1F4CA} \u0646\u0645\u0627\u06CC \u06A9\u0644\u06CC</h2><button id="refreshAll" class="btn btn-gray btn-sm">\u21BB \u062A\u0627\u0632\u0647\u200C\u0633\u0627\u0632\u06CC</button></div><div class="stats"><div class="stat"><b id="statProfiles">\u06F0</b><span>\u067E\u0631\u0648\u0641\u0627\u06CC\u0644</span></div><div class="stat"><b id="statProducts">\u06F0</b><span>\u0645\u062D\u0635\u0648\u0644 \u0646\u0645\u0627\u06CC\u0634\u06CC</span></div><div class="stat"><b id="statRunning">\u06F0</b><span>\u062F\u0631 \u0635\u0641 / \u0627\u062C\u0631\u0627</span></div><div class="stat"><b id="statFailed">\u06F0</b><span>\u062E\u0637\u0627</span></div></div></div><div class="card"><div class="card-head"><h2>\u{1F310} \u067E\u0631\u0648\u0641\u0627\u06CC\u0644\u200C\u0647\u0627\u06CC \u0630\u062E\u06CC\u0631\u0647\u200C\u0634\u062F\u0647</h2><button id="newProfileBtn" class="btn btn-blue btn-sm">\uFF0B \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u062C\u062F\u06CC\u062F</button></div><div id="profileList" class="profile-list"><div class="empty">\u062F\u0631 \u062D\u0627\u0644 \u0628\u0627\u0631\u06AF\u0630\u0627\u0631\u06CC \u067E\u0631\u0648\u0641\u0627\u06CC\u0644\u200C\u0647\u0627\u2026</div></div></div></section>
-<section id="pane-selector" class="tab-pane"><div class="sub-tabs"><button class="sub-tab active" data-sub="basic">\u06F1. \u0645\u0646\u0628\u0639 \u0648 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</button><button class="sub-tab" data-sub="selectors">\u06F2. \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</button><button class="sub-tab" data-sub="details">\u06F3. \u062C\u0632\u0626\u06CC\u0627\u062A \u0648 \u0627\u0631\u0633\u0627\u0644</button></div><div class="sub-pane" data-panel="basic"><div class="card"><div class="card-head"><h2>\u{1F517} \u0645\u0634\u062E\u0635\u0627\u062A \u067E\u0631\u0648\u0641\u0627\u06CC\u0644</h2><span id="editBadge" class="chip">\u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u062C\u062F\u06CC\u062F</span></div><input type="hidden" id="profileId"><div class="row"><div class="field"><label>\u0646\u0627\u0645 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644</label><input id="name" placeholder="\u0645\u062B\u0644\u0627\u064B \u0641\u0631\u0648\u0634\u06AF\u0627\u0647 \u0645\u0628\u062F\u0623"></div><div class="field"><label>\u0622\u062F\u0631\u0633 \u0635\u0641\u062D\u0647 \u0645\u062D\u0635\u0648\u0644\u0627\u062A</label><input id="url" dir="ltr" placeholder="https://example.com/shop?page=1"></div></div><div class="row"><div class="field small"><label>\u062A\u0639\u062F\u0627\u062F \u0635\u0641\u062D\u0627\u062A</label><input id="pages" type="number" value="1" min="1" max="100"></div><div class="field"><label>\u0646\u0648\u0639 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</label><select id="pagination"><option value="query_page">\u067E\u0627\u0631\u0627\u0645\u062A\u0631 Query (page)</option><option value="query_custom">\u067E\u0627\u0631\u0627\u0645\u062A\u0631 Query \u0633\u0641\u0627\u0631\u0634\u06CC</option><option value="path_page">\u0645\u0633\u06CC\u0631 /page/2/</option><option value="path_pattern">\u0627\u0644\u06AF\u0648\u06CC \u0645\u0633\u06CC\u0631 \u0628\u0627 {page}</option><option value="full_pattern">\u0627\u0644\u06AF\u0648\u06CC \u06A9\u0627\u0645\u0644 URL \u0628\u0627 {page}</option><option value="next_selector">\u0633\u0644\u06A9\u062A\u0648\u0631 \u062F\u06A9\u0645\u0647/\u0644\u06CC\u0646\u06A9 \u0628\u0639\u062F\u06CC</option><option value="none">\u0628\u062F\u0648\u0646 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</option></select></div><div class="field"><label>\u0646\u0627\u0645 \u067E\u0627\u0631\u0627\u0645\u062A\u0631 \u0635\u0641\u062D\u0647</label><input id="paginationValue" value="page" dir="ltr"></div><div class="field"><label>\u0627\u062C\u0631\u0627\u06CC \u062F\u0648\u0631\u0647\u200C\u0627\u06CC (\u062F\u0642\u06CC\u0642\u0647)</label><input id="interval" type="number" value="0" min="0"></div></div></div></div><div class="sub-pane" data-panel="selectors" hidden><div class="card"><div class="card-head"><h2>\u{1F3AF} \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627\u06CC \u0635\u0641\u062D\u0647 \u0641\u0647\u0631\u0633\u062A</h2><div class="row" style="margin:0"><button id="openVisual" class="btn btn-blue btn-sm">\u{1F441} \u0627\u0646\u062A\u062E\u0627\u0628 \u0628\u0635\u0631\u06CC</button><button id="suggestSelectors" class="btn btn-orange btn-sm">\u2728 \u067E\u06CC\u0634\u0646\u0647\u0627\u062F \u062E\u0648\u062F\u06A9\u0627\u0631</button><button id="testSelectors" class="btn btn-purple btn-sm">\u{1F9EA} \u0622\u0632\u0645\u0627\u06CC\u0634 \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</button></div></div><div id="selectorGrid" class="selector-grid"></div><div class="field-hint">\u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627 CSS \u0647\u0633\u062A\u0646\u062F. \u0622\u0632\u0645\u0627\u06CC\u0634\u060C \u0627\u0648\u0644\u06CC\u0646 \u0645\u0642\u0627\u062F\u06CC\u0631 \u067E\u06CC\u062F\u0627\u200C\u0634\u062F\u0647 \u0631\u0627 \u0646\u0634\u0627\u0646 \u0645\u06CC\u200C\u062F\u0647\u062F.</div></div></div><div class="sub-pane" data-panel="details" hidden><div class="card"><div class="card-head"><h2>\u{1F4C4} \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627\u06CC \u0635\u0641\u062D\u0647 \u0645\u062D\u0635\u0648\u0644</h2><button id="suggestDetails" class="btn btn-orange btn-sm">\u2728 \u067E\u06CC\u0634\u0646\u0647\u0627\u062F \u062C\u0632\u0626\u06CC\u0627\u062A</button></div><div class="field"><label>\u0622\u062F\u0631\u0633 \u0646\u0645\u0648\u0646\u0647\u0654 \u06CC\u06A9 \u0645\u062D\u0635\u0648\u0644</label><input id="detailSampleUrl" dir="ltr" placeholder="https://example.com/product/sample"><div class="field-hint">\u0628\u0631\u0627\u06CC \u067E\u06CC\u0634\u0646\u0647\u0627\u062F \u062E\u0648\u062F\u06A9\u0627\u0631 \u062A\u0648\u0636\u06CC\u062D\u0627\u062A\u060C \u06AF\u0627\u0644\u0631\u06CC\u060C \u0645\u0634\u062E\u0635\u0627\u062A \u0648 \u062A\u0646\u0648\u0639\u200C\u0647\u0627 \u0627\u0633\u062A\u0641\u0627\u062F\u0647 \u0645\u06CC\u200C\u0634\u0648\u062F.</div></div><div id="detailGrid" class="selector-grid"></div></div><div class="card"><h2>\u{1F4B0} \u0642\u06CC\u0645\u062A \u0648 \u0645\u0642\u0635\u062F</h2><div class="row"><div class="field"><label>\u067E\u0633\u0648\u0646\u062F \u0639\u0646\u0648\u0627\u0646</label><input id="titleSuffix"></div><div class="field"><label>\u0646\u0648\u0639 \u062A\u063A\u06CC\u06CC\u0631 \u0642\u06CC\u0645\u062A</label><select id="priceMode"><option value="none">\u0628\u062F\u0648\u0646 \u062A\u063A\u06CC\u06CC\u0631</option><option value="add">\u0627\u0641\u0632\u0648\u062F\u0646 \u0645\u0628\u0644\u063A</option><option value="percent">\u0627\u0641\u0632\u0648\u062F\u0646 \u062F\u0631\u0635\u062F</option><option value="multiply">\u0636\u0631\u0628</option></select></div><div class="field"><label>\u0645\u0642\u062F\u0627\u0631 \u062A\u063A\u06CC\u06CC\u0631</label><input id="priceValue" type="number" value="0"></div><div class="field"><label>\u06AF\u0631\u062F \u06A9\u0631\u062F\u0646</label><input id="roundPrice" type="number" value="0"></div><div class="field"><label>\u062D\u062F\u0627\u0642\u0644 \u0642\u06CC\u0645\u062A</label><input id="minPrice" type="number" value="0"></div></div><div class="row"><div class="field"><label>\u0634\u0646\u0627\u0633\u0647 \u062F\u0633\u062A\u0647 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633</label><input id="wooCategoryId" type="number" value="0"></div><div class="field"><label>\u0634\u0646\u0627\u0633\u0647 \u062F\u0633\u062A\u0647 \u0628\u0627\u0633\u0644\u0627\u0645</label><input id="basalamCategoryId" type="number" value="0"></div><div class="field"><label>\u062F\u0633\u062A\u0647\u200C\u0647\u0627\u06CC \u062C\u0627\u06CC\u06AF\u0632\u06CC\u0646 \u0628\u0627\u0633\u0644\u0627\u0645</label><input id="basalamFallbackCategoryIds" dir="ltr" placeholder="12, 34, 56"></div></div><div class="checks"><label><input id="enabled" type="checkbox" checked> \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0641\u0639\u0627\u0644</label><label><input id="networkIndirect" type="checkbox"> \u0627\u062A\u0635\u0627\u0644 \u063A\u06CC\u0631\u0645\u0633\u062A\u0642\u06CC\u0645 \u0645\u0628\u062F\u0623</label><label><input id="noExtract" type="checkbox"> \u0628\u062F\u0648\u0646 \u0627\u0633\u062A\u062E\u0631\u0627\u062C (\u0641\u0642\u0637 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u062F\u0631\u0648\u0646\u200C\u0631\u06CC\u0632\u06CC\u200C\u0634\u062F\u0647)</label><label><input id="syncWoo" type="checkbox"> \u0627\u0631\u0633\u0627\u0644 \u062E\u0648\u062F\u06A9\u0627\u0631 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633</label><label><input id="syncBasalam" type="checkbox"> \u0627\u0631\u0633\u0627\u0644 \u062E\u0648\u062F\u06A9\u0627\u0631 \u0628\u0627\u0633\u0644\u0627\u0645</label></div></div></div><div class="card"><div class="row" style="margin:0"><button id="saveBtn" class="btn btn-green">\u{1F4BE} \u0630\u062E\u06CC\u0631\u0647 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644</button><button id="clearForm" class="btn btn-gray">\u067E\u0627\u06A9\u200C\u06A9\u0631\u062F\u0646 \u0641\u0631\u0645</button><button id="scrapeForm" class="btn btn-blue">\u25B6 \u0630\u062E\u06CC\u0631\u0647 \u0648 \u0627\u0633\u062A\u062E\u0631\u0627\u062C</button></div></div></section>
-<section id="pane-products" class="tab-pane"><div class="card"><div class="row" style="margin:0"><div class="field"><label>\u067E\u0631\u0648\u0641\u0627\u06CC\u0644</label><select id="productProfile"></select></div><div class="field"><label>\u062C\u0633\u062A\u200C\u0648\u062C\u0648</label><input id="productSearch" placeholder="\u0639\u0646\u0648\u0627\u0646 \u0645\u062D\u0635\u0648\u0644..."></div><div class="field small" style="align-self:end"><button id="loadProducts" class="btn btn-blue">\u{1F4E6} \u0646\u0645\u0627\u06CC\u0634 \u0645\u062D\u0635\u0648\u0644\u0627\u062A</button></div></div></div><div class="card"><div class="card-head"><h2>\u{1F4E6} \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0627\u0633\u062A\u062E\u0631\u0627\u062C\u200C\u0634\u062F\u0647</h2><span id="productCount" class="chip">\u06F0 \u0645\u062D\u0635\u0648\u0644</span></div><div id="products" class="products"><div class="empty">\u06CC\u06A9 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0627\u0646\u062A\u062E\u0627\u0628 \u06A9\u0646\u06CC\u062F.</div></div></div></section>
+<section id="pane-selector" class="tab-pane"><div class="sub-tabs"><button class="sub-tab active" data-sub="basic">\u06F1. \u0645\u0646\u0628\u0639 \u0648 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</button><button class="sub-tab" data-sub="selectors">\u06F2. \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</button><button class="sub-tab" data-sub="details">\u06F3. \u062C\u0632\u0626\u06CC\u0627\u062A \u0648 \u0627\u0631\u0633\u0627\u0644</button></div><div class="sub-pane" data-panel="basic"><div class="card"><div class="card-head"><h2>\u{1F517} \u0645\u0634\u062E\u0635\u0627\u062A \u067E\u0631\u0648\u0641\u0627\u06CC\u0644</h2><span id="editBadge" class="chip">\u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u062C\u062F\u06CC\u062F</span></div><input type="hidden" id="profileId"><div class="row"><div class="field"><label>\u0646\u0627\u0645 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644</label><input id="name" placeholder="\u0645\u062B\u0644\u0627\u064B \u0641\u0631\u0648\u0634\u06AF\u0627\u0647 \u0645\u0628\u062F\u0623"></div><div class="field"><label>\u0622\u062F\u0631\u0633 \u0635\u0641\u062D\u0647 \u0645\u062D\u0635\u0648\u0644\u0627\u062A</label><input id="url" dir="ltr" placeholder="https://example.com/shop?page=1"></div></div><div class="row"><div class="field small"><label>\u062A\u0639\u062F\u0627\u062F \u0635\u0641\u062D\u0627\u062A</label><input id="pages" type="number" value="1" min="1" max="100"></div><div class="field"><label>\u0646\u0648\u0639 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</label><select id="pagination"><option value="query_page">\u067E\u0627\u0631\u0627\u0645\u062A\u0631 Query (page)</option><option value="query_custom">\u067E\u0627\u0631\u0627\u0645\u062A\u0631 Query \u0633\u0641\u0627\u0631\u0634\u06CC</option><option value="path_page">\u0645\u0633\u06CC\u0631 /page/2/</option><option value="path_pattern">\u0627\u0644\u06AF\u0648\u06CC \u0645\u0633\u06CC\u0631 \u0628\u0627 {page}</option><option value="full_pattern">\u0627\u0644\u06AF\u0648\u06CC \u06A9\u0627\u0645\u0644 URL \u0628\u0627 {page}</option><option value="next_selector">\u0633\u0644\u06A9\u062A\u0648\u0631 \u062F\u06A9\u0645\u0647/\u0644\u06CC\u0646\u06A9 \u0628\u0639\u062F\u06CC</option><option value="none">\u0628\u062F\u0648\u0646 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</option></select></div><div class="field"><label>\u0646\u0627\u0645 \u067E\u0627\u0631\u0627\u0645\u062A\u0631 \u0635\u0641\u062D\u0647</label><input id="paginationValue" value="page" dir="ltr"></div><div class="field"><label>\u0627\u062C\u0631\u0627\u06CC \u062F\u0648\u0631\u0647\u200C\u0627\u06CC (\u062F\u0642\u06CC\u0642\u0647)</label><input id="interval" type="number" value="0" min="0"></div></div></div></div><div class="sub-pane" data-panel="selectors" hidden><div class="card"><div class="card-head"><h2>\u{1F3AF} \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627\u06CC \u0635\u0641\u062D\u0647 \u0641\u0647\u0631\u0633\u062A</h2><div class="row" style="margin:0"><button id="openVisual" class="btn btn-blue btn-sm">\u{1F441} \u0627\u0646\u062A\u062E\u0627\u0628 \u0628\u0635\u0631\u06CC</button><button id="suggestSelectors" class="btn btn-orange btn-sm">\u2728 \u067E\u06CC\u0634\u0646\u0647\u0627\u062F \u062E\u0648\u062F\u06A9\u0627\u0631</button><button id="testSelectors" class="btn btn-purple btn-sm">\u{1F9EA} \u0622\u0632\u0645\u0627\u06CC\u0634 \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</button></div></div><div id="selectorGrid" class="selector-grid"></div><div class="field-hint">\u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627 CSS \u0647\u0633\u062A\u0646\u062F. \u0622\u0632\u0645\u0627\u06CC\u0634\u060C \u0627\u0648\u0644\u06CC\u0646 \u0645\u0642\u0627\u062F\u06CC\u0631 \u067E\u06CC\u062F\u0627\u200C\u0634\u062F\u0647 \u0631\u0627 \u0646\u0634\u0627\u0646 \u0645\u06CC\u200C\u062F\u0647\u062F.</div></div></div><div class="sub-pane" data-panel="details" hidden><div class="card"><div class="card-head"><h2>\u{1F4C4} \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627\u06CC \u0635\u0641\u062D\u0647 \u0645\u062D\u0635\u0648\u0644</h2><button id="suggestDetails" class="btn btn-orange btn-sm">\u2728 \u067E\u06CC\u0634\u0646\u0647\u0627\u062F \u062C\u0632\u0626\u06CC\u0627\u062A</button></div><div class="field"><label>\u0622\u062F\u0631\u0633 \u0646\u0645\u0648\u0646\u0647\u0654 \u06CC\u06A9 \u0645\u062D\u0635\u0648\u0644</label><input id="detailSampleUrl" dir="ltr" placeholder="https://example.com/product/sample"><div class="field-hint">\u0628\u0631\u0627\u06CC \u067E\u06CC\u0634\u0646\u0647\u0627\u062F \u062E\u0648\u062F\u06A9\u0627\u0631 \u062A\u0648\u0636\u06CC\u062D\u0627\u062A\u060C \u06AF\u0627\u0644\u0631\u06CC\u060C \u0645\u0634\u062E\u0635\u0627\u062A \u0648 \u062A\u0646\u0648\u0639\u200C\u0647\u0627 \u0627\u0633\u062A\u0641\u0627\u062F\u0647 \u0645\u06CC\u200C\u0634\u0648\u062F.</div></div><div id="detailGrid" class="selector-grid"></div></div><div class="card" style="border-color:#ec4899"><h2 style="color:#f9a8d4">\u{1F5BC} \u0686\u0646\u062F \u0639\u06A9\u0633 \u0627\u0632 \u0635\u0641\u062D\u0647\u0654 \u0645\u062D\u0635\u0648\u0644 (\u06AF\u0627\u0644\u0631\u06CC)</h2><div class="field-hint">\u0639\u06A9\u0633 \u0627\u0648\u0644 \u0634\u0627\u062E\u0635 \u0645\u062D\u0635\u0648\u0644 \u0645\u06CC\u200C\u0634\u0648\u062F \u0648 \u0628\u0642\u06CC\u0647 \u062F\u0631 \u06AF\u0627\u0644\u0631\u06CC \u0645\u0642\u0635\u062F \u0642\u0631\u0627\u0631 \u0645\u06CC\u200C\u06AF\u06CC\u0631\u0646\u062F.</div><div class="row"><div class="field"><label>\u0631\u0648\u0634</label><select id="galMode"><option value="off">\u062E\u0627\u0645\u0648\u0634 \u2014 \u0641\u0642\u0637 \u06CC\u06A9 \u0639\u06A9\u0633</option><option value="auto">\u{1F4E6} \u062E\u0648\u062F\u06A9\u0627\u0631 \u0627\u0632 \u0628\u0627\u06A9\u0633 \u0639\u06A9\u0633\u200C\u0647\u0627</option><option value="manual">\u270D\uFE0F \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627\u06CC \u062F\u0633\u062A\u06CC</option><option value="number">\u{1F522} \u0627\u0644\u06AF\u0648\u06CC \u0634\u0645\u0627\u0631\u0647\u200C\u062F\u0627\u0631</option></select></div></div><div id="galAutoBox" hidden><div class="field"><label>\u0633\u0644\u06A9\u062A\u0648\u0631 \u0638\u0631\u0641 \u06AF\u0627\u0644\u0631\u06CC</label><input id="galBox" dir="ltr" placeholder=".woocommerce-product-gallery"></div></div><div id="galManualBox" hidden><div class="field"><label>\u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627\u06CC \u062F\u0633\u062A\u06CC (\u0647\u0631 \u0633\u0644\u06A9\u062A\u0648\u0631 \u062F\u0631 \u06CC\u06A9 \u062E\u0637 \u06CC\u0627 \u062C\u062F\u0627\u0634\u062F\u0647 \u0628\u0627 |)</label><textarea id="galSelectors" rows="4" dir="ltr" placeholder=".gallery-1 img&#10;.gallery-2 img"></textarea></div></div><div id="galNumberBox" hidden><div class="field"><label>\u0627\u0644\u06AF\u0648\u06CC \u062F\u0627\u0631\u0627\u06CC {n}</label><input id="galPattern" dir="ltr" placeholder=".slide-{n} img"></div><div class="row"><div class="field"><label>\u0627\u0632</label><input id="galFrom" type="number" value="1" min="0" max="99"></div><div class="field"><label>\u062A\u0627</label><input id="galTo" type="number" value="10" min="1" max="99"></div></div></div><div id="galCommon" hidden><div class="row"><div class="field"><label>\u062D\u062F\u0627\u06A9\u062B\u0631 \u0639\u06A9\u0633</label><input id="galMax" type="number" value="10" min="1" max="30"></div><label class="checks"><input id="galSkipFirst" type="checkbox"> \u0639\u06A9\u0633 \u0627\u0648\u0644 \u0631\u0627 \u0631\u062F \u06A9\u0646</label></div><button id="testGallery" class="btn btn-purple btn-sm">\u{1F9EA} \u0622\u0632\u0645\u0627\u06CC\u0634 \u0631\u0648\u06CC \u06CC\u06A9 \u0645\u062D\u0635\u0648\u0644</button></div></div><div class="card"><h2>\u{1F4B0} \u0642\u06CC\u0645\u062A \u0648 \u0645\u0642\u0635\u062F</h2><div class="row"><div class="field"><label>\u067E\u0633\u0648\u0646\u062F \u0639\u0646\u0648\u0627\u0646</label><input id="titleSuffix"></div><div class="field"><label>\u0646\u0648\u0639 \u062A\u063A\u06CC\u06CC\u0631 \u0642\u06CC\u0645\u062A</label><select id="priceMode"><option value="none">\u0628\u062F\u0648\u0646 \u062A\u063A\u06CC\u06CC\u0631</option><option value="add">\u0627\u0641\u0632\u0648\u062F\u0646 \u0645\u0628\u0644\u063A</option><option value="percent">\u0627\u0641\u0632\u0648\u062F\u0646 \u062F\u0631\u0635\u062F</option><option value="multiply">\u0636\u0631\u0628</option></select></div><div class="field"><label>\u0645\u0642\u062F\u0627\u0631 \u062A\u063A\u06CC\u06CC\u0631</label><input id="priceValue" type="number" value="0"></div><div class="field"><label>\u06AF\u0631\u062F \u06A9\u0631\u062F\u0646</label><input id="roundPrice" type="number" value="0"></div><div class="field"><label>\u062D\u062F\u0627\u0642\u0644 \u0642\u06CC\u0645\u062A</label><input id="minPrice" type="number" value="0"></div></div><div class="row"><div class="field"><label>\u0634\u0646\u0627\u0633\u0647 \u062F\u0633\u062A\u0647 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633</label><input id="wooCategoryId" type="number" value="0"></div><div class="field"><label>\u0634\u0646\u0627\u0633\u0647 \u062F\u0633\u062A\u0647 \u0628\u0627\u0633\u0644\u0627\u0645</label><input id="basalamCategoryId" type="number" value="0"></div><div class="field"><label>\u062F\u0633\u062A\u0647\u200C\u0647\u0627\u06CC \u062C\u0627\u06CC\u06AF\u0632\u06CC\u0646 \u0628\u0627\u0633\u0644\u0627\u0645</label><input id="basalamFallbackCategoryIds" dir="ltr" placeholder="12, 34, 56"></div></div><div class="checks"><label><input id="enabled" type="checkbox" checked> \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0641\u0639\u0627\u0644</label><label><input id="networkIndirect" type="checkbox"> \u0627\u062A\u0635\u0627\u0644 \u063A\u06CC\u0631\u0645\u0633\u062A\u0642\u06CC\u0645 \u0645\u0628\u062F\u0623</label><label><input id="noExtract" type="checkbox"> \u0628\u062F\u0648\u0646 \u0627\u0633\u062A\u062E\u0631\u0627\u062C (\u0641\u0642\u0637 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u062F\u0631\u0648\u0646\u200C\u0631\u06CC\u0632\u06CC\u200C\u0634\u062F\u0647)</label><label><input id="syncWoo" type="checkbox"> \u0627\u0631\u0633\u0627\u0644 \u062E\u0648\u062F\u06A9\u0627\u0631 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633</label><label><input id="syncBasalam" type="checkbox"> \u0627\u0631\u0633\u0627\u0644 \u062E\u0648\u062F\u06A9\u0627\u0631 \u0628\u0627\u0633\u0644\u0627\u0645</label></div></div></div><div class="card"><div class="row" style="margin:0"><button id="saveBtn" class="btn btn-green">\u{1F4BE} \u0630\u062E\u06CC\u0631\u0647 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644</button><button id="clearForm" class="btn btn-gray">\u067E\u0627\u06A9\u200C\u06A9\u0631\u062F\u0646 \u0641\u0631\u0645</button><button id="scrapeForm" class="btn btn-blue">\u25B6 \u0630\u062E\u06CC\u0631\u0647 \u0648 \u0627\u0633\u062A\u062E\u0631\u0627\u062C</button></div></div></section>
+<section id="pane-products" class="tab-pane"><div class="card"><div class="row" style="margin:0"><div class="field"><label>\u067E\u0631\u0648\u0641\u0627\u06CC\u0644</label><select id="productProfile"></select></div><div class="field"><label>\u062C\u0633\u062A\u200C\u0648\u062C\u0648</label><input id="productSearch" placeholder="\u0639\u0646\u0648\u0627\u0646 \u0645\u062D\u0635\u0648\u0644..."></div><div class="field small" style="align-self:end"><button id="loadProducts" class="btn btn-blue">\u{1F4E6} \u0646\u0645\u0627\u06CC\u0634 \u0645\u062D\u0635\u0648\u0644\u0627\u062A</button></div></div></div><div class="card"><div class="card-head"><h2>\u{1F4E5} \u062F\u0631\u0648\u0646\u200C\u0631\u06CC\u0632\u06CC \u0648 \u0628\u0631\u0648\u0646\u200C\u0631\u06CC\u0632\u06CC \u0645\u062D\u0635\u0648\u0644\u0627\u062A</h2><span class="chip">CSV</span></div><p class="menu-text">\u0627\u06CC\u0646 \u0627\u0628\u0632\u0627\u0631 \u0645\u0627\u0646\u0646\u062F \u0646\u0633\u062E\u0647\u0654 PHP \u062F\u0631 \u0628\u062E\u0634 \u0627\u0635\u0644\u06CC \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0642\u0631\u0627\u0631 \u062F\u0627\u0631\u062F \u0648 \u062C\u0632\u0648 \u06F1\u06F8 \u0628\u062E\u0634 \u0645\u0646\u0648\u06CC \u0647\u0645\u0628\u0631\u06AF\u0631\u06CC \u0646\u06CC\u0633\u062A.</p><div class="row"><div class="field"><label>\u067E\u0631\u0648\u0641\u0627\u06CC\u0644</label><select id="transferProfile"></select></div><div class="field" style="align-self:end"><div class="menu-actions"><button id="csvExportMain" class="btn btn-green">\u2B07 \u062E\u0631\u0648\u062C\u06CC CSV</button><label class="btn btn-orange">\u2B06 \u0648\u0631\u0648\u062F CSV<input id="csvImportFile" type="file" accept=".csv,text/csv" hidden></label></div></div></div><div id="csvStatus" class="menu-text">\u2014</div></div><div class="card"><div class="card-head"><h2>\u{1F4E6} \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0627\u0633\u062A\u062E\u0631\u0627\u062C\u200C\u0634\u062F\u0647</h2><span id="productCount" class="chip">\u06F0 \u0645\u062D\u0635\u0648\u0644</span></div><div id="products" class="products"><div class="empty">\u06CC\u06A9 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0627\u0646\u062A\u062E\u0627\u0628 \u06A9\u0646\u06CC\u062F.</div></div></div></section>
+<section id="pane-destination" class="tab-pane"><div class="dest-hero"><h1>\u{1F9ED} \u0645\u062F\u06CC\u0631\u06CC\u062A \u062C\u0627\u0645\u0639 \u0645\u0642\u0635\u062F</h1><p>\u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0648\u0627\u0642\u0639\u06CC \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u0648 \u0647\u0645\u0647\u0654 \u063A\u0631\u0641\u0647\u200C\u0647\u0627\u06CC \u0628\u0627\u0633\u0644\u0627\u0645 \u0631\u0627 \u062C\u0633\u062A\u200C\u0648\u062C\u0648\u060C \u0628\u0627\u0632\u0628\u06CC\u0646\u06CC \u0648 \u0648\u06CC\u0631\u0627\u06CC\u0634 \u06A9\u0646\u06CC\u062F. \u067E\u06CC\u0634\u200C\u0646\u0645\u0627\u06CC\u0634 \u06AF\u0631\u0648\u0647\u06CC \u0647\u0645\u06CC\u0634\u0647 \u0642\u0628\u0644 \u0627\u0632 \u0627\u0639\u0645\u0627\u0644 \u0648\u0627\u0642\u0639\u06CC \u062F\u0631 \u062F\u0633\u062A\u0631\u0633 \u0627\u0633\u062A.</p><div class="dest-targets"><button class="dest-target active" data-dest-target="woo">\u{1F6D2} \u0648\u0648\u06A9\u0627\u0645\u0631\u0633</button><button class="dest-target" data-dest-target="basalam">\u{1F3EA} \u0628\u0627\u0633\u0644\u0627\u0645</button></div></div><div class="card"><div class="dest-toolbar"><div><label>\u062C\u0633\u062A\u200C\u0648\u062C\u0648\u06CC \u0639\u0646\u0648\u0627\u0646 \u06CC\u0627 \u0634\u0646\u0627\u0633\u0647 \u0645\u062D\u0635\u0648\u0644</label><input id="destSearch" placeholder="\u0645\u062B\u0644\u0627\u064B \u0639\u0637\u0631 \u06CC\u0627 \u06F1\u06F2\u06F3\u06F4"></div><div><label>\u063A\u0631\u0641\u0647</label><select id="destShop"><option value="all">\u0647\u0645\u0647\u0654 \u063A\u0631\u0641\u0647\u200C\u0647\u0627</option></select></div><div><label>\u062A\u0639\u062F\u0627\u062F \u062F\u0631 \u0635\u0641\u062D\u0647</label><select id="destPerPage"><option value="10">\u06F1\u06F0</option><option value="25" selected>\u06F2\u06F5</option><option value="50">\u06F5\u06F0</option><option value="100">\u06F1\u06F0\u06F0</option></select></div><button id="destLoad" class="btn btn-blue">\u{1F50E} \u062F\u0631\u06CC\u0627\u0641\u062A \u0645\u062D\u0635\u0648\u0644\u0627\u062A</button><button id="destReset" class="btn btn-gray">\u21BB \u067E\u0627\u06A9\u200C\u0633\u0627\u0632\u06CC</button></div><div id="destStatusPills" class="status-pills"></div><div class="dest-summary"><b id="destSummary">\u0645\u0642\u0635\u062F \u0631\u0627 \u0627\u0646\u062A\u062E\u0627\u0628 \u0648 \u0641\u0647\u0631\u0633\u062A \u0631\u0627 \u062F\u0631\u06CC\u0627\u0641\u062A \u06A9\u0646\u06CC\u062F.</b><span id="destSelection" class="chip">\u06F0 \u0627\u0646\u062A\u062E\u0627\u0628</span></div></div><details class="bulk-panel"><summary>\u26A1 \u0648\u06CC\u0631\u0627\u06CC\u0634 \u06AF\u0631\u0648\u0647\u06CC \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0627\u0646\u062A\u062E\u0627\u0628\u200C\u0634\u062F\u0647 <span id="destBulkCount">(\u06F0 \u0645\u062D\u0635\u0648\u0644)</span></summary><div class="bulk-body"><div class="help-box">\u062D\u062F\u0627\u06A9\u062B\u0631 \u06F2\u06F0 \u0645\u062D\u0635\u0648\u0644 \u062F\u0631 \u0647\u0631 \u0646\u0648\u0628\u062A \u062A\u0627 \u0633\u0642\u0641 \u062F\u0631\u062E\u0648\u0627\u0633\u062A\u200C\u0647\u0627\u06CC \u067E\u0644\u0646 \u0631\u0627\u06CC\u06AF\u0627\u0646 Cloudflare \u0631\u0639\u0627\u06CC\u062A \u0634\u0648\u062F. \u0627\u0628\u062A\u062F\u0627 \xAB\u067E\u06CC\u0634\u200C\u0646\u0645\u0627\u06CC\u0634\xBB \u0631\u0627 \u0628\u0632\u0646\u06CC\u062F.</div><div class="bulk-grid"><div><label>\u0639\u0645\u0644\u06CC\u0627\u062A \u0642\u06CC\u0645\u062A</label><select id="destPriceOp"><option value="">\u0628\u062F\u0648\u0646 \u062A\u063A\u06CC\u06CC\u0631</option><option value="set">\u0642\u0631\u0627\u0631 \u062F\u0627\u062F\u0646 \u0642\u06CC\u0645\u062A</option><option value="inc">\u0627\u0641\u0632\u0627\u06CC\u0634</option><option value="dec">\u06A9\u0627\u0647\u0634</option></select></div><div><label>\u0645\u0642\u062F\u0627\u0631 \u0642\u06CC\u0645\u062A (\u0639\u062F\u062F \u06CC\u0627 \u062F\u0631\u0635\u062F)</label><input id="destPriceValue" placeholder="\u0645\u062B\u0644\u0627\u064B 10% \u06CC\u0627 50000"></div><div><label>\u0645\u0648\u062C\u0648\u062F\u06CC \u062C\u062F\u06CC\u062F</label><input id="destBulkStock" type="number" min="0" placeholder="\u0628\u062F\u0648\u0646 \u062A\u063A\u06CC\u06CC\u0631"></div><div><label>\u0648\u0636\u0639\u06CC\u062A \u062C\u062F\u06CC\u062F</label><select id="destBulkStatus"><option value="">\u0628\u062F\u0648\u0646 \u062A\u063A\u06CC\u06CC\u0631</option></select></div><div><label>\u067E\u06CC\u0634\u0648\u0646\u062F \u0639\u0646\u0648\u0627\u0646</label><input id="destTitlePrefix" placeholder="\u0645\u062B\u0644\u0627\u064B \u0648\u06CC\u0698\u0647 \u2014 "></div><div><label>\u067E\u0633\u0648\u0646\u062F \u0639\u0646\u0648\u0627\u0646</label><input id="destTitleSuffix" placeholder="\u0645\u062B\u0644\u0627\u064B (\u062C\u062F\u06CC\u062F)"></div></div><div class="row" style="margin-top:8px"><div class="field"><label>\u062A\u0648\u0636\u06CC\u062D \u06A9\u0648\u062A\u0627\u0647 \u062C\u062F\u06CC\u062F</label><textarea id="destBulkShort" rows="2" placeholder="\u062E\u0627\u0644\u06CC = \u0628\u062F\u0648\u0646 \u062A\u063A\u06CC\u06CC\u0631"></textarea></div><div class="field"><label>\u062A\u0648\u0636\u06CC\u062D\u0627\u062A \u06A9\u0627\u0645\u0644 \u062C\u062F\u06CC\u062F</label><textarea id="destBulkDesc" rows="2" placeholder="\u062E\u0627\u0644\u06CC = \u0628\u062F\u0648\u0646 \u062A\u063A\u06CC\u06CC\u0631"></textarea></div></div><div class="bulk-actions"><button id="destBulkPreview" class="btn btn-purple">\u{1F441} \u067E\u06CC\u0634\u200C\u0646\u0645\u0627\u06CC\u0634 \u062A\u063A\u06CC\u06CC\u0631\u0627\u062A</button><button id="destBulkApply" class="btn btn-green">\u2713 \u0627\u0639\u0645\u0627\u0644 \u062A\u063A\u06CC\u06CC\u0631\u0627\u062A</button><button id="destBulkDeletePreview" class="btn btn-orange">\u{1F441} \u067E\u06CC\u0634\u200C\u0646\u0645\u0627\u06CC\u0634 \u062D\u0630\u0641 / \u0628\u0627\u06CC\u06AF\u0627\u0646\u06CC</button><button id="destBulkDelete" class="btn btn-red">\u{1F5D1} \u0627\u0639\u0645\u0627\u0644 \u062D\u0630\u0641 / \u0628\u0627\u06CC\u06AF\u0627\u0646\u06CC</button><button id="destClearSelection" class="btn btn-gray">\u067E\u0627\u06A9\u200C\u06A9\u0631\u062F\u0646 \u0627\u0646\u062A\u062E\u0627\u0628</button></div></div></details><div id="destProducts" class="dest-grid"><div class="empty">\u0628\u0631\u0627\u06CC \u0634\u0631\u0648\u0639 \xAB\u062F\u0631\u06CC\u0627\u0641\u062A \u0645\u062D\u0635\u0648\u0644\u0627\u062A\xBB \u0631\u0627 \u0628\u0632\u0646\u06CC\u062F.</div></div><div class="dest-pagination"><button id="destPrev" class="btn btn-gray">\u0635\u0641\u062D\u0647 \u0642\u0628\u0644</button><span id="destPageInfo">\u0635\u0641\u062D\u0647 \u06F1</span><button id="destNext" class="btn btn-gray">\u0635\u0641\u062D\u0647 \u0628\u0639\u062F</button></div></section>
 <section id="pane-jobs" class="tab-pane"><div class="card"><div class="card-head"><h2>\u23F3 \u0635\u0641 \u0627\u0633\u062A\u062E\u0631\u0627\u062C \u0648 \u0627\u0631\u0633\u0627\u0644</h2><div class="row" style="margin:0"><button id="refreshJobs" class="btn btn-gray btn-sm">\u21BB \u062A\u0627\u0632\u0647\u200C\u0633\u0627\u0632\u06CC</button><button id="clearJobs" class="btn btn-red btn-sm">\u067E\u0627\u06A9\u200C\u06A9\u0631\u062F\u0646 \u062A\u0645\u0627\u0645\u200C\u0634\u062F\u0647\u200C\u0647\u0627</button></div></div><div id="jobs" class="jobs"><div class="empty">\u0635\u0641 \u062E\u0627\u0644\u06CC \u0627\u0633\u062A.</div></div></div></section>
-<section id="pane-settings" class="tab-pane"><div class="card"><h2>\u{1F50C} \u0648\u0636\u0639\u06CC\u062A \u0633\u0631\u0648\u06CC\u0633\u200C\u0647\u0627</h2><div class="settings-line"><span>Cloudflare D1</span><b id="dbState">\u2014</b></div><div class="settings-line"><span>\u0648\u0648\u06A9\u0627\u0645\u0631\u0633</span><b id="wooState">\u2014</b></div><div class="settings-line"><span>\u0628\u0627\u0633\u0644\u0627\u0645</span><b id="basalamState">\u2014</b></div><div class="settings-line"><span>\u067E\u0631\u062F\u0627\u0632\u0634\u06AF\u0631 \u062F\u0627\u062E\u0644\u06CC</span><b id="workerState">\u2014</b></div></div><div class="card"><h2>\u{1F4E5} \u0645\u0647\u0627\u062C\u0631\u062A \u0627\u0632 PHP</h2><p style="font-size:10px;color:var(--muted);line-height:1.8;margin-bottom:8px">\u0645\u062D\u062A\u0648\u0627\u06CC \u0641\u0627\u06CC\u0644 profiles.json \u0642\u062F\u06CC\u0645\u06CC \u0631\u0627 \u0627\u06CC\u0646\u062C\u0627 \u0642\u0631\u0627\u0631 \u062F\u0647\u06CC\u062F.</p><textarea id="importJson" rows="7" dir="ltr" placeholder='{"profile_key": {...}}'></textarea><button id="importBtn" class="btn btn-purple" style="margin-top:8px">\u062F\u0631\u0648\u0646\u200C\u0631\u06CC\u0632\u06CC \u067E\u0631\u0648\u0641\u0627\u06CC\u0644\u200C\u0647\u0627</button></div><div class="card"><h2>\u{1FA7A} \u062E\u0631\u0648\u062C\u06CC \u0648 \u062E\u0637\u0627\u0647\u0627</h2><div id="out" class="logs">\u0622\u0645\u0627\u062F\u0647</div></div></section>
-</main><div id="visualModal" class="modal"><div class="modal-box"><div class="modal-head"><b>\u{1F441} \u0627\u0646\u062A\u062E\u0627\u0628 \u0628\u0635\u0631\u06CC \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</b><span id="visualUrl"></span><button id="closeVisual" class="btn btn-red btn-sm">\u2715 \u0628\u0633\u062A\u0646</button></div><div id="visualLoading" class="visual-loading">\u062F\u0631 \u062D\u0627\u0644 \u062F\u0631\u06CC\u0627\u0641\u062A \u0635\u0641\u062D\u0647 \u0645\u0628\u062F\u0623\u2026</div><iframe id="visualFrame" title="\u0627\u0646\u062A\u062E\u0627\u0628 \u0628\u0635\u0631\u06CC" hidden></iframe></div></div><nav class="main-tabs"><button class="main-tab active" data-tab="home"><span class="icon">\u{1F3E0}</span><span>\u062E\u0627\u0646\u0647</span></button><button class="main-tab" data-tab="selector"><span class="icon">\u{1F3AF}</span><span>\u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</span></button><button class="main-tab" data-tab="products"><span class="icon">\u{1F4E6}</span><span>\u0645\u062D\u0635\u0648\u0644\u0627\u062A</span></button><button class="main-tab" data-tab="jobs"><span class="icon">\u23F3</span><span>\u0635\u0641\u200C\u0647\u0627</span><i id="jobBadge" class="badge" hidden>\u06F0</i></button><button class="main-tab" data-tab="settings"><span class="icon">\u2699\uFE0F</span><span>\u062A\u0646\u0638\u06CC\u0645\u0627\u062A</span></button></nav><script src="/dashboard.js" defer><\/script></body></html>`;
+<section id="pane-settings" class="tab-pane"><div class="card"><h2>\u{1F50C} \u0648\u0636\u0639\u06CC\u062A \u0633\u0631\u0648\u06CC\u0633\u200C\u0647\u0627</h2><div class="settings-line"><span>Cloudflare D1</span><b id="dbState">\u2014</b></div><div class="settings-line"><span>\u0648\u0648\u06A9\u0627\u0645\u0631\u0633</span><b id="wooState">\u2014</b></div><div class="settings-line"><span>\u0628\u0627\u0633\u0644\u0627\u0645</span><b id="basalamState">\u2014</b></div><div class="settings-line"><span>\u067E\u0631\u062F\u0627\u0632\u0634\u06AF\u0631 \u062F\u0627\u062E\u0644\u06CC</span><b id="workerState">\u2014</b></div></div><div class="card"><h2>\u{1F4E5} \u0645\u0647\u0627\u062C\u0631\u062A \u0627\u0632 PHP</h2><p style="font-size:10px;color:var(--muted);line-height:1.8;margin-bottom:8px">\u0628\u062F\u0648\u0646 \u0646\u06CC\u0627\u0632 \u0628\u0647 \u0646\u0648\u0634\u062A\u0646 JSON: \u0641\u0627\u06CC\u0644 <b>profiles.json</b> \u06CC\u0627 \u0641\u0627\u06CC\u0644 \u06A9\u0627\u0645\u0644 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0631\u0627 \u0627\u0646\u062A\u062E\u0627\u0628 \u06A9\u0646\u06CC\u062F\u061B \u0628\u0631\u0646\u0627\u0645\u0647 \u0622\u0646 \u0631\u0627 \u0628\u0631\u0631\u0633\u06CC \u0645\u06CC\u200C\u06A9\u0646\u062F.</p><input id="profileImportFile" type="file" accept="application/json,.json"><button id="importBtn" class="btn btn-purple" style="margin-top:8px">\u0627\u0646\u062A\u062E\u0627\u0628 \u0648 \u062F\u0631\u0648\u0646\u200C\u0631\u06CC\u0632\u06CC \u0641\u0627\u06CC\u0644</button><div id="profileImportStatus" class="menu-text">\u0647\u0646\u0648\u0632 \u0641\u0627\u06CC\u0644\u06CC \u0627\u0646\u062A\u062E\u0627\u0628 \u0646\u0634\u062F\u0647 \u0627\u0633\u062A.</div></div><div class="card"><h2>\u{1FA7A} \u062E\u0631\u0648\u062C\u06CC \u0648 \u062E\u0637\u0627\u0647\u0627</h2><div id="out" class="logs">\u0622\u0645\u0627\u062F\u0647</div></div></section>
+</main><div id="visualModal" class="modal"><div class="modal-box"><div class="modal-head"><b>\u{1F441} \u0627\u0646\u062A\u062E\u0627\u0628 \u0628\u0635\u0631\u06CC \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</b><span id="visualUrl"></span><button id="closeVisual" class="btn btn-red btn-sm">\u2715 \u0628\u0633\u062A\u0646</button></div><div id="visualLoading" class="visual-loading">\u062F\u0631 \u062D\u0627\u0644 \u062F\u0631\u06CC\u0627\u0641\u062A \u0635\u0641\u062D\u0647 \u0645\u0628\u062F\u0623\u2026</div><iframe id="visualFrame" title="\u0627\u0646\u062A\u062E\u0627\u0628 \u0628\u0635\u0631\u06CC" hidden></iframe></div></div><nav class="main-tabs"><button class="main-tab active" data-tab="home"><span class="icon">\u{1F3E0}</span><span>\u062E\u0627\u0646\u0647</span></button><button class="main-tab" data-tab="selector"><span class="icon">\u{1F3AF}</span><span>\u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</span></button><button class="main-tab" data-tab="products"><span class="icon">\u{1F4E6}</span><span>\u0645\u062D\u0635\u0648\u0644\u0627\u062A</span></button><button class="main-tab" data-tab="destination"><span class="icon">\u{1F9ED}</span><span>\u0645\u062F\u06CC\u0631\u06CC\u062A \u0645\u0642\u0635\u062F</span></button><button class="main-tab" data-tab="jobs"><span class="icon">\u23F3</span><span>\u0635\u0641\u200C\u0647\u0627</span><i id="jobBadge" class="badge" hidden>\u06F0</i></button><button class="main-tab" data-tab="settings"><span class="icon">\u2699\uFE0F</span><span>\u062A\u0646\u0638\u06CC\u0645\u0627\u062A</span></button></nav><script src="/dashboard.js" defer><\/script></body></html>`;
 var DASHBOARD_JS = String.raw`
 'use strict';
 const $=id=>document.getElementById(id), state={profiles:[],jobs:[],selected:'',connected:false,settings:{},connections:{}};
 const listFields=[['container','📦 کانتینر محصول'],['title','📝 عنوان'],['price','💰 قیمت'],['link','🔗 لینک'],['image','🖼️ تصویر']];
-const detailFields=[['shortDesc','توضیح کوتاه'],['longDesc','توضیح کامل'],['sku','SKU / کد'],['brand','برند'],['stock','موجودی'],['weight','وزن'],['category','دسته‌بندی'],['gallery','گالری تصاویر'],['variations','تنوع‌ها (رنگ/سایز)']];
+const detailFields=[['shortDesc','توضیحات کوتاه'],['longDesc','توضیحات بلند'],['sku','SKU'],['category','دسته‌بندی'],['tags','برچسب‌ها'],['weight','وزن'],['stock','موجودی'],['brand','برند'],['detailImage','عکس اصلی'],['variations','تنوع‌ها (رنگ/سایز)']];
+function mInput(label,id,type,value,placeholder,binding){return '<div class="crow"><label>'+label+'</label><input id="'+id+'" type="'+(type||'text')+'"'+(value!==''?' value="'+value+'"':'')+(placeholder?' placeholder="'+placeholder+'"':'')+(binding?' '+binding[0]+'="'+binding[1]+'"':'')+'></div>'}
+function mCheck(label,id,binding,checked){return '<div class="crow check-row"><label><input id="'+id+'" type="checkbox"'+(checked?' checked':'')+(binding?' '+binding[0]+'="'+binding[1]+'"':'')+'> '+label+'</label></div>'}
+function mSelect(label,id,options,binding){return '<div class="crow"><label>'+label+'</label><select id="'+id+'"'+(binding?' '+binding[0]+'="'+binding[1]+'"':'')+'>'+options.map(x=>'<option value="'+x[0]+'">'+x[1]+'</option>').join('')+'</select></div>'}
+function mButton(text,action,kind){return '<button class="btn '+(kind||'btn-gray')+' btn-sm" data-ma="'+action+'">'+text+'</button>'}
+function mFile(id){return '<input id="'+id+'" type="file" accept="application/json,.json">'}
+const BSET=key=>['data-setting',key],BCON=key=>['data-connection',key];
 const menuDefs=[
- ['💾 ذخیره و بازیابی همهٔ تنظیمات','backup','سازگار با فایل settings_YYYYMMDD_HHMMSS.json نسخه PHP؛ شامل پروفایل‌ها، محصولات، اتصال‌ها و تنظیمات. ⚠ فایل خروجی حاوی کلیدهای اتصال است و باید محرمانه نگه داشته شود.','<div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="backup">⬇ برون‌ریزی فایل تنظیمات</button><label class="btn btn-orange btn-sm">♻ درون‌ریزی فایل<input id="restoreFile" type="file" accept="application/json,.json" hidden></label></div><div id="transferStatus" class="menu-text" style="margin-top:7px">فرمت: Scraper 4 settings-export</div>'],
- ['📥 درون‌ریزی و برون‌ریزی محصولات','product-transfer','انتقال CSV محصولات یک پروفایل با حفظ فیلدهای اصلی.','<div class="field"><label>شناسه پروفایل</label><input id="transferProfile" dir="ltr"></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="csv-export">⬇ خروجی CSV</button><label class="btn btn-orange btn-sm">⬆ ورود CSV<input id="csvImportFile" type="file" accept=".csv,text/csv" hidden></label></div><div id="csvStatus" class="menu-text">—</div>'],
- ['📜 تغییرات نسخه‌ها','versions','نسخه Cloudflare Workers بازنویسی بومی اسکرپر ۴ است.','<div class="menu-text">v1.0 · Cloudflare Workers + Hono + D1<br>انتخاب‌گر بصری، صف تراکنشی، همگام‌سازی و داشبورد فارسی.</div>'],
- ['🔄 نسخهٔ کد','code','استقرار کد با Wrangler یا داشبورد Cloudflare انجام می‌شود.','<div class="menu-actions"><button class="btn btn-blue btn-sm" data-ma="health">🔍 بررسی نسخه و سلامت</button><button class="btn btn-gray btn-sm" data-ma="reload">↻ بارگذاری مجدد</button></div>'],
- ['🛒 ووکامرس','woo','مشخصات را همین‌جا وارد کنید؛ به‌صورت رمزنگاری‌شده در D1 به‌صورت رمزنگاری‌شده ذخیره می‌شود.','<div class="field"><label>آدرس فروشگاه</label><input data-connection="woo.url" dir="ltr" placeholder="https://shop.example.com"></div><div class="field"><label>Consumer Key</label><input data-connection="woo.key" dir="ltr" autocomplete="off"></div><div class="field"><label>Consumer Secret</label><input data-connection="woo.secret" type="password" dir="ltr" autocomplete="new-password"></div><div class="field"><label>شناسه دسته پیش‌فرض</label><input data-connection="woo.categoryId" type="number" min="0"></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save-connections">💾 ذخیره</button><button class="btn btn-purple btn-sm" data-ma="test-woo">🔗 تست اتصال</button></div>'],
- ['🏪 باسلام','basalam','توکن، شناسه غرفه و آدرس API را در رابط ثبت کنید.','<div class="field"><label>Access Token</label><input data-connection="basalam.token" type="password" dir="ltr"></div><div class="field"><label>Vendor ID</label><input data-connection="basalam.vendorId" dir="ltr"></div><div class="field"><label>API Base URL</label><input data-connection="basalam.api" dir="ltr" value="https://openapi.basalam.com/v1"></div><div class="row"><div class="field"><label>روز آماده‌سازی</label><input data-connection="basalam.preparationDays" type="number" min="1"></div><div class="field"><label>وزن محصول</label><input data-connection="basalam.weight" type="number"></div><div class="field"><label>وزن بسته</label><input data-connection="basalam.packageWeight" type="number"></div><div class="field"><label>موجودی پیش‌فرض</label><input data-connection="basalam.stock" type="number"></div></div><div class="field"><label>شناسه دسته پیش‌فرض</label><input data-connection="basalam.categoryId" type="number"></div><div class="field"><label>دسته‌های جایگزین (JSON)</label><textarea data-connection="basalam.fallbackCategoryIds" dir="ltr" placeholder="[12,34,56]"></textarea></div><label class="checks"><input data-connection="basalam.autoCategory" type="checkbox"> دسته‌بندی خودکار</label><label class="checks"><input data-connection="basalam.netIndirect" type="checkbox"> اتصال غیرمستقیم</label><div class="field"><label>غرفه‌های اضافی (JSON)</label><textarea data-connection="basalam.shops" dir="ltr" placeholder="JSON array of shops"></textarea></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save-connections">💾 ذخیره</button><button class="btn btn-blue btn-sm" data-ma="test-basalam">🔗 تست اتصال</button></div>'],
- ['🤖 هوش مصنوعی','ai','مدیریت چند ارائه‌دهنده، تست مدل‌ها، کاندیدها، مستر و روش اتصال.','<div class="field"><label>ارائه‌دهنده‌ها (JSON)</label><textarea data-connection="ai.providers" dir="ltr" placeholder="JSON array"></textarea></div><div class="field"><label>مدل‌های کاندید (provider::model، آرایه JSON)</label><textarea data-connection="ai.candidates" dir="ltr" placeholder="[]"></textarea></div><div class="field"><label>مدل مستر</label><input data-connection="ai.master" dir="ltr"></div><div class="field"><label>پیام تست</label><input id="aiTestPrompt" value="سلام"></div><div class="row"><div class="field"><label>روش اتصال</label><select data-connection="ai.network.mode"><option value="direct">مستقیم</option><option value="doh">DoH</option><option value="dns">IP دستی</option><option value="proxy">HTTP/SOCKS Proxy</option><option value="worker">Cloudflare Worker</option></select></div><div class="field"><label>Proxy URL</label><input data-connection="ai.network.proxyUrl" dir="ltr"></div><div class="field"><label>Worker URL</label><input data-connection="ai.network.workerUrl" dir="ltr"></div><div class="field"><label>DoH URL</label><input data-connection="ai.network.dohUrl" dir="ltr"></div><div class="field"><label>IP دستی</label><input data-connection="ai.network.resolveIp" dir="ltr"></div></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save-connections">💾 ذخیره</button><button class="btn btn-purple btn-sm" data-ma="ai-test-all">🧪 تست همه مدل‌ها</button><button class="btn btn-yellow btn-sm" data-ma="ai-vote-master">✓ رأی به مستر</button><button class="btn btn-gray btn-sm" data-ma="ai-leaderboard">🏆 امتیازات</button></div><div id="aiMenuResult" class="logs">—</div>'],
- ['🔔 اعلان‌ها','notifications','مشخصات پیام‌رسان در خزانه رمزنگاری‌شده نگهداری می‌شود.','<label class="checks"><input data-setting="notifications.enabled" type="checkbox"> فعال</label><div class="field"><label>Webhook / API URL</label><input data-connection="notifications.url" dir="ltr"></div><div class="field"><label>Token</label><input data-connection="notifications.token" type="password" dir="ltr"></div><div class="field"><label>Chat ID عمومی</label><input data-connection="notifications.chatId" dir="ltr"></div><div class="field"><label>توکن بله</label><input data-connection="notifications.baleToken" type="password" dir="ltr"></div><div class="field"><label>Chat ID بله</label><input data-connection="notifications.baleChatId" dir="ltr"></div><div class="field"><label>توکن روبیکا</label><input data-connection="notifications.rubikaToken" type="password" dir="ltr"></div><div class="field"><label>Chat ID روبیکا</label><input data-connection="notifications.rubikaChatId" dir="ltr"></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save-connections">💾 ذخیره اتصال</button><button class="btn btn-purple btn-sm" data-ma="notify-bale">تست بله</button><button class="btn btn-orange btn-sm" data-ma="notify-rubika">تست روبیکا</button><button class="btn btn-gray btn-sm" data-ma="notify-webhook">تست Webhook</button><button class="btn btn-gray btn-sm" data-ma="save">ذخیره وضعیت</button></div>'],
- ['🗂 محصولات رفته از مبدأ','retire','محصولاتی که در استخراج موفق بعدی دیده نشوند غیرفعال و برای اقدام مقصد آماده می‌شوند.','<div class="field"><label>شناسه پروفایل</label><input id="retireProfile" dir="ltr"></div><div class="field"><label>عملیات</label><select id="retireAction"><option value="report">فقط گزارش</option><option value="draft">پیش‌نویس</option><option value="trash">زباله‌دان/بایگانی</option></select></div><div class="menu-actions"><button class="btn btn-gray btn-sm" data-ma="retire-preview-woo">👁 پیش‌نمایش Woo</button><button class="btn btn-purple btn-sm" data-ma="retire-preview-basalam">👁 پیش‌نمایش باسلام</button><button class="btn btn-red btn-sm" data-ma="retire-apply-woo">اجرای Woo</button><button class="btn btn-red btn-sm" data-ma="retire-apply-basalam">اجرای باسلام</button></div>'],
- ['⚙️ تنظیمات عمومی','general','رفتار عمومی استخراج و رابط.','<div class="field"><label>هم‌زمانی جزئیات</label><input data-setting="general.detailConcurrency" type="number" value="4"></div><label class="checks"><input data-setting="general.autoScroll" type="checkbox"> پرش خودکار صفحه</label><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save">💾 ذخیره</button><button class="btn btn-orange btn-sm" data-ma="selftest">🧾 خودآزمون نصب</button><button class="btn btn-purple btn-sm" data-ma="debug">🩺 دیباگ جامع</button><button class="btn btn-gray btn-sm" data-ma="parity">📋 گزارش تطبیق</button></div><div id="selftestResult" class="logs">—</div>'],
- ['🩺 نگهبان صف ارسال','watchdog','بستن Jobهایی که مدت زیادی بدون پیشرفت مانده‌اند.','<div class="field"><label>آستانه توقف (دقیقه)</label><input id="watchdogMinutes" type="number" value="30" min="5"></div><button class="btn btn-orange btn-sm" data-ma="watchdog">🔎 بررسی حالا</button>'],
- ['🌐 اتصال به سایت مبدأ','source','آزمایش دسترسی Cloudflare Workers به سایت مبدأ.','<div class="field"><label>آدرس آزمایش</label><input id="sourceTestUrl" dir="ltr" placeholder="https://example.com"></div><button class="btn btn-purple btn-sm" data-ma="source-test">🧪 آزمایش</button>'],
- ['🔍 مغایرت‌گیری با مقصد','recon','مقایسه همه محصولات محلی و مقصد با شناسه، SKU و عنوان نرمال‌شده.','<div class="field"><label>شناسه پروفایل (خالی=همه)</label><input id="reconProfile" dir="ltr"></div><div class="menu-actions"><button class="btn btn-purple btn-sm" data-ma="recon-woo">🛒 بررسی Woo</button><button class="btn btn-blue btn-sm" data-ma="recon-basalam">🏪 بررسی باسلام</button><button class="btn btn-green btn-sm" data-ma="rebuild-woo">🔗 بازسازی Woo</button><button class="btn btn-green btn-sm" data-ma="rebuild-basalam">🔗 بازسازی باسلام</button></div><div id="reconResult" class="logs">—</div>'],
- ['🧠 یادگیری دسته‌بندی','category','یادگیری یک تا پنج کلمه اول عنوان و انتخاب پرتکرارترین دسته.','<div class="field"><label>عنوان محصول</label><input id="catTitle"></div><div class="row"><div class="field"><label>شناسه دسته</label><input id="catId" type="number"></div><div class="field"><label>نام دسته</label><input id="catName"></div><div class="field"><label>تعداد کلمات</label><input id="catWords" type="number" min="1" max="5" value="5"></div></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="cat-learn">＋ ثبت یادگیری</button><button class="btn btn-purple btn-sm" data-ma="cat-test">🧪 آزمایش عنوان</button><button class="btn btn-gray btn-sm" data-ma="cat-list">📚 آموخته‌ها</button></div><div id="catResult" class="logs">—</div>'],
- ['✏️ ویرایش محصولات مقصد','editor','پیش‌نمایش و اعمال گروهی عنوان، قیمت و موجودی روی مقصد.','<div class="row"><div class="field"><label>مقصد</label><select id="bulkTarget"><option value="woo">ووکامرس</option><option value="basalam">باسلام</option></select></div><div class="field"><label>شناسه پروفایل</label><input id="bulkProfile" dir="ltr"></div><div class="field"><label>جست‌وجوی عنوان</label><input id="bulkQuery"></div></div><div class="row"><div class="field"><label>پیشوند</label><input id="bulkPrefix"></div><div class="field"><label>پسوند</label><input id="bulkSuffix"></div><div class="field"><label>درصد قیمت</label><input id="bulkPrice" type="number"></div><div class="field"><label>موجودی (خالی=بدون تغییر)</label><input id="bulkStock" type="number"></div></div><div class="menu-actions"><button class="btn btn-gray btn-sm" data-ma="bulk-preview">👁 پیش‌نمایش</button><button class="btn btn-red btn-sm" data-ma="bulk-apply">✓ اعمال تغییرات</button></div><div class="card" style="margin-top:8px"><h3>مدیریت مستقیم مقصد</h3><div class="row"><div class="field"><label>شناسه محصول مقصد</label><input id="destProductId" type="number"></div><div class="field"><label>وضعیت جدید</label><input id="destStatus" placeholder="publish / draft / archived"></div></div><div class="menu-actions"><button class="btn btn-gray btn-sm" data-ma="dest-overview">📊 وضعیت کلی</button><button class="btn btn-gray btn-sm" data-ma="dest-list">📋 محصولات</button><button class="btn btn-orange btn-sm" data-ma="dest-duplicates">⧉ تکراری‌ها</button><button class="btn btn-purple btn-sm" data-ma="dest-status">تغییر وضعیت</button><button class="btn btn-red btn-sm" data-ma="dest-delete">حذف</button></div></div><div id="bulkResult" class="logs">—</div>'],
- ['🖼 عکس‌دار کردن محصولات ووکامرس','photo','محصول بدون تصویر Woo با شناسه مقصد پیدا و تصویر مبدأ روی آن ثبت می‌شود.','<div class="field"><label>شناسه پروفایل</label><input id="photoProfile" dir="ltr"></div><div class="menu-actions"><button class="btn btn-gray btn-sm" data-ma="photo-preview">👁 پیش‌نمایش</button><button class="btn btn-green btn-sm" data-ma="photo-apply">🖼 اجرا</button></div><div id="photoResult" class="logs">—</div>'],
- ['🤖 پاسخ خودکار به مشتریان','autoreply','قواعد، AI، محدودیت اجرا و پاسخ واقعی به گفتگوهای باسلام.','<label class="checks"><input data-setting="autoreply.enabled" type="checkbox"> فعال</label><div class="row"><div class="field"><label>اولویت</label><select data-setting="autoreply.order"><option value="rules_first">قواعد ← AI</option><option value="ai_first">AI ← قواعد</option><option value="rules_only">فقط قواعد</option><option value="ai_only">فقط AI</option></select></div><div class="field"><label>حداکثر هر اجرا</label><input data-setting="autoreply.maxPerRun" type="number" value="5"></div><div class="field"><label>تعداد گفتگوی اسکن</label><input data-setting="autoreply.scanLimit" type="number" value="20"></div><div class="field"><label>مهلت انتظار پیام (دقیقه)</label><input data-setting="autoreply.graceMin" type="number" value="10"></div><div class="field"><label>فاصله پاسخ هر گفتگو (دقیقه)</label><input data-setting="autoreply.perChatMin" type="number" value="180"></div><div class="field"><label>امضا</label><input data-setting="autoreply.sign"></div></div><label class="checks"><input data-setting="autoreply.onlyOffhours" type="checkbox"> فقط خارج ساعت کاری</label><div class="row"><div class="field"><label>شروع کار</label><input data-setting="autoreply.workFrom" type="number" min="0" max="23" value="9"></div><div class="field"><label>پایان کار</label><input data-setting="autoreply.workTo" type="number" min="0" max="23" value="21"></div></div><div class="field"><label>قواعد JSON</label><textarea data-setting="autoreply.rules" dir="ltr" placeholder="[]"></textarea></div><div class="field"><label>پیام آزمایش</label><input id="arTestText" value="سلام، این محصول موجود است؟"></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save">💾 ذخیره</button><button class="btn btn-purple btn-sm" data-ma="ar-test">🧪 تست پاسخ</button><button class="btn btn-gray btn-sm" data-ma="ar-preview">👁 پیش‌نمایش گفتگوها</button><button class="btn btn-red btn-sm" data-ma="ar-run">🚀 اجرای واقعی</button><button class="btn btn-gray btn-sm" data-ma="ar-log">📜 گزارش</button></div><div id="arResult" class="logs">—</div>'],
- ['🌙 گزارش شبانهٔ محصولات','digest','مقایسه snapshot محصولات، تغییر قیمت، جدید و حذف‌شده و ارسال اعلان.','<label class="checks"><input data-setting="digest.enabled" type="checkbox"> فعال</label><div class="row"><div class="field"><label>ساعت ارسال</label><input data-setting="digest.hour" type="number" min="0" max="23" value="23"></div><div class="field"><label>منطقه زمانی</label><input data-setting="digest.timezone" dir="ltr" value="Asia/Tehran"></div></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save">💾 ذخیره</button><button class="btn btn-gray btn-sm" data-ma="digest-preview">👁 پیش‌نمایش</button><button class="btn btn-green btn-sm" data-ma="digest-send">📤 ارسال فوری</button><button class="btn btn-blue btn-sm" data-ma="orders">🛒 سفارش‌ها</button><button class="btn btn-purple btn-sm" data-ma="chats">💬 گفتگوها</button></div><div id="digestResult" class="logs">—</div>'],
- ['📊 آمار محصولات هر پروفایل','profile-stats','تعداد محصولات و نگاشت شناسه‌های مقصد.','<button class="btn btn-purple btn-sm" data-ma="stats">📊 نمایش آمار</button><div id="menuStats" class="logs">—</div>']
+ ['💾 ذخیره و بازیابی همهٔ تنظیمات','backup','فایل کامل سازگار با Scraper 4 شامل پروفایل‌ها، محصولات و تنظیمات است؛ آن را محرمانه نگه دارید.','<div class="menu-actions">'+mButton('⬇ دانلود همهٔ تنظیمات و پروفایل‌ها','backup','btn-green')+'</div>'+mFile('sxFile')+'<div class="menu-actions">'+mButton('♻️ بارگذاری و بازیابی','sx-restore','btn-orange')+'</div><div id="transferStatus" class="menu-text">—</div>'],
+ ['📜 گزارش تغییرات کد','changes','نسخهٔ مرجع رابط و رفتار: scraper4.php v9.80. تغییرات مهم این Worker به زبان ساده در این بخش ثبت می‌شوند.','<div class="menu-actions">'+mButton('📋 گزارش تطبیق v9.80','parity','btn-purple')+'</div><div class="change-list"><div class="change-item"><time>۱۴۰۵/۰۵/۲۸ · ۲۰۲۶-۰۸-۱۹</time><br><b>مدیریت جامع مقصد</b><br>فهرست صفحه‌بندی‌شده، جست‌وجوی واقعی، تب وضعیت، انتخاب غرفه، ویرایش تکی، پیش‌نمایش و اعمال گروهی و بایگانی صحیح باسلام اضافه شد.</div><div class="change-item"><time>۱۴۰۵/۰۵/۲۸</time><br><b>رفع مسیر Cloudflare Workers AI</b><br>endpoint بومی ai/run از Chat Completions جدا شد؛ مدل سازمان‌دار، payloadهای native و fallback سازگار همراه گزارش امن هر تلاش اضافه شدند.</div><div class="change-item"><time>۱۴۰۵/۰۵/۲۸</time><br><b>عیب‌یاب استخراج واقعی</b><br>دریافت شبکه، HTML واقعی، سلکتورها، parser فهرست و نمونهٔ جزئیات مرحله‌به‌مرحله آزمایش می‌شوند تا شکست واقعی قابل تشخیص باشد.</div><div class="change-item"><time>۱۴۰۵/۰۵/۲۸</time><br><b>رابط مدرن‌تر</b><br>محیط مدیریت مقصد، کارت‌ها، فرم‌ها، رنگ‌ها، ناوبری دسکتاپ/موبایل و گزارش‌های جامع بازطراحی شدند.</div></div><div id="changesResult" class="logs">مرجع: scraper4.php v9.80 · جزئیات تطبیق با دکمهٔ بالا</div>'],
+ ['🔄 نسخهٔ کد','version','تطبیق Cloudflare: Worker سیستم فایل و نصب‌کنندهٔ PHP ندارد؛ انتشار و بازگشت نسخه از Cloudflare Deployments انجام می‌شود. کنترل‌های ناممکن مرجع برای مقایسه حفظ اما غیرفعال‌اند.',[
+   mButton('🔍 بررسی و نصب نسخهٔ جدید','version-info','btn-blue'),mButton('⬇ نصب نسخهٔ جدید','version-info','btn-green'),
+   mCheck('بررسی خودکار هنگام باز/رفرش شدن صفحه','vcOnLoad',BSET('version.checkOnLoad'),true),
+   mInput('ریپو:','vcRepo','text','','user/repo'),mButton('🔄','version-info'),mInput('برنچ:','vcBranch','text','','ابتدا 🔄 را بزنید'),mInput('فایل:','vcPath','text','','ابتدا برنچ را انتخاب کنید'),mInput('توکن گیت‌هاب:','vcGhToken','password','','فقط ریپوی خصوصی'),mInput('فایل نصب‌کننده:','vcDeployFile','text','','deploy.php'),mInput('رمز نصب‌کننده:','vcDepToken','password','','توکن API پنل deploy'),mButton('💾 ذخیره','version-info','btn-green'),mButton('☁️ باز کردن پنل بکاپ هاست','version-info','btn-blue'),
+   mCheck('مخزن جدا برای بکاپ','bkOwnRepo',null,false),mInput('مخزن','bkRepo','text','','username/repo-name'),mInput('برنچ','bkBranch','text','','main'),mInput('توکن','bkToken','password','','ghp_...'),mInput('پوشه','bkPath','text','','backups'),mCheck('داده‌ها (پروفایل‌ها، تنظیمات، صف‌ها)','bkIncData',null,true),mCheck('همهٔ فایل‌های پوشه (کد و مستندات)','bkIncCode',null,true),mCheck('بکاپ خودکار با کران‌جاب','bkAuto',null,false),mInput('هر چند ساعت','bkEvery','number','24',''),mInput('نگه‌داری','bkKeep','number','20',''),mButton('💾 ذخیره تنظیمات','version-info','btn-green'),mButton('⬆ بکاپ همین حالا','backup','btn-blue'),mButton('🔄 فهرست محلی','version-info'),mButton('☁️ فهرست گیت‌هاب','version-info'),mFile('bkFile'),mButton('♻️ بازیابی از این فایل','bk-restore','btn-orange')
+ ].join('')+'<div id="versionResult" class="logs">برای نسخه‌های کد: Cloudflare Dashboard ← Workers & Pages ← Deployments</div>'],
+ ['🛒 ووکامرس','woo','اتصال، وضعیت انتشار، دسته و موجودی پیش‌فرض مطابق پنل مرجع.',[
+   mInput('آدرس:','wcUrl','url','','https://yourstore.com',BCON('woo.url')),mInput('Key:','wcCK','text','','ck_...',BCON('woo.key')),mInput('Secret:','wcCS','password','','cs_...',BCON('woo.secret')),mSelect('وضعیت:','wcSt',[['draft','پیش‌نویس'],['publish','منتشر']],BSET('woo.status')),mSelect('دسته:','wcCat',[['','--']],BCON('woo.categoryId')),mButton('🔄','woo-categories'),mInput('شناسه دستی:','wcCatManual','number','','مثلاً ۱۲۳'),mButton('✓ اعمال','woo-category-apply','btn-green'),mCheck('موجودی','wcMS',BSET('woo.manageStock'),false),mInput('تعداد موجودی','wcSQ','number','10','',BSET('woo.stock')),mButton('🔗 تست','test-woo','btn-blue'),mButton('💾 ذخیره','save-connections','btn-green')
+ ].join('')],
+ ['🏪 باسلام','basalam','توکن، غرفه، زمان آماده‌سازی، وزن و موجودی پیش‌فرض.',[
+   mInput('Token:','bsTk','password','','',BCON('basalam.token')),mInput('غرفه:','bsVid','number','','',BCON('basalam.vendorId')),mInput('آماده‌سازی:','bsPD','number','3','',BCON('basalam.preparationDays')),mInput('وزن:','bsW','number','500','',BCON('basalam.weight')),mInput('وزن بسته:','bsPW','number','600','',BCON('basalam.packageWeight')),mInput('موجودی:','bsSt','number','10','',BCON('basalam.stock')),mCheck('اتصال غیرمستقیم','bsIndirect',BCON('basalam.netIndirect'),false),
+   '<div class="visual-card"><div class="visual-row-head"><b style="color:#fbbf24">👥 غرفه‌های باسلام</b>'+mButton('➕ افزودن غرفه','basalam-shop-new','btn-green')+'</div><div class="help-box">غرفه پیش‌فرض همان توکن و شناسهٔ بالا است. غرفه‌های اضافی را کاملاً بصری اضافه، ویرایش، تست یا حذف کنید؛ نیازی به JSON نیست.</div><div id="basalamShopForm" hidden>'+mInput('نام غرفه:','shopName','text','','مثلاً شعبه تهران')+mInput('توکن:','shopToken','password','','توکن غرفه')+mInput('شناسه غرفه:','shopVendorId','number','','شناسه عددی')+mInput('تغییر قیمت ٪:','shopPricePercent','number','0','مثلاً 5')+'<div class="cact">'+mButton('✓ ذخیره غرفه','basalam-shop-save','btn-green')+mButton('انصراف','basalam-shop-cancel')+'</div></div><div id="basalamShopsList" class="visual-list"></div></div>',
+   '<div class="cact">',mButton('🔗 تست','test-basalam','btn-blue'),mButton('💾 ذخیره','save-connections','btn-green'),'</div><div id="bsTR"></div>'
+ ].join('')],
+ ['🤖 هوش مصنوعی','ai','ارائه‌دهنده‌ها، تست مدل‌ها، کاندیدها، مدل مستر و مسیر شبکه. رابط اصلی کاملاً بصری است و نیازی به نوشتن JSON ندارد.',[
+   '<div class="ai-tabs"><button class="ai-tab-btn active" data-ai-tab="providers">🧠 ارائه‌دهنده‌ها</button><button class="ai-tab-btn" data-ai-tab="test">🧪 تست مدل‌ها</button><button class="ai-tab-btn" data-ai-tab="models">📋 مدل‌ها</button><button class="ai-tab-btn" data-ai-tab="candidates">🏆 کاندید + مستر</button><button class="ai-tab-btn" data-ai-tab="net">🌐 اتصال</button></div>',
+   '<div class="ai-tab-panel active" data-ai-panel="providers"><div class="visual-card"><b style="color:#fbbf24">🧠 مدیریت بصری ارائه‌دهنده‌ها</b><div class="help-box">برای استفاده عادی، دکمهٔ «ارائه‌دهنده جدید» را بزنید و فرم ساده را کامل کنید. گزینهٔ فایل فقط برای انتقال تنظیمات قدیمی است.</div><div class="cact">'+mButton('➕ ارائه‌دهنده جدید','ai-provider-new','btn-green')+mButton('📥 انتقال از فایل JSON','ai-import-file','btn-blue')+mButton('🔄 تازه‌سازی','ai-providers')+'</div><input id="aiImportFile" type="file" accept="application/json,.json" hidden><div id="aiProviderForm" hidden>'+mInput('نام نمایشی:','aiEditName','text','','مثلاً OpenRouter')+mInput('آدرس پایه:','aiEditBase','url','','https://openrouter.ai/api/v1')+mInput('کلید API:','aiEditKey','password','','کلید محرمانه')+mCheck('این ارائه‌دهنده روشن باشد','aiEditEnabled',null,true)+mInput('مدل جدید:','aiEditModel','text','','مثلاً openai/gpt-4o-mini')+'<div class="cact">'+mButton('➕ افزودن مدل','ai-model-add','btn-blue')+mButton('✓ ذخیره ارائه‌دهنده','ai-provider-save','btn-green')+mButton('انصراف','ai-provider-cancel')+'</div><div id="aiEditModels" class="model-chips"></div></div><div id="aiProvidersList" class="visual-list"></div></div>'+mSelect('مدل فعال:','aiModelSel',[['','— یک مدل انتخاب کنید —']],BCON('ai.model'))+'</div>',
+   '<div class="ai-tab-panel" data-ai-panel="test"><div class="visual-card"><b style="color:#67e8f9">🧪 تست همه مدل‌های روشن</b><div class="help-box">نتیجه‌ها در یک جدول باز می‌شوند. روی هر ردیف کلیک کنید تا زمان پاسخ، وضعیت HTTP، مصرف توکن، پاسخ مدل و پاسخ خام سرویس را ببینید.</div>'+mInput('سقف/ارائه‌دهنده:','aiTestPerProvider','number','50','',BSET('ai.testPerProvider'))+mCheck('فقط مدل‌های کاندید','aiTestOnlyUntested',BSET('ai.onlyCandidates'),false)+mInput('پیام تست:','aiTestMsg','text','سلام','مثلاً: سلام')+mInput('دستهٔ تست:','aiTestCat','text','ادو پرفیوم','مثلاً: ادو پرفیوم')+mInput('تاخیر بین تست‌ها:','aiTestDelay','number','120','',BSET('ai.testDelay'))+'<div class="cact">'+mButton('▶ شروع تست','ai-test-all','btn-blue')+mButton('📊 نمایش آخرین جدول','ai-test-results','btn-purple')+'</div></div></div>',
+   '<div class="ai-tab-panel" data-ai-panel="models"><div class="visual-card"><b style="color:#67e8f9">📋 آزمایش یک مدل</b>'+mSelect('ارائه‌دهنده:','aiProviderSel',[['','— انتخاب —']],null)+mSelect('مدل:','aiSingleModelSel',[['','— انتخاب —']],null)+mInput('پیام:','aiSinglePrompt','text','سلام','پیام آزمایشی')+'<div class="cact">'+mButton('🔗 تست جامع این مدل','test-ai','btn-blue')+'</div></div></div>',
+   '<div class="ai-tab-panel" data-ai-panel="candidates"><div class="visual-card"><b style="color:#fbbf24">🏆 کاندیدها و مدل مستر</b><div class="help-box">کاندیدها مدل‌هایی هستند که در رأی‌گیری و آزمون مقایسه‌ای شرکت می‌کنند. هر مورد را با دکمه اضافه یا حذف کنید.</div>'+mSelect('ارائه‌دهنده:','aiCandProvSel',[['','— انتخاب —']],null)+mSelect('مدل کاندید:','aiCandModelSel',[['','—']],null)+'<div class="cact">'+mButton('➕ افزودن','ai-candidate-add','btn-green')+mButton('➕ افزودن همه مدل‌ها','ai-candidates-all','btn-blue')+'</div><div id="aiCandidatesList" class="visual-list"></div>'+mSelect('مدل مستر:','aiMasterPin',[['','خودکار (بهترین آمار)']],BCON('ai.master'))+'<div class="cact">'+mButton('🏷️ تست همه کاندیدها','ai-test-candidates','btn-purple')+mButton('📊 جدول امتیازات','ai-leaderboard')+'</div></div></div>',
+   '<div class="ai-tab-panel" data-ai-panel="net"><div class="visual-card"><b style="color:#67e8f9">🌐 روش اتصال</b><div class="help-box">در Cloudflare Workers فقط درخواست‌های HTTP/HTTPS اجرا می‌شوند. SOCKS، تغییر DNS سیستم و اتصال مستقیم به IP قابل اعمال نیست؛ برای عبور از محدودیت از Worker یا Gateway مجاز استفاده کنید.</div>'+mSelect('روش:','aiNetMode',[['direct','مستقیم'],['doh','DoH — فقط عیب‌یابی'],['resolve','IP دستی — غیرقابل اعمال در fetch'],['worker','Cloudflare Worker / پروکسی معکوس'],['gateway','Gateway سازگار با OpenAI'],['proxy','پروکسی HTTP']],BCON('ai.network.mode'))+mInput('آدرس Worker:','aiNetWorkerUrl','url','','https://xxx.workers.dev',BCON('ai.network.workerUrl'))+mInput('آدرس Gateway/Proxy:','aiNetProxyUrl','url','','https://gateway.example',BCON('ai.network.proxyUrl'))+mInput('سرور DoH:','aiNetDohUrl','url','https://cloudflare-dns.com/dns-query','',BCON('ai.network.dohUrl'))+mInput('IP مقصد:','aiNetResolveIp','text','','اطلاعاتی؛ در fetch اعمال نمی‌شود',BCON('ai.network.resolveIp'))+mCheck('تلاش با روش جایگزین در صورت شکست','aiNetFallback',BSET('ai.networkFallback'),true)+mInput('مهلت (ثانیه):','aiNetTimeout','number','25','',BSET('ai.timeout'))+'<div class="cact">'+mButton('🔗 تست مدل انتخابی','test-ai','btn-blue')+mButton('🩺 عیب‌یابی','debug','btn-orange')+mButton('💾 ذخیره','save-connections','btn-green')+'</div></div></div>',
+   '<div id="aiMenuResult" class="logs">—</div>'
+ ].join('')],
+ ['🔔 اعلان‌ها','notifications','بله، روبیکا، رویدادهای اعلان و یادآوری مطابق مرجع.',[
+   mCheck('بله فعال:','balehEnabled',BSET('notifications.baleEnabled'),false),mInput('Token بله:','balehToken','password','','Bot Token',BCON('notifications.baleToken')),mInput('Chat ID:','balehChatId','text','','شناسه چت',BCON('notifications.baleChatId')),mCheck('روبیکا فعال:','rubikaEnabled',BSET('notifications.rubikaEnabled'),false),mInput('Token روبیکا:','rubikaToken','password','','Bot Token',BCON('notifications.rubikaToken')),mInput('Chat ID:','rubikaChatId','text','','شناسه چت',BCON('notifications.rubikaChatId')),mCheck('🛒 سفارش جدید','notifOrderNew',BSET('notifications.events.orderNew'),true),mCheck('📦 تغییر وضعیت سفارش','notifOrderStatus',BSET('notifications.events.orderStatus'),true),mCheck('💬 پیام مشتری','notifChatMsg',BSET('notifications.events.chatMessage'),true),mCheck('📋 تغییر وضعیت محصول','notifProductStatus',BSET('notifications.events.productStatus'),true),mCheck('➕ محصول جدید افزوده شد','notifProductNew',BSET('notifications.events.productNew'),true),mCheck('🔄 بازگشت سفارش','notifOrderRefund',BSET('notifications.events.orderRefund'),true),mCheck('💰 گران/ارزان شدن مبدأ','notifSrcPrice',BSET('notifications.events.sourcePrice'),true),mCheck('📦 موجود/ناموجود شدن مبدأ','notifSrcStock',BSET('notifications.events.sourceStock'),true),mCheck('⚠️ خطای اجرای خودکار','notifRunFail',BSET('notifications.events.runFail'),true),mCheck('📡 پینگ اجرای کران‌جاب','notifCronPing',BSET('notifications.events.cronPing'),true),mInput('هر چند دقیقه','pingEvery','number','360','',BSET('notifications.pingEvery')),mButton('📡 تست','health','btn-blue'),mInput('یادآوری بعد از:','remindAfter','number','30','',BSET('notifications.remindAfter')),mInput('حداکثر تکرار:','remindMax','number','0','',BSET('notifications.remindMax')),mButton('🔔 تست بله','notify-bale','btn-blue'),mButton('🔔 تست روبیکا','notify-rubika','btn-purple'),mButton('💾 ذخیره','save-all','btn-green'),mButton('🛒 سفارش‌ها','orders'),mButton('💬 گفتگوها','chats'),mButton('📋 تست محصولات','notify-bale'),mButton('💰 تست تغییرات مبدأ','notify-bale')
+ ].join('')],
+ ['🗂 محصولات رفته از مبدأ','retire','رفتار محصولی که دیگر در مبدأ دیده نمی‌شود.',[
+   mSelect('اقدام:','retireMode',[['report','کاری نکن (فقط گزارش)'],['draft','پیش‌نویس/غیرفعال کن'],['outofstock','ناموجود کن'],['delete','حذف کن (زباله‌دان)']],BSET('retire.mode')),mInput('حداکثر ٪ حذف:','retireMaxPct','number','30','',BSET('retire.maxPct')),mInput('حداکثر تعداد:','retireMaxCount','number','50','',BSET('retire.maxCount')),mCheck('🔔 اعلان نتیجه به پیام‌رسان‌ها','notifRetire',BSET('retire.notify'),true),mButton('👁 پیش‌نمایش','retire-preview-woo'),mButton('💾 ذخیره','save','btn-green')
+ ].join('')],
+ ['⚙️ تنظیمات عمومی','general','رفتار عمومی استخراج، صف و نگه‌داری گزارش.',[
+   mCheck('پرش خودکار صفحه (اسکرول خودکار)','autoScrollOn',BSET('general.autoScroll'),true),mCheck('جلوگیری از ورود دوبارهٔ یک پروفایل به صف','qDedup',BSET('general.queueDedup'),true),mInput('ردیف رهاشده بعد از:','qDedupStale','number','120','',BSET('general.queueDedupStale')),mInput('قفل ضد هم‌پوشانی:','cronLockMin','number','30','',BSET('general.cronLockMin')),mInput('گزارش‌های استخراج:','keepReports','number','20','',BSET('general.keepReports')),mCheck('🔄 محصولات موجود را با محتوای تازه آپدیت کن','contentSync',BSET('general.contentSync'),true),mButton('🔎 وضعیت صف‌ها','health'),mButton('🔒 بررسی امنیت','debug','btn-orange'),mButton('💾 ذخیره','save','btn-green')
+ ].join('')+'<div id="selftestResult" class="logs">—</div>'],
+ ['🩺 نگهبان صف ارسال','watchdog','تشخیص و بستن کارهای بدون پیشرفت و تنظیم مهلت‌ها.',[
+   mCheck('فعال:','stallWatchdog',BSET('watchdog.enabled'),true),mInput('آستانه (ثانیه):','stallAfter','number','300','',BSET('watchdog.stallAfter')),mInput('سقف فاز جزئیات (ثانیه):','detailBudget','number','0','',BSET('watchdog.detailBudget')),mInput('مهلت بارگذاری صفحه (ثانیه):','proxyTimeout','number','45','',BSET('watchdog.proxyTimeout')),mButton('🔎 بررسی حالا','watchdog','btn-orange'),mButton('💾 ذخیره','save','btn-green'),mButton('🧾 خودآزمون نصب','selftest','btn-purple')
+ ].join('')],
+ ['🌐 اتصال به سایت مبدأ','source','Cloudflare Workers از fetch خروجی استفاده می‌کند. DoH/IP دستی و SOCKS مثل PHP روی DNS/سوکت سیستم اعمال‌پذیر نیستند؛ Worker/پروکسی HTTP قابل استفاده است.',[
+   mSelect('روش اصلی:','srcNetMode',[['direct','مستقیم (پیش‌فرض)'],['doh','DoH — فقط عیب‌یابی در Worker'],['ip','IP دستی — غیرقابل اعمال در fetch'],['proxy','پروکسی HTTP/SOCKS5'],['worker','Worker / پروکسی معکوس']],BSET('source.mode')),mInput('فاصلهٔ درخواست‌ها (ms):','srcNetGap','number','0','',BSET('source.gap')),mInput('IP دستی:','srcNetIp','text','','مثال: 104.21.0.1',BSET('source.ip')),mInput('آدرس DoH:','srcNetDoh','text','','https://cloudflare-dns.com/dns-query',BSET('source.doh')),mInput('پروکسی:','srcNetProxy','text','','https://host:port',BSET('source.proxy')),mSelect('نوع پروکسی:','srcNetProxyType',[['http','HTTP'],['socks5','SOCKS5'],['socks4','SOCKS4']],BSET('source.proxyType')),mInput('کاربر:رمز پروکسی:','srcNetProxyAuth','text','','user:pass',BSET('source.proxyAuth')),mInput('Worker:','srcNetWorker','text','','https://xxx.workers.dev یا .../{url}',BSET('source.worker')),mInput('فقط این دامنه‌ها:','srcNetHosts','text','','خالی = همه · مثال: shop.ir, example.com',BSET('source.hosts')),mCheck('🔁 اگر روش اصلی شکست خورد، روش‌های جایگزینِ فعال را هم امتحان کن','srcNetFallback',BSET('source.fallback'),true),mInput('آدرس آزمایش:','sourceTestUrl','url','','خالی = آدرس پروفایل انتخاب‌شده'),mButton('🧪 آزمایش دسترسی','source-test','btn-purple'),mButton('💾 ذخیره','save','btn-green')
+ ].join('')],
+ ['🔍 مغایرت‌گیری با مقصد','recon','مقایسه محصولات محلی و مقصد و بازسازی نگاشت شناسه‌ها.',[
+   mCheck('همهٔ پروفایل‌ها (نه فقط آن‌هایی که همگام‌سازی دوره‌ای دارند)','reconAllProfiles',BSET('recon.allProfiles'),false),mButton('🛒 بررسی ووکامرس','recon-woo','btn-purple'),mButton('🏪 بررسی باسلام','recon-basalam','btn-blue'),mButton('📇 وضعیت','stats'),mButton('🔗 بازسازی ووکامرس','rebuild-woo','btn-green'),mButton('🔗 بازسازی باسلام','rebuild-basalam','btn-green')
+ ].join('')+'<div id="reconResult" class="logs">—</div>'],
+ ['🧠 یادگیری دسته‌بندی','category','یادگیری از یک تا پنج کلمهٔ اول عنوان.',[
+   mSelect('چند کلمهٔ اول:','catLearnWords',[['1','۱ کلمه — فقط کلمهٔ اول'],['2','۲ کلمه — اول ۱ کلمه، بعد ۲ کلمه'],['3','۳ کلمه — تا سه کلمهٔ اول'],['4','۴ کلمه'],['5','۵ کلمه']],BSET('category.maxWords')),mInput('عنوان نمونه:','catTestTitle','text','','مثلاً عطر مردانه تلخ'),mButton('📚 آموخته‌ها','cat-list','btn-purple'),mButton('🧪 آزمایش عنوان','cat-test','btn-blue'),mButton('⬇️ پشتیبان','category-export'),'<input id="categoryImportFile" type="file" accept="application/json,.json" hidden>',mButton('⬆️ بازیابی از فایل','category-import','btn-orange')
+ ].join('')+'<div id="catResult" class="logs">—</div>'],
+ ['✏️ مدیریت جامع محصولات مقصد','editor','محیط مستقل و کامل مشابه نسخهٔ PHP: دریافت مستقیم محصولات، جست‌وجو، وضعیت‌ها، غرفه‌ها، ویرایش تکی و گروهی.','<div class="help-box">عملیات گروهی ابتدا پیش‌نمایش می‌شود. حذف باسلام مطابق API رسمی به بایگانی وضعیت ۴۱۸۴ تبدیل می‌شود.</div>'+mButton('🛒 مدیریت جامع ووکامرس','editor-woo','btn-purple')+mButton('🏪 مدیریت جامع باسلام','editor-basalam','btn-blue')+'<div id="bulkResult" class="logs">—</div>'],
+ ['🖼 عکس‌دار کردن محصولات ووکامرس','photo','ثبت تصویر مبدأ برای محصولات بدون تصویر ووکامرس.',[
+   mSelect('پروفایل:','photoProfile',[['','همهٔ پروفایل‌ها']],null),mCheck('ارسال گزارش به پیام‌رسان','photoNotify',BSET('photo.notify'),false),mButton('👁 پیش‌نمایش','photo-preview'),mButton('🖼 اجرا','photo-apply','btn-green')
+ ].join('')+'<div id="photoResult" class="logs">—</div>'],
+ ['🤖 پاسخ خودکار به مشتریان','autoreply','تنظیمات، هوش مصنوعی، قواعد و آزمایش پاسخ خودکار.',[
+   mButton('⚙️ تنظیمات','ar-tab-settings','btn-blue'),mButton('🤖 هوش مصنوعی','ar-tab-ai','btn-purple'),mButton('📋 قواعد','ar-tab-rules'),mButton('🚀 آزمایش','ar-tab-test','btn-orange'),mCheck('فعال','arEnabled',BSET('autoreply.enabled'),false),mInput('مهلت ادمین:','arGrace','number','10','',BSET('autoreply.graceMin')),mInput('فاصلهٔ هر گفتگو:','arPerChat','number','180','',BSET('autoreply.perChatMin')),mInput('سقف هر اجرا:','arMaxRun','number','5','',BSET('autoreply.maxPerRun')),mInput('بررسی:','arScan','number','20','',BSET('autoreply.scanLimit')),mCheck('فقط بیرون ساعت کاری جواب بده','arOffHours',BSET('autoreply.onlyOffhours'),false),mSelect('ساعت کاری از:','arFrom',Array.from({length:24},(_,i)=>[String(i),String(i)]),BSET('autoreply.workFrom')),mSelect('تا:','arTo',Array.from({length:24},(_,i)=>[String(i),String(i)]),BSET('autoreply.workTo')),mInput('امضا:','arSign','text','','اختیاری — مثلاً: (پاسخ خودکار)',BSET('autoreply.sign')),mCheck('📤 گزارش پاسخ‌ها به پیام‌رسان','arNotify',BSET('autoreply.notify'),false),mSelect('اولویت پاسخ:','arOrder',[['rules_first','اول قواعد آماده، بعد هوش مصنوعی'],['ai_first','اول هوش مصنوعی، بعد قواعد آماده'],['rules_only','فقط قواعد آماده (بدون هوش مصنوعی)'],['ai_only','فقط هوش مصنوعی (بدون قواعد)']],BSET('autoreply.order')),mSelect('پیام سیستمی:','arAiSysMode',[['default','پیام سیستمیِ پیش‌فرض سیستم'],['custom','پیام سیستمیِ سفارشی (خودم می‌نویسم)']],BSET('autoreply.systemMode')),'<div class="field"><label>متن:</label><textarea id="arAiSysText" data-setting="autoreply.systemText" placeholder="مثلاً: تو دستیار فروشگاه هستی…"></textarea></div>',mButton('💬 آزمایش در پنجرهٔ چت','ar-test','btn-purple'),'<div class="visual-card"><div class="visual-row-head"><b>📋 قواعد پاسخ آماده</b>'+mButton('➕ قاعدهٔ جدید','ar-rule-add','btn-green')+'</div><div id="arRuleForm" hidden>'+mSelect('نوع تطبیق:','arRuleMatch',[['contains','شامل عبارت'],['exact','دقیقاً برابر'],['starts','شروع با'],['always','همیشه']],null)+mInput('عبارت‌ها:','arRuleTriggers','text','','با | جدا کنید')+mInput('متن پاسخ:','arRuleReply','text','','پاسخ آماده')+mInput('اولویت:','arRulePriority','number','50','عدد کمتر زودتر بررسی می‌شود')+'<div class="cact">'+mButton('✓ ذخیره قاعده','ar-rule-save','btn-green')+mButton('انصراف','ar-rule-cancel')+'</div></div><div id="arRulesList" class="visual-list"></div></div>',mButton('↩️ بازگردانی قواعد پیش‌فرض','ar-rules-reset'),mInput('پیام نمونه','arTestText','text','','یک پیام نمونه بنویسید…'),mButton('🧪 سریع','ar-test','btn-purple'),mButton('👁 پیش‌نمایش روی گفتگوهای واقعی','ar-preview'),mButton('🚀 اجرای فوری','ar-run','btn-red'),mButton('📜 پاسخ‌های اخیر','ar-log')
+ ].join('')+'<div id="arResult" class="logs">—</div>'],
+ ['🌙 گزارش شبانهٔ محصولات','digest','ساخت و ارسال خلاصه تغییرات محصولات.',[
+   mCheck('فعال','digestEnabled',BSET('digest.enabled'),false),mSelect('ساعت ارسال:','digestHour',Array.from({length:24},(_,i)=>[String(i),String(i)]),BSET('digest.hour')),mSelect('بازهٔ گزارش:','digestHours',[['24','۲۴ ساعت گذشته'],['48','۲ روز گذشته'],['168','۷ روز گذشته']],BSET('digest.hours')),mButton('👁 پیش‌نمایش','digest-preview'),mButton('📤 ارسال فوری','digest-send','btn-green')
+ ].join('')+'<div id="digestResult" class="logs">—</div>'],
+ ['📊 آمار محصولات هر پروفایل','profile-stats','آمار جداگانه مقصدها و ارسال اختیاری گزارش.',mButton('🛒 آمار ووکامرس','stats-woo','btn-purple')+mButton('🏪 آمار باسلام','stats-basalam','btn-blue')+mCheck('📤 گزارش را به پیام‌رسان‌ها هم بفرست','sfxNotify',BSET('stats.notify'),false)+'<div id="menuStats" class="logs">—</div>']
 ];
 function initMenu(){$('menuSections').innerHTML=menuDefs.map(([title,key,desc,content])=>'<section class="menu-section" data-menu="'+key+'"><button class="menu-title"><span>'+title+'</span><i>▼</i></button><div class="menu-content"><p class="menu-text">'+desc+'</p>'+content+'</div></section>').join('')}
-function initFields(){ $('selectorGrid').innerHTML=listFields.map(([id,label])=>fieldHtml(id,label,id==='container'?'li.product':id==='title'?'h2':id==='price'?'.price':id==='link'?'a[href]':'img')).join(''); $('detailGrid').innerHTML=detailFields.map(([id,label])=>fieldHtml(id,label,'')).join('') }
+function initFields(){ $('selectorGrid').innerHTML=listFields.map(([id,label])=>fieldHtml(id,label,id==='container'?'li.product':id==='title'?'h2':id==='price'?'.price':id==='link'?'a[href]':'img')).join(''); $('detailGrid').innerHTML=detailFields.map(([id,label])=>fieldHtml(id,label,'')).join('');galModeChanged() }
+function galModeChanged(){const mode=$('galMode').value;$('galAutoBox').hidden=mode!=='auto';$('galManualBox').hidden=mode!=='manual';$('galNumberBox').hidden=mode!=='number';$('galCommon').hidden=mode==='off'}
+function galleryConfig(){return{mode:$('galMode').value,box:$('galBox').value.trim(),selectors:$('galSelectors').value.trim(),pattern:$('galPattern').value.trim(),from:Number($('galFrom').value)||0,to:Number($('galTo').value)||10,max:Math.max(1,Math.min(30,Number($('galMax').value)||10)),skip_first:$('galSkipFirst').checked}}
+function loadGallery(cfg={}){$('galMode').value=cfg.mode||'off';$('galBox').value=cfg.box||'';$('galSelectors').value=cfg.selectors||'';$('galPattern').value=cfg.pattern||'';$('galFrom').value=cfg.from??1;$('galTo').value=cfg.to??10;$('galMax').value=cfg.max??10;$('galSkipFirst').checked=!!cfg.skip_first;galModeChanged()}
+function gallerySelector(cfg=galleryConfig()){if(cfg.mode==='auto')return cfg.box;if(cfg.mode==='manual')return cfg.selectors;if(cfg.mode==='number'&&cfg.pattern.includes('{n}'))return Array.from({length:Math.max(0,Math.min(cfg.to,cfg.from+60)-cfg.from+1)},(_,i)=>cfg.pattern.replaceAll('{n}',String(cfg.from+i))).join('\n');return''}
 function fieldHtml(id,label,value){return '<div class="sel-item" id="wrap-'+id+'"><div class="sel-title"><b>'+label+'</b><span>CSS</span></div><input id="sel-'+id+'" dir="ltr" value="'+escAttr(value)+'"><div id="result-'+id+'" class="sel-result">—</div></div>'}
 const headers=()=>({'content-type':'application/json'});
 async function api(path,options={}){const response=await fetch(path,{...options,headers:{...headers(),...(options.headers||{})}}),text=await response.text();let data;try{data=JSON.parse(text)}catch{data={error:text||'HTTP '+response.status}}if(!response.ok)throw Error(data.detail||data.error||'HTTP '+response.status);return data}
 function notice(message,kind='ok'){const el=$('notice');el.className='notice show '+kind;el.textContent=message;clearTimeout(notice.timer);notice.timer=setTimeout(()=>el.classList.remove('show'),6000)}
 function output(value){$('out').textContent=typeof value==='string'?value:JSON.stringify(value,null,2)}
 function busy(button,on){button.disabled=on;if(on){button.dataset.old=button.textContent;button.textContent='در حال انجام…'}else if(button.dataset.old)button.textContent=button.dataset.old}
-function drawer(open){$('drawer').classList.toggle('open',open);$('drawerOverlay').classList.toggle('open',open);if(open&&state.selected)for(const id of ['retireProfile','reconProfile','bulkProfile','photoProfile'])if($(id)&&!$(id).value)$(id).value=state.selected}
+function drawer(open){$('drawer').classList.toggle('open',open);$('drawerOverlay').classList.toggle('open',open);$('hamburgerBtn').classList.toggle('active',open);if(open&&state.selected)for(const id of ['retireProfile','reconProfile','bulkProfile','photoProfile'])if($(id)&&!$(id).value)$(id).value=state.selected}
 function nestedGet(obj,path){return path.split('.').reduce((value,key)=>value?.[key],obj)}
 function nestedSet(obj,path,value){const keys=path.split('.');let node=obj;keys.slice(0,-1).forEach(key=>node=node[key]||(node[key]={}));node[keys.at(-1)]=value}
 function applySettings(){document.querySelectorAll('[data-setting]').forEach(input=>{const value=nestedGet(state.settings,input.dataset.setting);if(value===undefined||value===null)return;if(input.type==='checkbox')input.checked=Boolean(value);else if(typeof value==='object')input.value=JSON.stringify(value,null,2);else input.value=String(value)})}
 function applyConnections(){document.querySelectorAll('[data-connection]').forEach(input=>{const value=nestedGet(state.connections,input.dataset.connection);if(value===undefined||value===null)return;if(input.type==='checkbox')input.checked=Boolean(value);else if(typeof value==='object')input.value=JSON.stringify(value,null,2);else input.value=String(value)})}
 async function saveConnections(){const value=structuredClone(state.connections||{});document.querySelectorAll('[data-connection]').forEach(input=>{let v=input.type==='checkbox'?input.checked:input.type==='number'?Number(input.value):input.value.trim();if(input.tagName==='TEXTAREA'&&input.value.trim())try{v=JSON.parse(input.value)}catch{throw Error('مقدار یکی از فیلدهای JSON معتبر نیست.')}nestedSet(value,input.dataset.connection,v)});const result=await api('/api/connections',{method:'POST',body:JSON.stringify(value)});state.connections=result.connections;applyConnections();notice('اطلاعات اتصال با رمزنگاری AES-256 ذخیره شد.');const status=await api('/api/status');setState('wooState',status.connections.woo);setState('basalamState',status.connections.basalam)}
 async function saveSettings(){const settings=structuredClone(state.settings||{});document.querySelectorAll('[data-setting]').forEach(input=>{let value=input.type==='checkbox'?input.checked:input.type==='number'?Number(input.value):input.value;if(input.tagName==='TEXTAREA'&&input.value.trim()){try{value=JSON.parse(input.value)}catch{}}nestedSet(settings,input.dataset.setting,value)});await api('/api/settings',{method:'POST',body:JSON.stringify(settings)});state.settings=settings;notice('تنظیمات منوی عمومی ذخیره شد.')}
-async function menuAction(action){try{if(action==='save')return await saveSettings();if(action==='save-connections')return await saveConnections();if(action==='reload')return location.reload();if(action==='csv-export'){const id=$('transferProfile').value.trim();if(!id)throw Error('شناسه پروفایل را وارد کنید.');const r=await fetch('/api/profiles/'+encodeURIComponent(id)+'/export.csv',{headers:headers()});if(!r.ok)throw Error('خروجی CSV ناموفق بود.');const blob=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=id+'.csv';a.click();URL.revokeObjectURL(a.href);return notice('فایل CSV دانلود شد.')}if(action==='selftest'||action==='parity'||action==='debug'){const path=action==='selftest'?'/api/selftest':action==='debug'?'/api/debug':'/api/parity',d=await api(path);$('selftestResult').textContent=JSON.stringify(d,null,2);output(d);const label=action==='debug'?'دیباگ جامع':action==='selftest'?'خودآزمون':'گزارش تطبیق';return notice(d.ok?label+' با موفقیت تمام شد.':label+' موارد نیازمند بررسی دارد.',d.ok?'ok':'error')}if(action==='products'){drawer(false);return tab('products')}if(action==='health'){const d=await fetch('/health').then(r=>r.json());output(d);return notice('سلامت سرویس بررسی شد.')}if(action==='backup'){const r=await fetch('/api/settings-export',{headers:headers()});if(!r.ok)throw Error('ساخت فایل تنظیمات ناموفق بود.');const blob=await r.blob(),cd=r.headers.get('content-disposition')||'',name=cd.match(/filename="?([^";]+)/)?.[1]||('settings_'+Date.now()+'.json'),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();URL.revokeObjectURL(a.href);$('transferStatus').textContent='✅ برون‌ریزی شد: '+name;return notice('فایل کامل تنظیمات دانلود شد.')}if(action.startsWith('test-')){const target=action.slice(5),d=await api('/api/test-connection/'+target,{method:'POST',body:'{}'});output(d);return notice(d.ok?'اتصال موفق بود.':'اتصال ناموفق بود.',d.ok?'ok':'error')}if(action==='ai-test-all'){await saveConnections();const d=await api('/api/ai/test-all',{method:'POST',body:JSON.stringify({prompt:$('aiTestPrompt').value})});$('aiMenuResult').textContent=JSON.stringify(d.results,null,2);output(d);return notice('تست '+fa(d.results.length)+' مدل تمام شد.')}if(action==='ai-vote-master'){await saveConnections();const ai=state.connections.ai||{},d=await api('/api/ai/vote',{method:'POST',body:JSON.stringify({task:'manual',winner:ai.master,candidates:ai.candidates||[]})});$('aiMenuResult').textContent=JSON.stringify(d.leaderboard,null,2);return notice('رأی ثبت شد.')}if(action==='ai-leaderboard'){const d=await api('/api/ai/leaderboard');$('aiMenuResult').textContent=JSON.stringify(d.leaderboard,null,2);return output(d)}if(action.startsWith('notify-')){await saveConnections();const channel=action.slice(7),d=await api('/api/notifications/test',{method:'POST',body:JSON.stringify({channel,text:'پیام آزمایشی اسکرپر ۴ از Cloudflare Workers'})});output(d);return notice('پیام آزمایشی ارسال شد.')}if(action.startsWith('recon-')||action.startsWith('rebuild-')){const [kind,target]=action.split('-'),d=await api('/api/maintenance/'+kind+'/'+target,{method:'POST',body:JSON.stringify({profileId:$('reconProfile').value.trim()})});$('reconResult').textContent=JSON.stringify(d.report||d,null,2);output(d);return notice(kind==='recon'?'مغایرت‌گیری تمام شد.':'نگاشت مقصد بازسازی شد.')}if(action.startsWith('retire-')){const parts=action.split('-'),apply=parts[1]==='apply',target=parts[2];if(apply&&!confirm('عملیات روی مقصد واقعاً اعمال شود؟'))return;const d=await api('/api/maintenance/retire/'+target,{method:'POST',body:JSON.stringify({profileId:$('retireProfile').value.trim(),action:$('retireAction').value,confirm:apply?'APPLY':''})});output(d);return notice(apply?fa(d.changed)+' محصول مقصد تغییر کرد.':fa(d.count)+' محصول حذف‌شده پیدا شد.',d.failed?.length?'error':'ok')}if(action==='bulk-preview'||action==='bulk-apply'){const apply=action.endsWith('apply');if(apply&&!confirm('تغییر گروهی روی مقصد اعمال شود؟ این عملیات واقعی است.'))return;const body={profileId:$('bulkProfile').value.trim(),query:$('bulkQuery').value,prefix:$('bulkPrefix').value,suffix:$('bulkSuffix').value,pricePercent:Number($('bulkPrice').value),stock:$('bulkStock').value,confirm:apply?'APPLY':''},d=await api('/api/maintenance/bulk/'+$('bulkTarget').value,{method:'POST',body:JSON.stringify(body)});$('bulkResult').textContent=JSON.stringify(d,null,2);output(d);return notice(apply?fa(d.changed)+' محصول ویرایش شد.':fa(d.count)+' محصول در پیش‌نمایش است.',d.failed?.length?'error':'ok')}if(action.startsWith('dest-')){const target=$('bulkTarget').value,id=Number($('destProductId').value);let d;if(action==='dest-overview')d=await api('/api/destination/'+target+'/overview');else if(action==='dest-list')d=await api('/api/destination/'+target+'/products?limit=100');else if(action==='dest-duplicates')d=await api('/api/destination/'+target+'/duplicates');else if(action==='dest-status'){if(!id||!confirm('وضعیت محصول مقصد تغییر کند؟'))return;d=await api('/api/destination/'+target+'/'+id+'/status',{method:'POST',body:JSON.stringify({status:$('destStatus').value,confirm:'APPLY'})})}else{if(!id||!confirm('محصول مقصد حذف شود؟'))return;d=await api('/api/destination/'+target+'/'+id+'?confirm=DELETE',{method:'DELETE'})}$('bulkResult').textContent=JSON.stringify(d.items||d.groups||d,null,2);output(d);return notice('عملیات مدیریت مقصد انجام شد.')}if(action==='photo-preview'||action==='photo-apply'){const apply=action.endsWith('apply');if(apply&&!confirm('تصاویر روی ووکامرس ثبت شوند؟'))return;const d=await api('/api/maintenance/photo-fix',{method:'POST',body:JSON.stringify({profileId:$('photoProfile').value.trim(),confirm:apply?'APPLY':''})});$('photoResult').textContent=JSON.stringify(d,null,2);output(d);return notice(apply?fa(d.changed)+' تصویر ثبت شد.':fa(d.count)+' محصول بدون تصویر پیدا شد.',d.failed?.length?'error':'ok')}if(action==='cat-learn'||action==='cat-test'||action==='cat-list'){let d;if(action==='cat-list')d=await api('/api/category-learning');else d=await api('/api/category-learning/'+(action==='cat-learn'?'record':'test'),{method:'POST',body:JSON.stringify({title:$('catTitle').value,categoryId:Number($('catId').value),categoryName:$('catName').value,maxWords:Number($('catWords').value)})});$('catResult').textContent=JSON.stringify(d.items||d.result||d,null,2);return notice(action==='cat-learn'?'یادگیری ثبت شد.':'نتیجه آماده است.')}if(action==='ar-test'||action==='ar-preview'||action==='ar-run'||action==='ar-log'){await saveSettings();let d;if(action==='ar-test')d=await api('/api/autoreply/test',{method:'POST',body:JSON.stringify({text:$('arTestText').value})});else if(action==='ar-log')d=await api('/api/autoreply/log');else{const apply=action==='ar-run';if(apply&&!confirm('پاسخ‌ها واقعاً برای مشتریان ارسال شوند؟'))return;d=await api('/api/autoreply/run',{method:'POST',body:JSON.stringify({confirm:apply?'APPLY':''})})}$('arResult').textContent=JSON.stringify(d.items||d.result||d,null,2);output(d);return notice(action==='ar-run'?fa(d.replied)+' پاسخ ارسال شد.':'نتیجه پاسخ خودکار آماده شد.',d.failed?'error':'ok')}if(action==='digest-preview'||action==='digest-send'){await saveSettings();const send=action==='digest-send';if(send&&!confirm('گزارش همین حالا به پیام‌رسان‌ها ارسال شود؟'))return;const d=await api('/api/digest',{method:'POST',body:JSON.stringify({confirm:send?'SEND':''})});$('digestResult').textContent=JSON.stringify(d,null,2);output(d);return notice(send?'گزارش ارسال شد.':'پیش‌نمایش گزارش ساخته شد.')}if(action==='orders'||action==='chats'){const d=await api('/api/basalam/'+action);$('digestResult').textContent=JSON.stringify(d.items,null,2);output(d);return notice(fa(d.items.length)+' مورد دریافت شد.')}if(action==='watchdog'){const d=await api('/api/queue-watchdog',{method:'POST',body:JSON.stringify({minutes:Number($('watchdogMinutes').value)})});output(d);return notice(fa(d.reaped)+' کار متوقف‌شده بسته شد.')}if(action==='source-test'){const d=await api('/api/source-test',{method:'POST',body:JSON.stringify({url:$('sourceTestUrl').value})});output(d);return notice('دسترسی موفق: '+fa(d.bytes)+' بایت')}if(action==='stats'){const d=await api('/api/profile-stats');$('menuStats').textContent=JSON.stringify(d.items,null,2);output(d);return notice('آمار ساخته شد.')}if(action==='category-export'){const value=nestedGet(state.settings,'categoryLearning')||{},blob=new Blob([JSON.stringify(value,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='category-learning.json';a.click();URL.revokeObjectURL(a.href);return}notice('این ابزار از صفحه محصولات یا صف‌ها اجرا می‌شود.','info')}catch(error){notice(error.message,'error');output({error:error.message})}}
+let basalamShopEdit=-1,aiProviderEdit=-1,aiEditorModels=[],lastAiTable=null;
+function modalShell(title,html,back){let root=$('resultModal');if(!root){root=document.createElement('div');root.id='resultModal';root.className='result-modal';document.body.appendChild(root)}root.innerHTML='<div class="result-box" role="dialog" aria-modal="true"><div class="result-head">'+(back?'<button class="btn btn-gray btn-sm" data-modal-action="ai-table">← جدول</button>':'')+'<b>'+esc(title)+'</b><button class="btn btn-red btn-sm" data-modal-action="close">✕ بستن</button></div><div class="result-body">'+html+'</div></div>';root.onclick=e=>{if(e.target===root||e.target.closest('[data-modal-action="close"]'))root.remove();else if(e.target.closest('[data-modal-action="ai-table"]')&&lastAiTable)openAiTable(lastAiTable);else{const row=e.target.closest('[data-ai-row]');if(row&&lastAiTable)openAiDetail(lastAiTable.results[Number(row.dataset.aiRow)])}}}
+function openResultModal(title,data){const ok=Boolean(data&&data.ok),summary='<div class="result-summary '+(ok?'ok':'bad')+'"><b>'+(ok?'✓ عملیات موفق بود':'✗ عملیات کامل نشد')+'</b>'+(data?.error?'<br>'+esc(data.error):'')+'</div>',skip=new Set(['ok','raw','recommendations','results','error']),items=[];for(const[key,value]of Object.entries(data||{})){if(skip.has(key)||value===null||value===undefined||typeof value==='object')continue;items.push('<div class="detail-item"><small>'+esc(friendlyKey(key))+'</small><span>'+esc(formatValue(value,key))+'</span></div>')}for(const key of ['request','http','summary','usage'])if(data?.[key]&&typeof data[key]==='object')for(const[sub,value]of Object.entries(data[key]))if(value!==null&&value!==undefined&&typeof value!=='object')items.push('<div class="detail-item"><small>'+esc(friendlyKey(key+'.'+sub))+'</small><span>'+esc(formatValue(value,sub))+'</span></div>');let special='';if(data?.text!==undefined)special='<h3>💬 پاسخ مدل</h3><div class="raw-block" dir="auto">'+esc(data.text||'مدل پاسخ متنی برنگرداند.')+'</div>';const rec=Array.isArray(data?.recommendations)&&data.recommendations.length?'<h3>راهنمای مرحله بعد</h3><ul style="font-size:11px;line-height:2">'+data.recommendations.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>':'';const raw=data?.raw!==undefined?'<h3>🧾 پاسخ خام سرویس</h3><div class="raw-block">'+esc(pretty(data.raw))+'</div>':'';modalShell(title,summary+'<div class="detail-grid">'+items.join('')+'</div>'+special+rec+raw)}
+function friendlyKey(key){const m={target:'سرویس',service:'نام سرویس',startedAt:'زمان شروع',durationMs:'مدت پاسخ',provider:'شناسه ارائه‌دهنده',providerName:'ارائه‌دهنده',model:'مدل',prompt:'پیام آزمایشی',endpoint:'اندپوینت',httpStatus:'کد HTTP',httpStatusText:'وضعیت HTTP',contentType:'نوع پاسخ',finishReason:'علت پایان',phase:'مرحله خطا','request.method':'روش درخواست','request.endpoint':'آدرس آزمایش‌شده','request.authentication':'روش احراز هویت','request.shopIndex':'شماره غرفه','http.status':'کد HTTP','http.statusText':'متن وضعیت','http.contentType':'نوع پاسخ','http.finalUrl':'آدرس نهایی','summary.woocommerceVersion':'نسخه ووکامرس','summary.wordpressVersion':'نسخه وردپرس','summary.phpVersion':'نسخه PHP','summary.siteUrl':'آدرس فروشگاه','summary.userId':'شناسه کاربر','summary.userName':'نام کاربر','summary.vendorId':'شناسه غرفه','summary.vendorTitle':'نام غرفه','summary.vendorActive':'فعال بودن غرفه','summary.configuredVendorId':'شناسه تنظیم‌شده','summary.vendorIdMatches':'تطابق شناسه غرفه'};return m[key]||key}
+function formatValue(value,key){if(typeof value==='boolean')return value?'بله':'خیر';if(/(?:duration|latency)/i.test(key)&&Number.isFinite(Number(value)))return fa(value)+' میلی‌ثانیه';return String(value)}
+function pretty(value){try{return typeof value==='string'?value:JSON.stringify(value,null,2)}catch{return String(value)}}
+function openAiTable(payload){lastAiTable={...payload,results:Array.isArray(payload.results)?payload.results:[]};const rows=lastAiTable.results.map((r,i)=>'<tr data-ai-row="'+i+'"><td>'+(i+1).toLocaleString('fa-IR')+'</td><td>'+(r.ok?'🟢':'🔴')+'</td><td>'+esc(r.providerName||r.provider||'—')+'</td><td dir="ltr">'+esc(r.model||'—')+'</td><td>'+fa(r.latencyMs||0)+' ms</td><td>'+esc(r.ok?(r.text||'بدون پاسخ'):(r.error||'خطا'))+'</td></tr>').join('');modalShell('🧪 نتایج تست مدل‌های هوش مصنوعی','<div class="result-summary '+(lastAiTable.results.some(x=>x.ok)?'ok':'bad')+'">کل: '+fa(lastAiTable.results.length)+' · موفق: '+fa(lastAiTable.results.filter(x=>x.ok).length)+' · ناموفق: '+fa(lastAiTable.results.filter(x=>!x.ok).length)+'<br><small>برای دیدن اطلاعات جامع و پاسخ خام روی هر ردیف کلیک کنید.</small></div><div style="overflow:auto"><table class="result-table"><thead><tr><th>#</th><th>وضعیت</th><th>ارائه‌دهنده</th><th>مدل</th><th>تأخیر</th><th>پاسخ/خطا</th></tr></thead><tbody>'+rows+'</tbody></table></div>')}
+function openAiDetail(row){if(!row)return;const copy={...row,recommendations:row.ok?['پاسخ خام دقیقاً همان بدنه‌ای است که سرویس مدل برگردانده است.','زمان پاسخ شامل مسیر شبکه و زمان پردازش ارائه‌دهنده است.']:['متن خطا و پاسخ خام را بررسی کنید.','کلید API، Base URL و نام مدل را با مستندات ارائه‌دهنده تطبیق دهید.']};const ok=Boolean(copy.ok),summary='<div class="result-summary '+(ok?'ok':'bad')+'"><b>'+(ok?'🟢 مدل پاسخ داد':'🔴 آزمایش مدل ناموفق بود')+'</b>'+(copy.error?'<br>'+esc(copy.error):'')+'</div>';const fields=['providerName','provider','model','latencyMs','httpStatus','httpStatusText','contentType','finishReason','endpoint','prompt'],items=fields.filter(k=>copy[k]!==undefined&&copy[k]!==null).map(k=>'<div class="detail-item"><small>'+esc(friendlyKey(k))+'</small><span>'+esc(formatValue(copy[k],k))+'</span></div>').join(''),usage=copy.usage?'<h3>📊 مصرف توکن</h3><div class="raw-block">'+esc(pretty(copy.usage))+'</div>':'',text='<h3>💬 پاسخ متنی مدل</h3><div class="raw-block" dir="auto">'+esc(copy.text||'پاسخ متنی خالی است.')+'</div>',raw='<h3>🧾 پاسخ خام مدل / ارائه‌دهنده</h3><div class="raw-block">'+esc(pretty(copy.raw!==undefined?copy.raw:{error:copy.error||'پاسخ خام ثبت نشده است'}))+'</div>';modalShell('جزئیات مدل: '+(copy.providerName||copy.provider||'')+' / '+(copy.model||''),summary+'<div class="detail-grid">'+items+'</div>'+text+usage+raw,true)}
+function aiTab(name){document.querySelectorAll('[data-ai-tab]').forEach(x=>x.classList.toggle('active',x.dataset.aiTab===name));document.querySelectorAll('[data-ai-panel]').forEach(x=>x.classList.toggle('active',x.dataset.aiPanel===name))}
+function refreshVisualEditors(){renderBasalamShops();renderAiProviders();renderAutoRules()}
+function renderBasalamShops(){const box=$('basalamShopsList');if(!box)return;const shops=state.connections?.basalam?.shops||[];box.innerHTML=shops.map((s,i)=>'<div class="visual-row"><div class="visual-row-head"><b>🏪 '+esc(s.name||('غرفه '+(i+1)))+'</b><span class="cst '+(s.token?'on':'off')+'">'+(s.token?'توکن دارد':'توکن ندارد')+'</span></div><div class="visual-row-meta">Vendor ID: '+esc(s.vendorId||'—')+' · Price: '+esc(s.pricePercent||0)+'%</div><div class="cact"><button class="btn btn-blue btn-sm" data-ma="basalam-shop-test:'+i+'">🔗 تست جامع</button><button class="btn btn-gray btn-sm" data-ma="basalam-shop-edit:'+i+'">✎ ویرایش</button><button class="btn btn-red btn-sm" data-ma="basalam-shop-delete:'+i+'">🗑 حذف</button></div></div>').join('')||'<div class="empty">غرفهٔ اضافی ثبت نشده است.</div>'}
+function editBasalamShop(index){basalamShopEdit=index;const s=index>=0?(state.connections.basalam.shops||[])[index]:{};$('shopName').value=s?.name||'';$('shopToken').value=s?.token||'';$('shopVendorId').value=s?.vendorId||'';$('shopPricePercent').value=s?.pricePercent||0;$('basalamShopForm').hidden=false;$('shopName').focus()}
+async function saveBasalamShop(){const shop={name:$('shopName').value.trim(),token:$('shopToken').value.trim(),vendorId:$('shopVendorId').value.trim(),pricePercent:Number($('shopPricePercent').value)||0};if(!shop.name)throw Error('برای غرفه یک نام قابل تشخیص بنویسید.');if(!shop.token)throw Error('توکن غرفه خالی است.');state.connections.basalam.shops=state.connections.basalam.shops||[];if(basalamShopEdit>=0)state.connections.basalam.shops[basalamShopEdit]=shop;else state.connections.basalam.shops.push(shop);$('basalamShopForm').hidden=true;await saveConnections();renderBasalamShops()}
+function renderAiProviders(){const ai=state.connections?.ai||{},providers=ai.providers||[],box=$('aiProvidersList');if(!box)return;box.innerHTML=providers.map((p,i)=>'<div class="visual-row"><div class="visual-row-head"><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-provider-toggle="'+i+'" '+(p.enabled?'checked':'')+'> <b>'+esc(p.name||p.id)+'</b></label><span class="cst '+(p.apiKey?'on':'off')+'">'+(p.apiKey?'کلید دارد':'بدون کلید')+'</span></div><div class="visual-row-meta">'+esc(p.baseUrl||'بدون آدرس')+' · '+fa((p.models||[]).length)+' مدل</div><div class="model-chips">'+(p.models||[]).slice(0,8).map(m=>'<span class="model-chip">'+esc(m)+'</span>').join('')+((p.models||[]).length>8?'<span class="model-chip">+'+fa(p.models.length-8)+'</span>':'')+'</div><div class="cact"><button class="btn btn-blue btn-sm" data-ma="ai-provider-edit:'+i+'">✎ ویرایش</button><button class="btn btn-red btn-sm" data-ma="ai-provider-delete:'+i+'">🗑 حذف</button></div></div>').join('')||'<div class="empty">هنوز ارائه‌دهنده‌ای ثبت نشده است.</div>';fillAiSelects()}
+function fillAiSelects(){const providers=state.connections?.ai?.providers||[],opts='<option value="">— انتخاب —</option>'+providers.map(p=>'<option value="'+escAttr(p.id)+'">'+esc(p.name)+'</option>').join('');for(const id of ['aiProviderSel','aiCandProvSel'])if($(id)){const v=$(id).value;$(id).innerHTML=opts;if(providers.some(p=>p.id===v))$(id).value=v}fillAiModels('aiProviderSel','aiSingleModelSel');fillAiModels('aiCandProvSel','aiCandModelSel');const all=providers.flatMap(p=>(p.models||[]).map(m=>[p.id+'::'+m,p.name+' / '+m])),modelOpts='<option value="">— انتخاب —</option>'+all.map(x=>'<option value="'+escAttr(x[0])+'">'+esc(x[1])+'</option>').join('');for(const id of ['aiMasterPin','aiModelSel'])if($(id)){const v=id==='aiMasterPin'?state.connections.ai.master:state.connections.ai.model;$(id).innerHTML=(id==='aiMasterPin'?'<option value="">خودکار (بهترین آمار)</option>':'<option value="">— انتخاب —</option>')+all.map(x=>'<option value="'+escAttr(x[0])+'">'+esc(x[1])+'</option>').join('');$(id).value=v||''}renderAiCandidates()}
+function fillAiModels(providerId,modelId){if(!$(providerId)||!$(modelId))return;const p=(state.connections?.ai?.providers||[]).find(x=>x.id===$(providerId).value),v=$(modelId).value;$(modelId).innerHTML='<option value="">— انتخاب —</option>'+((p?.models||[]).map(m=>'<option value="'+escAttr(m)+'">'+esc(m)+'</option>').join(''));if((p?.models||[]).includes(v))$(modelId).value=v}
+function renderAiCandidates(){const box=$('aiCandidatesList');if(!box)return;const all=new Map((state.connections.ai.providers||[]).flatMap(p=>(p.models||[]).map(m=>[p.id+'::'+m,p.name+' / '+m]))),items=state.connections.ai.candidates||[];box.innerHTML=items.map(key=>'<div class="visual-row"><div class="visual-row-head"><span>'+esc(all.get(key)||key)+'</span><button class="btn btn-red btn-sm" data-ma="ai-candidate-remove:'+escAttr(key)+'">حذف</button></div></div>').join('')||'<div class="empty">مدل کاندیدی انتخاب نشده است.</div>'}
+function editAiProvider(index){aiProviderEdit=index;const p=index>=0?state.connections.ai.providers[index]:{enabled:true,models:[]};$('aiEditName').value=p?.name||'';$('aiEditBase').value=p?.baseUrl||'';$('aiEditKey').value=p?.apiKey||'';$('aiEditEnabled').checked=p?.enabled!==false;aiEditorModels=[...(p?.models||[])];$('aiProviderForm').hidden=false;renderAiEditModels();$('aiEditName').focus()}
+function renderAiEditModels(){const box=$('aiEditModels');if(box)box.innerHTML=aiEditorModels.map((m,i)=>'<span class="model-chip">'+esc(m)+' <button data-ma="ai-model-remove:'+i+'">✕</button></span>').join('')||'<span class="menu-text">هنوز مدلی افزوده نشده است.</span>'}
+async function saveAiProvider(){const name=$('aiEditName').value.trim(),baseUrl=$('aiEditBase').value.trim().replace(/\/$/,''),apiKey=$('aiEditKey').value.trim();if(!name||!baseUrl)throw Error('نام و آدرس پایهٔ ارائه‌دهنده الزامی است.');if(!aiEditorModels.length)throw Error('حداقل یک مدل اضافه کنید.');const old=aiProviderEdit>=0?state.connections.ai.providers[aiProviderEdit]:null,id=old?.id||slug(name)+'-'+Date.now().toString(36),item={id,name,baseUrl,apiKey,models:[...new Set(aiEditorModels)],enabled:$('aiEditEnabled').checked};state.connections.ai.providers=state.connections.ai.providers||[];if(aiProviderEdit>=0)state.connections.ai.providers[aiProviderEdit]=item;else state.connections.ai.providers.push(item);$('aiProviderForm').hidden=true;await saveConnections();renderAiProviders()}
+function slug(value){return value.toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]+/g,'-').replace(/^-|-$/g,'')||'provider'}
+async function importAiFile(file){const raw=JSON.parse(await file.text()),source=Array.isArray(raw)?raw:Array.isArray(raw.providers)?raw.providers:Object.entries(raw.providers||raw).map(([id,p])=>({id,...p})),providers=source.map((p,i)=>({id:String(p.id||p.key||('provider-'+(i+1))),name:String(p.name||p.title||p.id||('ارائه‌دهنده '+(i+1))),baseUrl:String(p.baseUrl||p.base_url||p.url||'').replace(/\/$/,''),apiKey:String(p.apiKey||p.api_key||p.keyValue||''),models:(Array.isArray(p.models)?p.models:[]).map(m=>String(typeof m==='object'?(m.id||m.name||''):m)).filter(Boolean),enabled:p.enabled!==false})).filter(p=>p.baseUrl);if(!providers.length)throw Error('ارائه‌دهندهٔ قابل استفاده‌ای در فایل پیدا نشد.');state.connections.ai.providers=providers;await saveConnections();renderAiProviders();notice(fa(providers.length)+' ارائه‌دهنده از فایل وارد شد.')}
+let autoRuleEdit=-1;
+function autoRules(){state.settings.autoreply=state.settings.autoreply||{};return state.settings.autoreply.rules=Array.isArray(state.settings.autoreply.rules)?state.settings.autoreply.rules:[]}
+function renderAutoRules(){const box=$('arRulesList');if(!box)return;const rules=autoRules();box.innerHTML=rules.map((r,i)=>'<div class="visual-row"><div class="visual-row-head"><b>'+esc(r.triggers||'همیشه')+'</b><span class="cst '+(r.on===false?'off':'on')+'">'+(r.on===false?'خاموش':'روشن')+'</span></div><div class="visual-row-meta">'+esc(r.match||'contains')+' · اولویت '+fa(r.priority||50)+'</div><div>'+esc(r.reply||'بدون پاسخ')+'</div><div class="cact"><button class="btn btn-blue btn-sm" data-ma="ar-rule-edit:'+i+'">✎ ویرایش</button><button class="btn btn-red btn-sm" data-ma="ar-rule-delete:'+i+'">🗑 حذف</button></div></div>').join('')||'<div class="empty">قاعدهٔ سفارشی ندارید؛ تا زمانی که قاعده‌ای نسازید قواعد امن پیش‌فرض استفاده می‌شوند.</div>'}
+function editAutoRule(index=-1){autoRuleEdit=index;const r=index>=0?autoRules()[index]:{};$('arRuleMatch').value=r.match||'contains';$('arRuleTriggers').value=r.triggers||'';$('arRuleReply').value=r.reply||'';$('arRulePriority').value=r.priority||50;$('arRuleForm').hidden=false;$('arRuleTriggers').focus()}
+async function saveAutoRule(){const match=$('arRuleMatch').value,triggers=$('arRuleTriggers').value.trim(),reply=$('arRuleReply').value.trim();if(match!=='always'&&!triggers)throw Error('حداقل یک عبارت برای تطبیق بنویسید.');if(!reply)throw Error('متن پاسخ قاعده خالی است.');const rule={id:autoRuleEdit>=0?autoRules()[autoRuleEdit].id:crypto.randomUUID(),on:true,match,triggers,reply,priority:Number($('arRulePriority').value)||50,daily_max:100};if(autoRuleEdit>=0)autoRules()[autoRuleEdit]=rule;else autoRules().push(rule);$('arRuleForm').hidden=true;await saveSettings();renderAutoRules()}
+async function restoreSettingsFile(file){if(!confirm('تنظیمات این فایل بازیابی شوند؟'))return;const raw=JSON.parse(await file.text()),d=await api('/api/settings-import',{method:'POST',body:JSON.stringify(raw)});await connect();$('transferStatus').textContent='✅ بازیابی شد: '+file.name;openResultModal('♻️ گزارش جامع بازیابی تنظیمات',d);notice('تنظیمات و رابط‌های بصری دوباره بارگذاری شدند.')}
+
+async function menuAction(action){try{
+if(action==='ar-rule-add')return editAutoRule(-1);if(action==='ar-rule-save')return await saveAutoRule();if(action==='ar-rule-cancel')return $('arRuleForm').hidden=true;if(action.startsWith('ar-rule-edit:'))return editAutoRule(Number(action.split(':')[1]));if(action.startsWith('ar-rule-delete:')){const i=Number(action.split(':')[1]);if(!confirm('این قاعده حذف شود؟'))return;autoRules().splice(i,1);await saveSettings();return renderAutoRules()}if(action==='ar-rules-reset'){if(!confirm('همهٔ قواعد سفارشی پاک و قواعد پیش‌فرض فعال شوند؟'))return;state.settings.autoreply=state.settings.autoreply||{};delete state.settings.autoreply.rules;await saveSettings();renderAutoRules();return notice('قواعد پیش‌فرض فعال شدند.')}if(action.startsWith('ar-tab-')){const target=action==='ar-tab-test'?'arTestText':action==='ar-tab-rules'?'arRulesList':action==='ar-tab-ai'?'arAiSysMode':'arEnabled';$(target)?.scrollIntoView({behavior:'smooth',block:'center'});return notice('بخش انتخاب‌شده نمایش داده شد.','info')}
+if(action==='basalam-shop-new')return editBasalamShop(-1);if(action==='basalam-shop-save')return await saveBasalamShop();if(action==='basalam-shop-cancel'){return $('basalamShopForm').hidden=true}if(action.startsWith('basalam-shop-edit:'))return editBasalamShop(Number(action.split(':')[1]));if(action.startsWith('basalam-shop-delete:')){const i=Number(action.split(':')[1]);if(!confirm('این غرفه حذف شود؟'))return;state.connections.basalam.shops.splice(i,1);await saveConnections();return renderBasalamShops()}if(action.startsWith('basalam-shop-test:')){const i=Number(action.split(':')[1]);await saveConnections();const d=await api('/api/test-connection/basalam',{method:'POST',body:JSON.stringify({shopIndex:i})});output(d);openResultModal('🔗 استعلام جامع غرفهٔ '+((state.connections.basalam.shops[i]?.name)||fa(i+1)),d);return notice(d.ok?'اتصال غرفه موفق بود.':'اتصال غرفه ناموفق بود.',d.ok?'ok':'error')}
+if(action==='ai-provider-new')return editAiProvider(-1);if(action==='ai-provider-save')return await saveAiProvider();if(action==='ai-provider-cancel')return $('aiProviderForm').hidden=true;if(action.startsWith('ai-provider-edit:'))return editAiProvider(Number(action.split(':')[1]));if(action.startsWith('ai-provider-delete:')){const i=Number(action.split(':')[1]),p=state.connections.ai.providers[i];if(!confirm('ارائه‌دهنده «'+(p?.name||'')+'» و مدل‌هایش حذف شود؟'))return;state.connections.ai.providers.splice(i,1);state.connections.ai.candidates=(state.connections.ai.candidates||[]).filter(x=>!x.startsWith(p.id+'::'));await saveConnections();return renderAiProviders()}if(action==='ai-model-add'){const value=$('aiEditModel').value.trim();if(!value)throw Error('نام دقیق مدل را بنویسید.');if(!aiEditorModels.includes(value))aiEditorModels.push(value);$('aiEditModel').value='';return renderAiEditModels()}if(action.startsWith('ai-model-remove:')){aiEditorModels.splice(Number(action.split(':')[1]),1);return renderAiEditModels()}if(action==='ai-import-file')return $('aiImportFile').click();if(action==='ai-providers'){const d=await api('/api/ai/providers');state.connections.ai.providers=Array.isArray(d.providers)?d.providers:[];renderAiProviders();return notice(fa(state.connections.ai.providers.length)+' ارائه‌دهنده تازه‌سازی شد.')}if(action==='ai-candidate-add'){const p=$('aiCandProvSel').value,m=$('aiCandModelSel').value;if(!p||!m)throw Error('ابتدا ارائه‌دهنده و مدل کاندید را انتخاب کنید.');const key=p+'::'+m;state.connections.ai.candidates=[...new Set([...(state.connections.ai.candidates||[]),key])];await saveConnections();return renderAiCandidates()}if(action==='ai-candidates-all'){state.connections.ai.candidates=[...new Set((state.connections.ai.providers||[]).filter(p=>p.enabled).flatMap(p=>(p.models||[]).map(m=>p.id+'::'+m)))];await saveConnections();return renderAiCandidates()}if(action.startsWith('ai-candidate-remove:')){const key=action.slice('ai-candidate-remove:'.length);state.connections.ai.candidates=(state.connections.ai.candidates||[]).filter(x=>x!==key);await saveConnections();return renderAiCandidates()}
+if(action==='save')return await saveSettings();if(action==='save-connections')return await saveConnections();if(action==='save-all'){await saveSettings();await saveConnections();openResultModal('💾 ذخیرهٔ کامل',{ok:true,summary:'تنظیمات عمومی و همهٔ اتصال‌ها با موفقیت ذخیره شدند.'});return}if(action==='sx-restore')return $('sxFile').click();if(action==='bk-restore')return $('bkFile').click();if(action==='version-info'){const d=await api('/api/version');openResultModal('🔄 اطلاعات نسخه و انتشار',{...d,summary:'انتشار و بازگشت نسخه در Cloudflare Dashboard ← Workers & Pages ← Deployments انجام می‌شود.',recommendations:['برای بازگشت، Deployment سالم قبلی را انتخاب و Rollback کنید.','Worker برخلاف PHP فایل نصب‌کننده روی هاست اجرا نمی‌کند.']});return}if(action==='reload')return location.reload();if(action==='csv-export'){const id=$('transferProfile').value.trim();if(!id)throw Error('شناسه پروفایل را وارد کنید.');const r=await fetch('/api/profiles/'+encodeURIComponent(id)+'/export.csv',{headers:headers()});if(!r.ok)throw Error('خروجی CSV ناموفق بود.');const blob=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=id+'.csv';a.click();URL.revokeObjectURL(a.href);return notice('فایل CSV دانلود شد.')}if(action==='selftest'||action==='parity'||action==='debug'){const path=action==='selftest'?'/api/selftest':action==='debug'?'/api/debug':'/api/parity',d=await api(path);$('selftestResult').textContent=JSON.stringify(d,null,2);output(d);const label=action==='debug'?'دیباگ جامع':action==='selftest'?'خودآزمون':'گزارش تطبیق';openResultModal(label,d);return notice(d.ok?label+' با موفقیت تمام شد.':label+' موارد نیازمند بررسی دارد.',d.ok?'ok':'error')}if(action==='products'){drawer(false);return tab('products')}if(action==='health'){const d=await fetch('/health').then(r=>r.json());output(d);openResultModal('❤️ نتیجه بررسی سلامت Worker',d);return notice('سلامت سرویس بررسی شد.')}if(action==='backup'){const r=await fetch('/api/settings-export',{headers:headers()});if(!r.ok)throw Error('ساخت فایل تنظیمات ناموفق بود.');const blob=await r.blob(),cd=r.headers.get('content-disposition')||'',name=cd.match(/filename="?([^";]+)/)?.[1]||('settings_'+Date.now()+'.json'),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();URL.revokeObjectURL(a.href);$('transferStatus').textContent='✅ برون‌ریزی شد: '+name;return notice('فایل کامل تنظیمات دانلود شد.')}if(action==='woo-categories'){await saveConnections();const d=await api('/api/categories/woo'),select=$('wcCat'),current=String(state.connections?.woo?.categoryId||'');select.innerHTML='<option value="">— انتخاب دسته —</option>'+d.items.map(x=>'<option value="'+escAttr(x.id)+'">'+esc(x.name)+' (#'+esc(x.id)+')</option>').join('');if(current)select.value=current;openResultModal('🗂 دسته‌های ووکامرس',{ok:true,total:d.items.length,raw:d.items});return notice(fa(d.items.length)+' دسته بارگذاری شد.')}if(action==='woo-category-apply'){const value=Number($('wcCatManual').value||$('wcCat').value);if(!value)throw Error('یک دسته انتخاب کنید یا شناسهٔ دستی معتبر بنویسید.');state.connections.woo.categoryId=value;if(!$('wcCat').querySelector('option[value="'+value+'"]'))$('wcCat').insertAdjacentHTML('beforeend','<option value="'+value+'">شناسه '+fa(value)+'</option>');$('wcCat').value=String(value);await saveConnections();return notice('دستهٔ پیش‌فرض ووکامرس اعمال شد.')}if(action.startsWith('test-')){const target=action.slice(5);let body={};if(target==='ai')body={provider:$('aiProviderSel')?.value||'',model:$('aiSingleModelSel')?.value||'',prompt:$('aiSinglePrompt')?.value||'سلام'};await saveConnections();const d=await api('/api/test-connection/'+target,{method:'POST',body:JSON.stringify(body)});output(d);openResultModal(target==='woo'?'🔗 استعلام جامع ووکامرس':target==='basalam'?'🔗 استعلام جامع باسلام':'🤖 آزمایش جامع مدل هوش مصنوعی',d);return notice(d.ok?'اتصال موفق بود.':'اتصال ناموفق بود.',d.ok?'ok':'error')}if(action==='ai-test-all'||action==='ai-test-candidates'){await saveConnections();const d=await api('/api/ai/test-all',{method:'POST',body:JSON.stringify({prompt:$('aiTestMsg')?.value||'سلام',onlyCandidates:action==='ai-test-candidates'||Boolean($('aiTestOnlyUntested')?.checked)})});$('aiMenuResult').textContent=JSON.stringify(d.results,null,2);output(d);openAiTable(d);return notice('تست '+fa(d.results.length)+' مدل تمام شد.')}if(action==='ai-test-results'){const d=await api('/api/ai/test-results');openAiTable(d);return}if(action==='ai-vote-master'){await saveConnections();const ai=state.connections.ai||{},d=await api('/api/ai/vote',{method:'POST',body:JSON.stringify({task:'manual',winner:ai.master,candidates:ai.candidates||[]})});$('aiMenuResult').textContent=JSON.stringify(d.leaderboard,null,2);return notice('رأی ثبت شد.')}if(action==='ai-leaderboard'){const d=await api('/api/ai/leaderboard');$('aiMenuResult').textContent=JSON.stringify(d.leaderboard,null,2);output(d);openResultModal('📊 جدول امتیاز مدل‌های هوش مصنوعی',{...d,raw:d.leaderboard});return}if(action.startsWith('notify-')){await saveConnections();const channel=action.slice(7),d=await api('/api/notifications/test',{method:'POST',body:JSON.stringify({channel,text:'پیام آزمایشی اسکرپر ۴ از Cloudflare Workers'})});output(d);openResultModal('🔔 نتیجهٔ تست اعلان '+channel,d);return notice(d.ok?'پیام آزمایشی ارسال شد.':'ارسال پیام آزمایشی ناموفق بود.',d.ok?'ok':'error')}if(action.startsWith('recon-')||action.startsWith('rebuild-')){const [kind,target]=action.split('-'),d=await api('/api/maintenance/'+kind+'/'+target,{method:'POST',body:JSON.stringify({profileId:state.selected||''})});$('reconResult').textContent=JSON.stringify(d.report||d,null,2);output(d);openResultModal((kind==='recon'?'🔍 مغایرت‌گیری ':'🔗 بازسازی نگاشت ')+(target==='woo'?'ووکامرس':'باسلام'),d);return notice(kind==='recon'?'مغایرت‌گیری تمام شد.':'نگاشت مقصد بازسازی شد.')}if(action.startsWith('retire-')){const parts=action.split('-'),apply=parts[1]==='apply',target=parts[2]||'woo';if(apply&&!confirm('عملیات روی مقصد واقعاً اعمال شود؟'))return;const retireAction=String(nestedGet(state.settings,'retire.mode')||$('retireMode')?.value||'report'),d=await api('/api/maintenance/retire/'+target,{method:'POST',body:JSON.stringify({profileId:state.selected||'',action:retireAction,confirm:apply?'APPLY':''})});output(d);openResultModal('🗑 گزارش محصولات حذف‌شدهٔ مقصد',d);return notice(apply?fa(d.changed)+' محصول مقصد تغییر کرد.':fa(d.count)+' محصول حذف‌شده پیدا شد.',d.failed?.length?'error':'ok')}if(action==='bulk-preview'||action==='bulk-apply'){const apply=action.endsWith('apply');if(apply&&!confirm('تغییر گروهی روی مقصد اعمال شود؟ این عملیات واقعی است.'))return;const body={profileId:$('bulkProfile').value.trim(),query:$('bulkQuery').value,prefix:$('bulkPrefix').value,suffix:$('bulkSuffix').value,pricePercent:Number($('bulkPrice').value),stock:$('bulkStock').value,confirm:apply?'APPLY':''},d=await api('/api/maintenance/bulk/'+$('bulkTarget').value,{method:'POST',body:JSON.stringify(body)});$('bulkResult').textContent=JSON.stringify(d,null,2);output(d);return notice(apply?fa(d.changed)+' محصول ویرایش شد.':fa(d.count)+' محصول در پیش‌نمایش است.',d.failed?.length?'error':'ok')}if(action.startsWith('dest-')){const target=$('bulkTarget').value,id=Number($('destProductId').value);let d;if(action==='dest-overview')d=await api('/api/destination/'+target+'/overview');else if(action==='dest-list')d=await api('/api/destination/'+target+'/products?limit=100');else if(action==='dest-duplicates')d=await api('/api/destination/'+target+'/duplicates');else if(action==='dest-status'){if(!id||!confirm('وضعیت محصول مقصد تغییر کند؟'))return;d=await api('/api/destination/'+target+'/'+id+'/status',{method:'POST',body:JSON.stringify({status:$('destStatus').value,confirm:'APPLY'})})}else{if(!id||!confirm('محصول مقصد حذف شود؟'))return;d=await api('/api/destination/'+target+'/'+id+'?confirm=DELETE',{method:'DELETE'})}$('bulkResult').textContent=JSON.stringify(d.items||d.groups||d,null,2);output(d);return notice('عملیات مدیریت مقصد انجام شد.')}if(action==='photo-preview'||action==='photo-apply'){const apply=action.endsWith('apply');if(apply&&!confirm('تصاویر روی ووکامرس ثبت شوند؟'))return;const d=await api('/api/maintenance/photo-fix',{method:'POST',body:JSON.stringify({profileId:$('photoProfile').value.trim(),confirm:apply?'APPLY':''})});$('photoResult').textContent=JSON.stringify(d,null,2);output(d);return notice(apply?fa(d.changed)+' تصویر ثبت شد.':fa(d.count)+' محصول بدون تصویر پیدا شد.',d.failed?.length?'error':'ok')}if(action==='cat-learn'||action==='cat-test'||action==='cat-list'){let d;if(action==='cat-list')d=await api('/api/category-learning');else{const title=$('catTestTitle')?.value||'';if(!title)throw Error('یک عنوان نمونه بنویسید.');d=await api('/api/category-learning/'+(action==='cat-learn'?'record':'test'),{method:'POST',body:JSON.stringify({title,categoryId:Number($('catId')?.value||0),categoryName:$('catName')?.value||'',maxWords:Number($('catLearnWords')?.value||5)})})}$('catResult').textContent=JSON.stringify(d.items||d.result||d,null,2);output(d);openResultModal(action==='cat-test'?'🧪 نتیجهٔ آزمایش دسته‌بندی':'📚 داده‌های یادگیری دسته‌بندی',d);return notice(action==='cat-learn'?'یادگیری ثبت شد.':'نتیجه آماده است.')}if(action==='ar-test'||action==='ar-preview'||action==='ar-run'||action==='ar-log'){await saveSettings();let d;if(action==='ar-test')d=await api('/api/autoreply/test',{method:'POST',body:JSON.stringify({text:$('arTestText').value})});else if(action==='ar-log')d=await api('/api/autoreply/log');else{const apply=action==='ar-run';if(apply&&!confirm('پاسخ‌ها واقعاً برای مشتریان ارسال شوند؟'))return;d=await api('/api/autoreply/run',{method:'POST',body:JSON.stringify({confirm:apply?'APPLY':''})})}$('arResult').textContent=JSON.stringify(d.items||d.result||d,null,2);output(d);openResultModal(action==='ar-test'?'🧪 نتیجهٔ جامع تست پاسخ خودکار':action==='ar-preview'?'👁 پیش‌نمایش پاسخ‌های خودکار':action==='ar-log'?'📜 گزارش پاسخ‌های خودکار':'🤖 نتیجهٔ اجرای پاسخ خودکار',d);return notice(action==='ar-run'?fa(d.replied)+' پاسخ ارسال شد.':'نتیجه پاسخ خودکار آماده شد.',d.failed?'error':'ok')}if(action==='digest-preview'||action==='digest-send'){await saveSettings();const send=action==='digest-send';if(send&&!confirm('گزارش همین حالا به پیام‌رسان‌ها ارسال شود؟'))return;const d=await api('/api/digest',{method:'POST',body:JSON.stringify({confirm:send?'SEND':''})});$('digestResult').textContent=JSON.stringify(d,null,2);output(d);return notice(send?'گزارش ارسال شد.':'پیش‌نمایش گزارش ساخته شد.')}if(action==='orders'||action==='chats'){const d=await api('/api/basalam/'+action);$('digestResult').textContent=JSON.stringify(d.items,null,2);output(d);return notice(fa(d.items.length)+' مورد دریافت شد.')}if(action==='watchdog'){const d=await api('/api/queue-watchdog',{method:'POST',body:JSON.stringify({minutes:Math.max(1,Math.ceil(Number($('stallAfter').value||300)/60))})});output(d);openResultModal('🩺 نتیجهٔ بررسی نگهبان صف',{...d,summary:fa(d.reaped)+' کار متوقف‌شده بسته شد.'});return notice(fa(d.reaped)+' کار متوقف‌شده بسته شد.')}if(action==='source-test'){const selected=state.profiles.find(p=>p.id===state.selected),url=$('sourceTestUrl').value.trim()||selected?.url||$('url').value.trim();if(!url)throw Error('آدرس آزمایش را وارد یا یک پروفایل انتخاب کنید.');const d=await api('/api/source-test',{method:'POST',body:JSON.stringify({url})});output(d);openResultModal('🌐 نتیجهٔ تست دسترسی به منبع',d);return notice('دسترسی موفق: '+fa(d.bytes)+' بایت')}if(action==='stats'||action==='stats-woo'||action==='stats-basalam'){const d=await api('/api/profile-stats');$('menuStats').textContent=JSON.stringify(d.items,null,2);output(d);openResultModal('📊 آمار محصولات هر پروفایل',{...d,target:action==='stats'?'all':action.slice(6)});return notice('آمار ساخته شد.')}if(action==='editor-woo'||action==='editor-basalam'){drawer(false);tab('destination');setDestinationTarget(action==='editor-basalam'?'basalam':'woo',true);return}if(action==='category-import')return $('categoryImportFile').click();if(action==='category-export'){const d=await api('/api/category-learning?limit=5000'),blob=new Blob([JSON.stringify(d.items||[],null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='category-learning.json';a.click();URL.revokeObjectURL(a.href);openResultModal('⬇️ گزارش پشتیبان یادگیری دسته‌بندی',{ok:true,total:(d.items||[]).length,summary:'فایل داده‌های واقعی یادگیری دسته‌بندی دانلود شد.'});return notice(fa((d.items||[]).length)+' مورد در فایل پشتیبان ذخیره شد.')}notice('این ابزار از صفحه محصولات یا صف‌ها اجرا می‌شود.','info')}catch(error){const detail={ok:false,phase:'dashboard',error:error?.message||String(error),recommendations:['تنظیمات واردشده را بررسی و دوباره تلاش کنید.','اگر خطا مربوط به شبکه است، اتصال اینترنت سرویس مقصد و آدرس API را بررسی کنید.']};notice(detail.error,'error');output(detail);openResultModal('⚠️ جزئیات خطا',detail)}}
 async function importCsv(file){try{const id=$('transferProfile').value.trim();if(!id)throw Error('شناسه پروفایل را وارد کنید.');$('csvStatus').textContent='⏳ در حال ورود…';const d=await api('/api/profiles/'+encodeURIComponent(id)+'/import',{method:'POST',body:JSON.stringify({csv:await file.text()})});$('csvStatus').textContent='✅ '+fa(d.imported)+' محصول وارد شد · خطا '+fa(d.failed);output(d);notice('درون‌ریزی CSV تمام شد.',d.failed?'error':'ok')}catch(error){$('csvStatus').textContent='❌ '+error.message;notice(error.message,'error')}}
 async function restoreFile(file){try{$('transferStatus').textContent='⏳ در حال خواندن و درون‌ریزی '+file.name+'…';const bundle=JSON.parse(await file.text()),d=await api('/api/settings-import',{method:'POST',body:JSON.stringify(bundle)});output(d);$('transferStatus').textContent='✅ '+fa(d.imported.profiles)+' پروفایل، '+fa(d.imported.products)+' محصول و '+fa(d.imported.states)+' تنظیم بازیابی شد.';notice('درون‌ریزی تنظیمات کامل شد؛ صفحه تازه می‌شود.');setTimeout(()=>location.reload(),1800)}catch(error){$('transferStatus').textContent='❌ '+error.message;notice(error.message,'error')}}
 function fa(value){return Number(value||0).toLocaleString('fa-IR')}
 function tab(name){document.querySelectorAll('.main-tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));document.querySelectorAll('.tab-pane').forEach(x=>x.classList.toggle('active',x.id==='pane-'+name));if(name==='jobs')loadJobs();if(name==='products')syncProfileSelects()}
-async function connect(){try{const [profiles,status,health,settings,connections]=await Promise.all([api('/api/profiles'),api('/api/status'),fetch('/health').then(r=>r.json()),api('/api/settings'),api('/api/connections')]);state.profiles=profiles.profiles;state.settings=settings.settings||{};state.connections=connections.connections||{};applySettings();applyConnections();state.connected=true;renderProfiles();renderStatus(status,health);await loadJobs(false);$('topDot').className='dot ok';$('topText').textContent='آماده · '+fa(state.profiles.length)+' پروفایل';notice('اطلاعات با موفقیت بارگذاری شد.');output(status);tab('home')}catch(error){state.connected=false;$('topDot').className='dot err';$('topText').textContent='خطا در بارگذاری';notice(error.message,'error');output({error:error.message})}}
+async function connect(){try{const [profiles,status,health,settings,connections]=await Promise.all([api('/api/profiles'),api('/api/status'),fetch('/health').then(r=>r.json()),api('/api/settings'),api('/api/connections')]);state.profiles=profiles.profiles;state.settings=settings.settings||{};state.connections=connections.connections||{};state.connections.basalam=state.connections.basalam||{};state.connections.basalam.shops=Array.isArray(state.connections.basalam.shops)?state.connections.basalam.shops:[];state.connections.ai=state.connections.ai||{};state.connections.ai.providers=Array.isArray(state.connections.ai.providers)?state.connections.ai.providers:[];state.connections.ai.candidates=Array.isArray(state.connections.ai.candidates)?state.connections.ai.candidates:[];applySettings();applyConnections();refreshVisualEditors();state.connected=true;renderProfiles();renderStatus(status,health);await loadJobs(false);$('topDot').className='dot ok';$('topText').textContent='آماده · '+fa(state.profiles.length)+' پروفایل';notice('اطلاعات با موفقیت بارگذاری شد.');output(status);tab('home')}catch(error){state.connected=false;$('topDot').className='dot err';$('topText').textContent='خطا در بارگذاری';notice(error.message,'error');output({error:error.message})}}
 function renderStatus(status,health){$('statProfiles').textContent=fa(state.profiles.length);$('statRunning').textContent=fa((status.jobs||[]).filter(j=>['queued','running'].includes(j.status)).length);$('statFailed').textContent=fa((status.jobs||[]).filter(j=>j.status==='failed').length);setState('dbState',health.databaseReady);setState('wooState',status.connections.woo);setState('basalamState',status.connections.basalam);setState('workerState',health.workerInWeb)}
 function setState(id,on){const el=$(id);el.textContent=on?'فعال':'غیرفعال';el.className=on?'on':'off'}
-function renderProfiles(){const box=$('profileList');box.innerHTML=state.profiles.map(p=>'<div class="profile '+(state.selected===p.id?'selected':'')+'"><div class="profile-title"><span>'+esc(p.name)+'</span><span class="chip">'+(p.enabled?'فعال':'خاموش')+'</span></div><div class="profile-url">'+esc(p.url)+'</div><div class="profile-meta"><span class="chip">'+fa(p.pages)+' صفحه</span><span class="chip">'+(p.intervalMinutes?fa(p.intervalMinutes)+' دقیقه':'دستی')+'</span>'+(p.syncWoo?'<span class="chip">Woo</span>':'')+(p.syncBasalam?'<span class="chip">Basalam</span>':'')+'</div><div class="profile-actions"><button class="btn btn-blue btn-sm" data-paction="scrape" data-id="'+escAttr(p.id)+'">▶ استخراج</button><button class="btn btn-green btn-sm" data-paction="sync" data-id="'+escAttr(p.id)+'">↥ ارسال</button><button class="btn btn-purple btn-sm" data-paction="edit" data-id="'+escAttr(p.id)+'">✎ ویرایش</button><button class="btn btn-red btn-sm" data-paction="delete" data-id="'+escAttr(p.id)+'">حذف</button></div></div>').join('')||'<div class="empty">پروفایلی وجود ندارد؛ از تب سلکتورها بسازید.</div>';syncProfileSelects()}
-function syncProfileSelects(){const current=$('productProfile').value;$('productProfile').innerHTML='<option value="">— انتخاب پروفایل —</option>'+state.profiles.map(p=>'<option value="'+escAttr(p.id)+'">'+esc(p.name)+'</option>').join('');if(state.profiles.some(p=>p.id===current))$('productProfile').value=current}
-function clearForm(){state.selected='';$('profileId').value='';$('name').value='';$('url').value='';$('pages').value='1';$('pagination').value='query_page';$('paginationValue').value='page';$('interval').value='0';$('titleSuffix').value='';$('priceMode').value='none';$('priceValue').value='0';$('roundPrice').value='0';$('minPrice').value='0';$('wooCategoryId').value='0';$('basalamCategoryId').value='0';$('basalamFallbackCategoryIds').value='';$('detailSampleUrl').value='';$('enabled').checked=true;$('networkIndirect').checked=false;$('noExtract').checked=false;$('syncWoo').checked=false;$('syncBasalam').checked=false;listFields.forEach(([id])=>{$('sel-'+id).value=id==='container'?'li.product':id==='title'?'h2':id==='price'?'.price':id==='link'?'a[href]':'img';$('result-'+id).textContent='—'});detailFields.forEach(([id])=>{$('sel-'+id).value='';$('result-'+id).textContent='—'});$('editBadge').textContent='پروفایل جدید';renderProfiles()}
-function editProfile(id){const p=state.profiles.find(x=>x.id===id);if(!p)return;state.selected=id;$('profileId').value=p.id;$('name').value=p.name;$('url').value=p.url;$('pages').value=p.pages;$('pagination').value=p.pagination;$('paginationValue').value=p.paginationValue;$('interval').value=p.intervalMinutes;$('titleSuffix').value=p.titleSuffix;$('priceMode').value=p.priceMode;$('priceValue').value=p.priceValue;$('roundPrice').value=p.roundPrice;$('minPrice').value=p.minPrice;$('wooCategoryId').value=p.wooCategoryId;$('basalamCategoryId').value=p.basalamCategoryId;$('basalamFallbackCategoryIds').value=(p.basalamFallbackCategoryIds||[]).join(', ');$('enabled').checked=p.enabled;$('networkIndirect').checked=!!p.networkIndirect;$('noExtract').checked=!!p.noExtract;$('syncWoo').checked=p.syncWoo;$('syncBasalam').checked=p.syncBasalam;[...listFields,...detailFields].forEach(([key])=>{$('sel-'+key).value=p.selectors[key]||''});$('editBadge').textContent='ویرایش: '+p.name;renderProfiles();tab('selector');subTab('basic')}
-function profileBody(){const selectors={};[...listFields,...detailFields].forEach(([key])=>selectors[key]=$('sel-'+key).value.trim());return{id:$('profileId').value||undefined,name:$('name').value.trim(),url:$('url').value.trim(),enabled:$('enabled').checked,pages:Number($('pages').value),pagination:$('pagination').value,paginationValue:$('paginationValue').value.trim(),intervalMinutes:Number($('interval').value),selectors,titleSuffix:$('titleSuffix').value,priceMode:$('priceMode').value,priceValue:Number($('priceValue').value),roundPrice:Number($('roundPrice').value),minPrice:Number($('minPrice').value),wooCategoryId:Number($('wooCategoryId').value),basalamCategoryId:Number($('basalamCategoryId').value),basalamFallbackCategoryIds:$('basalamFallbackCategoryIds').value.split(/[,،\s]+/).map(Number).filter(Boolean),networkIndirect:$('networkIndirect').checked,noExtract:$('noExtract').checked,syncWoo:$('syncWoo').checked,syncBasalam:$('syncBasalam').checked}}
+function renderProfiles(){const box=$('profileList');box.innerHTML=state.profiles.map(p=>'<div class="profile '+(state.selected===p.id?'selected':'')+'"><div class="profile-title"><span>'+esc(p.name)+'</span><span class="chip">'+(p.enabled?'فعال':'خاموش')+'</span></div><div class="profile-url">'+esc(p.url)+'</div><div class="profile-meta"><span class="chip">'+fa(p.pages)+' صفحه</span><span class="chip">'+(p.intervalMinutes?fa(p.intervalMinutes)+' دقیقه':'دستی')+'</span>'+(p.syncWoo?'<span class="chip">Woo</span>':'')+(p.syncBasalam?'<span class="chip">Basalam</span>':'')+'</div><div class="profile-actions"><button class="btn btn-blue btn-sm" data-paction="scrape" data-id="'+escAttr(p.id)+'">▶ استخراج</button><button class="btn btn-green btn-sm" data-paction="sync" data-id="'+escAttr(p.id)+'">↥ ارسال</button><button class="btn btn-gray btn-sm" data-paction="diagnose" data-id="'+escAttr(p.id)+'">🩺 عیب‌یابی</button><button class="btn btn-purple btn-sm" data-paction="edit" data-id="'+escAttr(p.id)+'">✎ ویرایش</button><button class="btn btn-red btn-sm" data-paction="delete" data-id="'+escAttr(p.id)+'">حذف</button></div></div>').join('')||'<div class="empty">پروفایلی وجود ندارد؛ از تب سلکتورها بسازید.</div>';syncProfileSelects()}
+function syncProfileSelects(){const options='<option value="">— انتخاب پروفایل —</option>'+state.profiles.map(p=>'<option value="'+escAttr(p.id)+'">'+esc(p.name)+'</option>').join('');for(const id of ['productProfile','transferProfile','photoProfile']){if(!$(id))continue;const current=$(id).value;$(id).innerHTML=(id==='photoProfile'?'<option value="">همهٔ پروفایل‌ها</option>':options);if(state.profiles.some(p=>p.id===current))$(id).value=current}}
+function clearForm(){state.selected='';$('profileId').value='';$('name').value='';$('url').value='';$('pages').value='1';$('pagination').value='query_page';$('paginationValue').value='page';$('interval').value='0';$('titleSuffix').value='';$('priceMode').value='none';$('priceValue').value='0';$('roundPrice').value='0';$('minPrice').value='0';$('wooCategoryId').value='0';$('basalamCategoryId').value='0';$('basalamFallbackCategoryIds').value='';$('detailSampleUrl').value='';$('enabled').checked=true;$('networkIndirect').checked=false;$('noExtract').checked=false;$('syncWoo').checked=false;$('syncBasalam').checked=false;listFields.forEach(([id])=>{$('sel-'+id).value=id==='container'?'li.product':id==='title'?'h2':id==='price'?'.price':id==='link'?'a[href]':'img';$('result-'+id).textContent='—'});detailFields.forEach(([id])=>{$('sel-'+id).value='';$('result-'+id).textContent='—'});loadGallery();$('editBadge').textContent='پروفایل جدید';renderProfiles()}
+function editProfile(id){const p=state.profiles.find(x=>x.id===id);if(!p)return;state.selected=id;$('profileId').value=p.id;$('name').value=p.name;$('url').value=p.url;$('pages').value=p.pages;$('pagination').value=p.pagination;$('paginationValue').value=p.paginationValue;$('interval').value=p.intervalMinutes;$('titleSuffix').value=p.titleSuffix;$('priceMode').value=p.priceMode;$('priceValue').value=p.priceValue;$('roundPrice').value=p.roundPrice;$('minPrice').value=p.minPrice;$('wooCategoryId').value=p.wooCategoryId;$('basalamCategoryId').value=p.basalamCategoryId;$('basalamFallbackCategoryIds').value=(p.basalamFallbackCategoryIds||[]).join(', ');$('enabled').checked=p.enabled;$('networkIndirect').checked=!!p.networkIndirect;$('noExtract').checked=!!p.noExtract;$('syncWoo').checked=p.syncWoo;$('syncBasalam').checked=p.syncBasalam;[...listFields,...detailFields].forEach(([key])=>{$('sel-'+key).value=p.selectors[key]||''});loadGallery(p.gallery||{mode:p.selectors.gallery?'manual':'off',selectors:p.selectors.gallery||'',max:p.selectors.galleryMax||10,skip_first:!!p.selectors.gallerySkipFirst});$('editBadge').textContent='ویرایش: '+p.name;renderProfiles();tab('selector');subTab('basic')}
+function profileBody(){const selectors={};[...listFields,...detailFields].forEach(([key])=>selectors[key]=$('sel-'+key).value.trim());return{id:$('profileId').value||undefined,name:$('name').value.trim(),url:$('url').value.trim(),enabled:$('enabled').checked,pages:Number($('pages').value),pagination:$('pagination').value,paginationValue:$('paginationValue').value.trim(),intervalMinutes:Number($('interval').value),selectors,gallery:galleryConfig(),titleSuffix:$('titleSuffix').value,priceMode:$('priceMode').value,priceValue:Number($('priceValue').value),roundPrice:Number($('roundPrice').value),minPrice:Number($('minPrice').value),wooCategoryId:Number($('wooCategoryId').value),basalamCategoryId:Number($('basalamCategoryId').value),basalamFallbackCategoryIds:$('basalamFallbackCategoryIds').value.split(/[,،\s]+/).map(Number).filter(Boolean),networkIndirect:$('networkIndirect').checked,noExtract:$('noExtract').checked,syncWoo:$('syncWoo').checked,syncBasalam:$('syncBasalam').checked}}
 async function saveProfile(runAfter=false){const button=runAfter?$('scrapeForm'):$('saveBtn');busy(button,true);try{if(!$('url').value.trim()&&!$('noExtract').checked)throw Error('آدرس پروفایل برای حالت استخراج اجباری است.');const result=await api('/api/profiles',{method:'POST',body:JSON.stringify(profileBody())});state.selected=result.profile.id;$('profileId').value=result.profile.id;await refreshProfiles();notice('پروفایل «'+result.profile.name+'» ذخیره شد.');if(runAfter)await createJob(result.profile.id,'scrape');else tab('home')}catch(error){notice(error.message,'error');output({error:error.message})}finally{busy(button,false)}}
 async function refreshProfiles(){const data=await api('/api/profiles');state.profiles=data.profiles;renderProfiles();$('statProfiles').textContent=fa(state.profiles.length)}
-async function profileAction(action,id){try{if(action==='edit')return editProfile(id);if(action==='delete'){if(!confirm('پروفایل و محصولات آن حذف شود؟'))return;await api('/api/profiles/'+encodeURIComponent(id),{method:'DELETE'});await refreshProfiles();notice('پروفایل حذف شد.');return}await createJob(id,action)}catch(error){notice(error.message,'error');output({error:error.message})}}
+async function profileAction(action,id){try{if(action==='edit')return editProfile(id);if(action==='diagnose')return runExtractionDiagnostic(id);if(action==='delete'){if(!confirm('پروفایل و محصولات آن حذف شود؟'))return;await api('/api/profiles/'+encodeURIComponent(id),{method:'DELETE'});await refreshProfiles();notice('پروفایل حذف شد.');return}await createJob(id,action)}catch(error){notice(error.message,'error');output({error:error.message})}}
 async function createJob(id,kind){const path='/api/profiles/'+encodeURIComponent(id)+'/'+(kind==='sync'?'sync':'scrape'),body=kind==='sync'?{target:'both'}:{};const data=await api(path,{method:'POST',body:JSON.stringify(body)});notice('کار در صف قرار گرفت.','info');output(data);tab('jobs');watchJob(data.job.id)}
 async function openVisual(){const button=$('openVisual');busy(button,true);try{const url=$('url').value.trim();if(!url)throw Error('ابتدا آدرس صفحه محصولات را وارد کنید.');const data=await api('/api/visual-ticket',{method:'POST',body:JSON.stringify({url})});$('visualUrl').textContent=url;$('visualModal').classList.add('open');$('visualLoading').hidden=false;$('visualFrame').hidden=true;$('visualFrame').src='/visual?ticket='+encodeURIComponent(data.ticket)}catch(error){notice(error.message,'error')}finally{busy(button,false)}}
 function closeVisual(){$('visualModal').classList.remove('open');$('visualFrame').src='about:blank'}
-function visualMessage(event){if(event.origin!==location.origin||event.data?.type!=='scraper4-selector')return;const {mode,selector,preview,count}=event.data,input=$('sel-'+mode);if(!input)return;input.value=selector;$('result-'+mode).textContent=fa(count)+' مورد · '+(preview||'ثبت شد');$('wrap-'+mode).classList.add('has');notice('سلکتور «'+mode+'» از صفحه انتخاب شد.');if(['shortDesc','longDesc','sku','brand','stock','weight','category','gallery','variations'].includes(mode))subTab('details');else subTab('selectors')}
+function visualMessage(event){if(event.origin!==location.origin||event.data?.type!=='scraper4-selector')return;const {mode,selector,preview,count}=event.data;if(mode==='gallery'){$('galMode').value='manual';$('galSelectors').value=selector;galModeChanged();subTab('details');notice('سلکتور گالری از صفحه انتخاب شد.');return}const input=$('sel-'+mode);if(!input)return;input.value=selector;$('result-'+mode).textContent=fa(count)+' مورد · '+(preview||'ثبت شد');$('wrap-'+mode).classList.add('has');notice('سلکتور «'+mode+'» از صفحه انتخاب شد.');if(['shortDesc','longDesc','sku','category','tags','weight','stock','brand','image','detailImage','galleryBox','galleryOne','variations'].includes(mode))subTab('details');else subTab('selectors')}
 async function suggestSelectorFields(){const button=$('suggestSelectors');busy(button,true);try{const url=$('url').value.trim();if(!url)throw Error('ابتدا آدرس پروفایل را وارد کنید.');const data=await api('/api/suggest-selectors',{method:'POST',body:JSON.stringify({url,mode:'list'})});for(const [id] of listFields){const selector=data.selectors[id];if(!selector)continue;$('sel-'+id).value=selector;const info=data.evidence[id]||{};$('result-'+id).textContent=fa(info.count||0)+' مورد · '+(info.sample||'پیشنهاد شد');$('wrap-'+id).classList.add('has')}output(data);notice(Object.keys(data.selectors).length?'سلکتورهای پیشنهادی ثبت شدند؛ نتیجه را آزمایش کنید.':'پیشنهاد مطمئنی پیدا نشد؛ از انتخاب بصری استفاده کنید.',Object.keys(data.selectors).length?'ok':'info')}catch(error){notice(error.message,'error')}finally{busy(button,false)}}
-async function suggestDetailFields(){const button=$('suggestDetails');busy(button,true);try{const url=$('detailSampleUrl').value.trim();if(!url)throw Error('آدرس نمونهٔ یک محصول را وارد کنید.');const data=await api('/api/suggest-selectors',{method:'POST',body:JSON.stringify({url,mode:'detail'})});for(const [id] of detailFields){const selector=data.selectors[id];if(!selector)continue;$('sel-'+id).value=selector;const info=data.evidence[id]||{};$('result-'+id).textContent=fa(info.count||0)+' مورد · '+(info.sample||'پیشنهاد شد');$('wrap-'+id).classList.add('has')}output(data);notice(Object.keys(data.selectors).length?'سلکتورهای جزئیات و تنوع پیشنهاد شدند؛ آن‌ها را بررسی کنید.':'پیشنهاد مطمئنی پیدا نشد؛ از انتخاب بصری استفاده کنید.',Object.keys(data.selectors).length?'ok':'info')}catch(error){notice(error.message,'error')}finally{busy(button,false)}}
-async function testSelectors(){const button=$('testSelectors');busy(button,true);try{const url=$('url').value.trim();if(!url)throw Error('ابتدا آدرس پروفایل را وارد کنید.');for(const [id] of listFields){const selector=$('sel-'+id).value.trim();if(!selector)continue;const type=['link','image'].includes(id)?id:'text';try{const data=await api('/api/test-selector',{method:'POST',body:JSON.stringify({url,selector,type})});$('result-'+id).textContent=fa(data.count)+' مورد · '+(data.values[0]||'بدون مقدار');$('wrap-'+id).classList.toggle('has',data.count>0)}catch(error){$('result-'+id).textContent='خطا: '+error.message}}notice('آزمایش سلکتورها تمام شد.')}finally{busy(button,false)}}
+async function suggestDetailFields(){const button=$('suggestDetails');busy(button,true);try{const url=$('detailSampleUrl').value.trim();if(!url)throw Error('آدرس نمونهٔ یک محصول را وارد کنید.');const data=await api('/api/suggest-selectors',{method:'POST',body:JSON.stringify({url,mode:'detail'})});for(const [id] of detailFields){const selector=data.selectors[id];if(!selector)continue;$('sel-'+id).value=selector;const info=data.evidence[id]||{};$('result-'+id).textContent=fa(info.count||0)+' مورد · '+(info.sample||'پیشنهاد شد');$('wrap-'+id).classList.add('has')}if(data.selectors.gallery){$('galMode').value='manual';$('galSelectors').value=data.selectors.gallery;galModeChanged()}output(data);notice(Object.keys(data.selectors).length?'سلکتورهای جزئیات و تنوع پیشنهاد شدند؛ آن‌ها را بررسی کنید.':'پیشنهاد مطمئنی پیدا نشد؛ از انتخاب بصری استفاده کنید.',Object.keys(data.selectors).length?'ok':'info')}catch(error){notice(error.message,'error')}finally{busy(button,false)}}
+async function testSelectors(){const button=$('testSelectors');busy(button,true);try{const url=$('url').value.trim(),results=[];if(!url)throw Error('ابتدا آدرس پروفایل را وارد کنید.');for(const [id,label] of listFields){const selector=$('sel-'+id).value.trim();if(!selector)continue;const type=['link','image'].includes(id)?id:'text';try{const data=await api('/api/test-selector',{method:'POST',body:JSON.stringify({url,selector,type})});$('result-'+id).textContent=fa(data.count)+' مورد · '+(data.values[0]||'بدون مقدار');$('wrap-'+id).classList.toggle('has',data.count>0);results.push({field:id,label,selector,ok:data.count>0,count:data.count,samples:data.values})}catch(error){$('result-'+id).textContent='خطا: '+error.message;results.push({field:id,label,selector,ok:false,error:error.message})}}const report={ok:results.every(x=>x.ok),url,tested:results.length,succeeded:results.filter(x=>x.ok).length,failed:results.filter(x=>!x.ok).length,results,recommendations:results.some(x=>!x.ok)?['سلکتورهای بدون نتیجه را با انتخاب‌گر بصری دوباره انتخاب کنید.']:['سلکتورهای فهرست معتبر به نظر می‌رسند؛ یک استخراج آزمایشی اجرا کنید.']};output(report);openResultModal('🧪 گزارش جامع آزمایش سلکتورها',report);notice('آزمایش سلکتورها تمام شد.',report.ok?'ok':'error')}catch(error){openResultModal('⚠️ خطای آزمایش سلکتورها',{ok:false,error:error.message});notice(error.message,'error')}finally{busy(button,false)}}
+async function testGallery(){const button=$('testGallery');busy(button,true);try{const url=$('detailSampleUrl').value.trim();if(!url)throw Error('آدرس نمونهٔ یک محصول را وارد کنید.');const cfg=galleryConfig(),selector=gallerySelector(cfg);if(!selector)throw Error('تنظیمات روش گالری کامل نیست.');const data=await api('/api/test-selector',{method:'POST',body:JSON.stringify({url,selector,type:'gallery',max:cfg.max,skipFirst:cfg.skip_first})}),report={...data,url,configuration:cfg,selector,recommendations:data.count?['تصاویر پیدا شدند؛ آدرس‌ها را در بخش پاسخ خام بازبینی کنید.']:['سلکتور گالری را با ابزار انتخاب بصری دوباره انتخاب کنید.','بررسی کنید تصاویر پس از اجرای JavaScript ساخته نشده باشند.']};output(report);openResultModal('🖼 گزارش جامع آزمایش گالری',report);notice(data.count?fa(data.count)+' عکس گالری پیدا شد.':'عکسی با تنظیمات گالری پیدا نشد.',data.count?'ok':'info')}catch(error){openResultModal('⚠️ خطای آزمایش گالری',{ok:false,error:error.message});notice(error.message,'error')}finally{busy(button,false)}}
+const dest={target:'woo',page:1,totalPages:1,total:0,status:'all',products:[],counts:{},shops:[],selected:new Map()};
+function destinationStatuses(target=dest.target){return target==='woo'?[['all','همه'],['publish','منتشرشده'],['draft','پیش‌نویس'],['pending','در انتظار'],['private','خصوصی'],['trash','زباله‌دان']]:[['all','همه'],['2976','فعال'],['3790','غیرفعال'],['3567','تأیید نشده'],['3568','در انتظار تأیید'],['4184','بایگانی']]}
+function destinationKey(product){return String(product.shopId||'default')+':'+String(product.id)}
+function destinationRefs(){return [...dest.selected.values()].map(x=>({id:Number(x.id),shopId:String(x.shopId||'')}))}
+function destinationStatusOptions(selected,blank=false){return (blank?'<option value="">بدون تغییر</option>':'')+destinationStatuses().filter(x=>x[0]!=='all').map(x=>'<option value="'+escAttr(x[0])+'"'+(String(selected)===String(x[0])?' selected':'')+'>'+esc(x[1])+'</option>').join('')}
+function updateDestinationSelection(){const count=dest.selected.size;$('destSelection').textContent=fa(count)+' انتخاب';$('destBulkCount').textContent='('+fa(count)+' محصول)';document.querySelectorAll('.dest-product').forEach(card=>card.classList.toggle('selected',Boolean(card.querySelector('.dest-check')?.checked)))}
+function setDestinationTarget(target,load=false){dest.target=target==='basalam'?'basalam':'woo';dest.page=1;dest.status='all';dest.products=[];dest.counts={};dest.selected.clear();document.querySelectorAll('[data-dest-target]').forEach(x=>x.classList.toggle('active',x.dataset.destTarget===dest.target));$('destShop').disabled=dest.target==='woo';$('destShop').innerHTML=dest.target==='woo'?'<option value="default">فروشگاه ووکامرس</option>':'<option value="all">همهٔ غرفه‌ها</option>';$('destBulkStatus').innerHTML=destinationStatusOptions('',true);renderDestinationStatuses();renderDestination();updateDestinationSelection();if(load)loadDestination(true)}
+function renderDestinationStatuses(){const counts=dest.counts||{};$('destStatusPills').innerHTML=destinationStatuses().map(x=>'<button class="status-pill '+(dest.status===x[0]?'active':'')+'" data-dest-status="'+escAttr(x[0])+'">'+esc(x[1])+(counts[x[0]]!==undefined?'<b>'+fa(counts[x[0]])+'</b>':'')+'</button>').join('')}
+function renderDestination(){const box=$('destProducts');if(!dest.products.length){box.innerHTML='<div class="empty">'+(dest.total?'در این صفحه محصولی نیست.':'محصولی یافت نشد؛ اتصال، غرفه و فیلتر را بررسی کنید.')+'</div>'}else box.innerHTML=dest.products.map(p=>{const key=destinationKey(p),checked=dest.selected.has(key),meta=['#'+fa(p.id),p.sku?'SKU: '+p.sku:'',p.category||'',dest.target==='basalam'?(p.shopName||p.shopId):''].filter(Boolean).join(' · ');return '<article class="dest-product '+(checked?'selected':'')+'" data-dest-key="'+escAttr(key)+'"><input class="dest-check" type="checkbox" data-dest-select="'+escAttr(key)+'" '+(checked?'checked':'')+' aria-label="انتخاب محصول">'+(p.image?'<img class="dest-image" loading="lazy" src="'+escAttr(p.image)+'" alt="">':'<div class="dest-image" style="display:grid;place-items:center;color:#64748b">بدون تصویر</div>')+'<div><div class="dest-title">'+esc(p.title||'بدون عنوان')+'</div><div class="dest-price">'+fa(p.price)+' تومان</div><div class="dest-meta">'+esc(meta)+'<br>موجودی: '+(p.stock===null?'نامشخص':fa(p.stock))+' · وضعیت: '+esc(p.statusLabel||p.status||'—')+'</div>'+(p.rejectionReason?'<div class="dest-reject">'+esc(p.rejectionReason)+'</div>':'')+'<div class="dest-actions"><button class="btn btn-blue btn-sm" data-dest-action="edit" data-key="'+escAttr(key)+'">✎ جزئیات و ویرایش</button><select class="btn btn-gray btn-sm" data-dest-card-status="'+escAttr(key)+'">'+destinationStatusOptions(p.status)+'</select><button class="btn btn-green btn-sm" data-dest-action="status" data-key="'+escAttr(key)+'">✓ وضعیت</button><button class="btn btn-red btn-sm" data-dest-action="delete" data-key="'+escAttr(key)+'">'+(dest.target==='basalam'?'بایگانی':'حذف')+'</button></div></div></article>'}).join('');$('destSummary').textContent=fa(dest.total)+' محصول · صفحه '+fa(dest.page)+' از '+fa(dest.totalPages);$('destPageInfo').textContent='صفحه '+fa(dest.page)+' از '+fa(dest.totalPages);$('destPrev').disabled=dest.page<=1;$('destNext').disabled=dest.page>=dest.totalPages;updateDestinationSelection()}
+async function loadDestination(withCounts=true){const button=$('destLoad');busy(button,true);$('destProducts').innerHTML='<div class="dest-loading">در حال دریافت مستقیم محصولات '+(dest.target==='woo'?'ووکامرس':'باسلام')+'…</div>';try{const query=new URLSearchParams({page:String(dest.page),per_page:$('destPerPage').value,q:$('destSearch').value.trim(),status:dest.status,shop:$('destShop').value||'all',counts:withCounts?'1':'0'}),data=await api('/api/destination/'+dest.target+'/products?'+query.toString());dest.products=Array.isArray(data.items)?data.items:[];dest.total=Number(data.total||0);dest.totalPages=Math.max(1,Number(data.totalPages||1));dest.page=Math.min(dest.page,dest.totalPages);if(data.counts)dest.counts=data.counts;dest.shops=Array.isArray(data.shops)?data.shops:[];if(dest.target==='basalam'){const current=$('destShop').value||'all';$('destShop').innerHTML='<option value="all">همهٔ غرفه‌ها</option>'+dest.shops.map(s=>'<option value="'+escAttr(s.id)+'">'+esc(s.name)+(s.primary?' · پیش‌فرض':'')+'</option>').join('');if([...$('destShop').options].some(x=>x.value===current))$('destShop').value=current}$('destBulkStatus').innerHTML=destinationStatusOptions('',true);renderDestinationStatuses();renderDestination();notice(fa(dest.total)+' محصول از مقصد دریافت شد.','ok')}catch(error){dest.products=[];dest.total=0;$('destProducts').innerHTML='<div class="empty">❌ '+esc(error.message)+'<br><small>ابتدا اتصال مقصد را از منوی کناری آزمایش کنید.</small></div>';notice(error.message,'error');openResultModal('⚠️ خطای دریافت محصولات مقصد',{ok:false,target:dest.target,error:error.message,recommendations:['اتصال مقصد و شناسه غرفه را آزمایش کنید.','در باسلام مطمئن شوید توکن به همین غرفه دسترسی دارد.','متن HTTP نمایش‌داده‌شده را برای تشخیص endpoint بررسی کنید.']})}finally{busy(button,false)}}
+function destinationProductByKey(key){return dest.products.find(p=>destinationKey(p)===key)||dest.selected.get(key)}
+async function destinationCardAction(action,key){const product=destinationProductByKey(key);if(!product)throw Error('محصول در فهرست فعلی پیدا نشد.');if(action==='edit')return openDestinationEditor(product);if(action==='status'){const select=document.querySelector('[data-dest-card-status="'+CSS.escape(key)+'"]'),status=select?.value;if(!status)throw Error('وضعیت را انتخاب کنید.');if(!confirm('وضعیت «'+product.title+'» تغییر کند؟'))return;const d=await api('/api/destination/'+dest.target+'/'+product.id+'/status',{method:'POST',body:JSON.stringify({status,shopId:product.shopId,confirm:'APPLY'})});openResultModal('✓ تغییر وضعیت محصول',d);await loadDestination(true);return}if(action==='delete')return deleteDestinationProduct(product)}
+async function deleteDestinationProduct(product){const verb=dest.target==='basalam'?'بایگانی شود؟ این عمل به وضعیت ۴۱۸۴ تغییر می‌کند و حذف دائمی نیست.':'به زباله‌دان منتقل شود؟';if(!confirm('محصول «'+product.title+'» '+verb))return;const d=await api('/api/destination/'+dest.target+'/'+product.id+'?confirm=DELETE&shop='+encodeURIComponent(product.shopId||'')+'&force=false',{method:'DELETE'});dest.selected.delete(destinationKey(product));openResultModal(dest.target==='basalam'?'🗄 نتیجه بایگانی باسلام':'🗑 نتیجه حذف ووکامرس',{...d,recommendations:dest.target==='basalam'?['API باسلام حذف دائمی ندارد؛ محصول با وضعیت ۴۱۸۴ بایگانی شد.']:['محصول به زباله‌دان ووکامرس منتقل شد و در صورت نیاز قابل بازیابی است.']});await loadDestination(true)}
+function destinationEditPayload(product){const body={shopId:product.shopId},title=$('dpTitle').value.trim(),price=$('dpPrice').value,stock=$('dpStock').value,status=$('dpStatus').value,shortDescription=$('dpShort').value,description=$('dpDescription').value,sku=$('dpSku')?.value.trim(),categoryId=$('dpCategory').value;if(title!==product.title)body.title=title;if(price!==''&&Number(price)!==Number(product.price))body.price=Number(price);if(stock!==''&&Number(stock)!==Number(product.stock))body.stock=Number(stock);if(status!==String(product.status))body.status=status;if(shortDescription!==String(product.shortDescription||''))body.shortDescription=shortDescription;if(description!==String(product.description||''))body.description=description;if(dest.target==='woo'&&sku!==String(product.sku||''))body.sku=sku;if(categoryId!==''&&Number(categoryId)!==Number(product.categoryId||0))body.categoryId=Number(categoryId);if(dest.target==='basalam'){for(const id of ['preparation_days','weight','package_weight']){const input=$('dp_'+id);if(input&&input.value!==''&&Number(input.value)!==Number(product.raw?.[id]??product.raw?.revision?.data?.[id]??0))body[id]=Number(input.value)}}return body}
+async function openDestinationEditor(summary){modalShell('⏳ دریافت جزئیات محصول','<div class="dest-loading">در حال دریافت اطلاعات کامل محصول…</div>');try{const data=await api('/api/destination/'+dest.target+'/product/'+summary.id+'?shop='+encodeURIComponent(summary.shopId||'')),p=data.product,extra=dest.target==='basalam'?'<div><label>روز آماده‌سازی</label><input id="dp_preparation_days" type="number" min="0" value="'+escAttr(p.raw?.preparation_days??p.raw?.revision?.data?.preparation_days??'')+'"></div><div><label>وزن محصول (گرم)</label><input id="dp_weight" type="number" min="0" value="'+escAttr(p.raw?.weight??p.raw?.revision?.data?.weight??'')+'"></div><div><label>وزن بسته (گرم)</label><input id="dp_package_weight" type="number" min="0" value="'+escAttr(p.raw?.package_weight??p.raw?.revision?.data?.package_weight??'')+'"></div>':'';modalShell('✎ ویرایش '+(dest.target==='woo'?'ووکامرس':'باسلام')+' · #'+fa(p.id),'<p class="modal-note">قیمت در رابط به تومان است. دکمهٔ پیش‌نمایش هیچ تغییری در فروشگاه ایجاد نمی‌کند.</p><div class="inline-form"><div class="wide"><label>عنوان</label><input id="dpTitle" value="'+escAttr(p.title)+'"></div><div><label>قیمت (تومان)</label><input id="dpPrice" type="number" min="0" value="'+escAttr(p.price)+'"></div><div><label>موجودی</label><input id="dpStock" type="number" min="0" value="'+(p.stock===null?'':escAttr(p.stock))+'"></div><div><label>وضعیت</label><select id="dpStatus">'+destinationStatusOptions(p.status)+'</select></div><div><label>SKU</label><input id="dpSku" value="'+escAttr(p.sku||'')+'" '+(dest.target==='basalam'?'disabled':'')+'></div><div><label>شناسه دسته</label><input id="dpCategory" type="number" min="0" value="'+escAttr(p.categoryId||'')+'"></div>'+extra+'<div class="wide"><label>توضیح کوتاه</label><textarea id="dpShort" rows="3">'+esc(p.shortDescription||'')+'</textarea></div><div class="wide"><label>توضیحات کامل</label><textarea id="dpDescription" rows="7">'+esc(p.description||'')+'</textarea></div></div><div id="dpPreview"></div><div class="bulk-actions"><button class="btn btn-purple" data-dp-action="preview">👁 پیش‌نمایش</button><button class="btn btn-green" data-dp-action="apply">✓ اعمال واقعی</button><button class="btn btn-red" data-dp-action="delete">'+(dest.target==='basalam'?'🗄 بایگانی':'🗑 انتقال به زباله‌دان')+'</button></div>');const root=$('resultModal');root.onclick=async event=>{if(event.target===root||event.target.closest('[data-modal-action="close"]'))return root.remove();const button=event.target.closest('[data-dp-action]');if(!button)return;try{const action=button.dataset.dpAction;if(action==='delete'){root.remove();return deleteDestinationProduct(p)}const body=destinationEditPayload(p),apply=action==='apply';if(apply&&!confirm('تغییرات واقعاً روی محصول مقصد اعمال شوند؟'))return;body.confirm=apply?'APPLY':'';busy(button,true);const result=await api('/api/destination/'+dest.target+'/'+p.id+'/update',{method:'POST',body:JSON.stringify(body)});if(apply){openResultModal('✓ نتیجه ویرایش محصول',{...result,raw:result.product||result.changes});await loadDestination(true)}else $('dpPreview').innerHTML='<div class="result-summary '+(result.changed?'ok':'bad')+'"><b>'+(result.changed?'تغییرات قابل اعمال':'تغییری نسبت به مقصد ثبت نشده')+'</b><div class="raw-block">'+esc(pretty(result.changes||{}))+'</div></div>'}catch(error){openResultModal('⚠️ خطای ویرایش محصول',{ok:false,error:error.message})}finally{busy(button,false)}}}catch(error){openResultModal('⚠️ خطای دریافت جزئیات محصول',{ok:false,error:error.message,recommendations:['شناسه محصول، غرفه و دسترسی توکن را بررسی کنید.']})}}
+function destinationBulkBody(remove=false){const ops={};if(remove)ops.delete=true;else{const priceOp=$('destPriceOp').value,priceValue=$('destPriceValue').value.trim();if(priceOp)ops.price={op:priceOp,val:priceValue};if($('destBulkStock').value!=='')ops.stock=Number($('destBulkStock').value);if($('destBulkStatus').value)ops.status=$('destBulkStatus').value;if($('destTitlePrefix').value)ops.titlePrefix=$('destTitlePrefix').value;if($('destTitleSuffix').value)ops.titleSuffix=$('destTitleSuffix').value;if($('destBulkShort').value)ops.shortDescription=$('destBulkShort').value;if($('destBulkDesc').value)ops.description=$('destBulkDesc').value}return{ids:destinationRefs(),ops}}
+async function runDestinationBulk(apply=false,remove=false){if(!dest.selected.size)throw Error('ابتدا حداقل یک محصول را انتخاب کنید.');if(dest.selected.size>20)throw Error('در هر نوبت حداکثر ۲۰ محصول قابل انتخاب است.');if(apply&&!confirm((remove?(dest.target==='basalam'?'محصولات انتخاب‌شده بایگانی':'محصولات انتخاب‌شده حذف'):'تغییرات گروهی اعمال')+' شوند؟ این عملیات واقعی است.'))return;const button=remove?(apply?$('destBulkDelete'):$('destBulkDeletePreview')):apply?$('destBulkApply'):$('destBulkPreview'),body=destinationBulkBody(remove);if(apply)body.confirm='APPLY';busy(button,true);try{const d=await api('/api/destination/'+dest.target+'/bulk',{method:'POST',body:JSON.stringify(body)});openResultModal((d.dryRun?'👁 پیش‌نمایش':'✓ نتیجه')+' '+(remove?(dest.target==='basalam'?'بایگانی گروهی':'حذف گروهی'):'ویرایش گروهی'),{...d,raw:d.items,recommendations:d.dryRun?['هیچ تغییری اعمال نشده است؛ سطرهای پاسخ خام را بازبینی و سپس دکمه اعمال را بزنید.']:d.failed?['ردیف‌های دارای error را بررسی و فقط همان موارد را دوباره اجرا کنید.']:['عملیات روی مقصد کامل شد.']});output(d);if(!d.dryRun){dest.selected.clear();await loadDestination(true)}}finally{busy(button,false)}}
+async function runExtractionDiagnostic(id){const profile=state.profiles.find(x=>x.id===id);modalShell('🩺 عیب‌یابی استخراج '+(profile?.name||id),'<div class="dest-loading">در حال دریافت واقعی صفحه و اجرای مرحله‌به‌مرحله pipeline…</div>');try{const d=await api('/api/profiles/'+encodeURIComponent(id)+'/extraction-diagnostic',{method:'POST',body:'{}'}),labels={configuration:'پیکربندی',network:'دریافت شبکه', 'list-extraction':'استخراج فهرست','selector-evidence':'نشانه‌های سلکتور','detail-extraction':'استخراج جزئیات'},stages=(d.stages||[]).map(stage=>{const details={...stage};delete details.name;delete details.ok;delete details.summary;return '<div class="stage-card '+(stage.ok?'ok':'bad')+'"><b>'+(stage.ok?'✓ ':'✗ ')+esc(labels[stage.name]||stage.name)+'</b><p>'+esc(stage.summary||'')+'</p><details><summary>نمایش داده‌های این مرحله</summary><div class="raw-block">'+esc(pretty(details))+'</div></details></div>'}).join(''),recommendations=(d.recommendations||[]).length?'<h3>راهکار پیشنهادی</h3><ul style="font-size:11px;line-height:2">'+d.recommendations.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>':'';modalShell('🩺 گزارش استخراج واقعی · '+(profile?.name||id),'<div class="result-summary '+(d.ok?'ok':'bad')+'"><b>'+(d.ok?'pipeline واقعی با موفقیت محصول پیدا کرد.':'یک یا چند مرحلهٔ واقعی استخراج ناموفق است.')+'</b><br>محصول پیدا‌شده: '+fa(d.productCount||0)+' · زمان: '+fa(d.durationMs||0)+' میلی‌ثانیه</div><div class="stage-list">'+stages+'</div>'+recommendations+'<h3>نشانی آزمایش‌شده</h3><div class="raw-block">'+esc(d.finalUrl||d.url||'—')+'</div>');output(d);notice(d.ok?'عیب‌یابی استخراج موفق بود.':'عیب‌یابی علت شکست را مشخص کرد.',d.ok?'ok':'error')}catch(error){openResultModal('⚠️ خطای عیب‌یابی استخراج',{ok:false,error:error.message,recommendations:['دسترسی شبکه و آدرس پروفایل را بررسی کنید.']})}}
 async function loadProducts(){const id=$('productProfile').value;if(!id){notice('یک پروفایل انتخاب کنید.','error');return}const button=$('loadProducts');busy(button,true);try{const q=encodeURIComponent($('productSearch').value.trim()),data=await api('/api/profiles/'+encodeURIComponent(id)+'/products?limit=200&q='+q);$('productCount').textContent=fa(data.total)+' محصول';$('statProducts').textContent=fa(data.products.length);$('products').innerHTML=data.products.map(p=>'<article class="product"><div class="thumb">'+(p.image?'<img loading="lazy" src="'+escAttr(p.image)+'" alt="">':'بدون تصویر')+'</div><div class="pbody"><div class="ptitle">'+esc(p.title)+'</div><span class="price">'+fa(p.price)+' تومان</span><div class="pmeta">'+esc(p.sku||p.brand||'')+'</div></div></article>').join('')||'<div class="empty">محصولی یافت نشد.</div>'}catch(error){notice(error.message,'error')}finally{busy(button,false)}}
 async function loadJobs(show=true){try{const data=await api('/api/jobs?limit=100');state.jobs=data.jobs;renderJobs();if(show)notice('صف تازه‌سازی شد.')}catch(error){if(show)notice(error.message,'error')}}
 function renderJobs(){const active=state.jobs.filter(j=>['queued','running'].includes(j.status));$('jobBadge').hidden=!active.length;$('jobBadge').textContent=fa(active.length);$('statRunning').textContent=fa(active.length);$('statFailed').textContent=fa(state.jobs.filter(j=>j.status==='failed').length);$('jobs').innerHTML=state.jobs.map(j=>{const pct=j.total?Math.min(100,Math.round(j.processed/j.total*100)):0;return '<div class="job"><div class="job-head"><b>'+(j.kind==='scrape'?'استخراج':'ارسال')+' · '+esc(profileName(j.profileId))+'</b><span class="job-status s-'+j.status+'">'+esc(j.status)+'</span></div><div class="progress"><div class="bar" style="width:'+pct+'%"></div></div><div style="font-size:9px;color:#94a3b8">مرحله: '+esc(j.phase)+' · '+fa(j.processed)+' / '+fa(j.total)+' · جدید '+fa(j.added)+' · خطا '+fa(j.failed)+'</div>'+(active.some(x=>x.id===j.id)?'<button class="btn btn-red btn-sm" data-job-action="stop" data-id="'+j.id+'" style="margin-top:7px">■ توقف</button>':'<div class="menu-actions"><button class="btn btn-orange btn-sm" data-job-action="retry" data-id="'+j.id+'">↻ اجرای دوباره</button><button class="btn btn-red btn-sm" data-job-action="delete" data-id="'+j.id+'">حذف</button></div>')+(j.error?'<div class="logs">'+esc(j.error)+'</div>':'')+'</div>'}).join('')||'<div class="empty">صف خالی است.</div>'}
@@ -3208,10 +3507,10 @@ function profileName(id){return state.profiles.find(p=>p.id===id)?.name||id}
 function watchJob(id){const timer=setInterval(async()=>{await loadJobs(false);const job=state.jobs.find(j=>j.id===id);if(job&&!['queued','running'].includes(job.status)){clearInterval(timer);notice(job.status==='done'?'عملیات کامل شد.':'پایان با وضعیت '+job.status,job.status==='done'?'ok':'error')}},1800)}
 async function jobAction(action,id){try{if(action==='delete'){await api('/api/jobs/'+id,{method:'DELETE'});notice('کار حذف شد.')}else{await api('/api/jobs/'+id+'/'+action,{method:'POST',body:'{}'});notice(action==='stop'?'درخواست توقف ثبت شد.':'کار دوباره در صف قرار گرفت.')}await loadJobs(false)}catch(error){notice(error.message,'error')}}
 async function clearJobs(){try{if(!confirm('همه کارهای تمام‌شده پاک شوند؟'))return;const d=await api('/api/jobs',{method:'DELETE'});notice(fa(d.deleted)+' کار پاک شد.');await loadJobs(false)}catch(error){notice(error.message,'error')}}
-async function importProfiles(){try{const profiles=JSON.parse($('importJson').value);const data=await api('/api/import-php',{method:'POST',body:JSON.stringify({profiles})});await refreshProfiles();notice(fa(data.imported)+' پروفایل درون‌ریزی شد.');output(data)}catch(error){notice(error.message,'error')}}
+async function importProfiles(){try{const file=$('profileImportFile').files[0];if(!file){$('profileImportFile').click();return}const raw=JSON.parse(await file.text()),full=Boolean(raw?.files||raw?.format==='scraper4-php-compatible'),data=await api(full?'/api/settings-import':'/api/import-php',{method:'POST',body:JSON.stringify(full?raw:{profiles:raw.profiles||raw})});if(full)await connect();else await refreshProfiles();$('profileImportStatus').textContent='✅ '+file.name+' با موفقیت بررسی و وارد شد.';notice(full?'فایل کامل تنظیمات درون‌ریزی شد.':fa(data.imported)+' پروفایل درون‌ریزی شد.');output(data);openResultModal('📥 گزارش درون‌ریزی فایل',data)}catch(error){$('profileImportStatus').textContent='❌ فایل قابل درون‌ریزی نبود: '+error.message;notice(error.message,'error');openResultModal('⚠️ خطای درون‌ریزی',{ok:false,error:error.message,recommendations:['مطمئن شوید فایل JSON معتبرِ profiles.json یا خروجی تنظیمات Scraper4 است.']})}}
 function subTab(name){document.querySelectorAll('.sub-tab').forEach(x=>x.classList.toggle('active',x.dataset.sub===name));document.querySelectorAll('.sub-pane').forEach(x=>x.hidden=x.dataset.panel!==name)}
 function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}const escAttr=esc;
-initMenu();initFields();$('hamburgerBtn').addEventListener('click',()=>drawer(true));$('drawerClose').addEventListener('click',()=>drawer(false));$('drawerOverlay').addEventListener('click',()=>drawer(false));$('drawerFull').addEventListener('click',()=>$('drawer').classList.toggle('full-drawer'));$('menuSections').addEventListener('click',event=>{const title=event.target.closest('.menu-title');if(title)return title.closest('.menu-section').classList.toggle('open');const button=event.target.closest('[data-ma]');if(button)menuAction(button.dataset.ma)});$('restoreFile').addEventListener('change',event=>{if(event.target.files[0]&&confirm('داده‌های بکاپ بازیابی شوند؟'))restoreFile(event.target.files[0])});$('csvImportFile').addEventListener('change',event=>{if(event.target.files[0])importCsv(event.target.files[0])});document.querySelectorAll('.main-tab').forEach(b=>b.addEventListener('click',()=>tab(b.dataset.tab)));document.querySelectorAll('.sub-tab').forEach(b=>b.addEventListener('click',()=>subTab(b.dataset.sub)));$('refreshAll').addEventListener('click',connect);$('newProfileBtn').addEventListener('click',()=>{clearForm();tab('selector')});$('clearForm').addEventListener('click',clearForm);$('saveBtn').addEventListener('click',()=>saveProfile(false));$('scrapeForm').addEventListener('click',()=>saveProfile(true));$('openVisual').addEventListener('click',openVisual);$('closeVisual').addEventListener('click',closeVisual);$('visualFrame').addEventListener('load',()=>{if($('visualFrame').src==='about:blank')return;$('visualLoading').hidden=true;$('visualFrame').hidden=false});$('visualModal').addEventListener('click',event=>{if(event.target===$('visualModal'))closeVisual()});window.addEventListener('message',visualMessage);$('suggestSelectors').addEventListener('click',suggestSelectorFields);$('suggestDetails').addEventListener('click',suggestDetailFields);$('testSelectors').addEventListener('click',testSelectors);$('loadProducts').addEventListener('click',loadProducts);$('productSearch').addEventListener('keydown',e=>{if(e.key==='Enter')loadProducts()});$('refreshJobs').addEventListener('click',()=>loadJobs());$('clearJobs').addEventListener('click',clearJobs);$('importBtn').addEventListener('click',importProfiles);$('profileList').addEventListener('click',e=>{const b=e.target.closest('[data-paction]');if(b)profileAction(b.dataset.paction,b.dataset.id)});$('jobs').addEventListener('click',e=>{const b=e.target.closest('[data-job-action]');if(b)jobAction(b.dataset.jobAction,b.dataset.id)});clearForm();connect();
+initMenu();initFields();$('hamburgerBtn').addEventListener('click',()=>drawer(true));$('drawerClose').addEventListener('click',()=>drawer(false));$('drawerOverlay').addEventListener('click',()=>drawer(false));$('drawerFull').addEventListener('click',()=>{const full=$('drawer').classList.toggle('full-drawer');$('drawerFull').classList.toggle('active',full);if(full)drawer(true)});$('csvExportMain').addEventListener('click',()=>menuAction('csv-export'));$('menuSections').addEventListener('click',event=>{const title=event.target.closest('.menu-title');if(title)return title.closest('.menu-section').classList.toggle('open');const aiTabButton=event.target.closest('[data-ai-tab]');if(aiTabButton)return aiTab(aiTabButton.dataset.aiTab);const button=event.target.closest('[data-ma]');if(button)menuAction(button.dataset.ma)});$('menuSections').addEventListener('change',event=>{const input=event.target;if(input.matches('[data-provider-toggle]')){const p=state.connections.ai.providers[Number(input.dataset.providerToggle)];if(p){p.enabled=input.checked;saveConnections().then(renderAiProviders).catch(e=>openResultModal('⚠️ خطای ذخیره',{ok:false,error:e.message}))}}else if(input.id==='aiProviderSel')fillAiModels('aiProviderSel','aiSingleModelSel');else if(input.id==='aiCandProvSel')fillAiModels('aiCandProvSel','aiCandModelSel')});$('restoreFile').addEventListener('change',event=>{if(event.target.files[0]&&confirm('داده‌های بکاپ بازیابی شوند؟'))restoreFile(event.target.files[0])});$('csvImportFile').addEventListener('change',event=>{if(event.target.files[0])importCsv(event.target.files[0])});$('aiImportFile').addEventListener('change',event=>{const file=event.target.files[0];if(file)importAiFile(file).catch(error=>openResultModal('⚠️ خطای فایل ارائه‌دهنده',{ok:false,error:error.message,recommendations:['فایل باید JSON معتبر و شامل providers باشد.']}));event.target.value=''});for(const id of ['sxFile','bkFile'])$(id).addEventListener('change',event=>{const file=event.target.files[0];if(file)restoreSettingsFile(file).catch(error=>openResultModal('⚠️ خطای بازیابی',{ok:false,error:error.message}));event.target.value=''});$('categoryImportFile').addEventListener('change',event=>{const file=event.target.files[0];if(!file)return;(async()=>{const raw=JSON.parse(await file.text()),d=await api('/api/category-learning/import',{method:'POST',body:JSON.stringify(raw)});$('catResult').textContent=JSON.stringify(d,null,2);openResultModal('⬆️ گزارش بازیابی یادگیری دسته‌بندی',d);notice(fa(d.imported)+' مورد بازیابی شد.')})().catch(error=>openResultModal('⚠️ خطای فایل یادگیری',{ok:false,error:error.message}));event.target.value=''});$('profileImportFile').addEventListener('change',event=>{$('profileImportStatus').textContent=event.target.files[0]?'فایل انتخاب‌شده: '+event.target.files[0].name:'هنوز فایلی انتخاب نشده است.'});document.querySelectorAll('.main-tab').forEach(b=>b.addEventListener('click',()=>tab(b.dataset.tab)));document.querySelectorAll('.sub-tab').forEach(b=>b.addEventListener('click',()=>subTab(b.dataset.sub)));$('refreshAll').addEventListener('click',connect);$('newProfileBtn').addEventListener('click',()=>{clearForm();tab('selector')});$('clearForm').addEventListener('click',clearForm);$('saveBtn').addEventListener('click',()=>saveProfile(false));$('scrapeForm').addEventListener('click',()=>saveProfile(true));$('openVisual').addEventListener('click',openVisual);$('closeVisual').addEventListener('click',closeVisual);$('visualFrame').addEventListener('load',()=>{if($('visualFrame').src==='about:blank')return;$('visualLoading').hidden=true;$('visualFrame').hidden=false});$('visualModal').addEventListener('click',event=>{if(event.target===$('visualModal'))closeVisual()});window.addEventListener('message',visualMessage);$('suggestSelectors').addEventListener('click',suggestSelectorFields);$('suggestDetails').addEventListener('click',suggestDetailFields);$('testSelectors').addEventListener('click',testSelectors);$('galMode').addEventListener('change',galModeChanged);$('testGallery').addEventListener('click',testGallery);document.querySelectorAll('[data-dest-target]').forEach(button=>button.addEventListener('click',()=>setDestinationTarget(button.dataset.destTarget,true)));$('destLoad').addEventListener('click',()=>{dest.page=1;loadDestination(true)});$('destReset').addEventListener('click',()=>{$('destSearch').value='';$('destShop').value=dest.target==='woo'?'default':'all';dest.page=1;dest.status='all';loadDestination(true)});$('destSearch').addEventListener('keydown',event=>{if(event.key==='Enter'){dest.page=1;loadDestination(true)}});$('destShop').addEventListener('change',()=>{dest.page=1;loadDestination(true)});$('destPerPage').addEventListener('change',()=>{dest.page=1;loadDestination(false)});$('destStatusPills').addEventListener('click',event=>{const button=event.target.closest('[data-dest-status]');if(button){dest.status=button.dataset.destStatus;dest.page=1;loadDestination(false)}});$('destProducts').addEventListener('change',event=>{const checkbox=event.target.closest('[data-dest-select]');if(checkbox){const key=checkbox.dataset.destSelect,product=destinationProductByKey(key);if(checkbox.checked&&dest.selected.size>=20){checkbox.checked=false;return notice('حداکثر ۲۰ محصول را در هر نوبت انتخاب کنید.','error')}if(checkbox.checked&&product)dest.selected.set(key,product);else dest.selected.delete(key);updateDestinationSelection()}});$('destProducts').addEventListener('click',event=>{const button=event.target.closest('[data-dest-action]');if(button)destinationCardAction(button.dataset.destAction,button.dataset.key).catch(error=>openResultModal('⚠️ خطای عملیات مقصد',{ok:false,error:error.message}))});$('destPrev').addEventListener('click',()=>{if(dest.page>1){dest.page--;loadDestination(false)}});$('destNext').addEventListener('click',()=>{if(dest.page<dest.totalPages){dest.page++;loadDestination(false)}});$('destClearSelection').addEventListener('click',()=>{dest.selected.clear();renderDestination()});$('destBulkPreview').addEventListener('click',()=>runDestinationBulk(false,false).catch(error=>openResultModal('⚠️ خطای پیش‌نمایش',{ok:false,error:error.message})));$('destBulkApply').addEventListener('click',()=>runDestinationBulk(true,false).catch(error=>openResultModal('⚠️ خطای ویرایش گروهی',{ok:false,error:error.message})));$('destBulkDeletePreview').addEventListener('click',()=>runDestinationBulk(false,true).catch(error=>openResultModal('⚠️ خطای پیش‌نمایش حذف گروهی',{ok:false,error:error.message})));$('destBulkDelete').addEventListener('click',()=>runDestinationBulk(true,true).catch(error=>openResultModal('⚠️ خطای حذف گروهی',{ok:false,error:error.message})));$('loadProducts').addEventListener('click',loadProducts);$('productSearch').addEventListener('keydown',e=>{if(e.key==='Enter')loadProducts()});$('refreshJobs').addEventListener('click',()=>loadJobs());$('clearJobs').addEventListener('click',clearJobs);$('importBtn').addEventListener('click',importProfiles);$('profileList').addEventListener('click',e=>{const b=e.target.closest('[data-paction]');if(b)profileAction(b.dataset.paction,b.dataset.id)});$('jobs').addEventListener('click',e=>{const b=e.target.closest('[data-job-action]');if(b)jobAction(b.dataset.jobAction,b.dataset.id)});setDestinationTarget('woo',false);clearForm();connect();
 `;
 
 // worker-src/maintenance.ts
@@ -3246,7 +3545,7 @@ async function retire(target, profileId, action, apply = false) {
     if (!item.remoteId) continue;
     try {
       if (target === "woo") await wooUpdate(item.remoteId, action === "trash" ? { status: "trash" } : { status: action === "draft" ? "draft" : "private" });
-      else await basalamUpdate(item.remoteId, { status: action === "trash" ? "archived" : action });
+      else await basalamUpdate(item.remoteId, { status: action === "trash" ? 4184 : 3790 });
       changed++;
     } catch (error) {
       failed.push({ title: item.title, error: msg(error) });
@@ -3255,6 +3554,7 @@ async function retire(target, profileId, action, apply = false) {
   return { ok: failed.length === 0, dryRun: false, changed, failed };
 }
 async function bulkEdit(target, input, apply = false) {
+  if (Array.isArray(input?.ids)) return destinationBulkEdit(target, input, apply);
   const rows2 = (await maintenanceRows(String(input.profileId || ""))).filter((x) => x.active).filter((x) => !input.query || norm2(x.title).includes(norm2(input.query))).slice(0, Math.min(1e3, Number(input.limit) || 200)), items = rows2.map((row) => {
     let title = String(row.title);
     if (input.prefix) title = String(input.prefix) + title;
@@ -3269,7 +3569,7 @@ async function bulkEdit(target, input, apply = false) {
     if (!item.remoteId) continue;
     try {
       const payload = { name: item.title };
-      if (item.price) target === "woo" ? payload.regular_price = String(item.price) : payload.price = item.price;
+      if (item.price) target === "woo" ? payload.regular_price = String(item.price) : payload.primary_price = item.price * 10;
       if (input.stock !== "" && input.stock != null) target === "woo" ? Object.assign(payload, { manage_stock: true, stock_quantity: Number(input.stock) }) : payload.stock = Number(input.stock);
       if (target === "woo") await wooUpdate(item.remoteId, payload);
       else await basalamUpdate(item.remoteId, payload);
@@ -3292,6 +3592,19 @@ async function photoFix(profileId, apply = false) {
   }
   return { ok: failed.length === 0, dryRun: false, changed, failed };
 }
+async function destinationCatalog(target, query = {}) {
+  const page = clamp(query.page, 1, 1e4, 1), perPage = clamp(query.perPage, 10, 100, 25), q = String(query.q || "").trim(), status = String(query.status || "all"), shopId = String(query.shopId || "all");
+  if (target === "woo") {
+    const result2 = await wooCatalog({ page, perPage, q, status }), counts2 = query.counts ? await wooStatusCounts() : void 0;
+    return { ok: true, target, page, perPage, q, status, shopId: "default", shops: [{ id: "default", name: "\u0641\u0631\u0648\u0634\u06AF\u0627\u0647 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633" }], ...result2, ...counts2 ? { counts: counts2 } : {}, priceUnit: "\u062A\u0648\u0645\u0627\u0646" };
+  }
+  const result = await basalamCatalog({ page, perPage, q, status, shopId }), counts = query.counts ? await basalamStatusCounts(shopId) : void 0;
+  return { ok: true, target, page, perPage, q, status, shopId, shops: (await basalamShops()).map((shop) => ({ id: shop.vendorId, name: shop.name, primary: shop.primary })), ...result, ...counts ? { counts } : {}, priceUnit: "\u062A\u0648\u0645\u0627\u0646", remotePriceUnit: "\u0631\u06CC\u0627\u0644", archiveInsteadOfDelete: true };
+}
+async function destinationProduct(target, id, shopId = "") {
+  if (!Number.isInteger(id) || id <= 0) throw Error("\u0634\u0646\u0627\u0633\u0647 \u0645\u062D\u0635\u0648\u0644 \u0646\u0627\u0645\u0639\u062A\u0628\u0631 \u0627\u0633\u062A.");
+  return target === "woo" ? wooGet(id) : basalamGet(id, shopId);
+}
 async function listDestinationProducts(target) {
   return target === "woo" ? wooProducts() : basalamProducts();
 }
@@ -3309,59 +3622,367 @@ async function findDestinationDuplicates(target) {
     rows2.push(item);
     groups.set(key2, rows2);
   }
-  return [...groups.entries()].filter(([, rows2]) => rows2.length > 1).map(([title, rows2]) => ({ title, count: rows2.length, items: rows2.map((x) => ({ id: x.id, name: x.name, status: x.status, sku: x.sku })) }));
+  return [...groups.entries()].filter(([, rows2]) => rows2.length > 1).map(([title, rows2]) => ({ title, count: rows2.length, items: rows2.map((x) => ({ id: x.id, name: x.name, status: x.status, sku: x.sku, shopId: x.shopId })) }));
 }
-async function destinationChangeStatus(target, id, status) {
+async function destinationUpdate(target, id, input, apply = false, shopId = "") {
+  const current2 = await destinationProduct(target, id, shopId), payload = directPayload(target, input, current2);
+  if (!Object.keys(payload).length) return { ok: true, dryRun: !apply, id, shopId: current2.shopId, changed: false, current: current2, changes: {} };
+  if (!apply) return { ok: true, dryRun: true, id, shopId: current2.shopId, changed: true, current: current2, changes: payload, summary: "\u067E\u06CC\u0634\u200C\u0646\u0645\u0627\u06CC\u0634 \u0627\u0633\u062A\u061B \u0686\u06CC\u0632\u06CC \u0631\u0648\u06CC \u0645\u0642\u0635\u062F \u062A\u063A\u06CC\u06CC\u0631 \u0646\u06A9\u0631\u062F." };
+  const raw2 = target === "woo" ? await wooUpdate(id, payload) : await basalamUpdate(id, payload, current2.shopId);
+  return { ok: true, dryRun: false, id, shopId: current2.shopId, changed: true, product: normalizeRemote(target, unwrapProduct(raw2), current2.shopId, current2.shopName) };
+}
+async function destinationChangeStatus(target, id, status, shopId = "") {
+  const allowed = target === "woo" ? ["publish", "draft", "private", "pending", "trash"] : ["2976", "3790", "3567", "3568", "4184"];
+  if (!allowed.includes(String(status))) throw Error("\u0648\u0636\u0639\u06CC\u062A \u0627\u0646\u062A\u062E\u0627\u0628\u200C\u0634\u062F\u0647 \u0645\u0639\u062A\u0628\u0631 \u0646\u06CC\u0633\u062A.");
   if (target === "woo") await wooUpdate(id, { status });
-  else await basalamUpdate(id, { status });
-  return { ok: true, id, status };
+  else await basalamUpdate(id, { status: Number(status) }, shopId);
+  return { ok: true, id, status, shopId: shopId || "default" };
 }
-async function destinationDelete(target, id, force = false) {
-  const c = await loadConnections();
+async function destinationDelete(target, id, force = false, shopId = "") {
   if (target === "woo") {
-    const x = c.woo, auth = basicAuth(x.key, x.secret), r = await safeFetch(`${x.url}/wp-json/wc/v3/products/${id}?force=${force ? "true" : "false"}`, { method: "DELETE", headers: { authorization: auth } }, 2e6);
-    if (!r.ok) throw Error(`Woo delete HTTP ${r.status}`);
-  } else {
-    const x = c.basalam, r = await safeFetch(`${x.api}/vendors/${encodeURIComponent(x.vendorId)}/products/${id}`, { method: "DELETE", headers: { authorization: `Bearer ${x.token}` } }, 2e6);
-    if (!r.ok) throw Error(`Basalam delete HTTP ${r.status}`);
+    const c = (await loadConnections()).woo, auth = basicAuth(c.key, c.secret), result = await fetchJson(`${wooBase(c)}/${id}?force=${force ? "true" : "false"}`, { method: "DELETE", headers: { authorization: auth } });
+    return { ok: true, id, deleted: true, force, product: result.body };
   }
-  return { ok: true, id, deleted: true };
+  await basalamUpdate(id, { status: 4184 }, shopId);
+  return { ok: true, id, deleted: false, archived: true, status: 4184, shopId: shopId || "default", message: "\u0628\u0627\u0633\u0644\u0627\u0645 \u062D\u0630\u0641 \u062F\u0627\u0626\u0645\u06CC \u0646\u062F\u0627\u0631\u062F\u061B \u0645\u062D\u0635\u0648\u0644 \u0628\u0627 \u0648\u0636\u0639\u06CC\u062A \u06F4\u06F1\u06F8\u06F4 \u0628\u0627\u06CC\u06AF\u0627\u0646\u06CC \u0634\u062F." };
+}
+async function destinationBulkEdit(target, input, apply = false) {
+  const refs = normalizeRefs(input.ids, input.shopId);
+  if (!refs.length) throw Error("\u0645\u062D\u0635\u0648\u0644\u06CC \u0627\u0646\u062A\u062E\u0627\u0628 \u0646\u0634\u062F\u0647 \u0627\u0633\u062A.");
+  if (refs.length > 20) throw Error("\u062F\u0631 Cloudflare Workers \u0628\u0631\u0627\u06CC \u0631\u0639\u0627\u06CC\u062A \u0633\u0642\u0641 \u062F\u0631\u062E\u0648\u0627\u0633\u062A\u200C\u0647\u0627\u06CC \u062E\u0627\u0631\u062C\u06CC\u060C \u0647\u0631 \u0646\u0648\u0628\u062A \u0648\u06CC\u0631\u0627\u06CC\u0634 \u062D\u062F\u0627\u06A9\u062B\u0631 \u06F2\u06F0 \u0645\u062D\u0635\u0648\u0644 \u0627\u0633\u062A. \u0627\u0646\u062A\u062E\u0627\u0628 \u0631\u0627 \u0628\u0647 \u0686\u0646\u062F \u0646\u0648\u0628\u062A \u062A\u0642\u0633\u06CC\u0645 \u06A9\u0646\u06CC\u062F.");
+  const ops = input.ops && typeof input.ops === "object" ? input.ops : input, items = [], updates = [], failures = [];
+  for (const ref of refs) try {
+    const current2 = await destinationProduct(target, ref.id, ref.shopId), built = bulkPayload(target, ops, current2), row = { id: ref.id, shopId: current2.shopId, title: current2.title, oldPrice: current2.price, ...built.summary };
+    if (ops.delete) {
+      row.action = target === "basalam" ? "\u0628\u0627\u06CC\u06AF\u0627\u0646\u06CC \u0628\u0627 \u0648\u0636\u0639\u06CC\u062A \u06F4\u06F1\u06F8\u06F4" : "\u062D\u0630\u0641" + (ops.force ? " \u0647\u0645\u06CC\u0634\u06AF\u06CC" : " \u0628\u0647 \u0632\u0628\u0627\u0644\u0647\u200C\u062F\u0627\u0646");
+      updates.push({ ref: { ...ref, shopId: current2.shopId }, payload: target === "basalam" ? { status: 4184 } : { delete: true, force: Boolean(ops.force) }, row });
+    } else if (Object.keys(built.payload).length) {
+      row.action = "\u0648\u06CC\u0631\u0627\u06CC\u0634";
+      updates.push({ ref: { ...ref, shopId: current2.shopId }, payload: built.payload, row });
+    } else row.action = "\u0628\u062F\u0648\u0646 \u062A\u063A\u06CC\u06CC\u0631";
+    items.push(row);
+  } catch (error) {
+    const row = { id: ref.id, shopId: ref.shopId, error: msg(error) };
+    items.push(row);
+    failures.push(row);
+  }
+  if (!apply) return { ok: failures.length === 0, dryRun: true, target, total: refs.length, changed: updates.filter((x) => !x.payload.delete).length, deleted: updates.filter((x) => x.payload.delete || x.payload.status === 4184 && ops.delete).length, skipped: refs.length - updates.length - failures.length, failed: failures.length, items, limit: 20, summary: "\u067E\u06CC\u0634\u200C\u0646\u0645\u0627\u06CC\u0634 \u06A9\u0627\u0645\u0644 \u0634\u062F\u061B \u0647\u06CC\u0686 \u062A\u063A\u06CC\u06CC\u0631\u06CC \u0631\u0648\u06CC \u0645\u0642\u0635\u062F \u0627\u0639\u0645\u0627\u0644 \u0646\u0634\u062F." };
+  const applied = await applyBulk(target, updates), failed = [...failures, ...applied.failed];
+  for (const failure of applied.failed) {
+    const row = items.find((item) => item.id === failure.id && item.shopId === failure.shopId);
+    if (row) row.error = failure.error;
+  }
+  return { ok: failed.length === 0, dryRun: false, target, total: refs.length, changed: applied.changed, deleted: applied.deleted, skipped: refs.length - updates.length - failures.length, failed: failed.length, items, limit: 20, archiveInsteadOfDelete: target === "basalam" };
+}
+async function applyBulk(target, updates) {
+  let changed = 0, deleted = 0;
+  const failed = [];
+  if (target === "basalam") {
+    const groups = /* @__PURE__ */ new Map();
+    for (const item of updates) {
+      const rows2 = groups.get(item.ref.shopId) || [];
+      rows2.push(item);
+      groups.set(item.ref.shopId, rows2);
+    }
+    for (const [shopId, rows2] of groups) try {
+      await basalamBatchUpdate(shopId, rows2.map((item) => ({ id: item.ref.id, ...item.payload })));
+      for (const item of rows2) item.payload.status === 4184 && item.row.action?.includes("\u0628\u0627\u06CC\u06AF\u0627\u0646\u06CC") ? deleted++ : changed++;
+    } catch {
+      for (const item of rows2) try {
+        await basalamUpdate(item.ref.id, item.payload, shopId);
+        item.payload.status === 4184 && item.row.action?.includes("\u0628\u0627\u06CC\u06AF\u0627\u0646\u06CC") ? deleted++ : changed++;
+      } catch (error) {
+        failed.push({ id: item.ref.id, shopId, error: msg(error) });
+      }
+    }
+    return { changed, deleted, failed };
+  }
+  for (const item of updates) try {
+    if (item.payload.delete) {
+      await destinationDelete("woo", item.ref.id, item.payload.force);
+      deleted++;
+    } else {
+      await wooUpdate(item.ref.id, item.payload);
+      changed++;
+    }
+  } catch (error) {
+    failed.push({ id: item.ref.id, shopId: "default", error: msg(error) });
+  }
+  return { changed, deleted, failed };
+}
+function directPayload(target, input, current2) {
+  const payload = {};
+  if (input.title !== void 0 && String(input.title).trim() && String(input.title).trim() !== current2.title) payload[target === "woo" ? "name" : "name"] = String(input.title).trim().slice(0, target === "woo" ? 300 : 120);
+  if (input.price !== void 0 && input.price !== "" && Number.isFinite(Number(input.price))) {
+    const price = Math.max(0, Math.round(Number(input.price)));
+    if (price !== current2.price) payload[target === "woo" ? "regular_price" : "primary_price"] = target === "woo" ? String(price) : price * 10;
+  }
+  if (input.stock !== void 0 && input.stock !== "" && Number.isFinite(Number(input.stock))) {
+    const stock = Math.max(0, Math.round(Number(input.stock)));
+    target === "woo" ? Object.assign(payload, { manage_stock: true, stock_quantity: stock, stock_status: stock > 0 ? "instock" : "outofstock" }) : payload.stock = stock;
+  }
+  if (input.status !== void 0 && String(input.status)) Object.assign(payload, statusPayload(target, String(input.status)));
+  if (input.shortDescription !== void 0) payload[target === "woo" ? "short_description" : "brief"] = String(input.shortDescription).slice(0, target === "woo" ? 2e4 : 250);
+  if (input.description !== void 0) payload.description = String(input.description).slice(0, 1e5);
+  if (input.sku !== void 0 && target === "woo") payload.sku = String(input.sku).slice(0, 100);
+  if (input.categoryId !== void 0 && Number(input.categoryId) > 0) target === "woo" ? payload.categories = [{ id: Number(input.categoryId) }] : payload.category_id = Number(input.categoryId);
+  if (target === "basalam") {
+    for (const key2 of ["preparation_days", "weight", "package_weight"]) if (input[key2] !== void 0 && Number(input[key2]) >= 0) payload[key2] = Number(input[key2]);
+  }
+  return payload;
+}
+function bulkPayload(target, ops, current2) {
+  const payload = {}, summary = {};
+  if (ops.price && typeof ops.price === "object") {
+    const next = applyPrice(String(ops.price.op || ""), String(ops.price.val ?? ""), current2.price);
+    if (next !== null && next !== current2.price) {
+      payload[target === "woo" ? "regular_price" : "primary_price"] = target === "woo" ? String(next) : next * 10;
+      summary.newPrice = next;
+      summary.pricePercent = current2.price ? Math.round((next - current2.price) / current2.price * 1e3) / 10 : 0;
+    }
+  }
+  if (ops.stock !== void 0 && ops.stock !== "") {
+    const stock = Math.max(0, Math.round(Number(ops.stock) || 0));
+    target === "woo" ? Object.assign(payload, { manage_stock: true, stock_quantity: stock, stock_status: stock > 0 ? "instock" : "outofstock" }) : payload.stock = stock;
+    summary.stock = stock;
+  }
+  if (ops.status) Object.assign(payload, statusPayload(target, String(ops.status)));
+  if (ops.description !== void 0 || ops.desc !== void 0) payload.description = String(ops.description ?? ops.desc).slice(0, 1e5);
+  if (ops.shortDescription !== void 0 || ops.short_desc !== void 0) payload[target === "woo" ? "short_description" : "brief"] = String(ops.shortDescription ?? ops.short_desc).slice(0, target === "woo" ? 2e4 : 250);
+  const title = (String(ops.titlePrefix ?? ops.title_prefix ?? "") + current2.title + String(ops.titleSuffix ?? ops.title_suffix ?? "")).trim();
+  if (title && title !== current2.title) {
+    payload.name = title.slice(0, target === "woo" ? 300 : 120);
+    summary.newTitle = title;
+  }
+  return { payload, summary };
+}
+function statusPayload(target, status) {
+  if (target === "woo") {
+    if (!["publish", "draft", "private", "pending", "trash"].includes(status)) throw Error("\u0648\u0636\u0639\u06CC\u062A \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u0646\u0627\u0645\u0639\u062A\u0628\u0631 \u0627\u0633\u062A.");
+    return { status };
+  }
+  const number = Number(status);
+  if (![2976, 3790, 3567, 3568, 4184].includes(number)) throw Error("\u0648\u0636\u0639\u06CC\u062A \u0628\u0627\u0633\u0644\u0627\u0645 \u0646\u0627\u0645\u0639\u062A\u0628\u0631 \u0627\u0633\u062A.");
+  return { status: number };
+}
+function applyPrice(op, value, current2) {
+  if (!["set", "inc", "dec"].includes(op)) return null;
+  const percent = value.trim().endsWith("%"), amount = Number(value.replace("%", "").replace(/,/g, ""));
+  if (!Number.isFinite(amount)) return null;
+  let next = op === "set" ? amount : op === "inc" ? current2 + (percent ? current2 * amount / 100 : amount) : current2 - (percent ? current2 * amount / 100 : amount);
+  return Math.max(0, Math.round(next));
 }
 async function remoteProducts(target) {
   return listDestinationProducts(target);
 }
 async function wooProducts() {
-  const c = (await loadConnections()).woo;
-  if (!c.url || !c.key || !c.secret) throw Error("\u0627\u062A\u0635\u0627\u0644 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
-  const auth = basicAuth(c.key, c.secret), out = [];
+  const out = [];
   for (let page = 1; page <= 100; page++) {
-    const r = await safeFetch(`${c.url}/wp-json/wc/v3/products?per_page=100&page=${page}&status=any`, { headers: { authorization: auth, accept: "application/json" } }, 1e7), data = await r.json();
-    if (!r.ok) throw Error(`Woo HTTP ${r.status}`);
-    for (const x of data) out.push({ id: Number(x.id), name: String(x.name || ""), sku: String(x.sku || ""), images: x.images || [], status: String(x.status || ""), price: Number(x.price || 0), raw: x });
-    if (data.length < 100) break;
+    const data = await wooCatalog({ page, perPage: 100, q: "", status: "all" });
+    out.push(...data.products);
+    if (page >= data.totalPages) break;
   }
   return out;
 }
 async function basalamProducts() {
-  const c = (await loadConnections()).basalam;
-  if (!c.token || !c.vendorId) throw Error("\u0627\u062A\u0635\u0627\u0644 \u0628\u0627\u0633\u0644\u0627\u0645 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
   const out = [];
-  for (let page = 1; page <= 100; page++) {
-    const r = await safeFetch(`${c.api}/vendors/${encodeURIComponent(c.vendorId)}/products?per_page=100&page=${page}`, { headers: { authorization: `Bearer ${c.token}`, accept: "application/json" } }, 1e7), body = await r.json();
-    if (!r.ok) throw Error(`Basalam HTTP ${r.status}`);
-    const data = body.data || body.products || body.results || body.items || [];
-    for (const x of data) out.push({ id: Number(x.id), name: String(x.name || x.title || ""), sku: String(x.sku || ""), images: x.photos || x.images || (x.photo ? [x.photo] : []), status: String(x.status || ""), price: Number(x.price || 0), raw: x });
-    if (data.length < 100) break;
+  for (const shop of await basalamShops()) for (let page = 1; page <= 100; page++) {
+    const data = await basalamCatalog({ page, perPage: 100, q: "", status: "all", shopId: shop.vendorId });
+    out.push(...data.products);
+    if (page >= data.totalPages) break;
   }
   return out;
 }
-async function wooUpdate(id, payload) {
-  const c = (await loadConnections()).woo, auth = basicAuth(c.key, c.secret), r = await safeFetch(`${c.url}/wp-json/wc/v3/products/${id}`, { method: "PUT", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(payload) }, 3e6);
-  if (!r.ok) throw Error(`Woo update ${id}: HTTP ${r.status}`);
+async function wooCatalog(query) {
+  const c = (await loadConnections()).woo;
+  if (!c.url || !c.key || !c.secret) throw Error("\u0627\u062A\u0635\u0627\u0644 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
+  const auth = basicAuth(c.key, c.secret);
+  if (/^\d+$/.test(query.q)) {
+    try {
+      const product = await wooGet(Number(query.q));
+      return { products: [product], total: 1, totalPages: 1, foundBy: "id" };
+    } catch {
+    }
+  }
+  const url = new URL(wooBase(c));
+  url.searchParams.set("page", String(query.page));
+  url.searchParams.set("per_page", String(query.perPage));
+  url.searchParams.set("status", wooListStatus(query.status));
+  if (query.q) url.searchParams.set("search", query.q);
+  const result = await fetchJson(url.toString(), { headers: { authorization: auth, accept: "application/json" } }), rows2 = Array.isArray(result.body) ? result.body : [];
+  return { products: rows2.map((row) => normalizeRemote("woo", row, "default", "\u0641\u0631\u0648\u0634\u06AF\u0627\u0647 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633")), total: Number(result.response.headers.get("x-wp-total") || rows2.length), totalPages: Math.max(1, Number(result.response.headers.get("x-wp-totalpages") || 1)), foundBy: query.q ? "search" : "list" };
 }
-async function basalamUpdate(id, payload) {
-  const c = (await loadConnections()).basalam, r = await safeFetch(`${c.api}/vendors/${encodeURIComponent(c.vendorId)}/products/${id}`, { method: "PATCH", headers: { authorization: `Bearer ${c.token}`, "content-type": "application/json" }, body: JSON.stringify(payload) }, 3e6);
-  if (!r.ok) throw Error(`Basalam update ${id}: HTTP ${r.status}`);
+async function wooStatusCounts() {
+  const statuses = ["all", "publish", "draft", "pending", "private", "trash"], entries = await Promise.all(statuses.map(async (status) => {
+    try {
+      const result = await wooCatalog({ page: 1, perPage: 10, q: "", status });
+      return [status, result.total];
+    } catch {
+      return [status, 0];
+    }
+  }));
+  return Object.fromEntries(entries);
+}
+async function wooGet(id) {
+  const c = (await loadConnections()).woo, auth = basicAuth(c.key, c.secret), result = await fetchJson(`${wooBase(c)}/${id}`, { headers: { authorization: auth, accept: "application/json" } });
+  return normalizeRemote("woo", unwrapProduct(result.body), "default", "\u0641\u0631\u0648\u0634\u06AF\u0627\u0647 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633");
+}
+async function wooUpdate(id, payload) {
+  const c = (await loadConnections()).woo, auth = basicAuth(c.key, c.secret), result = await fetchJson(`${wooBase(c)}/${id}`, { method: "PUT", headers: { authorization: auth, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(payload) });
+  return result.body;
+}
+function wooBase(c) {
+  if (!c.url || !c.key || !c.secret) throw Error("\u0627\u062A\u0635\u0627\u0644 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
+  return c.url.replace(/\/$/, "") + "/wp-json/wc/v3/products";
+}
+function wooListStatus(status) {
+  return ["publish", "draft", "pending", "private", "trash"].includes(status) ? status : "any";
+}
+async function basalamCatalog(query) {
+  const shops = selectShops(await basalamShops(), query.shopId);
+  if (!shops.length) throw Error("\u063A\u0631\u0641\u0647\u0654 \u0628\u0627\u0633\u0644\u0627\u0645 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F.");
+  if (/^\d+$/.test(query.q)) {
+    for (const shop of shops) try {
+      const product = await basalamGet(Number(query.q), shop.vendorId);
+      return { products: [product], total: 1, totalPages: 1, foundBy: "id" };
+    } catch {
+    }
+  }
+  const products = [];
+  let total = 0, totalPages = 1, successful = 0;
+  for (const shop of shops) {
+    const url = new URL(`${(await loadConnections()).basalam.api}/vendors/${encodeURIComponent(shop.vendorId)}/products`);
+    url.searchParams.set("page", String(query.page));
+    url.searchParams.set("per_page", String(query.perPage));
+    for (const value of basalamStatuses(query.status)) url.searchParams.append("statuses", value);
+    if (query.q) url.searchParams.set("title", query.q);
+    try {
+      const result = await basalamFetch(shop, url.toString()), rows2 = rowsFrom(result.body);
+      products.push(...rows2.map((row) => normalizeRemote("basalam", row, shop.vendorId, shop.name)));
+      total += Number(result.body?.total_count ?? result.body?.meta?.total ?? rows2.length);
+      totalPages = Math.max(totalPages, Number(result.body?.total_page ?? result.body?.meta?.last_page ?? 1));
+      successful++;
+    } catch (error) {
+      if (shops.length === 1) throw error;
+    }
+  }
+  if (!successful) throw Error("\u062F\u0631\u06CC\u0627\u0641\u062A \u0641\u0647\u0631\u0633\u062A \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0627\u0632 \u0647\u06CC\u0686 \u063A\u0631\u0641\u0647\u200C\u0627\u06CC \u0645\u0648\u0641\u0642 \u0646\u0628\u0648\u062F.");
+  return { products, total, totalPages, foundBy: query.q ? "title" : "list" };
+}
+async function basalamStatusCounts(shopId) {
+  const statuses = ["all", "2976", "3790", "3567", "3568", "4184"], entries = await Promise.all(statuses.map(async (status) => {
+    try {
+      const result = await basalamCatalog({ page: 1, perPage: 10, q: "", status, shopId });
+      return [status, result.total];
+    } catch {
+      return [status, 0];
+    }
+  }));
+  return Object.fromEntries(entries);
+}
+async function basalamGet(id, shopId = "") {
+  const shops = selectShops(await basalamShops(), shopId || "all");
+  let last;
+  for (const shop of shops) {
+    for (const endpoint of [`${(await loadConnections()).basalam.api}/products/${id}`, `${(await loadConnections()).basalam.api}/vendors/${encodeURIComponent(shop.vendorId)}/products/${id}`]) try {
+      const result = await basalamFetch(shop, endpoint), raw2 = unwrapProduct(result.body);
+      if (Number(raw2?.id || 0) > 0) return normalizeRemote("basalam", raw2, shop.vendorId, shop.name);
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw last instanceof Error ? last : Error(`\u0645\u062D\u0635\u0648\u0644 \u0628\u0627\u0633\u0644\u0627\u0645 #${id} \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F.`);
+}
+async function basalamUpdate(id, payload, shopId = "") {
+  const shops = selectShops(await basalamShops(), shopId || "all");
+  if (!shops.length) throw Error("\u063A\u0631\u0641\u0647\u0654 \u0628\u0627\u0633\u0644\u0627\u0645 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F.");
+  let last;
+  for (const shop of shops) {
+    for (const endpoint of [`${(await loadConnections()).basalam.api}/products/${id}`, `${(await loadConnections()).basalam.api}/vendors/${encodeURIComponent(shop.vendorId)}/products/${id}`]) try {
+      return (await basalamFetch(shop, endpoint, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) })).body;
+    } catch (error) {
+      last = error;
+      if (!(error instanceof DestinationHttpError && error.status === 404)) throw error;
+    }
+  }
+  throw last instanceof Error ? last : Error(`\u0648\u06CC\u0631\u0627\u06CC\u0634 \u0645\u062D\u0635\u0648\u0644 \u0628\u0627\u0633\u0644\u0627\u0645 #${id} \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062F.`);
+}
+async function basalamBatchUpdate(shopId, items) {
+  const shop = (await basalamShops()).find((item) => item.vendorId === shopId);
+  if (!shop) throw Error("\u063A\u0631\u0641\u0647\u0654 \u0628\u0627\u0633\u0644\u0627\u0645 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F.");
+  return (await basalamFetch(shop, `${(await loadConnections()).basalam.api}/vendors/${encodeURIComponent(shop.vendorId)}/products/batch-updates`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ data: items }) })).body;
+}
+async function basalamFetch(shop, url, init = {}) {
+  return fetchJson(url, { ...init, headers: { authorization: `Bearer ${shop.token}`, accept: "application/json", ...init.headers } });
+}
+async function basalamShops() {
+  const c = (await loadConnections()).basalam;
+  if (!c.token || !c.vendorId) throw Error("\u0627\u062A\u0635\u0627\u0644 \u0628\u0627\u0633\u0644\u0627\u0645 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
+  const rows2 = [{ name: "\u063A\u0631\u0641\u0647 \u067E\u06CC\u0634\u200C\u0641\u0631\u0636", token: c.token, vendorId: String(c.vendorId), pricePercent: 0, primary: true }, ...c.shops.filter((shop) => shop.token && shop.vendorId).map((shop) => ({ ...shop, vendorId: String(shop.vendorId), primary: false }))], seen = /* @__PURE__ */ new Set();
+  return rows2.filter((row) => row.vendorId && !seen.has(row.vendorId) && (seen.add(row.vendorId), true));
+}
+function selectShops(shops, shopId) {
+  return !shopId || shopId === "all" || shopId === "0" ? shops : shops.filter((shop) => shop.vendorId === String(shopId));
+}
+function basalamStatuses(status) {
+  const map = { all: ["2976", "3790", "3567", "3568", "4184", "2977", "2978", "3248", "4221"], active: ["2976"], inactive: ["3790"], not_approved: ["3567"], pending: ["3568"], archived: ["4184"] };
+  return map[status] || ([2976, 3790, 3567, 3568, 4184].includes(Number(status)) ? [String(status)] : map.all);
+}
+function normalizeRemote(target, x, shopId, shopName) {
+  const revision = x?.revision?.data || {}, rawStatus = x?.status ?? revision.status ?? "", status = typeof rawStatus === "object" ? String(rawStatus.value ?? rawStatus.id ?? "") : String(rawStatus || ""), statusLabel = typeof rawStatus === "object" ? String(rawStatus.name || rawStatus.description || status) : target === "basalam" ? { "2976": "\u0641\u0639\u0627\u0644", "3790": "\u063A\u06CC\u0631\u0641\u0639\u0627\u0644", "3567": "\u062A\u0623\u06CC\u06CC\u062F \u0646\u0634\u062F\u0647", "3568": "\u062F\u0631 \u0627\u0646\u062A\u0638\u0627\u0631 \u062A\u0623\u06CC\u06CC\u062F", "4184": "\u0628\u0627\u06CC\u06AF\u0627\u0646\u06CC" }[status] || status : status;
+  const rawImages = target === "woo" ? x?.images || [] : x?.photos || revision.photos || x?.images || (x?.photo || revision.photo ? [x?.photo || revision.photo] : []), images = (Array.isArray(rawImages) ? rawImages : []).map(imageValue).filter(Boolean), priceRaw = Number(x?.primary_price ?? revision.primary_price ?? x?.price ?? x?.regular_price ?? 0) || 0, category = x?.categories?.[0] || revision.category || x?.category || {}, reasons = [rawStatus?.description, ...(x?.revision?.rejection_reasons || []).flatMap((item) => [item?.name, item?.description])].filter(Boolean).join(" | ");
+  const title = String(x?.name || x?.title || revision.title || "");
+  return { id: Number(x?.id) || 0, name: title, title, sku: String(x?.sku || revision.sku || ""), images, image: images[0] || "", status, statusLabel, price: target === "basalam" ? Math.round(priceRaw / 10) : priceRaw, priceRaw, stock: numberOrNull(x?.stock_quantity ?? x?.inventory ?? revision.inventory ?? x?.stock), category: String(category?.name || category?.title || x?.category_name || ""), categoryId: Number(category?.id || x?.category_id) || null, shopId, shopName, rejectionReason: reasons, shortDescription: String(x?.short_description || x?.brief || revision.brief || ""), description: String(x?.description || revision.description || ""), raw: x };
+}
+function imageValue(value) {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  return String(value.src || value.original || value.lg || value.md || value.sm || value.xs || value.url || "");
+}
+function rowsFrom(body) {
+  const rows2 = body?.data ?? body?.products ?? body?.results ?? body?.items ?? body;
+  return Array.isArray(rows2) ? rows2 : [];
+}
+function unwrapProduct(body) {
+  return body?.data?.product ?? body?.data ?? body?.product ?? body ?? {};
+}
+function numberOrNull(value) {
+  return value === null || value === void 0 || value === "" ? null : Number.isFinite(Number(value)) ? Number(value) : null;
+}
+function normalizeRefs(ids, shopId = "") {
+  const seen = /* @__PURE__ */ new Set(), rows2 = [];
+  for (const value of ids || []) {
+    const id = Number(typeof value === "object" ? value.id : value), shop = String(typeof value === "object" ? value.shopId || value.shop_id || shopId : shopId || "");
+    if (!Number.isInteger(id) || id <= 0) continue;
+    const key2 = `${shop}:${id}`;
+    if (!seen.has(key2)) {
+      seen.add(key2);
+      rows2.push({ id, shopId: shop });
+    }
+  }
+  return rows2;
+}
+function clamp(value, min, max, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
+}
+var DestinationHttpError = class extends Error {
+  constructor(status, body, url) {
+    super(`HTTP ${status} \u0627\u0632 ${new URL(url).hostname}: ${String(body?.message || body?.error || JSON.stringify(body)).slice(0, 300)}`);
+    this.status = status;
+    this.body = body;
+  }
+};
+async function fetchJson(url, init = {}) {
+  const response = await safeFetch(url, init, 1e7), text = await response.text();
+  let body;
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { message: text.slice(0, 500) };
+  }
+  if (!response.ok) throw new DestinationHttpError(response.status, body, url);
+  return { response, body };
 }
 var msg = (e) => e instanceof Error ? e.message : String(e);
 
@@ -3509,358 +4130,740 @@ function msg2(error) {
 }
 
 // worker-src/scraper.ts
+var DEFAULT_CONTAINER = '.product, li.product, article.product, .product-item, .product-card, [data-product-id], [itemtype*="Product"]';
+var FALLBACKS = {
+  title: '.woocommerce-loop-product__title, .product-title, .product-name, [itemprop="name"], h1, h2, h3',
+  price: '.price ins, .sale-price, [itemprop="price"], .price, .amount, [data-price]',
+  link: 'a.woocommerce-LoopProduct-link, a.product-link, a[href*="/product/"], a[href*="/products/"], a[href]',
+  image: 'img.wp-post-image, img.product-image, [itemprop="image"], picture img, img, source',
+  sku: '[data-sku], [itemprop="sku"], .sku'
+};
+var DETAIL_KEYS = ["shortDesc", "sku", "category", "tags", "weight", "stock", "brand"];
+var IMAGE_ATTRS = ["data-zoom-image", "data-large_image", "data-large-image", "data-full", "data-src", "data-lazy-src", "data-original", "src", "content", "href"];
+var LINK_ATTRS = ["data-href", "href", "data-url", "data-link", "data-product-url", "data-product-link", "content"];
+function onclickUrl(element) {
+  return element.getAttribute("onclick")?.match(/(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/i)?.[1] || "";
+}
+var TITLE_ATTRS = ["data-title", "title", "aria-label", "content"];
+var PRICE_ATTRS = ["data-price", "data-regular-price", "data-sale-price", "content", "value"];
+var SKU_ATTRS = ["data-sku", "data-product-sku", "content", "value"];
+async function sourceKey(value) {
+  return (await sha2562(value)).slice(0, 32);
+}
 async function sourceText(url, indirect = false, maxBytes = 8e6) {
   if (!indirect) return safeText(url, maxBytes);
   const network = (await loadConnections()).ai.network;
   if (network.mode !== "worker") throw new Error("\u0627\u062A\u0635\u0627\u0644 \u063A\u06CC\u0631\u0645\u0633\u062A\u0642\u06CC\u0645 \u0645\u0628\u062F\u0623 \u062F\u0631 Cloudflare \u0641\u0642\u0637 \u0628\u0627 \u0631\u0648\u0634 Worker URL \u067E\u0634\u062A\u06CC\u0628\u0627\u0646\u06CC \u0645\u06CC\u200C\u0634\u0648\u062F.");
   return safeTextViaWorker(url, network.workerUrl, maxBytes);
 }
-var normalize = (value) => value.replace(/[\u200c\u200d\u200e\u200f\ufeff]/g, " ").replace(/\s+/g, " ").trim();
-var absolute = (value, base) => {
+function toAbsoluteUrl(value, base) {
   try {
-    const url = new URL(value, base);
-    return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+    return new URL(value, base).href;
   } catch {
     return "";
   }
-};
-function numberFromText(value) {
-  const en = value.replace(/[۰-۹]/g, (d) => String("\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9".indexOf(d))).replace(/[٠-٩]/g, (d) => String("\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669".indexOf(d))), groups = en.match(/\d[\d,٬.\s]*/g) || [];
-  return groups.length ? Math.max(...groups.map((item) => Number(item.replace(/\D/g, "")) || 0)) : 0;
 }
+var TRACKING_PARAMS = /^(utm_.+|fbclid|gclid|yclid|mc_cid|mc_eid|ref|ref_.*|source)$/i;
 function selectorParts(selector) {
-  const out = [];
+  const out = [], value = String(selector || "");
   let part = "", round = 0, square = 0, quote = "";
-  for (const ch of selector) {
+  for (const char of value) {
     if (quote) {
-      part += ch;
-      if (ch === quote) quote = "";
+      part += char;
+      if (char === quote) quote = "";
       continue;
     }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      part += ch;
-    } else if (ch === "(") {
+    if (char === '"' || char === "'") {
+      quote = char;
+      part += char;
+    } else if (char === "(") {
       round++;
-      part += ch;
-    } else if (ch === ")") {
-      round--;
-      part += ch;
-    } else if (ch === "[") {
+      part += char;
+    } else if (char === ")") {
+      round = Math.max(0, round - 1);
+      part += char;
+    } else if (char === "[") {
       square++;
-      part += ch;
-    } else if (ch === "]") {
-      square--;
-      part += ch;
-    } else if (ch === "," && !round && !square) {
+      part += char;
+    } else if (char === "]") {
+      square = Math.max(0, square - 1);
+      part += char;
+    } else if (char === "," && !round && !square) {
       if (part.trim()) out.push(part.trim());
       part = "";
-    } else part += ch;
+    } else part += char;
   }
   if (part.trim()) out.push(part.trim());
   return out;
 }
-function scoped(container, field) {
-  return selectorParts(container).flatMap((a) => selectorParts(field).map((b) => `${a} ${b}`));
+function multilineSelectorParts(selector) {
+  return String(selector || "").split(/[\r\n|]+/).flatMap((part) => selectorParts(part)).filter(Boolean);
 }
-function attr(element, names) {
+function safeOn(rewriter, selector, handler) {
+  try {
+    rewriter.on(selector, handler);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function cleanText(value) {
+  return normalizeDigits(String(value || "")).replace(/[\u200c\u200e\u200f\u202a-\u202e]/g, " ").replace(/\s+/g, " ").trim();
+}
+function normalizeDigits(value) {
+  return String(value || "").replace(/[۰-۹]/g, (d) => String("\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9".indexOf(d))).replace(/[٠-٩]/g, (d) => String("\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669".indexOf(d)));
+}
+function firstAttribute(element, names) {
   for (const name of names) {
     const value = element.getAttribute(name);
-    if (value && value !== "#") return value;
+    if (value && value.trim()) return value.trim();
   }
   return "";
 }
-var CardHandler = class {
-  active = [];
-  products;
-  base;
-  constructor(products, base) {
-    this.products = products;
-    this.base = base;
+function srcsetValue(value) {
+  const items = String(value || "").split(",").map((part) => part.trim()).filter(Boolean).map((part) => {
+    const match2 = part.match(/^(\S+)(?:\s+(\d+(?:\.\d+)?)(w|x))?$/i);
+    return { url: match2?.[1] || part.split(/\s+/)[0], score: Number(match2?.[2] || 1) * (match2?.[3]?.toLowerCase() === "x" ? 1e4 : 1) };
+  }).filter((item) => item.url);
+  return items.sort((a, b) => b.score - a.score)[0]?.url || "";
+}
+function elementValue(field, element, text = "") {
+  if (field === "link") return firstAttribute(element, LINK_ATTRS) || onclickUrl(element);
+  if (field === "image") return firstAttribute(element, IMAGE_ATTRS) || srcsetValue(element.getAttribute("data-srcset") || element.getAttribute("srcset") || "");
+  if (field === "title") return cleanText(text) || firstAttribute(element, TITLE_ATTRS);
+  if (field === "price") return cleanText(text) || firstAttribute(element, PRICE_ATTRS);
+  if (field === "sku") return cleanText(text) || firstAttribute(element, SKU_ATTRS);
+  return cleanText(text);
+}
+function canonicalUrl(value, baseUrl, stripAllQuery = false) {
+  const raw2 = String(value || "").trim();
+  if (!raw2 || /^(?:#|javascript:|mailto:|tel:|data:|blob:)/i.test(raw2)) return "";
+  const absolute = toAbsoluteUrl(raw2.replace(/&amp;/gi, "&"), baseUrl);
+  if (!absolute || !/^(https?):/i.test(absolute)) return "";
+  try {
+    const url = new URL(absolute);
+    url.hash = "";
+    if (stripAllQuery) url.search = "";
+    else for (const key2 of [...url.searchParams.keys()]) if (TRACKING_PARAMS.test(key2)) url.searchParams.delete(key2);
+    url.pathname = url.pathname.replace(/\/{2,}/g, "/");
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return absolute;
   }
+}
+function imageUrl(value, baseUrl) {
+  const raw2 = String(value || "").trim();
+  if (!raw2 || /^(data:|blob:|javascript:|#)/i.test(raw2) || /(?:placeholder|spacer|transparent|loading)(?:[-_.]|$)/i.test(raw2)) return "";
+  const absolute = toAbsoluteUrl(raw2.replace(/&amp;/gi, "&"), baseUrl);
+  return /^(https?):/i.test(absolute) ? absolute : "";
+}
+function galleryKey(url) {
+  return url.replace(/-\d{2,4}x\d{2,4}(?=\.[a-z]{3,5}(?:[?#]|$))/i, "").replace(/[?#].*$/, "");
+}
+function addGalleryImage(images, raw2, baseUrl, max = 30) {
+  const url = imageUrl(raw2, baseUrl);
+  if (url && images.length < Math.max(1, Math.min(30, max)) && !images.some((existing) => galleryKey(existing) === galleryKey(url))) images.push(url);
+}
+function linkScore(value) {
+  if (!value || /^(javascript:|mailto:|tel:|#)/i.test(value)) return -1e3;
+  let score = 0;
+  if (/\/products?\//i.test(value)) score += 40;
+  if (/[?&](?:add-to-cart|remove_item)=|\/cart\/?|wishlist|compare/i.test(value)) score -= 200;
+  return score;
+}
+function setCardValue(card, field, value, rank, baseUrl) {
+  let clean2 = String(value || "").trim();
+  if (field === "link") {
+    clean2 = canonicalUrl(clean2, baseUrl);
+    rank += linkScore(clean2);
+  } else if (field === "image") clean2 = imageUrl(clean2, baseUrl);
+  else clean2 = cleanText(clean2);
+  if (!clean2) return;
+  const previous = card.values[field];
+  if (!previous || rank > previous.rank) card.values[field] = { value: clean2, rank };
+}
+var CardHandler = class {
+  constructor(output, baseUrl) {
+    this.output = output;
+    this.baseUrl = baseUrl;
+  }
+  stack = [];
   element(element) {
-    const draft = { title: normalize(element.getAttribute("title") || ""), priceText: "", url: absolute(attr(element, ["href", "data-href", "data-url", "data-product-url"]), this.base), image: absolute(attr(element, ["data-src", "data-lazy-src", "data-original", "src"]), this.base) };
-    this.active.push(draft);
+    const card = { values: {} };
+    this.stack.push(card);
+    setCardValue(card, "link", firstAttribute(element, LINK_ATTRS), 15, this.baseUrl);
+    setCardValue(card, "image", firstAttribute(element, IMAGE_ATTRS) || srcsetValue(element.getAttribute("srcset") || ""), 15, this.baseUrl);
+    setCardValue(card, "title", firstAttribute(element, TITLE_ATTRS), 15, this.baseUrl);
+    setCardValue(card, "price", firstAttribute(element, PRICE_ATTRS), 15, this.baseUrl);
+    setCardValue(card, "sku", firstAttribute(element, SKU_ATTRS), 15, this.baseUrl);
     element.onEndTag(() => {
-      const index = this.active.lastIndexOf(draft);
-      if (index >= 0) this.active.splice(index, 1);
-      if (draft.title || draft.url) this.products.push(draft);
+      const ended = this.stack.pop();
+      if (ended) this.output.push(ended);
     });
   }
   current() {
-    return this.active[this.active.length - 1];
+    return this.stack[this.stack.length - 1];
   }
 };
-var TextFieldHandler = class {
-  card;
-  field;
-  captures = [];
-  constructor(card, field) {
-    this.card = card;
+var CardFieldHandler = class {
+  constructor(cards, field, rank, baseUrl) {
+    this.cards = cards;
     this.field = field;
+    this.rank = rank;
+    this.baseUrl = baseUrl;
   }
+  captures = [];
   element(element) {
-    const draft = this.card.current();
-    if (!draft) return;
-    const capture = { draft, text: "" };
+    const card = this.cards.current();
+    if (!card || this.captures.some((capture2) => capture2.card === card)) return;
+    const immediate = elementValue(this.field, element);
+    if (immediate) setCardValue(card, this.field, immediate, this.rank + 2, this.baseUrl);
+    const capture = { card, text: "", element };
     this.captures.push(capture);
     element.onEndTag(() => {
-      const i = this.captures.lastIndexOf(capture);
-      if (i >= 0) this.captures.splice(i, 1);
-      const value = normalize(capture.text);
-      if (value && !draft[this.field]) draft[this.field] = value;
+      setCardValue(card, this.field, elementValue(this.field, element, capture.text), this.rank, this.baseUrl);
+      const index = this.captures.indexOf(capture);
+      if (index >= 0) this.captures.splice(index, 1);
     });
   }
-  text(text) {
-    const capture = this.captures[this.captures.length - 1];
-    if (capture) capture.text += text.text;
+  text(chunk) {
+    for (const capture of this.captures) capture.text += chunk.text;
   }
 };
-var AttributeHandler = class {
-  card;
-  field;
-  base;
-  names;
-  constructor(card, field, base, names) {
-    this.card = card;
-    this.field = field;
-    this.base = base;
-    this.names = names;
-  }
-  element(element) {
-    const draft = this.card.current();
-    if (!draft || draft[this.field]) return;
-    let value = attr(element, this.names);
-    if (!value && this.field === "image") {
-      value = (element.getAttribute("srcset") || "").split(",")[0]?.trim().split(/\s+/)[0] || "";
-    }
-    draft[this.field] = absolute(value, this.base);
-  }
-};
-var JsonLdHandler = class {
-  chunks = [];
-  active = "";
-  element(element) {
-    this.active = "";
-    element.onEndTag(() => {
-      if (this.active.trim()) this.chunks.push(this.active);
-      this.active = "";
-    });
-  }
-  text(text) {
-    this.active += text.text;
-  }
-};
-async function parseCards(html, base, selectors) {
-  const drafts = [], card = new CardHandler(drafts, base), rewriter = new HTMLRewriter().on(selectors.container, card), title = new TextFieldHandler(card, "title"), price = new TextFieldHandler(card, "priceText"), link = new AttributeHandler(card, "url", base, ["href", "data-href", "data-url", "data-product-url"]), image = new AttributeHandler(card, "image", base, ["data-src", "data-lazy-src", "data-original", "src"]), jsonLd = new JsonLdHandler();
-  for (const selector of scoped(selectors.container, selectors.title)) rewriter.on(selector, title);
-  for (const selector of scoped(selectors.container, selectors.price)) rewriter.on(selector, price);
-  for (const selector of scoped(selectors.container, selectors.link)) rewriter.on(selector, link);
-  for (const selector of scoped(selectors.container, selectors.image)) rewriter.on(selector, image);
-  rewriter.on('script[type="application/ld+json"]', jsonLd);
-  await rewriter.transform(new Response(html)).text();
-  if (!drafts.length) for (const block of jsonLd.chunks) try {
-    const root = JSON.parse(block), items = [];
-    const walk = (value) => {
-      if (!value || typeof value !== "object") return;
-      if (String(value["@type"] || "").toLowerCase().includes("product")) items.push(value);
-      for (const child of Object.values(value)) if (typeof child === "object") walk(child);
-    };
-    walk(root);
-    for (const item of items) {
-      const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers || {}, rawImage = Array.isArray(item.image) ? item.image[0] : item.image || "";
-      drafts.push({ title: normalize(String(item.name || "")), priceText: String(offer.price || ""), url: absolute(String(item.url || ""), base), image: absolute(String(rawImage), base) });
-    }
-  } catch {
-  }
+function numberFromText(value) {
+  const normalized = normalizeDigits(value).replace(/[٬،]/g, ",").replace(/\u00a0/g, " ");
+  const matches = normalized.match(/\d[\d\s,._]{0,30}\d|\d/g) || [];
+  const numbers = matches.map((raw2) => {
+    let token = raw2.trim().replace(/\s/g, "");
+    if (/^\d+[.,]\d{1,2}$/.test(token) && !/[٬،]/.test(raw2)) return Number(token.replace(",", "."));
+    token = token.replace(/[^\d]/g, "");
+    return Number(token || 0);
+  }).filter((n) => Number.isFinite(n) && n >= 0);
+  return numbers.length ? Math.max(...numbers) : 0;
+}
+async function parseJsonLdProducts(html, baseUrl) {
   const products = [];
-  for (const draft of drafts) {
-    if (!draft.title && !draft.url) continue;
-    const key2 = (await sha2562(draft.url || draft.title)).slice(0, 32);
-    products.push({ sourceKey: key2, title: draft.title.slice(0, 300), price: numberFromText(draft.priceText), priceText: draft.priceText, url: draft.url, image: draft.image, images: draft.image ? [draft.image] : [], sourcePage: base, scrapedAt: (/* @__PURE__ */ new Date()).toISOString() });
+  for (const match2 of html.matchAll(/<script\b[^>]*type=["']application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const data = JSON.parse(match2[1].replace(/^\s*<!--|-->\s*$/g, ""));
+      const walk = (node, insideVariant = false) => {
+        if (!node || typeof node !== "object") return;
+        if (Array.isArray(node)) {
+          node.forEach((item2) => walk(item2, insideVariant));
+          return;
+        }
+        const item = node, types = Array.isArray(item["@type"]) ? item["@type"] : [item["@type"]];
+        if (!insideVariant && types.some((type) => String(type || "").toLowerCase() === "product")) {
+          const offers = Array.isArray(item.offers) ? item.offers[0] : item.offers || {};
+          const image = Array.isArray(item.image) ? item.image[0] : typeof item.image === "object" ? item.image?.url : item.image, imageValue2 = imageUrl(String(image || ""), baseUrl);
+          const title = cleanText(item.name || "");
+          const url = canonicalUrl(item.url || item["@id"] || "", baseUrl), availability = String(offers.availability || "");
+          if (title || url) products.push({ sourceKey: "", title, price: numberFromText(String(offers.price || offers.lowPrice || "")), priceText: cleanText(String(offers.price || offers.lowPrice || "")), url, image: imageValue2, images: imageValue2 ? [imageValue2] : [], sku: cleanText(String(item.sku || item.mpn || "")), brand: cleanText(String(typeof item.brand === "object" ? item.brand?.name : item.brand || "")), shortDesc: cleanText(String(item.description || "")), longDesc: "", stock: /outofstock|soldout|discontinued/i.test(availability) ? 0 : void 0, weight: void 0, category: cleanText(String(item.category || "")), tags: cleanText(Array.isArray(item.keywords) ? item.keywords.join(", ") : String(item.keywords || "")), variations: [], variationGroups: [], variationPrices: {}, sourcePage: baseUrl, scrapedAt: (/* @__PURE__ */ new Date()).toISOString() });
+        }
+        for (const [key2, value] of Object.entries(item)) walk(value, insideVariant || key2 === "hasVariant" || key2 === "isVariantOf");
+      };
+      walk(data);
+    } catch {
+    }
   }
   return products;
 }
-var NextLinkHandler = class {
-  url = "";
-  base;
-  constructor(base) {
-    this.base = base;
+async function parseCards(html, baseUrl, selectors) {
+  const cards = [];
+  const cardHandler = new CardHandler(cards, baseUrl);
+  const rewriter = new HTMLRewriter();
+  const containers = selectorParts(selectors.container || DEFAULT_CONTAINER);
+  let validContainer = false;
+  for (const selector of containers) validContainer = safeOn(rewriter, selector, cardHandler) || validContainer;
+  if (!validContainer) throw new Error("\u0633\u0644\u06A9\u062A\u0648\u0631 \u0638\u0631\u0641 \u0645\u062D\u0635\u0648\u0644 \u0646\u0627\u0645\u0639\u062A\u0628\u0631 \u0627\u0633\u062A.");
+  for (const field of ["title", "price", "link", "image", "sku"]) {
+    const configured = selectorParts(selectors[field]);
+    for (const selector of configured) {
+      safeOn(rewriter, selector, new CardFieldHandler(cardHandler, field, 100, baseUrl));
+      if (field === "image") for (const suffix of ["img", "source", "a"]) safeOn(rewriter, `${selector} ${suffix}`, new CardFieldHandler(cardHandler, field, 99, baseUrl));
+      if (field === "link") for (const suffix of ["a[href]", "[data-href]", "[data-url]", "[data-link]", "[data-product-url]", "[data-product-link]", "[onclick]"]) safeOn(rewriter, `${selector} ${suffix}`, new CardFieldHandler(cardHandler, field, 99, baseUrl));
+    }
+    for (const selector of selectorParts(FALLBACKS[field])) safeOn(rewriter, selector, new CardFieldHandler(cardHandler, field, 10, baseUrl));
+  }
+  try {
+    await rewriter.transform(new Response(html, { headers: { "content-type": "text/html; charset=UTF-8" } })).text();
+  } catch (error) {
+    throw new Error(`\u067E\u0631\u062F\u0627\u0632\u0634 HTML \u0641\u0647\u0631\u0633\u062A \u0634\u06A9\u0633\u062A \u062E\u0648\u0631\u062F: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const output = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const card of cards) {
+    let title = card.values.title?.value || "", url = card.values.link?.value || "", image = card.values.image?.value || "";
+    const priceText = card.values.price?.value || "", sku = card.values.sku?.value || "";
+    if (!title && url) {
+      try {
+        title = decodeURIComponent(new URL(url).pathname.split("/").filter(Boolean).pop() || "").replace(/[-_]+/g, " ");
+      } catch {
+      }
+    }
+    if (!title && !url) continue;
+    const identity = url ? canonicalUrl(url, baseUrl, true) : `${title}|${priceText}`;
+    const key2 = await sourceKey(identity);
+    if (seen.has(key2)) continue;
+    seen.add(key2);
+    output.push({ sourceKey: key2, title, price: numberFromText(priceText), priceText, url, image, images: image ? [image] : [], sku, shortDesc: "", longDesc: "", brand: "", stock: void 0, weight: void 0, category: "", variations: [], variationGroups: [], variationPrices: {}, sourcePage: baseUrl, scrapedAt: (/* @__PURE__ */ new Date()).toISOString() });
+  }
+  const structured = await parseJsonLdProducts(html, baseUrl), byKey = /* @__PURE__ */ new Map(), byUrl = /* @__PURE__ */ new Map(), bySku = /* @__PURE__ */ new Map(), byTitle = /* @__PURE__ */ new Map();
+  const addUnique = (map, key2, product) => {
+    if (key2) map.set(key2, map.has(key2) ? null : product);
+  };
+  for (const product of structured) {
+    const identity = product.url ? canonicalUrl(product.url, baseUrl, true) : `${product.title}|${product.priceText}`;
+    product.sourceKey = await sourceKey(identity);
+    byKey.set(product.sourceKey, product);
+    addUnique(byUrl, canonicalUrl(product.url, baseUrl, true), product);
+    addUnique(bySku, cleanText(product.sku || "").toLowerCase(), product);
+    addUnique(byTitle, cleanText(product.title).toLowerCase(), product);
+  }
+  for (let index = 0; index < output.length; index++) {
+    const product = output[index], urlKey = canonicalUrl(product.url, baseUrl, true), skuKey = cleanText(product.sku || "").toLowerCase(), titleKey = cleanText(product.title).toLowerCase();
+    const fallback = byKey.get(product.sourceKey) || byUrl.get(urlKey) || bySku.get(skuKey) || byTitle.get(titleKey) || null;
+    if (!fallback) continue;
+    const merged = { ...fallback, ...product, title: product.title || fallback.title, price: product.price > 0 ? product.price : fallback.price, priceText: product.priceText || fallback.priceText, url: product.url || fallback.url, image: product.image || fallback.image, images: product.images.length ? product.images : fallback.images, shortDesc: product.shortDesc || fallback.shortDesc, longDesc: product.longDesc || fallback.longDesc, sku: product.sku || fallback.sku, brand: product.brand || fallback.brand, stock: product.stock ?? fallback.stock, weight: product.weight ?? fallback.weight, category: product.category || fallback.category, tags: product.tags || fallback.tags, variations: product.variations?.length ? product.variations : fallback.variations, variationGroups: product.variationGroups?.length ? product.variationGroups : fallback.variationGroups, variationPrices: Object.keys(product.variationPrices || {}).length ? product.variationPrices : fallback.variationPrices };
+    const mergedIdentity = merged.url ? canonicalUrl(merged.url, baseUrl, true) : `${merged.title}|${merged.priceText}`;
+    merged.sourceKey = await sourceKey(mergedIdentity);
+    output[index] = merged;
+    byKey.delete(fallback.sourceKey);
+  }
+  const final = [], finalSeen = /* @__PURE__ */ new Set();
+  for (const product of [...output, ...byKey.values()]) if (!finalSeen.has(product.sourceKey)) {
+    finalSeen.add(product.sourceKey);
+    final.push(product);
+  }
+  return final;
+}
+var DETAIL_ATTRS = { shortDesc: ["data-description", "data-summary", "content", "title", "aria-label"], sku: SKU_ATTRS, category: ["data-category", "data-category-name", "content", "title"], tags: ["data-tags", "data-keywords", "content"], weight: ["data-weight", "data-product-weight", "content", "value"], stock: ["data-stock", "data-quantity", "data-stock-quantity", "content", "value"], brand: ["data-brand", "data-brand-name", "content", "title"] };
+var ScalarHandler = class {
+  constructor(key2, values) {
+    this.key = key2;
+    this.values = values;
+  }
+  captures = [];
+  element(element) {
+    if (this.values.get(this.key) || this.captures.length) return;
+    const immediate = firstAttribute(element, DETAIL_ATTRS[this.key] || ["data-value", "content", "value"]);
+    if (immediate) this.values.set(this.key, cleanText(immediate));
+    const capture = { text: "", element };
+    this.captures.push(capture);
+    element.onEndTag(() => {
+      if (!this.values.get(this.key)) {
+        const value = cleanText(capture.text);
+        if (value) this.values.set(this.key, value);
+      }
+      const index = this.captures.indexOf(capture);
+      if (index >= 0) this.captures.splice(index, 1);
+    });
+  }
+  text(chunk) {
+    for (const capture of this.captures) capture.text += chunk.text;
+  }
+};
+var DetailImageHandler = class {
+  constructor(result, baseUrl) {
+    this.result = result;
+    this.baseUrl = baseUrl;
   }
   element(element) {
-    if (this.url) return;
-    this.url = absolute(attr(element, ["href", "data-href", "data-url"]), this.base);
+    if (this.result.mainImage) return;
+    const value = firstAttribute(element, IMAGE_ATTRS) || srcsetValue(element.getAttribute("data-srcset") || element.getAttribute("srcset") || "");
+    this.result.mainImage = imageUrl(value, this.baseUrl);
+  }
+};
+var GalleryHandler = class {
+  constructor(images, baseUrl, max = 30) {
+    this.images = images;
+    this.baseUrl = baseUrl;
+    this.max = max;
+  }
+  element(element) {
+    const candidates = [...IMAGE_ATTRS.map((attr) => element.getAttribute(attr) || ""), element.getAttribute("href") || "", element.getAttribute("content") || "", srcsetValue(element.getAttribute("data-srcset") || ""), srcsetValue(element.getAttribute("srcset") || "")];
+    for (const candidate of candidates) addGalleryImage(this.images, candidate, this.baseUrl, this.max);
+  }
+};
+var LongDescriptionHandler = class {
+  constructor(marker) {
+    this.marker = marker;
+  }
+  element(element) {
+    element.before(`<!--${this.marker}:START-->`, { html: true });
+    element.after(`<!--${this.marker}:END-->`, { html: true });
+  }
+};
+var SanitizeHandler = class {
+  element(element) {
+    for (const [name] of Array.from(element.attributes)) if (/^on/i.test(name) || name.toLowerCase() === "srcdoc") element.removeAttribute(name);
+    for (const name of ["href", "src", "data-src"]) {
+      const value = element.getAttribute(name);
+      if (value && /^\s*(?:javascript|data\s*:\s*text\/html)/i.test(value)) element.removeAttribute(name);
+    }
+  }
+};
+var RemoveHandler = class {
+  element(element) {
+    element.remove();
+  }
+};
+function variationName(element) {
+  return cleanText(firstAttribute(element, ["data-attribute_name", "data-attribute-name", "data-name", "name", "data-label", "aria-label"]));
+}
+var VariationContext = class {
+  stack = [];
+  current() {
+    return this.stack[this.stack.length - 1] || "";
+  }
+};
+var VariationScopeHandler = class {
+  constructor(context) {
+    this.context = context;
+  }
+  element(element) {
+    const name = variationName(element);
+    this.context.stack.push(name);
+    element.onEndTag(() => this.context.stack.pop());
+  }
+};
+function mergeVariation(result, element, text, baseUrl, inheritedName = "") {
+  const attrs = Object.fromEntries(Array.from(element.attributes));
+  let json2 = {};
+  for (const key2 of ["data-product_variation", "data-variation", "data-product-variation"]) {
+    try {
+      if (attrs[key2]) json2 = JSON.parse(attrs[key2]);
+    } catch {
+    }
+  }
+  const name = variationName(element) || cleanText(String(json2.attribute_name || json2.name || "")) || inheritedName;
+  const explicitValue = firstAttribute(element, ["data-value", "value", "data-variation", "data-slug"]) || String(json2.variation || json2.value || "");
+  const tag = String(element.tagName || "").toLowerCase();
+  if (!name && !explicitValue && !["option", "button", "input"].includes(tag)) return;
+  const value = cleanText(explicitValue || text);
+  if (!value || /^(انتخاب|choose|select|لطفا)/i.test(value)) return;
+  const label = cleanText(text);
+  for (const item of [value, label]) if (item && item.length <= 180 && !result.variations.includes(item)) result.variations.push(item);
+  if (name) {
+    let group = result.variationGroups.find((group2) => group2.name === name);
+    if (!group) {
+      group = { name, values: [] };
+      result.variationGroups.push(group);
+    }
+    if (!group.values.includes(value)) group.values.push(value);
+  }
+  const price = numberFromText(String(json2.display_price || json2.price || firstAttribute(element, ["data-display_price", "data-display-price", "data-price", "data-regular-price", "data-sale-price"]) || text));
+  if (price > 0) {
+    result.variationPrices[value] = price;
+    if (label) result.variationPrices[label] = price;
+  }
+  const variationImage = String(json2.image?.full_src || json2.image?.src || json2.image || firstAttribute(element, IMAGE_ATTRS) || "");
+  addGalleryImage(result.images, variationImage, baseUrl);
+}
+var VariationHandler = class {
+  constructor(result, baseUrl, context) {
+    this.result = result;
+    this.baseUrl = baseUrl;
+    this.context = context;
+  }
+  captures = [];
+  element(element) {
+    const capture = { element, text: "" };
+    this.captures.push(capture);
+    element.onEndTag(() => {
+      mergeVariation(this.result, element, capture.text, this.baseUrl, this.context.current());
+      const index = this.captures.indexOf(capture);
+      if (index >= 0) this.captures.splice(index, 1);
+    });
+  }
+  text(chunk) {
+    for (const capture of this.captures) capture.text += chunk.text;
+  }
+};
+function extractMarkedFragment(html, marker) {
+  const start = `<!--${marker}:START-->`, end = `<!--${marker}:END-->`, from = html.indexOf(start);
+  if (from < 0) return "";
+  const to = html.indexOf(end, from + start.length);
+  return to < 0 ? "" : html.slice(from + start.length, to).trim();
+}
+function stripUnsafeHtml(html) {
+  return html.replace(/<(script|style|iframe|object|embed|form)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "").replace(/<(script|style|iframe|object|embed|form)\b[^>]*\/?\s*>/gi, "").replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "").replace(/\s+(href|src|srcdoc)\s*=\s*(["'])\s*(?:javascript|data\s*:\s*text\/html)[\s\S]*?\2/gi, "");
+}
+async function parseDetailPage(html, baseUrl, selectors) {
+  const result = { shortDesc: "", longDesc: "", sku: "", brand: "", stock: "", weight: "", category: "", tags: "", mainImage: "", images: [], variations: [], variationGroups: [], variationPrices: {} };
+  const values = /* @__PURE__ */ new Map(), rewriter = new HTMLRewriter();
+  for (const key2 of DETAIL_KEYS) for (const selector of selectorParts(selectors[key2])) safeOn(rewriter, selector, new ScalarHandler(key2, values));
+  const marker = `SCRAPER4_${Math.random().toString(36).slice(2)}`;
+  for (const selector of selectorParts(selectors.longDesc)) {
+    safeOn(rewriter, selector, new LongDescriptionHandler(marker));
+    for (const suffix of ["script", "style", "iframe", "object", "embed", "form"]) safeOn(rewriter, `${selector} ${suffix}`, new RemoveHandler());
+    safeOn(rewriter, `${selector} *`, new SanitizeHandler());
+  }
+  const detailImage = new DetailImageHandler(result, baseUrl);
+  for (const selector of selectorParts(selectors.detailImage)) {
+    safeOn(rewriter, selector, detailImage);
+    for (const suffix of ["img", "source", "a[href]", "[data-src]", "[data-large_image]", "[data-zoom-image]"]) safeOn(rewriter, `${selector} ${suffix}`, detailImage);
+  }
+  const galleryMax = Math.max(1, Math.min(30, Math.trunc(Number(selectors.galleryMax) || 30)));
+  const galleryImages = [], gallery = new GalleryHandler(galleryImages, baseUrl, galleryMax);
+  for (const selector of multilineSelectorParts(selectors.gallery)) {
+    safeOn(rewriter, selector, gallery);
+    for (const suffix of ["img", "source", "a", "meta", "[data-src]", "[data-zoom-image]"]) safeOn(rewriter, `${selector} ${suffix}`, gallery);
+  }
+  const variationContext = new VariationContext();
+  for (const selector of multilineSelectorParts(selectors.variations)) {
+    safeOn(rewriter, `${selector} select`, new VariationScopeHandler(variationContext));
+    safeOn(rewriter, selector, new VariationHandler(result, baseUrl, variationContext));
+    for (const suffix of ["option", "button", "input", "[data-value]", "[data-variation]", "[data-product_variation]"]) safeOn(rewriter, `${selector} ${suffix}`, new VariationHandler(result, baseUrl, variationContext));
+  }
+  let transformed = "";
+  try {
+    transformed = await rewriter.transform(new Response(html, { headers: { "content-type": "text/html; charset=UTF-8" } })).text();
+  } catch (error) {
+    throw new Error(`\u067E\u0631\u062F\u0627\u0632\u0634 HTML \u062C\u0632\u0626\u06CC\u0627\u062A \u0634\u06A9\u0633\u062A \u062E\u0648\u0631\u062F: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  for (const key2 of DETAIL_KEYS) result[key2] = values.get(key2) || "";
+  const includeGallery = multilineSelectorParts(selectors.gallery).length > 0;
+  result.longDesc = stripUnsafeHtml(extractMarkedFragment(transformed, marker));
+  if (includeGallery) for (const image of result.images) addGalleryImage(galleryImages, image, baseUrl, galleryMax);
+  result.images = galleryImages;
+  applyJsonLdDetail(html, baseUrl, result, galleryMax, includeGallery);
+  if (selectors.gallerySkipFirst && result.images.length) result.images = result.images.slice(1);
+  result.variations = [...new Set(result.variations.map(cleanText).filter(Boolean))];
+  result.variationGroups = result.variationGroups.filter((group) => group.name && group.values.length).map((group) => ({ ...group, values: [...new Set(group.values.map(cleanText).filter(Boolean))] }));
+  return result;
+}
+function applyJsonLdDetail(html, baseUrl, result, galleryMax = 30, includeGallery = true) {
+  const imageValue2 = (raw2) => String(typeof raw2 === "object" ? raw2?.url || raw2?.contentUrl || raw2?.["@id"] || "" : raw2 || "");
+  const addVariant = (variant) => {
+    if (!variant || typeof variant !== "object") return;
+    const groups = [];
+    for (const key2 of ["color", "size", "material", "pattern"]) {
+      const value = cleanText(String(variant[key2] || ""));
+      if (value) groups.push([key2, value]);
+    }
+    const properties = Array.isArray(variant.additionalProperty) ? variant.additionalProperty : [variant.additionalProperty];
+    for (const property of properties) if (property && typeof property === "object") {
+      const name = cleanText(String(property.name || property.propertyID || "\u0648\u06CC\u0698\u06AF\u06CC")), value = cleanText(String(property.value || property.valueReference?.name || ""));
+      if (value) groups.push([name, value]);
+    }
+    if (!groups.length && variant.isVariantOf) {
+      const value = cleanText(String(variant.name || ""));
+      if (value) groups.push(["\u062A\u0646\u0648\u0639", value]);
+    }
+    const offer = Array.isArray(variant.offers) ? variant.offers[0] : variant.offers || {}, price = numberFromText(String(offer.price || offer.lowPrice || offer.highPrice || ""));
+    for (const [name, value] of groups) {
+      if (!result.variations.includes(value)) result.variations.push(value);
+      let group = result.variationGroups.find((item) => item.name === name);
+      if (!group) {
+        group = { name, values: [] };
+        result.variationGroups.push(group);
+      }
+      if (!group.values.includes(value)) group.values.push(value);
+      if (price > 0) result.variationPrices[value] = price;
+    }
+    if (includeGallery) {
+      const images = Array.isArray(variant.image) ? variant.image : [variant.image];
+      for (const raw2 of images) addGalleryImage(result.images, imageValue2(raw2), baseUrl, galleryMax);
+    }
+  };
+  for (const match2 of html.matchAll(/<script\b[^>]*type=["']application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)) try {
+    const root = JSON.parse(match2[1].replace(/^\s*<!--|-->\s*$/g, "")), queue = [root];
+    while (queue.length) {
+      const node = queue.shift();
+      if (!node || typeof node !== "object") continue;
+      if (Array.isArray(node)) {
+        queue.push(...node);
+        continue;
+      }
+      queue.push(...Object.values(node).filter((value) => value && typeof value === "object"));
+      const types = (Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]]).map((type) => String(type || "").toLowerCase());
+      if (!types.includes("product") && !types.includes("productgroup")) continue;
+      if (types.includes("product")) {
+        if (!result.sku) result.sku = cleanText(String(node.sku || node.mpn || ""));
+        if (!result.brand) result.brand = cleanText(String(typeof node.brand === "object" ? node.brand?.name : node.brand || ""));
+        if (!result.category) result.category = cleanText(String(node.category || ""));
+        if (!result.tags) result.tags = cleanText(Array.isArray(node.keywords) ? node.keywords.join(", ") : String(node.keywords || ""));
+        if (!result.shortDesc) result.shortDesc = cleanText(String(node.description || ""));
+        if (!result.weight) result.weight = cleanText(String(typeof node.weight === "object" ? node.weight.value || node.weight.valueReference?.value || "" : node.weight || ""));
+        const offer = Array.isArray(node.offers) ? node.offers[0] : node.offers || {}, availability = String(offer.availability || "");
+        if (!result.stock && /outofstock|soldout|discontinued/i.test(availability)) result.stock = "0";
+        const images = Array.isArray(node.image) ? node.image : [node.image];
+        if (!result.mainImage) for (const raw2 of images) {
+          const candidate = imageUrl(imageValue2(raw2), baseUrl);
+          if (candidate) {
+            result.mainImage = candidate;
+            break;
+          }
+        }
+        if (includeGallery) for (const raw2 of images) addGalleryImage(result.images, imageValue2(raw2), baseUrl, galleryMax);
+        if (node.isVariantOf) addVariant(node);
+      }
+      const variants = Array.isArray(node.hasVariant) ? node.hasVariant : [node.hasVariant];
+      for (const variant of variants) addVariant(variant);
+    }
+  } catch {
+  }
+}
+function hasDetailSelectors(selectors) {
+  return [...DETAIL_KEYS, "longDesc", "detailImage", "gallery", "variations"].some((key2) => String(selectors[key2] || "").trim().length > 0);
+}
+async function scrapeDetails(product, selectors, indirect = false, maxBytes = 4e6) {
+  if (!product.url || !hasDetailSelectors(selectors)) return product;
+  const { text } = await sourceText(product.url, indirect, maxBytes);
+  const detail = await parseDetailPage(text, product.url, selectors);
+  const mainImage = detail.mainImage || product.image || "", images = [...new Set([mainImage, ...detail.images].filter(Boolean))];
+  return { ...product, shortDesc: detail.shortDesc || product.shortDesc, longDesc: detail.longDesc || product.longDesc, sku: detail.sku || product.sku, brand: detail.brand || product.brand, stock: detail.stock ? numberFromText(detail.stock) : product.stock, weight: detail.weight ? numberFromText(detail.weight) : product.weight, category: detail.category || product.category, tags: detail.tags || product.tags, images, image: mainImage || images[0] || product.image, variations: detail.variations.length ? detail.variations : product.variations || [], variationGroups: detail.variationGroups.length ? detail.variationGroups : product.variationGroups || [], variationPrices: Object.keys(detail.variationPrices).length ? detail.variationPrices : product.variationPrices || {} };
+}
+async function extractVariations(html, baseUrl, selector) {
+  const parsed = await parseDetailPage(html, baseUrl, { variations: selector });
+  return { variations: parsed.variations, variationGroups: parsed.variationGroups, variationPrices: parsed.variationPrices, images: parsed.images };
+}
+async function extractSelectorValues(html, baseUrl, selector, type) {
+  if (type === "variations") {
+    const result = await extractVariations(html, baseUrl, selector);
+    return result.variations || [];
+  }
+  const values = [];
+  class ValueHandler {
+    captures = [];
+    element(element) {
+      if (type === "link") {
+        const value = canonicalUrl(firstAttribute(element, LINK_ATTRS) || onclickUrl(element), baseUrl);
+        if (value) values.push(value);
+        return;
+      }
+      if (type === "image") {
+        const value = imageUrl(firstAttribute(element, IMAGE_ATTRS) || srcsetValue(element.getAttribute("srcset") || ""), baseUrl);
+        if (value) values.push(value);
+        return;
+      }
+      const capture = { element, text: "" };
+      this.captures.push(capture);
+      element.onEndTag(() => {
+        const value = cleanText(capture.text) || firstAttribute(element, [...TITLE_ATTRS, ...PRICE_ATTRS, ...SKU_ATTRS]);
+        if (value) values.push(value);
+        const i = this.captures.indexOf(capture);
+        if (i >= 0) this.captures.splice(i, 1);
+      });
+    }
+    text(chunk) {
+      for (const capture of this.captures) capture.text += chunk.text;
+    }
+  }
+  const rewriter = new HTMLRewriter(), handler = new ValueHandler();
+  let valid = false;
+  for (const part of selectorParts(selector)) valid = safeOn(rewriter, part, handler) || valid;
+  if (!valid) throw new Error("\u0633\u0644\u06A9\u062A\u0648\u0631 \u0646\u0627\u0645\u0639\u062A\u0628\u0631 \u0627\u0633\u062A.");
+  await rewriter.transform(new Response(html)).text();
+  return [...new Set(values)].slice(0, 100);
+}
+var NextLinkHandler = class {
+  constructor(baseUrl) {
+    this.baseUrl = baseUrl;
+  }
+  url = "";
+  element(element) {
+    if (!this.url) this.url = canonicalUrl(firstAttribute(element, LINK_ATTRS), this.baseUrl);
   }
 };
 async function scrapeListPage(url, selectors, nextSelector = "", indirect = false) {
   const page = await sourceText(url, indirect), next = new NextLinkHandler(page.url);
-  if (nextSelector) await new HTMLRewriter().on(nextSelector, next).transform(new Response(page.text)).text();
-  let products = await parseCards(page.text, page.url, selectors);
-  if (!products.length) {
-    const fallbacks = [{ container: "li.product, article.product", title: 'h2, h3, h4, .product-title, [class*="title"]', price: ".price, .amount, ins", link: "a[href]", image: "img" }, { container: ".product-card, .product-item", title: "h2, h3, h4, .title", price: ".price, .amount", link: "a[href]", image: "img" }];
-    for (const fallback of fallbacks) {
-      products = await parseCards(page.text, page.url, fallback);
-      if (products.length) break;
-    }
+  if (nextSelector) {
+    const rewriter = new HTMLRewriter();
+    for (const selector of selectorParts(nextSelector)) safeOn(rewriter, selector, next);
+    await rewriter.transform(new Response(page.text)).text();
   }
+  const products = await parseCards(page.text, page.url, selectors);
   return { products, nextUrl: next.url, url: page.url };
 }
-var FirstText = class {
-  value = "";
-  capture = "";
-  inside = false;
-  element(element) {
-    if (this.value) return;
-    this.capture = "";
-    this.inside = true;
-    element.onEndTag(() => {
-      if (!this.value) this.value = normalize(this.capture);
-      this.inside = false;
-    });
+async function diagnoseExtraction(profile, urlOverride = "") {
+  const started = Date.now(), url = String(urlOverride || profile.url || "").trim(), stages = [], recommendations = [];
+  const add = (name, ok, summary, details = {}) => stages.push({ name, ok, summary, ...details });
+  if (!url) {
+    add("configuration", false, "\u0622\u062F\u0631\u0633 \u0645\u0628\u062F\u0623 \u062E\u0627\u0644\u06CC \u0627\u0633\u062A.");
+    return { ok: false, profileId: profile.id, url, stages, recommendations: ["\u0622\u062F\u0631\u0633 \u0635\u0641\u062D\u0647\u0654 \u0641\u0647\u0631\u0633\u062A \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0631\u0627 \u062F\u0631 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0648\u0627\u0631\u062F \u06A9\u0646\u06CC\u062F."] };
   }
-  text(text) {
-    if (this.inside) this.capture += text.text;
+  let page;
+  try {
+    page = await sourceText(url, Boolean(profile.networkIndirect));
+    const bytes = new TextEncoder().encode(page.text).byteLength, title = cleanText(page.text.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/<[^>]+>/g, " ") || "");
+    add("network", true, `\u0635\u0641\u062D\u0647 \u0628\u0627 ${bytes.toLocaleString("fa-IR")} \u0628\u0627\u06CC\u062A \u062F\u0631\u06CC\u0627\u0641\u062A \u0634\u062F.`, { requestedUrl: url, finalUrl: page.url, contentType: page.contentType, bytes, title, indirect: Boolean(profile.networkIndirect) });
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    add("network", false, text, { requestedUrl: url, indirect: Boolean(profile.networkIndirect) });
+    recommendations.push(/ضدربات|چالش/.test(text) ? "\u0633\u0627\u06CC\u062A \u0635\u0641\u062D\u0647\u0654 \u0636\u062F\u0631\u0628\u0627\u062A \u0628\u0631\u06AF\u0631\u062F\u0627\u0646\u062F\u0647 \u0627\u0633\u062A\u061B \u062F\u0633\u062A\u0631\u0633\u06CC Worker \u0631\u0627 \u062F\u0631 \u0645\u0628\u062F\u0623 \u0645\u062C\u0627\u0632 \u06A9\u0646\u06CC\u062F \u06CC\u0627 Worker \u0648\u0627\u0633\u0637 \u0645\u0639\u062A\u0628\u0631 \u062A\u0646\u0638\u06CC\u0645 \u06A9\u0646\u06CC\u062F." : "\u0622\u062F\u0631\u0633\u060C \u062F\u0633\u062A\u0631\u0633\u06CC \u0639\u0645\u0648\u0645\u06CC \u0633\u0627\u06CC\u062A \u0648 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0631\u0648\u0634 \u0627\u062A\u0635\u0627\u0644 \u0645\u0628\u062F\u0623 \u0631\u0627 \u0628\u0631\u0631\u0633\u06CC \u06A9\u0646\u06CC\u062F.");
+    return { ok: false, profileId: profile.id, url, startedAt: new Date(Date.now() - (Date.now() - started)).toISOString(), durationMs: Date.now() - started, stages, recommendations };
   }
-};
-var GalleryHandler = class {
-  images;
-  base;
-  constructor(images, base) {
-    this.images = images;
-    this.base = base;
+  let products = [];
+  try {
+    products = await parseCards(page.text, page.url, profile.selectors);
+    const complete = { title: products.filter((x) => x.title).length, price: products.filter((x) => x.price > 0).length, link: products.filter((x) => x.url).length, image: products.filter((x) => x.image).length, sku: products.filter((x) => x.sku).length };
+    add("list-extraction", products.length > 0, products.length ? `${products.length.toLocaleString("fa-IR")} \u0645\u062D\u0635\u0648\u0644 \u0628\u0627 pipeline \u0648\u0627\u0642\u0639\u06CC \u0627\u0633\u062A\u062E\u0631\u0627\u062C \u0634\u062F.` : "\u0647\u06CC\u0686 \u0645\u062D\u0635\u0648\u0644\u06CC \u0627\u0632 HTML/JSON-LD \u0627\u0633\u062A\u062E\u0631\u0627\u062C \u0646\u0634\u062F.", { count: products.length, complete, selectors: profile.selectors, samples: products.slice(0, 5).map((x) => ({ title: x.title, price: x.price, priceText: x.priceText, url: x.url, image: x.image, sku: x.sku })) });
+  } catch (error) {
+    add("list-extraction", false, error instanceof Error ? error.message : String(error), { selectors: profile.selectors });
   }
-  element(element) {
-    const image = absolute(attr(element, ["data-src", "data-large_image", "data-lazy-src", "data-original", "href", "src"]), this.base);
-    if (image) this.images.add(image);
-  }
-};
-async function firstText(html, selector) {
-  if (!selector) return "";
-  const handler = new FirstText();
-  await new HTMLRewriter().on(selector, handler).transform(new Response(html)).text();
-  return handler.value;
-}
-async function sanitizedFragment(html, selector, base) {
-  const nonce = crypto.randomUUID(), start = `<!--s4-${nonce}-start-->`, end = `<!--s4-${nonce}-end-->`;
-  let marked = false;
-  const clean2 = (element) => {
-    for (const [name, value] of [...element.attributes]) {
-      const lower = name.toLowerCase();
-      if (lower.startsWith("on") || ["style", "srcdoc", "nonce", "integrity"].includes(lower)) {
-        element.removeAttribute(name);
-        continue;
-      }
-      if (["href", "src", "poster"].includes(lower)) {
-        const resolved = absolute(value, base);
-        resolved ? element.setAttribute(name, resolved) : element.removeAttribute(name);
-      }
+  const evidence = {};
+  for (const field of ["container", "title", "price", "link", "image"]) {
+    const selector = String(profile.selectors[field] || "").trim();
+    if (!selector) {
+      evidence[field] = { ok: false, count: 0, error: "\u0633\u0644\u06A9\u062A\u0648\u0631 \u062E\u0627\u0644\u06CC \u0627\u0633\u062A" };
+      continue;
     }
-  };
-  const marker = { element(element) {
-    clean2(element);
-    if (marked) return;
-    marked = true;
-    element.before(start, { html: true });
-    element.after(end, { html: true });
-  } }, sanitize = { element: clean2 }, remove = { element(element) {
-    element.remove();
-  } };
-  let rewriter = new HTMLRewriter().on(selector, marker);
-  for (const s of scoped(selector, "*")) rewriter = rewriter.on(s, sanitize);
-  for (const bad of ["script", "style", "iframe", "object", "embed", "form", "input", "button", "meta", "link"]) for (const s of scoped(selector, bad)) rewriter = rewriter.on(s, remove);
-  const output = await rewriter.transform(new Response(html)).text(), a = output.indexOf(start), b = output.indexOf(end, a + start.length);
-  return a >= 0 && b > a ? output.slice(a + start.length, b) : "";
-}
-async function extractVariations(html, selector) {
-  const groups = /* @__PURE__ */ new Map(), prices = {};
-  class Handler {
-    captures = [];
-    element(element) {
-      const rawName = attr(element, ["data-attribute_name", "data-name", "name", "aria-label"]) || "\u06AF\u0632\u06CC\u0646\u0647", name = normalize(rawName.replace(/^attribute_/i, "").replace(/^pa_/i, "")), rawValue = attr(element, ["data-value", "value", "data-title", "title", "aria-label"]), rawPrice = attr(element, ["data-price", "data-variation-price", "data-display-price"]), index = this.captures.push({ name, text: "", value: normalize(rawValue), price: numberFromText(rawPrice) }) - 1;
-      element.onEndTag(() => {
-        const item = this.captures[index];
-        this.captures[index] = void 0;
-        if (!item) return;
-        const value = item.value || normalize(item.text);
-        if (!value || /^choose|انتخاب|گزینش/i.test(value)) return;
-        const set = groups.get(item.name) || /* @__PURE__ */ new Set();
-        set.add(value.slice(0, 160));
-        groups.set(item.name, set);
-        if (item.price) prices[value.slice(0, 160)] = item.price;
-      });
-    }
-    text(text) {
-      for (const capture of this.captures) if (capture) capture.text += text.text;
+    try {
+      const type = field === "link" ? "link" : field === "image" ? "image" : "text", values = await extractSelectorValues(page.text, page.url, selector, type);
+      evidence[field] = { ok: values.length > 0, count: values.length, sample: values.slice(0, 3) };
+    } catch (error) {
+      evidence[field] = { ok: false, count: 0, error: error instanceof Error ? error.message : String(error) };
     }
   }
-  const handler = new Handler(), targets = [...scoped(selector, "option"), ...scoped(selector, "button"), ...scoped(selector, "[data-value]"), ...selectorParts(selector)];
-  let rewriter = new HTMLRewriter();
-  for (const target of [...new Set(targets)]) rewriter = rewriter.on(target, handler);
-  await rewriter.transform(new Response(html)).text();
-  const variationGroups = [...groups].map(([name, values]) => ({ name, values: [...values], ...Object.keys(prices).length ? { prices } : {} })).filter((group) => group.values.length);
-  return { variationGroups, variations: [...new Set(variationGroups.flatMap((group) => group.values))], variationPrices: prices };
-}
-async function testVariations(url, selector) {
-  const page = await safeText(url, 4e6);
-  return { url: page.url, ...await extractVariations(page.text, selector) };
-}
-async function scrapeDetails(product, selectors, indirect = false) {
-  if (!product.url) return product;
-  const page = await sourceText(product.url, indirect);
-  product.shortDesc = await firstText(page.text, selectors.shortDesc) || product.shortDesc;
-  product.sku = await firstText(page.text, selectors.sku) || product.sku;
-  product.brand = await firstText(page.text, selectors.brand) || product.brand;
-  product.category = await firstText(page.text, selectors.category) || product.category;
-  const stock = await firstText(page.text, selectors.stock);
-  if (stock) product.stock = numberFromText(stock);
-  const weight = await firstText(page.text, selectors.weight);
-  if (weight) product.weight = numberFromText(weight);
-  if (selectors.longDesc) product.longDesc = await sanitizedFragment(page.text, selectors.longDesc, page.url) || product.longDesc;
-  if (selectors.gallery) {
-    const images = new Set(product.images), handler = new GalleryHandler(images, page.url);
-    await new HTMLRewriter().on(selectors.gallery, handler).transform(new Response(page.text)).text();
-    product.images = [...images].slice(0, 30);
-    product.image ||= product.images[0] || "";
+  const evidenceOk = ["container", "title"].every((key2) => evidence[key2]?.ok);
+  add("selector-evidence", evidenceOk, evidenceOk ? "\u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627\u06CC \u067E\u0627\u06CC\u0647 \u0631\u0648\u06CC \u067E\u0627\u0633\u062E \u0648\u0627\u0642\u0639\u06CC \u0646\u0634\u0627\u0646\u0647 \u062F\u0627\u0631\u0646\u062F." : "\u06CC\u06A9 \u06CC\u0627 \u0686\u0646\u062F \u0633\u0644\u06A9\u062A\u0648\u0631 \u067E\u0627\u06CC\u0647 \u0631\u0648\u06CC \u067E\u0627\u0633\u062E \u0648\u0627\u0642\u0639\u06CC \u0646\u062A\u06CC\u062C\u0647 \u0646\u062F\u0627\u062F.", { evidence });
+  let detail = null;
+  const candidate = products.find((product) => product.url);
+  if (candidate && hasDetailSelectors(profile.selectors)) try {
+    const extracted = await scrapeDetails(candidate, profile.selectors, Boolean(profile.networkIndirect));
+    detail = { url: candidate.url, title: extracted.title, shortDesc: extracted.shortDesc, descriptionCharacters: String(extracted.longDesc || "").length, sku: extracted.sku, brand: extracted.brand, stock: extracted.stock, weight: extracted.weight, category: extracted.category, tags: extracted.tags, image: extracted.image, galleryCount: extracted.images.length, variations: extracted.variations?.slice(0, 20) };
+    add("detail-extraction", true, "\u0635\u0641\u062D\u0647\u0654 \u062C\u0632\u0626\u06CC\u0627\u062A \u0646\u0645\u0648\u0646\u0647 \u0628\u0627 pipeline \u0648\u0627\u0642\u0639\u06CC \u067E\u0631\u062F\u0627\u0632\u0634 \u0634\u062F.", { sample: detail });
+  } catch (error) {
+    add("detail-extraction", false, error instanceof Error ? error.message : String(error), { url: candidate.url });
   }
-  if (selectors.variations) {
-    const found = await extractVariations(page.text, selectors.variations);
-    if (found.variations.length) {
-      product.variations = found.variations;
-      product.variationGroups = found.variationGroups;
-      if (Object.keys(found.variationPrices).length) product.variationPrices = found.variationPrices;
-    }
+  else add("detail-extraction", true, candidate ? "\u0628\u0631\u0627\u06CC \u0627\u06CC\u0646 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0633\u0644\u06A9\u062A\u0648\u0631 \u062C\u0632\u0626\u06CC\u0627\u062A \u062A\u0646\u0638\u06CC\u0645 \u0646\u0634\u062F\u0647 \u0627\u0633\u062A." : "\u0645\u062D\u0635\u0648\u0644 \u062F\u0627\u0631\u0627\u06CC \u0644\u06CC\u0646\u06A9 \u0628\u0631\u0627\u06CC \u062A\u0633\u062A \u062C\u0632\u0626\u06CC\u0627\u062A \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F.", { skipped: true });
+  if (!products.length) recommendations.push("\u0633\u0644\u06A9\u062A\u0648\u0631 \u0638\u0631\u0641 \u0645\u062D\u0635\u0648\u0644 \u0631\u0627 \u0628\u0627 HTML \u0648\u0627\u0642\u0639\u06CC \u0627\u0635\u0644\u0627\u062D \u06A9\u0646\u06CC\u062F\u061B \u067E\u06CC\u0634\u0646\u0647\u0627\u062F \u062E\u0648\u062F\u06A9\u0627\u0631 \u0631\u0627 \u0627\u062C\u0631\u0627 \u0648 \u0633\u067E\u0633 \u062F\u0648\u0628\u0627\u0631\u0647 \u0647\u0645\u06CC\u0646 \u0639\u06CC\u0628\u200C\u06CC\u0627\u0628 \u0631\u0627 \u0628\u0632\u0646\u06CC\u062F.");
+  else {
+    if (!products.some((x) => x.price > 0)) recommendations.push("\u0645\u062D\u0635\u0648\u0644 \u067E\u06CC\u062F\u0627 \u0634\u062F\u0647 \u0648\u0644\u06CC \u0642\u06CC\u0645\u062A \u0635\u0641\u0631 \u0627\u0633\u062A\u061B \u0633\u0644\u06A9\u062A\u0648\u0631 \u0642\u06CC\u0645\u062A \u0648 \u0648\u0627\u062D\u062F/\u0645\u062A\u0646 \u0642\u06CC\u0645\u062A \u0631\u0627 \u0628\u0631\u0631\u0633\u06CC \u06A9\u0646\u06CC\u062F.");
+    if (!products.some((x) => x.url)) recommendations.push("\u0644\u06CC\u0646\u06A9 \u0645\u062D\u0635\u0648\u0644 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F\u0647 \u0627\u0633\u062A\u061B \u0633\u0644\u06A9\u062A\u0648\u0631 \u0644\u06CC\u0646\u06A9 \u0628\u0627\u06CC\u062F \u0628\u0647 \u0639\u0646\u0635\u0631 a \u06CC\u0627 \u0648\u06CC\u0698\u06AF\u06CC href/data-url \u0628\u0631\u0633\u062F.");
+    if (!products.some((x) => x.image)) recommendations.push("\u062A\u0635\u0648\u06CC\u0631 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F\u0647 \u0627\u0633\u062A\u061B data-src\u060C srcset \u06CC\u0627 \u0633\u0644\u06A9\u062A\u0648\u0631 \u062A\u0635\u0648\u06CC\u0631 \u0631\u0627 \u0628\u0631\u0631\u0633\u06CC \u06A9\u0646\u06CC\u062F.");
   }
-  return product;
+  const failed = stages.filter((stage) => !stage.ok);
+  return { ok: products.length > 0 && failed.length === 0, profileId: profile.id, url, finalUrl: page.url, startedAt: new Date(Date.now() - (Date.now() - started)).toISOString(), durationMs: Date.now() - started, productCount: products.length, stages, recommendations, detail };
 }
 function transformProduct(product, profile) {
-  product.title = normalize(product.title + profile.titleSuffix);
+  product.title = cleanText(product.title + profile.titleSuffix).slice(0, 300);
   const value = profile.priceValue;
   if (profile.priceMode === "add") product.price += value;
   if (profile.priceMode === "percent") product.price *= 1 + value / 100;
   if (profile.priceMode === "multiply") product.price *= value;
   if (profile.roundPrice > 0) product.price = Math.ceil(product.price / profile.roundPrice) * profile.roundPrice;
-  product.price = Math.round(product.price);
+  product.price = Math.max(0, Math.round(product.price));
   return product;
 }
 function pageUrl(profile, page) {
   const url = new URL(profile.url);
-  if (page <= 1 || profile.pagination === "none") return url.href;
-  if (profile.pagination === "path_page") {
-    url.pathname = url.pathname.replace(/\/page\/\d+\/?$/i, "").replace(/\/$/, "") + `/page/${page}/`;
-    return url.href;
+  if (page <= 1 || profile.pagination === "none" || profile.pagination === "next_selector") return url.href;
+  if (profile.pagination === "full_pattern") return profile.paginationValue.split("{page}").join(String(page));
+  if (profile.pagination === "path_page" || profile.pagination === "path_pattern") {
+    const pattern = profile.pagination === "path_page" ? "/page/{page}/" : profile.paginationValue || "/page/{page}/";
+    const basePath = url.pathname.replace(/\/page\/\d+\/?$/i, "").replace(/\/$/, "");
+    return url.origin + basePath + pattern.split("{page}").join(String(page));
   }
-  if (profile.pagination === "path_pattern") {
-    const pattern = profile.paginationValue || "/page/{page}/";
-    url.pathname = url.pathname.replace(/\/page\/\d+\/?$/i, "").replace(/\/$/, "") + pattern.replace("{page}", String(page));
-    return url.href;
-  }
-  if (profile.pagination === "full_pattern") return profile.paginationValue.replace("{page}", String(page));
-  url.searchParams.set(profile.pagination === "query_custom" ? profile.paginationValue || "paged" : profile.paginationValue || "page", String(page));
+  url.hash = "";
+  url.searchParams.set(profile.pagination === "query_custom" ? profile.paginationValue || "paged" : "page", String(page));
   return url.href;
 }
 async function mapLimit(items, limit, fn) {
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
     while (true) {
       const index = next++;
       if (index >= items.length) return;
@@ -3868,49 +4871,46 @@ async function mapLimit(items, limit, fn) {
     }
   }));
 }
-async function testSelectorHtml(html, base, selector, type = "text") {
-  const values = [];
-  let count = 0;
-  class Handler {
-    captures = [];
-    element(element) {
-      count++;
-      if (type === "link" || type === "image") {
-        if (values.length < 20) {
-          const raw2 = type === "link" ? attr(element, ["href", "data-href", "data-url"]) : attr(element, ["src", "data-src", "data-lazy-src", "data-original", "data-large_image", "href"]);
-          const value = absolute(raw2, base);
-          if (value) values.push(value.slice(0, 1e3));
-        }
-        return;
-      }
-      const index = this.captures.push("") - 1;
-      element.onEndTag(() => {
-        const value = normalize(this.captures[index] || "");
-        if (value && values.length < 20) values.push(value.slice(0, 1e3));
-        this.captures[index] = void 0;
-      });
-    }
-    text(text) {
-      for (let i = 0; i < this.captures.length; i++) if (this.captures[i] !== void 0) this.captures[i] += text.text;
-    }
-  }
-  await new HTMLRewriter().on(selector, new Handler()).transform(new Response(html)).text();
-  return { count, values };
-}
 async function testSelector(url, selector, type = "text") {
-  const page = await safeText(url, 4e6);
-  return testSelectorHtml(page.text, page.url, selector, type);
+  const page = await safeText(url, 4e6), values = await extractSelectorValues(page.text, page.url, selector, type === "link" ? "link" : type === "image" ? "image" : "text");
+  return { count: values.length, values: values.slice(0, 20) };
 }
-var SUGGESTION_CANDIDATES = { container: { selectors: ["li.product", "article.product", ".products .product", ".product-card", ".product-item", "[data-product-id]"] }, title: { selectors: [".woocommerce-loop-product__title", ".product-title", ".card-title", "h2", "h3", '[itemprop="name"]'] }, price: { selectors: [".price", '[itemprop="price"]', ".amount", "ins", ".product-price"] }, link: { type: "link", selectors: ["a.woocommerce-LoopProduct-link", "a.product-link", 'a[href*="/product/"]', "a[href]"] }, image: { type: "image", selectors: ["img.wp-post-image", "img.product-image", "img"] }, shortDesc: { selectors: [".woocommerce-product-details__short-description", ".short-description", '[itemprop="description"]'] }, longDesc: { selectors: ["#tab-description", ".woocommerce-Tabs-panel--description", ".product-description", ".description"] }, sku: { selectors: [".sku", '[itemprop="sku"]', "[data-sku]"] }, brand: { selectors: [".brand", '[itemprop="brand"]', ".product-brand"] }, stock: { selectors: [".stock", '[itemprop="availability"]', ".inventory"] }, weight: { selectors: [".product_weight", ".weight", "[data-weight]"] }, category: { selectors: [".posted_in", ".product_meta .category", ".breadcrumb"] }, gallery: { type: "image", selectors: [".woocommerce-product-gallery img", ".product-gallery img", "[data-gallery] img", ".gallery img"] }, variations: { selectors: [".variations", ".variations_form", "[data-product_variations]", ".product-options"] } };
+async function testVariations(url, selector) {
+  const page = await safeText(url, 4e6);
+  return { url: page.url, ...await extractVariations(page.text, page.url, selector) };
+}
+async function testGallery(url, selector, max = 30, skipFirst = false) {
+  const page = await safeText(url, 4e6), detail = await parseDetailPage(page.text, page.url, { gallery: selector, galleryMax: max, gallerySkipFirst: skipFirst });
+  return { url: page.url, count: detail.images.length, values: detail.images };
+}
+var SUGGESTION_CANDIDATES = {
+  container: { selectors: ["li.product", "article.product", ".products .product", ".product-card", ".product-item", "[data-product-id]"] },
+  title: { selectors: [".woocommerce-loop-product__title", ".product-title", ".card-title", "h2", "h3", '[itemprop="name"]'] },
+  price: { selectors: [".price ins", ".sale-price", ".price", '[itemprop="price"]', ".amount"] },
+  link: { type: "link", selectors: ["a.woocommerce-LoopProduct-link", "a.product-link", 'a[href*="/product/"]', "a[href]"] },
+  image: { type: "image", selectors: ["img.wp-post-image", "img.product-image", "picture img", "img"] },
+  shortDesc: { selectors: [".woocommerce-product-details__short-description", ".short-description", '[itemprop="description"]'] },
+  longDesc: { selectors: ["#tab-description", ".woocommerce-Tabs-panel--description", ".product-description", ".description"] },
+  sku: { selectors: [".sku", '[itemprop="sku"]', "[data-sku]"] },
+  brand: { selectors: [".brand", '[itemprop="brand"]', ".product-brand"] },
+  stock: { selectors: [".stock", '[itemprop="availability"]', ".inventory"] },
+  weight: { selectors: [".product_weight", ".weight", "[data-weight]"] },
+  category: { selectors: [".posted_in", ".product_meta .category", ".breadcrumb"] },
+  tags: { selectors: [".tagged_as", ".product_meta .tags", '[rel="tag"]'] },
+  detailImage: { type: "image", selectors: [".woocommerce-product-gallery__image img", ".product-main-image img", "img.wp-post-image", '[itemprop="image"]'] },
+  gallery: { type: "image", selectors: [".woocommerce-product-gallery img", ".product-gallery img", "[data-gallery] img", ".gallery img"] },
+  variations: { selectors: [".variations", ".variations_form", "[data-product_variations]", ".product-options"] }
+};
 async function suggestSelectors(url, mode = "all") {
-  const page = await safeText(url, 4e6), wanted = mode === "list" ? ["container", "title", "price", "link", "image"] : mode === "detail" ? ["shortDesc", "longDesc", "sku", "brand", "stock", "weight", "category", "gallery", "variations"] : Object.keys(SUGGESTION_CANDIDATES), selectors = {}, evidence = {};
+  const page = await safeText(url, 4e6), wanted = mode === "list" ? ["container", "title", "price", "link", "image"] : mode === "detail" ? ["shortDesc", "longDesc", "sku", "category", "tags", "weight", "stock", "brand", "detailImage", "gallery", "variations"] : Object.keys(SUGGESTION_CANDIDATES), selectors = {}, evidence = {};
   for (const field of wanted) {
     const config = SUGGESTION_CANDIDATES[field];
     for (const candidate of config.selectors) try {
-      const result = await testSelectorHtml(page.text, page.url, candidate, config.type || "text"), minimum = field === "container" ? 2 : 1;
-      if (result.count >= minimum && result.values.length > 0 || field === "container" && result.count >= minimum) {
+      const values = await extractSelectorValues(page.text, page.url, candidate, config.type || "text");
+      const count = values.length, minimum = field === "container" ? 2 : 1;
+      if (count >= minimum) {
         selectors[field] = candidate;
-        evidence[field] = { count: result.count, sample: result.values[0] || "" };
+        evidence[field] = { count, sample: values[0] || "" };
         break;
       }
     } catch {
@@ -4008,7 +5008,30 @@ async function syncBasalam(product, profile) {
 // worker-src/processor.ts
 var stateKey = (jobId) => `job_checkpoint:${jobId}`;
 function chunkSize() {
-  return Math.min(100, Math.max(1, Number(getEnv().JOB_CHUNK_SIZE) || 20));
+  return Math.min(50, Math.max(1, Number(getEnv().JOB_CHUNK_SIZE) || 10));
+}
+function preserveExisting(fresh, previous) {
+  if (!previous) return fresh;
+  return {
+    ...fresh,
+    title: fresh.title || previous.title,
+    price: fresh.price > 0 ? fresh.price : previous.price,
+    priceText: fresh.priceText || previous.priceText,
+    url: fresh.url || previous.url,
+    image: fresh.image || previous.image,
+    images: [...new Set([fresh.image, ...previous.images || [], ...fresh.images || []].filter(Boolean))],
+    shortDesc: fresh.shortDesc || previous.shortDesc,
+    longDesc: fresh.longDesc || previous.longDesc,
+    sku: fresh.sku || previous.sku,
+    brand: fresh.brand || previous.brand,
+    stock: fresh.stock ?? previous.stock,
+    weight: fresh.weight ?? previous.weight,
+    category: fresh.category || previous.category,
+    tags: fresh.tags || previous.tags,
+    variations: fresh.variations?.length ? fresh.variations : previous.variations,
+    variationGroups: fresh.variationGroups?.length ? fresh.variationGroups : previous.variationGroups,
+    variationPrices: Object.keys(fresh.variationPrices || {}).length ? fresh.variationPrices : previous.variationPrices
+  };
 }
 function append(job, text, level = "info") {
   job.log.push({ at: (/* @__PURE__ */ new Date()).toISOString(), level, message: text });
@@ -4077,7 +5100,8 @@ async function processJob(id) {
 }
 async function runScrapeChunk(job, profile) {
   const key2 = stateKey(job.id);
-  const checkpoint = await getState(key2, { page: 1, url: pageUrl(profile, 1), nextUrl: "", index: 0, seen: [] });
+  const checkpoint = await getState(key2, { page: 1, url: pageUrl(profile, 1), nextUrl: "", index: 0, seen: [], retireSafe: true });
+  checkpoint.retireSafe ??= true;
   if (await stopRequested(job.id)) {
     job.status = "stopped";
     return false;
@@ -4089,9 +5113,18 @@ async function runScrapeChunk(job, profile) {
     checkpoint.url = page.url;
     checkpoint.nextUrl = page.nextUrl;
     checkpoint.index = 0;
-    checkpoint.products = page.products.map((raw2) => transformProduct(raw2, profile)).filter((product) => !profile.minPrice || product.price >= profile.minPrice);
+    const pageProducts = page.products.map((raw2) => transformProduct(raw2, profile)).filter((product) => !profile.minPrice || product.price >= profile.minPrice);
+    checkpoint.products = pageProducts.filter((product) => !checkpoint.seen.includes(product.sourceKey));
+    if (!pageProducts.length) {
+      checkpoint.retireSafe = false;
+      if (checkpoint.page === 1) throw new Error("\u062F\u0631 \u0635\u0641\u062D\u0647\u0654 \u0627\u0648\u0644 \u0647\u06CC\u0686 \u0645\u062D\u0635\u0648\u0644\u06CC \u0627\u0633\u062A\u062E\u0631\u0627\u062C \u0646\u0634\u062F. \u0633\u0644\u06A9\u062A\u0648\u0631 \u0638\u0631\u0641/\u0641\u06CC\u0644\u062F\u0647\u0627\u060C \u067E\u0627\u0633\u062E \u0636\u062F\u0631\u0628\u0627\u062A \u0648 HTML \u0645\u0628\u062F\u0623 \u0631\u0627 \u0628\u0631\u0631\u0633\u06CC \u06A9\u0646\u06CC\u062F\u061B \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0642\u0628\u0644\u06CC \u0628\u0627\u0632\u0646\u0634\u0633\u062A\u0647 \u0646\u0634\u062F\u0646\u062F.");
+      append(job, `\u0635\u0641\u062D\u0647 ${checkpoint.page} \u062E\u0627\u0644\u06CC \u0628\u0648\u062F\u061B \u0628\u0631\u0627\u06CC \u062C\u0644\u0648\u06AF\u06CC\u0631\u06CC \u0627\u0632 \u062D\u0630\u0641 \u0627\u0634\u062A\u0628\u0627\u0647\u060C \u0628\u0627\u0632\u0646\u0634\u0633\u062A\u0647\u200C\u0633\u0627\u0632\u06CC \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0627\u0646\u062C\u0627\u0645 \u0646\u0645\u06CC\u200C\u0634\u0648\u062F.`, "warning");
+      await finishScrape(job, profile, checkpoint);
+      return false;
+    }
     if (!checkpoint.products.length) {
-      append(job, "\u0645\u062D\u0635\u0648\u0644\u06CC \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F\u061B \u067E\u06CC\u0645\u0627\u06CC\u0634 \u067E\u0627\u06CC\u0627\u0646 \u06CC\u0627\u0641\u062A", "warning");
+      checkpoint.retireSafe = false;
+      append(job, `\u0635\u0641\u062D\u0647 ${checkpoint.page} \u0641\u0642\u0637 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u062A\u06A9\u0631\u0627\u0631\u06CC \u062F\u0627\u0634\u062A\u061B \u062D\u0644\u0642\u0647\u0654 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC \u0645\u062A\u0648\u0642\u0641 \u0634\u062F \u0648 \u0628\u0627\u0632\u0646\u0634\u0633\u062A\u0647\u200C\u0633\u0627\u0632\u06CC \u0627\u0646\u062C\u0627\u0645 \u0646\u0645\u06CC\u200C\u0634\u0648\u062F.`, "warning");
       await finishScrape(job, profile, checkpoint);
       return false;
     }
@@ -4101,12 +5134,14 @@ async function runScrapeChunk(job, profile) {
   }
   job.phase = "details-save-sync";
   const start = checkpoint.index, end = Math.min(checkpoint.products.length, start + chunkSize()), batch = checkpoint.products.slice(start, end);
-  await mapLimit(batch, Math.min(8, Math.max(1, Number(getEnv().DETAIL_CONCURRENCY) || 4)), async (product) => {
+  await mapLimit(batch, Math.min(4, Math.max(1, Number(getEnv().DETAIL_CONCURRENCY) || 2)), async (product) => {
+    const merged = preserveExisting(product, await getProduct(profile.id, product.sourceKey));
+    Object.assign(product, merged);
     try {
-      await scrapeDetails(product, profile.selectors, Boolean(profile.networkIndirect));
+      Object.assign(product, await scrapeDetails(product, profile.selectors, Boolean(profile.networkIndirect)));
     } catch (error) {
       job.failed++;
-      append(job, `${product.title}: \u062C\u0632\u0626\u06CC\u0627\u062A: ${message(error)}`, "error");
+      append(job, `${product.title}: \u062C\u0632\u0626\u06CC\u0627\u062A: ${message(error)}\u061B \u0627\u0637\u0644\u0627\u0639\u0627\u062A \u0645\u0639\u062A\u0628\u0631 \u0642\u0628\u0644\u06CC \u062D\u0641\u0638 \u0634\u062F.`, "error");
     }
   });
   for (const product of batch) {
@@ -4115,15 +5150,20 @@ async function runScrapeChunk(job, profile) {
       await setState(key2, checkpoint);
       return false;
     }
+    let saved = false;
     try {
       const result = await upsertProduct(profile.id, product);
       result === "added" ? job.added++ : job.updated++;
+      saved = true;
     } catch (error) {
+      checkpoint.retireSafe = false;
       job.failed++;
       append(job, `${product.title}: \u0630\u062E\u06CC\u0631\u0647: ${message(error)}`, "error");
     }
-    await syncProduct(job, profile, product);
-    checkpoint.seen.push(product.sourceKey);
+    if (saved) {
+      await syncProduct(job, profile, product);
+      checkpoint.seen.push(product.sourceKey);
+    }
     checkpoint.index++;
     job.processed++;
   }
@@ -4149,8 +5189,10 @@ async function runScrapeChunk(job, profile) {
 }
 async function finishScrape(job, profile, checkpoint) {
   job.phase = "retire";
-  const retired = await markMissingProducts(profile.id, checkpoint.seen);
-  if (retired) append(job, `${retired} \u0645\u062D\u0635\u0648\u0644 \u062F\u06CC\u06AF\u0631 \u062F\u0631 \u0645\u0628\u062F\u0623 \u062F\u06CC\u062F\u0647 \u0646\u0634\u062F`, "warning");
+  if (checkpoint.retireSafe && checkpoint.seen.length) {
+    const retired = await markMissingProducts(profile.id, checkpoint.seen);
+    if (retired) append(job, `${retired} \u0645\u062D\u0635\u0648\u0644 \u062F\u06CC\u06AF\u0631 \u062F\u0631 \u0645\u0628\u062F\u0623 \u062F\u06CC\u062F\u0647 \u0646\u0634\u062F`, "warning");
+  } else append(job, "\u0627\u0633\u06A9\u0646 \u06A9\u0627\u0645\u0644 \u0648 \u0642\u0627\u0628\u0644\u200C\u0627\u0639\u062A\u0645\u0627\u062F \u0646\u0628\u0648\u062F\u061B \u0628\u0631\u0627\u06CC \u0627\u06CC\u0645\u0646\u06CC \u0647\u06CC\u0686 \u0645\u062D\u0635\u0648\u0644\u06CC \u0628\u0627\u0632\u0646\u0634\u0633\u062A\u0647 \u0646\u0634\u062F.", "warning");
   await markProfileRun(profile.id);
 }
 async function runSyncChunk(job, profile) {
@@ -4306,9 +5348,9 @@ async function renderVisualSelector(ticket) {
           continue;
         }
         try {
-          const absolute2 = new URL(value, page.url);
-          if (!["http:", "https:", "data:"].includes(absolute2.protocol)) element.removeAttribute(name);
-          else element.setAttribute(name, absolute2.href);
+          const absolute = new URL(value, page.url);
+          if (!["http:", "https:", "data:"].includes(absolute.protocol)) element.removeAttribute(name);
+          else element.setAttribute(name, absolute.href);
         } catch {
           element.removeAttribute(name);
         }
@@ -4339,7 +5381,7 @@ async function renderVisualSelector(ticket) {
   let rewriter = new HTMLRewriter().on("*", sanitize).on('script,iframe,object,embed,form,noscript,base,meta[http-equiv="refresh"],meta[http-equiv="Content-Security-Policy"]', remove).on("head", head).on("body", body);
   return rewriter.transform(new Response(page.text)).text();
 }
-var TOOLBAR = `<div id="__s4bar"><select id="__s4mode"><option value="container">\u{1F4E6} \u06A9\u0627\u0646\u062A\u06CC\u0646\u0631</option><option value="title">\u{1F4DD} \u0639\u0646\u0648\u0627\u0646</option><option value="price">\u{1F4B0} \u0642\u06CC\u0645\u062A</option><option value="link">\u{1F517} \u0644\u06CC\u0646\u06A9</option><option value="image">\u{1F5BC} \u062A\u0635\u0648\u06CC\u0631</option><option value="shortDesc">\u062A\u0648\u0636\u06CC\u062D \u06A9\u0648\u062A\u0627\u0647</option><option value="longDesc">\u062A\u0648\u0636\u06CC\u062D \u06A9\u0627\u0645\u0644</option><option value="sku">SKU</option><option value="brand">\u0628\u0631\u0646\u062F</option><option value="stock">\u0645\u0648\u062C\u0648\u062F\u06CC</option><option value="weight">\u0648\u0632\u0646</option><option value="category">\u062F\u0633\u062A\u0647\u200C\u0628\u0646\u062F\u06CC</option><option value="gallery">\u06AF\u0627\u0644\u0631\u06CC</option><option value="variations">\u062A\u0646\u0648\u0639\u200C\u0647\u0627</option></select><button id="__s4up">\u2B06 \u0648\u0627\u0644\u062F</button><button id="__s4down">\u2B07 \u0641\u0631\u0632\u0646\u062F</button><code id="__s4selector">\u0631\u0648\u06CC \u0639\u0646\u0635\u0631 \u0645\u0648\u0631\u062F \u0646\u0638\u0631 \u06A9\u0644\u06CC\u06A9 \u06A9\u0646\u06CC\u062F</code><span id="__s4count">\u06F0</span><button id="__s4save">\u2713 \u062B\u0628\u062A \u0633\u0644\u06A9\u062A\u0648\u0631</button></div>`;
+var TOOLBAR = `<div id="__s4bar"><select id="__s4mode"><option value="container">\u{1F4E6} \u06A9\u0627\u0646\u062A\u06CC\u0646\u0631</option><option value="title">\u{1F4DD} \u0639\u0646\u0648\u0627\u0646</option><option value="price">\u{1F4B0} \u0642\u06CC\u0645\u062A</option><option value="link">\u{1F517} \u0644\u06CC\u0646\u06A9</option><option value="image">\u{1F5BC} \u062A\u0635\u0648\u06CC\u0631 \u0641\u0647\u0631\u0633\u062A</option><option value="shortDesc">\u062A\u0648\u0636\u06CC\u062D\u0627\u062A \u06A9\u0648\u062A\u0627\u0647</option><option value="longDesc">\u062A\u0648\u0636\u06CC\u062D\u0627\u062A \u0628\u0644\u0646\u062F</option><option value="sku">SKU</option><option value="category">\u062F\u0633\u062A\u0647\u200C\u0628\u0646\u062F\u06CC</option><option value="tags">\u0628\u0631\u0686\u0633\u0628\u200C\u0647\u0627</option><option value="weight">\u0648\u0632\u0646</option><option value="stock">\u0645\u0648\u062C\u0648\u062F\u06CC</option><option value="brand">\u0628\u0631\u0646\u062F</option><option value="detailImage">\u0639\u06A9\u0633 \u0627\u0635\u0644\u06CC \u0645\u062D\u0635\u0648\u0644</option><option value="gallery">\u06AF\u0627\u0644\u0631\u06CC</option><option value="variations">\u062A\u0646\u0648\u0639\u200C\u0647\u0627</option></select><button id="__s4up">\u2B06 \u0648\u0627\u0644\u062F</button><button id="__s4down">\u2B07 \u0641\u0631\u0632\u0646\u062F</button><code id="__s4selector">\u0631\u0648\u06CC \u0639\u0646\u0635\u0631 \u0645\u0648\u0631\u062F \u0646\u0638\u0631 \u06A9\u0644\u06CC\u06A9 \u06A9\u0646\u06CC\u062F</code><span id="__s4count">\u06F0</span><button id="__s4save">\u2713 \u062B\u0628\u062A \u0633\u0644\u06A9\u062A\u0648\u0631</button></div>`;
 var PICKER_CSS = `#__s4bar{position:fixed!important;z-index:2147483647!important;top:0!important;left:0!important;right:0!important;min-height:48px!important;background:#0f172af2!important;color:#fff!important;border-bottom:2px solid #a855f7!important;display:flex!important;align-items:center!important;gap:6px!important;padding:6px 9px!important;font:12px Tahoma,sans-serif!important;direction:rtl!important;box-shadow:0 4px 18px #0008!important}#__s4bar select,#__s4bar button{width:auto!important;min-width:0!important;background:#334155!important;color:#fff!important;border:1px solid #64748b!important;border-radius:6px!important;padding:7px 9px!important;font:11px Tahoma!important;cursor:pointer!important}#__s4bar #__s4save{background:#22c55e!important;color:#052e16!important;border-color:#22c55e!important;font-weight:bold!important}#__s4selector{flex:1!important;direction:ltr!important;text-align:left!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;background:#020617!important;color:#f0abfc!important;padding:7px!important;border-radius:5px!important}#__s4count{color:#67e8f9!important;white-space:nowrap!important}.__s4hover{outline:3px solid #a855f7!important;outline-offset:2px!important;cursor:crosshair!important}.__s4picked{outline:4px solid #22c55e!important;outline-offset:2px!important}body{padding-top:52px!important}@media(max-width:650px){#__s4bar{flex-wrap:wrap!important}#__s4selector{order:3;flex-basis:75%!important}body{padding-top:90px!important}}`;
 var PICKER_JS = String.raw`(()=>{let current=null,hover=null;const bar=document.getElementById('__s4bar'),mode=document.getElementById('__s4mode'),label=document.getElementById('__s4selector'),count=document.getElementById('__s4count');const esc=v=>{try{return CSS.escape(v)}catch{return String(v).replace(/[^a-zA-Z0-9_-]/g,'\\$&')}};function selector(el){if(!el||el===document.body||el===document.documentElement)return el?.tagName?.toLowerCase()||'body';if(el.id){const s='#'+esc(el.id);if(document.querySelectorAll(s).length===1)return s}const parts=[];let node=el;while(node&&node!==document.body&&parts.length<5){let part=node.tagName.toLowerCase();const classes=[...node.classList].filter(x=>!x.startsWith('__s4')).slice(0,2);if(classes.length)part+='.'+classes.map(esc).join('.');let s=part;try{if(document.querySelectorAll(s).length===1){parts.unshift(part);break}}catch{}const siblings=node.parentElement?[...node.parentElement.children].filter(x=>x.tagName===node.tagName):[];if(siblings.length>1)part+=':nth-of-type('+(siblings.indexOf(node)+1)+')';parts.unshift(part);node=node.parentElement}return parts.join(' > ')}function choose(el){if(current)current.classList.remove('__s4picked');current=el;current.classList.add('__s4picked');const s=selector(current);label.textContent=s;try{count.textContent=document.querySelectorAll(s).length+' مورد'}catch{count.textContent='نامعتبر'}}document.addEventListener('mouseover',e=>{if(bar.contains(e.target))return;if(hover)hover.classList.remove('__s4hover');hover=e.target;hover.classList.add('__s4hover')},true);document.addEventListener('mouseout',e=>{if(e.target?.classList)e.target.classList.remove('__s4hover')},true);document.addEventListener('click',e=>{if(bar.contains(e.target))return;e.preventDefault();e.stopPropagation();choose(e.target)},true);document.getElementById('__s4up').onclick=()=>{if(current?.parentElement&&!bar.contains(current.parentElement))choose(current.parentElement)};document.getElementById('__s4down').onclick=()=>{if(current?.firstElementChild)choose(current.firstElementChild)};document.getElementById('__s4save').onclick=()=>{if(!current)return;const s=selector(current),preview=(current.innerText||current.getAttribute('src')||current.getAttribute('href')||'').trim().replace(/\s+/g,' ').slice(0,250);parent.postMessage({type:'scraper4-selector',mode:mode.value,selector:s,preview,count:document.querySelectorAll(s).length},location.origin)};window.addEventListener('message',e=>{if(e.origin!==location.origin)return;if(e.data?.type==='scraper4-mode'&&e.data.mode)mode.value=e.data.mode})})();`;
 
@@ -4355,7 +5397,7 @@ app.use("*", async (c, next) => {
 app.use("*", async (c, next) => c.req.path === "/visual" ? next() : dashboardSecurity(c, next));
 app.onError((error, c) => {
   console.error(JSON.stringify({ requestId: c.get("requestId"), path: c.req.path, error: message(error) }));
-  const text = message(error), status = /Unauthorized/.test(text) ? 401 : /not found/i.test(text) ? 404 : /invalid|required|empty|خالی|نامعتبر/i.test(text) ? 400 : /HTTP|fetch|network|اتصال/i.test(text) ? 502 : 500;
+  const text = message(error), status = /Unauthorized/.test(text) ? 401 : /not found/i.test(text) ? 404 : /Response exceeds|بیش از.*بایت/i.test(text) ? 413 : /timeout|مهلت دریافت/i.test(text) ? 504 : /invalid|required|empty|خالی|نامعتبر/i.test(text) ? 400 : /HTTP|fetch|network|اتصال/i.test(text) ? 502 : 500;
   return c.json({ ok: false, error: text, requestId: c.get("requestId") }, status);
 });
 app.get("/health", (c) => c.json({ ok: true, app: "scraper4-cloudflare", runtime: "cloudflare-workers", databaseReady: Boolean(c.env.DB), databaseError: c.env.DB ? null : "D1 binding DB is missing", workerInWeb: Boolean(c.env.JOBS), authenticationRequired: false, version: c.env.WORKER_VERSION || "1.0.0", time: (/* @__PURE__ */ new Date()).toISOString() }));
@@ -4390,9 +5432,10 @@ app.get("/api/connections", async (c) => c.json({ ok: true, connections: await l
 app.post("/api/connections", async (c) => c.json({ ok: true, connections: await saveConnections(await c.req.json()) }));
 app.get("/api/ai/providers", async (c) => c.json({ ok: true, providers: await aiProviders(), leaderboard: await getLeaderboard() }));
 app.post("/api/ai/test-all", async (c) => {
-  const b = await jsonBody(c);
-  return c.json({ ok: true, results: await testAllModels(String(b.prompt || "\u0633\u0644\u0627\u0645"), Boolean(b.onlyCandidates)) });
+  const b = await jsonBody(c), startedAt = (/* @__PURE__ */ new Date()).toISOString(), started = Date.now(), prompt = String(b.prompt || "\u0633\u0644\u0627\u0645"), results = await testAllModels(prompt, Boolean(b.onlyCandidates));
+  return c.json({ ok: results.some((x) => x.ok), startedAt, durationMs: Date.now() - started, prompt, total: results.length, succeeded: results.filter((x) => x.ok).length, failed: results.filter((x) => !x.ok).length, results });
 });
+app.get("/api/ai/test-results", async (c) => c.json({ ok: true, ...await getLastAiTestResults() }));
 app.post("/api/ai/call", async (c) => {
   const b = await jsonBody(c), provider = (await aiProviders()).find((p) => p.id === b.provider);
   if (!provider) return c.json({ ok: false, error: "Provider not found" }, 404);
@@ -4416,6 +5459,7 @@ app.post("/api/category-learning/test", async (c) => {
   const b = await jsonBody(c);
   return c.json({ ok: true, result: await findLearnedCategory(String(b.title || ""), Number(b.maxWords) || 5) });
 });
+app.post("/api/category-learning/import", async (c) => c.json({ ok: true, imported: await importCategoryLearning(await c.req.json()) }));
 app.post("/api/autoreply/test", async (c) => {
   const b = await jsonBody(c);
   return c.json({ ok: true, result: await generateReply(String(b.text || "")) });
@@ -4479,19 +5523,30 @@ app.post("/api/maintenance/photo-fix", async (c) => {
   return c.json(await photoFix(String(b.profileId || ""), b.confirm === "APPLY"));
 });
 app.get("/api/destination/:target/products", async (c) => {
-  const target = validDestination(c.req.param("target")), all = await listDestinationProducts(target), q = String(c.req.query("q") || "").toLowerCase(), filtered = q ? all.filter((x) => x.name.toLowerCase().includes(q) || String(x.id) === q) : all, limit = Math.min(200, Number(c.req.query("limit")) || 50), offset = Math.max(0, Number(c.req.query("offset")) || 0);
-  return c.json({ ok: true, total: filtered.length, items: filtered.slice(offset, offset + limit) });
+  const target = validDestination(c.req.param("target")), legacyLimit = Math.min(100, Number(c.req.query("limit")) || 25), legacyOffset = Math.max(0, Number(c.req.query("offset")) || 0), perPage = Math.min(100, Number(c.req.query("per_page")) || legacyLimit), page = Math.max(1, Number(c.req.query("page")) || Math.floor(legacyOffset / perPage) + 1), catalog = await destinationCatalog(target, { page, perPage, q: c.req.query("q") || "", status: c.req.query("status") || "all", shopId: c.req.query("shop") || "all", counts: c.req.query("counts") === "1" });
+  const { products, ...meta } = catalog;
+  return c.json({ ...meta, items: products });
 });
 app.get("/api/destination/:target/overview", async (c) => c.json({ ok: true, ...await destinationOverview(validDestination(c.req.param("target"))) }));
 app.get("/api/destination/:target/duplicates", async (c) => c.json({ ok: true, groups: await findDestinationDuplicates(validDestination(c.req.param("target"))) }));
+app.get("/api/destination/:target/product/:id", async (c) => c.json({ ok: true, product: await destinationProduct(validDestination(c.req.param("target")), Number(c.req.param("id")), c.req.query("shop") || "") }));
+app.post("/api/destination/:target/bulk", async (c) => {
+  const target = validDestination(c.req.param("target")), b = await jsonBody(c);
+  if (Array.isArray(b.ids) && b.ids.length > 20) return c.json({ ok: false, error: "\u062F\u0631 \u0647\u0631 \u0646\u0648\u0628\u062A \u062D\u062F\u0627\u06A9\u062B\u0631 \u06F2\u06F0 \u0645\u062D\u0635\u0648\u0644 \u0642\u0627\u0628\u0644 \u0648\u06CC\u0631\u0627\u06CC\u0634 \u0627\u0633\u062A." }, 400);
+  return c.json(await destinationBulkEdit(target, b, b.confirm === "APPLY"));
+});
+app.post("/api/destination/:target/:id/update", async (c) => {
+  const target = validDestination(c.req.param("target")), b = await jsonBody(c);
+  return c.json(await destinationUpdate(target, Number(c.req.param("id")), b, b.confirm === "APPLY", String(b.shopId || "")));
+});
 app.post("/api/destination/:target/:id/status", async (c) => {
   const b = await jsonBody(c);
-  if (b.confirm !== "APPLY") return c.json({ ok: false, error: "confirm APPLY is required" }, 400);
-  return c.json(await destinationChangeStatus(validDestination(c.req.param("target")), Number(c.req.param("id")), String(b.status || "")));
+  if (b.confirm !== "APPLY") return c.json({ ok: false, error: "\u0628\u0631\u0627\u06CC \u0627\u0639\u0645\u0627\u0644 \u0648\u0627\u0642\u0639\u06CC \u0639\u0628\u0627\u0631\u062A APPLY \u0644\u0627\u0632\u0645 \u0627\u0633\u062A." }, 400);
+  return c.json(await destinationChangeStatus(validDestination(c.req.param("target")), Number(c.req.param("id")), String(b.status || ""), String(b.shopId || "")));
 });
 app.delete("/api/destination/:target/:id", async (c) => {
-  if (c.req.query("confirm") !== "DELETE") return c.json({ ok: false, error: "confirm DELETE is required" }, 400);
-  return c.json(await destinationDelete(validDestination(c.req.param("target")), Number(c.req.param("id")), c.req.query("force") === "true"));
+  if (c.req.query("confirm") !== "DELETE") return c.json({ ok: false, error: "\u0628\u0631\u0627\u06CC \u062D\u0630\u0641 \u06CC\u0627 \u0628\u0627\u06CC\u06AF\u0627\u0646\u06CC\u060C \u062A\u0623\u06CC\u06CC\u062F DELETE \u0644\u0627\u0632\u0645 \u0627\u0633\u062A." }, 400);
+  return c.json(await destinationDelete(validDestination(c.req.param("target")), Number(c.req.param("id")), c.req.query("force") === "true", c.req.query("shop") || ""));
 });
 app.post("/api/products/:profileId/:sourceKey/sync/:target", async (c) => {
   const profile = await getProfile(c.req.param("profileId")), product = await getProduct(c.req.param("profileId"), c.req.param("sourceKey")), target = validDestination(c.req.param("target"));
@@ -4506,9 +5561,16 @@ app.post("/api/source-test", async (c) => {
   const b = await jsonBody(c), result = await safeText(String(b.url || ""), 1e6);
   return c.json({ ok: true, bytes: byteLength(result.text), url: result.url, title: (result.text.match(/<title[^>]*>(.*?)<\/title>/is)?.[1] || "").replace(/<[^>]+>/g, "").trim() });
 });
+app.post("/api/profiles/:id/extraction-diagnostic", async (c) => {
+  const profile = await getProfile(c.req.param("id"));
+  if (!profile) return c.json({ ok: false, error: "\u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F." }, 404);
+  const b = await jsonBody(c);
+  return c.json(await diagnoseExtraction(profile, String(b.url || "")));
+});
 app.post("/api/test-selector", async (c) => {
   const b = await jsonBody(c);
   if (b.type === "variations") return c.json({ ok: true, ...await testVariations(String(b.url || ""), String(b.selector || "")) });
+  if (b.type === "gallery") return c.json({ ok: true, ...await testGallery(String(b.url || ""), String(b.selector || ""), Number(b.max) || 30, Boolean(b.skipFirst)) });
   return c.json({ ok: true, ...await testSelector(String(b.url || ""), String(b.selector || ""), String(b.type || "text")) });
 });
 app.post("/api/suggest-selectors", async (c) => {
@@ -4516,25 +5578,8 @@ app.post("/api/suggest-selectors", async (c) => {
   return c.json({ ok: true, ...await suggestSelectors(String(b.url || ""), mode) });
 });
 app.post("/api/test-connection/:target", async (c) => {
-  const target = c.req.param("target"), connections = await loadConnections(true);
-  if (target === "woo") {
-    const x = connections.woo;
-    if (!x.url || !x.key || !x.secret) return c.json({ ok: false, error: "\u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A" }, 400);
-    const r = await safeFetch(x.url + "/wp-json/wc/v3/system_status", { headers: { authorization: basicAuth(x.key, x.secret), accept: "application/json" } }, 2e6);
-    return c.json({ ok: r.ok, code: r.status });
-  }
-  if (target === "basalam") {
-    const x = connections.basalam;
-    if (!x.token) return c.json({ ok: false, error: "\u062A\u0648\u06A9\u0646 \u0628\u0627\u0633\u0644\u0627\u0645 \u062E\u0627\u0644\u06CC \u0627\u0633\u062A" }, 400);
-    const r = await safeFetch(x.api + "/categories", { headers: { authorization: `Bearer ${x.token}`, accept: "application/json" } }, 2e6);
-    return c.json({ ok: r.ok, code: r.status });
-  }
-  if (target === "ai") {
-    const provider = (await aiProviders()).find((x) => x.enabled && x.models.length);
-    if (!provider) return c.json({ ok: false, error: "\u062A\u0646\u0638\u06CC\u0645\u0627\u062A AI \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A" }, 400);
-    return c.json(await aiCall(provider, provider.models[0], "\u0633\u0644\u0627\u0645"));
-  }
-  return c.json({ ok: false, error: "Unknown connection" }, 404);
+  const target = c.req.param("target"), input = await jsonBody(c);
+  return c.json(await connectionDiagnostic(target, input));
 });
 app.get("/api/categories/:target", async (c) => {
   const target = validDestination(c.req.param("target")), connections = await loadConnections();
@@ -4608,6 +5653,66 @@ app.post("/legacy/profiles/:id/extract", async (c) => createProfileJob(c, c.req.
 app.post("/legacy/profiles/:id/sync", async (c) => createProfileJob(c, c.req.param("id"), "sync"));
 app.get("/legacy/backup", async (c) => c.json({ ok: true, data: await createBackup() }));
 app.post("/legacy/restore", async (c) => c.json({ ok: true, data: await restoreBackup(await c.req.json()) }));
+async function connectionDiagnostic(target, input) {
+  const started = Date.now(), startedAt = (/* @__PURE__ */ new Date()).toISOString(), connections = await loadConnections(true);
+  try {
+    if (target === "woo") {
+      const x = connections.woo, endpoint = x.url.replace(/\/$/, "") + "/wp-json/wc/v3/system_status";
+      if (!x.url || !x.key || !x.secret) return diagnosticConfigError(target, startedAt, started, "\u0622\u062F\u0631\u0633 \u0641\u0631\u0648\u0634\u06AF\u0627\u0647\u060C Consumer Key \u0648 Consumer Secret \u0631\u0627 \u06A9\u0627\u0645\u0644 \u06A9\u0646\u06CC\u062F.", ["\u0622\u062F\u0631\u0633 \u0628\u0627\u06CC\u062F \u0628\u0627 https:// \u0634\u0631\u0648\u0639 \u0634\u0648\u062F.", "\u06A9\u0644\u06CC\u062F \u062E\u0648\u0627\u0646\u062F\u0646/\u0646\u0648\u0634\u062A\u0646 \u0631\u0627 \u0627\u0632 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u2190 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u2190 \u067E\u06CC\u0634\u0631\u0641\u062A\u0647 \u2190 REST API \u0628\u0633\u0627\u0632\u06CC\u062F."]);
+      const response = await safeFetch(endpoint, { headers: { authorization: basicAuth(x.key, x.secret), accept: "application/json" } }, 2e6), raw2 = await diagnosticBody(response), environment = raw2 && typeof raw2 === "object" ? raw2.environment || {} : {};
+      return { ok: response.ok, target, service: "WooCommerce REST API", startedAt, durationMs: Date.now() - started, request: { method: "GET", endpoint, authentication: "Basic Auth (\u06A9\u0644\u06CC\u062F \u062F\u0631 \u06AF\u0632\u0627\u0631\u0634 \u0646\u0645\u0627\u06CC\u0634 \u062F\u0627\u062F\u0647 \u0646\u0645\u06CC\u200C\u0634\u0648\u062F)" }, http: { status: response.status, statusText: response.statusText, contentType: response.headers.get("content-type") || "", finalUrl: response.headers.get("x-scraper-final-url") || endpoint }, summary: { woocommerceVersion: environment.woocommerce_version || null, wordpressVersion: environment.wp_version || null, phpVersion: environment.php_version || null, siteUrl: environment.site_url || x.url, storeName: raw2?.settings?.api_enabled ?? null }, recommendations: response.ok ? ["\u0627\u062A\u0635\u0627\u0644 \u0645\u0639\u062A\u0628\u0631 \u0627\u0633\u062A \u0648 WooCommerce System Status \u067E\u0627\u0633\u062E \u062F\u0627\u062F.", "\u0627\u06A9\u0646\u0648\u0646 \u062F\u0633\u062A\u0647\u200C\u0647\u0627 \u0631\u0627 \u0628\u0627\u0631\u06AF\u0630\u0627\u0631\u06CC \u0648 \u06CC\u06A9 \u0645\u062D\u0635\u0648\u0644 \u0622\u0632\u0645\u0627\u06CC\u0634\u06CC \u0631\u0627 \u0628\u0627 \u0648\u0636\u0639\u06CC\u062A \u067E\u06CC\u0634\u200C\u0646\u0648\u06CC\u0633 \u0627\u0631\u0633\u0627\u0644 \u06A9\u0646\u06CC\u062F."] : connectionAdvice(response.status, "woo"), raw: redactDiagnostic(raw2, [x.key, x.secret]) };
+    }
+    if (target === "basalam") {
+      const base = connections.basalam, index = Number(input?.shopIndex), shop = Number.isInteger(index) && index >= 0 ? base.shops[index] : null, token = shop?.token || base.token, expectedVendorId = shop?.vendorId || base.vendorId, endpoint = base.api.replace(/\/$/, "") + "/users/me";
+      if (!token) return diagnosticConfigError(target, startedAt, started, "\u062A\u0648\u06A9\u0646 \u0628\u0627\u0633\u0644\u0627\u0645 \u0648\u0627\u0631\u062F \u0646\u0634\u062F\u0647 \u0627\u0633\u062A.", ["\u0627\u0632 \u067E\u0646\u0644 \u062A\u0648\u0633\u0639\u0647\u200C\u062F\u0647\u0646\u062F\u06AF\u0627\u0646 \u0628\u0627\u0633\u0644\u0627\u0645 \u06CC\u06A9 \u062A\u0648\u06A9\u0646 \u0645\u0639\u062A\u0628\u0631 \u0628\u0633\u0627\u0632\u06CC\u062F.", "\u062A\u0648\u06A9\u0646 \u0631\u0627 \u0628\u062F\u0648\u0646 Bearer \u0648 \u0628\u062F\u0648\u0646 \u0641\u0627\u0635\u0644\u0647\u0654 \u0627\u0628\u062A\u062F\u0627/\u0627\u0646\u062A\u0647\u0627 \u0648\u0627\u0631\u062F \u06A9\u0646\u06CC\u062F."]);
+      const response = await safeFetch(endpoint, { headers: { authorization: `Bearer ${token}`, accept: "application/json" } }, 2e6), raw2 = await diagnosticBody(response), vendor = raw2?.vendor || raw2?.data?.vendor || {}, user = raw2?.data || raw2 || {}, vendorId = String(vendor.id || user.vendor_id || "");
+      return { ok: response.ok, target, service: "Basalam OpenAPI", startedAt, durationMs: Date.now() - started, request: { method: "GET", endpoint, authentication: "Bearer Token (\u062A\u0648\u06A9\u0646 \u062F\u0631 \u06AF\u0632\u0627\u0631\u0634 \u0646\u0645\u0627\u06CC\u0634 \u062F\u0627\u062F\u0647 \u0646\u0645\u06CC\u200C\u0634\u0648\u062F)", shopIndex: shop ? index : null }, http: { status: response.status, statusText: response.statusText, contentType: response.headers.get("content-type") || "", finalUrl: response.headers.get("x-scraper-final-url") || endpoint }, summary: { userId: user.id || null, userName: user.name || user.username || null, vendorId: vendorId || null, vendorTitle: vendor.title || user.vendor_title || shop?.name || null, vendorActive: vendor.is_active ?? null, verification: user.info_verification_status || null, configuredVendorId: expectedVendorId || null, vendorIdMatches: !expectedVendorId || !vendorId ? null : String(expectedVendorId) === vendorId }, recommendations: response.ok ? ["\u062A\u0648\u06A9\u0646 \u0645\u0639\u062A\u0628\u0631 \u0627\u0633\u062A \u0648 \u0645\u0633\u06CC\u0631 users/me \u067E\u0627\u0633\u062E \u062F\u0627\u062F.", ...!expectedVendorId && vendorId ? ["\u0634\u0646\u0627\u0633\u0647 \u063A\u0631\u0641\u0647\u0654 \u062F\u0631\u06CC\u0627\u0641\u062A\u200C\u0634\u062F\u0647 \u0631\u0627 \u062F\u0631 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0630\u062E\u06CC\u0631\u0647 \u06A9\u0646\u06CC\u062F."] : [], ...expectedVendorId && vendorId && String(expectedVendorId) !== vendorId ? ["\u0634\u0646\u0627\u0633\u0647 \u063A\u0631\u0641\u0647\u0654 \u062A\u0646\u0638\u06CC\u0645\u200C\u0634\u062F\u0647 \u0628\u0627 \u063A\u0631\u0641\u0647\u0654 \u062A\u0648\u06A9\u0646 \u06CC\u06A9\u0633\u0627\u0646 \u0646\u06CC\u0633\u062A\u061B \u0622\u0646 \u0631\u0627 \u0627\u0635\u0644\u0627\u062D \u06A9\u0646\u06CC\u062F."] : []] : connectionAdvice(response.status, "basalam"), raw: redactDiagnostic(raw2, [token]) };
+    }
+    if (target === "ai") {
+      const providers = await aiProviders(), provider = providers.find((x) => x.id === input?.provider) || providers.find((x) => x.enabled && x.models.length), model = String(input?.model || provider?.models[0] || ""), prompt = String(input?.prompt || "\u0633\u0644\u0627\u0645");
+      if (!provider || !model) return diagnosticConfigError(target, startedAt, started, "\u0627\u0631\u0627\u0626\u0647\u200C\u062F\u0647\u0646\u062F\u0647 \u0648 \u0645\u062F\u0644 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06CC \u062A\u0646\u0638\u06CC\u0645 \u0646\u0634\u062F\u0647 \u0627\u0633\u062A.", ["\u062F\u0631 \u0631\u0627\u0628\u0637 \u0628\u0635\u0631\u06CC \u06CC\u06A9 \u0627\u0631\u0627\u0626\u0647\u200C\u062F\u0647\u0646\u062F\u0647 \u0627\u0636\u0627\u0641\u0647 \u06A9\u0646\u06CC\u062F.", "Base URL\u060C API Key \u0648 \u062D\u062F\u0627\u0642\u0644 \u06CC\u06A9 \u0645\u062F\u0644 \u0631\u0627 \u0648\u0627\u0631\u062F \u0648 \u0630\u062E\u06CC\u0631\u0647 \u06A9\u0646\u06CC\u062F."]);
+      try {
+        const result = await aiCall(provider, model, prompt);
+        return { ...result, target, service: "AI Chat Completions", startedAt, durationMs: Date.now() - started, recommendations: ["\u0645\u062F\u0644 \u067E\u0627\u0633\u062E \u0645\u0639\u062A\u0628\u0631 \u0628\u0631\u06AF\u0631\u062F\u0627\u0646\u062F. \u0628\u0631\u0627\u06CC \u0645\u0634\u0627\u0647\u062F\u0647\u0654 \u067E\u0627\u0633\u062E \u062E\u0627\u0645\u060C \u0628\u062E\u0634 \u067E\u0627\u06CC\u06CC\u0646 \u0645\u0648\u062F\u0627\u0644 \u0631\u0627 \u0628\u0627\u0632\u0628\u06CC\u0646\u06CC \u06A9\u0646\u06CC\u062F."] };
+      } catch (error) {
+        const detail = error?.detail || {};
+        return { ok: false, target, service: "AI Chat Completions", startedAt, durationMs: Date.now() - started, provider: provider.id, providerName: provider.name, model, prompt, error: message(error), ...detail, recommendations: ["\u0622\u062F\u0631\u0633 \u067E\u0627\u06CC\u0647\u060C \u06A9\u0644\u06CC\u062F API \u0648 \u0646\u0627\u0645 \u062F\u0642\u06CC\u0642 \u0645\u062F\u0644 \u0631\u0627 \u0628\u0631\u0631\u0633\u06CC \u06A9\u0646\u06CC\u062F.", "\u0627\u06AF\u0631 \u062E\u0637\u0627 \u06F4\u06F2\u06F9 \u0627\u0633\u062A \u06A9\u0645\u06CC \u0635\u0628\u0631 \u06A9\u0646\u06CC\u062F \u06CC\u0627 \u0633\u0642\u0641 \u062A\u0633\u062A \u0647\u0645\u0632\u0645\u0627\u0646 \u0631\u0627 \u06A9\u0645 \u06A9\u0646\u06CC\u062F.", "\u0627\u06AF\u0631 \u062E\u0637\u0627\u06CC \u0634\u0628\u06A9\u0647 \u0627\u0633\u062A \u0631\u0648\u0634 Worker/Gateway \u0633\u0627\u0632\u06AF\u0627\u0631 \u0628\u0627 HTTP \u0631\u0627 \u0627\u0646\u062A\u062E\u0627\u0628 \u06A9\u0646\u06CC\u062F."] };
+      }
+    }
+    return { ok: false, target, error: "\u0646\u0648\u0639 \u0627\u062A\u0635\u0627\u0644 \u0646\u0627\u0634\u0646\u0627\u062E\u062A\u0647 \u0627\u0633\u062A.", startedAt, durationMs: Date.now() - started };
+  } catch (error) {
+    return { ok: false, target, startedAt, durationMs: Date.now() - started, error: message(error), phase: "network", recommendations: ["\u062F\u0633\u062A\u0631\u0633\u06CC \u0627\u06CC\u0646\u062A\u0631\u0646\u062A \u0648 \u0622\u062F\u0631\u0633 \u0633\u0631\u0648\u06CC\u0633 \u0631\u0627 \u0628\u0631\u0631\u0633\u06CC \u06A9\u0646\u06CC\u062F.", "\u0627\u06AF\u0631 \u0633\u0631\u0648\u06CC\u0633 IP \u06A9\u0644\u0627\u062F\u0641\u0644\u0631 \u0631\u0627 \u0645\u062D\u062F\u0648\u062F \u06A9\u0631\u062F\u0647 \u0627\u0633\u062A \u0627\u0632 Gateway/Worker \u0645\u062C\u0627\u0632 \u0647\u0645\u0627\u0646 \u0633\u0631\u0648\u06CC\u0633 \u0627\u0633\u062A\u0641\u0627\u062F\u0647 \u06A9\u0646\u06CC\u062F.", "\u0634\u0646\u0627\u0633\u0647 \u062F\u0631\u062E\u0648\u0627\u0633\u062A \u0648 \u0645\u062A\u0646 \u062E\u0637\u0627 \u0631\u0627 \u0628\u0631\u0627\u06CC \u0639\u06CC\u0628\u200C\u06CC\u0627\u0628\u06CC \u0646\u06AF\u0647 \u062F\u0627\u0631\u06CC\u062F."] };
+  }
+}
+function diagnosticConfigError(target, startedAt, started, error, recommendations) {
+  return { ok: false, target, startedAt, durationMs: Date.now() - started, phase: "configuration", error, recommendations };
+}
+async function diagnosticBody(response) {
+  const text = await response.text();
+  if (text.length > 1e5) return { truncated: true, totalCharacters: text.length, preview: text.slice(0, 1e5) };
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+function redactDiagnostic(value, secrets = []) {
+  if (typeof value === "string") return secrets.filter(Boolean).reduce((text, secret2) => text.replaceAll(secret2, "[\u067E\u0646\u0647\u0627\u0646]"), value);
+  if (Array.isArray(value)) return value.map((item) => redactDiagnostic(item, secrets));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key2, item] of Object.entries(value)) out[key2] = /(?:authorization|api[_-]?key|token|secret|password|consumer[_-]?(?:key|secret)|cookie)/i.test(key2) ? "[\u067E\u0646\u0647\u0627\u0646]" : redactDiagnostic(item, secrets);
+    return out;
+  }
+  return value;
+}
+function connectionAdvice(status, target) {
+  if (status === 401) return [target === "woo" ? "\u06A9\u0644\u06CC\u062F \u06CC\u0627 Secret \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u0645\u0639\u062A\u0628\u0631 \u0646\u06CC\u0633\u062A \u06CC\u0627 \u0645\u062C\u0648\u0632 \u06A9\u0627\u0641\u06CC \u0646\u062F\u0627\u0631\u062F." : "\u062A\u0648\u06A9\u0646 \u0628\u0627\u0633\u0644\u0627\u0645 \u0646\u0627\u0645\u0639\u062A\u0628\u0631 \u06CC\u0627 \u0645\u0646\u0642\u0636\u06CC \u0627\u0633\u062A.", "\u0627\u0637\u0644\u0627\u0639\u0627\u062A \u0627\u062A\u0635\u0627\u0644 \u0631\u0627 \u0627\u0635\u0644\u0627\u062D \u0648 \u062F\u0648\u0628\u0627\u0631\u0647 \u062A\u0633\u062A \u06A9\u0646\u06CC\u062F."];
+  if (status === 403) return ["\u0633\u0631\u0648\u06CC\u0633 \u062F\u0631\u062E\u0648\u0627\u0633\u062A \u0631\u0627 \u0645\u0645\u0646\u0648\u0639 \u06A9\u0631\u062F\u0647 \u0627\u0633\u062A\u061B \u0645\u062C\u0648\u0632 \u062A\u0648\u06A9\u0646/\u06A9\u0644\u06CC\u062F \u0648 \u0648\u0636\u0639\u06CC\u062A \u0627\u062D\u0631\u0627\u0632 \u0647\u0648\u06CC\u062A \u0631\u0627 \u0628\u0631\u0631\u0633\u06CC \u06A9\u0646\u06CC\u062F.", "\u0645\u0645\u06A9\u0646 \u0627\u0633\u062A IP \u062E\u0631\u0648\u062C\u06CC Cloudflare \u062F\u0631 \u0633\u0631\u0648\u06CC\u0633 \u0645\u0642\u0635\u062F \u0645\u062D\u062F\u0648\u062F \u0634\u062F\u0647 \u0628\u0627\u0634\u062F."];
+  if (status === 404) return ["\u0645\u0633\u06CC\u0631 API \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F\u061B \u0622\u062F\u0631\u0633 \u067E\u0627\u06CC\u0647 \u0648 \u0646\u0633\u062E\u0647 API \u0631\u0627 \u0628\u0631\u0631\u0633\u06CC \u06A9\u0646\u06CC\u062F."];
+  if (status === 429) return ["\u0645\u062D\u062F\u0648\u062F\u06CC\u062A \u062A\u0639\u062F\u0627\u062F \u062F\u0631\u062E\u0648\u0627\u0633\u062A \u0641\u0639\u0627\u0644 \u0634\u062F\u0647 \u0627\u0633\u062A\u061B \u0686\u0646\u062F \u062F\u0642\u06CC\u0642\u0647 \u0635\u0628\u0631 \u0648 \u062F\u0648\u0628\u0627\u0631\u0647 \u0622\u0632\u0645\u0627\u06CC\u0634 \u06A9\u0646\u06CC\u062F."];
+  return [`\u067E\u0627\u0633\u062E HTTP ${status} \u0645\u0648\u0641\u0642 \u0646\u0628\u0648\u062F. \u0628\u062E\u0634 \xAB\u067E\u0627\u0633\u062E \u062E\u0627\u0645\xBB \u0631\u0627 \u0628\u0631\u0627\u06CC \u067E\u06CC\u0627\u0645 \u062F\u0642\u06CC\u0642 \u0633\u0631\u0648\u06CC\u0633 \u0628\u0628\u06CC\u0646\u06CC\u062F.`];
+}
 async function createProfileJob(c, id, kind) {
   const profile = await getProfile(id);
   if (!profile) return c.json({ ok: false, error: "Profile not found" }, 404);
@@ -4671,6 +5776,44 @@ function idFromUrl(raw2) {
   const url = new URL(raw2), id = `${url.hostname}_${decodeURIComponent(url.pathname)}`.toLowerCase().replace(/[^\p{L}\p{N}_.-]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, 120);
   return id || crypto.randomUUID();
 }
+function selectorString(value) {
+  if (typeof value === "string") return value.trim();
+  if (value && typeof value === "object") {
+    const row = value;
+    if (row.enabled === false) return "";
+    return typeof row.selector === "string" ? row.selector.trim() : "";
+  }
+  return "";
+}
+function selectorRecord(raw2, keepEmpty = false) {
+  const parsed = typeof raw2 === "string" ? jsonValue(raw2, {}) : raw2;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const out = {};
+  for (const [key2, value] of Object.entries(parsed)) {
+    const selector = selectorString(value), explicit = typeof value === "string" || Boolean(value && typeof value === "object" && ("selector" in value || "enabled" in value));
+    if (selector || keepEmpty && explicit) out[key2] = selector;
+  }
+  return out;
+}
+function booleanValue(value, fallback = false) {
+  if (value === void 0 || value === null) return fallback;
+  if (typeof value === "string") return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+  return Boolean(value);
+}
+function normalizedGallery(raw2) {
+  const parsed = typeof raw2 === "string" ? jsonValue(raw2, {}) : raw2;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const cfg = parsed, rawMode = String(cfg.mode || "off"), mode = ["off", "auto", "manual", "number"].includes(rawMode) ? rawMode : "off";
+  const from = Math.max(0, Math.trunc(Number(cfg.from) || 0)), to = Math.max(from, Math.trunc(Number(cfg.to) || 10));
+  return { mode, box: selectorString(cfg.box), selectors: selectorString(cfg.selectors), pattern: selectorString(cfg.pattern), from, to, max: Math.max(1, Math.min(30, Math.trunc(Number(cfg.max) || 30))), skip_first: booleanValue(cfg.skip_first ?? cfg.skipFirst) };
+}
+function gallerySelector(cfg) {
+  if (cfg.mode === "auto") return cfg.box;
+  if (cfg.mode === "manual") return cfg.selectors;
+  if (cfg.mode !== "number" || !cfg.pattern.includes("{n}")) return "";
+  const to = Math.min(cfg.to, cfg.from + 60);
+  return Array.from({ length: to - cfg.from + 1 }, (_, index) => cfg.pattern.replaceAll("{n}", String(cfg.from + index))).join("\n");
+}
 function normalizeProfile(raw2) {
   const sync = typeof raw2.syncConfig === "string" ? jsonValue(raw2.syncConfig, {}) : raw2.syncConfig || {};
   const on = (value) => [true, 1, "1", "true", "on"].includes(value);
@@ -4679,9 +5822,18 @@ function normalizeProfile(raw2) {
   const url = new URL(rawUrl);
   if (!["http:", "https:"].includes(url.protocol)) throw new Error("Invalid profile URL");
   const previousCreated = String(raw2.createdAt || raw2.created_at || (/* @__PURE__ */ new Date()).toISOString());
-  const detail = typeof raw2.detailSelectors === "string" ? jsonValue(raw2.detailSelectors, {}) : raw2.detailSelectors || {};
-  const selectors = { ...DEFAULT_SELECTORS, ...typeof raw2.selectors === "string" ? jsonValue(raw2.selectors, {}) : raw2.selectors || {}, ...detail };
-  if (raw2.gallery?.selectors && !selectors.gallery) selectors.gallery = raw2.gallery.selectors;
+  const rawSelectorOptions = typeof raw2.selectors === "string" ? jsonValue(raw2.selectors, {}) : raw2.selectors && typeof raw2.selectors === "object" ? raw2.selectors : {};
+  const selectors = { ...DEFAULT_SELECTORS, ...selectorRecord(raw2.selectors, true), ...selectorRecord(raw2.listSelectors, true) };
+  if (Number(rawSelectorOptions.galleryMax) > 0) selectors.galleryMax = Math.max(1, Math.min(30, Math.trunc(Number(rawSelectorOptions.galleryMax))));
+  if (rawSelectorOptions.gallerySkipFirst !== void 0) selectors.gallerySkipFirst = booleanValue(rawSelectorOptions.gallerySkipFirst);
+  const detail = selectorRecord(raw2.detailSelectors);
+  for (const [key2, value] of Object.entries(detail)) selectors[key2 === "image" ? "detailImage" : key2] = value;
+  const gallery = normalizedGallery(raw2.gallery);
+  if (gallery) {
+    selectors.gallery = gallerySelector(gallery);
+    selectors.galleryMax = gallery.max;
+    selectors.gallerySkipFirst = gallery.skip_first;
+  }
   if (!selectors.container) {
     if (noExtract) selectors.container = "body";
     else throw new Error("selectors.container is required");
@@ -4699,6 +5851,7 @@ function normalizeProfile(raw2) {
     pagination: ["query_page", "query_custom", "path_page", "path_pattern", "full_pattern", "next_selector", "none"].includes(pagination) ? pagination : "query_page",
     paginationValue: String(raw2.paginationValue || raw2.pagVal || "page"),
     selectors,
+    gallery: gallery || void 0,
     titleSuffix: String(raw2.titleSuffix || ""),
     priceMode: ["none", "add", "percent", "multiply"].includes(raw2.priceMode) ? raw2.priceMode : "none",
     priceValue: Number(raw2.priceValue ?? raw2.priceVal) || 0,

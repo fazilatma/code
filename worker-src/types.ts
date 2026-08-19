@@ -11,8 +11,23 @@ export type Selectors = {
   stock?: string;
   weight?: string;
   category?: string;
+  tags?: string;
+  detailImage?: string;
   gallery?: string;
+  galleryMax?: number;
+  gallerySkipFirst?: boolean;
   variations?: string;
+};
+
+export type GalleryConfig = {
+  mode: 'off'|'auto'|'manual'|'number';
+  box: string;
+  selectors: string;
+  pattern: string;
+  from: number;
+  to: number;
+  max: number;
+  skip_first: boolean;
 };
 
 export type Profile = {
@@ -24,6 +39,7 @@ export type Profile = {
   pagination: 'query_page' | 'query_custom' | 'path_page' | 'path_pattern' | 'full_pattern' | 'next_selector' | 'none';
   paginationValue: string;
   selectors: Selectors;
+  gallery?: GalleryConfig;
   titleSuffix: string;
   priceMode: 'none' | 'add' | 'percent' | 'multiply';
   priceValue: number;
@@ -59,6 +75,7 @@ export type Product = {
   stock?: number;
   weight?: number;
   category?: string;
+  tags?: string;
   variations?: string[];
   variationGroups?: VariationGroup[];
   variationPrices?: Record<string,number>;

@@ -52,6 +52,39 @@ test('read-only debug endpoint checks bindings, D1, queue and KDF without leakin
   assert.doesNotMatch(JSON.stringify(body),/actual-secret-42|do-not-return|ck_test|cs_private/);
 });
 
+test('network redirects strip credentials, oversized and stalled bodies stop safely, and AI failures redact secrets',async()=>{
+  const originalFetch=globalThis.fetch,originalError=console.error,db=new MemoryD1();console.error=()=>{};
+  try{
+    await call(db,'/api/connections',jsonInit({woo:{url:'https://store.example',key:'ck_redirect',secret:'cs_redirect'},ai:{providers:[{id:'p1',name:'Provider',baseUrl:'https://ai.example/v1?token=url-secret-88',apiKey:'api-secret-77',models:['model-1'],enabled:true}],network:{mode:'direct'}}}));
+    const redirectCalls=[];globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request);redirectCalls.push({url,headers:new Headers(init.headers)});if(url.startsWith('https://store.example/'))return new Response(null,{status:302,headers:{location:'https://status.example/woo'}});if(url==='https://status.example/woo')return new Response(JSON.stringify({environment:{woocommerce_version:'9.0'}}),{headers:{'content-type':'application/json'}});throw new Error(`unexpected ${url}`)};
+    const woo=await call(db,'/api/test-connection/woo',jsonInit({})).then(r=>r.json());assert.equal(woo.ok,true);assert.match(redirectCalls[0].headers.get('authorization')||'',/^Basic /);assert.equal(redirectCalls[1].headers.get('authorization'),null);assert.equal(redirectCalls[1].headers.get('cookie'),null);assert.equal(redirectCalls[1].headers.get('proxy-authorization'),null);
+
+    let cancelled=false;globalThis.fetch=async()=>new Response(new ReadableStream({start(){},cancel(){cancelled=true}}),{headers:{'content-type':'text/html','content-length':'1000001'}});
+    const oversized=await call(db,'/api/source-test',jsonInit({url:'https://large.example/page'}));assert.equal(oversized.status,413);assert.equal(cancelled,true);assert.match((await oversized.json()).error,/exceeds/i);
+
+    globalThis.fetch=async(_request,init={})=>new Response(new ReadableStream({start(controller){init.signal?.addEventListener('abort',()=>controller.error(new Error('body aborted')),{once:true})}}),{headers:{'content-type':'text/html'}});
+    const stalled=await call(db,'/api/source-test',jsonInit({url:'https://slow.example/page'}),{REQUEST_TIMEOUT_MS:'1000'});assert.equal(stalled.status,504);assert.match((await stalled.json()).error,/مهلت دریافت/);
+
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request),authorization=new Headers(init.headers).get('authorization')||'';throw new Error(`cannot reach ${url}; ${authorization}`)};
+    const ai=await call(db,'/api/test-connection/ai',jsonInit({provider:'p1',model:'model-1',prompt:'سلام'})).then(r=>r.json()),serialized=JSON.stringify(ai);assert.equal(ai.ok,false);assert.equal(ai.phase,'network');assert.equal(typeof ai.latencyMs,'number');assert.ok(ai.raw);assert.doesNotMatch(serialized,/api-secret-77|url-secret-88/);assert.match(serialized,/پنهان/);
+  }finally{globalThis.fetch=originalFetch;console.error=originalError}
+});
+
+test('Cloudflare Workers AI uses native run payloads, resolves organization model paths, and only then falls back to chat',async()=>{
+  const originalFetch=globalThis.fetch,originalError=console.error,db=new MemoryD1(),calls=[];console.error=()=>{};
+  try{
+    await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'cf',name:'Cloudflare',baseUrl:'https://api.cloudflare.com/client/v4/accounts/account-123/ai/run/',apiKey:'cf-secret-token',models:['@cf/meta/llama-test','llama-3.1','@cf/nope/model'],enabled:true}],network:{mode:'direct'}}}));
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request),body=JSON.parse(String(init.body||'{}'));calls.push({url,body,authorization:new Headers(init.headers).get('authorization')});if(url.includes('/ai/run/@cf/meta/llama-test')&&body.messages)return new Response(JSON.stringify({success:true,result:{response:'پاسخ بومی'}}),{status:200,headers:{'content-type':'application/json'}});return new Response(JSON.stringify({errors:[{message:'No route for that URI'}]}),{status:404,headers:{'content-type':'application/json'}})};
+    const native=await call(db,'/api/test-connection/ai',jsonInit({provider:'cf',model:'@cf/meta/llama-test',prompt:'سلام'})).then(r=>r.json());assert.equal(native.ok,true);assert.equal(native.text,'پاسخ بومی');assert.equal(native.cloudflare.mode,'native');assert.equal(calls.length,2);assert.deepEqual(Object.keys(calls[0].body).sort(),['max_tokens','prompt']);assert.deepEqual(Object.keys(calls[1].body).sort(),['max_tokens','messages']);assert.ok(calls.every(x=>x.url.includes('/ai/run/@cf/meta/llama-test')));assert.ok(calls.every(x=>x.authorization==='Bearer cf-secret-token'));
+
+    calls.length=0;globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request),body=JSON.parse(String(init.body||'{}'));calls.push({url,body});if(url.includes('/ai/run/@cf/meta/llama-3.1')&&body.messages)return new Response(JSON.stringify({result:{response:'مسیر سازمانی'}}),{headers:{'content-type':'application/json'}});return new Response(JSON.stringify({errors:[{code:5007,message:'No such model'}]}),{status:404,headers:{'content-type':'application/json'}})};
+    const organized=await call(db,'/api/test-connection/ai',jsonInit({provider:'cf',model:'llama-3.1',prompt:'آزمایش'})).then(r=>r.json());assert.equal(organized.ok,true);assert.equal(organized.cloudflare.resolvedModel,'@cf/meta/llama-3.1');assert.ok(calls.some(x=>x.url.includes('/ai/run/llama-3.1')));assert.ok(calls.some(x=>x.url.includes('/ai/run/@cf/meta/llama-3.1')));
+
+    calls.length=0;globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request),body=JSON.parse(String(init.body||'{}'));calls.push({url,body});if(url.endsWith('/ai/v1/chat/completions'))return new Response(JSON.stringify({choices:[{message:{content:'پاسخ chat'}}]}),{headers:{'content-type':'application/json'}});return new Response(JSON.stringify({errors:[{message:'No route for that URI'}]}),{status:404,headers:{'content-type':'application/json'}})};
+    const chat=await call(db,'/api/test-connection/ai',jsonInit({provider:'cf',model:'@cf/nope/model',prompt:'fallback'})).then(r=>r.json());assert.equal(chat.ok,true);assert.equal(chat.text,'پاسخ chat');assert.equal(chat.cloudflare.mode,'openai-fallback');assert.ok(calls.some(x=>x.url.endsWith('/ai/v1/chat/completions')));assert.ok(calls.filter(x=>x.url.includes('/ai/run/')).every(x=>!x.url.includes('/chat/completions')));assert.doesNotMatch(JSON.stringify(chat),/cf-secret-token/);
+  }finally{globalThis.fetch=originalFetch;console.error=originalError}
+});
+
 test('PHP settings import normalizes syncConfig, noExtract, fallback categories, network flag, products and variations',async()=>{
   const db=new MemoryD1(),profile={name:'CSV only',syncConfig:{enabled:true,interval:3600,target:'both',noExtract:true},bslCategoryId:77,bslFallbackCatIds:[88,99],net_indirect:'1',products:[['p-1',{title:'Variable item',price:125000,variations:['قرمز','آبی'],variationGroups:[{name:'رنگ',values:['قرمز','آبی']}]}]]};
   const profilesFile=file('profiles.json',{'csv-profile':profile}),connectionsFile=file('connections.json',{woocommerce:{url:'https://woo.example',consumer_key:'ck_import',consumer_secret:'cs_import'},basalam:{fallback_cat_ids:[55],vendors:[{name:'غرفه دوم',token:'shop-token',vendor_id:'22',price_mode:'percent',price_val:5}]},src_network:{mode:'worker',worker_url:'https://gateway.example/{url}'}}),bundle={app:'scraper',files:{'profiles.json':profilesFile.name,'connections.json':connectionsFile.name}};
@@ -68,6 +101,42 @@ test('selector suggestion and variation extraction routes execute against HTML',
     const extracted=await call(db,'/api/test-selector',jsonInit({url:'https://shop.example/p/a',selector:'.variations',type:'variations'})),variation=await extracted.json();assert.equal(extracted.status,200);assert.ok(variation.variations.includes('red'));assert.ok(variation.variations.includes('blue'));assert.ok(variation.variations.includes('L'));assert.equal(variation.variationPrices.red,150000);
   }finally{globalThis.fetch=originalFetch}
 });
+
+test('comprehensive destination APIs page, search, preview, update, status, bulk and archive with shop-aware semantics',async()=>{
+  const originalFetch=globalThis.fetch,originalError=console.error,db=new MemoryD1(),requests=[];console.error=()=>{};
+  try{
+    await call(db,'/api/connections',jsonInit({woo:{url:'https://woo.example',key:'ck_dest',secret:'cs_dest'},basalam:{api:'https://basalam.example/api',token:'bs-token',vendorId:'55',shops:[{name:'غرفه دوم',token:'shop-token',vendorId:'66',pricePercent:0}]}}));
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request),method=String(init.method||'GET').toUpperCase(),body=init.body?JSON.parse(String(init.body)):null;requests.push({url,method,body,headers:new Headers(init.headers)});
+      if(url.startsWith('https://woo.example/wp-json/wc/v3/products/101')&&method==='GET')return jsonResponse({id:101,name:'کفش وو',regular_price:'250000',stock_quantity:4,status:'publish',sku:'W-1',images:[{src:'https://woo.example/a.jpg'}],categories:[{id:7,name:'کفش'}]});
+      if(url.startsWith('https://woo.example/wp-json/wc/v3/products/101')&&method==='PUT')return jsonResponse({id:101,name:body.name||'کفش وو',regular_price:body.regular_price||'250000',stock_quantity:body.stock_quantity??4,status:body.status||'publish',sku:'W-1',images:[],categories:[]});
+      if(url.startsWith('https://woo.example/wp-json/wc/v3/products')&&method==='GET')return jsonResponse([{id:101,name:'کفش وو',regular_price:'250000',stock_quantity:4,status:'publish',sku:'W-1',images:[],categories:[]}],200,{'x-wp-total':'1','x-wp-totalpages':'1'});
+      if(url.includes('/vendors/55/products/batch-updates')&&method==='PATCH')return jsonResponse({ok:true});
+      if(url.includes('/vendors/66/products/batch-updates')&&method==='PATCH')return jsonResponse({ok:true});
+      if(url.includes('/products/201')&&method==='GET')return jsonResponse({data:{id:201,title:'عطر باسلام',primary_price:1250000,stock:3,status:{value:2976,name:'فعال'},sku:'B-1',photos:[]}});
+      if(url.includes('/products/201')&&method==='PATCH')return jsonResponse({data:{id:201,title:'عطر باسلام',primary_price:body.primary_price??1250000,stock:body.stock??3,status:{value:body.status??2976,name:'فعال'},sku:'B-1',photos:[]}});
+      if(url.includes('/vendors/55/products')&&method==='GET')return jsonResponse({data:[{id:201,title:'عطر باسلام',primary_price:1250000,stock:3,status:{value:2976,name:'فعال'},sku:'B-1'}],total_count:1,total_page:1});
+      if(url.includes('/vendors/66/products')&&method==='GET')return jsonResponse({data:[],total_count:0,total_page:1});
+      throw new Error(`unexpected destination request ${method} ${url}`)};
+    const wooList=await call(db,'/api/destination/woo/products?page=1&per_page=25&q=%DA%A9%D9%81%D8%B4&status=publish').then(r=>r.json());assert.equal(wooList.ok,true);assert.equal(wooList.items.length,1);assert.equal(wooList.items[0].price,250000);assert.equal(wooList.totalPages,1);assert.ok(requests.at(-1).url.includes('search=%DA%A9%D9%81%D8%B4'));
+    const wooPreview=await call(db,'/api/destination/woo/101/update',jsonInit({title:'کفش تازه',price:275000,shopId:'default'})).then(r=>r.json());assert.equal(wooPreview.dryRun,true);assert.equal(wooPreview.changes.name,'کفش تازه');assert.equal(wooPreview.changes.regular_price,'275000');assert.equal(requests.filter(x=>x.method==='PUT').length,0);
+    const wooApply=await call(db,'/api/destination/woo/101/update',jsonInit({title:'کفش تازه',confirm:'APPLY'})).then(r=>r.json());assert.equal(wooApply.dryRun,false);assert.equal(requests.filter(x=>x.method==='PUT').length,1);
+    const wooStatus=await call(db,'/api/destination/woo/101/status',jsonInit({status:'draft',confirm:'APPLY'})).then(r=>r.json());assert.equal(wooStatus.ok,true);assert.equal(requests.at(-1).body.status,'draft');
+
+    const bsList=await call(db,'/api/destination/basalam/products?page=1&per_page=25&shop=55&status=2976').then(r=>r.json());assert.equal(bsList.items.length,1);assert.equal(bsList.items[0].price,125000);assert.equal(bsList.items[0].shopId,'55');assert.equal(bsList.archiveInsteadOfDelete,true);
+    const bsPreview=await call(db,'/api/destination/basalam/bulk',jsonInit({ids:[{id:201,shopId:'55'}],ops:{price:{op:'inc',val:'10%'},stock:6}})).then(r=>r.json());assert.equal(bsPreview.dryRun,true);assert.equal(bsPreview.items[0].newPrice,137500);assert.equal(bsPreview.items[0].stock,6);
+    const bsBulk=await call(db,'/api/destination/basalam/bulk',jsonInit({ids:[{id:201,shopId:'55'}],ops:{price:{op:'inc',val:'10%'}},confirm:'APPLY'})).then(r=>r.json());assert.equal(bsBulk.dryRun,false);assert.equal(bsBulk.changed,1);const batch=requests.find(x=>x.url.includes('/vendors/55/products/batch-updates'));assert.equal(batch.body.data[0].primary_price,1375000);
+    const archived=await call(db,'/api/destination/basalam/201?confirm=DELETE&shop=55',{method:'DELETE'}).then(r=>r.json());assert.equal(archived.archived,true);assert.equal(archived.deleted,false);assert.equal(requests.at(-1).method,'PATCH');assert.equal(requests.at(-1).body.status,4184);
+    const overLimit=await call(db,'/api/destination/basalam/bulk',jsonInit({ids:Array.from({length:21},(_,i)=>({id:i+1,shopId:'55'})),ops:{stock:1}}));assert.equal(overLimit.status,400);assert.match((await overLimit.json()).error,/۲۰/);
+  }finally{globalThis.fetch=originalFetch;console.error=originalError}
+});
+
+test('profile extraction diagnostic runs real network, list parser, selector evidence and detail stages without writes',async()=>{
+  globalThis.HTMLRewriter=TestHTMLRewriter;const originalFetch=globalThis.fetch,db=new MemoryD1();globalThis.fetch=async request=>{const url=String(request instanceof Request?request.url:request);if(url==='https://source.example/list')return new Response('<main><article class="item"><a class="link" href="/p/one"><h2>محصول واقعی</h2></a><span class="price">۱۲۵۰۰۰ تومان</span><img src="/one.jpg"></article><script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"محصول واقعی","url":"https://source.example/p/one","image":"https://source.example/one.jpg","offers":{"price":"125000"}}</script></main>',{headers:{'content-type':'text/html; charset=utf-8'}});if(url==='https://source.example/p/one')return new Response('<main><div class="description">توضیح کامل نمونه</div><span class="sku">S-1</span></main>',{headers:{'content-type':'text/html'}});throw new Error(`unexpected ${url}`)};
+  try{const saved=await call(db,'/api/profiles',jsonInit({id:'diag',name:'عیب‌یابی واقعی',url:'https://source.example/list',pages:1,pagination:'none',selectors:{container:'.item',title:'h2',price:'.price',link:'.link',image:'img',longDesc:'.description',sku:'.sku'},enabled:true}));assert.equal(saved.status,200);const response=await call(db,'/api/profiles/diag/extraction-diagnostic',jsonInit({})),report=await response.json();assert.equal(response.status,200);assert.equal(report.productCount,1);assert.equal(report.ok,true);assert.deepEqual(report.stages.map(x=>x.name),['network','list-extraction','selector-evidence','detail-extraction']);assert.equal(report.stages.find(x=>x.name==='network').bytes>0,true);assert.equal(report.stages.find(x=>x.name==='list-extraction').samples[0].title,'محصول واقعی');assert.equal(report.detail.sku,'S-1');assert.equal(db.products.size,0)
+  }finally{globalThis.fetch=originalFetch}
+});
+
+function jsonResponse(body,status=200,headers={}){return new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json',...headers}})}
 
 class TestHTMLRewriter {
   constructor(){this.handlers=[]}on(selector,handler){this.handlers.push({selector,handler});return this}

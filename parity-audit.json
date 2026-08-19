@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-19T03:39:12.043Z",
+  "generatedAt": "2026-08-19T05:33:51.427Z",
   "ok": true,
   "reference": {
     "file": "scraper4.php",
@@ -10,7 +10,7 @@
   },
   "worker": {
     "source": "worker-src",
-    "routes": 74,
+    "routes": 80,
     "bundlePresent": true
   },
   "manifest": {

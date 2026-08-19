@@ -5,7 +5,7 @@
 ## معماری
 
 - `worker-src/main.ts`: entrypoint و handlerهای `fetch`، `queue` و `scheduled`
-- `worker-src/app.ts`: API و داشبورد Hono، احراز هویت، import/export و routeهای سازگاری
+- `worker-src/app.ts`: API و داشبورد Hono، import/export، diagnostics و routeهای سازگاری (طبق تصمیم مالک بدون صفحهٔ ورود و `ADMIN_TOKEN`)
 - `worker-src/db.ts` و `migrations/`: persistence، bootstrap مقاوم و migrationهای D1
 - `worker-src/processor.ts`: پردازش chunked با checkpoint، توقف، retry، watchdog و ادامه در Queue
 - `worker-src/scraper.ts`: استخراج فهرست/جزئیات با `HTMLRewriter`، JSON-LD و pagination کامل، شامل `next_selector`
@@ -16,6 +16,14 @@
 - `scraper4.worker.js`: bundle تولیدشده و آمادهٔ Direct Upload برای به‌روزرسانی‌های بعدی
 
 D1 منبع canonical داده است. Queue فقط شناسهٔ job را حمل می‌کند و checkpoint هر job در `app_state` می‌ماند؛ بنابراین redelivery یا restart باعث از دست‌رفتن progress نمی‌شود. هر delivery حداکثر `JOB_CHUNK_SIZE` محصول را پردازش می‌کند.
+
+### مشخصات اجرایی Cloudflare، نه یک سرور ثابت
+
+Worker ماشین مجازی اختصاصی با CPU یا vCPU قابل‌انتخاب نیست؛ در V8 isolateهای Cloudflare روی شبکهٔ جهانی اجرا و خودکار scale می‌شود. طبق [Limits رسمی](https://developers.cloudflare.com/workers/platform/limits/) در پلن Free حدود مهم عبارت‌اند از: **128 MB حافظه برای هر isolate، 10 ms زمان CPU برای هر HTTP request، 100,000 درخواست در روز، 50 subrequest و 6 اتصال خروجی همزمان برای هر invocation، bundle فشردهٔ 3 MB و startup حداکثر 1 ثانیه**. انتظار پاسخ شبکه CPU time محسوب نمی‌شود. درخواست HTTP hard wall-time عمومی ندارد، ولی به باز ماندن client وابسته است؛ Queue/Cron/Alarm حداکثر 15 دقیقه wall-time و `waitUntil()` حداکثر 30 ثانیه پس از response/disconnect فرصت دارد.
+
+در پلن Paid حافظه همچنان 128 MB است؛ CPU درخواست HTTP به‌طور پیش‌فرض 30 ثانیه و قابل افزایش تا 5 دقیقه و subrequest پیش‌فرض 10,000 است. سقف body ورودی به plan اصلی حساب Cloudflare وابسته است (Free/Pro برابر 100 MB)، نه صرفاً Workers plan. جدول کامل، معنای connection و محدودیت bundle در [`CLOUDFLARE-PARITY.md`](./CLOUDFLARE-PARITY.md) ثبت شده است. dry-run فعلی پروژه فقط **490.29 KiB raw / 120.27 KiB gzip** است.
+
+پروژه برای پلن Free تنظیم شده: `DETAIL_CONCURRENCY=2`، `JOB_CHUNK_SIZE=10`، checkpoint در D1 و Queue برای ادامهٔ کار. این adaptation به‌جای نگه‌داشتن یک process طولانی PHP، هر اجرا را کوچک و قابل retry می‌کند.
 
 ## استقرار کامل فقط با Cloudflare Dashboard
 
@@ -128,7 +136,7 @@ npm run worker:test
 npx wrangler deploy --dry-run
 ```
 
-این دستورها typecheck سخت‌گیرانه، bundle، تست runtime/security، کنترل bindingهای declarative، تطابق migration و inventory 57 قابلیتی را اجرا می‌کنند.
+این دستورها typecheck سخت‌گیرانه، bundle و ۲۵ تست runtime/security/extraction/Cloudflare-AI/مدیریت مقصد/UI را اجرا می‌کنند؛ audit جداگانه نیز bindingهای declarative، migrationها و 178 mapping سازگاری را کنترل می‌کند.
 
 ## مهاجرت داده از PHP
 
