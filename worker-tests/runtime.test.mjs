@@ -5,7 +5,7 @@ import worker from '../scraper4.worker.js';
 
 const ctx={waitUntil() {},passThroughOnException() {}};
 const db={prepare:sql=>({sql,first:async()=>({name:'profiles'})}),batch:async()=>[]};
-const request=(path,init)=>worker.fetch(new Request(`https://worker.test${path}`,init),{DB:db,ADMIN_TOKEN:'test-secret',WORKER_VERSION:'test'},ctx);
+const request=(path,init)=>worker.fetch(new Request(`https://worker.test${path}`,init),{DB:db,VAULT_SECRET:'vault-secret',WORKER_VERSION:'test'},ctx);
 
 test('health endpoint exposes Worker runtime without secrets',async()=>{
   const response=await request('/health');
@@ -14,8 +14,8 @@ test('health endpoint exposes Worker runtime without secrets',async()=>{
   assert.equal(body.ok,true);
   assert.equal(body.runtime,'cloudflare-workers');
   assert.equal(body.databaseReady,true);
-  assert.equal(body.authenticated,true);
-  assert.equal(JSON.stringify(body).includes('test-secret'),false);
+  assert.equal(body.authenticationRequired,false);
+  assert.equal(JSON.stringify(body).includes('vault-secret'),false);
 });
 
 test('dashboard assets are served with security headers',async()=>{
@@ -23,26 +23,20 @@ test('dashboard assets are served with security headers',async()=>{
   assert.equal(page.status,200);
   const html=await page.text();
   assert.match(html,/اسکرپر ووکامرس و باسلام/);
-  assert.match(html,/id="token"[^>]*minlength="8"/);
+  assert.doesNotMatch(html,/id="token"|ADMIN_TOKEN/);
   assert.match(page.headers.get('content-security-policy')||'',/default-src 'self'/);
   const script=await request('/dashboard.js');
   assert.equal(script.status,200);
   assert.match(script.headers.get('content-type')||'',/javascript/);
+  assert.doesNotMatch(await script.text(),/authorization\s*:\s*['"]Bearer|s4rt|connectBtn/);
 });
 
-test('API requires constant-time bearer authentication with an eight-character minimum',async()=>{
-  const tooShort=await worker.fetch(new Request('https://worker.test/api/parity',{headers:{authorization:'Bearer 1234567'}}),{DB:db,ADMIN_TOKEN:'1234567'},ctx);
-  assert.equal(tooShort.status,503);
-  assert.match((await tooShort.json()).error,/8 characters/);
-  const minimum=await worker.fetch(new Request('https://worker.test/api/parity',{headers:{authorization:'Bearer 12345678'}}),{DB:db,ADMIN_TOKEN:'12345678'},ctx);
-  assert.equal(minimum.status,200);
-  const missing=await worker.fetch(new Request('https://worker.test/api/parity'),{DB:db,ADMIN_TOKEN:'test-secret'},ctx);
-  assert.equal(missing.status,401);
-  const wrong=await worker.fetch(new Request('https://worker.test/api/parity',{headers:{authorization:'Bearer wrong'}}),{DB:db,ADMIN_TOKEN:'test-secret'},ctx);
-  assert.equal(wrong.status,401);
-  const valid=await request('/api/parity',{headers:{authorization:'Bearer test-secret'}});
-  assert.equal(valid.status,200);
-  const body=await valid.json();
+test('API is directly accessible without an admin token',async()=>{
+  const withoutToken=await worker.fetch(new Request('https://worker.test/api/parity'),{DB:db,VAULT_SECRET:'vault-secret'},ctx);
+  assert.equal(withoutToken.status,200);
+  const arbitraryHeader=await worker.fetch(new Request('https://worker.test/api/parity',{headers:{authorization:'Bearer ignored'}}),{DB:db,ADMIN_TOKEN:'different-secret',VAULT_SECRET:'vault-secret'},ctx);
+  assert.equal(arbitraryHeader.status,200);
+  const body=await withoutToken.json();
   assert.equal(body.total,57);
   assert.equal(new Set(body.capabilities.map(item=>item.id)).size,57);
 });

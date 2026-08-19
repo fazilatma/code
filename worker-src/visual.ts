@@ -1,9 +1,9 @@
-import { getEnv } from './env.js';
+import { getEnv, MIN_SECRET_LENGTH, validSecret } from './env.js';
 import { safeText } from './network.js';
 import { base64ToUtf8, bytesToBase64, safeEqual, textEncoder, utf8ToBase64 } from './utils.js';
 
 declare class HTMLRewriter { on(selector:string,handlers:any):HTMLRewriter; transform(response:Response):Response; }
-const secret=()=>{const value=getEnv().ADMIN_TOKEN;if(!value)throw new Error('ADMIN_TOKEN is required for visual selector tickets');return value};
+const secret=()=>{const env=getEnv(),value=env.VAULT_SECRET||env.ADMIN_TOKEN;if(!validSecret(value))throw new Error(`VAULT_SECRET must be at least ${MIN_SECRET_LENGTH} characters for visual selector tickets`);return value};
 const base64url=(value:string)=>utf8ToBase64(value).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 const unbase64url=(value:string)=>base64ToUtf8(value.replace(/-/g,'+').replace(/_/g,'/').padEnd(Math.ceil(value.length/4)*4,'='));
 async function sign(value:string):Promise<string>{const key=await crypto.subtle.importKey('raw',textEncoder.encode(secret()),{name:'HMAC',hash:'SHA-256'},false,['sign']);const signature=new Uint8Array(await crypto.subtle.sign('HMAC',key,textEncoder.encode(value)));return bytesToBase64(signature).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}

@@ -12,7 +12,7 @@ Build command:  npm ci && npm run worker:test
 Deploy command: npm run worker:deploy
 ```
 
-این استقرار به R2، subscription یا کارت بانکی نیاز ندارد. deploy نخست D1، Queue اصلی، DLQ، Queue consumer، Cron و schema دیتابیس را خودکار ایجاد و متصل می‌کند؛ ساخت دستی resource یا paste کردن UUID لازم نیست. backup کامل از `/api/backup` به‌صورت فایل JSON دانلود می‌شود. فقط `ADMIN_TOKEN` و `VAULT_SECRET` باید پس از deploy با حداقل طول ۸ کاراکتر و به‌صورت Secret در Dashboard ثبت شوند.
+این استقرار به R2، subscription یا کارت بانکی نیاز ندارد. deploy نخست D1، Queue اصلی، DLQ، Queue consumer، Cron و schema دیتابیس را خودکار ایجاد و متصل می‌کند؛ ساخت دستی resource یا paste کردن UUID لازم نیست. backup کامل از `/api/backup` به‌صورت فایل JSON دانلود می‌شود. ورود پنل و API فعلاً به `ADMIN_TOKEN` نیاز ندارد. فقط `VAULT_SECRET` باید پس از deploy با حداقل طول ۸ کاراکتر و به‌صورت Secret در Dashboard ثبت شود تا اطلاعات اتصال رمزگذاری شوند.
 
 ## توسعهٔ محلی اختیاری
 

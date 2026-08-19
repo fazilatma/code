@@ -5,7 +5,7 @@ import { automationTick, autoreplyLogs, autoreplyRun, basalamChats, basalamOrder
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
 import { DASHBOARD, DASHBOARD_JS } from './dashboard.js';
 import { allProducts, clearFinishedJobs, createBackup, createJob, deleteJob, deleteProfile, enqueueDueProfiles, ensureSchema, findLearnedCategory, getJob, getProduct, getProfile, getState, importAutoreplyLog, importCategoryLearning, learnCategory, listCategoryLearning, listJobs, listProducts, listProfiles, profileStats, reapStalledJobs, restoreBackup, retryJob, saveProfile, setState, updateJob, upsertProduct } from './db.js';
-import { configureEnv, getEnv, MIN_SECRET_LENGTH, validSecret, type Env } from './env.js';
+import { configureEnv, type Env } from './env.js';
 import { bulkEdit, destinationChangeStatus, destinationDelete, destinationOverview, findDestinationDuplicates, listDestinationProducts, photoFix, rebuildMap, recon, retire } from './maintenance.js';
 import { safeFetch, safeText } from './network.js';
 import { sendNotification } from './notifications.js';
@@ -15,7 +15,7 @@ import { numberFromText, testSelector } from './scraper.js';
 import { createPhpSettingsBundle, decodePhpSettingsBundle, stateKeyForFile } from './settings-transfer.js';
 import { syncBasalam, syncWoo } from './sync.js';
 import { DEFAULT_SELECTORS, type Product, type Profile } from './types.js';
-import { basicAuth, byteLength, escapeHtml, message, safeEqual } from './utils.js';
+import { basicAuth, byteLength, escapeHtml, message } from './utils.js';
 import { createVisualTicket, renderVisualSelector } from './visual.js';
 
 type Variables={requestId:string};
@@ -25,11 +25,11 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticated:validSecret(c.env.ADMIN_TOKEN),version:c.env.WORKER_VERSION||'1.0.0',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.0.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/visual',async c=>{const content=await renderVisualSelector(c.req.query('ticket')||'');return c.html(content,200,{'cache-control':'no-store','content-security-policy':"default-src 'none'; img-src https: http: data:; style-src 'unsafe-inline' https: http:; font-src https: http: data:; script-src 'unsafe-inline'; frame-ancestors 'self';",'referrer-policy':'no-referrer'})});
-app.use('/api/*',async(c,next)=>{if(!c.env.DB)return c.json({ok:false,error:'D1 binding DB is not configured'},503);const token=c.env.ADMIN_TOKEN||'';if(!validSecret(c.env.ADMIN_TOKEN)&&c.env.ALLOW_INSECURE!=='true')return c.json({ok:false,error:`ADMIN_TOKEN is not configured or is shorter than ${MIN_SECRET_LENGTH} characters. Add it as an encrypted Secret in Cloudflare Dashboard → Worker → Settings → Variables and Secrets, then deploy the change.`},503);const supplied=(c.req.header('authorization')||'').replace(/^Bearer\s+/i,'');if(token&&!safeEqual(supplied,token))return c.json({ok:false,error:'Unauthorized'},401);await ensureSchema(c.env.DB);await next()});
+app.use('/api/*',async(c,next)=>{if(!c.env.DB)return c.json({ok:false,error:'D1 binding DB is not configured'},503);await ensureSchema(c.env.DB);await next()});
 
 app.post('/api/visual-ticket',async c=>{const body=await c.req.json() as any,url=new URL(String(body.url||''));if(!['http:','https:'].includes(url.protocol))return c.json({ok:false,error:'Invalid visual selector URL'},400);return c.json({ok:true,ticket:await createVisualTicket(url.href),expiresIn:300})});
 app.get('/api/status',async c=>{const connections=await loadConnections();return c.json({ok:true,profiles:(await listProfiles()).length,jobs:await listJobs(10),connections:connectionStatus(connections),queue:Boolean(c.env.JOBS),storage:{d1:true,r2:Boolean(c.env.BACKUPS)}})});

@@ -84,21 +84,20 @@ Wrangler قفل‌شده در `package-lock.json` هنگام نخستین deploy
 
 1. Worker `scraper4-cloudflare` را باز کنید.
 2. به **Settings → Variables and Secrets** بروید.
-3. `ADMIN_TOKEN` را به‌صورت **Secret** و با یک مقدار تصادفی حداقل ۸ کاراکتری اضافه کنید.
-4. `VAULT_SECRET` را نیز به‌صورت **Secret** و با مقداری مستقل و حداقل ۸ کاراکتری اضافه کنید.
-5. تغییرات را Save/Deploy کنید و URL `workers.dev` را باز کنید.
+3. `VAULT_SECRET` را به‌صورت **Secret** و با یک مقدار تصادفی حداقل ۸ کاراکتری اضافه کنید.
+4. تغییرات را Save/Deploy کنید و URL `workers.dev` را باز کنید.
 
-`ADMIN_TOKEN` اجباری و کلید ورود API است. `VAULT_SECRET` کلید ترجیحی vault است و پس از ذخیرهٔ اتصال‌ها نباید تغییر کند. اگر تعریف نشود، برنامه برای سازگاری از `ADMIN_TOKEN` استفاده می‌کند؛ در این حالت چرخاندن token بدون export/import مجدد اتصال‌ها ممکن نیست. برای restore یک backup روی استقرار دیگر نیز همان `VAULT_SECRET` لازم است.
+ورود پنل و API فعلاً به `ADMIN_TOKEN` نیاز ندارد. `VAULT_SECRET` کلید رمزگذاری vault است و پس از ذخیرهٔ اتصال‌ها نباید تغییر یا حذف شود. برای restore یک backup روی استقرار دیگر نیز همان `VAULT_SECRET` لازم است.
 
 متغیرهای credential مقصد مانند `WOO_URL`، `WOO_KEY`، `WOO_SECRET` و `BASALAM_TOKEN` فقط fallback هستند. روش پیشنهادی، ثبت اتصال‌ها از پنل رمزگذاری‌شدهٔ خود برنامه است. هیچ secret حساسی را در `wrangler.toml` قرار ندهید.
 
 ### 4. کنترل نصب از مرورگر
 
-بعد از تعریف secretها:
+بعد از تعریف secret:
 
-- `https://<worker>.workers.dev/health` باید `ok: true` و `databaseReady: true` بدهد.
-- داشبورد را باز و `ADMIN_TOKEN` را در تب تنظیمات وارد کنید.
-- endpoint احراز هویت‌شدهٔ `/api/selftest` باید `ok: true` و `total: 57` نشان دهد.
+- `https://<worker>.workers.dev/health` باید `ok: true`، `databaseReady: true` و `authenticationRequired: false` بدهد.
+- داشبورد باید بدون کادر ورود مستقیماً اطلاعات را بارگذاری کند.
+- endpoint `/api/selftest` باید بدون توکن `ok: true` و `total: 57` نشان دهد.
 - در **Bindings** باید `DB`، `JOBS` و `JOBS_DLQ` دیده شوند؛ نبودن `BACKUPS` عمدی است.
 - در **Triggers** باید Cron پنج‌دقیقه‌ای و Queue consumer دیده شوند.
 
@@ -134,7 +133,7 @@ npx wrangler deploy --dry-run
 دو مسیر وجود دارد:
 
 1. در داشبورد Worker، **تنظیمات عمومی ← انتقال همه تنظیمات** را باز کنید و bundle خروجی PHP را import کنید.
-2. فقط برای `profiles.json` قدیمی، درخواست `POST /api/import-php` با `Authorization: Bearer ADMIN_TOKEN` قابل استفاده است.
+2. فقط برای `profiles.json` قدیمی، درخواست `POST /api/import-php` بدون هدر ورود قابل استفاده است.
 
 فرمت `scraper4-php-compatible` برای فایل‌های اتصال، تنظیمات، category learning، autoreply و profile/product پشتیبانی می‌شود. اتصال‌های plaintext ورودی بلافاصله با Web Crypto رمز می‌شوند.
 
@@ -143,8 +142,8 @@ npx wrangler deploy --dry-run
 ## API و امنیت
 
 - `GET /health` عمومی است و secret نمایش نمی‌دهد.
-- داشبورد و JavaScript عمومی‌اند، اما تمام `/api/*` به `Authorization: Bearer <ADMIN_TOKEN>` نیاز دارند.
-- عملیات مخرب علاوه بر token به عبارت تأیید `APPLY` یا `DELETE` نیاز دارند.
+- ورود با `ADMIN_TOKEN` فعلاً غیرفعال است و تمام `/api/*` بدون هدر ورود در دسترس‌اند؛ URL Worker را عمومی منتشر نکنید.
+- عملیات مخرب همچنان به عبارت تأیید `APPLY` یا `DELETE` نیاز دارند.
 - Visual Selector ticket امضاشده و پنج‌دقیقه‌ای دارد؛ HTML مقصد sanitize می‌شود.
 - fetch مقصد فقط HTTP/HTTPS عمومی را می‌پذیرد، redirect را دوباره اعتبارسنجی می‌کند و پاسخ محدود دارد.
 - مستقیم‌رفتن از طریق SOCKS، custom DNS یا proxy سطح socket در Workers ممکن نیست. modeهای غیرمستقیم AI از `workerUrl` به‌عنوان gateway HTTP استفاده می‌کنند.
