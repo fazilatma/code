@@ -47,6 +47,12 @@ function onclickUrl(element:HtmlElement):string{return element.getAttribute('onc
 const TITLE_ATTRS=['data-title','title','aria-label','content'];
 const PRICE_ATTRS=['data-price','data-regular-price','data-sale-price','content','value'];
 const SKU_ATTRS=['data-sku','data-product-sku','content','value'];
+// Cloudflare's streaming parser rejects Element.onEndTag() for HTML void
+// elements (for example img/input/source) with "Parser error: No end tag".
+// Attribute-only fields never need an end callback, and text handlers must skip
+// it for tags which cannot contain text.
+const VOID_TAGS=new Set(['area','base','br','col','embed','hr','img','input','link','meta','param','source','track','wbr']);
+function hasEndTag(element:HtmlElement):boolean{return !VOID_TAGS.has(String(element.tagName||'').toLowerCase())}
 async function sourceKey(value:string):Promise<string>{return (await sha256(value)).slice(0,32)}
 async function sourceText(url:string,indirect=false,maxBytes=8_000_000){
   if(!indirect)return safeText(url,maxBytes);
@@ -142,6 +148,7 @@ class CardHandler {
     setCardValue(card,'title',firstAttribute(element,TITLE_ATTRS),15,this.baseUrl);
     setCardValue(card,'price',firstAttribute(element,PRICE_ATTRS),15,this.baseUrl);
     setCardValue(card,'sku',firstAttribute(element,SKU_ATTRS),15,this.baseUrl);
+    if(!hasEndTag(element)){this.stack.pop();this.output.push(card);return}
     element.onEndTag(()=>{const ended=this.stack.pop();if(ended)this.output.push(ended)});
   }
   current():Card|undefined{return this.stack[this.stack.length-1]}
@@ -153,6 +160,7 @@ class CardFieldHandler {
     const card=this.cards.current();if(!card||this.captures.some(capture=>capture.card===card))return;
     const immediate=elementValue(this.field,element);
     if(immediate)setCardValue(card,this.field,immediate,this.rank+2,this.baseUrl);
+    if(this.field==='link'||this.field==='image'||!hasEndTag(element))return;
     const capture={card,text:'',element};this.captures.push(capture);
     element.onEndTag(()=>{
       setCardValue(card,this.field,elementValue(this.field,element,capture.text),this.rank,this.baseUrl);
@@ -245,6 +253,7 @@ class ScalarHandler {
     if(this.values.get(this.key)||this.captures.length)return;
     const immediate=firstAttribute(element,DETAIL_ATTRS[this.key]||['data-value','content','value']);
     if(immediate)this.values.set(this.key,cleanText(immediate));
+    if(!hasEndTag(element))return;
     const capture={text:'',element};this.captures.push(capture);
     element.onEndTag(()=>{
       if(!this.values.get(this.key)){const value=cleanText(capture.text);if(value)this.values.set(this.key,value)}
@@ -283,7 +292,7 @@ class VariationContext {
 }
 class VariationScopeHandler {
   constructor(private context:VariationContext){}
-  element(element:HtmlElement):void{const name=variationName(element);this.context.stack.push(name);element.onEndTag(()=>this.context.stack.pop())}
+  element(element:HtmlElement):void{if(!hasEndTag(element))return;const name=variationName(element);this.context.stack.push(name);element.onEndTag(()=>this.context.stack.pop())}
 }
 function mergeVariation(result:DetailResult,element:HtmlElement,text:string,baseUrl:string,inheritedName=''):void{
   const attrs=Object.fromEntries(Array.from(element.attributes));
@@ -304,6 +313,7 @@ class VariationHandler {
   private captures:Array<{element:HtmlElement;text:string}>=[];
   constructor(private result:DetailResult,private baseUrl:string,private context:VariationContext){}
   element(element:HtmlElement):void{
+    if(!hasEndTag(element)){mergeVariation(this.result,element,'',this.baseUrl,this.context.current());return}
     const capture={element,text:''};this.captures.push(capture);
     element.onEndTag(()=>{mergeVariation(this.result,element,capture.text,this.baseUrl,this.context.current());const index=this.captures.indexOf(capture);if(index>=0)this.captures.splice(index,1)});
   }
@@ -391,6 +401,7 @@ export async function extractSelectorValues(html:string,baseUrl:string,selector:
     element(element:HtmlElement):void{
       if(type==='link'){const value=canonicalUrl(firstAttribute(element,LINK_ATTRS)||onclickUrl(element),baseUrl);if(value)values.push(value);return}
       if(type==='image'){const value=imageUrl(firstAttribute(element,IMAGE_ATTRS)||srcsetValue(element.getAttribute('srcset')||''),baseUrl);if(value)values.push(value);return}
+      if(!hasEndTag(element)){const value=firstAttribute(element,[...TITLE_ATTRS,...PRICE_ATTRS,...SKU_ATTRS]);if(value)values.push(cleanText(value));return}
       const capture={element,text:''};this.captures.push(capture);element.onEndTag(()=>{const value=cleanText(capture.text)||firstAttribute(element,[...TITLE_ATTRS,...PRICE_ATTRS,...SKU_ATTRS]);if(value)values.push(value);const i=this.captures.indexOf(capture);if(i>=0)this.captures.splice(i,1)})
     }
     text(chunk:TextChunk):void{for(const capture of this.captures)capture.text+=chunk.text}

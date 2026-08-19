@@ -11408,6 +11408,10 @@ function onclickUrl(element) {
 var TITLE_ATTRS = ["data-title", "title", "aria-label", "content"];
 var PRICE_ATTRS = ["data-price", "data-regular-price", "data-sale-price", "content", "value"];
 var SKU_ATTRS = ["data-sku", "data-product-sku", "content", "value"];
+var VOID_TAGS = /* @__PURE__ */ new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+function hasEndTag(element) {
+  return !VOID_TAGS.has(String(element.tagName || "").toLowerCase());
+}
 async function sourceKey(value) {
   return (await sha2562(value)).slice(0, 32);
 }
@@ -11557,6 +11561,11 @@ var CardHandler = class {
     setCardValue(card, "title", firstAttribute(element, TITLE_ATTRS), 15, this.baseUrl);
     setCardValue(card, "price", firstAttribute(element, PRICE_ATTRS), 15, this.baseUrl);
     setCardValue(card, "sku", firstAttribute(element, SKU_ATTRS), 15, this.baseUrl);
+    if (!hasEndTag(element)) {
+      this.stack.pop();
+      this.output.push(card);
+      return;
+    }
     element.onEndTag(() => {
       const ended = this.stack.pop();
       if (ended) this.output.push(ended);
@@ -11579,6 +11588,7 @@ var CardFieldHandler = class {
     if (!card || this.captures.some((capture2) => capture2.card === card)) return;
     const immediate = elementValue(this.field, element);
     if (immediate) setCardValue(card, this.field, immediate, this.rank + 2, this.baseUrl);
+    if (this.field === "link" || this.field === "image" || !hasEndTag(element)) return;
     const capture = { card, text: "", element };
     this.captures.push(capture);
     element.onEndTag(() => {
@@ -11709,6 +11719,7 @@ var ScalarHandler = class {
     if (this.values.get(this.key) || this.captures.length) return;
     const immediate = firstAttribute(element, DETAIL_ATTRS[this.key] || ["data-value", "content", "value"]);
     if (immediate) this.values.set(this.key, cleanText(immediate));
+    if (!hasEndTag(element)) return;
     const capture = { text: "", element };
     this.captures.push(capture);
     element.onEndTag(() => {
@@ -11783,6 +11794,7 @@ var VariationScopeHandler = class {
     this.context = context;
   }
   element(element) {
+    if (!hasEndTag(element)) return;
     const name = variationName(element);
     this.context.stack.push(name);
     element.onEndTag(() => this.context.stack.pop());
@@ -11829,6 +11841,10 @@ var VariationHandler = class {
   }
   captures = [];
   element(element) {
+    if (!hasEndTag(element)) {
+      mergeVariation(this.result, element, "", this.baseUrl, this.context.current());
+      return;
+    }
     const capture = { element, text: "" };
     this.captures.push(capture);
     element.onEndTag(() => {
@@ -11997,6 +12013,11 @@ async function extractSelectorValues(html, baseUrl, selector, type) {
       if (type === "image") {
         const value = imageUrl(firstAttribute(element, IMAGE_ATTRS) || srcsetValue(element.getAttribute("srcset") || ""), baseUrl);
         if (value) values.push(value);
+        return;
+      }
+      if (!hasEndTag(element)) {
+        const value = firstAttribute(element, [...TITLE_ATTRS, ...PRICE_ATTRS, ...SKU_ATTRS]);
+        if (value) values.push(cleanText(value));
         return;
       }
       const capture = { element, text: "" };

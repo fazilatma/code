@@ -10,6 +10,7 @@ import {load} from 'cheerio';
 const temporary=await mkdtemp(join(tmpdir(),'scraper4-extraction-'));
 await build({entryPoints:{scraper:new URL('../worker-src/scraper.ts',import.meta.url).pathname,network:new URL('../worker-src/network.ts',import.meta.url).pathname,app:new URL('../worker-src/app.ts',import.meta.url).pathname},bundle:true,format:'esm',platform:'browser',target:'es2022',outdir:temporary,entryNames:'[name]',outExtension:{'.js':'.mjs'}});
 const scraper=await import(pathToFileURL(join(temporary,'scraper.mjs'))),network=await import(pathToFileURL(join(temporary,'network.mjs'))),app=await import(pathToFileURL(join(temporary,'app.mjs')));
+const HTML_VOID_TAGS=new Set(['area','base','br','col','embed','hr','img','input','link','meta','param','source','track','wbr']);
 
 class CheerioHTMLRewriter {
   constructor(){this.registrations=[]}
@@ -22,7 +23,7 @@ class CheerioHTMLRewriter {
     if(node.type==='tag')for(const registration of this.registrations)if($(node).is(registration.selector))matching.push(registration.handler);
     const callbacks=[],wrapper={
       tagName:node.name,getAttribute:name=>node.attribs?.[name]??null,setAttribute:(name,value)=>$(node).attr(name,value),removeAttribute:name=>$(node).removeAttr(name),
-      before:(value)=>$(node).before(value),after:(value)=>$(node).after(value),remove:()=>$(node).remove(),onEndTag:callback=>callbacks.push(callback),
+      before:(value)=>$(node).before(value),after:(value)=>$(node).after(value),remove:()=>$(node).remove(),onEndTag:callback=>{if(HTML_VOID_TAGS.has(String(node.name).toLowerCase()))throw Error('Parser error: No end tag.');callbacks.push(callback)},
       get attributes(){return Object.entries(node.attribs||{})}
     };
     for(const handler of matching)handler.element?.(wrapper);
@@ -40,6 +41,13 @@ test('list extraction handles nested text, Persian price, element attributes, sm
   assert.equal(products[0].url,'https://shop.example/product/kafsh?color=red');assert.equal(products[0].image,'https://shop.example/img/a-1200.webp');
   assert.equal(products[1].title,'کیف چرمی');assert.equal(products[1].price,950_000);assert.equal(products[1].url,'https://shop.example/product/bag');assert.equal(products[1].image,'https://shop.example/img/bag.jpg');
   const trackingChanged=html.replace('utm_source=test&color=red','utm_campaign=other&color=red'),again=await scraper.parseCards(trackingChanged,'https://shop.example/catalog',selectors);assert.equal(again[0].sourceKey,products[0].sourceKey);
+});
+
+test('Cloudflare void elements never request an end tag while extracting Tailwind product cards',async()=>{
+  const html='<main><div class="flex flex-shrink flex-col"><a class="flex w-full grow" href="/product/902"><img class="aspect-[1/1.2] h-full w-full" src="/product.jpg"><div class="my-1 line-clamp-2 h-12">محصول برف</div><div class="flex flex-row items-center">۷۶۹٬۰۰۰ تومان</div></a></div></main>';
+  const selectors={container:'div.flex.flex-shrink.flex-col',title:'div.my-1.line-clamp-2.h-12',price:'div.flex.flex-row.items-center',link:'a.flex.w-full.grow',image:'img.aspect-\\[1\\/1\\.2\\].h-full.w-full'};
+  const products=await scraper.parseCards(html,'https://barfbox.ir/search/?page=1',selectors);
+  assert.equal(products.length,1);assert.equal(products[0].title,'محصول برف');assert.equal(products[0].price,769000);assert.equal(products[0].url,'https://barfbox.ir/product/902');assert.equal(products[0].image,'https://barfbox.ir/product.jpg');
 });
 
 test('product links support data-product attributes and simple onclick navigation',async()=>{
