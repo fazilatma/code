@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.81';
+const APP_VERSION = '9.82';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1796,6 +1796,12 @@ function bslNetCfg(?array $cn = null): array {
     if ($cn === null) $cn = loadConnections();
     $b = (array)($cn['basalam'] ?? []);
     $indirect = !empty($b['net_indirect']);
+    // v9.82: «اجرا» ممکن است یک حالت موقت را صریحاً بخواهد (مثلاً دکمهٔ تست با
+    // تیکِ تازه‌خاموش/روشنِ روی صفحه، قبل از ذخیره). اگر تعیین شده باشد بر
+    // مقدارِ ذخیره‌شده مقدم است.
+    if (array_key_exists('_bslIndirectOverride', $GLOBALS)) {
+        $indirect = !empty($GLOBALS['_bslIndirectOverride']);
+    }
     // جزئیات روش‌های اتصال از src_net (اتصال به سایت مبدأ) وام گرفته می‌شود
     $sn = [];
     if (function_exists('srcNetCfg')) $sn = srcNetCfg($cn);
@@ -3458,6 +3464,18 @@ function srcNetSetProfileIndirect(?string $pk): void {
         $on = netIndirectOn($p[$pk]['net_indirect'] ?? false);
     }
     $GLOBALS['_srcNetProfileIndirect'] = $on;
+}
+
+/* v9.82: برای استخراجِ فرانت‌اند (stream / detail_stream / fetch_missing_stream)
+   — فقط اگر برای این URL پروفایلی وجود داشته باشد، اتصالِ غیرمستقیمِ همان
+   پروفایل (سوییچ تب «شروع») اعمال می‌شود. اگر پروفایلی نباشد، مقدارِ سراسریِ
+   «اتصال به سایت مبدأ» (src_net) دست‌نخورده می‌ماند تا رفتارِ قبلی عوض نشود. */
+function srcNetApplyProfileIfExists(?string $pk): void {
+    if ($pk === '' || $pk === null) return;
+    $p = loadProfiles();
+    if (isset($p[$pk]) && is_array($p[$pk])) {
+        $GLOBALS['_srcNetProfileIndirect'] = netIndirectOn($p[$pk]['net_indirect'] ?? false);
+    }
 }
 
 /** آیا برای این دامنه باید از راه عبور استفاده کنیم؟ */
@@ -7153,6 +7171,8 @@ if (isset($_GET['fetch_missing_stream'])) {
 header('Content-Type: text/event-stream'); header('Cache-Control: no-cache'); header('X-Accel-Buffering: no');
 while (@ob_get_level()) @ob_end_clean();
 $items = json_decode($_POST['items'] ?? '[]', true) ?: [];
+// v9.82: سوییچِ «اتصال غیرمستقیم»ِ پروفایلِ تبِ «شروع» برای دریافت تصویر/قیمت هم اعمال شود
+if (function_exists('srcNetApplyProfileIfExists')) srcNetApplyProfileIfExists((string)($_GET['pk'] ?? ''));
 if (empty($items)) { send_sse('fetch_info', ['msg' => 'محصولی برای دریافت تصویر/قیمت یافت نشد']); send_sse('done', []); exit; }
 $total = count($items);
 send_sse('fetch_info', ['msg' => "شروع دریافت تصاویر/قیمت: $total محصول..."]);
@@ -7288,6 +7308,8 @@ while (@ob_get_level()) @ob_end_clean();
 
 $keys = isset($_GET['keys']) ? array_filter(explode(',', $_GET['keys'])) : [];
 $detailSelectors = isset($_GET['detailSelectors']) ? json_decode($_GET['detailSelectors'], true) : [];
+// v9.82: سوییچِ «اتصال غیرمستقیم»ِ پروفایلِ تبِ «شروع» برای استخراجِ جزئیات هم اعمال شود
+if (function_exists('srcNetApplyProfileIfExists')) srcNetApplyProfileIfExists((string)($_GET['pk'] ?? ''));
 // v8.64: تنظیمات گالری هم از همین‌جا می‌آید
 $galCfg = galleryNormalizeCfg($_POST['gallery'] ?? ($_GET['gallery'] ?? []));
 
@@ -7436,6 +7458,8 @@ $maxPages = max(1, min(100, (int)($_GET['pages'] ?? 20)));
 $selectors = isset($_GET['selectors']) ? json_decode($_GET['selectors'], true) : null;
 $pagType = $_GET['pagType'] ?? 'query_page';
 $pagVal = trim($_GET['pagVal'] ?? '');
+// v9.82: سوییچِ «اتصال غیرمستقیم»ِ پروفایلِ تبِ «شروع» برای استخراجِ لیست هم اعمال شود
+if (function_exists('srcNetApplyProfileIfExists')) srcNetApplyProfileIfExists(profileKey($url));
 
 if (!filter_var($url, FILTER_VALIDATE_URL)) {
 send_sse('error', ['message' => 'Invalid URL']);
@@ -12678,6 +12702,18 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'onclick="bslTest' . 'Indirect()"') !== false
          && strpos($selfSrc, "'bsl_test_ind' . 'irect'") !== false);
 
+    /* ---------- v9.82: همهٔ ترافیک باسلام/استخراج از مسیر غیرمستقیم ---------- */
+    $add('9.82', 'دکمهٔ «تست»ِ باسلام حالتِ فعلیِ تیکِ «اتصال غیرمستقیم» را به سرور می‌فرستد',
+         strpos($selfSrc, "fd.append('net_indirect',(\$('bsIndirect')" . "&&\$('bsIndirect').checked)?'1':'0');") !== false);
+    $add('9.82', 'سرورِ تستِ باسلام مقدارِ فرستاده‌شدهٔ تیک را مقدم می‌کند (حتی قبل از ذخیره)',
+         strpos($selfSrc, "\$GLOBALS['_bslInd" . "irectOverride'] = !empty(\$_POST['net_indirect']);") !== false);
+    $add('9.82', 'تیکِ «اتصال غیرمستقیم»ِ باسلام با تغییر خودکار ذخیره می‌شود',
+         strpos($selfSrc, 'id="bsInd' . 'irect" onchange="saveConn()"') !== false);
+    $add('9.82', 'استخراجِ فرانت‌اند (stream / detail_stream / fetch_missing) سوییچِ پروفایلِ تبِ شروع را اعمال می‌کند',
+         strpos($selfSrc, 'function srcNetApply' . 'ProfileIfExists(') !== false
+         && strpos($selfSrc, 'srcNetApplyProfileIfExists(profileKey($url))') !== false
+         && strpos($selfSrc, "srcNetApplyProfileIfExists((string)(\$_GET['pk'] ?? ''))") !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -17093,6 +17129,11 @@ exit;
 if (($_POST['action'] ?? '') === 'test_basalam') {
 header('Content-Type: application/json; charset=UTF-8');
 $tk=trim($_POST['token']??'');
+// v9.82: حالتِ فعلیِ تیکِ «اتصال غیرمستقیم» از صفحه بیاید تا تست دقیقاً با
+// همان تیکی که کاربر تازه زده/برداشته اجرا شود (قبل از ذخیره هم درست باشد).
+if (array_key_exists('net_indirect', $_POST)) {
+    $GLOBALS['_bslIndirectOverride'] = !empty($_POST['net_indirect']);
+}
 $r = bslReq($tk, 'GET', 'users/me');
 if ($r['ok']&&!empty($r['body'])) {
 $b=$r['body'];$v=$b['vendor']??[];
@@ -17150,6 +17191,11 @@ if (($_POST['action'] ?? '') === 'bsl_test_indirect') {
 header('Content-Type: application/json; charset=UTF-8');
 $cn=loadConnections();
 $tk=trim($_POST['token']??($cn['basalam']['token']??''));
+// v9.82: حالتِ فعلیِ تیک از صفحه بیاید تا «تست مسیر» دقیقاً همان چیزی را که
+// کاربر روی صفحه دیده (قبل از ذخیره) شبیه‌سازی کند.
+if (array_key_exists('net_indirect', $_POST)) {
+    $GLOBALS['_bslIndirectOverride'] = !empty($_POST['net_indirect']);
+}
 $net = function_exists('bslNetCfg') ? bslNetCfg($cn) : ['indirect'=>false,'mode'=>'direct','worker_url'=>'','proxy'=>'','resolve_ip'=>'','doh_url'=>'','proxy_type'=>'http','proxy_auth'=>'','ipv4'=>false];
 $url=bslApiBase().'users/me';
 
@@ -22538,7 +22584,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div class="crow"><label>موجودی:</label><input type="number" id="bsSt" value="10" style="max-width:100px"></div>
 <!-- v9.80: سوییچ «اتصال غیرمستقیم» برای باسلام — وقتی IP هاست بلاک شده، تبادل از روش‌های غیرمستقیم انجام شود -->
 <div class="crow" style="display:flex;align-items:flex-start;gap:8px">
-    <label style="flex:0 0 auto;min-width:0"><input type="checkbox" id="bsIndirect" style="width:14px;height:14px;margin-top:2px"> اتصال غیرمستقیم</label>
+    <label style="flex:0 0 auto;min-width:0"><input type="checkbox" id="bsIndirect" onchange="saveConn()" style="width:14px;height:14px;margin-top:2px"> اتصال غیرمستقیم</label>
     <span style="font-size:10px;color:#64748b;flex:1;line-height:1.7">تبادل با باسلام از طریق روش‌های اتصال غیرمستقیمِ بخش «اتصال به سایت مبدأ» (پروکسی، Worker، DoH...) انجام شود — وقتی IP هاست بلاک شده مفید است.</span>
 </div>
 <div style="margin-top:10px;padding-top:10px;border-top:1px solid #334155">
@@ -24405,7 +24451,7 @@ function renderBslFallbackCatDropList(cats,q){const dl=$('bslFallbackCatDropList
 let bslExtraVendors=[];
 function addBslVendor(){bslExtraVendors.push({vendor_id:0,token:'',name:'',shop_name:''});renderBslVendors();}
 function removeBslVendor(idx){if(!confirm('حذف این غرفه؟'))return;bslExtraVendors.splice(idx,1);renderBslVendors();}
-function testBslVendor(idx){const v=bslExtraVendors[idx];if(!v||!v.token){showToast('توکن خالی است',1);return;}const btn=document.getElementById('bslVTestBtn_'+idx);if(btn){btn.disabled=true;btn.textContent='⏳';}const fd=new FormData();fd.append('action','test_basalam');fd.append('token',v.token);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(btn){btn.disabled=false;btn.textContent='🔗';}if(d.ok){bslExtraVendors[idx].vendor_id=d.vendor_id||0;bslExtraVendors[idx].name=d.user_name||d.username||'';bslExtraVendors[idx].shop_name=d.vendor_title||'';renderBslVendors();showToast('✓ '+d.vendor_title+' (#'+d.vendor_id+')');}else{showToast('❌ '+(d.error||'خطا'),1);}}).catch(()=>{if(btn){btn.disabled=false;btn.textContent='🔗';}showToast('❌ خطا شبکه',1);});}
+function testBslVendor(idx){const v=bslExtraVendors[idx];if(!v||!v.token){showToast('توکن خالی است',1);return;}const btn=document.getElementById('bslVTestBtn_'+idx);if(btn){btn.disabled=true;btn.textContent='⏳';}const fd=new FormData();fd.append('action','test_basalam');fd.append('token',v.token);fd.append('net_indirect',($('bsIndirect')&&$('bsIndirect').checked)?'1':'0');fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(btn){btn.disabled=false;btn.textContent='🔗';}if(d.ok){bslExtraVendors[idx].vendor_id=d.vendor_id||0;bslExtraVendors[idx].name=d.user_name||d.username||'';bslExtraVendors[idx].shop_name=d.vendor_title||'';renderBslVendors();showToast('✓ '+d.vendor_title+' (#'+d.vendor_id+')');}else{showToast('❌ '+(d.error||'خطا'),1);}}).catch(()=>{if(btn){btn.disabled=false;btn.textContent='🔗';}showToast('❌ خطا شبکه',1);});}
 function renderBslVendors(){const list=$('bslVendorsList');if(!list)return;list.innerHTML='';if(bslExtraVendors.length===0){list.innerHTML='<div style="color:#64748b;font-size:11px;text-align:center;padding:8px">غرفه اضافی وجود ندارد</div>';return;}bslExtraVendors.forEach((v,idx)=>{const card=document.createElement('div');card.style.cssText='background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px';const info=v.shop_name?'<div style="color:#22d3ee;font-size:11px;margin-bottom:4px">'+esc(v.shop_name)+' (#'+v.vendor_id+')</div>':'';const nameVal=v.name||'';const pm=v.price_mode||'none';const pv=v.price_val||0;card.innerHTML='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-size:11px;color:#fbbf24;font-weight:700">غرفه '+(idx+1)+'</span><button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="removeBslVendor('+idx+')">✕</button></div>'+info+'<div style="display:flex;gap:6px;margin-bottom:6px"><input type="text" id="bslVName_'+idx+'" value="'+esc(nameVal)+'" placeholder="نام" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px;direction:rtl" oninput="bslExtraVendors['+idx+'].name=this.value"></div><div style="display:flex;gap:6px;margin-bottom:6px"><input type="password" id="bslVToken_'+idx+'" value="'+esc(v.token||'')+'" placeholder="Token" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].token=this.value"></div><div style="display:flex;gap:6px"><input type="number" id="bslVVid_'+idx+'" value="'+(v.vendor_id||'')+'" placeholder="شماره غرفه" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].vendor_id=parseInt(this.value)||0"><button class="btn btn-cyan" id="bslVTestBtn_'+idx+'" style="font-size:10px;padding:4px 8px" onclick="testBslVendor('+idx+')">🔗 تست</button></div>'
  // v9.68: تعدیل قیمتِ این غرفه (نسبت به قیمت پایهٔ محصول) + نمایش درصدِ مؤثر
  +'<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e293b">'
@@ -26981,7 +27027,8 @@ function startDetailExtraction(){
     const params = new URLSearchParams({
         detail_stream: '1',
         keys: keys.join(','),
-        detailSelectors: JSON.stringify(detailSel)
+        detailSelectors: JSON.stringify(detailSel),
+        pk: profileKey(($('url')&&$('url').value)||'')
     });
 
     const fd = new FormData();
@@ -27216,6 +27263,13 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.82', t:'🔗 همهٔ ترافیکِ باسلام و استخراج از مسیر غیرمستقیم + دکمهٔ تست از مسیر غیرمستقیم', items:[
+    'گزارش شما: دکمهٔ «تست مسیر» بای‌پس و موفقیتِ غیرمستقیم را می‌گفت ولی دکمهٔ', '«تست»ِ کناری هنوز «عدم موفقیت اتصال» می‌گفت؛ یعنی دکمهٔ تستِ باسلام از', 'مسیرِ غیرمستقیم نمی‌رفت. خواستید همهٔ ترافیکِ API باسلام از اتصالِ', 'غیرمستقیم رد شود.',
+    '🐞 ریشه: دکمهٔ «تست» وضعیتِ تیک را از رویِ ذخیره‌شده (دیسک) می‌خواند؛', 'اگر تیک تازه زده/برداشته شده بود و هنوز «ذخیره» نزده بودید، سرور همان', 'مقدارِ قدیمی را می‌دید و مستقیم می‌رفت.',
+    '✅ حالا دکمهٔ «تست» (و «تستِ غرفهٔ اضافی» و «تست مسیر») حالتِ فعلیِ تیکِ', 'رویِ صفحه را می‌فرستد و سرور دقیقاً با همان حالت اجرا می‌کند — حتی قبل', 'از ذخیره.',
+    '✅ تیکِ «اتصال غیرمستقیم»ِ باسلام حالا با هر تغییر بلافاصله خودکار ذخیره', 'می‌شود (نیازی به فشردنِ «ذخیره» نیست) تا همهٔ عملیات‌ها همان لحظه از', 'مسیرِ غیرمستقیم بروند.',
+    'خواستهٔ دوم: با زدنِ سوییچِ «اتصال غیرمستقیم» در تبِ «شروع» (پروفایل)،', 'ترافیکِ بارگذاریِ صفحه در تبِ سلکتورها و بقیهٔ عملیاتِ استخراج از مسیرِ', 'غیرمستقیم برود.',
+    '✅ بارگذاریِ صفحه در تبِ سلکتورها از قبل به این سوییچ وابسته بود.', '✅ حالا استخراجِ لیست (stream)، استخراجِ جزئیات (detail_stream) و', 'دریافتِ تصویر/قیمت (fetch_missing_stream) در فرانت‌اند هم سوییچِ', 'پروفایلِ تبِ «شروع» را رعایت می‌کنند و در صورتِ روشن بودن از مسیرِ', 'غیرمستقیم می‌روند.', '✅ مسیرِ بک‌اند و کران هم از قبل به این سوییچ وابسته بودند.'],},
   {v:'9.81', t:'🐞 رفعِ مسیرِ اتصالِ غیرمستقیمِ باسلام + دکمهٔ «تست مسیر» با نمایش آدرسِ کلودفلر', items:[
     'گزارش شما: با زدنِ تیکِ «اتصال غیرمستقیم»، ترافیکِ تنظیماتِ غرفهٔ باسلام باز', 'هم از مسیرِ مستقیم می‌رفت. بررسی شد و ریشه پیدا شد.',
     '🐞 ریشه: وقتی روشِ اصلیِ اتصالِ «سایت مبدأ» مقدارِ direct بود و فقط پروکسی/',
@@ -32055,7 +32109,7 @@ function testAiCategory(){
   });
 }
 
-function testBsl(){const s=$('bsS'),r=$('bsTR');s.textContent='\u062a\u0633\u062a...';s.className='cst tg';r.innerHTML='';const fd=new FormData();fd.append('action','test_basalam');fd.append('token',$('bsTk').value.trim());fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+function testBsl(){const s=$('bsS'),r=$('bsTR');s.textContent='\u062a\u0633\u062a...';s.className='cst tg';r.innerHTML='';const fd=new FormData();fd.append('action','test_basalam');fd.append('token',$('bsTk').value.trim());fd.append('net_indirect',($('bsIndirect')&&$('bsIndirect').checked)?'1':'0');fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
 if(d.ok){s.textContent='\u2713';s.className='cst on';r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">\u2713 '+esc(d.message)+' | '+esc(d.vendor_title||'')+'</div>';if(d.vendor_id&&!$('bsVid').value)$('bsVid').value=d.vendor_id;saveConn();
 showBslVendorModal(d);
 }else{s.textContent='\u2717';s.className='cst off';
@@ -32072,6 +32126,7 @@ function bslTestIndirect(){
   const fd=new FormData();
   fd.append('action','bsl_test_indirect');
   fd.append('token',$('bsTk').value.trim());
+  fd.append('net_indirect',($('bsIndirect')&&$('bsIndirect').checked)?'1':'0');
   fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
     if(btn){btn.disabled=false;btn.textContent='🌐 تست مسیر';}
     let modal=document.getElementById('bslIndModal');if(modal)modal.remove();
@@ -33949,7 +34004,7 @@ function fetchMissingImages(){
     log('🖼️ شروع دریافت تصاویر/قیمت '+items.length+' محصول','info');
     const fd=new FormData();
     fd.append('items',JSON.stringify(items));
-    fetch('?fetch_missing_stream=1',{method:'POST',body:fd}).then(rp=>{
+    fetch('?fetch_missing_stream=1&pk='+encodeURIComponent(profileKey(($('url')&&$('url').value)||'')),{method:'POST',body:fd}).then(rp=>{
         const rd=rp.body.getReader(),dc=new TextDecoder();let bf='';
         let done=0,found=0,failed=0;
         function rd2(){rd.read().then(({done:fin,value})=>{
