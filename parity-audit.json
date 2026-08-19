@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-08-19T04:10:13.394Z",
+  "generatedAt": "2026-08-19T04:32:58.198Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
     "routes": 106,
-    "menuActions": 75
+    "menuActions": 79
   },
   "routes": [
     "GET /health",
@@ -119,6 +119,8 @@
   "menuActions": [
     "ai-add-available",
     "ai-add-candidate",
+    "ai-add-model",
+    "ai-add-provider",
     "ai-candidate-category",
     "ai-candidate-reply",
     "ai-category-one",
@@ -128,6 +130,8 @@
     "ai-network-diagnostics",
     "ai-rejected-apply",
     "ai-rejected-preview",
+    "ai-remove-model",
+    "ai-remove-provider",
     "ai-test-start",
     "ai-test-status",
     "ai-test-stop",

@@ -1,5 +1,14 @@
 # Render TypeScript changelog
 
+## 2.18.0 — 2026-08-19
+
+- Added clickable AI test rows with comprehensive raw-response diagnostic modals.
+- Added reusable professional diagnostic modals for WooCommerce, Basalam, AI, source network, media and notification tests.
+- Replaced Basalam shop JSON editing with visual add/edit/remove cards.
+- Replaced autoreply rule JSON editing with visual rule cards.
+- Added visual AI provider/model add/remove/edit controls while retaining optional advanced JSON import.
+- Replaced pasted profile JSON with safe file-based profile/settings import.
+
 ## 2.17.0 — 2026-08-19
 
 - Added image URL/content validation with source-network routing.
