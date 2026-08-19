@@ -68,6 +68,12 @@ export async function migrate(): Promise<void> {
       updated_at timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY(profile_id,source_key,target,account_key)
     );
+    CREATE TABLE IF NOT EXISTS category_learning (
+      phrase text NOT NULL, category_id bigint NOT NULL, category_name text NOT NULL DEFAULT '', hits integer NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(phrase,category_id)
+    );
+    CREATE TABLE IF NOT EXISTS autoreply_log (
+      id bigserial PRIMARY KEY, chat_id bigint, customer text NOT NULL DEFAULT '', input_text text NOT NULL, output_text text NOT NULL, source text NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+    );
     CREATE TABLE IF NOT EXISTS app_state (
       key text PRIMARY KEY,
       value jsonb NOT NULL,
@@ -189,6 +195,15 @@ export async function setDestinationId(profileId:string,sourceKey:string,target:
 
 export async function markProfileRun(id: string): Promise<void> { await pool.query('UPDATE profiles SET last_run_at=now() WHERE id=$1', [id]); }
 
+export async function learnCategory(title:string,categoryId:number,categoryName='',maxWords=5):Promise<number>{const words=normalizeLearning(title).split(' ').filter(Boolean).slice(0,Math.max(1,Math.min(5,maxWords)));let saved=0;for(let n=1;n<=words.length;n++){const phrase=words.slice(0,n).join(' ');await pool.query(`INSERT INTO category_learning(phrase,category_id,category_name,hits,updated_at) VALUES($1,$2,$3,1,now()) ON CONFLICT(phrase,category_id) DO UPDATE SET hits=category_learning.hits+1,category_name=EXCLUDED.category_name,updated_at=now()`,[phrase,categoryId,categoryName]);saved++}return saved}
+export async function findLearnedCategory(title:string,maxWords=5):Promise<{categoryId:number;categoryName:string;phrase:string;hits:number}|null>{const words=normalizeLearning(title).split(' ').filter(Boolean).slice(0,Math.max(1,Math.min(5,maxWords)));for(let n=words.length;n>=1;n--){const phrase=words.slice(0,n).join(' '),{rows}=await pool.query(`SELECT category_id,category_name,phrase,hits FROM category_learning WHERE phrase=$1 ORDER BY hits DESC,updated_at DESC LIMIT 1`,[phrase]);if(rows[0])return{categoryId:Number(rows[0].category_id),categoryName:rows[0].category_name,phrase:rows[0].phrase,hits:rows[0].hits}}return null}
+export async function importCategoryLearning(raw:any):Promise<number>{const items=Array.isArray(raw)?raw:Object.entries(raw||{}).map(([phrase,value]:any)=>({phrase,...(typeof value==='object'?value:{category_id:value})}));let count=0;for(const item of items){const phrase=normalizeLearning(String(item.phrase||item.key||'')),categoryId=Number(item.category_id||item.categoryId||item.cat_id||item.id);if(!phrase||!categoryId)continue;await pool.query(`INSERT INTO category_learning(phrase,category_id,category_name,hits,updated_at) VALUES($1,$2,$3,$4,now()) ON CONFLICT(phrase,category_id) DO UPDATE SET category_name=EXCLUDED.category_name,hits=GREATEST(category_learning.hits,EXCLUDED.hits),updated_at=now()`,[phrase,categoryId,String(item.category_name||item.categoryName||item.cat_name||item.name||''),Math.max(1,Number(item.hits||item.count||1))]);count++}return count}
+export async function listCategoryLearning(limit=1000):Promise<any[]>{const {rows}=await pool.query('SELECT phrase,category_id,category_name,hits,updated_at FROM category_learning ORDER BY hits DESC,updated_at DESC LIMIT $1',[limit]);return rows}
+export async function addAutoreplyLog(row:{chatId:number;customer:string;input:string;output:string;source:string}):Promise<void>{await pool.query('INSERT INTO autoreply_log(chat_id,customer,input_text,output_text,source) VALUES($1,$2,$3,$4,$5)',[row.chatId,row.customer,row.input,row.output,row.source])}
+export async function importAutoreplyLog(raw:any):Promise<number>{if(!Array.isArray(raw))return 0;let count=0;for(const row of raw.slice(-5000)){const created=row.created_at?new Date(row.created_at):row.at?new Date(Number(row.at)*1000):null;await pool.query('INSERT INTO autoreply_log(chat_id,customer,input_text,output_text,source,created_at) VALUES($1,$2,$3,$4,$5,COALESCE($6,now()))',[Number(row.chat_id||0)||null,String(row.customer||row.who||''),String(row.input_text||row.in||''),String(row.output_text||row.out||''),String(row.source||row.rule||''),created]);count++}return count}
+export async function listAutoreplyLog(limit=100):Promise<any[]>{const {rows}=await pool.query('SELECT * FROM autoreply_log ORDER BY created_at DESC LIMIT $1',[limit]);return rows}
+function normalizeLearning(value:string){return value.toLowerCase().replace(/[يى]/g,'ی').replace(/ك/g,'ک').replace(/[\u200c\u200f\u200e]/g,' ').replace(/[^\p{L}\p{N}\s]/gu,' ').replace(/\s+/g,' ').trim()}
+
 export async function getState<T>(key: string, fallback: T): Promise<T> {
   const { rows } = await pool.query('SELECT value FROM app_state WHERE key=$1', [key]);
   return rows[0]?.value ?? fallback;
@@ -199,11 +214,10 @@ export async function setState(key: string, value: unknown): Promise<void> {
 }
 
 export async function createBackup(): Promise<Record<string, unknown>> {
-  const [profiles, products, jobs, states, maps] = await Promise.all([
-    pool.query('SELECT * FROM profiles ORDER BY created_at'), pool.query('SELECT * FROM products ORDER BY profile_id,created_at'),
-    pool.query('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 1000'), pool.query('SELECT * FROM app_state ORDER BY key'),pool.query('SELECT * FROM destination_map ORDER BY profile_id,target,account_key')
+  const [profiles,products,jobs,states,maps,learning,autoreply] = await Promise.all([
+    pool.query('SELECT * FROM profiles ORDER BY created_at'),pool.query('SELECT * FROM products ORDER BY profile_id,created_at'),pool.query('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 1000'),pool.query('SELECT * FROM app_state ORDER BY key'),pool.query('SELECT * FROM destination_map ORDER BY profile_id,target,account_key'),pool.query('SELECT * FROM category_learning ORDER BY hits DESC'),pool.query('SELECT * FROM autoreply_log ORDER BY created_at DESC LIMIT 5000')
   ]);
-  return { app: 'scraper4-render', version: 1, createdAt: new Date().toISOString(), profiles: profiles.rows, products: products.rows, jobs: jobs.rows, states: states.rows, destinationMap:maps.rows };
+  return {app:'scraper4-render',version:1,createdAt:new Date().toISOString(),profiles:profiles.rows,products:products.rows,jobs:jobs.rows,states:states.rows,destinationMap:maps.rows,categoryLearning:learning.rows,autoreplyLog:autoreply.rows};
 }
 
 export async function restoreBackup(bundle: any): Promise<{ profiles: number; products: number; states: number }> {
@@ -214,6 +228,8 @@ export async function restoreBackup(bundle: any): Promise<{ profiles: number; pr
     for (const row of bundle.profiles || []) { await client.query(`INSERT INTO profiles(id,data,enabled,interval_minutes,last_run_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,COALESCE($6,now()),now()) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data,enabled=EXCLUDED.enabled,interval_minutes=EXCLUDED.interval_minutes,last_run_at=EXCLUDED.last_run_at,updated_at=now()`, [row.id,row.data,row.enabled,row.interval_minutes,row.last_run_at,row.created_at]); pCount++; }
     for (const row of bundle.products || []) { await client.query(`INSERT INTO products(profile_id,source_key,data,title,price,source_url,remote_woo_id,remote_basalam_id,created_at,updated_at,active,missing_since) VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,now()),now(),COALESCE($10,true),$11) ON CONFLICT(profile_id,source_key) DO UPDATE SET data=EXCLUDED.data,title=EXCLUDED.title,price=EXCLUDED.price,source_url=EXCLUDED.source_url,remote_woo_id=EXCLUDED.remote_woo_id,remote_basalam_id=EXCLUDED.remote_basalam_id,active=EXCLUDED.active,missing_since=EXCLUDED.missing_since,updated_at=now()`, [row.profile_id,row.source_key,row.data,row.title,row.price,row.source_url,row.remote_woo_id,row.remote_basalam_id,row.created_at,row.active,row.missing_since]); productCount++; }
     for (const row of bundle.destinationMap || []) { await client.query(`INSERT INTO destination_map(profile_id,source_key,target,account_key,remote_id,updated_at) VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(profile_id,source_key,target,account_key) DO UPDATE SET remote_id=EXCLUDED.remote_id,updated_at=now()`,[row.profile_id,row.source_key,row.target,row.account_key,row.remote_id]); }
+    for(const row of bundle.categoryLearning||[]){await client.query(`INSERT INTO category_learning(phrase,category_id,category_name,hits,updated_at) VALUES($1,$2,$3,$4,now()) ON CONFLICT(phrase,category_id) DO UPDATE SET category_name=EXCLUDED.category_name,hits=EXCLUDED.hits,updated_at=now()`,[row.phrase,row.category_id,row.category_name,row.hits])}
+    for(const row of bundle.autoreplyLog||[]){await client.query(`INSERT INTO autoreply_log(chat_id,customer,input_text,output_text,source,created_at) VALUES($1,$2,$3,$4,$5,COALESCE($6,now()))`,[row.chat_id,row.customer,row.input_text,row.output_text,row.source,row.created_at])}
     for (const row of bundle.states || []) { await client.query(`INSERT INTO app_state(key,value,updated_at) VALUES($1,$2,now()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`, [row.key,row.value]); stateCount++; }
     await client.query('COMMIT'); return { profiles:pCount,products:productCount,states:stateCount };
   } catch(error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }

@@ -4,10 +4,11 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { secureHeaders } from 'hono/secure-headers';
 import { aiCall, aiProviders, getLeaderboard, recordVote, testAllModels } from './ai.js';
+import { automationTick, autoreplyLogs, autoreplyRun, basalamChats, basalamOrders, digest, generateReply } from './automation.js';
 import { config, assertConfig } from './config.js';
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
 import { DASHBOARD, DASHBOARD_JS, setupPage } from './dashboard.js';
-import { createBackup, createJob, deleteProfile, enqueueDueProfiles, getJob, getProfile, getState, listJobs, listProducts, listProfiles, migrate, pool, profileStats, reapStalledJobs, restoreBackup, saveProfile, setState, updateJob, upsertProduct } from './db.js';
+import { createBackup, createJob, deleteProfile, enqueueDueProfiles, findLearnedCategory, getJob, getProfile, getState, importAutoreplyLog, importCategoryLearning, learnCategory, listCategoryLearning, listJobs, listProducts, listProfiles, migrate, pool, profileStats, reapStalledJobs, restoreBackup, saveProfile, setState, updateJob, upsertProduct } from './db.js';
 import { DEFAULT_SELECTORS, type Product, type Profile } from './types.js';
 import { safeFetch, safeText } from './network.js';
 import { sendNotification } from './notifications.js';
@@ -94,6 +95,15 @@ app.post('/api/ai/call',async c=>{const body=await c.req.json() as any,providers
 app.post('/api/ai/vote',async c=>{const body=await c.req.json() as any;return c.json({ok:true,leaderboard:await recordVote(String(body.task||'manual'),String(body.winner||''),Array.isArray(body.candidates)?body.candidates.map(String):[])})});
 app.get('/api/ai/leaderboard',async c=>c.json({ok:true,leaderboard:await getLeaderboard()}));
 app.post('/api/notifications/test',async c=>{const body=await c.req.json() as any;return c.json(await sendNotification(body.channel||'webhook',String(body.text||'پیام آزمایشی اسکرپر ۴')))});
+app.get('/api/category-learning',async c=>c.json({ok:true,items:await listCategoryLearning(Math.min(5000,Number(c.req.query('limit'))||1000))}));
+app.post('/api/category-learning/record',async c=>{const b=await c.req.json() as any;return c.json({ok:true,saved:await learnCategory(String(b.title||''),Number(b.categoryId),String(b.categoryName||''),Number(b.maxWords)||5)})});
+app.post('/api/category-learning/test',async c=>{const b=await c.req.json() as any;return c.json({ok:true,result:await findLearnedCategory(String(b.title||''),Number(b.maxWords)||5)})});
+app.post('/api/autoreply/test',async c=>{const b=await c.req.json() as any;return c.json({ok:true,result:await generateReply(String(b.text||''))})});
+app.post('/api/autoreply/run',async c=>{const b=await c.req.json().catch(()=>({})) as any;return c.json(await autoreplyRun(b.confirm!=='APPLY'))});
+app.get('/api/autoreply/log',async c=>c.json({ok:true,items:await autoreplyLogs()}));
+app.post('/api/digest',async c=>{const b=await c.req.json().catch(()=>({})) as any;return c.json(await digest(b.confirm!=='SEND'))});
+app.get('/api/basalam/chats',async c=>c.json({ok:true,items:await basalamChats(Number(c.req.query('limit'))||20)}));
+app.get('/api/basalam/orders',async c=>c.json({ok:true,items:await basalamOrders(Number(c.req.query('limit'))||20)}));
 app.get('/api/settings', async c => c.json({ ok:true, settings: await getState('settings', {}) }));
 app.post('/api/settings', async c => { const settings=await c.req.json(); await setState('settings',settings); return c.json({ok:true}); });
 app.get('/api/backup', async c => c.json(await createBackup(), 200, { 'content-disposition': `attachment; filename="scraper4-render-${Date.now()}.json"` }));
@@ -103,7 +113,7 @@ app.get('/api/settings-export', async c => {
   return c.json(bundle,200,{'content-disposition':`attachment; filename="settings_${stamp}.json"`});
 });
 app.post('/api/settings-import', async c => {
-  const files=decodePhpSettingsBundle(await c.req.json());let profiles=0,products=0,states=0,connections=false;const warnings:string[]=[];
+  const files=decodePhpSettingsBundle(await c.req.json());let profiles=0,products=0,states=0,categories=0,autoreplyLogs=0,connections=false;const warnings:string[]=[];
   const rawProfiles=files['profiles.json'];
   if(rawProfiles&&typeof rawProfiles==='object')for(const [id,raw] of Object.entries(rawProfiles as Record<string,any>)){
     try{const profile=normalizeProfile({...raw,id});await saveProfile(profile);profiles++;for(const product of legacyProducts(raw?.products)){await upsertProduct(profile.id,product);products++;}}
@@ -111,8 +121,10 @@ app.post('/api/settings-import', async c => {
   }
   const rawConnections=files['connections.json'] as any;
   if(rawConnections){const woo=rawConnections.woocommerce||rawConnections.woo||{},basalam=rawConnections.basalam||{},ai=rawConnections.ai||{};await saveConnections({woo:{url:woo.url||woo.store_url||'',key:woo.consumer_key||woo.ck||woo.key||'',secret:woo.consumer_secret||woo.cs||woo.secret||'',categoryId:woo.category_id||0},basalam:{token:basalam.token||'',vendorId:String(basalam.vendor_id||basalam.vendorId||''),api:basalam.api_base||basalam.api||'https://openapi.basalam.com/v1',preparationDays:basalam.preparation_days,weight:basalam.weight,packageWeight:basalam.package_weight,stock:basalam.stock,categoryId:basalam.category_id,autoCategory:basalam.auto_category,netIndirect:basalam.net_indirect,shops:basalam.shops},ai:{baseUrl:ai.base_url||ai.baseUrl||'',apiKey:ai.api_key||ai.apiKey||'',model:ai.model||'',providers:ai.providers,candidates:ai.candidates,master:ai.master,network:ai.network},notifications:rawConnections.notifications||{}});connections=true;}
+  if(files['category_learning.json'])categories=await importCategoryLearning(files['category_learning.json']);
+  if(files['autoreply_log.json'])autoreplyLogs=await importAutoreplyLog(files['autoreply_log.json']);
   for(const [file,value] of Object.entries(files)){const key=stateKeyForFile(file);if(key){await setState(key,value);states++;}}
-  return c.json({ok:true,format:'scraper4-php-compatible',imported:{profiles,products,states,connections},warnings});
+  return c.json({ok:true,format:'scraper4-php-compatible',imported:{profiles,products,states,categories,autoreplyLogs,connections},warnings});
 });
 app.get('/api/profile-stats', async c => c.json({ok:true,items:await profileStats()}));
 app.post('/api/maintenance/recon/:target',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const body=await c.req.json().catch(()=>({})) as any;return c.json({ok:true,report:await recon(target as any,String(body.profileId||''))})});
@@ -168,7 +180,7 @@ function startBackground(): void {
   if (!config.runWorkerInWeb || !databaseReady || backgroundStarted) return;
   backgroundStarted = true;
   void workerLoop(config.workerPollMs);
-  const schedule = async () => { try { const count = await enqueueDueProfiles(); if (count) console.log(`Scheduled ${count} profile(s)`); } catch (error) { console.error('Scheduler error', error); } };
+  const schedule = async () => { try { const count=await enqueueDueProfiles();if(count)console.log(`Scheduled ${count} profile(s)`);const automation=await automationTick();if(Object.keys(automation).length)console.log('Automation',JSON.stringify(automation)); } catch (error) { console.error('Scheduler error', error); } };
   void schedule(); scheduler = setInterval(schedule, 60_000); scheduler.unref();
 }
 startBackground();

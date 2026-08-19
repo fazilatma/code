@@ -1,4 +1,4 @@
-import { allProducts, getState, listProfiles } from './db.js';
+import { allProducts, getState, listAutoreplyLog, listCategoryLearning, listProfiles } from './db.js';
 import { loadConnections } from './connections.js';
 
 export type PhpSettingsBundle = {
@@ -8,9 +8,9 @@ export type PhpSettingsBundle = {
 };
 
 const STATE_FILES: Record<string,string> = {
-  'render_settings.json':'settings', 'category_learning.json':'category_learning',
+  'render_settings.json':'settings',
   'autoreply_rules.json':'autoreply_rules', 'autoreply_state.json':'autoreply_state',
-  'autoreply_log.json':'autoreply_log', 'remote_map.json':'remote_map',
+  'remote_map.json':'remote_map',
   'ai_providers.json':'ai_providers', 'ai_candidates.json':'ai_candidates',
   'ai_votes.json':'ai_votes', 'sync_state.json':'sync_state',
   'notification_settings.json':'notification_settings', 'digest_state.json':'digest_state'
@@ -31,6 +31,8 @@ export async function createPhpSettingsBundle(host='render'): Promise<PhpSetting
     ai:{base_url:c.ai.baseUrl,api_key:c.ai.apiKey,model:c.ai.model,providers:c.ai.providers,candidates:c.ai.candidates,master:c.ai.master,network:c.ai.network},
     notifications:c.notifications
   });
+  addFile(files,'category_learning.json',await listCategoryLearning(10000));
+  addFile(files,'autoreply_log.json',await listAutoreplyLog(5000));
   for(const [file,key] of Object.entries(STATE_FILES)){const value=await getState<unknown>(key,null);if(value!==null)addFile(files,file,value)}
   const total_bytes=Object.values(files).reduce((sum,item)=>sum+item.size,0);
   return {app:'scraper',version:'render-1.0',created_at:Math.floor(Date.now()/1000),created_at_h:new Date().toISOString(),host,kind:'settings-export',format:'scraper4-php-compatible',files,total_files:Object.keys(files).length,total_bytes};
