@@ -6,9 +6,10 @@ const nativeFetch=globalThis.fetch;
 const html=await (await nativeFetch(base+'/')).text();
 const script=await (await nativeFetch(base+'/dashboard.js')).text();
 const {window}=parseHTML(html);
-const store=new Map();
+const rememberedProfile={id:'runtime-remembered',name:'پروفایل به‌یادمانده',url:'https://shop.example/products',enabled:true,pages:3,pagination:'query_page',paginationValue:'page',intervalMinutes:15,titleSuffix:'',priceMode:'none',priceValue:0,roundPrice:0,minPrice:0,wooCategoryId:0,basalamCategoryId:0,basalamFallbackCategoryIds:[],networkIndirect:false,noExtract:false,syncWoo:false,syncBasalam:false,selectors:{container:'li.product',title:'h2',price:'.price',link:'a[href]',image:'img'},gallery:{mode:'off'}},otherProfile={...rememberedProfile,id:'runtime-other',name:'پروفایل دوم',url:'https://other.example/products'};
+const store=new Map([['scraper4:last-profile-id',rememberedProfile.id]]);
 const localStorage={getItem:key=>store.has(key)?store.get(key):null,setItem:(key,value)=>store.set(key,String(value)),removeItem:key=>store.delete(key),clear:()=>store.clear()};
-const browserFetch=(input,init)=>nativeFetch(new URL(typeof input==='string'?input:input.url,base),init);
+const browserFetch=(input,init)=>{const url=new URL(typeof input==='string'?input:input.url,base);if(url.pathname==='/api/profiles'&&(!init?.method||init.method==='GET'))return Promise.resolve(new Response(JSON.stringify({ok:true,profiles:[rememberedProfile,otherProfile]}),{headers:{'content-type':'application/json'}}));return nativeFetch(url,init)};
 for(const [key,value] of Object.entries({window,document:window.document,navigator:window.navigator,location:window.location,history:window.history,HTMLElement:window.HTMLElement,HTMLSelectElement:window.HTMLSelectElement,Event:window.Event,CustomEvent:window.CustomEvent,localStorage,alert:()=>{},confirm:()=>true,fetch:browserFetch}))Object.defineProperty(globalThis,key,{value,writable:true,configurable:true});
 for(const [key,value] of Object.entries({fetch:browserFetch,localStorage,alert:()=>{},confirm:()=>true,FormData:globalThis.FormData,Blob:globalThis.Blob,File:globalThis.File,Headers:globalThis.Headers,Request:globalThis.Request,Response:globalThis.Response}))try{Object.defineProperty(window,key,{value,writable:true,configurable:true})}catch{}
 window.HTMLElement.prototype.scrollIntoView=()=>{};
@@ -16,9 +17,24 @@ window.HTMLElement.prototype.focus=()=>{};
 Object.defineProperty(window.HTMLSelectElement.prototype,'value',{configurable:true,get(){return this.querySelector('option[selected]')?.getAttribute('value')??this.querySelector('option')?.getAttribute('value')??''},set(value){for(const option of this.querySelectorAll('option')){if((option.getAttribute('value')??option.textContent)===String(value))option.setAttribute('selected','');else option.removeAttribute('selected')}}});
 const failures=[];
 process.on('unhandledRejection',error=>failures.push(error));
-try{(0,eval)(script+'\n;globalThis.__dashboardTest={runAiModelTests};')}catch(error){failures.push(error)}
+try{(0,eval)(script+'\n;globalThis.__dashboardTest={runAiModelTests,connect};')}catch(error){failures.push(error)}
 await new Promise(resolve=>setTimeout(resolve,900));
 assert.equal(failures.length,0,failures.map(error=>error?.stack||String(error)).join('\n'));
+assert.equal(document.getElementById('profileId').value,rememberedProfile.id,'last active profile is restored into the edit form after startup');
+assert.equal(document.getElementById('name').value,rememberedProfile.name);
+for(const id of ['homeProfile','settingsProfile','productProfile','sendProfile','importProfile'])assert.equal(document.getElementById(id).value,rememberedProfile.id,`${id} restores the last active profile`);
+assert.equal(localStorage.getItem('scraper4:last-profile-id'),rememberedProfile.id);
+const productProfile=document.getElementById('productProfile');productProfile.value=otherProfile.id;productProfile.dispatchEvent(new window.Event('change',{bubbles:true}));
+assert.equal(document.getElementById('profileId').value,otherProfile.id,'changing a related selector loads its profile into the edit form');
+for(const id of ['homeProfile','settingsProfile','productProfile','sendProfile','importProfile'])assert.equal(document.getElementById(id).value,otherProfile.id,`${id} stays synchronized after another selector changes`);
+assert.equal(localStorage.getItem('scraper4:last-profile-id'),otherProfile.id);
+localStorage.setItem('scraper4:last-profile-id','missing-profile');
+await globalThis.__dashboardTest.connect();
+assert.equal(localStorage.getItem('scraper4:last-profile-id'),null,'a deleted remembered profile is forgotten safely');
+assert.equal(document.getElementById('profileId').value,'','a missing remembered profile falls back to a clean form');
+localStorage.setItem('scraper4:last-profile-id',rememberedProfile.id);
+await globalThis.__dashboardTest.connect();
+assert.equal(document.getElementById('profileId').value,rememberedProfile.id);
 for(const pane of ['home','settings','selector','products','destination','jobs'])assert.ok(document.getElementById('pane-'+pane),`pane ${pane}`);
 const tabs=[...document.querySelectorAll('.main-tab')];
 assert.deepEqual(tabs.map(tab=>tab.textContent.trim().replace(/[۰-۹]+$/,'')),['شروع','تنظیمات','سلکتورها','نتایج','ارسال','درون‌ریزی']);
@@ -50,4 +66,4 @@ document.getElementById('detailSampleUrl').value='https://shop.example/product/a
 document.getElementById('sel-shortDesc').value='.summary';document.getElementById('testDetails').click();await new Promise(resolve=>setTimeout(resolve,30));assert.match(document.querySelector('#resultModal .result-head b').textContent,/آزمایش جزئیات محصول/);assert.match(document.getElementById('result-shortDesc').textContent,/۲ مورد/);
 document.getElementById('clearDetails').click();assert.equal(document.getElementById('sel-shortDesc').value,'');
 assert.equal(failures.length,0,failures.map(error=>error?.stack||String(error)).join('\n'));
-console.log('dashboard runtime OK: startup, six tabs, sequential AI tests, and dedicated detail visual/test/clear controls');
+console.log('dashboard runtime OK: remembered-profile restore/fallback, six tabs, sequential AI tests, and detail controls');

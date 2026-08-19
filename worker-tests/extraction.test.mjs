@@ -123,6 +123,18 @@ test('dashboard startup cannot be stopped by a stale file input and settings res
   assert.match(source,/بازیابی کامل شد/);
 });
 
+test('dashboard remembers and restores the last active profile after refresh',async()=>{
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
+  assert.match(source,/LAST_PROFILE_KEY='scraper4:last-profile-id'/);
+  assert.match(source,/function rememberProfile\(id\)[\s\S]*localStorage\.setItem\(LAST_PROFILE_KEY,value\)/);
+  assert.match(source,/const lastProfileId=rememberedProfileId\(\)\|\|state\.selected[\s\S]*editProfile\(lastProfileId,false\)[\s\S]*forgetRememberedProfile\(lastProfileId\);clearForm\(\)/);
+  assert.match(source,/function editProfile\(id,navigate=true\)[\s\S]*rememberProfile\(id\)/);
+  assert.match(source,/function activateProfile\(id\)[\s\S]*editProfile\(value,false\)[\s\S]*syncProfileSelects\(value\)/);
+  assert.match(source,/\['productProfile','transferProfile','photoProfile','sendProfile','importProfile'\][\s\S]*activateProfile\(event\.target\.value\)/);
+  assert.match(source,/rememberProfile\(result\.profile\.id\)[\s\S]*syncProfileSelects\(result\.profile\.id\)/);
+  assert.match(source,/forgetRememberedProfile\(id\)[\s\S]*await refreshProfiles\(\)/);
+});
+
 test('mobile RTL redesign keeps the requested bottom navigation order and touch-friendly theme',async()=>{
   const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),start=source.indexOf('<nav class="main-tabs" aria-label="ناوبری اصلی">'),end=source.indexOf('</nav>',start),nav=source.slice(start,end);
   assert.ok(start>0&&end>start,'main navigation must exist');
