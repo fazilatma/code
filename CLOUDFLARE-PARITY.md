@@ -104,7 +104,7 @@ Cloudflare برای Worker یک سرور ثابت با مدل CPU، تعداد v
 
 هر redirect نیز subrequest محسوب می‌شود. انتظار شبکه CPU time نیست، اما parse، رمزنگاری، sanitize و ساخت JSON از CPU و حافظه مصرف می‌کنند. به همین علت این پروژه پاسخ مبدأ را محدود، پردازش را checkpoint و هر پیام صف را روی ۱۰ محصول نگه می‌دارد؛ concurrency جزئیات نیز ۲ است تا از ۶ connection و ۵۰ subrequest پلن Free عبور نکند. سقف داخلی body/response پروژه ممکن است عمداً از سقف Cloudflare کمتر باشد.
 
-خروجی dry-run فعلی bundle: **490.29 KiB raw / 120.27 KiB gzip**؛ بسیار پایین‌تر از سقف 3 MB پلن Free.
+خروجی dry-run فعلی bundle: **491.62 KiB raw / 120.67 KiB gzip**؛ بسیار پایین‌تر از سقف 3 MB پلن Free.
 
 ## تست و بازتولید ممیزی
 
@@ -128,7 +128,7 @@ npx wrangler deploy --dry-run
 9. هجده بخش و ترتیب dashboard، editorهای بصری، محیط مستقل مدیریت مقصد، گزارش تغییرات کد، modalهای جامع و listenerهای واقعی؛
 10. health، dashboard headers، API بدون token، نبود importهای Node در bundle، همگامی schema و auto-provision config.
 
-آخرین نتیجه: **25/25 test موفق**، typecheck و build موفق؛ parity audit نیز `ok: true` و **178/178 mapping** بدون missing/extra، warning یا error است. smoke کامل `ok: true` و deploy dry-run نیز موفق است.
+آخرین نتیجه: **26/26 test موفق**، typecheck و build موفق؛ parity audit نیز `ok: true` و **178/178 mapping** بدون missing/extra، warning یا error است. smoke کامل `ok: true` و deploy dry-run نیز موفق است.
 
 ## فایل‌های راهنما
 

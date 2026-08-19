@@ -114,6 +114,15 @@ test('nontechnical settings UI uses visual editors and comprehensive clickable t
   assert.doesNotMatch(source,/id="(?:importJson|aiImportBox)"/);assert.match(source,/id="profileImportFile"/);assert.match(source,/id="basalamShopsList"/);assert.match(source,/id="aiProvidersList"/);assert.match(source,/data-ai-row/);assert.match(source,/پاسخ خام مدل/);assert.match(source,/استعلام جامع ووکامرس/);assert.match(source,/نتیجهٔ جامع تست پاسخ خودکار/);assert.match(source,/نتیجهٔ بررسی نگهبان صف/);assert.match(source,/api\/ai\/test-results/);assert.match(source,/category-export'[\s\S]*api\('\/api\/category-learning\?limit=5000'/);assert.match(source,/if\(full\)await connect\(\)/);assert.match(source,/id="pane-destination"/);assert.match(source,/data-tab="destination"/);assert.match(source,/id="destBulkPreview"/);assert.match(source,/id="destBulkDeletePreview"/);assert.match(source,/runDestinationBulk\(false,true\)/);assert.match(source,/api\/destination\/'\+dest\.target\+'\/bulk/);assert.match(source,/extraction-diagnostic/);assert.match(source,/No route for that URI|رفع مسیر Cloudflare Workers AI/);assert.match(source,/گزارش تغییرات کد/);
 });
 
+test('dashboard startup cannot be stopped by a stale file input and settings restore is visibly wired',async()=>{
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
+  assert.doesNotMatch(source,/\$\('restoreFile'\)/,'removed restoreFile input must not be bound');
+  assert.doesNotMatch(source,/\$\('[^']+'\)\.addEventListener/,'literal event bindings must tolerate an optional/moved UI control');
+  assert.match(source,/\['sxFile','bkFile'\][\s\S]*restoreSettingsFile\(file\)/);
+  assert.match(source,/api\('\/api\/settings-import'/);
+  assert.match(source,/بازیابی کامل شد/);
+});
+
 test('processor refuses unsafe retirement after empty, duplicate or failed extraction and preserves detail tags',async()=>{
   const source=await readFile(new URL('../worker-src/processor.ts',import.meta.url),'utf8');assert.match(source,/checkpoint\.retireSafe=false;[\s\S]*صفحه.*خالی/);assert.match(source,/فقط محصولات تکراری/);assert.match(source,/if\(checkpoint\.retireSafe&&checkpoint\.seen\.length\)/);assert.match(source,/هیچ محصولی بازنشسته نشد/);assert.match(source,/tags:fresh\.tags\|\|previous\.tags/);
 });
