@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.15.0 — 2026-08-19
+
+- Fixed selector sub-tabs being hidden or deactivated when AI sub-tabs were clicked.
+- Fixed auto-advance requesting a next-page selector when pagination is not next-selector mode.
+- Added organized field navigation chips, required/optional completion counts and detail filtering.
+- Added per-field visual picking, clear-detail controls and improved mobile visual-studio layout.
+- Added live selector previews, stable semantic selectors, sibling/keyboard navigation and link-preserving navigation.
+
 ## 2.14.0 — 2026-08-19
 
 - Rebuilt visual selection as an advanced responsive selector studio.
