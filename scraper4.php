@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.85';
+const APP_VERSION = '9.86';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -908,8 +908,11 @@ function aiHttp(string $url, array $headers, ?array $payload, array $net, ?strin
         // دو الگوی رایج پشتیبانی می‌شود:
         //   https://worker.example.workers.dev/https://api.openai.com/v1/...
         //   https://worker.example.workers.dev/v1/...   (+ هدر X-Target-Base)
+        // v9.86: در جای‌نشان {url} آدرسِ خام (بدون urlencode) می‌نشیند چون
+        // Workerِ نمونهٔ خودِ برنامه با pathname.slice(1) آدرس را می‌خواند و
+        // urlencode بودنِ آن را خراب می‌کرد.
         if (strpos($w, '{url}') !== false) {
-            $reqUrl = str_replace('{url}', rawurlencode($url), $w);
+            $reqUrl = str_replace('{url}', $url, $w);
         } else {
             $reqUrl = $w . '/' . ltrim($url, '/');
         }
@@ -1836,7 +1839,7 @@ function bslReqMode(string $url, string $tk, string $m, $d, bool $mp, array $net
 
     if ($mode === 'worker' && trim((string)($net['worker_url'] ?? '')) !== '') {
         $w = rtrim((string)$net['worker_url'], '/');
-        $u = (strpos($w, '{url}') !== false) ? str_replace('{url}', rawurlencode($url), $w) : $w . '/' . ltrim($url, '/');
+        $u = (strpos($w, '{url}') !== false) ? str_replace('{url}', $url, $w) : $w . '/' . ltrim($url, '/');
         $opt[CURLOPT_URL] = $u;
         $opt[CURLOPT_HTTPHEADER] = array_merge($h, ['X-Target-URL: ' . $url]);
     }
@@ -3582,7 +3585,7 @@ function srcNetFetchAttempt(string $url, int $timeout, array $net, string $mode)
         if (!empty($net['proxy_auth'])) curl_setopt($ch, CURLOPT_PROXYUSERPWD, (string)$net['proxy_auth']);
     } elseif ($mode === 'worker' && !empty($net['worker_url'])) {
         $w = rtrim((string)$net['worker_url'], '/');
-        $u = (strpos($w, '{url}') !== false) ? str_replace('{url}', rawurlencode($url), $w) : $w . '/' . ltrim($url, '/');
+        $u = (strpos($w, '{url}') !== false) ? str_replace('{url}', $url, $w) : $w . '/' . ltrim($url, '/');
         curl_setopt($ch, CURLOPT_URL, $u);
         // v9.85: هدرِ مقصدِ واقعی برای Workerِ معکوس (مثل بقیهٔ مسیرها)
         $headers[] = 'X-Target-URL: ' . $url;
@@ -3595,9 +3598,12 @@ function srcNetFetchAttempt(string $url, int $timeout, array $net, string $mode)
     $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL) ?: $url;
     curl_close($ch);
+    // v9.86: url = آدرسِ واقعیِ ساخته‌شده (برای Worker یعنی worker + آدرسِ مقصد)،
+    // raw = بدنهٔ خامِ پاسخِ خطا تا در صفحهٔ خطا نمایش داده شود.
     return ['ok' => $body !== false && $code >= 200 && $code < 400,
             'error' => $err ?: 'Empty', 'code' => $code, 'url' => $finalUrl,
-            'html' => $body === false ? '' : $body, 'mode' => $mode];
+            'html' => $body === false ? '' : $body,
+            'raw'  => $body === false ? '' : $body, 'mode' => $mode];
 }
 
 /* v9.00: راه عبور برای سایت مبدأ — DoH / IP دستی / پروکسی / Worker.
@@ -3653,7 +3659,8 @@ function fetch_html(string $url, int $timeout = 25): array {
     $last = null; $tried = [];
     foreach ($modes as $m) {
         $last = srcNetFetchAttempt($url, $timeout, $__srcNet, $m);
-        $tried[] = ['mode' => $m, 'code' => (int)$last['code'], 'error' => (string)($last['error'] ?? '')];
+        $tried[] = ['mode' => $m, 'code' => (int)$last['code'], 'error' => (string)($last['error'] ?? ''),
+                    'url' => (string)($last['url'] ?? ''), 'raw' => mb_substr((string)($last['raw'] ?? ''), 0, 400)];
         if (!empty($last['ok'])) return $last;
         // اگر خطای قطعیِ منطقی (مثل ۴۰۴/۴۰۰) بود، امتحانِ روشِ دیگر بی‌فایده است
         if ($last['code'] > 0 && !in_array($last['code'], [403, 429], true)) break;
@@ -4632,7 +4639,7 @@ $_dpHint = '<div style="margin-top:22px;padding:14px 16px;background:#1e293b;bor
   . 'صفحه را <b>سرور</b> می‌گیرد، نه مرورگر شما — پس این خطا یعنی مسیر شبکهٔ سرور به این سایت کند یا محدود است.<br>'
   . 'در تنظیمات ← <b>مهلت بارگذاری صفحه</b> را بالاتر ببرید (الان ' . (int)$dpTimeout . ' ثانیه، دو بار تلاش شد).'
   . '</div>'
-  . (isset($res['tried']) && count($res['tried']) ? '<div style="margin-top:14px;padding:12px 14px;background:#0f172a;border:1px solid #475569;border-radius:10px;line-height:1.9;font-size:11px;color:#94a3b8;direction:rtl"><b style="color:#fbbf24">🧭 روش‌های امتحان‌شده:</b><br>' . implode('<br>', array_map(function($t){ return '• ' . (($t['mode'] ?? '')==='direct' ? 'مستقیم' : 'غیرمستقیم (' . h($t['mode']) . ')') . ' → HTTP ' . (int)($t['code'] ?? 0) . ($t['error'] ? ' — ' . h($t['error']) : ''); }, $res['tried'])) . '</div>' : '');
+  . (isset($res['tried']) && count($res['tried']) ? '<div style="margin-top:14px;padding:12px 14px;background:#0f172a;border:1px solid #475569;border-radius:10px;line-height:1.9;font-size:11px;color:#94a3b8;direction:rtl"><b style="color:#fbbf24">🧭 روش‌های امتحان‌شده:</b><br>' . implode('<div style="height:8px"></div>', array_map(function($t){ return '<div><b>' . (($t['mode'] ?? '')==='direct' ? 'مستقیم' : 'غیرمستقیم (' . h($t['mode']) . ')') . '</b> → HTTP ' . (int)($t['code'] ?? 0) . ($t['error'] ? ' <span style="color:#f87171">— ' . h($t['error']) . '</span>' : '') . ($t['url'] ? '<div style="font-size:10px;color:#67e8f9;direction:ltr;text-align:left;word-break:break-all;margin-top:2px">آدرس: ' . h($t['url']) . '</div>' : '') . ($t['raw'] ? '<div style="font-size:10px;color:#94a3b8;direction:ltr;text-align:left;word-break:break-all;margin-top:2px;background:#0b1220;padding:4px 6px;border-radius:4px">پاسخ خام: ' . h($t['raw']) . '</div>' : '') . '</div>'; }, $res['tried'])) . '</div>' : '');
 $_dpTitle = (stripos($err, 'resolve') !== false) ? '❌ دامنه پیدا نشد'
           : ((stripos($err, 'timed out') !== false || stripos($err, 'timeout') !== false)
              ? '⏱ خطای تایم‌اوت' : '❌ بارگذاری ناموفق');
@@ -5462,7 +5469,7 @@ $_vpHint = '<div style="margin-top:26px;padding:16px 18px;background:#1e293b;bor
   . (int)$vpTimeout . ' ثانیه، دو بار تلاش شد).<br>'
   . '۳) اگر سرور شما در ایران است، ممکن است مسیر شبکه به این سایت محدود باشد؛ در این حالت «بارگذاری مستقیم» تنها راه است.'
   . '</div>'
-  . (isset($res['tried']) && count($res['tried']) ? '<div style="margin-top:14px;padding:12px 14px;background:#0f172a;border:1px solid #475569;border-radius:10px;line-height:1.9;font-size:11px;color:#94a3b8;direction:rtl"><b style="color:#fbbf24">🧭 روش‌های امتحان‌شده:</b><br>' . implode('<br>', array_map(function($t){ return '• ' . (($t['mode'] ?? '')==='direct' ? 'مستقیم' : 'غیرمستقیم (' . h($t['mode']) . ')') . ' → HTTP ' . (int)($t['code'] ?? 0) . ($t['error'] ? ' — ' . h($t['error']) : ''); }, $res['tried'])) . '</div>' : '');
+  . (isset($res['tried']) && count($res['tried']) ? '<div style="margin-top:14px;padding:12px 14px;background:#0f172a;border:1px solid #475569;border-radius:10px;line-height:1.9;font-size:11px;color:#94a3b8;direction:rtl"><b style="color:#fbbf24">🧭 روش‌های امتحان‌شده:</b><br>' . implode('<div style="height:8px"></div>', array_map(function($t){ return '<div><b>' . (($t['mode'] ?? '')==='direct' ? 'مستقیم' : 'غیرمستقیم (' . h($t['mode']) . ')') . '</b> → HTTP ' . (int)($t['code'] ?? 0) . ($t['error'] ? ' <span style="color:#f87171">— ' . h($t['error']) . '</span>' : '') . ($t['url'] ? '<div style="font-size:10px;color:#67e8f9;direction:ltr;text-align:left;word-break:break-all;margin-top:2px">آدرس: ' . h($t['url']) . '</div>' : '') . ($t['raw'] ? '<div style="font-size:10px;color:#94a3b8;direction:ltr;text-align:left;word-break:break-all;margin-top:2px;background:#0b1220;padding:4px 6px;border-radius:4px">پاسخ خام: ' . h($t['raw']) . '</div>' : '') . '</div>'; }, $res['tried'])) . '</div>' : '');
 if (stripos($err, 'resolve') !== false) echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:40px;direction:rtl"><h2>❌ خطا در دسترسی</h2><p>آدرس <b>'.h($url).'</b> از روی <b>سرور</b> قابل دسترسی نیست.</p><p style="color:#94a3b8">دلیل: سرور DNS قادر به یافتن دامنه نیست. ممکن است دامنه منقضی یا مشکل SSL داشته باشد.</p>'.$_vpHint.'</body></html>';
 elseif (stripos($err, 'timed out') !== false || stripos($err, 'timeout') !== false) echo '<html><body style="background:#0f172a;color:#fbbf24;font-family:Tahoma;padding:40px;direction:rtl"><h2>⏱ خطای تایم‌اوت</h2><p><b>سرورِ ما</b> نتوانست <b>'.h($url).'</b> را در '.(int)$vpTimeout.' ثانیه بگیرد.</p><p style="color:#94a3b8">این یعنی مشکل از مسیر شبکهٔ سرور است، نه از سایت. برای همین «بارگذاری مستقیم» کار می‌کند: آنجا مرورگر خودتان صفحه را می‌گیرد.</p>'.$_vpHint.'</body></html>';
 else echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:40px;direction:rtl"><h2>❌ بارگذاری ناموفق</h2><p>سرور نتوانست <b>'.h($url).'</b> را بگیرد.</p><p style="color:#94a3b8">پیام: '.h($err).'</p>'.$_vpHint.'</body></html>';
@@ -12804,6 +12811,14 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "\$headers[] = 'X-Target-URL: ' . \$url;") !== false
          && strpos($selfSrc, "} elseif (\$mode === 'worker' && !empty(\$net['worker_url'])) {") !== false);
 
+    /* ---------- v9.86: رفعِ الگوی {url} + نمایشِ آدرس و پاسخِ خام ---------- */
+    $add('9.86', 'در الگوی {url} آدرسِ خام (بدون urlencode) استفاده می‌شود',
+         strpos($selfSrc, "str_replace('{url}', \$url, \$w)") !== false
+         && strpos($selfSrc, "rawurlencode(\$url), \$w)") === false);
+    $add('9.86', 'دیاگنوس، آدرسِ ساخته‌شده و پاسخِ خامِ خطا را نشان می‌دهد',
+         strpos($selfSrc, "آدرس: ' . h(\$t['url'])") !== false
+         && strpos($selfSrc, "پاسخ خام: ' . h(\$t['raw'])") !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -17312,7 +17327,7 @@ foreach($modes as $mode){
     $display=$url;
     if($mode==='worker' && trim((string)($net['worker_url']??''))!==''){
         $w=rtrim((string)$net['worker_url'],'/');
-        $display=(strpos($w,'{url}')!==false)?str_replace('{url}',rawurlencode($url),$w):$w.'/'.ltrim($url,'/');
+        $display=(strpos($w,'{url}')!==false)?str_replace('{url}',$url,$w):$w.'/'.ltrim($url,'/');
     }
     $r=bslReqMode($url,$tk,'GET','',false,$net,$mode);
     $attempts[]=['mode'=>$mode,'code'=>$r['code'],'url'=>$display,'ok'=>!empty($r['ok']),'error'=>$r['error']];
@@ -27353,6 +27368,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.86', t:'🧭 Worker: رفعِ الگوی {url} + نمایشِ آدرسِ ساخته‌شده و پاسخِ خامِ خطا', items:[
+    'گزارش شما: با فعال بودنِ سوییچِ غیرمستقیم، «بارگذاری صفحه» خطا می‌دهد و دیاگنوس', 'نشان می‌دهد Worker با HTTP 404 و «Empty» جواب داده است. این یعنی ترافیک', 'به‌درستی به Worker رفته ولی Worker آدرسِ مقصد را درست درنیاورده.',
+    '🐞 ریشهٔ ۱: در الگویِ <code>{url}</code> آدرسِ مقصد با urlencode کد می‌شد؛ اما', 'Workerِ نمونهٔ خودِ برنامه آدرس را با <code>pathname.slice(1)</code> می‌خواند که', 'آدرسِ خام می‌خواهد، نه کدشده. پس الگوی {url} برای آن Worker خراب بود.',
+    '✅ حالا در همهٔ مسیرها (مبدأ/سلکتورها، باسلام، هوش مصنوعی) جای‌نشان {url} با', 'آدرسِ خام (بدون کدگذاری) پر می‌شود تا با Workerِ نمونه هماهنگ شود.',
+    'خواستهٔ شما: آدرسِ نشان‌داده‌شده در حالتِ غیرمستقیم ترکیبی از بیسِ Worker', 'به‌علاوهٔ آدرسِ اصلی باشد، و پیامِ خامِ خطا هم دیده شود.',
+    '✅ در «روش‌های امتحان‌شده» حالا برای هر روش «آدرسِ واقعیِ ساخته‌شده» (مثلاً', 'آدرسِ Worker) و «پاسخِ خامِ خطا» نمایش داده می‌شود تا دقیقاً ببینید درخواست', 'به کدام آدرس رفته و Worker چه برگردانده است.'],},
   {v:'9.85', t:'🐞 ریشهٔ اصلی: نبودِ هدرِ X-Target-URL در مسیرِ Worker برای «بارگذاری صفحه»/استخراج', items:[
     'گزارش شما: باز هم «بارگذاری صفحه» و ترافیکِ استخراج مستقیم می‌رفت یا با', 'خطای «Empty» مواجه می‌شد، در حالی که «تست مسیر» موفق بود.',
     '🐞 این بار ریشهٔ واقعیِ تفاوت پیدا شد: «تست مسیر» از مسیرِ باسلام (bslReqMode)', 'می‌رود که هدرِ <code>X-Target-URL</code> را به Workerِ کلودفلر می‌فرستد —', 'همان هدری که Worker برای دانستنِ آدرسِ مقصد به آن نیاز دارد. اما «بارگذاری', 'صفحه» و استخراجِ مبدأ از مسیرِ دیگری (srcNetFetchAttempt/fetch_html)', 'می‌روند که این هدر را نمی‌فرستادند. نتیجه: Worker آدرسِ مقصد را نمی‌دانست،', 'پاسخی برنمی‌گرداند و با خطای «Empty» مواجه می‌شدیم — در حالی که تستِ همان', 'آدرس از مسیرِ دیگر موفق بود.',
