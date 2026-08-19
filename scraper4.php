@@ -89,8 +89,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.87';
-const APP_VERSION_DATE = '1405/05/28';
+const APP_VERSION = '9.88';
+const APP_VERSION_DATE = '1405/05/29';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -8779,6 +8779,40 @@ else continue;
 }
 
 $pageProducts=parse_with_selectors($res['html'],$res['url'],$selectors);
+
+/* 🔍 v9.88 — تشخیصِ «مرورگر ۲۰ تا نشان می‌دهد ولی استخراج کم می‌آورد».
+   انتخابگرِ بصری سایت را داخل iframe و با جاوااسکریپتِ کامل بارگذاری می‌کند،
+   پس شمارشِ «N مورد مشابه» روی سندِ *رندرشده* است. اما استخراج با cURL انجام
+   می‌شود که جاوااسکریپت اجرا نمی‌کند و فقط HTML خامِ سرور را می‌گیرد. در
+   سایت‌های SPA / اسکرول بی‌نهایت / لِیزی‌لود، آن HTML خام یا هیچ کارتی ندارد
+   یا فقط چند کارتِ اول را دارد. آن‌وقت سلکتور کاملاً درست است ولی خروجی صفر
+   یا ۱ محصول می‌شود — بدون هیچ توضیحی. اینجا اختلاف را صریح گزارش می‌کنیم. */
+if ($page === 1) {
+    $_diagN = 0;
+    if (!empty($selectors['container'])) {
+        [$_dDom, $_dXp] = load_dom($res['html']);
+        $_dq = cssToXpath($selectors['container'], true);
+        $_dn = $_dq ? @$_dXp->query($_dq) : null;
+        if (!$_dn || $_dn->length === 0) {
+            $_dq = cssToXpath($selectors['container'], false);
+            $_dn = $_dq ? @$_dXp->query($_dq) : null;
+        }
+        $_diagN = $_dn ? $_dn->length : 0;
+    }
+    $GLOBALS['_extractDiag'] = [
+        'containers_in_raw_html' => $_diagN,
+        'products_parsed'        => count($pageProducts),
+        'html_bytes'             => strlen($res['html']),
+    ];
+    if ($_diagN === 0) {
+        $logs[] = '⚠️ سلکتور ظرف در HTMLِ خامِ سرور هیچ تطبیقی ندارد (۰ عدد).';
+        $logs[] = '⚠️ یعنی صفحه محتوایش را با جاوااسکریپت می‌سازد؛ cURL آن را نمی‌بیند.';
+    } elseif ($_diagN < 3 && $_diagN > 0) {
+        $logs[] = '⚠️ در HTMLِ خام فقط ' . $_diagN . ' ظرف هست (مرورگر بیشتر نشان می‌دهد).';
+        $logs[] = '⚠️ بقیهٔ کارت‌ها با اسکرول/جاوااسکریپت بارگذاری می‌شوند.';
+    }
+}
+
 $newCount=0;
 foreach($pageProducts as $key=>$p){
 if(isset($seenKeys[$key]))continue;
@@ -8868,6 +8902,11 @@ usleep(500000);
    هیچ‌چیز استخراج نشده، بدون هیچ توضیحی. */
 if(empty($allProducts)&&$phase!=='detail'){
 $_why=$fetchFail!==''?$fetchFail:'صفحهٔ فهرست باز شد ولی هیچ محصولی با سلکتورها پیدا نشد';
+/* v9.88: اگر سلکتور درست است ولی HTMLِ خام کارتی ندارد، علتِ واقعی را بگو. */
+$_dg=$GLOBALS['_extractDiag']??null;
+if($fetchFail===''&&is_array($_dg)&&(int)($_dg['containers_in_raw_html']??-1)===0){
+$_why='این صفحه محتوایش را با جاوااسکریپت می‌سازد — سلکتور شما درست است ولی در HTMLِ خامِ سرور هیچ کارتی وجود ندارد';
+}
 $_kept=count($prevByKey);
 $_guardLog=[$_kept>0
     ?'🛡 استخراج بی‌نتیجه بود — داده‌های قبلی دست‌نخورده ماند'
@@ -8875,6 +8914,15 @@ $_guardLog=[$_kept>0
 $_guardLog[]='   • علت: '.$_why;
 if($_kept>0)$_guardLog[]='   • '.$_kept.' محصول ذخیره‌شده حفظ شد (گالری و جزئیاتشان پاک نشد)';
 else $_guardLog[]='   • سلکتور «کانتینر» را روی صفحهٔ فهرست بررسی کنید، یا سایت مبدأ در دسترس نبوده';
+/* v9.88: راهنمای عملی برای سایت‌های جاوااسکریپتی */
+if(is_array($_dg)){
+$_guardLog[]='   • تشخیص: در HTMLِ خام '.(int)($_dg['containers_in_raw_html']??0).' ظرف پیدا شد (حجم صفحه '.number_format((int)($_dg['html_bytes']??0)).' بایت)';
+if((int)($_dg['containers_in_raw_html']??-1)===0){
+$_guardLog[]='   • انتخابگرِ بصری سایت را با جاوااسکریپتِ کامل در iframe نشان می‌دهد،';
+$_guardLog[]='     ولی استخراج با cURL انجام می‌شود و جاوااسکریپت اجرا نمی‌کند.';
+$_guardLog[]='   • راه‌حل: آدرسِ API خودِ سایت را به‌جای صفحهٔ HTML بدهید (در تب';
+$_guardLog[]='     Network مرورگر، درخواستی که محصولات را JSON برمی‌گرداند)';
+}}
 $_guardLog[]='   • اگر سایت مبدأ واقعاً خالی شده، اجرای بعدی هم همین را می‌گوید';
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'total'=>$maxPages,'current'=>$totalPages,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$_guardLog,'total_log_count'=>count($_guardLog),'extracted'=>0,'error'=>'استخراج بی‌نتیجه — '.$_why,'guard'=>'empty_result','kept'=>count($prevByKey),'products_saved'=>false]);
 $queue=extractReadQueue();
@@ -13133,6 +13181,14 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "preg_match('~,(\\d{1,2})\$~', \$en)") !== false);
     $add('9.85', 'کلاسِ کاراکتریِ ترکیب‌گر جداکنندهٔ الگو را نمی‌بندد',
          strpos($selfSrc, "preg_match('/[+~]/', \$css)") !== false);
+
+    /* ---------- v9.88: تشخیصِ صفحاتی که با جاوااسکریپت رندر می‌شوند ---------- */
+    $add('9.88', 'تعداد ظرف‌های موجود در HTMLِ خام شمرده و گزارش می‌شود',
+         strpos($selfSrc, "'containers_in_raw_html' => \$_diagN,") !== false);
+    $add('9.88', 'وقتی HTMLِ خام هیچ ظرفی ندارد، علتِ واقعی به کاربر گفته می‌شود',
+         strpos($selfSrc, "این صفحه محتوایش را با جاوااسکریپت می") !== false);
+    $add('9.88', 'راهنمای عملی: استفاده از API خودِ سایت پیشنهاد می‌شود',
+         strpos($selfSrc, "درخواستی که محصولات را JSON برمی") !== false);
 
     /* ---------- v9.87: سلکتورِ فیلد که با خودِ ظرف شروع می‌شود ---------- */
     $add('9.87', 'اگر سلکتور فیلد با خودِ ظرف شروع شود، گامِ اول حذف و بقیه نسبی اجرا می‌شود',
@@ -27698,6 +27754,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+    ['9.88', '1405/05/29', 'تشخیص صفحاتِ جاوااسکریپتی: چرا مرورگر ۲۰ محصول نشان می‌دهد ولی استخراج کمتر می‌آورد', [
+        'انتخابگرِ بصری صفحه را در iframe و با جاوااسکریپتِ کامل بارگذاری می‌کند، پس «N مورد مشابه» روی سندِ رندرشده شمرده می‌شود.',
+        'اما استخراج با cURL انجام می‌شود که جاوااسکریپت اجرا نمی‌کند؛ در سایت‌های SPA/اسکرول‌بی‌نهایت HTMLِ خام یا هیچ کارتی ندارد یا فقط چند کارتِ اول را دارد.',
+        'نتیجه: سلکتور کاملاً درست بود ولی خروجی ۰ یا ۱ محصول می‌شد، بدون هیچ توضیحی.',
+        'حالا تعداد ظرف‌های موجود در HTMLِ خام شمرده و در لاگ گزارش می‌شود و پیام خطا راه‌حل (استفاده از API خود سایت) را پیشنهاد می‌دهد.',
+    ]],
   {v:'9.87', t:'🐞 رفع واقعیِ «۲۰ مورد مشابه پیدا می‌شود ولی محصول درنمی‌آید»', items:[
     'این‌بار با PHP واقعی (نسخهٔ ۸.۵) داخل محیط تست شد، نه شبیه‌سازی. باگ',
     'دقیقاً بازتولید شد: ۲۰ ظرف پیدا می‌شد و خروجی ۰ محصول بود.',
