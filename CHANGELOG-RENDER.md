@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.14.0 — 2026-08-19
+
+- Rebuilt visual selection as an advanced responsive selector studio.
+- Added desktop/tablet/mobile viewport controls, field auto-advance, history undo/redo and completion tracking.
+- Added parent/child/previous/next DOM navigation, keyboard controls and selected-link navigation.
+- Improved stable selector generation using IDs, semantic attributes, filtered classes and uniqueness checks.
+- Preserved original links securely in the proxied page and added live parent-side previews.
+
 ## 2.13.0 — 2026-08-19
 
 - Added selected-product sync queues for WooCommerce, Basalam or both.
