@@ -89,8 +89,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.80';
-const APP_VERSION_DATE = '1405/05/25';
+const APP_VERSION = '9.83';
+const APP_VERSION_DATE = '1405/05/28';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 function extractReadQueue(): array {
@@ -1865,9 +1865,9 @@ function bslReqMode(string $url, string $tk, string $m, $d, bool $mp, array $net
             'body' => @json_decode($b, true), 'raw' => $b, 'mode' => $mode];
 }
 
-function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false): array {
+function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false, ?array $net=null, bool $skipStop=false): array {
 $url=bslApiBase().ltrim($ep,'/');
-$net = function_exists('bslNetCfg') ? bslNetCfg() : ['indirect'=>false,'mode'=>'direct','fallback'=>false];
+if($net===null)$net = function_exists('bslNetCfg') ? bslNetCfg() : ['indirect'=>false,'mode'=>'direct','fallback'=>false];
 
 // ترتیب روش‌ها: عادی مستقیم؛ اگر «اتصال غیرمستقیم» روشن باشد، اول روشِ تنظیم‌شده،
 // بعد روش‌های جایگزینِ فعال (DoH، IP دستی، پروکسی، Worker) و در نهایت مستقیم.
@@ -1896,8 +1896,11 @@ foreach($modes as $mode){
 $r=['ok'=>false];
 for($attempt=1;$attempt<=$maxRetries;$attempt++){
 // v8.59: کش stat را پاک کن، وگرنه سیگنال توقفِ تازه دیده نمی‌شود
+// v9.82: تست اتصال نباید به‌خاطر فایل توقفِ باقی‌مانده «stopped» بدهد
+if(!$skipStop){
 clearstatcache(true,BSL_STOP_FILE);
 if(file_exists(BSL_STOP_FILE)){return ['ok'=>false,'code'=>0,'error'=>'stopped','body'=>null,'raw'=>''];}
+}
 $r=bslReqMode($url,$tk,$m,$d,$mp,$net,$mode);
 $last=$r;
 if($r['code']>0)break;                 // پاسخ گرفته شد (موفق یا خطای منطقی)؛ دوباره نمی‌زنیم
@@ -1909,6 +1912,57 @@ if(!empty($r['ok']))return $r;
 if($r['code']>0&&!in_array($r['code'],[403,429],true))return $r;
 }
 return $last;
+}
+
+/* =====================================================================
+ *  v9.83: خواندنِ فهرست نباید به سیگنالِ توقفِ ارسال گیر کند
+ *
+ *  گزارش کاربر: «تست غرفه» درست کار می‌کرد ولی «مدیریت جامع محصولات
+ *  باسلام» فهرست خالی می‌داد. ریشه همان فایلِ bsl_stop_signal.json بود:
+ *  اگر از یک ارسالِ قبلی جا مانده باشد، bslReq فوراً error=stopped
+ *  برمی‌گرداند، هندلرِ فهرست هم با `if(!$r['ok'])continue;` خطا را
+ *  بی‌صدا رد می‌کرد و مودال با «صفر محصول» و بدون هیچ پیامی باز می‌شد.
+ *
+ *  bslReqRead دقیقاً مثل bslReq است ولی مثل تست اتصال سیگنالِ توقف را
+ *  نادیده می‌گیرد. فقط برای درخواست‌های خواندنی (GET) به کار می‌رود؛
+ *  ارسال و همگام‌سازی همچنان با دیدنِ سیگنالِ توقف فوراً می‌ایستند.
+ * ===================================================================== */
+function bslReqRead(string $tk, string $ep, ?array $net=null): array {
+    return bslReq($tk, 'GET', $ep, null, false, $net, true);
+}
+
+/**
+ * v9.83: ردیف‌های محصول را از شکل‌های مختلفِ پاسخ بیرون می‌کشد.
+ * باسلام بسته به مسیر، فهرست را زیر data یا products یا items یا
+ * data.products می‌گذارد و گاهی خودِ بدنه آرایه است.
+ */
+function bslRowsOf($body): array {
+    if (!is_array($body)) return [];
+    foreach (['data', 'products', 'items', 'results', 'result'] as $k) {
+        if (isset($body[$k]) && is_array($body[$k])) {
+            $v = $body[$k];
+            // data خودش می‌تواند wrapper باشد: data.products / data.items
+            if (!array_key_exists(0, $v)) {
+                foreach (['products', 'items', 'results', 'data'] as $k2) {
+                    if (isset($v[$k2]) && is_array($v[$k2]) && array_key_exists(0, $v[$k2])) return $v[$k2];
+                }
+                continue;
+            }
+            return $v;
+        }
+    }
+    if (array_key_exists(0, $body) && is_array($body[0])) return $body;
+    return [];
+}
+
+/** v9.83: total_count / total_page را از شکل‌های مختلفِ پاسخ می‌خواند */
+function bslMetaInt($body, string $key, int $def = 0): int {
+    if (!is_array($body)) return $def;
+    if (isset($body[$key])) return (int)$body[$key];
+    foreach (['data', 'meta', 'pagination'] as $w) {
+        if (isset($body[$w]) && is_array($body[$w]) && isset($body[$w][$key])) return (int)$body[$w][$key];
+    }
+    return $def;
 }
 
 $bslCatNameMap_global=[];
@@ -12670,6 +12724,44 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'function bslReq' . 'Mode(') !== false
          && strpos($selfSrc, 'bslReqMode($url,$tk,$m,$d,$mp,$net,$mode)') !== false);
 
+    /* ---------- v9.81: تست غرفه تیک اتصال غیرمستقیم فرم را می‌خواند ---------- */
+    $add('9.81', 'test_basalam مقدار فعلی تیک «اتصال غیرمستقیم» فرم را می‌خواند',
+         strpos($selfSrc, "array_key_exists('net_ind" . "irect', \$_POST)") !== false);
+    $add('9.81', 'دکمه‌های تست غرفه (اصلی و اضافی) net_indirect را می‌فرستند',
+         strpos($selfSrc, "fd.append('net_ind" . "irect'") !== false);
+    $add('9.81', 'پاسخ خطای اتصال تست باسلام شامل curl_error و mode است',
+         strpos($selfSrc, "'curl_er" . "ror'=>trim((string)(\$r['error']??''))") !== false
+         && strpos($selfSrc, "'mode'=>(string)(\$r['mo" . "de']??'')") !== false);
+
+    /* ---------- v9.82: تست اتصال سیگنال توقف را نادیده می‌گیرد ---------- */
+    $add('9.82', 'bslReq پارامتر skipStop دارد تا بتوان سیگنال توقف را نادیده گرفت',
+         strpos($selfSrc, 'bool $skip' . 'Stop=false') !== false);
+    $add('9.82', 'test_basalam با skipStop=true صدا می‌شود تا فایل توقف تست را خراب نکند',
+         strpos($selfSrc, "bslReq(\$tk, 'GET', 'users/me', null, false, \$net, tr" . "ue)") !== false);
+    $add('9.82', 'وقتی skipStop روشن است، وجود فایل توقف باعث برگشت stopped نمی‌شود',
+         strpos($selfSrc, 'if(!$skip' . 'Stop){') !== false
+         && strpos($selfSrc, "error'=>'stop" . "ped'") !== false);
+
+    /* ---------- v9.83: فهرست محصولات به سیگنال توقف گیر نمی‌کند ---------- */
+    $add('9.83', 'bslReqRead برای خواندن ساخته شد و سیگنال توقف را نادیده می‌گیرد',
+         strpos($selfSrc, 'function bslReq' . 'Read(') !== false
+         && strpos($selfSrc, "bslReq(\$tk, 'GET', \$ep, null, false, \$net, tr" . "ue)") !== false);
+    $add('9.83', 'هندلر bsl_products فهرست را با bslReqRead می‌خواند',
+         strpos($selfSrc, '$r=bslReq' . 'Read($sTk,$url);') !== false);
+    $add('9.83', 'اگر هیچ غرفه‌ای پاسخ ندهد، پیام خطا برمی‌گردد نه فهرست خالی',
+         strpos($selfSrc, 'if($okShops===0&&$shop' . 'Errs){') !== false
+         && strpos($selfSrc, "'errors'=>\$shop" . "Errs") !== false);
+    $add('9.83', 'ردیف‌های محصول از data/products/items خوانده می‌شوند',
+         strpos($selfSrc, 'function bslRows' . 'Of(') !== false
+         && strpos($selfSrc, "'data', 'products', 'items', 'results', 'res" . "ult'") !== false);
+    $add('9.83', 'در صورت خطای مسیر اصلی، مسیر جایگزین products?vendor_ids امتحان می‌شود',
+         strpos($selfSrc, "\$alt='products?vendor_i" . "ds='.\$sVid") !== false);
+    $add('9.83', 'مسیر جایگزین با فیلتر وضعیتِ سربرگ غربال می‌شود تا محصولات قاطی نشوند',
+         strpos($selfSrc, 'if($viaAlt&&$statusParam!==' . "'all'){") !== false);
+    $add('9.83', 'مودال محصولات، خطای دریافت را نمایش می‌دهد',
+         strpos($selfSrc, 'bslModalState.last' . 'Error=em;') !== false
+         && strpos($selfSrc, 'دریافت محصولات از باسلام ناموفق بود') !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -17085,7 +17177,13 @@ exit;
 if (($_POST['action'] ?? '') === 'test_basalam') {
 header('Content-Type: application/json; charset=UTF-8');
 $tk=trim($_POST['token']??'');
-$r = bslReq($tk, 'GET', 'users/me');
+// v9.81: تست اتصال، حالتِ فعلیِ «اتصال غیرمستقیم»ِ فرم را هم در نظر می‌گیرد
+$net = function_exists('bslNetCfg') ? bslNetCfg() : null;
+if ($net !== null && array_key_exists('net_indirect', $_POST)) {
+    $v = $_POST['net_indirect'];
+    $net['indirect'] = !empty($v) && $v !== 'false' && $v !== '0';
+}
+$r = bslReq($tk, 'GET', 'users/me', null, false, $net, true);
 if ($r['ok']&&!empty($r['body'])) {
 $b=$r['body'];$v=$b['vendor']??[];
 $ivs=$b['info_verification_status']??null;
@@ -17127,9 +17225,13 @@ echo json_encode([
 $errMsg='خطا';
 if($r['code']===401)$errMsg='توکن نامعتبر (۴۰۱)';
 elseif($r['code']===403)$errMsg='دسترسی ممنوع (۴۰۳) — احراز هویت ناقص یا توکن بدون مجوز';
-elseif($r['code']===0)$errMsg='خطا ارتباط با سرور باسلام';
+elseif($r['code']===0){
+    $errMsg='خطا ارتباط با سرور باسلام';
+    $ce=trim((string)($r['error']??''));
+    if($ce!==''&&$ce!=='stopped')$errMsg.=' — '.$ce;
+}
 elseif(!empty($r['body']['detail']))$errMsg=mb_substr($r['body']['detail'],0,200);
-echo json_encode(['ok'=>false,'error'=>$errMsg,'http_code'=>$r['code'],'detail'=>$r['body']['detail']??($r['raw']??'')], JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>false,'error'=>$errMsg,'http_code'=>$r['code'],'curl_error'=>trim((string)($r['error']??'')),'mode'=>(string)($r['mode']??''),'detail'=>$r['body']['detail']??($r['raw']??'')], JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -18666,7 +18768,7 @@ if($q!==''&&$searchId>0&&mb_strlen($q)<=12&&preg_match('~^\s*\d+\s*$~',$q)){
 $foundOne=null;
 foreach($shops as $sp){
 $sTk=(string)$sp['token'];$sVid=(int)$sp['vendor_id'];
-$one=bslReq($sTk,'GET','products/'.$searchId);
+$one=bslReqRead($sTk,'products/'.$searchId);
 $row=$one['body']['data']??($one['body']??null);
 if(!empty($one['ok'])&&is_array($row)&&(int)($row['id']??0)>0){
 if(is_array($row)){$row['shop']=$sVid;$row['shop_name']=(string)($sp['shop_name']??'');}
@@ -18674,7 +18776,7 @@ $foundOne=$row;break;
 }
 }
 if($foundOne){
-$cr=bslReq($shops[0]['token'],'GET','categories');
+$cr=bslReqRead($shops[0]['token'],'categories');
 if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
 echo json_encode(['ok'=>true,'products'=>[$foundOne],'page'=>1,'total_page'=>1,'total_count'=>1,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'found_by'=>'id','shop_id'=>$curShopId,'shops'=>$allShops],JSON_UNESCAPED_UNICODE);
 exit;
@@ -18682,25 +18784,62 @@ exit;
 }
 
 /* فهرست عادی — برای هر غرفهٔ انتخاب‌شده صفحه را می‌گیریم و جمع می‌کنیم.
-   در حالت «همه» از هر غرفه همان صفحه را می‌گیریم و برچسب غرفه می‌زنیم. */
+   در حالت «همه» از هر غرفه همان صفحه را می‌گیریم و برچسب غرفه می‌زنیم.
+
+   v9.83: سه اصلاح مهم اینجا انجام شد، چون فهرست بی‌صدا خالی برمی‌گشت:
+   ۱) خواندن با bslReqRead تا سیگنالِ توقفِ ارسال جلوی فهرست را نگیرد.
+   ۲) خطای هر غرفه جمع می‌شود و اگر هیچ غرفه‌ای پاسخ نداد، به‌جای
+      «صفر محصول»، پیام خطای واقعی (۴۰۱/۴۰۳/شبکه) نشان داده می‌شود.
+   ۳) اگر مسیر اصلی خطا داد، مسیر جایگزینِ products?vendor_ids= هم
+      امتحان می‌شود. */
+$shopErrs=[];$okShops=0;
 foreach($shops as $sp){
 $sTk=(string)$sp['token'];$sVid=(int)$sp['vendor_id'];
 if($sTk===''||$sVid<=0)continue;
-$url='vendors/'.$sVid.'/products?page='.$page.'&per_page='.$perPage;
-foreach($statusValues as $sv){$url.='&statuses='.$sv;}
+$sName=(string)($sp['shop_name']??('#'.$sVid));
+$stQ='';foreach($statusValues as $sv){$stQ.='&statuses='.$sv;}
+$url='vendors/'.$sVid.'/products?page='.$page.'&per_page='.$perPage.$stQ;
 if($q!==''){$url.='&title='.urlencode($q);}
-$r=bslReq($sTk,'GET',$url);
-if(!$r['ok']){continue;}
-$rows=$r['body']['data']??[];
-if(is_array($rows)){
+$r=bslReqRead($sTk,$url);
+$viaAlt=false;
+if(empty($r['ok'])){
+// v9.83: مسیر جایگزین — بعضی توکن‌ها فقط روی این مسیر مجوز دارند
+$alt='products?vendor_ids='.$sVid.'&page='.$page.'&per_page='.$perPage.$stQ;
+if($q!==''){$alt.='&title='.urlencode($q);}
+$r2=bslReqRead($sTk,$alt);
+if(!empty($r2['ok'])){$r=$r2;$viaAlt=true;}
+else{
+$shopErrs[]=$sName.': '.bslApiError($r,'دریافت محصولات ناموفق','vendors/{id}/products','vendor.product.read');
+continue;
+}
+}
+$okShops++;
+$rows=bslRowsOf($r['body']);
+/* v9.83: مسیر جایگزین ممکن است پارامتر statuses را نادیده بگیرد. اگر
+   فیلترِ سربرگ واقعاً خالی است، نباید محصولاتِ سربرگ‌های دیگر قاطی
+   شوند — پس همان‌جا خودمان بر اساس وضعیت فیلتر می‌کنیم. */
+if($viaAlt&&$statusParam!=='all'){
+$want=array_map('intval',$statusValues);
+$rows=array_values(array_filter($rows,function($row)use($want){
+if(!is_array($row))return false;
+$ps=$row['status']??($row['revision']['data']['status']??0);
+$sv=is_array($ps)?(int)($ps['value']??0):(int)$ps;
+return in_array($sv,$want,true);
+}));
+}
 foreach($rows as $row){
 if(is_array($row)){$row['shop']=$sVid;$row['shop_name']=(string)($sp['shop_name']??'');$data[]=$row;}
 }
+$totalCount+=$viaAlt?count($rows):bslMetaInt($r['body'],'total_count',count($rows));
+$tp=bslMetaInt($r['body'],'total_page',1);
+if(!$isAll){$totalPage=max(1,$tp);}
 }
-$totalCount+=(int)($r['body']['total_count']??0);
-$tp=(int)($r['body']['total_page']??1);
-if(!$isAll){$totalPage=$tp;}
-if(!$isAll&&!empty($r['ok'])&&$tp>1)$totalPage=$tp;
+
+/* v9.83: هیچ غرفه‌ای پاسخ نداد → خطا را نشان بده، نه فهرست خالی */
+if($okShops===0&&$shopErrs){
+echo json_encode(['ok'=>false,'error'=>implode(' | ',array_slice($shopErrs,0,3)),
+'errors'=>$shopErrs,'shop_id'=>$curShopId,'shops'=>$allShops],JSON_UNESCAPED_UNICODE);
+exit;
 }
 
 /* v8.82: فیلتر «title» سمت باسلام تطبیق سادهٔ رشته‌ای است و به نیم‌فاصله،
@@ -18716,10 +18855,10 @@ foreach($shops as $sp){
 $sTk=(string)$sp['token'];$sVid=(int)$sp['vendor_id'];
 if($sTk===''||$sVid<=0)continue;
 for($pg=1;$pg<=25;$pg++){
-$sr=bslReq($sTk,'GET','vendors/'.$sVid.'/products?page='.$pg.'&per_page=100'.$allSt);
+$sr=bslReqRead($sTk,'vendors/'.$sVid.'/products?page='.$pg.'&per_page=100'.$allSt);
 if(empty($sr['ok']))break;
-$rows=$sr['body']['data']??[];
-if(!is_array($rows)||!$rows)break;
+$rows=bslRowsOf($sr['body']);
+if(!$rows)break;
 foreach($rows as $row){
 if(!is_array($row))continue;
 $t=(string)($row['title']??'');
@@ -18733,7 +18872,7 @@ $row['shop']=$sVid;$row['shop_name']=(string)($sp['shop_name']??'');
 $hits[]=$row;
 }
 }
-$tp=(int)($sr['body']['total_page']??1);
+$tp=bslMetaInt($sr['body'],'total_page',1);
 if($pg>=max(1,$tp))break;
 if(count($hits)>=$perPage)break;
 }
@@ -18745,9 +18884,12 @@ $totalPage=1;$totalCount=count($hits);$foundBy='deep';
 }
 
 $cats=[];
-$cr=bslReq($shops[0]['token']??'', 'GET','categories');
+$cr=bslReqRead((string)($shops[0]['token']??''),'categories');
 if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
-echo json_encode(['ok'=>true,'products'=>$data,'page'=>$page,'total_page'=>$totalPage,'total_count'=>$totalCount,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'q'=>$q,'found_by'=>$foundBy,'shop_id'=>$curShopId,'shops'=>$allShops],JSON_UNESCAPED_UNICODE);
+/* v9.83: اگر فهرست خالی بود ولی خطایی هم بوده، پیام را همراه پاسخ بفرست
+   تا مودال به‌جای سکوت، دلیلِ خالی بودن را نشان بدهد. */
+$warn=(!$data&&$shopErrs)?implode(' | ',array_slice($shopErrs,0,3)):'';
+echo json_encode(['ok'=>true,'products'=>$data,'page'=>$page,'total_page'=>$totalPage,'total_count'=>$totalCount,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'q'=>$q,'found_by'=>$foundBy,'warn'=>$warn,'shop_id'=>$curShopId,'shops'=>$allShops],JSON_UNESCAPED_UNICODE);
 exit;
 }
 
@@ -24342,7 +24484,7 @@ function renderBslFallbackCatDropList(cats,q){const dl=$('bslFallbackCatDropList
 let bslExtraVendors=[];
 function addBslVendor(){bslExtraVendors.push({vendor_id:0,token:'',name:'',shop_name:''});renderBslVendors();}
 function removeBslVendor(idx){if(!confirm('حذف این غرفه؟'))return;bslExtraVendors.splice(idx,1);renderBslVendors();}
-function testBslVendor(idx){const v=bslExtraVendors[idx];if(!v||!v.token){showToast('توکن خالی است',1);return;}const btn=document.getElementById('bslVTestBtn_'+idx);if(btn){btn.disabled=true;btn.textContent='⏳';}const fd=new FormData();fd.append('action','test_basalam');fd.append('token',v.token);fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(btn){btn.disabled=false;btn.textContent='🔗';}if(d.ok){bslExtraVendors[idx].vendor_id=d.vendor_id||0;bslExtraVendors[idx].name=d.user_name||d.username||'';bslExtraVendors[idx].shop_name=d.vendor_title||'';renderBslVendors();showToast('✓ '+d.vendor_title+' (#'+d.vendor_id+')');}else{showToast('❌ '+(d.error||'خطا'),1);}}).catch(()=>{if(btn){btn.disabled=false;btn.textContent='🔗';}showToast('❌ خطا شبکه',1);});}
+function testBslVendor(idx){const v=bslExtraVendors[idx];if(!v||!v.token){showToast('توکن خالی است',1);return;}const btn=document.getElementById('bslVTestBtn_'+idx);if(btn){btn.disabled=true;btn.textContent='⏳';}const fd=new FormData();fd.append('action','test_basalam');fd.append('token',v.token);if($('bsIndirect'))fd.append('net_indirect',$('bsIndirect').checked?'1':'0');fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(btn){btn.disabled=false;btn.textContent='🔗';}if(d.ok){bslExtraVendors[idx].vendor_id=d.vendor_id||0;bslExtraVendors[idx].name=d.user_name||d.username||'';bslExtraVendors[idx].shop_name=d.vendor_title||'';renderBslVendors();showToast('✓ '+d.vendor_title+' (#'+d.vendor_id+')');}else{showToast('❌ '+(d.error||'خطا'),1);}}).catch(()=>{if(btn){btn.disabled=false;btn.textContent='🔗';}showToast('❌ خطا شبکه',1);});}
 function renderBslVendors(){const list=$('bslVendorsList');if(!list)return;list.innerHTML='';if(bslExtraVendors.length===0){list.innerHTML='<div style="color:#64748b;font-size:11px;text-align:center;padding:8px">غرفه اضافی وجود ندارد</div>';return;}bslExtraVendors.forEach((v,idx)=>{const card=document.createElement('div');card.style.cssText='background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px';const info=v.shop_name?'<div style="color:#22d3ee;font-size:11px;margin-bottom:4px">'+esc(v.shop_name)+' (#'+v.vendor_id+')</div>':'';const nameVal=v.name||'';const pm=v.price_mode||'none';const pv=v.price_val||0;card.innerHTML='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-size:11px;color:#fbbf24;font-weight:700">غرفه '+(idx+1)+'</span><button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="removeBslVendor('+idx+')">✕</button></div>'+info+'<div style="display:flex;gap:6px;margin-bottom:6px"><input type="text" id="bslVName_'+idx+'" value="'+esc(nameVal)+'" placeholder="نام" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px;direction:rtl" oninput="bslExtraVendors['+idx+'].name=this.value"></div><div style="display:flex;gap:6px;margin-bottom:6px"><input type="password" id="bslVToken_'+idx+'" value="'+esc(v.token||'')+'" placeholder="Token" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].token=this.value"></div><div style="display:flex;gap:6px"><input type="number" id="bslVVid_'+idx+'" value="'+(v.vendor_id||'')+'" placeholder="شماره غرفه" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].vendor_id=parseInt(this.value)||0"><button class="btn btn-cyan" id="bslVTestBtn_'+idx+'" style="font-size:10px;padding:4px 8px" onclick="testBslVendor('+idx+')">🔗 تست</button></div>'
  // v9.68: تعدیل قیمتِ این غرفه (نسبت به قیمت پایهٔ محصول) + نمایش درصدِ مؤثر
  +'<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e293b">'
@@ -27153,6 +27295,38 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.83', t:'🏪 رفع «مدیریت جامع محصولات باسلام: صفر محصول»', items:[
+    'گزارش شما: تست غرفه سالم بود ولی «مدیریت جامع محصولات باسلام» فهرست را',
+    'خالی و بدون هیچ پیامی نشان می‌داد.',
+    '🐞 ریشه: همان فایل سیگنال توقف ارسال (bsl_stop_signal.json) که در ۹.۸۲',
+    'تست را خراب می‌کرد، اینجا هم bslReq را با error=stopped قطع می‌کرد؛ و',
+    'هندلر فهرست با continue خطا را بی‌صدا رد می‌کرد.',
+    '✅ خواندن فهرست حالا با bslReqRead انجام می‌شود و مثل تست اتصال، سیگنال',
+    'توقف را نادیده می‌گیرد (ارسال و همگام‌سازی همچنان با توقف می‌ایستند).',
+    '✅ اگر درخواست واقعاً شکست بخورد، پیام خطای واقعی نشان داده می‌شود:',
+    '۴۰۱ توکن نامعتبر، ۴۰۳ نبودِ اسکوپ vendor.product.read، یا خطای شبکه.',
+    '✅ پاسخ باسلام از کلیدهای data / products / items / results خوانده می‌شود.',
+    '✅ اگر مسیر اصلی خطا بدهد، مسیر جایگزین products?vendor_ids هم امتحان',
+    'می‌شود و نتیجه‌اش با وضعیتِ همان سربرگ غربال می‌شود تا محصولاتِ',
+    'سربرگ‌های دیگر قاطی نشوند.'],},
+  {v:'9.82', t:'🛑 رفع خطای «جزئیات: stopped» در تست اتصال باسلام', items:[
+    'گزارش شما: دکمهٔ تست غرفه، به‌جای نتیجهٔ واقعی اتصال، «جزئیات: stopped»',
+    'نشان می‌داد.',
+    '🐞 ریشه: اگر فایل سیگنال توقف ارسال (bsl_stop_signal.json) از یک ارسالِ',
+    'قبلی باقی مانده باشد، bslReq فوراً error=stopped برمی‌گرداند و تست هم',
+    'همان را به‌عنوان خطای اتصال نشان می‌داد.',
+    '✅ پارامتر skipStop به bslReq اضافه شد.',
+    '✅ تست اتصال (test_basalam) با skipStop=true صدا می‌شود تا سیگنال توقف',
+    'دست‌نخورده بماند ولی جلوی تست را نگیرد.',
+    '✅ ارسال و همگام‌سازی همچنان با دیدن سیگنال توقف فوراً می‌ایستند.'],},
+  {v:'9.81', t:'🔗 تست غرفه، تیک «اتصال غیرمستقیم» فرم را رعایت می‌کند', items:[
+    'گزارش شما: دکمهٔ تست غرفه، تیک فعلی «اتصال غیرمستقیم» فرم را نادیده',
+    'می‌گرفت و همیشه با تنظیم ذخیره‌شده تست می‌کرد.',
+    '✅ test_basalam حالا مقدار net_indirect فرم را می‌خواند.',
+    '✅ bslReq پارامتر اختیاری $net گرفت.',
+    '✅ در خطای اتصال (HTTP 0) پاسخ شامل curl_error و mode است.',
+    '✅ testBsl و testBslVendor هر دو net_indirect را می‌فرستند و راهنمای',
+    'اتصال غیرمستقیم را نشان می‌دهند.'],},
   {v:'9.80', t:'🌐 تیکِ «اتصال غیرمستقیم» برای باسلام — تبادل از روش‌های غیرمستقیم', items:[
     'گزارش شما: باسلام هم IP هاست را بلاک کرده؛ خواستید یک تیک در بخشِ باسلامِ', 'منوی همبرگری بگذاریم تا با فعال‌شدنش، تبادل پیام با باسلام از روش‌هایِ', 'اتصالِ غیرمستقیم انجام شود.',
     '✅ در منوی همبرگری ← «🏪 باسلام» یک تیکِ «اتصال غیرمستقیم» اضافه شد.', '✅ وقتی روشن باشد، همهٔ درخواست‌های باسلام (دریافت محصولات، ارسال، تست،', 'چت/پیام، وضعیت و...) اول از روشِ اتصالِ غیرمستقیمِ تنظیم‌شده در بخشِ', '«اتصال به سایت مبدأ» (پروکسی، Worker، DoH، IP دستی) رد می‌شوند.', '✅ اگر روشِ اصلی جواب نداد، روش‌هایِ فعالِ دیگر هم امتحان می‌شوند و در', 'نهایت یک بار مستقیم؛ در اولینِ موفق برمی‌گردد.', '✅ خطاهایِ منطقی (مثل ۴۰۱/۴۰۴) دیگرِ روش‌ها را امتحان نمی‌کند (بی‌فایده', 'است) ولی بلاکِ ۴۰۳/۴۲۹ و قطعِ شبکه باعث می‌شود روشِ بعدی امتحان شود.'],},
@@ -31985,14 +32159,22 @@ function testAiCategory(){
   });
 }
 
-function testBsl(){const s=$('bsS'),r=$('bsTR');s.textContent='\u062a\u0633\u062a...';s.className='cst tg';r.innerHTML='';const fd=new FormData();fd.append('action','test_basalam');fd.append('token',$('bsTk').value.trim());fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
-if(d.ok){s.textContent='\u2713';s.className='cst on';r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">\u2713 '+esc(d.message)+' | '+esc(d.vendor_title||'')+'</div>';if(d.vendor_id&&!$('bsVid').value)$('bsVid').value=d.vendor_id;saveConn();
+function testBsl(){const s=$('bsS'),r=$('bsTR');s.textContent='تست...';s.className='cst tg';r.innerHTML='';const fd=new FormData();fd.append('action','test_basalam');fd.append('token',$('bsTk').value.trim());if($('bsIndirect'))fd.append('net_indirect',$('bsIndirect').checked?'1':'0');fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+if(d.ok){s.textContent='✓';s.className='cst on';r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ '+esc(d.message)+' | '+esc(d.vendor_title||'')+'</div>';if(d.vendor_id&&!$('bsVid').value)$('bsVid').value=d.vendor_id;saveConn();
 showBslVendorModal(d);
-}else{s.textContent='\u2717';s.className='cst off';
-r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">\u2717 '+esc(d.error||'\u062e\u0637\u0627')+'</div>';
+}else{s.textContent='✗';s.className='cst off';
+let ext='';
+if(d.http_code===0){
+ext='<div style="margin-top:6px;background:#0f172a;padding:8px;border-radius:6px;font-size:10px;color:#94a3b8;line-height:1.7">';
+if(d.curl_error)ext+='<div>جزئیات: <span dir="ltr" style="font-family:monospace">'+esc(d.curl_error)+'</span></div>';
+if(d.mode)ext+='<div>روش اتصال: '+esc(d.mode)+'</div>';
+ext+='<div style="margin-top:4px;color:#fbbf24">💡 اگر IP هاست توسط باسلام بلاک شده است، تیک «اتصال غیرمستقیم» را فعال کنید و در بخش «اتصال به سایت مبدأ» یک روش (پروکسی، Worker یا DoH) تنظیم و ذخیره کنید.</div>';
+ext+='</div>';
+}
+r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc(d.error||'خطا')+'</div>'+ext;
 if(d.http_code===403||d.http_code===401){showBslVendorModal(d);}
 }
-}).catch(()=>{s.textContent='\u2717';s.className='cst off';});}
+}).catch(()=>{s.textContent='✗';s.className='cst off';});}
 function showBslVendorModal(d){
 let html='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslVendorModal()">';
 html+='<div class="bsl-modal" style="max-width:600px">';
@@ -34595,7 +34777,7 @@ collectProfileData=function(){
 refreshSyncStatus();
 refreshExtractQueue();
 // v7.23: BaSalam Products Modal (fixed API response structure)
-let bslModalState={page:1,totalPage:1,totalCount:0,perPage:50,activeTab:'active',q:'',foundBy:'',shopId:0,shops:[]};
+let bslModalState={page:1,totalPage:1,totalCount:0,perPage:50,activeTab:'active',q:'',foundBy:'',shopId:0,shops:[],lastError:''};
 const BSL_TABS=[
     {key:'active',label:'✅ فعال',statuses:['2976']},
     {key:'approved',label:'🟢 تأیید شده',statuses:['2976']},
@@ -34617,7 +34799,18 @@ function showBslProductsModal(page,tab){
     fetch('?bsl_products=1&page='+page+'&per_page='+bslModalState.perPage+'&status='+tab
           +'&shop_id='+encodeURIComponent(String(bslModalState.shopId||0))
           +(_q?('&q='+encodeURIComponent(_q)):'')).then(r=>r.json()).then(d=>{
-        if(!d||!d.ok){showToast(d?.error||'خطا در دریافت محصولات',1);return;}
+        /* v9.83: خطا دیگر بی‌صدا رد نمی‌شود — قبلاً مودال با «صفر محصول»
+           باز می‌شد و کاربر نمی‌فهمید مشکل از توکن/شبکه است. */
+        if(!d||!d.ok){
+            const em=(d&&(d.error||(d.errors&&d.errors.join(' | '))))||'خطا در دریافت محصولات';
+            showToast(em,1);
+            bslModalState.totalPage=1;bslModalState.totalCount=0;
+            bslModalState.lastError=em;
+            renderBslModal([]);
+            return;
+        }
+        bslModalState.lastError=d.warn||'';
+        if(d.warn)showToast(d.warn,1);
         bslModalState.totalPage=d.total_page||1;
         bslModalState.totalCount=d.total_count||0;
         bslModalState.foundBy=d.found_by||'';
@@ -34636,7 +34829,13 @@ function showBslProductsModal(page,tab){
                 }).catch(()=>{});
             }
         });
-    }).catch(e=>{showToast('خطا: '+e.message,1);});
+    }).catch(e=>{
+        // v9.83: خطای شبکه هم باید در خودِ مودال دیده شود
+        bslModalState.lastError='خطای شبکه: '+e.message;
+        bslModalState.totalPage=1;bslModalState.totalCount=0;
+        showToast('خطا: '+e.message,1);
+        try{renderBslModal([]);}catch(_){}
+    });
 }
 function bslChangePerPage(val){
     bslModalState.perPage=parseInt(val)||50;
@@ -34756,6 +34955,16 @@ function renderBslModal(products){
             +' · <span style="color:#94a3b8">جستجو در همهٔ وضعیت‌ها انجام می‌شود، حتی وضعیت‌هایی که سربرگ ندارند</span></div>';
     }
     html+='<div class="bsl-modal-body">';
+    /* v9.83: اگر دریافت فهرست خطا داد، همین بالای مودال با پیام روشن
+       نشان داده می‌شود — نه «صفر محصول» بی‌توضیح. */
+    if(bslModalState.lastError){
+        html+='<div style="margin-bottom:8px;padding:10px;border-radius:8px;background:#7f1d1d;'
+            +'border:1px solid #ef4444;color:#fecaca;font-size:12px;line-height:1.8">'
+            +'<b>❌ دریافت محصولات از باسلام ناموفق بود</b><br>'+esc(bslModalState.lastError)
+            +'<div style="margin-top:6px;color:#fbbf24;font-size:11px">💡 اگر ۴۰۱/۴۰۳ می‌بینید توکن یا اسکوپ '
+            +'<span dir="ltr" style="font-family:monospace">vendor.product.read</span> را بررسی کنید؛ '
+            +'اگر خطای ارتباط است، تیک «اتصال غیرمستقیم» باسلام را امتحان کنید.</div></div>';
+    }
     // v8.06: Search bar + toolbar for manageable tabs
     if(isManageable&&products.length>0){
         html+='<div style="margin-bottom:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">';
