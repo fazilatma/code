@@ -143,6 +143,23 @@ test('workflow panes match the reference hierarchy and every new control is oper
   const appSource=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');assert.match(appSource,/read-excel-file\/web-worker/);assert.match(appSource,/destinationStatus:wooStatus\|\|undefined/);
 });
 
+test('remaining dashboard content follows a topic-first novice workflow without dropping advanced tools',async()=>{
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
+  const home=source.slice(source.indexOf('<section id="pane-home"'),source.indexOf('<section id="pane-selector"'));
+  assert.ok(home.indexOf('شروع استخراج محصولات')<home.indexOf('مدیریت پروفایل‌ها و نمای کلی'));
+  assert.match(home,/<details class="support-panel profile-library">[\s\S]*id="profileList"/);
+  const selector=source.slice(source.indexOf('<section id="pane-selector"'),source.indexOf('<section id="pane-products"'));
+  assert.deepEqual([...selector.matchAll(/<span class="step-badge">([^<]+)<\/span>/g)].map(x=>x[1]),['۱','۲','۳']);
+  assert.ok(selector.indexOf('منبع و صفحه‌بندی')<selector.indexOf('فیلدهای فهرست محصولات')&&selector.indexOf('فیلدهای فهرست محصولات')<selector.indexOf('جزئیات صفحهٔ محصول'));
+  const products=source.slice(source.indexOf('<section id="pane-products"'),source.indexOf('<section id="pane-destination"'));
+  assert.ok(products.indexOf('محصولات استخراج‌شده')<products.indexOf('ابزارهای خروجی و انتقال'));
+  assert.match(products,/id="goImportTab"[\s\S]*ورود CSV \/ Excel جدید/);assert.match(source,/\$\('goImportTab'\)[\s\S]*tab\('jobs'\)/);
+  const settings=source.slice(source.indexOf('<section id="pane-settings"'),source.indexOf('<nav class="main-tabs"'));
+  assert.ok(settings.indexOf('مدیریت قیمت')<settings.indexOf('ابزارهای فنی و مهاجرت'));assert.match(settings,/<details class="support-panel technical-panel">/);
+  assert.deepEqual(Object.values({maintenance:'🧰 نگهداری و نسخه',connections:'🔌 اتصال‌ها و سرویس‌ها',operations:'📦 عملیات محصولات و سلامت',automation:'🤖 اتوماسیون و گزارش'}).filter(label=>source.includes(label)).length,4);
+  assert.match(source,/menuDefs\.map\(\(\[title,key,desc,content\],index\)/);
+});
+
 test('processor refuses unsafe retirement after empty, duplicate or failed extraction and preserves detail tags',async()=>{
   const source=await readFile(new URL('../worker-src/processor.ts',import.meta.url),'utf8');assert.match(source,/checkpoint\.retireSafe=false;[\s\S]*صفحه.*خالی/);assert.match(source,/فقط محصولات تکراری/);assert.match(source,/if\(checkpoint\.retireSafe&&checkpoint\.seen\.length\)/);assert.match(source,/هیچ محصولی بازنشسته نشد/);assert.match(source,/tags:fresh\.tags\|\|previous\.tags/);
 });
