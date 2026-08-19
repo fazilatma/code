@@ -1,5 +1,14 @@
 # Render TypeScript changelog
 
+## 2.5.0 — 2026-08-19
+
+- Added a full-screen professional live AI test results dashboard.
+- Added status/provider filters, full-text search, sorting, CSV export and provider summaries.
+- Added success rate, pending, failure and average-latency analytics.
+- Added progressive message/category responses and per-model error details.
+- Added one-click model tests and per-candidate voting cards.
+- Added stale background-test recovery and fixed only-untested progress accounting.
+
 ## 2.4.0 — 2026-08-19
 
 - Added event-driven notifications for new orders, order status, chats, new products, source price/stock and Cron ping.
