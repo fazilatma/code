@@ -4263,7 +4263,7 @@ app.post("/api/settings", async (c) => {
 app.get("/api/backup", async (c) => {
   const backup = await createBackup();
   if (c.req.query("persist") === "true") {
-    if (!c.env.BACKUPS) return c.json({ ok: false, error: "R2 binding BACKUPS is not configured" }, 400);
+    if (!c.env.BACKUPS) return c.json({ ok: false, error: "Persistent R2 backups are disabled because this deployment has no R2 subscription. Use /api/backup without persist=true to download the complete JSON backup." }, 400);
     const key2 = `scraper4/${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
     await c.env.BACKUPS.put(key2, JSON.stringify(backup), { httpMetadata: { contentType: "application/json" }, customMetadata: { app: "scraper4-cloudflare" } });
     return c.json({ ok: true, persisted: true, key: key2, backup });

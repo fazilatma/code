@@ -1,6 +1,6 @@
 # Scraper 4 روی Cloudflare Workers
 
-این پوشه نسخهٔ Cloudflare-native از `scraper4.php` نسخهٔ 9.80 است. برنامه از Worker ماژولی، D1، Queues، Cron Triggers، R2 و Web Crypto استفاده می‌کند و به Node.js، PostgreSQL، Bash یا فایل‌سیستم دائمی وابسته نیست.
+این پوشه نسخهٔ Cloudflare-native از `scraper4.php` نسخهٔ 9.80 است. برنامه از Worker ماژولی، D1، Queues، Cron Triggers و Web Crypto استفاده می‌کند و به Node.js، PostgreSQL، Bash یا فایل‌سیستم دائمی وابسته نیست. پشتیبانی runtime از R2 اختیاری است، اما استقرار پیش‌فرض برای کار بدون کارت بانکی هیچ R2 binding ندارد.
 
 ## معماری
 
@@ -19,9 +19,9 @@ D1 منبع canonical داده است. Queue فقط شناسهٔ job را حمل
 
 ## استقرار کامل فقط با Cloudflare Dashboard
 
-برای نصب نخست **هیچ D1، R2 bucket یا Queue را دستی نسازید**. `wrangler.toml` resourceها را با نام قطعی و بدون ID حساب تعریف می‌کند و `npm run worker:deploy` همهٔ آن‌ها را ایجاد، متصل و migrate می‌کند. این کار در محیط Workers Builds اجرا می‌شود؛ کاربر به terminal یا Bash نیاز ندارد.
+برای نصب نخست **هیچ D1 یا Queue را دستی نسازید**. `wrangler.toml` resourceها را با نام قطعی و بدون ID حساب تعریف می‌کند و `npm run worker:deploy` همهٔ آن‌ها را ایجاد، متصل و migrate می‌کند. این کار در محیط Workers Builds اجرا می‌شود؛ کاربر به terminal، Bash، R2 subscription یا کارت بانکی نیاز ندارد.
 
-دو قابلیت account-level باید فقط یک‌بار از Dashboard فعال باشند: **Workers** و **R2 Object Storage**. فعال‌کردن R2 به‌معنای ساخت دستی bucket نیست؛ پذیرش/فعال‌سازی سرویس را Cloudflare به دلایل حساب و billing فقط در Dashboard اجازه می‌دهد. اگر فعال نباشد API با کد `10042` متوقف می‌شود. پس از فعال‌سازی، خود deploy bucket را می‌سازد.
+R2 عمداً در تنظیمات production تعریف نشده است، زیرا فعال‌سازی آن checkout و روش پرداخت می‌خواهد. endpoint عادی `/api/backup` همچنان backup کامل JSON را برای نگه‌داری روی دستگاه کاربر دانلود می‌کند. فقط حالت اختیاری `persist=true` که backup را مستقیم داخل R2 نگه می‌دارد در این استقرار غیرفعال است.
 
 > نام Worker را دقیقاً `scraper4-cloudflare` بگذارید. نام Queueها ثابت است و consumer عمداً به همان نام‌ها اشاره می‌کند.
 
@@ -62,7 +62,6 @@ Wrangler قفل‌شده در `package-lock.json` هنگام نخستین deploy
 | نوع | binding | نام resource ساخته‌شده | اتصال خودکار |
 |---|---|---|---|
 | D1 | `DB` | `scraper4-cloudflare-db` | بله |
-| R2 bucket | `BACKUPS` | `scraper4-cloudflare-backups` | بله |
 | Queue اصلی | `JOBS` | `scraper4-cloudflare-jobs` | producer + consumer |
 | Dead-letter Queue | `JOBS_DLQ` | `scraper4-cloudflare-jobs-dlq` | DLQ برای `JOBS` |
 | Cron Trigger | — | `*/5 * * * *` | بله |
@@ -77,7 +76,7 @@ Wrangler قفل‌شده در `package-lock.json` هنگام نخستین deploy
 
 همهٔ مراحل idempotent هستند. resourceها نام قطعی دارند اما ID حساب در Git ذخیره نمی‌شود؛ بنابراین حتی اگر deploy پس از ساخت یک resource قطع شود، retry همان resource را با نام پیدا و متصل می‌کند و نمونهٔ تکراری نمی‌سازد. deployهای بعدی نیز فقط migrationهای جدید را اعمال می‌کنند. علاوه بر آن، `ensureSchema()` در شروع هر isolate تمام دستورهای `CREATE ... IF NOT EXISTS` را یک‌بار اجرا می‌کند تا database تازه یا نیمه‌کاره نیز خودکار ترمیم شود.
 
-در log نخستین build باید پیام‌های provisioning برای `DB`، `BACKUPS`، `JOBS` و `JOBS_DLQ` و سپس پیام موفقیت migration دیده شوند. اگر build در میانه قطع شد، **Retry deployment** امن است و resource تکراری ایجاد نمی‌کند.
+در log نخستین build باید پیام‌های provisioning/اتصال برای `DB`، `JOBS` و `JOBS_DLQ` و سپس پیام موفقیت migration دیده شوند. هیچ درخواست R2 یا خطای `10042` نباید وجود داشته باشد. اگر build در میانه قطع شد، **Retry deployment** امن است و resource تکراری ایجاد نمی‌کند.
 
 ### 3. افزودن secretها از Dashboard
 
@@ -100,10 +99,10 @@ Wrangler قفل‌شده در `package-lock.json` هنگام نخستین deploy
 - `https://<worker>.workers.dev/health` باید `ok: true` و `databaseReady: true` بدهد.
 - داشبورد را باز و `ADMIN_TOKEN` را در تب تنظیمات وارد کنید.
 - endpoint احراز هویت‌شدهٔ `/api/selftest` باید `ok: true` و `total: 57` نشان دهد.
-- در **Bindings** باید `DB`، `BACKUPS`، `JOBS` و `JOBS_DLQ` دیده شوند.
+- در **Bindings** باید `DB`، `JOBS` و `JOBS_DLQ` دیده شوند؛ نبودن `BACKUPS` عمدی است.
 - در **Triggers** باید Cron پنج‌دقیقه‌ای و Queue consumer دیده شوند.
 
-نیازی به D1 Console، ساخت bucket، ساخت Queue، paste کردن UUID یا اجرای migration دستی نیست.
+نیازی به D1 Console، R2، ساخت Queue، paste کردن UUID یا اجرای migration دستی نیست.
 
 ## توسعه و آزمایش محلی اختیاری
 
@@ -139,7 +138,7 @@ npx wrangler deploy --dry-run
 
 فرمت `scraper4-php-compatible` برای فایل‌های اتصال، تنظیمات، category learning، autoreply و profile/product پشتیبانی می‌شود. اتصال‌های plaintext ورودی بلافاصله با Web Crypto رمز می‌شوند.
 
-پیش از migration بزرگ از endpoint `/api/backup?persist=true` استفاده کنید تا نسخه‌ای در R2 ذخیره شود. دانلود backup معمولی از `/api/backup` و بازیابی از `/api/restore` انجام می‌شود.
+پیش از migration بزرگ، endpoint `/api/backup` را اجرا و فایل JSON دانلودشده را روی دستگاه خود نگه‌داری کنید. بازیابی از `/api/restore` انجام می‌شود. حالت `/api/backup?persist=true` فقط برای استقرارهای دارای R2 است و در نسخهٔ بدون subscription پیام راهنمای کنترل‌شده برمی‌گرداند.
 
 ## API و امنیت
 

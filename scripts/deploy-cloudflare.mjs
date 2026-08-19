@@ -15,39 +15,18 @@ function run(args) {
     const child = spawn(process.execPath, [wrangler, ...args], {
       cwd: fileURLToPath(new URL('..', import.meta.url)),
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: 'inherit',
     });
-    const output = [];
-    const mirror = (stream, target) => stream.on('data', chunk => {
-      output.push(Buffer.from(chunk));
-      target.write(chunk);
-    });
-    mirror(child.stdout, process.stdout);
-    mirror(child.stderr, process.stderr);
     child.once('error', reject);
     child.once('exit', (code, signal) => {
       if (code === 0) resolve();
-      else {
-        const error = new Error(`wrangler ${args.join(' ')} failed${signal ? ` with signal ${signal}` : ` with exit code ${code}`}`);
-        error.output = Buffer.concat(output).toString('utf8');
-        reject(error);
-      }
+      else reject(new Error(`wrangler ${args.join(' ')} failed${signal ? ` with signal ${signal}` : ` with exit code ${code}`}`));
     });
   });
 }
 
-console.log('\n[1/2] Deploying Worker and automatically provisioning D1, R2, JOBS, and JOBS_DLQ...');
-try {
-  await run(['deploy', '--experimental-provision', '--experimental-auto-create']);
-} catch (error) {
-  if (/\b10042\b|please enable R2/i.test(error.output ?? '')) {
-    throw new Error(
-      'R2 Object Storage is not enabled for this Cloudflare account. In the Cloudflare Dashboard, open R2 Object Storage and enable the service, but do not create a bucket manually. Then use Retry deployment; Wrangler will create and bind scraper4-cloudflare-backups automatically.',
-      { cause: error },
-    );
-  }
-  throw error;
-}
+console.log('\n[1/2] Deploying Worker and automatically provisioning D1, JOBS, and JOBS_DLQ (R2-free mode)...');
+await run(['deploy', '--experimental-provision', '--experimental-auto-create']);
 
 console.log('\n[2/2] Applying pending D1 migrations to the provisioned DB binding...');
 await run(['d1', 'migrations', 'apply', 'DB', '--remote']);

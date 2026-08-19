@@ -12,7 +12,7 @@ Build command:  npm ci && npm run worker:test
 Deploy command: npm run worker:deploy
 ```
 
-سرویس account-level **R2 Object Storage** باید یک‌بار در Dashboard فعال شود؛ پس از آن deploy نخست D1، R2 bucket، Queue اصلی، DLQ، Queue consumer، Cron و schema دیتابیس را خودکار ایجاد و متصل می‌کند. ساخت دستی resource یا paste کردن UUID لازم نیست. فقط `ADMIN_TOKEN` و `VAULT_SECRET` باید پس از deploy به‌صورت Secret در Dashboard ثبت شوند.
+این استقرار به R2، subscription یا کارت بانکی نیاز ندارد. deploy نخست D1، Queue اصلی، DLQ، Queue consumer، Cron و schema دیتابیس را خودکار ایجاد و متصل می‌کند؛ ساخت دستی resource یا paste کردن UUID لازم نیست. backup کامل از `/api/backup` به‌صورت فایل JSON دانلود می‌شود. فقط `ADMIN_TOKEN` و `VAULT_SECRET` باید پس از deploy به‌صورت Secret در Dashboard ثبت شوند.
 
 ## توسعهٔ محلی اختیاری
 

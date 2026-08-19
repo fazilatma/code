@@ -31,10 +31,8 @@ max_retries = 5
 dead_letter_queue = "scraper4-cloudflare-jobs-dlq"
 max_concurrency = 2
 
-[[r2_buckets]]
-binding = "BACKUPS"
-bucket_name = "scraper4-cloudflare-backups"
-
+# BACKUPS is intentionally omitted: enabling R2 requires a billing subscription.
+# /api/backup remains available as a downloadable JSON export without R2.
 [triggers]
 crons = ["*/5 * * * *"]
 
