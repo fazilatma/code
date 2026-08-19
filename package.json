@@ -14,7 +14,8 @@
     "render:worker": "node render-dist/worker.js",
     "render:cron": "node render-dist/cron.js",
     "dev": "npm run render:build && node --watch render-dist/server.js",
-    "typecheck": "tsc -p tsconfig.render.json --noEmit"
+    "typecheck": "tsc -p tsconfig.render.json --noEmit",
+    "test": "npm run typecheck && node --test render-tests/*.test.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.1",

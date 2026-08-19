@@ -12,6 +12,7 @@ import { createBackup, createJob, deleteProfile, enqueueDueProfiles, findLearned
 import { DEFAULT_SELECTORS, type Product, type Profile } from './types.js';
 import { safeFetch, safeText } from './network.js';
 import { sendNotification } from './notifications.js';
+import { PHP_MENU_CAPABILITIES, runSelftest } from './parity.js';
 import { bulkEdit, photoFix, rebuildMap, recon, retire } from './maintenance.js';
 import { numberFromText, testSelector } from './scraper.js';
 import { createPhpSettingsBundle, decodePhpSettingsBundle, stateKeyForFile } from './settings-transfer.js';
@@ -87,6 +88,8 @@ app.post('/api/visual-ticket', async c => {
   return c.json({ ok: true, ticket: createVisualTicket(url.href), expiresIn: 300 });
 });
 app.get('/api/status', async c => { const connections=await loadConnections(); return c.json({ ok:true,profiles:(await listProfiles()).length,jobs:await listJobs(10),connections:connectionStatus(connections) }); });
+app.get('/api/selftest',async c=>c.json(await runSelftest()));
+app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES}));
 app.get('/api/connections', async c => c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections', async c => c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));

@@ -3,7 +3,7 @@ services:
     name: scraper4-render
     runtime: node
     plan: free
-    buildCommand: npm ci && npm run render:build
+    buildCommand: npm ci && npm test && npm run render:build
     startCommand: npm run render:start
     healthCheckPath: /health
     autoDeployTrigger: commit
