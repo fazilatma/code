@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.4.0 — 2026-08-19
+
+- Added event-driven notifications for new orders, order status, chats, new products, source price/stock and Cron ping.
+- Added persistent snapshot state, flood-safe first-run seeding and reminder throttling.
+- Added unanswered-chat reminders with delay and maximum-repeat controls.
+- Added preview/send and selected order/chat notification actions.
+- Integrated notification sweep into the internal scheduler and Render Cron.
+
 ## 2.3.0 — 2026-08-19
 
 - Added AI category recommendations using live Basalam leaf categories.

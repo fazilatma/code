@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-08-19T01:11:09.269Z",
+  "generatedAt": "2026-08-19T01:23:56.374Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 85,
-    "menuActions": 65
+    "routes": 88,
+    "menuActions": 68
   },
   "routes": [
     "GET /health",
@@ -35,6 +35,9 @@
     "POST /api/ai/category-rejected-batch",
     "POST /api/ai/category-local-batch",
     "POST /api/notifications/test",
+    "POST /api/notifications/sweep",
+    "POST /api/notifications/selected",
+    "GET /api/notifications/state",
     "GET /api/category-learning",
     "POST /api/category-learning/record",
     "POST /api/category-learning/test",
@@ -135,7 +138,10 @@
     "digest-send",
     "health",
     "notify-bale",
+    "notify-preview",
     "notify-rubika",
+    "notify-selected",
+    "notify-send",
     "notify-webhook",
     "orders",
     "parity",
