@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.3.0 — 2026-08-19
+
+- Added AI category recommendations using live Basalam leaf categories.
+- Added lexical category prefiltering to keep prompts bounded and relevant.
+- Added rejected Basalam product category preview and guarded batch apply.
+- Added local uncategorized product recommendation batches.
+- Added legacy aliases for `bsl_ai_category`, `bsl_fix_ai_cat_batch` and `bsl_master_fix`.
+
 ## 2.2.0 — 2026-08-19
 
 - Rebuilt selector testing as a single-fetch scoped workbench.

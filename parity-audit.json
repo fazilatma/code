@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-08-19T01:02:21.727Z",
+  "generatedAt": "2026-08-19T01:11:09.269Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 81,
-    "menuActions": 61
+    "routes": 85,
+    "menuActions": 65
   },
   "routes": [
     "GET /health",
@@ -30,6 +30,10 @@
     "POST /api/ai/test-stop",
     "POST /api/ai/candidates/:task",
     "GET /api/ai/network-diagnostics",
+    "GET /api/ai/basalam-categories",
+    "POST /api/ai/category-recommend",
+    "POST /api/ai/category-rejected-batch",
+    "POST /api/ai/category-local-batch",
     "POST /api/notifications/test",
     "GET /api/category-learning",
     "POST /api/category-learning/record",
@@ -96,9 +100,13 @@
     "ai-add-candidate",
     "ai-candidate-category",
     "ai-candidate-reply",
+    "ai-category-one",
     "ai-clear-candidates",
     "ai-leaderboard",
+    "ai-local-category",
     "ai-network-diagnostics",
+    "ai-rejected-apply",
+    "ai-rejected-preview",
     "ai-test-start",
     "ai-test-status",
     "ai-test-stop",
