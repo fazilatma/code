@@ -115,6 +115,37 @@ Content-Type: application/json
 {"profiles": { ...محتوای profiles.json... }}
 ```
 
+## سازگاری با API قدیمی PHP
+
+نسخه 2.0 مسیر زیر را برای کلاینت‌ها و اسکریپت‌هایی که قبلاً `scraper4.php` را فراخوانی می‌کردند ارائه می‌کند:
+
+```text
+https://YOUR-SERVICE.onrender.com/scraper4.php
+```
+
+احراز هویت با یکی از روش‌های زیر انجام می‌شود:
+
+```text
+Authorization: Bearer ADMIN_TOKEN
+```
+
+یا برای Cronهای قدیمی:
+
+```text
+?scraper4_parameter=1&api_token=ADMIN_TOKEN
+```
+
+نمونه‌ها:
+
+```text
+/scraper4.php?profiles=1&api_token=...
+/scraper4.php?cron_run=1&api_token=...
+/scraper4.php?selftest=1&api_token=...
+/scraper4.php?bsl_orders_list=1&api_token=...
+```
+
+Endpoint قدیمی ناشناخته پاسخ صریح HTTP 501 می‌گیرد و موفقیت جعلی برنمی‌گرداند.
+
 ## نکات عملیاتی
 
 - فایل‌سیستم Render پایدار فرض نشده؛ تمام داده مهم در PostgreSQL قرار می‌گیرد.

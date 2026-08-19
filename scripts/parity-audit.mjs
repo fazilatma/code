@@ -4,7 +4,7 @@ const normalized=php.replace(/'([^']*)'\s*\.\s*'([^']*)'/g,(_,a,b)=>`'${a}${b}'`
 const collect=(regex,text)=>[...text.matchAll(regex)].map(x=>x[1]);
 const phpGet=new Set([...collect(/isset\(\$_GET\[['"]([^'"]+)/g,normalized),...collect(/!empty\(\$_GET\[['"]([^'"]+)/g,normalized)]);
 const phpActions=new Set([...collect(/\$_POST\[['"]action['"]\]\s*\?\?\s*''\)\s*===\s*['"]([^'"]+)/g,normalized),...collect(/\$_POST\[['"]action['"]\]\s*===\s*['"]([^'"]+)/g,normalized)]);
-const routes=[...server.matchAll(/app\.(get|post|put|delete)\('([^']+)'/g)].map(x=>`${x[1].toUpperCase()} ${x[2]}`);
+const routes=[...server.matchAll(/app\.(get|post|put|delete|all)\('([^']+)'/g)].map(x=>`${x[1].toUpperCase()} ${x[2]}`);
 const menuActions=[...new Set(collect(/data-ma=\\?"([^"\\]+)/g,dashboard))].sort();
 const groups={
  profile:['profiles','load_profile','save_profile','delete_profile','all_profiles'],extraction:['test_selector','suggest_selectors','suggest_detail_selectors','gallery_test','gallery_suggest','detail_stream','extract_stop','extract_report','extract_queue_status'],

@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-08-19T00:37:00.982Z",
+  "generatedAt": "2026-08-19T00:42:55.432Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 72,
+    "routes": 73,
     "menuActions": 52
   },
   "routes": [
@@ -80,7 +80,8 @@
     "POST /api/profiles/:id/import",
     "POST /api/gallery-suggest",
     "POST /api/test-selector",
-    "POST /api/import-php"
+    "POST /api/import-php",
+    "ALL /scraper4.php"
   ],
   "menuActions": [
     "ai-leaderboard",

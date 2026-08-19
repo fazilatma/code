@@ -1,5 +1,12 @@
 # Render TypeScript changelog
 
+## 2.0.0 — 2026-08-19
+
+- Added authenticated `/scraper4.php` compatibility endpoint for legacy query and form clients.
+- Mapped legacy profile, queue, cron, backup, Basalam, AI, autoreply, digest, recon, photo, suffix, selector and image-proxy operations.
+- Legacy operations not yet mapped now return explicit HTTP 501 instead of silently succeeding.
+- Preserved bearer/API-token protection and database readiness checks for compatibility calls.
+
 ## 1.9.0 — 2026-08-19
 
 - Added native XLSX import/export with styled worksheets.
