@@ -31,8 +31,8 @@ export async function processOneJob(): Promise<boolean> {
           catch (error) { job.failed++; append(job, `${product.title}: ${message(error)}`, 'error'); }
         });
         job.phase = 'save'; await save(job);
-        for (const product of products) { const result = await upsertProduct(profile.id, product); result === 'added' ? job.added++ : job.updated++; }
-        const retired=await markMissingProducts(profile.id,products.map(p=>p.sourceKey));if(retired)append(job,`${retired} محصول دیگر در مبدأ دیده نشد`,'warning');
+        let unchanged=0;for(const product of products){const result=await upsertProduct(profile.id,product,job.id);if(result==='added')job.added++;else if(result==='updated')job.updated++;else unchanged++}if(unchanged)append(job,`${unchanged} محصول بدون تغییر بود`);
+        const retired=await markMissingProducts(profile.id,products.map(p=>p.sourceKey),job.id);if(retired)append(job,`${retired} محصول دیگر در مبدأ دیده نشد`,'warning');
         await markProfileRun(profile.id);
         if (job.target !== 'none') await runSync(job, profile, products);
       }

@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.10.0 — 2026-08-19
+
+- Added a transactional product change ledger for add/update/remove events.
+- Added field-level diffs while ignoring non-business timestamps.
+- Fixed extraction counters so unchanged products are no longer reported as updated.
+- Added detailed per-job reports, recent report summaries and Legacy `extract_report` mapping.
+- Included change history in full backups and restore.
+
 ## 2.9.0 — 2026-08-19
 
 - Added all PHP pagination modes: query page/custom, path pattern, full URL pattern and next selector.
