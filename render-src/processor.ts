@@ -32,9 +32,7 @@ export async function processOneJob(): Promise<boolean> {
         await markProfileRun(profile.id);
         if (job.target !== 'none') await runSync(job, profile, products);
       }
-    } else {
-      await runSync(job, profile, await allProducts(profile.id));
-    }
+    }else{let products=await allProducts(profile.id);const keys=Array.isArray(job.payload?.keys)?new Set(job.payload.keys):null;if(keys?.size)products=products.filter(product=>keys.has(product.sourceKey));await runSync(job,profile,products)}
     if (job.status !== 'stopped') job.status = 'done';
     append(job, job.status === 'done' ? 'عملیات با موفقیت تمام شد' : 'عملیات متوقف شد');
   }catch(error){job.error=message(error);append(job,job.error,'error');const stopped=await stopRequested(job.id);if(!stopped&&job.attempts<job.maxAttempts&&retryable(job.error)){const delay=Math.min(30*60_000,30_000*Math.pow(2,Math.max(0,job.attempts-1)));job.status='queued';job.phase='retry_wait';job.availableAt=new Date(Date.now()+delay).toISOString();append(job,`تلاش مجدد ${job.attempts+1}/${job.maxAttempts} بعد از ${Math.round(delay/1000)} ثانیه`,'warning');await save(job);return true}job.status=stopped?'stopped':'failed'}

@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-08-19T02:46:02.686Z",
+  "generatedAt": "2026-08-19T02:56:38.031Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 101,
+    "routes": 103,
     "menuActions": 72
   },
   "routes": [
@@ -99,6 +99,8 @@
     "DELETE /api/jobs/:id",
     "DELETE /api/jobs",
     "GET /api/profiles/:id/products",
+    "PUT /api/profiles/:id/products/:key",
+    "DELETE /api/profiles/:id/products/:key",
     "GET /api/profiles/:id/export.xlsx",
     "POST /api/profiles/:id/import.xlsx",
     "GET /api/profiles/:id/export.csv",

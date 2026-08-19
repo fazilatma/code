@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.13.0 — 2026-08-19
+
+- Added selected-product sync queues for WooCommerce, Basalam or both.
+- Added persistent job payloads and queued-key merging under profile dedup locks.
+- Added local product title/price/stock/image editing and guarded archival.
+- Added product-card selection, select-all and batch-send controls.
+- Added legacy queue-add/save-products mappings.
+
 ## 2.12.0 — 2026-08-19
 
 - Added advisory-lock queue deduplication per profile and job kind.

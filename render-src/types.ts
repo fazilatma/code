@@ -68,6 +68,7 @@ export type Job = {
   profileId: string;
   kind: 'scrape' | 'sync';
   target: 'none' | 'woo' | 'basalam' | 'both';
+  payload: { keys?: string[]; [key:string]: unknown };
   status: 'queued' | 'running' | 'done' | 'failed' | 'stopped';
   phase: string;
   total: number;
