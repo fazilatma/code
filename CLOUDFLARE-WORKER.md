@@ -77,10 +77,11 @@ Wrangler قفل‌شده در `package-lock.json` هنگام نخستین deploy
 
 وجود producer دوم `JOBS_DLQ` عمدی است: Wrangler ابتدا DLQ را می‌سازد و سپس consumer اصلی را با `dead_letter_queue` نصب می‌کند. برنامه لازم نیست روی این binding پیام عادی بفرستد.
 
-اسکریپت `scripts/deploy-cloudflare.mjs` دو مرحلهٔ غیرتعاملی دارد:
+اسکریپت `scripts/deploy-cloudflare.mjs` سه مرحلهٔ غیرتعاملی دارد:
 
 1. `wrangler deploy` با automatic provisioning؛
-2. اجرای تمام migrationهای pending روی binding خودکار `DB`.
+2. اجرای تمام migrationهای pending روی binding خودکار `DB`؛
+3. smoke واقعی روی URL عمومی production برای `/health`، `/api/version` و `/api/debug`؛ نسخه، D1 و Queue نیز اعتبارسنجی می‌شوند و build در صورت شکست smoke موفق اعلام نمی‌شود.
 
 همهٔ مراحل idempotent هستند. resourceها نام قطعی دارند اما ID حساب در Git ذخیره نمی‌شود؛ بنابراین حتی اگر deploy پس از ساخت یک resource قطع شود، retry همان resource را با نام پیدا و متصل می‌کند و نمونهٔ تکراری نمی‌سازد. deployهای بعدی نیز فقط migrationهای جدید را اعمال می‌کنند. علاوه بر آن، `ensureSchema()` در شروع هر isolate تمام دستورهای `CREATE ... IF NOT EXISTS` را یک‌بار اجرا می‌کند تا database تازه یا نیمه‌کاره نیز خودکار ترمیم شود.
 
