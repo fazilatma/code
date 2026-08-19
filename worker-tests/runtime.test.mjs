@@ -44,6 +44,8 @@ test('production bundle has no Node-only runtime imports',async()=>{
   const bundle=await readFile(new URL('../scraper4.worker.js',import.meta.url),'utf8');
   assert.doesNotMatch(bundle,/from\s+["'](?:node:|pg|undici|cheerio)/);
   assert.doesNotMatch(bundle,/\brequire\s*\(/);
+  assert.doesNotMatch(bundle,/wrangler secret put/);
+  assert.match(bundle,/Variables and Secrets/);
   assert.match(bundle,/queue\(batch/);
   assert.match(bundle,/scheduled\(/);
 });

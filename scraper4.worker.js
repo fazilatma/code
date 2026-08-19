@@ -2701,7 +2701,7 @@ var emptyConnections = () => ({
 });
 function password() {
   const env = getEnv(), secret2 = env.VAULT_SECRET || env.ADMIN_TOKEN;
-  if (!secret2) throw new Error("\u0628\u0631\u0627\u06CC \u0630\u062E\u06CC\u0631\u0647 \u0627\u0645\u0646 \u0627\u0637\u0644\u0627\u0639\u0627\u062A \u0627\u062A\u0635\u0627\u0644\u060C VAULT_SECRET \u06CC\u0627 ADMIN_TOKEN \u0631\u0627 \u0628\u0627 wrangler secret put \u062A\u0639\u0631\u06CC\u0641 \u06A9\u0646\u06CC\u062F.");
+  if (!secret2) throw new Error("\u0628\u0631\u0627\u06CC \u0630\u062E\u06CC\u0631\u0647 \u0627\u0645\u0646 \u0627\u0637\u0644\u0627\u0639\u0627\u062A \u0627\u062A\u0635\u0627\u0644\u060C VAULT_SECRET \u0648 ADMIN_TOKEN \u0631\u0627 \u062F\u0631 Cloudflare Dashboard \u2190 Settings \u2190 Variables and Secrets \u0628\u0647\u200C\u0635\u0648\u0631\u062A Secret \u062A\u0639\u0631\u06CC\u0641 \u06A9\u0646\u06CC\u062F.");
   return secret2;
 }
 var source = (value) => Uint8Array.from(value).buffer;
@@ -4192,7 +4192,7 @@ app.get("/visual", async (c) => {
 app.use("/api/*", async (c, next) => {
   if (!c.env.DB) return c.json({ ok: false, error: "D1 binding DB is not configured" }, 503);
   const token = c.env.ADMIN_TOKEN || "";
-  if (!token && c.env.ALLOW_INSECURE !== "true") return c.json({ ok: false, error: "ADMIN_TOKEN is not configured; run wrangler secret put ADMIN_TOKEN" }, 503);
+  if (!token && c.env.ALLOW_INSECURE !== "true") return c.json({ ok: false, error: "ADMIN_TOKEN is not configured. Add it as an encrypted Secret in Cloudflare Dashboard \u2192 Worker \u2192 Settings \u2192 Variables and Secrets, then deploy the change." }, 503);
   const supplied = (c.req.header("authorization") || "").replace(/^Bearer\s+/i, "");
   if (token && !safeEqual(supplied, token)) return c.json({ ok: false, error: "Unauthorized" }, 401);
   await ensureSchema(c.env.DB);

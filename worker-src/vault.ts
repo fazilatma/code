@@ -15,7 +15,7 @@ export const emptyConnections=():ConnectionVault=>({
   ai:{baseUrl:'',apiKey:'',model:'',providers:[],candidates:[],master:'',network:{mode:'direct',proxyUrl:'',workerUrl:'',dohUrl:'https://cloudflare-dns.com/dns-query',resolveIp:''}},
   notifications:{url:'',token:'',chatId:'',baleToken:'',baleChatId:'',rubikaToken:'',rubikaChatId:''}
 });
-function password():string{const env=getEnv(),secret=env.VAULT_SECRET||env.ADMIN_TOKEN;if(!secret)throw new Error('برای ذخیره امن اطلاعات اتصال، VAULT_SECRET یا ADMIN_TOKEN را با wrangler secret put تعریف کنید.');return secret;}
+function password():string{const env=getEnv(),secret=env.VAULT_SECRET||env.ADMIN_TOKEN;if(!secret)throw new Error('برای ذخیره امن اطلاعات اتصال، VAULT_SECRET و ADMIN_TOKEN را در Cloudflare Dashboard ← Settings ← Variables and Secrets به‌صورت Secret تعریف کنید.');return secret;}
 const source=(value:Uint8Array):ArrayBuffer=>Uint8Array.from(value).buffer;
 async function key(salt:Uint8Array,usage:KeyUsage[]):Promise<CryptoKey>{const material=await crypto.subtle.importKey('raw',textEncoder.encode(password()),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',hash:'SHA-256',salt:source(salt),iterations:120_000},material,{name:'AES-GCM',length:256},false,usage);}
 export async function encryptVault(value:ConnectionVault):Promise<Envelope>{const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12)),ciphertext=await crypto.subtle.encrypt({name:'AES-GCM',iv},await key(salt,['encrypt']),textEncoder.encode(JSON.stringify(value)));return{version:2,salt:bytesToBase64(salt),iv:bytesToBase64(iv),ciphertext:bytesToBase64(new Uint8Array(ciphertext))};}
