@@ -40,6 +40,9 @@ export type Env = {
   WORKER_VERSION?: string;
 };
 
+export const MIN_SECRET_LENGTH = 8;
+export function validSecret(value: string | undefined): value is string { return typeof value === 'string' && value.length >= MIN_SECRET_LENGTH; }
+
 let current: Env | undefined;
 export function configureEnv(env: Env): void { current = env; }
 export function getEnv(): Env {

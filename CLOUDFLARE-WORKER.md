@@ -84,8 +84,8 @@ Wrangler قفل‌شده در `package-lock.json` هنگام نخستین deploy
 
 1. Worker `scraper4-cloudflare` را باز کنید.
 2. به **Settings → Variables and Secrets** بروید.
-3. `ADMIN_TOKEN` را به‌صورت **Secret** و با یک مقدار طولانی و تصادفی اضافه کنید.
-4. `VAULT_SECRET` را نیز به‌صورت **Secret** و با مقداری مستقل، طولانی و تصادفی اضافه کنید.
+3. `ADMIN_TOKEN` را به‌صورت **Secret** و با یک مقدار تصادفی حداقل ۸ کاراکتری اضافه کنید.
+4. `VAULT_SECRET` را نیز به‌صورت **Secret** و با مقداری مستقل و حداقل ۸ کاراکتری اضافه کنید.
 5. تغییرات را Save/Deploy کنید و URL `workers.dev` را باز کنید.
 
 `ADMIN_TOKEN` اجباری و کلید ورود API است. `VAULT_SECRET` کلید ترجیحی vault است و پس از ذخیرهٔ اتصال‌ها نباید تغییر کند. اگر تعریف نشود، برنامه برای سازگاری از `ADMIN_TOKEN` استفاده می‌کند؛ در این حالت چرخاندن token بدون export/import مجدد اتصال‌ها ممکن نیست. برای restore یک backup روی استقرار دیگر نیز همان `VAULT_SECRET` لازم است.

@@ -21,14 +21,21 @@ test('health endpoint exposes Worker runtime without secrets',async()=>{
 test('dashboard assets are served with security headers',async()=>{
   const page=await request('/');
   assert.equal(page.status,200);
-  assert.match(await page.text(),/اسکرپر ووکامرس و باسلام/);
+  const html=await page.text();
+  assert.match(html,/اسکرپر ووکامرس و باسلام/);
+  assert.match(html,/id="token"[^>]*minlength="8"/);
   assert.match(page.headers.get('content-security-policy')||'',/default-src 'self'/);
   const script=await request('/dashboard.js');
   assert.equal(script.status,200);
   assert.match(script.headers.get('content-type')||'',/javascript/);
 });
 
-test('API requires constant-time bearer authentication',async()=>{
+test('API requires constant-time bearer authentication with an eight-character minimum',async()=>{
+  const tooShort=await worker.fetch(new Request('https://worker.test/api/parity',{headers:{authorization:'Bearer 1234567'}}),{DB:db,ADMIN_TOKEN:'1234567'},ctx);
+  assert.equal(tooShort.status,503);
+  assert.match((await tooShort.json()).error,/8 characters/);
+  const minimum=await worker.fetch(new Request('https://worker.test/api/parity',{headers:{authorization:'Bearer 12345678'}}),{DB:db,ADMIN_TOKEN:'12345678'},ctx);
+  assert.equal(minimum.status,200);
   const missing=await worker.fetch(new Request('https://worker.test/api/parity'),{DB:db,ADMIN_TOKEN:'test-secret'},ctx);
   assert.equal(missing.status,401);
   const wrong=await worker.fetch(new Request('https://worker.test/api/parity',{headers:{authorization:'Bearer wrong'}}),{DB:db,ADMIN_TOKEN:'test-secret'},ctx);
