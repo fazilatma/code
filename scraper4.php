@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.80';
+const APP_VERSION = '9.81';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1869,25 +1869,25 @@ function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false): arr
 $url=bslApiBase().ltrim($ep,'/');
 $net = function_exists('bslNetCfg') ? bslNetCfg() : ['indirect'=>false,'mode'=>'direct','fallback'=>false];
 
-// ترتیب روش‌ها: عادی مستقیم؛ اگر «اتصال غیرمستقیم» روشن باشد، اول روشِ تنظیم‌شده،
-// بعد روش‌های جایگزینِ فعال (DoH، IP دستی، پروکسی، Worker) و در نهایت مستقیم.
+// ترتیب روش‌ها: عادی مستقیم؛ اگر «اتصال غیرمستقیم» روشن باشد، اول روشِ تنظیم‌شده
+// (مثل worker/proxy)، بعد هر روشِ جایگزینِ پرشدهٔ دیگر و در نهایت مستقیم.
+// ⚠️ v9.81: قبلاً اگر روشِ اصلیِ src_net «direct» بود و فقط worker/proxy پر شده
+// بود، هیچ روشِ غیرمستقیمی اضافه نمی‌شد و ترافیک باز هم مستقیم می‌رفت. حالا
+// هروقت تیک روشن باشد، همهٔ روش‌هایِ غیرمستقیمِ پرشده امتحان می‌شوند.
 $modes = ['direct'];
 if (!empty($net['indirect'])) {
+    $modes = [];
     $primary = (string)$net['mode'];
-    if ($primary !== 'direct') {
-        $modes = [$primary];
-        if (!empty($net['fallback'])) {
-            foreach (['doh','dns','proxy','worker'] as $mm) {
-                if (in_array($mm, $modes, true)) continue;
-                if ($mm === 'dns'    && trim((string)($net['resolve_ip'] ?? '')) === '') continue;
-                if ($mm === 'doh'    && trim((string)($net['doh_url'] ?? '')) === '') continue;
-                if ($mm === 'proxy'  && trim((string)($net['proxy'] ?? '')) === '') continue;
-                if ($mm === 'worker' && trim((string)($net['worker_url'] ?? '')) === '') continue;
-                $modes[] = $mm;
-            }
-        }
-        $modes[] = 'direct';
+    if ($primary !== 'direct') $modes[] = $primary;   // روشِ اصلیِ اتصالِ غیرمستقیم
+    foreach (['doh','dns','proxy','worker'] as $mm) {  // و بقیهٔ روش‌های پرشده
+        if (in_array($mm, $modes, true)) continue;
+        if ($mm === 'dns'    && trim((string)($net['resolve_ip'] ?? '')) === '') continue;
+        if ($mm === 'doh'    && trim((string)($net['doh_url'] ?? '')) === '') continue;
+        if ($mm === 'proxy'  && trim((string)($net['proxy'] ?? '')) === '') continue;
+        if ($mm === 'worker' && trim((string)($net['worker_url'] ?? '')) === '') continue;
+        $modes[] = $mm;
     }
+    $modes[] = 'direct';   // در نهایت یک بار مستقیم
 }
 
 $maxRetries=3;$retryDelay=3;
@@ -12670,6 +12670,14 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'function bslReq' . 'Mode(') !== false
          && strpos($selfSrc, 'bslReqMode($url,$tk,$m,$d,$mp,$net,$mode)') !== false);
 
+    /* ---------- v9.81: رفعِ مسیرِ اتصال غیرمستقیمِ باسلام + دکمهٔ تست مسیر ---------- */
+    $add('9.81', 'وقتی تیک روشن باشد حتی اگر روشِ اصلی direct است، روش‌هایِ پر شده امتحان می‌شوند',
+         strpos($selfSrc, "if (\$primary !== 'direct') \$modes[] = \$primary;") !== false
+         && strpos($selfSrc, "foreach(['doh','dns','proxy','worker'] as \$mm)") !== false);
+    $add('9.81', 'دکمهٔ «تست مسیر» در بخشِ باسلام و پاپ‌آپِ نمایشِ آدرسِ ساخته‌شده وجود دارد',
+         strpos($selfSrc, 'onclick="bslTest' . 'Indirect()"') !== false
+         && strpos($selfSrc, "'bsl_test_ind' . 'irect'") !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -17131,6 +17139,61 @@ elseif($r['code']===0)$errMsg='خطا ارتباط با سرور باسلام';
 elseif(!empty($r['body']['detail']))$errMsg=mb_substr($r['body']['detail'],0,200);
 echo json_encode(['ok'=>false,'error'=>$errMsg,'http_code'=>$r['code'],'detail'=>$r['body']['detail']??($r['raw']??'')], JSON_UNESCAPED_UNICODE);
 }
+exit;
+}
+
+/* v9.81: «تستِ مسیرِ اتصال» باسلام — همان ترتیبی که bslReq با تیکِ «اتصال
+   غیرمستقیم» استفاده می‌کند را واقعاً اجرا و آدرسِ ساخته‌شدهٔ هر روش (مثلاً
+   آدرسِ Cloudflare Worker) را برمی‌گرداند تا در پاپ‌آپ دیده شود و معلوم شود
+   ترافیک واقعاً از کدام روش رفته است. */
+if (($_POST['action'] ?? '') === 'bsl_test_indirect') {
+header('Content-Type: application/json; charset=UTF-8');
+$cn=loadConnections();
+$tk=trim($_POST['token']??($cn['basalam']['token']??''));
+$net = function_exists('bslNetCfg') ? bslNetCfg($cn) : ['indirect'=>false,'mode'=>'direct','worker_url'=>'','proxy'=>'','resolve_ip'=>'','doh_url'=>'','proxy_type'=>'http','proxy_auth'=>'','ipv4'=>false];
+$url=bslApiBase().'users/me';
+
+// همان منطقِ bslReq — ترتیب روش‌ها
+$modes=['direct'];
+if(!empty($net['indirect'])){
+    $modes=[];
+    $primary=(string)($net['mode']??'direct');
+    if($primary!=='direct')$modes[]=$primary;
+    foreach(['doh','dns','proxy','worker'] as $mm){
+        if(in_array($mm,$modes,true))continue;
+        if($mm==='dns'   && trim((string)($net['resolve_ip']??''))==='')continue;
+        if($mm==='doh'   && trim((string)($net['doh_url']??''))==='')continue;
+        if($mm==='proxy' && trim((string)($net['proxy']??''))==='')continue;
+        if($mm==='worker'&& trim((string)($net['worker_url']??''))==='')continue;
+        $modes[]=$mm;
+    }
+    $modes[]='direct';
+}
+
+$attempts=[];$result=null;
+foreach($modes as $mode){
+    // آدرسِ ساخته‌شده برای نمایش (Worker → الحاقِ آدرس به worker)
+    $display=$url;
+    if($mode==='worker' && trim((string)($net['worker_url']??''))!==''){
+        $w=rtrim((string)$net['worker_url'],'/');
+        $display=(strpos($w,'{url}')!==false)?str_replace('{url}',rawurlencode($url),$w):$w.'/'.ltrim($url,'/');
+    }
+    $r=bslReqMode($url,$tk,'GET','',false,$net,$mode);
+    $attempts[]=['mode'=>$mode,'code'=>$r['code'],'url'=>$display,'ok'=>!empty($r['ok']),'error'=>$r['error']];
+    if(!empty($r['ok'])){ $result=['mode'=>$mode,'code'=>$r['code'],'url'=>$display,'ok'=>true]; break; }
+    // خطای منطقی غیر از 403/429 یعنی شبکه سالم است؛ روشِ بعدی فایده‌ای ندارد
+    if($r['code']>0 && !in_array($r['code'],[403,429],true)){ $result=['mode'=>$mode,'code'=>$r['code'],'url'=>$display,'ok'=>false,'error'=>$r['error']]; break; }
+}
+echo json_encode([
+    'ok'=>!empty($result['ok']),
+    'indirect'=>!empty($net['indirect']),
+    'primary_mode'=>(string)($net['mode']??'direct'),
+    'worker_url'=>(string)($net['worker_url']??''),
+    'proxy'=>(string)($net['proxy']??''),
+    'base'=>$url,
+    'attempts'=>$attempts,
+    'result'=>$result,
+], JSON_UNESCAPED_UNICODE);
 exit;
 }
 
@@ -22486,7 +22549,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <div style="font-size:10px;color:#64748b;margin-bottom:8px">غرفه پیش‌فرض (فوقانی) همان تنظیمات توکن/غرفه بالاست. غرفه‌های اضافی در ارسال همزمان استفاده می‌شوند.</div>
 <div id="bslVendorsList" style="display:flex;flex-direction:column;gap:6px"></div>
 </div>
-<div class="cact"><button class="btn btn-cyan" onclick="testBsl()">🔗 تست</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
+<div class="cact"><button class="btn btn-cyan" onclick="testBsl()">🔗 تست</button><button class="btn btn-blue" id="bslTestIndBtn" onclick="bslTestIndirect()" title="نمایش آدرسِ ساخته‌شده با کلودفلر/پروکسی و امتحان واقعیِ مسیر">🌐 تست مسیر</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div id="bsTR" style="margin-top:8px"></div>
 </div></div>
 
@@ -27153,6 +27216,13 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.81', t:'🐞 رفعِ مسیرِ اتصالِ غیرمستقیمِ باسلام + دکمهٔ «تست مسیر» با نمایش آدرسِ کلودفلر', items:[
+    'گزارش شما: با زدنِ تیکِ «اتصال غیرمستقیم»، ترافیکِ تنظیماتِ غرفهٔ باسلام باز', 'هم از مسیرِ مستقیم می‌رفت. بررسی شد و ریشه پیدا شد.',
+    '🐞 ریشه: وقتی روشِ اصلیِ اتصالِ «سایت مبدأ» مقدارِ direct بود و فقط پروکسی/',
+    'Worker/DoH پر شده بود، کد هیچ روشِ غیرمستقیمی را به فهرستِ امتحان اضافه', 'نمی‌کرد و در عمل ترافیک باز هم مستقیم می‌رفت.',
+    '✅ حالا هروقت تیکِ «اتصال غیرمستقیم» روشن باشد، همهٔ روش‌هایِ غیرمستقیمِ', 'پرشده (پروکسی، Worker، DoH، IP دستی) به‌ترتیب امتحان می‌شوند و در نهایت', 'یک بار مستقیم.',
+    'خواستهٔ دوم: یک دکمهٔ «تست» که آدرسِ درست‌شده با کلودفلر (Worker) را به', 'صورتِ پاپ‌آپ نشان دهد.',
+    '✅ دکمهٔ «🌐 تست مسیر» در بخشِ باسلامِ منوی همبرگری اضافه شد.', '✅ با کلیک، همان ترتیبی که bslReq استفاده می‌کند واقعاً اجرا می‌شود و در', 'پاپ‌آپ، وضعیتِ هر روش (موفق/ناموفق)، کدِ HTTP و آدرسِ دقیقِ ساخته‌شده', '(مثلاً آدرسِ Worker) را نشان می‌دهد تا معلوم شود ترافیک از کدام روش رفته.'],},
   {v:'9.80', t:'🌐 تیکِ «اتصال غیرمستقیم» برای باسلام — تبادل از روش‌های غیرمستقیم', items:[
     'گزارش شما: باسلام هم IP هاست را بلاک کرده؛ خواستید یک تیک در بخشِ باسلامِ', 'منوی همبرگری بگذاریم تا با فعال‌شدنش، تبادل پیام با باسلام از روش‌هایِ', 'اتصالِ غیرمستقیم انجام شود.',
     '✅ در منوی همبرگری ← «🏪 باسلام» یک تیکِ «اتصال غیرمستقیم» اضافه شد.', '✅ وقتی روشن باشد، همهٔ درخواست‌های باسلام (دریافت محصولات، ارسال، تست،', 'چت/پیام، وضعیت و...) اول از روشِ اتصالِ غیرمستقیمِ تنظیم‌شده در بخشِ', '«اتصال به سایت مبدأ» (پروکسی، Worker، DoH، IP دستی) رد می‌شوند.', '✅ اگر روشِ اصلی جواب نداد، روش‌هایِ فعالِ دیگر هم امتحان می‌شوند و در', 'نهایت یک بار مستقیم؛ در اولینِ موفق برمی‌گردد.', '✅ خطاهایِ منطقی (مثل ۴۰۱/۴۰۴) دیگرِ روش‌ها را امتحان نمی‌کند (بی‌فایده', 'است) ولی بلاکِ ۴۰۳/۴۲۹ و قطعِ شبکه باعث می‌شود روشِ بعدی امتحان شود.'],},
@@ -31993,6 +32063,52 @@ r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:
 if(d.http_code===403||d.http_code===401){showBslVendorModal(d);}
 }
 }).catch(()=>{s.textContent='\u2717';s.className='cst off';});}
+/* v9.81: «تستِ مسیرِ اتصال» باسلام — امتحانِ واقعیِ همان ترتیبی که با تیکِ
+   «اتصال غیرمستقیم» استفاده می‌شود و نمایشِ آدرسِ ساخته‌شده (مثلاً کلودفلر
+   Worker) در یک پاپ‌آپ تا معلوم شود ترافیک از کدام روش رفته است. */
+function bslTestIndirect(){
+  const btn=document.getElementById('bslTestIndBtn');
+  if(btn){btn.disabled=true;btn.textContent='⏳...';}
+  const fd=new FormData();
+  fd.append('action','bsl_test_indirect');
+  fd.append('token',$('bsTk').value.trim());
+  fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    if(btn){btn.disabled=false;btn.textContent='🌐 تست مسیر';}
+    let modal=document.getElementById('bslIndModal');if(modal)modal.remove();
+    modal=document.createElement('div');modal.id='bslIndModal';
+    const on=!!d.indirect;
+    const res=d.result||{};
+    const ok=!!res.ok;
+    const stColor=ok?'#4ade80':'#f87171';
+    let rows='';
+    (d.attempts||[]).forEach(a=>{
+      const ic=a.ok?'✅':(a.code>=400?'⛔':'❌');
+      rows+='<div style="padding:7px 10px;border-bottom:1px solid #1e293b;direction:rtl">'
+        +'<div><b style="color:#67e8f9">'+ic+' روش «'+esc(a.mode||'')+'</b> <span style="color:#94a3b8">(HTTP '+toFa(a.code||0)+')</span></div>'
+        +'<div style="font-size:10px;color:#64748b;direction:ltr;text-align:left;word-break:break-all;margin-top:3px">'+esc(a.url||'')+'</div>'
+        +(a.error?'<div style="font-size:10px;color:#f87171">'+esc(a.error)+'</div>':'')
+        +'</div>';
+    });
+    if(!rows)rows='<div style="color:#64748b;padding:8px">روشی ثبت نشد</div>';
+    const modeLabel={'direct':'مستقیم','doh':'DoH','dns':'IP دستی','proxy':'پروکسی','worker':'کلودفلر Worker'};
+    modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)this.parentElement.remove()"><div class="bsl-modal" style="width:640px">'
+      +'<div class="bsl-modal-head"><h2>🌐 تست مسیر اتصال باسلام</h2><button class="btn btn-gray" onclick="this.closest(\'#bslIndModal\').remove()">✕</button></div>'
+      +'<div class="bsl-modal-body" style="padding:12px;font-size:11px;max-height:70vh;overflow:auto">'
+      +'<div style="padding:10px;border-radius:8px;background:#111c31;border:1px solid '+stColor+';margin-bottom:10px;direction:rtl">'
+      +'<div style="font-weight:700;color:'+stColor+';font-size:13px">'+(ok?'✅ مسیر موفق شد':'❌ هیچ روشی موفق نشد')+'</div>'
+      +'<div style="color:#94a3b8;margin-top:4px">تیکِ «اتصال غیرمستقیم»: '+(on?'<b style="color:#22c55e">روشن</b>':'<b style="color:#f87171">خاموش</b>')+' · روش اصلی: «'+esc(modeLabel[d.primary_mode||'direct']||d.primary_mode||'direct')+'»</div>'
+      +(res.mode?'<div style="color:#67e8f9;margin-top:4px">روشِ موفق: «'+esc(modeLabel[res.mode]||res.mode)+'» · HTTP '+toFa(res.code||0)+'</div>':'')
+      +(d.worker_url?'<div style="font-size:10px;color:#64748b;margin-top:4px;word-break:break-all;direction:ltr;text-align:left">Worker: '+esc(d.worker_url)+'</div>':'')
+      +'</div>'
+      +'<div style="color:#94a3b8;margin-bottom:6px;direction:rtl">آدرس‌هایی که واقعاً تلاش شد (به‌ترتیب):</div>'
+      +rows
+      +'</div></div></div>';
+    document.body.appendChild(modal);
+  }).catch(()=>{
+    if(btn){btn.disabled=false;btn.textContent='🌐 تست مسیر';}
+    showToast('❌ خطا شبکه',1);
+  });
+}
 function showBslVendorModal(d){
 let html='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslVendorModal()">';
 html+='<div class="bsl-modal" style="max-width:600px">';
