@@ -1,5 +1,12 @@
 # Render TypeScript changelog
 
+## 2.20.0 — 2026-08-19
+
+- Replaced the menu-only parity claim with a full-source PHP/TypeScript audit.
+- Added exact Legacy, adapted-route and missing classifications for GET and POST contracts.
+- Added a comprehensive subsystem matrix, known bug/risk register and explicit completion criteria.
+- Documented 33 remaining GET contracts and all architecture-dependent differences.
+
 ## 2.19.1 — 2026-08-19
 
 - Reorganized destination management into sticky target/status/view controls.

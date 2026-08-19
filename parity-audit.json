@@ -1,13 +1,820 @@
 {
-  "generatedAt": "2026-08-19T05:13:38.212Z",
-  "php": {
-    "getConditions": 150,
-    "postActions": 28
+  "generatedAt": "2026-08-19T05:21:25.202Z",
+  "summary": {
+    "phpGetConditions": 150,
+    "phpPostActions": 28,
+    "relevantGet": 132,
+    "getCovered": 99,
+    "getMissing": 33,
+    "postCovered": 28,
+    "postMissing": 0,
+    "typescriptRoutes": 109,
+    "uiActions": 79
   },
-  "typescript": {
-    "routes": 109,
-    "menuActions": 79
-  },
+  "get": [
+    {
+      "name": "ai_candidates",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ai_candidates_category",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ai_candidates_reply",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ai_category",
+      "status": "adapted-route",
+      "route": "/api/ai/category-recommend"
+    },
+    {
+      "name": "ai_probe",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ai_providers_status",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ai_test_all",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ai_test_start",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ai_test_status",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ai_test_stop",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "all_profiles",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ar_chat",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "ar_log",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ar_rules",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ar_run",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "ar_test",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "backup_download",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "backup_export",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "backup_peek",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "backup_remote_list",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "backup_run",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "backup_status",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "basalam_stream",
+      "status": "adapted-route",
+      "route": "/api/jobs/:id/events"
+    },
+    {
+      "name": "bsl_activate_batch",
+      "status": "adapted-route",
+      "route": "/api/destination/:target/batch"
+    },
+    {
+      "name": "bsl_ai_category",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_change_status",
+      "status": "adapted-route",
+      "route": "/api/destination/:target/:id/status"
+    },
+    {
+      "name": "bsl_chats_list",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_clear_temp",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_client_stream",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_delete_batch",
+      "status": "adapted-route",
+      "route": "/api/destination/:target/batch"
+    },
+    {
+      "name": "bsl_delete_product",
+      "status": "adapted-route",
+      "route": "/api/destination/:target/:id"
+    },
+    {
+      "name": "bsl_download_ai_texts",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_find_duplicates",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_fix_ai_cat",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_fix_ai_cat_batch",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_fix_cat",
+      "status": "adapted-route",
+      "route": "/api/destination/basalam/:id/fix-category"
+    },
+    {
+      "name": "bsl_master_fix",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_notify_selected",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_orders_list",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_products",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_queue_add",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_queue_cancel",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_queue_clear_done",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_queue_delete",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_queue_detail",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_queue_get_products",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_queue_mark_done",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_queue_pause",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_queue_restart_server",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_queue_resume",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_queue_save_products",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_queue_start_next",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_queue_start_server",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_queue_status",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_queue_update_progress",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_rejected_cats",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_save_products",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "bsl_send_one",
+      "status": "adapted-route",
+      "route": "/api/products/:profileId/:sourceKey/sync/:target"
+    },
+    {
+      "name": "bsl_status_overview",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bsl_stop",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "bulk_edit",
+      "status": "adapted-route",
+      "route": "/api/maintenance/bulk/:target"
+    },
+    {
+      "name": "bulk_result",
+      "status": "adapted-route",
+      "route": "/api/changes"
+    },
+    {
+      "name": "bulk_status",
+      "status": "adapted-route",
+      "route": "/api/jobs/:id"
+    },
+    {
+      "name": "catlearn",
+      "status": "adapted-route",
+      "route": "/api/category-learning"
+    },
+    {
+      "name": "catlearn_bulk",
+      "status": "adapted-route",
+      "route": "/api/category-learning/record"
+    },
+    {
+      "name": "cron_last",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "cron_run",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "dest_list",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "detailSelectors",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "detail_proxy",
+      "status": "adapted-route",
+      "route": "/visual"
+    },
+    {
+      "name": "detail_stream",
+      "status": "adapted-route",
+      "route": "/api/detail-selectors-test"
+    },
+    {
+      "name": "digest",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "extract_queue_clear_done",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "extract_queue_delete",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "extract_queue_status",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "extract_report",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "extract_stop",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "fetch_missing_stream",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "fix_price",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "fullpage_inspect",
+      "status": "adapted-route",
+      "route": "/visual"
+    },
+    {
+      "name": "gallery_suggest",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "gallery_test",
+      "status": "adapted-route",
+      "route": "/api/gallery-suggest"
+    },
+    {
+      "name": "image_proxy",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "load_profile",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "notif_test",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "photo_fix",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "photo_status",
+      "status": "adapted-route",
+      "route": "/api/jobs/:id"
+    },
+    {
+      "name": "poll_bsl",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "poll_extract",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "poll_woo",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "profiles",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "queue_watchdog",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "queues_overview",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "recon",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "recon_result",
+      "status": "adapted-route",
+      "route": "/api/maintenance/recon/:target"
+    },
+    {
+      "name": "recon_status",
+      "status": "adapted-route",
+      "route": "/api/jobs/:id"
+    },
+    {
+      "name": "remote_map",
+      "status": "adapted-route",
+      "route": "/api/profile-stats"
+    },
+    {
+      "name": "retire_run",
+      "status": "adapted-route",
+      "route": "/api/maintenance/retire/:target"
+    },
+    {
+      "name": "sec_check",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "selectors",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "selftest",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "src_probe",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "stream",
+      "status": "adapted-route",
+      "route": "/api/jobs/:id/events"
+    },
+    {
+      "name": "suffix_notify",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "suffix_report",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "suffix_result",
+      "status": "adapted-route",
+      "route": "/api/destination/:target/suffix-report"
+    },
+    {
+      "name": "suffix_status",
+      "status": "adapted-route",
+      "route": "/api/jobs/:id"
+    },
+    {
+      "name": "suggest_detail_selectors",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "suggest_selectors",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "sync",
+      "status": "adapted-route",
+      "route": "/api/profiles/:id/sync"
+    },
+    {
+      "name": "sync_status",
+      "status": "adapted-route",
+      "route": "/api/jobs/:id"
+    },
+    {
+      "name": "sync_stream",
+      "status": "adapted-route",
+      "route": "/api/jobs/:id/events"
+    },
+    {
+      "name": "test_selector",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "vc_branches",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "vc_check",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "vc_deploy_info",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "vc_files",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "vc_settings",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "visual_proxy",
+      "status": "adapted-route",
+      "route": "/visual"
+    },
+    {
+      "name": "whoami",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "woo_dedup_stream",
+      "status": "adapted-route",
+      "route": "/api/destination/woo/deduplicate"
+    },
+    {
+      "name": "woo_queue_add",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "woo_queue_cancel",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "woo_queue_clear_done",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "woo_queue_delete",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "woo_queue_save_products",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "woo_queue_start_next",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "woo_queue_start_server",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "woo_queue_status",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "woo_save_products",
+      "status": "missing",
+      "route": null
+    },
+    {
+      "name": "woo_stop",
+      "status": "legacy-compatible",
+      "route": "/scraper4.php"
+    },
+    {
+      "name": "woo_stream",
+      "status": "adapted-route",
+      "route": "/api/jobs/:id/events"
+    }
+  ],
+  "post": [
+    {
+      "name": "ai_candidates_save",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "ai_import_providers",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "ai_select",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "ai_test_one",
+      "status": "adapted-route",
+      "route": "/api/ai/call"
+    },
+    {
+      "name": "ai_toggle_provider",
+      "status": "adapted-route",
+      "route": "/api/connections"
+    },
+    {
+      "name": "ai_vote",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "ar_save_rules",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "backup_restore",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "backup_run",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "backup_save_cfg",
+      "status": "adapted-route",
+      "route": "/api/connections"
+    },
+    {
+      "name": "bsl_categories",
+      "status": "adapted-route",
+      "route": "/api/categories/basalam"
+    },
+    {
+      "name": "catlearn_import",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "cron_run",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "csv",
+      "status": "adapted-route",
+      "route": "/api/profiles/:id/export.csv"
+    },
+    {
+      "name": "delete_profile",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "excel",
+      "status": "adapted-route",
+      "route": "/api/profiles/:id/export.xlsx"
+    },
+    {
+      "name": "load_connections",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "process_import",
+      "status": "adapted-route",
+      "route": "/api/profiles/:id/import"
+    },
+    {
+      "name": "save_connections",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "save_profile",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "save_sync",
+      "status": "adapted-route",
+      "route": "/api/settings"
+    },
+    {
+      "name": "test_ai",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "test_basalam",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "test_notif",
+      "status": "adapted-route",
+      "route": "/api/notifications/test"
+    },
+    {
+      "name": "test_woo",
+      "status": "legacy-compatible",
+      "route": null
+    },
+    {
+      "name": "update_sync_state",
+      "status": "adapted-route",
+      "route": "/api/settings"
+    },
+    {
+      "name": "upload_import",
+      "status": "adapted-route",
+      "route": "/api/profiles/:id/import"
+    },
+    {
+      "name": "woo_categories",
+      "status": "adapted-route",
+      "route": "/api/categories/woo"
+    }
+  ],
   "routes": [
     "GET /health",
     "GET /",
@@ -200,116 +1007,42 @@
     "woo-dedup",
     "xlsx-export"
   ],
-  "featureGroups": {
-    "profile": {
-      "phpItems": [
-        "profiles",
-        "load_profile",
-        "save_profile",
-        "delete_profile",
-        "all_profiles"
-      ],
-      "coveredByDedicatedTsRoute": 1
-    },
-    "extraction": {
-      "phpItems": [
-        "test_selector",
-        "suggest_selectors",
-        "suggest_detail_selectors",
-        "gallery_test",
-        "gallery_suggest",
-        "detail_stream",
-        "extract_stop",
-        "extract_report",
-        "extract_queue_status"
-      ],
-      "coveredByDedicatedTsRoute": 2
-    },
-    "importExport": {
-      "phpItems": [
-        "csv",
-        "excel",
-        "upload_import",
-        "process_import",
-        "export"
-      ],
-      "coveredByDedicatedTsRoute": 2
-    },
-    "woo": {
-      "phpItems": [
-        "woo_categories",
-        "woo_stream",
-        "woo_dedup_stream",
-        "woo_queue_status",
-        "woo_stop"
-      ],
-      "coveredByDedicatedTsRoute": 0
-    },
-    "basalam": {
-      "phpItems": [
-        "bsl_products",
-        "bsl_categories",
-        "basalam_stream",
-        "bsl_send_one",
-        "bsl_change_status",
-        "bsl_delete_product",
-        "bsl_find_duplicates",
-        "bsl_fix_cat",
-        "bsl_ai_category",
-        "bsl_rejected_cats",
-        "bsl_orders_list",
-        "bsl_chats_list"
-      ],
-      "coveredByDedicatedTsRoute": 0
-    },
-    "ai": {
-      "phpItems": [
-        "ai_providers_status",
-        "ai_test_all",
-        "ai_test_start",
-        "ai_test_status",
-        "ai_test_stop",
-        "ai_candidates",
-        "ai_category",
-        "ai_probe"
-      ],
-      "coveredByDedicatedTsRoute": 0
-    },
-    "maintenance": {
-      "phpItems": [
-        "recon",
-        "recon_status",
-        "bulk_edit",
-        "photo_fix",
-        "retire_run",
-        "suffix_report",
-        "remote_map"
-      ],
-      "coveredByDedicatedTsRoute": 3
-    },
-    "automation": {
-      "phpItems": [
-        "ar_rules",
-        "ar_test",
-        "ar_run",
-        "ar_log",
-        "digest",
-        "notif_test",
-        "queue_watchdog"
-      ],
-      "coveredByDedicatedTsRoute": 2
-    },
-    "deployment": {
-      "phpItems": [
-        "backup_export",
-        "backup_restore",
-        "backup_status",
-        "vc_check",
-        "vc_files",
-        "vc_branches",
-        "selftest"
-      ],
-      "coveredByDedicatedTsRoute": 1
-    }
+  "missing": {
+    "get": [
+      "ar_chat",
+      "backup_peek",
+      "bsl_clear_temp",
+      "bsl_client_stream",
+      "bsl_download_ai_texts",
+      "bsl_queue_cancel",
+      "bsl_queue_clear_done",
+      "bsl_queue_delete",
+      "bsl_queue_detail",
+      "bsl_queue_get_products",
+      "bsl_queue_mark_done",
+      "bsl_queue_restart_server",
+      "bsl_queue_save_products",
+      "bsl_queue_start_server",
+      "bsl_queue_update_progress",
+      "bsl_save_products",
+      "dest_list",
+      "detailSelectors",
+      "extract_queue_clear_done",
+      "extract_queue_delete",
+      "fix_price",
+      "selectors",
+      "suffix_notify",
+      "vc_branches",
+      "vc_check",
+      "vc_deploy_info",
+      "vc_files",
+      "vc_settings",
+      "woo_queue_clear_done",
+      "woo_queue_delete",
+      "woo_queue_save_products",
+      "woo_queue_start_server",
+      "woo_save_products"
+    ],
+    "post": []
   }
 }
