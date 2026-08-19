@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.83';
+const APP_VERSION = '9.84';
 const APP_VERSION_DATE = '1405/05/28';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1890,6 +1890,12 @@ if (!empty($net['indirect'])) {
     }
 }
 
+// v9.84: سیگنال توقف تاریخ مصرف دارد.
+// باگ: bslReq فقط file_exists را نگاه می‌کرد، بدون هیچ بررسی سن. یک
+// فایل bsl_stop_signal.json که روزها پیش از یک «توقف ارسال» جا مانده
+// بود، برای همیشه همهٔ درخواست‌ها را قطع می‌کرد. هندلر bsl_backend از
+// v8.57 نگه‌داشتِ ۱۵ دقیقه‌ای (BSL_STOP_HOLD_SEC) را رعایت می‌کرد ولی
+// خودِ bslReq نه — پس «توقف» عملاً دائمی می‌شد.
 $maxRetries=3;$retryDelay=3;
 $last=['ok'=>false,'code'=>0,'error'=>'هیچ روشی اجرا نشد','body'=>null,'raw'=>''];
 foreach($modes as $mode){
@@ -1899,7 +1905,14 @@ for($attempt=1;$attempt<=$maxRetries;$attempt++){
 // v9.82: تست اتصال نباید به‌خاطر فایل توقفِ باقی‌مانده «stopped» بدهد
 if(!$skipStop){
 clearstatcache(true,BSL_STOP_FILE);
-if(file_exists(BSL_STOP_FILE)){return ['ok'=>false,'code'=>0,'error'=>'stopped','body'=>null,'raw'=>''];}
+if(file_exists(BSL_STOP_FILE)){
+// v9.84: فقط سیگنالِ تازه معتبر است. قدیمی‌تر از نگه‌داشت = جامانده،
+// پاکش کن و ادامه بده؛ وگرنه یک توقفِ هفتهٔ پیش تا ابد کار را می‌بندد.
+$stopAge=time()-(int)@filemtime(BSL_STOP_FILE);
+if($stopAge<=BSL_STOP_HOLD_SEC){return ['ok'=>false,'code'=>0,'error'=>'stopped','body'=>null,'raw'=>''];}
+@unlink(BSL_STOP_FILE);
+clearstatcache(true,BSL_STOP_FILE);
+}
 }
 $r=bslReqMode($url,$tk,$m,$d,$mp,$net,$mode);
 $last=$r;
@@ -12762,6 +12775,26 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'bslModalState.last' . 'Error=em;') !== false
          && strpos($selfSrc, 'دریافت محصولات از باسلام ناموفق بود') !== false);
 
+    /* ---------- v9.84: سیگنال توقفِ جامانده کل باسلام را نمی‌بندد ---------- */
+    $add('9.84', 'سیگنال توقف تاریخ مصرف دارد و کهنه‌اش نادیده گرفته می‌شود',
+         strpos($selfSrc, '$stopAge=time()-(int)@filemtime(BSL_STOP_FILE);' . "\n" . 'if($stopAge<=BSL_STOP_HOLD_SEC)') !== false);
+    $add('9.84', 'سیگنال توقفِ جامانده پاک می‌شود تا دفعهٔ بعد سریع رد شود',
+         preg_match('~if\(\$stopAge<=BSL_STOP_HOLD_SEC\)\{return[^\n]*\n@unlink\(BSL_STOP_FILE\);~', $selfSrc) === 1);
+    $add('9.84', 'خطای stopped پیام مخصوص خودش را دارد نه «ارتباط برقرار نشد»',
+         strpos($selfSrc, "(string)(\$r['error'] ?? '') === 'stop" . "ped'") !== false
+         && strpos($selfSrc, 'ارسال متوقف شده است؛ از «پاک‌سازی فایل‌های موقت» استفاده کنید') !== false);
+    $add('9.84', 'مودال سفارش‌ها فهرست را با bslReqRead می‌خواند',
+         strpos($selfSrc, "\$r = bslReq" . "Read(\$tk, \$ep);") !== false);
+    $add('9.84', 'تست سفارش‌ها با bslReqRead انجام می‌شود',
+         strpos($selfSrc, "bslReq" . "Read(\$tk, 'vendor-parcels?items.vendor_ids=' . \$vid . '&per_page=10')") !== false);
+    $add('9.84', 'تست پیام‌ها با bslReqRead انجام می‌شود',
+         strpos($selfSrc, "bslReq" . "Read(\$tk, 'chats?limit=10&order_by=updated_at')") !== false);
+    $add('9.84', 'تست محصولات با bslReqRead انجام می‌شود',
+         strpos($selfSrc, "bslReq" . "Read(\$tk, 'vendors/' . \$vid . '/products?per_page=10&statuses=2976") !== false);
+    $add('9.84', 'شناسهٔ کاربر و متن پیام‌ها هم با bslReqRead خوانده می‌شوند',
+         strpos($selfSrc, "bslReq" . "Read(\$tk, 'users/me')") !== false
+         && strpos($selfSrc, "bslReq" . "Read(\$tk, 'chats/' . \$chatId . '/messages") !== false);
+
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
          strpos($selfSrc, 'clearstatcache(true, AI_TEST_STOP_FILE);') !== false
@@ -14340,6 +14373,12 @@ function notifPrereq(array $cn): ?string {
  */
 function bslApiError(array $r, string $what, string $endpoint, string $scope = ''): string {
     $c = (int)($r['code'] ?? 0);
+    // v9.84: «stopped» خطای شبکه نیست — سیگنال توقفِ ارسال است. قبلاً با
+    // کد ۰ قاطی می‌شد و کاربر پیام گمراه‌کنندهٔ «ارتباط برقرار نشد» می‌دید،
+    // در حالی که اینترنت و توکن سالم بودند.
+    if ((string)($r['error'] ?? '') === 'stopped') {
+        return $what . ' — ارسال متوقف شده است؛ از «پاک‌سازی فایل‌های موقت» استفاده کنید یا چند دقیقه صبر کنید';
+    }
     if ($c === 404) return $what . ' — مسیر یافت نشد (۴۰۴): ' . $endpoint;
     if ($c === 401) return $what . ' — توکن نامعتبر یا منقضی (۴۰۱)';
     if ($c === 403) return $what . ' — توکن دسترسی لازم را ندارد (۴۰۳)'
@@ -14485,7 +14524,7 @@ function bslMyUserId(string $tk): int {
     static $cache = [];
     $k = substr(md5($tk), 0, 12);
     if (isset($cache[$k])) return $cache[$k];
-    $r = bslReq($tk, 'GET', 'users/me');
+    $r = bslReqRead($tk, 'users/me');
     $id = 0;
     if (!empty($r['ok'])) $id = (int)($r['body']['id'] ?? ($r['body']['user_id'] ?? 0));
     return $cache[$k] = $id;
@@ -14496,7 +14535,7 @@ function bslFetchChatMessages(string $tk, int $chatId, int $limit = 10, int $myU
     // v8.33: پیش‌فرض یعنی «خودت پیدا کن» تا پاسخ‌های خود غرفه‌دار فیلتر شوند
     if ($myUserId < 0) $myUserId = bslMyUserId($tk);
     $lim = max(1, min(50, $limit));
-    $r = bslReq($tk, 'GET', 'chats/' . $chatId . '/messages?limit=' . $lim . '&order=desc');
+    $r = bslReqRead($tk, 'chats/' . $chatId . '/messages?limit=' . $lim . '&order=desc');
     if (!$r['ok']) return [];
     $rows = $r['body']['data']['messages'] ?? ($r['body']['data'] ?? []);
     if (!is_array($rows)) return [];
@@ -15023,7 +15062,7 @@ function notifCheckOrders(array $cn, bool $test = false, bool $send = true): arr
     $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
     $st = notifLoadState(); $since = (int)($st['last_order_check'] ?? 0);
     // v8.31: مسیر درست طبق مستندات رسمی — سفارش‌های غرفه‌دار
-    $r = bslReq($tk, 'GET', 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=10');
+    $r = bslReqRead($tk, 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=10');
     if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
             'error' => bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read')];
 
@@ -15079,7 +15118,7 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
     $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
     $st = notifLoadState(); $since = (int)($st['last_chat_check'] ?? 0);
     // v8.31: مسیر درست — گفتگوها زیر ریشه است، نه زیر vendors
-    $r = bslReq($tk, 'GET', 'chats?limit=10&order_by=updated_at');
+    $r = bslReqRead($tk, 'chats?limit=10&order_by=updated_at');
     if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
             'error' => bslApiError($r, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')];
 
@@ -15143,7 +15182,7 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
 function notifCheckProducts(array $cn, bool $test = false, bool $send = true): array {
     $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
     $st = notifLoadState(); $since = (int)($st['last_product_check'] ?? 0);
-    $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=10&statuses=2976&statuses=3790&statuses=3567');
+    $r = bslReqRead($tk, 'vendors/' . $vid . '/products?per_page=10&statuses=2976&statuses=3790&statuses=3567');
     if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
             'error' => bslApiError($r, 'دریافت محصولات ناموفق', 'vendors/{id}/products', 'vendor.product.read')];
 
@@ -17000,7 +17039,7 @@ if (isset($_GET['bsl_orders_list'])) {
     $cur = trim((string)($_GET['cursor'] ?? ''));
     if ($cur !== '') $ep .= '&cursor=' . rawurlencode($cur);
 
-    $r = bslReq($tk, 'GET', $ep);
+    $r = bslReqRead($tk, $ep);
     if (!$r['ok']) {
         echo json_encode(['ok' => false,
             'error' => bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read')],
@@ -17029,7 +17068,7 @@ if (isset($_GET['bsl_chats_list'])) {
     $ep = 'chats?limit=' . $limit . '&order_by=updated_at';
     if ($filter === 'unseen') $ep .= '&filters=unseen';   // فیلتر رسمی مستندات
 
-    $r = bslReq($tk, 'GET', $ep);
+    $r = bslReqRead($tk, $ep);
     if (!$r['ok']) {
         echo json_encode(['ok' => false,
             'error' => bslApiError($r, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')],
@@ -27295,6 +27334,21 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.84', t:'🔍 رفع «استعلام از باسلام: ارتباط برقرار نشد»', items:[
+    'گزارش شما: هر چهار دکمهٔ بخش «استعلام از باسلام» (سفارش‌ها، گفتگوها،',
+    'تست محصولات، تست تغییرات مبدأ) خطای «ارتباط با باسلام برقرار نشد»',
+    'می‌دادند — در حالی که «مدیریت جامع محصولات باسلام» درست کار می‌کرد.',
+    '🐞 ریشه: باز هم همان فایل bsl_stop_signal.json. در ۹.۸۳ فقط مسیرِ',
+    '«مدیریت جامع» را با bslReqRead درمان کردم و این چهار مسیر جا ماندند.',
+    '🐞 ریشهٔ عمیق‌تر: سیگنال توقف هیچ تاریخ مصرفی نداشت. یک فایلِ جامانده',
+    'از یک «توقف ارسال» قدیمی، برای همیشه همهٔ درخواست‌ها را می‌بست. هندلر',
+    'صف از ۸.۵۷ نگه‌داشتِ ۱۵ دقیقه‌ای را رعایت می‌کرد ولی خودِ bslReq نه.',
+    '✅ حالا سیگنال توقف فقط تا ۱۵ دقیقه معتبر است؛ کهنه‌ترش خودکار پاک',
+    'می‌شود. یعنی این باگ دیگر در هیچ مسیری تکرار نمی‌شود، نه فقط این چهار تا.',
+    '✅ هر چهار دکمهٔ استعلام و همچنین خواندن شناسهٔ کاربر و متن پیام‌ها به',
+    'bslReqRead منتقل شدند (ارسال و همگام‌سازی همچنان با توقف می‌ایستند).',
+    '✅ خطای stopped دیگر با خطای شبکه قاطی نمی‌شود و پیام درست خودش را',
+    'دارد، پس اگر باز پیش بیاید می‌فهمید مشکل از اینترنت یا توکن نیست.'],},
   {v:'9.83', t:'🏪 رفع «مدیریت جامع محصولات باسلام: صفر محصول»', items:[
     'گزارش شما: تست غرفه سالم بود ولی «مدیریت جامع محصولات باسلام» فهرست را',
     'خالی و بدون هیچ پیامی نشان می‌داد.',
