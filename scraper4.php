@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.86';
+const APP_VERSION = '9.87';
 const APP_VERSION_DATE = '1405/05/28';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -6600,6 +6600,65 @@ function queryInside(DOMXPath $xp, DOMNode $container, string $css): ?DOMNodeLis
         $rel = implode(' | ', $parts);
         $nodes = @$xp->query($rel, $container);
         if ($nodes && $nodes->length) return $nodes;
+
+        /* 🐞 v9.87 — علتِ واقعیِ «۲۰ مورد مشابه پیدا می‌شود ولی محصولی
+           استخراج نمی‌شود / فقط یکی می‌آید».
+
+           سلکتورساز مرورگر (gs) برای عنصری که خودش کلاس ندارد، مسیر را با
+           «نزدیک‌ترین والدِ کلاس‌دار» می‌سازد. آن والد معمولاً دقیقاً همان
+           کارتِ محصول است، پس برای عنوان چیزی مثل این ذخیره می‌شود:
+
+               container = div.product-card
+               title     = div.product-card span      ← پیشوندِ ظرف!
+
+           این سلکتور در مرورگر درست است (از ریشهٔ سند اجرا می‌شود)، ولی
+           اینجا نسبت به «خودِ ظرف» اجرا می‌شود و به
+           './/div[…product-card…]//span' تبدیل می‌شود؛ یعنی دنبال یک
+           product-card ديگر *درونِ* این کارت می‌گردد که وجود ندارد ⇒ صفر
+           تطبیق. آن‌وقت عنوان و لینک خالی می‌مانند و
+           «if (!title && !link) continue» کلِ ردیف را دور می‌ریزد ⇒ خروجی
+           صفر یا فقط همان چند کارتی که تصادفاً fallbackهای عمومی نجاتشان داد.
+
+           راه‌حل: اگر سلکتور با خودِ ظرف شروع می‌شود، آن گامِ اولِ اضافی را
+           بردار و باقیِ مسیر را نسبت به ظرف اجرا کن. */
+        if ($container instanceof DOMElement) {
+            $trimmed = trim($css);
+            /* گام اول سلکتور را جدا کن (ترکیب‌گرهای > + ~ نگه داشته می‌شوند) */
+            if (preg_match('~^([^\s>+\x7e]+)[\s>]+(.+)$~u', $trimmed, $m)) {
+                $head = trim($m[1]);
+                $tail = trim($m[2]);
+                if ($head !== '' && $tail !== '' && $tail[0] !== '+' && $tail[0] !== '~') {
+                    /* آیا گامِ اول به خودِ ظرف اشاره می‌کند؟ */
+                    $headXp = cssToXpath($head, $strict);
+                    $isSelf = false;
+                    if ($headXp !== '') {
+                        $selfParts = preg_split('~\s*\|\s*~', $headXp, -1, PREG_SPLIT_NO_EMPTY);
+                        foreach ($selfParts as $sp) {
+                            $sp = trim($sp);
+                            /* '//div[cond]' → 'self::div[cond]' */
+                            $sp = preg_replace('~^/*~', '', $sp);
+                            if ($sp === '') continue;
+                            $probe = @$xp->query('self::' . $sp, $container);
+                            if ($probe && $probe->length) { $isSelf = true; break; }
+                        }
+                    }
+                    if ($isSelf) {
+                        $tailXp = cssToXpath($tail, $strict);
+                        if ($tailXp !== '') {
+                            $tp = preg_split('~\s*\|\s*~', $tailXp, -1, PREG_SPLIT_NO_EMPTY);
+                            foreach ($tp as $i2 => $part2) {
+                                $part2 = trim($part2);
+                                if (strpos($part2, '//') === 0) $part2 = '.' . $part2;
+                                elseif (strpos($part2, './') !== 0 && strpos($part2, '/') === 0) $part2 = '.' . $part2;
+                                $tp[$i2] = $part2;
+                            }
+                            $nodes = @$xp->query(implode(' | ', $tp), $container);
+                            if ($nodes && $nodes->length) return $nodes;
+                        }
+                    }
+                }
+            }
+        }
     }
     return null;
 }
@@ -7178,7 +7237,13 @@ $p = ['title' => '', 'price' => '', 'link' => '', 'image' => '', 'sku' => ''];
 if (!empty($sel['title'])) {
 $nodes = queryInside($xp, $container, $sel['title']);
 if ($nodes && $nodes->length) {
-$p['title'] = normalize_text($nodes->item(0)->textContent);
+/* v9.87: item(0) کورکورانه برداشته نشود. وقتی سلکتور عمومی است
+   (مثل «span» که هم به قابِ عکس می‌خورد هم به عنوان)، گرهِ اول
+   می‌تواند تهی باشد و عنوان خالی بماند. اولین گرهِ دارای متن را بردار. */
+foreach ($nodes as $_tn) {
+    $_tt = normalize_text($_tn->textContent);
+    if ($_tt !== '') { $p['title'] = $_tt; break; }
+}
 }
 }
 
@@ -7198,7 +7263,11 @@ break;
 if (!empty($sel['price'])) {
 $nodes = queryInside($xp, $container, $sel['price']);
 if ($nodes && $nodes->length) {
-$p['price'] = extractPrice($nodes->item(0)->textContent);
+/* v9.87: مثل عنوان — اولین گرهی که واقعاً قیمت دارد، نه صرفاً گرهِ اول. */
+foreach ($nodes as $_pn) {
+    $_pp = extractPrice($_pn->textContent);
+    if ($_pp !== '' && $_pp !== null) { $p['price'] = $_pp; break; }
+}
 }
 }
 
@@ -13064,6 +13133,17 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "preg_match('~,(\\d{1,2})\$~', \$en)") !== false);
     $add('9.85', 'کلاسِ کاراکتریِ ترکیب‌گر جداکنندهٔ الگو را نمی‌بندد',
          strpos($selfSrc, "preg_match('/[+~]/', \$css)") !== false);
+
+    /* ---------- v9.87: سلکتورِ فیلد که با خودِ ظرف شروع می‌شود ---------- */
+    $add('9.87', 'اگر سلکتور فیلد با خودِ ظرف شروع شود، گامِ اول حذف و بقیه نسبی اجرا می‌شود',
+         strpos($selfSrc, "\$probe = @\$xp->query('self::' . \$sp, \$container);") !== false
+         && strpos($selfSrc, '$isSelf = true;') !== false);
+    $add('9.87', 'جداکنندهٔ regex گامِ اول با \\x7e نوشته شده تا ~ داخل کلاس نشکند',
+         strpos($selfSrc, "preg_match('~^([^\\s>+\\x7e]+)[\\s>]+(.+)\$~u', \$trimmed, \$m)") !== false);
+    $add('9.87', 'عنوان اولین گرهِ دارایِ متن را می‌گیرد نه کورکورانه item(0)',
+         strpos($selfSrc, "if (\$_tt !== '') { \$p['title'] = \$_tt; break; }") !== false);
+    $add('9.87', 'قیمت اولین گرهِ دارایِ قیمت را می‌گیرد نه کورکورانه item(0)',
+         strpos($selfSrc, "if (\$_pp !== '' && \$_pp !== null) { \$p['price'] = \$_pp; break; }") !== false);
 
     /* ---------- v9.86: ۲۰ ظرف پیدا می‌شد ولی ۱ محصول درمی‌آمد ---------- */
     $add('9.86', 'هر شاخهٔ union در queryInside جداگانه نسبی می‌شود',
@@ -27618,6 +27698,29 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.87', t:'🐞 رفع واقعیِ «۲۰ مورد مشابه پیدا می‌شود ولی محصول درنمی‌آید»', items:[
+    'این‌بار با PHP واقعی (نسخهٔ ۸.۵) داخل محیط تست شد، نه شبیه‌سازی. باگ',
+    'دقیقاً بازتولید شد: ۲۰ ظرف پیدا می‌شد و خروجی ۰ محصول بود.',
+    '🐞 ریشهٔ اصلی: سلکتورسازِ مرورگر (gs) برای عنصری که خودش کلاس ندارد،',
+    'مسیر را با «نزدیک‌ترین والدِ کلاس‌دار» می‌سازد — و آن والد معمولاً خودِ',
+    'کارتِ محصول است. یعنی ذخیره می‌شود: ظرف = div.product-card و همزمان',
+    'عنوان = «div.product-card span». در مرورگر این درست کار می‌کند چون از',
+    'ریشهٔ سند اجرا می‌شود، ولی در استخراج، سلکتورِ فیلد نسبت به *خودِ ظرف*',
+    'اجرا می‌شود و به .//div[…product-card…]//span تبدیل می‌گردد؛ یعنی دنبال',
+    'یک product-card دیگر *درونِ* همین کارت می‌گردد که وجود ندارد ⇒ صفر تطبیق.',
+    '🐞 پیامد: عنوان و لینک خالی می‌ماندند و شرط «اگر نه عنوان و نه لینک»',
+    'کلِ ردیف را دور می‌ریخت. خروجی صفر محصول — یا فقط همان چند کارتی که',
+    'تصادفاً fallbackهای عمومی (h2/h3/h4) نجاتشان می‌داد.',
+    '✅ اصلاح ۱: در queryInside اگر گامِ اولِ سلکتور به خودِ ظرف اشاره کند،',
+    'آن گامِ اضافی حذف و بقیهٔ مسیر نسبت به ظرف اجرا می‌شود.',
+    '✅ اصلاح ۲: عنوان و قیمت دیگر کورکورانه item(0) را برنمی‌دارند؛ اولین',
+    'گرهی که واقعاً متن/قیمت دارد انتخاب می‌شود. (سلکتور عمومی مثل «span»',
+    'اول به قابِ عکس می‌خورد که متنش خالی است.)',
+    '🧪 نتیجهٔ تست با PHP واقعی: کارتِ بدون لینک و بدون h2-h4 از ۰ به ۲۰',
+    'محصول رسید؛ «article.product_pod a» از ۰ به ۲ تطبیق. رگرسیون: هر ۷',
+    'حالتِ سلکتورِ books.toscrape همچنان ۲۰/۲۰ و تطبیق cssToXpath با مرورگر',
+    '۲۴ از ۲۴ بدون اختلاف.',
+  ]},
   {v:'9.86', t:'🐞 رفع «۲۰ مورد پیدا می‌کند ولی ۱ محصول استخراج می‌شود»', items:[
     'گزارش شما: موقع انتخاب سلکتورِ ظرف، درست ۲۰ عدد مشابه پیدا می‌شد، اما',
     'استخراج فقط ۱ محصول می‌داد. و نسخهٔ قدیمی با «استخراج فرانت‌اند» همان',
