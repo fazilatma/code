@@ -30,3 +30,7 @@ npm run worker:dev
 - migrationهای D1: `migrations/`
 - bundle آمادهٔ Direct Upload: `scraper4.worker.js`
 - مرجع رفتاری PHP: `scraper4.php`
+- گزارش تطبیق 178/178 عملیات و نتیجه تست‌ها: [`CLOUDFLARE-PARITY.md`](CLOUDFLARE-PARITY.md)
+- matrix ماشینی تطبیق: `parity-manifest.json` و `parity-audit.json`
+
+Vault با AES-256-GCM و PBKDF2 برابر سقف Cloudflare یعنی 100,000 iteration کار می‌کند. فایل settings قدیمی از مسیر داشبورد وارد می‌شود؛ envelope ناسازگار با iteration بیشتر به‌جای crash با پیام مهاجرت روشن رد می‌شود.

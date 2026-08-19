@@ -1,63 +1,20 @@
 {
-  "generatedAt": "2026-08-19T03:39:12.043Z",
-  "ok": true,
+  "schemaVersion": 1,
   "reference": {
     "file": "scraper4.php",
     "version": "9.80",
-    "getDispatchers": 150,
-    "postActions": 28,
-    "total": 178
+    "extraction": "explicit $_GET/$_POST[action] dispatcher keys"
   },
-  "worker": {
-    "source": "worker-src",
-    "routes": 74,
-    "bundlePresent": true
+  "policy": {
+    "statuses": [
+      "operational",
+      "adapted",
+      "account-dependent"
+    ],
+    "missingAllowed": false
   },
-  "manifest": {
-    "file": "parity-manifest.json",
-    "mappings": 178,
-    "uniqueMappings": 178,
-    "missing": 0,
-    "extra": 0,
-    "byStatus": {
-      "operational": 72,
-      "adapted": 74,
-      "account-dependent": 32
-    },
-    "bySection": {
-      "request-shape": 14,
-      "ai": 17,
-      "profiles": 7,
-      "autoreply": 6,
-      "backup": 9,
-      "destination": 19,
-      "maintenance": 22,
-      "notifications": 4,
-      "jobs": 37,
-      "category": 3,
-      "settings": 4,
-      "scraping": 14,
-      "automation": 1,
-      "transfer": 5,
-      "diagnostics": 5,
-      "deployment": 5,
-      "connections": 6
-    }
-  },
-  "securityChecks": {
-    "pbkdf2AtCloudflareLimit": true,
-    "sourceHasNo120000": true,
-    "bundleHasNo120000": true,
-    "diagnosticsRoute": true,
-    "selectorSuggestionRoute": true,
-    "variationExtraction": true,
-    "wooVariableProducts": true,
-    "phpSettingsImport": true,
-    "noAuthentication": true
-  },
-  "errors": [],
-  "warnings": [],
-  "mappings": [
+  "total": 178,
+  "entries": [
     {
       "phpMethod": "GET",
       "key": "action",

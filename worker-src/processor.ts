@@ -52,7 +52,7 @@ async function runScrapeChunk(job:Job,profile:Profile):Promise<boolean>{
   if(!checkpoint.products){
     job.phase='list';
     append(job,`صفحه ${checkpoint.page}: ${checkpoint.url}`);
-    const page=await scrapeListPage(checkpoint.url,profile.selectors,profile.pagination==='next_selector'?profile.paginationValue:'');
+    const page=await scrapeListPage(checkpoint.url,profile.selectors,profile.pagination==='next_selector'?profile.paginationValue:'',Boolean(profile.networkIndirect));
     checkpoint.url=page.url;checkpoint.nextUrl=page.nextUrl;checkpoint.index=0;
     checkpoint.products=page.products.map(raw=>transformProduct(raw,profile)).filter(product=>!profile.minPrice||product.price>=profile.minPrice);
     if(!checkpoint.products.length){append(job,'محصولی پیدا نشد؛ پیمایش پایان یافت','warning');await finishScrape(job,profile,checkpoint);return false}
@@ -62,7 +62,7 @@ async function runScrapeChunk(job:Job,profile:Profile):Promise<boolean>{
   job.phase='details-save-sync';
   const start=checkpoint.index,end=Math.min(checkpoint.products.length,start+chunkSize()),batch=checkpoint.products.slice(start,end);
   await mapLimit(batch,Math.min(8,Math.max(1,Number(getEnv().DETAIL_CONCURRENCY)||4)),async product=>{
-    try{await scrapeDetails(product,profile.selectors)}catch(error){job.failed++;append(job,`${product.title}: جزئیات: ${message(error)}`,'error')}
+    try{await scrapeDetails(product,profile.selectors,Boolean(profile.networkIndirect))}catch(error){job.failed++;append(job,`${product.title}: جزئیات: ${message(error)}`,'error')}
   });
   for(const product of batch){
     if(await stopRequested(job.id)){job.status='stopped';await setState(key,checkpoint);return false}

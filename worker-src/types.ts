@@ -12,6 +12,7 @@ export type Selectors = {
   weight?: string;
   category?: string;
   gallery?: string;
+  variations?: string;
 };
 
 export type Profile = {
@@ -30,6 +31,9 @@ export type Profile = {
   minPrice: number;
   wooCategoryId: number;
   basalamCategoryId: number;
+  basalamFallbackCategoryIds?: number[];
+  networkIndirect?: boolean;
+  noExtract?: boolean;
   syncWoo: boolean;
   syncBasalam: boolean;
   intervalMinutes: number;
@@ -37,6 +41,8 @@ export type Profile = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type VariationGroup = { name: string; values: string[]; prices?: Record<string,number> };
 
 export type Product = {
   sourceKey: string;
@@ -53,6 +59,9 @@ export type Product = {
   stock?: number;
   weight?: number;
   category?: string;
+  variations?: string[];
+  variationGroups?: VariationGroup[];
+  variationPrices?: Record<string,number>;
   sourcePage: string;
   scrapedAt: string;
 };

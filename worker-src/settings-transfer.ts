@@ -22,14 +22,15 @@ export async function createPhpSettingsBundle(host='cloudflare-worker'): Promise
   const profiles=await listProfiles(); const phpProfiles:Record<string,unknown>={};
   for(const profile of profiles){
     const products=(await allProducts(profile.id)).map(product=>[product.sourceKey,stripImages(product)]);
-    phpProfiles[profile.id]={...profile,pagType:profile.pagination,pagVal:profile.paginationValue,priceVal:profile.priceValue,bslCategoryId:profile.basalamCategoryId,products,productsOrder:products.map(item=>item[0])};
+    phpProfiles[profile.id]={...profile,pagType:profile.pagination,pagVal:profile.paginationValue,priceVal:profile.priceValue,bslCategoryId:profile.basalamCategoryId,bslFallbackCatIds:profile.basalamFallbackCategoryIds||[],net_indirect:Boolean(profile.networkIndirect),syncConfig:{enabled:Boolean(profile.intervalMinutes),interval:profile.intervalMinutes*60,target:profile.syncWoo&&profile.syncBasalam?'both':profile.syncWoo?'woo':profile.syncBasalam?'basalam':'none',noExtract:Boolean(profile.noExtract)},products,productsOrder:products.map(item=>item[0])};
   }
   addFile(files,'profiles.json',phpProfiles);
   const c=await loadConnections(true);
   addFile(files,'connections.json',{
     woocommerce:{url:c.woo.url,consumer_key:c.woo.key,consumer_secret:c.woo.secret,ck:c.woo.key,cs:c.woo.secret,category_id:c.woo.categoryId},
-    basalam:{token:c.basalam.token,vendor_id:c.basalam.vendorId,api_base:c.basalam.api,preparation_days:c.basalam.preparationDays,weight:c.basalam.weight,package_weight:c.basalam.packageWeight,stock:c.basalam.stock,category_id:c.basalam.categoryId,auto_category:c.basalam.autoCategory,net_indirect:c.basalam.netIndirect,shops:c.basalam.shops},
+    basalam:{token:c.basalam.token,vendor_id:c.basalam.vendorId,api_base:c.basalam.api,preparation_days:c.basalam.preparationDays,weight:c.basalam.weight,package_weight:c.basalam.packageWeight,stock:c.basalam.stock,category_id:c.basalam.categoryId,auto_category:c.basalam.autoCategory,net_indirect:c.basalam.netIndirect,shops:c.basalam.shops,fallback_cat_ids:c.basalam.fallbackCategoryIds,vendors:c.basalam.shops.map(shop=>({name:shop.name,token:shop.token,vendor_id:shop.vendorId,price_val:shop.pricePercent,price_mode:'percent'}))},
     ai:{base_url:c.ai.baseUrl,api_key:c.ai.apiKey,model:c.ai.model,providers:c.ai.providers,candidates:c.ai.candidates,master:c.ai.master,network:c.ai.network},
+    src_network:{mode:c.ai.network.mode,proxy:c.ai.network.proxyUrl,worker_url:c.ai.network.workerUrl,doh_url:c.ai.network.dohUrl,resolve_ip:c.ai.network.resolveIp},
     notifications:c.notifications
   });
   addFile(files,'category_learning.json',await listCategoryLearning(10000));

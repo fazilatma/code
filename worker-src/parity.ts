@@ -1,5 +1,6 @@
 import { connectionStatus, loadConnections } from './connections.js';
-import { getEnv } from './env.js';
+import { getEnv, validSecret } from './env.js';
+import { VAULT_KDF_ITERATIONS } from './vault.js';
 
 export type Capability={id:string;section:string;label:string;status:'operational'|'adapted'|'account-dependent';endpoint?:string;note?:string};
 

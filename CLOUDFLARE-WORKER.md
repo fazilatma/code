@@ -98,6 +98,8 @@ Wrangler قفل‌شده در `package-lock.json` هنگام نخستین deploy
 - `https://<worker>.workers.dev/health` باید `ok: true`، `databaseReady: true` و `authenticationRequired: false` بدهد.
 - داشبورد باید بدون کادر ورود مستقیماً اطلاعات را بارگذاری کند.
 - endpoint `/api/selftest` باید بدون توکن `ok: true` و `total: 57` نشان دهد.
+- endpoint `/api/debug` باید بررسی‌های runtime، vault، D1 و Queue را بدون نمایش مقدار Secret برگرداند.
+- `/api/parity` خلاصهٔ 178 dispatcher و inventory سطح منو را نشان می‌دهد؛ matrix کامل در `parity-manifest.json` است.
 - در **Bindings** باید `DB`، `JOBS` و `JOBS_DLQ` دیده شوند؛ نبودن `BACKUPS` عمدی است.
 - در **Triggers** باید Cron پنج‌دقیقه‌ای و Queue consumer دیده شوند.
 
@@ -135,7 +137,9 @@ npx wrangler deploy --dry-run
 1. در داشبورد Worker، **تنظیمات عمومی ← انتقال همه تنظیمات** را باز کنید و bundle خروجی PHP را import کنید.
 2. فقط برای `profiles.json` قدیمی، درخواست `POST /api/import-php` بدون هدر ورود قابل استفاده است.
 
-فرمت `scraper4-php-compatible` برای فایل‌های اتصال، تنظیمات، category learning، autoreply و profile/product پشتیبانی می‌شود. اتصال‌های plaintext ورودی بلافاصله با Web Crypto رمز می‌شوند.
+فرمت `scraper4-php-compatible` برای فایل‌های اتصال، تنظیمات، category learning، autoreply، profile/product و variation پشتیبانی می‌شود. `syncConfig`، `src_network`، پروفایل‌های `noExtract`، fallback category و غرفه‌ها نیز normalize می‌شوند. اتصال‌های plaintext ورودی بلافاصله با Web Crypto رمز می‌شوند.
+
+PBKDF2 در Worker دقیقاً با سقف Cloudflare یعنی 100,000 iteration اجرا می‌شود. اگر فایل حاوی envelope رمزگذاری‌شدهٔ قدیمی با iteration بیشتر باشد، import به‌جای خطای runtime با پیام سازگاری و HTTP 400 متوقف می‌شود؛ در این حالت از نسخه PHP یک settings export تازه با اتصال‌های قابل انتقال بگیرید و همان فایل را از داشبورد وارد کنید. `VAULT_SECRET` هیچ‌گاه در log یا `/api/debug` برگردانده نمی‌شود.
 
 پیش از migration بزرگ، endpoint `/api/backup` را اجرا و فایل JSON دانلودشده را روی دستگاه خود نگه‌داری کنید. بازیابی از `/api/restore` انجام می‌شود. حالت `/api/backup?persist=true` فقط برای استقرارهای دارای R2 است و در نسخهٔ بدون subscription پیام راهنمای کنترل‌شده برمی‌گرداند.
 
@@ -146,13 +150,14 @@ npx wrangler deploy --dry-run
 - عملیات مخرب همچنان به عبارت تأیید `APPLY` یا `DELETE` نیاز دارند.
 - Visual Selector ticket امضاشده و پنج‌دقیقه‌ای دارد؛ HTML مقصد sanitize می‌شود.
 - fetch مقصد فقط HTTP/HTTPS عمومی را می‌پذیرد، redirect را دوباره اعتبارسنجی می‌کند و پاسخ محدود دارد.
-- مستقیم‌رفتن از طریق SOCKS، custom DNS یا proxy سطح socket در Workers ممکن نیست. modeهای غیرمستقیم AI از `workerUrl` به‌عنوان gateway HTTP استفاده می‌کنند.
+- مستقیم‌رفتن از طریق SOCKS، custom DNS یا proxy سطح socket در Workers ممکن نیست. حالت `workerUrl` به‌عنوان gateway HTTP هم برای AI و هم scraping فهرست/جزئیات عملیاتی است؛ modeهای غیرقابل‌اجرا با خطای روشن رد می‌شوند.
 
 endpointهای تشخیصی مهم:
 
 ```text
 GET  /api/status
 GET  /api/selftest
+GET  /api/debug
 GET  /api/parity
 GET  /api/jobs
 POST /api/queue-watchdog

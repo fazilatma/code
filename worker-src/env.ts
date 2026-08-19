@@ -24,7 +24,6 @@ export type Env = {
   /** Provisioning-only producer binding that guarantees the dead-letter queue exists. */
   JOBS_DLQ?: QueueProducer<JobMessage>;
   BACKUPS?: R2Bucket;
-  ADMIN_TOKEN?: string;
   VAULT_SECRET?: string;
   ALLOW_INSECURE?: string;
   REQUEST_TIMEOUT_MS?: string;
