@@ -90,6 +90,22 @@ test('Cloudflare Workers AI uses native run payloads, resolves organization mode
   }finally{globalThis.fetch=originalFetch;console.error=originalError}
 });
 
+test('AI all-model testing paginates one model per Worker invocation and preserves one aggregate table',async()=>{
+  const originalFetch=globalThis.fetch,db=new MemoryD1(),calls=[];
+  try{
+    await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'batch',name:'Batch Provider',baseUrl:'https://ai.example/v1',apiKey:'batch-secret',models:['model-1','model-2','model-3','model-4'],enabled:true}],candidates:['batch::model-2','batch::model-4'],testPerProvider:50,network:{mode:'direct'}}}));
+    globalThis.fetch=async(request,init={})=>{const body=JSON.parse(String(init.body||'{}'));calls.push(body.model);return jsonResponse({choices:[{message:{content:'پاسخ '+body.model},finish_reason:'stop'}],usage:{total_tokens:9}})};
+    let cursor=0,runId='',last;
+    for(let invocation=0;invocation<4;invocation++){
+      const response=await call(db,'/api/ai/test-all',jsonInit({prompt:'سلام',cursor,runId,perProvider:2}));assert.equal(response.status,200);last=await response.json();runId=last.runId;cursor=last.nextCursor;
+      assert.equal(last.maxModelsPerInvocation,1);assert.equal(last.batchResults.length,1);assert.equal(last.results.length,invocation+1);assert.equal(last.total,4);assert.equal(last.done,invocation===3);
+    }
+    assert.deepEqual(calls,['model-1','model-2','model-3','model-4']);assert.equal(last.succeeded,4);assert.equal(last.failed,0);
+    const saved=await call(db,'/api/ai/test-results').then(response=>response.json());assert.equal(saved.results.length,4);assert.equal(saved.runId,runId);assert.equal(saved.results[2].usage.total_tokens,9);
+    cursor=0;runId='';for(let invocation=0;invocation<2;invocation++){const candidateResponse=await call(db,'/api/ai/test-all',jsonInit({prompt:'کاندید',onlyCandidates:true,cursor,runId}));last=await candidateResponse.json();runId=last.runId;cursor=last.nextCursor;assert.equal(last.total,2);assert.equal(last.done,invocation===1)}assert.deepEqual(calls.slice(4),['model-2','model-4']);
+  }finally{globalThis.fetch=originalFetch}
+});
+
 test('PHP settings import normalizes syncConfig, noExtract, fallback categories, network flag, products and variations',async()=>{
   const db=new MemoryD1(),profile={name:'CSV only',syncConfig:{enabled:true,interval:3600,target:'both',noExtract:true},bslCategoryId:77,bslFallbackCatIds:[88,99],net_indirect:'1',products:[['p-1',{title:'Variable item',price:125000,variations:['قرمز','آبی'],variationGroups:[{name:'رنگ',values:['قرمز','آبی']}]}]]};
   const profilesFile=file('profiles.json',{'csv-profile':profile}),connectionsFile=file('connections.json',{woocommerce:{url:'https://woo.example',consumer_key:'ck_import',consumer_secret:'cs_import'},basalam:{fallback_cat_ids:[55],vendors:[{name:'غرفه دوم',token:'shop-token',vendor_id:'22',price_mode:'percent',price_val:5}]},src_network:{mode:'worker',worker_url:'https://gateway.example/{url}'}}),bundle={app:'scraper',files:{'profiles.json':profilesFile.name,'connections.json':connectionsFile.name}};
@@ -98,6 +114,14 @@ test('PHP settings import normalizes syncConfig, noExtract, fallback categories,
   const product=JSON.parse(db.products.get('csv-profile:p-1').data);assert.deepEqual(product.variations,['قرمز','آبی']);assert.equal(product.variationGroups[0].name,'رنگ');
   const importedEnvelope=JSON.parse(db.states.get('connection_vault'));assert.equal(importedEnvelope.iterations,100000);assert.doesNotMatch(JSON.stringify(importedEnvelope),/cs_import|shop-token/);
   const importedConnections=await call(db,'/api/connections').then(r=>r.json());assert.equal(importedConnections.connections.woo.secret,'cs_import');assert.equal(importedConnections.connections.ai.network.mode,'worker');assert.equal(importedConnections.connections.basalam.shops[0].vendorId,'22');
+});
+
+test('visual selector uses reusable class selectors, real match counts, and a dedicated detail workflow',async()=>{
+  const originalFetch=globalThis.fetch,db=new MemoryD1();globalThis.fetch=async()=>new Response('<main><article class="product-card"><h2 class="product-title">A</h2></article><article class="product-card"><h2 class="product-title">B</h2></article></main>',{headers:{'content-type':'text/html; charset=utf-8'}});
+  try{
+    const listTicket=await call(db,'/api/visual-ticket',jsonInit({url:'https://shop.example/list'})).then(response=>response.json()),listResponse=await call(db,'/visual?context=list&ticket='+encodeURIComponent(listTicket.ticket)),listHtml=await listResponse.text();assert.equal(listResponse.status,200);assert.match(listHtml,/classCandidates/);assert.match(listHtml,/matches\(value\)>1/);assert.doesNotMatch(listHtml,/:nth-of-type/);assert.match(listHtml,/value="container"/);assert.doesNotMatch(listHtml,/value="shortDesc"/);
+    const detailTicket=await call(db,'/api/visual-ticket',jsonInit({url:'https://shop.example/product/a'})).then(response=>response.json()),detailResponse=await call(db,'/visual?context=detail&ticket='+encodeURIComponent(detailTicket.ticket)),detailHtml=await detailResponse.text();assert.equal(detailResponse.status,200);assert.match(detailHtml,/value="shortDesc"/);assert.match(detailHtml,/value="variations"/);assert.match(detailHtml,/value="galleryBox"/);assert.match(detailHtml,/scraper4-detail-selectors/);assert.doesNotMatch(detailHtml,/value="container"/);
+  }finally{globalThis.fetch=originalFetch}
 });
 
 test('selector suggestion and variation extraction routes execute against HTML',async()=>{

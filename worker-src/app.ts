@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
 import readXlsxFile from 'read-excel-file/web-worker';
-import { aiCall, aiProviders, getLastAiTestResults, getLeaderboard, recordVote, testAllModels } from './ai.js';
+import { aiCall, aiProviders, getLastAiTestResults, getLeaderboard, recordVote, testModelBatch } from './ai.js';
 import { automationTick, autoreplyLogs, autoreplyRun, basalamChats, basalamOrders, digest, generateReply } from './automation.js';
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
 import { DASHBOARD, DASHBOARD_JS } from './dashboard.js';
@@ -30,7 +30,7 @@ app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId
 app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.0.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
-app.get('/visual',async c=>{const content=await renderVisualSelector(c.req.query('ticket')||'');return c.html(content,200,{'cache-control':'no-store','content-security-policy':"default-src 'none'; img-src https: http: data:; style-src 'unsafe-inline' https: http:; font-src https: http: data:; script-src 'unsafe-inline'; frame-ancestors 'self';",'referrer-policy':'no-referrer'})});
+app.get('/visual',async c=>renderVisualSelector(c.req.query('ticket')||'',c.req.query('context')==='detail'?'detail':'list'));
 app.use('/api/*',async(c,next)=>{if(!c.env.DB)return c.json({ok:false,error:'D1 binding DB is not configured'},503);await ensureSchema(c.env.DB);await next()});
 
 app.post('/api/visual-ticket',async c=>{const body=await c.req.json() as any,url=new URL(String(body.url||''));if(!['http:','https:'].includes(url.protocol))return c.json({ok:false,error:'Invalid visual selector URL'},400);return c.json({ok:true,ticket:await createVisualTicket(url.href),expiresIn:300})});
@@ -42,7 +42,7 @@ app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.0.0',
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
-app.post('/api/ai/test-all',async c=>{const b=await jsonBody(c),startedAt=new Date().toISOString(),started=Date.now(),prompt=String(b.prompt||'سلام'),results=await testAllModels(prompt,Boolean(b.onlyCandidates));return c.json({ok:results.some(x=>x.ok),startedAt,durationMs:Date.now()-started,prompt,total:results.length,succeeded:results.filter(x=>x.ok).length,failed:results.filter(x=>!x.ok).length,results})});
+app.post('/api/ai/test-all',async c=>{const b=await jsonBody(c),started=Date.now(),result=await testModelBatch(String(b.prompt||'سلام'),{onlyCandidates:Boolean(b.onlyCandidates),cursor:Number(b.cursor)||0,runId:String(b.runId||'')});return c.json({...result,durationMs:Date.now()-started,invocationPolicy:'یک مدل در هر invocation برای رعایت سقف ۵۰ subrequest پلن رایگان Cloudflare'})});
 app.get('/api/ai/test-results',async c=>c.json({ok:true,...await getLastAiTestResults()}));
 app.post('/api/ai/call',async c=>{const b=await jsonBody(c),provider=(await aiProviders()).find(p=>p.id===b.provider);if(!provider)return c.json({ok:false,error:'Provider not found'},404);return c.json(await aiCall(provider,String(b.model||''),String(b.prompt||'سلام')))});
 app.post('/api/ai/vote',async c=>{const b=await jsonBody(c);return c.json({ok:true,leaderboard:await recordVote(String(b.task||'manual'),String(b.winner||''),Array.isArray(b.candidates)?b.candidates.map(String):[])})});

@@ -7,15 +7,16 @@ type Network={mode:string;proxyUrl:string;workerUrl:string;dohUrl:string;resolve
 type AiAttempt={endpoint:string;body:string|string[];model:string;httpStatus?:number;phase:'network'|'http'|'success';error?:string};
 type RequestResult={response?:Response;body?:any;rawText?:string;networkError?:string};
 
-export async function aiProviders():Promise<Provider[]>{const ai=(await loadConnections()).ai;return ai.providers.length?ai.providers:[{id:'default',name:'Default',baseUrl:ai.baseUrl,apiKey:ai.apiKey,models:ai.model?[ai.model]:[],enabled:true}]}
+function providersFromAi(ai:any):Provider[]{return ai.providers.length?ai.providers:[{id:'default',name:'Default',baseUrl:ai.baseUrl,apiKey:ai.apiKey,models:ai.model?[ai.model]:[],enabled:true}]}
+export async function aiProviders():Promise<Provider[]>{return providersFromAi((await loadConnections()).ai)}
 
-export async function aiCall(provider:Provider,model:string,prompt:string){
-  const ai=(await loadConnections()).ai;
+export async function aiCall(provider:Provider,model:string,prompt:string,networkOverride?:Network){
+  const network=networkOverride||(await loadConnections()).ai.network;
   if(!provider.baseUrl||!provider.apiKey||!model)throw new Error('تنظیمات ارائه‌دهنده/مدل کامل نیست');
   const started=Date.now();
-  if(isCloudflareNative(provider.baseUrl))return cloudflareCall(provider,model,prompt,ai.network,started);
+  if(isCloudflareNative(provider.baseUrl))return cloudflareCall(provider,model,prompt,network,started);
   const endpoint=openAiEndpoint(provider.baseUrl),reportedEndpoint=safeEndpoint(endpoint),payload={model,messages:[{role:'user',content:prompt}],max_tokens:400,temperature:.2};
-  const result=await requestAi(endpoint,payload,provider,ai.network);
+  const result=await requestAi(endpoint,payload,provider,network);
   if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:reportedEndpoint,latencyMs:Date.now()-started,raw:{error:reason}})}
   const response=result.response!,body=result.body,latencyMs=Date.now()-started;
   if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${aiErrorMessage(body)||response.statusText||'AI error'}`,failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body));
@@ -83,15 +84,39 @@ function aiErrorMessage(body:any):string{
   return String(body?.error?.message||body?.message||body?.error||'').trim();
 }
 
-export async function testAllModels(prompt='سلام',onlyCandidates=false){
-  const ai=(await loadConnections()).ai,providers=await aiProviders(),wanted=new Set(ai.candidates),tasks=providers.filter(p=>p.enabled).flatMap(p=>p.models.map(model=>({p,model,key:`${p.id}::${model}`}))).filter(x=>!onlyCandidates||wanted.has(x.key)),results:any[]=[];let cursor=0;
-  await Promise.all(Array.from({length:Math.min(3,tasks.length)},async()=>{while(cursor<tasks.length){const task=tasks[cursor++];try{results.push({...await aiCall(task.p,task.model,prompt),key:task.key})}catch(error){results.push(error instanceof AiResponseError?{...error.detail,key:task.key}:{ok:false,key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,error:error instanceof Error?error.message:String(error)})}}}));
-  const saved={at:new Date().toISOString(),prompt,results};await setState('ai_test_results',saved);return results;
+const AI_TEST_MODELS_PER_INVOCATION=1;
+type AiTestTask={p:Provider;model:string;key:string};
+type StoredAiTest={runId:string;startedAt:string;updatedAt:string;prompt:string;onlyCandidates:boolean;total:number;results:any[]};
+function aiTestTasks(ai:any,providers:Provider[],onlyCandidates:boolean):AiTestTask[]{
+  const wanted=new Set<string>(Array.isArray(ai.candidates)?ai.candidates.map(String):[]),tasks:AiTestTask[]=[];
+  for(const p of providers){
+    if(p.enabled===false)continue;
+    for(const rawModel of p.models||[]){const model=String(rawModel||'').trim(),key=`${p.id}::${model}`;if(!model||onlyCandidates&&!wanted.has(key))continue;tasks.push({p,model,key})}
+  }
+  return tasks;
 }
-export async function getLastAiTestResults(){return getState<any>('ai_test_results',{at:null,prompt:'',results:[]})}
+function aiTestFailure(error:unknown,task:AiTestTask,prompt:string){return error instanceof AiResponseError?{...error.detail,key:task.key}:{ok:false,phase:'unknown',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey),raw:{error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey)}}}
+
+/**
+ * Runs at most one model per Worker invocation. A Cloudflare-native model can
+ * legitimately need several native payload/model attempts before the OpenAI
+ * fallback, so a larger batch can exhaust the Free plan's 50-subrequest cap.
+ * The dashboard advances `cursor`, making every model a fresh invocation while
+ * this function persists one aggregate result set for the final table.
+ */
+export async function testModelBatch(prompt='سلام',options:{onlyCandidates?:boolean;cursor?:number;runId?:string}={}){
+  const ai=(await loadConnections()).ai,providers=providersFromAi(ai),onlyCandidates=Boolean(options.onlyCandidates),tasks=aiTestTasks(ai,providers,onlyCandidates),cursor=Math.max(0,Math.trunc(Number(options.cursor)||0));
+  const previous=cursor>0?await getState<StoredAiTest|null>('ai_test_results',null):null,runId=String(options.runId||previous?.runId||crypto.randomUUID()),startedAt=cursor===0||!previous?.startedAt?new Date().toISOString():previous.startedAt;
+  if(cursor>0&&(!previous?.runId||previous.runId!==runId||previous.prompt!==prompt||previous.onlyCandidates!==onlyCandidates))throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
+  const results:any[]=cursor===0?[]:Array.isArray(previous?.results)?previous.results:[],batch=tasks.slice(cursor,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults:any[]=[];
+  for(const task of batch){try{batchResults.push({...await aiCall(task.p,task.model,prompt,ai.network),key:task.key})}catch(error){batchResults.push(aiTestFailure(error,task,prompt))}}
+  results.push(...batchResults);const nextCursor=Math.min(tasks.length,cursor+batch.length),done=nextCursor>=tasks.length,updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);
+  return{ok:done&&results.some(x=>x.ok),runId,startedAt,updatedAt,prompt,total:tasks.length,cursor,nextCursor,done,batchSize:batch.length,maxModelsPerInvocation:AI_TEST_MODELS_PER_INVOCATION,succeeded:results.filter(x=>x.ok).length,failed:results.filter(x=>!x.ok).length,results,batchResults};
+}
+export async function getLastAiTestResults(){return getState<any>('ai_test_results',{runId:'',startedAt:null,updatedAt:null,prompt:'',total:0,results:[]})}
 class AiResponseError extends Error{constructor(message:string,public detail:any){super(message);detail.error=message}}
 function parseResponse(raw:string,secret=''):any{const limit=50_000,safe=secret?raw.replaceAll(secret,'[پنهان]'):raw;if(safe.length>limit)return{truncated:true,totalCharacters:safe.length,preview:safe.slice(0,limit)};try{return redactRaw(JSON.parse(safe))}catch{return safe}}
-function redactRaw(value:any):any{if(Array.isArray(value))return value.map(redactRaw);if(value&&typeof value==='object'){const result:any={};for(const[key,item]of Object.entries(value))result[key]=/(?:authorization|api[_-]?key|token|secret|password|consumer[_-]?(?:key|secret))/i.test(key)?'[پنهان]':redactRaw(item);return result}return value}
+function redactRaw(value:any):any{if(Array.isArray(value))return value.map(redactRaw);if(value&&typeof value==='object'){const result:any={};for(const[key,item]of Object.entries(value))result[key]=/^(?:authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|consumer[_-]?(?:key|secret))$/i.test(key)?'[پنهان]':redactRaw(item);return result}return value}
 function safeEndpoint(raw:string){try{const url=new URL(raw);url.username='';url.password='';for(const key of [...url.searchParams.keys()])if(/(?:key|token|secret|password|auth)/i.test(key))url.searchParams.set(key,'[پنهان]');return url.toString()}catch{return raw.replace(/([?&](?:key|token|secret|password|auth)[^=]*=)[^&]+/gi,'$1[پنهان]')}}
 function safeError(raw:string,endpoint:string,apiKey:string):string{let value=String(raw||'').replaceAll(endpoint,safeEndpoint(endpoint));if(apiKey)value=value.replaceAll(apiKey,'[پنهان]');return value}
 export async function recordVote(task:string,winner:string,candidates:string[]){const votes=await getState<any>('ai_votes',{scores:{},history:[]});for(const key of candidates){votes.scores[key]??={wins:0,tests:0};votes.scores[key].tests++;if(key===winner)votes.scores[key].wins++}votes.history.push({at:new Date().toISOString(),task,winner,candidates});votes.history=votes.history.slice(-1000);await setState('ai_votes',votes);return leaderboard(votes)}

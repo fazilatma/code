@@ -16,7 +16,7 @@ window.HTMLElement.prototype.focus=()=>{};
 Object.defineProperty(window.HTMLSelectElement.prototype,'value',{configurable:true,get(){return this.querySelector('option[selected]')?.getAttribute('value')??this.querySelector('option')?.getAttribute('value')??''},set(value){for(const option of this.querySelectorAll('option')){if((option.getAttribute('value')??option.textContent)===String(value))option.setAttribute('selected','');else option.removeAttribute('selected')}}});
 const failures=[];
 process.on('unhandledRejection',error=>failures.push(error));
-try{(0,eval)(script)}catch(error){failures.push(error)}
+try{(0,eval)(script+'\n;globalThis.__dashboardTest={runAiModelTests};')}catch(error){failures.push(error)}
 await new Promise(resolve=>setTimeout(resolve,900));
 assert.equal(failures.length,0,failures.map(error=>error?.stack||String(error)).join('\n'));
 for(const pane of ['home','settings','selector','products','destination','jobs'])assert.ok(document.getElementById('pane-'+pane),`pane ${pane}`);
@@ -39,4 +39,15 @@ assert.ok(document.querySelector('#pane-jobs .import-card'));
 document.getElementById('goImportTab').click();
 assert.ok(document.getElementById('pane-jobs').classList.contains('active'),'new spreadsheet import shortcut activates import pane');
 assert.notEqual(document.getElementById('dbState').textContent.trim(),'—');
-console.log('dashboard runtime OK: startup, API bootstrap, six tabs, conceptual groups, import shortcut, and extraction controls');
+assert.ok(document.getElementById('openDetailVisual'),'detail visual picker button exists');
+assert.ok(document.getElementById('testDetails'),'detail selector test button exists');
+assert.ok(document.getElementById('clearDetails'),'detail selector clear button exists');
+let aiInvocations=0,visualTickets=0,openedUrl='';
+const controlledFetch=async(input,init={})=>{const url=new URL(typeof input==='string'?input:input.url,base);if(url.pathname==='/api/ai/test-all'){const body=JSON.parse(String(init.body||'{}'));assert.equal(body.cursor,aiInvocations);aiInvocations++;const done=aiInvocations===3,results=Array.from({length:aiInvocations},(_,index)=>({ok:true,key:'runtime::model-'+index,provider:'runtime',providerName:'Runtime',model:'model-'+index,latencyMs:12,text:'پاسخ '+index,raw:{usage:{total_tokens:7}}}));return new Response(JSON.stringify({ok:done,runId:'runtime-run',total:3,cursor:body.cursor,nextCursor:aiInvocations,done,batchSize:1,succeeded:aiInvocations,failed:0,results,batchResults:[results.at(-1)]}),{headers:{'content-type':'application/json'}})}if(url.pathname==='/api/visual-ticket'){visualTickets++;return new Response(JSON.stringify({ok:true,ticket:'runtime-ticket'}),{headers:{'content-type':'application/json'}})}if(url.pathname==='/api/test-selector')return new Response(JSON.stringify({ok:true,count:2,values:['نمونهٔ اول','نمونهٔ دوم']}),{headers:{'content-type':'application/json'}});return browserFetch(input,init)};
+Object.defineProperty(globalThis,'fetch',{value:controlledFetch,writable:true,configurable:true});Object.defineProperty(window,'fetch',{value:controlledFetch,writable:true,configurable:true});Object.defineProperty(window,'open',{value:url=>{openedUrl=String(url);return{closed:false,close(){this.closed=true},focus(){}}},writable:true,configurable:true});
+assert.ok(document.querySelector('[data-ma="ai-test-all"]'),'AI all-model button is rendered');await globalThis.__dashboardTest.runAiModelTests(false);assert.equal(aiInvocations,3,'AI tests use three independent requests for three models');assert.match(document.querySelector('#resultModal .result-head b').textContent,/نتایج تست مدل‌های هوش مصنوعی/);assert.match(document.querySelector('#resultModal .result-body').textContent,/۳/);
+document.getElementById('detailSampleUrl').value='https://shop.example/product/a';document.getElementById('openDetailVisual').click();await new Promise(resolve=>setTimeout(resolve,20));assert.equal(visualTickets,1);assert.match(document.getElementById('visualFrame').getAttribute('src'),/context=detail/);
+document.getElementById('sel-shortDesc').value='.summary';document.getElementById('testDetails').click();await new Promise(resolve=>setTimeout(resolve,30));assert.match(document.querySelector('#resultModal .result-head b').textContent,/آزمایش جزئیات محصول/);assert.match(document.getElementById('result-shortDesc').textContent,/۲ مورد/);
+document.getElementById('clearDetails').click();assert.equal(document.getElementById('sel-shortDesc').value,'');
+assert.equal(failures.length,0,failures.map(error=>error?.stack||String(error)).join('\n'));
+console.log('dashboard runtime OK: startup, six tabs, sequential AI tests, and dedicated detail visual/test/clear controls');
