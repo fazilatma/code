@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-08-19T04:32:58.198Z",
+  "generatedAt": "2026-08-19T04:50:04.311Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 106,
+    "routes": 109,
     "menuActions": 79
   },
   "routes": [
@@ -67,6 +67,9 @@
     "POST /api/media/discover",
     "POST /api/media/repair",
     "GET /api/destination/:target/products",
+    "GET /api/destination/:target/products/:id",
+    "PUT /api/destination/:target/products/:id",
+    "POST /api/destination/:target/batch",
     "GET /api/destination/:target/overview",
     "GET /api/destination/:target/duplicates",
     "GET /api/destination/:target/suffix-report",

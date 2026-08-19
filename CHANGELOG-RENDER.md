@@ -1,5 +1,12 @@
 # Render TypeScript changelog
 
+## 2.19.0 — 2026-08-19
+
+- Added a dedicated comprehensive destination-management tab for WooCommerce and Basalam.
+- Added remote product search, status/image filters, pagination, overview metrics and raw details.
+- Added visual single-product editing/deletion and guarded batch status/category/stock/price/delete operations.
+- Added duplicate and rejected-product diagnostics with professional result modals.
+
 ## 2.18.0 — 2026-08-19
 
 - Added clickable AI test rows with comprehensive raw-response diagnostic modals.
