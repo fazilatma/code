@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.11.0 — 2026-08-19
+
+- Added a dedicated professional reports tab with profile/time filters and CSV export.
+- Rebuilt nightly digest from the transactional product-change ledger.
+- Added per-profile add/update/remove summaries and field-level price samples.
+- Added automatic report retention by age and maximum row count.
+- Added report APIs for filtered history and cleanup.
+
 ## 2.10.0 — 2026-08-19
 
 - Added a transactional product change ledger for add/update/remove events.

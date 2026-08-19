@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-08-19T02:25:46.229Z",
+  "generatedAt": "2026-08-19T02:36:20.957Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 95,
+    "routes": 98,
     "menuActions": 72
   },
   "routes": [
@@ -87,6 +87,9 @@
     "GET /api/jobs/:id/events",
     "GET /api/jobs/:id/report",
     "GET /api/reports",
+    "GET /api/changes",
+    "GET /api/changes.csv",
+    "DELETE /api/changes",
     "GET /api/jobs/:id",
     "POST /api/jobs/:id/stop",
     "POST /api/jobs/:id/retry",
