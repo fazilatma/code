@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.16.0 — 2026-08-19
+
+- Fixed visual selectors being over-specific (`nth-of-type`/unique ID) and reporting one match.
+- Added field-aware repeated-selector generation and container-scoped match counts.
+- Added automatic transition from list fields to the real sample product page for detail fields.
+- Reorganized the visual studio title and controls into separate rows.
+- Added required/optional selector progress, field navigator, filtering and browser-like regression tests.
+
 ## 2.15.0 — 2026-08-19
 
 - Fixed selector sub-tabs being hidden or deactivated when AI sub-tabs were clicked.
