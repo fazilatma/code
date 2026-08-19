@@ -104,7 +104,7 @@ Cloudflare برای Worker یک سرور ثابت با مدل CPU، تعداد v
 
 هر redirect نیز subrequest محسوب می‌شود. انتظار شبکه CPU time نیست، اما parse، رمزنگاری، sanitize و ساخت JSON از CPU و حافظه مصرف می‌کنند. به همین علت این پروژه پاسخ مبدأ را محدود، پردازش را checkpoint و هر پیام صف را روی ۱۰ محصول نگه می‌دارد؛ concurrency جزئیات نیز ۲ است تا از ۶ connection و ۵۰ subrequest پلن Free عبور نکند. سقف داخلی body/response پروژه ممکن است عمداً از سقف Cloudflare کمتر باشد.
 
-خروجی dry-run فعلی bundle: **502.74 KiB raw / 123.39 KiB gzip**؛ بسیار پایین‌تر از سقف 3 MB پلن Free.
+خروجی dry-run فعلی bundle: **771.48 KiB upload / 179.85 KiB gzip**؛ بسیار پایین‌تر از سقف 3 MB پلن Free.
 
 ## تست و بازتولید ممیزی
 
@@ -119,16 +119,16 @@ npx wrangler deploy --dry-run
 
 1. round-trip رمزگذاری/رمزگشایی vault در iteration=100000 و رد envelope=120000؛
 2. diagnostics بدون افشای markerهای Secret و metadata/raw امن تست AI؛ شکست شبکهٔ AI، حذف credential در redirect بین originها، timeout تا پایان body و توقف response بیش‌ازحد نیز regression دارند؛
-3. import ساختار سازگار PHP شامل محصولات و variationها؛
+3. import ساختار سازگار PHP شامل محصولات و variationها، و درون‌ریزی واقعی CSV/XLSX با سرستون فارسی، وضعیت ووکامرس، سقف ۱۰ MiB و پاسخ JSON خطا؛
 4. routeهای پیشنهاد selector، استخراج مستقیم list/detail از fixture فارسی و fallbackهای JSON-LD/variation/gallery؛
 5. merge و dedupe کارت، checkpoint، حفظ دادهٔ معتبر قبلی و جلوگیری از retire شدن ناامن هنگام شکست ذخیره/parse؛
 6. dispatch بومی Cloudflare Workers AI، payloadهای prompt/messages، مدل‌های ساده و سازمان‌دار، chat fallback و redaction؛
 7. API جامع مقصد شامل catalog/search/page/shop/status، preview/apply تکی و گروهی، تبدیل تومان/ریال و archive وضعیت 4184 باسلام؛
 8. diagnostic پروفایل روی network/list/selectors/detail بدون write و اتصال دکمه و modal آن؛
-9. هجده بخش و ترتیب dashboard، editorهای بصری، محیط مستقل مدیریت مقصد، گزارش تغییرات کد، modalهای جامع و listenerهای واقعی؛
+9. هجده بخش و ترتیب dashboard، editorهای بصری، چهار pane بازطراحی‌شده، محیط مستقل مدیریت مقصد، گزارش تغییرات کد، modalهای جامع و listenerهای واقعی؛
 10. health، dashboard headers، API بدون token، نبود importهای Node در bundle، همگامی schema و auto-provision config.
 
-آخرین نتیجه: **27/27 test موفق**، typecheck و build موفق؛ parity audit نیز `ok: true` و **178/178 mapping** بدون missing/extra، warning یا error است. smoke کامل `ok: true` و deploy dry-run نیز موفق است.
+آخرین نتیجه: **29/29 test موفق**، typecheck و build موفق؛ runtime مستقل LinkeDOM نیز راه‌اندازی، bootstrap API، شش تب و کنترل‌های paneهای بازطراحی‌شده را تأیید کرد. parity audit نیز `ok: true` و **178/178 mapping** بدون missing/extra، warning یا error است. smoke کامل `ok: true` و deploy dry-run نیز موفق است.
 
 ## فایل‌های راهنما
 

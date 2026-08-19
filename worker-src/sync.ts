@@ -16,6 +16,7 @@ export async function syncWoo(product:Product,profile:Profile):Promise<'created'
   }
   const groups=(product.variationGroups||[]).filter(group=>group.name&&group.values?.length);
   const payload:any={name:product.title,sku,type:groups.length?'variable':'simple',regular_price:String(product.price),description:product.longDesc||'',short_description:product.shortDesc||''};
+  if(product.destinationStatus)payload.status=product.destinationStatus;
   if(product.images.length)payload.images=product.images.map(src=>({src}));
   if(product.stock!==undefined)Object.assign(payload,{manage_stock:true,stock_quantity:product.stock});
   if(product.weight)payload.weight=String(product.weight);

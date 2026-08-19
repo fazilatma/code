@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import {strToU8,zipSync} from 'fflate';
 import worker from '../scraper4.worker.js';
 
 const ctx={waitUntil(){},passThroughOnException(){}};
 class MemoryD1 {
-  constructor(){this.states=new Map();this.profiles=new Map();this.products=new Map()}
+  constructor(){this.states=new Map();this.profiles=new Map();this.products=new Map();this.jobs=new Map()}
   prepare(sql){return new MemoryStatement(this,sql)}
   async batch(statements){return statements.map(()=>({success:true,meta:{changes:0}}))}
 }
@@ -19,6 +20,8 @@ class MemoryStatement {
     if(s.includes("FROM jobs WHERE status='running'"))return{n:0};
     if(s.startsWith('SELECT value FROM app_state WHERE key=')){const value=this.db.states.get(v[0]);return value===undefined?null:{value}};
     if(s.startsWith('SELECT * FROM profiles WHERE id='))return this.db.profiles.get(v[0])||null;
+    if(s.startsWith('SELECT * FROM jobs WHERE id='))return this.db.jobs.get(v[0])||null;
+    if(s.startsWith('SELECT * FROM jobs WHERE profile_id='))return[...this.db.jobs.values()].find(job=>job.profile_id===v[0]&&job.kind===v[1]&&['queued','running'].includes(job.status))||null;
     if(s.startsWith('SELECT 1 AS found FROM products'))return this.db.products.has(`${v[0]}:${v[1]}`)?{found:1}:null;
     return null;
   }
@@ -27,12 +30,14 @@ class MemoryStatement {
     if(s.startsWith('INSERT INTO app_state'))this.db.states.set(v[0],v[1]);
     else if(s.startsWith('INSERT INTO profiles'))this.db.profiles.set(v[0],{id:v[0],data:v[1],enabled:v[2],interval_minutes:v[3],created_at:v[4],updated_at:v[5],last_run_at:null});
     else if(s.startsWith('INSERT INTO products'))this.db.products.set(`${v[0]}:${v[1]}`,{profile_id:v[0],source_key:v[1],data:v[2],title:v[3],price:v[4],source_url:v[5]});
+    else if(s.startsWith('INSERT INTO jobs'))this.db.jobs.set(v[0],{id:v[0],profile_id:v[1],kind:v[2],target:v[3],status:'queued',phase:'waiting',total:0,processed:0,added:0,updated:0,failed:0,stop_requested:0,error:null,log:'[]',created_at:v[4],updated_at:v[5],started_at:null,finished_at:null});
     return{success:true,meta:{changes:1}};
   }
 }
 const call=(db,path,init={},extra={})=>worker.fetch(new Request(`https://worker.test${path}`,init),{DB:db,VAULT_SECRET:'vault-secret',JOBS:{send:async()=>{}},JOBS_DLQ:{send:async()=>{}},...extra},ctx);
 const jsonInit=body=>({method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
 const file=(name,value)=>{const text=JSON.stringify(value);return{name:{size:Buffer.byteLength(text),b64:Buffer.from(text).toString('base64')}}};
+function tinyXlsx(){const files={'[Content_Types].xml':'<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>','_rels/.rels':'<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>','xl/workbook.xml':'<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Products" sheetId="1" r:id="rId1"/></sheets></workbook>','xl/_rels/workbook.xml.rels':'<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>','xl/worksheets/sheet1.xml':'<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>نام محصول</t></is></c><c r="B1" t="inlineStr"><is><t>قیمت</t></is></c><c r="C1" t="inlineStr"><is><t>برند</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>عطر اکسل</t></is></c><c r="B2"><v>375000</v></c><c r="C2" t="inlineStr"><is><t>نمونه</t></is></c></row></sheetData></worksheet>'};return zipSync(Object.fromEntries(Object.entries(files).map(([name,text])=>[name,strToU8(text)])))}
 
 test('PBKDF2 uses Cloudflare maximum, vault round-trips, and oversized legacy envelopes fail clearly',async()=>{
   const source=await readFile(new URL('../worker-src/vault.ts',import.meta.url),'utf8'),bundle=await readFile(new URL('../scraper4.worker.js',import.meta.url),'utf8');
@@ -134,6 +139,20 @@ test('profile extraction diagnostic runs real network, list parser, selector evi
   globalThis.HTMLRewriter=TestHTMLRewriter;const originalFetch=globalThis.fetch,db=new MemoryD1();globalThis.fetch=async request=>{const url=String(request instanceof Request?request.url:request);if(url==='https://source.example/list')return new Response('<main><article class="item"><a class="link" href="/p/one"><h2>محصول واقعی</h2></a><span class="price">۱۲۵۰۰۰ تومان</span><img src="/one.jpg"></article><script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"محصول واقعی","url":"https://source.example/p/one","image":"https://source.example/one.jpg","offers":{"price":"125000"}}</script></main>',{headers:{'content-type':'text/html; charset=utf-8'}});if(url==='https://source.example/p/one')return new Response('<main><div class="description">توضیح کامل نمونه</div><span class="sku">S-1</span></main>',{headers:{'content-type':'text/html'}});throw new Error(`unexpected ${url}`)};
   try{const saved=await call(db,'/api/profiles',jsonInit({id:'diag',name:'عیب‌یابی واقعی',url:'https://source.example/list',pages:1,pagination:'none',selectors:{container:'.item',title:'h2',price:'.price',link:'.link',image:'img',longDesc:'.description',sku:'.sku'},enabled:true}));assert.equal(saved.status,200);const response=await call(db,'/api/profiles/diag/extraction-diagnostic',jsonInit({})),report=await response.json();assert.equal(response.status,200);assert.equal(report.productCount,1);assert.equal(report.ok,true);assert.deepEqual(report.stages.map(x=>x.name),['network','list-extraction','selector-evidence','detail-extraction']);assert.equal(report.stages.find(x=>x.name==='network').bytes>0,true);assert.equal(report.stages.find(x=>x.name==='list-extraction').samples[0].title,'محصول واقعی');assert.equal(report.detail.sku,'S-1');assert.equal(db.products.size,0)
   }finally{globalThis.fetch=originalFetch}
+});
+
+test('standalone spreadsheet import understands Persian CSV headers, keeps Woo status, and targeted sync jobs stay targeted',async()=>{
+  const db=new MemoryD1();
+  const saved=await call(db,'/api/profiles',jsonInit({id:'sheet-ui',name:'فایل فروشگاه',url:'',noExtract:true,pages:1,pagination:'none',selectors:{container:'.product',title:'h2',price:'.price',link:'a',image:'img'},enabled:true}));
+  assert.equal(saved.status,200);
+  const csv='نام محصول,قیمت,تصویر,کد محصول\nکفش آزمایشی,۲۵۰۰۰۰,https://images.example/shoe.jpg,SKU-FA-1\n';
+  const imported=await call(db,'/api/profiles/sheet-ui/import?format=csv&wooStatus=draft',{method:'POST',headers:{'content-type':'text/csv; charset=utf-8'},body:csv}),report=await imported.json();
+  assert.equal(imported.status,200);assert.equal(report.format,'csv');assert.equal(report.rows,1);assert.equal(report.imported,1);assert.equal(report.wooStatus,'draft');
+  const stored=JSON.parse([...db.products.values()][0].data);assert.equal(stored.title,'کفش آزمایشی');assert.equal(stored.price,250000);assert.equal(stored.sku,'SKU-FA-1');assert.equal(stored.destinationStatus,'draft');
+  const excel=await call(db,'/api/profiles/sheet-ui/import?format=xlsx&wooStatus=publish',{method:'POST',headers:{'content-type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},body:tinyXlsx()}),excelReport=await excel.json();assert.equal(excel.status,200);assert.equal(excelReport.format,'xlsx');assert.equal(excelReport.imported,1);const excelProduct=[...db.products.values()].map(row=>JSON.parse(row.data)).find(product=>product.title==='عطر اکسل');assert.equal(excelProduct.price,375000);assert.equal(excelProduct.brand,'نمونه');assert.equal(excelProduct.destinationStatus,'publish');
+  const broken=await call(db,'/api/profiles/sheet-ui/import?format=xlsx',{method:'POST',headers:{'content-type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},body:new Uint8Array([1,2,3])});assert.equal(broken.status,400);assert.match(broken.headers.get('content-type')||'',/application\/json/);assert.match((await broken.json()).error,/Excel|فایل|zip/i);
+  const oversized=await call(db,'/api/profiles/sheet-ui/import?format=csv',{method:'POST',headers:{'content-type':'text/csv'},body:'x'.repeat(10*1024*1024+1)});assert.equal(oversized.status,413);assert.match(oversized.headers.get('content-type')||'',/application\/json/);assert.match((await oversized.json()).error,/۱۰|حجم|MiB/i);
+  const queued=await call(db,'/api/profiles/sheet-ui/sync',jsonInit({target:'woo'})),job=(await queued.json()).job;assert.equal(queued.status,202);assert.equal(job.kind,'sync');assert.equal(job.target,'woo');
 });
 
 function jsonResponse(body,status=200,headers={}){return new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json',...headers}})}

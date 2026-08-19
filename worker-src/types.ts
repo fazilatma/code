@@ -79,6 +79,8 @@ export type Product = {
   variations?: string[];
   variationGroups?: VariationGroup[];
   variationPrices?: Record<string,number>;
+  /** WooCommerce publication status selected during spreadsheet import. */
+  destinationStatus?: 'draft' | 'publish' | 'pending' | 'private';
   sourcePage: string;
   scrapedAt: string;
 };

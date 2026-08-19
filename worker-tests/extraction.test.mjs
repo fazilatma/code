@@ -132,6 +132,17 @@ test('mobile RTL redesign keeps the requested bottom navigation order and touch-
   assert.match(source,/--bg:#050a13;--card:#121d30/);assert.match(source,/\.main-tabs\{top:auto!important;bottom:0!important/);assert.match(source,/env\(safe-area-inset-bottom\)/);assert.match(source,/\.hamburger,\.fullwidth-btn\{top:12px;width:52px;height:52px/);assert.match(source,/input,select,textarea\{min-height:50px/);assert.match(source,/\$\('productBadge'\)\.hidden=!data\.total/);
 });
 
+test('workflow panes match the reference hierarchy and every new control is operationally wired',async()=>{
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
+  for(const id of ['releaseBanner','homeProfile','homeAutoMode','homeManualMode','homeScrape','homeDiagnose','homeBackend','homeJobs','settingsProfile','savePriceSettings','sendProfile','quickWoo','quickBasalam','destinationJobs','importProfile','importStatus','importFile','importAnalyze','importResult'])assert.equal((source.match(new RegExp(`id="${id}"`,'g'))||[]).length,1,`${id} must be unique`);
+  for(const id of ['titleSuffix','priceMode','priceValue','roundPrice','minPrice','wooCategoryId','basalamCategoryId','basalamFallbackCategoryIds','enabled','networkIndirect','noExtract','syncWoo','syncBasalam'])assert.equal((source.match(new RegExp(`id="${id}"`,'g'))||[]).length,1,`${id} moved to settings without duplication`);
+  const settings=source.slice(source.indexOf('<section id="pane-settings"'),source.indexOf('<nav class="main-tabs"'));assert.match(settings,/مدیریت قیمت/);assert.match(settings,/دسته‌بندی جداگانه برای هر مقصد/);assert.match(settings,/settings-help/);
+  const destination=source.slice(source.indexOf('<section id="pane-destination"'),source.indexOf('<section id="pane-jobs"'));assert.match(destination,/ارسال سریع محصولات/);assert.match(destination,/مدیریت جامع مقصد/);
+  const jobs=source.slice(source.indexOf('<section id="pane-jobs"'),source.indexOf('<section id="pane-settings"'));assert.match(jobs,/آپلود فایل CSV یا Excel/);assert.match(jobs,/file-picker/);
+  assert.match(source,/createJob\(\$\('sendProfile'\)\.value,'sync','woo',false\)/);assert.match(source,/createJob\(\$\('sendProfile'\)\.value,'sync','basalam',false\)/);assert.match(source,/importCsv\(\$\('importFile'\)\.files\[0\]/);assert.match(source,/saveProfile\(false,true\)/);
+  const appSource=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');assert.match(appSource,/read-excel-file\/web-worker/);assert.match(appSource,/destinationStatus:wooStatus\|\|undefined/);
+});
+
 test('processor refuses unsafe retirement after empty, duplicate or failed extraction and preserves detail tags',async()=>{
   const source=await readFile(new URL('../worker-src/processor.ts',import.meta.url),'utf8');assert.match(source,/checkpoint\.retireSafe=false;[\s\S]*صفحه.*خالی/);assert.match(source,/فقط محصولات تکراری/);assert.match(source,/if\(checkpoint\.retireSafe&&checkpoint\.seen\.length\)/);assert.match(source,/هیچ محصولی بازنشسته نشد/);assert.match(source,/tags:fresh\.tags\|\|previous\.tags/);
 });
