@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-08-19T00:22:12.425Z",
+  "generatedAt": "2026-08-19T00:31:39.027Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 63,
-    "menuActions": 47
+    "routes": 70,
+    "menuActions": 51
   },
   "routes": [
     "GET /health",
@@ -14,6 +14,7 @@
     "GET /dashboard.js",
     "GET /visual",
     "POST /api/visual-ticket",
+    "GET /api/version",
     "GET /api/status",
     "GET /api/selftest",
     "GET /api/parity",
@@ -49,6 +50,10 @@
     "GET /api/destination/:target/products",
     "GET /api/destination/:target/overview",
     "GET /api/destination/:target/duplicates",
+    "GET /api/destination/:target/suffix-report",
+    "POST /api/destination/woo/deduplicate",
+    "GET /api/destination/basalam/rejected",
+    "POST /api/destination/basalam/:id/fix-category",
     "POST /api/destination/:target/:id/status",
     "DELETE /api/destination/:target/:id",
     "POST /api/products/:profileId/:sourceKey/sync/:target",
@@ -62,6 +67,7 @@
     "POST /api/profiles/:id/scrape",
     "POST /api/profiles/:id/sync",
     "GET /api/jobs",
+    "GET /api/jobs/:id/events",
     "GET /api/jobs/:id",
     "POST /api/jobs/:id/stop",
     "POST /api/jobs/:id/retry",
@@ -70,6 +76,7 @@
     "GET /api/profiles/:id/products",
     "GET /api/profiles/:id/export.csv",
     "POST /api/profiles/:id/import",
+    "POST /api/gallery-suggest",
     "POST /api/test-selector",
     "POST /api/import-php"
   ],
@@ -82,6 +89,8 @@
     "ar-run",
     "ar-test",
     "backup",
+    "basalam-fix-category",
+    "basalam-rejected",
     "bulk-apply",
     "bulk-preview",
     "cat-learn",
@@ -118,9 +127,11 @@
     "selftest",
     "source-test",
     "stats",
+    "suffix-report",
     "test-basalam",
     "test-woo",
-    "watchdog"
+    "watchdog",
+    "woo-dedup"
   ],
   "featureGroups": {
     "profile": {
@@ -145,7 +156,7 @@
         "extract_report",
         "extract_queue_status"
       ],
-      "coveredByDedicatedTsRoute": 1
+      "coveredByDedicatedTsRoute": 2
     },
     "importExport": {
       "phpItems": [
@@ -207,7 +218,7 @@
         "suffix_report",
         "remote_map"
       ],
-      "coveredByDedicatedTsRoute": 2
+      "coveredByDedicatedTsRoute": 3
     },
     "automation": {
       "phpItems": [

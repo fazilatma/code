@@ -97,6 +97,8 @@ export async function mapLimit<T>(items: T[], limit: number, fn: (item: T, index
   }));
 }
 
+export async function suggestGallery(url:string):Promise<Array<{selector:string;count:number;sample:string[]}>>{const {text,url:final}=await safeText(url,5_000_000),$=cheerio.load(text),candidates=['.woocommerce-product-gallery img','.product-gallery img','.gallery img','[class*=gallery] img','[class*=thumb] img','img[data-large_image]','img[data-src]','main img','article img'],results:Array<{selector:string;count:number;sample:string[]}>=[];for(const selector of candidates){const images=new Set<string>();$(selector).each((_i,el)=>{const node=$(el),raw=node.attr('data-large_image')||node.attr('data-src')||node.attr('src')||'',value=absolute(raw,final);if(value&&!value.startsWith('data:'))images.add(value)});if(images.size)results.push({selector,count:images.size,sample:[...images].slice(0,5)})}return results.sort((a,b)=>b.count-a.count)}
+
 export async function testSelector(url: string, selector: string, type = 'text'): Promise<{ count: number; values: string[] }> {
   const { text, url: final } = await safeText(url, 4_000_000); const $ = cheerio.load(text); const values: string[] = [];
   $(selector).slice(0, 20).each((_i, el) => { const node = $(el); let value = type === 'link' ? absolute(node.attr('href') || '', final) : type === 'image' ? absolute(node.attr('src') || node.attr('data-src') || '', final) : normalize(node.text()); if (value) values.push(value.slice(0, 1000)); });

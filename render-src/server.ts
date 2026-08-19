@@ -1,8 +1,8 @@
 import { serve } from '@hono/node-server';
 import { timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
-import { cors } from 'hono/cors';
 import { secureHeaders } from 'hono/secure-headers';
+import { streamSSE } from 'hono/streaming';
 import { aiCall, aiProviders, getLeaderboard, recordVote, testAllModels } from './ai.js';
 import { automationTick, autoreplyLogs, autoreplyRun, basalamChats, basalamOrders, digest, generateReply } from './automation.js';
 import { config, assertConfig } from './config.js';
@@ -13,11 +13,12 @@ import { DEFAULT_SELECTORS, type Product, type Profile } from './types.js';
 import { safeFetch, safeText } from './network.js';
 import { sendNotification } from './notifications.js';
 import { PHP_MENU_CAPABILITIES, runSelftest } from './parity.js';
-import { bulkEdit, destinationChangeStatus, destinationDelete, destinationOverview, findDestinationDuplicates, listDestinationProducts, photoFix, rebuildMap, recon, retire } from './maintenance.js';
-import { numberFromText, testSelector } from './scraper.js';
+import { bulkEdit, deduplicateWoo, destinationChangeStatus, destinationDelete, destinationOverview, findDestinationDuplicates, fixBasalamCategory, listDestinationProducts, photoFix, rebuildMap, recon, rejectedBasalam, retire, suffixReport } from './maintenance.js';
+import { numberFromText, suggestGallery, testSelector } from './scraper.js';
 import { syncBasalam, syncWoo } from './sync.js';
 import { createPhpSettingsBundle, decodePhpSettingsBundle, stateKeyForFile } from './settings-transfer.js';
 import { createVisualTicket, renderVisualSelector } from './visual.js';
+import { APP_BUILD_DATE, APP_RELEASE, APP_VERSION } from './version.js';
 import { workerLoop, requestWorkerStop } from './processor.js';
 
 let databaseReady = false;
@@ -47,11 +48,13 @@ const dashboardHeaders = secureHeaders({
   }
 });
 app.use('*', async (c, next) => c.req.path === '/visual' ? next() : dashboardHeaders(c, next));
-app.use('/api/*', cors({ origin: origin => origin, allowHeaders: ['authorization','content-type'], allowMethods: ['GET','POST','PUT','DELETE'] }));
 app.onError((error, c) => { console.error(error); return c.json({ ok: false, error: error.message }, 500); });
 app.get('/health', c => c.json({
   ok: true,
   app: 'scraper4-render',
+  version: APP_VERSION,
+  buildDate: APP_BUILD_DATE,
+  release: APP_RELEASE,
   runtime: process.version,
   databaseReady,
   databaseError: databaseReady ? null : databaseError,
@@ -88,7 +91,8 @@ app.post('/api/visual-ticket', async c => {
   if (!['http:', 'https:'].includes(url.protocol)) return c.json({ ok: false, error: 'Invalid visual selector URL' }, 400);
   return c.json({ ok: true, ticket: createVisualTicket(url.href), expiresIn: 300 });
 });
-app.get('/api/status', async c => { const connections=await loadConnections(); return c.json({ ok:true,profiles:(await listProfiles()).length,jobs:await listJobs(10),connections:connectionStatus(connections) }); });
+app.get('/api/version',c=>c.json({ok:true,version:APP_VERSION,buildDate:APP_BUILD_DATE,release:APP_RELEASE}));
+app.get('/api/status', async c => { const connections=await loadConnections(); return c.json({ ok:true,version:APP_VERSION,buildDate:APP_BUILD_DATE,profiles:(await listProfiles()).length,jobs:await listJobs(10),connections:connectionStatus(connections) }); });
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES}));
 app.get('/api/connections', async c => c.json({ok:true,connections:await loadConnections(true)}));
@@ -139,6 +143,10 @@ app.post('/api/maintenance/photo-fix',async c=>{const body=await c.req.json() as
 app.get('/api/destination/:target/products',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const all=await listDestinationProducts(target as any),q=String(c.req.query('q')||'').toLowerCase(),filtered=q?all.filter(x=>x.name.toLowerCase().includes(q)||String(x.id)===q):all,limit=Math.min(200,Number(c.req.query('limit'))||50),offset=Math.max(0,Number(c.req.query('offset'))||0);return c.json({ok:true,total:filtered.length,items:filtered.slice(offset,offset+limit)})});
 app.get('/api/destination/:target/overview',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);return c.json({ok:true,...await destinationOverview(target as any)})});
 app.get('/api/destination/:target/duplicates',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);return c.json({ok:true,groups:await findDestinationDuplicates(target as any)})});
+app.get('/api/destination/:target/suffix-report',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);return c.json(await suffixReport(target as any))});
+app.post('/api/destination/woo/deduplicate',async c=>{const body=await c.req.json().catch(()=>({})) as any;return c.json(await deduplicateWoo(body.confirm==='APPLY'))});
+app.get('/api/destination/basalam/rejected',async c=>c.json({ok:true,items:await rejectedBasalam()}));
+app.post('/api/destination/basalam/:id/fix-category',async c=>{const body=await c.req.json() as any;if(body.confirm!=='APPLY')return c.json({ok:false,error:'confirm APPLY is required'},400);return c.json(await fixBasalamCategory(Number(c.req.param('id')),Number(body.categoryId)))});
 app.post('/api/destination/:target/:id/status',async c=>{const target=c.req.param('target'),body=await c.req.json() as any;if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);if(body.confirm!=='APPLY')return c.json({ok:false,error:'confirm APPLY is required'},400);return c.json(await destinationChangeStatus(target as any,Number(c.req.param('id')),String(body.status||'')))});
 app.delete('/api/destination/:target/:id',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);if(c.req.query('confirm')!=='DELETE')return c.json({ok:false,error:'confirm DELETE is required'},400);return c.json(await destinationDelete(target as any,Number(c.req.param('id')),c.req.query('force')==='true'))});
 app.post('/api/products/:profileId/:sourceKey/sync/:target',async c=>{const profile=await getProfile(c.req.param('profileId')),product=await getProduct(c.req.param('profileId'),c.req.param('sourceKey')),target=c.req.param('target');if(!profile||!product)return c.json({ok:false,error:'Product/profile not found'},404);if(target==='woo')return c.json({ok:true,result:await syncWoo(product,profile)});if(target==='basalam')return c.json({ok:true,result:await syncBasalam(product,profile)});return c.json({ok:false,error:'Invalid target'},400)});
@@ -168,6 +176,7 @@ app.post('/api/profiles/:id/sync', async c => {
   return c.json({ ok: true, job: await createJob(profile.id, 'sync', validTarget(body.target || 'both')) }, 202);
 });
 app.get('/api/jobs', async c => c.json({ ok: true, jobs: await listJobs(Math.min(200, Number(c.req.query('limit')) || 50)) }));
+app.get('/api/jobs/:id/events',c=>streamSSE(c,async stream=>{let last='',seq=0;for(let i=0;i<600;i++){const job=await getJob(c.req.param('id'));if(!job){await stream.writeSSE({event:'error',data:JSON.stringify({error:'Job not found'}),id:String(++seq)});break}const data=JSON.stringify(job);if(data!==last){await stream.writeSSE({event:'progress',data,id:String(++seq)});last=data}if(!['queued','running'].includes(job.status)){await stream.writeSSE({event:'done',data,id:String(++seq)});break}await stream.sleep(1000)}}));
 app.get('/api/jobs/:id', async c => { const job = await getJob(c.req.param('id')); return job ? c.json({ ok: true, job }) : c.json({ ok: false, error: 'Job not found' }, 404); });
 app.post('/api/jobs/:id/stop', async c => { await updateJob(c.req.param('id'), { stopRequested: true }); return c.json({ ok: true }); });
 app.post('/api/jobs/:id/retry',async c=>{const job=await retryJob(c.req.param('id'));return job?c.json({ok:true,job}):c.json({ok:false,error:'Job cannot be retried'},409)});
@@ -179,6 +188,7 @@ app.get('/api/profiles/:id/products', async c => {
 });
 app.get('/api/profiles/:id/export.csv',async c=>{const result=await listProducts(c.req.param('id'),100000,0,''),fields=['sourceKey','title','price','url','image','sku','brand','stock','weight','category','shortDesc','longDesc'],csv='\uFEFF'+fields.join(',')+'\n'+result.products.map(p=>fields.map(field=>csvCell((p as any)[field])).join(',')).join('\n');return c.body(csv,200,{'content-type':'text/csv; charset=utf-8','content-disposition':`attachment; filename="${c.req.param('id').replace(/[^a-z0-9_.-]/gi,'_')}.csv"`})});
 app.post('/api/profiles/:id/import',async c=>{const profile=await getProfile(c.req.param('id'));if(!profile)return c.json({ok:false,error:'Profile not found'},404);const body=await c.req.json() as any,rows=Array.isArray(body.rows)?body.rows:typeof body.csv==='string'?parseCsv(body.csv):[];let imported=0,failed=0;const errors:string[]=[];for(const [index,row] of rows.entries())try{const title=String(row.title||row.name||'').trim();if(!title)throw Error('title is empty');const key=String(row.sourceKey||row.key||crypto.randomUUID()),image=String(row.image||'');await upsertProduct(profile.id,{sourceKey:key,title,price:numberFromText(String(row.price||0)),priceText:String(row.price||''),url:String(row.url||row.link||''),image,images:image?[image]:[],sku:String(row.sku||''),brand:String(row.brand||''),stock:row.stock==null?undefined:Number(row.stock),weight:row.weight==null?undefined:Number(row.weight),category:String(row.category||''),shortDesc:String(row.shortDesc||''),longDesc:String(row.longDesc||''),sourcePage:'import',scrapedAt:new Date().toISOString()});imported++}catch(error){failed++;if(errors.length<50)errors.push(`row ${index+1}: ${error instanceof Error?error.message:String(error)}`)}return c.json({ok:failed===0,imported,failed,errors})});
+app.post('/api/gallery-suggest',async c=>{const body=await c.req.json() as any;return c.json({ok:true,suggestions:await suggestGallery(String(body.url||''))})});
 app.post('/api/test-selector', async c => {
   const body = await c.req.json() as any; return c.json({ ok: true, ...await testSelector(String(body.url || ''), String(body.selector || ''), String(body.type || 'text')) });
 });
