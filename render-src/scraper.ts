@@ -33,6 +33,9 @@ export function pageUrl(profile: Profile, page: number): string {
 
 export async function scrapeList(url: string, selectors: Selectors): Promise<Product[]> {
   const { text, url: finalUrl } = await safeText(url);
+  return parseProductHtml(text,finalUrl,selectors);
+}
+export function parseProductHtml(text:string,finalUrl:string,selectors:Selectors):Product[]{
   const $ = cheerio.load(text); const products: Product[] = [];
   $(selectors.container).each((_index, element) => {
     const root = $(element); const title = firstText(root, selectors.title); if (!title) return;

@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-08-19T00:31:39.027Z",
+  "generatedAt": "2026-08-19T00:37:00.982Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 70,
-    "menuActions": 51
+    "routes": 72,
+    "menuActions": 52
   },
   "routes": [
     "GET /health",
@@ -74,6 +74,8 @@
     "DELETE /api/jobs/:id",
     "DELETE /api/jobs",
     "GET /api/profiles/:id/products",
+    "GET /api/profiles/:id/export.xlsx",
+    "POST /api/profiles/:id/import.xlsx",
     "GET /api/profiles/:id/export.csv",
     "POST /api/profiles/:id/import",
     "POST /api/gallery-suggest",
@@ -131,7 +133,8 @@
     "test-basalam",
     "test-woo",
     "watchdog",
-    "woo-dedup"
+    "woo-dedup",
+    "xlsx-export"
   ],
   "featureGroups": {
     "profile": {

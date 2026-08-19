@@ -1,6 +1,6 @@
 {
   "name": "scraper4-render",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "private": true,
   "description": "Render-native product scraper and WooCommerce/Basalam synchronizer",
   "type": "module",
@@ -21,9 +21,15 @@
   "dependencies": {
     "@hono/node-server": "^1.19.1",
     "cheerio": "^1.1.2",
+    "exceljs": "^4.4.0",
     "hono": "^4.13.3",
     "pg": "^8.16.3",
     "undici": "^7.29.0"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

@@ -1,5 +1,11 @@
 # Render TypeScript changelog
 
+## 1.9.0 — 2026-08-19
+
+- Added native XLSX import/export with styled worksheets.
+- Added fixture-based parser regression tests for Persian prices, relative URLs and stable product keys.
+- Expanded versioned parity work for legacy import workflows.
+
 ## 1.8.0 — 2026-08-19
 
 - Added full-source PHP/TypeScript parity audit (`npm run parity:audit`).
