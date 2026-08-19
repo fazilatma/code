@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.19.1 — 2026-08-19
+
+- Reorganized destination management into sticky target/status/view controls.
+- Added responsive card and table modes with synchronized selection.
+- Replaced prompt-based editing with a visual modal and destination category lists.
+- Added quick WooCommerce deduplication and Basalam AI category correction controls.
+- Added a 30-second remote product cache with explicit fresh refresh and mutation invalidation.
+
 ## 2.19.0 — 2026-08-19
 
 - Added a dedicated comprehensive destination-management tab for WooCommerce and Basalam.
