@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.84';
+const APP_VERSION = '9.85';
 const APP_VERSION_DATE = '1405/05/28';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4367,14 +4367,33 @@ $containerPatterns = [
 ['selector' => 'div.col', 'xpath' => "//div[contains(@class,'col') and .//a and .//img]"],
 ['selector' => 'div.item', 'xpath' => "//div[contains(@class,'item') and .//a and .//img]"],
 ['selector' => 'li.col', 'xpath' => "//li[contains(@class,'col')]"],
+/* v9.85: پوششِ قالب‌هایی مثل books.toscrape.com که نامِ کلاسشان
+   product_pod / product-box است و نیز ظرفِ شبکه‌ایِ عمومی. */
+['selector' => 'article', 'xpath' => "//article[.//a[@href] and .//img]"],
+['selector' => 'li', 'xpath' => "//li[.//a[@href] and .//img and .//*[contains(@class,'price')]]"],
 ];
 
 foreach ($containerPatterns as $p) {
 $nodes = @$xp->query($p['xpath']);
 if ($nodes && $nodes->length >= 2) {
-$suggestions['container'][] = ['selector' => $p['selector'], 'count' => $nodes->length];
+/* 🐞 v9.85: پیشنهادی که هیچ محصولِ سالمی نمی‌دهد نباید نمایش داده شود.
+   نمونهٔ واقعی: div.product در books.toscrape.com روی ۲۰ عدد
+   div.product_price تطبیق می‌خورد (بدون لینک و بدون عنوان) و کاربر با
+   دیدن «۲۰ مورد» آن را انتخاب می‌کرد و خروجی صفر می‌گرفت. */
+$usable = 0;
+foreach ($nodes as $n) {
+$l = @$xp->query('.//a[@href]', $n);
+$t = @$xp->query('.//h1|.//h2|.//h3|.//h4|.//a[@title]|.//*[contains(@class,"title")]', $n);
+$i = @$xp->query('.//img', $n);
+if (($l && $l->length) && (($t && $t->length) || ($i && $i->length))) $usable++;
+}
+if ($usable >= 2) {
+$suggestions['container'][] = ['selector' => $p['selector'], 'count' => $usable];
 }
 }
+}
+/* بهترین پیشنهاد اول: بیشترین تعدادِ محصولِ سالم */
+usort($suggestions['container'], fn($a, $b) => $b['count'] <=> $a['count']);
 
 $titlePatterns = [
 ['selector' => 'h2.title', 'xpath' => ".//h2[contains(@class,'title')]"],
@@ -6238,6 +6257,42 @@ if ($len > $bestLen) { $bestLen = $len; $best = $m; }
 if ($best) return trim($best[1] . ' ' . $best[2]);
 }
 
+/* v9.85: ارزهای غیرایرانی (£ $ € ¥ ₽ ₺ ﷼ و کدهای سه‌حرفی).
+   🐞 قبلاً این تابع فقط سه الگو داشت و هر سه ایران‌محور بودند: «عدد + تومان/
+   ریال»، «گروه‌های سه‌رقمیِ جداشده» و «عددِ چهاررقمی به بالا». نتیجه این بود
+   که £51.77 و $19.99 و €9,99 هیچ‌کدام قیمت شناخته نمی‌شدند و رشتهٔ خالی
+   برمی‌گشت. قیمتِ خالی هم یعنی محصول به صف «تکمیل قیمت/تصویر» می‌رفت و برای
+   هر کالا سه تلاش اضافه انجام می‌شد — کندیِ بی‌دلیل روی هر سایت خارجی.
+   این شاخه عمداً بعد از شاخهٔ تومان/ریال آمده تا رفتار سایت‌های ایرانی
+   ذره‌ای تغییر نکند. */
+$cur = '£|\$|€|¥|₽|₺|₹|﷼|USD|EUR|GBP|AED|TRY|CAD|AUD|CHF|JPY|CNY';
+$num = '[\d۰-۹٠-٩]{1,3}(?:[,\s\x{202F}\x{00A0}][\d۰-۹٠-٩]{3})+(?:[.٫][\d۰-۹٠-٩]{1,2})?|[\d۰-۹٠-٩]+(?:[.,٫][\d۰-۹٠-٩]{1,2})?(?![\d۰-۹٠-٩])';
+if (preg_match_all('~(?:(' . $cur . ')\s*(' . $num . '))|(?:(' . $num . ')\s*(' . $cur . '))~ui', $text, $matches, PREG_SET_ORDER)) {
+$best = null; $bestVal = -1;
+foreach ($matches as $m) {
+$sym = (($m[1] ?? '') !== '') ? $m[1] : ($m[4] ?? '');
+$raw = (($m[2] ?? '') !== '') ? $m[2] : ($m[3] ?? '');
+if ($raw === '' || $sym === '') continue;
+$en = str_replace(['۰','۱','۲','۳','۴','۵','۶','۷','۸','۹'], ['0','1','2','3','4','5','6','7','8','9'], $raw);
+$en = str_replace(['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'], ['0','1','2','3','4','5','6','7','8','9'], $en);
+$en = str_replace('٫', '.', $en);
+/* جداکنندهٔ اعشار در اروپا «,» است (19,99) ولی در انگلیسی «,» هزارگان
+   است (1,299). قاعده: اگر آخرین «,» فقط ۱ یا ۲ رقم بعد از خود دارد و
+   نقطه‌ای در کار نیست، اعشار است؛ در غیر این صورت جداکنندهٔ هزارگان. */
+if (strpos($en, '.') === false && preg_match('~,(\d{1,2})$~', $en)) {
+$en = preg_replace('~,(\d{1,2})$~', '.$1', $en);
+}
+$en = preg_replace('~[,\s\x{202F}\x{00A0}]~u', '', $en);
+$val = (float)$en;
+if ($val <= 0) continue;
+/* بزرگ‌ترین مبلغ برنده است: در «£10 £51.77» معمولاً دومی قیمت اصلی است.
+   خودِ متنِ تطبیق‌یافته برگردانده می‌شود تا ترتیب اصلی حفظ شود:
+   «£51.77» و «51.77 GBP» هر کدام به شکل خودشان. */
+if ($val > $bestVal) { $bestVal = $val; $best = normalize_text($m[0]); }
+}
+if ($best !== null) return $best;
+}
+
 if (preg_match_all('~([\d۰-۹٠-٩]{1,3}(?:'.$sep.'[\d۰-۹٠-٩]{3})+)~u', $text, $matches)) {
 $candidates = [];
 foreach ($matches[1] as $match) {
@@ -6296,50 +6351,162 @@ function xpClassCond(string $class, bool $strict): string {
         : "contains(@class,'" . $class . "')";
 }
 
+/**
+ * v9.85: یک رشته را به «لیترالِ» امنِ XPath تبدیل می‌کند.
+ * XPath 1.0 کاراکتر گریز ندارد، پس رشته‌ای که هم ' و هم " دارد باید با
+ * concat() ساخته شود. بدون این، سلکتوری مثل a[title*="Don't"] عبارت را
+ * خراب می‌کرد و query بی‌صدا false برمی‌گرداند.
+ */
+function xpLit(string $s): string {
+    if (strpos($s, "'") === false) return "'" . $s . "'";
+    if (strpos($s, '"') === false) return '"' . $s . '"';
+    return "concat('" . str_replace("'", "',\"'\",'", $s) . "')";
+}
+
+/**
+ * v9.85: یک «گام» از سلکتور (یک توکن بدون فاصله) را به بخش XPath تبدیل
+ * می‌کند: نام تگ + هر تعداد کلاس + شناسه + هر تعداد ویژگی + شبه‌کلاس‌های
+ * موقعیتی. اگر چیزی را نفهمید رشتهٔ خالی برمی‌گرداند تا فراخوان بداند
+ * ترجمه شکست خورده — نه اینکه بی‌صدا به «همه‌چیز» تبدیلش کند.
+ */
+function cssStepToXpath(string $step, bool $strictClass): string {
+    $step = trim($step);
+    if ($step === '') return '';
+    if ($step === '*') return '*';
+
+    $tag = '*';
+    $conds = [];
+    $i = 0;
+    $len = strlen($step);
+
+    if (preg_match('~^([A-Za-z][\w-]*)~', $step, $m)) {
+        $tag = strtolower($m[1]);
+        $i = strlen($m[1]);
+    }
+
+    while ($i < $len) {
+        $rest = substr($step, $i);
+        $ch = $step[$i];
+
+        if ($ch === '.') {
+            if (!preg_match('~^\.([\w-]+)~', $rest, $m)) return '';
+            $conds[] = xpClassCond($m[1], $strictClass);
+            $i += strlen($m[0]);
+            continue;
+        }
+
+        if ($ch === '#') {
+            if (!preg_match('~^#([\w:-]+)~', $rest, $m)) return '';
+            $conds[] = '@id=' . xpLit($m[1]);
+            $i += strlen($m[0]);
+            continue;
+        }
+
+        if ($ch === '[') {
+            $close = strpos($step, ']', $i);
+            if ($close === false) return '';
+            $inner = substr($step, $i + 1, $close - $i - 1);
+            $i = $close + 1;
+            if (!preg_match('~^\s*([\w:.-]+)\s*(?:([*^$]?=)\s*(.*?))?\s*$~', $inner, $m)) return '';
+            $attr = '@' . $m[1];
+            if (!isset($m[2]) || $m[2] === '') { $conds[] = $attr; continue; }
+            $val = trim($m[3]);
+            if (mb_strlen($val) >= 2) {
+                $q0 = mb_substr($val, 0, 1);
+                $q1 = mb_substr($val, -1);
+                if (($q0 === '"' && $q1 === '"') || ($q0 === "'" && $q1 === "'")) $val = mb_substr($val, 1, -1);
+            }
+            $lit = xpLit($val);
+            if ($m[2] === '=')      { $conds[] = $attr . '=' . $lit; }
+            elseif ($m[2] === '*=') { $conds[] = 'contains(' . $attr . ',' . $lit . ')'; }
+            elseif ($m[2] === '^=') { $conds[] = 'starts-with(' . $attr . ',' . $lit . ')'; }
+            elseif ($m[2] === '$=') {
+                // XPath 1.0 ends-with ندارد؛ با substring ساخته می‌شود
+                $n = mb_strlen($val);
+                $conds[] = 'substring(' . $attr . ',string-length(' . $attr . ')-' . ($n - 1) . ')=' . $lit;
+            } else return '';
+            continue;
+        }
+
+        if ($ch === ':') {
+            if (preg_match('~^::?nth-child\((\d+)\)~', $rest, $m)) {
+                $conds[] = 'count(preceding-sibling::*)=' . ((int)$m[1] - 1);
+                $i += strlen($m[0]);
+                continue;
+            }
+            if (preg_match('~^::?first-child~', $rest, $m)) {
+                $conds[] = 'count(preceding-sibling::*)=0';
+                $i += strlen($m[0]);
+                continue;
+            }
+            if (preg_match('~^::?last-child~', $rest, $m)) {
+                $conds[] = 'count(following-sibling::*)=0';
+                $i += strlen($m[0]);
+                continue;
+            }
+            return '';   // :hover، :not(...) و بقیه — ترجمه نمی‌شوند
+        }
+
+        return '';       // کاراکتر ناشناخته
+    }
+
+    return $conds ? $tag . '[' . implode(' and ', $conds) . ']' : $tag;
+}
+
+/**
+ * v9.85: مبدل CSS→XPath واقعی.
+ *
+ * 🐞 نسخهٔ قبلی فقط پنج شکل خیلی ساده را می‌شناخت و هر چیز دیگری را بی‌صدا
+ * به «//*» تبدیل می‌کرد — یعنی «هر عنصری در کل صفحه». آن‌وقت
+ * parse_with_selectors چهارصد گره را ظرفِ محصول حساب می‌کرد، extractSmartLink
+ * برای تقریباً همه‌شان به یک لینک مشترک می‌رسید، productKey همه را یک کلید
+ * می‌دید و ته کار «یک محصول» در می‌آمد. سلکتورهایی مثل «ol.row > li» یا
+ * «div.a, div.b» یا «li:nth-child(2)» دقیقاً به همین دام می‌افتادند.
+ *
+ * حالا پشتیبانی می‌شوند: گروه (a, b)، فرزند مستقیم (a > b)، نواده (a b)،
+ * چند کلاس در یک گام، شناسه، چند ویژگی با = و *= و ^= و $= و حضور ساده،
+ * و :nth-child(n) / :first-child / :last-child.
+ *
+ * اگر باز هم چیزی قابل ترجمه نبود، رشتهٔ خالی برمی‌گردد نه «//*». خالی یعنی
+ * «نمی‌دانم» که فراخوان می‌تواند درست مدیریتش کند؛ «//*» یعنی «همه‌چیز» که
+ * همیشه جواب غلط و بی‌سروصدا می‌دهد.
+ */
 function cssToXpath(string $css, bool $strictClass = false): string {
-$css = trim($css);
-if (!$css) return '';
+    $css = trim($css);
+    if ($css === '') return '';
 
-if (preg_match('~^#([\w-]+)$~', $css, $m)) {
-return "//*[@id='" . $m[1] . "']";
-}
+    // گروه: هر شاخه جدا ترجمه و با | به هم وصل می‌شود
+    if (strpos($css, ',') !== false) {
+        $out = [];
+        foreach (explode(',', $css) as $branch) {
+            $branch = trim($branch);
+            if ($branch === '') continue;
+            $one = cssToXpath($branch, $strictClass);
+            if ($one === '') return '';   // یک شاخهٔ نامفهوم کل گروه را باطل می‌کند
+            $out[] = $one;
+        }
+        return $out ? implode(' | ', $out) : '';
+    }
 
-if (preg_match('~^([\w]+)?((?:\.[\w-]+)+)$~', $css, $m)) {
-$tag = $m[1] ?: '*';
-$classes = array_filter(explode('.', $m[2]));
-$cond = implode(' and ', array_map(fn($c) => xpClassCond($c, $strictClass), $classes));
-return "//" . $tag . "[$cond]";
-}
+    // ترکیب‌گرها را به توکن مستقل تبدیل کن؛ + و ~ پشتیبانی نمی‌شوند
+    /* 🐞 v9.85: اینجا قبلاً '~[+~]~' نوشته شده بود. کاراکتر ~ داخل کلاسِ
+       کاراکتری، خودِ جداکنندهٔ الگو را می‌بست و PHP خطای «Unknown modifier ]»
+       می‌داد. این warning وسط جریان SSE/JSON چاپ می‌شد و خروجی را خراب می‌کرد. */
+    if (preg_match('/[+~]/', $css)) return '';
+    $norm = preg_replace('~\s*>\s*~', ' > ', $css);
+    $tokens = preg_split('~\s+~', trim($norm), -1, PREG_SPLIT_NO_EMPTY);
+    if (!$tokens) return '';
 
-if (preg_match('~^[\w]+$~', $css)) {
-return "//" . $css;
-}
-
-if (preg_match('~^([\w]+)\[(\w+)=["\']?([^"\']+)["\']?\]$~', $css, $m)) {
-return "//" . $m[1] . "[@" . $m[2] . "='" . $m[3] . "']";
-}
-
-if (preg_match('~^([\w]+)\[(\w+)\*=["\']?([^"\']+)["\']?\]$~', $css, $m)) {
-return "//" . $m[1] . "[contains(@" . $m[2] . ",'" . $m[3] . "')]";
-}
-
-$parts = preg_split('~\s+~', $css);
-if (count($parts) > 1) {
-$xpath = '';
-foreach ($parts as $i => $part) {
-$part = trim($part);
-if (preg_match('~^([\w]+)?(\.[\w-]+)?$~', $part, $m)) {
-$tag = $m[1] ?: '*';
-$class = isset($m[2]) ? ltrim($m[2], '.') : '';
-$xpath .= ($i === 0 ? '//' : '//');
-$xpath .= $tag;
-if ($class) $xpath .= '[' . xpClassCond($class, $strictClass) . ']';
-}
-}
-return $xpath;
-}
-
-return "//*";
+    $xpath = '';
+    $axis = '//';
+    foreach ($tokens as $tok) {
+        if ($tok === '>') { $axis = '/'; continue; }
+        $stepXp = cssStepToXpath($tok, $strictClass);
+        if ($stepXp === '') return '';
+        $xpath .= $axis . $stepXp;
+        $axis = '//';
+    }
+    return $xpath;
 }
 
 function extractSmartLink($node, $xp, string $baseUrl): string {
@@ -6938,6 +7105,58 @@ if (!$containers || $containers->length === 0) {
 }
 if (!$containers || $containers->length === 0) return [];
 
+/* 🐞 v9.85 — علتِ اصلیِ «فقط ۱ محصول استخراج شد».
+   وقتی کاربر در انتخابگر بصری روی کارت محصول کلیک می‌کند، گاهی سلکتوری
+   ساخته/ذخیره می‌شود که به ظرفِ *بیرونی* اشاره دارد و در کل صفحه فقط یک
+   تطبیق دارد (مثل ol.row یا div.col-md-9 یا section). آن‌وقت این حلقه یک
+   بار اجرا می‌شود و چون queryInside فقط item(0) را برمی‌دارد، از میان ۲۰
+   کالا فقط اولی بیرون می‌آید — دقیقاً چیزی که در books.toscrape.com و
+   mantoopatris دیده شد.
+   راه‌حل: اگر ظرف یکتاست ولی سلکتورِ عنوان/قیمت/لینک داخلش چند تطبیق دارد،
+   یعنی ظرفِ واقعی یک لایه پایین‌تر است. پس دنبال آن نسلِ مشترکی می‌گردیم که
+   تعدادش با تعداد آیتم‌های داخلی می‌خواند و آن را ظرف در نظر می‌گیریم. */
+if ($containers->length === 1) {
+    $probe = '';
+    foreach (['title', 'price', 'link', 'image'] as $f) {
+        if (!empty($sel[$f])) { $probe = $sel[$f]; break; }
+    }
+    $inner = $probe ? queryInside($xp, $containers->item(0), $probe) : null;
+    if (!$inner || $inner->length < 2) {
+        /* اگر سلکتور فیلدی نداریم، از نشانه‌های عمومیِ «کارت» کمک بگیر */
+        foreach (['.//h2|.//h3|.//h4', './/a[@href][.//img]', './/img'] as $q) {
+            $t = @$xp->query($q, $containers->item(0));
+            if ($t && $t->length >= 2) { $inner = $t; break; }
+        }
+    }
+    if ($inner && $inner->length >= 2) {
+        /* از هر آیتم داخلی به سمت بالا برو تا جایی که تعدادِ اجدادِ هم‌سطح
+           هنوز برابر تعداد آیتم‌هاست؛ آخرین سطحِ سالم = ظرفِ واقعی. */
+        $want = $inner->length;
+        $best = null;
+        $node = $inner->item(0);
+        $depth = 0;
+        while ($node && $node->parentNode instanceof DOMElement && $depth < 8) {
+            $node = $node->parentNode;
+            if ($node === $containers->item(0)) break;
+            $name = $node->nodeName;
+            $cls  = $node instanceof DOMElement ? trim($node->getAttribute('class')) : '';
+            if ($cls !== '') {
+                $first = preg_split('~\s+~', $cls)[0];
+                $q = './/' . $name . '[' . xpClassCond($first, true) . ']';
+            } else {
+                $q = './/' . $name;
+            }
+            $sib = @$xp->query($q, $containers->item(0));
+            if ($sib && $sib->length === $want) { $best = $sib; }
+            elseif ($sib && $sib->length > $want) { break; }
+            $depth++;
+        }
+        if ($best) {
+            $containers = $best;
+        }
+    }
+}
+
 foreach ($containers as $container) {
 $p = ['title' => '', 'price' => '', 'link' => '', 'image' => '', 'sku' => ''];
 
@@ -7031,32 +7250,56 @@ function parse_products(string $html, string $baseUrl): array {
 [$dom, $xp] = load_dom($html);
 $products = [];
 
+/* v9.85: الگوی article[class*=product] (books.toscrape و بسیاری از قالب‌های
+   ووکامرس) و ظرفِ شبکه‌ایِ «لینک+تصویر+قیمت» اضافه شد. */
 $containerQueries = [
 "//li[contains(@class,'product')]",
 "//div[contains(@class,'product-card')]",
 "//div[contains(@class,'product-item')]",
-"//div[contains(@class,'product') and not(contains(@class,'products'))]",
 "//article[contains(@class,'product')]",
+"//div[contains(@class,'product') and not(contains(@class,'products'))]",
 "//div[contains(@class,'card') and .//a and .//img]",
 "//div[contains(@class,'col') and .//a and .//img and .//*[contains(@class,'price') or contains(text(),'تومان')]]",
 "//li[contains(@class,'col') and .//a and .//img]",
 "//div[contains(@class,'item') and .//a and .//img]",
+"//li[.//a[@href] and .//img and .//*[contains(@class,'price')]]",
 ];
 
 $nodes = [];
 $seen = [];
 
+/* 🐞 v9.85: قبلاً اولین الگویی که ≥۲ گره می‌داد بی‌چون‌وچرا برنده می‌شد.
+   در books.toscrape.com الگوی div[class*=product] روی ۲۰ عدد div.product_price
+   می‌افتاد که نه لینک دارند نه عنوان، و در ادامه همه با
+   «if (!title && !link) continue» دور ریخته می‌شدند ⇒ خروجی صفر محصول،
+   بدون هیچ پیام خطایی. حالا نامزدها امتیاز می‌گیرند: گرهی که هم لینک و هم
+   عنوان/تصویر دارد ارزش دارد، و الگویی که بیشترین گرهِ *قابل‌استفاده* را
+   بدهد انتخاب می‌شود. */
+$bestScore = 0; $bestNodes = [];
 foreach ($containerQueries as $q) {
 $result = @$xp->query($q);
-if ($result && $result->length >= 2) {
+if (!$result || $result->length < 2) continue;
+$usable = 0;
 foreach ($result as $n) {
+$hasLink  = @$xp->query('.//a[@href]', $n);
+$hasTitle = @$xp->query('.//h1|.//h2|.//h3|.//h4|.//a[@title]|.//*[contains(@class,"title")]', $n);
+$hasImg   = @$xp->query('.//img', $n);
+if (($hasLink && $hasLink->length) && (($hasTitle && $hasTitle->length) || ($hasImg && $hasImg->length))) {
+$usable++;
+}
+}
+if ($usable > $bestScore) {
+$bestScore = $usable;
+$bestNodes = iterator_to_array($result);
+/* اگر تقریباً همهٔ گره‌ها سالم‌اند، بهتر از این پیدا نمی‌شود */
+if ($usable === $result->length && $usable >= 2) break;
+}
+}
+foreach ($bestNodes as $n) {
 $h = spl_object_hash($n);
 if (!isset($seen[$h])) {
 $seen[$h] = 1;
 $nodes[] = $n;
-}
-}
-break;
 }
 }
 
@@ -12787,6 +13030,25 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "\$r = bslReq" . "Read(\$tk, \$ep);") !== false);
     $add('9.84', 'تست سفارش‌ها با bslReqRead انجام می‌شود',
          strpos($selfSrc, "bslReq" . "Read(\$tk, 'vendor-parcels?items.vendor_ids=' . \$vid . '&per_page=10')") !== false);
+
+    /* ---------- v9.85: «فقط ۱ محصول استخراج شد» ---------- */
+    $add('9.85', 'ظرفِ تک‌گره به فرزندانِ تکراری تنزل داده می‌شود',
+         strpos($selfSrc, 'if ($containers->length === 1) {') !== false
+         && strpos($selfSrc, '$sib && $sib->length === $want') !== false);
+    $add('9.85', 'parse_products نامزدها را بر پایهٔ محصولِ سالم امتیاز می‌دهد',
+         strpos($selfSrc, '$bestScore = 0; $bestNodes = [];') !== false
+         && strpos($selfSrc, 'if ($usable > $bestScore) {') !== false);
+    $add('9.85', 'الگوی article[class*=product] بالاتر از div[class*=product] است',
+         strpos($selfSrc, '"//article[contains(@class,\'product\')]",' . "\n" . '"//div[contains(@class,\'product\') and not(contains(@class,\'products\'))]",') !== false);
+    $add('9.85', 'پیشنهادِ سلکتوری که محصول سالم ندارد نمایش داده نمی‌شود',
+         strpos($selfSrc, "if (\$usable >= 2) {") !== false
+         && strpos($selfSrc, "usort(\$suggestions['container'], fn(\$a, \$b) => \$b['count'] <=> \$a['count']);") !== false);
+    $add('9.85', 'extractPrice ارزهای خارجی را می‌شناسد',
+         strpos($selfSrc, "\$cur = '£|") !== false);
+    $add('9.85', 'اعشارِ اروپاییِ ۱۹,۹۹ با هزارگانِ ۱,۲۹۹ اشتباه نمی‌شود',
+         strpos($selfSrc, "preg_match('~,(\\d{1,2})\$~', \$en)") !== false);
+    $add('9.85', 'کلاسِ کاراکتریِ ترکیب‌گر جداکنندهٔ الگو را نمی‌بندد',
+         strpos($selfSrc, "preg_match('/[+~]/', \$css)") !== false);
     $add('9.84', 'تست پیام‌ها با bslReqRead انجام می‌شود',
          strpos($selfSrc, "bslReq" . "Read(\$tk, 'chats?limit=10&order_by=updated_at')") !== false);
     $add('9.84', 'تست محصولات با bslReqRead انجام می‌شود',
@@ -27334,6 +27596,29 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.85', t:'🐞 رفع «فقط یک محصول استخراج می‌شود»', items:[
+    'گزارش شما: در mantoopatris فقط ۱ محصول می‌آمد و بعد تأیید کردید که',
+    'books.toscrape.com هم همین‌طور است. چون سایت دوم ایستا و بدون ضدربات',
+    'است، ثابت شد ایراد از خودِ منطق پارس ماست نه از سایت مقصد.',
+    '🐞 ریشهٔ اصلی: وقتی سلکتورِ ظرف به یک عنصرِ بیرونی اشاره کند (مثل ol.row',
+    'یا div.col-md-9) در کل صفحه فقط ۱ تطبیق دارد؛ حلقه یک بار می‌چرخید و چون',
+    'برای هر فیلد فقط اولین تطبیق برداشته می‌شد، از ۲۰ کالا فقط اولی بیرون',
+    'می‌آمد — بدون هیچ خطایی، که پیدا کردنش را سخت می‌کرد.',
+    '✅ حالا اگر ظرف یکتا باشد ولی فیلدهای داخلش چند تطبیق داشته باشند،',
+    'خودکار یک لایه پایین می‌رویم و ظرفِ واقعیِ تکرارشونده پیدا می‌شود.',
+    'صفحهٔ جزئیاتِ تک‌محصولی دست‌نخورده می‌ماند و همان ۱ نتیجه را می‌دهد.',
+    '🐞 باگ دوم: در حالت خودکار، اولین الگویی که ≥۲ گره می‌داد برنده می‌شد.',
+    'در books.toscrape روی ۲۰ عدد div.product_price می‌افتاد که نه لینک',
+    'داشتند نه عنوان، و همه دور ریخته می‌شدند ⇒ صفر محصول. حالا نامزدها',
+    'بر پایهٔ «چند تا محصولِ واقعاً سالم می‌دهی» امتیاز می‌گیرند.',
+    '🐞 باگ سوم: extractPrice فقط تومان و ریال را می‌شناخت. £51.77 و $19.99',
+    'خالی برمی‌گشتند و بی‌دلیل به صفِ «تکمیل قیمت» با ۳ تلاش اضافه می‌رفتند.',
+    '✅ حالا £ $ € ¥ ₽ ₺ ₹ ﷼ و کدهای USD/EUR/GBP/… پشتیبانی می‌شوند، هم',
+    'پیش‌وند هم پس‌وند، و اعشارِ اروپایی (۱۹,۹۹) از هزارگان (۱,۲۹۹) تفکیک',
+    'می‌شود. رفتار قیمت‌های تومانی/ریالی ذره‌ای تغییر نکرده.',
+    '✅ پیشنهادهای سلکتور هم فیلتر و مرتب شدند: گزینه‌ای که محصول سالم',
+    'نمی‌دهد دیگر نمایش داده نمی‌شود و بهترین گزینه اول فهرست می‌آید.',
+  ]},
   {v:'9.84', t:'🔍 رفع «استعلام از باسلام: ارتباط برقرار نشد»', items:[
     'گزارش شما: هر چهار دکمهٔ بخش «استعلام از باسلام» (سفارش‌ها، گفتگوها،',
     'تست محصولات، تست تغییرات مبدأ) خطای «ارتباط با باسلام برقرار نشد»',
