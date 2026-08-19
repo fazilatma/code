@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.83';
+const APP_VERSION = '9.84';
 const APP_VERSION_DATE = '1405/05/25';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3485,6 +3485,30 @@ function srcNetApplyProfileIfExists(?string $pk): void {
     }
 }
 
+/* v9.84: آیا این دامنه یکی از دامنه‌های باسلام است؟ */
+function isBslHost(string $host): bool {
+    $host = strtolower(trim($host));
+    if ($host === '') return false;
+    return $host === 'basalam.com' || $host === 'openapi.basalam.com'
+        || substr($host, -strlen('.basalam.com')) === '.basalam.com'
+        || substr($host, -strlen('.openapi.basalam.com')) === '.openapi.basalam.com';
+}
+
+/* v9.84: برای بارگذاریِ صفحه (سمت سرور) باید «اتصال غیرمستقیم» رعایت شود اگر:
+   ۱) سوییچِ «اتصال غیرمستقیم»ِ پروفایل (تبِ شروع) روشن باشد، یا
+   ۲) مقصدِ خودِ باسلام باشد و تیکِ «اتصال غیرمستقیم»ِ باسلام (منوی همبرگری) روشن باشد.
+   اینطوری اگر کاربر تیکِ باسلام را زده باشد، بارگذاریِ صفحهٔ باسلام در تبِ
+   سلکتورها هم از مسیرِ غیرمستقیم می‌رود — نه فقط پروفایل. */
+function srcNetForceIndirectForHost(string $host): bool {
+    $host = strtolower(trim($host));
+    if (array_key_exists('_srcNetProfileIndirect', $GLOBALS) && !empty($GLOBALS['_srcNetProfileIndirect'])) return true;
+    if ($host !== '' && isBslHost($host) && function_exists('bslNetCfg')) {
+        $bn = bslNetCfg();
+        if (!empty($bn['indirect'])) return true;
+    }
+    return false;
+}
+
 /** آیا برای این دامنه باید از راه عبور استفاده کنیم؟ */
 function srcNetApplies(array $net, string $host): bool {
     if ($net['mode'] === 'direct') return false;
@@ -3577,6 +3601,13 @@ function fetch_html(string $url, int $timeout = 25): array {
     $parsed = parse_url($url); $__srcHost = strtolower((string)($parsed['host'] ?? ''));
     srcPace($__srcHost, (int)($__srcNet['gap_ms'] ?? 0));
 
+    // v9.84: یکپارچه‌سازی — علاوه بر سوییچِ پروفایل، اگر مقصدِ خودِ باسلام باشد و
+    // تیکِ «اتصال غیرمستقیم»ِ باسلام روشن باشد هم مسیرِ غیرمستقیم را تحمیل کن.
+    if (empty($__srcNet['force_indirect']) && function_exists('srcNetForceIndirectForHost')
+        && srcNetForceIndirectForHost($__srcHost)) {
+        $__srcNet['force_indirect'] = true;
+    }
+
     $modes = [];
     // v9.83: اگر پروفایلِ «اتصال غیرمستقیم» را روشن کرده باشد (یا در حالتِ سرورساید
     // صفحهٔ سلکتورها)، حتی اگر روشِ اصلیِ سراسری «direct» باشد، همهٔ روش‌هایِ
@@ -3611,14 +3642,17 @@ function fetch_html(string $url, int $timeout = 25): array {
         if (empty($modes)) $modes[] = 'direct';
     }
 
-    $last = null;
+    $last = null; $tried = [];
     foreach ($modes as $m) {
         $last = srcNetFetchAttempt($url, $timeout, $__srcNet, $m);
+        $tried[] = ['mode' => $m, 'code' => (int)$last['code'], 'error' => (string)($last['error'] ?? '')];
         if (!empty($last['ok'])) return $last;
         // اگر خطای قطعیِ منطقی (مثل ۴۰۴/۴۰۰) بود، امتحانِ روشِ دیگر بی‌فایده است
         if ($last['code'] > 0 && !in_array($last['code'], [403, 429], true)) break;
     }
-    return $last ?? ['ok' => false, 'error' => 'Empty', 'code' => 0, 'url' => $url, 'html' => '', 'mode' => ''];
+    $last = $last ?? ['ok' => false, 'error' => 'Empty', 'code' => 0, 'url' => $url, 'html' => '', 'mode' => ''];
+    $last['tried'] = $tried;
+    return $last;
 }
 
 function extractImageFromHtml(string $html, string $pageUrl): string {
@@ -4589,7 +4623,8 @@ $err = $res['error'] ?? 'Unknown';
 $_dpHint = '<div style="margin-top:22px;padding:14px 16px;background:#1e293b;border:1px solid #334155;border-radius:10px;line-height:2;font-size:13px;color:#cbd5e1">'
   . 'صفحه را <b>سرور</b> می‌گیرد، نه مرورگر شما — پس این خطا یعنی مسیر شبکهٔ سرور به این سایت کند یا محدود است.<br>'
   . 'در تنظیمات ← <b>مهلت بارگذاری صفحه</b> را بالاتر ببرید (الان ' . (int)$dpTimeout . ' ثانیه، دو بار تلاش شد).'
-  . '</div>';
+  . '</div>'
+  . (isset($res['tried']) && count($res['tried']) ? '<div style="margin-top:14px;padding:12px 14px;background:#0f172a;border:1px solid #475569;border-radius:10px;line-height:1.9;font-size:11px;color:#94a3b8;direction:rtl"><b style="color:#fbbf24">🧭 روش‌های امتحان‌شده:</b><br>' . implode('<br>', array_map(function($t){ return '• ' . (($t['mode'] ?? '')==='direct' ? 'مستقیم' : 'غیرمستقیم (' . h($t['mode']) . ')') . ' → HTTP ' . (int)($t['code'] ?? 0) . ($t['error'] ? ' — ' . h($t['error']) : ''); }, $res['tried'])) . '</div>' : '');
 $_dpTitle = (stripos($err, 'resolve') !== false) ? '❌ دامنه پیدا نشد'
           : ((stripos($err, 'timed out') !== false || stripos($err, 'timeout') !== false)
              ? '⏱ خطای تایم‌اوت' : '❌ بارگذاری ناموفق');
@@ -5418,7 +5453,8 @@ $_vpHint = '<div style="margin-top:26px;padding:16px 18px;background:#1e293b;bor
   . '۲) اگر سایت فقط کند است: در تنظیمات ← <b>مهلت بارگذاری صفحه</b> را بالاتر ببرید (الان '
   . (int)$vpTimeout . ' ثانیه، دو بار تلاش شد).<br>'
   . '۳) اگر سرور شما در ایران است، ممکن است مسیر شبکه به این سایت محدود باشد؛ در این حالت «بارگذاری مستقیم» تنها راه است.'
-  . '</div>';
+  . '</div>'
+  . (isset($res['tried']) && count($res['tried']) ? '<div style="margin-top:14px;padding:12px 14px;background:#0f172a;border:1px solid #475569;border-radius:10px;line-height:1.9;font-size:11px;color:#94a3b8;direction:rtl"><b style="color:#fbbf24">🧭 روش‌های امتحان‌شده:</b><br>' . implode('<br>', array_map(function($t){ return '• ' . (($t['mode'] ?? '')==='direct' ? 'مستقیم' : 'غیرمستقیم (' . h($t['mode']) . ')') . ' → HTTP ' . (int)($t['code'] ?? 0) . ($t['error'] ? ' — ' . h($t['error']) : ''); }, $res['tried'])) . '</div>' : '');
 if (stripos($err, 'resolve') !== false) echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:40px;direction:rtl"><h2>❌ خطا در دسترسی</h2><p>آدرس <b>'.h($url).'</b> از روی <b>سرور</b> قابل دسترسی نیست.</p><p style="color:#94a3b8">دلیل: سرور DNS قادر به یافتن دامنه نیست. ممکن است دامنه منقضی یا مشکل SSL داشته باشد.</p>'.$_vpHint.'</body></html>';
 elseif (stripos($err, 'timed out') !== false || stripos($err, 'timeout') !== false) echo '<html><body style="background:#0f172a;color:#fbbf24;font-family:Tahoma;padding:40px;direction:rtl"><h2>⏱ خطای تایم‌اوت</h2><p><b>سرورِ ما</b> نتوانست <b>'.h($url).'</b> را در '.(int)$vpTimeout.' ثانیه بگیرد.</p><p style="color:#94a3b8">این یعنی مشکل از مسیر شبکهٔ سرور است، نه از سایت. برای همین «بارگذاری مستقیم» کار می‌کند: آنجا مرورگر خودتان صفحه را می‌گیرد.</p>'.$_vpHint.'</body></html>';
 else echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:40px;direction:rtl"><h2>❌ بارگذاری ناموفق</h2><p>سرور نتوانست <b>'.h($url).'</b> را بگیرد.</p><p style="color:#94a3b8">پیام: '.h($err).'</p>'.$_vpHint.'</body></html>';
@@ -12745,6 +12781,15 @@ if (isset($_GET['selftest'])) {
     $add('9.83', 'fetch_html در حالتِ force_indirect همهٔ روش‌هایِ غیرمستقیمِ پرشده را امتحان می‌کند',
          strpos($selfSrc, "if (!empty(\$__srcNet['force_indirect'])) {") !== false
          && strpos($selfSrc, "\$primary = (string)\$__srcNet['mode'];") !== false);
+
+    /* ---------- v9.84: یکپارچه‌سازیِ تیکِ باسلام با بارگذاریِ صفحه (سمتِ سرور) ---------- */
+    $add('9.84', 'برای مقصدِ باسلام، تیکِ «اتصال غیرمستقیم»ِ باسلام هم fetch_html را غیرمستقیم می‌کند',
+         strpos($selfSrc, 'function isBsl' . 'Host(string $host): bool {') !== false
+         && strpos($selfSrc, 'function srcNetForce' . 'IndirectForHost(string $host): bool {') !== false
+         && strpos($selfSrc, "srcNetForceIndirectForHost(\$__srcHost)") !== false);
+    $add('9.84', 'صفحهٔ خطا، روش‌هایِ امتحان‌شده را نشان می‌دهد',
+         strpos($selfSrc, "\$res['tried']") !== false
+         && strpos($selfSrc, 'روش‌های امتحان‌شده') !== false);
 
     /* ---------- v9.42: توقفِ تست همهٔ مدل‌ها ---------- */
     $add('9.42', 'کش statِ فایل توقفِ تست مدل پاک می‌شود تا دکمهٔ توقف کار کند',
@@ -27295,6 +27340,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.84', t:'🔗 یکپارچه‌سازیِ تیکِ باسلام با بارگذاریِ صفحه (سمتِ سرور) + دی‌اگنوسِ روش‌ها', items:[
+    'گزارش شما: باز هم «بارگذاری صفحه» در تبِ سلکتورها مستقیم می‌رفت و خطای', '«Empty» می‌داد، در حالی که تیکِ اتصالِ غیرمستقیم روشن بود.',
+    '🐞 ریشهٔ اصلی: «بارگذاری صفحه» و بارگذاریِ نمونهٔ جزئیات، صفحه را با', 'fetch_html (سمتِ سرور) می‌گیرند و fetch_html فقط سوییچِ «اتصال غیرمستقیم»ِ', 'پروفایل (تبِ شروع) را می‌خواند — نه تیکِ «اتصال غیرمستقیم»ِ باسلام (منوی', 'همبرگری). پس اگر آدرسِ بارگذاری‌شده خودِ باسلام بود و فقط تیکِ باسلام را', 'زده بودید، باز هم مستقیم می‌رفت.',
+    '✅ حالا وقتی مقصدِ خودِ باسلام باشد (basalam.com / openapi.basalam.com) و', 'تیکِ «اتصال غیرمستقیم»ِ باسلام روشن باشد، fetch_html هم مثل مسیرِ باسلام', 'همهٔ روش‌هایِ غیرمستقیمِ پرشده را امتحان می‌کند و در نهایت مستقیم.', '✅ سوییچِ پروفایل (تبِ شروع) هم به‌عنوان قبل کار می‌کند؛ اگر هرکدام روشن', 'باشد، مسیرِ غیرمستقیم برای آن مقصد تحمیل می‌شود.',
+    '✅ برای اینکه دیگر کور نباشیم، صفحهٔ خطا حالا «روش‌های امتحان‌شده» را نشان', 'می‌دهد: کدام روش (مستقیم/غیرمستقیم) با چه کدی امتحان شد تا معلوم شود', 'ترافیک واقعاً از کدام مسیر رفته است.'],},
   {v:'9.83', t:'🖥 رفعِ اتصالِ غیرمستقیمِ بارگذاریِ صفحه در تبِ سلکتورها (سمتِ سرور)', items:[
     'گزارش شما: با وجودِ فعال بودنِ «اتصال غیرمستقیم»ِ پروفایل، در تبِ سلکتورها با', 'زدنِ «بارگذاری صفحه» خطای «سرور نتوانست ... را بگیرد / پیام: Empty» می‌آمد', 'یعنی ترافیکِ آن پروفایل باز هم مستقیم رفته بود.',
     '🐞 ریشه: «بارگذاری صفحه» در تبِ سلکتورها به‌صورتِ سمتِ سرور اجرا می‌شود', '(visual_proxy/detail_proxy که با fetch_html صفحه را از رویِ سرور می‌گیرند).', 'fetch_html فقط وقتی از روشِ غیرمستقیم می‌رفت که روشِ اصلیِ سراسریِ', '«اتصال به سایت مبدأ» خودش غیرمستقیم (مثلاً worker) بود؛ اگر روشِ اصلیِ', 'سراسری «direct» بود ولی فقط Worker/پروکسی پر شده بود، حتی با روشن بودنِ', 'سوییچِ پروفایل، درخواست مستقیم می‌رفت.',
