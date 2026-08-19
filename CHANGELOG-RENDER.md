@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.17.0 — 2026-08-19
+
+- Added image URL/content validation with source-network routing.
+- Added OpenGraph, gallery, lazy image, srcset and JSON-LD media discovery.
+- Added profile-wide missing/broken image preview and guarded recovery.
+- Added persisted media health status and connected recovery to WooCommerce photo repair.
+- Added PHP-compatible `fetch_missing_stream` mapping.
+
 ## 2.16.0 — 2026-08-19
 
 - Fixed visual selectors being over-specific (`nth-of-type`/unique ID) and reporting one match.

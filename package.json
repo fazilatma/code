@@ -1,6 +1,6 @@
 {
   "name": "scraper4-render",
-  "version": "2.16.0",
+  "version": "2.17.0",
   "private": true,
   "description": "Render-native product scraper and WooCommerce/Basalam synchronizer",
   "type": "module",
