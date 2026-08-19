@@ -123,6 +123,15 @@ test('dashboard startup cannot be stopped by a stale file input and settings res
   assert.match(source,/بازیابی کامل شد/);
 });
 
+test('mobile RTL redesign keeps the requested bottom navigation order and touch-friendly theme',async()=>{
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),start=source.indexOf('<nav class="main-tabs" aria-label="ناوبری اصلی">'),end=source.indexOf('</nav>',start),nav=source.slice(start,end);
+  assert.ok(start>0&&end>start,'main navigation must exist');
+  assert.deepEqual([...nav.matchAll(/data-tab="([^"]+)"/g)].map(match=>match[1]),['home','settings','selector','products','destination','jobs']);
+  assert.deepEqual([...nav.matchAll(/<span>([^<]+)<\/span>/g)].map(match=>match[1]),['شروع','تنظیمات','سلکتورها','نتایج','ارسال','درون‌ریزی']);
+  assert.equal((nav.match(/<svg /g)||[]).length,6);assert.match(nav,/id="productBadge"/);assert.match(nav,/id="jobBadge"/);
+  assert.match(source,/--bg:#050a13;--card:#121d30/);assert.match(source,/\.main-tabs\{top:auto!important;bottom:0!important/);assert.match(source,/env\(safe-area-inset-bottom\)/);assert.match(source,/\.hamburger,\.fullwidth-btn\{top:12px;width:52px;height:52px/);assert.match(source,/input,select,textarea\{min-height:50px/);assert.match(source,/\$\('productBadge'\)\.hidden=!data\.total/);
+});
+
 test('processor refuses unsafe retirement after empty, duplicate or failed extraction and preserves detail tags',async()=>{
   const source=await readFile(new URL('../worker-src/processor.ts',import.meta.url),'utf8');assert.match(source,/checkpoint\.retireSafe=false;[\s\S]*صفحه.*خالی/);assert.match(source,/فقط محصولات تکراری/);assert.match(source,/if\(checkpoint\.retireSafe&&checkpoint\.seen\.length\)/);assert.match(source,/هیچ محصولی بازنشسته نشد/);assert.match(source,/tags:fresh\.tags\|\|previous\.tags/);
 });
