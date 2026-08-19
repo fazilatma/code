@@ -19,9 +19,11 @@ D1 منبع canonical داده است. Queue فقط شناسهٔ job را حمل
 
 ## استقرار کامل فقط با Cloudflare Dashboard
 
-برای نصب نخست **هیچ D1، R2 یا Queue را دستی نسازید**. `wrangler.toml` از draft bindingها استفاده می‌کند و `npm run worker:deploy` همهٔ resourceها را در همان حساب Cloudflare ایجاد، متصل و migrate می‌کند. این کار در محیط Workers Builds اجرا می‌شود؛ کاربر به terminal یا Bash نیاز ندارد.
+برای نصب نخست **هیچ D1، R2 bucket یا Queue را دستی نسازید**. `wrangler.toml` resourceها را با نام قطعی و بدون ID حساب تعریف می‌کند و `npm run worker:deploy` همهٔ آن‌ها را ایجاد، متصل و migrate می‌کند. این کار در محیط Workers Builds اجرا می‌شود؛ کاربر به terminal یا Bash نیاز ندارد.
 
-> نام Worker را دقیقاً `scraper4-cloudflare` بگذارید. نام Queueهای خودکار از نام Worker ساخته شده و consumer نیز عمداً به همین نام‌ها اشاره می‌کند.
+دو قابلیت account-level باید فقط یک‌بار از Dashboard فعال باشند: **Workers** و **R2 Object Storage**. فعال‌کردن R2 به‌معنای ساخت دستی bucket نیست؛ پذیرش/فعال‌سازی سرویس را Cloudflare به دلایل حساب و billing فقط در Dashboard اجازه می‌دهد. اگر فعال نباشد API با کد `10042` متوقف می‌شود. پس از فعال‌سازی، خود deploy bucket را می‌سازد.
+
+> نام Worker را دقیقاً `scraper4-cloudflare` بگذارید. نام Queueها ثابت است و consumer عمداً به همان نام‌ها اشاره می‌کند.
 
 ### 1. اتصال GitHub به Workers Builds
 
@@ -30,20 +32,26 @@ D1 منبع canonical داده است. Queue فقط شناسهٔ job را حمل
 3. نام Worker را `scraper4-cloudflare` قرار دهید.
 4. شاخهٔ production را `arena/01a0176d-code` انتخاب کنید.
 5. Root directory را `/` یا خالی بگذارید.
-6. Build command را این مقدار بگذارید:
+6. در **Build variables and secrets** متغیر build زیر را اضافه کنید تا فایل Python قدیمی repository نصب نشود:
+
+   ```text
+   SKIP_DEPENDENCY_INSTALL=1
+   ```
+
+7. Build command را این مقدار بگذارید؛ `npm ci` وابستگی‌های Worker را نصب می‌کند:
 
    ```text
    npm ci && npm run worker:test
    ```
 
-7. Deploy command را این مقدار بگذارید:
+8. Deploy command را این مقدار بگذارید:
 
    ```text
    npm run worker:deploy
    ```
 
-8. Preview deploy برای شاخه‌های دیگر را غیرفعال کنید تا resourceهای production توسط buildهای preview تغییر نکنند.
-9. **Save and Deploy** را بزنید.
+9. Preview deploy برای شاخه‌های دیگر را غیرفعال کنید تا resourceهای production توسط buildهای preview تغییر نکنند.
+10. **Save and Deploy** را بزنید.
 
 Git integration پس از هر push جدید به شاخهٔ production، repository را خودش checkout و build می‌کند. Worker در runtime دستور `git pull` اجرا نمی‌کند و نباید هم‌زمان یک GitHub Actions deploy جداگانه فعال شود.
 
@@ -67,7 +75,7 @@ Wrangler قفل‌شده در `package-lock.json` هنگام نخستین deploy
 1. `wrangler deploy` با automatic provisioning؛
 2. اجرای تمام migrationهای pending روی binding خودکار `DB`.
 
-همهٔ مراحل idempotent هستند. deploy بعدی bindingهای قبلی را از Worker به ارث می‌برد، resource تکراری نمی‌سازد و فقط migrationهای جدید را اعمال می‌کند. علاوه بر آن، `ensureSchema()` در شروع هر isolate تمام دستورهای `CREATE ... IF NOT EXISTS` را یک‌بار اجرا می‌کند تا database تازه یا نیمه‌کاره نیز خودکار ترمیم شود.
+همهٔ مراحل idempotent هستند. resourceها نام قطعی دارند اما ID حساب در Git ذخیره نمی‌شود؛ بنابراین حتی اگر deploy پس از ساخت یک resource قطع شود، retry همان resource را با نام پیدا و متصل می‌کند و نمونهٔ تکراری نمی‌سازد. deployهای بعدی نیز فقط migrationهای جدید را اعمال می‌کنند. علاوه بر آن، `ensureSchema()` در شروع هر isolate تمام دستورهای `CREATE ... IF NOT EXISTS` را یک‌بار اجرا می‌کند تا database تازه یا نیمه‌کاره نیز خودکار ترمیم شود.
 
 در log نخستین build باید پیام‌های provisioning برای `DB`، `BACKUPS`، `JOBS` و `JOBS_DLQ` و سپس پیام موفقیت migration دیده شوند. اگر build در میانه قطع شد، **Retry deployment** امن است و resource تکراری ایجاد نمی‌کند.
 
@@ -120,7 +128,7 @@ npm run worker:test
 npx wrangler deploy --dry-run
 ```
 
-این دستورها typecheck سخت‌گیرانه، bundle، تست runtime/security، کنترل draft bindingها، تطابق migration و inventory 57 قابلیتی را اجرا می‌کنند.
+این دستورها typecheck سخت‌گیرانه، bundle، تست runtime/security، کنترل bindingهای declarative، تطابق migration و inventory 57 قابلیتی را اجرا می‌کنند.
 
 ## مهاجرت داده از PHP
 

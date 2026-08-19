@@ -62,14 +62,14 @@ test('Cloudflare resources are automatically provisioned during deploy',async()=
   const deployScript=await readFile(new URL('../scripts/deploy-cloudflare.mjs',import.meta.url),'utf8');
 
   assert.match(config,/name\s*=\s*"scraper4-cloudflare"/);
-  assert.match(config,/\[\[d1_databases\]\][\s\S]*?binding\s*=\s*"DB"/);
-  assert.doesNotMatch(config,/\bdatabase_(?:id|name)\s*=/);
-  assert.match(config,/\[\[r2_buckets\]\]\s*\nbinding\s*=\s*"BACKUPS"/);
-  assert.doesNotMatch(config,/\bbucket_name\s*=/);
-  assert.match(config,/\[\[queues\.producers\]\]\s*\nbinding\s*=\s*"JOBS"/);
-  assert.match(config,/\[\[queues\.producers\]\]\s*\nbinding\s*=\s*"JOBS_DLQ"/);
+  assert.match(config,/\[\[d1_databases\]\][\s\S]*?binding\s*=\s*"DB"[\s\S]*?database_name\s*=\s*"scraper4-cloudflare-db"/);
+  assert.doesNotMatch(config,/\bdatabase_id\s*=/);
+  assert.match(config,/\[\[r2_buckets\]\]\s*\nbinding\s*=\s*"BACKUPS"\s*\nbucket_name\s*=\s*"scraper4-cloudflare-backups"/);
+  assert.match(config,/\[\[queues\.producers\]\]\s*\nbinding\s*=\s*"JOBS"\s*\nqueue\s*=\s*"scraper4-cloudflare-jobs"/);
+  assert.match(config,/\[\[queues\.producers\]\]\s*\nbinding\s*=\s*"JOBS_DLQ"\s*\nqueue\s*=\s*"scraper4-cloudflare-jobs-dlq"/);
   assert.match(config,/queue\s*=\s*"scraper4-cloudflare-jobs"/);
   assert.match(config,/dead_letter_queue\s*=\s*"scraper4-cloudflare-jobs-dlq"/);
   assert.equal(packageJson.scripts['worker:deploy'],'node scripts/deploy-cloudflare.mjs');
   assert.match(deployScript,/deploy[\s\S]*experimental-provision[\s\S]*d1[\s\S]*migrations[\s\S]*apply[\s\S]*DB[\s\S]*remote/);
+  assert.match(deployScript,/10042[\s\S]*R2 Object Storage[\s\S]*do not create a bucket manually[\s\S]*Retry deployment/);
 });

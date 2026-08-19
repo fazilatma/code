@@ -5,19 +5,23 @@ main = "worker-src/main.ts"
 compatibility_date = "2026-08-19"
 workers_dev = true
 
-# Draft bindings are provisioned and re-attached automatically by Wrangler.
-# No account resource IDs belong in source control.
+# Declarative bindings use deterministic names but no immutable account IDs.
+# Wrangler creates missing resources and re-attaches existing resources by name,
+# which also makes retries safe after a partially completed deployment.
 [[d1_databases]]
 binding = "DB"
+database_name = "scraper4-cloudflare-db"
 migrations_dir = "migrations"
 
 # JOBS_DLQ is intentionally also a producer binding. This makes Wrangler
 # provision the DLQ before it installs the JOBS consumer configuration.
 [[queues.producers]]
 binding = "JOBS"
+queue = "scraper4-cloudflare-jobs"
 
 [[queues.producers]]
 binding = "JOBS_DLQ"
+queue = "scraper4-cloudflare-jobs-dlq"
 
 [[queues.consumers]]
 queue = "scraper4-cloudflare-jobs"
@@ -29,6 +33,7 @@ max_concurrency = 2
 
 [[r2_buckets]]
 binding = "BACKUPS"
+bucket_name = "scraper4-cloudflare-backups"
 
 [triggers]
 crons = ["*/5 * * * *"]

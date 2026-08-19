@@ -7,11 +7,12 @@
 راهنمای کامل dashboard-only در [CLOUDFLARE-WORKER.md](CLOUDFLARE-WORKER.md) است. در Workers Builds کافی است repository را با نام Worker دقیق `scraper4-cloudflare` متصل کنید و این مقادیر را بگذارید:
 
 ```text
+Build variable: SKIP_DEPENDENCY_INSTALL=1
 Build command:  npm ci && npm run worker:test
 Deploy command: npm run worker:deploy
 ```
 
-Deploy نخست D1، R2، Queue اصلی، DLQ، Queue consumer، Cron و schema دیتابیس را خودکار ایجاد و متصل می‌کند؛ ساخت دستی resource یا paste کردن UUID لازم نیست. فقط `ADMIN_TOKEN` و `VAULT_SECRET` باید پس از deploy به‌صورت Secret در Dashboard ثبت شوند.
+سرویس account-level **R2 Object Storage** باید یک‌بار در Dashboard فعال شود؛ پس از آن deploy نخست D1، R2 bucket، Queue اصلی، DLQ، Queue consumer، Cron و schema دیتابیس را خودکار ایجاد و متصل می‌کند. ساخت دستی resource یا paste کردن UUID لازم نیست. فقط `ADMIN_TOKEN` و `VAULT_SECRET` باید پس از deploy به‌صورت Secret در Dashboard ثبت شوند.
 
 ## توسعهٔ محلی اختیاری
 
@@ -24,7 +25,7 @@ npm run worker:dev
 
 - source اصلی Worker: `worker-src/`
 - entrypoint: `worker-src/main.ts`
-- تنظیمات و draft bindingهای Cloudflare: `wrangler.toml`
+- تنظیمات و bindingهای declarative Cloudflare: `wrangler.toml`
 - deploy و migration خودکار: `scripts/deploy-cloudflare.mjs`
 - migrationهای D1: `migrations/`
 - bundle آمادهٔ Direct Upload: `scraper4.worker.js`
