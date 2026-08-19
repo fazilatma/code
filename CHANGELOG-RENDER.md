@@ -1,5 +1,15 @@
 # Render TypeScript changelog
 
+## 2.2.0 — 2026-08-19
+
+- Rebuilt selector testing as a single-fetch scoped workbench.
+- Added automatic list-selector suggestions and per-field validation errors.
+- Added automatic first product URL discovery for detail selector testing.
+- Added separate visual picking for list and product-detail pages.
+- Added detail-selector batch tests and moved gallery suggestions to the product-detail workflow.
+- Fixed selectors that target the container/root element itself.
+- Fixed visual picker click handling where browser Event was incorrectly treated as detail mode.
+
 ## 2.1.0 — 2026-08-19
 
 - Rebuilt the AI hamburger section as five PHP-style tabs: providers, tests, models, candidates/master and network.

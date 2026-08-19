@@ -13,10 +13,11 @@ export function numberFromText(value: string): number {
 }
 
 function sourceKey(url: string, title: string): string { return createHash('sha256').update(url || title).digest('hex').slice(0, 32); }
-function firstText($root: cheerio.Cheerio<any>, selector: string): string { return normalize($root.find(selector).first().text()); }
+function selectWithin($root:cheerio.Cheerio<any>,selector:string){try{return $root.is(selector)?$root.first():$root.find(selector).first()}catch{return $root.find(selector).first()}}
+function firstText($root: cheerio.Cheerio<any>, selector: string): string { return normalize(selectWithin($root,selector).text()); }
 function firstAttr($root: cheerio.Cheerio<any>, selector: string, attrs: string[]): string {
-  const node = $root.find(selector).first();
-  for (const attr of attrs) { const value = node.attr(attr); if (value && value !== '#') return value; }
+  let node=selectWithin($root,selector);
+  for(const candidate of [node,node.find('a,img').first(),$root.closest('a')])for(const attr of attrs){const value=candidate.attr(attr);if(value&&value!=='#')return value}
   return '';
 }
 
@@ -99,6 +100,11 @@ export async function mapLimit<T>(items: T[], limit: number, fn: (item: T, index
     while (true) { const index = next++; if (index >= items.length) return; await fn(items[index], index); }
   }));
 }
+
+export function validateSelectorConfig(selectors:Selectors){const $=cheerio.load('<main><div></div></main>'),errors:Record<string,string>={};for(const [key,selector] of Object.entries(selectors)){if(!selector)continue;try{$(selector)}catch(error){errors[key]=error instanceof Error?error.message:'سلکتور نامعتبر'}}return errors}
+export async function selectorWorkbench(url:string,selectors:Selectors){const page=await safeText(url,6_000_000),$=cheerio.load(page.text),errors:Record<string,string>={};for(const key of ['container','title','price','link','image'] as const)try{$(selectors[key])}catch(error){errors[key]=error instanceof Error?error.message:'سلکتور نامعتبر'}if(errors.container)return{url:page.url,containerCount:0,products:[],firstProductUrl:'',fields:{title:0,price:0,link:0,image:0},errors};let products:Product[]=[];try{products=parseProductHtml(page.text,page.url,selectors).slice(0,20)}catch(error){errors.parse=error instanceof Error?error.message:String(error)}return{url:page.url,containerCount:$(selectors.container).length,products,firstProductUrl:products.find(p=>p.url)?.url||'',fields:{title:products.filter(p=>p.title).length,price:products.filter(p=>p.price>0).length,link:products.filter(p=>p.url).length,image:products.filter(p=>p.image).length},errors}}
+export async function suggestListSelectors(url:string){const {text}=await safeText(url,5_000_000),$=cheerio.load(text),containers=['li.product','div.product','.product-card','.product-item','article.product','[itemtype*=Product]','.woocommerce-LoopProduct-link'],titles=['h2','h3','.title','.product-title','.woocommerce-loop-product__title','[itemprop=name]'],prices=['.price','.amount','[itemprop=price]','.product-price','ins .amount'],links=['a[href]','.product-link','[itemprop=url]'],images=['img','img[data-src]','.product-image','[itemprop=image]'];const count=(selector:string,root?:cheerio.Cheerio<any>)=>{try{return(root||$.root()).find(selector).length}catch{return 0}},bestContainer=containers.map(selector=>({selector,count:count(selector)})).filter(x=>x.count>1).sort((a,b)=>b.count-a.count),sample=bestContainer[0]?.selector?$(bestContainer[0].selector).first():$.root(),rank=(items:string[])=>items.map(selector=>({selector,count:count(selector,sample)})).filter(x=>x.count).sort((a,b)=>b.count-a.count);return{container:bestContainer,title:rank(titles),price:rank(prices),link:rank(links),image:rank(images)}}
+export async function testDetailSelectors(url:string,selectors:Selectors){const {text,url:final}=await safeText(url,6_000_000),$=cheerio.load(text),result:Record<string,{count:number;preview:string}>={};for(const key of ['shortDesc','longDesc','sku','brand','stock','weight','category','gallery'] as const){const selector=selectors[key];if(!selector)continue;let nodes;try{nodes=$(selector)}catch{result[key]={count:0,preview:'سلکتور نامعتبر'};continue}const first=nodes.first(),preview=key==='gallery'?absolute(first.attr('data-large_image')||first.attr('data-src')||first.attr('src')||'',final):normalize(first.text()).slice(0,500);result[key]={count:nodes.length,preview}}return{url:final,fields:result}}
 
 export async function suggestGallery(url:string):Promise<Array<{selector:string;count:number;sample:string[]}>>{const {text,url:final}=await safeText(url,5_000_000),$=cheerio.load(text),candidates=['.woocommerce-product-gallery img','.product-gallery img','.gallery img','[class*=gallery] img','[class*=thumb] img','img[data-large_image]','img[data-src]','main img','article img'],results:Array<{selector:string;count:number;sample:string[]}>=[];for(const selector of candidates){const images=new Set<string>();$(selector).each((_i,el)=>{const node=$(el),raw=node.attr('data-large_image')||node.attr('data-src')||node.attr('src')||'',value=absolute(raw,final);if(value&&!value.startsWith('data:'))images.add(value)});if(images.size)results.push({selector,count:images.size,sample:[...images].slice(0,5)})}return results.sort((a,b)=>b.count-a.count)}
 

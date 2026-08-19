@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-08-19T00:52:24.734Z",
+  "generatedAt": "2026-08-19T01:02:21.727Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 78,
+    "routes": 81,
     "menuActions": 61
   },
   "routes": [
@@ -83,6 +83,9 @@
     "POST /api/profiles/:id/import.xlsx",
     "GET /api/profiles/:id/export.csv",
     "POST /api/profiles/:id/import",
+    "POST /api/selector-workbench",
+    "POST /api/selector-suggest",
+    "POST /api/detail-selectors-test",
     "POST /api/gallery-suggest",
     "POST /api/test-selector",
     "POST /api/import-php",
