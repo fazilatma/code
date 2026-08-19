@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.8.0 — 2026-08-19
+
+- Added WooCommerce structured variation extraction from `data-product_variations`.
+- Added fallback variation groups from select options and JSON-LD offers.
+- Added variation price ranges, stock, SKU, image and attributes.
+- Added native WooCommerce variable product/attribute/variation synchronization.
+- Added Basalam variation summaries and CSV/XLSX/settings migration support.
+
 ## 2.7.0 — 2026-08-19
 
 - Added source-site Direct, DoH, manual IP, HTTP/HTTPS Proxy and Worker routing.

@@ -12,6 +12,7 @@ export type Selectors = {
   weight?: string;
   category?: string;
   gallery?: string;
+  variations?: string;
 };
 
 export type Profile = {
@@ -54,6 +55,10 @@ export type Product = {
   stock?: number;
   weight?: number;
   category?: string;
+  variationGroups?: Array<{ name:string; options:string[] }>;
+  variations?: Array<{ sku?:string; price?:number; stock?:number; image?:string; attributes:Record<string,string> }>;
+  priceMin?: number;
+  priceMax?: number;
   sourcePage: string;
   scrapedAt: string;
 };
