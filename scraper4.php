@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.88';
+const APP_VERSION = '9.89';
 const APP_VERSION_DATE = '1405/05/29';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -6509,7 +6509,7 @@ function cssToXpath(string $css, bool $strictClass = false): string {
     return $xpath;
 }
 
-function extractSmartLink($node, $xp, string $baseUrl): string {
+function extractSmartLink($node, $xp, string $baseUrl, $boundary = null): string {
 if (!$node instanceof DOMElement) return '';
 
 if ($node->tagName === 'a') {
@@ -6534,6 +6534,14 @@ return make_absolute_url($h, $baseUrl);
 }
 }
 
+/* v9.89: بالا رفتن به دنبال <a> باید در مرزِ ظرفِ محصول متوقف شود.
+   باگ: وقتی سلکتور «لینک» به یک <img> اشاره می‌کرد و داخل کارت هیچ <a>
+   نبود، این حلقه تا ۷ والد بالا می‌رفت و از خودِ کارت هم بیرون می‌زد. اگر
+   کل فهرست داخل یک <a> مشترک (بنر کمپین، رَپرِ کلیک‌پذیر) بود، هر ۲۰ کارت
+   همان یک آدرس را می‌گرفتند. بعد productKey که اول روی link هش می‌گیرد،
+   هر ۲۰ ردیف را یک کلید می‌دید و ۱۹ تا را دور می‌ریخت — «فقط یک محصول».
+   حالا مرز ظرف پاس داده می‌شود و حلقه از آن فراتر نمی‌رود؛ لینکِ نادرست
+   برنمی‌گردد و کلید به title|price می‌افتد که برای هر کارت یکتاست. */
 $parent = $node->parentNode;
 for ($i = 0; $i < 7 && $parent instanceof DOMElement; $i++) {
 if ($parent->tagName === 'a') {
@@ -6548,6 +6556,7 @@ if ($v && $v !== '#' && !preg_match('~^(javascript:|data:)~i', $v)) {
 return make_absolute_url($v, $baseUrl);
 }
 }
+if ($boundary instanceof DOMElement && $parent->isSameNode($boundary)) break;
 $parent = $parent->parentNode;
 }
 
@@ -7284,12 +7293,12 @@ if ($price) { $p['price'] = $price; break; }
 if (!empty($sel['link'])) {
 $nodes = queryInside($xp, $container, $sel['link']);
 if ($nodes && $nodes->length && $nodes->item(0) instanceof DOMElement) {
-$p['link'] = extractSmartLink($nodes->item(0), $xp, $baseUrl);
+$p['link'] = extractSmartLink($nodes->item(0), $xp, $baseUrl, $container);
 }
 }
 
 if (!$p['link']) {
-$p['link'] = extractSmartLink($container, $xp, $baseUrl);
+$p['link'] = extractSmartLink($container, $xp, $baseUrl, $container);
 }
 
 if (!empty($sel['image'])) {
@@ -7321,7 +7330,21 @@ break;
 if (!$p['title'] && !$p['link']) continue;
 $p['title'] = mb_substr($p['title'], 0, 200);
 
+/* v9.89: تورِ ایمنی در برابر «چند کارت، یک آدرس».
+   productKey اگر link داشته باشد فقط روی link هش می‌گیرد. پس اگر سایت
+   برای همهٔ کارت‌ها یک آدرسِ یکسان بدهد (رَپرِ کلیک‌پذیر، لینکِ «مشاهدهٔ
+   همه»، یا href="#/" ) هر ۲۰ ردیف یک کلید می‌گیرند و ۱۹ تای آن‌ها بی‌صدا
+   دور ریخته می‌شوند — کاربر فقط «یک محصول» می‌بیند. اینجا اگر کلید تکراری
+   بود ولی عنوان با ردیفِ ثبت‌شده فرق داشت، یعنی این‌ها واقعاً دو محصولِ
+   جدا هستند؛ پس با کلیدِ عنوان‌محور ثبتشان می‌کنیم تا حذف نشوند. */
 $key = productKey($p);
+if (isset($products[$key])) {
+$prevT = mb_strtolower(trim($products[$key]['title'] ?? ''));
+$curT  = mb_strtolower(trim($p['title'] ?? ''));
+if ($curT !== '' && $prevT !== '' && $curT !== $prevT) {
+$key = md5('title:' . $curT . '|' . ($p['price'] ?? ''));
+}
+}
 if (!isset($products[$key])) {
 $products[$key] = $p;
 }
@@ -7403,7 +7426,7 @@ $nodes[] = $n;
 foreach ($nodes as $node) {
 $p = ['title' => '', 'price' => '', 'link' => '', 'image' => '', 'sku' => ''];
 
-$p['link'] = extractSmartLink($node, $xp, $baseUrl);
+$p['link'] = extractSmartLink($node, $xp, $baseUrl, $node);
 
 if (!$p['link']) {
 $linkNodes = @$xp->query('.//a[@href]', $node);
@@ -13181,6 +13204,17 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "preg_match('~,(\\d{1,2})\$~', \$en)") !== false);
     $add('9.85', 'کلاسِ کاراکتریِ ترکیب‌گر جداکنندهٔ الگو را نمی‌بندد',
          strpos($selfSrc, "preg_match('/[+~]/', \$css)") !== false);
+
+    /* ---------- v9.89: «۲۰ کارت، یک آدرس» ⇒ فقط یک محصول ---------- */
+    $add('9.89', 'بالا رفتن به دنبال <a> در مرزِ ظرفِ محصول متوقف می‌شود',
+         strpos($selfSrc, '$boundary = null): string {') !== false
+      && strpos($selfSrc, '$parent->isSameNode($boundary)') !== false);
+    $add('9.89', 'هر سه فراخوانی extractSmartLink مرزِ ظرف را پاس می‌دهند',
+         strpos($selfSrc, 'extractSmartLink($nodes->item(0), $xp, $baseUrl, $container)') !== false
+      && strpos($selfSrc, 'extractSmartLink($container, $xp, $baseUrl, $container)') !== false
+      && strpos($selfSrc, 'extractSmartLink($node, $xp, $baseUrl, $node)') !== false);
+    $add('9.89', 'اگر کلید تکراری بود ولی عنوان فرق داشت، ردیف حذف نمی‌شود',
+         strpos($selfSrc, "$key = md5('title:' . $curT . '|'") !== false);
 
     /* ---------- v9.88: تشخیصِ صفحاتی که با جاوااسکریپت رندر می‌شوند ---------- */
     $add('9.88', 'تعداد ظرف‌های موجود در HTMLِ خام شمرده و گزارش می‌شود',
@@ -27754,6 +27788,19 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.89', t:'🎯 رفع «۲۰ محصول پیدا می‌شود ولی فقط یکی ذخیره می‌شود»', items:[
+    'باگ با PHP واقعی بازتولید شد: ۲۰ ظرف پیدا می‌شد و خروجی ۱ محصول بود.',
+    '🐞 ریشه: وقتی سلکتور «لینک» به یک <img> اشاره می‌کند و داخل کارت هیچ',
+    '<a> نیست، تابعِ لینک‌یاب تا ۷ والد بالا می‌رفت و از خودِ کارت بیرون',
+    'می‌زد. اگر کل فهرست داخل یک <a> مشترک بود (بنر یا رَپرِ کلیک‌پذیر)،',
+    'هر ۲۰ کارت همان یک آدرس را می‌گرفتند.',
+    '🐞 بعد productKey که وقتی link هست فقط روی link هش می‌گیرد، هر ۲۰',
+    'ردیف را یک کلید می‌دید و ۱۹ تا را بی‌صدا دور می‌ریخت.',
+    '✅ حالا بالا رفتن در مرزِ ظرفِ محصول متوقف می‌شود.',
+    '✅ تورِ ایمنی: اگر کلید تکراری بود ولی عنوان فرق داشت، ردیف با کلیدِ',
+    '   عنوان‌محور ثبت می‌شود تا هیچ محصولی بی‌صدا حذف نشود.',
+    'پوشش تست: رَپرِ مشترک، href یکسان، کارت سالم، ۱ کارت واقعی، SPA.',
+  ]},
   {v:'9.88', t:'🔍 تشخیص صفحاتی که محتوا را با جاوااسکریپت می‌سازند', items:[
     'چرا انتخابگر «۲۰ مورد مشابه» نشان می‌داد ولی استخراج ۰ یا ۱ محصول می‌آورد:',
     'انتخابگرِ بصری صفحه را در iframe و با جاوااسکریپتِ کامل بارگذاری می‌کند،',
