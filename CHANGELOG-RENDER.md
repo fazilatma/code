@@ -1,5 +1,14 @@
 # Render TypeScript changelog
 
+## 2.21.0 — 2026-08-19
+
+- Fully separated WooCommerce and Basalam destination sub-panels with independent filters, views and state.
+- Added responsive card/table modes, quick status filters and visual category-aware edit modal.
+- Changed Basalam connection tests to `users/me`, returning user/vendor/verification details.
+- Added per-extra-shop test buttons that auto-fill vendor ID/name and open complete diagnostics.
+- Added signed same-origin image proxying for Basalam images that block browser hotlinking.
+- Added remote-product caching with explicit fresh refresh and mutation invalidation.
+
 ## 2.20.0 — 2026-08-19
 
 - Replaced the menu-only parity claim with a full-source PHP/TypeScript audit.

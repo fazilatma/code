@@ -1,3 +1,3 @@
-export const APP_VERSION = '2.20.0';
+export const APP_VERSION = '2.21.0';
 export const APP_BUILD_DATE = '2026-08-19';
-export const APP_RELEASE = 'Phase 29 — comprehensive full-source parity audit';
+export const APP_RELEASE = 'Phase 30 — separated destination managers and Basalam vendor diagnostics';

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-19T05:21:25.202Z",
+  "generatedAt": "2026-08-19T05:49:06.554Z",
   "summary": {
     "phpGetConditions": 150,
     "phpPostActions": 28,
@@ -8,7 +8,7 @@
     "getMissing": 33,
     "postCovered": 28,
     "postMissing": 0,
-    "typescriptRoutes": 109,
+    "typescriptRoutes": 111,
     "uiActions": 79
   },
   "get": [
@@ -819,6 +819,7 @@
     "GET /health",
     "GET /",
     "GET /dashboard.js",
+    "GET /image",
     "GET /visual",
     "POST /api/visual-ticket",
     "GET /api/version",
@@ -893,6 +894,7 @@
     "POST /api/source-test",
     "POST /api/source-diagnostics",
     "POST /api/test-connection/:target",
+    "POST /api/test-basalam-token",
     "GET /api/categories/:target",
     "GET /api/profiles",
     "POST /api/profiles",
