@@ -52,6 +52,7 @@
 15. **فاز ۱۵ — بکاپ GitHub (انجام شد):** تنظیم از رابط، رمزنگاری AES-GCM، آپلود/list/download/restore، زمان‌بندی و نگاشت Legacy.
 16. **فاز ۱۶ — شبکه مبدأ (انجام شد):** Direct/DoH/IP/HTTP Proxy/Worker، fallback، timeout، عیب‌یابی و تیک مستقل هر پروفایل.
 17. **فاز ۱۷ — محصولات متغیر (انجام شد):** استخراج ساختاری Woo، گروه/تنوع/SKU/قیمت/موجودی/تصویر، همگام‌سازی variable و انتقال CSV/XLSX.
+18. **فاز ۱۸ — صفحه‌بندی کامل (انجام شد):** query page/custom، path/full pattern، next selector، انتخاب بصری دکمه بعد، loop guard و تست URL.
 
 ## نتیجهٔ تطبیق منوی همبرگری (نه کل برنامه)
 

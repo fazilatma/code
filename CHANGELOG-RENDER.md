@@ -1,5 +1,12 @@
 # Render TypeScript changelog
 
+## 2.9.0 — 2026-08-19
+
+- Added all PHP pagination modes: query page/custom, path pattern, full URL pattern and next selector.
+- Added real next-link discovery with relative URL resolution and loop protection.
+- Added visual selection for the next-page control and integrated pagination checks into the selector workbench.
+- Added deterministic pagination regression tests.
+
 ## 2.8.0 — 2026-08-19
 
 - Added WooCommerce structured variation extraction from `data-product_variations`.

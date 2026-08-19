@@ -1,5 +1,5 @@
 import { allProducts, claimJob, getProfile, markMissingProducts, markProfileRun, stopRequested, updateJob, upsertProduct } from './db.js';
-import { mapLimit, pageUrl, scrapeDetails, scrapeList, transformProduct } from './scraper.js';
+import { mapLimit, pageUrl, scrapeDetails, scrapeListPage, transformProduct } from './scraper.js';
 import { syncBasalam, syncWoo } from './sync.js';
 import type { Job, Product } from './types.js';
 
@@ -18,13 +18,10 @@ export async function processOneJob(): Promise<boolean> {
     const profile = await getProfile(job.profileId); if (!profile) throw new Error('Profile not found');
     append(job, `شروع ${job.kind === 'scrape' ? 'استخراج' : 'همگام‌سازی'} «${profile.name}»`);
     if (job.kind === 'scrape') {
-      job.phase = 'list'; await save(job); const found = new Map<string, Product>();
-      for (let page = 1; page <= profile.pages; page++) {
-        if (await stopRequested(job.id)) { job.status = 'stopped'; break; }
-        const url = pageUrl(profile, page); append(job, `صفحه ${page}: ${url}`);
-        const list = await scrapeList(url, profile.selectors, !profile.netIndirect); if (!list.length) { append(job, 'محصولی پیدا نشد', 'warning'); break; }
-        for (const raw of list) { const p = transformProduct(raw, profile); if (!profile.minPrice || p.price >= profile.minPrice) found.set(p.sourceKey, p); }
-        job.total = found.size; job.processed += list.length; await save(job);
+      job.phase='list';await save(job);const found=new Map<string,Product>();let nextUrl='';const seenPageUrls=new Set<string>();
+      for(let page=1;page<=profile.pages;page++){
+        if(await stopRequested(job.id)){job.status='stopped';break}
+        if(profile.pagination==='next_selector'&&page>1&&!nextUrl){append(job,'دکمه صفحه بعد پیدا نشد؛ صفحه‌بندی تمام شد','info');break}const url=profile.pagination==='next_selector'&&page>1?nextUrl:pageUrl(profile,page);if(seenPageUrls.has(url)){append(job,'آدرس صفحه تکراری شد؛ توقف برای جلوگیری از حلقه','warning');break}seenPageUrls.add(url);append(job,`صفحه ${page}: ${url}`);const result=await scrapeListPage(url,profile.selectors,profile.pagination==='next_selector'?profile.paginationValue:'',!profile.netIndirect),list=result.products;nextUrl=result.nextUrl;if(!list.length){append(job,'محصولی پیدا نشد','warning');break}for(const raw of list){const p=transformProduct(raw,profile);if(!profile.minPrice||p.price>=profile.minPrice)found.set(p.sourceKey,p)}job.total=found.size;job.processed+=list.length;await save(job)
       }
       if (job.status !== 'stopped') {
         job.phase = 'details'; const products = [...found.values()]; await save(job);

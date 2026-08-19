@@ -212,7 +212,7 @@ app.get('/api/profiles/:id/export.xlsx',async c=>{const result=await listProduct
 app.post('/api/profiles/:id/import.xlsx',async c=>{const profile=await getProfile(c.req.param('id'));if(!profile)return c.json({ok:false,error:'Profile not found'},404);const body=await c.req.json() as any;if(typeof body.base64!=='string')return c.json({ok:false,error:'base64 is required'},400);return c.json(await importRows(profile,await xlsxToRows(Buffer.from(body.base64,'base64'))))});
 app.get('/api/profiles/:id/export.csv',async c=>{const result=await listProducts(c.req.param('id'),100000,0,''),fields=['sourceKey','title','price','url','image','sku','brand','stock','weight','category','shortDesc','longDesc','variationGroups','variations','priceMin','priceMax'],csv='\uFEFF'+fields.join(',')+'\n'+result.products.map(p=>fields.map(field=>csvCell((p as any)[field])).join(',')).join('\n');return c.body(csv,200,{'content-type':'text/csv; charset=utf-8','content-disposition':`attachment; filename="${c.req.param('id').replace(/[^a-z0-9_.-]/gi,'_')}.csv"`})});
 app.post('/api/profiles/:id/import',async c=>{const profile=await getProfile(c.req.param('id'));if(!profile)return c.json({ok:false,error:'Profile not found'},404);const body=await c.req.json() as any,rows=Array.isArray(body.rows)?body.rows:typeof body.csv==='string'?parseCsv(body.csv):[];return c.json(await importRows(profile,rows))});
-app.post('/api/selector-workbench',async c=>{const body=await c.req.json() as any;return c.json({ok:true,...await selectorWorkbench(String(body.url||''),{...DEFAULT_SELECTORS,...(body.selectors||{})})})});
+app.post('/api/selector-workbench',async c=>{const body=await c.req.json() as any;return c.json({ok:true,...await selectorWorkbench(String(body.url||''),{...DEFAULT_SELECTORS,...(body.selectors||{})},String(body.nextSelector||''))})});
 app.post('/api/selector-suggest',async c=>{const body=await c.req.json() as any;return c.json({ok:true,suggestions:await suggestListSelectors(String(body.url||''))})});
 app.post('/api/detail-selectors-test',async c=>{const body=await c.req.json() as any;return c.json({ok:true,...await testDetailSelectors(String(body.url||''),{...DEFAULT_SELECTORS,...(body.selectors||{})})})});
 app.post('/api/gallery-suggest',async c=>{const body=await c.req.json() as any;return c.json({ok:true,suggestions:await suggestGallery(String(body.url||''))})});
@@ -262,10 +262,10 @@ function legacyProducts(raw: unknown): Product[] {
 }
 function normalizeProfile(raw: any): Profile {
   const url = new URL(String(raw.url || '')); if (!['http:','https:'].includes(url.protocol)) throw new Error('Invalid profile URL');
-  const now = new Date().toISOString(); const selectors = { ...DEFAULT_SELECTORS, ...(typeof raw.selectors === 'string' ? JSON.parse(raw.selectors) : raw.selectors || {}) };
+  const now=new Date().toISOString(),selectors={...DEFAULT_SELECTORS,...(typeof raw.selectors==='string'?JSON.parse(raw.selectors):raw.selectors||{})},paginationRaw=String(raw.pagination||raw.pagType||'query_page'),pagination=(paginationRaw==='path_page'?'path_pattern':paginationRaw);
   for (const key of ['container','title','price','link','image']) if (!selectors[key]) throw new Error(`selectors.${key} is required`);
   return { id: String(raw.id || idFromUrl(url.href)), name: String(raw.name || url.hostname), url: url.href, enabled: raw.enabled !== false,
-    pages: Math.min(100,Math.max(1,Number(raw.pages)||1)), pagination: ['query_page','path_page','none'].includes(raw.pagination || raw.pagType) ? raw.pagination || raw.pagType : 'query_page',
+    pages: Math.min(100,Math.max(1,Number(raw.pages)||1)), pagination:(['query_page','query_custom','path_pattern','full_pattern','next_selector','none'].includes(pagination)?pagination:'query_page') as Profile['pagination'],
     paginationValue: String(raw.paginationValue || raw.pagVal || 'page'), selectors, titleSuffix: String(raw.titleSuffix || ''),
     priceMode: ['none','add','percent','multiply'].includes(raw.priceMode) ? raw.priceMode : 'none', priceValue: Number(raw.priceValue ?? raw.priceVal) || 0,
     roundPrice: Math.max(0,Number(raw.roundPrice)||0), minPrice: Math.max(0,Number(raw.minPrice)||0), wooCategoryId: Number(raw.wooCategoryId)||0,

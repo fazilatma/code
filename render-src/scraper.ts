@@ -21,21 +21,11 @@ function firstAttr($root: cheerio.Cheerio<any>, selector: string, attrs: string[
   return '';
 }
 
-export function pageUrl(profile: Profile, page: number): string {
-  const url = new URL(profile.url);
-  if (page <= 1 || profile.pagination === 'none') return url.href;
-  if (profile.pagination === 'path_page') {
-    url.pathname = url.pathname.replace(/\/page\/\d+\/?$/i, '').replace(/\/$/, '') + `/page/${page}/`;
-    return url.href;
-  }
-  url.searchParams.set(profile.paginationValue || 'page', String(page));
-  return url.href;
-}
+export function pageUrl(profile:Profile,page:number):string{const url=new URL(profile.url);if(page<=1||profile.pagination==='none'||profile.pagination==='next_selector')return url.href;if(profile.pagination==='query_custom'){url.searchParams.set(profile.paginationValue||'paged',String(page));return url.href}if(profile.pagination==='path_pattern'){const pattern=(profile.paginationValue||'/page/{page}/').replace('{page}',String(page)),basePath=url.pathname.replace(/\/page\/\d+\/?$/i,'').replace(/\/$/,'');url.pathname=basePath+pattern;return url.href}if(profile.pagination==='full_pattern')return(profile.paginationValue||profile.url).replace('{page}',String(page));url.searchParams.set('page',String(page));return url.href}
 
-export async function scrapeList(url: string, selectors: Selectors, forceDirect=false): Promise<Product[]> {
-  const { text, url: finalUrl } = await sourceText(url,8_000_000,forceDirect);
-  return parseProductHtml(text,finalUrl,selectors);
-}
+export async function scrapeList(url:string,selectors:Selectors,forceDirect=false):Promise<Product[]>{return(await scrapeListPage(url,selectors,'',forceDirect)).products}
+export async function scrapeListPage(url:string,selectors:Selectors,nextSelector='',forceDirect=false){const{text,url:finalUrl}=await sourceText(url,8_000_000,forceDirect),products=parseProductHtml(text,finalUrl,selectors),$=cheerio.load(text);let nextUrl='';if(nextSelector)try{const node=$(nextSelector).first(),raw=node.attr('href')||node.attr('data-href')||node.find('a[href]').first().attr('href')||'';nextUrl=absolute(raw,finalUrl)}catch{}return{products,nextUrl,url:finalUrl}}
+
 export function parseProductHtml(text:string,finalUrl:string,selectors:Selectors):Product[]{
   const $ = cheerio.load(text); const products: Product[] = [];
   $(selectors.container).each((_index, element) => {
@@ -100,7 +90,7 @@ export async function mapLimit<T>(items: T[], limit: number, fn: (item: T, index
 }
 
 export function validateSelectorConfig(selectors:Selectors){const $=cheerio.load('<main><div></div></main>'),errors:Record<string,string>={};for(const [key,selector] of Object.entries(selectors)){if(!selector)continue;try{$(selector)}catch(error){errors[key]=error instanceof Error?error.message:'سلکتور نامعتبر'}}return errors}
-export async function selectorWorkbench(url:string,selectors:Selectors){const page=await sourceText(url,6_000_000),$=cheerio.load(page.text),errors:Record<string,string>={};for(const key of ['container','title','price','link','image'] as const)try{$(selectors[key])}catch(error){errors[key]=error instanceof Error?error.message:'سلکتور نامعتبر'}if(errors.container)return{url:page.url,containerCount:0,products:[],firstProductUrl:'',fields:{title:0,price:0,link:0,image:0},errors};let products:Product[]=[];try{products=parseProductHtml(page.text,page.url,selectors).slice(0,20)}catch(error){errors.parse=error instanceof Error?error.message:String(error)}return{url:page.url,containerCount:$(selectors.container).length,products,firstProductUrl:products.find(p=>p.url)?.url||'',fields:{title:products.filter(p=>p.title).length,price:products.filter(p=>p.price>0).length,link:products.filter(p=>p.url).length,image:products.filter(p=>p.image).length},errors}}
+export async function selectorWorkbench(url:string,selectors:Selectors,nextSelector=''){const page=await sourceText(url,6_000_000),$=cheerio.load(page.text),errors:Record<string,string>={};for(const key of ['container','title','price','link','image'] as const)try{$(selectors[key])}catch(error){errors[key]=error instanceof Error?error.message:'سلکتور نامعتبر'}let nextUrl='';if(nextSelector)try{const node=$(nextSelector).first();nextUrl=absolute(node.attr('href')||node.attr('data-href')||node.find('a').attr('href')||'',page.url)}catch(error){errors.next=error instanceof Error?error.message:'سلکتور صفحه بعد نامعتبر'}if(errors.container)return{url:page.url,containerCount:0,products:[],firstProductUrl:'',nextUrl,fields:{title:0,price:0,link:0,image:0},errors};let products:Product[]=[];try{products=parseProductHtml(page.text,page.url,selectors).slice(0,20)}catch(error){errors.parse=error instanceof Error?error.message:String(error)}return{url:page.url,containerCount:$(selectors.container).length,products,firstProductUrl:products.find(p=>p.url)?.url||'',nextUrl,fields:{title:products.filter(p=>p.title).length,price:products.filter(p=>p.price>0).length,link:products.filter(p=>p.url).length,image:products.filter(p=>p.image).length},errors}}
 export async function suggestListSelectors(url:string){const {text}=await sourceText(url,5_000_000),$=cheerio.load(text),containers=['li.product','div.product','.product-card','.product-item','article.product','[itemtype*=Product]','.woocommerce-LoopProduct-link'],titles=['h2','h3','.title','.product-title','.woocommerce-loop-product__title','[itemprop=name]'],prices=['.price','.amount','[itemprop=price]','.product-price','ins .amount'],links=['a[href]','.product-link','[itemprop=url]'],images=['img','img[data-src]','.product-image','[itemprop=image]'];const count=(selector:string,root?:cheerio.Cheerio<any>)=>{try{return(root||$.root()).find(selector).length}catch{return 0}},bestContainer=containers.map(selector=>({selector,count:count(selector)})).filter(x=>x.count>1).sort((a,b)=>b.count-a.count),sample=bestContainer[0]?.selector?$(bestContainer[0].selector).first():$.root(),rank=(items:string[])=>items.map(selector=>({selector,count:count(selector,sample)})).filter(x=>x.count).sort((a,b)=>b.count-a.count);return{container:bestContainer,title:rank(titles),price:rank(prices),link:rank(links),image:rank(images)}}
 export async function testDetailSelectors(url:string,selectors:Selectors){const {text,url:final}=await sourceText(url,6_000_000),$=cheerio.load(text),result:Record<string,{count:number;preview:string}>={};for(const key of ['shortDesc','longDesc','sku','brand','stock','weight','category','gallery','variations'] as const){const selector=selectors[key];if(!selector)continue;let nodes;try{nodes=$(selector)}catch{result[key]={count:0,preview:'سلکتور نامعتبر'};continue}const first=nodes.first(),preview=key==='gallery'?absolute(first.attr('data-large_image')||first.attr('data-src')||first.attr('src')||'',final):normalize(first.text()).slice(0,500);result[key]={count:nodes.length,preview}}return{url:final,fields:result}}
 
