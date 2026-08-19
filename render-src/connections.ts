@@ -15,4 +15,4 @@ export async function saveConnections(input:unknown): Promise<ConnectionVault> {
   await setState(KEY,encryptVault(value));cached={value,expires:Date.now()+30_000};return value;
 }
 
-export function connectionStatus(value:ConnectionVault){return{woo:Boolean(value.woo.url&&value.woo.key&&value.woo.secret),basalam:Boolean(value.basalam.token&&value.basalam.vendorId),ai:Boolean(value.ai.baseUrl&&value.ai.apiKey&&value.ai.model),notifications:Boolean(value.notifications.url)}}
+export function connectionStatus(value:ConnectionVault){return{woo:Boolean(value.woo.url&&value.woo.key&&value.woo.secret),basalam:Boolean(value.basalam.token&&value.basalam.vendorId),ai:Boolean(value.ai.baseUrl&&value.ai.apiKey&&value.ai.model),notifications:Boolean(value.notifications.url),github:Boolean(value.github.token&&value.github.repo)}}

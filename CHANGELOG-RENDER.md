@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.6.0 — 2026-08-19
+
+- Added encrypted-vault GitHub repository/token/branch/path settings in the dashboard.
+- Added direct PHP-compatible settings backup upload to GitHub Contents API.
+- Added remote backup listing, download and guarded restore through the existing settings importer.
+- Added scheduled GitHub backups with configurable intervals and persisted success/failure state.
+- Added legacy `backup_run`, `backup_remote_list` and `backup_download` mappings.
+
 ## 2.5.0 — 2026-08-19
 
 - Added a full-screen professional live AI test results dashboard.

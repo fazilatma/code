@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-08-19T01:35:37.632Z",
+  "generatedAt": "2026-08-19T01:49:14.432Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 88,
-    "menuActions": 68
+    "routes": 92,
+    "menuActions": 71
   },
   "routes": [
     "GET /health",
@@ -51,6 +51,10 @@
     "POST /api/settings",
     "GET /api/backup",
     "POST /api/restore",
+    "POST /api/github-backup/run",
+    "GET /api/github-backup/list",
+    "GET /api/github-backup/status",
+    "GET /api/github-backup/:name",
     "GET /api/settings-export",
     "POST /api/settings-import",
     "GET /api/profile-stats",
@@ -136,6 +140,9 @@
     "dest-status",
     "digest-preview",
     "digest-send",
+    "github-backup",
+    "github-list",
+    "github-restore",
     "health",
     "notify-bale",
     "notify-preview",
