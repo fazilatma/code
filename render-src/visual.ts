@@ -1,7 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import * as cheerio from 'cheerio';
 import { config } from './config.js';
-import { safeText } from './network.js';
+import { sourceText } from './source-network.js';
 
 const ephemeralSecret = randomBytes(32).toString('hex');
 const secret = () => config.adminToken || ephemeralSecret;
@@ -28,7 +28,7 @@ export function readVisualTicket(ticket: string): Ticket {
 
 export async function renderVisualSelector(ticket: string): Promise<string> {
   const { url } = readVisualTicket(ticket);
-  const page = await safeText(url, 6_000_000);
+  const page = await sourceText(url, 6_000_000);
   const $ = cheerio.load(page.text, { scriptingEnabled: false });
   $('script,iframe,object,embed,form,noscript').remove();
   $('meta[http-equiv="Content-Security-Policy"],meta[http-equiv="content-security-policy"],meta[http-equiv="refresh"],base').remove();

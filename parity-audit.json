@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-08-19T01:49:14.432Z",
+  "generatedAt": "2026-08-19T02:02:33.700Z",
   "php": {
     "getConditions": 150,
     "postActions": 28
   },
   "typescript": {
-    "routes": 92,
-    "menuActions": 71
+    "routes": 93,
+    "menuActions": 72
   },
   "routes": [
     "GET /health",
@@ -75,6 +75,7 @@
     "POST /api/products/:profileId/:sourceKey/sync/:target",
     "POST /api/queue-watchdog",
     "POST /api/source-test",
+    "POST /api/source-diagnostics",
     "POST /api/test-connection/:target",
     "GET /api/categories/:target",
     "GET /api/profiles",
@@ -166,6 +167,7 @@
     "save",
     "save-connections",
     "selftest",
+    "source-diagnostics",
     "source-test",
     "stats",
     "suffix-report",

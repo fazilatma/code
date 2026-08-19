@@ -1,5 +1,13 @@
 # Render TypeScript changelog
 
+## 2.7.0 — 2026-08-19
+
+- Added source-site Direct, DoH, manual IP, HTTP/HTTPS Proxy and Worker routing.
+- Added automatic direct fallback, per-request timeout and encrypted proxy credentials.
+- Routed list/detail scraping, selector tests, gallery suggestions and visual proxy through the source transport.
+- Added per-profile indirect-connection control and multi-path diagnostics.
+- Added source-network migration in PHP-compatible settings bundles.
+
 ## 2.6.0 — 2026-08-19
 
 - Added encrypted-vault GitHub repository/token/branch/path settings in the dashboard.

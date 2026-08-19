@@ -30,7 +30,8 @@ export async function createPhpSettingsBundle(host='render'): Promise<PhpSetting
     basalam:{token:c.basalam.token,vendor_id:c.basalam.vendorId,api_base:c.basalam.api,preparation_days:c.basalam.preparationDays,weight:c.basalam.weight,package_weight:c.basalam.packageWeight,stock:c.basalam.stock,category_id:c.basalam.categoryId,auto_category:c.basalam.autoCategory,net_indirect:c.basalam.netIndirect,shops:c.basalam.shops},
     ai:{base_url:c.ai.baseUrl,api_key:c.ai.apiKey,model:c.ai.model,activeProvider:c.ai.activeProvider,providers:c.ai.providers,candidates:c.ai.candidates,master:c.ai.master,network:c.ai.network},
     notifications:c.notifications,
-    github:{token:c.github.token,repo:c.github.repo,branch:c.github.branch,path:c.github.path}
+    github:{token:c.github.token,repo:c.github.repo,branch:c.github.branch,path:c.github.path},
+    src_net:c.sourceNetwork
   });
   addFile(files,'category_learning.json',await listCategoryLearning(10000));
   addFile(files,'autoreply_log.json',await listAutoreplyLog(5000));

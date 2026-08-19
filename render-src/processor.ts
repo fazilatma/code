@@ -22,7 +22,7 @@ export async function processOneJob(): Promise<boolean> {
       for (let page = 1; page <= profile.pages; page++) {
         if (await stopRequested(job.id)) { job.status = 'stopped'; break; }
         const url = pageUrl(profile, page); append(job, `صفحه ${page}: ${url}`);
-        const list = await scrapeList(url, profile.selectors); if (!list.length) { append(job, 'محصولی پیدا نشد', 'warning'); break; }
+        const list = await scrapeList(url, profile.selectors, !profile.netIndirect); if (!list.length) { append(job, 'محصولی پیدا نشد', 'warning'); break; }
         for (const raw of list) { const p = transformProduct(raw, profile); if (!profile.minPrice || p.price >= profile.minPrice) found.set(p.sourceKey, p); }
         job.total = found.size; job.processed += list.length; await save(job);
       }
@@ -30,7 +30,7 @@ export async function processOneJob(): Promise<boolean> {
         job.phase = 'details'; const products = [...found.values()]; await save(job);
         await mapLimit(products, Math.max(1, Number(process.env.DETAIL_CONCURRENCY || 4)), async product => {
           if (await stopRequested(job.id)) return;
-          try { await scrapeDetails(product, profile.selectors); }
+          try { await scrapeDetails(product, profile.selectors, !profile.netIndirect); }
           catch (error) { job.failed++; append(job, `${product.title}: ${message(error)}`, 'error'); }
         });
         job.phase = 'save'; await save(job);

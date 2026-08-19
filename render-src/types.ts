@@ -32,6 +32,7 @@ export type Profile = {
   basalamCategoryId: number;
   syncWoo: boolean;
   syncBasalam: boolean;
+  netIndirect: boolean;
   intervalMinutes: number;
   lastRunAt: string | null;
   createdAt: string;
