@@ -12,15 +12,17 @@
  *
  * API Token مقصد باید دست‌کم مجوز Account > Workers Scripts > Edit داشته باشد.
  * Worker مقصد را جدا از این پنل انتخاب کنید تا پنل خودش را جایگزین نکند.
+ * نصب نخست (D1/Queue/R2/Cron) باید یک‌بار با wrangler.toml انجام شود؛ این پنل
+ * برای به‌روزرسانی کد است و bindingهای نصب‌شده را حفظ می‌کند.
  */
 
 const DEPLOY_VERSION = "1.0.0";
 const DEFAULTS = {
   repo: "fazilatma/code",
-  branch: "arena/01a01575-code",
+  branch: "arena/01a0176d-code",
   path: "scraper4.worker.js",
-  worker: "scraper4",
-  compatibilityDate: "2026-08-18"
+  worker: "scraper4-cloudflare",
+  compatibilityDate: "2026-08-19"
 };
 const SECURITY_HEADERS = {
   "x-content-type-options": "nosniff",
@@ -217,7 +219,11 @@ async function uploadWorker(config, code) {
   const metadata = {
     main_module: "worker.js",
     compatibility_date: config.compatibilityDate,
-    compatibility_flags: []
+    compatibility_flags: [],
+    // Code-only updates must not erase resources provisioned by Wrangler.
+    // Initial installation still requires wrangler.toml because Queue consumers,
+    // Cron triggers, D1 migrations, and R2 buckets are account-level resources.
+    keep_bindings: ["plain_text", "secret_text", "json", "d1", "r2_bucket", "queue"]
   };
   const body = new FormData();
   body.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }), "metadata.json");

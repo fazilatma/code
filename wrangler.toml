@@ -1,0 +1,43 @@
+name = "scraper4-cloudflare"
+main = "worker-src/main.ts"
+compatibility_date = "2026-08-19"
+workers_dev = true
+
+# Replace this placeholder after: npx wrangler d1 create scraper4-db
+[[d1_databases]]
+binding = "DB"
+database_name = "scraper4-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+# Create once with: npx wrangler queues create scraper4-jobs
+[[queues.producers]]
+binding = "JOBS"
+queue = "scraper4-jobs"
+
+[[queues.consumers]]
+queue = "scraper4-jobs"
+max_batch_size = 5
+max_batch_timeout = 5
+max_retries = 5
+dead_letter_queue = "scraper4-jobs-dlq"
+max_concurrency = 2
+
+# Create once with: npx wrangler r2 bucket create scraper4-backups
+[[r2_buckets]]
+binding = "BACKUPS"
+bucket_name = "scraper4-backups"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+WORKER_VERSION = "1.0.0"
+REQUEST_TIMEOUT_MS = "25000"
+MAX_RESPONSE_BYTES = "8000000"
+DETAIL_CONCURRENCY = "4"
+JOB_CHUNK_SIZE = "20"
+
+[observability.logs]
+enabled = true
+invocation_logs = true

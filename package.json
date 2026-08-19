@@ -1,22 +1,29 @@
 {
-  "name": "scraper4-render",
+  "name": "scraper4-cloudflare",
   "version": "1.0.0",
   "private": true,
-  "description": "Render-native product scraper and WooCommerce/Basalam synchronizer",
+  "description": "Cloudflare Workers-native Scraper 4 with D1, Queues, Cron, and R2 backups",
   "type": "module",
   "engines": {
-    "node": "20.19.4"
+    "node": ">=20.19.0"
   },
   "scripts": {
-    "start": "node render-dist/server.js",
+    "start": "wrangler dev --ip 0.0.0.0",
     "render:build": "node build-render.mjs",
     "render:start": "node render-dist/server.js",
     "render:worker": "node render-dist/worker.js",
     "render:cron": "node render-dist/cron.js",
-    "dev": "npm run render:build && node --watch render-dist/server.js",
-    "typecheck": "tsc -p tsconfig.render.json --noEmit",
-    "test": "npm run typecheck && node --test render-tests/*.test.mjs",
-    "parity:audit": "node scripts/parity-audit.mjs"
+    "dev": "wrangler dev --ip 0.0.0.0",
+    "typecheck": "npm run worker:typecheck",
+    "test": "npm run worker:test",
+    "parity:audit": "node scripts/parity-audit.mjs",
+    "worker:build": "node build-worker.mjs",
+    "worker:typecheck": "tsc -p tsconfig.worker.json --noEmit",
+    "worker:dev": "wrangler dev --ip 0.0.0.0",
+    "worker:test": "npm run worker:typecheck && npm run worker:build && node --test worker-tests/*.test.mjs",
+    "worker:deploy": "wrangler deploy",
+    "worker:db:local": "wrangler d1 migrations apply scraper4-db --local",
+    "worker:db:remote": "wrangler d1 migrations apply scraper4-db --remote"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.1",
@@ -29,6 +36,7 @@
     "@types/node": "^24.3.0",
     "@types/pg": "^8.15.5",
     "esbuild": "^0.25.9",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "wrangler": "^4.124.0"
   }
 }

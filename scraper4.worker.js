@@ -1,11 +1,4579 @@
-var ht=(t,e,r)=>(n,a)=>{let o=-1;return i(0);async function i(s){if(s<=o)throw new Error("next() called multiple times");o=s;let c,l=!1,u;if(t[s]?(u=t[s][0][0],n.req.routeIndex=s):u=s===t.length&&a||void 0,u)try{c=await u(n,()=>i(s+1))}catch(p){if(p instanceof Error&&e)n.error=p,c=await e(p,n),l=!0;else throw p}else n.finalized===!1&&r&&(c=await r(n));return c&&(n.finalized===!1||l)&&(n.res=c),n}};var Bt=Symbol();var Ut=(t,e)=>new Response(t,{headers:{"Content-Type":e.replace(/^[^;]+/,n=>n.toLowerCase())}}).formData();var X=t=>"headers"in t,Wt=async(t,e=Object.create(null))=>{let{all:r=!1,dot:n=!1}=e,i=(X(t)?t.headers:t.raw.headers).get("Content-Type")?.split(";")[0].trim().toLowerCase();return i==="multipart/form-data"||i==="application/x-www-form-urlencoded"?_e(t,{all:r,dot:n}):{}};async function _e(t,e){if(!X(t)&&t.bodyCache.formData)return Vt(await t.bodyCache.formData,e);let r=X(t)?t.headers:t.raw.headers,n=await t.arrayBuffer(),a=Ut(n,r.get("Content-Type")||"");X(t)||(t.bodyCache.formData=a);let o=await a;return o?Vt(o,e):{}}function Vt(t,e){let r=Object.create(null);return t.forEach((n,a)=>{e.all||a.endsWith("[]")?ve(r,a,n):r[a]=n}),e.dot&&Object.entries(r).forEach(([n,a])=>{n.includes(".")&&(Re(r,n,a),delete r[n])}),r}var ve=(t,e,r)=>{t[e]!==void 0?Array.isArray(t[e])?t[e].push(r):t[e]=[t[e],r]:e.endsWith("[]")?t[e]=[r]:t[e]=r},Re=(t,e,r)=>{if(/(?:^|\.)__proto__\./.test(e))return;let n=t,a=e.split(".");a.forEach((o,i)=>{i===a.length-1?n[o]=r:((!n[o]||typeof n[o]!="object"||Array.isArray(n[o])||n[o]instanceof File)&&(n[o]=Object.create(null)),n=n[o])})};var mt=t=>{let e=t.split("/");return e[0]===""&&e.shift(),e},Jt=t=>{let{groups:e,path:r}=Se(t),n=mt(r);return Ae(n,e)},Se=t=>{let e=[];return t=t.replace(/\{[^}]+\}/g,(r,n)=>{let a=`@${n}`;return e.push([a,r]),a}),{groups:e,path:t}},Ae=(t,e)=>{for(let r=e.length-1;r>=0;r--){let[n]=e[r];for(let a=t.length-1;a>=0;a--)if(t[a].includes(n)){t[a]=t[a].replace(n,e[r][1]);break}}return t},Z={},Kt=(t,e)=>{if(t==="*")return"*";let r=t.match(/^\:([^\{\}]+)(?:\{(.+)\})?$/);if(r){let n=`${t}#${e}`;return Z[n]||(r[2]?Z[n]=e&&e[0]!==":"&&e[0]!=="*"?[n,r[1],new RegExp(`^${r[2]}(?=/${e})`)]:[t,r[1],new RegExp(`^${r[2]}$`)]:Z[n]=[t,r[1],!0]),Z[n]}return null},zt=(t,e)=>{try{return e(t)}catch{return t.replace(/(?:%[0-9A-Fa-f]{2})+/g,r=>{try{return e(r)}catch{return r}})}},Te=t=>zt(t,decodeURI),wt=t=>{let e=t.url,r=e.indexOf("/",e.indexOf(":")+4),n=r;for(;n<e.length;n++){let a=e.charCodeAt(n);if(a===37){let o=e.indexOf("?",n),i=e.indexOf("#",n),s=o===-1?i===-1?void 0:i:i===-1?o:Math.min(o,i),c=e.slice(r,s);return Te(c.includes("%25")?c.replace(/%25/g,"%2525"):c)}else if(a===63||a===35)break}return e.slice(r,n)};var Gt=t=>{let e=wt(t);return e.length>1&&e.at(-1)==="/"?e.slice(0,-1):e},T=(t,e,...r)=>(r.length&&(e=T(e,...r)),`${t?.[0]==="/"?"":"/"}${t}${e==="/"?"":`${t?.at(-1)==="/"?"":"/"}${e?.[0]==="/"?e.slice(1):e}`}`),tt=t=>{if(t.charCodeAt(t.length-1)!==63||!t.includes(":"))return null;let e=t.split("/"),r=[],n="";return e.forEach(a=>{if(a!==""&&!/\:/.test(a))n+="/"+a;else if(/\:/.test(a))if(a.charCodeAt(a.length-1)===63){r.length===0&&n===""?r.push("/"):r.push(n);let o=a.slice(0,-1);n+="/"+o,r.push(n)}else n+="/"+a}),r.filter((a,o,i)=>i.indexOf(a)===o)},et=t=>t.indexOf("%")!==-1?zt(t,$e):t,gt=t=>(t.indexOf("+")!==-1&&(t=t.replace(/\+/g," ")),et(t)),Ft=(t,e,r)=>{let n;if(!r&&e&&e.indexOf("%")===-1&&e.indexOf("+")===-1){let i=t.indexOf("?",8);if(i===-1)return;for(t.startsWith(e,i+1)||(i=t.indexOf(`&${e}`,i+1));i!==-1;){let s=t.charCodeAt(i+e.length+1);if(s===61){let c=i+e.length+2,l=t.indexOf("&",c);return gt(t.slice(c,l===-1?void 0:l))}else if(s==38||isNaN(s))return"";i=t.indexOf(`&${e}`,i+1)}if(n=/[%+]/.test(t),!n)return}let a=Object.create(null);n??=/[%+]/.test(t);let o=t.indexOf("?",8);for(;o!==-1;){let i=t.indexOf("&",o+1),s=t.indexOf("=",o);s>i&&i!==-1&&(s=-1);let c=t.slice(o+1,s===-1?i===-1?void 0:i:s);if(n&&(c=gt(c)),o=i,c==="")continue;let l;s===-1?l="":(l=t.slice(s+1,i===-1?void 0:i),n&&(l=gt(l))),r?(a[c]&&Array.isArray(a[c])||(a[c]=[]),a[c].push(l)):a[c]??=l}return e?a[e]:a},qt=Ft,Qt=(t,e)=>Ft(t,e,!0),$e=decodeURIComponent;var Yt=class{raw;#e;#t;routeIndex=0;path;bodyCache={};constructor(t,e="/",r=[[]]){this.raw=t,this.path=e,this.#t=r}param(t){return t?this.#r(t):this.#o()}#r(t){let e=this.#t[0][this.routeIndex][1][t],r=this.#n(e);return r&&et(r)}#o(){let t={},e=Object.keys(this.#t[0][this.routeIndex][1]);for(let r of e){let n=this.#n(this.#t[0][this.routeIndex][1][r]);n!==void 0&&(t[r]=et(n))}return t}#n(t){return this.#t[1]?this.#t[1][t]:t}query(t){return qt(this.url,t)}queries(t){return Qt(this.url,t)}header(t){if(t)return this.raw.headers.get(t)??void 0;let e=Object.create(null);return this.raw.headers.forEach((r,n)=>{e[n]=r}),e}async parseBody(t){return Wt(this,t)}#a=t=>{let{bodyCache:e,raw:r}=this,n=e[t];if(n)return n;for(let a in e)return e[a].then(o=>(a==="json"&&(o=JSON.stringify(o)),new Response(o)[t]()));return e[t]=r[t]()};json(){return this.#a("text").then(t=>JSON.parse(t))}text(){return this.#a("text")}arrayBuffer(){return this.#a("arrayBuffer")}bytes(){return this.#a("arrayBuffer").then(t=>new Uint8Array(t))}blob(){return this.#a("blob")}formData(){return this.#a("formData")}addValidatedData(t,e){(this.#e??={})[t]=e}valid(t){return this.#e?.[t]}get url(){return this.raw.url}get method(){return this.raw.method}get[Bt](){return this.#t}get matchedRoutes(){return this.#t[0].map(([[,t]])=>t)}get routePath(){return this.#t[0].map(([[,t]])=>t)[this.routeIndex].path}};var Xt={Stringify:1,BeforeStream:2,Stream:3},Oe=(t,e)=>{let r=new String(t);return r.isEscaped=!0,r.callbacks=e,r};var yt=async(t,e,r,n,a)=>{typeof t=="object"&&!(t instanceof String)&&(t instanceof Promise||(t=t.toString()),t instanceof Promise&&(t=await t));let o=t.callbacks;if(!o?.length)return Promise.resolve(t);a?a[0]+=t:a=[t];let i=Promise.all(o.map(s=>s({phase:e,buffer:a,context:n}))).then(s=>Promise.all(s.filter(Boolean).map(c=>yt(c,e,!1,n,a))).then(()=>a[0]));return r?Oe(await i,o):i};var Ce="text/plain; charset=UTF-8",bt=(t,e)=>({"Content-Type":t,...e}),z=(t,e)=>new Response(t,e),xt=class{#e;#t;env={};#r;finalized=!1;error;#o;#n;#a;#u;#c;#l;#i;#d;#p;constructor(t,e){this.#e=t,e&&(this.#n=e.executionCtx,this.env=e.env,this.#l=e.notFoundHandler,this.#p=e.path,this.#d=e.matchResult)}get req(){return this.#t??=new Yt(this.#e,this.#p,this.#d),this.#t}get event(){if(this.#n&&"respondWith"in this.#n)return this.#n;throw Error("This context has no FetchEvent")}get executionCtx(){if(this.#n)return this.#n;throw Error("This context has no ExecutionContext")}get res(){return this.#a||=z(null,{headers:this.#i??=new Headers})}set res(t){if(this.#a&&t){t=z(t.body,t);for(let[e,r]of this.#a.headers.entries())if(e!=="content-type")if(e==="set-cookie"){let n=this.#a.headers.getSetCookie();t.headers.delete("set-cookie");for(let a of n)t.headers.append("set-cookie",a)}else t.headers.set(e,r)}this.#a=t,this.finalized=!0}render=(...t)=>(this.#c??=e=>this.html(e),this.#c(...t));setLayout=t=>this.#u=t;getLayout=()=>this.#u;setRenderer=t=>{this.#c=t};header=(t,e,r)=>{this.finalized&&(this.#a=z(this.#a.body,this.#a));let n=this.#a?this.#a.headers:this.#i??=new Headers;e===void 0?n.delete(t):r?.append?n.append(t,e):n.set(t,e)};status=t=>{this.#o=t};set=(t,e)=>{this.#r??=new Map,this.#r.set(t,e)};get=t=>this.#r?this.#r.get(t):void 0;get var(){return this.#r?Object.fromEntries(this.#r):{}}#s(t,e,r){let n=this.#a?new Headers(this.#a.headers):this.#i;if(typeof e=="object"&&e.headers){n??=new Headers;for(let[o,i]of new Headers(e.headers))o==="set-cookie"?n.append(o,i):n.set(o,i)}if(r){if(!n){let o=0;for(let i in r)if(++o>1||typeof r[i]!="string"){n=new Headers;break}}if(n)for(let o in r){let i=r[o];if(typeof i=="string")n.set(o,i);else{n.delete(o);for(let s of i)n.append(o,s)}}}let a=typeof e=="number"?e:e?.status??this.#o;return z(t,{status:a,headers:n??r})}newResponse=(...t)=>this.#s(...t);body=(t,e,r)=>this.#s(t,e,r);text=(t,e,r)=>!this.#i&&!this.#o&&!e&&!r&&!this.finalized?new Response(t):this.#s(t,e,bt(Ce,r));json=(t,e,r)=>this.#s(JSON.stringify(t),e,bt("application/json",r));html=(t,e,r)=>{let n=a=>this.#s(a,e,bt("text/html; charset=UTF-8",r));return typeof t=="object"?yt(t,Xt.Stringify,!1,{}).then(n):n(t)};redirect=(t,e)=>{let r=String(t);return this.header("Location",/[^\x00-\xFF]/.test(r)?encodeURI(r):r),this.newResponse(null,e??302)};notFound=()=>(this.#l??=()=>z(),this.#l(this))};var x="ALL",Zt="all",te=["get","post","put","delete","options","patch","query"],rt="Can not add a route since the matcher is already built.",nt=class extends Error{};var ee="__COMPOSED_HANDLER";var je=t=>t.text("404 Not Found",404),re=(t,e)=>{if("getResponse"in t){let r=t.getResponse();return e.newResponse(r.body,r)}return console.error(t),e.text("Internal Server Error",500)},ne=class ae{get;post;put;delete;options;patch;query;all;on;use;router;getPath;_basePath="/";#e="/";routes=[];constructor(e={}){[...te,Zt].forEach(o=>{this[o]=(i,...s)=>(typeof i=="string"?this.#e=i:this.#o(o,this.#e,i),s.forEach(c=>{this.#o(o,this.#e,c)}),this)}),this.on=(o,i,...s)=>{for(let c of[i].flat()){this.#e=c;for(let l of[o].flat())s.map(u=>{this.#o(l.toUpperCase(),this.#e,u)})}return this},this.use=(o,...i)=>(typeof o=="string"?this.#e=o:(this.#e="*",i.unshift(o)),i.forEach(s=>{this.#o(x,this.#e,s)}),this);let{strict:n,...a}=e;Object.assign(this,a),this.getPath=n??!0?e.getPath??wt:Gt}#t(){let e=new ae({router:this.router,getPath:this.getPath});return e.errorHandler=this.errorHandler,e.#r=this.#r,e.routes=this.routes,e}#r=je;errorHandler=re;route(e,r){let n=this.basePath(e);return r.routes.map(a=>{let o;r.errorHandler===re?o=a.handler:(o=async(i,s)=>(await ht([],r.errorHandler)(i,()=>a.handler(i,s))).res,o[ee]=a.handler),n.#o(a.method,a.path,o,a.basePath)}),this}basePath(e){let r=this.#t();return r._basePath=T(this._basePath,e),r}onError=e=>(this.errorHandler=e,this);notFound=e=>(this.#r=e,this);mount(e,r,n){let a,o;n&&(typeof n=="function"?o=n:(o=n.optionHandler,n.replaceRequest===!1?a=c=>c:a=n.replaceRequest));let i=o?c=>{let l=o(c);return Array.isArray(l)?l:[l]}:c=>{let l;try{l=c.executionCtx}catch{}return[c.env,l]};a||=(()=>{let c=T(this._basePath,e),l=c==="/"?0:c.length;return u=>{let p=new URL(u.url);return p.pathname=this.getPath(u).slice(l)||"/",new Request(p,u)}})();let s=async(c,l)=>{let u=await r(a(c.req.raw),...i(c));if(u)return u;await l()};return this.#o(x,T(e,"*"),s),this}#o(e,r,n,a){e=e.toUpperCase(),r=T(this._basePath,r);let o={basePath:a!==void 0?T(this._basePath,a):this._basePath,path:r,method:e,handler:n};this.router.add(e,r,[n,o]),this.routes.push(o)}#n(e,r){if(e instanceof Error)return this.errorHandler(e,r);throw e}#a(e,r,n,a){if(a==="HEAD")return(async()=>new Response(null,await this.#a(e,r,n,"GET")))();let o=this.getPath(e,{env:n}),i=this.router.match(a,o),s=new xt(e,{path:o,matchResult:i,env:n,executionCtx:r,notFoundHandler:this.#r});if(i[0].length===1){let l;try{l=i[0][0][0][0](s,async()=>{s.res=await this.#r(s)})}catch(u){return this.#n(u,s)}return l instanceof Promise?l.then(u=>u||(s.finalized?s.res:this.#r(s))).catch(u=>this.#n(u,s)):l??this.#r(s)}let c=ht(i[0],this.errorHandler,this.#r);return(async()=>{try{let l=await c(s);if(!l.finalized)throw new Error("Context is not finalized. Did you forget to return a Response object or `await next()`?");return l.res}catch(l){return this.#n(l,s)}})()}fetch=(e,...r)=>this.#a(e,r[1],r[0],e.method);request=(e,r,n,a)=>e instanceof Request?this.fetch(r?new Request(e,r):e,n,a):(e=e.toString(),this.fetch(new Request(/^https?:\/\//.test(e)?e:`http://localhost${T("/",e)}`,r),n,a));fire=()=>{addEventListener("fetch",e=>{e.respondWith(this.#a(e.request,e,void 0,e.request.method))})}};var at=[];function kt(t,e){let r=this.buildAllMatchers(),n=((a,o)=>{let i=r[a]||r[x],s=i[2][o];if(s)return s;let c=o.match(i[0]);if(!c)return[[],at];let l=c.indexOf("",1);return[i[1][l],c]});return this.match=n,n(t,e)}var ot="[^/]+",B=".*",I="(?:|/.*)",$=Symbol(),oe=new Set(".\\+*[^]$()");function De(t,e){return t.length===1?e.length===1?t<e?-1:1:-1:e.length===1?1:t===B||t===I?e===I?-1:1:e===B||e===I?-1:t===ot?1:e===ot?-1:t.length===e.length?t<e?-1:1:e.length-t.length}var se=class Et{#e;#t;#r=Object.create(null);insert(e,r,n,a,o){let i=this;for(let s=0,c=e.length;s<c;s++){let l=e[s],u=l.length===1?l==="*"?s===c-1?["","",B]:["","",ot]:null:l==="/*"?["","",I]:l.match(/^\:([^\{\}]+)(?:\{(.+)\})?$/),p;if(u){let f=u[1],h=u[2]||ot;if(f&&u[2]&&(h===".*"||(h=h.replace(/^\((?!\?:)(?=[^)]+\)$)/,"(?:"),/\((?!\?:)/.test(h))||h.length===1&&oe.has(h)))throw $;if(p=i.#r[h],!p){if(h!==B&&h!==I){for(let b in i.#r)if((h.length>1||b.length>1)&&b!==B&&b!==I)throw $}p=i.#r[h]=new Et}f!==""&&(p.#t??=a.varIndex++,n.push([f,p.#t]))}else if(p=i.#r[l],!p){for(let f in i.#r)if(f.length>1&&f!==B&&f!==I)throw $;p=i.#r[l]=new Et}i=p}if(i.#e!==void 0)throw $;i.#e=o?-1:r}buildRegExpStr(){let r=Object.keys(this.#r).sort(De).map(n=>{let a=this.#r[n],o=a.buildRegExpStr();return o===""?"":(typeof a.#t=="number"?`(${n})@${a.#t}`:oe.has(n)?`\\${n}`:n)+o}).filter(Boolean);return typeof this.#e=="number"&&this.#e!==-1&&r.unshift(`#${this.#e}`),r.length===0?"":r.length===1?r[0]:"(?:"+r.join("|")+")"}};var Pt=class{#e={varIndex:0};#t=new se;#r=0;paths=Object.create(null);insert(t,e){if(e){this.#t.insert(t.split(""),0,[],this.#e,!0);return}let r=[],n=[],a=t;for(let i=0;;){let s=!1;if(a=a.replace(/\{[^}]+\}/g,c=>{let l=`@\\${i}`;return n[i]=[l,c],i++,s=!0,l}),!s)break}let o=a.match(/(?::[^\/]+)|(?:\/\*$)|./g)||[];for(let i=n.length-1;i>=0;i--){let[s]=n[i];for(let c=o.length-1;c>=0;c--)if(o[c].indexOf(s)!==-1){o[c]=o[c].replace(s,n[i][1]);break}}this.#t.insert(o,this.#r,r,this.#e,!1),this.paths[t]=[this.#r++,r]}buildRegExp(){let t=this.#t.buildRegExpStr();if(t==="")return[/^$/,[],[]];let e=0,r=[],n=[];return t=t.replace(/#(\d+)|@(\d+)|\.\*\$/g,(a,o,i)=>o!==void 0?(r[++e]=Number(o),"$()"):(i!==void 0&&(n[Number(i)]=++e),"")),[new RegExp(`^${t}`),r,n]}};var ie=Object.create(null);function ce(t){return ie[t]??=new RegExp(t==="*"?"":`^${t.replace(/\/\*$|([.\\+*[^\]$()])/g,(e,r)=>r?`\\${r}`:"(?:|/.*)")}$`)}function Me(){ie=Object.create(null)}function st(t,e){if(t){for(let r of Object.keys(t).sort((n,a)=>a.length-n.length))if(ce(r).test(e))return[...t[r]]}}var it=class{name="RegExpRouter";#e;#t;#r;constructor(){this.#e={[x]:Object.create(null)},this.#t={[x]:Object.create(null)},this.#r={[x]:new Pt}}#o(t,e){try{this.#r[t].insert(e,!/\*|\/:/.test(e))}catch(r){throw r===$?new nt(e):r}}add(t,e,r){let n=this.#e,a=this.#t;if(!n||!a)throw new Error(rt);n[t]||(this.#r[t]=new Pt,[n,a].forEach(s=>{s[t]=Object.create(null),Object.keys(s[x]).forEach(c=>{s[t][c]=[...s[x][c]],this.#o(t,c)})})),e==="/*"&&(e="*");let o=(e.match(/\/:/g)||[]).length;if(/\*$/.test(e)){let s=ce(e);Object.keys(n).forEach(c=>{(t===x||t===c)&&!n[c][e]&&(this.#o(c,e),n[c][e]=st(n[c],e)||st(n[x],e)||[])}),Object.keys(n).forEach(c=>{(t===x||t===c)&&Object.keys(n[c]).forEach(l=>{s.test(l)&&n[c][l].push([r,o])})}),Object.keys(a).forEach(c=>{(t===x||t===c)&&Object.keys(a[c]).forEach(l=>s.test(l)&&a[c][l].push([r,o]))});return}let i=tt(e)||[e];for(let s=0,c=i.length;s<c;s++){let l=i[s];Object.keys(a).forEach(u=>{(t===x||t===u)&&(a[u][l]||(this.#o(u,l),a[u][l]=[...st(n[u],l)||st(n[x],l)||[]]),a[u][l].push([r,o-c+s+1]))})}}match=kt;buildAllMatchers(){let t=Object.create(null);return Object.keys(this.#t).concat(Object.keys(this.#e)).forEach(e=>{t[e]||=this.#n(e)}),this.#e=this.#t=this.#r=void 0,Me(),t}#n(t){let e=this.#e[t],r=this.#t[t],n=this.#r[t],a=Object.create(null),o=[];[e,r].forEach(u=>{for(let p in u){let f=u[p],h=n.paths[p];if(!h){a[p]=[f.map(([w])=>[w,Object.create(null)]),at];continue}let b=h[1];o[h[0]]=f.map(([w,k])=>{let y=Object.create(null);for(k-=1;k>=0;k--){let[A,E]=b[k];y[A]=E}return[w,y]})}});let[i,s,c]=n.buildRegExp();for(let u=0,p=o.length;u<p;u++)for(let f=0,h=o[u].length;f<h;f++){let b=o[u][f]?.[1];if(!b)continue;let w=Object.keys(b);for(let k=0,y=w.length;k<y;k++)b[w[k]]=c[b[w[k]]]}let l=[];for(let u in s)l[u]=o[s[u]];return[i,l,a]}};var _t=class{name="SmartRouter";#e=[];#t=[];constructor(t){this.#e=t.routers}add(t,e,r){if(!this.#t)throw new Error(rt);this.#t.push([t,e,r])}match(t,e){if(!this.#t)throw new Error("Fatal error");let r=this.#e,n=this.#t,a=r.length,o=0,i;for(;o<a;o++){let s=r[o];try{for(let c=0,l=n.length;c<l;c++)s.add(...n[c]);i=s.match(t,e)}catch(c){if(c instanceof nt)continue;throw c}this.match=s.match.bind(s),this.#e=[s],this.#t=void 0;break}if(o===a)throw new Error("Fatal error");return this.name=`SmartRouter + ${this.activeRouter.name}`,i}get activeRouter(){if(this.#t||this.#e.length!==1)throw new Error("No active router has been determined yet.");return this.#e[0]}};var vt=Object.create(null),Ie=0,le=class ue{#e=[];#t=Object.create(null);#r=[];#o;#n=vt;insert(e,r,n){let a=this,o=Jt(r),i=new Set,s=0;for(let c of o){let l=o[++s],u=Kt(c,l)||(l===void 0&&c&&c.indexOf("*")===c.length-1?c:null),p=Array.isArray(u),f=p?u[0]:u||c,h=a.#t[f]||=new ue;u&&!h.#o&&(h.#o=u,a.#r.push(h)),a=h,p&&i.add(u[1])}a.#e.push({[e]:{handler:n,possibleKeys:[...i],score:++Ie}})}#a(e,r,n,a,o){for(let i=0,s=r.#e.length;i<s;i++){let c=r.#e[i],l=c[n]||c[x];if(l){l.params=Object.create(null),e.push(l);for(let u=0,p=l.possibleKeys.length;u<p;u++){let f=l.possibleKeys[u];l.params[f]=o?.[f]&&!u?o[f]:a[f]??o?.[f]}}}}search(e,r){let n=[];this.#n=vt;let o=[this],i=mt(r),s=[],c=i.length,l=null;for(let u=0;u<c;u++){let p=i[u],f=u===c-1,h=[];for(let w=0,k=o.length;w<k;w++){let y=o[w],A=y.#t[p];A&&(A.#n=y.#n,f?(A.#t["*"]&&this.#a(n,A.#t["*"],e,y.#n),this.#a(n,A,e,y.#n)):h.push(A));for(let E of y.#r){let J=E.#o,v=y.#n===vt?{}:{...y.#n};if(typeof J=="string"){(J==="*"||p.startsWith(J.slice(0,-1)))&&(this.#a(n,E,e,y.#n),J==="*"&&(E.#n=v,h.push(E)));continue}let[,Lt,K]=J;if(!(!p&&K===!0)){if(K!==!0){if(!l){l=[];let ft=r[0]==="/"?1:0;for(let H=0;H<c;H++)l[H]=ft,ft+=i[H].length+1}let Ht=r.slice(l[u]),Y=K.exec(Ht);if(Y){v[Lt]=Y[0],this.#a(n,E,e,y.#n,v),Y[0].length===Ht.length&&E.#t["*"]&&this.#a(n,E.#t["*"],e,y.#n,v);for(let ft in E.#t){E.#n=v;let H=Y[0].match(/\//g)?.length??0;(s[H]||=[]).push(E);break}continue}}(K===!0||K.test(p))&&(v[Lt]=p,f?(this.#a(n,E,e,v,y.#n),E.#t["*"]&&this.#a(n,E.#t["*"],e,v,y.#n)):(E.#n=v,h.push(E)))}}}let b=s.shift();o=b?h.concat(b):h}return n[1]&&n.sort((u,p)=>u.score-p.score),[n.map(({handler:u,params:p})=>[u,p])]}};var Rt=class{name="TrieRouter";#e=new le;add(t,e,r){for(let n of tt(e)||[e])this.#e.insert(t,n,r)}match(t,e){return this.#e.search(t,e)}};var St=class extends ne{constructor(t={}){super(t),this.router=t.router??new _t({routers:[new it,new Rt]})}};var U="10.0.0-worker",Ne={"content-type":"application/json; charset=utf-8","cache-control":"no-store"},C={container:"li.product",title:"h2, h3, .woocommerce-loop-product__title",price:".price, .amount",link:"a[href]",image:"img"},q=new St;q.use("*",async(t,e)=>{let r=Date.now();await e(),t.header("x-scraper4-version",U),t.header("x-content-type-options","nosniff"),t.header("referrer-policy","same-origin"),t.header("x-response-time",`${Date.now()-r}ms`)});q.all("*",t=>He(t.req.raw,t.env,t.executionCtx));q.onError((t,e)=>(console.error(t),e.json({ok:!1,error:F(t)},500)));q.notFound(t=>t.json({ok:!1,error:"\u0645\u0633\u06CC\u0631 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F"},404));var Le={fetch:q.fetch,async scheduled(t,e,r){r.waitUntil(Ot(e,t.scheduledTime))}},Cn=Le;async function He(t,e,r){let n=new URL(t.url),a=n.pathname.replace(/\/+$/,"")||"/";if(a==="/health")return d({ok:!0,app:"scraper4-worker",version:U,storage:e.SCRAPER_KV?"kv":"cache",time:Date.now()});if(a==="/"&&t.method==="GET"&&!n.search)return ze(or);if(!Je(t,e))return d({ok:!1,error:"\u062F\u0633\u062A\u0631\u0633\u06CC \u063A\u06CC\u0631\u0645\u062C\u0627\u0632"},401,{"www-authenticate":"Bearer"});let o=await Be(t,n,e,r);if(o)return o;if(a==="/api/status"&&t.method==="GET")return d({ok:!0,version:U,profiles:(await _(e)).length,latestJob:await g(e,"jobs:latest")});if(a==="/api/profiles"&&t.method==="GET")return d({ok:!0,profiles:await _(e)});if(a==="/api/profiles"&&t.method==="POST"){let i=await O(t),s=Dt(i),c=await _(e),l=c.findIndex(u=>u.id===s.id);return l>=0&&(s.createdAt=c[l].createdAt),l>=0?c[l]=s:c.push(s),await m(e,"profiles",c),d({ok:!0,profile:s})}if(a.startsWith("/api/profiles/")&&t.method==="DELETE"){let i=decodeURIComponent(a.slice(14)),s=await _(e),c=s.filter(l=>l.id!==i);return s.length===c.length?d({ok:!1,error:"\u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F"},404):(await m(e,"profiles",c),await be(e,i),d({ok:!0}))}if(a==="/api/connections"&&t.method==="GET"){let i=M(await S(e),e);return d({ok:!0,connections:$t(i)})}if(a==="/api/connections"&&t.method==="POST"){let i=await S(e),s=await O(t),c=xe(i,s);return await m(e,"connections",c),d({ok:!0,connections:$t(M(c,e))})}if(a==="/api/test-selector"&&t.method==="POST"){let i=await O(t),s=D(i.url),c=ut(i.selector,"selector"),l=await ye(s,c,e,10);return d({ok:!0,count:l.length,values:l})}if(a==="/api/suggest-selectors"&&t.method==="POST"){let i=await O(t);return d(await Ee(D(i.url),e))}if(a==="/api/scrape"&&t.method==="POST"){let i=await O(t),s=await Tt(e,String(i.profileId||"")),c=await g(e,`job-active:${s.id}`);if(c&&["queued","running"].includes(c.status))return d({ok:!1,error:"\u0627\u06CC\u0646 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0647\u0645\u200C\u0627\u06A9\u0646\u0648\u0646 \u062F\u0631 \u062D\u0627\u0644 \u0627\u062C\u0631\u0627 \u0627\u0633\u062A",job:c},409);let l=It(s.id);return await j(e,l),r.waitUntil(Nt(s,l,e,!!i.sync)),d({ok:!0,started:!0,job:l},202)}if(a.startsWith("/api/jobs/")&&t.method==="GET"){let i=decodeURIComponent(a.slice(10)),s=await g(e,`job:${i}`);return s?d({ok:!0,job:s}):d({ok:!1,error:"\u06A9\u0627\u0631 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F"},404)}if(a.startsWith("/api/jobs/")&&a.endsWith("/stop")&&t.method==="POST"){let i=decodeURIComponent(a.slice(10,-5)),s=await g(e,`job:${i}`);return s?(s.stop=!0,s.updatedAt=Date.now(),await j(e,s),d({ok:!0})):d({ok:!1,error:"\u06A9\u0627\u0631 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F"},404)}if(a.startsWith("/api/products/")&&t.method==="GET"){let i=decodeURIComponent(a.slice(14)),s=Math.min(500,Math.max(1,Number(n.searchParams.get("limit"))||100)),c=n.searchParams.get("cursor")||void 0,l=await Ze(e,i,s,c);return d({ok:!0,...l})}if(a==="/api/sync"&&t.method==="POST"){let i=await O(t),s=await Tt(e,String(i.profileId||"")),c=String(i.target||"both"),l=await W(e,s.id),u=await ke(l,s,c,e);return d({ok:!0,result:u})}if(a==="/api/export"&&t.method==="GET"){let i=String(n.searchParams.get("profileId")||""),s=await W(e,i);return new Response(Ct(s),{headers:{"content-type":"text/csv; charset=utf-8","content-disposition":`attachment; filename="${L(i)}.csv"`}})}if(a==="/api/import-php"&&t.method==="POST"){let i=await O(t),s=ar(i.profiles);return await m(e,"profiles",s),i.connections&&await m(e,"connections",i.connections),d({ok:!0,imported:s.length,warning:"\u06A9\u0644\u06CC\u062F\u0647\u0627\u06CC \u0645\u062D\u0631\u0645\u0627\u0646\u0647 \u0631\u0627 \u0628\u0647\u062A\u0631 \u0627\u0633\u062A \u0628\u0627 wrangler secret \u0630\u062E\u06CC\u0631\u0647 \u06A9\u0646\u06CC\u062F."})}return a==="/proxy/image"&&t.method==="GET"?Pe(n.searchParams.get("url")||"",e):d({ok:!1,error:"\u0645\u0633\u06CC\u0631 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F"},404)}async function Be(t,e,r,n){let a=e.searchParams;if(t.method==="GET"){if(a.has("whoami")||a.has("selftest"))return d({ok:!0,runtime:"cloudflare-workers",language:"typescript",version:U,storage:r.SCRAPER_KV?"kv":"cache"});if(a.has("profiles")||a.has("all_profiles")){let s=await _(r);return d(Object.fromEntries(s.map(c=>[c.id,c])))}if(a.has("load_profile")){let s=a.get("load_profile")||a.get("profile_key")||"",l=(await _(r)).find(u=>u.id===s||u.url===s||u.id===Ue(s));return l?d({ok:!0,key:l.id,profile:l}):d({ok:!1,error:"\u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F"},404)}if(a.has("poll_extract")||a.has("extract_queue_status"))return d({ok:!0,progress:await g(r,"jobs:latest")});if(a.has("cron_last"))return d(await g(r,"jobs:latest")||{ok:!1,error:"\u0647\u0646\u0648\u0632 \u0627\u062C\u0631\u0627 \u0646\u0634\u062F\u0647"});if(a.has("cron_run"))return n.waitUntil(Ot(r,Date.now())),d({ok:!0,started:!0,detached:!0});if(a.has("image_proxy")||a.has("rp"))return Pe(a.get("image_proxy")||a.get("rp")||"",r);if(a.has("test_selector")){let s=D(a.get("test_selector")),c=ut(a.get("selector"),"selector"),l=await ye(s,c,r,10);return d({ok:!0,count:l.length,value:l[0]||"",values:l})}if(a.has("suggest_selectors"))return d(await Ee(D(a.get("suggest_selectors")),r));if(a.has("extract_stop")){let s=await g(r,"jobs:latest");return s&&(s.stop=!0,await j(r,s)),d({ok:!0})}if(a.has("csv")||a.has("excel")||a.get("action")==="csv"||a.get("action")==="excel"){let s=a.get("profile")||a.get("profile_key")||"";return new Response(Ct(await W(r,s)),{headers:{"content-type":"text/csv; charset=utf-8","content-disposition":`attachment; filename="${L(s)}.csv"`}})}if(a.has("woo_categories"))return d(await he(r));if(a.has("bsl_categories"))return d(await ge(r));if(a.has("sync_status"))return d(await g(r,"legacy:sync_state")||{});if(a.has("remote_map"))return d(await g(r,"legacy:remote_map")||{});if(a.has("catlearn"))return d(await g(r,"legacy:category_learning")||{});if(a.has("ar_rules"))return d(await g(r,"legacy:autoreply_rules")||[]);if(a.has("ar_log"))return d(await g(r,"legacy:autoreply_log")||[]);if(a.has("ai_candidates"))return d(await g(r,"legacy:ai_candidates")||[]);if(a.has("ai_providers_status"))return d(Ve(await g(r,"legacy:ai_providers")||[]));if(a.has("queues_overview"))return d({ok:!0,extract:await g(r,"jobs:latest"),woo:await g(r,"legacy:woo_queue"),basalam:await g(r,"legacy:bsl_queue")});if(a.has("extract_report"))return d(await g(r,`job:${a.get("queue_id")||""}`)||{ok:!1,error:"\u06AF\u0632\u0627\u0631\u0634 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F"});if(a.has("backup_export")||a.has("backup_download")){let s=await de(r);return new Response(JSON.stringify(s),{headers:{"content-type":"application/json; charset=utf-8","content-disposition":`attachment; filename="scraper4-backup-${Date.now()}.json"`}})}if(a.has("backup_status"))return d(await g(r,"legacy:backup_log")||[]);if(a.has("sync")){let s=await Tt(r,a.get("profile_key")||a.get("profile")||""),c=It(s.id);return await j(r,c),n.waitUntil(Nt(s,c,r,!0)),d({ok:!0,started:!0,queue_id:c.id})}}if(t.method!=="POST"||e.pathname!=="/")return null;let o=await O(t),i=String(o.action||a.get("action")||"");if(!i)return null;if(i==="save_profile"){let s=R(o.selectors)||{container:o.containerSelector||o.container||C.container,title:o.titleSelector||o.title||C.title,price:o.priceSelector||o.price||C.price,link:o.linkSelector||o.link||C.link,image:o.imageSelector||o.image||C.image},c=Dt({...o,pages:o.pages,pagination:o.pagType||o.pagination,paginationValue:o.pagVal||o.paginationValue,priceValue:o.priceVal??o.priceValue,selectors:s}),l=await _(r),u=l.findIndex(p=>p.id===c.id);return u>=0?(c.createdAt=l[u].createdAt,l[u]=c):l.push(c),await m(r,"profiles",l),d({ok:!0,key:c.id,message:"\u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0630\u062E\u06CC\u0631\u0647 \u0634\u062F",selectors:c.selectors,has_selectors:!0})}if(i==="delete_profile"){let s=String(o.url||o.profile_key||""),c=s.startsWith("http")?Mt(s):s,l=await _(r);return await m(r,"profiles",l.filter(u=>u.id!==c)),await be(r,c),d({ok:!0,key:c})}if(i==="load_connections")return d({ok:!0,connections:$t(M(await S(r),r))});if(i==="save_connections"){let s=R(o.connections)||o,c=xe(await S(r),s);return await m(r,"connections",c),d({ok:!0})}if(i==="test_woo")return d(await tr(r));if(i==="test_basalam")return d(await er(r));if(i==="woo_categories")return d(await he(r));if(i==="bsl_categories")return d(await ge(r));if(i==="cron_run")return n.waitUntil(Ot(r,Date.now())),d({ok:!0,started:!0,detached:!0});if(i==="save_sync"||i==="update_sync_state"){let s=R(o.syncConfig||o.state||o.json)||o;return await m(r,"legacy:sync_state",s),d({ok:!0})}if(i==="ar_save_rules"){let s=R(o.rules||o.json)||[];return await m(r,"legacy:autoreply_rules",s),d({ok:!0,count:Array.isArray(s)?s.length:0})}if(i==="catlearn_import"){let s=R(o.data||o.json)||{};return await m(r,"legacy:category_learning",s),d({ok:!0,count:Object.keys(s).length})}if(i==="ai_import_providers"){let s=R(o.providers||o.json)||[];return await m(r,"legacy:ai_providers",s),d({ok:!0,count:Array.isArray(s)?s.length:0})}if(i==="ai_candidates_save"){let s=R(o.candidates||o.json)||[];return await m(r,"legacy:ai_candidates",s),d({ok:!0})}if(i==="ai_select"){let s={provider:o.provider||"",model:o.model||"",updated_at:Date.now()};return await m(r,"legacy:ai_selected",s),d({ok:!0,selected:s})}if(i==="ai_vote"){let s=await g(r,"legacy:ai_votes")||[];return s.push({...o,action:void 0,at:Date.now()}),s.length>1e3&&s.splice(0,s.length-1e3),await m(r,"legacy:ai_votes",s),d({ok:!0})}if(i==="backup_run"){let s=await de(r);await m(r,"legacy:last_backup",s);let c=await g(r,"legacy:backup_log")||[];return c.push({at:Date.now(),files:Object.keys(s.data).length,ok:!0}),await m(r,"legacy:backup_log",c.slice(-50)),d({ok:!0,files:Object.keys(s.data).length,bundle:s})}if(i==="backup_restore"){let s=R(o.bundle||o.json);return s?d(await We(r,s)):d({ok:!1,error:"\u0628\u0633\u062A\u0647\u0654 \u0628\u06A9\u0627\u067E \u0646\u0627\u0645\u0639\u062A\u0628\u0631 \u0627\u0633\u062A"},400)}if(i==="backup_save_cfg"){let s=R(o.config||o.json)||o;return delete s.action,await m(r,"legacy:backup_config",s),d({ok:!0})}if(i==="csv"||i==="excel"){let s=String(o.profile_key||o.profile||"");return new Response(Ct(await W(r,s)),{headers:{"content-type":"text/csv; charset=utf-8"}})}return d({ok:!1,error:`\u0627\u0646\u062F\u067E\u0648\u06CC\u0646\u062A \u0642\u062F\u06CC\u0645\u06CC \xAB${i}\xBB \u062F\u0631 \u062D\u0627\u0644\u062A \u062A\u06A9\u200C\u0641\u0627\u06CC\u0644\u06CC Workers \u0642\u0627\u0628\u0644 \u0627\u062C\u0631\u0627 \u0646\u06CC\u0633\u062A`,unsupported:!0},501)}function R(t){if(typeof t!="string")return t;try{return JSON.parse(t)}catch{return null}}function Ue(t){try{return Mt(t)}catch{return t}}function Ve(t){return t.map(e=>({...e,apiKey:e.apiKey?G(String(e.apiKey)):"",key:e.key?G(String(e.key)):""}))}var me=["profiles","connections","legacy:sync_state","legacy:remote_map","legacy:category_learning","legacy:autoreply_rules","legacy:autoreply_log","legacy:ai_providers","legacy:ai_candidates","legacy:ai_selected","legacy:ai_votes"];async function de(t){let e={};for(let n of me){let a=await g(t,n);a!==null&&(e[n]=a)}let r=e.profiles||[];for(let n of r)e[`products:${n.id}`]=await W(t,n.id);return{app:"scraper4-worker",version:U,created_at:Date.now(),data:e}}async function We(t,e){if(!e||e.app!=="scraper4-worker"||typeof e.data!="object")return{ok:!1,error:"\u0633\u0627\u062E\u062A\u0627\u0631 \u0628\u06A9\u0627\u067E \u0645\u0639\u062A\u0628\u0631 \u0646\u06CC\u0633\u062A"};let r=0;for(let[n,a]of Object.entries(e.data)){if(n.startsWith("products:")){let o=n.slice(9),i=Array.isArray(a)?a:[];for(let s of i)await m(t,Q(o,s.key),s);await m(t,`product-index:${o}`,i.map(s=>s.key)),r+=i.length;continue}me.includes(n)&&(await m(t,n,a),r++)}return{ok:!0,restored:r}}function Je(t,e){if(!e.ADMIN_TOKEN)return!0;let r=t.headers.get("authorization")||"",n=r.startsWith("Bearer ")?r.slice(7):t.headers.get("x-admin-token")||"";return Ke(n,e.ADMIN_TOKEN)}function Ke(t,e){let r=new TextEncoder().encode(t),n=new TextEncoder().encode(e),a=r.length^n.length;for(let o=0;o<Math.max(r.length,n.length);o++)a|=(r[o]||0)^(n[o]||0);return a===0}function d(t,e=200,r={}){return new Response(JSON.stringify(t),{status:e,headers:{...Ne,...r}})}function ze(t){return new Response(t,{headers:{"content-type":"text/html; charset=utf-8","content-security-policy":"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'"}})}function F(t){return t instanceof Error?t.message:String(t)}async function O(t){if((t.headers.get("content-type")||"").includes("application/json"))return await t.json();let r=await t.formData(),n={};for(let[a,o]of r)n[a]=typeof o=="string"?o:o.name;return n}function jt(t){return`https://scraper4-state.invalid/${encodeURIComponent(t)}`}async function g(t,e){if(t.SCRAPER_KV)return t.SCRAPER_KV.get(e,"json");let r=await caches.default.match(jt(e));if(!r)return null;try{return await r.json()}catch{return null}}async function m(t,e,r,n){let a=JSON.stringify(r);if(a.length>24e6)throw new Error(`\u062D\u062C\u0645 ${e} \u0627\u0632 \u0645\u062D\u062F\u0648\u062F\u06CC\u062A \u0630\u062E\u06CC\u0631\u0647\u200C\u0633\u0627\u0632\u06CC \u0628\u06CC\u0634\u062A\u0631 \u0627\u0633\u062A`);if(t.SCRAPER_KV){await t.SCRAPER_KV.put(e,a,n?{expirationTtl:n}:void 0);return}await caches.default.put(jt(e),new Response(a,{headers:{"content-type":"application/json","cache-control":`public, max-age=${n||31536e3}`}}))}async function At(t,e){if(t.SCRAPER_KV){await t.SCRAPER_KV.delete(e);return}await caches.default.delete(jt(e))}async function _(t){return await g(t,"profiles")||[]}async function Tt(t,e){let r=(await _(t)).find(n=>n.id===e);if(!r)throw new Error("\u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F");return r}function Dt(t){let e=D(t.url),r=Date.now(),n={...C,...t.selectors||{}};for(let a of["container","title","price","link","image"])ut(n[a],`selectors.${a}`);return{id:L(String(t.id||Mt(e))),name:String(t.name||new URL(e).hostname).trim(),url:e,enabled:t.enabled!==!1,pages:Math.min(100,Math.max(1,Number(t.pages)||1)),pagination:["query_page","path_page","next","none"].includes(t.pagination)?t.pagination:"query_page",paginationValue:String(t.paginationValue||"page"),selectors:n,titleSuffix:String(t.titleSuffix||""),priceMode:t.priceMode||"none",priceValue:Number(t.priceValue)||0,roundPrice:Math.max(0,Number(t.roundPrice)||0),minPrice:Math.max(0,Number(t.minPrice)||0),wooCategoryId:Number(t.wooCategoryId)||0,basalamCategoryId:Number(t.basalamCategoryId)||0,syncWoo:!!t.syncWoo,syncBasalam:!!t.syncBasalam,createdAt:Number(t.createdAt)||r,updatedAt:r}}function Mt(t){let e=new URL(t);return L(`${e.hostname}_${e.pathname.replace(/\/page\/\d+\/?$/i,"")}`)}function L(t){return t.toLowerCase().replace(/[^a-z0-9_.-]+/g,"_").replace(/^_+|_+$/g,"").slice(0,120)||crypto.randomUUID()}function ut(t,e){let r=String(t||"").trim();if(!r)throw new Error(`${e} \u0627\u062C\u0628\u0627\u0631\u06CC \u0627\u0633\u062A`);return r}function D(t){let e=ut(t,"url"),r=new URL(e);if(!/^https?:$/.test(r.protocol))throw new Error("\u0641\u0642\u0637 \u0622\u062F\u0631\u0633 HTTP/HTTPS \u0645\u062C\u0627\u0632 \u0627\u0633\u062A");return Ge(r.hostname),r.href}function Ge(t){let e=t.toLowerCase().replace(/\.$/,"");if(e==="localhost"||e.endsWith(".local")||e.endsWith(".internal")||e==="0.0.0.0"||e==="::1")throw new Error("\u0622\u062F\u0631\u0633 \u062F\u0627\u062E\u0644\u06CC \u0645\u062C\u0627\u0632 \u0646\u06CC\u0633\u062A");let r=e.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);if(!r)return;let[n,a]=[Number(r[1]),Number(r[2])];if(n===10||n===127||n===0||n>=224||n===169&&a===254||n===172&&a>=16&&a<=31||n===192&&a===168)throw new Error("IP \u062E\u0635\u0648\u0635\u06CC \u0645\u062C\u0627\u0632 \u0646\u06CC\u0633\u062A")}async function P(t,e,r={}){let n=D(t),a=r.maxBytes||8e6;for(let o=0;o<5;o++){let i=await fetch(n,{method:r.method||"GET",headers:{"user-agent":e.USER_AGENT||"Mozilla/5.0 (compatible; Scraper4Worker/10.0)",accept:"text/html,application/json;q=0.9,*/*;q=0.8",...r.headers||{}},body:r.body,redirect:"manual"});if([301,302,303,307,308].includes(i.status)){let c=i.headers.get("location");if(!c)throw new Error("\u0631\u06CC\u062F\u0627\u06CC\u0631\u06A9\u062A \u0628\u062F\u0648\u0646 \u0645\u0642\u0635\u062F");n=D(new URL(c,n).href);continue}if(Number(i.headers.get("content-length")||0)>a)throw new Error("\u067E\u0627\u0633\u062E \u0633\u0627\u06CC\u062A \u0628\u06CC\u0634 \u0627\u0632 \u062D\u062F \u0628\u0632\u0631\u06AF \u0627\u0633\u062A");return i}throw new Error("\u062A\u0639\u062F\u0627\u062F \u0631\u06CC\u062F\u0627\u06CC\u0631\u06A9\u062A \u0628\u06CC\u0634 \u0627\u0632 \u062D\u062F \u0627\u0633\u062A")}function pe(t,e){if(!t||/^(data:|javascript:|blob:|#)/i.test(t))return"";try{let r=new URL(t,e);return/^https?:$/.test(r.protocol)?r.href:""}catch{return""}}function dt(t){return t.replace(/[\u200c\u200d\u200e\u200f\ufeff]/g," ").replace(/\s+/g," ").trim()}function we(t){let r=t.replace(/[۰-۹]/g,n=>String("\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9".indexOf(n))).replace(/[٠-٩]/g,n=>String("\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669".indexOf(n))).match(/[\d][\d,٬.\s]*/g)||[];return r.length?Math.max(...r.map(n=>Number(n.replace(/[^\d]/g,""))||0)):0}function Fe(t,e){return L(t?new URL(t).pathname:e).slice(0,100)}var V=class{constructor(e=1e3){this.limit=e}values=[];current="";text(e){if(!(this.values.length>=this.limit)&&(this.current+=e.text,e.lastInTextNode)){let r=dt(this.current);r&&this.values.push(r),this.current=""}}},lt=class{constructor(e,r=1e3){this.attrs=e;this.limit=r}values=[];element(e){if(!(this.values.length>=this.limit))for(let r of this.attrs){let n=e.getAttribute(r);if(n&&n!=="#"){this.values.push(n);return}}}};async function pt(t){await t.arrayBuffer()}async function ye(t,e,r,n=1e3){let a=await P(t,r),o=new V(n);return await pt(new HTMLRewriter().on(e,o).transform(a)),o.values}function ct(t,e){let r=t.split(",").map(a=>a.trim()).filter(Boolean),n=e.split(",").map(a=>a.trim()).filter(Boolean);return r.flatMap(a=>n.map(o=>`${a} ${o}`)).join(",")}async function qe(t,e,r){let n=await P(t,r);if(!n.ok)throw new Error(`HTTP ${n.status}`);let a=new V(5e3),o=new V(5e3),i=new lt(["href","data-href","data-url","data-product-url"],5e3),s=new lt(["data-src","data-lazy-src","data-original","src","srcset"],5e3),c=e.container.trim(),l=new HTMLRewriter().on(ct(c,e.title),a).on(ct(c,e.price),o).on(ct(c,e.link),i).on(ct(c,e.image),s);await pt(l.transform(n));let u=Math.max(a.values.length,i.values.length,o.values.length),p=[];for(let f=0;f<u;f++){let h=dt(a.values[f]||"");if(!h)continue;let b=pe(i.values[f]||"",t),w=s.values[f]||"";w.includes(",")&&(w=w.split(",")[0]),/\s+\d+[wx]$/.test(w)&&(w=w.replace(/\s+\d+[wx]$/,""));let k=pe(w,t),y=o.values[f]||"";p.push({key:Fe(b,h),title:h,price:we(y),priceText:y,url:b,image:k,images:k?[k]:[],sourcePage:t,scrapedAt:Date.now()})}return p}async function Qe(t,e,r){if(!t.url)return t;let a=[["shortDesc",e.shortDesc,"text"],["longDesc",e.longDesc,"text"],["sku",e.sku,"text"],["brand",e.brand,"text"],["category",e.category,"text"],["stock",e.stock,"text"],["weight",e.weight,"text"]].filter(c=>c[1]);if(!a.length)return t;let o=await P(t.url,r),i=new HTMLRewriter,s=[];for(let[,c]of a){let l=new V(2);s.push(l),i=i.on(c,l)}return await pt(i.transform(o)),a.forEach(([c],l)=>{let u=dt(s[l].values.join(" "));u&&(c==="stock"||c==="weight"?t[c]=we(u):t[c]=u)}),t}function Ye(t,e){let r=new URL(t.url);return e===1||t.pagination==="none"||t.pagination==="next"?r.href:t.pagination==="path_page"?(r.pathname=r.pathname.replace(/\/page\/\d+\/?$/i,"").replace(/\/$/,"")+`/page/${e}/`,r.href):(r.searchParams.set(t.paginationValue||"page",String(e)),r.href)}function Xe(t,e){t.title=dt(t.title+(e.titleSuffix||""));let r=e.priceValue||0;return e.priceMode==="add"?t.price+=r:e.priceMode==="percent"?t.price*=1+r/100:e.priceMode==="multiply"&&(t.price*=r),e.roundPrice&&(t.price=Math.ceil(t.price/e.roundPrice)*e.roundPrice),t.price=Math.round(t.price),t}function It(t){let e=Date.now();return{id:crypto.randomUUID(),profileId:t,status:"queued",phase:"waiting",total:0,processed:0,added:0,updated:0,failed:0,startedAt:e,updatedAt:e,log:[]}}function N(t,e,r="info"){t.log.push({at:Date.now(),level:r,message:e}),t.log.length>100&&(t.log=t.log.slice(-100)),t.updatedAt=Date.now()}async function j(t,e){await Promise.all([m(t,`job:${e.id}`,e,604800),m(t,"jobs:latest",e,604800),...["queued","running"].includes(e.status)?[m(t,`job-active:${e.profileId}`,e,86400)]:[]])}async function fe(t,e){return!!(await g(t,`job:${e.id}`))?.stop}async function Nt(t,e,r,n){try{e.status="running",e.phase="list",N(e,`\u0634\u0631\u0648\u0639 \u0627\u0633\u062A\u062E\u0631\u0627\u062C \xAB${t.name}\xBB`),await j(r,e);let a=new Map;for(let o=1;o<=t.pages;o++){if(await fe(r,e)){e.status="stopped";break}let i=Ye(t,o);N(e,`\u0635\u0641\u062D\u0647 ${o}: ${i}`);let s=await qe(i,t.selectors,r);if(!s.length){N(e,"\u0645\u062D\u0635\u0648\u0644\u06CC \u062F\u0631 \u0635\u0641\u062D\u0647 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F","warning");break}for(let c of s){let l=Xe(c,t);(!t.minPrice||l.price>=t.minPrice)&&a.set(l.key,l)}if(e.total=a.size,e.processed+=s.length,await j(r,e),t.pagination==="next"){N(e,"\u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC next \u0641\u0642\u0637 \u0635\u0641\u062D\u0647\u0654 \u0646\u062E\u0633\u062A \u0631\u0627 \u062F\u0631 Worker \u067E\u0631\u062F\u0627\u0632\u0634 \u0645\u06CC\u200C\u06A9\u0646\u062F","warning");break}}if(e.status!=="stopped"){e.phase="details";let o=[...a.values()];for(let i=0;i<o.length;i+=4){if(await fe(r,e)){e.status="stopped";break}await Promise.all(o.slice(i,i+4).map(async s=>{try{await Qe(s,t.selectors,r)}catch(c){e.failed++,N(e,`${s.title}: ${F(c)}`,"error")}}))}if(e.status!=="stopped"){e.phase="save";let i=new Map((await W(r,t.id)).map(s=>[s.key,s]));for(let s of o)i.has(s.key)?e.updated++:e.added++,await m(r,Q(t.id,s.key),s);await m(r,`product-index:${t.id}`,o.map(s=>s.key)),(n||t.syncWoo||t.syncBasalam)&&(e.phase="sync",await ke(o,t,n||t.syncWoo&&t.syncBasalam?"both":t.syncWoo?"woo":"basalam",r)),e.status="done",N(e,`${o.length} \u0645\u062D\u0635\u0648\u0644 \u0630\u062E\u06CC\u0631\u0647 \u0634\u062F`)}}}catch(a){e.status="failed",e.error=F(a),N(e,e.error,"error")}e.finishedAt=Date.now(),e.updatedAt=Date.now(),await j(r,e),await At(r,`job-active:${t.id}`)}function Q(t,e){return`product:${L(t)}:${L(e)}`}async function W(t,e){let r=await g(t,`product-index:${e}`)||[],n=[];for(let a=0;a<r.length;a+=50){let o=await Promise.all(r.slice(a,a+50).map(i=>g(t,Q(e,i))));n.push(...o.filter(Boolean))}return n}async function Ze(t,e,r,n){let a=await g(t,`product-index:${e}`)||[],o=n?Math.max(0,Number(atob(n))||0):0,i=a.slice(o,o+r);return{products:(await Promise.all(i.map(c=>g(t,Q(e,c))))).filter(Boolean),cursor:o+r<a.length?btoa(String(o+r)):null,total:a.length}}async function be(t,e){let r=await g(t,`product-index:${e}`)||[];for(let n=0;n<r.length;n+=50)await Promise.all(r.slice(n,n+50).map(a=>At(t,Q(e,a))));await At(t,`product-index:${e}`)}async function S(t){return await g(t,"connections")||{}}function M(t,e){return{woo:{url:e.WOO_URL||t.woo?.url||"",key:e.WOO_KEY||t.woo?.key||"",secret:e.WOO_SECRET||t.woo?.secret||""},basalam:{token:e.BASALAM_TOKEN||t.basalam?.token||"",vendorId:e.BASALAM_VENDOR_ID||t.basalam?.vendorId||"",api:e.BASALAM_API||t.basalam?.api||"https://openapi.basalam.com/v1"}}}function G(t){return t?`${t.slice(0,3)}\u2022\u2022\u2022\u2022${t.slice(-3)}`:""}function $t(t){return{woo:{url:t.woo?.url||"",key:G(t.woo?.key||""),secret:G(t.woo?.secret||"")},basalam:{token:G(t.basalam?.token||""),vendorId:t.basalam?.vendorId||"",api:t.basalam?.api||""}}}function xe(t,e){let r=(n,a="")=>!n||n.includes("\u2022\u2022\u2022\u2022")?a:n;return{woo:{url:e.woo?.url||t.woo?.url||"",key:r(e.woo?.key,t.woo?.key),secret:r(e.woo?.secret,t.woo?.secret)},basalam:{token:r(e.basalam?.token,t.basalam?.token),vendorId:e.basalam?.vendorId||t.basalam?.vendorId||"",api:e.basalam?.api||t.basalam?.api||"https://openapi.basalam.com/v1"}}}async function tr(t){let e=M(await S(t),t).woo;if(!e.url||!e.key||!e.secret)return{ok:!1,error:"\u0627\u062A\u0635\u0627\u0644 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A"};let r=e.url.replace(/\/$/,"")+"/wp-json/wc/v3/system_status",n=await P(r,t,{headers:{authorization:`Basic ${btoa(`${e.key}:${e.secret}`)}`,accept:"application/json"},maxBytes:2e6});return{ok:n.ok,code:n.status,body:await n.json().catch(()=>null)}}async function er(t){let e=M(await S(t),t).basalam;if(!e.token)return{ok:!1,error:"\u062A\u0648\u06A9\u0646 \u0628\u0627\u0633\u0644\u0627\u0645 \u0648\u0627\u0631\u062F \u0646\u0634\u062F\u0647 \u0627\u0633\u062A"};let r=await P(`${e.api.replace(/\/$/,"")}/categories`,t,{headers:{authorization:`Bearer ${e.token}`,accept:"application/json"},maxBytes:3e6});return{ok:r.ok,code:r.status,body:await r.json().catch(()=>null)}}async function he(t){let e=M(await S(t),t).woo;if(!e.url||!e.key||!e.secret)return{ok:!1,error:"\u0627\u062A\u0635\u0627\u0644 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A"};let r=e.url.replace(/\/$/,"")+"/wp-json/wc/v3/products/categories?per_page=100",n=await P(r,t,{headers:{authorization:`Basic ${btoa(`${e.key}:${e.secret}`)}`,accept:"application/json"},maxBytes:4e6}),a=await n.json().catch(()=>null);return{ok:n.ok,code:n.status,categories:a,body:a}}async function ge(t){let e=M(await S(t),t).basalam;if(!e.token)return{ok:!1,error:"\u062A\u0648\u06A9\u0646 \u0628\u0627\u0633\u0644\u0627\u0645 \u0648\u0627\u0631\u062F \u0646\u0634\u062F\u0647 \u0627\u0633\u062A"};let r=await P(`${e.api.replace(/\/$/,"")}/categories`,t,{headers:{authorization:`Bearer ${e.token}`,accept:"application/json"},maxBytes:4e6}),n=await r.json().catch(()=>null);return{ok:r.ok,code:r.status,categories:n,body:n}}async function ke(t,e,r,n){let a=M(await S(n),n),o={};return(r==="woo"||r==="both")&&(o.woo=await rr(t,e,a.woo,n)),(r==="basalam"||r==="both")&&(o.basalam=await nr(t,e,a.basalam,n)),o}async function rr(t,e,r,n){if(!r.url||!r.key||!r.secret)return{ok:!1,error:"\u0627\u062A\u0635\u0627\u0644 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A"};let a=0,o=0,i=0,s=[];for(let c of t)try{let l=c.sku||`s4-${e.id}-${c.key}`.slice(0,100),u=r.url.replace(/\/$/,"")+"/wp-json/wc/v3/products",p=`Basic ${btoa(`${r.key}:${r.secret}`)}`,f=await P(`${u}?sku=${encodeURIComponent(l)}`,n,{headers:{authorization:p,accept:"application/json"}}),h=f.ok?await f.json():[],b={name:c.title,sku:l,type:"simple",regular_price:String(c.price),description:c.longDesc||"",short_description:c.shortDesc||"",manage_stock:c.stock!==void 0,stock_quantity:c.stock,images:c.images.map(y=>({src:y}))};e.wooCategoryId&&(b.categories=[{id:e.wooCategoryId}]),c.weight&&(b.weight=String(c.weight));let w=h[0]?.id,k=await P(w?`${u}/${w}`:u,n,{method:"POST",headers:{authorization:p,"content-type":"application/json",accept:"application/json"},body:JSON.stringify(b),maxBytes:2e6});if(!k.ok)throw new Error(`WooCommerce HTTP ${k.status}: ${(await k.text()).slice(0,300)}`);w?o++:a++}catch(l){i++,s.length<20&&s.push(`${c.title}: ${F(l)}`)}return{ok:i===0,created:a,updated:o,failed:i,errors:s}}async function nr(t,e,r,n){if(!r.token||!r.vendorId)return{ok:!1,error:"\u0627\u062A\u0635\u0627\u0644 \u0628\u0627\u0633\u0644\u0627\u0645 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A"};let a=0,o=0,i=[],s=`${r.api.replace(/\/$/,"")}/vendors/${encodeURIComponent(r.vendorId)}/products`;for(let c of t)try{let l={name:c.title,price:c.price,stock:c.stock??10,description:c.longDesc||c.shortDesc||"",photo:c.image||void 0,category_id:e.basalamCategoryId||void 0,weight:c.weight||500,preparation_days:3},u=await P(s,n,{method:"POST",headers:{authorization:`Bearer ${r.token}`,"content-type":"application/json",accept:"application/json"},body:JSON.stringify(l),maxBytes:2e6});if(!u.ok)throw new Error(`Basalam HTTP ${u.status}: ${(await u.text()).slice(0,300)}`);a++}catch(l){o++,i.length<20&&i.push(`${c.title}: ${F(l)}`)}return{ok:o===0,created:a,failed:o,errors:i}}async function Ee(t,e){let r=["li.product","div.product",".product-card",".product-item","article.product",".woocommerce-LoopProduct-link","[itemtype*='Product']"],n=await P(t,e),a=r.map(()=>({count:0})),o=new HTMLRewriter;return r.forEach((i,s)=>{o=o.on(i,{element(){a[s].count++}})}),await pt(o.transform(n)),{ok:!0,containers:r.map((i,s)=>({selector:i,count:a[s].count})).filter(i=>i.count>1).sort((i,s)=>s.count-i.count),defaults:C}}async function Pe(t,e){let r=D(t),n=await P(r,e,{maxBytes:1e7}),a=n.headers.get("content-type")||"";return!n.ok||!a.startsWith("image/")?d({ok:!1,error:"\u067E\u0627\u0633\u062E \u062A\u0635\u0648\u06CC\u0631 \u0645\u0639\u062A\u0628\u0631 \u0646\u06CC\u0633\u062A"},400):new Response(n.body,{status:200,headers:{"content-type":a,"cache-control":"public, max-age=86400","x-content-type-options":"nosniff"}})}async function Ot(t,e){let r=(await _(t)).filter(n=>n.enabled);for(let n of r){let a=await g(t,`job-active:${n.id}`);if(a&&["queued","running"].includes(a.status))continue;let o=It(n.id);o.startedAt=e,await j(t,o),await Nt(n,o,t,!0)}}function Ct(t){let e=["key","title","price","url","image","sku","brand","stock","weight","category","shortDesc","longDesc"],r=n=>`"${String(n??"").replace(/"/g,'""')}"`;return"\uFEFF"+e.join(",")+`
-`+t.map(n=>e.map(a=>r(n[a])).join(",")).join(`
-`)}function ar(t){let e=typeof t=="string"?JSON.parse(t):t;if(!e||typeof e!="object")throw new Error("profiles \u0646\u0627\u0645\u0639\u062A\u0628\u0631 \u0627\u0633\u062A");return Object.entries(e).map(([r,n])=>Dt({...n,id:r,pagination:n.pagType||n.pagination,paginationValue:n.pagVal||n.paginationValue,priceValue:n.priceVal??n.priceValue,selectors:n.selectors||C}))}var or=`<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Scraper 4 Worker</title><style>
-:root{color-scheme:dark;--bg:#07111f;--card:#101d30;--line:#263b56;--text:#e7eef8;--muted:#91a4bd;--blue:#38bdf8;--green:#34d399;--red:#fb7185}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0,#102b48,var(--bg) 36%);font:14px Tahoma,Arial;color:var(--text)}main{max-width:1100px;margin:auto;padding:24px}.head{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:25px;margin:0}h1 b{color:var(--blue)}.badge{background:#12304a;border:1px solid #1e597d;border-radius:20px;padding:7px 12px;color:#8bdcff}.card{background:rgba(16,29,48,.95);border:1px solid var(--line);border-radius:15px;padding:18px;margin-top:16px;box-shadow:0 14px 40px #0003}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:11px}.five{grid-template-columns:2fr 1fr 1fr 1fr 1fr}label{color:var(--muted);font-size:12px;display:block;margin-bottom:5px}input,select,textarea,button{width:100%;border:1px solid #314a67;border-radius:9px;padding:10px;background:#091525;color:var(--text);font:inherit}button{cursor:pointer;background:#075985;border-color:#0ea5e9;font-weight:bold}button:hover{filter:brightness(1.2)}button.red{background:#881337;border-color:#e11d48}button.green{background:#065f46;border-color:#10b981}.actions{display:flex;gap:7px}.actions button{width:auto}.profiles{display:grid;gap:9px}.profile{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px;background:#091525;border:1px solid #203954;border-radius:10px}.profile small{display:block;color:var(--muted);direction:ltr;text-align:right;margin-top:5px}.log{white-space:pre-wrap;direction:rtl;background:#050c16;border-radius:10px;padding:12px;min-height:75px;color:#b8c8db}.ok{color:var(--green)}.err{color:var(--red)}@media(max-width:700px){.grid,.five{grid-template-columns:1fr}.profile,.head{align-items:stretch;flex-direction:column}.actions{flex-wrap:wrap}}
-</style></head><body><main><div class="head"><h1>\u0627\u0633\u06A9\u0631\u067E\u0631 <b>\u06F4</b> \u2014 Cloudflare Worker</h1><span class="badge">TypeScript \xB7 KV \xB7 v${U}</span></div>
-<div class="card"><div class="grid"><div><label>\u062A\u0648\u06A9\u0646 \u0645\u062F\u06CC\u0631\u06CC\u062A (\u0627\u06AF\u0631 ADMIN_TOKEN \u062A\u0646\u0638\u06CC\u0645 \u0634\u062F\u0647)</label><input id="token" type="password" placeholder="Bearer token"></div><div style="align-self:end"><button onclick="loadAll()">\u0627\u062A\u0635\u0627\u0644 \u0648 \u0628\u0627\u0631\u06AF\u0630\u0627\u0631\u06CC</button></div></div></div>
-<div class="card"><h2>\u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0627\u0633\u062A\u062E\u0631\u0627\u062C</h2><div class="grid"><div><label>\u0646\u0627\u0645</label><input id="name" placeholder="\u0641\u0631\u0648\u0634\u06AF\u0627\u0647 \u0645\u0628\u062F\u0623"></div><div><label>URL</label><input id="url" dir="ltr" placeholder="https://example.com/shop?page=1"></div></div><div class="grid five" style="margin-top:10px"><div><label>\u0633\u0644\u06A9\u062A\u0648\u0631 \u0645\u062D\u0635\u0648\u0644</label><input id="container" dir="ltr" value="li.product"></div><div><label>\u0639\u0646\u0648\u0627\u0646</label><input id="title" dir="ltr" value="h2"></div><div><label>\u0642\u06CC\u0645\u062A</label><input id="price" dir="ltr" value=".price"></div><div><label>\u0644\u06CC\u0646\u06A9</label><input id="link" dir="ltr" value="a[href]"></div><div><label>\u062A\u0635\u0648\u06CC\u0631</label><input id="image" dir="ltr" value="img"></div></div><div class="grid" style="margin-top:10px"><div><label>\u062A\u0639\u062F\u0627\u062F \u0635\u0641\u062D\u0647</label><input id="pages" type="number" value="1" min="1" max="100"></div><div><label>\u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</label><select id="pagination"><option value="query_page">\u067E\u0627\u0631\u0627\u0645\u062A\u0631 page</option><option value="path_page">/page/2/</option><option value="none">\u0628\u062F\u0648\u0646 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</option></select></div></div><button class="green" style="margin-top:12px" onclick="saveProfile()">\u0630\u062E\u06CC\u0631\u0647 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644</button></div>
-<div class="card"><div class="head"><h2>\u067E\u0631\u0648\u0641\u0627\u06CC\u0644\u200C\u0647\u0627</h2><button style="width:auto" onclick="loadProfiles()">\u062A\u0627\u0632\u0647\u200C\u0633\u0627\u0632\u06CC</button></div><div id="profiles" class="profiles"></div></div>
-<div class="card"><h2>\u0648\u0636\u0639\u06CC\u062A</h2><div id="status" class="log">\u0622\u0645\u0627\u062F\u0647</div></div></main><script>
-const $=id=>document.getElementById(id);let timer=null;function headers(){const t=$('token').value;localStorage.s4token=t;return {'content-type':'application/json',...(t?{authorization:'Bearer '+t}:{})}}async function api(path,opt={}){const r=await fetch(path,{...opt,headers:{...headers(),...(opt.headers||{})}});const d=await r.json();if(!r.ok)throw Error(d.error||r.status);return d}function out(s,err=false){$('status').className='log '+(err?'err':'ok');$('status').textContent=typeof s==='string'?s:JSON.stringify(s,null,2)}async function loadProfiles(){try{const d=await api('/api/profiles');$('profiles').innerHTML=d.profiles.map(p=>'<div class="profile"><div><b>'+esc(p.name)+'</b><small>'+esc(p.url)+'</small></div><div class="actions"><button onclick="run(''+p.id+'')">\u0627\u0633\u062A\u062E\u0631\u0627\u062C</button><button class="green" onclick="sync(''+p.id+'')">\u0647\u0645\u06AF\u0627\u0645\u200C\u0633\u0627\u0632\u06CC</button><button class="red" onclick="delp(''+p.id+'')">\u062D\u0630\u0641</button></div></div>').join('')||'<span>\u0647\u0646\u0648\u0632 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644\u06CC \u0646\u06CC\u0633\u062A.</span>'}catch(e){out(e.message,true)}}async function saveProfile(){try{const body={name:$('name').value,url:$('url').value,pages:+$('pages').value,pagination:$('pagination').value,selectors:{container:$('container').value,title:$('title').value,price:$('price').value,link:$('link').value,image:$('image').value}};await api('/api/profiles',{method:'POST',body:JSON.stringify(body)});out('\u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0630\u062E\u06CC\u0631\u0647 \u0634\u062F');loadProfiles()}catch(e){out(e.message,true)}}async function run(id){try{const d=await api('/api/scrape',{method:'POST',body:JSON.stringify({profileId:id})});out(d.job);watch(d.job.id)}catch(e){out(e.message,true)}}function watch(id){clearInterval(timer);timer=setInterval(async()=>{try{const d=await api('/api/jobs/'+id);out(d.job);if(!['queued','running'].includes(d.job.status))clearInterval(timer)}catch(e){clearInterval(timer);out(e.message,true)}},1800)}async function sync(id){try{out('\u062F\u0631 \u062D\u0627\u0644 \u0647\u0645\u06AF\u0627\u0645\u200C\u0633\u0627\u0632\u06CC\u2026');out((await api('/api/sync',{method:'POST',body:JSON.stringify({profileId:id,target:'both'})})).result)}catch(e){out(e.message,true)}}async function delp(id){if(!confirm('\u062D\u0630\u0641 \u0634\u0648\u062F\u061F'))return;try{await api('/api/profiles/'+id,{method:'DELETE'});loadProfiles()}catch(e){out(e.message,true)}}function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}async function loadAll(){$('token').value=$('token').value||localStorage.s4token||'';await loadProfiles();try{out(await api('/api/status'))}catch(e){out(e.message,true)}}$('token').value=localStorage.s4token||'';loadAll();
-<\/script></body></html>`;export{Cn as default};
+/* Generated by npm run worker:build — edit worker-src/, not this bundle. */
+
+// node_modules/hono/dist/compose.js
+var compose = (middleware, onError, onNotFound) => {
+  return (context, next) => {
+    let index = -1;
+    return dispatch(0);
+    async function dispatch(i) {
+      if (i <= index) {
+        throw new Error("next() called multiple times");
+      }
+      index = i;
+      let res;
+      let isError = false;
+      let handler;
+      if (middleware[i]) {
+        handler = middleware[i][0][0];
+        context.req.routeIndex = i;
+      } else {
+        handler = i === middleware.length && next || void 0;
+      }
+      if (handler) {
+        try {
+          res = await handler(context, () => dispatch(i + 1));
+        } catch (err) {
+          if (err instanceof Error && onError) {
+            context.error = err;
+            res = await onError(err, context);
+            isError = true;
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        if (context.finalized === false && onNotFound) {
+          res = await onNotFound(context);
+        }
+      }
+      if (res && (context.finalized === false || isError)) {
+        context.res = res;
+      }
+      return context;
+    }
+  };
+};
+
+// node_modules/hono/dist/request/constants.js
+var GET_MATCH_RESULT = /* @__PURE__ */ Symbol();
+
+// node_modules/hono/dist/utils/buffer.js
+var bufferToFormData = (arrayBuffer, contentType) => {
+  const response = new Response(arrayBuffer, {
+    headers: {
+      // Normalize the media type (case-insensitive) while keeping parameters like the boundary
+      "Content-Type": contentType.replace(/^[^;]+/, (mediaType) => mediaType.toLowerCase())
+    }
+  });
+  return response.formData();
+};
+
+// node_modules/hono/dist/utils/body.js
+var isRawRequest = (request) => "headers" in request;
+var parseBody = async (request, options = /* @__PURE__ */ Object.create(null)) => {
+  const { all = false, dot = false } = options;
+  const headers = isRawRequest(request) ? request.headers : request.raw.headers;
+  const contentType = headers.get("Content-Type");
+  const mediaType = contentType?.split(";")[0].trim().toLowerCase();
+  if (mediaType === "multipart/form-data" || mediaType === "application/x-www-form-urlencoded") {
+    return parseFormData(request, { all, dot });
+  }
+  return {};
+};
+async function parseFormData(request, options) {
+  if (!isRawRequest(request) && request.bodyCache.formData) {
+    return convertFormDataToBodyData(
+      await request.bodyCache.formData,
+      options
+    );
+  }
+  const headers = isRawRequest(request) ? request.headers : request.raw.headers;
+  const arrayBuffer = await request.arrayBuffer();
+  const formDataPromise = bufferToFormData(arrayBuffer, headers.get("Content-Type") || "");
+  if (!isRawRequest(request)) {
+    request.bodyCache.formData = formDataPromise;
+  }
+  const formData = await formDataPromise;
+  if (formData) {
+    return convertFormDataToBodyData(formData, options);
+  }
+  return {};
+}
+function convertFormDataToBodyData(formData, options) {
+  const form = /* @__PURE__ */ Object.create(null);
+  formData.forEach((value, key2) => {
+    const shouldParseAllValues = options.all || key2.endsWith("[]");
+    if (!shouldParseAllValues) {
+      form[key2] = value;
+    } else {
+      handleParsingAllValues(form, key2, value);
+    }
+  });
+  if (options.dot) {
+    Object.entries(form).forEach(([key2, value]) => {
+      const shouldParseDotValues = key2.includes(".");
+      if (shouldParseDotValues) {
+        handleParsingNestedValues(form, key2, value);
+        delete form[key2];
+      }
+    });
+  }
+  return form;
+}
+var handleParsingAllValues = (form, key2, value) => {
+  if (form[key2] !== void 0) {
+    if (Array.isArray(form[key2])) {
+      ;
+      form[key2].push(value);
+    } else {
+      form[key2] = [form[key2], value];
+    }
+  } else {
+    if (!key2.endsWith("[]")) {
+      form[key2] = value;
+    } else {
+      form[key2] = [value];
+    }
+  }
+};
+var handleParsingNestedValues = (form, key2, value) => {
+  if (/(?:^|\.)__proto__\./.test(key2)) {
+    return;
+  }
+  let nestedForm = form;
+  const keys = key2.split(".");
+  keys.forEach((key22, index) => {
+    if (index === keys.length - 1) {
+      nestedForm[key22] = value;
+    } else {
+      if (!nestedForm[key22] || typeof nestedForm[key22] !== "object" || Array.isArray(nestedForm[key22]) || nestedForm[key22] instanceof File) {
+        nestedForm[key22] = /* @__PURE__ */ Object.create(null);
+      }
+      nestedForm = nestedForm[key22];
+    }
+  });
+};
+
+// node_modules/hono/dist/utils/url.js
+var splitPath = (path) => {
+  const paths = path.split("/");
+  if (paths[0] === "") {
+    paths.shift();
+  }
+  return paths;
+};
+var splitRoutingPath = (routePath) => {
+  const { groups, path } = extractGroupsFromPath(routePath);
+  const paths = splitPath(path);
+  return replaceGroupMarks(paths, groups);
+};
+var extractGroupsFromPath = (path) => {
+  const groups = [];
+  path = path.replace(/\{[^}]+\}/g, (match2, index) => {
+    const mark = `@${index}`;
+    groups.push([mark, match2]);
+    return mark;
+  });
+  return { groups, path };
+};
+var replaceGroupMarks = (paths, groups) => {
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const [mark] = groups[i];
+    for (let j = paths.length - 1; j >= 0; j--) {
+      if (paths[j].includes(mark)) {
+        paths[j] = paths[j].replace(mark, groups[i][1]);
+        break;
+      }
+    }
+  }
+  return paths;
+};
+var patternCache = {};
+var getPattern = (label, next) => {
+  if (label === "*") {
+    return "*";
+  }
+  const match2 = label.match(/^\:([^\{\}]+)(?:\{(.+)\})?$/);
+  if (match2) {
+    const cacheKey = `${label}#${next}`;
+    if (!patternCache[cacheKey]) {
+      if (match2[2]) {
+        patternCache[cacheKey] = next && next[0] !== ":" && next[0] !== "*" ? [cacheKey, match2[1], new RegExp(`^${match2[2]}(?=/${next})`)] : [label, match2[1], new RegExp(`^${match2[2]}$`)];
+      } else {
+        patternCache[cacheKey] = [label, match2[1], true];
+      }
+    }
+    return patternCache[cacheKey];
+  }
+  return null;
+};
+var tryDecode = (str, decoder) => {
+  try {
+    return decoder(str);
+  } catch {
+    return str.replace(/(?:%[0-9A-Fa-f]{2})+/g, (match2) => {
+      try {
+        return decoder(match2);
+      } catch {
+        return match2;
+      }
+    });
+  }
+};
+var tryDecodeURI = (str) => tryDecode(str, decodeURI);
+var getPath = (request) => {
+  const url = request.url;
+  const start = url.indexOf("/", url.indexOf(":") + 4);
+  let i = start;
+  for (; i < url.length; i++) {
+    const charCode = url.charCodeAt(i);
+    if (charCode === 37) {
+      const queryIndex = url.indexOf("?", i);
+      const hashIndex = url.indexOf("#", i);
+      const end = queryIndex === -1 ? hashIndex === -1 ? void 0 : hashIndex : hashIndex === -1 ? queryIndex : Math.min(queryIndex, hashIndex);
+      const path = url.slice(start, end);
+      return tryDecodeURI(path.includes("%25") ? path.replace(/%25/g, "%2525") : path);
+    } else if (charCode === 63 || charCode === 35) {
+      break;
+    }
+  }
+  return url.slice(start, i);
+};
+var getPathNoStrict = (request) => {
+  const result = getPath(request);
+  return result.length > 1 && result.at(-1) === "/" ? result.slice(0, -1) : result;
+};
+var mergePath = (base, sub, ...rest) => {
+  if (rest.length) {
+    sub = mergePath(sub, ...rest);
+  }
+  return `${base?.[0] === "/" ? "" : "/"}${base}${sub === "/" ? "" : `${base?.at(-1) === "/" ? "" : "/"}${sub?.[0] === "/" ? sub.slice(1) : sub}`}`;
+};
+var checkOptionalParameter = (path) => {
+  if (path.charCodeAt(path.length - 1) !== 63 || !path.includes(":")) {
+    return null;
+  }
+  const segments = path.split("/");
+  const results = [];
+  let basePath = "";
+  segments.forEach((segment) => {
+    if (segment !== "" && !/\:/.test(segment)) {
+      basePath += "/" + segment;
+    } else if (/\:/.test(segment)) {
+      if (segment.charCodeAt(segment.length - 1) === 63) {
+        if (results.length === 0 && basePath === "") {
+          results.push("/");
+        } else {
+          results.push(basePath);
+        }
+        const optionalSegment = segment.slice(0, -1);
+        basePath += "/" + optionalSegment;
+        results.push(basePath);
+      } else {
+        basePath += "/" + segment;
+      }
+    }
+  });
+  return results.filter((v, i, a) => a.indexOf(v) === i);
+};
+var tryDecodeURIComponent = (str) => str.indexOf("%") !== -1 ? tryDecode(str, decodeURIComponent_) : str;
+var _decodeURI = (value) => {
+  if (value.indexOf("+") !== -1) {
+    value = value.replace(/\+/g, " ");
+  }
+  return tryDecodeURIComponent(value);
+};
+var _getQueryParam = (url, key2, multiple) => {
+  let encoded;
+  if (!multiple && key2 && key2.indexOf("%") === -1 && key2.indexOf("+") === -1) {
+    let keyIndex2 = url.indexOf("?", 8);
+    if (keyIndex2 === -1) {
+      return void 0;
+    }
+    if (!url.startsWith(key2, keyIndex2 + 1)) {
+      keyIndex2 = url.indexOf(`&${key2}`, keyIndex2 + 1);
+    }
+    while (keyIndex2 !== -1) {
+      const trailingKeyCode = url.charCodeAt(keyIndex2 + key2.length + 1);
+      if (trailingKeyCode === 61) {
+        const valueIndex = keyIndex2 + key2.length + 2;
+        const endIndex = url.indexOf("&", valueIndex);
+        return _decodeURI(url.slice(valueIndex, endIndex === -1 ? void 0 : endIndex));
+      } else if (trailingKeyCode == 38 || isNaN(trailingKeyCode)) {
+        return "";
+      }
+      keyIndex2 = url.indexOf(`&${key2}`, keyIndex2 + 1);
+    }
+    encoded = /[%+]/.test(url);
+    if (!encoded) {
+      return void 0;
+    }
+  }
+  const results = /* @__PURE__ */ Object.create(null);
+  encoded ??= /[%+]/.test(url);
+  let keyIndex = url.indexOf("?", 8);
+  while (keyIndex !== -1) {
+    const nextKeyIndex = url.indexOf("&", keyIndex + 1);
+    let valueIndex = url.indexOf("=", keyIndex);
+    if (valueIndex > nextKeyIndex && nextKeyIndex !== -1) {
+      valueIndex = -1;
+    }
+    let name = url.slice(
+      keyIndex + 1,
+      valueIndex === -1 ? nextKeyIndex === -1 ? void 0 : nextKeyIndex : valueIndex
+    );
+    if (encoded) {
+      name = _decodeURI(name);
+    }
+    keyIndex = nextKeyIndex;
+    if (name === "") {
+      continue;
+    }
+    let value;
+    if (valueIndex === -1) {
+      value = "";
+    } else {
+      value = url.slice(valueIndex + 1, nextKeyIndex === -1 ? void 0 : nextKeyIndex);
+      if (encoded) {
+        value = _decodeURI(value);
+      }
+    }
+    if (multiple) {
+      if (!(results[name] && Array.isArray(results[name]))) {
+        results[name] = [];
+      }
+      ;
+      results[name].push(value);
+    } else {
+      results[name] ??= value;
+    }
+  }
+  return key2 ? results[key2] : results;
+};
+var getQueryParam = _getQueryParam;
+var getQueryParams = (url, key2) => {
+  return _getQueryParam(url, key2, true);
+};
+var decodeURIComponent_ = decodeURIComponent;
+
+// node_modules/hono/dist/request.js
+var HonoRequest = class {
+  /**
+   * `.raw` can get the raw Request object.
+   *
+   * @see {@link https://hono.dev/docs/api/request#raw}
+   *
+   * @example
+   * ```ts
+   * // For Cloudflare Workers
+   * app.post('/', async (c) => {
+   *   const metadata = c.req.raw.cf?.hostMetadata?
+   *   ...
+   * })
+   * ```
+   */
+  raw;
+  #validatedData;
+  // Short name of validatedData
+  #matchResult;
+  routeIndex = 0;
+  /**
+   * `.path` can get the pathname of the request.
+   *
+   * @see {@link https://hono.dev/docs/api/request#path}
+   *
+   * @example
+   * ```ts
+   * app.get('/about/me', (c) => {
+   *   const pathname = c.req.path // `/about/me`
+   * })
+   * ```
+   */
+  path;
+  bodyCache = {};
+  constructor(request, path = "/", matchResult = [[]]) {
+    this.raw = request;
+    this.path = path;
+    this.#matchResult = matchResult;
+  }
+  param(key2) {
+    return key2 ? this.#getDecodedParam(key2) : this.#getAllDecodedParams();
+  }
+  #getDecodedParam(key2) {
+    const paramKey = this.#matchResult[0][this.routeIndex][1][key2];
+    const param = this.#getParamValue(paramKey);
+    return param && tryDecodeURIComponent(param);
+  }
+  #getAllDecodedParams() {
+    const decoded = {};
+    const keys = Object.keys(this.#matchResult[0][this.routeIndex][1]);
+    for (const key2 of keys) {
+      const value = this.#getParamValue(this.#matchResult[0][this.routeIndex][1][key2]);
+      if (value !== void 0) {
+        decoded[key2] = tryDecodeURIComponent(value);
+      }
+    }
+    return decoded;
+  }
+  #getParamValue(paramKey) {
+    return this.#matchResult[1] ? this.#matchResult[1][paramKey] : paramKey;
+  }
+  query(key2) {
+    return getQueryParam(this.url, key2);
+  }
+  queries(key2) {
+    return getQueryParams(this.url, key2);
+  }
+  header(name) {
+    if (name) {
+      return this.raw.headers.get(name) ?? void 0;
+    }
+    const headerData = /* @__PURE__ */ Object.create(null);
+    this.raw.headers.forEach((value, key2) => {
+      headerData[key2] = value;
+    });
+    return headerData;
+  }
+  async parseBody(options) {
+    return parseBody(this, options);
+  }
+  #cachedBody = (key2) => {
+    const { bodyCache, raw: raw2 } = this;
+    const cachedBody = bodyCache[key2];
+    if (cachedBody) {
+      return cachedBody;
+    }
+    for (const anyCachedKey in bodyCache) {
+      return bodyCache[anyCachedKey].then((body) => {
+        if (anyCachedKey === "json") {
+          body = JSON.stringify(body);
+        }
+        return new Response(body)[key2]();
+      });
+    }
+    return bodyCache[key2] = raw2[key2]();
+  };
+  /**
+   * `.json()` can parse Request body of type `application/json`
+   *
+   * @see {@link https://hono.dev/docs/api/request#json}
+   *
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.json()
+   * })
+   * ```
+   */
+  json() {
+    return this.#cachedBody("text").then((text) => JSON.parse(text));
+  }
+  /**
+   * `.text()` can parse Request body of type `text/plain`
+   *
+   * @see {@link https://hono.dev/docs/api/request#text}
+   *
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.text()
+   * })
+   * ```
+   */
+  text() {
+    return this.#cachedBody("text");
+  }
+  /**
+   * `.arrayBuffer()` parse Request body as an `ArrayBuffer`
+   *
+   * @see {@link https://hono.dev/docs/api/request#arraybuffer}
+   *
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.arrayBuffer()
+   * })
+   * ```
+   */
+  arrayBuffer() {
+    return this.#cachedBody("arrayBuffer");
+  }
+  /**
+   * `.bytes()` parses the request body as a `Uint8Array`.
+   *
+   * @see {@link https://hono.dev/docs/api/request#bytes}
+   *
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.bytes()
+   * })
+   * ```
+   */
+  bytes() {
+    return this.#cachedBody("arrayBuffer").then((buffer) => new Uint8Array(buffer));
+  }
+  /**
+   * Parses the request body as a `Blob`.
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.blob();
+   * });
+   * ```
+   * @see https://hono.dev/docs/api/request#blob
+   */
+  blob() {
+    return this.#cachedBody("blob");
+  }
+  /**
+   * Parses the request body as `FormData`.
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.formData();
+   * });
+   * ```
+   * @see https://hono.dev/docs/api/request#formdata
+   */
+  formData() {
+    return this.#cachedBody("formData");
+  }
+  /**
+   * Adds validated data to the request.
+   *
+   * @param target - The target of the validation.
+   * @param data - The validated data to add.
+   */
+  addValidatedData(target, data) {
+    ;
+    (this.#validatedData ??= {})[target] = data;
+  }
+  valid(target) {
+    return this.#validatedData?.[target];
+  }
+  /**
+   * `.url()` can get the request url strings.
+   *
+   * @see {@link https://hono.dev/docs/api/request#url}
+   *
+   * @example
+   * ```ts
+   * app.get('/about/me', (c) => {
+   *   const url = c.req.url // `http://localhost:8787/about/me`
+   *   ...
+   * })
+   * ```
+   */
+  get url() {
+    return this.raw.url;
+  }
+  /**
+   * `.method()` can get the method name of the request.
+   *
+   * @see {@link https://hono.dev/docs/api/request#method}
+   *
+   * @example
+   * ```ts
+   * app.get('/about/me', (c) => {
+   *   const method = c.req.method // `GET`
+   * })
+   * ```
+   */
+  get method() {
+    return this.raw.method;
+  }
+  get [GET_MATCH_RESULT]() {
+    return this.#matchResult;
+  }
+  /**
+   * `.matchedRoutes()` can return a matched route in the handler
+   *
+   * @deprecated
+   *
+   * Use matchedRoutes helper defined in "hono/route" instead.
+   *
+   * @see {@link https://hono.dev/docs/api/request#matchedroutes}
+   *
+   * @example
+   * ```ts
+   * app.use('*', async function logger(c, next) {
+   *   await next()
+   *   c.req.matchedRoutes.forEach(({ handler, method, path }, i) => {
+   *     const name = handler.name || (handler.length < 2 ? '[handler]' : '[middleware]')
+   *     console.log(
+   *       method,
+   *       ' ',
+   *       path,
+   *       ' '.repeat(Math.max(10 - path.length, 0)),
+   *       name,
+   *       i === c.req.routeIndex ? '<- respond from here' : ''
+   *     )
+   *   })
+   * })
+   * ```
+   */
+  get matchedRoutes() {
+    return this.#matchResult[0].map(([[, route]]) => route);
+  }
+  /**
+   * `routePath()` can retrieve the path registered within the handler
+   *
+   * @deprecated
+   *
+   * Use routePath helper defined in "hono/route" instead.
+   *
+   * @see {@link https://hono.dev/docs/api/request#routepath}
+   *
+   * @example
+   * ```ts
+   * app.get('/posts/:id', (c) => {
+   *   return c.json({ path: c.req.routePath })
+   * })
+   * ```
+   */
+  get routePath() {
+    return this.#matchResult[0].map(([[, route]]) => route)[this.routeIndex].path;
+  }
+};
+
+// node_modules/hono/dist/utils/html.js
+var HtmlEscapedCallbackPhase = {
+  Stringify: 1,
+  BeforeStream: 2,
+  Stream: 3
+};
+var raw = (value, callbacks) => {
+  const escapedString = new String(value);
+  escapedString.isEscaped = true;
+  escapedString.callbacks = callbacks;
+  return escapedString;
+};
+var resolveCallback = async (str, phase, preserveCallbacks, context, buffer) => {
+  if (typeof str === "object" && !(str instanceof String)) {
+    if (!(str instanceof Promise)) {
+      str = str.toString();
+    }
+    if (str instanceof Promise) {
+      str = await str;
+    }
+  }
+  const callbacks = str.callbacks;
+  if (!callbacks?.length) {
+    return Promise.resolve(str);
+  }
+  if (buffer) {
+    buffer[0] += str;
+  } else {
+    buffer = [str];
+  }
+  const resStr = Promise.all(callbacks.map((c) => c({ phase, buffer, context }))).then(
+    (res) => Promise.all(
+      res.filter(Boolean).map((str2) => resolveCallback(str2, phase, false, context, buffer))
+    ).then(() => buffer[0])
+  );
+  if (preserveCallbacks) {
+    return raw(await resStr, callbacks);
+  } else {
+    return resStr;
+  }
+};
+
+// node_modules/hono/dist/context.js
+var TEXT_PLAIN = "text/plain; charset=UTF-8";
+var setDefaultContentType = (contentType, headers) => {
+  return {
+    "Content-Type": contentType,
+    ...headers
+  };
+};
+var createResponseInstance = (body, init) => new Response(body, init);
+var Context = class {
+  #rawRequest;
+  #req;
+  /**
+   * `.env` can get bindings (environment variables, secrets, KV namespaces, D1 database, R2 bucket etc.) in Cloudflare Workers.
+   *
+   * @see {@link https://hono.dev/docs/api/context#env}
+   *
+   * @example
+   * ```ts
+   * // Environment object for Cloudflare Workers
+   * app.get('*', async c => {
+   *   const counter = c.env.COUNTER
+   * })
+   * ```
+   */
+  env = {};
+  #var;
+  finalized = false;
+  /**
+   * `.error` can get the error object from the middleware if the Handler throws an error.
+   *
+   * @see {@link https://hono.dev/docs/api/context#error}
+   *
+   * @example
+   * ```ts
+   * app.use('*', async (c, next) => {
+   *   await next()
+   *   if (c.error) {
+   *     // do something...
+   *   }
+   * })
+   * ```
+   */
+  error;
+  #status;
+  #executionCtx;
+  #res;
+  #layout;
+  #renderer;
+  #notFoundHandler;
+  #preparedHeaders;
+  #matchResult;
+  #path;
+  /**
+   * Creates an instance of the Context class.
+   *
+   * @param req - The Request object.
+   * @param options - Optional configuration options for the context.
+   */
+  constructor(req, options) {
+    this.#rawRequest = req;
+    if (options) {
+      this.#executionCtx = options.executionCtx;
+      this.env = options.env;
+      this.#notFoundHandler = options.notFoundHandler;
+      this.#path = options.path;
+      this.#matchResult = options.matchResult;
+    }
+  }
+  /**
+   * `.req` is the instance of {@link HonoRequest}.
+   */
+  get req() {
+    this.#req ??= new HonoRequest(this.#rawRequest, this.#path, this.#matchResult);
+    return this.#req;
+  }
+  /**
+   * @see {@link https://hono.dev/docs/api/context#event}
+   * The FetchEvent associated with the current request.
+   *
+   * @throws Will throw an error if the context does not have a FetchEvent.
+   */
+  get event() {
+    if (this.#executionCtx && "respondWith" in this.#executionCtx) {
+      return this.#executionCtx;
+    } else {
+      throw Error("This context has no FetchEvent");
+    }
+  }
+  /**
+   * @see {@link https://hono.dev/docs/api/context#executionctx}
+   * The ExecutionContext associated with the current request.
+   *
+   * @throws Will throw an error if the context does not have an ExecutionContext.
+   */
+  get executionCtx() {
+    if (this.#executionCtx) {
+      return this.#executionCtx;
+    } else {
+      throw Error("This context has no ExecutionContext");
+    }
+  }
+  /**
+   * @see {@link https://hono.dev/docs/api/context#res}
+   * The Response object for the current request.
+   */
+  get res() {
+    return this.#res ||= createResponseInstance(null, {
+      headers: this.#preparedHeaders ??= new Headers()
+    });
+  }
+  /**
+   * Sets the Response object for the current request.
+   *
+   * @param _res - The Response object to set.
+   */
+  set res(_res) {
+    if (this.#res && _res) {
+      _res = createResponseInstance(_res.body, _res);
+      for (const [k, v] of this.#res.headers.entries()) {
+        if (k === "content-type") {
+          continue;
+        }
+        if (k === "set-cookie") {
+          const cookies = this.#res.headers.getSetCookie();
+          _res.headers.delete("set-cookie");
+          for (const cookie of cookies) {
+            _res.headers.append("set-cookie", cookie);
+          }
+        } else {
+          _res.headers.set(k, v);
+        }
+      }
+    }
+    this.#res = _res;
+    this.finalized = true;
+  }
+  /**
+   * `.render()` can create a response within a layout.
+   *
+   * @see {@link https://hono.dev/docs/api/context#render-setrenderer}
+   *
+   * @example
+   * ```ts
+   * app.get('/', (c) => {
+   *   return c.render('Hello!')
+   * })
+   * ```
+   */
+  render = (...args) => {
+    this.#renderer ??= (content) => this.html(content);
+    return this.#renderer(...args);
+  };
+  /**
+   * Sets the layout for the response.
+   *
+   * @param layout - The layout to set.
+   * @returns The layout function.
+   */
+  setLayout = (layout) => this.#layout = layout;
+  /**
+   * Gets the current layout for the response.
+   *
+   * @returns The current layout function.
+   */
+  getLayout = () => this.#layout;
+  /**
+   * `.setRenderer()` can set the layout in the custom middleware.
+   *
+   * @see {@link https://hono.dev/docs/api/context#render-setrenderer}
+   *
+   * @example
+   * ```tsx
+   * app.use('*', async (c, next) => {
+   *   c.setRenderer((content) => {
+   *     return c.html(
+   *       <html>
+   *         <body>
+   *           <p>{content}</p>
+   *         </body>
+   *       </html>
+   *     )
+   *   })
+   *   await next()
+   * })
+   * ```
+   */
+  setRenderer = (renderer) => {
+    this.#renderer = renderer;
+  };
+  /**
+   * `.header()` can set headers.
+   *
+   * @see {@link https://hono.dev/docs/api/context#header}
+   *
+   * @example
+   * ```ts
+   * app.get('/welcome', (c) => {
+   *   // Set headers
+   *   c.header('X-Message', 'Hello!')
+   *   c.header('Content-Type', 'text/plain')
+   *
+   *   // Append multiple headers using the append option (e.g. Vary)
+   *   c.header('Vary', 'Accept-Encoding', { append: true })
+   *   c.header('Vary', 'User-Agent', { append: true })
+   *
+   *   return c.body('Thank you for coming')
+   * })
+   * ```
+   */
+  header = (name, value, options) => {
+    if (this.finalized) {
+      this.#res = createResponseInstance(this.#res.body, this.#res);
+    }
+    const headers = this.#res ? this.#res.headers : this.#preparedHeaders ??= new Headers();
+    if (value === void 0) {
+      headers.delete(name);
+    } else if (options?.append) {
+      headers.append(name, value);
+    } else {
+      headers.set(name, value);
+    }
+  };
+  status = (status) => {
+    this.#status = status;
+  };
+  /**
+   * `.set()` can set the value specified by the key.
+   *
+   * @see {@link https://hono.dev/docs/api/context#set-get}
+   *
+   * @example
+   * ```ts
+   * app.use('*', async (c, next) => {
+   *   c.set('message', 'Hono is hot!!')
+   *   await next()
+   * })
+   * ```
+   */
+  set = (key2, value) => {
+    this.#var ??= /* @__PURE__ */ new Map();
+    this.#var.set(key2, value);
+  };
+  /**
+   * `.get()` can use the value specified by the key.
+   *
+   * @see {@link https://hono.dev/docs/api/context#set-get}
+   *
+   * @example
+   * ```ts
+   * app.get('/', (c) => {
+   *   const message = c.get('message')
+   *   return c.text(`The message is "${message}"`)
+   * })
+   * ```
+   */
+  get = (key2) => {
+    return this.#var ? this.#var.get(key2) : void 0;
+  };
+  /**
+   * `.var` can access the value of a variable.
+   *
+   * @see {@link https://hono.dev/docs/api/context#var}
+   *
+   * @example
+   * ```ts
+   * const result = c.var.client.oneMethod()
+   * ```
+   */
+  // c.var.propName is a read-only
+  get var() {
+    if (!this.#var) {
+      return {};
+    }
+    return Object.fromEntries(this.#var);
+  }
+  #newResponse(data, arg, headers) {
+    let responseHeaders = this.#res ? new Headers(this.#res.headers) : this.#preparedHeaders;
+    if (typeof arg === "object" && arg.headers) {
+      responseHeaders ??= new Headers();
+      for (const [key2, value] of new Headers(arg.headers)) {
+        if (key2 === "set-cookie") {
+          responseHeaders.append(key2, value);
+        } else {
+          responseHeaders.set(key2, value);
+        }
+      }
+    }
+    if (headers) {
+      if (!responseHeaders) {
+        let count = 0;
+        for (const k in headers) {
+          if (++count > 1 || typeof headers[k] !== "string") {
+            responseHeaders = new Headers();
+            break;
+          }
+        }
+      }
+      if (responseHeaders) {
+        for (const k in headers) {
+          const v = headers[k];
+          if (typeof v === "string") {
+            responseHeaders.set(k, v);
+          } else {
+            responseHeaders.delete(k);
+            for (const v2 of v) {
+              responseHeaders.append(k, v2);
+            }
+          }
+        }
+      }
+    }
+    const status = typeof arg === "number" ? arg : arg?.status ?? this.#status;
+    return createResponseInstance(data, {
+      status,
+      headers: responseHeaders ?? headers
+    });
+  }
+  newResponse = (...args) => this.#newResponse(...args);
+  /**
+   * `.body()` can return the HTTP response.
+   * You can set headers with `.header()` and set HTTP status code with `.status`.
+   * This can also be set in `.text()`, `.json()` and so on.
+   *
+   * @see {@link https://hono.dev/docs/api/context#body}
+   *
+   * @example
+   * ```ts
+   * app.get('/welcome', (c) => {
+   *   // Set headers
+   *   c.header('X-Message', 'Hello!')
+   *   c.header('Content-Type', 'text/plain')
+   *   // Set HTTP status code
+   *   c.status(201)
+   *
+   *   // Return the response body
+   *   return c.body('Thank you for coming')
+   * })
+   * ```
+   */
+  body = (data, arg, headers) => this.#newResponse(data, arg, headers);
+  /**
+   * `.text()` can render text as `Content-Type:text/plain`.
+   *
+   * @see {@link https://hono.dev/docs/api/context#text}
+   *
+   * @example
+   * ```ts
+   * app.get('/say', (c) => {
+   *   return c.text('Hello!')
+   * })
+   * ```
+   */
+  text = (text, arg, headers) => {
+    return !this.#preparedHeaders && !this.#status && !arg && !headers && !this.finalized ? new Response(text) : this.#newResponse(
+      text,
+      arg,
+      setDefaultContentType(TEXT_PLAIN, headers)
+    );
+  };
+  /**
+   * `.json()` can render JSON as `Content-Type:application/json`.
+   *
+   * @see {@link https://hono.dev/docs/api/context#json}
+   *
+   * @example
+   * ```ts
+   * app.get('/api', (c) => {
+   *   return c.json({ message: 'Hello!' })
+   * })
+   * ```
+   */
+  json = (object, arg, headers) => {
+    return this.#newResponse(
+      JSON.stringify(object),
+      arg,
+      setDefaultContentType("application/json", headers)
+    );
+  };
+  html = (html, arg, headers) => {
+    const res = (html2) => this.#newResponse(html2, arg, setDefaultContentType("text/html; charset=UTF-8", headers));
+    return typeof html === "object" ? resolveCallback(html, HtmlEscapedCallbackPhase.Stringify, false, {}).then(res) : res(html);
+  };
+  /**
+   * `.redirect()` can Redirect, default status code is 302.
+   *
+   * @see {@link https://hono.dev/docs/api/context#redirect}
+   *
+   * @example
+   * ```ts
+   * app.get('/redirect', (c) => {
+   *   return c.redirect('/')
+   * })
+   * app.get('/redirect-permanently', (c) => {
+   *   return c.redirect('/', 301)
+   * })
+   * ```
+   */
+  redirect = (location, status) => {
+    const locationString = String(location);
+    this.header(
+      "Location",
+      // Multibyes should be encoded
+      // eslint-disable-next-line no-control-regex
+      !/[^\x00-\xFF]/.test(locationString) ? locationString : encodeURI(locationString)
+    );
+    return this.newResponse(null, status ?? 302);
+  };
+  /**
+   * `.notFound()` can return the Not Found Response.
+   *
+   * @see {@link https://hono.dev/docs/api/context#notfound}
+   *
+   * @example
+   * ```ts
+   * app.get('/notfound', (c) => {
+   *   return c.notFound()
+   * })
+   * ```
+   */
+  notFound = () => {
+    this.#notFoundHandler ??= () => createResponseInstance();
+    return this.#notFoundHandler(this);
+  };
+};
+
+// node_modules/hono/dist/router.js
+var METHOD_NAME_ALL = "ALL";
+var METHOD_NAME_ALL_LOWERCASE = "all";
+var METHODS = ["get", "post", "put", "delete", "options", "patch", "query"];
+var MESSAGE_MATCHER_IS_ALREADY_BUILT = "Can not add a route since the matcher is already built.";
+var UnsupportedPathError = class extends Error {
+};
+
+// node_modules/hono/dist/utils/constants.js
+var COMPOSED_HANDLER = "__COMPOSED_HANDLER";
+
+// node_modules/hono/dist/hono-base.js
+var notFoundHandler = (c) => {
+  return c.text("404 Not Found", 404);
+};
+var errorHandler = (err, c) => {
+  if ("getResponse" in err) {
+    const res = err.getResponse();
+    return c.newResponse(res.body, res);
+  }
+  console.error(err);
+  return c.text("Internal Server Error", 500);
+};
+var Hono = class _Hono {
+  get;
+  post;
+  put;
+  delete;
+  options;
+  patch;
+  query;
+  all;
+  on;
+  use;
+  /*
+    This class is like an abstract class and does not have a router.
+    To use it, inherit the class and implement router in the constructor.
+  */
+  router;
+  getPath;
+  // Cannot use `#` because it requires visibility at JavaScript runtime.
+  _basePath = "/";
+  #path = "/";
+  routes = [];
+  constructor(options = {}) {
+    const allMethods = [...METHODS, METHOD_NAME_ALL_LOWERCASE];
+    allMethods.forEach((method) => {
+      this[method] = (args1, ...args) => {
+        if (typeof args1 === "string") {
+          this.#path = args1;
+        } else {
+          this.#addRoute(method, this.#path, args1);
+        }
+        args.forEach((handler) => {
+          this.#addRoute(method, this.#path, handler);
+        });
+        return this;
+      };
+    });
+    this.on = (method, path, ...handlers) => {
+      for (const p of [path].flat()) {
+        this.#path = p;
+        for (const m of [method].flat()) {
+          handlers.map((handler) => {
+            this.#addRoute(m.toUpperCase(), this.#path, handler);
+          });
+        }
+      }
+      return this;
+    };
+    this.use = (arg1, ...handlers) => {
+      if (typeof arg1 === "string") {
+        this.#path = arg1;
+      } else {
+        this.#path = "*";
+        handlers.unshift(arg1);
+      }
+      handlers.forEach((handler) => {
+        this.#addRoute(METHOD_NAME_ALL, this.#path, handler);
+      });
+      return this;
+    };
+    const { strict, ...optionsWithoutStrict } = options;
+    Object.assign(this, optionsWithoutStrict);
+    this.getPath = strict ?? true ? options.getPath ?? getPath : getPathNoStrict;
+  }
+  #clone() {
+    const clone = new _Hono({
+      router: this.router,
+      getPath: this.getPath
+    });
+    clone.errorHandler = this.errorHandler;
+    clone.#notFoundHandler = this.#notFoundHandler;
+    clone.routes = this.routes;
+    return clone;
+  }
+  #notFoundHandler = notFoundHandler;
+  // Cannot use `#` because it requires visibility at JavaScript runtime.
+  errorHandler = errorHandler;
+  /**
+   * `.route()` allows grouping other Hono instance in routes.
+   *
+   * @see {@link https://hono.dev/docs/api/routing#grouping}
+   *
+   * @param {string} path - base Path
+   * @param {Hono} app - other Hono instance
+   * @returns {Hono} routed Hono instance
+   *
+   * @example
+   * ```ts
+   * const app = new Hono()
+   * const app2 = new Hono()
+   *
+   * app2.get("/user", (c) => c.text("user"))
+   * app.route("/api", app2) // GET /api/user
+   * ```
+   */
+  route(path, app2) {
+    const subApp = this.basePath(path);
+    app2.routes.map((r) => {
+      let handler;
+      if (app2.errorHandler === errorHandler) {
+        handler = r.handler;
+      } else {
+        handler = async (c, next) => (await compose([], app2.errorHandler)(c, () => r.handler(c, next))).res;
+        handler[COMPOSED_HANDLER] = r.handler;
+      }
+      subApp.#addRoute(r.method, r.path, handler, r.basePath);
+    });
+    return this;
+  }
+  /**
+   * `.basePath()` allows base paths to be specified.
+   *
+   * @see {@link https://hono.dev/docs/api/routing#base-path}
+   *
+   * @param {string} path - base Path
+   * @returns {Hono} changed Hono instance
+   *
+   * @example
+   * ```ts
+   * const api = new Hono().basePath('/api')
+   * ```
+   */
+  basePath(path) {
+    const subApp = this.#clone();
+    subApp._basePath = mergePath(this._basePath, path);
+    return subApp;
+  }
+  /**
+   * `.onError()` handles an error and returns a customized Response.
+   *
+   * @see {@link https://hono.dev/docs/api/hono#error-handling}
+   *
+   * @param {ErrorHandler} handler - request Handler for error
+   * @returns {Hono} changed Hono instance
+   *
+   * @example
+   * ```ts
+   * app.onError((err, c) => {
+   *   console.error(`${err}`)
+   *   return c.text('Custom Error Message', 500)
+   * })
+   * ```
+   */
+  onError = (handler) => {
+    this.errorHandler = handler;
+    return this;
+  };
+  /**
+   * `.notFound()` allows you to customize a Not Found Response.
+   *
+   * @see {@link https://hono.dev/docs/api/hono#not-found}
+   *
+   * @param {NotFoundHandler} handler - request handler for not-found
+   * @returns {Hono} changed Hono instance
+   *
+   * @example
+   * ```ts
+   * app.notFound((c) => {
+   *   return c.text('Custom 404 Message', 404)
+   * })
+   * ```
+   */
+  notFound = (handler) => {
+    this.#notFoundHandler = handler;
+    return this;
+  };
+  /**
+   * `.mount()` allows you to mount applications built with other frameworks into your Hono application.
+   *
+   * @see {@link https://hono.dev/docs/api/hono#mount}
+   *
+   * @param {string} path - base Path
+   * @param {Function} applicationHandler - other Request Handler
+   * @param {MountOptions} [options] - options of `.mount()`
+   * @returns {Hono} mounted Hono instance
+   *
+   * @example
+   * ```ts
+   * import { Router as IttyRouter } from 'itty-router'
+   * import { Hono } from 'hono'
+   * // Create itty-router application
+   * const ittyRouter = IttyRouter()
+   * // GET /itty-router/hello
+   * ittyRouter.get('/hello', () => new Response('Hello from itty-router'))
+   *
+   * const app = new Hono()
+   * app.mount('/itty-router', ittyRouter.handle)
+   * ```
+   *
+   * @example
+   * ```ts
+   * const app = new Hono()
+   * // Send the request to another application without modification.
+   * app.mount('/app', anotherApp, {
+   *   replaceRequest: (req) => req,
+   * })
+   * ```
+   */
+  mount(path, applicationHandler, options) {
+    let replaceRequest;
+    let optionHandler;
+    if (options) {
+      if (typeof options === "function") {
+        optionHandler = options;
+      } else {
+        optionHandler = options.optionHandler;
+        if (options.replaceRequest === false) {
+          replaceRequest = (request) => request;
+        } else {
+          replaceRequest = options.replaceRequest;
+        }
+      }
+    }
+    const getOptions = optionHandler ? (c) => {
+      const options2 = optionHandler(c);
+      return Array.isArray(options2) ? options2 : [options2];
+    } : (c) => {
+      let executionContext = void 0;
+      try {
+        executionContext = c.executionCtx;
+      } catch {
+      }
+      return [c.env, executionContext];
+    };
+    replaceRequest ||= (() => {
+      const mergedPath = mergePath(this._basePath, path);
+      const pathPrefixLength = mergedPath === "/" ? 0 : mergedPath.length;
+      return (request) => {
+        const url = new URL(request.url);
+        url.pathname = this.getPath(request).slice(pathPrefixLength) || "/";
+        return new Request(url, request);
+      };
+    })();
+    const handler = async (c, next) => {
+      const res = await applicationHandler(replaceRequest(c.req.raw), ...getOptions(c));
+      if (res) {
+        return res;
+      }
+      await next();
+    };
+    this.#addRoute(METHOD_NAME_ALL, mergePath(path, "*"), handler);
+    return this;
+  }
+  #addRoute(method, path, handler, baseRoutePath) {
+    method = method.toUpperCase();
+    path = mergePath(this._basePath, path);
+    const r = {
+      basePath: baseRoutePath !== void 0 ? mergePath(this._basePath, baseRoutePath) : this._basePath,
+      path,
+      method,
+      handler
+    };
+    this.router.add(method, path, [handler, r]);
+    this.routes.push(r);
+  }
+  #handleError(err, c) {
+    if (err instanceof Error) {
+      return this.errorHandler(err, c);
+    }
+    throw err;
+  }
+  #dispatch(request, executionCtx, env, method) {
+    if (method === "HEAD") {
+      return (async () => new Response(null, await this.#dispatch(request, executionCtx, env, "GET")))();
+    }
+    const path = this.getPath(request, { env });
+    const matchResult = this.router.match(method, path);
+    const c = new Context(request, {
+      path,
+      matchResult,
+      env,
+      executionCtx,
+      notFoundHandler: this.#notFoundHandler
+    });
+    if (matchResult[0].length === 1) {
+      let res;
+      try {
+        res = matchResult[0][0][0][0](c, async () => {
+          c.res = await this.#notFoundHandler(c);
+        });
+      } catch (err) {
+        return this.#handleError(err, c);
+      }
+      return res instanceof Promise ? res.then(
+        (resolved) => resolved || (c.finalized ? c.res : this.#notFoundHandler(c))
+      ).catch((err) => this.#handleError(err, c)) : res ?? this.#notFoundHandler(c);
+    }
+    const composed = compose(matchResult[0], this.errorHandler, this.#notFoundHandler);
+    return (async () => {
+      try {
+        const context = await composed(c);
+        if (!context.finalized) {
+          throw new Error(
+            "Context is not finalized. Did you forget to return a Response object or `await next()`?"
+          );
+        }
+        return context.res;
+      } catch (err) {
+        return this.#handleError(err, c);
+      }
+    })();
+  }
+  /**
+   * `.fetch()` will be entry point of your app.
+   *
+   * @see {@link https://hono.dev/docs/api/hono#fetch}
+   *
+   * @param {Request} request - request Object of request
+   * @param {Env} env - env Object
+   * @param {ExecutionContext} executionCtx - context of execution
+   * @returns {Response | Promise<Response>} response of request
+   *
+   */
+  fetch = (request, ...rest) => {
+    return this.#dispatch(request, rest[1], rest[0], request.method);
+  };
+  /**
+   * `.request()` is a useful method for testing.
+   * You can pass a URL or pathname to send a GET request.
+   * app will return a Response object.
+   * ```ts
+   * test('GET /hello is ok', async () => {
+   *   const res = await app.request('/hello')
+   *   expect(res.status).toBe(200)
+   * })
+   * ```
+   * @see https://hono.dev/docs/api/hono#request
+   */
+  request = (input, requestInit, Env, executionCtx) => {
+    if (input instanceof Request) {
+      return this.fetch(requestInit ? new Request(input, requestInit) : input, Env, executionCtx);
+    }
+    input = input.toString();
+    return this.fetch(
+      new Request(
+        /^https?:\/\//.test(input) ? input : `http://localhost${mergePath("/", input)}`,
+        requestInit
+      ),
+      Env,
+      executionCtx
+    );
+  };
+  /**
+   * `.fire()` automatically adds a global fetch event listener.
+   * This can be useful for environments that adhere to the Service Worker API, such as non-ES module Cloudflare Workers.
+   * @deprecated
+   * Use `fire` from `hono/service-worker` instead.
+   * ```ts
+   * import { Hono } from 'hono'
+   * import { fire } from 'hono/service-worker'
+   *
+   * const app = new Hono()
+   * // ...
+   * fire(app)
+   * ```
+   * @see https://hono.dev/docs/api/hono#fire
+   * @see https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API
+   * @see https://developers.cloudflare.com/workers/reference/migrate-to-module-workers/
+   */
+  fire = () => {
+    addEventListener("fetch", (event) => {
+      event.respondWith(this.#dispatch(event.request, event, void 0, event.request.method));
+    });
+  };
+};
+
+// node_modules/hono/dist/router/reg-exp-router/matcher.js
+var emptyParam = [];
+function match(method, path) {
+  const matchers = this.buildAllMatchers();
+  const match2 = ((method2, path2) => {
+    const matcher = matchers[method2] || matchers[METHOD_NAME_ALL];
+    const staticMatch = matcher[2][path2];
+    if (staticMatch) {
+      return staticMatch;
+    }
+    const match3 = path2.match(matcher[0]);
+    if (!match3) {
+      return [[], emptyParam];
+    }
+    const index = match3.indexOf("", 1);
+    return [matcher[1][index], match3];
+  });
+  this.match = match2;
+  return match2(method, path);
+}
+
+// node_modules/hono/dist/router/reg-exp-router/node.js
+var LABEL_REG_EXP_STR = "[^/]+";
+var ONLY_WILDCARD_REG_EXP_STR = ".*";
+var TAIL_WILDCARD_REG_EXP_STR = "(?:|/.*)";
+var PATH_ERROR = /* @__PURE__ */ Symbol();
+var regExpMetaChars = new Set(".\\+*[^]$()");
+function compareKey(a, b) {
+  if (a.length === 1) {
+    return b.length === 1 ? a < b ? -1 : 1 : -1;
+  }
+  if (b.length === 1) {
+    return 1;
+  }
+  if (a === ONLY_WILDCARD_REG_EXP_STR || a === TAIL_WILDCARD_REG_EXP_STR) {
+    return b === TAIL_WILDCARD_REG_EXP_STR ? -1 : 1;
+  } else if (b === ONLY_WILDCARD_REG_EXP_STR || b === TAIL_WILDCARD_REG_EXP_STR) {
+    return -1;
+  }
+  if (a === LABEL_REG_EXP_STR) {
+    return 1;
+  } else if (b === LABEL_REG_EXP_STR) {
+    return -1;
+  }
+  return a.length === b.length ? a < b ? -1 : 1 : b.length - a.length;
+}
+var Node = class _Node {
+  // handler index of a dynamic path, or -1 for a static path terminal
+  #index;
+  #varIndex;
+  #children = /* @__PURE__ */ Object.create(null);
+  insert(tokens, index, paramMap, context, isStatic) {
+    let node = this;
+    for (let i = 0, len = tokens.length; i < len; i++) {
+      const token = tokens[i];
+      const pattern = token.length === 1 ? token === "*" ? i === len - 1 ? ["", "", ONLY_WILDCARD_REG_EXP_STR] : ["", "", LABEL_REG_EXP_STR] : null : token === "/*" ? ["", "", TAIL_WILDCARD_REG_EXP_STR] : token.match(/^\:([^\{\}]+)(?:\{(.+)\})?$/);
+      let nextNode;
+      if (pattern) {
+        const name = pattern[1];
+        let regexpStr = pattern[2] || LABEL_REG_EXP_STR;
+        if (name && pattern[2]) {
+          if (regexpStr === ".*") {
+            throw PATH_ERROR;
+          }
+          regexpStr = regexpStr.replace(/^\((?!\?:)(?=[^)]+\)$)/, "(?:");
+          if (/\((?!\?:)/.test(regexpStr)) {
+            throw PATH_ERROR;
+          }
+          if (regexpStr.length === 1 && regExpMetaChars.has(regexpStr)) {
+            throw PATH_ERROR;
+          }
+        }
+        nextNode = node.#children[regexpStr];
+        if (!nextNode) {
+          if (regexpStr !== ONLY_WILDCARD_REG_EXP_STR && regexpStr !== TAIL_WILDCARD_REG_EXP_STR) {
+            for (const k in node.#children) {
+              if (
+                // a single-char pattern coexists with single-char literals as a literal does
+                (regexpStr.length > 1 || k.length > 1) && k !== ONLY_WILDCARD_REG_EXP_STR && k !== TAIL_WILDCARD_REG_EXP_STR
+              ) {
+                throw PATH_ERROR;
+              }
+            }
+          }
+          nextNode = node.#children[regexpStr] = new _Node();
+        }
+        if (name !== "") {
+          nextNode.#varIndex ??= context.varIndex++;
+          paramMap.push([name, nextNode.#varIndex]);
+        }
+      } else {
+        nextNode = node.#children[token];
+        if (!nextNode) {
+          for (const k in node.#children) {
+            if (k.length > 1 && k !== ONLY_WILDCARD_REG_EXP_STR && k !== TAIL_WILDCARD_REG_EXP_STR) {
+              throw PATH_ERROR;
+            }
+          }
+          nextNode = node.#children[token] = new _Node();
+        }
+      }
+      node = nextNode;
+    }
+    if (node.#index !== void 0) {
+      throw PATH_ERROR;
+    }
+    node.#index = isStatic ? -1 : index;
+  }
+  buildRegExpStr() {
+    const childKeys = Object.keys(this.#children).sort(compareKey);
+    const strList = childKeys.map((k) => {
+      const c = this.#children[k];
+      const childStr = c.buildRegExpStr();
+      return childStr === "" ? "" : (typeof c.#varIndex === "number" ? `(${k})@${c.#varIndex}` : regExpMetaChars.has(k) ? `\\${k}` : k) + childStr;
+    }).filter(Boolean);
+    if (typeof this.#index === "number" && this.#index !== -1) {
+      strList.unshift(`#${this.#index}`);
+    }
+    if (strList.length === 0) {
+      return "";
+    }
+    if (strList.length === 1) {
+      return strList[0];
+    }
+    return "(?:" + strList.join("|") + ")";
+  }
+};
+
+// node_modules/hono/dist/router/reg-exp-router/trie.js
+var Trie = class {
+  #context = { varIndex: 0 };
+  #root = new Node();
+  #index = 0;
+  // dynamic path -> [handler index, param assoc]; static paths are not registered
+  paths = /* @__PURE__ */ Object.create(null);
+  insert(path, isStatic) {
+    if (isStatic) {
+      this.#root.insert(path.split(""), 0, [], this.#context, true);
+      return;
+    }
+    const paramAssoc = [];
+    const groups = [];
+    let markedPath = path;
+    for (let i = 0; ; ) {
+      let replaced = false;
+      markedPath = markedPath.replace(/\{[^}]+\}/g, (m) => {
+        const mark = `@\\${i}`;
+        groups[i] = [mark, m];
+        i++;
+        replaced = true;
+        return mark;
+      });
+      if (!replaced) {
+        break;
+      }
+    }
+    const tokens = markedPath.match(/(?::[^\/]+)|(?:\/\*$)|./g) || [];
+    for (let i = groups.length - 1; i >= 0; i--) {
+      const [mark] = groups[i];
+      for (let j = tokens.length - 1; j >= 0; j--) {
+        if (tokens[j].indexOf(mark) !== -1) {
+          tokens[j] = tokens[j].replace(mark, groups[i][1]);
+          break;
+        }
+      }
+    }
+    this.#root.insert(tokens, this.#index, paramAssoc, this.#context, false);
+    this.paths[path] = [this.#index++, paramAssoc];
+  }
+  buildRegExp() {
+    let regexp = this.#root.buildRegExpStr();
+    if (regexp === "") {
+      return [/^$/, [], []];
+    }
+    let captureIndex = 0;
+    const indexReplacementMap = [];
+    const paramReplacementMap = [];
+    regexp = regexp.replace(/#(\d+)|@(\d+)|\.\*\$/g, (_, handlerIndex, paramIndex) => {
+      if (handlerIndex !== void 0) {
+        indexReplacementMap[++captureIndex] = Number(handlerIndex);
+        return "$()";
+      }
+      if (paramIndex !== void 0) {
+        paramReplacementMap[Number(paramIndex)] = ++captureIndex;
+        return "";
+      }
+      return "";
+    });
+    return [new RegExp(`^${regexp}`), indexReplacementMap, paramReplacementMap];
+  }
+};
+
+// node_modules/hono/dist/router/reg-exp-router/router.js
+var wildcardRegExpCache = /* @__PURE__ */ Object.create(null);
+function buildWildcardRegExp(path) {
+  return wildcardRegExpCache[path] ??= new RegExp(
+    path === "*" ? "" : `^${path.replace(
+      /\/\*$|([.\\+*[^\]$()])/g,
+      (_, metaChar) => metaChar ? `\\${metaChar}` : "(?:|/.*)"
+    )}$`
+  );
+}
+function clearWildcardRegExpCache() {
+  wildcardRegExpCache = /* @__PURE__ */ Object.create(null);
+}
+function findMiddleware(middleware, path) {
+  if (!middleware) {
+    return void 0;
+  }
+  for (const k of Object.keys(middleware).sort((a, b) => b.length - a.length)) {
+    if (buildWildcardRegExp(k).test(path)) {
+      return [...middleware[k]];
+    }
+  }
+  return void 0;
+}
+var RegExpRouter = class {
+  name = "RegExpRouter";
+  #middleware;
+  #routes;
+  #tries;
+  constructor() {
+    this.#middleware = { [METHOD_NAME_ALL]: /* @__PURE__ */ Object.create(null) };
+    this.#routes = { [METHOD_NAME_ALL]: /* @__PURE__ */ Object.create(null) };
+    this.#tries = { [METHOD_NAME_ALL]: new Trie() };
+  }
+  #insertPath(method, path) {
+    try {
+      this.#tries[method].insert(path, !/\*|\/:/.test(path));
+    } catch (e) {
+      throw e === PATH_ERROR ? new UnsupportedPathError(path) : e;
+    }
+  }
+  add(method, path, handler) {
+    const middleware = this.#middleware;
+    const routes = this.#routes;
+    if (!middleware || !routes) {
+      throw new Error(MESSAGE_MATCHER_IS_ALREADY_BUILT);
+    }
+    if (!middleware[method]) {
+      this.#tries[method] = new Trie();
+      [middleware, routes].forEach((handlerMap) => {
+        handlerMap[method] = /* @__PURE__ */ Object.create(null);
+        Object.keys(handlerMap[METHOD_NAME_ALL]).forEach((p) => {
+          handlerMap[method][p] = [...handlerMap[METHOD_NAME_ALL][p]];
+          this.#insertPath(method, p);
+        });
+      });
+    }
+    if (path === "/*") {
+      path = "*";
+    }
+    const paramCount = (path.match(/\/:/g) || []).length;
+    if (/\*$/.test(path)) {
+      const re = buildWildcardRegExp(path);
+      Object.keys(middleware).forEach((m) => {
+        if ((method === METHOD_NAME_ALL || method === m) && !middleware[m][path]) {
+          this.#insertPath(m, path);
+          middleware[m][path] = findMiddleware(middleware[m], path) || findMiddleware(middleware[METHOD_NAME_ALL], path) || [];
+        }
+      });
+      Object.keys(middleware).forEach((m) => {
+        if (method === METHOD_NAME_ALL || method === m) {
+          Object.keys(middleware[m]).forEach((p) => {
+            re.test(p) && middleware[m][p].push([handler, paramCount]);
+          });
+        }
+      });
+      Object.keys(routes).forEach((m) => {
+        if (method === METHOD_NAME_ALL || method === m) {
+          Object.keys(routes[m]).forEach(
+            (p) => re.test(p) && routes[m][p].push([handler, paramCount])
+          );
+        }
+      });
+      return;
+    }
+    const paths = checkOptionalParameter(path) || [path];
+    for (let i = 0, len = paths.length; i < len; i++) {
+      const path2 = paths[i];
+      Object.keys(routes).forEach((m) => {
+        if (method === METHOD_NAME_ALL || method === m) {
+          if (!routes[m][path2]) {
+            this.#insertPath(m, path2);
+            routes[m][path2] = [
+              ...findMiddleware(middleware[m], path2) || findMiddleware(middleware[METHOD_NAME_ALL], path2) || []
+            ];
+          }
+          routes[m][path2].push([handler, paramCount - len + i + 1]);
+        }
+      });
+    }
+  }
+  match = match;
+  buildAllMatchers() {
+    const matchers = /* @__PURE__ */ Object.create(null);
+    Object.keys(this.#routes).concat(Object.keys(this.#middleware)).forEach((method) => {
+      matchers[method] ||= this.#buildMatcher(method);
+    });
+    this.#middleware = this.#routes = this.#tries = void 0;
+    clearWildcardRegExpCache();
+    return matchers;
+  }
+  #buildMatcher(method) {
+    const middleware = this.#middleware[method];
+    const routes = this.#routes[method];
+    const trie = this.#tries[method];
+    const staticMap = /* @__PURE__ */ Object.create(null);
+    const handlerData = [];
+    [middleware, routes].forEach((r) => {
+      for (const path in r) {
+        const handlers = r[path];
+        const pathData = trie.paths[path];
+        if (!pathData) {
+          staticMap[path] = [handlers.map(([h]) => [h, /* @__PURE__ */ Object.create(null)]), emptyParam];
+          continue;
+        }
+        const paramAssoc = pathData[1];
+        handlerData[pathData[0]] = handlers.map(([h, paramCount]) => {
+          const paramIndexMap = /* @__PURE__ */ Object.create(null);
+          paramCount -= 1;
+          for (; paramCount >= 0; paramCount--) {
+            const [key2, value] = paramAssoc[paramCount];
+            paramIndexMap[key2] = value;
+          }
+          return [h, paramIndexMap];
+        });
+      }
+    });
+    const [regexp, indexReplacementMap, paramReplacementMap] = trie.buildRegExp();
+    for (let i = 0, len = handlerData.length; i < len; i++) {
+      for (let j = 0, len2 = handlerData[i].length; j < len2; j++) {
+        const map = handlerData[i][j]?.[1];
+        if (!map) {
+          continue;
+        }
+        const keys = Object.keys(map);
+        for (let k = 0, len3 = keys.length; k < len3; k++) {
+          map[keys[k]] = paramReplacementMap[map[keys[k]]];
+        }
+      }
+    }
+    const handlerMap = [];
+    for (const i in indexReplacementMap) {
+      handlerMap[i] = handlerData[indexReplacementMap[i]];
+    }
+    return [regexp, handlerMap, staticMap];
+  }
+};
+
+// node_modules/hono/dist/router/smart-router/router.js
+var SmartRouter = class {
+  name = "SmartRouter";
+  #routers = [];
+  #routes = [];
+  constructor(init) {
+    this.#routers = init.routers;
+  }
+  add(method, path, handler) {
+    if (!this.#routes) {
+      throw new Error(MESSAGE_MATCHER_IS_ALREADY_BUILT);
+    }
+    this.#routes.push([method, path, handler]);
+  }
+  match(method, path) {
+    if (!this.#routes) {
+      throw new Error("Fatal error");
+    }
+    const routers = this.#routers;
+    const routes = this.#routes;
+    const len = routers.length;
+    let i = 0;
+    let res;
+    for (; i < len; i++) {
+      const router = routers[i];
+      try {
+        for (let i2 = 0, len2 = routes.length; i2 < len2; i2++) {
+          router.add(...routes[i2]);
+        }
+        res = router.match(method, path);
+      } catch (e) {
+        if (e instanceof UnsupportedPathError) {
+          continue;
+        }
+        throw e;
+      }
+      this.match = router.match.bind(router);
+      this.#routers = [router];
+      this.#routes = void 0;
+      break;
+    }
+    if (i === len) {
+      throw new Error("Fatal error");
+    }
+    this.name = `SmartRouter + ${this.activeRouter.name}`;
+    return res;
+  }
+  get activeRouter() {
+    if (this.#routes || this.#routers.length !== 1) {
+      throw new Error("No active router has been determined yet.");
+    }
+    return this.#routers[0];
+  }
+};
+
+// node_modules/hono/dist/router/trie-router/node.js
+var emptyParams = /* @__PURE__ */ Object.create(null);
+var order = 0;
+var Node2 = class _Node2 {
+  #methods = [];
+  #children = /* @__PURE__ */ Object.create(null);
+  #patterns = [];
+  #pattern;
+  #params = emptyParams;
+  insert(method, path, handler) {
+    let curNode = this;
+    const parts = splitRoutingPath(path);
+    const possibleKeys = /* @__PURE__ */ new Set();
+    let i = 0;
+    for (const p of parts) {
+      const nextP = parts[++i];
+      const pattern = getPattern(p, nextP) || (nextP === void 0 && p && p.indexOf("*") === p.length - 1 ? p : null);
+      const isParam = Array.isArray(pattern);
+      const key2 = isParam ? pattern[0] : pattern || p;
+      const child = curNode.#children[key2] ||= new _Node2();
+      if (pattern && !child.#pattern) {
+        child.#pattern = pattern;
+        curNode.#patterns.push(child);
+      }
+      curNode = child;
+      if (isParam) {
+        possibleKeys.add(pattern[1]);
+      }
+    }
+    curNode.#methods.push({
+      [method]: {
+        handler,
+        possibleKeys: [...possibleKeys],
+        score: ++order
+      }
+    });
+  }
+  #pushHandlerSets(handlerSets, node, method, nodeParams, params) {
+    for (let i = 0, len = node.#methods.length; i < len; i++) {
+      const m = node.#methods[i];
+      const handlerSet = m[method] || m[METHOD_NAME_ALL];
+      if (handlerSet) {
+        handlerSet.params = /* @__PURE__ */ Object.create(null);
+        handlerSets.push(handlerSet);
+        for (let i2 = 0, len2 = handlerSet.possibleKeys.length; i2 < len2; i2++) {
+          const key2 = handlerSet.possibleKeys[i2];
+          handlerSet.params[key2] = params?.[key2] && !i2 ? params[key2] : nodeParams[key2] ?? params?.[key2];
+        }
+      }
+    }
+  }
+  search(method, path) {
+    const handlerSets = [];
+    this.#params = emptyParams;
+    const curNode = this;
+    let curNodes = [curNode];
+    const parts = splitPath(path);
+    const curNodesQueue = [];
+    const len = parts.length;
+    let partOffsets = null;
+    for (let i = 0; i < len; i++) {
+      const part = parts[i];
+      const isLast = i === len - 1;
+      const tempNodes = [];
+      for (let j = 0, len2 = curNodes.length; j < len2; j++) {
+        const node = curNodes[j];
+        const nextNode = node.#children[part];
+        if (nextNode) {
+          nextNode.#params = node.#params;
+          if (isLast) {
+            if (nextNode.#children["*"]) {
+              this.#pushHandlerSets(handlerSets, nextNode.#children["*"], method, node.#params);
+            }
+            this.#pushHandlerSets(handlerSets, nextNode, method, node.#params);
+          } else {
+            tempNodes.push(nextNode);
+          }
+        }
+        for (const child of node.#patterns) {
+          const pattern = child.#pattern;
+          const params = node.#params === emptyParams ? {} : { ...node.#params };
+          if (typeof pattern === "string") {
+            if (pattern === "*" || part.startsWith(pattern.slice(0, -1))) {
+              this.#pushHandlerSets(handlerSets, child, method, node.#params);
+              if (pattern === "*") {
+                child.#params = params;
+                tempNodes.push(child);
+              }
+            }
+            continue;
+          }
+          const [, name, matcher] = pattern;
+          if (!part && matcher === true) {
+            continue;
+          }
+          if (matcher !== true) {
+            if (!partOffsets) {
+              partOffsets = [];
+              let offset = path[0] === "/" ? 1 : 0;
+              for (let p = 0; p < len; p++) {
+                partOffsets[p] = offset;
+                offset += parts[p].length + 1;
+              }
+            }
+            const restPathString = path.slice(partOffsets[i]);
+            const m = matcher.exec(restPathString);
+            if (m) {
+              params[name] = m[0];
+              this.#pushHandlerSets(handlerSets, child, method, node.#params, params);
+              if (m[0].length === restPathString.length && child.#children["*"]) {
+                this.#pushHandlerSets(
+                  handlerSets,
+                  child.#children["*"],
+                  method,
+                  node.#params,
+                  params
+                );
+              }
+              for (const _ in child.#children) {
+                child.#params = params;
+                const componentCount = m[0].match(/\//g)?.length ?? 0;
+                const targetCurNodes = curNodesQueue[componentCount] ||= [];
+                targetCurNodes.push(child);
+                break;
+              }
+              continue;
+            }
+          }
+          if (matcher === true || matcher.test(part)) {
+            params[name] = part;
+            if (isLast) {
+              this.#pushHandlerSets(handlerSets, child, method, params, node.#params);
+              if (child.#children["*"]) {
+                this.#pushHandlerSets(
+                  handlerSets,
+                  child.#children["*"],
+                  method,
+                  params,
+                  node.#params
+                );
+              }
+            } else {
+              child.#params = params;
+              tempNodes.push(child);
+            }
+          }
+        }
+      }
+      const shifted = curNodesQueue.shift();
+      curNodes = shifted ? tempNodes.concat(shifted) : tempNodes;
+    }
+    if (handlerSets[1]) {
+      handlerSets.sort((a, b) => {
+        return a.score - b.score;
+      });
+    }
+    return [handlerSets.map(({ handler, params }) => [handler, params])];
+  }
+};
+
+// node_modules/hono/dist/router/trie-router/router.js
+var TrieRouter = class {
+  name = "TrieRouter";
+  #node = new Node2();
+  add(method, path, handler) {
+    for (const result of checkOptionalParameter(path) || [path]) {
+      this.#node.insert(method, result, handler);
+    }
+  }
+  match(method, path) {
+    return this.#node.search(method, path);
+  }
+};
+
+// node_modules/hono/dist/hono.js
+var Hono2 = class extends Hono {
+  /**
+   * Creates an instance of the Hono class.
+   *
+   * @param options - Optional configuration options for the Hono instance.
+   */
+  constructor(options = {}) {
+    super(options);
+    this.router = options.router ?? new SmartRouter({
+      routers: [new RegExpRouter(), new TrieRouter()]
+    });
+  }
+};
+
+// node_modules/hono/dist/middleware/secure-headers/secure-headers.js
+var HEADERS_MAP = {
+  crossOriginEmbedderPolicy: ["Cross-Origin-Embedder-Policy", "require-corp"],
+  crossOriginResourcePolicy: ["Cross-Origin-Resource-Policy", "same-origin"],
+  crossOriginOpenerPolicy: ["Cross-Origin-Opener-Policy", "same-origin"],
+  originAgentCluster: ["Origin-Agent-Cluster", "?1"],
+  referrerPolicy: ["Referrer-Policy", "no-referrer"],
+  strictTransportSecurity: ["Strict-Transport-Security", "max-age=15552000; includeSubDomains"],
+  xContentTypeOptions: ["X-Content-Type-Options", "nosniff"],
+  xDnsPrefetchControl: ["X-DNS-Prefetch-Control", "off"],
+  xDownloadOptions: ["X-Download-Options", "noopen"],
+  xFrameOptions: ["X-Frame-Options", "SAMEORIGIN"],
+  xPermittedCrossDomainPolicies: ["X-Permitted-Cross-Domain-Policies", "none"],
+  xXssProtection: ["X-XSS-Protection", "0"]
+};
+var DEFAULT_OPTIONS = {
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: true,
+  crossOriginOpenerPolicy: true,
+  originAgentCluster: true,
+  referrerPolicy: true,
+  strictTransportSecurity: true,
+  xContentTypeOptions: true,
+  xDnsPrefetchControl: true,
+  xDownloadOptions: true,
+  xFrameOptions: true,
+  xPermittedCrossDomainPolicies: true,
+  xXssProtection: true,
+  removePoweredBy: true,
+  permissionsPolicy: {}
+};
+var secureHeaders = (customOptions) => {
+  const options = { ...DEFAULT_OPTIONS, ...customOptions };
+  const headersToSet = getFilteredHeaders(options);
+  const callbacks = [];
+  if (options.contentSecurityPolicy) {
+    const [callback, value] = getCSPDirectives(
+      options.contentSecurityPolicy,
+      "Content-Security-Policy"
+    );
+    if (callback) {
+      callbacks.push(callback);
+    }
+    headersToSet.push(["Content-Security-Policy", value]);
+  }
+  if (options.contentSecurityPolicyReportOnly) {
+    const [callback, value] = getCSPDirectives(
+      options.contentSecurityPolicyReportOnly,
+      "Content-Security-Policy-Report-Only"
+    );
+    if (callback) {
+      callbacks.push(callback);
+    }
+    headersToSet.push(["Content-Security-Policy-Report-Only", value]);
+  }
+  if (options.permissionsPolicy && Object.keys(options.permissionsPolicy).length > 0) {
+    headersToSet.push([
+      "Permissions-Policy",
+      getPermissionsPolicyDirectives(options.permissionsPolicy)
+    ]);
+  }
+  if (options.reportingEndpoints) {
+    headersToSet.push(["Reporting-Endpoints", getReportingEndpoints(options.reportingEndpoints)]);
+  }
+  if (options.reportTo) {
+    headersToSet.push(["Report-To", getReportToOptions(options.reportTo)]);
+  }
+  return async function secureHeaders2(ctx, next) {
+    const headersToSetForReq = callbacks.length === 0 ? headersToSet : callbacks.reduce((acc, cb) => cb(ctx, acc), headersToSet);
+    await next();
+    setHeaders(ctx, headersToSetForReq);
+    if (options?.removePoweredBy) {
+      ctx.res.headers.delete("X-Powered-By");
+    }
+  };
+};
+function getFilteredHeaders(options) {
+  return Object.entries(HEADERS_MAP).filter(([key2]) => options[key2]).map(([key2, defaultValue]) => {
+    const overrideValue = options[key2];
+    return typeof overrideValue === "string" ? [defaultValue[0], overrideValue] : defaultValue;
+  });
+}
+function getCSPDirectives(contentSecurityPolicy, headerName) {
+  const callbacks = [];
+  const resultValues = [];
+  for (const [directive, value] of Object.entries(contentSecurityPolicy)) {
+    const valueArray = Array.isArray(value) ? value : [value];
+    valueArray.forEach((value2, i) => {
+      if (typeof value2 === "function") {
+        const index = i * 2 + 2 + resultValues.length;
+        callbacks.push((ctx, values) => {
+          values[index] = value2(ctx, directive);
+        });
+      }
+    });
+    resultValues.push(
+      directive.replace(
+        /[A-Z]+(?![a-z])|[A-Z]/g,
+        (match2, offset) => offset ? "-" + match2.toLowerCase() : match2.toLowerCase()
+      ),
+      ...valueArray.flatMap((value2) => [" ", value2]),
+      "; "
+    );
+  }
+  resultValues.pop();
+  return callbacks.length === 0 ? [void 0, resultValues.join("")] : [
+    (ctx, headersToSet) => headersToSet.map((values) => {
+      if (values[0] === headerName) {
+        const clone = values[1].slice();
+        callbacks.forEach((cb) => {
+          cb(ctx, clone);
+        });
+        return [values[0], clone.join("")];
+      } else {
+        return values;
+      }
+    }),
+    resultValues
+  ];
+}
+function getPermissionsPolicyDirectives(policy) {
+  return Object.entries(policy).map(([directive, value]) => {
+    const kebabDirective = camelToKebab(directive);
+    if (typeof value === "boolean") {
+      return `${kebabDirective}=${value ? "*" : "()"}`;
+    }
+    if (Array.isArray(value)) {
+      if (value.length === 0) {
+        return `${kebabDirective}=()`;
+      }
+      if (value.length === 1 && value[0] === "*") {
+        return `${kebabDirective}=*`;
+      }
+      if (value.length === 1 && value[0] === "none") {
+        return `${kebabDirective}=()`;
+      }
+      const allowlist = value.map((item) => ["self", "src"].includes(item) ? item : `"${item}"`);
+      return `${kebabDirective}=(${allowlist.join(" ")})`;
+    }
+    return "";
+  }).filter(Boolean).join(", ");
+}
+function camelToKebab(str) {
+  return str.replace(/([a-z\d])([A-Z])/g, "$1-$2").toLowerCase();
+}
+function getReportingEndpoints(reportingEndpoints = []) {
+  return reportingEndpoints.map((endpoint) => `${endpoint.name}="${endpoint.url}"`).join(", ");
+}
+function getReportToOptions(reportTo = []) {
+  return reportTo.map((option) => JSON.stringify(option)).join(", ");
+}
+function setHeaders(ctx, headersToSet) {
+  headersToSet.forEach(([header, value]) => {
+    ctx.res.headers.set(header, value);
+  });
+}
+
+// worker-src/env.ts
+var current;
+function configureEnv(env) {
+  current = env;
+}
+function getEnv() {
+  if (!current?.DB) throw new Error("D1 binding DB is not configured");
+  return current;
+}
+
+// worker-src/schema.ts
+var SCHEMA = `
+CREATE TABLE IF NOT EXISTS profiles (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  interval_minutes INTEGER NOT NULL DEFAULT 0,
+  last_run_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE IF NOT EXISTS products (
+  profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  source_key TEXT NOT NULL,
+  data TEXT NOT NULL,
+  title TEXT NOT NULL,
+  price INTEGER NOT NULL DEFAULT 0,
+  source_url TEXT NOT NULL DEFAULT '',
+  remote_woo_id INTEGER,
+  remote_basalam_id INTEGER,
+  active INTEGER NOT NULL DEFAULT 1,
+  missing_since TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY(profile_id, source_key)
+);
+CREATE INDEX IF NOT EXISTS products_profile_updated_idx ON products(profile_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS products_title_idx ON products(profile_id, title);
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('scrape','sync')),
+  target TEXT NOT NULL DEFAULT 'none',
+  status TEXT NOT NULL DEFAULT 'queued',
+  phase TEXT NOT NULL DEFAULT 'waiting',
+  total INTEGER NOT NULL DEFAULT 0,
+  processed INTEGER NOT NULL DEFAULT 0,
+  added INTEGER NOT NULL DEFAULT 0,
+  updated INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0,
+  stop_requested INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  log TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  started_at TEXT,
+  finished_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS jobs_queue_idx ON jobs(status, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active_idx ON jobs(profile_id,kind) WHERE status IN ('queued','running');
+CREATE TABLE IF NOT EXISTS destination_map (
+  profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  source_key TEXT NOT NULL,
+  target TEXT NOT NULL,
+  account_key TEXT NOT NULL DEFAULT 'default',
+  remote_id INTEGER NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY(profile_id, source_key, target, account_key)
+);
+CREATE TABLE IF NOT EXISTS category_learning (
+  phrase TEXT NOT NULL,
+  category_id INTEGER NOT NULL,
+  category_name TEXT NOT NULL DEFAULT '',
+  hits INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY(phrase, category_id)
+);
+CREATE TABLE IF NOT EXISTS autoreply_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id INTEGER,
+  customer TEXT NOT NULL DEFAULT '',
+  input_text TEXT NOT NULL,
+  output_text TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE IF NOT EXISTS app_state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+`;
+
+// worker-src/db.ts
+var ready = /* @__PURE__ */ new WeakMap();
+var now = () => (/* @__PURE__ */ new Date()).toISOString();
+var json = (value, fallback) => {
+  if (value === null || value === void 0) return fallback;
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+var clean = (values) => values.map((value) => value === void 0 ? null : typeof value === "boolean" ? Number(value) : value);
+function statement(sql, values = []) {
+  return getEnv().DB.prepare(sql).bind(...clean(values));
+}
+async function rows(sql, values = []) {
+  const result = await statement(sql, values).all();
+  if (!result.success) throw new Error(result.error || "D1 query failed");
+  return result.results || [];
+}
+async function run(sql, values = []) {
+  const result = await statement(sql, values).run();
+  if (!result.success) throw new Error(result.error || "D1 query failed");
+  return Number(result.meta?.changes || 0);
+}
+async function ensureSchema(db = getEnv().DB) {
+  const key2 = db;
+  let promise = ready.get(key2);
+  if (!promise) {
+    promise = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='profiles'").first().then(async (existing) => {
+      if (existing) return;
+      const statements = SCHEMA.split(";").map((sql) => sql.trim()).filter(Boolean).map((sql) => db.prepare(sql));
+      await db.batch(statements);
+    }).catch((error) => {
+      ready.delete(key2);
+      throw error;
+    });
+    ready.set(key2, promise);
+  }
+  await promise;
+}
+function profileFromRow(row) {
+  const data = json(row.data, {});
+  return {
+    ...data,
+    enabled: Boolean(row.enabled),
+    intervalMinutes: Number(row.interval_minutes || 0),
+    lastRunAt: row.last_run_at || null,
+    createdAt: row.created_at || data.createdAt,
+    updatedAt: row.updated_at || data.updatedAt
+  };
+}
+function jobFromRow(row) {
+  return {
+    id: String(row.id),
+    profileId: String(row.profile_id),
+    kind: row.kind,
+    target: row.target,
+    status: row.status,
+    phase: String(row.phase),
+    total: Number(row.total || 0),
+    processed: Number(row.processed || 0),
+    added: Number(row.added || 0),
+    updated: Number(row.updated || 0),
+    failed: Number(row.failed || 0),
+    stopRequested: Boolean(row.stop_requested),
+    error: row.error == null ? null : String(row.error),
+    log: json(row.log, []),
+    createdAt: String(row.created_at),
+    startedAt: row.started_at ? String(row.started_at) : null,
+    finishedAt: row.finished_at ? String(row.finished_at) : null,
+    updatedAt: String(row.updated_at)
+  };
+}
+function productFromRow(row) {
+  return json(row.data, {});
+}
+async function listProfiles() {
+  return (await rows("SELECT * FROM profiles ORDER BY updated_at DESC")).map(profileFromRow);
+}
+async function getProfile(id) {
+  const row = await statement("SELECT * FROM profiles WHERE id=?", [id]).first();
+  return row ? profileFromRow(row) : null;
+}
+async function saveProfile(profile) {
+  const previous = await getProfile(profile.id);
+  const timestamp = now();
+  const value = { ...profile, createdAt: previous?.createdAt || profile.createdAt || timestamp, updatedAt: timestamp };
+  await run(
+    `INSERT INTO profiles(id,data,enabled,interval_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET data=excluded.data,enabled=excluded.enabled,interval_minutes=excluded.interval_minutes,updated_at=excluded.updated_at`,
+    [value.id, JSON.stringify(value), value.enabled, value.intervalMinutes, value.createdAt, value.updatedAt]
+  );
+  return await getProfile(value.id);
+}
+async function deleteProfile(id) {
+  const db = getEnv().DB;
+  await db.batch([
+    db.prepare("DELETE FROM app_state WHERE key IN (SELECT 'job_checkpoint:'||id FROM jobs WHERE profile_id=?)").bind(id),
+    db.prepare("DELETE FROM destination_map WHERE profile_id=?").bind(id),
+    db.prepare("DELETE FROM products WHERE profile_id=?").bind(id),
+    db.prepare("DELETE FROM jobs WHERE profile_id=?").bind(id),
+    db.prepare("DELETE FROM profiles WHERE id=?").bind(id)
+  ]);
+  return true;
+}
+async function createJob(profileId, kind, target) {
+  const active = await statement("SELECT * FROM jobs WHERE profile_id=? AND kind=? AND status IN ('queued','running') ORDER BY created_at LIMIT 1", [profileId, kind]).first();
+  if (active) return jobFromRow(active);
+  const id = crypto.randomUUID(), timestamp = now();
+  try {
+    await run("INSERT INTO jobs(id,profile_id,kind,target,created_at,updated_at) VALUES(?,?,?,?,?,?)", [id, profileId, kind, target, timestamp, timestamp]);
+  } catch (error) {
+    const concurrent = await statement("SELECT * FROM jobs WHERE profile_id=? AND kind=? AND status IN ('queued','running') ORDER BY created_at LIMIT 1", [profileId, kind]).first();
+    if (concurrent) return jobFromRow(concurrent);
+    throw error;
+  }
+  return await getJob(id);
+}
+async function getJob(id) {
+  const row = await statement("SELECT * FROM jobs WHERE id=?", [id]).first();
+  return row ? jobFromRow(row) : null;
+}
+async function listJobs(limit = 50) {
+  return (await rows("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", [Math.max(1, limit)])).map(jobFromRow);
+}
+async function claimJob(id) {
+  const candidate = id ? await statement("SELECT id FROM jobs WHERE id=? AND status='queued'", [id]).first() : await statement("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1").first();
+  if (!candidate) return null;
+  const timestamp = now();
+  const changed = await run("UPDATE jobs SET status='running',phase='starting',started_at=?,updated_at=? WHERE id=? AND status='queued'", [timestamp, timestamp, candidate.id]);
+  return changed ? getJob(candidate.id) : null;
+}
+async function updateJob(id, patch) {
+  const allowed = { status: "status", phase: "phase", total: "total", processed: "processed", added: "added", updated: "updated", failed: "failed", stopRequested: "stop_requested", error: "error", log: "log", finishedAt: "finished_at" };
+  const entries = Object.entries(patch).filter(([key2]) => allowed[key2]);
+  if (!entries.length) return;
+  const sets = entries.map(([key2]) => `${allowed[key2]}=?`), values = entries.map(([key2, value]) => key2 === "log" ? JSON.stringify(value) : value);
+  await run(`UPDATE jobs SET ${sets.join(",")},updated_at=? WHERE id=?`, [...values, now(), id]);
+}
+async function stopRequested(id) {
+  const row = await statement("SELECT stop_requested FROM jobs WHERE id=?", [id]).first();
+  return Boolean(row?.stop_requested);
+}
+async function retryJob(id) {
+  const timestamp = now(), changed = await run(`UPDATE jobs SET status='queued',phase='waiting',stop_requested=0,error=NULL,started_at=NULL,finished_at=NULL,processed=0,added=0,updated=0,failed=0,updated_at=? WHERE id=? AND status IN ('failed','stopped','done')`, [timestamp, id]);
+  return changed ? getJob(id) : null;
+}
+async function deleteJob(id) {
+  const deleted = await run("DELETE FROM jobs WHERE id=? AND status!='running'", [id]);
+  if (deleted) await deleteState(`job_checkpoint:${id}`);
+  return Boolean(deleted);
+}
+async function clearFinishedJobs() {
+  await run("DELETE FROM app_state WHERE key IN (SELECT 'job_checkpoint:'||id FROM jobs WHERE status IN ('done','failed','stopped'))");
+  return run("DELETE FROM jobs WHERE status IN ('done','failed','stopped')");
+}
+async function upsertProduct(profileId, product) {
+  const existing = await statement("SELECT 1 AS found FROM products WHERE profile_id=? AND source_key=?", [profileId, product.sourceKey]).first();
+  const timestamp = now();
+  await run(
+    `INSERT INTO products(profile_id,source_key,data,title,price,source_url,active,missing_since,created_at,updated_at) VALUES(?,?,?,?,?,?,1,NULL,?,?)
+    ON CONFLICT(profile_id,source_key) DO UPDATE SET data=excluded.data,title=excluded.title,price=excluded.price,source_url=excluded.source_url,active=1,missing_since=NULL,updated_at=excluded.updated_at`,
+    [profileId, product.sourceKey, JSON.stringify(product), product.title, product.price, product.url, timestamp, timestamp]
+  );
+  return existing ? "updated" : "added";
+}
+async function listProducts(profileId, limit = 100, offset = 0, q = "") {
+  const filter = q ? " AND title LIKE ? ESCAPE '\\'" : "", pattern = `%${q.replace(/[\\%_]/g, "\\$&")}%`, params = q ? [profileId, pattern] : [profileId];
+  const count = await statement(`SELECT count(*) AS total FROM products WHERE profile_id=?${filter}`, params).first();
+  const result = await rows(`SELECT data FROM products WHERE profile_id=?${filter} ORDER BY updated_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { products: result.map(productFromRow), total: Number(count?.total || 0) };
+}
+async function allProducts(profileId) {
+  return (await rows("SELECT data FROM products WHERE profile_id=? ORDER BY updated_at", [profileId])).map(productFromRow);
+}
+async function getProduct(profileId, sourceKey) {
+  const row = await statement("SELECT data FROM products WHERE profile_id=? AND source_key=?", [profileId, sourceKey]).first();
+  return row ? productFromRow(row) : null;
+}
+async function markMissingProducts(profileId, seenKeys) {
+  if (!seenKeys.length) return 0;
+  const seen = new Set(seenKeys), existing = await rows("SELECT source_key FROM products WHERE profile_id=? AND active=1", [profileId]), missing = existing.filter((x) => !seen.has(x.source_key));
+  if (!missing.length) return 0;
+  const timestamp = now(), db = getEnv().DB;
+  for (let i = 0; i < missing.length; i += 50) await db.batch(missing.slice(i, i + 50).map((x) => db.prepare("UPDATE products SET active=0,missing_since=COALESCE(missing_since,?),updated_at=? WHERE profile_id=? AND source_key=?").bind(timestamp, timestamp, profileId, x.source_key)));
+  return missing.length;
+}
+async function maintenanceRows(profileId = "") {
+  const productRows = await rows(`SELECT * FROM products ${profileId ? "WHERE profile_id=?" : ""} ORDER BY updated_at DESC`, profileId ? [profileId] : []), maps = await rows(`SELECT * FROM destination_map ${profileId ? "WHERE profile_id=?" : ""}`, profileId ? [profileId] : []), by = /* @__PURE__ */ new Map();
+  for (const map of maps) {
+    const key2 = `${map.profile_id}\0${map.source_key}`, items = by.get(key2) || [];
+    items.push(map);
+    by.set(key2, items);
+  }
+  return productRows.map((row) => ({ ...row, data: json(row.data, {}), active: Boolean(row.active), maps: by.get(`${row.profile_id}\0${row.source_key}`) || [] }));
+}
+async function setRemoteId(profileId, sourceKey, target, id) {
+  const column = target === "woo" ? "remote_woo_id" : "remote_basalam_id";
+  await run(`UPDATE products SET ${column}=?,updated_at=? WHERE profile_id=? AND source_key=?`, [id, now(), profileId, sourceKey]);
+}
+async function getRemoteId(profileId, sourceKey, target) {
+  const column = target === "woo" ? "remote_woo_id" : "remote_basalam_id", row = await statement(`SELECT ${column} AS id FROM products WHERE profile_id=? AND source_key=?`, [profileId, sourceKey]).first();
+  return row?.id ? Number(row.id) : null;
+}
+async function getDestinationId(profileId, sourceKey, target, accountKey = "default") {
+  const row = await statement("SELECT remote_id FROM destination_map WHERE profile_id=? AND source_key=? AND target=? AND account_key=?", [profileId, sourceKey, target, accountKey]).first();
+  return row?.remote_id ? Number(row.remote_id) : null;
+}
+async function setDestinationId(profileId, sourceKey, target, accountKey, remoteId) {
+  await run(`INSERT INTO destination_map(profile_id,source_key,target,account_key,remote_id,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(profile_id,source_key,target,account_key) DO UPDATE SET remote_id=excluded.remote_id,updated_at=excluded.updated_at`, [profileId, sourceKey, target, accountKey, remoteId, now()]);
+}
+async function markProfileRun(id) {
+  await run("UPDATE profiles SET last_run_at=?,updated_at=? WHERE id=?", [now(), now(), id]);
+}
+var normalizeLearning = (value) => value.toLowerCase().replace(/[يى]/g, "\u06CC").replace(/ك/g, "\u06A9").replace(/[\u200c\u200f\u200e]/g, " ").replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+async function learnCategory(title, categoryId, categoryName = "", maxWords = 5) {
+  const words = normalizeLearning(title).split(" ").filter(Boolean).slice(0, Math.max(1, Math.min(5, maxWords)));
+  let saved = 0;
+  for (let n = 1; n <= words.length; n++) {
+    const phrase = words.slice(0, n).join(" ");
+    await run(`INSERT INTO category_learning(phrase,category_id,category_name,hits,updated_at) VALUES(?,?,?,1,?) ON CONFLICT(phrase,category_id) DO UPDATE SET hits=category_learning.hits+1,category_name=excluded.category_name,updated_at=excluded.updated_at`, [phrase, categoryId, categoryName, now()]);
+    saved++;
+  }
+  return saved;
+}
+async function findLearnedCategory(title, maxWords = 5) {
+  const words = normalizeLearning(title).split(" ").filter(Boolean).slice(0, Math.max(1, Math.min(5, maxWords)));
+  for (let n = words.length; n >= 1; n--) {
+    const phrase = words.slice(0, n).join(" "), row = await statement("SELECT * FROM category_learning WHERE phrase=? ORDER BY hits DESC,updated_at DESC LIMIT 1", [phrase]).first();
+    if (row) return { categoryId: Number(row.category_id), categoryName: String(row.category_name), phrase: String(row.phrase), hits: Number(row.hits) };
+  }
+  return null;
+}
+async function importCategoryLearning(raw2) {
+  const items = Array.isArray(raw2) ? raw2 : Object.entries(raw2 || {}).map(([phrase, value]) => ({ phrase, ...typeof value === "object" ? value : { category_id: value } }));
+  let count = 0;
+  for (const item of items) {
+    const phrase = normalizeLearning(String(item.phrase || item.key || "")), categoryId = Number(item.category_id || item.categoryId || item.cat_id || item.id);
+    if (!phrase || !categoryId) continue;
+    await run(`INSERT INTO category_learning(phrase,category_id,category_name,hits,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(phrase,category_id) DO UPDATE SET category_name=excluded.category_name,hits=MAX(category_learning.hits,excluded.hits),updated_at=excluded.updated_at`, [phrase, categoryId, String(item.category_name || item.categoryName || item.cat_name || item.name || ""), Math.max(1, Number(item.hits || item.count || 1)), now()]);
+    count++;
+  }
+  return count;
+}
+async function listCategoryLearning(limit = 1e3) {
+  return rows("SELECT * FROM category_learning ORDER BY hits DESC,updated_at DESC LIMIT ?", [limit]);
+}
+async function addAutoreplyLog(row) {
+  await run("INSERT INTO autoreply_log(chat_id,customer,input_text,output_text,source) VALUES(?,?,?,?,?)", [row.chatId || null, row.customer, row.input, row.output, row.source]);
+}
+async function importAutoreplyLog(raw2) {
+  if (!Array.isArray(raw2)) return 0;
+  let count = 0;
+  for (const row of raw2.slice(-5e3)) {
+    await run("INSERT INTO autoreply_log(chat_id,customer,input_text,output_text,source,created_at) VALUES(?,?,?,?,?,?)", [Number(row.chat_id || 0) || null, String(row.customer || row.who || ""), String(row.input_text || row.in || ""), String(row.output_text || row.out || ""), String(row.source || row.rule || ""), row.created_at || row.at ? new Date(row.created_at || Number(row.at) * 1e3).toISOString() : now()]);
+    count++;
+  }
+  return count;
+}
+async function listAutoreplyLog(limit = 100) {
+  return rows("SELECT * FROM autoreply_log ORDER BY created_at DESC LIMIT ?", [limit]);
+}
+async function getState(key2, fallback) {
+  const row = await statement("SELECT value FROM app_state WHERE key=?", [key2]).first();
+  return row ? json(row.value, fallback) : fallback;
+}
+async function setState(key2, value) {
+  await run(`INSERT INTO app_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, [key2, JSON.stringify(value), now()]);
+}
+async function deleteState(key2) {
+  await run("DELETE FROM app_state WHERE key=?", [key2]);
+}
+async function createBackup() {
+  const [profiles, products, jobs, states, destinationMap, categoryLearning, autoreplyLog] = await Promise.all([rows("SELECT * FROM profiles ORDER BY created_at"), rows("SELECT * FROM products ORDER BY profile_id,created_at"), rows("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 1000"), rows("SELECT * FROM app_state ORDER BY key"), rows("SELECT * FROM destination_map ORDER BY profile_id,target,account_key"), rows("SELECT * FROM category_learning ORDER BY hits DESC"), rows("SELECT * FROM autoreply_log ORDER BY created_at DESC LIMIT 5000")]);
+  return { app: "scraper4-cloudflare", version: 1, createdAt: now(), profiles, products, jobs, states, destinationMap, categoryLearning, autoreplyLog };
+}
+async function restoreBackup(bundle) {
+  if (!bundle || !["scraper4-cloudflare", "scraper4-render"].includes(bundle.app) || bundle.version !== 1) throw new Error("Invalid Scraper 4 backup");
+  let profiles = 0, products = 0, states = 0;
+  for (const row of bundle.profiles || []) {
+    const data = json(row.data, row.data || {});
+    await saveProfile({ ...data, id: row.id, enabled: Boolean(row.enabled), intervalMinutes: Number(row.interval_minutes || 0), lastRunAt: row.last_run_at || null, createdAt: row.created_at || now(), updatedAt: now() });
+    profiles++;
+  }
+  for (const row of bundle.products || []) {
+    const product = json(row.data, row.data);
+    await upsertProduct(row.profile_id, product);
+    if (row.remote_woo_id) await setRemoteId(row.profile_id, row.source_key, "woo", Number(row.remote_woo_id));
+    if (row.remote_basalam_id) await setRemoteId(row.profile_id, row.source_key, "basalam", Number(row.remote_basalam_id));
+    products++;
+  }
+  for (const row of bundle.destinationMap || []) await setDestinationId(row.profile_id, row.source_key, row.target, row.account_key, Number(row.remote_id));
+  await importCategoryLearning(bundle.categoryLearning || []);
+  await importAutoreplyLog(bundle.autoreplyLog || []);
+  for (const row of bundle.states || []) {
+    await setState(row.key, json(row.value, row.value));
+    states++;
+  }
+  return { profiles, products, states };
+}
+async function profileStats() {
+  const profiles = await listProfiles(), result = [];
+  for (const profile of profiles) {
+    const row = await statement("SELECT count(*) products,count(remote_woo_id) woo_mapped,count(remote_basalam_id) basalam_mapped,max(updated_at) last_product_at FROM products WHERE profile_id=?", [profile.id]).first();
+    result.push({ id: profile.id, name: profile.name, ...row });
+  }
+  return result;
+}
+async function reapStalledJobs(minutes = 30) {
+  const cutoff = new Date(Date.now() - Math.max(5, minutes) * 6e4).toISOString();
+  return run(`UPDATE jobs SET status='failed',phase='watchdog',error='Job was inactive and closed by watchdog',finished_at=?,updated_at=? WHERE status='running' AND updated_at<?`, [now(), now(), cutoff]);
+}
+async function enqueueDueProfiles() {
+  const timestamp = Date.now(), profiles = await listProfiles(), jobs = [];
+  for (const profile of profiles) {
+    if (!profile.enabled || !profile.intervalMinutes) continue;
+    const due = !profile.lastRunAt || timestamp - new Date(profile.lastRunAt).getTime() >= profile.intervalMinutes * 6e4;
+    if (!due) continue;
+    const job = await createJob(profile.id, "scrape", profile.syncWoo && profile.syncBasalam ? "both" : profile.syncWoo ? "woo" : profile.syncBasalam ? "basalam" : "none");
+    jobs.push(job);
+    await markProfileRun(profile.id);
+  }
+  return jobs;
+}
+
+// worker-src/utils.ts
+var textEncoder = new TextEncoder();
+var textDecoder = new TextDecoder();
+function bytesToBase64(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 32768) out += String.fromCharCode(...bytes.subarray(i, i + 32768));
+  return btoa(out);
+}
+function base64ToBytes(value) {
+  const raw2 = atob(value), bytes = new Uint8Array(raw2.length);
+  for (let i = 0; i < raw2.length; i++) bytes[i] = raw2.charCodeAt(i);
+  return bytes;
+}
+function utf8ToBase64(value) {
+  return bytesToBase64(textEncoder.encode(value));
+}
+function base64ToUtf8(value) {
+  return textDecoder.decode(base64ToBytes(value));
+}
+function basicAuth(username, password2) {
+  return `Basic ${utf8ToBase64(`${username}:${password2}`)}`;
+}
+function byteLength(value) {
+  return textEncoder.encode(value).byteLength;
+}
+function message(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+async function sha2562(value) {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", textEncoder.encode(value)));
+  return [...bytes].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+function safeEqual(a, b) {
+  const length = Math.max(a.length, b.length), aa = a.padEnd(length, "\0"), bb = b.padEnd(length, "\0");
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < length; i++) diff |= aa.charCodeAt(i) ^ bb.charCodeAt(i);
+  return diff === 0;
+}
+
+// worker-src/vault.ts
+var emptyConnections = () => ({
+  woo: { url: "", key: "", secret: "", categoryId: 0 },
+  basalam: { token: "", vendorId: "", api: "https://openapi.basalam.com/v1", preparationDays: 3, weight: 500, packageWeight: 600, stock: 10, categoryId: 0, autoCategory: false, netIndirect: false, shops: [] },
+  ai: { baseUrl: "", apiKey: "", model: "", providers: [], candidates: [], master: "", network: { mode: "direct", proxyUrl: "", workerUrl: "", dohUrl: "https://cloudflare-dns.com/dns-query", resolveIp: "" } },
+  notifications: { url: "", token: "", chatId: "", baleToken: "", baleChatId: "", rubikaToken: "", rubikaChatId: "" }
+});
+function password() {
+  const env = getEnv(), secret2 = env.VAULT_SECRET || env.ADMIN_TOKEN;
+  if (!secret2) throw new Error("\u0628\u0631\u0627\u06CC \u0630\u062E\u06CC\u0631\u0647 \u0627\u0645\u0646 \u0627\u0637\u0644\u0627\u0639\u0627\u062A \u0627\u062A\u0635\u0627\u0644\u060C VAULT_SECRET \u06CC\u0627 ADMIN_TOKEN \u0631\u0627 \u0628\u0627 wrangler secret put \u062A\u0639\u0631\u06CC\u0641 \u06A9\u0646\u06CC\u062F.");
+  return secret2;
+}
+var source = (value) => Uint8Array.from(value).buffer;
+async function key(salt, usage) {
+  const material = await crypto.subtle.importKey("raw", textEncoder.encode(password()), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt: source(salt), iterations: 12e4 }, material, { name: "AES-GCM", length: 256 }, false, usage);
+}
+async function encryptVault(value) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12)), ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await key(salt, ["encrypt"]), textEncoder.encode(JSON.stringify(value)));
+  return { version: 2, salt: bytesToBase64(salt), iv: bytesToBase64(iv), ciphertext: bytesToBase64(new Uint8Array(ciphertext)) };
+}
+async function decryptVault(raw2) {
+  if (!raw2) return environmentFallback();
+  const envelope = raw2;
+  if (envelope.version !== 2) throw new Error("\u0646\u0633\u062E\u0647 \u062E\u0632\u0627\u0646\u0647 \u0628\u0627 Worker \u0633\u0627\u0632\u06AF\u0627\u0631 \u0646\u06CC\u0633\u062A\u061B \u0627\u062A\u0635\u0627\u0644\u200C\u0647\u0627 \u0631\u0627 \u062F\u0648\u0628\u0627\u0631\u0647 \u0648\u0627\u0631\u062F \u06A9\u0646\u06CC\u062F.");
+  try {
+    const salt = base64ToBytes(envelope.salt), iv = base64ToBytes(envelope.iv), plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: source(iv) }, await key(salt, ["decrypt"]), source(base64ToBytes(envelope.ciphertext)));
+    return mergeConnections(emptyConnections(), JSON.parse(textDecoder.decode(plain)));
+  } catch {
+    throw new Error("\u0628\u0627\u0632\u06A9\u0631\u062F\u0646 \u0627\u0637\u0644\u0627\u0639\u0627\u062A \u0627\u062A\u0635\u0627\u0644 \u0645\u0645\u06A9\u0646 \u0646\u0634\u062F\u061B \u0622\u06CC\u0627 VAULT_SECRET (\u06CC\u0627 ADMIN_TOKEN \u062F\u0631 \u062D\u0627\u0644\u062A fallback) \u062A\u063A\u06CC\u06CC\u0631 \u06A9\u0631\u062F\u0647 \u0627\u0633\u062A\u061F");
+  }
+}
+function environmentFallback() {
+  const env = getEnv(), result = emptyConnections();
+  result.woo = { ...result.woo, url: env.WOO_URL || "", key: env.WOO_KEY || "", secret: env.WOO_SECRET || "" };
+  result.basalam = { ...result.basalam, token: env.BASALAM_TOKEN || "", vendorId: env.BASALAM_VENDOR_ID || "", api: env.BASALAM_API || result.basalam.api };
+  return result;
+}
+function mergeConnections(base, input) {
+  const text = (value, fallback = "") => typeof value === "string" ? value.trim() : fallback, num = (value, fallback = 0) => value !== void 0 && Number.isFinite(Number(value)) ? Number(value) : fallback, bool = (value, fallback = false) => typeof value === "boolean" ? value : fallback;
+  const shops = Array.isArray(input?.basalam?.shops) ? input.basalam.shops.map((shop) => ({ name: text(shop?.name), token: text(shop?.token), vendorId: text(shop?.vendorId), pricePercent: num(shop?.pricePercent) })) : base.basalam.shops;
+  const providers = Array.isArray(input?.ai?.providers) ? input.ai.providers.map((p, i) => ({ id: text(p?.id) || `provider-${i + 1}`, name: text(p?.name) || text(p?.id) || `Provider ${i + 1}`, baseUrl: text(p?.baseUrl || p?.base_url).replace(/\/$/, ""), apiKey: text(p?.apiKey || p?.api_key), models: Array.isArray(p?.models) ? p.models.map(String) : [], enabled: p?.enabled !== false })) : base.ai.providers;
+  const network = { ...base.ai.network, ...input?.ai?.network || {} };
+  return {
+    woo: { url: text(input?.woo?.url, base.woo.url).replace(/\/$/, ""), key: text(input?.woo?.key, base.woo.key), secret: text(input?.woo?.secret, base.woo.secret), categoryId: num(input?.woo?.categoryId, base.woo.categoryId) },
+    basalam: { token: text(input?.basalam?.token, base.basalam.token), vendorId: text(input?.basalam?.vendorId, base.basalam.vendorId), api: text(input?.basalam?.api, base.basalam.api).replace(/\/$/, "") || "https://openapi.basalam.com/v1", preparationDays: num(input?.basalam?.preparationDays, base.basalam.preparationDays), weight: num(input?.basalam?.weight, base.basalam.weight), packageWeight: num(input?.basalam?.packageWeight, base.basalam.packageWeight), stock: num(input?.basalam?.stock, base.basalam.stock), categoryId: num(input?.basalam?.categoryId, base.basalam.categoryId), autoCategory: bool(input?.basalam?.autoCategory, base.basalam.autoCategory), netIndirect: bool(input?.basalam?.netIndirect, base.basalam.netIndirect), shops },
+    ai: { baseUrl: text(input?.ai?.baseUrl, base.ai.baseUrl).replace(/\/$/, ""), apiKey: text(input?.ai?.apiKey, base.ai.apiKey), model: text(input?.ai?.model, base.ai.model), providers, candidates: Array.isArray(input?.ai?.candidates) ? input.ai.candidates.map(String) : base.ai.candidates, master: text(input?.ai?.master, base.ai.master), network: { mode: text(network.mode, "direct"), proxyUrl: text(network.proxyUrl), workerUrl: text(network.workerUrl), dohUrl: text(network.dohUrl, "https://cloudflare-dns.com/dns-query"), resolveIp: text(network.resolveIp) } },
+    notifications: { url: text(input?.notifications?.url, base.notifications.url), token: text(input?.notifications?.token, base.notifications.token), chatId: text(input?.notifications?.chatId, base.notifications.chatId), baleToken: text(input?.notifications?.baleToken, base.notifications.baleToken), baleChatId: text(input?.notifications?.baleChatId, base.notifications.baleChatId), rubikaToken: text(input?.notifications?.rubikaToken, base.notifications.rubikaToken), rubikaChatId: text(input?.notifications?.rubikaChatId, base.notifications.rubikaChatId) }
+  };
+}
+
+// worker-src/connections.ts
+var KEY = "connection_vault";
+var cached = null;
+async function loadConnections(fresh = false) {
+  if (!fresh && cached && cached.expires > Date.now()) return cached.value;
+  const value = await decryptVault(await getState(KEY, null));
+  cached = { value, expires: Date.now() + 3e4 };
+  return value;
+}
+async function saveConnections(input) {
+  const value = mergeConnections(await loadConnections(true), input);
+  await setState(KEY, await encryptVault(value));
+  cached = { value, expires: Date.now() + 3e4 };
+  return value;
+}
+function connectionStatus(value) {
+  return { woo: Boolean(value.woo.url && value.woo.key && value.woo.secret), basalam: Boolean(value.basalam.token && value.basalam.vendorId), ai: Boolean(value.ai.baseUrl && value.ai.apiKey && value.ai.model || value.ai.providers.some((p) => p.enabled && p.baseUrl && p.apiKey && p.models.length)), notifications: Boolean(value.notifications.url || value.notifications.baleToken || value.notifications.rubikaToken) };
+}
+
+// worker-src/network.ts
+function privateIp(value) {
+  const ip = value.replace(/^\[|\]$/g, "").toLowerCase();
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip)) {
+    const p = ip.split(".").map(Number);
+    if (p.some((x) => x < 0 || x > 255)) return true;
+    const [a, b] = p;
+    return a === 0 || a === 10 || a === 127 || a >= 224 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 100 && b >= 64 && b <= 127;
+  }
+  if (ip.includes(":")) return ip === "::" || ip === "::1" || ip.startsWith("fc") || ip.startsWith("fd") || ip.startsWith("fe8") || ip.startsWith("fe9") || ip.startsWith("fea") || ip.startsWith("feb") || ip.startsWith("::ffff:127.") || ip.startsWith("::ffff:10.") || ip.startsWith("::ffff:192.168.");
+  return false;
+}
+function assertPublicUrl(raw2) {
+  const url = new URL(raw2);
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Only HTTP/HTTPS URLs are allowed");
+  if (url.username || url.password) throw new Error("Credentials in URLs are not allowed");
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (!host || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".home") || privateIp(host)) throw new Error("Private hosts are not allowed");
+  return url;
+}
+async function limitedBody(response, maxBytes) {
+  const declared = Number(response.headers.get("content-length") || 0);
+  if (declared > maxBytes) throw new Error(`Response exceeds ${maxBytes} bytes`);
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader(), chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel();
+          throw new Error(`Response exceeds ${maxBytes} bytes`);
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+async function safeFetch(raw2, init = {}, maxBytes) {
+  let url = assertPublicUrl(raw2), requestInit = { ...init };
+  const env = getEnv(), limit = Math.min(25e6, Math.max(1e3, maxBytes || Number(env.MAX_RESPONSE_BYTES) || 8e6));
+  for (let redirects = 0; redirects < 5; redirects++) {
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort("timeout"), Math.max(1e3, Number(env.REQUEST_TIMEOUT_MS) || 25e3));
+    let response;
+    try {
+      response = await fetch(url.href, { ...requestInit, redirect: "manual", signal: controller.signal, headers: { "user-agent": "Scraper4-Cloudflare/1.0", accept: "text/html,application/json;q=0.9,*/*;q=0.8", ...requestInit.headers } });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      if (!location) throw new Error("Redirect without location");
+      url = assertPublicUrl(new URL(location, url).href);
+      if (response.status === 303) {
+        requestInit = { ...requestInit, method: "GET", body: void 0 };
+      }
+      continue;
+    }
+    const body = await limitedBody(response, limit), headers = new Headers(response.headers);
+    headers.set("x-scraper-final-url", url.href);
+    return new Response(Uint8Array.from(body).buffer, { status: response.status, statusText: response.statusText, headers });
+  }
+  throw new Error("Too many redirects");
+}
+async function safeText(raw2, maxBytes = 8e6) {
+  const response = await safeFetch(raw2, {}, maxBytes);
+  if (!response.ok) throw new Error(`HTTP ${response.status} from ${raw2}`);
+  return { text: textDecoder.decode(await response.arrayBuffer()), url: response.headers.get("x-scraper-final-url") || raw2, contentType: response.headers.get("content-type") || "" };
+}
+
+// worker-src/ai.ts
+async function aiProviders() {
+  const ai = (await loadConnections()).ai;
+  return ai.providers.length ? ai.providers : [{ id: "default", name: "Default", baseUrl: ai.baseUrl, apiKey: ai.apiKey, models: ai.model ? [ai.model] : [], enabled: true }];
+}
+async function aiCall(provider, model, prompt) {
+  const ai = (await loadConnections()).ai;
+  if (!provider.baseUrl || !provider.apiKey || !model) throw new Error("\u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0627\u0631\u0627\u0626\u0647\u200C\u062F\u0647\u0646\u062F\u0647/\u0645\u062F\u0644 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
+  const endpoint = provider.baseUrl + (provider.baseUrl.includes("/chat/completions") ? "" : "/chat/completions"), started = Date.now(), response = await networkFetch(endpoint, { method: "POST", headers: { authorization: `Bearer ${provider.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 400, temperature: 0.2 }) }, ai.network), body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${body?.error?.message || body?.message || "AI error"}`);
+  const text = body?.choices?.[0]?.message?.content || body?.result?.response || body?.response || "";
+  return { ok: true, text: String(text), latencyMs: Date.now() - started, provider: provider.id, model };
+}
+async function testAllModels(prompt = "\u0633\u0644\u0627\u0645", onlyCandidates = false) {
+  const ai = (await loadConnections()).ai, providers = await aiProviders(), wanted = new Set(ai.candidates), tasks = providers.filter((p) => p.enabled).flatMap((p) => p.models.map((model) => ({ p, model, key: `${p.id}::${model}` }))).filter((x) => !onlyCandidates || wanted.has(x.key)), results = [];
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(3, tasks.length) }, async () => {
+    while (cursor < tasks.length) {
+      const task = tasks[cursor++];
+      try {
+        results.push({ ...await aiCall(task.p, task.model, prompt), key: task.key });
+      } catch (error) {
+        results.push({ ok: false, key: task.key, provider: task.p.id, model: task.model, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  }));
+  await setState("ai_test_results", { at: (/* @__PURE__ */ new Date()).toISOString(), results });
+  return results;
+}
+async function recordVote(task, winner, candidates) {
+  const votes = await getState("ai_votes", { scores: {}, history: [] });
+  for (const key2 of candidates) {
+    votes.scores[key2] ??= { wins: 0, tests: 0 };
+    votes.scores[key2].tests++;
+    if (key2 === winner) votes.scores[key2].wins++;
+  }
+  votes.history.push({ at: (/* @__PURE__ */ new Date()).toISOString(), task, winner, candidates });
+  votes.history = votes.history.slice(-1e3);
+  await setState("ai_votes", votes);
+  return leaderboard(votes);
+}
+async function getLeaderboard() {
+  return leaderboard(await getState("ai_votes", { scores: {}, history: [] }));
+}
+function leaderboard(votes) {
+  return Object.entries(votes.scores || {}).map(([key2, v]) => ({ key: key2, wins: v.wins || 0, tests: v.tests || 0, score: v.tests ? Math.round(v.wins / v.tests * 1e3) / 10 : 0 })).sort((a, b) => b.score - a.score || b.wins - a.wins);
+}
+async function networkFetch(url, init, net) {
+  assertPublicUrl(url);
+  if (net.mode === "direct" || !net.mode) return safeFetch(url, init, 3e6);
+  if (net.workerUrl) {
+    const target = net.workerUrl.includes("{url}") ? net.workerUrl.replace("{url}", encodeURIComponent(url)) : net.workerUrl + (net.workerUrl.includes("?") ? "&" : "?") + "url=" + encodeURIComponent(url);
+    return safeFetch(target, { ...init, headers: { ...init.headers, "x-scraper-target": url } }, 3e6);
+  }
+  throw new Error(`\u062D\u0627\u0644\u062A \u0634\u0628\u06A9\u0647 \xAB${net.mode}\xBB \u062F\u0631 Workers \u0628\u0647 Worker/Gateway \u0648\u0627\u0633\u0637 \u0646\u06CC\u0627\u0632 \u062F\u0627\u0631\u062F\u061B workerUrl \u0631\u0627 \u062A\u0646\u0638\u06CC\u0645 \u06A9\u0646\u06CC\u062F.`);
+}
+
+// worker-src/notifications.ts
+async function sendNotification(channel, text) {
+  const n = (await loadConnections()).notifications;
+  if (channel === "bale") {
+    if (!n.baleToken || !n.baleChatId) throw Error("\u062A\u0648\u06A9\u0646 \u06CC\u0627 Chat ID \u0628\u0644\u0647 \u062E\u0627\u0644\u06CC \u0627\u0633\u062A");
+    return send(`https://tapi.bale.ai/bot${n.baleToken}/sendMessage`, { chat_id: n.baleChatId, text });
+  }
+  if (channel === "rubika") {
+    if (!n.rubikaToken || !n.rubikaChatId) throw Error("\u062A\u0648\u06A9\u0646 \u06CC\u0627 Chat ID \u0631\u0648\u0628\u06CC\u06A9\u0627 \u062E\u0627\u0644\u06CC \u0627\u0633\u062A");
+    return send(`https://botapi.rubika.ir/v3/${n.rubikaToken}/sendMessage`, { chat_id: n.rubikaChatId, text });
+  }
+  if (!n.url) throw Error("Webhook URL \u062E\u0627\u0644\u06CC \u0627\u0633\u062A");
+  return send(n.url, { chat_id: n.chatId, text, token: n.token });
+}
+async function send(url, payload) {
+  const response = await safeFetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(payload) }, 1e6), body = await response.json().catch(() => null);
+  if (!response.ok) throw Error(`Notification HTTP ${response.status}`);
+  return { ok: true, code: response.status, body };
+}
+
+// worker-src/automation.ts
+var norm = (v) => String(v || "").toLowerCase().replace(/[يى]/g, "\u06CC").replace(/ك/g, "\u06A9").replace(/[\u200c\u200f\u200e]/g, " ").replace(/\s+/g, " ").trim();
+var DEFAULT_RULES = [{ id: "hello", on: true, match: "contains", triggers: "\u0633\u0644\u0627\u0645|\u062F\u0631\u0648\u062F|\u0648\u0642\u062A \u0628\u062E\u06CC\u0631", reply: "\u0633\u0644\u0627\u0645 \u0648 \u0648\u0642\u062A \u0628\u062E\u06CC\u0631 \u{1F339} \u062F\u0631 \u062E\u062F\u0645\u062A\u0645.", priority: 10, daily_max: 100 }, { id: "thanks", on: true, match: "contains", triggers: "\u0645\u0645\u0646\u0648\u0646|\u0645\u062A\u0634\u06A9\u0631|\u0633\u067E\u0627\u0633", reply: "\u062E\u0648\u0627\u0647\u0634 \u0645\u06CC\u200C\u06A9\u0646\u0645 \u{1F337}", priority: 20, daily_max: 100 }, { id: "bye", on: true, match: "contains", triggers: "\u062E\u062F\u0627\u062D\u0627\u0641\u0638|\u062E\u062F\u0627\u0646\u06AF\u0647\u062F\u0627\u0631", reply: "\u062E\u062F\u0627\u0646\u06AF\u0647\u062F\u0627\u0631 \u{1F339} \u0647\u0631 \u0632\u0645\u0627\u0646 \u0633\u0624\u0627\u0644\u06CC \u062F\u0627\u0634\u062A\u06CC\u062F \u062F\u0631 \u062E\u062F\u0645\u062A\u0645.", priority: 30, daily_max: 100 }];
+function matchRule(rules, text) {
+  const sorted = rules.filter((r) => r.on !== false && r.reply).sort((a, b) => (a.priority || 50) - (b.priority || 50));
+  for (const rule of sorted) if (ruleMatch(rule, text)) return rule;
+  return null;
+}
+function ruleMatch(rule, text) {
+  if (rule.match === "always") return true;
+  const value = norm(text);
+  for (const raw2 of String(rule.triggers || "").split(/[\r\n|]+/)) {
+    const trigger = norm(raw2);
+    if (!trigger) continue;
+    if (rule.match === "exact" && value === trigger) return true;
+    if (rule.match === "starts" && value.startsWith(trigger)) return true;
+    if ((!rule.match || rule.match === "contains") && value.includes(trigger)) return true;
+    if (rule.match === "regex") try {
+      if (new RegExp(raw2, "iu").test(text)) return true;
+    } catch {
+    }
+  }
+  return false;
+}
+async function generateReply(text) {
+  const settings = await getState("settings", {}), cfg = settings.autoreply || {}, rules = Array.isArray(cfg.rules) && cfg.rules.length ? cfg.rules : DEFAULT_RULES, order2 = cfg.order || cfg.reply_order || "rules_first", rule = matchRule(rules, text);
+  const fromRule = () => rule ? { text: String(rule.reply), source: `rule:${rule.id || "rule"}` } : null, fromAi = async () => {
+    try {
+      const providers = await aiProviders(), p = providers.find((x) => x.enabled && x.models.length);
+      if (!p) return null;
+      const response = await aiCall(p, p.models[0], `\u062A\u0648 \u067E\u0634\u062A\u06CC\u0628\u0627\u0646 \u0645\u0624\u062F\u0628 \u0641\u0631\u0648\u0634\u06AF\u0627\u0647 \u0647\u0633\u062A\u06CC. \u06A9\u0648\u062A\u0627\u0647 \u0648 \u0641\u0627\u0631\u0633\u06CC \u067E\u0627\u0633\u062E \u0628\u062F\u0647. \u067E\u06CC\u0627\u0645 \u0645\u0634\u062A\u0631\u06CC: ${text}`);
+      return { text: response.text, source: `ai:${p.id}::${p.models[0]}` };
+    } catch {
+      return null;
+    }
+  };
+  if (order2 === "rules_only") return fromRule();
+  if (order2 === "ai_only") return fromAi();
+  if (order2 === "ai_first") return await fromAi() || fromRule();
+  return fromRule() || await fromAi();
+}
+async function autoreplyRun(dry = true) {
+  const settings = await getState("settings", {}), cfg = settings.autoreply || {};
+  if (!dry && !cfg.enabled) throw Error("\u067E\u0627\u0633\u062E \u062E\u0648\u062F\u06A9\u0627\u0631 \u0641\u0639\u0627\u0644 \u0646\u06CC\u0633\u062A");
+  const chats = await basalamChats(Number(cfg.scanLimit) || 20), state = await getState("autoreply_state", { chats: {}, day: "", daily: {} }), items = [];
+  let replied = 0, skipped = 0, failed = 0;
+  for (const chat of chats.slice(0, Math.min(50, Number(cfg.maxPerRun) || 5))) {
+    const chatId = Number(chat.id || chat.chat_id), messages = await chatMessages(chatId, 20), last = messages.find((m) => isCustomer(m));
+    if (!last) {
+      skipped++;
+      continue;
+    }
+    const msgId = String(last.id || last.message_id || ""), text = messageText(last), now2 = Date.now(), lastAt = messageTime(last), previous = state.chats?.[chatId];
+    if (!text || previous?.msgId === msgId) {
+      skipped++;
+      continue;
+    }
+    if (Number(cfg.graceMin || 10) > 0 && lastAt && now2 - lastAt < Number(cfg.graceMin || 10) * 6e4) {
+      skipped++;
+      items.push({ chatId, text, skip: "\u0645\u0647\u0644\u062A \u0627\u0646\u062A\u0638\u0627\u0631 \u067E\u06CC\u0627\u0645" });
+      continue;
+    }
+    if (previous?.at && now2 - Number(previous.at) < Number(cfg.perChatMin || 180) * 6e4) {
+      skipped++;
+      items.push({ chatId, text, skip: "\u0641\u0627\u0635\u0644\u0647 \u067E\u0627\u0633\u062E \u0628\u0647 \u06AF\u0641\u062A\u06AF\u0648" });
+      continue;
+    }
+    if (cfg.onlyOffhours && !offHours(Number(cfg.workFrom ?? 9), Number(cfg.workTo ?? 21))) {
+      skipped++;
+      continue;
+    }
+    const answer = await generateReply(text);
+    if (!answer) {
+      items.push({ chatId, text, skip: "\u0628\u062F\u0648\u0646 \u067E\u0627\u0633\u062E" });
+      skipped++;
+      continue;
+    }
+    const row = { chatId, customer: chat.customer?.name || chat.user?.name || chat.title || "", input: text, reply: answer.text, source: answer.source, status: dry ? "\u0627\u0631\u0633\u0627\u0644 \u0645\u06CC\u200C\u0634\u062F" : "\u062F\u0631 \u0627\u0646\u062A\u0638\u0627\u0631" };
+    if (dry) {
+      replied++;
+      items.push(row);
+      continue;
+    }
+    try {
+      await sendChat(chatId, answer.text + (cfg.sign ? `
+${cfg.sign}` : ""));
+      state.chats ??= {};
+      state.chats[chatId] = { msgId, at: Date.now(), source: answer.source };
+      await addAutoreplyLog({ chatId, customer: row.customer, input: text, output: answer.text, source: answer.source });
+      row.status = "\u0627\u0631\u0633\u0627\u0644 \u0634\u062F";
+      replied++;
+    } catch (error) {
+      row.status = error instanceof Error ? error.message : String(error);
+      failed++;
+    }
+    items.push(row);
+  }
+  if (!dry) await setState("autoreply_state", state);
+  return { ok: failed === 0, dry, checked: chats.length, replied, skipped, failed, items };
+}
+async function basalamChats(limit = 20) {
+  const c = (await loadConnections()).basalam;
+  if (!c.token) throw Error("\u062A\u0648\u06A9\u0646 \u0628\u0627\u0633\u0644\u0627\u0645 \u062E\u0627\u0644\u06CC \u0627\u0633\u062A");
+  const r = await safeFetch(`${c.api}/chats?limit=${Math.min(50, limit)}&order_by=updated_at`, { headers: { authorization: `Bearer ${c.token}`, accept: "application/json" } }, 3e6), body = await r.json();
+  if (!r.ok) throw Error(`Basalam chats HTTP ${r.status}`);
+  return body?.data?.chats || body?.data || [];
+}
+async function basalamOrders(perPage = 20) {
+  const c = (await loadConnections()).basalam;
+  if (!c.token || !c.vendorId) throw Error("\u0627\u062A\u0635\u0627\u0644 \u0628\u0627\u0633\u0644\u0627\u0645 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
+  const r = await safeFetch(`${c.api}/vendor-parcels?items.vendor_ids=${encodeURIComponent(c.vendorId)}&per_page=${Math.min(30, perPage)}`, { headers: { authorization: `Bearer ${c.token}`, accept: "application/json" } }, 5e6), body = await r.json();
+  if (!r.ok) throw Error(`Basalam orders HTTP ${r.status}`);
+  return body?.data || [];
+}
+async function chatMessages(chatId, limit = 20) {
+  const c = (await loadConnections()).basalam, r = await safeFetch(`${c.api}/chats/${chatId}/messages?limit=${limit}&order=desc`, { headers: { authorization: `Bearer ${c.token}`, accept: "application/json" } }, 3e6), body = await r.json();
+  if (!r.ok) throw Error(`Chat messages HTTP ${r.status}`);
+  return body?.data?.messages || body?.data || [];
+}
+async function sendChat(chatId, text) {
+  const c = (await loadConnections()).basalam, r = await safeFetch(`${c.api}/chats/${chatId}/messages`, { method: "POST", headers: { authorization: `Bearer ${c.token}`, "content-type": "application/json" }, body: JSON.stringify({ content: { text: text.slice(0, 3e3) }, message_type: "text" }) }, 2e6);
+  if (!r.ok) throw Error(`Send chat HTTP ${r.status}`);
+}
+function isCustomer(m) {
+  const role = String(m.sender_type || m.sender?.type || m.role || "").toLowerCase();
+  return !["vendor", "seller", "shop", "admin"].includes(role);
+}
+function messageText(m) {
+  return String(m.content?.text || m.text || m.message || "").trim();
+}
+function messageTime(m) {
+  const value = m.created_at || m.createdAt || m.date || m.timestamp;
+  if (!value) return 0;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 1e9 ? n < 1e12 ? n * 1e3 : n : Date.parse(value) || 0;
+}
+function offHours(from, to) {
+  const hour = (/* @__PURE__ */ new Date()).getHours();
+  if (from === to) return false;
+  return from < to ? !(hour >= from && hour < to) : !(hour >= from || hour < to);
+}
+async function digest(preview = true) {
+  const rows2 = await maintenanceRows(""), previous = await getState("digest_snapshot", {}), current2 = {};
+  for (const row of rows2) current2[`${row.profile_id}:${row.source_key}`] = { title: row.title, price: Number(row.price), active: row.active };
+  const added = [], removed = [], changed = [];
+  for (const [key2, value] of Object.entries(current2)) {
+    if (!previous[key2]) added.push(value);
+    else if (previous[key2].price !== value.price) changed.push({ ...value, oldPrice: previous[key2].price });
+  }
+  for (const [key2, value] of Object.entries(previous)) if (!current2[key2] || !current2[key2].active) removed.push(value);
+  const text = `\u{1F319} \u06AF\u0632\u0627\u0631\u0634 \u0645\u062D\u0635\u0648\u0644\u0627\u062A
+\u2795 \u062C\u062F\u06CC\u062F: ${added.length}
+\u{1F4B0} \u062A\u063A\u06CC\u06CC\u0631 \u0642\u06CC\u0645\u062A: ${changed.length}
+\u{1F5D1} \u062D\u0630\u0641/\u0646\u0627\u0645\u0648\u062C\u0648\u062F: ${removed.length}`;
+  const delivery = [];
+  if (!preview) {
+    await setState("digest_snapshot", current2);
+    const n = (await loadConnections()).notifications;
+    for (const [channel, on] of [["bale", n.baleToken && n.baleChatId], ["rubika", n.rubikaToken && n.rubikaChatId], ["webhook", n.url]]) if (on) try {
+      delivery.push({ channel, ...await sendNotification(channel, text) });
+    } catch (error) {
+      delivery.push({ channel, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { ok: true, preview, text, added: added.slice(0, 100), removed: removed.slice(0, 100), changed: changed.slice(0, 100), counts: { added: added.length, removed: removed.length, changed: changed.length }, delivery };
+}
+async function autoreplyLogs() {
+  return listAutoreplyLog(100);
+}
+async function automationTick() {
+  const settings = await getState("settings", {}), result = {};
+  if (settings.autoreply?.enabled) try {
+    result.autoreply = await autoreplyRun(false);
+  } catch (error) {
+    result.autoreply = { error: error instanceof Error ? error.message : String(error) };
+  }
+  const d = settings.digest || {}, timezone = String(d.timezone || "Asia/Tehran"), parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23" }).formatToParts(/* @__PURE__ */ new Date()), part = (name) => parts.find((x) => x.type === name)?.value || "", today = `${part("year")}-${part("month")}-${part("day")}`, hour = Number(part("hour")), state = await getState("digest_run", {});
+  if (d.enabled && hour === Number(d.hour ?? 23) && state.day !== today) try {
+    result.digest = await digest(false);
+    await setState("digest_run", { day: today, at: (/* @__PURE__ */ new Date()).toISOString() });
+  } catch (error) {
+    result.digest = { error: error instanceof Error ? error.message : String(error) };
+  }
+  return result;
+}
+
+// worker-src/dashboard.ts
+var DASHBOARD = `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>\u0627\u0633\u06A9\u0631\u067E\u0631 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u0648 \u0628\u0627\u0633\u0644\u0627\u0645</title><style>
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}:root{color-scheme:dark;--bg:#0f172a;--card:#1e293b;--line:#334155;--input:#0f172a;--muted:#94a3b8;--blue:#3b82f6;--cyan:#06b6d4;--green:#22c55e;--red:#ef4444;--purple:#a855f7;--orange:#f97316;--yellow:#eab308}body{font-family:Tahoma,system-ui,sans-serif;background:var(--bg);color:#e2e8f0;min-height:100vh;padding:58px 12px 86px;direction:rtl}.container{max-width:1400px;margin:auto}.topbar{position:fixed;z-index:900;top:0;left:0;right:0;height:48px;background:#111c31ee;backdrop-filter:blur(12px);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 14px}.brand{font-weight:800;font-size:15px}.brand b{color:#67e8f9}.top-state{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:10px}.dot{width:8px;height:8px;border-radius:50%;background:#64748b}.dot.ok{background:var(--green);box-shadow:0 0 10px #22c55e}.dot.err{background:var(--red)}h1{font-size:18px;margin-bottom:12px}h2{font-size:15px;margin-bottom:10px}h3{font-size:13px;color:#67e8f9;margin-bottom:9px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}.card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}.field{flex:1;min-width:180px}.field.small{min-width:100px}.field label{display:block;color:var(--muted);font-size:10px;margin-bottom:5px}.field-hint{font-size:9px;color:#64748b;margin-top:4px;line-height:1.6}input,select,textarea{background:var(--input);border:1px solid #475569;color:#fff;padding:9px 11px;border-radius:8px;font-size:12px;font-family:inherit;width:100%}input:focus,select:focus,textarea:focus{outline:1px solid var(--cyan);border-color:var(--cyan)}input[type=checkbox]{width:auto;accent-color:var(--blue)}select{min-width:90px}.checks{display:flex;gap:14px;flex-wrap:wrap;padding:7px 0}.checks label{display:flex;gap:6px;align-items:center;color:#cbd5e1;font-size:11px}.btn{padding:9px 13px;border:0;border-radius:8px;font-weight:700;cursor:pointer;font-size:11px;font-family:inherit;white-space:nowrap}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:wait}.btn-blue{background:linear-gradient(135deg,var(--blue),var(--cyan));color:#001018}.btn-green{background:var(--green);color:#052e16}.btn-red{background:var(--red);color:#fff}.btn-purple{background:var(--purple);color:#fff}.btn-orange{background:var(--orange);color:#1c0a00}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:var(--yellow);color:#1c1500}.btn-sm{padding:5px 8px;font-size:9px}.main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172af5;border-top:1px solid var(--line);display:flex;z-index:1000;box-shadow:0 -4px 20px #0008;padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:9px 3px 7px;border:0;background:transparent;color:#64748b;font:11px Tahoma;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative}.main-tab .icon{font-size:19px}.main-tab.active{color:#60a5fa;background:#1e293b}.main-tab .badge{position:absolute;top:3px;right:calc(50% - 22px);background:var(--red);color:#fff;font-size:8px;padding:2px 5px;border-radius:8px}.tab-pane{display:none;animation:fade .2s}.tab-pane.active{display:block}@keyframes fade{from{opacity:.3;transform:translateY(4px)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px;overflow:auto}.sub-tab{flex:1;min-width:90px;padding:8px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:600 11px Tahoma;cursor:pointer}.sub-tab.active{background:var(--blue);color:#07111e}.notice{padding:10px 12px;border-radius:8px;margin-bottom:10px;font-size:11px;display:none}.notice.show{display:block}.notice.ok{background:#14532d;border:1px solid var(--green);color:#bbf7d0}.notice.error{background:#7f1d1d;border:1px solid var(--red);color:#fecaca}.notice.info{background:#1e3a5f;border:1px solid var(--blue);color:#bfdbfe}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.stat{background:#0f172a;border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center}.stat b{display:block;font-size:19px;color:#f8fafc}.stat span{font-size:9px;color:#64748b}.profile-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:9px}.profile{background:#0f172a;border:1px solid var(--line);border-radius:10px;padding:11px}.profile.selected{border-color:var(--cyan);box-shadow:0 0 0 1px #06b6d455}.profile-title{display:flex;justify-content:space-between;gap:8px;font-size:12px;font-weight:bold}.profile-url{direction:ltr;text-align:left;color:#64748b;font:9px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:6px 0}.profile-meta{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0}.chip{font-size:8px;padding:3px 6px;border-radius:8px;background:#1e3a5f;color:#93c5fd}.profile-actions{display:flex;gap:5px;flex-wrap:wrap}.selector-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px}.sel-item{background:#0f172a;border:1px solid var(--line);border-radius:8px;padding:9px}.sel-item.has{border-color:#16a34a}.sel-title{display:flex;justify-content:space-between;color:var(--muted);font-size:10px;margin-bottom:5px}.sel-item input{font:10px monospace;padding:7px}.sel-result{margin-top:5px;min-height:20px;padding:5px;border-radius:5px;background:#111c31;color:#86efac;font-size:9px;overflow:hidden}.products{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px}.product{background:#1e293b;border:1px solid var(--line);border-radius:11px;overflow:hidden}.thumb{height:135px;background:linear-gradient(135deg,#1e3a5f,#312e81);display:flex;align-items:center;justify-content:center;color:#64748b}.thumb img{width:100%;height:100%;object-fit:cover}.pbody{padding:9px}.ptitle{font-size:11px;font-weight:bold;line-height:1.55;height:35px;overflow:hidden}.price{display:inline-block;background:#166534;color:#86efac;padding:4px 7px;border-radius:6px;font-size:11px;margin:6px 0}.pmeta{font-size:9px;color:#64748b}.progress{height:5px;background:#334155;border-radius:5px;overflow:hidden;margin:7px 0}.bar{height:100%;background:linear-gradient(90deg,var(--blue),var(--purple));transition:.3s}.jobs{display:flex;flex-direction:column;gap:8px}.job{background:#0f172a;border:1px solid var(--line);border-radius:9px;padding:10px}.job-head{display:flex;justify-content:space-between;gap:8px}.job-status{font-size:9px;padding:3px 7px;border-radius:8px}.s-running,.s-queued{background:#1e3a5f;color:#93c5fd}.s-done{background:#14532d;color:#86efac}.s-failed,.s-stopped{background:#7f1d1d;color:#fca5a5}.logs{direction:ltr;text-align:left;background:#020617;border:1px solid var(--line);padding:9px;border-radius:7px;max-height:180px;overflow:auto;font:9px monospace;color:#94a3b8;margin-top:7px}.empty{text-align:center;padding:25px;color:#64748b}.settings-line{display:flex;justify-content:space-between;padding:9px;border-bottom:1px solid var(--line);font-size:11px}.on{color:#4ade80}.off{color:#f87171}.modal{position:fixed;z-index:2000;inset:0;background:#020617dd;display:none;padding:12px}.modal.open{display:flex}.modal-box{width:min(1500px,100%);height:calc(100vh - 24px);margin:auto;background:#1e293b;border:1px solid #475569;border-radius:12px;overflow:hidden;display:flex;flex-direction:column}.modal-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line)}.modal-head span{font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.modal iframe{flex:1;width:100%;border:0;background:#fff}.visual-loading{padding:25px;text-align:center;color:#67e8f9}.hamburger{position:fixed;z-index:1200;top:7px;left:9px;width:36px;height:36px;border:1px solid #475569;border-radius:9px;background:#1e293b;color:#fff;font-size:19px;cursor:pointer}.drawer-overlay{position:fixed;z-index:1290;inset:0;background:#0009;display:none}.drawer-overlay.open{display:block}.drawer{position:fixed;z-index:1300;top:0;bottom:0;left:-430px;width:410px;max-width:94vw;background:#0f172a;border-right:1px solid #475569;transition:left .25s;overflow:auto}.drawer.open{left:0}.drawer-head{position:sticky;z-index:2;top:0;background:#1e293b;border-bottom:1px solid #475569;padding:13px;display:flex;align-items:center;justify-content:space-between}.drawer-body{padding:10px}.menu-section{border-bottom:1px solid #1e293b}.menu-title{display:flex;align-items:center;justify-content:space-between;width:100%;padding:12px 8px;border:0;background:transparent;color:#e2e8f0;font:bold 12px Tahoma;cursor:pointer;text-align:right}.menu-title:hover{background:#1e293b}.menu-title i{color:#64748b}.menu-content{display:none;background:#111c31;border:1px solid #1e293b;border-radius:8px;padding:10px;margin-bottom:8px}.menu-section.open .menu-content{display:block}.menu-section.open .menu-title i{transform:rotate(180deg)}.menu-actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}.menu-text{font-size:9px;color:#94a3b8;line-height:1.8}.menu-content textarea{min-height:80px}.full-drawer{width:100%;max-width:100%}@media(max-width:700px){body{padding-left:8px;padding-right:8px}.stats{grid-template-columns:repeat(2,1fr)}.main-tab{font-size:9px}.main-tab .icon{font-size:17px}.field{min-width:100%}.card{padding:11px}.products{grid-template-columns:repeat(2,1fr)}}
+</style></head><body><button id="hamburgerBtn" class="hamburger" title="\u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0639\u0645\u0648\u0645\u06CC">\u2630</button><div id="drawerOverlay" class="drawer-overlay"></div><aside id="drawer" class="drawer"><div class="drawer-head"><b>\u2630 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0639\u0645\u0648\u0645\u06CC</b><div><button id="drawerFull" class="btn btn-gray btn-sm">\u26F6</button> <button id="drawerClose" class="btn btn-red btn-sm">\u2715</button></div></div><div id="menuSections" class="drawer-body"></div></aside><header class="topbar"><div class="brand">\u{1F6D2} \u0627\u0633\u06A9\u0631\u067E\u0631 <b>\u0648\u0648\u06A9\u0627\u0645\u0631\u0633 / \u0628\u0627\u0633\u0644\u0627\u0645</b></div><div class="top-state"><span id="topText">\u062F\u0631 \u0627\u0646\u062A\u0638\u0627\u0631 \u0627\u062A\u0635\u0627\u0644</span><i id="topDot" class="dot"></i></div></header><main class="container"><div id="notice" class="notice" role="status"></div>
+<section id="pane-home" class="tab-pane active"><div class="card"><div class="card-head"><h2>\u{1F4CA} \u0646\u0645\u0627\u06CC \u06A9\u0644\u06CC</h2><button id="refreshAll" class="btn btn-gray btn-sm">\u21BB \u062A\u0627\u0632\u0647\u200C\u0633\u0627\u0632\u06CC</button></div><div class="stats"><div class="stat"><b id="statProfiles">\u06F0</b><span>\u067E\u0631\u0648\u0641\u0627\u06CC\u0644</span></div><div class="stat"><b id="statProducts">\u06F0</b><span>\u0645\u062D\u0635\u0648\u0644 \u0646\u0645\u0627\u06CC\u0634\u06CC</span></div><div class="stat"><b id="statRunning">\u06F0</b><span>\u062F\u0631 \u0635\u0641 / \u0627\u062C\u0631\u0627</span></div><div class="stat"><b id="statFailed">\u06F0</b><span>\u062E\u0637\u0627</span></div></div></div><div class="card"><div class="card-head"><h2>\u{1F310} \u067E\u0631\u0648\u0641\u0627\u06CC\u0644\u200C\u0647\u0627\u06CC \u0630\u062E\u06CC\u0631\u0647\u200C\u0634\u062F\u0647</h2><button id="newProfileBtn" class="btn btn-blue btn-sm">\uFF0B \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u062C\u062F\u06CC\u062F</button></div><div id="profileList" class="profile-list"><div class="empty">\u0627\u0628\u062A\u062F\u0627 \u062F\u0631 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A ADMIN_TOKEN \u0631\u0627 \u0648\u0627\u0631\u062F \u06A9\u0646\u06CC\u062F.</div></div></div></section>
+<section id="pane-selector" class="tab-pane"><div class="sub-tabs"><button class="sub-tab active" data-sub="basic">\u06F1. \u0645\u0646\u0628\u0639 \u0648 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</button><button class="sub-tab" data-sub="selectors">\u06F2. \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</button><button class="sub-tab" data-sub="details">\u06F3. \u062C\u0632\u0626\u06CC\u0627\u062A \u0648 \u0627\u0631\u0633\u0627\u0644</button></div><div class="sub-pane" data-panel="basic"><div class="card"><div class="card-head"><h2>\u{1F517} \u0645\u0634\u062E\u0635\u0627\u062A \u067E\u0631\u0648\u0641\u0627\u06CC\u0644</h2><span id="editBadge" class="chip">\u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u062C\u062F\u06CC\u062F</span></div><input type="hidden" id="profileId"><div class="row"><div class="field"><label>\u0646\u0627\u0645 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644</label><input id="name" placeholder="\u0645\u062B\u0644\u0627\u064B \u0641\u0631\u0648\u0634\u06AF\u0627\u0647 \u0645\u0628\u062F\u0623"></div><div class="field"><label>\u0622\u062F\u0631\u0633 \u0635\u0641\u062D\u0647 \u0645\u062D\u0635\u0648\u0644\u0627\u062A</label><input id="url" dir="ltr" placeholder="https://example.com/shop?page=1"></div></div><div class="row"><div class="field small"><label>\u062A\u0639\u062F\u0627\u062F \u0635\u0641\u062D\u0627\u062A</label><input id="pages" type="number" value="1" min="1" max="100"></div><div class="field"><label>\u0646\u0648\u0639 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</label><select id="pagination"><option value="query_page">\u067E\u0627\u0631\u0627\u0645\u062A\u0631 Query (page)</option><option value="query_custom">\u067E\u0627\u0631\u0627\u0645\u062A\u0631 Query \u0633\u0641\u0627\u0631\u0634\u06CC</option><option value="path_page">\u0645\u0633\u06CC\u0631 /page/2/</option><option value="path_pattern">\u0627\u0644\u06AF\u0648\u06CC \u0645\u0633\u06CC\u0631 \u0628\u0627 {page}</option><option value="full_pattern">\u0627\u0644\u06AF\u0648\u06CC \u06A9\u0627\u0645\u0644 URL \u0628\u0627 {page}</option><option value="next_selector">\u0633\u0644\u06A9\u062A\u0648\u0631 \u062F\u06A9\u0645\u0647/\u0644\u06CC\u0646\u06A9 \u0628\u0639\u062F\u06CC</option><option value="none">\u0628\u062F\u0648\u0646 \u0635\u0641\u062D\u0647\u200C\u0628\u0646\u062F\u06CC</option></select></div><div class="field"><label>\u0646\u0627\u0645 \u067E\u0627\u0631\u0627\u0645\u062A\u0631 \u0635\u0641\u062D\u0647</label><input id="paginationValue" value="page" dir="ltr"></div><div class="field"><label>\u0627\u062C\u0631\u0627\u06CC \u062F\u0648\u0631\u0647\u200C\u0627\u06CC (\u062F\u0642\u06CC\u0642\u0647)</label><input id="interval" type="number" value="0" min="0"></div></div></div></div><div class="sub-pane" data-panel="selectors" hidden><div class="card"><div class="card-head"><h2>\u{1F3AF} \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627\u06CC \u0635\u0641\u062D\u0647 \u0641\u0647\u0631\u0633\u062A</h2><div class="row" style="margin:0"><button id="openVisual" class="btn btn-blue btn-sm">\u{1F441} \u0627\u0646\u062A\u062E\u0627\u0628 \u0628\u0635\u0631\u06CC</button><button id="testSelectors" class="btn btn-purple btn-sm">\u{1F9EA} \u0622\u0632\u0645\u0627\u06CC\u0634 \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</button></div></div><div id="selectorGrid" class="selector-grid"></div><div class="field-hint">\u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627 CSS \u0647\u0633\u062A\u0646\u062F. \u0622\u0632\u0645\u0627\u06CC\u0634\u060C \u0627\u0648\u0644\u06CC\u0646 \u0645\u0642\u0627\u062F\u06CC\u0631 \u067E\u06CC\u062F\u0627\u200C\u0634\u062F\u0647 \u0631\u0627 \u0646\u0634\u0627\u0646 \u0645\u06CC\u200C\u062F\u0647\u062F.</div></div></div><div class="sub-pane" data-panel="details" hidden><div class="card"><h2>\u{1F4C4} \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627\u06CC \u0635\u0641\u062D\u0647 \u0645\u062D\u0635\u0648\u0644</h2><div id="detailGrid" class="selector-grid"></div></div><div class="card"><h2>\u{1F4B0} \u0642\u06CC\u0645\u062A \u0648 \u0645\u0642\u0635\u062F</h2><div class="row"><div class="field"><label>\u067E\u0633\u0648\u0646\u062F \u0639\u0646\u0648\u0627\u0646</label><input id="titleSuffix"></div><div class="field"><label>\u0646\u0648\u0639 \u062A\u063A\u06CC\u06CC\u0631 \u0642\u06CC\u0645\u062A</label><select id="priceMode"><option value="none">\u0628\u062F\u0648\u0646 \u062A\u063A\u06CC\u06CC\u0631</option><option value="add">\u0627\u0641\u0632\u0648\u062F\u0646 \u0645\u0628\u0644\u063A</option><option value="percent">\u0627\u0641\u0632\u0648\u062F\u0646 \u062F\u0631\u0635\u062F</option><option value="multiply">\u0636\u0631\u0628</option></select></div><div class="field"><label>\u0645\u0642\u062F\u0627\u0631 \u062A\u063A\u06CC\u06CC\u0631</label><input id="priceValue" type="number" value="0"></div><div class="field"><label>\u06AF\u0631\u062F \u06A9\u0631\u062F\u0646</label><input id="roundPrice" type="number" value="0"></div><div class="field"><label>\u062D\u062F\u0627\u0642\u0644 \u0642\u06CC\u0645\u062A</label><input id="minPrice" type="number" value="0"></div></div><div class="row"><div class="field"><label>\u0634\u0646\u0627\u0633\u0647 \u062F\u0633\u062A\u0647 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633</label><input id="wooCategoryId" type="number" value="0"></div><div class="field"><label>\u0634\u0646\u0627\u0633\u0647 \u062F\u0633\u062A\u0647 \u0628\u0627\u0633\u0644\u0627\u0645</label><input id="basalamCategoryId" type="number" value="0"></div></div><div class="checks"><label><input id="enabled" type="checkbox" checked> \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0641\u0639\u0627\u0644</label><label><input id="syncWoo" type="checkbox"> \u0627\u0631\u0633\u0627\u0644 \u062E\u0648\u062F\u06A9\u0627\u0631 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633</label><label><input id="syncBasalam" type="checkbox"> \u0627\u0631\u0633\u0627\u0644 \u062E\u0648\u062F\u06A9\u0627\u0631 \u0628\u0627\u0633\u0644\u0627\u0645</label></div></div></div><div class="card"><div class="row" style="margin:0"><button id="saveBtn" class="btn btn-green">\u{1F4BE} \u0630\u062E\u06CC\u0631\u0647 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644</button><button id="clearForm" class="btn btn-gray">\u067E\u0627\u06A9\u200C\u06A9\u0631\u062F\u0646 \u0641\u0631\u0645</button><button id="scrapeForm" class="btn btn-blue">\u25B6 \u0630\u062E\u06CC\u0631\u0647 \u0648 \u0627\u0633\u062A\u062E\u0631\u0627\u062C</button></div></div></section>
+<section id="pane-products" class="tab-pane"><div class="card"><div class="row" style="margin:0"><div class="field"><label>\u067E\u0631\u0648\u0641\u0627\u06CC\u0644</label><select id="productProfile"></select></div><div class="field"><label>\u062C\u0633\u062A\u200C\u0648\u062C\u0648</label><input id="productSearch" placeholder="\u0639\u0646\u0648\u0627\u0646 \u0645\u062D\u0635\u0648\u0644..."></div><div class="field small" style="align-self:end"><button id="loadProducts" class="btn btn-blue">\u{1F4E6} \u0646\u0645\u0627\u06CC\u0634 \u0645\u062D\u0635\u0648\u0644\u0627\u062A</button></div></div></div><div class="card"><div class="card-head"><h2>\u{1F4E6} \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0627\u0633\u062A\u062E\u0631\u0627\u062C\u200C\u0634\u062F\u0647</h2><span id="productCount" class="chip">\u06F0 \u0645\u062D\u0635\u0648\u0644</span></div><div id="products" class="products"><div class="empty">\u06CC\u06A9 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644 \u0627\u0646\u062A\u062E\u0627\u0628 \u06A9\u0646\u06CC\u062F.</div></div></div></section>
+<section id="pane-jobs" class="tab-pane"><div class="card"><div class="card-head"><h2>\u23F3 \u0635\u0641 \u0627\u0633\u062A\u062E\u0631\u0627\u062C \u0648 \u0627\u0631\u0633\u0627\u0644</h2><div class="row" style="margin:0"><button id="refreshJobs" class="btn btn-gray btn-sm">\u21BB \u062A\u0627\u0632\u0647\u200C\u0633\u0627\u0632\u06CC</button><button id="clearJobs" class="btn btn-red btn-sm">\u067E\u0627\u06A9\u200C\u06A9\u0631\u062F\u0646 \u062A\u0645\u0627\u0645\u200C\u0634\u062F\u0647\u200C\u0647\u0627</button></div></div><div id="jobs" class="jobs"><div class="empty">\u0635\u0641 \u062E\u0627\u0644\u06CC \u0627\u0633\u062A.</div></div></div></section>
+<section id="pane-settings" class="tab-pane"><div class="card"><h2>\u{1F510} \u0627\u062A\u0635\u0627\u0644 \u0628\u0647 \u067E\u0646\u0644</h2><div class="row"><div class="field"><label>ADMIN_TOKEN</label><input id="token" type="password" autocomplete="current-password" placeholder="\u062A\u0648\u06A9\u0646 ADMIN_TOKEN \u062F\u0631 Cloudflare"></div><div class="field small" style="align-self:end"><button id="connectBtn" class="btn btn-blue">\u0627\u062A\u0635\u0627\u0644 \u0648 \u0628\u0631\u0631\u0633\u06CC</button></div></div></div><div class="card"><h2>\u{1F50C} \u0648\u0636\u0639\u06CC\u062A \u0633\u0631\u0648\u06CC\u0633\u200C\u0647\u0627</h2><div class="settings-line"><span>Cloudflare D1</span><b id="dbState">\u2014</b></div><div class="settings-line"><span>\u0648\u0648\u06A9\u0627\u0645\u0631\u0633</span><b id="wooState">\u2014</b></div><div class="settings-line"><span>\u0628\u0627\u0633\u0644\u0627\u0645</span><b id="basalamState">\u2014</b></div><div class="settings-line"><span>\u067E\u0631\u062F\u0627\u0632\u0634\u06AF\u0631 \u062F\u0627\u062E\u0644\u06CC</span><b id="workerState">\u2014</b></div></div><div class="card"><h2>\u{1F4E5} \u0645\u0647\u0627\u062C\u0631\u062A \u0627\u0632 PHP</h2><p style="font-size:10px;color:var(--muted);line-height:1.8;margin-bottom:8px">\u0645\u062D\u062A\u0648\u0627\u06CC \u0641\u0627\u06CC\u0644 profiles.json \u0642\u062F\u06CC\u0645\u06CC \u0631\u0627 \u0627\u06CC\u0646\u062C\u0627 \u0642\u0631\u0627\u0631 \u062F\u0647\u06CC\u062F.</p><textarea id="importJson" rows="7" dir="ltr" placeholder='{"profile_key": {...}}'></textarea><button id="importBtn" class="btn btn-purple" style="margin-top:8px">\u062F\u0631\u0648\u0646\u200C\u0631\u06CC\u0632\u06CC \u067E\u0631\u0648\u0641\u0627\u06CC\u0644\u200C\u0647\u0627</button></div><div class="card"><h2>\u{1FA7A} \u062E\u0631\u0648\u062C\u06CC \u0648 \u062E\u0637\u0627\u0647\u0627</h2><div id="out" class="logs">\u0622\u0645\u0627\u062F\u0647</div></div></section>
+</main><div id="visualModal" class="modal"><div class="modal-box"><div class="modal-head"><b>\u{1F441} \u0627\u0646\u062A\u062E\u0627\u0628 \u0628\u0635\u0631\u06CC \u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</b><span id="visualUrl"></span><button id="closeVisual" class="btn btn-red btn-sm">\u2715 \u0628\u0633\u062A\u0646</button></div><div id="visualLoading" class="visual-loading">\u062F\u0631 \u062D\u0627\u0644 \u062F\u0631\u06CC\u0627\u0641\u062A \u0635\u0641\u062D\u0647 \u0645\u0628\u062F\u0623\u2026</div><iframe id="visualFrame" title="\u0627\u0646\u062A\u062E\u0627\u0628 \u0628\u0635\u0631\u06CC" hidden></iframe></div></div><nav class="main-tabs"><button class="main-tab active" data-tab="home"><span class="icon">\u{1F3E0}</span><span>\u062E\u0627\u0646\u0647</span></button><button class="main-tab" data-tab="selector"><span class="icon">\u{1F3AF}</span><span>\u0633\u0644\u06A9\u062A\u0648\u0631\u0647\u0627</span></button><button class="main-tab" data-tab="products"><span class="icon">\u{1F4E6}</span><span>\u0645\u062D\u0635\u0648\u0644\u0627\u062A</span></button><button class="main-tab" data-tab="jobs"><span class="icon">\u23F3</span><span>\u0635\u0641\u200C\u0647\u0627</span><i id="jobBadge" class="badge" hidden>\u06F0</i></button><button class="main-tab" data-tab="settings"><span class="icon">\u2699\uFE0F</span><span>\u062A\u0646\u0638\u06CC\u0645\u0627\u062A</span></button></nav><script src="/dashboard.js" defer><\/script></body></html>`;
+var DASHBOARD_JS = String.raw`
+'use strict';
+const $=id=>document.getElementById(id), state={profiles:[],jobs:[],selected:'',connected:false,settings:{},connections:{}};
+const listFields=[['container','📦 کانتینر محصول'],['title','📝 عنوان'],['price','💰 قیمت'],['link','🔗 لینک'],['image','🖼️ تصویر']];
+const detailFields=[['shortDesc','توضیح کوتاه'],['longDesc','توضیح کامل'],['sku','SKU / کد'],['brand','برند'],['stock','موجودی'],['weight','وزن'],['category','دسته‌بندی'],['gallery','گالری تصاویر']];
+const menuDefs=[
+ ['💾 ذخیره و بازیابی همهٔ تنظیمات','backup','سازگار با فایل settings_YYYYMMDD_HHMMSS.json نسخه PHP؛ شامل پروفایل‌ها، محصولات، اتصال‌ها و تنظیمات. ⚠ فایل خروجی حاوی کلیدهای اتصال است و باید محرمانه نگه داشته شود.','<div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="backup">⬇ برون‌ریزی فایل تنظیمات</button><label class="btn btn-orange btn-sm">♻ درون‌ریزی فایل<input id="restoreFile" type="file" accept="application/json,.json" hidden></label></div><div id="transferStatus" class="menu-text" style="margin-top:7px">فرمت: Scraper 4 settings-export</div>'],
+ ['📥 درون‌ریزی و برون‌ریزی محصولات','product-transfer','انتقال CSV محصولات یک پروفایل با حفظ فیلدهای اصلی.','<div class="field"><label>شناسه پروفایل</label><input id="transferProfile" dir="ltr"></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="csv-export">⬇ خروجی CSV</button><label class="btn btn-orange btn-sm">⬆ ورود CSV<input id="csvImportFile" type="file" accept=".csv,text/csv" hidden></label></div><div id="csvStatus" class="menu-text">—</div>'],
+ ['📜 تغییرات نسخه‌ها','versions','نسخه Cloudflare Workers بازنویسی بومی اسکرپر ۴ است.','<div class="menu-text">v1.0 · Cloudflare Workers + Hono + D1<br>انتخاب‌گر بصری، صف تراکنشی، همگام‌سازی و داشبورد فارسی.</div>'],
+ ['🔄 نسخهٔ کد','code','استقرار کد با Wrangler یا داشبورد Cloudflare انجام می‌شود.','<div class="menu-actions"><button class="btn btn-blue btn-sm" data-ma="health">🔍 بررسی نسخه و سلامت</button><button class="btn btn-gray btn-sm" data-ma="reload">↻ بارگذاری مجدد</button></div>'],
+ ['🛒 ووکامرس','woo','مشخصات را همین‌جا وارد کنید؛ به‌صورت رمزنگاری‌شده در D1 به‌صورت رمزنگاری‌شده ذخیره می‌شود.','<div class="field"><label>آدرس فروشگاه</label><input data-connection="woo.url" dir="ltr" placeholder="https://shop.example.com"></div><div class="field"><label>Consumer Key</label><input data-connection="woo.key" dir="ltr" autocomplete="off"></div><div class="field"><label>Consumer Secret</label><input data-connection="woo.secret" type="password" dir="ltr" autocomplete="new-password"></div><div class="field"><label>شناسه دسته پیش‌فرض</label><input data-connection="woo.categoryId" type="number" min="0"></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save-connections">💾 ذخیره</button><button class="btn btn-purple btn-sm" data-ma="test-woo">🔗 تست اتصال</button></div>'],
+ ['🏪 باسلام','basalam','توکن، شناسه غرفه و آدرس API را در رابط ثبت کنید.','<div class="field"><label>Access Token</label><input data-connection="basalam.token" type="password" dir="ltr"></div><div class="field"><label>Vendor ID</label><input data-connection="basalam.vendorId" dir="ltr"></div><div class="field"><label>API Base URL</label><input data-connection="basalam.api" dir="ltr" value="https://openapi.basalam.com/v1"></div><div class="row"><div class="field"><label>روز آماده‌سازی</label><input data-connection="basalam.preparationDays" type="number" min="1"></div><div class="field"><label>وزن محصول</label><input data-connection="basalam.weight" type="number"></div><div class="field"><label>وزن بسته</label><input data-connection="basalam.packageWeight" type="number"></div><div class="field"><label>موجودی پیش‌فرض</label><input data-connection="basalam.stock" type="number"></div></div><div class="field"><label>شناسه دسته پیش‌فرض</label><input data-connection="basalam.categoryId" type="number"></div><label class="checks"><input data-connection="basalam.autoCategory" type="checkbox"> دسته‌بندی خودکار</label><label class="checks"><input data-connection="basalam.netIndirect" type="checkbox"> اتصال غیرمستقیم</label><div class="field"><label>غرفه‌های اضافی (JSON)</label><textarea data-connection="basalam.shops" dir="ltr" placeholder="JSON array of shops"></textarea></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save-connections">💾 ذخیره</button><button class="btn btn-blue btn-sm" data-ma="test-basalam">🔗 تست اتصال</button></div>'],
+ ['🤖 هوش مصنوعی','ai','مدیریت چند ارائه‌دهنده، تست مدل‌ها، کاندیدها، مستر و روش اتصال.','<div class="field"><label>ارائه‌دهنده‌ها (JSON)</label><textarea data-connection="ai.providers" dir="ltr" placeholder="JSON array"></textarea></div><div class="field"><label>مدل‌های کاندید (provider::model، آرایه JSON)</label><textarea data-connection="ai.candidates" dir="ltr" placeholder="[]"></textarea></div><div class="field"><label>مدل مستر</label><input data-connection="ai.master" dir="ltr"></div><div class="field"><label>پیام تست</label><input id="aiTestPrompt" value="سلام"></div><div class="row"><div class="field"><label>روش اتصال</label><select data-connection="ai.network.mode"><option value="direct">مستقیم</option><option value="doh">DoH</option><option value="dns">IP دستی</option><option value="proxy">HTTP/SOCKS Proxy</option><option value="worker">Cloudflare Worker</option></select></div><div class="field"><label>Proxy URL</label><input data-connection="ai.network.proxyUrl" dir="ltr"></div><div class="field"><label>Worker URL</label><input data-connection="ai.network.workerUrl" dir="ltr"></div><div class="field"><label>DoH URL</label><input data-connection="ai.network.dohUrl" dir="ltr"></div><div class="field"><label>IP دستی</label><input data-connection="ai.network.resolveIp" dir="ltr"></div></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save-connections">💾 ذخیره</button><button class="btn btn-purple btn-sm" data-ma="ai-test-all">🧪 تست همه مدل‌ها</button><button class="btn btn-yellow btn-sm" data-ma="ai-vote-master">✓ رأی به مستر</button><button class="btn btn-gray btn-sm" data-ma="ai-leaderboard">🏆 امتیازات</button></div><div id="aiMenuResult" class="logs">—</div>'],
+ ['🔔 اعلان‌ها','notifications','مشخصات پیام‌رسان در خزانه رمزنگاری‌شده نگهداری می‌شود.','<label class="checks"><input data-setting="notifications.enabled" type="checkbox"> فعال</label><div class="field"><label>Webhook / API URL</label><input data-connection="notifications.url" dir="ltr"></div><div class="field"><label>Token</label><input data-connection="notifications.token" type="password" dir="ltr"></div><div class="field"><label>Chat ID عمومی</label><input data-connection="notifications.chatId" dir="ltr"></div><div class="field"><label>توکن بله</label><input data-connection="notifications.baleToken" type="password" dir="ltr"></div><div class="field"><label>Chat ID بله</label><input data-connection="notifications.baleChatId" dir="ltr"></div><div class="field"><label>توکن روبیکا</label><input data-connection="notifications.rubikaToken" type="password" dir="ltr"></div><div class="field"><label>Chat ID روبیکا</label><input data-connection="notifications.rubikaChatId" dir="ltr"></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save-connections">💾 ذخیره اتصال</button><button class="btn btn-purple btn-sm" data-ma="notify-bale">تست بله</button><button class="btn btn-orange btn-sm" data-ma="notify-rubika">تست روبیکا</button><button class="btn btn-gray btn-sm" data-ma="notify-webhook">تست Webhook</button><button class="btn btn-gray btn-sm" data-ma="save">ذخیره وضعیت</button></div>'],
+ ['🗂 محصولات رفته از مبدأ','retire','محصولاتی که در استخراج موفق بعدی دیده نشوند غیرفعال و برای اقدام مقصد آماده می‌شوند.','<div class="field"><label>شناسه پروفایل</label><input id="retireProfile" dir="ltr"></div><div class="field"><label>عملیات</label><select id="retireAction"><option value="report">فقط گزارش</option><option value="draft">پیش‌نویس</option><option value="trash">زباله‌دان/بایگانی</option></select></div><div class="menu-actions"><button class="btn btn-gray btn-sm" data-ma="retire-preview-woo">👁 پیش‌نمایش Woo</button><button class="btn btn-purple btn-sm" data-ma="retire-preview-basalam">👁 پیش‌نمایش باسلام</button><button class="btn btn-red btn-sm" data-ma="retire-apply-woo">اجرای Woo</button><button class="btn btn-red btn-sm" data-ma="retire-apply-basalam">اجرای باسلام</button></div>'],
+ ['⚙️ تنظیمات عمومی','general','رفتار عمومی استخراج و رابط.','<div class="field"><label>هم‌زمانی جزئیات</label><input data-setting="general.detailConcurrency" type="number" value="4"></div><label class="checks"><input data-setting="general.autoScroll" type="checkbox"> پرش خودکار صفحه</label><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save">💾 ذخیره</button><button class="btn btn-orange btn-sm" data-ma="selftest">🧾 خودآزمون نصب</button><button class="btn btn-gray btn-sm" data-ma="parity">📋 گزارش ۵۷ قابلیت</button></div><div id="selftestResult" class="logs">—</div>'],
+ ['🩺 نگهبان صف ارسال','watchdog','بستن Jobهایی که مدت زیادی بدون پیشرفت مانده‌اند.','<div class="field"><label>آستانه توقف (دقیقه)</label><input id="watchdogMinutes" type="number" value="30" min="5"></div><button class="btn btn-orange btn-sm" data-ma="watchdog">🔎 بررسی حالا</button>'],
+ ['🌐 اتصال به سایت مبدأ','source','آزمایش دسترسی Cloudflare Workers به سایت مبدأ.','<div class="field"><label>آدرس آزمایش</label><input id="sourceTestUrl" dir="ltr" placeholder="https://example.com"></div><button class="btn btn-purple btn-sm" data-ma="source-test">🧪 آزمایش</button>'],
+ ['🔍 مغایرت‌گیری با مقصد','recon','مقایسه همه محصولات محلی و مقصد با شناسه، SKU و عنوان نرمال‌شده.','<div class="field"><label>شناسه پروفایل (خالی=همه)</label><input id="reconProfile" dir="ltr"></div><div class="menu-actions"><button class="btn btn-purple btn-sm" data-ma="recon-woo">🛒 بررسی Woo</button><button class="btn btn-blue btn-sm" data-ma="recon-basalam">🏪 بررسی باسلام</button><button class="btn btn-green btn-sm" data-ma="rebuild-woo">🔗 بازسازی Woo</button><button class="btn btn-green btn-sm" data-ma="rebuild-basalam">🔗 بازسازی باسلام</button></div><div id="reconResult" class="logs">—</div>'],
+ ['🧠 یادگیری دسته‌بندی','category','یادگیری یک تا پنج کلمه اول عنوان و انتخاب پرتکرارترین دسته.','<div class="field"><label>عنوان محصول</label><input id="catTitle"></div><div class="row"><div class="field"><label>شناسه دسته</label><input id="catId" type="number"></div><div class="field"><label>نام دسته</label><input id="catName"></div><div class="field"><label>تعداد کلمات</label><input id="catWords" type="number" min="1" max="5" value="5"></div></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="cat-learn">＋ ثبت یادگیری</button><button class="btn btn-purple btn-sm" data-ma="cat-test">🧪 آزمایش عنوان</button><button class="btn btn-gray btn-sm" data-ma="cat-list">📚 آموخته‌ها</button></div><div id="catResult" class="logs">—</div>'],
+ ['✏️ ویرایش محصولات مقصد','editor','پیش‌نمایش و اعمال گروهی عنوان، قیمت و موجودی روی مقصد.','<div class="row"><div class="field"><label>مقصد</label><select id="bulkTarget"><option value="woo">ووکامرس</option><option value="basalam">باسلام</option></select></div><div class="field"><label>شناسه پروفایل</label><input id="bulkProfile" dir="ltr"></div><div class="field"><label>جست‌وجوی عنوان</label><input id="bulkQuery"></div></div><div class="row"><div class="field"><label>پیشوند</label><input id="bulkPrefix"></div><div class="field"><label>پسوند</label><input id="bulkSuffix"></div><div class="field"><label>درصد قیمت</label><input id="bulkPrice" type="number"></div><div class="field"><label>موجودی (خالی=بدون تغییر)</label><input id="bulkStock" type="number"></div></div><div class="menu-actions"><button class="btn btn-gray btn-sm" data-ma="bulk-preview">👁 پیش‌نمایش</button><button class="btn btn-red btn-sm" data-ma="bulk-apply">✓ اعمال تغییرات</button></div><div class="card" style="margin-top:8px"><h3>مدیریت مستقیم مقصد</h3><div class="row"><div class="field"><label>شناسه محصول مقصد</label><input id="destProductId" type="number"></div><div class="field"><label>وضعیت جدید</label><input id="destStatus" placeholder="publish / draft / archived"></div></div><div class="menu-actions"><button class="btn btn-gray btn-sm" data-ma="dest-overview">📊 وضعیت کلی</button><button class="btn btn-gray btn-sm" data-ma="dest-list">📋 محصولات</button><button class="btn btn-orange btn-sm" data-ma="dest-duplicates">⧉ تکراری‌ها</button><button class="btn btn-purple btn-sm" data-ma="dest-status">تغییر وضعیت</button><button class="btn btn-red btn-sm" data-ma="dest-delete">حذف</button></div></div><div id="bulkResult" class="logs">—</div>'],
+ ['🖼 عکس‌دار کردن محصولات ووکامرس','photo','محصول بدون تصویر Woo با شناسه مقصد پیدا و تصویر مبدأ روی آن ثبت می‌شود.','<div class="field"><label>شناسه پروفایل</label><input id="photoProfile" dir="ltr"></div><div class="menu-actions"><button class="btn btn-gray btn-sm" data-ma="photo-preview">👁 پیش‌نمایش</button><button class="btn btn-green btn-sm" data-ma="photo-apply">🖼 اجرا</button></div><div id="photoResult" class="logs">—</div>'],
+ ['🤖 پاسخ خودکار به مشتریان','autoreply','قواعد، AI، محدودیت اجرا و پاسخ واقعی به گفتگوهای باسلام.','<label class="checks"><input data-setting="autoreply.enabled" type="checkbox"> فعال</label><div class="row"><div class="field"><label>اولویت</label><select data-setting="autoreply.order"><option value="rules_first">قواعد ← AI</option><option value="ai_first">AI ← قواعد</option><option value="rules_only">فقط قواعد</option><option value="ai_only">فقط AI</option></select></div><div class="field"><label>حداکثر هر اجرا</label><input data-setting="autoreply.maxPerRun" type="number" value="5"></div><div class="field"><label>تعداد گفتگوی اسکن</label><input data-setting="autoreply.scanLimit" type="number" value="20"></div><div class="field"><label>مهلت انتظار پیام (دقیقه)</label><input data-setting="autoreply.graceMin" type="number" value="10"></div><div class="field"><label>فاصله پاسخ هر گفتگو (دقیقه)</label><input data-setting="autoreply.perChatMin" type="number" value="180"></div><div class="field"><label>امضا</label><input data-setting="autoreply.sign"></div></div><label class="checks"><input data-setting="autoreply.onlyOffhours" type="checkbox"> فقط خارج ساعت کاری</label><div class="row"><div class="field"><label>شروع کار</label><input data-setting="autoreply.workFrom" type="number" min="0" max="23" value="9"></div><div class="field"><label>پایان کار</label><input data-setting="autoreply.workTo" type="number" min="0" max="23" value="21"></div></div><div class="field"><label>قواعد JSON</label><textarea data-setting="autoreply.rules" dir="ltr" placeholder="[]"></textarea></div><div class="field"><label>پیام آزمایش</label><input id="arTestText" value="سلام، این محصول موجود است؟"></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save">💾 ذخیره</button><button class="btn btn-purple btn-sm" data-ma="ar-test">🧪 تست پاسخ</button><button class="btn btn-gray btn-sm" data-ma="ar-preview">👁 پیش‌نمایش گفتگوها</button><button class="btn btn-red btn-sm" data-ma="ar-run">🚀 اجرای واقعی</button><button class="btn btn-gray btn-sm" data-ma="ar-log">📜 گزارش</button></div><div id="arResult" class="logs">—</div>'],
+ ['🌙 گزارش شبانهٔ محصولات','digest','مقایسه snapshot محصولات، تغییر قیمت، جدید و حذف‌شده و ارسال اعلان.','<label class="checks"><input data-setting="digest.enabled" type="checkbox"> فعال</label><div class="row"><div class="field"><label>ساعت ارسال</label><input data-setting="digest.hour" type="number" min="0" max="23" value="23"></div><div class="field"><label>منطقه زمانی</label><input data-setting="digest.timezone" dir="ltr" value="Asia/Tehran"></div></div><div class="menu-actions"><button class="btn btn-green btn-sm" data-ma="save">💾 ذخیره</button><button class="btn btn-gray btn-sm" data-ma="digest-preview">👁 پیش‌نمایش</button><button class="btn btn-green btn-sm" data-ma="digest-send">📤 ارسال فوری</button><button class="btn btn-blue btn-sm" data-ma="orders">🛒 سفارش‌ها</button><button class="btn btn-purple btn-sm" data-ma="chats">💬 گفتگوها</button></div><div id="digestResult" class="logs">—</div>'],
+ ['📊 آمار محصولات هر پروفایل','profile-stats','تعداد محصولات و نگاشت شناسه‌های مقصد.','<button class="btn btn-purple btn-sm" data-ma="stats">📊 نمایش آمار</button><div id="menuStats" class="logs">—</div>']
+];
+function initMenu(){$('menuSections').innerHTML=menuDefs.map(([title,key,desc,content])=>'<section class="menu-section" data-menu="'+key+'"><button class="menu-title"><span>'+title+'</span><i>▼</i></button><div class="menu-content"><p class="menu-text">'+desc+'</p>'+content+'</div></section>').join('')}
+function initFields(){ $('selectorGrid').innerHTML=listFields.map(([id,label])=>fieldHtml(id,label,id==='container'?'li.product':id==='title'?'h2':id==='price'?'.price':id==='link'?'a[href]':'img')).join(''); $('detailGrid').innerHTML=detailFields.map(([id,label])=>fieldHtml(id,label,'')).join('') }
+function fieldHtml(id,label,value){return '<div class="sel-item" id="wrap-'+id+'"><div class="sel-title"><b>'+label+'</b><span>CSS</span></div><input id="sel-'+id+'" dir="ltr" value="'+escAttr(value)+'"><div id="result-'+id+'" class="sel-result">—</div></div>'}
+const token=()=>($('token').value||'').trim(),headers=()=>({'content-type':'application/json',authorization:'Bearer '+token()});
+async function api(path,options={}){const response=await fetch(path,{...options,headers:{...headers(),...(options.headers||{})}}),text=await response.text();let data;try{data=JSON.parse(text)}catch{data={error:text||'HTTP '+response.status}}if(!response.ok)throw Error(data.detail||data.error||'HTTP '+response.status);return data}
+function notice(message,kind='ok'){const el=$('notice');el.className='notice show '+kind;el.textContent=message;clearTimeout(notice.timer);notice.timer=setTimeout(()=>el.classList.remove('show'),6000)}
+function output(value){$('out').textContent=typeof value==='string'?value:JSON.stringify(value,null,2)}
+function busy(button,on){button.disabled=on;if(on){button.dataset.old=button.textContent;button.textContent='در حال انجام…'}else if(button.dataset.old)button.textContent=button.dataset.old}
+function drawer(open){$('drawer').classList.toggle('open',open);$('drawerOverlay').classList.toggle('open',open);if(open&&state.selected)for(const id of ['retireProfile','reconProfile','bulkProfile','photoProfile'])if($(id)&&!$(id).value)$(id).value=state.selected}
+function nestedGet(obj,path){return path.split('.').reduce((value,key)=>value?.[key],obj)}
+function nestedSet(obj,path,value){const keys=path.split('.');let node=obj;keys.slice(0,-1).forEach(key=>node=node[key]||(node[key]={}));node[keys.at(-1)]=value}
+function applySettings(){document.querySelectorAll('[data-setting]').forEach(input=>{const value=nestedGet(state.settings,input.dataset.setting);if(value===undefined||value===null)return;if(input.type==='checkbox')input.checked=Boolean(value);else if(typeof value==='object')input.value=JSON.stringify(value,null,2);else input.value=String(value)})}
+function applyConnections(){document.querySelectorAll('[data-connection]').forEach(input=>{const value=nestedGet(state.connections,input.dataset.connection);if(value===undefined||value===null)return;if(input.type==='checkbox')input.checked=Boolean(value);else if(typeof value==='object')input.value=JSON.stringify(value,null,2);else input.value=String(value)})}
+async function saveConnections(){const value=structuredClone(state.connections||{});document.querySelectorAll('[data-connection]').forEach(input=>{let v=input.type==='checkbox'?input.checked:input.type==='number'?Number(input.value):input.value.trim();if(input.tagName==='TEXTAREA'&&input.value.trim())try{v=JSON.parse(input.value)}catch{throw Error('JSON غرفه‌های اضافی معتبر نیست.')}nestedSet(value,input.dataset.connection,v)});const result=await api('/api/connections',{method:'POST',body:JSON.stringify(value)});state.connections=result.connections;applyConnections();notice('اطلاعات اتصال با رمزنگاری AES-256 ذخیره شد.');const status=await api('/api/status');setState('wooState',status.connections.woo);setState('basalamState',status.connections.basalam)}
+async function saveSettings(){const settings=structuredClone(state.settings||{});document.querySelectorAll('[data-setting]').forEach(input=>{let value=input.type==='checkbox'?input.checked:input.type==='number'?Number(input.value):input.value;if(input.tagName==='TEXTAREA'&&input.value.trim()){try{value=JSON.parse(input.value)}catch{}}nestedSet(settings,input.dataset.setting,value)});await api('/api/settings',{method:'POST',body:JSON.stringify(settings)});state.settings=settings;notice('تنظیمات منوی عمومی ذخیره شد.')}
+async function menuAction(action){try{if(action==='save')return await saveSettings();if(action==='save-connections')return await saveConnections();if(action==='reload')return location.reload();if(action==='csv-export'){const id=$('transferProfile').value.trim();if(!id)throw Error('شناسه پروفایل را وارد کنید.');const r=await fetch('/api/profiles/'+encodeURIComponent(id)+'/export.csv',{headers:headers()});if(!r.ok)throw Error('خروجی CSV ناموفق بود.');const blob=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=id+'.csv';a.click();URL.revokeObjectURL(a.href);return notice('فایل CSV دانلود شد.')}if(action==='selftest'||action==='parity'){const d=await api(action==='selftest'?'/api/selftest':'/api/parity');$('selftestResult').textContent=JSON.stringify(d,null,2);output(d);return notice(action==='selftest'?(d.ok?'همه خودآزمون‌ها موفق بود.':'بعضی آزمون‌ها ناموفق بود.'):'گزارش وفاداری بارگذاری شد.',d.ok?'ok':'error')}if(action==='products'){drawer(false);return tab('products')}if(action==='health'){const d=await fetch('/health').then(r=>r.json());output(d);return notice('سلامت سرویس بررسی شد.')}if(action==='backup'){const r=await fetch('/api/settings-export',{headers:headers()});if(!r.ok)throw Error('ساخت فایل تنظیمات ناموفق بود.');const blob=await r.blob(),cd=r.headers.get('content-disposition')||'',name=cd.match(/filename="?([^";]+)/)?.[1]||('settings_'+Date.now()+'.json'),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();URL.revokeObjectURL(a.href);$('transferStatus').textContent='✅ برون‌ریزی شد: '+name;return notice('فایل کامل تنظیمات دانلود شد.')}if(action.startsWith('test-')){const target=action.slice(5),d=await api('/api/test-connection/'+target,{method:'POST',body:'{}'});output(d);return notice(d.ok?'اتصال موفق بود.':'اتصال ناموفق بود.',d.ok?'ok':'error')}if(action==='ai-test-all'){await saveConnections();const d=await api('/api/ai/test-all',{method:'POST',body:JSON.stringify({prompt:$('aiTestPrompt').value})});$('aiMenuResult').textContent=JSON.stringify(d.results,null,2);output(d);return notice('تست '+fa(d.results.length)+' مدل تمام شد.')}if(action==='ai-vote-master'){await saveConnections();const ai=state.connections.ai||{},d=await api('/api/ai/vote',{method:'POST',body:JSON.stringify({task:'manual',winner:ai.master,candidates:ai.candidates||[]})});$('aiMenuResult').textContent=JSON.stringify(d.leaderboard,null,2);return notice('رأی ثبت شد.')}if(action==='ai-leaderboard'){const d=await api('/api/ai/leaderboard');$('aiMenuResult').textContent=JSON.stringify(d.leaderboard,null,2);return output(d)}if(action.startsWith('notify-')){await saveConnections();const channel=action.slice(7),d=await api('/api/notifications/test',{method:'POST',body:JSON.stringify({channel,text:'پیام آزمایشی اسکرپر ۴ از Cloudflare Workers'})});output(d);return notice('پیام آزمایشی ارسال شد.')}if(action.startsWith('recon-')||action.startsWith('rebuild-')){const [kind,target]=action.split('-'),d=await api('/api/maintenance/'+kind+'/'+target,{method:'POST',body:JSON.stringify({profileId:$('reconProfile').value.trim()})});$('reconResult').textContent=JSON.stringify(d.report||d,null,2);output(d);return notice(kind==='recon'?'مغایرت‌گیری تمام شد.':'نگاشت مقصد بازسازی شد.')}if(action.startsWith('retire-')){const parts=action.split('-'),apply=parts[1]==='apply',target=parts[2];if(apply&&!confirm('عملیات روی مقصد واقعاً اعمال شود؟'))return;const d=await api('/api/maintenance/retire/'+target,{method:'POST',body:JSON.stringify({profileId:$('retireProfile').value.trim(),action:$('retireAction').value,confirm:apply?'APPLY':''})});output(d);return notice(apply?fa(d.changed)+' محصول مقصد تغییر کرد.':fa(d.count)+' محصول حذف‌شده پیدا شد.',d.failed?.length?'error':'ok')}if(action==='bulk-preview'||action==='bulk-apply'){const apply=action.endsWith('apply');if(apply&&!confirm('تغییر گروهی روی مقصد اعمال شود؟ این عملیات واقعی است.'))return;const body={profileId:$('bulkProfile').value.trim(),query:$('bulkQuery').value,prefix:$('bulkPrefix').value,suffix:$('bulkSuffix').value,pricePercent:Number($('bulkPrice').value),stock:$('bulkStock').value,confirm:apply?'APPLY':''},d=await api('/api/maintenance/bulk/'+$('bulkTarget').value,{method:'POST',body:JSON.stringify(body)});$('bulkResult').textContent=JSON.stringify(d,null,2);output(d);return notice(apply?fa(d.changed)+' محصول ویرایش شد.':fa(d.count)+' محصول در پیش‌نمایش است.',d.failed?.length?'error':'ok')}if(action.startsWith('dest-')){const target=$('bulkTarget').value,id=Number($('destProductId').value);let d;if(action==='dest-overview')d=await api('/api/destination/'+target+'/overview');else if(action==='dest-list')d=await api('/api/destination/'+target+'/products?limit=100');else if(action==='dest-duplicates')d=await api('/api/destination/'+target+'/duplicates');else if(action==='dest-status'){if(!id||!confirm('وضعیت محصول مقصد تغییر کند؟'))return;d=await api('/api/destination/'+target+'/'+id+'/status',{method:'POST',body:JSON.stringify({status:$('destStatus').value,confirm:'APPLY'})})}else{if(!id||!confirm('محصول مقصد حذف شود؟'))return;d=await api('/api/destination/'+target+'/'+id+'?confirm=DELETE',{method:'DELETE'})}$('bulkResult').textContent=JSON.stringify(d.items||d.groups||d,null,2);output(d);return notice('عملیات مدیریت مقصد انجام شد.')}if(action==='photo-preview'||action==='photo-apply'){const apply=action.endsWith('apply');if(apply&&!confirm('تصاویر روی ووکامرس ثبت شوند؟'))return;const d=await api('/api/maintenance/photo-fix',{method:'POST',body:JSON.stringify({profileId:$('photoProfile').value.trim(),confirm:apply?'APPLY':''})});$('photoResult').textContent=JSON.stringify(d,null,2);output(d);return notice(apply?fa(d.changed)+' تصویر ثبت شد.':fa(d.count)+' محصول بدون تصویر پیدا شد.',d.failed?.length?'error':'ok')}if(action==='cat-learn'||action==='cat-test'||action==='cat-list'){let d;if(action==='cat-list')d=await api('/api/category-learning');else d=await api('/api/category-learning/'+(action==='cat-learn'?'record':'test'),{method:'POST',body:JSON.stringify({title:$('catTitle').value,categoryId:Number($('catId').value),categoryName:$('catName').value,maxWords:Number($('catWords').value)})});$('catResult').textContent=JSON.stringify(d.items||d.result||d,null,2);return notice(action==='cat-learn'?'یادگیری ثبت شد.':'نتیجه آماده است.')}if(action==='ar-test'||action==='ar-preview'||action==='ar-run'||action==='ar-log'){await saveSettings();let d;if(action==='ar-test')d=await api('/api/autoreply/test',{method:'POST',body:JSON.stringify({text:$('arTestText').value})});else if(action==='ar-log')d=await api('/api/autoreply/log');else{const apply=action==='ar-run';if(apply&&!confirm('پاسخ‌ها واقعاً برای مشتریان ارسال شوند؟'))return;d=await api('/api/autoreply/run',{method:'POST',body:JSON.stringify({confirm:apply?'APPLY':''})})}$('arResult').textContent=JSON.stringify(d.items||d.result||d,null,2);output(d);return notice(action==='ar-run'?fa(d.replied)+' پاسخ ارسال شد.':'نتیجه پاسخ خودکار آماده شد.',d.failed?'error':'ok')}if(action==='digest-preview'||action==='digest-send'){await saveSettings();const send=action==='digest-send';if(send&&!confirm('گزارش همین حالا به پیام‌رسان‌ها ارسال شود؟'))return;const d=await api('/api/digest',{method:'POST',body:JSON.stringify({confirm:send?'SEND':''})});$('digestResult').textContent=JSON.stringify(d,null,2);output(d);return notice(send?'گزارش ارسال شد.':'پیش‌نمایش گزارش ساخته شد.')}if(action==='orders'||action==='chats'){const d=await api('/api/basalam/'+action);$('digestResult').textContent=JSON.stringify(d.items,null,2);output(d);return notice(fa(d.items.length)+' مورد دریافت شد.')}if(action==='watchdog'){const d=await api('/api/queue-watchdog',{method:'POST',body:JSON.stringify({minutes:Number($('watchdogMinutes').value)})});output(d);return notice(fa(d.reaped)+' کار متوقف‌شده بسته شد.')}if(action==='source-test'){const d=await api('/api/source-test',{method:'POST',body:JSON.stringify({url:$('sourceTestUrl').value})});output(d);return notice('دسترسی موفق: '+fa(d.bytes)+' بایت')}if(action==='stats'){const d=await api('/api/profile-stats');$('menuStats').textContent=JSON.stringify(d.items,null,2);output(d);return notice('آمار ساخته شد.')}if(action==='category-export'){const value=nestedGet(state.settings,'categoryLearning')||{},blob=new Blob([JSON.stringify(value,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='category-learning.json';a.click();URL.revokeObjectURL(a.href);return}notice('این ابزار از صفحه محصولات یا صف‌ها اجرا می‌شود.','info')}catch(error){notice(error.message,'error');output({error:error.message})}}
+async function importCsv(file){try{const id=$('transferProfile').value.trim();if(!id)throw Error('شناسه پروفایل را وارد کنید.');$('csvStatus').textContent='⏳ در حال ورود…';const d=await api('/api/profiles/'+encodeURIComponent(id)+'/import',{method:'POST',body:JSON.stringify({csv:await file.text()})});$('csvStatus').textContent='✅ '+fa(d.imported)+' محصول وارد شد · خطا '+fa(d.failed);output(d);notice('درون‌ریزی CSV تمام شد.',d.failed?'error':'ok')}catch(error){$('csvStatus').textContent='❌ '+error.message;notice(error.message,'error')}}
+async function restoreFile(file){try{$('transferStatus').textContent='⏳ در حال خواندن و درون‌ریزی '+file.name+'…';const bundle=JSON.parse(await file.text()),d=await api('/api/settings-import',{method:'POST',body:JSON.stringify(bundle)});output(d);$('transferStatus').textContent='✅ '+fa(d.imported.profiles)+' پروفایل، '+fa(d.imported.products)+' محصول و '+fa(d.imported.states)+' تنظیم بازیابی شد.';notice('درون‌ریزی تنظیمات کامل شد؛ صفحه تازه می‌شود.');setTimeout(()=>location.reload(),1800)}catch(error){$('transferStatus').textContent='❌ '+error.message;notice(error.message,'error')}}
+function fa(value){return Number(value||0).toLocaleString('fa-IR')}
+function tab(name){document.querySelectorAll('.main-tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));document.querySelectorAll('.tab-pane').forEach(x=>x.classList.toggle('active',x.id==='pane-'+name));if(name==='jobs')loadJobs();if(name==='products')syncProfileSelects()}
+async function connect(){const button=$('connectBtn');busy(button,true);try{if(!token())throw Error('ADMIN_TOKEN را وارد کنید.');localStorage.setItem('s4rt',token());const [profiles,status,health,settings,connections]=await Promise.all([api('/api/profiles'),api('/api/status'),fetch('/health').then(r=>r.json()),api('/api/settings'),api('/api/connections')]);state.profiles=profiles.profiles;state.settings=settings.settings||{};state.connections=connections.connections||{};applySettings();applyConnections();state.connected=true;renderProfiles();renderStatus(status,health);await loadJobs(false);$('topDot').className='dot ok';$('topText').textContent='متصل · '+fa(state.profiles.length)+' پروفایل';notice('اتصال با موفقیت برقرار شد.');output(status);tab('home')}catch(error){state.connected=false;$('topDot').className='dot err';$('topText').textContent='خطا در اتصال';notice(error.message,'error');output({error:error.message})}finally{busy(button,false)}}
+function renderStatus(status,health){$('statProfiles').textContent=fa(state.profiles.length);$('statRunning').textContent=fa((status.jobs||[]).filter(j=>['queued','running'].includes(j.status)).length);$('statFailed').textContent=fa((status.jobs||[]).filter(j=>j.status==='failed').length);setState('dbState',health.databaseReady);setState('wooState',status.connections.woo);setState('basalamState',status.connections.basalam);setState('workerState',health.workerInWeb)}
+function setState(id,on){const el=$(id);el.textContent=on?'فعال':'غیرفعال';el.className=on?'on':'off'}
+function renderProfiles(){const box=$('profileList');box.innerHTML=state.profiles.map(p=>'<div class="profile '+(state.selected===p.id?'selected':'')+'"><div class="profile-title"><span>'+esc(p.name)+'</span><span class="chip">'+(p.enabled?'فعال':'خاموش')+'</span></div><div class="profile-url">'+esc(p.url)+'</div><div class="profile-meta"><span class="chip">'+fa(p.pages)+' صفحه</span><span class="chip">'+(p.intervalMinutes?fa(p.intervalMinutes)+' دقیقه':'دستی')+'</span>'+(p.syncWoo?'<span class="chip">Woo</span>':'')+(p.syncBasalam?'<span class="chip">Basalam</span>':'')+'</div><div class="profile-actions"><button class="btn btn-blue btn-sm" data-paction="scrape" data-id="'+escAttr(p.id)+'">▶ استخراج</button><button class="btn btn-green btn-sm" data-paction="sync" data-id="'+escAttr(p.id)+'">↥ ارسال</button><button class="btn btn-purple btn-sm" data-paction="edit" data-id="'+escAttr(p.id)+'">✎ ویرایش</button><button class="btn btn-red btn-sm" data-paction="delete" data-id="'+escAttr(p.id)+'">حذف</button></div></div>').join('')||'<div class="empty">پروفایلی وجود ندارد؛ از تب سلکتورها بسازید.</div>';syncProfileSelects()}
+function syncProfileSelects(){const current=$('productProfile').value;$('productProfile').innerHTML='<option value="">— انتخاب پروفایل —</option>'+state.profiles.map(p=>'<option value="'+escAttr(p.id)+'">'+esc(p.name)+'</option>').join('');if(state.profiles.some(p=>p.id===current))$('productProfile').value=current}
+function clearForm(){state.selected='';$('profileId').value='';$('name').value='';$('url').value='';$('pages').value='1';$('pagination').value='query_page';$('paginationValue').value='page';$('interval').value='0';$('titleSuffix').value='';$('priceMode').value='none';$('priceValue').value='0';$('roundPrice').value='0';$('minPrice').value='0';$('wooCategoryId').value='0';$('basalamCategoryId').value='0';$('enabled').checked=true;$('syncWoo').checked=false;$('syncBasalam').checked=false;listFields.forEach(([id])=>{$('sel-'+id).value=id==='container'?'li.product':id==='title'?'h2':id==='price'?'.price':id==='link'?'a[href]':'img';$('result-'+id).textContent='—'});detailFields.forEach(([id])=>{$('sel-'+id).value='';$('result-'+id).textContent='—'});$('editBadge').textContent='پروفایل جدید';renderProfiles()}
+function editProfile(id){const p=state.profiles.find(x=>x.id===id);if(!p)return;state.selected=id;$('profileId').value=p.id;$('name').value=p.name;$('url').value=p.url;$('pages').value=p.pages;$('pagination').value=p.pagination;$('paginationValue').value=p.paginationValue;$('interval').value=p.intervalMinutes;$('titleSuffix').value=p.titleSuffix;$('priceMode').value=p.priceMode;$('priceValue').value=p.priceValue;$('roundPrice').value=p.roundPrice;$('minPrice').value=p.minPrice;$('wooCategoryId').value=p.wooCategoryId;$('basalamCategoryId').value=p.basalamCategoryId;$('enabled').checked=p.enabled;$('syncWoo').checked=p.syncWoo;$('syncBasalam').checked=p.syncBasalam;[...listFields,...detailFields].forEach(([key])=>{$('sel-'+key).value=p.selectors[key]||''});$('editBadge').textContent='ویرایش: '+p.name;renderProfiles();tab('selector');subTab('basic')}
+function profileBody(){const selectors={};[...listFields,...detailFields].forEach(([key])=>selectors[key]=$('sel-'+key).value.trim());return{id:$('profileId').value||undefined,name:$('name').value.trim(),url:$('url').value.trim(),enabled:$('enabled').checked,pages:Number($('pages').value),pagination:$('pagination').value,paginationValue:$('paginationValue').value.trim(),intervalMinutes:Number($('interval').value),selectors,titleSuffix:$('titleSuffix').value,priceMode:$('priceMode').value,priceValue:Number($('priceValue').value),roundPrice:Number($('roundPrice').value),minPrice:Number($('minPrice').value),wooCategoryId:Number($('wooCategoryId').value),basalamCategoryId:Number($('basalamCategoryId').value),syncWoo:$('syncWoo').checked,syncBasalam:$('syncBasalam').checked}}
+async function saveProfile(runAfter=false){const button=runAfter?$('scrapeForm'):$('saveBtn');busy(button,true);try{if(!token())throw Error('ابتدا از تنظیمات متصل شوید.');if(!$('url').value.trim())throw Error('آدرس پروفایل اجباری است.');const result=await api('/api/profiles',{method:'POST',body:JSON.stringify(profileBody())});state.selected=result.profile.id;$('profileId').value=result.profile.id;await refreshProfiles();notice('پروفایل «'+result.profile.name+'» ذخیره شد.');if(runAfter)await createJob(result.profile.id,'scrape');else tab('home')}catch(error){notice(error.message,'error');output({error:error.message})}finally{busy(button,false)}}
+async function refreshProfiles(){const data=await api('/api/profiles');state.profiles=data.profiles;renderProfiles();$('statProfiles').textContent=fa(state.profiles.length)}
+async function profileAction(action,id){try{if(action==='edit')return editProfile(id);if(action==='delete'){if(!confirm('پروفایل و محصولات آن حذف شود؟'))return;await api('/api/profiles/'+encodeURIComponent(id),{method:'DELETE'});await refreshProfiles();notice('پروفایل حذف شد.');return}await createJob(id,action)}catch(error){notice(error.message,'error');output({error:error.message})}}
+async function createJob(id,kind){const path='/api/profiles/'+encodeURIComponent(id)+'/'+(kind==='sync'?'sync':'scrape'),body=kind==='sync'?{target:'both'}:{};const data=await api(path,{method:'POST',body:JSON.stringify(body)});notice('کار در صف قرار گرفت.','info');output(data);tab('jobs');watchJob(data.job.id)}
+async function openVisual(){const button=$('openVisual');busy(button,true);try{const url=$('url').value.trim();if(!url)throw Error('ابتدا آدرس صفحه محصولات را وارد کنید.');const data=await api('/api/visual-ticket',{method:'POST',body:JSON.stringify({url})});$('visualUrl').textContent=url;$('visualModal').classList.add('open');$('visualLoading').hidden=false;$('visualFrame').hidden=true;$('visualFrame').src='/visual?ticket='+encodeURIComponent(data.ticket)}catch(error){notice(error.message,'error')}finally{busy(button,false)}}
+function closeVisual(){$('visualModal').classList.remove('open');$('visualFrame').src='about:blank'}
+function visualMessage(event){if(event.origin!==location.origin||event.data?.type!=='scraper4-selector')return;const {mode,selector,preview,count}=event.data,input=$('sel-'+mode);if(!input)return;input.value=selector;$('result-'+mode).textContent=fa(count)+' مورد · '+(preview||'ثبت شد');$('wrap-'+mode).classList.add('has');notice('سلکتور «'+mode+'» از صفحه انتخاب شد.');if(['shortDesc','longDesc','sku','brand','stock','weight','category','gallery'].includes(mode))subTab('details');else subTab('selectors')}
+async function testSelectors(){const button=$('testSelectors');busy(button,true);try{const url=$('url').value.trim();if(!url)throw Error('ابتدا آدرس پروفایل را وارد کنید.');for(const [id] of listFields){const selector=$('sel-'+id).value.trim();if(!selector)continue;const type=['link','image'].includes(id)?id:'text';try{const data=await api('/api/test-selector',{method:'POST',body:JSON.stringify({url,selector,type})});$('result-'+id).textContent=fa(data.count)+' مورد · '+(data.values[0]||'بدون مقدار');$('wrap-'+id).classList.toggle('has',data.count>0)}catch(error){$('result-'+id).textContent='خطا: '+error.message}}notice('آزمایش سلکتورها تمام شد.')}finally{busy(button,false)}}
+async function loadProducts(){const id=$('productProfile').value;if(!id){notice('یک پروفایل انتخاب کنید.','error');return}const button=$('loadProducts');busy(button,true);try{const q=encodeURIComponent($('productSearch').value.trim()),data=await api('/api/profiles/'+encodeURIComponent(id)+'/products?limit=200&q='+q);$('productCount').textContent=fa(data.total)+' محصول';$('statProducts').textContent=fa(data.products.length);$('products').innerHTML=data.products.map(p=>'<article class="product"><div class="thumb">'+(p.image?'<img loading="lazy" src="'+escAttr(p.image)+'" alt="">':'بدون تصویر')+'</div><div class="pbody"><div class="ptitle">'+esc(p.title)+'</div><span class="price">'+fa(p.price)+' تومان</span><div class="pmeta">'+esc(p.sku||p.brand||'')+'</div></div></article>').join('')||'<div class="empty">محصولی یافت نشد.</div>'}catch(error){notice(error.message,'error')}finally{busy(button,false)}}
+async function loadJobs(show=true){try{const data=await api('/api/jobs?limit=100');state.jobs=data.jobs;renderJobs();if(show)notice('صف تازه‌سازی شد.')}catch(error){if(show)notice(error.message,'error')}}
+function renderJobs(){const active=state.jobs.filter(j=>['queued','running'].includes(j.status));$('jobBadge').hidden=!active.length;$('jobBadge').textContent=fa(active.length);$('statRunning').textContent=fa(active.length);$('statFailed').textContent=fa(state.jobs.filter(j=>j.status==='failed').length);$('jobs').innerHTML=state.jobs.map(j=>{const pct=j.total?Math.min(100,Math.round(j.processed/j.total*100)):0;return '<div class="job"><div class="job-head"><b>'+(j.kind==='scrape'?'استخراج':'ارسال')+' · '+esc(profileName(j.profileId))+'</b><span class="job-status s-'+j.status+'">'+esc(j.status)+'</span></div><div class="progress"><div class="bar" style="width:'+pct+'%"></div></div><div style="font-size:9px;color:#94a3b8">مرحله: '+esc(j.phase)+' · '+fa(j.processed)+' / '+fa(j.total)+' · جدید '+fa(j.added)+' · خطا '+fa(j.failed)+'</div>'+(active.some(x=>x.id===j.id)?'<button class="btn btn-red btn-sm" data-job-action="stop" data-id="'+j.id+'" style="margin-top:7px">■ توقف</button>':'<div class="menu-actions"><button class="btn btn-orange btn-sm" data-job-action="retry" data-id="'+j.id+'">↻ اجرای دوباره</button><button class="btn btn-red btn-sm" data-job-action="delete" data-id="'+j.id+'">حذف</button></div>')+(j.error?'<div class="logs">'+esc(j.error)+'</div>':'')+'</div>'}).join('')||'<div class="empty">صف خالی است.</div>'}
+function profileName(id){return state.profiles.find(p=>p.id===id)?.name||id}
+function watchJob(id){const timer=setInterval(async()=>{await loadJobs(false);const job=state.jobs.find(j=>j.id===id);if(job&&!['queued','running'].includes(job.status)){clearInterval(timer);notice(job.status==='done'?'عملیات کامل شد.':'پایان با وضعیت '+job.status,job.status==='done'?'ok':'error')}},1800)}
+async function jobAction(action,id){try{if(action==='delete'){await api('/api/jobs/'+id,{method:'DELETE'});notice('کار حذف شد.')}else{await api('/api/jobs/'+id+'/'+action,{method:'POST',body:'{}'});notice(action==='stop'?'درخواست توقف ثبت شد.':'کار دوباره در صف قرار گرفت.')}await loadJobs(false)}catch(error){notice(error.message,'error')}}
+async function clearJobs(){try{if(!confirm('همه کارهای تمام‌شده پاک شوند؟'))return;const d=await api('/api/jobs',{method:'DELETE'});notice(fa(d.deleted)+' کار پاک شد.');await loadJobs(false)}catch(error){notice(error.message,'error')}}
+async function importProfiles(){try{const profiles=JSON.parse($('importJson').value);const data=await api('/api/import-php',{method:'POST',body:JSON.stringify({profiles})});await refreshProfiles();notice(fa(data.imported)+' پروفایل درون‌ریزی شد.');output(data)}catch(error){notice(error.message,'error')}}
+function subTab(name){document.querySelectorAll('.sub-tab').forEach(x=>x.classList.toggle('active',x.dataset.sub===name));document.querySelectorAll('.sub-pane').forEach(x=>x.hidden=x.dataset.panel!==name)}
+function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}const escAttr=esc;
+initMenu();initFields();$('hamburgerBtn').addEventListener('click',()=>drawer(true));$('drawerClose').addEventListener('click',()=>drawer(false));$('drawerOverlay').addEventListener('click',()=>drawer(false));$('drawerFull').addEventListener('click',()=>$('drawer').classList.toggle('full-drawer'));$('menuSections').addEventListener('click',event=>{const title=event.target.closest('.menu-title');if(title)return title.closest('.menu-section').classList.toggle('open');const button=event.target.closest('[data-ma]');if(button)menuAction(button.dataset.ma)});$('restoreFile').addEventListener('change',event=>{if(event.target.files[0]&&confirm('داده‌های بکاپ بازیابی شوند؟'))restoreFile(event.target.files[0])});$('csvImportFile').addEventListener('change',event=>{if(event.target.files[0])importCsv(event.target.files[0])});document.querySelectorAll('.main-tab').forEach(b=>b.addEventListener('click',()=>tab(b.dataset.tab)));document.querySelectorAll('.sub-tab').forEach(b=>b.addEventListener('click',()=>subTab(b.dataset.sub)));$('connectBtn').addEventListener('click',connect);$('refreshAll').addEventListener('click',connect);$('newProfileBtn').addEventListener('click',()=>{clearForm();tab('selector')});$('clearForm').addEventListener('click',clearForm);$('saveBtn').addEventListener('click',()=>saveProfile(false));$('scrapeForm').addEventListener('click',()=>saveProfile(true));$('openVisual').addEventListener('click',openVisual);$('closeVisual').addEventListener('click',closeVisual);$('visualFrame').addEventListener('load',()=>{if($('visualFrame').src==='about:blank')return;$('visualLoading').hidden=true;$('visualFrame').hidden=false});$('visualModal').addEventListener('click',event=>{if(event.target===$('visualModal'))closeVisual()});window.addEventListener('message',visualMessage);$('testSelectors').addEventListener('click',testSelectors);$('loadProducts').addEventListener('click',loadProducts);$('productSearch').addEventListener('keydown',e=>{if(e.key==='Enter')loadProducts()});$('refreshJobs').addEventListener('click',()=>loadJobs());$('clearJobs').addEventListener('click',clearJobs);$('importBtn').addEventListener('click',importProfiles);$('profileList').addEventListener('click',e=>{const b=e.target.closest('[data-paction]');if(b)profileAction(b.dataset.paction,b.dataset.id)});$('jobs').addEventListener('click',e=>{const b=e.target.closest('[data-job-action]');if(b)jobAction(b.dataset.jobAction,b.dataset.id)});$('token').addEventListener('keydown',e=>{if(e.key==='Enter')connect()});$('token').value=localStorage.getItem('s4rt')||'';clearForm();if(token())connect();else tab('settings');
+`;
+
+// worker-src/maintenance.ts
+var norm2 = (v) => String(v || "").toLowerCase().replace(/[يى]/g, "\u06CC").replace(/ك/g, "\u06A9").replace(/[\u200c\u200f\u200e]/g, " ").replace(/\s+/g, " ").replace(/\s*[\[(](?:کد|code|sku)?\s*[:：]?\s*\d+[\])]]\s*$/i, "").trim();
+async function recon(target, profileId = "") {
+  const local = await maintenanceRows(profileId), remote = await remoteProducts(target), byId = new Map(remote.map((x) => [x.id, x])), bySku = new Map(remote.filter((x) => x.sku).map((x) => [x.sku, x])), byName = new Map(remote.map((x) => [norm2(x.name), x])), used = /* @__PURE__ */ new Set(), items = [];
+  for (const row of local) {
+    const mapped = target === "woo" ? Number(row.remote_woo_id || 0) : Number(row.remote_basalam_id || 0), sku = row.data?.sku || `s4-${row.profile_id}-${row.source_key}`.slice(0, 100);
+    const match2 = byId.get(mapped) || bySku.get(sku) || byName.get(norm2(row.title));
+    if (match2) used.add(match2.id);
+    items.push({ profileId: row.profile_id, sourceKey: row.source_key, title: row.title, active: row.active, remoteId: match2?.id || null, matchedBy: match2 ? match2.id === mapped ? "id" : match2.sku === sku ? "sku" : "title" : "none", remoteTitle: match2?.name || "" });
+  }
+  const result = { target, at: (/* @__PURE__ */ new Date()).toISOString(), local: local.length, remote: remote.length, matched: items.filter((x) => x.remoteId).length, missingRemote: items.filter((x) => !x.remoteId && x.active).length, retired: items.filter((x) => !x.active).length, extraRemote: remote.filter((x) => !used.has(x.id)).map((x) => ({ id: x.id, title: x.name, status: x.status })), items };
+  await setState(`recon_${target}`, result);
+  return result;
+}
+async function rebuildMap(target, profileId = "") {
+  const report = await recon(target, profileId);
+  let mapped = 0;
+  for (const item of report.items) if (item.remoteId) {
+    await setDestinationId(item.profileId, item.sourceKey, target, "default", item.remoteId);
+    await setRemoteId(item.profileId, item.sourceKey, target, item.remoteId);
+    mapped++;
+  }
+  return { ok: true, target, mapped, unmatched: report.items.length - mapped };
+}
+async function retire(target, profileId, action, apply = false) {
+  const rows2 = (await maintenanceRows(profileId)).filter((x) => !x.active), preview = rows2.map((x) => ({ profileId: x.profile_id, sourceKey: x.source_key, title: x.title, remoteId: target === "woo" ? x.remote_woo_id : x.remote_basalam_id, missingSince: x.missing_since, action }));
+  if (!apply || action === "report") return { ok: true, dryRun: true, count: preview.length, items: preview };
+  let changed = 0, failed = [];
+  for (const item of preview) {
+    if (!item.remoteId) continue;
+    try {
+      if (target === "woo") await wooUpdate(item.remoteId, action === "trash" ? { status: "trash" } : { status: action === "draft" ? "draft" : "private" });
+      else await basalamUpdate(item.remoteId, { status: action === "trash" ? "archived" : action });
+      changed++;
+    } catch (error) {
+      failed.push({ title: item.title, error: msg(error) });
+    }
+  }
+  return { ok: failed.length === 0, dryRun: false, changed, failed };
+}
+async function bulkEdit(target, input, apply = false) {
+  const rows2 = (await maintenanceRows(String(input.profileId || ""))).filter((x) => x.active).filter((x) => !input.query || norm2(x.title).includes(norm2(input.query))).slice(0, Math.min(1e3, Number(input.limit) || 200)), items = rows2.map((row) => {
+    let title = String(row.title);
+    if (input.prefix) title = String(input.prefix) + title;
+    if (input.suffix) title += String(input.suffix);
+    let price = Number(row.price);
+    if (Number(input.pricePercent)) price = Math.round(price * (1 + Number(input.pricePercent) / 100));
+    return { row, title, price, remoteId: target === "woo" ? row.remote_woo_id : row.remote_basalam_id };
+  });
+  if (!apply) return { ok: true, dryRun: true, count: items.length, items: items.slice(0, 100).map((x) => ({ title: x.row.title, newTitle: x.title, oldPrice: x.row.price, newPrice: x.price, remoteId: x.remoteId })) };
+  let changed = 0, failed = [];
+  for (const item of items) {
+    if (!item.remoteId) continue;
+    try {
+      const payload = { name: item.title };
+      if (item.price) target === "woo" ? payload.regular_price = String(item.price) : payload.price = item.price;
+      if (input.stock !== "" && input.stock != null) target === "woo" ? Object.assign(payload, { manage_stock: true, stock_quantity: Number(input.stock) }) : payload.stock = Number(input.stock);
+      if (target === "woo") await wooUpdate(item.remoteId, payload);
+      else await basalamUpdate(item.remoteId, payload);
+      changed++;
+    } catch (error) {
+      failed.push({ title: item.row.title, error: msg(error) });
+    }
+  }
+  return { ok: failed.length === 0, dryRun: false, changed, failed };
+}
+async function photoFix(profileId, apply = false) {
+  const rows2 = (await maintenanceRows(profileId)).filter((x) => x.active && x.remote_woo_id && x.data?.image), remote = await remoteProducts("woo"), byId = new Map(remote.map((x) => [x.id, x])), items = rows2.filter((x) => !(byId.get(Number(x.remote_woo_id))?.images || []).length).map((x) => ({ id: Number(x.remote_woo_id), title: x.title, image: x.data.image }));
+  if (!apply) return { ok: true, dryRun: true, count: items.length, items: items.slice(0, 200) };
+  let changed = 0, failed = [];
+  for (const item of items) try {
+    await wooUpdate(item.id, { images: [{ src: item.image }] });
+    changed++;
+  } catch (error) {
+    failed.push({ title: item.title, error: msg(error) });
+  }
+  return { ok: failed.length === 0, dryRun: false, changed, failed };
+}
+async function listDestinationProducts(target) {
+  return target === "woo" ? wooProducts() : basalamProducts();
+}
+async function destinationOverview(target) {
+  const items = await listDestinationProducts(target), statuses = {};
+  for (const item of items) statuses[item.status] = (statuses[item.status] || 0) + 1;
+  return { target, total: items.length, statuses, withoutImage: items.filter((x) => !x.images.length).length, withoutSku: items.filter((x) => !x.sku).length };
+}
+async function findDestinationDuplicates(target) {
+  const items = await listDestinationProducts(target), groups = /* @__PURE__ */ new Map();
+  for (const item of items) {
+    const key2 = norm2(item.name);
+    if (!key2) continue;
+    const rows2 = groups.get(key2) || [];
+    rows2.push(item);
+    groups.set(key2, rows2);
+  }
+  return [...groups.entries()].filter(([, rows2]) => rows2.length > 1).map(([title, rows2]) => ({ title, count: rows2.length, items: rows2.map((x) => ({ id: x.id, name: x.name, status: x.status, sku: x.sku })) }));
+}
+async function destinationChangeStatus(target, id, status) {
+  if (target === "woo") await wooUpdate(id, { status });
+  else await basalamUpdate(id, { status });
+  return { ok: true, id, status };
+}
+async function destinationDelete(target, id, force = false) {
+  const c = await loadConnections();
+  if (target === "woo") {
+    const x = c.woo, auth = basicAuth(x.key, x.secret), r = await safeFetch(`${x.url}/wp-json/wc/v3/products/${id}?force=${force ? "true" : "false"}`, { method: "DELETE", headers: { authorization: auth } }, 2e6);
+    if (!r.ok) throw Error(`Woo delete HTTP ${r.status}`);
+  } else {
+    const x = c.basalam, r = await safeFetch(`${x.api}/vendors/${encodeURIComponent(x.vendorId)}/products/${id}`, { method: "DELETE", headers: { authorization: `Bearer ${x.token}` } }, 2e6);
+    if (!r.ok) throw Error(`Basalam delete HTTP ${r.status}`);
+  }
+  return { ok: true, id, deleted: true };
+}
+async function remoteProducts(target) {
+  return listDestinationProducts(target);
+}
+async function wooProducts() {
+  const c = (await loadConnections()).woo;
+  if (!c.url || !c.key || !c.secret) throw Error("\u0627\u062A\u0635\u0627\u0644 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
+  const auth = basicAuth(c.key, c.secret), out = [];
+  for (let page = 1; page <= 100; page++) {
+    const r = await safeFetch(`${c.url}/wp-json/wc/v3/products?per_page=100&page=${page}&status=any`, { headers: { authorization: auth, accept: "application/json" } }, 1e7), data = await r.json();
+    if (!r.ok) throw Error(`Woo HTTP ${r.status}`);
+    for (const x of data) out.push({ id: Number(x.id), name: String(x.name || ""), sku: String(x.sku || ""), images: x.images || [], status: String(x.status || ""), price: Number(x.price || 0), raw: x });
+    if (data.length < 100) break;
+  }
+  return out;
+}
+async function basalamProducts() {
+  const c = (await loadConnections()).basalam;
+  if (!c.token || !c.vendorId) throw Error("\u0627\u062A\u0635\u0627\u0644 \u0628\u0627\u0633\u0644\u0627\u0645 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
+  const out = [];
+  for (let page = 1; page <= 100; page++) {
+    const r = await safeFetch(`${c.api}/vendors/${encodeURIComponent(c.vendorId)}/products?per_page=100&page=${page}`, { headers: { authorization: `Bearer ${c.token}`, accept: "application/json" } }, 1e7), body = await r.json();
+    if (!r.ok) throw Error(`Basalam HTTP ${r.status}`);
+    const data = body.data || body.products || body.results || body.items || [];
+    for (const x of data) out.push({ id: Number(x.id), name: String(x.name || x.title || ""), sku: String(x.sku || ""), images: x.photos || x.images || (x.photo ? [x.photo] : []), status: String(x.status || ""), price: Number(x.price || 0), raw: x });
+    if (data.length < 100) break;
+  }
+  return out;
+}
+async function wooUpdate(id, payload) {
+  const c = (await loadConnections()).woo, auth = basicAuth(c.key, c.secret), r = await safeFetch(`${c.url}/wp-json/wc/v3/products/${id}`, { method: "PUT", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(payload) }, 3e6);
+  if (!r.ok) throw Error(`Woo update ${id}: HTTP ${r.status}`);
+}
+async function basalamUpdate(id, payload) {
+  const c = (await loadConnections()).basalam, r = await safeFetch(`${c.api}/vendors/${encodeURIComponent(c.vendorId)}/products/${id}`, { method: "PATCH", headers: { authorization: `Bearer ${c.token}`, "content-type": "application/json" }, body: JSON.stringify(payload) }, 3e6);
+  if (!r.ok) throw Error(`Basalam update ${id}: HTTP ${r.status}`);
+}
+var msg = (e) => e instanceof Error ? e.message : String(e);
+
+// worker-src/parity.ts
+var PHP_MENU_CAPABILITIES = [
+  { id: "settings-export", section: "backup", label: "\u062F\u0627\u0646\u0644\u0648\u062F \u0647\u0645\u0647 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0648 \u067E\u0631\u0648\u0641\u0627\u06CC\u0644\u200C\u0647\u0627", status: "operational", endpoint: "/api/settings-export" },
+  { id: "settings-import", section: "backup", label: "\u0628\u0627\u0631\u06AF\u0630\u0627\u0631\u06CC \u0648 \u0628\u0627\u0632\u06CC\u0627\u0628\u06CC \u062A\u0646\u0638\u06CC\u0645\u0627\u062A", status: "operational", endpoint: "/api/settings-import" },
+  { id: "changelog", section: "version", label: "\u062A\u063A\u06CC\u06CC\u0631\u0627\u062A \u0646\u0633\u062E\u0647\u200C\u0647\u0627", status: "adapted", note: "Git history / CLOUDFLARE-WORKER.md" },
+  { id: "version-check", section: "version", label: "\u0628\u0631\u0631\u0633\u06CC \u0646\u0633\u062E\u0647 \u06A9\u062F", status: "adapted", note: "Cloudflare Workers deploy status" },
+  { id: "version-update", section: "version", label: "\u0646\u0635\u0628 \u0646\u0633\u062E\u0647 \u062C\u062F\u06CC\u062F", status: "adapted", note: "Wrangler versions/rollback" },
+  { id: "backup-full", section: "backup", label: "\u0628\u06A9\u0627\u067E \u06A9\u0627\u0645\u0644 \u062F\u0627\u062F\u0647", status: "operational", endpoint: "/api/backup" },
+  { id: "backup-restore", section: "backup", label: "\u0628\u0627\u0632\u06CC\u0627\u0628\u06CC \u0628\u06A9\u0627\u067E Cloudflare", status: "operational", endpoint: "/api/restore" },
+  { id: "woo-save", section: "woo", label: "\u0630\u062E\u06CC\u0631\u0647 \u0627\u062A\u0635\u0627\u0644 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633", status: "operational", endpoint: "/api/connections" },
+  { id: "woo-test", section: "woo", label: "\u062A\u0633\u062A \u0648\u0648\u06A9\u0627\u0645\u0631\u0633", status: "operational", endpoint: "/api/test-connection/woo" },
+  { id: "woo-category", section: "woo", label: "\u062F\u0633\u062A\u0647 \u067E\u06CC\u0634\u200C\u0641\u0631\u0636 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633", status: "operational" },
+  { id: "basalam-save", section: "basalam", label: "\u0630\u062E\u06CC\u0631\u0647 \u0627\u062A\u0635\u0627\u0644 \u0628\u0627\u0633\u0644\u0627\u0645", status: "operational", endpoint: "/api/connections" },
+  { id: "basalam-test", section: "basalam", label: "\u062A\u0633\u062A \u0628\u0627\u0633\u0644\u0627\u0645", status: "operational", endpoint: "/api/test-connection/basalam" },
+  { id: "basalam-multishop", section: "basalam", label: "\u0645\u062F\u06CC\u0631\u06CC\u062A \u0686\u0646\u062F \u063A\u0631\u0641\u0647", status: "operational" },
+  { id: "basalam-indirect", section: "basalam", label: "\u0627\u062A\u0635\u0627\u0644 \u063A\u06CC\u0631\u0645\u0633\u062A\u0642\u06CC\u0645", status: "account-dependent", note: "\u0628\u0631\u0627\u06CC AI \u06A9\u0627\u0645\u0644\u061B API \u0628\u0627\u0633\u0644\u0627\u0645 \u0628\u0633\u062A\u0647 \u0628\u0647 Proxy" },
+  { id: "ai-import", section: "ai", label: "\u062F\u0631\u0648\u0646\u200C\u0631\u06CC\u0632\u06CC \u0627\u0631\u0627\u0626\u0647\u200C\u062F\u0647\u0646\u062F\u06AF\u0627\u0646 AI", status: "operational", endpoint: "/api/connections" },
+  { id: "ai-providers", section: "ai", label: "\u0627\u0631\u0627\u0626\u0647\u200C\u062F\u0647\u0646\u062F\u06AF\u0627\u0646 AI", status: "operational", endpoint: "/api/ai/providers" },
+  { id: "ai-test-all", section: "ai", label: "\u062A\u0633\u062A \u0647\u0645\u0647 \u0645\u062F\u0644\u200C\u0647\u0627", status: "operational", endpoint: "/api/ai/test-all" },
+  { id: "ai-models", section: "ai", label: "\u0641\u0647\u0631\u0633\u062A \u0645\u062F\u0644\u200C\u0647\u0627", status: "operational", endpoint: "/api/ai/providers" },
+  { id: "ai-candidates", section: "ai", label: "\u0645\u062F\u0644\u200C\u0647\u0627\u06CC \u06A9\u0627\u0646\u062F\u06CC\u062F", status: "operational" },
+  { id: "ai-master", section: "ai", label: "\u0645\u062F\u0644 \u0645\u0633\u062A\u0631", status: "operational" },
+  { id: "ai-vote", section: "ai", label: "\u0631\u0623\u06CC \u0645\u062F\u0644", status: "operational", endpoint: "/api/ai/vote" },
+  { id: "ai-leaderboard", section: "ai", label: "\u062C\u062F\u0648\u0644 \u0627\u0645\u062A\u06CC\u0627\u0632\u0627\u062A", status: "operational", endpoint: "/api/ai/leaderboard" },
+  { id: "ai-network", section: "ai", label: "\u0631\u0648\u0634 \u0627\u062A\u0635\u0627\u0644 AI", status: "operational" },
+  { id: "ai-probe", section: "ai", label: "\u0639\u06CC\u0628\u200C\u06CC\u0627\u0628\u06CC AI", status: "operational", endpoint: "/api/ai/test-all" },
+  { id: "notify-save", section: "notifications", label: "\u0630\u062E\u06CC\u0631\u0647 \u0627\u0639\u0644\u0627\u0646\u200C\u0647\u0627", status: "operational", endpoint: "/api/connections" },
+  { id: "notify-bale", section: "notifications", label: "\u062A\u0633\u062A \u0628\u0644\u0647", status: "operational", endpoint: "/api/notifications/test" },
+  { id: "notify-rubika", section: "notifications", label: "\u062A\u0633\u062A \u0631\u0648\u0628\u06CC\u06A9\u0627", status: "operational", endpoint: "/api/notifications/test" },
+  { id: "notify-webhook", section: "notifications", label: "\u062A\u0633\u062A Webhook", status: "operational", endpoint: "/api/notifications/test" },
+  { id: "orders", section: "notifications", label: "\u0627\u0633\u062A\u0639\u0644\u0627\u0645 \u0633\u0641\u0627\u0631\u0634\u200C\u0647\u0627", status: "operational", endpoint: "/api/basalam/orders" },
+  { id: "chats", section: "notifications", label: "\u0627\u0633\u062A\u0639\u0644\u0627\u0645 \u06AF\u0641\u062A\u06AF\u0648\u0647\u0627", status: "operational", endpoint: "/api/basalam/chats" },
+  { id: "retire-preview", section: "retire", label: "\u067E\u06CC\u0634\u200C\u0646\u0645\u0627\u06CC\u0634 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0631\u0641\u062A\u0647", status: "operational", endpoint: "/api/maintenance/retire/woo" },
+  { id: "retire-apply", section: "retire", label: "\u0627\u0639\u0645\u0627\u0644 \u0648\u0636\u0639\u06CC\u062A \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0631\u0641\u062A\u0647", status: "operational", endpoint: "/api/maintenance/retire/woo" },
+  { id: "general-save", section: "general", label: "\u0630\u062E\u06CC\u0631\u0647 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0639\u0645\u0648\u0645\u06CC", status: "operational", endpoint: "/api/settings" },
+  { id: "queue-status", section: "general", label: "\u0648\u0636\u0639\u06CC\u062A \u0635\u0641\u200C\u0647\u0627", status: "operational", endpoint: "/api/jobs" },
+  { id: "security-check", section: "general", label: "\u0628\u0631\u0631\u0633\u06CC \u0627\u0645\u0646\u06CC\u062A", status: "operational", endpoint: "/api/selftest" },
+  { id: "watchdog", section: "watchdog", label: "\u0646\u06AF\u0647\u0628\u0627\u0646 \u0635\u0641", status: "operational", endpoint: "/api/queue-watchdog" },
+  { id: "selftest", section: "watchdog", label: "\u062E\u0648\u062F\u0622\u0632\u0645\u0648\u0646 \u0646\u0635\u0628", status: "operational", endpoint: "/api/selftest" },
+  { id: "source-test", section: "source", label: "\u0622\u0632\u0645\u0627\u06CC\u0634 \u0627\u062A\u0635\u0627\u0644 \u0645\u0628\u062F\u0623", status: "operational", endpoint: "/api/source-test" },
+  { id: "source-network", section: "source", label: "\u062A\u0646\u0638\u06CC\u0645 \u0645\u0633\u06CC\u0631 \u0634\u0628\u06A9\u0647 \u0645\u0628\u062F\u0623", status: "account-dependent", note: "Fetch \u0627\u0645\u0646 \u0645\u0633\u062A\u0642\u06CC\u0645\u061B proxy \u0628\u0631\u0627\u06CC AI" },
+  { id: "recon-woo", section: "recon", label: "\u0645\u063A\u0627\u06CC\u0631\u062A\u200C\u06AF\u06CC\u0631\u06CC \u0648\u0648\u06A9\u0627\u0645\u0631\u0633", status: "operational", endpoint: "/api/maintenance/recon/woo" },
+  { id: "recon-basalam", section: "recon", label: "\u0645\u063A\u0627\u06CC\u0631\u062A\u200C\u06AF\u06CC\u0631\u06CC \u0628\u0627\u0633\u0644\u0627\u0645", status: "operational", endpoint: "/api/maintenance/recon/basalam" },
+  { id: "map-status", section: "recon", label: "\u0648\u0636\u0639\u06CC\u062A Remote Map", status: "operational", endpoint: "/api/profile-stats" },
+  { id: "map-rebuild-woo", section: "recon", label: "\u0628\u0627\u0632\u0633\u0627\u0632\u06CC \u0646\u06AF\u0627\u0634\u062A \u0648\u0648\u06A9\u0627\u0645\u0631\u0633", status: "operational", endpoint: "/api/maintenance/rebuild/woo" },
+  { id: "map-rebuild-basalam", section: "recon", label: "\u0628\u0627\u0632\u0633\u0627\u0632\u06CC \u0646\u06AF\u0627\u0634\u062A \u0628\u0627\u0633\u0644\u0627\u0645", status: "operational", endpoint: "/api/maintenance/rebuild/basalam" },
+  { id: "category-list", section: "category", label: "\u0646\u0645\u0627\u06CC\u0634 \u0622\u0645\u0648\u062E\u062A\u0647\u200C\u0647\u0627", status: "operational", endpoint: "/api/category-learning" },
+  { id: "category-test", section: "category", label: "\u0622\u0632\u0645\u0627\u06CC\u0634 \u062F\u0633\u062A\u0647 \u0639\u0646\u0648\u0627\u0646", status: "operational", endpoint: "/api/category-learning/test" },
+  { id: "category-record", section: "category", label: "\u062B\u0628\u062A \u06CC\u0627\u062F\u06AF\u06CC\u0631\u06CC \u062F\u0633\u062A\u0647", status: "operational", endpoint: "/api/category-learning/record" },
+  { id: "bulk-woo", section: "editor", label: "\u0648\u06CC\u0631\u0627\u06CC\u0634 \u06AF\u0631\u0648\u0647\u06CC \u0648\u0648\u06A9\u0627\u0645\u0631\u0633", status: "operational", endpoint: "/api/maintenance/bulk/woo" },
+  { id: "bulk-basalam", section: "editor", label: "\u0648\u06CC\u0631\u0627\u06CC\u0634 \u06AF\u0631\u0648\u0647\u06CC \u0628\u0627\u0633\u0644\u0627\u0645", status: "operational", endpoint: "/api/maintenance/bulk/basalam" },
+  { id: "photo-preview", section: "photo", label: "\u067E\u06CC\u0634\u200C\u0646\u0645\u0627\u06CC\u0634 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0628\u062F\u0648\u0646 \u0639\u06A9\u0633", status: "operational", endpoint: "/api/maintenance/photo-fix" },
+  { id: "photo-apply", section: "photo", label: "\u0639\u06A9\u0633\u200C\u062F\u0627\u0631\u06A9\u0631\u062F\u0646 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633", status: "operational", endpoint: "/api/maintenance/photo-fix" },
+  { id: "autoreply-test", section: "autoreply", label: "\u0622\u0632\u0645\u0627\u06CC\u0634 \u067E\u0627\u0633\u062E \u062E\u0648\u062F\u06A9\u0627\u0631", status: "operational", endpoint: "/api/autoreply/test" },
+  { id: "autoreply-preview", section: "autoreply", label: "\u067E\u06CC\u0634\u200C\u0646\u0645\u0627\u06CC\u0634 \u06AF\u0641\u062A\u06AF\u0648\u0647\u0627", status: "operational", endpoint: "/api/autoreply/run" },
+  { id: "autoreply-run", section: "autoreply", label: "\u0627\u062C\u0631\u0627\u06CC \u067E\u0627\u0633\u062E \u062E\u0648\u062F\u06A9\u0627\u0631", status: "operational", endpoint: "/api/autoreply/run" },
+  { id: "autoreply-log", section: "autoreply", label: "\u06AF\u0632\u0627\u0631\u0634 \u067E\u0627\u0633\u062E\u200C\u0647\u0627", status: "operational", endpoint: "/api/autoreply/log" },
+  { id: "digest-preview", section: "digest", label: "\u067E\u06CC\u0634\u200C\u0646\u0645\u0627\u06CC\u0634 \u06AF\u0632\u0627\u0631\u0634 \u0634\u0628\u0627\u0646\u0647", status: "operational", endpoint: "/api/digest" },
+  { id: "digest-send", section: "digest", label: "\u0627\u0631\u0633\u0627\u0644 \u06AF\u0632\u0627\u0631\u0634 \u0634\u0628\u0627\u0646\u0647", status: "operational", endpoint: "/api/digest" }
+];
+async function runSelftest() {
+  const checks = [];
+  const check = async (name, fn) => {
+    try {
+      const detail = await fn();
+      checks.push({ name, ok: true, detail: detail || void 0 });
+    } catch (error) {
+      checks.push({ name, ok: false, detail: error instanceof Error ? error.message : String(error) });
+    }
+  };
+  await check("database", async () => {
+    const row = await getEnv().DB.prepare("SELECT 1 AS ok").first();
+    if (row?.ok !== 1) throw Error("D1 query failed");
+    return "D1 connected";
+  });
+  await check("schema", async () => {
+    const required = ["profiles", "products", "jobs", "app_state", "destination_map", "category_learning", "autoreply_log"], result = await getEnv().DB.prepare("SELECT name FROM sqlite_master WHERE type='table'").all(), found = result.results.map((x) => x.name), missing = required.filter((x) => !found.includes(x));
+    if (missing.length) throw Error("Missing: " + missing.join(","));
+    return `${required.length} tables`;
+  });
+  await check("menu-inventory", async () => {
+    if (PHP_MENU_CAPABILITIES.length !== 57) throw Error(`Expected 57, got ${PHP_MENU_CAPABILITIES.length}`);
+    const ids = PHP_MENU_CAPABILITIES.map((x) => x.id);
+    if (new Set(ids).size !== ids.length) throw Error("Duplicate capability ID");
+    return "57 unique operations";
+  });
+  await check("vault", async () => JSON.stringify(connectionStatus(await loadConnections(true))));
+  await check("destructive-guards", async () => "Retire, bulk edit and photo fix require APPLY");
+  const operational = PHP_MENU_CAPABILITIES.filter((x) => x.status === "operational").length, adapted = PHP_MENU_CAPABILITIES.filter((x) => x.status === "adapted").length, dependent = PHP_MENU_CAPABILITIES.filter((x) => x.status === "account-dependent").length;
+  return { ok: checks.every((x) => x.ok), checks, summary: { total: 57, operational, adapted, accountDependent: dependent }, capabilities: PHP_MENU_CAPABILITIES, at: (/* @__PURE__ */ new Date()).toISOString() };
+}
+
+// worker-src/scraper.ts
+var normalize = (value) => value.replace(/[\u200c\u200d\u200e\u200f\ufeff]/g, " ").replace(/\s+/g, " ").trim();
+var absolute = (value, base) => {
+  try {
+    const url = new URL(value, base);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+  } catch {
+    return "";
+  }
+};
+function numberFromText(value) {
+  const en = value.replace(/[۰-۹]/g, (d) => String("\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9".indexOf(d))).replace(/[٠-٩]/g, (d) => String("\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669".indexOf(d))), groups = en.match(/\d[\d,٬.\s]*/g) || [];
+  return groups.length ? Math.max(...groups.map((item) => Number(item.replace(/\D/g, "")) || 0)) : 0;
+}
+function selectorParts(selector) {
+  const out = [];
+  let part = "", round = 0, square = 0, quote = "";
+  for (const ch of selector) {
+    if (quote) {
+      part += ch;
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      part += ch;
+    } else if (ch === "(") {
+      round++;
+      part += ch;
+    } else if (ch === ")") {
+      round--;
+      part += ch;
+    } else if (ch === "[") {
+      square++;
+      part += ch;
+    } else if (ch === "]") {
+      square--;
+      part += ch;
+    } else if (ch === "," && !round && !square) {
+      if (part.trim()) out.push(part.trim());
+      part = "";
+    } else part += ch;
+  }
+  if (part.trim()) out.push(part.trim());
+  return out;
+}
+function scoped(container, field) {
+  return selectorParts(container).flatMap((a) => selectorParts(field).map((b) => `${a} ${b}`));
+}
+function attr(element, names) {
+  for (const name of names) {
+    const value = element.getAttribute(name);
+    if (value && value !== "#") return value;
+  }
+  return "";
+}
+var CardHandler = class {
+  active = [];
+  products;
+  base;
+  constructor(products, base) {
+    this.products = products;
+    this.base = base;
+  }
+  element(element) {
+    const draft = { title: normalize(element.getAttribute("title") || ""), priceText: "", url: absolute(attr(element, ["href", "data-href", "data-url", "data-product-url"]), this.base), image: absolute(attr(element, ["data-src", "data-lazy-src", "data-original", "src"]), this.base) };
+    this.active.push(draft);
+    element.onEndTag(() => {
+      const index = this.active.lastIndexOf(draft);
+      if (index >= 0) this.active.splice(index, 1);
+      if (draft.title || draft.url) this.products.push(draft);
+    });
+  }
+  current() {
+    return this.active[this.active.length - 1];
+  }
+};
+var TextFieldHandler = class {
+  card;
+  field;
+  captures = [];
+  constructor(card, field) {
+    this.card = card;
+    this.field = field;
+  }
+  element(element) {
+    const draft = this.card.current();
+    if (!draft) return;
+    const capture = { draft, text: "" };
+    this.captures.push(capture);
+    element.onEndTag(() => {
+      const i = this.captures.lastIndexOf(capture);
+      if (i >= 0) this.captures.splice(i, 1);
+      const value = normalize(capture.text);
+      if (value && !draft[this.field]) draft[this.field] = value;
+    });
+  }
+  text(text) {
+    const capture = this.captures[this.captures.length - 1];
+    if (capture) capture.text += text.text;
+  }
+};
+var AttributeHandler = class {
+  card;
+  field;
+  base;
+  names;
+  constructor(card, field, base, names) {
+    this.card = card;
+    this.field = field;
+    this.base = base;
+    this.names = names;
+  }
+  element(element) {
+    const draft = this.card.current();
+    if (!draft || draft[this.field]) return;
+    let value = attr(element, this.names);
+    if (!value && this.field === "image") {
+      value = (element.getAttribute("srcset") || "").split(",")[0]?.trim().split(/\s+/)[0] || "";
+    }
+    draft[this.field] = absolute(value, this.base);
+  }
+};
+var JsonLdHandler = class {
+  chunks = [];
+  active = "";
+  element(element) {
+    this.active = "";
+    element.onEndTag(() => {
+      if (this.active.trim()) this.chunks.push(this.active);
+      this.active = "";
+    });
+  }
+  text(text) {
+    this.active += text.text;
+  }
+};
+async function parseCards(html, base, selectors) {
+  const drafts = [], card = new CardHandler(drafts, base), rewriter = new HTMLRewriter().on(selectors.container, card), title = new TextFieldHandler(card, "title"), price = new TextFieldHandler(card, "priceText"), link = new AttributeHandler(card, "url", base, ["href", "data-href", "data-url", "data-product-url"]), image = new AttributeHandler(card, "image", base, ["data-src", "data-lazy-src", "data-original", "src"]), jsonLd = new JsonLdHandler();
+  for (const selector of scoped(selectors.container, selectors.title)) rewriter.on(selector, title);
+  for (const selector of scoped(selectors.container, selectors.price)) rewriter.on(selector, price);
+  for (const selector of scoped(selectors.container, selectors.link)) rewriter.on(selector, link);
+  for (const selector of scoped(selectors.container, selectors.image)) rewriter.on(selector, image);
+  rewriter.on('script[type="application/ld+json"]', jsonLd);
+  await rewriter.transform(new Response(html)).text();
+  if (!drafts.length) for (const block of jsonLd.chunks) try {
+    const root = JSON.parse(block), items = [];
+    const walk = (value) => {
+      if (!value || typeof value !== "object") return;
+      if (String(value["@type"] || "").toLowerCase().includes("product")) items.push(value);
+      for (const child of Object.values(value)) if (typeof child === "object") walk(child);
+    };
+    walk(root);
+    for (const item of items) {
+      const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers || {}, rawImage = Array.isArray(item.image) ? item.image[0] : item.image || "";
+      drafts.push({ title: normalize(String(item.name || "")), priceText: String(offer.price || ""), url: absolute(String(item.url || ""), base), image: absolute(String(rawImage), base) });
+    }
+  } catch {
+  }
+  const products = [];
+  for (const draft of drafts) {
+    if (!draft.title && !draft.url) continue;
+    const key2 = (await sha2562(draft.url || draft.title)).slice(0, 32);
+    products.push({ sourceKey: key2, title: draft.title.slice(0, 300), price: numberFromText(draft.priceText), priceText: draft.priceText, url: draft.url, image: draft.image, images: draft.image ? [draft.image] : [], sourcePage: base, scrapedAt: (/* @__PURE__ */ new Date()).toISOString() });
+  }
+  return products;
+}
+var NextLinkHandler = class {
+  url = "";
+  base;
+  constructor(base) {
+    this.base = base;
+  }
+  element(element) {
+    if (this.url) return;
+    this.url = absolute(attr(element, ["href", "data-href", "data-url"]), this.base);
+  }
+};
+async function scrapeListPage(url, selectors, nextSelector = "") {
+  const page = await safeText(url), next = new NextLinkHandler(page.url);
+  if (nextSelector) await new HTMLRewriter().on(nextSelector, next).transform(new Response(page.text)).text();
+  let products = await parseCards(page.text, page.url, selectors);
+  if (!products.length) {
+    const fallbacks = [{ container: "li.product, article.product", title: 'h2, h3, h4, .product-title, [class*="title"]', price: ".price, .amount, ins", link: "a[href]", image: "img" }, { container: ".product-card, .product-item", title: "h2, h3, h4, .title", price: ".price, .amount", link: "a[href]", image: "img" }];
+    for (const fallback of fallbacks) {
+      products = await parseCards(page.text, page.url, fallback);
+      if (products.length) break;
+    }
+  }
+  return { products, nextUrl: next.url, url: page.url };
+}
+var FirstText = class {
+  value = "";
+  capture = "";
+  inside = false;
+  element(element) {
+    if (this.value) return;
+    this.capture = "";
+    this.inside = true;
+    element.onEndTag(() => {
+      if (!this.value) this.value = normalize(this.capture);
+      this.inside = false;
+    });
+  }
+  text(text) {
+    if (this.inside) this.capture += text.text;
+  }
+};
+var GalleryHandler = class {
+  images;
+  base;
+  constructor(images, base) {
+    this.images = images;
+    this.base = base;
+  }
+  element(element) {
+    const image = absolute(attr(element, ["data-src", "data-large_image", "data-lazy-src", "data-original", "href", "src"]), this.base);
+    if (image) this.images.add(image);
+  }
+};
+async function firstText(html, selector) {
+  if (!selector) return "";
+  const handler = new FirstText();
+  await new HTMLRewriter().on(selector, handler).transform(new Response(html)).text();
+  return handler.value;
+}
+async function sanitizedFragment(html, selector, base) {
+  const nonce = crypto.randomUUID(), start = `<!--s4-${nonce}-start-->`, end = `<!--s4-${nonce}-end-->`;
+  let marked = false;
+  const clean2 = (element) => {
+    for (const [name, value] of [...element.attributes]) {
+      const lower = name.toLowerCase();
+      if (lower.startsWith("on") || ["style", "srcdoc", "nonce", "integrity"].includes(lower)) {
+        element.removeAttribute(name);
+        continue;
+      }
+      if (["href", "src", "poster"].includes(lower)) {
+        const resolved = absolute(value, base);
+        resolved ? element.setAttribute(name, resolved) : element.removeAttribute(name);
+      }
+    }
+  };
+  const marker = { element(element) {
+    clean2(element);
+    if (marked) return;
+    marked = true;
+    element.before(start, { html: true });
+    element.after(end, { html: true });
+  } }, sanitize = { element: clean2 }, remove = { element(element) {
+    element.remove();
+  } };
+  let rewriter = new HTMLRewriter().on(selector, marker);
+  for (const s of scoped(selector, "*")) rewriter = rewriter.on(s, sanitize);
+  for (const bad of ["script", "style", "iframe", "object", "embed", "form", "input", "button", "meta", "link"]) for (const s of scoped(selector, bad)) rewriter = rewriter.on(s, remove);
+  const output = await rewriter.transform(new Response(html)).text(), a = output.indexOf(start), b = output.indexOf(end, a + start.length);
+  return a >= 0 && b > a ? output.slice(a + start.length, b) : "";
+}
+async function scrapeDetails(product, selectors) {
+  if (!product.url) return product;
+  const page = await safeText(product.url);
+  product.shortDesc = await firstText(page.text, selectors.shortDesc) || product.shortDesc;
+  product.sku = await firstText(page.text, selectors.sku) || product.sku;
+  product.brand = await firstText(page.text, selectors.brand) || product.brand;
+  product.category = await firstText(page.text, selectors.category) || product.category;
+  const stock = await firstText(page.text, selectors.stock);
+  if (stock) product.stock = numberFromText(stock);
+  const weight = await firstText(page.text, selectors.weight);
+  if (weight) product.weight = numberFromText(weight);
+  if (selectors.longDesc) product.longDesc = await sanitizedFragment(page.text, selectors.longDesc, page.url) || product.longDesc;
+  if (selectors.gallery) {
+    const images = new Set(product.images), handler = new GalleryHandler(images, page.url);
+    await new HTMLRewriter().on(selectors.gallery, handler).transform(new Response(page.text)).text();
+    product.images = [...images].slice(0, 30);
+    product.image ||= product.images[0] || "";
+  }
+  return product;
+}
+function transformProduct(product, profile) {
+  product.title = normalize(product.title + profile.titleSuffix);
+  const value = profile.priceValue;
+  if (profile.priceMode === "add") product.price += value;
+  if (profile.priceMode === "percent") product.price *= 1 + value / 100;
+  if (profile.priceMode === "multiply") product.price *= value;
+  if (profile.roundPrice > 0) product.price = Math.ceil(product.price / profile.roundPrice) * profile.roundPrice;
+  product.price = Math.round(product.price);
+  return product;
+}
+function pageUrl(profile, page) {
+  const url = new URL(profile.url);
+  if (page <= 1 || profile.pagination === "none") return url.href;
+  if (profile.pagination === "path_page") {
+    url.pathname = url.pathname.replace(/\/page\/\d+\/?$/i, "").replace(/\/$/, "") + `/page/${page}/`;
+    return url.href;
+  }
+  if (profile.pagination === "path_pattern") {
+    const pattern = profile.paginationValue || "/page/{page}/";
+    url.pathname = url.pathname.replace(/\/page\/\d+\/?$/i, "").replace(/\/$/, "") + pattern.replace("{page}", String(page));
+    return url.href;
+  }
+  if (profile.pagination === "full_pattern") return profile.paginationValue.replace("{page}", String(page));
+  url.searchParams.set(profile.pagination === "query_custom" ? profile.paginationValue || "paged" : profile.paginationValue || "page", String(page));
+  return url.href;
+}
+async function mapLimit(items, limit, fn) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      await fn(items[index], index);
+    }
+  }));
+}
+async function testSelector(url, selector, type = "text") {
+  const page = await safeText(url, 4e6), values = [];
+  let count = 0;
+  class Handler {
+    capture = "";
+    element(element) {
+      count++;
+      if (values.length >= 20) return;
+      if (type === "link" || type === "image") {
+        const raw2 = type === "link" ? attr(element, ["href", "data-href"]) : attr(element, ["src", "data-src", "data-lazy-src", "data-original"]);
+        const value = absolute(raw2, page.url);
+        if (value) values.push(value.slice(0, 1e3));
+        return;
+      }
+      this.capture = "";
+      element.onEndTag(() => {
+        const value = normalize(this.capture);
+        if (value && values.length < 20) values.push(value.slice(0, 1e3));
+        this.capture = "";
+      });
+    }
+    text(text) {
+      this.capture += text.text;
+    }
+  }
+  await new HTMLRewriter().on(selector, new Handler()).transform(new Response(page.text)).text();
+  return { count, values };
+}
+
+// worker-src/sync.ts
+async function syncWoo(product, profile) {
+  const c = (await loadConnections()).woo;
+  if (!c.url || !c.key || !c.secret) throw new Error("\u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
+  const base = c.url.replace(/\/$/, "") + "/wp-json/wc/v3/products", auth = basicAuth(c.key, c.secret);
+  let id = await getRemoteId(profile.id, product.sourceKey, "woo");
+  const sku = product.sku || `s4-${profile.id}-${product.sourceKey}`.slice(0, 100);
+  if (!id) {
+    const search = await safeFetch(`${base}?sku=${encodeURIComponent(sku)}`, { headers: { authorization: auth, accept: "application/json" } }, 2e6);
+    if (search.ok) {
+      const found = await search.json();
+      id = found[0]?.id ? Number(found[0].id) : null;
+    }
+  }
+  const payload = { name: product.title, sku, type: "simple", regular_price: String(product.price), description: product.longDesc || "", short_description: product.shortDesc || "" };
+  if (product.images.length) payload.images = product.images.map((src) => ({ src }));
+  if (product.stock !== void 0) Object.assign(payload, { manage_stock: true, stock_quantity: product.stock });
+  if (product.weight) payload.weight = String(product.weight);
+  const category = profile.wooCategoryId || c.categoryId;
+  if (category) payload.categories = [{ id: category }];
+  const response = await safeFetch(id ? `${base}/${id}` : base, { method: "POST", headers: { authorization: auth, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(payload) }, 3e6), body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`WooCommerce HTTP ${response.status}: ${body.message || JSON.stringify(body).slice(0, 300)}`);
+  const remoteId = Number(body.id || id);
+  if (remoteId) {
+    await setRemoteId(profile.id, product.sourceKey, "woo", remoteId);
+    await setDestinationId(profile.id, product.sourceKey, "woo", "default", remoteId);
+  }
+  return id ? "updated" : "created";
+}
+async function syncBasalam(product, profile) {
+  const c = (await loadConnections()).basalam;
+  if (!c.token || !c.vendorId) throw new Error("\u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0628\u0627\u0633\u0644\u0627\u0645 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A");
+  const learned = c.autoCategory ? await findLearnedCategory(product.title) : null, categoryId = profile.basalamCategoryId || learned?.categoryId || c.categoryId || void 0, accounts = [{ name: "\u067E\u06CC\u0634\u200C\u0641\u0631\u0636", token: c.token, vendorId: c.vendorId, pricePercent: 0 }, ...c.shops.filter((s) => s.token && s.vendorId)], results = [];
+  for (const account of accounts) {
+    const accountKey = String(account.vendorId), legacy = account === accounts[0] ? await getRemoteId(profile.id, product.sourceKey, "basalam") : null;
+    let existing = await getDestinationId(profile.id, product.sourceKey, "basalam", accountKey) || legacy;
+    const base = `${c.api}/vendors/${encodeURIComponent(account.vendorId)}/products`, price = Math.round(product.price * (1 + (account.pricePercent || 0) / 100)), payload = { name: product.title, price, stock: product.stock ?? c.stock, description: product.longDesc || product.shortDesc || "", photo: product.image || void 0, category_id: categoryId, weight: product.weight || c.weight, package_weight: c.packageWeight, preparation_days: c.preparationDays };
+    const response = await safeFetch(existing ? `${base}/${existing}` : base, { method: existing ? "PATCH" : "POST", headers: { authorization: `Bearer ${account.token}`, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(payload) }, 3e6), body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`Basalam ${account.name} HTTP ${response.status}: ${body.message || JSON.stringify(body).slice(0, 300)}`);
+    const remoteId = Number(body.id || body.product?.id || existing);
+    if (remoteId) {
+      await setDestinationId(profile.id, product.sourceKey, "basalam", accountKey, remoteId);
+      if (account === accounts[0]) await setRemoteId(profile.id, product.sourceKey, "basalam", remoteId);
+    }
+    results.push({ shop: account.name, action: existing ? "updated" : "created", id: remoteId });
+  }
+  return results;
+}
+
+// worker-src/processor.ts
+var stateKey = (jobId) => `job_checkpoint:${jobId}`;
+function chunkSize() {
+  return Math.min(100, Math.max(1, Number(getEnv().JOB_CHUNK_SIZE) || 20));
+}
+function append(job, text, level = "info") {
+  job.log.push({ at: (/* @__PURE__ */ new Date()).toISOString(), level, message: text });
+  if (job.log.length > 200) job.log = job.log.slice(-200);
+}
+async function save(job) {
+  await updateJob(job.id, { status: job.status, phase: job.phase, total: job.total, processed: job.processed, added: job.added, updated: job.updated, failed: job.failed, error: job.error, log: job.log, finishedAt: job.finishedAt });
+}
+async function enqueueJob(job, waitUntil) {
+  const queue = getEnv().JOBS;
+  if (queue) {
+    await queue.send({ jobId: job.id });
+    return;
+  }
+  const promise = drainInline(job.id);
+  if (waitUntil) {
+    waitUntil(promise);
+    return;
+  }
+  await promise;
+}
+async function drainInline(jobId) {
+  for (let i = 0; i < 5; i++) {
+    const result = await processJob(jobId);
+    if (result !== "continue") return;
+  }
+}
+async function processJob(id) {
+  const job = await claimJob(id);
+  if (!job) return "ignored";
+  try {
+    const profile = await getProfile(job.profileId);
+    if (!profile) throw new Error("Profile not found");
+    append(job, `\u0634\u0631\u0648\u0639/\u0627\u062F\u0627\u0645\u0647 ${job.kind === "scrape" ? "\u0627\u0633\u062A\u062E\u0631\u0627\u062C" : "\u0647\u0645\u06AF\u0627\u0645\u200C\u0633\u0627\u0632\u06CC"} \xAB${profile.name}\xBB`);
+    const more = job.kind === "scrape" ? await runScrapeChunk(job, profile) : await runSyncChunk(job, profile);
+    if (job.status === "stopped") {
+      await deleteState(stateKey(job.id));
+      job.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+      job.phase = "finished";
+      append(job, "\u0639\u0645\u0644\u06CC\u0627\u062A \u0645\u062A\u0648\u0642\u0641 \u0634\u062F", "warning");
+      await save(job);
+      return "complete";
+    }
+    if (more) {
+      job.status = "queued";
+      append(job, "\u0646\u0642\u0637\u0647\u0654 \u0628\u0627\u0632\u06CC\u0627\u0628\u06CC \u0630\u062E\u06CC\u0631\u0647 \u0634\u062F\u061B \u0627\u062F\u0627\u0645\u0647 \u062F\u0631 \u067E\u06CC\u0627\u0645 \u0628\u0639\u062F\u06CC \u0635\u0641");
+      await save(job);
+      return "continue";
+    }
+    job.status = "done";
+    job.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+    job.phase = "finished";
+    append(job, "\u0639\u0645\u0644\u06CC\u0627\u062A \u0628\u0627 \u0645\u0648\u0641\u0642\u06CC\u062A \u062A\u0645\u0627\u0645 \u0634\u062F");
+    await deleteState(stateKey(job.id));
+    await save(job);
+    return "complete";
+  } catch (error) {
+    job.status = "failed";
+    job.error = message(error);
+    job.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+    job.phase = "finished";
+    append(job, job.error, "error");
+    await save(job);
+    return "complete";
+  }
+}
+async function runScrapeChunk(job, profile) {
+  const key2 = stateKey(job.id);
+  const checkpoint = await getState(key2, { page: 1, url: pageUrl(profile, 1), nextUrl: "", index: 0, seen: [] });
+  if (await stopRequested(job.id)) {
+    job.status = "stopped";
+    return false;
+  }
+  if (!checkpoint.products) {
+    job.phase = "list";
+    append(job, `\u0635\u0641\u062D\u0647 ${checkpoint.page}: ${checkpoint.url}`);
+    const page = await scrapeListPage(checkpoint.url, profile.selectors, profile.pagination === "next_selector" ? profile.paginationValue : "");
+    checkpoint.url = page.url;
+    checkpoint.nextUrl = page.nextUrl;
+    checkpoint.index = 0;
+    checkpoint.products = page.products.map((raw2) => transformProduct(raw2, profile)).filter((product) => !profile.minPrice || product.price >= profile.minPrice);
+    if (!checkpoint.products.length) {
+      append(job, "\u0645\u062D\u0635\u0648\u0644\u06CC \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F\u061B \u067E\u06CC\u0645\u0627\u06CC\u0634 \u067E\u0627\u06CC\u0627\u0646 \u06CC\u0627\u0641\u062A", "warning");
+      await finishScrape(job, profile, checkpoint);
+      return false;
+    }
+    job.total += checkpoint.products.length;
+    await setState(key2, checkpoint);
+    await save(job);
+  }
+  job.phase = "details-save-sync";
+  const start = checkpoint.index, end = Math.min(checkpoint.products.length, start + chunkSize()), batch = checkpoint.products.slice(start, end);
+  await mapLimit(batch, Math.min(8, Math.max(1, Number(getEnv().DETAIL_CONCURRENCY) || 4)), async (product) => {
+    try {
+      await scrapeDetails(product, profile.selectors);
+    } catch (error) {
+      job.failed++;
+      append(job, `${product.title}: \u062C\u0632\u0626\u06CC\u0627\u062A: ${message(error)}`, "error");
+    }
+  });
+  for (const product of batch) {
+    if (await stopRequested(job.id)) {
+      job.status = "stopped";
+      await setState(key2, checkpoint);
+      return false;
+    }
+    try {
+      const result = await upsertProduct(profile.id, product);
+      result === "added" ? job.added++ : job.updated++;
+    } catch (error) {
+      job.failed++;
+      append(job, `${product.title}: \u0630\u062E\u06CC\u0631\u0647: ${message(error)}`, "error");
+    }
+    await syncProduct(job, profile, product);
+    checkpoint.seen.push(product.sourceKey);
+    checkpoint.index++;
+    job.processed++;
+  }
+  checkpoint.seen = [...new Set(checkpoint.seen)];
+  if (checkpoint.index < checkpoint.products.length) {
+    await setState(key2, checkpoint);
+    await save(job);
+    return true;
+  }
+  const hasNext = checkpoint.page < profile.pages && (profile.pagination === "next_selector" ? Boolean(checkpoint.nextUrl) : profile.pagination !== "none");
+  if (hasNext) {
+    checkpoint.page++;
+    checkpoint.url = profile.pagination === "next_selector" ? checkpoint.nextUrl : pageUrl(profile, checkpoint.page);
+    checkpoint.nextUrl = "";
+    checkpoint.index = 0;
+    delete checkpoint.products;
+    await setState(key2, checkpoint);
+    await save(job);
+    return true;
+  }
+  await finishScrape(job, profile, checkpoint);
+  return false;
+}
+async function finishScrape(job, profile, checkpoint) {
+  job.phase = "retire";
+  const retired = await markMissingProducts(profile.id, checkpoint.seen);
+  if (retired) append(job, `${retired} \u0645\u062D\u0635\u0648\u0644 \u062F\u06CC\u06AF\u0631 \u062F\u0631 \u0645\u0628\u062F\u0623 \u062F\u06CC\u062F\u0647 \u0646\u0634\u062F`, "warning");
+  await markProfileRun(profile.id);
+}
+async function runSyncChunk(job, profile) {
+  const key2 = stateKey(job.id), checkpoint = await getState(key2, { offset: 0 });
+  if (await stopRequested(job.id)) {
+    job.status = "stopped";
+    return false;
+  }
+  job.phase = "sync";
+  const result = await listProducts(profile.id, chunkSize(), checkpoint.offset, "");
+  job.total = result.total;
+  for (const product of result.products) {
+    if (await stopRequested(job.id)) {
+      job.status = "stopped";
+      await setState(key2, checkpoint);
+      return false;
+    }
+    await syncProduct(job, profile, product);
+    checkpoint.offset++;
+    job.processed++;
+  }
+  await setState(key2, checkpoint);
+  await save(job);
+  return checkpoint.offset < result.total;
+}
+async function syncProduct(job, profile, product) {
+  if (job.target === "woo" || job.target === "both") try {
+    await syncWoo(product, profile);
+  } catch (error) {
+    job.failed++;
+    append(job, `${product.title} [WooCommerce]: ${message(error)}`, "error");
+  }
+  if (job.target === "basalam" || job.target === "both") try {
+    await syncBasalam(product, profile);
+  } catch (error) {
+    job.failed++;
+    append(job, `${product.title} [Basalam]: ${message(error)}`, "error");
+  }
+}
+
+// worker-src/settings-transfer.ts
+var STATE_FILES = {
+  "render_settings.json": "settings",
+  "autoreply_rules.json": "autoreply_rules",
+  "autoreply_state.json": "autoreply_state",
+  "remote_map.json": "remote_map",
+  "ai_providers.json": "ai_providers",
+  "ai_candidates.json": "ai_candidates",
+  "ai_votes.json": "ai_votes",
+  "sync_state.json": "sync_state",
+  "notification_settings.json": "notification_settings",
+  "digest_state.json": "digest_state"
+};
+async function createPhpSettingsBundle(host = "cloudflare-worker") {
+  const files = {};
+  const profiles = await listProfiles();
+  const phpProfiles = {};
+  for (const profile of profiles) {
+    const products = (await allProducts(profile.id)).map((product) => [product.sourceKey, stripImages(product)]);
+    phpProfiles[profile.id] = { ...profile, pagType: profile.pagination, pagVal: profile.paginationValue, priceVal: profile.priceValue, bslCategoryId: profile.basalamCategoryId, products, productsOrder: products.map((item) => item[0]) };
+  }
+  addFile(files, "profiles.json", phpProfiles);
+  const c = await loadConnections(true);
+  addFile(files, "connections.json", {
+    woocommerce: { url: c.woo.url, consumer_key: c.woo.key, consumer_secret: c.woo.secret, ck: c.woo.key, cs: c.woo.secret, category_id: c.woo.categoryId },
+    basalam: { token: c.basalam.token, vendor_id: c.basalam.vendorId, api_base: c.basalam.api, preparation_days: c.basalam.preparationDays, weight: c.basalam.weight, package_weight: c.basalam.packageWeight, stock: c.basalam.stock, category_id: c.basalam.categoryId, auto_category: c.basalam.autoCategory, net_indirect: c.basalam.netIndirect, shops: c.basalam.shops },
+    ai: { base_url: c.ai.baseUrl, api_key: c.ai.apiKey, model: c.ai.model, providers: c.ai.providers, candidates: c.ai.candidates, master: c.ai.master, network: c.ai.network },
+    notifications: c.notifications
+  });
+  addFile(files, "category_learning.json", await listCategoryLearning(1e4));
+  addFile(files, "autoreply_log.json", await listAutoreplyLog(5e3));
+  for (const [file, key2] of Object.entries(STATE_FILES)) {
+    const value = await getState(key2, null);
+    if (value !== null) addFile(files, file, value);
+  }
+  const total_bytes = Object.values(files).reduce((sum, item) => sum + item.size, 0);
+  return { app: "scraper", version: "cloudflare-1.0", created_at: Math.floor(Date.now() / 1e3), created_at_h: (/* @__PURE__ */ new Date()).toISOString(), host, kind: "settings-export", format: "scraper4-php-compatible", files, total_files: Object.keys(files).length, total_bytes };
+}
+function decodePhpSettingsBundle(bundle) {
+  if (!bundle || typeof bundle !== "object" || !bundle.files || typeof bundle.files !== "object") throw new Error("\u0641\u0627\u06CC\u0644 \u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0633\u0627\u062E\u062A\u0627\u0631 files \u0633\u0627\u0632\u06AF\u0627\u0631 \u0628\u0627 Scraper 4 \u0646\u062F\u0627\u0631\u062F.");
+  const result = {};
+  for (const [name, meta] of Object.entries(bundle.files)) {
+    if (name !== name.split("/").pop() || !meta || typeof meta.b64 !== "string") continue;
+    const decoded = base64ToUtf8(meta.b64);
+    if (byteLength(decoded) > 3e7) throw new Error(`\u0641\u0627\u06CC\u0644 ${name} \u0628\u06CC\u0634 \u0627\u0632 \u062D\u062F \u0628\u0632\u0631\u06AF \u0627\u0633\u062A.`);
+    try {
+      result[name] = JSON.parse(decoded);
+    } catch {
+      throw new Error(`\u0645\u062D\u062A\u0648\u0627\u06CC ${name} JSON \u0645\u0639\u062A\u0628\u0631 \u0646\u06CC\u0633\u062A.`);
+    }
+  }
+  if (!Object.keys(result).length) throw new Error("\u0647\u06CC\u0686 \u0641\u0627\u06CC\u0644 JSON \u0642\u0627\u0628\u0644 \u0628\u0627\u0632\u06CC\u0627\u0628\u06CC \u062F\u0631 \u0628\u0633\u062A\u0647 \u0646\u0628\u0648\u062F.");
+  return result;
+}
+function stateKeyForFile(file) {
+  return STATE_FILES[file];
+}
+function addFile(files, name, value) {
+  const text = JSON.stringify(value);
+  files[name] = { size: byteLength(text), b64: utf8ToBase64(text) };
+}
+function stripImages(value) {
+  const text = JSON.stringify(value).replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, "");
+  return JSON.parse(text);
+}
+
+// worker-src/types.ts
+var DEFAULT_SELECTORS = {
+  container: "li.product",
+  title: "h2, h3, .woocommerce-loop-product__title",
+  price: ".price, .amount",
+  link: "a[href]",
+  image: "img"
+};
+
+// worker-src/visual.ts
+var secret = () => {
+  const value = getEnv().ADMIN_TOKEN;
+  if (!value) throw new Error("ADMIN_TOKEN is required for visual selector tickets");
+  return value;
+};
+var base64url = (value) => utf8ToBase64(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+var unbase64url = (value) => base64ToUtf8(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "="));
+async function sign(value) {
+  const key2 = await crypto.subtle.importKey("raw", textEncoder.encode(secret()), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = new Uint8Array(await crypto.subtle.sign("HMAC", key2, textEncoder.encode(value)));
+  return bytesToBase64(signature).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+async function createVisualTicket(url) {
+  const encoded = base64url(JSON.stringify({ url, expires: Date.now() + 3e5 }));
+  return `${encoded}.${await sign(encoded)}`;
+}
+async function readVisualTicket(ticket) {
+  const [encoded, signature] = ticket.split(".");
+  if (!encoded || !signature || !safeEqual(signature, await sign(encoded))) throw new Error("Visual selector ticket is invalid");
+  const payload = JSON.parse(unbase64url(encoded));
+  if (!payload.url || payload.expires < Date.now()) throw new Error("Visual selector ticket has expired");
+  return payload;
+}
+async function renderVisualSelector(ticket) {
+  const { url } = await readVisualTicket(ticket), page = await safeText(url, 6e6);
+  const sanitize = { element(element) {
+    for (const [name, value] of [...element.attributes]) {
+      const lower = name.toLowerCase();
+      if (lower.startsWith("on") || ["srcdoc", "nonce", "integrity"].includes(lower)) {
+        element.removeAttribute(name);
+        continue;
+      }
+      if (["src", "href", "poster"].includes(lower)) {
+        if (element.tagName === "a" && lower === "href") {
+          element.setAttribute(name, "#");
+          continue;
+        }
+        try {
+          const absolute2 = new URL(value, page.url);
+          if (!["http:", "https:", "data:"].includes(absolute2.protocol)) element.removeAttribute(name);
+          else element.setAttribute(name, absolute2.href);
+        } catch {
+          element.removeAttribute(name);
+        }
+      }
+      if (lower === "target" && element.tagName === "a") element.removeAttribute(name);
+    }
+    const srcset = element.getAttribute("srcset");
+    if (srcset) {
+      const value = srcset.split(",").map((part) => {
+        const [url2, size = ""] = part.trim().split(/\s+/, 2);
+        try {
+          return `${new URL(url2, page.url).href} ${size}`.trim();
+        } catch {
+          return "";
+        }
+      }).filter(Boolean).join(", ");
+      value ? element.setAttribute("srcset", value) : element.removeAttribute("srcset");
+    }
+  } }, remove = { element(element) {
+    element.remove();
+  } }, head = { element(element) {
+    element.prepend('<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">', { html: true });
+    element.append(`<style>${PICKER_CSS}</style>`, { html: true });
+  } }, body = { element(element) {
+    element.prepend(TOOLBAR, { html: true });
+    element.append(`<script>${PICKER_JS}<\/script>`, { html: true });
+  } };
+  let rewriter = new HTMLRewriter().on("*", sanitize).on('script,iframe,object,embed,form,noscript,base,meta[http-equiv="refresh"],meta[http-equiv="Content-Security-Policy"]', remove).on("head", head).on("body", body);
+  return rewriter.transform(new Response(page.text)).text();
+}
+var TOOLBAR = `<div id="__s4bar"><select id="__s4mode"><option value="container">\u{1F4E6} \u06A9\u0627\u0646\u062A\u06CC\u0646\u0631</option><option value="title">\u{1F4DD} \u0639\u0646\u0648\u0627\u0646</option><option value="price">\u{1F4B0} \u0642\u06CC\u0645\u062A</option><option value="link">\u{1F517} \u0644\u06CC\u0646\u06A9</option><option value="image">\u{1F5BC} \u062A\u0635\u0648\u06CC\u0631</option><option value="shortDesc">\u062A\u0648\u0636\u06CC\u062D \u06A9\u0648\u062A\u0627\u0647</option><option value="longDesc">\u062A\u0648\u0636\u06CC\u062D \u06A9\u0627\u0645\u0644</option><option value="sku">SKU</option><option value="brand">\u0628\u0631\u0646\u062F</option><option value="stock">\u0645\u0648\u062C\u0648\u062F\u06CC</option><option value="weight">\u0648\u0632\u0646</option><option value="category">\u062F\u0633\u062A\u0647\u200C\u0628\u0646\u062F\u06CC</option><option value="gallery">\u06AF\u0627\u0644\u0631\u06CC</option></select><button id="__s4up">\u2B06 \u0648\u0627\u0644\u062F</button><button id="__s4down">\u2B07 \u0641\u0631\u0632\u0646\u062F</button><code id="__s4selector">\u0631\u0648\u06CC \u0639\u0646\u0635\u0631 \u0645\u0648\u0631\u062F \u0646\u0638\u0631 \u06A9\u0644\u06CC\u06A9 \u06A9\u0646\u06CC\u062F</code><span id="__s4count">\u06F0</span><button id="__s4save">\u2713 \u062B\u0628\u062A \u0633\u0644\u06A9\u062A\u0648\u0631</button></div>`;
+var PICKER_CSS = `#__s4bar{position:fixed!important;z-index:2147483647!important;top:0!important;left:0!important;right:0!important;min-height:48px!important;background:#0f172af2!important;color:#fff!important;border-bottom:2px solid #a855f7!important;display:flex!important;align-items:center!important;gap:6px!important;padding:6px 9px!important;font:12px Tahoma,sans-serif!important;direction:rtl!important;box-shadow:0 4px 18px #0008!important}#__s4bar select,#__s4bar button{width:auto!important;min-width:0!important;background:#334155!important;color:#fff!important;border:1px solid #64748b!important;border-radius:6px!important;padding:7px 9px!important;font:11px Tahoma!important;cursor:pointer!important}#__s4bar #__s4save{background:#22c55e!important;color:#052e16!important;border-color:#22c55e!important;font-weight:bold!important}#__s4selector{flex:1!important;direction:ltr!important;text-align:left!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;background:#020617!important;color:#f0abfc!important;padding:7px!important;border-radius:5px!important}#__s4count{color:#67e8f9!important;white-space:nowrap!important}.__s4hover{outline:3px solid #a855f7!important;outline-offset:2px!important;cursor:crosshair!important}.__s4picked{outline:4px solid #22c55e!important;outline-offset:2px!important}body{padding-top:52px!important}@media(max-width:650px){#__s4bar{flex-wrap:wrap!important}#__s4selector{order:3;flex-basis:75%!important}body{padding-top:90px!important}}`;
+var PICKER_JS = String.raw`(()=>{let current=null,hover=null;const bar=document.getElementById('__s4bar'),mode=document.getElementById('__s4mode'),label=document.getElementById('__s4selector'),count=document.getElementById('__s4count');const esc=v=>{try{return CSS.escape(v)}catch{return String(v).replace(/[^a-zA-Z0-9_-]/g,'\\$&')}};function selector(el){if(!el||el===document.body||el===document.documentElement)return el?.tagName?.toLowerCase()||'body';if(el.id){const s='#'+esc(el.id);if(document.querySelectorAll(s).length===1)return s}const parts=[];let node=el;while(node&&node!==document.body&&parts.length<5){let part=node.tagName.toLowerCase();const classes=[...node.classList].filter(x=>!x.startsWith('__s4')).slice(0,2);if(classes.length)part+='.'+classes.map(esc).join('.');let s=part;try{if(document.querySelectorAll(s).length===1){parts.unshift(part);break}}catch{}const siblings=node.parentElement?[...node.parentElement.children].filter(x=>x.tagName===node.tagName):[];if(siblings.length>1)part+=':nth-of-type('+(siblings.indexOf(node)+1)+')';parts.unshift(part);node=node.parentElement}return parts.join(' > ')}function choose(el){if(current)current.classList.remove('__s4picked');current=el;current.classList.add('__s4picked');const s=selector(current);label.textContent=s;try{count.textContent=document.querySelectorAll(s).length+' مورد'}catch{count.textContent='نامعتبر'}}document.addEventListener('mouseover',e=>{if(bar.contains(e.target))return;if(hover)hover.classList.remove('__s4hover');hover=e.target;hover.classList.add('__s4hover')},true);document.addEventListener('mouseout',e=>{if(e.target?.classList)e.target.classList.remove('__s4hover')},true);document.addEventListener('click',e=>{if(bar.contains(e.target))return;e.preventDefault();e.stopPropagation();choose(e.target)},true);document.getElementById('__s4up').onclick=()=>{if(current?.parentElement&&!bar.contains(current.parentElement))choose(current.parentElement)};document.getElementById('__s4down').onclick=()=>{if(current?.firstElementChild)choose(current.firstElementChild)};document.getElementById('__s4save').onclick=()=>{if(!current)return;const s=selector(current),preview=(current.innerText||current.getAttribute('src')||current.getAttribute('href')||'').trim().replace(/\s+/g,' ').slice(0,250);parent.postMessage({type:'scraper4-selector',mode:mode.value,selector:s,preview,count:document.querySelectorAll(s).length},location.origin)};window.addEventListener('message',e=>{if(e.origin!==location.origin)return;if(e.data?.type==='scraper4-mode'&&e.data.mode)mode.value=e.data.mode})})();`;
+
+// worker-src/app.ts
+var app = new Hono2();
+var dashboardSecurity = secureHeaders({ contentSecurityPolicy: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], connectSrc: ["'self'"], imgSrc: ["'self'", "data:", "https:"], objectSrc: ["'none'"], frameAncestors: ["'none'"] }, referrerPolicy: "no-referrer" });
+app.use("*", async (c, next) => {
+  configureEnv(c.env);
+  c.set("requestId", crypto.randomUUID());
+  c.header("x-content-type-options", "nosniff");
+  await next();
+});
+app.use("*", async (c, next) => c.req.path === "/visual" ? next() : dashboardSecurity(c, next));
+app.onError((error, c) => {
+  console.error(JSON.stringify({ requestId: c.get("requestId"), path: c.req.path, error: message(error) }));
+  const text = message(error), status = /Unauthorized/.test(text) ? 401 : /not found/i.test(text) ? 404 : /invalid|required|empty|خالی|نامعتبر/i.test(text) ? 400 : /HTTP|fetch|network|اتصال/i.test(text) ? 502 : 500;
+  return c.json({ ok: false, error: text, requestId: c.get("requestId") }, status);
+});
+app.get("/health", (c) => c.json({ ok: true, app: "scraper4-cloudflare", runtime: "cloudflare-workers", databaseReady: Boolean(c.env.DB), databaseError: c.env.DB ? null : "D1 binding DB is missing", workerInWeb: Boolean(c.env.JOBS), authenticated: Boolean(c.env.ADMIN_TOKEN), version: c.env.WORKER_VERSION || "1.0.0", time: (/* @__PURE__ */ new Date()).toISOString() }));
+app.get("/", async (c) => {
+  await ensureSchema(c.env.DB);
+  return c.html(DASHBOARD);
+});
+app.get("/dashboard.js", (c) => c.body(DASHBOARD_JS, 200, { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store" }));
+app.get("/visual", async (c) => {
+  const content = await renderVisualSelector(c.req.query("ticket") || "");
+  return c.html(content, 200, { "cache-control": "no-store", "content-security-policy": "default-src 'none'; img-src https: http: data:; style-src 'unsafe-inline' https: http:; font-src https: http: data:; script-src 'unsafe-inline'; frame-ancestors 'self';", "referrer-policy": "no-referrer" });
+});
+app.use("/api/*", async (c, next) => {
+  if (!c.env.DB) return c.json({ ok: false, error: "D1 binding DB is not configured" }, 503);
+  const token = c.env.ADMIN_TOKEN || "";
+  if (!token && c.env.ALLOW_INSECURE !== "true") return c.json({ ok: false, error: "ADMIN_TOKEN is not configured; run wrangler secret put ADMIN_TOKEN" }, 503);
+  const supplied = (c.req.header("authorization") || "").replace(/^Bearer\s+/i, "");
+  if (token && !safeEqual(supplied, token)) return c.json({ ok: false, error: "Unauthorized" }, 401);
+  await ensureSchema(c.env.DB);
+  await next();
+});
+app.post("/api/visual-ticket", async (c) => {
+  const body = await c.req.json(), url = new URL(String(body.url || ""));
+  if (!["http:", "https:"].includes(url.protocol)) return c.json({ ok: false, error: "Invalid visual selector URL" }, 400);
+  return c.json({ ok: true, ticket: await createVisualTicket(url.href), expiresIn: 300 });
+});
+app.get("/api/status", async (c) => {
+  const connections = await loadConnections();
+  return c.json({ ok: true, profiles: (await listProfiles()).length, jobs: await listJobs(10), connections: connectionStatus(connections), queue: Boolean(c.env.JOBS), storage: { d1: true, r2: Boolean(c.env.BACKUPS) } });
+});
+app.get("/api/selftest", async (c) => c.json(await runSelftest()));
+app.get("/api/parity", (c) => c.json({ ok: true, total: PHP_MENU_CAPABILITIES.length, capabilities: PHP_MENU_CAPABILITIES }));
+app.get("/api/version", (c) => c.json({ ok: true, version: c.env.WORKER_VERSION || "1.0.0", runtime: "cloudflare-workers", deployment: "wrangler versions deploy / wrangler rollback" }));
+app.get("/api/connections", async (c) => c.json({ ok: true, connections: await loadConnections(true) }));
+app.post("/api/connections", async (c) => c.json({ ok: true, connections: await saveConnections(await c.req.json()) }));
+app.get("/api/ai/providers", async (c) => c.json({ ok: true, providers: await aiProviders(), leaderboard: await getLeaderboard() }));
+app.post("/api/ai/test-all", async (c) => {
+  const b = await jsonBody(c);
+  return c.json({ ok: true, results: await testAllModels(String(b.prompt || "\u0633\u0644\u0627\u0645"), Boolean(b.onlyCandidates)) });
+});
+app.post("/api/ai/call", async (c) => {
+  const b = await jsonBody(c), provider = (await aiProviders()).find((p) => p.id === b.provider);
+  if (!provider) return c.json({ ok: false, error: "Provider not found" }, 404);
+  return c.json(await aiCall(provider, String(b.model || ""), String(b.prompt || "\u0633\u0644\u0627\u0645")));
+});
+app.post("/api/ai/vote", async (c) => {
+  const b = await jsonBody(c);
+  return c.json({ ok: true, leaderboard: await recordVote(String(b.task || "manual"), String(b.winner || ""), Array.isArray(b.candidates) ? b.candidates.map(String) : []) });
+});
+app.get("/api/ai/leaderboard", async (c) => c.json({ ok: true, leaderboard: await getLeaderboard() }));
+app.post("/api/notifications/test", async (c) => {
+  const b = await jsonBody(c);
+  return c.json(await sendNotification(b.channel || "webhook", String(b.text || "\u067E\u06CC\u0627\u0645 \u0622\u0632\u0645\u0627\u06CC\u0634\u06CC \u0627\u0633\u06A9\u0631\u067E\u0631 \u06F4 \u0627\u0632 Cloudflare Workers")));
+});
+app.get("/api/category-learning", async (c) => c.json({ ok: true, items: await listCategoryLearning(Math.min(5e3, Number(c.req.query("limit")) || 1e3)) }));
+app.post("/api/category-learning/record", async (c) => {
+  const b = await jsonBody(c);
+  return c.json({ ok: true, saved: await learnCategory(String(b.title || ""), Number(b.categoryId), String(b.categoryName || ""), Number(b.maxWords) || 5) });
+});
+app.post("/api/category-learning/test", async (c) => {
+  const b = await jsonBody(c);
+  return c.json({ ok: true, result: await findLearnedCategory(String(b.title || ""), Number(b.maxWords) || 5) });
+});
+app.post("/api/autoreply/test", async (c) => {
+  const b = await jsonBody(c);
+  return c.json({ ok: true, result: await generateReply(String(b.text || "")) });
+});
+app.post("/api/autoreply/run", async (c) => {
+  const b = await jsonBody(c);
+  return c.json(await autoreplyRun(b.confirm !== "APPLY"));
+});
+app.get("/api/autoreply/log", async (c) => c.json({ ok: true, items: await autoreplyLogs() }));
+app.post("/api/digest", async (c) => {
+  const b = await jsonBody(c);
+  return c.json(await digest(b.confirm !== "SEND"));
+});
+app.get("/api/basalam/chats", async (c) => c.json({ ok: true, items: await basalamChats(Number(c.req.query("limit")) || 20) }));
+app.get("/api/basalam/orders", async (c) => c.json({ ok: true, items: await basalamOrders(Number(c.req.query("limit")) || 20) }));
+app.get("/api/settings", async (c) => c.json({ ok: true, settings: await getState("settings", {}) }));
+app.post("/api/settings", async (c) => {
+  await setState("settings", await c.req.json());
+  return c.json({ ok: true });
+});
+app.get("/api/backup", async (c) => {
+  const backup = await createBackup();
+  if (c.req.query("persist") === "true") {
+    if (!c.env.BACKUPS) return c.json({ ok: false, error: "R2 binding BACKUPS is not configured" }, 400);
+    const key2 = `scraper4/${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
+    await c.env.BACKUPS.put(key2, JSON.stringify(backup), { httpMetadata: { contentType: "application/json" }, customMetadata: { app: "scraper4-cloudflare" } });
+    return c.json({ ok: true, persisted: true, key: key2, backup });
+  }
+  return c.json(backup, 200, { "content-disposition": `attachment; filename="scraper4-cloudflare-${Date.now()}.json"` });
+});
+app.post("/api/restore", async (c) => c.json({ ok: true, result: await restoreBackup(await c.req.json()) }));
+app.get("/api/settings-export", async (c) => {
+  const bundle = await createPhpSettingsBundle(new URL(c.req.url).host), stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[-:T]/g, "").slice(0, 15);
+  return c.json(bundle, 200, { "content-disposition": `attachment; filename="settings_${stamp}.json"` });
+});
+app.post("/api/settings-import", async (c) => c.json(await importPhpSettings(await c.req.json())));
+app.post("/api/import-php", async (c) => {
+  const body = await jsonBody(c), source2 = typeof body.profiles === "string" ? JSON.parse(body.profiles) : body.profiles, imported = [];
+  for (const [id, value] of Object.entries(source2 || {})) imported.push(await saveProfile(normalizeProfile({ ...value, id })));
+  return c.json({ ok: true, imported: imported.length, profiles: imported });
+});
+app.get("/api/profile-stats", async (c) => c.json({ ok: true, items: await profileStats() }));
+app.post("/api/maintenance/recon/:target", async (c) => {
+  const target = validDestination(c.req.param("target")), b = await jsonBody(c);
+  return c.json({ ok: true, report: await recon(target, String(b.profileId || "")) });
+});
+app.post("/api/maintenance/rebuild/:target", async (c) => {
+  const target = validDestination(c.req.param("target")), b = await jsonBody(c);
+  return c.json(await rebuildMap(target, String(b.profileId || "")));
+});
+app.post("/api/maintenance/retire/:target", async (c) => {
+  const target = validDestination(c.req.param("target")), b = await jsonBody(c);
+  return c.json(await retire(target, String(b.profileId || ""), String(b.action || "report"), b.confirm === "APPLY"));
+});
+app.post("/api/maintenance/bulk/:target", async (c) => {
+  const target = validDestination(c.req.param("target")), b = await jsonBody(c);
+  return c.json(await bulkEdit(target, b, b.confirm === "APPLY"));
+});
+app.post("/api/maintenance/photo-fix", async (c) => {
+  const b = await jsonBody(c);
+  return c.json(await photoFix(String(b.profileId || ""), b.confirm === "APPLY"));
+});
+app.get("/api/destination/:target/products", async (c) => {
+  const target = validDestination(c.req.param("target")), all = await listDestinationProducts(target), q = String(c.req.query("q") || "").toLowerCase(), filtered = q ? all.filter((x) => x.name.toLowerCase().includes(q) || String(x.id) === q) : all, limit = Math.min(200, Number(c.req.query("limit")) || 50), offset = Math.max(0, Number(c.req.query("offset")) || 0);
+  return c.json({ ok: true, total: filtered.length, items: filtered.slice(offset, offset + limit) });
+});
+app.get("/api/destination/:target/overview", async (c) => c.json({ ok: true, ...await destinationOverview(validDestination(c.req.param("target"))) }));
+app.get("/api/destination/:target/duplicates", async (c) => c.json({ ok: true, groups: await findDestinationDuplicates(validDestination(c.req.param("target"))) }));
+app.post("/api/destination/:target/:id/status", async (c) => {
+  const b = await jsonBody(c);
+  if (b.confirm !== "APPLY") return c.json({ ok: false, error: "confirm APPLY is required" }, 400);
+  return c.json(await destinationChangeStatus(validDestination(c.req.param("target")), Number(c.req.param("id")), String(b.status || "")));
+});
+app.delete("/api/destination/:target/:id", async (c) => {
+  if (c.req.query("confirm") !== "DELETE") return c.json({ ok: false, error: "confirm DELETE is required" }, 400);
+  return c.json(await destinationDelete(validDestination(c.req.param("target")), Number(c.req.param("id")), c.req.query("force") === "true"));
+});
+app.post("/api/products/:profileId/:sourceKey/sync/:target", async (c) => {
+  const profile = await getProfile(c.req.param("profileId")), product = await getProduct(c.req.param("profileId"), c.req.param("sourceKey")), target = validDestination(c.req.param("target"));
+  if (!profile || !product) return c.json({ ok: false, error: "Product/profile not found" }, 404);
+  return c.json({ ok: true, result: target === "woo" ? await syncWoo(product, profile) : await syncBasalam(product, profile) });
+});
+app.post("/api/queue-watchdog", async (c) => {
+  const b = await jsonBody(c);
+  return c.json({ ok: true, reaped: await reapStalledJobs(Number(b.minutes) || 30) });
+});
+app.post("/api/source-test", async (c) => {
+  const b = await jsonBody(c), result = await safeText(String(b.url || ""), 1e6);
+  return c.json({ ok: true, bytes: byteLength(result.text), url: result.url, title: (result.text.match(/<title[^>]*>(.*?)<\/title>/is)?.[1] || "").replace(/<[^>]+>/g, "").trim() });
+});
+app.post("/api/test-selector", async (c) => {
+  const b = await jsonBody(c);
+  return c.json({ ok: true, ...await testSelector(String(b.url || ""), String(b.selector || ""), String(b.type || "text")) });
+});
+app.post("/api/test-connection/:target", async (c) => {
+  const target = c.req.param("target"), connections = await loadConnections(true);
+  if (target === "woo") {
+    const x = connections.woo;
+    if (!x.url || !x.key || !x.secret) return c.json({ ok: false, error: "\u062A\u0646\u0638\u06CC\u0645\u0627\u062A \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A" }, 400);
+    const r = await safeFetch(x.url + "/wp-json/wc/v3/system_status", { headers: { authorization: basicAuth(x.key, x.secret), accept: "application/json" } }, 2e6);
+    return c.json({ ok: r.ok, code: r.status });
+  }
+  if (target === "basalam") {
+    const x = connections.basalam;
+    if (!x.token) return c.json({ ok: false, error: "\u062A\u0648\u06A9\u0646 \u0628\u0627\u0633\u0644\u0627\u0645 \u062E\u0627\u0644\u06CC \u0627\u0633\u062A" }, 400);
+    const r = await safeFetch(x.api + "/categories", { headers: { authorization: `Bearer ${x.token}`, accept: "application/json" } }, 2e6);
+    return c.json({ ok: r.ok, code: r.status });
+  }
+  if (target === "ai") {
+    const provider = (await aiProviders()).find((x) => x.enabled && x.models.length);
+    if (!provider) return c.json({ ok: false, error: "\u062A\u0646\u0638\u06CC\u0645\u0627\u062A AI \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A" }, 400);
+    return c.json(await aiCall(provider, provider.models[0], "\u0633\u0644\u0627\u0645"));
+  }
+  return c.json({ ok: false, error: "Unknown connection" }, 404);
+});
+app.get("/api/categories/:target", async (c) => {
+  const target = validDestination(c.req.param("target")), connections = await loadConnections();
+  if (target === "woo") {
+    const x2 = connections.woo;
+    if (!x2.url || !x2.key || !x2.secret) return c.json({ ok: false, error: "\u0627\u062A\u0635\u0627\u0644 \u0648\u0648\u06A9\u0627\u0645\u0631\u0633 \u06A9\u0627\u0645\u0644 \u0646\u06CC\u0633\u062A" }, 400);
+    const items = [];
+    for (let page = 1; page <= 20; page++) {
+      const r2 = await safeFetch(`${x2.url}/wp-json/wc/v3/products/categories?per_page=100&page=${page}`, { headers: { authorization: basicAuth(x2.key, x2.secret), accept: "application/json" } }, 3e6), found = await r2.json();
+      if (!r2.ok) throw new Error(`Woo HTTP ${r2.status}`);
+      items.push(...found);
+      if (found.length < 100) break;
+    }
+    return c.json({ ok: true, items });
+  }
+  const x = connections.basalam;
+  if (!x.token) return c.json({ ok: false, error: "\u062A\u0648\u06A9\u0646 \u0628\u0627\u0633\u0644\u0627\u0645 \u062E\u0627\u0644\u06CC \u0627\u0633\u062A" }, 400);
+  const r = await safeFetch(`${x.api}/categories`, { headers: { authorization: `Bearer ${x.token}`, accept: "application/json" } }, 5e6), body = await r.json();
+  return c.json({ ok: r.ok, items: body?.data || body?.categories || body });
+});
+app.get("/api/profiles", async (c) => c.json({ ok: true, profiles: await listProfiles() }));
+app.post("/api/profiles", async (c) => c.json({ ok: true, profile: await saveProfile(normalizeProfile(await c.req.json())) }));
+app.delete("/api/profiles/:id", async (c) => c.json({ ok: await deleteProfile(c.req.param("id")) }));
+app.post("/api/profiles/:id/scrape", async (c) => createProfileJob(c, c.req.param("id"), "scrape"));
+app.post("/api/profiles/:id/sync", async (c) => createProfileJob(c, c.req.param("id"), "sync"));
+app.get("/api/profiles/:id/products", async (c) => c.json({ ok: true, ...await listProducts(c.req.param("id"), Math.min(500, Number(c.req.query("limit")) || 100), Math.max(0, Number(c.req.query("offset")) || 0), c.req.query("q") || "") }));
+app.get("/api/profiles/:id/export.csv", async (c) => {
+  const result = await listProducts(c.req.param("id"), 1e5, 0, ""), fields = ["sourceKey", "title", "price", "url", "image", "sku", "brand", "stock", "weight", "category", "shortDesc", "longDesc"], csv = "\uFEFF" + fields.join(",") + "\n" + result.products.map((p) => fields.map((field) => csvCell(p[field])).join(",")).join("\n");
+  return c.body(csv, 200, { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="${c.req.param("id").replace(/[^a-z0-9_.-]/gi, "_")}.csv"` });
+});
+app.post("/api/profiles/:id/import", async (c) => {
+  const profile = await getProfile(c.req.param("id"));
+  if (!profile) return c.json({ ok: false, error: "Profile not found" }, 404);
+  const b = await jsonBody(c), records = Array.isArray(b.rows) ? b.rows : typeof b.csv === "string" ? parseCsv(b.csv) : [];
+  let imported = 0, failed = 0;
+  const errors = [];
+  for (const [index, row] of records.entries()) try {
+    const title = String(row.title || row.name || "").trim();
+    if (!title) throw new Error("title is empty");
+    const key2 = String(row.sourceKey || row.key || crypto.randomUUID()), image = String(row.image || "");
+    await upsertProduct(profile.id, { sourceKey: key2, title, price: numberFromText(String(row.price || 0)), priceText: String(row.price || ""), url: String(row.url || row.link || ""), image, images: image ? [image] : [], sku: String(row.sku || ""), brand: String(row.brand || ""), stock: row.stock == null ? void 0 : Number(row.stock), weight: row.weight == null ? void 0 : Number(row.weight), category: String(row.category || ""), shortDesc: String(row.shortDesc || ""), longDesc: String(row.longDesc || ""), sourcePage: "import", scrapedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    imported++;
+  } catch (error) {
+    failed++;
+    if (errors.length < 50) errors.push(`row ${index + 1}: ${message(error)}`);
+  }
+  return c.json({ ok: failed === 0, imported, failed, errors });
+});
+app.get("/api/jobs", async (c) => c.json({ ok: true, jobs: await listJobs(Math.min(200, Number(c.req.query("limit")) || 50)) }));
+app.get("/api/jobs/:id", async (c) => {
+  const job = await getJob(c.req.param("id"));
+  return job ? c.json({ ok: true, job }) : c.json({ ok: false, error: "Job not found" }, 404);
+});
+app.post("/api/jobs/:id/stop", async (c) => {
+  await updateJob(c.req.param("id"), { stopRequested: true });
+  return c.json({ ok: true });
+});
+app.post("/api/jobs/:id/retry", async (c) => {
+  const job = await retryJob(c.req.param("id"));
+  if (!job) return c.json({ ok: false, error: "Job cannot be retried" }, 409);
+  await enqueueJob(job, (p) => c.executionCtx.waitUntil(p));
+  return c.json({ ok: true, job });
+});
+app.delete("/api/jobs/:id", async (c) => c.json({ ok: await deleteJob(c.req.param("id")) }));
+app.delete("/api/jobs", async (c) => c.json({ ok: true, deleted: await clearFinishedJobs() }));
+app.get("/legacy/profiles", async (c) => c.json({ ok: true, data: await listProfiles() }));
+app.get("/legacy/profiles/:id/products", async (c) => c.json({ ok: true, data: (await listProducts(c.req.param("id"), 500, 0, "")).products }));
+app.get("/legacy/jobs", async (c) => c.json({ ok: true, data: await listJobs(100) }));
+app.post("/legacy/profiles", async (c) => c.json({ ok: true, data: await saveProfile(normalizeProfile(await c.req.json())) }));
+app.post("/legacy/profiles/:id/extract", async (c) => createProfileJob(c, c.req.param("id"), "scrape"));
+app.post("/legacy/profiles/:id/sync", async (c) => createProfileJob(c, c.req.param("id"), "sync"));
+app.get("/legacy/backup", async (c) => c.json({ ok: true, data: await createBackup() }));
+app.post("/legacy/restore", async (c) => c.json({ ok: true, data: await restoreBackup(await c.req.json()) }));
+async function createProfileJob(c, id, kind) {
+  const profile = await getProfile(id);
+  if (!profile) return c.json({ ok: false, error: "Profile not found" }, 404);
+  const b = await c.req.json().catch(() => ({})), target = validTarget(b.target || (kind === "sync" ? "both" : "none")), job = await createJob(profile.id, kind, target);
+  if (job.status === "queued") await enqueueJob(job, (promise) => c.executionCtx.waitUntil(promise));
+  return c.json({ ok: true, job }, 202);
+}
+async function jsonBody(c) {
+  return c.req.json().catch(() => ({}));
+}
+function validTarget(value) {
+  return ["none", "woo", "basalam", "both"].includes(value) ? value : "none";
+}
+function validDestination(value) {
+  if (value !== "woo" && value !== "basalam") throw new Error("Invalid target");
+  return value;
+}
+function csvCell(value) {
+  return `"${String(value ?? "").replace(/"/g, '""')}"`;
+}
+function parseCsv(text) {
+  const rows2 = [];
+  let row = [], cell = "", quoted = false;
+  const input = text.replace(/^\uFEFF/, "");
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (quoted) {
+      if (ch === '"' && input[i + 1] === '"') {
+        cell += '"';
+        i++;
+      } else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (ch === "\n") {
+      row.push(cell);
+      rows2.push(row);
+      row = [];
+      cell = "";
+    } else if (ch !== "\r") cell += ch;
+  }
+  if (cell || row.length) {
+    row.push(cell);
+    rows2.push(row);
+  }
+  const headers = rows2.shift()?.map((x) => x.trim()) || [];
+  return rows2.filter((x) => x.some(Boolean)).map((values) => Object.fromEntries(headers.map((key2, i) => [key2, values[i] || ""])));
+}
+function idFromUrl(raw2) {
+  const url = new URL(raw2), id = `${url.hostname}_${decodeURIComponent(url.pathname)}`.toLowerCase().replace(/[^\p{L}\p{N}_.-]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, 120);
+  return id || crypto.randomUUID();
+}
+function normalizeProfile(raw2) {
+  const url = new URL(String(raw2.url || ""));
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Invalid profile URL");
+  const previousCreated = String(raw2.createdAt || raw2.created_at || (/* @__PURE__ */ new Date()).toISOString()), detail = typeof raw2.detailSelectors === "string" ? JSON.parse(raw2.detailSelectors) : raw2.detailSelectors || {}, selectors = { ...DEFAULT_SELECTORS, ...typeof raw2.selectors === "string" ? JSON.parse(raw2.selectors) : raw2.selectors || {}, ...detail };
+  if (raw2.gallery?.selectors && !selectors.gallery) selectors.gallery = raw2.gallery.selectors;
+  if (!selectors.container) throw new Error("selectors.container is required");
+  const pagination = String(raw2.pagination || raw2.pagType || "query_page");
+  return { id: String(raw2.id || raw2.key || idFromUrl(url.href)), name: String(raw2.name || url.hostname), url: url.href, enabled: raw2.enabled !== false, pages: Math.min(100, Math.max(1, Number(raw2.pages) || 1)), pagination: ["query_page", "query_custom", "path_page", "path_pattern", "full_pattern", "next_selector", "none"].includes(pagination) ? pagination : "query_page", paginationValue: String(raw2.paginationValue || raw2.pagVal || "page"), selectors, titleSuffix: String(raw2.titleSuffix || ""), priceMode: ["none", "add", "percent", "multiply"].includes(raw2.priceMode) ? raw2.priceMode : "none", priceValue: Number(raw2.priceValue ?? raw2.priceVal) || 0, roundPrice: Math.max(0, Number(raw2.roundPrice) || 0), minPrice: Math.max(0, Number(raw2.minPrice) || 0), wooCategoryId: Number(raw2.wooCategoryId) || 0, basalamCategoryId: Number(raw2.basalamCategoryId ?? raw2.bslCategoryId) || 0, syncWoo: Boolean(raw2.syncWoo), syncBasalam: Boolean(raw2.syncBasalam), intervalMinutes: Math.max(0, Number(raw2.intervalMinutes ?? raw2.interval) || 0), lastRunAt: raw2.lastRunAt || null, createdAt: previousCreated, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+}
+function legacyProducts(raw2) {
+  const entries = [];
+  if (Array.isArray(raw2)) for (const item of raw2) {
+    if (Array.isArray(item) && item.length >= 2) entries.push([String(item[0]), item[1]]);
+    else if (item && typeof item === "object") entries.push([String(item.sourceKey || item.key || crypto.randomUUID()), item]);
+  }
+  else if (raw2 && typeof raw2 === "object") for (const [key2, value] of Object.entries(raw2)) entries.push([key2, value]);
+  return entries.filter(([, p]) => p && p.title).map(([key2, p]) => {
+    const images = Array.isArray(p.images) ? p.images.filter((x) => typeof x === "string" && !String(x).startsWith("data:")) : [], image = String(p.image || images[0] || "");
+    if (image && !images.includes(image) && !image.startsWith("data:")) images.unshift(image);
+    return { sourceKey: key2, title: String(p.title), price: numberFromText(String(p.finalPrice ?? p.price ?? 0)), priceText: String(p.priceText ?? p.price ?? ""), url: String(p.url || p.link || ""), image: image.startsWith("data:") ? "" : image, images, shortDesc: String(p.shortDesc || ""), longDesc: String(p.longDesc || ""), sku: String(p.sku || ""), brand: String(p.brand || ""), stock: p.stock == null ? void 0 : Number(p.stock), weight: p.weight == null ? void 0 : Number(p.weight), category: String(p.category || ""), sourcePage: String(p.sourcePage || ""), scrapedAt: (/* @__PURE__ */ new Date()).toISOString() };
+  });
+}
+async function importPhpSettings(bundle) {
+  const files = decodePhpSettingsBundle(bundle);
+  let profiles = 0, products = 0, states = 0, categories = 0, autoreplyLogs2 = 0, connections = false;
+  const warnings = [];
+  const rawProfiles = files["profiles.json"];
+  if (rawProfiles && typeof rawProfiles === "object") for (const [id, raw2] of Object.entries(rawProfiles)) try {
+    const profile = normalizeProfile({ ...raw2, id });
+    await saveProfile(profile);
+    profiles++;
+    for (const product of legacyProducts(raw2?.products)) {
+      await upsertProduct(profile.id, product);
+      products++;
+    }
+  } catch (error) {
+    warnings.push(`${id}: ${message(error)}`);
+  }
+  const rawConnections = files["connections.json"];
+  if (rawConnections) {
+    const woo = rawConnections.woocommerce || rawConnections.woo || {}, basalam = rawConnections.basalam || {}, ai = rawConnections.ai || {};
+    await saveConnections({ woo: { url: woo.url || woo.store_url || "", key: woo.consumer_key || woo.ck || woo.key || "", secret: woo.consumer_secret || woo.cs || woo.secret || "", categoryId: woo.category_id || 0 }, basalam: { token: basalam.token || "", vendorId: String(basalam.vendor_id || basalam.vendorId || ""), api: basalam.api_base || basalam.api || "https://openapi.basalam.com/v1", preparationDays: basalam.preparation_days, weight: basalam.weight, packageWeight: basalam.package_weight, stock: basalam.stock, categoryId: basalam.category_id, autoCategory: basalam.auto_category, netIndirect: basalam.net_indirect, shops: basalam.shops }, ai: { baseUrl: ai.base_url || ai.baseUrl || "", apiKey: ai.api_key || ai.apiKey || "", model: ai.model || "", providers: ai.providers, candidates: ai.candidates, master: ai.master, network: ai.network }, notifications: rawConnections.notifications || {} });
+    connections = true;
+  }
+  if (files["category_learning.json"]) categories = await importCategoryLearning(files["category_learning.json"]);
+  if (files["autoreply_log.json"]) autoreplyLogs2 = await importAutoreplyLog(files["autoreply_log.json"]);
+  for (const [file, value] of Object.entries(files)) {
+    const key2 = stateKeyForFile(file);
+    if (key2) {
+      await setState(key2, value);
+      states++;
+    }
+  }
+  return { ok: true, format: "scraper4-php-compatible", imported: { profiles, products, states, categories, autoreplyLogs: autoreplyLogs2, connections }, warnings };
+}
+async function scheduledTasks(env, waitUntil) {
+  configureEnv(env);
+  await ensureSchema(env.DB);
+  await reapStalledJobs(30);
+  const due = await enqueueDueProfiles(), queued = (await listJobs(200)).filter((job) => job.status === "queued"), seen = /* @__PURE__ */ new Set();
+  for (const job of [...due, ...queued]) if (!seen.has(job.id)) {
+    seen.add(job.id);
+    await enqueueJob(job, waitUntil);
+  }
+  waitUntil(automationTick());
+}
+
+// worker-src/main.ts
+var main_default = {
+  fetch: app.fetch,
+  async queue(batch, env, ctx) {
+    configureEnv(env);
+    await ensureSchema(env.DB);
+    for (const item of batch.messages) {
+      try {
+        const result = await processJob(String(item.body?.jobId || ""));
+        console.log(JSON.stringify({ event: "queue_job", jobId: item.body?.jobId, result }));
+        if (result === "continue") {
+          if (env.JOBS) await env.JOBS.send({ jobId: item.body.jobId }, { delaySeconds: 1 });
+          else item.retry({ delaySeconds: 30 });
+        }
+        item.ack();
+      } catch (error) {
+        console.error("queue delivery failed", error);
+        item.retry({ delaySeconds: 30 });
+      }
+    }
+  },
+  async scheduled(_controller, env, ctx) {
+    await scheduledTasks(env, (promise) => ctx.waitUntil(promise));
+  }
+};
+export {
+  main_default as default
+};

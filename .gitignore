@@ -89,3 +89,6 @@ storage_errors.log
 node_modules/
 render-dist/
 .wrangler/
+
+# Cloudflare Worker build artifacts
+worker-dist/
