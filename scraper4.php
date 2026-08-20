@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.90';
+const APP_VERSION = '9.91';
 const APP_VERSION_DATE = '1405/05/29';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -10704,8 +10704,13 @@ if (empty($syncCfg['enabled'])) { $pResult['status'] = 'sync_disabled'; $results
 $interval = (int)($syncCfg['interval'] ?? 3600);
 $lastRun = (int)($syncState[$key]['lastRun'] ?? 0);
 $target = $syncCfg['target'] ?? 'woo';
+/* v9.91: «هیچ‌کدام» — استخراج دوره‌ای انجام شود ولی هیچ ارسالی به مقصدها نشود.
+   مقدارِ none با هیچ‌کدام از شرط‌های woo/bsl/both جور درنمی‌آید، پس صف‌ها خالی
+   می‌مانند. فقط برای اینکه گزارشِ کران روشن باشد، صریح علامت می‌زنیم. */
+if (!in_array($target, ['woo', 'bsl', 'both', 'none'], true)) $target = 'woo';
 if ($interval > 0 && ($now - $lastRun < $interval)) { $pResult['status'] = 'not_due'; $pResult['remaining'] = $interval - ($now - $lastRun); $results['profiles'][] = $pResult; continue; }
 $pResult['status'] = 'syncing'; $pResult['target'] = $target;
+if ($target === 'none') { $pResult['send'] = 'disabled_by_target'; }
 /* v9.45: پروفایل‌های واردشده با اکسل/CSV — بدون استخراج، فقط آپدیت قیمت/موجودی.
    وقتی تیک «بدون استخراج» روشن است، مرحلهٔ استخراج (فهرست/جزئیات) کاملاً رد
    می‌شود و فقط محصولاتِ ازقبل‌داشته با قیمت و موجودیِ فعلی‌شان دوره‌ای به مقصد
@@ -13261,6 +13266,39 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "preg_match('~,(\\d{1,2})\$~', \$en)") !== false);
     $add('9.85', 'کلاسِ کاراکتریِ ترکیب‌گر جداکنندهٔ الگو را نمی‌بندد',
          strpos($selfSrc, "preg_match('/[+~]/', \$css)") !== false);
+
+    /* ---------- v9.91: ماندگاریِ تب + مقصدِ «هیچ‌کدام» ---------- */
+    $add('9.91', 'نامِ تب فعال در مرورگر ذخیره می‌شود',
+         strpos($selfSrc, "LAST_TAB_KEY = 'scraper_last_main_tab'") !== false
+      && strpos($selfSrc, 'function rememberMainTab(') !== false
+      && strpos($selfSrc, 'function lastMainTab(') !== false
+      && strpos($selfSrc, 'rememberMainTab(name);') !== false);
+    $add('9.91', 'بعد از لود، اول هش و بعد آخرین تبِ ذخیره‌شده اعمال می‌شود',
+         strpos($selfSrc, 'const want = MAIN_TABS.includes(hash) ? hash : lastMainTab();') !== false
+      && strpos($selfSrc, 'switchMainTab(want)') !== false);
+    $add('9.91', 'فهرست تب‌های معتبر یک‌جا تعریف شده و در هر دو مسیر یکی است',
+         strpos($selfSrc, "MAIN_TABS = ['start','settings','selectors','results','send','import']") !== false
+      // نسخهٔ سخت‌کدشدهٔ قدیمی در بازیابیِ هش دیگر نیست
+      && substr_count($selfSrc, ']' . '.includes(hash)') === 0);
+    $add('9.91', 'بازیابیِ خودکارِ پروفایل دیگر تبِ کاربر را عوض نمی‌کند',
+         strpos($selfSrc, 'function applyProfile(p, keepTab) {') !== false
+      && strpos($selfSrc, 'applyProfile(d.profile, !!silent);') !== false
+      && strpos($selfSrc, "if (!keepTab) switchMainTab('results');") !== false);
+    $add('9.91', 'کشویی هدفِ همگام‌سازی گزینهٔ «هیچ‌کدام» دارد',
+         strpos($selfSrc, '<option value="no' . 'ne">هیچ‌کدام') !== false);
+    $add('9.91', 'مقدارِ نامعتبرِ هدف به woo برمی‌گردد و none معتبر است',
+         strpos($selfSrc, "in_array(\$target, ['woo', 'bsl', 'both', 'none'], true)") !== false
+      && strpos($selfSrc, "\$pResult['send'] = 'disabled_by_target';") !== false);
+    $add('9.91', 'با هدفِ «هیچ‌کدام» هیچ صفی برای ووکامرس یا باسلام ساخته نمی‌شود',
+         strpos($selfSrc, "if (\$target === 'woo' || \$target === 'both') {") !== false
+      && strpos($selfSrc, "if (\$target === 'bsl' || \$target === 'both') {") !== false
+      // هیچ‌جا none را با woo/bsl یکی نگرفته‌ایم
+      && strpos($selfSrc, "\$target === 'none' || \$target === 'woo'") === false);
+    $add('9.91', 'بازنشستگیِ محصولاتِ حذف‌شده هم با هدفِ «هیچ‌کدام» اجرا نمی‌شود',
+         strpos($selfSrc, "if (\$target === 'none') { \$out['skipped'] = 'مقصد «هیچ‌کدام» است'; return \$out; }") !== false);
+    $add('9.91', 'نوارِ وضعیتِ سینک برای «هیچ‌کدام» متنِ مخصوص نشان می‌دهد',
+         strpos($selfSrc, "if(tg==='none')") !== false
+      && strpos($selfSrc, 'بدون ارسال (فقط استخراج)') !== false);
 
     /* ---------- v9.90: کنترل‌های تب سلکتورها ---------- */
     $add('9.90', 'هر سه دستهٔ کنترل، تیک نمایش/پنهان دارند',
@@ -16156,6 +16194,8 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
     $out = ['mode' => $mode, 'target' => $target, 'checked' => 0,
             'retired' => 0, 'not_found' => 0, 'failed' => 0, 'items' => [], 'dry_run' => $dryRun];
     if ($mode === 'off' || !$items) { $out['skipped'] = 'غیرفعال'; return $out; }
+    // v9.91: مقصدِ «هیچ‌کدام» یعنی هیچ تماسی با ووکامرس/باسلام گرفته نشود
+    if ($target === 'none') { $out['skipped'] = 'مقصد «هیچ‌کدام» است'; return $out; }
 
     $guard = retireGuard(count($items), $extracted, $cn);
     $out['guard'] = $guard;
@@ -23976,10 +24016,14 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
             </div>
             <div class="row" style="margin-bottom:6px;align-items:center">
                 <label style="min-width:80px;font-size:12px;color:#94a3b8">هدف:</label>
+                <!-- v9.91: گزینهٔ چهارم — «هیچ‌کدام». استخراج دوره‌ای اجرا می‌شود
+                     ولی هیچ محصولی به ووکامرس یا باسلام فرستاده نمی‌شود. برای
+                     پروفایل‌هایی که فقط می‌خواهید قیمت/موجودی مبدأ رصد شود. -->
                 <select id="profileSyncTarget" onchange="scheduleSave();updateSyncStatusText()" style="flex:1">
                     <option value="woo">ووکامرس</option>
                     <option value="bsl">باسلام</option>
                     <option value="both">هر دو</option>
+                    <option value="none">هیچ‌کدام (فقط استخراج، بدون ارسال)</option>
                 </select>
             </div>
 
@@ -25079,6 +25123,25 @@ function scheduleSave() {
     }
 }
 
+/* =====================================================================
+ *  v9.91: آخرین تبِ باز بعد از رفرش برمی‌گردد
+ *
+ *  تا اینجا با هر رفرش، تب «شروع» باز می‌شد (یا اگر پروفایلی بازیابی
+ *  می‌شد، تب «نتایج»). آدرسِ هش (#results) نوشته می‌شد ولی دو چیز آن را
+ *  بی‌اثر می‌کرد: ۱) اگر کاربر هیچ تبی را دستی کلیک نکرده بود هشی وجود
+ *  نداشت، ۲) بازیابیِ خودکارِ آخرین پروفایل بعد از آن اجرا می‌شد و
+ *  زورکی به «نتایج» می‌پرید. حالا نامِ تب در همین مرورگر ذخیره می‌شود و
+ *  بازیابیِ پروفایل دیگر تب را عوض نمی‌کند. */
+const MAIN_TABS = ['start','settings','selectors','results','send','import'];
+const LAST_TAB_KEY = 'scraper_last_main_tab';
+function rememberMainTab(name){
+    try { if (MAIN_TABS.includes(name)) localStorage.setItem(LAST_TAB_KEY, name); } catch(e) {}
+}
+function lastMainTab(){
+    try { const v = localStorage.getItem(LAST_TAB_KEY) || ''; return MAIN_TABS.includes(v) ? v : ''; }
+    catch(e) { return ''; }
+}
+
 function switchMainTab(name) {
     document.querySelectorAll('.main-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     // v9.65: اگر پنلِ درخواست‌شده وجود نداشته باشد (مثلاً نامِ اشتباه)، هیچ پنلی را
@@ -25091,6 +25154,7 @@ function switchMainTab(name) {
     // v8.88: روی موبایل صفحه را به بالا نپران
     softScrollTo({top:0,behavior:'smooth'});
     try { history.replaceState(null, '', '#' + name); } catch(e) {}
+    rememberMainTab(name);   // v9.91: تا رفرشِ بعدی همین‌جا باز شود
 }
 // v8.17: Settings panel toggle
 function toggleSettingsPanel(){const p=document.getElementById('settingsPanel');const o=document.getElementById('settingsOverlay');const b=document.getElementById('hamburgerBtn');if(p.classList.contains('open')){p.classList.remove('open');o.classList.remove('open');if(b)b.classList.remove('active');}else{p.classList.add('open');o.classList.add('open');if(b)b.classList.add('active');}}
@@ -25179,9 +25243,13 @@ function renderBslProfileCatList(cats,q){const list=$('bslProfileCatList');if(!l
 function bslSelectProfileCat(catId){bslProfileSelectedCatId=catId;$('bslProfileCatId').value=String(catId);if(bslAllCats.length>0){const c=bslAllCats.find(x=>x.id===catId);if(c)$('bslProfileCatSearch').value=c.name;}scheduleSave();}
 
 (function(){
+    /* v9.91: اول هشِ آدرس (اگر کاربر لینکِ مستقیم باز کرده)، وگرنه آخرین
+       تبی که در همین مرورگر باز بود. قبلاً فقط هش خوانده می‌شد و چون در
+       بازِ کردنِ ساده هشی وجود ندارد، همیشه «شروع» می‌آمد. */
     const hash = window.location.hash.replace('#','');
-    if (['start','settings','selectors','results','send','import'].includes(hash)) {
-        setTimeout(() => switchMainTab(hash), 50);
+    const want = MAIN_TABS.includes(hash) ? hash : lastMainTab();
+    if (want) {
+        setTimeout(() => switchMainTab(want), 50);
     }
 })();
 
@@ -25759,7 +25827,10 @@ function loadProfileFromServer(url, silent) {
         .then(r => r.json())
         .then(d => {
             if (d.ok && d.profile) {
-                applyProfile(d.profile);
+                /* v9.91: در بازیابیِ خودکارِ بعد از رفرش (silent) نباید تبِ کاربر
+                   عوض شود. قبلاً applyProfile در پایانش به «نتایج» می‌پرید و
+                   همان علتِ اصلیِ «هر رفرش، تبِ من عوض می‌شود» بود. */
+                applyProfile(d.profile, !!silent);
                 rememberProfile(url);            // v8.68
                 if (silent) showToast('↩ آخرین پروفایل بازیابی شد: ' + (d.profile.name || url));
             } else if (!silent) {
@@ -25771,7 +25842,7 @@ function loadProfileFromServer(url, silent) {
         .catch(() => { if (!silent) showToast('خطا در بارگذاری', true); });
 }
 
-function applyProfile(p) {
+function applyProfile(p, keepTab) {
     $('url').value = p.url || '';
     $('profileName').value = p.name || '';
     $('pages').value = p.pages || 10;
@@ -25840,7 +25911,8 @@ function applyProfile(p) {
             }
         });
         refreshViews();
-        switchMainTab('results');
+        // v9.91: در بازیابیِ خودکار، تبِ فعلیِ کاربر حفظ می‌شود
+        if (!keepTab) switchMainTab('results');
         showToast('✓ پروفایل "' + (p.name || '') + '" بارگذاری شد (' + toFa(products.size) + ' محصول)');
     } else {
         refreshViews();
@@ -27988,6 +28060,20 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.91', t:'🗂️ تبِ باز بعد از رفرش می‌ماند + مقصدِ «هیچ‌کدام»', items:[
+    'با هر رفرش، تب به «شروع» یا «نتایج» می‌پرید و باید دوباره دستی',
+    'به تبِ خودتان برمی‌گشتید.',
+    '✅ آخرین تبی که باز بوده در همین مرورگر ذخیره می‌شود و بعد از رفرش',
+    '   دقیقاً همان باز می‌شود. لینکِ مستقیم با #results هنوز اولویت دارد.',
+    '🐞 علتِ اصلی: بازیابیِ خودکارِ آخرین پروفایل بعد از لود اجرا می‌شد و',
+    '   چون محصول داشت، زورکی به تب «نتایج» می‌پرید. حالا در بازیابیِ',
+    '   خودکار تبِ کاربر دست نمی‌خورد (در انتخابِ دستیِ پروفایل مثل قبل',
+    '   به «نتایج» می‌رود).',
+    '✅ کشویی «هدف» در همگام‌سازی دوره‌ای گزینهٔ چهارم گرفت: «هیچ‌کدام',
+    '   (فقط استخراج، بدون ارسال)» — استخراج دوره‌ای اجرا می‌شود ولی هیچ',
+    '   محصولی به ووکامرس یا باسلام صف نمی‌شود و بازنشستگی هم اجرا',
+    '   نمی‌شود. برای رصدِ قیمت/موجودی مبدأ بدون دست‌زدن به فروشگاه.',
+  ]},
   {v:'9.90', t:'🧰 تب سلکتورها: کنترل‌های جمع‌وجور و نوار شناورِ درست', items:[
     'سه دستهٔ کنترلِ سلکتور با هم ارتفاع زیادی می‌گرفتند و روی نمایشگر',
     'کوچک عملاً چیزی از خودِ صفحهٔ پیش‌نمایش باقی نمی‌ماند.',
@@ -35514,6 +35600,10 @@ function updateSyncStatusText(){
     const wm=$('profileSyncWooAddUpdate').checked?'➕🔄 ووکامرس':'🆕 ووکامرس';
     const bm=$('profileSyncBslAddUpdate').checked?'➕🔄 باسلام':'🆕 باسلام';
     const ne=($('profileSyncNoExtract')&&$('profileSyncNoExtract').checked)?' 🚫بدون استخراج':'';
+    /* v9.91: مقصدِ «هیچ‌کدام» — استخراج انجام می‌شود ولی چیزی ارسال نمی‌شود،
+       پس نشان‌دادن حالتِ ووکامرس/باسلام گمراه‌کننده است. */
+    const tg=$('profileSyncTarget')?$('profileSyncTarget').value:'woo';
+    if(tg==='none'){$('profileSyncStatus').textContent='✓ سینک فعال ('+intv+') | 🚫 بدون ارسال (فقط استخراج)'+ne;return;}
     $('profileSyncStatus').textContent='✓ سینک فعال ('+intv+') | '+wm+' | '+bm+ne;
 }
 function refreshSyncStatus(){
