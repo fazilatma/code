@@ -1,5 +1,12 @@
 # Render TypeScript changelog
 
+## 2.23.0 — 2026-08-20
+
+- Added a persistent Persian typography selector with live preview in general settings.
+- Added Vazirmatn, Noto Sans/Kufi Arabic, IBM Plex Sans Arabic, Markazi, Lalezar, Cairo, Tajawal, Changa and El Messiri web fonts.
+- Added local Iran Yekan/Yekan Bakh/B Yekan support with safe Persian and system fallbacks.
+- Applied the selected font consistently to navigation, drawer headings, buttons, forms and selector controls.
+
 ## 2.22.0 — 2026-08-20
 
 - Added AI-provider JSON export beside import, including model reasoning metadata.
