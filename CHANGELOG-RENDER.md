@@ -1,5 +1,14 @@
 # Render TypeScript changelog
 
+## 2.22.0 — 2026-08-20
+
+- Added AI-provider JSON export beside import, including model reasoning metadata.
+- Added the Mistral text-to-text catalog and a one-click add/update action.
+- Added per-model reasoning flags and reasoning-aware request/response handling for Together AI and other reasoning models.
+- Made every AI result row open complete diagnostics with the raw provider response, while simplifying duplicated table columns.
+- Fixed the drawer expand control stacking and made expanded section headers sticky while scrolling.
+- Added eleven persistent, live-preview color themes to general settings.
+
 ## 2.21.0 — 2026-08-19
 
 - Fully separated WooCommerce and Basalam destination sub-panels with independent filters, views and state.

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-19T05:49:06.554Z",
+  "generatedAt": "2026-08-20T14:26:43.764Z",
   "summary": {
     "phpGetConditions": 150,
     "phpPostActions": 28,
@@ -8,8 +8,8 @@
     "getMissing": 33,
     "postCovered": 28,
     "postMissing": 0,
-    "typescriptRoutes": 111,
-    "uiActions": 79
+    "typescriptRoutes": 112,
+    "uiActions": 81
   },
   "get": [
     {
@@ -829,6 +829,7 @@
     "GET /api/connections",
     "POST /api/connections",
     "GET /api/ai/providers",
+    "POST /api/ai/providers/:id/discover-models",
     "POST /api/ai/test-all",
     "POST /api/ai/call",
     "POST /api/ai/vote",
@@ -931,12 +932,14 @@
   "menuActions": [
     "ai-add-available",
     "ai-add-candidate",
+    "ai-add-mistral-models",
     "ai-add-model",
     "ai-add-provider",
     "ai-candidate-category",
     "ai-candidate-reply",
     "ai-category-one",
     "ai-clear-candidates",
+    "ai-export-providers",
     "ai-leaderboard",
     "ai-local-category",
     "ai-network-diagnostics",
