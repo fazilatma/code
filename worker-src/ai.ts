@@ -106,6 +106,7 @@ export async function suggestCategoryWithModel(title:string,modelKey:string,cate
 const AI_TEST_MODELS_PER_INVOCATION=1;
 type AiTestTask={p:Provider;model:string;key:string};
 type StoredAiTest={runId:string;startedAt:string;updatedAt:string;prompt:string;categoryTitle:string;onlyCandidates:boolean;total:number;results:any[]};
+type AiTestOptions={onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[];skipCurrent?:boolean;skipReason?:string};
 function aiTestTasks(ai:any,providers:Provider[],onlyCandidates:boolean):AiTestTask[]{
   const wanted=new Set<string>(Array.isArray(ai.candidates)?ai.candidates.map(String):[]),tasks:AiTestTask[]=[];
   for(const p of providers){
@@ -116,25 +117,35 @@ function aiTestTasks(ai:any,providers:Provider[],onlyCandidates:boolean):AiTestT
 }
 function aiTestFailure(error:unknown,task:AiTestTask,prompt:string){return error instanceof AiResponseError?{...error.detail,key:task.key}:{ok:false,phase:'unknown',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey),raw:{error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey)}}}
 
+function aiTestResponse(saved:StoredAiTest,tasks:AiTestTask[],cursor:number,nextCursor:number,batchResults:any[],replayed=false){
+  const results=saved.results,done=nextCursor>=tasks.length,messageSucceeded=results.filter(x=>x.ok).length,messageFailed=results.filter(x=>!x.ok).length,categoryAttempted=Boolean(saved.categoryTitle),categorySucceeded=categoryAttempted?results.filter(x=>x.categoryResult?.ok).length:0,categoryFailed=categoryAttempted?results.filter(x=>!x.categoryResult?.ok).length:0,skipped=results.filter(x=>x.skipped||x.phase==='transport-skip').length;
+  return{ok:done&&messageSucceeded>0,runId:saved.runId,startedAt:saved.startedAt,updatedAt:saved.updatedAt,prompt:saved.prompt,categoryTitle:saved.categoryTitle,total:tasks.length,cursor,nextCursor,done,batchSize:batchResults.length,maxModelsPerInvocation:AI_TEST_MODELS_PER_INVOCATION,succeeded:messageSucceeded,failed:messageFailed,messageSucceeded,messageFailed,categorySucceeded,categoryFailed,skipped,replayed,results,batchResults};
+}
+function skippedAiTestResult(task:AiTestTask,prompt:string,categoryTitle:string,reason:string){
+  const error=String(reason||'پس از چند تلاش، پاسخ این نوبت از Worker دریافت نشد.');
+  return{ok:false,skipped:true,phase:'transport-skip',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error,raw:{error},categoryTitle,categoryResult:categoryTitle?{ok:false,skipped:true,phase:'transport-skip',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error,raw:{error}}:null,catResponse:categoryTitle?error:''};
+}
 /**
- * Runs at most one model per Worker invocation. A Cloudflare-native model can
- * legitimately need several native payload/model attempts before the OpenAI
- * fallback, so a larger batch can exhaust the Free plan's 50-subrequest cap.
- * The dashboard advances `cursor`, making every model a fresh invocation while
- * this function persists one aggregate result set for the final table.
+ * Runs at most one model per Worker invocation. Results are persisted before
+ * responding and a repeated runId/cursor replays the stored row, so browser
+ * retries never execute or append the same model twice.
  */
-export async function testModelBatch(prompt='سلام',options:{onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[]}={}){
-  const ai=(await loadConnections()).ai,providers=providersFromAi(ai),onlyCandidates=Boolean(options.onlyCandidates),tasks=aiTestTasks(ai,providers,onlyCandidates),cursor=Math.max(0,Math.trunc(Number(options.cursor)||0)),categoryTitle=String(options.categoryTitle||'').trim(),categories=Array.isArray(options.categories)?options.categories:[];
-  const previous=cursor>0?await getState<StoredAiTest|null>('ai_test_results',null):null,runId=String(options.runId||previous?.runId||crypto.randomUUID()),startedAt=cursor===0||!previous?.startedAt?new Date().toISOString():previous.startedAt;
-  if(cursor>0&&(!previous?.runId||previous.runId!==runId||previous.prompt!==prompt||previous.categoryTitle!==categoryTitle||previous.onlyCandidates!==onlyCandidates))throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
-  const results:any[]=cursor===0?[]:Array.isArray(previous?.results)?previous.results:[],batch=tasks.slice(cursor,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults:any[]=[];
+export async function testModelBatch(prompt='سلام',options:AiTestOptions={}){
+  const ai=(await loadConnections()).ai,providers=providersFromAi(ai),onlyCandidates=Boolean(options.onlyCandidates),tasks=aiTestTasks(ai,providers,onlyCandidates),cursor=Math.max(0,Math.trunc(Number(options.cursor)||0)),categoryTitle=String(options.categoryTitle||'').trim(),categories=Array.isArray(options.categories)?options.categories:[],requestedRunId=String(options.runId||'').trim();
+  const previous=requestedRunId||cursor>0?await getState<StoredAiTest|null>('ai_test_results',null):null,runId=requestedRunId||crypto.randomUUID(),sameRun=Boolean(previous?.runId&&previous.runId===runId&&previous.prompt===prompt&&previous.categoryTitle===categoryTitle&&previous.onlyCandidates===onlyCandidates),startedAt=sameRun&&previous?.startedAt?previous.startedAt:new Date().toISOString();
+  if(cursor>0&&!sameRun)throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
+  const results:any[]=sameRun&&Array.isArray(previous?.results)?[...previous.results]:[];
+  if(cursor>results.length)throw new Error('ترتیب ادامهٔ آزمایش معتبر نیست؛ آخرین نتیجه را باز کنید و دوباره ادامه دهید.');
+  if(sameRun&&cursor<results.length){const nextCursor=Math.min(tasks.length,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults=results.slice(cursor,nextCursor),saved={...previous!,total:tasks.length,results};return aiTestResponse(saved,tasks,cursor,nextCursor,batchResults,true)}
+  const batch=tasks.slice(cursor,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults:any[]=[];
   for(const task of batch){
+    if(options.skipCurrent){batchResults.push(skippedAiTestResult(task,prompt,categoryTitle,String(options.skipReason||'')));continue}
     let message:any;try{message={...await aiCall(task.p,task.model,prompt,ai.network),key:task.key}}catch(error){message=aiTestFailure(error,task,prompt)}
     let categoryResult:any=null;if(categoryTitle&&categories.length)try{categoryResult={...await categoryWithTask(task,categoryTitle,categories,ai.network),key:task.key}}catch(error){categoryResult=aiTestFailure(error,task,categoryTitle)}
     batchResults.push({...message,categoryTitle,categoryResult,catResponse:categoryResult?.ok?`${categoryResult.categoryName} (#${categoryResult.categoryId})`:categoryResult?.error||(!categories.length?'فهرست دسته‌بندی در دسترس نیست':'')});
   }
-  results.push(...batchResults);const nextCursor=Math.min(tasks.length,cursor+batch.length),done=nextCursor>=tasks.length,updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,categoryTitle,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);
-  return{ok:done&&results.some(x=>x.ok),runId,startedAt,updatedAt,prompt,categoryTitle,total:tasks.length,cursor,nextCursor,done,batchSize:batch.length,maxModelsPerInvocation:AI_TEST_MODELS_PER_INVOCATION,succeeded:results.filter(x=>x.ok).length,failed:results.filter(x=>!x.ok).length,categorySucceeded:results.filter(x=>x.categoryResult?.ok).length,results,batchResults};
+  results.push(...batchResults);const nextCursor=Math.min(tasks.length,cursor+batch.length),updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,categoryTitle,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);
+  return aiTestResponse(saved,tasks,cursor,nextCursor,batchResults,false);
 }
 export async function getLastAiTestResults(){return getState<any>('ai_test_results',{runId:'',startedAt:null,updatedAt:null,prompt:'',total:0,results:[]})}
 class AiResponseError extends Error{constructor(message:string,public detail:any){super(message);detail.error=message}}

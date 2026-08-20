@@ -130,6 +130,32 @@ test('AI model table stores an independently validated category response for the
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('AI test cursor replay is idempotent and transport skip advances without calling the model',async()=>{
+  const originalFetch=globalThis.fetch,db=new MemoryD1(),calls=[];
+  try{
+    await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'stable',name:'Stable Provider',baseUrl:'https://ai.example/v1',apiKey:'stable-secret',models:['model-1'],enabled:true}],network:{mode:'direct'}}}));
+    globalThis.fetch=async(_request,init={})=>{const body=JSON.parse(String(init.body||'{}'));calls.push(body.model);return jsonResponse({choices:[{message:{content:'پاسخ سلام'}}]})};
+    const payload={prompt:'سلام',cursor:0,runId:'idempotent-run'};
+    const first=await call(db,'/api/ai/test-all',jsonInit(payload)).then(response=>response.json());assert.equal(first.done,true);assert.equal(first.replayed,false);assert.equal(first.messageSucceeded,1);assert.equal(first.messageFailed,0);assert.equal(first.results[0].text,'پاسخ سلام');
+    const replay=await call(db,'/api/ai/test-all',jsonInit(payload)).then(response=>response.json());assert.equal(replay.replayed,true);assert.equal(replay.results.length,1);assert.equal(replay.batchResults.length,1);assert.deepEqual(calls,['model-1'],'the same cursor must never execute the model twice');
+    const skipped=await call(db,'/api/ai/test-all',jsonInit({prompt:'سلام',cursor:0,runId:'skip-run',skipCurrent:true,skipReason:'browser transport failed'})).then(response=>response.json());assert.equal(skipped.done,true);assert.equal(skipped.messageSucceeded,0);assert.equal(skipped.messageFailed,1);assert.equal(skipped.skipped,1);assert.equal(skipped.results[0].phase,'transport-skip');assert.equal(skipped.results[0].skipped,true);assert.deepEqual(calls,['model-1'],'transport skip must not call the provider');
+  }finally{globalThis.fetch=originalFetch}
+});
+
+test('Basalam chat APIs normalize conversations and lazy message details with actionable errors',async()=>{
+  const originalFetch=globalThis.fetch,originalError=console.error,db=new MemoryD1(),requests=[];console.error=()=>{};
+  try{
+    await call(db,'/api/connections',jsonInit({basalam:{api:'https://basalam.example/api',token:'chat-token',vendorId:'55'}}));
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request),headers=new Headers(init.headers);requests.push({url,headers});assert.equal(headers.get('authorization'),'Bearer chat-token');
+      if(url.includes('/chats/42/messages'))return jsonResponse({data:{messages:[{id:2,content:{text:'پاسخ غرفه'},sender:{name:'غرفه',type:'vendor'},sender_type:'vendor',message_type:'text',created_at:'2026-08-20T10:02:00Z'},{id:1,text:'سلام، موجوده؟',sender:{name:'مریم',type:'customer'},sender_type:'customer',created_at:'2026-08-20T10:01:00Z'}]}});
+      if(url.includes('/chats?'))return jsonResponse({data:{chats:[{chat_id:42,customer:{name:'مریم'},unread_count:3,updated_at:'2026-08-20T10:02:00Z',last_message:{id:2,content:{text:'پاسخ غرفه'},sender:{name:'غرفه'},message_type:'text'}}]}});
+      throw new Error(`unexpected chat URL ${url}`)};
+    const chatsResponse=await call(db,'/api/basalam/chats?limit=50'),chats=await chatsResponse.json();assert.equal(chatsResponse.status,200);assert.equal(chats.total,1);assert.equal(chats.unseen,1);assert.deepEqual(chats.items[0],{chatId:42,id:42,customer:'مریم',text:'پاسخ غرفه',unseen:3,updatedAt:'2026-08-20T10:02:00Z',chatType:'',sender:'غرفه',lastMessageId:'2',messageType:'text'});
+    const messageResponse=await call(db,'/api/basalam/chats/42/messages?limit=50'),messages=await messageResponse.json();assert.equal(messageResponse.status,200);assert.equal(messages.chatId,42);assert.equal(messages.total,2);assert.equal(messages.items[0].text,'سلام، موجوده؟');assert.equal(messages.items[0].fromShop,false);assert.equal(messages.items[1].text,'پاسخ غرفه');assert.equal(messages.items[1].fromShop,true);assert.equal(requests.length,2);
+    globalThis.fetch=async()=>jsonResponse({message:'forbidden scope'},403);const forbidden=await call(db,'/api/basalam/chats');assert.equal(forbidden.status,502);const error=await forbidden.json();assert.match(error.error,/HTTP 403/);assert.match(error.error,/دسترسی گفتگو\/پیام/);assert.match(error.error,/forbidden scope/);
+  }finally{globalThis.fetch=originalFetch;console.error=originalError}
+});
+
 test('PHP settings import normalizes syncConfig, noExtract, fallback categories, network flag, products and variations',async()=>{
   const db=new MemoryD1(),profile={name:'CSV only',syncConfig:{enabled:true,interval:3600,target:'both',noExtract:true},bslCategoryId:77,bslFallbackCatIds:[88,99],net_indirect:'1',products:[['p-1',{title:'Variable item',price:125000,variations:['قرمز','آبی'],variationGroups:[{name:'رنگ',values:['قرمز','آبی']}]}]]};
   const profilesFile=file('profiles.json',{'csv-profile':profile}),connectionsFile=file('connections.json',{woocommerce:{url:'https://woo.example',consumer_key:'ck_import',consumer_secret:'cs_import'},basalam:{fallback_cat_ids:[55],vendors:[{name:'غرفه دوم',token:'shop-token',vendor_id:'22',price_mode:'percent',price_val:5}]},src_network:{mode:'worker',worker_url:'https://gateway.example/{url}'}}),bundle={app:'scraper',files:{'profiles.json':profilesFile.name,'connections.json':connectionsFile.name}};

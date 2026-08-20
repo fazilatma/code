@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
 import readXlsxFile from 'read-excel-file/web-worker';
 import { aiCall, aiProviders, getLastAiTestResults, getLeaderboard, recordVote, suggestCategoryWithModel, testModelBatch } from './ai.js';
-import { automationTick, autoreplyLogs, autoreplyRun, basalamChats, basalamOrders, digest, generateReply } from './automation.js';
+import { automationTick, autoreplyLogs, autoreplyRun, basalamChatMessagesOverview, basalamChatsOverview, basalamOrders, digest, generateReply } from './automation.js';
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
 import { DASHBOARD, DASHBOARD_JS } from './dashboard.js';
 import { allProducts, clearFinishedJobs, createBackup, createJob, deleteJob, deleteProfile, enqueueDueProfiles, ensureSchema, findLearnedCategory, getJob, getProduct, getProfile, getState, importAutoreplyLog, importCategoryLearning, learnCategory, listCategoryLearning, listJobs, listProducts, listProfiles, profileStats, reapStalledJobs, restoreBackup, retryJob, saveProfile, setState, updateJob, upsertProduct } from './db.js';
@@ -22,12 +22,12 @@ import { createVisualTicket, renderVisualSelector } from './visual.js';
 
 type Variables={requestId:string};
 export const app=new Hono<{Bindings:Env;Variables:Variables}>();
-const dashboardSecurity=secureHeaders({contentSecurityPolicy:{defaultSrc:["'self'"],scriptSrc:["'self'"],styleSrc:["'self'","'unsafe-inline'"],connectSrc:["'self'"],imgSrc:["'self'",'data:','https:'],objectSrc:["'none'"],frameAncestors:["'none'"]},referrerPolicy:'no-referrer'});
+const dashboardSecurity=secureHeaders({contentSecurityPolicy:{defaultSrc:["'self'"],scriptSrc:["'self'"],styleSrc:["'self'","'unsafe-inline'",'https://v1.fontapi.ir'],fontSrc:["'self'",'data:','https://cdn.fontcdn.ir'],connectSrc:["'self'"],imgSrc:["'self'",'data:','https:'],objectSrc:["'none'"],frameAncestors:["'none'"]},referrerPolicy:'no-referrer'});
 app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomUUID());c.header('x-content-type-options','nosniff');await next()});
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.2.0',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.3.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/visual',async c=>renderVisualSelector(c.req.query('ticket')||'',c.req.query('context')==='detail'?'detail':'list'));
@@ -38,11 +38,11 @@ app.get('/api/status',async c=>{const connections=await loadConnections();return
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.2.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.3.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
-app.post('/api/ai/test-all',async c=>{const b=await jsonBody(c),started=Date.now(),categoryTitle=String(b.categoryTitle||'').trim();let categories:any[]=[];if(categoryTitle)try{categories=(await destinationCategories(Boolean(b.refreshCategories))).items}catch{/* پیام و مدل‌ها حتی بدون اتصال باسلام تست می‌شوند */}const result=await testModelBatch(String(b.prompt||'سلام'),{onlyCandidates:Boolean(b.onlyCandidates),cursor:Number(b.cursor)||0,runId:String(b.runId||''),categoryTitle,categories});return c.json({...result,durationMs:Date.now()-started,categoryListAvailable:categories.length>0,invocationPolicy:'یک مدل در هر invocation برای رعایت سقف ۵۰ subrequest پلن رایگان Cloudflare'})});
+app.post('/api/ai/test-all',async c=>{const b=await jsonBody(c),started=Date.now(),categoryTitle=String(b.categoryTitle||'').trim();let categories:any[]=[];if(categoryTitle)try{categories=(await destinationCategories(Boolean(b.refreshCategories))).items}catch{/* پیام و مدل‌ها حتی بدون اتصال باسلام تست می‌شوند */}const result=await testModelBatch(String(b.prompt||'سلام'),{onlyCandidates:Boolean(b.onlyCandidates),cursor:Number(b.cursor)||0,runId:String(b.runId||''),categoryTitle,categories,skipCurrent:Boolean(b.skipCurrent),skipReason:String(b.skipReason||'')});return c.json({...result,durationMs:Date.now()-started,categoryListAvailable:categories.length>0,invocationPolicy:'یک مدل در هر invocation برای رعایت سقف ۵۰ subrequest پلن رایگان Cloudflare'})});
 app.get('/api/ai/test-results',async c=>c.json({ok:true,...await getLastAiTestResults()}));
 app.post('/api/ai/call',async c=>{const b=await jsonBody(c),provider=(await aiProviders()).find(p=>p.id===b.provider);if(!provider)return c.json({ok:false,error:'Provider not found'},404);return c.json(await aiCall(provider,String(b.model||''),String(b.prompt||'سلام')))});
 app.post('/api/ai/vote',async c=>{const b=await jsonBody(c);return c.json({ok:true,leaderboard:await recordVote(String(b.task||'manual'),String(b.winner||''),Array.isArray(b.candidates)?b.candidates.map(String):[])})});
@@ -56,7 +56,8 @@ app.post('/api/autoreply/test',async c=>{const b=await jsonBody(c);return c.json
 app.post('/api/autoreply/run',async c=>{const b=await jsonBody(c);return c.json(await autoreplyRun(b.confirm!=='APPLY'))});
 app.get('/api/autoreply/log',async c=>c.json({ok:true,items:await autoreplyLogs()}));
 app.post('/api/digest',async c=>{const b=await jsonBody(c);return c.json(await digest(b.confirm!=='SEND'))});
-app.get('/api/basalam/chats',async c=>c.json({ok:true,items:await basalamChats(Number(c.req.query('limit'))||20)}));
+app.get('/api/basalam/chats',async c=>c.json(await basalamChatsOverview(Number(c.req.query('limit'))||50)));
+app.get('/api/basalam/chats/:id/messages',async c=>c.json(await basalamChatMessagesOverview(Number(c.req.param('id')),Number(c.req.query('limit'))||50)));
 app.get('/api/basalam/orders',async c=>c.json({ok:true,items:await basalamOrders(Number(c.req.query('limit'))||20)}));
 app.get('/api/settings',async c=>c.json({ok:true,settings:await getState('settings',{})}));
 app.post('/api/settings',async c=>{await setState('settings',await c.req.json());return c.json({ok:true})});

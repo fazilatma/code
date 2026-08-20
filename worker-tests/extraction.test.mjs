@@ -133,6 +133,15 @@ test('destination modals, green AI filtering, live progress, and clickable queue
   assert.match(networkSource,/WOO_EDGE_ERRORS=new Set\(\[520,521,522,523,524,525,526\]\)/);assert.match(networkSource,/function safeWooFetch/);assert.match(source,/woo\.network\.mode/);assert.match(source,/woo\.network\.workerUrl/);
 });
 
+test('font picker, resilient AI result columns, Basalam chat modal, and real destination table are fully wired',async()=>{
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),appSource=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');
+  assert.match(source,/فونت کل سایت/);for(const font of ['vazir','yekan','shabnam','sahel','samim'])assert.match(source,new RegExp(`${font}:\\{family:`));
+  assert.match(source,/appearance\.font/);assert.match(source,/function applySiteFont\(/);assert.match(source,/appFontStylesheet/);assert.match(appSource,/styleSrc:[^\n]*https:\/\/v1\.fontapi\.ir/);assert.match(appSource,/fontSrc:[^\n]*https:\/\/cdn\.fontcdn\.ir/);
+  for(const id of ['aiProgressRetries','aiProgressSkipped'])assert.match(source,new RegExp(`id="${id}"`));assert.match(source,/AI_TEST_RESUME_KEY/);assert.match(source,/maxRetries=3/);assert.match(source,/skipCurrent:true/);assert.match(source,/messageSucceeded/);assert.match(source,/پاسخ پیام «/);assert.match(source,/خطای پاسخ پیام/);
+  assert.match(source,/function openBasalamChats\(/);assert.match(source,/function openBasalamChatDetail\(/);assert.match(source,/api\/basalam\/chats\?limit=50/);assert.match(source,/\/messages\?limit=50/);assert.match(source,/خوانده‌نشده/);assert.match(source,/data-chat-search/);
+  assert.match(source,/function destinationTable\(/);assert.match(source,/<table class="dest-table">/);assert.match(source,/else if\(dest\.view==='rows'\)box\.innerHTML=destinationTable\(\)/);assert.match(source,/else box\.innerHTML=dest\.products\.map/,'card mode remains an independent renderer');
+});
+
 test('dashboard startup cannot be stopped by a stale file input and settings restore is visibly wired',async()=>{
   const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
   assert.doesNotMatch(source,/\$\('restoreFile'\)/,'removed restoreFile input must not be bound');
