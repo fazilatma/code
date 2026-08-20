@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.94';
+const APP_VERSION = '9.95';
 const APP_VERSION_DATE = '1405/05/30';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2276,6 +2276,97 @@ function aiNormalizeProviders($raw): array {
             'enabled' => ($p['enabled'] ?? true) !== false,
             'models'  => $models,
         ];
+    }
+    return $out;
+}
+
+/* =====================================================================
+ *  v9.95 (۹ج): کاتالوگِ آمادهٔ مدل‌های Mistral با قابلیت «متن به متن»
+ *
+ *  فقط مدل‌هایی که اندپوینتِ /v1/chat/completions دارند (text-to-text).
+ *  مدل‌های OCR، صوت (Voxtral)، امبدینگ و مدیریت محتوا عمداً نیستند
+ *  چون با «چت» کار نمی‌کنند و در تست خطا می‌دهند.
+ *  همهٔ شناسه‌ها از سند رسمی docs.mistral.ai گرفته شده و مدل‌های
+ *  بازنشسته (deprecated/retired) وارد نشده‌اند.
+ * ===================================================================== */
+function aiMistralCatalog(): array {
+    // [id, نام, ورودی(هزار توکن), خروجی, toolCalling, vision, رایگان, استدلالی؟]
+    $rows = [
+        // ── خانوادهٔ اصلی (Flagship) ──
+        ['mistral-large-latest',   'Mistral Large 3 (آخرین)',        256000, 128000, true,  true,  false, false],
+        ['mistral-large-3',        'Mistral Large 3',                256000, 128000, true,  true,  false, false],
+        ['mistral-large-2512',     'Mistral Large 3 · v25.12',       256000, 128000, true,  true,  false, false],
+        ['mistral-medium-latest',  'Mistral Medium 3.5 (آخرین)',     256000, 128000, true,  true,  false, false],
+        ['mistral-medium-3-5',     'Mistral Medium 3.5',             256000, 128000, true,  true,  false, false],
+        ['mistral-medium-2604',    'Mistral Medium 3.5 · v26.04',    256000, 128000, true,  true,  false, false],
+        // Mistral Small 4 دو حالته است: instruct + reasoning
+        ['mistral-small-latest',   'Mistral Small 4 (آخرین)',        256000, 128000, true,  true,  false, true ],
+        ['mistral-small-4-0',      'Mistral Small 4',                256000, 128000, true,  true,  false, true ],
+        ['mistral-small-2603',     'Mistral Small 4 · v26.03',       256000, 128000, true,  true,  false, true ],
+        // ── خانوادهٔ Ministral 3 (سبک و ارزان) ──
+        ['ministral-14b-latest',   'Ministral 3 14B (آخرین)',        256000, 128000, true,  false, false, false],
+        ['ministral-14b-2512',     'Ministral 3 14B · v25.12',       256000, 128000, true,  false, false, false],
+        ['ministral-8b-latest',    'Ministral 3 8B (آخرین)',         256000, 128000, true,  true,  false, false],
+        ['ministral-8b-2512',      'Ministral 3 8B · v25.12',        256000, 128000, true,  true,  false, false],
+        ['ministral-3b-latest',    'Ministral 3 3B (آخرین)',         256000, 128000, true,  true,  false, false],
+        ['ministral-3b-2512',      'Ministral 3 3B · v25.12',        256000, 128000, true,  true,  false, false],
+        // ── مدل کدنویسی (چت هم دارد) ──
+        ['codestral-latest',       'Codestral (آخرین)',              128000,  64000, true,  false, false, false],
+        ['codestral-2508',         'Codestral · v25.08',             128000,  64000, true,  false, false, false],
+        // ── میزبانی‌شدهٔ شخص ثالث ──
+        ['zai-glm-5-2',            'Z.ai GLM 5.2',                  1000000, 128000, true,  false, false, true ],
+        // ── Labs (رایگان، پیش‌نمایش پژوهشی) ──
+        ['labs-leanstral-1-5',     'Leanstral 1.5 (آزمایشگاه، رایگان)', 256000, 128000, true, false, true, true ],
+    ];
+    $models = [];
+    foreach ($rows as $r) {
+        $models[] = [
+            'id'              => $r[0],
+            'name'            => $r[1],
+            'maxInputTokens'  => $r[2],
+            'maxOutputTokens' => $r[3],
+            'toolCalling'     => $r[4],
+            'vision'          => $r[5],
+            'free'            => $r[6],
+            'reasoning'       => $r[7],
+            'tested'          => false,
+            'available'       => false,
+            'rateLimited'     => false,
+        ];
+    }
+    return [
+        'id'      => 'mistral',
+        'name'    => 'Mistral AI',
+        'vendor'  => 'mistral',
+        'url'     => 'https://api.mistral.ai/v1/chat/completions',
+        'apiKey'  => '',
+        'enabled' => true,
+        'models'  => $models,
+    ];
+}
+
+/**
+ * v9.95 (۹ب): ساختِ آرایهٔ کاملِ تنظیمات برای برون‌ریزی (دانلود).
+ * $withKeys=false یعنی کلیدهای API خالی می‌شوند (اشتراک‌گذاری امن).
+ */
+function aiProvidersExportArray(bool $withKeys = true): array {
+    $providers = aiProvidersLoad();
+    $out = [];
+    foreach ($providers as $id => $p) {
+        $row = [
+            'id'      => (string)($p['id'] ?? $id),
+            'name'    => (string)($p['name'] ?? $id),
+            'vendor'  => (string)($p['vendor'] ?? ''),
+            'url'     => (string)($p['url'] ?? ''),
+            'apiKey'  => $withKeys ? (string)($p['apiKey'] ?? '') : '',
+            'enabled' => ($p['enabled'] ?? true) !== false,
+            'models'  => [],
+        ];
+        foreach ((array)($p['models'] ?? []) as $m) {
+            if (!is_array($m)) continue;
+            $row['models'][] = $m;
+        }
+        $out[$id] = $row;
     }
     return $out;
 }
@@ -14021,6 +14112,137 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'function initAppFontPref()') !== false
       && strpos($selfSrc, 'try{ initAppFontPref(); }catch(e){}') !== false);
 
+    /* ---------- v9.95 (۹الف): حذفِ فیلدهای تکراری از مودالِ تست ---------- */
+    $add('9.95', 'مودالِ تست دیگر فیلدهای تکراریِ پیام/دسته/تاخیر را نمی‌سازد',
+         substr_count($selfSrc, "+'<input id=\"aiTest" . "Msg\"") === 0
+      && substr_count($selfSrc, "+'<input id=\"aiTest" . "Cat\"") === 0
+      && substr_count($selfSrc, "+'<input id=\"aiTest" . "Delay\"") === 0);
+    $add('9.95', 'هر سه فیلد فقط یک بار (در بخش بیرونی) ساخته می‌شوند',
+         substr_count($selfSrc, '<input type="text" id="aiTest' . 'Msg"') === 1
+      && substr_count($selfSrc, '<input type="text" id="aiTest' . 'Cat"') === 1
+      && substr_count($selfSrc, '<input type="number" id="aiTest' . 'Delay"') === 1);
+    $add('9.95', 'مقادیرِ به‌کاررفته در مودال فقط‌خواندنی نمایش داده می‌شوند',
+         strpos($selfSrc, "+'<span>پیام تست: <b style=\"color:#cbd5e1\">'+esc(aiTestMsgVal||'سلام')+'</b></span>'") !== false
+      && strpos($selfSrc, "+'<span>دستهٔ تست: <b style=\"color:#cbd5e1\">'+esc(aiTestCatVal||'ادو پرفیوم')+'</b></span>'") !== false);
+    $add('9.95', 'تستِ گروهی و تکی همچنان از فیلدهای بیرونی می‌خوانند',
+         substr_count($selfSrc, "aiTestMsgVal=(\$('aiTestMsg')&&\$('aiTestMsg').value.trim())||'سلام';") === 2
+      && strpos($selfSrc, "const msg=(\$('aiTestMsg')&&\$('aiTestMsg').value.trim())||'سلام';") !== false);
+
+    /* ---------- v9.95 (۹ب): برون‌ریزی فایل تنظیمات هوش مصنوعی ---------- */
+    $add('9.95', 'اندپوینتِ برون‌ریزی با هدرِ دانلود وجود دارد',
+         strpos($selfSrc, "isset(\$_GET['ai_export_" . "providers'])") !== false
+      && strpos($selfSrc, "header('Content-Disposition: attachment; filename=\"' . \$fname . '\"');") !== false
+      && strpos($selfSrc, "'ai-providers-' . date('Y-m-d-His')") !== false);
+    $add('9.95', 'خروجیِ برون‌ریزی همان ساختارِ درون‌ریزی است',
+         function_exists('aiProvidersExportArray')
+      && (function () {
+             $raw = ['op' => ['id' => 'op', 'name' => 'OpenRouter', 'vendor' => 'or',
+                              'url' => 'https://x/v1', 'apiKey' => 'sk-secret-123', 'enabled' => true,
+                              'models' => [['id' => 'a/b', 'name' => 'A B', 'free' => true]]]];
+             $norm = aiNormalizeProviders($raw);
+             // شکلِ خروجی باید دوباره قابلِ نرمال‌سازی باشد (رفت‌وبرگشتِ کامل)
+             $again = aiNormalizeProviders($norm);
+             return isset($again['op']['models'][0]['id']) && $again['op']['models'][0]['id'] === 'a/b'
+                 && $again['op']['apiKey'] === 'sk-secret-123' && $again['op']['url'] === 'https://x/v1';
+         })());
+    $add('9.95', 'حالتِ «بدون کلید» کلیدهای API را خالی می‌کند',
+         strpos($selfSrc, "'apiKey'  => \$withKeys ? (string)(\$p['apiKey'] ?? '') : '',") !== false
+      && strpos($selfSrc, "\$withKeys = (string)(\$_GET['keys'] ?? '1') !== '0';") !== false);
+    $add('9.95', 'دو دکمهٔ برون‌ریزی کنارِ درون‌ریزی در رابط کاربری هست',
+         strpos($selfSrc, 'onclick="aiExportProviders(1)"') !== false
+      && strpos($selfSrc, 'onclick="aiExportProviders(0)"') !== false
+      && strpos($selfSrc, 'function aiExportProviders(withKeys)') !== false
+      && strpos($selfSrc, "const url='?ai_export_providers=1&keys='+(withKeys?1:0);") !== false);
+
+    /* ---------- v9.95 (۹ج): مدل‌های متن‌به‌متنِ Mistral ---------- */
+    $add('9.95', 'کاتالوگِ Mistral وجود دارد و به اندپوینتِ درست اشاره می‌کند',
+         function_exists('aiMistralCatalog')
+      && (function () {
+             $c = aiMistralCatalog();
+             return ($c['id'] ?? '') === 'mistral'
+                 && ($c['url'] ?? '') === 'https://api.mistral.ai/v1/chat/completions'
+                 && count($c['models'] ?? []) >= 15;
+         })());
+    $add('9.95', 'مدل‌های کلیدیِ متن‌به‌متن در کاتالوگ هستند',
+         (function () {
+             $ids = array_column(aiMistralCatalog()['models'], 'id');
+             foreach (['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest',
+                       'ministral-14b-latest', 'ministral-8b-latest', 'ministral-3b-latest',
+                       'codestral-latest', 'zai-glm-5-2', 'labs-leanstral-1-5'] as $need) {
+                 if (!in_array($need, $ids, true)) return false;
+             }
+             return true;
+         })());
+    $add('9.95', 'مدل‌های غیرِ متن‌به‌متن (OCR/صوت/امبدینگ) وارد نشده‌اند',
+         (function () {
+             $ids = array_column(aiMistralCatalog()['models'], 'id');
+             foreach ($ids as $id) {
+                 foreach (['ocr', 'voxtral', 'embed', 'moderation', 'shieldstral'] as $bad) {
+                     if (stripos($id, $bad) !== false) return false;
+                 }
+             }
+             return true;
+         })());
+    $add('9.95', 'مدل‌های بازنشستهٔ Mistral وارد نشده‌اند',
+         (function () {
+             $ids = array_column(aiMistralCatalog()['models'], 'id');
+             foreach (['mistral-medium-2508', 'mistral-small-2506', 'magistral-medium-2507',
+                       'devstral-medium-2507', 'mistral-large-2411', 'pixtral-large-2411',
+                       'mistral-saba-2502', 'codestral-2501'] as $dead) {
+                 if (in_array($dead, $ids, true)) return false;
+             }
+             return true;
+         })());
+    $add('9.95', 'Mistral Small 4 و GLM 5.2 به‌عنوان استدلالی علامت خورده‌اند',
+         (function () {
+             $rows = [];
+             foreach (aiMistralCatalog()['models'] as $m) $rows[$m['id']] = $m;
+             return aiIsReasoningModel($rows['mistral-small-latest'] ?? null)
+                 && aiIsReasoningModel($rows['zai-glm-5-2'] ?? null)
+                 && !aiIsReasoningModel($rows['ministral-3b-latest'] ?? null)
+                 && !aiIsReasoningModel($rows['mistral-large-latest'] ?? null);
+         })());
+    $add('9.95', 'کاتالوگ از نرمال‌سازی سالم بیرون می‌آید',
+         (function () {
+             $out = aiNormalizeProviders(['mistral' => aiMistralCatalog()]);
+             $m = $out['mistral']['models'] ?? [];
+             if (count($m) !== count(aiMistralCatalog()['models'])) return false;
+             foreach ($m as $row) { if (($row['id'] ?? '') === '' || ($row['name'] ?? '') === '') return false; }
+             return ($out['mistral']['url'] ?? '') === 'https://api.mistral.ai/v1/chat/completions';
+         })());
+    $add('9.95', 'آدرسِ Mistral به /chat/completions ختم می‌شود (بدون تکرار)',
+         (function () {
+             $ep = aiProviderEndpoint(aiMistralCatalog(), 'mistral-large-latest');
+             return ($ep['kind'] ?? '') === 'openai'
+                 && ($ep['url'] ?? '') === 'https://api.mistral.ai/v1/chat/completions';
+         })());
+    $add('9.95', 'اندپوینتِ افزودنِ Mistral + دکمهٔ آن وجود دارد',
+         strpos($selfSrc, "=== 'ai_add_" . "mistral'") !== false
+      && strpos($selfSrc, 'onclick="aiAddMistral()"') !== false
+      && strpos($selfSrc, 'function aiAddMistral()') !== false);
+    $add('9.95', 'افزودنِ دوبارهٔ Mistral کلید و نتایجِ تستِ قبلی را نگه می‌دارد',
+         strpos($selfSrc, "if (\$key === '' && is_array(\$old)) \$key = trim((string)(\$old['apiKey'] ?? ''));") !== false
+      && strpos($selfSrc, "foreach (['tested','available','rateLimited','testDetails'] as \$k) {") !== false);
+
+    /* ---------- v9.95 (۹د): مودالِ جزئیاتِ کاملِ هر ردیفِ تست ---------- */
+    $add('9.95', 'اندپوینتِ جزئیاتِ تستِ یک مدل وجود دارد',
+         strpos($selfSrc, "isset(\$_GET['ai_test_" . "detail'])") !== false
+      && strpos($selfSrc, "'raw'           => (string)(\$d['raw'] ?? ''),") !== false
+      && strpos($selfSrc, "'endpoint'      => (string)(\$ep['url'] ?? ''),") !== false);
+    $add('9.95', 'پاسخ خامِ سرویس هنگام تست ذخیره می‌شود (هر دو مسیر)',
+         substr_count($selfSrc, "'raw'=>mb_substr((string)(\$r['raw'] ?? ''), 0, 4000), 'via'=>(string)(\$r['via'] ?? '')") === 2);
+    $add('9.95', 'هر ردیفِ جدولِ نتایج قابلِ کلیک است و جزئیات را باز می‌کند',
+         strpos($selfSrc, "tr.addEventListener('click',function(){aiOpenRowDetail(tr.dataset.aiProvider,tr.dataset.aiModel);});") !== false
+      && strpos($selfSrc, "tr.dataset.aiProvider=d.provider||'';") !== false
+      && strpos($selfSrc, 'function aiOpenRowDetail(pid,mid)') !== false);
+    $add('9.95', 'مودالِ جزئیات، پاسخ خام را به‌صورت JSON مرتب نشان می‌دهد',
+         strpos($selfSrc, 'pretty=JSON.stringify(JSON.parse(d.raw),null,2);') !== false
+      && strpos($selfSrc, '🧾 پاسخ خامِ سرویس (JSON)') !== false
+      && strpos($selfSrc, 'function aiRetestFromDetail()') !== false);
+    $add('9.95', 'مودالِ جزئیات بالاتر از مودالِ تست می‌نشیند',
+         strpos($selfSrc, "m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.8);z-index:10060") !== false
+      && 10060 > 10000);
+
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
          strpos($selfSrc, '.hamburger-btn,.fullwidth-btn' . '{z-index:10050}') !== false
@@ -18981,6 +19203,103 @@ header('Content-Type: application/json; charset=UTF-8');
 echo json_encode(aiProvidersSummary(), JSON_UNESCAPED_UNICODE);
 exit;
 }
+/* v9.95 (۹ب): برون‌ریزی (دانلود) فایل JSON تنظیمات ارائه‌دهنده‌ها.
+   ?ai_export_providers=1        → با کلیدهای API
+   ?ai_export_providers=1&keys=0 → بدون کلید (برای اشتراک‌گذاری امن)      */
+if (isset($_GET['ai_export_providers'])) {
+$withKeys = (string)($_GET['keys'] ?? '1') !== '0';
+$data = aiProvidersExportArray($withKeys);
+$json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+if ($json === false) $json = '{}';
+$fname = 'ai-providers-' . date('Y-m-d-His') . ($withKeys ? '' : '-nokeys') . '.json';
+header('Content-Type: application/json; charset=UTF-8');
+header('Content-Disposition: attachment; filename="' . $fname . '"');
+header('Content-Length: ' . strlen($json));
+header('Cache-Control: no-store');
+echo $json;
+exit;
+}
+/* v9.95 (۹د): جزئیات کاملِ تستِ یک مدل (شاملِ پاسخ خام) برای مودالِ ردیف */
+if (isset($_GET['ai_test_detail'])) {
+header('Content-Type: application/json; charset=UTF-8');
+$pid = trim((string)($_GET['provider'] ?? ''));
+$mid = trim((string)($_GET['model'] ?? ''));
+$providers = aiProvidersLoad();
+$p = $providers[$pid] ?? null;
+if (!$p) { echo json_encode(['ok'=>false,'error'=>'ارائه‌دهنده یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+$row = aiFindModelRow($p, $mid);
+if (!$row) { echo json_encode(['ok'=>false,'error'=>'مدل یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+$d = is_array($row['testDetails'] ?? null) ? $row['testDetails'] : [];
+$ep = aiProviderEndpoint($p, $mid);
+// آخرین ردیفِ همین مدل در وضعیتِ تستِ گروهی (اگر باشد) — خطای کاملِ شبکه
+$stItem = null;
+$st = aiTestStateLoad();
+foreach (array_reverse((array)($st['items'] ?? [])) as $it) {
+    if (is_array($it) && ($it['provider'] ?? '') === $pid && ($it['model'] ?? '') === $mid) { $stItem = $it; break; }
+}
+echo json_encode(['ok'=>true,
+    'provider'      => $pid,
+    'providerName'  => (string)($p['name'] ?? $pid),
+    'providerUrl'   => (string)($p['url'] ?? ''),
+    'endpoint'      => (string)($ep['url'] ?? ''),
+    'model'         => $mid,
+    'modelName'     => (string)($row['name'] ?? $mid),
+    'tested'        => !empty($row['tested']),
+    'available'     => !empty($row['available']),
+    'rateLimited'   => !empty($row['rateLimited']),
+    'toolCalling'   => !empty($row['toolCalling']),
+    'vision'        => !empty($row['vision']),
+    'free'          => !empty($row['free']),
+    'reasoning'     => aiIsReasoningModel($row, $mid),
+    'maxInputTokens'=> (int)($row['maxInputTokens'] ?? 0),
+    'maxOutputTokens'=>(int)($row['maxOutputTokens'] ?? 0),
+    'status'        => (int)($d['status'] ?? 0),
+    'latencyMs'     => (int)($d['latencyMs'] ?? 0),
+    'testedAt'      => (string)($d['testedAt'] ?? ''),
+    'testMsg'       => (string)($d['testMsg'] ?? ''),
+    'testCat'       => (string)($d['testCat'] ?? ''),
+    'response'      => (string)($d['response'] ?? ''),
+    'catResponse'   => (string)($d['catResponse'] ?? ''),
+    'error'         => (string)($d['error'] ?? ''),
+    'raw'           => (string)($d['raw'] ?? ''),
+    'via'           => (string)($d['via'] ?? ''),
+    'itemError'     => $stItem ? (string)($stItem['error'] ?? '') : '',
+    'itemLabel'     => $stItem ? (string)($stItem['label'] ?? '') : '',
+], JSON_UNESCAPED_UNICODE);
+exit;
+}
+/* v9.95 (۹ج): افزودن ارائه‌دهندهٔ آمادهٔ Mistral با همهٔ مدل‌های متن‌به‌متن */
+if (($_POST['action'] ?? '') === 'ai_add_mistral') {
+header('Content-Type: application/json; charset=UTF-8');
+$cat = aiMistralCatalog();
+$key = trim((string)($_POST['api_key'] ?? ''));
+$providers = aiProvidersLoad();
+$old = $providers['mistral'] ?? null;
+// کلیدِ قبلی حفظ می‌شود مگر کلیدِ تازه داده شده باشد
+if ($key === '' && is_array($old)) $key = trim((string)($old['apiKey'] ?? ''));
+$cat['apiKey'] = $key;
+// نتایجِ تستِ قبلیِ همان مدل‌ها را از دست ندهیم
+if (is_array($old)) {
+    foreach ($cat['models'] as $i => $m) {
+        $prev = aiFindModelRow($old, (string)$m['id']);
+        if (!$prev) continue;
+        foreach (['tested','available','rateLimited','testDetails'] as $k) {
+            if (array_key_exists($k, $prev)) $cat['models'][$i][$k] = $prev[$k];
+        }
+    }
+}
+$providers['mistral'] = $cat;
+$providers = aiNormalizeProviders($providers);
+$ok = aiProvidersSave($providers);
+$sel = aiSelected();
+if ($sel['provider'] === '' || !isset($providers[$sel['provider']])) {
+    aiSaveSelected('mistral', $providers['mistral']['models'][0]['id'] ?? '');
+}
+echo json_encode(['ok'=>$ok, 'models'=>count($cat['models']), 'has_key'=>$key !== '',
+    'message'=>'Mistral با '.count($cat['models']).' مدل متن‌به‌متن اضافه شد'
+        .($key === '' ? ' — کلید API را در فایل تنظیمات وارد کنید' : '')], JSON_UNESCAPED_UNICODE);
+exit;
+}
 /* درون‌ریزی فایل JSON تنظیمات ارائه‌دهنده‌ها */
 if (($_POST['action'] ?? '') === 'ai_import_providers') {
 header('Content-Type: application/json; charset=UTF-8');
@@ -19097,7 +19416,9 @@ $rateLimited = in_array($code, [429], true);
 $catResponse = aiRunTestCategory($providers[$pid], $mid, $testCat, aiTestCategoryData());
 $details = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300), 'response'=>mb_substr((string)$response,0,300),
             'catResponse'=>(string)$catResponse, 'testMsg'=>$testMsg, 'testCat'=>$testCat,
-            'latencyMs'=>$latency, 'testedAt'=>gmdate('c')];
+            'latencyMs'=>$latency, 'testedAt'=>gmdate('c'),
+            // v9.95 (۹د): بدنهٔ خامِ پاسخِ سرویس برای مودالِ «جزئیات کامل»
+            'raw'=>mb_substr((string)($r['raw'] ?? ''), 0, 4000), 'via'=>(string)($r['via'] ?? '')];
 foreach ($providers[$pid]['models'] as $i => $m) {
     if (($m['id'] ?? '') === $mid) {
         $providers[$pid]['models'][$i]['tested'] = true;
@@ -19322,7 +19643,9 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
                     $providers[$pid]['models'][$i]['rateLimited'] = in_array($code, [429], true);
                     $providers[$pid]['models'][$i]['testDetails'] = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300),
                         'response'=>mb_substr((string)$response,0,300), 'catResponse'=>(string)$catResponse,
-                        'testMsg'=>$testMsg, 'testCat'=>$testCat, 'latencyMs'=>$latency, 'testedAt'=>gmdate('c')];
+                        'testMsg'=>$testMsg, 'testCat'=>$testCat, 'latencyMs'=>$latency, 'testedAt'=>gmdate('c'),
+                        // v9.95 (۹د): بدنهٔ خامِ پاسخ برای مودالِ «جزئیات کامل»
+                        'raw'=>mb_substr((string)($r['raw'] ?? ''), 0, 4000), 'via'=>(string)($r['via'] ?? '')];
                     break;
                 }
             }
@@ -24376,6 +24699,15 @@ body.spanel-open .hamburger-btn,body.spanel-open .fullwidth-btn{box-shadow:0 2px
 <button class="btn btn-gray" onclick="aiShowImportBox()" style="flex:1;font-size:11px">📋 چسباندن JSON</button>
 <button class="btn btn-blue" onclick="aiLoadProviders()" style="flex:0;font-size:11px">🔄 بارگذاری</button>
 </div>
+<!-- v9.95 (۹ب): برون‌ریزی (دانلود) همان فایل JSON برای پشتیبان‌گیری/انتقال -->
+<div class="cact" style="margin-top:4px">
+<button class="btn btn-green" onclick="aiExportProviders(1)" style="flex:1;font-size:11px" title="دانلود فایل JSON تنظیمات هوش‌های مصنوعی، همراه با کلیدهای API">📤 برون‌ریزی JSON (با کلید)</button>
+<button class="btn btn-gray" onclick="aiExportProviders(0)" style="flex:1;font-size:11px" title="همان فایل ولی بدون کلیدهای API — برای اشتراک‌گذاری امن">🔒 بدون کلید</button>
+</div>
+<!-- v9.95 (۹ج): افزودن یک‌کلیکیِ همهٔ مدل‌های متن‌به‌متنِ Mistral -->
+<div class="cact" style="margin-top:4px">
+<button class="btn btn-purple" onclick="aiAddMistral()" style="flex:1;font-size:11px" title="ارائه‌دهندهٔ Mistral AI با همهٔ مدل‌های چت (متن به متن) اضافه می‌شود؛ فقط کلید API را وارد کنید">✨ افزودن مدل‌های Mistral</button>
+</div>
 <input type="file" id="aiImportFile" accept=".json,application/json" style="display:none" onchange="aiImportFromFile(this)">
 <div id="aiImportBoxWrap" style="display:none;margin-top:6px">
 <textarea id="aiImportBox" rows="6" dir="ltr" spellcheck="false" style="width:100%;font-family:ui-monospace,monospace;font-size:10px;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px" placeholder='{\n  "openrouter": { "name":"OpenRouter", "url":"...", "apiKey":"...", "models":[ {...} ] }\n}'></textarea>
@@ -29274,6 +29606,28 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.95', t:'🤖 برون‌ریزی تنظیمات هوش مصنوعی + مدل‌های Mistral + جزئیات هر تست', items:[
+    '🧹 داخلِ مودالِ «تست مدل‌ها» سه فیلدِ «پیام تست»، «دستهٔ تست» و «تاخیر»',
+    '   تکراری بودند (همان‌ها در تبِ 🧪 تست مدل‌ها هستند) و چون شناسهٔ یکسان',
+    '   داشتند، گاهی مقدارِ اشتباه خوانده می‌شد. حالا برداشته شدند و به‌جایشان',
+    '   همان مقادیرِ به‌کاررفته فقط نمایش داده می‌شود.',
+    '📤 تنظیمات ← «🤖 هوش مصنوعی» ← تبِ ارائه‌دهنده‌ها: دو دکمهٔ تازهٔ برون‌ریزی',
+    '   کنارِ درون‌ریزی — «📤 برون‌ریزی JSON (با کلید)» برای پشتیبان‌گیری و',
+    '   «🔒 بدون کلید» برای وقتی می‌خواهید فایل را با کسی به اشتراک بگذارید.',
+    '   فایل با نامِ ai-providers-<تاریخ>.json دانلود می‌شود و دقیقاً همان',
+    '   فرمتی است که دکمهٔ «📥 درون‌ریزی JSON» می‌خواند.',
+    '✨ دکمهٔ «افزودن مدل‌های Mistral»: همهٔ مدل‌های متن‌به‌متنِ میسترال یک‌جا',
+    '   اضافه می‌شوند — Mistral Large 3، Medium 3.5، Small 4، Ministral 3',
+    '   (14B/8B/3B)، Codestral، Z.ai GLM 5.2 و Leanstral 1.5 (رایگان)،',
+    '   هرکدام با نسخهٔ latest و نسخهٔ تاریخ‌دار. مدل‌های OCR، صوتی، امبدینگ',
+    '   و مدیریت محتوا عمداً اضافه نمی‌شوند چون با چت کار نمی‌کنند.',
+    '   کلیدِ API قبلی و نتایجِ تستِ قبلی حفظ می‌شود.',
+    '🔎 در جدولِ نتایجِ تست، روی هر ردیف کلیک کنید: مودالِ «جزئیات کاملِ تست»',
+    '   باز می‌شود — اندپوینت، روش اتصال، کد HTTP، تأخیر، سقف توکن، پاسخِ',
+    '   کاملِ پیام، پاسخِ دسته‌بندی، متنِ کاملِ خطا و مهم‌تر از همه',
+    '   «🧾 پاسخ خامِ سرویس» به‌صورت JSON مرتب‌شده. دکمهٔ «🔁 تست دوباره» هم',
+    '   همان‌جا هست.',
+  ]},
   {v:'9.94', t:'🎨 ۱۳ رنگ‌بندی + منوی چسبان + مدل‌های استدلالی', items:[
     '⛶ دکمهٔ «تمام عرض کردن منو» بعد از باز شدنِ منو پشتِ آن می‌افتاد و',
     '   کلیک را می‌بلعید. حالا هر دو دکمهٔ ☰ و ⛶ همیشه بالاترین لایه‌اند.',
@@ -34049,6 +34403,118 @@ function aiImportText(txt){
     }).catch(()=>{showToast('✗ خطا شبکه',1);});
 }
 function aiImportFromText(){const t=$('aiImportBox');if(t)aiImportText(t.value);}
+/* v9.95 (۹ب): برون‌ریزی (دانلود) فایل JSON تنظیمات هوش‌های مصنوعی.
+   withKeys=1 → با کلیدهای API · withKeys=0 → بدون کلید (اشتراک‌گذاری امن) */
+function aiExportProviders(withKeys){
+    const url='?ai_export_providers=1&keys='+(withKeys?1:0);
+    const a=document.createElement('a');
+    a.href=url; a.download='';
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{try{document.body.removeChild(a);}catch(e){}},1500);
+    showToast(withKeys?'📤 فایل تنظیمات (با کلید) در حال دانلود است':'🔒 فایل تنظیمات بدون کلید در حال دانلود است');
+}
+/* v9.95 (۹ج): افزودن ارائه‌دهندهٔ Mistral با همهٔ مدل‌های متن‌به‌متن */
+function aiAddMistral(){
+    const key=prompt('کلید API میسترال (Mistral) را وارد کنید.\nاگر خالی بگذارید فقط فهرست مدل‌ها اضافه می‌شود و بعداً می‌توانید کلید را وارد کنید.','');
+    if(key===null)return;
+    const fd=new FormData();fd.append('action','ai_add_mistral');fd.append('api_key',(key||'').trim());
+    const r=$('aiTR');
+    if(r)r.innerHTML='<div style="color:#67e8f9;font-size:11px">🔄 در حال افزودن مدل‌های Mistral...</div>';
+    fetch('',{method:'POST',body:fd}).then(r2=>r2.json()).then(d=>{
+        if(d&&d.ok){
+            showToast('✓ '+d.message);
+            if(r)r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✓ '+esc(d.message)+'</div>';
+            aiLoadProviders();
+        }else{
+            showToast('✗ '+((d&&d.error)||'خطا'),1);
+            if(r)r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ '+esc((d&&d.error)||'خطا')+'</div>';
+        }
+    }).catch(()=>showToast('✗ خطا شبکه',1));
+}
+/* v9.95 (۹د): مودالِ «اطلاعات کاملِ یک مدل + پاسخ خام» — با کلیک روی ردیفِ
+   جدولِ نتایجِ تست باز می‌شود. داده‌ها از ?ai_test_detail=1 خوانده می‌شوند
+   چون در state.items فقط نسخهٔ کوتاه‌شده (۱۵۰/۱۲۰ کاراکتری) ذخیره است. */
+function aiCloseRowDetail(){const m=document.getElementById('aiRowDetail');if(m)m.remove();}
+function aiRowDetailRow(label,val,mono){
+    if(val===''||val===null||val===undefined)return '';
+    return '<tr><td style="padding:5px 8px;color:#94a3b8;white-space:nowrap;vertical-align:top;border-bottom:1px solid #1e293b">'+esc(label)+'</td>'
+      +'<td style="padding:5px 8px;color:#e2e8f0;border-bottom:1px solid #1e293b'+(mono?';font-family:ui-monospace,monospace;direction:ltr;text-align:left;word-break:break-all':'')+'">'+esc(String(val))+'</td></tr>';
+}
+var aiRowDetailKey={provider:'',model:''};
+/* v9.95: «تست دوبارهٔ همین مدل» از داخلِ مودالِ جزئیات */
+function aiRetestFromDetail(){
+    const pid=aiRowDetailKey.provider, mid=aiRowDetailKey.model;
+    if(!pid||!mid)return;
+    const b=document.getElementById('aiRowDetailBody');
+    if(b)b.innerHTML='<div style="color:#67e8f9">⏳ در حال تست دوبارهٔ <b dir="ltr">'+esc(mid)+'</b> ...</div>';
+    const fd=new FormData();
+    fd.append('action','ai_test_one');fd.append('provider_id',pid);fd.append('model_id',mid);
+    fd.append('msg',($('aiTestMsg')&&$('aiTestMsg').value.trim())||'سلام');
+    fd.append('cat',($('aiTestCat')&&$('aiTestCat').value.trim())||'ادو پرفیوم');
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(()=>{aiOpenRowDetail(pid,mid);aiLoadProviders();})
+      .catch(()=>{if(b)b.innerHTML='<div style="color:#fca5a5">✗ خطا در تست دوباره</div>';});
+}
+function aiOpenRowDetail(pid,mid){
+    if(!pid||!mid)return;
+    aiRowDetailKey={provider:pid,model:mid};
+    aiCloseRowDetail();
+    const m=document.createElement('div');
+    m.id='aiRowDetail';
+    m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.8);z-index:10060;display:flex;align-items:center;justify-content:center;padding:20px';
+    m.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:12px;width:min(900px,96vw);max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">'
+      +'<div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #334155;flex:0 0 auto">'
+      +'<span style="font-size:14px">🔎</span><b style="color:#67e8f9;flex:1">جزئیات کاملِ تستِ مدل</b>'
+      +'<button class="btn btn-gray" onclick="aiCloseRowDetail()" style="font-size:11px;padding:4px 10px">✕ بستن</button></div>'
+      +'<div id="aiRowDetailBody" style="flex:1;overflow:auto;padding:12px 16px;font-size:11.5px;color:#94a3b8">⏳ در حال خواندن...</div></div>';
+    m.addEventListener('click',function(e){if(e.target===m)aiCloseRowDetail();});
+    document.body.appendChild(m);
+    fetch('?ai_test_detail=1&provider='+encodeURIComponent(pid)+'&model='+encodeURIComponent(mid))
+      .then(r=>r.json()).then(d=>{
+        const b=document.getElementById('aiRowDetailBody');if(!b)return;
+        if(!d||!d.ok){b.innerHTML='<div style="color:#fca5a5">✗ '+esc((d&&d.error)||'خطا در خواندن جزئیات')+'</div>';return;}
+        const badge=(txt,color)=>'<span style="display:inline-block;padding:2px 7px;border-radius:20px;font-size:10.5px;background:'+color+'22;color:'+color+';border:1px solid '+color+'66;margin-inline-end:5px;margin-left:5px">'+esc(txt)+'</span>';
+        let flags='';
+        flags+=d.available?badge('🟢 در دسترس','#4ade80'):badge('🔴 ناموفق','#f87171');
+        if(d.rateLimited)flags+=badge('⏱ ریت‌لیمیت','#fbbf24');
+        if(d.reasoning)flags+=badge('🧠 استدلالی','#a78bfa');
+        if(d.toolCalling)flags+=badge('🔧 tool calling','#60a5fa');
+        if(d.vision)flags+=badge('👁 تصویری','#f472b6');
+        if(d.free)flags+=badge('🆓 رایگان','#34d399');
+        if(!d.tested)flags+=badge('هنوز تست نشده','#94a3b8');
+        let h='<div style="margin-bottom:8px">'+flags+'</div>';
+        h+='<table style="width:100%;border-collapse:collapse;font-size:11.5px">';
+        h+=aiRowDetailRow('ارائه‌دهنده',(d.providerName||'')+' ('+(d.provider||'')+')');
+        h+=aiRowDetailRow('مدل',d.model,true);
+        if(d.modelName&&d.modelName!==d.model)h+=aiRowDetailRow('نام مدل',d.modelName);
+        h+=aiRowDetailRow('اندپوینت',d.endpoint,true);
+        if(d.via)h+=aiRowDetailRow('روش اتصال',d.via,true);
+        if(d.status)h+=aiRowDetailRow('کد وضعیت HTTP',d.status,true);
+        if(d.latencyMs)h+=aiRowDetailRow('تأخیر',toFa(d.latencyMs)+' میلی‌ثانیه');
+        if(d.testedAt)h+=aiRowDetailRow('زمان تست (UTC)',d.testedAt,true);
+        if(d.maxInputTokens)h+=aiRowDetailRow('سقف توکن ورودی',toFa(d.maxInputTokens));
+        if(d.maxOutputTokens)h+=aiRowDetailRow('سقف توکن خروجی',toFa(d.maxOutputTokens));
+        if(d.testMsg)h+=aiRowDetailRow('پیام تست',d.testMsg);
+        if(d.testCat)h+=aiRowDetailRow('عنوان دسته‌بندی',d.testCat);
+        h+='</table>';
+        const block=(title,txt,color)=>txt?('<div style="margin-top:10px"><div style="color:'+color+';font-weight:700;margin-bottom:4px">'+esc(title)+'</div>'
+            +'<div style="background:#0b1425;border:1px solid #1e293b;border-radius:6px;padding:8px;white-space:pre-wrap;word-break:break-word;color:#e2e8f0;max-height:240px;overflow:auto">'+esc(txt)+'</div></div>'):'';
+        h+=block('💬 پاسخ مدل به پیام تست',d.response,'#4ade80');
+        h+=block('🏷️ پاسخ دسته‌بندی',d.catResponse,'#a78bfa');
+        h+=block('⚠️ خطا',d.error||d.itemError,'#f87171');
+        if(d.raw){
+            let pretty=d.raw;
+            try{pretty=JSON.stringify(JSON.parse(d.raw),null,2);}catch(e){}
+            h+='<div style="margin-top:10px"><div style="color:#67e8f9;font-weight:700;margin-bottom:4px">🧾 پاسخ خامِ سرویس (JSON)</div>'
+              +'<pre dir="ltr" style="background:#0b1425;border:1px solid #1e293b;border-radius:6px;padding:8px;white-space:pre-wrap;word-break:break-all;color:#cbd5e1;max-height:320px;overflow:auto;font-family:ui-monospace,monospace;font-size:10.5px;text-align:left;margin:0">'+esc(pretty)+'</pre></div>';
+        }else{
+            h+='<div style="margin-top:10px;color:#64748b">🧾 پاسخ خام برای این مدل ذخیره نشده — یک بار دیگر تستش کنید تا ذخیره شود.</div>';
+        }
+        h+='<div class="cact" style="margin-top:12px">'
+          +'<button class="btn btn-cyan" style="flex:1;font-size:11px" onclick="aiRetestFromDetail()">🔁 تست دوبارهٔ همین مدل</button>'
+          +'<button class="btn btn-gray" style="flex:0;font-size:11px" onclick="aiCloseRowDetail()">بستن</button></div>';
+        b.innerHTML=h;
+      }).catch(()=>{const b=document.getElementById('aiRowDetailBody');if(b)b.innerHTML='<div style="color:#fca5a5">✗ خطا در ارتباط</div>';});
+}
 function aiTestOne(pid,mid){
     // v9.52: پیام و دستهٔ تست را از فیلدهای جاری می‌گیرد (مودال یا بخش بیرونی)
     const msg=($('aiTestMsg')&&$('aiTestMsg').value.trim())||'سلام';
@@ -34096,14 +34562,16 @@ function aiOpenTestModal(){
       +'<span style="font-size:11px;color:#94a3b8">فقط سبزها</span>'
       +'<input type="checkbox" id="aiTestOnlyGreen" onchange="aiTestToggleOnlyGreen(this.checked)" style="display:none">'
       +'<span class="ai-switch"></span></label></div>'
-      // v9.52: دو فیلد قابل ویرایش برای پیام و دستهٔ تست در مودال
-      +'<div style="display:flex;gap:10px;padding:8px 16px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;flex-wrap:wrap;align-items:center">'
-      +'<span style="color:#94a3b8">پیام تست:</span>'
-      +'<input id="aiTestMsg" value="'+esc(aiTestMsgVal||'سلام')+'" dir="rtl" style="flex:1;min-width:140px;padding:4px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px">'
-      +'<span style="color:#94a3b8">دستهٔ تست:</span>'
-      +'<input id="aiTestCat" value="'+esc(aiTestCatVal||'ادو پرفیوم')+'" dir="rtl" style="flex:1;min-width:140px;padding:4px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px">'
-      +'<span style="color:#94a3b8">تاخیر (ms):</span>'
-      +'<input id="aiTestDelay" type="number" value="'+esc(aiTestDelayVal||120)+'" min="0" max="60000" step="50" dir="ltr" style="width:90px;padding:4px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری از ریت‌لیمیت">'
+      /* v9.95 (۹الف): سه فیلدِ «پیام تست»، «دستهٔ تست» و «تاخیر» از داخلِ مودال
+         برداشته شدند — همان‌ها در تبِ «🧪 تست مدل‌ها» هستند و داشتنِ نسخهٔ دوم
+         با شناسه‌های تکراری (aiTestMsg/aiTestCat/aiTestDelay) باعث می‌شد
+         document.getElementById همیشه نسخهٔ بیرونی را بگیرد. اینجا فقط
+         مقادیرِ به‌کاررفته را «فقط‌خواندنی» نشان می‌دهیم. */
+      +'<div style="display:flex;gap:14px;padding:7px 16px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;flex-wrap:wrap;align-items:center;color:#64748b">'
+      +'<span>پیام تست: <b style="color:#cbd5e1">'+esc(aiTestMsgVal||'سلام')+'</b></span>'
+      +'<span>دستهٔ تست: <b style="color:#cbd5e1">'+esc(aiTestCatVal||'ادو پرفیوم')+'</b></span>'
+      +'<span>تاخیر: <b style="color:#cbd5e1">'+toFa(aiTestDelayVal||120)+' ms</b></span>'
+      +'<span style="margin-inline-start:auto;margin-left:auto;color:#475569">برای تغییر، تبِ «🧪 تست مدل‌ها» · روی هر ردیف کلیک کنید تا جزئیات کامل را ببینید</span>'
       +'</div>'
       +'<div style="flex:1;overflow:auto;padding:0">'
       +'<table style="width:100%;border-collapse:collapse;font-size:11px">'
@@ -34176,6 +34644,14 @@ function aiEnsureTestRow(d){
     aiTestTotCount++;aiTestWaitCount++;
     const tr=document.createElement('tr');
     tr.style.borderBottom='1px solid #1e293b';
+    /* v9.95 (۹د): کلیک روی ردیف → مودالِ «اطلاعات کامل + پاسخ خامِ مدل» */
+    tr.style.cursor='pointer';
+    tr.title='برای دیدنِ اطلاعات کامل و پاسخ خامِ مدل کلیک کنید';
+    tr.dataset.aiProvider=d.provider||'';
+    tr.dataset.aiModel=d.model||'';
+    tr.addEventListener('mouseenter',function(){tr.style.background='#16233c';});
+    tr.addEventListener('mouseleave',function(){tr.style.background='';});
+    tr.addEventListener('click',function(){aiOpenRowDetail(tr.dataset.aiProvider,tr.dataset.aiModel);});
     tr.innerHTML='<td style="padding:6px;text-align:center;color:#64748b">'+toFa(aiTestTotCount)+'</td>'
       +'<td style="padding:6px;text-align:center"><span class="aiSt">⏳</span></td>'
       +'<td style="padding:6px;text-align:right;color:#94a3b8">'+esc(d.providerName||d.provider||'')+'</td>'
