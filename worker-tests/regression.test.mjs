@@ -186,6 +186,20 @@ test('AI model table stores an independently validated category response for the
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('reasoning Together-compatible models classify products and answer customers with a protected final response',async()=>{
+  const originalFetch=globalThis.fetch,db=new MemoryD1(),requests=[];
+  try{
+    const model='openai/gpt-oss-20b';
+    const savedResponse=await call(db,'/api/connections',jsonInit({basalam:{api:'https://basalam.example/v1',token:'bs-reasoning',vendorId:'77'},ai:{providers:[{id:'together',name:'Together AI',baseUrl:'https://api.together.xyz/v1',apiKey:'together-secret',models:[model],reasoningModels:[model],enabled:true}],candidates:['together::'+model],master:'together::'+model,model:'together::'+model,network:{mode:'direct'}}})),saved=await savedResponse.json();
+    assert.equal(savedResponse.status,200);assert.deepEqual(saved.connections.ai.providers[0].reasoningModels,[model],'manual reasoning flags survive encrypted vault normalization');
+    await call(db,'/api/settings',jsonInit({autoreply:{order:'ai_only',systemMode:'custom',systemText:'دستیار فروشگاه آزمایشی'}}));
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request);if(url==='https://basalam.example/v1/categories')return jsonResponse({data:[{id:10,name:'آرایشی',children:[{id:11,name:'ادو پرفیوم'}]}]});const body=JSON.parse(String(init.body||'{}')),prompt=body.messages?.[0]?.content||'';requests.push({url,body,prompt});if(prompt.includes('فهرست مجاز'))return jsonResponse({choices:[{message:{reasoning_content:'ابتدا دسته‌های ۱۰ و ۱۱ را مقایسه می‌کنم.',content:'<think>شناسه ۱۰ عمومی‌تر است.</think>{"category_id":11,"reason":"تخصصی‌تر"}'}}],usage:{total_tokens:240}});if(prompt.includes('پیام مشتری'))return jsonResponse({output:{choices:[{text:'بله، این محصول موجود است.'}]},usage:{total_tokens:180}});return jsonResponse({choices:[{message:{reasoning_content:'پاسخ را کوتاه می‌کنم.',content:'<think>تحلیل داخلی</think>سلام، در خدمتم.'}}],usage:{total_tokens:160}})};
+    const tested=await call(db,'/api/ai/test-all',jsonInit({prompt:'سلام',categoryTitle:'ادو پرفیوم',cursor:0,runId:''})).then(response=>response.json());assert.equal(tested.done,true);assert.equal(tested.messageSucceeded,1);assert.equal(tested.categorySucceeded,1);assert.equal(tested.results[0].reasoning,true);assert.equal(tested.results[0].text,'سلام، در خدمتم.');assert.doesNotMatch(tested.results[0].text,/think|تحلیل داخلی/);assert.equal(tested.results[0].categoryResult.categoryId,11);assert.equal(tested.results[0].categoryResult.text,'{"category_id":11,"reason":"تخصصی‌تر"}');
+    const reply=await call(db,'/api/autoreply/test',jsonInit({text:'آیا این محصول موجود است؟'})).then(response=>response.json());assert.equal(reply.result.text,'بله، این محصول موجود است.');assert.equal(reply.result.source,'ai:together::'+model);assert.match(requests.at(-1).prompt,/فقط با پاسخ نهایی/);assert.match(requests.at(-1).prompt,/دستیار فروشگاه آزمایشی/);
+    assert.equal(requests.length,3);for(const item of requests){assert.equal(item.url,'https://api.together.xyz/v1/chat/completions');assert.equal(item.body.max_tokens,1600);assert.equal('temperature' in item.body,false,'reasoning models must not receive a potentially unsupported temperature')}
+  }finally{globalThis.fetch=originalFetch}
+});
+
 test('Mistral OCR and Embeddings use their dedicated endpoints and skip chat-only category classification',async()=>{
   const originalFetch=globalThis.fetch,db=new MemoryD1(),requests=[];
   try{

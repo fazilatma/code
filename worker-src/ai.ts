@@ -3,13 +3,27 @@ import { loadConnections } from './connections.js';
 import { getState, setState } from './db.js';
 import { assertPublicUrl, safeFetch } from './network.js';
 
-type Provider={id:string;name:string;baseUrl:string;apiKey:string;models:string[];enabled:boolean};
+export type Provider={id:string;name:string;baseUrl:string;apiKey:string;models:string[];reasoningModels:string[];enabled:boolean};
 type Network={mode:string;proxyUrl:string;workerUrl:string;dohUrl:string;resolveIp:string};
 type AiAttempt={endpoint:string;body:string|string[];model:string;httpStatus?:number;phase:'network'|'http'|'success';error?:string};
 type RequestResult={response?:Response;body?:any;rawText?:string;networkError?:string};
 
-function providersFromAi(ai:any):Provider[]{return ai.providers.length?ai.providers:[{id:'default',name:'Default',baseUrl:ai.baseUrl,apiKey:ai.apiKey,models:ai.model?[ai.model]:[],enabled:true}]}
+function providersFromAi(ai:any):Provider[]{return ai.providers.length?ai.providers.map((provider:any)=>({...provider,reasoningModels:Array.isArray(provider.reasoningModels)?provider.reasoningModels.map(String):[]})):[{id:'default',name:'Default',baseUrl:ai.baseUrl,apiKey:ai.apiKey,models:ai.model?[ai.model]:[],reasoningModels:[],enabled:true}]}
 export async function aiProviders():Promise<Provider[]>{return providersFromAi((await loadConnections()).ai)}
+
+/** Explicit user flags win first; the fallback covers common reasoning families already saved before this setting existed. */
+export function isReasoningAiModel(provider:Pick<Provider,'reasoningModels'>|undefined,model:string):boolean{
+  if(provider?.reasoningModels?.includes(model))return true;
+  const value=String(model||'').toLowerCase();
+  return /(?:^|[\/_:.-])(?:deepseek[-_.]?r1|qwq|qwen3|gpt[-_.]?oss|o[134](?:[-_.]|$)|reason(?:ing|er)?|thinking|think|magistral|nemotron|reflection|bonsai|liquid)(?:[\/_:.-]|$)/i.test(value)||/cohere[^/]*reason/i.test(value);
+}
+
+export async function preferredAiChatModel():Promise<{provider:Provider;model:string}|null>{
+  const ai=(await loadConnections()).ai,providers=providersFromAi(ai).filter(provider=>provider.enabled!==false),preferred=[ai.model,ai.master,...(Array.isArray(ai.candidates)?ai.candidates:[])].map(String).filter(Boolean);
+  for(const key of preferred){const [providerId,...parts]=key.split('::'),model=parts.length?parts.join('::'):key;const provider=parts.length?providers.find(item=>item.id===providerId):providers.find(item=>item.models.includes(model));if(provider&&provider.models.includes(model)&&isChatCompatibleAiModel(provider,model))return{provider,model}}
+  for(const provider of providers){const model=provider.models.find(item=>isChatCompatibleAiModel(provider,item));if(model)return{provider,model}}
+  return null;
+}
 
 export type AiModelEndpoint='chat-completions'|'ocr'|'embeddings';
 type AiEndpointProvider=Pick<Provider,'id'> & Partial<Pick<Provider,'baseUrl'>>;
@@ -24,12 +38,14 @@ export async function aiCall(provider:Provider,model:string,prompt:string,networ
   if(isCloudflareNative(provider.baseUrl))return cloudflareCall(provider,model,prompt,network,started);
   const endpointType=aiModelEndpoint(provider,model);
   if(endpointType!=='chat-completions')return mistralDedicatedCall(provider,model,prompt,network,started,endpointType);
-  const endpoint=openAiEndpoint(provider.baseUrl),reportedEndpoint=safeEndpoint(endpoint),payload={model,messages:[{role:'user',content:prompt}],max_tokens:400,temperature:.2};
-  const result=await requestAi(endpoint,payload,provider,network);
-  if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:reportedEndpoint,latencyMs:Date.now()-started,raw:{error:reason}})}
+  const endpoint=openAiEndpoint(provider.baseUrl),reportedEndpoint=safeEndpoint(endpoint),reasoning=isReasoningAiModel(provider,model),messages=[{role:'user',content:prompt}],payload:any={model,messages,max_tokens:reasoning?1600:400};if(!reasoning)payload.temperature=.2;
+  let result=await requestAi(endpoint,payload,provider,network);
+  // OpenAI reasoning endpoints use max_completion_tokens while Together-compatible endpoints use max_tokens.
+  if(reasoning&&result.response?.status===400&&/max_tokens|max_completion_tokens/i.test(aiErrorMessage(result.body)))result=await requestAi(endpoint,{model,messages,max_completion_tokens:1600},provider,network);
+  if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:reportedEndpoint,latencyMs:Date.now()-started,reasoning,raw:{error:reason}})}
   const response=result.response!,body=result.body,latencyMs=Date.now()-started;
-  if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${aiErrorMessage(body)||response.statusText||'AI error'}`,failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body));
-  return successDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body,{endpointType:'chat-completions',chatCompatible:true});
+  if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${aiErrorMessage(body)||response.statusText||'AI error'}`,{...failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body),reasoning});
+  return validatedChatSuccess(provider,model,prompt,reportedEndpoint,latencyMs,response,body,{endpointType:'chat-completions',chatCompatible:true,reasoning});
 }
 
 const MISTRAL_OCR_TEST_IMAGE='https://raw.githubusercontent.com/mistralai/cookbook/main/mistral/ocr/receipt.png';
@@ -52,23 +68,23 @@ async function mistralDedicatedCall(provider:Provider,model:string,prompt:string
 async function cloudflareCall(provider:Provider,model:string,prompt:string,network:Network,started:number){
   const accountId=cloudflareAccountId(provider.baseUrl);
   if(!accountId)throw new AiResponseError('شمارهٔ حساب Cloudflare در آدرس پیدا نشد',{ok:false,phase:'configuration',provider:provider.id,providerName:provider.name,model,prompt,endpoint:safeEndpoint(provider.baseUrl),latencyMs:Date.now()-started,raw:{error:'Cloudflare account ID was not found in base URL'}});
-  const models=cloudflareModelIds(model),base=`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/`,messages=[{role:'user',content:prompt}],attempts:AiAttempt[]=[];
+  const reasoning=isReasoningAiModel(provider,model),maxTokens=reasoning?1600:400,models=cloudflareModelIds(model),base=`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/`,messages=[{role:'user',content:prompt}],attempts:AiAttempt[]=[];
   let last:RequestResult|undefined,lastEndpoint=base+models[0];
   for(const modelId of models){
-    const endpoint=base+modelId.replace(/^\/+/,''),bodies:Array<{label:string;value:any}>=[{label:'prompt',value:{prompt,max_tokens:400}},{label:'messages',value:{messages,max_tokens:400}}];
+    const endpoint=base+modelId.replace(/^\/+/,''),bodies:Array<{label:string;value:any}>=[{label:'prompt',value:{prompt,max_tokens:maxTokens}},{label:'messages',value:{messages,max_tokens:maxTokens}}];
     for(const candidate of bodies){
       const result=await requestAi(endpoint,candidate.value,provider,network);last=result;lastEndpoint=endpoint;
       const error=result.networkError?safeError(result.networkError,endpoint,provider.apiKey):result.response?.ok?'':aiErrorMessage(result.body)||result.response?.statusText||'Cloudflare AI error';
       attempts.push({endpoint:safeEndpoint(endpoint),body:Object.keys(candidate.value),model:modelId,httpStatus:result.response?.status,phase:result.networkError?'network':result.response?.ok?'success':'http',...(error?{error}:{})});
-      if(result.response?.ok)return successDetail(provider,model,prompt,safeEndpoint(endpoint),Date.now()-started,result.response,result.body,{cloudflare:{mode:'native',resolvedModel:modelId,triedModels:models,attempts}});
+      if(result.response?.ok)return validatedChatSuccess(provider,model,prompt,safeEndpoint(endpoint),Date.now()-started,result.response,result.body,{reasoning,cloudflare:{mode:'native',resolvedModel:modelId,triedModels:models,attempts}});
     }
   }
   const chatEndpoint=`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/v1/chat/completions`;
   for(const modelId of models){
-    const payload={model:modelId,messages,max_tokens:400},result=await requestAi(chatEndpoint,payload,provider,network);last=result;lastEndpoint=chatEndpoint;
+    const payload={model:modelId,messages,max_tokens:maxTokens},result=await requestAi(chatEndpoint,payload,provider,network);last=result;lastEndpoint=chatEndpoint;
     const error=result.networkError?safeError(result.networkError,chatEndpoint,provider.apiKey):result.response?.ok?'':aiErrorMessage(result.body)||result.response?.statusText||'Cloudflare AI error';
     attempts.push({endpoint:safeEndpoint(chatEndpoint),body:`chat-${modelId}`,model:modelId,httpStatus:result.response?.status,phase:result.networkError?'network':result.response?.ok?'success':'http',...(error?{error}:{})});
-    if(result.response?.ok)return successDetail(provider,model,prompt,safeEndpoint(chatEndpoint),Date.now()-started,result.response,result.body,{cloudflare:{mode:'openai-fallback',resolvedModel:modelId,triedModels:models,attempts}});
+    if(result.response?.ok)return validatedChatSuccess(provider,model,prompt,safeEndpoint(chatEndpoint),Date.now()-started,result.response,result.body,{reasoning,cloudflare:{mode:'openai-fallback',resolvedModel:modelId,triedModels:models,attempts}});
   }
   const latencyMs=Date.now()-started,cloudflare={mode:'failed',triedModels:models,attempts};
   if(last?.networkError){const reason=safeError(last.networkError,lastEndpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:safeEndpoint(lastEndpoint),latencyMs,cloudflare,raw:{error:reason}})}
@@ -101,15 +117,17 @@ async function requestAi(endpoint:string,payload:any,provider:Provider,network:N
   try{const response=await networkFetch(endpoint,{method:'POST',headers:{authorization:`Bearer ${provider.apiKey}`,'content-type':'application/json'},body:JSON.stringify(payload)},network),rawText=await response.text(),body=parseResponse(rawText,provider.apiKey);return{response,body,rawText}}
   catch(error){return{networkError:error instanceof Error?error.message:String(error)}}
 }
-function successDetail(provider:Provider,model:string,prompt:string,endpoint:string,latencyMs:number,response:Response,body:any,extra:Record<string,unknown>={}){return{ok:true,text:extractAiText(body),latencyMs,provider:provider.id,providerName:provider.name,model,prompt,endpoint,httpStatus:response.status,httpStatusText:response.statusText,contentType:response.headers.get('content-type')||'',usage:body?.usage||body?.result?.usage||null,finishReason:body?.choices?.[0]?.finish_reason||'',raw:body,...extra}}
-function failureDetail(provider:Provider,model:string,prompt:string,endpoint:string,latencyMs:number,response?:Response,body?:any){return{ok:false,phase:'http',provider:provider.id,providerName:provider.name,model,prompt,endpoint,latencyMs,httpStatus:response?.status||0,httpStatusText:response?.statusText||'',contentType:response?.headers.get('content-type')||'',raw:body??null}}
-function extractAiText(body:any):string{
-  const content=body?.choices?.[0]?.message?.content;
-  if(typeof content==='string'&&content.trim())return content;
-  if(Array.isArray(content)){const joined=content.map((item:any)=>typeof item==='string'?item:item?.text||item?.content||'').join('');if(joined.trim())return joined}
-  for(const value of [body?.choices?.[0]?.text,body?.result?.response,body?.response,body?.output_text,body?.result?.text])if(typeof value==='string'&&value.trim())return value;
-  return '';
+function cleanReasoningTags(value:string):string{const original=String(value||'').trim(),without=original.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi,'').replace(/<\/?(?:analysis|reasoning)>/gi,'').trim();return without||original}
+function extractAiResponse(body:any):{text:string;reasoningText:string;reasoningOnly:boolean}{
+  const choices=Array.isArray(body?.choices)?body.choices:[],reasoningParts:string[]=[],answers:string[]=[];
+  for(const choice of choices){const message=choice?.message||{};for(const value of [message?.reasoning_content,message?.reasoning])if(typeof value==='string'&&value.trim())reasoningParts.push(value.trim());const content=message?.content;if(typeof content==='string'&&content.trim())answers.push(content.trim());else if(Array.isArray(content)){const joined=content.map((item:any)=>typeof item==='string'?item:item?.text||item?.content||'').join('').trim();if(joined)answers.push(joined)}if(typeof choice?.text==='string'&&choice.text.trim())answers.push(choice.text.trim())}
+  for(const value of [body?.output_text,body?.result?.response,body?.result?.text,body?.response,body?.text,body?.data?.[0]?.text])if(typeof value==='string'&&value.trim())answers.push(value.trim());
+  const output=body?.output;if(Array.isArray(output)){for(const item of output){if(typeof item==='string'&&item.trim())answers.push(item.trim());else if(item&&typeof item==='object'){if(typeof item.text==='string'&&item.text.trim())answers.push(item.text.trim());const content=item.content;if(typeof content==='string'&&content.trim())answers.push(content.trim());else if(Array.isArray(content)){const joined=content.map((segment:any)=>typeof segment==='string'?segment:segment?.text||segment?.content||'').join('').trim();if(joined)answers.push(joined)}}}}else if(Array.isArray(output?.choices)){for(const choice of output.choices){const value=choice?.message?.content||choice?.text;if(typeof value==='string'&&value.trim())answers.push(value.trim())}}
+  const reasoningText=reasoningParts.join('\n\n').trim(),answer=answers.find(Boolean)||'',cleaned=cleanReasoningTags(answer);return{text:cleaned||(reasoningText?cleanReasoningTags(reasoningText):''),reasoningText,reasoningOnly:!answer&&Boolean(reasoningText)};
 }
+function successDetail(provider:Provider,model:string,prompt:string,endpoint:string,latencyMs:number,response:Response,body:any,extra:Record<string,unknown>={}){const extracted=extractAiResponse(body);return{ok:true,text:extracted.text,reasoningText:extracted.reasoningText,reasoningOnly:extracted.reasoningOnly,latencyMs,provider:provider.id,providerName:provider.name,model,prompt,endpoint,httpStatus:response.status,httpStatusText:response.statusText,contentType:response.headers.get('content-type')||'',usage:body?.usage||body?.result?.usage||null,finishReason:body?.choices?.[0]?.finish_reason||'',raw:body,...extra}}
+function validatedChatSuccess(provider:Provider,model:string,prompt:string,endpoint:string,latencyMs:number,response:Response,body:any,extra:Record<string,unknown>={}){const detail=successDetail(provider,model,prompt,endpoint,latencyMs,response,body,extra);if(!detail.text.trim())throw new AiResponseError('مدل با وجود پاسخ HTTP موفق، هیچ متن یا پاسخ نهایی برنگرداند.',{...detail,ok:false,phase:'validation'});return detail}
+function failureDetail(provider:Provider,model:string,prompt:string,endpoint:string,latencyMs:number,response?:Response,body?:any){return{ok:false,phase:'http',provider:provider.id,providerName:provider.name,model,prompt,endpoint,latencyMs,httpStatus:response?.status||0,httpStatusText:response?.statusText||'',contentType:response?.headers.get('content-type')||'',raw:body??null}}
 function aiErrorMessage(body:any):string{
   if(body&&Array.isArray(body.errors))for(const error of body.errors){const message=String(error?.message||'').trim();if(message)return Number(error?.internalCode??error?.code)===5007?`مدل در Cloudflare وجود ندارد (No such model): ${message}`:message}
   return String(body?.error?.message||body?.message||body?.error||'').trim();
@@ -121,8 +139,8 @@ function categoryRows(title:string,categories:AiCategoryOption[]){
   return rows.map((row,index)=>{const name=String(row.path||row.name),normalized=normalizeCategoryText(name),score=words.reduce((sum,word)=>sum+(normalized.includes(word)?word.length+2:0),0);return{row,index,name,score}}).sort((a,b)=>b.score-a.score||a.index-b.index).slice(0,500);
 }
 function normalizeCategoryText(value:string){return String(value||'').toLowerCase().replace(/[يى]/g,'ی').replace(/ك/g,'ک').replace(/[\u200c\u200f\u200e]/g,' ').replace(/[^\p{L}\p{N}]+/gu,' ').replace(/\s+/g,' ').trim()}
-function categoryPrompt(title:string,categories:AiCategoryOption[]){const ranked=categoryRows(title,categories),allowed:AiCategoryOption[]=[],lines:string[]=[];let length=0;for(const item of ranked){const line=`${item.row.id} | ${item.name}`;if(length+line.length+1>18_000)break;lines.push(line);allowed.push(item.row);length+=line.length+1}if(!lines.length)throw new Error('فهرست معتبر دسته‌بندی باسلام در دسترس نیست.');return{allowed,prompt:`برای محصول زیر فقط مناسب‌ترین شناسه دسته‌بندی باسلام را از فهرست مجاز انتخاب کن. شناسه باید دقیقاً یکی از اعداد فهرست باشد. پاسخ را به شکل JSON کوتاه {"category_id":123,"reason":"..."} بده.\nمحصول: ${title}\nفهرست مجاز:\n${lines.join('\n')}`}}
-function parseCategoryId(text:string,categories:AiCategoryOption[]){const valid=new Set(categories.map(row=>Number(row.id)));try{const parsed=JSON.parse(String(text||'').replace(/^```(?:json)?\s*|\s*```$/gi,''));const id=Number(parsed?.category_id??parsed?.categoryId??parsed?.id);if(valid.has(id))return id}catch{/* response can be plain text */}for(const match of String(text||'').matchAll(/\d+/g)){const id=Number(match[0]);if(valid.has(id))return id}return 0}
+function categoryPrompt(title:string,categories:AiCategoryOption[]){const ranked=categoryRows(title,categories),allowed:AiCategoryOption[]=[],lines:string[]=[];let length=0;for(const item of ranked){const line=`${item.row.id} | ${item.name}`;if(length+line.length+1>18_000)break;lines.push(line);allowed.push(item.row);length+=line.length+1}if(!lines.length)throw new Error('فهرست معتبر دسته‌بندی باسلام در دسترس نیست.');return{allowed,prompt:`برای محصول زیر فقط مناسب‌ترین شناسه دسته‌بندی باسلام را از فهرست مجاز انتخاب کن. شناسه باید دقیقاً یکی از اعداد فهرست باشد. اگر مدل استدلالی هستی، فکرکردن را داخلی انجام بده و در پاسخ نهایی هیچ عدد دیگری ننویس. پاسخ نهایی فقط JSON کوتاه {"category_id":123,"reason":"..."} باشد.\nمحصول: ${title}\nفهرست مجاز:\n${lines.join('\n')}`}}
+function parseCategoryId(text:string,categories:AiCategoryOption[]){const source=String(text||''),valid=new Set(categories.map(row=>Number(row.id)));for(const candidate of [source,...[...source.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(match=>match[1])])try{const parsed=JSON.parse(candidate.trim());const id=Number(parsed?.category_id??parsed?.categoryId??parsed?.id);if(valid.has(id))return id}catch{/* response can contain prose */}for(const match of source.matchAll(/["']?category_(?:id)?["']?\s*[:=]\s*["']?(\d+)/gi)){const id=Number(match[1]);if(valid.has(id))return id}const numbers=[...source.matchAll(/\d+/g)].map(match=>Number(match[0])).filter(id=>valid.has(id));return numbers.length?numbers.at(-1)!:0}
 async function categoryWithTask(task:AiTestTask,title:string,categories:AiCategoryOption[],network:Network){
   if(!isChatCompatibleAiModel(task.p,task.model))throw new AiResponseError('این مدل endpoint اختصاصی دارد و برای گفت‌وگو یا دسته‌بندی کاندید نمی‌شود.',{ok:false,skipped:true,phase:'unsupported-task',provider:task.p.id,providerName:task.p.name,model:task.model,prompt:title,endpointType:aiModelEndpoint(task.p,task.model),chatCompatible:false,latencyMs:0,raw:{reason:'dedicated endpoint model'}});
   const prepared=categoryPrompt(title,categories),detail=await aiCall(task.p,task.model,prepared.prompt,network),categoryId=parseCategoryId(detail.text,prepared.allowed),category=prepared.allowed.find(row=>Number(row.id)===categoryId);
