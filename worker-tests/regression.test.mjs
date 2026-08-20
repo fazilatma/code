@@ -6,7 +6,7 @@ import worker from '../scraper4.worker.js';
 
 const ctx={waitUntil(){},passThroughOnException(){}};
 class MemoryD1 {
-  constructor(){this.states=new Map();this.profiles=new Map();this.products=new Map();this.jobs=new Map()}
+  constructor(){this.states=new Map();this.profiles=new Map();this.products=new Map();this.jobs=new Map();this.categoryLearning=new Map()}
   prepare(sql){return new MemoryStatement(this,sql)}
   async batch(statements){return statements.map(()=>({success:true,meta:{changes:0}}))}
 }
@@ -23,13 +23,15 @@ class MemoryStatement {
     if(s.startsWith('SELECT * FROM jobs WHERE id='))return this.db.jobs.get(v[0])||null;
     if(s.startsWith('SELECT * FROM jobs WHERE profile_id='))return[...this.db.jobs.values()].find(job=>job.profile_id===v[0]&&job.kind===v[1]&&['queued','running'].includes(job.status))||null;
     if(s.startsWith('SELECT 1 AS found FROM products'))return this.db.products.has(`${v[0]}:${v[1]}`)?{found:1}:null;
+    if(s.startsWith('SELECT * FROM category_learning WHERE phrase='))return[...this.db.categoryLearning.values()].filter(row=>row.phrase===v[0]).sort((a,b)=>b.hits-a.hits)[0]||null;
     return null;
   }
-  async all(){const s=this.sql;let results=[];if(s.startsWith('SELECT * FROM profiles ORDER BY'))results=[...this.db.profiles.values()];return{success:true,results}}
+  async all(){const s=this.sql;let results=[];if(s.startsWith('SELECT * FROM profiles ORDER BY'))results=[...this.db.profiles.values()];if(s.startsWith('SELECT * FROM category_learning ORDER BY'))results=[...this.db.categoryLearning.values()].sort((a,b)=>b.hits-a.hits).slice(0,Number(this.values[0])||1000);return{success:true,results}}
   async run(){const s=this.sql,v=this.values;
     if(s.startsWith('INSERT INTO app_state'))this.db.states.set(v[0],v[1]);
     else if(s.startsWith('INSERT INTO profiles'))this.db.profiles.set(v[0],{id:v[0],data:v[1],enabled:v[2],interval_minutes:v[3],created_at:v[4],updated_at:v[5],last_run_at:null});
     else if(s.startsWith('INSERT INTO products'))this.db.products.set(`${v[0]}:${v[1]}`,{profile_id:v[0],source_key:v[1],data:v[2],title:v[3],price:v[4],source_url:v[5]});
+    else if(s.startsWith('INSERT INTO category_learning')){const key=`${v[0]}:${v[1]}`,previous=this.db.categoryLearning.get(key);this.db.categoryLearning.set(key,{phrase:v[0],category_id:v[1],category_name:v[2],hits:(previous?.hits||0)+(s.includes('VALUES(?,?,?,1,?)')?1:Number(v[3])||1),updated_at:v.at(-1)})}
     else if(s.startsWith('INSERT INTO jobs'))this.db.jobs.set(v[0],{id:v[0],profile_id:v[1],kind:v[2],target:v[3],status:'queued',phase:'waiting',total:0,processed:0,added:0,updated:0,failed:0,stop_requested:0,error:null,log:'[]',created_at:v[4],updated_at:v[5],started_at:null,finished_at:null});
     return{success:true,meta:{changes:1}};
   }
@@ -106,6 +108,16 @@ test('AI all-model testing paginates one model per Worker invocation and preserv
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('AI model table stores an independently validated category response for the test category title',async()=>{
+  const originalFetch=globalThis.fetch,db=new MemoryD1(),prompts=[];
+  try{
+    await call(db,'/api/connections',jsonInit({basalam:{api:'https://basalam.example/v1',token:'bs-category',vendorId:'77'},ai:{providers:[{id:'cat',name:'Category Provider',baseUrl:'https://ai.example/v1',apiKey:'cat-secret',models:['model-a'],enabled:true}],candidates:['cat::model-a'],network:{mode:'direct'}}}));
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request);if(url==='https://basalam.example/v1/categories')return jsonResponse({data:[{id:10,name:'آرایشی',children:[{id:11,name:'ادو پرفیوم'}]}]});const body=JSON.parse(String(init.body||'{}')),prompt=body.messages?.[0]?.content||'';prompts.push(prompt);return jsonResponse({choices:[{message:{content:prompt.includes('فهرست مجاز')?'{"category_id":11,"reason":"درست"}':'پاسخ پیام'}}],usage:{total_tokens:12}})};
+    const response=await call(db,'/api/ai/test-all',jsonInit({prompt:'سلام',categoryTitle:'ادو پرفیوم',cursor:0,runId:''})),result=await response.json();assert.equal(response.status,200);assert.equal(result.done,true);assert.equal(result.categoryTitle,'ادو پرفیوم');assert.equal(result.categorySucceeded,1);assert.equal(result.results[0].categoryResult.ok,true);assert.equal(result.results[0].categoryResult.categoryId,11);assert.equal(result.results[0].catResponse,'ادو پرفیوم (#11)');assert.equal(prompts.length,2);assert.ok(prompts.some(x=>x.includes('فهرست مجاز')));
+    const saved=await call(db,'/api/ai/test-results').then(r=>r.json());assert.equal(saved.categoryTitle,'ادو پرفیوم');assert.equal(saved.results[0].categoryResult.categoryName,'ادو پرفیوم');
+  }finally{globalThis.fetch=originalFetch}
+});
+
 test('PHP settings import normalizes syncConfig, noExtract, fallback categories, network flag, products and variations',async()=>{
   const db=new MemoryD1(),profile={name:'CSV only',syncConfig:{enabled:true,interval:3600,target:'both',noExtract:true},bslCategoryId:77,bslFallbackCatIds:[88,99],net_indirect:'1',products:[['p-1',{title:'Variable item',price:125000,variations:['قرمز','آبی'],variationGroups:[{name:'رنگ',values:['قرمز','آبی']}]}]]};
   const profilesFile=file('profiles.json',{'csv-profile':profile}),connectionsFile=file('connections.json',{woocommerce:{url:'https://woo.example',consumer_key:'ck_import',consumer_secret:'cs_import'},basalam:{fallback_cat_ids:[55],vendors:[{name:'غرفه دوم',token:'shop-token',vendor_id:'22',price_mode:'percent',price_val:5}]},src_network:{mode:'worker',worker_url:'https://gateway.example/{url}'}}),bundle={app:'scraper',files:{'profiles.json':profilesFile.name,'connections.json':connectionsFile.name}};
@@ -134,8 +146,10 @@ test('selector suggestion and variation extraction routes execute against HTML',
 test('comprehensive destination APIs page, search, preview, update, status, bulk and archive with shop-aware semantics',async()=>{
   const originalFetch=globalThis.fetch,originalError=console.error,db=new MemoryD1(),requests=[];console.error=()=>{};
   try{
-    await call(db,'/api/connections',jsonInit({woo:{url:'https://woo.example',key:'ck_dest',secret:'cs_dest'},basalam:{api:'https://basalam.example/api',token:'bs-token',vendorId:'55',shops:[{name:'غرفه دوم',token:'shop-token',vendorId:'66',pricePercent:0}]}}));
+    await call(db,'/api/connections',jsonInit({woo:{url:'https://woo.example',key:'ck_dest',secret:'cs_dest'},basalam:{api:'https://basalam.example/api',token:'bs-token',vendorId:'55',shops:[{name:'غرفه دوم',token:'shop-token',vendorId:'66',pricePercent:0}]},ai:{providers:[{id:'cat-ai',name:'Category AI',baseUrl:'https://ai.example/v1',apiKey:'ai-secret',models:['cat-model'],enabled:true}],candidates:['cat-ai::cat-model'],network:{mode:'direct'}}}));
     globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request),method=String(init.method||'GET').toUpperCase(),body=init.body?JSON.parse(String(init.body)):null;requests.push({url,method,body,headers:new Headers(init.headers)});
+      if(url==='https://basalam.example/api/categories'&&method==='GET')return jsonResponse({data:[{id:900,name:'آرایشی و بهداشتی',children:[{id:901,name:'عطر و ادکلن'},{id:902,name:'ادو پرفیوم'}]}]});
+      if(url==='https://ai.example/v1/chat/completions'&&method==='POST')return jsonResponse({choices:[{message:{content:'{"category_id":902,"reason":"مناسب‌ترین دسته"}'}}]});
       if(url.startsWith('https://woo.example/wp-json/wc/v3/products/101')&&method==='GET')return jsonResponse({id:101,name:'کفش وو',regular_price:'250000',stock_quantity:4,status:'publish',sku:'W-1',images:[{src:'https://woo.example/a.jpg'}],categories:[{id:7,name:'کفش'}]});
       if(url.startsWith('https://woo.example/wp-json/wc/v3/products/101')&&method==='PUT')return jsonResponse({id:101,name:body.name||'کفش وو',regular_price:body.regular_price||'250000',stock_quantity:body.stock_quantity??4,status:body.status||'publish',sku:'W-1',images:[],categories:[]});
       if(url.startsWith('https://woo.example/wp-json/wc/v3/products')&&method==='GET')return jsonResponse([{id:101,name:'کفش وو',regular_price:'250000',stock_quantity:4,status:'publish',sku:'W-1',images:[],categories:[]}],200,{'x-wp-total':'1','x-wp-totalpages':'1'});
@@ -152,8 +166,15 @@ test('comprehensive destination APIs page, search, preview, update, status, bulk
     const wooStatus=await call(db,'/api/destination/woo/101/status',jsonInit({status:'draft',confirm:'APPLY'})).then(r=>r.json());assert.equal(wooStatus.ok,true);assert.equal(requests.at(-1).body.status,'draft');
 
     const bsList=await call(db,'/api/destination/basalam/products?page=1&per_page=25&shop=55&status=2976').then(r=>r.json());assert.equal(bsList.items.length,1);assert.equal(bsList.items[0].price,125000);assert.equal(bsList.items[0].shopId,'55');assert.equal(bsList.archiveInsteadOfDelete,true);
+    const categories=await call(db,'/api/categories/basalam?refresh=1').then(r=>r.json());assert.equal(categories.ok,true);assert.equal(categories.total,3);assert.equal(categories.items.find(x=>x.id===902).path,'آرایشی و بهداشتی ← ادو پرفیوم');assert.equal(categories.items.find(x=>x.id===902).leaf,true);
+    const aiCategory=await call(db,'/api/destination/basalam/category/suggest',jsonInit({mode:'ai',title:'ادو پرفیوم زنانه',modelKey:'cat-ai::cat-model'})).then(r=>r.json());assert.equal(aiCategory.ok,true);assert.equal(aiCategory.categoryId,902);assert.equal(aiCategory.categoryName,'ادو پرفیوم');assert.match(aiCategory.text,/category_id/);
+    const noLearning=await call(db,'/api/destination/basalam/category/suggest',jsonInit({mode:'learned',title:'عطر باسلام'})).then(r=>r.json());assert.equal(noLearning.result,null);
     const bsPreview=await call(db,'/api/destination/basalam/bulk',jsonInit({ids:[{id:201,shopId:'55'}],ops:{price:{op:'inc',val:'10%'},stock:6}})).then(r=>r.json());assert.equal(bsPreview.dryRun,true);assert.equal(bsPreview.items[0].newPrice,137500);assert.equal(bsPreview.items[0].stock,6);
     const bsBulk=await call(db,'/api/destination/basalam/bulk',jsonInit({ids:[{id:201,shopId:'55'}],ops:{price:{op:'inc',val:'10%'}},confirm:'APPLY'})).then(r=>r.json());assert.equal(bsBulk.dryRun,false);assert.equal(bsBulk.changed,1);const batch=requests.find(x=>x.url.includes('/vendors/55/products/batch-updates'));assert.equal(batch.body.data[0].primary_price,1375000);
+    const categoryBody={ids:[{id:201,shopId:'55'}],ops:{categoryAssignments:[{id:201,shopId:'55',categoryId:902,categoryName:'ادو پرفیوم',source:'هوش مصنوعی'}]}};
+    const categoryPreview=await call(db,'/api/destination/basalam/bulk',jsonInit(categoryBody)).then(r=>r.json());assert.equal(categoryPreview.dryRun,true);assert.equal(categoryPreview.items[0].newCategoryId,902);assert.equal(categoryPreview.items[0].categorySource,'هوش مصنوعی');
+    const categoryApply=await call(db,'/api/destination/basalam/bulk',jsonInit({...categoryBody,confirm:'APPLY'})).then(r=>r.json());assert.equal(categoryApply.dryRun,false);assert.equal(categoryApply.changed,1);assert.ok(categoryApply.learningRecords>0);const categoryBatch=requests.filter(x=>x.url.includes('/vendors/55/products/batch-updates')).at(-1);assert.equal(categoryBatch.body.data[0].category_id,902);
+    const learned=await call(db,'/api/destination/basalam/category/suggest',jsonInit({mode:'learned',title:'عطر باسلام ویژه'})).then(r=>r.json());assert.equal(learned.result.categoryId,902);assert.equal(learned.result.categoryName,'ادو پرفیوم');
     const archived=await call(db,'/api/destination/basalam/201?confirm=DELETE&shop=55',{method:'DELETE'}).then(r=>r.json());assert.equal(archived.archived,true);assert.equal(archived.deleted,false);assert.equal(requests.at(-1).method,'PATCH');assert.equal(requests.at(-1).body.status,4184);
     const overLimit=await call(db,'/api/destination/basalam/bulk',jsonInit({ids:Array.from({length:21},(_,i)=>({id:i+1,shopId:'55'})),ops:{stock:1}}));assert.equal(overLimit.status,400);assert.match((await overLimit.json()).error,/۲۰/);
   }finally{globalThis.fetch=originalFetch;console.error=originalError}

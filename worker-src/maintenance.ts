@@ -1,5 +1,5 @@
 import { loadConnections } from './connections.js';
-import { getState, maintenanceRows, setDestinationId, setRemoteId, setState } from './db.js';
+import { getState, learnCategory, maintenanceRows, setDestinationId, setRemoteId, setState } from './db.js';
 import { safeFetch } from './network.js';
 import { basicAuth } from './utils.js';
 import type { ConnectionVault } from './vault.js';
@@ -10,6 +10,7 @@ type Shop={name:string;token:string;vendorId:string;pricePercent:number;primary:
 export type Remote={id:number;name:string;title:string;sku:string;images:string[];image:string;status:string;statusLabel:string;price:number;priceRaw:number;stock:number|null;category:string;categoryId:number|null;shopId:string;shopName:string;rejectionReason:string;shortDescription:string;description:string;raw:any};
 type CatalogQuery={page?:number;perPage?:number;q?:string;status?:string;shopId?:string;counts?:boolean};
 type ProductRef={id:number;shopId:string};
+export type DestinationCategory={id:number;name:string;path:string;parentId:number|null;depth:number;leaf:boolean};
 
 export async function recon(target:Target,profileId=''){
   const local=await maintenanceRows(profileId),remote=await remoteProducts(target),byId=new Map(remote.map(x=>[x.id,x])),bySku=new Map(remote.filter(x=>x.sku).map(x=>[x.sku,x])),byName=new Map(remote.map(x=>[norm(x.name),x])),used=new Set<number>(),items:any[]=[];
@@ -38,6 +39,15 @@ export async function destinationCatalog(target:Target,query:CatalogQuery={}){
   const result=await basalamCatalog({page,perPage,q,status,shopId}),counts=query.counts?await basalamStatusCounts(shopId):undefined;
   return{ok:true,target,page,perPage,q,status,shopId,shops:(await basalamShops()).map(shop=>({id:shop.vendorId,name:shop.name,primary:shop.primary})),...result,...(counts?{counts}:{}),priceUnit:'تومان',remotePriceUnit:'ریال',archiveInsteadOfDelete:true};
 }
+export async function destinationCategories(refresh=false):Promise<{items:DestinationCategory[];cached:boolean;updatedAt:string}>{
+  const cacheKey='basalam_categories_v1',cached=await getState<any>(cacheKey,null),maxAge=24*60*60*1000;
+  if(!refresh&&Array.isArray(cached?.items)&&cached.items.length&&Date.now()-Date.parse(String(cached.updatedAt||0))<maxAge)return{items:cached.items,cached:true,updatedAt:String(cached.updatedAt)};
+  const connection=(await loadConnections()).basalam;if(!connection.token)throw Error('توکن باسلام خالی است.');const shop:Shop={name:'غرفه پیش‌فرض',token:connection.token,vendorId:String(connection.vendorId||''),pricePercent:0,primary:true},api=connection.api;
+  const result=await basalamFetch(shop,`${String(api).replace(/\/$/,'')}/categories`),roots=categoryRoots(result.body),items:DestinationCategory[]=[];
+  flattenCategoryTree(roots,items,[],0,null);
+  if(!items.length)throw Error('فهرست دسته‌بندی باسلام خالی است. اتصال و پاسخ API را بررسی کنید.');
+  const record={items:dedupeCategories(items),updatedAt:new Date().toISOString()};await setState(cacheKey,record);return{...record,cached:false};
+}
 export async function destinationProduct(target:Target,id:number,shopId=''){if(!Number.isInteger(id)||id<=0)throw Error('شناسه محصول نامعتبر است.');return target==='woo'?wooGet(id):basalamGet(id,shopId)}
 export async function listDestinationProducts(target:Target):Promise<Remote[]>{return target==='woo'?wooProducts():basalamProducts()}
 export async function destinationOverview(target:Target){const items=await listDestinationProducts(target),statuses:Record<string,number>={};for(const item of items)statuses[item.status]=(statuses[item.status]||0)+1;return{target,total:items.length,statuses,withoutImage:items.filter(x=>!x.images.length).length,withoutSku:items.filter(x=>!x.sku).length}}
@@ -47,7 +57,7 @@ export async function destinationUpdate(target:Target,id:number,input:any,apply=
   const current=await destinationProduct(target,id,shopId),payload=directPayload(target,input,current);
   if(!Object.keys(payload).length)return{ok:true,dryRun:!apply,id,shopId:current.shopId,changed:false,current,changes:{}};
   if(!apply)return{ok:true,dryRun:true,id,shopId:current.shopId,changed:true,current,changes:payload,summary:'پیش‌نمایش است؛ چیزی روی مقصد تغییر نکرد.'};
-  const raw=target==='woo'?await wooUpdate(id,payload):await basalamUpdate(id,payload,current.shopId);return{ok:true,dryRun:false,id,shopId:current.shopId,changed:true,product:normalizeRemote(target,unwrapProduct(raw),current.shopId,current.shopName)};
+  const raw=target==='woo'?await wooUpdate(id,payload):await basalamUpdate(id,payload,current.shopId);let learningRecords=0;if(target==='basalam'&&Number(payload.category_id)>0)learningRecords=await learnCategory(current.title,Number(payload.category_id),String(input.categoryName||current.category||`#${payload.category_id}`));return{ok:true,dryRun:false,id,shopId:current.shopId,changed:true,product:normalizeRemote(target,unwrapProduct(raw),current.shopId,current.shopName),learningRecords};
 }
 export async function destinationChangeStatus(target:Target,id:number,status:string,shopId=''){const allowed=target==='woo'?['publish','draft','private','pending','trash']:['2976','3790','3567','3568','4184'];if(!allowed.includes(String(status)))throw Error('وضعیت انتخاب‌شده معتبر نیست.');if(target==='woo')await wooUpdate(id,{status});else await basalamUpdate(id,{status:Number(status)},shopId);return{ok:true,id,status,shopId:shopId||'default'}}
 export async function destinationDelete(target:Target,id:number,force=false,shopId=''){
@@ -59,16 +69,17 @@ export async function destinationDelete(target:Target,id:number,force=false,shop
 export async function destinationBulkEdit(target:Target,input:any,apply=false){
   const refs=normalizeRefs(input.ids,input.shopId);if(!refs.length)throw Error('محصولی انتخاب نشده است.');
   if(refs.length>20)throw Error('در Cloudflare Workers برای رعایت سقف درخواست‌های خارجی، هر نوبت ویرایش حداکثر ۲۰ محصول است. انتخاب را به چند نوبت تقسیم کنید.');
-  const ops=input.ops&&typeof input.ops==='object'?input.ops:input,items:any[]=[],updates:Array<{ref:ProductRef;payload:any;row:any}>=[],failures:any[]=[];
+  const ops=input.ops&&typeof input.ops==='object'?input.ops:input,assignments=normalizeCategoryAssignments(ops.categoryAssignments),items:any[]=[],updates:Array<{ref:ProductRef;payload:any;row:any}>=[],failures:any[]=[];
   for(const ref of refs)try{
-    const current=await destinationProduct(target,ref.id,ref.shopId),built=bulkPayload(target,ops,current),row={id:ref.id,shopId:current.shopId,title:current.title,oldPrice:current.price,...built.summary};
+    const current=await destinationProduct(target,ref.id,ref.shopId),assignment=assignments.get(`${ref.shopId||current.shopId}:${ref.id}`)||assignments.get(`:${ref.id}`),effective=assignment?{...ops,categoryId:assignment.categoryId}:ops,built=bulkPayload(target,effective,current),row={id:ref.id,shopId:current.shopId,title:current.title,oldPrice:current.price,...built.summary,...(assignment?{categoryName:assignment.categoryName,categorySource:assignment.source}: {})};
     if(ops.delete){row.action=target==='basalam'?'بایگانی با وضعیت ۴۱۸۴':'حذف'+(ops.force?' همیشگی':' به زباله‌دان');updates.push({ref:{...ref,shopId:current.shopId},payload:target==='basalam'?{status:4184}:{delete:true,force:Boolean(ops.force)},row})}
     else if(Object.keys(built.payload).length){row.action='ویرایش';updates.push({ref:{...ref,shopId:current.shopId},payload:built.payload,row})}else row.action='بدون تغییر';
     items.push(row);
   }catch(error){const row={id:ref.id,shopId:ref.shopId,error:msg(error)};items.push(row);failures.push(row)}
   if(!apply)return{ok:failures.length===0,dryRun:true,target,total:refs.length,changed:updates.filter(x=>!x.payload.delete).length,deleted:updates.filter(x=>x.payload.delete||x.payload.status===4184&&ops.delete).length,skipped:refs.length-updates.length-failures.length,failed:failures.length,items,limit:20,summary:'پیش‌نمایش کامل شد؛ هیچ تغییری روی مقصد اعمال نشد.'};
-  const applied=await applyBulk(target,updates),failed=[...failures,...applied.failed];for(const failure of applied.failed){const row=items.find(item=>item.id===failure.id&&item.shopId===failure.shopId);if(row)row.error=failure.error}
-  return{ok:failed.length===0,dryRun:false,target,total:refs.length,changed:applied.changed,deleted:applied.deleted,skipped:refs.length-updates.length-failures.length,failed:failed.length,items,limit:20,archiveInsteadOfDelete:target==='basalam'};
+  const applied=await applyBulk(target,updates),failed=[...failures,...applied.failed],failedKeys=new Set(applied.failed.map(row=>`${row.shopId}:${row.id}`));for(const failure of applied.failed){const row=items.find(item=>item.id===failure.id&&item.shopId===failure.shopId);if(row)row.error=failure.error}
+  let learningRecords=0;if(target==='basalam')for(const item of updates)if(Number(item.payload.category_id)>0&&!failedKeys.has(`${item.ref.shopId}:${item.ref.id}`))learningRecords+=await learnCategory(item.row.title,Number(item.payload.category_id),String(item.row.categoryName||`#${item.payload.category_id}`));
+  return{ok:failed.length===0,dryRun:false,target,total:refs.length,changed:applied.changed,deleted:applied.deleted,skipped:refs.length-updates.length-failures.length,failed:failed.length,items,limit:20,archiveInsteadOfDelete:target==='basalam',learningRecords};
 }
 
 async function applyBulk(target:Target,updates:Array<{ref:ProductRef;payload:any;row:any}>){
@@ -102,6 +113,7 @@ function bulkPayload(target:Target,ops:any,current:Remote){const payload:any={},
   if(ops.status)Object.assign(payload,statusPayload(target,String(ops.status)));
   if(ops.description!==undefined||ops.desc!==undefined)payload.description=String(ops.description??ops.desc).slice(0,100_000);
   if(ops.shortDescription!==undefined||ops.short_desc!==undefined)payload[target==='woo'?'short_description':'brief']=String(ops.shortDescription??ops.short_desc).slice(0,target==='woo'?20_000:250);
+  if(ops.categoryId!==undefined&&Number(ops.categoryId)>0){const categoryId=Math.round(Number(ops.categoryId));target==='woo'?payload.categories=[{id:categoryId}]:payload.category_id=categoryId;summary.newCategoryId=categoryId}
   const title=(String(ops.titlePrefix??ops.title_prefix??'')+current.title+String(ops.titleSuffix??ops.title_suffix??'')).trim();if(title&&title!==current.title){payload.name=title.slice(0,target==='woo'?300:120);summary.newTitle=title}
   return{payload,summary};
 }
@@ -139,6 +151,10 @@ async function basalamFetch(shop:Shop,url:string,init:RequestInit={}){return fet
 async function basalamShops():Promise<Shop[]>{const c=(await loadConnections()).basalam;if(!c.token||!c.vendorId)throw Error('اتصال باسلام کامل نیست');const rows:Shop[]=[{name:'غرفه پیش‌فرض',token:c.token,vendorId:String(c.vendorId),pricePercent:0,primary:true},...c.shops.filter(shop=>shop.token&&shop.vendorId).map(shop=>({...shop,vendorId:String(shop.vendorId),primary:false}))],seen=new Set<string>();return rows.filter(row=>row.vendorId&&!seen.has(row.vendorId)&&(seen.add(row.vendorId),true))}
 function selectShops(shops:Shop[],shopId:string){return !shopId||shopId==='all'||shopId==='0'?shops:shops.filter(shop=>shop.vendorId===String(shopId))}
 function basalamStatuses(status:string){const map:Record<string,string[]>={all:['2976','3790','3567','3568','4184','2977','2978','3248','4221'],active:['2976'],inactive:['3790'],not_approved:['3567'],pending:['3568'],archived:['4184']};return map[status]||([2976,3790,3567,3568,4184].includes(Number(status))?[String(status)]:map.all)}
+function categoryRoots(body:any):any[]{const candidates=[body?.data?.categories,body?.data,body?.categories,body?.results,body?.items,body];for(const value of candidates)if(Array.isArray(value))return value;return[]}
+function categoryChildren(row:any):any[]{for(const value of [row?.children,row?.childs,row?.subcategories,row?.categories,row?.data?.children])if(Array.isArray(value))return value;return[]}
+function flattenCategoryTree(rows:any[],out:DestinationCategory[],parents:string[],depth:number,parentId:number|null){for(const row of rows){const id=Number(row?.id??row?.category_id??row?.value),name=String(row?.name??row?.title??row?.label??'').trim();if(!Number.isInteger(id)||id<=0||!name)continue;const children=categoryChildren(row),path=[...parents,name];out.push({id,name,path:path.join(' ← '),parentId,depth,leaf:children.length===0});if(children.length)flattenCategoryTree(children,out,path,depth+1,id)}}
+function dedupeCategories(rows:DestinationCategory[]){const seen=new Set<number>();return rows.filter(row=>!seen.has(row.id)&&(seen.add(row.id),true))}
 
 function normalizeRemote(target:Target,x:any,shopId:string,shopName:string):Remote{
   const revision=x?.revision?.data||{},rawStatus=x?.status??revision.status??'',status=typeof rawStatus==='object'?String(rawStatus.value??rawStatus.id??''):String(rawStatus||''),statusLabel=typeof rawStatus==='object'?String(rawStatus.name||rawStatus.description||status):target==='basalam'?({'2976':'فعال','3790':'غیرفعال','3567':'تأیید نشده','3568':'در انتظار تأیید','4184':'بایگانی'}[status]||status):status;
@@ -150,6 +166,7 @@ function rowsFrom(body:any):any[]{const rows=body?.data??body?.products??body?.r
 function unwrapProduct(body:any):any{return body?.data?.product??body?.data??body?.product??body??{}}
 function numberOrNull(value:any):number|null{return value===null||value===undefined||value===''?null:(Number.isFinite(Number(value))?Number(value):null)}
 function normalizeRefs(ids:any[],shopId=''):ProductRef[]{const seen=new Set<string>(),rows:ProductRef[]=[];for(const value of ids||[]){const id=Number(typeof value==='object'?value.id:value),shop=String(typeof value==='object'?(value.shopId||value.shop_id||shopId):shopId||'');if(!Number.isInteger(id)||id<=0)continue;const key=`${shop}:${id}`;if(!seen.has(key)){seen.add(key);rows.push({id,shopId:shop})}}return rows}
+function normalizeCategoryAssignments(value:any){const rows=Array.isArray(value)?value:[],map=new Map<string,{categoryId:number;categoryName:string;source:string}>();for(const row of rows){const id=Number(row?.id),categoryId=Number(row?.categoryId??row?.category_id),shopId=String(row?.shopId??row?.shop_id??'');if(Number.isInteger(id)&&id>0&&Number.isInteger(categoryId)&&categoryId>0)map.set(`${shopId}:${id}`,{categoryId,categoryName:String(row?.categoryName??row?.category_name??''),source:String(row?.source??'')})}return map}
 function clamp(value:any,min:number,max:number,fallback:number){const n=Number(value);return Number.isFinite(n)?Math.max(min,Math.min(max,Math.round(n))):fallback}
 
 class DestinationHttpError extends Error{constructor(public status:number,public body:any,url:string){super(`HTTP ${status} از ${new URL(url).hostname}: ${String(body?.message||body?.error||JSON.stringify(body)).slice(0,300)}`)}}

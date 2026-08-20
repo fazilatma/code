@@ -84,9 +84,28 @@ function aiErrorMessage(body:any):string{
   return String(body?.error?.message||body?.message||body?.error||'').trim();
 }
 
+export type AiCategoryOption={id:number;name:string;path?:string;parentId?:number|null;leaf?:boolean};
+function categoryRows(title:string,categories:AiCategoryOption[]){
+  const words=normalizeCategoryText(title).split(' ').filter(word=>word.length>1),rows=categories.filter(row=>Number.isInteger(Number(row.id))&&Number(row.id)>0&&(row.leaf!==false||!categories.some(other=>Number(other.parentId)===Number(row.id))));
+  return rows.map((row,index)=>{const name=String(row.path||row.name),normalized=normalizeCategoryText(name),score=words.reduce((sum,word)=>sum+(normalized.includes(word)?word.length+2:0),0);return{row,index,name,score}}).sort((a,b)=>b.score-a.score||a.index-b.index).slice(0,500);
+}
+function normalizeCategoryText(value:string){return String(value||'').toLowerCase().replace(/[يى]/g,'ی').replace(/ك/g,'ک').replace(/[\u200c\u200f\u200e]/g,' ').replace(/[^\p{L}\p{N}]+/gu,' ').replace(/\s+/g,' ').trim()}
+function categoryPrompt(title:string,categories:AiCategoryOption[]){const ranked=categoryRows(title,categories),allowed:AiCategoryOption[]=[],lines:string[]=[];let length=0;for(const item of ranked){const line=`${item.row.id} | ${item.name}`;if(length+line.length+1>18_000)break;lines.push(line);allowed.push(item.row);length+=line.length+1}if(!lines.length)throw new Error('فهرست معتبر دسته‌بندی باسلام در دسترس نیست.');return{allowed,prompt:`برای محصول زیر فقط مناسب‌ترین شناسه دسته‌بندی باسلام را از فهرست مجاز انتخاب کن. شناسه باید دقیقاً یکی از اعداد فهرست باشد. پاسخ را به شکل JSON کوتاه {"category_id":123,"reason":"..."} بده.\nمحصول: ${title}\nفهرست مجاز:\n${lines.join('\n')}`}}
+function parseCategoryId(text:string,categories:AiCategoryOption[]){const valid=new Set(categories.map(row=>Number(row.id)));try{const parsed=JSON.parse(String(text||'').replace(/^```(?:json)?\s*|\s*```$/gi,''));const id=Number(parsed?.category_id??parsed?.categoryId??parsed?.id);if(valid.has(id))return id}catch{/* response can be plain text */}for(const match of String(text||'').matchAll(/\d+/g)){const id=Number(match[0]);if(valid.has(id))return id}return 0}
+async function categoryWithTask(task:AiTestTask,title:string,categories:AiCategoryOption[],network:Network){
+  const prepared=categoryPrompt(title,categories),detail=await aiCall(task.p,task.model,prepared.prompt,network),categoryId=parseCategoryId(detail.text,prepared.allowed),category=prepared.allowed.find(row=>Number(row.id)===categoryId);
+  if(!category)throw new AiResponseError('مدل هیچ شناسهٔ معتبر از فهرست دسته‌بندی باسلام برنگرداند.',{...detail,ok:false,phase:'validation',categoryTitle:title,categoryId:0,allowedCategoryCount:prepared.allowed.length});
+  return{...detail,categoryTitle:title,categoryId,categoryName:String(category.name),categoryPath:String(category.path||category.name),allowedCategoryCount:prepared.allowed.length};
+}
+export async function suggestCategoryWithModel(title:string,modelKey:string,categories:AiCategoryOption[]){
+  const ai=(await loadConnections()).ai,providers=providersFromAi(ai),[providerId,...modelParts]=String(modelKey||'').split('::'),model=modelParts.join('::'),provider=providers.find(item=>item.id===providerId&&item.enabled!==false&&item.models.includes(model));
+  if(!String(title||'').trim())throw new Error('عنوان محصول برای دسته‌بندی لازم است.');if(!provider||!model)throw new Error('مدل انتخاب‌شده در تنظیمات فعال هوش مصنوعی پیدا نشد.');
+  const task={p:provider,model,key:`${provider.id}::${model}`};try{return{...await categoryWithTask(task,String(title).trim(),categories,ai.network),key:task.key}}catch(error){return aiTestFailure(error,task,String(title).trim())}
+}
+
 const AI_TEST_MODELS_PER_INVOCATION=1;
 type AiTestTask={p:Provider;model:string;key:string};
-type StoredAiTest={runId:string;startedAt:string;updatedAt:string;prompt:string;onlyCandidates:boolean;total:number;results:any[]};
+type StoredAiTest={runId:string;startedAt:string;updatedAt:string;prompt:string;categoryTitle:string;onlyCandidates:boolean;total:number;results:any[]};
 function aiTestTasks(ai:any,providers:Provider[],onlyCandidates:boolean):AiTestTask[]{
   const wanted=new Set<string>(Array.isArray(ai.candidates)?ai.candidates.map(String):[]),tasks:AiTestTask[]=[];
   for(const p of providers){
@@ -104,14 +123,18 @@ function aiTestFailure(error:unknown,task:AiTestTask,prompt:string){return error
  * The dashboard advances `cursor`, making every model a fresh invocation while
  * this function persists one aggregate result set for the final table.
  */
-export async function testModelBatch(prompt='سلام',options:{onlyCandidates?:boolean;cursor?:number;runId?:string}={}){
-  const ai=(await loadConnections()).ai,providers=providersFromAi(ai),onlyCandidates=Boolean(options.onlyCandidates),tasks=aiTestTasks(ai,providers,onlyCandidates),cursor=Math.max(0,Math.trunc(Number(options.cursor)||0));
+export async function testModelBatch(prompt='سلام',options:{onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[]}={}){
+  const ai=(await loadConnections()).ai,providers=providersFromAi(ai),onlyCandidates=Boolean(options.onlyCandidates),tasks=aiTestTasks(ai,providers,onlyCandidates),cursor=Math.max(0,Math.trunc(Number(options.cursor)||0)),categoryTitle=String(options.categoryTitle||'').trim(),categories=Array.isArray(options.categories)?options.categories:[];
   const previous=cursor>0?await getState<StoredAiTest|null>('ai_test_results',null):null,runId=String(options.runId||previous?.runId||crypto.randomUUID()),startedAt=cursor===0||!previous?.startedAt?new Date().toISOString():previous.startedAt;
-  if(cursor>0&&(!previous?.runId||previous.runId!==runId||previous.prompt!==prompt||previous.onlyCandidates!==onlyCandidates))throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
+  if(cursor>0&&(!previous?.runId||previous.runId!==runId||previous.prompt!==prompt||previous.categoryTitle!==categoryTitle||previous.onlyCandidates!==onlyCandidates))throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
   const results:any[]=cursor===0?[]:Array.isArray(previous?.results)?previous.results:[],batch=tasks.slice(cursor,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults:any[]=[];
-  for(const task of batch){try{batchResults.push({...await aiCall(task.p,task.model,prompt,ai.network),key:task.key})}catch(error){batchResults.push(aiTestFailure(error,task,prompt))}}
-  results.push(...batchResults);const nextCursor=Math.min(tasks.length,cursor+batch.length),done=nextCursor>=tasks.length,updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);
-  return{ok:done&&results.some(x=>x.ok),runId,startedAt,updatedAt,prompt,total:tasks.length,cursor,nextCursor,done,batchSize:batch.length,maxModelsPerInvocation:AI_TEST_MODELS_PER_INVOCATION,succeeded:results.filter(x=>x.ok).length,failed:results.filter(x=>!x.ok).length,results,batchResults};
+  for(const task of batch){
+    let message:any;try{message={...await aiCall(task.p,task.model,prompt,ai.network),key:task.key}}catch(error){message=aiTestFailure(error,task,prompt)}
+    let categoryResult:any=null;if(categoryTitle&&categories.length)try{categoryResult={...await categoryWithTask(task,categoryTitle,categories,ai.network),key:task.key}}catch(error){categoryResult=aiTestFailure(error,task,categoryTitle)}
+    batchResults.push({...message,categoryTitle,categoryResult,catResponse:categoryResult?.ok?`${categoryResult.categoryName} (#${categoryResult.categoryId})`:categoryResult?.error||(!categories.length?'فهرست دسته‌بندی در دسترس نیست':'')});
+  }
+  results.push(...batchResults);const nextCursor=Math.min(tasks.length,cursor+batch.length),done=nextCursor>=tasks.length,updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,categoryTitle,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);
+  return{ok:done&&results.some(x=>x.ok),runId,startedAt,updatedAt,prompt,categoryTitle,total:tasks.length,cursor,nextCursor,done,batchSize:batch.length,maxModelsPerInvocation:AI_TEST_MODELS_PER_INVOCATION,succeeded:results.filter(x=>x.ok).length,failed:results.filter(x=>!x.ok).length,categorySucceeded:results.filter(x=>x.categoryResult?.ok).length,results,batchResults};
 }
 export async function getLastAiTestResults(){return getState<any>('ai_test_results',{runId:'',startedAt:null,updatedAt:null,prompt:'',total:0,results:[]})}
 class AiResponseError extends Error{constructor(message:string,public detail:any){super(message);detail.error=message}}
