@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.93';
+const APP_VERSION = '9.94';
 const APP_VERSION_DATE = '1405/05/30';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -225,6 +225,215 @@ function app_font_boot(): string {
          . 'window.appFontApply=applyFont;window.appFontCurrent=readFont;' . "\n"
          . 'applyFont(readFont(),false);' . "\n"
          . 'try{window.addEventListener("storage",function(e){if(e&&e.key===KEY)applyFont(readFont(),false);});}catch(e){}' . "\n"
+         . '})();</' . 'script>';
+}
+
+/* ==================================================================
+ *  v9.94: رنگ‌بندی (تم) کلِ برنامه
+ *
+ *  کاربر ۱۰ رنگ‌بندیِ جذاب خواست. رنگ‌های برنامه در ~۲۲۰۰ جای مختلف
+ *  سخت‌کد شده‌اند (هم داخل <style>، هم داخل style=""، هم داخل رشته‌های
+ *  جاوااسکریپت). بازنویسی همهٔ آن‌ها با متغیرِ CSS نه شدنی بود نه امن.
+ *
+ *  راه‌حل: «نگاشتِ پالت در لحظهٔ خروجی».
+ *   ۱) فهرستِ ثابتی از رنگ‌های پایهٔ برنامه داریم (APP_THEME_BASE).
+ *   ۲) هر تم فقط چند عدد است: چرخشِ رنگ‌مایه، ضریبِ اشباع و «روشن/تیره».
+ *      رنگِ تازه با تبدیل HSL از رنگِ پایه ساخته می‌شود؛ پس هیچ رنگی
+ *      جا نمی‌ماند و هماهنگیِ کل رابط حفظ می‌شود.
+ *   ۳) خروجیِ صفحه از یک فیلترِ ob عبور می‌کند و رنگ‌های پایه با strtr
+ *      (یک‌بار پیمایش، کلیدِ بلندتر اولویت دارد) جایگزین می‌شوند.
+ *
+ *  چرا سمتِ سرور؟ چون همین یک نقطه هم CSS، هم style اینلاین و هم
+ *  رنگ‌های داخلِ رشته‌های JS را پوشش می‌دهد و در مرورگر هیچ هزینه‌ای ندارد.
+ *  انتخابِ کاربر در localStorage می‌ماند و با کوکی به سرور می‌رسد.
+ * ================================================================== */
+const APP_THEME_KEY     = 'scraper_theme';
+const APP_THEME_DEFAULT = 'ocean';
+
+/** رنگ‌های پایهٔ برنامه — فقط ۶ و ۸ رقمی. (سه‌رقمی‌ها مثل #fff عمداً نیستند
+ *  تا داخلِ رنگ‌های بلندترِ محتوای کاربر جایگزینیِ اشتباه رخ ندهد.) */
+function app_theme_base_colors(): array {
+    return [
+        '#0e749020','#14532d20','#14532d30','#14532d33','#14532d40','#164e6320','#1e293b80',
+        '#22c55e55','#2e106530','#42200620','#42200630','#4c1d9520','#50072430','#67e8f933',
+        '#78350f30','#7c2d1220','#7c3aed20','#7f1d1d20','#7f1d1d26','#7f1d1d30','#7f1d1d40',
+        '#c2410c20','#04210f','#052e16','#06b6d4','#0891b2','#0b1220','#0c2a4d','#0e4429',
+        '#0e7490','#0f172a','#111c31','#134e4a','#14532d','#14b8a6','#164e63','#166534',
+        '#1a0000','#1c1207','#1d4ed8','#1e1b4b','#1e293b','#1e3a5f','#1e3a8a','#1e40af',
+        '#22c55e','#22d3ee','#2563eb','#2d1b4e','#312e81','#334155','#3b0764','#3b1e1e',
+        '#3b3a1e','#3b82f6','#3f2d05','#422006','#4338ca','#475569','#4ade80','#4c1d95',
+        '#500724','#581c87','#60a5fa','#6366f1','#64748b','#67e8f9','#6b21a8','#6d28d9',
+        '#78350f','#7c2d12','#7c3aed','#7e22ce','#7f1d1d','#818cf8','#831843','#86efac',
+        '#8b5cf6','#93c5fd','#94a3b8','#a5f3fc','#a78bfa','#a855f7','#bbf7d0','#bfdbfe',
+        '#c084fc','#c2410c','#c4b5fd','#cbd5e1','#dc2626','#e2e8f0','#e9d5ff','#ea580c',
+        '#eab308','#ec4899','#ef4444','#f0abfc','#f472b6','#f59e0b','#f87171','#f97316',
+        '#f9a8d4','#facc15','#fb923c','#fbbf24','#fbcfe8','#fca5a5','#fcd34d','#fdba74',
+        '#fde68a','#fecaca',
+    ];
+}
+
+/** #rrggbb یا #rrggbbaa → [h(0..360), s(0..1), l(0..1), alphaHex] */
+function app_theme_hex2hsl(string $hex): array {
+    $h = ltrim($hex, '#');
+    $alpha = strlen($h) === 8 ? substr($h, 6, 2) : '';
+    $r = hexdec(substr($h, 0, 2)) / 255;
+    $g = hexdec(substr($h, 2, 2)) / 255;
+    $b = hexdec(substr($h, 4, 2)) / 255;
+    $mx = max($r, $g, $b); $mn = min($r, $g, $b);
+    $l = ($mx + $mn) / 2; $d = $mx - $mn;
+    if ($d < 1e-9) return [0.0, 0.0, $l, $alpha];
+    $s = $l > 0.5 ? $d / (2 - $mx - $mn) : $d / ($mx + $mn);
+    if ($mx === $r)      $hh = fmod((($g - $b) / $d) + ($g < $b ? 6 : 0), 6);
+    elseif ($mx === $g)  $hh = (($b - $r) / $d) + 2;
+    else                 $hh = (($r - $g) / $d) + 4;
+    return [$hh * 60.0, $s, $l, $alpha];
+}
+
+/** HSL → #rrggbb (+ آلفای دست‌نخورده) */
+function app_theme_hsl2hex(float $h, float $s, float $l, string $alpha = ''): string {
+    $h = fmod(fmod($h, 360) + 360, 360);
+    $s = max(0.0, min(1.0, $s));
+    $l = max(0.0, min(1.0, $l));
+    $c = (1 - abs(2 * $l - 1)) * $s;
+    $x = $c * (1 - abs(fmod($h / 60, 2) - 1));
+    $m = $l - $c / 2;
+    if     ($h <  60) [$r,$g,$b] = [$c,$x,0];
+    elseif ($h < 120) [$r,$g,$b] = [$x,$c,0];
+    elseif ($h < 180) [$r,$g,$b] = [0,$c,$x];
+    elseif ($h < 240) [$r,$g,$b] = [0,$x,$c];
+    elseif ($h < 300) [$r,$g,$b] = [$x,0,$c];
+    else              [$r,$g,$b] = [$c,0,$x];
+    return sprintf('#%02x%02x%02x', (int)round(($r+$m)*255), (int)round(($g+$m)*255), (int)round(($b+$m)*255)) . $alpha;
+}
+
+/**
+ * فهرست رنگ‌بندی‌ها.
+ *  nHue  : رنگ‌مایهٔ خنثی‌ها (پس‌زمینه، کارت، خط، متنِ کم‌رنگ)
+ *  nSat  : ضریبِ اشباعِ خنثی‌ها (۰ = خاکستریِ خالص)
+ *  nLift : تیره‌تر/روشن‌تر کردنِ زمینه‌ها (فقط خنثی‌های تیره؛ متن‌ها دست‌نخورده)
+ *  aRot  : چرخشِ رنگ‌مایهٔ رنگ‌های تأکیدی (سبز/قرمز/زرد/آبی) بر حسب درجه
+ *  aSat  : ضریبِ اشباعِ رنگ‌های تأکیدی
+ *
+ *  چرا همه تیره‌اند؟ چون رنگِ متنِ ~۲۲۰۰ عنصر در همین فایل سخت‌کد است و
+ *  در «تمِ روشن» بخشی از آن‌ها (مثل color:#fff روی input) سفیدِ روی سفید
+ *  می‌شد. به‌جای یک تمِ روشنِ نصفه‌نیمه، ۱۳ رنگ‌بندیِ تیرهٔ واقعاً متفاوت
+ *  داریم که خوانایی‌شان تضمین‌شده است.
+ */
+function app_themes_registry(): array {
+    return [
+        'ocean'    => ['label' => '🌊 اقیانوس شب (پیش‌فرض)', 'nHue' => 217, 'nSat' => 1.00, 'nLift' =>  0.00, 'aRot' =>   0, 'aSat' => 1.00],
+        'midnight' => ['label' => '🌌 نیمه‌شبِ نیلی',          'nHue' => 243, 'nSat' => 1.15, 'nLift' => -0.01, 'aRot' => -18, 'aSat' => 1.05],
+        'emerald'  => ['label' => '🌿 جنگلِ زمردی',            'nHue' => 168, 'nSat' => 0.95, 'nLift' =>  0.00, 'aRot' =>  12, 'aSat' => 1.00],
+        'royal'    => ['label' => '👑 ارغوانِ سلطنتی',         'nHue' => 276, 'nSat' => 1.10, 'nLift' =>  0.00, 'aRot' =>  22, 'aSat' => 1.05],
+        'crimson'  => ['label' => '🍷 یاقوتِ سرخ',             'nHue' => 344, 'nSat' => 1.00, 'nLift' => -0.01, 'aRot' => -14, 'aSat' => 1.00],
+        'amber'    => ['label' => '🥃 کهربای گرم',             'nHue' =>  28, 'nSat' => 0.85, 'nLift' =>  0.00, 'aRot' =>  10, 'aSat' => 1.05],
+        'teal'     => ['label' => '🐬 فیروزهٔ عمیق',           'nHue' => 191, 'nSat' => 1.05, 'nLift' =>  0.00, 'aRot' =>   0, 'aSat' => 1.10],
+        'graphite' => ['label' => '🖤 گرافیتِ خالص',           'nHue' => 220, 'nSat' => 0.00, 'nLift' =>  0.01, 'aRot' =>   0, 'aSat' => 0.88],
+        'rose'     => ['label' => '🌹 رُزگلد',                 'nHue' => 338, 'nSat' => 0.70, 'nLift' =>  0.01, 'aRot' =>  20, 'aSat' => 0.95],
+        'forest'   => ['label' => '🌲 شبِ جنگلِ زیتونی',       'nHue' => 138, 'nSat' => 0.65, 'nLift' =>  0.00, 'aRot' => -10, 'aSat' => 0.95],
+        'oled'     => ['label' => '⚫ سیاهِ مطلق (OLED)',      'nHue' => 220, 'nSat' => 0.30, 'nLift' => -0.06, 'aRot' =>   0, 'aSat' => 1.05],
+        'cyber'    => ['label' => '🛸 سایبرپانکِ نئونی',       'nHue' => 287, 'nSat' => 1.35, 'nLift' => -0.02, 'aRot' =>  34, 'aSat' => 1.20],
+        'nordic'   => ['label' => '❄️ یخِ نوردیک',             'nHue' => 205, 'nSat' => 0.80, 'nLift' =>  0.03, 'aRot' =>  -6, 'aSat' => 0.88],
+    ];
+}
+
+/** آیا این رنگِ پایه «خنثی» است (رمپِ خاکستری-آبیِ رابط)؟ */
+function app_theme_is_neutral(float $h, float $s): bool {
+    if ($s < 0.10) return true;
+    return ($h >= 200 && $h <= 240 && $s <= 0.55);
+}
+
+/** نگاشتِ رنگِ پایه → رنگِ تم (برای strtr). تمِ پیش‌فرض نگاشتِ خالی می‌دهد. */
+function app_theme_map(string $key): array {
+    $themes = app_themes_registry();
+    if (!isset($themes[$key]) || $key === APP_THEME_DEFAULT) return [];
+    $t = $themes[$key];
+    $map = [];
+    foreach (app_theme_base_colors() as $hex) {
+        [$h, $s, $l, $a] = app_theme_hex2hsl($hex);
+        $neutral = app_theme_is_neutral($h, $s);
+        if ($neutral) {
+            $nh = (float)$t['nHue'];
+            $ns = $s * (float)$t['nSat'];
+        } else {
+            $nh = $h + (float)$t['aRot'];
+            $ns = $s * (float)$t['aSat'];
+        }
+        $nl = $l;
+        /* nLift فقط روی خنثی‌های تیره (زمینه/کارت/خط) اثر دارد. متن‌های روشن
+           (l > 0.45) دست نمی‌خورند تا کنتراست هرگز کم نشود. */
+        if ($neutral && $l <= 0.45) $nl = max(0.02, $l + (float)$t['nLift']);
+        $new = app_theme_hsl2hex($nh, $ns, $nl, $a);
+        if ($new !== $hex) $map[$hex] = $new;
+    }
+    return $map;
+}
+
+/** رنگِ پایه را با تمِ داده‌شده ترجمه می‌کند (برای نمونه‌رنگ‌ها) */
+function app_theme_color(string $key, string $hex): string {
+    $map = app_theme_map($key);
+    return $map[$hex] ?? $hex;
+}
+
+/** سه نمونه‌رنگِ هر تم به شکل rgb() — عمداً hex نیست تا فیلترِ خروجی آن را عوض نکند */
+function app_theme_swatches(string $key): array {
+    $out = [];
+    foreach (['#0f172a', '#1e293b', '#3b82f6'] as $c) {
+        $h = ltrim(app_theme_color($key, $c), '#');
+        $out[] = 'rgb(' . hexdec(substr($h, 0, 2)) . ',' . hexdec(substr($h, 2, 2)) . ',' . hexdec(substr($h, 4, 2)) . ')';
+    }
+    return $out;
+}
+
+/** تمِ درخواست جاری — از کوکی خوانده می‌شود (جاوااسکریپت آن را می‌نویسد) */
+function app_theme_current(): string {
+    $k = (string)($_COOKIE[APP_THEME_KEY] ?? '');
+    return isset(app_themes_registry()[$k]) ? $k : APP_THEME_DEFAULT;
+}
+
+/** فیلترِ خروجی — رنگ‌های پایه را به رنگ‌های تم ترجمه می‌کند */
+function app_theme_filter(string $html): string {
+    $map = app_theme_map(app_theme_current());
+    if (!$map) return $html;
+    return strtr($html, $map);
+}
+
+/** بافرِ خروجی را با فیلترِ تم روشن می‌کند (پیش از چاپِ صفحه صدا زده می‌شود) */
+function app_theme_ob_start(): void {
+    if (app_theme_current() === APP_THEME_DEFAULT) return;
+    ob_start('app_theme_filter');
+}
+
+/**
+ * قطعهٔ خودبسندهٔ «راه‌اندازِ تم» برای <head>.
+ * چون ترجمهٔ رنگ‌ها سمتِ سرور انجام می‌شود، این قطعه فقط باید مطمئن شود
+ * کوکی با انتخابِ ذخیره‌شده یکی است؛ اگر نبود یک‌بار (و فقط یک‌بار)
+ * صفحه را تازه می‌کند.
+ */
+function app_theme_boot(): string {
+    $reg = [];
+    foreach (app_themes_registry() as $k => $v) $reg[$k] = ['label' => $v['label']];
+    $json = json_encode($reg, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    return '<script>(function(){' . "\n"
+         . 'var T=' . $json . ',KEY=' . json_encode(APP_THEME_KEY) . ',DEF=' . json_encode(APP_THEME_DEFAULT) . ';' . "\n"
+         . 'window.APP_THEMES=T;window.APP_THEME_KEY=KEY;window.APP_THEME_DEFAULT=DEF;' . "\n"
+         . 'function readTheme(){try{var v=localStorage.getItem(KEY);return (v&&T[v])?v:DEF;}catch(e){return DEF;}}' . "\n"
+         . 'function cookieTheme(){var m=(document.cookie||"").match(new RegExp("(?:^|; )"+KEY+"=([^;]*)"));return m?decodeURIComponent(m[1]):"";}' . "\n"
+         . 'function writeCookie(k){try{document.cookie=KEY+"="+encodeURIComponent(k)+";path=/;max-age=31536000;samesite=Lax";}catch(e){}}' . "\n"
+         . 'function applyTheme(k,save){' . "\n"
+         . '  if(!T[k])k=DEF;' . "\n"
+         . '  if(save){try{localStorage.setItem(KEY,k);}catch(e){}}' . "\n"
+         . '  writeCookie(k);' . "\n"
+         . '  try{document.documentElement.setAttribute("data-theme",k);' . "\n"
+         . '      document.documentElement.style.colorScheme="dark";}catch(e){}' . "\n"
+         . '  window.APP_THEME_CURRENT=k;return k;}' . "\n"
+         . 'window.appThemeApply=applyTheme;window.appThemeCurrent=readTheme;' . "\n"
+         . 'var want=readTheme(),have=cookieTheme();' . "\n"
+         . 'applyTheme(want,false);' . "\n"
+         . '/* رنگ‌ها سمتِ سرور جاسازی می‌شوند؛ اگر کوکی عقب بود یک‌بار رفرش لازم است */' . "\n"
+         . 'if(want!==have){var G="__thm_reload";try{if(!sessionStorage.getItem(G)){sessionStorage.setItem(G,"1");location.reload();return;}}catch(e){}}' . "\n"
+         . 'else{try{sessionStorage.removeItem("__thm_reload");}catch(e){}}' . "\n"
+         . 'try{window.addEventListener("storage",function(e){if(e&&e.key===KEY){applyTheme(readTheme(),false);location.reload();}});}catch(e){}' . "\n"
          . '})();</' . 'script>';
 }
 
@@ -1311,6 +1520,124 @@ function aiModelKey(string $s): string {
     if (preg_match('~^\[([^]]+)\]\(([^)]+)\)$~', $s, $m)) $s = $m[1];
     return $s;
 }
+/* =====================================================================
+ *  v9.94: مدل‌های «استدلالی» (reasoning)
+ *
+ *  گزارش کاربر: مدلِ رایگانِ استدلالیِ Together AI (و بقیهٔ مدل‌های
+ *  استدلالی) در «تست مدل‌ها» پاسخ می‌دادند ولی در «دسته‌بندی» و
+ *  «پاسخ به مشتری» هیچ‌وقت جواب نمی‌دادند.
+ *
+ *  دو علتِ واقعی:
+ *   ۱) سقفِ توکن. دسته‌بندی max_tokens=20 و پاسخ به مشتری 160 می‌فرستاد.
+ *      مدلِ استدلالی اول کلِ بودجه را صرفِ «فکر کردن» می‌کند و به content
+ *      نمی‌رسد؛ پس رشتهٔ خالی برمی‌گشت. (تستِ مدل‌ها ۳۰۰ می‌فرستاد و
+ *      به همین دلیل کار می‌کرد.)
+ *   ۲) استخراجِ متن. سه مسیرِ تولیدی مستقیماً
+ *      choices[0].message.content را می‌خواندند و فیلدهای
+ *      reasoning / reasoning_content را نمی‌دیدند — برخلاف aiExtractText.
+ *
+ *  حل: هر دو مسیر از aiExtractText عبور می‌کنند، سقفِ توکن برای مدلِ
+ *  استدلالی چند برابر می‌شود، و متنِ «فکر کردن» پیش از استفاده تمیز
+ *  می‌شود. تشخیص خودکار است ولی کاربر هم می‌تواند دستی تیک بزند.
+ * ===================================================================== */
+
+/** الگوهای نامِ مدل‌های استدلالیِ شناخته‌شده */
+function aiReasoningPatterns(): array {
+    return ['deepseek-r1', 'deepseek-reason', 'qwq', 'qwen3', 'qwen-3', 'thinking', 'think',
+            'reasoner', 'reasoning', 'gpt-oss', 'o1-', 'o3-', 'o4-', 'magistral', 'phi-4-reasoning',
+            'nemotron', 'skywork-o1', 'marco-o1', 'sky-t1', 'exaone-deep', 'r1-distill'];
+}
+
+/**
+ * آیا این مدل استدلالی است؟
+ * اولویت با تیکِ دستیِ کاربر ($m['reasoning']) است؛ اگر تیک نخورده باشد
+ * از روی نامِ مدل حدس می‌زنیم.
+ */
+function aiIsReasoningModel(?array $m, string $modelId = ''): bool {
+    if (is_array($m)) {
+        if (array_key_exists('reasoning', $m)) return !empty($m['reasoning']);
+        if ($modelId === '') $modelId = (string)($m['id'] ?? '');
+    }
+    $low = strtolower(trim($modelId));
+    if ($low === '') return false;
+    foreach (aiReasoningPatterns() as $kw) if (strpos($low, $kw) !== false) return true;
+    return false;
+}
+
+/** ردیفِ مدل را داخل ارائه‌دهنده پیدا می‌کند */
+function aiFindModelRow(?array $p, string $modelId): ?array {
+    if (!is_array($p)) return null;
+    foreach ((array)($p['models'] ?? []) as $m) {
+        if (is_array($m) && (string)($m['id'] ?? '') === $modelId) return $m;
+    }
+    return null;
+}
+
+/**
+ * سقفِ توکن را برای مدل‌های استدلالی بزرگ می‌کند.
+ * مدلِ عادی همان عددِ قبلی را می‌گیرد تا رفتار و هزینه‌اش تغییر نکند.
+ */
+function aiReasoningBudget(int $want, bool $isReasoning): int {
+    if (!$isReasoning) return $want;
+    return max(768, $want * 8);
+}
+
+/**
+ * بلوکِ «فکر کردن» را از متنِ مدلِ استدلالی جدا می‌کند.
+ * خیلی از مدل‌ها زنجیرهٔ فکر را داخل <think>…</think> می‌گذارند و بعد
+ * جوابِ نهایی را می‌نویسند؛ اگر پاک نشود، پاسخِ مشتری پر از فکرِ مدل
+ * می‌شود و دسته‌بندی هم اولین عددِ داخلِ فکر را برمی‌دارد.
+ */
+function aiStripReasoning(string $text): string {
+    $t = $text;
+    // بلوکِ کاملِ فکر
+    $t = preg_replace('~<(think|thinking|reasoning|thought)>.*?</\1>~is', ' ', $t) ?? $t;
+    // بلوکِ بازِ بدونِ بسته (وقتی توکن تمام شده) — هرچه بعدش آمده فکر است
+    $t = preg_replace('~<(think|thinking|reasoning|thought)>.*$~is', ' ', $t) ?? $t;
+    // بلوکِ بسته بدونِ باز (وقتی سرویس تگِ باز را جدا فرستاده)
+    if (preg_match('~</(?:think|thinking|reasoning|thought)>~i', $t)) {
+        $t = preg_replace('~^.*</(?:think|thinking|reasoning|thought)>~is', '', $t) ?? $t;
+    }
+    // نشانه‌های متنیِ رایج
+    $t = preg_replace('~^\s*(?:Thought|Reasoning|Analysis|Final Answer)\s*:\s*~i', '', $t) ?? $t;
+    return trim($t);
+}
+
+/**
+ * v9.94: شناسهٔ دسته را از متنِ پاسخ بیرون می‌کشد.
+ *
+ * مدلِ غیراستدلالی فقط یک عدد می‌نویسد. مدلِ استدلالی گاهی چند شناسه را
+ * بلند بلند بررسی می‌کند و «انتخابِ نهایی» ته متن می‌آید؛ پس اگر بیش از
+ * یک عدد دیدیم، آخری را برمی‌داریم. اگر جمله‌ای مثل «ID: 1234» یا
+ * «answer is 1234» بود، همان اولویت دارد.
+ */
+function aiPickCategoryId(string $text): int {
+    $t = trim($text);
+    if ($t === '') return 0;
+    // الگوهای صریحِ «جوابِ نهایی»
+    if (preg_match('~(?:final(?:\s+answer)?|answer|category(?:\s*id)?|id)\s*[:=]?\s*#?(\d{2,})~i', $t, $m)) {
+        return (int)$m[1];
+    }
+    if (!preg_match_all('/\d+/', $t, $mm) || empty($mm[0])) return 0;
+    // شناسه‌های دسته چندرقمی‌اند؛ عددهای تک‌رقمیِ داخلِ توضیح را نادیده بگیر
+    $big = array_values(array_filter($mm[0], fn($n) => strlen($n) >= 2));
+    $pick = $big ? end($big) : end($mm[0]);
+    return (int)$pick;
+}
+
+/**
+ * متنِ مفیدِ پاسخ را از بدنه بیرون می‌کشد — نسخهٔ آگاه به مدل استدلالی.
+ * اول aiExtractText (که همهٔ شکل‌های پاسخ را می‌شناسد) و بعد پاکسازیِ فکر.
+ * اگر بعد از پاکسازی چیزی نماند، خودِ متنِ خام برگردانده می‌شود تا
+ * دست‌کم چیزی برای نمایش/تطبیق وجود داشته باشد.
+ */
+function aiExtractAnswer($body): string {
+    $raw = trim(aiExtractText($body));
+    if ($raw === '') return '';
+    $clean = aiStripReasoning($raw);
+    return $clean !== '' ? $clean : $raw;
+}
+
 /**
  * آدرس «chat/completions» یک ارائه‌دهنده را می‌سازد.
  * همهٔ فرمت‌ها OpenAI-compatible اند به‌جز Cloudflare که native است.
@@ -1588,6 +1915,13 @@ function aiExtractText($body): string {
 
 function aiProviderCall(array $p, string $model, array $payload, ?array $net = null): array {
     if ($net === null) $net = aiNetCfg();
+    /* v9.94: اگر مدل استدلالی است، سقفِ توکن را همین‌جا (یک نقطهٔ مشترک برای
+       همهٔ مسیرها: دسته‌بندی، پاسخ مشتری، تستِ مدل‌ها) بزرگ می‌کنیم. بدون این،
+       مدل کلِ بودجه را صرفِ «فکر کردن» می‌کند و content خالی برمی‌گردد. */
+    if (isset($payload['max_tokens'])) {
+        $isR = aiIsReasoningModel(aiFindModelRow($p, $model), $model);
+        $payload['max_tokens'] = aiReasoningBudget((int)$payload['max_tokens'], $isR);
+    }
     $ep = aiProviderEndpoint($p, $model);
     if ($ep['kind'] === 'cloudflare') return aiCloudflareCall($p, $model, $payload, $net);
     $apiKey = trim((string)($p['apiKey'] ?? ''));
@@ -1852,9 +2186,8 @@ function aiCandidateCategory(array $p, string $model, string $title, array $cats
         if (!empty($r['cf_error'])) $err = $r['cf_error'];
         return ['ok' => false, 'category_id' => 0, 'category_name' => '', 'ai_text' => '', 'error' => mb_substr((string)$err, 0, 160), 'latency' => $lat, 'model' => $model];
     }
-    $text = trim(aiExtractText($r['body'] ?? []));   // v9.54: استخراج مقاوم
-    $id = 0;
-    if (preg_match('/\d+/', $text, $m)) $id = (int)$m[0];
+    $text = aiExtractAnswer($r['body'] ?? []);   // v9.54: استخراج مقاوم · v9.94: بدون بلوکِ فکر
+    $id = aiPickCategoryId($text);
     $id = findLeafCategory($id, $cats);
     $valid = false; $name = '';
     foreach ($cats as $c) { if ((int)$c['id'] === $id) { $valid = true; $name = $c['name']; break; } }
@@ -1891,7 +2224,7 @@ function aiCandidateReply(array $p, string $model, string $text, ?int $timeoutSe
     $lat = (int)round((microtime(true) - $t0) * 1000);
     if (empty($r['ok'])) return ['ok' => false, 'text' => '', 'error' => mb_substr((string)($r['error'] ?? 'خطا'), 0, 120), 'latency' => $lat, 'model' => $model];
     $body = $r['body'] ?? [];
-    $reply = trim(aiExtractText($body));   // v9.54: استخراج مقاوم
+    $reply = aiExtractAnswer($body);   // v9.54: استخراج مقاوم · v9.94: بدون بلوکِ فکر
     if ($reply === '') return ['ok' => false, 'text' => '', 'error' => 'پاسخ خالی از مدل', 'latency' => $lat, 'model' => $model];
     $reply = preg_replace('/\s+/u', ' ', $reply);
     $modelName = (string)($body['model'] ?? $model);
@@ -1928,6 +2261,10 @@ function aiNormalizeProviders($raw): array {
                 'available'      => !empty($m['available']),
                 'rateLimited'    => !empty($m['rateLimited']),
             ];
+            /* v9.94: تیکِ دستیِ «این مدل استدلالی است».
+               فقط وقتی ذخیره می‌شود که کاربر واقعاً تصمیم گرفته باشد؛
+               اگر کلید نباشد، تشخیص خودکار از روی نامِ مدل کار می‌کند. */
+            if (array_key_exists('reasoning', $m)) $models[count($models) - 1]['reasoning'] = !empty($m['reasoning']);
             if (!empty($m['testDetails'])) $models[count($models) - 1]['testDetails'] = $m['testDetails'];
         }
         $out[$id] = [
@@ -1963,6 +2300,9 @@ function aiProvidersSummary(): array {
                 return ['id' => $m['id'], 'name' => $m['name'] ?? $m['id'],
                         'tested' => !empty($m['tested']), 'available' => !empty($m['available']),
                         'rateLimited' => !empty($m['rateLimited']), 'toolCalling' => !empty($m['toolCalling']),
+                        // v9.94: وضعیت استدلالی + اینکه دستی تعیین شده یا خودکار
+                        'reasoning' => aiIsReasoningModel($m),
+                        'reasoningManual' => array_key_exists('reasoning', $m),
                         'latency' => (int)($m['testDetails']['latencyMs'] ?? 0)];
             }, $p['models'] ?? []),
         ];
@@ -5661,7 +6001,9 @@ $script = str_replace('id="__ver" style="opacity:.65">',
 
 /* v9.93: فونتِ انتخابیِ کاربر روی نوارها و پاپ‌آپِ خودِ ما هم اعمال شود.
    فقط متغیر --app-font تعریف می‌شود؛ CSS خودِ سایتِ مقصد دست نمی‌خورد. */
-$script = app_font_boot() . $script;
+/* v9.94: رنگ‌بندی هم فقط روی نوار/پاپ‌آپِ خودِ ما ترجمه می‌شود، نه روی
+   HTMLِ سایتِ مقصد (وگرنه ظاهرِ سایتِ مبدأ به‌هم می‌ریخت). */
+$script = app_theme_filter(app_font_boot() . $script);
 $html = preg_replace('~</body>~i', $script . '</body>', $html);
 if (stripos($html, '</body>') === false) $html .= $script;
 
@@ -6510,7 +6852,9 @@ $script = preg_replace_callback(
 
 /* v9.93: فونتِ انتخابیِ کاربر روی نوارها و پاپ‌آپِ خودِ ما هم اعمال شود.
    فقط متغیر --app-font تعریف می‌شود؛ CSS خودِ سایتِ مقصد دست نمی‌خورد. */
-$script = app_font_boot() . $script;
+/* v9.94: رنگ‌بندی هم فقط روی نوار/پاپ‌آپِ خودِ ما ترجمه می‌شود، نه روی
+   HTMLِ سایتِ مقصد (وگرنه ظاهرِ سایتِ مبدأ به‌هم می‌ریخت). */
+$script = app_theme_filter(app_font_boot() . $script);
 $html = preg_replace('~</body>~i', $script . '</body>', $html);
 if (stripos($html, '</body>') === false) $html .= $script;
 
@@ -13269,9 +13613,12 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'choices[0].text') !== false
          && strpos($selfSrc, 'output_text') !== false
          && strpos($selfSrc, 'output.choices[0].text') !== false);
+    /* v9.94: هر دو مسیر حالا از aiExtractAnswer (پوششِ aiExtractText + حذفِ
+       بلوکِ «فکر کردن») عبور می‌کنند تا مدل‌های استدلالی هم جواب بدهند. */
     $add('9.54', 'تستِ مدل‌ها و دسته‌بندی از aiExtractText استفاده می‌کنند',
-         strpos($selfSrc, '$response = $ok ? aiExtractText($body) : \'\'') !== false
-         && strpos($selfSrc, 'trim(aiExtractText($r[\'body\'] ?? []))') !== false);
+         strpos($selfSrc, '$response = $ok ? aiExtract' . 'Answer($body) : \'\'') !== false
+         && strpos($selfSrc, '$text = aiExtract' . 'Answer($r[\'body\'] ?? [])') !== false
+         && strpos($selfSrc, 'trim(aiExtract' . 'Text($body))') !== false);
 
     /* ---------- v9.55: افزودن انبوهِ مدل‌های در دسترس + حذف انتخابی کاندیدها ---------- */
     $add('9.55', 'دکمهٔ «افزودن همهٔ مدل‌های در دسترس به کاندیدها»',
@@ -13648,7 +13995,7 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'document.documentElement.style.setProperty("--app-font",f.stack)') !== false
       && strpos($selfSrc, '<style id="appFontVars">:root{--app-font:') !== false);
     $add('9.93', 'فونت پیش از رندر اعمال می‌شود (بدون پرشِ فونت)',
-         strpos($selfSrc, '<?= app_font_' . 'boot() ?>' . "\n" . '<style>') !== false
+         strpos($selfSrc, '<?= app_font_' . 'boot() ?>' . "\n" . '<?= app_theme_' . 'boot() ?>') !== false
       && strpos($selfSrc, 'applyFont(readFont(),false);') !== false);
     $add('9.93', 'فایل فونت تنبل بارگذاری می‌شود (فقط فونتِ انتخاب‌شده)',
          strpos($selfSrc, 'if(f.css){var lid="appFontLink_"+k;') !== false
@@ -13662,7 +14009,7 @@ if (isset($_GET['selftest'])) {
     $add('9.93', 'تغییر فونت در یک تب، تب‌ها و iframeهای باز را هم به‌روز می‌کند',
          strpos($selfSrc, 'window.addEventListener("storage",function(e){if(e&&e.key===KEY)applyFont(readFont(),false);})') !== false);
     $add('9.93', 'صفحهٔ پیش‌نمایش/انتخابگر هم راه‌اندازِ فونت را تزریق می‌کند',
-         substr_count($selfSrc, '$script = app_font_' . 'boot() . $script;') === 2);
+         substr_count($selfSrc, '$script = app_theme_filter(app_font_' . 'boot() . $script);') === 2);
     $add('9.93', 'کشویی فونت در زیربخش «📱 نمایش» تنظیمات عمومی هست',
          strpos($selfSrc, 'id="appFontSel" onchange="setAppFont(this.value)"') !== false
       && strpos($selfSrc, 'foreach (app_fonts_registry() as $fk => $fv)') !== false);
@@ -13673,6 +14020,233 @@ if (isset($_GET['selftest'])) {
     $add('9.93', 'کشویی بعد از لود با فونتِ ذخیره‌شده هم‌تراز می‌شود',
          strpos($selfSrc, 'function initAppFontPref()') !== false
       && strpos($selfSrc, 'try{ initAppFontPref(); }catch(e){}') !== false);
+
+    /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
+    $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
+         strpos($selfSrc, '.hamburger-btn,.fullwidth-btn' . '{z-index:10050}') !== false
+      && (function () {
+             // z-index دکمه‌ها باید از پنل (9999) و اورلی (9998) بیشتر باشد
+             return 10050 > 9999 && 10050 > 9998;
+         })());
+    $add('9.94', 'وقتی منو باز است، body کلاس spanel-open می‌گیرد',
+         substr_count($selfSrc, "document.body.classList.add('spanel-" . "open')") === 1
+      && substr_count($selfSrc, "document.body.classList.remove('spanel-" . "open')") === 1);
+    $add('9.94', 'سربخشِ هر آیتمِ منو چسبان است و زیرِ سربرگِ پنل می‌نشیند',
+         strpos($selfSrc, '.settings-panel .smenu-hdr' . '{position:sticky;top:var(--spanel-head-h,58px)') !== false
+      && strpos($selfSrc, '.settings-panel-head{position:sticky;top:0;z-index:6') !== false);
+    $add('9.94', 'سربخش‌های تودرتو پله‌ای زیرِ هم می‌چسبند (۳ سطح)',
+         strpos($selfSrc, '.settings-panel .smenu-body .smenu-hdr{top:calc(var(--spanel-head-h,58px) + var(--smenu-hdr-h,46px))') !== false
+      && strpos($selfSrc, 'var(--smenu-hdr-h,46px) * 2') !== false
+      && strpos($selfSrc, 'var(--smenu-hdr-h,46px) * 3') !== false);
+    $add('9.94', 'ارتفاعِ سربرگ و سربخش با جاوااسکریپت اندازه گرفته می‌شود',
+         strpos($selfSrc, 'function syncSmenuSticky' . 'Offsets()') !== false
+      && strpos($selfSrc, "p.style.setProperty('--spanel-head-h',hh+'px')") !== false
+      && strpos($selfSrc, "p.style.setProperty('--smenu-hdr-h',sh+'px')") !== false);
+    $add('9.94', 'بعد از باز شدنِ آکاردئون، سقفِ ارتفاع برداشته می‌شود',
+         strpos($selfSrc, '.smenu-body.open.smenu-done' . '{max-height:none;overflow:visible}') !== false
+      && strpos($selfSrc, "body.classList.add('smenu-done')") !== false
+      && strpos($selfSrc, "body.classList.remove('smenu-done')") !== false);
+
+    /* ---------- v9.94 (۸ج): رنگ‌بندی (تم) کلِ برنامه ---------- */
+    $add('9.94', 'حداقل ۱۰ رنگ‌بندی تعریف شده و هرکدام برچسب دارند',
+         (function () {
+             $th = app_themes_registry();
+             if (count($th) < 10) return false;
+             foreach ($th as $k => $v) {
+                 if (trim((string)($v['label'] ?? '')) === '') return false;
+                 foreach (['nHue', 'nSat', 'nLift', 'aRot', 'aSat'] as $f) {
+                     if (!array_key_exists($f, $v)) return false;
+                 }
+             }
+             return isset($th[APP_THEME_DEFAULT]);
+         })());
+    $add('9.94', 'هر رنگ‌بندی واقعاً رنگِ متفاوتی تولید می‌کند (تکراری نیست)',
+         (function () {
+             $seen = [];
+             foreach (array_keys(app_themes_registry()) as $k) {
+                 $sig = implode('|', app_theme_swatches($k));
+                 if (isset($seen[$sig])) return false;
+                 $seen[$sig] = 1;
+             }
+             return count($seen) === count(app_themes_registry());
+         })());
+    $add('9.94', 'تبدیل hex↔HSL برگشت‌پذیر است (رنگ خراب نمی‌شود)',
+         (function () {
+             foreach (['#0f172a', '#e2e8f0', '#22c55e', '#f87171', '#7f1d1d20'] as $hex) {
+                 [$h, $s, $l, $a] = app_theme_hex2hsl($hex);
+                 if (app_theme_hsl2hex($h, $s, $l, $a) !== $hex) return false;
+             }
+             return true;
+         })());
+    $add('9.94', 'آلفای رنگ‌های هشت‌رقمی در ترجمهٔ تم حفظ می‌شود',
+         (function () {
+             $map = app_theme_map('royal');
+             foreach (['#7f1d1d20', '#14532d30', '#1e293b80'] as $hex) {
+                 if (!isset($map[$hex])) continue;
+                 if (strlen($map[$hex]) !== 9) return false;
+                 if (substr($map[$hex], -2) !== substr($hex, -2)) return false;
+             }
+             return true;
+         })());
+    /* تمِ پیش‌فرض باید نگاشتِ خالی بدهد؛ و فیلتر باید دقیقاً همان رفتار را
+       داشته باشد — وقتی تمِ جاری پیش‌فرض است دست نزند، و وقتی نیست عوض کند. */
+    $add('9.94', 'تمِ پیش‌فرض هیچ رنگی را عوض نمی‌کند (خروجی دست‌نخورده)',
+         app_theme_map(APP_THEME_DEFAULT) === []
+      && strtr('background:#0f172a', app_theme_map(APP_THEME_DEFAULT)) === 'background:#0f172a'
+      && (app_theme_current() === APP_THEME_DEFAULT
+            ? app_theme_filter('background:#0f172a') === 'background:#0f172a'
+            : app_theme_filter('background:#0f172a') !== 'background:#0f172a'));
+    $add('9.94', 'همهٔ رنگ‌های پایه در فهرست هستند و خروجیِ معتبر می‌دهند',
+         (function () {
+             $base = app_theme_base_colors();
+             if (count($base) < 100) return false;
+             foreach ($base as $c) {
+                 if (!preg_match('~^#(?:[0-9a-f]{6}|[0-9a-f]{8})$~', $c)) return false;
+             }
+             return count($base) === count(array_unique($base));
+         })());
+    $add('9.94', 'کنتراستِ متنِ اصلی روی زمینه در همهٔ تم‌ها حفظ می‌شود',
+         (function () {
+             $lum = function (string $hex): float {
+                 $h = ltrim($hex, '#');
+                 $f = function ($v) { $v /= 255; return $v <= 0.03928 ? $v / 12.92 : pow(($v + 0.055) / 1.055, 2.4); };
+                 return 0.2126 * $f(hexdec(substr($h, 0, 2))) + 0.7152 * $f(hexdec(substr($h, 2, 2))) + 0.0722 * $f(hexdec(substr($h, 4, 2)));
+             };
+             foreach (array_keys(app_themes_registry()) as $k) {
+                 $bg = app_theme_color($k, '#0f172a');
+                 $fg = app_theme_color($k, '#e2e8f0');
+                 $a = $lum($bg); $b = $lum($fg);
+                 $ratio = (max($a, $b) + 0.05) / (min($a, $b) + 0.05);
+                 if ($ratio < 7.0) return false;   // AAA برای متنِ معمولی
+             }
+             return true;
+         })());
+    $add('9.94', 'زمینهٔ همهٔ تم‌ها تیره می‌ماند (متنِ سفیدِ سخت‌کد خوانا بماند)',
+         (function () {
+             foreach (array_keys(app_themes_registry()) as $k) {
+                 foreach (['#0f172a', '#1e293b', '#334155', '#475569'] as $c) {
+                     [, , $l, ] = app_theme_hex2hsl(app_theme_color($k, $c));
+                     if ($l > 0.45) return false;
+                 }
+             }
+             return true;
+         })());
+    $add('9.94', 'ترجمهٔ رنگ‌ها روی خروجی صفحه اعمال می‌شود (بافرِ خروجی)',
+         strpos($selfSrc, 'function app_theme_ob_' . 'start(): void') !== false
+      && strpos($selfSrc, "ob_start('app_theme_" . "filter')") !== false
+      && substr_count($selfSrc, 'app_theme_ob_' . 'start();') >= 2);
+    $add('9.94', 'انتخاب تم در localStorage و کوکی ذخیره می‌شود',
+         strpos($selfSrc, "const APP_THEME_KEY     = 'scraper_' . 'theme'") !== false
+      && strpos($selfSrc, 'localStorage.setItem(KEY,k)') !== false
+      && strpos($selfSrc, 'document.cookie=KEY+"="+encodeURIComponent(k)+";path=/;max-age=31536000;samesite=Lax"') !== false);
+    $add('9.94', 'راه‌اندازِ تم در <head> هر سه صفحه تزریق می‌شود',
+         strpos($selfSrc, 'function app_theme_' . 'boot(): string') !== false
+      && strpos($selfSrc, '<?= app_theme_' . 'boot() ?>') !== false
+      && strpos($selfSrc, "app_font_boot() . app_theme_" . "boot() . '</head>") !== false);
+    $add('9.94', 'اگر کوکی با انتخابِ ذخیره‌شده یکی نبود، فقط یک‌بار رفرش می‌شود',
+         strpos($selfSrc, 'if(want!==have){var G="__thm_reload";') !== false
+      && strpos($selfSrc, 'sessionStorage.getItem(G)') !== false);
+    $add('9.94', 'تغییر تم در یک تب، تب‌های دیگر را هم به‌روز می‌کند',
+         strpos($selfSrc, 'window.addEventListener("storage",function(e){if(e&&e.key===KEY){applyTheme(readTheme(),false);location.reload();}})') !== false);
+    $add('9.94', 'تمِ ناشناخته به پیش‌فرض برمی‌گردد (سمت سرور و سمت مرورگر)',
+         app_theme_map('__no_such_theme__') === []
+      && strpos($selfSrc, 'if(!T[k])k=DEF;') !== false
+      && strpos($selfSrc, 'return isset(app_themes_registry()[$k]) ? $k : APP_THEME_DEFAULT;') !== false);
+    $add('9.94', 'کشویی و کارت‌های نمونه‌رنگ در «📱 نمایش» تنظیمات عمومی هستند',
+         strpos($selfSrc, 'id="appThemeSel" onchange="setAppTheme(this.value)"') !== false
+      && strpos($selfSrc, 'foreach (app_themes_registry() as $tk => $tv)') !== false
+      && strpos($selfSrc, 'id="appThemeGrid"') !== false);
+    $add('9.94', 'نمونه‌رنگ‌ها با rgb() چاپ می‌شوند تا فیلترِ تم آن‌ها را عوض نکند',
+         strpos($selfSrc, 'function app_theme_' . 'swatches(string $key): array') !== false
+      && (function () {
+             foreach (app_theme_swatches('royal') as $s) {
+                 if (strpos($s, 'rgb(') !== 0) return false;
+                 if (strpos($s, '#') !== false) return false;
+             }
+             return true;
+         })());
+    $add('9.94', 'کشویی و کارت‌ها بعد از لود با تمِ ذخیره‌شده هم‌تراز می‌شوند',
+         strpos($selfSrc, 'function initAppThemePref()') !== false
+      && strpos($selfSrc, 'function syncAppThemeUI(k)') !== false
+      && strpos($selfSrc, 'try{ initAppThemePref(); }catch(e){}') !== false);
+    $add('9.94', 'صفحهٔ پیش‌نمایش/انتخابگر هم رنگ‌بندی را می‌گیرد',
+         substr_count($selfSrc, 'app_theme_filter(app_font_' . 'boot() . $script)') === 2);
+
+    /* ---------- v9.94 (۸د): مدل‌های استدلالی در دسته‌بندی و پاسخ به مشتری ---------- */
+    $add('9.94', 'مدل‌های استدلالیِ شناخته‌شده خودکار تشخیص داده می‌شوند',
+         aiIsReasoningModel(null, 'deepseek-ai/DeepSeek-R1')
+      && aiIsReasoningModel(null, 'Qwen/QwQ-32B-Preview')
+      && aiIsReasoningModel(null, 'openai/gpt-oss-120b')
+      && aiIsReasoningModel(null, 'nvidia/Llama-3.1-Nemotron-70B')
+      && !aiIsReasoningModel(null, 'meta-llama/Llama-3.3-70B-Instruct-Turbo')
+      && !aiIsReasoningModel(null, 'mistralai/Mixtral-8x7B-Instruct-v0.1'));
+    $add('9.94', 'تیکِ دستی بر تشخیصِ خودکار اولویت دارد (هر دو جهت)',
+         aiIsReasoningModel(['id' => 'some-plain-model', 'reasoning' => true])
+      && !aiIsReasoningModel(['id' => 'deepseek-r1', 'reasoning' => false])
+      && aiIsReasoningModel(['id' => 'deepseek-r1'])
+      && !aiIsReasoningModel(['id' => 'llama-3-8b']));
+    $add('9.94', 'سقفِ توکنِ مدلِ استدلالی بزرگ می‌شود، مدلِ عادی دست‌نخورده می‌ماند',
+         aiReasoningBudget(20, false) === 20
+      && aiReasoningBudget(160, false) === 160
+      && aiReasoningBudget(300, false) === 300
+      && aiReasoningBudget(20, true) >= 768
+      && aiReasoningBudget(160, true) === 1280
+      && aiReasoningBudget(300, true) === 2400);
+    $add('9.94', 'سقفِ توکن در یک نقطهٔ مشترک اعمال می‌شود (aiProviderCall)',
+         strpos($selfSrc, "\$payload['max_tokens'] = aiReasoning" . "Budget((int)\$payload['max_tokens'], \$isR);") !== false
+      && strpos($selfSrc, 'function aiFindModel' . 'Row(?array $p, string $modelId): ?array') !== false);
+    $add('9.94', 'بلوکِ <think> از پاسخ جدا می‌شود',
+         aiStripReasoning('<think>بگذار فکر کنم…</think>سلام، بله موجود است.') === 'سلام، بله موجود است.'
+      && aiStripReasoning('<thinking>x</thinking> 1234') === '1234'
+      && aiStripReasoning('پاسخِ ساده') === 'پاسخِ ساده');
+    $add('9.94', 'بلوکِ فکرِ نیمه‌کاره یا بی‌سرِ فکر هم پاک می‌شود',
+         aiStripReasoning('مقدمه </think> جوابِ نهایی') === 'جوابِ نهایی'
+      && aiStripReasoning('<think>هنوز دارم فکر می‌کنم و توکن تمام شد') === '');
+    $add('9.94', 'اگر بعد از پاکسازی چیزی نماند، متنِ خام برمی‌گردد',
+         aiExtractAnswer(['choices' => [['message' => ['content' => '<think>فقط فکر</think>']]]]) === '<think>فقط فکر</think>'
+      && aiExtractAnswer(['choices' => [['message' => ['content' => '<think>فکر</think>پاسخ']]]]) === 'پاسخ');
+    $add('9.94', 'فیلدِ reasoning_content مدل‌های استدلالی هم خوانده می‌شود',
+         aiExtractAnswer(['choices' => [['message' => ['content' => '', 'reasoning_content' => 'دستهٔ ۱۲۳۴']]]]) === 'دستهٔ ۱۲۳۴'
+      && aiExtractAnswer(['choices' => [['message' => ['content' => '', 'reasoning' => 'سلام']]]]) === 'سلام');
+    $add('9.94', 'شناسهٔ دسته از متنِ پرحرفِ مدلِ استدلالی درست بیرون کشیده می‌شود',
+         aiPickCategoryId('1234') === 1234
+      && aiPickCategoryId('بررسی 1111 و 2222، انتخاب نهایی: 3333') === 3333
+      && aiPickCategoryId('Final answer: 4567 چون این محصول عطر است') === 4567
+      && aiPickCategoryId('هیچ عددی ندارد') === 0);
+    $add('9.94', 'دسته‌بندی (هر دو مسیر) از استخراجِ آگاه به استدلال استفاده می‌کند',
+         substr_count($selfSrc, '$aiCatId=aiPick' . 'CategoryId($aiText);') === 2
+      && substr_count($selfSrc, "\$aiText=aiExtract" . "Answer(\$rData);") === 3
+      && strpos($selfSrc, "\$aiText=trim(\$rData['choi" . "ces'][0]['message']['content']??'')") === false);
+    $add('9.94', 'پاسخ خودکار به مشتری هم دیگر content خام را مستقیم نمی‌خواند',
+         strpos($selfSrc, "\$reply = trim((string)(\$body['choi" . "ces'][0]['message']['content'] ?? ''))") === false
+      && substr_count($selfSrc, '$reply = aiExtract' . 'Answer($body);') === 2);
+    $add('9.94', 'اندپوینتِ تیکِ دستیِ «مدل استدلالی» وجود دارد',
+         strpos($selfSrc, "=== 'ai_toggle_" . "reasoning'") !== false
+      && strpos($selfSrc, "\$providers[\$pid]['models'][\$i]['reasoning'] = \$on;") !== false);
+    $add('9.94', 'فیلد reasoning در نرمال‌سازی و خلاصهٔ ارائه‌دهنده‌ها حفظ می‌شود',
+         strpos($selfSrc, "if (array_key_exists('reasoning', \$m)) \$models[count(\$models) - 1]['reasoning'] = !empty(\$m['reasoning']);") !== false
+      && strpos($selfSrc, "'reasoning' => aiIsReasoning" . "Model(\$m),") !== false
+      && strpos($selfSrc, "'reasoningManual' => array_key_exists('reasoning', \$m),") !== false);
+    $add('9.94', 'نرمال‌سازی، تیکِ دستی را گم نمی‌کند و تشخیصِ خودکار را خراب نمی‌کند',
+         (function () {
+             $raw = ['tg' => ['id' => 'tg', 'name' => 'Together', 'models' => [
+                 ['id' => 'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free'],
+                 ['id' => 'plain-model', 'reasoning' => true],
+                 ['id' => 'qwq-32b', 'reasoning' => false],
+             ]]];
+             $out = aiNormalizeProviders($raw);
+             $m = $out['tg']['models'] ?? [];
+             if (count($m) !== 3) return false;
+             if (array_key_exists('reasoning', $m[0])) return false;      // خودکار — کلید ذخیره نمی‌شود
+             if (!aiIsReasoningModel($m[0])) return false;                // ولی استدلالی شناخته می‌شود
+             if (!aiIsReasoningModel($m[1])) return false;                // تیکِ دستی روشن
+             if (aiIsReasoningModel($m[2])) return false;                 // تیکِ دستی خاموش
+             return true;
+         })());
+    $add('9.94', 'تیکِ 🧠 کنار هر مدل در فهرست مدل‌ها نمایش داده می‌شود',
+         strpos($selfSrc, 'onchange="aiToggleReasoningFrom(this)"') !== false
+      && strpos($selfSrc, 'function aiToggleReasoning(pid,mid,on)') !== false
+      && strpos($selfSrc, "fd.append('action','ai_toggle_reasoning')") !== false);
 
     /* ---------- v9.92: زمان‌بندیِ واقعیِ کران + پروفایل‌های ناپدیدشونده ---------- */
     /* باگ ۱: فاز ۲ در هر تیکِ کران اجرا می‌شد چون lastRun فقط در مسیرِ کاملاً
@@ -15173,6 +15747,7 @@ if (isset($_GET['selftest'])) {
     }
 
     $esc = fn($s) => htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
+    app_theme_ob_start();   // v9.94: صفحهٔ خودآزمون هم رنگ‌بندیِ کاربر را می‌گیرد
     echo '<!DOCTYPE html><html dir="rtl" lang="fa"><head><meta charset="UTF-8">'
        . '<meta name="viewport" content="width=device-width,initial-scale=1">'
        . '<title>خودآزمون v' . APP_VERSION . '</title><style>'
@@ -15185,7 +15760,7 @@ if (isset($_GET['selftest'])) {
        . '.v{color:#64748b;font-family:ui-monospace,monospace;font-size:11px;white-space:nowrap}'
        . '.ok{color:#4ade80}.no{color:#f87171}.d{color:#64748b;font-size:11px}'
        . '.hero{border-radius:12px;padding:16px;text-align:center;margin-bottom:14px}'
-       . '</style>' . app_font_boot() . '</head><body><div class="wrap">';
+       . '</style>' . app_font_boot() . app_theme_boot() . '</head><body><div class="wrap">';
     echo '<div class="hero" style="background:' . ($allOk ? '#14532d' : '#7f1d1d')
        . ';border:1px solid ' . ($allOk ? '#22c55e' : '#ef4444') . '">'
        . '<div class="big">v' . $esc(APP_VERSION) . '</div>'
@@ -15798,7 +16373,8 @@ function arAiReplyText(string $text, ?int $timeoutSec = null): array {
     ], 'temperature' => 0.5, 'max_tokens' => 160], $net);
     if (empty($r['ok'])) return ['ok' => false, 'text' => '', 'error' => mb_substr((string)($r['error'] ?? 'خطا'), 0, 120), 'model' => ''];
     $body = $r['body'] ?? [];
-    $reply = trim((string)($body['choices'][0]['message']['content'] ?? ''));
+    // v9.94: استخراجِ آگاه به مدل استدلالی (reasoning/reasoning_content + حذف <think>)
+    $reply = aiExtractAnswer($body);
     if ($reply === '') return ['ok' => false, 'text' => '', 'error' => 'پاسخ خالی از مدل', 'model' => ''];
     $reply = preg_replace('/\s+/u', ' ', $reply);
     $modelName = (string)($body['model'] ?? ($r['model'] ?? ($r['backup']['model'] ?? '')));
@@ -18374,7 +18950,7 @@ $r=aiProviderCall($provider,$modelId,$payload,$netT);
 $httpCode=(int)$r['code'];
 if($httpCode===200){
 $rData=$r['body']??[];
-$aiText=trim($rData['choices'][0]['message']['content']??'');
+$aiText=aiExtractAnswer($rData);   // v9.94: مدل‌های استدلالی هم پاسخِ قابل‌نمایش می‌دهند
 $modelUsed=$rData['model']??$modelId;
 $usage=$rData['usage']??[];
 echo json_encode(['ok'=>true,'message'=>'اتصال AI موفق!','response'=>$aiText,'model'=>$modelUsed,'usage'=>$usage,'via'=>$r['via']??'','tried'=>$r['tried']??[],'provider'=>$provider['name']??$providerId],JSON_UNESCAPED_UNICODE);
@@ -18462,6 +19038,32 @@ if ($on === false && aiSelected()['provider'] === $pid) {
 echo json_encode(['ok'=>$ok,'provider'=>$pid,'enabled'=>$on], JSON_UNESCAPED_UNICODE);
 exit;
 }
+/* v9.94: تیکِ دستیِ «این مدل استدلالی است».
+   تشخیصِ خودکار از روی نامِ مدل کار می‌کند، ولی مدل‌های تازه/نام‌های
+   غیرمتعارف را نمی‌شناسد؛ این اندپوینت به کاربر اجازه می‌دهد صریحاً
+   تعیین کند. با روشن بودنِ آن، سقفِ توکن بزرگ می‌شود و بلوکِ «فکر کردن»
+   از پاسخ حذف می‌شود تا دسته‌بندی و پاسخ به مشتری درست کار کند. */
+if (($_POST['action'] ?? '') === 'ai_toggle_reasoning') {
+header('Content-Type: application/json; charset=UTF-8');
+$pid = trim($_POST['provider_id'] ?? '');
+$mid = trim($_POST['model_id'] ?? '');
+$providers = aiProvidersLoad();
+if (!isset($providers[$pid])) { echo json_encode(['ok'=>false,'error'=>'ارائه‌دهنده یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+$on = !empty($_POST['reasoning']);
+$found = false;
+foreach ($providers[$pid]['models'] as $i => $m) {
+    if (($m['id'] ?? '') === $mid) {
+        $providers[$pid]['models'][$i]['reasoning'] = $on;
+        $found = true;
+        break;
+    }
+}
+if (!$found) { echo json_encode(['ok'=>false,'error'=>'مدل یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+$ok = aiProvidersSave($providers);
+echo json_encode(['ok'=>$ok,'provider'=>$pid,'model'=>$mid,'reasoning'=>$on,
+                  'budget'=>aiReasoningBudget(20, $on)], JSON_UNESCAPED_UNICODE);
+exit;
+}
 /* تست یک مدل و ذخیرهٔ نتیجه در همان مدل */
 if (($_POST['action'] ?? '') === 'ai_test_one') {
 header('Content-Type: application/json; charset=UTF-8');
@@ -18489,7 +19091,7 @@ $latency = (int)round((microtime(true) - $t0) * 1000);
 $code = (int)$r['code'];
 $ok = $code === 200;
 $body = $r['body'] ?? [];
-$response = $ok ? aiExtractText($body) : '';   // v9.54: استخراج مقاومِ متنِ پاسخ
+$response = $ok ? aiExtractAnswer($body) : '';   // v9.54: استخراج مقاوم · v9.94: بدون بلوکِ فکر
 $err = $ok ? '' : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
 $rateLimited = in_array($code, [429], true);
 $catResponse = aiRunTestCategory($providers[$pid], $mid, $testCat, aiTestCategoryData());
@@ -18666,7 +19268,7 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
         $code = (int)$r['code'];
         $ok = $code === 200;
         $body = $r['body'] ?? [];
-        $response = $ok ? aiExtractText($body) : '';   // v9.54: استخراج مقاومِ متنِ پاسخ
+        $response = $ok ? aiExtractAnswer($body) : '';   // v9.54: استخراج مقاوم · v9.94: بدون بلوکِ فکر
         $err = $ok ? '' : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
         // تشخیص قابل‌دسترس‌نبودن اندپوینت
         $diag = aiTestNetworkFailure($r);
@@ -18696,7 +19298,7 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
             $st['diag'][$pid]['mode'] = (string)(aiNetCfg()['mode'] ?? 'direct');
             $st['diag'][$pid]['net_hint'] = 'روش اتصال فعلی روی این شبکه کار نمی‌کند ولی «مستقیم» جواب می‌دهد — روش را روی «مستقیم» بگذارید یا یک Worker/پروکسی سالم اضافه کنید';
             // روش اتصال را موقتاً مستقیم کن تا خودِ مدل رد نشود
-            $r = $rd; $ok = true; $code = (int)$rd['code']; $response = aiExtractText($rd['body'] ?? []);   // v9.54
+            $r = $rd; $ok = true; $code = (int)$rd['code']; $response = aiExtractAnswer($rd['body'] ?? []);   // v9.54 · v9.94
         } else {
             $st['diag'][$pid]['net_issue'] = false;
         }
@@ -18950,10 +19552,10 @@ $rAi=aiActiveChat($payload);
 $httpCode=(int)$rAi['code'];
 if($httpCode!==200){echo json_encode(['ok'=>false,'error'=>'خطا API AI (HTTP '.$httpCode.') — '.($rAi['error']??'') .' — روش عبور: '.($rAi['via']??'?'),'category_id'=>0,'tried'=>$rAi['tried']??[]],JSON_UNESCAPED_UNICODE);exit;}
 $rData=$rAi['body']??[];
-$aiText=trim($rData['choices'][0]['message']['content']??'');
+$aiText=aiExtractAnswer($rData);   // v9.94: مدل‌های استدلالی هم دسته‌بندی می‌کنند
 
 $aiCatId=0;
-if(preg_match('/\d+/',$aiText,$m)){$aiCatId=(int)$m[0];}
+$aiCatId=aiPickCategoryId($aiText);   // v9.94: جوابِ نهاییِ مدلِ استدلالی هم درست خوانده می‌شود
 
 $valid=false;$catName='';$aiCatId=findLeafCategory($aiCatId,$cats);
 foreach($cats as $c){if((int)$c['id']===$aiCatId){$valid=true;$catName=$c['name'];break;}}
@@ -21968,12 +22570,12 @@ if(!empty($_aiCfg['provider'])){
 // v9.21: از مسیر مشترک عبور با ارائه‌دهندهٔ فعال (با بک‌آپ مدل رایگان)
 $payload=['messages'=>[['role'=>'system','content'=>'You are a product categorization assistant. Return ONLY the numeric category ID.'],['role'=>'user','content'=>$prompt]],'temperature'=>$aiTemperature,'max_tokens'=>20];
 $rQ=aiActiveChat($payload);
-if((int)$rQ['code']===200){$rData=$rQ['body']??[];$aiText=trim($rData['choices'][0]['message']['content']??'');$aiModelUsed=$aiModel;}
+if((int)$rQ['code']===200){$rData=$rQ['body']??[];$aiText=aiExtractAnswer($rData);$aiModelUsed=$aiModel;}   // v9.94
 }
 if(empty($aiText)){echo json_encode(['ok'=>false,'error'=>'خطا API هوش مصنوعی: '.mb_substr((string)($rQ['error']??'هیچکدام پاسخ نداد'),0,120),'category_id'=>0],JSON_UNESCAPED_UNICODE);exit;}
 
 $aiCatId=0;
-if(preg_match('/\d+/',$aiText,$m)){$aiCatId=(int)$m[0];}
+$aiCatId=aiPickCategoryId($aiText);   // v9.94: جوابِ نهاییِ مدلِ استدلالی هم درست خوانده می‌شود
 
 $valid=false;$catName='';
 foreach($cats as $c){if((int)$c['id']===$aiCatId){$valid=true;$catName=$c['name'];break;}}
@@ -23362,6 +23964,7 @@ $initialProfiles[] = [
 ];
 }
 usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'] ?? 0));
+app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کاربر روی کلِ خروجی
 ?>
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -23370,6 +23973,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>اسکرپر ووکامرس v8.22</title>
 <?= app_font_boot() ?>
+<?= app_theme_boot() ?>
 <style>
 *{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}body{font-family:var(--app-font,Tahoma,system-ui,sans-serif);background:#0f172a;color:#e2e8f0;min-height:100vh;padding:12px;padding-bottom:90px;padding-top:56px;direction:rtl}.container{max-width:1400px;margin:0 auto}h1{font-size:18px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}input,select{background:#0f172a;border:1px solid #475569;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%}input[type="checkbox"]{width:auto}select{min-width:90px;width:auto}
 .btn{padding:11px 14px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;transition:.15s;white-space:nowrap}.btn:hover{opacity:.9}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:not-allowed}.btn-blue{background:linear-gradient(135deg,#3b82f6,#06b6d4);color:#000}.btn-red{background:#ef4444;color:#fff}.btn-green{background:#22c55e;color:#000}.btn-purple{background:#a855f7;color:#fff}.btn-orange{background:#f97316;color:#000}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:#eab308;color:#000}.btn-cyan{background:#06b6d4;color:#000}.btn-teal{background:#14b8a6;color:#000}.btn-pink{background:#ec4899;color:#fff}.btn-indigo{background:#6366f1;color:#fff}.hidden{display:none!important}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
@@ -23395,8 +23999,30 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 /* v9.61: دکمهٔ «تمام‌عرض کردن منو» کنار همبرگر — پنل تنظیمات را به‌جای
    ۴۰۰ پیکسل، تمام عرض صفحه می‌کند تا همهٔ محتوا/بخش‌ها در یک نگاه باز شوند. */
 .fullwidth-btn{position:fixed;top:10px;left:60px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.fullwidth-btn:hover{background:#334155}.fullwidth-btn.active{background:#7c3aed;color:#fff}.settings-panel.full{width:100vw;max-width:100vw;left:0}.settings-panel.full .smenu-body.open{max-height:none;overflow:visible}
-.hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:1;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}
-.smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}/* v9.78: آکاردئون‌های تب سلکتورها بزرگ‌ترند (شامل پیش‌نمایش iframe) */
+/* v9.94 (۸الف): دکمه‌های ☰ و ⛶ همیشه بالای پنل تنظیمات بمانند.
+   قبلاً z-index:10001 بود ولی پنل (z-index:9999) با پس‌زمینهٔ مات و
+   عرضِ 100vw در حالت «تمام‌عرض» روی آن‌ها می‌افتاد و کلیک را می‌بلعید. */
+.hamburger-btn,.fullwidth-btn{z-index:10050}
+body.spanel-open .hamburger-btn,body.spanel-open .fullwidth-btn{box-shadow:0 2px 14px rgba(0,0,0,.65)}
+.hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:6;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}
+.smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}
+/* v9.94 (۸ب): سربخشِ هر آیتمِ منو به بالای پنل می‌چسبد.
+   بخش‌های بلند (هوش مصنوعی، سلکتورها، …) چند هزار پیکسل ارتفاع دارند و
+   بعد از کمی اسکرول معلوم نبود داخل کدام بخش هستید. حالا عنوان بالا می‌ماند.
+   --spanel-head-h ارتفاع واقعیِ سربرگِ پنل است (با JS اندازه گرفته می‌شود)
+   تا سربخش دقیقاً زیرِ آن بنشیند و رویش نیفتد. */
+.settings-panel .smenu-hdr{position:sticky;top:var(--spanel-head-h,58px);z-index:5;background:#0f172a;box-shadow:0 1px 0 #1e293b}
+.settings-panel .smenu-hdr.open{background:#111c31;box-shadow:0 2px 8px rgba(0,0,0,.45)}
+.settings-panel .smenu-hdr:hover{background:#1e293b}
+/* سربخشِ تودرتو زیرِ سربخشِ والدش می‌چسبد تا هر دو دیده شوند */
+.settings-panel .smenu-body .smenu-hdr{top:calc(var(--spanel-head-h,58px) + var(--smenu-hdr-h,46px));z-index:4}
+.settings-panel .smenu-body .smenu-body .smenu-hdr{top:calc(var(--spanel-head-h,58px) + (var(--smenu-hdr-h,46px) * 2));z-index:3}
+.settings-panel .smenu-body .smenu-body .smenu-body .smenu-hdr{top:calc(var(--spanel-head-h,58px) + (var(--smenu-hdr-h,46px) * 3));z-index:2}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}
+/* v9.94 (۸ب): بعد از پایانِ انیمیشنِ باز شدن، سقفِ ارتفاع برداشته می‌شود.
+   دو سود دارد: (۱) بخش‌های بلندتر از ۲۰۰۰px دیگر بریده نمی‌شوند،
+   (۲) overflow:visible باعث می‌شود سربخش‌های تودرتو هم واقعاً بچسبند
+   (سربخشِ داخلِ جعبهٔ overflow:hidden به‌جای پنل، به همان جعبه می‌چسبد). */
+.smenu-body.open.smenu-done{max-height:none;overflow:visible}/* v9.78: آکاردئون‌های تب سلکتورها بزرگ‌ترند (شامل پیش‌نمایش iframe) */
 .smenu-body.open.sel-open{max-height:12000px}.smenu-body .crow{margin-bottom:8px}.smenu-body .cact{margin-top:10px}.live-cnt{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:8px 0}.live-cnt .lc{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;cursor:pointer;transition:.15s;display:flex;flex-direction:column;gap:1px}
 /* v9.78: توضیحاتِ داخلِ بخش‌های تب سلکتورها هم کشویی شدند */
 .hint-collapse summary{cursor:pointer;font-size:12px;font-weight:700;list-style:none;display:flex;align-items:center;gap:6px;padding:4px 0}
@@ -24046,6 +24672,34 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 در همین مرورگر ذخیره می‌ماند. فایل فونت فقط وقتی از اینترنت گرفته می‌شود که آن را انتخاب
 کنید؛ گزینهٔ «پیش‌فرض سیستم» هیچ چیزی دانلود نمی‌کند. اگر اینترنتِ کاربر به CDN نرسد،
 به‌صورت خودکار همان فونت قبلی نمایش داده می‌شود.
+</div>
+
+<!-- v9.94: رنگ‌بندی (تم) کل برنامه -->
+<div class="crow"><label>رنگ‌بندی برنامه:</label>
+<select id="appThemeSel" onchange="setAppTheme(this.value)" style="flex:1;min-width:150px">
+<?php foreach (app_themes_registry() as $tk => $tv): ?>
+<option value="<?= htmlspecialchars($tk, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($tv['label'], ENT_QUOTES, 'UTF-8') ?></option>
+<?php endforeach; ?>
+</select></div>
+<div id="appThemeGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:6px;margin-bottom:8px">
+<?php foreach (app_themes_registry() as $tk => $tv): $sw = app_theme_swatches($tk); ?>
+<div class="thm-card" data-theme-card="<?= htmlspecialchars($tk, ENT_QUOTES, 'UTF-8') ?>"
+     onclick="setAppTheme('<?= htmlspecialchars($tk, ENT_QUOTES, 'UTF-8') ?>')"
+     title="<?= htmlspecialchars($tv['label'], ENT_QUOTES, 'UTF-8') ?>"
+     style="border:1px solid #334155;border-radius:8px;padding:6px;cursor:pointer;background:#0f172a">
+  <div style="display:flex;gap:3px;margin-bottom:4px">
+    <span style="flex:1;height:16px;border-radius:3px;background:<?= $sw[0] ?>"></span>
+    <span style="flex:1;height:16px;border-radius:3px;background:<?= $sw[1] ?>"></span>
+    <span style="flex:1;height:16px;border-radius:3px;background:<?= $sw[2] ?>"></span>
+  </div>
+  <div style="font-size:9.5px;color:#94a3b8;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><?= htmlspecialchars($tv['label'], ENT_QUOTES, 'UTF-8') ?></div>
+</div>
+<?php endforeach; ?>
+</div>
+<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:10px">
+رنگ‌بندی روی <b>کل برنامه</b> — همهٔ کارت‌ها، دکمه‌ها، نوارها و صفحهٔ خودآزمون — اعمال
+می‌شود و در همین مرورگر ذخیره می‌ماند. رنگ‌ها سمت سرور جاسازی می‌شوند، پس هیچ پرشِ
+رنگی موقع بالا آمدن صفحه ندارید. با عوض کردن تم، صفحه یک‌بار تازه می‌شود.
 </div>
 
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:5px">🚦 صف‌ها</div>
@@ -25624,12 +26278,43 @@ function switchMainTab(name) {
     rememberMainTab(name);   // v9.91: تا رفرشِ بعدی همین‌جا باز شود
 }
 // v8.17: Settings panel toggle
-function toggleSettingsPanel(){const p=document.getElementById('settingsPanel');const o=document.getElementById('settingsOverlay');const b=document.getElementById('hamburgerBtn');if(p.classList.contains('open')){p.classList.remove('open');o.classList.remove('open');if(b)b.classList.remove('active');}else{p.classList.add('open');o.classList.add('open');if(b)b.classList.add('active');}}
+function toggleSettingsPanel(){const p=document.getElementById('settingsPanel');const o=document.getElementById('settingsOverlay');const b=document.getElementById('hamburgerBtn');if(p.classList.contains('open')){p.classList.remove('open');o.classList.remove('open');if(b)b.classList.remove('active');document.body.classList.remove('spanel-open');}else{p.classList.add('open');o.classList.add('open');if(b)b.classList.add('active');document.body.classList.add('spanel-open');syncSmenuStickyOffsets();}}
+/* v9.94 (۸ب): ارتفاعِ واقعیِ سربرگِ پنل و یک سربخشِ نمونه را اندازه می‌گیریم و
+   داخل متغیرهای CSS می‌گذاریم. با این کار سربخش‌های چسبان دقیقاً زیرِ سربرگ
+   می‌نشینند، حتی اگر فونتِ انتخابیِ کاربر ارتفاع‌ها را عوض کرده باشد. */
+function syncSmenuStickyOffsets(){
+  const p=document.getElementById('settingsPanel');if(!p)return;
+  const head=p.querySelector('.settings-panel-head');
+  const hdr=p.querySelector('.smenu-hdr');
+  const hh=head?Math.round(head.getBoundingClientRect().height):0;
+  const sh=hdr?Math.round(hdr.getBoundingClientRect().height):0;
+  if(hh>0)p.style.setProperty('--spanel-head-h',hh+'px');
+  if(sh>0)p.style.setProperty('--smenu-hdr-h',sh+'px');
+}
 // v9.61: تمام‌عرض کردن پنل تنظیمات (منو و محتویاتش). اگر منو بسته باشد اول باز
 // می‌شود؛ کلاس .full روی پنل عرض را به 100vw و سقف‌های .smenu-body را بی‌سقف می‌کند
 // تا هیچ بخشی گیر و بریده نماند.
-function toggleFullSettings(){const p=document.getElementById('settingsPanel');const b=document.getElementById('fullBtn');if(!p)return;if(!p.classList.contains('open')){toggleSettingsPanel();}const full=p.classList.toggle('full');if(b)b.classList.toggle('active',full);}
-function toggleSmenu(hdr){const isOpen=hdr.classList.contains('open');hdr.classList.toggle('open');const body=hdr.nextElementSibling;if(body){if(isOpen){body.classList.remove('open');}else{body.classList.add('open');}}}
+function toggleFullSettings(){const p=document.getElementById('settingsPanel');const b=document.getElementById('fullBtn');if(!p)return;if(!p.classList.contains('open')){toggleSettingsPanel();}const full=p.classList.toggle('full');if(b)b.classList.toggle('active',full);syncSmenuStickyOffsets();}
+/* v9.94 (۸ب): بعد از پایانِ ترنزیشنِ باز شدن، کلاس smenu-done می‌گیرد تا سقفِ
+   max-height برداشته و overflow باز شود؛ موقعِ بستن اول برمی‌گردد به حالتِ
+   سقف‌دار وگرنه انیمیشنِ بسته‌شدن اصلاً دیده نمی‌شود. */
+function toggleSmenu(hdr){
+  const isOpen=hdr.classList.contains('open');
+  hdr.classList.toggle('open');
+  const body=hdr.nextElementSibling;
+  if(body){
+    if(isOpen){
+      body.classList.remove('smenu-done');
+      void body.offsetHeight;          /* فورس رفلو تا ترنزیشن از ارتفاع واقعی شروع شود */
+      body.classList.remove('open');
+    }else{
+      body.classList.add('open');
+      clearTimeout(body.__smenuT);
+      body.__smenuT=setTimeout(function(){if(body.classList.contains('open'))body.classList.add('smenu-done');},320);
+    }
+  }
+  syncSmenuStickyOffsets();
+}
 // v8.17: Per-profile fallback categories
 let bslProfileFallbackCats=[];
 let bslProfileFallbackSelectedCatId=0;
@@ -27233,6 +27918,40 @@ function initAppFontPref(){
   if(sel)sel.value=k;
   syncAppFontPreview(k);
 }
+
+/* ==================================================================
+ *  v9.94: رنگ‌بندی (تم) کل برنامه
+ *
+ *  رنگ‌ها سمتِ سرور در خروجی جاسازی می‌شوند (app_theme_filter)، پس
+ *  عوض کردن تم یعنی: ذخیره در localStorage + نوشتن کوکی + یک رفرش.
+ *  موتورش (appThemeApply/appThemeCurrent) در <head> تعریف شده است.
+ * ================================================================== */
+function setAppTheme(key){
+  if(typeof window.appThemeApply!=='function')return;
+  const cur=(typeof window.appThemeCurrent==='function')?window.appThemeCurrent():'';
+  const k=window.appThemeApply(key,true);
+  syncAppThemeUI(k);
+  if(k===cur)return;                       /* همان تم — رفرشِ بی‌مورد نکن */
+  const t=(window.APP_THEMES||{})[k];
+  showToast('رنگ‌بندی: '+((t&&t.label)||k)+' — در حال اعمال…');
+  try{ sessionStorage.removeItem('__thm_reload'); }catch(e){}
+  setTimeout(function(){location.reload();},220);
+}
+/** کشویی و کارت‌های نمونه را با تمِ جاری هم‌تراز کن */
+function syncAppThemeUI(k){
+  const sel=document.getElementById('appThemeSel');
+  if(sel)sel.value=k;
+  const cards=document.querySelectorAll('[data-theme-card]');
+  for(let i=0;i<cards.length;i++){
+    const on=cards[i].getAttribute('data-theme-card')===k;
+    cards[i].style.borderColor=on?'#4ade80':'#334155';
+    cards[i].style.boxShadow=on?'0 0 0 1px #4ade80':'none';
+  }
+}
+function initAppThemePref(){
+  const k=(typeof window.appThemeCurrent==='function')?window.appThemeCurrent():'ocean';
+  syncAppThemeUI(k);
+}
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
 /**
  * v8.84: مقدار امن برای گذاشتن داخل رشتهٔ تک‌کوتیشنیِ یک ویژگی onclick.
@@ -28555,6 +29274,29 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.94', t:'🎨 ۱۳ رنگ‌بندی + منوی چسبان + مدل‌های استدلالی', items:[
+    '⛶ دکمهٔ «تمام عرض کردن منو» بعد از باز شدنِ منو پشتِ آن می‌افتاد و',
+    '   کلیک را می‌بلعید. حالا هر دو دکمهٔ ☰ و ⛶ همیشه بالاترین لایه‌اند.',
+    '📌 سربخشِ هر آیتمِ منو (همان‌جا که کشویی می‌شود) به بالای پنل می‌چسبد؛',
+    '   در بخش‌های بلند مثل «هوش مصنوعی» دیگر گم نمی‌شوید. سربخش‌های',
+    '   تودرتو هم پله‌ای زیرِ هم می‌چسبند.',
+    '   ضمناً آکاردئون‌های خیلی بلند دیگر از ۲۰۰۰ پیکسل بریده نمی‌شوند.',
+    '🎨 تنظیمات ← «⚙️ تنظیمات عمومی» ← «📱 نمایش» ← «رنگ‌بندی برنامه»:',
+    '   ۱۳ تم — اقیانوس شب، نیمه‌شبِ نیلی، جنگلِ زمردی، ارغوانِ سلطنتی،',
+    '   یاقوتِ سرخ، کهربای گرم، فیروزهٔ عمیق، گرافیتِ خالص، رُزگلد،',
+    '   شبِ جنگلِ زیتونی، سیاهِ مطلق (OLED)، سایبرپانکِ نئونی و یخِ نوردیک.',
+    '   با کارت‌های نمونه‌رنگ انتخاب می‌کنید و در همین مرورگر ذخیره می‌ماند.',
+    '   رنگ‌ها سمتِ سرور جاسازی می‌شوند، پس هیچ پرشِ رنگی موقع لود ندارید.',
+    '🧠 مدل‌های استدلالی (DeepSeek-R1، QwQ، gpt-oss، Nemotron و…) در تست',
+    '   جواب می‌دادند ولی در «دسته‌بندی» و «پاسخ به مشتری» ساکت بودند.',
+    '   دو علت داشت: (۱) سقفِ توکن ۲۰/۱۶۰ بود و مدل کلِ بودجه را صرفِ',
+    '   «فکر کردن» می‌کرد، (۲) آن دو مسیر فیلدهای reasoning را نمی‌خواندند.',
+    '   ✅ حالا سقفِ توکنِ مدلِ استدلالی خودکار چند برابر می‌شود، بلوکِ',
+    '   <think> از پاسخ جدا می‌شود و شناسهٔ دسته از «انتخابِ نهایی» خوانده',
+    '   می‌شود — مدل عادی هیچ تغییری نمی‌کند.',
+    '   ✅ اگر نامِ مدل ناشناخته بود، کنارش تیکِ 🧠 «این مدل استدلالی است»',
+    '   هست تا دستی تعیین کنید.',
+  ]},
   {v:'9.93', t:'🔤 فونت کل برنامه قابل تغییر شد (وزیر، یکان و …)', items:[
     'تاهوما همه‌جا سخت‌کد شده بود و راهی برای عوض کردنش نبود.',
     '✅ تنظیمات ← «⚙️ تنظیمات عمومی» ← «📱 نمایش» ← «فونت برنامه»:',
@@ -32663,6 +33405,8 @@ function syncBslSendBoxCats(catId,fallbackIds){
 document.addEventListener('DOMContentLoaded',function(){
     try{ initAutoScrollPref(); }catch(e){}   // v8.88
     try{ initAppFontPref(); }catch(e){}      // v9.93
+    try{ initAppThemePref(); }catch(e){}     // v9.94: رنگ‌بندی (تم) برنامه
+    try{ syncSmenuStickyOffsets(); }catch(e){}  // v9.94: افستِ سربخش‌های چسبان
     try{ selCtlInit(); }catch(e){}           // v9.90: تیک‌های نمایش کنترل‌های سلکتور
     const si=$('bsCatSearch');
     if(si){
@@ -33249,10 +33993,19 @@ function aiRenderModels(){
             const st=m.available?'🟢':(m.tested?'🔴':'⚪');
             const lat=m.latency?' · '+toFa(m.latency)+'ms':'';
             const tool=m.toolCalling?' 🔧':'';
+            /* v9.94: تیکِ «مدل استدلالی». وقتی روشن است، سقفِ توکن چند برابر
+               می‌شود و بلوکِ «فکر کردن» از پاسخ جدا می‌شود؛ بدون آن، مدل‌های
+               استدلالی در دسته‌بندی و پاسخ به مشتری پاسخِ خالی می‌دادند. */
+            const rTitle=m.reasoningManual
+              ?'تعیینِ دستی: '+(m.reasoning?'استدلالی':'غیراستدلالی')
+              :'تشخیصِ خودکار از روی نام مدل: '+(m.reasoning?'استدلالی':'غیراستدلالی')+' — برای تعیینِ دستی تیک بزنید';
             h+='<div style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-bottom:1px solid #1e293b;font-size:10.5px">'
               +'<span title="'+(m.available?'در دسترس':(m.tested?'ناموفق':'تست نشده'))+'">'+st+'</span>'
               +'<span style="flex:1;color:#e2e8f0;direction:ltr;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.name||m.id)+'</span>'
               +'<span style="color:#64748b">'+lat+'</span>'+tool
+              +'<label class="ai-rsn" title="'+esc(rTitle)+'" style="display:flex;align-items:center;gap:3px;cursor:pointer;color:'+(m.reasoning?'#c4b5fd':'#64748b')+';white-space:nowrap">'
+              +'<input type="checkbox" style="width:13px;height:13px;flex:0 0 auto" '+(m.reasoning?'checked':'')
+              +' data-p="'+esc(p.id)+'" data-m="'+esc(m.id)+'" onchange="aiToggleReasoningFrom(this)">🧠</label>'
               +'<button class="btn btn-gray" style="font-size:9px;padding:2px 6px" data-p="'+esc(p.id)+'" data-m="'+esc(m.id)+'" onclick="aiTestOneFrom(this)">🧪</button>'
               +'</div>';
         });
@@ -33260,6 +34013,20 @@ function aiRenderModels(){
     }
 }
 function aiTestOneFrom(btn){if(btn&&btn.dataset)aiTestOne(btn.dataset.p,btn.dataset.m);}
+/* v9.94: روشن/خاموش کردنِ دستیِ «مدل استدلالی» */
+function aiToggleReasoningFrom(cb){if(cb&&cb.dataset)aiToggleReasoning(cb.dataset.p,cb.dataset.m,cb.checked);}
+function aiToggleReasoning(pid,mid,on){
+    const fd=new FormData();
+    fd.append('action','ai_toggle_reasoning');
+    fd.append('provider_id',pid);
+    fd.append('model_id',mid);
+    fd.append('reasoning',on?'1':'0');
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){showToast('خطا در ذخیره: '+((d&&d.error)||'؟'),1);}
+        else{showToast(on?('🧠 «'+mid+'» استدلالی شد — سقف توکن '+toFa(d.budget||0)):('«'+mid+'» غیراستدلالی شد'));}
+        aiLoadProviders();
+    }).catch(()=>{showToast('❌ خطا شبکه',1);});
+}
 
 function aiSelectProvider(){
     const p=aiCurrentProvider();
