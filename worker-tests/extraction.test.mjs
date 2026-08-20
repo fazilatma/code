@@ -184,6 +184,15 @@ test('dashboard remembers and restores the last active profile after refresh',as
   assert.match(source,/forgetRememberedProfile\(id\)[\s\S]*await refreshProfiles\(\)/);
 });
 
+test('drawer controls stay above the menu, open section heads are sticky, and general settings expose twelve live themes plus reasoning flags',async()=>{
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),vault=await readFile(new URL('../worker-src/vault.ts',import.meta.url),'utf8'),ai=await readFile(new URL('../worker-src/ai.ts',import.meta.url),'utf8');
+  assert.match(source,/<div class="drawer-head">[\s\S]*id="drawerFull"[\s\S]*id="drawerClose"[\s\S]*<div id="menuSections"/,'full-width control is rendered inside the sticky drawer header');
+  assert.match(source,/\.drawer-head \.fullwidth-btn\{position:static/);assert.match(source,/\.menu-section\.open>\.menu-title\{position:sticky;top:70px/);assert.match(source,/\.menu-section\.open \.menu-content\{max-height:none;[^}]*overflow:visible/,'long menu sections use drawer scrolling instead of a competing internal scroller');
+  assert.match(source,/mSelect\('رنگ‌بندی کل سایت:','siteTheme'/);assert.match(source,/id="themeSwatches"/);assert.match(source,/data-theme-choice/);assert.match(source,/applySiteTheme\(nestedGet\(state\.settings,'appearance\.theme'\)/);
+  const themeBlock=source.slice(source.indexOf('const SITE_THEMES='),source.indexOf('const SITE_FONTS=')),themeKeys=[...themeBlock.matchAll(/(?:\{|,)([a-z]+):\[/g)].map(match=>match[1]);assert.equal(themeKeys.length,12);assert.deepEqual(themeKeys,['midnight','ocean','aurora','royal','sunset','rose','cobalt','forest','graphite','coffee','persian','cyber']);
+  assert.match(source,/data-ai-reasoning-index/);assert.match(source,/aiEditorReasoning/);assert.match(source,/reasoningModels:models\.filter/);assert.match(source,/مدل رایگان Together/);assert.match(vault,/reasoningModels:string\[\]/);assert.match(vault,/reasoningModels:Array\.isArray/);assert.match(ai,/isReasoningAiModel/);assert.match(ai,/max_tokens:reasoning\?1600:400/);assert.match(ai,/preferredAiChatModel/);
+});
+
 test('mobile RTL redesign keeps the requested bottom navigation order and touch-friendly theme',async()=>{
   const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),start=source.indexOf('<nav class="main-tabs" aria-label="ناوبری اصلی">'),end=source.indexOf('</nav>',start),nav=source.slice(start,end);
   assert.ok(start>0&&end>start,'main navigation must exist');

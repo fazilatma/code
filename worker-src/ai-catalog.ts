@@ -1,6 +1,6 @@
 export type AiProviderCatalog={
   catalogVersion?:number;
-  providers?:Array<{id:string;name?:string;baseUrl?:string;apiKey?:string;models?:string[];enabled?:boolean}>;
+  providers?:Array<{id:string;name?:string;baseUrl?:string;apiKey?:string;models?:string[];reasoningModels?:string[];enabled?:boolean}>;
 };
 
 /**
@@ -56,7 +56,7 @@ export function upgradeAiProviderCatalog(ai:AiProviderCatalog):boolean{
   ai.providers=Array.isArray(ai.providers)?ai.providers:[];
   let version=Math.max(0,Math.trunc(Number(ai.catalogVersion)||0)),changed=false,provider=mistralProvider(ai);
   if(!provider){
-    provider={id:'mistral',name:'Mistral AI',baseUrl:'https://api.mistral.ai/v1',apiKey:'',models:[],enabled:false};
+    provider={id:'mistral',name:'Mistral AI',baseUrl:'https://api.mistral.ai/v1',apiKey:'',models:[],reasoningModels:[],enabled:false};
     ai.providers.push(provider);changed=true;
   }
   if(version<1){appendModels(provider,MISTRAL_CATALOG_V1_MODELS);version=1;changed=true}
