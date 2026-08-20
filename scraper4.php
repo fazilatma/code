@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.91';
+const APP_VERSION = '9.92';
 const APP_VERSION_DATE = '1405/05/29';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -532,15 +532,89 @@ $path = preg_replace('~\.(html|htm|php)$~i', '', $path);
 return $host . ($path ? '_' . preg_replace('~[^a-z0-9]+~i', '_', $path) : '');
 }
 
+/* v9.92: خواندنِ پروفایل‌ها با تشخیصِ «فایلِ خراب» از «فایلِ خالی».
+
+   تا ۹.۹۱ هر سه حالتِ «فایل نیست»، «فایل صفر بایت است» و «JSON خراب
+   است» یک نتیجه می‌دادند: آرایهٔ خالی. حالتِ سوم دروغ است — فایلِ نصفه
+   یعنی داده هست ولی الان قابلِ خواندن نیست، و رفتارِ درست «دست نزن»
+   است نه «فرض کن هیچ پروفایلی نداری». همان فرضِ غلط بود که باعث می‌شد
+   نوشتنِ بعدی همهٔ پروفایل‌ها را جارو کند و فقط یکی بماند.
+
+   حالا اگر محتوا هست ولی JSON خراب است: (۱) یک کپیِ .corrupt کنارش
+   نگه‌داشته می‌شود تا داده از دست نرود، (۲) اگر نسخهٔ پشتیبانِ سالمی
+   هست از آن خوانده می‌شود، (۳) و مهم‌تر از همه، پرچمِ خرابی روشن
+   می‌شود تا saveProfiles از نوشتنِ روی آن خودداری کند. */
 function loadProfiles(): array {
+$GLOBALS['_profilesCorrupt'] = false;
 if (!file_exists(PROFILES_FILE)) return [];
 $json = @file_get_contents(PROFILES_FILE);
-if (!$json) return [];
+if ($json === false || trim((string)$json) === '') {
+    // صفر بایت روی فایلی که قبلاً پشتیبان داشته = قربانیِ یک نوشتنِ نیمه‌کاره
+    $bk = PROFILES_FILE . '.bak';
+    if (is_file($bk)) {
+        $bd = @json_decode((string)@file_get_contents($bk), true);
+        if (is_array($bd) && $bd !== []) {
+            @file_put_contents(__DIR__ . '/storage_errors.log', date('Y-m-d H:i:s') . ' | ' . PROFILES_FILE . " | فایل خالی بود — از نسخهٔ پشتیبان خوانده شد (" . count($bd) . " پروفایل)\n", FILE_APPEND);
+            return $bd;
+        }
+    }
+    return [];
+}
 $data = @json_decode($json, true);
-return is_array($data) ? $data : [];
+if (is_array($data)) {
+    /* نسخهٔ پشتیبان فقط از یک خوانشِ سالم و غیرخالی ساخته می‌شود، و فقط
+       وقتی محتوا واقعاً عوض شده — تا هزینهٔ نوشتن در هر بار خواندن نباشد. */
+    if ($data !== []) {
+        $bk = PROFILES_FILE . '.bak';
+        if (!is_file($bk) || (int)@filemtime($bk) < (int)@filemtime(PROFILES_FILE)) @copy(PROFILES_FILE, $bk);
+    }
+    return $data;
+}
+$GLOBALS['_profilesCorrupt'] = true;
+@copy(PROFILES_FILE, PROFILES_FILE . '.corrupt');
+@file_put_contents(__DIR__ . '/storage_errors.log', date('Y-m-d H:i:s') . ' | ' . PROFILES_FILE . ' | JSON خراب (' . strlen($json) . ' بایت) — کپی .corrupt نگه داشته شد' . "\n", FILE_APPEND);
+$bk = PROFILES_FILE . '.bak';
+if (is_file($bk)) {
+    $bd = @json_decode((string)@file_get_contents($bk), true);
+    if (is_array($bd) && $bd !== []) {
+        /* v9.92: بازیابی موفق بود، پس دیگر «خراب» نیستیم. اگر پرچم را
+           روشن بگذاریم، saveProfiles تا ابد رد می‌شود و برنامه بی‌آنکه
+           کسی بفهمد فقط‌خواندنی می‌ماند. فایل اصلی را همین‌جا از روی
+           پشتیبان ترمیم می‌کنیم تا وضعیت واقعاً به حالت سالم برگردد. */
+        if (@copy($bk, PROFILES_FILE)) {
+            $GLOBALS['_profilesCorrupt'] = false;
+            @file_put_contents(__DIR__ . '/storage_errors.log', date('Y-m-d H:i:s') . ' | ' . PROFILES_FILE . ' | از پشتیبان ترمیم شد (' . count($bd) . " پروفایل)\n", FILE_APPEND);
+        }
+        return $bd;
+    }
+}
+return [];
 }
 
-function saveProfiles(array $profiles): bool {
+/* v9.92: محافظِ آخر در برابرِ «همهٔ پروفایل‌ها رفتند و یکی ماند».
+
+   دو حالت اینجا متوقف می‌شوند:
+   ۱) خوانشِ قبلی خراب بوده ($_profilesCorrupt) — نوشتنِ روی آن یعنی
+      تثبیتِ فاجعه. رد می‌شود.
+   ۲) قرار است چند پروفایل با «یکی» جایگزین شود، درحالی‌که فایلِ روی
+      دیسک همین حالا بیشتر دارد. این هرگز یک عملیاتِ مشروع نیست مگر
+      حذفِ صریحِ کاربر، که مسیرِ خودش را دارد (delete_profile). چنین
+      نوشتنی با پروفایل‌های موجودِ روی دیسک ادغام می‌شود، نه جایگزینشان. */
+function saveProfiles(array $profiles, bool $allowDelete = false): bool {
+if (!empty($GLOBALS['_profilesCorrupt'])) {
+    @file_put_contents(__DIR__ . '/storage_errors.log', date('Y-m-d H:i:s') . ' | ' . PROFILES_FILE . " | نوشتن رد شد: خوانشِ قبلی خراب بود\n", FILE_APPEND);
+    return false;
+}
+if (!$allowDelete && is_file(PROFILES_FILE)) {
+    $onDisk = @json_decode((string)@file_get_contents(PROFILES_FILE), true);
+    if (is_array($onDisk) && count($onDisk) > count($profiles) && count($profiles) > 0) {
+        $lost = array_diff(array_keys($onDisk), array_keys($profiles));
+        if ($lost) {
+            foreach ($lost as $lk) $profiles[$lk] = $onDisk[$lk];
+            @file_put_contents(__DIR__ . '/storage_errors.log', date('Y-m-d H:i:s') . ' | ' . PROFILES_FILE . ' | ' . count($lost) . " پروفایل از حذفِ ناخواسته نجات یافت: " . implode(',', $lost) . "\n", FILE_APPEND);
+        }
+    }
+}
 return writeJsonFile(PROFILES_FILE, $profiles)['ok'];
 }
 /* =====================================================================
@@ -560,6 +634,31 @@ function writeJsonFile(string $path, $data): array {
         @file_put_contents(__DIR__ . '/storage_errors.log', date('Y-m-d H:i:s') . ' | ' . $path . ' | ' . $msg . "\n", FILE_APPEND);
         return ['ok' => false, 'error' => $msg];
     }
+    /* =================================================================
+       v9.92: نوشتن «اتمی» — علتِ واقعیِ «پروفایل‌ها پاک می‌شوند».
+
+       file_put_contents اول فایل را خالی (truncate) می‌کند و بعد
+       می‌نویسد. روی هاستی که وسطِ استخراج پردازه را می‌کشد (SIGKILL سرِ
+       سقفِ زمانی وب‌سرور) این پنجره واقعی است: profiles.json نصفه یا
+       صفر بایت روی دیسک می‌ماند. دفعهٔ بعد loadProfiles() آن JSON خرابْ
+       را نمی‌تواند بخواند و طبقِ کدش آرایهٔ خالی برمی‌گرداند. بعد
+       extractCheckpoint / پایانِ runBackendExtract همان آرایهٔ خالی را
+       می‌گیرند، فقط پروفایلِ در دستِ خودشان را رویش می‌گذارند و ذخیره
+       می‌کنند — و از آن لحظه فقط «یک» پروفایل باقی می‌ماند. دقیقاً همان
+       چیزی که کاربر گزارش کرد.
+
+       با نوشتن روی فایل موقت و rename اتمی، فایلِ مقصد یا نسخهٔ کاملِ
+       قبلی است یا نسخهٔ کاملِ جدید — هیچ‌وقت نصفه. rename روی همان
+       فایل‌سیستم در POSIX اتمی است.
+       ================================================================= */
+    $tmp = $path . '.tmp' . getmypid();
+    $w = @file_put_contents($tmp, $json, LOCK_EX);
+    if ($w !== false && $w === strlen($json)) {
+        // مجوزهای فایل قبلی حفظ شود تا rename دسترسی وب‌سرور را عوض نکند
+        if (is_file($path)) { $pm = @fileperms($path); if ($pm !== false) @chmod($tmp, $pm & 0777); }
+        if (@rename($tmp, $path)) return ['ok' => true, 'error' => ''];
+    }
+    @unlink($tmp);
     // ۱) تلاش با قفل
     $r = @file_put_contents($path, $json, LOCK_EX);
     if ($r !== false) return ['ok' => true, 'error' => ''];
@@ -4228,7 +4327,8 @@ $key = profileKey($url);
 $profiles = loadProfiles();
 if (isset($profiles[$key])) {
 unset($profiles[$key]);
-saveProfiles($profiles);
+// v9.92: حذفِ صریحِ کاربر — محافظِ ضدِ حذفِ ناخواسته باید کنار برود
+saveProfiles($profiles, true);
 echo json_encode(['ok' => true, 'key' => $key, 'message' => 'پروفایل حذف شد']);
 } else {
 echo json_encode(['ok' => false, 'error' => 'Not found']);
@@ -9863,6 +9963,36 @@ function profileOrderedProducts(array $profile, ?array $onlyKeys = null, bool $f
  * هر اجرای بعدی همان اول رد می‌شد — یعنی دقیقاً در حالتی که نگهبان لازم
  * بود، هیچ‌وقت اجرا نمی‌شد و کار گیرکرده تا نیم ساعت همان‌طور می‌ماند.
  */
+/* =====================================================================
+   v9.92: «نوبت را همین حالا مصرف کن» — رفعِ ریشه‌ایِ اجرای مکررِ کران.
+
+   تا ۹.۹۱، lastRun فقط جایی نوشته می‌شد که پروفایل واقعاً به مرحلهٔ
+   ارسال می‌رسید، و saveSyncState هم تازه «بعد از پایانِ کلِ حلقه» صدا
+   زده می‌شد. یعنی lastRun فقط در سناریوی کاملاً موفق روی دیسک می‌نشست.
+   هر خروجِ زودهنگام یا هر مرگِ پردازه آن را از بین می‌برد:
+
+     • $stageOpen ⇒ status=detail_pending ⇒ continue — بدونِ lastRun
+     • target='none' ⇒ هیچ‌کدام از شاخه‌های woo/bsl اجرا نمی‌شود ⇒ فقط
+       price_sig ست می‌شود، lastRun نه
+     • استخراجِ طولانی ⇒ هاست پردازه را می‌کشد ⇒ saveSyncState هرگز
+       اجرا نمی‌شود ⇒ هیچ‌چیز ذخیره نمی‌شود
+
+   نتیجه در هر سه حالت یکی است: تیکِ بعدی (یک دقیقه بعد) همان پروفایل
+   را باز هم «due» می‌بیند و کلِ کار — از جمله فازِ جزئیات — دوباره
+   شروع می‌شود. دورهٔ ۶ ساعته یا ۲ ساعته عملاً بی‌اثر بود.
+
+   درست این است که نوبت «در لحظهٔ شروع» و «مستقیم روی دیسک» مصرف شود:
+   یک نوبت یعنی یک بار تلاش، نه یک بار موفقیت. */
+function cronMarkRun(string $key, string $status = 'running'): void {
+    if ($key === '') return;
+    $st = loadSyncState();
+    $row = is_array($st[$key] ?? null) ? $st[$key] : [];
+    $row['lastRun'] = time();
+    $row['status']  = $status;
+    $st[$key] = $row;
+    saveSyncState($st);
+}
+
 function cronWatchdogs(array $cn): array {
     $results = ['watchdog' => []];
 // v8.33: مرحلهٔ نگهبان — اگر ارسالی وسط راه گیر کرده، ادامه‌اش بده.
@@ -10678,10 +10808,44 @@ $syncState = loadSyncState();
    (فهرست + جزئیاتِ فقطِ محصولاتِ جدید/ناقص). ردیفی که اینجا دوباره ساخته می‌شود
    در صف است، پس حلقهٔ پایین همان پروفایل را تکراری رد می‌کند و کارِ دوگانه پیش
    نمی‌آید. */
+/* v9.92: «ادامهٔ نگهبان» هم باید تابعِ زمان‌بندیِ پروفایل باشد.
+
+   این در ۹.۹۱ باگِ اصلیِ «فاز ۲ در هر فراخوانیِ کران اجرا می‌شود» بود و
+   دقیقاً همان حلقه‌ای است که کامنتِ v9.73 ادعا می‌کرد بسته شده — ولی از
+   درِ پشتیِ مسیرِ v9.75 دوباره باز شده بود:
+
+     کاتالوگِ بزرگ ⇒ فازِ جزئیات هر نوبت از سقفِ زمانیِ هاست می‌ماند
+     ⇒ پردازه کشته می‌شود، ردیفِ صف «running» جا می‌ماند و
+        _extract_stage='detail' تازه می‌ماند
+     ⇒ تیکِ بعدیِ کران (یک دقیقه بعد): نگهبان ردیفِ بی‌حرکت را برمی‌دارد و
+        extract_resume را پر می‌کند
+     ⇒ همین‌جا بی‌قید runBackendExtract(...,'detail') صدا زده می‌شود —
+        قبل و مستقلاً از گیتِ not_due، پس دورهٔ ۶ ساعته هیچ اثری ندارد
+     ⇒ دوباره کشته می‌شود ⇒ حلقهٔ بی‌پایانِ «جزئیات در هر دقیقه».
+
+   نگهبان برای «کارِ نیمه‌کارهٔ یک اجرای مرده» ساخته شده، نه برای دور زدنِ
+   زمان‌بندی. پس ادامه فقط وقتی مجاز است که خودِ آن پروفایل هم اکنون در
+   نوبتش باشد. اگر نوبتش نیست، ردیفِ گیرکرده همین حالا از صف برداشته شده
+   (کارِ نگهبان انجام شد) و کارِ نیمه‌تمام در نوبتِ بعدیِ خودش ادامه
+   می‌یابد — چیزی از دست نمی‌رود چون چک‌پوینتِ هر محصول روی دیسک است. */
 if (!empty($wdEarly['extract_resume'])) {
     foreach (array_unique((array)$wdEarly['extract_resume']) as $_rk) {
         if ($_rk === '') continue;
         $_prR = $profiles[$_rk] ?? null;
+        /* گیتِ زمان‌بندی — همان معیارِ حلقهٔ اصلی، نه چیزی سخت‌گیرانه‌تر.
+           interval=0 یعنی «هر بار فراخوانی»، پس آن‌جا ادامه آزاد است. */
+        $_scR  = is_array($_prR) ? ($_prR['syncConfig'] ?? []) : [];
+        $_ivR  = (int)($_scR['interval'] ?? 3600);
+        $_lrR  = (int)($syncState[$_rk]['lastRun'] ?? 0);
+        if (empty($_scR['enabled'])) {
+            $results['extract_resume_skipped'][] = ['key' => $_rk, 'reason' => 'sync_disabled'];
+            continue;
+        }
+        if ($_ivR > 0 && ($now - $_lrR) < $_ivR) {
+            $results['extract_resume_skipped'][] = ['key' => $_rk, 'reason' => 'not_due',
+                'remaining' => $_ivR - ($now - $_lrR)];
+            continue;
+        }
         $_phR = 'all';
         if (is_array($_prR)) {
             $_psR = (string)($_prR['_extract_stage'] ?? '');
@@ -10689,6 +10853,11 @@ if (!empty($wdEarly['extract_resume'])) {
             $_staleR = max(120, (int)($cn['stall_after'] ?? 300));
             if ($_psR === 'detail' && $_psaR <= $_staleR) $_phR = 'detail';
         }
+        /* v9.92: نوبت همین حالا مصرف شد — پیش از شروعِ کارِ طولانی ثبتش کن.
+           اگر هاست وسطِ کار بکشدمان، lastRun روی دیسک نشسته و تیکِ بعدی
+           دوباره از صفر شروع نمی‌کند. */
+        cronMarkRun($_rk, 'extract_resume');
+        $syncState = loadSyncState();
         $_rr = runBackendExtract($_rk, 'watchdog_resume', false, $_phR);
         $results['extract_resumed'][] = ['key' => $_rk, 'phase' => $_phR, 'ok' => !empty($_rr['ok'])];
     }
@@ -10709,6 +10878,14 @@ $target = $syncCfg['target'] ?? 'woo';
    می‌مانند. فقط برای اینکه گزارشِ کران روشن باشد، صریح علامت می‌زنیم. */
 if (!in_array($target, ['woo', 'bsl', 'both', 'none'], true)) $target = 'woo';
 if ($interval > 0 && ($now - $lastRun < $interval)) { $pResult['status'] = 'not_due'; $pResult['remaining'] = $interval - ($now - $lastRun); $results['profiles'][] = $pResult; continue; }
+/* v9.92: نوبت همین‌جا — پیش از هر کارِ طولانی — مصرف و روی دیسک ثبت شود.
+   جزئیاتِ چرایی بالای cronMarkRun(). خلاصه: تا حالا lastRun فقط در مسیرِ
+   کاملاً موفق ذخیره می‌شد، پس یک استخراجِ طولانی که هاست وسطش پردازه را
+   می‌کشت باعث می‌شد پروفایل در تیکِ بعدیِ کران دوباره «due» باشد و کل
+   چرخه (از جمله فاز ۲) هر دقیقه تکرار شود. */
+cronMarkRun($key, 'running');
+if (!isset($syncState[$key]) || !is_array($syncState[$key])) $syncState[$key] = [];
+$syncState[$key]['lastRun'] = $now;
 $pResult['status'] = 'syncing'; $pResult['target'] = $target;
 if ($target === 'none') { $pResult['send'] = 'disabled_by_target'; }
 /* v9.45: پروفایل‌های واردشده با اکسل/CSV — بدون استخراج، فقط آپدیت قیمت/موجودی.
@@ -13266,6 +13443,48 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "preg_match('~,(\\d{1,2})\$~', \$en)") !== false);
     $add('9.85', 'کلاسِ کاراکتریِ ترکیب‌گر جداکنندهٔ الگو را نمی‌بندد',
          strpos($selfSrc, "preg_match('/[+~]/', \$css)") !== false);
+
+    /* ---------- v9.92: زمان‌بندیِ واقعیِ کران + پروفایل‌های ناپدیدشونده ---------- */
+    /* باگ ۱: فاز ۲ در هر تیکِ کران اجرا می‌شد چون lastRun فقط در مسیرِ کاملاً
+       موفق ذخیره می‌شد و مسیرِ «ادامهٔ نگهبان» اصلاً گیتِ زمان‌بندی نداشت. */
+    $add('9.92', 'نوبتِ اجرا در لحظهٔ شروع و مستقیم روی دیسک ثبت می‌شود',
+         strpos($selfSrc, 'function cronMark' . 'Run(string $key') !== false
+      && strpos($selfSrc, "\$row['lastRun'] = ti" . "me();") !== false
+      && strpos($selfSrc, 'saveSyncState($st);') !== false);
+    $add('9.92', 'حلقهٔ کران پیش از استخراجِ طولانی نوبت را مصرف می‌کند',
+         strpos($selfSrc, "cronMarkRun(\$key, 'runn" . "ing');") !== false);
+    $add('9.92', 'ادامهٔ نگهبان به دورهٔ زمان‌بندیِ همان پروفایل مقید است',
+         strpos($selfSrc, "\$_ivR  = (int)(\$_scR['interv" . "al'] ?? 3600);") !== false
+      && strpos($selfSrc, "if (\$_ivR > 0 && (\$now - \$_lrR) < \$_ivR) {") !== false
+      && strpos($selfSrc, "'reason' => 'not_" . "due'") !== false);
+    $add('9.92', 'ادامهٔ نگهبان برای پروفایلِ خاموش اجرا نمی‌شود',
+         strpos($selfSrc, "'reason' => 'sync_disa" . "bled'") !== false);
+    $add('9.92', 'ادامهٔ نگهبان هم نوبت را پیش از شروع مصرف می‌کند',
+         strpos($selfSrc, "cronMarkRun(\$_rk, 'extract_res" . "ume');") !== false);
+    /* باگ ۲: نوشتنِ غیراتمی، فایلِ نصفه می‌ساخت؛ خوانشِ بعدی آن را «خالی»
+       می‌فهمید و نوشتنِ بعد از آن فقط یک پروفایل باقی می‌گذاشت. */
+    $add('9.92', 'فایل JSON اتمی نوشته می‌شود (فایل موقت + rename)',
+         strpos($selfSrc, "\$tmp = \$path . '.tmp' . getmyp" . "id();") !== false
+      && strpos($selfSrc, 'if (@rename($tmp, $path)) return') !== false);
+    $add('9.92', 'خوانشِ پروفایل، فایلِ خرابِ JSON را با فایلِ خالی یکی نمی‌گیرد',
+         strpos($selfSrc, "\$GLOBALS['_profilesCorr" . "upt'] = true;") !== false
+      && strpos($selfSrc, "@copy(PROFILES_FILE, PROFILES_FILE . '.corr" . "upt');") !== false);
+    $add('9.92', 'از آخرین خوانشِ سالم نسخهٔ پشتیبان نگه داشته می‌شود',
+         strpos($selfSrc, "\$bk = PROFILES_FILE . '.b" . "ak';") !== false
+      && strpos($selfSrc, '@copy(PROFILES_FILE, $bk);') !== false);
+    $add('9.92', 'نوشتن روی پروفایلِ خراب رد می‌شود',
+         strpos($selfSrc, "if (!empty(\$GLOBALS['_profilesCorrupt'])) {") !== false);
+    $add('9.92', 'نوشتنی که پروفایل‌ها را کم کند با نسخهٔ روی دیسک ادغام می‌شود',
+         strpos($selfSrc, 'count($onDisk) > count($profiles) && count($profiles) > 0') !== false
+      && strpos($selfSrc, 'foreach ($lost as $lk) $profiles[$lk] = $onDisk[$lk];') !== false);
+    $add('9.92', 'حذفِ عمدیِ کاربر همچنان کار می‌کند (محافظ دور زده می‌شود)',
+         strpos($selfSrc, 'function saveProfiles(array $profiles, bool $allowDelete = false)') !== false
+      && strpos($selfSrc, 'if (!$allowDelete && is_file(PROFILES_FILE)) {') !== false
+      && strpos($selfSrc, 'saveProfiles($profiles, tr' . 'ue);') !== false);
+    $add('9.92', 'بازیابی از پشتیبان پرچمِ خرابی را پاک می‌کند (قفلِ فقط‌خواندنی نمی‌ماند)',
+         strpos($selfSrc, "if (@copy(\$bk, PROFILES_FILE)) {") !== false
+      && strpos($selfSrc, "\$GLOBALS['_profilesCorr" . "upt'] = false;") !== false
+      && strpos($selfSrc, 'از پشتیبان ترمیم شد (') !== false);
 
     /* ---------- v9.91: ماندگاریِ تب + مقصدِ «هیچ‌کدام» ---------- */
     $add('9.91', 'نامِ تب فعال در مرورگر ذخیره می‌شود',
