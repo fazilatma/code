@@ -1,6 +1,6 @@
 {
   "name": "scraper4-cloudflare",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "Cloudflare Workers-native Scraper 4 with D1, Queues, Cron, and downloadable backups",
   "type": "module",

@@ -49,6 +49,14 @@ export async function destinationCategories(refresh=false):Promise<{items:Destin
   const record={items:dedupeCategories(items),updatedAt:new Date().toISOString()};await setState(cacheKey,record);return{...record,cached:false};
 }
 export async function destinationProduct(target:Target,id:number,shopId=''){if(!Number.isInteger(id)||id<=0)throw Error('شناسه محصول نامعتبر است.');return target==='woo'?wooGet(id):basalamGet(id,shopId)}
+/** Applies one already-validated category without an extra product GET. Queue jobs use
+ * this narrow operation so every invocation remains well below the Free-plan
+ * subrequest ceiling while category learning stays consistent with manual edits. */
+export async function applyBasalamCategory(id:number,shopId:string,categoryId:number,title:string,categoryName:string,source='هوش مصنوعی سرورساید'){
+  if(!Number.isInteger(id)||id<=0||!Number.isInteger(categoryId)||categoryId<=0)throw Error('شناسهٔ محصول یا دسته‌بندی نامعتبر است.');
+  const raw=await basalamUpdate(id,{category_id:categoryId},shopId);const learned=await learnCategory(title,categoryId,categoryName);
+  return{ok:true,id,shopId,categoryId,categoryName,source,learned,raw};
+}
 export async function listDestinationProducts(target:Target):Promise<Remote[]>{return target==='woo'?wooProducts():basalamProducts()}
 export async function destinationOverview(target:Target){const items=await listDestinationProducts(target),statuses:Record<string,number>={};for(const item of items)statuses[item.status]=(statuses[item.status]||0)+1;return{target,total:items.length,statuses,withoutImage:items.filter(x=>!x.images.length).length,withoutSku:items.filter(x=>!x.sku).length}}
 export async function findDestinationDuplicates(target:Target){const items=await listDestinationProducts(target),groups=new Map<string,Remote[]>();for(const item of items){const key=norm(item.name);if(!key)continue;const rows=groups.get(key)||[];rows.push(item);groups.set(key,rows)}return[...groups.entries()].filter(([,rows])=>rows.length>1).map(([title,rows])=>({title,count:rows.length,items:rows.map(x=>({id:x.id,name:x.name,status:x.status,sku:x.sku,shopId:x.shopId}))}))}

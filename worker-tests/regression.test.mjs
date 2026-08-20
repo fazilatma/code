@@ -6,7 +6,7 @@ import worker from '../scraper4.worker.js';
 
 const ctx={waitUntil(){},passThroughOnException(){}};
 class MemoryD1 {
-  constructor(){this.states=new Map();this.profiles=new Map();this.products=new Map();this.jobs=new Map();this.categoryLearning=new Map()}
+  constructor(){this.states=new Map();this.stateUpdatedAt=new Map();this.profiles=new Map();this.products=new Map();this.jobs=new Map();this.categoryLearning=new Map()}
   prepare(sql){return new MemoryStatement(this,sql)}
   async batch(statements){return statements.map(()=>({success:true,meta:{changes:0}}))}
 }
@@ -28,7 +28,11 @@ class MemoryStatement {
   }
   async all(){const s=this.sql;let results=[];if(s.startsWith('SELECT * FROM profiles ORDER BY'))results=[...this.db.profiles.values()];if(s.startsWith('SELECT * FROM category_learning ORDER BY'))results=[...this.db.categoryLearning.values()].sort((a,b)=>b.hits-a.hits).slice(0,Number(this.values[0])||1000);return{success:true,results}}
   async run(){const s=this.sql,v=this.values;
-    if(s.startsWith('INSERT INTO app_state'))this.db.states.set(v[0],v[1]);
+    if(s.startsWith('INSERT INTO app_state')){
+      const lease=s.includes('WHERE app_state.updated_at<?'),current=this.db.states.get(v[0]),currentAt=this.db.stateUpdatedAt.get(v[0])||'';
+      if(!lease||current===undefined||currentAt<v[3]){this.db.states.set(v[0],v[1]);this.db.stateUpdatedAt.set(v[0],v[2])}
+    }
+    else if(s.startsWith('DELETE FROM app_state WHERE key=')&&this.db.states.get(v[0])===v[1]){this.db.states.delete(v[0]);this.db.stateUpdatedAt.delete(v[0])}
     else if(s.startsWith('INSERT INTO profiles'))this.db.profiles.set(v[0],{id:v[0],data:v[1],enabled:v[2],interval_minutes:v[3],created_at:v[4],updated_at:v[5],last_run_at:null});
     else if(s.startsWith('INSERT INTO products'))this.db.products.set(`${v[0]}:${v[1]}`,{profile_id:v[0],source_key:v[1],data:v[2],title:v[3],price:v[4],source_url:v[5]});
     else if(s.startsWith('INSERT INTO category_learning')){const key=`${v[0]}:${v[1]}`,previous=this.db.categoryLearning.get(key);this.db.categoryLearning.set(key,{phrase:v[0],category_id:v[1],category_name:v[2],hits:(previous?.hits||0)+(s.includes('VALUES(?,?,?,1,?)')?1:Number(v[3])||1),updated_at:v.at(-1)})}
@@ -40,6 +44,50 @@ const call=(db,path,init={},extra={})=>worker.fetch(new Request(`https://worker.
 const jsonInit=body=>({method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
 const file=(name,value)=>{const text=JSON.stringify(value);return{name:{size:Buffer.byteLength(text),b64:Buffer.from(text).toString('base64')}}};
 function tinyXlsx(){const files={'[Content_Types].xml':'<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>','_rels/.rels':'<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>','xl/workbook.xml':'<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Products" sheetId="1" r:id="rId1"/></sheets></workbook>','xl/_rels/workbook.xml.rels':'<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>','xl/worksheets/sheet1.xml':'<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>نام محصول</t></is></c><c r="B1" t="inlineStr"><is><t>قیمت</t></is></c><c r="C1" t="inlineStr"><is><t>برند</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>عطر اکسل</t></is></c><c r="B2"><v>375000</v></c><c r="C2" t="inlineStr"><is><t>نمونه</t></is></c></row></sheetData></worksheet>'};return zipSync(Object.fromEntries(Object.entries(files).map(([name,text])=>[name,strToU8(text)])))}
+
+test('same-origin font CSS and WOFF2 proxy are functional and cacheable',async()=>{
+  const db=new MemoryD1(),cssResponse=await call(db,'/assets/fonts/vazir.css');assert.equal(cssResponse.status,200);assert.match(cssResponse.headers.get('content-type')||'',/text\/css/);const css=await cssResponse.text();assert.match(css,/font-family:"Vazir"/);assert.match(css,/url\("\/assets\/fonts\/vazir-400\.woff2"\)/);assert.doesNotMatch(css,/fontapi\.ir|fontcdn\.ir/);
+  const originalFetch=globalThis.fetch;let upstream='';globalThis.fetch=async request=>{upstream=String(request instanceof Request?request.url:request);return new Response(new Uint8Array([119,79,70,50]),{headers:{'content-type':'font/woff2'}})};try{const fontResponse=await call(db,'/assets/fonts/vazir-400.woff2');assert.equal(fontResponse.status,200);assert.equal(fontResponse.headers.get('content-type'),'font/woff2');assert.match(fontResponse.headers.get('cache-control')||'',/immutable/);assert.equal(fontResponse.headers.get('access-control-allow-origin'),'*');assert.match(upstream,/cdn\.fontcdn\.ir\/Fonts\/Vazir\/[a-f0-9]{64}\.woff2$/);assert.deepEqual([...new Uint8Array(await fontResponse.arrayBuffer())],[119,79,70,50])}finally{globalThis.fetch=originalFetch}
+});
+
+test('AI test runs persist server-side and expose stop/resume recovery controls',async()=>{
+  const db=new MemoryD1(),sent=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}};const startedResponse=await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام',categoryTitle:'ادو پرفیوم',delayMs:250}),extra),started=await startedResponse.json();assert.equal(startedResponse.status,202);assert.equal(started.run.kind,'ai-test');assert.equal(started.run.status,'queued');assert.equal(sent[0].message.task,'ai-test');assert.ok(db.states.has('background_current:ai-test'));
+  const current=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());assert.equal(current.run.id,started.run.id);assert.equal(current.run.prompt,'سلام');
+  const stopped=await call(db,'/api/ai/test-runs/control',jsonInit({action:'stop'}),extra).then(response=>response.json());assert.equal(stopped.run.status,'paused');assert.equal(stopped.run.stopRequested,true);
+  const resumed=await call(db,'/api/ai/test-runs/control',jsonInit({action:'resume'}),extra).then(response=>response.json());assert.equal(resumed.run.status,'queued');assert.equal(resumed.run.stopRequested,false);assert.equal(sent.at(-1).message.runId,started.run.id)
+});
+
+test('AI queue checkpoints results server-side until all models finish after a refresh',async()=>{
+  const db=new MemoryD1(),sent=[],models=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}},env={DB:db,VAULT_SECRET:'vault-secret',JOBS:null,JOBS_DLQ:{send:async()=>{}}};env.JOBS=extra.JOBS;
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'durable',name:'Durable AI',baseUrl:'https://ai.example/v1',apiKey:'durable-ai-secret',models:['model-1','model-2'],enabled:true}],network:{mode:'direct'}}}),extra);
+  const originalFetch=globalThis.fetch;globalThis.fetch=async(_request,init={})=>{const body=JSON.parse(String(init.body||'{}'));models.push(body.model);return jsonResponse({choices:[{message:{content:`پاسخ ${body.model}`}}]})};
+  const deliver=message=>worker.queue({messages:[{body:message,ack(){},retry(){assert.fail('AI checkpoint should not retry')}}]},env,ctx);
+  try{
+    const started=await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام پایدار'}),extra).then(response=>response.json());assert.equal(started.run.status,'queued');assert.equal(sent.length,1);
+    await deliver(sent.shift().message);const refreshed=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());assert.equal(refreshed.run.status,'queued');assert.equal(refreshed.run.cursor,1);assert.equal(refreshed.run.result.results.length,1);assert.equal(refreshed.run.result.serverSide,true);
+    await deliver(sent.shift().message);assert.equal(sent.length,0);const completed=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());assert.equal(completed.run.status,'done');assert.equal(completed.run.cursor,2);assert.equal(completed.run.result.results.length,2);assert.deepEqual(models,['model-1','model-2'])
+  }finally{globalThis.fetch=originalFetch}
+});
+
+test('category-all queue consumes every unapproved page once and survives duplicate delivery',async()=>{
+  const db=new MemoryD1(),sent=[],listPages=[],updatedIds=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}},env={DB:db,VAULT_SECRET:'vault-secret',JOBS:null,JOBS_DLQ:{send:async()=>{}}};env.JOBS=extra.JOBS;
+  await call(db,'/api/connections',jsonInit({basalam:{api:'https://basalam.example/v1',token:'category-token',vendorId:'55'},ai:{providers:[{id:'cat-ai',name:'Category AI',baseUrl:'https://ai.example/v1',apiKey:'category-ai-secret',models:['cat-model'],enabled:true}],candidates:['cat-ai::cat-model'],network:{mode:'direct'}}}),extra);
+  db.states.set('ai_test_results',JSON.stringify({runId:'completed-ai-run',results:[{ok:true,provider:'cat-ai',model:'cat-model'}]}));
+  db.states.set('basalam_categories_v1',JSON.stringify({updatedAt:new Date().toISOString(),items:[{id:902,name:'ادو پرفیوم',path:'آرایشی ← ادو پرفیوم',parentId:null,depth:1,leaf:true}]}));
+  const originalFetch=globalThis.fetch;globalThis.fetch=async(request,init={})=>{const url=new URL(String(request instanceof Request?request.url:request)),method=String(init.method||(request instanceof Request?request.method:'GET')||'GET').toUpperCase();
+    if(url.hostname==='ai.example')return jsonResponse({choices:[{message:{content:'{"category_id":902,"reason":"مرتبط"}'}}]});
+    if(url.pathname==='/v1/vendors/55/products'&&method==='GET'){const page=Number(url.searchParams.get('page'));listPages.push(page);assert.deepEqual(url.searchParams.getAll('statuses'),['3567']);return jsonResponse({data:[{id:200+page,title:`ادو پرفیوم ${page}`,status:{value:3567,name:'تأیید نشده'}}],total_count:2,total_page:2})}
+    if(/^\/v1\/products\/20[12]$/.test(url.pathname)&&method==='PATCH'){updatedIds.push(Number(url.pathname.split('/').at(-1)));assert.equal(JSON.parse(String(init.body)).category_id,902);return jsonResponse({ok:true})}
+    throw new Error(`unexpected category-all request ${method} ${url}`)};
+  const deliver=async message=>{let acked=0,retried=0;await worker.queue({messages:[{body:message,ack(){acked++},retry(){retried++}}]},env,ctx);assert.equal(acked,1);assert.equal(retried,0)};
+  try{
+    const startedResponse=await call(db,'/api/destination/basalam/category-runs',jsonInit({}),extra),started=await startedResponse.json();assert.equal(startedResponse.status,202);assert.equal(started.run.total,0);assert.equal(sent.length,1);
+    const duplicate=sent.shift().message;await Promise.all([deliver(duplicate),deliver(duplicate)]);
+    for(let checkpoints=0;sent.length&&checkpoints<10;checkpoints++)await deliver(sent.shift().message);
+    assert.equal(sent.length,0,'the queue run must reach a terminal checkpoint');assert.deepEqual(listPages,[1,2]);assert.deepEqual(updatedIds.sort((a,b)=>a-b),[201,202]);
+    const current=await call(db,'/api/destination/basalam/category-runs/current',{},extra).then(response=>response.json());assert.equal(current.run.status,'done');assert.equal(current.run.total,2);assert.equal(current.run.processed,2);assert.equal(current.run.changed,2);assert.equal(current.run.failed,0);assert.equal(current.run.items.length,2);assert.equal('products' in current.run,false,'the public response must not expose the potentially large checkpoint list')
+  }finally{globalThis.fetch=originalFetch}
+});
 
 test('PBKDF2 uses Cloudflare maximum, vault round-trips, and oversized legacy envelopes fail clearly',async()=>{
   const source=await readFile(new URL('../worker-src/vault.ts',import.meta.url),'utf8'),bundle=await readFile(new URL('../scraper4.worker.js',import.meta.url),'utf8');

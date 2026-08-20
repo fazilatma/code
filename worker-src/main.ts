@@ -2,6 +2,7 @@ import { app, scheduledTasks } from './app.js';
 import { configureEnv, type Env } from './env.js';
 import { ensureSchema } from './db.js';
 import { processJob } from './processor.js';
+import { processBackgroundMessage } from './background.js';
 import type { JobMessage } from './types.js';
 
 type ExecutionContext={waitUntil(promise:Promise<unknown>):void};
@@ -15,11 +16,20 @@ export default {
     configureEnv(env);await ensureSchema(env.DB);
     for(const item of batch.messages){
       try{
-        const result=await processJob(String(item.body?.jobId||''));
-        console.log(JSON.stringify({event:'queue_job',jobId:item.body?.jobId,result}));
-        if(result==='continue'){
-          if(env.JOBS)await env.JOBS.send({jobId:item.body.jobId},{delaySeconds:1});
-          else item.retry({delaySeconds:30});
+        if(item.body?.task==='ai-test'||item.body?.task==='category-all'){
+          const result=await processBackgroundMessage(item.body);
+          console.log(JSON.stringify({event:'queue_background',task:item.body.task,runId:item.body.runId,result:result.outcome}));
+          if(result.outcome==='continue'){
+            if(env.JOBS)await env.JOBS.send(item.body,{delaySeconds:result.delaySeconds||1});
+            else item.retry({delaySeconds:30});
+          }
+        }else{
+          const jobId=String('jobId' in item.body?item.body.jobId:'');const result=await processJob(jobId);
+          console.log(JSON.stringify({event:'queue_job',jobId,result}));
+          if(result==='continue'){
+            if(env.JOBS)await env.JOBS.send({task:'job',jobId},{delaySeconds:1});
+            else item.retry({delaySeconds:30});
+          }
         }
         item.ack();
       }catch(error){console.error('queue delivery failed',error);item.retry({delaySeconds:30})}
