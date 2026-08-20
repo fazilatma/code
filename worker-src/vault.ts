@@ -2,7 +2,7 @@ import { getEnv, MIN_SECRET_LENGTH, validSecret } from './env.js';
 import { base64ToBytes, bytesToBase64, textDecoder, textEncoder } from './utils.js';
 
 export type ConnectionVault={
-  woo:{url:string;key:string;secret:string;categoryId:number};
+  woo:{url:string;key:string;secret:string;categoryId:number;network:{mode:'auto'|'direct'|'worker';workerUrl:string}};
   basalam:{token:string;vendorId:string;api:string;preparationDays:number;weight:number;packageWeight:number;stock:number;categoryId:number;fallbackCategoryIds:number[];autoCategory:boolean;netIndirect:boolean;shops:Array<{name:string;token:string;vendorId:string;pricePercent:number}>};
   ai:{baseUrl:string;apiKey:string;model:string;providers:Array<{id:string;name:string;baseUrl:string;apiKey:string;models:string[];enabled:boolean}>;candidates:string[];master:string;network:{mode:string;proxyUrl:string;workerUrl:string;dohUrl:string;resolveIp:string}};
   notifications:{url:string;token:string;chatId:string;baleToken:string;baleChatId:string;rubikaToken:string;rubikaChatId:string};
@@ -12,7 +12,7 @@ type Envelope={version:2;salt:string;iv:string;ciphertext:string;iterations?:num
 export const VAULT_KDF_ITERATIONS=100_000;
 
 export const emptyConnections=():ConnectionVault=>({
-  woo:{url:'',key:'',secret:'',categoryId:0},
+  woo:{url:'',key:'',secret:'',categoryId:0,network:{mode:'auto',workerUrl:''}},
   basalam:{token:'',vendorId:'',api:'https://openapi.basalam.com/v1',preparationDays:3,weight:500,packageWeight:600,stock:10,categoryId:0,fallbackCategoryIds:[],autoCategory:false,netIndirect:false,shops:[]},
   ai:{baseUrl:'',apiKey:'',model:'',providers:[],candidates:[],master:'',network:{mode:'direct',proxyUrl:'',workerUrl:'',dohUrl:'https://cloudflare-dns.com/dns-query',resolveIp:''}},
   notifications:{url:'',token:'',chatId:'',baleToken:'',baleChatId:'',rubikaToken:'',rubikaChatId:''}
@@ -28,7 +28,7 @@ export function mergeConnections(base:ConnectionVault,input:any):ConnectionVault
   const shops=Array.isArray(input?.basalam?.shops)?input.basalam.shops.map((shop:any)=>({name:text(shop?.name),token:text(shop?.token),vendorId:text(shop?.vendorId),pricePercent:num(shop?.pricePercent)})):base.basalam.shops;
   const providers=Array.isArray(input?.ai?.providers)?input.ai.providers.map((p:any,i:number)=>({id:text(p?.id)||`provider-${i+1}`,name:text(p?.name)||text(p?.id)||`Provider ${i+1}`,baseUrl:text(p?.baseUrl||p?.base_url).replace(/\/$/,''),apiKey:text(p?.apiKey||p?.api_key),models:Array.isArray(p?.models)?p.models.map(String):[],enabled:p?.enabled!==false})):base.ai.providers;
   const network={...base.ai.network,...(input?.ai?.network||{})};return{
-    woo:{url:text(input?.woo?.url,base.woo.url).replace(/\/$/,''),key:text(input?.woo?.key,base.woo.key),secret:text(input?.woo?.secret,base.woo.secret),categoryId:num(input?.woo?.categoryId,base.woo.categoryId)},
+    woo:{url:text(input?.woo?.url,base.woo.url).replace(/\/$/,''),key:text(input?.woo?.key,base.woo.key),secret:text(input?.woo?.secret,base.woo.secret),categoryId:num(input?.woo?.categoryId,base.woo.categoryId),network:{mode:['auto','direct','worker'].includes(text(input?.woo?.network?.mode,base.woo.network.mode))?text(input?.woo?.network?.mode,base.woo.network.mode) as 'auto'|'direct'|'worker':'auto',workerUrl:text(input?.woo?.network?.workerUrl,base.woo.network.workerUrl).replace(/\/$/,'')}},
     basalam:{token:text(input?.basalam?.token,base.basalam.token),vendorId:text(input?.basalam?.vendorId,base.basalam.vendorId),api:text(input?.basalam?.api,base.basalam.api).replace(/\/$/,'')||'https://openapi.basalam.com/v1',preparationDays:num(input?.basalam?.preparationDays,base.basalam.preparationDays),weight:num(input?.basalam?.weight,base.basalam.weight),packageWeight:num(input?.basalam?.packageWeight,base.basalam.packageWeight),stock:num(input?.basalam?.stock,base.basalam.stock),categoryId:num(input?.basalam?.categoryId,base.basalam.categoryId),fallbackCategoryIds:Array.isArray(input?.basalam?.fallbackCategoryIds)?input.basalam.fallbackCategoryIds.map(Number).filter((id:number)=>id>0):base.basalam.fallbackCategoryIds,autoCategory:bool(input?.basalam?.autoCategory,base.basalam.autoCategory),netIndirect:bool(input?.basalam?.netIndirect,base.basalam.netIndirect),shops},
     ai:{baseUrl:text(input?.ai?.baseUrl,base.ai.baseUrl).replace(/\/$/,''),apiKey:text(input?.ai?.apiKey,base.ai.apiKey),model:text(input?.ai?.model,base.ai.model),providers,candidates:Array.isArray(input?.ai?.candidates)?input.ai.candidates.map(String):base.ai.candidates,master:text(input?.ai?.master,base.ai.master),network:{mode:text(network.mode,'direct'),proxyUrl:text(network.proxyUrl),workerUrl:text(network.workerUrl),dohUrl:text(network.dohUrl,'https://cloudflare-dns.com/dns-query'),resolveIp:text(network.resolveIp)}},
     notifications:{url:text(input?.notifications?.url,base.notifications.url),token:text(input?.notifications?.token,base.notifications.token),chatId:text(input?.notifications?.chatId,base.notifications.chatId),baleToken:text(input?.notifications?.baleToken,base.notifications.baleToken),baleChatId:text(input?.notifications?.baleChatId,base.notifications.baleChatId),rubikaToken:text(input?.notifications?.rubikaToken,base.notifications.rubikaToken),rubikaChatId:text(input?.notifications?.rubikaChatId,base.notifications.rubikaChatId)}

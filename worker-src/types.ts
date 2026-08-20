@@ -99,7 +99,7 @@ export type Job = {
   failed: number;
   stopRequested: boolean;
   error: string | null;
-  log: Array<{ at: string; level: string; message: string }>;
+  log: Array<{ at: string; level: string; message: string; event?: 'added'|'updated'|'failed'|'removed'|'out-of-stock'|'zero-price'|'price-increased'|'price-decreased'|'sync-created'|'sync-updated'; item?: {sourceKey:string;title:string;url?:string;target?:string;shop?:string;oldPrice?:number;newPrice?:number;delta?:number;percent?:number;error?:string} }>;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

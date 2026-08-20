@@ -1,6 +1,6 @@
 import { loadConnections } from './connections.js';
 import { findLearnedCategory, getDestinationId, getRemoteId, setDestinationId, setRemoteId } from './db.js';
-import { safeFetch } from './network.js';
+import { safeFetch, safeWooFetch } from './network.js';
 import { basicAuth } from './utils.js';
 import type { Product, Profile, VariationGroup } from './types.js';
 
@@ -11,7 +11,7 @@ export async function syncWoo(product:Product,profile:Profile):Promise<'created'
   let id=await getRemoteId(profile.id,product.sourceKey,'woo');
   const sku=product.sku||`s4-${profile.id}-${product.sourceKey}`.slice(0,100);
   if(!id){
-    const search=await safeFetch(`${base}?sku=${encodeURIComponent(sku)}`,{headers:{authorization:auth,accept:'application/json'}},2_000_000);
+    const search=await safeWooFetch(`${base}?sku=${encodeURIComponent(sku)}`,{headers:{authorization:auth,accept:'application/json'}},2_000_000);
     if(search.ok){const found=await search.json() as any[];id=found[0]?.id?Number(found[0].id):null}
   }
   const groups=(product.variationGroups||[]).filter(group=>group.name&&group.values?.length);
@@ -22,7 +22,7 @@ export async function syncWoo(product:Product,profile:Profile):Promise<'created'
   if(product.weight)payload.weight=String(product.weight);
   if(groups.length)payload.attributes=groups.map(group=>({name:group.name,visible:true,variation:true,options:group.values.slice(0,100)}));
   const category=profile.wooCategoryId||c.categoryId;if(category)payload.categories=[{id:category}];
-  const response=await safeFetch(id?`${base}/${id}`:base,{method:'POST',headers:{authorization:auth,'content-type':'application/json',accept:'application/json'},body:JSON.stringify(payload)},3_000_000),body=await response.json().catch(()=>({})) as any;
+  const response=await safeWooFetch(id?`${base}/${id}`:base,{method:'POST',headers:{authorization:auth,'content-type':'application/json',accept:'application/json'},body:JSON.stringify(payload)},3_000_000),body=await response.json().catch(()=>({})) as any;
   if(!response.ok)throw new Error(`WooCommerce HTTP ${response.status}: ${body.message||JSON.stringify(body).slice(0,300)}`);
   const remoteId=Number(body.id||id);
   if(remoteId){
@@ -37,13 +37,13 @@ async function syncWooVariations(base:string,parentId:number,parentSku:string,gr
   const combinations=cartesian(groups).slice(0,100);
   for(let index=0;index<combinations.length;index++){
     const options=combinations[index],sku=`${parentSku}-v${index+1}`.slice(0,100);
-    const search=await safeFetch(`${base}/${parentId}/variations?sku=${encodeURIComponent(sku)}&per_page=1`,{headers:{authorization:auth,accept:'application/json'}},1_000_000);
+    const search=await safeWooFetch(`${base}/${parentId}/variations?sku=${encodeURIComponent(sku)}&per_page=1`,{headers:{authorization:auth,accept:'application/json'}},1_000_000);
     const found=search.ok?await search.json().catch(()=>[]) as any[]:[],existing=Number(found[0]?.id)||0;
     const keyedPrices=options.map(option=>product.variationPrices?.[option.value]).filter((price):price is number=>Number(price)>0);
     const payload:any={sku,regular_price:String(keyedPrices[0]||product.price),attributes:options.map(({name,option})=>({name,option}))};
     if(product.stock!==undefined)Object.assign(payload,{manage_stock:true,stock_quantity:product.stock});
     if(product.image)payload.image={src:product.image};
-    const result=await safeFetch(existing?`${base}/${parentId}/variations/${existing}`:`${base}/${parentId}/variations`,{method:'POST',headers:{authorization:auth,'content-type':'application/json',accept:'application/json'},body:JSON.stringify(payload)},2_000_000);
+    const result=await safeWooFetch(existing?`${base}/${parentId}/variations/${existing}`:`${base}/${parentId}/variations`,{method:'POST',headers:{authorization:auth,'content-type':'application/json',accept:'application/json'},body:JSON.stringify(payload)},2_000_000);
     if(!result.ok){const error=await result.json().catch(()=>({})) as any;throw new Error(`WooCommerce variation HTTP ${result.status}: ${error.message||JSON.stringify(error).slice(0,300)}`)}
   }
 }

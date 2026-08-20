@@ -77,6 +77,18 @@ test('network redirects strip credentials, oversized and stalled bodies stop saf
   }finally{globalThis.fetch=originalFetch;console.error=originalError}
 });
 
+test('Woo automatic network mode retries Cloudflare 522 through the configured Worker and explains the result',async()=>{
+  const originalFetch=globalThis.fetch,originalError=console.error,db=new MemoryD1(),calls=[];console.error=()=>{};
+  try{
+    await call(db,'/api/connections',jsonInit({woo:{url:'https://store.example',key:'ck_woo',secret:'cs_woo',network:{mode:'auto',workerUrl:'https://woo-proxy.example/?target={url}'}}}));
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request),headers=new Headers(init.headers);calls.push({url,headers});if(url.startsWith('https://store.example/'))return new Response('origin timeout',{status:522,headers:{'content-type':'text/plain'}});if(url.startsWith('https://woo-proxy.example/'))return new Response(JSON.stringify([{id:77,name:'محصول نمونه',status:'publish'}]),{headers:{'content-type':'application/json'}});throw new Error(`unexpected ${url}`)};
+    const fallback=await call(db,'/api/test-connection/woo',jsonInit({})).then(response=>response.json());assert.equal(fallback.ok,true,JSON.stringify(fallback));assert.equal(fallback.http.status,200);assert.equal(fallback.http.networkMode,'worker');assert.equal(fallback.http.directStatus,522);assert.equal(fallback.summary.sampleProductId,77);assert.match(fallback.recommendations.join(' '),/مستقیم.*۵۲۲|مستقیم.*522/);assert.equal(calls.length,2);assert.match(calls[1].url,/woo-proxy\.example/);assert.equal(calls[1].headers.get('x-target-url')?.startsWith('https://store.example/'),true);assert.match(calls[1].headers.get('authorization')||'',/^Basic /);
+
+    await call(db,'/api/connections',jsonInit({woo:{network:{mode:'direct',workerUrl:'https://woo-proxy.example/?target={url}'}}}));calls.length=0;globalThis.fetch=async(request)=>{calls.push({url:String(request instanceof Request?request.url:request),headers:new Headers()});return new Response('origin timeout',{status:522,headers:{'content-type':'text/plain'}})};
+    const direct=await call(db,'/api/test-connection/woo',jsonInit({})).then(response=>response.json());assert.equal(direct.ok,false);assert.equal(direct.http.status,522);assert.equal(direct.http.networkMode,'direct');assert.equal(calls.length,1);assert.match(calls[0].url,/store\.example/);assert.match(direct.recommendations.join(' '),/سرور اصلی|کلید ووکامرس مقصر نیست/);
+  }finally{globalThis.fetch=originalFetch;console.error=originalError}
+});
+
 test('Cloudflare Workers AI uses native run payloads, resolves organization model paths, and only then falls back to chat',async()=>{
   const originalFetch=globalThis.fetch,originalError=console.error,db=new MemoryD1(),calls=[];console.error=()=>{};
   try{

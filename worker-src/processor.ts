@@ -1,4 +1,4 @@
-import { claimJob, deleteState, getJob, getProduct, getProfile, getState, listProducts, markMissingProducts, markProfileRun, setState, stopRequested, updateJob, upsertProduct } from './db.js';
+import { claimJob, deleteState, findMissingProducts, getJob, getProduct, getProfile, getState, listProducts, markMissingProducts, markProfileRun, setState, stopRequested, updateJob, upsertProduct } from './db.js';
 import { getEnv } from './env.js';
 import { mapLimit, pageUrl, scrapeDetails, scrapeListPage, transformProduct } from './scraper.js';
 import { syncBasalam, syncWoo } from './sync.js';
@@ -22,7 +22,9 @@ function preserveExisting(fresh:Product,previous:Product|null):Product{
     variationPrices:Object.keys(fresh.variationPrices||{}).length?fresh.variationPrices:previous.variationPrices
   };
 }
-function append(job:Job,text:string,level='info'){job.log.push({at:new Date().toISOString(),level,message:text});if(job.log.length>200)job.log=job.log.slice(-200)}
+type JobLog=Job['log'][number];
+function reportItem(product:Product,extra:Partial<NonNullable<JobLog['item']>>={}):NonNullable<JobLog['item']>{return{sourceKey:product.sourceKey,title:product.title,url:product.url,...extra}}
+function append(job:Job,text:string,level='info',event?:JobLog['event'],item?:JobLog['item']){job.log.push({at:new Date().toISOString(),level,message:text,event,item});if(job.log.length>1500)job.log=job.log.slice(-1500)}
 async function save(job:Job){await updateJob(job.id,{status:job.status,phase:job.phase,total:job.total,processed:job.processed,added:job.added,updated:job.updated,failed:job.failed,error:job.error,log:job.log,finishedAt:job.finishedAt})}
 
 export async function enqueueJob(job:Job,waitUntil?:(promise:Promise<unknown>)=>void):Promise<void>{
@@ -79,16 +81,20 @@ async function runScrapeChunk(job:Job,profile:Profile):Promise<boolean>{
     await setState(key,checkpoint);await save(job);
   }
   job.phase='details-save-sync';
-  const start=checkpoint.index,end=Math.min(checkpoint.products.length,start+chunkSize()),batch=checkpoint.products.slice(start,end);
+  const start=checkpoint.index,end=Math.min(checkpoint.products.length,start+chunkSize()),batch=checkpoint.products.slice(start,end),previousByKey=new Map<string,Product|null>(),rawPriceByKey=new Map<string,number>();
   await mapLimit(batch,Math.min(4,Math.max(1,Number(getEnv().DETAIL_CONCURRENCY)||2)),async product=>{
-    const merged=preserveExisting(product,await getProduct(profile.id,product.sourceKey));Object.assign(product,merged);
-    try{Object.assign(product,await scrapeDetails(product,profile.selectors,Boolean(profile.networkIndirect)))}catch(error){job.failed++;append(job,`${product.title}: جزئیات: ${message(error)}؛ اطلاعات معتبر قبلی حفظ شد.`,'error')}
+    const previous=await getProduct(profile.id,product.sourceKey);previousByKey.set(product.sourceKey,previous);rawPriceByKey.set(product.sourceKey,product.price);Object.assign(product,preserveExisting(product,previous));
+    try{Object.assign(product,await scrapeDetails(product,profile.selectors,Boolean(profile.networkIndirect)))}catch(error){const errorText=message(error);job.failed++;append(job,`${product.title}: جزئیات: ${errorText}؛ اطلاعات معتبر قبلی حفظ شد.`,'error','failed',reportItem(product,{error:errorText}))}
   });
   for(const product of batch){
     if(await stopRequested(job.id)){job.status='stopped';await setState(key,checkpoint);return false}
+    const previous=previousByKey.get(product.sourceKey)||null,rawPrice=rawPriceByKey.get(product.sourceKey)??product.price;
+    if(rawPrice<=0)append(job,`${product.title}: قیمت صفر یا نامعتبر از مبدأ دریافت شد.`,'warning','zero-price',reportItem(product,{newPrice:rawPrice}));
+    if(product.stock===0)append(job,`${product.title}: موجودی مبدأ به صفر رسیده است.`,'warning','out-of-stock',reportItem(product));
+    if(previous&&previous.price>0&&product.price>0&&previous.price!==product.price){const delta=product.price-previous.price,percent=Number((delta/previous.price*100).toFixed(2));append(job,`${product.title}: قیمت ${delta>0?'افزایش':'کاهش'} یافت (${percent}٪).`,delta>0?'warning':'info',delta>0?'price-increased':'price-decreased',reportItem(product,{oldPrice:previous.price,newPrice:product.price,delta,percent}))}
     let saved=false;
-    try{const result=await upsertProduct(profile.id,product);result==='added'?job.added++:job.updated++;saved=true}
-    catch(error){checkpoint.retireSafe=false;job.failed++;append(job,`${product.title}: ذخیره: ${message(error)}`,'error')}
+    try{const result=await upsertProduct(profile.id,product);result==='added'?job.added++:job.updated++;append(job,`${product.title}: ${result==='added'?'محصول جدید ثبت شد':'اطلاعات محصول به‌روزرسانی شد'}`,'info',result,reportItem(product));saved=true}
+    catch(error){const errorText=message(error);checkpoint.retireSafe=false;job.failed++;append(job,`${product.title}: ذخیره: ${errorText}`,'error','failed',reportItem(product,{error:errorText}))}
     if(saved){await syncProduct(job,profile,product);checkpoint.seen.push(product.sourceKey)}
     checkpoint.index++;job.processed++;
   }
@@ -101,7 +107,8 @@ async function runScrapeChunk(job:Job,profile:Profile):Promise<boolean>{
 async function finishScrape(job:Job,profile:Profile,checkpoint:ScrapeCheckpoint):Promise<void>{
   job.phase='retire';
   if(checkpoint.retireSafe&&checkpoint.seen.length){
-    const retired=await markMissingProducts(profile.id,checkpoint.seen);
+    const missing=await findMissingProducts(profile.id,checkpoint.seen),retired=await markMissingProducts(profile.id,checkpoint.seen);
+    for(const product of missing.slice(0,1000))append(job,`${product.title}: دیگر در مبدأ دیده نشد و بازنشسته شد.`,'warning','removed',reportItem(product));
     if(retired)append(job,`${retired} محصول دیگر در مبدأ دیده نشد`,'warning');
   }else append(job,'اسکن کامل و قابل‌اعتماد نبود؛ برای ایمنی هیچ محصولی بازنشسته نشد.','warning');
   await markProfileRun(profile.id);
@@ -122,13 +129,13 @@ async function runSyncChunk(job:Job,profile:Profile):Promise<boolean>{
 }
 
 async function syncProduct(job:Job,profile:Profile,product:Product):Promise<void>{
-  if(job.target==='woo'||job.target==='both')try{await syncWoo(product,profile)}catch(error){job.failed++;append(job,`${product.title} [WooCommerce]: ${message(error)}`,'error')}
-  if(job.target==='basalam'||job.target==='both')try{await syncBasalam(product,profile)}catch(error){job.failed++;append(job,`${product.title} [Basalam]: ${message(error)}`,'error')}
+  if(job.target==='woo'||job.target==='both')try{const action=await syncWoo(product,profile);append(job,`${product.title} [WooCommerce]: ${action==='created'?'ایجاد':'به‌روزرسانی'} شد.`,'info',action==='created'?'sync-created':'sync-updated',reportItem(product,{target:'woo',shop:'فروشگاه ووکامرس'}))}catch(error){const errorText=message(error);job.failed++;append(job,`${product.title} [WooCommerce]: ${errorText}`,'error','failed',reportItem(product,{target:'woo',error:errorText}))}
+  if(job.target==='basalam'||job.target==='both')try{const results=await syncBasalam(product,profile);for(const result of results)append(job,`${product.title} [Basalam · ${result.shop}]: ${result.action==='created'?'ایجاد':'به‌روزرسانی'} شد.`,'info',result.action==='created'?'sync-created':'sync-updated',reportItem(product,{target:'basalam',shop:result.shop}))}catch(error){const errorText=message(error);job.failed++;append(job,`${product.title} [Basalam]: ${errorText}`,'error','failed',reportItem(product,{target:'basalam',error:errorText}))}
 }
 
 export async function retryAndEnqueue(id:string,waitUntil?:(promise:Promise<unknown>)=>void):Promise<Job|null>{
   const job=await getJob(id);if(!job)return null;
   await deleteState(stateKey(id));
-  await updateJob(id,{status:'queued',phase:'waiting',stopRequested:false,error:null,finishedAt:null,processed:0,added:0,updated:0,failed:0});
+  await updateJob(id,{status:'queued',phase:'waiting',stopRequested:false,error:null,finishedAt:null,processed:0,added:0,updated:0,failed:0,log:[]});
   const queued=await getJob(id);if(queued)await enqueueJob(queued,waitUntil);return queued;
 }

@@ -1,6 +1,6 @@
 import { loadConnections } from './connections.js';
 import { getState, learnCategory, maintenanceRows, setDestinationId, setRemoteId, setState } from './db.js';
-import { safeFetch } from './network.js';
+import { safeFetch, safeWooFetch } from './network.js';
 import { basicAuth } from './utils.js';
 import type { ConnectionVault } from './vault.js';
 
@@ -61,7 +61,7 @@ export async function destinationUpdate(target:Target,id:number,input:any,apply=
 }
 export async function destinationChangeStatus(target:Target,id:number,status:string,shopId=''){const allowed=target==='woo'?['publish','draft','private','pending','trash']:['2976','3790','3567','3568','4184'];if(!allowed.includes(String(status)))throw Error('وضعیت انتخاب‌شده معتبر نیست.');if(target==='woo')await wooUpdate(id,{status});else await basalamUpdate(id,{status:Number(status)},shopId);return{ok:true,id,status,shopId:shopId||'default'}}
 export async function destinationDelete(target:Target,id:number,force=false,shopId=''){
-  if(target==='woo'){const c=(await loadConnections()).woo,auth=basicAuth(c.key,c.secret),result=await fetchJson(`${wooBase(c)}/${id}?force=${force?'true':'false'}`,{method:'DELETE',headers:{authorization:auth}});return{ok:true,id,deleted:true,force,product:result.body}}
+  if(target==='woo'){const c=(await loadConnections()).woo,auth=basicAuth(c.key,c.secret),result=await fetchJson(`${wooBase(c)}/${id}?force=${force?'true':'false'}`,{method:'DELETE',headers:{authorization:auth}},true);return{ok:true,id,deleted:true,force,product:result.body}}
   // Basalam has no permanent DELETE endpoint. The reversible PHP-parity action is archive status 4184.
   await basalamUpdate(id,{status:4184},shopId);return{ok:true,id,deleted:false,archived:true,status:4184,shopId:shopId||'default',message:'باسلام حذف دائمی ندارد؛ محصول با وضعیت ۴۱۸۴ بایگانی شد.'};
 }
@@ -128,12 +128,12 @@ async function wooCatalog(query:{page:number;perPage:number;q:string;status:stri
   const c=(await loadConnections()).woo;if(!c.url||!c.key||!c.secret)throw Error('اتصال ووکامرس کامل نیست');const auth=basicAuth(c.key,c.secret);
   if(/^\d+$/.test(query.q)){try{const product=await wooGet(Number(query.q));return{products:[product],total:1,totalPages:1,foundBy:'id'}}catch{/* continue with server search */}}
   const url=new URL(wooBase(c));url.searchParams.set('page',String(query.page));url.searchParams.set('per_page',String(query.perPage));url.searchParams.set('status',wooListStatus(query.status));if(query.q)url.searchParams.set('search',query.q);
-  const result=await fetchJson(url.toString(),{headers:{authorization:auth,accept:'application/json'}}),rows=Array.isArray(result.body)?result.body:[];
+  const result=await fetchJson(url.toString(),{headers:{authorization:auth,accept:'application/json'}},true),rows=Array.isArray(result.body)?result.body:[];
   return{products:rows.map(row=>normalizeRemote('woo',row,'default','فروشگاه ووکامرس')),total:Number(result.response.headers.get('x-wp-total')||rows.length),totalPages:Math.max(1,Number(result.response.headers.get('x-wp-totalpages')||1)),foundBy:query.q?'search':'list'};
 }
 async function wooStatusCounts(){const statuses=['all','publish','draft','pending','private','trash'],entries=await Promise.all(statuses.map(async status=>{try{const result=await wooCatalog({page:1,perPage:10,q:'',status});return[status,result.total] as const}catch{return[status,0] as const}}));return Object.fromEntries(entries)}
-async function wooGet(id:number){const c=(await loadConnections()).woo,auth=basicAuth(c.key,c.secret),result=await fetchJson(`${wooBase(c)}/${id}`,{headers:{authorization:auth,accept:'application/json'}});return normalizeRemote('woo',unwrapProduct(result.body),'default','فروشگاه ووکامرس')}
-async function wooUpdate(id:number,payload:any){const c=(await loadConnections()).woo,auth=basicAuth(c.key,c.secret),result=await fetchJson(`${wooBase(c)}/${id}`,{method:'PUT',headers:{authorization:auth,'content-type':'application/json',accept:'application/json'},body:JSON.stringify(payload)});return result.body}
+async function wooGet(id:number){const c=(await loadConnections()).woo,auth=basicAuth(c.key,c.secret),result=await fetchJson(`${wooBase(c)}/${id}`,{headers:{authorization:auth,accept:'application/json'}},true);return normalizeRemote('woo',unwrapProduct(result.body),'default','فروشگاه ووکامرس')}
+async function wooUpdate(id:number,payload:any){const c=(await loadConnections()).woo,auth=basicAuth(c.key,c.secret),result=await fetchJson(`${wooBase(c)}/${id}`,{method:'PUT',headers:{authorization:auth,'content-type':'application/json',accept:'application/json'},body:JSON.stringify(payload)},true);return result.body}
 function wooBase(c:ConnectionVault['woo']){if(!c.url||!c.key||!c.secret)throw Error('اتصال ووکامرس کامل نیست');return c.url.replace(/\/$/,'')+'/wp-json/wc/v3/products'}
 function wooListStatus(status:string){return ['publish','draft','pending','private','trash'].includes(status)?status:'any'}
 
@@ -170,5 +170,5 @@ function normalizeCategoryAssignments(value:any){const rows=Array.isArray(value)
 function clamp(value:any,min:number,max:number,fallback:number){const n=Number(value);return Number.isFinite(n)?Math.max(min,Math.min(max,Math.round(n))):fallback}
 
 class DestinationHttpError extends Error{constructor(public status:number,public body:any,url:string){super(`HTTP ${status} از ${new URL(url).hostname}: ${String(body?.message||body?.error||JSON.stringify(body)).slice(0,300)}`)}}
-async function fetchJson(url:string,init:RequestInit={}){const response=await safeFetch(url,init,10_000_000),text=await response.text();let body:any;try{body=text?JSON.parse(text):{}}catch{body={message:text.slice(0,500)}}if(!response.ok)throw new DestinationHttpError(response.status,body,url);return{response,body}}
+async function fetchJson(url:string,init:RequestInit={},woo=false){const response=await (woo?safeWooFetch(url,init,10_000_000):safeFetch(url,init,10_000_000)),text=await response.text();let body:any;try{body=text?JSON.parse(text):{}}catch{body={message:text.slice(0,500)}}if(!response.ok)throw new DestinationHttpError(response.status,body,url);return{response,body}}
 const msg=(e:unknown)=>e instanceof Error?e.message:String(e);

@@ -94,7 +94,7 @@ export async function updateJob(id:string,patch:Partial<Job>):Promise<void>{
   await run(`UPDATE jobs SET ${sets.join(',')},updated_at=? WHERE id=?`,[...values,now(),id]);
 }
 export async function stopRequested(id:string):Promise<boolean>{const row=await statement('SELECT stop_requested FROM jobs WHERE id=?',[id]).first<{stop_requested:number}>();return Boolean(row?.stop_requested);}
-export async function retryJob(id:string):Promise<Job|null>{const timestamp=now(),changed=await run(`UPDATE jobs SET status='queued',phase='waiting',stop_requested=0,error=NULL,started_at=NULL,finished_at=NULL,processed=0,added=0,updated=0,failed=0,updated_at=? WHERE id=? AND status IN ('failed','stopped','done')`,[timestamp,id]);return changed?getJob(id):null;}
+export async function retryJob(id:string):Promise<Job|null>{const timestamp=now(),changed=await run(`UPDATE jobs SET status='queued',phase='waiting',stop_requested=0,error=NULL,started_at=NULL,finished_at=NULL,processed=0,added=0,updated=0,failed=0,log='[]',updated_at=? WHERE id=? AND status IN ('failed','stopped','done')`,[timestamp,id]);return changed?getJob(id):null;}
 export async function deleteJob(id:string):Promise<boolean>{const deleted=await run("DELETE FROM jobs WHERE id=? AND status!='running'",[id]);if(deleted)await deleteState(`job_checkpoint:${id}`);return Boolean(deleted);}
 export async function clearFinishedJobs():Promise<number>{await run("DELETE FROM app_state WHERE key IN (SELECT 'job_checkpoint:'||id FROM jobs WHERE status IN ('done','failed','stopped'))");return run("DELETE FROM jobs WHERE status IN ('done','failed','stopped')");}
 
@@ -111,6 +111,7 @@ export async function listProducts(profileId:string,limit=100,offset=0,q=''):Pro
 }
 export async function allProducts(profileId:string):Promise<Product[]>{return(await rows('SELECT data FROM products WHERE profile_id=? ORDER BY updated_at',[profileId])).map(productFromRow);}
 export async function getProduct(profileId:string,sourceKey:string):Promise<Product|null>{const row=await statement('SELECT data FROM products WHERE profile_id=? AND source_key=?',[profileId,sourceKey]).first();return row?productFromRow(row):null;}
+export async function findMissingProducts(profileId:string,seenKeys:string[]):Promise<Product[]>{if(!seenKeys.length)return[];const seen=new Set(seenKeys),existing=await rows<{source_key:string;data:string}>('SELECT source_key,data FROM products WHERE profile_id=? AND active=1',[profileId]);return existing.filter(x=>!seen.has(x.source_key)).map(productFromRow)}
 export async function markMissingProducts(profileId:string,seenKeys:string[]):Promise<number>{
   if(!seenKeys.length)return 0;const seen=new Set(seenKeys),existing=await rows<{source_key:string}>('SELECT source_key FROM products WHERE profile_id=? AND active=1',[profileId]),missing=existing.filter(x=>!seen.has(x.source_key));
   if(!missing.length)return 0;const timestamp=now(),db=getEnv().DB;for(let i=0;i<missing.length;i+=50)await db.batch(missing.slice(i,i+50).map(x=>db.prepare('UPDATE products SET active=0,missing_since=COALESCE(missing_since,?),updated_at=? WHERE profile_id=? AND source_key=?').bind(timestamp,timestamp,profileId,x.source_key)));return missing.length;
