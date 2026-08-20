@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.89';
+const APP_VERSION = '9.90';
 const APP_VERSION_DATE = '1405/05/29';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4713,6 +4713,8 @@ body{padding-top:0!important}
   box-shadow:0 4px 14px rgba(0,0,0,.55);font:12px Tahoma,sans-serif;direction:rtl;
   white-space:nowrap;cursor:default}
 .__pop.__on{display:flex}
+/* v9.90: خاموش‌کردن کل نوار شناور از پنل بیرونی */
+.__pop.__off{display:none!important}
 /* v8.76: دو ردیف — ردیف بالا کنترل، ردیف پایین سلکتور و پیش‌نمایش */
 .__prow{display:flex;gap:3px;align-items:center}
 .__prow2{display:flex;gap:4px;align-items:center;max-width:430px}
@@ -4753,10 +4755,11 @@ body{padding-top:0!important}
      بدون برگشتن به پنل بالای صفحه انجام شود. -->
 <div class="__pop" id="__pop">
   <div class="__prow">
-    <!-- v8.77: فلش‌های خواهر/برادر برداشته شدند — عملاً استفاده نمی‌شدند
-         و فقط نوار را شلوغ می‌کردند. کلیدهای → ← هنوز کار می‌کنند. -->
+    <!-- v9.90: فلش‌های خواهر/برادر برگشتند (در v8.77 حذف شده بودند). -->
     <button class="__pb" id="__pup"   onclick="__go('up')"   title="والد (کلید ↑)">⬆</button>
     <button class="__pb" id="__pdn"   onclick="__go('down')" title="فرزند (کلید ↓)">⬇</button>
+    <button class="__pb" id="__pprv"  onclick="__go('prev')" title="آیتم قبلی (کلید →)">⬅</button>
+    <button class="__pb" id="__pnxt"  onclick="__go('next')" title="آیتم بعدی (کلید ←)">➡</button>
     <span class="__psep"></span>
     <button class="__pb" id="__pfprev" onclick="__field(-1)" title="فیلد قبلی (Shift+Tab)">‹</button>
     <button class="__pb __pfld" id="__pfld" onclick="__field(1)" title="فیلد بعدی (کلید Tab یا Space)">—</button>
@@ -5174,16 +5177,22 @@ function __placePop(el,sel,nMatch,mode){
   }catch(e){}
   var top=r.top+sy-ph-6;
   if(r.top-ph-6<0)top=r.bottom+sy+6;            // جا نبود → برو زیرش
-  var left=r.left+sx;
-  var maxL=sx+document.documentElement.clientWidth-pw-8;
+  /* v9.90: مثل پیش‌نمایش فهرست — وسط‌چین روی المان و clamp به viewport
+     تا دکمهٔ سمت راست (والد) هیچ‌وقت بیرون نزند. */
+  var vw=document.documentElement.clientWidth||window.innerWidth||360;
+  var left=r.left+sx+(r.width-pw)/2;
+  var minL=sx+4, maxL=sx+vw-pw-8;
+  if(maxL<minL)maxL=minL;
   if(left>maxL)left=maxL;
-  if(left<sx+4)left=sx+4;
+  if(left<minL)left=minL;
   pop.style.top=(Math.max(sy+2,top)-oy)+'px';
   pop.style.left=(left-ox)+'px';
   var d=function(id,on){var b=document.getElementById(id);if(b)b.disabled=!on;};
-  // v8.77: فقط والد/فرزند روی نوار مانده‌اند
+  // v9.90: هر چهار جهت وضعیت فعال/غیرفعال می‌گیرند
   d('__pup',   !!(el.parentElement&&el.parentElement.tagName!=='BODY'));
   d('__pdn',   !!el.firstElementChild);
+  d('__pprv',  !!el.previousElementSibling);
+  d('__pnxt',  !!el.nextElementSibling);
 }
 
 /** رنگ‌آمیزی تصاویری که با انتخاب فعلی برداشته می‌شوند */
@@ -5375,6 +5384,10 @@ window.addEventListener('message',function(e){
     __setMode(String(d.mode||'shortDesc'));
   }else if(d.type==='picker_go'){
     __go(String(d.dir||'up'));
+  }else if(d.type==='picker_popbar'){
+    /* v9.90: نمایش/پنهان‌کردن نوار شناور از روی چک‌باکس پنل بیرونی */
+    var pop=document.getElementById('__pop');
+    if(pop){ if(d.on===false)pop.classList.add('__off'); else pop.classList.remove('__off'); }
   }else if(d.type==='picker_clear_gal'){
     GAL=[];delete S.galleryOne;__paintGallery('galleryOne');__report();
   }else if(d.type==='picker_done'){
@@ -5387,6 +5400,10 @@ window.__done=function(){
   if(GAL.length)S.galleryOne=GAL.join('\n');
   __post('detail_selectors',{data:S});
 };
+
+/* v9.90: __field داخل IIFE بود و onclickهای HTML به آن نمی‌رسیدند، پس
+   دکمه‌های ‹ › و نام فیلد روی نوار شناور بی‌اثر بودند. */
+window.__field=__field;
 
 __navState();
 __post('picker_ready',{});
@@ -5560,6 +5577,9 @@ body{padding-top:130px!important}
   box-shadow:0 4px 14px rgba(0,0,0,.55);font:12px Tahoma,sans-serif;direction:rtl;
   white-space:nowrap;cursor:default}
 .__pop.__on{display:flex}
+/* v9.90: کاربر می‌تواند کل نوار شناور را از پنل بیرونی خاموش کند.
+   __off از __on قوی‌تر است چون بعد از آن تعریف شده و !important دارد. */
+.__pop.__off{display:none!important}
 .__prow{display:flex;gap:3px;align-items:center}
 .__prow2{display:flex;gap:4px;align-items:center;max-width:430px}
 .__psep{width:1px;height:15px;background:#1e40af;margin:0 2px;flex:0 0 auto}
@@ -5606,9 +5626,13 @@ body{padding-top:130px!important}
 <!-- v8.76: نوار شناور کنار المان انتخاب‌شده -->
 <div class="__pop" id="__pop">
   <div class="__prow">
-    <!-- v8.77: فلش‌های خواهر/برادر برداشته شدند؛ کلیدهای → ← باقی‌اند -->
+    <!-- v9.90: فلش‌های خواهر/برادر برگشتند. در v8.77 برداشته شده بودند و
+         فقط کلیدهای → ← کار می‌کردند؛ کاربر با موس راهی برای رفتن به آیتم
+         بغلی نداشت. حالا هر چهار جهت روی خود نوار هست. -->
     <button class="__pb" id="__pup"   onclick="__goParent()" title="والد (کلید ↑)">⬆</button>
     <button class="__pb" id="__pdn"   onclick="__goChild()"  title="فرزند (کلید ↓)">⬇</button>
+    <button class="__pb" id="__pprv"  onclick="__goPrev()"   title="آیتم قبلی (کلید →)">⬅</button>
+    <button class="__pb" id="__pnxt"  onclick="__goNext()"   title="آیتم بعدی (کلید ←)">➡</button>
     <span class="__psep"></span>
     <button class="__pb" id="__pfprev" onclick="__vField(-1)" title="فیلد قبلی (Shift+Tab)">‹</button>
     <button class="__pb __pfld" id="__pfld" onclick="__vField(1)" title="فیلد بعدی (Tab یا Space)">—</button>
@@ -5917,19 +5941,31 @@ function __placePop(el,sel,mode){
   // نوار بالای صفحه ۱۳۰ پیکسل ارتفاع دارد؛ زیرش پنهان نشو
   var top=r.top+sy-ph-6;
   if(r.top-ph-6<134)top=r.bottom+sy+6;
-  var left=r.left+sx;
-  var maxL=sx+document.documentElement.clientWidth-pw-8;
+  /* v9.90: نوار روی المان وسط‌چین می‌شود، نه چسبیده به لبهٔ چپش.
+     قبلاً left=r.left بود؛ روی المان‌های پهن نوار به یک گوشه می‌افتاد و
+     چون clamp با clientWidth (بدون در نظر گرفتن اسکرول افقی) حساب می‌شد،
+     دکمهٔ «والد» — که در چیدمان rtl سمت راستِ نوار است — از کادر بیرون
+     می‌زد و دیده نمی‌شد. حالا اول وسط‌چین، بعد به viewportِ واقعی clamp. */
+  var vw=document.documentElement.clientWidth||window.innerWidth||360;
+  var left=r.left+sx+(r.width-pw)/2;
+  var minL=sx+4, maxL=sx+vw-pw-8;
+  if(maxL<minL)maxL=minL;              // نوار از خود صفحه پهن‌تر بود
   if(left>maxL)left=maxL;
-  if(left<sx+4)left=sx+4;
+  if(left<minL)left=minL;
   pop.style.top=(Math.max(sy+136,top)-oy)+'px';
   pop.style.left=(left-ox)+'px';
   var d=function(id,on){var b=document.getElementById(id);if(b)b.disabled=!on;};
-  // v8.77: فقط والد/فرزند روی نوار مانده‌اند
+  // v9.90: هر چهار جهت وضعیت فعال/غیرفعال می‌گیرند (قبلاً فقط والد/فرزند)
   d('__pup',   !!(el.parentElement&&el.parentElement.tagName!=='BODY'));
   d('__pdn',   !!el.firstElementChild);
+  d('__pprv',  !!el.previousElementSibling);
+  d('__pnxt',  !!el.nextElementSibling);
 }
 
-/** v8.76: عوض کردن فیلد از داخل خود صفحه */
+/** v8.76: عوض کردن فیلد از داخل خود صفحه
+ *  v9.90: این تابع داخل IIFE تعریف شده بود، پس onclick داخل HTML (که در
+ *  دامنهٔ سراسری اجرا می‌شود) به آن نمی‌رسید و دکمه‌های ‹ › و نام فیلد
+ *  با ReferenceError بی‌صدا شکست می‌خوردند. انتهای فایل روی window ست می‌شود. */
 function __vField(step){
   var sel=document.getElementById('__m');
   if(!sel)return;
@@ -6166,8 +6202,12 @@ function __vpReport(){
   }
   __vpPost('vp_state',{
     mode:m, sel:S[m]||'', tag:el?elInfo(el):'',
+    /* v9.90: وضعیت خواهر/برادر هم گزارش می‌شود تا دکمه‌های «قبلی/بعدی»ِ
+       پنل بیرونی بدانند کی فعال باشند. قبلاً فقط up/down فرستاده می‌شد. */
     nav:{up:!!(el&&el.parentElement&&el.parentElement.tagName!=='BODY'),
-         down:!!(el&&el.firstElementChild)},
+         down:!!(el&&el.firstElementChild),
+         prev:!!(el&&el.previousElementSibling),
+         next:!!(el&&el.nextElementSibling)},
     matches:el?countSimilar(el):0,
     preview:String(pv||'').substring(0,150),
     all:S
@@ -6184,8 +6224,25 @@ window.addEventListener('message',function(e){
     else if(d.dir==='down') __goChild();
     else if(d.dir==='prev') __goPrev();
     else if(d.dir==='next') __goNext();
+  }else if(d.type==='vp_popbar'){
+    /* v9.90: نمایش/پنهان‌کردن نوار شناور از روی چک‌باکس پنل بیرونی */
+    var pop=document.getElementById('__pop');
+    if(pop){ if(d.on===false)pop.classList.add('__off'); else pop.classList.remove('__off'); }
+  }else if(d.type==='vp_topbar'){
+    /* v9.90: نوار ثابت بالای صفحهٔ پیش‌نمایش هم قابل خاموش‌کردن شد.
+       padding-top بدنه با آن هماهنگ می‌شود وگرنه ۱۳۰ پیکسل جای خالی می‌ماند. */
+    var bar=document.querySelector('.__bar');
+    if(bar){
+      bar.style.display=(d.on===false)?'none':'';
+      try{ document.body.style.paddingTop=(d.on===false)?'0px':'130px'; }catch(_e){}
+    }
   }
 });
+
+/* v9.90: این توابع داخل IIFE بودند و onclickهای درون HTML — که در دامنهٔ
+   سراسری ارزیابی می‌شوند — به آن‌ها دسترسی نداشتند. نتیجه: دکمه‌های
+   «فیلد قبلی/بعدی» روی نوار شناور هیچ کاری نمی‌کردند. */
+window.__vField=__vField;
 __vpPost('vp_ready',{});
 
 })();
@@ -13205,6 +13262,57 @@ if (isset($_GET['selftest'])) {
     $add('9.85', 'کلاسِ کاراکتریِ ترکیب‌گر جداکنندهٔ الگو را نمی‌بندد',
          strpos($selfSrc, "preg_match('/[+~]/', \$css)") !== false);
 
+    /* ---------- v9.90: کنترل‌های تب سلکتورها ---------- */
+    $add('9.90', 'هر سه دستهٔ کنترل، تیک نمایش/پنهان دارند',
+         strpos($selfSrc, 'id="ctlVpPanel"') !== false
+      && strpos($selfSrc, 'id="ctlVpPop"')   !== false
+      && strpos($selfSrc, 'id="ctlVpTop"')   !== false
+      && strpos($selfSrc, 'id="ctlPkPanel"') !== false
+      && strpos($selfSrc, 'id="ctlPkPop"')   !== false
+      && strpos($selfSrc, 'id="ctlPkHint"')  !== false);
+    $add('9.90', 'انتخابِ نمایش کنترل‌ها ذخیره و دوباره اعمال می‌شود',
+         strpos($selfSrc, "SEL_CTL_KEY='scraper_selctl'") !== false
+      && strpos($selfSrc, 'function selCtlInit(') !== false
+      && strpos($selfSrc, 'function selCtlToggle(') !== false
+      && strpos($selfSrc, 'selCtlInit();') !== false);
+    $add('9.90', 'تیک‌ها بعد از آمادهٔ‌شدن هر iframe دوباره اعمال می‌شوند',
+         strpos($selfSrc, "selCtlSyncFrame('vp')") !== false
+      && strpos($selfSrc, "selCtlSyncFrame('pk')") !== false
+      && strpos($selfSrc, 'function selCtlSyncFrame(') !== false);
+    $add('9.90', 'نوار شناور با کلاس __off واقعاً پنهان می‌شود',
+         substr_count($selfSrc, '.__pop.__' . 'off{display:none!important}') === 2
+      && strpos($selfSrc, "'vp_popbar'") !== false
+      && strpos($selfSrc, "'picker_popbar'") !== false);
+    $add('9.90', 'فلش‌های خواهر/برادر روی نوار شناور برگشتند',
+         substr_count($selfSrc, 'id="__pp' . 'rv"') === 2
+      && substr_count($selfSrc, 'id="__pn' . 'xt"') === 2
+      && strpos($selfSrc, 'onclick="__go' . 'Prev()"   title="آیتم قبلی') !== false
+      && strpos($selfSrc, 'onclick="__go' . 'Next()"   title="آیتم بعدی') !== false
+      && strpos($selfSrc, 'onclick="__go(\'prev\')" title="آیتم قبلی') !== false
+      && strpos($selfSrc, 'onclick="__go(\'next\')" title="آیتم بعدی') !== false);
+    $add('9.90', 'دکمه‌های فیلد روی نوار شناور از دامنهٔ سراسری در دسترس‌اند',
+         strpos($selfSrc, 'window.__vField=__vField;') !== false
+      && strpos($selfSrc, 'window.__field=__field;') !== false);
+    $add('9.90', 'نوار شناور روی المان وسط‌چین می‌شود',
+         substr_count($selfSrc, 'var left=r.left+sx+' . '(r.width-pw)/2;') === 2
+      // چسبیدن به لبهٔ چپ (رفتار قدیمی) دیگر هیچ‌جا نیست. رشته تکه‌تکه
+      // نوشته شده تا خودِ این آزمون در شمارش نیفتد.
+      && substr_count($selfSrc, 'var left=r.left+' . 'sx;') === 0);
+    $add('9.90', 'نوار شناور هرگز از لبهٔ راست بیرون نمی‌زند',
+         substr_count($selfSrc, 'if(maxL<minL)' . 'maxL=minL;') === 2
+      && substr_count($selfSrc, 'var minL=sx+4, ' . 'maxL=sx+vw-pw-8;') === 2);
+    $add('9.90', 'هر چهار جهت روی نوار شناور وضعیت فعال/غیرفعال می‌گیرند',
+         substr_count($selfSrc, "d('__pp" . "rv',  !!el.previousElementSibling);") === 2
+      && substr_count($selfSrc, "d('__pn" . "xt',  !!el.nextElementSibling);") === 2);
+    $add('9.90', 'پنل‌های بیرونی هم دکمهٔ قبلی/بعدی دارند',
+         strpos($selfSrc, 'id="vp' . 'Prev"') !== false && strpos($selfSrc, 'id="vp' . 'Next"') !== false
+      && strpos($selfSrc, 'id="pk' . 'Prev"') !== false && strpos($selfSrc, 'id="pk' . 'Next"') !== false
+      && strpos($selfSrc, "[['vpUp','up'],['vpDown','down'],['vpPrev','prev'],['vpNext','next']]") !== false
+      && strpos($selfSrc, "[['pkUp','up'],['pkDown','down'],['pkPrev','prev'],['pkNext','next']]") !== false);
+    $add('9.90', 'پیش‌نمایش فهرست وضعیت خواهر/برادر را گزارش می‌کند',
+         strpos($selfSrc, 'prev:!!(el&&el.previousElementSibling),') !== false
+      && strpos($selfSrc, 'next:!!(el&&el.nextElementSibling)},') !== false);
+
     /* ---------- v9.89: «۲۰ کارت، یک آدرس» ⇒ فقط یک محصول ---------- */
     $add('9.89', 'بالا رفتن به دنبال <a> در مرزِ ظرفِ محصول متوقف می‌شود',
          strpos($selfSrc, '$boundary = null): string {') !== false
@@ -14115,10 +14223,12 @@ if (isset($_GET['selftest'])) {
 
     /* ---------- v8.77: نمونهٔ قابل‌انتخاب، پنل فهرست، حذف فلش‌ها، توقف استخراج ---------- */
     // فلش‌های خواهر/برادر از هر دو نوار شناور و از پنل جزئیات حذف شدند
-    $add('8.77', 'فلش‌های خواهر/برادر از نوارها برداشته شده‌اند',
-         strpos($selfSrc, 'id="__pp' . 'rev"') === false
-         && strpos($selfSrc, 'id="__pn' . 'ext"') === false
-         && strpos($selfSrc, 'id="pk' . 'Prev" onclick') === false);
+    /* v9.90: این بررسی وارونه شد. در ۸.۷۷ فلش‌های خواهر/برادر عمداً حذف
+       شده بودند، ولی کاربر بدون آن‌ها با موس راهی برای رفتن به آیتم بغلی
+       نداشت. حالا باید حتماً موجود باشند — تستش در بخش ۹.۹۰ است. */
+    $add('8.77', 'دکمه‌های فیلد (‹ ›) روی نوار شناور هستند',
+         substr_count($selfSrc, 'id="__pf' . 'prev"') === 2
+         && substr_count($selfSrc, 'id="__pf' . 'next"') === 2);
     $add('8.77', 'دکمه‌های والد و فرزند سر جایشان مانده‌اند',
          substr_count($selfSrc, 'id="__p' . 'up"') === 2
          && substr_count($selfSrc, 'id="__p' . 'dn"') === 2);
@@ -24262,6 +24372,21 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
             <!-- v8.77: همان کنترل‌های بیرونیِ سلکتور جزئیات، این‌بار برای
                  پیش‌نمایش فهرست محصولات. تا حالا این پیش‌نمایش هیچ کنترل
                  بیرونی نداشت و فقط نوار داخل خودِ صفحه بود. -->
+            <!-- v9.90: سه دستهٔ کنترلِ سلکتور جای زیادی می‌گرفتند. هر کدام
+                 حالا یک تیک نمایش/پنهان دارد و انتخاب کاربر در localStorage
+                 می‌ماند تا با هر بار باز کردن صفحه دوباره تنظیم نشود. -->
+            <div class="selctl-bar" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 10px;margin:0 0 8px;font-size:11.5px">
+                <b style="color:#93c5fd;font-size:11px">🧰 نمایش کنترل‌ها:</b>
+                <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#cbd5e1">
+                    <input type="checkbox" id="ctlVpPanel" checked onchange="selCtlToggle('vpPanel',this.checked)"> پنل بیرونی
+                </label>
+                <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#cbd5e1">
+                    <input type="checkbox" id="ctlVpPop" checked onchange="selCtlToggle('vpPop',this.checked)"> نوار شناور کنار المان
+                </label>
+                <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#cbd5e1">
+                    <input type="checkbox" id="ctlVpTop" checked onchange="selCtlToggle('vpTop',this.checked)"> نوار بالای پیش‌نمایش
+                </label>
+            </div>
             <div class="card" id="vpPanel" style="margin:0 0 8px;border-color:#3b82f6;padding:9px">
                 <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
                     <label style="flex:0 0 auto;font-size:11px;color:#93c5fd;font-weight:700">🎯 انتخاب:</label>
@@ -24278,6 +24403,9 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
                 <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
                     <button class="btn btn-blue" id="vpUp"   onclick="vpGo('up')"   style="font-size:11px;padding:6px 10px" title="عنصر والد">⬆ والد</button>
                     <button class="btn btn-blue" id="vpDown" onclick="vpGo('down')" style="font-size:11px;padding:6px 10px" title="اولین فرزند">⬇ فرزند</button>
+                    <!-- v9.90: ناوبری خواهر/برادر روی پنل بیرونی هم اضافه شد -->
+                    <button class="btn btn-blue" id="vpPrev" onclick="vpGo('prev')" style="font-size:11px;padding:6px 10px" title="آیتم قبلی (هم‌ردیف)">⬅ قبلی</button>
+                    <button class="btn btn-blue" id="vpNext" onclick="vpGo('next')" style="font-size:11px;padding:6px 10px" title="آیتم بعدی (هم‌ردیف)">➡ بعدی</button>
                     <span id="vpCnt" style="font-size:11px;color:#93c5fd;font-weight:700"></span>
                 </div>
                 <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
@@ -24474,6 +24602,19 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
     <!-- v8.68: کنترل‌های انتخاب، بیرون از پنجرهٔ پیش‌نمایش.
          قبلاً یک نوار ثابت داخل خودِ صفحهٔ محصول بود و بخش زیادی از
          ارتفاع را می‌گرفت؛ در ارتفاع کم عملاً چیزی برای کلیک نمی‌ماند. -->
+    <!-- v9.90: همان تیک‌های نمایش/پنهان، این‌بار برای کنترل‌های صفحهٔ جزئیات -->
+    <div class="selctl-bar hidden" id="pkCtlBar" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px 10px;margin-top:14px;font-size:11.5px">
+        <b style="color:#c4b5fd;font-size:11px">🧰 نمایش کنترل‌ها:</b>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#cbd5e1">
+            <input type="checkbox" id="ctlPkPanel" checked onchange="selCtlToggle('pkPanel',this.checked)"> پنل بیرونی
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#cbd5e1">
+            <input type="checkbox" id="ctlPkPop" checked onchange="selCtlToggle('pkPop',this.checked)"> نوار شناور کنار المان
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#cbd5e1">
+            <input type="checkbox" id="ctlPkHint" checked onchange="selCtlToggle('pkHint',this.checked)"> راهنما و چیپ‌ها
+        </label>
+    </div>
     <div class="card hidden" id="pickerPanel" style="margin-top:14px;border-color:#a855f7;padding:10px">
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:7px">
             <label style="flex:0 0 auto;font-size:11px;color:#c4b5fd;font-weight:700">🎯 انتخاب:</label>
@@ -24501,6 +24642,9 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
         <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
             <button class="btn btn-purple" id="pkUp"   onclick="pkGo('up')"   style="font-size:11px;padding:6px 10px" title="عنصر والد">⬆ والد</button>
             <button class="btn btn-purple" id="pkDown" onclick="pkGo('down')" style="font-size:11px;padding:6px 10px" title="اولین فرزند">⬇ فرزند</button>
+            <!-- v9.90: ناوبری خواهر/برادر روی پنل بیرونی جزئیات هم اضافه شد -->
+            <button class="btn btn-purple" id="pkPrev" onclick="pkGo('prev')" style="font-size:11px;padding:6px 10px" title="آیتم قبلی (هم‌ردیف)">⬅ قبلی</button>
+            <button class="btn btn-purple" id="pkNext" onclick="pkGo('next')" style="font-size:11px;padding:6px 10px" title="آیتم بعدی (هم‌ردیف)">➡ بعدی</button>
             <button class="btn btn-gray" id="pkClearGal" onclick="pkClearGal()" style="font-size:11px;padding:6px 10px;display:none">🗑 پاک کردن عکس‌ها</button>
             <span id="pkCnt" style="font-size:11px;color:#f9a8d4;font-weight:700"></span>
         </div>
@@ -25395,6 +25539,10 @@ function openDetailProxy(keepScroll) {
     $('detailFrameWrap').classList.remove('hidden');
     // v8.68: پنل کنترل بیرونی هم باز شود
     const pp = $('pickerPanel'); if (pp) pp.classList.remove('hidden');
+    // v9.90: نوار تیک‌های نمایش هم با پنل باز می‌شود، بعد وضعیت ذخیره‌شده اعمال می‌شود
+    const pcb = $('pkCtlBar'); if (pcb) pcb.classList.remove('hidden');
+    try{ selCtlApply('pkPanel', !$('ctlPkPanel')||$('ctlPkPanel').checked);
+         selCtlApply('pkHint',  !$('ctlPkHint') ||$('ctlPkHint').checked); }catch(_e){}
     // ارتفاع پیش‌فرض را به اندازهٔ پنجره بزرگ کن تا فضای کلیک کم نباشد
     setDetailIframeHeight(Math.max(500, window.innerHeight - 160));
     // v9.75: کلید پروفایلِ فعلی را بفرست تا اتصالِ صفحه مطابق «اتصال غیرمستقیم»ِ
@@ -26015,6 +26163,7 @@ function pkClose(){
   $('detailFrameWrap').classList.add('hidden');
   $('detailFrame').src='about:blank';
   const p=$('pickerPanel'); if(p)p.classList.add('hidden');
+  const cb=$('pkCtlBar');    if(cb)cb.classList.add('hidden');   // v9.90
 }
 
 /** وضعیتی که iframe گزارش می‌دهد را روی پنل می‌نشاند */
@@ -26053,8 +26202,9 @@ function pkApplyState(st){
   else if((st.matches||0)>1)      cnt='⚠ '+toFa(st.matches)+' تطبیق';
   set('pkCnt', cnt);
   const nav=st.nav||{};
-  // v8.77: دکمه‌های هم‌سطح از پنل برداشته شدند
-  [['pkUp','up'],['pkDown','down']].forEach(([id,k])=>{
+  /* v9.90: دکمه‌های هم‌سطح برگشتند. صفحه از قبل prev/next را گزارش می‌کرد
+     ولی پنل نادیده‌شان می‌گرفت (v8.77 آن‌ها را حذف کرده بود). */
+  [['pkUp','up'],['pkDown','down'],['pkPrev','prev'],['pkNext','next']].forEach(([id,k])=>{
     const b=$(id); if(b)b.disabled=!nav[k];
   });
   // v8.75: کدام فیلدها تا حالا پر شده‌اند
@@ -26079,6 +26229,53 @@ function vpFrame(){ const f=$('vFrame'); return f&&f.contentWindow?f.contentWind
 function vpSend(type,extra){ const w=vpFrame(); if(w)try{w.postMessage(Object.assign({type},extra||{}),'*');}catch(e){} }
 function vpSetMode(m){ vpSend('vp_mode',{mode:m}); }
 function vpGo(dir){ vpSend('vp_go',{dir}); }
+
+/* =====================================================================
+ *  v9.90: نمایش/پنهان‌کردن دسته‌های کنترلِ سلکتور.
+ *  سه دستهٔ کنترل (پنل بیرونی، نوار شناور کنار المان، نوار بالای صفحه)
+ *  با هم ارتفاع زیادی می‌گرفتند و روی نمایشگر کوچک چیزی از خودِ صفحه
+ *  باقی نمی‌ماند. هرکدام حالا یک تیک دارد. دسته‌هایی که داخل iframe
+ *  هستند با postMessage خبردار می‌شوند، بقیه مستقیم کلاس hidden می‌گیرند.
+ *  انتخاب کاربر در localStorage می‌ماند تا هر بار تکرار نشود.
+ * ===================================================================== */
+const SEL_CTL_KEY='scraper_selctl';
+function selCtlLoad(){
+  try{ return JSON.parse(localStorage.getItem(SEL_CTL_KEY)||'{}')||{}; }catch(e){ return {}; }
+}
+function selCtlSave(st){
+  try{ localStorage.setItem(SEL_CTL_KEY,JSON.stringify(st)); }catch(e){}
+}
+/** یک دسته را روشن/خاموش کن (بدون ذخیره — برای اعمال اولیه هم استفاده می‌شود) */
+function selCtlApply(key,on){
+  const box=id=>{ const n=$(id); if(n)n.classList.toggle('hidden',!on); };
+  if(key==='vpPanel')      box('vpPanel');
+  else if(key==='pkPanel') box('pickerPanel');
+  else if(key==='pkHint'){ box('pkHint'); box('pkChips'); box('pkProgress'); }
+  else if(key==='vpPop')   vpSend('vp_popbar',{on:!!on});
+  else if(key==='vpTop')   vpSend('vp_topbar',{on:!!on});
+  else if(key==='pkPop')   pkSend('picker_popbar',{on:!!on});
+}
+function selCtlToggle(key,on){
+  const st=selCtlLoad(); st[key]=!!on; selCtlSave(st);
+  selCtlApply(key,!!on);
+}
+/** وضعیت ذخیره‌شده را روی تیک‌ها و خود کنترل‌ها بنشان */
+function selCtlInit(){
+  const st=selCtlLoad();
+  [['vpPanel','ctlVpPanel'],['vpPop','ctlVpPop'],['vpTop','ctlVpTop'],
+   ['pkPanel','ctlPkPanel'],['pkPop','ctlPkPop'],['pkHint','ctlPkHint']]
+  .forEach(([key,boxId])=>{
+    const on = (st[key]===undefined) ? true : !!st[key];   // پیش‌فرض: روشن
+    const cb=$(boxId); if(cb)cb.checked=on;
+    selCtlApply(key,on);
+  });
+}
+/** بعد از آمادهٔ‌شدن هر iframe دوباره اعمال کن — پیام قبل از ready گم می‌شود */
+function selCtlSyncFrame(which){
+  const st=selCtlLoad(), get=k=>(st[k]===undefined?true:!!st[k]);
+  if(which==='vp'){ selCtlApply('vpPop',get('vpPop')); selCtlApply('vpTop',get('vpTop')); }
+  else            { selCtlApply('pkPop',get('pkPop')); }
+}
 
 var vpFilled={};
 function vpNextField(){
@@ -26112,7 +26309,8 @@ function vpApplyState(st){
   const c=$('vpPv'); if(c)c.style.color=st.preview?'#86efac':'#fbbf24';
   set('vpCnt', (st.matches||0)>1?('🔢 '+toFa(st.matches)+' مشابه'):'');
   const nav=st.nav||{};
-  [['vpUp','up'],['vpDown','down']].forEach(([id,k])=>{
+  // v9.90: قبلی/بعدی هم به فهرست اضافه شدند
+  [['vpUp','up'],['vpDown','down'],['vpPrev','prev'],['vpNext','next']].forEach(([id,k])=>{
     const b=$(id); if(b)b.disabled=!nav[k];
   });
   vpFilled={};
@@ -26220,6 +26418,7 @@ window.addEventListener('message',e=>{
   } else if(e.data && e.data.type==='picker_ready'){
     // v8.68: صفحهٔ نمونه آماده شد — حالت فعلی پنل را به آن بگو
     pkSetMode(($('pkMode')||{}).value||'shortDesc');
+    selCtlSyncFrame('pk');   // v9.90: تیک‌های نمایش را روی صفحهٔ تازه‌لودشده اعمال کن
   } else if(e.data && e.data.type==='picker_state'){
     pkApplyState(e.data);
   } else if(e.data && e.data.type==='picker_field'){
@@ -26269,6 +26468,7 @@ window.addEventListener('message',e=>{
     vpApplyState(e.data);
   } else if(e.data && e.data.type==='vp_ready'){
     vpSetMode(($('vpMode')||{}).value||'container');
+    selCtlSyncFrame('vp');   // v9.90: تیک‌های نمایش را روی صفحهٔ تازه‌لودشده اعمال کن
   } else if(e.data && e.data.type==='cancel'){
     $('vFrame').src='about:blank';
   } else if(e.data && e.data.type==='cancel_detail'){
@@ -27788,6 +27988,25 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.90', t:'🧰 تب سلکتورها: کنترل‌های جمع‌وجور و نوار شناورِ درست', items:[
+    'سه دستهٔ کنترلِ سلکتور با هم ارتفاع زیادی می‌گرفتند و روی نمایشگر',
+    'کوچک عملاً چیزی از خودِ صفحهٔ پیش‌نمایش باقی نمی‌ماند.',
+    '✅ هر دسته حالا تیک نمایش/پنهان دارد: «پنل بیرونی»، «نوار شناور کنار',
+    '   المان» و «نوار بالای پیش‌نمایش» (در جزئیات: «راهنما و چیپ‌ها»).',
+    '✅ انتخاب شما در مرورگر ذخیره می‌شود و بعد از لود دوبارهٔ پیش‌نمایش',
+    '   هم دوباره اعمال می‌شود.',
+    '🐞 دکمه‌های «فیلد قبلی/بعدی» روی نوار شناور هیچ کاری نمی‌کردند:',
+    '   تابعشان داخل IIFE تعریف شده بود و onclickِ داخل HTML — که در',
+    '   دامنهٔ سراسری اجرا می‌شود — به آن نمی‌رسید و بی‌صدا خطا می‌داد.',
+    '🐞 فلش‌های خواهر/برادر در ۸.۷۷ از نوار برداشته شده بودند و فقط با',
+    '   کلیدهای → ← کار می‌کردند. حالا هر چهار جهت روی نوار هست و پنل',
+    '   بیرونی هم دکمهٔ «⬅ قبلی / ➡ بعدی» گرفت.',
+    '🐞 نوار به لبهٔ چپِ المان می‌چسبید و روی المان‌های پهن کج می‌افتاد؛',
+    '   clamp هم اسکرول افقی را حساب نمی‌کرد، برای همین دکمهٔ «والد» از',
+    '   سمت راست بیرون می‌زد و دیده نمی‌شد.',
+    '✅ حالا نوار روی المان وسط‌چین می‌شود و به عرضِ واقعیِ پنجره clamp',
+    '   می‌شود، پس هیچ دکمه‌ای از کادر بیرون نمی‌زند.',
+  ]},
   {v:'9.89', t:'🎯 رفع «۲۰ محصول پیدا می‌شود ولی فقط یکی ذخیره می‌شود»', items:[
     'باگ با PHP واقعی بازتولید شد: ۲۰ ظرف پیدا می‌شد و خروجی ۱ محصول بود.',
     '🐞 ریشه: وقتی سلکتور «لینک» به یک <img> اشاره می‌کند و داخل کارت هیچ',
@@ -31849,6 +32068,7 @@ function syncBslSendBoxCats(catId,fallbackIds){
 // v7.48: Search input event handlers
 document.addEventListener('DOMContentLoaded',function(){
     try{ initAutoScrollPref(); }catch(e){}   // v8.88
+    try{ selCtlInit(); }catch(e){}           // v9.90: تیک‌های نمایش کنترل‌های سلکتور
     const si=$('bsCatSearch');
     if(si){
         si.addEventListener('focus',function(){renderBslCatFilter(this.value);$('bsCatList').style.display='block';});
