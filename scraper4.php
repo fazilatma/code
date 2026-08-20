@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.95';
+const APP_VERSION = '9.96';
 const APP_VERSION_DATE = '1405/05/30';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2181,10 +2181,14 @@ function aiCandidateCategory(array $p, string $model, string $title, array $cats
     ], 'temperature' => 0.1, 'max_tokens' => 20];
     $r = aiProviderCall($p, $model, $payload, $net);
     $lat = (int)round((microtime(true) - $t0) * 1000);
+    /* v9.96: بدنهٔ خامِ پاسخِ سرویس برای درخواستِ دسته‌بندی هم برگردانده می‌شود
+       تا در مودالِ «جزئیات کاملِ تستِ مدل» کنارِ پاسخ خامِ پیام دیده شود. */
+    $rawCat = mb_substr((string)($r['raw'] ?? ''), 0, 4000);
     if ((int)$r['code'] !== 200) {
         $err = $r['body']['error']['message'] ?? ($r['body']['message'] ?? ($r['error'] ?? ('HTTP ' . $r['code'])));
         if (!empty($r['cf_error'])) $err = $r['cf_error'];
-        return ['ok' => false, 'category_id' => 0, 'category_name' => '', 'ai_text' => '', 'error' => mb_substr((string)$err, 0, 160), 'latency' => $lat, 'model' => $model];
+        return ['ok' => false, 'category_id' => 0, 'category_name' => '', 'ai_text' => '', 'error' => mb_substr((string)$err, 0, 160),
+                'latency' => $lat, 'model' => $model, 'raw' => $rawCat, 'status' => (int)$r['code'], 'via' => (string)($r['via'] ?? '')];
     }
     $text = aiExtractAnswer($r['body'] ?? []);   // v9.54: استخراج مقاوم · v9.94: بدون بلوکِ فکر
     $id = aiPickCategoryId($text);
@@ -2196,7 +2200,8 @@ function aiCandidateCategory(array $p, string $model, string $title, array $cats
         if ($id > 0) { $valid = true; foreach ($cats as $c) { if ((int)$c['id'] === $id) { $name = $c['name']; break; } } }
     }
     return ['ok' => $valid, 'category_id' => $id, 'category_name' => $name,
-            'ai_text' => $text, 'error' => '', 'latency' => $lat, 'model' => $model];
+            'ai_text' => $text, 'error' => '', 'latency' => $lat, 'model' => $model,
+            'raw' => $rawCat, 'status' => (int)$r['code'], 'via' => (string)($r['via'] ?? '')];
 }
 
 /** پاسخ خودکار یک کاندید خاص (برای آزمون چند-کاندیدی) */
@@ -13648,8 +13653,10 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, 'function p2CandPick') !== false
          && strpos($selfSrc, 'function bslMasterFixAll') !== false
          && strpos($selfSrc, "?bsl_master_fix=1'") !== false);
+    /* v9.96: چیدمانِ ستونی به یک ردیفِ افقیِ mbar تبدیل شد (سربرگِ کوتاه‌تر در موبایل) */
     $add('9.49', 'عنوان «مدیریت جامع محصولات باسلام» در بالاترین ردیفِ تمام‌عرض مودال می‌نشیند',
-         strpos($selfSrc, 'style="flex-direction:column;align-items:stretch;gap:7px;padding:10px 14px"') !== false);
+         strpos($selfSrc, 'html+=\'<div class="bsl-modal-head mbar" style="padding:8px 12px;gap:6px">\';') !== false
+      && strpos($selfSrc, 'html+=\'<h2 class="mb-el" style="font-size:14px;margin:0">') !== false);
 
     /* ---------- v9.50: انتخابِ مدل مستر بر اساس آمارِ دسته‌بندیِ صحیح فاز ۲ ---------- */
     $add('9.50', 'تأییدِ دسته‌بندیِ صحیح در فاز ۲، رأیِ کاندیدِ پیش‌بینی‌کننده را ثبت می‌کند',
@@ -14121,9 +14128,11 @@ if (isset($_GET['selftest'])) {
          substr_count($selfSrc, '<input type="text" id="aiTest' . 'Msg"') === 1
       && substr_count($selfSrc, '<input type="text" id="aiTest' . 'Cat"') === 1
       && substr_count($selfSrc, '<input type="number" id="aiTest' . 'Delay"') === 1);
+    /* v9.96: همین مقادیر در نوارِ فشردهٔ mbar نشستند و برچسبشان کوتاه شد */
     $add('9.95', 'مقادیرِ به‌کاررفته در مودال فقط‌خواندنی نمایش داده می‌شوند',
-         strpos($selfSrc, "+'<span>پیام تست: <b style=\"color:#cbd5e1\">'+esc(aiTestMsgVal||'سلام')+'</b></span>'") !== false
-      && strpos($selfSrc, "+'<span>دستهٔ تست: <b style=\"color:#cbd5e1\">'+esc(aiTestCatVal||'ادو پرفیوم')+'</b></span>'") !== false);
+         strpos($selfSrc, "esc(aiTestMsgVal||'سلام')+'</b></span>'") !== false
+      && strpos($selfSrc, "esc(aiTestCatVal||'ادو پرفیوم')+'</b></span>'") !== false
+      && strpos($selfSrc, "toFa(aiTestDelayVal||120)+'</b> ms</span>'") !== false);
     $add('9.95', 'تستِ گروهی و تکی همچنان از فیلدهای بیرونی می‌خوانند',
          substr_count($selfSrc, "aiTestMsgVal=(\$('aiTestMsg')&&\$('aiTestMsg').value.trim())||'سلام';") === 2
       && strpos($selfSrc, "const msg=(\$('aiTestMsg')&&\$('aiTestMsg').value.trim())||'سلام';") !== false);
@@ -14235,13 +14244,62 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "tr.addEventListener('click',function(){aiOpenRowDetail(tr.dataset.aiProvider,tr.dataset.aiModel);});") !== false
       && strpos($selfSrc, "tr.dataset.aiProvider=d.provider||'';") !== false
       && strpos($selfSrc, 'function aiOpenRowDetail(pid,mid)') !== false);
+    /* v9.96 (۱۰ب): به‌جای یک بلوکِ خام، هلپرِ rawBlock() دو بلوک می‌سازد */
     $add('9.95', 'مودالِ جزئیات، پاسخ خام را به‌صورت JSON مرتب نشان می‌دهد',
-         strpos($selfSrc, 'pretty=JSON.stringify(JSON.parse(d.raw),null,2);') !== false
-      && strpos($selfSrc, '🧾 پاسخ خامِ سرویس (JSON)') !== false
+         strpos($selfSrc, 'const rawBlock=(title,txt,color,note)=>{') !== false
+      && strpos($selfSrc, 'pretty=JSON.stringify(JSON.parse(txt),null,2);') !== false
+      && strpos($selfSrc, '🧾 پاسخ خامِ درخواستِ پیام تست (JSON)') !== false
       && strpos($selfSrc, 'function aiRetestFromDetail()') !== false);
     $add('9.95', 'مودالِ جزئیات بالاتر از مودالِ تست می‌نشیند',
          strpos($selfSrc, "m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.8);z-index:10060") !== false
       && 10060 > 10000);
+
+    /* ---------- v9.96 (۱۰ب): پاسخ خامِ درخواستِ دسته‌بندی ---------- */
+    $add('9.96', 'aiCandidateCategory پاسخ خام و وضعیتِ HTTP را برمی‌گرداند',
+         strpos($selfSrc, "\$rawCat = mb_substr((string)(\$r['raw'] ?? ''), 0, 4000);") !== false
+      && substr_count($selfSrc, "'raw' => \$rawCat, 'status' => (int)\$r['code'], 'via' => (string)(\$r['via'] ?? '')") === 2);
+    $add('9.96', 'aiRunTestCategory متادیتای خام را با ارجاع بیرون می‌دهد',
+         strpos($selfSrc, 'function aiRunTestCategory(array $p, string $mid, string $testCat, ?array $catData, ?array $net = null, ?array &$meta = null)') !== false
+      && strpos($selfSrc, "\$meta = ['raw' => '', 'status' => 0, 'via' => '', 'aiText' => ''];") !== false);
+    $add('9.96', 'خامِ دسته‌بندی در testDetails ذخیره می‌شود (هر دو مسیر)',
+         substr_count($selfSrc, "'catRaw'=>(string)(\$catMeta['raw'] ?? '')") === 2
+      && substr_count($selfSrc, "'catStatus'=>(int)(\$catMeta['status'] ?? 0)") === 2);
+    $add('9.96', 'اندپوینتِ جزئیات کلیدهای catRaw/catStatus/catVia را می‌فرستد',
+         strpos($selfSrc, "'catRaw'        => (string)(\$d['catRaw'] ?? ''),") !== false
+      && strpos($selfSrc, "'catStatus'     => (int)(\$d['catStatus'] ?? 0),") !== false
+      && strpos($selfSrc, "'catVia'        => (string)(\$d['catVia'] ?? ''),") !== false);
+    $add('9.96', 'مودالِ جزئیات بلوکِ خامِ دسته‌بندی را جدا نشان می‌دهد',
+         strpos($selfSrc, "rawBlock('🏷️ پاسخ خامِ درخواستِ دسته‌بندی (JSON)',d.catRaw,'#a78bfa',note)") !== false
+      && strpos($selfSrc, "if(d.catStatus)note+=' · HTTP '+d.catStatus;") !== false);
+
+    /* ---------- v9.96 (۱۰الف): سربرگِ فشردهٔ مودال‌ها ---------- */
+    $add('9.96', 'کلاس‌های نوارِ فشرده (mhead/mbar/mstat) در CSS تعریف شده‌اند',
+         strpos($selfSrc, '.mhead{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0}') !== false
+      && strpos($selfSrc, '.mbar{display:flex;align-items:center;gap:12px;flex-wrap:nowrap;overflow-x:auto') !== false
+      && strpos($selfSrc, '.mstat{display:inline-flex') !== false
+      && strpos($selfSrc, '.mbar .mb-sp{flex:1 1 auto;min-width:6px}') !== false);
+    $add('9.96', 'مودالِ نتایجِ زندهٔ تست: عنوان و متنِ «در حال تست» در یک ردیف',
+         strpos($selfSrc, '+\'<b class="mh-t" style="color:#67e8f9;font-size:13px">🧪 نتایج زندهٔ تست همهٔ مدل‌ها</b>\'') !== false
+      && strpos($selfSrc, '+\'<span id="aiTestCur" class="mstat"></span>\'') !== false);
+    $add('9.96', 'شمارنده‌ها و مقادیرِ فقط‌خواندنی در یک نوارِ mbar ادغام شده‌اند',
+         strpos($selfSrc, '+\'<div class="mbar" style="padding:6px 14px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;color:#94a3b8"') !== false
+      && strpos($selfSrc, 'id="aiTestTot"') !== false
+      && strpos($selfSrc, 'id="aiTestOnlyGreen"') !== false
+      && strpos($selfSrc, "+'<span class=\"mb-sp\"></span>'") !== false);
+    $add('9.96', 'سربرگِ ستونیِ مودالِ باسلام به یک ردیفِ افقی تبدیل شد',
+         strpos($selfSrc, 'html+=\'<div class="bsl-modal-head mbar" style="padding:8px 12px;gap:6px">\';') !== false
+      && strpos($selfSrc, 'html+=\'<span class="mb-sp"></span>\';') !== false
+      && strpos($selfSrc, 'onclick="closeBslModal()">\\u2715</button>') !== false);
+    $add('9.96', 'نوارهای wrapدارِ سایر مودال‌ها هم فشرده شدند',
+         strpos($selfSrc, 'id="bslAiBatchSummary" class="mbar"') !== false
+      && strpos($selfSrc, 'id="bslActivateSummary" class="mbar"') !== false
+      && strpos($selfSrc, 'h+=\'<div class="mbar" style="gap:8px;padding:7px 14px;\'') !== false
+      && strpos($selfSrc, 'html+=\'<div class="mbar" style="gap:6px;padding:7px 12px;background:#111c31') !== false);
+    $add('9.96', 'مودالِ جزئیاتِ تکی هم سربرگِ mhead دارد',
+         strpos($selfSrc, '+\'<b class="mh-t" style="color:#67e8f9;font-size:13px">🔎 جزئیات کاملِ تستِ مدل</b>\'') !== false);
+    $add('9.96', 'در موبایل سربرگ‌ها کوچک‌تر می‌شوند',
+         strpos($selfSrc, '@media(max-width:620px){') !== false
+      && strpos($selfSrc, '.mhead .mh-t{font-size:12.5px}') !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -19263,6 +19321,12 @@ echo json_encode(['ok'=>true,
     'error'         => (string)($d['error'] ?? ''),
     'raw'           => (string)($d['raw'] ?? ''),
     'via'           => (string)($d['via'] ?? ''),
+    /* v9.96: پاسخ خامِ درخواستِ دسته‌بندی — درخواستِ دومی که هنگام تست به
+       همان مدل زده می‌شود و نتیجه‌اش ستونِ «پاسخ دسته» را پر می‌کند. */
+    'catRaw'        => (string)($d['catRaw'] ?? ''),
+    'catStatus'     => (int)($d['catStatus'] ?? 0),
+    'catVia'        => (string)($d['catVia'] ?? ''),
+    'catAiText'     => (string)($d['catAiText'] ?? ''),
     'itemError'     => $stItem ? (string)($stItem['error'] ?? '') : '',
     'itemLabel'     => $stItem ? (string)($stItem['label'] ?? '') : '',
 ], JSON_UNESCAPED_UNICODE);
@@ -19413,12 +19477,16 @@ $body = $r['body'] ?? [];
 $response = $ok ? aiExtractAnswer($body) : '';   // v9.54: استخراج مقاوم · v9.94: بدون بلوکِ فکر
 $err = $ok ? '' : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
 $rateLimited = in_array($code, [429], true);
-$catResponse = aiRunTestCategory($providers[$pid], $mid, $testCat, aiTestCategoryData());
+$catMeta = null;
+$catResponse = aiRunTestCategory($providers[$pid], $mid, $testCat, aiTestCategoryData(), null, $catMeta);
 $details = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300), 'response'=>mb_substr((string)$response,0,300),
             'catResponse'=>(string)$catResponse, 'testMsg'=>$testMsg, 'testCat'=>$testCat,
             'latencyMs'=>$latency, 'testedAt'=>gmdate('c'),
             // v9.95 (۹د): بدنهٔ خامِ پاسخِ سرویس برای مودالِ «جزئیات کامل»
-            'raw'=>mb_substr((string)($r['raw'] ?? ''), 0, 4000), 'via'=>(string)($r['via'] ?? '')];
+            'raw'=>mb_substr((string)($r['raw'] ?? ''), 0, 4000), 'via'=>(string)($r['via'] ?? ''),
+            // v9.96: پاسخ خامِ درخواستِ دسته‌بندی (درخواستِ دوم) جداگانه
+            'catRaw'=>(string)($catMeta['raw'] ?? ''), 'catStatus'=>(int)($catMeta['status'] ?? 0),
+            'catVia'=>(string)($catMeta['via'] ?? ''), 'catAiText'=>(string)($catMeta['aiText'] ?? '')];
 foreach ($providers[$pid]['models'] as $i => $m) {
     if (($m['id'] ?? '') === $mid) {
         $providers[$pid]['models'][$i]['tested'] = true;
@@ -19525,10 +19593,17 @@ function aiTestCategoryData(): ?array {
 
 /* v9.52: اجرای تستِ دسته‌بندی برای یک مدل و خلاصه‌سازی نتیجه به رشتهٔ کوتاه.
    اگر catData نباشد یا عنوان خالی باشد null برمی‌گردد. */
-function aiRunTestCategory(array $p, string $mid, string $testCat, ?array $catData, ?array $net = null): ?string {
+/* v9.96: پارامترِ خروجیِ $meta پاسخِ خامِ درخواستِ دسته‌بندی را برمی‌گرداند
+   (raw/status/via/ai_text) تا در مودالِ «جزئیات کاملِ تست» ذخیره و نشان داده شود. */
+function aiRunTestCategory(array $p, string $mid, string $testCat, ?array $catData, ?array $net = null, ?array &$meta = null): ?string {
+    $meta = ['raw' => '', 'status' => 0, 'via' => '', 'aiText' => ''];
     if ($testCat === '' || !$catData) return null;
     if ($net === null) $net = aiNetCfg();
     $res = aiCandidateCategory($p, $mid, $testCat, $catData['cats'], $catData['leafCats'], $catData['catList'], $net);
+    $meta = ['raw'    => (string)($res['raw'] ?? ''),
+             'status' => (int)($res['status'] ?? 0),
+             'via'    => (string)($res['via'] ?? ''),
+             'aiText' => mb_substr((string)($res['ai_text'] ?? ''), 0, 300)];
     if (!empty($res['ok']) && !empty($res['category_name'])) return $res['category_name'] . ' (#' . $res['category_id'] . ')';
     if (!empty($res['category_id'])) return '#' . $res['category_id'];
     if (!empty($res['error'])) return 'خطا: ' . mb_substr((string)$res['error'], 0, 80);
@@ -19633,7 +19708,8 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
         }
         $st['diag'][$pid]['last_label'] = $diag['label'];
         // v9.52: تستِ دسته‌بندی برای همین مدل (پیش‌فرض «ادو پرفیوم»)
-        $catResponse = aiRunTestCategory($p, $mid, $testCat, $catData);
+        $catMeta = null;
+        $catResponse = aiRunTestCategory($p, $mid, $testCat, $catData, null, $catMeta);
         // ذخیرهٔ نتیجه در provider
         if (isset($providers[$pid]['models'])) {
             foreach ($providers[$pid]['models'] as $i => $m) {
@@ -19645,7 +19721,10 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
                         'response'=>mb_substr((string)$response,0,300), 'catResponse'=>(string)$catResponse,
                         'testMsg'=>$testMsg, 'testCat'=>$testCat, 'latencyMs'=>$latency, 'testedAt'=>gmdate('c'),
                         // v9.95 (۹د): بدنهٔ خامِ پاسخ برای مودالِ «جزئیات کامل»
-                        'raw'=>mb_substr((string)($r['raw'] ?? ''), 0, 4000), 'via'=>(string)($r['via'] ?? '')];
+                        'raw'=>mb_substr((string)($r['raw'] ?? ''), 0, 4000), 'via'=>(string)($r['via'] ?? ''),
+                        // v9.96: پاسخ خامِ درخواستِ دسته‌بندی (درخواستِ دوم) جداگانه
+                        'catRaw'=>(string)($catMeta['raw'] ?? ''), 'catStatus'=>(int)($catMeta['status'] ?? 0),
+                        'catVia'=>(string)($catMeta['via'] ?? ''), 'catAiText'=>(string)($catMeta['aiText'] ?? '')];
                     break;
                 }
             }
@@ -24316,7 +24395,37 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 .sres .no2{color:#f87171;padding:2px 0;border-bottom:1px solid #1e293b}.sres a{color:#60a5fa;text-decoration:none}.scard{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:8px;margin:4px 0;display:flex;gap:8px;align-items:flex-start;transition:border-color .2s}.scard:hover{border-color:#475569}.scard-img{width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0;background:#0f172a}.scard-noimg{width:48px;height:48px;border-radius:6px;flex-shrink:0;background:#0f172a;display:flex;align-items:center;justify-content:center;color:#475569;font-size:18px}.scard-body{flex:1;min-width:0;direction:rtl}.scard-title{color:#e2e8f0;font-weight:700;font-size:11px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl}.scard-meta{display:flex;gap:6px;flex-wrap:wrap;font-size:10px;margin-bottom:2px;direction:rtl}
 .scard-meta span{display:inline-flex;align-items:center;gap:2px}.scard-price{color:#4ade80;font-family:monospace;font-size:10px;direction:ltr}.scard-cat{color:#c084fc;font-size:9px}.scard-unit{color:#64748b;font-size:9px}.scard-result{font-size:10px;font-weight:700;margin-top:2px}.scard-ok{color:#4ade80}.scard-up{color:#facc15}.scard-skip{color:#94a3b8}.scard-fail{color:#f87171}.scard.scard-ok{border-left:3px solid #4ade80}.scard.scard-up{border-left:3px solid #facc15}.scard.scard-skip{border-left:3px solid #94a3b8}.scard.scard-fail{border-left:3px solid #f87171}.scard-err{color:#f87171;font-size:9px;margin-top:2px;direction:rtl;background:#7f1d1d20;padding:1px 6px;border-radius:3px}.scard-reason{color:#fbbf24;font-size:9px;margin-top:2px;direction:rtl;background:#42200620;padding:1px 6px;border-radius:3px}.scard-rid{color:#60a5fa;font-size:9px;direction:ltr}
 .ssum{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:10px}.ssum .si{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.ssum .si b{font-size:18px;display:block}.ssum .si span{color:#64748b;font-size:10px}@media(min-width:900px){body{padding:16px;padding-bottom:16px}h1{font-size:22px}.main-tabs{position:static;border-top:none;box-shadow:none;background:#1e293b;border:1px solid #334155;border-radius:12px;margin-bottom:14px;padding:3px}.main-tab{padding:12px;border-radius:8px;flex-direction:row;gap:8px;font-size:13px}.main-tab .t-icon{font-size:16px}.main-tab.active{background:#3b82f6}.main-tab .badge{position:static;margin-right:4px;min-width:auto}.visual-container{grid-template-columns:1fr 320px}.grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.btn{padding:10px 16px}.profile-row{flex-wrap:nowrap}}
-.bsl-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100001;display:flex;align-items:center;justify-content:center;padding:10px}.bsl-modal{background:#0f172a;border:1px solid #334155;border-radius:14px;max-width:95vw;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;width:900px}.bsl-modal-head{padding:12px 16px;background:#1e293b;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between}.bsl-modal-head h2{margin:0;font-size:15px;color:#67e8f9}.bsl-modal-body{overflow:auto;flex:1;padding:8px}.bsl-modal-table{width:100%;border-collapse:collapse;font-size:11px}.bsl-modal-table th{background:#1e293b;color:#67e8f9;padding:8px;text-align:center;font-size:11px;border:1px solid #334155;white-space:nowrap}
+.bsl-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100001;display:flex;align-items:center;justify-content:center;padding:10px}.bsl-modal{background:#0f172a;border:1px solid #334155;border-radius:14px;max-width:95vw;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;width:900px}.bsl-modal-head{padding:12px 16px;background:#1e293b;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between}.bsl-modal-head h2{margin:0;font-size:15px;color:#67e8f9}
+/* =====================================================================
+   v9.96: نوارهای فشردهٔ سربرگِ مودال‌ها
+   مشکل: عنوانِ مودال، متنِ وضعیت (مثل «در حال تست: فلان مدل») و شمارنده‌ها
+   با flex-wrap:wrap چیده شده بودند؛ در موبایل هرکدام به سطرِ خودش می‌افتاد و
+   سربرگ «ستونی» و بلند می‌شد و از ارتفاعِ جدولِ نتایج می‌دزدید.
+   راهکار: همه در یک «ردیفِ افقی» می‌مانند (flex-wrap:nowrap) و اگر جا نشد
+   یا با «…» کوتاه می‌شوند (.mh-t / .mb-el) یا نوار افقی اسکرول می‌شود (.mbar).
+   ===================================================================== */
+.mhead{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0}
+.mhead .mh-t{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0}
+.mhead .mh-act{flex:0 0 auto;display:flex;align-items:center;gap:6px}
+.mbar{display:flex;align-items:center;gap:12px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:#334155 transparent}
+.mbar::-webkit-scrollbar{height:4px}
+.mbar::-webkit-scrollbar-track{background:transparent}
+.mbar::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+.mbar>*{flex:0 0 auto;white-space:nowrap}
+.mbar .mb-sp{flex:1 1 auto;min-width:6px}
+.mbar .mb-el{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.mstat{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#1e293b;border:1px solid #334155;border-radius:20px;padding:2px 9px;font-size:10.5px;color:#fbbf24;line-height:1.7}
+.mstat:empty{display:none}
+.bsl-modal-head{gap:8px}
+.bsl-modal-head h2{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:620px){
+.mhead{gap:6px}
+.mhead .mh-t{font-size:12.5px}
+.mhead .mh-act .btn{padding:4px 8px!important;font-size:10px!important}
+.mbar{gap:9px;font-size:10.5px}
+.bsl-modal-head{padding:9px 12px}
+.bsl-modal-head h2{font-size:13px}
+}.bsl-modal-body{overflow:auto;flex:1;padding:8px}.bsl-modal-table{width:100%;border-collapse:collapse;font-size:11px}.bsl-modal-table th{background:#1e293b;color:#67e8f9;padding:8px;text-align:center;font-size:11px;border:1px solid #334155;white-space:nowrap}
 .bsl-modal-table td{padding:6px 8px;border:1px solid #1e293b;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bsl-modal-table td.td-name{max-width:none;white-space:normal;overflow:visible;line-height:1.4;font-size:12px;direction:rtl;unicode-bidi:plaintext}.bsl-modal-table tr:hover td{background:#1e293b80}.bsl-modal-table .td-id{color:#94a3b8;font-family:monospace;text-align:center}.bsl-modal-table .td-price{color:#fbbf24;font-family:monospace;text-align:center;direction:ltr}.bsl-modal-table .td-stock{color:#22c55e;text-align:center}.bsl-modal-table .td-status{text-align:center}.bsl-modal-table .td-img{width:40px;height:40px;object-fit:cover;border-radius:4px}.bsl-modal-pager{padding:8px 16px;background:#1e293b;border-top:1px solid #334155;display:flex;align-items:center;justify-content:center;gap:8px}
 .bsl-tabs{display:flex;gap:2px;padding:0 12px;background:#1e293b;border-bottom:1px solid #334155;flex-wrap:wrap;direction:rtl}.bsl-tab{padding:6px 12px;font-size:11px;color:#94a3b8;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap;border-radius:6px 6px 0 0}.bsl-tab:hover{color:#e2e8f0;background:#334155}.bsl-tab.active{color:#67e8f9;border-bottom-color:#67e8f9;background:#0f172a;font-weight:700}.bsl-tab .tab-count{font-size:9px;color:#64748b;margin-right:2px}.hamburger-btn{position:fixed;top:10px;left:10px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.hamburger-btn:hover{background:#334155}
 /* v9.61: دکمهٔ «تمام‌عرض کردن منو» کنار همبرگر — پنل تنظیمات را به‌جای
@@ -29606,6 +29715,27 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.96', t:'📐 سربرگِ فشردهٔ مودال‌ها + پاسخ خامِ درخواستِ دسته‌بندی', items:[
+    '📐 مودالِ «نتایج زندهٔ تست همهٔ مدل‌ها» در موبایل سربرگِ بسیار بلندی داشت:',
+    '   عنوان، متنِ زردِ «در حال تست: …»، دکمه‌ها، چهار شمارنده، سوییچِ «فقط',
+    '   سبزها» و نوارِ فقط‌خواندنیِ پیام/دسته/تأخیر هرکدام به سطرِ خودشان',
+    '   می‌افتادند و گاهی ۵–۶ سطر می‌شدند. حالا همه در دو ردیفِ افقی جمع شده‌اند:',
+    '   ردیفِ اول عنوان + چیپِ وضعیتِ زندهٔ «در حال تست» + دکمه‌های توقف/بستن،',
+    '   ردیفِ دوم شمارنده‌ها + پیام/دسته/تأخیر + سوییچِ فقط سبزها.',
+    '   اگر جا کم بیاید، عنوان با «…» کوتاه می‌شود و نوارِ دوم افقی اسکرول',
+    '   می‌خورد — به‌جای اینکه ارتفاعِ جدولِ نتایج را بخورد.',
+    '🔎 همین الگو در کلِ سایت پیاده شد: سربرگِ ستونیِ «مدیریت جامع محصولات',
+    '   باسلام» (عنوان و دکمه‌ها در دو ردیف بودند)، نوارِ خلاصهٔ «فاز ۲»،',
+    '   نوارِ فیلترِ سفارش‌ها/گفتگوها و نوارهای خلاصهٔ «اصلاح دسته‌بندی AI» و',
+    '   «فعال‌سازی محصولات» — همه یک ردیفِ افقی با اسکرولِ نرم شدند.',
+    '🧾 مودالِ جزئیاتِ یک مدل (کلیک روی هر ردیف) حالا دو پاسخِ خام را جدا نشان',
+    '   می‌دهد: «🧾 پاسخ خامِ درخواستِ پیام تست» و «🏷️ پاسخ خامِ درخواستِ',
+    '   دسته‌بندی» — همراه با کدِ HTTP، مسیرِ فراخوانی (via) و متنِ خامی که مدل',
+    '   پیش از تبدیل به شناسهٔ دسته برگردانده بود. برای عیب‌یابیِ اینکه چرا یک',
+    '   مدل در پیام موفق است ولی در دسته‌بندی نه، دیگر حدس زدن لازم نیست.',
+    '   نکته: خامِ دسته‌بندی فقط وقتی ذخیره می‌شود که توکنِ باسلام تنظیم باشد،',
+    '   چون فهرستِ دسته‌ها از آنجا خوانده می‌شود.',
+  ]},
   {v:'9.95', t:'🤖 برون‌ریزی تنظیمات هوش مصنوعی + مدل‌های Mistral + جزئیات هر تست', items:[
     '🧹 داخلِ مودالِ «تست مدل‌ها» سه فیلدِ «پیام تست»، «دستهٔ تست» و «تاخیر»',
     '   تکراری بودند (همان‌ها در تبِ 🧪 تست مدل‌ها هستند) و چون شناسهٔ یکسان',
@@ -32888,8 +33018,8 @@ function inqOpen(kind,filter){
   html+='<div class="bsl-modal" style="max-width:920px">';
   html+='<div class="bsl-modal-head"><h2 id="inqTitle">'+title+'</h2>'
       +'<button class="btn btn-gray" onclick="inqClose()">✕</button></div>';
-  // نوار فیلتر
-  html+='<div style="display:flex;gap:6px;padding:8px 12px;background:#111c31;border-bottom:1px solid #334155;flex-wrap:wrap;align-items:center">';
+  // نوار فیلتر — v9.96 (۱۰الف): یک ردیفِ افقی با اسکرول به‌جای wrap تا سربرگ کوتاه بماند
+  html+='<div class="mbar" style="gap:6px;padding:7px 12px;background:#111c31;border-bottom:1px solid #334155">';
   if(isOrd){
     html+='<button class="btn btn-gray" id="inqF_all" onclick="inqSetFilter(\'all\')" style="font-size:11px;padding:5px 10px">همه</button>';
     html+='<button class="btn btn-gray" id="inqF_unsent" onclick="inqSetFilter(\'unsent\')" style="font-size:11px;padding:5px 10px">📦 ارسال‌نشده</button>';
@@ -32897,7 +33027,7 @@ function inqOpen(kind,filter){
     html+='<button class="btn btn-gray" id="inqF_all" onclick="inqSetFilter(\'all\')" style="font-size:11px;padding:5px 10px">همه</button>';
     html+='<button class="btn btn-gray" id="inqF_unseen" onclick="inqSetFilter(\'unseen\')" style="font-size:11px;padding:5px 10px">💬 خوانده‌نشده</button>';
   }
-  html+='<span style="flex:1"></span>';
+  html+='<span class="mb-sp"></span>';
   html+='<span id="inqSummary" style="font-size:11px;color:#94a3b8"></span>';
   html+='<button class="btn btn-gray" onclick="inqReload()" style="font-size:11px;padding:5px 10px">🔄 تازه‌سازی</button>';
   html+='</div>';
@@ -34462,9 +34592,9 @@ function aiOpenRowDetail(pid,mid){
     m.id='aiRowDetail';
     m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.8);z-index:10060;display:flex;align-items:center;justify-content:center;padding:20px';
     m.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:12px;width:min(900px,96vw);max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">'
-      +'<div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #334155;flex:0 0 auto">'
-      +'<span style="font-size:14px">🔎</span><b style="color:#67e8f9;flex:1">جزئیات کاملِ تستِ مدل</b>'
-      +'<button class="btn btn-gray" onclick="aiCloseRowDetail()" style="font-size:11px;padding:4px 10px">✕ بستن</button></div>'
+      +'<div class="mhead" style="padding:10px 14px;border-bottom:1px solid #334155;flex:0 0 auto">'
+      +'<b class="mh-t" style="color:#67e8f9;font-size:13px">🔎 جزئیات کاملِ تستِ مدل</b>'
+      +'<span class="mh-act"><button class="btn btn-gray" onclick="aiCloseRowDetail()" style="font-size:11px;padding:4px 10px">✕ بستن</button></span></div>'
       +'<div id="aiRowDetailBody" style="flex:1;overflow:auto;padding:12px 16px;font-size:11.5px;color:#94a3b8">⏳ در حال خواندن...</div></div>';
     m.addEventListener('click',function(e){if(e.target===m)aiCloseRowDetail();});
     document.body.appendChild(m);
@@ -34501,13 +34631,28 @@ function aiOpenRowDetail(pid,mid){
         h+=block('💬 پاسخ مدل به پیام تست',d.response,'#4ade80');
         h+=block('🏷️ پاسخ دسته‌بندی',d.catResponse,'#a78bfa');
         h+=block('⚠️ خطا',d.error||d.itemError,'#f87171');
-        if(d.raw){
-            let pretty=d.raw;
-            try{pretty=JSON.stringify(JSON.parse(d.raw),null,2);}catch(e){}
-            h+='<div style="margin-top:10px"><div style="color:#67e8f9;font-weight:700;margin-bottom:4px">🧾 پاسخ خامِ سرویس (JSON)</div>'
+        /* v9.96: هر دو پاسخِ خام — درخواستِ «پیام تست» و درخواستِ «دسته‌بندی» */
+        const rawBlock=(title,txt,color,note)=>{
+            let pretty=txt;
+            try{pretty=JSON.stringify(JSON.parse(txt),null,2);}catch(e){}
+            return '<div style="margin-top:10px"><div style="color:'+color+';font-weight:700;margin-bottom:4px">'+esc(title)
+              +(note?'<span style="color:#64748b;font-weight:400;font-size:10px"> — '+esc(note)+'</span>':'')+'</div>'
               +'<pre dir="ltr" style="background:#0b1425;border:1px solid #1e293b;border-radius:6px;padding:8px;white-space:pre-wrap;word-break:break-all;color:#cbd5e1;max-height:320px;overflow:auto;font-family:ui-monospace,monospace;font-size:10.5px;text-align:left;margin:0">'+esc(pretty)+'</pre></div>';
+        };
+        if(d.raw){
+            h+=rawBlock('🧾 پاسخ خامِ درخواستِ پیام تست (JSON)',d.raw,'#67e8f9',
+                'درخواست اول: پیامِ «'+(d.testMsg||'سلام')+'»');
         }else{
-            h+='<div style="margin-top:10px;color:#64748b">🧾 پاسخ خام برای این مدل ذخیره نشده — یک بار دیگر تستش کنید تا ذخیره شود.</div>';
+            h+='<div style="margin-top:10px;color:#64748b">🧾 پاسخ خامِ پیام تست ذخیره نشده — یک بار دیگر تستش کنید تا ذخیره شود.</div>';
+        }
+        if(d.catRaw){
+            let note='درخواست دوم: دسته‌بندیِ «'+(d.testCat||'')+'»';
+            if(d.catStatus)note+=' · HTTP '+d.catStatus;
+            if(d.catVia)note+=' · '+d.catVia;
+            h+=rawBlock('🏷️ پاسخ خامِ درخواستِ دسته‌بندی (JSON)',d.catRaw,'#a78bfa',note);
+            if(d.catAiText)h+='<div style="margin-top:4px;color:#94a3b8;font-size:10.5px">متنِ خروجیِ مدل پیش از تبدیل به شناسهٔ دسته: <b style="color:#c4b5fd;direction:ltr;display:inline-block">'+esc(d.catAiText)+'</b></div>';
+        }else{
+            h+='<div style="margin-top:10px;color:#64748b">🏷️ پاسخ خامِ دسته‌بندی ذخیره نشده — برای ذخیره‌شدن باید توکنِ باسلام تنظیم باشد (فهرست دسته‌ها از آنجا خوانده می‌شود) و مدل دوباره تست شود.</div>';
         }
         h+='<div class="cact" style="margin-top:12px">'
           +'<button class="btn btn-cyan" style="flex:1;font-size:11px" onclick="aiRetestFromDetail()">🔁 تست دوبارهٔ همین مدل</button>'
@@ -34547,32 +34692,39 @@ function aiOpenTestModal(){
       +'.ai-switch-wrap input:checked + .ai-switch::after{transform:translateX(14px)}'
       +'</style>'
       +'<div style="background:#0f172a;border:1px solid #334155;border-radius:12px;width:min(1100px,96vw);max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5)">'
-      +'<div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #334155;flex:0 0 auto">'
-      +'<span style="font-size:14px">🧪</span><b style="color:#67e8f9;flex:1">نتایج زندهٔ تست همهٔ مدل‌ها</b>'
-      +'<span id="aiTestCur" style="color:#fbbf24;font-size:11px"></span>'
+      /* v9.96 (۱۰الف): سربرگِ مودال فشرده شد.
+         پیش‌تر عنوان، متنِ زردِ «در حال تست…»، شمارنده‌ها و نوارِ فقط‌خواندنی
+         سه ردیفِ جدا بودند و در موبایل با wrap شدن به ۵–۶ سطر می‌رسیدند و
+         نیمی از ارتفاعِ مودال را می‌خوردند. حالا دو ردیفِ nowrap داریم:
+         ۱) عنوان + چیپِ وضعیتِ زنده (aiTestCur) + دکمه‌ها
+         ۲) شمارنده‌ها + مقادیرِ فقط‌خواندنی + سوییچِ «فقط سبزها» (با اسکرولِ افقی) */
+      +'<div class="mhead" style="padding:9px 14px;border-bottom:1px solid #334155;flex:0 0 auto">'
+      +'<b class="mh-t" style="color:#67e8f9;font-size:13px">🧪 نتایج زندهٔ تست همهٔ مدل‌ها</b>'
+      +'<span id="aiTestCur" class="mstat"></span>'
+      +'<span class="mh-act">'
       +'<button class="btn btn-red" onclick="aiTestStop()" style="font-size:11px;padding:4px 10px">⏹ توقف</button>'
-      +'<button class="btn btn-gray" onclick="aiCloseTestModal()" style="font-size:11px;padding:4px 10px">✕ بستن</button></div>'
-      +'<div style="display:flex;gap:16px;padding:8px 16px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;color:#94a3b8;flex-wrap:wrap;align-items:center">'
-      +'<span>کل: <b id="aiTestTot" style="color:#e2e8f0">۰</b></span>'
-      +'<span>🟢 در دسترس: <b id="aiTestOk" style="color:#4ade80">۰</b></span>'
-      +'<span>🔴 ناموفق: <b id="aiTestFail" style="color:#f87171">۰</b></span>'
-      +'<span>⏳ در انتظار: <b id="aiTestWait" style="color:#fbbf24">۰</b></span>'
-      // v9.64: سوییچِ اسلایدریِ «فقط سبزها»
-      +'<label class="ai-switch-wrap" style="display:flex;align-items:center;gap:7px;cursor:pointer;margin-inline-start:auto;margin-left:auto">'
-      +'<span style="font-size:11px;color:#94a3b8">فقط سبزها</span>'
-      +'<input type="checkbox" id="aiTestOnlyGreen" onchange="aiTestToggleOnlyGreen(this.checked)" style="display:none">'
-      +'<span class="ai-switch"></span></label></div>'
+      +'<button class="btn btn-gray" onclick="aiCloseTestModal()" style="font-size:11px;padding:4px 10px">✕ بستن</button></span></div>'
       /* v9.95 (۹الف): سه فیلدِ «پیام تست»، «دستهٔ تست» و «تاخیر» از داخلِ مودال
          برداشته شدند — همان‌ها در تبِ «🧪 تست مدل‌ها» هستند و داشتنِ نسخهٔ دوم
          با شناسه‌های تکراری (aiTestMsg/aiTestCat/aiTestDelay) باعث می‌شد
          document.getElementById همیشه نسخهٔ بیرونی را بگیرد. اینجا فقط
-         مقادیرِ به‌کاررفته را «فقط‌خواندنی» نشان می‌دهیم. */
-      +'<div style="display:flex;gap:14px;padding:7px 16px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;flex-wrap:wrap;align-items:center;color:#64748b">'
-      +'<span>پیام تست: <b style="color:#cbd5e1">'+esc(aiTestMsgVal||'سلام')+'</b></span>'
-      +'<span>دستهٔ تست: <b style="color:#cbd5e1">'+esc(aiTestCatVal||'ادو پرفیوم')+'</b></span>'
-      +'<span>تاخیر: <b style="color:#cbd5e1">'+toFa(aiTestDelayVal||120)+' ms</b></span>'
-      +'<span style="margin-inline-start:auto;margin-left:auto;color:#475569">برای تغییر، تبِ «🧪 تست مدل‌ها» · روی هر ردیف کلیک کنید تا جزئیات کامل را ببینید</span>'
-      +'</div>'
+         مقادیرِ به‌کاررفته را «فقط‌خواندنی» نشان می‌دهیم.
+         v9.96: این نوار با نوارِ شمارنده‌ها ادغام شد تا یک ردیفِ کامل صرفه‌جویی شود. */
+      +'<div class="mbar" style="padding:6px 14px;border-bottom:1px solid #1e293b;flex:0 0 auto;font-size:11px;color:#94a3b8" title="برای تغییرِ پیام/دسته/تأخیر به تبِ «🧪 تست مدل‌ها» بروید · روی هر ردیف کلیک کنید تا جزئیات کامل را ببینید">'
+      +'<span>کل: <b id="aiTestTot" style="color:#e2e8f0">۰</b></span>'
+      +'<span>🟢 <b id="aiTestOk" style="color:#4ade80">۰</b></span>'
+      +'<span>🔴 <b id="aiTestFail" style="color:#f87171">۰</b></span>'
+      +'<span>⏳ <b id="aiTestWait" style="color:#fbbf24">۰</b></span>'
+      +'<span style="color:#334155">|</span>'
+      +'<span class="mb-el" style="color:#64748b">پیام: <b style="color:#cbd5e1">'+esc(aiTestMsgVal||'سلام')+'</b></span>'
+      +'<span class="mb-el" style="color:#64748b">دسته: <b style="color:#cbd5e1">'+esc(aiTestCatVal||'ادو پرفیوم')+'</b></span>'
+      +'<span style="color:#64748b">تأخیر: <b style="color:#cbd5e1">'+toFa(aiTestDelayVal||120)+'</b> ms</span>'
+      +'<span class="mb-sp"></span>'
+      // v9.64: سوییچِ اسلایدریِ «فقط سبزها»
+      +'<label class="ai-switch-wrap" style="display:flex;align-items:center;gap:7px;cursor:pointer">'
+      +'<span style="font-size:11px;color:#94a3b8">فقط سبزها</span>'
+      +'<input type="checkbox" id="aiTestOnlyGreen" onchange="aiTestToggleOnlyGreen(this.checked)" style="display:none">'
+      +'<span class=\"ai-switch\"></span></label></div>'
       +'<div style="flex:1;overflow:auto;padding:0">'
       +'<table style="width:100%;border-collapse:collapse;font-size:11px">'
       +'<thead><tr style="background:#1e293b;position:sticky;top:0;color:#94a3b8">'
@@ -37558,10 +37710,15 @@ function renderBslModal(products){
     html+='<div class="bsl-modal">';
     /* v9.49: عنوان در بالاترین ردیفِ تمام‌عرض مودال می‌نشیند و دکمه‌های
        عملیات در ردیفِ پایینِ جدا — تا مودال به‌جای رشدِ عمودی (در موبایل)
-       افقی باز شود و فضای کمتری بگیرد. */
-    html+='<div class="bsl-modal-head" style="flex-direction:column;align-items:stretch;gap:7px;padding:10px 14px">';
-    html+='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="font-size:15px;flex:1;min-width:0">\u{1F3EA} \u0645\u062F\u06CC\u0631\u06CC\u062A \u062C\u0627\u0645\u0639 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0628\u0627\u0633\u0644\u0627\u0645 ('+toFa(total)+' \u0645\u062D\u0635\u0648\u0644)</h2><button class="btn btn-gray" onclick="closeBslModal()">\u2715</button></div>';
-    html+='<div style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn btn-red" style="font-size:11px;padding:4px 8px" onclick="bslFindDuplicates()">\u{1F50D} \u062A\u06A9\u0631\u0627\u0631\u06CC\u200C\u0647\u0627</button><button class="btn btn-purple" style="font-size:11px;padding:4px 8px" onclick="bslPhase2Check()" title="اصلاح دستهٔ محصولات رد شده">🔄 فاز ۲</button><button class="btn btn-cyan" style="font-size:11px;padding:4px 8px" onclick="bslStatusOverview()">\u{1F4CA} \u0648\u0636\u0639\u06CC\u062A</button></div>';
+       افقی باز شود و فضای کمتری بگیرد.
+       v9.96 (۱۰الف): همان دو ردیف در «یک ردیفِ افقیِ بدون wrap» ادغام شد؛
+       عنوان با «…» کوتاه می‌شود و اگر دکمه‌ها جا نشدند نوار افقی اسکرول
+       می‌خورد — به‌جای اینکه سربرگ در موبایل به ۳–۴ سطر رشد کند. */
+    html+='<div class="bsl-modal-head mbar" style="padding:8px 12px;gap:6px">';
+    html+='<h2 class="mb-el" style="font-size:14px;margin:0">\u{1F3EA} \u0645\u062F\u06CC\u0631\u06CC\u062A \u062C\u0627\u0645\u0639 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0628\u0627\u0633\u0644\u0627\u0645 ('+toFa(total)+' \u0645\u062D\u0635\u0648\u0644)</h2>';
+    html+='<span class="mb-sp"></span>';
+    html+='<button class="btn btn-red" style="font-size:11px;padding:4px 8px" onclick="bslFindDuplicates()">\u{1F50D} \u062A\u06A9\u0631\u0627\u0631\u06CC\u200C\u0647\u0627</button><button class="btn btn-purple" style="font-size:11px;padding:4px 8px" onclick="bslPhase2Check()" title="اصلاح دستهٔ محصولات رد شده">🔄 فاز ۲</button><button class="btn btn-cyan" style="font-size:11px;padding:4px 8px" onclick="bslStatusOverview()">\u{1F4CA} \u0648\u0636\u0639\u06CC\u062A</button>';
+    html+='<button class="btn btn-gray" style="font-size:11px;padding:4px 8px" onclick="closeBslModal()">\u2715</button>';
     html+='</div>';
     // Tabs
     html+='<div class="bsl-tabs">';
@@ -37935,7 +38092,7 @@ function bslBatchFixAiCat(){
     if(modal)modal.remove();
     modal=document.createElement('div');
     modal.id='bslAiBatchModal';
-    modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslAiBatchModal()"><div class="bsl-modal" style="width:800px"><div class="bsl-modal-head"><h2>\u{1F916} \u0627\u0635\u0644\u0627\u062D \u062F\u0633\u062A\u0647\u200C\u0628\u0646\u062F\u06CC \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06CC \u2014 \u06AF\u0632\u0627\u0631\u0634 \u0632\u0646\u062F\u0647</h2><button class="btn btn-gray" onclick="closeBslAiBatchModal()">\u2715</button></div><div class="bsl-modal-body" style="padding:0"><div id="bslAiBatchSummary" style="padding:10px 16px;background:#1e293b;border-bottom:1px solid #334155;font-size:12px;color:#94a3b8;display:flex;gap:16px;flex-wrap:wrap;direction:rtl"><span>\u0627\u0632: <b id="bslAiBatchTotal" style="color:#67e8f9">0</b></span><span>\u2705 \u0627\u0635\u0644\u0627\u062D: <b id="bslAiBatchFixed" style="color:#4ade80">0</b></span><span>\u26A0\uFE0F \u0628\u062F\u0648\u0646 AI: <b id="bslAiBatchNoAi" style="color:#fbbf24">0</b></span><span>\u26A0\uFE0F \u062F\u0633\u062A\u0647 \u0646\u06CC\u0633\u062A: <b id="bslAiBatchNoCat" style="color:#fbbf24">0</b></span><span>\u274C \u0646\u0627\u0645\u0648\u0641\u0642: <b id="bslAiBatchFailed" style="color:#f87171">0</b></span></div><div id="bslAiBatchLog" style="max-height:60vh;overflow-y:auto;padding:8px;font-size:11px;direction:rtl"></div></div><div class="bsl-modal-pager"><button class="btn btn-gray" onclick="closeBslAiBatchModal()">\u0628\u0633\u062A\u0646</button></div></div></div>';
+    modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslAiBatchModal()"><div class="bsl-modal" style="width:800px"><div class="bsl-modal-head"><h2>\u{1F916} \u0627\u0635\u0644\u0627\u062D \u062F\u0633\u062A\u0647\u200C\u0628\u0646\u062F\u06CC \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06CC \u2014 \u06AF\u0632\u0627\u0631\u0634 \u0632\u0646\u062F\u0647</h2><button class="btn btn-gray" onclick="closeBslAiBatchModal()">\u2715</button></div><div class="bsl-modal-body" style="padding:0"><div id="bslAiBatchSummary" class="mbar" style="padding:7px 14px;background:#1e293b;border-bottom:1px solid #334155;font-size:11.5px;color:#94a3b8;direction:rtl"><span>\u0627\u0632: <b id="bslAiBatchTotal" style="color:#67e8f9">0</b></span><span>\u2705 \u0627\u0635\u0644\u0627\u062D: <b id="bslAiBatchFixed" style="color:#4ade80">0</b></span><span>\u26A0\uFE0F \u0628\u062F\u0648\u0646 AI: <b id="bslAiBatchNoAi" style="color:#fbbf24">0</b></span><span>\u26A0\uFE0F \u062F\u0633\u062A\u0647 \u0646\u06CC\u0633\u062A: <b id="bslAiBatchNoCat" style="color:#fbbf24">0</b></span><span>\u274C \u0646\u0627\u0645\u0648\u0641\u0642: <b id="bslAiBatchFailed" style="color:#f87171">0</b></span></div><div id="bslAiBatchLog" style="max-height:60vh;overflow-y:auto;padding:8px;font-size:11px;direction:rtl"></div></div><div class="bsl-modal-pager"><button class="btn btn-gray" onclick="closeBslAiBatchModal()">\u0628\u0633\u062A\u0646</button></div></div></div>';
     document.body.appendChild(modal);
     const logEl=document.getElementById('bslAiBatchLog');
     let fixed=0,failed=0,noAi=0,noCat=0,total=0;
@@ -38051,7 +38208,7 @@ function bslBatchActivate(fromStatus){
     let modal=document.getElementById('bslActivateModal');
     if(modal)modal.remove();
     modal=document.createElement('div');modal.id='bslActivateModal';
-    modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslActivateModal()"><div class="bsl-modal" style="width:750px"><div class="bsl-modal-head"><h2>\u2705 \u0641\u0639\u0627\u0644\u200C\u0633\u0627\u0632\u06CC \u0645\u062D\u0635\u0648\u0644\u0627\u062A '+fromLabel+' \u2014 \u06AF\u0632\u0627\u0631\u0634 \u0632\u0646\u062F\u0647</h2><button class="btn btn-gray" onclick="closeBslActivateModal()">\u2715</button></div><div class="bsl-modal-body" style="padding:0"><div id="bslActivateSummary" style="padding:10px 16px;background:#1e293b;border-bottom:1px solid #334155;font-size:12px;color:#94a3b8;display:flex;gap:16px;flex-wrap:wrap;direction:rtl"><span>\u0627\u0632: <b id="bslActivateTotal" style="color:#67e8f9">0</b></span><span>\u2705 \u0641\u0639\u0627\u0644 \u0634\u062F: <b id="bslActivateOk" style="color:#4ade80">0</b></span><span>\u23F8 \u0631\u062F \u0634\u062F: <b id="bslActivateSkip" style="color:#fbbf24">0</b></span><span>\u274C \u0646\u0627\u0645\u0648\u0641\u0642: <b id="bslActivateFail" style="color:#f87171">0</b></span></div><div id="bslActivateLog" style="max-height:60vh;overflow-y:auto;padding:8px;font-size:11px;direction:rtl"></div></div><div class="bsl-modal-pager"><button class="btn btn-gray" onclick="closeBslActivateModal()">\u0628\u0633\u062A\u0646</button></div></div></div>';
+    modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslActivateModal()"><div class="bsl-modal" style="width:750px"><div class="bsl-modal-head"><h2>\u2705 \u0641\u0639\u0627\u0644\u200C\u0633\u0627\u0632\u06CC \u0645\u062D\u0635\u0648\u0644\u0627\u062A '+fromLabel+' \u2014 \u06AF\u0632\u0627\u0631\u0634 \u0632\u0646\u062F\u0647</h2><button class="btn btn-gray" onclick="closeBslActivateModal()">\u2715</button></div><div class="bsl-modal-body" style="padding:0"><div id="bslActivateSummary" class="mbar" style="padding:7px 14px;background:#1e293b;border-bottom:1px solid #334155;font-size:11.5px;color:#94a3b8;direction:rtl"><span>\u0627\u0632: <b id="bslActivateTotal" style="color:#67e8f9">0</b></span><span>\u2705 \u0641\u0639\u0627\u0644 \u0634\u062F: <b id="bslActivateOk" style="color:#4ade80">0</b></span><span>\u23F8 \u0631\u062F \u0634\u062F: <b id="bslActivateSkip" style="color:#fbbf24">0</b></span><span>\u274C \u0646\u0627\u0645\u0648\u0641\u0642: <b id="bslActivateFail" style="color:#f87171">0</b></span></div><div id="bslActivateLog" style="max-height:60vh;overflow-y:auto;padding:8px;font-size:11px;direction:rtl"></div></div><div class="bsl-modal-pager"><button class="btn btn-gray" onclick="closeBslActivateModal()">\u0628\u0633\u062A\u0646</button></div></div></div>';
     document.body.appendChild(modal);
     const logEl=document.getElementById('bslActivateLog');
     let ok=0,skip=0,fail=0,total=0;
@@ -38380,12 +38537,14 @@ function showPhase2Modal(rejected,cats){
       +'<h2>🔄 فاز ۲ — اصلاح دستهٔ محصولات رد شده</h2>'
       +'<button class="btn btn-gray" onclick="closePhase2()">✕</button></div>';
     // نوار خلاصه و عملیات گروهی
-    h+='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 14px;'
+    /* v9.96 (۱۰الف): نوارِ خلاصه+عملیات از wrap به یک ردیفِ افقی با اسکرول
+       تبدیل شد تا در موبایل به ۳ سطر نشکند و ارتفاعِ لیستِ محصولات حفظ شود. */
+    h+='<div class="mbar" style="gap:8px;padding:7px 14px;'
       +'background:#111c31;border-bottom:1px solid #334155">'
       +'<span style="font-size:12px;color:#e2e8f0">'+toFa(rejected.length)+' محصول رد شده</span>'
       +'<span style="font-size:11px;color:#86efac">✅ '+toFa(auto)+' پیشنهاد خودکار</span>'
       +'<span style="font-size:11px;color:#fbbf24">✋ '+toFa(rejected.length-auto)+' نیازمند انتخاب دستی</span>'
-      +'<span style="flex:1"></span>'
+      +'<span class="mb-sp"></span>'
       +'<span id="p2Done" style="font-size:11px;color:#4ade80"></span>'
       +(auto>0?'<button class="btn btn-green" onclick="bslPhase2FixAll()" id="p2AllBtn" '
         +'style="font-size:11px;padding:5px 10px">⚡ اصلاح همهٔ پیشنهادها ('+toFa(auto)+')</button>':'')
