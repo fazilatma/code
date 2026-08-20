@@ -1,6 +1,6 @@
 import { getState, setState } from './db.js';
 import { getEnv } from './env.js';
-import { getLastAiTestResults, suggestCategoryWithModel, testModelBatch } from './ai.js';
+import { getLastAiTestResults, isChatCompatibleAiModel, suggestCategoryWithModel, testModelBatch } from './ai.js';
 import { loadConnections } from './connections.js';
 import { applyBasalamCategory, destinationCatalog, destinationCategories } from './maintenance.js';
 import type { BackgroundMessage } from './types.js';
@@ -59,7 +59,7 @@ export async function startAiTestRun(input:any,waitUntil?:(promise:Promise<unkno
 
 async function successfulCategoryModels():Promise<string[]>{
   const[tests,connections]=await Promise.all([getLastAiTestResults(),loadConnections()]),green=new Set((Array.isArray(tests?.results)?tests.results:[]).filter((row:any)=>row?.ok===true).map((row:any)=>`${row.provider}::${row.model}`)),ai=connections.ai,candidates=Array.isArray(ai.candidates)?ai.candidates.map(String):[],providers=ai.providers.length?ai.providers:[{id:'default',models:ai.model?[ai.model]:[],enabled:true}],configured:string[]=[];
-  for(const provider of providers)if(provider.enabled!==false)for(const model of provider.models||[]){const key=`${provider.id}::${model}`;if(model&&green.has(key))configured.push(key)}
+  for(const provider of providers)if(provider.enabled!==false)for(const model of provider.models||[]){const key=`${provider.id}::${model}`;if(model&&green.has(key)&&isChatCompatibleAiModel(provider,model))configured.push(key)}
   return[...new Set([...candidates.filter(key=>green.has(key)&&configured.includes(key)),...configured])].slice(0,5);
 }
 export async function startAllUnapprovedCategoryRun(waitUntil?:(promise:Promise<unknown>)=>void):Promise<{run:any;existing:boolean}>{

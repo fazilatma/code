@@ -1,12 +1,34 @@
-export const AI_PROVIDER_CATALOG_VERSION=1;
+export type AiProviderCatalog={
+  catalogVersion?:number;
+  providers?:Array<{id:string;name?:string;baseUrl?:string;apiKey?:string;models?:string[];enabled?:boolean}>;
+};
 
 /**
- * Models listed on Mistral's API pricing page that are compatible with this
- * app's text/chat-completions workflow. OCR, embeddings, moderation, TTS, and
- * transcription-only endpoints are intentionally excluded.
- * Source: https://mistral.ai/pricing/api/ (checked 2026-08-20).
+ * Every model carrying the explicit “Text-to-text” capability on Mistral's
+ * official API pricing page (reviewed 2026-08-20). Some of these models use a
+ * dedicated endpoint; see MISTRAL_MODEL_ENDPOINTS rather than assuming chat.
  */
-export const MISTRAL_CHAT_MODELS=[
+export const MISTRAL_TEXT_TO_TEXT_MODELS=[
+  'mistral-medium-latest',
+  'mistral-small-latest',
+  'mistral-large-latest',
+  'zai-glm-5-2',
+  'mistral-ocr-latest',
+  'voxtral-small-latest',
+  'codestral-latest',
+  'ministral-3b-latest',
+  'ministral-8b-latest',
+  'ministral-14b-latest',
+  'mistral-embed'
+] as const;
+
+export const MISTRAL_MODEL_ENDPOINTS:Record<string,'chat-completions'|'ocr'|'embeddings'>={
+  'mistral-ocr-latest':'ocr',
+  'mistral-embed':'embeddings'
+};
+
+/** The previous one-time catalog is kept as migration history. */
+export const MISTRAL_CATALOG_V1_MODELS=[
   'mistral-medium-latest',
   'mistral-small-latest',
   'mistral-large-latest',
@@ -19,19 +41,26 @@ export const MISTRAL_CHAT_MODELS=[
   'ministral-14b-latest'
 ] as const;
 
-type AiCatalogTarget={catalogVersion?:number;providers:Array<{id:string;name:string;baseUrl:string;apiKey:string;models:string[];enabled:boolean}>};
+export const MISTRAL_CATALOG_VERSION=2;
+const MISTRAL_CATALOG_V2_ADDITIONS=['mistral-ocr-latest','mistral-embed'] as const;
 
-/** Applies each catalog release once, so users can still edit/remove models afterwards. */
-export function upgradeAiProviderCatalog(ai:AiCatalogTarget):boolean{
-  if(Number(ai.catalogVersion||0)>=AI_PROVIDER_CATALOG_VERSION)return false;
-  let provider=ai.providers.find(item=>String(item.id).toLowerCase()==='mistral'||/api\.mistral\.ai/i.test(String(item.baseUrl||'')));
+function mistralProvider(ai:AiProviderCatalog){return ai.providers?.find(provider=>provider.id==='mistral'||/api\.mistral\.ai/i.test(String(provider.baseUrl||'')))}
+function appendModels(provider:NonNullable<AiProviderCatalog['providers']>[number],models:readonly string[]){provider.models=[...new Set([...(Array.isArray(provider.models)?provider.models.map(String):[]),...models])]}
+
+/**
+ * Applies each catalog revision exactly once. Existing names, keys, URLs,
+ * enabled flags, custom models, candidates and master choices are untouched;
+ * a model deleted after a completed revision is therefore not re-added.
+ */
+export function upgradeAiProviderCatalog(ai:AiProviderCatalog):boolean{
+  ai.providers=Array.isArray(ai.providers)?ai.providers:[];
+  let version=Math.max(0,Math.trunc(Number(ai.catalogVersion)||0)),changed=false,provider=mistralProvider(ai);
   if(!provider){
     provider={id:'mistral',name:'Mistral AI',baseUrl:'https://api.mistral.ai/v1',apiKey:'',models:[],enabled:false};
-    ai.providers.push(provider);
+    ai.providers.push(provider);changed=true;
   }
-  provider.name=provider.name||'Mistral AI';
-  provider.baseUrl=String(provider.baseUrl||'https://api.mistral.ai/v1').replace(/\/$/,'');
-  provider.models=[...new Set([...(Array.isArray(provider.models)?provider.models.map(String):[]),...MISTRAL_CHAT_MODELS])];
-  ai.catalogVersion=AI_PROVIDER_CATALOG_VERSION;
-  return true;
+  if(version<1){appendModels(provider,MISTRAL_CATALOG_V1_MODELS);version=1;changed=true}
+  if(version<2){appendModels(provider,MISTRAL_CATALOG_V2_ADDITIONS);version=2;changed=true}
+  if(ai.catalogVersion!==version){ai.catalogVersion=version;changed=true}
+  return changed;
 }

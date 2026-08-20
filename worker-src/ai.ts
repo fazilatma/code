@@ -1,3 +1,4 @@
+import { MISTRAL_MODEL_ENDPOINTS } from './ai-catalog.js';
 import { loadConnections } from './connections.js';
 import { getState, setState } from './db.js';
 import { assertPublicUrl, safeFetch } from './network.js';
@@ -10,17 +11,42 @@ type RequestResult={response?:Response;body?:any;rawText?:string;networkError?:s
 function providersFromAi(ai:any):Provider[]{return ai.providers.length?ai.providers:[{id:'default',name:'Default',baseUrl:ai.baseUrl,apiKey:ai.apiKey,models:ai.model?[ai.model]:[],enabled:true}]}
 export async function aiProviders():Promise<Provider[]>{return providersFromAi((await loadConnections()).ai)}
 
+export type AiModelEndpoint='chat-completions'|'ocr'|'embeddings';
+type AiEndpointProvider=Pick<Provider,'id'> & Partial<Pick<Provider,'baseUrl'>>;
+function isMistralProvider(provider:AiEndpointProvider):boolean{return provider.id==='mistral'||/api\.mistral\.ai/i.test(String(provider.baseUrl||''))}
+export function aiModelEndpoint(provider:AiEndpointProvider,model:string):AiModelEndpoint{return isMistralProvider(provider)?MISTRAL_MODEL_ENDPOINTS[model]||'chat-completions':'chat-completions'}
+export function isChatCompatibleAiModel(provider:AiEndpointProvider,model:string):boolean{return aiModelEndpoint(provider,model)==='chat-completions'}
+
 export async function aiCall(provider:Provider,model:string,prompt:string,networkOverride?:Network){
   const network=networkOverride||(await loadConnections()).ai.network;
   if(!provider.baseUrl||!provider.apiKey||!model)throw new Error('تنظیمات ارائه‌دهنده/مدل کامل نیست');
   const started=Date.now();
   if(isCloudflareNative(provider.baseUrl))return cloudflareCall(provider,model,prompt,network,started);
+  const endpointType=aiModelEndpoint(provider,model);
+  if(endpointType!=='chat-completions')return mistralDedicatedCall(provider,model,prompt,network,started,endpointType);
   const endpoint=openAiEndpoint(provider.baseUrl),reportedEndpoint=safeEndpoint(endpoint),payload={model,messages:[{role:'user',content:prompt}],max_tokens:400,temperature:.2};
   const result=await requestAi(endpoint,payload,provider,network);
   if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:reportedEndpoint,latencyMs:Date.now()-started,raw:{error:reason}})}
   const response=result.response!,body=result.body,latencyMs=Date.now()-started;
   if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${aiErrorMessage(body)||response.statusText||'AI error'}`,failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body));
-  return successDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body);
+  return successDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body,{endpointType:'chat-completions',chatCompatible:true});
+}
+
+const MISTRAL_OCR_TEST_IMAGE='https://raw.githubusercontent.com/mistralai/cookbook/main/mistral/ocr/receipt.png';
+async function mistralDedicatedCall(provider:Provider,model:string,prompt:string,network:Network,started:number,endpointType:Exclude<AiModelEndpoint,'chat-completions'>){
+  const endpoint=mistralEndpoint(provider.baseUrl,endpointType),reportedEndpoint=safeEndpoint(endpoint),payload=endpointType==='embeddings'?{model,input:[prompt||'سلام']}:{model,document:{type:'image_url',image_url:MISTRAL_OCR_TEST_IMAGE},include_image_base64:false};
+  const result=await requestAi(endpoint,payload,provider,network);
+  if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:reportedEndpoint,endpointType,chatCompatible:false,latencyMs:Date.now()-started,raw:{error:reason}})}
+  const response=result.response!,body=result.body,latencyMs=Date.now()-started;
+  if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${aiErrorMessage(body)||response.statusText||'AI error'}`,{...failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body),endpointType,chatCompatible:false});
+  if(endpointType==='embeddings'){
+    const vector=body?.data?.[0]?.embedding,dimensions=Array.isArray(vector)?vector.length:Number(body?.data?.[0]?.dimensions)||0;
+    if(!dimensions)throw new AiResponseError('پاسخ endpoint امبدینگ فاقد بردار معتبر بود.',{...failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body),phase:'validation',endpointType,chatCompatible:false});
+    return successDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body,{endpointType,chatCompatible:false,text:`بردار امبدینگ معتبر با ${dimensions} بُعد دریافت شد.`,dimensions});
+  }
+  const pages=Array.isArray(body?.pages)?body.pages:[],text=pages.map((page:any)=>String(page?.markdown||'').trim()).filter(Boolean).join('\n\n');
+  if(!pages.length)throw new AiResponseError('پاسخ endpoint OCR فاقد صفحهٔ معتبر بود.',{...failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body),phase:'validation',endpointType,chatCompatible:false});
+  return successDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body,{endpointType,chatCompatible:false,text:text||`OCR با موفقیت ${pages.length} صفحه را پردازش کرد.`,pages:pages.length,testInput:'official-public-receipt-image'});
 }
 
 async function cloudflareCall(provider:Provider,model:string,prompt:string,network:Network,started:number){
@@ -58,6 +84,11 @@ function openAiEndpoint(raw:string):string{
   if(url.port==='11434'&&!/\/v1\/?$/i.test(url.pathname))url.pathname=url.pathname.replace(/\/$/,'')+'/v1';
   url.pathname=url.pathname.replace(/\/$/,'')+'/chat/completions';return url.toString();
 }
+function mistralEndpoint(raw:string,type:Exclude<AiModelEndpoint,'chat-completions'>):string{
+  const url=new URL(unmarkdownUrl(raw)),suffix=type==='ocr'?'ocr':'embeddings';
+  url.pathname=url.pathname.replace(/\/(?:chat\/completions|ocr|embeddings)\/?$/i,'').replace(/\/$/,'')+'/'+suffix;
+  return url.toString();
+}
 function cloudflareModelIds(raw:string):string[]{
   const model=String(raw||'').trim().replace(/^\/+/,''),out=[model],after=model.replace(/^@cf\//i,'');
   if(after&&after.indexOf('/')<0){
@@ -93,6 +124,7 @@ function normalizeCategoryText(value:string){return String(value||'').toLowerCas
 function categoryPrompt(title:string,categories:AiCategoryOption[]){const ranked=categoryRows(title,categories),allowed:AiCategoryOption[]=[],lines:string[]=[];let length=0;for(const item of ranked){const line=`${item.row.id} | ${item.name}`;if(length+line.length+1>18_000)break;lines.push(line);allowed.push(item.row);length+=line.length+1}if(!lines.length)throw new Error('فهرست معتبر دسته‌بندی باسلام در دسترس نیست.');return{allowed,prompt:`برای محصول زیر فقط مناسب‌ترین شناسه دسته‌بندی باسلام را از فهرست مجاز انتخاب کن. شناسه باید دقیقاً یکی از اعداد فهرست باشد. پاسخ را به شکل JSON کوتاه {"category_id":123,"reason":"..."} بده.\nمحصول: ${title}\nفهرست مجاز:\n${lines.join('\n')}`}}
 function parseCategoryId(text:string,categories:AiCategoryOption[]){const valid=new Set(categories.map(row=>Number(row.id)));try{const parsed=JSON.parse(String(text||'').replace(/^```(?:json)?\s*|\s*```$/gi,''));const id=Number(parsed?.category_id??parsed?.categoryId??parsed?.id);if(valid.has(id))return id}catch{/* response can be plain text */}for(const match of String(text||'').matchAll(/\d+/g)){const id=Number(match[0]);if(valid.has(id))return id}return 0}
 async function categoryWithTask(task:AiTestTask,title:string,categories:AiCategoryOption[],network:Network){
+  if(!isChatCompatibleAiModel(task.p,task.model))throw new AiResponseError('این مدل endpoint اختصاصی دارد و برای گفت‌وگو یا دسته‌بندی کاندید نمی‌شود.',{ok:false,skipped:true,phase:'unsupported-task',provider:task.p.id,providerName:task.p.name,model:task.model,prompt:title,endpointType:aiModelEndpoint(task.p,task.model),chatCompatible:false,latencyMs:0,raw:{reason:'dedicated endpoint model'}});
   const prepared=categoryPrompt(title,categories),detail=await aiCall(task.p,task.model,prepared.prompt,network),categoryId=parseCategoryId(detail.text,prepared.allowed),category=prepared.allowed.find(row=>Number(row.id)===categoryId);
   if(!category)throw new AiResponseError('مدل هیچ شناسهٔ معتبر از فهرست دسته‌بندی باسلام برنگرداند.',{...detail,ok:false,phase:'validation',categoryTitle:title,categoryId:0,allowedCategoryCount:prepared.allowed.length});
   return{...detail,categoryTitle:title,categoryId,categoryName:String(category.name),categoryPath:String(category.path||category.name),allowedCategoryCount:prepared.allowed.length};
@@ -111,15 +143,15 @@ function aiTestTasks(ai:any,providers:Provider[],onlyCandidates:boolean):AiTestT
   const wanted=new Set<string>(Array.isArray(ai.candidates)?ai.candidates.map(String):[]),tasks:AiTestTask[]=[];
   for(const p of providers){
     if(p.enabled===false)continue;
-    for(const rawModel of p.models||[]){const model=String(rawModel||'').trim(),key=`${p.id}::${model}`;if(!model||onlyCandidates&&!wanted.has(key))continue;tasks.push({p,model,key})}
+    for(const rawModel of p.models||[]){const model=String(rawModel||'').trim(),key=`${p.id}::${model}`;if(!model||onlyCandidates&&(!wanted.has(key)||!isChatCompatibleAiModel(p,model)))continue;tasks.push({p,model,key})}
   }
   return tasks;
 }
 function aiTestFailure(error:unknown,task:AiTestTask,prompt:string){return error instanceof AiResponseError?{...error.detail,key:task.key}:{ok:false,phase:'unknown',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey),raw:{error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey)}}}
 
 function aiTestResponse(saved:StoredAiTest,tasks:AiTestTask[],cursor:number,nextCursor:number,batchResults:any[],replayed=false){
-  const results=saved.results,done=nextCursor>=tasks.length,messageSucceeded=results.filter(x=>x.ok).length,messageFailed=results.filter(x=>!x.ok).length,categoryAttempted=Boolean(saved.categoryTitle),categorySucceeded=categoryAttempted?results.filter(x=>x.categoryResult?.ok).length:0,categoryFailed=categoryAttempted?results.filter(x=>!x.categoryResult?.ok).length:0,skipped=results.filter(x=>x.skipped||x.phase==='transport-skip').length;
-  return{ok:done&&messageSucceeded>0,runId:saved.runId,startedAt:saved.startedAt,updatedAt:saved.updatedAt,prompt:saved.prompt,categoryTitle:saved.categoryTitle,total:tasks.length,cursor,nextCursor,done,batchSize:batchResults.length,maxModelsPerInvocation:AI_TEST_MODELS_PER_INVOCATION,succeeded:messageSucceeded,failed:messageFailed,messageSucceeded,messageFailed,categorySucceeded,categoryFailed,skipped,replayed,results,batchResults};
+  const results=saved.results,done=nextCursor>=tasks.length,messageSucceeded=results.filter(x=>x.ok).length,messageFailed=results.filter(x=>!x.ok).length,categoryAttempted=Boolean(saved.categoryTitle),categorySucceeded=categoryAttempted?results.filter(x=>x.categoryResult?.ok).length:0,categorySkipped=categoryAttempted?results.filter(x=>x.categoryResult?.skipped).length:0,categoryFailed=categoryAttempted?results.filter(x=>x.categoryResult&&!x.categoryResult.ok&&!x.categoryResult.skipped).length:0,skipped=results.filter(x=>x.skipped||x.phase==='transport-skip').length;
+  return{ok:done&&messageSucceeded>0,runId:saved.runId,startedAt:saved.startedAt,updatedAt:saved.updatedAt,prompt:saved.prompt,categoryTitle:saved.categoryTitle,total:tasks.length,cursor,nextCursor,done,batchSize:batchResults.length,maxModelsPerInvocation:AI_TEST_MODELS_PER_INVOCATION,succeeded:messageSucceeded,failed:messageFailed,messageSucceeded,messageFailed,categorySucceeded,categoryFailed,categorySkipped,skipped,replayed,results,batchResults};
 }
 function skippedAiTestResult(task:AiTestTask,prompt:string,categoryTitle:string,reason:string){
   const error=String(reason||'پس از چند تلاش، پاسخ این نوبت از Worker دریافت نشد.');
@@ -141,7 +173,9 @@ export async function testModelBatch(prompt='سلام',options:AiTestOptions={})
   for(const task of batch){
     if(options.skipCurrent){batchResults.push(skippedAiTestResult(task,prompt,categoryTitle,String(options.skipReason||'')));continue}
     let message:any;try{message={...await aiCall(task.p,task.model,prompt,ai.network),key:task.key}}catch(error){message=aiTestFailure(error,task,prompt)}
-    let categoryResult:any=null;if(categoryTitle&&categories.length)try{categoryResult={...await categoryWithTask(task,categoryTitle,categories,ai.network),key:task.key}}catch(error){categoryResult=aiTestFailure(error,task,categoryTitle)}
+    let categoryResult:any=null;
+    if(categoryTitle&&!isChatCompatibleAiModel(task.p,task.model))categoryResult={ok:false,skipped:true,phase:'unsupported-task',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,endpointType:aiModelEndpoint(task.p,task.model),chatCompatible:false,latencyMs:0,error:'این مدل endpoint اختصاصی دارد؛ تست خود مدل انجام شد اما برای دسته‌بندی گفت‌وگویی مناسب نیست.',raw:{reason:'dedicated endpoint model'}};
+    else if(categoryTitle&&categories.length)try{categoryResult={...await categoryWithTask(task,categoryTitle,categories,ai.network),key:task.key}}catch(error){categoryResult=aiTestFailure(error,task,categoryTitle)}
     batchResults.push({...message,categoryTitle,categoryResult,catResponse:categoryResult?.ok?`${categoryResult.categoryName} (#${categoryResult.categoryId})`:categoryResult?.error||(!categories.length?'فهرست دسته‌بندی در دسترس نیست':'')});
   }
   results.push(...batchResults);const nextCursor=Math.min(tasks.length,cursor+batch.length),updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,categoryTitle,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);
