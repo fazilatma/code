@@ -89,9 +89,144 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.92';
-const APP_VERSION_DATE = '1405/05/29';
+const APP_VERSION = '9.93';
+const APP_VERSION_DATE = '1405/05/30';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
+
+/* ==================================================================
+ *  v9.93: فونتِ کلِ برنامه
+ *
+ *  کاربر می‌خواست بتواند فونت رابط را عوض کند و فونت‌های فارسی
+ *  (وزیر، یکان و …) در دسترس باشد. راه‌حل:
+ *
+ *  ۱) هیچ‌جای CSS دیگر «Tahoma» سخت‌کد نیست؛ همه‌جا var(--app-font)
+ *     با فالبکِ Tahoma خوانده می‌شود. پس اگر جاوااسکریپت هم اجرا نشود
+ *     ظاهر برنامه دقیقاً مثل قبل است.
+ *  ۲) فایلِ webfont فقط وقتی دانلود می‌شود که کاربر آن فونت را انتخاب
+ *     کرده باشد (تزریقِ تنبلِ <link>/<style>). پیش‌فرض هیچ فونتی از
+ *     اینترنت گرفته نمی‌شود.
+ *  ۳) انتخاب در localStorage می‌ماند و در همان اولین تگِ <head> اعمال
+ *     می‌شود تا صفحه یک لحظه با فونت قبلی رندر نشود (ضدِ FOUC).
+ *  ۴) رویدادِ storage باعث می‌شود صفحه‌های همزمانِ باز (از جمله iframeِ
+ *     انتخابگر) بدون رفرش هم‌فونت شوند.
+ * ================================================================== */
+const APP_FONT_KEY      = 'scraper_font';
+const APP_FONT_FALLBACK = 'Tahoma,system-ui,sans-serif';
+
+/** فهرست فونت‌های قابل انتخاب. همهٔ آدرس‌ها روی jsDelivr راستی‌آزمایی شده‌اند. */
+function app_fonts_registry(): array {
+    $fb = APP_FONT_FALLBACK;
+    $es = 'https://cdn.jsdelivr.net/gh/aminabedi68/Estedad@8.5/fonts/Statics/webfonts/';
+    $iy = 'https://cdn.jsdelivr.net/gh/morajabi/balast-website@master/static/fonts/iranyekan/woff2/';
+    return [
+        'system' => [
+            'label' => 'پیش‌فرض سیستم (تاهوما)',
+            'stack' => $fb,
+            'css'   => '',
+            'face'  => '',
+        ],
+        'vazirmatn' => [
+            'label' => 'وزیرمتن — Vazirmatn',
+            'stack' => 'Vazirmatn,' . $fb,
+            'css'   => 'https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css',
+            'face'  => '',
+        ],
+        'vazir' => [
+            'label' => 'وزیر (کلاسیک) — Vazir',
+            'stack' => 'Vazir,' . $fb,
+            'css'   => 'https://cdn.jsdelivr.net/gh/rastikerdar/vazir-font@30.1.0/dist/font-face.css',
+            'face'  => '',
+        ],
+        'sahel' => [
+            'label' => 'ساحل — Sahel',
+            'stack' => 'Sahel,' . $fb,
+            'css'   => 'https://cdn.jsdelivr.net/gh/rastikerdar/sahel-font@3.4.0/dist/font-face.css',
+            'face'  => '',
+        ],
+        'samim' => [
+            'label' => 'صمیم — Samim',
+            'stack' => 'Samim,' . $fb,
+            'css'   => 'https://cdn.jsdelivr.net/gh/rastikerdar/samim-font@4.0.5/dist/font-face.css',
+            'face'  => '',
+        ],
+        'shabnam' => [
+            'label' => 'شبنم — Shabnam',
+            'stack' => 'Shabnam,' . $fb,
+            'css'   => 'https://cdn.jsdelivr.net/gh/rastikerdar/shabnam-font@5.0.1/dist/font-face.css',
+            'face'  => '',
+        ],
+        'parastoo' => [
+            'label' => 'پرستو — Parastoo',
+            'stack' => 'Parastoo,' . $fb,
+            'css'   => 'https://cdn.jsdelivr.net/gh/rastikerdar/parastoo-font@2.0.0/dist/font-face.css',
+            'face'  => '',
+        ],
+        /* استعداد و یکان روی CDN فایل CSS آماده ندارند، پس @font-face دستی */
+        'estedad' => [
+            'label' => 'استعداد — Estedad',
+            'stack' => 'Estedad,' . $fb,
+            'css'   => '',
+            'face'  =>
+                "@font-face{font-family:'Estedad';src:url('{$es}Estedad-Regular.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}"
+              . "@font-face{font-family:'Estedad';src:url('{$es}Estedad-Medium.woff2') format('woff2');font-weight:500;font-style:normal;font-display:swap}"
+              . "@font-face{font-family:'Estedad';src:url('{$es}Estedad-SemiBold.woff2') format('woff2');font-weight:600;font-style:normal;font-display:swap}"
+              . "@font-face{font-family:'Estedad';src:url('{$es}Estedad-Bold.woff2') format('woff2');font-weight:700;font-style:normal;font-display:swap}",
+        ],
+        'iranyekan' => [
+            'label' => 'ایران‌یکان — IRANYekan',
+            'stack' => 'IRANYekan,' . $fb,
+            'css'   => '',
+            'face'  =>
+                "@font-face{font-family:'IRANYekan';src:url('{$iy}iranyekanweblight.woff2') format('woff2');font-weight:300;font-style:normal;font-display:swap}"
+              . "@font-face{font-family:'IRANYekan';src:url('{$iy}iranyekanwebregular.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}"
+              . "@font-face{font-family:'IRANYekan';src:url('{$iy}iranyekanwebbold.woff2') format('woff2');font-weight:700;font-style:normal;font-display:swap}",
+        ],
+        'yekan' => [
+            'label' => 'یکان (کلاسیک) — Yekan',
+            'stack' => 'Yekan,' . $fb,
+            'css'   => '',
+            /* این مخزن فقط وزن معمولی دارد؛ وزن ضخیم را مرورگر می‌سازد */
+            'face'  =>
+                "@font-face{font-family:'Yekan';src:url('https://cdn.jsdelivr.net/gh/hemedani/yekan@3.0.0/Yekan.woff') format('woff');font-weight:normal;font-style:normal;font-display:swap}",
+        ],
+    ];
+}
+
+/**
+ * قطعهٔ خودبسندهٔ «راه‌اندازِ فونت».
+ *
+ * هر صفحه‌ای که این را در <head> (یا هرجای دیگر) echo کند، فونتِ ذخیره‌شدهٔ
+ * کاربر را می‌گیرد و متغیرِ CSS --app-font را روی <html> می‌نشاند.
+ * چون همهٔ صفحه‌ها هم‌مبدأ هستند، localStorage بینشان مشترک است.
+ */
+function app_font_boot(): string {
+    $reg = [];
+    foreach (app_fonts_registry() as $k => $v) {
+        $reg[$k] = ['label' => $v['label'], 'stack' => $v['stack'], 'css' => $v['css'], 'face' => $v['face']];
+    }
+    $json = json_encode($reg, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    $key  = APP_FONT_KEY;
+    $fb   = APP_FONT_FALLBACK;
+
+    return '<style id="appFontVars">:root{--app-font:' . $fb . '}</style>' . "\n"
+         . '<script>(function(){' . "\n"
+         . 'var F=' . $json . ';' . "\n"
+         . 'var KEY=' . json_encode($key) . ',FB=' . json_encode($fb) . ';' . "\n"
+         . 'window.APP_FONTS=F;window.APP_FONT_KEY=KEY;window.APP_FONT_FALLBACK=FB;' . "\n"
+         . 'function head(){return document.head||document.getElementsByTagName("head")[0]||document.documentElement;}' . "\n"
+         . 'function readFont(){try{var v=localStorage.getItem(KEY);return (v&&F[v])?v:"system";}catch(e){return "system";}}' . "\n"
+         . 'function applyFont(k,save){' . "\n"
+         . '  if(!F[k])k="system";var f=F[k];' . "\n"
+         . '  if(save){try{localStorage.setItem(KEY,k);}catch(e){}}' . "\n"
+         . '  try{document.documentElement.style.setProperty("--app-font",f.stack);}catch(e){}' . "\n"
+         . '  if(f.css){var lid="appFontLink_"+k;if(!document.getElementById(lid)){var l=document.createElement("link");l.id=lid;l.rel="stylesheet";l.href=f.css;head().appendChild(l);}}' . "\n"
+         . '  if(f.face){var sid="appFontFace_"+k;if(!document.getElementById(sid)){var s=document.createElement("style");s.id=sid;s.appendChild(document.createTextNode(f.face));head().appendChild(s);}}' . "\n"
+         . '  window.APP_FONT_CURRENT=k;return k;}' . "\n"
+         . 'window.appFontApply=applyFont;window.appFontCurrent=readFont;' . "\n"
+         . 'applyFont(readFont(),false);' . "\n"
+         . 'try{window.addEventListener("storage",function(e){if(e&&e.key===KEY)applyFont(readFont(),false);});}catch(e){}' . "\n"
+         . '})();</' . 'script>';
+}
 
 function extractReadQueue(): array {
 if (!file_exists(EXTRACT_QUEUE_FILE)) return ['entries' => []];
@@ -4737,7 +4872,7 @@ $_dpHint = '<div style="margin-top:22px;padding:14px 16px;background:#1e293b;bor
 $_dpTitle = (stripos($err, 'resolve') !== false) ? '❌ دامنه پیدا نشد'
           : ((stripos($err, 'timed out') !== false || stripos($err, 'timeout') !== false)
              ? '⏱ خطای تایم‌اوت' : '❌ بارگذاری ناموفق');
-echo '<html><body style="background:#0f172a;color:#fbbf24;font-family:Tahoma;padding:40px;direction:rtl">'
+echo '<html><body style="background:#0f172a;color:#fbbf24;font-family:var(--app-font,Tahoma,sans-serif);padding:40px;direction:rtl">'
    . '<h2>' . $_dpTitle . '</h2><p><b>سرورِ ما</b> نتوانست <b>' . h($url) . '</b> را بگیرد.</p>'
    . '<p style="color:#94a3b8">پیام: ' . h($err) . '</p>' . $_dpHint . '</body></html>';
 exit;
@@ -4785,7 +4920,7 @@ $script = <<<'SCRIPT'
 *{cursor:crosshair!important}
 .__h{outline:3px solid #a855f7!important;outline-offset:2px}
 .__s{outline:3px solid #22c55e!important;background:rgba(168,85,247,.08)!important}
-.__bar{position:fixed;top:0;left:0;right:0;background:linear-gradient(180deg,#581c87,#3b0764);color:#fff;padding:0;z-index:999999;font:13px Tahoma,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.6)}
+.__bar{position:fixed;top:0;left:0;right:0;background:linear-gradient(180deg,#581c87,#3b0764);color:#fff;padding:0;z-index:999999;font:13px var(--app-font,Tahoma,sans-serif);box-shadow:0 4px 20px rgba(0,0,0,.6)}
 .__row{display:flex;gap:8px;align-items:center;padding:8px 14px;flex-wrap:wrap}
 .__row2{display:flex;gap:6px;align-items:center;padding:4px 14px 8px;flex-wrap:wrap;border-top:1px solid #6b21a8}
 .__bar select,.__bar button{padding:7px 12px;border-radius:6px;border:1px solid #7e22ce;background:#6b21a8;color:#fff;font:inherit;cursor:pointer;white-space:nowrap}
@@ -4810,7 +4945,7 @@ body{padding-top:0!important}
    قبلاً برای هر «والد/فرزند» باید تا بالای صفحه اسکرول می‌کردید. */
 .__pop{position:absolute;z-index:2147483647;display:none;flex-direction:column;gap:2px;
   background:#1e1b4b;border:1px solid #a855f7;border-radius:7px;padding:3px 4px;
-  box-shadow:0 4px 14px rgba(0,0,0,.55);font:12px Tahoma,sans-serif;direction:rtl;
+  box-shadow:0 4px 14px rgba(0,0,0,.55);font:12px var(--app-font,Tahoma,sans-serif);direction:rtl;
   white-space:nowrap;cursor:default}
 .__pop.__on{display:flex}
 /* v9.90: خاموش‌کردن کل نوار شناور از پنل بیرونی */
@@ -4825,14 +4960,14 @@ body{padding-top:0!important}
 /* v8.76: نام فیلدی که همین حالا دارید انتخابش می‌کنید — تا برای عوض کردنش
    لازم نباشد تا بالای صفحه اسکرول کنید */
 .__pfld{background:#7e22ce!important;color:#fff!important;min-width:78px;text-align:center;
-  font:11px Tahoma,sans-serif!important;font-weight:700!important;max-width:150px}
+  font:11px var(--app-font,Tahoma,sans-serif)!important;font-weight:700!important;max-width:150px}
 .__pfld.__fdone{background:#166534!important;color:#bbf7d0!important}
 .__pop em{font-style:normal;color:#86efac;font-size:10.5px;max-width:235px;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap;background:#052e16;border:1px solid #14532d;
   border-radius:4px;padding:1px 5px}
 .__pop em.__warn{color:#fbbf24;background:#3f2d05;border-color:#78350f}
 .__pb{background:#6b21a8;color:#fff;border:1px solid #7e22ce;border-radius:5px;
-  padding:3px 7px;font:12px Tahoma,sans-serif;cursor:pointer;line-height:1.4}
+  padding:3px 7px;font:12px var(--app-font,Tahoma,sans-serif);cursor:pointer;line-height:1.4}
 .__pb:hover{background:#a855f7}
 .__pb:disabled{opacity:.3;cursor:not-allowed}
 .__pb.__okb{background:#22c55e;border-color:#22c55e;color:#04210f;font-weight:700}
@@ -5524,6 +5659,9 @@ $script = str_replace('id="__ver" style="opacity:.65">',
     'id="__ver" style="opacity:.65">v' . APP_VERSION,
     $script);
 
+/* v9.93: فونتِ انتخابیِ کاربر روی نوارها و پاپ‌آپِ خودِ ما هم اعمال شود.
+   فقط متغیر --app-font تعریف می‌شود؛ CSS خودِ سایتِ مقصد دست نمی‌خورد. */
+$script = app_font_boot() . $script;
 $html = preg_replace('~</body>~i', $script . '</body>', $html);
 if (stripos($html, '</body>') === false) $html .= $script;
 
@@ -5580,9 +5718,9 @@ $_vpHint = '<div style="margin-top:26px;padding:16px 18px;background:#1e293b;bor
   . (int)$vpTimeout . ' ثانیه، دو بار تلاش شد).<br>'
   . '۳) اگر سرور شما در ایران است، ممکن است مسیر شبکه به این سایت محدود باشد؛ در این حالت «بارگذاری مستقیم» تنها راه است.'
   . '</div>';
-if (stripos($err, 'resolve') !== false) echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:40px;direction:rtl"><h2>❌ خطا در دسترسی</h2><p>آدرس <b>'.h($url).'</b> از روی <b>سرور</b> قابل دسترسی نیست.</p><p style="color:#94a3b8">دلیل: سرور DNS قادر به یافتن دامنه نیست. ممکن است دامنه منقضی یا مشکل SSL داشته باشد.</p>'.$_vpHint.'</body></html>';
-elseif (stripos($err, 'timed out') !== false || stripos($err, 'timeout') !== false) echo '<html><body style="background:#0f172a;color:#fbbf24;font-family:Tahoma;padding:40px;direction:rtl"><h2>⏱ خطای تایم‌اوت</h2><p><b>سرورِ ما</b> نتوانست <b>'.h($url).'</b> را در '.(int)$vpTimeout.' ثانیه بگیرد.</p><p style="color:#94a3b8">این یعنی مشکل از مسیر شبکهٔ سرور است، نه از سایت. برای همین «بارگذاری مستقیم» کار می‌کند: آنجا مرورگر خودتان صفحه را می‌گیرد.</p>'.$_vpHint.'</body></html>';
-else echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:40px;direction:rtl"><h2>❌ بارگذاری ناموفق</h2><p>سرور نتوانست <b>'.h($url).'</b> را بگیرد.</p><p style="color:#94a3b8">پیام: '.h($err).'</p>'.$_vpHint.'</body></html>';
+if (stripos($err, 'resolve') !== false) echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:var(--app-font,Tahoma,sans-serif);padding:40px;direction:rtl"><h2>❌ خطا در دسترسی</h2><p>آدرس <b>'.h($url).'</b> از روی <b>سرور</b> قابل دسترسی نیست.</p><p style="color:#94a3b8">دلیل: سرور DNS قادر به یافتن دامنه نیست. ممکن است دامنه منقضی یا مشکل SSL داشته باشد.</p>'.$_vpHint.'</body></html>';
+elseif (stripos($err, 'timed out') !== false || stripos($err, 'timeout') !== false) echo '<html><body style="background:#0f172a;color:#fbbf24;font-family:var(--app-font,Tahoma,sans-serif);padding:40px;direction:rtl"><h2>⏱ خطای تایم‌اوت</h2><p><b>سرورِ ما</b> نتوانست <b>'.h($url).'</b> را در '.(int)$vpTimeout.' ثانیه بگیرد.</p><p style="color:#94a3b8">این یعنی مشکل از مسیر شبکهٔ سرور است، نه از سایت. برای همین «بارگذاری مستقیم» کار می‌کند: آنجا مرورگر خودتان صفحه را می‌گیرد.</p>'.$_vpHint.'</body></html>';
+else echo '<html><body style="background:#0f172a;color:#fca5a5;font-family:var(--app-font,Tahoma,sans-serif);padding:40px;direction:rtl"><h2>❌ بارگذاری ناموفق</h2><p>سرور نتوانست <b>'.h($url).'</b> را بگیرد.</p><p style="color:#94a3b8">پیام: '.h($err).'</p>'.$_vpHint.'</body></html>';
 exit;
 }
 
@@ -5647,7 +5785,7 @@ $script = <<<'SCRIPT'
 *{cursor:crosshair!important}
 .__h{outline:3px solid #3b82f6!important;outline-offset:2px}
 .__s{outline:3px solid #22c55e!important;background:rgba(34,197,94,.08)!important}
-.__bar{position:fixed;top:0;left:0;right:0;background:linear-gradient(180deg,#1e293b,#0f172a);color:#fff;padding:0;z-index:999999;font:13px Tahoma,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.6)}
+.__bar{position:fixed;top:0;left:0;right:0;background:linear-gradient(180deg,#1e293b,#0f172a);color:#fff;padding:0;z-index:999999;font:13px var(--app-font,Tahoma,sans-serif);box-shadow:0 4px 20px rgba(0,0,0,.6)}
 .__row{display:flex;gap:8px;align-items:center;padding:8px 14px;flex-wrap:wrap}
 .__row2{display:flex;gap:6px;align-items:center;padding:4px 14px 8px;flex-wrap:wrap;border-top:1px solid #334155}
 .__row3{display:flex;gap:6px;align-items:center;padding:4px 14px 8px;flex-wrap:wrap;border-top:1px solid #1e293b;background:#0f172a}
@@ -5662,7 +5800,7 @@ $script = <<<'SCRIPT'
 .__cnt{background:#0f172a;padding:2px 8px;border-radius:4px;font-size:11px;color:#f59e0b}
 .__preview-label{font-size:10px;color:#64748b;min-width:60px}
 .__preview{background:#0f172a;padding:6px 10px;border-radius:4px;font-size:11px;color:#86efac;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid #22c55e;font-weight:700;min-width:200px;direction:ltr;text-align:left}
-.__preview.title-prev{color:#60a5fa;border-color:#3b82f6;font-weight:700;font-family:Tahoma,sans-serif;direction:rtl;text-align:right}
+.__preview.title-prev{color:#60a5fa;border-color:#3b82f6;font-weight:700;font-family:var(--app-font,Tahoma,sans-serif);direction:rtl;text-align:right}
 .__preview.price-prev{color:#fbbf24;border-color:#f59e0b}
 .__preview.link-prev{color:#a78bfa;border-color:#8b5cf6;font-size:10px}
 .__preview.img-prev{color:#f472b6;border-color:#ec4899;font-size:10px}
@@ -5674,7 +5812,7 @@ body{padding-top:130px!important}
    قدم در درخت باید تا بالا اسکرول می‌کردید. */
 .__pop{position:absolute;z-index:2147483647;display:none;flex-direction:column;gap:2px;
   background:#0b1220;border:1px solid #3b82f6;border-radius:7px;padding:3px 4px;
-  box-shadow:0 4px 14px rgba(0,0,0,.55);font:12px Tahoma,sans-serif;direction:rtl;
+  box-shadow:0 4px 14px rgba(0,0,0,.55);font:12px var(--app-font,Tahoma,sans-serif);direction:rtl;
   white-space:nowrap;cursor:default}
 .__pop.__on{display:flex}
 /* v9.90: کاربر می‌تواند کل نوار شناور را از پنل بیرونی خاموش کند.
@@ -5684,7 +5822,7 @@ body{padding-top:130px!important}
 .__prow2{display:flex;gap:4px;align-items:center;max-width:430px}
 .__psep{width:1px;height:15px;background:#1e40af;margin:0 2px;flex:0 0 auto}
 .__pb{background:#1e3a5f;color:#fff;border:1px solid #3b82f6;border-radius:5px;
-  padding:3px 7px;font:12px Tahoma,sans-serif;cursor:pointer;line-height:1.4}
+  padding:3px 7px;font:12px var(--app-font,Tahoma,sans-serif);cursor:pointer;line-height:1.4}
 .__pb:hover{background:#3b82f6}
 .__pb:disabled{opacity:.3;cursor:not-allowed}
 .__pb.__okb{background:#22c55e;border-color:#22c55e;color:#04210f;font-weight:700}
@@ -6370,6 +6508,9 @@ $script = preg_replace_callback(
     },
     $script);
 
+/* v9.93: فونتِ انتخابیِ کاربر روی نوارها و پاپ‌آپِ خودِ ما هم اعمال شود.
+   فقط متغیر --app-font تعریف می‌شود؛ CSS خودِ سایتِ مقصد دست نمی‌خورد. */
+$script = app_font_boot() . $script;
 $html = preg_replace('~</body>~i', $script . '</body>', $html);
 if (stripos($html, '</body>') === false) $html .= $script;
 
@@ -13444,6 +13585,95 @@ if (isset($_GET['selftest'])) {
     $add('9.85', 'کلاسِ کاراکتریِ ترکیب‌گر جداکنندهٔ الگو را نمی‌بندد',
          strpos($selfSrc, "preg_match('/[+~]/', \$css)") !== false);
 
+    /* ---------- v9.93: فونتِ قابل تغییرِ کل برنامه ---------- */
+    $add('9.93', 'فهرست فونت‌ها یک‌جا تعریف شده و گزینهٔ پیش‌فرضِ سیستم دارد',
+         strpos($selfSrc, 'function app_fonts_regi' . 'stry(): array') !== false
+      && strpos($selfSrc, "const APP_FONT_KEY      = 'scraper_' . 'font'") !== false
+      && strpos($selfSrc, "'system' => [") !== false);
+    $add('9.93', 'فونت‌های فارسیِ خواسته‌شده (وزیر و یکان) در فهرست هستند',
+         strpos($selfSrc, "'vazirmatn' => [") !== false
+      && strpos($selfSrc, "'vazir' => [") !== false
+      && strpos($selfSrc, "'yekan' => [") !== false
+      && strpos($selfSrc, "'iranyekan' => [") !== false);
+    $add('9.93', 'فونت‌های تکمیلی (ساحل، صمیم، شبنم، پرستو، استعداد) هم هستند',
+         strpos($selfSrc, "'sahel' => [") !== false
+      && strpos($selfSrc, "'samim' => [") !== false
+      && strpos($selfSrc, "'shabnam' => [") !== false
+      && strpos($selfSrc, "'parastoo' => [") !== false
+      && strpos($selfSrc, "'estedad' => [") !== false);
+    $add('9.93', 'هر فونت یا فایل CSS دارد یا @font-faceِ دستی (هیچ‌کدام خالی نیست)',
+         (function () {
+             foreach (app_fonts_registry() as $k => $v) {
+                 if ($k === 'system') continue;
+                 if (($v['css'] ?? '') === '' && ($v['face'] ?? '') === '') return false;
+                 if (($v['stack'] ?? '') === '' || ($v['label'] ?? '') === '') return false;
+             }
+             return true;
+         })());
+    $add('9.93', 'همهٔ آدرس‌های فونت روی CDN امن (https + jsdelivr) هستند',
+         (function () {
+             foreach (app_fonts_registry() as $v) {
+                 $blob = ($v['css'] ?? '') . ' ' . ($v['face'] ?? '');
+                 if (preg_match_all('~https?://[^\s\'")]+~', $blob, $m)) {
+                     foreach ($m[0] as $u) {
+                         if (strpos($u, 'https://cdn.jsdelivr.net/') !== 0) return false;
+                     }
+                 }
+                 if (strpos($blob, 'http://') !== false) return false;
+             }
+             return true;
+         })());
+    $add('9.93', 'در فهرست، مسیرهای بن‌بستِ شناخته‌شده استفاده نشده‌اند',
+         (function () {
+             foreach (app_fonts_registry() as $v) {
+                 $blob = ($v['css'] ?? '') . ' ' . ($v['face'] ?? '');
+                 if (strpos($blob, 'typeface-iran' . 'yekan') !== false) return false;
+                 if (strpos($blob, 'gandom-' . 'font') !== false) return false;
+                 if (strpos($blob, 'vazir-font@' . 'v') !== false) return false;
+             }
+             return true;
+         })());
+    $add('9.93', 'body دیگر تاهومای سخت‌کد ندارد و از var(--app-font) می‌خواند',
+         strpos($selfSrc, 'body{font-family:var(--app-font,Tahoma,system-ui,sans-serif);background:#0f172a;color:#e2e8f0;min-height:100vh;') !== false
+      && strpos($selfSrc, 'body{font-family:Tah' . 'oma,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;') === false);
+    $add('9.93', 'نوار و پاپ‌آپِ انتخابگر هم از متغیر فونت استفاده می‌کنند',
+         strpos($selfSrc, 'font:13px var(--app-font,Tahoma,sans-serif)') !== false
+      && strpos($selfSrc, 'font:12px var(--app-font,Tahoma,sans-serif)') !== false
+      && strpos($selfSrc, 'font:13px Tah' . 'oma,sans-serif') === false);
+    $add('9.93', 'صفحهٔ خودآزمون هم فونت کاربر را می‌گیرد',
+         strpos($selfSrc, "'body{font-family:var(--app-font,Tahoma,system-ui,sans-serif);background:#0f172a;color:#e2e8f0;padding:16px;line-height:1.7}'") !== false
+      && strpos($selfSrc, "'</style>' . app_font_boot() . '</head>") !== false);
+    $add('9.93', 'راه‌اندازِ فونت متغیر CSS را روی <html> می‌نشاند',
+         strpos($selfSrc, 'function app_font_' . 'boot(): string') !== false
+      && strpos($selfSrc, 'document.documentElement.style.setProperty("--app-font",f.stack)') !== false
+      && strpos($selfSrc, '<style id="appFontVars">:root{--app-font:') !== false);
+    $add('9.93', 'فونت پیش از رندر اعمال می‌شود (بدون پرشِ فونت)',
+         strpos($selfSrc, '<?= app_font_' . 'boot() ?>' . "\n" . '<style>') !== false
+      && strpos($selfSrc, 'applyFont(readFont(),false);') !== false);
+    $add('9.93', 'فایل فونت تنبل بارگذاری می‌شود (فقط فونتِ انتخاب‌شده)',
+         strpos($selfSrc, 'if(f.css){var lid="appFontLink_"+k;') !== false
+      && strpos($selfSrc, 'if(f.face){var sid="appFontFace_"+k;') !== false
+      && strpos($selfSrc, "'css'   => '',") !== false);
+    $add('9.93', 'انتخاب در localStorage ذخیره و بعد از رفرش خوانده می‌شود',
+         strpos($selfSrc, 'localStorage.setItem(KEY,k)') !== false
+      && strpos($selfSrc, 'var v=localStorage.getItem(KEY);return (v&&F[v])?v:"system";') !== false);
+    $add('9.93', 'کلیدِ ناشناخته در حافظه به پیش‌فرض سیستم برمی‌گردد',
+         strpos($selfSrc, 'if(!F[k])k="system";var f=F[k];') !== false);
+    $add('9.93', 'تغییر فونت در یک تب، تب‌ها و iframeهای باز را هم به‌روز می‌کند',
+         strpos($selfSrc, 'window.addEventListener("storage",function(e){if(e&&e.key===KEY)applyFont(readFont(),false);})') !== false);
+    $add('9.93', 'صفحهٔ پیش‌نمایش/انتخابگر هم راه‌اندازِ فونت را تزریق می‌کند',
+         substr_count($selfSrc, '$script = app_font_' . 'boot() . $script;') === 2);
+    $add('9.93', 'کشویی فونت در زیربخش «📱 نمایش» تنظیمات عمومی هست',
+         strpos($selfSrc, 'id="appFontSel" onchange="setAppFont(this.value)"') !== false
+      && strpos($selfSrc, 'foreach (app_fonts_registry() as $fk => $fv)') !== false);
+    $add('9.93', 'جعبهٔ نمونهٔ متن زیر کشویی وجود دارد و با انتخاب عوض می‌شود',
+         strpos($selfSrc, 'id="appFontPreview"') !== false
+      && strpos($selfSrc, 'function syncAppFontPreview(k)') !== false
+      && strpos($selfSrc, 'box.style.fontFamily=f.stack') !== false);
+    $add('9.93', 'کشویی بعد از لود با فونتِ ذخیره‌شده هم‌تراز می‌شود',
+         strpos($selfSrc, 'function initAppFontPref()') !== false
+      && strpos($selfSrc, 'try{ initAppFontPref(); }catch(e){}') !== false);
+
     /* ---------- v9.92: زمان‌بندیِ واقعیِ کران + پروفایل‌های ناپدیدشونده ---------- */
     /* باگ ۱: فاز ۲ در هر تیکِ کران اجرا می‌شد چون lastRun فقط در مسیرِ کاملاً
        موفق ذخیره می‌شد و مسیرِ «ادامهٔ نگهبان» اصلاً گیتِ زمان‌بندی نداشت. */
@@ -14946,7 +15176,7 @@ if (isset($_GET['selftest'])) {
     echo '<!DOCTYPE html><html dir="rtl" lang="fa"><head><meta charset="UTF-8">'
        . '<meta name="viewport" content="width=device-width,initial-scale=1">'
        . '<title>خودآزمون v' . APP_VERSION . '</title><style>'
-       . 'body{font-family:Tahoma,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;padding:16px;line-height:1.7}'
+       . 'body{font-family:var(--app-font,Tahoma,system-ui,sans-serif);background:#0f172a;color:#e2e8f0;padding:16px;line-height:1.7}'
        . '.wrap{max-width:760px;margin:0 auto}h1{font-size:18px;margin:0 0 4px}'
        . '.big{font-size:34px;font-weight:700;font-family:ui-monospace,monospace}'
        . '.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}'
@@ -14955,7 +15185,7 @@ if (isset($_GET['selftest'])) {
        . '.v{color:#64748b;font-family:ui-monospace,monospace;font-size:11px;white-space:nowrap}'
        . '.ok{color:#4ade80}.no{color:#f87171}.d{color:#64748b;font-size:11px}'
        . '.hero{border-radius:12px;padding:16px;text-align:center;margin-bottom:14px}'
-       . '</style></head><body><div class="wrap">';
+       . '</style>' . app_font_boot() . '</head><body><div class="wrap">';
     echo '<div class="hero" style="background:' . ($allOk ? '#14532d' : '#7f1d1d')
        . ';border:1px solid ' . ($allOk ? '#22c55e' : '#ef4444') . '">'
        . '<div class="big">v' . $esc(APP_VERSION) . '</div>'
@@ -23139,14 +23369,15 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>اسکرپر ووکامرس v8.22</title>
+<?= app_font_boot() ?>
 <style>
-*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}body{font-family:Tahoma,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:12px;padding-bottom:90px;padding-top:56px;direction:rtl}.container{max-width:1400px;margin:0 auto}h1{font-size:18px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}input,select{background:#0f172a;border:1px solid #475569;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%}input[type="checkbox"]{width:auto}select{min-width:90px;width:auto}
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}body{font-family:var(--app-font,Tahoma,system-ui,sans-serif);background:#0f172a;color:#e2e8f0;min-height:100vh;padding:12px;padding-bottom:90px;padding-top:56px;direction:rtl}.container{max-width:1400px;margin:0 auto}h1{font-size:18px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}input,select{background:#0f172a;border:1px solid #475569;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%}input[type="checkbox"]{width:auto}select{min-width:90px;width:auto}
 .btn{padding:11px 14px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;transition:.15s;white-space:nowrap}.btn:hover{opacity:.9}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:not-allowed}.btn-blue{background:linear-gradient(135deg,#3b82f6,#06b6d4);color:#000}.btn-red{background:#ef4444;color:#fff}.btn-green{background:#22c55e;color:#000}.btn-purple{background:#a855f7;color:#fff}.btn-orange{background:#f97316;color:#000}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:#eab308;color:#000}.btn-cyan{background:#06b6d4;color:#000}.btn-teal{background:#14b8a6;color:#000}.btn-pink{background:#ec4899;color:#fff}.btn-indigo{background:#6366f1;color:#fff}.hidden{display:none!important}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
 .stat{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.stat b{font-size:20px;display:block}.stat span{color:#64748b;font-size:10px}.progress{height:5px;background:#334155;border-radius:5px;margin:10px 0;overflow:hidden}.progress-bar{height:100%;background:linear-gradient(90deg,#3b82f6,#a855f7);width:0;transition:.3s}.progress-bar.pink{background:linear-gradient(90deg,#ec4899,#f59e0b)}.status{color:#94a3b8;font-size:12px;margin-bottom:8px}.logs{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:140px;overflow-y:auto;font-family:monospace;font-size:11px;margin-bottom:10px;direction:ltr;text-align:left}.log{padding:2px 0;border-bottom:1px solid #1e293b}.log-ok{color:#4ade80}.log-err{color:#f87171}.log-info{color:#60a5fa}.log-detail{color:#f0abfc}
 .main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #334155;display:flex;z-index:1000;box-shadow:0 -4px 20px rgba(0,0,0,.5);padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:10px 4px 8px;border:none;background:transparent;color:#64748b;font-size:11px;font-family:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative;transition:color .2s}.main-tab .t-icon{font-size:20px}.main-tab .t-label{font-weight:600}.main-tab.active{color:#3b82f6;background:#1e293b}.main-tab .badge{position:absolute;top:4px;right:calc(50% - 20px);background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:10px;min-width:16px;text-align:center}.main-tab .badge.ok{background:#22c55e;color:#000}.tab-pane{display:none;animation:fadeIn .3s ease}.tab-pane.active{display:block}
 @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.sub-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.sub-tab.active{background:#3b82f6;color:#000}.mode-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.mode-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.mode-tab.active{background:#3b82f6;color:#000}.visual-container{display:grid;grid-template-columns:1fr;gap:14px}
 .iframe-wrap{background:#0f172a;border:1px solid #334155;border-radius:0 0 10px 10px;overflow:auto;height:600px;position:relative;resize:vertical;min-height:300px;max-height:95vh}.iframe-wrap iframe{width:100%;height:100%;border:none;background:#fff;min-height:100%}.iframe-wrap .if-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:13px}.iframe-size-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#1e293b;border:1px solid #334155;border-radius:10px 10px 0 0;font-size:12px;color:#94a3b8}.iframe-size-bar input[type=range]{flex:1;cursor:pointer}.iframe-size-bar .size-val{color:#67e8f9;font-weight:700;min-width:50px;text-align:center;font-size:13px}.iframe-size-bar label{cursor:pointer;color:#94a3b8}.selector-panel{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px}
-.selector-panel h3{margin:0 0 10px;font-size:14px;color:#67e8f9}.sel-item{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.sel-item.has{border-color:#22c55e;background:#14532d20}.sel-item.has label{color:#4ade80}.sel-item label{display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px;color:#94a3b8}.sel-item input{width:100%;font-family:monospace;font-size:11px;padding:6px 8px}.sel-item .sel-preview{font-size:10px;color:#86efac;padding:4px 8px;background:#0f172a;border:1px solid #22c55e;border-radius:4px;margin-top:6px;font-family:Tahoma,sans-serif;word-break:break-word;max-height:60px;overflow:hidden;line-height:1.4}.sel-item .sel-preview.price-prev{color:#fbbf24;border-color:#f59e0b;font-family:monospace;direction:ltr;text-align:left}
+.selector-panel h3{margin:0 0 10px;font-size:14px;color:#67e8f9}.sel-item{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.sel-item.has{border-color:#22c55e;background:#14532d20}.sel-item.has label{color:#4ade80}.sel-item label{display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px;color:#94a3b8}.sel-item input{width:100%;font-family:monospace;font-size:11px;padding:6px 8px}.sel-item .sel-preview{font-size:10px;color:#86efac;padding:4px 8px;background:#0f172a;border:1px solid #22c55e;border-radius:4px;margin-top:6px;font-family:var(--app-font,Tahoma,sans-serif);word-break:break-word;max-height:60px;overflow:hidden;line-height:1.4}.sel-item .sel-preview.price-prev{color:#fbbf24;border-color:#f59e0b;font-family:monospace;direction:ltr;text-align:left}
 .sel-item .sel-preview.link-prev{color:#a78bfa;border-color:#8b5cf6;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.img-prev{color:#f472b6;border-color:#ec4899;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.empty{color:#fca5a5;border-color:#ef4444;background:#7f1d1d30}.sel-item .sel-actions-row{display:flex;gap:4px;margin-top:6px}.sel-item .sel-actions-row .btn{padding:4px 8px;font-size:10px;flex:1}.sel-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}.suggest-list{max-height:150px;overflow-y:auto;background:#1e293b;border:1px solid #334155;border-radius:6px;margin-top:6px}.suggest-item{padding:8px;font-size:11px;cursor:pointer;font-family:monospace;border-bottom:1px solid #334155}.suggest-item:hover{background:#334155}
 .detail-field{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.detail-field.enabled{border-color:#a855f7;background:#2d1b4e}.detail-field-row{display:flex;gap:8px;align-items:center;margin-bottom:6px}.detail-field-row .fname{flex:0 0 110px;font-size:12px;font-weight:700;color:#c4b5fd}.detail-field-row .ftoggle{flex:0 0 auto}.detail-field-row .fselector{flex:1;font-family:monospace;font-size:11px;padding:6px 8px}.detail-field-meta{font-size:10px;color:#64748b;display:flex;gap:10px;align-items:center}.detail-field-meta .preview{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}.product{background:#1e293b;border:1px solid #334155;border-radius:12px;overflow:hidden}
 .thumb{height:140px;background:linear-gradient(135deg,#1e3a5f,#312e81);display:flex;align-items:center;justify-content:center}.thumb img{width:100%;height:100%;object-fit:cover}.noimg{color:#64748b;font-weight:600;font-size:11px}.pbody{padding:10px}.ptitle{font-weight:700;font-size:12px;margin-bottom:6px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:36px}.pdetail-short{font-size:10px;color:#cbd5e1;line-height:1.4;margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-height:30px}.price{display:inline-block;padding:4px 8px;background:#166534;color:#86efac;border-radius:6px;font-weight:700;font-size:12px;margin-bottom:4px}
@@ -23798,6 +24029,23 @@ title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری
 وقتی تب عوض می‌شود یا در درخت المان‌ها بالا و پایین می‌روید، صفحه خودش جابه‌جا می‌شود.
 <b>روی موبایل به‌صورت پیش‌فرض خاموش است</b> چون جای دست شما را گم می‌کند.
 اگر لازم داشتید همین‌جا روشنش کنید.
+</div>
+
+<!-- v9.93: انتخاب فونتِ کل برنامه -->
+<div class="crow"><label>فونت برنامه:</label>
+<select id="appFontSel" onchange="setAppFont(this.value)" style="flex:1;min-width:150px">
+<?php foreach (app_fonts_registry() as $fk => $fv): ?>
+<option value="<?= htmlspecialchars($fk, ENT_QUOTES, 'UTF-8') ?>" style="font-family:<?= htmlspecialchars($fv['stack'], ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($fv['label'], ENT_QUOTES, 'UTF-8') ?></option>
+<?php endforeach; ?>
+</select></div>
+<div id="appFontPreview" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px 10px;margin-bottom:6px;font-size:14px;line-height:2;color:#e2e8f0">
+نمونهٔ متن: قیمت این محصول ۱٬۲۵۰٬۰۰۰ تومان است. <b>ضخیم</b>
+</div>
+<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:10px">
+فونت روی <b>کل برنامه</b> — شامل صفحهٔ انتخاب سلکتور و صفحهٔ خودآزمون — اعمال می‌شود و
+در همین مرورگر ذخیره می‌ماند. فایل فونت فقط وقتی از اینترنت گرفته می‌شود که آن را انتخاب
+کنید؛ گزینهٔ «پیش‌فرض سیستم» هیچ چیزی دانلود نمی‌کند. اگر اینترنتِ کاربر به CDN نرسد،
+به‌صورت خودکار همان فونت قبلی نمایش داده می‌شود.
 </div>
 
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:5px">🚦 صف‌ها</div>
@@ -26817,7 +27065,7 @@ function gs(el){if(!el||el.tagName=='BODY'||el.tagName=='HTML')return'';var t=el
 function elInfo(el){if(!el)return'';var tag=el.tagName.toLowerCase();var cls=Array.from(el.classList).filter(function(x){return !x.startsWith('__')}).join('.');var id=el.id&&!/^__/.test(el.id)?'#'+el.id:'';return tag+(cls?'.'+cls:'')+(id||'');}
 function countSimilar(el){if(!el)return 0;var s=gs(el);if(!s)return 0;try{return document.querySelectorAll(s).length;}catch(e){return 0;}}
 var bar=document.createElement('div');bar.id='__insp_bar';
-bar.style.cssText='position:fixed;top:0;left:0;right:0;background:linear-gradient(180deg,#1e293b,#0f172a);color:#fff;padding:0;z-index:999999;font:13px Tahoma,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.6)';
+bar.style.cssText='position:fixed;top:0;left:0;right:0;background:linear-gradient(180deg,#1e293b,#0f172a);color:#fff;padding:0;z-index:999999;font:13px var(--app-font,Tahoma,sans-serif);box-shadow:0 4px 20px rgba(0,0,0,.6)';
 var style=document.createElement('style');style.textContent='*{cursor:crosshair!important}.__ih{outline:3px solid #3b82f6!important;outline-offset:2px}.__is{outline:3px solid #22c55e!important;background:rgba(34,197,94,.08)!important}';
 document.head.appendChild(style);
 bar.innerHTML='<div style="display:flex;gap:8px;align-items:center;padding:8px 14px;flex-wrap:wrap"><select id="__insp_m" style="padding:7px 12px;border-radius:6px;border:1px solid #475569;background:#334155;color:#fff;font:inherit;cursor:pointer"><option value="container">📦 کانتینر</option><option value="title">📝 عنوان</option><option value="price">💰 قیمت</option><option value="link">🔗 لینک</option><option value="image">🖼️ تصویر</option></select><span id="__insp_sel" style="background:#0f172a;padding:5px 10px;border-radius:4px;font-family:monospace;font-size:11px;color:#67e8f9;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">کلیک کنید...</span><button id="__insp_ok" style="padding:7px 12px;border-radius:6px;border:1px solid #475569;background:#334155;color:#fff;font:inherit;cursor:pointer">✓ بعدی</button><button id="__insp_done" style="padding:7px 12px;border-radius:6px;border:1px solid #22c55e;background:#22c55e;color:#000;font:inherit;cursor:pointer;font-weight:bold">✅ کپی همه</button><button id="__insp_close" style="padding:7px 12px;border-radius:6px;border:1px solid #ef4444;background:#ef4444;color:#fff;font:inherit;cursor:pointer">✕</button></div><div style="display:flex;gap:6px;align-items:center;padding:4px 14px 8px;flex-wrap:wrap;border-top:1px solid #334155"><button id="__insp_up" style="padding:5px 10px;border-radius:6px;border:1px solid #3b82f6;background:#1e3a5f;color:#93c5fd;font:inherit;cursor:pointer;font-weight:700">⬆</button><button id="__insp_down" style="padding:5px 10px;border-radius:6px;border:1px solid #3b82f6;background:#1e3a5f;color:#93c5fd;font:inherit;cursor:pointer;font-weight:700">⬇</button><button id="__insp_prev" style="padding:5px 10px;border-radius:6px;border:1px solid #3b82f6;background:#1e3a5f;color:#93c5fd;font:inherit;cursor:pointer;font-weight:700">⬅</button><button id="__insp_next" style="padding:5px 10px;border-radius:6px;border:1px solid #3b82f6;background:#1e3a5f;color:#93c5fd;font:inherit;cursor:pointer;font-weight:700">➡</button><span id="__insp_tag" style="background:#312e81;padding:3px 8px;border-radius:4px;font-family:monospace;font-size:11px;color:#c4b5fd">-</span><span id="__insp_cnt" style="background:#0f172a;padding:2px 8px;border-radius:4px;font-size:11px;color:#f59e0b"></span></div><div style="display:flex;gap:6px;align-items:center;padding:4px 14px 8px;flex-wrap:wrap;border-top:1px solid #1e293b;background:#0f172a"><span style="font-size:10px;color:#64748b">پیش‌نمایش:</span><span id="__insp_preview" style="background:#0f172a;padding:6px 10px;border-radius:4px;font-size:11px;color:#86efac;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid #22c55e;font-weight:700;min-width:100px;direction:ltr;text-align:left">در انتظار انتخاب...</span></div>';
@@ -26956,6 +27204,34 @@ function setAutoScrollPref(on){
 function initAutoScrollPref(){
   const el=document.getElementById('autoScrollOn');
   if(el)el.checked=autoScrollAllowed();
+}
+
+/* ==================================================================
+ *  v9.93: فونتِ کل برنامه
+ *
+ *  موتورش (appFontApply/appFontCurrent) در همان اولین اسکریپتِ <head>
+ *  تعریف شده تا صفحه از لحظهٔ اول با فونت درست رندر شود. این‌جا فقط
+ *  کشویی پنل تنظیمات به آن وصل می‌شود.
+ * ================================================================== */
+function setAppFont(key){
+  if(typeof window.appFontApply!=='function')return;
+  const k=window.appFontApply(key,true);
+  const f=(window.APP_FONTS||{})[k];
+  syncAppFontPreview(k);
+  showToast('فونت برنامه: '+((f&&f.label)||k));
+}
+/** جعبهٔ نمونهٔ زیر کشویی را با فونت انتخابی نشان بده */
+function syncAppFontPreview(k){
+  const box=document.getElementById('appFontPreview');
+  const f=(window.APP_FONTS||{})[k];
+  if(box&&f)box.style.fontFamily=f.stack;
+}
+/** کشویی را با فونتِ ذخیره‌شده هم‌تراز کن */
+function initAppFontPref(){
+  const k=(typeof window.appFontCurrent==='function')?window.appFontCurrent():'system';
+  const sel=document.getElementById('appFontSel');
+  if(sel)sel.value=k;
+  syncAppFontPreview(k);
 }
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
 /**
@@ -28279,6 +28555,19 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.93', t:'🔤 فونت کل برنامه قابل تغییر شد (وزیر، یکان و …)', items:[
+    'تاهوما همه‌جا سخت‌کد شده بود و راهی برای عوض کردنش نبود.',
+    '✅ تنظیمات ← «⚙️ تنظیمات عمومی» ← «📱 نمایش» ← «فونت برنامه»:',
+    '   پیش‌فرض سیستم (تاهوما)، وزیرمتن، وزیر، ساحل، صمیم، شبنم، پرستو،',
+    '   استعداد، ایران‌یکان و یکان.',
+    '✅ زیر کشویی یک جعبهٔ نمونه هست تا پیش از انتخاب، شکل فونت را ببینید.',
+    '✅ انتخاب در همین مرورگر ذخیره می‌شود و بعد از رفرش می‌ماند. صفحه از',
+    '   همان لحظهٔ اول با فونت درست بالا می‌آید (پرشِ فونت ندارد).',
+    '✅ فونت روی کل برنامه اعمال می‌شود: صفحهٔ اصلی، نوار و پاپ‌آپِ انتخاب',
+    '   سلکتور داخل پیش‌نمایش، و صفحهٔ خودآزمون.',
+    '⚡ فایل فونت فقط وقتی از اینترنت گرفته می‌شود که همان فونت را انتخاب',
+    '   کرده باشید؛ «پیش‌فرض سیستم» هیچ چیزی دانلود نمی‌کند.',
+  ]},
   {v:'9.91', t:'🗂️ تبِ باز بعد از رفرش می‌ماند + مقصدِ «هیچ‌کدام»', items:[
     'با هر رفرش، تب به «شروع» یا «نتایج» می‌پرید و باید دوباره دستی',
     'به تبِ خودتان برمی‌گشتید.',
@@ -32055,7 +32344,7 @@ function vcBanner(d) {
     b.id = 'vcBar';
     b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:linear-gradient(135deg,#f59e0b,#f97316);' +
         'color:#1c1207;padding:11px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;' +
-        'font-family:Tahoma,sans-serif;font-size:13px;font-weight:700;box-shadow:0 3px 14px rgba(0,0,0,.4);direction:rtl';
+        'font-family:var(--app-font,Tahoma,sans-serif);font-size:13px;font-weight:700;box-shadow:0 3px 14px rgba(0,0,0,.4);direction:rtl';
     b.innerHTML = '<span style="flex:1;min-width:200px">⬆ نسخهٔ جدیدی از کد روی گیت‌هاب موجود است' +
         ' <span style="opacity:.75;font-weight:400">(' + esc(d.remote_id) + ')</span></span>' +
         '<button id="vcGo" style="background:#0f172a;color:#fde68a;border:none;padding:8px 15px;border-radius:7px;' +
@@ -32373,6 +32662,7 @@ function syncBslSendBoxCats(catId,fallbackIds){
 // v7.48: Search input event handlers
 document.addEventListener('DOMContentLoaded',function(){
     try{ initAutoScrollPref(); }catch(e){}   // v8.88
+    try{ initAppFontPref(); }catch(e){}      // v9.93
     try{ selCtlInit(); }catch(e){}           // v9.90: تیک‌های نمایش کنترل‌های سلکتور
     const si=$('bsCatSearch');
     if(si){
