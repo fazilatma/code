@@ -61,6 +61,13 @@ const DEDUP_RESULT_FILE   = __DIR__ . '/dedup_result.json';
 const DEDUP_STOP_FILE     = __DIR__ . '/dedup_stop.json';
 const DEDUP_LOCK_FILE     = __DIR__ . '/dedup.lock';
 const DEDUP_MAX_GROUPS    = 1200;
+// v10.03 (۱۷): محیطِ آزمایشیِ «ایجنتِ مدیریت محصولات» — مدل با فراخوانیِ ابزار (tool calling)
+const AGENT_PROGRESS_FILE = __DIR__ . '/agent_progress.json';
+const AGENT_RESULT_FILE   = __DIR__ . '/agent_result.json';
+const AGENT_STOP_FILE     = __DIR__ . '/agent_stop.json';
+const AGENT_LOCK_FILE     = __DIR__ . '/agent.lock';
+const AGENT_MAX_STEPS     = 24;   // سقفِ دورِ گفت‌وگو با مدل (ضدِ حلقهٔ بی‌پایان)
+const AGENT_MAX_CALLS     = 80;   // سقفِ کلِ فراخوانیِ ابزار در یک اجرا
 const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 /* v9.20: ارائه‌دهنده‌های هوش مصنوعی (چند-ارائه‌دهنده) — فایل جدا از
@@ -104,7 +111,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.02';
+const APP_VERSION = '10.03';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12922,6 +12929,121 @@ if (isset($_GET['catlearn_bulk'])) {
     exit;
 }
 
+/* =====================================================================
+ *  v10.03 (۱۷): اندپوینت‌های «ایجنتِ مدیریت محصولات»
+ *  ?agent_start=1&mode=sim|dry|live  (+POST task)  → شروع در پس‌زمینه
+ *  ?agent_status=1[&since=N]                       → وضعیت و لاگِ زنده
+ *  ?agent_result=1                                 → گزارشِ کامل
+ *  ?agent_stop=1                                   → درخواستِ توقف
+ *  ?agent_tools=1                                  → فهرستِ ابزارها
+ * ===================================================================== */
+if (isset($_GET['agent_tools'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $out = [];
+    foreach (agentToolSpecs() as $t) {
+        $f = $t['function'];
+        $out[] = ['name' => $f['name'], 'desc' => $f['description'],
+                  'params' => array_keys($f['parameters']['properties'] ?? [])];
+    }
+    $cfg = aiActiveConfig();
+    echo json_encode(['ok' => true, 'tools' => $out,
+        'model' => (string)($cfg['model'] ?? ''),
+        'provider' => (string)($cfg['provider']['name'] ?? ''),
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['agent_start'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $mode = (string)($_GET['mode'] ?? 'dry');
+    if (!in_array($mode, ['sim', 'dry', 'live'], true)) $mode = 'dry';
+    $task = trim((string)($_POST['task'] ?? ($_GET['task'] ?? '')));
+    if ($task === '') {
+        echo json_encode(['ok' => false, 'error' => 'دستورِ کار خالی است'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $lockFp = fopen(AGENT_LOCK_FILE, 'c');
+    if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
+        if ($lockFp) fclose($lockFp);
+        echo json_encode(['ok' => false, 'running' => true,
+            'error' => 'یک اجرای ایجنت همین حالا در جریان است'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    @set_time_limit(0); @ignore_user_abort(true);
+    agentClearStop();
+    $cn = loadConnections();
+
+    @unlink(AGENT_PROGRESS_FILE);
+    @unlink(AGENT_RESULT_FILE);
+    agentProgress(['running' => true, 'done' => false, 'mode' => $mode, 'task' => $task,
+        'started_at' => time(), 'step' => 0, 'calls' => 0, 'changes' => 0, 'phase' => 'start',
+        'log_add' => ['🚀 شروعِ ایجنت — ' . agentModeLabel($mode)]]);
+
+    $early = json_encode(['ok' => true, 'started' => true, 'mode' => $mode], JSON_UNESCAPED_UNICODE);
+    header('Connection: close');
+    header('Content-Length: ' . strlen($early));
+    echo $early;
+    @ob_flush(); @flush();
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+
+    register_shutdown_function(function () use ($lockFp) {
+        @flock($lockFp, LOCK_UN); @fclose($lockFp); @unlink(AGENT_LOCK_FILE);
+    });
+
+    try {
+        $rep = agentRun($cn, $task, $mode);
+    } catch (Throwable $e) {
+        agentProgress(['running' => false, 'done' => true, 'error' => $e->getMessage(),
+            'log_add' => ['❌ خطا: ' . $e->getMessage()]]);
+        agentClearStop();
+        exit;
+    }
+    @file_put_contents(AGENT_RESULT_FILE, json_encode($rep, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    $stopped = agentStopRequested();
+    agentClearStop();
+    agentProgress(['running' => false, 'done' => true, 'stopped' => $stopped,
+        'result_ok' => !empty($rep['ok']), 'error' => $rep['error'] ?? '',
+        'calls' => $rep['calls'] ?? 0, 'changes' => count($rep['changes'] ?? []),
+        'log_add' => [empty($rep['ok'])
+            ? ('❌ ' . ($rep['error'] ?? 'ناموفق'))
+            : ('🏁 پایان در ' . $rep['took'] . ' ثانیه — '
+               . aiFaNum((int)$rep['calls']) . ' فراخوانیِ ابزار، '
+               . aiFaNum(count($rep['changes'])) . ' تغییر ('
+               . aiFaNum((int)$rep['applied']) . ' واقعی)')]]);
+    exit;
+}
+
+if (isset($_GET['agent_status'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $p = [];
+    if (is_file(AGENT_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(AGENT_PROGRESS_FILE), true);
+        if (is_array($d)) $p = $d;
+    }
+    $since = max(0, (int)($_GET['since'] ?? 0));
+    $log = is_array($p['log'] ?? null) ? $p['log'] : [];
+    $p['log'] = array_slice($log, $since);
+    $p['log_total'] = count($log);
+    $p['ok'] = true;
+    echo json_encode($p, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['agent_result'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    if (!is_file(AGENT_RESULT_FILE)) {
+        echo json_encode(['ok' => false, 'error' => 'هنوز گزارشی وجود ندارد'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    echo (string)@file_get_contents(AGENT_RESULT_FILE);
+    exit;
+}
+
+if (isset($_GET['agent_stop'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @file_put_contents(AGENT_STOP_FILE, json_encode(['at' => time()]));
+    agentProgress(['log_add' => ['⏹ درخواستِ توقف ثبت شد — پس از گامِ جاری متوقف می‌شود']]);
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 /**
  * v8.53: گزارش محصولات بر اساس پسوند پروفایل.
  * ?suffix_report=1&target=woo|bsl[&notify=1]  → شروع در پس‌زمینه
@@ -15917,6 +16039,183 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "isset(\$_GET['bsl_find_dup" . "licates'])")  === false
       && strpos($selfSrc, "isset(\$_GET['bsl_delete_ba" . "tch'])")     === false
       && strpos($selfSrc, "isset(\$_GET['woo_dedup_str" . "eam'])")     === false);
+
+    /* ---------- v10.03 (۱۷): ایجنتِ مدیریت محصولات با فراخوانیِ ابزار ---------- */
+    $add('10.03', 'توابعِ موتورِ ایجنت تعریف شده‌اند',
+         function_exists('agentRun')          && function_exists('agentToolSpecs')
+      && function_exists('agentExecTool')     && function_exists('agentProgress')
+      && function_exists('agentToolListProducts') && function_exists('agentToolSearchSnappshop')
+      && function_exists('agentToolUpdateProduct') && function_exists('agentSnappParse')
+      && function_exists('agentStopRequested')     && function_exists('agentModeLabel')
+      && function_exists('agentSystemPrompt')      && function_exists('agentTitleScore'));
+    $add('10.03', 'چهار ابزار به مدل معرفی می‌شود: فهرست، اسنپ‌شاپ، به‌روزرسانی، پایان',
+         (function () {
+             $names = array_map(fn($t) => $t['function']['name'], agentToolSpecs());
+             sort($names);
+             return $names === ['finish', 'list_products', 'search_snappshop', 'update_product'];
+         })());
+    $add('10.03', 'مشخصاتِ ابزارها با استانداردِ OpenAI/Mistral سازگار است',
+         (function () {
+             foreach (agentToolSpecs() as $t) {
+                 if (($t['type'] ?? '') !== 'function') return false;
+                 $f = $t['function'] ?? [];
+                 if (!isset($f['name'], $f['description'], $f['parameters'])) return false;
+                 if (($f['parameters']['type'] ?? '') !== 'object') return false;
+                 if (!isset($f['parameters']['properties'])) return false;
+             }
+             return true;
+         })());
+    $add('10.03', 'توضیحِ ابزارها فارسی است تا مدل درست انتخاب کند',
+         (function () {
+             foreach (agentToolSpecs() as $t) {
+                 if (!preg_match('/[\x{0600}-\x{06FF}]/u', (string)$t['function']['description'])) return false;
+             }
+             return true;
+         })());
+    $add('10.03', 'سه حالتِ اجرا وجود دارد و پیش‌فرض نوشتنی نیست',
+         agentModeLabel('sim') !== '' && agentModeLabel('dry') !== '' && agentModeLabel('live') !== ''
+      && strpos($selfSrc, "in_array(\$mode, ['sim', 'dry', 'live'], true)") !== false
+      && strpos($selfSrc, "\$mode = (string)(\$_GET['mode'] ?? 'dry')") !== false);
+    $add('10.03', 'فقط حالتِ live اجازهٔ نوشتن روی فروشگاه دارد',
+         strpos($selfSrc, "if (\$ctx['mode'] !== 'live') {") !== false
+      && strpos($selfSrc, "'simulated' => true") !== false);
+    $add('10.03', 'فیلدهای tools و tool_choice به مدل فرستاده می‌شود',
+         strpos($selfSrc, "'tools'       => agentToolSpecs()") !== false
+      && strpos($selfSrc, "'tool_choice' => 'auto'") !== false);
+    $add('10.03', 'اگر مدل tools را نپذیرد، خودکار به حالتِ متنی برمی‌گردد',
+         strpos($selfSrc, '$nativeTools = false') !== false
+      && strpos($selfSrc, 'agentTextToolPrompt(') !== false);
+    $add('10.03', 'هر سه قالبِ رایجِ فراخوانیِ ابزار خوانده می‌شود',
+         (function () {
+             $a = aiExtractToolCalls(['choices' => [['message' => ['tool_calls' => [
+                 ['id' => 'x1', 'function' => ['name' => 'finish', 'arguments' => '{"summary":"ok"}']]]]]]]);
+             $b = aiExtractToolCalls(['choices' => [['message' => ['function_call' =>
+                 ['name' => 'finish', 'arguments' => '{"summary":"ok"}']]]]]);
+             $c = aiExtractToolCalls(['output' => [['type' => 'function_call',
+                 'name' => 'finish', 'arguments' => '{"summary":"ok"}']]]);
+             return count($a) === 1 && count($b) === 1 && count($c) === 1
+                 && $a[0]['name'] === 'finish' && $a[0]['args']['summary'] === 'ok'
+                 && $b[0]['name'] === 'finish' && $c[0]['name'] === 'finish';
+         })());
+    $add('10.03', 'آرگومانِ ابزار هم رشتهٔ JSON و هم آرایه را می‌پذیرد',
+         (function () {
+             $s = aiExtractToolCalls(['choices' => [['message' => ['tool_calls' => [
+                 ['id' => 'a', 'function' => ['name' => 'finish', 'arguments' => '{"summary":"s"}']]]]]]]);
+             $r = aiExtractToolCalls(['choices' => [['message' => ['tool_calls' => [
+                 ['id' => 'a', 'function' => ['name' => 'finish', 'arguments' => ['summary' => 's']]]]]]]]);
+             return ($s[0]['args']['summary'] ?? '') === 's' && ($r[0]['args']['summary'] ?? '') === 's';
+         })());
+    $add('10.03', 'پاسخِ ابزار با نقشِ tool و tool_call_id به مدل برمی‌گردد',
+         strpos($selfSrc, "'role' => 'tool'") !== false
+      && strpos($selfSrc, "'tool_call_id' => ") !== false);
+    $add('10.03', 'جست‌وجوی اسنپ‌شاپ به دامنهٔ درست می‌رود',
+         strpos($selfSrc, 'https://snappshop.ir/search?q=') !== false);
+    $add('10.03', 'قیمتِ اسنپ‌شاپ از JSON-LD خوانده می‌شود',
+         (function () {
+             $h = '<script type="application/ld+json">' . json_encode(['@type' => 'Product',
+                 'name' => 'عطر مردانه بلو', 'offers' => ['price' => '910000',
+                 'availability' => 'https://schema.org/InStock']]) . '</' . 'script>';
+             $r = agentSnappParse($h);
+             return count($r) === 1 && (int)$r[0]['price'] === 910000 && $r[0]['available'] === true;
+         })());
+    $add('10.03', 'اگر JSON-LD نبود، از __NEXT_DATA__ خوانده می‌شود',
+         (function () {
+             $h = '<script id="__NEXT_DATA__" type="application/json">' . json_encode(['props' => ['pageProps' =>
+                 ['products' => [['title' => 'ادکلن زنانه لانکوم', 'price' => 1320000, 'available' => true]]]]])
+                 . '</' . 'script>';
+             $r = agentSnappParse($h);
+             return count($r) === 1 && (int)$r[0]['price'] === 1320000
+                 && $r[0]['title'] === 'ادکلن زنانه لانکوم';
+         })());
+    $add('10.03', 'ناموجود بودن در اسنپ‌شاپ درست تشخیص داده می‌شود',
+         (function () {
+             $h = '<script type="application/ld+json">' . json_encode(['@type' => 'Product',
+                 'name' => 'عطر جیبی دیور', 'offers' => ['price' => '205000',
+                 'availability' => 'https://schema.org/OutOfStock']]) . '</' . 'script>';
+             $r = agentSnappParse($h);
+             return count($r) === 1 && $r[0]['available'] === false;
+         })());
+    $add('10.03', 'محصولِ بی‌ربط امتیازِ پایین می‌گیرد و «پیدا نشد» می‌شود',
+         (function () {
+             $bad  = agentTitleScore('عطر مردانه بلو د شنل صد میلی', 'کیف چرم طبیعی دست‌دوز');
+             $good = agentTitleScore('عطر مردانه بلو د شنل', 'عطر مردانه بلو د شنل ۱۰۰ میل');
+             return $bad < 0.3 && $good >= 0.3 && $good > $bad;
+         })());
+    $add('10.03', 'به‌روزرسانی بدون قیمت و بدون موجودی رد می‌شود',
+         (function () {
+             $r = agentToolUpdateProduct(['cn' => [], 'mode' => 'sim'],
+                 ['target' => 'woo', 'id' => 5]);
+             return empty($r['ok']);
+         })());
+    $add('10.03', 'قیمتِ صفر یا منفی و موجودیِ منفی پذیرفته نمی‌شود',
+         (function () {
+             $a = agentToolUpdateProduct(['cn' => [], 'mode' => 'sim'], ['target' => 'woo', 'id' => 5, 'price' => 0]);
+             $b = agentToolUpdateProduct(['cn' => [], 'mode' => 'sim'], ['target' => 'woo', 'id' => 5, 'stock' => -3]);
+             return empty($a['ok']) && empty($b['ok']);
+         })());
+    $add('10.03', 'در حالتِ شبیه‌سازی هیچ چیزی واقعاً نوشته نمی‌شود',
+         (function () {
+             $r = agentToolUpdateProduct(['cn' => [], 'mode' => 'sim'],
+                 ['target' => 'woo', 'id' => 501, 'price' => 910000, 'stock' => 3]);
+             return !empty($r['ok']) && empty($r['applied']) && !empty($r['simulated']);
+         })());
+    $add('10.03', 'ووکامرس با regular_price و باسلام با primary_price آپدیت می‌شود',
+         strpos($selfSrc, "'regular_price'") !== false
+      && strpos($selfSrc, "'primary_price'") !== false);
+    $add('10.03', 'موجودیِ صفر در ووکامرس به outofstock تبدیل می‌شود',
+         strpos($selfSrc, "'stock_status'") !== false
+      && strpos($selfSrc, "'outofstock'") !== false
+      && strpos($selfSrc, "'manage_stock'") !== false);
+    $add('10.03', 'فهرستِ محصولات با کلیدواژه فیلتر می‌شود و سقفِ تعداد دارد',
+         strpos($selfSrc, 'AGENT_MAX_STEPS') !== false
+      && strpos($selfSrc, 'AGENT_MAX_CALLS') !== false
+      && strpos($selfSrc, "min(100, max(1,") !== false);
+    $add('10.03', 'حلقهٔ ایجنت سقفِ گام و سقفِ فراخوانی دارد (بی‌نهایت نمی‌چرخد)',
+         AGENT_MAX_STEPS > 0 && AGENT_MAX_STEPS <= 100
+      && AGENT_MAX_CALLS > 0 && AGENT_MAX_CALLS <= 500
+      && strpos($selfSrc, '$step < AGENT_MAX_STEPS') !== false);
+    $add('10.03', 'ابزارِ ناشناخته خطای روشن می‌دهد نه خطای مرگبار',
+         (function () {
+             $r = agentExecTool(['cn' => [], 'mode' => 'sim'], 'no_such_tool', []);
+             return isset($r['ok']) && $r['ok'] === false && !empty($r['error']);
+         })());
+    $add('10.03', 'کاربر می‌تواند وسطِ کار ایجنت را متوقف کند',
+         strpos($selfSrc, 'AGENT_STOP_FILE') !== false
+      && strpos($selfSrc, 'function agentStopRequested') !== false
+      && strpos($selfSrc, "'stopped_by' => ") !== false);
+    $add('10.03', 'پنج اندپوینتِ ایجنت وجود دارد',
+         strpos($selfSrc, "\$_GET['agent_tools']")  !== false
+      && strpos($selfSrc, "\$_GET['agent_start']")  !== false
+      && strpos($selfSrc, "\$_GET['agent_status']") !== false
+      && strpos($selfSrc, "\$_GET['agent_result']") !== false
+      && strpos($selfSrc, "\$_GET['agent_stop']")   !== false);
+    $add('10.03', 'اجرا در پس‌زمینه است و دو اجرای همزمان جلوگیری می‌شود',
+         strpos($selfSrc, 'AGENT_LOCK_FILE') !== false
+      && strpos($selfSrc, 'LOCK_EX | LOCK_NB') !== false
+      && strpos($selfSrc, 'fastcgi_finish_request') !== false
+      && strpos($selfSrc, 'یک اجرای ایجنت همین حالا در جریان است') !== false);
+    $add('10.03', 'قفل حتی وقتی کار نیمه‌کاره می‌ماند آزاد می‌شود',
+         strpos($selfSrc, 'register_shutdown_function(function () use ($lockFp)') !== false);
+    $add('10.03', 'پیشرفتِ زنده با شمارهٔ خطِ لاگ خوانده می‌شود (تکراری نمایش داده نمی‌شود)',
+         strpos($selfSrc, "\$since = max(0, (int)(\$_GET['since'] ?? 0))") !== false
+      && strpos($selfSrc, "'log_total'") !== false);
+    $add('10.03', 'رابطِ ایجنت با انتخابِ حالت و جعبهٔ دستور ساخته شده',
+         strpos($selfSrc, 'id="agTask"') !== false
+      && strpos($selfSrc, 'id="agMode"') !== false
+      && strpos($selfSrc, 'id="agRunBtn"') !== false
+      && strpos($selfSrc, 'id="agLog"') !== false
+      && strpos($selfSrc, 'id="agReport"') !== false);
+    $add('10.03', 'توابعِ جاوااسکریپتِ ایجنت تعریف شده‌اند',
+         strpos($selfSrc, 'function agStart(')        !== false
+      && strpos($selfSrc, 'function agPoll(')         !== false
+      && strpos($selfSrc, 'function agStop(')         !== false
+      && strpos($selfSrc, 'function agRenderReport(') !== false
+      && strpos($selfSrc, 'function agLoadTools(')    !== false);
+    $add('10.03', 'حالتِ «اجرای واقعی» از کاربر تأیید می‌گیرد',
+         strpos($selfSrc, "mode === 'live' && !confirm(") !== false);
+    $add('10.03', 'پرامپتِ نمونهٔ عطر و ادکلن پیش‌فرض داخلِ جعبه است',
+         strpos($selfSrc, 'محصول‌های عطر و ادکلن را پیدا کن') !== false
+      && strpos($selfSrc, 'snappshop.ir') !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -26830,6 +27129,625 @@ function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
             'duplicates_list' => $out];
 }
 
+/* =====================================================================
+ *  v10.03 (۱۷): محیطِ آزمایشیِ «ایجنتِ مدیریت محصولات»
+ *
+ *  ایده: به‌جای اینکه برای هر کار یک دکمه و یک تابعِ جدا بنویسیم، به مدل
+ *  یک جعبه‌ابزار می‌دهیم و می‌گذاریم خودش تصمیم بگیرد کدام ابزار را با چه
+ *  ورودی صدا بزند. این همان «فراخوانیِ ابزار» (tool calling) است که
+ *  مدل‌های Mistral / Gemini / Groq / GPT-OSS و... پشتیبانی می‌کنند.
+ *
+ *  چرخهٔ کار:
+ *    ۱) پیامِ کاربر + فهرستِ ابزارها (JSON Schema) به مدل فرستاده می‌شود.
+ *    ۲) مدل به‌جای متن، یک یا چند tool_call برمی‌گرداند.
+ *    ۳) ما ابزار را واقعاً اجرا می‌کنیم و نتیجه را با نقشِ "tool" و
+ *       همان tool_call_id به مدل پس می‌دهیم.
+ *    ۴) تکرار تا وقتی مدل «تمام شد» بگوید یا به سقفِ گام‌ها برسیم.
+ *
+ *  سه حالتِ اجرا (مهم‌ترین بخشِ «آزمایشی بودن»):
+ *    sim  — هیچ تماسِ شبکه‌ای؛ دادهٔ نمونهٔ داخلی. برای دیدنِ رفتارِ مدل.
+ *    dry  — دادهٔ واقعی خوانده می‌شود، ولی هیچ نوشتنی انجام نمی‌شود.
+ *    live — واقعی؛ قیمت و موجودی واقعاً در باسلام/ووکامرس نوشته می‌شود.
+ *
+ *  پیش‌فرض همیشه dry است تا یک اشتباهِ مدل به فروشگاه آسیب نزند.
+ * ===================================================================== */
+
+/** پیشرفتِ زندهٔ ایجنت (همان الگوی dedupProgress) */
+function agentProgress(array $patch): void {
+    $cur = [];
+    if (is_file(AGENT_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(AGENT_PROGRESS_FILE), true);
+        if (is_array($d)) $cur = $d;
+    }
+    $log = is_array($cur['log'] ?? null) ? $cur['log'] : [];
+    if (isset($patch['log_add'])) {
+        foreach ((array)$patch['log_add'] as $l) $log[] = ['t' => time(), 'm' => (string)$l];
+        if (count($log) > 500) $log = array_slice($log, -500);
+        unset($patch['log_add']);
+    }
+    $steps = is_array($cur['steps'] ?? null) ? $cur['steps'] : [];
+    if (isset($patch['step_add'])) {
+        foreach ((array)$patch['step_add'] as $s) $steps[] = $s;
+        if (count($steps) > 300) $steps = array_slice($steps, -300);
+        unset($patch['step_add']);
+    }
+    $cur = array_merge($cur, $patch);
+    $cur['log'] = $log; $cur['steps'] = $steps; $cur['ts'] = time();
+    @file_put_contents(AGENT_PROGRESS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+function agentStopRequested(): bool { return is_file(AGENT_STOP_FILE); }
+function agentClearStop(): void { @unlink(AGENT_STOP_FILE); }
+
+/** برچسبِ فارسیِ حالتِ اجرا */
+function agentModeLabel(string $m): string {
+    if ($m === 'live') return 'اجرای واقعی';
+    if ($m === 'sim')  return 'شبیه‌سازیِ کامل';
+    return 'آزمایشی (بدون نوشتن)';
+}
+
+/* ---------------------------------------------------------------------
+ *  استخراجِ tool_call از پاسخِ مدل
+ * ------------------------------------------------------------------- */
+
+/**
+ * tool_call ها را از پاسخِ سازگارِ OpenAI بیرون می‌کشد.
+ * خروجی: [ ['id'=>..,'name'=>..,'args'=>[..]] , ... ]
+ */
+function aiExtractToolCalls($body): array {
+    if (!is_array($body)) return [];
+    $out = [];
+    $raw = [];
+    // OpenAI / Mistral / Groq / Together / OpenRouter
+    foreach (($body['choices'] ?? []) as $ch) {
+        if (!is_array($ch)) continue;
+        $tc = $ch['message']['tool_calls'] ?? ($ch['delta']['tool_calls'] ?? null);
+        if (is_array($tc)) foreach ($tc as $t) $raw[] = $t;
+        // فرمتِ قدیمیِ function_call (تک‌تایی)
+        $fc = $ch['message']['function_call'] ?? null;
+        if (is_array($fc) && ($fc['name'] ?? '') !== '') {
+            $raw[] = ['id' => 'call_legacy_' . count($raw), 'function' => $fc];
+        }
+    }
+    // پاسخ‌های Responses-style: output[] با type=function_call
+    foreach (($body['output'] ?? []) as $it) {
+        if (!is_array($it)) continue;
+        if (($it['type'] ?? '') === 'function_call' || isset($it['arguments'])) {
+            $raw[] = ['id' => (string)($it['call_id'] ?? ($it['id'] ?? '')),
+                      'function' => ['name' => (string)($it['name'] ?? ''),
+                                     'arguments' => $it['arguments'] ?? '{}']];
+        }
+    }
+    foreach ($raw as $i => $t) {
+        if (!is_array($t)) continue;
+        $fn = $t['function'] ?? $t;
+        $name = trim((string)($fn['name'] ?? ''));
+        if ($name === '') continue;
+        $a = $fn['arguments'] ?? ($t['input'] ?? []);
+        if (is_string($a)) {
+            $dec = json_decode($a, true);
+            $a = is_array($dec) ? $dec : [];
+        }
+        if (!is_array($a)) $a = [];
+        $id = trim((string)($t['id'] ?? ''));
+        if ($id === '') $id = 'call_' . $i . '_' . substr(md5($name . $i), 0, 8);
+        $out[] = ['id' => $id, 'name' => $name, 'args' => $a];
+    }
+    return $out;
+}
+
+/**
+ * پشتیبانِ متنی: مدل‌هایی که tool calling بومی ندارند معمولاً بلوکِ JSON
+ * برمی‌گردانند. اگر متن دقیقاً شکلِ {"tool":"...","args":{...}} داشت،
+ * همان را به‌عنوان فراخوانیِ ابزار می‌پذیریم تا این محیط با مدل‌های
+ * بیشتری کار کند.
+ */
+function agentParseTextCall(string $text): array {
+    $t = trim($text);
+    if ($t === '') return [];
+    if (preg_match('~```(?:json)?\s*(.+?)\s*```~s', $t, $m)) $t = trim($m[1]);
+    $s = strpos($t, '{');
+    $e = strrpos($t, '}');
+    if ($s === false || $e === false || $e <= $s) return [];
+    $d = json_decode(substr($t, $s, $e - $s + 1), true);
+    if (!is_array($d)) return [];
+    $name = trim((string)($d['tool'] ?? ($d['name'] ?? ($d['function'] ?? ''))));
+    if ($name === '') return [];
+    $args = $d['args'] ?? ($d['arguments'] ?? ($d['parameters'] ?? []));
+    if (is_string($args)) { $dd = json_decode($args, true); $args = is_array($dd) ? $dd : []; }
+    if (!is_array($args)) $args = [];
+    return [['id' => 'call_text_' . substr(md5($name . $t), 0, 8), 'name' => $name, 'args' => $args]];
+}
+
+/** پیامِ خامِ assistant (با tool_calls) را از پاسخ بیرون می‌کشد */
+function aiAssistantMessage($body): ?array {
+    if (!is_array($body)) return null;
+    foreach (($body['choices'] ?? []) as $ch) {
+        if (is_array($ch) && is_array($ch['message'] ?? null)) return $ch['message'];
+    }
+    return null;
+}
+
+/* ---------------------------------------------------------------------
+ *  جعبه‌ابزارِ ایجنت
+ * ------------------------------------------------------------------- */
+
+/**
+ * تعریفِ ابزارها به فرمتِ استانداردِ OpenAI/Mistral.
+ * هر ابزار = یک تابعِ واقعیِ همین برنامه.
+ */
+function agentToolSpecs(): array {
+    return [
+        ['type' => 'function', 'function' => [
+            'name' => 'list_products',
+            'description' => 'فهرست محصولات فروشگاه را برمی‌گرداند. با query می‌توان فقط محصولاتی را گرفت که کلیدواژه در عنوانشان هست (مثلاً «عطر» یا «ادکلن»). خروجی شامل شناسه، عنوان، قیمت و موجودیِ فعلی است.',
+            'parameters' => [
+                'type' => 'object',
+                'properties' => [
+                    'source' => ['type' => 'string', 'enum' => ['woo', 'bsl'],
+                                 'description' => 'woo = ووکامرس، bsl = باسلام'],
+                    'query'  => ['type' => 'string', 'description' => 'کلیدواژهٔ عنوان؛ برای چند کلیدواژه با «|» جدا کنید، مثلاً «عطر|ادکلن»'],
+                    'limit'  => ['type' => 'integer', 'description' => 'حداکثر تعداد خروجی (پیش‌فرض ۲۰، سقف ۱۰۰)'],
+                ],
+                'required' => ['source'],
+            ],
+        ]],
+        ['type' => 'function', 'function' => [
+            'name' => 'search_snappshop',
+            'description' => 'یک عنوان را در سایت snappshop.ir جست‌وجو می‌کند و نزدیک‌ترین محصول را با قیمت و وضعیتِ موجودی برمی‌گرداند. برای گرفتنِ قیمتِ روزِ بازار از این ابزار استفاده کن.',
+            'parameters' => [
+                'type' => 'object',
+                'properties' => [
+                    'title' => ['type' => 'string', 'description' => 'عنوانِ محصول برای جست‌وجو'],
+                ],
+                'required' => ['title'],
+            ],
+        ]],
+        ['type' => 'function', 'function' => [
+            'name' => 'update_product',
+            'description' => 'قیمت و/یا موجودیِ یک محصول را در ووکامرس یا باسلام به‌روز می‌کند. فقط وقتی صدا بزن که قیمتِ تازه را از search_snappshop گرفته باشی. در حالتِ آزمایشی نتیجه فقط شبیه‌سازی می‌شود.',
+            'parameters' => [
+                'type' => 'object',
+                'properties' => [
+                    'target' => ['type' => 'string', 'enum' => ['woo', 'bsl'],
+                                 'description' => 'مقصدِ به‌روزرسانی'],
+                    'id'     => ['type' => 'integer', 'description' => 'شناسهٔ محصول در همان مقصد'],
+                    'price'  => ['type' => 'integer', 'description' => 'قیمتِ تازه به تومان؛ اگر نمی‌خواهی قیمت عوض شود این را نفرست'],
+                    'stock'  => ['type' => 'integer', 'description' => 'موجودیِ تازه؛ اگر نمی‌خواهی موجودی عوض شود این را نفرست'],
+                    'reason' => ['type' => 'string', 'description' => 'دلیلِ کوتاهِ تغییر، برای گزارش'],
+                ],
+                'required' => ['target', 'id'],
+            ],
+        ]],
+        ['type' => 'function', 'function' => [
+            'name' => 'finish',
+            'description' => 'وقتی کار تمام شد این را صدا بزن و خلاصهٔ فارسیِ کارهایی که کردی را بنویس.',
+            'parameters' => [
+                'type' => 'object',
+                'properties' => [
+                    'summary' => ['type' => 'string', 'description' => 'خلاصهٔ فارسیِ نتیجه'],
+                ],
+                'required' => ['summary'],
+            ],
+        ]],
+    ];
+}
+
+/** دادهٔ نمونه برای حالتِ شبیه‌سازی (بدونِ هیچ تماسِ شبکه‌ای) */
+function agentSimData(): array {
+    static $d = null;
+    if ($d !== null) return $d;
+    $d = [
+        'woo' => [
+            ['id' => 501, 'name' => 'عطر مردانه بلو د شنل ۱۰۰ میل', 'price' => 850000, 'stock' => 3, 'status' => 'publish'],
+            ['id' => 502, 'name' => 'ادکلن زنانه لانکوم لاوی است بل', 'price' => 1250000, 'stock' => 0, 'status' => 'publish'],
+            ['id' => 503, 'name' => 'عطر جیبی مردانه دیور ساواج', 'price' => 190000, 'stock' => 12, 'status' => 'publish'],
+            ['id' => 504, 'name' => 'کیف چرم مردانه مدل رسمی', 'price' => 700000, 'stock' => 5, 'status' => 'publish'],
+        ],
+        'bsl' => [
+            ['id' => 9101, 'name' => 'عطر مردانه بلو د شنل ۱۰۰ میل', 'price' => 820000, 'stock' => 2, 'status' => 2976],
+            ['id' => 9102, 'name' => 'ادکلن زنانه لانکوم لاوی است بل', 'price' => 1190000, 'stock' => 4, 'status' => 2976],
+            ['id' => 9103, 'name' => 'ماگ سرامیکی طرح دار', 'price' => 95000, 'stock' => 20, 'status' => 2976],
+        ],
+        'snapp' => [
+            'عطر مردانه بلو د شنل ۱۰۰ میل'      => ['title' => 'عطر مردانه بلو دو شنل حجم ۱۰۰ میلی‌لیتر', 'price' => 910000, 'available' => true],
+            'ادکلن زنانه لانکوم لاوی است بل'    => ['title' => 'ادکلن زنانه لانکوم La Vie Est Belle', 'price' => 1320000, 'available' => true],
+            'عطر جیبی مردانه دیور ساواج'        => ['title' => 'عطر جیبی مردانه Dior Sauvage', 'price' => 205000, 'available' => false],
+        ],
+    ];
+    return $d;
+}
+
+/** آیا عنوان با کلیدواژه‌های query جور است؟ */
+function agentTitleMatches(string $name, string $query): bool {
+    $query = trim($query);
+    if ($query === '') return true;
+    foreach (preg_split('~[|،,]+~u', $query) as $kw) {
+        $kw = trim($kw);
+        if ($kw !== '' && mb_stripos($name, $kw) !== false) return true;
+    }
+    return false;
+}
+
+/** ابزارِ ۱: فهرستِ محصولات */
+function agentToolListProducts(array $ctx, array $a): array {
+    $src   = ((string)($a['source'] ?? 'woo')) === 'bsl' ? 'bsl' : 'woo';
+    $query = (string)($a['query'] ?? '');
+    $limit = max(1, min(100, (int)($a['limit'] ?? 20)));
+
+    if ($ctx['mode'] === 'sim') {
+        $rows = agentSimData()[$src];
+    } elseif ($src === 'bsl') {
+        $bs = $ctx['cn']['basalam'] ?? [];
+        if (empty($bs['token']) || empty($bs['vendor_id']))
+            return ['ok' => false, 'error' => 'اتصالِ باسلام تنظیم نشده است'];
+        $rows = dedupFetchBsl((string)$bs['token'], (int)$bs['vendor_id'], 5);
+    } else {
+        $w = $ctx['cn']['woocommerce'] ?? [];
+        if (empty($w['store_url']))
+            return ['ok' => false, 'error' => 'اتصالِ ووکامرس تنظیم نشده است'];
+        $rows = dedupFetchWoo($w, 5);
+    }
+
+    $out = [];
+    foreach ($rows as $r) {
+        $name = (string)($r['name'] ?? '');
+        if (!agentTitleMatches($name, $query)) continue;
+        $out[] = ['id' => (int)($r['id'] ?? 0), 'title' => $name,
+                  'price' => (int)round((float)($r['price'] ?? 0)),
+                  'stock' => (int)($r['stock'] ?? 0)];
+        if (count($out) >= $limit) break;
+    }
+    return ['ok' => true, 'source' => $src, 'count' => count($out), 'products' => $out];
+}
+
+/**
+ * ابزارِ ۲: جست‌وجو در snappshop.ir
+ * سایت را می‌گیریم و قیمت را از JSON-LD یا __NEXT_DATA__ یا الگوی متنی درمی‌آوریم.
+ */
+function agentSnappParse(string $html): array {
+    $items = [];
+    // ۱) JSON-LD (مطمئن‌ترین راه اگر سایت آن را بدهد)
+    if (preg_match_all('~<script[^>]+application/ld\+json[^>]*>(.*?)</script>~si', $html, $m)) {
+        foreach ($m[1] as $blk) {
+            $d = json_decode(trim($blk), true);
+            if (!is_array($d)) continue;
+            $list = isset($d['itemListElement']) ? $d['itemListElement'] : [$d];
+            foreach ((array)$list as $it) {
+                if (!is_array($it)) continue;
+                $node = $it['item'] ?? $it;
+                if (!is_array($node)) continue;
+                $nm = trim((string)($node['name'] ?? ''));
+                $of = $node['offers'] ?? [];
+                if (isset($of[0])) $of = $of[0];
+                $pr = (float)($of['price'] ?? ($node['price'] ?? 0));
+                $av = (string)($of['availability'] ?? '');
+                if ($nm === '') continue;
+                $items[] = ['title' => $nm, 'price' => (int)round($pr),
+                            'available' => $av === '' ? ($pr > 0) : (stripos($av, 'InStock') !== false)];
+            }
+        }
+    }
+    // ۲) __NEXT_DATA__ / داده‌های تزریق‌شده
+    if (!$items && preg_match('~__NEXT_DATA__[^>]*>(.*?)</script>~s', $html, $m)) {
+        $d = json_decode(trim($m[1]), true);
+        if (is_array($d)) {
+            $walk = function ($n) use (&$walk, &$items) {
+                if (!is_array($n)) return;
+                $t = $n['title'] ?? ($n['name'] ?? null);
+                $p = $n['price'] ?? ($n['min_price'] ?? ($n['final_price'] ?? null));
+                if (is_string($t) && trim($t) !== '' && (is_int($p) || is_float($p) || (is_string($p) && $p !== ''))) {
+                    $pv = (int)round((float)preg_replace('~[^0-9.]~', '', (string)$p));
+                    if ($pv > 0) $items[] = ['title' => trim($t), 'price' => $pv, 'available' => true];
+                }
+                foreach ($n as $v) if (is_array($v)) $walk($v);
+            };
+            $walk($d);
+        }
+    }
+    // ۳) آخرین راه: الگوی متنیِ «عنوان ... قیمت»
+    if (!$items && preg_match_all('~"(?:title|name)"\s*:\s*"([^"]{6,120})"[^}]{0,400}?"(?:price|final_price|min_price)"\s*:\s*"?([0-9,\.]+)~su', $html, $m, PREG_SET_ORDER)) {
+        foreach ($m as $one) {
+            $pv = (int)round((float)str_replace(',', '', $one[2]));
+            if ($pv > 0) $items[] = ['title' => $one[1], 'price' => $pv, 'available' => true];
+        }
+    }
+    // یکتاسازی
+    $seen = []; $uniq = [];
+    foreach ($items as $it) {
+        $k = mb_strtolower($it['title']);
+        if (isset($seen[$k])) continue;
+        $seen[$k] = 1; $uniq[] = $it;
+        if (count($uniq) >= 20) break;
+    }
+    return $uniq;
+}
+
+/** امتیازِ شباهتِ دو عنوان (۰ تا ۱) بر پایهٔ کلمه‌های مشترک */
+function agentTitleScore(string $a, string $b): float {
+    $norm = function ($s) {
+        $s = mb_strtolower(persianToEnglish($s));
+        $s = preg_replace('~[^\p{L}\p{N}]+~u', ' ', $s);
+        return array_values(array_filter(explode(' ', trim((string)$s)), fn($w) => mb_strlen($w) > 1));
+    };
+    $wa = $norm($a); $wb = $norm($b);
+    if (!$wa || !$wb) return 0.0;
+    $hit = count(array_intersect($wa, $wb));
+    return $hit / max(1, min(count($wa), count($wb)));
+}
+
+function agentToolSearchSnappshop(array $ctx, array $a): array {
+    $title = trim((string)($a['title'] ?? ''));
+    if ($title === '') return ['ok' => false, 'error' => 'عنوان خالی است'];
+
+    if ($ctx['mode'] === 'sim') {
+        $tbl = agentSimData()['snapp'];
+        $best = null; $bs = 0.0;
+        foreach ($tbl as $k => $v) {
+            $s = agentTitleScore($title, $k);
+            if ($s > $bs) { $bs = $s; $best = $v; }
+        }
+        if (!$best || $bs < 0.4) return ['ok' => true, 'found' => false, 'query' => $title,
+                                         'note' => 'در snappshop چیزی پیدا نشد'];
+        return ['ok' => true, 'found' => true, 'query' => $title, 'match' => $best['title'],
+                'price' => $best['price'], 'available' => $best['available'], 'score' => round($bs, 2)];
+    }
+
+    $url = 'https://snappshop.ir/search?q=' . rawurlencode($title);
+    $r = fetch_html($url, 25);
+    if (empty($r['ok']))
+        return ['ok' => false, 'error' => 'دسترسی به snappshop ممکن نشد: ' . (string)($r['error'] ?? ('HTTP ' . ($r['code'] ?? '?')))];
+    $items = agentSnappParse((string)($r['html'] ?? ''));
+    if (!$items) return ['ok' => true, 'found' => false, 'query' => $title,
+                         'note' => 'صفحه گرفته شد ولی محصولی استخراج نشد'];
+    $best = null; $bs = 0.0;
+    foreach ($items as $it) {
+        $s = agentTitleScore($title, $it['title']);
+        if ($s > $bs) { $bs = $s; $best = $it; }
+    }
+    if (!$best || $bs < 0.3) return ['ok' => true, 'found' => false, 'query' => $title,
+                                     'note' => 'نتیجهٔ به‌اندازهٔ کافی نزدیک پیدا نشد',
+                                     'candidates' => array_slice(array_column($items, 'title'), 0, 5)];
+    return ['ok' => true, 'found' => true, 'query' => $title, 'match' => $best['title'],
+            'price' => $best['price'], 'available' => !empty($best['available']),
+            'score' => round($bs, 2), 'url' => $url];
+}
+
+/** ابزارِ ۳: به‌روزرسانیِ قیمت/موجودی */
+function agentToolUpdateProduct(array $ctx, array $a): array {
+    $target = ((string)($a['target'] ?? '')) === 'bsl' ? 'bsl' : 'woo';
+    $id     = (int)($a['id'] ?? 0);
+    $hasP   = array_key_exists('price', $a) && $a['price'] !== null && $a['price'] !== '';
+    $hasS   = array_key_exists('stock', $a) && $a['stock'] !== null && $a['stock'] !== '';
+    $price  = $hasP ? (int)round((float)$a['price']) : null;
+    $stock  = $hasS ? (int)$a['stock'] : null;
+    $reason = trim((string)($a['reason'] ?? ''));
+    if ($id <= 0)          return ['ok' => false, 'error' => 'شناسهٔ محصول نامعتبر است'];
+    if (!$hasP && !$hasS)  return ['ok' => false, 'error' => 'نه قیمت داده شده نه موجودی؛ چیزی برای تغییر نیست'];
+    if ($price !== null && $price <= 0) return ['ok' => false, 'error' => 'قیمت باید بزرگ‌تر از صفر باشد'];
+    if ($stock !== null && $stock < 0)  return ['ok' => false, 'error' => 'موجودی نمی‌تواند منفی باشد'];
+
+    $rec = ['target' => $target, 'id' => $id, 'price' => $price, 'stock' => $stock, 'reason' => $reason];
+
+    // در sim و dry هیچ‌چیز واقعاً نوشته نمی‌شود
+    if ($ctx['mode'] !== 'live') {
+        return ['ok' => true, 'applied' => false, 'simulated' => true,
+                'message' => 'حالتِ ' . agentModeLabel($ctx['mode']) . ' — تغییر ثبت شد ولی روی فروشگاه نوشته نشد',
+                'change' => $rec];
+    }
+
+    if ($target === 'bsl') {
+        $bs = $ctx['cn']['basalam'] ?? [];
+        if (empty($bs['token']) || empty($bs['vendor_id']))
+            return ['ok' => false, 'error' => 'اتصالِ باسلام تنظیم نشده است'];
+        $f = [];
+        if ($price !== null) $f['primary_price'] = $price;
+        if ($stock !== null) $f['stock'] = $stock;
+        $r = bslEditProduct((string)$bs['token'], (int)$bs['vendor_id'], $id, $f);
+    } else {
+        $w = $ctx['cn']['woocommerce'] ?? [];
+        if (empty($w['store_url']))
+            return ['ok' => false, 'error' => 'اتصالِ ووکامرس تنظیم نشده است'];
+        $f = [];
+        if ($price !== null) { $f['regular_price'] = (string)$price; }
+        if ($stock !== null) {
+            $f['manage_stock']   = true;
+            $f['stock_quantity'] = $stock;
+            $f['stock_status']   = $stock > 0 ? 'instock' : 'outofstock';
+        }
+        $r = wooEditProduct($w, $id, $f);
+    }
+    if (empty($r['ok']))
+        return ['ok' => false, 'error' => 'ناموفق (HTTP ' . (int)($r['code'] ?? 0) . ')', 'change' => $rec];
+    return ['ok' => true, 'applied' => true, 'change' => $rec];
+}
+
+/** اجرای یک ابزار و برگرداندنِ نتیجه به‌صورت آرایه */
+function agentExecTool(array $ctx, string $name, array $args): array {
+    switch ($name) {
+        case 'list_products':     return agentToolListProducts($ctx, $args);
+        case 'search_snappshop':  return agentToolSearchSnappshop($ctx, $args);
+        case 'update_product':    return agentToolUpdateProduct($ctx, $args);
+        case 'finish':            return ['ok' => true, 'finished' => true,
+                                          'summary' => (string)($args['summary'] ?? '')];
+    }
+    return ['ok' => false, 'error' => 'ابزارِ ناشناخته: ' . $name];
+}
+
+/** خلاصهٔ یک‌خطیِ فارسی از یک فراخوانیِ ابزار — برای لاگِ زنده */
+function agentCallLabel(string $name, array $args): string {
+    if ($name === 'list_products')
+        return '📋 فهرستِ محصولات ' . ((($args['source'] ?? '') === 'bsl') ? 'باسلام' : 'ووکامرس')
+             . (($args['query'] ?? '') !== '' ? (' · جست‌وجو: ' . $args['query']) : '');
+    if ($name === 'search_snappshop')
+        return '🔎 اسنپ‌شاپ: ' . (string)($args['title'] ?? '');
+    if ($name === 'update_product') {
+        $p = [];
+        if (isset($args['price'])) $p[] = 'قیمت ' . aiFaNum((int)$args['price']);
+        if (isset($args['stock'])) $p[] = 'موجودی ' . aiFaNum((int)$args['stock']);
+        return '✏️ به‌روزرسانی ' . ((($args['target'] ?? '') === 'bsl') ? 'باسلام' : 'ووکامرس')
+             . ' #' . aiFaNum((int)($args['id'] ?? 0)) . ($p ? (' → ' . implode('، ', $p)) : '');
+    }
+    if ($name === 'finish') return '🏁 پایانِ کار';
+    return '🔧 ' . $name;
+}
+
+/** پیامِ سیستمیِ ایجنت */
+function agentSystemPrompt(string $mode): string {
+    $s  = "تو یک دستیارِ مدیریتِ فروشگاهِ اینترنتی هستی و به چند ابزارِ واقعی دسترسی داری.\n";
+    $s .= "قواعد:\n";
+    $s .= "۱) برای هر کاری حتماً ابزارِ مناسب را صدا بزن؛ چیزی را از خودت حدس نزن.\n";
+    $s .= "۲) اول با list_products محصولات را پیدا کن، بعد برای هر عنوان search_snappshop را صدا بزن، و در پایان با update_product قیمت و موجودی را اصلاح کن.\n";
+    $s .= "۳) اگر snappshop محصولی را پیدا نکرد، آن محصول را دست‌نخورده رها کن.\n";
+    $s .= "۴) اگر در snappshop ناموجود بود، موجودی را صفر کن.\n";
+    $s .= "۵) هر بار حداکثر چند ابزار را صدا بزن و منتظرِ نتیجه بمان.\n";
+    $s .= "۶) وقتی کار تمام شد، ابزارِ finish را با خلاصهٔ فارسی صدا بزن.\n";
+    $s .= "حالتِ فعلیِ اجرا: " . agentModeLabel($mode) . ".\n";
+    if ($mode !== 'live') $s .= "در این حالت هیچ تغییری واقعاً روی فروشگاه نوشته نمی‌شود، ولی تو کارَت را کامل انجام بده.\n";
+    $s .= "همیشه فارسی بنویس.";
+    return $s;
+}
+
+/* ---------------------------------------------------------------------
+ *  حلقهٔ اصلیِ ایجنت
+ * ------------------------------------------------------------------- */
+
+/**
+ * ایجنت را اجرا می‌کند.
+ * $mode: sim | dry | live
+ * خروجی: گزارشِ کامل برای AGENT_RESULT_FILE
+ */
+function agentRun(array $cn, string $task, string $mode): array {
+    $t0  = microtime(true);
+    $ctx = ['cn' => $cn, 'mode' => $mode];
+    $tools = agentToolSpecs();
+
+    $messages = [
+        ['role' => 'system', 'content' => agentSystemPrompt($mode)],
+        ['role' => 'user',   'content' => $task],
+    ];
+
+    $calls = 0; $changes = []; $finalText = ''; $stoppedBy = '';
+    $usedTools = []; $nativeTools = null;
+
+    for ($step = 1; $step <= AGENT_MAX_STEPS; $step++) {
+        if (agentStopRequested()) { $stoppedBy = 'کاربر'; break; }
+        agentProgress(['step' => $step, 'phase' => 'think',
+            'log_add' => ['🤔 گامِ ' . aiFaNum($step) . ' — پرسش از مدل...']]);
+
+        $payload = ['messages' => $messages, 'tools' => $tools, 'tool_choice' => 'auto',
+                    'temperature' => 0.1, 'max_tokens' => 1200];
+        $r = aiActiveChat($payload);
+
+        if (empty($r['ok'])) {
+            $err = (string)($r['error'] ?? ('HTTP ' . (int)($r['code'] ?? 0)));
+            // بعضی سرویس‌ها اصلاً فیلدِ tools را قبول نمی‌کنند ⇒ بدونِ آن دوباره امتحان کن
+            if ((int)($r['code'] ?? 0) === 400 && $nativeTools !== false) {
+                $nativeTools = false;
+                agentProgress(['log_add' => ['⚠️ مدل فیلدِ tools را نپذیرفت؛ حالتِ متنی امتحان می‌شود']]);
+                $messages[0]['content'] = agentSystemPrompt($mode) . "\n\n"
+                    . "این مدل فراخوانیِ ابزارِ بومی ندارد. برای صدا زدنِ ابزار فقط و فقط یک بلوکِ JSON بنویس:\n"
+                    . '{"tool":"نامِ ابزار","args":{...}}' . "\n"
+                    . 'ابزارها: ' . json_encode(array_map(fn($t) => [
+                          'name' => $t['function']['name'],
+                          'params' => array_keys($t['function']['parameters']['properties'] ?? []),
+                      ], $tools), JSON_UNESCAPED_UNICODE);
+                continue;
+            }
+            agentProgress(['log_add' => ['❌ خطای مدل: ' . $err]]);
+            return ['ok' => false, 'error' => $err, 'mode' => $mode, 'task' => $task,
+                    'steps' => $step, 'calls' => $calls, 'changes' => $changes,
+                    'took' => round(microtime(true) - $t0, 1)];
+        }
+
+        $body = $r['body'];
+        $tcs  = aiExtractToolCalls($body);
+        $text = aiExtractText($body);
+        if (!$tcs) {
+            $tcs = agentParseTextCall($text);
+            if ($tcs) agentProgress(['log_add' => ['🧩 فراخوانیِ ابزار از متنِ مدل استخراج شد']]);
+        } elseif ($nativeTools === null) {
+            $nativeTools = true;
+            agentProgress(['native_tools' => true, 'log_add' => ['✅ مدل فراخوانیِ ابزارِ بومی دارد']]);
+        }
+
+        if (!$tcs) {
+            $finalText = trim($text);
+            agentProgress(['log_add' => ['💬 مدل بدونِ ابزار پاسخِ متنی داد؛ پایان']]);
+            break;
+        }
+
+        // پیامِ assistant را عیناً به تاریخچه اضافه کن (لازمهٔ پروتکل)
+        $asst = aiAssistantMessage($body);
+        if (is_array($asst) && isset($asst['tool_calls'])) {
+            $messages[] = $asst;
+        } else {
+            $messages[] = ['role' => 'assistant', 'content' => $text !== '' ? $text : null,
+                'tool_calls' => array_map(fn($c) => [
+                    'id' => $c['id'], 'type' => 'function',
+                    'function' => ['name' => $c['name'],
+                                   'arguments' => json_encode($c['args'], JSON_UNESCAPED_UNICODE)],
+                ], $tcs)];
+        }
+
+        $finished = false;
+        foreach ($tcs as $c) {
+            if (agentStopRequested()) { $stoppedBy = 'کاربر'; break; }
+            if ($calls >= AGENT_MAX_CALLS) { $stoppedBy = 'سقفِ فراخوانی'; break; }
+            $calls++;
+            $usedTools[$c['name']] = ($usedTools[$c['name']] ?? 0) + 1;
+            agentProgress(['phase' => 'tool', 'calls' => $calls,
+                'log_add' => [agentCallLabel($c['name'], $c['args'])]]);
+
+            $res = agentExecTool($ctx, $c['name'], $c['args']);
+
+            if ($c['name'] === 'update_product' && !empty($res['ok']) && isset($res['change'])) {
+                $ch = $res['change'];
+                $ch['applied'] = !empty($res['applied']);
+                $changes[] = $ch;
+                agentProgress(['changes' => count($changes)]);
+            }
+            if (!empty($res['ok'])) {
+                if ($c['name'] === 'list_products')
+                    agentProgress(['log_add' => ['   ↳ ' . aiFaNum((int)($res['count'] ?? 0)) . ' محصول']]);
+                elseif ($c['name'] === 'search_snappshop')
+                    agentProgress(['log_add' => ['   ↳ ' . (empty($res['found'])
+                        ? 'پیدا نشد'
+                        : ('قیمت ' . aiFaNum((int)($res['price'] ?? 0)) . ' · '
+                           . (!empty($res['available']) ? 'موجود' : 'ناموجود')))]]);
+                elseif ($c['name'] === 'update_product')
+                    agentProgress(['log_add' => ['   ↳ ' . (!empty($res['applied'])
+                        ? 'روی فروشگاه نوشته شد' : 'شبیه‌سازی شد (بدون نوشتن)')]]);
+            } else {
+                agentProgress(['log_add' => ['   ↳ ⚠️ ' . (string)($res['error'] ?? 'ناموفق')]]);
+            }
+
+            agentProgress(['step_add' => [['step' => $step, 'tool' => $c['name'],
+                'args' => $c['args'], 'ok' => !empty($res['ok'])]]]);
+
+            $messages[] = ['role' => 'tool', 'tool_call_id' => $c['id'], 'name' => $c['name'],
+                           'content' => json_encode($res, JSON_UNESCAPED_UNICODE)];
+
+            if ($c['name'] === 'finish') {
+                $finalText = (string)($res['summary'] ?? '');
+                $finished = true;
+                break;
+            }
+        }
+        if ($finished || $stoppedBy !== '') break;
+    }
+
+    if ($finalText === '' && $stoppedBy === '') $stoppedBy = 'سقفِ گام‌ها';
+
+    $applied = 0;
+    foreach ($changes as $c) if (!empty($c['applied'])) $applied++;
+
+    return ['ok' => true, 'mode' => $mode, 'task' => $task, 'summary' => $finalText,
+            'stopped_by' => $stoppedBy, 'calls' => $calls, 'tools_used' => $usedTools,
+            'changes' => $changes, 'applied' => $applied,
+            'simulated' => count($changes) - $applied,
+            'native_tools' => $nativeTools, 'took' => round(microtime(true) - $t0, 1)];
+}
+
 function normalizeTitle(string $title): string {
 $t=mb_strtolower(trim($title),'UTF-8');
 $t=preg_replace("/\s+/u",' ',$t);
@@ -28971,6 +29889,47 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="bslQueueList" style="font-size:11px;color:#64748b">صف خالی — برای افزودن، دکمه «🚀 ارسال باسلام» را کلیک کنید</div>
 </div>
 </div>
+</div>
+
+<div class="card" style="margin-top:14px;border:1px solid #7c3aed">
+<div class="section-title" style="color:#c084fc">🤖 ایجنت مدیریت محصولات <span style="font-size:10px;background:#7c3aed;color:#fff;padding:2px 7px;border-radius:6px;vertical-align:middle">آزمایشی</span></div>
+<div class="alert alert-info" style="margin-bottom:8px;font-size:11px">
+💡 به‌جای دکمه‌های از پیش آماده، کارتان را <b>به زبان فارسی</b> بنویسید. مدل هوش مصنوعی خودش تصمیم می‌گیرد کدام ابزار را صدا بزند: فهرست محصولات، جست‌وجو در snappshop.ir، و به‌روزرسانی قیمت/موجودی در باسلام و ووکامرس.<br>
+⚠️ نیازمند مدلی با پشتیبانی <b>فراخوانی ابزار</b> (Mistral، Gemini، Groq، GPT-OSS و…). اگر مدل پشتیبانی نکند، برنامه خودکار به حالت متنی سوییچ می‌کند.
+</div>
+
+<div class="row" style="align-items:center;margin-bottom:6px">
+<label style="min-width:78px">مدل فعال:</label>
+<span id="agModel" style="color:#94a3b8;font-size:12px">—</span>
+<button class="btn btn-gray" onclick="agLoadTools()" style="font-size:10px;padding:4px 8px;margin-right:auto">🔄 بررسی</button>
+</div>
+
+<textarea id="agTask" rows="3" style="width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;padding:9px;font-size:12px;font-family:inherit" placeholder="مثال: محصول‌های عطر و ادکلن را پیدا کن و عنوان آن‌ها را در سایت snappshop.ir پیدا کن و قیمت و موجودی آن‌ها را در باسلام و ووکامرس آپدیت کن">محصول‌های عطر و ادکلن را پیدا کن و عنوان آن‌ها را در سایت snappshop.ir پیدا کن و قیمت و موجودی آن‌ها را در باسلام و ووکامرس آپدیت کن</textarea>
+
+<div class="row" style="align-items:center;margin-top:8px">
+<label style="min-width:78px">حالت اجرا:</label>
+<select id="agMode" style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;padding:7px;font-size:12px">
+<option value="sim">🧪 شبیه‌سازی کامل — داده نمونه، بدون هیچ اتصالی (برای دیدن رفتار مدل)</option>
+<option value="dry" selected>🔍 آزمایشی — داده واقعی خوانده می‌شود، ولی چیزی نوشته نمی‌شود</option>
+<option value="live">🔥 اجرای واقعی — قیمت و موجودی واقعاً تغییر می‌کند</option>
+</select>
+</div>
+
+<div class="cact" style="margin-top:9px">
+<button class="btn btn-purple" id="agRunBtn" onclick="agStart()" style="flex:1">🚀 اجرای ایجنت</button>
+<button class="btn btn-red hidden" id="agStopBtn" onclick="agStop()">⏹ توقف</button>
+<button class="btn btn-gray" onclick="agShowTools()" style="font-size:11px">🧰 ابزارها</button>
+</div>
+
+<div class="ssum hidden" id="agSum" style="margin-top:9px">
+<div class="si"><b id="agSteps" style="color:#c084fc">۰</b><span>گام</span></div>
+<div class="si"><b id="agCalls" style="color:#60a5fa">۰</b><span>ابزار</span></div>
+<div class="si"><b id="agChanges" style="color:#facc15">۰</b><span>تغییر</span></div>
+</div>
+
+<div class="status" id="agStatus" style="color:#c084fc;margin-top:6px"></div>
+<div id="agLog" class="hidden" style="margin-top:8px;background:#0b1120;border:1px solid #1e293b;border-radius:8px;padding:9px;max-height:280px;overflow:auto;font-size:11px;line-height:1.9;direction:rtl"></div>
+<div id="agReport" class="hidden" style="margin-top:8px"></div>
 </div>
 
 <div class="card" style="margin-top:14px">
@@ -40061,6 +41020,183 @@ function ddStatusBadge(p){
     const k=p.status>0?p.status:(p.wstatus||'');
     const v=M[k]||['—','#64748b'];
     return '<span style="color:'+v[1]+';font-size:10px">'+v[0]+'</span>';
+}
+
+/* ===== v10.03 — ایجنتِ مدیریت محصولات (tool calling) ===== */
+var agTimer = null, agSince = 0, agBusy = false;
+
+function agSetBusy(b) {
+    agBusy = b;
+    var r = $('agRunBtn'), s = $('agStopBtn');
+    if (r) { r.disabled = b; r.style.opacity = b ? '0.5' : '1'; }
+    if (s) s.classList.toggle('hidden', !b);
+}
+
+function agLog(msg) {
+    var box = $('agLog');
+    if (!box) return;
+    box.classList.remove('hidden');
+    var d = document.createElement('div');
+    d.textContent = msg;
+    if (msg.indexOf('❌') === 0) d.style.color = '#f87171';
+    else if (msg.indexOf('✏️') === 0) d.style.color = '#facc15';
+    else if (msg.indexOf('🔎') === 0) d.style.color = '#22d3ee';
+    else if (msg.indexOf('📋') === 0) d.style.color = '#a78bfa';
+    else if (msg.indexOf('🤔') === 0) d.style.color = '#64748b';
+    else if (msg.indexOf('   ↳') === 0) d.style.color = '#94a3b8';
+    else d.style.color = '#e2e8f0';
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+}
+
+function agLoadTools() {
+    var el = $('agModel');
+    if (el) el.textContent = 'در حال بررسی…';
+    fetch('?agent_tools').then(function (r) { return r.json(); }).then(function (j) {
+        if (!el) return;
+        if (j && j.ok && j.model) {
+            el.textContent = j.model + (j.provider ? ' (' + j.provider + ')' : '')
+                + ' — ' + toFa(j.tools.length) + ' ابزار';
+            el.style.color = '#4ade80';
+        } else {
+            el.textContent = 'هیچ مدلی فعال نیست — از تب «هوش مصنوعی» یکی را انتخاب کنید';
+            el.style.color = '#f87171';
+        }
+    }).catch(function () { if (el) { el.textContent = 'خطای ارتباط'; el.style.color = '#f87171'; } });
+}
+
+function agShowTools() {
+    fetch('?agent_tools').then(function (r) { return r.json(); }).then(function (j) {
+        if (!j || !j.ok) { showToast('خطا در خواندن ابزارها', 'error'); return; }
+        var h = '<div style="background:#0b1120;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px">'
+              + '<div style="color:#c084fc;font-weight:700;margin-bottom:7px">🧰 ابزارهایی که در اختیار مدل است</div>';
+        j.tools.forEach(function (t) {
+            h += '<div style="margin-bottom:7px;padding-bottom:7px;border-bottom:1px solid #1e293b">'
+               + '<code style="color:#4ade80;direction:ltr;display:inline-block">' + esc(t.name) + '</code>'
+               + '<div style="color:#94a3b8;margin-top:2px">' + esc(t.desc) + '</div>'
+               + '<div style="color:#64748b;font-size:10px;direction:ltr;text-align:right">'
+               + esc(t.params.join(' · ')) + '</div></div>';
+        });
+        h += '</div>';
+        var box = $('agReport');
+        if (box) { box.innerHTML = h; box.classList.remove('hidden'); }
+    });
+}
+
+function agStart() {
+    if (agBusy) return;
+    var task = ($('agTask') || {}).value || '';
+    task = task.trim();
+    if (!task) { showToast('لطفاً کارِ موردنظر را بنویسید', 'error'); return; }
+    var mode = ($('agMode') || {}).value || 'dry';
+    if (mode === 'live' && !confirm('حالت «اجرای واقعی» انتخاب شده است.\n\nقیمت و موجودی محصولات در باسلام و ووکامرس واقعاً تغییر می‌کند و برگشت‌پذیر نیست.\n\nادامه می‌دهید؟')) return;
+
+    agSince = 0;
+    var box = $('agLog'); if (box) { box.innerHTML = ''; box.classList.remove('hidden'); }
+    var rp = $('agReport'); if (rp) { rp.innerHTML = ''; rp.classList.add('hidden'); }
+    var sm = $('agSum'); if (sm) sm.classList.remove('hidden');
+    ['agSteps', 'agCalls', 'agChanges'].forEach(function (i) { if ($(i)) $(i).textContent = '۰'; });
+    agSetBusy(true);
+    if ($('agStatus')) $('agStatus').textContent = 'در حال شروع…';
+
+    var fd = new FormData();
+    fd.append('task', task);
+    fetch('?agent_start&mode=' + encodeURIComponent(mode), { method: 'POST', body: fd })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+            if (!j || !j.ok) {
+                agSetBusy(false);
+                if ($('agStatus')) $('agStatus').textContent = (j && j.error) || 'شروع نشد';
+                showToast((j && j.error) || 'ایجنت شروع نشد', 'error');
+                return;
+            }
+            agWatch();
+        })
+        .catch(function () { agSetBusy(false); showToast('خطای ارتباط با سرور', 'error'); });
+}
+
+function agWatch() {
+    if (agTimer) clearInterval(agTimer);
+    agTimer = setInterval(agPoll, 1200);
+    agPoll();
+}
+
+function agPoll() {
+    fetch('?agent_status&since=' + agSince).then(function (r) { return r.json(); }).then(function (p) {
+        if (!p) return;
+        (p.log || []).forEach(function (l) { agLog(l.m || ''); });
+        agSince = p.log_total || agSince;
+        if ($('agSteps')) $('agSteps').textContent = toFa(p.step || 0);
+        if ($('agCalls')) $('agCalls').textContent = toFa(p.calls || 0);
+        if ($('agChanges')) $('agChanges').textContent = toFa(p.changes || 0);
+        if ($('agStatus')) {
+            $('agStatus').textContent = p.done
+                ? (p.error ? ('خطا: ' + p.error) : 'پایان یافت')
+                : ('در حال اجرا — گامِ ' + toFa(p.step || 0));
+        }
+        if (p.done) {
+            if (agTimer) { clearInterval(agTimer); agTimer = null; }
+            agSetBusy(false);
+            agFinish();
+        }
+    }).catch(function () { });
+}
+
+function agStop() {
+    fetch('?agent_stop').then(function () { showToast('درخواست توقف ارسال شد', 'info'); });
+}
+
+function agFinish() {
+    fetch('?agent_result').then(function (r) { return r.json(); }).then(function (rep) {
+        if (!rep || !rep.ok) return;
+        agRenderReport(rep);
+    }).catch(function () { });
+}
+
+function agModeLabelJs(m) {
+    if (m === 'live') return '🔥 اجرای واقعی';
+    if (m === 'sim') return '🧪 شبیه‌سازی';
+    return '🔍 آزمایشی (بدون نوشتن)';
+}
+
+function agRenderReport(rep) {
+    var box = $('agReport');
+    if (!box) return;
+    var ch = rep.changes || [];
+    var h = '<div style="background:#0b1120;border:1px solid #334155;border-radius:8px;padding:11px;font-size:12px">'
+          + '<div style="color:#c084fc;font-weight:700;margin-bottom:6px">📄 گزارشِ ایجنت — ' + esc(agModeLabelJs(rep.mode)) + '</div>'
+          + '<div style="color:#e2e8f0;line-height:1.9;margin-bottom:8px">' + esc(rep.summary || '') + '</div>'
+          + '<div style="color:#64748b;font-size:11px;margin-bottom:8px">'
+          + 'زمان: ' + toFa(rep.took || 0) + ' ثانیه · فراخوانیِ ابزار: ' + toFa(rep.calls || 0)
+          + ' · واقعاً اعمال‌شده: ' + toFa(rep.applied || 0)
+          + ' · شبیه‌سازی‌شده: ' + toFa(rep.simulated || 0)
+          + (rep.native_tools ? ' · ابزارِ بومی' : ' · حالتِ متنی')
+          + (rep.stopped_by ? ' · متوقف‌شده توسط ' + esc(rep.stopped_by) : '')
+          + '</div>';
+    if (ch.length) {
+        h += '<table style="width:100%;border-collapse:collapse;font-size:11px">'
+           + '<tr style="color:#94a3b8;text-align:right">'
+           + '<th style="padding:4px;border-bottom:1px solid #334155">مقصد</th>'
+           + '<th style="padding:4px;border-bottom:1px solid #334155">شناسه</th>'
+           + '<th style="padding:4px;border-bottom:1px solid #334155">قیمت</th>'
+           + '<th style="padding:4px;border-bottom:1px solid #334155">موجودی</th>'
+           + '<th style="padding:4px;border-bottom:1px solid #334155">وضعیت</th></tr>';
+        ch.forEach(function (c) {
+            h += '<tr>'
+               + '<td style="padding:4px;border-bottom:1px solid #1e293b">' + (c.target === 'woo' ? 'ووکامرس' : 'باسلام') + '</td>'
+               + '<td style="padding:4px;border-bottom:1px solid #1e293b;direction:ltr;text-align:right">' + toFa(c.id) + '</td>'
+               + '<td style="padding:4px;border-bottom:1px solid #1e293b">' + (c.price === null || c.price === undefined ? '—' : toFa(c.price)) + '</td>'
+               + '<td style="padding:4px;border-bottom:1px solid #1e293b">' + (c.stock === null || c.stock === undefined ? '—' : toFa(c.stock)) + '</td>'
+               + '<td style="padding:4px;border-bottom:1px solid #1e293b;color:' + (c.applied ? '#4ade80' : (c.error ? '#f87171' : '#facc15')) + '">'
+               + (c.applied ? 'اعمال شد' : (c.error ? esc(c.error) : 'شبیه‌سازی')) + '</td></tr>';
+        });
+        h += '</table>';
+    } else {
+        h += '<div style="color:#64748b">هیچ تغییری پیشنهاد نشد.</div>';
+    }
+    h += '</div>';
+    box.innerHTML = h;
+    box.classList.remove('hidden');
 }
 
 function ddRenderReport(d){
