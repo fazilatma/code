@@ -66,6 +66,15 @@ const AI_PROVIDERS_FILE = __DIR__ . '/ai_providers.json';
    مرورگر آن را poll می‌کند؛ فایل توقف برای قطع صریح اجرا. */
 const AI_TEST_STATE_FILE = __DIR__ . '/ai_test_state.json';
 const AI_TEST_STOP_FILE  = __DIR__ . '/ai_test_stop.json';
+/* v10.01 (۱۵): وضعیتِ سلامتِ هر «کلید API».
+   چرا فایلِ جدا و نه داخلِ ai_providers.json: هنگام «تست همهٔ مدل‌ها» آرایهٔ
+   ارائه‌دهنده‌ها در حافظه نگه داشته و در پایانِ هر دور یکجا بازنویسی می‌شود؛
+   اگر وضعیتِ کلید هم همان‌جا می‌نشست، هر نشانه‌گذاریِ وسطِ کار با ذخیرهٔ بعدی
+   پاک می‌شد. این فایل کوچک است و مستقل به‌روز می‌شود. */
+const AI_KEY_STATE_FILE = __DIR__ . '/ai_key_state.json';
+/* پس از خطای ریت‌لیمیت، کلید چند ثانیه کنار گذاشته می‌شود (خطای اعتبار
+   برخلافِ این، تا وقتی کاربر پاکش نکند یا کلید موفق شود باقی می‌ماند). */
+const AI_KEY_RATE_COOLDOWN = 90;
 // v9.38: پایگاه رایِ «مدل کاندید» — کدام مدل در آزمون‌ها بهتر جواب داده
 const AI_VOTES_FILE = __DIR__ . '/ai_votes.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
@@ -89,8 +98,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.00';
-const APP_VERSION_DATE = '1405/05/30';
+const APP_VERSION = '10.01';
+const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -1558,6 +1567,256 @@ function aiProvidersLoad(): array {
 function aiProvidersSave(array $p): bool {
     return writeJsonFile(AI_PROVIDERS_FILE, $p)['ok'];
 }
+
+/* =====================================================================
+ *  v10.01 (۱۵): چند کلید API برای هر ارائه‌دهنده
+ *
+ *  مسئله: سرویس‌های رایگان سهمیهٔ روزانه/ماهانه دارند. وقتی اعتبارِ یک
+ *  کلید تمام می‌شود همهٔ مدل‌های آن ارائه‌دهنده «قرمز» می‌شوند، در حالی
+ *  که کاربر معمولاً چند کلید (چند حساب) دارد. تا نسخهٔ ۱۰٫۰۰ هر
+ *  ارائه‌دهنده فقط یک رشتهٔ apiKey داشت.
+ *
+ *  راه‌حل:
+ *    ۱) هر ارائه‌دهنده آرایهٔ apiKeys[] می‌گیرد؛ فیلدِ قدیمیِ apiKey هم
+ *       سرِ جایش می‌ماند (سازگاریِ عقب‌رو + برون‌ریزی/درون‌ریزیِ قدیمی)
+ *       و همیشه آینهٔ «کلیدِ اولِ سالم» است.
+ *    ۲) وضعیتِ سلامتِ هر کلید در فایلِ جدا (AI_KEY_STATE_FILE) می‌نشیند.
+ *    ۳) هر فراخوانی، «اولین کلیدِ سالم» را برمی‌دارد؛ اگر خطای اعتبار/
+ *       ریت‌لیمیت/کلیدِ نامعتبر گرفت، همان کلید علامت می‌خورد و درخواست
+ *       بی‌درنگ با کلیدِ بعدی تکرار می‌شود.
+ *    ۴) کلیدِ تازه هیچ سابقه‌ای ندارد ⇒ خطای کلیدِ قبلی به آن سرایت
+ *       نمی‌کند؛ افزودنِ کلید حتی نتیجهٔ «اعتبار تمام شده»ی مدل‌ها را
+ *       پاک می‌کند تا دوباره تست شوند.
+ * ===================================================================== */
+
+/** شناسهٔ کوتاه و پایدارِ یک کلید — خودِ کلید هیچ‌جا در شناسه نمی‌آید */
+function aiKeyId(string $key): string {
+    $key = trim($key);
+    return $key === '' ? '' : substr(sha1($key), 0, 10);
+}
+
+/**
+ * ارقام لاتین ⇒ فارسی.
+ * توجه: strtr سه‌آرگومانی بایت‌به‌بایت کار می‌کند و برای ارقامِ چندبایتیِ
+ * فارسی خروجیِ خرابِ UTF-8 می‌سازد (json_encode بعداً false برمی‌گرداند)؛
+ * پس حتماً باید از نگاشتِ آرایه‌ای استفاده شود.
+ */
+function aiFaNum($n): string {
+    return strtr((string)$n, ['0'=>'۰','1'=>'۱','2'=>'۲','3'=>'۳','4'=>'۴',
+                              '5'=>'۵','6'=>'۶','7'=>'۷','8'=>'۸','9'=>'۹']);
+}
+
+/** نمایشِ ماسک‌شدهٔ کلید برای رابط کاربری */
+function aiKeyPreview(string $key): string {
+    $key = trim($key);
+    if ($key === '') return '';
+    if (mb_strlen($key) <= 10) return mb_substr($key, 0, 2) . str_repeat('•', 4);
+    return mb_substr($key, 0, 5) . '…' . mb_substr($key, -4);
+}
+
+/**
+ * فهرستِ نرمال‌شدهٔ کلیدهای یک ارائه‌دهنده:
+ * [ ['id','key','label','enabled'], … ]
+ * کلیدِ تکراری حذف می‌شود و فیلدِ قدیمیِ apiKey هم — اگر در فهرست نباشد —
+ * به‌عنوان کلیدِ اول در نظر گرفته می‌شود.
+ */
+function aiProviderKeys(array $p): array {
+    $out = []; $seen = [];
+    foreach ((array)($p['apiKeys'] ?? []) as $row) {
+        if (is_array($row)) {
+            $k     = trim((string)($row['key'] ?? ''));
+            $label = trim((string)($row['label'] ?? ''));
+            $en    = ($row['enabled'] ?? true) !== false;
+        } else {
+            $k = trim((string)$row); $label = ''; $en = true;
+        }
+        if ($k === '' || isset($seen[$k])) continue;
+        $seen[$k] = true;
+        $out[] = ['id' => aiKeyId($k), 'key' => $k, 'label' => $label, 'enabled' => $en];
+    }
+    $legacy = trim((string)($p['apiKey'] ?? ''));
+    if ($legacy !== '' && !isset($seen[$legacy])) {
+        array_unshift($out, ['id' => aiKeyId($legacy), 'key' => $legacy, 'label' => '', 'enabled' => true]);
+    }
+    return $out;
+}
+
+/** آرایهٔ کلیدها را به شکلِ ذخیره‌شدنی (با apiKey آینه) روی provider می‌نشاند */
+function aiProviderSetKeys(array $p, array $keys): array {
+    $rows = []; $seen = [];
+    foreach ($keys as $k) {
+        $key = trim((string)($k['key'] ?? ''));
+        if ($key === '' || isset($seen[$key])) continue;
+        $seen[$key] = true;
+        $rows[] = ['id'      => aiKeyId($key),
+                   'key'     => $key,
+                   'label'   => trim((string)($k['label'] ?? '')),
+                   'enabled' => ($k['enabled'] ?? true) !== false,
+                   'addedAt' => (int)($k['addedAt'] ?? time())];
+    }
+    $p['apiKeys'] = $rows;
+    /* apiKey همیشه آینهٔ «اولین کلیدِ روشن» است تا کدها و فایل‌های قدیمی
+       (و برون‌ریزیِ نسخه‌های پیشین) دقیقاً مثل قبل کار کنند. */
+    $mirror = '';
+    foreach ($rows as $r) { if ($r['enabled']) { $mirror = $r['key']; break; } }
+    if ($mirror === '' && $rows) $mirror = $rows[0]['key'];
+    $p['apiKey'] = $mirror;
+    return $p;
+}
+
+/** وضعیتِ سلامتِ کلیدها از دیسک */
+function aiKeyStateLoad(): array {
+    if (!is_file(AI_KEY_STATE_FILE)) return [];
+    $d = json_decode((string)@file_get_contents(AI_KEY_STATE_FILE), true);
+    return is_array($d) ? $d : [];
+}
+function aiKeyStateSave(array $st): bool {
+    return writeJsonFile(AI_KEY_STATE_FILE, $st)['ok'];
+}
+
+/**
+ * سلامتِ یک کلید:
+ *   blocked=true یعنی «برای درخواستِ بعدی سراغش نرو».
+ *   اعتبار/اشتراک و کلیدِ نامعتبر تا وقتی کاربر پاک نکند (یا کلید دوباره
+ *   موفق شود) باقی می‌ماند؛ ریت‌لیمیت فقط چند ثانیه.
+ */
+function aiKeyHealth(string $pid, string $kid, ?array $state = null): array {
+    $st = $state === null ? aiKeyStateLoad() : $state;
+    $row = $st[$pid . '|' . $kid] ?? null;
+    $base = ['blocked' => false, 'kind' => '', 'label' => '', 'msg' => '', 'at' => 0,
+             'fails' => 0, 'okAt' => 0, 'retryIn' => 0];
+    if (!is_array($row)) return $base;
+    $kind = (string)($row['kind'] ?? '');
+    $at   = (int)($row['at'] ?? 0);
+    $base['kind']  = $kind;
+    $base['label'] = (string)($row['label'] ?? '');
+    $base['msg']   = (string)($row['msg'] ?? '');
+    $base['at']    = $at;
+    $base['fails'] = (int)($row['fails'] ?? 0);
+    $base['okAt']  = (int)($row['okAt'] ?? 0);
+    if ($kind === 'rate') {
+        $left = AI_KEY_RATE_COOLDOWN - (time() - $at);
+        $base['retryIn'] = max(0, $left);
+        $base['blocked'] = $left > 0;
+    } elseif ($kind === 'billing' || $kind === 'auth') {
+        $base['blocked'] = true;
+    }
+    return $base;
+}
+
+/** خطای این پاسخ «مالِ کلید» است یا نه (اعتبار / ریت‌لیمیت / کلیدِ نامعتبر) */
+function aiKeyFailureKind(array $r): array {
+    if (!empty($r['ok'])) return ['kind' => '', 'label' => '', 'msg' => ''];
+    $code = (int)($r['code'] ?? 0);
+    /* خطایی که از Worker/پروکسی آمده ربطی به کلید ندارد — کلیدِ سالم را
+       بی‌خود نسوزانیم. */
+    if (!empty($r['proxy_blocked'])) return ['kind' => '', 'label' => '', 'msg' => ''];
+    $bill = aiBillingFailure($r);
+    if ($bill['is']) return ['kind' => 'billing', 'label' => $bill['label'], 'msg' => (string)$bill['msg']];
+    if ($code === 429) return ['kind' => 'rate',
+        'label' => 'محدودیت نرخ (۴۲۹) — سهمیهٔ لحظه‌ای این کلید پر شده', 'msg' => ''];
+    if ($code === 401) return ['kind' => 'auth',
+        'label' => 'کلید نامعتبر است (۴۰۱) — پاکش کنید یا کلیدِ درست بگذارید', 'msg' => ''];
+    return ['kind' => '', 'label' => '', 'msg' => ''];
+}
+
+/** ثبتِ خطای یک کلید */
+function aiKeyMarkFail(string $pid, string $kid, string $kind, string $label = '', string $msg = ''): void {
+    if ($pid === '' || $kid === '' || $kind === '') return;
+    $st = aiKeyStateLoad();
+    $k  = $pid . '|' . $kid;
+    $prev = is_array($st[$k] ?? null) ? $st[$k] : [];
+    $st[$k] = ['kind'  => $kind,
+               'label' => mb_substr($label, 0, 200),
+               'msg'   => mb_substr($msg, 0, 200),
+               'at'    => time(),
+               'fails' => (int)($prev['fails'] ?? 0) + 1,
+               'okAt'  => (int)($prev['okAt'] ?? 0)];
+    aiKeyStateSave($st);
+}
+
+/** کلید جواب داد ⇒ هر برچسبِ خطای قبلی پاک می‌شود */
+function aiKeyMarkOk(string $pid, string $kid): void {
+    if ($pid === '' || $kid === '') return;
+    $st = aiKeyStateLoad();
+    $k  = $pid . '|' . $kid;
+    $prev = is_array($st[$k] ?? null) ? $st[$k] : [];
+    if (($prev['kind'] ?? '') === '' && (int)($prev['okAt'] ?? 0) > time() - 60) return;  // نوشتنِ بی‌خود
+    $st[$k] = ['kind' => '', 'label' => '', 'msg' => '', 'at' => 0,
+               'fails' => 0, 'okAt' => time()];
+    aiKeyStateSave($st);
+}
+
+/** پاک‌کردنِ دستیِ وضعیت — $kid خالی یعنی همهٔ کلیدهای این ارائه‌دهنده */
+function aiKeyClearState(string $pid, string $kid = ''): int {
+    $st = aiKeyStateLoad();
+    $n = 0;
+    foreach (array_keys($st) as $k) {
+        if ($kid === '') { if (strpos($k, $pid . '|') === 0) { unset($st[$k]); $n++; } }
+        elseif ($k === $pid . '|' . $kid)                    { unset($st[$k]); $n++; }
+    }
+    if ($n) aiKeyStateSave($st);
+    return $n;
+}
+
+/**
+ * انتخابِ کلید برای درخواستِ بعدی: اولین کلیدِ روشن و سالم.
+ * اگر همه سوخته باشند، باز هم اولین کلیدِ روشن برمی‌گردد (با healthy=false)
+ * تا دست‌کم یک تلاش انجام شود — چون ممکن است سهمیه تازه شده باشد.
+ */
+function aiPickApiKey(array $p, string $pid = '', array $skip = []): array {
+    if ($pid === '') $pid = (string)($p['id'] ?? '');
+    $keys = aiProviderKeys($p);
+    $state = aiKeyStateLoad();
+    $fallback = null;
+    foreach ($keys as $k) {
+        if (!$k['enabled']) continue;
+        if (in_array($k['id'], $skip, true)) continue;
+        if ($fallback === null) $fallback = $k;
+        $h = aiKeyHealth($pid, $k['id'], $state);
+        if (!$h['blocked']) return $k + ['healthy' => true, 'total' => count($keys)];
+    }
+    if ($fallback !== null) return $fallback + ['healthy' => false, 'total' => count($keys)];
+    return ['id' => '', 'key' => '', 'label' => '', 'enabled' => true,
+            'healthy' => false, 'total' => count($keys), 'none' => true];
+}
+
+/** چند کلیدِ سالمِ آماده‌به‌کار دارد (برای نمایش و تصمیمِ چرخش) */
+function aiHealthyKeyCount(array $p, string $pid = ''): int {
+    if ($pid === '') $pid = (string)($p['id'] ?? '');
+    $state = aiKeyStateLoad();
+    $n = 0;
+    foreach (aiProviderKeys($p) as $k) {
+        if (!$k['enabled']) continue;
+        if (!aiKeyHealth($pid, $k['id'], $state)['blocked']) $n++;
+    }
+    return $n;
+}
+
+/**
+ * وقتی کلیدِ تازه‌ای اضافه می‌شود، نتیجهٔ «اعتبار/سهمیه»ی مدل‌ها دیگر معتبر
+ * نیست: کلیدِ نو ممکن است همان مدل‌ها را باز کند. پس آن ردیف‌ها به حالتِ
+ * «تست‌نشده» برمی‌گردند تا در تستِ بعدی (حتی با تیکِ «فقط تست‌نشده») دوباره
+ * سنجیده شوند. مدل‌هایی که با خطای فنی رد شده‌اند دست‌نخورده می‌مانند.
+ */
+function aiResetKeyRelatedFailures(array $p): array {
+    foreach ((array)($p['models'] ?? []) as $i => $m) {
+        if (!is_array($m)) continue;
+        $bill  = (string)($m['billingIssue'] ?? '');
+        $stat  = (int)($m['testDetails']['status'] ?? 0);
+        $rate  = !empty($m['rateLimited']);
+        if ($bill === '' && !$rate && !in_array($stat, [401, 402, 429], true)) continue;
+        unset($p['models'][$i]['billingIssue']);
+        $p['models'][$i]['tested']      = false;
+        $p['models'][$i]['available']   = false;
+        $p['models'][$i]['rateLimited'] = false;
+        if (isset($p['models'][$i]['testDetails']) && is_array($p['models'][$i]['testDetails'])) {
+            $p['models'][$i]['testDetails']['keyReset']   = true;
+            $p['models'][$i]['testDetails']['resetAt']    = gmdate('c');
+        }
+    }
+    return $p;
+}
 /* =====================================================================
  *  v9.24: حالتِ کارِ پس‌زمینهٔ «تست مدل‌ها»
  *
@@ -2232,7 +2491,64 @@ function aiExtractText($body): string {
     return '';
 }
 
+/**
+ * v10.01: پوستهٔ چرخشِ کلید.
+ * هستهٔ واقعیِ فراخوانی aiProviderCallOnce() است و دقیقاً مثل قبل کار می‌کند؛
+ * این تابع فقط تصمیم می‌گیرد «با کدام کلید» صدا زده شود و اگر خطا از جنسِ
+ * کلید بود (اعتبار/سهمیه/۴۲۹/۴۰۱) همان کلید را علامت می‌زند و بی‌درنگ با
+ * کلیدِ بعدیِ همان ارائه‌دهنده دوباره تلاش می‌کند.
+ */
 function aiProviderCall(array $p, string $model, array $payload, ?array $net = null): array {
+    if ($net === null) $net = aiNetCfg();
+    $pid  = (string)($p['id'] ?? '');
+    $keys = aiProviderKeys($p);
+    if (count($keys) < 2) {
+        /* یک کلید (یا هیچ کلید) ⇒ مسیرِ ساده، بدون هیچ سربار؛ فقط نتیجهٔ
+           موفق/ناموفقِ همان کلید ثبت می‌شود تا در UI دیده شود. */
+        $r = aiProviderCallOnce($p, $model, $payload, $net);
+        $kid = $keys ? $keys[0]['id'] : '';
+        if ($kid !== '' && $pid !== '') {
+            if (!empty($r['ok'])) aiKeyMarkOk($pid, $kid);
+            else {
+                $kf = aiKeyFailureKind($r);
+                if ($kf['kind'] !== '') aiKeyMarkFail($pid, $kid, $kf['kind'], $kf['label'], $kf['msg']);
+            }
+        }
+        if ($kid !== '') $r['keyId'] = $kid;
+        return $r;
+    }
+
+    $skip = []; $rotated = 0; $last = null;
+    $maxTry = min(count($keys), 6);
+    for ($attempt = 0; $attempt < $maxTry; $attempt++) {
+        $pick = aiPickApiKey($p, $pid, $skip);
+        if (!empty($pick['none']) || (string)$pick['key'] === '') break;
+        $kid = (string)$pick['id'];
+        $pk  = $p;
+        $pk['apiKey'] = (string)$pick['key'];
+        $r = aiProviderCallOnce($pk, $model, $payload, $net);
+        $r['keyId']      = $kid;
+        $r['keyLabel']   = (string)$pick['label'];
+        $r['keyPreview'] = aiKeyPreview((string)$pick['key']);
+        if ($rotated > 0) { $r['keyRotated'] = $rotated; }
+        if (!empty($r['ok'])) { aiKeyMarkOk($pid, $kid); return $r; }
+        if (!empty($r['stopped'])) return $r;
+        $kf = aiKeyFailureKind($r);
+        if ($kf['kind'] === '') return $r;              // خطا ربطی به کلید ندارد
+        aiKeyMarkFail($pid, $kid, $kf['kind'], $kf['label'], $kf['msg']);
+        $r['keyFailed'] = $kf['kind'];
+        $r['keyFailLabel'] = $kf['label'];
+        $skip[] = $kid;
+        $rotated++;
+        $last = $r;
+    }
+    if ($last === null) return aiProviderCallOnce($p, $model, $payload, $net);
+    $last['keysExhausted'] = true;
+    $last['keysTried']     = count($skip);
+    return $last;
+}
+
+function aiProviderCallOnce(array $p, string $model, array $payload, ?array $net = null): array {
     if ($net === null) $net = aiNetCfg();
     /* v9.94: اگر مدل استدلالی است، سقفِ توکن را همین‌جا (یک نقطهٔ مشترک برای
        همهٔ مسیرها: دسته‌بندی، پاسخ مشتری، تستِ مدل‌ها) بزرگ می‌کنیم. بدون این،
@@ -2657,7 +2973,7 @@ function aiNormalizeProviders($raw): array {
             if (array_key_exists('reasoning', $m)) $models[count($models) - 1]['reasoning'] = !empty($m['reasoning']);
             if (!empty($m['testDetails'])) $models[count($models) - 1]['testDetails'] = $m['testDetails'];
         }
-        $out[$id] = [
+        $row = [
             'id'      => $id,
             'name'    => trim((string)($p['name'] ?? $id)),
             'vendor'  => trim((string)($p['vendor'] ?? '')),
@@ -2666,6 +2982,14 @@ function aiNormalizeProviders($raw): array {
             'enabled' => ($p['enabled'] ?? true) !== false,
             'models'  => $models,
         ];
+        /* v10.01: فهرستِ چندکلیدی هم عبور داده می‌شود. اگر فایل/درون‌ریزیِ
+           قدیمی فقط apiKey داشته باشد، همان یک کلید به فهرست تبدیل می‌شود؛
+           پس هیچ تنظیماتِ قبلی از دست نمی‌رود. */
+        $row = aiProviderSetKeys($row, aiProviderKeys(is_array($p) ? $p : []));
+        if (trim((string)($p['apiKey'] ?? '')) !== '' && $row['apiKey'] === '') {
+            $row['apiKey'] = trim((string)$p['apiKey']);
+        }
+        $out[$id] = $row;
     }
     return $out;
 }
@@ -2752,6 +3076,16 @@ function aiProvidersExportArray(bool $withKeys = true): array {
             'enabled' => ($p['enabled'] ?? true) !== false,
             'models'  => [],
         ];
+        /* v10.01: کلیدهای اضافی هم برون‌ریزی می‌شوند (فقط در حالتِ باکلید).
+           فایلِ خروجی همچنان apiKey را دارد، پس نسخه‌های قدیمی‌تر هم آن را
+           می‌خوانند. */
+        $keysOut = [];
+        foreach (aiProviderKeys($p) as $k) {
+            $keysOut[] = ['key'     => $withKeys ? $k['key'] : '',
+                          'label'   => $k['label'],
+                          'enabled' => $k['enabled']];
+        }
+        if ($keysOut) $row['apiKeys'] = $keysOut;
         foreach ((array)($p['models'] ?? []) as $m) {
             if (!is_array($m)) continue;
             $row['models'][] = $m;
@@ -2767,8 +3101,28 @@ function aiProvidersSummary(): array {
     $sel = aiActiveConfig();
     $sum = ['ok' => true, 'selected' => ['provider' => is_array($sel['provider']) ? ($sel['provider']['id'] ?? '') : '', 'model' => $sel['model']],
             'providers' => [], 'total_models' => 0];
+    $keyState = aiKeyStateLoad();
     foreach ($providers as $id => $p) {
         $key = (string)($p['apiKey'] ?? '');
+        /* v10.01: فهرستِ کلیدها با وضعیتِ سلامت — خودِ کلید هرگز به مرورگر
+           فرستاده نمی‌شود، فقط پیش‌نمایشِ ماسک‌شده و شناسهٔ هش‌شده. */
+        $keyRows = []; $healthy = 0;
+        foreach (aiProviderKeys($p) as $kk) {
+            $h = aiKeyHealth((string)$id, $kk['id'], $keyState);
+            if ($kk['enabled'] && !$h['blocked']) $healthy++;
+            $keyRows[] = [
+                'id'      => $kk['id'],
+                'label'   => $kk['label'],
+                'preview' => aiKeyPreview($kk['key']),
+                'enabled' => $kk['enabled'],
+                'blocked' => $h['blocked'],
+                'kind'    => $h['kind'],
+                'note'    => $h['label'],
+                'fails'   => $h['fails'],
+                'retryIn' => $h['retryIn'],
+                'okAt'    => $h['okAt'],
+            ];
+        }
         $sum['providers'][] = [
             'id'      => $id,
             'name'    => $p['name'] ?? $id,
@@ -2776,6 +3130,9 @@ function aiProvidersSummary(): array {
             'url'     => $p['url'] ?? '',
             'enabled' => ($p['enabled'] ?? true) !== false,
             'has_key' => $key !== '',
+            'keys'        => $keyRows,
+            'key_count'   => count($keyRows),
+            'key_healthy' => $healthy,
             'key_preview' => $key !== '' ? (mb_substr($key, 0, 4) . '…' . mb_substr($key, -4)) : '',
             'models'  => array_map(function ($m) {
                 return ['id' => $m['id'], 'name' => $m['name'] ?? $m['id'],
@@ -13069,7 +13426,12 @@ if (isset($_GET['ai_probe'])) {
     if (!empty($_ac['provider'])) {
         $provId   = (string)($_ac['provider']['id'] ?? '');
         $provName = (string)($_ac['provider']['name'] ?? $provId);
-        $apiKey   = trim((string)($_ac['provider']['apiKey'] ?? ''));
+        /* v10.01: عیب‌یابی هم با «کلیدِ سالم» انجام شود، نه با کلیدی که
+           اعتبارش تمام شده — وگرنه گزارش، خطای اعتبار را به‌جای خطای شبکه
+           نشان می‌دهد. */
+        $_pk      = aiPickApiKey($_ac['provider'], $provId);
+        $apiKey   = trim((string)($_pk['key'] ?? ''));
+        if ($apiKey === '') $apiKey = trim((string)($_ac['provider']['apiKey'] ?? ''));
         $model    = (string)($_ac['model'] ?? '');
         $ep = aiProviderEndpoint($_ac['provider'], $model);
         // برای تستِ عیب‌یابی، آدرس chat/completions را می‌سنجیم
@@ -15050,6 +15412,197 @@ if (isset($_GET['selftest'])) {
     $add('10.00', 'نوارِ وضعیتِ مودال مرحلهٔ جاری (دسته‌بندی/پیام) را نشان می‌دهد',
          strpos($selfSrc, "' · تستِ دسته‌بندی'") !== false
       && strpos($selfSrc, "' · تستِ پیام'") !== false);
+
+    /* ---------- v10.01 (۱۵): چند کلید API برای هر ارائه‌دهنده ---------- */
+    $add('10.01', 'توابعِ پایهٔ مدیریتِ چند کلید وجود دارند',
+         function_exists('aiProviderKeys') && function_exists('aiProviderSetKeys')
+      && function_exists('aiPickApiKey')   && function_exists('aiKeyId')
+      && function_exists('aiKeyPreview')   && function_exists('aiHealthyKeyCount'));
+    $add('10.01', 'وضعیتِ کلیدها در فایلِ جدا نگه‌داری می‌شود تا با ذخیرهٔ تنظیمات پاک نشود',
+         defined('AI_KEY_STATE_FILE') && defined('AI_KEY_RATE_COOLDOWN')
+      && function_exists('aiKeyStateLoad') && function_exists('aiKeyStateSave')
+      && AI_KEY_STATE_FILE !== AI_PROVIDERS_FILE);
+    $add('10.01', 'تنظیماتِ قدیمی با یک apiKey همچنان کار می‌کند (سازگاریِ عقب‌رو)',
+         (function () {
+             $k = aiProviderKeys(['id' => 'x', 'apiKey' => 'sk-legacy-0001']);
+             return count($k) === 1 && $k[0]['key'] === 'sk-legacy-0001' && $k[0]['enabled'] === true;
+         })());
+    $add('10.01', 'کلیدِ تکراری دوبار وارد فهرست نمی‌شود',
+         (function () {
+             $k = aiProviderKeys(['id' => 'x', 'apiKey' => 'AAA1234567',
+                                  'apiKeys' => [['key' => 'AAA1234567'], ['key' => 'BBB1234567']]]);
+             return count($k) === 2;
+         })());
+    $add('10.01', 'فیلدِ apiKey همیشه آینهٔ اولین کلیدِ روشن است (کدهای قدیمی نمی‌شکنند)',
+         (function () {
+             $p = aiProviderSetKeys(['id' => 'x'],
+                     [['key' => 'K1aaaaaaaa', 'enabled' => false], ['key' => 'K2bbbbbbbb']]);
+             return ($p['apiKey'] ?? '') === 'K2bbbbbbbb' && count($p['apiKeys']) === 2;
+         })());
+    $add('10.01', 'شناسهٔ کلید هش است و خودِ کلید را افشا نمی‌کند',
+         (function () {
+             $id = aiKeyId('sk-super-secret-value');
+             return strlen($id) === 10 && strpos($id, 'secret') === false
+                 && $id === aiKeyId('sk-super-secret-value');
+         })());
+    $add('10.01', 'پیش‌نمایشِ کلید ماسک می‌شود و هرگز کاملِ کلید نیست',
+         aiKeyPreview('sk-1234567890abcd') === 'sk-12…abcd'
+      && aiKeyPreview('') === ''
+      && strpos(aiKeyPreview('sk-1234567890abcd'), '67890') === false);
+    $add('10.01', 'خطای ۴۰۲/اعتبار، ۴۲۹ و ۴۰۱ «خطای کلید» شناخته می‌شوند',
+         aiKeyFailureKind(['ok' => false, 'code' => 429])['kind'] === 'rate'
+      && aiKeyFailureKind(['ok' => false, 'code' => 401])['kind'] === 'auth'
+      && aiKeyFailureKind(['ok' => false, 'code' => 402])['kind'] === 'billing');
+    $add('10.01', 'خطای فنی (۵۰۰) و خطای واسطه کلیدِ سالم را نمی‌سوزانند',
+         aiKeyFailureKind(['ok' => false, 'code' => 500])['kind'] === ''
+      && aiKeyFailureKind(['ok' => false, 'code' => 402, 'proxy_blocked' => true])['kind'] === ''
+      && aiKeyFailureKind(['ok' => true, 'code' => 200])['kind'] === '');
+    $add('10.01', 'محدودیتِ نرخ موقتی است ولی اتمامِ اعتبار پایدار می‌ماند',
+         (function () {
+             $now = time();
+             $st = ['p|k1' => ['kind' => 'rate',    'at' => $now - 5,     'fails' => 1],
+                    'p|k2' => ['kind' => 'rate',    'at' => $now - 99999, 'fails' => 1],
+                    'p|k3' => ['kind' => 'billing', 'at' => $now - 99999, 'fails' => 1]];
+             $h1 = aiKeyHealth('p', 'k1', $st);
+             $h2 = aiKeyHealth('p', 'k2', $st);
+             $h3 = aiKeyHealth('p', 'k3', $st);
+             return $h1['blocked'] === true && $h1['retryIn'] > 0
+                 && $h2['blocked'] === false
+                 && $h3['blocked'] === true;
+         })());
+    $add('10.01', 'کلیدِ سوخته رد می‌شود و اولین کلیدِ سالم انتخاب می‌گردد',
+         (function () {
+             $p = aiProviderSetKeys(['id' => 'pp'],
+                     [['key' => 'K1aaaaaaaa'], ['key' => 'K2bbbbbbbb'], ['key' => 'K3cccccccc']]);
+             $skip = [aiKeyId('K1aaaaaaaa')];
+             $pick = aiPickApiKey($p, 'pp', $skip);
+             return $pick['key'] === 'K2bbbbbbbb';
+         })());
+    $add('10.01', 'اگر همهٔ کلیدها سوخته باشند باز هم یک تلاشِ آخر انجام می‌شود',
+         (function () {
+             $p = aiProviderSetKeys(['id' => 'pp2'], [['key' => 'K1aaaaaaaa']]);
+             $pick = aiPickApiKey($p, 'pp2', []);
+             return $pick['key'] === 'K1aaaaaaaa' && empty($pick['none']);
+         })());
+    $add('10.01', 'کلیدِ خاموش‌شده اصلاً انتخاب نمی‌شود',
+         (function () {
+             $p = aiProviderSetKeys(['id' => 'pp3'],
+                     [['key' => 'OFFaaaaaaa', 'enabled' => false], ['key' => 'ONbbbbbbbb']]);
+             $pick = aiPickApiKey($p, 'pp3', []);
+             return $pick['key'] === 'ONbbbbbbbb';
+         })());
+    $add('10.01', 'کلیدِ تازه هیچ سابقه‌ای از خطای کلیدِ قبلی به ارث نمی‌برد',
+         (function () {
+             $now = time();
+             $st = ['zz|' . aiKeyId('OLDaaaaaaa') => ['kind' => 'billing', 'at' => $now, 'fails' => 3]];
+             $hOld = aiKeyHealth('zz', aiKeyId('OLDaaaaaaa'), $st);
+             $hNew = aiKeyHealth('zz', aiKeyId('NEWbbbbbbb'), $st);
+             return $hOld['blocked'] === true
+                 && $hNew['blocked'] === false && $hNew['kind'] === '' && $hNew['fails'] === 0;
+         })());
+    $add('10.01', 'افزودنِ کلید، مدل‌هایی را که به‌خاطر اعتبار/سهمیه رد شده بودند برای تستِ دوباره آزاد می‌کند',
+         (function () {
+             $p = aiResetKeyRelatedFailures(['id' => 'q', 'models' => [
+                    ['id' => 'm1', 'tested' => true, 'available' => false, 'billingIssue' => 'credit'],
+                    ['id' => 'm2', 'tested' => true, 'available' => true],
+                    ['id' => 'm3', 'tested' => true, 'available' => false, 'rateLimited' => true],
+                    ['id' => 'm4', 'tested' => true, 'available' => false,
+                     'testDetails' => ['status' => 404]]]]);
+             $m = $p['models'];
+             return $m[0]['tested'] === false && !isset($m[0]['billingIssue'])
+                 && $m[1]['tested'] === true  && $m[1]['available'] === true   // سالم دست نمی‌خورد
+                 && $m[2]['tested'] === false                                  // ریت‌لیمیت هم آزاد
+                 && $m[3]['tested'] === true;                                  // خطای فنی دست نمی‌خورد
+         })());
+    $add('10.01', 'هستهٔ فراخوانی از پوستهٔ چرخشِ کلید جدا شده است',
+         function_exists('aiProviderCallOnce')
+      && strpos($selfSrc, '$last[' . "'keysExhausted'] = true;") !== false
+      && strpos($selfSrc, 'aiProviderCallOnce($pk, $model, $payload, $net)') !== false);
+    $add('10.01', 'مسیرِ Cloudflare هم کلیدِ چرخانده‌شده را می‌گیرد نه کلیدِ ثابت',
+         (function () use ($selfSrc) {
+             $i = strpos($selfSrc, 'function aiProviderCall' . 'Once(');
+             if ($i === false) return false;
+             $blk = substr($selfSrc, $i, 1200);
+             // چرخش، کلید را در $pk['apiKey'] می‌گذارد و همین $p به Cloudflare می‌رسد
+             return strpos($blk, "return aiCloudflareCall(\$p, \$model, \$payload, \$net);") !== false
+                 && strpos($selfSrc, "\$pk['apiKey'] = (string)\$pick['key'];") !== false;
+         })());
+    $add('10.01', 'مسیرِ موازی (curl_multi) هم با کلیدِ سالم درخواست می‌فرستد',
+         strpos($selfSrc, '$pick   = aiPickApiKey($p, (string)($p[' . "'id'] ?? ''));") !== false
+      && strpos($selfSrc, "'keyId' => (string)(\$pick['id'] ?? '')") !== false);
+    $add('10.01', 'نتیجهٔ هر کلید (موفق/ناموفق) ثبت می‌شود تا چرخش هوشمند بماند',
+         function_exists('aiKeyMarkOk') && function_exists('aiKeyMarkFail')
+      && function_exists('aiKeyClearState'));
+    $add('10.01', 'ارقامِ فارسیِ پیام‌ها UTF-8 سالم می‌مانند (پاسخِ JSON خالی برنمی‌گردد)',
+         (function () {
+             $m = aiFaNum(2) . ' کلید افزوده شد';
+             return $m === '۲ کلید افزوده شد'
+                 && mb_check_encoding($m, 'UTF-8')
+                 && json_encode(['msg' => $m], JSON_UNESCAPED_UNICODE) !== false
+                 && aiFaNum(1405) === '۱۴۰۵';
+         })()
+      // strtr سه‌آرگومانی بایتی است و نباید روی ارقامِ فارسی به‌کار برود
+      && strpos($selfSrc, "'0123456789', '" . "۰۱۲۳۴۵۶۷۸۹')") === false);
+    $add('10.01', 'تستِ تکیِ یک مدل هم مثل تستِ گروهی billingIssue را ثبت می‌کند',
+         (function () use ($selfSrc) {
+             // لنگر: خطی که فقط در بدنهٔ اندپوینتِ تستِ تکی هست
+             $i = strpos($selfSrc, "\$testCat = trim((string)(\$_POST['c" . "at'] ?? 'ادو پرفیوم'));");
+             if ($i === false) return false;
+             $blk = substr($selfSrc, $i, 6000);
+             return strpos($blk, '$j = aiTestJudge($r, $mid, $pid);') !== false
+                 && strpos($blk, "\$providers[\$pid]['models'][\$i]['billingIssue'] = \$j['billing'];") !== false;
+         })());
+    $add('10.01', 'وقتی همهٔ کلیدها امتحان شدند، گزارش صریح می‌گوید کلیدِ تازه لازم است',
+         strpos($selfSrc, 'کلیدِ این ارائه‌دهنده امتحان شد؛ یک کلید تازه اضافه کنید') !== false);
+    $add('10.01', 'اندپوینت‌های افزودن/حذف/روشن‌خاموش/بازنشانیِ کلید وجود دارند',
+         strpos($selfSrc, "'ai_keys_list','ai_keys_" . "add','ai_keys_del'") !== false
+      && strpos($selfSrc, "\$act === 'ai_keys_" . "add'") !== false
+      && strpos($selfSrc, "\$act === 'ai_keys_" . "del'") !== false
+      && strpos($selfSrc, "\$act === 'ai_keys_" . "toggle'") !== false
+      && strpos($selfSrc, "\$act === 'ai_keys_" . "reset'") !== false);
+    $add('10.01', 'می‌توان چند کلید را یکجا (هر خط یکی) چسباند',
+         (function () {
+             $parts = preg_split('~[\r\n,;\s]+~u', "K1aaaaaaaa\nK2bbbbbbbb, K3cccccccc");
+             $n = 0;
+             foreach ((array)$parts as $x) if (trim((string)$x) !== '' && mb_strlen(trim((string)$x)) >= 8) $n++;
+             return $n === 3;
+         })());
+    $add('10.01', 'خودِ کلید هرگز به مرورگر فرستاده نمی‌شود — فقط پیش‌نمایشِ ماسک‌شده',
+         strpos($selfSrc, "'preview'=>aiKeyPreview(\$k['key'])") !== false
+      && strpos($selfSrc, "'preview' => aiKeyPreview(\$kk['key'])") !== false
+      && strpos($selfSrc, "'key'=>\$k['key']") === false);
+    $add('10.01', 'خلاصهٔ ارائه‌دهنده‌ها شمارِ کلیدهای سالم را برمی‌گرداند',
+         strpos($selfSrc, "'key_healthy' => \$healthy,") !== false
+      && strpos($selfSrc, "'key_count'   => count(\$keyRows),") !== false);
+    $add('10.01', 'کلیدهای اضافی هم برون‌ریزی/درون‌ریزی می‌شوند',
+         strpos($selfSrc, "if (\$keysOut) \$row['apiKeys'] = \$keysOut;") !== false
+      && (function () {
+             $raw = ['gg' => ['id' => 'gg', 'name' => 'G', 'url' => 'https://x/v1',
+                              'apiKey' => 'K1aaaaaaaa',
+                              'apiKeys' => [['key' => 'K1aaaaaaaa'], ['key' => 'K2bbbbbbbb']],
+                              'models' => [['id' => 'm1']]]];
+             $n = aiNormalizeProviders($raw);
+             return count($n['gg']['apiKeys'] ?? []) === 2
+                 && ($n['gg']['apiKey'] ?? '') === 'K1aaaaaaaa';
+         })());
+    $add('10.01', 'رابطِ کاربریِ افزودن/حذف کلید در تبِ ارائه‌دهنده‌ها هست',
+         strpos($selfSrc, 'id="aiKeyList"') !== false
+      && strpos($selfSrc, 'id="aiKeyNew"') !== false
+      && strpos($selfSrc, 'id="aiKeyLabel"') !== false
+      && strpos($selfSrc, 'onclick="aiKey' . 'Add()"') !== false);
+    $add('10.01', 'توابعِ جاوااسکریپتِ مدیریتِ کلید تعریف شده و صدا زده می‌شوند',
+         strpos($selfSrc, 'function aiKey' . 'Render()') !== false
+      && strpos($selfSrc, 'function aiKey' . 'Add()') !== false
+      && strpos($selfSrc, 'function aiKey' . 'Del(kid)') !== false
+      && strpos($selfSrc, 'function aiKey' . 'Toggle(kid,on)') !== false
+      && strpos($selfSrc, 'function aiKey' . 'Reset(kid)') !== false
+      && strpos($selfSrc, 'aiKey' . 'Render();   // v10.01') !== false);
+    $add('10.01', 'وقتی کلیدِ سالمی نمانده، رابط صریح هشدار می‌دهد',
+         strpos($selfSrc, 'هیچ کلیدِ سالمی باقی نمانده') !== false);
+    $add('10.01', 'کلیدِ تازه در «افزودن مدل‌های Mistral» جای کلیدهای قبلی را نمی‌گیرد',
+         strpos($selfSrc, 'if ($catKeys) $cat = aiProviderSetKeys($cat, $catKeys);') !== false);
+    $add('10.01', 'عیب‌یابیِ اتصال هم با کلیدِ سالم انجام می‌شود نه کلیدِ سوخته',
+         strpos($selfSrc, '$_pk      = aiPickApiKey($_ac[' . "'provider'], \$provId);") !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -20107,6 +20660,16 @@ $old = $providers['mistral'] ?? null;
 // کلیدِ قبلی حفظ می‌شود مگر کلیدِ تازه داده شده باشد
 if ($key === '' && is_array($old)) $key = trim((string)($old['apiKey'] ?? ''));
 $cat['apiKey'] = $key;
+/* v10.01: اگر قبلاً چند کلید برای Mistral ثبت شده بود، حفظشان کن و کلیدِ
+   تازه را — اگر تکراری نیست — به همان فهرست اضافه کن. بدون این، هر بار
+   «افزودن مدل‌های Mistral» همهٔ کلیدهای پشتیبان را پاک می‌کرد. */
+$catKeys = is_array($old) ? aiProviderKeys($old) : [];
+if ($key !== '') {
+    $dup = false;
+    foreach ($catKeys as $ck) if ($ck['key'] === $key) { $dup = true; break; }
+    if (!$dup) array_unshift($catKeys, ['key' => $key, 'label' => '', 'enabled' => true]);
+}
+if ($catKeys) $cat = aiProviderSetKeys($cat, $catKeys);
 // نتایجِ تستِ قبلیِ همان مدل‌ها را از دست ندهیم
 if (is_array($old)) {
     foreach ($cat['models'] as $i => $m) {
@@ -20186,6 +20749,110 @@ if ($on === false && aiSelected()['provider'] === $pid) {
 echo json_encode(['ok'=>$ok,'provider'=>$pid,'enabled'=>$on], JSON_UNESCAPED_UNICODE);
 exit;
 }
+/* =====================================================================
+ *  v10.01 (۱۵): اندپوینت‌های مدیریتِ چند کلید API
+ *    ai_keys_list   — فهرستِ کلیدهای یک ارائه‌دهنده با وضعیتِ سلامت
+ *    ai_keys_add    — افزودنِ یک یا چند کلید (هر خط یک کلید)
+ *    ai_keys_del    — حذفِ کلید
+ *    ai_keys_toggle — روشن/خاموش کردنِ موقتِ کلید
+ *    ai_keys_reset  — پاک‌کردنِ برچسبِ خطای کلید (سهمیه تازه شده)
+ *  در همهٔ پاسخ‌ها فقط پیش‌نمایشِ ماسک‌شده برمی‌گردد، نه خودِ کلید.
+ * ===================================================================== */
+if (in_array(($_POST['action'] ?? ''), ['ai_keys_list','ai_keys_add','ai_keys_del',
+                                        'ai_keys_toggle','ai_keys_reset'], true)) {
+header('Content-Type: application/json; charset=UTF-8');
+$act = (string)$_POST['action'];
+$pid = trim($_POST['provider_id'] ?? '');
+$providers = aiProvidersLoad();
+if (!isset($providers[$pid])) { echo json_encode(['ok'=>false,'error'=>'ارائه‌دهنده یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+$p    = $providers[$pid];
+$keys = aiProviderKeys($p);
+$msg  = '';
+$added = 0; $removed = 0; $cleared = 0; $dirty = false;
+
+if ($act === 'ai_keys_add') {
+    /* کاربر می‌تواند چند کلید را با هم (هر خط یکی، یا جداشده با کاما/فاصله)
+       بچسباند — چون معمولاً چند حسابِ رایگان را یکجا کپی می‌کند. */
+    $raw   = (string)($_POST['api_key'] ?? '');
+    $label = trim((string)($_POST['label'] ?? ''));
+    $parts = preg_split('~[\r\n,;\s]+~u', $raw);
+    $have  = [];
+    foreach ($keys as $k) $have[$k['key']] = true;
+    $dupe = 0;
+    foreach ((array)$parts as $one) {
+        $one = trim((string)$one);
+        if ($one === '' || mb_strlen($one) < 8) continue;
+        if (isset($have[$one])) { $dupe++; continue; }
+        $have[$one] = true;
+        $keys[] = ['id' => aiKeyId($one), 'key' => $one,
+                   'label' => $label !== '' ? $label : ('کلید ' . (count($keys) + 1)),
+                   'enabled' => true, 'addedAt' => time()];
+        $added++;
+    }
+    if ($added === 0) {
+        echo json_encode(['ok'=>false,'error'=> $dupe > 0
+            ? 'این کلید از قبل ثبت شده است'
+            : 'کلید معتبری وارد نشد (حداقل ۸ نویسه)'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $dirty = true;
+    /* کلیدِ تازه سابقهٔ خطا ندارد: نتیجهٔ «اعتبار تمام شد»ِ مدل‌ها باید دور
+       ریخته شود تا با کلیدِ جدید دوباره تست شوند. این دقیقاً همان چیزی است
+       که نبودش باعث می‌شد کلیدِ نو هم «قرمز» به‌نظر برسد. */
+    $p = aiResetKeyRelatedFailures($p);
+    $cleared = aiKeyClearState($pid);
+    $msg = aiFaNum($added) . ' کلید افزوده شد؛ مدل‌هایی که به‌خاطر اتمام اعتبار رد شده بودند دوباره تست می‌شوند.';
+    if ($dupe > 0) $msg .= ' (' . aiFaNum($dupe) . ' کلید تکراری نادیده گرفته شد.)';
+
+} elseif ($act === 'ai_keys_del') {
+    $kid = trim($_POST['key_id'] ?? '');
+    $keep = [];
+    foreach ($keys as $k) { if ($k['id'] === $kid) { $removed++; continue; } $keep[] = $k; }
+    if ($removed === 0) { echo json_encode(['ok'=>false,'error'=>'کلید یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+    $keys = $keep;
+    $dirty = true;
+    aiKeyClearState($pid, $kid);
+    $msg = 'کلید حذف شد.';
+
+} elseif ($act === 'ai_keys_toggle') {
+    $kid = trim($_POST['key_id'] ?? '');
+    $on  = !empty($_POST['enabled']);
+    $hit = false;
+    foreach ($keys as $i => $k) { if ($k['id'] === $kid) { $keys[$i]['enabled'] = $on; $hit = true; } }
+    if (!$hit) { echo json_encode(['ok'=>false,'error'=>'کلید یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+    $dirty = true;
+    $msg = $on ? 'کلید روشن شد.' : 'کلید خاموش شد.';
+
+} elseif ($act === 'ai_keys_reset') {
+    $kid = trim($_POST['key_id'] ?? '');
+    $cleared = aiKeyClearState($pid, $kid);
+    /* «سهمیه‌ام تازه شده» ⇒ مدل‌های ردشده به‌خاطر اعتبار هم دوباره تست شوند */
+    $p = aiResetKeyRelatedFailures($p);
+    $dirty = true;
+    $msg = 'وضعیتِ خطای کلید پاک شد؛ در تستِ بعدی دوباره امتحان می‌شود.';
+}
+
+if ($dirty) {
+    $p = aiProviderSetKeys($p, $keys);
+    $providers[$pid] = $p;
+    if (!aiProvidersSave($providers)) {
+        echo json_encode(['ok'=>false,'error'=>'ذخیرهٔ تنظیمات ناموفق بود'],JSON_UNESCAPED_UNICODE); exit;
+    }
+}
+
+$state = aiKeyStateLoad();
+$rows = [];
+foreach (aiProviderKeys($providers[$pid]) as $k) {
+    $h = aiKeyHealth($pid, $k['id'], $state);
+    $rows[] = ['id'=>$k['id'], 'label'=>$k['label'], 'preview'=>aiKeyPreview($k['key']),
+               'enabled'=>$k['enabled'], 'blocked'=>$h['blocked'], 'kind'=>$h['kind'],
+               'note'=>$h['label'], 'fails'=>$h['fails'], 'retryIn'=>$h['retryIn'], 'okAt'=>$h['okAt']];
+}
+echo json_encode(['ok'=>true, 'provider'=>$pid, 'keys'=>$rows, 'count'=>count($rows),
+                  'healthy'=>aiHealthyKeyCount($providers[$pid], $pid),
+                  'added'=>$added, 'removed'=>$removed, 'cleared'=>$cleared,
+                  'msg'=>$msg], JSON_UNESCAPED_UNICODE);
+exit;
+}
 /* v9.94: تیکِ دستیِ «این مدل استدلالی است».
    تشخیصِ خودکار از روی نامِ مدل کار می‌کند، ولی مدل‌های تازه/نام‌های
    غیرمتعارف را نمی‌شناسد؛ این اندپوینت به کاربر اجازه می‌دهد صریحاً
@@ -20247,6 +20914,12 @@ $body = $r['body'] ?? [];
 $response = $ok ? aiExtractAnswer($body) : '';   // v9.54: استخراج مقاوم · v9.94: بدون بلوکِ فکر
 $err = $ok ? '' : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
 $rateLimited = in_array($code, [429], true);
+/* v10.01 (۱۵): تستِ تکی هم مثل تستِ گروهی از همان «داورِ» مشترک عبور می‌کند.
+   تا پیش از این، دستهٔ خطا (kind/note) و مهم‌تر از آن پرچمِ billingIssue فقط
+   در مسیرِ گروهی نوشته می‌شد؛ نتیجه اینکه اگر کاربر یک مدل را تکی تست می‌کرد
+   و کلید اعتبارش تمام بود، آن مدل «رد» می‌شد ولی بعد از افزودنِ کلیدِ تازه
+   آزاد نمی‌شد. حالا هر دو مسیر یکسان‌اند. */
+$j = aiTestJudge($r, $mid, $pid);
 $details = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300), 'response'=>mb_substr((string)$response,0,300),
             'catResponse'=>(string)$catResponse, 'testMsg'=>$testMsg, 'testCat'=>$testCat,
             'latencyMs'=>$latency, 'testedAt'=>gmdate('c'),
@@ -20254,12 +20927,18 @@ $details = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300), 'response'=
             'raw'=>mb_substr((string)($r['raw'] ?? ''), 0, 4000), 'via'=>(string)($r['via'] ?? ''),
             // v9.96: پاسخ خامِ درخواستِ دسته‌بندی (درخواستِ دوم) جداگانه
             'catRaw'=>(string)($catMeta['raw'] ?? ''), 'catStatus'=>(int)($catMeta['status'] ?? 0),
-            'catVia'=>(string)($catMeta['via'] ?? ''), 'catAiText'=>(string)($catMeta['aiText'] ?? '')];
+            'catVia'=>(string)($catMeta['via'] ?? ''), 'catAiText'=>(string)($catMeta['aiText'] ?? ''),
+            // v10.01: دستهٔ خطا و توضیحِ فارسیِ آن — مثل مسیرِ گروهی
+            'kind'=>(string)$j['kind'], 'note'=>(string)$j['note']];
 foreach ($providers[$pid]['models'] as $i => $m) {
     if (($m['id'] ?? '') === $mid) {
         $providers[$pid]['models'][$i]['tested'] = true;
         $providers[$pid]['models'][$i]['available'] = $ok;
         $providers[$pid]['models'][$i]['rateLimited'] = $rateLimited;
+        // v10.01: علتِ «اعتبار/اشتراک» اینجا هم ثبت می‌شود تا افزودنِ کلیدِ
+        // تازه بتواند این مدل را برای تستِ دوباره آزاد کند.
+        if ($j['billing'] !== '') $providers[$pid]['models'][$i]['billingIssue'] = $j['billing'];
+        else                      unset($providers[$pid]['models'][$i]['billingIssue']);
         $providers[$pid]['models'][$i]['testDetails'] = $details;
         break;
     }
@@ -20267,7 +20946,11 @@ foreach ($providers[$pid]['models'] as $i => $m) {
 aiProvidersSave($providers);
 echo json_encode(['ok'=>true, 'model'=>$mid, 'provider'=>$pid, 'available'=>$ok,
     'rateLimited'=>$rateLimited, 'latencyMs'=>$latency, 'code'=>$code, 'error'=>$err,
-    'response'=>mb_substr($response,0,200), 'catResponse'=>(string)$catResponse], JSON_UNESCAPED_UNICODE);
+    'response'=>mb_substr($response,0,200), 'catResponse'=>(string)$catResponse,
+    // v10.01: توضیحِ فارسیِ خطا و وضعیتِ چرخشِ کلید برای نمایشِ بی‌درنگ
+    'kind'=>(string)$j['kind'], 'note'=>(string)$j['note'], 'billing'=>(string)$j['billing'],
+    'keysExhausted'=>!empty($r['keysExhausted']), 'keyRotated'=>(int)($r['keyRotated'] ?? 0),
+    'keyPreview'=>(string)($r['keyPreview'] ?? '')], JSON_UNESCAPED_UNICODE);
 exit;
 }
 /* =====================================================================
@@ -20508,11 +21191,14 @@ function aiParallelCalls(array $jobs, array $net, int $concurrency = 4): array {
             $out[$k] = $job + ['r' => aiProviderCall($p, $mid, (array)$job['payload'], $net), 'seq' => true];
             continue;
         }
-        $apiKey = trim((string)($p['apiKey'] ?? ''));
+        /* v10.01: به‌جای apiKey ثابت، «اولین کلیدِ سالمِ» این ارائه‌دهنده. */
+        $pick   = aiPickApiKey($p, (string)($p['id'] ?? ''));
+        $apiKey = trim((string)($pick['key'] ?? ''));
         $headers = ['Content-Type: application/json'];
         if ($apiKey !== '') $headers[] = 'Authorization: Bearer ' . $apiKey;
         $body = $payload; $body['model'] = $mid;
-        $pending[$k] = ['job' => $job, 'url' => $ep['url'], 'headers' => $headers, 'body' => $body];
+        $pending[$k] = ['job' => $job, 'url' => $ep['url'], 'headers' => $headers, 'body' => $body,
+                        'keyId' => (string)($pick['id'] ?? '')];
     }
     $keys = array_keys($pending);
     $nk = count($keys);
@@ -20559,6 +21245,29 @@ function aiParallelCalls(array $jobs, array $net, int $concurrency = 4): array {
                 $r2['retried_seq'] = true;
                 $r = $r2;
             }
+            /* v10.01: نتیجهٔ کلیدی که در مسیرِ موازی استفاده شد را ثبت کن؛ اگر
+               خطا از جنسِ کلید بود، کلید را بسوزان و همان مدل را یک بار از
+               مسیرِ ترتیبی رد کن — آنجا خودکار سراغِ کلیدِ بعدی می‌رود. */
+            $bKid = (string)($b['pd']['keyId'] ?? '');
+            $bPid = (string)($b['pd']['job']['p']['id'] ?? '');
+            if ($bKid !== '' && $bPid !== '' && empty($r['retried_seq'])) {
+                $r['keyId'] = $bKid;
+                if (!empty($r['ok'])) aiKeyMarkOk($bPid, $bKid);
+                else {
+                    $kf = aiKeyFailureKind($r);
+                    if ($kf['kind'] !== '') {
+                        aiKeyMarkFail($bPid, $bKid, $kf['kind'], $kf['label'], $kf['msg']);
+                        if (!aiTestStopRequested()
+                            && aiHealthyKeyCount($b['pd']['job']['p'], $bPid) > 0) {
+                            $r2 = aiProviderCall($b['pd']['job']['p'], (string)$b['pd']['job']['mid'],
+                                                 (array)$b['pd']['job']['payload'], $net);
+                            $r2['retried_seq'] = true;
+                            $r2['keyRotated']  = max(1, (int)($r2['keyRotated'] ?? 0));
+                            $r = $r2;
+                        }
+                    }
+                }
+            }
             $out[$b['k']] = $b['pd']['job'] + ['r' => $r];
         }
         curl_multi_close($mh);
@@ -20590,6 +21299,17 @@ function aiTestJudge(array $r, string $mid, string $pid = ''): array {
         $note = $bill['label'];
         $diag['cat'] = 'billing';
         $diag['label'] = $bill['label'];
+        /* v10.01: اگر چند کلید داشتیم و همه امتحان شدند، این را صریح بگو —
+           تفاوتِ «یک کلید تمام شد» با «هیچ کلیدِ سالمی نمانده» برای کاربر
+           مهم است: در حالت دوم باید کلیدِ تازه اضافه کند. */
+        if (!empty($r['keysExhausted'])) {
+            $kt = aiFaNum((int)($r['keysTried'] ?? 0));
+            $note .= ' — هر ' . $kt . ' کلیدِ این ارائه‌دهنده امتحان شد؛ یک کلید تازه اضافه کنید';
+            $diag['label'] = $note;
+            $diag['keysExhausted'] = true;
+        } elseif (!empty($r['keyRotated'])) {
+            $note .= ' (پس از چرخش روی ' . aiFaNum((int)$r['keyRotated']) . ' کلید)';
+        }
     /* ۲) خطا از واسطه (Worker/پروکسی/CDN) است نه از سرویس */
     } elseif (!$ok && (!empty($r['proxy_blocked']) || aiProxyLevelFailure($r, (string)($r['mode'] ?? '')))) {
         $kind = 'proxy';
@@ -26011,6 +26731,31 @@ body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn{z-index:10}
 <select id="aiProviderSel" onchange="aiSelectProvider()" style="flex:1"><option value="">— درون‌ریزی کنید —</option></select></div>
 <div class="crow"><label>مدل فعال:</label>
 <select id="aiModelSel" onchange="aiSelectModel()" style="flex:1"><option value="">—</option></select></div>
+<!-- v10.01 (۱۵): مدیریتِ چند کلید API برای ارائه‌دهندهٔ انتخاب‌شده.
+     سرویس‌های رایگان سهمیهٔ محدود دارند؛ با چند کلید (چند حساب) وقتی یکی
+     تمام شد سامانه خودکار سراغِ بعدی می‌رود و کار متوقف نمی‌شود. -->
+<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+<span style="font-size:12px;color:#67e8f9;font-weight:700">🔑 کلیدهای API این ارائه‌دهنده</span>
+<span style="font-size:10px;color:#64748b" id="aiKeyCount"></span>
+</div>
+<div style="font-size:10.5px;color:#94a3b8;margin-bottom:6px;line-height:1.7">
+می‌توانید برای هر ارائه‌دهنده <b>چند کلید</b> ثبت کنید. هر درخواست با اولین کلیدِ سالم فرستاده می‌شود؛ اگر کلیدی <b style="color:#fbbf24">اعتبارش تمام شود</b> یا به <b style="color:#fbbf24">محدودیت نرخ</b> بخورد، همان لحظه کلیدِ بعدی جایگزین می‌شود. کلیدِ تازه سابقهٔ خطای کلیدِ قبلی را به ارث نمی‌برد.
+</div>
+<div id="aiKeyList" style="max-height:210px;overflow-y:auto;border:1px solid #334155;border-radius:6px;background:#0f172a">
+<div style="padding:8px;color:#64748b;font-size:11px">ابتدا یک ارائه‌دهنده انتخاب کنید.</div>
+</div>
+<div class="crow" style="margin-top:6px">
+<input type="password" id="aiKeyNew" dir="ltr" spellcheck="false" autocomplete="off" placeholder="کلید API تازه — می‌توانید چند کلید را هر خط یکی بچسبانید" style="flex:1;font-family:ui-monospace,monospace;font-size:11px" onkeydown="if(event.key==='Enter'){event.preventDefault();aiKeyAdd();}">
+</div>
+<div class="crow" style="margin-top:4px">
+<input type="text" id="aiKeyLabel" placeholder="برچسب دلخواه (مثلاً: حساب دوم)" style="flex:1;font-size:11px">
+</div>
+<div class="cact" style="margin-top:4px">
+<button class="btn btn-green" onclick="aiKeyAdd()" style="flex:2;font-size:11px" title="کلید را به فهرست اضافه می‌کند و مدل‌هایی را که به‌خاطر اتمام اعتبار رد شده بودند برای تستِ دوباره آزاد می‌کند">➕ افزودن کلید</button>
+<button class="btn btn-cyan" onclick="aiKeyShow()" style="flex:1;font-size:11px" title="نمایش/پنهان‌سازی متنِ کلیدِ در حال تایپ">👁 نمایش</button>
+</div>
+</div>
 <!-- v9.63: فهرست ارائه‌دهنده‌ها با تیکِ روشن/خاموش انفرادی — ارائه‌دهندهٔ خاموش
      و همهٔ مدل‌هایش از «تست مدل‌ها» بیرون می‌ماند ولی داده‌ها پاک نمی‌شود. -->
 <div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
@@ -30912,6 +31657,44 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.01', t:'🔑 چند کلید API برای هر ارائه‌دهنده + چرخشِ خودکار', items:[
+    '🔑 حالا برای هر ارائه‌دهنده می‌توانید <b>چند کلید API</b> ثبت کنید — مثلاً',
+    '   سه حسابِ رایگانِ Groq یا دو کلیدِ Mistral. زیرِ «ارائه‌دهنده/مدل» یک',
+    '   کادرِ تازه هست: کلید را می‌چسبانید، دکمهٔ ➕ را می‌زنید، تمام.',
+    '   می‌توانید چند کلید را هم یکجا (هر خط یکی) بچسبانید.',
+    '',
+    '🔁 هر درخواست با <b>اولین کلیدِ سالم</b> فرستاده می‌شود. اگر کلیدی وسطِ',
+    '   کار «اعتبار تمام شد» (۴۰۲) یا «محدودیت نرخ» (۴۲۹) یا «کلید نامعتبر»',
+    '   (۴۰۱) گرفت، همان لحظه کلیدِ بعدی جای آن را می‌گیرد و درخواست دوباره',
+    '   می‌رود؛ کاربر هیچ خطایی نمی‌بیند. ریت‌لیمیت فقط ۹۰ ثانیه کلید را کنار',
+    '   می‌گذارد، ولی اتمامِ اعتبار تا وقتی خودتان پاک نکنید می‌ماند.',
+    '',
+    '🆕 <b>کلیدِ تازه سابقهٔ کلیدِ قبلی را به ارث نمی‌برد.</b> این همان چیزی بود',
+    '   که آزار می‌داد: کلیدِ نو می‌گذاشتید ولی مدل‌ها همچنان «اعتبار تمام شده»',
+    '   می‌ماندند. حالا به‌محضِ افزودنِ کلید، هر مدلی که به‌خاطر اعتبار/سهمیه رد',
+    '   شده بود به حالتِ «تست‌نشده» برمی‌گردد و در تستِ بعدی دوباره سنجیده',
+    '   می‌شود؛ مدل‌هایی که خطای فنی داشتند دست‌نخورده می‌مانند.',
+    '',
+    '🩺 هر کلید در فهرست وضعیتِ خودش را نشان می‌دهد: سالم / اعتبار تمام /',
+    '   محدودیت نرخ (با شمارشِ معکوس) / نامعتبر، به‌همراه تعداد خطاها. برای هر',
+    '   کلید دکمهٔ روشن‌وخاموش، «پاک‌کردنِ وضعیت» (وقتی سهمیه‌تان تازه شده) و',
+    '   حذف هست. خودِ کلید هرگز به مرورگر فرستاده نمی‌شود — فقط چند نویسهٔ',
+    '   اول و آخر.',
+    '',
+    '⚠️ اگر همهٔ کلیدهای یک ارائه‌دهنده سوخته باشند، پیامِ خطا صریح می‌گوید',
+    '   «هر N کلید امتحان شد؛ یک کلید تازه اضافه کنید» — نه یک خطای مبهم.',
+    '   اگر هم درخواست بعد از چرخش موفق شود، همان‌جا نوشته می‌شود با چند کلید',
+    '   جابه‌جا شده است.',
+    '',
+    '🧯 دو باگ ضمنی هم رفع شد: (۱) «افزودن مدل‌های Mistral» کلیدهای قبلیِ',
+    '   همان ارائه‌دهنده را پاک می‌کرد؛ (۲) تستِ تکیِ یک مدل — برخلاف تستِ',
+    '   گروهی — علتِ «اعتبار» را ثبت نمی‌کرد و آن مدل بعد از افزودنِ کلیدِ تازه',
+    '   آزاد نمی‌شد.',
+    '',
+    '♻️ سازگاریِ کامل با تنظیماتِ قبلی: کانفیگ‌های تک‌کلیدی بدون هیچ کاری',
+    '   همان‌طور کار می‌کنند و فایلِ برون‌ریزی/درون‌ریزیِ JSON هم کلیدهای',
+    '   اضافی را با خود می‌برد.',
+  ]},
   {v:'10.00', t:'🪟 مودالِ تست روی دکمه‌های شناور + اول دسته‌بندی بعد پیام', items:[
     '🪟 مودالِ «نتایج زندهٔ تست همهٔ مدل‌ها» زیرِ دکمه‌های ☰ و ⛶ می‌رفت و آن دو',
     '   دکمه روی جدول می‌افتادند و کلیک را هم می‌دزدیدند. حالا مودال بالاتر',
@@ -35714,6 +36497,7 @@ function aiRenderProviders(){
     aiRenderModels();
     aiCandFillSel();
     aiRenderProviderToggles();
+    aiKeyRender();   // v10.01: فهرستِ کلیدهای ارائه‌دهندهٔ انتخاب‌شده
 }
 // v9.63: فهرست ارائه‌دهنده‌ها با تیکِ روشن/خاموش انفرادی. خاموش کردن یعنی
 // ارائه‌دهنده و همهٔ مدل‌هایش از «تست مدل‌ها» کنار می‌روند (تست انبوه فقط
@@ -35738,6 +36522,103 @@ function aiRenderProviderToggles(){
     list.innerHTML=html||'<div style="padding:8px;color:#64748b;font-size:11px">ارائه‌دهنده‌ای نیست.</div>';
     const c=document.getElementById('aiProvOnCount');
     if(c)c.textContent=onCount+' روشن از '+provs.length;
+}
+/* ── v10.01 (۱۵): رابطِ مدیریتِ چند کلید API ─────────────────────────
+   داده از aiProvData می‌آید (aiProvidersSummary سمتِ PHP). خودِ کلید هرگز
+   به مرورگر نمی‌آید — فقط پیش‌نمایشِ ماسک‌شده و شناسهٔ هش‌شده. */
+function aiKeyRender(){
+    const list=document.getElementById('aiKeyList');if(!list)return;
+    const cnt=document.getElementById('aiKeyCount');
+    const p=aiCurrentProvider();
+    if(!p){
+        list.innerHTML='<div style="padding:8px;color:#64748b;font-size:11px">ابتدا یک ارائه‌دهنده انتخاب کنید.</div>';
+        if(cnt)cnt.textContent='';return;
+    }
+    const keys=p.keys||[];
+    if(!keys.length){
+        list.innerHTML='<div style="padding:9px;color:#fbbf24;font-size:11px">⚠ هنوز هیچ کلیدی برای «'+esc(p.name||p.id)+'» ثبت نشده. کلید را در کادرِ پایین بگذارید.</div>';
+        if(cnt)cnt.textContent='بدون کلید';return;
+    }
+    let html='';
+    keys.forEach((k,i)=>{
+        const off=k.enabled===false;
+        let badge,color,tip;
+        if(off){badge='✕ خاموش';color='#64748b';tip='این کلید موقتاً کنار گذاشته شده';}
+        else if(k.kind==='billing'){badge='💳 اعتبار تمام';color='#f87171';tip=k.note||'اعتبار/سهمیهٔ این کلید تمام شده';}
+        else if(k.kind==='auth'){badge='🚫 نامعتبر';color='#f87171';tip=k.note||'کلید پذیرفته نشد (۴۰۱)';}
+        else if(k.kind==='rate'&&k.blocked){badge='⏳ '+toFa(k.retryIn)+'s';color='#fbbf24';tip=k.note||'محدودیت نرخ — به‌زودی دوباره امتحان می‌شود';}
+        else{badge='✓ سالم';color='#4ade80';tip=k.okAt?'آخرین استفاده موفق بوده':'هنوز خطایی نداشته';}
+        const active=(!off&&!k.blocked);
+        html+='<div style="display:flex;align-items:center;gap:6px;padding:7px 9px;border-bottom:1px solid #1e293b;'+(off?'opacity:.55':'')+'" title="'+esc(tip)+'">'
+           +'<span style="color:#64748b;font-size:10px;width:14px;flex:0 0 auto">'+toFa(i+1)+'</span>'
+           +'<input type="checkbox" style="width:14px;height:14px;flex:0 0 auto" '+(off?'':'checked')+' onchange="aiKeyToggle(\''+jsAttr(k.id)+'\',this.checked)" title="روشن/خاموش">'
+           +'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+             +'<span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10.5px;color:#e2e8f0">'+esc(k.preview||'')+'</span>'
+             +(k.label?' <span style="color:#94a3b8;font-size:10px">· '+esc(k.label)+'</span>':'')
+           +'</span>'
+           +(active&&i===0?'<span style="font-size:9.5px;color:#67e8f9;white-space:nowrap">در حال استفاده</span>':'')
+           +(k.fails?'<span style="font-size:9.5px;color:#64748b;white-space:nowrap" title="تعداد خطاهای ثبت‌شده">'+toFa(k.fails)+' خطا</span>':'')
+           +'<span style="font-size:10px;color:'+color+';white-space:nowrap">'+badge+'</span>'
+           +(k.kind?'<button class="btn btn-cyan" style="padding:2px 6px;font-size:10px" onclick="aiKeyReset(\''+jsAttr(k.id)+'\')" title="سهمیه‌ام تازه شده — برچسبِ خطا را پاک کن">↺</button>':'')
+           +'<button class="btn btn-red" style="padding:2px 6px;font-size:10px" onclick="aiKeyDel(\''+jsAttr(k.id)+'\')" title="حذف این کلید">🗑</button>'
+           +'</div>';
+    });
+    /* اگر همهٔ کلیدها سوخته‌اند، صریح هشدار بده — این همان حالتی است که
+       کاربر باید کلیدِ تازه اضافه کند. */
+    const healthy=(typeof p.key_healthy==='number')?p.key_healthy:keys.filter(k=>k.enabled!==false&&!k.blocked).length;
+    if(!healthy){
+        html+='<div style="padding:8px;background:#3b1111;color:#fca5a5;font-size:10.5px">⚠ هیچ کلیدِ سالمی باقی نمانده — یک کلید تازه اضافه کنید یا با ↺ وضعیت را پاک کنید.</div>';
+    }
+    list.innerHTML=html;
+    if(cnt)cnt.textContent=toFa(healthy)+' سالم از '+toFa(keys.length);
+}
+function aiKeyShow(){
+    const el=document.getElementById('aiKeyNew');if(!el)return;
+    el.type=(el.type==='password')?'text':'password';
+    el.focus();
+}
+function aiKeyPost(fd,okMsg){
+    const p=aiCurrentProvider();
+    if(!p){showToast('ابتدا یک ارائه‌دهنده انتخاب کنید',1);return;}
+    fd.append('provider_id',p.id);
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){showToast('❌ '+((d&&d.error)||'خطا'),1);return;}
+        showToast('✓ '+(d.msg||okMsg||'انجام شد'));
+        aiLoadProviders();
+    }).catch(()=>{showToast('❌ خطای شبکه',1);});
+}
+function aiKeyAdd(){
+    const inp=document.getElementById('aiKeyNew');
+    const lab=document.getElementById('aiKeyLabel');
+    const v=inp?inp.value.trim():'';
+    if(!v){showToast('کلید را وارد کنید',1);return;}
+    const fd=new FormData();
+    fd.append('action','ai_keys_add');
+    fd.append('api_key',v);
+    fd.append('label',lab?lab.value.trim():'');
+    if(inp)inp.value='';
+    if(lab)lab.value='';
+    aiKeyPost(fd,'کلید افزوده شد');
+}
+function aiKeyDel(kid){
+    if(!confirm('این کلید حذف شود؟'))return;
+    const fd=new FormData();
+    fd.append('action','ai_keys_del');
+    fd.append('key_id',kid);
+    aiKeyPost(fd,'کلید حذف شد');
+}
+function aiKeyToggle(kid,on){
+    const fd=new FormData();
+    fd.append('action','ai_keys_toggle');
+    fd.append('key_id',kid);
+    fd.append('enabled',on?'1':'0');
+    aiKeyPost(fd,on?'روشن شد':'خاموش شد');
+}
+function aiKeyReset(kid){
+    const fd=new FormData();
+    fd.append('action','ai_keys_reset');
+    fd.append('key_id',kid);
+    aiKeyPost(fd,'وضعیت پاک شد');
 }
 function aiToggleProvider(pid,on){
     const fd=new FormData();
