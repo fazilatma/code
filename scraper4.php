@@ -120,7 +120,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.05';
+const APP_VERSION = '10.06';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -280,12 +280,15 @@ function app_font_boot(): string {
  * ================================================================== */
 const APP_THEME_KEY     = 'scraper_theme';
 const APP_THEME_DEFAULT = 'ocean';
+/* v10.06: کلیدِ روشن/خاموشِ لایهٔ جلوه‌های بصری. پیش‌فرض روشن است. */
+const APP_FX_KEY        = 'scraper_fx';
 
 /** رنگ‌های پایهٔ برنامه — فقط ۶ و ۸ رقمی. (سه‌رقمی‌ها مثل #fff عمداً نیستند
  *  تا داخلِ رنگ‌های بلندترِ محتوای کاربر جایگزینیِ اشتباه رخ ندهد.) */
 function app_theme_base_colors(): array {
     return [
-        '#0e749020','#14532d20','#14532d30','#14532d33','#14532d40','#164e6320','#1e293b80',
+        '#06b6d420','#0e749020','#14532d20','#14532d30','#14532d33','#14532d40','#164e6320',
+        '#1e293b80','#22c55e00','#3b82f620','#3b82f640','#a855f720','#e2e8f033','#e2e8f04d',
         '#22c55e55','#2e106530','#42200620','#42200630','#4c1d9520','#50072430','#67e8f933',
         '#78350f30','#7c2d1220','#7c3aed20','#7f1d1d20','#7f1d1d26','#7f1d1d30','#7f1d1d40',
         '#c2410c20','#04210f','#052e16','#06b6d4','#0891b2','#0b1220','#0c2a4d','#0e4429',
@@ -465,6 +468,32 @@ function app_theme_boot(): string {
          . 'if(want!==have){var G="__thm_reload";try{if(!sessionStorage.getItem(G)){sessionStorage.setItem(G,"1");location.reload();return;}}catch(e){}}' . "\n"
          . 'else{try{sessionStorage.removeItem("__thm_reload");}catch(e){}}' . "\n"
          . 'try{window.addEventListener("storage",function(e){if(e&&e.key===KEY){applyTheme(readTheme(),false);location.reload();}});}catch(e){}' . "\n"
+         . '})();</' . 'script>';
+}
+
+/**
+ * v10.06: راه‌اندازِ «جلوه‌های بصری».
+ *
+ * برخلافِ تم، اینجا هیچ چیزی سمتِ سرور ترجمه نمی‌شود: کلِ لایهٔ جلوه یک
+ * بلاکِ CSS است که پشتِ html[data-fx="on"] خوابیده. پس روشن/خاموش کردن
+ * فقط یعنی عوض کردنِ یک ویژگی روی <html> — بدون رفرش، بدون درخواست.
+ *
+ * این قطعه در <head> و پیش از رندرِ <body> اجرا می‌شود، بنابراین اگر
+ * کاربر جلوه‌ها را خاموش کرده باشد هیچ‌وقت یک فریمِ «روشن» نمی‌بیند.
+ */
+function app_fx_boot(): string {
+    return '<script>(function(){' . "\n"
+         . 'var KEY=' . json_encode(APP_FX_KEY) . ';window.APP_FX_KEY=KEY;' . "\n"
+         . 'function read(){try{var v=localStorage.getItem(KEY);return v==="off"?"off":"on";}catch(e){return "on";}}' . "\n"
+         . 'function apply(v,save){' . "\n"
+         . '  v=(v==="off")?"off":"on";' . "\n"
+         . '  if(save){try{localStorage.setItem(KEY,v);}catch(e){}}' . "\n"
+         . '  try{document.documentElement.setAttribute("data-fx",v);}catch(e){}' . "\n"
+         . '  window.APP_FX_CURRENT=v;return v;}' . "\n"
+         . 'window.appFxApply=apply;window.appFxCurrent=read;' . "\n"
+         . 'apply(read(),false);' . "\n"
+         . '/* تبِ دیگرِ همین برنامه هم بی‌رفرش هم‌حالت شود */' . "\n"
+         . 'try{window.addEventListener("storage",function(e){if(e&&e.key===KEY)apply(read(),false);});}catch(e){}' . "\n"
          . '})();</' . 'script>';
 }
 
@@ -16903,6 +16932,93 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'AUTO_LOCK_FILE') !== false
       && strpos($selfSrc, "'locked'")       !== false);
 
+    /* ---------- v10.06 (۲۰): لایهٔ جلوه‌های بصری ---------- */
+    $add('10.06', 'بلاکِ جلوه‌ها با نشانه‌های آغاز و پایان مرزبندی شده است',
+         substr_count($selfSrc, 'FX-' . 'BEGIN') === 1
+      && substr_count($selfSrc, 'FX-' . 'END')   === 1);
+    $add('10.06', 'همهٔ رنگ‌های بلاکِ جلوه‌ها در فهرستِ رنگ‌های پایه‌اند (۱۳ تم نمی‌شکنند)',
+         (function () use ($selfSrc) {
+             $a = strpos($selfSrc, 'FX-' . 'BEGIN');
+             $b = strpos($selfSrc, 'FX-' . 'END');
+             if ($a === false || $b === false || $b <= $a) return false;
+             $blk = substr($selfSrc, $a, $b - $a);
+             preg_match_all('/#[0-9a-fA-F]{3,8}\b/', $blk, $m);
+             if (!$m[0]) return false;
+             $base = array_map('strtolower', app_theme_base_colors());
+             foreach ($m[0] as $hex) {
+                 if (!in_array(strtolower($hex), $base, true)) return false;
+             }
+             return true;
+         })());
+    $add('10.06', 'هر قاعدهٔ جلوه پشتِ data-fx="on" است (خاموش کردن، رابطِ قبلی را برمی‌گرداند)',
+         (function () use ($selfSrc) {
+             $a = strpos($selfSrc, 'FX-' . 'BEGIN');
+             $b = strpos($selfSrc, 'FX-' . 'END');
+             if ($a === false || $b === false || $b <= $a) return false;
+             $blk = substr($selfSrc, $a, $b - $a);
+             $cut = strpos($blk, '*/');                      // سرآیندِ نیمه‌بریده
+             if ($cut !== false) $blk = substr($blk, $cut + 2);
+             $blk = preg_replace('#/\*.*?\*/#s', '', $blk);
+             $gate = 'html[data-fx=' . '"on"]';
+             $bad = 0;
+             foreach (preg_split('/\R/', (string)$blk) as $ln) {
+                 $ln = trim($ln);
+                 if ($ln === '' || $ln[0] === '}' || $ln[0] === '*' || $ln[0] === '/') continue;
+                 if (strpos($ln, '@keyframes') === 0 || strpos($ln, ':root{') === 0) continue;
+                 if (strpos($ln, '@media') === 0) { if (strpos($ln, $gate) === false) $bad++; continue; }
+                 if (strpos($ln, $gate) !== 0) $bad++;
+             }
+             return $bad === 0;
+         })());
+    $add('10.06', 'جلوه‌ها فقط transform/opacity/filter را انیمیت می‌کنند (بدون تغییرِ چیدمان)',
+         (function () use ($selfSrc) {
+             $a = strpos($selfSrc, 'FX-' . 'BEGIN');
+             $b = strpos($selfSrc, 'FX-' . 'END');
+             if ($a === false || $b === false || $b <= $a) return false;
+             $blk = substr($selfSrc, $a, $b - $a);
+             preg_match_all('/@keyframes\s+\w+\{(.*?)\}\s*$/m', $blk, $m);
+             $banned = ['width:', 'height:', 'top:', 'left:', 'right:', 'bottom:', 'margin', 'padding'];
+             foreach ($m[1] as $body) {
+                 foreach ($banned as $prop) {
+                     if (strpos($body, $prop) !== false
+                         && strpos($body, 'background-position') === false) return false;
+                 }
+             }
+             return count($m[1]) >= 8;
+         })());
+    $add('10.06', 'راه‌اندازِ جلوه‌ها در <head> است، پس یک فریمِ «روشنِ ناخواسته» دیده نمی‌شود',
+         strpos($selfSrc, 'function app_fx_boot') !== false
+      && strpos($selfSrc, 'app_fx_' . 'boot() ?>') !== false
+      && strpos($selfSrc, 'setAttribute("data-fx"') !== false);
+    $add('10.06', 'انتخابِ کاربر ذخیره می‌شود و بینِ تب‌ها هم‌گام می‌ماند',
+         strpos($selfSrc, "APP_FX_KEY        = 'scraper_fx'") !== false
+      && strpos($selfSrc, 'localStorage.setItem(KEY,v)') !== false
+      && strpos($selfSrc, 'window.appFxApply') !== false
+      && strpos($selfSrc, 'window.appFxCurrent') !== false);
+    $add('10.06', 'سوییچِ روشن/خاموش در پنلِ تنظیمات هست و به توابعش وصل است',
+         strpos($selfSrc, 'id="appFxChk"') !== false
+      && strpos($selfSrc, 'onchange="setAppFx(this.checked)"') !== false
+      && strpos($selfSrc, 'function setAppFx')     !== false
+      && strpos($selfSrc, 'function syncAppFxUI')  !== false
+      && strpos($selfSrc, 'function initAppFxPref') !== false
+      && strpos($selfSrc, 'initAppFxPref(); }catch') !== false);
+    $add('10.06', 'تپشِ شمارنده فقط وقتی می‌آید که عدد واقعاً عوض شده باشد',
+         strpos($selfSrc, 'function fxSetNum') !== false
+      && strpos($selfSrc, "if(el.textContent===s)return;") !== false
+      && substr_count($selfSrc, "fxSetNum('" . "num") === 3);
+    $add('10.06', 'جلوهٔ ورودِ کارتِ محصول در هر دو نقطهٔ بازنویسیِ className حفظ می‌شود',
+         substr_count($selfSrc, "el.classList.contains('fx-" . "pop')?' fx-pop':''") === 2
+      && strpos($selfSrc, 'function fxWatchCard') !== false
+      && strpos($selfSrc, 'fxWatchCard(d);') !== false);
+    $add('10.06', 'جلوه‌ها احترامِ prefers-reduced-motion و صفحهٔ کوچک را نگه می‌دارند',
+         strpos($selfSrc, 'prefers-reduced-motion:reduce') !== false
+      && strpos($selfSrc, '@media(max-width:620px){html[data-fx=' . '"on"]') !== false);
+    $add('10.06', 'عنوانِ صفحه به شکلک و متن شکسته شده تا گرادیانِ متن، ایموجی را محو نکند',
+         strpos($selfSrc, 'class="h1-ico"') !== false
+      && strpos($selfSrc, 'class="h1-txt"') !== false
+      && strpos($selfSrc, 'class="h1-name"') !== false
+      && substr_count($selfSrc, '<' . 'h1>') === 1);
+
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
          strpos($selfSrc, '.hamburger-btn,.fullwidth-btn' . '{z-index:10050}') !== false
@@ -28490,6 +28606,7 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 <title>اسکرپر ووکامرس v8.22</title>
 <?= app_font_boot() ?>
 <?= app_theme_boot() ?>
+<?= app_fx_boot() ?>
 <style>
 *{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}body{font-family:var(--app-font,Tahoma,system-ui,sans-serif);background:#0f172a;color:#e2e8f0;min-height:100vh;padding:12px;padding-bottom:90px;padding-top:56px;direction:rtl}.container{max-width:1400px;margin:0 auto}h1{font-size:18px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}input,select{background:#0f172a;border:1px solid #475569;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%}input[type="checkbox"]{width:auto}select{min-width:90px;width:auto}
 .btn{padding:11px 14px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;transition:.15s;white-space:nowrap}.btn:hover{opacity:.9}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:not-allowed}.btn-blue{background:linear-gradient(135deg,#3b82f6,#06b6d4);color:#000}.btn-red{background:#ef4444;color:#fff}.btn-green{background:#22c55e;color:#000}.btn-purple{background:#a855f7;color:#fff}.btn-orange{background:#f97316;color:#000}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:#eab308;color:#000}.btn-cyan{background:#06b6d4;color:#000}.btn-teal{background:#14b8a6;color:#000}.btn-pink{background:#ec4899;color:#fff}.btn-indigo{background:#6366f1;color:#fff}.hidden{display:none!important}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
@@ -28590,13 +28707,188 @@ body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn{z-index:10}
 .p2-id{font-size:10px;color:#64748b;font-family:ui-monospace,monospace}.p2-reason{font-size:10.5px;color:#94a3b8;margin-bottom:8px;line-height:1.6}.p2-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.p2-actions .btn{font-size:11px;padding:5px 10px}.p2-auto{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.p2-hint{font-size:10.5px;color:#fbbf24}.p2-search{position:relative;flex:1;min-width:170px;max-width:280px}.p2-search input[type=text]{width:100%;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:11px;direction:rtl}.p2-list{display:none;position:absolute;top:100%;left:0;right:0;max-height:200px;overflow-y:auto;background:#1e293b;border:1px solid #475569;border-radius:6px;z-index:100002;direction:rtl}.p2-status{margin-top:6px;font-size:11px}.p2-ai{margin-top:5px;font-size:10.5px;line-height:1.9}
 .p2-ok-txt{color:#4ade80;font-weight:700}.p2-err-txt{color:#fca5a5}.rc-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:6px}.rc-cell{background:#111c31;border:1px solid #334155;border-radius:8px;padding:7px 4px;text-align:center;display:flex;flex-direction:column;gap:2px}.rc-cell b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.rc-cell span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rc-cell.rc-on{cursor:pointer;transition:.15s}.rc-cell.rc-on:hover{background:#1e293b;border-color:#60a5fa;transform:translateY(-1px)}.sfx-card{display:flex;gap:10px;align-items:flex-start;background:#111c31;border:1px solid #334155;border-radius:8px;padding:9px;margin-bottom:7px}.sfx-pie{flex:0 0 auto;line-height:0}.sfx-info{flex:1;min-width:0}.sfx-name{color:#e2e8f0;font-weight:700;margin-bottom:3px;line-height:1.6}
 .sfx-sfx{color:#67e8f9;font-size:10px;font-weight:400}.sfx-total{color:#94a3b8;margin-bottom:4px}.sfx-row{display:flex;align-items:center;gap:6px;line-height:1.9}.sfx-row i{width:9px;height:9px;border-radius:2px;flex:0 0 auto;display:inline-block}.sfx-row span{color:#cbd5e1}.sfx-row b{color:#e2e8f0;font-family:ui-monospace,monospace}.sfx-row .sfx-pct{color:#64748b;font-size:10px;margin-right:auto}@media(max-width:620px){.sfx-card{flex-direction:column;align-items:center;text-align:center}.sfx-row{justify-content:center}.sfx-row .sfx-pct{margin-right:6px}}@media(max-width:620px){.rc-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:620px){.p2-actions{flex-direction:column;align-items:stretch}.p2-search{max-width:none}.p2-auto{max-width:none}}
+/* FX-BEGIN ========================================================
+ *  v10.06: لایهٔ «جلوه‌های بصری» (FX)
+ *
+ *  چهار قاعده‌ای که این بلاک نباید بشکند:
+ *
+ *  ۱) هر رنگِ هگزی که اینجا می‌آید باید در app_theme_base_colors()
+ *     باشد، وگرنه فیلترِ سمتِ سرور ترجمه‌اش نمی‌کند و در ۱۲ تمِ دیگر
+ *     یک لکهٔ آبی وسطِ تمِ سبز می‌ماند. سایه‌های خنثی عمداً rgba(0,0,0,…)
+ *     هستند — مثل بقیهٔ فایل — چون سیاه در هیچ تمی نباید بچرخد.
+ *     (خودآزمون این را می‌سنجد: هر هگزِ داخلِ این بلاک باید در فهرستِ
+ *      پایه باشد.)
+ *
+ *  ۲) همه‌چیز پشتِ html[data-fx="on"] است. با data-fx="off" باید
+ *     دقیقاً همان رابطِ v10.05 برگردد، پس هیچ قاعده‌ای اینجا حق ندارد
+ *     چیدمان را عوض کند: نه عرض، نه ارتفاع، نه display.
+ *
+ *  ۳) فقط transform/opacity/filter/background-position انیمیت می‌شوند
+ *     (کارِ کارتِ گرافیک). هیچ انیمیشنی روی width/height/top/left نیست.
+ *
+ *  ۴) prefers-reduced-motion یعنی حرکت حذف — ولی رنگ و عمق می‌ماند.
+ * ================================================================== */
+:root{--fx-ease:cubic-bezier(.22,1,.36,1);--fx-dur:.45s}
+
+/* ۱) هالهٔ زندهٔ پس‌زمینه: سه لکهٔ نورِ محو که بسیار کند می‌چرخند.
+   fixed و pointer-events:none، پس نه جلوی کلیک را می‌گیرد نه با اسکرول
+   بازچینش می‌شود. z-index منفی روی فرزندِ body یعنی «بالای بومِ صفحه،
+   زیرِ همهٔ محتوا» — بدون هیچ دست‌کاری در چیدمان. */
+html[data-fx="on"] body::before{content:"";position:fixed;inset:-30vmax;z-index:-2;pointer-events:none;background:radial-gradient(38vmax 38vmax at 18% 12%,#3b82f620,transparent 60%),radial-gradient(32vmax 32vmax at 84% 78%,#a855f720,transparent 62%),radial-gradient(26vmax 26vmax at 62% 22%,#06b6d420,transparent 64%);animation:fxAurora 38s ease-in-out infinite alternate;will-change:transform}
+@keyframes fxAurora{0%{transform:translate3d(0,0,0) scale(1)}50%{transform:translate3d(2.5%,-2%,0) scale(1.06)}100%{transform:translate3d(-2%,2.5%,0) scale(1.02)}}
+/* بافتِ ریزِ نویز — گرادیان‌های بزرگ را از حالتِ «راه‌راهِ رنگی» درمی‌آورد */
+html[data-fx="on"] body::after{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.45;background-image:radial-gradient(#94a3b8 .5px,transparent .5px);background-size:3px 3px;mix-blend-mode:overlay}
+
+/* ۲) کارت‌ها: عمق، خطِ نورِ بالا، بالا آمدن با هاور */
+html[data-fx="on"] .card{position:relative;box-shadow:0 1px 2px rgba(0,0,0,.35),0 8px 24px rgba(0,0,0,.25);transition:transform var(--fx-dur) var(--fx-ease),box-shadow var(--fx-dur) var(--fx-ease),border-color var(--fx-dur) var(--fx-ease)}
+html[data-fx="on"] .card::before{content:"";position:absolute;top:-1px;right:14px;left:14px;height:1px;pointer-events:none;background:linear-gradient(90deg,transparent,#3b82f6,#a855f7,transparent);opacity:0;transition:opacity var(--fx-dur) var(--fx-ease)}
+html[data-fx="on"] .card:hover{transform:translateY(-2px);box-shadow:0 2px 4px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.45),0 0 0 1px #3b82f620}
+html[data-fx="on"] .card:hover::before{opacity:1}
+
+/* ۳) دکمه‌ها: درخششِ عبوری + فلاشِ لمس.
+   عمداً overflow:hidden نگذاشته‌ام: دکمه‌ها white-space:nowrap دارند و
+   بعضی‌شان داخلِ flex فشرده می‌شوند؛ overflow متنشان را می‌بُرید. به‌جای
+   جابه‌جا کردنِ یک لایه (که باید بریده شود) فقط background-position
+   حرکت می‌کند، پس درخشش هرگز از مرزِ دکمه بیرون نمی‌زند.
+   isolation:isolate هم لازم است: با آن، لایهٔ z-index:-1 روی زمینهٔ خودِ
+   دکمه می‌نشیند (نه زیرِ کارتِ والد) و همچنان پشتِ متن می‌ماند. */
+html[data-fx="on"] .btn{position:relative;isolation:isolate;transition:transform .18s var(--fx-ease),box-shadow .18s var(--fx-ease),opacity .15s}
+/* .copy-btn عمداً absolute است؛ قاعدهٔ بالا نباید از جایش تکانش بدهد */
+html[data-fx="on"] .copy-btn{position:absolute}
+html[data-fx="on"] .btn::after{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;border-radius:inherit;background:linear-gradient(115deg,transparent 32%,#e2e8f033 47%,transparent 62%);background-size:260% 100%;background-repeat:no-repeat;background-position:170% 0}
+html[data-fx="on"] .btn:hover:not(:disabled)::after{background-position:-70% 0;transition:background-position .62s var(--fx-ease)}
+html[data-fx="on"] .btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.45)}
+html[data-fx="on"] .btn:active:not(:disabled){transform:translateY(0) scale(.97)}
+html[data-fx="on"] .btn:disabled::after{display:none}
+/* فلاشِ لمس — JS کلاس را می‌زند و خودش برمی‌دارد (روی موبایل که هاور نیست) */
+html[data-fx="on"] .btn.fx-tap::before{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;border-radius:inherit;background:#e2e8f033;animation:fxTap .45s ease-out forwards}
+@keyframes fxTap{from{opacity:1}to{opacity:0}}
+/* جلوه نباید دسترسی‌پذیری را کم کند: مسیرِ کیبورد باید دیده شود */
+html[data-fx="on"] .btn:focus-visible,html[data-fx="on"] input:focus-visible,html[data-fx="on"] select:focus-visible{outline:2px solid #67e8f9;outline-offset:2px}
+
+/* ۴) ورودی‌ها: هالهٔ فوکوس */
+html[data-fx="on"] input,html[data-fx="on"] select{transition:border-color .2s,box-shadow .2s,background-color .2s}
+html[data-fx="on"] input:focus,html[data-fx="on"] select:focus{border-color:#3b82f6;box-shadow:0 0 0 3px #3b82f620;outline:none}
+
+/* ۵) تب‌های اصلی: نشانگرِ نورانی و جهشِ آیکن */
+html[data-fx="on"] .main-tab{transition:color .2s,background-color .2s}
+html[data-fx="on"] .main-tab .t-icon{display:inline-block;transition:transform .32s var(--fx-ease),filter .32s var(--fx-ease)}
+html[data-fx="on"] .main-tab.active .t-icon{transform:translateY(-2px) scale(1.18);filter:drop-shadow(0 3px 8px #3b82f6)}
+html[data-fx="on"] .main-tab.active::after{content:"";position:absolute;top:0;right:22%;left:22%;height:2px;border-radius:2px;background:linear-gradient(90deg,transparent,#3b82f6,#22d3ee,transparent);animation:fxSlideIn .38s var(--fx-ease)}
+@keyframes fxSlideIn{from{opacity:0;transform:scaleX(.35)}to{opacity:1;transform:scaleX(1)}}
+html[data-fx="on"] .main-tab .badge{animation:fxBadgePop .34s var(--fx-ease)}
+@keyframes fxBadgePop{0%{transform:scale(0)}62%{transform:scale(1.28)}100%{transform:scale(1)}}
+
+/* ۶) ورودِ نرمِ محتوای تب + آمدنِ آبشاریِ کارت‌ها */
+html[data-fx="on"] .tab-pane.active{animation:fxPaneIn .42s var(--fx-ease)}
+@keyframes fxPaneIn{from{opacity:0;transform:translateY(10px) scale(.995)}to{opacity:1;transform:none}}
+html[data-fx="on"] .tab-pane.active>.card{animation:fxCardIn .5s var(--fx-ease) backwards}
+html[data-fx="on"] .tab-pane.active>.card:nth-child(1){animation-delay:.02s}
+html[data-fx="on"] .tab-pane.active>.card:nth-child(2){animation-delay:.07s}
+html[data-fx="on"] .tab-pane.active>.card:nth-child(3){animation-delay:.12s}
+html[data-fx="on"] .tab-pane.active>.card:nth-child(4){animation-delay:.17s}
+html[data-fx="on"] .tab-pane.active>.card:nth-child(n+5){animation-delay:.21s}
+@keyframes fxCardIn{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+
+/* ۷) تب‌های داخلی */
+html[data-fx="on"] .sub-tab,html[data-fx="on"] .mode-tab,html[data-fx="on"] .ai-tab-btn,html[data-fx="on"] .bsl-tab{transition:background-color .22s var(--fx-ease),color .22s,transform .22s var(--fx-ease),box-shadow .22s var(--fx-ease)}
+html[data-fx="on"] .sub-tab:hover,html[data-fx="on"] .mode-tab:hover,html[data-fx="on"] .ai-tab-btn:hover,html[data-fx="on"] .bsl-tab:hover{transform:translateY(-1px)}
+html[data-fx="on"] .sub-tab.active,html[data-fx="on"] .mode-tab.active{box-shadow:0 4px 14px #3b82f640}
+html[data-fx="on"] .ai-tab-panel.active{animation:fxPaneIn .34s var(--fx-ease)}
+
+/* ۸) کارتِ محصول: بزرگ‌نماییِ عکس، بالا آمدن، ورودِ اسکرولی.
+   fx-pop عمداً «انیمیشن» است نه «حالتِ پنهان»: اگر ناظرِ اسکرول هرگز
+   شلیک نکند، هیچ محصولی نامرئی نمی‌ماند. */
+html[data-fx="on"] .product{transition:transform var(--fx-dur) var(--fx-ease),box-shadow var(--fx-dur) var(--fx-ease),border-color var(--fx-dur) var(--fx-ease)}
+html[data-fx="on"] .product:hover{transform:translateY(-4px);border-color:#3b82f6;box-shadow:0 16px 36px rgba(0,0,0,.5),0 0 0 1px #3b82f640}
+html[data-fx="on"] .thumb{overflow:hidden}
+html[data-fx="on"] .thumb img{transition:transform .55s var(--fx-ease)}
+html[data-fx="on"] .product:hover .thumb img{transform:scale(1.07)}
+html[data-fx="on"] .product .price{transition:transform .3s var(--fx-ease)}
+html[data-fx="on"] .product:hover .price{transform:scale(1.05)}
+html[data-fx="on"] .fx-pop{animation:fxCardIn .5s var(--fx-ease)}
+
+/* ۹) نوارِ پیشرفت: راه‌راهِ روان + برقِ عبوری.
+   چهار نوار (wPB/ddPB/bPB/extractProgressBar) گرادیانِ اینلاین دارند و
+   شورتهندِ background سایزِ زمینه را صفر می‌کند؛ پس background-size
+   اینجا !important است — تنها !importantِ این بلاک. */
+html[data-fx="on"] .progress{position:relative;overflow:hidden}
+html[data-fx="on"] .progress-bar{position:relative;overflow:hidden;background-size:300% 100%!important;animation:fxFlow 3.2s linear infinite}
+@keyframes fxFlow{from{background-position:0 0}to{background-position:300% 0}}
+html[data-fx="on"] .progress-bar::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,#e2e8f04d,transparent);animation:fxSheen 1.9s ease-in-out infinite}
+@keyframes fxSheen{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+
+/* ۱۰) شمارنده‌ها و آمار */
+html[data-fx="on"] .stat,html[data-fx="on"] .live-cnt .lc,html[data-fx="on"] .rc-cell{transition:transform .25s var(--fx-ease),box-shadow .25s var(--fx-ease),border-color .25s}
+html[data-fx="on"] .stat:hover,html[data-fx="on"] .live-cnt .lc:hover,html[data-fx="on"] .rc-cell:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.35)}
+/* fx-bump فقط وقتی می‌آید که عددی واقعاً عوض شده باشد (fxSetNum) */
+html[data-fx="on"] .fx-bump{animation:fxBump .5s var(--fx-ease)}
+@keyframes fxBump{0%{transform:scale(1)}35%{transform:scale(1.22);filter:brightness(1.35)}100%{transform:scale(1)}}
+
+/* ۱۱) مودال‌ها: پس‌زمینهٔ مات + ورودِ فنری */
+html[data-fx="on"] .bsl-modal-overlay{animation:fxFade .26s ease;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+@keyframes fxFade{from{opacity:0}to{opacity:1}}
+html[data-fx="on"] .bsl-modal{animation:fxModalIn .38s var(--fx-ease);box-shadow:0 30px 80px rgba(0,0,0,.6)}
+@keyframes fxModalIn{from{opacity:0;transform:translateY(18px) scale(.97)}to{opacity:1;transform:none}}
+
+/* ۱۲) پنلِ تنظیمات */
+html[data-fx="on"] .settings-panel{transition:left .38s var(--fx-ease),box-shadow .38s var(--fx-ease)}
+html[data-fx="on"] .settings-panel.open{box-shadow:24px 0 60px rgba(0,0,0,.7)}
+html[data-fx="on"] .settings-overlay{backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+html[data-fx="on"] .smenu-hdr .arrow{transition:transform .3s var(--fx-ease)}
+
+/* ۱۳) دکمه‌های شناور */
+html[data-fx="on"] .hamburger-btn,html[data-fx="on"] .fullwidth-btn{transition:background-color .2s,transform .25s var(--fx-ease),box-shadow .25s var(--fx-ease)}
+html[data-fx="on"] .hamburger-btn:hover,html[data-fx="on"] .fullwidth-btn:hover{transform:translateY(-2px) scale(1.06);box-shadow:0 8px 24px rgba(0,0,0,.7)}
+html[data-fx="on"] .hamburger-btn.active{box-shadow:0 0 0 3px #3b82f640,0 8px 24px rgba(0,0,0,.7)}
+
+/* ۱۴) توست: ورودِ فنری از بالا */
+html[data-fx="on"] .toast{box-shadow:0 14px 40px rgba(0,0,0,.7)}
+html[data-fx="on"] .toast.show{animation:fxToastIn .42s var(--fx-ease)}
+@keyframes fxToastIn{0%{opacity:0;transform:translateX(-50%) translateY(-14px) scale(.94)}60%{transform:translateX(-50%) translateY(3px) scale(1.02)}100%{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
+
+/* ۱۵) ردیف‌های جدول و خطوطِ لاگ */
+html[data-fx="on"] tbody tr{transition:background-color .18s}
+html[data-fx="on"] .log{animation:fxLogIn .3s var(--fx-ease)}
+@keyframes fxLogIn{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:none}}
+
+/* ۱۶) حالتِ «مشغول» و «توجه» — JS این دو کلاس را می‌زند و برمی‌دارد */
+html[data-fx="on"] .fx-busy{position:relative;overflow:hidden}
+html[data-fx="on"] .fx-busy::after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,transparent,#67e8f933,transparent);animation:fxSheen 1.5s ease-in-out infinite}
+html[data-fx="on"] .fx-pulse{animation:fxPulse 1.6s ease-in-out 2}
+@keyframes fxPulse{0%,100%{box-shadow:0 0 0 0 #22c55e55}50%{box-shadow:0 0 0 6px #22c55e00}}
+
+/* ۱۷) نوارِ اسکرول و انتخابِ متن، هماهنگ با تم */
+html[data-fx="on"] *{scrollbar-width:thin;scrollbar-color:#475569 transparent}
+html[data-fx="on"] ::-webkit-scrollbar{width:9px;height:9px}
+html[data-fx="on"] ::-webkit-scrollbar-track{background:transparent}
+html[data-fx="on"] ::-webkit-scrollbar-thumb{background:#334155;border-radius:6px;border:2px solid transparent;background-clip:content-box}
+html[data-fx="on"] ::-webkit-scrollbar-thumb:hover{background:#475569;background-clip:content-box}
+html[data-fx="on"] ::selection{background:#3b82f6;color:#e2e8f0}
+
+/* ۱۸) عنوانِ صفحه: گرادیانِ آرام روی خودِ متن (نه روی شکلک) */
+html[data-fx="on"] .h1-txt{background:linear-gradient(95deg,#e2e8f0,#93c5fd,#c4b5fd,#e2e8f0);background-size:280% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:fxFlow 14s linear infinite}
+html[data-fx="on"] .app-ver{transition:transform .2s var(--fx-ease),border-color .2s,background-color .2s}
+html[data-fx="on"] .app-ver:hover{transform:translateY(-1px) scale(1.04)}
+
+/* ۱۹) سوییچ‌ها */
+html[data-fx="on"] .prof-net-switch .prof-net-slider{transition:background-color .25s var(--fx-ease)}
+html[data-fx="on"] .prof-net-switch .prof-net-slider::after{transition:transform .25s var(--fx-ease)}
+html[data-fx="on"] .slider,html[data-fx="on"] .slider:before{transition:.25s var(--fx-ease)}
+
+/* ۲۰) احترام به prefers-reduced-motion: حرکت حذف، رنگ و عمق می‌ماند */
+@media(prefers-reduced-motion:reduce){html[data-fx="on"] *,html[data-fx="on"] *::before,html[data-fx="on"] *::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}html[data-fx="on"] body::before{animation:none}}
+
+/* ۲۱) موبایل: جلوه‌های گران کم می‌شوند (باتری + نبودِ هاور) */
+@media(max-width:620px){html[data-fx="on"] body::after{display:none}html[data-fx="on"] body::before{animation-duration:60s}html[data-fx="on"] .card:hover{transform:none}html[data-fx="on"] .bsl-modal-overlay{backdrop-filter:none;-webkit-backdrop-filter:none}}
+/* FX-END ========================================================== */
 </style>
 </head>
 <body>
 <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleSettingsPanel()">☰</button>
 <button class="fullwidth-btn" id="fullBtn" onclick="toggleFullSettings()" title="تمام عرض کردن منو و محتویات آن">⛶</button>
 <div class="container">
-<h1>🛒 اسکرپر
+<h1><span class="h1-name"><span class="h1-ico">🛒</span> <span class="h1-txt">اسکرپر</span></span>
   <span class="app-ver" id="appVer" title="نسخهٔ کد — برای بررسی به‌روزرسانی کلیک کنید"
         onclick="toggleSettingsPanel()">v<?=APP_VERSION?></span>
   <span id="profileStatus" class="profile-indicator unsaved">جدید</span>
@@ -29452,6 +29744,21 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 رنگ‌بندی روی <b>کل برنامه</b> — همهٔ کارت‌ها، دکمه‌ها، نوارها و صفحهٔ خودآزمون — اعمال
 می‌شود و در همین مرورگر ذخیره می‌ماند. رنگ‌ها سمت سرور جاسازی می‌شوند، پس هیچ پرشِ
 رنگی موقع بالا آمدن صفحه ندارید. با عوض کردن تم، صفحه یک‌بار تازه می‌شود.
+</div>
+
+<!-- v10.06 (۲۰): لایهٔ جلوه‌های بصری -->
+<div class="crow" style="align-items:flex-start">
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer;margin:0">
+<input type="checkbox" id="appFxChk" onchange="setAppFx(this.checked)" checked style="width:15px;height:15px">
+<span>✨ جلوه‌های بصری (<b id="appFxState" style="color:#67e8f9">روشن</b>)</span></label>
+</div>
+<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:10px;padding-right:21px">
+هالهٔ نورِ پس‌زمینه، عمق و بالا آمدنِ کارت‌ها، درخششِ دکمه‌ها، ورودِ نرمِ تب‌ها، بزرگ‌نماییِ
+عکسِ محصول، نوارِ پیشرفتِ جاری و تپشِ شمارنده‌ها. همه‌چیز فقط با <b>transform</b> و
+<b>opacity</b> کار می‌کند، پس چیدمان را جابه‌جا نمی‌کند و روی موبایل هم سنگین نیست
+(زیر ۶۲۰ پیکسل خودکار سبک‌تر می‌شود). اگر سیستم‌عامل شما «کاهش حرکت» را روشن کرده
+باشد، حرکت‌ها خودبه‌خود حذف می‌شوند. خاموش کردنِ این گزینه <b>بدون رفرش</b> دقیقاً
+همان ظاهرِ سادهٔ قبلی را برمی‌گرداند.
 </div>
 
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:5px">🚦 صف‌ها</div>
@@ -32575,15 +32882,20 @@ function log(m,t='info'){
 }
 
 function update(){
-  $('numP').textContent=toFa(products.size);
-  $('numPg').textContent=toFa(pages);
-  $('numD').textContent=toFa(details);
+  /* v10.06: fxSetNum فقط وقتی می‌نویسد که عدد واقعاً عوض شده باشد و همان‌جا
+     تپشِ کوتاهِ fx-bump را می‌زند — هم DOM کمتر دست می‌خورد، هم تغییرِ عدد
+     در وسطِ یک استخراجِ شلوغ از چشم نمی‌افتد. */
+  fxSetNum('numP',  toFa(products.size));
+  fxSetNum('numPg', toFa(pages));
+  fxSetNum('numD',  toFa(details));
 
   const badge = $('resultsBadge');
+  const _bPrev = badge.textContent;
   if (products.size > 0) {
       badge.classList.remove('hidden');
       badge.textContent = products.size > 99 ? '99+' : products.size;
-      badge.className = 'badge ok';
+      badge.className = 'badge ok';          // v10.06: className پاک می‌شود…
+      if (badge.textContent !== _bPrev) fxBump(badge);   // …پس تپش بعدش می‌آید
   } else {
       badge.classList.add('hidden');
   }
@@ -32704,6 +33016,95 @@ function initAppThemePref(){
   const k=(typeof window.appThemeCurrent==='function')?window.appThemeCurrent():'ocean';
   syncAppThemeUI(k);
 }
+/* =====================================================================
+ *  v10.06 (۲۰): لایهٔ «جلوه‌های بصری»
+ *
+ *  کلِ ظاهرِ جلوه‌ها CSS است و پشتِ html[data-fx="on"] قفل شده؛ این چند
+ *  تابع فقط سه کارِ کوچک می‌کنند که از CSS برنمی‌آید:
+ *    ۱) تپشِ شمارنده وقتی عددش واقعاً عوض شده (نه در هر رندر)،
+ *    ۲) ورودِ آبشاریِ کارتِ محصول وقتی وارد دید می‌شود،
+ *    ۳) فلاشِ لمس روی دکمه‌ها (چون موبایل :hover ندارد).
+ *  هر سه با کلاس کار می‌کنند و اگر جلوه‌ها خاموش باشد اصلاً اجرا نمی‌شوند.
+ * ================================================================== */
+function fxOn(){
+  try{ return document.documentElement.getAttribute('data-fx')==='on'; }catch(e){ return false; }
+}
+function setAppFx(on){
+  if(typeof window.appFxApply!=='function')return;
+  const v=window.appFxApply(on?'on':'off',true);
+  syncAppFxUI(v);
+  if(v==='on')fxInitRuntime();
+  showToast(v==='on'?'✨ جلوه‌های بصری روشن شد':'جلوه‌های بصری خاموش شد');
+}
+function syncAppFxUI(v){
+  const on=(v!=='off');
+  const c=document.getElementById('appFxChk');
+  if(c)c.checked=on;
+  const s=document.getElementById('appFxState');
+  if(s)s.textContent=on?'روشن':'خاموش';
+}
+function initAppFxPref(){
+  const v=(typeof window.appFxCurrent==='function')?window.appFxCurrent():'on';
+  syncAppFxUI(v);
+  fxInitRuntime();
+}
+/** انیمیشنِ یک‌باره را از نو راه می‌اندازد (بدون reflow دوباره نمی‌پرد) */
+function fxReplay(el,cls,ms){
+  if(!el||!fxOn())return;
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
+  setTimeout(function(){ try{ el.classList.remove(cls); }catch(e){} },ms);
+}
+function fxBump(el){ fxReplay(el,'fx-bump',620); }
+function fxPulse(el){ fxReplay(el,'fx-pulse',3400); }
+/** حالتِ «در حال کار» — نوارِ نورِ عبوری روی یک عنصر */
+function fxBusy(el,on){
+  if(!el)return;
+  if(on&&fxOn())el.classList.add('fx-busy'); else el.classList.remove('fx-busy');
+}
+/** عدد را فقط وقتی می‌نویسد که عوض شده باشد، و همان‌جا یک تپش می‌زند */
+function fxSetNum(id,txt){
+  const el=$(id);
+  if(!el)return;
+  const s=String(txt);
+  if(el.textContent===s)return;
+  el.textContent=s;
+  fxBump(el);
+}
+/* ورودِ کارتِ محصول: fx-pop یک «انیمیشن» است نه «حالتِ پنهان»؛ اگر ناظر
+   هرگز شلیک نکند هیچ محصولی نامرئی نمی‌ماند. */
+let fxPopObs;
+function fxPopObserver(){
+  if(fxPopObs!==undefined)return fxPopObs;
+  if(typeof IntersectionObserver!=='function'){ fxPopObs=null; return null; }
+  fxPopObs=new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if(!e.isIntersecting)return;
+      fxPopObs.unobserve(e.target);
+      if(fxOn())e.target.classList.add('fx-pop');
+    });
+  },{rootMargin:'80px'});
+  return fxPopObs;
+}
+function fxWatchCard(el){
+  if(!el||!fxOn())return;
+  const o=fxPopObserver();
+  if(o)o.observe(el); else el.classList.add('fx-pop');
+}
+function fxInitRuntime(){
+  if(window.__fxRuntime)return;
+  window.__fxRuntime=true;
+  /* فلاشِ لمس: در فازِ capture می‌نشیند تا stopPropagation هندلرهای
+     موجود آن را نخورد، و هیچ‌وقت جلوی کلیک را نمی‌گیرد. */
+  document.addEventListener('pointerdown',function(e){
+    if(!fxOn())return;
+    const t=e&&e.target;
+    const b=(t&&t.closest)?t.closest('.btn'):null;
+    if(!b||b.disabled)return;
+    fxReplay(b,'fx-tap',500);
+  },true);
+}
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
 /**
  * v8.84: مقدار امن برای گذاشتن داخل رشتهٔ تک‌کوتیشنیِ یک ویژگی onclick.
@@ -32767,9 +33168,12 @@ function renderCard(p,k){
   // v8.41: محصول تازه هرگز نباید به‌خاطر فیلترِ اجرای قبلی پنهان شود
   if(resultFilter!=='all'&&Object.keys(prodStatusMap).length===0)resetResultFilter();
   const _cls='product'+(_st==='new'?' is-new':_st==='changed'?' is-chg':'');
-  if(el){el.innerHTML=html;el.className=_cls;el.style.display=matchFilter(_st)?'':'none';}
+  // v10.06: className یک‌جا بازنویسی می‌شود؛ اگر کارت قبلاً جلوهٔ ورود را
+  // گرفته بود باید نگهش داریم وگرنه با هر به‌روزرسانی دوباره می‌پرد.
+  if(el){const _pop=el.classList.contains('fx-pop')?' fx-pop':'';
+         el.innerHTML=html;el.className=_cls+_pop;el.style.display=matchFilter(_st)?'':'none';}
   else{const d=document.createElement('div');d.className=_cls;d.dataset.k=_k;d.innerHTML=html;
-       d.style.display=matchFilter(_st)?'':'none';$('vGrid').appendChild(d);}
+       d.style.display=matchFilter(_st)?'':'none';$('vGrid').appendChild(d);fxWatchCard(d);}
 }
 
 function renderRow(p,i,k){
@@ -33714,6 +34118,7 @@ function start(useSel=false){
   $('startBtn').classList.add('hidden');$('startManualBtn').classList.add('hidden');$('stopBtn').classList.remove('hidden');
   $('progress').classList.remove('hidden');$('progressBar').style.width='0%';
   update();
+  fxBusy($('status'),true);          // v10.06: نوارِ نورِ «در حال کار»
 
   let sUrl=`?stream=1&url=${encodeURIComponent(url)}&pages=${$('pages').value}&pagType=${encodeURIComponent($('pagType').value)}&pagVal=${encodeURIComponent($('pagVal').value)}`;
   if(useSel&&sel.container){
@@ -33736,6 +34141,7 @@ function start(useSel=false){
       $('progressBar').style.width='100%';
       showToast(`✓ ${d.total} محصول استخراج شد`);
       switchMainTab('results');
+      fxPulse(document.querySelector('.main-tab[data-tab="results"]'));   // v10.06
       // Auto-save profile with products after scrape completes
       if($('url').value.trim() && products.size > 0) saveProfileSilent();
   });
@@ -33745,7 +34151,7 @@ function start(useSel=false){
 }
 
 function stop(){if(es)es.close();log('⏹ متوقف شد','err');finish();}
-function finish(){running=false;if(es){es.close();es=null;}$('startBtn').classList.remove('hidden');$('startManualBtn').classList.remove('hidden');$('stopBtn').classList.add('hidden');$('txtContent').textContent=genTxt();showLiveComparison();}
+function finish(){running=false;if(es){es.close();es=null;}$('startBtn').classList.remove('hidden');$('startManualBtn').classList.remove('hidden');$('stopBtn').classList.add('hidden');$('txtContent').textContent=genTxt();showLiveComparison();fxBusy($('status'),false);}
 
 function startDetailExtraction(){
     if(detailRunning)return;
@@ -38345,6 +38751,7 @@ document.addEventListener('DOMContentLoaded',function(){
     try{ initAutoScrollPref(); }catch(e){}   // v8.88
     try{ initAppFontPref(); }catch(e){}      // v9.93
     try{ initAppThemePref(); }catch(e){}     // v9.94: رنگ‌بندی (تم) برنامه
+    try{ initAppFxPref(); }catch(e){}        // v10.06: جلوه‌های بصری
     try{ syncSmenuStickyOffsets(); }catch(e){}  // v9.94: افستِ سربخش‌های چسبان
     try{ selCtlInit(); }catch(e){}           // v9.90: تیک‌های نمایش کنترل‌های سلکتور
     const si=$('bsCatSearch');
@@ -40794,7 +41201,8 @@ function resetResultFilter(){
 function refreshResultBadges(){
   document.querySelectorAll('#vGrid .product').forEach(el=>{
     const st=prodStatusMap[el.dataset.k]||'';
-    el.className='product'+(st==='new'?' is-new':st==='changed'?' is-chg':'');
+    const _pop=el.classList.contains('fx-pop')?' fx-pop':'';   // v10.06: جلوهٔ ورود پاک نشود
+    el.className='product'+(st==='new'?' is-new':st==='changed'?' is-chg':'')+_pop;
     const t=el.querySelector('.ptitle');
     if(t){
       const old=t.querySelector('.pbadge');
