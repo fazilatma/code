@@ -99,6 +99,20 @@ test('Batch-only OpenRouter models are retried on /api/beta/batches and return t
   }finally{globalThis.fetch=originalFetch;console.error=originalError}
 });
 
+test('AI result modal can retry message or category independently',async()=>{
+  const originalFetch=globalThis.fetch,db=new MemoryD1(),prompts=[];
+  try{
+    await call(db,'/api/connections',jsonInit({basalam:{api:'https://basalam.example/v1',token:'bs-retry',vendorId:'77'},ai:{providers:[{id:'retry',name:'Retry Provider',baseUrl:'https://ai.example/v1',apiKey:'retry-secret',models:['model-a'],enabled:true}],network:{mode:'direct'}}}));
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request);if(url==='https://basalam.example/v1/categories')return jsonResponse({data:[{id:10,name:'آرایشی',children:[{id:11,name:'ادو پرفیوم'}]}]});const body=init.body?JSON.parse(String(init.body)):{},prompt=body.messages?.[0]?.content||'';if(prompt)prompts.push(prompt);if(prompt.includes('فهرست مجاز'))return jsonResponse({choices:[{message:{content:prompts.filter(item=>item.includes('فهرست مجاز')).length===1?'بدون دسته':'{"category_id":11,"reason":"درست"}'}}]});return jsonResponse({choices:[{message:{content:prompts.filter(item=>!item.includes('فهرست مجاز')).length===1?'اول':'دوم'}}]})};
+    const first=await call(db,'/api/ai/test-all',jsonInit({prompt:'سلام',categoryTitle:'ادو پرفیوم',cursor:0,runId:''})).then(response=>response.json());
+    assert.equal(first.results[0].text,'اول');assert.equal(first.results[0].categoryResult.ok,false);
+    const messageRetry=await call(db,'/api/ai/test-runs/retry',jsonInit({key:first.results[0].key,part:'message'})).then(response=>response.json());
+    assert.equal(messageRetry.results[0].text,'دوم');assert.equal(messageRetry.results[0].messageRetryCount,1);assert.equal(messageRetry.results[0].categoryResult.ok,false);
+    const categoryRetry=await call(db,'/api/ai/test-runs/retry',jsonInit({key:first.results[0].key,part:'category'})).then(response=>response.json());
+    assert.equal(categoryRetry.results[0].text,'دوم');assert.equal(categoryRetry.results[0].categoryResult.ok,true);assert.equal(categoryRetry.results[0].categoryResult.categoryId,11);assert.equal(categoryRetry.results[0].categoryRetryCount,1);
+  }finally{globalThis.fetch=originalFetch}
+});
+
 test('scheduled cron uses live general settings for watchdog, report retention, lock and cron ping',async()=>{
   const db=new MemoryD1(),pending=[],pings=[],localCtx={waitUntil(promise){pending.push(promise)},passThroughOnException(){}};
   await call(db,'/api/settings',jsonInit({general:{cronLockMin:1,keepReports:2,queueDedup:true,queueDedupStale:1,contentSync:false},watchdog:{enabled:true,stallAfter:60},notifications:{events:{cronPing:true},pingEvery:1}}));
@@ -258,7 +272,7 @@ test('AI model table stores an independently validated category response for the
   const originalFetch=globalThis.fetch,db=new MemoryD1(),prompts=[];
   try{
     await call(db,'/api/connections',jsonInit({basalam:{api:'https://basalam.example/v1',token:'bs-category',vendorId:'77'},ai:{providers:[{id:'cat',name:'Category Provider',baseUrl:'https://ai.example/v1',apiKey:'cat-secret',models:['model-a'],enabled:true}],candidates:['cat::model-a'],network:{mode:'direct'}}}));
-    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request);if(url==='https://basalam.example/v1/categories')return jsonResponse({data:[{id:10,name:'آرایشی',children:[{id:11,name:'ادو پرفیوم'}]}]});const body=JSON.parse(String(init.body||'{}')),prompt=body.messages?.[0]?.content||'';prompts.push(prompt);return jsonResponse({choices:[{message:{content:prompt.includes('فهرست مجاز')?'{"category_id":11,"reason":"درست"}':'پاسخ پیام'}}],usage:{total_tokens:12}})};
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request);if(url==='https://basalam.example/v1/categories')return jsonResponse({data:[{id:10,name:'آرایشی',children:[{id:11,name:'ادو پرفیوم'}]}]});const body=init.body?JSON.parse(String(init.body)):{},prompt=body.messages?.[0]?.content||'';if(prompt)prompts.push(prompt);return jsonResponse({choices:[{message:{content:prompt.includes('فهرست مجاز')?'{"category_id":11,"reason":"درست"}':'پاسخ پیام'}}],usage:{total_tokens:12}})};
     const response=await call(db,'/api/ai/test-all',jsonInit({prompt:'سلام',categoryTitle:'ادو پرفیوم',cursor:0,runId:''})),result=await response.json();assert.equal(response.status,200);assert.equal(result.done,true);assert.equal(result.categoryTitle,'ادو پرفیوم');assert.equal(result.categorySucceeded,1);assert.equal(result.results[0].categoryResult.ok,true);assert.equal(result.results[0].categoryResult.categoryId,11);assert.equal(result.results[0].catResponse,'ادو پرفیوم (#11)');assert.equal(prompts.length,2);assert.ok(prompts.some(x=>x.includes('فهرست مجاز')));
     const saved=await call(db,'/api/ai/test-results').then(r=>r.json());assert.equal(saved.categoryTitle,'ادو پرفیوم');assert.equal(saved.results[0].categoryResult.categoryName,'ادو پرفیوم');
   }finally{globalThis.fetch=originalFetch}

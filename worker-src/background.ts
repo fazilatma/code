@@ -53,6 +53,16 @@ function publicRun(run:BackgroundRun|null):any{
   const{products,...safe}=run;return safe;
 }
 export async function getPublicBackgroundRun(kind:BackgroundRun['kind']):Promise<any>{return publicRun(await currentBackgroundRun(kind))}
+export async function retryAiTestPart(key:string,part:'message'|'category'){
+  const stored=await getLastAiTestResults(),retryKey=String(key||'').trim();
+  if(!retryKey)throw new Error('شناسه مدل برای تلاش مجدد لازم است.');
+  if(!stored?.runId||!Array.isArray(stored.results)||!stored.results.length)throw new Error('نتیجهٔ ذخیره‌شده‌ای برای تلاش مجدد نیست؛ ابتدا تست مدل‌ها را اجرا کنید.');
+  let categories:any[]=[];if(part==='category'&&stored.categoryTitle)try{categories=(await destinationCategories()).items}catch{/* category retry still records the missing-list error */}
+  const result=await testModelBatch(String(stored.prompt||'سلام'),{runId:String(stored.runId),retryKey,retryPart:part,onlyCandidates:Boolean(stored.onlyCandidates),categoryTitle:String(stored.categoryTitle||''),categories,timeoutMs:20_000});
+  const run=await currentBackgroundRun('ai-test');
+  if(run&&run.kind==='ai-test'&&(run.id===stored.runId||run.result?.runId===stored.runId)){run.result={...(run.result||{}),...result,results:result.results};await writeRun(run)}
+  return result;
+}
 
 async function enqueue(message:BackgroundMessage,waitUntil?:(promise:Promise<unknown>)=>void):Promise<void>{
   const queue=getEnv().JOBS;

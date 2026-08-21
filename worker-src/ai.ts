@@ -190,7 +190,7 @@ export async function suggestCategoryWithModel(title:string,modelKey:string,cate
 const AI_TEST_MODELS_PER_INVOCATION=1;
 type AiTestTask={p:Provider;model:string;key:string};
 type StoredAiTest={runId:string;startedAt:string;updatedAt:string;prompt:string;categoryTitle:string;onlyCandidates:boolean;total:number;results:any[]};
-type AiTestOptions={onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[];skipCurrent?:boolean;skipReason?:string;timeoutMs?:number;retryKey?:string};
+type AiTestOptions={onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[];skipCurrent?:boolean;skipReason?:string;timeoutMs?:number;retryKey?:string;retryPart?:'message'|'category'|'both'};
 export function isRetryableAiResult(row:any):boolean{
   if(!row||row.ok)return false;
   if(row.skipped||row.phase==='transport-skip'||row.phase==='batch-pending')return true;
@@ -224,6 +224,21 @@ async function executeAiTestTask(task:AiTestTask,prompt:string,categoryTitle:str
   const row:any={...message,categoryTitle,categoryResult,catResponse:categoryResult?.ok?`${categoryResult.categoryName} (#${categoryResult.categoryId})`:categoryResult?.error||(!categories.length?'فهرست دسته‌بندی در دسترس نیست':'')};
   row.retryable=isRetryableAiResult(row);return row;
 }
+function categoryResponseText(categoryResult:any,categories:AiCategoryOption[]){return categoryResult?.ok?`${categoryResult.categoryName} (#${categoryResult.categoryId})`:categoryResult?.error||(!categories.length?'فهرست دسته‌بندی در دسترس نیست':'')}
+async function executeAiTestPart(task:AiTestTask,prompt:string,categoryTitle:string,categories:AiCategoryOption[],network:Network,timeoutMs:number|undefined,part:'message'|'category',previousRow:any){
+  if(part==='message'){
+    let message:any;try{message={...await aiCall(task.p,task.model,prompt,network,timeoutMs,String(previousRow?.batchId||'')),key:task.key}}catch(error){message=aiTestFailure(error,task,prompt)}
+    const row:any={...previousRow,...message,key:task.key,categoryTitle,categoryResult:previousRow?.categoryResult??null,catResponse:previousRow?.catResponse||'',messageRetryCount:Number(previousRow?.messageRetryCount||0)+1,retryCount:Number(previousRow?.retryCount||0)+1};
+    row.retryable=isRetryableAiResult(row);return row;
+  }
+  let categoryResult:any=null;
+  if(!categoryTitle)categoryResult={ok:false,phase:'configuration',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:'',latencyMs:0,error:'عنوان دسته برای تست تنظیم نشده است.',raw:{reason:'missing-category-title'}};
+  else if(!isChatCompatibleAiModel(task.p,task.model))categoryResult={ok:false,skipped:true,phase:'unsupported-task',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,endpointType:aiModelEndpoint(task.p,task.model),chatCompatible:false,latencyMs:0,error:'این مدل endpoint اختصاصی دارد و برای دسته‌بندی گفت‌وگویی مناسب نیست.',raw:{reason:'dedicated endpoint model'}};
+  else if(!categories.length)categoryResult={ok:false,phase:'configuration',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error:'فهرست دسته‌بندی در دسترس نیست',raw:{reason:'no-categories'}};
+  else try{categoryResult={...await categoryWithTask(task,categoryTitle,categories,network,timeoutMs),key:task.key}}catch(error){categoryResult=aiTestFailure(error,task,categoryTitle)}
+  const row:any={...previousRow,key:task.key,categoryTitle,categoryResult,catResponse:categoryResponseText(categoryResult,categories),categoryRetryCount:Number(previousRow?.categoryRetryCount||0)+1,retryCount:Number(previousRow?.retryCount||0)+1};
+  row.retryable=isRetryableAiResult(row);return row;
+}
 /**
  * Runs at most one model per Worker invocation. Results are persisted before
  * responding and a repeated runId/cursor replays the stored row, so browser
@@ -239,8 +254,9 @@ export async function testModelBatch(prompt='سلام',options:AiTestOptions={})
   if(retryKey){
     if(!sameRun)throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
     const task=tasks.find(item=>item.key===retryKey);if(!task)throw new Error('مدل برای تلاش مجدد پیدا نشد.');
-    const previous=results.find(item=>item.key===task.key),row=await executeAiTestTask(task,prompt,categoryTitle,categories,ai.network,timeoutMs,Boolean(options.skipCurrent),String(options.skipReason||''),String(previous?.batchId||''));
-    const index=results.findIndex(item=>item.key===task.key);row.retryCount=Number((index>=0?results[index]:null)?.retryCount||0)+1;
+    const existing=results.find(item=>item.key===task.key),part=options.retryPart==='message'||options.retryPart==='category'?options.retryPart:'both';
+    const row=part==='both'?await executeAiTestTask(task,prompt,categoryTitle,categories,ai.network,timeoutMs,Boolean(options.skipCurrent),String(options.skipReason||''),String(existing?.batchId||'')):await executeAiTestPart(task,prompt,categoryTitle,categories,ai.network,timeoutMs,part,existing||{});
+    const index=results.findIndex(item=>item.key===task.key);if(part==='both')row.retryCount=Number((index>=0?results[index]:null)?.retryCount||0)+1;
     if(index>=0)results[index]=row;else results.push(row);
     const updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,categoryTitle,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);
     return aiTestResponse(saved,tasks,cursor,Math.max(cursor,results.length),[row],false);
