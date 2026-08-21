@@ -1,4 +1,4 @@
-import { getState, setState } from './db.js';
+import { deleteState, getState, setState } from './db.js';
 import { getEnv } from './env.js';
 import { getLastAiTestResults, isChatCompatibleAiModel, suggestCategoryWithModel, testModelBatch } from './ai.js';
 import { loadConnections } from './connections.js';
@@ -19,6 +19,11 @@ const runKey=(kind:BackgroundRun['kind'],id:string)=>`background_run:${kind}:${i
 const leaseKey=(kind:BackgroundRun['kind'],id:string)=>`background_lease:${kind}:${id}`;
 const now=()=>new Date().toISOString();
 const active=(run:BackgroundRun|null)=>Boolean(run&&['queued','running','paused'].includes(run.status));
+/** If a run shows no progress for this long, treat it as recovered/stale and re-enqueue it. */
+const STALL_MS=6*60_000;
+/** If a run still shows no progress for this long, fail it so the user can resume or restart instead of being stuck forever. */
+const HARD_STALL_MS=20*60_000;
+const runAge=(run:BackgroundRun)=>Date.now()-(Date.parse(run.updatedAt||run.createdAt)||Date.now());
 
 // Queue delivery is at-least-once. This D1 compare-and-set lease ensures two deliveries
 // cannot process the same checkpoint concurrently. A crashed isolate is recoverable after
@@ -51,8 +56,24 @@ async function enqueue(message:BackgroundMessage,waitUntil?:(promise:Promise<unk
 }
 async function drainInline(message:BackgroundMessage){for(let i=0;i<5;i++){const result=await processBackgroundMessage(message);if(result.outcome!=='continue')break}}
 
+/** Force-clear a stuck run (its pointer, run row, lease and shared test-results state) so a fresh run can start. */
+export async function resetBackgroundRun(kind:BackgroundRun['kind']):Promise<void>{
+  const id=await getState<string>(pointerKey(kind),'');
+  if(id){await deleteState(runKey(kind,id));await deleteState(leaseKey(kind,id));}
+  await setState(pointerKey(kind),'');
+  if(kind==='ai-test')await deleteState('ai_test_results');
+}
+
 export async function startAiTestRun(input:any,waitUntil?:(promise:Promise<unknown>)=>void):Promise<{run:any;existing:boolean}>{
-  const previous=await currentBackgroundRun('ai-test');if(active(previous))return{run:publicRun(previous),existing:true};
+  const previous=await currentBackgroundRun('ai-test');
+  if(previous&&active(previous)){
+    // A paused (user-stopped) or a recent run is returned as-is so it isn't clobbered.
+    if(previous.status==='paused'||previous.stopRequested)return{run:publicRun(previous),existing:true};
+    // A run that is queued/running but has made no progress for a long time is a stuck zombie:
+    // clear it so the user can start a fresh test instead of being blocked forever.
+    if(runAge(previous)<STALL_MS)return{run:publicRun(previous),existing:true};
+    await resetBackgroundRun('ai-test');
+  }
   const timestamp=now(),id=crypto.randomUUID(),run:AiTestRun={id,kind:'ai-test',status:'queued',phase:'waiting',stopRequested:false,createdAt:timestamp,updatedAt:timestamp,startedAt:null,finishedAt:null,attempts:0,error:null,prompt:String(input?.prompt||'سلام'),categoryTitle:String(input?.categoryTitle||'').trim(),onlyCandidates:Boolean(input?.onlyCandidates),delayMs:Math.max(0,Math.min(60_000,Number(input?.delayMs)||0)),cursor:0,result:{runId:id,total:0,nextCursor:0,results:[]}};
   await writeRun(run);await setState(pointerKey('ai-test'),id);await enqueue({task:'ai-test',runId:id},waitUntil);return{run:publicRun(run),existing:false};
 }
@@ -133,5 +154,14 @@ export async function processBackgroundMessage(message:BackgroundMessage):Promis
 }
 
 export async function recoverBackgroundRuns(waitUntil?:(promise:Promise<unknown>)=>void):Promise<void>{
-  for(const kind of ['ai-test','category-all'] as const){const run=await currentBackgroundRun(kind);if(!run||run.stopRequested||run.status==='paused'||['done','failed'].includes(run.status))continue;const stale=Date.now()-Date.parse(run.updatedAt)>5*60_000;if(run.status==='queued'||stale){if(stale){run.status='queued';run.phase='recovered';await writeRun(run)}await enqueue({task:kind,runId:run.id},waitUntil)}}
+  for(const kind of ['ai-test','category-all'] as const){
+    const run=await currentBackgroundRun(kind);
+    if(!run||run.stopRequested||run.status==='paused'||['done','failed'].includes(run.status))continue;
+    const age=runAge(run);
+    // Truly stuck: even after many minutes there is still no progress. Fail it so the user can
+    // act (resume or restart) instead of the run silently sitting forever.
+    if(age>HARD_STALL_MS){run.status='failed';run.phase='failed';run.finishedAt=now();run.error='اجرای سرورساید چند دقیقه بدون هیچ پیشرفتی ماند و برای جلوگیری از گیر کردن دائمی متوقف شد؛ روی «ادامه» بزنید یا از نو شروع کنید.';await writeRun(run);continue;}
+    // A queued run, or a running run that stalled, is re-enqueued so the chain cannot silently break.
+    if(run.status==='queued'||age>STALL_MS){if(run.status!=='queued'){run.status='queued';run.phase='recovered';await writeRun(run)}await enqueue({task:kind,runId:run.id},waitUntil)}
+  }
 }
