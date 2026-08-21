@@ -10480,8 +10480,18 @@ async function aiAgentCall(provider, model, messages, tools, networkOverride, ti
     }
     throw new AiResponseError("\u0647\u06CC\u0686 \u0645\u062F\u0644 Cloudflare \u0628\u0631\u0627\u06CC \u0627\u06CC\u0646 \u0634\u0646\u0627\u0633\u0647 \u067E\u06CC\u062F\u0627 \u0646\u0634\u062F", { ok: false, phase: "configuration", provider: provider.id, providerName: provider.name, model, prompt: messages[messages.length - 1]?.content || "", latencyMs: Date.now() - started });
   }
-  const endpoint = openAiEndpoint(provider.baseUrl), payload = { model: canonical, messages, tools, tool_choice: "auto", max_tokens: maxTokens, temperature: 0.2 };
-  const result = await requestAi(endpoint, payload, provider, network, timeoutMs);
+  const endpoint = openAiEndpoint(provider.baseUrl), reasoning = isReasoningAiModel(provider, model), payload = { model: canonical, messages, tools, tool_choice: "auto", max_tokens: maxTokens };
+  if (!reasoning) payload.temperature = 0.2;
+  let result = await requestAi(endpoint, payload, provider, network, timeoutMs), usedPayload = payload;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (result.networkError || !result.response || result.response.ok || isCreditAiStatus(result.response.status, aiErrorMessage(result.body))) break;
+    const errorText2 = aiErrorMessage(result.body);
+    if (!isPayloadShapeError(result.response.status, errorText2)) break;
+    const adapted = adjustChatPayload(usedPayload, errorText2);
+    if (!adapted) break;
+    usedPayload = adapted;
+    result = await requestAi(endpoint, usedPayload, provider, network, timeoutMs);
+  }
   if (result.networkError) {
     const reason = safeError(result.networkError, endpoint, provider.apiKey);
     throw new AiResponseError(reason, { ok: false, phase: "network", provider: provider.id, providerName: provider.name, model, prompt: messages[messages.length - 1]?.content || "", endpoint: safeEndpoint(endpoint), latencyMs: Date.now() - started, raw: { error: reason } });
@@ -10581,7 +10591,7 @@ function isOpenRouter(provider, endpoint = "") {
   return provider.id === "openrouter" || /openrouter/i.test(String(provider.name || "")) || /openrouter\.ai/i.test(String(provider.baseUrl || endpoint || ""));
 }
 function aiRequestHeaders(provider, endpoint, method = "POST") {
-  const headers = { authorization: `Bearer ${provider.apiKey}`, accept: "application/json", "user-agent": "Scraper4/1.17.1" };
+  const headers = { authorization: `Bearer ${provider.apiKey}`, accept: "application/json", "user-agent": "Scraper4/1.17.2" };
   if (method === "POST") headers["content-type"] = "application/json";
   if (isOpenRouter(provider, endpoint)) {
     headers["http-referer"] = "https://scraper4.workers.dev";
@@ -11684,6 +11694,8 @@ var AGENT_TOOL_MODELS = [
   { id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", name: "Llama 3.3 70B Instruct (FP8 Fast)", vendor: "Meta \u2014 Workers AI", free: true, toolCalling: true, note: "\u062F\u0642\u062A \u0628\u0627\u0644\u0627 \u0628\u0631\u0627\u06CC \u062A\u062D\u0644\u06CC\u0644\u200C\u0647\u0627\u06CC \u067E\u06CC\u0686\u06CC\u062F\u0647." },
   { id: "@cf/meta/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout 17B", vendor: "Meta \u2014 Workers AI", free: true, toolCalling: true, note: "\u0646\u0633\u0644 \u062C\u062F\u06CC\u062F Llama \u0628\u0627 \u067E\u0634\u062A\u06CC\u0628\u0627\u0646\u06CC \u0627\u0632 \u0641\u0631\u0627\u062E\u0648\u0627\u0646\u06CC \u0627\u0628\u0632\u0627\u0631." },
   { id: "@cf/meta/llama-4-maverick-17b-128e-instruct", name: "Llama 4 Maverick 17B", vendor: "Meta \u2014 Workers AI", free: true, toolCalling: true, note: "\u0642\u0648\u06CC\u200C\u062A\u0631\u06CC\u0646 \u0645\u062F\u0644 \u0631\u0627\u06CC\u06AF\u0627\u0646\u0650 \u0627\u06CC\u0646 \u0641\u0647\u0631\u0633\u062A \u0628\u0631\u0627\u06CC tool use." },
+  { id: "Prism-ML/Ternary-Bonsai-27B", name: "Prism Ternary Bonsai 27B", vendor: "PrismML \u2014 Together AI", free: true, toolCalling: true, note: "\u0631\u0627\u06CC\u06AF\u0627\u0646 \u0631\u0648\u06CC Together AI (api.together.xyz/v1)\u061B \u0645\u062F\u0644 \u0627\u0633\u062A\u062F\u0644\u0627\u0644\u06CC \u0628\u0627 \u0641\u0631\u0627\u062E\u0648\u0627\u0646\u06CC \u0627\u0628\u0632\u0627\u0631. \u0628\u0631\u0627\u06CC \u0627\u0633\u062A\u0641\u0627\u062F\u0647\u060C \u06CC\u06A9 \u0627\u0631\u0627\u0626\u0647\u200C\u062F\u0647\u0646\u062F\u0647 \u0628\u0627 Base URL \xABhttps://api.together.xyz/v1\xBB \u0628\u0633\u0627\u0632\u06CC\u062F \u0648 \u0647\u0645\u06CC\u0646 \u0634\u0646\u0627\u0633\u0647 \u0631\u0627 \u0628\u0647 \u0645\u062F\u0644\u200C\u0647\u0627\u06CC\u0634 \u0627\u0636\u0627\u0641\u0647 \u06A9\u0646\u06CC\u062F." },
+  { id: "labs-leanstral-2603", name: "Leanstral 2603 (119B)", vendor: "Mistral AI (labs)", free: false, toolCalling: true, note: "\u0645\u062F\u0644 \u0622\u0632\u0645\u0627\u06CC\u0634\u06AF\u0627\u0647\u06CC Mistral \u0628\u0627 \u0641\u0631\u0627\u062E\u0648\u0627\u0646\u06CC \u0627\u0628\u0632\u0627\u0631 \u0648 \u0627\u0633\u062A\u062F\u0644\u0627\u0644\u061B \u0627\u0632 \u0637\u0631\u06CC\u0642 API \u0645\u0627\u06CC\u0633\u062A\u0631\u0627\u0644 (labs-leanstral-2603) \u062F\u0631 \u062F\u0633\u062A\u0631\u0633 \u0627\u0633\u062A." },
   { id: "*configured", name: "\u0645\u062F\u0644\u200C\u0647\u0627\u06CC \u0627\u0631\u0627\u0626\u0647\u200C\u062F\u0647\u0646\u062F\u0647\u200C\u0647\u0627\u06CC \u062A\u0646\u0638\u06CC\u0645\u200C\u0634\u062F\u0647", vendor: "OpenAI-compatible (GPT\u060C DeepSeek\u060C Qwen \u0648\u2026)", free: false, toolCalling: false, note: "\u0627\u0632 \u0645\u062F\u0644\u200C\u0647\u0627\u06CC \u0630\u062E\u06CC\u0631\u0647\u200C\u0634\u062F\u0647\u0654 \u062E\u0648\u062F\u062A\u0627\u0646 \u0627\u0646\u062A\u062E\u0627\u0628 \u06A9\u0646\u06CC\u062F\u061B \u0645\u062F\u0644 \u0628\u0627\u06CC\u062F \u0641\u0631\u0627\u062E\u0648\u0627\u0646\u06CC \u0627\u0628\u0632\u0627\u0631 (tool calling) \u067E\u0634\u062A\u06CC\u0628\u0627\u0646\u06CC \u06A9\u0646\u062F." }
 ];
 var AGENT_PROMPT_TEMPLATES = [
@@ -12787,15 +12799,17 @@ async function loadAgentTab(){try{
   }
 }catch(error){notice(error.message,'error')}}
 function renderAgentModelSelect(){const sel=$('agentModelSel');if(!sel)return;const prev=sel.value;
-  const free=(agentData.models||[]).filter(m=>m.id!=='*configured'&&m.toolCalling!==false);
+  const free=(agentData.models||[]).filter(m=>m.id!=='*configured'&&m.toolCalling===true&&m.free===true);
+  const paid=(agentData.models||[]).filter(m=>m.id!=='*configured'&&m.toolCalling===true&&m.free!==true);
   const providerIds=[...new Map((agentData.configured||[]).map(p=>[p.providerId,p])).values()];
   let html='<option value="">— خودکار (اولین مدل رایگان آماده) —</option>';
-  if(free.length)html+='<optgroup label="🆓 رایگان — Workers AI (فراخوانی ابزار)">'+free.map(m=>'<option value="'+escAttr(m.id)+'">'+esc(m.name)+'</option>').join('')+'</optgroup>';
+  if(free.length)html+='<optgroup label="🆓 رایگان (فراخوانی ابزار)">'+free.map(m=>'<option value="'+escAttr(m.id)+'">'+esc(m.name)+'</option>').join('')+'</optgroup>';
+  if(paid.length)html+='<optgroup label="💳 پولی — فراخوانی ابزار">'+paid.map(m=>'<option value="'+escAttr(m.id)+'">'+esc(m.name)+'</option>').join('')+'</optgroup>';
   for(const p of providerIds){const models=[...new Set((agentData.configured||[]).filter(c=>c.providerId===p.providerId).map(c=>c.model))];if(!models.length)continue;html+='<optgroup label="'+esc(p.providerName||p.providerId)+'">'+models.map(m=>'<option value="'+escAttr(p.providerId+'::'+m)+'">'+esc(m)+'</option>').join('')+'</optgroup>'}
   sel.innerHTML=html;sel.value=prev||'';}
 function renderAgentTemplates(){const el=$('agentTemplates');if(!el)return;el.innerHTML=agentTemplates.map((t,i)=>'<button type="button" class="agent-tpl" data-agent-tpl="'+i+'" title="'+escAttr(t.description)+'">'+esc(t.name)+'</button>').join('')}
 function applyAgentTemplate(index){const t=agentTemplates[index];if(!t)return;const txt=$('agentPromptText');if(txt)txt.value=t.prompt;if($('agentMaxSteps'))$('agentMaxSteps').value=String(t.maxSteps||6);if(t.tools&&t.tools.length&&document.querySelector('#agentToolsList'))document.querySelectorAll('#agentToolsList input[type=checkbox]').forEach(cb=>{cb.checked=t.tools.includes(cb.value)});notice('الگوی «'+t.name+'» اعمال شد؛ دکمهٔ اجرا را بزنید.','ok')}
-function renderAgentModels(){const el=$('agentModelsList');if(!el)return;el.innerHTML=agentData.models.map(m=>'<div class="visual-row" style="border-color:'+(m.free?'#16a34a':'#475569')+'"><div class="visual-row-head"><b>'+esc(m.name)+'</b><span class="chip" style="background:#3b2f1e;color:#fbbf24">🔧 فراخوانی ابزار</span>'+(m.free?'<span class="chip" style="background:#14532d;color:#86efac">رایگان</span>':'<span class="chip">پولی</span>')+'</div><div style="font-size:10px;color:#94a3b8;direction:ltr;text-align:left">'+esc(m.id)+'</div><div style="font-size:10px;color:#64748b;margin-top:4px">'+esc(m.vendor)+' — '+esc(m.note)+'</div></div>').join('');const info=$('agentToolsListInfo');if(info)info.innerHTML=agentData.tools.map(t=>'<div class="visual-row"><div class="visual-row-head"><b>🔧 '+esc(t.name)+'</b><span class="chip">'+esc(t.id)+'</span></div><div style="font-size:10px;color:#94a3b8;margin-top:4px">'+esc(t.description)+'</div></div>').join('')}
+function renderAgentModels(){const el=$('agentModelsList');if(!el)return;el.innerHTML=agentData.models.map(m=>'<div class="visual-row" style="border-color:'+(m.free?'#16a34a':'#475569')+'"><div class="visual-row-head"><b>'+esc(m.name)+'</b>'+(m.toolCalling?'<span class="chip" style="background:#3b2f1e;color:#fbbf24">🔧 فراخوانی ابزار</span>':'<span class="chip">بدون tag</span>')+(m.free?'<span class="chip" style="background:#14532d;color:#86efac">رایگان</span>':'<span class="chip">پولی</span>')+'</div><div style="font-size:10px;color:#94a3b8;direction:ltr;text-align:left">'+esc(m.id)+'</div><div style="font-size:10px;color:#64748b;margin-top:4px">'+esc(m.vendor)+' — '+esc(m.note)+'</div></div>').join('');const info=$('agentToolsListInfo');if(info)info.innerHTML=agentData.tools.map(t=>'<div class="visual-row"><div class="visual-row-head"><b>🔧 '+esc(t.name)+'</b><span class="chip">'+esc(t.id)+'</span></div><div style="font-size:10px;color:#94a3b8;margin-top:4px">'+esc(t.description)+'</div></div>').join('')}
 function renderAgentPromptList(){const el=$('agentPromptsList'),count=$('agentPromptCount');if(!el)return;if(count)count.textContent=fa(agentData.prompts.length);el.innerHTML=agentData.prompts.length?agentData.prompts.map(p=>'<div class="visual-row"><div class="visual-row-head"><b>'+esc(p.name)+'</b><span class="chip">'+(p.enabled?'فعال':'غیرفعال')+' — '+(p.scheduleMinutes?'هر '+fa(p.scheduleMinutes)+' دقیقه':'فقط دستی')+'</span></div><div style="font-size:10px;color:#94a3b8;margin:4px 0;max-height:38px;overflow:hidden">'+esc(p.prompt)+'</div><div style="font-size:9px;color:#64748b;margin-bottom:4px">'+(p.lastRunAt?'آخرین اجرا: '+esc(p.lastRunAt):'هنوز اجرا نشده')+'</div><div class="cact">'+mButton('▶️ اجرا','agent-prompt-run:'+p.id,'btn-green')+mButton('✎ ویرایش','agent-prompt-edit:'+p.id)+mButton('📜 لاگ','agent-prompt-logs:'+p.id,'btn-purple')+mButton('🗑 حذف','agent-prompt-delete:'+p.id,'btn-red')+'</div></div>').join(''):'<div class="empty">پرامپت زمان‌بندی‌شده‌ای ثبت نشده است.</div>'}
 function renderAgentRuns(){const el=$('agentRunsList'),count=$('agentRunsCount');if(!el)return;if(count)count.textContent=fa(agentData.runs.length);el.innerHTML=agentData.runs.length?agentData.runs.map(r=>'<div class="visual-row"><div class="visual-row-head"><b>'+esc(r.name||'اجرای دستی')+'</b><span class="chip">'+esc(agentStatusBadge(r.status))+' — گام '+fa(r.steps||0)+'/'+fa(r.maxSteps||6)+'</span></div><div style="font-size:10px;color:#94a3b8;direction:ltr;text-align:left;margin:4px 0">'+(r.model?esc(r.model):'')+'</div>'+(r.result?'<div style="font-size:10px;color:#bbf7d0;margin-bottom:4px">'+esc(String(r.result).slice(0,220))+'</div>':'')+'<div class="cact">'+mButton('📜 لاگ','agent-run-logs:'+r.id,'btn-purple')+mButton('🗑 حذف','agent-run-delete:'+r.id,'btn-red')+'</div></div>').join(''):'<div class="empty">اجرایی ثبت نشده است.</div>'}
 function renderAgentStatusCard(run){const el=$('agentStatusCard'),badge=$('agentRunBadge');if(!el)return;if(!run){el.innerHTML='<div class="empty">هنوز اجرایی ثبت نشده است. از «اجرای سریع» شروع کنید.</div>';if(badge)badge.textContent='—';return}
@@ -14865,7 +14879,7 @@ app.onError((error, c) => {
   const text = message(error), status = /Unauthorized/.test(text) ? 401 : /not found/i.test(text) ? 404 : /Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text) ? 413 : /timeout|مهلت دریافت/i.test(text) ? 504 : /invalid|required|empty|خالی|نامعتبر/i.test(text) ? 400 : /HTTP|fetch|network|اتصال/i.test(text) ? 502 : 500;
   return c.json({ ok: false, error: text, requestId: c.get("requestId") }, status);
 });
-app.get("/health", (c) => c.json({ ok: true, app: "scraper4-cloudflare", runtime: "cloudflare-workers", databaseReady: Boolean(c.env.DB), databaseError: c.env.DB ? null : "D1 binding DB is missing", workerInWeb: Boolean(c.env.JOBS), authenticationRequired: false, version: c.env.WORKER_VERSION || "1.17.1", time: (/* @__PURE__ */ new Date()).toISOString() }));
+app.get("/health", (c) => c.json({ ok: true, app: "scraper4-cloudflare", runtime: "cloudflare-workers", databaseReady: Boolean(c.env.DB), databaseError: c.env.DB ? null : "D1 binding DB is missing", workerInWeb: Boolean(c.env.JOBS), authenticationRequired: false, version: c.env.WORKER_VERSION || "1.17.2", time: (/* @__PURE__ */ new Date()).toISOString() }));
 app.get("/", async (c) => {
   await ensureSchema(c.env.DB);
   return c.html(DASHBOARD);
@@ -14894,7 +14908,7 @@ app.get("/api/status", async (c) => {
 app.get("/api/selftest", async (c) => c.json(await runSelftest()));
 app.get("/api/debug", async (c) => c.json(await runDiagnostics()));
 app.get("/api/parity", (c) => c.json({ ok: true, total: PHP_MENU_CAPABILITIES.length, capabilities: PHP_MENU_CAPABILITIES, dispatcherAudit: { reference: "scraper4.php v9.80", total: 178, get: 150, post: 28, mapped: 178, missing: 0, artifact: "parity-manifest.json" } }));
-app.get("/api/version", (c) => c.json({ ok: true, version: c.env.WORKER_VERSION || "1.17.1", runtime: "cloudflare-workers", deployment: "wrangler versions deploy / wrangler rollback" }));
+app.get("/api/version", (c) => c.json({ ok: true, version: c.env.WORKER_VERSION || "1.17.2", runtime: "cloudflare-workers", deployment: "wrangler versions deploy / wrangler rollback" }));
 app.get("/api/connections", async (c) => c.json({ ok: true, connections: await loadConnections(true) }));
 app.post("/api/connections", async (c) => c.json({ ok: true, connections: await saveConnections(await c.req.json()) }));
 app.get("/api/ai/providers", async (c) => c.json({ ok: true, providers: await aiProviders(), leaderboard: await getLeaderboard() }));

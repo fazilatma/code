@@ -16,9 +16,15 @@ test('the free tool-calling model catalog is present, unique and clearly tagged'
   const ids=new Set(agent.AGENT_TOOL_MODELS.map(m=>m.id));
   assert.equal(ids.size,agent.AGENT_TOOL_MODELS.length,'model ids are unique');
   assert.ok(agent.AGENT_TOOL_MODELS.every(m=>m.name&&m.note),'every model has a name and a Persian note');
-  assert.ok(agent.AGENT_TOOL_MODELS.filter(m=>m.free).length>=5,'the free Cloudflare models are listed');
+  assert.ok(agent.AGENT_TOOL_MODELS.filter(m=>m.free).length>=5,'the free models are listed');
   assert.ok(agent.AGENT_TOOL_MODELS.filter(m=>m.id!=='*configured').every(m=>m.toolCalling===true),'every curated model carries the toolCalling tag');
   assert.equal(agent.AGENT_TOOL_MODELS.find(m=>m.id==='*configured').toolCalling,false,'the configured-provider option is explicitly non-tagged');
+  const leanstral=agent.AGENT_TOOL_MODELS.find(m=>m.id==='labs-leanstral-2603');
+  assert.ok(leanstral&&leanstral.toolCalling===true,'labs-leanstral-2603 is listed as a tool-calling model');
+  assert.equal(leanstral.free,false,'Leanstral is a paid lab model');
+  const prism=agent.AGENT_TOOL_MODELS.find(m=>m.id==='Prism-ML/Ternary-Bonsai-27B');
+  assert.ok(prism&&prism.toolCalling===true,'Together Prism (Ternary Bonsai 27B) is listed as a tool-calling model');
+  assert.equal(prism.free,true,'Together Prism is on the free tier');
 });
 
 test('ready-made prompt templates exist, are unique and reference valid tools',()=>{

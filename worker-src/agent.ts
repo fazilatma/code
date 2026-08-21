@@ -23,6 +23,8 @@ export const AGENT_TOOL_MODELS:AgentToolModel[]=[
   {id:'@cf/meta/llama-3.3-70b-instruct-fp8-fast',name:'Llama 3.3 70B Instruct (FP8 Fast)',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'دقت بالا برای تحلیل‌های پیچیده.'},
   {id:'@cf/meta/llama-4-scout-17b-16e-instruct',name:'Llama 4 Scout 17B',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'نسل جدید Llama با پشتیبانی از فراخوانی ابزار.'},
   {id:'@cf/meta/llama-4-maverick-17b-128e-instruct',name:'Llama 4 Maverick 17B',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'قوی‌ترین مدل رایگانِ این فهرست برای tool use.'},
+  {id:'Prism-ML/Ternary-Bonsai-27B',name:'Prism Ternary Bonsai 27B',vendor:'PrismML — Together AI',free:true,toolCalling:true,note:'رایگان روی Together AI (api.together.xyz/v1)؛ مدل استدلالی با فراخوانی ابزار. برای استفاده، یک ارائه‌دهنده با Base URL «https://api.together.xyz/v1» بسازید و همین شناسه را به مدل‌هایش اضافه کنید.'},
+  {id:'labs-leanstral-2603',name:'Leanstral 2603 (119B)',vendor:'Mistral AI (labs)',free:false,toolCalling:true,note:'مدل آزمایشگاهی Mistral با فراخوانی ابزار و استدلال؛ از طریق API مایسترال (labs-leanstral-2603) در دسترس است.'},
   {id:'*configured',name:'مدل‌های ارائه‌دهنده‌های تنظیم‌شده',vendor:'OpenAI-compatible (GPT، DeepSeek، Qwen و…)',free:false,toolCalling:false,note:'از مدل‌های ذخیره‌شدهٔ خودتان انتخاب کنید؛ مدل باید فراخوانی ابزار (tool calling) پشتیبانی کند.'}
 ];
 

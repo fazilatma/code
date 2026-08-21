@@ -102,8 +102,17 @@ export async function aiAgentCall(provider:Provider,model:string,messages:Array<
     }
     throw new AiResponseError('هیچ مدل Cloudflare برای این شناسه پیدا نشد',{ok:false,phase:'configuration',provider:provider.id,providerName:provider.name,model,prompt:messages[messages.length-1]?.content||'',latencyMs:Date.now()-started});
   }
-  const endpoint=openAiEndpoint(provider.baseUrl),payload:any={model:canonical,messages,tools,tool_choice:'auto',max_tokens:maxTokens,temperature:.2};
-  const result=await requestAi(endpoint,payload,provider,network,timeoutMs);
+  const endpoint=openAiEndpoint(provider.baseUrl),reasoning=isReasoningAiModel(provider,model),payload:any={model:canonical,messages,tools,tool_choice:'auto',max_tokens:maxTokens};
+  if(!reasoning)payload.temperature=.2;
+  let result=await requestAi(endpoint,payload,provider,network,timeoutMs),usedPayload=payload;
+  // Some reasoning/tool models reject temperature or max_tokens; adapt only on payload-shape 400/422.
+  for(let attempt=0;attempt<3;attempt++){
+    if(result.networkError||!result.response||result.response.ok||isCreditAiStatus(result.response.status,aiErrorMessage(result.body)))break;
+    const errorText=aiErrorMessage(result.body);
+    if(!isPayloadShapeError(result.response.status,errorText))break;
+    const adapted=adjustChatPayload(usedPayload,errorText);if(!adapted)break;
+    usedPayload=adapted;result=await requestAi(endpoint,usedPayload,provider,network,timeoutMs);
+  }
   if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt:messages[messages.length-1]?.content||'',endpoint:safeEndpoint(endpoint),latencyMs:Date.now()-started,raw:{error:reason}})}
   const response=result.response!,body=result.body,latencyMs=Date.now()-started,errorText=aiErrorMessage(body)||response.statusText||'AI error';
   if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${errorText}`,{ok:false,phase:'http',provider:provider.id,providerName:provider.name,model,prompt:messages[messages.length-1]?.content||'',endpoint:safeEndpoint(endpoint),latencyMs,httpStatus:response.status,raw:body});
@@ -177,7 +186,7 @@ function cloudflareModelIds(raw:string):string[]{
 function canonicalAiModel(model:string){return String(model||'').trim().replace(/^~+/,'')}
 function isOpenRouter(provider:Pick<Provider,'id'|'name'|'baseUrl'>,endpoint=''){return provider.id==='openrouter'||/openrouter/i.test(String(provider.name||''))||/openrouter\.ai/i.test(String(provider.baseUrl||endpoint||''))}
 function aiRequestHeaders(provider:Provider,endpoint:string,method:'POST'|'GET'='POST'):Record<string,string>{
-  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.17.1'};
+  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.17.2'};
   if(method==='POST')headers['content-type']='application/json';
   if(isOpenRouter(provider,endpoint)){headers['http-referer']='https://scraper4.workers.dev';headers.referer='https://scraper4.workers.dev';headers['x-title']='Scraper 4'}
   return headers;
