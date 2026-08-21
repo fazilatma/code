@@ -38,8 +38,8 @@ export async function aiCall(provider:Provider,model:string,prompt:string,networ
   if(isCloudflareNative(provider.baseUrl))return cloudflareCall(provider,model,prompt,network,started,timeoutMs);
   const endpointType=aiModelEndpoint(provider,model);
   if(endpointType!=='chat-completions')return mistralDedicatedCall(provider,model,prompt,network,started,endpointType,timeoutMs);
-  const endpoint=openAiEndpoint(provider.baseUrl),reportedEndpoint=safeEndpoint(endpoint),reasoning=isReasoningAiModel(provider,model),messages=[{role:'user',content:prompt}],payload:any={model,messages,max_tokens:reasoning?1600:400};if(!reasoning)payload.temperature=.2;
-  if(batchId)return batchChatCall(provider,model,prompt,payload,network,started,timeoutMs,reasoning,batchId);
+  const endpoint=openAiEndpoint(provider.baseUrl),reportedEndpoint=safeEndpoint(endpoint),reasoning=isReasoningAiModel(provider,model),chatModel=canonicalAiModel(model),messages=[{role:'user',content:prompt}],payload:any={model:chatModel,messages,max_tokens:reasoning?1600:400};if(!reasoning)payload.temperature=.2;
+  if(batchId)return batchChatCall(provider,chatModel,prompt,payload,network,started,timeoutMs,reasoning,batchId);
   let result=await requestAi(endpoint,payload,provider,network,timeoutMs),usedPayload=payload;
   // Providers disagree on token-limit field names and whether temperature is legal; adapt only on 400/422, never on billing/credit errors.
   for(let attempt=0;attempt<3;attempt++){
@@ -51,7 +51,7 @@ export async function aiCall(provider:Provider,model:string,prompt:string,networ
   }
   if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:reportedEndpoint,latencyMs:Date.now()-started,reasoning,raw:{error:reason}})}
   const response=result.response!,body=result.body,latencyMs=Date.now()-started,errorText=aiErrorMessage(body)||response.statusText||'AI error';
-  if(!response.ok&&isBatchOnlyError(response.status,errorText))return batchChatCall(provider,model,prompt,usedPayload,network,started,timeoutMs,reasoning);
+  if(!response.ok&&isBatchOnlyError(response.status,errorText))return batchChatCall(provider,chatModel,prompt,usedPayload,network,started,timeoutMs,reasoning);
   if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${errorText}`,{...failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body),reasoning});
   return validatedChatSuccess(provider,model,prompt,reportedEndpoint,latencyMs,response,body,{endpointType:'chat-completions',chatCompatible:true,reasoning});
 }
@@ -121,12 +121,28 @@ function cloudflareModelIds(raw:string):string[]{
   }
   return [...new Set(out.filter(Boolean))];
 }
+function canonicalAiModel(model:string){return String(model||'').trim().replace(/^~+/,'')}
+function isOpenRouter(provider:Pick<Provider,'id'|'name'|'baseUrl'>,endpoint=''){return provider.id==='openrouter'||/openrouter/i.test(String(provider.name||''))||/openrouter\.ai/i.test(String(provider.baseUrl||endpoint||''))}
+function aiRequestHeaders(provider:Provider,endpoint:string,method:'POST'|'GET'='POST'):Record<string,string>{
+  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.15.0'};
+  if(method==='POST')headers['content-type']='application/json';
+  if(isOpenRouter(provider,endpoint)){headers['http-referer']='https://scraper4.workers.dev';headers.referer='https://scraper4.workers.dev';headers['x-title']='Scraper 4'}
+  return headers;
+}
+function isSecurityPolicyError(status:number,message:string){return status===403&&/access denied by security policy|security policy|cf-mitigated|bot fight/i.test(String(message||''))}
 async function requestAi(endpoint:string,payload:any,provider:Provider,network:Network,timeoutMs?:number):Promise<RequestResult>{
-  try{const response=await networkFetch(endpoint,{method:'POST',headers:{authorization:`Bearer ${provider.apiKey}`,'content-type':'application/json'},body:JSON.stringify(payload)},network,timeoutMs),rawText=await response.text(),body=parseResponse(rawText,provider.apiKey);return{response,body,rawText}}
-  catch(error){return{networkError:error instanceof Error?error.message:String(error)}}
+  try{
+    const headers=aiRequestHeaders(provider,endpoint,'POST');
+    let response=await networkFetch(endpoint,{method:'POST',headers,body:JSON.stringify(payload)},network,timeoutMs),rawText=await response.text(),body=parseResponse(rawText,provider.apiKey);
+    if(isSecurityPolicyError(response.status,aiErrorMessage(body))){
+      const retryHeaders:Record<string,string>={...headers,'user-agent':'Scraper4-AI/1.15'};delete retryHeaders.referer;delete retryHeaders['http-referer'];delete retryHeaders['x-title'];
+      response=await networkFetch(endpoint,{method:'POST',headers:retryHeaders,body:JSON.stringify(payload)},network,timeoutMs);rawText=await response.text();body=parseResponse(rawText,provider.apiKey);
+    }
+    return{response,body,rawText};
+  }catch(error){return{networkError:error instanceof Error?error.message:String(error)}}
 }
 async function requestAiGet(endpoint:string,provider:Provider,network:Network,timeoutMs?:number):Promise<RequestResult>{
-  try{const response=await networkFetch(endpoint,{method:'GET',headers:{authorization:`Bearer ${provider.apiKey}`,accept:'application/json'}},network,timeoutMs),rawText=await response.text(),body=parseResponse(rawText,provider.apiKey);return{response,body,rawText}}
+  try{const response=await networkFetch(endpoint,{method:'GET',headers:aiRequestHeaders(provider,endpoint,'GET')},network,timeoutMs),rawText=await response.text(),body=parseResponse(rawText,provider.apiKey);return{response,body,rawText}}
   catch(error){return{networkError:error instanceof Error?error.message:String(error)}}
 }
 function isCreditAiText(value:string){return /(?:^|\b)(?:402|insufficient[_.\s-]?quota|insufficient[_.\s-]?credit|credit[_.\s-]?balance|payment[_.\s-]?required|billing|out of credits|no credits|موجودی اعتبار|اعتبار.*تمام|شارژ.*تمام)(?:\b|$)/i.test(String(value||''))&&!/(?:429|rate.?limit|too many requests)/i.test(String(value||''))}
@@ -232,7 +248,7 @@ export function isCreditAiResult(row:any):boolean{
 export function isRetryableAiResult(row:any):boolean{
   if(!row||row.ok||isCreditAiResult(row))return false;
   if(row.skipped||row.phase==='transport-skip'||row.phase==='batch-pending'||row.retryable)return true;
-  return /مهلت دریافت|timeout|AbortError|گیر کردن|خودکار رد|batch api هنوز|\b429\b|rate.?limit|too many requests|overloaded|temporarily unavailable/i.test([row.error,row.phase,row.catResponse,row.httpStatus].map(x=>String(x||'')).join(' '));
+  return /مهلت دریافت|timeout|AbortError|گیر کردن|خودکار رد|batch api هنوز|\b429\b|rate.?limit|too many requests|overloaded|temporarily unavailable|security policy|access denied by security policy/i.test([row.error,row.phase,row.catResponse,row.httpStatus].map(x=>String(x||'')).join(' '));
 }
 function aiTestTasks(ai:any,providers:Provider[],onlyCandidates:boolean):AiTestTask[]{
   const wanted=new Set<string>(Array.isArray(ai.candidates)?ai.candidates.map(String):[]),columns:AiTestTask[][]=[];

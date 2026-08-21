@@ -476,6 +476,20 @@ test('hung AI retry pass tests one model from each provider in parallel',async()
 });
 
 
+
+test('OpenRouter requests send API headers, strip alias prefixes, and retry security-policy 403',async()=>{
+  const originalFetch=globalThis.fetch,originalError=console.error,db=new MemoryD1(),calls=[];console.error=()=>{};
+  try{
+    await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'openrouter',name:'OpenRouter',baseUrl:'https://openrouter.ai/api/v1',apiKey:'or-secret',models:['~qwen/qwen3.8-max'],enabled:true}],network:{mode:'direct'}}}));
+    globalThis.fetch=async(_request,init={})=>{const headers=new Headers(init.headers),body=init.body?JSON.parse(String(init.body)):null;calls.push({body,ua:headers.get('user-agent'),referer:headers.get('http-referer')||headers.get('referer'),title:headers.get('x-title'),authorization:headers.get('authorization')});
+      if(/Mozilla\/5\.0/.test(String(headers.get('user-agent')||''))||!headers.get('x-title'))return jsonResponse({success:false,error:'Access denied by security policy.'},403);
+      return jsonResponse({choices:[{message:{content:'سلام از OpenRouter'}}]})};
+    const result=await call(db,'/api/test-connection/ai',jsonInit({provider:'openrouter',model:'~qwen/qwen3.8-max',prompt:'سلام'})).then(response=>response.json());
+    assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.text,'سلام از OpenRouter');assert.ok(calls.length>=1);assert.match(String(calls[0].ua||''),/^Scraper4/);assert.equal(calls[0].referer,'https://scraper4.workers.dev');assert.equal(calls[0].title,'Scraper 4');assert.equal(calls[0].authorization,'Bearer or-secret');assert.doesNotMatch(String(calls[0].ua||''),/Mozilla\/5\.0/);assert.equal(calls.at(-1).body.model,'qwen/qwen3.8-max');
+  }finally{globalThis.fetch=originalFetch;console.error=originalError}
+});
+
+
 function jsonResponse(body,status=200,headers={}){return new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json',...headers}})}
 
 class TestHTMLRewriter {
