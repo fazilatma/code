@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.98';
+const APP_VERSION = '9.99';
 const APP_VERSION_DATE = '1405/05/30';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1289,14 +1289,80 @@ function aiNetCfg(?array $cn = null): array {
  * چرا: وقتی DNS محلی پاسخ جعلی می‌دهد، این مسیر رمزگذاری‌شده است و
  * فیلترشکن هم لازم ندارد چون خودِ کلادفلر/گوگل از ایران در دسترس‌اند.
  */
+/* =====================================================================
+ *  v9.99: حافظهٔ مشترکِ DoH — IPهای سالم، IPهای «سوخته» و شکست‌های اخیر.
+ *
+ *  گزارش تست کاربر: برای huggingface و cerebras همهٔ مدل‌ها پشت‌سرهم
+ *  «Connection timed out after 15002 ms» روی doh(65.8.131.16) گرفتند.
+ *  علت: aiDohResolve فقط اولین رکورد A را می‌گرفت و آن را تا پایانِ
+ *  پردازه کش می‌کرد؛ اگر آن IP بی‌ربط بود، هر ۲۶ مدل یکی‌یکی ۱۵ ثانیه
+ *  می‌سوختند. حالا:
+ *    • همهٔ رکوردهای A نگه داشته می‌شوند (نه فقط اولی)
+ *    • IPی که به اتصال نرسید «سوخته» علامت می‌خورد و دیگر برنمی‌گردد
+ *    • اگر خودِ DoH پاسخ نداد، ۹۰ ثانیه منفی-کش می‌شود تا زنجیرهٔ
+ *      تایم‌اوت برای بقیهٔ مدل‌های همان ارائه‌دهنده تکرار نشود
+ *    • اگر یک اندپوینتِ DoH خراب بود، اندپوینت بعدی امتحان می‌شود
+ * ===================================================================== */
+function &aiDohStore(): array {
+    static $s = ['ips' => [], 'bad' => [], 'fail' => []];
+    return $s;
+}
+/** یک IP را برای این میزبان «سوخته» علامت می‌زند تا دیگر استفاده نشود */
+function aiDohMarkBad(string $host, string $ip): void {
+    $host = strtolower(trim($host)); $ip = trim($ip);
+    if ($host === '' || $ip === '') return;
+    $s = &aiDohStore();
+    $s['bad'][$host][$ip] = time();
+    if (!empty($s['ips'][$host])) {
+        $left = [];
+        foreach ($s['ips'][$host] as $x) { if ($x !== $ip) $left[] = $x; }
+        if ($left) $s['ips'][$host] = $left; else unset($s['ips'][$host]);
+    }
+}
+/** فهرست اندپوینت‌های DoH: انتخابِ کاربر، سپس کلادفلر و گوگل */
+function aiDohEndpoints(string $dohUrl): array {
+    $list = [];
+    $dohUrl = trim($dohUrl);
+    if ($dohUrl !== '') $list[] = $dohUrl;
+    foreach (['https://cloudflare-dns.com/dns-query', 'https://dns.google/resolve'] as $d) {
+        if (!in_array($d, $list, true)) $list[] = $d;
+    }
+    return $list;
+}
 function aiDohResolve(string $host, string $dohUrl = '', int $timeout = 10): array {
-    static $cache = [];
     $host = strtolower(trim($host));
     if ($host === '') return ['ok' => false, 'error' => 'میزبان خالی'];
     if (filter_var($host, FILTER_VALIDATE_IP)) return ['ok' => true, 'ip' => $host, 'cached' => false];
-    if (isset($cache[$host])) return ['ok' => true, 'ip' => $cache[$host], 'cached' => true];
-
-    $dohUrl = $dohUrl !== '' ? $dohUrl : 'https://cloudflare-dns.com/dns-query';
+    $s = &aiDohStore();
+    if (!empty($s['ips'][$host]))
+        return ['ok' => true, 'ip' => $s['ips'][$host][0], 'cached' => true, 'ips' => $s['ips'][$host]];
+    /* منفی-کش: اگر همین الان DoH برای این میزبان شکست خورده، ۹۰ ثانیه
+       دوباره امتحان نکن — وگرنه هر مدلِ بعدی دوباره تایم‌اوت می‌شود. */
+    if (isset($s['fail'][$host]) && (time() - (int)$s['fail'][$host]['t']) < 90)
+        return ['ok' => false, 'error' => (string)$s['fail'][$host]['e'], 'cachedFail' => true];
+    $lastErr = '';
+    foreach (aiDohEndpoints($dohUrl) as $dohEp) {
+        if (aiTestStopRequested()) return ['ok' => false, 'error' => 'stopped'];
+        $r = aiDohQuery($host, $dohEp, $timeout);
+        if (!empty($r['stopped'])) return ['ok' => false, 'error' => 'stopped'];
+        if (!empty($r['ok'])) {
+            $ips = [];
+            foreach ($r['ips'] as $ip) { if (!isset($s['bad'][$host][$ip])) $ips[] = $ip; }
+            if ($ips) {
+                $s['ips'][$host] = $ips;
+                unset($s['fail'][$host]);
+                return ['ok' => true, 'ip' => $ips[0], 'cached' => false, 'ips' => $ips];
+            }
+            $lastErr = 'همهٔ IPهای این میزبان قبلاً ناموفق بوده‌اند';
+            continue;
+        }
+        $lastErr = (string)$r['error'];
+    }
+    $s['fail'][$host] = ['t' => time(), 'e' => $lastErr !== '' ? $lastErr : 'DoH ناموفق'];
+    return ['ok' => false, 'error' => (string)$s['fail'][$host]['e']];
+}
+/** یک پرس‌وجوی DoH به یک اندپوینت مشخص — همهٔ رکوردهای A را برمی‌گرداند */
+function aiDohQuery(string $host, string $dohUrl, int $timeout = 10): array {
     $url = $dohUrl . (strpos($dohUrl, '?') === false ? '?' : '&')
          . 'name=' . urlencode($host) . '&type=A';
     $ch = curl_init($url);
@@ -1319,35 +1385,40 @@ function aiDohResolve(string $host, string $dohUrl = '', int $timeout = 10): arr
     $err  = curl_error($ch);
     $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     curl_close($ch);
-    if (aiTestStopRequested()) return ['ok' => false, 'error' => 'stopped'];   // v9.45
+    if (aiTestStopRequested()) return ['ok' => false, 'error' => 'stopped', 'stopped' => true];   // v9.45
     if ($code !== 200) return ['ok' => false, 'error' => 'DoH پاسخ نداد (HTTP ' . $code . ') ' . $err];
     $j = json_decode((string)$body, true);
+    $ips = [];
     foreach ((array)($j['Answer'] ?? []) as $a) {
         $ip = trim((string)($a['data'] ?? ''));
-        if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-            $cache[$host] = $ip;
-            return ['ok' => true, 'ip' => $ip, 'cached' => false];
-        }
+        if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)
+            && !in_array($ip, $ips, true)) $ips[] = $ip;
     }
+    if ($ips) return ['ok' => true, 'ips' => $ips];
     return ['ok' => false, 'error' => 'رکورد A پیدا نشد'];
 }
 
-/**
- * درخواست HTTP با اعمال روش عبور انتخاب‌شده.
- * خروجی: ['ok','code','body','raw','error','via','effective_url']
- */
-function aiHttp(string $url, array $headers, ?array $payload, array $net, ?string $forceMode = null): array {
+/* =====================================================================
+ *  v9.99: aiHttp به سه بخش شکسته شد تا همان منطق هم به‌صورت تکی و هم
+ *  به‌صورت موازی (curl_multi) قابل استفاده باشد:
+ *     aiHttpPrepare() → یک هندلِ curl آمادهٔ اجرا + فراداده می‌سازد
+ *     aiHttpFinish()  → خروجیِ خامِ curl را به نتیجهٔ استاندارد تبدیل می‌کند
+ *     aiHttp()        → همان رفتارِ قبلی (prepare ➜ exec ➜ finish)
+ *  هیچ رفتاری برای مسیرهای موجود عوض نمی‌شود؛ فقط قابلِ‌اشتراک شد.
+ * ===================================================================== */
+function aiHttpPrepare(string $url, array $headers, ?array $payload, array $net, ?string $forceMode = null): array {
     $mode = $forceMode ?? ($net['mode'] ?? 'direct');
     $parts = parse_url($url);
     $host  = (string)($parts['host'] ?? '');
     $reqUrl = $url;
     $extraHeaders = [];
     $via = $mode;
+    $pinnedIp = '';   // v9.99: IPی که با DoH/دستی به curl تحمیل شده
 
     if ($mode === 'worker') {
         // پروکسی معکوس: آدرس مقصد را به‌عنوان مسیر/هدر می‌فرستیم.
         $w = rtrim((string)$net['worker_url'], '/');
-        if ($w === '') return ['ok' => false, 'code' => 0, 'error' => 'آدرس Worker خالی است', 'via' => $mode];
+        if ($w === '') return ['err' => ['ok' => false, 'code' => 0, 'error' => 'آدرس Worker خالی است', 'via' => $mode, 'mode' => $mode]];
         // دو الگوی رایج پشتیبانی می‌شود:
         //   https://worker.example.workers.dev/https://api.openai.com/v1/...
         //   https://worker.example.workers.dev/v1/...   (+ هدر X-Target-Base)
@@ -1386,21 +1457,22 @@ function aiHttp(string $url, array $headers, ?array $payload, array $net, ?strin
         $ip = '';
         if ($mode === 'dns') {
             $ip = (string)$net['resolve_ip'];
-            if ($ip === '') { curl_close($ch); return ['ok' => false, 'code' => 0, 'error' => 'IP دستی وارد نشده', 'via' => $mode]; }
+            if ($ip === '') { curl_close($ch); return ['err' => ['ok' => false, 'code' => 0, 'error' => 'IP دستی وارد نشده', 'via' => $mode, 'mode' => $mode]]; }
         } else {
             $r = aiDohResolve($host, (string)$net['doh_url'], min(10, (int)$net['timeout']));
-            if (empty($r['ok'])) { curl_close($ch); return ['ok' => false, 'code' => 0, 'error' => 'DoH: ' . ($r['error'] ?? '?'), 'via' => $mode]; }
+            if (empty($r['ok'])) { curl_close($ch); return ['err' => ['ok' => false, 'code' => 0, 'error' => 'DoH: ' . ($r['error'] ?? '?'), 'via' => $mode, 'mode' => $mode]]; }
             $ip = (string)$r['ip'];
             $via = 'doh(' . $ip . ')';
         }
         $port = (int)($parts['port'] ?? (($parts['scheme'] ?? 'https') === 'https' ? 443 : 80));
         // نام میزبان دست‌نخورده می‌ماند، فقط مقصد TCP عوض می‌شود
         $opt[CURLOPT_RESOLVE] = [$host . ':' . $port . ':' . $ip];
+        $pinnedIp = $ip;   // v9.99: اگر این IP به اتصال نرسید، «سوخته» علامتش می‌زنیم
     }
 
     if ($mode === 'proxy') {
         $px = (string)$net['proxy'];
-        if ($px === '') { curl_close($ch); return ['ok' => false, 'code' => 0, 'error' => 'آدرس پروکسی خالی است', 'via' => $mode]; }
+        if ($px === '') { curl_close($ch); return ['err' => ['ok' => false, 'code' => 0, 'error' => 'آدرس پروکسی خالی است', 'via' => $mode, 'mode' => $mode]]; }
         $opt[CURLOPT_PROXY] = $px;
         $map = [
             'http'   => CURLPROXY_HTTP,
@@ -1422,15 +1494,45 @@ function aiHttp(string $url, array $headers, ?array $payload, array $net, ?strin
     curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, function ($ch2, $dlt, $dltT, $ult, $ultT) {
         return aiTestStopRequested() ? 1 : 0;   // غیرصفر → abort
     });
+    return ['ch' => $ch, 'mode' => $mode, 'via' => $via, 'host' => $host,
+            'pinnedIp' => $pinnedIp, 'reqUrl' => $reqUrl];
+}
+
+/** خروجیِ خامِ یک هندلِ curlِ اجراشده را به نتیجهٔ استاندارد تبدیل می‌کند */
+function aiHttpFinish(array $h, $raw, string $err, int $code, string $eurl): array {
+    $host = (string)($h['host'] ?? '');
+    $pinnedIp = (string)($h['pinnedIp'] ?? '');
+    /* v9.99: اگر IP را خودمان (DoH) تحمیل کرده بودیم و اتصال اصلاً برقرار
+       نشد، آن IP را «سوخته» علامت بزن تا مدل‌های بعدیِ همان ارائه‌دهنده
+       دوباره ۱۵ ثانیه روی همان IP بی‌ربط نسوزند. */
+    if ($pinnedIp !== '' && $code === 0 && $err !== '' && !aiTestStopRequested()) {
+        $el = strtolower($err);
+        if (strpos($el, 'timed out') !== false || strpos($el, 'connect') !== false
+            || strpos($el, 'refused') !== false || strpos($el, 'reset') !== false
+            || strpos($el, 'unreachable') !== false) {
+            aiDohMarkBad($host, $pinnedIp);
+        }
+    }
+    return ['ok' => $code >= 200 && $code < 300, 'code' => $code, 'error' => $err,
+            'body' => @json_decode((string)$raw, true), 'raw' => $raw,
+            'via' => (string)($h['via'] ?? ''), 'effective_url' => $eurl,
+            'req_url' => (string)($h['reqUrl'] ?? ''), 'mode' => (string)($h['mode'] ?? '')];
+}
+
+/**
+ * درخواست HTTP با اعمال روش عبور انتخاب‌شده.
+ * خروجی: ['ok','code','body','raw','error','via','effective_url']
+ */
+function aiHttp(string $url, array $headers, ?array $payload, array $net, ?string $forceMode = null): array {
+    $h = aiHttpPrepare($url, $headers, $payload, $net, $forceMode);
+    if (isset($h['err'])) return $h['err'];
+    $ch = $h['ch'];
     $raw  = curl_exec($ch);
     $err  = curl_error($ch);
     $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     $eurl = (string)curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
     curl_close($ch);
-
-    return ['ok' => $code >= 200 && $code < 300, 'code' => $code, 'error' => $err,
-            'body' => @json_decode((string)$raw, true), 'raw' => $raw,
-            'via' => $via, 'effective_url' => $eurl];
+    return aiHttpFinish($h, $raw, $err, $code, $eurl);
 }
 
 /* =====================================================================
@@ -1502,6 +1604,197 @@ function aiTestNetworkFailure(array $r): array {
     }
     return ['code' => $code, 'cat' => $cat, 'label' => $label, 'reachable' => $reachable, 'error' => (string)($r['error'] ?? '')];
 }
+/* =====================================================================
+ *  v9.99: تشخیصِ «خطا از واسطه است، نه از خودِ سرویس»
+ *
+ *  گزارش تست کاربر: ۴۹ مدل از ۵۰ مدلِ OpenRouter و هر ۱۵ مدلِ Groq با
+ *  HTTP 403 رد شدند، ولی بدنهٔ پاسخ این بود:
+ *      {"success":false,"error":"Access denied by security policy."}
+ *  این متنِ خودِ Worker/پروکسیِ واسط است، نه پاسخِ OpenRouter. برای
+ *  Together هم صفحهٔ HTMLِ «Sorry, you have been blocked» کلادفلر آمده بود.
+ *
+ *  اهمیتش: aiProviderCall روی کدهای ۴۰۰/۴۰۳/۴۰۴/۴۲۹ عمداً می‌ایستد (تا
+ *  خطای منطقیِ سرویس را با تلاشِ بی‌فایده قاطی نکند). ولی وقتی ۴۰۳ از
+ *  واسطه آمده، ایستادن یعنی مسیرِ «مستقیم» که سالم است هرگز امتحان
+ *  نمی‌شود و همهٔ مدل‌ها بی‌دلیل «ناموفق» ثبت می‌شوند.
+ *
+ *  این تابع امضاهای واسطه را می‌شناسد تا حلقه به‌جای ایستادن، روشِ بعدی
+ *  را امتحان کند و در گزارش هم «مشکل از مسیر عبور» برچسب بخورد.
+ * ===================================================================== */
+function aiProxyLevelFailure(array $r, string $mode = ''): bool {
+    $code = (int)($r['code'] ?? 0);
+    if ($code < 400) return false;
+    $mode = $mode !== '' ? $mode : (string)($r['mode'] ?? '');
+    $viaProxy = in_array($mode, ['worker', 'proxy', 'gateway'], true);
+    $raw = (string)($r['raw'] ?? '');
+    $body = $r['body'] ?? null;
+    $low = strtolower($raw);
+
+    // ۱) امضاهای متنیِ صریحِ واسطه/CDN — حتی اگر روش «مستقیم» باشد
+    //    (چون ممکن است base_url خودش یک درگاه واسط باشد)
+    $sigs = ['access denied by security policy', 'sorry, you have been blocked',
+             'you have been blocked', 'attention required! | cloudflare',
+             'cf-error-details', 'error code: 1020', 'proxy.php',
+             'x-target-url', 'bad gateway', 'gateway timeout'];
+    foreach ($sigs as $sig) {
+        if ($sig !== '' && strpos($low, $sig) !== false) return true;
+    }
+
+    // ۲) پاسخِ HTML به‌جای JSON: هر API واقعی برای خطا JSON می‌دهد.
+    //    صفحهٔ HTML یعنی چیزی وسطِ راه جواب داده است.
+    $t = ltrim($raw);
+    if ($t !== '' && (stripos($t, '<!doctype') === 0 || stripos($t, '<html') === 0)) return true;
+
+    // ۳) پوستهٔ {"success":false,"error":"..."} که فرمتِ OpenAI نیست
+    if (is_array($body) && array_key_exists('success', $body) && $body['success'] === false
+        && isset($body['error']) && is_string($body['error'])
+        && !isset($body['error']['message'])) return true;
+
+    // ۴) از مسیر واسطه، خطای ۴۰۳/۵۰۲/۵۰۳ با پیامِ تهی یا صرفاً «Forbidden»
+    if ($viaProxy) {
+        if (in_array($code, [502, 503, 504], true)) return true;
+        if ($code === 403) {
+            $msg = '';
+            if (is_array($body)) {
+                $msg = (string)($body['error']['message'] ?? ($body['message'] ?? (is_string($body['error'] ?? null) ? $body['error'] : '')));
+            }
+            $msg = strtolower(trim($msg));
+            if ($msg === '' || $msg === 'forbidden' || $msg === 'access denied') return true;
+        }
+    }
+    return false;
+}
+
+/* v9.99: آیا این خطا مربوط به «اعتبار/اشتراک/سهمیه» است؟
+   این دسته عمداً «رفع» نمی‌شود — با هیچ تغییری در کد درست نمی‌شود و فقط
+   باید درست برچسب بخورد تا کاربر بداند باید شارژ/ارتقا بدهد یا مدل را
+   کنار بگذارد. (خواستهٔ صریح: خطاهای اعتبار را رفع نکن، دسته‌بندی کن.) */
+function aiBillingFailure(array $r): array {
+    $code = (int)($r['code'] ?? 0);
+    $raw  = strtolower((string)($r['raw'] ?? ''));
+    $body = $r['body'] ?? null;
+    $msg  = '';
+    if (is_array($body)) {
+        $msg = (string)($body['error']['message'] ?? ($body['message'] ?? ''));
+        if ($msg === '' && isset($body['error']) && is_string($body['error'])) $msg = $body['error'];
+        if ($msg === '' && !empty($body['errors'][0]['message'])) $msg = (string)$body['errors'][0]['message'];
+    } elseif (is_string($body) && $body !== '') {
+        // v9.99: بعضی سرویس‌ها بدنه را متنِ خام می‌فرستند (نه JSON). اگر فقط
+        // به raw تکیه کنیم، متنِ خطا از دست می‌رود و همه‌چیز «۴۰۲ = اعتبار»
+        // برچسب می‌خورد؛ در حالی که ممکن است «پلن» یا «اشتراک» باشد.
+        $msg = $body;
+    }
+    $hay = strtolower($msg) . ' ' . $raw;
+    // v9.99: ترتیبِ قانون‌ها مهم است — دسته‌های دقیق‌تر (پلن/اشتراک/Labs/آزمایشی)
+    // پیش از دستهٔ عمومیِ «اعتبار» سنجیده می‌شوند، وگرنه واژه‌های عامی مثل
+    // «billing» یا «payment required» همه را «credit» برچسب می‌زنند.
+    $rules = [
+        ['plan',    ['not available on the workers free plan', 'is not allowed to access',
+                     'upgrade your plan', 'requires a paid plan', 'paid plan'],
+                    'پلن رایگان اجازه نمی‌دهد — نیاز به ارتقای پلن'],
+        ['tier',    ['tier_not_allowed', 'not available in your subscription tier',
+                     'subscription tier', 'model_not_in_tier'],
+                    'مدل در سطحِ اشتراکِ شما نیست — نیاز به ارتقای اشتراک'],
+        ['labs',    ['labs_not_enabled', 'admin must enable', 'admin to enable', 'labs model'],
+                    'مدل Labs غیرفعال است — ادمینِ حساب باید فعالش کند'],
+        ['trial',   ['trial key', 'trial keys are limited', '1000 api calls'],
+                    'کلید آزمایشی سقف ماهانه دارد — کلید تولیدی لازم است'],
+        ['credit',  ['depleted your monthly included credits', 'monthly included credits',
+                     'insufficient credits', 'insufficient_quota', 'exceeded your current quota',
+                     'payment required', 'billing', 'add credits', 'out of credit'],
+                    'اعتبار تمام شده — باید حساب را شارژ کنید (رفع‌شدنی با کد نیست)'],
+    ];
+    foreach ($rules as $ru) {
+        foreach ($ru[1] as $needle) {
+            if ($needle !== '' && strpos($hay, $needle) !== false)
+                return ['is' => true, 'kind' => $ru[0], 'label' => $ru[2], 'msg' => mb_substr($msg, 0, 200)];
+        }
+    }
+    if ($code === 402) return ['is' => true, 'kind' => 'credit',
+        'label' => 'اعتبار تمام شده (۴۰۲) — باید حساب را شارژ کنید', 'msg' => mb_substr($msg, 0, 200)];
+    return ['is' => false, 'kind' => '', 'label' => '', 'msg' => ''];
+}
+
+/* =====================================================================
+ *  v9.99: مدل‌هایی که اصلاً «چت» نیستند
+ *
+ *  در گزارشِ تستِ کاربر ده‌ها ردیفِ Cloudflare با خطاهایی مثل
+ *    AiError: Bad input… required properties are 'text' / 'query,contexts'
+ *    {"code":7000,"message":"No route for that URI"}
+ *  شکست خورده بودند. این‌ها مدلِ خرابی نیستند — مدلِ embedding، تبدیل
+ *  متن‌به‌گفتار، تشخیصِ گفتار، تولید تصویر یا rerank اند و ورودیِ چت
+ *  نمی‌گیرند. تستِ چت روی آن‌ها همیشه شکست می‌خورد و فقط گزارش را شلوغ
+ *  و زمانِ تست را چند برابر می‌کند. این‌ها «رد شد» نیستند، «قابل‌تست
+ *  نیستند» و باید از صف کنار بروند.
+ * ===================================================================== */
+function aiNonChatModel(string $modelId, array $m = []): string {
+    $id = strtolower(trim($modelId));
+    if ($id === '') return '';
+    // اگر کاربر دستی علامت زده باشد، حرفِ او مقدم است
+    if (isset($m['chat'])) return empty($m['chat']) ? 'کاربر آن را غیرچت علامت زده' : '';
+    $rules = [
+        ['امبدینگ (متن را به بردار تبدیل می‌کند، پاسخ متنی ندارد)',
+         ['bge-', 'embeddinggemma', '/embed', 'text-embedding', 'embed-', 'e5-', 'gte-', 'jina-embed']],
+        ['بازچینش نتایج (rerank) — ورودی‌اش query و contexts است',
+         ['rerank', 'bge-reranker']],
+        ['تولید تصویر — خروجی‌اش تصویر است نه متن',
+         ['flux', 'stable-diffusion', 'sd-', 'sdxl', 'dreamshaper', 'lightning', 'phoenix-1', 'text-to-image']],
+        ['تبدیل گفتار به متن (ASR)', ['whisper', 'nova-3', 'speech-to-text']],
+        ['تبدیل متن به گفتار (TTS)', ['melotts', 'aura-1', 'text-to-speech', 'tts-']],
+        ['طبقه‌بندی/بینایی — خروجی برچسب است نه متن',
+         ['resnet', 'detr-', 'uform', 'clip-', 'image-classification']],
+        ['ترجمهٔ تخصصی — ورودی‌اش قالبِ چت نیست', ['m2m100', 'opus-mt']],
+        ['تشخیصِ نوبتِ گفتار', ['smart-turn']],
+        ['محافظ/مدیریت محتوا — پاسخِ گفت‌وگویی نمی‌دهد',
+         ['guard', 'shieldstral', 'moderation', 'llamaguard', 'llama-guard']],
+    ];
+    foreach ($rules as $ru) {
+        foreach ($ru[1] as $needle) {
+            if (strpos($id, $needle) !== false) return $ru[0];
+        }
+    }
+    return '';
+}
+
+/* =====================================================================
+ *  v9.99: اعتبارسنجیِ پاسخِ «ظاهراً موفق»
+ *
+ *  در گزارشِ تستِ کاربر ۹ مدلِ Cloudflare با available=true ثبت شده بودند
+ *  در حالی که متنِ پاسخشان JSONِ خامِ یک مدلِ دیگر بود
+ *  (model:"@cf/meta/llama-3.1-8b-fast-v2") و چند مدل هم پاسخی مثل
+ *  «OOOOO…» یا یک عبارتِ تکراری داده بودند. این‌ها مثبتِ کاذب‌اند: مدل
+ *  در عمل کار نمی‌کند ولی سبز ثبت می‌شود و بعداً در تولید خطا می‌دهد.
+ *
+ *  خروجی: رشتهٔ خالی = پاسخ سالم، وگرنه دلیلِ مشکوک‌بودن.
+ * ===================================================================== */
+function aiSuspectAnswer(string $text, string $modelId = ''): string {
+    $t = trim($text);
+    if ($t === '') return 'پاسخ خالی است';
+    // ۱) خودِ پاسخ یک JSONِ خام است (پوستهٔ سرویس، نه متنِ مدل)
+    if ((strpos($t, '{') === 0 || strpos($t, '[') === 0)) {
+        $j = json_decode($t, true);
+        if (is_array($j) && (isset($j['model']) || isset($j['choices']) || isset($j['result'])
+            || isset($j['usage']) || isset($j['object']))) {
+            $other = trim((string)($j['model'] ?? ''));
+            if ($other !== '' && $modelId !== '' && strcasecmp($other, $modelId) !== 0)
+                return 'پاسخ در واقع JSONِ خامِ مدلِ دیگری است: ' . mb_substr($other, 0, 60);
+            return 'به‌جای متن، JSONِ خامِ سرویس برگشته است';
+        }
+    }
+    // ۲) تکرارِ یک نویسه (مثل «OOOOO…») — نشانهٔ خرابیِ تولید
+    $len = mb_strlen($t);
+    if ($len >= 12) {
+        $chars = preg_split('//u', preg_replace('/\s+/u', '', $t), -1, PREG_SPLIT_NO_EMPTY);
+        if ($chars && count($chars) >= 12) {
+            $uniq = count(array_unique($chars));
+            if ($uniq <= 2) return 'پاسخ فقط تکرارِ یک نویسه است — خروجیِ خراب';
+        }
+    }
+    // ۳) تکرارِ یک عبارت پشت‌سرهم بیش از ۵ بار
+    if (preg_match('/(.{4,40}?)\1{5,}/u', $t)) return 'پاسخ یک عبارتِ تکرارشونده است — خروجیِ خراب';
+    return '';
+}
+
 /** انتخاب فعال {provider,model} را از connections می‌خواند */
 function aiSelected(): array {
     $s = loadConnections()['ai_selected'] ?? [];
@@ -1646,9 +1939,17 @@ function aiProviderEndpoint(array $p, string $model = ''): array {
     $raw = trim((string)($p['url'] ?? ''));
     if (preg_match('~^\[([^]]+)\]\(([^)]+)\)$~', $raw, $m)) $raw = $m[2];
     $vendor = strtolower(trim((string)($p['vendor'] ?? '')));
-    // Cloudflare: آدرس خودِ مدل (`.../ai/run/@cf/...`)
-    if (stripos($raw, '/ai/run/') !== false) {
+    // Cloudflare: آدرس خودِ مدل (`.../ai/run/@cf/...`) یا آدرس پایهٔ `.../ai/run`
+    // v9.99: قبلاً فقط `/ai/run/` (با اسلشِ پایانی) شناخته می‌شد؛ اگر کاربر آدرس
+    // را بدون اسلشِ آخر وارد می‌کرد، اشتباهاً OpenAI فرض می‌شد و `/chat/completions`
+    // به دنبالش می‌چسبید ⇒ خطای «No route for that URI».
+    if (stripos($raw, '/ai/run/') !== false || preg_match('~/ai/run/?$~i', $raw)) {
         return ['kind' => 'cloudflare', 'url' => $raw, 'model' => $model];
+    }
+    // v9.99: اندپوینت‌های نیتیوِ غیر-OpenAI که نباید `/chat/completions` بگیرند
+    if (preg_match('~/v\d+/(messages|generateContent|complete|generate)/?$~i', $raw)
+        || stripos($raw, ':generateContent') !== false) {
+        return ['kind' => 'native', 'url' => $raw, 'model' => $model];
     }
     // Ollama: اندپوینت سازگار با OpenAI روی /v1
     if ($vendor === 'ollama-models' || strpos($raw, '11434') !== false) {
@@ -1689,7 +1990,15 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
         return ['ok' => false, 'code' => 0, 'error' => 'شمارهٔ حساب Cloudflare در آدرس پیدا نشد', 'via' => 'direct'];
     }
     $acct = $m[1];
-    $base = 'https://api.cloudflare.com/client/v4/accounts/' . rawurlencode($acct) . '/ai/run/';
+    /* v9.99: پیش از این هاست به‌صورت ثابت api.cloudflare.com بود و آدرسِ واردشدهٔ
+       کاربر نادیده گرفته می‌شد؛ در نتیجه AI Gateway یا هر پروکسیِ سازگار کار
+       نمی‌کرد. حالا ریشهٔ آدرس از خودِ تنظیماتِ کاربر گرفته می‌شود و فقط اگر
+       چیزی نبود به هاستِ رسمی برمی‌گردیم. */
+    $cfRoot = '';
+    if (preg_match('~^(.*?/ai/run)(/|$)~i', $url, $mr)) $cfRoot = $mr[1];
+    $base = $cfRoot !== ''
+        ? rtrim($cfRoot, '/') . '/'
+        : 'https://api.cloudflare.com/client/v4/accounts/' . rawurlencode($acct) . '/ai/run/';
 
     // v9.32: فهرست نام‌های مدلِ امتحان‌شده.
     // خیلی از مدل‌های وارده فقط @cf/llama-... دارند در حالی که مسیر درست
@@ -1767,15 +2076,22 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
     $last = null; $r = null; $tried = []; $viaChat = false;
     foreach ($modelIds as $mid) {
         $target = $base . $mid;
+        /* v9.99: ترتیبِ بدنه‌ها برعکس شد — اول {messages} بعد {prompt}.
+           چرا: در گزارشِ تستِ کاربر چند مدلِ Cloudflare با HTTP 200 برگشتند
+           ولی پاسخ کاملاً بی‌ربط بود («OOOOO…» یا یک عبارتِ تکراری) و
+           prompt_tokens=1 نشان می‌داد فقط آخرین تکهٔ متن به‌عنوان
+           text-completion رفته است. مسیرِ {messages} همان چیزی است که مدلِ
+           instruct-tuned انتظار دارد و پاسخِ درست می‌دهد؛ {prompt} فقط
+           برای مدل‌های قدیمیِ non-chat به‌عنوان یدک می‌ماند. */
         $bodies = [];
-        $bA = ['prompt' => $prompt];
-        if ($maxTok > 0) $bA['max_tokens'] = $maxTok;
-        $bodies[] = $bA;
         if (!empty($messages)) {
             $bB = ['messages' => $messages];
             if ($maxTok > 0) $bB['max_tokens'] = $maxTok;
             $bodies[] = $bB;
         }
+        $bA = ['prompt' => $prompt];
+        if ($maxTok > 0) $bA['max_tokens'] = $maxTok;
+        $bodies[] = $bA;
         foreach ($bodies as $ab) {
             if (aiTestStopRequested()) {   // v9.45
                 return ['ok' => false, 'code' => 0, 'error' => 'stopped', 'stopped' => true, 'cf_tried_models' => $modelIds];
@@ -1793,7 +2109,10 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
        JSON می‌گیرد و خروجیِ استاندارد OpenAI را برمی‌گرداند؛ خیلی از ابزارهای
        تستِ خارجی با همین مسیر همهٔ مدل‌ها را ok گزارش می‌دهند. */
     if (empty($r['ok']) && !empty($messages)) {
-        $chatUrl = 'https://api.cloudflare.com/client/v4/accounts/' . rawurlencode($acct) . '/ai/v1/chat/completions';
+        // v9.99: همان ریشه‌ای که برای native استفاده شد (نه هاستِ ثابت)
+        $chatUrl = $cfRoot !== ''
+            ? preg_replace('~/ai/run$~i', '/ai/v1/chat/completions', rtrim($cfRoot, '/'))
+            : 'https://api.cloudflare.com/client/v4/accounts/' . rawurlencode($acct) . '/ai/v1/chat/completions';
         foreach ($modelIds as $mid2) {
             if (aiTestStopRequested()) {
                 return ['ok' => false, 'code' => 0, 'error' => 'stopped', 'stopped' => true, 'cf_tried_models' => $modelIds];
@@ -1949,6 +2268,8 @@ function aiProviderCall(array $p, string $model, array $payload, ?array $net = n
         }
     }
     $tried = [];
+    $proxyBlocked = null;   // v9.99: اولین پاسخی که از «واسطه» آمده، نه از سرویس
+    $svcAnswer = null;      // v9.99: اولین پاسخی که واقعاً از خودِ سرویس آمده
     foreach ($modes as $m) {
         /* v9.45: اگر وسطِ امتحانِ روش‌های مختلفِ اتصال، کاربر «توقف» را زده
            باشد، فوراً بیرون بیا — نه اینکه به سراغ روشِ بعدی برود. بدون این،
@@ -1961,12 +2282,29 @@ function aiProviderCall(array $p, string $model, array $payload, ?array $net = n
         if (aiTestStopRequested()) {
             return ['ok' => false, 'code' => 0, 'error' => 'stopped', 'stopped' => true, 'tried' => $tried];
         }
-        if (!empty($r['ok']) || in_array($r['code'], [400, 401, 403, 404, 422, 429], true)) {
+        if (!empty($r['ok'])) { $r['tried'] = $tried; return $r; }
+        /* v9.99: خطای ۴xx فقط وقتی «حرفِ آخرِ سرویس» است که از خودِ سرویس
+           آمده باشد. اگر امضای Worker/پروکسی/CDN داشت، روشِ بعدی را امتحان
+           کن — وگرنه یک واسطهٔ خرابْ همهٔ مدل‌ها را ناموفق نشان می‌دهد. */
+        if (aiProxyLevelFailure($r, $m)) {
+            $r['proxy_blocked'] = true;
+            $r['proxy_mode'] = $m;
+            if ($proxyBlocked === null) $proxyBlocked = $r;
+            continue;
+        }
+        /* v9.99: پاسخِ اعتبار/اشتراک (۴۰۲ و مانند آن) هم حرفِ آخرِ سرویس است؛
+           امتحانِ روش‌های دیگر فقط وقت تلف می‌کند چون مشکل شبکه‌ای نیست. */
+        if (in_array($r['code'], [400, 401, 402, 403, 404, 422, 429], true)) {
             $r['tried'] = $tried;
             return $r;
         }
+        /* v9.99: پاسخی که از خودِ سرویس آمده (کد HTTP معنادار دارد) را نگه دار
+           تا اگر هیچ روشی موفق نشد، بر پاسخِ واسطه ترجیح داده شود. */
+        if ($svcAnswer === null && (int)($r['code'] ?? 0) > 0) $svcAnswer = $r;
     }
-    $last = $r ?? ['ok' => false, 'code' => 0, 'error' => 'هیچ روشی اجرا نشد'];
+    /* اگر هیچ روشی موفق نشد: پاسخِ واقعیِ سرویس بر پاسخِ واسطه اولویت دارد،
+       وگرنه پاسخِ واسطه با برچسبِ درست برمی‌گردد تا در گزارش «۴۰۳ مدل» دیده نشود. */
+    $last = $svcAnswer ?? $proxyBlocked ?? ($r ?? ['ok' => false, 'code' => 0, 'error' => 'هیچ روشی اجرا نشد']);
     $last['tried'] = $tried;
     return $last;
 }
@@ -2253,6 +2591,18 @@ function aiNormalizeProviders($raw): array {
             // پرش از ردیف‌های خراب (مثل فهرست اشتباه Cloudflare)
             if (stripos($mid, 'index.md') !== false || stripos($mid, '"headline"') !== false
                 || stripos($mid, 'page",') !== false || stripos($mid, 'https:') !== false) continue;
+            /* v9.99: نام‌هایی که از اسکرپِ جدولِ HTML بیرون آمده‌اند (مثل کاتالوگِ
+               Cerebras) مدل نیستند: تگ‌های HTML، کلماتِ ستونِ جدول و رشته‌های
+               تک‌کلمه‌ایِ خیلی کوتاه. اگر تست شوند فقط ۴۰۴/۴۰۰ می‌گیرند و
+               گزارش را شلوغ می‌کنند. */
+            $midLow = strtolower($mid);
+            $htmlJunk = ['tbody','thead','tr','td','th','ul','ol','li','div','span','table',
+                         'nav','svg','path','button','section','header','footer','script',
+                         'style','p','a','h1','h2','h3','h4','br','hr','img','form','input'];
+            if (in_array($midLow, $htmlJunk, true)) continue;
+            if (preg_match('~^[<>{}\[\]\\/|]+$~', $mid)) continue;
+            // شناسهٔ مدل دست‌کم ۳ نویسه و شاملِ حرف/رقم است
+            if (mb_strlen($mid) < 3 || !preg_match('~[a-z0-9]~i', $mid)) continue;
             $models[] = [
                 'id'             => $mid,
                 'name'           => trim((string)($m['name'] ?? $mid)),
@@ -2299,14 +2649,14 @@ function aiMistralCatalog(): array {
     $rows = [
         // ── خانوادهٔ اصلی (Flagship) ──
         ['mistral-large-latest',   'Mistral Large 3 (آخرین)',        256000, 128000, true,  true,  false, false],
-        ['mistral-large-3',        'Mistral Large 3',                256000, 128000, true,  true,  false, false],
+        /* v9.99: `mistral-large-3` و `mistral-small-4-0` شناسهٔ معتبرِ API نیستند
+           (تستِ واقعی: «Invalid model») — فقط aliasِ `-latest` و نسخهٔ تاریخ‌دار
+           پذیرفته می‌شود. */
         ['mistral-large-2512',     'Mistral Large 3 · v25.12',       256000, 128000, true,  true,  false, false],
         ['mistral-medium-latest',  'Mistral Medium 3.5 (آخرین)',     256000, 128000, true,  true,  false, false],
-        ['mistral-medium-3-5',     'Mistral Medium 3.5',             256000, 128000, true,  true,  false, false],
         ['mistral-medium-2604',    'Mistral Medium 3.5 · v26.04',    256000, 128000, true,  true,  false, false],
         // Mistral Small 4 دو حالته است: instruct + reasoning
         ['mistral-small-latest',   'Mistral Small 4 (آخرین)',        256000, 128000, true,  true,  false, true ],
-        ['mistral-small-4-0',      'Mistral Small 4',                256000, 128000, true,  true,  false, true ],
         ['mistral-small-2603',     'Mistral Small 4 · v26.03',       256000, 128000, true,  true,  false, true ],
         // ── خانوادهٔ Ministral 3 (سبک و ارزان) ──
         ['ministral-14b-latest',   'Ministral 3 14B (آخرین)',        256000, 128000, true,  false, false, false],
@@ -13692,7 +14042,7 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, "پاسخ دسته") !== false);
     $add('9.52', 'تستِ انبوه و تک‌مدلی، پیام و دستهٔ قابل‌تنظیم را به مدل می‌فرستد',
          strpos($selfSrc, 'aiRunTestCategory') !== false
-         && strpos($selfSrc, "aiRunTestBackground(\$per, \$onlyUntested, \$testMsg, \$testCat)") !== false
+         && strpos($selfSrc, "aiRunTestBackground(\$per, \$onlyUntested, \$testMsg, \$testCat, \$delayMs, \$concurrency, \$skipNonChat)") !== false
          && strpos($selfSrc, "&msg=" . "'+encodeURIComponent(aiTestMsgVal)") !== false);
 
     /* ---------- v9.53: دکمهٔ شروع/ادامهٔ تست مدل‌ها ---------- */
@@ -14134,7 +14484,7 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, "esc(aiTestCatVal||'ادو پرفیوم')+'</b></span>'") !== false
       && strpos($selfSrc, "toFa(aiTestDelayVal||120)+'</b> ms</span>'") !== false);
     $add('9.95', 'تستِ گروهی و تکی همچنان از فیلدهای بیرونی می‌خوانند',
-         substr_count($selfSrc, "aiTestMsgVal=(\$('aiTestMsg')&&\$('aiTestMsg').value.trim())||'سلام';") === 2
+         substr_count($selfSrc, "aiTestMsgVal=(\$('aiTestMsg')&&\$('aiTestMsg').value.trim())||'سلام';") >= 2
       && strpos($selfSrc, "const msg=(\$('aiTestMsg')&&\$('aiTestMsg').value.trim())||'سلام';") !== false);
 
     /* ---------- v9.95 (۹ب): برون‌ریزی فایل تنظیمات هوش مصنوعی ---------- */
@@ -14418,6 +14768,158 @@ if (isset($_GET['selftest'])) {
          })());
     $add('9.98', 'اسلش‌های URL در فایلِ خروجی escape نمی‌شوند',
          strpos($selfSrc, 'JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES') !== false);
+
+    /* ---------- v9.99 (۱۳): عیب‌یابیِ خطاهای تستِ مدل + تستِ موازیِ چرخشی ---------- */
+    $add('9.99', 'حل نامِ دامنه از راهِ DNS-over-HTTPS با چند سرورِ پشتیبان',
+         function_exists('aiDohQuery') && function_exists('aiDohEndpoints')
+      && function_exists('aiDohMarkBad') && function_exists('aiDohStore'));
+    $add('9.99', 'خطای واسطه (ورکر/پروکسی) از خطای واقعیِ سرویس جدا می‌شود',
+         function_exists('aiProxyLevelFailure')
+      && strpos($selfSrc, '$proxyBlocked') !== false
+      && strpos($selfSrc, '$svcAnswer') !== false);
+    $add('9.99', 'پاسخِ واقعیِ سرویس همیشه بر پاسخِ واسطهٔ خراب اولویت دارد',
+         strpos($selfSrc, 'return $svcAnswer ?? $proxyBlocked ?? $r;') !== false);
+    $add('9.99', 'کدهای قطعیِ سرویس (۴۰۰/۴۰۱/۴۰۲/۴۰۳/۴۰۴/۴۲۲/۴۲۹) بی‌درنگ برمی‌گردند',
+         preg_match('~\[\s*400\s*,\s*401\s*,\s*402\s*,\s*403\s*,\s*404\s*,\s*422\s*,\s*429\s*\]~', $selfSrc) === 1);
+    $add('9.99', 'خطاهای اعتبار/اشتراک شناسایی و برچسب می‌خورند (نه «رفع»)',
+         function_exists('aiBillingFailure')
+      && strpos($selfSrc, 'depleted your monthly') !== false
+      && strpos($selfSrc, 'Workers Free plan') !== false
+      && strpos($selfSrc, 'subscription tier') !== false);
+    $add('9.99', 'انواعِ خطای اعتبار از هم تفکیک می‌شوند (credit/plan/tier/labs/trial)',
+         (function () {
+             $cases = [
+                 'credit' => 'You have depleted your monthly included credits for Inference',
+                 'trial'  => 'trial key has allocated 1000 API calls per month',
+                 'plan'   => "The model is not available on the Workers Free plan",
+                 'tier'   => 'Model not available in your subscription tier',
+                 'labs'   => 'Labs model requires your admin to enable it',
+             ];
+             foreach ($cases as $want => $body) {
+                 $b = aiBillingFailure(['code' => 402, 'body' => $body, 'error' => '']);
+                 if (empty($b['is']) || ($b['kind'] ?? '') !== $want) return false;
+             }
+             // پیامِ عادی نباید «اعتبار» تشخیص داده شود
+             $ok = aiBillingFailure(['code' => 200, 'body' => '{"choices":[]}', 'error' => '']);
+             return empty($ok['is']);
+         })());
+    $add('9.99', 'مدل‌های غیرچت (تصویر/صدا/امبدینگ) پیش از تست شناسایی می‌شوند',
+         function_exists('aiNonChatModel'));
+    $add('9.99', 'aiNonChatModel مدل‌های امبدینگ و تصویر را می‌گیرد و مدلِ چت را رد نمی‌کند',
+         aiNonChatModel('text-embedding-3-large') !== ''
+      && aiNonChatModel('stable-diffusion-xl-base-1.0') !== ''
+      && aiNonChatModel('whisper-large-v3') !== ''
+      && aiNonChatModel('llama-3.3-70b-versatile') === '');
+    $add('9.99', 'پاسخِ بی‌معنا (تکرارِ یک نویسه یا خالی) مشکوک شمرده می‌شود',
+         function_exists('aiSuspectAnswer')
+      && aiSuspectAnswer('OOOOOOOOOOOOOOOO', 'x') !== ''
+      && aiSuspectAnswer('سلام! چطور می‌توانم کمک کنم؟', 'x') === '');
+    $add('9.99', 'صفِ تست چرخشی است: مدلِ اولِ همهٔ ارائه‌دهنده‌ها، بعد مدلِ دوم',
+         function_exists('aiTestBuildQueue'));
+    $add('9.99', 'هر دورِ صف حداکثر یک مدل از هر ارائه‌دهنده دارد (ضدِ ریت‌لیمیت)',
+         (function () {
+             $prov = [
+                 'a' => ['id' => 'a', 'enabled' => true, 'models' => [['id' => 'a1'], ['id' => 'a2'], ['id' => 'a3']]],
+                 'b' => ['id' => 'b', 'enabled' => true, 'models' => [['id' => 'b1'], ['id' => 'b2']]],
+                 'c' => ['id' => 'c', 'enabled' => true, 'models' => [['id' => 'c1']]],
+             ];
+             $stats = [];
+             $q = aiTestBuildQueue($prov, 10, false, true, $stats);
+             if (count($q) !== 6) return false;
+             $seen = [];
+             foreach ($q as $j) {
+                 $key = $j['round'] . '|' . $j['pid'];
+                 if (isset($seen[$key])) return false;   // تکرارِ ارائه‌دهنده در یک دور
+                 $seen[$key] = true;
+             }
+             // ترتیب باید دورِ ۰ کاملِ همه باشد، بعد دورِ ۱
+             $rounds = array_map(function ($j) { return $j['round']; }, $q);
+             $sorted = $rounds; sort($sorted);
+             return $rounds === $sorted;
+         })());
+    $add('9.99', 'درخواست‌های هر دور واقعاً هم‌زمان (curl_multi) فرستاده می‌شوند',
+         function_exists('aiParallelCalls')
+      && strpos($selfSrc, 'curl_multi_' . 'init') !== false
+      && strpos($selfSrc, 'curl_multi_' . 'add_handle') !== false
+      && strpos($selfSrc, 'curl_multi_' . 'exec') !== false);
+    $add('9.99', 'فراخوانیِ HTTP به سه‌گانهٔ آماده‌سازی/پایان/یک‌جا شکسته شده تا موازی‌سازی ممکن شود',
+         function_exists('aiHttpPrepare') && function_exists('aiHttpFinish') && function_exists('aiHttp'));
+    $add('9.99', 'مدل‌هایی که موازی‌شان ممکن نیست ترتیبی دوباره امتحان می‌شوند',
+         strpos($selfSrc, 'retried_' . 'seq') !== false
+      && strpos($selfSrc, "'seq' => true") !== false);
+    $add('9.99', 'داوریِ نتیجهٔ تست، اعتبار را بر پروکسی و پروکسی را بر مدلِ نامعتبر مقدم می‌داند',
+         function_exists('aiTestJudge')
+      && strpos($selfSrc, "'badmodel'") !== false
+      && strpos($selfSrc, "'bogus'") !== false);
+    $add('9.99', 'aiRunTestBackground پارامترهای هم‌زمانی و ردکردنِ غیرچت را می‌گیرد',
+         (function () {
+             $r = new ReflectionFunction('aiRunTestBackground');
+             $names = array_map(function ($p) { return $p->getName(); }, $r->getParameters());
+             return in_array('concurrency', $names, true) && in_array('skipNonChat', $names, true);
+         })());
+    $add('9.99', 'اندپوینتِ شروعِ تست پارامترهای conc و nonchat را می‌پذیرد',
+         strpos($selfSrc, "\$_GET['conc']") !== false
+      && strpos($selfSrc, "\$_GET['nonchat']") !== false);
+    $add('9.99', 'وضعیتِ تست، آرگومان‌های همان اجرا را ذخیره می‌کند تا ادامه ممکن باشد',
+         strpos($selfSrc, "'args'") !== false
+      && strpos($selfSrc, "\$st['args']") !== false);
+    $add('9.99', 'تستِ گیرکرده تشخیص داده می‌شود و «قابلِ ادامه» علامت می‌خورد',
+         strpos($selfSrc, "'stalled'") !== false
+      && strpos($selfSrc, "'resumable'") !== false
+      && strpos($selfSrc, "'idle_sec'") !== false);
+    $add('9.99', 'اندپوینتِ رفعِ گیر برای تستِ مدل‌ها وجود دارد',
+         strpos($selfSrc, 'ai_test_' . 'unstick') !== false);
+    $add('9.99', 'رفعِ گیر روی تستِ زنده اجرا نمی‌شود مگر با force',
+         strpos($selfSrc, "'alive' => true") !== false
+      && strpos($selfSrc, "\$_GET['force']") !== false);
+    $add('9.99', 'ادامه پس از رفعِ گیر فقط مدل‌های تست‌نشده را می‌زند (کارِ انجام‌شده تکرار نمی‌شود)',
+         strpos($selfSrc, "'unstuck' => true") !== false
+      && strpos($selfSrc, "'done_before'") !== false);
+    $add('9.99', 'دکمهٔ «رفعِ گیر و ادامه» در پنلِ تست هست و تابعش تعریف شده',
+         strpos($selfSrc, 'function aiTestUnstick') !== false
+      && strpos($selfSrc, 'aiTestUnstick()') !== false
+      && strpos($selfSrc, 'رفعِ گیر و ادامه') !== false);
+    $add('9.99', 'کنترلِ «درخواستِ هم‌زمان» و تیکِ «ردکردنِ غیرچت» در رابط کاربری هست',
+         strpos($selfSrc, 'id="aiTestConc"') !== false
+      && strpos($selfSrc, 'id="aiTestSkipNonChat"') !== false
+      && strpos($selfSrc, 'function aiTestReadOpts') !== false);
+    $add('9.99', 'نامِ مدل‌های آشغال (تگِ HTML) هنگام درون‌ریزی دور ریخته می‌شود',
+         (function () {
+             $raw = ['x' => ['id' => 'x', 'name' => 'X', 'url' => 'https://e.x/v1', 'models' => [
+                 ['id' => 'tbody'], ['id' => 'td'], ['id' => 'ul'], ['id' => 'a'], ['id' => 'p'],
+                 ['id' => 'llama-3.3-70b'],
+             ]]];
+             $n = aiNormalizeProviders($raw);
+             $ids = array_map(function ($m) { return $m['id']; }, $n['x']['models']);
+             return $ids === ['llama-3.3-70b'];
+         })());
+    $add('9.99', 'شناسه‌های نامعتبرِ Mistral از کاتالوگ حذف شدند (Invalid model)',
+         (function () {
+             $ids = array_map(function ($m) { return $m['id']; }, aiMistralCatalog()['models']);
+             return !in_array('mistral-large-3', $ids, true)
+                 && !in_array('mistral-small-4-0', $ids, true)
+                 && !in_array('mistral-medium-3-5', $ids, true)
+                 && in_array('mistral-large-latest', $ids, true)
+                 && in_array('mistral-small-latest', $ids, true);
+         })());
+    $add('9.99', 'کاتالوگِ Mistral هیچ مدلِ غیرچتی (OCR/صوت/امبدینگ) ندارد',
+         (function () {
+             foreach (aiMistralCatalog()['models'] as $m) {
+                 if (aiNonChatModel((string)$m['id']) !== '') return false;
+             }
+             return true;
+         })());
+    $add('9.99', 'آدرسِ Cloudflare از همان ریشه‌ای که کاربر داده ساخته می‌شود',
+         strpos($selfSrc, '$cfRoot') !== false
+      && strpos($selfSrc, '~^(.*?/ai/run)(/|$)~i') !== false);
+    $add('9.99', 'ارائه‌دهندهٔ کلادفلر از قالبِ {messages} استفاده می‌کند نه {text}',
+         strpos($selfSrc, "'messages' =>") !== false);
+    $add('9.99', 'شمارنده‌های تفکیکیِ نتیجه (غیرچت/اعتبار/پروکسی/بی‌معنا/مدلِ نامعتبر) نگه داشته می‌شوند',
+         strpos($selfSrc, "'nonchat'") !== false
+      && strpos($selfSrc, "'billing'") !== false
+      && strpos($selfSrc, "'proxy'") !== false
+      && strpos($selfSrc, "'bogus'") !== false
+      && strpos($selfSrc, "'badmodel'") !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -19713,7 +20215,13 @@ if (!empty($st['running']) && empty($st['done'])) {
         $st['done'] = true;
         $st['stopped'] = true;
         $st['stalled'] = true;
-        $st['summary'] = 'گیر کرد (پردازهٔ پس‌زمینه دیگر پاسخ نمی‌دهد) — متوقف شد';
+        /* v9.99: «رفعِ گیر» — کارِ نیمه‌تمام دور ریخته نمی‌شود. چون نتیجهٔ هر
+           دور بلافاصله در ai_providers.json ذخیره شده، با only_untested
+           می‌توان دقیقاً از همان‌جا ادامه داد. این پرچم را UI می‌بیند و دکمهٔ
+           «ادامه» را نشان می‌دهد؛ اگر خودکار هم باشد، همان‌جا ازسرگیری می‌کند. */
+        $st['resumable'] = true;
+        $st['idle_sec'] = $idle;
+        $st['summary'] = 'گیر کرد (پردازهٔ پس‌زمینه ' . $idle . ' ثانیه پاسخ نداد) — با «ادامه» از همان‌جا دنبال می‌شود';
         aiTestStateSave($st);
     }
 }
@@ -19796,146 +20304,433 @@ function aiRunTestCategory(array $p, string $mid, string $testCat, ?array $catDa
     return '';
 }
 
-/* هستهٔ اجرای تست — یک تابع تا هم از مسیر پس‌زمینه و هم از مسیر هم‌زمان استفاده کند */
-function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'سلام', string $testCat = 'ادو پرفیوم', int $delayMs = 120): array {
-    @set_time_limit(0); @ignore_user_abort(true);
-    @unlink(AI_TEST_STOP_FILE);
-    $providers = aiProvidersLoad();
-    $catData = aiTestCategoryData();
-    $delayMs = max(0, min(60000, (int)$delayMs));   // v9.56: تاخیر بین هر تست (جلوگیری از ریت‌لیمیت)
-    $st = ['running'=>true,'done'=>false,'stopped'=>false,'started_at'=>time(),'updated_at'=>time(),
-           'per_provider'=>$per,'only_untested'=>$onlyUntested,'delay_ms'=>$delayMs,
-           'total'=>0,'tested'=>0,'available'=>0,'failed'=>0,'skipped'=>0,
-           'current'=>['provider'=>'','model'=>''],'items'=>[],'diag'=>[],'summary'=>''];
-    // شمارش کل مدل‌های هدف
-    $queue = [];
+/* =====================================================================
+ *  v9.99: اجرای موازیِ چرخشی (round-robin) با curl_multi
+ *
+ *  خواستهٔ کاربر: «اول مدلِ اولِ همهٔ ارائه‌دهنده‌ها، بعد مدلِ دومِ همه، و
+ *  همین‌طور تا آخر» — تا هم کلِ لیست سریع‌تر تمام شود و هم ریت‌لیمیت نخوریم.
+ *
+ *  چرا این ترتیب دقیقاً ریت‌لیمیت را کم می‌کند: ریت‌لیمیت همیشه «به ازای هر
+ *  ارائه‌دهنده» است. اگر ۵۰ مدلِ OpenRouter را پشت‌سرهم بزنیم، ۵۰ درخواست در
+ *  چند ثانیه به یک ارائه‌دهنده می‌خورد و از RPM آن رد می‌شویم. ولی در حالتِ
+ *  چرخشی، هر «دور» فقط یک درخواست به هر ارائه‌دهنده می‌فرستد و درخواست‌های
+ *  هم‌زمان روی ارائه‌دهنده‌های *متفاوت* پخش می‌شوند. نتیجه: هم‌زمانیِ واقعی
+ *  بالا می‌رود ولی نرخِ هر ارائه‌دهنده پایین می‌ماند.
+ *
+ *  aiTestBuildQueue(): صفِ چرخشی را می‌سازد (دور ۱ = مدلِ اولِ همه، …).
+ *  aiParallelCalls():  یک دسته درخواست را با curl_multi هم‌زمان می‌فرستد.
+ * ===================================================================== */
+function aiTestBuildQueue(array $providers, int $per, bool $onlyUntested, bool $skipNonChat = true, array &$stats = []): array {
+    $stats = ['skipped' => 0, 'nonchat' => 0];
+    // ۱) فهرستِ مدل‌های هر ارائه‌دهنده (با رعایتِ سقف و فیلترها)
+    $byProv = [];
     foreach ($providers as $pid => $p) {
         if (($p['enabled'] ?? true) === false) continue;
-        $n = 0;
-        foreach ($p['models'] as $m) {
+        $n = 0; $list = [];
+        foreach ((array)($p['models'] ?? []) as $m) {
             $mid = (string)($m['id'] ?? '');
             if ($mid === '') continue;
             if ($onlyUntested && !empty($m['tested'])) continue;
-            if ($n >= $per) { $st['skipped']++; $n++; continue; }
+            /* v9.99: مدل‌های غیرچت (امبدینگ/تصویر/صوت/rerank) اصلاً وارد صف
+               نمی‌شوند — تستِ چت روی آن‌ها همیشه شکست می‌خورد. */
+            if ($skipNonChat) {
+                $why = aiNonChatModel($mid, is_array($m) ? $m : []);
+                if ($why !== '') { $stats['nonchat']++; continue; }
+            }
+            if ($n >= $per) { $stats['skipped']++; $n++; continue; }
             $n++;
-            $queue[] = ['pid'=>$pid, 'mid'=>$mid];
+            $list[] = $mid;
+        }
+        if ($list) $byProv[$pid] = $list;
+    }
+    // ۲) چرخش: دور i = مدلِ i-امِ هر ارائه‌دهنده
+    $queue = []; $round = 0; $max = 0;
+    foreach ($byProv as $l) $max = max($max, count($l));
+    for ($i = 0; $i < $max; $i++) {
+        foreach ($byProv as $pid => $l) {
+            if (isset($l[$i])) $queue[] = ['pid' => $pid, 'mid' => $l[$i], 'round' => $i];
+        }
+        $round++;
+    }
+    $stats['rounds'] = $round;
+    $stats['providers'] = count($byProv);
+    return $queue;
+}
+
+/**
+ * چند فراخوانیِ مدل را هم‌زمان اجرا می‌کند (curl_multi).
+ * $jobs: هر عضو ['p'=>provider, 'mid'=>string, 'payload'=>array]
+ * خروجی: همان کلیدها با 'r' => نتیجهٔ استانداردِ aiHttp
+ *
+ * نکته: فقط مسیرِ OpenAI-compatible موازی می‌شود. Cloudflare native چند
+ * درخواستِ زنجیره‌ای دارد (نام‌های مختلفِ org و دو نوع بدنه) و منطقش
+ * ترتیبی است؛ آن‌ها به مسیرِ تکی برمی‌گردند تا رفتار عوض نشود.
+ */
+function aiParallelCalls(array $jobs, array $net, int $concurrency = 4): array {
+    $out = [];
+    $concurrency = max(1, min(16, $concurrency));
+    $pending = [];
+    foreach ($jobs as $k => $job) {
+        $p = $job['p']; $mid = (string)$job['mid'];
+        $payload = (array)$job['payload'];
+        if (isset($payload['max_tokens'])) {
+            $isR = aiIsReasoningModel(aiFindModelRow($p, $mid), $mid);
+            $payload['max_tokens'] = aiReasoningBudget((int)$payload['max_tokens'], $isR);
+        }
+        $ep = aiProviderEndpoint($p, $mid);
+        if ($ep['kind'] !== 'openai') {   // Cloudflare و مسیرهای خاص → ترتیبی
+            $out[$k] = $job + ['r' => aiProviderCall($p, $mid, (array)$job['payload'], $net), 'seq' => true];
+            continue;
+        }
+        $apiKey = trim((string)($p['apiKey'] ?? ''));
+        $headers = ['Content-Type: application/json'];
+        if ($apiKey !== '') $headers[] = 'Authorization: Bearer ' . $apiKey;
+        $body = $payload; $body['model'] = $mid;
+        $pending[$k] = ['job' => $job, 'url' => $ep['url'], 'headers' => $headers, 'body' => $body];
+    }
+    $keys = array_keys($pending);
+    $nk = count($keys);
+    $idx = 0;
+    while ($idx < $nk) {
+        if (aiTestStopRequested()) break;
+        $mh = curl_multi_init();
+        $batch = [];
+        /* یک دسته به اندازهٔ سقفِ هم‌زمانی بردار. کلیدِ $batch یک شمارندهٔ
+           سادهٔ عددی است، نه خودِ هندل: در PHP 8 هندلِ curl یک شیء
+           (CurlHandle) است و قابلِ تبدیل به int/کلیدِ آرایه نیست. */
+        while (count($batch) < $concurrency && $idx < $nk) {
+            $k = $keys[$idx++];
+            $pd = $pending[$k];
+            $h = aiHttpPrepare($pd['url'], $pd['headers'], $pd['body'], $net, $net['mode'] ?? 'direct');
+            if (isset($h['err'])) { $out[$k] = $pd['job'] + ['r' => $h['err']]; continue; }
+            $batch[] = ['k' => $k, 'h' => $h, 'pd' => $pd];
+            curl_multi_add_handle($mh, $h['ch']);
+        }
+        if (!$batch) { curl_multi_close($mh); continue; }
+        // اجرای هم‌زمانِ دسته
+        $running = null;
+        do {
+            $st = curl_multi_exec($mh, $running);
+            if ($running) curl_multi_select($mh, 0.5);
+            if (aiTestStopRequested()) break;
+        } while ($running > 0 && $st === CURLM_OK);
+        foreach ($batch as $b) {
+            $ch = $b['h']['ch'];
+            $raw  = (string)curl_multi_getcontent($ch);
+            $err  = (string)curl_error($ch);
+            $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+            $eurl = (string)curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+            curl_multi_remove_handle($mh, $ch);
+            curl_close($ch);
+            $r = aiHttpFinish($b['h'], $raw, $err, $code, $eurl);
+            /* اگر مسیرِ موازی به‌خاطر واسطهٔ خراب یا خطای شبکه شکست خورد،
+               همان مدل را یک بار از مسیرِ ترتیبیِ کامل (که همهٔ روش‌های
+               اتصال را امتحان می‌کند) رد کن. */
+            if (empty($r['ok']) && !aiTestStopRequested()
+                && (aiProxyLevelFailure($r, (string)($r['mode'] ?? '')) || (int)$r['code'] === 0)) {
+                $r2 = aiProviderCall($b['pd']['job']['p'], (string)$b['pd']['job']['mid'],
+                                     (array)$b['pd']['job']['payload'], $net);
+                $r2['retried_seq'] = true;
+                $r = $r2;
+            }
+            $out[$b['k']] = $b['pd']['job'] + ['r' => $r];
+        }
+        curl_multi_close($mh);
+    }
+    return $out;
+}
+
+/* v9.99: نتیجهٔ یک مدل را ارزیابی و برچسب‌گذاری می‌کند.
+   یک نقطهٔ مشترک تا مسیرِ موازی و ترتیبی دقیقاً یکسان قضاوت کنند. */
+function aiTestJudge(array $r, string $mid, string $pid = ''): array {
+    $code = (int)($r['code'] ?? 0);
+    $body = $r['body'] ?? [];
+    $ok = $code === 200;
+    $response = $ok ? aiExtractAnswer($body) : '';
+    $err = '';
+    if (!$ok) {
+        $err = $body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP ' . $code)));
+        if (is_array($err)) $err = json_encode($err, JSON_UNESCAPED_UNICODE);
+        if (!empty($r['cf_error'])) $err = $r['cf_error'];
+    }
+    $diag = aiTestNetworkFailure($r);
+    $kind = ''; $note = '';
+
+    /* ۱) خطاهای اعتبار/اشتراک — طبقِ خواستهٔ صریحِ کاربر «رفع» نمی‌شوند،
+          فقط درست برچسب می‌خورند تا با خطای فنی قاطی نشوند. */
+    $bill = aiBillingFailure($r);
+    if (!$ok && $bill['is']) {
+        $kind = 'billing:' . $bill['kind'];
+        $note = $bill['label'];
+        $diag['cat'] = 'billing';
+        $diag['label'] = $bill['label'];
+    /* ۲) خطا از واسطه (Worker/پروکسی/CDN) است نه از سرویس */
+    } elseif (!$ok && (!empty($r['proxy_blocked']) || aiProxyLevelFailure($r, (string)($r['mode'] ?? '')))) {
+        $kind = 'proxy';
+        $note = 'خطا از مسیرِ عبور (Worker/پروکسی/CDN) است نه از خودِ مدل — روش اتصال را عوض کنید';
+        $diag['cat'] = 'proxy';
+        $diag['label'] = 'مسیرِ عبور مسدود است (' . $code . ') — نه خطای مدل';
+    /* ۳) مدلی که در این سرویس وجود ندارد یا چت نیست */
+    } elseif (!$ok && $code === 400) {
+        $low = strtolower((string)$err . ' ' . (string)($r['raw'] ?? ''));
+        if (strpos($low, 'model_not_supported') !== false || strpos($low, 'invalid model') !== false
+            || strpos($low, 'no route for that uri') !== false || strpos($low, 'not a chat model') !== false
+            || strpos($low, 'no such model') !== false) {
+            $kind = 'badmodel';
+            $note = 'این شناسهٔ مدل در این سرویس وجود ندارد یا مدلِ چت نیست — از فهرست حذفش کنید';
+            $diag['cat'] = 'badmodel';
+            $diag['label'] = 'مدل نامعتبر (۴۰۰)';
         }
     }
-    $st['total'] = count($queue);
+
+    /* ۴) مثبتِ کاذب: HTTP 200 ولی پاسخ در عمل بی‌معنی/متعلق به مدلِ دیگر */
+    $suspect = '';
+    if ($ok) {
+        $suspect = aiSuspectAnswer((string)$response, $mid);
+        if ($suspect !== '') {
+            $ok = false;
+            $kind = 'bogus';
+            $note = 'پاسخ معتبر نیست: ' . $suspect;
+            $err = $note;
+            $diag['cat'] = 'bogus';
+            $diag['label'] = 'پاسخِ نامعتبر با کد ۲۰۰ — عملاً کار نمی‌کند';
+        }
+    }
+    if ($ok) { $diag['cat'] = 'ok'; $diag['label'] = 'در دسترس'; }
+    elseif (($diag['label'] ?? '') === '') $diag['label'] = 'HTTP ' . $code;
+    $diag['ok'] = $ok;
+    return ['ok' => $ok, 'code' => $code, 'response' => (string)$response, 'error' => (string)$err,
+            'diag' => $diag, 'kind' => $kind, 'note' => $note, 'suspect' => $suspect,
+            'billing' => $bill['is'] ? $bill['kind'] : ''];
+}
+
+/* هستهٔ اجرای تست — یک تابع تا هم از مسیر پس‌زمینه و هم از مسیر هم‌زمان استفاده کند */
+function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'سلام', string $testCat = 'ادو پرفیوم', int $delayMs = 120, int $concurrency = 4, bool $skipNonChat = true, bool $doCat = true): array {
+    @set_time_limit(0); @ignore_user_abort(true);
+    @unlink(AI_TEST_STOP_FILE);
+    $providers = aiProvidersLoad();
+    $catData = $doCat ? aiTestCategoryData() : null;
+    $delayMs = max(0, min(60000, (int)$delayMs));   // v9.56: تاخیر بین هر دور (جلوگیری از ریت‌لیمیت)
+    $concurrency = max(1, min(16, (int)$concurrency));
+    $net = aiNetCfg();
+    $st = ['running'=>true,'done'=>false,'stopped'=>false,'started_at'=>time(),'updated_at'=>time(),
+           'per_provider'=>$per,'only_untested'=>$onlyUntested,'delay_ms'=>$delayMs,
+           'concurrency'=>$concurrency,'skip_nonchat'=>$skipNonChat,
+           'total'=>0,'tested'=>0,'available'=>0,'failed'=>0,'skipped'=>0,'nonchat'=>0,
+           'billing'=>0,'proxy'=>0,'bogus'=>0,'badmodel'=>0,'round'=>0,'rounds'=>0,
+           'current'=>['provider'=>'','model'=>''],'items'=>[],'diag'=>[],'summary'=>''];
+
+    /* v9.99: صفِ چرخشی — مدلِ اولِ همهٔ ارائه‌دهنده‌ها، بعد مدلِ دومِ همه، …
+       تا درخواست‌هایِ هم‌زمان روی ارائه‌دهنده‌های متفاوت پخش شوند و ریت‌لیمیتِ
+       هیچ ارائه‌دهنده‌ای پر نشود. */
+    $qstats = [];
+    $queue = aiTestBuildQueue($providers, $per, $onlyUntested, $skipNonChat, $qstats);
+    /* v9.99: پارامترهای اجرا را نگه دار تا مکانیزمِ «رفعِ گیر» بتواند دقیقاً
+       همین تست را از همان‌جا که مانده ادامه دهد (بدون تستِ دوبارهٔ مدل‌هایی
+       که جواب داده‌اند). */
+    $st['args'] = ['per'=>$per, 'msg'=>$testMsg, 'cat'=>$testCat, 'delay'=>$delayMs,
+                   'conc'=>$concurrency, 'nonchat'=>$skipNonChat ? 1 : 0];
+    $st['pid'] = function_exists('getmypid') ? (int)getmypid() : 0;
+    $st['skipped'] = (int)($qstats['skipped'] ?? 0);
+    $st['nonchat'] = (int)($qstats['nonchat'] ?? 0);
+    $st['rounds']  = (int)($qstats['rounds'] ?? 0);
+    $st['total']   = count($queue);
     aiTestStateSave($st);
-    foreach ($queue as $q) {
-        // توقف صریح — v9.42: کش stat را پاک کن وگرنه سیگنال توقفِ تازه دیده
-        // نمی‌شود. فایل توقف را یک پردازهٔ جدا (درخواست مرورگر) می‌سازد؛ PHP
-        // نتیجهٔ is_file را برای طولِ این پردازه کش می‌کند و اگر اولین بررسی
-        // «فایل نیست» بود، دکمهٔ توقف تا پایان کار بی‌اثر می‌ماند. همین الگوی
-        // clearstatcache در bslReq برای BSL_STOP_FILE از قبل هست.
-        clearstatcache(true, AI_TEST_STOP_FILE);
-        if (is_file(AI_TEST_STOP_FILE)) { $st['stopped'] = true; break; }
-        $pid = $q['pid']; $mid = $q['mid'];
-        $p = $providers[$pid] ?? null;
-        if (!$p) continue;
-        $st['current'] = ['provider'=>$pid, 'model'=>$mid];
-        aiTestStateSave($st);
-        $t0 = microtime(true);
-        // پیام تست (پیش‌فرض «سلام») — v9.57: سقف توکن ۳۰۰ برای مدل‌های reasoning
-        $r = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>300], aiNetCfg());
-        /* v9.45: اگر فراخوانی به‌خاطر توقف abort شد، همین‌جا خارج شو —
-           منتظر پردازشِ نتیجهٔ «stopped» نباش. */
-        if (!empty($r['stopped']) || aiTestStopRequested()) {
-            $st['stopped'] = true;
-            break;
-        }
-        $latency = (int)round((microtime(true) - $t0) * 1000);
-        $code = (int)$r['code'];
-        $ok = $code === 200;
-        $body = $r['body'] ?? [];
-        $response = $ok ? aiExtractAnswer($body) : '';   // v9.54: استخراج مقاوم · v9.94: بدون بلوکِ فکر
-        $err = $ok ? '' : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
-        // تشخیص قابل‌دسترس‌نبودن اندپوینت
-        $diag = aiTestNetworkFailure($r);
-        $diag['label'] = $ok ? 'در دسترس' : ($diag['label'] !== '' ? $diag['label'] : ('HTTP '.$code));
-        $diag['ok'] = $ok;
-        $diag['latencyMs'] = $latency;
-        if (!isset($st['diag'][$pid])) $st['diag'][$pid] = ['reachable'=>true,'categories'=>[],'samples'=>0];
-        $st['diag'][$pid]['samples']++;
-        /* v9.29: اگر با «روش اتصال فعلی» fail شد ولی با «مستقیم» روی همان مدل
-           موفق شد، یعنی خودِ هاست به اندپوینت دسترسی دارد و مشکل از روش اتصال
-           (مثلاً DoH که روی این شبکه به سرور DNS هم وصل نمی‌شود) است. آن را
-           «مشکل روش» علامت بزن تا پیام گمراه‌کنندهٔ «هاست دسترسی ندارد» نیاید. */
-        $netIssue = false;
-        if (!$ok) {
-            if (aiTestStopRequested()) {   // v9.45
-                $st['stopped'] = true;
-                break;
-            }
-            $netCfg = aiNetCfg();
-            $dnet = $netCfg; $dnet['mode'] = 'direct';
-            $rd = aiProviderCall($p, $mid, ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>300], $dnet);   // v9.57
-            if (aiTestStopRequested()) { $st['stopped'] = true; break; }
-            if ((int)$rd['code'] === 200) $netIssue = true;
-        }
-        if ($netIssue) {
-            $st['diag'][$pid]['net_issue'] = true;
-            $st['diag'][$pid]['mode'] = (string)(aiNetCfg()['mode'] ?? 'direct');
-            $st['diag'][$pid]['net_hint'] = 'روش اتصال فعلی روی این شبکه کار نمی‌کند ولی «مستقیم» جواب می‌دهد — روش را روی «مستقیم» بگذارید یا یک Worker/پروکسی سالم اضافه کنید';
-            // روش اتصال را موقتاً مستقیم کن تا خودِ مدل رد نشود
-            $r = $rd; $ok = true; $code = (int)$rd['code']; $response = aiExtractAnswer($rd['body'] ?? []);   // v9.54 · v9.94
-        } else {
-            $st['diag'][$pid]['net_issue'] = false;
-        }
-        if (!$ok) {
-            $st['diag'][$pid]['categories'][$diag['cat']] = ($st['diag'][$pid]['categories'][$diag['cat']] ?? 0) + 1;
-            if ($diag['cat'] === 'dns' || $diag['cat'] === 'timeout' || $diag['cat'] === 'refused'
-                || $diag['cat'] === 'connect' || $diag['cat'] === 'ssl' || $diag['cat'] === 'network') {
-                $st['diag'][$pid]['reachable'] = false;
-                $st['diag'][$pid]['first_error'] = $diag['error'];
-            }
-        }
-        $st['diag'][$pid]['last_label'] = $diag['label'];
-        // v9.52: تستِ دسته‌بندی برای همین مدل (پیش‌فرض «ادو پرفیوم»)
-        $catMeta = null;
-        $catResponse = aiRunTestCategory($p, $mid, $testCat, $catData, null, $catMeta);
-        // ذخیرهٔ نتیجه در provider
-        if (isset($providers[$pid]['models'])) {
-            foreach ($providers[$pid]['models'] as $i => $m) {
-                if (($m['id'] ?? '') === $mid) {
-                    $providers[$pid]['models'][$i]['tested'] = true;
-                    $providers[$pid]['models'][$i]['available'] = $ok;
-                    $providers[$pid]['models'][$i]['rateLimited'] = in_array($code, [429], true);
-                    $providers[$pid]['models'][$i]['testDetails'] = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300),
-                        'response'=>mb_substr((string)$response,0,300), 'catResponse'=>(string)$catResponse,
-                        'testMsg'=>$testMsg, 'testCat'=>$testCat, 'latencyMs'=>$latency, 'testedAt'=>gmdate('c'),
-                        // v9.95 (۹د): بدنهٔ خامِ پاسخ برای مودالِ «جزئیات کامل»
-                        'raw'=>mb_substr((string)($r['raw'] ?? ''), 0, 4000), 'via'=>(string)($r['via'] ?? ''),
-                        // v9.96: پاسخ خامِ درخواستِ دسته‌بندی (درخواستِ دوم) جداگانه
-                        'catRaw'=>(string)($catMeta['raw'] ?? ''), 'catStatus'=>(int)($catMeta['status'] ?? 0),
-                        'catVia'=>(string)($catMeta['via'] ?? ''), 'catAiText'=>(string)($catMeta['aiText'] ?? '')];
-                    break;
+
+    /* مدل‌های غیرچت را در همان provider علامت بزن تا کاربر ببیند چرا تست نشدند */
+    if ($skipNonChat) {
+        foreach ($providers as $pid2 => $p2) {
+            foreach ((array)($p2['models'] ?? []) as $i2 => $m2) {
+                $mid2 = (string)($m2['id'] ?? '');
+                if ($mid2 === '') continue;
+                $why = aiNonChatModel($mid2, is_array($m2) ? $m2 : []);
+                if ($why !== '') {
+                    $providers[$pid2]['models'][$i2]['nonChat'] = true;
+                    $providers[$pid2]['models'][$i2]['nonChatReason'] = $why;
+                } elseif (isset($providers[$pid2]['models'][$i2]['nonChat'])) {
+                    unset($providers[$pid2]['models'][$i2]['nonChat'], $providers[$pid2]['models'][$i2]['nonChatReason']);
                 }
             }
         }
-        $st['tested']++;
-        if ($ok) $st['available']++; else $st['failed']++;
-        $st['items'][] = ['provider'=>$pid, 'providerName'=>$p['name']??$pid, 'model'=>$mid,
-            'ok'=>$ok, 'latencyMs'=>$latency, 'error'=>mb_substr((string)$err,0,120),
-            'cat'=>$diag['cat'], 'label'=>$diag['label'],
-            'msgResponse'=>mb_substr($response,0,150), 'catResponse'=>mb_substr((string)$catResponse,0,150)];
-        if (count($st['items']) > 1000) $st['items'] = array_slice($st['items'], -1000);
-        $st['current'] = ['provider'=>'', 'model'=>''];
-        // هر ۳ مدل ذخیره کن تا اگر پردازه کشته شد کار حفظ شود
-        if ($st['tested'] % 3 === 0) { aiProvidersSave($providers); aiTestStateSave($st); }
-        // v9.56: تاخیر قابل‌تنظیم بین هر تست برای جلوگیری از ریت‌لیمیت
-        if ($delayMs > 0) usleep($delayMs * 1000);
     }
+
+    /* صف را دور-به-دور (هر دور = یک مدل از هر ارائه‌دهنده) اجرا کن. داخل هر
+       دور، درخواست‌ها با curl_multi هم‌زمان می‌روند. */
+    $rounds = [];
+    foreach ($queue as $q) { $rounds[(int)$q['round']][] = $q; }
+    ksort($rounds);
+    $payloadBase = ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>300];
+
+    foreach ($rounds as $rIdx => $items) {
+        clearstatcache(true, AI_TEST_STOP_FILE);
+        if (is_file(AI_TEST_STOP_FILE)) { $st['stopped'] = true; break; }
+        $st['round'] = (int)$rIdx + 1;
+        $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1), 'model'=>count($items) . ' مدل هم‌زمان'];
+        aiTestStateSave($st);
+
+        // ساخت دستهٔ درخواست‌های این دور
+        $jobs = [];
+        foreach ($items as $q) {
+            $p = $providers[$q['pid']] ?? null;
+            if (!$p) continue;
+            $jobs[] = ['p'=>$p, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'payload'=>$payloadBase, 't0'=>microtime(true)];
+        }
+        if (!$jobs) continue;
+        $t0r = microtime(true);
+        $results = aiParallelCalls($jobs, $net, $concurrency);
+        if (aiTestStopRequested()) { $st['stopped'] = true; break; }
+        $roundMs = (int)round((microtime(true) - $t0r) * 1000);
+
+        foreach ($results as $res) {
+            if (aiTestStopRequested()) { $st['stopped'] = true; break 2; }
+            $pid = (string)$res['pid']; $mid = (string)$res['mid'];
+            $p = $providers[$pid] ?? null;
+            if (!$p) continue;
+            $r = (array)$res['r'];
+            $latency = (int)round((microtime(true) - (float)$res['t0']) * 1000);
+            $j = aiTestJudge($r, $mid, $pid);
+            $ok = $j['ok']; $code = $j['code']; $response = $j['response']; $err = $j['error'];
+            $diag = $j['diag']; $diag['latencyMs'] = $latency;
+
+            if (!isset($st['diag'][$pid])) $st['diag'][$pid] = ['reachable'=>true,'categories'=>[],'samples'=>0];
+            $st['diag'][$pid]['samples']++;
+            if (!$ok) {
+                $st['diag'][$pid]['categories'][$diag['cat']] = ($st['diag'][$pid]['categories'][$diag['cat']] ?? 0) + 1;
+                if (in_array($diag['cat'], ['dns','timeout','refused','connect','ssl','network'], true)) {
+                    $st['diag'][$pid]['reachable'] = false;
+                    $st['diag'][$pid]['first_error'] = $diag['error'];
+                }
+                if ($j['kind'] === 'proxy') {
+                    $st['diag'][$pid]['net_issue'] = true;
+                    $st['diag'][$pid]['mode'] = (string)($net['mode'] ?? 'direct');
+                    $st['diag'][$pid]['net_hint'] = 'پاسخِ خطا از Worker/پروکسی آمده نه از سرویس — روش اتصال را «مستقیم» کنید یا Workerِ سالم بگذارید';
+                }
+            }
+            $st['diag'][$pid]['last_label'] = $diag['label'];
+            if ($j['billing'] !== '') $st['billing']++;
+            if ($j['kind'] === 'proxy') $st['proxy']++;
+            if ($j['kind'] === 'bogus') $st['bogus']++;
+            if ($j['kind'] === 'badmodel') $st['badmodel']++;
+
+            // v9.52: تستِ دسته‌بندی برای همین مدل — فقط وقتی مدل واقعاً جواب داده
+            $catMeta = null; $catResponse = null;
+            if ($ok && $doCat) $catResponse = aiRunTestCategory($p, $mid, $testCat, $catData, $net, $catMeta);
+
+            if (isset($providers[$pid]['models'])) {
+                foreach ($providers[$pid]['models'] as $i => $m) {
+                    if (($m['id'] ?? '') === $mid) {
+                        $providers[$pid]['models'][$i]['tested'] = true;
+                        $providers[$pid]['models'][$i]['available'] = $ok;
+                        $providers[$pid]['models'][$i]['rateLimited'] = in_array($code, [429], true);
+                        // v9.99: علتِ رفع‌نشدنی (اعتبار/اشتراک) جدا ثبت می‌شود
+                        if ($j['billing'] !== '') {
+                            $providers[$pid]['models'][$i]['billingIssue'] = $j['billing'];
+                        } else {
+                            unset($providers[$pid]['models'][$i]['billingIssue']);
+                        }
+                        $providers[$pid]['models'][$i]['testDetails'] = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300),
+                            'response'=>mb_substr((string)$response,0,300), 'catResponse'=>(string)$catResponse,
+                            'testMsg'=>$testMsg, 'testCat'=>$testCat, 'latencyMs'=>$latency, 'testedAt'=>gmdate('c'),
+                            'raw'=>mb_substr((string)($r['raw'] ?? ''), 0, 4000), 'via'=>(string)($r['via'] ?? ''),
+                            'catRaw'=>(string)($catMeta['raw'] ?? ''), 'catStatus'=>(int)($catMeta['status'] ?? 0),
+                            'catVia'=>(string)($catMeta['via'] ?? ''), 'catAiText'=>(string)($catMeta['aiText'] ?? ''),
+                            // v9.99: دستهٔ خطا و توضیحِ فارسیِ آن
+                            'kind'=>(string)$j['kind'], 'note'=>(string)$j['note'],
+                            'retriedSeq'=>!empty($r['retried_seq'])];
+                        break;
+                    }
+                }
+            }
+            $st['tested']++;
+            if ($ok) $st['available']++; else $st['failed']++;
+            $st['items'][] = ['provider'=>$pid, 'providerName'=>$p['name']??$pid, 'model'=>$mid,
+                'ok'=>$ok, 'latencyMs'=>$latency, 'error'=>mb_substr((string)$err,0,120),
+                'cat'=>$diag['cat'], 'label'=>$diag['label'], 'kind'=>(string)$j['kind'],
+                'round'=>$st['round'],
+                'msgResponse'=>mb_substr($response,0,150), 'catResponse'=>mb_substr((string)$catResponse,0,150)];
+            if (count($st['items']) > 1000) $st['items'] = array_slice($st['items'], -1000);
+        }
+        $st['current'] = ['provider'=>'', 'model'=>''];
+        $st['last_round_ms'] = $roundMs;
+        aiProvidersSave($providers);
+        aiTestStateSave($st);
+        /* تاخیر بینِ دورها (نه بینِ تک‌تکِ درخواست‌ها): چون هر دور فقط یک
+           درخواست به هر ارائه‌دهنده می‌زند، همین فاصله برای رعایتِ RPM کافی است. */
+        if ($delayMs > 0 && !aiTestStopRequested()) usleep($delayMs * 1000);
+    }
+
     aiProvidersSave($providers);
     $st['running'] = false;
     $st['done'] = true;
+    $extra = '';
+    if ($st['nonchat'] > 0) $extra .= ' · ⏭ ' . $st['nonchat'] . ' غیرچت';
+    if ($st['billing'] > 0) $extra .= ' · 💳 ' . $st['billing'] . ' اعتبار/اشتراک';
+    if ($st['proxy'] > 0)   $extra .= ' · 🛰 ' . $st['proxy'] . ' مسیرِ عبور';
+    if ($st['bogus'] > 0)   $extra .= ' · ⚠ ' . $st['bogus'] . ' پاسخِ نامعتبر';
     $st['summary'] = $st['stopped']
         ? 'توقف خواسته شد — '.$st['tested'].' تست انجام شد'
-        : 'تمام شد — '.$st['tested'].' تست · 🟢 '.$st['available'].' · 🔴 '.$st['failed'];
+        : 'تمام شد — '.$st['tested'].' تست · 🟢 '.$st['available'].' · 🔴 '.$st['failed'].$extra;
     aiTestStateSave($st);
     @unlink(AI_TEST_STOP_FILE);
     return $st;
+}
+
+/* =====================================================================
+ *  v9.99: «رفعِ گیر» برای تستِ مدل‌ها  →  ?ai_test_unstick=1
+ *
+ *  چرا لازم است: پردازهٔ پس‌زمینهٔ تست ممکن است وسطِ کار بمیرد (کشته‌شدن
+ *  توسط هاست، ری‌استارتِ php-fpm، تایم‌اوتِ سخت). در آن حالت running در فایلِ
+ *  وضعیت true می‌ماند، مرورگر بی‌نهایت poll می‌کند و کاربر فکر می‌کند تست
+ *  ادامه دارد در حالی که هیچ‌کس کار نمی‌کند.
+ *
+ *  این اندپوینت همان الگوی «رفعِ گیر»ِ صفِ ارسال (bsl_queue) را برای تست
+ *  پیاده می‌کند:
+ *    ۱) وضعیتِ مرده را تشخیص می‌دهد (updated_at کهنه).
+ *    ۲) قفلِ running و فایلِ توقف را آزاد می‌کند.
+ *    ۳) کار را با only_untested=1 از سر می‌گیرد؛ چون نتیجهٔ هر دور بلافاصله
+ *       ذخیره شده، مدل‌های تست‌شده دوباره تست نمی‌شوند و کار دقیقاً از همان
+ *       نقطه ادامه پیدا می‌کند.
+ * ===================================================================== */
+if (isset($_GET['ai_test_unstick'])) {
+header('Content-Type: application/json; charset=UTF-8');
+$st = aiTestStateLoad();
+$stAt = (int)($st['updated_at'] ?? $st['started_at'] ?? 0);
+$idle = $stAt > 0 ? (time() - $stAt) : PHP_INT_MAX;
+$stall = max(60, (int)(loadConnections()['ai_test_stall_sec'] ?? 300));
+$force = !empty($_GET['force']);
+
+// اگر واقعاً زنده است و به‌تازگی به‌روز شده، دست نزن
+if (!empty($st['running']) && empty($st['done']) && $idle < $stall && !$force) {
+    echo json_encode(['ok'=>false, 'alive'=>true, 'idle_sec'=>$idle,
+        'error'=>'تست زنده است و ' . $idle . ' ثانیه پیش به‌روز شده — گیر نکرده'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+$args = (array)($st['args'] ?? []);
+$per     = max(1, min(500, (int)($_GET['per_provider'] ?? ($args['per'] ?? 50))));
+$testMsg = trim((string)($_GET['msg'] ?? ($args['msg'] ?? 'سلام')));
+if ($testMsg === '') $testMsg = 'سلام';
+$testCat = trim((string)($_GET['cat'] ?? ($args['cat'] ?? 'ادو پرفیوم')));
+if ($testCat === '') $testCat = 'ادو پرفیوم';
+$delayMs = max(0, min(60000, (int)($_GET['delay'] ?? ($args['delay'] ?? 120))));
+$concurrency = max(1, min(16, (int)($_GET['conc'] ?? ($args['conc'] ?? 4))));
+// اگر وضعیتِ قبلی این پارامتر را نداشت، همان پیش‌فرضِ شروعِ تست (روشن) بماند
+$skipNonChat = isset($_GET['nonchat']) ? ($_GET['nonchat'] !== '0')
+                                       : (array_key_exists('nonchat', $args) ? !empty($args['nonchat']) : true);
+
+// آزادسازی قفل‌ها
+@unlink(AI_TEST_STOP_FILE);
+$doneBefore = (int)($st['tested'] ?? 0);
+$st['running'] = false; $st['done'] = true; $st['stalled'] = true;
+aiTestStateSave($st);
+
+/* از سر بگیر: فقط مدل‌های تست‌نشده — یعنی همان‌هایی که به آن‌ها نرسیده بودیم */
+finishRequestNow(json_encode(['ok'=>true, 'unstuck'=>true, 'resumed'=>true,
+    'idle_sec'=>$idle, 'done_before'=>$doneBefore,
+    'note'=>'تستِ گیرکرده آزاد شد و از همان‌جا ادامه یافت — ' . $doneBefore . ' مدل قبلاً تست شده بود'],
+    JSON_UNESCAPED_UNICODE));
+aiRunTestBackground($per, true, $testMsg, $testCat, $delayMs, $concurrency, $skipNonChat);
+exit;
 }
 
 if (isset($_GET['ai_test_start']) || isset($_GET['ai_test_all'])) {
@@ -19949,6 +20744,9 @@ $testCat = trim((string)($_GET['cat'] ?? 'ادو پرفیوم'));
 if ($testCat === '') $testCat = 'ادو پرفیوم';
 // v9.56: تاخیر بین هر تست (میلی‌ثانیه) — برای جلوگیری از ریت‌لیمیت
 $delayMs = max(0, min(60000, (int)($_GET['delay'] ?? 120)));
+// v9.99: سقفِ درخواست‌های هم‌زمان و ردکردنِ مدل‌های غیرچت
+$concurrency = max(1, min(16, (int)($_GET['conc'] ?? 4)));
+$skipNonChat = ($_GET['nonchat'] ?? '1') !== '0';
 // اگر کاری در حال اجراست، دوباره شروع نکن
 $cur = aiTestStateLoad();
 if (!empty($cur['running'])) {
@@ -19960,11 +20758,11 @@ finishRequestNow(json_encode(['ok'=>true,'started'=>true,'background'=>$detach,
     'note'=>'تست در پس‌زمینهٔ سرور ادامه دارد — می‌توانید صفحه را ببندید'], JSON_UNESCAPED_UNICODE));
 if (!$detach) {
     // حالت هم‌زمان برای تست/عیب‌یابی
-    aiRunTestBackground($per, $onlyUntested, $testMsg, $testCat, $delayMs);
+    aiRunTestBackground($per, $onlyUntested, $testMsg, $testCat, $delayMs, $concurrency, $skipNonChat);
     exit;
 }
 // پس از جدا شدن از مرورگر، اجرای واقعی ادامه می‌یابد
-aiRunTestBackground($per, $onlyUntested, $testMsg, $testCat, $delayMs);
+aiRunTestBackground($per, $onlyUntested, $testMsg, $testCat, $delayMs, $concurrency, $skipNonChat);
 exit;
 }
 
@@ -25048,10 +25846,22 @@ placeholder="مثلاً: ادو پرفیوم" title="عنوان محصولی ک�
 <div class="crow" style="margin-top:4px"><label>تاخیر بین تست‌ها:</label>
 <input type="number" id="aiTestDelay" value="120" min="0" max="60000" step="50" dir="ltr" style="max-width:110px;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px"
 title="مکث بین هر تست (میلی‌ثانیه) برای جلوگیری از ریت‌لیمیت — مثلاً ۱۰۰۰ یعنی یک ثانیه">
-<span style="font-size:10.5px;color:#64748b">ms · جلوگیری از ریت‌لیمیت</span></div>
+<span style="font-size:10.5px;color:#64748b">ms · بین هر «دور»</span></div>
+<!-- v9.99: تستِ موازیِ چرخشی — سقفِ هم‌زمانی و ردکردنِ مدل‌های غیرچت -->
+<div class="crow" style="margin-top:4px"><label>درخواستِ هم‌زمان:</label>
+<input type="number" id="aiTestConc" value="4" min="1" max="16" step="1" dir="ltr" style="max-width:110px;padding:5px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px"
+title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶). چون در هر دور فقط یک درخواست به هر ارائه‌دهنده می‌رود، بالا بردنِ این عدد سرعت را زیاد می‌کند ولی ریت‌لیمیتِ هیچ ارائه‌دهنده‌ای را پر نمی‌کند.">
+<span style="font-size:10.5px;color:#64748b">۱..۱۶ · سرعتِ کل</span></div>
+<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;cursor:pointer;margin-top:4px">
+<input type="checkbox" id="aiTestSkipNonChat" checked style="width:14px;height:14px"> ردکردنِ مدل‌های غیرچت (تصویر/صدا/امبدینگ)</label>
+<div style="font-size:10px;color:#64748b;margin-top:4px;line-height:1.6">
+🔄 تست «چرخشی» است: اول مدلِ اولِ همهٔ ارائه‌دهنده‌ها، بعد مدلِ دومِ همه و… چون ریت‌لیمیت برای هر ارائه‌دهنده جداست، این کار هم کل لیست را سریع‌تر تمام می‌کند و هم خطای ریت‌لیمیت نمی‌دهد.</div>
 <div class="cact" style="margin-top:6px">
 <button class="btn btn-green" onclick="aiTestStartContinue()" style="flex:1" title="اگر تستی در حال اجراست ادامه می‌دهد، وگرنه تستِ تازه شروع می‌کند">▶ شروع / ادامه</button>
 <button class="btn btn-blue" onclick="aiShowTestTable()" style="flex:1" title="باز کردن جدولِ نتایجِ تست بدون شروعِ تستِ تازه">📊 نمایش جدول</button>
+</div>
+<div class="cact" style="margin-top:4px">
+<button class="btn" onclick="aiTestUnstick()" style="flex:1;background:#7c2d12;border-color:#9a3412" title="اگر تست وسطِ کار گیر کرده (پردازهٔ پس‌زمینه مرده)، قفل را آزاد می‌کند و از همان‌جا که مانده ادامه می‌دهد — مدل‌های تست‌شده دوباره تست نمی‌شوند">🔧 رفعِ گیر و ادامه</button>
 </div>
 </div>
 </div>
@@ -29900,6 +30710,58 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.99', t:'🧪 عیب‌یابیِ خطاهای تستِ مدل + تستِ موازیِ چرخشی + رفعِ گیر', items:[
+    '📋 گزارشِ تستِ واقعیِ کاربر (ده‌ها ردیفِ قرمز) خط‌به‌خط بررسی شد و خطاها',
+    '   به دو گروه تقسیم شدند: «قابلِ رفع با کد» و «مربوط به اعتبار/اشتراک».',
+    '',
+    '── گروهِ اول: رفع شد ──',
+    '🛰 خطای ۴۰۳ که از ورکر/پروکسی می‌آمد به‌اشتباه به پای مدل نوشته می‌شد.',
+    '   حالا خطای «واسطه» از خطای «سرویس» جدا می‌شود و اگر مسیرِ عبور خراب',
+    '   باشد، برنامه خودش راهِ مستقیم/DoH/DNS/ورکر/پروکسی را یکی‌یکی امتحان',
+    '   می‌کند. قاعدهٔ ثابت: پاسخِ واقعیِ سرویس همیشه بر پاسخِ واسطهٔ خراب',
+    '   اولویت دارد — پس ۴۰۲ِ سرویس دیگر زیرِ ۴۰۳ِ پروکسی گم نمی‌شود.',
+    '🌐 حلِ نامِ دامنه از راهِ DNS-over-HTTPS با چند سرورِ پشتیبان اضافه شد و',
+    '   سرورِ خراب موقتاً کنار گذاشته می‌شود؛ تایم‌اوت‌های پیاپی رفع شدند.',
+    '☁️ خطاهای Cloudflare درست شد: آدرس از همان ریشه‌ای که کاربر داده ساخته',
+    '   می‌شود (نه دامنهٔ حدسی)، و بدنه به‌جای {text} قالبِ استانداردِ',
+    '   {messages} می‌فرستد — خطاهای «Bad input» و «No route for that URI»',
+    '   و پاسخ‌های تهیِ prompt_tokens:1 برطرف شدند.',
+    '🚫 مدل‌هایی که اصلاً «چت» نیستند (امبدینگ، rerank، تولید تصویر، تبدیل',
+    '   گفتار به متن و برعکس، طبقه‌بندی، محافظِ محتوا) پیش از تست شناسایی و',
+    '   کنار گذاشته می‌شوند. این‌ها «رد شد» نیستند، «قابلِ تست نیستند» —',
+    '   هم گزارش تمیزتر شد هم زمانِ تست کوتاه‌تر.',
+    '🗑️ نام‌های آشغال هنگام درون‌ریزی دور ریخته می‌شوند: شناسه‌هایی مثل tbody،',
+    '   td، ul و li که از کپیِ جدولِ HTML سایتِ ارائه‌دهنده وارد شده بودند.',
+    '🩹 سه شناسهٔ نامعتبرِ Mistral که خطای «Invalid model» می‌دادند از کاتالوگ',
+    '   حذف شدند؛ فقط نام‌های معتبرِ latest و نسخه‌های تاریخ‌دار ماندند.',
+    '🤨 پاسخِ بی‌معنا (تکرارِ یک نویسه، پاسخِ خالی) دیگر «موفق» شمرده نمی‌شود',
+    '   و برچسبِ جداگانه می‌گیرد.',
+    '',
+    '── گروهِ دوم: عمداً رفع نشد، فقط درست برچسب خورد ──',
+    '💳 خطاهای اعتبار و اشتراک با هیچ تغییری در کد درست نمی‌شوند. حالا به پنج',
+    '   دستهٔ روشن تفکیک می‌شوند تا بدانید کارِ شما چیست: «اعتبار تمام شده»،',
+    '   «پلن رایگان اجازه نمی‌دهد»، «مدل در سطحِ اشتراکِ شما نیست»، «مدل Labs',
+    '   را ادمین باید فعال کند» و «کلید آزمایشی سقفِ ماهانه دارد».',
+    '',
+    '── تستِ موازیِ چرخشی ──',
+    '🔄 ترتیبِ تست عوض شد: اول مدلِ اولِ همهٔ ارائه‌دهنده‌ها، بعد مدلِ دومِ همه',
+    '   و به همین ترتیب. چون ریت‌لیمیت همیشه برای هر ارائه‌دهنده جداست، در هر',
+    '   «دور» حداکثر یک درخواست به هر ارائه‌دهنده می‌رود.',
+    '⚡ درخواست‌های هر دور واقعاً هم‌زمان فرستاده می‌شوند (curl_multi) و سقفِ',
+    '   هم‌زمانی از رابط کاربری قابلِ تنظیم است (۱ تا ۱۶، پیش‌فرض ۴).',
+    '   نتیجه: کلِ لیست چند برابر سریع‌تر تمام می‌شود، بدونِ خطای ریت‌لیمیت.',
+    '⏱️ تأخیر حالا «بین دورها» اعمال می‌شود نه بین تک‌تک تست‌ها.',
+    '',
+    '── رفعِ گیر ──',
+    '🔧 دکمهٔ «رفعِ گیر و ادامه» به بخشِ تست اضافه شد. اگر پردازهٔ پس‌زمینه مرده',
+    '   ولی وضعیت روی «در حال اجرا» مانده باشد، وضعیت خودش این را تشخیص می‌دهد',
+    '   و «قابلِ ادامه» علامت می‌خورد. دکمه قفل را آزاد می‌کند و تست را از همان',
+    '   جا که مانده دنبال می‌کند — مدل‌های تست‌شده دوباره تست نمی‌شوند.',
+    '🛡️ روی تستی که واقعاً زنده است اجرا نمی‌شود (مگر با تأییدِ صریح) تا دو',
+    '   پردازه هم‌زمان روی یک فهرست کار نکنند.',
+    '📊 شمارنده‌های تفکیکی به خلاصهٔ نتیجه اضافه شد: غیرچت، اعتبار، مسیرِ عبور،',
+    '   پاسخِ بی‌معنا و مدلِ نامعتبر.',
+  ]},
   {v:'9.98', t:'📤 رفعِ باگ: دکمهٔ «برون‌ریزی JSON» هیچ فایلی دانلود نمی‌کرد', items:[
     '🐞 دکمه‌های «📤 برون‌ریزی JSON (با کلید)» و «🔒 بدون کلید» فشرده می‌شدند،',
     '   توستِ «در حال دانلود است» هم می‌آمد، ولی هیچ فایلی ذخیره نمی‌شد.',
@@ -35063,6 +35925,13 @@ function aiPollTest(){
 }
 let aiTestRows={},aiTestTotCount=0,aiTestOkCount=0,aiTestFailCount=0,aiTestWaitCount=0;
 let aiTestMsgVal='سلام',aiTestCatVal='ادو پرفیوم',aiTestDelayVal=120;
+// v9.99: سقفِ درخواستِ هم‌زمان و ردکردنِ مدل‌های غیرچت
+let aiTestConcVal=4,aiTestSkipNonChatVal=true;
+function aiTestReadOpts(){
+    aiTestConcVal=Math.max(1,Math.min(16,parseInt(($('aiTestConc')&&$('aiTestConc').value)||'4',10)||4));
+    aiTestSkipNonChatVal=$('aiTestSkipNonChat')?!!$('aiTestSkipNonChat').checked:true;
+    return '&conc='+aiTestConcVal+'&nonchat='+(aiTestSkipNonChatVal?'1':'0');
+}
 // v9.64: فیلترِ «فقط سبزها» در جدولِ نتایجِ تست مدل‌ها
 let aiTestOnlyGreen=false;
 function aiTestRenderCounters(){
@@ -35187,7 +36056,7 @@ function aiTestAll(){
     aiTestTotCount=0;aiTestOkCount=0;aiTestFailCount=0;aiTestWaitCount=0;aiTestRows={};
     fetch('?ai_test_start=1&per_provider='+per+'&only_untested='+only
         +'&msg='+encodeURIComponent(aiTestMsgVal)+'&cat='+encodeURIComponent(aiTestCatVal)
-        +'&delay='+aiTestDelayVal).then(r=>r.json()).then(d=>{
+        +'&delay='+aiTestDelayVal+aiTestReadOpts()).then(r=>r.json()).then(d=>{
         if(d&&d.running&&!d.ok){ if($('aiTestCur'))$('aiTestCur').textContent='در حال اجراست — ادامهٔ آن را نشان می‌دهم'; }
         else if($('aiTestCur'))$('aiTestCur').textContent='شروع تست در پس‌زمینهٔ سرور...';
         aiPollTest();
@@ -35220,6 +36089,31 @@ function aiShowTestTable(){
             }
         }
     }).catch(()=>{ if($('aiTestCur'))$('aiTestCur').textContent='خطا در خواندن وضعیت'; });
+}
+/* v9.99: «رفعِ گیر» — وقتی پردازهٔ پس‌زمینهٔ تست مرده ولی وضعیت روی «در حال
+   اجرا» مانده، قفل را آزاد می‌کند و تست را از همان‌جا که مانده ادامه می‌دهد.
+   چون نتیجهٔ هر دور بلافاصله ذخیره شده، مدل‌های تست‌شده دوباره تست نمی‌شوند. */
+function aiTestUnstick(){
+    aiOpenTestModal();
+    aiTestMsgVal=($('aiTestMsg')&&$('aiTestMsg').value.trim())||'سلام';
+    aiTestCatVal=($('aiTestCat')&&$('aiTestCat').value.trim())||'ادو پرفیوم';
+    aiTestDelayVal=Math.max(0,parseInt(($('aiTestDelay')&&$('aiTestDelay').value)||'120',10)||120);
+    if($('aiTestCur'))$('aiTestCur').textContent='🔧 در حال بررسی و رفعِ گیر...';
+    fetch('?ai_test_unstick=1&msg='+encodeURIComponent(aiTestMsgVal)
+        +'&cat='+encodeURIComponent(aiTestCatVal)
+        +'&delay='+aiTestDelayVal+aiTestReadOpts()).then(r=>r.json()).then(d=>{
+        if(d&&d.alive){
+            if($('aiTestCur'))$('aiTestCur').textContent='✅ تست گیر نکرده — زنده است و ادامه دارد';
+            aiPollTest();
+            return;
+        }
+        if(d&&d.ok){
+            if($('aiTestCur'))$('aiTestCur').textContent='🔧 قفل آزاد شد — ادامه از مدلِ '+toFa((d.done_before||0)+1)+' به بعد';
+            aiPollTest();
+        }else if($('aiTestCur')){
+            $('aiTestCur').textContent='خطا در رفعِ گیر: '+esc((d&&d.error)||'نامشخص');
+        }
+    }).catch(()=>{ if($('aiTestCur'))$('aiTestCur').textContent='خطا در رفعِ گیر'; });
 }
 /* v9.24: بعد از ریفرش، اگر کاری در حال اجراست مودال را باز کن و ادامه بده */
 function aiResumeTestModalOnLoad(){
