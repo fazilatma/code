@@ -55,6 +55,12 @@ const CATLEARN_FILE = __DIR__ . '/category_learning.json';   // v8.48
 const CATLEARN_MAX_WORDS = 5;
 const RECON_PROGRESS_FILE = __DIR__ . '/recon_progress.json'; // v8.49
 const SUFFIX_PROGRESS_FILE = __DIR__ . '/suffix_progress.json'; // v8.53
+// v10.02 (۱۶): حذفِ هوشمندِ محصولاتِ تکراری — کارِ بلندمدتِ سمتِ سرور
+const DEDUP_PROGRESS_FILE = __DIR__ . '/dedup_progress.json';
+const DEDUP_RESULT_FILE   = __DIR__ . '/dedup_result.json';
+const DEDUP_STOP_FILE     = __DIR__ . '/dedup_stop.json';
+const DEDUP_LOCK_FILE     = __DIR__ . '/dedup.lock';
+const DEDUP_MAX_GROUPS    = 1200;
 const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 /* v9.20: ارائه‌دهنده‌های هوش مصنوعی (چند-ارائه‌دهنده) — فایل جدا از
@@ -98,7 +104,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.01';
+const APP_VERSION = '10.02';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12980,6 +12986,224 @@ if (isset($_GET['suffix_report'])) {
     exit;
 }
 
+/* =====================================================================
+ *  v10.02 (۱۶): اندپوینت‌های حذفِ تکراری — همه سمتِ سرور و بلندمدت
+ *
+ *  ?dedup_start=1&target=woo|bsl&mode=scan|delete  → شروع در پس‌زمینه
+ *  ?dedup_status=1[&since=N]                        → وضعیت و لاگِ زنده
+ *  ?dedup_result=1                                  → نتیجهٔ کامل
+ *  ?dedup_stop=1                                    → درخواستِ توقف
+ *  POST action=dedup_save_cfg                       → ذخیرهٔ تنظیمات
+ *  POST action=dedup_preview                        → پیش‌نمایشِ الگوها
+ *  POST action=dedup_delete_ids                     → حذفِ دستیِ چند شناسه
+ *
+ *  چرا «شروع + نظرسنجی» و نه یک درخواستِ طولانی؟ چون روی غرفه‌ای با چند
+ *  هزار محصول، فقط مرحلهٔ دریافت ده‌ها درخواست HTTP است و بعد صدها حذف.
+ *  هیچ مرورگر/پروکسی/هاستی این‌قدر صبر نمی‌کند و کاربر «خطای شبکه» می‌دید.
+ * ===================================================================== */
+if (isset($_GET['dedup_start'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $target = (string)($_GET['target'] ?? '');
+    $mode   = ((string)($_GET['mode'] ?? 'scan')) === 'delete' ? 'delete' : 'scan';
+    if ($target !== 'woo' && $target !== 'bsl') {
+        echo json_encode(['ok' => false, 'error' => 'مقصد نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $lockFp = fopen(DEDUP_LOCK_FILE, 'c');
+    if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
+        if ($lockFp) fclose($lockFp);
+        echo json_encode(['ok' => false, 'running' => true,
+            'error' => 'یک عملیاتِ حذفِ تکراری همین حالا در حال اجراست'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    @set_time_limit(0); @ignore_user_abort(true);
+    dedupClearStop();
+    $cn  = loadConnections();
+    $cfg = dedupCfg($cn);
+
+    @unlink(DEDUP_PROGRESS_FILE);
+    dedupProgress(['running' => true, 'done' => false, 'target' => $target, 'mode' => $mode,
+        'started_at' => time(), 'total' => 0, 'groups' => 0, 'dups' => 0,
+        'deleted' => 0, 'failed' => 0, 'processed' => 0, 'phase' => 'start',
+        'keep' => $cfg['keep'],
+        'log_add' => ['🚀 شروع — ' . ($target === 'woo' ? 'ووکامرس' : 'باسلام')
+            . ' · ' . ($mode === 'delete' ? 'حذفِ واقعی' : 'فقط گزارش')
+            . ' · نگه‌داری: ' . dedupKeepLabel($cfg['keep'])]]);
+
+    // پاسخِ فوری، سپس ادامهٔ کار در پس‌زمینه
+    $early = json_encode(['ok' => true, 'started' => true, 'target' => $target, 'mode' => $mode],
+        JSON_UNESCAPED_UNICODE);
+    header('Connection: close');
+    header('Content-Length: ' . strlen($early));
+    echo $early;
+    @ob_flush(); @flush();
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+
+    register_shutdown_function(function () use ($lockFp) {
+        @flock($lockFp, LOCK_UN); @fclose($lockFp); @unlink(DEDUP_LOCK_FILE);
+    });
+
+    try {
+        $rep = dedupRun($cn, $target, $cfg, $mode);
+    } catch (Throwable $e) {
+        dedupProgress(['running' => false, 'done' => true, 'error' => $e->getMessage(),
+            'log_add' => ['❌ خطا: ' . $e->getMessage()]]);
+        dedupClearStop();
+        exit;
+    }
+    @file_put_contents(DEDUP_RESULT_FILE, json_encode($rep, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    $stopped = dedupStopRequested();
+    dedupClearStop();
+    dedupProgress(['running' => false, 'done' => true, 'stopped' => $stopped,
+        'result_ok' => !empty($rep['ok']), 'error' => $rep['error'] ?? '',
+        'groups' => $rep['groups'] ?? 0, 'dups' => $rep['duplicates'] ?? 0,
+        'deleted' => $rep['deleted'] ?? 0, 'failed' => $rep['failed'] ?? 0,
+        'log_add' => [empty($rep['ok'])
+            ? ('❌ ' . ($rep['error'] ?? 'ناموفق'))
+            : ('🏁 پایان در ' . $rep['took'] . ' ثانیه — '
+               . ($mode === 'delete'
+                  ? (($target === 'bsl' ? 'بایگانی‌شده: ' : 'حذف‌شده: ') . $rep['deleted']
+                     . ($rep['failed'] ? ('، ناموفق: ' . $rep['failed']) : ''))
+                  : ('گزارش آماده است: ' . $rep['duplicates'] . ' نسخهٔ اضافی')))]]);
+    exit;
+}
+
+if (isset($_GET['dedup_cfg'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cn = loadConnections();
+    echo json_encode(['ok' => true, 'cfg' => dedupCfg($cn),
+        'defaults' => dedupDefaultCfg(),
+        'has_woo' => !empty($cn['woocommerce']['store_url']),
+        'has_bsl' => !empty($cn['basalam']['token']) && !empty($cn['basalam']['vendor_id']),
+        'has_result' => is_file(DEDUP_RESULT_FILE),
+        'running' => is_file(DEDUP_LOCK_FILE)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['dedup_status'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $st = [];
+    if (is_file(DEDUP_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(DEDUP_PROGRESS_FILE), true);
+        if (is_array($d)) $st = $d;
+    }
+    $log = is_array($st['log'] ?? null) ? $st['log'] : [];
+    $since = max(0, (int)($_GET['since'] ?? 0));
+    $st['log_total'] = count($log);
+    $st['log'] = $since > 0 ? array_slice($log, $since) : array_slice($log, -60);
+    // اگر پردازه مرده باشد ولی فایل هنوز running بگوید، قفل را ملاک بگیر
+    if (!empty($st['running']) && !is_file(DEDUP_LOCK_FILE)
+        && (time() - (int)($st['ts'] ?? 0)) > 90) {
+        $st['running'] = false; $st['done'] = true; $st['stale'] = true;
+    }
+    $st['ok'] = true;
+    echo json_encode($st, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['dedup_result'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    if (!is_file(DEDUP_RESULT_FILE)) {
+        echo json_encode(['ok' => false, 'error' => 'هنوز گزارشی گرفته نشده'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    echo (string)@file_get_contents(DEDUP_RESULT_FILE);
+    exit;
+}
+
+if (isset($_GET['dedup_stop'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @file_put_contents(DEDUP_STOP_FILE, json_encode(['at' => time()]));
+    dedupProgress(['log_add' => ['⏹ درخواستِ توقف ثبت شد — پس از موردِ جاری متوقف می‌شود']]);
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (($_POST['action'] ?? '') === 'dedup_save_cfg') {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cn = loadConnections();
+    $d  = dedupDefaultCfg();
+    $cfg = [];
+    foreach ($d as $k => $v) {
+        if (!array_key_exists($k, $_POST)) { $cfg[$k] = is_array($cn['dedup'] ?? null) && array_key_exists($k, $cn['dedup']) ? $cn['dedup'][$k] : $v; continue; }
+        if (is_bool($v))    $cfg[$k] = !empty($_POST[$k]) && $_POST[$k] !== 'false' && $_POST[$k] !== '0';
+        elseif (is_int($v)) $cfg[$k] = (int)$_POST[$k];
+        else                $cfg[$k] = (string)$_POST[$k];
+    }
+    $cn['dedup'] = $cfg;
+    saveConnections($cn);
+    echo json_encode(['ok' => true, 'cfg' => dedupCfg($cn)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/**
+ * پیش‌نمایشِ زندهٔ الگوها: کاربر چند عنوان نمونه می‌دهد و می‌بیند پس از
+ * برداشتنِ پسوند چه چیزی می‌ماند و کدام‌ها هم‌گروه می‌شوند. هیچ درخواستی
+ * به مقصد فرستاده نمی‌شود، پس فوری است.
+ */
+if (($_POST['action'] ?? '') === 'dedup_preview') {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cfg = dedupCfg();
+    foreach (dedupDefaultCfg() as $k => $v) {
+        if (!array_key_exists($k, $_POST)) continue;
+        if (is_bool($v))    $cfg[$k] = !empty($_POST[$k]) && $_POST[$k] !== 'false' && $_POST[$k] !== '0';
+        elseif (is_int($v)) $cfg[$k] = (int)$_POST[$k];
+        else                $cfg[$k] = (string)$_POST[$k];
+    }
+    $raw = (string)($_POST['titles'] ?? '');
+    $lines = array_values(array_filter(array_map('trim', preg_split('/[\r\n]+/u', $raw)), function ($x) { return $x !== ''; }));
+    $lines = array_slice($lines, 0, 60);
+    $pats  = dedupPatterns($cfg);
+    $rows = []; $groups = [];
+    foreach ($lines as $i => $t) {
+        $n = dedupNormalize($t, $cfg, $pats);
+        // «تغییر کرد» یعنی الگوها چیزی برداشتند، نه صرفاً کوچک‌سازیِ حروف
+        $base = dedupNormalize($t, $cfg, []);
+        $rows[] = ['title' => $t, 'norm' => $n, 'changed' => ($n !== $base)];
+        if ($n !== '') $groups[$n][] = $i;
+    }
+    $dups = [];
+    foreach ($groups as $n => $idx) if (count($idx) > 1) $dups[] = ['norm' => $n, 'idx' => $idx];
+    echo json_encode(['ok' => true, 'rows' => $rows, 'dups' => $dups,
+        'patterns' => count($pats)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** حذفِ دستیِ چند شناسه از دلِ گزارش (بدون اجرای دوبارهٔ کلِ اسکن) */
+if (($_POST['action'] ?? '') === 'dedup_delete_ids') {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(0); @ignore_user_abort(true);
+    $target = (string)($_POST['target'] ?? '');
+    $ids = json_decode((string)($_POST['ids'] ?? '[]'), true);
+    if (!is_array($ids)) $ids = [];
+    $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+    $ids = array_slice($ids, 0, 200);
+    if (!$ids || ($target !== 'woo' && $target !== 'bsl')) {
+        echo json_encode(['ok' => false, 'error' => 'ورودی نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $cn = loadConnections();
+    $done = 0; $fail = 0; $items = [];
+    foreach ($ids as $did) {
+        if ($target === 'bsl') {
+            $bs = $cn['basalam'] ?? [];
+            if (empty($bs['token'])) { echo json_encode(['ok' => false, 'error' => 'تنظیمات باسلام ناقص'], JSON_UNESCAPED_UNICODE); exit; }
+            $r = bslArchiveProduct((string)$bs['token'], (int)$bs['vendor_id'], $did);
+            $ok = !empty($r['ok']) || in_array((int)($r['code'] ?? 0), [200, 204], true);
+            $em = $r['body']['message'] ?? ('HTTP ' . ($r['code'] ?? '?'));
+        } else {
+            $w = $cn['woocommerce'] ?? [];
+            if (empty($w['store_url'])) { echo json_encode(['ok' => false, 'error' => 'تنظیمات ووکامرس ناقص'], JSON_UNESCAPED_UNICODE); exit; }
+            $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'DELETE', 'products/' . $did . '?force=true');
+            $ok = !empty($r['ok']);
+            $em = $r['body']['message'] ?? ('HTTP ' . ($r['code'] ?? '?'));
+        }
+        if ($ok) { $done++; $items[] = ['id' => $did, 'ok' => true]; }
+        else     { $fail++; $items[] = ['id' => $did, 'ok' => false, 'msg' => (string)$em]; }
+        usleep(200000);
+    }
+    echo json_encode(['ok' => true, 'deleted' => $done, 'failed' => $fail, 'items' => $items,
+        'msg' => aiFaNum($done) . ($target === 'bsl' ? ' محصول بایگانی شد' : ' محصول حذف شد')
+                 . ($fail ? ('؛ ' . aiFaNum($fail) . ' ناموفق') : '')], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['suffix_status'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $st = [];
@@ -15603,6 +15827,96 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'if ($catKeys) $cat = aiProviderSetKeys($cat, $catKeys);') !== false);
     $add('10.01', 'عیب‌یابیِ اتصال هم با کلیدِ سالم انجام می‌شود نه کلیدِ سوخته',
          strpos($selfSrc, '$_pk      = aiPickApiKey($_ac[' . "'provider'], \$provId);") !== false);
+
+    /* ---------- v10.02 (۱۶): موتورِ حذفِ تکراری — قابل تنظیم، دوپلتفرمی، سرورساید ---------- */
+    $add('10.02', 'توابعِ موتورِ حذفِ تکراری تعریف شده‌اند',
+         function_exists('dedupDefaultCfg') && function_exists('dedupCfg')
+      && function_exists('dedupRun')       && function_exists('dedupNormalize')
+      && function_exists('dedupFetchWoo')  && function_exists('dedupStatusRank')
+      && function_exists('dedupTs')        && function_exists('dedupPrice')
+      && function_exists('dedupKeepLabel') && function_exists('dedupStopRequested'));
+    $add('10.02', 'هر شش معیارِ نگه‌داری پشتیبانی می‌شود',
+         dedupKeepLabel('newest') === 'جدیدترین' && dedupKeepLabel('oldest') === 'قدیمی‌ترین'
+      && dedupKeepLabel('cheapest') === 'ارزان‌ترین' && dedupKeepLabel('expensive') === 'گران‌ترین'
+      && dedupKeepLabel('most_stock') !== '' && dedupKeepLabel('best_status') !== '');
+    $add('10.02', 'پیش‌فرضِ تنظیمات معتبر است (newest + پاک‌سازیِ (کد:x) و #x)',
+         (function () {
+             $d = dedupDefaultCfg();
+             return $d['keep'] === 'newest' && $d['strip_code'] === true
+                 && $d['strip_hash'] === true && $d['prefer_active'] === true
+                 && (int)$d['min_len'] >= 1;
+         })());
+    $add('10.02', 'نرمال‌سازی پسوندهای (کد:x) و #x را با ارقامِ فارسی/لاتین حذف می‌کند',
+         (function () {
+             $c = dedupDefaultCfg();
+             $a = dedupNormalize('کیف چرمی (کد:۱۲۳)', $c);
+             $b = dedupNormalize('کیف چرمی #123', $c);
+             $e = dedupNormalize('کیف چرمی', $c);
+             return $a === $b && $b === $e && $e !== '';
+         })());
+    $add('10.02', 'نرمال‌سازی عددِ داخلِ عنوان (مثل A54 5G) را دست نمی‌زند',
+         (function () {
+             $c = dedupDefaultCfg();
+             return dedupNormalize('گوشی A54 5G', $c) !== dedupNormalize('گوشی A54', $c);
+         })());
+    $add('10.02', 'الگویِ دلخواهِ کاربر (strip_custom) هم متنِ ساده و هم regex را می‌پذیرد',
+         (function () {
+             $c = dedupDefaultCfg();
+             $c['strip_custom'] = "کد x\n" . '/\s*[-]\s*نو$/';
+             $one = dedupNormalize('لپ تاپ کد 4412', $c);
+             $two = dedupNormalize('لپ تاپ - نو', $c);
+             return $one === dedupNormalize('لپ تاپ', $c) && $two === dedupNormalize('لپ تاپ', $c);
+         })());
+    $add('10.02', 'regexِ نامعتبرِ کاربر باعث خطا نمی‌شود',
+         (function () {
+             $c = dedupDefaultCfg();
+             $c['strip_custom'] = '/((((/';
+             return dedupNormalize('یک محصول', $c) !== '';
+         })());
+    $add('10.02', 'رتبهٔ وضعیت برای هر دو پلتفرم تعریف شده (فعال > بایگانی)',
+         dedupStatusRank(['wstatus' => 'publish']) > dedupStatusRank(['wstatus' => 'draft'])
+      && dedupStatusRank(['status' => 2976])      > dedupStatusRank(['status' => 4184]));
+    $add('10.02', 'قیمتِ رشته‌ای ووکامرس به عدد تبدیل می‌شود',
+         dedupPrice(['price' => '12500.00']) === 12500.0 || dedupPrice(['price' => '12500.00']) == 12500);
+    $add('10.02', 'اندپوینت‌های سرورسایدِ کارِ بلندمدت وجود دارند',
+         strpos($selfSrc, "\$_GET['dedup_start']")  !== false
+      && strpos($selfSrc, "\$_GET['dedup_status']") !== false
+      && strpos($selfSrc, "\$_GET['dedup_result']") !== false
+      && strpos($selfSrc, "\$_GET['dedup_stop']")   !== false
+      && strpos($selfSrc, "\$_GET['dedup_cfg']")    !== false);
+    $add('10.02', 'کار در پس‌زمینه ادامه می‌یابد (بدون وابستگی به مرورگر ⇒ بدون خطای شبکه)',
+         strpos($selfSrc, 'ignore_user_abort(true)') !== false
+      && strpos($selfSrc, 'DEDUP_PROGRESS_FILE') !== false
+      && strpos($selfSrc, 'DEDUP_RESULT_FILE')   !== false
+      && strpos($selfSrc, 'DEDUP_LOCK_FILE')     !== false);
+    $add('10.02', 'تنظیمات در connections.json ذخیره و از آن خوانده می‌شود',
+         strpos($selfSrc, "'dedup_save_cfg'") !== false
+      && strpos($selfSrc, "\$cn['dedup']")    !== false);
+    $add('10.02', 'پیش‌نمایشِ نرمال‌سازی و حذفِ دستیِ شناسه‌ها موجود است',
+         strpos($selfSrc, "'dedup_preview'")    !== false
+      && strpos($selfSrc, "'dedup_delete_ids'") !== false);
+    $add('10.02', 'ووکامرس صفحه‌به‌صفحه و با همهٔ وضعیت‌ها خوانده می‌شود',
+         strpos($selfSrc, 'products?per_page=100&status=any') !== false);
+    $add('10.02', 'حذف: ووکامرس DELETE force و باسلام بایگانی (۴۱۸۴)',
+         strpos($selfSrc, "'DELETE','products/'") !== false
+      && strpos($selfSrc, 'bslArchiveProduct(') !== false);
+    $add('10.02', 'هستهٔ مشترکِ جاوااسکریپت برای هر دو پلتفرم یکی است',
+         strpos($selfSrc, 'function ddStart(')     !== false
+      && strpos($selfSrc, 'function ddWatch(')     !== false
+      && strpos($selfSrc, 'function ddApplyStatus(') !== false
+      && strpos($selfSrc, 'function ddCfgHtml(')   !== false
+      && strpos($selfSrc, 'function ddRenderReport(') !== false);
+    $add('10.02', 'باسلام همان پنلِ تنظیمات و همان موتور را صدا می‌زند',
+         strpos($selfSrc, 'function bslFindDuplicates') !== false
+      && strpos($selfSrc, "ddLoadCfg('bsl'")   !== false
+      && strpos($selfSrc, "ddStart('bsl'")     !== false);
+    $add('10.02', 'ووکامرس هم به همان هسته وصل است',
+         strpos($selfSrc, "ddLoadCfg('woo'") !== false
+      && strpos($selfSrc, "ddStart('woo'")   !== false);
+    $add('10.02', 'اندپوینت‌های قدیمیِ تکراری‌ها برداشته شدند',
+         strpos($selfSrc, "isset(\$_GET['bsl_find_dup" . "licates'])")  === false
+      && strpos($selfSrc, "isset(\$_GET['bsl_delete_ba" . "tch'])")     === false
+      && strpos($selfSrc, "isset(\$_GET['woo_dedup_str" . "eam'])")     === false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -23271,67 +23585,7 @@ echo $output;
 exit;
 }
 
-if(isset($_GET['bsl_find_duplicates'])){
-header('Content-Type: application/json; charset=UTF-8');
-set_time_limit(0);ignore_user_abort(true);
-$cn=loadConnections();$bs=$cn['basalam']??[];
-if(empty($bs['token'])||empty($bs['vendor_id'])){echo json_encode(['ok'=>false,'error'=>'تنظیمات باسلام ناقص'],JSON_UNESCAPED_UNICODE);exit;}
-$tk=$bs['token'];$vid=(int)$bs['vendor_id'];
-$statusFilter=$_GET['status']??'all';
-$statusMap=['active'=>['2976'],'inactive'=>['3790'],'not_approved'=>['3567'],'pending'=>['3568'],'archived'=>['4184'],'all'=>['2976','3790','3567','3568','4184']];
-$statusValues=$statusMap[$statusFilter]??$statusMap['all'];
-
-$allProducts=[];
-for($pg=1;$pg<=200;$pg++){
-$url='vendors/'.$vid.'/products?page='.$pg.'&per_page=100';
-foreach($statusValues as $sv){$url.='&statuses='.$sv;}
-$r=bslReq($tk,'GET',$url);
-if(!$r['ok'])break;
-$data=$r['body']['data']??[];
-if(empty($data))break;
-$tp=max(1,(int)($r['body']['total_page']??1));
-foreach($data as $p){
-$pId=(int)($p['id']??0);
-$pName=trim($p['title']??$p['name']??'');
-$pStatus=(int)($p['status']??0);
-$rev=$p['revision']??[];
-$pPrice=(int)($rev['data']['primary_price']??0);
-$pStock=(int)($rev['data']['stock']??0);
-$pCatId=(int)($rev['data']['category_id']??0);
-$allProducts[]=['id'=>$pId,'name'=>$pName,'status'=>$pStatus,'price'=>$pPrice,'stock'=>$pStock,'category_id'=>$pCatId];
-}
-if($pg>=$tp)break;
-}
-
-$normalize=function($n){
-$n=preg_replace('/\s*\(کد\s*:\s*\d+\)\s*/u','',$n);
-$n=preg_replace('/\s*\(code\s*:\s*\d+\)\s*/iu','',$n);
-$n=preg_replace('/\s*\(کد\s*:\s*[^\)]+\)\s*/u','',$n);
-$n=preg_replace('/\s*\(\d+\)\s*$/u','',$n);
-return trim($n);
-};
-
-$groups=[];
-foreach($allProducts as $p){
-$nn=$normalize($p['name']);
-if($nn==='')continue;
-$key=mb_strtolower($nn,'UTF-8');
-if(!isset($groups[$key]))$groups[$key]=[];
-$groups[$key][]=$p;
-}
-
-$duplicates=[];
-$totalDupProducts=0;
-foreach($groups as $key=>$items){
-if(count($items)<2)continue;
-$duplicates[]=['normalized_name'=>$items[0]['name']??'','count'=>count($items),'products'=>$items];
-$totalDupProducts+=count($items);
-}
-
-usort($duplicates,function($a,$b){return $b['count']<=>$a['count'];});
-echo json_encode(['ok'=>true,'total_products'=>count($allProducts),'duplicate_groups'=>count($duplicates),'duplicate_products'=>$totalDupProducts,'duplicates'=>$duplicates],JSON_UNESCAPED_UNICODE);
-exit;
-}
+// v10.02 (۱۶): اندپوینتِ قدیمیِ ?bsl_find_duplicates=1 حذف شد؛ جایگزینِ آن موتورِ dedup_* است (dedup_start/dedup_status/dedup_result).
 
 if(isset($_GET['bsl_change_status'])){
 header('Content-Type: application/json; charset=UTF-8');
@@ -23372,43 +23626,7 @@ echo json_encode(['ok'=>false,'error'=>'بایگانی ناموفق ('.$r['code'
 exit;
 }
 
-if(isset($_GET['bsl_delete_batch'])){
-header('Content-Type: text/event-stream; charset=UTF-8');
-header('Cache-Control: no-cache');
-header('Connection: keep-alive');
-header('X-Accel-Buffering: no');
-set_time_limit(0);ignore_user_abort(true);
-$cn=loadConnections();$bs=$cn['basalam']??[];
-if(empty($bs['token'])||empty($bs['vendor_id'])){
-echo "data: ".json_encode(['type'=>'error','msg'=>'تنظیمات باسلام ناقص'],JSON_UNESCAPED_UNICODE)."\n\n";if(ob_get_level())ob_flush();flush();exit;
-}
-$tk=$bs['token'];$vid=(int)$bs['vendor_id'];
-$ids=json_decode($_GET['ids']??'[]',true);
-if(!is_array($ids)||empty($ids)){
-echo "data: ".json_encode(['type'=>'error','msg'=>'لیست محصولات خالی است'],JSON_UNESCAPED_UNICODE)."\n\n";if(ob_get_level())ob_flush();flush();exit;
-}
-$sse=function($d){echo "data: ".json_encode($d,JSON_UNESCAPED_UNICODE)."\n\n";if(ob_get_level())ob_flush();flush();};
-$sse(['type'=>'step','msg'=>'شروع حذف '.count($ids).' محصول...']);
-$deleted=0;$failed=0;$total=count($ids);
-foreach($ids as $idx=>$pId){
-$pId=(int)$pId;
-if($pId<=0){$failed++;$sse(['type'=>'item','idx'=>$idx+1,'total'=>$total,'pId'=>$pId,'status'=>'failed','msg'=>'شناسه نامعتبر']);continue;}
-// v8.62: بایگانی، چون باسلام حذف واقعی ندارد
-$r=bslArchiveProduct($tk,$vid,$pId);
-if($r['ok']||$r['code']===204||$r['code']===200){
-$deleted++;
-$sse(['type'=>'item','idx'=>$idx+1,'total'=>$total,'pId'=>$pId,'status'=>'deleted','msg'=>'بایگانی شد']);
-}else{
-$failed++;
-$errDetail=($r['body']['message']??$r['body']['error']??'خطا');
-$sse(['type'=>'item','idx'=>$idx+1,'total'=>$total,'pId'=>$pId,'status'=>'failed','msg'=>'حذف ناموفق: '.$errDetail]);
-}
-usleep(500000);
-}
-$sse(['type'=>'done','deleted'=>$deleted,'failed'=>$failed,'total'=>$total,'msg'=>'حذف شد: '.$deleted.' | ناموفق: '.$failed.' (از '.$total.')']);
-if(function_exists('fastcgi_finish_request'))fastcgi_finish_request();
-exit;
-}
+// v10.02 (۱۶): اندپوینتِ قدیمیِ ?bsl_delete_batch=1 حذف شد؛ جایگزینِ آن موتورِ dedup_* است (dedup_start/dedup_status/dedup_result).
 
 if(isset($_GET['bsl_status_overview'])){
 header('Content-Type: application/json; charset=UTF-8');
@@ -26167,58 +26385,451 @@ usleep($bslDelayMs*1000);
 send_sse('send_complete',['sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total]);
 send_sse('done',[]);exit;
 }
-if (isset($_GET['woo_dedup_stream'])) {
-header('Content-Type: text/event-stream'); header('Cache-Control: no-cache'); header('X-Accel-Buffering: no');
-while (@ob_get_level()) @ob_end_clean();
-$cn=loadConnections();$w=$cn['woocommerce']??[];
-if(empty($w['store_url'])){send_sse('error',['message'=>'تنظیمات ووکامرس ناقص']);send_sse('done',[]);exit;}
-$doDelete=!empty($_POST['do_delete']);
-send_sse('dedup_info',['msg'=>'دریافت لیست محصولات ووکامرس...']);
-$allProducts=[];$page=1;$totalFetched=0;
-while(true){
-$r=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'GET','products?per_page=100&status=any&page='.$page);
-if(!$r['ok']||!is_array($r['body'])){send_sse('dedup_info',['msg'=>'خطا در دریافت صفحه '.$page.' (HTTP '.($r['code']??'?').')']);break;}
-$batch=$r['body'];
-if(empty($batch))break;
-foreach($batch as $prod){
-$allProducts[]=['id'=>$prod['id']??0,'name'=>trim($prod['name']??''),'price'=>$prod['regular_price']??'','date_created'=>$prod['date_created']??'','status'=>$prod['status']??''];
-}
-$totalFetched+=count($batch);
-send_sse('dedup_info',['msg'=>"صفحه $page: ".count($batch)." محصول (مجموع: $totalFetched)"]);
-if(count($batch)<100)break;
-$page++;
-usleep(200000);
-}
-send_sse('dedup_info',['msg'=>"مجموع $totalFetched محصول دریافت شد. جستجوی تکراری‌ها..."]);
+// v10.02 (۱۶): اندپوینتِ قدیمیِ ?woo_dedup_stream=1 حذف شد؛ جایگزینِ آن موتورِ dedup_* است (dedup_start/dedup_status/dedup_result).
+/* =====================================================================
+ *  v10.02 (۱۶): موتورِ حذفِ محصولاتِ تکراری — قابل تنظیم و سمتِ سرور
+ *
+ *  چرا بازنویسی شد؟
+ *   ۱) معیارِ «کدام نسخه بماند» سفت‌وسخت بود: ووکامرس همیشه قدیمی‌ترین را
+ *      حذف می‌کرد و باسلام هرچه فعال نبود. کاربر می‌خواهد خودش انتخاب کند
+ *      (جدیدتر/قدیمی‌تر، ارزان‌تر/گران‌تر، موجودی بیشتر، وضعیت بهتر).
+ *   ۲) الگویِ پسوندی که هنگام تشخیصِ هم‌نامی نادیده گرفته می‌شود ثابت و
+ *      فقط «(کد:N)» بود. حالا کاربر می‌تواند «#N»، «(code:N)»، پسوندِ
+ *      دلخواه یا حتی چند الگو را با هم فعال کند.
+ *   ۳) این کار روی غرفه‌ای با چند هزار محصول چند دقیقه طول می‌کشد. تا امروز
+ *      روی یک درخواستِ همزمانِ HTTP اجرا می‌شد و مرورگر/هاست وسطِ راه قطع
+ *      می‌کرد ⇒ «خطای شبکه». حالا مثل «گزارش پسوند»، درخواست بی‌درنگ پاسخ
+ *      می‌گیرد و کار در پس‌زمینه ادامه پیدا می‌کند؛ پیشرفت از فایل خوانده
+ *      می‌شود و بستنِ مرورگر هیچ اثری ندارد.
+ * ===================================================================== */
 
-$groups=[];
-foreach($allProducts as $prod){
-$n=normalizeTitle($prod['name']);
-if($n==='')continue;
-$groups[$n][]=$prod;
+/** پیش‌فرضِ تنظیماتِ حذفِ تکراری (هم برای باسلام هم ووکامرس یکسان) */
+function dedupDefaultCfg(): array {
+    return [
+        'keep'          => 'newest',   // newest|oldest|cheapest|expensive|most_stock|best_status
+        'tie'           => 'newest',   // معیارِ دوم وقتی معیارِ اول مساوی شد
+        'prefer_active' => true,       // پیش از هر معیار، نسخهٔ فعال/منتشرشده را نگه دار
+        'strip_code'    => true,       // (کد:۱۲) و (code:12) و [کد ۱۲]
+        'strip_hash'    => true,       // #12 در انتهای عنوان
+        'strip_paren'   => false,      // (۱۲) خالی در انتها
+        'strip_dash'    => false,      // - ۱۲ در انتهای عنوان
+        'strip_custom'  => '',         // الگوی دلخواهِ کاربر (چند خطی)
+        'ci'            => true,       // بی‌تفاوت به بزرگی/کوچکیِ حروف
+        'norm_digits'   => true,       // ارقامِ فارسی/عربی ⇒ لاتین
+        'norm_arabic'   => true,       // ي/ك عربی ⇒ ی/ک فارسی و حذف اعراب
+        'min_len'       => 3,          // عنوانِ کوتاه‌تر از این نادیده گرفته شود
+    ];
 }
-$dupCount=0;$delCount=0;$delFail=0;
-foreach($groups as $norm=>$items){
-if(count($items)<2)continue;
 
-usort($items,function($a,$b){return strcmp($a['date_created']??'',$b['date_created']??'');});
-$dupCount+=count($items)-1;
-send_sse('dedup_found',['name'=>$items[0]['name'],'count'=>count($items),'ids'=>array_column($items,'id')]);
-send_sse('dedup_info',['msg'=>'تکراری: "'.mb_substr($items[0]['name'],0,50).'" ×'.count($items)]);
-if($doDelete){
+/** تنظیماتِ ذخیره‌شده را با پیش‌فرض ادغام می‌کند */
+function dedupCfg(?array $cn = null): array {
+    if ($cn === null) $cn = loadConnections();
+    $c = is_array($cn['dedup'] ?? null) ? $cn['dedup'] : [];
+    $d = dedupDefaultCfg();
+    $out = [];
+    foreach ($d as $k => $v) {
+        if (!array_key_exists($k, $c)) { $out[$k] = $v; continue; }
+        if (is_bool($v))      $out[$k] = !empty($c[$k]) && $c[$k] !== 'false' && $c[$k] !== '0';
+        elseif (is_int($v))   $out[$k] = (int)$c[$k];
+        else                  $out[$k] = (string)$c[$k];
+    }
+    $valid = ['newest','oldest','cheapest','expensive','most_stock','best_status'];
+    if (!in_array($out['keep'], $valid, true)) $out['keep'] = 'newest';
+    if (!in_array($out['tie'],  $valid, true)) $out['tie']  = 'newest';
+    $out['min_len'] = max(1, min(60, $out['min_len']));
+    return $out;
+}
 
-for($d=0;$d<count($items)-1;$d++){
-$did=$items[$d]['id'];
-$dr=wooReq($w['store_url'],$w['consumer_key'],$w['consumer_secret'],'DELETE','products/'.$did.'?force=true');
-if($dr['ok']){$delCount++;send_sse('dedup_info',['msg'=>"✅ حذف ID#$did: ".mb_substr($items[$d]['name'],0,40)]);}
-else{$delFail++;send_sse('dedup_info',['msg'=>"❌ خطا حذف ID#$did: ".($dr['body']['message']??'?')]);}
-usleep(300000);
+/**
+ * الگوهای regex ای که باید از انتهای عنوان برداشته شوند.
+ * هر الگو یک regex کاملِ آمادهٔ preg_replace است.
+ *
+ * الگویِ دلخواهِ کاربر: هر خط یک الگو. اگر خط با / شروع و تمام شود، عیناً
+ * به‌عنوان regex استفاده می‌شود؛ وگرنه به‌صورتِ متنِ ساده در نظر گرفته
+ * می‌شود و «x» یا «X» یا «*» داخلش به معنیِ «یک عددِ چندرقمی» است. مثلاً
+ * کاربر می‌نویسد «(کد:x)» یا «#x» یا «-کد x».
+ */
+function dedupPatterns(array $cfg): array {
+    $D = '[0-9۰-۹٠-٩]';                 // رقمِ لاتین/فارسی/عربی
+    $pats = [];
+    if (!empty($cfg['strip_code'])) {
+        // (کد:۱۲) · [code: 12] · (شناسه ۱۲) · (sku:12) — با یا بدون فاصله و دونقطه
+        $pats[] = '/\s*[\(\[]\s*(?:کد|کُد|code|sku|شناسه|شناسه\s*کالا)\s*[:：\-]?\s*' . $D . '+\s*[\)\]]\s*$/iu';
+        // بدونِ پرانتز: «... کد:۱۲» در انتها
+        $pats[] = '/\s*(?:کد|code|sku|شناسه)\s*[:：]\s*' . $D . '+\s*$/iu';
+    }
+    if (!empty($cfg['strip_hash'])) {
+        $pats[] = '/\s*[#＃]\s*' . $D . '+\s*$/u';
+        $pats[] = '/\s*[\(\[]\s*[#＃]\s*' . $D . '+\s*[\)\]]\s*$/u';
+    }
+    if (!empty($cfg['strip_paren'])) {
+        $pats[] = '/\s*[\(\[]\s*' . $D . '+\s*[\)\]]\s*$/u';
+    }
+    if (!empty($cfg['strip_dash'])) {
+        $pats[] = '/\s*[\-–—_]\s*' . $D . '+\s*$/u';
+    }
+    $custom = trim((string)($cfg['strip_custom'] ?? ''));
+    if ($custom !== '') {
+        foreach (preg_split('/[\r\n]+/u', $custom) as $line) {
+            $line = trim($line);
+            if ($line === '') continue;
+            if (strlen($line) > 2 && $line[0] === '/' && substr($line, -1) === '/') {
+                // regex خام؛ فقط اگر معتبر باشد پذیرفته می‌شود
+                $rx = $line . 'u';
+                if (@preg_match($rx, '') !== false) $pats[] = $rx;
+                continue;
+            }
+            // متنِ ساده ⇒ escape، سپس x/X/* ⇒ عدد، و فاصله‌ها انعطاف‌پذیر
+            $q = preg_quote($line, '/');
+            $q = str_replace(['x', 'X', '\*'], $D . '+', $q);
+            $q = preg_replace('/(\\\\ )+/u', '\\s*', $q);
+            $rx = '/\s*' . $q . '\s*$/iu';
+            if (@preg_match($rx, '') !== false) $pats[] = $rx;
+        }
+    }
+    return $pats;
 }
+
+/** یک الگوی نمونه را روی یک عنوان آزمایش می‌کند (برای پیش‌نمایشِ زندهٔ UI) */
+function dedupNormalize(string $title, array $cfg, ?array $pats = null): string {
+    if ($pats === null) $pats = dedupPatterns($cfg);
+    $t = trim($title);
+    if (!empty($cfg['norm_arabic'])) {
+        $t = strtr($t, ['ي' => 'ی', 'ك' => 'ک', 'ٱ' => 'ا', 'أ' => 'ا', 'إ' => 'ا',
+                        'ة' => 'ه', 'ۀ' => 'ه', 'ؤ' => 'و', 'ئ' => 'ی',
+                        "\u{200c}" => ' ', "\u{200f}" => '', "\u{200e}" => '',
+                        'ً' => '', 'ٌ' => '', 'ٍ' => '', 'َ' => '', 'ُ' => '',
+                        'ِ' => '', 'ّ' => '', 'ْ' => '', 'ٰ' => '']);
+    }
+    if (!empty($cfg['norm_digits'])) {
+        $t = strtr($t, ['۰'=>'0','۱'=>'1','۲'=>'2','۳'=>'3','۴'=>'4','۵'=>'5',
+                        '۶'=>'6','۷'=>'7','۸'=>'8','۹'=>'9',
+                        '٠'=>'0','١'=>'1','٢'=>'2','٣'=>'3','٤'=>'4','٥'=>'5',
+                        '٦'=>'6','٧'=>'7','٨'=>'8','٩'=>'9']);
+    }
+    if (!empty($cfg['ci']) && function_exists('mb_strtolower')) $t = mb_strtolower($t, 'UTF-8');
+    $t = preg_replace('/\s+/u', ' ', $t);
+    // الگوها ممکن است تودرتو باشند («… (کد:۳) #۷») ⇒ تا وقتی چیزی کم می‌شود تکرار کن
+    for ($round = 0; $round < 4; $round++) {
+        $before = $t;
+        foreach ($pats as $rx) $t = (string)preg_replace($rx, ' ', $t);
+        $t = trim(preg_replace('/\s{2,}/u', ' ', $t));
+        if ($t === $before) break;
+    }
+    return trim($t);
 }
+
+/** برچسبِ فارسیِ معیارِ نگه‌داری */
+function dedupKeepLabel(string $k): string {
+    $m = ['newest' => 'جدیدترین', 'oldest' => 'قدیمی‌ترین', 'cheapest' => 'ارزان‌ترین',
+          'expensive' => 'گران‌ترین', 'most_stock' => 'بیشترین موجودی',
+          'best_status' => 'بهترین وضعیت'];
+    return $m[$k] ?? $k;
 }
-send_sse('dedup_complete',['total'=>$totalFetched,'groups'=>count(array_filter($groups,function($g){return count($g)>=2;})),'duplicates'=>$dupCount,'deleted'=>$delCount,'delete_failed'=>$delFail,'dry_run'=>!$doDelete]);
-send_sse('done',[]);exit;
+
+/**
+ * رتبهٔ وضعیت — هرچه بزرگ‌تر، «بهتر». برای هر دو مقصد یکدست است تا
+ * منطقِ مرتب‌سازی مشترک بماند.
+ *   باسلام: 2976 فعال · 3568 در انتظار · 3567 تأییدنشده · 3790 غیرفعال · 4184 بایگانی
+ *   ووکامرس: publish · pending · draft · private · trash
+ */
+function dedupStatusRank(array $p): int {
+    $bs = (int)($p['status'] ?? 0);
+    if ($bs > 0) {
+        $r = [2976 => 100, 3568 => 70, 3567 => 40, 3790 => 25, 4184 => 5];
+        return $r[$bs] ?? 10;
+    }
+    $w = (string)($p['wstatus'] ?? '');
+    $r = ['publish' => 100, 'pending' => 70, 'draft' => 40, 'private' => 25, 'trash' => 5];
+    return $r[$w] ?? 10;
 }
+
+/** آیا این نسخه «فعال/منتشرشده» است؟ */
+function dedupIsActive(array $p): bool {
+    if ((int)($p['status'] ?? 0) > 0) return (int)$p['status'] === 2976;
+    return (string)($p['wstatus'] ?? '') === 'publish';
+}
+
+/**
+ * مقایسهٔ دو نسخه بر اساس یک معیار.
+ * خروجی منفی ⇒ $a «بهتر» است (باید بماند).
+ */
+function dedupCmpBy(array $a, array $b, string $crit): int {
+    switch ($crit) {
+        case 'oldest':
+            return dedupTs($a) <=> dedupTs($b);
+        case 'newest':
+            return dedupTs($b) <=> dedupTs($a);
+        case 'cheapest':
+            $pa = dedupPrice($a); $pb = dedupPrice($b);
+            if ($pa <= 0 && $pb > 0) return 1;      // قیمتِ نامعلوم بازنده است
+            if ($pb <= 0 && $pa > 0) return -1;
+            return $pa <=> $pb;
+        case 'expensive':
+            return dedupPrice($b) <=> dedupPrice($a);
+        case 'most_stock':
+            return (int)($b['stock'] ?? 0) <=> (int)($a['stock'] ?? 0);
+        case 'best_status':
+            return dedupStatusRank($b) <=> dedupStatusRank($a);
+    }
+    return 0;
+}
+
+/** زمانِ ساختِ محصول به‌صورت عدد (۰ = نامعلوم ⇒ بازنده در «جدیدترین») */
+function dedupTs(array $p): int {
+    if (isset($p['ts']) && (int)$p['ts'] > 0) return (int)$p['ts'];
+    $d = trim((string)($p['date_created'] ?? ''));
+    if ($d !== '') { $t = strtotime($d); if ($t !== false) return $t; }
+    // باسلام تاریخ نمی‌دهد؛ شناسهٔ بزرگ‌تر یعنی محصولِ تازه‌تر
+    return (int)($p['id'] ?? 0);
+}
+
+/** قیمت به عدد (۰ = نامعلوم) */
+function dedupPrice(array $p): int {
+    $v = $p['price'] ?? 0;
+    if (is_string($v)) { $v = preg_replace('/[^0-9.]/', '', $v); }
+    return (int)round((float)$v);
+}
+
+/**
+ * از یک گروهِ هم‌نام، تصمیم می‌گیرد کدام بماند و کدام‌ها بروند.
+ * ترتیبِ تصمیم:
+ *   ۱) اگر «ترجیحِ فعال» روشن است و دستِ‌کم یکی فعال است ⇒ فقط بینِ فعال‌ها رقابت
+ *   ۲) معیارِ اصلی · ۳) معیارِ دوم (tie) · ۴) شناسهٔ کوچک‌تر (پایداریِ نتیجه)
+ */
+function dedupPickKeeper(array $items, array $cfg): array {
+    $pool = $items;
+    if (!empty($cfg['prefer_active'])) {
+        $act = array_values(array_filter($items, 'dedupIsActive'));
+        if ($act) $pool = $act;
+    }
+    $keep = $cfg['keep']; $tie = $cfg['tie'];
+    usort($pool, function ($a, $b) use ($keep, $tie) {
+        $c = dedupCmpBy($a, $b, $keep);
+        if ($c !== 0) return $c;
+        if ($tie !== $keep) { $c = dedupCmpBy($a, $b, $tie); if ($c !== 0) return $c; }
+        return (int)($a['id'] ?? 0) <=> (int)($b['id'] ?? 0);
+    });
+    $keeper = $pool[0] ?? $items[0];
+    $kid = (int)($keeper['id'] ?? 0);
+    $drop = [];
+    foreach ($items as $it) if ((int)($it['id'] ?? 0) !== $kid) $drop[] = $it;
+    return ['keep' => $keeper, 'drop' => $drop];
+}
+
+/** گروه‌بندیِ محصولات بر اساس عنوانِ نرمال‌شده */
+function dedupGroup(array $rows, array $cfg): array {
+    $pats = dedupPatterns($cfg);
+    $g = [];
+    foreach ($rows as $r) {
+        $name = (string)($r['name'] ?? ($r['title'] ?? ''));
+        $n = dedupNormalize($name, $cfg, $pats);
+        if ($n === '' || mb_strlen($n, 'UTF-8') < (int)$cfg['min_len']) continue;
+        $g[$n][] = $r;
+    }
+    return $g;
+}
+
+/* --------------------- پیشرفتِ کارِ پس‌زمینه --------------------- */
+
+function dedupProgress(array $patch): void {
+    $cur = [];
+    if (is_file(DEDUP_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(DEDUP_PROGRESS_FILE), true);
+        if (is_array($d)) $cur = $d;
+    }
+    $log = is_array($cur['log'] ?? null) ? $cur['log'] : [];
+    if (isset($patch['log_add'])) {
+        foreach ((array)$patch['log_add'] as $l) $log[] = ['t' => time(), 'm' => (string)$l];
+        if (count($log) > 400) $log = array_slice($log, -400);
+        unset($patch['log_add']);
+    }
+    $cur = array_merge($cur, $patch);
+    $cur['log'] = $log; $cur['ts'] = time();
+    @file_put_contents(DEDUP_PROGRESS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+function dedupStopRequested(): bool { return is_file(DEDUP_STOP_FILE); }
+function dedupClearStop(): void { @unlink(DEDUP_STOP_FILE); }
+
+/* --------------------- گرفتنِ محصولات از مقصد --------------------- */
+
+/** همهٔ محصولاتِ باسلام برای حذفِ تکراری (با قیمت/موجودی/وضعیت) */
+function dedupFetchBsl(string $tk, int $vid, int $maxPages = 200): array {
+    $rows = [];
+    $statuses = '&statuses=2976&statuses=3790&statuses=3567&statuses=3568&statuses=4184';
+    for ($page = 1; $page <= $maxPages; $page++) {
+        if (dedupStopRequested()) { dedupProgress(['log_add' => ['⏹ توقف در صفحهٔ ' . $page]]); break; }
+        $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?page=' . $page . '&per_page=100' . $statuses);
+        if (empty($r['ok'])) {
+            dedupProgress(['log_add' => ['⚠️ صفحهٔ ' . $page . ' ناموفق (HTTP ' . ($r['code'] ?? '?') . ')']]);
+            break;
+        }
+        $batch = $r['body']['data'] ?? [];
+        if (!$batch) break;
+        $tp = max(1, (int)($r['body']['total_page'] ?? 1));
+        foreach ($batch as $p) {
+            if (!is_array($p)) continue;
+            $rev  = $p['revision']['data'] ?? [];
+            $name = trim((string)($p['title'] ?? ($p['name'] ?? ($rev['title'] ?? ''))));
+            if ($name === '') continue;
+            $st = $p['status'] ?? null;
+            $rows[] = [
+                'id'     => (int)($p['id'] ?? 0),
+                'name'   => $name,
+                'status' => (int)(is_array($st) ? ($st['value'] ?? 0) : $st),
+                'price'  => (int)($rev['primary_price'] ?? ($p['price'] ?? 0)),
+                'stock'  => (int)($rev['stock'] ?? ($p['stock'] ?? 0)),
+                'ts'     => (int)($p['id'] ?? 0),
+            ];
+        }
+        dedupProgress(['fetched' => count($rows), 'page' => $page, 'pages' => $tp,
+            'log_add' => ['📄 باسلام صفحهٔ ' . $page . '/' . $tp . ': ' . count($batch)
+                . ' محصول (مجموع ' . count($rows) . ')']]);
+        if ($page >= $tp || count($batch) < 100) break;
+        usleep(150000);
+    }
+    return $rows;
+}
+
+/** همهٔ محصولاتِ ووکامرس برای حذفِ تکراری */
+function dedupFetchWoo(array $w, int $maxPages = 200): array {
+    $rows = [];
+    for ($page = 1; $page <= $maxPages; $page++) {
+        if (dedupStopRequested()) { dedupProgress(['log_add' => ['⏹ توقف در صفحهٔ ' . $page]]); break; }
+        $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET',
+            'products?per_page=100&status=any&orderby=id&order=asc&page=' . $page);
+        if (empty($r['ok']) || !is_array($r['body'])) {
+            dedupProgress(['log_add' => ['⚠️ صفحهٔ ' . $page . ' ناموفق (HTTP ' . ($r['code'] ?? '?') . ')']]);
+            break;
+        }
+        $batch = $r['body'];
+        if (!$batch) break;
+        foreach ($batch as $p) {
+            if (!is_array($p)) continue;
+            $name = trim((string)($p['name'] ?? ''));
+            if ($name === '') continue;
+            $pr = $p['regular_price'] ?? '';
+            if ($pr === '' || $pr === null) $pr = $p['price'] ?? '';
+            $rows[] = [
+                'id'      => (int)($p['id'] ?? 0),
+                'name'    => $name,
+                'wstatus' => (string)($p['status'] ?? ''),
+                'price'   => $pr,
+                'stock'   => (int)($p['stock_quantity'] ?? 0),
+                'date_created' => (string)($p['date_created'] ?? ''),
+                'sku'     => (string)($p['sku'] ?? ''),
+            ];
+        }
+        dedupProgress(['fetched' => count($rows), 'page' => $page,
+            'log_add' => ['📄 ووکامرس صفحهٔ ' . $page . ': ' . count($batch)
+                . ' محصول (مجموع ' . count($rows) . ')']]);
+        if (count($batch) < 100) break;
+        usleep(150000);
+    }
+    return $rows;
+}
+
+/**
+ * کارِ کاملِ حذفِ تکراری — این تابع می‌تواند چند دقیقه طول بکشد و فقط از
+ * مسیرِ پس‌زمینه صدا زده می‌شود.
+ *
+ * $mode: 'scan' فقط گزارش · 'delete' واقعاً حذف/بایگانی کن
+ */
+function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
+    $t0 = microtime(true);
+    dedupProgress(['phase' => 'fetch', 'log_add' => ['🔍 دریافتِ فهرستِ محصولات...']]);
+
+    if ($target === 'bsl') {
+        $bs = $cn['basalam'] ?? [];
+        if (empty($bs['token']) || empty($bs['vendor_id'])) return ['ok' => false, 'error' => 'تنظیمات باسلام ناقص است'];
+        $rows = dedupFetchBsl((string)$bs['token'], (int)$bs['vendor_id']);
+    } else {
+        $w = $cn['woocommerce'] ?? [];
+        if (empty($w['store_url'])) return ['ok' => false, 'error' => 'تنظیمات ووکامرس ناقص است'];
+        $rows = dedupFetchWoo($w);
+    }
+    if (!$rows) return ['ok' => false, 'error' => 'هیچ محصولی دریافت نشد'];
+
+    dedupProgress(['phase' => 'group', 'total' => count($rows),
+        'log_add' => ['🧮 ' . count($rows) . ' محصول دریافت شد؛ گروه‌بندی بر اساس عنوان...']]);
+
+    $groups = dedupGroup($rows, $cfg);
+    $dupGroups = []; $dupCount = 0;
+    foreach ($groups as $norm => $items) {
+        if (count($items) < 2) continue;
+        $pick = dedupPickKeeper($items, $cfg);
+        $dupCount += count($pick['drop']);
+        $dupGroups[] = ['norm' => $norm, 'count' => count($items),
+                        'keep' => $pick['keep'], 'drop' => $pick['drop']];
+    }
+    usort($dupGroups, function ($a, $b) { return $b['count'] <=> $a['count']; });
+
+    dedupProgress(['phase' => $mode === 'delete' ? 'delete' : 'done',
+        'groups' => count($dupGroups), 'dups' => $dupCount,
+        'log_add' => ['🔎 ' . count($dupGroups) . ' گروهِ هم‌نام با مجموعاً ' . $dupCount
+            . ' نسخهٔ اضافی — معیارِ نگه‌داری: ' . dedupKeepLabel($cfg['keep'])]]);
+
+    $deleted = 0; $failed = 0; $errors = [];
+    if ($mode === 'delete' && $dupCount > 0) {
+        $done = 0;
+        foreach ($dupGroups as $gi => $g) {
+            if (dedupStopRequested()) { dedupProgress(['log_add' => ['⏹ حذف با درخواستِ کاربر متوقف شد']]); break; }
+            foreach ($g['drop'] as $d) {
+                if (dedupStopRequested()) break;
+                $did = (int)($d['id'] ?? 0);
+                if ($did <= 0) continue;
+                if ($target === 'bsl') {
+                    $bs = $cn['basalam'] ?? [];
+                    $r = bslArchiveProduct((string)$bs['token'], (int)$bs['vendor_id'], $did);
+                    $ok = !empty($r['ok']) || in_array((int)($r['code'] ?? 0), [200, 204], true);
+                    $em = $r['body']['message'] ?? ($r['body']['error'] ?? ('HTTP ' . ($r['code'] ?? '?')));
+                } else {
+                    $w = $cn['woocommerce'] ?? [];
+                    $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'DELETE', 'products/' . $did . '?force=true');
+                    $ok = !empty($r['ok']);
+                    $em = $r['body']['message'] ?? ('HTTP ' . ($r['code'] ?? '?'));
+                }
+                $done++;
+                if ($ok) {
+                    $deleted++;
+                    dedupProgress(['deleted' => $deleted, 'failed' => $failed, 'processed' => $done,
+                        'log_add' => ['✅ ' . ($target === 'bsl' ? 'بایگانی' : 'حذف') . ' #' . $did
+                            . ' — ' . mb_substr((string)$d['name'], 0, 45, 'UTF-8')]]);
+                } else {
+                    $failed++;
+                    if (count($errors) < 30) $errors[] = ['id' => $did, 'msg' => (string)$em];
+                    dedupProgress(['deleted' => $deleted, 'failed' => $failed, 'processed' => $done,
+                        'log_add' => ['❌ #' . $did . ' — ' . mb_substr((string)$em, 0, 70, 'UTF-8')]]);
+                }
+                usleep(250000);
+            }
+            if ($gi % 10 === 9) dedupProgress(['log_add' => ['— ' . ($gi + 1) . ' گروه پردازش شد —']]);
+        }
+    }
+
+    // فقط بخشی از گروه‌ها را در نتیجه نگه می‌داریم تا فایل غول‌آسا نشود
+    $out = [];
+    foreach (array_slice($dupGroups, 0, DEDUP_MAX_GROUPS) as $g) {
+        $mk = function (array $p) {
+            return ['id' => (int)($p['id'] ?? 0), 'name' => (string)($p['name'] ?? ''),
+                    'price' => dedupPrice($p), 'stock' => (int)($p['stock'] ?? 0),
+                    'status' => (int)($p['status'] ?? 0), 'wstatus' => (string)($p['wstatus'] ?? ''),
+                    'ts' => dedupTs($p), 'date_created' => (string)($p['date_created'] ?? '')];
+        };
+        $out[] = ['normalized' => $g['norm'], 'count' => $g['count'],
+                  'keep' => $mk($g['keep']), 'drop' => array_map($mk, $g['drop'])];
+    }
+
+    return ['ok' => true, 'target' => $target, 'mode' => $mode, 'cfg' => $cfg,
+            'total' => count($rows), 'groups' => count($dupGroups), 'duplicates' => $dupCount,
+            'deleted' => $deleted, 'failed' => $failed, 'errors' => $errors,
+            'truncated' => count($dupGroups) > DEDUP_MAX_GROUPS,
+            'took' => round(microtime(true) - $t0, 1), 'at' => time(),
+            'duplicates_list' => $out];
+}
+
 function normalizeTitle(string $title): string {
 $t=mb_strtolower(trim($title),'UTF-8');
 $t=preg_replace("/\s+/u",' ',$t);
@@ -28293,15 +28904,14 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <span id="wooDedupArrow" style="color:#94a3b8;font-size:12px">▼</span>
 </div>
 <div id="wooDedupBody" style="display:none;padding:10px;background:#0f172a">
-<div class="alert alert-info" style="margin-bottom:8px;font-size:11px">💡 محصولاتی که عنوان مشابه دارند (با یا بدون پسوند رنگ/سایز/مدل) شناسایی و قدیمی‌ترین حذف می‌شود.</div>
-<div class="crow">
-    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-        <input type="checkbox" id="ddDelete"> <b style="color:#f87171">حذف واقعی</b> <span style="color:#64748b">(بدون تیک = فقط نمایش)</span>
-    </label>
-</div>
-<div class="cact">
-    <button class="btn btn-orange" id="ddBtn" onclick="wooDedup()" style="flex:1">🔍 جستجوی تکراری‌ها</button>
-    <button class="btn btn-red hidden" id="ddStop" onclick="ddRunning=false" style="flex:0">⏹</button>
+<!-- v10.02 (۱۶): پنلِ مشترکِ حذفِ تکراری. همین قالب برای باسلام هم در مودال
+     بازتولید می‌شود تا رفتار و تنظیماتِ هر دو مقصد دقیقاً یکسان باشد. -->
+<div class="alert alert-info" style="margin-bottom:8px;font-size:11px">💡 محصولاتِ هم‌نام شناسایی می‌شوند و طبق معیارِ شما یکی می‌ماند و بقیه حذف. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود؛ بستنِ مرورگر مشکلی ایجاد نمی‌کند.</div>
+<div id="ddCfgHost"></div>
+<div class="cact" style="margin-top:8px">
+    <button class="btn btn-orange" id="ddBtn" onclick="ddStart('woo','scan')" style="flex:1">🔍 گزارشِ تکراری‌ها</button>
+    <button class="btn btn-red" id="ddDelBtn" onclick="ddStart('woo','delete')" style="flex:1">🗑 حذفِ تکراری‌ها</button>
+    <button class="btn btn-red hidden" id="ddStop" onclick="ddStop()" style="flex:0">⏹</button>
 </div>
 <div class="progress hidden" id="ddP"><div class="progress-bar" id="ddPB" style="background:linear-gradient(90deg,#ea580c,#f97316)"></div></div>
 <div class="status" id="ddSS" style="color:#fb923c"></div>
@@ -28312,6 +28922,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
     <div class="si"><b id="ddDup" style="color:#f97316">۰</b><span>تعداد تکراری</span></div>
     <div class="si"><b id="ddDel" style="color:#f87171">۰</b><span>حذف شده</span></div>
 </div>
+<div id="ddReport" style="margin-top:8px"></div>
 </div>
 </div>
 </div>
@@ -35487,7 +36098,7 @@ function vcBusy() {
         if (typeof wSend !== 'undefined' && wSend) return 'ارسال به ووکامرس';
         if (typeof bSend !== 'undefined' && bSend) return 'ارسال به باسلام';
         if (typeof fetchMissingRunning !== 'undefined' && fetchMissingRunning) return 'تکمیل اطلاعات';
-        if (typeof ddRunning !== 'undefined' && ddRunning) return 'حذف تکراری‌ها';
+        if (typeof ddIsRun !== 'undefined' && ddIsRun) return 'حذف تکراری‌ها';
     } catch (e) {}
     return '';
 }
@@ -38784,6 +39395,8 @@ function toggleWooDedup(){
     if(!body)return;
     if(body.style.display==='none'){
         body.style.display='block';
+        // v10.02 (۱۶): پنلِ تنظیمات فقط بارِ اول ساخته و از سرور پر می‌شود
+        ddLoadCfg('woo','ddCfgHost');
         if(arrow)arrow.textContent='▲';
     }else{
         body.style.display='none';
@@ -39232,43 +39845,270 @@ function finFM(done,found,failed,total){
   refreshViews=function(){_refreshViews();setTimeout(observeImages,200);};
   setTimeout(observeImages,500);
 })();
-// ========== WooCommerce Dedup JS ==========
-let ddRunning=false;
-function wooDedup(){
-    if(ddRunning)return;
-    ddRunning=true;
-    const doDel=$('ddDelete').checked;
-    $('ddBtn').classList.add('hidden');$('ddStop').classList.remove('hidden');
-    $('ddP').classList.remove('hidden');$('ddRunning').classList.remove('hidden');$('ddRunning').innerHTML='';
-    $('ddSM').classList.add('hidden');$('ddSS').textContent='در حال جستجو...';$('ddPB').style.width='0%';
-    const fd=new FormData();fd.append('do_delete',doDel?'1':'0');
-    fetch('?woo_dedup_stream=1',{method:'POST',body:fd}).then(rp=>{
-        const rd=rp.body.getReader(),dc=new TextDecoder();let bf='';
-        function rd2(){rd.read().then(({done,value})=>{
-            if(done){finDedup();return;}
-            bf+=dc.decode(value,{stream:true});const es=bf.split('\n\n');bf=es.pop();
-            es.forEach(ev=>{const p=pSSE(ev);if(!p)return;
-                if(p.t==='dedup_info'){$('ddRunning').innerHTML+='<div style="color:#94a3b8;padding:2px 8px;font-size:10px;border-bottom:1px solid #1e293b">'+esc(p.d.msg)+'</div>';}
-                else if(p.t==='dedup_found'){
-                    const ids=p.d.ids||[];
-                    $('ddRunning').innerHTML+='<div style="padding:6px 8px;margin:3px 0;background:#7f1d1d30;border:1px solid #f97316;border-radius:6px;font-size:11px;color:#fb923c">🔴 <b>'+esc(p.d.name)+'</b> ×'+p.d.count+' <span style="color:#94a3b8">IDs: '+ids.join(', ')+'</span></div>';
-                }
-                else if(p.t==='dedup_complete'){
-                    $('ddTot').textContent=toFa(p.d.total);
-                    $('ddGrp').textContent=toFa(p.d.groups);
-                    $('ddDup').textContent=toFa(p.d.duplicates);
-                    $('ddDel').textContent=toFa(p.d.deleted);
-                    $('ddSM').classList.remove('hidden');
-                    $('ddPB').style.width='100%';
-                    if(p.d.dry_run){$('ddSS').textContent='✓ حالت پیش‌نمایش - '+toFa(p.d.duplicates)+' تکراری یافت شد';}
-                    else{$('ddSS').textContent='✓ '+toFa(p.d.deleted)+' محصول تکراری حذف شد';}
-                }
-                else if(p.t==='error'){$('ddRunning').innerHTML+='<div class="no2">✗ '+esc(p.d.message)+'</div>';}
-            });scrollElBottom($('ddRunning'));rd2();
-        }).catch(()=>finDedup());}rd2();
-    }).catch(()=>finDedup());
+// ========== v10.02 (۱۶): هستهٔ مشترکِ حذفِ تکراری (ووکامرس + باسلام) ==========
+// یک موتورِ JS برای هر دو مقصد؛ فقط ظرفِ DOM فرق می‌کند: ووکامرس داخل
+// آکاردئون رندر می‌شود و باسلام داخلِ مودال. تنظیمات، نظرسنجیِ پیشرفت،
+// گزارش و حذفِ دستی همگی مشترک‌اند.
+let ddIsRun=false, ddTimer=null, ddSeen=0, ddTarget='woo', ddCfg=null, ddLastResult=null;
+const DD_KEEP=[['newest','جدیدترین بماند'],['oldest','قدیمی‌ترین بماند'],['cheapest','ارزان‌ترین بماند'],['expensive','گران‌ترین بماند'],['most_stock','بیشترین موجودی بماند'],['best_status','بهترین وضعیت بماند']];
+
+// شناسه‌ها با پیشوند تفکیک می‌شوند تا دو نسخهٔ همزمان در صفحه تداخل نکنند
+function ddEl(id){return document.getElementById((ddTarget==='bsl'?'bd':'dd')+id);}
+
+function ddCfgHtml(pfx){
+    const opts=DD_KEEP.map(k=>'<option value="'+k[0]+'">'+k[1]+'</option>').join('');
+    return '<div style="background:#0b1220;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px">'
+    +'<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">'
+    +'<label style="flex:1;min-width:170px">🎯 کدام نسخه بماند؟<select id="'+pfx+'Keep" class="inp" style="width:100%;margin-top:3px">'+opts+'</select></label>'
+    +'<label style="flex:1;min-width:170px">↔️ اگر مساوی شدند<select id="'+pfx+'Tie" class="inp" style="width:100%;margin-top:3px">'+opts+'</select></label>'
+    +'</div>'
+    +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="'+pfx+'PrefAct"> <span>اول نسخهٔ <b style="color:#4ade80">فعال/منتشرشده</b> را نگه دار (بعد معیار بالا)</span></label>'
+    +'<div style="border-top:1px solid #1e293b;padding-top:8px;margin-bottom:6px;color:#94a3b8">🧩 <b>پسوندهایی که هنگام مقایسه نادیده گرفته شوند</b> — «۱۲» یعنی هر عددِ چندرقمی</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px">'
+    +'<label style="cursor:pointer"><input type="checkbox" id="'+pfx+'SCode"> <code>(کد:۱۲)</code></label>'
+    +'<label style="cursor:pointer"><input type="checkbox" id="'+pfx+'SHash"> <code>#۱۲</code></label>'
+    +'<label style="cursor:pointer"><input type="checkbox" id="'+pfx+'SParen"> <code>(۱۲)</code></label>'
+    +'<label style="cursor:pointer"><input type="checkbox" id="'+pfx+'SDash"> <code>- ۱۲</code></label>'
+    +'</div>'
+    +'<label style="display:block;margin-bottom:8px">✏️ الگوی دلخواه <span style="color:#64748b">(هر خط یکی؛ <code>x</code> = عدد. مثال: <code>(کد:x)</code> یا <code>#x</code>)</span>'
+    +'<textarea id="'+pfx+'SCustom" class="inp" rows="2" style="width:100%;margin-top:3px;font-family:monospace" placeholder="(کد:x)&#10;#x"></textarea></label>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px">'
+    +'<label style="cursor:pointer"><input type="checkbox" id="'+pfx+'Ci"> بی‌تفاوت به بزرگی حروف</label>'
+    +'<label style="cursor:pointer"><input type="checkbox" id="'+pfx+'ND"> ارقام فارسی=لاتین</label>'
+    +'<label style="cursor:pointer"><input type="checkbox" id="'+pfx+'NA"> ي/ك عربی=ی/ک</label>'
+    +'</div>'
+    +'<div style="border-top:1px solid #1e293b;padding-top:8px">'
+    +'<div style="color:#94a3b8;margin-bottom:4px">🔬 <b>آزمایشِ الگو</b> — چند عنوانِ نمونه بنویسید تا ببینید چه چیزی هم‌نام شمرده می‌شود</div>'
+    +'<textarea id="'+pfx+'Test" class="inp" rows="3" style="width:100%;font-family:monospace" placeholder="گوشی سامسونگ A54 (کد:۱۲۳)&#10;گوشی سامسونگ A54 #45"></textarea>'
+    +'<div style="display:flex;gap:6px;margin-top:6px">'
+    +'<button class="btn btn-cyan" style="flex:1;font-size:11px;padding:5px" onclick="ddPreview()">🔬 آزمایش</button>'
+    +'<button class="btn btn-green" style="flex:1;font-size:11px;padding:5px" onclick="ddSaveCfg(1)">💾 ذخیرهٔ تنظیمات</button>'
+    +'</div>'
+    +'<div id="'+pfx+'Prev" style="margin-top:6px"></div>'
+    +'</div></div>';
 }
-function finDedup(){ddRunning=false;$('ddBtn').classList.remove('hidden');$('ddStop').classList.add('hidden');}
+
+function ddPfx(){return ddTarget==='bsl'?'bd':'dd';}
+
+function ddFillCfg(c){
+    const p=ddPfx(); const g=id=>document.getElementById(p+id);
+    if(!g('Keep'))return;
+    g('Keep').value=c.keep; g('Tie').value=c.tie;
+    g('PrefAct').checked=!!c.prefer_active;
+    g('SCode').checked=!!c.strip_code; g('SHash').checked=!!c.strip_hash;
+    g('SParen').checked=!!c.strip_paren; g('SDash').checked=!!c.strip_dash;
+    g('SCustom').value=c.strip_custom||'';
+    g('Ci').checked=!!c.ci; g('ND').checked=!!c.norm_digits; g('NA').checked=!!c.norm_arabic;
+}
+
+function ddReadCfg(){
+    const p=ddPfx(); const g=id=>document.getElementById(p+id);
+    if(!g('Keep'))return ddCfg||{};
+    return {keep:g('Keep').value,tie:g('Tie').value,
+        prefer_active:g('PrefAct').checked?'1':'0',
+        strip_code:g('SCode').checked?'1':'0',strip_hash:g('SHash').checked?'1':'0',
+        strip_paren:g('SParen').checked?'1':'0',strip_dash:g('SDash').checked?'1':'0',
+        strip_custom:g('SCustom').value,
+        ci:g('Ci').checked?'1':'0',norm_digits:g('ND').checked?'1':'0',
+        norm_arabic:g('NA').checked?'1':'0'};
+}
+
+function ddLoadCfg(target,hostId){
+    ddTarget=target;
+    const host=document.getElementById(hostId);
+    if(host&&!document.getElementById(ddPfx()+'Keep'))host.innerHTML=ddCfgHtml(ddPfx());
+    return fetch('?dedup_cfg=1').then(r=>r.json()).then(d=>{
+        if(d&&d.ok){ddCfg=d.cfg;ddFillCfg(d.cfg);}
+        return d;
+    }).catch(()=>null);
+}
+
+function ddSaveCfg(toast){
+    const fd=new FormData();fd.append('action','dedup_save_cfg');
+    const c=ddReadCfg();for(const k in c)fd.append(k,c[k]);
+    return fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(d&&d.ok){ddCfg=d.cfg;if(toast)showToast('✅ تنظیماتِ حذفِ تکراری ذخیره شد');}
+        else if(toast)showToast('❌ ذخیره نشد',1);
+        return d;
+    }).catch(()=>{if(toast)showToast('❌ خطای شبکه هنگام ذخیره',1);});
+}
+
+function ddPreview(){
+    const p=ddPfx();const out=document.getElementById(p+'Prev');const ta=document.getElementById(p+'Test');
+    if(!out||!ta)return;
+    if(!ta.value.trim()){out.innerHTML='<div style="color:#94a3b8;font-size:11px">چند عنوانِ نمونه بنویسید.</div>';return;}
+    out.innerHTML='<div style="color:#67e8f9;font-size:11px">⏳ ...</div>';
+    const fd=new FormData();fd.append('action','dedup_preview');fd.append('titles',ta.value);
+    const c=ddReadCfg();for(const k in c)fd.append(k,c[k]);
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){out.innerHTML='<div class="no2">✗ آزمایش ناموفق</div>';return;}
+        let h='<div style="font-size:11px;border:1px solid #334155;border-radius:6px;overflow:hidden">';
+        h+='<table style="width:100%;border-collapse:collapse"><tr style="background:#1e293b;color:#94a3b8"><th style="padding:4px;text-align:right">عنوان</th><th style="padding:4px;text-align:right">پس از نرمال‌سازی</th></tr>';
+        d.rows.forEach(r=>{
+            h+='<tr style="border-top:1px solid #1e293b"><td style="padding:4px;color:#cbd5e1">'+esc(r.title)+'</td><td style="padding:4px;color:'+(r.changed?'#4ade80':'#94a3b8')+'">'+esc(r.norm)+(r.changed?' ✂️':'')+'</td></tr>';
+        });
+        h+='</table></div>';
+        if(d.dups&&d.dups.length){
+            h+='<div style="margin-top:5px;color:#fb923c;font-size:11px">🔴 '+toFa(d.dups.length)+' گروهِ هم‌نام: '+d.dups.map(x=>'«'+esc(x.norm)+'» ×'+toFa(x.idx.length)).join(' · ')+'</div>';
+        }else{
+            h+='<div style="margin-top:5px;color:#4ade80;font-size:11px">✓ هیچ دو عنوانی هم‌نام نشد ('+toFa(d.patterns)+' الگوی فعال)</div>';
+        }
+        out.innerHTML=h;
+    }).catch(()=>{out.innerHTML='<div class="no2">✗ خطای شبکه</div>';});
+}
+
+// شروعِ کارِ پس‌زمینه: تنظیمات ذخیره می‌شود، سرور بی‌درنگ پاسخ می‌دهد و
+// از آن به بعد فقط وضعیت را می‌خوانیم ⇒ دیگر خطای شبکه/تایم‌اوت نداریم.
+function ddStart(target,mode){
+    if(ddIsRun){showToast('⏳ یک عملیات در حال اجراست',1);return;}
+    ddTarget=target;
+    if(mode==='delete'&&!confirm('محصولاتِ تکراری واقعاً حذف می‌شوند'+(target==='bsl'?' (در باسلام: بایگانی)':'')+'.\nمعیار: '+(document.getElementById(ddPfx()+'Keep')||{value:''}).value+'\nادامه می‌دهید؟'))return;
+    ddSaveCfg(0).then(()=>{
+        ddIsRun=true;ddSeen=0;ddLastResult=null;
+        const E=ddEl;
+        if(E('Btn'))E('Btn').classList.add('hidden');
+        if(E('DelBtn'))E('DelBtn').classList.add('hidden');
+        if(E('Stop'))E('Stop').classList.remove('hidden');
+        if(E('P'))E('P').classList.remove('hidden');
+        if(E('PB'))E('PB').style.width='5%';
+        if(E('Running')){E('Running').classList.remove('hidden');E('Running').innerHTML='';}
+        if(E('SM'))E('SM').classList.add('hidden');
+        if(E('Report'))E('Report').innerHTML='';
+        if(E('SS'))E('SS').textContent='⏳ در حال شروع...';
+        fetch('?dedup_start=1&target='+target+'&mode='+mode).then(r=>r.json()).then(d=>{
+            if(!d||!d.ok){
+                if(E('SS'))E('SS').textContent='✗ '+((d&&d.error)||'شروع نشد');
+                ddFinish();return;
+            }
+            if(E('SS'))E('SS').textContent='🚀 اجرا در پس‌زمینهٔ سرور — می‌توانید صفحه را ببندید';
+            ddWatch();
+        }).catch(()=>{
+            // حتی اگر پاسخِ شروع گم شود، کار روی سرور آغاز شده؛ فقط تماشا کن
+            if(E('SS'))E('SS').textContent='… اتصال کند است، وضعیت را دنبال می‌کنیم';
+            ddWatch();
+        });
+    });
+}
+
+function ddWatch(){
+    clearInterval(ddTimer);
+    ddTimer=setInterval(()=>{
+        fetch('?dedup_status=1&since='+ddSeen).then(r=>r.json()).then(st=>{
+            if(!st)return;
+            ddApplyStatus(st);
+            if(st.done){clearInterval(ddTimer);ddFinish();ddFetchResult();}
+        }).catch(()=>{});
+    },1200);
+}
+
+function ddApplyStatus(st){
+    const E=ddEl;
+    if(st.log&&st.log.length&&E('Running')){
+        let h='';
+        st.log.forEach(l=>{h+='<div style="padding:2px 8px;font-size:10px;color:#94a3b8;border-bottom:1px solid #1e293b">'+esc(l.m)+'</div>';});
+        E('Running').innerHTML+=h;scrollElBottom(E('Running'));
+    }
+    if(typeof st.log_total==='number')ddSeen=st.log_total;
+    if(E('Tot'))E('Tot').textContent=toFa(st.total||0);
+    if(E('Grp'))E('Grp').textContent=toFa(st.groups||0);
+    if(E('Dup'))E('Dup').textContent=toFa(st.dups||0);
+    if(E('Del'))E('Del').textContent=toFa(st.deleted||0);
+    if(E('SM'))E('SM').classList.remove('hidden');
+    if(E('PB')){
+        let pct=8;
+        if(st.phase==='fetch')pct=Math.min(55,10+(st.page||0)*3);
+        else if(st.phase==='group')pct=60;
+        else if(st.phase==='delete')pct=60+Math.round(35*((st.processed||0)/Math.max(1,st.dups||1)));
+        else if(st.done)pct=100;
+        E('PB').style.width=pct+'%';
+    }
+    if(E('SS')&&!st.done){
+        if(st.phase==='fetch')E('SS').textContent='📄 دریافت محصولات... ('+toFa(st.fetched||0)+')';
+        else if(st.phase==='group')E('SS').textContent='🧮 گروه‌بندی عنوان‌ها...';
+        else if(st.phase==='delete')E('SS').textContent='🗑 حذف '+toFa(st.processed||0)+' از '+toFa(st.dups||0);
+    }
+    if(st.done&&E('SS')){
+        if(st.error)E('SS').textContent='✗ '+st.error;
+        else if(st.stopped)E('SS').textContent='⏹ متوقف شد — حذف‌شده: '+toFa(st.deleted||0);
+        else if((st.deleted||0)>0)E('SS').textContent='✓ '+toFa(st.deleted)+' مورد حذف شد'+((st.failed||0)?('، '+toFa(st.failed)+' ناموفق'):'');
+        else E('SS').textContent='✓ گزارش آماده است — '+toFa(st.dups||0)+' نسخهٔ اضافی در '+toFa(st.groups||0)+' گروه';
+    }
+}
+
+function ddStop(){
+    fetch('?dedup_stop=1').then(()=>{showToast('⏹ درخواستِ توقف ثبت شد');}).catch(()=>{});
+}
+
+function ddFinish(){
+    ddIsRun=false;clearInterval(ddTimer);
+    const E=ddEl;
+    if(E('Btn'))E('Btn').classList.remove('hidden');
+    if(E('DelBtn'))E('DelBtn').classList.remove('hidden');
+    if(E('Stop'))E('Stop').classList.add('hidden');
+    if(E('PB'))E('PB').style.width='100%';
+}
+
+function ddFetchResult(){
+    fetch('?dedup_result=1').then(r=>r.json()).then(d=>{
+        if(!d||!d.ok)return;
+        ddLastResult=d;ddRenderReport(d);
+    }).catch(()=>{});
+}
+
+function ddStatusBadge(p){
+    const M={2976:['فعال','#4ade80'],3790:['غیرفعال','#94a3b8'],3567:['تأییدنشده','#fbbf24'],3568:['در انتظار','#60a5fa'],4184:['بایگانی','#f87171'],
+             'publish':['منتشر','#4ade80'],'draft':['پیش‌نویس','#94a3b8'],'pending':['در انتظار','#60a5fa'],'private':['خصوصی','#a78bfa'],'trash':['زباله','#f87171']};
+    const k=p.status>0?p.status:(p.wstatus||'');
+    const v=M[k]||['—','#64748b'];
+    return '<span style="color:'+v[1]+';font-size:10px">'+v[0]+'</span>';
+}
+
+function ddRenderReport(d){
+    const E=ddEl;const host=E('Report');if(!host)return;
+    const list=d.duplicates_list||[];
+    if(!list.length){host.innerHTML='<div style="color:#4ade80;font-size:12px;padding:8px">✓ هیچ محصولِ تکراری‌ای پیدا نشد.</div>';return;}
+    let h='<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:6px">'
+      +'<div style="color:#fb923c;font-size:12px;font-weight:700">🔴 '+toFa(d.groups)+' گروه · '+toFa(d.duplicates)+' نسخهٔ اضافی</div>'
+      +'<button class="btn btn-red" style="font-size:11px;padding:4px 10px" onclick="ddDeleteAllFromReport()">🗑 حذفِ همهٔ موارد نشان‌داده‌شده</button></div>';
+    if(d.truncated)h+='<div class="alert alert-warn" style="font-size:11px;margin-bottom:6px">⚠️ فقط بخشی از گروه‌ها نمایش داده می‌شود.</div>';
+    h+='<div style="max-height:340px;overflow-y:auto;border:1px solid #334155;border-radius:8px">';
+    list.forEach((g,gi)=>{
+        h+='<div style="border-bottom:1px solid #1e293b;padding:6px 8px">';
+        h+='<div style="color:#e2e8f0;font-size:11px;font-weight:700;margin-bottom:3px">'+esc(g.normalized)+' <span style="color:#f97316">×'+toFa(g.count)+'</span></div>';
+        h+='<div style="font-size:10px;color:#4ade80;padding:2px 6px">✅ می‌ماند: #'+toFa(g.keep.id)+' — '+esc(g.keep.name)+' · '+toFa(g.keep.price)+' · '+ddStatusBadge(g.keep)+'</div>';
+        g.drop.forEach(p=>{
+            h+='<div style="font-size:10px;color:#fca5a5;padding:2px 6px;display:flex;justify-content:space-between;align-items:center">'
+              +'<span>🗑 #'+toFa(p.id)+' — '+esc(p.name)+' · '+toFa(p.price)+' · '+ddStatusBadge(p)+'</span>'
+              +'<button class="btn btn-red" style="font-size:9px;padding:1px 6px" onclick="ddDeleteIds(['+p.id+'])">حذف</button></div>';
+        });
+        h+='</div>';
+    });
+    h+='</div>';
+    host.innerHTML=h;
+}
+
+function ddDeleteAllFromReport(){
+    if(!ddLastResult)return;
+    const ids=[];(ddLastResult.duplicates_list||[]).forEach(g=>g.drop.forEach(p=>ids.push(p.id)));
+    if(!ids.length){showToast('چیزی برای حذف نیست');return;}
+    if(!confirm(toFa(ids.length)+' محصول '+(ddTarget==='bsl'?'بایگانی':'حذف')+' می‌شود. مطمئنید؟'))return;
+    ddDeleteIds(ids);
+}
+
+function ddDeleteIds(ids){
+    if(!ids||!ids.length)return;
+    const fd=new FormData();fd.append('action','dedup_delete_ids');
+    fd.append('target',ddTarget);fd.append('ids',JSON.stringify(ids));
+    showToast('⏳ در حال حذف '+toFa(ids.length)+' مورد...');
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(d&&d.ok){showToast('✅ '+d.msg);ddStart(ddTarget,'scan');}
+        else showToast('❌ '+((d&&d.error)||'حذف ناموفق'),1);
+    }).catch(()=>showToast('❌ خطای شبکه',1));
+}
+
+// سازگاریِ عقب‌رو: نام‌های قدیمی هنوز کار می‌کنند
+function wooDedup(){ddStart('woo','scan');}
+function finDedup(){ddFinish();}
 
 // ========== Auto-Sync JS (per-profile, triggered via cron) ==========
 let syncTimer=null;
@@ -40584,87 +41424,64 @@ function bslStatusOverview(){
     }).catch(()=>{modal.querySelector('.bsl-modal-body').innerHTML='<div style="color:#f87171">\u274C \u062E\u0637\u0627 \u0634\u0628\u06A9\u0647</div>';});
 }
 
-// v8.06: Find duplicate BaSalam products
+// v10.02 (۱۶): حذفِ تکراریِ باسلام — دقیقاً همان موتور و همان تنظیماتِ ووکامرس
+// پیش‌تر این بخش فقط یک گزارشِ یک‌جا بود: کلِ غرفه در یک درخواستِ HTTP خوانده
+// می‌شد و روی غرفه‌های بزرگ به «خطای شبکه» می‌خورد، معیارِ نگه‌داری هم سفت
+// بود (هرچه فعال نبود می‌رفت). حالا مثل ووکامرس در پس‌زمینهٔ سرور اجرا می‌شود.
 function bslFindDuplicates(){
     let modal=document.getElementById('bslDupModal');if(modal)modal.remove();
     modal=document.createElement('div');modal.id='bslDupModal';
-    modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)this.parentElement.remove()"><div class="bsl-modal" style="width:900px"><div class="bsl-modal-head"><h2>\u{1F50D} \u067E\u06CC\u062F\u0627\u06A9\u0631\u062F\u0646 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u062A\u06A9\u0631\u0627\u0631\u06CC</h2><button class="btn btn-gray" onclick="this.closest(\'#bslDupModal\').remove()">\u2715</button></div><div class="bsl-modal-body" style="padding:20px;text-align:center"><div style="color:#67e8f9">\u{1F50D} \u062F\u0631\u06CC\u0627\u0641\u062A \u0648 \u062A\u062D\u0644\u06CC\u0644 \u0645\u062D\u0635\u0648\u0644\u0627\u062A...</div><div style="color:#94a3b8;font-size:11px;margin-top:8px">\u067E\u0633\u0648\u0646\u062F \u0647\u0627\u06CC \u0645\u0627\u0646\u0646\u062F (\u06A9\u062F:x) \u0646\u0627\u062F\u06CC\u062F\u0647 \u06AF\u0631\u0641\u062A\u0647 \u0645\u06CC\u200C\u0634\u0648\u0646\u062F</div></div></div></div>';
+    modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)bslCloseDup()">'
+      +'<div class="bsl-modal" style="width:900px;max-width:95vw">'
+      +'<div class="bsl-modal-head"><h2>\u{1F50D} حذفِ محصولاتِ تکراری باسلام</h2>'
+      +'<button class="btn btn-gray" onclick="bslCloseDup()">\u2715</button></div>'
+      +'<div class="bsl-modal-body" style="padding:12px;max-height:80vh;overflow-y:auto">'
+      +'<div class="alert alert-info" style="font-size:11px;margin-bottom:8px">💡 در باسلام «حذف» وجود ندارد؛ نسخه‌های اضافی <b>بایگانی</b> می‌شوند (وضعیت ۴۱۸۴) و از غرفه ناپدید. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود — می‌توانید این پنجره را ببندید.</div>'
+      +'<div id="bdCfgHost"></div>'
+      +'<div style="display:flex;gap:6px;margin-top:8px">'
+      +'<button class="btn btn-orange" id="bdBtn" onclick="ddStart(\'bsl\',\'scan\')" style="flex:1">\u{1F50D} گزارشِ تکراری‌ها</button>'
+      +'<button class="btn btn-red" id="bdDelBtn" onclick="ddStart(\'bsl\',\'delete\')" style="flex:1">\u{1F5D1} بایگانیِ تکراری‌ها</button>'
+      +'<button class="btn btn-red hidden" id="bdStop" onclick="ddStop()" style="flex:0">\u23F9</button>'
+      +'</div>'
+      +'<div class="progress hidden" id="bdP" style="margin-top:8px"><div class="progress-bar" id="bdPB" style="background:linear-gradient(90deg,#0891b2,#22d3ee)"></div></div>'
+      +'<div class="status" id="bdSS" style="color:#67e8f9"></div>'
+      +'<div class="sres hidden" id="bdRunning" style="max-height:220px;overflow-y:auto"></div>'
+      +'<div class="ssum hidden" id="bdSM">'
+      +'<div class="si"><b id="bdTot" style="color:#60a5fa">\u06F0</b><span>کل محصولات</span></div>'
+      +'<div class="si"><b id="bdGrp" style="color:#facc15">\u06F0</b><span>گروه تکراری</span></div>'
+      +'<div class="si"><b id="bdDup" style="color:#f97316">\u06F0</b><span>تعداد تکراری</span></div>'
+      +'<div class="si"><b id="bdDel" style="color:#f87171">\u06F0</b><span>بایگانی شده</span></div>'
+      +'</div>'
+      +'<div id="bdReport" style="margin-top:8px"></div>'
+      +'</div></div></div>';
     document.body.appendChild(modal);
-    fetch('?bsl_find_duplicates=1&status=all').then(r=>r.json()).then(d=>{
-        if(!d||!d.ok){modal.querySelector('.bsl-modal-body').innerHTML='<div style="color:#f87171">\u274C '+(d?.error||'\u062E\u0637\u0627')+'</div>';return;}
-        if(!d.duplicates||d.duplicates.length===0){
-            modal.querySelector('.bsl-modal-body').innerHTML='<div style="color:#4ade80;font-size:14px">\u2705 \u0647\u06CC\u0686 \u0645\u062D\u0635\u0648\u0644 \u062A\u06A9\u0631\u0627\u0631\u06CC \u06CC\u0627\u0641\u062A \u0646\u0634\u062F</div>';
-            return;
-        }
-        let html='<div style="direction:rtl;margin-bottom:12px;font-size:12px;color:#94a3b8">\u06A9\u0644 '+toFa(d.duplicate_groups)+' \u06AF\u0631\u0648\u0647 \u062A\u06A9\u0631\u0627\u0631\u06CC \u0628\u0627 '+toFa(d.duplicate_products)+' \u0645\u062D\u0635\u0648\u0644 (\u0627\u0632 '+toFa(d.total_products)+' \u0645\u062D\u0635\u0648\u0644 \u06A9\u0644) <span style="color:#fbbf24">\u2014 \u067E\u0633\u0648\u0646\u062F (\u06A9\u062F:x) \u0646\u0627\u062F\u06CC\u062F\u0647 \u06AF\u0631\u0641\u062A\u0647 \u0634\u062F\u0647</span></div>';
-        html+='<div style="max-height:60vh;overflow-y:auto;direction:rtl">';
-        d.duplicates.forEach((g,gi)=>{
-            const statusIcon={2976:'\u2705',3790:'\u23F8',3567:'\u274C',3568:'\u23F3',4184:'\u{1F4DA}'};
-            html+='<div style="margin-bottom:10px;border:1px solid #475569;border-radius:8px;overflow:hidden">';
-            html+='<div style="padding:8px 12px;background:#1e293b;display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'">';
-            html+='<div style="color:#c4b5fd;font-weight:700;font-size:12px">\u{1F4C1} '+esc(g.normalized_name)+' <span style="color:#94a3b8">('+toFa(g.count)+' \u0646\u0633\u062E\u0647)</span></div>';
-            // Find which to keep (prefer active)
-            const activeItem=g.products.find(p=>p.status===2976);
-            const keepId=activeItem?activeItem.id:g.products[0].id;
-            const deleteIds=g.products.filter(p=>p.id!==keepId).map(p=>p.id);
-            html+='<button class="btn btn-red" style="font-size:11px;padding:3px 8px" onclick="event.stopPropagation();bslDeleteDuplicates(['+deleteIds.join(',')+'],\''+esc(g.normalized_name).replace(/'/g,"\\'")+'\')">\u{1F5D1} \u062D\u0630\u0641 '+(g.count-1)+' \u062A\u06A9\u0631\u0627\u0631\u06CC</button>';
-            html+='</div>';
-            html+='<div style="display:'+(gi<3?'block':'none')+'">';
-            html+='<table style="width:100%;border-collapse:collapse;font-size:11px;direction:rtl">';
-            html+='<tr style="background:#0f172a"><th style="padding:4px;color:#67e8f9">ID</th><th style="padding:4px;color:#67e8f9">\u0646\u0627\u0645</th><th style="padding:4px;color:#67e8f9">\u0648\u0636\u0639\u06CC\u062A</th><th style="padding:4px;color:#67e8f9">\u0642\u06CC\u0645\u062A</th><th style="padding:4px;color:#67e8f9">\u0645\u0648\u062C\u0648\u062F\u06CC</th><th style="padding:4px;color:#67e8f9">\u0627\u0642\u062F\u0627\u0645</th></tr>';
-            g.products.forEach(p=>{
-                const isKeep=p.id===keepId;
-                const sIcon=statusIcon[p.status]||'\u2753';
-                const sName={2976:'\u0641\u0639\u0627\u0644',3790:'\u063A\u06CC\u0631\u0641\u0639\u0627\u0644',3567:'\u0631\u062F\u0634\u062F\u0647',3568:'\u062F\u0631\u0627\u0646\u062A\u0638\u0627\u0631',4184:'\u0628\u0627\u06CC\u06AF\u0627\u0646\u06CC'}[p.status]||p.status;
-                const priceStr=p.price>0?toFa(Math.round(p.price/10))+'\u062A':'\u0646\u0627\u0645\u0634\u062E\u0635';
-                const stockStr=p.stock>0?toFa(p.stock):'<span style="color:#f87171">\u0646\u0627\u0645\u0648\u062C\u0648\u062F</span>';
-                const rowBg=isKeep?'background:#052e16':'';
-                html+='<tr style="border-bottom:1px solid #1e293b;'+rowBg+'">';
-                html+='<td style="padding:4px;color:#94a3b8;font-family:monospace;text-align:center">'+p.id+(isKeep?' \u2B50':'')+'</td>';
-                html+='<td style="padding:4px;color:#e2e8f0;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(p.name)+'</td>';
-                html+='<td style="padding:4px;text-align:center">'+sIcon+' '+sName+'</td>';
-                html+='<td style="padding:4px;color:#fbbf24;text-align:center;font-family:monospace">'+priceStr+'</td>';
-                html+='<td style="padding:4px;text-align:center">'+stockStr+'</td>';
-                html+='<td style="padding:4px;text-align:center">'+(isKeep?'<span style="color:#4ade80;font-size:10px">\u062D\u0641\u0638</span>':'<button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="bslDeleteOne('+p.id+')">\u{1F5D1}</button>')+'</td>';
-                html+='</tr>';
-            });
-            html+='</table></div></div>';
-        });
-        html+='</div>';
-        modal.querySelector('.bsl-modal-body').innerHTML=html;
-    }).catch(()=>{modal.querySelector('.bsl-modal-body').innerHTML='<div style="color:#f87171">\u274C \u062E\u0637\u0627 \u0634\u0628\u06A9\u0647</div>';});
+    ddLoadCfg('bsl','bdCfgHost').then(()=>{
+        // اگر گزارشی از قبل هست، بدونِ اسکنِ دوباره نشانش بده
+        fetch('?dedup_result=1').then(r=>r.json()).then(d=>{
+            if(d&&d.ok&&d.target==='bsl'){ddTarget='bsl';ddLastResult=d;ddRenderReport(d);
+                const e=document.getElementById('bdSS');
+                if(e)e.textContent='ℹ️ گزارشِ قبلی نمایش داده شد — برای به‌روزرسانی دکمهٔ گزارش را بزنید';}
+        }).catch(()=>{});
+    });
 }
 
-// v8.06: Delete one BaSalam product
+function bslCloseDup(){
+    // نظرسنجی را ببند ولی کارِ سرور ادامه دارد
+    if(ddTarget==='bsl'){clearInterval(ddTimer);ddIsRun=false;}
+    const m=document.getElementById('bslDupModal');if(m)m.remove();
+}
+
+// سازگاریِ عقب‌رو با فراخوان‌های قدیمی از دیگر بخش‌ها
 function bslDeleteOne(productId){
-    if(!confirm('\u274C \u0622\u06CC\u0627 \u0627\u0632 \u062D\u0630\u0641 \u0645\u062D\u0635\u0648\u0644 #'+productId+' \u0645\u0637\u0645\u0626\u0646\u06CC\u062F\u061F'))return;
-    fetch('?bsl_delete_product=1&product_id='+productId).then(r=>r.json()).then(d=>{
-        if(d&&d.ok){showToast('\u2705 '+d.msg);bslFindDuplicates();}else{showToast('\u274C '+(d?.error||'\u062E\u0637\u0627'),1);}
-    }).catch(()=>showToast('\u274C \u062E\u0637\u0627 \u0634\u0628\u06A9\u0647',1));
+    ddTarget='bsl';
+    if(!confirm('این محصول بایگانی شود؟'))return;
+    ddDeleteIds([parseInt(productId,10)]);
 }
-
-// v8.06: Batch delete duplicate products (SSE stream in modal)
 function bslDeleteDuplicates(ids,groupName){
-    if(!confirm('\u274C \u0622\u06CC\u0627 \u0627\u0632 \u062D\u0630\u0641 '+ids.length+' \u0645\u062D\u0635\u0648\u0644 \u062A\u06A9\u0631\u0627\u0631\u06CC \u0645\u0637\u0645\u0626\u0646\u06CC\u062F\u061F\n\u0646\u0627\u0645: '+groupName))return;
-    let modal=document.getElementById('bslDelDupModal');if(modal)modal.remove();
-    modal=document.createElement('div');modal.id='bslDelDupModal';
-    modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)this.parentElement.remove()"><div class="bsl-modal" style="width:600px"><div class="bsl-modal-head"><h2>\u{1F5D1} \u062D\u0630\u0641 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u062A\u06A9\u0631\u0627\u0631\u06CC</h2><button class="btn btn-gray" onclick="this.closest(\'#bslDelDupModal\').remove()">\u2715</button></div><div class="bsl-modal-body" style="padding:0"><div id="bslDelDupLog" style="max-height:60vh;overflow-y:auto;padding:8px;font-size:11px;direction:rtl"></div></div></div></div>';
-    document.body.appendChild(modal);
-    const logEl=document.getElementById('bslDelDupLog');
-    const addLog=function(cls,icon,text){const d=document.createElement('div');d.style.cssText='padding:3px 6px;border-bottom:1px solid #1e293b;direction:rtl;'+cls;d.textContent=icon+' '+text;logEl.appendChild(d);logEl.scrollTop=logEl.scrollHeight;};
-    addLog('color:#67e8f9','\u2139\uFE0F','\u0634\u0631\u0648\u0639 \u062D\u0630\u0641 '+ids.length+' \u0645\u062D\u0635\u0648\u0644...');
-    const evtSrc=new EventSource('?bsl_delete_batch=1&ids='+encodeURIComponent(JSON.stringify(ids)));
-    window._bslDelDupEvtSrc=evtSrc;
-    evtSrc.onmessage=function(e){
-        try{
-            const d=JSON.parse(e.data);
-            if(d.type==='step'){addLog('color:#67e8f9','\u2139\uFE0F',d.msg);}
-            else if(d.type==='item'){addLog(d.status==='deleted'?'color:#4ade80':'color:#f87171',d.status==='deleted'?'\u2705':'\u274C','['+d.idx+'/'+d.total+'] #'+d.pId+' \u2014 '+d.msg);}
-            else if(d.type==='done'){addLog('color:#4ade80;font-weight:700','\u{1F3C1}',d.msg);evtSrc.close();setTimeout(()=>{const m=document.getElementById('bslDelDupModal');if(m)m.remove();bslFindDuplicates();},1500);}
-            else if(d.type==='error'){addLog('color:#f87171','\u274C',d.msg);evtSrc.close();}
-        }catch(ex){}
-    };
-    evtSrc.onerror=function(){addLog('color:#f87171','\u274C','\u062E\u0637\u0627 \u0634\u0628\u06A9\u0647');evtSrc.close();};
+    ddTarget='bsl';
+    if(!ids||!ids.length)return;
+    if(!confirm(toFa(ids.length)+' نسخهٔ تکراری از «'+(groupName||'')+'» بایگانی شود؟'))return;
+    ddDeleteIds(ids.map(x=>parseInt(x,10)));
 }
 
 function bslFixAiCat(productId){
