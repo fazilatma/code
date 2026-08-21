@@ -19,7 +19,7 @@ import { syncBasalam, syncWoo } from './sync.js';
 import { DEFAULT_SELECTORS, type Product, type Profile } from './types.js';
 import { basicAuth, byteLength, escapeHtml, message } from './utils.js';
 import { createVisualTicket, renderVisualSelector } from './visual.js';
-import { controlBackgroundRun, getPublicBackgroundRun, recoverBackgroundRuns, startAiTestRun, startAllUnapprovedCategoryRun } from './background.js';
+import { controlBackgroundRun, getPublicBackgroundRun, recoverBackgroundRuns, resetBackgroundRun, startAiTestRun, startAllUnapprovedCategoryRun } from './background.js';
 import { fontFile, fontStylesheet } from './fonts.js';
 
 type Variables={requestId:string};
@@ -49,6 +49,7 @@ app.post('/api/ai/test-all',async c=>{const b=await jsonBody(c),started=Date.now
 app.post('/api/ai/test-runs',async c=>{const started=await startAiTestRun(await jsonBody(c),(promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise));return c.json({ok:true,...started},started.existing?200:202)});
 app.get('/api/ai/test-runs/current',async c=>c.json({ok:true,run:await getPublicBackgroundRun('ai-test')}));
 app.post('/api/ai/test-runs/control',async c=>{const b=await jsonBody(c),action=String(b.action)==='resume'?'resume':'stop';return c.json({ok:true,run:await controlBackgroundRun('ai-test',action,(promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise))})});
+app.post('/api/ai/test-runs/reset',async c=>{await resetBackgroundRun('ai-test');return c.json({ok:true,run:await getPublicBackgroundRun('ai-test')})});
 app.get('/api/ai/test-results',async c=>c.json({ok:true,...await getLastAiTestResults()}));
 app.post('/api/ai/call',async c=>{const b=await jsonBody(c),provider=(await aiProviders()).find(p=>p.id===b.provider);if(!provider)return c.json({ok:false,error:'Provider not found'},404);return c.json(await aiCall(provider,String(b.model||''),String(b.prompt||'سلام')))});
 app.post('/api/ai/vote',async c=>{const b=await jsonBody(c);return c.json({ok:true,leaderboard:await recordVote(String(b.task||'manual'),String(b.winner||''),Array.isArray(b.candidates)?b.candidates.map(String):[])})});
