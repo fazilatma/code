@@ -53,10 +53,13 @@ test('production bundle has no Node-only runtime imports',async()=>{
 
 test('D1 migration and runtime schema remain synchronized',async()=>{
   const source=await readFile(new URL('../worker-src/schema.ts',import.meta.url),'utf8');
-  const migration=await readFile(new URL('../migrations/0001_initial.sql',import.meta.url),'utf8');
+  const {readdir}=await import('node:fs/promises');
+  const files=(await readdir(new URL('../migrations',import.meta.url))).filter(name=>/^\d+.*\.sql$/.test(name)).sort();
+  assert.ok(files.length>=2,'every schema addition ships as a new numbered migration');
+  const migration=(await Promise.all(files.map(name=>readFile(new URL(`../migrations/${name}`,import.meta.url),'utf8')))).join('\n');
   const schema=source.slice(source.indexOf('`')+1,source.lastIndexOf('`')).trim();
-  assert.equal(migration.replace(/^--[^\n]*\n/,'').trim(),schema);
-  for(const table of ['profiles','products','jobs','destination_map','category_learning','autoreply_log','app_state'])assert.match(migration,new RegExp(`CREATE TABLE IF NOT EXISTS ${table}\\b`));
+  assert.equal(migration.replace(/^--[^\n]*\n/gm,'').replace(/\n{2,}/g,'\n').trim(),schema);
+  for(const table of ['profiles','products','jobs','destination_map','category_learning','autoreply_log','app_state','agent_prompts','agent_runs'])assert.match(migration,new RegExp(`CREATE TABLE IF NOT EXISTS ${table}\\b`));
 });
 
 test('Cloudflare resources are automatically provisioned during deploy',async()=>{
@@ -73,7 +76,7 @@ test('Cloudflare resources are automatically provisioned during deploy',async()=
   assert.match(config,/queue\s*=\s*"scraper4-cloudflare-jobs"/);
   assert.match(config,/dead_letter_queue\s*=\s*"scraper4-cloudflare-jobs-dlq"/);
   assert.match(config,/crons\s*=\s*\[\s*"\* \* \* \* \*"\s*\]/);
-  assert.match(config,/WORKER_VERSION\s*=\s*"1\.16\.0"/);
+  assert.match(config,/WORKER_VERSION\s*=\s*"1.17.0"/);
   assert.equal(packageJson.scripts['worker:deploy'],'node scripts/deploy-cloudflare.mjs');
   assert.match(deployScript,/R2-free mode[\s\S]*deploy[\s\S]*experimental-provision[\s\S]*d1[\s\S]*migrations[\s\S]*apply[\s\S]*DB[\s\S]*remote/);
   assert.doesNotMatch(deployScript,/10042|enable R2/i);

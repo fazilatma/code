@@ -4,6 +4,7 @@ import { getLastAiTestResults, isChatCompatibleAiModel, isRetryableAiResult, nex
 import { loadConnections } from './connections.js';
 import { applyBasalamCategory, destinationCatalog, destinationCategories, destinationChangeStatus } from './maintenance.js';
 import { buildDedupGroups, normalizeDedupKeep, parseSuffixFormats, type DedupCandidate, type DedupGroup, type DedupKeep } from './dedup.js';
+import { processAgentRunMessage, recoverAgentRun } from './agent.js';
 import type { BackgroundMessage } from './types.js';
 
 export type BackgroundOutcome={outcome:'complete'|'continue'|'ignored';delaySeconds?:number};
@@ -129,9 +130,12 @@ export async function startAllUnapprovedCategoryRun(waitUntil?:(promise:Promise<
 export async function startDedupRun(target:DedupTarget,input:any,waitUntil?:(promise:Promise<unknown>)=>void):Promise<{run:any;existing:boolean}>{
   const previous=await currentBackgroundRun('dedup');
   if(previous&&active(previous)){
-    if(previous.status==='paused'||previous.stopRequested)return{run:publicRun(previous),existing:true};
-    if(runAge(previous)<STALL_MS)return{run:publicRun(previous),existing:true};
-    await resetBackgroundRun('dedup');
+    // A run belonging to the other shop is not "current" for this request: clear it so the
+    // chosen target always gets a fresh server-side run instead of silently reusing the other shop's.
+    if(previous.kind==='dedup'&&previous.target!==target)await resetBackgroundRun('dedup');
+    else if(previous.status==='paused'||previous.stopRequested)return{run:publicRun(previous),existing:true};
+    else if(runAge(previous)<STALL_MS)return{run:publicRun(previous),existing:true};
+    else await resetBackgroundRun('dedup');
   }
   // Fail fast with a clear connection error before queueing a long job.
   const connections=await loadConnections();
@@ -273,6 +277,7 @@ async function processDedupRun(run:DedupRun):Promise<BackgroundOutcome>{
 }
 
 export async function processBackgroundMessage(message:BackgroundMessage):Promise<BackgroundOutcome>{
+  if(message.task==='agent')return processAgentRunMessage(message as {task:'agent';runId:string});
   if(message.task!=='ai-test'&&message.task!=='category-all'&&message.task!=='dedup')return{outcome:'ignored'};
   const token=await claimRun(message.task,message.runId);if(!token)return{outcome:'ignored'};
   try{
@@ -286,6 +291,7 @@ export async function processBackgroundMessage(message:BackgroundMessage):Promis
 }
 
 export async function recoverBackgroundRuns(waitUntil?:(promise:Promise<unknown>)=>void):Promise<void>{
+  await recoverAgentRun(waitUntil);
   for(const kind of ['ai-test','category-all','dedup'] as const){
     const run=await currentBackgroundRun(kind);
     if(!run||run.stopRequested||run.status==='paused'||['done','failed'].includes(run.status))continue;

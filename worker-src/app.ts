@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
 import readXlsxFile from 'read-excel-file/web-worker';
 import { aiCall, aiProviders, getLastAiTestResults, getLeaderboard, recordVote, suggestCategoryWithModel, testModelBatch } from './ai.js';
+import { AGENT_TOOLS, AGENT_TOOL_MODELS, agentCronTick, controlAgentRun, createOrUpdateAgentPrompt, currentAgentRun, getAgentRunPublic, listAgentRunsPublic, publicAgentRun, removeAgentPrompt, resetAgentRun, startAgentRun } from './agent.js';
 import { automationTick, autoreplyLogs, autoreplyRun, basalamChatMessagesOverview, basalamChatsOverview, basalamOrders, digest, generateReply } from './automation.js';
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
 import { DASHBOARD, DASHBOARD_JS } from './dashboard.js';
@@ -29,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.16.0',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.17.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -41,7 +42,7 @@ app.get('/api/status',async c=>{const connections=await loadConnections();return
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.16.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.17.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -55,6 +56,22 @@ app.get('/api/ai/test-results',async c=>c.json({ok:true,...await getLastAiTestRe
 app.post('/api/ai/call',async c=>{const b=await jsonBody(c),provider=(await aiProviders()).find(p=>p.id===b.provider);if(!provider)return c.json({ok:false,error:'Provider not found'},404);return c.json(await aiCall(provider,String(b.model||''),String(b.prompt||'سلام')))});
 app.post('/api/ai/vote',async c=>{const b=await jsonBody(c);return c.json({ok:true,leaderboard:await recordVote(String(b.task||'manual'),String(b.winner||''),Array.isArray(b.candidates)?b.candidates.map(String):[])})});
 app.get('/api/ai/leaderboard',async c=>c.json({ok:true,leaderboard:await getLeaderboard()}));
+
+// ─── Agentic AI: tool-calling models, prompts, scheduled runs and logs ───────
+app.get('/api/agent/models',async c=>{const providers=(await aiProviders()).filter(p=>p.enabled!==false);const configured=providers.flatMap(p=>(p.models||[]).map(model=>({providerId:p.id,providerName:p.name,model})));return c.json({ok:true,models:AGENT_TOOL_MODELS,configured})});
+app.get('/api/agent/tasks',c=>c.json({ok:true,tools:AGENT_TOOLS}));
+app.get('/api/agent/prompts',async c=>{const{listAgentPrompts}=await import('./db.js');return c.json({ok:true,items:(await listAgentPrompts()).map(row=>({id:row.id,name:row.name,description:row.description,prompt:row.prompt,tools:JSON.parse(row.tools||'[]'),scheduleMinutes:row.scheduleMinutes,modelKey:row.modelKey,enabled:row.enabled,maxSteps:row.maxSteps,lastRunAt:row.lastRunAt,createdAt:row.createdAt,updatedAt:row.updatedAt}))})});
+app.post('/api/agent/prompts',async c=>c.json({ok:true,prompt:await createOrUpdateAgentPrompt(await jsonBody(c))}));
+app.delete('/api/agent/prompts/:id',async c=>{await removeAgentPrompt(c.req.param('id'));return c.json({ok:true})});
+app.post('/api/agent/prompts/:id/run',async c=>{const started=await startAgentRun({promptId:c.req.param('id')},(promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise));return c.json({ok:true,...started},started.existing?200:202)});
+app.post('/api/agent/runs',async c=>{const started=await startAgentRun(await jsonBody(c),(promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise));return c.json({ok:true,...started},started.existing?200:202)});
+app.get('/api/agent/runs',async c=>c.json({ok:true,items:await listAgentRunsPublic(Math.min(100,Number(c.req.query('limit'))||40))}));
+app.get('/api/agent/runs/current',async c=>c.json({ok:true,run:publicAgentRun(await currentAgentRun())}));
+app.post('/api/agent/runs/control',async c=>{const b=await jsonBody(c),action=String(b.action)==='resume'?'resume':'stop';return c.json({ok:true,run:await controlAgentRun(action,(promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise))})});
+app.post('/api/agent/runs/reset',async c=>{await resetAgentRun();return c.json({ok:true,run:null})});
+app.get('/api/agent/runs/:id',async c=>c.json({ok:true,run:await getAgentRunPublic(c.req.param('id'))}));
+app.delete('/api/agent/runs/:id',async c=>{const{deleteAgentRun}=await import('./db.js');await deleteAgentRun(c.req.param('id'));return c.json({ok:true})});
+
 app.post('/api/notifications/test',async c=>{const b=await jsonBody(c);return c.json(await sendNotification(b.channel||'webhook',String(b.text||'پیام آزمایشی اسکرپر ۴ از Cloudflare Workers')))});
 app.get('/api/category-learning',async c=>c.json({ok:true,items:await listCategoryLearning(Math.min(5000,Number(c.req.query('limit'))||1000))}));
 app.post('/api/category-learning/record',async c=>{const b=await jsonBody(c);return c.json({ok:true,saved:await learnCategory(String(b.title||''),Number(b.categoryId),String(b.categoryName||''),Number(b.maxWords)||5)})});
@@ -250,6 +267,7 @@ export async function scheduledTasks(env:Env,waitUntil:(promise:Promise<unknown>
     const due=await enqueueDueProfiles(),queued=(await listJobs(200)).filter(job=>job.status==='queued'),seen=new Set<string>();
     for(const job of [...due,...queued])if(!seen.has(job.id)){seen.add(job.id);await enqueueJob(job,waitUntil)}
     await recoverBackgroundRuns(waitUntil);
+    waitUntil(agentCronTick((promise:Promise<unknown>)=>waitUntil(promise)));
     waitUntil(automationTick());
     waitUntil(maybeCronPing(settings));
   }finally{await releaseCronLock()}

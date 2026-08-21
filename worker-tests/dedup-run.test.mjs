@@ -23,7 +23,24 @@ const stubs={
   './db.js':`const h=globalThis.__dedupHarness;
     export async function getState(key,fallback){return h.states.has(key)?JSON.parse(h.states.get(key)):fallback}
     export async function setState(key,value){h.states.set(key,JSON.stringify(value));h.stateUpdatedAt.set(key,new Date().toISOString())}
-    export async function deleteState(key){h.states.delete(key);h.stateUpdatedAt.delete(key)}`,
+    export async function deleteState(key){h.states.delete(key);h.stateUpdatedAt.delete(key)}
+    export async function getAgentRun(){return null}
+    export async function saveAgentRun(){}
+    export async function updateAgentRun(){}
+    export async function deleteAgentRun(){}
+    export async function listAgentRuns(){return[]}
+    export async function getAgentPrompt(){return null}
+    export async function listAgentPrompts(){return[]}
+    export async function saveAgentPrompt(){}
+    export async function deleteAgentPrompt(){}
+    export async function deleteAgentRunsForPrompt(){}
+    export async function touchAgentPromptLastRun(){}
+    export async function listProducts(){return{products:[],total:0}}
+    export async function listJobs(){return[]}
+    export async function listProfiles(){return[]}
+    export async function profileStats(){return[]}
+    export async function listAutoreplyLog(){return[]}
+    export async function listCategoryLearning(){return[]}`,
   './env.js':`const h=globalThis.__dedupHarness;
     class Stmt{constructor(sql){this.sql=sql.replace(/\\s+/g,' ').trim();this.values=[]}
       bind(...values){this.values=values;return this}
@@ -39,7 +56,9 @@ const stubs={
     export function isRetryableAiResult(){return false}
     export function nextAiTestBatch(){return{batch:[]}}
     export async function suggestCategoryWithModel(){return{ok:false}}
-    export async function testModelBatch(){return{done:true,results:[],batchResults:[],total:0,nextCursor:0}}`,
+    export async function testModelBatch(){return{done:true,results:[],batchResults:[],total:0,nextCursor:0}}
+    export async function aiAgentCall(){return{text:'پاسخ آزمایشی',toolCalls:[],raw:{},latencyMs:1,providerId:'test',model:'test'}}
+    export async function aiProviders(){return[]}`,
 };
 const stubPlugin={name:'dedup-stubs',setup(pluginBuild){
   pluginBuild.onResolve({filter:/^\.\/(maintenance|connections|db|env|ai)\.js$/},args=>({path:args.path,namespace:'dedup-stub'}));

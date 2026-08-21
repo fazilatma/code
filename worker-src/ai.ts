@@ -57,6 +57,59 @@ export async function aiCall(provider:Provider,model:string,prompt:string,networ
 }
 
 const MISTRAL_OCR_TEST_IMAGE='https://raw.githubusercontent.com/mistralai/cookbook/main/mistral/ocr/receipt.png';
+
+// ─── Agentic AI: tool calling (function calling) ─────────────────────────────
+export type AiTool={type:'function';function:{name:string;description:string;parameters:Record<string,unknown>}};
+export type AiToolCall={id:string;name:string;arguments:Record<string,unknown>};
+export type AiAgentTurn={text:string;toolCalls:AiToolCall[];raw:any;latencyMs:number;providerId:string;model:string};
+
+/** Parses a `function.arguments` JSON string into an object without ever crashing the loop. */
+export function parseToolArguments(raw:unknown):Record<string,unknown>{
+  const value=String(raw??'');
+  if(!value.trim())return{};
+  try{const parsed=JSON.parse(value);return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{raw:value}}catch{return{raw:value}}
+}
+/** Extracts assistant message text + tool_calls from any chat-completions shaped body. */
+export function parseAgentTurn(body:any):{text:string;toolCalls:AiToolCall[]}{
+  const message=body?.choices?.[0]?.message;
+  if(!message||typeof message!=='object')return{text:String(body?.result?.response||body?.response||''),toolCalls:[]};
+  const text=typeof message.content==='string'?message.content:'';
+  const toolCalls:AiToolCall[]=Array.isArray(message.tool_calls)?message.tool_calls.filter((call:any)=>call&&call.function).map((call:any)=>({id:String(call.id||`call_${crypto.randomUUID()}`),name:String(call.function.name||''),arguments:parseToolArguments(call.function.arguments)})):[];
+  return{text,toolCalls};
+}
+
+/**
+ * One agentic turn: sends the conversation + tool definitions and returns the model's
+ * text and/or requested tool calls. Works with Cloudflare Workers AI native models and
+ * any OpenAI-compatible endpoint; provider/model must actually support tool use.
+ */
+export async function aiAgentCall(provider:Provider,model:string,messages:Array<{role:string;content:string}>,tools:AiTool[],networkOverride?:Network,timeoutMs?:number,maxTokens=2000):Promise<AiAgentTurn>{
+  const network=networkOverride||(await loadConnections()).ai.network,started=Date.now();
+  if(!provider.baseUrl||!provider.apiKey||!model)throw new Error('تنظیمات ارائه‌دهنده/مدل کامل نیست');
+  const canonical=canonicalAiModel(model);
+  if(isCloudflareNative(provider.baseUrl)){
+    const accountId=cloudflareAccountId(provider.baseUrl);
+    if(!accountId)throw new AiResponseError('شمارهٔ حساب Cloudflare در آدرس پیدا نشد',{ok:false,phase:'configuration',provider:provider.id,providerName:provider.name,model,prompt:messages[messages.length-1]?.content||'',latencyMs:Date.now()-started});
+    const models=cloudflareModelIds(model),base=`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/`;
+    for(const modelId of models){
+      const endpoint=base+modelId.replace(/^\/+/,''),payload={messages,tools,max_tokens:maxTokens};
+      const result=await requestAi(endpoint,payload,provider,network,timeoutMs);
+      if(result.networkError)throw new AiResponseError(safeError(result.networkError,endpoint,provider.apiKey),{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt:messages[messages.length-1]?.content||'',endpoint:safeEndpoint(endpoint),latencyMs:Date.now()-started,raw:{error:safeError(result.networkError,endpoint,provider.apiKey)}});
+      const response=result.response!,body=result.body,errorText=aiErrorMessage(body)||response.statusText||'Cloudflare AI error';
+      if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${errorText}`,{ok:false,phase:'http',provider:provider.id,providerName:provider.name,model,prompt:messages[messages.length-1]?.content||'',endpoint:safeEndpoint(endpoint),latencyMs:Date.now()-started,httpStatus:response.status,raw:body});
+      const turn=parseAgentTurn(body);
+      return{...turn,raw:parseResponse(JSON.stringify(body),provider.apiKey),latencyMs:Date.now()-started,providerId:provider.id,model:modelId};
+    }
+    throw new AiResponseError('هیچ مدل Cloudflare برای این شناسه پیدا نشد',{ok:false,phase:'configuration',provider:provider.id,providerName:provider.name,model,prompt:messages[messages.length-1]?.content||'',latencyMs:Date.now()-started});
+  }
+  const endpoint=openAiEndpoint(provider.baseUrl),payload:any={model:canonical,messages,tools,tool_choice:'auto',max_tokens:maxTokens,temperature:.2};
+  const result=await requestAi(endpoint,payload,provider,network,timeoutMs);
+  if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt:messages[messages.length-1]?.content||'',endpoint:safeEndpoint(endpoint),latencyMs:Date.now()-started,raw:{error:reason}})}
+  const response=result.response!,body=result.body,latencyMs=Date.now()-started,errorText=aiErrorMessage(body)||response.statusText||'AI error';
+  if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${errorText}`,{ok:false,phase:'http',provider:provider.id,providerName:provider.name,model,prompt:messages[messages.length-1]?.content||'',endpoint:safeEndpoint(endpoint),latencyMs,httpStatus:response.status,raw:body});
+  const turn=parseAgentTurn(body);
+  return{...turn,raw:parseResponse(JSON.stringify(body),provider.apiKey),latencyMs,providerId:provider.id,model:canonical};
+}
 async function mistralDedicatedCall(provider:Provider,model:string,prompt:string,network:Network,started:number,endpointType:Exclude<AiModelEndpoint,'chat-completions'>,timeoutMs?:number){
   const endpoint=mistralEndpoint(provider.baseUrl,endpointType),reportedEndpoint=safeEndpoint(endpoint),payload=endpointType==='embeddings'?{model,input:[prompt||'سلام']}:{model,document:{type:'image_url',image_url:MISTRAL_OCR_TEST_IMAGE},include_image_base64:false};
   const result=await requestAi(endpoint,payload,provider,network,timeoutMs);
@@ -124,7 +177,7 @@ function cloudflareModelIds(raw:string):string[]{
 function canonicalAiModel(model:string){return String(model||'').trim().replace(/^~+/,'')}
 function isOpenRouter(provider:Pick<Provider,'id'|'name'|'baseUrl'>,endpoint=''){return provider.id==='openrouter'||/openrouter/i.test(String(provider.name||''))||/openrouter\.ai/i.test(String(provider.baseUrl||endpoint||''))}
 function aiRequestHeaders(provider:Provider,endpoint:string,method:'POST'|'GET'='POST'):Record<string,string>{
-  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.16.0'};
+  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.17.0'};
   if(method==='POST')headers['content-type']='application/json';
   if(isOpenRouter(provider,endpoint)){headers['http-referer']='https://scraper4.workers.dev';headers.referer='https://scraper4.workers.dev';headers['x-title']='Scraper 4'}
   return headers;

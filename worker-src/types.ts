@@ -106,7 +106,7 @@ export type Job = {
   updatedAt: string;
 };
 
-export type BackgroundMessage = { task: 'ai-test' | 'category-all' | 'dedup'; runId: string };
+export type BackgroundMessage = { task: 'ai-test' | 'category-all' | 'dedup' | 'agent'; runId: string };
 export type JobMessage = { task?: 'job'; jobId: string } | BackgroundMessage;
 
 export const DEFAULT_SELECTORS: Selectors = {
