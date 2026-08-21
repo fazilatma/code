@@ -34,3 +34,4 @@ npm run worker:dev
 - matrix ماشینی تطبیق: `parity-manifest.json` و `parity-audit.json`
 
 Vault با AES-256-GCM و PBKDF2 برابر سقف Cloudflare یعنی 100,000 iteration کار می‌کند. فایل settings قدیمی از مسیر داشبورد وارد می‌شود؛ envelope ناسازگار با iteration بیشتر به‌جای crash با پیام مهاجرت روشن رد می‌شود.
+
