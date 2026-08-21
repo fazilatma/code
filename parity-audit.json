@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-20T14:43:19.668Z",
+  "generatedAt": "2026-08-21T13:59:47.443Z",
   "summary": {
     "phpGetConditions": 150,
     "phpPostActions": 28,
@@ -8,8 +8,8 @@
     "getMissing": 33,
     "postCovered": 28,
     "postMissing": 0,
-    "typescriptRoutes": 112,
-    "uiActions": 81
+    "typescriptRoutes": 114,
+    "uiActions": 83
   },
   "get": [
     {
@@ -832,6 +832,8 @@
     "POST /api/ai/providers/:id/discover-models",
     "POST /api/ai/test-all",
     "POST /api/ai/call",
+    "GET /api/ai/tools",
+    "POST /api/ai/agent",
     "POST /api/ai/vote",
     "GET /api/ai/leaderboard",
     "POST /api/ai/test-start",
@@ -935,6 +937,8 @@
     "ai-add-mistral-models",
     "ai-add-model",
     "ai-add-provider",
+    "ai-agent-run",
+    "ai-agent-tools",
     "ai-candidate-category",
     "ai-candidate-reply",
     "ai-category-one",

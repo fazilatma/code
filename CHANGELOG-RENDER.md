@@ -1,5 +1,14 @@
 # Render TypeScript changelog
 
+## 2.24.0 — 2026-08-20
+
+- Added a secure OpenAI-compatible tool-calling loop with bounded rounds, argument parsing and complete execution traces.
+- Added read tools for profiles, local/destination products, queues, changes, Basalam categories/orders/chats and selector tests.
+- Added guarded public web search and web-page reading with SSRF protection and response-size limits.
+- Added preview-only tools for local/destination updates and queue actions; mutation tools never apply changes automatically.
+- Added per-model tool-calling toggles, imported `toolCalling` metadata and encrypted persistence in the connection vault.
+- Added a dedicated AI agent panel, tool inventory endpoint and full raw diagnostics.
+
 ## 2.23.0 — 2026-08-20
 
 - Added a persistent Persian typography selector with live preview in general settings.

@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
 import { streamSSE } from 'hono/streaming';
 import { aiCall, aiProviders, aiTestState, candidateTest, discoverProviderModels, getLeaderboard, networkDiagnostics, recordVote, startAiTest, stopAiTest, testAllModels } from './ai.js';
+import { aiToolNames } from './ai-tools.js';
 import { automationTick, autoreplyLogs, autoreplyRun, basalamChats, basalamOrders, digest, generateReply, notificationSweep, notifySelected } from './automation.js';
 import { config, assertConfig } from './config.js';
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
@@ -108,6 +109,8 @@ app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders
 app.post('/api/ai/providers/:id/discover-models',async c=>c.json(await discoverProviderModels(c.req.param('id'))));
 app.post('/api/ai/test-all',async c=>{const body=await c.req.json().catch(()=>({})) as any;return c.json({ok:true,results:await testAllModels(String(body.prompt||'سلام'),Boolean(body.onlyCandidates))})});
 app.post('/api/ai/call',async c=>{const body=await c.req.json() as any,providers=await aiProviders(),provider=providers.find(p=>p.id===body.provider);if(!provider)return c.json({ok:false,error:'Provider not found'},404);return c.json(await aiCall(provider,String(body.model||''),String(body.prompt||'سلام')))});
+app.get('/api/ai/tools',c=>c.json({ok:true,tools:aiToolNames()}));
+app.post('/api/ai/agent',async c=>{const body=await c.req.json() as any,providers=await aiProviders(),requested=providers.find(p=>p.id===body.provider),provider=requested||providers.find(p=>p.enabled&&p.toolModels?.length);if(!provider)return c.json({ok:false,error:'مدل دارای فراخوانی ابزار فعال نیست'},409);const model=String(body.model||provider.toolModels?.[0]||'');if(!provider.toolModels?.includes(model))return c.json({ok:false,error:'فراخوانی ابزار برای این مدل فعال نشده است'},409);return c.json(await aiCall(provider,model,String(body.prompt||'وضعیت فروشگاه را خلاصه کن.')))});
 app.post('/api/ai/vote',async c=>{const body=await c.req.json() as any;return c.json({ok:true,leaderboard:await recordVote(String(body.task||'manual'),String(body.winner||''),Array.isArray(body.candidates)?body.candidates.map(String):[])})});
 app.get('/api/ai/leaderboard',async c=>c.json({ok:true,leaderboard:await getLeaderboard()}));
 app.post('/api/ai/test-start',async c=>c.json({ok:true,state:await startAiTest(await c.req.json().catch(()=>({})))}));
