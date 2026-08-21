@@ -69,6 +69,14 @@ const AGENT_STOP_FILE     = __DIR__ . '/agent_stop.json';
 const AGENT_LOCK_FILE     = __DIR__ . '/agent.lock';
 const AGENT_MAX_STEPS     = 24;   // سقفِ دورِ گفت‌وگو با مدل (ضدِ حلقهٔ بی‌پایان)
 const AGENT_MAX_CALLS     = 80;   // سقفِ کلِ فراخوانیِ ابزار در یک اجرا
+
+/* v10.05 (۱۹): اتوماسیونِ ایجنتی — کارهای زمان‌بندی‌شده */
+const AUTO_JOBS_FILE     = __DIR__ . '/auto_jobs.json';
+const AUTO_LOG_DIR       = __DIR__ . '/auto_logs';
+const AUTO_LOCK_FILE     = __DIR__ . '/auto.lock';
+const AUTO_LOCK_TTL      = 900;   // قفلِ کهنه‌تر از این، مرده حساب می‌شود
+const AUTO_LOG_KEEP      = 50;    // چند اجرای آخرِ هر کار نگه داشته شود
+const AUTO_MAX_PER_TICK  = 2;     // سقفِ کارهای اجراشده در هر تیکِ کران
 const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
 /* v9.20: ارائه‌دهنده‌های هوش مصنوعی (چند-ارائه‌دهنده) — فایل جدا از
@@ -112,7 +120,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.04';
+const APP_VERSION = '10.05';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12534,6 +12542,25 @@ if (arCfg($cn)['enabled']) {
     }
 }
 
+/* v10.05 (۱۹): زمان‌بندِ کارهای ایجنتی.
+
+   چرا اینجا و نه بالاترِ کران: هر اجرای ایجنت ده‌ها ثانیه طول می‌کشد و
+   ممکن است هاست وسطش پردازه را بکشد. اگر بالای کران می‌نشست، استخراج و
+   ارسال و اعلان — که کارِ اصلیِ برنامه‌اند — قربانیِ یک کارِ هوش مصنوعی
+   می‌شدند. پس آخر صف است: هرچه لازم است اول انجام شده، و اگر اینجا
+   کشته شویم چیزی از دست نرفته و کارها در تیکِ بعدی سررسید می‌مانند. */
+try {
+    $autoRes = autoTick($cn, $now);
+    if (!empty($autoRes['ran'])) {
+        $results['auto_agent'] = ['ran' => (int)$autoRes['ran'],
+                                  'jobs' => $autoRes['jobs'] ?? []];
+    } elseif (!empty($autoRes['locked'])) {
+        $results['auto_agent'] = 'locked';
+    }
+} catch (Throwable $e) {
+    $results['auto_agent'] = ['error' => $e->getMessage()];
+}
+
 // v8.62: گزارش شبانه — اگر ساعتش رسیده و امروز فرستاده نشده
 $digRes = digestMaybeSend($cn, $now);
 if (!empty($digRes['sent'])) $results['digest'] = $digRes['totals'] ?? 'sent';
@@ -12938,6 +12965,546 @@ if (isset($_GET['catlearn_bulk'])) {
  *  ?agent_stop=1                                   → درخواستِ توقف
  *  ?agent_tools=1                                  → فهرستِ ابزارها
  * ===================================================================== */
+/* =====================================================================
+   v10.05 (۱۹): «اتوماسیونِ ایجنتی» — کارهای زمان‌بندی‌شده با مدل‌های رایگان
+
+   ایدهٔ کلی: در v10.03 موتورِ ایجنت با فراخوانیِ ابزار ساخته شد و در
+   v10.04 رابطش به بخشِ هوش مصنوعی رفت. حالا لایهٔ بعدی: به‌جای اینکه
+   کاربر هر بار دستی دستور بدهد، مجموعه‌ای از «کارِ آماده» تعریف می‌کند
+   که خودشان در دوره‌های زمانیِ معین اجرا شوند.
+
+   چرا روی کرانِ موجود سوار شد و نه یک زمان‌بندِ جدا: هاستِ اشتراکی فقط
+   یک کرانِ سیستمی دارد که همین حالا ?cron_run را می‌زند. ساختنِ زمان‌بندِ
+   دومی یعنی کاربر باید یک کرانِ دیگر هم تعریف کند — که اکثراً نمی‌کنند و
+   بعد گزارش می‌دهند «کارها اجرا نمی‌شوند». پس autoTick() داخلِ همان
+   چرخهٔ کران صدا زده می‌شود.
+   ===================================================================== */
+
+/** کاتالوگِ مدل‌های رایگانی که فراخوانیِ ابزار (tool calling) دارند.
+ *
+ *  فقط مدل‌هایی اینجا هستند که هر سه شرط را دارند: (۱) لایهٔ رایگانِ
+ *  واقعی، (۲) پشتیبانی از tools/tool_choice، (۳) اندپوینتِ سازگار با
+ *  OpenAI. مدل‌های صوتی/تصویری و مدل‌هایی که فقط چت می‌کنند نیامده‌اند،
+ *  چون در حلقهٔ ایجنت بی‌فایده‌اند.
+ *
+ *  [id, نام, ارائه‌دهنده, context, سقفِ رایگان, یادداشت, کیفیت(۱..۵)]
+ */
+function autoFreeToolModels(): array {
+    $rows = [
+        // ── Groq: سریع‌ترین، بدون کارت، سقفِ روزانهٔ خوب ──
+        ['llama-3.3-70b-versatile', 'Llama 3.3 70B', 'groq', 131000, '۳۰ درخواست/دقیقه · ۱۰۰۰ تا ۱۴۴۰۰ در روز', 'قوی‌ترین انتخابِ رایگان برای ایجنت؛ ابزارها را قابل‌اعتماد صدا می‌زند', 5],
+        ['llama-3.1-8b-instant',    'Llama 3.1 8B Instant', 'groq', 131000, '۳۰ درخواست/دقیقه · ۱۴۴۰۰ در روز', 'سبک و بسیار سریع؛ برای کارهای ساده و پرتکرار', 3],
+        ['moonshotai/kimi-k2-instruct', 'Kimi K2', 'groq', 262000, '۱۰۰۰ در روز', 'حافظهٔ بسیار بلند؛ خوب برای تحلیلِ فهرست‌های طولانی', 4],
+        ['openai/gpt-oss-120b',     'GPT-OSS 120B', 'groq', 131000, '۱۰۰۰ در روز', 'مدلِ بازِ OpenAI؛ در ابزار زدن دقیق است', 4],
+        ['openai/gpt-oss-20b',      'GPT-OSS 20B', 'groq', 131000, '۱۰۰۰ در روز', 'نسخهٔ کوچک‌تر؛ ارزان‌تر از نظر سهمیه', 3],
+        ['qwen/qwen3-32b',          'Qwen3 32B', 'groq', 131000, '۱۰۰۰ در روز', 'فارسی را نسبتاً خوب می‌فهمد', 4],
+        // ── Google AI Studio: سخاوتمندترین سقفِ روزانه ──
+        ['gemini-2.5-flash',        'Gemini 2.5 Flash', 'gemini', 1000000, '۱۵ درخواست/دقیقه · ۱۵۰۰ در روز', 'بهترین نسبتِ سقف به کیفیت؛ حافظهٔ ۱ میلیونی', 5],
+        ['gemini-2.5-flash-lite',   'Gemini 2.5 Flash-Lite', 'gemini', 1000000, '۱۵ درخواست/دقیقه · ۱۵۰۰ در روز', 'سریع‌تر و سبک‌تر؛ برای کارهای تکراری', 4],
+        // ── Cerebras: سریع‌ترین تولیدِ توکن ──
+        ['gpt-oss-120b',            'GPT-OSS 120B (سربراس)', 'cerebras', 131000, '۳۰ درخواست/دقیقه · ~۱M توکن در روز', 'تولیدِ فوق‌سریع؛ برای کارهای طولانی', 4],
+        ['qwen-3-235b-a22b',        'Qwen3 235B', 'cerebras', 131000, '۳۰ درخواست/دقیقه · ~۱M توکن در روز', 'بزرگ‌ترین مدلِ رایگانِ سربراس', 5],
+        // ── Mistral (لایهٔ Experiment) ──
+        ['mistral-small-latest',    'Mistral Small', 'mistral', 256000, '~۱ درخواست/ثانیه · ~۱B توکن در ماه', 'سقفِ ماهانهٔ بسیار بالا؛ نیازمندِ تأییدِ تلفنی', 4],
+        ['ministral-8b-latest',     'Ministral 3 8B', 'mistral', 256000, '~۱ درخواست/ثانیه', 'سبک و ارزان؛ مناسبِ کارهای دوره‌ای', 3],
+        // ── OpenRouter: تنوعِ مدل با یک کلید ──
+        ['deepseek/deepseek-chat:free', 'DeepSeek Chat (رایگان)', 'openrouter', 128000, '۲۰ درخواست/دقیقه · ۵۰ در روز', 'سقفِ روزانه کم است؛ برای کارهای کم‌تکرار', 4],
+        ['meta-llama/llama-3.3-70b-instruct:free', 'Llama 3.3 70B (رایگان)', 'openrouter', 131000, '۵۰ در روز', 'همان Llama از مسیرِ اوپن‌روتر', 4],
+        // ── GitHub Models ──
+        ['gpt-4o-mini',             'GPT-4o mini (گیت‌هاب)', 'github', 128000, '۱۵ درخواست/دقیقه · ۱۵۰ در روز', 'با حسابِ گیت‌هاب؛ سقف بسته به اشتراکِ کوپایلت', 4],
+    ];
+    $out = [];
+    foreach ($rows as $r) {
+        $out[] = ['id' => $r[0], 'name' => $r[1], 'provider' => $r[2], 'context' => $r[3],
+                  'limit' => $r[4], 'note' => $r[5], 'quality' => $r[6]];
+    }
+    return $out;
+}
+
+/** نامِ فارسیِ ارائه‌دهنده‌ها + نشانیِ گرفتنِ کلیدِ رایگان */
+function autoProviderInfo(): array {
+    return [
+        'groq'       => ['name' => 'Groq',            'key' => 'console.groq.com',   'card' => false],
+        'gemini'     => ['name' => 'Google AI Studio','key' => 'ai.google.dev',      'card' => false],
+        'cerebras'   => ['name' => 'Cerebras',        'key' => 'cloud.cerebras.ai',  'card' => false],
+        'mistral'    => ['name' => 'Mistral AI',      'key' => 'console.mistral.ai', 'card' => false],
+        'openrouter' => ['name' => 'OpenRouter',      'key' => 'openrouter.ai/keys', 'card' => false],
+        'github'     => ['name' => 'GitHub Models',   'key' => 'github.com/marketplace/models', 'card' => false],
+    ];
+}
+
+/** کارهایی که ایجنت با ابزارهای موجود می‌تواند انجام دهد.
+ *
+ *  دو دسته: کارهای مخصوصِ همین سایت (site) و کارهای عمومی که هر ایجنتِ
+ *  ابزاردار می‌تواند بکند (general). این فهرست هم راهنمای کاربر است و هم
+ *  منبعِ دکمه‌های «افزودنِ سریع» در رابط.
+ *
+ *  [کلید, عنوان, توضیح, دسته, پرامپتِ آماده, دورهٔ پیشنهادی(دقیقه)]
+ */
+function autoTaskCatalog(): array {
+    $rows = [
+        // ── مخصوصِ این سایت ──
+        ['price_sync', 'هم‌ترازیِ قیمت با اسنپ‌شاپ',
+         'قیمتِ محصولات را با اسنپ‌شاپ مقایسه می‌کند و اختلاف‌ها را گزارش/اصلاح می‌کند.',
+         'site',
+         'محصول‌های فروشگاه را فهرست کن، برای هرکدام در snappshop.ir جست‌وجو کن و اگر اختلافِ قیمت بیشتر از ۵ درصد بود قیمت را هم‌تراز کن. در پایان خلاصه‌ای از تغییرها بده.',
+         1440],
+        ['stock_guard', 'نگهبانِ موجودی',
+         'محصولاتی که در مرجع ناموجود شده‌اند را در فروشگاه هم صفر می‌کند.',
+         'site',
+         'محصول‌های فروشگاه را فهرست کن و هرکدام را در snappshop.ir بررسی کن. هر محصولی که در مرجع ناموجود است، موجودی‌اش را در فروشگاه صفر کن. محصولاتِ موجود را دست نزن.',
+         360],
+        ['price_audit', 'ممیزیِ قیمتِ بدون تغییر',
+         'فقط گزارش می‌دهد؛ هیچ تغییری نمی‌دهد. برای پایشِ روزانه.',
+         'site',
+         'قیمتِ همهٔ محصول‌ها را با اسنپ‌شاپ مقایسه کن و فقط یک گزارش بده که کدام‌ها گران‌تر و کدام‌ها ارزان‌ترند. هیچ محصولی را تغییر نده.',
+         720],
+        ['title_cleanup', 'پاک‌سازیِ عنوان‌ها',
+         'عنوان‌های نامرتب، تکراری یا پر از کلمهٔ اضافه را پیدا و گزارش می‌کند.',
+         'site',
+         'فهرستِ محصول‌ها را بگیر و عنوان‌هایی که مشکل دارند (خیلی بلند، دارای کاراکترِ عجیب، تکراری، یا با کلماتِ تبلیغاتیِ اضافه) را پیدا کن و فهرستِ پیشنهادِ اصلاح بده.',
+         10080],
+        ['gap_finder', 'شکارِ فرصتِ قیمتی',
+         'محصولاتی که از مرجع خیلی ارزان‌تر فروخته می‌شوند (ضررده) را می‌یابد.',
+         'site',
+         'محصول‌هایی را پیدا کن که قیمتشان بیش از ۲۰ درصد پایین‌تر از قیمتِ اسنپ‌شاپ است. اینها احتمالاً ضررده‌اند. فقط گزارش بده و تغییری نده.',
+         1440],
+        ['stale_check', 'محصولاتِ فراموش‌شده',
+         'محصولاتی که مدت‌هاست به‌روز نشده‌اند را شناسایی می‌کند.',
+         'site',
+         'فهرستِ محصول‌ها را بررسی کن و آنهایی را که قیمت یا موجودی‌شان مشکوک به قدیمی‌بودن است (مثلاً قیمتِ خیلی گرد، موجودیِ صفرِ قدیمی) گزارش کن.',
+         10080],
+        // ── عمومی ──
+        ['daily_digest', 'خلاصهٔ روزانه',
+         'یک گزارشِ فشرده از وضعیتِ فروشگاه در پایانِ روز.',
+         'general',
+         'وضعیتِ کلیِ فروشگاه را بررسی کن: چند محصول داری، چندتا ناموجودند، میانگینِ قیمت چقدر است. یک خلاصهٔ کوتاهِ فارسی بنویس.',
+         1440],
+        ['anomaly_watch', 'شکارِ ناهنجاری',
+         'قیمت یا موجودیِ عجیب‌وغریب را علامت می‌زند.',
+         'general',
+         'محصول‌ها را بررسی کن و هر چیزِ غیرعادی را گزارش کن: قیمتِ صفر، قیمتِ نجومی، موجودیِ منفی، عنوانِ خالی. فقط گزارش بده.',
+         720],
+        ['competitor_watch', 'رصدِ رقیب',
+         'تغییراتِ قیمتِ مرجع را دنبال می‌کند.',
+         'general',
+         'قیمتِ فعلیِ محصول‌های اصلی را در snappshop.ir بخوان و با قیمتِ فروشگاه مقایسه کن. جدولی از اختلاف‌ها بساز. تغییری نده.',
+         180],
+        ['custom', 'دستورِ دلخواه',
+         'هر دستوری که خودت می‌نویسی.',
+         'general',
+         '',
+         1440],
+    ];
+    $out = [];
+    foreach ($rows as $r) {
+        $out[] = ['key' => $r[0], 'title' => $r[1], 'desc' => $r[2], 'cat' => $r[3],
+                  'prompt' => $r[4], 'every' => $r[5]];
+    }
+    return $out;
+}
+
+/** دوره‌های زمانیِ قابلِ انتخاب (دقیقه) */
+function autoIntervals(): array {
+    return [
+        15     => 'هر ۱۵ دقیقه',
+        30     => 'هر نیم‌ساعت',
+        60     => 'هر ساعت',
+        180    => 'هر ۳ ساعت',
+        360    => 'هر ۶ ساعت',
+        720    => 'هر ۱۲ ساعت',
+        1440   => 'روزی یک‌بار',
+        4320   => 'هر ۳ روز',
+        10080  => 'هفته‌ای یک‌بار',
+        43200  => 'ماهی یک‌بار',
+    ];
+}
+
+/** خواندنِ کارهای ذخیره‌شده */
+function autoLoadJobs(): array {
+    if (!is_file(AUTO_JOBS_FILE)) return [];
+    $j = json_decode((string)@file_get_contents(AUTO_JOBS_FILE), true);
+    if (!is_array($j)) return [];
+    $out = [];
+    foreach ($j as $row) {
+        if (!is_array($row) || empty($row['id'])) continue;
+        $out[] = autoNormalizeJob($row);
+    }
+    return $out;
+}
+
+/** یک کار را به شکلِ استاندارد در می‌آورد (تا فیلدِ گمشده خطا ندهد) */
+function autoNormalizeJob(array $r): array {
+    return [
+        'id'       => (string)$r['id'],
+        'title'    => (string)($r['title'] ?? 'بی‌نام'),
+        'prompt'   => (string)($r['prompt'] ?? ''),
+        'mode'     => in_array(($r['mode'] ?? 'dry'), ['sim', 'dry', 'live'], true) ? (string)$r['mode'] : 'dry',
+        'every'    => max(5, (int)($r['every'] ?? 1440)),
+        'enabled'  => !empty($r['enabled']),
+        'model'    => (string)($r['model'] ?? ''),
+        'created'  => (int)($r['created'] ?? time()),
+        'last_run' => (int)($r['last_run'] ?? 0),
+        'last_ok'  => isset($r['last_ok']) ? (bool)$r['last_ok'] : null,
+        'last_msg' => (string)($r['last_msg'] ?? ''),
+        'runs'     => (int)($r['runs'] ?? 0),
+        'fails'    => (int)($r['fails'] ?? 0),
+        'changes'  => (int)($r['changes'] ?? 0),
+    ];
+}
+
+/** نوشتنِ اتمیکِ کارها (تا اگر وسطِ نوشتن قطع شد، فایل نصفه نماند) */
+function autoSaveJobs(array $jobs): bool {
+    $tmp = AUTO_JOBS_FILE . '.tmp';
+    $ok  = @file_put_contents($tmp, json_encode(array_values($jobs),
+        JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)) !== false;
+    if (!$ok) return false;
+    return @rename($tmp, AUTO_JOBS_FILE);
+}
+
+/** شناسهٔ یکتا برای کارِ تازه */
+function autoNewId(): string {
+    return 'job_' . dechex(time()) . dechex(random_int(0x100, 0xfff));
+}
+
+/** آیا وقتِ اجرای این کار رسیده؟ */
+function autoJobDue(array $job, int $now): bool {
+    if (empty($job['enabled'])) return false;
+    if ($job['prompt'] === '') return false;
+    $due = (int)$job['last_run'] + ((int)$job['every'] * 60);
+    return $now >= $due;
+}
+
+/** زمانِ اجرای بعدی به شکلِ خوانا */
+function autoNextRunLabel(array $job, int $now): string {
+    if (empty($job['enabled'])) return 'خاموش';
+    if ((int)$job['last_run'] === 0) return 'در اولین تیکِ کران';
+    $due = (int)$job['last_run'] + ((int)$job['every'] * 60);
+    $d   = $due - $now;
+    if ($d <= 0) return 'همین حالا';
+    if ($d < 3600)  return 'تا ' . aiFaNum((int)ceil($d / 60)) . ' دقیقهٔ دیگر';
+    if ($d < 86400) return 'تا ' . aiFaNum((int)ceil($d / 3600)) . ' ساعتِ دیگر';
+    return 'تا ' . aiFaNum((int)ceil($d / 86400)) . ' روزِ دیگر';
+}
+
+/** افزودنِ یک ردیف به لاگِ یک کار.
+ *
+ *  لاگِ هر کار جداست تا مودالِ لاگ سریع باز شود؛ اگر همه در یک فایل
+ *  بودند، با چند ده کار فایل چند مگابایتی می‌شد و هر بار باز کردنِ
+ *  مودال کلِ آن را می‌خواند.
+ */
+function autoLogAppend(string $jobId, array $entry): void {
+    if (!is_dir(AUTO_LOG_DIR)) @mkdir(AUTO_LOG_DIR, 0775, true);
+    $f    = AUTO_LOG_DIR . '/' . preg_replace('~[^a-z0-9_]~i', '', $jobId) . '.json';
+    $rows = [];
+    if (is_file($f)) {
+        $j = json_decode((string)@file_get_contents($f), true);
+        if (is_array($j)) $rows = $j;
+    }
+    $rows[] = $entry;
+    // فقط آخرین N اجرا بماند — وگرنه فایل بی‌نهایت رشد می‌کند
+    if (count($rows) > AUTO_LOG_KEEP) $rows = array_slice($rows, -AUTO_LOG_KEEP);
+    @file_put_contents($f, json_encode($rows, JSON_UNESCAPED_UNICODE));
+}
+
+/** خواندنِ لاگِ یک کار (تازه‌ترین اول) */
+function autoLogRead(string $jobId): array {
+    $f = AUTO_LOG_DIR . '/' . preg_replace('~[^a-z0-9_]~i', '', $jobId) . '.json';
+    if (!is_file($f)) return [];
+    $j = json_decode((string)@file_get_contents($f), true);
+    if (!is_array($j)) return [];
+    return array_reverse($j);
+}
+
+/** پاک کردنِ لاگِ یک کار */
+function autoLogClear(string $jobId): void {
+    $f = AUTO_LOG_DIR . '/' . preg_replace('~[^a-z0-9_]~i', '', $jobId) . '.json';
+    @unlink($f);
+}
+
+/** اجرای یک کار و ثبتِ نتیجه در لاگ.
+ *
+ *  عمداً از همان agentRun استفاده می‌کند تا رفتارِ کارِ زمان‌بندی‌شده
+ *  دقیقاً همان رفتارِ اجرای دستی باشد — اگر دو مسیرِ جدا می‌ساختیم،
+ *  کاربر چیزی را دستی تست می‌کرد و در اجرای خودکار نتیجهٔ دیگری می‌گرفت.
+ */
+function autoRunJob(array $cn, array $job): array {
+    $t0 = microtime(true);
+    $entry = ['t' => time(), 'mode' => $job['mode'], 'ok' => false,
+              'summary' => '', 'calls' => 0, 'changes' => 0, 'took' => 0.0, 'error' => ''];
+    try {
+        $res = agentRun($cn, $job['prompt'], $job['mode']);
+        $entry['ok']      = !empty($res['ok']);
+        $entry['summary'] = (string)($res['summary'] ?? '');
+        $entry['calls']   = (int)($res['calls'] ?? 0);
+        $entry['changes'] = is_array($res['changes'] ?? null) ? count($res['changes']) : 0;
+        $entry['applied'] = (int)($res['applied'] ?? 0);
+        $entry['detail']  = array_slice(is_array($res['changes'] ?? null) ? $res['changes'] : [], 0, 25);
+        if (empty($res['ok'])) $entry['error'] = (string)($res['error'] ?? 'خطای نامشخص');
+    } catch (Throwable $e) {
+        $entry['error'] = 'استثنا: ' . $e->getMessage();
+    }
+    $entry['took'] = round(microtime(true) - $t0, 2);
+    autoLogAppend($job['id'], $entry);
+    return $entry;
+}
+
+/** تیکِ زمان‌بند — از داخلِ کران صدا زده می‌شود.
+ *
+ *  در هر تیک حداکثر AUTO_MAX_PER_TICK کار اجرا می‌شود. دلیلش ساده است:
+ *  هر اجرای ایجنت می‌تواند ده‌ها ثانیه طول بکشد و هاستِ اشتراکی
+ *  max_execution_time دارد. اگر ۱۰ کار هم‌زمان سررسید شوند و همه را
+ *  یک‌جا بدویم، کران وسطِ کار کشته می‌شود و هیچ‌کدام نتیجه‌شان ثبت
+ *  نمی‌شود. با سقفِ هر تیک، بقیه در تیکِ بعدی می‌آیند.
+ */
+function autoTick(array $cn, int $now = 0): array {
+    if ($now <= 0) $now = time();
+    $out = ['ran' => 0, 'skipped' => 0, 'jobs' => []];
+    $jobs = autoLoadJobs();
+    if (!$jobs) return $out;
+
+    // قفلِ اختصاصی: نگذار دو تیکِ هم‌زمان یک کار را دوبار بدوانند
+    $lock = AUTO_LOCK_FILE;
+    if (is_file($lock)) {
+        $age = $now - (int)@filemtime($lock);
+        if ($age < AUTO_LOCK_TTL) { $out['locked'] = true; return $out; }
+        @unlink($lock);   // قفلِ مرده
+    }
+    @file_put_contents($lock, (string)$now);
+
+    try {
+        $ran = 0;
+        foreach ($jobs as $i => $job) {
+            if ($ran >= AUTO_MAX_PER_TICK) { $out['skipped']++; continue; }
+            if (!autoJobDue($job, $now)) continue;
+            $e = autoRunJob($cn, $job);
+            $ran++;
+            $jobs[$i]['last_run'] = $now;
+            $jobs[$i]['last_ok']  = $e['ok'];
+            $jobs[$i]['last_msg'] = $e['ok'] ? (string)$e['summary'] : (string)$e['error'];
+            $jobs[$i]['runs']     = (int)$job['runs'] + 1;
+            if (!$e['ok']) $jobs[$i]['fails'] = (int)$job['fails'] + 1;
+            $jobs[$i]['changes']  = (int)$job['changes'] + (int)$e['changes'];
+            $out['jobs'][] = ['id' => $job['id'], 'title' => $job['title'],
+                              'ok' => $e['ok'], 'changes' => $e['changes']];
+            $out['ran']++;
+        }
+        if ($out['ran'] > 0) autoSaveJobs($jobs);
+    } finally {
+        @unlink($lock);
+    }
+    return $out;
+}
+
+/* ── v10.05 (۱۹): اندپوینت‌های اتوماسیونِ ایجنتی ── */
+
+/** کاتالوگ: مدل‌های رایگانِ ابزاردار + کارهای پیشنهادی + دوره‌ها */
+if (isset($_GET['auto_catalog'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $iv = [];
+    foreach (autoIntervals() as $m => $lbl) $iv[] = ['m' => $m, 'label' => $lbl];
+    echo json_encode([
+        'ok'        => true,
+        'models'    => autoFreeToolModels(),
+        'providers' => autoProviderInfo(),
+        'tasks'     => autoTaskCatalog(),
+        'intervals' => $iv,
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** فهرستِ کارها با وضعیتِ زندهٔ هرکدام */
+if (isset($_GET['auto_jobs'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $now  = time();
+    $jobs = autoLoadJobs();
+    $out  = [];
+    foreach ($jobs as $j) {
+        $j['next_label'] = autoNextRunLabel($j, $now);
+        $j['due']        = autoJobDue($j, $now);
+        $j['log_count']  = count(autoLogRead($j['id']));
+        $out[] = $j;
+    }
+    echo json_encode(['ok' => true, 'jobs' => $out, 'now' => $now,
+        'max_per_tick' => AUTO_MAX_PER_TICK], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** افزودن یا ویرایشِ یک کار */
+if (isset($_GET['auto_save'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $id     = trim((string)($_POST['id'] ?? ''));
+    $title  = trim((string)($_POST['title'] ?? ''));
+    $prompt = trim((string)($_POST['prompt'] ?? ''));
+    $mode   = (string)($_POST['mode'] ?? 'dry');
+    $every  = (int)($_POST['every'] ?? 1440);
+    $model  = trim((string)($_POST['model'] ?? ''));
+    $enabled= !empty($_POST['enabled']) && $_POST['enabled'] !== '0';
+
+    if ($title === '')  { echo json_encode(['ok' => false, 'error' => 'عنوانِ کار خالی است'], JSON_UNESCAPED_UNICODE); exit; }
+    if ($prompt === '') { echo json_encode(['ok' => false, 'error' => 'دستورِ کار خالی است'], JSON_UNESCAPED_UNICODE); exit; }
+    if (!in_array($mode, ['sim', 'dry', 'live'], true)) $mode = 'dry';
+    if ($every < 5) $every = 5;
+
+    $jobs  = autoLoadJobs();
+    $found = false;
+    foreach ($jobs as $i => $j) {
+        if ($j['id'] === $id && $id !== '') {
+            $jobs[$i] = array_merge($j, ['title' => $title, 'prompt' => $prompt,
+                'mode' => $mode, 'every' => $every, 'enabled' => $enabled, 'model' => $model]);
+            $found = true;
+            break;
+        }
+    }
+    if (!$found) {
+        if (count($jobs) >= 40) { echo json_encode(['ok' => false, 'error' => 'سقفِ ۴۰ کار پر شده است'], JSON_UNESCAPED_UNICODE); exit; }
+        $id = autoNewId();
+        $jobs[] = autoNormalizeJob(['id' => $id, 'title' => $title, 'prompt' => $prompt,
+            'mode' => $mode, 'every' => $every, 'enabled' => $enabled, 'model' => $model,
+            'created' => time()]);
+    }
+    $ok = autoSaveJobs($jobs);
+    echo json_encode(['ok' => $ok, 'id' => $id, 'edited' => $found,
+        'error' => $ok ? '' : 'نوشتن روی دیسک ناموفق بود'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** حذفِ یک کار (لاگش هم پاک می‌شود) */
+if (isset($_GET['auto_delete'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $id   = trim((string)($_POST['id'] ?? $_GET['auto_delete']));
+    $jobs = autoLoadJobs();
+    $out  = [];
+    $hit  = false;
+    foreach ($jobs as $j) {
+        if ($j['id'] === $id) { $hit = true; continue; }
+        $out[] = $j;
+    }
+    if (!$hit) { echo json_encode(['ok' => false, 'error' => 'کار پیدا نشد'], JSON_UNESCAPED_UNICODE); exit; }
+    autoLogClear($id);
+    echo json_encode(['ok' => autoSaveJobs($out)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** روشن/خاموشِ سریعِ یک کار */
+if (isset($_GET['auto_toggle'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $id   = trim((string)($_POST['id'] ?? $_GET['auto_toggle']));
+    $jobs = autoLoadJobs();
+    $now  = null;
+    foreach ($jobs as $i => $j) {
+        if ($j['id'] === $id) { $jobs[$i]['enabled'] = empty($j['enabled']); $now = $jobs[$i]['enabled']; break; }
+    }
+    if ($now === null) { echo json_encode(['ok' => false, 'error' => 'کار پیدا نشد'], JSON_UNESCAPED_UNICODE); exit; }
+    echo json_encode(['ok' => autoSaveJobs($jobs), 'enabled' => $now], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** لاگِ اجراهای یک کار — برای مودالِ لاگ */
+if (isset($_GET['auto_log'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $id  = trim((string)$_GET['auto_log']);
+    $job = null;
+    foreach (autoLoadJobs() as $j) if ($j['id'] === $id) { $job = $j; break; }
+    if (!$job) { echo json_encode(['ok' => false, 'error' => 'کار پیدا نشد'], JSON_UNESCAPED_UNICODE); exit; }
+    $rows = autoLogRead($id);
+    $okN = 0; $chN = 0;
+    foreach ($rows as $r) { if (!empty($r['ok'])) $okN++; $chN += (int)($r['changes'] ?? 0); }
+    echo json_encode(['ok' => true, 'job' => $job, 'entries' => $rows,
+        'stat' => ['total' => count($rows), 'ok' => $okN, 'fail' => count($rows) - $okN,
+                   'changes' => $chN]], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** پاک‌کردنِ لاگِ یک کار */
+if (isset($_GET['auto_log_clear'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    autoLogClear(trim((string)($_POST['id'] ?? $_GET['auto_log_clear'])));
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** اجرای فوریِ یک کار — «همین حالا اجرا کن» بدون منتظرِ کران ماندن.
+ *
+ *  عمداً همان الگوی agent_start را دنبال می‌کند (قفلِ flock + بستنِ زودهنگامِ
+ *  اتصال) تا کاربر بتواند پیشرفتِ زنده را در همان پنلِ ایجنت ببیند و در
+ *  صورت نیاز با همان دکمهٔ «توقف» متوقفش کند. */
+if (isset($_GET['auto_run_now'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $id  = trim((string)($_POST['id'] ?? $_GET['auto_run_now']));
+    $job = null;
+    foreach (autoLoadJobs() as $j) if ($j['id'] === $id) { $job = $j; break; }
+    if (!$job) { echo json_encode(['ok' => false, 'error' => 'کار پیدا نشد'], JSON_UNESCAPED_UNICODE); exit; }
+
+    $lockFp = fopen(AGENT_LOCK_FILE, 'c');
+    if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
+        if ($lockFp) fclose($lockFp);
+        echo json_encode(['ok' => false, 'running' => true,
+            'error' => 'یک اجرای ایجنت همین حالا در جریان است'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    @set_time_limit(0); @ignore_user_abort(true);
+    agentClearStop();
+    $cn = loadConnections();
+
+    @unlink(AGENT_PROGRESS_FILE);
+    @unlink(AGENT_RESULT_FILE);
+    agentProgress(['running' => true, 'done' => false, 'mode' => $job['mode'],
+        'task' => $job['prompt'], 'started_at' => time(), 'step' => 0, 'calls' => 0,
+        'changes' => 0, 'phase' => 'start',
+        'log_add' => ['🗓 اجرای دستیِ کارِ زمان‌بندی‌شده: ' . $job['title']
+                      . ' — ' . agentModeLabel($job['mode'])]]);
+
+    $early = json_encode(['ok' => true, 'started' => true, 'mode' => $job['mode'],
+        'title' => $job['title']], JSON_UNESCAPED_UNICODE);
+    header('Connection: close');
+    header('Content-Length: ' . strlen($early));
+    echo $early;
+    @ob_flush(); @flush();
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+
+    register_shutdown_function(function () use ($lockFp) {
+        @flock($lockFp, LOCK_UN); @fclose($lockFp); @unlink(AGENT_LOCK_FILE);
+    });
+
+    $now  = time();
+    $jobs = autoLoadJobs();
+    foreach ($jobs as $i => $j) if ($j['id'] === $id) $jobs[$i]['last_run'] = $now;
+    autoSaveJobs($jobs);
+
+    $e = autoRunJob($cn, $job);
+    $e['manual'] = true;
+
+    $jobs = autoLoadJobs();
+    foreach ($jobs as $i => $j) {
+        if ($j['id'] !== $id) continue;
+        $jobs[$i]['last_run'] = $now;
+        $jobs[$i]['last_ok']  = $e['ok'];
+        $jobs[$i]['last_msg'] = $e['ok'] ? (string)$e['summary'] : (string)$e['error'];
+        $jobs[$i]['runs']     = (int)$j['runs'] + 1;
+        if (!$e['ok']) $jobs[$i]['fails'] = (int)$j['fails'] + 1;
+        $jobs[$i]['changes']  = (int)$j['changes'] + (int)$e['changes'];
+    }
+    autoSaveJobs($jobs);
+
+    agentClearStop();
+    agentProgress(['running' => false, 'done' => true, 'result_ok' => $e['ok'],
+        'error' => (string)$e['error'], 'calls' => (int)$e['calls'],
+        'changes' => (int)$e['changes'],
+        'log_add' => [$e['ok']
+            ? ('🏁 پایانِ «' . $job['title'] . '» در ' . $e['took'] . ' ثانیه — '
+               . aiFaNum((int)$e['changes']) . ' تغییر')
+            : ('❌ ' . $e['error'])]]);
+    exit;
+}
+
+/** تیکِ دستیِ زمان‌بند — برای آزمایش یا کرانِ اختصاصی */
+if (isset($_GET['auto_tick'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $r = autoTick(loadConnections());
+    echo json_encode(array_merge(['ok' => true], $r), JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['agent_tools'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $out = [];
@@ -16224,15 +16791,15 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'data-ai-panel=' . '"agent"') !== false);
     $add('10.04', 'دکمهٔ تب همان تابعِ سوییچِ بخشِ هوش مصنوعی را صدا می‌زند',
          strpos($selfSrc, "aiTab('agent')") !== false);
-    $add('10.04', 'هر شش تبِ بخشِ هوش مصنوعی پنلِ متناظر دارند',
+    $add('10.04', 'هر هفت تبِ بخشِ هوش مصنوعی پنلِ متناظر دارند',
          (function () use ($selfSrc) {
              // رشته‌ها با الحاق شکسته شده‌اند تا خودِ این آزمون در شمارش نیاید
              preg_match_all('/data-ai-tab=' . '"([a-z]+)"/', $selfSrc, $m);   $btns = $m[1];
              preg_match_all('/data-ai-panel=' . '"([a-z]+)"/', $selfSrc, $m); $pans = $m[1];
              sort($btns); sort($pans);
-             return count($btns) === 6
+             return count($btns) === 7
                  && $btns === $pans
-                 && $btns === ['agent', 'candidates', 'models', 'net', 'providers', 'test'];
+                 && $btns === ['agent', 'autopilot', 'candidates', 'models', 'net', 'providers', 'test'];
          })());
     $add('10.04', 'رابطِ ایجنت دیگر در تبِ ارسال تکرار نشده است',
          substr_count($selfSrc, 'id=' . '"agTask"')   === 1
@@ -16257,6 +16824,84 @@ if (isset($_GET['selftest'])) {
          })());
     $add('10.04', 'پیش‌فرضِ حالتِ اجرا هنوز غیرنوشتنی است',
          strpos($selfSrc, '<option value="dry" selected>') !== false);
+
+    /* ---------- v10.05 (۱۹): تبِ اتوماسیونِ زمان‌بندی‌شدهٔ ایجنت ---------- */
+    $add('10.05', 'تبِ اتوماسیون دکمه و پنلِ مستقل دارد',
+         strpos($selfSrc, 'data-ai-tab=' . '"autopilot"')   !== false
+      && strpos($selfSrc, 'data-ai-panel=' . '"autopilot"') !== false
+      && strpos($selfSrc, "aiTab('auto" . "pilot')")        !== false);
+    $add('10.05', 'پنلِ اتوماسیون پس از پنلِ ایجنت می‌آید',
+         (function () use ($selfSrc) {
+             $ag = strpos($selfSrc, 'data-ai-panel=' . '"agent"');
+             $ap = strpos($selfSrc, 'data-ai-panel=' . '"autopilot"');
+             return $ag !== false && $ap !== false && $ag < $ap;
+         })());
+    $add('10.05', 'هر نُه اندپوینتِ اتوماسیون تعریف شده‌اند',
+         (function () use ($selfSrc) {
+             foreach (['auto_catalog','auto_jobs','auto_save','auto_toggle','auto_delete',
+                       'auto_log','auto_log_clear','auto_tick','auto_run_now'] as $ep) {
+                 if (strpos($selfSrc, "_GET['" . $ep . "']") === false) return false;
+             }
+             return true;
+         })());
+    $add('10.05', 'موتورِ زمان‌بند و توابعِ کمکی‌اش موجودند',
+         (function () use ($selfSrc) {
+             foreach (['autoFreeToolModels','autoTaskCatalog','autoIntervals','autoLoadJobs',
+                       'autoNormalizeJob','autoSaveJobs','autoJobDue','autoNextRunLabel',
+                       'autoLogAppend','autoLogRead','autoLogClear','autoRunJob','autoTick'] as $fn) {
+                 if (strpos($selfSrc, 'function ' . $fn . '(') === false) return false;
+             }
+             return true;
+         })());
+    $add('10.05', 'زمان‌بند به چرخهٔ کران قلاب شده است',
+         (function () use ($selfSrc) {
+             $hook = strpos($selfSrc, 'autoTick($cn, $now)');
+             $night = strpos($selfSrc, 'v8.62: گزارش شبانه — اگر ساعتش رسیده');
+             return $hook !== false && $night !== false && $hook < $night;
+         })());
+    $add('10.05', 'فهرستِ مدل‌های رایگانِ ابزاردار چند ارائه‌دهنده را پوشش می‌دهد',
+         (function () use ($selfSrc) {
+             foreach (['groq','google','cerebras','openrouter','github','mistral'] as $pv) {
+                 if (strpos($selfSrc, "'" . $pv . "'") === false) return false;
+             }
+             return strpos($selfSrc, 'llama-3.3-70b-versatile') !== false
+                 && strpos($selfSrc, 'moonshotai/kimi-k2-instruct') !== false;
+         })());
+    $add('10.05', 'کاتالوگِ کارها هم موردِ سایت و هم عمومی دارد',
+         (function () use ($selfSrc) {
+             foreach (['price_sync','stock_guard','price_audit','title_cleanup',
+                       'gap_finder','stale_check'] as $k) {
+                 if (strpos($selfSrc, "'" . $k . "'") === false) return false;
+             }
+             foreach (['daily_digest','anomaly_watch','competitor_watch'] as $k) {
+                 if (strpos($selfSrc, "'" . $k . "'") === false) return false;
+             }
+             return true;
+         })());
+    $add('10.05', 'شناسه‌های فرمِ اتوماسیون کامل‌اند',
+         (function () use ($selfSrc) {
+             foreach (['apTitle','apPrompt','apEvery','apMode','apEnabled','apJobId',
+                       'apPresets','apJobList','apModelList','apTaskList','apCronState'] as $id) {
+                 if (strpos($selfSrc, 'id=' . '"' . $id . '"') === false) return false;
+             }
+             return true;
+         })());
+    $add('10.05', 'مودالِ لاگ و توابعِ پیرامونش تعریف شده‌اند',
+         strpos($selfSrc, 'function apShowLog')  !== false
+      && strpos($selfSrc, 'function apCloseLog') !== false
+      && strpos($selfSrc, 'function apClearLog') !== false
+      && strpos($selfSrc, 'function apRenderLog') !== false);
+    $add('10.05', 'باز شدنِ تب داده‌ها را می‌گیرد',
+         strpos($selfSrc, "tab==='auto" . "pilot'") !== false
+      && strpos($selfSrc, 'apLoadCatalog();') !== false
+      && strpos($selfSrc, 'apLoadJobs();')    !== false);
+    $add('10.05', 'کمینهٔ دورهٔ اجرا و سقفِ تعدادِ کار مهار شده‌اند',
+         strpos($selfSrc, 'AUTO_MAX_PER_TICK') !== false
+      && strpos($selfSrc, 'AUTO_LOCK_TTL')     !== false
+      && strpos($selfSrc, 'AUTO_LOG_KEEP')     !== false);
+    $add('10.05', 'اجرای زمان‌بندی‌شده قفلِ هم‌روندی دارد',
+         strpos($selfSrc, 'AUTO_LOCK_FILE') !== false
+      && strpos($selfSrc, "'locked'")       !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -28269,6 +28914,7 @@ body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn{z-index:10}
 <div class="ai-tab-btn" data-ai-tab="candidates" onclick="aiTab('candidates')">🏆 کاندید + مستر</div>
 <div class="ai-tab-btn" data-ai-tab="net" onclick="aiTab('net')">🌐 اتصال</div>
 <div class="ai-tab-btn" data-ai-tab="agent" onclick="aiTab('agent')">🤖 ایجنت</div>
+<div class="ai-tab-btn" data-ai-tab="autopilot" onclick="aiTab('autopilot')">🗓 اتوماسیون</div>
 </div>
 
 <!-- ══ تب ۱: ارائه‌دهنده‌ها ══ -->
@@ -28552,6 +29198,108 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="agLog" class="hidden" style="margin-top:8px;background:#0b1120;border:1px solid #1e293b;border-radius:8px;padding:9px;max-height:260px;overflow:auto;font-size:11px;line-height:1.9;direction:rtl"></div>
 <div id="agReport" class="hidden" style="margin-top:8px"></div>
 </div>
+</div>
+
+<div class="ai-tab-panel" data-ai-panel="autopilot">
+
+<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px">
+<div style="font-size:11px;color:#34d399;font-weight:700;margin-bottom:6px">🗓 اتوماسیونِ ایجنتی <span style="font-size:9px;background:#059669;color:#fff;padding:1px 6px;border-radius:5px">خودکار</span></div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+کارهای آماده تعریف کنید تا <b style="color:#94a3b8">خودشان در دوره‌های معین</b> اجرا شوند — بدون اینکه هر بار دستی دستور بدهید.
+هر کار یک دستورِ فارسی است که ایجنت با ابزارهایش انجام می‌دهد و نتیجه‌اش در لاگِ همان کار ثبت می‌شود.<br>
+⚠️ اجرا روی <b style="color:#94a3b8">همان کرانِ برنامه</b> سوار است؛ اگر کران فعال نباشد هیچ کاری اجرا نمی‌شود.
+</div>
+
+<div class="crow" style="align-items:center">
+<label>وضعیت کران:</label>
+<span id="apCronState" style="flex:1;color:#94a3b8;font-size:10.5px">در حالِ بررسی…</span>
+<button class="btn btn-gray" onclick="apTick()" style="flex:0;font-size:10px;padding:4px 8px">⚡ تیکِ دستی</button>
+</div>
+</div>
+
+<div class="ssum" id="apSum" style="margin-top:8px">
+<div class="si"><b id="apStatJobs" style="color:#34d399">۰</b><span>کار</span></div>
+<div class="si"><b id="apStatOn" style="color:#60a5fa">۰</b><span>فعال</span></div>
+<div class="si"><b id="apStatRuns" style="color:#c084fc">۰</b><span>اجرا</span></div>
+<div class="si"><b id="apStatChanges" style="color:#facc15">۰</b><span>تغییر</span></div>
+<div class="si"><b id="apStatFails" style="color:#f87171">۰</b><span>خطا</span></div>
+</div>
+
+<!-- ── فرمِ ساخت/ویرایشِ کار ── -->
+<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;margin-top:8px">
+<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+<span id="apFormTitle" style="font-size:11px;color:#34d399;font-weight:700;flex:1">➕ کارِ تازه</span>
+<button class="btn btn-gray hidden" id="apCancelBtn" onclick="apResetForm()" style="flex:0;font-size:10px;padding:3px 8px">✖ انصراف</button>
+</div>
+<input type="hidden" id="apJobId" value="">
+
+<div style="font-size:10.5px;color:#94a3b8;margin-bottom:4px">آمادهٔ استفاده — یکی را بزنید تا فرم پر شود:</div>
+<div id="apPresets" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px"></div>
+
+<div class="crow" style="align-items:center">
+<label>عنوان:</label>
+<input type="text" id="apTitle" style="flex:1;font-size:11px" placeholder="مثال: هم‌ترازیِ روزانهٔ قیمت">
+</div>
+
+<div style="margin-top:6px">
+<div style="font-size:10.5px;color:#94a3b8;margin-bottom:4px">دستورِ کار (فارسی):</div>
+<textarea id="apPrompt" rows="3" style="width:100%;background:#111c31;border:1px solid #334155;border-radius:8px;color:#e2e8f0;padding:8px;font-size:11.5px;font-family:inherit;line-height:1.8" placeholder="مثال: قیمتِ محصول‌ها را با اسنپ‌شاپ مقایسه کن و اختلاف‌های بیشتر از ۵ درصد را اصلاح کن"></textarea>
+</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
+<label>هر چند وقت:</label>
+<select id="apEvery" style="flex:1;font-size:11px"></select>
+</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
+<label>حالت اجرا:</label>
+<select id="apMode" style="flex:1;font-size:11px">
+<option value="sim">🧪 شبیه‌سازی — دادهٔ نمونه، بدون هیچ اتصالی</option>
+<option value="dry" selected>🔍 آزمایشی — می‌خواند ولی نمی‌نویسد</option>
+<option value="live">🔥 اجرای واقعی — قیمت و موجودی تغییر می‌کند</option>
+</select>
+</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
+<label>از همان ابتدا فعال:</label>
+<label class="sw" style="flex:0"><input type="checkbox" id="apEnabled" checked><span></span></label>
+<span style="flex:1;font-size:10px;color:#64748b">اگر خاموش باشد، کار ذخیره می‌شود ولی اجرا نمی‌شود</span>
+</div>
+
+<div class="cact" style="margin-top:8px">
+<button class="btn btn-green" onclick="apSaveJob()" style="flex:1;font-size:11px">💾 ذخیرهٔ کار</button>
+</div>
+</div>
+
+<!-- ── فهرستِ کارها ── -->
+<div style="margin-top:10px">
+<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+<span style="font-size:11px;color:#94a3b8;font-weight:700;flex:1">📋 کارهای تعریف‌شده</span>
+<button class="btn btn-gray" onclick="apLoadJobs()" style="flex:0;font-size:10px;padding:3px 8px">🔄 تازه‌سازی</button>
+</div>
+<div id="apJobList" style="font-size:11px;color:#64748b">در حالِ بارگذاری…</div>
+</div>
+
+<!-- ── مدل‌های رایگانِ ابزاردار ── -->
+<div style="margin-top:12px">
+<div style="font-size:11px;color:#60a5fa;font-weight:700;margin-bottom:4px">🆓 مدل‌های رایگانی که فراخوانیِ ابزار دارند</div>
+<div style="font-size:10px;color:#64748b;margin-bottom:6px;line-height:1.8">
+این مدل‌ها لایهٔ رایگانِ واقعی دارند، از <b style="color:#94a3b8">tools/tool_choice</b> پشتیبانی می‌کنند و اندپوینتشان سازگار با OpenAI است — یعنی همین ایجنت مستقیم رویشان کار می‌کند.
+سقف‌ها تقریبی‌اند و ارائه‌دهنده‌ها مرتب تغییرشان می‌دهند.
+</div>
+<div id="apModelList" style="font-size:11px;color:#64748b">—</div>
+</div>
+
+<!-- ── کارهایی که ایجنت می‌تواند بکند ── -->
+<div style="margin-top:12px">
+<div style="font-size:11px;color:#facc15;font-weight:700;margin-bottom:4px">🧰 ایجنت چه کارهایی می‌تواند بکند؟</div>
+<div style="font-size:10px;color:#64748b;margin-bottom:6px;line-height:1.8">
+دستهٔ اول مخصوصِ همین فروشگاه است و با ابزارهای داخلیِ برنامه کار می‌کند؛ دستهٔ دوم کارهای عمومی‌ای است که هر ایجنتِ ابزاردار می‌تواند انجام دهد.
+روی هرکدام بزنید تا به‌عنوان کارِ تازه در فرمِ بالا بنشیند.
+</div>
+<div id="apTaskList" style="font-size:11px;color:#64748b">—</div>
+</div>
+
 </div>
 
 </div>
@@ -37655,6 +38403,426 @@ function aiTab(tab){
     // اتصال» هیچ محتوایی دیده نمی‌شد (تب‌ها خالی). حالا برای تبِ انتخاب‌شده
     // صریحاً display:block می‌گذاریم تا حتی تب‌های بدون کلاس .active هم باز شوند.
     panels.forEach(p=>{p.style.display=(p.getAttribute('data-ai-panel')===tab)?'block':'none';});
+    // v10.05: تبِ اتوماسیون در نخستین باز شدن، کاتالوگ/کارها/وضعیتِ کران را می‌گیرد
+    if(tab==='autopilot'){ apLoadCatalog(); apLoadJobs(); apCronState(); }
+}
+
+/* ===== v10.05 (۱۹): اتوماسیونِ ایجنتی — کارهای زمان‌بندی‌شده ===== */
+
+let apCatalog = null;      // کاتالوگِ مدل‌ها/کارها/دوره‌ها (یک‌بار بارگذاری)
+let apJobsCache = [];      // آخرین فهرستِ کارها
+let apLogTimer = null;     // تایمرِ نوسازیِ مودالِ لاگ
+
+/** کاتالوگ را یک‌بار می‌گیرد و بخش‌های ثابتِ تب را می‌سازد */
+function apLoadCatalog(){
+    if(apCatalog){ apRenderCatalog(); return; }
+    fetch('?auto_catalog=1').then(r=>r.json()).then(d=>{
+        if(!d||!d.ok) return;
+        apCatalog = d;
+        apRenderCatalog();
+    }).catch(()=>{});
+}
+
+function apRenderCatalog(){
+    const d = apCatalog; if(!d) return;
+
+    // ── دوره‌ها ──
+    const sel = $('apEvery');
+    if(sel && !sel.options.length){
+        sel.innerHTML = d.intervals.map(function(i){
+            return '<option value="'+i.m+'"'+(i.m===1440?' selected':'')+'>'+esc(i.label)+'</option>';
+        }).join('');
+    }
+
+    // ── دکمه‌های آماده ──
+    const pre = $('apPresets');
+    if(pre){
+        pre.innerHTML = d.tasks.filter(function(t){return t.key!=='custom';}).map(function(t){
+            return '<button class="btn btn-gray" onclick="apUsePreset(\''+t.key+'\')" '
+                 + 'title="'+esc(t.desc)+'" style="flex:0;font-size:9.5px;padding:3px 7px">'
+                 + esc(t.title)+'</button>';
+        }).join('');
+    }
+
+    // ── مدل‌های رایگانِ ابزاردار ──
+    const ml = $('apModelList');
+    if(ml){
+        const byProv = {};
+        d.models.forEach(function(m){ (byProv[m.provider] = byProv[m.provider] || []).push(m); });
+        let h = '';
+        Object.keys(byProv).forEach(function(p){
+            const info = d.providers[p] || {name:p, key:'', card:false};
+            h += '<div style="margin-bottom:8px">'
+              +  '<div style="font-size:10.5px;color:#93c5fd;font-weight:700;margin-bottom:3px">'
+              +  esc(info.name)
+              +  ' <span style="font-size:9px;color:#64748b;font-weight:400">'+esc(info.key)+'</span>'
+              +  (info.card ? '' : ' <span style="font-size:8.5px;background:#065f46;color:#6ee7b7;padding:1px 5px;border-radius:4px">بدون کارت</span>')
+              +  '</div>';
+            byProv[p].forEach(function(m){
+                const stars = '★'.repeat(m.quality) + '☆'.repeat(5-m.quality);
+                h += '<div style="background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:6px 8px;margin-bottom:3px">'
+                  +  '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+                  +  '<b style="color:#e2e8f0;font-size:10.5px">'+esc(m.name)+'</b>'
+                  +  '<code style="font-size:9px;color:#64748b;background:#111c31;padding:1px 5px;border-radius:4px">'+esc(m.id)+'</code>'
+                  +  '<span style="font-size:9px;color:#fbbf24;margin-right:auto">'+stars+'</span>'
+                  +  '</div>'
+                  +  '<div style="font-size:9.5px;color:#64748b;margin-top:3px;line-height:1.7">'
+                  +  '📊 '+toFa(Math.round(m.context/1000))+'K حافظه · ⏱ '+esc(m.limit)
+                  +  '<br>💡 '+esc(m.note)+'</div>'
+                  +  '</div>';
+            });
+            h += '</div>';
+        });
+        ml.innerHTML = h;
+    }
+
+    // ── کارهای ممکن ──
+    const tl = $('apTaskList');
+    if(tl){
+        let h = '';
+        [['site','🏪 مخصوصِ این فروشگاه','#34d399'],
+         ['general','🌍 عمومی','#60a5fa']].forEach(function(g){
+            const rows = d.tasks.filter(function(t){return t.cat===g[0] && t.key!=='custom';});
+            if(!rows.length) return;
+            h += '<div style="font-size:10.5px;color:'+g[2]+';font-weight:700;margin:6px 0 3px">'+g[1]+'</div>';
+            rows.forEach(function(t){
+                h += '<div onclick="apUsePreset(\''+t.key+'\')" style="background:#0f172a;border:1px solid #1e293b;'
+                  +  'border-radius:6px;padding:6px 8px;margin-bottom:3px;cursor:pointer" '
+                  +  'onmouseover="this.style.borderColor=\'#475569\'" onmouseout="this.style.borderColor=\'#1e293b\'">'
+                  +  '<b style="color:#e2e8f0;font-size:10.5px">'+esc(t.title)+'</b>'
+                  +  '<div style="font-size:9.5px;color:#64748b;margin-top:2px;line-height:1.7">'+esc(t.desc)+'</div>'
+                  +  '</div>';
+            });
+        });
+        tl.innerHTML = h;
+    }
+}
+
+/** پر کردنِ فرم از روی یک کارِ آماده */
+function apUsePreset(key){
+    if(!apCatalog) return;
+    const t = apCatalog.tasks.find(function(x){return x.key===key;});
+    if(!t) return;
+    apResetForm();
+    $('apTitle').value  = t.title;
+    $('apPrompt').value = t.prompt;
+    const sel = $('apEvery');
+    if(sel) for(let i=0;i<sel.options.length;i++){
+        if(+sel.options[i].value === +t.every){ sel.selectedIndex = i; break; }
+    }
+    // کارهایی که فقط گزارش می‌دهند خطری ندارند ⇒ پیش‌فرضِ امن‌تر
+    const readOnly = /گزارش|ممیزی|پیدا کن|بررسی/.test(t.prompt) && !/اصلاح|صفر کن|تغییر بده/.test(t.prompt);
+    $('apMode').value = readOnly ? 'dry' : 'dry';
+    $('apTitle').focus();
+    showToast('«'+t.title+'» در فرم نشست — در صورت نیاز ویرایش و ذخیره کنید');
+}
+
+/** خالی کردنِ فرم و بازگشت به حالتِ «کارِ تازه» */
+function apResetForm(){
+    $('apJobId').value  = '';
+    $('apTitle').value  = '';
+    $('apPrompt').value = '';
+    $('apMode').value   = 'dry';
+    $('apEnabled').checked = true;
+    const sel = $('apEvery');
+    if(sel) for(let i=0;i<sel.options.length;i++){
+        if(+sel.options[i].value === 1440){ sel.selectedIndex = i; break; }
+    }
+    const ft = $('apFormTitle'); if(ft) ft.textContent = '➕ کارِ تازه';
+    const cb = $('apCancelBtn'); if(cb) cb.classList.add('hidden');
+}
+
+/** ذخیرهٔ کارِ تازه یا ویرایشِ کارِ موجود */
+function apSaveJob(){
+    const title  = ($('apTitle').value||'').trim();
+    const prompt = ($('apPrompt').value||'').trim();
+    if(!title)  { showToast('عنوانِ کار را بنویسید',true);  return; }
+    if(!prompt) { showToast('دستورِ کار را بنویسید',true); return; }
+
+    const fd = new FormData();
+    fd.append('id',      $('apJobId').value||'');
+    fd.append('title',   title);
+    fd.append('prompt',  prompt);
+    fd.append('mode',    $('apMode').value);
+    fd.append('every',   $('apEvery').value);
+    fd.append('enabled', $('apEnabled').checked ? '1' : '0');
+
+    fetch('?auto_save=1',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){ showToast((d&&d.error)||'ذخیره ناموفق بود',true); return; }
+        showToast(d.edited ? 'کار به‌روزرسانی شد' : 'کارِ تازه ساخته شد');
+        apResetForm();
+        apLoadJobs();
+    }).catch(()=>showToast('خطای شبکه',true));
+}
+
+/** بارگذاریِ فهرستِ کارها */
+function apLoadJobs(){
+    fetch('?auto_jobs=1').then(r=>r.json()).then(d=>{
+        if(!d||!d.ok) return;
+        apJobsCache = d.jobs||[];
+        apRenderJobs(d);
+    }).catch(()=>{});
+}
+
+function apRenderJobs(d){
+    const box = $('apJobList'); if(!box) return;
+    const jobs = d.jobs||[];
+
+    // ── شمارنده‌های بالا ──
+    let on=0, runs=0, ch=0, fails=0;
+    jobs.forEach(function(j){ if(j.enabled) on++; runs+=j.runs; ch+=j.changes; fails+=j.fails; });
+    if($('apStatJobs'))    $('apStatJobs').textContent    = toFa(jobs.length);
+    if($('apStatOn'))      $('apStatOn').textContent      = toFa(on);
+    if($('apStatRuns'))    $('apStatRuns').textContent    = toFa(runs);
+    if($('apStatChanges')) $('apStatChanges').textContent = toFa(ch);
+    if($('apStatFails'))   $('apStatFails').textContent   = toFa(fails);
+
+    if(!jobs.length){
+        box.innerHTML = '<div style="background:#0f172a;border:1px dashed #334155;border-radius:8px;padding:14px;'
+            + 'text-align:center;color:#64748b;font-size:10.5px;line-height:1.9">'
+            + 'هنوز کاری تعریف نشده است.<br>یکی از دکمه‌های آمادهٔ بالا را بزنید یا دستورِ خودتان را بنویسید.</div>';
+        return;
+    }
+
+    const modeLbl = {sim:'🧪 شبیه‌سازی', dry:'🔍 آزمایشی', live:'🔥 واقعی'};
+    const modeCol = {sim:'#94a3b8', dry:'#60a5fa', live:'#f87171'};
+
+    box.innerHTML = jobs.map(function(j){
+        const st = (j.last_ok===null||j.last_ok===undefined) ? {t:'—',c:'#64748b'}
+                 : (j.last_ok ? {t:'✅ موفق',c:'#34d399'} : {t:'❌ ناموفق',c:'#f87171'});
+        return '<div style="background:#0f172a;border:1px solid '+(j.enabled?'#334155':'#1e293b')
+          + ';border-radius:8px;padding:8px;margin-bottom:6px'+(j.enabled?'':';opacity:.6')+'">'
+          + '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:5px">'
+          +   '<b style="color:#e2e8f0;font-size:11.5px">'+esc(j.title)+'</b>'
+          +   '<span style="font-size:9px;color:'+modeCol[j.mode]+';background:#111c31;padding:1px 6px;border-radius:4px">'+modeLbl[j.mode]+'</span>'
+          +   (j.due&&j.enabled ? '<span style="font-size:9px;color:#facc15;background:#422006;padding:1px 6px;border-radius:4px">سررسید</span>' : '')
+          +   '<span style="margin-right:auto;font-size:9.5px;color:#64748b">🕒 '+esc(j.next_label)+'</span>'
+          + '</div>'
+          + '<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:5px;'
+          +   'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">💬 '+esc(j.prompt)+'</div>'
+          + '<div style="display:flex;gap:8px;flex-wrap:wrap;font-size:9.5px;color:#64748b;margin-bottom:6px">'
+          +   '<span>🔁 '+toFa(j.runs)+' اجرا</span>'
+          +   '<span>✏️ '+toFa(j.changes)+' تغییر</span>'
+          +   (j.fails ? '<span style="color:#f87171">⚠️ '+toFa(j.fails)+' خطا</span>' : '')
+          +   '<span style="color:'+st.c+'">'+st.t+'</span>'
+          + '</div>'
+          + (j.last_msg ? '<div style="font-size:9.5px;color:#94a3b8;background:#111c31;border-radius:5px;'
+          +   'padding:4px 6px;margin-bottom:6px;line-height:1.7">'+esc(j.last_msg.substring(0,180))+'</div>' : '')
+          + '<div class="cact" style="gap:4px">'
+          +   '<button class="btn '+(j.enabled?'btn-gray':'btn-green')+'" onclick="apToggle(\''+j.id+'\')" style="flex:0;font-size:9.5px;padding:3px 8px">'
+          +     (j.enabled?'⏸ خاموش':'▶ روشن')+'</button>'
+          +   '<button class="btn btn-purple" onclick="apRunNow(\''+j.id+'\')" style="flex:0;font-size:9.5px;padding:3px 8px">⚡ اجرای فوری</button>'
+          +   '<button class="btn btn-blue" onclick="apShowLog(\''+j.id+'\')" style="flex:0;font-size:9.5px;padding:3px 8px">📋 لاگ'
+          +     (j.log_count?' ('+toFa(j.log_count)+')':'')+'</button>'
+          +   '<button class="btn btn-gray" onclick="apEditJob(\''+j.id+'\')" style="flex:0;font-size:9.5px;padding:3px 8px">✏️</button>'
+          +   '<button class="btn btn-red" onclick="apDeleteJob(\''+j.id+'\')" style="flex:0;font-size:9.5px;padding:3px 8px">🗑</button>'
+          + '</div>'
+          + '</div>';
+    }).join('');
+}
+
+/** بردنِ یک کار به فرم برای ویرایش */
+function apEditJob(id){
+    const j = apJobsCache.find(function(x){return x.id===id;});
+    if(!j) return;
+    $('apJobId').value  = j.id;
+    $('apTitle').value  = j.title;
+    $('apPrompt').value = j.prompt;
+    $('apMode').value   = j.mode;
+    $('apEnabled').checked = !!j.enabled;
+    const sel = $('apEvery');
+    if(sel) for(let i=0;i<sel.options.length;i++){
+        if(+sel.options[i].value === +j.every){ sel.selectedIndex = i; break; }
+    }
+    const ft = $('apFormTitle'); if(ft) ft.textContent = '✏️ ویرایشِ «'+j.title+'»';
+    const cb = $('apCancelBtn'); if(cb) cb.classList.remove('hidden');
+    softScrollIntoView($('apTitle'),{behavior:'smooth',block:'center'});
+}
+
+/** روشن/خاموشِ سریع */
+function apToggle(id){
+    const fd = new FormData(); fd.append('id',id);
+    fetch('?auto_toggle=1',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){ showToast((d&&d.error)||'ناموفق',true); return; }
+        showToast(d.enabled?'کار فعال شد':'کار خاموش شد');
+        apLoadJobs();
+    }).catch(()=>showToast('خطای شبکه',true));
+}
+
+/** حذفِ کار */
+function apDeleteJob(id){
+    const j = apJobsCache.find(function(x){return x.id===id;});
+    if(!confirm('کارِ «'+(j?j.title:id)+'» و کلِ لاگش حذف شود؟')) return;
+    const fd = new FormData(); fd.append('id',id);
+    fetch('?auto_delete=1',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){ showToast((d&&d.error)||'حذف ناموفق',true); return; }
+        showToast('کار حذف شد');
+        apLoadJobs();
+    }).catch(()=>showToast('خطای شبکه',true));
+}
+
+/** اجرای فوریِ یک کار — بدون منتظرِ کران ماندن */
+function apRunNow(id){
+    const j = apJobsCache.find(function(x){return x.id===id;});
+    if(j && j.mode==='live' && !confirm('این کار در حالتِ «اجرای واقعی» است و قیمت/موجودی را تغییر می‌دهد. مطمئنید؟')) return;
+    const fd = new FormData(); fd.append('id',id);
+    fetch('?auto_run_now=1',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){ showToast((d&&d.error)||'اجرا ناموفق',true); return; }
+        showToast('اجرا شروع شد — پیشرفت در تبِ ایجنت دیده می‌شود');
+        // لاگ را باز نگه دار تا کاربر نتیجه را زنده ببیند
+        apShowLog(id, true);
+    }).catch(()=>showToast('خطای شبکه',true));
+}
+
+/** تیکِ دستیِ زمان‌بند */
+function apTick(){
+    showToast('در حالِ اجرای تیک…');
+    fetch('?auto_tick=1').then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){ showToast('تیک ناموفق',true); return; }
+        if(d.locked)    showToast('یک تیکِ دیگر در جریان است');
+        else if(!d.ran) showToast('هیچ کاری سررسید نشده بود');
+        else            showToast(toFa(d.ran)+' کار اجرا شد');
+        apLoadJobs();
+    }).catch(()=>showToast('خطای شبکه',true));
+}
+
+/* ===== مودالِ لاگِ هر کار ===== */
+
+/** باز کردنِ مودالِ لاگ. live=true یعنی تا پایانِ اجرا خودش نو شود. */
+function apShowLog(id, live){
+    let m = $('apLogModal');
+    if(!m){
+        m = document.createElement('div');
+        m.id = 'apLogModal';
+        m.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999;'
+                        + 'background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center';
+        document.body.appendChild(m);
+    }
+    m.style.display = 'flex';
+    m.dataset.jobId = id;
+    m.innerHTML = '<div style="background:#1e293b;border:1px solid #475569;border-radius:12px;padding:16px;'
+        + 'width:90%;max-width:720px;max-height:85vh;overflow-y:auto;color:#e2e8f0">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">'
+        +   '<span style="font-weight:700;font-size:14px;color:#60a5fa">📋 لاگِ اجراها</span>'
+        +   '<div style="display:flex;gap:4px">'
+        +     '<button class="btn btn-gray" onclick="apLoadLog()" style="font-size:10px;padding:4px 8px">🔄</button>'
+        +     '<button class="btn btn-red" onclick="apClearLog()" style="font-size:10px;padding:4px 8px">🗑 پاک‌کردن</button>'
+        +     '<button class="btn btn-gray" onclick="apCloseLog()" style="font-size:10px;padding:4px 8px">✕</button>'
+        +   '</div>'
+        + '</div>'
+        + '<div id="apLogBody" style="font-size:11px">در حالِ بارگذاری…</div>'
+        + '</div>';
+    apLoadLog();
+    if(apLogTimer){ clearInterval(apLogTimer); apLogTimer = null; }
+    if(live) apLogTimer = setInterval(apLoadLog, 3000);
+}
+
+function apCloseLog(){
+    const m = $('apLogModal');
+    if(m) m.style.display = 'none';
+    if(apLogTimer){ clearInterval(apLogTimer); apLogTimer = null; }
+    apLoadJobs();
+}
+
+function apClearLog(){
+    const m = $('apLogModal'); if(!m) return;
+    if(!confirm('کلِ لاگِ این کار پاک شود؟')) return;
+    const fd = new FormData(); fd.append('id', m.dataset.jobId);
+    fetch('?auto_log_clear=1',{method:'POST',body:fd}).then(()=>{
+        showToast('لاگ پاک شد');
+        apLoadLog();
+    }).catch(()=>{});
+}
+
+function apLoadLog(){
+    const m = $('apLogModal');
+    if(!m || m.style.display === 'none') return;
+    fetch('?auto_log='+encodeURIComponent(m.dataset.jobId)).then(r=>r.json()).then(d=>{
+        const b = $('apLogBody'); if(!b) return;
+        if(!d||!d.ok){ b.innerHTML = '<div style="color:#f87171">'+esc((d&&d.error)||'خطا')+'</div>'; return; }
+        apRenderLog(b, d);
+    }).catch(()=>{});
+}
+
+function apRenderLog(b, d){
+    const j = d.job, s = d.stat, rows = d.entries||[];
+    let h = '<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;margin-bottom:10px">'
+        + '<b style="color:#e2e8f0;font-size:12px">'+esc(j.title)+'</b>'
+        + '<div style="font-size:10px;color:#64748b;margin-top:4px;line-height:1.8">💬 '+esc(j.prompt)+'</div>'
+        + '<div style="display:flex;gap:10px;flex-wrap:wrap;font-size:10px;color:#94a3b8;margin-top:6px">'
+        +   '<span>📊 '+toFa(s.total)+' اجرا</span>'
+        +   '<span style="color:#34d399">✅ '+toFa(s.ok)+'</span>'
+        +   '<span style="color:#f87171">❌ '+toFa(s.fail)+'</span>'
+        +   '<span style="color:#facc15">✏️ '+toFa(s.changes)+' تغییر</span>'
+        + '</div></div>';
+
+    if(!rows.length){
+        h += '<div style="background:#0f172a;border:1px dashed #334155;border-radius:8px;padding:14px;'
+          +  'text-align:center;color:#64748b;font-size:10.5px">هنوز اجرایی ثبت نشده است.</div>';
+        b.innerHTML = h; return;
+    }
+
+    rows.forEach(function(e){
+        const dt = new Date(e.t*1000);
+        const when = toFa(dt.getHours())+':'+toFa(('0'+dt.getMinutes()).slice(-2))
+                   + ' — ' + toFa(dt.getDate())+'/'+toFa(dt.getMonth()+1);
+        h += '<div style="background:#0f172a;border:1px solid '+(e.ok?'#1e3a2f':'#3f1d1d')+';'
+          +  'border-radius:8px;padding:8px;margin-bottom:5px">'
+          +  '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px">'
+          +    '<span style="font-size:11px;color:'+(e.ok?'#34d399':'#f87171')+';font-weight:700">'
+          +      (e.ok?'✅ موفق':'❌ ناموفق')+'</span>'
+          +    (e.manual?'<span style="font-size:9px;color:#c084fc;background:#2e1065;padding:1px 5px;border-radius:4px">دستی</span>':'')
+          +    '<span style="font-size:9px;color:#64748b;background:#111c31;padding:1px 5px;border-radius:4px">'+esc(e.mode||'')+'</span>'
+          +    '<span style="margin-right:auto;font-size:9.5px;color:#64748b">🕒 '+when+'</span>'
+          +  '</div>'
+          +  '<div style="display:flex;gap:8px;flex-wrap:wrap;font-size:9.5px;color:#64748b;margin-bottom:4px">'
+          +    '<span>🔧 '+toFa(e.calls||0)+' فراخوانی</span>'
+          +    '<span>✏️ '+toFa(e.changes||0)+' تغییر</span>'
+          +    (e.applied?'<span style="color:#facc15">🔥 '+toFa(e.applied)+' واقعی</span>':'')
+          +    '<span>⏱ '+toFa(e.took||0)+' ثانیه</span>'
+          +  '</div>';
+        if(e.summary) h += '<div style="font-size:10.5px;color:#cbd5e1;line-height:1.9;background:#111c31;'
+                        +  'border-radius:5px;padding:5px 7px">'+esc(e.summary)+'</div>';
+        if(e.error)   h += '<div style="font-size:10px;color:#fca5a5;line-height:1.8;background:#1f1414;'
+                        +  'border-radius:5px;padding:5px 7px">⚠️ '+esc(e.error)+'</div>';
+        if(e.detail && e.detail.length){
+            h += '<div style="margin-top:5px;font-size:9.5px;color:#94a3b8">';
+            e.detail.forEach(function(c){
+                const bits = [];
+                if(c.price !== null && c.price !== undefined) bits.push('قیمت: '+toFa(c.price));
+                if(c.stock !== null && c.stock !== undefined) bits.push('موجودی: '+toFa(c.stock));
+                h += '<div style="padding:2px 0;border-top:1px solid #1e293b">'
+                  +  '• '+esc(String(c.target||''))+' #'+toFa(c.id||'')+' — '+esc(bits.join(' · '))
+                  +  (c.applied?' <span style="color:#34d399">اعمال شد</span>':' <span style="color:#64748b">شبیه‌سازی</span>')
+                  +  (c.reason?' <span style="color:#64748b">('+esc(c.reason)+')</span>':'')
+                  +  '</div>';
+            });
+            h += '</div>';
+        }
+        h += '</div>';
+    });
+    b.innerHTML = h;
+}
+
+/** وضعیتِ کران را نشان می‌دهد تا کاربر بفهمد کارها اصلاً اجرا می‌شوند یا نه */
+function apCronState(){
+    const el = $('apCronState'); if(!el) return;
+    fetch('?cron_last').then(r=>r.json()).then(d=>{
+        if(!d || !d.at){
+            el.innerHTML = '<span style="color:#f87171">⚠️ هنوز هیچ اجرای کرانی ثبت نشده — '
+                + 'تا کران فعال نشود کارها خودکار اجرا نمی‌شوند</span>';
+            return;
+        }
+        const ago = Math.max(0, Math.floor(Date.now()/1000) - d.at);
+        const txt = ago < 3600 ? (toFa(Math.floor(ago/60))+' دقیقه پیش')
+                  : ago < 86400 ? (toFa(Math.floor(ago/3600))+' ساعت پیش')
+                  : (toFa(Math.floor(ago/86400))+' روز پیش');
+        const stale = ago > 7200;
+        el.innerHTML = '<span style="color:'+(stale?'#facc15':'#34d399')+'">'
+            + (stale?'⚠️':'✅')+' آخرین اجرای کران: '+txt+'</span>';
+    }).catch(function(){
+        el.innerHTML = '<span style="color:#64748b">وضعیتِ کران نامشخص</span>';
+    });
 }
 function updateAiNetBadge(){
     const el=$('aiS'),m=($('aiNetMode')||{}).value||'direct';
