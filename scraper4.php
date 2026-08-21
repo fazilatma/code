@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.96';
+const APP_VERSION = '9.97';
 const APP_VERSION_DATE = '1405/05/30';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -14263,7 +14263,8 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, "\$meta = ['raw' => '', 'status' => 0, 'via' => '', 'aiText' => ''];") !== false);
     $add('9.96', 'خامِ دسته‌بندی در testDetails ذخیره می‌شود (هر دو مسیر)',
          substr_count($selfSrc, "'catRaw'=>(string)(\$catMeta['raw'] ?? '')") === 2
-      && substr_count($selfSrc, "'catStatus'=>(int)(\$catMeta['status'] ?? 0)") === 2);
+      /* v9.97: اندپوینتِ ai_test_one_cat هم همین کلید را در پاسخِ JSON دارد ⇒ ۳ */
+      && substr_count($selfSrc, "'catStatus'=>(int)(\$catMeta['status'] ?? 0)") === 3);
     $add('9.96', 'اندپوینتِ جزئیات کلیدهای catRaw/catStatus/catVia را می‌فرستد',
          strpos($selfSrc, "'catRaw'        => (string)(\$d['catRaw'] ?? ''),") !== false
       && strpos($selfSrc, "'catStatus'     => (int)(\$d['catStatus'] ?? 0),") !== false
@@ -14300,6 +14301,48 @@ if (isset($_GET['selftest'])) {
     $add('9.96', 'در موبایل سربرگ‌ها کوچک‌تر می‌شوند',
          strpos($selfSrc, '@media(max-width:620px){') !== false
       && strpos($selfSrc, '.mhead .mh-t{font-size:12.5px}') !== false);
+
+    /* ---------- v9.97: دکمهٔ «تست دوبارهٔ دسته‌بندی» در مودالِ جزئیات ---------- */
+    $add('9.97', 'اندپوینتِ POST ai_test_one_cat وجود دارد',
+         strpos($selfSrc, "if ((\$_POST['action'] ?? '') === 'ai_test_one_cat') {") !== false
+      && strpos($selfSrc, "\$catResponse = aiRunTestCategory(\$providers[\$pid], \$mid, \$testCat, \$catData, null, \$catMeta);") !== false);
+    $add('9.97', 'تستِ دسته‌بندی فقط کلیدهای دسته را به‌روز می‌کند نه کلِ جزئیات را',
+         (function () use ($selfSrc) {
+             /* شرطِ منفی را فقط روی بدنهٔ خودِ اندپوینت بسنج، نه کلِ فایل —
+                وگرنه متنِ همین آزمون هم به چشم می‌آید و همیشه رد می‌شود. */
+             /* strrpos: آخرین تطابق = خودِ اندپوینت (اولی متنِ همین آزمون است) */
+             $s = strrpos($selfSrc, "=== 'ai_test_one_cat') {");
+             if ($s === false) return false;
+             $e = strpos($selfSrc, "\nexit;\n}", $s);
+             if ($e === false) return false;
+             $blk = substr($selfSrc, $s, $e - $s);
+             return strpos($blk, "\$d = (array)(\$providers[\$pid]['models'][\$idx]['testDetails'] ?? []);") !== false
+                 && strpos($blk, "\$d['catRaw']") !== false
+                 && strpos($blk, "\$d['catLatencyMs']") !== false
+                 && strpos($blk, "\$d['catTestedAt']") !== false
+                 /* پاسخِ پیام تست و خامِ آن نباید بازنویسی شوند */
+                 && strpos($blk, "\$d['response'] ") === false
+                 && strpos($blk, "\$d['raw'] ") === false
+                 && strpos($blk, "\$d['latencyMs']") === false;
+         })());
+    $add('9.97', 'اگر توکنِ باسلام نباشد پیام روشن برمی‌گردد نه خطای مبهم',
+         strpos($selfSrc, "'error'=>'دسته‌های باسلام در دسترس نیست — توکنِ باسلام را در تنظیمات ← اتصالات وارد کنید.'") !== false);
+    $add('9.97', 'دستهٔ تست از فیلد یا از تستِ قبلیِ همان مدل خوانده می‌شود',
+         strpos($selfSrc, "if (\$testCat === '') \$testCat = trim((string)(\$providers[\$pid]['models'][\$idx]['testDetails']['testCat'] ?? ''));") !== false
+      && strpos($selfSrc, "if (\$testCat === '') \$testCat = 'ادو پرفیوم';") !== false);
+    $add('9.97', 'اندپوینتِ جزئیات، تأخیر و زمانِ تستِ دسته‌بندی را هم می‌فرستد',
+         strpos($selfSrc, "'catLatencyMs'  => (int)(\$d['catLatencyMs'] ?? 0),") !== false
+      && strpos($selfSrc, "'catTestedAt'   => (string)(\$d['catTestedAt'] ?? ''),") !== false);
+    $add('9.97', 'تابعِ JS آن aiRetestCatFromDetail است و به همان اندپوینت می‌زند',
+         strpos($selfSrc, 'function aiRetestCatFromDetail()') !== false
+      && strpos($selfSrc, "fd.append('action','ai_test_one_cat');") !== false);
+    $add('9.97', 'دکمهٔ بنفشِ «تست دوبارهٔ دسته‌بندی» کنارِ دکمهٔ تستِ کامل نشسته',
+         strpos($selfSrc, 'onclick="aiRetestCatFromDetail()"') !== false
+      && strpos($selfSrc, '🏷️ تست دوبارهٔ دسته‌بندی</button>') !== false
+      && strpos($selfSrc, 'onclick="aiRetestFromDetail()"') !== false);
+    $add('9.97', 'مودالِ جزئیات تأخیر و زمانِ جداگانهٔ دسته‌بندی را نشان می‌دهد',
+         strpos($selfSrc, "aiRowDetailRow('تأخیر دسته‌بندی',toFa(d.catLatencyMs)+' میلی‌ثانیه')") !== false
+      && strpos($selfSrc, "aiRowDetailRow('زمان تستِ دسته‌بندی (UTC)',d.catTestedAt,true)") !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -19327,6 +19370,9 @@ echo json_encode(['ok'=>true,
     'catStatus'     => (int)($d['catStatus'] ?? 0),
     'catVia'        => (string)($d['catVia'] ?? ''),
     'catAiText'     => (string)($d['catAiText'] ?? ''),
+    /* v9.97: تأخیر و زمانِ آخرین تستِ دسته‌بندی (وقتی جدا از پیام تست اجرا شده) */
+    'catLatencyMs'  => (int)($d['catLatencyMs'] ?? 0),
+    'catTestedAt'   => (string)($d['catTestedAt'] ?? ''),
     'itemError'     => $stItem ? (string)($stItem['error'] ?? '') : '',
     'itemLabel'     => $stItem ? (string)($stItem['label'] ?? '') : '',
 ], JSON_UNESCAPED_UNICODE);
@@ -19500,6 +19546,58 @@ aiProvidersSave($providers);
 echo json_encode(['ok'=>true, 'model'=>$mid, 'provider'=>$pid, 'available'=>$ok,
     'rateLimited'=>$rateLimited, 'latencyMs'=>$latency, 'code'=>$code, 'error'=>$err,
     'response'=>mb_substr($response,0,200), 'catResponse'=>(string)$catResponse], JSON_UNESCAPED_UNICODE);
+exit;
+}
+/* =====================================================================
+ *  v9.97: تستِ دوبارهٔ «فقط دسته‌بندی» برای یک مدل.
+ *
+ *  در مودالِ «جزئیات کاملِ تستِ مدل» دکمهٔ «🔁 تست دوبارهٔ همین مدل» هر دو
+ *  درخواست (پیام + دسته‌بندی) را از نو می‌زد. وقتی فقط می‌خواهید ببینید چرا
+ *  دسته‌بندی خطا می‌دهد، تکرارِ درخواستِ پیام هم وقت می‌برد و هم بی‌جهت
+ *  سهمیه/ریت‌لیمیت می‌سوزاند. این اندپوینت فقط درخواستِ دوم را می‌زند و
+ *  تنها کلیدهای دسته‌بندیِ testDetails را به‌روز می‌کند — پاسخِ پیام تست،
+ *  تأخیر، کد وضعیت و خامِ آن دست‌نخورده باقی می‌ماند.
+ *
+ *  توجه: available/tested مدل را عوض نمی‌کند، چون معیارِ «در دسترس بودن»
+ *  همان درخواستِ پیام است؛ شکستِ دسته‌بندی می‌تواند فقط به‌خاطر نبودِ
+ *  توکنِ باسلام یا بدفرمت‌بودنِ خروجیِ مدل باشد.
+ * ===================================================================== */
+if (($_POST['action'] ?? '') === 'ai_test_one_cat') {
+header('Content-Type: application/json; charset=UTF-8');
+$pid = trim($_POST['provider_id'] ?? '');
+$mid = trim($_POST['model_id'] ?? '');
+$providers = aiProvidersLoad();
+if (!isset($providers[$pid])) { echo json_encode(['ok'=>false,'error'=>'ارائه‌دهنده یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+$idx = -1;
+foreach ($providers[$pid]['models'] as $i => $m) { if (($m['id'] ?? '') === $mid) { $idx = $i; break; } }
+if ($idx < 0) { echo json_encode(['ok'=>false,'error'=>'مدل یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+$testCat = trim((string)($_POST['cat'] ?? ''));
+if ($testCat === '') $testCat = trim((string)($providers[$pid]['models'][$idx]['testDetails']['testCat'] ?? ''));
+if ($testCat === '') $testCat = 'ادو پرفیوم';
+$catData = aiTestCategoryData();
+if (!$catData) {
+    echo json_encode(['ok'=>false,'error'=>'دسته‌های باسلام در دسترس نیست — توکنِ باسلام را در تنظیمات ← اتصالات وارد کنید.'],JSON_UNESCAPED_UNICODE);
+    exit;
+}
+$t0 = microtime(true);
+$catMeta = null;
+$catResponse = aiRunTestCategory($providers[$pid], $mid, $testCat, $catData, null, $catMeta);
+$catLatency = (int)round((microtime(true) - $t0) * 1000);
+/* فقط کلیدهای دسته‌بندی را روی جزئیاتِ موجود بنویس — بقیه دست‌نخورده */
+$d = (array)($providers[$pid]['models'][$idx]['testDetails'] ?? []);
+$d['catResponse']  = (string)$catResponse;
+$d['testCat']      = $testCat;
+$d['catRaw']       = (string)($catMeta['raw'] ?? '');
+$d['catStatus']    = (int)($catMeta['status'] ?? 0);
+$d['catVia']       = (string)($catMeta['via'] ?? '');
+$d['catAiText']    = (string)($catMeta['aiText'] ?? '');
+$d['catLatencyMs'] = $catLatency;
+$d['catTestedAt']  = gmdate('c');
+$providers[$pid]['models'][$idx]['testDetails'] = $d;
+aiProvidersSave($providers);
+echo json_encode(['ok'=>true, 'provider'=>$pid, 'model'=>$mid, 'testCat'=>$testCat,
+    'catResponse'=>(string)$catResponse, 'catStatus'=>(int)($catMeta['status'] ?? 0),
+    'catVia'=>(string)($catMeta['via'] ?? ''), 'catLatencyMs'=>$catLatency], JSON_UNESCAPED_UNICODE);
 exit;
 }
 /* تست همهٔ مدل‌های فعال (SSE) — با سقف به‌ازای هر ارائه‌دهنده */
@@ -29715,6 +29813,20 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.97', t:'🏷️ دکمهٔ «تست دوبارهٔ دسته‌بندی» در مودالِ جزئیات', items:[
+    '🏷️ در مودالِ «جزئیات کاملِ تستِ مدل» تا حالا فقط یک دکمهٔ «🔁 تست دوبارهٔ',
+    '   همین مدل» بود که هر دو درخواست را از نو می‌زد. حالا کنارش دکمهٔ بنفشِ',
+    '   «🏷️ تست دوبارهٔ دسته‌بندی» هم هست که فقط درخواستِ دوم را می‌زند.',
+    '   پاسخِ پیام تست، تأخیر، کد وضعیت و پاسخِ خامِ آن دست‌نخورده می‌ماند —',
+    '   پس می‌توانید چند بار پشتِ‌هم دسته‌بندی را امتحان کنید بدون اینکه',
+    '   سهمیهٔ درخواستِ پیام هم بسوزد.',
+    '🧾 نتیجه هم دقیقاً مثل پاسخِ پیام نمایش داده می‌شود: پاسخ دسته‌بندی،',
+    '   پاسخِ خامِ JSON، کدِ HTTP، مسیرِ فراخوانی (via)، متنِ خامِ مدل پیش از',
+    '   تبدیل به شناسهٔ دسته، و حالا تأخیر و زمانِ خودِ همین تست به‌صورت جدا.',
+    '⚠️ اگر توکنِ باسلام تنظیم نباشد، به‌جای خطای مبهم پیامِ روشن می‌آید:',
+    '   فهرستِ دسته‌ها از باسلام خوانده می‌شود، پس اول باید در تنظیمات ←',
+    '   اتصالات توکن را وارد کنید.',
+  ]},
   {v:'9.96', t:'📐 سربرگِ فشردهٔ مودال‌ها + پاسخ خامِ درخواستِ دسته‌بندی', items:[
     '📐 مودالِ «نتایج زندهٔ تست همهٔ مدل‌ها» در موبایل سربرگِ بسیار بلندی داشت:',
     '   عنوان، متنِ زردِ «در حال تست: …»، دکمه‌ها، چهار شمارنده، سوییچِ «فقط',
@@ -34584,6 +34696,28 @@ function aiRetestFromDetail(){
     fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(()=>{aiOpenRowDetail(pid,mid);aiLoadProviders();})
       .catch(()=>{if(b)b.innerHTML='<div style="color:#fca5a5">✗ خطا در تست دوباره</div>';});
 }
+/* v9.97: «تست دوبارهٔ دسته‌بندی» — قرینهٔ aiRetestFromDetail ولی فقط درخواستِ
+   دومی که ستونِ «پاسخ دسته» را می‌سازد. پاسخِ پیام تست و خامِ آن دست نمی‌خورد،
+   پس می‌شود چند بار پشت‌سرهم زد بی‌آنکه سهمیه‌ی پیام هم مصرف شود. */
+function aiRetestCatFromDetail(){
+    const pid=aiRowDetailKey.provider, mid=aiRowDetailKey.model;
+    if(!pid||!mid)return;
+    const b=document.getElementById('aiRowDetailBody');
+    if(b)b.innerHTML='<div style="color:#a78bfa">⏳ در حال تستِ دوبارهٔ دسته‌بندی برای <b dir="ltr">'+esc(mid)+'</b> ...</div>';
+    const fd=new FormData();
+    fd.append('action','ai_test_one_cat');fd.append('provider_id',pid);fd.append('model_id',mid);
+    fd.append('cat',($('aiTestCat')&&$('aiTestCat').value.trim())||'');
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(d&&d.ok===false){
+            if(b)b.innerHTML='<div style="color:#fca5a5;line-height:1.9">✗ '+esc(d.error||'خطا در تستِ دسته‌بندی')
+              +'<div style="margin-top:8px"><button class="btn btn-gray" style="font-size:11px" onclick="aiOpenRowDetail('
+              +JSON.stringify(pid)+','+JSON.stringify(mid)+')">↩ بازگشت به جزئیات</button></div></div>';
+            return;
+        }
+        showToast('🏷️ دسته‌بندی دوباره تست شد',0);
+        aiOpenRowDetail(pid,mid);aiLoadProviders();
+    }).catch(()=>{if(b)b.innerHTML='<div style="color:#fca5a5">✗ خطا در تستِ دوبارهٔ دسته‌بندی</div>';});
+}
 function aiOpenRowDetail(pid,mid){
     if(!pid||!mid)return;
     aiRowDetailKey={provider:pid,model:mid};
@@ -34625,6 +34759,9 @@ function aiOpenRowDetail(pid,mid){
         if(d.maxOutputTokens)h+=aiRowDetailRow('سقف توکن خروجی',toFa(d.maxOutputTokens));
         if(d.testMsg)h+=aiRowDetailRow('پیام تست',d.testMsg);
         if(d.testCat)h+=aiRowDetailRow('عنوان دسته‌بندی',d.testCat);
+        /* v9.97: اگر دسته‌بندی جدا از پیام تست اجرا شده، زمان/تأخیرِ خودش را دارد */
+        if(d.catLatencyMs)h+=aiRowDetailRow('تأخیر دسته‌بندی',toFa(d.catLatencyMs)+' میلی‌ثانیه');
+        if(d.catTestedAt)h+=aiRowDetailRow('زمان تستِ دسته‌بندی (UTC)',d.catTestedAt,true);
         h+='</table>';
         const block=(title,txt,color)=>txt?('<div style="margin-top:10px"><div style="color:'+color+';font-weight:700;margin-bottom:4px">'+esc(title)+'</div>'
             +'<div style="background:#0b1425;border:1px solid #1e293b;border-radius:6px;padding:8px;white-space:pre-wrap;word-break:break-word;color:#e2e8f0;max-height:240px;overflow:auto">'+esc(txt)+'</div></div>'):'';
@@ -34654,8 +34791,10 @@ function aiOpenRowDetail(pid,mid){
         }else{
             h+='<div style="margin-top:10px;color:#64748b">🏷️ پاسخ خامِ دسته‌بندی ذخیره نشده — برای ذخیره‌شدن باید توکنِ باسلام تنظیم باشد (فهرست دسته‌ها از آنجا خوانده می‌شود) و مدل دوباره تست شود.</div>';
         }
+        /* v9.97: دو دکمهٔ تستِ دوباره — کاملِ مدل (پیام + دسته) و فقط دسته‌بندی */
         h+='<div class="cact" style="margin-top:12px">'
-          +'<button class="btn btn-cyan" style="flex:1;font-size:11px" onclick="aiRetestFromDetail()">🔁 تست دوبارهٔ همین مدل</button>'
+          +'<button class="btn btn-cyan" style="flex:1;font-size:11px" onclick="aiRetestFromDetail()" title="هر دو درخواست را از نو می‌زند: پیام تست و سپس دسته‌بندی">🔁 تست دوبارهٔ همین مدل</button>'
+          +'<button class="btn btn-purple" style="flex:1;font-size:11px" onclick="aiRetestCatFromDetail()" title="فقط درخواستِ دسته‌بندی را دوباره می‌زند — پاسخِ پیام تست و خامِ آن دست‌نخورده می‌ماند">🏷️ تست دوبارهٔ دسته‌بندی</button>'
           +'<button class="btn btn-gray" style="flex:0;font-size:11px" onclick="aiCloseRowDetail()">بستن</button></div>';
         b.innerHTML=h;
       }).catch(()=>{const b=document.getElementById('aiRowDetailBody');if(b)b.innerHTML='<div style="color:#fca5a5">✗ خطا در ارتباط</div>';});
