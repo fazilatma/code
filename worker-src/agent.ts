@@ -15,15 +15,26 @@ export type AgentRun={id:string;promptId:string;name:string;prompt:string;provid
 
 export type AgentOutcome={outcome:'complete'|'continue'|'ignored';delaySeconds?:number};
 
-// ─── Free tool-calling models (Cloudflare Workers AI free tier unless noted) ──
-export type AgentToolModel={id:string;name:string;vendor:string;free:boolean;note:string};
+// ─── Tool-calling models (each entry is verified to support function/tool calling) ──
+export type AgentToolModel={id:string;name:string;vendor:string;free:boolean;toolCalling:boolean;note:string};
 export const AGENT_TOOL_MODELS:AgentToolModel[]=[
-  {id:'@cf/meta/llama-3.1-8b-instruct',name:'Llama 3.1 8B Instruct',vendor:'Meta — Workers AI',free:true,note:'رایگان روی Workers AI؛ فراخوانی ابزار (tool use) را پشتیبانی می‌کند و برای اتوماسیون سبک مناسب است.'},
-  {id:'@cf/qwen/qwen2.5-coder-32b-instruct',name:'Qwen2.5 Coder 32B Instruct',vendor:'Alibaba — Workers AI',free:true,note:'رایگان روی Workers AI؛ قدرتمند در فراخوانی ابزار و کارهای چندمرحله‌ای.'},
-  {id:'@cf/meta/llama-3.3-70b-instruct-fp8-fast',name:'Llama 3.3 70B Instruct (FP8 Fast)',vendor:'Meta — Workers AI',free:true,note:'رایگان روی Workers AI؛ دقت بالا برای تحلیل‌های پیچیده.'},
-  {id:'@cf/meta/llama-4-scout-17b-16e-instruct',name:'Llama 4 Scout 17B',vendor:'Meta — Workers AI',free:true,note:'نسل جدید Llama با پشتیبانی از فراخوانی ابزار.'},
-  {id:'@cf/meta/llama-4-maverick-17b-128e-instruct',name:'Llama 4 Maverick 17B',vendor:'Meta — Workers AI',free:true,note:'نسل جدید Llama؛ قوی‌ترین مدل رایگانِ لیست برای tool use.'},
-  {id:'*configured',name:'هر مدل فراخوانی‌ابزارِ ارائه‌دهنده‌های تنظیم‌شده',vendor:'OpenAI-compatible (GPT، DeepSeek، Qwen و…)',free:false,note:'از فهرست مدل‌های ارائه‌دهنده‌های ذخیره‌شده انتخاب کنید؛ فقط مدل‌هایی که tool calling پشتیبانی می‌کنند.'}
+  {id:'@cf/meta/llama-3.1-8b-instruct',name:'Llama 3.1 8B Instruct',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'سبک و رایگان؛ برای اتوماسیون‌های ساده و پاسخ‌های سریع مناسب است.'},
+  {id:'@cf/qwen/qwen2.5-coder-32b-instruct',name:'Qwen2.5 Coder 32B Instruct',vendor:'Alibaba — Workers AI',free:true,toolCalling:true,note:'قدرتمند در فراخوانی ابزار و کارهای چندمرحله‌ای.'},
+  {id:'@cf/meta/llama-3.3-70b-instruct-fp8-fast',name:'Llama 3.3 70B Instruct (FP8 Fast)',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'دقت بالا برای تحلیل‌های پیچیده.'},
+  {id:'@cf/meta/llama-4-scout-17b-16e-instruct',name:'Llama 4 Scout 17B',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'نسل جدید Llama با پشتیبانی از فراخوانی ابزار.'},
+  {id:'@cf/meta/llama-4-maverick-17b-128e-instruct',name:'Llama 4 Maverick 17B',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'قوی‌ترین مدل رایگانِ این فهرست برای tool use.'},
+  {id:'*configured',name:'مدل‌های ارائه‌دهنده‌های تنظیم‌شده',vendor:'OpenAI-compatible (GPT، DeepSeek، Qwen و…)',free:false,toolCalling:false,note:'از مدل‌های ذخیره‌شدهٔ خودتان انتخاب کنید؛ مدل باید فراخوانی ابزار (tool calling) پشتیبانی کند.'}
+];
+
+// ─── Ready-made prompt templates (quick start) ────────────────────────────────
+export type AgentPromptTemplate={id:string;name:string;description:string;prompt:string;tools:string[];maxSteps:number};
+export const AGENT_PROMPT_TEMPLATES:AgentPromptTemplate[]=[
+  {id:'site-status',name:'🩺 وضعیت سایت',description:'وضعیت کلی، کارهای فعال و اتصال‌ها',maxSteps:4,prompt:'وضعیت کلی سایت را بررسی کن: تعداد پروفایل‌ها، کارهای در حال اجرا و در صف، وضعیت اتصال ووکامرس و باسلام و وضعیت صف سرور را گزارش بده. اعداد را فارسی بنویس.',tools:['site_status','jobs_report']},
+  {id:'morning-report',name:'🌅 گزارش صبحگاهی',description:'گزارش کامل: کارها + آمار هر دو فروشگاه + دسته‌بندی‌ها',maxSteps:8,prompt:'یک گزارش صبحگاهی کامل آماده کن: کارهای اخیر با وضعیت و خطاها، آمار محصولات ووکامرس و باسلام (تعداد و وضعیت‌ها) و ۵ مورد پرکاربرد از دسته‌بندی‌های یادگرفته‌شده را فهرست کن.',tools:['jobs_report','destination_overview','categories_learned','profile_stats']},
+  {id:'basalam-dup',name:'🧬 تکراری‌های باسلام',description:'گروه‌های همنام و نسخه‌های اضافی باسلام',maxSteps:5,prompt:'تکراری‌های محصولات باسلام را بررسی کن: محصولات همنام (با حذف پسوند کد) را پیدا کن و تعداد گروه‌های همنام و نسخه‌های تکراری را بگو؛ ۵ گروه اول را با قیمت و تاریخ فهرست کن.',tools:['duplicates_report']},
+  {id:'woo-dup',name:'🧬 تکراری‌های ووکامرس',description:'گروه‌های همنام و نسخه‌های اضافی ووکامرس',maxSteps:5,prompt:'تکراری‌های محصولات ووکامرس را بررسی کن: محصولات همنام (با حذف پسوند کد) را پیدا کن و ۵ گروه اول را با جزئیات قیمت و تاریخ فهرست کن.',tools:['duplicates_report']},
+  {id:'products-search',name:'🔎 جست‌وجوی محصولات',description:'جست‌وجو در محصولات ذخیره‌شدهٔ سایت',maxSteps:4,prompt:'در محصولات ذخیره‌شدهٔ بانک، محصولاتی را که در عنوانشان «عطر» دارند جست‌وجو کن و ۱۰ مورد اول را با قیمت و پروفایل منبع فهرست کن.',tools:['products_search']},
+  {id:'customer-support',name:'💬 پاسخ‌های خودکار',description:'گزارش آخرین پاسخ‌های خودکار مشتریان',maxSteps:4,prompt:'آخرین پاسخ‌های خودکار ثبت‌شده برای مشتریان را گزارش بده؛ هر مورد شامل متن ورودی، پاسخ و زمان باشد. اگر پاسخی ثبت نشده، بگو.',tools:['autoreply_report']}
 ];
 
 // ─── Tool definitions shown to the user and fed to the model as JSON schema ──
@@ -128,12 +139,19 @@ async function drainInline(message:{task:'agent';runId:string}){for(let i=0;i<5;
 export function publicAgentRun(run:AgentRun|null):any{
   if(!run)return null;
   const logs=run.logs.slice(-200),messages=run.messages.slice(-30);
-  return{id:run.id,promptId:run.promptId,name:run.name,prompt:run.prompt,provider:run.providerId,model:run.model,tools:run.tools,maxSteps:run.maxSteps,status:run.status,phase:run.phase,steps:run.steps,result:run.result||null,error:run.error,createdAt:run.createdAt,updatedAt:run.updatedAt,startedAt:run.startedAt,finishedAt:run.finishedAt,logs,messages};
+  const progress=run.maxSteps>0?Math.min(100,Math.round(run.steps/run.maxSteps*100)):0;
+  return{id:run.id,promptId:run.promptId,name:run.name,prompt:run.prompt,provider:run.providerId,model:run.model,tools:run.tools,maxSteps:run.maxSteps,status:run.status,phase:run.phase,steps:run.steps,progress,result:run.result||null,error:run.error,createdAt:run.createdAt,updatedAt:run.updatedAt,startedAt:run.startedAt,finishedAt:run.finishedAt,logs,messages};
 }
 
 // ─── Model resolution ─────────────────────────────────────────────────────────
+/**
+ * Resolves the requested model to a provider that actually lists it. Preference order:
+ * explicit `modelKey` (providerId::model) → explicit providerId+model → the first
+ * configured provider whose model list contains one of the curated tool-calling ids.
+ */
 async function resolveAgentModel(modelKey:string,providerId:string,model:string):Promise<{provider:any;model:string;resolvedKey:string}|null>{
   const providers=(await aiProviders()).filter(provider=>provider.enabled!==false);
+  const curatedIds=new Set(AGENT_TOOL_MODELS.filter(m=>m.id!=='*configured').map(m=>m.id));
   const wanted=String(modelKey||'').trim();
   if(wanted&&wanted!=='*configured'){
     const[pid,...parts]=wanted.split('::'),wantedModel=parts.length?parts.join('::'):wanted;
@@ -143,14 +161,27 @@ async function resolveAgentModel(modelKey:string,providerId:string,model:string)
   if(providerId&&model){
     const provider=providers.find(item=>item.id===providerId);
     if(provider&&provider.models.includes(model))return{provider,model,resolvedKey:`${provider.id}::${model}`};
-    if(provider&&AGENT_TOOL_MODELS.some(candidate=>candidate.id===model))return{provider,model,resolvedKey:`${provider.id}::${model}`};
+    if(provider&&curatedIds.has(model))return{provider,model,resolvedKey:`${provider.id}::${model}`};
   }
   for(const provider of providers){
     for(const modelId of provider.models){
-      if(AGENT_TOOL_MODELS.some(candidate=>candidate.id===modelId))return{provider,model:modelId,resolvedKey:`${provider.id}::${modelId}`};
+      if(curatedIds.has(modelId))return{provider,model:modelId,resolvedKey:`${provider.id}::${modelId}`};
     }
   }
   return null;
+}
+/** Human-readable guidance used when no usable tool-calling model is configured yet. */
+export async function agentModelSetupHint():Promise<string>{
+  const providers=(await aiProviders()).filter(provider=>provider.enabled!==false);
+  const curated=new Set(AGENT_TOOL_MODELS.filter(m=>m.id!=='*configured').map(m=>m.id));
+  const ready=providers.filter(provider=>(provider.models||[]).some(model=>curated.has(model)));
+  const usable=providers.filter(provider=>(provider.models||[]).some(model=>!curated.has(model)));
+  const lines:string[]=['مدل دارای فراخوانی ابزار پیدا نشد.'];
+  if(!providers.length)lines.push('هنوز هیچ ارائه‌دهنده‌ای ذخیره نشده است.');
+  if(ready.length)lines.push(`ارائه‌دهنده‌های آماده برای مدل‌های رایگان: ${ready.map(p=>p.name).join('، ')}.`);
+  if(!ready.length)lines.push('برای مدل‌های رایگان، اتصال Cloudflare AI را تنظیم کنید: در «ارائه‌دهنده‌ها» یک ارائه‌دهنده با Base URL به شکل https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai بسازید و یکی از مدل‌های فهرست رایگان را به مدل‌هایش اضافه کنید.');
+  if(usable.length)lines.push(`ارائه‌دهنده‌های دیگر تنظیم‌شده (باید فراخوانی ابزار را پشتیبانی کنند): ${usable.map(p=>p.name).join('، ')}.`);
+  return lines.join(' ');
 }
 
 // ─── Step execution ───────────────────────────────────────────────────────────
@@ -201,7 +232,7 @@ async function executeAgentStep(run:AgentRun):Promise<AgentOutcome>{
     run.logs.push({at:now(),step:0,type:'info',text:`شروع اجرا با مدل ${run.model||'خودکار'}؛ ابزارهای فعال: ${run.tools.join('، ')||'—'}`});
   }
   const resolved=await resolveAgentModel('',run.providerId,run.model);
-  if(!resolved){run.status='failed';run.phase='failed';run.finishedAt=now();run.error='مدل دارای فراخوانی ابزار پیدا نشد؛ یک مدل از لیست مدل‌های ایجنتیک انتخاب و ذخیره کنید.';run.logs.push({at:now(),step:run.steps,type:'error',text:run.error});await writeRun(run);return{outcome:'complete'}}
+  if(!resolved){run.status='failed';run.phase='failed';run.finishedAt=now();run.error=await agentModelSetupHint();run.logs.push({at:now(),step:run.steps,type:'error',text:run.error});await writeRun(run);return{outcome:'complete'}}
   const chatMessages=run.messages.filter(m=>m.content!==null||(m.tool_calls?.length??0)>0).map(m=>({role:m.role,content:m.content??'',...(m.tool_calls?.length?{tool_calls:m.tool_calls}:{})}));
   const turn=await aiAgentCall(resolved.provider,resolved.model,chatMessages,agentToolSchemas(run.tools),undefined,undefined,run.maxSteps<=3?1200:2000);
   const toolCalls=turn.toolCalls||[];
@@ -242,7 +273,8 @@ export async function startAgentRun(input:any,waitUntil?:(promise:Promise<unknow
   const maxSteps=Math.max(1,Math.min(12,Number(input?.maxSteps)||promptRow?.maxSteps||6));
   const modelKey=String(input?.modelKey||promptRow?.modelKey||'');
   const resolved=await resolveAgentModel(modelKey,String(input?.providerId||''),String(input?.model||''));
-  const timestamp=now(),id=crypto.randomUUID(),run:AgentRun={id,promptId:String(input?.promptId||promptRow?.id||''),name:String(input?.name||promptRow?.name||'اجرای دستی'),prompt,providerId:resolved?.provider.id||String(input?.providerId||''),model:resolved?.model||String(input?.model||''),tools:toolsFinal,maxSteps,status:'queued',phase:'starting',messages:[],logs:[],steps:0,result:null,stopRequested:false,attempts:0,error:null,createdAt:timestamp,updatedAt:timestamp,startedAt:null,finishedAt:null};
+  if(!resolved)throw new Error(await agentModelSetupHint());
+  const timestamp=now(),id=crypto.randomUUID(),run:AgentRun={id,promptId:String(input?.promptId||promptRow?.id||''),name:String(input?.name||promptRow?.name||'اجرای دستی'),prompt,providerId:resolved.provider.id,model:resolved.model,tools:toolsFinal,maxSteps,status:'queued',phase:'starting',messages:[],logs:[],steps:0,result:null,stopRequested:false,attempts:0,error:null,createdAt:timestamp,updatedAt:timestamp,startedAt:null,finishedAt:null};
   await saveAgentRun(toRow(run));await setState(pointerKey,id);
   try{await enqueue({task:'agent',runId:id},waitUntil)}catch(error){run.status='failed';run.error=error instanceof Error?error.message:String(error);await writeRun(run)}
   return{run:publicAgentRun(run),existing:false};

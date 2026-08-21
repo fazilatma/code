@@ -17,6 +17,20 @@ test('the free tool-calling model catalog is present, unique and clearly tagged'
   assert.equal(ids.size,agent.AGENT_TOOL_MODELS.length,'model ids are unique');
   assert.ok(agent.AGENT_TOOL_MODELS.every(m=>m.name&&m.note),'every model has a name and a Persian note');
   assert.ok(agent.AGENT_TOOL_MODELS.filter(m=>m.free).length>=5,'the free Cloudflare models are listed');
+  assert.ok(agent.AGENT_TOOL_MODELS.filter(m=>m.id!=='*configured').every(m=>m.toolCalling===true),'every curated model carries the toolCalling tag');
+  assert.equal(agent.AGENT_TOOL_MODELS.find(m=>m.id==='*configured').toolCalling,false,'the configured-provider option is explicitly non-tagged');
+});
+
+test('ready-made prompt templates exist, are unique and reference valid tools',()=>{
+  assert.ok(agent.AGENT_PROMPT_TEMPLATES.length>=4,'at least four quick-start templates');
+  const ids=new Set(agent.AGENT_PROMPT_TEMPLATES.map(t=>t.id));
+  assert.equal(ids.size,agent.AGENT_PROMPT_TEMPLATES.length,'template ids are unique');
+  const toolIds=new Set(agent.AGENT_TOOLS.map(t=>t.id));
+  for(const template of agent.AGENT_PROMPT_TEMPLATES){
+    assert.ok(template.name&&template.prompt&&template.prompt.length>20,'every template has a name and a real prompt');
+    assert.ok(template.tools.length>0&&template.tools.every(tool=>toolIds.has(tool)),'template tools are valid');
+    assert.ok(template.maxSteps>=2&&template.maxSteps<=12,'template maxSteps is in range');
+  }
 });
 
 test('the tool catalog covers every requested site domain with unique ids',()=>{
