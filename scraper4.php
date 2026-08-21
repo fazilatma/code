@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.99';
+const APP_VERSION = '10.00';
 const APP_VERSION_DATE = '1405/05/30';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2504,21 +2504,32 @@ function aiVoteRecord(string $task, string $input, string $winner, array $candid
     return $v;
 }
 
-/** دسته‌بندی یک کاندید خاص (برای آزمون چند-کاندیدی) */
-function aiCandidateCategory(array $p, string $model, string $title, array $cats,
-                              array $leafCats, string $catList, ?array $net = null): array {
-    if ($net === null) $net = aiNetCfg();
-    $t0 = microtime(true);
+/* =====================================================================
+ *  v10.00 (۱۴ب): سه هلپرِ مشترکِ «تستِ دسته‌بندی».
+ *
+ *  چرا جدا شدند: تا این لحظه فقط مسیرِ *ترتیبی* (aiCandidateCategory) وجود
+ *  داشت و در تستِ گروهی، دسته‌بندیِ هر مدل یکی‌یکی و بعد از تستِ پیام زده
+ *  می‌شد. حالا که ترتیب برعکس شده (اول دسته‌بندی، بعد پیام) می‌خواهیم
+ *  دسته‌بندی هم مثل پیام با curl_multi موازی برود؛ برای این کار باید
+ *  «ساختِ بدنهٔ درخواست» و «تفسیرِ پاسخ» از «فرستادنِ درخواست» جدا شوند.
+ *
+ *    aiCatPayload()  → بدنهٔ درخواست (پرامپتِ یکسان برای هر دو مسیر)
+ *    aiCatParse()    → تفسیرِ پاسخِ خام به آرایهٔ نتیجه
+ *    aiCatSummary()  → خلاصهٔ کوتاهِ فارسی برای ستونِ «پاسخ دسته»
+ *    aiCatMeta()     → متادیتای خام برای مودالِ «جزئیات کامل»
+ * ===================================================================== */
+function aiCatPayload(string $title, string $catList): array {
     $prompt = "You are a product categorization assistant for a Persian (Farsi) e-commerce platform (BaSalam).\n"
             . "Given this product title: \"" . $title . "\"\n\n"
             . "Select the BEST category ID from this list:\n" . $catList . "\n\n"
             . "Return ONLY the category ID number. Do not return any text, explanation, or name. Just the numeric ID.";
-    $payload = ['messages' => [
+    return ['messages' => [
         ['role' => 'system', 'content' => 'You are a product categorization assistant. Return ONLY the numeric category ID.'],
         ['role' => 'user', 'content' => $prompt],
     ], 'temperature' => 0.1, 'max_tokens' => 20];
-    $r = aiProviderCall($p, $model, $payload, $net);
-    $lat = (int)round((microtime(true) - $t0) * 1000);
+}
+
+function aiCatParse(array $r, string $title, array $cats, string $model, int $lat): array {
     /* v9.96: بدنهٔ خامِ پاسخِ سرویس برای درخواستِ دسته‌بندی هم برگردانده می‌شود
        تا در مودالِ «جزئیات کاملِ تستِ مدل» کنارِ پاسخ خامِ پیام دیده شود. */
     $rawCat = mb_substr((string)($r['raw'] ?? ''), 0, 4000);
@@ -2540,6 +2551,30 @@ function aiCandidateCategory(array $p, string $model, string $title, array $cats
     return ['ok' => $valid, 'category_id' => $id, 'category_name' => $name,
             'ai_text' => $text, 'error' => '', 'latency' => $lat, 'model' => $model,
             'raw' => $rawCat, 'status' => (int)$r['code'], 'via' => (string)($r['via'] ?? '')];
+}
+
+function aiCatSummary(array $res): string {
+    if (!empty($res['ok']) && !empty($res['category_name'])) return $res['category_name'] . ' (#' . $res['category_id'] . ')';
+    if (!empty($res['category_id'])) return '#' . $res['category_id'];
+    if (!empty($res['error'])) return 'خطا: ' . mb_substr((string)$res['error'], 0, 80);
+    if (!empty($res['ai_text'])) return mb_substr(trim((string)$res['ai_text']), 0, 80);
+    return '';
+}
+
+function aiCatMeta(array $res): array {
+    return ['raw'    => (string)($res['raw'] ?? ''),
+            'status' => (int)($res['status'] ?? 0),
+            'via'    => (string)($res['via'] ?? ''),
+            'aiText' => mb_substr((string)($res['ai_text'] ?? ''), 0, 300)];
+}
+
+/** دسته‌بندی یک کاندید خاص (برای آزمون چند-کاندیدی) */
+function aiCandidateCategory(array $p, string $model, string $title, array $cats,
+                              array $leafCats, string $catList, ?array $net = null): array {
+    if ($net === null) $net = aiNetCfg();
+    $t0 = microtime(true);
+    $r = aiProviderCall($p, $model, aiCatPayload($title, $catList), $net);
+    return aiCatParse($r, $title, $cats, $model, (int)round((microtime(true) - $t0) * 1000));
 }
 
 /** پاسخ خودکار یک کاندید خاص (برای آزمون چند-کاندیدی) */
@@ -14601,9 +14636,11 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'pretty=JSON.stringify(JSON.parse(txt),null,2);') !== false
       && strpos($selfSrc, '🧾 پاسخ خامِ درخواستِ پیام تست (JSON)') !== false
       && strpos($selfSrc, 'function aiRetestFromDetail()') !== false);
+    /* v10.00 (۱۴الف): هر دو مودال یک پله بالا رفتند (10080/10090) تا از
+       دکمه‌های شناورِ ☰ و ⛶ (10050) بالاتر باشند. */
     $add('9.95', 'مودالِ جزئیات بالاتر از مودالِ تست می‌نشیند',
-         strpos($selfSrc, "m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.8);z-index:10060") !== false
-      && 10060 > 10000);
+         strpos($selfSrc, "m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.8);z-index:10090") !== false
+      && 10090 > 10080);
 
     /* ---------- v9.96 (۱۰ب): پاسخ خامِ درخواستِ دسته‌بندی ---------- */
     $add('9.96', 'aiCandidateCategory پاسخ خام و وضعیتِ HTTP را برمی‌گرداند',
@@ -14920,6 +14957,99 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, "'proxy'") !== false
       && strpos($selfSrc, "'bogus'") !== false
       && strpos($selfSrc, "'badmodel'") !== false);
+
+    /* ==================================================================
+     *  v10.00 (۱۴): مودالِ تست بالای دکمه‌های شناور + ترتیبِ دسته‌بندی/پیام
+     * ================================================================== */
+
+    /* ---------- ۱۴الف: z-index ---------- */
+    $add('10.00', 'مودالِ نتایجِ زندهٔ تست بالاتر از دکمه‌های ☰ و ⛶ می‌نشیند',
+         strpos($selfSrc, "m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.72);z-index:10080") !== false
+      && 10080 > 10050);
+    $add('10.00', 'مودالِ جزئیاتِ تکی هنوز بالای مودالِ نتایجِ زنده است',
+         strpos($selfSrc, "background:rgba(2,6,23,.8);z-index:10090") !== false
+      && 10090 > 10080 && 10090 > 10050);
+    $add('10.00', 'وقتی مودال باز است، دکمه‌های شناور با کلاسِ modal-open پایین می‌روند',
+         strpos($selfSrc, 'body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn' . '{z-index:10}') !== false
+      && strpos($selfSrc, "document.body.classList.add('modal-" . "open');") !== false
+      && strpos($selfSrc, "document.body.classList.remove('modal-" . "open');") !== false);
+    $add('10.00', 'کلاس modal-open دقیقاً موقعِ باز/بسته شدنِ همان مودال ست/پاک می‌شود',
+         substr_count($selfSrc, "document.body.classList.add('modal-" . "open')") === 1
+      && substr_count($selfSrc, "document.body.classList.remove('modal-" . "open')") === 1);
+
+    /* ---------- ۱۴ب: اول دسته‌بندی، بعد پیام ---------- */
+    $add('10.00', 'هلپرهای مشترکِ دسته‌بندی جدا شده‌اند (payload/parse/summary/meta)',
+         strpos($selfSrc, 'function aiCatPayload(string $title, string $catList): array') !== false
+      && strpos($selfSrc, 'function aiCatParse(array $r, string $title, array $cats, string $model, int $lat): array') !== false
+      && strpos($selfSrc, 'function aiCatSummary(array $res): string') !== false
+      && strpos($selfSrc, 'function aiCatMeta(array $res): array') !== false);
+    $add('10.00', 'aiCandidateCategory و aiRunTestCategory از همان هلپرها استفاده می‌کنند',
+         strpos($selfSrc, '$r = aiProviderCall($p, $model, aiCatPayload($title, $catList), $net);') !== false
+      && strpos($selfSrc, 'return aiCatParse($r, $title, $cats, $model, (int)round((microtime(true) - $t0) * 1000));') !== false
+      && strpos($selfSrc, '$meta = aiCatMeta($res);') !== false
+      && strpos($selfSrc, 'return aiCatSummary($res);') !== false);
+    $add('10.00', 'aiCatPayload پرامپتِ دسته‌بندی و سقفِ توکنِ کوچک را می‌سازد',
+         (function () {
+             $pl = aiCatPayload('ادو پرفیوم مردانه', "11: عطر\n22: کیف");
+             return ($pl['max_tokens'] ?? 0) === 20
+                 && count($pl['messages']) === 2
+                 && $pl['messages'][0]['role'] === 'system'
+                 && strpos($pl['messages'][1]['content'], 'ادو پرفیوم مردانه') !== false
+                 && strpos($pl['messages'][1]['content'], '11: عطر') !== false;
+         })());
+    $add('10.00', 'aiCatParse پاسخِ موفق را به شناسه و نامِ دسته تبدیل می‌کند',
+         (function () {
+             $cats = [['id' => 11, 'name' => 'عطر', 'level' => 2], ['id' => 22, 'name' => 'کیف', 'level' => 2]];
+             $r = ['code' => 200, 'raw' => '{"x":1}', 'via' => 'direct',
+                   'body' => ['choices' => [['message' => ['content' => '11']]]]];
+             $res = aiCatParse($r, 'ادو پرفیوم', $cats, 'm1', 55);
+             return !empty($res['ok']) && (int)$res['category_id'] === 11
+                 && $res['category_name'] === 'عطر' && (int)$res['latency'] === 55;
+         })());
+    $add('10.00', 'aiCatSummary خلاصهٔ فارسیِ درست می‌سازد (موفق/خطا/خام)',
+         aiCatSummary(['ok' => true, 'category_id' => 11, 'category_name' => 'عطر']) === 'عطر (#11)'
+      && aiCatSummary(['ok' => false, 'category_id' => 22]) === '#22'
+      && strpos(aiCatSummary(['ok' => false, 'category_id' => 0, 'error' => 'HTTP 429']), 'خطا: ') === 0
+      && aiCatSummary(['ok' => false, 'category_id' => 0, 'error' => '', 'ai_text' => '']) === '');
+    $add('10.00', 'aiCatMeta خام/وضعیت/مسیر/متنِ مدل را بیرون می‌دهد',
+         (function () {
+             $m = aiCatMeta(['raw' => '{"a":1}', 'status' => 429, 'via' => 'doh', 'ai_text' => 'سلام']);
+             return $m['raw'] === '{"a":1}' && $m['status'] === 429
+                 && $m['via'] === 'doh' && $m['aiText'] === 'سلام';
+         })());
+    $add('10.00', 'در تستِ گروهی، درخواستِ دسته‌بندی *قبل از* درخواستِ پیام فرستاده می‌شود',
+         (function () use ($selfSrc) {
+             $fn = strpos($selfSrc, 'function aiRunTestBackground(int $per');
+             if ($fn === false) return false;
+             $cat = strpos($selfSrc, '$catByKey = [];', $fn);
+             $msg = strpos($selfSrc, "\$jobs[] = ['p'=>\$p, 'mid'=>\$q['mid'], 'pid'=>\$q['pid'], 'payload'=>\$payloadBase", $fn);
+             return $cat !== false && $msg !== false && $cat < $msg;
+         })());
+    $add('10.00', 'دسته‌بندی هم مثل پیام موازی (curl_multi) می‌رود نه تک‌تک',
+         strpos($selfSrc, 'foreach (aiParallelCalls($catJobs, $net, $concurrency) as $cr) {') !== false
+      && strpos($selfSrc, "\$catJobs[] = ['p'=>\$p, 'mid'=>\$q['mid'], 'pid'=>\$q['pid'], 'payload'=>\$catPayload") !== false);
+    $add('10.00', 'نتیجهٔ دسته‌بندی از حافظه خوانده می‌شود و درخواستِ دوباره نمی‌رود',
+         strpos($selfSrc, "\$cc = \$catByKey[\$pid . '|' . \$mid] ?? null;") !== false
+      /* رشته را تکه‌تکه می‌سازیم تا متنِ خودِ این آزمون به چشم نیاید */
+      && strpos($selfSrc, 'if ($ok && $doCat)' . ' $catResponse = aiRunTest' . 'Category(') === false);
+    $add('10.00', 'اگر دسته‌بندی خطای قطعی داد (اعتبار/مدلِ نامعتبر/۴۰۱/۴۰۴) پیام زده نمی‌شود',
+         strpos($selfSrc, "if (\$cj['billing'] !== '' || \$cj['kind'] === 'badmodel' || in_array(\$ccode, [401, 404], true)) {") !== false
+      && strpos($selfSrc, "'msgSkipped'=>!empty(\$r['msg_skipped'])") !== false);
+    $add('10.00', 'تأخیر و زمانِ خودِ درخواستِ دسته‌بندی در جزئیات ذخیره می‌شود',
+         strpos($selfSrc, "'catLatencyMs'=>\$catLatency, 'catTestedAt'=>\$cc ? gmdate('c') : ''") !== false);
+    $add('10.00', 'در تستِ تکی هم اول دسته‌بندی و بعد پیام اجرا می‌شود',
+         (function () use ($selfSrc) {
+             $s0 = strpos($selfSrc, "if ((\$_POST['action'] ?? '') === 'ai_test_one') {");
+             if ($s0 === false) return false;
+             $e0 = strpos($selfSrc, "\nexit;\n}", $s0);
+             $blk = substr($selfSrc, $s0, $e0 - $s0);
+             $cat = strpos($blk, '$catResponse = aiRunTestCategory(');
+             $msg = strpos($blk, '$r = aiProviderCall($providers[$pid], $mid, $payload, aiNetCfg());');
+             return $cat !== false && $msg !== false && $cat < $msg;
+         })());
+    $add('10.00', 'نوارِ وضعیتِ مودال مرحلهٔ جاری (دسته‌بندی/پیام) را نشان می‌دهد',
+         strpos($selfSrc, "' · تستِ دسته‌بندی'") !== false
+      && strpos($selfSrc, "' · تستِ پیام'") !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -20099,6 +20229,11 @@ $testMsg = trim((string)($_POST['msg'] ?? 'سلام'));
 if ($testMsg === '') $testMsg = 'سلام';
 $testCat = trim((string)($_POST['cat'] ?? 'ادو پرفیوم'));
 if ($testCat === '') $testCat = 'ادو پرفیوم';
+/* v10.00 (۱۴ب): اول دسته‌بندی، بعد پیام — دقیقاً مثل مسیرِ تستِ گروهی.
+   دلیل: ریت‌لیمیتِ دقیقه‌ایِ سرویس‌های رایگان معمولاً درخواستِ *دوم* را رد
+   می‌کند و دسته‌بندی برای کاربر مهم‌تر از پیامِ نمونه است. */
+$catMeta = null;
+$catResponse = aiRunTestCategory($providers[$pid], $mid, $testCat, aiTestCategoryData(), null, $catMeta);
 $t0 = microtime(true);
 // v9.57: سقف توکن برای تست بالاتر رفت (۳۰۰) — مدل‌های reasoning (مثل gpt-oss،
 // qwen، nemotron و...) اول روی «فکر کردن» توکن می‌سوزانند و اگر سقف پایین باشد
@@ -20112,8 +20247,6 @@ $body = $r['body'] ?? [];
 $response = $ok ? aiExtractAnswer($body) : '';   // v9.54: استخراج مقاوم · v9.94: بدون بلوکِ فکر
 $err = $ok ? '' : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
 $rateLimited = in_array($code, [429], true);
-$catMeta = null;
-$catResponse = aiRunTestCategory($providers[$pid], $mid, $testCat, aiTestCategoryData(), null, $catMeta);
 $details = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300), 'response'=>mb_substr((string)$response,0,300),
             'catResponse'=>(string)$catResponse, 'testMsg'=>$testMsg, 'testCat'=>$testCat,
             'latencyMs'=>$latency, 'testedAt'=>gmdate('c'),
@@ -20292,16 +20425,9 @@ function aiRunTestCategory(array $p, string $mid, string $testCat, ?array $catDa
     $meta = ['raw' => '', 'status' => 0, 'via' => '', 'aiText' => ''];
     if ($testCat === '' || !$catData) return null;
     if ($net === null) $net = aiNetCfg();
-    $res = aiCandidateCategory($p, $mid, $testCat, $catData['cats'], $catData['leafCats'], $catData['catList'], $net);
-    $meta = ['raw'    => (string)($res['raw'] ?? ''),
-             'status' => (int)($res['status'] ?? 0),
-             'via'    => (string)($res['via'] ?? ''),
-             'aiText' => mb_substr((string)($res['ai_text'] ?? ''), 0, 300)];
-    if (!empty($res['ok']) && !empty($res['category_name'])) return $res['category_name'] . ' (#' . $res['category_id'] . ')';
-    if (!empty($res['category_id'])) return '#' . $res['category_id'];
-    if (!empty($res['error'])) return 'خطا: ' . mb_substr((string)$res['error'], 0, 80);
-    if (!empty($res['ai_text'])) return mb_substr(trim((string)$res['ai_text']), 0, 80);
-    return '';
+    $res  = aiCandidateCategory($p, $mid, $testCat, $catData['cats'], $catData['leafCats'], $catData['catList'], $net);
+    $meta = aiCatMeta($res);
+    return aiCatSummary($res);
 }
 
 /* =====================================================================
@@ -20560,6 +20686,9 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
     foreach ($queue as $q) { $rounds[(int)$q['round']][] = $q; }
     ksort($rounds);
     $payloadBase = ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>300];
+    /* v10.00 (۱۴ب): بدنهٔ ثابتِ درخواستِ دسته‌بندی یک بار ساخته می‌شود؛ برای
+       همهٔ مدل‌ها یکسان است (فقط نامِ مدل داخلِ aiParallelCalls عوض می‌شود). */
+    $catPayload = ($doCat && $catData && $testCat !== '') ? aiCatPayload($testCat, (string)$catData['catList']) : null;
 
     foreach ($rounds as $rIdx => $items) {
         clearstatcache(true, AI_TEST_STOP_FILE);
@@ -20568,16 +20697,76 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
         $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1), 'model'=>count($items) . ' مدل هم‌زمان'];
         aiTestStateSave($st);
 
-        // ساخت دستهٔ درخواست‌های این دور
-        $jobs = [];
+        $t0r = microtime(true);
+
+        /* =============================================================
+         *  v10.00 (۱۴ب): گامِ ۱ — «تستِ دسته‌بندی» *اول* زده می‌شود.
+         *
+         *  چرا ترتیب عوض شد: هر مدل در این برنامه دو درخواست می‌گیرد
+         *  (پیامِ نمونه + دسته‌بندیِ یک عنوانِ نمونه). خیلی از سرویس‌های
+         *  رایگان ریت‌لیمیتِ *دقیقه‌ای* دارند؛ وقتی دو درخواست پشت‌سرهم
+         *  می‌رود، معمولاً درخواستِ دوم است که ۴۲۹ می‌خورد. تا نسخهٔ ۹٫۹۹
+         *  درخواستِ دوم «دسته‌بندی» بود و دقیقاً همان چیزی که برای کاربر
+         *  مهم‌تر است (توانایی مدل در انتخابِ دستهٔ باسلام) قربانی می‌شد.
+         *  حالا دسته‌بندی اول می‌رود و اگر سهمیه ته کشید، پیام رد می‌شود
+         *  که کم‌اهمیت‌تر است.
+         *
+         *  ضمناً دسته‌بندی هم مثل پیام با curl_multi موازی می‌رود (قبلاً
+         *  تک‌تک و ترتیبی بود) ⇒ کلِ تست سریع‌تر تمام می‌شود.
+         * ============================================================= */
+        $catByKey = [];
+        if ($catPayload !== null) {
+            $catJobs = [];
+            foreach ($items as $q) {
+                $p = $providers[$q['pid']] ?? null;
+                if (!$p) continue;
+                $catJobs[] = ['p'=>$p, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'payload'=>$catPayload, 't0'=>microtime(true)];
+            }
+            if ($catJobs) {
+                $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1) . ' · تستِ دسته‌بندی', 'model'=>count($catJobs) . ' مدل هم‌زمان'];
+                aiTestStateSave($st);
+                foreach (aiParallelCalls($catJobs, $net, $concurrency) as $cr) {
+                    $crr    = (array)$cr['r'];
+                    $clat   = (int)round((microtime(true) - (float)$cr['t0']) * 1000);
+                    $parsed = aiCatParse($crr, $testCat, (array)$catData['cats'], (string)$cr['mid'], $clat);
+                    $catByKey[(string)$cr['pid'] . '|' . (string)$cr['mid']] =
+                        ['res'=>$parsed, 'r'=>$crr, 'summary'=>aiCatSummary($parsed), 'meta'=>aiCatMeta($parsed), 'lat'=>$clat];
+                }
+            }
+            if (aiTestStopRequested()) { $st['stopped'] = true; break; }
+            /* فاصلهٔ کوتاه بین دو موجِ درخواست به همان ارائه‌دهنده‌ها */
+            if ($catByKey && $delayMs > 0) usleep($delayMs * 1000);
+        }
+
+        /* گامِ ۲ — تستِ پیام. اگر دسته‌بندی با خطای «قطعی» برگشته (اعتبار/
+           اشتراک، مدلِ ناموجود، کلیدِ نامعتبر) درخواستِ دوم هم دقیقاً همان
+           خطا را می‌گیرد ⇒ زده نمی‌شود و همان نتیجه بازاستفاده می‌شود.
+           این هم سهمیه را نمی‌سوزاند و هم تست را کوتاه‌تر می‌کند. */
+        $jobs = []; $reuse = [];
+        $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1) . ' · تستِ پیام', 'model'=>count($items) . ' مدل هم‌زمان'];
         foreach ($items as $q) {
             $p = $providers[$q['pid']] ?? null;
             if (!$p) continue;
+            $cc = $catByKey[(string)$q['pid'] . '|' . (string)$q['mid']] ?? null;
+            if ($cc !== null) {
+                $cj    = aiTestJudge((array)$cc['r'], (string)$q['mid'], (string)$q['pid']);
+                $ccode = (int)($cc['r']['code'] ?? 0);
+                if ($cj['billing'] !== '' || $cj['kind'] === 'badmodel' || in_array($ccode, [401, 404], true)) {
+                    $reuse[] = ['p'=>$p, 'mid'=>$q['mid'], 'pid'=>$q['pid'],
+                                't0'=>microtime(true) - ((int)$cc['lat']) / 1000,
+                                'r'=>((array)$cc['r']) + ['msg_skipped'=>true]];
+                    continue;
+                }
+            }
             $jobs[] = ['p'=>$p, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'payload'=>$payloadBase, 't0'=>microtime(true)];
         }
-        if (!$jobs) continue;
-        $t0r = microtime(true);
-        $results = aiParallelCalls($jobs, $net, $concurrency);
+        $results = [];
+        if ($jobs) {
+            aiTestStateSave($st);
+            $results = array_values(aiParallelCalls($jobs, $net, $concurrency));
+        }
+        foreach ($reuse as $ru) $results[] = $ru;
+        if (!$results) continue;
         if (aiTestStopRequested()) { $st['stopped'] = true; break; }
         $roundMs = (int)round((microtime(true) - $t0r) * 1000);
 
@@ -20612,9 +20801,12 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
             if ($j['kind'] === 'bogus') $st['bogus']++;
             if ($j['kind'] === 'badmodel') $st['badmodel']++;
 
-            // v9.52: تستِ دسته‌بندی برای همین مدل — فقط وقتی مدل واقعاً جواب داده
-            $catMeta = null; $catResponse = null;
-            if ($ok && $doCat) $catResponse = aiRunTestCategory($p, $mid, $testCat, $catData, $net, $catMeta);
+            /* v10.00 (۱۴ب): نتیجهٔ دسته‌بندی همین دور از پیش (قبل از پیام)
+               گرفته شده؛ اینجا فقط خوانده می‌شود و درخواستِ تازه‌ای نمی‌رود. */
+            $cc = $catByKey[$pid . '|' . $mid] ?? null;
+            $catMeta     = $cc ? (array)$cc['meta'] : null;
+            $catResponse = $cc ? (string)$cc['summary'] : null;
+            $catLatency  = $cc ? (int)$cc['lat'] : 0;
 
             if (isset($providers[$pid]['models'])) {
                 foreach ($providers[$pid]['models'] as $i => $m) {
@@ -20634,6 +20826,10 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
                             'raw'=>mb_substr((string)($r['raw'] ?? ''), 0, 4000), 'via'=>(string)($r['via'] ?? ''),
                             'catRaw'=>(string)($catMeta['raw'] ?? ''), 'catStatus'=>(int)($catMeta['status'] ?? 0),
                             'catVia'=>(string)($catMeta['via'] ?? ''), 'catAiText'=>(string)($catMeta['aiText'] ?? ''),
+                            // v10.00: تأخیر و زمانِ خودِ درخواستِ دسته‌بندی
+                            'catLatencyMs'=>$catLatency, 'catTestedAt'=>$cc ? gmdate('c') : '',
+                            // v10.00 (۱۴ب): پیام تست به‌خاطر خطای قطعیِ دسته‌بندی زده نشد
+                            'msgSkipped'=>!empty($r['msg_skipped']),
                             // v9.99: دستهٔ خطا و توضیحِ فارسیِ آن
                             'kind'=>(string)$j['kind'], 'note'=>(string)$j['note'],
                             'retriedSeq'=>!empty($r['retried_seq'])];
@@ -25419,6 +25615,12 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
    عرضِ 100vw در حالت «تمام‌عرض» روی آن‌ها می‌افتاد و کلیک را می‌بلعید. */
 .hamburger-btn,.fullwidth-btn{z-index:10050}
 body.spanel-open .hamburger-btn,body.spanel-open .fullwidth-btn{box-shadow:0 2px 14px rgba(0,0,0,.65)}
+/* v10.00 (۱۴الف): وقتی یک مودالِ تمام‌صفحه باز است، دکمه‌های شناورِ ☰ و ⛶
+   باید *زیرِ* آن بروند. قبلاً مودالِ «نتایج زندهٔ تستِ مدل‌ها» با z-index:10000
+   ساخته می‌شد و این دو دکمه (10050) روی آن می‌افتادند و هم دیده می‌شدند هم
+   کلیک را می‌دزدیدند. راهِ درست همین است، نه بالا بردنِ z-index مودال:
+   دکمه‌ها باید بالای *پنلِ تنظیمات* (9999) بمانند ولی زیرِ *مودال‌ها*. */
+body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn{z-index:10}
 .hamburger-btn.active{background:#3b82f6;color:#000}.settings-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9998;display:none;opacity:0;transition:opacity .3s}.settings-overlay.open{display:block;opacity:1}.settings-panel{position:fixed;top:0;left:-420px;width:400px;max-width:90vw;height:100vh;background:#0f172a;border-right:1px solid #334155;z-index:9999;overflow-y:auto;transition:left .3s ease;padding:0}.settings-panel.open{left:0}.settings-panel-head{position:sticky;top:0;z-index:6;background:#1e293b;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155}.settings-panel-head h2{margin:0;font-size:16px;color:#e2e8f0}.settings-panel-body{padding:16px 20px}.settings-panel .cc{margin-bottom:12px}.settings-panel .ccb{padding:10px}.smenu{border-bottom:1px solid #1e293b}
 .smenu-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;transition:background .15s}.smenu-hdr:hover{background:#1e293b}
 /* v9.94 (۸ب): سربخشِ هر آیتمِ منو به بالای پنل می‌چسبد.
@@ -30710,6 +30912,27 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.00', t:'🪟 مودالِ تست روی دکمه‌های شناور + اول دسته‌بندی بعد پیام', items:[
+    '🪟 مودالِ «نتایج زندهٔ تست همهٔ مدل‌ها» زیرِ دکمه‌های ☰ و ⛶ می‌رفت و آن دو',
+    '   دکمه روی جدول می‌افتادند و کلیک را هم می‌دزدیدند. حالا مودال بالاتر',
+    '   می‌نشیند و تا وقتی باز است، دکمه‌های شناور خودشان کنار می‌روند و بعد',
+    '   از بستنِ مودال دوباره برمی‌گردند. مودالِ «جزئیات کاملِ تست» هم یک پله',
+    '   بالاتر از آن ماند تا ترتیبِ لایه‌ها به‌هم نریزد.',
+    '',
+    '🏷️ ترتیبِ دو درخواستِ تستِ هر مدل برعکس شد: حالا «تستِ دسته‌بندی» اول',
+    '   می‌رود و «پیامِ نمونه» دوم. دلیل: سرویس‌های رایگان ریت‌لیمیتِ دقیقه‌ای',
+    '   دارند و معمولاً درخواستِ دوم است که رد می‌شود؛ تا دیروز دقیقاً همان',
+    '   دسته‌بندی — که مهم‌ترین کارِ مدل در این برنامه است — قربانی می‌شد.',
+    '⚡ تستِ دسته‌بندی هم مثل تستِ پیام موازی (curl_multi) شد؛ قبلاً برای هر',
+    '   مدل جداگانه و ترتیبی زده می‌شد. کلِ تست محسوس‌تر سریع می‌شود.',
+    '💡 اگر دسته‌بندی با خطای «قطعی» برگردد (اعتبار/اشتراک، مدلِ ناموجود،',
+    '   کلیدِ نامعتبر، ۴۰۱/۴۰۴) درخواستِ پیام دیگر زده نمی‌شود؛ همان خطا',
+    '   ثبت می‌شود. نه سهمیه می‌سوزد نه وقت.',
+    '🕒 تأخیر و زمانِ خودِ درخواستِ دسته‌بندی جداگانه ذخیره و در مودالِ',
+    '   جزئیات نشان داده می‌شود؛ نوارِ بالای مودال هم می‌گوید الان کدام',
+    '   مرحله در جریان است: «تستِ دسته‌بندی» یا «تستِ پیام».',
+    '🧪 ۱۷ خودآزمونِ تازه برای هر دو مورد اضافه شد.',
+  ]},
   {v:'9.99', t:'🧪 عیب‌یابیِ خطاهای تستِ مدل + تستِ موازیِ چرخشی + رفعِ گیر', items:[
     '📋 گزارشِ تستِ واقعیِ کاربر (ده‌ها ردیفِ قرمز) خط‌به‌خط بررسی شد و خطاها',
     '   به دو گروه تقسیم شدند: «قابلِ رفع با کد» و «مربوط به اعتبار/اشتراک».',
@@ -35743,7 +35966,7 @@ function aiOpenRowDetail(pid,mid){
     aiCloseRowDetail();
     const m=document.createElement('div');
     m.id='aiRowDetail';
-    m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.8);z-index:10060;display:flex;align-items:center;justify-content:center;padding:20px';
+    m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.8);z-index:10090;display:flex;align-items:center;justify-content:center;padding:20px';
     m.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:12px;width:min(900px,96vw);max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">'
       +'<div class="mhead" style="padding:10px 14px;border-bottom:1px solid #334155;flex:0 0 auto">'
       +'<b class="mh-t" style="color:#67e8f9;font-size:13px">🔎 جزئیات کاملِ تستِ مدل</b>'
@@ -35841,7 +36064,9 @@ function aiOpenTestModal(){
     let m=document.getElementById('aiTestModal');if(m)m.remove();
     m=document.createElement('div');
     m.id='aiTestModal';
-    m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.72);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px';
+    m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.72);z-index:10080;display:flex;align-items:center;justify-content:center;padding:20px';
+    // v10.00 (۱۴الف): تا وقتی این مودال باز است، دکمه‌های شناورِ ☰ و ⛶ زیر آن بروند
+    document.body.classList.add('modal-open');
     m.innerHTML='<style>'
       // v9.64: سوییچِ اسلایدری «فقط سبزها» — نمایش فقط مدل‌های دارای چراغ سبز
       +'.ai-switch{width:34px;height:20px;border-radius:20px;background:#334155;position:relative;display:inline-block;transition:background .2s;flex:0 0 auto;vertical-align:middle}'
@@ -35903,6 +36128,7 @@ function aiCloseTestModal(){
     // فقط poll را قطع می‌کنیم؛ کارِ سرور به‌صورت پس‌زمینه ادامه دارد
     if(window._aiPollTimer){clearInterval(window._aiPollTimer);window._aiPollTimer=null;}
     const m=document.getElementById('aiTestModal');if(m)m.remove();
+    document.body.classList.remove('modal-open');   // v10.00 (۱۴الف): دکمه‌های شناور برگردند
     aiLoadProviders();
 }
 function aiTestStop(){
