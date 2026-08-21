@@ -61,6 +61,7 @@ const DEDUP_RESULT_FILE   = __DIR__ . '/dedup_result.json';
 const DEDUP_STOP_FILE     = __DIR__ . '/dedup_stop.json';
 const DEDUP_LOCK_FILE     = __DIR__ . '/dedup.lock';
 const DEDUP_MAX_GROUPS    = 1200;
+// v10.04 (۱۸): انتقالِ رابطِ «ایجنتِ مدیریت محصولات» از تبِ ارسال به تبِ تازهٔ «🤖 ایجنت» در بخشِ هوش مصنوعی
 // v10.03 (۱۷): محیطِ آزمایشیِ «ایجنتِ مدیریت محصولات» — مدل با فراخوانیِ ابزار (tool calling)
 const AGENT_PROGRESS_FILE = __DIR__ . '/agent_progress.json';
 const AGENT_RESULT_FILE   = __DIR__ . '/agent_result.json';
@@ -111,7 +112,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.03';
+const APP_VERSION = '10.04';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -16200,11 +16201,11 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "\$since = max(0, (int)(\$_GET['since'] ?? 0))") !== false
       && strpos($selfSrc, "'log_total'") !== false);
     $add('10.03', 'رابطِ ایجنت با انتخابِ حالت و جعبهٔ دستور ساخته شده',
-         strpos($selfSrc, 'id="agTask"') !== false
-      && strpos($selfSrc, 'id="agMode"') !== false
-      && strpos($selfSrc, 'id="agRunBtn"') !== false
-      && strpos($selfSrc, 'id="agLog"') !== false
-      && strpos($selfSrc, 'id="agReport"') !== false);
+         strpos($selfSrc, 'id=' . '"agTask"') !== false
+      && strpos($selfSrc, 'id=' . '"agMode"') !== false
+      && strpos($selfSrc, 'id=' . '"agRunBtn"') !== false
+      && strpos($selfSrc, 'id=' . '"agLog"') !== false
+      && strpos($selfSrc, 'id=' . '"agReport"') !== false);
     $add('10.03', 'توابعِ جاوااسکریپتِ ایجنت تعریف شده‌اند',
          strpos($selfSrc, 'function agStart(')        !== false
       && strpos($selfSrc, 'function agPoll(')         !== false
@@ -16216,6 +16217,46 @@ if (isset($_GET['selftest'])) {
     $add('10.03', 'پرامپتِ نمونهٔ عطر و ادکلن پیش‌فرض داخلِ جعبه است',
          strpos($selfSrc, 'محصول‌های عطر و ادکلن را پیدا کن') !== false
       && strpos($selfSrc, 'snappshop.ir') !== false);
+
+    /* ---------- v10.04 (۱۸): انتقالِ رابطِ ایجنت به بخشِ هوش مصنوعی ---------- */
+    $add('10.04', 'رابطِ ایجنت یک تبِ مستقل در بخشِ هوش مصنوعی است',
+         strpos($selfSrc, 'data-ai-tab=' . '"agent"') !== false
+      && strpos($selfSrc, 'data-ai-panel=' . '"agent"') !== false);
+    $add('10.04', 'دکمهٔ تب همان تابعِ سوییچِ بخشِ هوش مصنوعی را صدا می‌زند',
+         strpos($selfSrc, "aiTab('agent')") !== false);
+    $add('10.04', 'هر شش تبِ بخشِ هوش مصنوعی پنلِ متناظر دارند',
+         (function () use ($selfSrc) {
+             // رشته‌ها با الحاق شکسته شده‌اند تا خودِ این آزمون در شمارش نیاید
+             preg_match_all('/data-ai-tab=' . '"([a-z]+)"/', $selfSrc, $m);   $btns = $m[1];
+             preg_match_all('/data-ai-panel=' . '"([a-z]+)"/', $selfSrc, $m); $pans = $m[1];
+             sort($btns); sort($pans);
+             return count($btns) === 6
+                 && $btns === $pans
+                 && $btns === ['agent', 'candidates', 'models', 'net', 'providers', 'test'];
+         })());
+    $add('10.04', 'رابطِ ایجنت دیگر در تبِ ارسال تکرار نشده است',
+         substr_count($selfSrc, 'id=' . '"agTask"')   === 1
+      && substr_count($selfSrc, 'id=' . '"agRunBtn"') === 1
+      && substr_count($selfSrc, 'id=' . '"agMode"')   === 1
+      && substr_count($selfSrc, 'id=' . '"agLog"')    === 1);
+    $add('10.04', 'پنلِ ایجنت پس از پنلِ اتصال و پیش از پایانِ بخش می‌آید',
+         (function () use ($selfSrc) {
+             $net   = strpos($selfSrc, 'data-ai-panel=' . '"net"');
+             $agent = strpos($selfSrc, 'data-ai-panel=' . '"agent"');
+             $notif = strrpos($selfSrc, '🔔 اعلان' . '‌ها');
+             return $net !== false && $agent !== false && $notif !== false
+                 && $net < $agent && $agent < $notif;
+         })());
+    $add('10.04', 'شناسه‌های رابطِ ایجنت دست‌نخورده مانده‌اند تا جاوااسکریپت بشکند',
+         (function () use ($selfSrc) {
+             foreach (['agTask','agMode','agRunBtn','agStopBtn','agLog','agReport',
+                       'agModel','agSum','agSteps','agCalls','agChanges','agStatus'] as $id) {
+                 if (strpos($selfSrc, 'id="' . $id . '"') === false) return false;
+             }
+             return true;
+         })());
+    $add('10.04', 'پیش‌فرضِ حالتِ اجرا هنوز غیرنوشتنی است',
+         strpos($selfSrc, '<option value="dry" selected>') !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -28227,6 +28268,7 @@ body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn{z-index:10}
 <div class="ai-tab-btn" data-ai-tab="models" onclick="aiTab('models')">📋 مدل‌ها</div>
 <div class="ai-tab-btn" data-ai-tab="candidates" onclick="aiTab('candidates')">🏆 کاندید + مستر</div>
 <div class="ai-tab-btn" data-ai-tab="net" onclick="aiTab('net')">🌐 اتصال</div>
+<div class="ai-tab-btn" data-ai-tab="agent" onclick="aiTab('agent')">🤖 ایجنت</div>
 </div>
 
 <!-- ══ تب ۱: ارائه‌دهنده‌ها ══ -->
@@ -28462,6 +28504,56 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="aiTR" style="margin-top:8px"></div>
 </div>
 </div>
+
+<!-- ══ تب ۶: ایجنتِ مدیریت محصولات (v10.03) ══ -->
+<div class="ai-tab-panel" data-ai-panel="agent">
+<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px">
+<div style="font-size:11px;color:#c084fc;font-weight:700;margin-bottom:6px">🤖 ایجنتِ مدیریت محصولات <span style="font-size:9px;background:#7c3aed;color:#fff;padding:1px 6px;border-radius:5px">آزمایشی</span></div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+کارتان را <b style="color:#94a3b8">به زبان فارسی</b> بنویسید؛ مدل خودش تصمیم می‌گیرد کدام ابزار را صدا بزند:
+فهرستِ محصولات، جست‌وجو در snappshop.ir، و به‌روزرسانیِ قیمت/موجودی در باسلام و ووکامرس.<br>
+⚠️ نیازمند مدلی با پشتیبانیِ <b style="color:#94a3b8">فراخوانی ابزار</b> (Mistral، Gemini، Groq، GPT-OSS و…).
+اگر مدل پشتیبانی نکند، خودکار به حالتِ متنی سوییچ می‌شود.
+</div>
+
+<div class="crow" style="align-items:center">
+<label>مدل فعال:</label>
+<span id="agModel" style="flex:1;color:#94a3b8;font-size:11px">—</span>
+<button class="btn btn-gray" onclick="agLoadTools()" style="flex:0;font-size:10px;padding:4px 8px">🔄 بررسی</button>
+</div>
+
+<div style="margin-top:8px">
+<div style="font-size:10.5px;color:#94a3b8;margin-bottom:4px">دستورِ کار:</div>
+<textarea id="agTask" rows="3" style="width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;padding:8px;font-size:11.5px;font-family:inherit;line-height:1.8" placeholder="مثال: محصول‌های عطر و ادکلن را پیدا کن و عنوان آن‌ها را در سایت snappshop.ir پیدا کن و قیمت و موجودی آن‌ها را در باسلام و ووکامرس آپدیت کن">محصول‌های عطر و ادکلن را پیدا کن و عنوان آن‌ها را در سایت snappshop.ir پیدا کن و قیمت و موجودی آن‌ها را در باسلام و ووکامرس آپدیت کن</textarea>
+</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
+<label>حالت اجرا:</label>
+<select id="agMode" style="flex:1;font-size:11px">
+<option value="sim">🧪 شبیه‌سازی — دادهٔ نمونه، بدون هیچ اتصالی</option>
+<option value="dry" selected>🔍 آزمایشی — می‌خواند ولی نمی‌نویسد</option>
+<option value="live">🔥 اجرای واقعی — قیمت و موجودی تغییر می‌کند</option>
+</select>
+</div>
+
+<div class="cact" style="margin-top:8px">
+<button class="btn btn-purple" id="agRunBtn" onclick="agStart()" style="flex:1;font-size:11px">🚀 اجرای ایجنت</button>
+<button class="btn btn-red hidden" id="agStopBtn" onclick="agStop()" style="flex:0;font-size:11px">⏹ توقف</button>
+<button class="btn btn-gray" onclick="agShowTools()" style="flex:0;font-size:11px">🧰 ابزارها</button>
+</div>
+
+<div class="ssum hidden" id="agSum" style="margin-top:8px">
+<div class="si"><b id="agSteps" style="color:#c084fc">۰</b><span>گام</span></div>
+<div class="si"><b id="agCalls" style="color:#60a5fa">۰</b><span>ابزار</span></div>
+<div class="si"><b id="agChanges" style="color:#facc15">۰</b><span>تغییر</span></div>
+</div>
+
+<div id="agStatus" style="margin-top:6px;font-size:11px;color:#c084fc"></div>
+<div id="agLog" class="hidden" style="margin-top:8px;background:#0b1120;border:1px solid #1e293b;border-radius:8px;padding:9px;max-height:260px;overflow:auto;font-size:11px;line-height:1.9;direction:rtl"></div>
+<div id="agReport" class="hidden" style="margin-top:8px"></div>
+</div>
+</div>
+
 </div>
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🔔 اعلان‌ها</h3><span class="cst off" id="balehS">غیرفعال</span><span class="arrow">▼</span></div>
@@ -29889,47 +29981,6 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="bslQueueList" style="font-size:11px;color:#64748b">صف خالی — برای افزودن، دکمه «🚀 ارسال باسلام» را کلیک کنید</div>
 </div>
 </div>
-</div>
-
-<div class="card" style="margin-top:14px;border:1px solid #7c3aed">
-<div class="section-title" style="color:#c084fc">🤖 ایجنت مدیریت محصولات <span style="font-size:10px;background:#7c3aed;color:#fff;padding:2px 7px;border-radius:6px;vertical-align:middle">آزمایشی</span></div>
-<div class="alert alert-info" style="margin-bottom:8px;font-size:11px">
-💡 به‌جای دکمه‌های از پیش آماده، کارتان را <b>به زبان فارسی</b> بنویسید. مدل هوش مصنوعی خودش تصمیم می‌گیرد کدام ابزار را صدا بزند: فهرست محصولات، جست‌وجو در snappshop.ir، و به‌روزرسانی قیمت/موجودی در باسلام و ووکامرس.<br>
-⚠️ نیازمند مدلی با پشتیبانی <b>فراخوانی ابزار</b> (Mistral، Gemini، Groq، GPT-OSS و…). اگر مدل پشتیبانی نکند، برنامه خودکار به حالت متنی سوییچ می‌کند.
-</div>
-
-<div class="row" style="align-items:center;margin-bottom:6px">
-<label style="min-width:78px">مدل فعال:</label>
-<span id="agModel" style="color:#94a3b8;font-size:12px">—</span>
-<button class="btn btn-gray" onclick="agLoadTools()" style="font-size:10px;padding:4px 8px;margin-right:auto">🔄 بررسی</button>
-</div>
-
-<textarea id="agTask" rows="3" style="width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;padding:9px;font-size:12px;font-family:inherit" placeholder="مثال: محصول‌های عطر و ادکلن را پیدا کن و عنوان آن‌ها را در سایت snappshop.ir پیدا کن و قیمت و موجودی آن‌ها را در باسلام و ووکامرس آپدیت کن">محصول‌های عطر و ادکلن را پیدا کن و عنوان آن‌ها را در سایت snappshop.ir پیدا کن و قیمت و موجودی آن‌ها را در باسلام و ووکامرس آپدیت کن</textarea>
-
-<div class="row" style="align-items:center;margin-top:8px">
-<label style="min-width:78px">حالت اجرا:</label>
-<select id="agMode" style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;padding:7px;font-size:12px">
-<option value="sim">🧪 شبیه‌سازی کامل — داده نمونه، بدون هیچ اتصالی (برای دیدن رفتار مدل)</option>
-<option value="dry" selected>🔍 آزمایشی — داده واقعی خوانده می‌شود، ولی چیزی نوشته نمی‌شود</option>
-<option value="live">🔥 اجرای واقعی — قیمت و موجودی واقعاً تغییر می‌کند</option>
-</select>
-</div>
-
-<div class="cact" style="margin-top:9px">
-<button class="btn btn-purple" id="agRunBtn" onclick="agStart()" style="flex:1">🚀 اجرای ایجنت</button>
-<button class="btn btn-red hidden" id="agStopBtn" onclick="agStop()">⏹ توقف</button>
-<button class="btn btn-gray" onclick="agShowTools()" style="font-size:11px">🧰 ابزارها</button>
-</div>
-
-<div class="ssum hidden" id="agSum" style="margin-top:9px">
-<div class="si"><b id="agSteps" style="color:#c084fc">۰</b><span>گام</span></div>
-<div class="si"><b id="agCalls" style="color:#60a5fa">۰</b><span>ابزار</span></div>
-<div class="si"><b id="agChanges" style="color:#facc15">۰</b><span>تغییر</span></div>
-</div>
-
-<div class="status" id="agStatus" style="color:#c084fc;margin-top:6px"></div>
-<div id="agLog" class="hidden" style="margin-top:8px;background:#0b1120;border:1px solid #1e293b;border-radius:8px;padding:9px;max-height:280px;overflow:auto;font-size:11px;line-height:1.9;direction:rtl"></div>
-<div id="agReport" class="hidden" style="margin-top:8px"></div>
 </div>
 
 <div class="card" style="margin-top:14px">
