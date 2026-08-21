@@ -112,7 +112,7 @@ test('response decoding honors declared legacy encodings and BOMs',()=>{
 });
 
 test('hamburger menu preserves PHP order, count, dimensions and moves CSV transfer into products',async()=>{
-  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),expected=['💾 ذخیره و بازیابی همهٔ تنظیمات','📜 گزارش تغییرات کد','🔄 نسخهٔ کد','🛒 ووکامرس','🏪 باسلام','🤖 هوش مصنوعی','🔔 اعلان‌ها','🗂 محصولات رفته از مبدأ','⚙️ تنظیمات عمومی','🩺 نگهبان صف ارسال','🌐 اتصال به سایت مبدأ','🔍 مغایرت‌گیری با مقصد','🧠 یادگیری دسته‌بندی','✏️ مدیریت جامع محصولات مقصد','🖼 عکس‌دار کردن محصولات ووکامرس','🤖 پاسخ خودکار به مشتریان','🌙 گزارش شبانهٔ محصولات','📊 آمار محصولات هر پروفایل'];
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),expected=['💾 ذخیره و بازیابی همهٔ تنظیمات','📜 گزارش تغییرات کد','🔄 نسخهٔ کد','🛒 ووکامرس','🏪 باسلام','🤖 هوش مصنوعی','🔔 اعلان‌ها','🗂 محصولات رفته از مبدأ','⚙️ تنظیمات عمومی','🩺 نگهبان صف ارسال','🌐 اتصال به سایت مبدأ','🔍 مغایرت‌گیری با مقصد','🧠 یادگیری دسته‌بندی','✏️ مدیریت جامع محصولات مقصد','🧬 حذف تکراری‌های مقصد (سرورساید)','🖼 عکس‌دار کردن محصولات ووکامرس','🤖 پاسخ خودکار به مشتریان','🌙 گزارش شبانهٔ محصولات','📊 آمار محصولات هر پروفایل'];
   const block=source.slice(source.indexOf('const menuDefs='),source.indexOf('];',source.indexOf('const menuDefs='))),titles=[...block.matchAll(/^ \['([^']+)'/gm)].map(match=>match[1]);assert.deepEqual(titles,expected);assert.doesNotMatch(block,/product-transfer|درون‌ریزی و برون‌ریزی محصولات/);
   assert.match(source,/\.hamburger\{[^}]*width:44px;height:44px/);assert.match(source,/\.drawer\{[^}]*width:400px;max-width:90vw/);assert.match(source,/id="pane-products"[\s\S]*id="transferProfile"/);
 });
