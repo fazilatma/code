@@ -58,6 +58,31 @@ test('AI test runs persist server-side and expose stop/resume recovery controls'
   const resumed=await call(db,'/api/ai/test-runs/control',jsonInit({action:'resume'}),extra).then(response=>response.json());assert.equal(resumed.run.status,'queued');assert.equal(resumed.run.stopRequested,false);assert.equal(sent.at(-1).message.runId,started.run.id)
 });
 
+test('watchdog skips a stalled AI model when the current run is polled',async()=>{
+  const db=new MemoryD1(),sent=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}};
+  const started=await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام'}),extra).then(response=>response.json());
+  const key='background_run:ai-test:'+started.run.id,run=JSON.parse(db.states.get(key));
+  run.status='running';run.phase='testing';run.updatedAt=new Date(Date.now()-60_000).toISOString();
+  db.states.set(key,JSON.stringify(run));db.stateUpdatedAt.set(key,run.updatedAt);
+  const current=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());
+  assert.equal(current.run.skipNext,true);assert.equal(current.run.phase,'watchdog-skip');assert.equal(current.run.status,'queued');
+  assert.ok(sent.some(item=>item.message.task==='ai-test'&&item.message.runId===started.run.id),'stalled run must be re-enqueued');
+});
+
+test('AI model budget timeout skips the hung model and continues the queue',async()=>{
+  const db=new MemoryD1(),sent=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})},AI_TEST_MODEL_BUDGET_MS:'150',AI_TEST_TIMEOUT_MS:'80'};
+  const env={DB:db,VAULT_SECRET:'vault-secret',JOBS:extra.JOBS,JOBS_DLQ:{send:async()=>{}},AI_TEST_MODEL_BUDGET_MS:'150',AI_TEST_TIMEOUT_MS:'80'};
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'slow',name:'Slow AI',baseUrl:'https://ai.example/v1',apiKey:'slow-secret',models:['hang-1','ok-2'],enabled:true}],network:{mode:'direct'}}}),extra);
+  const originalFetch=globalThis.fetch;globalThis.fetch=()=>new Promise(()=>{});
+  const deliver=message=>worker.queue({messages:[{body:message,ack(){},retry(){assert.fail('budget skip should ack, not retry')}}]},env,ctx);
+  try{
+    const started=await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام'}),extra).then(response=>response.json());
+    await deliver(sent.shift().message);
+    const current=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());
+    assert.equal(current.run.cursor,1);assert.equal(current.run.result.results[0].skipped,true);assert.equal(current.run.result.results[0].phase,'transport-skip');assert.ok(current.run.result.skippedStuck>=1);assert.equal(current.run.status,'queued');
+  }finally{globalThis.fetch=originalFetch}
+});
+
 test('AI queue checkpoints results server-side until all models finish after a refresh',async()=>{
   const db=new MemoryD1(),sent=[],models=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}},env={DB:db,VAULT_SECRET:'vault-secret',JOBS:null,JOBS_DLQ:{send:async()=>{}}};env.JOBS=extra.JOBS;
   await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'durable',name:'Durable AI',baseUrl:'https://ai.example/v1',apiKey:'durable-ai-secret',models:['model-1','model-2'],enabled:true}],network:{mode:'direct'}}}),extra);

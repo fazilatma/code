@@ -37,6 +37,8 @@ export type Env = {
   BASALAM_VENDOR_ID?: string;
   BASALAM_API?: string;
   WORKER_VERSION?: string;
+  AI_TEST_MODEL_BUDGET_MS?: string;
+  AI_TEST_TIMEOUT_MS?: string;
 };
 
 export const MIN_SECRET_LENGTH = 8;

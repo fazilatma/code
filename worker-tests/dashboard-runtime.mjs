@@ -5,7 +5,7 @@ const base=process.env.DASHBOARD_URL||'http://127.0.0.1:8787';
 const nativeFetch=globalThis.fetch;
 const html=await (await nativeFetch(base+'/')).text();
 const script=await (await nativeFetch(base+'/dashboard.js')).text();
-assert.match(script,/نسخهٔ ۱\.۸\.۰/,'the in-app change report identifies the current release');
+assert.match(script,/نسخهٔ ۱\.۹\.۰/,'the in-app change report identifies the current release');
 assert.match(html,/id="topVersion"/,'the app version is rendered in the site header');
 assert.match(html,/id="topVersionNum"/,'the header version number has a dedicated slot');
 assert.match(script,/رفع توقف استخراج روی تصویر و عناصر بدون تگ پایان/,'the latest parser fix is documented in the change report');

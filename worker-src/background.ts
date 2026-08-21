@@ -8,7 +8,7 @@ import type { BackgroundMessage } from './types.js';
 export type BackgroundOutcome={outcome:'complete'|'continue'|'ignored';delaySeconds?:number};
 type RunStatus='queued'|'running'|'paused'|'done'|'failed';
 type BaseRun={id:string;kind:'ai-test'|'category-all';status:RunStatus;phase:string;stopRequested:boolean;createdAt:string;updatedAt:string;startedAt:string|null;finishedAt:string|null;attempts:number;error:string|null};
-type AiTestRun=BaseRun&{kind:'ai-test';prompt:string;categoryTitle:string;onlyCandidates:boolean;delayMs:number;cursor:number;result:any};
+type AiTestRun=BaseRun&{kind:'ai-test';prompt:string;categoryTitle:string;onlyCandidates:boolean;delayMs:number;cursor:number;result:any;skipNext?:boolean;currentStartedAt?:string|null;currentKey?:string|null};
 type CategoryProduct={id:number;shopId:string;title:string};
 type CategoryRunItem={id:number;shopId:string;title:string;ok:boolean;categoryId?:number;categoryName?:string;source?:string;confidence?:number;error?:string};
 type CategoryRun=BaseRun&{kind:'category-all';modelKeys:string[];page:number;totalPages:number;products:CategoryProduct[];cursor:number;total:number;processed:number;changed:number;failed:number;items:CategoryRunItem[]};
@@ -19,17 +19,23 @@ const runKey=(kind:BackgroundRun['kind'],id:string)=>`background_run:${kind}:${i
 const leaseKey=(kind:BackgroundRun['kind'],id:string)=>`background_lease:${kind}:${id}`;
 const now=()=>new Date().toISOString();
 const active=(run:BackgroundRun|null)=>Boolean(run&&['queued','running','paused'].includes(run.status));
-/** If a run shows no progress for this long, treat it as recovered/stale and re-enqueue it. */
-const STALL_MS=6*60_000;
-/** If a run still shows no progress for this long, fail it so the user can resume or restart instead of being stuck forever. */
-const HARD_STALL_MS=20*60_000;
+/** If a run shows no progress for this long, skip the current model and continue. */
+const STALL_MS=45_000;
+/** Lease must expire sooner than STALL so a dead isolate cannot block the watchdog. */
+const LEASE_MS=35_000;
+const MODEL_BUDGET_MS=20_000;
 const runAge=(run:BackgroundRun)=>Date.now()-(Date.parse(run.updatedAt||run.createdAt)||Date.now());
+async function raceBudget<T>(work:Promise<T>,ms:number):Promise<T|undefined>{
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  const timeout=new Promise<undefined>(resolve=>{timer=setTimeout(()=>resolve(undefined),ms)});
+  try{return await Promise.race([work,timeout])}finally{if(timer)clearTimeout(timer)}
+}
 
 // Queue delivery is at-least-once. This D1 compare-and-set lease ensures two deliveries
 // cannot process the same checkpoint concurrently. A crashed isolate is recoverable after
 // the lease expires and the scheduled recovery pass re-enqueues the run.
 async function claimRun(kind:BackgroundRun['kind'],id:string):Promise<string|null>{
-  const token=crypto.randomUUID(),key=leaseKey(kind,id),stamp=now(),stale=new Date(Date.now()-5*60_000).toISOString(),value=JSON.stringify({token});
+  const token=crypto.randomUUID(),key=leaseKey(kind,id),stamp=now(),stale=new Date(Date.now()-LEASE_MS).toISOString(),value=JSON.stringify({token});
   await getEnv().DB.prepare(`INSERT INTO app_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at WHERE app_state.updated_at<?`).bind(key,value,stamp,stale).run();
   const row=await getEnv().DB.prepare('SELECT value FROM app_state WHERE key=?').bind(key).first<{value:string}>();
   try{return JSON.parse(row?.value||'{}').token===token?token:null}catch{return null}
@@ -102,12 +108,21 @@ export async function controlBackgroundRun(kind:BackgroundRun['kind'],action:'st
   run.stopRequested=false;run.status='queued';run.phase=run.kind==='category-all'&&run.products.length===0?'listing':'waiting';run.error=null;run.finishedAt=null;run.attempts=0;await writeRun(run);await enqueue({task:run.kind,runId:run.id},waitUntil);return publicRun(run);
 }
 
+function withAiTimings(run:AiTestRun,result:any,startedMs:number,skippedStuck:boolean){
+  const ms=Math.max(0,Date.now()-startedMs),previous=Array.isArray(run.result?.timingSamples)?run.result.timingSamples as number[]:[],samples=[...previous,ms].slice(-80),avg=samples.length?Math.round(samples.reduce((a,b)=>a+b,0)/samples.length):0,last=result.batchResults?.[0];
+  return{...result,serverSide:true,lastModelAt:now(),lastModelMs:ms,avgMs:avg,timingSamples:samples,skippedStuck:Number(run.result?.skippedStuck||0)+(skippedStuck?1:0),currentKey:null,currentStartedAt:null,lastModelName:last?`${last.providerName||last.provider||''} / ${last.model||''}`:run.result?.lastModelName||''};
+}
 async function processAiTest(run:AiTestRun):Promise<BackgroundOutcome>{
   if(run.stopRequested||run.status==='paused')return{outcome:'complete'};
-  run.status='running';run.phase='testing';run.startedAt ||= now();await writeRun(run);
+  const budget=Math.max(50,Math.min(60_000,Number(getEnv().AI_TEST_MODEL_BUDGET_MS)||MODEL_BUDGET_MS)),callTimeout=Math.max(50,Math.min(Math.max(50,budget-50),Number(getEnv().AI_TEST_TIMEOUT_MS)||8_000));
+  run.status='running';run.phase='testing';run.startedAt||=now();run.currentStartedAt=now();run.error=null;await writeRun(run);
   let categories:any[]=[];if(run.categoryTitle)try{categories=(await destinationCategories()).items}catch{/* Model response tests continue without Basalam categories. */}
-  const result=await testModelBatch(run.prompt,{runId:run.id,cursor:run.cursor,onlyCandidates:run.onlyCandidates,categoryTitle:run.categoryTitle,categories});
-  run.cursor=Number(result.nextCursor||run.cursor);run.result={...result,serverSide:true};run.attempts=0;
+  const skip=Boolean(run.skipNext);run.skipNext=false;const started=Date.now();
+  const options={runId:run.id,cursor:run.cursor,onlyCandidates:run.onlyCandidates,categoryTitle:run.categoryTitle,categories,timeoutMs:callTimeout,skipCurrent:skip,skipReason:skip?'این مدل پاسخ نداد و نگهبان صف برای جلوگیری از گیر کردن آن را رد کرد.':''};
+  let result:any=await raceBudget(testModelBatch(run.prompt,options),budget),stuck=false;
+  if(!result){stuck=true;result=await testModelBatch(run.prompt,{...options,skipCurrent:true,skipReason:'مهلت پاسخ این مدل تمام شد و برای ادامهٔ صف خودکار رد شد.'})}
+  const skipped=stuck||skip||Boolean(result.batchResults?.[0]?.skipped&&result.batchResults?.[0]?.phase==='transport-skip');
+  run.cursor=Number(result.nextCursor||run.cursor);run.result=withAiTimings(run,result,started,skipped);run.attempts=0;run.currentKey=null;run.currentStartedAt=null;
   const latest=await readRun('ai-test',run.id);if(latest?.stopRequested){run.stopRequested=true;run.status='paused';run.phase='paused'}else if(result.done){run.status='done';run.phase='finished';run.finishedAt=now()}else{run.status='queued';run.phase='waiting'}
   await writeRun(run);return{outcome:result.done||run.status==='paused'?'complete':'continue',delaySeconds:run.delayMs?Math.max(1,Math.ceil(run.delayMs/1000)):1};
 }
@@ -157,11 +172,10 @@ export async function recoverBackgroundRuns(waitUntil?:(promise:Promise<unknown>
   for(const kind of ['ai-test','category-all'] as const){
     const run=await currentBackgroundRun(kind);
     if(!run||run.stopRequested||run.status==='paused'||['done','failed'].includes(run.status))continue;
-    const age=runAge(run);
-    // Truly stuck: even after many minutes there is still no progress. Fail it so the user can
-    // act (resume or restart) instead of the run silently sitting forever.
-    if(age>HARD_STALL_MS){run.status='failed';run.phase='failed';run.finishedAt=now();run.error='اجرای سرورساید چند دقیقه بدون هیچ پیشرفتی ماند و برای جلوگیری از گیر کردن دائمی متوقف شد؛ روی «ادامه» بزنید یا از نو شروع کنید.';await writeRun(run);continue;}
-    // A queued run, or a running run that stalled, is re-enqueued so the chain cannot silently break.
-    if(run.status==='queued'||age>STALL_MS){if(run.status!=='queued'){run.status='queued';run.phase='recovered';await writeRun(run)}await enqueue({task:kind,runId:run.id},waitUntil)}
+    if(runAge(run)<=STALL_MS)continue;
+    if(run.kind==='ai-test'){
+      run.skipNext=true;run.status='queued';run.phase='watchdog-skip';run.error=null;await writeRun(run);await enqueue({task:kind,runId:run.id},waitUntil);continue;
+    }
+    run.status='queued';run.phase='recovered';await writeRun(run);await enqueue({task:kind,runId:run.id},waitUntil);
   }
 }
