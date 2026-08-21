@@ -1,5 +1,5 @@
 import { loadConnections } from './connections.js';
-import { findLearnedCategory, getDestinationId, getRemoteId, setDestinationId, setRemoteId } from './db.js';
+import { findLearnedCategory, getDestinationId, getRemoteId, getState, setDestinationId, setRemoteId } from './db.js';
 import { safeFetch, safeWooFetch } from './network.js';
 import { basicAuth } from './utils.js';
 import type { Product, Profile, VariationGroup } from './types.js';
@@ -15,9 +15,10 @@ export async function syncWoo(product:Product,profile:Profile):Promise<'created'
     if(search.ok){const found=await search.json() as any[];id=found[0]?.id?Number(found[0].id):null}
   }
   const groups=(product.variationGroups||[]).filter(group=>group.name&&group.values?.length);
-  const payload:any={name:product.title,sku,type:groups.length?'variable':'simple',regular_price:String(product.price),description:product.longDesc||'',short_description:product.shortDesc||''};
+  const contentSync=(await getState<any>('settings',{}))?.general?.contentSync!==false;
+  const payload:any={name:product.title,sku,type:groups.length?'variable':'simple',regular_price:String(product.price)};
+  if(!id||contentSync){payload.description=product.longDesc||'';payload.short_description=product.shortDesc||'';if(product.images.length)payload.images=product.images.map(src=>({src}))}
   if(product.destinationStatus)payload.status=product.destinationStatus;
-  if(product.images.length)payload.images=product.images.map(src=>({src}));
   if(product.stock!==undefined)Object.assign(payload,{manage_stock:true,stock_quantity:product.stock});
   if(product.weight)payload.weight=String(product.weight);
   if(groups.length)payload.attributes=groups.map(group=>({name:group.name,visible:true,variation:true,options:group.values.slice(0,100)}));

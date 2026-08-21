@@ -72,7 +72,7 @@ Wrangler قفل‌شده در `package-lock.json` هنگام نخستین deploy
 | D1 | `DB` | `scraper4-cloudflare-db` | بله |
 | Queue اصلی | `JOBS` | `scraper4-cloudflare-jobs` | producer + consumer |
 | Dead-letter Queue | `JOBS_DLQ` | `scraper4-cloudflare-jobs-dlq` | DLQ برای `JOBS` |
-| Cron Trigger | — | `*/5 * * * *` | بله |
+| Cron Trigger | — | `* * * * *` | بله |
 | Workers Logs | — | invocation logs | بله |
 
 وجود producer دوم `JOBS_DLQ` عمدی است: Wrangler ابتدا DLQ را می‌سازد و سپس consumer اصلی را با `dead_letter_queue` نصب می‌کند. برنامه لازم نیست روی این binding پیام عادی بفرستد.
@@ -175,7 +175,7 @@ POST /api/source-test
 
 ## Cron، Queue و بازیابی
 
-Cron هر پنج دقیقه:
+Cron هر دقیقه:
 
 - jobهای running راکد را با watchdog می‌بندد؛
 - profileهای موعدرسیده را enqueue می‌کند؛

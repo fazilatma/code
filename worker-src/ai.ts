@@ -31,7 +31,7 @@ function isMistralProvider(provider:AiEndpointProvider):boolean{return provider.
 export function aiModelEndpoint(provider:AiEndpointProvider,model:string):AiModelEndpoint{return isMistralProvider(provider)?MISTRAL_MODEL_ENDPOINTS[model]||'chat-completions':'chat-completions'}
 export function isChatCompatibleAiModel(provider:AiEndpointProvider,model:string):boolean{return aiModelEndpoint(provider,model)==='chat-completions'}
 
-export async function aiCall(provider:Provider,model:string,prompt:string,networkOverride?:Network,timeoutMs?:number){
+export async function aiCall(provider:Provider,model:string,prompt:string,networkOverride?:Network,timeoutMs?:number,batchId?:string){
   const network=networkOverride||(await loadConnections()).ai.network;
   if(!provider.baseUrl||!provider.apiKey||!model)throw new Error('تنظیمات ارائه‌دهنده/مدل کامل نیست');
   const started=Date.now();
@@ -39,12 +39,14 @@ export async function aiCall(provider:Provider,model:string,prompt:string,networ
   const endpointType=aiModelEndpoint(provider,model);
   if(endpointType!=='chat-completions')return mistralDedicatedCall(provider,model,prompt,network,started,endpointType,timeoutMs);
   const endpoint=openAiEndpoint(provider.baseUrl),reportedEndpoint=safeEndpoint(endpoint),reasoning=isReasoningAiModel(provider,model),messages=[{role:'user',content:prompt}],payload:any={model,messages,max_tokens:reasoning?1600:400};if(!reasoning)payload.temperature=.2;
+  if(batchId)return batchChatCall(provider,model,prompt,payload,network,started,timeoutMs,reasoning,batchId);
   let result=await requestAi(endpoint,payload,provider,network,timeoutMs);
   // OpenAI reasoning endpoints use max_completion_tokens while Together-compatible endpoints use max_tokens.
   if(reasoning&&result.response?.status===400&&/max_tokens|max_completion_tokens/i.test(aiErrorMessage(result.body)))result=await requestAi(endpoint,{model,messages,max_completion_tokens:1600},provider,network,timeoutMs);
   if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:reportedEndpoint,latencyMs:Date.now()-started,reasoning,raw:{error:reason}})}
-  const response=result.response!,body=result.body,latencyMs=Date.now()-started;
-  if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${aiErrorMessage(body)||response.statusText||'AI error'}`,{...failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body),reasoning});
+  const response=result.response!,body=result.body,latencyMs=Date.now()-started,errorText=aiErrorMessage(body)||response.statusText||'AI error';
+  if(!response.ok&&isBatchOnlyError(response.status,errorText))return batchChatCall(provider,model,prompt,payload,network,started,timeoutMs,reasoning);
+  if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${errorText}`,{...failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body),reasoning});
   return validatedChatSuccess(provider,model,prompt,reportedEndpoint,latencyMs,response,body,{endpointType:'chat-completions',chatCompatible:true,reasoning});
 }
 
@@ -117,6 +119,38 @@ async function requestAi(endpoint:string,payload:any,provider:Provider,network:N
   try{const response=await networkFetch(endpoint,{method:'POST',headers:{authorization:`Bearer ${provider.apiKey}`,'content-type':'application/json'},body:JSON.stringify(payload)},network,timeoutMs),rawText=await response.text(),body=parseResponse(rawText,provider.apiKey);return{response,body,rawText}}
   catch(error){return{networkError:error instanceof Error?error.message:String(error)}}
 }
+async function requestAiGet(endpoint:string,provider:Provider,network:Network,timeoutMs?:number):Promise<RequestResult>{
+  try{const response=await networkFetch(endpoint,{method:'GET',headers:{authorization:`Bearer ${provider.apiKey}`,accept:'application/json'}},network,timeoutMs),rawText=await response.text(),body=parseResponse(rawText,provider.apiKey);return{response,body,rawText}}
+  catch(error){return{networkError:error instanceof Error?error.message:String(error)}}
+}
+function isBatchOnlyError(status:number,message:string){return(status===404||status===400||status===403)&&/batch api|\/api\/beta\/batches/i.test(message)}
+function batchApiUrl(chatEndpoint:string){const url=new URL(chatEndpoint);url.pathname='/api/beta/batches';url.search='';url.hash='';return url.toString()}
+function sleep(ms:number){return new Promise(resolve=>setTimeout(resolve,Math.max(0,ms)))}
+async function batchChatCall(provider:Provider,model:string,prompt:string,chatPayload:any,network:Network,started:number,timeoutMs:number|undefined,reasoning:boolean,existingId=''){
+  const batchUrl=batchApiUrl(openAiEndpoint(provider.baseUrl)),reported=safeEndpoint(batchUrl),deadline=started+Math.max(4_000,timeoutMs||20_000);
+  const chatBody:any={messages:chatPayload.messages};if(chatPayload.max_tokens)chatBody.max_tokens=chatPayload.max_tokens;if(chatPayload.max_completion_tokens)chatBody.max_completion_tokens=chatPayload.max_completion_tokens;if('temperature' in chatPayload)chatBody.temperature=chatPayload.temperature;
+  let batchId=String(existingId||'').trim(),result:RequestResult|undefined,body:any,response:Response|undefined;
+  if(!batchId){
+    result=await requestAi(batchUrl,{endpoint:'/v1/chat/completions',model,requests:[{custom_id:'s4-1',body:chatBody}]},provider,network,Math.max(1000,deadline-Date.now()));
+    if(result.networkError){const reason=safeError(result.networkError,batchUrl,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:reported,endpointType:'batch',latencyMs:Date.now()-started,reasoning,raw:{error:reason}})}
+    response=result.response;body=result.body;batchId=String(body?.id||'');
+    if(!response?.ok&&response?.status!==202)throw new AiResponseError(`HTTP ${response?.status||0}: ${aiErrorMessage(body)||'Batch API error'}`,{...failureDetail(provider,model,prompt,reported,Date.now()-started,response,body),reasoning,endpointType:'batch',batchId:batchId||null});
+    if(!batchId)throw new AiResponseError('Batch API شناسهٔ دسته برنگرداند.',{...failureDetail(provider,model,prompt,reported,Date.now()-started,response,body),reasoning,endpointType:'batch'});
+  }
+  const terminal=new Set(['completed','failed','expired','cancelled']);
+  while(!terminal.has(String(body?.status||''))&&Date.now()<deadline){
+    await sleep(Math.min(800,Math.max(150,deadline-Date.now())));
+    result=await requestAiGet(`${batchUrl.replace(/\/$/,'')}/${encodeURIComponent(batchId)}`,provider,network,Math.max(1000,deadline-Date.now()));
+    if(result.networkError){const reason=safeError(result.networkError,batchUrl,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:reported,endpointType:'batch',batchId,latencyMs:Date.now()-started,reasoning,raw:{error:reason}})}
+    response=result.response;body=result.body;
+  }
+  const latencyMs=Date.now()-started,status=String(body?.status||''),pending=!terminal.has(status);
+  if(status!=='completed')throw new AiResponseError(pending?`Batch API هنوز تمام نشده (وضعیت: ${status||'pending'}).`:`HTTP ${response?.status||0}: ${aiErrorMessage(body)||status||'Batch API error'}`,{...failureDetail(provider,model,prompt,reported,latencyMs,response,body),reasoning,endpointType:'batch',batchId,phase:pending?'batch-pending':'http',retryable:pending,skipped:pending});
+  const item=(Array.isArray(body?.results)?body.results:[]).find((row:any)=>row.custom_id==='s4-1')||body?.results?.[0],innerError=item?.error,inner=item?.response?.body??item?.body,innerStatus=Number(item?.response?.status_code??item?.response?.status??(inner?200:0));
+  if(innerError)throw new AiResponseError(String(innerError.message||innerError.code||innerError),{...failureDetail(provider,model,prompt,reported,latencyMs,response,body),reasoning,endpointType:'batch',batchId});
+  if(!inner||innerStatus>=400)throw new AiResponseError(`HTTP ${innerStatus}: ${aiErrorMessage(inner)||'پاسخ Batch API خالی بود.'}`,{...failureDetail(provider,model,prompt,reported,latencyMs,response,inner||body),reasoning,endpointType:'batch',batchId});
+  return validatedChatSuccess(provider,model,prompt,reported,latencyMs,response!,inner,{endpointType:'batch',chatCompatible:true,reasoning,batchId});
+}
 function cleanReasoningTags(value:string):string{const original=String(value||'').trim(),without=original.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi,'').replace(/<\/?(?:analysis|reasoning)>/gi,'').trim();return without||original}
 function extractAiResponse(body:any):{text:string;reasoningText:string;reasoningOnly:boolean}{
   const choices=Array.isArray(body?.choices)?body.choices:[],reasoningParts:string[]=[],answers:string[]=[];
@@ -159,8 +193,8 @@ type StoredAiTest={runId:string;startedAt:string;updatedAt:string;prompt:string;
 type AiTestOptions={onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[];skipCurrent?:boolean;skipReason?:string;timeoutMs?:number;retryKey?:string};
 export function isRetryableAiResult(row:any):boolean{
   if(!row||row.ok)return false;
-  if(row.skipped||row.phase==='transport-skip')return true;
-  return /مهلت دریافت|timeout|AbortError|گیر کردن|خودکار رد/i.test([row.error,row.phase,row.catResponse].map(x=>String(x||'')).join(' '));
+  if(row.skipped||row.phase==='transport-skip'||row.phase==='batch-pending')return true;
+  return /مهلت دریافت|timeout|AbortError|گیر کردن|خودکار رد|batch api هنوز/i.test([row.error,row.phase,row.catResponse].map(x=>String(x||'')).join(' '));
 }
 function aiTestTasks(ai:any,providers:Provider[],onlyCandidates:boolean):AiTestTask[]{
   const wanted=new Set<string>(Array.isArray(ai.candidates)?ai.candidates.map(String):[]),tasks:AiTestTask[]=[];
@@ -180,9 +214,9 @@ function skippedAiTestResult(task:AiTestTask,prompt:string,categoryTitle:string,
   const error=String(reason||'پس از چند تلاش، پاسخ این نوبت از Worker دریافت نشد.');
   return{ok:false,skipped:true,retryable:true,phase:'transport-skip',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error,raw:{error},categoryTitle,categoryResult:categoryTitle?{ok:false,skipped:true,phase:'transport-skip',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error,raw:{error}}:null,catResponse:categoryTitle?error:''};
 }
-async function executeAiTestTask(task:AiTestTask,prompt:string,categoryTitle:string,categories:AiCategoryOption[],network:Network,timeoutMs?:number,skipCurrent=false,skipReason=''){
+async function executeAiTestTask(task:AiTestTask,prompt:string,categoryTitle:string,categories:AiCategoryOption[],network:Network,timeoutMs?:number,skipCurrent=false,skipReason='',batchId=''){
   if(skipCurrent)return skippedAiTestResult(task,prompt,categoryTitle,skipReason);
-  let message:any;try{message={...await aiCall(task.p,task.model,prompt,network,timeoutMs),key:task.key}}catch(error){message=aiTestFailure(error,task,prompt)}
+  let message:any;try{message={...await aiCall(task.p,task.model,prompt,network,timeoutMs,batchId),key:task.key}}catch(error){message=aiTestFailure(error,task,prompt)}
   let categoryResult:any=null;
   if(categoryTitle&&!message.ok)categoryResult={ok:false,skipped:true,phase:'message-failed',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error:'چون پاسخ پیام ناموفق بود، تست دسته‌بندی این مدل رد شد تا صف گیر نکند.',raw:{reason:'message-failed'}};
   else if(categoryTitle&&!isChatCompatibleAiModel(task.p,task.model))categoryResult={ok:false,skipped:true,phase:'unsupported-task',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,endpointType:aiModelEndpoint(task.p,task.model),chatCompatible:false,latencyMs:0,error:'این مدل endpoint اختصاصی دارد؛ تست خود مدل انجام شد اما برای دسته‌بندی گفت‌وگویی مناسب نیست.',raw:{reason:'dedicated endpoint model'}};
@@ -205,7 +239,7 @@ export async function testModelBatch(prompt='سلام',options:AiTestOptions={})
   if(retryKey){
     if(!sameRun)throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
     const task=tasks.find(item=>item.key===retryKey);if(!task)throw new Error('مدل برای تلاش مجدد پیدا نشد.');
-    const row=await executeAiTestTask(task,prompt,categoryTitle,categories,ai.network,timeoutMs,Boolean(options.skipCurrent),String(options.skipReason||''));
+    const previous=results.find(item=>item.key===task.key),row=await executeAiTestTask(task,prompt,categoryTitle,categories,ai.network,timeoutMs,Boolean(options.skipCurrent),String(options.skipReason||''),String(previous?.batchId||''));
     const index=results.findIndex(item=>item.key===task.key);row.retryCount=Number((index>=0?results[index]:null)?.retryCount||0)+1;
     if(index>=0)results[index]=row;else results.push(row);
     const updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,categoryTitle,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);

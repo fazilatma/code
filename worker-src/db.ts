@@ -70,8 +70,13 @@ export async function deleteProfile(id: string): Promise<boolean> {
 }
 
 export async function createJob(profileId: string, kind: Job['kind'], target: Job['target']): Promise<Job> {
+  const settings = await getState<any>('settings', {}), dedup = settings?.general?.queueDedup !== false;
   const active = await statement("SELECT * FROM jobs WHERE profile_id=? AND kind=? AND status IN ('queued','running') ORDER BY created_at LIMIT 1",[profileId,kind]).first();
-  if (active) return jobFromRow(active);
+  if (active && dedup) {
+    const job = jobFromRow(active), staleMin = Math.max(1, Number(settings?.general?.queueDedupStale) || 120), age = Date.now() - new Date(job.updatedAt).getTime();
+    if (job.status === 'queued' && age >= staleMin * 60_000) await updateJob(job.id, {status:'failed', phase:'stale-replaced', error:'کار قبلی به‌خاطر ماندن بیش از حد در صف بسته شد تا کار تازه جایگزین شود.', finishedAt: now()});
+    else return job;
+  }
   const id=crypto.randomUUID(),timestamp=now();
   try { await run('INSERT INTO jobs(id,profile_id,kind,target,created_at,updated_at) VALUES(?,?,?,?,?,?)',[id,profileId,kind,target,timestamp,timestamp]); }
   catch (error) {
@@ -97,6 +102,10 @@ export async function stopRequested(id:string):Promise<boolean>{const row=await 
 export async function retryJob(id:string):Promise<Job|null>{const timestamp=now(),changed=await run(`UPDATE jobs SET status='queued',phase='waiting',stop_requested=0,error=NULL,started_at=NULL,finished_at=NULL,processed=0,added=0,updated=0,failed=0,log='[]',updated_at=? WHERE id=? AND status IN ('failed','stopped','done')`,[timestamp,id]);return changed?getJob(id):null;}
 export async function deleteJob(id:string):Promise<boolean>{const deleted=await run("DELETE FROM jobs WHERE id=? AND status!='running'",[id]);if(deleted)await deleteState(`job_checkpoint:${id}`);return Boolean(deleted);}
 export async function clearFinishedJobs():Promise<number>{await run("DELETE FROM app_state WHERE key IN (SELECT 'job_checkpoint:'||id FROM jobs WHERE status IN ('done','failed','stopped'))");return run("DELETE FROM jobs WHERE status IN ('done','failed','stopped')");}
+export async function pruneFinishedJobs(keep=20):Promise<number>{
+  const limit=Math.max(1,Math.min(200,Math.trunc(Number(keep)||20))),finished=await rows<{id:string}>("SELECT id FROM jobs WHERE status IN ('done','failed','stopped') ORDER BY created_at DESC");
+  let deleted=0;for(const row of finished.slice(limit))if(await deleteJob(row.id))deleted++;return deleted;
+}
 
 export async function upsertProduct(profileId:string,product:Product):Promise<'added'|'updated'>{
   const existing=await statement('SELECT 1 AS found FROM products WHERE profile_id=? AND source_key=?',[profileId,product.sourceKey]).first();const timestamp=now();
@@ -150,5 +159,5 @@ export async function restoreBackup(bundle:any):Promise<{profiles:number;product
   for(const row of bundle.states||[]){await setState(row.key,json(row.value,row.value));states++;}return{profiles,products,states};
 }
 export async function profileStats():Promise<any[]>{const profiles=await listProfiles(),result:any[]=[];for(const profile of profiles){const row=await statement('SELECT count(*) products,count(remote_woo_id) woo_mapped,count(remote_basalam_id) basalam_mapped,max(updated_at) last_product_at FROM products WHERE profile_id=?',[profile.id]).first<any>();result.push({id:profile.id,name:profile.name,...row})}return result;}
-export async function reapStalledJobs(minutes=30):Promise<number>{const cutoff=new Date(Date.now()-Math.max(5,minutes)*60_000).toISOString();return run(`UPDATE jobs SET status='failed',phase='watchdog',error='Job was inactive and closed by watchdog',finished_at=?,updated_at=? WHERE status='running' AND updated_at<?`,[now(),now(),cutoff]);}
+export async function reapStalledJobs(minutes=30):Promise<number>{const cutoff=new Date(Date.now()-Math.max(0.5,Number(minutes)||30)*60_000).toISOString();return run(`UPDATE jobs SET status='failed',phase='watchdog',error='Job was inactive and closed by watchdog',finished_at=?,updated_at=? WHERE status='running' AND updated_at<?`,[now(),now(),cutoff]);}
 export async function enqueueDueProfiles():Promise<Job[]>{const timestamp=Date.now(),profiles=await listProfiles(),jobs:Job[]=[];for(const profile of profiles){if(!profile.enabled||!profile.intervalMinutes)continue;const due=!profile.lastRunAt||timestamp-new Date(profile.lastRunAt).getTime()>=profile.intervalMinutes*60_000;if(!due)continue;const job=await createJob(profile.id,profile.noExtract?'sync':'scrape',profile.syncWoo&&profile.syncBasalam?'both':profile.syncWoo?'woo':profile.syncBasalam?'basalam':'none');jobs.push(job);await markProfileRun(profile.id)}return jobs;}

@@ -34,10 +34,10 @@ max_concurrency = 2
 # BACKUPS is intentionally omitted: enabling R2 requires a billing subscription.
 # /api/backup remains available as a downloadable JSON export without R2.
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["* * * * *"]
 
 [vars]
-WORKER_VERSION = "1.10.0"
+WORKER_VERSION = "1.11.0"
 REQUEST_TIMEOUT_MS = "25000"
 MAX_RESPONSE_BYTES = "8000000"
 DETAIL_CONCURRENCY = "2"

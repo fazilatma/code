@@ -26,7 +26,7 @@ class MemoryStatement {
     if(s.startsWith('SELECT * FROM category_learning WHERE phrase='))return[...this.db.categoryLearning.values()].filter(row=>row.phrase===v[0]).sort((a,b)=>b.hits-a.hits)[0]||null;
     return null;
   }
-  async all(){const s=this.sql;let results=[];if(s.startsWith('SELECT * FROM profiles ORDER BY'))results=[...this.db.profiles.values()];if(s.startsWith('SELECT * FROM category_learning ORDER BY'))results=[...this.db.categoryLearning.values()].sort((a,b)=>b.hits-a.hits).slice(0,Number(this.values[0])||1000);return{success:true,results}}
+  async all(){const s=this.sql;let results=[];if(s.startsWith('SELECT * FROM profiles ORDER BY'))results=[...this.db.profiles.values()];if(s.startsWith('SELECT * FROM jobs ORDER BY'))results=[...this.db.jobs.values()].sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0,Number(this.values[0])||200);if(s.startsWith('SELECT id FROM jobs WHERE status IN'))results=[...this.db.jobs.values()].filter(job=>['done','failed','stopped'].includes(job.status)).sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).map(job=>({id:job.id}));if(s.startsWith('SELECT * FROM category_learning ORDER BY'))results=[...this.db.categoryLearning.values()].sort((a,b)=>b.hits-a.hits).slice(0,Number(this.values[0])||1000);return{success:true,results}}
   async run(){const s=this.sql,v=this.values;
     if(s.startsWith('INSERT INTO app_state')){
       const lease=s.includes('WHERE app_state.updated_at<?'),current=this.db.states.get(v[0]),currentAt=this.db.stateUpdatedAt.get(v[0])||'';
@@ -37,6 +37,8 @@ class MemoryStatement {
     else if(s.startsWith('INSERT INTO products'))this.db.products.set(`${v[0]}:${v[1]}`,{profile_id:v[0],source_key:v[1],data:v[2],title:v[3],price:v[4],source_url:v[5]});
     else if(s.startsWith('INSERT INTO category_learning')){const key=`${v[0]}:${v[1]}`,previous=this.db.categoryLearning.get(key);this.db.categoryLearning.set(key,{phrase:v[0],category_id:v[1],category_name:v[2],hits:(previous?.hits||0)+(s.includes('VALUES(?,?,?,1,?)')?1:Number(v[3])||1),updated_at:v.at(-1)})}
     else if(s.startsWith('INSERT INTO jobs'))this.db.jobs.set(v[0],{id:v[0],profile_id:v[1],kind:v[2],target:v[3],status:'queued',phase:'waiting',total:0,processed:0,added:0,updated:0,failed:0,stop_requested:0,error:null,log:'[]',created_at:v[4],updated_at:v[5],started_at:null,finished_at:null});
+    else if(s.includes("WHERE status='running' AND updated_at<?")){let n=0;for(const job of this.db.jobs.values())if(job.status==='running'&&String(job.updated_at||'')<String(v[2])){job.status='failed';job.phase='watchdog';job.error='Job was inactive and closed by watchdog';job.finished_at=v[0];job.updated_at=v[1];n++}return{success:true,meta:{changes:n}}}
+    else if(s.startsWith("DELETE FROM jobs WHERE id=")){const job=this.db.jobs.get(v[0]);if(job&&job.status!=='running'){this.db.jobs.delete(v[0]);return{success:true,meta:{changes:1}}}return{success:true,meta:{changes:0}}}
     return{success:true,meta:{changes:1}};
   }
 }
@@ -80,6 +82,38 @@ test('AI model budget timeout skips the hung model and continues the queue',asyn
     await deliver(sent.shift().message);
     const current=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());
     assert.equal(current.run.cursor,1);assert.equal(current.run.result.results[0].skipped,true);assert.equal(current.run.result.results[0].phase,'transport-skip');assert.ok(current.run.result.skippedStuck>=1);assert.equal(current.run.status,'queued');
+  }finally{globalThis.fetch=originalFetch}
+});
+
+test('Batch-only OpenRouter models are retried on /api/beta/batches and return the completed chat text',async()=>{
+  const originalFetch=globalThis.fetch,originalError=console.error,db=new MemoryD1(),calls=[];console.error=()=>{};
+  try{
+    await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'openrouter',name:'OpenRouter',baseUrl:'https://openrouter.ai/api/v1',apiKey:'or-secret',models:['batch-only-model'],enabled:true}],network:{mode:'direct'}}}));
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request),method=String(init.method||(request instanceof Request?request.method:'GET')||'GET').toUpperCase(),body=init.body?JSON.parse(String(init.body)):null;calls.push({url,method,body});
+      if(url.endsWith('/chat/completions')&&method==='POST')return jsonResponse({error:{message:'This model is only available through the Batch API. Use the /api/beta/batches endpoint instead.',code:404}},404);
+      if(url==='https://openrouter.ai/api/beta/batches'&&method==='POST'){assert.equal(body.endpoint,'/v1/chat/completions');assert.equal(body.model,'batch-only-model');assert.equal(body.requests[0].custom_id,'s4-1');return jsonResponse({id:'batch_123',object:'batch',status:'validating',results:null},202)}
+      if(url==='https://openrouter.ai/api/beta/batches/batch_123'&&method==='GET')return jsonResponse({id:'batch_123',status:'completed',results:[{custom_id:'s4-1',response:{status_code:200,body:{choices:[{message:{content:'پاسخ بچ'}},]},error:null}}]});
+      throw new Error(`unexpected ${method} ${url}`)};
+    const result=await call(db,'/api/test-connection/ai',jsonInit({provider:'openrouter',model:'batch-only-model',prompt:'سلام'})).then(response=>response.json());
+    assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.text,'پاسخ بچ');assert.equal(result.endpointType,'batch');assert.equal(result.batchId,'batch_123');assert.match(result.endpoint,/beta\/batches/);assert.equal(calls[0].url,'https://openrouter.ai/api/v1/chat/completions');assert.equal(calls[1].url,'https://openrouter.ai/api/beta/batches');assert.equal(calls[2].url,'https://openrouter.ai/api/beta/batches/batch_123');assert.doesNotMatch(JSON.stringify(result),/or-secret/);
+  }finally{globalThis.fetch=originalFetch;console.error=originalError}
+});
+
+test('scheduled cron uses live general settings for watchdog, report retention, lock and cron ping',async()=>{
+  const db=new MemoryD1(),pending=[],pings=[],localCtx={waitUntil(promise){pending.push(promise)},passThroughOnException(){}};
+  await call(db,'/api/settings',jsonInit({general:{cronLockMin:1,keepReports:2,queueDedup:true,queueDedupStale:1,contentSync:false},watchdog:{enabled:true,stallAfter:60},notifications:{events:{cronPing:true},pingEvery:1}}));
+  await call(db,'/api/connections',jsonInit({notifications:{url:'https://notify.example/hook',chatId:'c1',token:'hook-token'}}));
+  const stale=new Date(Date.now()-120_000).toISOString();
+  db.jobs.set('stale-job',{id:'stale-job',profile_id:'p',kind:'scrape',target:'none',status:'running',phase:'details',total:1,processed:0,added:0,updated:0,failed:0,stop_requested:0,error:null,log:'[]',created_at:stale,updated_at:stale,started_at:stale,finished_at:null});
+  db.jobs.set('old-done',{id:'old-done',profile_id:'p',kind:'scrape',target:'none',status:'done',phase:'finished',total:1,processed:1,added:1,updated:0,failed:0,stop_requested:0,error:null,log:'[]',created_at:'2020-01-01T00:00:00.000Z',updated_at:'2020-01-01T00:00:00.000Z',started_at:'2020-01-01T00:00:00.000Z',finished_at:'2020-01-01T00:00:01.000Z'});
+  db.jobs.set('new-done',{id:'new-done',profile_id:'p',kind:'scrape',target:'none',status:'done',phase:'finished',total:1,processed:1,added:0,updated:1,failed:0,stop_requested:0,error:null,log:'[]',created_at:'2026-08-21T10:00:00.000Z',updated_at:'2026-08-21T10:00:00.000Z',started_at:'2026-08-21T10:00:00.000Z',finished_at:'2026-08-21T10:00:01.000Z'});
+  const originalFetch=globalThis.fetch;globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request);pings.push(url);if(url==='https://notify.example/hook')return jsonResponse({ok:true});throw new Error('unexpected '+url)};
+  try{
+    const env={DB:db,VAULT_SECRET:'vault-secret',JOBS:{send:async()=>{}},JOBS_DLQ:{send:async()=>{}},WORKER_VERSION:'1.11.0'};
+    await worker.scheduled({cron:'* * * * *',scheduledTime:Date.now()},env,localCtx);await Promise.all(pending);
+    assert.equal(db.jobs.get('stale-job').status,'failed');assert.equal(db.jobs.get('stale-job').phase,'watchdog');
+    assert.equal(db.jobs.has('old-done'),false);assert.equal(db.jobs.has('new-done'),true);
+    assert.ok(pings.includes('https://notify.example/hook'));assert.equal(JSON.parse(db.states.get('cron_lock')).held,false);assert.ok(db.states.get('cron_ping'));
   }finally{globalThis.fetch=originalFetch}
 });
 
