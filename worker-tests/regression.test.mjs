@@ -83,6 +83,25 @@ test('AI model budget timeout skips the hung model and continues the queue',asyn
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('hung AI models are retried three times after the first pass',async()=>{
+  const db=new MemoryD1(),sent=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})},AI_TEST_MODEL_BUDGET_MS:'80',AI_TEST_TIMEOUT_MS:'50'};
+  const env={DB:db,VAULT_SECRET:'vault-secret',JOBS:extra.JOBS,JOBS_DLQ:{send:async()=>{}},AI_TEST_MODEL_BUDGET_MS:'80',AI_TEST_TIMEOUT_MS:'50'};
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'slow',name:'Slow AI',baseUrl:'https://ai.example/v1',apiKey:'slow-secret',models:['hang-1'],enabled:true}],network:{mode:'direct'}}}),extra);
+  const originalFetch=globalThis.fetch;globalThis.fetch=()=>new Promise(()=>{});
+  const deliver=message=>worker.queue({messages:[{body:message,ack(){},retry(){assert.fail('retry pass should ack')}}]},env,ctx);
+  try{
+    await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام'}),extra);
+    let retries=0;
+    for(let i=0;i<8&&sent.length;i++){
+      await deliver(sent.shift().message);
+      const current=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());
+      retries=Number(current.run.result?.results?.[0]?.retryCount||0);
+      if(current.run.status==='done'){assert.equal(retries,3,'a hung model gets three extra attempts at the end');assert.equal(current.run.result.results[0].skipped,true);return}
+    }
+    assert.fail('run did not finish after hung-model retries, last retryCount='+retries)
+  }finally{globalThis.fetch=originalFetch}
+});
+
 test('AI queue checkpoints results server-side until all models finish after a refresh',async()=>{
   const db=new MemoryD1(),sent=[],models=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}},env={DB:db,VAULT_SECRET:'vault-secret',JOBS:null,JOBS_DLQ:{send:async()=>{}}};env.JOBS=extra.JOBS;
   await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'durable',name:'Durable AI',baseUrl:'https://ai.example/v1',apiKey:'durable-ai-secret',models:['model-1','model-2'],enabled:true}],network:{mode:'direct'}}}),extra);

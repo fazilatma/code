@@ -156,7 +156,12 @@ export async function suggestCategoryWithModel(title:string,modelKey:string,cate
 const AI_TEST_MODELS_PER_INVOCATION=1;
 type AiTestTask={p:Provider;model:string;key:string};
 type StoredAiTest={runId:string;startedAt:string;updatedAt:string;prompt:string;categoryTitle:string;onlyCandidates:boolean;total:number;results:any[]};
-type AiTestOptions={onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[];skipCurrent?:boolean;skipReason?:string;timeoutMs?:number};
+type AiTestOptions={onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[];skipCurrent?:boolean;skipReason?:string;timeoutMs?:number;retryKey?:string};
+export function isRetryableAiResult(row:any):boolean{
+  if(!row||row.ok)return false;
+  if(row.skipped||row.phase==='transport-skip')return true;
+  return /مهلت دریافت|timeout|AbortError|گیر کردن|خودکار رد/i.test([row.error,row.phase,row.catResponse].map(x=>String(x||'')).join(' '));
+}
 function aiTestTasks(ai:any,providers:Provider[],onlyCandidates:boolean):AiTestTask[]{
   const wanted=new Set<string>(Array.isArray(ai.candidates)?ai.candidates.map(String):[]),tasks:AiTestTask[]=[];
   for(const p of providers){
@@ -173,7 +178,17 @@ function aiTestResponse(saved:StoredAiTest,tasks:AiTestTask[],cursor:number,next
 }
 function skippedAiTestResult(task:AiTestTask,prompt:string,categoryTitle:string,reason:string){
   const error=String(reason||'پس از چند تلاش، پاسخ این نوبت از Worker دریافت نشد.');
-  return{ok:false,skipped:true,phase:'transport-skip',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error,raw:{error},categoryTitle,categoryResult:categoryTitle?{ok:false,skipped:true,phase:'transport-skip',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error,raw:{error}}:null,catResponse:categoryTitle?error:''};
+  return{ok:false,skipped:true,retryable:true,phase:'transport-skip',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error,raw:{error},categoryTitle,categoryResult:categoryTitle?{ok:false,skipped:true,phase:'transport-skip',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error,raw:{error}}:null,catResponse:categoryTitle?error:''};
+}
+async function executeAiTestTask(task:AiTestTask,prompt:string,categoryTitle:string,categories:AiCategoryOption[],network:Network,timeoutMs?:number,skipCurrent=false,skipReason=''){
+  if(skipCurrent)return skippedAiTestResult(task,prompt,categoryTitle,skipReason);
+  let message:any;try{message={...await aiCall(task.p,task.model,prompt,network,timeoutMs),key:task.key}}catch(error){message=aiTestFailure(error,task,prompt)}
+  let categoryResult:any=null;
+  if(categoryTitle&&!message.ok)categoryResult={ok:false,skipped:true,phase:'message-failed',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error:'چون پاسخ پیام ناموفق بود، تست دسته‌بندی این مدل رد شد تا صف گیر نکند.',raw:{reason:'message-failed'}};
+  else if(categoryTitle&&!isChatCompatibleAiModel(task.p,task.model))categoryResult={ok:false,skipped:true,phase:'unsupported-task',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,endpointType:aiModelEndpoint(task.p,task.model),chatCompatible:false,latencyMs:0,error:'این مدل endpoint اختصاصی دارد؛ تست خود مدل انجام شد اما برای دسته‌بندی گفت‌وگویی مناسب نیست.',raw:{reason:'dedicated endpoint model'}};
+  else if(categoryTitle&&categories.length)try{categoryResult={...await categoryWithTask(task,categoryTitle,categories,network,timeoutMs),key:task.key}}catch(error){categoryResult=aiTestFailure(error,task,categoryTitle)}
+  const row:any={...message,categoryTitle,categoryResult,catResponse:categoryResult?.ok?`${categoryResult.categoryName} (#${categoryResult.categoryId})`:categoryResult?.error||(!categories.length?'فهرست دسته‌بندی در دسترس نیست':'')};
+  row.retryable=isRetryableAiResult(row);return row;
 }
 /**
  * Runs at most one model per Worker invocation. Results are persisted before
@@ -186,17 +201,19 @@ export async function testModelBatch(prompt='سلام',options:AiTestOptions={})
   if(cursor>0&&!sameRun)throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
   const results:any[]=sameRun&&Array.isArray(previous?.results)?[...previous.results]:[];
   if(cursor>results.length)throw new Error('ترتیب ادامهٔ آزمایش معتبر نیست؛ آخرین نتیجه را باز کنید و دوباره ادامه دهید.');
-  if(sameRun&&cursor<results.length){const nextCursor=Math.min(tasks.length,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults=results.slice(cursor,nextCursor),saved={...previous!,total:tasks.length,results};return aiTestResponse(saved,tasks,cursor,nextCursor,batchResults,true)}
-  const batch=tasks.slice(cursor,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults:any[]=[],timeoutMs=Number(options.timeoutMs)>0?Number(options.timeoutMs):undefined;
-  for(const task of batch){
-    if(options.skipCurrent){batchResults.push(skippedAiTestResult(task,prompt,categoryTitle,String(options.skipReason||'')));continue}
-    let message:any;try{message={...await aiCall(task.p,task.model,prompt,ai.network,timeoutMs),key:task.key}}catch(error){message=aiTestFailure(error,task,prompt)}
-    let categoryResult:any=null;
-    if(categoryTitle&&!message.ok)categoryResult={ok:false,skipped:true,phase:'message-failed',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error:'چون پاسخ پیام ناموفق بود، تست دسته‌بندی این مدل رد شد تا صف گیر نکند.',raw:{reason:'message-failed'}};
-    else if(categoryTitle&&!isChatCompatibleAiModel(task.p,task.model))categoryResult={ok:false,skipped:true,phase:'unsupported-task',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,endpointType:aiModelEndpoint(task.p,task.model),chatCompatible:false,latencyMs:0,error:'این مدل endpoint اختصاصی دارد؛ تست خود مدل انجام شد اما برای دسته‌بندی گفت‌وگویی مناسب نیست.',raw:{reason:'dedicated endpoint model'}};
-    else if(categoryTitle&&categories.length)try{categoryResult={...await categoryWithTask(task,categoryTitle,categories,ai.network,timeoutMs),key:task.key}}catch(error){categoryResult=aiTestFailure(error,task,categoryTitle)}
-    batchResults.push({...message,categoryTitle,categoryResult,catResponse:categoryResult?.ok?`${categoryResult.categoryName} (#${categoryResult.categoryId})`:categoryResult?.error||(!categories.length?'فهرست دسته‌بندی در دسترس نیست':'')});
+  const timeoutMs=Number(options.timeoutMs)>0?Number(options.timeoutMs):undefined,retryKey=String(options.retryKey||'').trim();
+  if(retryKey){
+    if(!sameRun)throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
+    const task=tasks.find(item=>item.key===retryKey);if(!task)throw new Error('مدل برای تلاش مجدد پیدا نشد.');
+    const row=await executeAiTestTask(task,prompt,categoryTitle,categories,ai.network,timeoutMs,Boolean(options.skipCurrent),String(options.skipReason||''));
+    const index=results.findIndex(item=>item.key===task.key);row.retryCount=Number((index>=0?results[index]:null)?.retryCount||0)+1;
+    if(index>=0)results[index]=row;else results.push(row);
+    const updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,categoryTitle,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);
+    return aiTestResponse(saved,tasks,cursor,Math.max(cursor,results.length),[row],false);
   }
+  if(sameRun&&cursor<results.length){const nextCursor=Math.min(tasks.length,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults=results.slice(cursor,nextCursor),saved={...previous!,total:tasks.length,results};return aiTestResponse(saved,tasks,cursor,nextCursor,batchResults,true)}
+  const batch=tasks.slice(cursor,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults:any[]=[];
+  for(const task of batch)batchResults.push(await executeAiTestTask(task,prompt,categoryTitle,categories,ai.network,timeoutMs,Boolean(options.skipCurrent),String(options.skipReason||'')));
   const latestSaved=await getState<StoredAiTest|null>('ai_test_results',null);
   if(latestSaved?.runId===runId&&Array.isArray(latestSaved.results)&&latestSaved.results.length>cursor){const nextCursor=Math.min(tasks.length,latestSaved.results.length);return aiTestResponse(latestSaved,tasks,cursor,nextCursor,latestSaved.results.slice(cursor,Math.min(latestSaved.results.length,cursor+AI_TEST_MODELS_PER_INVOCATION)),true)}
   results.push(...batchResults);const nextCursor=Math.min(tasks.length,cursor+batch.length),updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,categoryTitle,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);

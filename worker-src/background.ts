@@ -1,6 +1,6 @@
 import { deleteState, getState, setState } from './db.js';
 import { getEnv } from './env.js';
-import { getLastAiTestResults, isChatCompatibleAiModel, suggestCategoryWithModel, testModelBatch } from './ai.js';
+import { getLastAiTestResults, isChatCompatibleAiModel, isRetryableAiResult, suggestCategoryWithModel, testModelBatch } from './ai.js';
 import { loadConnections } from './connections.js';
 import { applyBasalamCategory, destinationCatalog, destinationCategories } from './maintenance.js';
 import type { BackgroundMessage } from './types.js';
@@ -8,7 +8,7 @@ import type { BackgroundMessage } from './types.js';
 export type BackgroundOutcome={outcome:'complete'|'continue'|'ignored';delaySeconds?:number};
 type RunStatus='queued'|'running'|'paused'|'done'|'failed';
 type BaseRun={id:string;kind:'ai-test'|'category-all';status:RunStatus;phase:string;stopRequested:boolean;createdAt:string;updatedAt:string;startedAt:string|null;finishedAt:string|null;attempts:number;error:string|null};
-type AiTestRun=BaseRun&{kind:'ai-test';prompt:string;categoryTitle:string;onlyCandidates:boolean;delayMs:number;cursor:number;result:any;skipNext?:boolean;currentStartedAt?:string|null;currentKey?:string|null};
+type AiTestRun=BaseRun&{kind:'ai-test';prompt:string;categoryTitle:string;onlyCandidates:boolean;delayMs:number;cursor:number;result:any;skipNext?:boolean;currentStartedAt?:string|null;currentKey?:string|null;retryJobs?:{key:string;left:number}[]};
 type CategoryProduct={id:number;shopId:string;title:string};
 type CategoryRunItem={id:number;shopId:string;title:string;ok:boolean;categoryId?:number;categoryName?:string;source?:string;confidence?:number;error?:string};
 type CategoryRun=BaseRun&{kind:'category-all';modelKeys:string[];page:number;totalPages:number;products:CategoryProduct[];cursor:number;total:number;processed:number;changed:number;failed:number;items:CategoryRunItem[]};
@@ -112,19 +112,33 @@ function withAiTimings(run:AiTestRun,result:any,startedMs:number,skippedStuck:bo
   const ms=Math.max(0,Date.now()-startedMs),previous=Array.isArray(run.result?.timingSamples)?run.result.timingSamples as number[]:[],samples=[...previous,ms].slice(-80),avg=samples.length?Math.round(samples.reduce((a,b)=>a+b,0)/samples.length):0,last=result.batchResults?.[0];
   return{...result,serverSide:true,lastModelAt:now(),lastModelMs:ms,avgMs:avg,timingSamples:samples,skippedStuck:Number(run.result?.skippedStuck||0)+(skippedStuck?1:0),currentKey:null,currentStartedAt:null,lastModelName:last?`${last.providerName||last.provider||''} / ${last.model||''}`:run.result?.lastModelName||''};
 }
+function queueRetryJobs(results:any[]){return (Array.isArray(results)?results:[]).filter(isRetryableAiResult).map((row:any)=>({key:String(row.key),left:3}))}
 async function processAiTest(run:AiTestRun):Promise<BackgroundOutcome>{
   if(run.stopRequested||run.status==='paused')return{outcome:'complete'};
   const budget=Math.max(50,Math.min(60_000,Number(getEnv().AI_TEST_MODEL_BUDGET_MS)||MODEL_BUDGET_MS)),callTimeout=Math.max(50,Math.min(Math.max(50,budget-50),Number(getEnv().AI_TEST_TIMEOUT_MS)||8_000));
-  run.status='running';run.phase='testing';run.startedAt||=now();run.currentStartedAt=now();run.error=null;await writeRun(run);
+  const retrying=Array.isArray(run.retryJobs)&&run.retryJobs.length>0;
+  run.status='running';run.phase=retrying?'retrying':'testing';run.startedAt||=now();run.currentStartedAt=now();run.error=null;await writeRun(run);
   let categories:any[]=[];if(run.categoryTitle)try{categories=(await destinationCategories()).items}catch{/* Model response tests continue without Basalam categories. */}
   const skip=Boolean(run.skipNext);run.skipNext=false;const started=Date.now();
-  const options={runId:run.id,cursor:run.cursor,onlyCandidates:run.onlyCandidates,categoryTitle:run.categoryTitle,categories,timeoutMs:callTimeout,skipCurrent:skip,skipReason:skip?'این مدل پاسخ نداد و نگهبان صف برای جلوگیری از گیر کردن آن را رد کرد.':''};
+  const options:any={runId:run.id,cursor:run.cursor,onlyCandidates:run.onlyCandidates,categoryTitle:run.categoryTitle,categories,timeoutMs:callTimeout,skipCurrent:skip,skipReason:skip?'این مدل پاسخ نداد و نگهبان صف برای جلوگیری از گیر کردن آن را رد کرد.':''};
+  if(retrying)options.retryKey=run.retryJobs![0].key;
   let result:any=await raceBudget(testModelBatch(run.prompt,options),budget),stuck=false;
   if(!result){stuck=true;result=await testModelBatch(run.prompt,{...options,skipCurrent:true,skipReason:'مهلت پاسخ این مدل تمام شد و برای ادامهٔ صف خودکار رد شد.'})}
   const skipped=stuck||skip||Boolean(result.batchResults?.[0]?.skipped&&result.batchResults?.[0]?.phase==='transport-skip');
-  run.cursor=Number(result.nextCursor||run.cursor);run.result=withAiTimings(run,result,started,skipped);run.attempts=0;run.currentKey=null;run.currentStartedAt=null;
-  const latest=await readRun('ai-test',run.id);if(latest?.stopRequested){run.stopRequested=true;run.status='paused';run.phase='paused'}else if(result.done){run.status='done';run.phase='finished';run.finishedAt=now()}else{run.status='queued';run.phase='waiting'}
-  await writeRun(run);return{outcome:result.done||run.status==='paused'?'complete':'continue',delaySeconds:run.delayMs?Math.max(1,Math.ceil(run.delayMs/1000)):1};
+  if(retrying){
+    const job=run.retryJobs![0],row=(result.results||[]).find((item:any)=>item.key===job.key);
+    if(!isRetryableAiResult(row))run.retryJobs!.shift();else{job.left-=1;if(job.left<=0)run.retryJobs!.shift()}
+  }else{
+    run.cursor=Number(result.nextCursor||run.cursor);
+    if(result.done)run.retryJobs=queueRetryJobs(result.results);
+  }
+  run.result={...withAiTimings(run,result,started,skipped),retryPending:(run.retryJobs||[]).length};run.attempts=0;run.currentKey=null;run.currentStartedAt=null;
+  const latest=await readRun('ai-test',run.id);
+  if(latest?.stopRequested){run.stopRequested=true;run.status='paused';run.phase='paused'}
+  else if((run.retryJobs||[]).length){run.status='queued';run.phase='retrying'}
+  else if(result.done||retrying){run.status='done';run.phase='finished';run.finishedAt=now();run.retryJobs=[]}
+  else{run.status='queued';run.phase='waiting'}
+  await writeRun(run);return{outcome:run.status==='queued'?'continue':'complete',delaySeconds:run.delayMs?Math.max(1,Math.ceil(run.delayMs/1000)):1};
 }
 
 function compactCategoryItem(row:any):CategoryRunItem{return{id:Number(row.id),shopId:String(row.shopId||''),title:String(row.title||''),ok:Boolean(row.ok),...(row.categoryId?{categoryId:Number(row.categoryId)}:{}),...(row.categoryName?{categoryName:String(row.categoryName)}:{}),...(row.source?{source:String(row.source)}:{}),...(row.confidence?{confidence:Number(row.confidence)}:{}),...(row.error?{error:String(row.error).slice(0,500)}:{})}}
