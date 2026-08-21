@@ -89,7 +89,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '9.97';
+const APP_VERSION = '9.98';
 const APP_VERSION_DATE = '1405/05/30';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -14161,7 +14161,8 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'onclick="aiExportProviders(1)"') !== false
       && strpos($selfSrc, 'onclick="aiExportProviders(0)"') !== false
       && strpos($selfSrc, 'function aiExportProviders(withKeys)') !== false
-      && strpos($selfSrc, "const url='?ai_export_providers=1&keys='+(withKeys?1:0);") !== false);
+      // v9.98: مسیرِ ساختِ آدرس عوض شد (نسبی → مطلق از راهِ aiUrl)
+      && strpos($selfSrc, "aiUrl('ai_export_" . "providers=1&keys='+(withKeys?1:0))") !== false);
 
     /* ---------- v9.95 (۹ج): مدل‌های متن‌به‌متنِ Mistral ---------- */
     $add('9.95', 'کاتالوگِ Mistral وجود دارد و به اندپوینتِ درست اشاره می‌کند',
@@ -14343,6 +14344,80 @@ if (isset($_GET['selftest'])) {
     $add('9.97', 'مودالِ جزئیات تأخیر و زمانِ جداگانهٔ دسته‌بندی را نشان می‌دهد',
          strpos($selfSrc, "aiRowDetailRow('تأخیر دسته‌بندی',toFa(d.catLatencyMs)+' میلی‌ثانیه')") !== false
       && strpos($selfSrc, "aiRowDetailRow('زمان تستِ دسته‌بندی (UTC)',d.catTestedAt,true)") !== false);
+
+    /* ---------- v9.98 (۱۲): رفعِ باگِ «دکمهٔ برون‌ریزی JSON فایلی دانلود نمی‌کرد» ----------
+       علتِ ریشه‌ای سه‌تایی بود: در JS یک <a href="?..." download=""> موقت ساخته
+       می‌شد که (الف) صفتِ download خالی داشت و مرورگرها به‌جای دانلود ناوبری
+       می‌کردند، (ب) href نسبیِ '?...' بود که زیرِ مسیرهای غیرِ ریشه به فایلِ
+       اشتباه می‌رفت، (ج) هیچ بازخوردی از خطای سرور نمی‌داد. حالا مسیرِ
+       fetch+blob+objectURL (همان روشِ آزموده‌شدهٔ پشتیبان‌گیری) به‌کار می‌رود. */
+    $add('9.98', 'برون‌ریزی دیگر لینکِ نسبی با download خالی نمی‌سازد',
+         strpos($selfSrc, "a.href=url; a.down" . "load='';") === false
+      && strpos($selfSrc, "const url='?ai_export_" . "providers=1&keys='+(withKeys?1:0);") === false);
+    $add('9.98', 'aiUrl آدرسِ مطلقِ همین اسکریپت را می‌سازد',
+         strpos($selfSrc, 'function aiUrl(query)') !== false
+      && strpos($selfSrc, 'new URL(window.location.pathname, window.location.origin)') !== false
+      && strpos($selfSrc, "u.search='?'+String(query||'').replace(") !== false);
+    $add('9.98', 'برون‌ریزی از مسیرِ fetch + blob + objectURL دانلود می‌کند',
+         strpos($selfSrc, 'function aiExportSaveBlob(blob, name)') !== false
+      && strpos($selfSrc, 'const url=URL.createObjectURL(blob);') !== false
+      && strpos($selfSrc, 'a.href=url; a.download=name;') !== false
+      && strpos($selfSrc, "fetch(url,{credentials:'same-origin',cache:'no-store'})") !== false);
+    $add('9.98', 'صفتِ download با نامِ واقعیِ فایل پر می‌شود (نه رشتهٔ خالی)',
+         strpos($selfSrc, 'function aiExportFilename(cd, withKeys)') !== false
+      && strpos($selfSrc, "aiExportSaveBlob(blob,name);") !== false);
+    $add('9.98', 'نامِ فایل از هدرِ Content-Disposition استخراج می‌شود',
+         strpos($selfSrc, "res.headers.get('Content-Disposition')") !== false
+      && strpos($selfSrc, 'aiExportFilename(cd,withKeys)') !== false);
+    $add('9.98', 'اگر هدرِ نام نبود، نامِ یدکی با تاریخ ساخته می‌شود',
+         strpos($selfSrc, "return 'ai-providers-'+d.getFullYear()") !== false
+      && strpos($selfSrc, "+(withKeys?'':'-nokeys')+'.json';") !== false);
+    $add('9.98', 'خطای HTTP و پاسخِ خالی به کاربر گزارش می‌شود',
+         strpos($selfSrc, "if(!res.ok) throw new Error('HTTP '+res.status);") !== false
+      && strpos($selfSrc, "if(!blob||!blob.size) throw new Error('فایل خالی برگشت');") !== false
+      && strpos($selfSrc, "showToast('✗ برون‌ریزی ناموفق: '+msg,1);") !== false);
+    $add('9.98', 'اندپوینتِ سرور پیش از هدرها بافرِ خروجی را پاک می‌کند',
+         (function () use ($selfSrc) {
+             $i = strpos($selfSrc, "isset(\$_GET['ai_export_" . "providers'])");
+             if ($i === false) return false;
+             $body = substr($selfSrc, $i, 1400);
+             $h    = strpos($body, "header('Content-Disposition:");
+             $ob   = strpos($body, 'while (@ob_get_level()) @ob_end_clean();');
+             return $h !== false && $ob !== false && $ob < $h;
+         })());
+    $add('9.98', 'هدرِ nosniff جلوی بازشدنِ فایل در تب را می‌گیرد',
+         strpos($selfSrc, "header('X-Content-Type-Options: nosniff');") !== false);
+    $add('9.98', 'خروجیِ خالی «{}» است نه «[]» تا دوباره قابلِ درون‌ریزی باشد',
+         strpos($selfSrc, "\$json = \$data === []" . "\n      ? '{}'") !== false
+      && json_decode('{}', true) === []);
+    $add('9.98', 'فهرستِ models آرایه می‌ماند و به آبجکتِ ایندکس‌دار تبدیل نمی‌شود',
+         (function () {
+             $d = ['p' => ['id' => 'p', 'models' => [['id' => 'm1'], ['id' => 'm2']]]];
+             $j = json_encode($d, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+             $b = json_decode($j, true);
+             return isset($b['p']['models'][0]['id']) && $b['p']['models'][0]['id'] === 'm1'
+                 && array_keys($b['p']['models']) === [0, 1];
+         })()
+      // و اندپوینت هم دقیقاً همین پرچم‌ها را می‌زند (نه FORCE_OBJECT)
+      && strpos($selfSrc, ": json_encode(\$data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);") !== false);
+    $add('9.98', 'رفت‌وبرگشتِ برون‌ریزی → درون‌ریزی داده را سالم نگه می‌دارد',
+         (function () {
+             $raw = ['gr' => ['id' => 'gr', 'name' => 'Groq', 'vendor' => 'groq',
+                              'url' => 'https://api.groq.com/openai/v1', 'apiKey' => 'gsk-abc',
+                              'enabled' => true,
+                              'models' => [['id' => 'llama-3.3-70b', 'name' => 'Llama', 'free' => true]]]];
+             $norm = aiNormalizeProviders($raw);
+             $json = json_encode($norm, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+                                      | JSON_PRETTY_PRINT);
+             $back = json_decode($json, true);
+             if (!is_array($back) || !isset($back['gr'])) return false;
+             $again = aiNormalizeProviders($back);
+             return ($again['gr']['apiKey'] ?? '') === 'gsk-abc'
+                 && ($again['gr']['url'] ?? '') === 'https://api.groq.com/openai/v1'
+                 && ($again['gr']['models'][0]['id'] ?? '') === 'llama-3.3-70b';
+         })());
+    $add('9.98', 'اسلش‌های URL در فایلِ خروجی escape نمی‌شوند',
+         strpos($selfSrc, 'JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES') !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -19308,15 +19383,27 @@ exit;
    ?ai_export_providers=1        → با کلیدهای API
    ?ai_export_providers=1&keys=0 → بدون کلید (برای اشتراک‌گذاری امن)      */
 if (isset($_GET['ai_export_providers'])) {
+// v9.98: هر بایتی که پیش از هدرها چاپ شده باشد (اخطار PHP، BOM، فیلترِ تم)
+// فایلِ دانلودی را خراب می‌کند و مرورگر به‌جای ذخیره، متن را نشان می‌دهد.
+while (@ob_get_level()) @ob_end_clean();
 $withKeys = (string)($_GET['keys'] ?? '1') !== '0';
 $data = aiProvidersExportArray($withKeys);
-$json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+// v9.98: وقتی هیچ ارائه‌دهنده‌ای نیست، json_encode آرایهٔ خالی را «[]»
+// می‌نویسد و درون‌ریزیِ دوبارهٔ همان فایل بی‌معنا می‌شود. فقط همین حالت
+// به «{}» تبدیل می‌شود — JSON_FORCE_OBJECT به کار نمی‌رود چون فهرستِ
+// models را هم به آبجکتِ ایندکس‌دار («{"0":…}») تبدیل می‌کند.
+$json = $data === []
+      ? '{}'
+      : json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
 if ($json === false) $json = '{}';
 $fname = 'ai-providers-' . date('Y-m-d-His') . ($withKeys ? '' : '-nokeys') . '.json';
 header('Content-Type: application/json; charset=UTF-8');
 header('Content-Disposition: attachment; filename="' . $fname . '"');
 header('Content-Length: ' . strlen($json));
 header('Cache-Control: no-store');
+// v9.98: بدون این هدر، مرورگر ممکن است نوعِ فایل را حدس بزند و به‌جای
+// دانلود آن را در تب باز کند.
+header('X-Content-Type-Options: nosniff');
 echo $json;
 exit;
 }
@@ -29813,6 +29900,25 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'9.98', t:'📤 رفعِ باگ: دکمهٔ «برون‌ریزی JSON» هیچ فایلی دانلود نمی‌کرد', items:[
+    '🐞 دکمه‌های «📤 برون‌ریزی JSON (با کلید)» و «🔒 بدون کلید» فشرده می‌شدند،',
+    '   توستِ «در حال دانلود است» هم می‌آمد، ولی هیچ فایلی ذخیره نمی‌شد.',
+    '🔍 علت سه‌تا بود: (۱) لینکِ موقتی که ساخته می‌شد صفتِ download خالی داشت',
+    '   و مرورگرهای امروزی در این حالت به‌جای دانلود، ناوبری می‌کنند؛',
+    '   (۲) آدرسِ لینک نسبی («?ai_export_providers=1») بود و اگر صفحه زیرِ',
+    '   مسیرِ دیگری باز شده بود، درخواست به فایلِ اشتباهی می‌رفت؛',
+    '   (۳) اگر سرور خطا می‌داد هم باز همان توستِ موفقیت نشان داده می‌شد.',
+    '✅ حالا فایل با همان روشِ آزموده‌شدهٔ «پشتیبان‌گیری تنظیمات» دانلود می‌شود:',
+    '   محتوا با fetch گرفته می‌شود، به blob تبدیل و با نامِ واقعیِ فایل ذخیره',
+    '   می‌شود. نامِ فایل از هدرِ Content-Disposition خوانده می‌شود و اگر نبود،',
+    '   نامی با تاریخ و ساعت ساخته می‌شود.',
+    '🧯 خطاها دیگر بی‌صدا نیستند: کدِ خطای HTTP، پاسخِ خالی و قطعیِ شبکه هرکدام',
+    '   پیامِ روشنِ خودشان را زیرِ دکمه‌ها نشان می‌دهند.',
+    '🛡️ سمتِ سرور هم محکم شد: بافرِ خروجی پیش از ارسالِ هدرها پاک می‌شود تا',
+    '   هیچ بایتِ اضافه‌ای فایل را خراب نکند، هدرِ nosniff اضافه شد، و وقتی هیچ',
+    '   ارائه‌دهنده‌ای ثبت نشده باشد خروجی «{}» است نه «[]» تا دوباره قابلِ',
+    '   درون‌ریزی باشد.',
+  ]},
   {v:'9.97', t:'🏷️ دکمهٔ «تست دوبارهٔ دسته‌بندی» در مودالِ جزئیات', items:[
     '🏷️ در مودالِ «جزئیات کاملِ تستِ مدل» تا حالا فقط یک دکمهٔ «🔁 تست دوبارهٔ',
     '   همین مدل» بود که هر دو درخواست را از نو می‌زد. حالا کنارش دکمهٔ بنفشِ',
@@ -34646,14 +34752,65 @@ function aiImportText(txt){
 }
 function aiImportFromText(){const t=$('aiImportBox');if(t)aiImportText(t.value);}
 /* v9.95 (۹ب): برون‌ریزی (دانلود) فایل JSON تنظیمات هوش‌های مصنوعی.
-   withKeys=1 → با کلیدهای API · withKeys=0 → بدون کلید (اشتراک‌گذاری امن) */
-function aiExportProviders(withKeys){
-    const url='?ai_export_providers=1&keys='+(withKeys?1:0);
+   withKeys=1 → با کلیدهای API · withKeys=0 → بدون کلید (اشتراک‌گذاری امن)
+
+   v9.98 — رفع باگ «دکمه هیچ فایلی دانلود نمی‌کرد»:
+   نسخهٔ قبلی یک <a href="?..." download=""> موقت می‌ساخت و click() می‌زد.
+   سه اشکال داشت: (۱) download='' رشتهٔ خالی است و مرورگرهای مدرن آن را
+   «نام فایل را از سرور بگیر» تعبیر نمی‌کنند بلکه در بسیاری از حالت‌ها کل
+   صفت را نادیده می‌گیرند و به‌جای دانلود ناوبری می‌کنند؛ (۲) href نسبیِ
+   '?...' نسبت به آدرسِ فعلی حل می‌شود و اگر صفحه زیر مسیر دیگری (یا با
+   pathname متفاوت) باز شده باشد کوئری جای درستی نمی‌رود؛ (۳) هیچ بازخوردی
+   از خطای سرور نبود — اگر پاسخ خطا بود کاربر فقط یک توست موفقیت می‌دید.
+
+   راه‌حل: همان مسیرِ آزموده‌شدهٔ «پشتیبان‌گیری تنظیمات» — fetch + blob +
+   objectURL با نامِ فایل استخراج‌شده از هدر Content-Disposition. این روش
+   در همهٔ مرورگرها دانلود واقعی می‌دهد و خطاها را هم نشان می‌دهد. */
+/* v9.98: ساختِ آدرسِ مطلقِ همین اسکریپت + کوئری.
+   href/fetch نسبیِ '?x=1' نسبت به pathname فعلی حل می‌شود؛ اگر صفحه با
+   مسیرِ دایرکتوری (مثلاً /panel/) یا از داخل یک iframe/بازنویسیِ مسیر باز
+   شده باشد، کوئری به فایلِ اشتباهی می‌رود و پاسخ HTML برمی‌گردد نه JSON.
+   با location.pathname آدرسِ دقیقِ همین فایل ساخته می‌شود. */
+function aiUrl(query){
+    try{
+        const u=new URL(window.location.pathname, window.location.origin);
+        u.search='?'+String(query||'').replace(/^\?/,'');
+        return u.toString();
+    }catch(e){ return '?'+String(query||'').replace(/^\?/,''); }
+}
+function aiExportFilename(cd, withKeys){
+    const m=String(cd||'').match(/filename\*?=(?:UTF-8''|")?([^";]+)"?/i);
+    if(m&&m[1]){ try{ return decodeURIComponent(m[1]); }catch(e){ return m[1]; } }
+    const d=new Date(), p=n=>String(n).padStart(2,'0');
+    return 'ai-providers-'+d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())
+         +'-'+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds())
+         +(withKeys?'':'-nokeys')+'.json';
+}
+function aiExportSaveBlob(blob, name){
+    const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
-    a.href=url; a.download='';
+    a.href=url; a.download=name; a.rel='noopener'; a.style.display='none';
     document.body.appendChild(a); a.click();
-    setTimeout(()=>{try{document.body.removeChild(a);}catch(e){}},1500);
-    showToast(withKeys?'📤 فایل تنظیمات (با کلید) در حال دانلود است':'🔒 فایل تنظیمات بدون کلید در حال دانلود است');
+    setTimeout(()=>{try{document.body.removeChild(a);}catch(e){} try{URL.revokeObjectURL(url);}catch(e){}},1500);
+}
+function aiExportProviders(withKeys){
+    const url=aiUrl('ai_export_providers=1&keys='+(withKeys?1:0));
+    const r=$('aiTR');
+    showToast(withKeys?'📤 در حال آماده‌سازی فایل (با کلید)...':'🔒 در حال آماده‌سازی فایل بدون کلید...');
+    fetch(url,{credentials:'same-origin',cache:'no-store'}).then(res=>{
+        if(!res.ok) throw new Error('HTTP '+res.status);
+        const cd=res.headers.get('Content-Disposition')||'';
+        return res.blob().then(b=>({blob:b,name:aiExportFilename(cd,withKeys)}));
+    }).then(({blob,name})=>{
+        if(!blob||!blob.size) throw new Error('فایل خالی برگشت');
+        aiExportSaveBlob(blob,name);
+        showToast('✅ دانلود شد: '+name);
+        if(r)r.innerHTML='<div class="alert alert-success" style="padding:8px;font-size:11px">✅ فایل <code style="direction:ltr">'+esc(name)+'</code> دانلود شد ('+blob.size+' بایت)'+(withKeys?'':' — بدون کلیدهای API')+'</div>';
+    }).catch(e=>{
+        const msg=(e&&e.message)||'خطا';
+        showToast('✗ برون‌ریزی ناموفق: '+msg,1);
+        if(r)r.innerHTML='<div style="background:#7f1d1d;color:#fca5a5;padding:8px;font-size:11px">✗ برون‌ریزی ناموفق: '+esc(msg)+'</div>';
+    });
 }
 /* v9.95 (۹ج): افزودن ارائه‌دهندهٔ Mistral با همهٔ مدل‌های متن‌به‌متن */
 function aiAddMistral(){
