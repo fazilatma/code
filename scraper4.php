@@ -120,7 +120,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.07';
+const APP_VERSION = '10.08';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2729,6 +2729,62 @@ function aiFreeFallbackConfig(): array {
         }
     }
     return ['provider' => null, 'model' => '', 'via' => ''];
+}
+
+/**
+ * v10.08 (۲۲): پیدا کردنِ ارائه‌دهنده برای یک شناسهٔ مدلِ دلخواه.
+ *
+ *  کاربر در فهرستِ «مدل‌های ابزاردار» یک مدل انتخاب می‌کند، ولی آن
+ *  فهرست فقط یک کاتالوگِ راهنماست — کلیدِ واقعی در «اتصالات» است. پس
+ *  باید بگردیم ببینیم کدام اتصالِ فعالِ کاربر این مدل را دارد.
+ *
+ *  دو مرحله: اول تطبیقِ دقیقِ شناسه در مدل‌های همان اتصال؛ اگر نبود،
+ *  حدسِ ارائه‌دهنده از روی نشانیِ اندپوینت (چون کاربر ممکن است مدل را
+ *  در فهرستِ اتصال ثبت نکرده باشد ولی اندپوینتش همان را بپذیرد).
+ *
+ *  اگر هیچ‌کدام جواب نداد آرایهٔ خالی برمی‌گردد و صداکننده باید به
+ *  مدلِ فعالِ پیش‌فرض برگردد — هیچ‌وقت کارِ کاربر را متوقف نمی‌کنیم.
+ */
+function autoResolveModel(string $modelId): array {
+    $modelId = trim($modelId);
+    if ($modelId === '') return [];
+    $providers = aiProvidersLoad();
+
+    // مرحلهٔ ۱: مدل عیناً در فهرستِ یکی از اتصال‌ها ثبت شده است
+    foreach ($providers as $pr) {
+        if (($pr['enabled'] ?? true) === false) continue;
+        foreach (($pr['models'] ?? []) as $m) {
+            if ((string)($m['id'] ?? '') === $modelId) {
+                return ['provider' => $pr, 'model' => $modelId, 'via' => 'exact'];
+            }
+        }
+    }
+
+    // مرحلهٔ ۲: از روی ارائه‌دهندهٔ کاتالوگ، اتصالِ هم‌خانواده را حدس بزن
+    $host = '';
+    foreach (autoFreeToolModels() as $cm) {
+        if ($cm['id'] === $modelId) { $host = (string)$cm['provider']; break; }
+    }
+    if ($host === '') return [];
+    $needle = [
+        'groq'       => 'groq.com',
+        'gemini'     => 'generativelanguage.googleapis.com',
+        'cerebras'   => 'cerebras.ai',
+        'mistral'    => 'mistral.ai',
+        'openrouter' => 'openrouter.ai',
+        'github'     => 'models.inference.ai.azure.com',
+        'nvidia'     => 'integrate.api.nvidia.com',
+        'cloudflare' => 'cloudflare.com',
+    ][$host] ?? '';
+    if ($needle === '') return [];
+    foreach ($providers as $pr) {
+        if (($pr['enabled'] ?? true) === false) continue;
+        $url = strtolower((string)($pr['endpoint'] ?? $pr['url'] ?? ''));
+        if ($url !== '' && strpos($url, $needle) !== false) {
+            return ['provider' => $pr, 'model' => $modelId, 'via' => 'host'];
+        }
+    }
+    return [];
 }
 
 /** فراخوانی چت با ارائه‌دهندهٔ فعال + بک‌آپ خودکارِ مدل رایگان */
@@ -13020,32 +13076,65 @@ if (isset($_GET['catlearn_bulk'])) {
  */
 function autoFreeToolModels(): array {
     $rows = [
-        // ── Groq: سریع‌ترین، بدون کارت، سقفِ روزانهٔ خوب ──
-        ['llama-3.3-70b-versatile', 'Llama 3.3 70B', 'groq', 131000, '۳۰ درخواست/دقیقه · ۱۰۰۰ تا ۱۴۴۰۰ در روز', 'قوی‌ترین انتخابِ رایگان برای ایجنت؛ ابزارها را قابل‌اعتماد صدا می‌زند', 5],
-        ['llama-3.1-8b-instant',    'Llama 3.1 8B Instant', 'groq', 131000, '۳۰ درخواست/دقیقه · ۱۴۴۰۰ در روز', 'سبک و بسیار سریع؛ برای کارهای ساده و پرتکرار', 3],
-        ['moonshotai/kimi-k2-instruct', 'Kimi K2', 'groq', 262000, '۱۰۰۰ در روز', 'حافظهٔ بسیار بلند؛ خوب برای تحلیلِ فهرست‌های طولانی', 4],
-        ['openai/gpt-oss-120b',     'GPT-OSS 120B', 'groq', 131000, '۱۰۰۰ در روز', 'مدلِ بازِ OpenAI؛ در ابزار زدن دقیق است', 4],
-        ['openai/gpt-oss-20b',      'GPT-OSS 20B', 'groq', 131000, '۱۰۰۰ در روز', 'نسخهٔ کوچک‌تر؛ ارزان‌تر از نظر سهمیه', 3],
-        ['qwen/qwen3-32b',          'Qwen3 32B', 'groq', 131000, '۱۰۰۰ در روز', 'فارسی را نسبتاً خوب می‌فهمد', 4],
-        // ── Google AI Studio: سخاوتمندترین سقفِ روزانه ──
-        ['gemini-2.5-flash',        'Gemini 2.5 Flash', 'gemini', 1000000, '۱۵ درخواست/دقیقه · ۱۵۰۰ در روز', 'بهترین نسبتِ سقف به کیفیت؛ حافظهٔ ۱ میلیونی', 5],
-        ['gemini-2.5-flash-lite',   'Gemini 2.5 Flash-Lite', 'gemini', 1000000, '۱۵ درخواست/دقیقه · ۱۵۰۰ در روز', 'سریع‌تر و سبک‌تر؛ برای کارهای تکراری', 4],
-        // ── Cerebras: سریع‌ترین تولیدِ توکن ──
-        ['gpt-oss-120b',            'GPT-OSS 120B (سربراس)', 'cerebras', 131000, '۳۰ درخواست/دقیقه · ~۱M توکن در روز', 'تولیدِ فوق‌سریع؛ برای کارهای طولانی', 4],
-        ['qwen-3-235b-a22b',        'Qwen3 235B', 'cerebras', 131000, '۳۰ درخواست/دقیقه · ~۱M توکن در روز', 'بزرگ‌ترین مدلِ رایگانِ سربراس', 5],
-        // ── Mistral (لایهٔ Experiment) ──
-        ['mistral-small-latest',    'Mistral Small', 'mistral', 256000, '~۱ درخواست/ثانیه · ~۱B توکن در ماه', 'سقفِ ماهانهٔ بسیار بالا؛ نیازمندِ تأییدِ تلفنی', 4],
-        ['ministral-8b-latest',     'Ministral 3 8B', 'mistral', 256000, '~۱ درخواست/ثانیه', 'سبک و ارزان؛ مناسبِ کارهای دوره‌ای', 3],
-        // ── OpenRouter: تنوعِ مدل با یک کلید ──
-        ['deepseek/deepseek-chat:free', 'DeepSeek Chat (رایگان)', 'openrouter', 128000, '۲۰ درخواست/دقیقه · ۵۰ در روز', 'سقفِ روزانه کم است؛ برای کارهای کم‌تکرار', 4],
-        ['meta-llama/llama-3.3-70b-instruct:free', 'Llama 3.3 70B (رایگان)', 'openrouter', 131000, '۵۰ در روز', 'همان Llama از مسیرِ اوپن‌روتر', 4],
-        // ── GitHub Models ──
-        ['gpt-4o-mini',             'GPT-4o mini (گیت‌هاب)', 'github', 128000, '۱۵ درخواست/دقیقه · ۱۵۰ در روز', 'با حسابِ گیت‌هاب؛ سقف بسته به اشتراکِ کوپایلت', 4],
+        /* ── Groq — سریع‌ترین، بدون کارت، سقفِ روزانهٔ خوب ──────────── */
+        ['llama-3.3-70b-versatile', 'Llama 3.3 70B', 'groq', 131000, '۳۰/دقیقه · ۱۰۰۰/روز · ۱۲K توکن‌بردقیقه', 'قوی‌ترین انتخابِ رایگان برای ایجنت؛ ابزارها را قابل‌اعتماد صدا می‌زند', 5, 'balanced'],
+        ['moonshotai/kimi-k2-instruct', 'Kimi K2', 'groq', 262000, '۶۰/دقیقه · ۱۰۰۰/روز', 'حافظهٔ ۲۶۲ هزارتایی؛ بهترین گزینه برای فهرست‌های خیلی بلند', 5, 'longctx'],
+        ['openai/gpt-oss-120b', 'GPT-OSS 120B', 'groq', 131000, '۳۰/دقیقه · ۱۰۰۰/روز · ۸K توکن‌بردقیقه', 'مدلِ بازِ OpenAI؛ در ساختِ آرگومانِ ابزار دقیق است', 5, 'balanced'],
+        ['openai/gpt-oss-20b', 'GPT-OSS 20B', 'groq', 131000, '۳۰/دقیقه · ۱۰۰۰/روز · ۸K توکن‌بردقیقه', 'نسخهٔ کوچک‌تر؛ سهمیهٔ کمتری می‌سوزاند', 4, 'fast'],
+        ['qwen/qwen3-32b', 'Qwen3 32B', 'groq', 131000, '۶۰/دقیقه · ۱۰۰۰/روز', 'فارسی را نسبتاً خوب می‌فهمد؛ گزینهٔ خوبِ میان‌رده', 4, 'balanced'],
+        ['llama-3.1-8b-instant', 'Llama 3.1 8B Instant', 'groq', 131000, '۳۰/دقیقه · ۱۴۴۰۰/روز · ۶K توکن‌بردقیقه', 'سخاوتمندترین سقفِ روزانه؛ برای کارهای ساده و پرتکرار', 3, 'fast'],
+        ['groq/compound', 'Groq Compound', 'groq', 131000, '۳۰/دقیقه · ۲۵۰/روز', 'سامانهٔ ترکیبی با جست‌وجوی وبِ داخلی؛ سقفِ روزانه کم', 4, 'agentic'],
+        ['groq/compound-mini', 'Groq Compound Mini', 'groq', 131000, '۳۰/دقیقه · ۲۵۰/روز', 'نسخهٔ سبکِ ترکیبی؛ سریع‌تر ولی کم‌دقت‌تر', 3, 'agentic'],
+
+        /* ── Google AI Studio — سخاوتمندترین سقفِ روزانه ────────────── */
+        ['gemini-2.5-flash', 'Gemini 2.5 Flash', 'gemini', 1000000, '۱۵/دقیقه · ۱۵۰۰/روز', 'بهترین نسبتِ سقف به کیفیت؛ حافظهٔ ۱ میلیونی', 5, 'longctx'],
+        ['gemini-2.5-flash-lite', 'Gemini 2.5 Flash-Lite', 'gemini', 1000000, '۱۵/دقیقه · ۱۵۰۰/روز', 'سریع‌تر و سبک‌تر؛ برای کارهای تکراریِ روزانه', 4, 'fast'],
+        ['gemini-2.0-flash', 'Gemini 2.0 Flash', 'gemini', 1000000, '۱۵/دقیقه · ۱۵۰۰/روز', 'نسلِ قبل ولی هنوز پایدار و ابزاردار', 4, 'balanced'],
+        ['gemini-2.0-flash-lite', 'Gemini 2.0 Flash-Lite', 'gemini', 1000000, '۳۰/دقیقه · ۱۵۰۰/روز', 'ارزان‌ترین از نظر سهمیه؛ سقفِ دقیقه‌ایِ بالاتر', 3, 'fast'],
+
+        /* ── Cerebras — سریع‌ترین تولیدِ توکن ───────────────────────── */
+        ['gpt-oss-120b', 'GPT-OSS 120B (سربراس)', 'cerebras', 131000, '۳۰/دقیقه · ~۱M توکن/روز', 'تولیدِ فوق‌سریع (~۳۰۰۰ توکن/ثانیه)؛ برای کارهای طولانی', 5, 'fast'],
+        ['qwen-3-235b-a22b-instruct-2507', 'Qwen3 235B', 'cerebras', 131000, '۳۰/دقیقه · ~۱M توکن/روز', 'بزرگ‌ترین مدلِ رایگانِ سربراس؛ استدلالِ قوی', 5, 'balanced'],
+        ['qwen-3-32b', 'Qwen3 32B (سربراس)', 'cerebras', 131000, '۳۰/دقیقه · ~۱M توکن/روز', 'میان‌ردهٔ سریع', 4, 'fast'],
+        ['llama-3.3-70b', 'Llama 3.3 70B (سربراس)', 'cerebras', 131000, '۳۰/دقیقه · ~۱M توکن/روز', 'همان Llama با سرعتِ سربراس', 4, 'balanced'],
+
+        /* ── Mistral (لایهٔ Experiment) ─────────────────────────────── */
+        ['mistral-large-latest', 'Mistral Large 3', 'mistral', 256000, '~۱/ثانیه · ~۱B توکن/ماه', 'قوی‌ترین مدلِ میسترال؛ فراخوانیِ ابزارِ موازی دارد', 5, 'balanced'],
+        ['mistral-medium-latest', 'Mistral Medium 3.1', 'mistral', 256000, '~۱/ثانیه · ~۱B توکن/ماه', 'تعادلِ خوبِ کیفیت و سرعت', 4, 'balanced'],
+        ['mistral-small-latest', 'Mistral Small 3.2', 'mistral', 256000, '~۱/ثانیه · ~۱B توکن/ماه', 'سقفِ ماهانهٔ بسیار بالا؛ نیازمندِ تأییدِ تلفنی', 4, 'balanced'],
+        ['ministral-8b-latest', 'Ministral 3 8B', 'mistral', 256000, '~۱/ثانیه · ~۱B توکن/ماه', 'سبک و ارزان؛ مناسبِ کارهای دوره‌ای', 3, 'fast'],
+        ['ministral-3b-latest', 'Ministral 3 3B', 'mistral', 128000, '~۱/ثانیه · ~۱B توکن/ماه', 'کوچک‌ترین؛ فقط برای کارهای بسیار ساده', 2, 'fast'],
+        ['codestral-latest', 'Codestral', 'mistral', 256000, '~۱/ثانیه · ~۱B توکن/ماه', 'تخصصیِ کد؛ برای کارهای دادهٔ ساخت‌یافته خوب است', 3, 'code'],
+
+        /* ── OpenRouter — تنوعِ مدل با یک کلید ──────────────────────── */
+        ['deepseek/deepseek-chat-v3.1:free', 'DeepSeek V3.1 (رایگان)', 'openrouter', 164000, '۲۰/دقیقه · ۵۰/روز', 'کیفیتِ بالا؛ سقفِ روزانه کم — برای کارهای کم‌تکرار', 5, 'balanced'],
+        ['deepseek/deepseek-r1:free', 'DeepSeek R1 (رایگان)', 'openrouter', 164000, '۲۰/دقیقه · ۵۰/روز', 'مدلِ استدلالی؛ کندتر ولی در تصمیمِ چندمرحله‌ای بهتر', 5, 'reasoning'],
+        ['meta-llama/llama-3.3-70b-instruct:free', 'Llama 3.3 70B (رایگان)', 'openrouter', 131000, '۲۰/دقیقه · ۵۰/روز', 'همان Llama از مسیرِ اوپن‌روتر', 4, 'balanced'],
+        ['qwen/qwen3-235b-a22b:free', 'Qwen3 235B (رایگان)', 'openrouter', 131000, '۲۰/دقیقه · ۵۰/روز', 'بزرگ و توانمند؛ سقفِ روزانه محدود', 4, 'balanced'],
+        ['mistralai/mistral-small-3.2-24b-instruct:free', 'Mistral Small 3.2 (رایگان)', 'openrouter', 128000, '۲۰/دقیقه · ۵۰/روز', 'میسترال بدونِ نیاز به تأییدِ تلفنی', 4, 'balanced'],
+        ['google/gemini-2.0-flash-exp:free', 'Gemini 2.0 Flash (رایگان)', 'openrouter', 1000000, '۲۰/دقیقه · ۵۰/روز', 'جمینای بدونِ کلیدِ گوگل', 4, 'longctx'],
+
+        /* ── GitHub Models — با حسابِ گیت‌هاب ───────────────────────── */
+        ['gpt-4o-mini', 'GPT-4o mini (گیت‌هاب)', 'github', 128000, '۱۵/دقیقه · ۱۵۰/روز', 'پایدار و دقیق در ابزار؛ سقف بسته به اشتراکِ کوپایلت', 4, 'balanced'],
+        ['gpt-4o', 'GPT-4o (گیت‌هاب)', 'github', 128000, '۱۰/دقیقه · ۵۰/روز', 'کیفیتِ بالا؛ سقفِ روزانهٔ کم', 5, 'balanced'],
+        ['gpt-4.1', 'GPT-4.1 (گیت‌هاب)', 'github', 1000000, '۱۰/دقیقه · ۵۰/روز', 'حافظهٔ یک‌میلیونی؛ برای تحلیلِ کاتالوگِ بزرگ', 5, 'longctx'],
+        ['gpt-4.1-mini', 'GPT-4.1 mini (گیت‌هاب)', 'github', 1000000, '۱۵/دقیقه · ۱۵۰/روز', 'نسخهٔ سبکِ ۴.۱ با همان حافظه', 4, 'fast'],
+        ['Phi-4', 'Phi-4 (گیت‌هاب)', 'github', 16000, '۱۵/دقیقه · ۱۵۰/روز', 'کوچک و سریع؛ حافظهٔ کم — برای کارهای کوتاه', 3, 'fast'],
+
+        /* ── NVIDIA NIM — ۱۲۰+ مدل با کلیدِ رایگان ──────────────────── */
+        ['meta/llama-3.3-70b-instruct', 'Llama 3.3 70B (انویدیا)', 'nvidia', 131000, '~۴۰/دقیقه · ~۱۰۰۰/روز', 'کیفیتِ خوب؛ پشتیبانیِ ابزار جزئی است', 4, 'balanced'],
+        ['nvidia/llama-3.3-nemotron-super-49b-v1', 'Nemotron Super 49B', 'nvidia', 131000, '~۴۰/دقیقه · ~۱۰۰۰/روز', 'تنظیم‌شدهٔ انویدیا برای دنبال‌کردنِ دستور', 4, 'balanced'],
+        ['qwen/qwen2.5-coder-32b-instruct', 'Qwen2.5 Coder 32B', 'nvidia', 131000, '~۴۰/دقیقه · ~۱۰۰۰/روز', 'تخصصیِ کد و دادهٔ ساخت‌یافته', 3, 'code'],
+
+        /* ── Cloudflare Workers AI — روی همان حسابِ کلادفلر ─────────── */
+        ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', 'Llama 3.3 70B (کلادفلر)', 'cloudflare', 24000, '۱۰ هزار نورون/روز', 'حافظهٔ کم؛ پشتیبانیِ ابزار جزئی — برای کارهای کوتاه', 3, 'fast'],
+        ['@cf/meta/llama-4-scout-17b-16e-instruct', 'Llama 4 Scout 17B', 'cloudflare', 131000, '۱۰ هزار نورون/روز', 'نسلِ ۴؛ حافظهٔ بهتر از بقیهٔ مدل‌های کلادفلر', 4, 'balanced'],
+        ['@cf/qwen/qwen2.5-coder-32b-instruct', 'Qwen2.5 Coder (کلادفلر)', 'cloudflare', 32000, '۱۰ هزار نورون/روز', 'تخصصیِ کد روی زیرساختِ کلادفلر', 3, 'code'],
     ];
     $out = [];
     foreach ($rows as $r) {
         $out[] = ['id' => $r[0], 'name' => $r[1], 'provider' => $r[2], 'context' => $r[3],
-                  'limit' => $r[4], 'note' => $r[5], 'quality' => $r[6]];
+                  'limit' => $r[4], 'note' => $r[5], 'quality' => $r[6], 'tag' => $r[7]];
     }
     return $out;
 }
@@ -13059,6 +13148,20 @@ function autoProviderInfo(): array {
         'mistral'    => ['name' => 'Mistral AI',      'key' => 'console.mistral.ai', 'card' => false],
         'openrouter' => ['name' => 'OpenRouter',      'key' => 'openrouter.ai/keys', 'card' => false],
         'github'     => ['name' => 'GitHub Models',   'key' => 'github.com/marketplace/models', 'card' => false],
+        'nvidia'     => ['name' => 'NVIDIA NIM',      'key' => 'build.nvidia.com',   'card' => false],
+        'cloudflare' => ['name' => 'Cloudflare Workers AI', 'key' => 'dash.cloudflare.com', 'card' => false],
+    ];
+}
+
+/** برچسبِ فارسیِ «جنسِ» هر مدل — برای فیلترِ فهرست */
+function autoModelTags(): array {
+    return [
+        'balanced'  => ['label' => 'متعادل',      'icon' => '⚖️'],
+        'fast'      => ['label' => 'سریع',        'icon' => '⚡'],
+        'longctx'   => ['label' => 'حافظهٔ بلند', 'icon' => '📚'],
+        'reasoning' => ['label' => 'استدلالی',    'icon' => '🧠'],
+        'agentic'   => ['label' => 'ایجنتی',      'icon' => '🤖'],
+        'code'      => ['label' => 'کد',          'icon' => '💻'],
     ];
 }
 
@@ -13262,7 +13365,7 @@ function autoRunJob(array $cn, array $job): array {
     $entry = ['t' => time(), 'mode' => $job['mode'], 'ok' => false,
               'summary' => '', 'calls' => 0, 'changes' => 0, 'took' => 0.0, 'error' => ''];
     try {
-        $res = agentRun($cn, $job['prompt'], $job['mode']);
+        $res = agentRun($cn, $job['prompt'], $job['mode'], (string)($job['model'] ?? ''));
         $entry['ok']      = !empty($res['ok']);
         $entry['summary'] = (string)($res['summary'] ?? '');
         $entry['calls']   = (int)($res['calls'] ?? 0);
@@ -13336,6 +13439,7 @@ if (isset($_GET['auto_catalog'])) {
         'ok'        => true,
         'models'    => autoFreeToolModels(),
         'providers' => autoProviderInfo(),
+        'tags'      => autoModelTags(),
         'tasks'     => autoTaskCatalog(),
         'intervals' => $iv,
     ], JSON_UNESCAPED_UNICODE);
@@ -17075,6 +17179,85 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'html[data-fx=' . '"on"] #fxTop{position:fixed') !== false
       && strpos($selfSrc, 'z-index:99998')  !== false
       && 99998 > 10050);
+
+    /* ---------- v10.08 (۲۲): فهرستِ انتخاب‌پذیرِ مدل‌های ابزاردار ---------- */
+    $add('10.08', 'کاتالوگْ فهرستِ جامعی از مدل‌های ابزاردار است، نه چند نمونه',
+         (function () {
+             $m = autoFreeToolModels();
+             $p = [];
+             foreach ($m as $r) { $p[$r['provider']] = true; }
+             return count($m) >= 35 && count($p) >= 8;
+         })());
+    $add('10.08', 'هر ردیفِ مدل ستون‌های کاملِ لازم برای انتخاب را دارد',
+         (function () {
+             foreach (autoFreeToolModels() as $r) {
+                 foreach (['id','name','provider','context','limit','note','quality','tag'] as $k) {
+                     if (!array_key_exists($k, $r)) return false;
+                 }
+                 if ($r['id'] === '' || $r['context'] <= 0) return false;
+                 if ($r['quality'] < 1 || $r['quality'] > 5) return false;
+             }
+             return true;
+         })());
+    $add('10.08', 'شناسهٔ مدل‌ها یکتاست و هر مدل ارائه‌دهندهٔ شناخته‌شده دارد',
+         (function () {
+             $ids = []; $info = autoProviderInfo();
+             foreach (autoFreeToolModels() as $r) {
+                 if (isset($ids[$r['id']])) return false;
+                 $ids[$r['id']] = true;
+                 if (!isset($info[$r['provider']])) return false;
+             }
+             return true;
+         })());
+    $add('10.08', 'برچسبِ جنسِ هر مدل در جدولِ برچسب‌ها تعریف شده است',
+         (function () {
+             $tags = autoModelTags();
+             if (count($tags) < 4) return false;
+             foreach ($tags as $t) { if (($t['label'] ?? '') === '' || ($t['icon'] ?? '') === '') return false; }
+             foreach (autoFreeToolModels() as $r) { if (!isset($tags[$r['tag']])) return false; }
+             return true;
+         })());
+    $add('10.08', 'اندپوینتِ کاتالوگ برچسب‌ها را هم به رابط می‌دهد',
+         strpos($selfSrc, "'tags'      => autoModel" . "Tags(),") !== false);
+    $add('10.08', 'انتخابِ مدل روی خودِ کار ذخیره می‌شود',
+         strpos($selfSrc, "'model'" . "    => (string)(\$r['model'] ?? '')") !== false
+      && strpos($selfSrc, "fd.append('model'") !== false);
+    $add('10.08', 'مدلِ انتخابیِ کار به اجرای ایجنت پاس داده می‌شود',
+         strpos($selfSrc, "agentRun(\$cn, \$job['prompt'], \$job['mode'], (string)(\$job['model'] ?? ''))") !== false
+      && (function () {
+             $f = new ReflectionFunction('agentRun');
+             $ps = $f->getParameters();
+             return count($ps) === 4 && $ps[3]->getName() === 'model' && $ps[3]->isOptional();
+         })());
+    $add('10.08', 'اجرای ایجنت با مدلِ سنجاق‌شده مسیرِ ارائه‌دهندهٔ همان مدل را می‌رود',
+         strpos($selfSrc, "\$pin ? aiProviderCall(\$pin['provider'], \$pin['model'], \$payload)") !== false
+      && strpos($selfSrc, 'function autoResolveModel') !== false);
+    $add('10.08', 'مدلِ ناموجود کار را زمین نمی‌زند و به پیش‌فرض برمی‌گردد',
+         autoResolveModel('یک-مدلِ-کاملاً-ناموجود') === []
+      && autoResolveModel('') === []
+      && strpos($selfSrc, 'مدلِ پیش‌فرض استفاده می‌شود') !== false);
+    $add('10.08', 'حلِ مدل فقط اتصال‌های روشن را در نظر می‌گیرد',
+         strpos($selfSrc, "if ((\$pr['enabled'] ?? true) === false) continue;") !== false
+      && substr_count($selfSrc, "if ((\$pr['enabled'] ?? true) === false) continue;") === 2);
+    $add('10.08', 'فرمِ کار منویِ مدل و راهنمای آن را دارد',
+         strpos($selfSrc, 'id="apModel"')     !== false
+      && strpos($selfSrc, 'id="apModelHint"') !== false
+      && strpos($selfSrc, 'id="apModelFilter"') !== false
+      && strpos($selfSrc, 'function apFillModelSelect') !== false
+      && strpos($selfSrc, 'function apModelHint')       !== false);
+    $add('10.08', 'کارت‌های فهرست دکمهٔ انتخاب دارند و شناسهٔ اسلش‌دار را سالم می‌فرستند',
+         strpos($selfSrc, "apPickModel(\\''+jsAttr(m.id)+'\\')") !== false
+      && strpos($selfSrc, 'function apPickModel') !== false
+      && strpos($selfSrc, 'function apRenderModelList') !== false);
+    $add('10.08', 'انتخابِ نامعتبر انتخابِ قبلیِ کاربر را پاک نمی‌کند',
+         strpos($selfSrc, 'const prev = sel.value;') !== false
+      && strpos($selfSrc, "sel.value = prev; showToast('این مدل در فهرست نیست',true)") !== false);
+    $add('10.08', 'ویرایش و ریستِ فرم مقدارِ مدل را هم می‌برند و برمی‌گردانند',
+         strpos($selfSrc, "ms.value = j.model || ''") !== false
+      && strpos($selfSrc, "ms.value = ''; apModelHint();") !== false);
+    $add('10.08', 'فیلترِ برچسبی فهرست را محدود می‌کند بی‌آنکه کاتالوگ را دوباره بگیرد',
+         strpos($selfSrc, 'function apRenderModelFilter') !== false
+      && strpos($selfSrc, 'apModelsCache.filter(function(m){return m.tag===tag;})') !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -28475,10 +28658,17 @@ function agentSystemPrompt(string $mode): string {
  * $mode: sim | dry | live
  * خروجی: گزارشِ کامل برای AGENT_RESULT_FILE
  */
-function agentRun(array $cn, string $task, string $mode): array {
+function agentRun(array $cn, string $task, string $mode, string $model = ''): array {
     $t0  = microtime(true);
     $ctx = ['cn' => $cn, 'mode' => $mode];
     $tools = agentToolSpecs();
+    /* v10.08: اگر کار مدلِ دلخواه دارد و آن مدل در اتصال‌های کاربر پیدا
+       شد، همهٔ گام‌های همین اجرا با همان مدل زده می‌شوند. پیدا نشد ⇒
+       بی‌صدا به مدلِ فعالِ پیش‌فرض برمی‌گردیم تا کار زمین نماند. */
+    $pin = $model !== '' ? autoResolveModel($model) : [];
+    if ($model !== '' && !$pin) {
+        agentProgress(['log_add' => ['⚠️ مدلِ «' . $model . '» در اتصال‌ها پیدا نشد؛ مدلِ پیش‌فرض استفاده می‌شود']]);
+    }
 
     $messages = [
         ['role' => 'system', 'content' => agentSystemPrompt($mode)],
@@ -28495,7 +28685,7 @@ function agentRun(array $cn, string $task, string $mode): array {
 
         $payload = ['messages' => $messages, 'tools' => $tools, 'tool_choice' => 'auto',
                     'temperature' => 0.1, 'max_tokens' => 1200];
-        $r = aiActiveChat($payload);
+        $r = $pin ? aiProviderCall($pin['provider'], $pin['model'], $payload) : aiActiveChat($payload);
 
         if (empty($r['ok'])) {
             $err = (string)($r['error'] ?? ('HTTP ' . (int)($r['code'] ?? 0)));
@@ -29688,6 +29878,12 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 
 <div class="crow" style="align-items:center;margin-top:6px">
+<label>مدلِ هوش مصنوعی:</label>
+<select id="apModel" style="flex:1;font-size:11px"></select>
+</div>
+<div style="font-size:9.5px;color:#64748b;margin:2px 0 0;line-height:1.7" id="apModelHint">مدلِ پیش‌فرضِ اتصالات استفاده می‌شود</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
 <label>حالت اجرا:</label>
 <select id="apMode" style="flex:1;font-size:11px">
 <option value="sim">🧪 شبیه‌سازی — دادهٔ نمونه، بدون هیچ اتصالی</option>
@@ -29717,6 +29913,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 
 <!-- ── مدل‌های رایگانِ ابزاردار ── -->
+<div id="apModelFilter" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px"></div>
 <div style="margin-top:12px">
 <div style="font-size:11px;color:#60a5fa;font-weight:700;margin-bottom:4px">🆓 مدل‌های رایگانی که فراخوانیِ ابزار دارند</div>
 <div style="font-size:10px;color:#64748b;margin-bottom:6px;line-height:1.8">
@@ -39019,6 +39216,25 @@ function aiTab(tab){
 
 let apCatalog = null;      // کاتالوگِ مدل‌ها/کارها/دوره‌ها (یک‌بار بارگذاری)
 let apJobsCache = [];      // آخرین فهرستِ کارها
+let apModelsCache = [];    // v10.08: کاتالوگِ مدل‌های ابزاردار
+let apTagsCache = {};      // v10.08: برچسب‌های جنسِ مدل
+let apProvCache = {};      // v10.08: اطلاعاتِ ارائه‌دهنده‌ها
+
+/** انتخابِ یک مدل از فهرست ⇒ نشستن در منویِ فرمِ کار */
+function apPickModel(id){
+    const sel = $('apModel');
+    if(!sel) return;
+    /* اگر شناسه در منو نباشد مرورگر value را خالی می‌کند و انتخابِ قبلیِ
+       کاربر بی‌سروصدا پاک می‌شود؛ پس قبلش نگه می‌داریم و برمی‌گردانیم. */
+    const prev = sel.value;
+    sel.value = id;
+    if(sel.value !== id){ sel.value = prev; showToast('این مدل در فهرست نیست',true); return; }
+    apModelHint();
+    fxOkFlash('apModel');
+    const m = apModelsCache.filter(function(x){return x.id===id;})[0];
+    showToast('مدل انتخاب شد: ' + (m ? m.name : id));
+    softScrollIntoView(sel,{behavior:'smooth',block:'center'});
+}
 let apLogTimer = null;     // تایمرِ نوسازیِ مودالِ لاگ
 
 /** کاتالوگ را یک‌بار می‌گیرد و بخش‌های ثابتِ تب را می‌سازد */
@@ -39053,36 +39269,12 @@ function apRenderCatalog(){
     }
 
     // ── مدل‌های رایگانِ ابزاردار ──
-    const ml = $('apModelList');
-    if(ml){
-        const byProv = {};
-        d.models.forEach(function(m){ (byProv[m.provider] = byProv[m.provider] || []).push(m); });
-        let h = '';
-        Object.keys(byProv).forEach(function(p){
-            const info = d.providers[p] || {name:p, key:'', card:false};
-            h += '<div style="margin-bottom:8px">'
-              +  '<div style="font-size:10.5px;color:#93c5fd;font-weight:700;margin-bottom:3px">'
-              +  esc(info.name)
-              +  ' <span style="font-size:9px;color:#64748b;font-weight:400">'+esc(info.key)+'</span>'
-              +  (info.card ? '' : ' <span style="font-size:8.5px;background:#065f46;color:#6ee7b7;padding:1px 5px;border-radius:4px">بدون کارت</span>')
-              +  '</div>';
-            byProv[p].forEach(function(m){
-                const stars = '★'.repeat(m.quality) + '☆'.repeat(5-m.quality);
-                h += '<div style="background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:6px 8px;margin-bottom:3px">'
-                  +  '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
-                  +  '<b style="color:#e2e8f0;font-size:10.5px">'+esc(m.name)+'</b>'
-                  +  '<code style="font-size:9px;color:#64748b;background:#111c31;padding:1px 5px;border-radius:4px">'+esc(m.id)+'</code>'
-                  +  '<span style="font-size:9px;color:#fbbf24;margin-right:auto">'+stars+'</span>'
-                  +  '</div>'
-                  +  '<div style="font-size:9.5px;color:#64748b;margin-top:3px;line-height:1.7">'
-                  +  '📊 '+toFa(Math.round(m.context/1000))+'K حافظه · ⏱ '+esc(m.limit)
-                  +  '<br>💡 '+esc(m.note)+'</div>'
-                  +  '</div>';
-            });
-            h += '</div>';
-        });
-        ml.innerHTML = h;
-    }
+    apModelsCache = d.models || [];
+    apTagsCache   = d.tags || {};
+    apProvCache   = d.providers || {};
+    apFillModelSelect();
+    apRenderModelFilter();
+    apRenderModelList('all');
 
     // ── کارهای ممکن ──
     const tl = $('apTaskList');
@@ -39104,6 +39296,103 @@ function apRenderCatalog(){
         });
         tl.innerHTML = h;
     }
+}
+
+/** پر کردنِ منویِ انتخابِ مدل در فرمِ کار */
+function apFillModelSelect(){
+    const sel = $('apModel');
+    if(!sel) return;
+    const keep = sel.value;
+    let h = '<option value="">🔗 مدلِ پیش‌فرضِ اتصالات</option>';
+    const byProv = {};
+    apModelsCache.forEach(function(m){ (byProv[m.provider] = byProv[m.provider] || []).push(m); });
+    Object.keys(byProv).forEach(function(p){
+        const info = apProvCache[p] || {name:p};
+        h += '<optgroup label="'+esc(info.name)+'">';
+        byProv[p].forEach(function(m){
+            const t = apTagsCache[m.tag] || {icon:'',label:''};
+            h += '<option value="'+esc(m.id)+'">'+t.icon+' '+esc(m.name)
+              +  ' — '+'★'.repeat(m.quality)+'</option>';
+        });
+        h += '</optgroup>';
+    });
+    sel.innerHTML = h;
+    if(keep) sel.value = keep;
+    sel.onchange = apModelHint;
+    apModelHint();
+}
+
+/** توضیحِ زیرِ منو: سقف و ویژگیِ مدلِ انتخاب‌شده */
+function apModelHint(){
+    const sel = $('apModel'), hint = $('apModelHint');
+    if(!sel || !hint) return;
+    const m = apModelsCache.filter(function(x){return x.id===sel.value;})[0];
+    if(!m){
+        hint.innerHTML = 'مدلِ پیش‌فرضِ اتصالات استفاده می‌شود — اگر مدلی انتخاب کنید باید کلیدش در بخشِ «اتصالات» ثبت شده باشد.';
+        return;
+    }
+    const info = apProvCache[m.provider] || {name:m.provider,key:''};
+    hint.innerHTML = '<b style="color:#93c5fd">'+esc(info.name)+'</b> · 📊 '
+        + toFa(Math.round(m.context/1000))+'K حافظه · ⏱ '+esc(m.limit)
+        + '<br>💡 '+esc(m.note)
+        + '<br><span style="color:#fbbf24">کلید از ' + esc(info.key) + ' — باید در «اتصالات» ثبت شود</span>';
+}
+
+/** دکمه‌های فیلترِ جنسِ مدل */
+function apRenderModelFilter(){
+    const f = $('apModelFilter');
+    if(!f) return;
+    const counts = {};
+    apModelsCache.forEach(function(m){ counts[m.tag] = (counts[m.tag]||0)+1; });
+    let h = '<button class="btn btn-blue" onclick="apRenderModelList(\'all\')" '
+          + 'style="flex:0;font-size:9px;padding:2px 7px">همه ('+toFa(apModelsCache.length)+')</button>';
+    Object.keys(apTagsCache).forEach(function(k){
+        if(!counts[k]) return;
+        const t = apTagsCache[k];
+        h += '<button class="btn btn-gray" onclick="apRenderModelList(\''+k+'\')" '
+          +  'style="flex:0;font-size:9px;padding:2px 7px">'+t.icon+' '+esc(t.label)
+          +  ' ('+toFa(counts[k])+')</button>';
+    });
+    f.innerHTML = h;
+}
+
+/** فهرستِ کارتیِ مدل‌ها با دکمهٔ انتخاب */
+function apRenderModelList(tag){
+    const ml = $('apModelList');
+    if(!ml) return;
+    const rows = (tag==='all') ? apModelsCache
+               : apModelsCache.filter(function(m){return m.tag===tag;});
+    const byProv = {};
+    rows.forEach(function(m){ (byProv[m.provider] = byProv[m.provider] || []).push(m); });
+    let h = '';
+    Object.keys(byProv).forEach(function(p){
+            const info = apProvCache[p] || {name:p, key:'', card:false};
+            h += '<div style="margin-bottom:8px">'
+              +  '<div style="font-size:10.5px;color:#93c5fd;font-weight:700;margin-bottom:3px">'
+              +  esc(info.name)
+              +  ' <span style="font-size:9px;color:#64748b;font-weight:400">'+esc(info.key)+'</span>'
+              +  (info.card ? '' : ' <span style="font-size:8.5px;background:#065f46;color:#6ee7b7;padding:1px 5px;border-radius:4px">بدون کارت</span>')
+              +  '</div>';
+            byProv[p].forEach(function(m){
+                const stars = '★'.repeat(m.quality) + '☆'.repeat(5-m.quality);
+                const tg = apTagsCache[m.tag] || {icon:'',label:''};
+                h += '<div style="background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:6px 8px;margin-bottom:3px">'
+                  +  '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+                  +  '<b style="color:#e2e8f0;font-size:10.5px">'+esc(m.name)+'</b>'
+                  +  '<code style="font-size:9px;color:#64748b;background:#111c31;padding:1px 5px;border-radius:4px">'+esc(m.id)+'</code>'
+                  +  '<span style="font-size:9px;color:#fbbf24;margin-right:auto">'+stars+'</span>'
+                  +  '<button class="btn btn-blue" onclick="apPickModel(\''+jsAttr(m.id)+'\')" '
+                  +  'style="flex:0;font-size:9px;padding:2px 8px">انتخاب</button>'
+                  +  '</div>'
+                  +  '<div style="font-size:9.5px;color:#64748b;margin-top:3px;line-height:1.7">'
+                  +  (tg.icon ? tg.icon+' '+esc(tg.label)+' · ' : '')
+                  +  '📊 '+toFa(Math.round(m.context/1000))+'K حافظه · ⏱ '+esc(m.limit)
+                  +  '<br>💡 '+esc(m.note)+'</div>'
+                  +  '</div>';
+            });
+        h += '</div>';
+    });
+    ml.innerHTML = h || '<div style="color:#64748b;font-size:10px">موردی نیست</div>';
 }
 
 /** پر کردنِ فرم از روی یک کارِ آماده */
@@ -39131,6 +39420,7 @@ function apResetForm(){
     $('apTitle').value  = '';
     $('apPrompt').value = '';
     $('apMode').value   = 'dry';
+    const ms = $('apModel'); if(ms){ ms.value = ''; apModelHint(); }
     $('apEnabled').checked = true;
     const sel = $('apEvery');
     if(sel) for(let i=0;i<sel.options.length;i++){
@@ -39152,6 +39442,7 @@ function apSaveJob(){
     fd.append('title',   title);
     fd.append('prompt',  prompt);
     fd.append('mode',    $('apMode').value);
+    fd.append('model',   ($('apModel')||{value:''}).value);
     fd.append('every',   $('apEvery').value);
     fd.append('enabled', $('apEnabled').checked ? '1' : '0');
 
@@ -39237,6 +39528,7 @@ function apEditJob(id){
     $('apTitle').value  = j.title;
     $('apPrompt').value = j.prompt;
     $('apMode').value   = j.mode;
+    const ms = $('apModel'); if(ms){ ms.value = j.model || ''; apModelHint(); }
     $('apEnabled').checked = !!j.enabled;
     const sel = $('apEvery');
     if(sel) for(let i=0;i<sel.options.length;i++){
