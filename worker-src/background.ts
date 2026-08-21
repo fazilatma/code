@@ -2,17 +2,21 @@ import { deleteState, getState, setState } from './db.js';
 import { getEnv } from './env.js';
 import { getLastAiTestResults, isChatCompatibleAiModel, isRetryableAiResult, nextAiTestBatch, suggestCategoryWithModel, testModelBatch } from './ai.js';
 import { loadConnections } from './connections.js';
-import { applyBasalamCategory, destinationCatalog, destinationCategories } from './maintenance.js';
+import { applyBasalamCategory, destinationCatalog, destinationCategories, destinationChangeStatus } from './maintenance.js';
+import { buildDedupGroups, normalizeDedupKeep, parseSuffixFormats, type DedupCandidate, type DedupGroup, type DedupKeep } from './dedup.js';
 import type { BackgroundMessage } from './types.js';
 
 export type BackgroundOutcome={outcome:'complete'|'continue'|'ignored';delaySeconds?:number};
 type RunStatus='queued'|'running'|'paused'|'done'|'failed';
-type BaseRun={id:string;kind:'ai-test'|'category-all';status:RunStatus;phase:string;stopRequested:boolean;createdAt:string;updatedAt:string;startedAt:string|null;finishedAt:string|null;attempts:number;error:string|null};
+type BaseRun={id:string;kind:'ai-test'|'category-all'|'dedup';status:RunStatus;phase:string;stopRequested:boolean;createdAt:string;updatedAt:string;startedAt:string|null;finishedAt:string|null;attempts:number;error:string|null};
 type AiTestRun=BaseRun&{kind:'ai-test';prompt:string;categoryTitle:string;onlyCandidates:boolean;delayMs:number;cursor:number;result:any;skipNext?:boolean;currentStartedAt?:string|null;currentKey?:string|null;retryJobs?:{key:string;left:number}[]};
 type CategoryProduct={id:number;shopId:string;title:string};
 type CategoryRunItem={id:number;shopId:string;title:string;ok:boolean;categoryId?:number;categoryName?:string;source?:string;confidence?:number;error?:string};
 type CategoryRun=BaseRun&{kind:'category-all';modelKeys:string[];page:number;totalPages:number;products:CategoryProduct[];cursor:number;total:number;processed:number;changed:number;failed:number;items:CategoryRunItem[]};
-export type BackgroundRun=AiTestRun|CategoryRun;
+type DedupTarget='woo'|'basalam';
+type DedupItemLog={id:number;shopId:string;name:string;ok:boolean;action:string;error?:string};
+type DedupRun=BaseRun&{kind:'dedup';target:DedupTarget;keep:DedupKeep;suffixFormats:string[];apply:boolean;page:number;totalPages:number;listingDone:boolean;grouped:boolean;products:DedupCandidate[];groups:DedupGroup[];groupCursor:number;removeCursor:number;scanned:number;groupsFound:number;duplicates:number;removed:number;failed:number;items:DedupItemLog[]};
+export type BackgroundRun=AiTestRun|CategoryRun|DedupRun;
 
 const pointerKey=(kind:BackgroundRun['kind'])=>`background_current:${kind}`;
 const runKey=(kind:BackgroundRun['kind'],id:string)=>`background_run:${kind}:${id}`;
@@ -55,6 +59,10 @@ export async function currentBackgroundRun(kind:BackgroundRun['kind']):Promise<B
 function publicRun(run:BackgroundRun|null):any{
   if(!run)return null;
   if(run.kind==='ai-test')return{...run,result:run.result||{}};
+  if(run.kind==='dedup'){
+    const{products,groups,...safe}=run;
+    return{...safe,groups:groups.slice(0,250).map(group=>({title:group.title,count:group.remove.length+1,keep:group.keep,remove:group.remove.slice(0,25)})),groupsTruncated:groups.length>250};
+  }
   const{products,...safe}=run;return safe;
 }
 export async function getPublicBackgroundRun(kind:BackgroundRun['kind']):Promise<any>{return publicRun(await currentBackgroundRun(kind))}
@@ -113,6 +121,26 @@ export async function startAllUnapprovedCategoryRun(waitUntil?:(promise:Promise<
   await writeRun(run);await setState(pointerKey('category-all'),id);await enqueue({task:'category-all',runId:id},waitUntil);return{run:publicRun(run),existing:false};
 }
 
+/**
+ * Long-running duplicate cleanup for a destination shop. Runs fully server-side on the Queue so
+ * the browser can close: pages are listed one Queue message at a time, grouping is a single CPU
+ * pass, and removals happen in small batches — every step checkpoints to D1.
+ */
+export async function startDedupRun(target:DedupTarget,input:any,waitUntil?:(promise:Promise<unknown>)=>void):Promise<{run:any;existing:boolean}>{
+  const previous=await currentBackgroundRun('dedup');
+  if(previous&&active(previous)){
+    if(previous.status==='paused'||previous.stopRequested)return{run:publicRun(previous),existing:true};
+    if(runAge(previous)<STALL_MS)return{run:publicRun(previous),existing:true};
+    await resetBackgroundRun('dedup');
+  }
+  // Fail fast with a clear connection error before queueing a long job.
+  const connections=await loadConnections();
+  if(target==='woo'){const woo=connections.woo;if(!woo.url||!woo.key||!woo.secret)throw new Error('اتصال ووکامرس کامل نیست؛ آدرس و کلیدهای API را در بخش اتصال‌ها ذخیره کنید.')}
+  else{const basalam=connections.basalam;if(!basalam.token||!basalam.vendorId)throw new Error('اتصال باسلام کامل نیست؛ توکن و شناسهٔ غرفه را در بخش اتصال‌ها ذخیره کنید.')}
+  const timestamp=now(),id=crypto.randomUUID(),run:DedupRun={id,kind:'dedup',status:'queued',phase:'listing',stopRequested:false,createdAt:timestamp,updatedAt:timestamp,startedAt:null,finishedAt:null,attempts:0,error:null,target,keep:normalizeDedupKeep(input?.keep),suffixFormats:parseSuffixFormats(input?.suffixFormats),apply:Boolean(input?.apply),page:1,totalPages:1,listingDone:false,grouped:false,products:[],groups:[],groupCursor:0,removeCursor:0,scanned:0,groupsFound:0,duplicates:0,removed:0,failed:0,items:[]};
+  await writeRun(run);await setState(pointerKey('dedup'),id);await enqueue({task:'dedup',runId:id},waitUntil);return{run:publicRun(run),existing:false};
+}
+
 export async function controlBackgroundRun(kind:BackgroundRun['kind'],action:'stop'|'resume',waitUntil?:(promise:Promise<unknown>)=>void):Promise<any>{
   const run=await currentBackgroundRun(kind);if(!run)throw new Error('اجرای پس‌زمینه‌ای پیدا نشد.');
   if(action==='stop'){
@@ -120,7 +148,7 @@ export async function controlBackgroundRun(kind:BackgroundRun['kind'],action:'st
     run.stopRequested=true;run.status='paused';run.phase='paused';await writeRun(run);return publicRun(run);
   }
   if(!['paused','failed'].includes(run.status))return publicRun(run);
-  run.stopRequested=false;run.status='queued';run.phase=run.kind==='category-all'&&run.products.length===0?'listing':'waiting';run.error=null;run.finishedAt=null;run.attempts=0;await writeRun(run);await enqueue({task:run.kind,runId:run.id},waitUntil);return publicRun(run);
+  run.stopRequested=false;run.status='queued';run.phase=run.kind==='category-all'&&run.products.length===0?'listing':run.kind==='dedup'?(!run.listingDone?'listing':!run.grouped?'grouping':'removing'):'waiting';run.error=null;run.finishedAt=null;run.attempts=0;await writeRun(run);await enqueue({task:run.kind,runId:run.id},waitUntil);return publicRun(run);
 }
 
 function withAiTimings(run:AiTestRun,result:any,startedMs:number,skippedStuck:boolean){
@@ -190,12 +218,66 @@ async function processCategoryRun(run:CategoryRun):Promise<BackgroundOutcome>{
   return run.phase==='listing'||run.products.length===0?listCategoryProducts(run):categorizeOne(run);
 }
 
+function appendDedupItem(run:DedupRun,item:DedupItemLog){run.items.push({...item,name:String(item.name||'').slice(0,160),...(item.error?{error:String(item.error).slice(0,400)}:{})});if(run.items.length>400)run.items=run.items.slice(-400)}
+/** One catalog page per Queue message keeps every invocation far below the subrequest ceiling. */
+async function dedupListPage(run:DedupRun):Promise<BackgroundOutcome>{
+  const data:any=await destinationCatalog(run.target,{page:run.page,perPage:100,status:'all',shopId:'all'}),seen=new Set(run.products.map(row=>`${row.shopId}:${row.id}`));
+  for(const raw of data.products||[]){
+    const status=String(raw.status||'');
+    if(run.target==='woo'&&status==='trash')continue;
+    if(run.target==='basalam'&&status==='4184')continue;
+    const id=Number(raw.id)||0,shopId=String(raw.shopId||'default'),key=`${shopId}:${id}`;
+    if(id<=0||seen.has(key))continue;seen.add(key);
+    run.products.push({id,shopId,name:String(raw.name||raw.title||'').slice(0,200),price:Number(raw.price)||0,date:String(raw.raw?.date_created||raw.raw?.created_at||raw.raw?.createdAt||''),status,sku:String(raw.sku||'').slice(0,100)});
+  }
+  run.totalPages=Math.max(run.totalPages,Number(data.totalPages)||1);run.scanned=run.products.length;run.attempts=0;
+  if(run.page<run.totalPages&&run.page<200){run.page++;run.phase='listing'}else{run.listingDone=true;run.phase='grouping'}
+  run.status='queued';await writeRun(run);return{outcome:'continue',delaySeconds:1};
+}
+async function dedupGroupProducts(run:DedupRun):Promise<BackgroundOutcome>{
+  run.groups=buildDedupGroups(run.products,run.keep,run.suffixFormats);
+  run.groupsFound=run.groups.length;run.duplicates=run.groups.reduce((sum,group)=>sum+group.remove.length,0);
+  run.products=[];run.grouped=true;run.attempts=0;run.groupCursor=0;run.removeCursor=0;
+  if(!run.apply||run.duplicates===0){run.status='done';run.phase='finished';run.finishedAt=now();await writeRun(run);return{outcome:'complete'}}
+  run.status='queued';run.phase='removing';await writeRun(run);return{outcome:'continue',delaySeconds:1};
+}
+/** Removes at most 4 duplicates per invocation; Woo goes to trash, Basalam to archive 4184 — both reversible. */
+async function dedupRemoveBatch(run:DedupRun):Promise<BackgroundOutcome>{
+  let done=0;
+  while(done<4){
+    const group=run.groups[run.groupCursor];
+    if(!group)break;
+    const item=group.remove[run.removeCursor];
+    if(!item){run.groupCursor++;run.removeCursor=0;continue}
+    try{
+      if(run.target==='woo')await destinationChangeStatus('woo',item.id,'trash');
+      else await destinationChangeStatus('basalam',item.id,'4184',item.shopId);
+      run.removed++;appendDedupItem(run,{id:item.id,shopId:item.shopId,name:item.name,ok:true,action:run.target==='woo'?'به زباله‌دان ووکامرس منتقل شد':'در باسلام بایگانی (۴۱۸۴) شد'});
+    }catch(error){run.failed++;appendDedupItem(run,{id:item.id,shopId:item.shopId,name:item.name,ok:false,action:'ناموفق',error:error instanceof Error?error.message:String(error)})}
+    run.removeCursor++;done++;
+  }
+  run.attempts=0;
+  const finished=!run.groups[run.groupCursor];
+  const latest=await readRun('dedup',run.id);
+  if(latest?.stopRequested){run.stopRequested=true;run.status='paused';run.phase='paused'}
+  else if(finished){run.status='done';run.phase='finished';run.finishedAt=now()}
+  else{run.status='queued';run.phase='removing'}
+  await writeRun(run);return{outcome:run.status==='queued'?'continue':'complete',delaySeconds:1};
+}
+async function processDedupRun(run:DedupRun):Promise<BackgroundOutcome>{
+  if(run.stopRequested||run.status==='paused')return{outcome:'complete'};
+  run.status='running';run.startedAt ||= now();await writeRun(run);
+  if(!run.listingDone)return dedupListPage(run);
+  if(!run.grouped)return dedupGroupProducts(run);
+  return dedupRemoveBatch(run);
+}
+
 export async function processBackgroundMessage(message:BackgroundMessage):Promise<BackgroundOutcome>{
-  if(message.task!=='ai-test'&&message.task!=='category-all')return{outcome:'ignored'};
+  if(message.task!=='ai-test'&&message.task!=='category-all'&&message.task!=='dedup')return{outcome:'ignored'};
   const token=await claimRun(message.task,message.runId);if(!token)return{outcome:'ignored'};
   try{
     const run=await readRun(message.task,message.runId);if(!run||['done','failed','paused'].includes(run.status))return{outcome:'ignored'};
-    try{return run.kind==='ai-test'?await processAiTest(run):await processCategoryRun(run)}catch(error){
+    try{return run.kind==='ai-test'?await processAiTest(run):run.kind==='dedup'?await processDedupRun(run):await processCategoryRun(run)}catch(error){
       run.attempts=(run.attempts||0)+1;run.error=error instanceof Error?error.message:String(error);
       if(run.attempts>=5){run.status='failed';run.phase='failed';run.finishedAt=now()}else{run.status='queued';run.phase=run.kind==='category-all'&&run.products.length===0?'listing':'retrying'}
       await writeRun(run);return{outcome:run.status==='failed'?'complete':'continue',delaySeconds:Math.min(60,Math.pow(2,run.attempts))};
@@ -204,7 +286,7 @@ export async function processBackgroundMessage(message:BackgroundMessage):Promis
 }
 
 export async function recoverBackgroundRuns(waitUntil?:(promise:Promise<unknown>)=>void):Promise<void>{
-  for(const kind of ['ai-test','category-all'] as const){
+  for(const kind of ['ai-test','category-all','dedup'] as const){
     const run=await currentBackgroundRun(kind);
     if(!run||run.stopRequested||run.status==='paused'||['done','failed'].includes(run.status))continue;
     if(runAge(run)<=STALL_MS)continue;

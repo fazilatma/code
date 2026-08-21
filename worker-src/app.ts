@@ -19,7 +19,7 @@ import { syncBasalam, syncWoo } from './sync.js';
 import { DEFAULT_SELECTORS, type Product, type Profile } from './types.js';
 import { basicAuth, byteLength, escapeHtml, message } from './utils.js';
 import { createVisualTicket, renderVisualSelector } from './visual.js';
-import { controlBackgroundRun, getPublicBackgroundRun, recoverBackgroundRuns, resetBackgroundRun, retryAiTestPart, startAiTestRun, startAllUnapprovedCategoryRun } from './background.js';
+import { controlBackgroundRun, getPublicBackgroundRun, recoverBackgroundRuns, resetBackgroundRun, retryAiTestPart, startAiTestRun, startAllUnapprovedCategoryRun, startDedupRun } from './background.js';
 import { fontFile, fontStylesheet } from './fonts.js';
 
 type Variables={requestId:string};
@@ -29,7 +29,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.15.0',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.16.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -41,7 +41,7 @@ app.get('/api/status',async c=>{const connections=await loadConnections();return
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.15.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.16.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -84,7 +84,12 @@ app.post('/api/maintenance/bulk/:target',async c=>{const target=validDestination
 app.post('/api/maintenance/photo-fix',async c=>{const b=await jsonBody(c);return c.json(await photoFix(String(b.profileId||''),b.confirm==='APPLY'))});
 app.get('/api/destination/:target/products',async c=>{const target=validDestination(c.req.param('target')),legacyLimit=Math.min(100,Number(c.req.query('limit'))||25),legacyOffset=Math.max(0,Number(c.req.query('offset'))||0),perPage=Math.min(100,Number(c.req.query('per_page'))||legacyLimit),page=Math.max(1,Number(c.req.query('page'))||Math.floor(legacyOffset/perPage)+1),catalog=await destinationCatalog(target,{page,perPage,q:c.req.query('q')||'',status:c.req.query('status')||'all',shopId:c.req.query('shop')||'all',counts:c.req.query('counts')==='1'});const{products,...meta}=catalog;return c.json({...meta,items:products})});
 app.get('/api/destination/:target/overview',async c=>c.json({ok:true,...await destinationOverview(validDestination(c.req.param('target')))}));
-app.get('/api/destination/:target/duplicates',async c=>c.json({ok:true,groups:await findDestinationDuplicates(validDestination(c.req.param('target')))}));
+app.get('/api/destination/:target/duplicates',async c=>c.json({ok:true,groups:await findDestinationDuplicates(validDestination(c.req.param('target')),{keep:c.req.query('keep')||'',suffixFormats:c.req.query('suffix')||''})}));
+// Server-side duplicate cleanup runs on the Queue with D1 checkpoints, so long shops never hit browser/network timeouts.
+app.post('/api/destination/:target/dedup-runs',async c=>{const target=validDestination(c.req.param('target')),b=await jsonBody(c);const started=await startDedupRun(target,b,(promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise));return c.json({ok:true,...started},started.existing?200:202)});
+app.get('/api/destination/:target/dedup-runs/current',async c=>{validDestination(c.req.param('target'));await recoverBackgroundRuns(promise=>c.executionCtx.waitUntil(promise));return c.json({ok:true,run:await getPublicBackgroundRun('dedup')})});
+app.post('/api/destination/:target/dedup-runs/control',async c=>{validDestination(c.req.param('target'));const b=await jsonBody(c),action=String(b.action)==='resume'?'resume':'stop';return c.json({ok:true,run:await controlBackgroundRun('dedup',action,(promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise))})});
+app.post('/api/destination/:target/dedup-runs/reset',async c=>{validDestination(c.req.param('target'));await resetBackgroundRun('dedup');return c.json({ok:true,run:await getPublicBackgroundRun('dedup')})});
 app.get('/api/destination/:target/product/:id',async c=>c.json({ok:true,product:await destinationProduct(validDestination(c.req.param('target')),Number(c.req.param('id')),c.req.query('shop')||'')}));
 app.post('/api/destination/:target/bulk',async c=>{const target=validDestination(c.req.param('target')),b=await jsonBody(c);if(Array.isArray(b.ids)&&b.ids.length>20)return c.json({ok:false,error:'در هر نوبت حداکثر ۲۰ محصول قابل ویرایش است.'},400);return c.json(await destinationBulkEdit(target,b,b.confirm==='APPLY'))});
 app.post('/api/destination/basalam/category/suggest',async c=>{const b=await jsonBody(c),title=String(b.title||'').trim(),mode=String(b.mode||'learned');if(!title)return c.json({ok:false,error:'عنوان محصول خالی است.'},400);if(mode==='learned')return c.json({ok:true,mode,result:await findLearnedCategory(title,Number(b.maxWords)||5)});if(mode!=='ai')return c.json({ok:false,error:'روش پیشنهاد دسته‌بندی نامعتبر است.'},400);const categories=(await destinationCategories(Boolean(b.refreshCategories))).items,result=await suggestCategoryWithModel(title,String(b.modelKey||''),categories);return c.json({mode,categories:categories.length,...result})});

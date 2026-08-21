@@ -16,7 +16,7 @@ export default {
     configureEnv(env);await ensureSchema(env.DB);
     for(const item of batch.messages){
       try{
-        if(item.body?.task==='ai-test'||item.body?.task==='category-all'){
+        if(item.body?.task==='ai-test'||item.body?.task==='category-all'||item.body?.task==='dedup'){
           const result=await processBackgroundMessage(item.body);
           console.log(JSON.stringify({event:'queue_background',task:item.body.task,runId:item.body.runId,result:result.outcome}));
           if(result.outcome==='continue'){

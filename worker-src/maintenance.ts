@@ -1,5 +1,6 @@
 import { loadConnections } from './connections.js';
 import { getState, learnCategory, maintenanceRows, setDestinationId, setRemoteId, setState } from './db.js';
+import { buildDedupGroups, normalizeDedupKeep, parseSuffixFormats } from './dedup.js';
 import { safeFetch, safeWooFetch } from './network.js';
 import { basicAuth } from './utils.js';
 import type { ConnectionVault } from './vault.js';
@@ -59,7 +60,12 @@ export async function applyBasalamCategory(id:number,shopId:string,categoryId:nu
 }
 export async function listDestinationProducts(target:Target):Promise<Remote[]>{return target==='woo'?wooProducts():basalamProducts()}
 export async function destinationOverview(target:Target){const items=await listDestinationProducts(target),statuses:Record<string,number>={};for(const item of items)statuses[item.status]=(statuses[item.status]||0)+1;return{target,total:items.length,statuses,withoutImage:items.filter(x=>!x.images.length).length,withoutSku:items.filter(x=>!x.sku).length}}
-export async function findDestinationDuplicates(target:Target){const items=await listDestinationProducts(target),groups=new Map<string,Remote[]>();for(const item of items){const key=norm(item.name);if(!key)continue;const rows=groups.get(key)||[];rows.push(item);groups.set(key,rows)}return[...groups.entries()].filter(([,rows])=>rows.length>1).map(([title,rows])=>({title,count:rows.length,items:rows.map(x=>({id:x.id,name:x.name,status:x.status,sku:x.sku,shopId:x.shopId}))}))}
+/** Synchronous duplicate report (small shops). Long-running removal happens in the server-side dedup run. */
+export async function findDestinationDuplicates(target:Target,options:{keep?:string;suffixFormats?:string}={}){
+  const items=await listDestinationProducts(target),keep=normalizeDedupKeep(options.keep),formats=parseSuffixFormats(options.suffixFormats);
+  const candidates=items.filter(x=>!(target==='woo'&&x.status==='trash')&&!(target==='basalam'&&x.status==='4184')).map(x=>({id:x.id,shopId:x.shopId||'default',name:x.name,price:Number(x.price)||0,date:String(x.raw?.date_created||x.raw?.created_at||''),status:x.status,sku:x.sku}));
+  return buildDedupGroups(candidates,keep,formats).map(group=>({title:group.title,count:group.remove.length+1,keep:group.keep,items:[group.keep,...group.remove].map(x=>({id:x.id,name:x.name,status:x.status,sku:x.sku,shopId:x.shopId,price:x.price,keep:x.id===group.keep.id&&x.shopId===group.keep.shopId}))}));
+}
 
 export async function destinationUpdate(target:Target,id:number,input:any,apply=false,shopId=''){
   const current=await destinationProduct(target,id,shopId),payload=directPayload(target,input,current);
