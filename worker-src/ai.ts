@@ -15,7 +15,7 @@ export async function aiProviders():Promise<Provider[]>{return providersFromAi((
 export function isReasoningAiModel(provider:Pick<Provider,'reasoningModels'>|undefined,model:string):boolean{
   if(provider?.reasoningModels?.includes(model))return true;
   const value=String(model||'').toLowerCase();
-  return /(?:^|[\/_:.-])(?:deepseek[-_.]?r1|qwq|qwen3|gpt[-_.]?oss|o[134](?:[-_.]|$)|reason(?:ing|er)?|thinking|think|magistral|nemotron|reflection|bonsai|liquid)(?:[\/_:.-]|$)/i.test(value)||/cohere[^/]*reason/i.test(value);
+  return /(?:^|[\/_:.-])(?:deepseek[-_.]?r1|qwq|qwen3|gpt[-_.]?oss|gpt[-_.]?5|o[1-5](?:[-_.]|$)|reason(?:ing|er)?|thinking|think|magistral|nemotron|reflection|bonsai|liquid)(?:[\/_:.-]|$)/i.test(value)||/cohere[^/]*reason/i.test(value);
 }
 
 export async function preferredAiChatModel():Promise<{provider:Provider;model:string}|null>{
@@ -40,12 +40,18 @@ export async function aiCall(provider:Provider,model:string,prompt:string,networ
   if(endpointType!=='chat-completions')return mistralDedicatedCall(provider,model,prompt,network,started,endpointType,timeoutMs);
   const endpoint=openAiEndpoint(provider.baseUrl),reportedEndpoint=safeEndpoint(endpoint),reasoning=isReasoningAiModel(provider,model),messages=[{role:'user',content:prompt}],payload:any={model,messages,max_tokens:reasoning?1600:400};if(!reasoning)payload.temperature=.2;
   if(batchId)return batchChatCall(provider,model,prompt,payload,network,started,timeoutMs,reasoning,batchId);
-  let result=await requestAi(endpoint,payload,provider,network,timeoutMs);
-  // OpenAI reasoning endpoints use max_completion_tokens while Together-compatible endpoints use max_tokens.
-  if(reasoning&&result.response?.status===400&&/max_tokens|max_completion_tokens/i.test(aiErrorMessage(result.body)))result=await requestAi(endpoint,{model,messages,max_completion_tokens:1600},provider,network,timeoutMs);
+  let result=await requestAi(endpoint,payload,provider,network,timeoutMs),usedPayload=payload;
+  // Providers disagree on token-limit field names and whether temperature is legal; adapt only on 400/422, never on billing/credit errors.
+  for(let attempt=0;attempt<3;attempt++){
+    if(result.networkError||!result.response||result.response.ok||isCreditAiStatus(result.response.status,aiErrorMessage(result.body)))break;
+    const errorText=aiErrorMessage(result.body);
+    if(!isPayloadShapeError(result.response.status,errorText))break;
+    const adapted=adjustChatPayload(usedPayload,errorText);if(!adapted)break;
+    usedPayload=adapted;result=await requestAi(endpoint,usedPayload,provider,network,timeoutMs);
+  }
   if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:reportedEndpoint,latencyMs:Date.now()-started,reasoning,raw:{error:reason}})}
   const response=result.response!,body=result.body,latencyMs=Date.now()-started,errorText=aiErrorMessage(body)||response.statusText||'AI error';
-  if(!response.ok&&isBatchOnlyError(response.status,errorText))return batchChatCall(provider,model,prompt,payload,network,started,timeoutMs,reasoning);
+  if(!response.ok&&isBatchOnlyError(response.status,errorText))return batchChatCall(provider,model,prompt,usedPayload,network,started,timeoutMs,reasoning);
   if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${errorText}`,{...failureDetail(provider,model,prompt,reportedEndpoint,latencyMs,response,body),reasoning});
   return validatedChatSuccess(provider,model,prompt,reportedEndpoint,latencyMs,response,body,{endpointType:'chat-completions',chatCompatible:true,reasoning});
 }
@@ -123,6 +129,22 @@ async function requestAiGet(endpoint:string,provider:Provider,network:Network,ti
   try{const response=await networkFetch(endpoint,{method:'GET',headers:{authorization:`Bearer ${provider.apiKey}`,accept:'application/json'}},network,timeoutMs),rawText=await response.text(),body=parseResponse(rawText,provider.apiKey);return{response,body,rawText}}
   catch(error){return{networkError:error instanceof Error?error.message:String(error)}}
 }
+function isCreditAiText(value:string){return /(?:^|\b)(?:402|insufficient[_.\s-]?quota|insufficient[_.\s-]?credit|credit[_.\s-]?balance|payment[_.\s-]?required|billing|out of credits|no credits|موجودی اعتبار|اعتبار.*تمام|شارژ.*تمام)(?:\b|$)/i.test(String(value||''))&&!/(?:429|rate.?limit|too many requests)/i.test(String(value||''))}
+function isCreditAiStatus(status:number,message:string){return status===402||isCreditAiText(`${status} ${message}`)}
+function isPayloadShapeError(status:number,message:string){return(status===400||status===422)&&!isCreditAiText(message)&&!isBatchOnlyError(status,message)}
+function adjustChatPayload(payload:any,errorText:string):any|null{
+  const msg=String(errorText||''),next={...payload};let changed=false;
+  if(/temperature/i.test(msg)&&'temperature' in next){delete next.temperature;changed=true}
+  if(/max_completion_tokens/i.test(msg)&&next.max_tokens!=null){next.max_completion_tokens=next.max_tokens;delete next.max_tokens;changed=true}
+  else if(/max_tokens/i.test(msg)&&next.max_completion_tokens!=null){next.max_tokens=next.max_completion_tokens;delete next.max_completion_tokens;changed=true}
+  else if(/max_tokens|max_completion_tokens/i.test(msg)&&next.max_tokens!=null){next.max_completion_tokens=next.max_tokens;delete next.max_tokens;changed=true}
+  if(!changed&&/unsupported (?:parameter|value|argument)|unknown argument|unrecognized request argument|extra fields not permitted/i.test(msg)){
+    const slim:any={model:payload.model,messages:payload.messages};
+    if(payload.max_completion_tokens)slim.max_completion_tokens=payload.max_completion_tokens;else if(payload.max_tokens)slim.max_tokens=payload.max_tokens;
+    return slim;
+  }
+  return changed?next:null;
+}
 function isBatchOnlyError(status:number,message:string){return(status===404||status===400||status===403)&&/batch api|\/api\/beta\/batches/i.test(message)}
 function batchApiUrl(chatEndpoint:string){const url=new URL(chatEndpoint);url.pathname='/api/beta/batches';url.search='';url.hash='';return url.toString()}
 function sleep(ms:number){return new Promise(resolve=>setTimeout(resolve,Math.max(0,ms)))}
@@ -154,7 +176,7 @@ async function batchChatCall(provider:Provider,model:string,prompt:string,chatPa
 function cleanReasoningTags(value:string):string{const original=String(value||'').trim(),without=original.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi,'').replace(/<\/?(?:analysis|reasoning)>/gi,'').trim();return without||original}
 function extractAiResponse(body:any):{text:string;reasoningText:string;reasoningOnly:boolean}{
   const choices=Array.isArray(body?.choices)?body.choices:[],reasoningParts:string[]=[],answers:string[]=[];
-  for(const choice of choices){const message=choice?.message||{};for(const value of [message?.reasoning_content,message?.reasoning])if(typeof value==='string'&&value.trim())reasoningParts.push(value.trim());const content=message?.content;if(typeof content==='string'&&content.trim())answers.push(content.trim());else if(Array.isArray(content)){const joined=content.map((item:any)=>typeof item==='string'?item:item?.text||item?.content||'').join('').trim();if(joined)answers.push(joined)}if(typeof choice?.text==='string'&&choice.text.trim())answers.push(choice.text.trim())}
+  for(const choice of choices){const message=choice?.message||{};for(const value of [message?.reasoning_content,message?.reasoning])if(typeof value==='string'&&value.trim())reasoningParts.push(value.trim());const content=message?.content;if(typeof content==='string'&&content.trim())answers.push(content.trim());else if(Array.isArray(content)){const joined=content.map((item:any)=>typeof item==='string'?item:item?.text||item?.content||'').join('').trim();if(joined)answers.push(joined)}if(typeof choice?.text==='string'&&choice.text.trim())answers.push(choice.text.trim());if(typeof message?.refusal==='string'&&message.refusal.trim())answers.push(message.refusal.trim())}
   for(const value of [body?.output_text,body?.result?.response,body?.result?.text,body?.response,body?.text,body?.data?.[0]?.text])if(typeof value==='string'&&value.trim())answers.push(value.trim());
   const output=body?.output;if(Array.isArray(output)){for(const item of output){if(typeof item==='string'&&item.trim())answers.push(item.trim());else if(item&&typeof item==='object'){if(typeof item.text==='string'&&item.text.trim())answers.push(item.text.trim());const content=item.content;if(typeof content==='string'&&content.trim())answers.push(content.trim());else if(Array.isArray(content)){const joined=content.map((segment:any)=>typeof segment==='string'?segment:segment?.text||segment?.content||'').join('').trim();if(joined)answers.push(joined)}}}}else if(Array.isArray(output?.choices)){for(const choice of output.choices){const value=choice?.message?.content||choice?.text;if(typeof value==='string'&&value.trim())answers.push(value.trim())}}
   const reasoningText=reasoningParts.join('\n\n').trim(),answer=answers.find(Boolean)||'',cleaned=cleanReasoningTags(answer);return{text:cleaned||(reasoningText?cleanReasoningTags(reasoningText):''),reasoningText,reasoningOnly:!answer&&Boolean(reasoningText)};
@@ -187,21 +209,41 @@ export async function suggestCategoryWithModel(title:string,modelKey:string,cate
   const task={p:provider,model,key:`${provider.id}::${model}`};try{return{...await categoryWithTask(task,String(title).trim(),categories,ai.network),key:task.key}}catch(error){return aiTestFailure(error,task,String(title).trim())}
 }
 
-const AI_TEST_MODELS_PER_INVOCATION=1;
+/** One model per provider per invocation keeps each provider at 1 in-flight request (avoids rate limits) while finishing the list faster. */
+export const AI_TEST_MAX_PARALLEL=10;
+const AI_TEST_MODELS_PER_INVOCATION=AI_TEST_MAX_PARALLEL;
 type AiTestTask={p:Provider;model:string;key:string};
 type StoredAiTest={runId:string;startedAt:string;updatedAt:string;prompt:string;categoryTitle:string;onlyCandidates:boolean;total:number;results:any[]};
-type AiTestOptions={onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[];skipCurrent?:boolean;skipReason?:string;timeoutMs?:number;retryKey?:string;retryPart?:'message'|'category'|'both'};
+type AiTestOptions={onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[];skipCurrent?:boolean;skipReason?:string;timeoutMs?:number;retryKey?:string;retryKeys?:string[];retryPart?:'message'|'category'|'both'};
+export function aiTestProviderId(key:string){return String(key||'').split('::')[0]}
+export function nextAiTestBatch<T>(items:T[],cursor:number,providerOf:(item:T)=>string,max=AI_TEST_MAX_PARALLEL):{batch:T[];nextCursor:number}{
+  const batch:T[]=[];const seen=new Set<string>();
+  for(let i=Math.max(0,cursor);i<items.length;i++){
+    const id=providerOf(items[i]);
+    if(seen.has(id)||batch.length>=max)break;
+    seen.add(id);batch.push(items[i]);
+  }
+  return{batch,nextCursor:cursor+batch.length};
+}
+export function isCreditAiResult(row:any):boolean{
+  const blob=[row?.error,row?.phase,row?.httpStatus,row?.raw?.error,row?.raw?.code,row?.raw?.message].map(x=>String(x||'')).join(' ');
+  return isCreditAiText(blob)||Number(row?.httpStatus)===402;
+}
 export function isRetryableAiResult(row:any):boolean{
-  if(!row||row.ok)return false;
-  if(row.skipped||row.phase==='transport-skip'||row.phase==='batch-pending')return true;
-  return /مهلت دریافت|timeout|AbortError|گیر کردن|خودکار رد|batch api هنوز/i.test([row.error,row.phase,row.catResponse].map(x=>String(x||'')).join(' '));
+  if(!row||row.ok||isCreditAiResult(row))return false;
+  if(row.skipped||row.phase==='transport-skip'||row.phase==='batch-pending'||row.retryable)return true;
+  return /مهلت دریافت|timeout|AbortError|گیر کردن|خودکار رد|batch api هنوز|\b429\b|rate.?limit|too many requests|overloaded|temporarily unavailable/i.test([row.error,row.phase,row.catResponse,row.httpStatus].map(x=>String(x||'')).join(' '));
 }
 function aiTestTasks(ai:any,providers:Provider[],onlyCandidates:boolean):AiTestTask[]{
-  const wanted=new Set<string>(Array.isArray(ai.candidates)?ai.candidates.map(String):[]),tasks:AiTestTask[]=[];
+  const wanted=new Set<string>(Array.isArray(ai.candidates)?ai.candidates.map(String):[]),columns:AiTestTask[][]=[];
   for(const p of providers){
     if(p.enabled===false)continue;
-    for(const rawModel of p.models||[]){const model=String(rawModel||'').trim(),key=`${p.id}::${model}`;if(!model||onlyCandidates&&(!wanted.has(key)||!isChatCompatibleAiModel(p,model)))continue;tasks.push({p,model,key})}
+    const column:AiTestTask[]=[];
+    for(const rawModel of p.models||[]){const model=String(rawModel||'').trim(),key=`${p.id}::${model}`;if(!model||onlyCandidates&&(!wanted.has(key)||!isChatCompatibleAiModel(p,model)))continue;column.push({p,model,key})}
+    if(column.length)columns.push(column);
   }
+  const tasks:AiTestTask[]=[],max=columns.reduce((n,column)=>Math.max(n,column.length),0);
+  for(let i=0;i<max;i++)for(const column of columns)if(column[i])tasks.push(column[i]);
   return tasks;
 }
 function aiTestFailure(error:unknown,task:AiTestTask,prompt:string){return error instanceof AiResponseError?{...error.detail,key:task.key}:{ok:false,phase:'unknown',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey),raw:{error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey)}}}
@@ -239,10 +281,17 @@ async function executeAiTestPart(task:AiTestTask,prompt:string,categoryTitle:str
   const row:any={...previousRow,key:task.key,categoryTitle,categoryResult,catResponse:categoryResponseText(categoryResult,categories),categoryRetryCount:Number(previousRow?.categoryRetryCount||0)+1,retryCount:Number(previousRow?.retryCount||0)+1};
   row.retryable=isRetryableAiResult(row);return row;
 }
+async function executeAiTestRound(batch:AiTestTask[],prompt:string,categoryTitle:string,categories:AiCategoryOption[],network:Network,timeoutMs:number|undefined,skipCurrent:boolean,skipReason:string,results:any[]){
+  if(!batch.length)return [];
+  if(skipCurrent)return batch.map(task=>skippedAiTestResult(task,prompt,categoryTitle,skipReason));
+  return Promise.all(batch.map(task=>executeAiTestTask(task,prompt,categoryTitle,categories,network,timeoutMs,false,'',String(results.find(item=>item.key===task.key)?.batchId||''))));
+}
 /**
- * Runs at most one model per Worker invocation. Results are persisted before
- * responding and a repeated runId/cursor replays the stored row, so browser
- * retries never execute or append the same model twice.
+ * Runs one model-index round across providers per Worker invocation (first of
+ * every provider, then second of every provider, …). Parallel calls never hit
+ * the same provider twice, which finishes the list faster and avoids rate
+ * limits. Results are persisted before responding and a repeated runId/cursor
+ * replays the stored rows.
  */
 export async function testModelBatch(prompt='سلام',options:AiTestOptions={}){
   const ai=(await loadConnections()).ai,providers=providersFromAi(ai),onlyCandidates=Boolean(options.onlyCandidates),tasks=aiTestTasks(ai,providers,onlyCandidates),cursor=Math.max(0,Math.trunc(Number(options.cursor)||0)),categoryTitle=String(options.categoryTitle||'').trim(),categories=Array.isArray(options.categories)?options.categories:[],requestedRunId=String(options.runId||'').trim();
@@ -250,22 +299,27 @@ export async function testModelBatch(prompt='سلام',options:AiTestOptions={})
   if(cursor>0&&!sameRun)throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
   const results:any[]=sameRun&&Array.isArray(previous?.results)?[...previous.results]:[];
   if(cursor>results.length)throw new Error('ترتیب ادامهٔ آزمایش معتبر نیست؛ آخرین نتیجه را باز کنید و دوباره ادامه دهید.');
-  const timeoutMs=Number(options.timeoutMs)>0?Number(options.timeoutMs):undefined,retryKey=String(options.retryKey||'').trim();
-  if(retryKey){
+  const timeoutMs=Number(options.timeoutMs)>0?Number(options.timeoutMs):undefined,retryKeys=[...new Set([...(Array.isArray(options.retryKeys)?options.retryKeys:[]).map(String),String(options.retryKey||'')].map(value=>value.trim()).filter(Boolean))];
+  if(retryKeys.length){
     if(!sameRun)throw new Error('نوبت آزمایش مدل‌ها منقضی یا تغییر داده شده است؛ آزمایش را از ابتدا اجرا کنید.');
-    const task=tasks.find(item=>item.key===retryKey);if(!task)throw new Error('مدل برای تلاش مجدد پیدا نشد.');
-    const existing=results.find(item=>item.key===task.key),part=options.retryPart==='message'||options.retryPart==='category'?options.retryPart:'both';
-    const row=part==='both'?await executeAiTestTask(task,prompt,categoryTitle,categories,ai.network,timeoutMs,Boolean(options.skipCurrent),String(options.skipReason||''),String(existing?.batchId||'')):await executeAiTestPart(task,prompt,categoryTitle,categories,ai.network,timeoutMs,part,existing||{});
-    const index=results.findIndex(item=>item.key===task.key);if(part==='both')row.retryCount=Number((index>=0?results[index]:null)?.retryCount||0)+1;
-    if(index>=0)results[index]=row;else results.push(row);
+    const retryTasks=retryKeys.map(key=>{const task=tasks.find(item=>item.key===key);if(!task)throw new Error('مدل برای تلاش مجدد پیدا نشد.');return task});
+    const part=options.retryPart==='message'||options.retryPart==='category'?options.retryPart:'both';
+    const batchResults:any[]=[];
+    if(part!=='both'&&retryTasks.length===1){
+      const task=retryTasks[0],existing=results.find(item=>item.key===task.key),row=await executeAiTestPart(task,prompt,categoryTitle,categories,ai.network,timeoutMs,part,existing||{});
+      const index=results.findIndex(item=>item.key===task.key);if(index>=0)results[index]=row;else results.push(row);batchResults.push(row);
+    }else{
+      const rows=await executeAiTestRound(retryTasks,prompt,categoryTitle,categories,ai.network,timeoutMs,Boolean(options.skipCurrent),String(options.skipReason||''),results);
+      for(const row of rows){const index=results.findIndex(item=>item.key===row.key);row.retryCount=Number((index>=0?results[index]:null)?.retryCount||0)+1;if(index>=0)results[index]=row;else results.push(row);batchResults.push(row)}
+    }
     const updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,categoryTitle,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);
-    return aiTestResponse(saved,tasks,cursor,Math.max(cursor,results.length),[row],false);
+    return aiTestResponse(saved,tasks,cursor,Math.max(cursor,results.length),batchResults,false);
   }
-  if(sameRun&&cursor<results.length){const nextCursor=Math.min(tasks.length,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults=results.slice(cursor,nextCursor),saved={...previous!,total:tasks.length,results};return aiTestResponse(saved,tasks,cursor,nextCursor,batchResults,true)}
-  const batch=tasks.slice(cursor,cursor+AI_TEST_MODELS_PER_INVOCATION),batchResults:any[]=[];
-  for(const task of batch)batchResults.push(await executeAiTestTask(task,prompt,categoryTitle,categories,ai.network,timeoutMs,Boolean(options.skipCurrent),String(options.skipReason||'')));
+  const round=nextAiTestBatch(tasks,cursor,task=>task.p.id);
+  if(sameRun&&cursor<results.length){const nextCursor=Math.min(tasks.length,Math.max(round.nextCursor,cursor+1));const batchResults=results.slice(cursor,nextCursor),saved={...previous!,total:tasks.length,results};return aiTestResponse(saved,tasks,cursor,nextCursor,batchResults,true)}
+  const batch=round.batch,batchResults=await executeAiTestRound(batch,prompt,categoryTitle,categories,ai.network,timeoutMs,Boolean(options.skipCurrent),String(options.skipReason||''),results);
   const latestSaved=await getState<StoredAiTest|null>('ai_test_results',null);
-  if(latestSaved?.runId===runId&&Array.isArray(latestSaved.results)&&latestSaved.results.length>cursor){const nextCursor=Math.min(tasks.length,latestSaved.results.length);return aiTestResponse(latestSaved,tasks,cursor,nextCursor,latestSaved.results.slice(cursor,Math.min(latestSaved.results.length,cursor+AI_TEST_MODELS_PER_INVOCATION)),true)}
+  if(latestSaved?.runId===runId&&Array.isArray(latestSaved.results)&&latestSaved.results.length>cursor){const nextCursor=Math.min(tasks.length,latestSaved.results.length);return aiTestResponse(latestSaved,tasks,cursor,nextCursor,latestSaved.results.slice(cursor,Math.min(latestSaved.results.length,round.nextCursor)),true)}
   results.push(...batchResults);const nextCursor=Math.min(tasks.length,cursor+batch.length),updatedAt=new Date().toISOString(),saved:StoredAiTest={runId,startedAt,updatedAt,prompt,categoryTitle,onlyCandidates,total:tasks.length,results};await setState('ai_test_results',saved);
   return aiTestResponse(saved,tasks,cursor,nextCursor,batchResults,false);
 }

@@ -1,6 +1,6 @@
 import { deleteState, getState, setState } from './db.js';
 import { getEnv } from './env.js';
-import { getLastAiTestResults, isChatCompatibleAiModel, isRetryableAiResult, suggestCategoryWithModel, testModelBatch } from './ai.js';
+import { getLastAiTestResults, isChatCompatibleAiModel, isRetryableAiResult, nextAiTestBatch, suggestCategoryWithModel, testModelBatch } from './ai.js';
 import { loadConnections } from './connections.js';
 import { applyBasalamCategory, destinationCatalog, destinationCategories } from './maintenance.js';
 import type { BackgroundMessage } from './types.js';
@@ -124,8 +124,8 @@ export async function controlBackgroundRun(kind:BackgroundRun['kind'],action:'st
 }
 
 function withAiTimings(run:AiTestRun,result:any,startedMs:number,skippedStuck:boolean){
-  const ms=Math.max(0,Date.now()-startedMs),previous=Array.isArray(run.result?.timingSamples)?run.result.timingSamples as number[]:[],samples=[...previous,ms].slice(-80),avg=samples.length?Math.round(samples.reduce((a,b)=>a+b,0)/samples.length):0,last=result.batchResults?.[0];
-  return{...result,serverSide:true,lastModelAt:now(),lastModelMs:ms,avgMs:avg,timingSamples:samples,skippedStuck:Number(run.result?.skippedStuck||0)+(skippedStuck?1:0),currentKey:null,currentStartedAt:null,lastModelName:last?`${last.providerName||last.provider||''} / ${last.model||''}`:run.result?.lastModelName||''};
+  const ms=Math.max(0,Date.now()-startedMs),previous=Array.isArray(run.result?.timingSamples)?run.result.timingSamples as number[]:[],samples=[...previous,ms].slice(-80),avg=samples.length?Math.round(samples.reduce((a,b)=>a+b,0)/samples.length):0,names=(Array.isArray(result.batchResults)?result.batchResults:[]).map((row:any)=>`${row.providerName||row.provider||''} / ${row.model||''}`.trim()).filter(Boolean);
+  return{...result,serverSide:true,lastModelAt:now(),lastModelMs:ms,avgMs:avg,timingSamples:samples,skippedStuck:Number(run.result?.skippedStuck||0)+(skippedStuck?1:0),currentKey:null,currentStartedAt:null,lastModelName:names.join(' · ')||run.result?.lastModelName||''};
 }
 function queueRetryJobs(results:any[]){return (Array.isArray(results)?results:[]).filter(isRetryableAiResult).map((row:any)=>({key:String(row.key),left:3}))}
 async function processAiTest(run:AiTestRun):Promise<BackgroundOutcome>{
@@ -137,13 +137,18 @@ async function processAiTest(run:AiTestRun):Promise<BackgroundOutcome>{
   let categories:any[]=[];if(run.categoryTitle)try{categories=(await destinationCategories()).items}catch{/* Model response tests continue without Basalam categories. */}
   const skip=Boolean(run.skipNext);run.skipNext=false;const started=Date.now();
   const options:any={runId:run.id,cursor:run.cursor,onlyCandidates:run.onlyCandidates,categoryTitle:run.categoryTitle,categories,timeoutMs:callTimeout,skipCurrent:skip,skipReason:skip?'این مدل پاسخ نداد و نگهبان صف برای جلوگیری از گیر کردن آن را رد کرد.':''};
-  if(retrying)options.retryKey=run.retryJobs![0].key;
+  if(retrying)options.retryKeys=nextAiTestBatch(run.retryJobs!,0,job=>String(job.key).split('::')[0]).batch.map(job=>job.key);
   let result:any=await raceBudget(testModelBatch(run.prompt,options),budget),stuck=false;
   if(!result){stuck=true;result=await testModelBatch(run.prompt,{...options,skipCurrent:true,skipReason:'مهلت پاسخ این مدل تمام شد و برای ادامهٔ صف خودکار رد شد.'})}
-  const skipped=stuck||skip||Boolean(result.batchResults?.[0]?.skipped&&result.batchResults?.[0]?.phase==='transport-skip');
+  const skipped=stuck||skip||Boolean((result.batchResults||[]).some((row:any)=>row?.skipped&&row?.phase==='transport-skip'));
   if(retrying){
-    const job=run.retryJobs![0],row=(result.results||[]).find((item:any)=>item.key===job.key);
-    if(!isRetryableAiResult(row))run.retryJobs!.shift();else{job.left-=1;if(job.left<=0)run.retryJobs!.shift()}
+    const done=new Set((result.batchResults||[]).map((item:any)=>item.key));
+    run.retryJobs=run.retryJobs!.flatMap(job=>{
+      if(!done.has(job.key))return[job];
+      const row=(result.results||[]).find((item:any)=>item.key===job.key);
+      if(!isRetryableAiResult(row))return[];
+      const left=job.left-1;return left>0?[{...job,left}]:[];
+    });
   }else{
     run.cursor=Number(result.nextCursor||run.cursor);
     if(result.done)run.retryJobs=queueRetryJobs(result.results);

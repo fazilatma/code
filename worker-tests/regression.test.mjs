@@ -274,7 +274,7 @@ test('AI all-model testing paginates one model per Worker invocation and preserv
     let cursor=0,runId='',last;
     for(let invocation=0;invocation<4;invocation++){
       const response=await call(db,'/api/ai/test-all',jsonInit({prompt:'سلام',cursor,runId,perProvider:2}));assert.equal(response.status,200);last=await response.json();runId=last.runId;cursor=last.nextCursor;
-      assert.equal(last.maxModelsPerInvocation,1);assert.equal(last.batchResults.length,1);assert.equal(last.results.length,invocation+1);assert.equal(last.total,4);assert.equal(last.done,invocation===3);
+      assert.equal(last.maxModelsPerInvocation,10);assert.equal(last.batchResults.length,1);assert.equal(last.results.length,invocation+1);assert.equal(last.total,4);assert.equal(last.done,invocation===3);
     }
     assert.deepEqual(calls,['model-1','model-2','model-3','model-4']);assert.equal(last.succeeded,4);assert.equal(last.failed,0);
     const saved=await call(db,'/api/ai/test-results').then(response=>response.json());assert.equal(saved.results.length,4);assert.equal(saved.runId,runId);assert.equal(saved.results[2].usage.total_tokens,9);
@@ -425,6 +425,56 @@ test('standalone spreadsheet import understands Persian CSV headers, keeps Woo s
   const oversized=await call(db,'/api/profiles/sheet-ui/import?format=csv',{method:'POST',headers:{'content-type':'text/csv'},body:'x'.repeat(10*1024*1024+1)});assert.equal(oversized.status,413);assert.match(oversized.headers.get('content-type')||'',/application\/json/);assert.match((await oversized.json()).error,/۱۰|حجم|MiB/i);
   const queued=await call(db,'/api/profiles/sheet-ui/sync',jsonInit({target:'woo'})),job=(await queued.json()).job;assert.equal(queued.status,202);assert.equal(job.kind,'sync');assert.equal(job.target,'woo');
 });
+
+
+test('AI tests send the same model index of every provider in parallel and skip a hung round together',async()=>{
+  const originalFetch=globalThis.fetch,db=new MemoryD1(),calls=[];
+  try{
+    await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'alpha',name:'Alpha',baseUrl:'https://alpha.example/v1',apiKey:'alpha-secret',models:['a1','a2'],enabled:true},{id:'beta',name:'Beta',baseUrl:'https://beta.example/v1',apiKey:'beta-secret',models:['b1','b2'],enabled:true}],network:{mode:'direct'}}}));
+    globalThis.fetch=async(request,init={})=>{const url=String(request instanceof Request?request.url:request),body=JSON.parse(String(init.body||'{}'));calls.push({host:new URL(url).host,model:body.model});return jsonResponse({choices:[{message:{content:'پاسخ '+body.model}}]})};
+    const first=await call(db,'/api/ai/test-all',jsonInit({prompt:'سلام',cursor:0,runId:''})).then(response=>response.json());
+    assert.equal(first.total,4);assert.equal(first.done,false);assert.equal(first.batchSize,2);assert.equal(first.nextCursor,2);assert.deepEqual(first.results.map(row=>row.model).sort(),['a1','b1']);assert.deepEqual([...new Set(calls.map(item=>item.host))].sort(),['alpha.example','beta.example']);
+    const second=await call(db,'/api/ai/test-all',jsonInit({prompt:'سلام',cursor:first.nextCursor,runId:first.runId})).then(response=>response.json());
+    assert.equal(second.done,true);assert.equal(second.batchSize,2);assert.deepEqual(second.results.map(row=>row.model),['a1','b1','a2','b2']);
+    const skipped=await call(db,'/api/ai/test-all',jsonInit({prompt:'رد',cursor:0,runId:'round-skip',skipCurrent:true,skipReason:'hung round'})).then(response=>response.json());
+    assert.equal(skipped.batchSize,2);assert.equal(skipped.skipped,2);assert.ok(skipped.results.every(row=>row.phase==='transport-skip'));assert.equal(calls.length,4,'skipping a round must not call any provider');
+  }finally{globalThis.fetch=originalFetch}
+});
+
+test('chat payload shape errors are retried with a compatible body while credit errors stay failed',async()=>{
+  const originalFetch=globalThis.fetch,originalError=console.error,db=new MemoryD1(),bodies=[];console.error=()=>{};
+  try{
+    await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'shape',name:'Shape',baseUrl:'https://shape.example/v1',apiKey:'shape-secret',models:['gpt-5-mini'],enabled:true}],network:{mode:'direct'}}}));
+    globalThis.fetch=async(_request,init={})=>{const body=JSON.parse(String(init.body||'{}'));bodies.push(body);
+      if(body.model==='paid-out')return jsonResponse({error:{message:'You exceeded your current quota. Please check your billing.',code:'insufficient_quota'}},402);
+      if('temperature' in body)return jsonResponse({error:{message:'Unsupported value: temperature is not supported with this model.'}},400);
+      if('max_tokens' in body)return jsonResponse({error:{message:'Unsupported parameter: max_tokens. Use max_completion_tokens instead.'}},400);
+      return jsonResponse({choices:[{message:{content:'سازگار'}}]})};
+    const ok=await call(db,'/api/test-connection/ai',jsonInit({provider:'shape',model:'gpt-5-mini',prompt:'سلام'})).then(response=>response.json());
+    assert.equal(ok.ok,true,JSON.stringify(ok));assert.equal(ok.text,'سازگار');assert.equal(ok.reasoning,true);assert.ok(bodies.some(body=>body.model==='gpt-5-mini'&&'max_completion_tokens' in body&&!('temperature' in body)));
+    await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'billed',name:'Billed',baseUrl:'https://billed.example/v1',apiKey:'billed-secret',models:['paid-out'],enabled:true}],network:{mode:'direct'}}}));
+    const credit=await call(db,'/api/ai/test-all',jsonInit({prompt:'سلام',cursor:0,runId:'credit-run'})).then(response=>response.json());
+    const paid=credit.results.find(row=>row.model==='paid-out');assert.equal(paid.ok,false);assert.equal(paid.retryable,false);assert.match(String(paid.error||''),/quota|402|billing/i);
+  }finally{globalThis.fetch=originalFetch;console.error=originalError}
+});
+
+test('hung AI retry pass tests one model from each provider in parallel',async()=>{
+  const db=new MemoryD1(),sent=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})},AI_TEST_MODEL_BUDGET_MS:'80',AI_TEST_TIMEOUT_MS:'50'};
+  const env={DB:db,VAULT_SECRET:'vault-secret',JOBS:extra.JOBS,JOBS_DLQ:{send:async()=>{}},AI_TEST_MODEL_BUDGET_MS:'80',AI_TEST_TIMEOUT_MS:'50'};
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'slow-a',name:'Slow A',baseUrl:'https://a.example/v1',apiKey:'a-secret',models:['hang-a'],enabled:true},{id:'slow-b',name:'Slow B',baseUrl:'https://b.example/v1',apiKey:'b-secret',models:['hang-b'],enabled:true}],network:{mode:'direct'}}}),extra);
+  const originalFetch=globalThis.fetch;globalThis.fetch=()=>new Promise(()=>{});
+  const deliver=message=>worker.queue({messages:[{body:message,ack(){},retry(){assert.fail('retry pass should ack')}}]},env,ctx);
+  try{
+    await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام'}),extra);
+    await deliver(sent.shift().message);
+    const afterFirst=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());
+    assert.equal(afterFirst.run.result.results.length,2,'first pass tests both providers together');assert.equal(afterFirst.run.phase,'retrying');
+    await deliver(sent.shift().message);
+    const afterRetry=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());
+    assert.equal(afterRetry.run.result.batchResults.length,2,'retry pass also runs one hung model per provider');assert.equal(afterRetry.run.result.results.filter(row=>Number(row.retryCount)>0).length,2);
+  }finally{globalThis.fetch=originalFetch}
+});
+
 
 function jsonResponse(body,status=200,headers={}){return new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json',...headers}})}
 
