@@ -120,7 +120,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.08';
+const APP_VERSION = '10.09';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2775,6 +2775,7 @@ function autoResolveModel(string $modelId): array {
         'github'     => 'models.inference.ai.azure.com',
         'nvidia'     => 'integrate.api.nvidia.com',
         'cloudflare' => 'cloudflare.com',
+        'together'   => 'together.xyz',
     ][$host] ?? '';
     if ($needle === '') return [];
     foreach ($providers as $pr) {
@@ -13105,6 +13106,7 @@ function autoFreeToolModels(): array {
         ['ministral-8b-latest', 'Ministral 3 8B', 'mistral', 256000, '~۱/ثانیه · ~۱B توکن/ماه', 'سبک و ارزان؛ مناسبِ کارهای دوره‌ای', 3, 'fast'],
         ['ministral-3b-latest', 'Ministral 3 3B', 'mistral', 128000, '~۱/ثانیه · ~۱B توکن/ماه', 'کوچک‌ترین؛ فقط برای کارهای بسیار ساده', 2, 'fast'],
         ['codestral-latest', 'Codestral', 'mistral', 256000, '~۱/ثانیه · ~۱B توکن/ماه', 'تخصصیِ کد؛ برای کارهای دادهٔ ساخت‌یافته خوب است', 3, 'code'],
+        ['labs-leanstral-1-5', 'Leanstral 1.5 (لبز، رایگان)', 'mistral', 256000, 'رایگان (لایهٔ Labs) · باید Labs models را روشن کنید', 'تخصصیِ اثباتِ Lean 4 — فراخوانیِ ابزار دارد ولی برای کارهای عمومیِ فروشگاه مناسب نیست', 2, 'code'],
 
         /* ── OpenRouter — تنوعِ مدل با یک کلید ──────────────────────── */
         ['deepseek/deepseek-chat-v3.1:free', 'DeepSeek V3.1 (رایگان)', 'openrouter', 164000, '۲۰/دقیقه · ۵۰/روز', 'کیفیتِ بالا؛ سقفِ روزانه کم — برای کارهای کم‌تکرار', 5, 'balanced'],
@@ -13130,6 +13132,9 @@ function autoFreeToolModels(): array {
         ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', 'Llama 3.3 70B (کلادفلر)', 'cloudflare', 24000, '۱۰ هزار نورون/روز', 'حافظهٔ کم؛ پشتیبانیِ ابزار جزئی — برای کارهای کوتاه', 3, 'fast'],
         ['@cf/meta/llama-4-scout-17b-16e-instruct', 'Llama 4 Scout 17B', 'cloudflare', 131000, '۱۰ هزار نورون/روز', 'نسلِ ۴؛ حافظهٔ بهتر از بقیهٔ مدل‌های کلادفلر', 4, 'balanced'],
         ['@cf/qwen/qwen2.5-coder-32b-instruct', 'Qwen2.5 Coder (کلادفلر)', 'cloudflare', 32000, '۱۰ هزار نورون/روز', 'تخصصیِ کد روی زیرساختِ کلادفلر', 3, 'code'],
+
+        /* ── Together AI — سرورلسِ رایگانِ Bonsai (همان بک‌آپِ داخلی) ── */
+        ['Prism-ML/Ternary-Bonsai-27B', 'Ternary Bonsai 27B', 'together', 262000, 'رایگان روی سرورلسِ Together · SLA ۹۹.۹٪', 'همان مدلی که برنامه به‌عنوان بک‌آپِ رایگان استفاده می‌کند؛ ۲۶۲K حافظه و BFCL v3 برابر ۷۴.۰', 4, 'agentic'],
     ];
     $out = [];
     foreach ($rows as $r) {
@@ -13150,6 +13155,7 @@ function autoProviderInfo(): array {
         'github'     => ['name' => 'GitHub Models',   'key' => 'github.com/marketplace/models', 'card' => false],
         'nvidia'     => ['name' => 'NVIDIA NIM',      'key' => 'build.nvidia.com',   'card' => false],
         'cloudflare' => ['name' => 'Cloudflare Workers AI', 'key' => 'dash.cloudflare.com', 'card' => false],
+        'together'   => ['name' => 'Together AI',   'key' => 'api.together.xyz', 'card' => false],
     ];
 }
 
@@ -17258,6 +17264,55 @@ if (isset($_GET['selftest'])) {
     $add('10.08', 'فیلترِ برچسبی فهرست را محدود می‌کند بی‌آنکه کاتالوگ را دوباره بگیرد',
          strpos($selfSrc, 'function apRenderModelFilter') !== false
       && strpos($selfSrc, 'apModelsCache.filter(function(m){return m.tag===tag;})') !== false);
+
+    /* ---------- v10.09 (۲۲): افزودنِ Leanstral 1.5 و Ternary Bonsai ---------- */
+    $add('10.09', 'Leanstral 1.5 در کاتالوگِ انتخاب هست و زیرِ میسترال نشسته',
+         (function () {
+             foreach (autoFreeToolModels() as $r) {
+                 if ($r['id'] === 'labs-leanstral-1-5') return $r['provider'] === 'mistral';
+             }
+             return false;
+         })());
+    $add('10.09', 'Ternary Bonsai در کاتالوگ هست و ارائه‌دهندهٔ Together تعریف شده',
+         (function () {
+             $info = autoProviderInfo();
+             if (!isset($info['together'])) return false;
+             foreach (autoFreeToolModels() as $r) {
+                 if ($r['id'] === 'Prism-ML/Ternary-Bonsai-27B') {
+                     return $r['provider'] === 'together' && $r['context'] >= 262000;
+                 }
+             }
+             return false;
+         })());
+    $add('10.09', 'شناسهٔ Bonsai در کاتالوگ عیناً همان شناسهٔ بک‌آپِ رایگانِ داخلی است',
+         (function () use ($selfSrc) {
+             $inCat = false;
+             foreach (autoFreeToolModels() as $r) {
+                 if ($r['id'] === 'Prism-ML/Ternary-Bonsai-27B') $inCat = true;
+             }
+             return $inCat
+                 && strpos($selfSrc, "\$prefer = ['Prism-ML/Ternary" . "-Bonsai-27B'") !== false;
+         })());
+    $add('10.09', 'حدسِ هاست برای Together تعریف شده تا مدل به اتصالِ درست وصل شود',
+         strpos($selfSrc, "'together'   => 'together.xyz',") !== false);
+    $add('10.09', 'Leanstral تخصصی است و امتیازِ بالا نگرفته تا کاربر گمراه نشود',
+         (function () {
+             foreach (autoFreeToolModels() as $r) {
+                 if ($r['id'] === 'labs-leanstral-1-5') {
+                     return $r['quality'] <= 3 && mb_strpos($r['note'], 'Lean 4') !== false;
+                 }
+             }
+             return false;
+         })());
+    $add('10.09', 'دو مدلِ تازه کاتالوگ را نشکسته‌اند (شمارش و یکتاییِ شناسه)',
+         (function () {
+             $m = autoFreeToolModels();
+             $ids = array_column($m, 'id');
+             $p = [];
+             foreach ($m as $r) { $p[$r['provider']] = true; }
+             return count($m) >= 41 && count($p) >= 9
+                 && count($ids) === count(array_unique($ids));
+         })());
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
