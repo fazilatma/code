@@ -23,7 +23,12 @@ const active=(run:BackgroundRun|null)=>Boolean(run&&['queued','running','paused'
 const STALL_MS=45_000;
 /** Lease must expire sooner than STALL so a dead isolate cannot block the watchdog. */
 const LEASE_MS=35_000;
-const MODEL_BUDGET_MS=20_000;
+const DEFAULT_SKIP_TIMEOUT_MS=1_000;
+export function aiSkipTimeoutMs(settings:any):number{
+  const fromSettings=Number(settings?.ai?.skipTimeoutMs),fromEnv=Number(getEnv().AI_TEST_TIMEOUT_MS);
+  const raw=Number.isFinite(fromSettings)&&fromSettings>0?fromSettings:Number.isFinite(fromEnv)&&fromEnv>0?fromEnv:DEFAULT_SKIP_TIMEOUT_MS;
+  return Math.max(50,Math.min(60_000,Math.trunc(raw)));
+}
 const runAge=(run:BackgroundRun)=>Date.now()-(Date.parse(run.updatedAt||run.createdAt)||Date.now());
 async function raceBudget<T>(work:Promise<T>,ms:number):Promise<T|undefined>{
   let timer:ReturnType<typeof setTimeout>|undefined;
@@ -58,7 +63,7 @@ export async function retryAiTestPart(key:string,part:'message'|'category'){
   if(!retryKey)throw new Error('شناسه مدل برای تلاش مجدد لازم است.');
   if(!stored?.runId||!Array.isArray(stored.results)||!stored.results.length)throw new Error('نتیجهٔ ذخیره‌شده‌ای برای تلاش مجدد نیست؛ ابتدا تست مدل‌ها را اجرا کنید.');
   let categories:any[]=[];if(part==='category'&&stored.categoryTitle)try{categories=(await destinationCategories()).items}catch{/* category retry still records the missing-list error */}
-  const result=await testModelBatch(String(stored.prompt||'سلام'),{runId:String(stored.runId),retryKey,retryPart:part,onlyCandidates:Boolean(stored.onlyCandidates),categoryTitle:String(stored.categoryTitle||''),categories,timeoutMs:20_000});
+  const result=await testModelBatch(String(stored.prompt||'سلام'),{runId:String(stored.runId),retryKey,retryPart:part,onlyCandidates:Boolean(stored.onlyCandidates),categoryTitle:String(stored.categoryTitle||''),categories,timeoutMs:aiSkipTimeoutMs(await getState('settings',{}))});
   const run=await currentBackgroundRun('ai-test');
   if(run&&run.kind==='ai-test'&&(run.id===stored.runId||run.result?.runId===stored.runId)){run.result={...(run.result||{}),...result,results:result.results};await writeRun(run)}
   return result;
@@ -125,7 +130,8 @@ function withAiTimings(run:AiTestRun,result:any,startedMs:number,skippedStuck:bo
 function queueRetryJobs(results:any[]){return (Array.isArray(results)?results:[]).filter(isRetryableAiResult).map((row:any)=>({key:String(row.key),left:3}))}
 async function processAiTest(run:AiTestRun):Promise<BackgroundOutcome>{
   if(run.stopRequested||run.status==='paused')return{outcome:'complete'};
-  const budget=Math.max(50,Math.min(60_000,Number(getEnv().AI_TEST_MODEL_BUDGET_MS)||MODEL_BUDGET_MS)),callTimeout=Math.max(50,Math.min(Math.max(50,budget-50),Number(getEnv().AI_TEST_TIMEOUT_MS)||8_000));
+  const settings=await getState<any>('settings',{}),callTimeout=aiSkipTimeoutMs(settings),envBudget=Number(getEnv().AI_TEST_MODEL_BUDGET_MS);
+  const budget=Math.max(callTimeout+50,Math.min(60_000,Number.isFinite(envBudget)&&envBudget>0?envBudget:callTimeout*2+200));
   const retrying=Array.isArray(run.retryJobs)&&run.retryJobs.length>0;
   run.status='running';run.phase=retrying?'retrying':'testing';run.startedAt||=now();run.currentStartedAt=now();run.error=null;await writeRun(run);
   let categories:any[]=[];if(run.categoryTitle)try{categories=(await destinationCategories()).items}catch{/* Model response tests continue without Basalam categories. */}

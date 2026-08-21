@@ -25,7 +25,7 @@ function redirectedInit(init:RequestInit,from:URL,to:URL,status:number):RequestI
 export async function safeFetch(raw:string,init:RequestInit={},maxBytes?:number,timeoutMs?:number):Promise<Response>{
   let url=assertPublicUrl(raw),requestInit={...init};const env=getEnv(),limit=Math.min(25_000_000,Math.max(1000,maxBytes||Number(env.MAX_RESPONSE_BYTES)||8_000_000));
   for(let redirects=0;redirects<5;redirects++){
-    const controller=new AbortController(),timeout=setTimeout(()=>controller.abort('timeout'),Math.max(1000,timeoutMs||Number(env.REQUEST_TIMEOUT_MS)||25_000));
+    const wait=Number(timeoutMs)>0?Math.max(50,Number(timeoutMs)):Math.max(1000,Number(env.REQUEST_TIMEOUT_MS)||25_000),controller=new AbortController(),timeout=setTimeout(()=>controller.abort('timeout'),wait);
     try{
       const requestHeaders=new Headers({'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',accept:'text/html,application/xhtml+xml,application/json;q=0.9,application/xml;q=0.8,*/*;q=0.5','accept-language':'fa-IR,fa;q=0.9,en-US;q=0.7,en;q=0.6','cache-control':'no-cache'});new Headers(requestInit.headers).forEach((value,name)=>requestHeaders.set(name,value));
       const response=await fetch(url.href,{...requestInit,redirect:'manual',signal:controller.signal,headers:requestHeaders});

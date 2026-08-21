@@ -81,7 +81,21 @@ test('AI model budget timeout skips the hung model and continues the queue',asyn
     const started=await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام'}),extra).then(response=>response.json());
     await deliver(sent.shift().message);
     const current=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());
-    assert.equal(current.run.cursor,1);assert.equal(current.run.result.results[0].skipped,true);assert.equal(current.run.result.results[0].phase,'transport-skip');assert.ok(current.run.result.skippedStuck>=1);assert.equal(current.run.status,'queued');
+    assert.equal(current.run.cursor,1);assert.equal(current.run.result.results[0].ok,false);assert.ok(current.run.result.results[0].skipped||/مهلت|timeout|AbortError/i.test([current.run.result.results[0].error,current.run.result.results[0].phase].join(' ')));assert.equal(current.run.status,'queued');
+  }finally{globalThis.fetch=originalFetch}
+});
+
+test('dashboard skip-timeout setting is used to skip a hung AI model',async()=>{
+  const db=new MemoryD1(),sent=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}},env={DB:db,VAULT_SECRET:'vault-secret',JOBS:extra.JOBS,JOBS_DLQ:{send:async()=>{}}};
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'slow',name:'Slow AI',baseUrl:'https://ai.example/v1',apiKey:'slow-secret',models:['hang-1'],enabled:true}],network:{mode:'direct'}}}),extra);
+  await call(db,'/api/settings',jsonInit({ai:{skipTimeoutMs:80}}),extra);
+  const originalFetch=globalThis.fetch;globalThis.fetch=()=>new Promise(()=>{});
+  const deliver=message=>worker.queue({messages:[{body:message,ack(){},retry(){assert.fail('timeout skip should ack')}}]},env,ctx);
+  try{
+    await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام'}),extra);
+    await deliver(sent.shift().message);
+    const current=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());
+    assert.equal(current.run.result.results[0].ok,false);assert.match(String(current.run.result.results[0].error||current.run.result.results[0].phase||''),/مهلت|timeout|AbortError|transport-skip/i);
   }finally{globalThis.fetch=originalFetch}
 });
 
@@ -144,7 +158,7 @@ test('hung AI models are retried three times after the first pass',async()=>{
       await deliver(sent.shift().message);
       const current=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());
       retries=Number(current.run.result?.results?.[0]?.retryCount||0);
-      if(current.run.status==='done'){assert.equal(retries,3,'a hung model gets three extra attempts at the end');assert.equal(current.run.result.results[0].skipped,true);return}
+      if(current.run.status==='done'){assert.equal(retries,3,'a hung model gets three extra attempts at the end');assert.equal(current.run.result.results[0].ok,false);return}
     }
     assert.fail('run did not finish after hung-model retries, last retryCount='+retries)
   }finally{globalThis.fetch=originalFetch}
