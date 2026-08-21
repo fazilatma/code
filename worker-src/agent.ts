@@ -225,6 +225,21 @@ export async function processAgentRunMessage(message:{task:'agent';runId:string}
     }
   }finally{await releaseRun(message.runId,token)}
 }
+/**
+ * Rebuilds the conversation for the model call. `tool` messages MUST keep their
+ * `tool_call_id` (Mistral/OpenAI reject a tool message without it), and assistant
+ * messages that carry tool_calls should omit an empty `content` (some APIs reject
+ * `content: ""` next to tool_calls).
+ */
+export function buildAgentChatMessages(messages:AgentRun['messages']):Array<{role:string;content:string|null;tool_call_id?:string;tool_calls?:AgentRun['messages'][number]['tool_calls']}>{
+  return messages.filter(m=>m.role==='tool'||m.content!==null||(m.tool_calls?.length??0)>0).map(m=>{
+    if(m.role==='tool')return{role:'tool',tool_call_id:m.tool_call_id||'',content:m.content??''};
+    const hasCalls=(m.tool_calls?.length??0)>0,out:any={role:m.role};
+    if(m.content!==null&&m.content!=='')out.content=m.content;
+    if(hasCalls)out.tool_calls=m.tool_calls;
+    return out;
+  });
+}
 async function executeAgentStep(run:AgentRun):Promise<AgentOutcome>{
   run.status='running';run.startedAt ||= now();
   if(run.messages.length===0){
@@ -235,7 +250,7 @@ async function executeAgentStep(run:AgentRun):Promise<AgentOutcome>{
   }
   const resolved=await resolveAgentModel('',run.providerId,run.model);
   if(!resolved){run.status='failed';run.phase='failed';run.finishedAt=now();run.error=await agentModelSetupHint();run.logs.push({at:now(),step:run.steps,type:'error',text:run.error});await writeRun(run);return{outcome:'complete'}}
-  const chatMessages=run.messages.filter(m=>m.content!==null||(m.tool_calls?.length??0)>0).map(m=>({role:m.role,content:m.content??'',...(m.tool_calls?.length?{tool_calls:m.tool_calls}:{})}));
+  const chatMessages=buildAgentChatMessages(run.messages);
   const turn=await aiAgentCall(resolved.provider,resolved.model,chatMessages,agentToolSchemas(run.tools),undefined,undefined,run.maxSteps<=3?1200:2000);
   const toolCalls=turn.toolCalls||[];
   if(toolCalls.length){

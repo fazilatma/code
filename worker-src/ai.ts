@@ -15,7 +15,7 @@ export async function aiProviders():Promise<Provider[]>{return providersFromAi((
 export function isReasoningAiModel(provider:Pick<Provider,'reasoningModels'>|undefined,model:string):boolean{
   if(provider?.reasoningModels?.includes(model))return true;
   const value=String(model||'').toLowerCase();
-  return /(?:^|[\/_:.-])(?:deepseek[-_.]?r1|qwq|qwen3|gpt[-_.]?oss|gpt[-_.]?5|o[1-5](?:[-_.]|$)|reason(?:ing|er)?|thinking|think|magistral|nemotron|reflection|bonsai|liquid)(?:[\/_:.-]|$)/i.test(value)||/cohere[^/]*reason/i.test(value);
+  return /(?:^|[\/_:.-])(?:deepseek[-_.]?r1|qwq|qwen3|gpt[-_.]?oss|gpt[-_.]?5|o[1-5](?:[-_.]|$)|reason(?:ing|er)?|thinking|think|magistral|leanstral|nemotron|reflection|bonsai|liquid)(?:[\/_:.-]|$)/i.test(value)||/cohere[^/]*reason/i.test(value);
 }
 
 export async function preferredAiChatModel():Promise<{provider:Provider;model:string}|null>{
@@ -83,7 +83,7 @@ export function parseAgentTurn(body:any):{text:string;toolCalls:AiToolCall[]}{
  * text and/or requested tool calls. Works with Cloudflare Workers AI native models and
  * any OpenAI-compatible endpoint; provider/model must actually support tool use.
  */
-export async function aiAgentCall(provider:Provider,model:string,messages:Array<{role:string;content:string}>,tools:AiTool[],networkOverride?:Network,timeoutMs?:number,maxTokens=2000):Promise<AiAgentTurn>{
+export async function aiAgentCall(provider:Provider,model:string,messages:Array<{role:string;content:string|null;tool_call_id?:string;tool_calls?:Array<{id:string;type:string;function:{name:string;arguments:string}}>}>,tools:AiTool[],networkOverride?:Network,timeoutMs?:number,maxTokens=2000):Promise<AiAgentTurn>{
   const network=networkOverride||(await loadConnections()).ai.network,started=Date.now();
   if(!provider.baseUrl||!provider.apiKey||!model)throw new Error('تنظیمات ارائه‌دهنده/مدل کامل نیست');
   const canonical=canonicalAiModel(model);
@@ -186,7 +186,7 @@ function cloudflareModelIds(raw:string):string[]{
 function canonicalAiModel(model:string){return String(model||'').trim().replace(/^~+/,'')}
 function isOpenRouter(provider:Pick<Provider,'id'|'name'|'baseUrl'>,endpoint=''){return provider.id==='openrouter'||/openrouter/i.test(String(provider.name||''))||/openrouter\.ai/i.test(String(provider.baseUrl||endpoint||''))}
 function aiRequestHeaders(provider:Provider,endpoint:string,method:'POST'|'GET'='POST'):Record<string,string>{
-  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.17.2'};
+  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.17.3'};
   if(method==='POST')headers['content-type']='application/json';
   if(isOpenRouter(provider,endpoint)){headers['http-referer']='https://scraper4.workers.dev';headers.referer='https://scraper4.workers.dev';headers['x-title']='Scraper 4'}
   return headers;

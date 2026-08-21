@@ -10390,7 +10390,7 @@ async function aiProviders() {
 function isReasoningAiModel(provider, model) {
   if (provider?.reasoningModels?.includes(model)) return true;
   const value = String(model || "").toLowerCase();
-  return /(?:^|[\/_:.-])(?:deepseek[-_.]?r1|qwq|qwen3|gpt[-_.]?oss|gpt[-_.]?5|o[1-5](?:[-_.]|$)|reason(?:ing|er)?|thinking|think|magistral|nemotron|reflection|bonsai|liquid)(?:[\/_:.-]|$)/i.test(value) || /cohere[^/]*reason/i.test(value);
+  return /(?:^|[\/_:.-])(?:deepseek[-_.]?r1|qwq|qwen3|gpt[-_.]?oss|gpt[-_.]?5|o[1-5](?:[-_.]|$)|reason(?:ing|er)?|thinking|think|magistral|leanstral|nemotron|reflection|bonsai|liquid)(?:[\/_:.-]|$)/i.test(value) || /cohere[^/]*reason/i.test(value);
 }
 async function preferredAiChatModel() {
   const ai = (await loadConnections()).ai, providers = providersFromAi(ai).filter((provider) => provider.enabled !== false), preferred = [ai.model, ai.master, ...Array.isArray(ai.candidates) ? ai.candidates : []].map(String).filter(Boolean);
@@ -10591,7 +10591,7 @@ function isOpenRouter(provider, endpoint = "") {
   return provider.id === "openrouter" || /openrouter/i.test(String(provider.name || "")) || /openrouter\.ai/i.test(String(provider.baseUrl || endpoint || ""));
 }
 function aiRequestHeaders(provider, endpoint, method = "POST") {
-  const headers = { authorization: `Bearer ${provider.apiKey}`, accept: "application/json", "user-agent": "Scraper4/1.17.2" };
+  const headers = { authorization: `Bearer ${provider.apiKey}`, accept: "application/json", "user-agent": "Scraper4/1.17.3" };
   if (method === "POST") headers["content-type"] = "application/json";
   if (isOpenRouter(provider, endpoint)) {
     headers["http-referer"] = "https://scraper4.workers.dev";
@@ -11939,6 +11939,15 @@ async function processAgentRunMessage(message2) {
     await releaseRun(message2.runId, token);
   }
 }
+function buildAgentChatMessages(messages) {
+  return messages.filter((m) => m.role === "tool" || m.content !== null || (m.tool_calls?.length ?? 0) > 0).map((m) => {
+    if (m.role === "tool") return { role: "tool", tool_call_id: m.tool_call_id || "", content: m.content ?? "" };
+    const hasCalls = (m.tool_calls?.length ?? 0) > 0, out = { role: m.role };
+    if (m.content !== null && m.content !== "") out.content = m.content;
+    if (hasCalls) out.tool_calls = m.tool_calls;
+    return out;
+  });
+}
 async function executeAgentStep(run2) {
   run2.status = "running";
   run2.startedAt ||= now2();
@@ -11961,7 +11970,7 @@ ${JSON.stringify(tools).slice(0, 6e3)}` });
     await writeRun(run2);
     return { outcome: "complete" };
   }
-  const chatMessages2 = run2.messages.filter((m) => m.content !== null || (m.tool_calls?.length ?? 0) > 0).map((m) => ({ role: m.role, content: m.content ?? "", ...m.tool_calls?.length ? { tool_calls: m.tool_calls } : {} }));
+  const chatMessages2 = buildAgentChatMessages(run2.messages);
   const turn = await aiAgentCall(resolved.provider, resolved.model, chatMessages2, agentToolSchemas(run2.tools), void 0, void 0, run2.maxSteps <= 3 ? 1200 : 2e3);
   const toolCalls = turn.toolCalls || [];
   if (toolCalls.length) {
@@ -14879,7 +14888,7 @@ app.onError((error, c) => {
   const text = message(error), status = /Unauthorized/.test(text) ? 401 : /not found/i.test(text) ? 404 : /Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text) ? 413 : /timeout|مهلت دریافت/i.test(text) ? 504 : /invalid|required|empty|خالی|نامعتبر/i.test(text) ? 400 : /HTTP|fetch|network|اتصال/i.test(text) ? 502 : 500;
   return c.json({ ok: false, error: text, requestId: c.get("requestId") }, status);
 });
-app.get("/health", (c) => c.json({ ok: true, app: "scraper4-cloudflare", runtime: "cloudflare-workers", databaseReady: Boolean(c.env.DB), databaseError: c.env.DB ? null : "D1 binding DB is missing", workerInWeb: Boolean(c.env.JOBS), authenticationRequired: false, version: c.env.WORKER_VERSION || "1.17.2", time: (/* @__PURE__ */ new Date()).toISOString() }));
+app.get("/health", (c) => c.json({ ok: true, app: "scraper4-cloudflare", runtime: "cloudflare-workers", databaseReady: Boolean(c.env.DB), databaseError: c.env.DB ? null : "D1 binding DB is missing", workerInWeb: Boolean(c.env.JOBS), authenticationRequired: false, version: c.env.WORKER_VERSION || "1.17.3", time: (/* @__PURE__ */ new Date()).toISOString() }));
 app.get("/", async (c) => {
   await ensureSchema(c.env.DB);
   return c.html(DASHBOARD);
@@ -14908,7 +14917,7 @@ app.get("/api/status", async (c) => {
 app.get("/api/selftest", async (c) => c.json(await runSelftest()));
 app.get("/api/debug", async (c) => c.json(await runDiagnostics()));
 app.get("/api/parity", (c) => c.json({ ok: true, total: PHP_MENU_CAPABILITIES.length, capabilities: PHP_MENU_CAPABILITIES, dispatcherAudit: { reference: "scraper4.php v9.80", total: 178, get: 150, post: 28, mapped: 178, missing: 0, artifact: "parity-manifest.json" } }));
-app.get("/api/version", (c) => c.json({ ok: true, version: c.env.WORKER_VERSION || "1.17.2", runtime: "cloudflare-workers", deployment: "wrangler versions deploy / wrangler rollback" }));
+app.get("/api/version", (c) => c.json({ ok: true, version: c.env.WORKER_VERSION || "1.17.3", runtime: "cloudflare-workers", deployment: "wrangler versions deploy / wrangler rollback" }));
 app.get("/api/connections", async (c) => c.json({ ok: true, connections: await loadConnections(true) }));
 app.post("/api/connections", async (c) => c.json({ ok: true, connections: await saveConnections(await c.req.json()) }));
 app.get("/api/ai/providers", async (c) => c.json({ ok: true, providers: await aiProviders(), leaderboard: await getLeaderboard() }));

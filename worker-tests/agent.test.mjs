@@ -27,6 +27,28 @@ test('the free tool-calling model catalog is present, unique and clearly tagged'
   assert.equal(prism.free,true,'Together Prism is on the free tier');
 });
 
+test('buildAgentChatMessages keeps tool_call_id on tool messages and drops empty content next to tool_calls',()=>{
+  const messages=[
+    {role:'system',content:'شما یک عامل هستید'},
+    {role:'user',content:'وضعیت سایت را بررسی کن'},
+    {role:'assistant',content:null,tool_calls:[{id:'call_1',type:'function',function:{name:'site_status',arguments:'{}'}}]},
+    {role:'tool',tool_call_id:'call_1',content:'{"profiles":3}'},
+    {role:'assistant',content:null,tool_calls:[{id:'call_2',type:'function',function:{name:'jobs_report',arguments:'{}'}}]},
+    {role:'tool',tool_call_id:'call_2',content:'{"jobs":[]}'},
+    {role:'assistant',content:'گزارش آماده است'}
+  ];
+  const rebuilt=agent.buildAgentChatMessages(messages);
+  assert.equal(rebuilt.length,7);
+  assert.equal(rebuilt[3].role,'tool');
+  assert.equal(rebuilt[3].tool_call_id,'call_1','tool message keeps its tool_call_id');
+  assert.equal(rebuilt[5].tool_call_id,'call_2');
+  assert.equal(rebuilt[5].content,'{"jobs":[]}');
+  assert.equal(rebuilt[2].content,undefined,'assistant tool_calls omit an empty content');
+  assert.deepEqual(rebuilt[2].tool_calls,messages[2].tool_calls);
+  assert.equal(rebuilt[6].content,'گزارش آماده است');
+  assert.equal(rebuilt[0].content,'شما یک عامل هستید');
+});
+
 test('ready-made prompt templates exist, are unique and reference valid tools',()=>{
   assert.ok(agent.AGENT_PROMPT_TEMPLATES.length>=4,'at least four quick-start templates');
   const ids=new Set(agent.AGENT_PROMPT_TEMPLATES.map(t=>t.id));
