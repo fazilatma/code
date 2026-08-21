@@ -1,0 +1,296 @@
+import { serve } from '@hono/node-server';
+import { timingSafeEqual } from 'node:crypto';
+import { Hono } from 'hono';
+import { secureHeaders } from 'hono/secure-headers';
+import { streamSSE } from 'hono/streaming';
+import { aiCall, aiProviders, aiTestState, candidateTest, discoverProviderModels, getLeaderboard, networkDiagnostics, recordVote, startAiTest, stopAiTest, testAllModels } from './ai.js';
+import { aiToolNames } from './ai-tools.js';
+import { automationTick, autoreplyLogs, autoreplyRun, basalamChats, basalamOrders, digest, generateReply, notificationSweep, notifySelected } from './automation.js';
+import { config, assertConfig } from './config.js';
+import { connectionStatus, loadConnections, saveConnections } from './connections.js';
+import { DASHBOARD, DASHBOARD_JS, setupPage } from './dashboard.js';
+import { archiveLocalProduct, changeReport, createBackup, createJob, deleteProfile, enqueueDueProfiles, findLearnedCategory, getJob, getProduct, getProfile, getState, importAutoreplyLog, importCategoryLearning, jobReport, learnCategory, listCategoryLearning, listJobs, listProducts, listProfiles, migrate, pool, profileStats, pruneProductChanges, reapStalledJobs, recentReports, restoreBackup, retryJob, deleteJob, clearFinishedJobs, saveProfile,setQueuePaused,queueOverview,setState,updateJob,updateLocalProduct,upsertProduct } from './db.js';
+import { DEFAULT_SELECTORS, type Product, type Profile } from './types.js';
+import { safeFetch } from './network.js';
+import { sendNotification } from './notifications.js';
+import { discoverProductImages, repairProfileMedia, validateImage } from './media.js';
+import { PHP_MENU_CAPABILITIES, runSelftest } from './parity.js';
+import { basalamCategories as aiBasalamCategories, batchRejectedCategories, classifyLocalProducts, recommendCategory } from './product-ai.js';
+import { githubBackupGet, githubBackupList, githubBackupRun, githubBackupStatus } from './github-backup.js';
+import { bulkEdit, deduplicateWoo, destinationBatch, destinationChangeStatus, destinationDelete, destinationOverview, destinationUpdate, findDestinationDuplicates, fixBasalamCategory, listDestinationProducts, photoFix, rebuildMap, recon, rejectedBasalam, retire, suffixReport } from './maintenance.js';
+import { numberFromText, selectorWorkbench, suggestGallery, suggestListSelectors, testDetailSelectors, testSelector, validateSelectorConfig } from './scraper.js';
+import { syncBasalam, syncWoo } from './sync.js';
+import { createPhpSettingsBundle, decodePhpSettingsBundle, stateKeyForFile } from './settings-transfer.js';
+import { productsToXlsx, xlsxToRows } from './spreadsheet.js';
+import { sourceDiagnostics, sourceText } from './source-network.js';
+import { createVisualTicket, readVisualTicket, renderVisualSelector } from './visual.js';
+import { APP_BUILD_DATE, APP_RELEASE, APP_VERSION } from './version.js';
+import { workerLoop, requestWorkerStop } from './processor.js';
+
+let databaseReady = false;
+let databaseError = '';
+async function initializeDatabase(): Promise<boolean> {
+  try {
+    assertConfig();
+    await migrate();
+    await pool.query('SELECT 1');
+    databaseReady = true; databaseError = '';
+    console.log('PostgreSQL connected and schema is ready');
+    return true;
+  } catch (error) {
+    databaseReady = false;
+    databaseError = error instanceof Error ? error.message : String(error);
+    console.error(`DATABASE NOT READY: ${databaseError}`);
+    return false;
+  }
+}
+await initializeDatabase();
+
+const app = new Hono();
+const dashboardHeaders = secureHeaders({
+  contentSecurityPolicy: {
+    defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"],
+    connectSrc: ["'self'"], imgSrc: ["'self'", 'data:', 'https:'], objectSrc: ["'none'"], frameAncestors: ["'none'"]
+  }
+});
+app.use('*', async (c, next) => c.req.path === '/visual' ? next() : dashboardHeaders(c, next));
+app.onError((error, c) => { console.error(error); return c.json({ ok: false, error: error.message }, 500); });
+app.get('/health', c => c.json({
+  ok: true,
+  app: 'scraper4-render',
+  version: APP_VERSION,
+  buildDate: APP_BUILD_DATE,
+  release: APP_RELEASE,
+  runtime: process.version,
+  databaseReady,
+  databaseError: databaseReady ? null : databaseError,
+  workerInWeb: config.runWorkerInWeb,
+  time: new Date().toISOString()
+}));
+app.get('/', c => c.html(databaseReady ? DASHBOARD : setupPage(databaseError)));
+app.get('/dashboard.js', c => c.body(DASHBOARD_JS, 200, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' }));
+app.get('/image',async c=>{try{const {url}=readVisualTicket(c.req.query('ticket')||''),response=await safeFetch(url,{headers:{accept:'image/*'}},10_000_000),type=response.headers.get('content-type')||'';if(!response.ok||!type.startsWith('image/'))return c.body('invalid image',400);return new Response(response.body,{headers:{'content-type':type,'cache-control':'private,max-age=300','x-content-type-options':'nosniff'}})}catch{return c.body('invalid ticket',400)}});
+app.get('/visual', async c => {
+  try {
+    const content = await renderVisualSelector(c.req.query('ticket') || '');
+    return c.html(content, 200, {
+      'cache-control': 'no-store',
+      'content-security-policy': "default-src 'none'; img-src https: http: data:; style-src 'unsafe-inline' https: http:; font-src https: http: data:; script-src 'unsafe-inline'; frame-ancestors 'self';",
+      'referrer-policy': 'no-referrer'
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return c.html(`<html dir="rtl"><body style="background:#0f172a;color:#fca5a5;font-family:Tahoma;padding:30px"><h2>خطای انتخاب‌گر بصری</h2><p>${message.replace(/[&<>]/g, '')}</p></body></html>`, 400);
+  }
+});
+
+app.use('/api/*', async (c, next) => {
+  if (!databaseReady) return c.json({ ok: false, error: 'Database is not configured', detail: databaseError, setup: 'Create Render PostgreSQL and set DATABASE_URL to its Internal Database URL.' }, 503);
+  if (!config.adminToken) return next();
+  const auth = c.req.header('authorization') || '';
+  if (!safeEqual(auth.replace(/^Bearer\s+/i, ''), config.adminToken)) return c.json({ ok: false, error: 'Unauthorized' }, 401);
+  await next();
+});
+app.use('/scraper4.php',async(c,next)=>{if(!databaseReady)return c.json({ok:false,error:'Database is not configured'},503);if(!config.adminToken)return next();const auth=(c.req.header('authorization')||'').replace(/^Bearer\s+/i,''),queryToken=c.req.query('api_token')||'';if(!safeEqual(auth||queryToken,config.adminToken))return c.json({ok:false,error:'Unauthorized'},401);await next()});
+
+app.post('/api/visual-ticket', async c => {
+  const body = await c.req.json() as { url?: string };
+  const url = new URL(String(body.url || ''));
+  if (!['http:', 'https:'].includes(url.protocol)) return c.json({ ok: false, error: 'Invalid visual selector URL' }, 400);
+  return c.json({ ok: true, ticket: createVisualTicket(url.href), expiresIn: 300 });
+});
+app.get('/api/version',c=>c.json({ok:true,version:APP_VERSION,buildDate:APP_BUILD_DATE,release:APP_RELEASE}));
+app.get('/api/status', async c => { const connections=await loadConnections(); return c.json({ ok:true,version:APP_VERSION,buildDate:APP_BUILD_DATE,profiles:(await listProfiles()).length,jobs:await listJobs(10),connections:connectionStatus(connections) }); });
+app.get('/api/selftest',async c=>c.json(await runSelftest()));
+app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES}));
+app.get('/api/connections', async c => c.json({ok:true,connections:await loadConnections(true)}));
+app.post('/api/connections', async c => c.json({ok:true,connections:await saveConnections(await c.req.json())}));
+app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
+app.post('/api/ai/providers/:id/discover-models',async c=>c.json(await discoverProviderModels(c.req.param('id'))));
+app.post('/api/ai/test-all',async c=>{const body=await c.req.json().catch(()=>({})) as any;return c.json({ok:true,results:await testAllModels(String(body.prompt||'سلام'),Boolean(body.onlyCandidates))})});
+app.post('/api/ai/call',async c=>{const body=await c.req.json() as any,providers=await aiProviders(),provider=providers.find(p=>p.id===body.provider);if(!provider)return c.json({ok:false,error:'Provider not found'},404);return c.json(await aiCall(provider,String(body.model||''),String(body.prompt||'سلام')))});
+app.get('/api/ai/tools',c=>c.json({ok:true,tools:aiToolNames()}));
+app.post('/api/ai/agent',async c=>{const body=await c.req.json() as any,providers=await aiProviders(),requested=providers.find(p=>p.id===body.provider),provider=requested||providers.find(p=>p.enabled&&p.toolModels?.length);if(!provider)return c.json({ok:false,error:'مدل دارای فراخوانی ابزار فعال نیست'},409);const model=String(body.model||provider.toolModels?.[0]||'');if(!provider.toolModels?.includes(model))return c.json({ok:false,error:'فراخوانی ابزار برای این مدل فعال نشده است'},409);return c.json(await aiCall(provider,model,String(body.prompt||'وضعیت فروشگاه را خلاصه کن.')))});
+app.post('/api/ai/vote',async c=>{const body=await c.req.json() as any;return c.json({ok:true,leaderboard:await recordVote(String(body.task||'manual'),String(body.winner||''),Array.isArray(body.candidates)?body.candidates.map(String):[])})});
+app.get('/api/ai/leaderboard',async c=>c.json({ok:true,leaderboard:await getLeaderboard()}));
+app.post('/api/ai/test-start',async c=>c.json({ok:true,state:await startAiTest(await c.req.json().catch(()=>({})))}));
+app.get('/api/ai/test-status',async c=>c.json({ok:true,state:await aiTestState()}));
+app.post('/api/ai/test-stop',async c=>c.json(await stopAiTest()));
+app.post('/api/ai/candidates/:task',async c=>{const task=c.req.param('task');if(!['category','autoreply'].includes(task))return c.json({ok:false,error:'Invalid task'},400);const body=await c.req.json() as any;return c.json({ok:true,...await candidateTest(task as any,String(body.input||''))})});
+app.get('/api/ai/network-diagnostics',async c=>c.json(await networkDiagnostics()));
+app.get('/api/ai/basalam-categories',async c=>c.json({ok:true,items:await aiBasalamCategories()}));
+app.post('/api/ai/category-recommend',async c=>{const body=await c.req.json() as any;return c.json(await recommendCategory(String(body.title||''),String(body.description||'')))});
+app.post('/api/ai/category-rejected-batch',async c=>{const body=await c.req.json().catch(()=>({})) as any;return c.json(await batchRejectedCategories({limit:Number(body.limit)||20,apply:body.confirm==='APPLY'}))});
+app.post('/api/ai/category-local-batch',async c=>{const body=await c.req.json().catch(()=>({})) as any;return c.json(await classifyLocalProducts(String(body.profileId||''),Number(body.limit)||20))});
+app.post('/api/notifications/test',async c=>{const body=await c.req.json() as any;return c.json(await sendNotification(body.channel||'webhook',String(body.text||'پیام آزمایشی اسکرپر ۴')))});
+app.post('/api/notifications/sweep',async c=>{const body=await c.req.json().catch(()=>({})) as any;return c.json(await notificationSweep(body.confirm!=='SEND'))});
+app.post('/api/notifications/selected',async c=>{const body=await c.req.json() as any;if(!['orders','chats'].includes(body.kind))return c.json({ok:false,error:'Invalid kind'},400);return c.json(await notifySelected(body.kind,Array.isArray(body.ids)?body.ids.map(String):[]))});
+app.get('/api/notifications/state',async c=>c.json({ok:true,state:await getState('notification_state',{})}));
+app.get('/api/category-learning',async c=>c.json({ok:true,items:await listCategoryLearning(Math.min(5000,Number(c.req.query('limit'))||1000))}));
+app.post('/api/category-learning/record',async c=>{const b=await c.req.json() as any;return c.json({ok:true,saved:await learnCategory(String(b.title||''),Number(b.categoryId),String(b.categoryName||''),Number(b.maxWords)||5)})});
+app.post('/api/category-learning/test',async c=>{const b=await c.req.json() as any;return c.json({ok:true,result:await findLearnedCategory(String(b.title||''),Number(b.maxWords)||5)})});
+app.post('/api/autoreply/test',async c=>{const b=await c.req.json() as any;return c.json({ok:true,result:await generateReply(String(b.text||''))})});
+app.post('/api/autoreply/run',async c=>{const b=await c.req.json().catch(()=>({})) as any;return c.json(await autoreplyRun(b.confirm!=='APPLY'))});
+app.get('/api/autoreply/log',async c=>c.json({ok:true,items:await autoreplyLogs()}));
+app.post('/api/digest',async c=>{const b=await c.req.json().catch(()=>({})) as any;return c.json(await digest(b.confirm!=='SEND'))});
+app.get('/api/basalam/chats',async c=>c.json({ok:true,items:await basalamChats(Number(c.req.query('limit'))||20)}));
+app.get('/api/basalam/orders',async c=>c.json({ok:true,items:await basalamOrders(Number(c.req.query('limit'))||20)}));
+app.get('/api/settings', async c => c.json({ ok:true, settings: await getState('settings', {}) }));
+app.post('/api/settings', async c => { const settings=await c.req.json(); await setState('settings',settings); return c.json({ok:true}); });
+app.get('/api/backup', async c => c.json(await createBackup(), 200, { 'content-disposition': `attachment; filename="scraper4-render-${Date.now()}.json"` }));
+app.post('/api/restore', async c => c.json({ok:true,result:await restoreBackup(await c.req.json())}));
+app.post('/api/github-backup/run',async c=>c.json(await githubBackupRun(new URL(c.req.url).host)));
+app.get('/api/github-backup/list',async c=>c.json(await githubBackupList()));
+app.get('/api/github-backup/status',async c=>c.json({ok:true,status:await githubBackupStatus()}));
+app.get('/api/github-backup/:name',async c=>c.json(await githubBackupGet(c.req.param('name'))));
+app.get('/api/settings-export', async c => {
+  const bundle=await createPhpSettingsBundle(new URL(c.req.url).host),digits=new Date().toISOString().replace(/\D/g,'').slice(0,14),stamp=`${digits.slice(0,8)}_${digits.slice(8)}`;
+  return c.json(bundle,200,{'content-disposition':`attachment; filename="settings_${stamp}.json"`});
+});
+app.post('/api/settings-import', async c => {
+  const files=decodePhpSettingsBundle(await c.req.json());let profiles=0,products=0,states=0,categories=0,autoreplyLogs=0,connections=false;const warnings:string[]=[];
+  const rawProfiles=files['profiles.json'];
+  if(rawProfiles&&typeof rawProfiles==='object')for(const [id,raw] of Object.entries(rawProfiles as Record<string,any>)){
+    try{const profile=normalizeProfile({...raw,id});await saveProfile(profile);profiles++;for(const product of legacyProducts(raw?.products)){await upsertProduct(profile.id,product);products++;}}
+    catch(error){warnings.push(`${id}: ${error instanceof Error?error.message:String(error)}`)}
+  }
+  const rawConnections=files['connections.json'] as any;
+  if(rawConnections){const woo=rawConnections.woocommerce||rawConnections.woo||{},basalam=rawConnections.basalam||{},ai=rawConnections.ai||{};await saveConnections({woo:{url:woo.url||woo.store_url||'',key:woo.consumer_key||woo.ck||woo.key||'',secret:woo.consumer_secret||woo.cs||woo.secret||'',categoryId:woo.category_id||0},basalam:{token:basalam.token||'',vendorId:String(basalam.vendor_id||basalam.vendorId||''),api:basalam.api_base||basalam.api||'https://openapi.basalam.com/v1',preparationDays:basalam.preparation_days,weight:basalam.weight,packageWeight:basalam.package_weight,stock:basalam.stock,categoryId:basalam.category_id,autoCategory:basalam.auto_category,netIndirect:basalam.net_indirect,shops:basalam.shops},ai:{baseUrl:ai.base_url||ai.baseUrl||'',apiKey:ai.api_key||ai.apiKey||'',model:ai.model||'',activeProvider:ai.activeProvider||ai.active_provider||'',providers:ai.providers,candidates:ai.candidates,master:ai.master,network:ai.network},notifications:rawConnections.notifications||{},github:rawConnections.github||{},sourceNetwork:rawConnections.src_net||rawConnections.sourceNetwork||{}});connections=true;}
+  if(files['category_learning.json'])categories=await importCategoryLearning(files['category_learning.json']);
+  if(files['autoreply_log.json'])autoreplyLogs=await importAutoreplyLog(files['autoreply_log.json']);
+  for(const [file,value] of Object.entries(files)){const key=stateKeyForFile(file);if(key){await setState(key,value);states++;}}
+  return c.json({ok:true,format:'scraper4-php-compatible',imported:{profiles,products,states,categories,autoreplyLogs,connections},warnings});
+});
+app.get('/api/profile-stats', async c => c.json({ok:true,items:await profileStats()}));
+app.post('/api/maintenance/recon/:target',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const body=await c.req.json().catch(()=>({})) as any;return c.json({ok:true,report:await recon(target as any,String(body.profileId||''))})});
+app.post('/api/maintenance/rebuild/:target',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const body=await c.req.json().catch(()=>({})) as any;return c.json(await rebuildMap(target as any,String(body.profileId||'')))});
+app.post('/api/maintenance/retire/:target',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const body=await c.req.json() as any,apply=body.confirm==='APPLY';return c.json(await retire(target as any,String(body.profileId||''),String(body.action||'report'),apply))});
+app.post('/api/maintenance/bulk/:target',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const body=await c.req.json() as any;return c.json(await bulkEdit(target as any,body,body.confirm==='APPLY'))});
+app.post('/api/maintenance/photo-fix',async c=>{const body=await c.req.json() as any;return c.json(await photoFix(String(body.profileId||''),body.confirm==='APPLY'))});
+app.post('/api/media/validate',async c=>{const body=await c.req.json() as any;return c.json(await validateImage(String(body.url||'')))});
+app.post('/api/media/discover',async c=>{const body=await c.req.json() as any;return c.json({ok:true,images:await discoverProductImages(String(body.url||''))})});
+app.post('/api/media/repair',async c=>{const body=await c.req.json() as any;return c.json(await repairProfileMedia(String(body.profileId||''),{apply:body.confirm==='APPLY',limit:Number(body.limit)||100,validateAll:Boolean(body.validateAll)}))});
+app.get('/api/destination/:target/products',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const all=await listDestinationProducts(target as any,c.req.query('fresh')==='1'),q=String(c.req.query('q')||'').toLowerCase(),status=String(c.req.query('status')||''),image=String(c.req.query('image')||''),filtered=all.filter(x=>(!q||x.name.toLowerCase().includes(q)||String(x.id)===q)&&(!status||x.status===status)&&(!image||(image==='yes'?x.images.length>0:x.images.length===0))),limit=Math.min(200,Number(c.req.query('limit'))||50),offset=Math.max(0,Number(c.req.query('offset'))||0);return c.json({ok:true,total:filtered.length,items:filtered.slice(offset,offset+limit).map(item=>{const image=remoteImageUrl(item);return{...item,proxyImage:image?'/image?ticket='+encodeURIComponent(createVisualTicket(image)):''}})})});
+app.get('/api/destination/:target/products/:id',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);const item=(await listDestinationProducts(target as any)).find(x=>x.id===Number(c.req.param('id')));return item?c.json({ok:true,item:{...item,proxyImage:remoteImageUrl(item)?'/image?ticket='+encodeURIComponent(createVisualTicket(remoteImageUrl(item))):''}}):c.json({ok:false,error:'Product not found'},404)});
+app.put('/api/destination/:target/products/:id',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);return c.json(await destinationUpdate(target as any,Number(c.req.param('id')),await c.req.json()))});
+app.post('/api/destination/:target/batch',async c=>{const target=c.req.param('target'),body=await c.req.json() as any;if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);return c.json(await destinationBatch(target as any,Array.isArray(body.ids)?body.ids.map(Number):[],String(body.operation||''),body.value,body.confirm==='APPLY'))});
+app.get('/api/destination/:target/overview',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);return c.json({ok:true,...await destinationOverview(target as any,c.req.query('fresh')==='1')})});
+app.get('/api/destination/:target/duplicates',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);return c.json({ok:true,groups:await findDestinationDuplicates(target as any)})});
+app.get('/api/destination/:target/suffix-report',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);return c.json(await suffixReport(target as any))});
+app.post('/api/destination/woo/deduplicate',async c=>{const body=await c.req.json().catch(()=>({})) as any;return c.json(await deduplicateWoo(body.confirm==='APPLY'))});
+app.get('/api/destination/basalam/rejected',async c=>c.json({ok:true,items:await rejectedBasalam()}));
+app.post('/api/destination/basalam/:id/fix-category',async c=>{const body=await c.req.json() as any;if(body.confirm!=='APPLY')return c.json({ok:false,error:'confirm APPLY is required'},400);return c.json(await fixBasalamCategory(Number(c.req.param('id')),Number(body.categoryId)))});
+app.post('/api/destination/:target/:id/status',async c=>{const target=c.req.param('target'),body=await c.req.json() as any;if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);if(body.confirm!=='APPLY')return c.json({ok:false,error:'confirm APPLY is required'},400);return c.json(await destinationChangeStatus(target as any,Number(c.req.param('id')),String(body.status||'')))});
+app.delete('/api/destination/:target/:id',async c=>{const target=c.req.param('target');if(!['woo','basalam'].includes(target))return c.json({ok:false,error:'Invalid target'},400);if(c.req.query('confirm')!=='DELETE')return c.json({ok:false,error:'confirm DELETE is required'},400);return c.json(await destinationDelete(target as any,Number(c.req.param('id')),c.req.query('force')==='true'))});
+app.post('/api/products/:profileId/:sourceKey/sync/:target',async c=>{const profile=await getProfile(c.req.param('profileId')),product=await getProduct(c.req.param('profileId'),c.req.param('sourceKey')),target=c.req.param('target');if(!profile||!product)return c.json({ok:false,error:'Product/profile not found'},404);if(target==='woo')return c.json({ok:true,result:await syncWoo(product,profile)});if(target==='basalam')return c.json({ok:true,result:await syncBasalam(product,profile)});return c.json({ok:false,error:'Invalid target'},400)});
+app.get('/api/queue/overview',async c=>c.json({ok:true,...await queueOverview()}));
+app.post('/api/queue/pause',async c=>{const body=await c.req.json().catch(()=>({})) as any;return c.json({ok:true,...await setQueuePaused(true,String(body.reason||''))})});
+app.post('/api/queue/resume',async c=>c.json({ok:true,...await setQueuePaused(false,'')}));
+app.post('/api/queue-watchdog', async c => { const body=await c.req.json().catch(()=>({})) as any; return c.json({ok:true,reaped:await reapStalledJobs(Number(body.minutes)||30)}); });
+app.post('/api/source-test', async c => { const body=await c.req.json() as any; const result=await sourceText(String(body.url||''),1_000_000); return c.json({ok:true,bytes:Buffer.byteLength(result.text),url:result.url,mode:result.mode,title:(result.text.match(/<title[^>]*>(.*?)<\/title>/is)?.[1]||'').replace(/<[^>]+>/g,'').trim()}); });
+app.post('/api/source-diagnostics',async c=>{const body=await c.req.json() as any;return c.json(await sourceDiagnostics(String(body.url||'')))});
+app.post('/api/test-connection/:target',async c=>c.json(await connectionDiagnostic(c.req.param('target'))));
+app.post('/api/test-basalam-token',async c=>{const body=await c.req.json() as any,connections=await loadConnections(true);return c.json(await basalamTokenDiagnostic(String(body.token||''),String(body.api||connections.basalam.api),String(body.vendorId||'')))});
+app.get('/api/categories/:target',async c=>{const target=c.req.param('target'),connections=await loadConnections();if(target==='woo'){const x=connections.woo;if(!x.url||!x.key||!x.secret)return c.json({ok:false,error:'اتصال ووکامرس کامل نیست'},400);const auth=`Basic ${Buffer.from(`${x.key}:${x.secret}`).toString('base64')}`,items:any[]=[];for(let page=1;page<=20;page++){const r=await safeFetch(`${x.url}/wp-json/wc/v3/products/categories?per_page=100&page=${page}`,{headers:{authorization:auth,accept:'application/json'}},3_000_000),rows=await r.json() as any[];if(!r.ok)return c.json({ok:false,error:`Woo HTTP ${r.status}`},502);items.push(...rows);if(rows.length<100)break}return c.json({ok:true,items})}if(target==='basalam'){const x=connections.basalam;if(!x.token)return c.json({ok:false,error:'توکن باسلام خالی است'},400);const r=await safeFetch(`${x.api}/categories`,{headers:{authorization:`Bearer ${x.token}`,accept:'application/json'}},5_000_000),body=await r.json() as any;return c.json({ok:r.ok,items:body?.data||body?.categories||body})}return c.json({ok:false,error:'Invalid target'},400)});
+app.get('/api/profiles', async c => c.json({ ok: true, profiles: await listProfiles() }));
+app.post('/api/profiles', async c => {
+  const profile=normalizeProfile(await c.req.json()),selectorErrors=validateSelectorConfig(profile.selectors);if(Object.keys(selectorErrors).length)return c.json({ok:false,error:'یک یا چند سلکتور نامعتبر است',selectorErrors},400);return c.json({ok:true,profile:await saveProfile(profile)});
+});
+app.delete('/api/profiles/:id', async c => c.json({ ok: await deleteProfile(c.req.param('id')) }));
+app.post('/api/profiles/:id/scrape', async c => {
+  const profile = await getProfile(c.req.param('id')); if (!profile) return c.json({ ok: false, error: 'Profile not found' }, 404);
+  const body = await c.req.json().catch(() => ({})) as any; const target = validTarget(body.target || 'none');
+  return c.json({ ok: true, job: await createJob(profile.id, 'scrape', target) }, 202);
+});
+app.post('/api/profiles/:id/sync', async c => {
+  const profile = await getProfile(c.req.param('id')); if (!profile) return c.json({ ok: false, error: 'Profile not found' }, 404);
+  const body = await c.req.json().catch(() => ({})) as any;
+  const keys=Array.isArray(body.keys)?body.keys.map(String).slice(0,10000):[];return c.json({ok:true,job:await createJob(profile.id,'sync',validTarget(body.target||'both'),{keys})},202);
+});
+app.get('/api/jobs', async c => c.json({ ok: true, jobs: await listJobs(Math.min(200, Number(c.req.query('limit')) || 50)) }));
+app.get('/api/jobs/:id/events',c=>streamSSE(c,async stream=>{let last='',seq=0;for(let i=0;i<600;i++){const job=await getJob(c.req.param('id'));if(!job){await stream.writeSSE({event:'error',data:JSON.stringify({error:'Job not found'}),id:String(++seq)});break}const data=JSON.stringify(job);if(data!==last){await stream.writeSSE({event:'progress',data,id:String(++seq)});last=data}if(!['queued','running'].includes(job.status)){await stream.writeSSE({event:'done',data,id:String(++seq)});break}await stream.sleep(1000)}}));
+app.get('/api/jobs/:id/report',async c=>{const report=await jobReport(c.req.param('id'));return report?c.json({ok:true,report}):c.json({ok:false,error:'Job not found'},404)});
+app.get('/api/reports',async c=>c.json({ok:true,reports:await recentReports(Math.min(100,Number(c.req.query('limit'))||30))}));
+app.get('/api/changes',async c=>c.json({ok:true,report:await changeReport({hours:Number(c.req.query('hours'))||24,profileId:c.req.query('profileId')||'',limit:Number(c.req.query('limit'))||1000})}));
+app.get('/api/changes.csv',async c=>{const report=await changeReport({hours:Number(c.req.query('hours'))||24,profileId:c.req.query('profileId')||'',limit:10000}),fields=['created_at','profile_id','profile_name','source_key','change_type','title','old_price','new_price'],csv='\uFEFF'+fields.join(',')+'\n'+report.items.map((item:any)=>[item.created_at,item.profile_id,item.profile_name,item.source_key,item.change_type,item.new_data?.title||item.old_data?.title||'',item.old_data?.price||'',item.new_data?.price||''].map(csvCell).join(',')).join('\n');return c.body(csv,200,{'content-type':'text/csv; charset=utf-8','content-disposition':'attachment; filename="product-changes.csv"'})});
+app.delete('/api/changes',async c=>{if(c.req.query('confirm')!=='DELETE')return c.json({ok:false,error:'confirm DELETE is required'},400);return c.json({ok:true,...await pruneProductChanges(Number(c.req.query('days'))||90,Number(c.req.query('maxRows'))||100000)})});
+app.get('/api/jobs/:id', async c => { const job = await getJob(c.req.param('id')); return job ? c.json({ ok: true, job }) : c.json({ ok: false, error: 'Job not found' }, 404); });
+app.post('/api/jobs/:id/stop', async c => { await updateJob(c.req.param('id'), { stopRequested: true }); return c.json({ ok: true }); });
+app.post('/api/jobs/:id/retry',async c=>{const job=await retryJob(c.req.param('id'));return job?c.json({ok:true,job}):c.json({ok:false,error:'Job cannot be retried'},409)});
+app.delete('/api/jobs/:id',async c=>c.json({ok:await deleteJob(c.req.param('id'))}));
+app.delete('/api/jobs',async c=>c.json({ok:true,deleted:await clearFinishedJobs()}));
+app.get('/api/profiles/:id/products', async c => {
+  const limit = Math.min(500, Number(c.req.query('limit')) || 100), offset = Math.max(0, Number(c.req.query('offset')) || 0);
+  return c.json({ ok: true, ...await listProducts(c.req.param('id'), limit, offset, c.req.query('q') || '') });
+});
+app.put('/api/profiles/:id/products/:key',async c=>{const product=await updateLocalProduct(c.req.param('id'),c.req.param('key'),await c.req.json());return product?c.json({ok:true,product}):c.json({ok:false,error:'Product not found'},404)});
+app.delete('/api/profiles/:id/products/:key',async c=>{if(c.req.query('confirm')!=='ARCHIVE')return c.json({ok:false,error:'confirm ARCHIVE is required'},400);return c.json({ok:await archiveLocalProduct(c.req.param('id'),c.req.param('key'))})});
+app.get('/api/profiles/:id/export.xlsx',async c=>{const result=await listProducts(c.req.param('id'),100000,0,''),buffer=await productsToXlsx(result.products);return c.body(buffer as any,200,{'content-type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','content-disposition':`attachment; filename="${c.req.param('id').replace(/[^a-z0-9_.-]/gi,'_')}.xlsx"`})});
+app.post('/api/profiles/:id/import.xlsx',async c=>{const profile=await getProfile(c.req.param('id'));if(!profile)return c.json({ok:false,error:'Profile not found'},404);const body=await c.req.json() as any;if(typeof body.base64!=='string')return c.json({ok:false,error:'base64 is required'},400);return c.json(await importRows(profile,await xlsxToRows(Buffer.from(body.base64,'base64'))))});
+app.get('/api/profiles/:id/export.csv',async c=>{const result=await listProducts(c.req.param('id'),100000,0,''),fields=['sourceKey','title','price','url','image','sku','brand','stock','weight','category','shortDesc','longDesc','variationGroups','variations','priceMin','priceMax'],csv='\uFEFF'+fields.join(',')+'\n'+result.products.map(p=>fields.map(field=>csvCell((p as any)[field])).join(',')).join('\n');return c.body(csv,200,{'content-type':'text/csv; charset=utf-8','content-disposition':`attachment; filename="${c.req.param('id').replace(/[^a-z0-9_.-]/gi,'_')}.csv"`})});
+app.post('/api/profiles/:id/import',async c=>{const profile=await getProfile(c.req.param('id'));if(!profile)return c.json({ok:false,error:'Profile not found'},404);const body=await c.req.json() as any,rows=Array.isArray(body.rows)?body.rows:typeof body.csv==='string'?parseCsv(body.csv):[];return c.json(await importRows(profile,rows))});
+app.post('/api/selector-workbench',async c=>{const body=await c.req.json() as any;return c.json({ok:true,...await selectorWorkbench(String(body.url||''),{...DEFAULT_SELECTORS,...(body.selectors||{})},String(body.nextSelector||''))})});
+app.post('/api/selector-suggest',async c=>{const body=await c.req.json() as any;return c.json({ok:true,suggestions:await suggestListSelectors(String(body.url||''))})});
+app.post('/api/detail-selectors-test',async c=>{const body=await c.req.json() as any;return c.json({ok:true,...await testDetailSelectors(String(body.url||''),{...DEFAULT_SELECTORS,...(body.selectors||{})})})});
+app.post('/api/gallery-suggest',async c=>{const body=await c.req.json() as any;return c.json({ok:true,suggestions:await suggestGallery(String(body.url||''))})});
+app.post('/api/test-selector', async c => {
+  const body = await c.req.json() as any; return c.json({ ok: true, ...await testSelector(String(body.url || ''), String(body.selector || ''), String(body.type || 'text')) });
+});
+app.post('/api/import-php', async c => {
+  const body = await c.req.json() as any; const source = typeof body.profiles === 'string' ? JSON.parse(body.profiles) : body.profiles;
+  const imported: Profile[] = [];
+  for (const [id, value] of Object.entries(source || {})) imported.push(await saveProfile(normalizeProfile({ ...(value as any), id })));
+  return c.json({ ok: true, imported: imported.length, profiles: imported });
+});
+app.all('/scraper4.php',legacyHandler);
+
+const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, info => console.log(`Scraper4 Render listening on http://${info.address}:${info.port}`));
+let scheduler: NodeJS.Timeout | undefined;
+let backgroundStarted = false;
+function startBackground(): void {
+  if (!config.runWorkerInWeb || !databaseReady || backgroundStarted) return;
+  backgroundStarted = true;
+  void workerLoop(config.workerPollMs);
+  const schedule = async () => { try { const count=await enqueueDueProfiles();if(count)console.log(`Scheduled ${count} profile(s)`);const automation=await automationTick();if(Object.keys(automation).length)console.log('Automation',JSON.stringify(automation)); } catch (error) { console.error('Scheduler error', error); } };
+  void schedule(); scheduler = setInterval(schedule, 60_000); scheduler.unref();
+}
+startBackground();
+const databaseRetry = setInterval(async () => { if (!databaseReady && config.databaseUrl && await initializeDatabase()) startBackground(); }, 30_000);
+databaseRetry.unref();
+const shutdown = async () => { requestWorkerStop(); clearInterval(databaseRetry); if (scheduler) clearInterval(scheduler); server.close(); await pool.end(); process.exit(0); };
+process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+
+async function basalamTokenDiagnostic(token:string,apiBase:string,vendorId=''){const started=Date.now(),endpoint=apiBase.replace(/\/$/,'')+'/users/me';if(!token)return{ok:false,target:'basalam',stage:'configuration',error:'توکن باسلام خالی است',config:{api:apiBase,vendorId,tokenPresent:false}};try{const response=await safeFetch(endpoint,{headers:{authorization:`Bearer ${token}`,accept:'application/json'}},3_000_000),text=await response.text(),raw=parseResponseText(text),vendor=raw?.vendor||{};return{ok:response.ok,target:'basalam',endpoint,httpCode:response.status,statusText:response.statusText,latencyMs:Date.now()-started,user:{id:raw?.id,name:raw?.name,username:raw?.username,mobile:raw?.mobile,email:raw?.email,hashId:raw?.hash_id,avatar:raw?.avatar},vendor:{id:Number(vendor.id||0),title:vendor.title||'',identifier:vendor.identifier||'',isActive:Boolean(vendor.is_active),status:vendor.status,createdAt:vendor.created_at,activatedAt:vendor.activated_at,orderCount:vendor.order_count,freeShippingToIran:vendor.free_shipping_to_iran},verification:raw?.info_verification_status||null,raw}}catch(error){return{ok:false,target:'basalam',endpoint,stage:'request',latencyMs:Date.now()-started,error:error instanceof Error?error.message:String(error)}}}
+function remoteImageUrl(item:any):string{const candidates=[item?.images?.[0],item?.raw?.photo,item?.raw?.photos?.[0],item?.raw?.image];for(const value of candidates){if(typeof value==='string'&&/^https?:/i.test(value))return value;if(value&&typeof value==='object'){for(const key of ['src','url','original','large','medium','small']){const nested=value[key];if(typeof nested==='string'&&/^https?:/i.test(nested))return nested;if(nested&&typeof nested==='object'){const url=nested.url||nested.src;if(typeof url==='string'&&/^https?:/i.test(url))return url}}}}return''}
+function parseResponseText(text:string){try{return JSON.parse(text)}catch{return{text:text.slice(0,4000)}}}
+async function connectionDiagnostic(target:string){const started=Date.now(),connections=await loadConnections(true);try{if(target==='woo'){const x=connections.woo;if(!x.url||!x.key||!x.secret)return{ok:false,target,stage:'configuration',error:'آدرس، Consumer Key یا Consumer Secret کامل نیست',config:{url:x.url,keyPresent:Boolean(x.key),secretPresent:Boolean(x.secret)}};const endpoint=x.url.replace(/\/$/,'')+'/wp-json/wc/v3/system_status',auth=`Basic ${Buffer.from(`${x.key}:${x.secret}`).toString('base64')}`,response=await safeFetch(endpoint,{headers:{authorization:auth,accept:'application/json'}},3_000_000),text=await response.text(),raw=parseResponseText(text);return{ok:response.ok,target,endpoint,httpCode:response.status,statusText:response.statusText,latencyMs:Date.now()-started,config:{url:x.url,keyPresent:true,secretPresent:true},summary:{environment:raw?.environment||null,database:raw?.database||null,settings:raw?.settings||null},raw:response.ok?raw:{error:raw}}}if(target==='basalam'){const x=connections.basalam;return basalamTokenDiagnostic(x.token,x.api,x.vendorId)}if(target==='ai'){const providers=await aiProviders(),provider=providers.find(p=>p.enabled&&p.models.length);if(!provider)return{ok:false,target,stage:'configuration',error:'ارائه‌دهنده و مدل فعال وجود ندارد'};const result=await aiCall(provider,provider.models[0],'سلام؛ فقط یک پاسخ کوتاه برای تست اتصال بده.');return{ok:true,target,latencyMs:Date.now()-started,provider:{id:provider.id,name:provider.name,kind:provider.kind,model:provider.models[0],baseUrl:provider.baseUrl},result}}return{ok:false,target,error:'نوع اتصال ناشناخته است'}}catch(error){return{ok:false,target,stage:'request',latencyMs:Date.now()-started,error:error instanceof Error?error.message:String(error),details:(error as any)?.details||null}}}
+
+async function legacyHandler(c:any){const q=c.req.query(),has=(key:string)=>Object.prototype.hasOwnProperty.call(q,key);if(c.req.method==='POST'){const body=await c.req.parseBody({all:true}),action=String(body.action||q.action||'');if(action==='save_profile'){const listSelectors=parseJsonField(body.selectors)||{},detailRaw=parseJsonField(body.detailSelectors)||{},detailSelectors=Object.fromEntries(Object.entries(detailRaw).map(([key,value]:any)=>[key,typeof value==='string'?value:value?.selector||''])),raw:any={...body,selectors:{...listSelectors,...detailSelectors},pagination:body.pagType,paginationValue:body.pagVal,priceValue:body.priceVal};const profile=normalizeProfile(raw),selectorErrors=validateSelectorConfig(profile.selectors);if(Object.keys(selectorErrors).length)return c.json({ok:false,error:'سلکتور نامعتبر',selectorErrors},400);return c.json({ok:true,key:profile.id,profile:await saveProfile(profile),message:'پروفایل ذخیره شد'})}if(action==='delete_profile'){const id=String(body.profile_key||body.id||'');return c.json({ok:await deleteProfile(id),key:id})}if(action==='load_connections')return c.json({ok:true,connections:await loadConnections(true)});if(action==='save_connections'){const value=parseJsonField(body.connections)||body;return c.json({ok:true,connections:await saveConnections(value)})}if(action==='test_basalam'&&body.token){const connections=await loadConnections(true);return c.json(await basalamTokenDiagnostic(String(body.token),connections.basalam.api,String(body.vendor_id||'')))}if(action==='test_woo'||action==='test_basalam'||action==='test_ai')return c.json(await connectionDiagnostic(action.replace('test_','')));if(action==='ai_import_providers'){const value=parseJsonField(body.providers||body.json)||[],connections=await loadConnections(true);connections.ai.providers=Array.isArray(value)?value:value.providers||[];return c.json({ok:true,connections:await saveConnections(connections)})}if(action==='ai_candidates_save'||action==='ai_select'){const connections=await loadConnections(true);if(action==='ai_candidates_save')connections.ai.candidates=parseJsonField(body.candidates)||[];else{connections.ai.master=String(body.model||'');if(body.provider&&body.model)connections.ai.model=String(body.model)}return c.json({ok:true,connections:await saveConnections(connections)})}if(action==='ai_vote'){return c.json({ok:true,leaderboard:await recordVote(String(body.task||'manual'),String(body.winner||''),parseJsonField(body.candidates)||[])})}if(action==='backup_restore'){const file=body.file,bundle=file instanceof File?JSON.parse(await file.text()):parseJsonField(body.bundle||body.json);if(!bundle)return c.json({ok:false,error:'بسته بکاپ نامعتبر است'},400);if(bundle.app==='scraper4-render')return c.json({ok:true,result:await restoreBackup(bundle)});return c.json({ok:false,error:'برای فایل settings_*.json از /api/settings-import استفاده کنید'},409)}if(action==='ar_save_rules'){const settings=await getState<any>('settings',{});settings.autoreply??={};settings.autoreply.rules=parseJsonField(body.rules)||[];await setState('settings',settings);return c.json({ok:true})}if(action==='catlearn_import'){return c.json({ok:true,imported:await importCategoryLearning(parseJsonField(body.data)||{})})}if(['woo_queue_add','woo_queue_save_products','bsl_queue_add','bsl_queue_save_products'].includes(action)){const profileId=String(body.profile_key||body.profile||''),keys=parseJsonField(body.keys||body.products)||[],target=action.startsWith('woo')?'woo':'basalam';return c.json({ok:true,job:await createJob(profileId,'sync',target as any,{keys:Array.isArray(keys)?keys.map((x:any)=>typeof x==='string'?x:String(x.key||x[0]||'' )).filter(Boolean):[]})})}if(action==='cron_run'){return c.json({ok:true,enqueued:await enqueueDueProfiles(),automation:await automationTick()})}return c.json({ok:false,error:`Legacy POST action not ported: ${action}`},501)}
+if(has('profiles')||has('all_profiles')){const profiles=await listProfiles();return c.json(Object.fromEntries(profiles.map(p=>[p.id,p])))}if(has('load_profile')){const value=String(q.load_profile||q.profile_key||''),profile=(await listProfiles()).find(p=>p.id===value||p.url===value);return profile?c.json({ok:true,key:profile.id,profile}):c.json({ok:false,error:'پروفایل پیدا نشد'},404)}if(has('poll_extract')||has('extract_queue_status')||has('queues_overview'))return c.json({ok:true,jobs:await listJobs(100)});if(has('extract_report')){const report=await jobReport(String(q.queue_id||q.id||''));return report?c.json({ok:true,...report}):c.json({ok:false,error:'گزارش پیدا نشد'},404)}if(has('bsl_queue_add')||has('woo_queue_add')){const target=has('bsl_queue_add')?'basalam':'woo',keys=String(q.keys||'').split(',').filter(Boolean);return c.json({ok:true,job:await createJob(String(q.profile_key||q.profile||''),'sync',target as any,{keys})})}if(has('bsl_queue_pause')||has('woo_queue_cancel'))return c.json({ok:true,...await setQueuePaused(true,String(q.reason||'legacy'))});if(has('bsl_queue_resume')||has('woo_queue_start_next')||has('bsl_queue_start_next'))return c.json({ok:true,...await setQueuePaused(false,'')});if(has('queue_watchdog'))return c.json({ok:true,reaped:await reapStalledJobs(Number(q.minutes)||30)});if(has('poll_woo')||has('woo_queue_status'))return c.json({ok:true,jobs:(await listJobs(100)).filter(j=>j.target==='woo'||j.target==='both')});if(has('poll_bsl')||has('bsl_queue_status'))return c.json({ok:true,jobs:(await listJobs(100)).filter(j=>j.target==='basalam'||j.target==='both')});if(has('extract_stop')||has('woo_stop')||has('bsl_stop')){const id=String(q.queue_id||q.id||'');if(id)await updateJob(id,{stopRequested:true});return c.json({ok:true})}if(has('cron_run'))return c.json({ok:true,enqueued:await enqueueDueProfiles(),automation:await automationTick()});if(has('cron_last'))return c.json({ok:true,jobs:await listJobs(10)});if(has('whoami'))return c.json({ok:true,runtime:'render-node',version:APP_VERSION});if(has('selftest')||has('sec_check'))return c.json(await runSelftest());if(has('backup_export'))return c.json(await createPhpSettingsBundle(new URL(c.req.url).host));if(has('backup_run'))return c.json(await githubBackupRun(new URL(c.req.url).host));if(has('backup_remote_list'))return c.json(await githubBackupList());if(has('backup_download'))return c.json(await githubBackupGet(String(q.backup_download||q.name||'')));if(has('backup_status'))return c.json({ok:true,available:true,storage:'PostgreSQL',github:await githubBackupStatus()});if(has('bsl_products'))return c.json({ok:true,items:await listDestinationProducts('basalam')});if(has('bsl_status_overview'))return c.json({ok:true,...await destinationOverview('basalam')});if(has('bsl_find_duplicates'))return c.json({ok:true,groups:await findDestinationDuplicates('basalam')});if(has('bsl_rejected_cats'))return c.json({ok:true,items:await rejectedBasalam()});if(has('bsl_ai_category'))return c.json(await recommendCategory(String(q.title||''),String(q.text||'')));if(has('bsl_fix_ai_cat')||has('bsl_fix_ai_cat_batch')||has('bsl_master_fix'))return c.json(await batchRejectedCategories({limit:Number(q.limit)||20,apply:q.apply==='1'}));if(has('bsl_orders_list'))return c.json({ok:true,rows:await basalamOrders(Number(q.per_page)||20)});if(has('bsl_chats_list'))return c.json({ok:true,rows:await basalamChats(Number(q.limit)||20)});if(has('bsl_notify_selected'))return c.json(await notifySelected(q.kind==='chats'?'chats':'orders',String(q.ids||'').split(',').filter(Boolean)));if(has('notif_test'))return c.json(await notificationSweep(true));if(has('notify'))return c.json(await notificationSweep(q.send!=='1'));if(has('ai_providers_status'))return c.json({ok:true,providers:await aiProviders()});if(has('ai_candidates')){const x=(await loadConnections()).ai;return c.json({ok:true,candidates:x.candidates,master:x.master,leaderboard:await getLeaderboard()})}if(has('ai_test_start'))return c.json({ok:true,state:await startAiTest({prompt:String(q.msg||'سلام'),categoryTitle:String(q.title||'ادو پرفیوم'),perProvider:Number(q.per_provider)||50,delayMs:Number(q.delay)||120,onlyUntested:q.only_untested==='1'})});if(has('ai_test_status'))return c.json({ok:true,state:await aiTestState()});if(has('ai_test_stop'))return c.json(await stopAiTest());if(has('ai_candidates_category'))return c.json({ok:true,...await candidateTest('category',String(q.title||q.text||''))});if(has('ai_candidates_reply'))return c.json({ok:true,...await candidateTest('autoreply',String(q.text||''))});if(has('ai_probe'))return c.json(await networkDiagnostics());if(has('ai_test_all'))return c.json({ok:true,results:await testAllModels(String(q.msg||'سلام'))});if(has('ar_rules'))return c.json({ok:true,rules:(await getState<any>('settings',{})).autoreply?.rules||[]});if(has('ar_log'))return c.json({ok:true,items:await autoreplyLogs()});if(has('ar_test'))return c.json({ok:true,result:await generateReply(String(q.text||'سلام'))});if(has('ar_run'))return c.json(await autoreplyRun(q.dry!=='0'));if(has('digest'))return c.json(await digest(q.send!=='1'));if(has('recon'))return c.json({ok:true,report:await recon(q.target==='bsl'?'basalam':'woo',String(q.profile||''))});if(has('photo_fix'))return c.json(await photoFix(String(q.profile||''),q.apply==='1'));if(has('fetch_missing_stream'))return c.json(await repairProfileMedia(String(q.profile||q.profile_key||''),{apply:q.apply==='1',limit:Number(q.limit)||100}));if(has('suffix_report'))return c.json(await suffixReport(q.target==='bsl'?'basalam':'woo'));if(has('src_probe'))return c.json(await sourceDiagnostics(String(q.src_probe||q.url||'')));if(has('suggest_selectors'))return c.json({ok:true,suggestions:await suggestListSelectors(String(q.suggest_selectors||q.url||''))});if(has('suggest_detail_selectors'))return c.json({ok:true,...await testDetailSelectors(String(q.suggest_detail_selectors||q.url||''),DEFAULT_SELECTORS)});if(has('gallery_suggest'))return c.json({ok:true,suggestions:await suggestGallery(String(q.gallery_suggest||q.url||''))});if(has('test_selector'))return c.json({ok:true,...await testSelector(String(q.test_selector||q.url||''),String(q.selector||''),String(q.type||'text'))});if(has('image_proxy')){const r=await safeFetch(String(q.image_proxy),{},10_000_000),type=r.headers.get('content-type')||'';if(!r.ok||!type.startsWith('image/'))return c.json({ok:false,error:'Invalid image'},400);return new Response(r.body,{headers:{'content-type':type,'cache-control':'private,max-age=300'}})}return c.json({ok:false,error:'Legacy endpoint not ported',query:Object.keys(q)},501)}
+function parseJsonField(value:unknown){if(typeof value!=='string')return value;try{return JSON.parse(value)}catch{return null}}
+
+function parseJsonArray(value:unknown){if(Array.isArray(value))return value;if(typeof value==='string'&&value.trim())try{const parsed=JSON.parse(value);return Array.isArray(parsed)?parsed:undefined}catch{}return undefined}
+async function importRows(profile:Profile,rows:any[]){let imported=0,failed=0;const errors:string[]=[];for(const [index,row] of rows.entries())try{const title=String(row.title||row.name||'').trim();if(!title)throw Error('title is empty');const key=String(row.sourceKey||row.key||crypto.randomUUID()),image=String(row.image||'');await upsertProduct(profile.id,{sourceKey:key,title,price:numberFromText(String(row.price||0)),priceText:String(row.price||''),url:String(row.url||row.link||''),image,images:image?[image]:[],sku:String(row.sku||''),brand:String(row.brand||''),stock:row.stock==null||row.stock===''?undefined:Number(row.stock),weight:row.weight==null||row.weight===''?undefined:Number(row.weight),category:String(row.category||''),shortDesc:String(row.shortDesc||''),longDesc:String(row.longDesc||''),variationGroups:parseJsonArray(row.variationGroups),variations:parseJsonArray(row.variations),priceMin:row.priceMin?numberFromText(String(row.priceMin)):undefined,priceMax:row.priceMax?numberFromText(String(row.priceMax)):undefined,sourcePage:'import',scrapedAt:new Date().toISOString()});imported++}catch(error){failed++;if(errors.length<50)errors.push(`row ${index+1}: ${error instanceof Error?error.message:String(error)}`)}return{ok:failed===0,imported,failed,errors}}
+function csvCell(value:unknown){const text=value&&typeof value==='object'?JSON.stringify(value):String(value??'');return `"${text.replace(/"/g,'""')}"`}
+function parseCsv(text:string):Record<string,string>[] {const rows:string[][]=[];let row:string[]=[],cell='',quoted=false;const input=text.replace(/^\uFEFF/,'');for(let i=0;i<input.length;i++){const ch=input[i];if(quoted){if(ch==='"'&&input[i+1]==='"'){cell+='"';i++}else if(ch==='"')quoted=false;else cell+=ch}else if(ch==='"')quoted=true;else if(ch===','){row.push(cell);cell=''}else if(ch==='\n'){row.push(cell);rows.push(row);row=[];cell=''}else if(ch!=='\r')cell+=ch}if(cell||row.length){row.push(cell);rows.push(row)}const headers=rows.shift()?.map(x=>x.trim())||[];return rows.filter(x=>x.some(Boolean)).map(values=>Object.fromEntries(headers.map((key,i)=>[key,values[i]||''])))}
+function validTarget(value: string): 'none'|'woo'|'basalam'|'both' { return ['none','woo','basalam','both'].includes(value) ? value as any : 'none'; }
+function safeEqual(a: string, b: string): boolean { const aa=Buffer.from(a),bb=Buffer.from(b); return aa.length===bb.length && timingSafeEqual(aa,bb); }
+function idFromUrl(raw: string): string { const url = new URL(raw); return `${url.hostname}_${url.pathname}`.toLowerCase().replace(/[^a-z0-9_.-]+/g,'_').replace(/^_+|_+$/g,'').slice(0,120); }
+function legacyProducts(raw: unknown): Product[] {
+  const entries:Array<[string,any]>=[];
+  if(Array.isArray(raw))for(const item of raw){if(Array.isArray(item)&&item.length>=2)entries.push([String(item[0]),item[1]]);else if(item&&typeof item==='object')entries.push([String((item as any).sourceKey||(item as any).key||crypto.randomUUID()),item]);}
+  else if(raw&&typeof raw==='object')for(const [key,value] of Object.entries(raw as Record<string,any>))entries.push([key,value]);
+  return entries.filter(([,p])=>p&&p.title).map(([key,p])=>{const images=Array.isArray(p.images)?p.images.filter((x:unknown)=>typeof x==='string'&&!String(x).startsWith('data:')):[];const image=String(p.image||images[0]||'');if(image&&!images.includes(image)&&!image.startsWith('data:'))images.unshift(image);return{sourceKey:key,title:String(p.title),price:numberFromText(String(p.finalPrice??p.price??0)),priceText:String(p.priceText??p.price??''),url:String(p.url||p.link||''),image:image.startsWith('data:')?'':image,images,shortDesc:String(p.shortDesc||''),longDesc:String(p.longDesc||''),sku:String(p.sku||''),brand:String(p.brand||''),stock:p.stock==null?undefined:Number(p.stock),weight:p.weight==null?undefined:Number(p.weight),category:String(p.category||''),variationGroups:Array.isArray(p.variationGroups||p.variation_groups)?(p.variationGroups||p.variation_groups):undefined,variations:Array.isArray(p.variations)?p.variations:undefined,priceMin:Number(p.priceMin||p.price_min)||undefined,priceMax:Number(p.priceMax||p.price_max)||undefined,sourcePage:String(p.sourcePage||''),scrapedAt:new Date().toISOString()}});
+}
+function normalizeProfile(raw: any): Profile {
+  const url = new URL(String(raw.url || '')); if (!['http:','https:'].includes(url.protocol)) throw new Error('Invalid profile URL');
+  const now=new Date().toISOString(),selectors={...DEFAULT_SELECTORS,...(typeof raw.selectors==='string'?JSON.parse(raw.selectors):raw.selectors||{})},paginationRaw=String(raw.pagination||raw.pagType||'query_page'),pagination=(paginationRaw==='path_page'?'path_pattern':paginationRaw);
+  for (const key of ['container','title','price','link','image']) if (!selectors[key]) throw new Error(`selectors.${key} is required`);
+  return { id: String(raw.id || idFromUrl(url.href)), name: String(raw.name || url.hostname), url: url.href, enabled: raw.enabled !== false,
+    pages: Math.min(100,Math.max(1,Number(raw.pages)||1)), pagination:(['query_page','query_custom','path_pattern','full_pattern','next_selector','none'].includes(pagination)?pagination:'query_page') as Profile['pagination'],
+    paginationValue: String(raw.paginationValue || raw.pagVal || 'page'), selectors, titleSuffix: String(raw.titleSuffix || ''),
+    priceMode: ['none','add','percent','multiply'].includes(raw.priceMode) ? raw.priceMode : 'none', priceValue: Number(raw.priceValue ?? raw.priceVal) || 0,
+    roundPrice: Math.max(0,Number(raw.roundPrice)||0), minPrice: Math.max(0,Number(raw.minPrice)||0), wooCategoryId: Number(raw.wooCategoryId)||0,
+    basalamCategoryId: Number(raw.basalamCategoryId ?? raw.bslCategoryId)||0, syncWoo: Boolean(raw.syncWoo), syncBasalam: Boolean(raw.syncBasalam), netIndirect:Boolean(raw.netIndirect??raw.net_indirect),
+    intervalMinutes: Math.max(0,Number(raw.intervalMinutes)||0), lastRunAt: raw.lastRunAt || null, createdAt: raw.createdAt || now, updatedAt: now };
+}

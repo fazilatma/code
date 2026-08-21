@@ -1,3 +1,4 @@
+import os
 import time
 import threading
 import requests
@@ -6,8 +7,9 @@ from flask import Flask, render_template_string
 app = Flask(__name__)
 
 # --- تنظیمات ---
-TELEGRAM_BOT_TOKEN = "1082931872:AAFdXeyMIagoS77J1Prtc-PRxCKpsYux3vM"
-TELEGRAM_CHAT_ID = "-950362036"
+# Legacy demo only. Secrets must never be committed to the repository.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 INTERVAL = 60  # ثانیه
 
 # --- وضعیت جریان ارسال ---

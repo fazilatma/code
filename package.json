@@ -1,22 +1,41 @@
 {
-    "name": "app-service-hello-world",
-    "description": "Simple Hello World Node.js sample for Azure App Service",
-    "version": "0.0.1",
-    "private": true,
-    "license": "MIT",
-    "author": "Microsoft",
-    "scripts": {
-        "start": "node index.js",
-        "dev": "nodemon"
-    },
-    "dependencies": {
-        "ejs": "^3.0.1",
-        "express": "^4.17.1",
-        "lightweight-charts": "^5.1.0",
-        "nodemon": "^2.0.2"
-    },
-    "devDependencies": {
-        "gulp": "^4.0.2",
-        "gulp-imagemin": "^7.1.0"
+  "name": "scraper4-render",
+  "version": "2.24.0",
+  "private": true,
+  "description": "Render-native product scraper and WooCommerce/Basalam synchronizer",
+  "type": "module",
+  "engines": {
+    "node": "20.19.4"
+  },
+  "scripts": {
+    "start": "node render-dist/server.js",
+    "render:build": "node build-render.mjs",
+    "render:start": "node render-dist/server.js",
+    "render:worker": "node render-dist/worker.js",
+    "render:cron": "node render-dist/cron.js",
+    "dev": "npm run render:build && node --watch render-dist/server.js",
+    "typecheck": "tsc -p tsconfig.render.json --noEmit",
+    "test": "npm run typecheck && node --test render-tests/*.test.mjs",
+    "parity:audit": "node scripts/parity-audit.mjs"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.1",
+    "cheerio": "^1.1.2",
+    "exceljs": "^4.4.0",
+    "hono": "^4.13.3",
+    "pg": "^8.16.3",
+    "undici": "^7.29.0"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
     }
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.15.5",
+    "esbuild": "^0.25.9",
+    "linkedom": "^0.18.13",
+    "typescript": "^5.9.2"
+  }
 }
