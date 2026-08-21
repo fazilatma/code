@@ -120,7 +120,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.06';
+const APP_VERSION = '10.07';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -17019,6 +17019,63 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'class="h1-name"') !== false
       && substr_count($selfSrc, '<' . 'h1>') === 1);
 
+    /* ---------- v10.07 (۲۱): لایهٔ دومِ جلوه‌ها ---------- */
+    $add('10.07', 'جنسِ شیشه‌ای فقط روی سطح‌های شناورِ کم‌تعداد آمده، نه روی کارت‌ها',
+         strpos($selfSrc, 'html[data-fx=' . '"on"] .settings-panel{backdrop-filter') !== false
+      && strpos($selfSrc, 'html[data-fx=' . '"on"] .bsl-modal{backdrop-filter')      !== false
+      && strpos($selfSrc, 'html[data-fx=' . '"on"] .toast{backdrop-filter')          !== false
+      && strpos($selfSrc, 'html[data-fx=' . '"on"] .card{backdrop-filter')           === false);
+    $add('10.07', 'هالهٔ دنبال‌کنندهٔ نشانگر با متغیرِ CSS کار می‌کند و پیش‌فرضِ امن دارد',
+         strpos($selfSrc, '--fx-mx:50%;--fx-my:50%')            !== false
+      && strpos($selfSrc, 'at var(--fx-mx) var(--fx-my)')       !== false
+      && strpos($selfSrc, 'function fxTrackPointer')            !== false
+      && strpos($selfSrc, "setProperty('--fx-mx'")              !== false
+      && strpos($selfSrc, "setProperty('--fx-my'")              !== false);
+    $add('10.07', 'ردیابِ نشانگر یک‌بار روی document می‌نشیند و passive است',
+         strpos($selfSrc, "addEventListener('pointermove',fxTrack" . "Pointer,{passive:true})") !== false
+      && substr_count($selfSrc, 'fxTrackPointer,{pass' . 'ive') === 1);
+    $add('10.07', 'لایهٔ هالهٔ کارت کلیک را نمی‌بلعد و محتوا رویش می‌ماند',
+         strpos($selfSrc, 'html[data-fx=' . '"on"] .card::after{content:""') !== false
+      && strpos($selfSrc, 'html[data-fx=' . '"on"] .card>*{position:relative;z-index:1}') !== false
+      && (function () use ($selfSrc) {
+             // در همان قاعدهٔ ::after باید pointer-events:none باشد
+             $i = strpos($selfSrc, 'html[data-fx=' . '"on"] .card::after{');
+             if ($i === false) return false;
+             $rule = substr($selfSrc, $i, strpos($selfSrc, '}', $i) - $i);
+             return strpos($rule, 'pointer-events:none') !== false;
+         })());
+    $add('10.07', 'نوارِ بالای صفحه شمارنده است نه سوییچ و زیرِ صفر نمی‌رود',
+         strpos($selfSrc, 'function fxTopBar')                       !== false
+      && strpos($selfSrc, 'fxTopN=Math.max(0,fxTopN+(on?1:-1))')     !== false
+      && strpos($selfSrc, 'fxTopBar(true)')                          !== false
+      && strpos($selfSrc, 'fxTopBar(false)')                         !== false);
+    $add('10.07', 'حالت‌های معنایی از همان fxReplayِ لایهٔ قبل استفاده می‌کنند',
+         strpos($selfSrc, 'function fxOkFlash')       !== false
+      && strpos($selfSrc, 'function fxErrFlash')      !== false
+      && strpos($selfSrc, "fxReplay(el,'fx-ok',720)") !== false
+      && strpos($selfSrc, "fxReplay(el,'fx-err',540)") !== false);
+    $add('10.07', 'ذخیرهٔ پروفایل بازخوردِ دیداریِ موفق و خطا می‌دهد',
+         strpos($selfSrc, "fxOkFlash('profileName')")  !== false
+      && strpos($selfSrc, "fxErrFlash('profileName')") !== false);
+    $add('10.07', 'اسکلتِ بارگذاری وقتی جلوه‌ها خاموش است چیزی تزریق نمی‌کند',
+         strpos($selfSrc, 'function fxSkeleton') !== false
+      && strpos($selfSrc, "if(!fxOn()){el.innerHTML='';return;}") !== false);
+    $add('10.07', 'کی‌فریم‌های تازه اضافه شدند و اسمِ تکراری نساختند',
+         substr_count($selfSrc, '@keyframes fx' . 'Check') === 1
+      && substr_count($selfSrc, '@keyframes fx' . 'Ok{')   === 1
+      && substr_count($selfSrc, '@keyframes fx' . 'Shake') === 1
+      && substr_count($selfSrc, '@keyframes fx' . 'Glow')  === 1
+      && substr_count($selfSrc, '@keyframes fx' . 'ImgIn') === 1
+      && substr_count($selfSrc, '@keyframes fx' . 'Blink') === 1);
+    $add('10.07', 'گران‌ترین جلوه‌ها روی موبایل و در حالتِ کم‌حرکت خاموش می‌شوند',
+         strpos($selfSrc, 'backdrop-filter:none;-webkit-backdrop-filter:none') !== false
+      && strpos($selfSrc, 'html[data-fx=' . '"on"] .card::after{display:none}') !== false
+      && strpos($selfSrc, 'html[data-fx=' . '"on"] #fxTop{animation:none}')     !== false);
+    $add('10.07', 'نوارِ بالای صفحه بالاتر از محتوا ولی زیرِ دکمه‌های شناور می‌نشیند',
+         strpos($selfSrc, 'html[data-fx=' . '"on"] #fxTop{position:fixed') !== false
+      && strpos($selfSrc, 'z-index:99998')  !== false
+      && 99998 > 10050);
+
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
          strpos($selfSrc, '.hamburger-btn,.fullwidth-btn' . '{z-index:10050}') !== false
@@ -28881,6 +28938,93 @@ html[data-fx="on"] .slider,html[data-fx="on"] .slider:before{transition:.25s var
 
 /* ۲۱) موبایل: جلوه‌های گران کم می‌شوند (باتری + نبودِ هاور) */
 @media(max-width:620px){html[data-fx="on"] body::after{display:none}html[data-fx="on"] body::before{animation-duration:60s}html[data-fx="on"] .card:hover{transform:none}html[data-fx="on"] .bsl-modal-overlay{backdrop-filter:none;-webkit-backdrop-filter:none}}
+
+/* ══════════════════════════════════════════════════════════════════
+   v10.07 (۲۱): لایهٔ دومِ جلوه‌ها — «جنس» و «واکنش»
+
+   لایهٔ v10.06 حرکت و عمق آورد. این لایه سه چیزِ دیگر می‌آورد که
+   رابط را از «متحرک» به «گران» می‌برد:
+
+   الف) جنسِ شیشه‌ای (glassmorphism) روی سطح‌های شناور — سربخش، پنلِ
+        تنظیمات، مودال‌ها. blur فقط روی چیزهایی که تعدادشان کم و ثابت
+        است، چون backdrop-filter گران‌ترین چیزِ این فایل است.
+
+   ب) واکنشِ نشانگر: کارت‌ها زیرِ ماوس یک هالهٔ نورِ دنبال‌کننده دارند.
+      مختصات را JS در دو متغیرِ CSS می‌گذارد؛ اگر JS اجرا نشود مقدارِ
+      پیش‌فرضِ 50% وسط می‌ماند و هیچ چیزی خراب نمی‌شود.
+
+   ج) حالت‌های معنایی: موفق/خطا/در حال کار، هرکدام امضای بصریِ خودش.
+
+   قیدهای لایهٔ قبل عیناً رعایت شده‌اند:
+     • هر قاعده پشتِ html[data-fx="on"] — خاموش کردن یعنی بازگشتِ کامل
+     • فقط رنگ‌های پالتِ پایه (۱۳ تم نباید بشکنند)
+     • در @keyframes فقط transform/opacity/filter/background-position
+   ================================================================== */
+html[data-fx="on"]{--fx-spring:cubic-bezier(.34,1.56,.64,1);--fx-mx:50%;--fx-my:50%}
+
+/* ۲۲) شیشه: سطح‌های شناور پس‌زمینه را محو می‌کنند.
+   عمداً روی .card نیامده — کارت‌ها ده‌ها تا هستند و blurِ ده‌ها لایه
+   روی موبایل فریم می‌اندازد. فقط سطح‌هایی که یکی‌اند و روی بقیه شناورند. */
+html[data-fx="on"] .settings-panel{backdrop-filter:blur(14px) saturate(1.4);-webkit-backdrop-filter:blur(14px) saturate(1.4)}
+html[data-fx="on"] .bsl-modal{backdrop-filter:blur(10px) saturate(1.3);-webkit-backdrop-filter:blur(10px) saturate(1.3)}
+html[data-fx="on"] .toast{backdrop-filter:blur(10px) saturate(1.5);-webkit-backdrop-filter:blur(10px) saturate(1.5)}
+html[data-fx="on"] .hamburger-btn,html[data-fx="on"] .fullwidth-btn{backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+
+/* ۲۳) هالهٔ دنبال‌کنندهٔ نشانگر روی کارت.
+   --fx-mx/--fx-my را fxTrackPointer() به‌روز می‌کند. radial-gradient
+   روی یک لایهٔ ::after می‌نشیند که opacity‌اش فقط با هاور بالا می‌آید،
+   پس وقتی ماوس بیرون است هیچ رنگی رسم نمی‌شود. */
+html[data-fx="on"] .card::after{content:"";position:absolute;inset:0;z-index:0;pointer-events:none;border-radius:inherit;opacity:0;transition:opacity .35s var(--fx-ease);background:radial-gradient(22vmax 22vmax at var(--fx-mx) var(--fx-my),#3b82f620,transparent 55%)}
+html[data-fx="on"] .card:hover::after{opacity:1}
+html[data-fx="on"] .card>*{position:relative;z-index:1}
+
+/* ۲۴) دکمه‌های اصلی: هالهٔ رنگیِ هم‌خانوادهٔ خودشان هنگام هاور.
+   box-shadow رنگی، نه border — چون border چیدمان را جابه‌جا می‌کند. */
+html[data-fx="on"] .btn-blue:hover:not(:disabled){box-shadow:0 6px 20px #3b82f640,0 0 0 1px #3b82f640}
+html[data-fx="on"] .btn-green:hover:not(:disabled){box-shadow:0 6px 20px #14532d40,0 0 0 1px #22c55e55}
+html[data-fx="on"] .btn-red:hover:not(:disabled){box-shadow:0 6px 20px #7f1d1d40,0 0 0 1px #7f1d1d40}
+html[data-fx="on"] .btn-purple:hover:not(:disabled){box-shadow:0 6px 20px #4c1d9520,0 0 0 1px #7c3aed20}
+
+/* ۲۵) ورودی‌ها: برچسبِ شناور نمی‌سازیم (ساختار عوض می‌شود)، ولی
+   خودِ ورودی هنگام فوکوس کمی «بالا می‌آید» و روشن‌تر می‌شود. */
+html[data-fx="on"] input:focus,html[data-fx="on"] select:focus,html[data-fx="on"] textarea:focus{box-shadow:0 0 0 3px #3b82f620,0 4px 14px #0b1220}
+html[data-fx="on"] textarea{transition:border-color .2s,box-shadow .2s}
+html[data-fx="on"] input[type="checkbox"]{transition:transform .18s var(--fx-spring)}
+html[data-fx="on"] input[type="checkbox"]:active{transform:scale(.86)}
+html[data-fx="on"] input[type="checkbox"]:checked{animation:fxCheck .32s var(--fx-spring)}
+@keyframes fxCheck{0%{transform:scale(.7)}55%{transform:scale(1.22)}100%{transform:scale(1)}}
+
+/* ۲۶) حالت‌های معنایی — JS این کلاس‌ها را می‌زند و خودش برمی‌دارد */
+html[data-fx="on"] .fx-ok{animation:fxOk .7s var(--fx-ease)}
+@keyframes fxOk{0%{transform:scale(1)}30%{transform:scale(1.04);filter:brightness(1.3) saturate(1.4)}100%{transform:scale(1);filter:none}}
+html[data-fx="on"] .fx-err{animation:fxShake .5s ease-in-out}
+@keyframes fxShake{0%,100%{transform:translateX(0)}18%{transform:translateX(-5px)}38%{transform:translateX(4px)}58%{transform:translateX(-3px)}78%{transform:translateX(2px)}}
+html[data-fx="on"] .fx-glow{animation:fxGlow 2s ease-in-out infinite}
+@keyframes fxGlow{0%,100%{filter:brightness(1)}50%{filter:brightness(1.28) saturate(1.25)}}
+
+/* ۲۷) اسکلتِ بارگذاری — به‌جای «هیچ»، یک موجِ خاکستری.
+   کلاس را JS روی ظرفِ خالی می‌گذارد تا صفحه در انتظار مرده به نظر نرسد. */
+html[data-fx="on"] .fx-skel{position:relative;overflow:hidden;background:#1e293b;border-radius:8px;min-height:14px}
+html[data-fx="on"] .fx-skel::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,#e2e8f033,transparent);animation:fxSheen 1.4s ease-in-out infinite}
+
+/* ۲۸) نوارِ پیشرفتِ بالای صفحه هنگام کارِ طولانی (fxTopBar) */
+html[data-fx="on"] #fxTop{position:fixed;top:0;right:0;left:0;height:2px;z-index:99998;pointer-events:none;background:linear-gradient(90deg,#3b82f6,#22d3ee,#a855f7,#3b82f6);background-size:300% 100%;animation:fxFlow 1.6s linear infinite;transform-origin:right center;transition:opacity .3s}
+
+/* ۲۹) ردیف‌های جدول: نوارِ رنگیِ کناری هنگام هاور، بدون جابه‌جاییِ متن */
+html[data-fx="on"] tbody tr:hover{background:#1e293b80;box-shadow:inset -2px 0 0 0 #3b82f6}
+
+/* ۳۰) تصاویر: ورودِ نرم به‌جای پرشِ ناگهانی وقتی لود می‌شوند */
+html[data-fx="on"] .thumb img{animation:fxImgIn .5s var(--fx-ease)}
+@keyframes fxImgIn{from{opacity:0;filter:blur(6px)}to{opacity:1;filter:blur(0)}}
+
+/* ۳۱) نشانگرِ «زنده»: نقطهٔ تپنده برای چیزهایی که در حال اجرا هستند */
+html[data-fx="on"] .fx-live{position:relative}
+html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-13px;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:#22c55e;animation:fxBlink 1.4s ease-in-out infinite}
+@keyframes fxBlink{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.75)}}
+
+/* ۳۲) موبایل و کم‌حرکت: گران‌ترین‌ها اول خاموش می‌شوند */
+@media(max-width:620px){html[data-fx="on"] .settings-panel,html[data-fx="on"] .bsl-modal,html[data-fx="on"] .toast,html[data-fx="on"] .hamburger-btn,html[data-fx="on"] .fullwidth-btn{backdrop-filter:none;-webkit-backdrop-filter:none}html[data-fx="on"] .card::after{display:none}}
+@media(prefers-reduced-motion:reduce){html[data-fx="on"] .fx-glow,html[data-fx="on"] .fx-live::before,html[data-fx="on"] #fxTop{animation:none}}
 /* FX-END ========================================================== */
 </style>
 </head>
@@ -32327,8 +32471,10 @@ function saveProfile() {
                 }else{
                     showToast('✓ ذخیره شد — بدون سلکتورها (استخراج اتوماتیک غیرفعال)');
                 }
+                fxOkFlash('profileName');     // v10.07: تأییدِ دیداریِ ذخیره
             } else {
                 showToast('خطا: ' + (d.error || ''), true);
+                fxErrFlash('profileName');    // v10.07
             }
         })
         .catch(() => showToast('خطا در ارتباط', true));
@@ -33104,6 +33250,61 @@ function fxInitRuntime(){
     if(!b||b.disabled)return;
     fxReplay(b,'fx-tap',500);
   },true);
+  /* v10.07: ردیابِ نشانگر برای هالهٔ دنبال‌کنندهٔ کارت‌ها */
+  try{ document.addEventListener('pointermove',fxTrackPointer,{passive:true}); }catch(e){}
+}
+/* ══════════════════════════════════════════════════════════════════
+ *  v10.07 (۲۱): لایهٔ دومِ جلوه‌ها — «جنس» و «واکنش»
+ *
+ *  همه‌چیز روی زیرساختِ v10.06 سوار است: fxOn() برای گیت و fxReplay()
+ *  برای زدن و برداشتنِ کلاس. هیچ‌کدام اجباری نیستند — اگر عنصر نباشد
+ *  یا جلوه‌ها خاموش باشد، بی‌صدا برمی‌گردند.
+ * ================================================================== */
+
+/* ردیابِ نشانگر: مختصاتِ نسبیِ ماوس داخلِ کارت را در دو متغیرِ CSS
+   می‌گذارد تا هالهٔ ::after دنبالش بیاید. روی document شنیده می‌شود
+   (نه تک‌تکِ کارت‌ها) تا با کارت‌هایی که بعداً ساخته می‌شوند هم کار
+   کند و هزارتا listener روی صفحه نماند. */
+function fxTrackPointer(e){
+  if(!fxOn())return;
+  const c=(e&&e.target&&e.target.closest)?e.target.closest('.card'):null;
+  if(!c)return;
+  const r=c.getBoundingClientRect();
+  if(!r.width||!r.height)return;
+  c.style.setProperty('--fx-mx',((e.clientX-r.left)/r.width*100).toFixed(1)+'%');
+  c.style.setProperty('--fx-my',((e.clientY-r.top)/r.height*100).toFixed(1)+'%');
+}
+
+/* نوارِ باریکِ بالای صفحه برای کارهای طولانی.
+   شمارنده است نه سوییچ: اگر دو کارِ هم‌زمان شروع شوند، نوار تا پایانِ
+   آخرینشان می‌ماند. هرگز زیرِ صفر نمی‌رود. */
+let fxTopN=0;
+function fxTopBar(on){
+  fxTopN=Math.max(0,fxTopN+(on?1:-1));
+  let el=document.getElementById('fxTop');
+  if(fxTopN>0&&fxOn()){
+    if(!el){el=document.createElement('div');el.id='fxTop';document.body.appendChild(el);}
+    el.style.opacity='1';
+  }else if(el){
+    el.style.opacity='0';
+    setTimeout(function(){ try{ if(fxTopN===0&&el.parentNode)el.parentNode.removeChild(el); }catch(e){} },320);
+  }
+}
+
+/* دو حالتِ معنایی روی همان fxReplayِ لایهٔ قبل */
+function fxOkFlash(el){ if(typeof el==='string')el=$(el); fxReplay(el,'fx-ok',720); }
+function fxErrFlash(el){ if(typeof el==='string')el=$(el); fxReplay(el,'fx-err',540); }
+
+/* اسکلتِ بارگذاری: چند نوارِ موج‌دار به‌جای ظرفِ خالی و مرده.
+   اگر جلوه‌ها خاموش باشد ظرف را فقط خالی می‌کند. */
+function fxSkeleton(el,n){
+  if(typeof el==='string')el=$(el);
+  if(!el)return;
+  if(!fxOn()){el.innerHTML='';return;}
+  let h='';
+  for(let i=0;i<(n||3);i++)
+    h+='<div class="fx-skel" style="height:'+(14+(i%2)*8)+'px;margin-bottom:8px;opacity:'+(1-i*0.18).toFixed(2)+'"></div>';
+  el.innerHTML=h;
 }
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
 /**
@@ -42551,6 +42752,7 @@ function ddStart(target,mode){
     if(mode==='delete'&&!confirm('محصولاتِ تکراری واقعاً حذف می‌شوند'+(target==='bsl'?' (در باسلام: بایگانی)':'')+'.\nمعیار: '+(document.getElementById(ddPfx()+'Keep')||{value:''}).value+'\nادامه می‌دهید؟'))return;
     ddSaveCfg(0).then(()=>{
         ddIsRun=true;ddSeen=0;ddLastResult=null;
+        fxTopBar(true);                       // v10.07: نوارِ پیشرفتِ بالای صفحه
         const E=ddEl;
         if(E('Btn'))E('Btn').classList.add('hidden');
         if(E('DelBtn'))E('DelBtn').classList.add('hidden');
@@ -42627,6 +42829,7 @@ function ddStop(){
 
 function ddFinish(){
     ddIsRun=false;clearInterval(ddTimer);
+    fxTopBar(false);                          // v10.07
     const E=ddEl;
     if(E('Btn'))E('Btn').classList.remove('hidden');
     if(E('DelBtn'))E('DelBtn').classList.remove('hidden');
