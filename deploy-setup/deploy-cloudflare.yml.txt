@@ -1,0 +1,40 @@
+# Deploy Cloudflare Worker (manual) — GitHub Actions workflow
+# ⚠️ این فایل باید به مسیر `.github/workflows/deploy-cloudflare.yml` منتقل شود
+# (GitHub به اپلیکیشن‌ها اجازه نمی‌دهد خودشان workflow بسازند؛ این محدودیت امنیتی GitHub است)
+
+name: Deploy Cloudflare Worker (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      CF_API_TOKEN:
+        description: 'Cloudflare API token (Edit Cloudflare Workers)'
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Mask token in logs
+        run: echo "::add-mask::${{ github.event.inputs.CF_API_TOKEN }}"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          CI: 'true'
+
+      - name: Deploy worker (provision D1/Queues + migrate + smoke test)
+        run: npm run worker:deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ github.event.inputs.CF_API_TOKEN }}
+          CI: 'true'
