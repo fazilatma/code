@@ -3,17 +3,28 @@ import { loadConnections } from './connections.js';
 import { getState, setState } from './db.js';
 import { assertPublicUrl, safeFetch } from './network.js';
 
-export type Provider={id:string;name:string;baseUrl:string;apiKey:string;apiKeys?:string[];models:string[];reasoningModels:string[];enabled:boolean};
+export type CfAccountKey={accountId:string;token:string};
+export type Provider={id:string;name:string;baseUrl:string;apiKey:string;apiKeys?:Array<string|CfAccountKey>;models:string[];reasoningModels:string[];enabled:boolean};
 type Network={mode:string;proxyUrl:string;workerUrl:string;dohUrl:string;resolveIp:string};
 type AiAttempt={endpoint:string;body:string|string[];model:string;httpStatus?:number;phase:'network'|'http'|'success';error?:string};
 type RequestResult={response?:Response;body?:any;rawText?:string;networkError?:string};
 
-function providersFromAi(ai:any):Provider[]{return ai.providers.length?ai.providers.map((provider:any)=>{const keys=Array.isArray(provider.apiKeys)&&provider.apiKeys.length?provider.apiKeys.map(String).filter(Boolean):provider.apiKey?[String(provider.apiKey)]:[];const apiKey=keys[0]||String(provider.apiKey||'');return{...provider,apiKey,apiKeys:keys.length?keys:(apiKey?[apiKey]:[]),reasoningModels:Array.isArray(provider.reasoningModels)?provider.reasoningModels.map(String):[]}}):[{id:'default',name:'Default',baseUrl:ai.baseUrl,apiKey:ai.apiKey,apiKeys:ai.apiKey?[String(ai.apiKey)]:[],models:ai.model?[ai.model]:[],reasoningModels:[],enabled:true}]}
+function providersFromAi(ai:any):Provider[]{return ai.providers.length?ai.providers.map((provider:any)=>{const rawKeys=Array.isArray(provider.apiKeys)?provider.apiKeys:(provider.apiKey?[provider.apiKey]:[]);const keys=rawKeys.filter((k:any)=>k&&(typeof k==='string'?String(k).trim():String(k?.token||'').trim()));const first=keys[0]||provider.apiKey||'';const apiKey=typeof first==='string'?first:first?.token||'';return{...provider,apiKey,apiKeys:keys.length?keys:(apiKey?[apiKey]:[]),reasoningModels:Array.isArray(provider.reasoningModels)?provider.reasoningModels.map(String):[]}}):[{id:'default',name:'Default',baseUrl:ai.baseUrl,apiKey:ai.apiKey,apiKeys:ai.apiKey?[String(ai.apiKey)]:[],models:ai.model?[ai.model]:[],reasoningModels:[],enabled:true}]}
 
 /** Active API keys of a provider (fallback to the single apiKey). */
-export function providerKeys(provider:Provider):string[]{const keys=Array.isArray(provider.apiKeys)&&provider.apiKeys.length?provider.apiKeys.map(String).filter(Boolean):provider.apiKey?[String(provider.apiKey)]:[];return keys.length?keys:provider.apiKey?[String(provider.apiKey)]:[]}
+export function providerKeys(provider:Provider):string[]{
+  const keys=Array.isArray(provider.apiKeys)&&provider.apiKeys.length?provider.apiKeys:(provider.apiKey?[provider.apiKey]:[]);
+  return keys.filter(k=>k&&(typeof k==='string'?String(k).trim():String((k as CfAccountKey).token||'').trim())).map(k=>typeof k==='string'?k:(k as CfAccountKey).token||'');
+}
 /** Clone of the provider bound to the n-th key (falls back to the first key). */
-export function providerWithKey(provider:Provider,index=0):Provider{const keys=providerKeys(provider),apiKey=keys[index]??keys[0]??(provider.apiKey||'');return{...provider,apiKey}}
+export function providerWithKey(provider:Provider,index=0):Provider{
+  const keys=Array.isArray(provider.apiKeys)&&provider.apiKeys.length?provider.apiKeys:(provider.apiKey?[provider.apiKey]:[]);
+  const chosen=keys[index]??keys[0]??(provider.apiKey||'');
+  if(typeof chosen==='string')return{...provider,apiKey:chosen};
+  const account=(chosen as CfAccountKey).accountId||cloudflareAccountId(provider.baseUrl)||'';
+  const token=(chosen as CfAccountKey).token||provider.apiKey||'';
+  return{...provider,apiKey:token,baseUrl:account?`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/ai/run/`:provider.baseUrl};
+}
 /** Parses an optional trailing `::k<n>` suffix from a model reference. */
 export function parseModelKeySuffix(raw:string):{model:string;keyIndex:number}{const match=String(raw||'').match(/^(.*?)::k(\d+)$/);return match?{model:match[1],keyIndex:Math.max(0,Number(match[2])-1)}:{model:String(raw||''),keyIndex:0}}
 /** Display suffix for non-primary keys, e.g. index 1 -> ' [K۲]'. */
@@ -239,7 +250,7 @@ function cloudflareModelIds(raw:string):string[]{
 function canonicalAiModel(model:string){return String(model||'').trim().replace(/^~+/,'')}
 function isOpenRouter(provider:Pick<Provider,'id'|'name'|'baseUrl'>,endpoint=''){return provider.id==='openrouter'||/openrouter/i.test(String(provider.name||''))||/openrouter\.ai/i.test(String(provider.baseUrl||endpoint||''))}
 function aiRequestHeaders(provider:Provider,endpoint:string,method:'POST'|'GET'='POST'):Record<string,string>{
-  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.25.0'};
+  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.26.0'};
   if(method==='POST')headers['content-type']='application/json';
   if(isOpenRouter(provider,endpoint)){headers['http-referer']='https://scraper4.workers.dev';headers.referer='https://scraper4.workers.dev';headers['x-title']='Scraper 4'}
   return headers;

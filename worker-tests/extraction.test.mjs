@@ -238,6 +238,15 @@ test('selector tab: sticky sub-tabs, product dropdown for detail sample, price d
   assert.match(scraper,/تنوع‌ها به‌عنوان گالری عکس/,'variation images feed the gallery');
 });
 
+test('CF editor lists multiple accounts with a test button per account; generic keys keep test buttons',async()=>{
+  const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
+  assert.match(dash,/data-ai-account-id="/,'account id input per row');
+  assert.match(dash,/data-ai-account-token="/,'token input per row');
+  assert.match(dash,/ai-key-test:'\+i\+'/,'test button per key/account');
+  assert.match(dash,/async function testAiKey\(/,'test-key handler');
+  assert.match(dash,/aiEditorAccounts/,'accounts state');
+});
+
 test('Cloudflare AI provider editor shows account-id/token fields and export transforms them',async()=>{
   const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),vault=await readFile(new URL('../worker-src/vault.ts',import.meta.url),'utf8');
   for(const token of ['aiEditAccountId','aiEditCfToken','aiCloudflareBox','aiIsCloudflareBase','aiCloudflareAccountFromBase','aiCloudflareBaseFromParts'])assert.match(dash,new RegExp(token),token);
@@ -249,12 +258,12 @@ test('Cloudflare AI provider editor shows account-id/token fields and export tra
 test('provider editor supports multiple API keys and model lists show key suffixes',async()=>{
   const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),ai=await readFile(new URL('../worker-src/ai.ts',import.meta.url),'utf8'),vault=await readFile(new URL('../worker-src/vault.ts',import.meta.url),'utf8');
   for(const token of ['aiEditKeys','ai-key-add','ai-key-remove','renderAiEditKeys','aiKeySuffixLabel','aiProviderKeyCount'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
-  assert.match(ai,/apiKeys\?:string\[\]/);
+  assert.match(ai,/apiKeys\?:Array<string\|CfAccountKey>/);
   assert.match(ai,/providerKeys\(provider/);
   assert.match(ai,/providerWithKey\(provider/);
   assert.match(ai,/parseModelKeySuffix\(/);
   assert.match(ai,/keyLabel:aiKeySuffixLabel\(ki\)/,'test tasks carry a visible key suffix');
-  assert.match(vault,/apiKeys:string\[\]/);
+  assert.match(vault,/apiKeys:Array<string\|\{accountId:string;token:string\}>/);
   assert.match(dash,/apiKeys:keys\.length\?keys/,'export/import round-trips the keys array');
 });
 

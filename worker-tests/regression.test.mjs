@@ -127,6 +127,19 @@ test('AI result modal can retry message or category independently',async()=>{
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('cloudflare multi-account keys: each account = accountId+token and providerWithKey picks the right account',async()=>{
+  const db=new MemoryD1();
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'cf',name:'CF',baseUrl:'https://api.cloudflare.com/client/v4/accounts/acc1/ai/run/',apiKey:'tok-1',apiKeys:[{accountId:'acc1',token:'tok-1'},{accountId:'acc2',token:'tok-2'}],models:['@cf/meta/llama-4-scout-17b-16e-instruct'],enabled:true}],candidates:[],master:'',model:'',network:{mode:'direct'}}}));
+  const loaded=await call(db,'/api/connections').then(r=>r.json());
+  const p=loaded.connections.ai.providers.find(x=>x.id==='cf');
+  assert.equal(p.apiKeys.length,2,'two accounts kept');
+  assert.equal(p.apiKeys[1].accountId,'acc2');assert.equal(p.apiKeys[1].token,'tok-2');
+  const source=await readFile(new URL('../worker-src/ai.ts',import.meta.url),'utf8');
+  assert.match(source,/export function providerWithKey\(provider:Provider,index=0\)/,'providerWithKey exported');
+  assert.match(source,/chosen as CfAccountKey\)\.accountId\|\|cloudflareAccountId/,'providerWithKey rebuilds the account baseUrl');
+  assert.match(source,/apiKeys\?:Array<string\|CfAccountKey>/,'provider type supports string|account keys');
+});
+
 test('cloudflare provider keeps accountId/cfToken through the vault',async()=>{
   const db=new MemoryD1();
   await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'cf',name:'Cloudflare',baseUrl:'https://api.cloudflare.com/client/v4/accounts/acc123/ai/run/',apiKey:'tok-1',apiKeys:['tok-1'],accountId:'acc123',cfToken:'tok-1',models:['@cf/meta/llama-4-scout-17b-16e-instruct'],enabled:true}],candidates:[],master:'',model:'',network:{mode:'direct'}}}));
