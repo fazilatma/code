@@ -303,8 +303,14 @@ test('provider editor supports multiple API keys and model lists show key suffix
   assert.match(ai,/providerWithKey\(provider/);
   assert.match(ai,/parseModelKeySuffix\(/);
   assert.match(ai,/keyLabel:aiKeySuffixLabel\(ki\)/,'test tasks carry a visible key suffix');
+  assert.match(ai,/\[K'\+String\(index\+1\)\.replace\(\/\\d\/g,d=>'۰۱۲۳۴۵۶۷۸۹'/,'suffix uses Persian digits');
   assert.match(vault,/apiKeys:Array<string\|\{accountId:string;token:string\}>/);
   assert.match(dash,/apiKeys:keys\.length\?keys/,'export/import round-trips the keys array');
+  assert.match(dash,/querySelectorAll\('#aiEditKeys \.ai-account-row'\)/,'Cloudflare accounts are read from their rows when saving');
+  assert.match(dash,/renderAiTestEstimate/,'test panel estimate helper exists');
+  assert.match(dash,/id="aiTestEstimate"/,'test panel shows the per-key test-entry estimate');
+  assert.match(dash,/aiTestOnlyUntested'\)\?\.addEventListener\('change',renderAiTestEstimate/,'candidate checkbox refreshes the estimate');
+  assert.match(dash,/last\.keyLabel/,'live progress shows the per-key suffix of the current model');
 });
 
 test('import preview header mapping selects + row detail modal + Workers AI catalog UI are wired',async()=>{

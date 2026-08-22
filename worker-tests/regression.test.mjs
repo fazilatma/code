@@ -333,6 +333,30 @@ test('AI queue checkpoints results server-side until all models finish after a r
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('adding a second API key doubles the test list with a per-key suffix',async()=>{
+  const db=new MemoryD1(),sent=[],models=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}},env={DB:db,VAULT_SECRET:'vault-secret',JOBS:null,JOBS_DLQ:{send:async()=>{}}};env.JOBS=extra.JOBS;
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'multi',name:'Multi-Key AI',baseUrl:'https://ai.example/v1',apiKey:'key-1',apiKeys:['key-1','key-2'],models:['model-a','model-b'],enabled:true}],network:{mode:'direct'}}}),extra);
+  const originalFetch=globalThis.fetch;globalThis.fetch=async(_request,init={})=>{const body=JSON.parse(String(init.body||'{}'));models.push(body.model);return jsonResponse({choices:[{message:{content:'پاسخ'}}]})};
+  const deliver=message=>worker.queue({messages:[{body:message,ack(){},retry(){assert.fail('second-key run should ack')}}]},env,ctx);
+  try{
+    const started=await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام'}),extra).then(r=>r.json());assert.equal(started.run.status,'queued');
+    await deliver(sent.shift().message);
+    const first=await call(db,'/api/ai/test-runs/current',{},extra).then(r=>r.json());
+    assert.equal(first.run.result.total,4,'two models x two keys = four test entries (doubled)');
+    assert.equal(first.run.result.results.length,1);
+    assert.equal(first.run.result.results[0].key,'multi::model-a');
+    assert.equal(first.run.result.results[0].keyLabel,'');
+    while(sent.length)await deliver(sent.shift().message);
+    const done=await call(db,'/api/ai/test-runs/current',{},extra).then(r=>r.json());
+    assert.equal(done.run.status,'done');
+    const rows=done.run.result.results;
+    assert.equal(rows.length,4);
+    assert.deepEqual(rows.map(r=>r.key),['multi::model-a','multi::model-a::k2','multi::model-b','multi::model-b::k2']);
+    assert.deepEqual(rows.map(r=>r.keyLabel),['',' [K۲]','',' [K۲]']);
+    assert.deepEqual(models,['model-a','model-a','model-b','model-b']);
+  }finally{globalThis.fetch=originalFetch}
+});
+
 test('category-all queue consumes every unapproved page once and survives duplicate delivery',async()=>{
   const db=new MemoryD1(),sent=[],listPages=[],updatedIds=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}},env={DB:db,VAULT_SECRET:'vault-secret',JOBS:null,JOBS_DLQ:{send:async()=>{}}};env.JOBS=extra.JOBS;
   await call(db,'/api/connections',jsonInit({basalam:{api:'https://basalam.example/v1',token:'category-token',vendorId:'55'},ai:{providers:[{id:'cat-ai',name:'Category AI',baseUrl:'https://ai.example/v1',apiKey:'category-ai-secret',models:['cat-model'],enabled:true}],candidates:['cat-ai::cat-model'],network:{mode:'direct'}}}),extra);

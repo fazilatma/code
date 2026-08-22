@@ -28,7 +28,7 @@ export function providerWithKey(provider:Provider,index=0):Provider{
 /** Parses an optional trailing `::k<n>` suffix from a model reference. */
 export function parseModelKeySuffix(raw:string):{model:string;keyIndex:number}{const match=String(raw||'').match(/^(.*?)::k(\d+)$/);return match?{model:match[1],keyIndex:Math.max(0,Number(match[2])-1)}:{model:String(raw||''),keyIndex:0}}
 /** Display suffix for non-primary keys, e.g. index 1 -> ' [K۲]'. */
-export function aiKeySuffixLabel(index:number):string{return index>0?` [K${index+1}]`:''}
+export function aiKeySuffixLabel(index:number):string{return index>0?' [K'+String(index+1).replace(/\d/g,d=>'۰۱۲۳۴۵۶۷۸۹'[Number(d)])+']':''}
 export async function aiProviders():Promise<Provider[]>{return providersFromAi((await loadConnections()).ai)}
 
 /** Explicit user flags win first; the fallback covers common reasoning families already saved before this setting existed. */
@@ -250,7 +250,7 @@ function cloudflareModelIds(raw:string):string[]{
 function canonicalAiModel(model:string){return String(model||'').trim().replace(/^~+/,'')}
 function isOpenRouter(provider:Pick<Provider,'id'|'name'|'baseUrl'>,endpoint=''){return provider.id==='openrouter'||/openrouter/i.test(String(provider.name||''))||/openrouter\.ai/i.test(String(provider.baseUrl||endpoint||''))}
 function aiRequestHeaders(provider:Provider,endpoint:string,method:'POST'|'GET'='POST'):Record<string,string>{
-  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.29.0'};
+  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.30.0'};
   if(method==='POST')headers['content-type']='application/json';
   if(isOpenRouter(provider,endpoint)){headers['http-referer']='https://scraper4.workers.dev';headers.referer='https://scraper4.workers.dev';headers['x-title']='Scraper 4'}
   return headers;
