@@ -2,7 +2,7 @@ import { app, scheduledTasks } from './app.js';
 import { configureEnv, type Env } from './env.js';
 import { ensureSchema, listQueuedJobs } from './db.js';
 import { processJob } from './processor.js';
-import { processBackgroundMessage } from './background.js';
+import { listQueuedBackgroundRuns, processBackgroundMessage } from './background.js';
 import type { JobMessage } from './types.js';
 
 type ExecutionContext={waitUntil(promise:Promise<unknown>):void};
@@ -17,10 +17,14 @@ export default {
     for(const item of batch.messages){
       try{
         if(item.body?.task==='ai-test'||item.body?.task==='category-all'||item.body?.task==='dedup'||item.body?.task==='agent'){
-          const result=await processBackgroundMessage(item.body);
-          console.log(JSON.stringify({event:'queue_background',task:item.body.task,runId:item.body.runId,result:result.outcome}));
+          // Each wake-up processes the highest-priority queued background run
+          // (task-manager drag order) instead of blindly following FIFO message
+          // order; a displaced run stays queued and is recovered by the cron sweep.
+          const queued=await listQueuedBackgroundRuns(1),message=queued.length?queued[0]:item.body;
+          const result=await processBackgroundMessage(message);
+          console.log(JSON.stringify({event:'queue_background',task:message.task,runId:message.runId,result:result.outcome}));
           if(result.outcome==='continue'){
-            if(env.JOBS)await env.JOBS.send(item.body,{delaySeconds:result.delaySeconds||1});
+            if(env.JOBS)await env.JOBS.send(message,{delaySeconds:result.delaySeconds||1});
             else item.retry({delaySeconds:30});
           }
         }else{

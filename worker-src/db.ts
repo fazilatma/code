@@ -105,6 +105,18 @@ export async function listQueuedJobs(limit=200):Promise<Job[]>{
   const map=await getJobPriorities();
   return jobs.sort((a,b)=>jobPriority(map,b)-jobPriority(map,a)||a.createdAt.localeCompare(b.createdAt));
 }
+// ─── Background-run priority map (task-manager drag order) ───────────────────
+// Ranks run kinds ('ai-test' | 'dedup' | 'category-all' | 'agent'): the first
+// kind in the user-defined order gets the highest number and is dispatched
+// first when several background runs are queued. Unranked kinds get priority 0.
+const RUN_PRIORITY_KEY='run_priorities_v1';
+export async function getRunPriorities():Promise<Record<string,number>>{return getState<Record<string,number>>(RUN_PRIORITY_KEY,{});}
+export async function setRunPriorities(kinds:string[]):Promise<Record<string,number>>{
+  const valid=[...new Set(kinds.map(String).filter(Boolean))],map:Record<string,number>={};
+  valid.forEach((kind,index)=>{map[kind]=valid.length-index});
+  await setState(RUN_PRIORITY_KEY,map);
+  return map;
+}
 export async function claimJob(id?:string):Promise<Job|null>{
   const candidate=id?await statement("SELECT id FROM jobs WHERE id=? AND status='queued'",[id]).first<{id:string}>():await statement("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1").first<{id:string}>();
   if(!candidate)return null;const timestamp=now();const changed=await run("UPDATE jobs SET status='running',phase='starting',started_at=?,updated_at=? WHERE id=? AND status='queued'",[timestamp,timestamp,candidate.id]);

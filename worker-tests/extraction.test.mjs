@@ -250,7 +250,7 @@ test('provider list: collapsible cards, sticky header, restore after edit, colla
 });
 
 test('task manager panel is wired and the activity endpoint exists',async()=>{
-  const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),app=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');
+  const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),app=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8'),main=await readFile(new URL('../worker-src/main.ts',import.meta.url),'utf8');
   for(const token of ['activityBtn','openActivityManager','activityPoll','/api/activity','activity-stats','activity-runs'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
   assert.match(app,/\/api\/activity/,'activity endpoint');
   assert.match(app,/getPublicBackgroundRun\('ai-test'\)/);
@@ -259,6 +259,11 @@ test('task manager panel is wired and the activity endpoint exists',async()=>{
   assert.match(dash,/\/api\/jobs\/priority/,'priority endpoint is wired in the dashboard');
   assert.match(app,/app\.post\('\/api\/jobs\/priority'/,'priority endpoint exists');
   assert.match(app,/listQueuedJobs/,'cron and consumer use the priority-ordered queue');
+  for(const token of ['data-activity-run','data-run-kind','data-run-up','data-run-down','activityOpenRun','activityMoveRun','saveRunPriorities','activityReorderRuns'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
+  assert.match(dash,/\/api\/runs\/priority/,'runs priority endpoint is wired in the dashboard');
+  assert.match(app,/app\.post\('\/api\/runs\/priority'/,'runs priority endpoint exists');
+  assert.match(app,/getRunPriorities/,'runs priorities drive the activity ordering');
+  assert.match(main,/listQueuedBackgroundRuns/,'queue consumer dispatches background runs by priority');
 });
 
 test('aiEditorAccounts state is always declared so provider edit never throws',async()=>{

@@ -6,7 +6,7 @@ import { AGENT_PROMPT_TEMPLATES, AGENT_TOOLS, AGENT_TOOL_MODELS, agentCronTick, 
 import { automationTick, autoreplyLogs, autoreplyRun, basalamChatMessagesOverview, basalamChatsOverview, basalamOrders, digest, generateReply } from './automation.js';
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
 import { DASHBOARD, DASHBOARD_JS } from './dashboard.js';
-import { allProducts, clearFinishedJobs, createBackup, createJob, deleteJob, deleteProfile, enqueueDueProfiles, ensureSchema, findLearnedCategory, getJob, getJobPriorities, getProduct, getProfile, getState, getTriedBasalamCategories, importAutoreplyLog, importCategoryLearning, learnCategory, listCategoryLearning, listJobs, listProducts, listProfiles, listQueuedJobs, markBasalamCategoriesTried, profileStats, pruneFinishedJobs, reapStalledJobs, restoreBackup, retryJob, saveProfile, setJobPriorities, setState, updateJob, upsertProduct } from './db.js';
+import { allProducts, clearFinishedJobs, createBackup, createJob, deleteJob, deleteProfile, enqueueDueProfiles, ensureSchema, findLearnedCategory, getJob, getJobPriorities, getProduct, getProfile, getRunPriorities, getState, getTriedBasalamCategories, importAutoreplyLog, importCategoryLearning, learnCategory, listCategoryLearning, listJobs, listProducts, listProfiles, listQueuedJobs, markBasalamCategoriesTried, profileStats, pruneFinishedJobs, reapStalledJobs, restoreBackup, retryJob, saveProfile, setJobPriorities, setRunPriorities, setState, updateJob, upsertProduct } from './db.js';
 import { configureEnv, type Env } from './env.js';
 import { bulkEdit, destinationBulkEdit, destinationCatalog, destinationCategories, destinationChangeStatus, destinationDelete, destinationOverview, destinationProduct, destinationUpdate, findDestinationDuplicates, photoFix, rebuildMap, recon, retire } from './maintenance.js';
 import { safeFetch, safeText, safeWooFetch } from './network.js';
@@ -30,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.28.0',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.29.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -41,7 +41,7 @@ app.post('/api/visual-ticket',async c=>{const body=await c.req.json() as any,url
 app.get('/api/status',async c=>{const connections=await loadConnections();return c.json({ok:true,profiles:(await listProfiles()).length,jobs:await listJobs(10),connections:connectionStatus(connections),queue:Boolean(c.env.JOBS),storage:{d1:true,r2:Boolean(c.env.BACKUPS)}})});
 // ─── Task-manager style live activity (lightweight) ──────────────────────────
 app.get('/api/activity',async c=>{
-  const[profiles,jobs,aiRun,dedupRun,catRun,agentRun,cronLock,priorities,version]=await Promise.all([
+  const[profiles,jobs,aiRun,dedupRun,catRun,agentRun,cronLock,priorities,runPriorities,version]=await Promise.all([
     listProfiles(),
     listJobs(Math.min(30,Number(c.req.query('limit'))||15)),
     getPublicBackgroundRun('ai-test'),
@@ -50,6 +50,7 @@ app.get('/api/activity',async c=>{
     publicAgentRun(await currentAgentRun()),
     getState<any>('cron_lock',{}),
     getJobPriorities(),
+    getRunPriorities(),
     Promise.resolve(c.env.WORKER_VERSION||'1.0.0')
   ]);
   const active=jobs.filter(j=>['queued','running'].includes(j.status)).sort((a,b)=>{
@@ -57,12 +58,17 @@ app.get('/api/activity',async c=>{
     const pa=Number(priorities[a.id])||0,pb=Number(priorities[b.id])||0;
     return pa!==pb?pb-pa:a.createdAt.localeCompare(b.createdAt);
   });
+  const RUN_KIND_ORDER=['ai-test','dedup','category-all','agent'];
   const runs=[aiRun,dedupRun,catRun,agentRun].filter(Boolean).map(r=>({
-    kind:r.kind||'run',name:r.kind==='ai-test'?'تست مدل‌های هوش مصنوعی':r.kind==='dedup'?'حذف تکراری‌های مقصد':r.kind==='category-all'?'دسته‌بندی همهٔ باسلام':'عملیات ایجنتیک',
-    status:r.status,phase:r.phase,progress:r.total?Math.round((Number(r.processed||r.cursor||0)/Number(r.total))*100):(r.steps&&r.maxSteps?Math.round(r.steps/r.maxSteps*100):0),
+    id:r.id,kind:r.kind||'run',name:r.kind==='ai-test'?'تست مدل‌های هوش مصنوعی':r.kind==='dedup'?'حذف تکراری‌های مقصد':r.kind==='category-all'?'دسته‌بندی همهٔ باسلام':'عملیات ایجنتیک',
+    status:r.status,phase:r.phase,priority:Number(runPriorities[r.kind])||0,progress:r.total?Math.round((Number(r.processed||r.cursor||0)/Number(r.total))*100):(r.steps&&r.maxSteps?Math.round(r.steps/r.maxSteps*100):0),
     detail:r.kind==='dedup'?`${r.scanned||0} بررسی · ${r.removed||0} حذف`:r.kind==='category-all'?`${r.processed||0}/${r.total||0}`:r.kind==='agent'?`گام ${r.steps||0}/${r.maxSteps||0}`:`${r.messageSucceeded??r.succeeded??0} موفق`,
     updatedAt:r.updatedAt
-  }));
+  })).sort((a,b)=>{
+    if(a.status!==b.status)return a.status==='queued'?-1:1; // queued (reorderable) first, then the rest
+    if(a.priority!==b.priority)return b.priority-a.priority;
+    return RUN_KIND_ORDER.indexOf(a.kind)-RUN_KIND_ORDER.indexOf(b.kind);
+  });
   const cronAge=cronLock?.at?Date.now()-Date.parse(cronLock.at):null;
   return c.json({ok:true,ts:new Date().toISOString(),queue:Boolean(c.env.JOBS),version,
     counts:{profiles:profiles.length,jobs:jobs.length,active:active.length,runningRuns:runs.filter(r=>['queued','running'].includes(r.status)).length},
@@ -75,7 +81,7 @@ app.get('/api/activity',async c=>{
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.28.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.29.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -222,6 +228,17 @@ app.post('/api/jobs/priority',async c=>{
   // saved order, so we only persist when at least one queued job was reordered.
   if(!valid.length)return c.json({ok:true,count:0,priorities:await getJobPriorities()});
   const priorities=await setJobPriorities(valid);
+  return c.json({ok:true,count:valid.length,priorities});
+});
+// Reorder background runs by priority: kinds are sent in the desired dispatch
+// order (first = highest priority). Only the four known run kinds are accepted;
+// an empty result never wipes the saved order.
+app.post('/api/runs/priority',async c=>{
+  const b=await jsonBody(c),kinds=Array.isArray(b.kinds)?b.kinds.map(String):[];
+  if(!kinds.length)return c.json({ok:false,error:'هیچ اجرایی برای اولویت‌بندی ارسال نشد.'},400);
+  const known=new Set(['ai-test','category-all','dedup','agent']),valid=kinds.filter((kind:string)=>known.has(kind));
+  if(!valid.length)return c.json({ok:true,count:0,priorities:await getRunPriorities()});
+  const priorities=await setRunPriorities(valid);
   return c.json({ok:true,count:valid.length,priorities});
 });
 

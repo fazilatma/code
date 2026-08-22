@@ -1,10 +1,10 @@
-import { deleteState, getState, getTriedBasalamCategories, markBasalamCategoriesTried, setState } from './db.js';
+import { deleteState, getRunPriorities, getState, getTriedBasalamCategories, markBasalamCategoriesTried, setState } from './db.js';
 import { getEnv } from './env.js';
 import { getLastAiTestResults, isChatCompatibleAiModel, isRetryableAiResult, nextAiTestBatch, suggestCategoryWithModel, testModelBatch } from './ai.js';
 import { loadConnections } from './connections.js';
 import { applyBasalamCategory, destinationCatalog, destinationCategories, destinationChangeStatus } from './maintenance.js';
 import { buildDedupGroups, normalizeDedupKeep, parseSuffixFormats, type DedupCandidate, type DedupGroup, type DedupKeep } from './dedup.js';
-import { processAgentRunMessage, recoverAgentRun } from './agent.js';
+import { currentAgentRun, processAgentRunMessage, recoverAgentRun } from './agent.js';
 import type { BackgroundMessage } from './types.js';
 
 export type BackgroundOutcome={outcome:'complete'|'continue'|'ignored';delaySeconds?:number};
@@ -85,6 +85,22 @@ async function enqueue(message:BackgroundMessage,waitUntil?:(promise:Promise<unk
   if(waitUntil)waitUntil(promise);else await promise;
 }
 async function drainInline(message:BackgroundMessage){for(let i=0;i<5;i++){const result=await processBackgroundMessage(message);if(result.outcome!=='continue')break}}
+
+// Priority-aware dispatch order for background runs (task-manager drag order).
+// Only runs still waiting in the queue are candidates; the first entry of the
+// returned list is the run the queue consumer should process next.
+const RUN_KIND_ORDER=['ai-test','dedup','category-all','agent'];
+export async function listQueuedBackgroundRuns(limit=5):Promise<BackgroundMessage[]>{
+  const priorities=await getRunPriorities(),priorityOf=(kind:string)=>Number(priorities[kind])||0;
+  const candidates:Array<{message:BackgroundMessage;kind:string;priority:number}>=[];
+  for(const kind of ['ai-test','category-all','dedup'] as const){
+    const run=await currentBackgroundRun(kind);
+    if(run&&run.status==='queued')candidates.push({message:{task:kind,runId:run.id},kind,priority:priorityOf(kind)});
+  }
+  const agentRun=await currentAgentRun();
+  if(agentRun&&agentRun.status==='queued')candidates.push({message:{task:'agent',runId:agentRun.id},kind:'agent',priority:priorityOf('agent')});
+  return candidates.sort((a,b)=>b.priority-a.priority||RUN_KIND_ORDER.indexOf(a.kind)-RUN_KIND_ORDER.indexOf(b.kind)).slice(0,Math.max(1,limit)).map(c=>c.message);
+}
 
 /** Force-clear a stuck run (its pointer, run row, lease and shared test-results state) so a fresh run can start. */
 export async function resetBackgroundRun(kind:BackgroundRun['kind']):Promise<void>{

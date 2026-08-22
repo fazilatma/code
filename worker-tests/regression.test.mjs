@@ -260,6 +260,30 @@ test('task manager drag order persists as priority and drives active job orderin
   assert.equal(empty.ok,false);
 });
 
+test('background run drag order persists, reorders the runs section and exposes run ids',async()=>{
+  const db=new MemoryD1();
+  db.states.set('background_current:ai-test',JSON.stringify('ai-id'));
+  db.states.set('background_run:ai-test:ai-id',JSON.stringify({id:'ai-id',kind:'ai-test',status:'queued',phase:'waiting',stopRequested:false,createdAt:'2026-08-22T10:00:00.000Z',updatedAt:'2026-08-22T10:00:00.000Z',startedAt:null,finishedAt:null,attempts:0,error:null,total:0,processed:0,cursor:0,result:{}}));
+  db.states.set('background_current:category-all',JSON.stringify('cat-id'));
+  db.states.set('background_run:category-all:cat-id',JSON.stringify({id:'cat-id',kind:'category-all',status:'queued',phase:'listing',stopRequested:false,createdAt:'2026-08-22T11:00:00.000Z',updatedAt:'2026-08-22T11:00:00.000Z',startedAt:null,finishedAt:null,attempts:0,error:null,page:1,totalPages:2,total:0,processed:0,changed:0,failed:0,items:[],products:[]}));
+  const before=await call(db,'/api/activity').then(r=>r.json());
+  assert.deepEqual(before.runs.map(r=>r.kind),['ai-test','category-all']); // canonical default order
+  assert.equal(before.runs[0].id,'ai-id');assert.equal(before.runs[1].id,'cat-id');
+  const reordered=await call(db,'/api/runs/priority',jsonInit({kinds:['category-all','ai-test']})).then(r=>r.json());
+  assert.equal(reordered.ok,true);assert.equal(reordered.count,2);
+  assert.equal(JSON.parse(db.states.get('run_priorities_v1'))['category-all'],2);
+  assert.equal(JSON.parse(db.states.get('run_priorities_v1'))['ai-test'],1);
+  const after=await call(db,'/api/activity').then(r=>r.json());
+  assert.deepEqual(after.runs.map(r=>r.kind),['category-all','ai-test']);
+  assert.equal(after.runs[0].priority,2);assert.equal(after.runs[1].priority,1);
+  // Unknown kinds are ignored and never wipe the saved order.
+  const bogus=await call(db,'/api/runs/priority',jsonInit({kinds:['bogus']})).then(r=>r.json());
+  assert.equal(bogus.count,0);
+  assert.equal(JSON.parse(db.states.get('run_priorities_v1'))['ai-test'],1);
+  const empty=await call(db,'/api/runs/priority',jsonInit({kinds:[]})).then(r=>r.json());
+  assert.equal(empty.ok,false);
+});
+
 test('scheduled cron uses live general settings for watchdog, report retention, lock and cron ping',async()=>{
   const db=new MemoryD1(),pending=[],pings=[],localCtx={waitUntil(promise){pending.push(promise)},passThroughOnException(){}};
   await call(db,'/api/settings',jsonInit({general:{cronLockMin:1,keepReports:2,queueDedup:true,queueDedupStale:1,contentSync:false},watchdog:{enabled:true,stallAfter:60},notifications:{events:{cronPing:true},pingEvery:1}}));
