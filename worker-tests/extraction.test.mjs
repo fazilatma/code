@@ -124,7 +124,7 @@ test('nontechnical settings UI uses visual editors and comprehensive clickable t
 
 test('AI provider export is confidential and the Mistral catalog covers every official Text-to-text endpoint',async()=>{
   const dashboard=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),catalogSource=await readFile(new URL('../worker-src/ai-catalog.ts',import.meta.url),'utf8'),vault=await readFile(new URL('../worker-src/vault.ts',import.meta.url),'utf8');
-  assert.match(dashboard,/برون‌ریزی محرمانه/);assert.match(dashboard,/aiExportDownload/);assert.match(dashboard,/showSaveFilePicker/);assert.match(dashboard,/دانلود فایل JSON در مرورگر/);assert.match(dashboard,/کلیدهای API را نیز شامل|کلیدهای API است/);assert.match(dashboard,/ai-export-file'[\s\S]*exportAiProviders\(\)/);assert.match(dashboard,/format:'scraper4-ai-providers'/);assert.match(dashboard,/containsSecrets:true/);assert.match(dashboard,/providers:Array\.isArray\(ai\.providers\)/);assert.match(dashboard,/candidates:Array\.isArray\(ai\.candidates\)/);assert.match(dashboard,/master:String\(ai\.master/);assert.match(dashboard,/network:ai\.network/);assert.match(dashboard,/raw\?\.ai[\s\S]*config\.candidates[\s\S]*config\.network/);assert.match(dashboard,/mistral\.ai\/pricing\/api\//);
+  assert.match(dashboard,/برون‌ریزی محرمانه/);assert.match(dashboard,/aiExportDownload/);assert.match(dashboard,/showSaveFilePicker/);assert.match(dashboard,/دانلود فایل JSON در مرورگر/);assert.match(dashboard,/کلیدهای API را نیز شامل|کلیدهای API است/);assert.match(dashboard,/ai-export-file'[\s\S]*exportAiProviders\(\)/);assert.match(dashboard,/format:'scraper4-ai-providers'/);assert.match(dashboard,/containsSecrets:true/);assert.match(dashboard,/providers:exportProviders/);assert.match(dashboard,/candidates:Array\.isArray\(ai\.candidates\)/);assert.match(dashboard,/master:String\(ai\.master/);assert.match(dashboard,/network:ai\.network/);assert.match(dashboard,/raw\?\.ai[\s\S]*config\.candidates[\s\S]*config\.network/);assert.match(dashboard,/mistral\.ai\/pricing\/api\//);
   assert.deepEqual([...catalog.MISTRAL_TEXT_TO_TEXT_MODELS],[
     'mistral-medium-latest','mistral-small-latest','mistral-large-latest','zai-glm-5-2','mistral-ocr-latest','voxtral-small-latest','codestral-latest','ministral-3b-latest','ministral-8b-latest','ministral-14b-latest','mistral-embed'
   ]);
@@ -211,6 +211,14 @@ test('workflow panes match the reference hierarchy and every new control is oper
   const jobs=source.slice(source.indexOf('<section id="pane-jobs"'),source.indexOf('<section id="pane-settings"'));assert.match(jobs,/درون‌ریزی هوشمند از فایل/);assert.match(jobs,/importDropZone/);assert.match(jobs,/importMappingCard/);assert.match(jobs,/importHistoryList/);
   assert.match(source,/createJob\(\$\('sendProfile'\)\.value,'sync','woo',false\)/);assert.match(source,/createJob\(\$\('sendProfile'\)\.value,'sync','basalam',false\)/);assert.match(source,/analyzeImport\(\)\.catch/);assert.match(source,/executeImport\(\)\.catch/);assert.match(source,/saveProfile\(false,true\)/);
   const appSource=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');assert.match(appSource,/read-excel-file\/web-worker/);assert.match(appSource,/destinationStatus:wooStatus\|\|undefined/);
+});
+
+test('Cloudflare AI provider editor shows account-id/token fields and export transforms them',async()=>{
+  const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),vault=await readFile(new URL('../worker-src/vault.ts',import.meta.url),'utf8');
+  for(const token of ['aiEditAccountId','aiEditCfToken','aiCloudflareBox','aiIsCloudflareBase','aiCloudflareAccountFromBase','aiCloudflareBaseFromParts'])assert.match(dash,new RegExp(token),token);
+  assert.match(dash,/out\.accountId=aiCloudflareAccountFromBase/,'export writes accountId for CF providers');
+  assert.match(dash,/p\.accountId&&p\.cfToken\)baseUrl=aiCloudflareBaseFromParts/,'import rebuilds baseUrl from accountId+token');
+  assert.match(vault,/accountId\?:string;cfToken\?:string/);
 });
 
 test('provider editor supports multiple API keys and model lists show key suffixes',async()=>{

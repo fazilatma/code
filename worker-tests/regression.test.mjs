@@ -127,6 +127,15 @@ test('AI result modal can retry message or category independently',async()=>{
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('cloudflare provider keeps accountId/cfToken through the vault',async()=>{
+  const db=new MemoryD1();
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'cf',name:'Cloudflare',baseUrl:'https://api.cloudflare.com/client/v4/accounts/acc123/ai/run/',apiKey:'tok-1',apiKeys:['tok-1'],accountId:'acc123',cfToken:'tok-1',models:['@cf/meta/llama-4-scout-17b-16e-instruct'],enabled:true}],candidates:[],master:'',model:'',network:{mode:'direct'}}}));
+  const loaded=await call(db,'/api/connections').then(r=>r.json());
+  const p=loaded.connections.ai.providers.find(x=>x.id==='cf');
+  assert.equal(p.accountId,'acc123');assert.equal(p.cfToken,'tok-1');
+  assert.equal(p.baseUrl,'https://api.cloudflare.com/client/v4/accounts/acc123/ai/run');
+});
+
 test('multi-key providers: keys are saved, exported and used per model suffix in chat',async()=>{
   const db=new MemoryD1();
   await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'mk',name:'MultiKey',baseUrl:'https://mk.example/v1',apiKey:'key-one',apiKeys:['key-one','key-two'],models:['m1'],enabled:true}],candidates:[],master:'',model:'',network:{mode:'direct'}}}));
