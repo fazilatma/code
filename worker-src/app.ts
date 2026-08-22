@@ -30,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.17.3',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.18.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -42,7 +42,7 @@ app.get('/api/status',async c=>{const connections=await loadConnections();return
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.17.3',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.18.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -134,7 +134,20 @@ app.post('/api/profiles/:id/scrape',async c=>createProfileJob(c,c.req.param('id'
 app.post('/api/profiles/:id/sync',async c=>createProfileJob(c,c.req.param('id'),'sync'));
 app.get('/api/profiles/:id/products',async c=>c.json({ok:true,...await listProducts(c.req.param('id'),Math.min(500,Number(c.req.query('limit'))||100),Math.max(0,Number(c.req.query('offset'))||0),c.req.query('q')||'')}));
 app.get('/api/profiles/:id/export.csv',async c=>{const result=await listProducts(c.req.param('id'),100000,0,''),fields=['sourceKey','title','price','url','image','sku','brand','stock','weight','category','shortDesc','longDesc','variations','variationGroups'],csv='\uFEFF'+fields.join(',')+'\n'+result.products.map(p=>fields.map(field=>csvCell((p as any)[field])).join(',')).join('\n');return c.body(csv,200,{'content-type':'text/csv; charset=utf-8','content-disposition':`attachment; filename="${c.req.param('id').replace(/[^a-z0-9_.-]/gi,'_')}.csv"`})});
-app.post('/api/profiles/:id/import',async c=>{const profile=await getProfile(c.req.param('id'));if(!profile)return c.json({ok:false,error:'Profile not found'},404);const{records,format,wooStatus}=await importRecords(c);let imported=0,failed=0;const errors:string[]=[];for(const[index,row]of records.entries())try{const title=String(row.title||row.name||'').trim();if(!title)throw new Error('title is empty');const key=String(row.sourceKey||row.key||crypto.randomUUID()),image=String(row.image||'');await upsertProduct(profile.id,{sourceKey:key,title,price:numberFromText(String(row.price||0)),priceText:String(row.price||''),url:String(row.url||row.link||''),image,images:image?[image]:[],sku:String(row.sku||''),brand:String(row.brand||''),stock:row.stock==null?undefined:Number(row.stock),weight:row.weight==null?undefined:Number(row.weight),category:String(row.category||''),shortDesc:String(row.shortDesc||''),longDesc:String(row.longDesc||''),variations:jsonValue(row.variations,[]),variationGroups:jsonValue(row.variationGroups,[]),destinationStatus:wooStatus||undefined,sourcePage:'import',scrapedAt:new Date().toISOString()});imported++}catch(error){failed++;if(errors.length<50)errors.push(`row ${index+1}: ${message(error)}`)}return c.json({ok:failed===0,format,wooStatus,rows:records.length,imported,failed,errors})});
+app.post('/api/profiles/:id/import',async c=>{const profile=await getProfile(c.req.param('id'));if(!profile)return c.json({ok:false,error:'Profile not found'},404);const{records,format,wooStatus}=await importRecords(c);const opts=parseImportOptions(c.req.query('opts'));let imported=0,failed=0,skipped=0;const errors:string[]=[],mapping=opts.mapping,dedupe=String(opts.dedupe||'none');const lastTitle=new Map<string,number>();if(dedupe==='last'){for(let i=records.length-1;i>=0;i--){const rawRow=records[i],row=mapping&&Object.keys(mapping).length?applyImportMapping(rawRow,mapping):rawRow;const title=String(row.title||row.name||'').trim();if(title&&!lastTitle.has(title))lastTitle.set(title,i)}}const seenTitle=new Set<string>();for(const[index,rawRow]of records.entries())try{const row=mapping&&Object.keys(mapping).length?applyImportMapping(rawRow,mapping):rawRow;const title=String(row.title||row.name||'').trim();if(!title){if(opts.skipMissingTitle){skipped++;continue}throw new Error('title is empty')}if(dedupe==='first'&&seenTitle.has(title)){skipped++;continue}if(dedupe==='last'&&lastTitle.get(title)!==index){skipped++;continue}seenTitle.add(title);const priceRaw=String(row.price??row.priceText??'').trim();const price=normalizeImportPrice(priceRaw,opts);if(price===null){if(opts.skipMissingPrice){skipped++;continue}throw new Error(`invalid price "${priceRaw.slice(0,40)}"`)}const key=String(row.sourceKey||row.key||crypto.randomUUID()),image=String(row.image||'');await upsertProduct(profile.id,{sourceKey:key,title,price,priceText:priceRaw,url:String(row.url||row.link||''),image,images:image?[image]:[],sku:String(row.sku||''),brand:String(row.brand||''),stock:row.stock==null||String(row.stock).trim()===''?(opts.defaultStock>0?opts.defaultStock:undefined):Number(String(row.stock).replace(/[^\d.-]/g,'')),weight:row.weight==null?undefined:Number(String(row.weight).replace(/[^\d.-]/g,'')),category:String(row.category||''),shortDesc:String(row.shortDesc||''),longDesc:String(row.longDesc||''),variations:jsonValue(row.variations,[]),variationGroups:jsonValue(row.variationGroups,[]),destinationStatus:wooStatus||undefined,sourcePage:'import',scrapedAt:new Date().toISOString()});imported++}catch(error){failed++;if(errors.length<50)errors.push(`row ${index+1}: ${message(error)}`)}await pushImportHistory({fileName:String(c.req.query('name')||'').slice(0,200),format,rows:records.length,imported,failed,skipped,wooStatus:wooStatus||undefined,opts,at:new Date().toISOString()});return c.json({ok:failed===0&&skipped<records.length,format,wooStatus,rows:records.length,imported,failed,skipped,errors})});
+
+// ─── Advanced import: analyze file, column mapping, history ──────────────────
+app.post('/api/import/analyze',async c=>{
+  const file=await readImportFile(c),table=file.rows,headers=file.headers;
+  const mapping=detectImportMapping(headers),mappingObj=Object.fromEntries(mapping.map(m=>[m.column,m.field]));
+  const samples=table.slice(0,6).map(values=>Object.fromEntries(headers.map((h,i)=>[h,values[i]??''])));
+  let missingTitle=0,missingPrice=0,zeroPrice=0,invalidPrice=0,limit=Math.min(10000,table.length);
+  for(let i=0;i<limit;i++){const values=table[i],obj=Object.fromEntries(headers.map((h,j)=>[h,values[j]??''])),row=Object.keys(mappingObj).length?applyImportMapping(obj,mappingObj):normalizeImportRecord(obj),title=String(row.title||'').trim();if(!title)missingTitle++;else{const price=normalizeImportPrice(String(row.price??''),{priceUnit:'toman'});if(price===null)invalidPrice++;else if(price===0)zeroPrice++;else if(price<0)invalidPrice++}if(!String(row.price??'').trim())missingPrice++}
+  const priceHint=file.rows.length?detectPriceUnit(samples):null;
+  return c.json({ok:true,format:file.format,total:table.length,headers,mapping,samples,issues:{missingTitle,missingPrice,zeroPrice,invalidPrice,checked:Math.min(limit,table.length)},priceHint});
+});
+app.get('/api/import/history',async c=>c.json({ok:true,items:await getImportHistory()}));
+app.post('/api/import/history/clear',async c=>{await setState('import_history',[]);return c.json({ok:true})});
 
 app.get('/api/jobs',async c=>c.json({ok:true,jobs:await listJobs(Math.min(200,Number(c.req.query('limit'))||50))}));
 app.get('/api/jobs/:id',async c=>{const job=await getJob(c.req.param('id'));return job?c.json({ok:true,job}):c.json({ok:false,error:'Job not found'},404)});
@@ -187,7 +200,85 @@ async function jsonBody(c:any):Promise<any>{return c.req.json().catch(()=>({}))}
 function validTarget(value:string):'none'|'woo'|'basalam'|'both'{return['none','woo','basalam','both'].includes(value)?value as any:'none'}
 function validDestination(value:string):'woo'|'basalam'{if(value!=='woo'&&value!=='basalam')throw new Error('Invalid target');return value}
 function csvCell(value:unknown){const text=value&&typeof value==='object'?JSON.stringify(value):String(value??'');return`"${text.replace(/"/g,'""')}"`}
-async function importRecords(c:any):Promise<{records:Record<string,any>[];format:'csv'|'xlsx'|'json';wooStatus:Product['destinationStatus']|''}>{const contentType=String(c.req.header('content-type')||'').toLowerCase(),requested=String(c.req.query('format')||'').toLowerCase();let format:'csv'|'xlsx'|'json'='json',records:Record<string,any>[]=[],wooStatus:Product['destinationStatus']|''='';if(contentType.includes('application/json')){const body=await jsonBody(c);records=Array.isArray(body.rows)?body.rows:typeof body.csv==='string'?parseCsv(body.csv):[];wooStatus=validWooImportStatus(body.wooStatus)}else{const size=Number(c.req.header('content-length')||0);if(size>10*1024*1024)throw new Error('فایل درون‌ریزی باید حداکثر ۱۰ مگابایت باشد.');const buffer=await c.req.arrayBuffer();if(buffer.byteLength>10*1024*1024)throw new Error('فایل درون‌ریزی باید حداکثر ۱۰ مگابایت باشد.');if(requested==='xlsx'||contentType.includes('spreadsheetml')){format='xlsx';const table=await readXlsxFile(buffer);records=recordsFromSheet(table as unknown[][])}else{format='csv';records=parseCsv(new TextDecoder().decode(buffer))}wooStatus=validWooImportStatus(c.req.query('wooStatus'))}return{records:records.map(normalizeImportRecord),format,wooStatus}}
+async function importRecords(c:any):Promise<{records:Record<string,any>[];format:'csv'|'xlsx'|'json';wooStatus:Product['destinationStatus']|''}>{const contentType=String(c.req.header('content-type')||'').toLowerCase(),requested=String(c.req.query('format')||'').toLowerCase();let format:'csv'|'xlsx'|'json'='json',records:Record<string,any>[]=[],wooStatus:Product['destinationStatus']|''='';if(contentType.includes('application/json')){const body=await jsonBody(c);records=Array.isArray(body.rows)?body.rows:typeof body.csv==='string'?parseCsv(body.csv):[];wooStatus=validWooImportStatus(body.wooStatus)}else{const file=await readImportFile(c);format=file.format;records=file.rows.map(values=>normalizeImportRecord(Object.fromEntries(file.headers.map((key,i)=>[key,values[i]||'']))));wooStatus=validWooImportStatus(c.req.query('wooStatus'))}return{records,format,wooStatus}}
+
+type ImportFile={format:'csv'|'xlsx';headers:string[];rows:string[][]};
+async function readImportFile(c:any):Promise<ImportFile>{
+  const requested=String(c.req.query('format')||'').toLowerCase(),contentType=String(c.req.header('content-type')||'').toLowerCase(),size=Number(c.req.header('content-length')||0);
+  if(size>10*1024*1024)throw new Error('فایل درون‌ریزی باید حداکثر ۱۰ مگابایت باشد.');
+  const buffer=await c.req.arrayBuffer();
+  if(buffer.byteLength>10*1024*1024)throw new Error('فایل درون‌ریزی باید حداکثر ۱۰ مگابایت باشد.');
+  if(requested==='xlsx'||contentType.includes('spreadsheetml')){const table=await readXlsxFile(buffer);const headers=(table[0]||[]).map(String);return{format:'xlsx',headers,rows:table.slice(1).map((row:unknown[])=>row.map(cell=>cell==null?'':String(cell)))}}
+  const rows=parseCsvRaw(new TextDecoder().decode(buffer));if(!rows.length)return{format:'csv',headers:[],rows:[]};const headers=rows[0];return{format:'csv',headers,rows:rows.slice(1)};
+}
+function parseCsvRaw(text:string):string[][]{const rows:string[][]=[];let row:string[]=[],cell='',quoted=false;const input=text.replace(/^\uFEFF/,'');for(let i=0;i<input.length;i++){const ch=input[i];if(quoted){if(ch==='"'&&input[i+1]==='"'){cell+='"';i++}else if(ch==='"')quoted=false;else cell+=ch}else if(ch==='"')quoted=true;else if(ch===','){row.push(cell);cell=''}else if(ch==='\n'){row.push(cell);rows.push(row);row=[];cell=''}else if(ch!=='\r')cell+=ch}if(cell||row.length){row.push(cell);rows.push(row)}return rows.filter((x,index)=>index===0||x.some(Boolean))}
+
+// ─── Import column mapping & options ─────────────────────────────────────────
+const IMPORT_FIELDS:Array<{field:string;labels:string[]}>=[
+  {field:'title',labels:['title','name','product','عنوان','نام','ناممحصول','نام محصول','نامکالا']},
+  {field:'price',labels:['price','قیمت','قیمتفروش','قیمت فروش','قیمتکالا']},
+  {field:'url',labels:['url','link','لینک','آدرس','آدرسصفحه','منبع']},
+  {field:'image',labels:['image','img','تصویر','عکس','تصویراصلی','تصویراصلی']},
+  {field:'sku',labels:['sku','کد','کدمحصول','کد محصول','شناسهکالا','code','productcode']},
+  {field:'brand',labels:['brand','برند']},
+  {field:'stock',labels:['stock','موجودی','تعداد','تعدادموجودی']},
+  {field:'weight',labels:['weight','وزن']},
+  {field:'category',labels:['category','دسته','دستهبندی','گروه','گروهکالا']},
+  {field:'shortDesc',labels:['shortdesc','توضیحکوتاه','مختصر']},
+  {field:'longDesc',labels:['longdesc','description','desc','توضیحات','توضیحکامل','متن']},
+  {field:'tags',labels:['tags','تگ','برچسب']},
+  {field:'sourceKey',labels:['sourcekey','key','شناسه','شناسهمحصول','id']},
+  {field:'variations',labels:['variations','تنوع','تنوعها']}
+];
+const normalizeImportHeader=(value:string)=>String(value||'').trim().toLowerCase().replace(/[يى]/g,'ی').replace(/ك/g,'ک').replace(/[\s_\-‌.]+/g,'').replace(/[«»"']/g,'');
+function detectImportMapping(headers:string[]):Array<{column:string;field:string;confidence:number}>{
+  const used=new Set<string>(),out:Array<{column:string;field:string;confidence:number}>=[];
+  for(const header of headers){
+    const key=normalizeImportHeader(header);if(!key)continue;
+    let best:null|{field:string;confidence:number}=null;
+    for(const def of IMPORT_FIELDS){
+      for(const label of def.labels){
+        const norm=normalizeImportHeader(label);
+        if(key===norm){best={field:def.field,confidence:1};break}
+        if(key.includes(norm)&&norm.length>=3&&(!best||best.confidence<0.9)){best={field:def.field,confidence:0.85};break}
+        if(norm.includes(key)&&key.length>=3&&(!best||best.confidence<0.75)){best={field:def.field,confidence:0.7};break}
+      }
+      if(best?.confidence===1)break;
+    }
+    if(best&&!used.has(best.field)){used.add(best.field);out.push({column:header,field:best.field,confidence:best.confidence})}
+  }
+  return out;
+}
+function applyImportMapping(row:Record<string,any>,mapping:Record<string,string>):Record<string,any>{
+  const out:Record<string,any>={};
+  for(const[column,field]of Object.entries(mapping||{})){if(column in row)out[field]=row[column]}
+  for(const[key,value]of Object.entries(row)){out[key]??=value}
+  return out;
+}
+type ImportOptions={mapping:Record<string,string>;skipMissingTitle:boolean;skipMissingPrice:boolean;priceUnit:'toman'|'rial'|'multiply10'|'none';defaultStock:number;dedupe:'none'|'first'|'last'};
+function parseImportOptions(raw:unknown):ImportOptions{
+  const o=typeof raw==='string'?jsonValue<Record<string,any>>(raw,{}):(raw&&typeof raw==='object'?raw:{}) as Record<string,any>;
+  const mapping:Record<string,string>={};
+  if(o.mapping&&typeof o.mapping==='object')for(const[col,field]of Object.entries(o.mapping as Record<string,any>)){const f=String(field||'').trim();if(f)mapping[String(col)]=f}
+  const unit=String(o.priceUnit||'none'),dedupe=String(o.dedupe||'none');return{mapping,skipMissingTitle:o.skipMissingTitle!==false,skipMissingPrice:Boolean(o.skipMissingPrice),priceUnit:['toman','rial','multiply10','none'].includes(unit)?unit as ImportOptions['priceUnit']:'none',defaultStock:Math.max(0,Math.trunc(Number(o.defaultStock)||0)),dedupe:['none','first','last'].includes(dedupe)?dedupe as ImportOptions['dedupe']:'none'};
+}
+function normalizeImportPrice(raw:string,opts:Pick<ImportOptions,'priceUnit'>):number|null{
+  const text=String(raw??'').trim();if(!text)return 0;
+  let digits=text.replace(/[۰-۹٠-٩]/g,ch=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(ch)>=0?String('۰۱۲۳۴۵۶۷۸۹'.indexOf(ch)):String('٠١٢٣٤٥٦٧٨٩'.indexOf(ch)));
+  digits=digits.replace(/[^\d.,-]/g,'').replace(/\./g,'').replace(/^,+/,'').replace(/,+/g,'');
+  const number=Number(digits);if(!Number.isFinite(number))return null;
+  if(opts.priceUnit==='rial')return Math.round(number/10);
+  if(opts.priceUnit==='multiply10')return Math.round(number*10);
+  return Math.round(number);
+}
+function detectPriceUnit(samples:Array<Record<string,any>>):'rial'|'toman'|null{
+  const values:number[]=[];for(const row of samples){const n=normalizeImportPrice(String(row.price??row.قیمت??''),{priceUnit:'none'});if(n&&n>0)values.push(n)}
+  if(!values.length)return null;
+  const avg=values.reduce((a,b)=>a+b,0)/values.length;
+  return avg>=10000&&values.every(v=>v%10===0)?'rial':'toman';
+}
+async function getImportHistory():Promise<any[]>{const items=await getState<any[]>('import_history',[]);return Array.isArray(items)?items.slice(-60):[]}
+async function pushImportHistory(entry:any):Promise<void>{const items=await getImportHistory();items.push(entry);await setState('import_history',items.slice(-60))}
 function validWooImportStatus(value:unknown):Product['destinationStatus']|''{const status=String(value||'');return status==='draft'||status==='publish'||status==='pending'||status==='private'?status:''}
 function recordsFromSheet(table:unknown[][]):Record<string,any>[]{const rows=table.filter(row=>row.some(cell=>cell!==null&&cell!==undefined&&String(cell).trim()!=='')),headers=(rows.shift()||[]).map(String);return rows.map(values=>Object.fromEntries(headers.map((header,index)=>[header,values[index]??''])))}
 function normalizeImportRecord(row:Record<string,any>):Record<string,any>{const aliases:Record<string,string>={title:'title',name:'title','نام':'title','ناممحصول':'title','عنوان':'title','عنوانمحصول':'title',price:'price','قیمت':'price','قیمتفروش':'price',url:'url',link:'url','لینک':'url','آدرس':'url','آدرسصفحه':'url',image:'image','تصویر':'image','عکس':'image',sku:'sku','کدمحصول':'sku','شناسهکالا':'sku',sourcekey:'sourceKey',key:'sourceKey','شناسه':'sourceKey',brand:'brand','برند':'brand',stock:'stock','موجودی':'stock',weight:'weight','وزن':'weight',category:'category','دستهبندی':'category',shortdesc:'shortDesc','توضیحکوتاه':'shortDesc',longdesc:'longDesc',description:'longDesc','توضیحات':'longDesc'};const out:Record<string,any>={};for(const[key,value]of Object.entries(row)){const normalized=key.trim().toLowerCase().replace(/[\s_\-‌]+/g,'').replace(/[يى]/g,'ی').replace(/ك/g,'ک'),target=aliases[normalized]||key;out[target]=value}return out}

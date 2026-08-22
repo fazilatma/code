@@ -208,8 +208,8 @@ test('workflow panes match the reference hierarchy and every new control is oper
   for(const id of ['titleSuffix','priceMode','priceValue','roundPrice','minPrice','wooCategoryId','basalamCategoryId','basalamFallbackCategoryIds','enabled','networkIndirect','noExtract','syncWoo','syncBasalam'])assert.equal((source.match(new RegExp(`id="${id}"`,'g'))||[]).length,1,`${id} moved to settings without duplication`);
   const settings=source.slice(source.indexOf('<section id="pane-settings"'),source.indexOf('<nav class="main-tabs"'));assert.match(settings,/مدیریت قیمت/);assert.match(settings,/دسته‌بندی جداگانه برای هر مقصد/);assert.match(settings,/settings-help/);
   const destination=source.slice(source.indexOf('<section id="pane-destination"'),source.indexOf('<section id="pane-jobs"'));assert.match(destination,/ارسال سریع محصولات/);assert.match(destination,/مدیریت جامع مقصد/);
-  const jobs=source.slice(source.indexOf('<section id="pane-jobs"'),source.indexOf('<section id="pane-settings"'));assert.match(jobs,/آپلود فایل CSV یا Excel/);assert.match(jobs,/file-picker/);
-  assert.match(source,/createJob\(\$\('sendProfile'\)\.value,'sync','woo',false\)/);assert.match(source,/createJob\(\$\('sendProfile'\)\.value,'sync','basalam',false\)/);assert.match(source,/importCsv\(\$\('importFile'\)\.files\[0\]/);assert.match(source,/saveProfile\(false,true\)/);
+  const jobs=source.slice(source.indexOf('<section id="pane-jobs"'),source.indexOf('<section id="pane-settings"'));assert.match(jobs,/درون‌ریزی هوشمند از فایل/);assert.match(jobs,/importDropZone/);assert.match(jobs,/importMappingCard/);assert.match(jobs,/importHistoryList/);
+  assert.match(source,/createJob\(\$\('sendProfile'\)\.value,'sync','woo',false\)/);assert.match(source,/createJob\(\$\('sendProfile'\)\.value,'sync','basalam',false\)/);assert.match(source,/analyzeImport\(\)\.catch/);assert.match(source,/executeImport\(\)\.catch/);assert.match(source,/saveProfile\(false,true\)/);
   const appSource=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');assert.match(appSource,/read-excel-file\/web-worker/);assert.match(appSource,/destinationStatus:wooStatus\|\|undefined/);
 });
 
