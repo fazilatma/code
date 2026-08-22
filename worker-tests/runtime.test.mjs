@@ -76,7 +76,7 @@ test('Cloudflare resources are automatically provisioned during deploy',async()=
   assert.match(config,/queue\s*=\s*"scraper4-cloudflare-jobs"/);
   assert.match(config,/dead_letter_queue\s*=\s*"scraper4-cloudflare-jobs-dlq"/);
   assert.match(config,/crons\s*=\s*\[\s*"\* \* \* \* \*"\s*\]/);
-  assert.match(config,/WORKER_VERSION\s*=\s*"1.19.4"/);
+  assert.match(config,/WORKER_VERSION\s*=\s*"1.20.0"/);
   assert.equal(packageJson.scripts['worker:deploy'],'node scripts/deploy-cloudflare.mjs');
   assert.match(deployScript,/R2-free mode[\s\S]*deploy[\s\S]*experimental-provision[\s\S]*d1[\s\S]*migrations[\s\S]*apply[\s\S]*DB[\s\S]*remote/);
   assert.doesNotMatch(deployScript,/10042|enable R2/i);

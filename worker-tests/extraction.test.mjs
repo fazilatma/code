@@ -213,6 +213,20 @@ test('workflow panes match the reference hierarchy and every new control is oper
   const appSource=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');assert.match(appSource,/read-excel-file\/web-worker/);assert.match(appSource,/destinationStatus:wooStatus\|\|undefined/);
 });
 
+test('import preview header mapping selects + row detail modal + Workers AI catalog UI are wired',async()=>{
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),app=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8'),catalog=await readFile(new URL('../worker-src/workers-ai-catalog.ts',import.meta.url),'utf8');
+  assert.match(source,/head-map-sel/);assert.match(source,/data-head-col/);assert.match(source,/preview-row/);assert.match(source,/openImportRowModal/);
+  assert.match(source,/workersCatalogList/);assert.match(source,/loadWorkersCatalog/);assert.match(source,/api\/ai\/workers-catalog/);
+  assert.match(app,/\/api\/ai\/workers-catalog/);
+  assert.match(catalog,/WORKERS_AI_MODELS/);assert.match(catalog,/workersAiTaskGroups/);
+  const ids=[...catalog.matchAll(/id:'(@cf[^']+)'/g)].map(m=>m[1]);
+  assert.ok(ids.length>=80,'catalog covers 80+ models');
+  assert.ok(ids.includes('@cf/meta/llama-4-scout-17b-16e-instruct'));
+  assert.ok(ids.includes('@cf/qwen/qwen3.8-27b'));
+  assert.ok(ids.includes('@cf/deepseek-ai/deepseek-v4-flash-0731'));
+  assert.ok(ids.includes('@cf/moonshotai/kimi-k2.7-code'));
+});
+
 test('AI chat tab exposes a capability-filtered model picker and chat wiring',async()=>{
   const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
   assert.match(source,/data-ai-tab="chat"/);
