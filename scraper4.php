@@ -126,7 +126,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.12';
+const APP_VERSION = '10.13';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -11775,8 +11775,16 @@ if (isset($_GET['backup_export'])) {
     // v9.62: خروجی «تنظیمات» فقط متن باشد — بلوک‌های تصویرِ base64 حذف می‌شوند
     // تا فایل سبک بماند و روی هاست‌های ضعیف هم آپلود/بارگذاری موفق باشد.
     $bundle = backupBuildBundle($cfg, true);
+    /* v10.13 (۲۶): برون‌ریزیِ گزینشی. sections می‌تواند شناسهٔ بخش یا
+       زیربخش باشد؛ خالی یعنی «همه» تا لینکِ قدیمیِ ?backup_export=1
+       دقیقاً مثل قبل کار کند. */
+    $selRaw = (string)($_GET['sections'] ?? $_POST['sections'] ?? '');
+    $sel = $selRaw === '' ? [] : explode(',', $selRaw);
+    if ($sel) $bundle = backupApplySections($bundle, $sel);
     if (empty($bundle['files'])) {
-        echo json_encode(['ok' => false, 'error' => 'هیچ فایل داده‌ای پیدا نشد — هنوز پروفایل/تنظیماتی ذخیره نشده'], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['ok' => false, 'error' => $sel
+            ? 'بخش‌های انتخاب‌شده هیچ داده‌ای روی این نصب ندارند'
+            : 'هیچ فایل داده‌ای پیدا نشد — هنوز پروفایل/تنظیماتی ذخیره نشده'], JSON_UNESCAPED_UNICODE);
         exit;
     }
     $bundle['kind'] = 'settings-export';
@@ -11784,6 +11792,40 @@ if (isset($_GET['backup_export'])) {
     header('Content-Disposition: attachment; filename="' . $name . '"');
     header('Content-Length: ' . strlen(json_encode($bundle, JSON_UNESCAPED_UNICODE)));
     echo json_encode($bundle, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+/* v10.13 (۲۶): نقشهٔ بخش‌ها/زیربخش‌ها + اینکه هرکدام روی این نصب چقدر
+   داده دارند. رابطِ کاربری همین را می‌گیرد و چک‌باکس‌ها را می‌سازد؛ هیچ
+   فهرستی در سمتِ جاوااسکریپت تکرار نمی‌شود تا از هم عقب نیفتند. */
+if (isset($_GET['backup_sections'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $out = [];
+    foreach (backupSectionMap() as $secId => $sec) {
+        $subs = [];
+        foreach ((array)($sec['subs'] ?? []) as $sid => $sub) {
+            $st = backupSubStat($sid);
+            $subs[] = ['id' => $sid, 'title' => (string)$sub['title'],
+                       'desc' => (string)($sub['desc'] ?? '')] + $st;
+        }
+        $out[] = ['id' => $secId, 'title' => (string)$sec['title'],
+                  'desc' => (string)($sec['desc'] ?? ''), 'subs' => $subs];
+    }
+    echo json_encode(['ok' => true, 'sections' => $out], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+/* v10.13 (۲۶): بستهٔ آپلودشده را می‌خواند و می‌گوید داخلش چه بخش‌هایی
+   واقعاً وجود دارد — تا کاربر پیش از جایگزینی، آگاهانه تیک بزند.
+   هیچ فایلی نوشته نمی‌شود. */
+if (($_POST['action'] ?? '') === 'backup_inspect') {
+    header('Content-Type: application/json; charset=UTF-8');
+    $bundle = null;
+    if (!empty($_FILES['file']['tmp_name'])) {
+        $bundle = json_decode((string)@file_get_contents($_FILES['file']['tmp_name']), true);
+    }
+    if (!is_array($bundle) || empty($bundle['files'])) {
+        echo json_encode(['ok' => false, 'error' => 'بستهٔ تنظیمات خوانده نشد — فایل JSON معتبر نیست'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    echo json_encode(backupInspectBundle($bundle), JSON_UNESCAPED_UNICODE);
     exit;
 }
 /* فهرست بکاپ‌های موجود روی گیت‌هاب */
@@ -11815,6 +11857,9 @@ if (($_POST['action'] ?? '') === 'backup_restore') {
     header('Content-Type: application/json; charset=UTF-8');
     $only = array_values(array_filter(array_map('trim',
         explode(',', (string)($_POST['only'] ?? '')))));
+    /* v10.13 (۲۶): انتخابِ بخش/زیربخش هنگام درون‌ریزی. خالی = همه. */
+    $secRaw = (string)($_POST['sections'] ?? '');
+    $secSel = $secRaw === '' ? [] : array_values(array_filter(array_map('trim', explode(',', $secRaw))));
     $bundle = null;
     $src = (string)($_POST['source'] ?? 'local');
     if ($src === 'upload' && !empty($_FILES['file']['tmp_name'])) {
@@ -11838,7 +11883,11 @@ if (($_POST['action'] ?? '') === 'backup_restore') {
     if (!is_array($bundle) || empty($bundle['files'])) {
         echo json_encode(['ok' => false, 'error' => 'بستهٔ بکاپ خوانده نشد'], JSON_UNESCAPED_UNICODE); exit;
     }
-    $res = backupRestoreBundle($bundle, $only);
+    $res = backupRestoreBundle($bundle, $only, $secSel);
+    if (!$res['ok'] && empty($res['restored']) && $secSel) {
+        echo json_encode(['ok' => false,
+            'error' => 'بخش‌های انتخاب‌شده در این بسته نبودند — چیزی بازیابی نشد'], JSON_UNESCAPED_UNICODE); exit;
+    }
     $res['from'] = $src;
     $res['bundle_at'] = (string)($bundle['created_at_h'] ?? '');
     backupLog(['restore' => $res['restored'] ?? [], 'from' => $src]);
@@ -12001,14 +12050,356 @@ function backupSaveCfg(array $c): bool {
 
 /** فایل‌های «داده» — همان‌هایی که .gitignore کنار می‌گذارد و از دست می‌روند */
 function backupDataFiles(): array {
+    /* v10.13 (۲۶): پنج فایلِ زیر تا حالا در بستهٔ «تنظیمات» نمی‌آمدند و
+       این یک نشتِ واقعیِ داده بود — مهم‌ترینش ai_providers.json است که
+       همهٔ ارائه‌دهنده‌ها، کلیدهای API و فهرستِ مدل‌ها را نگه می‌دارد.
+       یعنی کاربری که «همهٔ تنظیمات» را دانلود می‌کرد و روی هاستِ تازه
+       برمی‌گرداند، تمامِ پیکربندیِ هوش مصنوعی‌اش را از دست می‌داد. */
     $names = ['profiles.json','connections.json','sync_state.json',
               'extract_queue.json','bsl_queue.json','woo_queue.json',
               'category_learning.json','bsl_cat_names.json','remote_map.json',
               'autoreply_rules.json','autoreply_state.json','autoreply_log.json',
-              'digest_state.json','cron_last_run.json','last_notification_check.json'];
+              'digest_state.json','cron_last_run.json','last_notification_check.json',
+              'ai_providers.json','ai_votes.json','ai_key_state.json',
+              'category_attempts.json','auto_jobs.json'];
     $out = [];
     foreach ($names as $n) { $p = __DIR__ . '/' . $n; if (is_file($p)) $out[] = $n; }
     return $out;
+}
+
+/* =====================================================================
+ *  v10.13 (۲۶): «نقشهٔ بخش‌ها و زیربخش‌ها» برای درون‌ریزی/برون‌ریزیِ
+ *  گزینشیِ تنظیماتِ کلیِ سایت.
+ *
+ *  مسئله: تا اینجا «دانلود همهٔ تنظیمات» و «بارگذاری و بازیابی» هر دو
+ *  همه‌یا‌هیچ بودند. کاربری که فقط می‌خواست ارائه‌دهنده‌های هوش مصنوعیِ
+ *  یک نصب را به نصبِ دیگر ببرد، مجبور بود پروفایل‌ها و صف‌ها و اتصال‌های
+ *  مقصد را هم زیر آن بریزد — یعنی عملاً نمی‌توانست.
+ *
+ *  راه‌حل: هر فایلِ داده به یک «زیربخش» نسبت داده می‌شود و زیربخش‌ها
+ *  زیرِ «بخش»های معنادار (پروفایل‌ها، هوش مصنوعی، اتصال‌ها، دسته‌بندی،
+ *  صف‌ها، پاسخِ خودکار، اتوماسیون) دسته می‌شوند. هم برون‌ریزی و هم
+ *  درون‌ریزی همین شناسه‌ها را می‌گیرند.
+ *
+ *  دو زیربخشِ پروفایل‌ها ریزتر از «فایل» هستند: profiles.json هم
+ *  پیکربندیِ سایت (آدرس، سلکتورها، گزینه‌ها) و هم محصولاتِ استخراج‌شده
+ *  را در یک فایل دارد، و اینها دو چیزِ کاملاً متفاوت‌اند — یکی چند
+ *  کیلوبایت تنظیمات است و دیگری می‌تواند ده‌ها مگابایت محصول باشد.
+ *  برای همین فیلترِ «کلیدِ درونِ هر پروفایل» هم پشتیبانی می‌شود.
+ * ===================================================================== */
+function backupSectionMap(): array {
+    return [
+        'profiles' => [
+            'title' => '👤 پروفایل‌ها',
+            'desc'  => 'سایت‌های تعریف‌شده، سلکتورها و محصولاتِ استخراج‌شده',
+            'subs'  => [
+                'profiles_cfg' => [
+                    'title' => 'تنظیماتِ پروفایل‌ها',
+                    'desc'  => 'آدرس، سلکتورها، گزینه‌های استخراج و ارسال — بدون محصولات',
+                    'file'  => 'profiles.json', 'slice' => 'omit', 'keys' => ['products', 'productsOrder'],
+                ],
+                'profiles_products' => [
+                    'title' => 'محصولاتِ پروفایل‌ها',
+                    'desc'  => 'محصولاتِ استخراج‌شدهٔ هر پروفایل (حجیم‌ترین بخش)',
+                    'file'  => 'profiles.json', 'slice' => 'only', 'keys' => ['products', 'productsOrder'],
+                ],
+            ],
+        ],
+        'ai' => [
+            'title' => '🤖 هوش مصنوعی',
+            'desc'  => 'ارائه‌دهنده‌ها، کلیدهای API، مدل‌ها و پایگاه رأی',
+            'subs'  => [
+                'ai_providers' => [
+                    'title' => 'ارائه‌دهنده‌ها، کلیدها و مدل‌ها',
+                    'desc'  => 'همهٔ سرویس‌های هوش مصنوعی با کلیدهای API و فهرستِ مدل‌ها',
+                    'files' => ['ai_providers.json'],
+                ],
+                'ai_votes' => [
+                    'title' => 'مدل‌های کاندید، مدل مستر و پایگاه رأی',
+                    'desc'  => 'اینکه کدام مدل در آزمون‌ها بهتر جواب داده است',
+                    'files' => ['ai_votes.json'],
+                ],
+                'ai_keystate' => [
+                    'title' => 'وضعیتِ سلامتِ کلیدها',
+                    'desc'  => 'کدام کلید ریت‌لیمیت یا بی‌اعتبار شده — معمولاً لازم نیست منتقل شود',
+                    'files' => ['ai_key_state.json'],
+                ],
+            ],
+        ],
+        'connections' => [
+            'title' => '🔌 اتصالِ فروشگاه‌ها',
+            'desc'  => 'ووکامرس و باسلام، دفترچهٔ شناسه‌ها و وضعیتِ همگام‌سازی',
+            'subs'  => [
+                'conn_main' => [
+                    'title' => 'تنظیماتِ اتصال (ووکامرس و باسلام)',
+                    'desc'  => 'آدرس فروشگاه، کلیدها، توکن، وزن و انبار پیش‌فرض',
+                    'files' => ['connections.json'],
+                ],
+                'conn_remote_map' => [
+                    'title' => 'دفترچهٔ «محصول ↔ شناسهٔ مقصد»',
+                    'desc'  => 'بدونِ این، محصولاتِ ارسال‌شده دوباره تکراری ساخته می‌شوند',
+                    'files' => ['remote_map.json'],
+                ],
+                'conn_sync' => [
+                    'title' => 'وضعیتِ همگام‌سازی',
+                    'desc'  => 'آخرین وضعیتِ ارسال و به‌روزرسانیِ هر پروفایل',
+                    'files' => ['sync_state.json'],
+                ],
+            ],
+        ],
+        'category' => [
+            'title' => '🗂 دسته‌بندی',
+            'desc'  => 'حافظهٔ یادگیری، تلاش‌های انجام‌شده و نامِ دسته‌های باسلام',
+            'subs'  => [
+                'cat_learning' => [
+                    'title' => 'حافظهٔ یادگیریِ دسته‌بندی',
+                    'desc'  => 'نگاشتِ «کلمه ⇒ دسته» که با هر اصلاحِ موفق پر می‌شود',
+                    'files' => ['category_learning.json'],
+                ],
+                'cat_attempts' => [
+                    'title' => 'حافظهٔ دسته‌های امتحان‌شده',
+                    'desc'  => 'برای هر محصول چه دسته‌ای قبلاً امتحان و رد شده است',
+                    'files' => ['category_attempts.json'],
+                ],
+                'cat_names' => [
+                    'title' => 'کشِ نامِ دسته‌های باسلام',
+                    'desc'  => 'فقط یک کش است؛ اگر نباشد دوباره از باسلام گرفته می‌شود',
+                    'files' => ['bsl_cat_names.json'],
+                ],
+            ],
+        ],
+        'queues' => [
+            'title' => '📋 صف‌های کار',
+            'desc'  => 'کارهای در انتظارِ استخراج و ارسال',
+            'subs'  => [
+                'q_extract' => ['title' => 'صفِ استخراج',        'desc' => 'پروفایل‌های در نوبتِ استخراجِ بک‌اند', 'files' => ['extract_queue.json']],
+                'q_bsl'     => ['title' => 'صفِ ارسال به باسلام', 'desc' => 'محصولاتِ در نوبتِ ارسال به باسلام',      'files' => ['bsl_queue.json']],
+                'q_woo'     => ['title' => 'صفِ ارسال به ووکامرس','desc' => 'محصولاتِ در نوبتِ ارسال به ووکامرس',     'files' => ['woo_queue.json']],
+            ],
+        ],
+        'autoreply' => [
+            'title' => '💬 پاسخِ خودکار',
+            'desc'  => 'قواعد، وضعیت و گزارشِ پاسخ‌گوییِ خودکار به مشتری',
+            'subs'  => [
+                'ar_rules' => ['title' => 'قواعدِ پاسخِ خودکار', 'desc' => 'همان چیزی که واقعاً باید منتقل شود', 'files' => ['autoreply_rules.json']],
+                'ar_state' => ['title' => 'وضعیتِ پاسخِ خودکار', 'desc' => 'به کدام پیام قبلاً پاسخ داده شده',    'files' => ['autoreply_state.json']],
+                'ar_log'   => ['title' => 'گزارشِ پاسخِ خودکار', 'desc' => 'تاریخچه — برای انتقال معمولاً لازم نیست', 'files' => ['autoreply_log.json']],
+            ],
+        ],
+        'automation' => [
+            'title' => '⏱ اتوماسیون و کران',
+            'desc'  => 'کارهای زمان‌بندی‌شده و نشانه‌های زمانیِ اجرا',
+            'subs'  => [
+                'auto_jobs'  => ['title' => 'کارهای زمان‌بندی‌شده', 'desc' => 'تعریفِ کارهای خودکارِ ایجنتی', 'files' => ['auto_jobs.json']],
+                'auto_stamp' => [
+                    'title' => 'نشانه‌های زمانیِ اجرا',
+                    'desc'  => 'آخرین اجرای کران، آخرین بررسیِ اعلان و خلاصهٔ روزانه',
+                    'files' => ['cron_last_run.json', 'last_notification_check.json', 'digest_state.json'],
+                ],
+            ],
+        ],
+    ];
+}
+
+/** فهرستِ شناسهٔ همهٔ زیربخش‌ها، به ترتیبِ نقشه */
+function backupAllSubIds(): array {
+    $out = [];
+    foreach (backupSectionMap() as $sec) {
+        foreach ((array)($sec['subs'] ?? []) as $sid => $_) $out[] = $sid;
+    }
+    return $out;
+}
+
+/**
+ * ورودیِ کاربر می‌تواند شناسهٔ «بخش» یا «زیربخش» باشد؛ خروجی همیشه
+ * فهرستِ زیربخش‌هاست. فهرستِ خالی یعنی «همه» — تا رفتارِ نسخه‌های قبل
+ * (که اصلاً پارامتری نمی‌فرستادند) عیناً حفظ شود.
+ */
+function backupExpandSections(array $sel): array {
+    $sel = array_values(array_filter(array_map('trim', $sel), fn($v) => $v !== ''));
+    if (!$sel) return backupAllSubIds();
+    $map = backupSectionMap();
+    $out = [];
+    foreach ($sel as $id) {
+        if (isset($map[$id])) {
+            foreach ((array)($map[$id]['subs'] ?? []) as $sid => $_) $out[] = $sid;
+            continue;
+        }
+        foreach ($map as $sec) {
+            if (isset($sec['subs'][$id])) { $out[] = $id; break; }
+        }
+    }
+    return array_values(array_unique($out));
+}
+
+/** تعریفِ یک زیربخش را برمی‌گرداند (یا null) */
+function backupSubDef(string $subId): ?array {
+    foreach (backupSectionMap() as $sec) {
+        if (isset($sec['subs'][$subId])) return $sec['subs'][$subId];
+    }
+    return null;
+}
+
+/** فایل‌هایی که این مجموعه زیربخش لمس می‌کنند */
+function backupSubsFiles(array $subs): array {
+    $out = [];
+    foreach ($subs as $sid) {
+        $d = backupSubDef($sid);
+        if (!$d) continue;
+        if (!empty($d['file']))  $out[] = (string)$d['file'];
+        foreach ((array)($d['files'] ?? []) as $f) $out[] = (string)$f;
+    }
+    return array_values(array_unique($out));
+}
+
+/**
+ * برشِ profiles.json: هر پروفایل یک نگاشت است و کلیدهای products/
+ * productsOrder را یا نگه می‌داریم یا دور می‌ریزیم.
+ * $mode = 'only' (فقط همان کلیدها) یا 'omit' (همه‌چیز جز آن‌ها).
+ */
+function backupSliceEntries($data, string $mode, array $keys) {
+    if (!is_array($data)) return $data;
+    $out = [];
+    foreach ($data as $k => $entry) {
+        if (!is_array($entry)) { if ($mode === 'omit') $out[$k] = $entry; continue; }
+        $row = [];
+        foreach ($entry as $ek => $ev) {
+            $hit = in_array((string)$ek, $keys, true);
+            if (($mode === 'only' && $hit) || ($mode === 'omit' && !$hit)) $row[$ek] = $ev;
+        }
+        /* در حالتِ only، رکوردی که همهٔ مقادیرِ برش‌خورده‌اش خالی است
+           اصلاً وارد بسته نمی‌شود. اگر وارد می‌شد، بازیابی «محصولات» از
+           بسته‌ای که پروفایلش هیچ محصولی نداشت، محصولاتِ مقصد را با
+           آرایهٔ خالی پاک می‌کرد — یعنی دقیقاً برعکسِ خواستهٔ کاربر. */
+        if ($mode === 'omit') { $out[$k] = $row; continue; }
+        foreach ($row as $rv) { if ($rv !== [] && $rv !== null && $rv !== '') { $out[$k] = $row; break; } }
+    }
+    return $out;
+}
+
+/**
+ * محتوای یک فایل را بر اساسِ زیربخش‌های انتخاب‌شده فیلتر می‌کند.
+ * خروجیِ null یعنی «این فایل اصلاً انتخاب نشده».
+ */
+function backupFilterFileContent(string $file, string $content, array $subs) {
+    $whole = false; $slices = [];
+    foreach ($subs as $sid) {
+        $d = backupSubDef($sid);
+        if (!$d) continue;
+        if (in_array($file, (array)($d['files'] ?? []), true)) { $whole = true; continue; }
+        if ((string)($d['file'] ?? '') === $file) $slices[] = $d;
+    }
+    if ($whole) return $content;
+    if (!$slices) return null;
+    $data = json_decode($content, true);
+    if (!is_array($data)) return $content;   // نمی‌شناسیمش ⇒ دست‌نخورده
+    /* اگر هر دو برشِ یک فایل انتخاب شده‌اند، یعنی کلِ فایل */
+    $modes = array_map(fn($d) => (string)($d['slice'] ?? ''), $slices);
+    if (in_array('only', $modes, true) && in_array('omit', $modes, true)) return $content;
+    $d = $slices[0];
+    $sliced = backupSliceEntries($data, (string)($d['slice'] ?? 'omit'), (array)($d['keys'] ?? []));
+    return (string)json_encode($sliced, JSON_UNESCAPED_UNICODE);
+}
+
+/**
+ * بستهٔ ساخته‌شده را به بخش‌های انتخابی می‌برد: فایل‌های خارج از انتخاب
+ * حذف و فایل‌های نیمه‌انتخاب‌شده برش داده می‌شوند.
+ */
+function backupApplySections(array $bundle, array $sel): array {
+    $subs = backupExpandSections($sel);
+    $all  = backupAllSubIds();
+    sort($subs); sort($all);
+    if ($subs === $all) return $bundle;      // «همه» ⇒ دست نزن
+    $subs = backupExpandSections($sel);
+    $files = []; $bytes = 0;
+    foreach ((array)($bundle['files'] ?? []) as $name => $meta) {
+        $raw = b64dec((string)($meta['b64'] ?? ''));
+        if ($raw === false) continue;
+        $f = backupFilterFileContent((string)$name, (string)$raw, $subs);
+        if ($f === null) continue;
+        $bytes += strlen($f);
+        $files[$name] = ['size' => strlen($f), 'b64' => b64enc($f)];
+    }
+    $bundle['files'] = $files;
+    $bundle['total_files'] = count($files);
+    $bundle['total_bytes'] = $bytes;
+    $bundle['sections'] = array_values($subs);
+    return $bundle;
+}
+
+/**
+ * v10.13 (۲۶): بستهٔ آمادهٔ درون‌ریزی را می‌کاود و می‌گوید داخلش چه
+ * بخش‌هایی واقعاً هست — تا کاربر پیش از جایگزینی آگاهانه تیک بزند.
+ * هیچ فایلی نوشته نمی‌شود.
+ */
+function backupInspectBundle(array $bundle): array {
+    $have = [];
+    foreach ((array)($bundle['files'] ?? []) as $n => $m) $have[basename((string)$n)] = (int)($m['size'] ?? 0);
+    $out = [];
+    foreach (backupSectionMap() as $secId => $sec) {
+        $subs = [];
+        foreach ((array)($sec['subs'] ?? []) as $sid => $sub) {
+            $files = !empty($sub['file']) ? [(string)$sub['file']] : (array)($sub['files'] ?? []);
+            $bytes = 0; $in = false; $count = 0;
+            foreach ($files as $f) {
+                if (!isset($have[$f])) continue;
+                $in = true;
+                $raw = (string)b64dec((string)($bundle['files'][$f]['b64'] ?? ''));
+                if (!empty($sub['slice'])) {
+                    $cut = backupFilterFileContent($f, $raw, [$sid]);
+                    $raw = $cut === null ? '' : (string)$cut;
+                }
+                $bytes += strlen($raw);
+                $j = json_decode($raw, true);
+                if (is_array($j)) {
+                    if ($sid === 'profiles_products') {
+                        foreach ($j as $e) $count += is_array($e) ? count((array)($e['products'] ?? [])) : 0;
+                    } else { $count += count($j); }
+                }
+            }
+            /* برشِ خالی (بسته پروفایل دارد ولی هیچ محصولی داخلش نیست)
+               نباید «موجود» شمرده شود، وگرنه کاربر تیک می‌زند و انتظارِ
+               بازگشتِ چیزی را دارد که اصلاً در بسته نبوده. */
+            if ($in && !empty($sub['slice']) && $count === 0) $in = false;
+            $subs[] = ['id' => $sid, 'title' => (string)$sub['title'],
+                       'desc' => (string)($sub['desc'] ?? ''),
+                       'exists' => $in, 'bytes' => $bytes, 'count' => $count];
+        }
+        $out[] = ['id' => $secId, 'title' => (string)$sec['title'],
+                  'desc' => (string)($sec['desc'] ?? ''), 'subs' => $subs];
+    }
+    return ['ok' => true, 'sections' => $out,
+        'created_at_h' => (string)($bundle['created_at_h'] ?? ''),
+        'version' => (string)($bundle['version'] ?? ''),
+        'kind' => (string)($bundle['kind'] ?? ''),
+        'total_files' => count($have)];
+}
+
+/** چند رکورد داخل هر فایلِ داده هست — برای نمایش کنارِ هر زیربخش */
+function backupSubStat(string $subId): array {
+    $d = backupSubDef($subId);
+    if (!$d) return ['exists' => false, 'bytes' => 0, 'count' => 0];
+    $files = !empty($d['file']) ? [(string)$d['file']] : (array)($d['files'] ?? []);
+    $bytes = 0; $count = 0; $exists = false;
+    foreach ($files as $f) {
+        $p = __DIR__ . '/' . $f;
+        if (!is_file($p)) continue;
+        $exists = true;
+        $raw = (string)@file_get_contents($p);
+        if ($f === 'profiles.json' && !empty($d['slice'])) {
+            $raw = (string)backupFilterFileContent($f, $raw, [$subId]);
+        }
+        $bytes += strlen($raw);
+        $j = json_decode($raw, true);
+        if (is_array($j)) {
+            if ($subId === 'profiles_products') {
+                foreach ($j as $e) $count += is_array($e) ? count((array)($e['products'] ?? [])) : 0;
+            } else {
+                $count += count($j);
+            }
+        }
+    }
+    return ['exists' => $exists, 'bytes' => $bytes, 'count' => $count];
 }
 /** فایل‌های کد و مستندات همین پوشه (بدون زیرپوشه‌های سنگین و بدون رازها) */
 function backupCodeFiles(): array {
@@ -12149,21 +12540,62 @@ function backupRun(?array $cfg = null): array {
 }
 
 /** بازیابی از یک بسته */
-function backupRestoreBundle(array $bundle, array $only = []): array {
-    $done = []; $skipped = [];
+function backupRestoreBundle(array $bundle, array $only = [], array $sections = []): array {
+    /* v10.13 (۲۶): درون‌ریزیِ گزینشی.
+       $only  — فهرستِ نامِ فایل (رفتار قدیمی، دست‌نخورده)
+       $sections — شناسهٔ بخش/زیربخش. خالی یعنی همه.
+
+       نکتهٔ ظریف: وقتی فقط یکی از دو برشِ profiles.json انتخاب شده،
+       نوشتنِ فایل به‌صورت کامل یعنی نابود کردنِ برشِ دیگر. مثلاً کاربری
+       که فقط «تنظیماتِ پروفایل‌ها» را برمی‌گرداند، انتظار ندارد محصولاتِ
+       فعلی‌اش پاک شوند. برای همین برشِ انتخاب‌شده با فایلِ روی دیسک
+       ادغام می‌شود، نه جایگزینِ آن. */
+    $subs = $sections ? backupExpandSections($sections) : [];
+    $done = []; $skipped = []; $merged = [];
     foreach ((array)($bundle['files'] ?? []) as $name => $meta) {
         $safe = basename((string)$name);
         if ($safe === '' || $safe !== $name) { $skipped[] = $name; continue; }
         if ($only && !in_array($safe, $only, true)) continue;
         $data = b64dec((string)($meta['b64'] ?? ''));
         if ($data === false) { $skipped[] = $safe; continue; }
-        // نسخهٔ فعلی کنار گذاشته شود تا بازیابیِ اشتباه هم برگشت‌پذیر باشد
         $dst = __DIR__ . '/' . $safe;
+        if ($subs) {
+            $cut = backupFilterFileContent($safe, (string)$data, $subs);
+            if ($cut === null) continue;                       // این فایل انتخاب نشده
+            if ($cut !== (string)$data) {
+                // برشِ ناقص ⇒ باید با محتوای فعلی ادغام شود
+                $data = backupMergeSlice($dst, (string)$cut);
+                $merged[] = $safe;
+            } else { $data = $cut; }
+        }
+        // نسخهٔ فعلی کنار گذاشته شود تا بازیابیِ اشتباه هم برگشت‌پذیر باشد
         if (is_file($dst)) @copy($dst, $dst . '.before-restore');
         if (@file_put_contents($dst, $data, LOCK_EX) !== false) $done[] = $safe;
         else $skipped[] = $safe;
     }
-    return ['ok' => !empty($done), 'restored' => $done, 'skipped' => $skipped];
+    $res = ['ok' => !empty($done), 'restored' => $done, 'skipped' => $skipped];
+    if ($subs)   $res['sections'] = array_values($subs);
+    if ($merged) $res['merged'] = array_values(array_unique($merged));
+    return $res;
+}
+
+/**
+ * v10.13 (۲۶): برشِ تازه را روی محتوای فعلیِ فایل می‌نشاند.
+ * فقط کلیدهایی که در برش آمده‌اند عوض می‌شوند؛ بقیهٔ کلیدهای هر رکورد
+ * (و رکوردهایی که اصلاً در برش نیستند) دست‌نخورده می‌مانند.
+ */
+function backupMergeSlice(string $dstPath, string $sliceJson): string {
+    $slice = json_decode($sliceJson, true);
+    if (!is_array($slice)) return $sliceJson;
+    $cur = is_file($dstPath) ? json_decode((string)@file_get_contents($dstPath), true) : [];
+    if (!is_array($cur)) $cur = [];
+    foreach ($slice as $k => $row) {
+        if (!is_array($row) || !is_array($cur[$k] ?? null)) { $cur[$k] = $row; continue; }
+        /* array_merge کلیدهای عددی را از نو شماره‌گذاری می‌کند و رکوردِ
+           پروفایل را خراب می‌کند؛ حلقهٔ صریح امن‌تر است. */
+        foreach ($row as $ck => $cv) $cur[$k][$ck] = $cv;
+    }
+    return (string)json_encode($cur, JSON_UNESCAPED_UNICODE);
 }
 
 if (isCliRun()) {
@@ -17862,6 +18294,117 @@ if (isset($_GET['selftest'])) {
     $add('10.12', 'شمارنده‌های «رد شده» در پاسخِ پایانیِ اصلاحِ گروهی هست',
          substr_count($selfSrc, "'skip_same'") >= 1
       && substr_count($selfSrc, "'skip_tried'") >= 1);
+
+    /* ---------- v10.13 (۲۶): انتخابِ بخش/زیربخش در برون‌ریزی و درون‌ریزی ---------- */
+    $add('10.13', 'نقشهٔ بخش‌ها هفت بخش با زیربخشِ یکتا دارد',
+         (function () {
+             $m = backupSectionMap();
+             if (count($m) < 7) return false;
+             $ids = backupAllSubIds();
+             return count($ids) === count(array_unique($ids)) && count($ids) >= 17
+                 && isset($m['profiles']['subs']['profiles_cfg'], $m['profiles']['subs']['profiles_products'])
+                 && isset($m['ai']['subs']['ai_providers']);
+         })());
+    $add('10.13', 'هر فایلِ دادهٔ بکاپ در نقشهٔ بخش‌ها پوشش دارد',
+         (function () {
+             $covered = backupSubsFiles(backupAllSubIds());
+             $names = ['profiles.json','connections.json','sync_state.json','extract_queue.json',
+                       'bsl_queue.json','woo_queue.json','category_learning.json','bsl_cat_names.json',
+                       'remote_map.json','autoreply_rules.json','autoreply_state.json','autoreply_log.json',
+                       'digest_state.json','cron_last_run.json','last_notification_check.json',
+                       'ai_providers.json','ai_votes.json','ai_key_state.json',
+                       'category_attempts.json','auto_jobs.json'];
+             return array_diff($names, $covered) === [];
+         })());
+    /* v10.13: تا نسخهٔ قبل، ai_providers.json اصلاً در بستهٔ «تنظیمات» نبود
+       و کاربر با انتقالِ بسته همهٔ کلیدهای هوش مصنوعی‌اش را از دست می‌داد. */
+    $add('10.13', 'ارائه‌دهنده‌های هوش مصنوعی جزوِ فایل‌های بکاپ هستند',
+         strpos($selfSrc, "'ai_provi" . "ders.json','ai_votes.json','ai_key_state.json'") !== false);
+    $add('10.13', 'انتخابِ خالی یعنی «همه» تا رفتارِ نسخه‌های قبل نشکند',
+         backupExpandSections([]) === backupAllSubIds()
+      && backupExpandSections(['nope_zz']) === []);
+    $add('10.13', 'شناسهٔ بخش به زیربخش‌هایش باز می‌شود و تکرار حذف می‌شود',
+         (function () {
+             $a = backupExpandSections(['profiles']); sort($a);
+             $b = backupExpandSections(['profiles', 'profiles_cfg']); sort($b);
+             return $a === ['profiles_cfg', 'profiles_products'] && $a === $b
+                 && backupExpandSections(['ai_providers']) === ['ai_providers'];
+         })());
+    $add('10.13', 'برشِ پروفایل‌ها تنظیمات و محصولات را از هم جدا می‌کند',
+         (function () {
+             $j = json_encode(['a' => ['name' => 'الف', 'products' => [['t' => 1], ['t' => 2]]],
+                               'b' => ['name' => 'ب', 'products' => []]], JSON_UNESCAPED_UNICODE);
+             $cfg = json_decode((string)backupFilterFileContent('profiles.json', $j, ['profiles_cfg']), true);
+             $prd = json_decode((string)backupFilterFileContent('profiles.json', $j, ['profiles_products']), true);
+             return !isset($cfg['a']['products']) && ($cfg['a']['name'] ?? '') === 'الف' && isset($cfg['b'])
+                 && count($prd['a']['products'] ?? []) === 2 && !isset($prd['a']['name'])
+                 // پروفایلِ بی‌محصول نباید در برشِ محصولات بیاید، وگرنه
+                 // بازیابی محصولاتِ مقصد را با آرایهٔ خالی پاک می‌کند
+                 && !isset($prd['b'])
+                 && backupFilterFileContent('profiles.json', $j, ['profiles_cfg', 'profiles_products']) === $j;
+         })());
+    $add('10.13', 'فایلِ انتخاب‌نشده از بسته بیرون می‌ماند و فایلِ کامل دست‌نخورده',
+         backupFilterFileContent('ai_providers.json', '{"x":1}', ['profiles_cfg']) === null
+      && backupFilterFileContent('ai_providers.json', '{"x":1}', ['ai_providers']) === '{"x":1}'
+      && backupFilterFileContent('profiles.json', 'NOT-JSON', ['profiles_cfg']) === 'NOT-JSON');
+    $add('10.13', 'برون‌ریزیِ گزینشی فقط فایل‌های همان بخش را نگه می‌دارد',
+         (function () {
+             $mk = fn($c) => ['size' => strlen($c), 'b64' => b64enc($c)];
+             $bundle = ['files' => ['profiles.json' => $mk('{"a":{"name":"x","products":[{"t":1}]}}'),
+                                    'ai_providers.json' => $mk('{"o":1}'),
+                                    'connections.json' => $mk('{"w":1}')]];
+             $ai = backupApplySections($bundle, ['ai']);
+             return array_keys($ai['files']) === ['ai_providers.json']
+                 && (int)$ai['total_files'] === 1 && isset($ai['sections'])
+                 && count(backupApplySections($bundle, [])['files']) === 3
+                 && count(backupApplySections($bundle, backupAllSubIds())['files']) === 3;
+         })());
+    /* v10.13: مهم‌ترین ضمانتِ این نسخه — بازیابیِ «تنظیماتِ پروفایل‌ها»
+       نباید محصولاتِ موجود روی مقصد را نابود کند. */
+    $add('10.13', 'ادغامِ برش، کلیدهای دست‌نخوردهٔ مقصد را حفظ می‌کند',
+         (function () {
+             $tmp = sys_get_temp_dir() . '/st_bkmerge_' . getmypid() . '.json';
+             @file_put_contents($tmp, json_encode(
+                 ['a' => ['name' => 'قدیمی', 'products' => [['t' => 9]]], 'z' => ['name' => 'زد']],
+                 JSON_UNESCAPED_UNICODE));
+             $m = json_decode(backupMergeSlice($tmp, json_encode(
+                 ['a' => ['name' => 'تازه']], JSON_UNESCAPED_UNICODE)), true);
+             @unlink($tmp);
+             return ($m['a']['name'] ?? '') === 'تازه'
+                 && count($m['a']['products'] ?? []) === 1
+                 && isset($m['z']);
+         })());
+    $add('10.13', 'کاوشِ بسته می‌گوید داخلش چه بخش‌هایی هست',
+         (function () {
+             $mk = fn($c) => ['size' => strlen($c), 'b64' => b64enc($c)];
+             $r = backupInspectBundle(['files' => ['ai_providers.json' => $mk('{"o":{"k":1}}')]]);
+             $in = [];
+             foreach ($r['sections'] as $s) foreach ($s['subs'] as $x) if ($x['exists']) $in[] = $x['id'];
+             return !empty($r['ok']) && $in === ['ai_providers'] && (int)$r['total_files'] === 1;
+         })());
+    $add('10.13', 'بستهٔ بدونِ محصول، زیربخشِ محصولات را «موجود» اعلام نمی‌کند',
+         (function () {
+             $c  = '{"a":{"name":"x","url":"y"}}';
+             $r  = backupInspectBundle(['files' => ['profiles.json' => ['size' => strlen($c), 'b64' => b64enc($c)]]]);
+             $in = [];
+             foreach ($r['sections'] as $s) foreach ($s['subs'] as $x) if ($x['exists']) $in[] = $x['id'];
+             return $in === ['profiles_cfg'];
+         })());
+    $add('10.13', 'اندپوینت‌های نقشه و کاوشِ بخش‌ها هست',
+         strpos($selfSrc, "isset(\$_GET['backup_sec" . "tions'])") !== false
+      && strpos($selfSrc, "=== 'backup_ins" . "pect'") !== false);
+    $add('10.13', 'برون‌ریزی و درون‌ریزی هر دو پارامترِ sections را می‌خوانند',
+         strpos($selfSrc, "\$bundle = backupApplySections(\$bundle, \$sel)") !== false
+      && strpos($selfSrc, "backupRestoreBundle(\$bundle, \$only, \$secSel)") !== false);
+    $add('10.13', 'رابطِ انتخابِ بخش در HTML و جاوااسکریپت هست',
+         strpos($selfSrc, 'id="sxPicker"') !== false
+      && strpos($selfSrc, 'id="sxSecList"') !== false
+      && strpos($selfSrc, 'function sxTogglePicker') !== false
+      && strpos($selfSrc, 'function sxInspectFile') !== false
+      && strpos($selfSrc, 'onchange="sxInspectFile()"') !== false);
+    $add('10.13', 'هر سه دکمهٔ بازیابی از همان انتخابِ مشترک استفاده می‌کنند',
+         substr_count($selfSrc, 'bkSecAppend(fd)') >= 2
+      && strpos($selfSrc, "if(sel)fd.append('sections',sel)") !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -30341,14 +30884,31 @@ html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-
 را در یک فایل <code style="direction:ltr">settings_*.json</code> دانلود کنید و بعد از نوسازیِ هاست/سرور/PaaS
 با همین یک فایل دوباره بارگذاری کنید. <b style="color:#fbbf24">این فایل حاوی کلیدها و داده‌های شماست؛ آن را امن نگه دارید.</b>
 </div>
+<!-- v10.13 (۲۶): انتخابگرِ بخش/زیربخش، مشترک بین برون‌ریزی و درون‌ریزی -->
+<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+<button class="btn btn-teal" onclick="sxTogglePicker()" id="sxPickBtn" style="flex:1;font-size:11px">🧩 انتخابِ بخش‌ها — همهٔ بخش‌ها</button>
+</div>
+<div id="sxPicker" class="hidden" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px 10px;margin-bottom:10px">
+<div style="font-size:10px;color:#94a3b8;line-height:1.7;margin-bottom:8px">
+تیکِ هر بخش را بردارید تا نه در فایلِ دانلودی بیاید و نه هنگام بازیابی نوشته شود.
+<b style="color:#5eead4">هر بخشی که تیک نخورَد، دست‌نخورده باقی می‌ماند.</b>
+</div>
+<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+<button class="btn btn-gray" onclick="sxPickAll(true)" style="font-size:10px;padding:4px 10px">✔ همه</button>
+<button class="btn btn-gray" onclick="sxPickAll(false)" style="font-size:10px;padding:4px 10px">✖ هیچ‌کدام</button>
+<button class="btn btn-gray" onclick="sxPickOnlyPresent()" style="font-size:10px;padding:4px 10px" id="sxPickPresent">📦 فقط آنچه داده دارد</button>
+</div>
+<div id="sxSecList" style="font-size:11px">در حال بارگذاری…</div>
+</div>
 <div class="cact" style="margin-top:0">
-<button class="btn btn-green" onclick="sxDownloadAll()" style="flex:1">⬇ دانلود همهٔ تنظیمات و پروفایل‌ها</button>
+<button class="btn btn-green" onclick="sxDownloadAll()" style="flex:1">⬇ دانلود تنظیمات و پروفایل‌ها</button>
 </div>
 <div style="display:flex;gap:6px;align-items:center;margin-top:8px">
-<input type="file" id="sxFile" accept=".json" style="flex:1;font-size:10px">
+<input type="file" id="sxFile" accept=".json" style="flex:1;font-size:10px" onchange="sxInspectFile()">
 <button class="btn btn-orange" onclick="sxRestoreAll()" style="flex:0 0 auto;font-size:11px">♻️ بارگذاری و بازیابی</button>
 </div>
 <div style="font-size:10px;color:#64748b;margin-top:6px;line-height:1.7">
+پس از انتخابِ فایل، فهرستِ بالا به «آنچه واقعاً داخلِ همان فایل هست» به‌روز می‌شود تا آگاهانه تیک بزنید.
 بازیابی فایلِ فعلی را جایگزین می‌کند؛ از هر فایلِ عوض‌شده یک کپی <code style="direction:ltr">.before-restore</code> کنارش می‌ماند.
 بعد از بازیابی، صفحه را رفرش کنید.
 </div>
@@ -30508,6 +31068,10 @@ html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-
     <div style="font-size:10.5px;color:#fbbf24;line-height:1.7;margin-bottom:8px">
       ⚠️ بازیابی، فایل‌های فعلی را جایگزین می‌کند. از هر فایلی که عوض شود یک کپی با پسوند
       <code style="direction:ltr">.before-restore</code> کنارش می‌ماند.
+    </div>
+    <!-- v10.13 (۲۶): همان انتخابگرِ بخشِ بالای منو، اینجا هم اعمال می‌شود -->
+    <div id="bkSecNote" style="font-size:10px;color:#5eead4;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px 8px;margin-bottom:8px;line-height:1.7">
+      🧩 اگر در بخشِ «💾 ذخیره و بازیابی همهٔ تنظیمات» بخش‌هایی را انتخاب کرده باشید، بازیابیِ زیر هم فقط همان بخش‌ها را برمی‌گرداند.
     </div>
     <div class="cact" style="margin-bottom:8px">
       <button class="btn btn-gray" onclick="bkRefresh()" style="flex:1;font-size:11px">🔄 فهرست محلی</button>
@@ -35968,6 +36532,39 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.13', t:'🧩 انتخابِ بخش‌ها هنگام دانلود و بازیابیِ تنظیمات', items:[
+    '🧩 <b>دیگر «همه یا هیچ» نیست.</b> بالای «💾 ذخیره و بازیابی همهٔ تنظیمات»',
+    '   یک دکمهٔ <b>«انتخابِ بخش‌ها»</b> آمده که ۷ بخش و ۱۹ زیربخش را با چک‌باکس',
+    '   نشان می‌دهد: پروفایل‌ها، هوش مصنوعی، اتصالِ فروشگاه‌ها، دسته‌بندی،',
+    '   صف‌های کار، پاسخِ خودکار و اتوماسیون. هرچه تیک بزنید، هم در فایلِ',
+    '   دانلودی می‌آید و هم هنگام بازیابی نوشته می‌شود.',
+    '',
+    '✂️ <b>پروفایل‌ها به دو زیربخش شکسته شد:</b> «تنظیماتِ پروفایل‌ها» (آدرس،',
+    '   سلکتورها، گزینه‌ها) و «محصولاتِ پروفایل‌ها». حالا می‌توانید فقط تنظیمات',
+    '   را به یک نصبِ دیگر ببرید بدونِ حملِ ده‌ها مگابایت محصول — یا برعکس.',
+    '',
+    '🛡 <b>بازیابیِ یک زیربخش، بقیهٔ فایل را نابود نمی‌کند.</b> اگر فقط «تنظیماتِ',
+    '   پروفایل‌ها» را برگردانید، محصولاتِ موجود روی همان نصب سرِ جایشان',
+    '   می‌مانند؛ برش با فایلِ فعلی <b>ادغام</b> می‌شود، نه جایگزینِ آن.',
+    '   هر بخشی که تیک نخورَد اصلاً لمس نمی‌شود.',
+    '',
+    '🔑 <b>باگِ مهم: ارائه‌دهنده‌های هوش مصنوعی اصلاً بکاپ نمی‌شدند.</b> فایلِ',
+    '   <code>ai_providers.json</code> — با همهٔ کلیدهای API و مدل‌ها — در بستهٔ',
+    '   «تنظیمات» نبود، یعنی هرکس روی هاستِ تازه بازیابی می‌کرد کلِ پیکربندیِ',
+    '   هوش مصنوعی‌اش را از دست می‌داد. حالا به‌همراه <code>ai_votes.json</code>،',
+    '   <code>ai_key_state.json</code>، <code>category_attempts.json</code> و',
+    '   <code>auto_jobs.json</code> به بکاپ اضافه شد.',
+    '',
+    '🔍 <b>فایلِ انتخابی پیش از بازیابی کاویده می‌شود.</b> به‌محضِ انتخابِ فایل،',
+    '   فهرستِ بخش‌ها به «آنچه واقعاً داخلِ همان فایل هست» به‌روز می‌شود؛ تعدادِ',
+    '   رکورد و حجمِ هر بخش نمایش داده می‌شود و بخش‌هایی که در فایل نیستند',
+    '   خاکستری می‌شوند. متنِ تأیید هم به‌جای «همه‌چیز»، نامِ دقیقِ بخش‌ها را',
+    '   فهرست می‌کند.',
+    '',
+    '♻️ <b>هر سه دکمهٔ بازیابی</b> (بکاپِ محلی، بکاپِ گیت‌هاب و بارگذاریِ فایل)',
+    '   از همین یک انتخابِ مشترک پیروی می‌کنند. اگر هیچ بخشی را دست نزنید،',
+    '   رفتار دقیقاً مثل نسخه‌های قبل است: همه‌چیز.',
+  ]},
   {v:'10.12', t:'🧠 دسته‌بندیِ هوشمند: نه دستهٔ تکراری، نه تلاشِ تکراری، و رأی‌گیریِ چندمدلی', items:[
     '🚫 <b>دستهٔ فعلیِ محصول دیگر پیشنهاد نمی‌شود.</b> تا حالا مدل بارها همان',
     '   دسته‌ای را برمی‌گرداند که باسلام همین الان ردش کرده بود و اصلاح بی‌نتیجه',
@@ -39725,12 +40322,25 @@ function bkRemoteList(){
         bkSet('✅ '+toFa((d.items||[]).length)+' بکاپ روی گیت‌هاب','#4ade80');
     }).catch(()=>bkSet('❌ خطای شبکه','#f87171'));
 }
+/* v10.13 (۲۶): متنِ «چه چیزی بازیابی می‌شود» برای تأییدِ بازیابی؛
+   از همان انتخابگرِ مشترکِ بالای منوی تنظیمات خوانده می‌شود. */
+function bkSecSuffix(){
+    if(typeof sxSel!=='function')return '';
+    const sel=(typeof SX_SECS!=='undefined'&&SX_SECS.length)?sxSel():'';
+    return sel?('\n\nفقط بخش‌های انتخاب‌شده در «💾 ذخیره و بازیابی همهٔ تنظیمات» ('+toFa(sxSecCount())+' بخش) برگردانده می‌شوند.'):'';
+}
+function bkSecAppend(fd){
+    if(typeof sxSel!=='function')return;
+    const sel=(typeof SX_SECS!=='undefined'&&SX_SECS.length)?sxSel():'';
+    if(sel)fd.append('sections',sel);
+}
 function bkRestore(src,name){
-    if(!confirm('بازیابی از «'+name+'»؟\nفایل‌های فعلی جایگزین می‌شوند (یک کپی .before-restore کنارشان می‌ماند).'))return;
+    if(!confirm('بازیابی از «'+name+'»؟\nفایل‌های فعلی جایگزین می‌شوند (یک کپی .before-restore کنارشان می‌ماند).'+bkSecSuffix()))return;
     const fd=new FormData();
     fd.append('action','backup_restore');
     fd.append('source',src);
     fd.append('name',name);
+    bkSecAppend(fd);
     bkSet('⏳ در حال بازیابی...','#67e8f9');
     fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
         if(!d||!d.ok){bkSet('❌ '+esc((d&&d.error)||'بازیابی نشد'),'#f87171');return;}
@@ -39742,11 +40352,12 @@ function bkRestore(src,name){
 function bkRestoreUpload(){
     const f=($('bkFile')||{}).files;
     if(!f||!f.length){showToast('اول فایل را انتخاب کنید',1);return;}
-    if(!confirm('بازیابی از فایل انتخاب‌شده؟'))return;
+    if(!confirm('بازیابی از فایل انتخاب‌شده؟'+bkSecSuffix()))return;
     const fd=new FormData();
     fd.append('action','backup_restore');
     fd.append('source','upload');
     fd.append('file',f[0]);
+    bkSecAppend(fd);
     bkSet('⏳ در حال بازیابی...','#67e8f9');
     fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
         if(!d||!d.ok){bkSet('❌ '+esc((d&&d.error)||'بازیابی نشد'),'#f87171');return;}
@@ -39755,10 +40366,118 @@ function bkRestoreUpload(){
     }).catch(()=>bkSet('❌ خطای شبکه','#f87171'));
 }
 
-/* v9.59: «دانلود همهٔ تنظیمات و پروفایل‌ها» از بالای منوی تنظیمات */
+/* =====================================================================
+ * v10.13 (۲۶): انتخابگرِ بخش/زیربخش.
+ * یک وضعیتِ مشترک برای هر دو جهت: چیزی که تیک دارد هم دانلود می‌شود و
+ * هم بازیابی. فهرستِ بخش‌ها از سرور می‌آید (?backup_sections=1) تا هیچ
+ * نامِ فایلی در جاوااسکریپت تکرار نشود و از PHP عقب نیفتد.
+ * ===================================================================== */
+let SX_SECS=[], SX_ON={}, SX_MODE='local';   // local = دادهٔ همین نصب، bundle = فایلِ آپلودشده
+function sxSecCount(){let n=0;for(const k in SX_ON)if(SX_ON[k])n++;return n;}
+function sxSecTotal(){let n=0;SX_SECS.forEach(s=>n+=(s.subs||[]).length);return n;}
+/** فهرستِ زیربخش‌های تیک‌خورده؛ اگر همه تیک باشند رشتهٔ خالی (= رفتارِ قدیمی) */
+function sxSel(){
+    const on=[];SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{if(SX_ON[x.id])on.push(x.id);}));
+    return on.length===sxSecTotal()?'':on.join(',');
+}
+function sxPickBtnSync(){
+    const b=$('sxPickBtn');if(!b)return;
+    const n=sxSecCount(),t=sxSecTotal();
+    b.textContent='🧩 انتخابِ بخش‌ها — '+(t===0?'…':(n===t?'همهٔ بخش‌ها':(n===0?'هیچ بخشی انتخاب نشده':toFa(n)+' از '+toFa(t)+' بخش')));
+    b.className='btn '+(n===0?'btn-red':(n===t?'btn-teal':'btn-yellow'));
+}
+function sxTogglePicker(){
+    const p=$('sxPicker');if(!p)return;
+    p.classList.toggle('hidden');
+    if(!p.classList.contains('hidden')&&!SX_SECS.length)sxLoadSections();
+}
+function sxLoadSections(){
+    fetch('?backup_sections=1').then(r=>r.json()).then(d=>{
+        if(!d||!d.ok)return;
+        SX_SECS=d.sections||[];SX_MODE='local';
+        SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{if(SX_ON[x.id]===undefined)SX_ON[x.id]=true;}));
+        sxRenderSections();
+    }).catch(()=>{const e=$('sxSecList');if(e)e.textContent='فهرست بخش‌ها بارگذاری نشد';});
+}
+function sxHuman(b){
+    b=+b||0;
+    if(b<1024)return toFa(b)+' بایت';
+    if(b<1048576)return toFa(Math.round(b/1024))+' کیلوبایت';
+    return toFa((b/1048576).toFixed(1))+' مگابایت';
+}
+function sxRenderSections(){
+    const box=$('sxSecList');if(!box)return;
+    if(!SX_SECS.length){box.textContent='بخشی پیدا نشد';return;}
+    const srcNote=SX_MODE==='bundle'
+        ?'<div style="font-size:10px;color:#fbbf24;margin-bottom:8px;line-height:1.7">📄 اعداد زیر از <b>فایلِ انتخاب‌شده</b> است، نه از این نصب. بخش‌هایی که داخلِ فایل نیستند غیرفعال شده‌اند.</div>'
+        :'<div style="font-size:10px;color:#64748b;margin-bottom:8px;line-height:1.7">📊 اعداد زیر دادهٔ <b>همین نصب</b> است.</div>';
+    box.innerHTML=srcNote+SX_SECS.map(sec=>{
+        const subs=sec.subs||[];
+        const on=subs.filter(x=>SX_ON[x.id]).length;
+        const rows=subs.map(x=>{
+            const dis=(SX_MODE==='bundle'&&!x.exists);
+            const meta=x.exists
+                ?('<span style="color:#4ade80">'+toFa(x.count)+' مورد · '+sxHuman(x.bytes)+'</span>')
+                :'<span style="color:#64748b">'+(SX_MODE==='bundle'?'در این فایل نیست':'خالی')+'</span>';
+            return '<label style="display:flex;gap:6px;align-items:flex-start;padding:5px 6px;border-radius:6px;'
+                +(dis?'opacity:.45;':'cursor:pointer;')+'">'
+                +'<input type="checkbox" data-sxsub="'+esc(x.id)+'" '+(SX_ON[x.id]&&!dis?'checked':'')+(dis?' disabled':'')
+                +' onchange="sxToggleSub(this)" style="margin-top:2px">'
+                +'<span style="flex:1"><span style="color:#e2e8f0">'+esc(x.title)+'</span> '+meta
+                +'<br><span style="font-size:9.5px;color:#64748b">'+esc(x.desc||'')+'</span></span></label>';
+        }).join('');
+        return '<div style="border:1px solid #334155;border-radius:8px;padding:6px 8px;margin-bottom:6px;background:#111827">'
+            +'<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">'
+            +'<input type="checkbox" data-sxsec="'+esc(sec.id)+'" '+(on===subs.length?'checked':'')
+            +' onchange="sxToggleSec(this)">'
+            +'<b style="color:#5eead4;font-size:11.5px">'+esc(sec.title)+'</b>'
+            +'<span style="font-size:9.5px;color:#64748b">'+esc(sec.desc||'')+'</span></div>'
+            +rows+'</div>';
+    }).join('');
+    sxPickBtnSync();
+}
+function sxToggleSub(el){SX_ON[el.getAttribute('data-sxsub')]=el.checked;sxRenderSections();}
+function sxToggleSec(el){
+    const id=el.getAttribute('data-sxsec'),v=el.checked;
+    const sec=SX_SECS.find(s=>s.id===id);if(!sec)return;
+    (sec.subs||[]).forEach(x=>{if(!(SX_MODE==='bundle'&&!x.exists))SX_ON[x.id]=v;});
+    sxRenderSections();
+}
+function sxPickAll(v){
+    SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{if(!(SX_MODE==='bundle'&&!x.exists))SX_ON[x.id]=v;}));
+    sxRenderSections();
+}
+function sxPickOnlyPresent(){
+    SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{SX_ON[x.id]=!!x.exists;}));
+    sxRenderSections();
+}
+/* فایلی که کاربر انتخاب می‌کند را می‌کاود تا تیک‌ها با محتوای واقعیِ
+   همان بسته هم‌راستا شوند — نه با دادهٔ این نصب. */
+function sxInspectFile(){
+    const f=($('sxFile')||{}).files;
+    if(!f||!f.length){SX_MODE='local';sxLoadSections();return;}
+    const fd=new FormData();
+    fd.append('action','backup_inspect');
+    fd.append('file',f[0]);
+    sxSet('⏳ در حال خواندنِ فایل...','#67e8f9');
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){sxSet('❌ '+esc((d&&d.error)||'فایل خوانده نشد'),'#f87171');return;}
+        SX_SECS=d.sections||[];SX_MODE='bundle';
+        SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{SX_ON[x.id]=!!x.exists;}));
+        sxRenderSections();
+        const p=$('sxPicker');if(p)p.classList.remove('hidden');
+        const when=d.created_at_h?(' — ساختِ '+esc(d.created_at_h)):'';
+        sxSet('📄 فایل خوانده شد: '+toFa(sxSecCount())+' بخش داخلش هست'+when+' — تیک‌ها را بررسی کنید','#67e8f9');
+    }).catch(()=>sxSet('❌ خطای شبکه هنگام خواندنِ فایل','#f87171'));
+}
+
+/* v9.59: «دانلود همهٔ تنظیمات و پروفایل‌ها» از بالای منوی تنظیمات
+   v10.13 (۲۶): بخش‌های انتخاب‌شده به سرور فرستاده می‌شود */
 function sxDownloadAll(){
+    if(SX_SECS.length&&sxSecCount()===0){showToast('هیچ بخشی انتخاب نشده',1);return;}
+    const sel=SX_SECS.length?sxSel():'';
     sxSet('⏳ در حال بسته‌بندی داده‌ها...','#67e8f9');
-    fetch('?backup_export=1').then(r=>{
+    fetch('?backup_export=1'+(sel?'&sections='+encodeURIComponent(sel):'')).then(r=>{
         if(!r.ok)return r.json().then(d=>{throw new Error((d&&d.error)||('HTTP '+r.status));});
         const cd=r.headers.get('Content-Disposition')||'';
         const m=cd.match(/filename="?([^";]+)"?/);
@@ -39770,25 +40489,39 @@ function sxDownloadAll(){
         a.href=url;a.download=name;
         document.body.appendChild(a);a.click();
         document.body.removeChild(a);URL.revokeObjectURL(url);
-        sxSet('✅ دانلود شد: <code style="direction:ltr">'+esc(name)+'</code> — آن را امن نگه دارید','#4ade80');
+        const partial=(SX_SECS.length&&sxSecCount()<sxSecTotal())?(' ('+toFa(sxSecCount())+' بخشِ منتخب)'):'';
+        sxSet('✅ دانلود شد: <code style="direction:ltr">'+esc(name)+'</code>'+partial+' — آن را امن نگه دارید','#4ade80');
         showToast('✅ فایل تنظیمات دانلود شد');
     }).catch(e=>sxSet('❌ '+esc(e.message||'خطا'),'#f87171'));
 }
-/* v9.59: «بارگذاری و بازیابی» از بالای منوی تنظیمات */
+/* v9.59: «بارگذاری و بازیابی» از بالای منوی تنظیمات
+   v10.13 (۲۶): فقط بخش‌های تیک‌خورده نوشته می‌شوند و متنِ تأیید دقیقاً
+   می‌گوید چه چیزی جایگزین می‌شود — «همه‌چیز» یک تأییدِ ترسناک است که
+   کاربر بی‌فکر می‌زند؛ فهرستِ صریح این‌طور نیست. */
 function sxRestoreAll(){
     const f=($('sxFile')||{}).files;
     if(!f||!f.length){showToast('اول فایل تنظیمات را انتخاب کنید',1);return;}
-    if(!confirm('همهٔ تنظیمات و پروفایل‌ها از این فایل بارگذاری و جایگزین شوند؟\nاز فایل‌های فعلی یک کپی .before-restore کنارشان می‌ماند.'))return;
+    if(SX_SECS.length&&sxSecCount()===0){showToast('هیچ بخشی برای بازیابی انتخاب نشده',1);return;}
+    const sel=SX_SECS.length?sxSel():'';
+    let what='همهٔ تنظیمات و پروفایل‌ها';
+    if(sel){
+        const names=[];
+        SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{if(SX_ON[x.id])names.push('• '+x.title);}));
+        what='این بخش‌ها:\n'+names.join('\n');
+    }
+    if(!confirm(what+'\n\nاز این فایل بارگذاری و جایگزین شوند؟\nبخش‌های تیک‌نخورده دست‌نخورده می‌مانند و از هر فایلِ عوض‌شده یک کپی .before-restore کنارش می‌ماند.'))return;
     const fd=new FormData();
     fd.append('action','backup_restore');
     fd.append('source','upload');
     fd.append('file',f[0]);
+    if(sel)fd.append('sections',sel);
     sxSet('⏳ در حال بارگذاری و بازیابی...','#67e8f9');
     fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
         if(!d||!d.ok){sxSet('❌ '+esc((d&&d.error)||'بازیابی نشد'),'#f87171');return;}
-        sxSet('✅ '+toFa((d.restored||[]).length)+' فایل بارگذاری شد — صفحه را رفرش کنید','#4ade80');
+        const mg=(d.merged||[]).length?(' ('+toFa((d.merged||[]).length)+' فایل ادغام شد تا بقیهٔ داده‌ها نپرد)'):'';
+        sxSet('✅ '+toFa((d.restored||[]).length)+' فایل بارگذاری شد'+mg+' — صفحه را رفرش کنید','#4ade80');
         showToast('✅ تنظیمات بازیابی شد — صفحه را رفرش کنید');
-        setTimeout(()=>location.reload(),1200);
+        setTimeout(()=>location.reload(),1600);
     }).catch(()=>sxSet('❌ خطای شبکه','#f87171'));
 }
 function sxSet(m,color){const e=$('sxStatus');if(e)e.innerHTML=m&&color?('<span style="color:'+color+'">'+m+'</span>'):m;}
