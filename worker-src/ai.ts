@@ -15,7 +15,7 @@ export async function aiProviders():Promise<Provider[]>{return providersFromAi((
 export function isReasoningAiModel(provider:Pick<Provider,'reasoningModels'>|undefined,model:string):boolean{
   if(provider?.reasoningModels?.includes(model))return true;
   const value=String(model||'').toLowerCase();
-  return /(?:^|[\/_:.-])(?:deepseek[-_.]?r1|qwq|qwen3|gpt[-_.]?oss|gpt[-_.]?5|o[1-5](?:[-_.]|$)|reason(?:ing|er)?|thinking|think|magistral|leanstral|nemotron|reflection|bonsai|liquid)(?:[\/_:.-]|$)/i.test(value)||/cohere[^/]*reason/i.test(value);
+  return /(?:^|[\/_:.-])(?:deepseek[-_.]?(?:r1|v4)|qwq|qwen3|gpt[-_.]?oss|gpt[-_.]?5|o[1-5](?:[-_.]|$)|reason(?:ing|er)?|thinking|think|magistral|leanstral|kimi[-_.]?k2|glm[-_.]?[45]|nemotron|reflection|bonsai|liquid)(?:[\/_:.-]|$)/i.test(value)||/cohere[^/]*reason/i.test(value);
 }
 
 export async function preferredAiChatModel():Promise<{provider:Provider;model:string}|null>{
@@ -227,7 +227,7 @@ function cloudflareModelIds(raw:string):string[]{
 function canonicalAiModel(model:string){return String(model||'').trim().replace(/^~+/,'')}
 function isOpenRouter(provider:Pick<Provider,'id'|'name'|'baseUrl'>,endpoint=''){return provider.id==='openrouter'||/openrouter/i.test(String(provider.name||''))||/openrouter\.ai/i.test(String(provider.baseUrl||endpoint||''))}
 function aiRequestHeaders(provider:Provider,endpoint:string,method:'POST'|'GET'='POST'):Record<string,string>{
-  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.19.3'};
+  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.19.4'};
   if(method==='POST')headers['content-type']='application/json';
   if(isOpenRouter(provider,endpoint)){headers['http-referer']='https://scraper4.workers.dev';headers.referer='https://scraper4.workers.dev';headers['x-title']='Scraper 4'}
   return headers;

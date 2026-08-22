@@ -18,11 +18,17 @@ export type AgentOutcome={outcome:'complete'|'continue'|'ignored';delaySeconds?:
 // ─── Tool-calling models (each entry is verified to support function/tool calling) ──
 export type AgentToolModel={id:string;name:string;vendor:string;free:boolean;toolCalling:boolean;note:string};
 export const AGENT_TOOL_MODELS:AgentToolModel[]=[
-  {id:'@cf/meta/llama-3.1-8b-instruct',name:'Llama 3.1 8B Instruct',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'سبک و رایگان؛ برای اتوماسیون‌های ساده و پاسخ‌های سریع مناسب است.'},
-  {id:'@cf/qwen/qwen2.5-coder-32b-instruct',name:'Qwen2.5 Coder 32B Instruct',vendor:'Alibaba — Workers AI',free:true,toolCalling:true,note:'قدرتمند در فراخوانی ابزار و کارهای چندمرحله‌ای.'},
-  {id:'@cf/meta/llama-3.3-70b-instruct-fp8-fast',name:'Llama 3.3 70B Instruct (FP8 Fast)',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'دقت بالا برای تحلیل‌های پیچیده.'},
-  {id:'@cf/meta/llama-4-scout-17b-16e-instruct',name:'Llama 4 Scout 17B',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'نسل جدید Llama با پشتیبانی از فراخوانی ابزار.'},
-  {id:'@cf/meta/llama-4-maverick-17b-128e-instruct',name:'Llama 4 Maverick 17B',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'قوی‌ترین مدل رایگانِ این فهرست برای tool use.'},
+  // Cloudflare Workers AI — function-calling models (verified against the official
+  // Workers AI catalog, Aug 2026). All run on the free tier's daily neuron quota.
+  {id:'@cf/meta/llama-4-scout-17b-16e-instruct',name:'Llama 4 Scout 17B 16E Instruct',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'فراخوانی ابزار + vision؛ مدل پین‌شدهٔ کاتالوگ Workers AI. در سهمیهٔ رایگان روزانه در دسترس است.'},
+  {id:'@cf/meta/llama-3.3-70b-instruct-fp8-fast',name:'Llama 3.3 70B Instruct (FP8 Fast)',vendor:'Meta — Workers AI',free:true,toolCalling:true,note:'فراخوانی ابزار رسمی؛ دقت بالا برای تحلیل‌های پیچیده.'},
+  {id:'@cf/qwen/qwen3.8-27b',name:'Qwen 3.8 27B',vendor:'Alibaba — Workers AI',free:true,toolCalling:true,note:'فراخوانی ابزار + استدلال + vision؛ پنجرهٔ ۲۶۲K توکن. (جایگزین Qwen2.5-Coder)'},
+  {id:'@cf/openai/gpt-oss-120b',name:'GPT-OSS 120B',vendor:'OpenAI — Workers AI',free:true,toolCalling:true,note:'مدل متن‌باز OpenAI با فراخوانی ابزار و استدلال؛ پنجرهٔ ۱۲۸K.'},
+  {id:'@cf/deepseek-ai/deepseek-v4-flash-0731',name:'DeepSeek V4 Flash 0731',vendor:'DeepSeek — Workers AI',free:true,toolCalling:true,note:'استدلالی + فراخوانی ابزار؛ پنجرهٔ ۱M توکن.'},
+  {id:'@cf/deepseek-ai/deepseek-v4-pro-0813',name:'DeepSeek V4 Pro 0813',vendor:'DeepSeek — Workers AI',free:true,toolCalling:true,note:'نسخهٔ قوی‌تر V4 برای کارهای چندمرحله‌ای؛ پنجرهٔ ۱M توکن.'},
+  {id:'@cf/zai-org/glm-5.2',name:'GLM-5.2',vendor:'Z.ai — Workers AI',free:true,toolCalling:true,note:'مدل عامل‌محور Z.ai با فراخوانی ابزار و استدلال برای کدنویسی.'},
+  {id:'@cf/moonshotai/kimi-k2.7-code',name:'Kimi K2.7 Code',vendor:'Moonshot AI — Workers AI',free:true,toolCalling:true,note:'۱T پارامتر؛ فراخوانی ابزار چندنوبته + استدلال + vision؛ پنجرهٔ ۲۶۲K.'},
+  {id:'@cf/moonshotai/kimi-k2.6',name:'Kimi K2.6',vendor:'Moonshot AI — Workers AI',free:true,toolCalling:true,note:'نسل قبلی K2.6 با فراخوانی ابزار و استدلال.'},
   {id:'Prism-ML/Ternary-Bonsai-27B',name:'Prism Ternary Bonsai 27B',vendor:'PrismML — Together AI',free:true,toolCalling:true,note:'رایگان روی Together AI (api.together.xyz/v1)؛ مدل استدلالی با فراخوانی ابزار. برای استفاده، یک ارائه‌دهنده با Base URL «https://api.together.xyz/v1» بسازید و همین شناسه را به مدل‌هایش اضافه کنید.'},
   {id:'labs-leanstral-1-5',name:'Leanstral 1.5 (119B)',vendor:'Mistral AI (Labs — رایگان)',free:true,toolCalling:true,note:'جایگزین Leanstral 2603 (بازنشسته). رایگان روی Labs مایسترال با فراخوانی ابزار و استدلال؛ شناسهٔ API: labs-leanstral-1-5.'},
   {id:'*configured',name:'مدل‌های ارائه‌دهنده‌های تنظیم‌شده',vendor:'OpenAI-compatible (GPT، DeepSeek، Qwen و…)',free:false,toolCalling:false,note:'از مدل‌های ذخیره‌شدهٔ خودتان انتخاب کنید؛ مدل باید فراخوانی ابزار (tool calling) پشتیبانی کند.'}
