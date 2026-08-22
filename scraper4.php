@@ -126,8 +126,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.14';
-const APP_VERSION_DATE = '1405/05/31';
+const APP_VERSION = '10.15';
+const APP_VERSION_DATE = '1405/06/01';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -596,7 +596,13 @@ function extractPrevMap(array $profile): array {
  * قیمت و عنوان همیشه از اجرای تازه می‌آیند چون کار اصلی همین است.
  */
 function extractMergeDetail(array $fresh, array $prev): array {
-    // فیلدهایی که فقط از صفحهٔ محصول می‌آیند
+    /* فیلدهایی که فقط از صفحهٔ محصول می‌آیند.
+       v10.15: «price» عمداً این‌جا نیست، هرچند حالا فیلدِ جزئیات هم هست.
+       $carry یعنی «اگر اجرای تازه خالی بود، مقدارِ قبلی را نگه دار» — که
+       برای قیمت خطرناک است: محصولی که واقعاً از فهرست حذف/ناموجود شده
+       تا ابد قیمتِ کهنه‌اش را نشان می‌داد و مقایسهٔ گران/ارزان هم دروغ
+       می‌شد. محافظتِ «قیمتِ خالی چیزی را پاک نکند» جای دیگری اعمال شده:
+       داخلِ فازِ جزئیات، جایی که می‌دانیم صفحهٔ محصول باز شده است. */
     $carry = ['shortDesc', 'longDesc', 'sku', 'brand', 'weight', 'stock',
               'category', 'tags', 'variations_text'];
     foreach ($carry as $f) {
@@ -6233,6 +6239,17 @@ $xp = new DOMXPath($dom);
 libxml_clear_errors();
 
 $suggestions = [
+/* v10.15: قیمت. ترتیب مهم است: ins (قیمتِ پس از تخفیف) قبل از خودِ .price
+   می‌آید تا روی محصولِ حراج‌دار عددِ درست پیشنهاد شود نه قیمتِ خط‌خورده. */
+'price' => [
+'p.price ins .amount',
+'p.price ins',
+'.summary p.price ins .amount',
+'.summary p.price .amount',
+'p.price .amount',
+'p.price',
+'.summary .price',
+],
 'shortDesc' => [
 'div.woocommerce-product-details__short-description',
 'div.product-short-description',
@@ -6284,6 +6301,14 @@ if (!$xpath) continue;
 $nodes = @$xp->query($xpath);
 if ($nodes && $nodes->length) {
 $text = trim($nodes->item(0)->textContent);
+/* v10.15: برای قیمت، پیش‌نمایش همان عددی است که واقعاً برداشته می‌شود.
+   اگر سلکتور به گره‌ای بخورد که عددِ قابل‌فهمی ندارد، اصلاً پیشنهاد نشود —
+   وگرنه کاربر سلکتوری را می‌پذیرد که موقعِ استخراج رشتهٔ خالی می‌دهد. */
+if ($field === 'price') {
+$pv = extractPrice($text);
+if ($pv !== '') $found[$field][] = ['selector' => $sel, 'preview' => $pv];
+continue;
+}
 if ($text && mb_strlen($text) < 5000) {
 $found[$field][] = [
 'selector' => $sel,
@@ -6483,6 +6508,7 @@ var GAL=[];   // v8.66: سلکتورهای تک‌عکسِ انتخاب‌شده
    قبلاً برای عوض کردن فیلد باید تا بالای صفحه اسکرول می‌کردید، یک گزینه
    از منو برمی‌داشتید و دوباره تا محل المان پایین می‌آمدید. */
 var FIELDS=[
+  ['price','قیمت'],
   ['shortDesc','توضیح کوتاه'],['longDesc','توضیح بلند'],['sku','SKU'],
   ['category','دسته‌بندی'],['tags','برچسب‌ها'],['weight','وزن'],
   ['stock','موجودی'],['brand','برند'],['variations','تنوع‌ها'],
@@ -6730,6 +6756,13 @@ function getPreview(el, mode){
       return t?('چیزی پیدا نشد — متن ظرف: '+t.substring(0,60)):'(خالی)';
     }
     return vv.length+' گزینه ← '+vv.join(' · ');
+  }
+  /* v10.15: پیش‌نمایشِ قیمت دقیقاً از همان extractPrice می‌آید که سمتِ سرور
+     هم استفاده می‌شود، تا آنچه اینجا می‌بینید همان چیزی باشد که ذخیره می‌شود. */
+  if(mode==='price'){
+    var pt=extractPrice(el.textContent||'');
+    if(!pt)return '(قیمتی پیدا نشد — والد یا فرزند را امتحان کنید)';
+    return '💰 '+pt;
   }
   if(mode==='shortDesc'||mode==='longDesc'){
     var t=(el.textContent||'').replace(/\s+/g,' ').trim();
@@ -9539,6 +9572,16 @@ if (in_array($field, ['longDesc', 'shortDesc'])) {
 $value = trim(@$dom->saveHTML($node));
 $value = preg_replace('~\s+~', ' ', $value);
 $extracted[$field] = $value;
+} elseif ($field === 'price') {
+/* v10.15: قیمتِ صفحهٔ محصول. متنِ خام به درد نمی‌خورد چون معمولاً هم قیمتِ
+   خط‌خورده و هم قیمتِ باتخفیف و هم واحد کنار هم‌اند («۲۵۰,۰۰۰ تومان
+   ۱۹۹,۰۰۰ تومان»). extractPrice همان تابعی است که فازِ فهرست استفاده می‌کند،
+   پس عددِ اینجا با عددِ آنجا قابلِ مقایسه است و مقایسهٔ گران/ارزان نمی‌شکند. */
+$_pv = extractPrice($node->textContent);
+/* اگر سلکتور درست است ولی این محصول قیمت ندارد (ناموجود/«تماس بگیرید»)،
+   رشتهٔ خالی نفرست — سمتِ مرورگر روی p.price می‌نشیند و قیمتِ درستِ
+   فازِ فهرست را پاک می‌کند. نفرستادن یعنی «دست نزن». */
+if ($_pv !== '') $extracted[$field] = $_pv;
 } elseif ($field === 'image') {
 
 // v8.66: همان تابع مشترک گالری — نسخهٔ باکیفیت (data-zoom/data-large) را
@@ -10773,6 +10816,10 @@ $_galDone=$galleryCfg['enabled']&&count($p['images']??[])>1&&!empty($p['image'])
 // کدام فیلدِ خواسته‌شده هنوز خالی است؟
 $_fieldMissing=false;
 foreach($_wantKeys as $_wk){
+    /* v10.15: قیمت همیشه «کهنه» حساب می‌شود — همان قاعدهٔ سمتِ مرورگر در
+       startDetailExtraction. p.price از فازِ فهرست پر است، پس با سنجشِ
+       «خالی است؟» صفحهٔ هیچ محصولی برای تازه‌کردنِ قیمت باز نمی‌شد. */
+    if($_wk==='price'){$_fieldMissing=true;break;}
     if($_wk==='variations'){ if(empty($p['variations'])){$_fieldMissing=true;break;} continue; }
     $_cur=$p[$_wk]??'';
     if(is_array($_cur)?empty($_cur):(trim((string)$_cur)==='')){$_fieldMissing=true;break;}
@@ -18550,8 +18597,55 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'SX_ON[x.id]=!x.off') !== false);
     $add('10.14', 'sxSel() وقتی انتخاب = پیش‌فرض است رشتهٔ خالی می‌دهد',
          strpos($selfSrc, 'const same=on.length===def.length') !== false);
-    $add('10.14', 'نسخه به 10.14 رسید و در CHANGELOG ثبت شد',
-         APP_VERSION === '10.' . '14' && strpos($selfSrc, "{v:'10." . "14'") !== false);
+    /* v10.15: این ادعا تا اینجا APP_VERSION را با '10.14' می‌سنجید، یعنی با
+       هر بمپِ نسخه قرمز می‌شد. چیزی که واقعاً باید ماندگار بماند این است که
+       ورودیِ ۱۰.۱۴ در CHANGELOG بماند و نسخه از آن عقب‌تر نرفته باشد. */
+    $add('10.14', 'ورودیِ 10.14 در CHANGELOG ماندگار است و نسخه از آن عقب نرفته',
+         strpos($selfSrc, "{v:'10." . "14'") !== false
+      && version_compare(APP_VERSION, '10.' . '14', '>='));
+
+    /* ---------- v10.15 (۲۸): «قیمت» در فیلدهای جزئیات محصول ---------- */
+    /* توجه: هر رشتهٔ جست‌وجو عمداً تکه‌تکه نوشته شده. اگر عینِ رشته را بنویسیم،
+       خودِ همین فایل شاملش می‌شود و strpos حتی با نبودِ کدِ محصول هم سبز
+       می‌شود — تلهٔ خودارجاعی که در نسخه‌های قبل هم رعایت شده است. */
+    $add('10.15', 'price اولین عضوِ DETAIL_FIELDS است',
+         (bool)preg_match('~const DETAIL_FIELDS = \[.{0,900}?\{key:\'price\'~s', $selfSrc));
+    $add('10.15', 'گزینهٔ 💰 قیمت در فهرستِ حالتِ پیکرِ جزئیات هست',
+         strpos($selfSrc, '<option value="price">💰 ' . 'قیمت</option>') !== false);
+    $add('10.15', 'پیکرِ جزئیات پیش‌نمایشِ قیمت را از extractPrice می‌گیرد',
+         strpos($selfSrc, "if(mode===" . "'price')") !== false
+      && strpos($selfSrc, 'قیمتی پیدا ' . 'نشد') !== false);
+    /* مسیرِ SSE تنها استخراج‌کننده‌ای بود که شاخهٔ price نداشت — یعنی دکمهٔ
+       «استخراج جزئیات» قیمت را بی‌صدا رد می‌کرد. */
+    $add('10.15', 'مسیرِ SSE شاخهٔ price دارد و قیمتِ خالی را نمی‌فرستد',
+         strpos($selfSrc, '$_pv = extractPrice($node' . '->textContent);') !== false
+      && strpos($selfSrc, "if (\$_pv !== '') \$extracted" . "[\$field] = \$_pv;") !== false);
+    $add('10.15', 'سمتِ مرورگر هم قیمتِ خالی را روی قیمتِ موجود نمی‌نویسد',
+         strpos($selfSrc, "if (f.key === 'price' && !d[f.key]" . " && p[f.key]) return;") !== false);
+    /* قیمت برخلافِ بقیهٔ فیلدها هر بار باید تازه شود، وگرنه چون از فازِ فهرست
+       پر است هیچ محصولی در صف نمی‌رود. هر دو مسیر (دکمه و پس‌زمینه) یکسان. */
+    $add('10.15', 'گیتِ صفِ مرورگر قیمت را همیشه کهنه حساب می‌کند',
+         strpos($selfSrc, "f.key === 'price' ? true" . " : !p[f.key]") !== false);
+    $add('10.15', 'گیتِ فازِ جزئیاتِ پس‌زمینه هم همان قاعده را دارد',
+         strpos($selfSrc, "if(\$_wk==='price'){\$_field" . "Missing=true;break;}") !== false);
+    /* ستونِ سومِ «قیمت» کنارِ «قیمت اولیه/نهایی» نباید ساخته شود. */
+    $add('10.15', 'getDetailColumns() قیمت را از ستون‌ها کنار می‌گذارد',
+         strpos($selfSrc, 'function getDetail' . 'Columns() {') !== false
+      && strpos($selfSrc, "getEnabledDetailFields().filter(f => f.key !== " . "'price')") !== false);
+    /* هر پنج نقطهٔ نمایش/خروجی: renderRow، updateTableHeaders، genTxt، getCSV، dl */
+    $add('10.15', 'هر پنج نقطهٔ جدول/خروجی از getDetailColumns استفاده می‌کنند',
+         substr_count($selfSrc, '= getDetail' . 'Columns();') === 5);
+    $add('10.15', 'اندپوینتِ پیشنهاد برای قیمت سلکتور دارد و ins را جلوتر می‌گذارد',
+         strpos($selfSrc, "'p.price ins " . ".amount',") !== false
+      && strpos($selfSrc, "'p.price ins " . ".amount',") < strpos($selfSrc, "'p.price " . ".amount',"));
+    $add('10.15', 'پیش‌نمایشِ پیشنهادِ قیمت عددِ واقعی است نه متنِ خام',
+         strpos($selfSrc, '$pv = extractPrice($text' . ');') !== false
+      && strpos($selfSrc, "if (\$pv !== '') \$found[\$field][] = ['selector'" . " => \$sel, 'preview' => \$pv];") !== false);
+    $add('10.15', 'راهنمای فارسیِ فیلدِ قیمت به کاربر نمایش داده می‌شود',
+         strpos($selfSrc, 'قیمت (v10.' . '15):') !== false
+      && strpos($selfSrc, 'ستونِ جدیدی ' . 'نمی‌سازد') !== false);
+    $add('10.15', 'نسخه به 10.15 رسید و در CHANGELOG ثبت شد',
+         APP_VERSION === '10.' . '15' && strpos($selfSrc, "{v:'10." . "15'") !== false);
 
 /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -32900,7 +32994,12 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <div class="hint-body">
                 💡 ابتدا حداقل یک محصول را در لیست استخراج کنید، سپس با دکمه زیر صفحه نمونه آن را باز کنید و روی هر فیلد کلیک کنید.<br>
                 🖼 <b>گالری هم از همان‌جا:</b> در فهرست بالای صفحهٔ نمونه، «باکس گالری» یا «افزودن تک‌عکس» را انتخاب کنید.
-                با دکمه‌های <b>⬆ والد</b> و <b>⬇ فرزند</b> می‌توانید دقیقاً همان ظرفی را بگیرید که همهٔ عکس‌ها داخلش هستند.
+                با دکمه‌های <b>⬆ والد</b> و <b>⬇ فرزند</b> می‌توانید دقیقاً همان ظرفی را بگیرید که همهٔ عکس‌ها داخلش هستند.<br>
+                💰 <b>قیمت (v10.15):</b> اگر صفحهٔ فهرست قیمت را ناقص یا بدونِ تخفیف نشان می‌دهد، فیلدِ «قیمت» را
+                فعال کنید تا از صفحهٔ خودِ محصول برداشته شود و جای قیمتِ فهرست بنشیند.
+                برخلافِ بقیهٔ فیلدها، قیمت <b>هر بار</b> تازه می‌شود (چون مدام عوض می‌شود) و
+                <b>ستونِ جدیدی نمی‌سازد</b> — همان «قیمت اولیه/نهایی» دقیق‌تر می‌شود.
+                اگر محصولی قیمت نداشت، قیمتِ قبلی‌اش پاک نمی‌شود.
             </div>
         </details>
         <div class="row">
@@ -33033,6 +33132,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:7px">
             <label style="flex:0 0 auto;font-size:11px;color:#c4b5fd;font-weight:700">🎯 انتخاب:</label>
             <select id="pkMode" onchange="pkSetMode(this.value)" style="flex:1;min-width:170px">
+                <option value="price">💰 قیمت</option>
                 <option value="shortDesc">📝 توضیحات کوتاه</option>
                 <option value="longDesc">📄 توضیحات بلند</option>
                 <option value="sku">🏷️ SKU</option>
@@ -33416,6 +33516,14 @@ let es=null,detailEs=null,products=new Map(),order=[],pages=0,details=0,running=
 let detailWatch=null, detailLastBeat=0;
 let sel={container:'',title:'',price:'',link:'',image:''};
 const DETAIL_FIELDS = [
+    /* v10.15: قیمت از صفحهٔ خودِ محصول.
+       چرا لازم بود: تا اینجا قیمت فقط از صفحهٔ فهرست برداشته می‌شد. خیلی از
+       فروشگاه‌ها در فهرست یا قیمت نمی‌گذارند، یا بازه («از ۱۲۰٬۰۰۰») یا قیمتِ
+       پیش از تخفیف نشان می‌دهند و عددِ درست فقط داخلِ صفحهٔ محصول است.
+       هر دو استخراج‌کنندهٔ بک‌اند از قدیم شاخهٔ price داشتند (extractPrice روی
+       متنِ گره) ولی مثل image در v8.66 هیچ‌جا در رابط کاربری قابل تنظیم نبود،
+       پس عملاً مرده بود. */
+    {key:'price',     label:'قیمت',            icon:'💰'},
     {key:'shortDesc', label:'توضیحات کوتاه', icon:'📝'},
     {key:'longDesc',  label:'توضیحات بلند',   icon:'📄'},
     {key:'sku',       label:'SKU',             icon:'🏷️'},
@@ -33734,6 +33842,16 @@ function shortText(s, len=80) {
 
 function getEnabledDetailFields() {
     return DETAIL_FIELDS.filter(f => detailSel[f.key] && detailSel[f.key].enabled && detailSel[f.key].selector);
+}
+
+/* v10.15: ستون‌های جزئیات برای جدول/خروجی — بدونِ «قیمت».
+   قیمتِ جزئیات فیلدِ تازه‌ای نمی‌سازد؛ همان p.price را دقیق‌تر می‌کند و
+   جدول از قبل «قیمت اولیه/قیمت نهایی» را از همان p.price می‌سازد. اگر
+   این‌جا فیلتر نشود، کاربر یک ستونِ «قیمت» سومِ تکراری کنارِ آن دو می‌بیند
+   و در CSV/اکسل هم یک ستونِ اضافه ظاهر می‌شود. استخراج و صف‌بندی همچنان
+   از getEnabledDetailFields استفاده می‌کنند، فقط نمایش/خروجی فرق دارد. */
+function getDetailColumns() {
+    return getEnabledDetailFields().filter(f => f.key !== 'price');
 }
 
 function renderDetailFieldsList() {
@@ -34588,7 +34706,8 @@ function pkModeHint(m){
     galleryBox:'🖼 روی ظرفی کلیک کنید که همهٔ عکس‌ها داخلش هستند (نه خود عکس). با ⬆ والد بزرگ‌ترش کنید تا همهٔ عکس‌ها صورتی شوند.',
     galleryOne:'➕ روی هر عکسی که می‌خواهید کلیک کنید — چند بار. هر کدام به فهرست اضافه می‌شود.',
     variations:'🎨 روی ظرفی کلیک کنید که گزینه‌های رنگ یا سایز داخلش هستند (select، دکمه‌ها یا فهرست).',
-    image:'🌆 روی عکس اصلی محصول کلیک کنید.'
+    image:'🌆 روی عکس اصلی محصول کلیک کنید.',
+    price:'💰 روی قیمتِ نهایی محصول کلیک کنید (اگر تخفیف دارد، روی عددِ پس از تخفیف). قیمتِ صفحهٔ محصول جای قیمتِ صفحهٔ فهرست را می‌گیرد.'
   };
   const h=$('pkHint');
   if(h)h.innerHTML=(hints[m]||'روی هر بخش از صفحهٔ زیر کلیک کنید.')
@@ -35432,7 +35551,7 @@ function renderRow(p,i,k){
   let origPrice = getOriginalPrice(p.price);
   let customTd = isCustomColEnabled() ? `<td>${esc(getCustomColVal())}</td>` : '';
   let detailTds = '';
-  const enabledFields = getEnabledDetailFields();
+  const enabledFields = getDetailColumns();   // v10.15: قیمت ستونِ جدا نمی‌گیرد
   enabledFields.forEach(f => {
       const val = p[f.key] || '';
       let display = val;
@@ -35475,7 +35594,7 @@ function updateTableHeaders() {
     if(!thead) return;
     // v8.84: ستون گالری بعد از «تصویر» می‌آید — همان ترتیبی که renderRow می‌سازد
     let baseHeaders = '<th>#</th><th>عنوان</th><th>قیمت اولیه</th><th>قیمت نهایی</th><th>لینک</th><th>تصویر</th><th>🖼 گالری</th>';
-    const enabledFields = getEnabledDetailFields();
+    const enabledFields = getDetailColumns();   // v10.15: قیمت ستونِ جدا نمی‌گیرد
     enabledFields.forEach(f => {
         baseHeaders += `<th>${f.icon} ${esc(f.label)}</th>`;
     });
@@ -35552,7 +35671,7 @@ function removeBelowMinPrice() {
 function genTxt(){
   // v8.84: ستون گالری در نمای متنی هم بیاید تا با جدول یکی باشد
   let headers = '# | Title | Original | Final | URL | Image | Gallery';
-  const enabledFields = getEnabledDetailFields();
+  const enabledFields = getDetailColumns();   // v10.15: قیمت ستونِ جدا نمی‌گیرد
   enabledFields.forEach(f => headers += ` | ${f.label}`);
   if (isCustomColEnabled()) headers += ` | ${getCustomColName()}`;
   let t = headers + '\n' + '-'.repeat(140) + '\n';
@@ -36421,7 +36540,13 @@ function startDetailExtraction(){
         if (!p.link) return false;
         // با گالری روشن، محصولی که هنوز چند عکس ندارد باید بررسی شود
         if (galOn && !(p.images && p.images.length > 1)) return true;
-        return enabledFields.some(f => !p[f.key]);
+        /* v10.15: قیمت استثناست. بقیهٔ فیلدها «یک‌بار پر می‌شوند و تمام»،
+           ولی p.price تقریباً همیشه از فازِ فهرست پر است؛ با قاعدهٔ «فقط
+           خالی‌ها» هیچ محصولی صف نمی‌شد و کاربری که فقط «قیمت» را فعال
+           کرده بود پیام «همه از قبل استخراج شده‌اند» می‌گرفت. از آن‌طرف
+           قیمت همان چیزی است که مدام عوض می‌شود، پس وقتی کاربر عمداً
+           سلکتورش را داده یعنی می‌خواهد از صفحهٔ محصول تازه‌اش کند. */
+        return enabledFields.some(f => f.key === 'price' ? true : !p[f.key]);
     });
 
     if (keys.length === 0) {
@@ -36524,6 +36649,11 @@ function parseSSEEvent(ev) {
                 let added = 0;
                 DETAIL_FIELDS.forEach(f => {
                     if (d[f.key] !== undefined && d[f.key] !== null) {
+                        /* v10.15: قیمتِ خالی نباید قیمتِ موجود را پاک کند.
+                           بقیهٔ فیلدها تا حالا فقط وقتی می‌آمدند که چیزی
+                           پیدا شده بود، ولی p.price از فازِ فهرست پر است و
+                           بازنویسی‌اش با '' یعنی از دست رفتنِ داده. */
+                        if (f.key === 'price' && !d[f.key] && p[f.key]) return;
                         p[f.key] = d[f.key];
                         added++;
                     }
@@ -36607,7 +36737,7 @@ function reset(){
 
 function getCSV(){
   let headers = ['"#"', '"Title"', '"Original Price"', '"Final Price"', '"URL"', '"Image"'];
-  const enabledFields = getEnabledDetailFields();
+  const enabledFields = getDetailColumns();   // v10.15: قیمت ستونِ جدا نمی‌گیرد
   enabledFields.forEach(f => headers.push(`"${f.label}"`));
   if (isCustomColEnabled()) headers.push(`"${getCustomColName()}"`);
   let c = headers.join(',') + '\n';
@@ -36633,7 +36763,7 @@ function copyTxt(){navigator.clipboard.writeText(genTxt()).then(()=>showToast('�
 function dl(action){
     const f=document.createElement('form');
     f.method='POST';
-    const enabledFields = getEnabledDetailFields();
+    const enabledFields = getDetailColumns();   // v10.15: قیمت ستونِ جدا نمی‌گیرد
     f.innerHTML=`<input type="hidden" name="action" value="${action}">
                  <input type="hidden" name="products">
                  <input type="hidden" name="useCustom" value="${isCustomColEnabled() ? 1 : 0}">
@@ -36679,6 +36809,29 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.15', t:'💰 «قیمت» به فیلدهای جزئیات محصول اضافه شد', items:[
+    '💰 <b>چه چیزی اضافه شد.</b> تا این نسخه قیمت فقط از <b>صفحهٔ فهرست</b> خوانده می‌شد.',
+    '   خیلی از سایت‌ها در فهرست قیمتِ ناقص می‌گذارند (بدونِ تخفیف، «از … تومان»،',
+    '   یا اصلاً هیچ) و عددِ درست فقط داخلِ صفحهٔ خودِ محصول است. حالا «💰 قیمت»',
+    '   اولین فیلدِ فهرستِ «جزئیات محصول» است: سلکتورش را می‌دهید و قیمت از',
+    '   صفحهٔ محصول برداشته می‌شود.',
+    '🎯 در <b>صفحهٔ نمونه</b> هم مثل بقیهٔ فیلدها با کلیک انتخاب می‌شود و',
+    '   پیش‌نمایش، همان عددِ نهایی را نشان می‌دهد نه متنِ خام؛ پس قبل از استخراج',
+    '   می‌بینید که سلکتور واقعاً عدد می‌دهد.',
+    '💡 دکمهٔ <b>«پیشنهاد»</b> برای قیمت هم سلکتور حدس می‌زند و عمداً',
+    '   <code>ins</code> (قیمتِ بعد از تخفیف) را جلوتر از قیمتِ خط‌خورده می‌گذارد.',
+    '🔁 <b>یک تفاوتِ عمدی با بقیهٔ فیلدها:</b> توضیحات و SKU یک‌بار پر می‌شوند و تمام،',
+    '   ولی قیمت مدام عوض می‌شود. پس وقتی «قیمت» فعال است، صفحهٔ محصول',
+    '   <b>هر بار</b> باز می‌شود تا قیمت تازه شود — وگرنه چون قیمت از فهرست از قبل',
+    '   پر بود، هیچ محصولی در صف نمی‌رفت و پیامِ «همه از قبل استخراج شده‌اند»',
+    '   می‌آمد. این قاعده هم در دکمهٔ دستی و هم در اجرای خودکار یکسان است.',
+    '🛡 <b>قیمتِ خالی چیزی را پاک نمی‌کند.</b> اگر محصولی ناموجود بود یا',
+    '   «تماس بگیرید» داشت، قیمتِ قبلی‌اش دست‌نخورده می‌ماند.',
+    '📊 <b>ستونِ تکراری ساخته نمی‌شود.</b> جدول و CSV و اکسل از قبل «قیمت اولیه»',
+    '   و «قیمت نهایی» دارند؛ قیمتِ جزئیات همان‌ها را دقیق‌تر می‌کند و ستونِ',
+    '   سومی اضافه نمی‌شود. سودِ جانبی: چون خروجی از همان <code>price</code>',
+    '   می‌آید، سود/درصدها و مقایسهٔ «گران‌تر/ارزان‌تر شد» هم خودکار درست می‌مانند.',
+  ]},
   {v:'10.14', t:'⚙️ «تنظیماتِ سیستمی» هم بکاپ می‌شود (بخشِ هشتم)', items:[
     '⚙️ <b>یک شکافِ واقعی بسته شد.</b> سه فایلِ پیکربندیِ سطحِ نصب —',
     '   <code>.versioncheck.json</code> (مخزن، برنچ، توکنِ گیت‌هاب، فایلِ deploy)،',
