@@ -30,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.31.0',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.32.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -61,7 +61,7 @@ app.get('/api/activity',async c=>{
   const RUN_KIND_ORDER=['ai-test','dedup','category-all','agent'];
   const runs=[aiRun,dedupRun,catRun,agentRun].filter(Boolean).map(r=>({
     id:r.id,kind:r.kind||'run',name:r.kind==='ai-test'?'تست مدل‌های هوش مصنوعی':r.kind==='dedup'?'حذف تکراری‌های مقصد':r.kind==='category-all'?'دسته‌بندی همهٔ باسلام':'عملیات ایجنتیک',
-    status:r.status,phase:r.phase,priority:Number(runPriorities[r.kind])||0,progress:r.total?Math.round((Number(r.processed||r.cursor||0)/Number(r.total))*100):(r.steps&&r.maxSteps?Math.round(r.steps/r.maxSteps*100):0),
+    status:r.status,phase:r.phase,priority:Number(runPriorities[r.kind])||0,target:r.target,progress:r.total?Math.round((Number(r.processed||r.cursor||0)/Number(r.total))*100):(r.steps&&r.maxSteps?Math.round(r.steps/r.maxSteps*100):0),
     detail:r.kind==='dedup'?`${r.scanned||0} بررسی · ${r.removed||0} حذف`:r.kind==='category-all'?`${r.processed||0}/${r.total||0}`:r.kind==='agent'?`گام ${r.steps||0}/${r.maxSteps||0}`:`${r.messageSucceeded??r.succeeded??0} موفق`,
     updatedAt:r.updatedAt
   })).sort((a,b)=>{
@@ -81,7 +81,7 @@ app.get('/api/activity',async c=>{
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.31.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.32.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -175,6 +175,7 @@ app.post('/api/destination/basalam/category-tried',async c=>{const b=await jsonB
 app.post('/api/destination/basalam/category-runs',async c=>{const started=await startAllUnapprovedCategoryRun((promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise));return c.json({ok:true,...started},started.existing?200:202)});
 app.get('/api/destination/basalam/category-runs/current',async c=>c.json({ok:true,run:await getPublicBackgroundRun('category-all')}));
 app.post('/api/destination/basalam/category-runs/control',async c=>{const b=await jsonBody(c),action=String(b.action)==='resume'?'resume':'stop';return c.json({ok:true,run:await controlBackgroundRun('category-all',action,(promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise))})});
+app.post('/api/destination/basalam/category-runs/reset',async c=>{await resetBackgroundRun('category-all');return c.json({ok:true,run:await getPublicBackgroundRun('category-all')})});
 app.post('/api/destination/:target/:id/update',async c=>{const target=validDestination(c.req.param('target')),b=await jsonBody(c);return c.json(await destinationUpdate(target,Number(c.req.param('id')),b,b.confirm==='APPLY',String(b.shopId||'')))});
 app.post('/api/destination/:target/:id/status',async c=>{const b=await jsonBody(c);if(b.confirm!=='APPLY')return c.json({ok:false,error:'برای اعمال واقعی عبارت APPLY لازم است.'},400);return c.json(await destinationChangeStatus(validDestination(c.req.param('target')),Number(c.req.param('id')),String(b.status||''),String(b.shopId||'')))});
 app.delete('/api/destination/:target/:id',async c=>{if(c.req.query('confirm')!=='DELETE')return c.json({ok:false,error:'برای حذف یا بایگانی، تأیید DELETE لازم است.'},400);return c.json(await destinationDelete(validDestination(c.req.param('target')),Number(c.req.param('id')),c.req.query('force')==='true',c.req.query('shop')||''))});

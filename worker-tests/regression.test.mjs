@@ -32,13 +32,14 @@ class MemoryStatement {
       const lease=s.includes('WHERE app_state.updated_at<?'),current=this.db.states.get(v[0]),currentAt=this.db.stateUpdatedAt.get(v[0])||'';
       if(!lease||current===undefined||currentAt<v[3]){this.db.states.set(v[0],v[1]);this.db.stateUpdatedAt.set(v[0],v[2])}
     }
-    else if(s.startsWith('DELETE FROM app_state WHERE key=')&&this.db.states.get(v[0])===v[1]){this.db.states.delete(v[0]);this.db.stateUpdatedAt.delete(v[0])}
+    else if(s.startsWith('DELETE FROM app_state WHERE key=')){const needsValue=s.includes('AND value=?');if(!needsValue||this.db.states.get(v[0])===v[1]){this.db.states.delete(v[0]);this.db.stateUpdatedAt.delete(v[0])}}
     else if(s.startsWith('INSERT INTO profiles'))this.db.profiles.set(v[0],{id:v[0],data:v[1],enabled:v[2],interval_minutes:v[3],created_at:v[4],updated_at:v[5],last_run_at:null});
     else if(s.startsWith('INSERT INTO products'))this.db.products.set(`${v[0]}:${v[1]}`,{profile_id:v[0],source_key:v[1],data:v[2],title:v[3],price:v[4],source_url:v[5]});
     else if(s.startsWith('INSERT INTO category_learning')){const key=`${v[0]}:${v[1]}`,previous=this.db.categoryLearning.get(key);this.db.categoryLearning.set(key,{phrase:v[0],category_id:v[1],category_name:v[2],hits:(previous?.hits||0)+(s.includes('VALUES(?,?,?,1,?)')?1:Number(v[3])||1),updated_at:v.at(-1)})}
     else if(s.startsWith('INSERT INTO jobs'))this.db.jobs.set(v[0],{id:v[0],profile_id:v[1],kind:v[2],target:v[3],status:'queued',phase:'waiting',total:0,processed:0,added:0,updated:0,failed:0,stop_requested:0,error:null,log:'[]',created_at:v[4],updated_at:v[5],started_at:null,finished_at:null});
     else if(s.includes("WHERE status='running' AND updated_at<?")){let n=0;for(const job of this.db.jobs.values())if(job.status==='running'&&String(job.updated_at||'')<String(v[2])){job.status='failed';job.phase='watchdog';job.error='Job was inactive and closed by watchdog';job.finished_at=v[0];job.updated_at=v[1];n++}return{success:true,meta:{changes:n}}}
     else if(s.startsWith("DELETE FROM jobs WHERE id=")){const job=this.db.jobs.get(v[0]);if(job&&job.status!=='running'){this.db.jobs.delete(v[0]);return{success:true,meta:{changes:1}}}return{success:true,meta:{changes:0}}}
+    else if(s.startsWith('DELETE FROM jobs WHERE status IN')){let n=0;for(const [id,job] of this.db.jobs)if(['done','failed','stopped'].includes(job.status)){this.db.jobs.delete(id);n++}return{success:true,meta:{changes:n}}}
     return{success:true,meta:{changes:1}};
   }
 }
@@ -300,6 +301,58 @@ test('scheduled cron uses live general settings for watchdog, report retention, 
     assert.equal(db.jobs.has('old-done'),false);assert.equal(db.jobs.has('new-done'),true);
     assert.ok(pings.includes('https://notify.example/hook'));assert.equal(JSON.parse(db.states.get('cron_lock')).held,false);assert.ok(db.states.get('cron_ping'));
   }finally{globalThis.fetch=originalFetch}
+});
+
+test('priority dispatch never starves a displaced background run',async()=>{
+  const db=new MemoryD1(),sent=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}},env={DB:db,VAULT_SECRET:'vault-secret',JOBS:null,JOBS_DLQ:{send:async()=>{}}};env.JOBS=extra.JOBS;
+  await call(db,'/api/connections',jsonInit({woo:{url:'https://shop.example',key:'k',secret:'s'},ai:{providers:[{id:'prio',name:'Prio AI',baseUrl:'https://ai.example/v1',apiKey:'prio-secret',models:['model-1','model-2'],enabled:true}],network:{mode:'direct'}}}),extra);
+  const originalFetch=globalThis.fetch;globalThis.fetch=async()=>jsonResponse({choices:[{message:{content:'پاسخ'}}]});
+  try{
+    const ai=await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام'}),extra).then(r=>r.json());
+    const dd=await call(db,'/api/destination/woo/dedup-runs',jsonInit({keep:'newest',suffixFormats:'',apply:false}),extra).then(r=>r.json());
+    assert.equal(ai.run.status,'queued');assert.equal(dd.run.status,'queued');
+    const dedupMsg=sent.find(m=>m.message.task==='dedup');assert.ok(dedupMsg,'dedup run enqueued');
+    let acked=false;
+    // Deliver ONLY the dedup message: priority picks the queued ai-test first,
+    // and the displaced dedup message must be re-queued (never starved).
+    await worker.queue({messages:[{body:dedupMsg.message,ack(){acked=true},retry(){assert.fail('should not retry')}}]},env,ctx);
+    assert.ok(acked);
+    assert.ok(sent.some(m=>m.message.task==='ai-test'),'ai-test continued');
+    assert.ok(sent.some(m=>m.message.task==='dedup'),'dedup message kept alive (no starvation)');
+    const aiCur=await call(db,'/api/ai/test-runs/current',{},extra).then(r=>r.json());
+    assert.equal(aiCur.run.status,'queued');assert.equal(aiCur.run.cursor,1);
+    const ddCur=await call(db,'/api/destination/woo/dedup-runs/current',{},extra).then(r=>r.json());
+    assert.equal(ddCur.run.status,'queued');
+  }finally{globalThis.fetch=originalFetch}
+});
+
+test('task manager delete endpoints remove jobs, keep the queue and clear the priority map',async()=>{
+  const db=new MemoryD1();
+  await call(db,'/api/profiles',jsonInit({id:'p1',name:'p',url:'',noExtract:true,pages:1,pagination:'none',selectors:{container:'.x',title:'h2',price:'.p',link:'a',image:'img'},enabled:true}));
+  const job=(id,created,status='queued')=>db.jobs.set(id,{id,profile_id:'p1',kind:'scrape',target:'woo',status,phase:status==='done'?'finished':'waiting',total:1,processed:0,added:0,updated:0,failed:0,stop_requested:0,error:null,log:'[]',created_at:created,updated_at:created,started_at:null,finished_at:null});
+  job('j1','2026-08-22T10:00:00.000Z');job('j2','2026-08-22T11:00:00.000Z');job('j3','2026-08-22T12:00:00.000Z','done');
+  await call(db,'/api/jobs/priority',jsonInit({ids:['j1','j2']}));
+  assert.equal(JSON.parse(db.states.get('job_priorities_v1'))['j1'],2);
+  const del=await call(db,'/api/jobs/j1',{method:'DELETE'}).then(r=>r.json());
+  assert.equal(del.ok,true);
+  assert.equal(db.jobs.has('j1'),false);
+  assert.equal(JSON.parse(db.states.get('job_priorities_v1'))['j1'],undefined,'deleted job leaves no stale priority entry');
+  const clear=await call(db,'/api/jobs',{method:'DELETE'}).then(r=>r.json());
+  assert.equal(clear.ok,true);
+  assert.equal(db.jobs.has('j3'),false);
+  assert.equal(db.jobs.has('j2'),true,'queued job survives clear-finished');
+});
+
+test('category-all run reset endpoint clears the background run',async()=>{
+  const db=new MemoryD1();
+  db.states.set('background_current:category-all',JSON.stringify('cat-r1'));
+  db.states.set('background_run:category-all:cat-r1',JSON.stringify({id:'cat-r1',kind:'category-all',status:'queued',phase:'listing',stopRequested:false,createdAt:'2026-08-22T10:00:00.000Z',updatedAt:'2026-08-22T10:00:00.000Z',startedAt:null,finishedAt:null,attempts:0,error:null,page:1,totalPages:1,total:0,processed:0,changed:0,failed:0,items:[],products:[]}));
+  const cur=await call(db,'/api/destination/basalam/category-runs/current').then(r=>r.json());
+  assert.equal(cur.run.id,'cat-r1');
+  const reset=await call(db,'/api/destination/basalam/category-runs/reset',{method:'POST',body:'{}'}).then(r=>r.json());
+  assert.equal(reset.ok,true);assert.equal(reset.run,null);
+  const after=await call(db,'/api/destination/basalam/category-runs/current').then(r=>r.json());
+  assert.equal(after.run,null);
 });
 
 test('hung AI models are retried three times after the first pass',async()=>{

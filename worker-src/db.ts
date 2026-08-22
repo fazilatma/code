@@ -130,7 +130,15 @@ export async function updateJob(id:string,patch:Partial<Job>):Promise<void>{
 }
 export async function stopRequested(id:string):Promise<boolean>{const row=await statement('SELECT stop_requested FROM jobs WHERE id=?',[id]).first<{stop_requested:number}>();return Boolean(row?.stop_requested);}
 export async function retryJob(id:string):Promise<Job|null>{const timestamp=now(),changed=await run(`UPDATE jobs SET status='queued',phase='waiting',stop_requested=0,error=NULL,started_at=NULL,finished_at=NULL,processed=0,added=0,updated=0,failed=0,log='[]',updated_at=? WHERE id=? AND status IN ('failed','stopped','done')`,[timestamp,id]);return changed?getJob(id):null;}
-export async function deleteJob(id:string):Promise<boolean>{const deleted=await run("DELETE FROM jobs WHERE id=? AND status!='running'",[id]);if(deleted)await deleteState(`job_checkpoint:${id}`);return Boolean(deleted);}
+export async function deleteJob(id:string):Promise<boolean>{
+  const deleted=await run("DELETE FROM jobs WHERE id=? AND status!='running'",[id]);
+  if(deleted){
+    await deleteState(`job_checkpoint:${id}`);
+    const map=await getJobPriorities();
+    if(Object.prototype.hasOwnProperty.call(map,id)){delete map[id];await setState(JOB_PRIORITY_KEY,map)}
+  }
+  return Boolean(deleted);
+}
 export async function clearFinishedJobs():Promise<number>{await run("DELETE FROM app_state WHERE key IN (SELECT 'job_checkpoint:'||id FROM jobs WHERE status IN ('done','failed','stopped'))");return run("DELETE FROM jobs WHERE status IN ('done','failed','stopped')");}
 export async function pruneFinishedJobs(keep=20):Promise<number>{
   const limit=Math.max(1,Math.min(200,Math.trunc(Number(keep)||20))),finished=await rows<{id:string}>("SELECT id FROM jobs WHERE status IN ('done','failed','stopped') ORDER BY created_at DESC");
