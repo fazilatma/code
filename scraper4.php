@@ -16950,15 +16950,16 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'data-ai-panel=' . '"agent"') !== false);
     $add('10.04', 'دکمهٔ تب همان تابعِ سوییچِ بخشِ هوش مصنوعی را صدا می‌زند',
          strpos($selfSrc, "aiTab('agent')") !== false);
-    $add('10.04', 'هر هفت تبِ بخشِ هوش مصنوعی پنلِ متناظر دارند',
+    /* v10.11 (۲۴): با افزودنِ تبِ «چت با مدل‌ها» تعداد از ۷ به ۸ رسید */
+    $add('10.04', 'هر هشت تبِ بخشِ هوش مصنوعی پنلِ متناظر دارند',
          (function () use ($selfSrc) {
              // رشته‌ها با الحاق شکسته شده‌اند تا خودِ این آزمون در شمارش نیاید
              preg_match_all('/data-ai-tab=' . '"([a-z]+)"/', $selfSrc, $m);   $btns = $m[1];
              preg_match_all('/data-ai-panel=' . '"([a-z]+)"/', $selfSrc, $m); $pans = $m[1];
              sort($btns); sort($pans);
-             return count($btns) === 7
+             return count($btns) === 8
                  && $btns === $pans
-                 && $btns === ['agent', 'autopilot', 'candidates', 'models', 'net', 'providers', 'test'];
+                 && $btns === ['agent', 'autopilot', 'candidates', 'chat', 'models', 'net', 'providers', 'test'];
          })());
     $add('10.04', 'رابطِ ایجنت دیگر در تبِ ارسال تکرار نشده است',
          substr_count($selfSrc, 'id=' . '"agTask"')   === 1
@@ -17271,6 +17272,9 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'id="apModelFilter"') !== false
       && strpos($selfSrc, 'function apFillModelSelect') !== false
       && strpos($selfSrc, 'function apModelHint')       !== false);
+    $add('10.08', 'راهنمای مدل هنوز حافظه و توضیحِ مدل را نشان می‌دهد',
+         strpos($selfSrc, "'K حافظه'") !== false
+      && strpos($selfSrc, "h += '<br>💡 ' + esc(m.note);") !== false);
     $add('10.08', 'کارت‌های فهرست دکمهٔ انتخاب دارند و شناسهٔ اسلش‌دار را سالم می‌فرستند',
          strpos($selfSrc, "apPickModel(\\''+jsAttr(m.id)+'\\')") !== false
       && strpos($selfSrc, 'function apPickModel') !== false
@@ -17341,10 +17345,15 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'function agFillModelSelect') !== false
       && strpos($selfSrc, 'function agModelHint')       !== false
       && strpos($selfSrc, 'function agModelReset')      !== false);
+    /* v10.11: ساختِ منو به aiMdlFillModels منتقل شد؛ گزینهٔ پیش‌فرض حالا
+       از پارامترِ blank می‌آید و برای هر سه پنل یکسان است. */
     $add('10.10', 'منویِ مدلِ ایجنت گزینهٔ «پیش‌فرضِ اتصالات» را در صدر دارد',
-         strpos($selfSrc, "var h = '<option value=\"\">🔗 مدلِ پیش‌فرضِ اتصالات</option>';") !== false);
+         strpos($selfSrc, "blank:'🔗 مدلِ پیش‌فرضِ اتصالات', after:agModelHint") !== false
+      && strpos($selfSrc, "h = o.blank ? '<option value=\"\">'+esc(o.blank)+'</option>' : ''") !== false);
     $add('10.10', 'انتخابِ ناموجود در منویِ ایجنت بی‌صدا نمی‌ماند و به پیش‌فرض برمی‌گردد',
-         strpos($selfSrc, "if (keep) { sel.value = keep; if (sel.value !== keep) sel.value = ''; }") !== false);
+         strpos($selfSrc, "sel.value = keep;") !== false
+      && strpos($selfSrc, "if(keep && sel.value !== keep){") !== false
+      && strpos($selfSrc, 'خارج از فیلترِ فعلی') !== false);
     $add('10.10', 'مدلِ انتخابیِ ایجنت واقعاً در درخواستِ شروع فرستاده می‌شود',
          strpos($selfSrc, "fd.append('model', (\$('agModelSel') || { value: '' }).value || '');") !== false);
     $add('10.10', 'بک‌اندِ ?agent_start مدل را می‌خواند و به agentRun پاس می‌دهد',
@@ -17411,6 +17420,125 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "var AG_MODEL_LS = 'ag_model_pick';") !== false
       && strpos($selfSrc, 'localStorage.setItem(AG_MODEL_LS') !== false
       && strpos($selfSrc, 'localStorage.getItem(AG_MODEL_LS)') !== false);
+
+    /* ---------- v10.11 (۲۴): فهرستِ مدل‌ها، فیلترِ ارائه‌دهنده و تبِ چت ---------- */
+    $add('10.11', 'اندپوینتِ فهرستِ یکپارچهٔ مدل‌ها تعریف شده است',
+         strpos($selfSrc, "_GET['ai_model_" . "index']") !== false
+      && strpos($selfSrc, 'function aiModelCaps') !== false);
+    $add('10.11', 'فهرستِ مدل‌ها هم اتصال‌های کاربر و هم پیشنهادهای کاتالوگ را می‌دهد',
+         (function () {
+             $rows = aiModelIndexRows();
+             if (!$rows['models']) return false;
+             $g = [];
+             foreach ($rows['models'] as $m) $g[substr($m['group'], 0, 4)] = true;
+             // بدونِ هیچ اتصالی، همهٔ ردیف‌ها باید از کاتالوگ (cat:) بیایند
+             foreach ($rows['models'] as $m) {
+                 foreach (['id','name','group','provider','ready','chat','tools','reasoning'] as $f) {
+                     if (!array_key_exists($f, $m)) return false;
+                 }
+             }
+             return isset($g['cat:']) && count($rows['groups']) >= 5;
+         })());
+    $add('10.11', 'سه قابلیتِ چت/ابزار/استدلال برای هر مدل تعیین می‌شود',
+         (function () {
+             $c = aiModelCaps('llama-3.3-70b-versatile', [], ['id' => 'x']);
+             if (!$c['chat'] || !$c['tools'] || $c['reasoning']) return false;
+             // مدلِ امبدینگ نه چت است نه ابزاردار
+             $e = aiModelCaps('bge-large-en', [], []);
+             if ($e['chat'] || $e['tools'] || $e['why'] === '') return false;
+             // مدلِ استدلالی از روی نام شناخته می‌شود
+             $r = aiModelCaps('deepseek-r1-distill-llama-70b', [], []);
+             if (!$r['reasoning'] || !$r['chat']) return false;
+             // تیکِ دستیِ کاربر بر حدسِ نام مقدم است
+             return aiModelCaps('some-model', ['toolCalling' => false], ['id' => 'x'])['tools'] === false;
+         })());
+    $add('10.11', 'شمارشِ سه فیلتر در پاسخِ فهرست می‌آید',
+         (function () {
+             $r = aiModelIndexRows();
+             foreach (['chat', 'tools', 'reasoning', 'ready'] as $k) {
+                 if (!isset($r['counts'][$k])) return false;
+             }
+             return $r['counts']['chat'] >= $r['counts']['reasoning'];
+         })());
+    $add('10.11', 'بارگذارِ مشترکِ مدل‌ها دیگر خطا را بی‌صدا نمی‌بلعد',
+         strpos($selfSrc, 'function aiMdlLoad') !== false
+      && strpos($selfSrc, 'function aiMdlSync') !== false
+      && strpos($selfSrc, 'پاسخِ سرور: HTTP ') !== false
+      && strpos($selfSrc, 'پاسخ JSON نبود (HTTP ') !== false);
+    $add('10.11', 'هر سه حالتِ بارگذاری/خطا/خالی پیامِ خودش را دارد',
+         strpos($selfSrc, 'در حالِ بارگذاریِ فهرستِ مدل‌ها') !== false
+      && strpos($selfSrc, 'فهرستِ مدل‌ها بارگذاری نشد') !== false
+      && strpos($selfSrc, 'هیچ مدلی پیدا نشد') !== false
+      && strpos($selfSrc, '🔄 تلاشِ دوباره') !== false);
+    $add('10.11', 'هر سه پنل جعبهٔ خطای مدل دارند',
+         strpos($selfSrc, 'id="agModelErr"') !== false
+      && strpos($selfSrc, 'id="apModelErr"') !== false
+      && strpos($selfSrc, 'id="chModelErr"') !== false);
+    $add('10.11', 'هر سه پنل فیلدِ ارائه‌دهنده با پیش‌فرضِ «همه» دارند',
+         substr_count($selfSrc, '<option value=""' . '>همهٔ ارائه‌دهنده‌ها</option>') === 3
+      && strpos($selfSrc, 'id="agProvSel"') !== false
+      && strpos($selfSrc, 'id="apProvSel"') !== false
+      && strpos($selfSrc, 'id="chProvSel"') !== false);
+    $add('10.11', 'هر سه پنل کادرِ جست‌وجوی مدل دارند',
+         strpos($selfSrc, 'id="agModelSearch"') !== false
+      && strpos($selfSrc, 'id="apModelPick"')   !== false
+      && strpos($selfSrc, 'id="chModelSearch"') !== false
+      && strpos($selfSrc, 'function aiMdlPick') !== false);
+    $add('10.11', 'جست‌وجو روی شناسه، نام و ارائه‌دهنده کار می‌کند',
+         strpos($selfSrc, "const hay = (m.id + ' ' + m.name + ' ' + m.provider).toLowerCase();") !== false);
+    $add('10.11', 'منویِ ارائه‌دهنده گزینهٔ «همه» را در صدر و با شمارش می‌سازد',
+         strpos($selfSrc, "h = '<option value=\"\">همهٔ ارائه‌دهنده‌ها (' + toFa(rows.length) + ' مدل)</option>'") !== false
+      && strpos($selfSrc, 'function aiMdlFillProv') !== false);
+    $add('10.11', 'تبِ «چت با مدل‌ها» دکمه و پنلِ مستقل دارد',
+         strpos($selfSrc, 'data-ai-tab=' . '"chat"')   !== false
+      && strpos($selfSrc, 'data-ai-panel=' . '"chat"') !== false
+      && strpos($selfSrc, "aiTab('ch" . "at')")        !== false);
+    $add('10.11', 'پنلِ چت پس از پنلِ اتوماسیون می‌آید',
+         (function () use ($selfSrc) {
+             $ap = strpos($selfSrc, 'data-ai-panel=' . '"autopilot"');
+             $ch = strpos($selfSrc, 'data-ai-panel=' . '"chat"');
+             return $ap !== false && $ch !== false && $ap < $ch;
+         })());
+    $add('10.11', 'انتخابِ مدلِ تبِ چت هر سه فیلترِ خواسته‌شده را دارد',
+         strpos($selfSrc, 'function chSetCap') !== false
+      && strpos($selfSrc, "['chat',      '💬 فقط چت'") !== false
+      && strpos($selfSrc, "['tools',     '🤖 دارای ابزار'") !== false
+      && strpos($selfSrc, "['reasoning', '🧠 استدلالی'") !== false);
+    $add('10.11', 'فیلترِ پیش‌فرضِ تبِ چت «فقط چت» است',
+         strpos($selfSrc, "var chCap  = 'chat';") !== false);
+    $add('10.11', 'اندپوینتِ ارسالِ پیامِ چت تعریف شده است',
+         strpos($selfSrc, "'ai_chat_" . "send'") !== false
+      && strpos($selfSrc, 'function chSend') !== false
+      && strpos($selfSrc, "fd.append('action', 'ai_chat_" . "send');") !== false);
+    $add('10.11', 'چت تاریخچهٔ گفت‌وگو را می‌فرستد ولی سقفِ نوبت دارد',
+         strpos($selfSrc, "fd.append('history', JSON.stringify(chHist));") !== false
+      && strpos($selfSrc, '$hist = array_slice($hist, -12);') !== false);
+    $add('10.11', 'تاریخچه فقط پس از پاسخِ موفق رشد می‌کند',
+         (function () use ($selfSrc) {
+             // strrpos چون خودِ همین ادعا نخستین رخدادِ هر دو رشته است
+             $push = strrpos($selfSrc, "chHist.push({role:'user', content:msg});");
+             $ok   = strrpos($selfSrc, "if (!d.ok) throw new Error(d.error");
+             return $push !== false && $ok !== false && $ok < $push;
+         })());
+    $add('10.11', 'چت مدلِ غیرگفت‌وگویی را پیش از ارسال رد می‌کند',
+         strpos($selfSrc, 'if (m && !m.chat) {') !== false
+      && strpos($selfSrc, 'این مدل گفت‌وگویی نیست') !== false);
+    $add('10.11', 'خطای چت در خودِ گفت‌وگو دیده می‌شود نه در سکوت',
+         strpos($selfSrc, "chBubble('err', '⚠️ '") !== false
+      && strpos($selfSrc, 'ai-msg.err') !== false);
+    $add('10.11', 'ارسالِ همزمان قفل می‌شود تا پاسخ‌ها قاطی نشوند',
+         strpos($selfSrc, 'if (chBusy) {') !== false
+      && strpos($selfSrc, 'chBusy = true;') !== false
+      && strpos($selfSrc, 'chBusy = false;') !== false);
+    $add('10.11', 'تبِ چت هنگامِ باز شدن فهرستِ مدل‌ها را می‌گیرد',
+         strpos($selfSrc, "if(tab==='chat'){ chLoadCatalog(); }") !== false);
+    $add('10.11', 'ایجنت و اتوماسیون فقط مدل‌های ابزاردار را پیشنهاد می‌دهند',
+         substr_count($selfSrc, "cap:" . "'tools'") === 2);
+    $add('10.11', 'پاسخِ چت با همان استخراج‌گرِ مقاومِ متن خوانده می‌شود',
+         strpos($selfSrc, '$text = aiStripReasoning(aiExtractText($body));') !== false);
+    $add('10.11', 'کاتالوگِ اتوماسیون هم دیگر خطایش را پنهان نمی‌کند',
+         strpos($selfSrc, 'کاتالوگِ کارها بارگذاری نشد') !== false
+      && strpos($selfSrc, 'onclick="apLoadCatalog(true)"') !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -22372,6 +22500,201 @@ header('Content-Type: application/json; charset=UTF-8');
 echo json_encode(aiProvidersSummary(), JSON_UNESCAPED_UNICODE);
 exit;
 }
+/* ══════════════════════════════════════════════════════════════════
+ *  v10.11 (۲۴): فهرستِ یکپارچهٔ مدل‌ها برای همهٔ انتخاب‌گرها
+ *
+ *  تا ۱۰٫۱۰ انتخاب‌گرهای «ایجنت» و «اتوماسیون» فقط کاتالوگِ ثابتِ
+ *  autoFreeToolModels() را نشان می‌دادند. مشکل: آن کاتالوگ فهرستِ
+ *  «پیشنهادی»ست، نه مدل‌هایی که کاربر واقعاً اتصالشان را ثبت کرده.
+ *  اگر کاربر مدلی خارج از کاتالوگ داشت اصلاً دیده نمی‌شد، و اگر
+ *  اتصالی نداشت فهرستِ پر می‌دید که هیچ‌کدامش کار نمی‌کرد.
+ *
+ *  این اندپوینت هر دو منبع را یکجا می‌دهد:
+ *    • مدل‌های ثبت‌شدهٔ کاربر (از ai_providers.json) با پرچمِ ready=true
+ *    • مدل‌های کاتالوگ که اتصالشان نیست، با ready=false (پیشنهاد)
+ *  و برای هر مدل سه قابلیت را مشخص می‌کند تا فیلترِ سه‌گانه کار کند:
+ *    chat (همه‌چیزِ گفت‌وگویی) · tools (فراخوانیِ ابزار) · reasoning (استدلالی)
+ * ══════════════════════════════════════════════════════════════════ */
+
+/** سه قابلیتِ یک مدل را از روی ردیفِ اتصال و کاتالوگ تعیین می‌کند */
+function aiModelCaps(string $modelId, array $row = [], array $catRow = []): array {
+    $nonChat = aiNonChatModel($modelId, $row);
+    $chat    = $nonChat === '';
+    /* ابزار: تیکِ دستیِ کاربر مقدم است؛ بعد حضور در کاتالوگِ ابزارداران؛
+       بعد الگویِ نامِ خانواده‌هایی که tools را قابل‌اعتماد پشتیبانی می‌کنند. */
+    if (array_key_exists('toolCalling', $row)) {
+        $tools = !empty($row['toolCalling']);
+    } elseif ($catRow) {
+        $tools = true;
+    } else {
+        $tools = false;
+        $low = strtolower($modelId);
+        foreach (['llama-3.3', 'llama-3.1', 'llama-4', 'mistral', 'ministral', 'devstral',
+                  'magistral', 'codestral', 'gpt-oss', 'gpt-4', 'gemini-2', 'gemini-1.5',
+                  'qwen', 'command-r', 'firefunction', 'hermes', 'nemotron', 'glm-4',
+                  'deepseek-v3', 'kimi-k2', 'grok'] as $kw) {
+            if (strpos($low, $kw) !== false) { $tools = true; break; }
+        }
+    }
+    if (!$chat) $tools = false;
+    $reason = $chat && aiIsReasoningModel($row ?: null, $modelId);
+    return ['chat' => $chat, 'tools' => $tools, 'reasoning' => $reason, 'why' => $nonChat];
+}
+
+/* ══ v10.11 (۲۴): اندپوینتِ چتِ زندهٔ تبِ «💬 چت» ══
+   یک پیام (به‌همراه تاریخچهٔ گفت‌وگو) را به مدلِ انتخابی می‌فرستد.
+   مدل با همان autoResolveModel به اتصالِ کاربر نگاشت می‌شود؛ اگر
+   نگاشت نشد به مدلِ پیش‌فرضِ اتصالات می‌افتد تا چت هرگز بن‌بست نشود. */
+if (($_POST['action'] ?? '') === 'ai_chat_send') {
+    header('Content-Type: application/json; charset=UTF-8');
+    $msg = trim((string)($_POST['message'] ?? ''));
+    if ($msg === '') { echo json_encode(['ok'=>false,'error'=>'پیام خالی است'],JSON_UNESCAPED_UNICODE); exit; }
+    $model = trim((string)($_POST['model'] ?? ''));
+    $sys   = trim((string)($_POST['system'] ?? ''));
+    $hist  = json_decode((string)($_POST['history'] ?? '[]'), true);
+    if (!is_array($hist)) $hist = [];
+
+    $messages = [];
+    if ($sys !== '') $messages[] = ['role' => 'system', 'content' => $sys];
+    /* فقط ۱۲ نوبتِ آخر می‌رود تا سقفِ توکنِ مدل‌های کوچک پر نشود */
+    $hist = array_slice($hist, -12);
+    foreach ($hist as $h) {
+        if (!is_array($h)) continue;
+        $role = ($h['role'] ?? '') === 'assistant' ? 'assistant' : 'user';
+        $txt  = trim((string)($h['content'] ?? ''));
+        if ($txt !== '') $messages[] = ['role' => $role, 'content' => mb_substr($txt, 0, 6000)];
+    }
+    $messages[] = ['role' => 'user', 'content' => mb_substr($msg, 0, 12000)];
+
+    $pin  = $model !== '' ? autoResolveModel($model) : [];
+    $isR  = aiIsReasoningModel(null, $model);
+    $payload = ['messages' => $messages, 'temperature' => 0.7,
+                'max_tokens' => aiReasoningBudget(1200, $isR)];
+
+    $t0 = microtime(true);
+    $r  = $pin ? aiProviderCall($pin['provider'], $pin['model'], $payload)
+               : aiActiveChat($payload);
+    $ms = (int)round((microtime(true) - $t0) * 1000);
+
+    if (empty($r['ok'])) {
+        echo json_encode(['ok' => false, 'took' => $ms,
+            'error' => (string)($r['error'] ?? ('خطای HTTP ' . (int)($r['code'] ?? 0))),
+            'code'  => (int)($r['code'] ?? 0)], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $body = $r['body'] ?? null;
+    if (is_string($body)) { $d = json_decode($body, true); if (is_array($d)) $body = $d; }
+    $text = aiStripReasoning(aiExtractText($body));
+    if (trim($text) === '') {
+        echo json_encode(['ok' => false, 'took' => $ms,
+            'error' => 'مدل پاسخِ متنی برنگرداند (شاید مدلِ غیرچت است)'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $used = $pin ? (string)$pin['model'] : '';
+    if ($used === '') { $ac = aiActiveConfig(); $used = (string)($ac['model'] ?? ''); }
+    echo json_encode(['ok' => true, 'reply' => $text, 'took' => $ms,
+        'model' => $used, 'via' => $pin ? (string)$pin['via'] : 'default',
+        'provider' => $pin ? (string)($pin['provider']['name'] ?? '') : ''],
+        JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** فهرستِ یکپارچهٔ مدل‌ها را می‌سازد (تا هم اندپوینت و هم آزمون از آن بخورند) */
+function aiModelIndexRows(): array {
+    $cat = [];
+    foreach (autoFreeToolModels() as $cm) $cat[(string)$cm['id']] = $cm;
+    $provInfo = autoProviderInfo();
+
+    $out = [];      // شناسهٔ یکتا ⇒ ردیف
+    $groups = [];   // شناسهٔ گروه ⇒ برچسبِ نمایشی
+
+    /* ── ۱) مدل‌های واقعیِ کاربر ── */
+    foreach (aiProvidersLoad() as $pid => $pr) {
+        $pname = (string)($pr['name'] ?? $pid);
+        $on    = ($pr['enabled'] ?? true) !== false;
+        $gid   = 'conn:' . $pid;
+        $groups[$gid] = $pname . ($on ? '' : ' (خاموش)');
+        foreach ((array)($pr['models'] ?? []) as $m) {
+            if (!is_array($m)) continue;
+            $mid = (string)($m['id'] ?? '');
+            if ($mid === '') continue;
+            $caps = aiModelCaps($mid, $m, $cat[$mid] ?? []);
+            $out[$gid . '|' . $mid] = [
+                'id'        => $mid,
+                'name'      => (string)($m['name'] ?? $mid),
+                'group'     => $gid,
+                'provider'  => $pname,
+                'ready'     => $on,
+                'chat'      => $caps['chat'],
+                'tools'     => $caps['tools'],
+                'reasoning' => $caps['reasoning'],
+                'why'       => $caps['why'],
+                'tested'    => !empty($m['tested']),
+                'available' => !empty($m['available']),
+                'note'      => isset($cat[$mid]) ? (string)$cat[$mid]['note'] : '',
+                'context'   => isset($cat[$mid]) ? (int)$cat[$mid]['context'] : 0,
+                'quality'   => isset($cat[$mid]) ? (int)$cat[$mid]['quality'] : 0,
+                'tag'       => isset($cat[$mid]) ? (string)$cat[$mid]['tag'] : '',
+            ];
+        }
+    }
+
+    /* ── ۲) پیشنهادهای کاتالوگ که اتصالشان ثبت نشده ── */
+    $haveIds = [];
+    foreach ($out as $r) $haveIds[$r['id']] = true;
+    foreach (autoFreeToolModels() as $cm) {
+        $mid = (string)$cm['id'];
+        if (isset($haveIds[$mid])) continue;
+        $pv  = (string)$cm['provider'];
+        $gid = 'cat:' . $pv;
+        $groups[$gid] = 'پیشنهادی — ' . (string)(($provInfo[$pv]['name'] ?? $pv));
+        $out[$gid . '|' . $mid] = [
+            'id'        => $mid,
+            'name'      => (string)$cm['name'],
+            'group'     => $gid,
+            'provider'  => (string)(($provInfo[$pv]['name'] ?? $pv)),
+            'ready'     => false,
+            'chat'      => true,
+            'tools'     => true,
+            'reasoning' => aiIsReasoningModel(null, $mid) || (string)$cm['tag'] === 'reasoning',
+            'why'       => '',
+            'tested'    => false,
+            'available' => false,
+            'note'      => (string)$cm['note'],
+            'context'   => (int)$cm['context'],
+            'quality'   => (int)$cm['quality'],
+            'tag'       => (string)$cm['tag'],
+        ];
+    }
+
+    $rows = array_values($out);
+    $n = ['chat' => 0, 'tools' => 0, 'reasoning' => 0, 'ready' => 0];
+    foreach ($rows as $r) {
+        if ($r['chat'])      $n['chat']++;
+        if ($r['tools'])     $n['tools']++;
+        if ($r['reasoning']) $n['reasoning']++;
+        if ($r['ready'])     $n['ready']++;
+    }
+    return ['models' => $rows, 'groups' => $groups, 'counts' => $n];
+}
+
+if (isset($_GET['ai_model_index'])) {
+    /* بافرهای تمِ رنگ را می‌بندیم تا JSON با HTML آلوده نشود — همان الگویی
+       که در ?ai_export_providers جواب داد. بدونِ این، روی بعضی هاست‌ها پاسخ
+       پارس نمی‌شد و منویِ مدل‌ها بی‌هیچ پیامی خالی می‌ماند. */
+    while (@ob_get_level()) @ob_end_clean();
+    $r   = aiModelIndexRows();
+    $out = json_encode(['ok' => true, 'models' => $r['models'], 'groups' => $r['groups'],
+                        'counts' => $r['counts'], 'total' => count($r['models'])],
+                       JSON_UNESCAPED_UNICODE);
+    header('Content-Type: application/json; charset=UTF-8');
+    header('X-Content-Type-Options: nosniff');
+    header('Cache-Control: no-store');
+    header('Content-Length: ' . strlen($out));
+    echo $out;
+    exit;
+}
+
 /* v9.95 (۹ب): برون‌ریزی (دانلود) فایل JSON تنظیمات ارائه‌دهنده‌ها.
    ?ai_export_providers=1        → با کلیدهای API
    ?ai_export_providers=1&keys=0 → بدون کلید (برای اشتراک‌گذاری امن)      */
@@ -29100,7 +29423,7 @@ body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn{z-index:10}
 .hint-collapse[open] summary::before{transform:rotate(180deg)}
 .hint-collapse .hint-body{padding-top:6px}
 /* v9.60: تب‌های بخش هوش مصنوعی */
-.prof-net-switch .prof-net-slider{width:36px;height:20px;border-radius:20px;background:#334155;position:relative;display:inline-block;transition:background .2s;flex:0 0 auto;vertical-align:middle}.prof-net-switch .prof-net-slider::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#e2e8f0;transition:transform .2s}.prof-net-switch input:checked + .prof-net-slider{background:#22c55e}.prof-net-switch input:checked + .prof-net-slider::after{transform:translateX(16px)}.smenu-body.open.ai-tabs-open{max-height:4000px}.ai-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;border-bottom:1px solid #334155;padding-bottom:6px;direction:rtl}.ai-tab-btn{padding:7px 12px;font-size:11px;color:#94a3b8;background:#111c31;border:1px solid #334155;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap;flex:1;min-width:80px;text-align:center}.ai-tab-btn:hover{background:#1e293b;color:#e2e8f0}.ai-tab-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6;font-weight:700}.ai-tab-panel{display:none}.ai-tab-panel.active{display:block}
+.prof-net-switch .prof-net-slider{width:36px;height:20px;border-radius:20px;background:#334155;position:relative;display:inline-block;transition:background .2s;flex:0 0 auto;vertical-align:middle}.prof-net-switch .prof-net-slider::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#e2e8f0;transition:transform .2s}.prof-net-switch input:checked + .prof-net-slider{background:#22c55e}.prof-net-switch input:checked + .prof-net-slider::after{transform:translateX(16px)}.smenu-body.open.ai-tabs-open{max-height:4000px}.ai-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;border-bottom:1px solid #334155;padding-bottom:6px;direction:rtl}.ai-tab-btn{padding:7px 12px;font-size:11px;color:#94a3b8;background:#111c31;border:1px solid #334155;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap;flex:1;min-width:80px;text-align:center}.ai-tab-btn:hover{background:#1e293b;color:#e2e8f0}.ai-tab-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6;font-weight:700}.ai-tab-panel{display:none}.ai-tab-panel.active{display:block}.ai-mdl-err{margin-top:6px;padding:7px 9px;border-radius:8px;font-size:10.5px;line-height:1.8;background:#7f1d1d20;border:1px solid #b91c1c;color:#fca5a5}.ai-mdl-err b{color:#fecaca}.ai-mdl-err button{margin-top:5px;font-size:10px;padding:3px 9px}.ai-chat-box{margin-top:8px;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;min-height:120px;max-height:340px;overflow-y:auto;display:flex;flex-direction:column;gap:6px}.ai-chat-empty{font-size:10.5px;color:#64748b;text-align:center;padding:22px 6px}.ai-msg{max-width:88%;padding:7px 10px;border-radius:10px;font-size:11.5px;line-height:1.9;white-space:pre-wrap;word-break:break-word}.ai-msg.me{align-self:flex-start;background:#1e293b;border:1px solid #334155;color:#e2e8f0}.ai-msg.bot{align-self:flex-end;background:#14532d30;border:1px solid #166534;color:#dcfce7}.ai-msg.err{align-self:flex-end;background:#7f1d1d20;border:1px solid #b91c1c;color:#fca5a5}.ai-msg .mt{display:block;margin-top:4px;font-size:9px;color:#64748b}.ai-chip{padding:3px 9px;border-radius:20px;font-size:10px;cursor:pointer;border:1px solid #334155;background:#111c31;color:#94a3b8;transition:.15s;user-select:none}.ai-chip:hover{background:#1e293b;color:#e2e8f0}.ai-chip.on{background:#3b82f6;border-color:#3b82f6;color:#fff;font-weight:700}
 .live-cnt .lc:hover{background:#1e293b;transform:translateY(-1px)}.live-cnt .lc b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.live-cnt .lc span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.live-cnt .lc i{font-size:9px;font-style:normal;font-family:ui-monospace,monospace}@media(max-width:620px){.live-cnt{grid-template-columns:repeat(3,1fr)}}.pdir{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700}.pdir-up{background:#7f1d1d;color:#fca5a5}.pdir-down{background:#14532d;color:#86efac}.pdir-same{background:#334155;color:#94a3b8}.app-ver{display:inline-block;background:#0f172a;border:1px solid #334155;color:#67e8f9;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;font-family:ui-monospace,monospace;cursor:pointer;transition:.15s;vertical-align:middle}
 .app-ver:hover{border-color:#67e8f9;background:#0e749020}.app-ver.upd{border-color:#f59e0b;color:#fbbf24;background:#42200630;animation:verPulse 2s ease-in-out infinite}@keyframes verPulse{0%,100%{opacity:1}50%{opacity:.55}}.vc-drop{position:absolute;top:100%;left:0;right:0;background:#0f172a;border:1px solid #475569;border-radius:8px;max-height:220px;overflow-y:auto;z-index:60;display:none;margin-top:3px;box-shadow:0 6px 18px rgba(0,0,0,.5)}.vc-drop.open{display:block}.vc-opt{padding:8px 10px;cursor:pointer;font-size:11px;font-family:monospace;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;gap:8px;direction:ltr;text-align:left}.vc-opt:last-child{border-bottom:none}.vc-opt:hover{background:#1e3a5f}.vc-opt .vc-meta{color:#64748b;font-size:10px;flex:0 0 auto}.vc-drop .vc-none{padding:10px;color:#64748b;font-size:11px;text-align:center}
 .pbadge{display:inline-block;font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:4px;vertical-align:middle}.pb-new{background:#14532d;color:#86efac}.pb-chg{background:#78350f;color:#fcd34d}.rf-btn{background:#1e293b;border:1px solid #334155;color:#94a3b8;font-size:11px;font-family:inherit;padding:5px 10px;border-radius:6px;cursor:pointer;transition:.15s}.rf-btn:hover{background:#334155}.rf-btn.on{background:#1e3a5f;border-color:#3b82f6;color:#93c5fd;font-weight:700}.product.is-new{border-color:#22c55e}.product.is-chg{border-color:#f59e0b}.p2-card{border:1px solid #475569;border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#0f172a}.p2-card.p2-ok{border-color:#22c55e;background:#14532d33}.p2-card.p2-err{border-color:#ef4444;background:#7f1d1d26}.p2-title{font-size:12.5px;font-weight:700;color:#e2e8f0;margin-bottom:3px;line-height:1.6}
@@ -29694,6 +30017,7 @@ html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-
 <div class="ai-tab-btn" data-ai-tab="net" onclick="aiTab('net')">🌐 اتصال</div>
 <div class="ai-tab-btn" data-ai-tab="agent" onclick="aiTab('agent')">🤖 ایجنت</div>
 <div class="ai-tab-btn" data-ai-tab="autopilot" onclick="aiTab('autopilot')">🗓 اتوماسیون</div>
+<div class="ai-tab-btn" data-ai-tab="chat" onclick="aiTab('chat')">💬 چت با مدل‌ها</div>
 </div>
 
 <!-- ══ تب ۱: ارائه‌دهنده‌ها ══ -->
@@ -29948,11 +30272,22 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 
 <div class="crow" style="align-items:center;margin-top:6px">
+<label>ارائه‌دهنده:</label>
+<select id="agProvSel" onchange="agProvChange()" style="flex:1;font-size:11px"><option value="">همهٔ ارائه‌دهنده‌ها</option></select>
+</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
+<label>جست‌وجوی مدل:</label>
+<input type="text" id="agModelSearch" oninput="agFillModelSelect()" placeholder="🔎 بخشی از نامِ مدل…" style="flex:1;font-size:11px" dir="ltr">
+</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
 <label>مدلِ این اجرا:</label>
 <select id="agModelSel" style="flex:1;font-size:11px"></select>
 <button class="btn btn-gray" onclick="agModelReset()" style="flex:0;font-size:10px;padding:4px 8px" title="بازگشت به مدلِ پیش‌فرضِ اتصالات">↺</button>
 </div>
 <div style="font-size:9.5px;color:#64748b;margin:2px 0 0;line-height:1.7" id="agModelHint">مدلِ پیش‌فرضِ اتصالات استفاده می‌شود</div>
+<div id="agModelErr" class="ai-mdl-err hidden"></div>
 
 <div style="margin-top:8px">
 <div style="font-size:10.5px;color:#94a3b8;margin-bottom:4px">دستورِ کار:</div>
@@ -30039,10 +30374,21 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 
 <div class="crow" style="align-items:center;margin-top:6px">
+<label>ارائه‌دهنده:</label>
+<select id="apProvSel" onchange="apProvChange()" style="flex:1;font-size:11px"><option value="">همهٔ ارائه‌دهنده‌ها</option></select>
+</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
+<label>جست‌وجوی مدل:</label>
+<input type="text" id="apModelPick" oninput="apFillModelSelect()" placeholder="🔎 بخشی از نامِ مدل…" style="flex:1;font-size:11px" dir="ltr">
+</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
 <label>مدلِ هوش مصنوعی:</label>
 <select id="apModel" style="flex:1;font-size:11px"></select>
 </div>
 <div style="font-size:9.5px;color:#64748b;margin:2px 0 0;line-height:1.7" id="apModelHint">مدلِ پیش‌فرضِ اتصالات استفاده می‌شود</div>
+<div id="apModelErr" class="ai-mdl-err hidden"></div>
 
 <div class="crow" style="align-items:center;margin-top:6px">
 <label>حالت اجرا:</label>
@@ -30104,6 +30450,60 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 </details>
 
+</div>
+
+<!-- ══ تب ۸ (v10.11): چت با مدل‌ها ══ -->
+<div class="ai-tab-panel" data-ai-panel="chat">
+<div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px">
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">💬 چت با مدل‌ها</div>
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+اینجا می‌توانید مستقیم با هر مدلی که اتصالش را ثبت کرده‌اید گفت‌وگو کنید — بدون اینکه
+کارِ ایجنت یا اتوماسیون را دست بزنید. برای اینکه بین ده‌ها مدل گم نشوید،
+اول با سه دکمهٔ زیر نوعِ مدل را محدود کنید، بعد ارائه‌دهنده را انتخاب کنید و
+در کادرِ جست‌وجو نامِ مدل را بنویسید.
+</div>
+
+<!-- سه فیلترِ خواسته‌شده -->
+<div style="font-size:10.5px;color:#94a3b8;margin-bottom:4px">نوعِ مدل:</div>
+<div id="chFilter" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px"></div>
+
+<div class="crow" style="align-items:center">
+<label>ارائه‌دهنده:</label>
+<select id="chProvSel" onchange="chProvChange()" style="flex:1;font-size:11px"><option value="">همهٔ ارائه‌دهنده‌ها</option></select>
+</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
+<label>جست‌وجوی مدل:</label>
+<input type="text" id="chModelSearch" oninput="chFillModelSelect()" placeholder="🔎 بخشی از نامِ مدل…" style="flex:1;font-size:11px" dir="ltr">
+</div>
+
+<div class="crow" style="align-items:center;margin-top:6px">
+<label>مدل:</label>
+<select id="chModelSel" onchange="chModelHint()" style="flex:1;font-size:11px"></select>
+<button class="btn btn-gray" onclick="chLoadCatalog(true)" style="flex:0;font-size:10px;padding:4px 8px" title="بارگذاری دوبارهٔ فهرستِ مدل‌ها">🔄</button>
+</div>
+<div style="font-size:9.5px;color:#64748b;margin:2px 0 0;line-height:1.7" id="chModelHintBox">—</div>
+<div id="chModelErr" class="ai-mdl-err hidden"></div>
+
+<details style="margin-top:8px">
+<summary style="cursor:pointer;font-size:10.5px;color:#94a3b8">⚙️ پیامِ سیستمی (اختیاری)</summary>
+<textarea id="chSystem" rows="2" style="width:100%;margin-top:6px;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;padding:8px;font-size:11px;font-family:inherit;line-height:1.8" placeholder="مثال: پاسخ‌ها را کوتاه و فارسی بده"></textarea>
+</details>
+</div>
+
+<!-- کادرِ گفت‌وگو -->
+<div id="chBox" class="ai-chat-box">
+<div class="ai-chat-empty" id="chEmpty">هنوز پیامی رد و بدل نشده. پایین بنویسید و بفرستید.</div>
+</div>
+
+<div style="display:flex;gap:6px;align-items:flex-end;margin-top:8px">
+<textarea id="chInput" rows="2" onkeydown="chKey(event)" style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;padding:8px;font-size:11.5px;font-family:inherit;line-height:1.8" placeholder="پیامتان را بنویسید… (Ctrl+Enter برای ارسال)"></textarea>
+<button class="btn btn-purple" id="chSendBtn" onclick="chSend()" style="flex:0;font-size:11px;white-space:nowrap">📨 ارسال</button>
+</div>
+<div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+<span id="chStatus" style="flex:1;font-size:10px;color:#64748b">—</span>
+<button class="btn btn-gray" onclick="chClear()" style="flex:0;font-size:10px;padding:3px 8px">🗑 پاک‌کردنِ گفت‌وگو</button>
+</div>
 </div>
 
 </div>
@@ -39383,6 +39783,201 @@ function aiTab(tab){
     if(tab==='autopilot'){ apLoadCatalog(); apLoadJobs(); apCronState(); }
     // v10.10 (۲۳): تبِ ایجنت هم کاتالوگِ مدل‌ها و وضعیتِ مدلِ فعال را می‌گیرد
     if(tab==='agent'){ agLoadCatalog(); agLoadTools(); }
+    // v10.11 (۲۴): تبِ چت هم در نخستین باز شدن فهرستِ مدل‌ها را می‌گیرد
+    if(tab==='chat'){ chLoadCatalog(); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ *  v10.11 (۲۴): لایهٔ مشترکِ «فهرستِ مدل‌ها» برای همهٔ انتخاب‌گرها
+ *
+ *  چرا نوشته شد: تا ۱۰٫۱۰ هر پنل خودش fetch می‌زد و انتهایش
+ *  «.catch(()=>{})» داشت. یعنی اگر درخواست ۵۰۰ می‌داد، یا هاست
+ *  به‌جای JSON یک صفحهٔ خطای HTML برمی‌گرداند، یا شبکه قطع بود،
+ *  هیچ اتفاقی نمی‌افتاد: منویِ مدل خالی می‌ماند و کاربر فقط
+ *  می‌دید «مدل‌ها لود نمی‌شوند» بدون یک کلمه توضیح.
+ *
+ *  حالا یک بارگذارِ مشترک داریم که سه حالت را صریح نشان می‌دهد:
+ *  «در حالِ بارگذاری» · «خطا + کدِ HTTP + دکمهٔ تلاش دوباره» · «خالی».
+ * ═══════════════════════════════════════════════════════════════════ */
+
+let aiMdlData = null;     // آخرین پاسخِ موفقِ ?ai_model_index
+let aiMdlBusy = false;    // درخواستی در جریان است؟
+let aiMdlErr  = '';       // متنِ آخرین خطا (خالی = بی‌خطا)
+const aiMdlHosts = [];    // انتخاب‌گرهایی که باید پس از بارگذاری پر شوند
+
+/** یک انتخاب‌گر را ثبت می‌کند تا با هر بارگذاری/خطا به‌روز شود */
+function aiMdlRegister(host){
+    for(let i=0;i<aiMdlHosts.length;i++){ if(aiMdlHosts[i].err===host.err) return; }
+    aiMdlHosts.push(host);
+}
+
+/** جعبهٔ وضعیت/خطای زیرِ یک انتخاب‌گر */
+function aiMdlSetBox(errId, html){
+    const b = $(errId);
+    if(!b) return;
+    if(!html){ b.classList.add('hidden'); b.innerHTML=''; return; }
+    b.classList.remove('hidden');
+    b.innerHTML = html;
+}
+
+/** پیامِ خطا را با کدِ HTTP و دکمهٔ تلاشِ دوباره می‌سازد */
+function aiMdlErrHtml(){
+    return '<b>فهرستِ مدل‌ها بارگذاری نشد.</b><br>' + esc(aiMdlErr)
+        + '<br><button class="btn btn-gray" onclick="aiMdlLoad(true)">🔄 تلاشِ دوباره</button>';
+}
+
+/** همهٔ انتخاب‌گرهای ثبت‌شده را با وضعیتِ فعلی هم‌گام می‌کند */
+function aiMdlSync(){
+    aiMdlHosts.forEach(function(h){
+        if(aiMdlBusy){ aiMdlSetBox(h.err, '⏳ در حالِ بارگذاریِ فهرستِ مدل‌ها…'); return; }
+        if(aiMdlErr){ aiMdlSetBox(h.err, aiMdlErrHtml()); return; }
+        if(aiMdlData && !aiMdlData.models.length){
+            aiMdlSetBox(h.err, 'هیچ مدلی پیدا نشد. در تبِ «ارائه‌دهنده‌ها» یک اتصال ثبت کنید.');
+        } else {
+            aiMdlSetBox(h.err, '');
+        }
+        if(typeof h.fill === 'function') h.fill();
+    });
+}
+
+/**
+ * فهرستِ مدل‌ها را می‌گیرد. برخلافِ نسخهٔ قبل هیچ خطایی را قورت نمی‌دهد:
+ * کدِ HTTP، پاسخِ غیرJSON و خطای شبکه هرکدام پیامِ خودشان را دارند.
+ */
+function aiMdlLoad(force){
+    if(aiMdlBusy) return;
+    if(aiMdlData && !force){ aiMdlSync(); return; }
+    aiMdlBusy = true; aiMdlErr = '';
+    aiMdlSync();
+    let code = 0;
+    fetch('?ai_model_index=1', {headers:{'Accept':'application/json'}})
+      .then(function(r){ code = r.status; return r.text(); })
+      .then(function(txt){
+        if(code < 200 || code >= 300) throw new Error('پاسخِ سرور: HTTP ' + toFa(code));
+        let d;
+        /* هاست‌هایی که صفحهٔ خطا یا بنرِ تبلیغاتی به پاسخ می‌چسبانند، JSON را
+           خراب می‌کنند. به‌جای «Unexpected token» گنگ، صریح می‌گوییم چه شد. */
+        try { d = JSON.parse(txt); }
+        catch(e){
+            const head = txt.replace(/\s+/g,' ').slice(0,90);
+            throw new Error('پاسخ JSON نبود (HTTP ' + toFa(code) + '). آغازِ پاسخ: ' + head);
+        }
+        if(!d || !d.ok) throw new Error(String((d && d.error) || 'پاسخِ نامعتبر از سرور'));
+        aiMdlData = d; aiMdlBusy = false; aiMdlErr = '';
+        aiMdlSync();
+      })
+      .catch(function(e){
+        aiMdlBusy = false;
+        aiMdlErr  = (e && e.message) ? e.message
+                  : 'ارتباط با سرور برقرار نشد (شبکه یا فایروال).';
+        aiMdlSync();
+      });
+}
+
+/** فهرستِ مدل‌ها پس از اعمالِ فیلترِ قابلیت، ارائه‌دهنده و جست‌وجو */
+function aiMdlPick(cap, group, q){
+    if(!aiMdlData) return [];
+    const needle = String(q||'').trim().toLowerCase();
+    return aiMdlData.models.filter(function(m){
+        if(cap === 'chat'      && !m.chat)      return false;
+        if(cap === 'tools'     && !m.tools)     return false;
+        if(cap === 'reasoning' && !m.reasoning) return false;
+        if(group && m.group !== group) return false;
+        if(needle){
+            const hay = (m.id + ' ' + m.name + ' ' + m.provider).toLowerCase();
+            if(hay.indexOf(needle) === -1) return false;
+        }
+        return true;
+    });
+}
+
+/** منویِ ارائه‌دهنده — گزینهٔ نخست همیشه «همهٔ ارائه‌دهنده‌ها» */
+function aiMdlFillProv(provId, cap){
+    const sel = $(provId);
+    if(!sel || !aiMdlData) return;
+    const keep = sel.value;
+    const rows = aiMdlPick(cap, '', '');
+    const n = {};
+    rows.forEach(function(m){ n[m.group] = (n[m.group]||0)+1; });
+    let h = '<option value="">همهٔ ارائه‌دهنده‌ها (' + toFa(rows.length) + ' مدل)</option>';
+    Object.keys(aiMdlData.groups).forEach(function(g){
+        if(!n[g]) return;
+        h += '<option value="'+esc(g)+'">'+esc(aiMdlData.groups[g])+' ('+toFa(n[g])+')</option>';
+    });
+    sel.innerHTML = h;
+    sel.value = keep;
+    if(sel.value !== keep) sel.value = '';   // ارائه‌دهنده دیگر مدلی ندارد
+}
+
+/** نشانه‌های کوتاهِ کنارِ نامِ مدل */
+function aiMdlIcons(m){
+    let t = m.ready ? '✅' : '💡';
+    if(m.tools)     t += '🤖';
+    if(m.reasoning) t += '🧠';
+    if(!m.chat)     t += '🚫';
+    return t;
+}
+
+/**
+ * منویِ مدل را می‌سازد. مقدارِ قبلی حفظ می‌شود؛ اگر مدلِ انتخابیِ کاربر
+ * از فیلتر بیرون افتاد، به‌جای پاک‌شدنِ بی‌صدا به‌عنوان گزینهٔ اضافه می‌ماند.
+ */
+function aiMdlFillModels(o){
+    const sel = $(o.model);
+    if(!sel) return;
+    const keep = sel.value;
+    if(!aiMdlData){
+        sel.innerHTML = '<option value="">' + (aiMdlBusy ? '⏳ در حالِ بارگذاری…'
+                                                         : '— فهرست بارگذاری نشده —') + '</option>';
+        return;
+    }
+    const group = ($(o.prov)||{value:''}).value;
+    const q     = ($(o.search)||{value:''}).value;
+    const rows  = aiMdlPick(o.cap, group, q);
+
+    let h = o.blank ? '<option value="">'+esc(o.blank)+'</option>' : '';
+    if(!rows.length){
+        h += '<option value="" disabled>— هیچ مدلی با این فیلتر پیدا نشد —</option>';
+    }
+    const byG = {};
+    rows.forEach(function(m){ (byG[m.group] = byG[m.group] || []).push(m); });
+    Object.keys(byG).forEach(function(g){
+        h += '<optgroup label="'+esc(aiMdlData.groups[g]||g)+'">';
+        byG[g].forEach(function(m){
+            const star = m.quality ? ' — ' + '★'.repeat(m.quality) : '';
+            h += '<option value="'+esc(m.id)+'">'+aiMdlIcons(m)+' '+esc(m.name)+star+'</option>';
+        });
+        h += '</optgroup>';
+    });
+    sel.innerHTML = h;
+    sel.value = keep;
+    /* مدلِ انتخابیْ قربانیِ فیلتر نشود: برش می‌گردانیم و علامت می‌زنیم */
+    if(keep && sel.value !== keep){
+        const all = (aiMdlData.models.filter(function(x){return x.id===keep;})[0]);
+        sel.insertAdjacentHTML('beforeend',
+            '<optgroup label="خارج از فیلترِ فعلی"><option value="'+esc(keep)+'">'
+            + esc(all ? all.name : keep) + '</option></optgroup>');
+        sel.value = keep;
+    }
+    if(typeof o.after === 'function') o.after();
+}
+
+/** متنِ راهنمای زیرِ منو برای مدلِ انتخاب‌شده */
+function aiMdlHintHtml(id, blankMsg){
+    if(!id) return blankMsg;
+    const m = aiMdlData ? aiMdlData.models.filter(function(x){return x.id===id;})[0] : null;
+    if(!m) return '<span style="color:#fbbf24">این مدل در فهرستِ فعلی نیست — شاید اتصالش حذف شده باشد.</span>';
+    const caps = [];
+    if(m.chat)      caps.push('💬 چت');
+    if(m.tools)     caps.push('🤖 ابزار');
+    if(m.reasoning) caps.push('🧠 استدلالی');
+    let h = '<b style="color:#93c5fd">'+esc(m.provider)+'</b>';
+    if(m.context) h += ' · 📊 ' + toFa(Math.round(m.context/1000)) + 'K حافظه';
+    if(caps.length) h += ' · ' + caps.join(' · ');
+    if(m.note) h += '<br>💡 ' + esc(m.note);
+    if(!m.chat && m.why) h += '<br><span style="color:#f87171">⚠️ ' + esc(m.why) + '</span>';
+    if(!m.ready) h += '<br><span style="color:#fbbf24">⚠️ اتصالِ این مدل ثبت نشده — اول در تبِ «ارائه‌دهنده‌ها» کلیدش را وارد کنید.</span>';
+    return h;
 }
 
 /* ===== v10.05 (۱۹): اتوماسیونِ ایجنتی — کارهای زمان‌بندی‌شده ===== */
@@ -39419,13 +40014,32 @@ function apPickModel(id){
 let apLogTimer = null;     // تایمرِ نوسازیِ مودالِ لاگ
 
 /** کاتالوگ را یک‌بار می‌گیرد و بخش‌های ثابتِ تب را می‌سازد */
-function apLoadCatalog(){
-    if(apCatalog){ apRenderCatalog(); return; }
-    fetch('?auto_catalog=1').then(r=>r.json()).then(d=>{
-        if(!d||!d.ok) return;
+function apLoadCatalog(force){
+    /* v10.11 (۲۴): منویِ مدل از فهرستِ مشترک پر می‌شود (با نمایشِ خطا)،
+       ولی دوره‌ها/کارهای آماده هنوز از کاتالوگِ اتوماسیون می‌آیند. */
+    aiMdlRegister({err:'apModelErr', fill:apFillModelSelect});
+    aiMdlLoad(!!force);
+    if(apCatalog && !force){ apRenderCatalog(); return; }
+    let code = 0;
+    fetch('?auto_catalog=1', {headers:{'Accept':'application/json'}})
+      .then(function(r){ code = r.status; return r.text(); })
+      .then(function(txt){
+        if(code < 200 || code >= 300) throw new Error('HTTP ' + toFa(code));
+        let d;
+        try { d = JSON.parse(txt); }
+        catch(e){ throw new Error('پاسخ JSON نبود (HTTP ' + toFa(code) + ')'); }
+        if(!d || !d.ok) throw new Error(String(d && d.error || 'پاسخِ نامعتبر'));
         apCatalog = d;
         apRenderCatalog();
-    }).catch(()=>{});
+      })
+      .catch(function(e){
+        /* دیگر بی‌صدا نیست: کاربر می‌فهمد چرا فهرستِ کارهای آماده خالی است */
+        const t = $('apTaskList');
+        if(t) t.innerHTML = '<span style="color:#f87171">کاتالوگِ کارها بارگذاری نشد — '
+            + esc((e && e.message) || 'خطای شبکه')
+            + ' <button class="btn btn-gray" onclick="apLoadCatalog(true)" '
+            + 'style="font-size:9px;padding:2px 7px">🔄 تلاشِ دوباره</button></span>';
+      });
 }
 
 function apRenderCatalog(){
@@ -39483,40 +40097,22 @@ function apRenderCatalog(){
 function apFillModelSelect(){
     const sel = $('apModel');
     if(!sel) return;
-    const keep = sel.value;
-    let h = '<option value="">🔗 مدلِ پیش‌فرضِ اتصالات</option>';
-    const byProv = {};
-    apModelsCache.forEach(function(m){ (byProv[m.provider] = byProv[m.provider] || []).push(m); });
-    Object.keys(byProv).forEach(function(p){
-        const info = apProvCache[p] || {name:p};
-        h += '<optgroup label="'+esc(info.name)+'">';
-        byProv[p].forEach(function(m){
-            const t = apTagsCache[m.tag] || {icon:'',label:''};
-            h += '<option value="'+esc(m.id)+'">'+t.icon+' '+esc(m.name)
-              +  ' — '+'★'.repeat(m.quality)+'</option>';
-        });
-        h += '</optgroup>';
-    });
-    sel.innerHTML = h;
-    if(keep) sel.value = keep;
+    /* کارهای زمان‌بندی‌شده ابزار صدا می‌زنند ⇒ فقط مدل‌های ابزاردار */
+    aiMdlFillProv('apProvSel', 'tools');
+    aiMdlFillModels({model:'apModel', prov:'apProvSel', search:'apModelPick',
+                     cap:'tools', blank:'🔗 مدلِ پیش‌فرضِ اتصالات', after:apModelHint});
     sel.onchange = apModelHint;
-    apModelHint();
 }
+
+/** تغییرِ ارائه‌دهنده ⇒ فهرستِ مدل‌ها فیلتر می‌شود */
+function apProvChange(){ apFillModelSelect(); }
 
 /** توضیحِ زیرِ منو: سقف و ویژگیِ مدلِ انتخاب‌شده */
 function apModelHint(){
     const sel = $('apModel'), hint = $('apModelHint');
     if(!sel || !hint) return;
-    const m = apModelsCache.filter(function(x){return x.id===sel.value;})[0];
-    if(!m){
-        hint.innerHTML = 'مدلِ پیش‌فرضِ اتصالات استفاده می‌شود — اگر مدلی انتخاب کنید باید کلیدش در بخشِ «اتصالات» ثبت شده باشد.';
-        return;
-    }
-    const info = apProvCache[m.provider] || {name:m.provider,key:''};
-    hint.innerHTML = '<b style="color:#93c5fd">'+esc(info.name)+'</b> · 📊 '
-        + toFa(Math.round(m.context/1000))+'K حافظه · ⏱ '+esc(m.limit)
-        + '<br>💡 '+esc(m.note)
-        + '<br><span style="color:#fbbf24">کلید از ' + esc(info.key) + ' — باید در «اتصالات» ثبت شود</span>';
+    hint.innerHTML = aiMdlHintHtml(sel.value,
+        'مدلِ پیش‌فرضِ اتصالات استفاده می‌شود — اگر مدلی انتخاب کنید باید کلیدش در بخشِ «اتصالات» ثبت شده باشد.');
 }
 
 /** دکمه‌های فیلترِ جنسِ مدل */
@@ -43455,51 +44051,26 @@ function agLog(msg) {
    (?auto_catalog=1) اینجا هم نشان داده می‌شود و انتخاب تا agentRun می‌رود. */
 var AG_MODEL_LS = 'ag_model_pick';
 
-function agLoadCatalog() {
-    var fill = function () { agFillModelSelect(); };
-    if (apCatalog) {
-        if (!apModelsCache.length) {
-            apModelsCache = apCatalog.models || [];
-            apTagsCache   = apCatalog.tags || {};
-            apProvCache   = apCatalog.providers || {};
-        }
-        fill(); return;
-    }
-    fetch('?auto_catalog=1').then(function (r) { return r.json(); }).then(function (d) {
-        if (!d || !d.ok) return;
-        apCatalog     = d;
-        apModelsCache = d.models || [];
-        apTagsCache   = d.tags || {};
-        apProvCache   = d.providers || {};
-        fill();
-    }).catch(function () { });
+function agLoadCatalog(force) {
+    /* v10.11 (۲۴): از بارگذارِ مشترک استفاده می‌کند تا خطاها دیده شوند.
+       ایجنت ابزار صدا می‌زند ⇒ فقط مدل‌های ابزاردار را نشان می‌دهیم. */
+    aiMdlRegister({err:'agModelErr', fill:agFillModelSelect});
+    aiMdlLoad(!!force);
 }
 
-/** پر کردنِ منویِ مدلِ ایجنت — گروه‌بندی‌شده بر اساسِ ارائه‌دهنده */
+/** تغییرِ ارائه‌دهنده ⇒ فهرستِ مدل‌ها فیلتر می‌شود */
+function agProvChange() { agFillModelSelect(); }
+
+/** پر کردنِ منویِ مدلِ ایجنت — با فیلترِ ارائه‌دهنده و جست‌وجو */
 function agFillModelSelect() {
     var sel = $('agModelSel');
     if (!sel) return;
-    var keep = sel.value || '';
-    if (!keep) { try { keep = localStorage.getItem(AG_MODEL_LS) || ''; } catch (e) { keep = ''; } }
-    var h = '<option value="">🔗 مدلِ پیش‌فرضِ اتصالات</option>';
-    var byProv = {};
-    apModelsCache.forEach(function (m) { (byProv[m.provider] = byProv[m.provider] || []).push(m); });
-    Object.keys(byProv).forEach(function (pv) {
-        var info = apProvCache[pv] || { name: pv };
-        h += '<optgroup label="' + esc(info.name) + '">';
-        byProv[pv].forEach(function (m) {
-            var t = apTagsCache[m.tag] || { icon: '', label: '' };
-            h += '<option value="' + esc(m.id) + '">' + t.icon + ' ' + esc(m.name)
-              +  ' — ' + '★'.repeat(m.quality) + '</option>';
-        });
-        h += '</optgroup>';
-    });
-    sel.innerHTML = h;
-    /* مثل apFillModelSelect: اگر شناسهٔ ذخیره‌شده دیگر در کاتالوگ نباشد،
-       مرورگر value را بی‌صدا خالی می‌کند ⇒ به پیش‌فرض برمی‌گردیم. */
-    if (keep) { sel.value = keep; if (sel.value !== keep) sel.value = ''; }
+    /* انتخابِ دفعهٔ قبلِ کاربر پیش از ساختِ منو برگردانده می‌شود */
+    if (!sel.value) { try { sel.value = localStorage.getItem(AG_MODEL_LS) || ''; } catch (e) { } }
+    aiMdlFillProv('agProvSel', 'tools');
+    aiMdlFillModels({model:'agModelSel', prov:'agProvSel', search:'agModelSearch',
+                     cap:'tools', blank:'🔗 مدلِ پیش‌فرضِ اتصالات', after:agModelHint});
     sel.onchange = agModelHint;
-    agModelHint();
 }
 
 /** توضیحِ زیرِ منو + ذخیرهٔ انتخاب برای دفعهٔ بعد */
@@ -43507,16 +44078,10 @@ function agModelHint() {
     var sel = $('agModelSel'), hint = $('agModelHint');
     if (!sel || !hint) return;
     try { localStorage.setItem(AG_MODEL_LS, sel.value || ''); } catch (e) { }
-    var m = apModelsCache.filter(function (x) { return x.id === sel.value; })[0];
-    if (!m) {
-        hint.innerHTML = 'مدلِ پیش‌فرضِ اتصالات استفاده می‌شود — همان چیزی که بالا زیرِ «مدل فعال» می‌بینید.';
-        return;
-    }
-    var info = apProvCache[m.provider] || { name: m.provider, key: '' };
-    hint.innerHTML = '<b style="color:#93c5fd">' + esc(info.name) + '</b> · 📊 '
-        + toFa(Math.round(m.context / 1000)) + 'K حافظه · ⏱ ' + esc(m.limit)
-        + '<br>💡 ' + esc(m.note)
-        + '<br><span style="color:#fbbf24">کلید از ' + esc(info.key) + ' — باید در «اتصالات» ثبت شده باشد</span>';
+    hint.innerHTML = aiMdlHintHtml(sel.value,
+        'مدلِ پیش‌فرضِ اتصالات استفاده می‌شود — همان چیزی که بالا زیرِ «مدل فعال» می‌بینید.');
+    if (!sel.value) return;
+    var m = { id: sel.value };
     /* آیا این مدل واقعاً به یکی از اتصال‌های ثبت‌شده می‌خورد؟ */
     fetch('?agent_model_check&model=' + encodeURIComponent(m.id))
         .then(function (r) { return r.json(); }).then(function (d) {
@@ -43526,6 +44091,166 @@ function agModelHint() {
                 ? '<br><span style="color:#4ade80">✅ به اتصالِ «' + esc(d.provider) + '» وصل می‌شود</span>'
                 : '<br><span style="color:#f87171">⚠️ هیچ اتصالِ فعالی برای این مدل نیست — اجرا با مدلِ پیش‌فرض می‌رود</span>';
         }).catch(function () { });
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ *  v10.11 (۲۴): تبِ «💬 چت با مدل‌ها»
+ *
+ *  گفت‌وگوی مستقیم با هر مدلِ ثبت‌شده، جدا از ایجنت و اتوماسیون.
+ *  انتخابِ مدل سه فیلترِ خواسته‌شده دارد: فقط چت / ابزاردار / استدلالی.
+ *  تاریخچه در حافظهٔ صفحه می‌ماند و با هر پیام به سرور می‌رود تا مدل
+ *  بافتِ گفت‌وگو را داشته باشد؛ سقفِ ۱۲ نوبتِ آخر سمتِ PHP اعمال می‌شود.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+var CH_MODEL_LS = 'ai_chat_model';
+var chCap  = 'chat';   // فیلترِ فعال: chat | tools | reasoning
+var chHist = [];       // [{role:'user'|'assistant', content:'…'}]
+var chBusy = false;
+
+function chLoadCatalog(force) {
+    aiMdlRegister({err:'chModelErr', fill:chFillModelSelect});
+    chRenderFilter();
+    aiMdlLoad(!!force);
+}
+
+/** سه دکمهٔ فیلترِ نوعِ مدل، با شمارشِ زنده */
+function chRenderFilter() {
+    var f = $('chFilter');
+    if (!f) return;
+    var defs = [
+        ['chat',      '💬 فقط چت',        'مدل‌هایی که پاسخِ متنی می‌دهند'],
+        ['tools',     '🤖 دارای ابزار',   'مدل‌هایی که فراخوانیِ ابزار (function calling) دارند'],
+        ['reasoning', '🧠 استدلالی',      'مدل‌هایی که پیش از پاسخ زنجیرهٔ استدلال می‌سازند']
+    ];
+    var c = (aiMdlData && aiMdlData.counts) || {};
+    var h = '';
+    defs.forEach(function (d) {
+        var n = c[d[0]];
+        h += '<span class="ai-chip' + (chCap === d[0] ? ' on' : '') + '" title="' + esc(d[2]) + '"'
+          +  ' onclick="chSetCap(\'' + d[0] + '\')">' + d[1]
+          +  (n === undefined ? '' : ' (' + toFa(n) + ')') + '</span>';
+    });
+    f.innerHTML = h;
+}
+
+/** تغییرِ فیلترِ نوعِ مدل */
+function chSetCap(cap) {
+    chCap = cap;
+    chRenderFilter();
+    chFillModelSelect();
+}
+
+function chProvChange() { chFillModelSelect(); }
+
+function chFillModelSelect() {
+    var sel = $('chModelSel');
+    if (!sel) return;
+    if (!sel.value) { try { sel.value = localStorage.getItem(CH_MODEL_LS) || ''; } catch (e) { } }
+    chRenderFilter();
+    aiMdlFillProv('chProvSel', chCap);
+    aiMdlFillModels({model:'chModelSel', prov:'chProvSel', search:'chModelSearch',
+                     cap:chCap, blank:'🔗 مدلِ پیش‌فرضِ اتصالات', after:chModelHint});
+}
+
+function chModelHint() {
+    var sel = $('chModelSel'), hint = $('chModelHintBox');
+    if (!sel || !hint) return;
+    try { localStorage.setItem(CH_MODEL_LS, sel.value || ''); } catch (e) { }
+    hint.innerHTML = aiMdlHintHtml(sel.value,
+        'مدلِ پیش‌فرضِ اتصالات استفاده می‌شود. برای انتخابِ مدلِ مشخص، اول نوع و ارائه‌دهنده را تعیین کنید.');
+}
+
+/** یک حباب پیام به کادرِ گفت‌وگو اضافه می‌کند */
+function chBubble(kind, text, meta) {
+    var box = $('chBox');
+    if (!box) return null;
+    var em = $('chEmpty');
+    if (em) em.remove();
+    var d = document.createElement('div');
+    d.className = 'ai-msg ' + kind;
+    d.innerHTML = esc(text) + (meta ? '<span class="mt">' + esc(meta) + '</span>' : '');
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+    return d;
+}
+
+/** Ctrl+Enter ⇒ ارسال (Enterِ تنها برای خطِ جدید آزاد می‌ماند) */
+function chKey(e) {
+    if (e && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); chSend(); }
+}
+
+function chSend() {
+    if (chBusy) { showToast('صبر کنید، پاسخِ قبلی هنوز نیامده', true); return; }
+    var inp = $('chInput');
+    if (!inp) return;
+    var msg = (inp.value || '').trim();
+    if (!msg) { showToast('پیام خالی است', true); return; }
+
+    var sel   = $('chModelSel');
+    var model = sel ? sel.value : '';
+    var m     = (aiMdlData && model)
+              ? aiMdlData.models.filter(function (x) { return x.id === model; })[0] : null;
+    if (m && !m.chat) {
+        showToast('این مدل گفت‌وگویی نیست: ' + (m.why || 'پاسخِ متنی نمی‌دهد'), true);
+        return;
+    }
+
+    chBubble('me', msg);
+    inp.value = '';
+    chBusy = true;
+    var btn = $('chSendBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ …'; }
+    var st = $('chStatus');
+    if (st) st.textContent = 'در حالِ گرفتنِ پاسخ' + (m ? ' از ' + m.name : '') + '…';
+    var wait = chBubble('bot', '⏳ در حالِ نوشتن…');
+
+    var fd = new FormData();
+    fd.append('action', 'ai_chat_send');
+    fd.append('message', msg);
+    fd.append('model', model);
+    fd.append('system', ($('chSystem') || {value:''}).value || '');
+    fd.append('history', JSON.stringify(chHist));
+
+    var code = 0;
+    fetch(location.pathname, {method:'POST', body:fd})
+      .then(function (r) { code = r.status; return r.text(); })
+      .then(function (txt) {
+        var d;
+        try { d = JSON.parse(txt); }
+        catch (e) {
+            throw new Error('پاسخ JSON نبود (HTTP ' + toFa(code) + '): '
+                + txt.replace(/\s+/g, ' ').slice(0, 90));
+        }
+        if (!d.ok) throw new Error(d.error || ('HTTP ' + toFa(code)));
+        if (wait) wait.remove();
+        chBubble('bot', d.reply,
+            (d.model || 'پیش‌فرض') + ' · ' + toFa(Math.round(d.took / 100) / 10) + ' ثانیه');
+        /* تاریخچه فقط پس از پاسخِ موفق رشد می‌کند تا پیامِ شکست‌خورده
+           در نوبتِ بعد دوباره به مدل فرستاده نشود. */
+        chHist.push({role:'user', content:msg});
+        chHist.push({role:'assistant', content:d.reply});
+        if (st) st.textContent = '✅ پاسخ آمد — ' + toFa(chHist.length / 2) + ' نوبت گفت‌وگو';
+      })
+      .catch(function (e) {
+        if (wait) wait.remove();
+        chBubble('err', '⚠️ ' + ((e && e.message) || 'ارتباط با سرور برقرار نشد'));
+        if (st) st.textContent = '❌ ارسال ناموفق بود';
+      })
+      .then(function () {
+        chBusy = false;
+        var b = $('chSendBtn');
+        if (b) { b.disabled = false; b.textContent = '📨 ارسال'; }
+      });
+}
+
+function chClear() {
+    if (chHist.length && !confirm('کلِ گفت‌وگو پاک شود؟')) return;
+    chHist = [];
+    var box = $('chBox');
+    if (box) box.innerHTML = '<div class="ai-chat-empty" id="chEmpty">هنوز پیامی رد و بدل نشده. پایین بنویسید و بفرستید.</div>';
+    var st = $('chStatus');
+    if (st) st.textContent = '—';
+    showToast('گفت‌وگو پاک شد');
 }
 
 /** بازگشت به مدلِ پیش‌فرضِ اتصالات */
