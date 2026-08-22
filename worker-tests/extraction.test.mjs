@@ -238,6 +238,12 @@ test('selector tab: sticky sub-tabs, product dropdown for detail sample, price d
   assert.match(scraper,/تنوع‌ها به‌عنوان گالری عکس/,'variation images feed the gallery');
 });
 
+test('every generic provider key row has a test button',async()=>{
+  const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
+  assert.match(dash,/data-ai-key="'\+i\+'"[\s\S]*data-ma="ai-key-test:'\+i\+'"/,'generic key row has test button next to the input');
+  assert.match(dash,/aiEditorModels\.find\(m=>aiChatCompatibleModel/,'test uses a chat-compatible model first');
+});
+
 test('CF editor lists multiple accounts with a test button per account; generic keys keep test buttons',async()=>{
   const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
   assert.match(dash,/data-ai-account-id="/,'account id input per row');
