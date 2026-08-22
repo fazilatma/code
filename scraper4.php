@@ -53,6 +53,12 @@ const EXTRACT_PROGRESS_FILE = __DIR__ . '/extract_progress.json';
 const CATLEARN_FILE = __DIR__ . '/category_learning.json';   // v8.48
 // v8.60: سقف «چند کلمهٔ اول» برای یادگیری و تطبیق خودکار دسته‌بندی
 const CATLEARN_MAX_WORDS = 5;
+/* v10.12 (۲۵): حافظهٔ «دسته‌های امتحان‌شده» برای هر محصول.
+   جدا از category_learning.json است: آن یکی می‌گوید «چه چیزی جواب داد»
+   (کلمه ⇒ دسته)، این یکی می‌گوید «چه چیزی برای این محصولِ مشخص قبلاً
+   امتحان شد» تا دوباره همان پیشنهاد تکرار و دوباره رد نشود. */
+const CATTRIED_FILE = __DIR__ . '/category_attempts.json';
+const CATTRIED_MAX_PRODUCTS = 2000;   // سقفِ حجم؛ قدیمی‌ترها هرس می‌شوند
 const RECON_PROGRESS_FILE = __DIR__ . '/recon_progress.json'; // v8.49
 const SUFFIX_PROGRESS_FILE = __DIR__ . '/suffix_progress.json'; // v8.53
 // v10.02 (۱۶): حذفِ هوشمندِ محصولاتِ تکراری — کارِ بلندمدتِ سمتِ سرور
@@ -120,7 +126,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.10';
+const APP_VERSION = '10.12';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2942,18 +2948,35 @@ function aiVoteRecord(string $task, string $input, string $winner, array $candid
  *    aiCatSummary()  → خلاصهٔ کوتاهِ فارسی برای ستونِ «پاسخ دسته»
  *    aiCatMeta()     → متادیتای خام برای مودالِ «جزئیات کامل»
  * ===================================================================== */
-function aiCatPayload(string $title, string $catList): array {
+function aiCatPayload(string $title, string $catList, array $tried = []): array {
     $prompt = "You are a product categorization assistant for a Persian (Farsi) e-commerce platform (BaSalam).\n"
             . "Given this product title: \"" . $title . "\"\n\n"
-            . "Select the BEST category ID from this list:\n" . $catList . "\n\n"
-            . "Return ONLY the category ID number. Do not return any text, explanation, or name. Just the numeric ID.";
+            . "Select the BEST category ID from this list:\n" . $catList . "\n\n";
+    /* v10.12 (۲۵): دسته‌های امتحان‌شده از خودِ فهرست حذف شده‌اند، ولی یک
+       تذکرِ صریح هم می‌دهیم: بعضی مدل‌ها شناسه‌ای را از حافظه می‌سازند که
+       اصلاً در فهرست نبوده. با این جمله، تکرارِ گزینهٔ ردشده کمتر می‌شود. */
+    if ($tried) {
+        $lbl = [];
+        foreach (array_slice($tried, 0, 12) as $t) {
+            $tid = (int)($t['id'] ?? $t);
+            if ($tid <= 0) continue;
+            $tnm = is_array($t) ? trim((string)($t['name'] ?? '')) : '';
+            $lbl[] = $tnm !== '' ? ($tid . ' (' . $tnm . ')') : (string)$tid;
+        }
+        if ($lbl) {
+            $prompt .= "IMPORTANT: these category IDs were already tried for this exact product and were REJECTED. "
+                     . "Do NOT return any of them: " . implode(', ', $lbl) . "\n"
+                     . "Choose a genuinely different category.\n\n";
+        }
+    }
+    $prompt .= "Return ONLY the category ID number. Do not return any text, explanation, or name. Just the numeric ID.";
     return ['messages' => [
         ['role' => 'system', 'content' => 'You are a product categorization assistant. Return ONLY the numeric category ID.'],
         ['role' => 'user', 'content' => $prompt],
     ], 'temperature' => 0.1, 'max_tokens' => 20];
 }
 
-function aiCatParse(array $r, string $title, array $cats, string $model, int $lat): array {
+function aiCatParse(array $r, string $title, array $cats, string $model, int $lat, array $exclude = []): array {
     /* v9.96: بدنهٔ خامِ پاسخِ سرویس برای درخواستِ دسته‌بندی هم برگردانده می‌شود
        تا در مودالِ «جزئیات کاملِ تستِ مدل» کنارِ پاسخ خامِ پیام دیده شود. */
     $rawCat = mb_substr((string)($r['raw'] ?? ''), 0, 4000);
@@ -2972,8 +2995,16 @@ function aiCatParse(array $r, string $title, array $cats, string $model, int $la
         $id = autoMatchBslCategory($title, $cats);
         if ($id > 0) { $valid = true; foreach ($cats as $c) { if ((int)$c['id'] === $id) { $name = $c['name']; break; } } }
     }
+    /* v10.12 (۲۵): اگر مدل با وجودِ حذفِ گزینه باز هم یکی از دسته‌های
+       ردشده را برگرداند، اینجا مردود می‌شود. بدونِ این بررسی، حلقهٔ
+       «پیشنهاد ⇒ رد ⇒ همان پیشنهاد» دوباره بسته می‌شد. */
+    $repeat = false;
+    if ($valid && $exclude && in_array($id, array_map('intval', $exclude), true)) {
+        $repeat = true; $valid = false;
+    }
     return ['ok' => $valid, 'category_id' => $id, 'category_name' => $name,
-            'ai_text' => $text, 'error' => '', 'latency' => $lat, 'model' => $model,
+            'ai_text' => $text, 'error' => $repeat ? 'دستهٔ تکراری (قبلاً امتحان شده)' : '',
+            'repeat' => $repeat, 'latency' => $lat, 'model' => $model,
             'raw' => $rawCat, 'status' => (int)$r['code'], 'via' => (string)($r['via'] ?? '')];
 }
 
@@ -2994,11 +3025,12 @@ function aiCatMeta(array $res): array {
 
 /** دسته‌بندی یک کاندید خاص (برای آزمون چند-کاندیدی) */
 function aiCandidateCategory(array $p, string $model, string $title, array $cats,
-                              array $leafCats, string $catList, ?array $net = null): array {
+                              array $leafCats, string $catList, ?array $net = null,
+                              array $exclude = [], array $triedInfo = []): array {
     if ($net === null) $net = aiNetCfg();
     $t0 = microtime(true);
-    $r = aiProviderCall($p, $model, aiCatPayload($title, $catList), $net);
-    return aiCatParse($r, $title, $cats, $model, (int)round((microtime(true) - $t0) * 1000));
+    $r = aiProviderCall($p, $model, aiCatPayload($title, $catList, $triedInfo), $net);
+    return aiCatParse($r, $title, $cats, $model, (int)round((microtime(true) - $t0) * 1000), $exclude);
 }
 
 /** پاسخ خودکار یک کاندید خاص (برای آزمون چند-کاندیدی) */
@@ -3696,6 +3728,146 @@ function catLearnLookup(string $title, ?array $learned = null, ?int $maxWords = 
     for ($i = $n; $i >= 1; $i--) {
         $id = catLearnBestFor(catFirstWords($title, $i), $d);
         if ($id > 0) return $id;
+    }
+    return 0;
+}
+
+/* =====================================================================
+ *  v10.12 (۲۵): حافظهٔ «دسته‌های امتحان‌شدهٔ هر محصول»
+ *
+ *  چرا لازم شد: اصلاحِ جمعی هر بار از صفر تصمیم می‌گرفت. اگر مدل برای
+ *  محصولی دستهٔ X را پیشنهاد می‌داد و باسلام دوباره ردش می‌کرد، اجرای
+ *  بعدی همان X را دوباره پیشنهاد می‌داد — یک حلقهٔ بی‌پایان که هم وقت و
+ *  هم سهمیهٔ مدل را می‌سوزاند. حالا هر تلاش ثبت می‌شود و دفعهٔ بعد هم از
+ *  پرامپتِ مدل و هم از فهرستِ کاندیدها کنار گذاشته می‌شود.
+ *
+ *  ساختار: products[<pid>] = ['t'=>عنوان, 'cur'=>دستهٔ فعلی,
+ *                             'tried'=>[<cid>=>['n','name','at','by','res']],
+ *                             'last'=>ts]
+ * ===================================================================== */
+function catTriedLoad(): array {
+    if (!is_file(CATTRIED_FILE)) return ['updated_at' => 0, 'products' => []];
+    $d = json_decode((string)@file_get_contents(CATTRIED_FILE), true);
+    if (!is_array($d)) return ['updated_at' => 0, 'products' => []];
+    if (!is_array($d['products'] ?? null)) $d['products'] = [];
+    return $d;
+}
+
+function catTriedSave(array $d): void {
+    // هرسِ قدیمی‌ترها تا فایل بی‌نهایت رشد نکند
+    if (count($d['products']) > CATTRIED_MAX_PRODUCTS) {
+        uasort($d['products'], fn($a, $b) => (int)($b['last'] ?? 0) <=> (int)($a['last'] ?? 0));
+        $d['products'] = array_slice($d['products'], 0, CATTRIED_MAX_PRODUCTS, true);
+    }
+    $d['updated_at'] = time();
+    @file_put_contents(CATTRIED_FILE, json_encode($d, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/** ردیفِ یک محصول (خالی اگر تا حالا چیزی امتحان نشده) */
+function catTriedRow(int $pid, ?array $d = null): array {
+    if ($pid <= 0) return [];
+    $d = $d ?? catTriedLoad();
+    $r = $d['products'][(string)$pid] ?? null;
+    return is_array($r) ? $r : [];
+}
+
+/**
+ * فهرستِ شناسه‌هایی که برای این محصول نباید دوباره پیشنهاد شوند:
+ * هرچه قبلاً امتحان شده + دستهٔ فعلیِ ثبت‌شده (چون همان است که رد شده).
+ */
+function catTriedExclude(int $pid, int $currentCatId = 0, ?array $d = null): array {
+    $out = [];
+    if ($currentCatId > 0) $out[] = $currentCatId;
+    $row = catTriedRow($pid, $d);
+    foreach (array_keys((array)($row['tried'] ?? [])) as $cid) {
+        $cid = (int)$cid;
+        if ($cid > 0 && !in_array($cid, $out, true)) $out[] = $cid;
+    }
+    if (($cur = (int)($row['cur'] ?? 0)) > 0 && !in_array($cur, $out, true)) $out[] = $cur;
+    return $out;
+}
+
+/** آیا این دسته قبلاً برای این محصول امتحان شده؟ */
+function catTriedHas(int $pid, int $catId, ?array $d = null): bool {
+    if ($pid <= 0 || $catId <= 0) return false;
+    $row = catTriedRow($pid, $d);
+    return isset($row['tried'][(string)$catId]);
+}
+
+/**
+ * ثبتِ یک تلاش. $res: applied (اعمال شد) | rejected (باسلام رد کرد) |
+ * failed (PATCH نشد) | skipped (تکراری بود و نفرستادیم).
+ */
+function catTriedRecord(int $pid, int $catId, string $catName = '', string $by = '',
+                        string $res = 'applied', string $title = '', int $curCat = 0): bool {
+    if ($pid <= 0 || $catId <= 0) return false;
+    $d = catTriedLoad();
+    $k = (string)$pid;
+    if (!isset($d['products'][$k]) || !is_array($d['products'][$k])) {
+        $d['products'][$k] = ['t' => '', 'cur' => 0, 'tried' => [], 'last' => 0];
+    }
+    if ($title !== '')  $d['products'][$k]['t']   = mb_substr($title, 0, 120);
+    if ($curCat > 0)    $d['products'][$k]['cur'] = $curCat;
+    $ck   = (string)$catId;
+    $prev = $d['products'][$k]['tried'][$ck] ?? ['n' => 0, 'name' => ''];
+    $d['products'][$k]['tried'][$ck] = [
+        'n'    => (int)($prev['n'] ?? 0) + 1,
+        'name' => $catName !== '' ? $catName : (string)($prev['name'] ?? ''),
+        'at'   => time(), 'by' => mb_substr($by, 0, 60), 'res' => $res,
+    ];
+    $d['products'][$k]['last'] = time();
+    catTriedSave($d);
+    return true;
+}
+
+/** پاک‌کردنِ حافظهٔ تلاش‌ها — همه یا فقط یک محصول */
+function catTriedClear(int $pid = 0): int {
+    $d = catTriedLoad();
+    if ($pid <= 0) { $n = count($d['products']); catTriedSave(['updated_at' => time(), 'products' => []]); return $n; }
+    $k = (string)$pid;
+    if (!isset($d['products'][$k])) return 0;
+    unset($d['products'][$k]);
+    catTriedSave($d);
+    return 1;
+}
+
+/**
+ * فهرستِ دسته‌ها را برای پرامپت می‌سازد و شناسه‌های امتحان‌شده را حذف
+ * می‌کند. حذف از خودِ فهرست از «نگو این را انتخاب کن» قوی‌تر است: مدل
+ * اصلاً گزینه را نمی‌بیند، پس نمی‌تواند تکرارش کند.
+ */
+function aiCatListBuild(array $leafCats, array $exclude = [], int $maxLen = 3000): string {
+    $ex = [];
+    foreach ($exclude as $e) { $e = (int)$e; if ($e > 0) $ex[$e] = true; }
+    $out = ''; $n = 0;
+    foreach ($leafCats as $c) {
+        $id = (int)($c['id'] ?? 0);
+        if ($id <= 0 || isset($ex[$id])) continue;
+        $line = $id . ': ' . (string)($c['name'] ?? '') . "\n";
+        if (strlen($out) + strlen($line) > $maxLen) break;
+        $out .= $line; $n++;
+    }
+    return $out;
+}
+
+/** شمارشِ کوتاهِ فارسی از حافظهٔ تلاش‌ها برای نمایش در رابط */
+function catTriedStats(): array {
+    $d = catTriedLoad();
+    $prod = count($d['products']);
+    $att = 0;
+    foreach ($d['products'] as $r) $att += count((array)($r['tried'] ?? []));
+    return ['products' => $prod, 'attempts' => $att, 'updated_at' => (int)($d['updated_at'] ?? 0)];
+}
+
+/** شناسهٔ دستهٔ فعلیِ محصول را از شکل‌های مختلفِ پاسخِ باسلام درمی‌آورد */
+function bslProductCatId(array $p): int {
+    $rev  = (array)($p['revision'] ?? []);
+    $rd   = (array)($rev['data'] ?? []);
+    foreach ([$rd['category'] ?? null, $p['category'] ?? null] as $c) {
+        if (is_array($c) && (int)($c['id'] ?? 0) > 0) return (int)$c['id'];
+    }
+    foreach ([$rd['category_id'] ?? null, $p['category_id'] ?? null] as $c) {
+        if (is_numeric($c) && (int)$c > 0) return (int)$c;
     }
     return 0;
 }
@@ -14590,6 +14762,35 @@ if (isset($_GET['ai_probe'])) {
  * نمی‌آیند چون کنار خودِ فایل ذخیره می‌شوند. با این دو اندپوینت می‌شود
  * حافظه را از نصب قبلی بیرون کشید و در نصب تازه ریخت.
  */
+/* v10.12 (۲۵): مدیریتِ حافظهٔ «دسته‌های امتحان‌شده».
+   op=stats  ⇒ آمار کلی
+   op=list   ⇒ تلاش‌های یک محصول (برای نمایش زیر ردیفِ فاز ۲)
+   op=clear  ⇒ پاک‌کردنِ یک محصول (pid) یا کلِ حافظه (pid=0) */
+if (($_POST['action'] ?? '') === 'cat_tried') {
+    header('Content-Type: application/json; charset=UTF-8');
+    $op  = (string)($_POST['op'] ?? 'stats');
+    $pid = (int)($_POST['pid'] ?? 0);
+    if ($op === 'clear') {
+        $n = catTriedClear($pid);
+        echo json_encode(['ok' => true, 'cleared' => $n,
+            'msg' => $pid > 0 ? 'حافظهٔ تلاش این محصول پاک شد' : 'کل حافظهٔ تلاش‌ها پاک شد (' . aiFaNum($n) . ' محصول)'],
+            JSON_UNESCAPED_UNICODE); exit;
+    }
+    if ($op === 'list') {
+        $row = catTriedRow($pid);
+        $out = [];
+        foreach ((array)($row['tried'] ?? []) as $cid => $info) {
+            $out[] = ['id' => (int)$cid, 'name' => (string)($info['name'] ?? ''),
+                      'n' => (int)($info['n'] ?? 1), 'at' => (int)($info['at'] ?? 0),
+                      'by' => (string)($info['by'] ?? ''), 'res' => (string)($info['res'] ?? '')];
+        }
+        usort($out, function ($a, $b) { return $b['at'] <=> $a['at']; });
+        echo json_encode(['ok' => true, 'pid' => $pid, 'cur' => (int)($row['cur'] ?? 0),
+                          'title' => (string)($row['t'] ?? ''), 'tried' => $out], JSON_UNESCAPED_UNICODE); exit;
+    }
+    echo json_encode(['ok' => true] + catTriedStats(), JSON_UNESCAPED_UNICODE); exit;
+}
+
 if (($_POST['action'] ?? '') === 'catlearn_import') {
     header('Content-Type: application/json; charset=UTF-8');
     $inc = json_decode((string)($_POST['data'] ?? '{}'), true);
@@ -17539,6 +17740,128 @@ if (isset($_GET['selftest'])) {
     $add('10.11', 'کاتالوگِ اتوماسیون هم دیگر خطایش را پنهان نمی‌کند',
          strpos($selfSrc, 'کاتالوگِ کارها بارگذاری نشد') !== false
       && strpos($selfSrc, 'onclick="apLoadCatalog(true)"') !== false);
+
+    /* ---------- v10.12 (۲۵): حافظهٔ دسته‌های امتحان‌شده + اجماعِ چندمدلی ---------- */
+    $add('10.12', 'فایلِ حافظهٔ «دسته‌های امتحان‌شده» با سقفِ حجم تعریف شده است',
+         strpos($selfSrc, "CATTRIED_" . "FILE = __DIR__") !== false
+      && defined('CATTRIED_MAX_PRODUCTS') && CATTRIED_MAX_PRODUCTS >= 500);
+    $add('10.12', 'دستهٔ فعلیِ محصول از هر چهار شکلِ پاسخِ باسلام خوانده می‌شود',
+         bslProductCatId(['revision' => ['data' => ['category' => ['id' => 11]]], 'category_id' => 99]) === 11
+      && bslProductCatId(['category' => ['id' => 22]]) === 22
+      && bslProductCatId(['category_id' => 33]) === 33
+      && bslProductCatId(['title' => 'x']) === 0);
+    $add('10.12', 'ثبتِ تلاش برای هر محصول جدا نگه داشته می‌شود و شمارنده دارد',
+         (function () {
+             $bak = is_file(CATTRIED_FILE) ? (string)@file_get_contents(CATTRIED_FILE) : null;
+             @unlink(CATTRIED_FILE);
+             catTriedRecord(101, 501, 'الف', 'ai_text', 'rejected', 'محصول ۱', 0);
+             catTriedRecord(101, 501, 'الف', 'ai_text', 'rejected', 'محصول ۱', 0);
+             catTriedRecord(101, 502, 'ب',   'master',  'applied',  'محصول ۱', 0);
+             catTriedRecord(102, 501, 'الف', 'master',  'failed',   'محصول ۲', 0);
+             $r1 = catTriedRow(101); $r2 = catTriedRow(102);
+             $ok = (int)($r1['tried'][501]['n'] ?? 0) === 2
+                && count($r1['tried'] ?? []) === 2
+                && count($r2['tried'] ?? []) === 1
+                && catTriedHas(101, 502) === true
+                && catTriedHas(102, 502) === false;
+             $st = catTriedStats();
+             $ok = $ok && $st['products'] === 2 && $st['attempts'] === 3;
+             // پاک‌کردنِ یک محصول فقط همان را می‌برد
+             catTriedClear(101);
+             $ok = $ok && catTriedHas(101, 501) === false && catTriedHas(102, 501) === true;
+             catTriedClear(0);
+             $ok = $ok && catTriedStats()['products'] === 0;
+             @unlink(CATTRIED_FILE);
+             if ($bak !== null) @file_put_contents(CATTRIED_FILE, $bak);
+             return $ok;
+         })());
+    $add('10.12', 'دستهٔ فعلیِ محصول هم مثل دسته‌های امتحان‌شده ممنوع می‌شود',
+         (function () {
+             $bak = is_file(CATTRIED_FILE) ? (string)@file_get_contents(CATTRIED_FILE) : null;
+             @unlink(CATTRIED_FILE);
+             catTriedRecord(201, 601, 'الف', 'ai_text', 'rejected', 'م', 777);
+             $ex = catTriedExclude(201, 777);
+             // هم دستهٔ امتحان‌شده و هم دستهٔ فعلی باید در فهرستِ ممنوع باشند
+             $ok = in_array(601, $ex, true) && in_array(777, $ex, true);
+             // بدونِ دادنِ دستهٔ فعلی هم، دستهٔ ثبت‌شده در حافظه ممنوع می‌ماند
+             $ok = $ok && in_array(777, catTriedExclude(201, 0), true);
+             @unlink(CATTRIED_FILE);
+             if ($bak !== null) @file_put_contents(CATTRIED_FILE, $bak);
+             return $ok;
+         })());
+    $add('10.12', 'فهرستِ دسته‌های پیشنهادی، دسته‌های ممنوع را حذف می‌کند',
+         (function () {
+             $leaf = [['id' => 1, 'name' => 'یک'], ['id' => 2, 'name' => 'دو'], ['id' => 3, 'name' => 'سه']];
+             $all  = aiCatListBuild($leaf, []);
+             $cut  = aiCatListBuild($leaf, [2]);
+             return strpos($all, '2: دو') !== false
+                 && strpos($cut, '2: دو') === false
+                 && strpos($cut, '1: یک') !== false
+                 && aiCatListBuild($leaf, [1, 2, 3]) === '';
+         })());
+    $add('10.12', 'پرامپتِ دسته‌بندی صریحاً دسته‌های امتحان‌شده را ممنوع اعلام می‌کند',
+         (function () {
+             $pl = aiCatPayload('کفش', '1=یک' . "\n" . '2=دو', [['id' => 9, 'name' => 'نُه']]);
+             $j  = json_encode($pl, JSON_UNESCAPED_UNICODE);
+             // قراردادِ قدیمیِ پیام‌ها نباید بشکند
+             return count($pl['messages']) === 2 && (int)$pl['max_tokens'] === 20
+                 && strpos($j, 'Do NOT return any of them') !== false
+                 && strpos($j, '9') !== false;
+         })());
+    $add('10.12', 'اگر مدل دستهٔ ممنوع را برگرداند، پاسخ رد و «تکراری» علامت می‌خورد',
+         (function () {
+             $cats = [['id' => 5, 'name' => 'پنج', 'level' => 2]];
+             $r    = ['code' => 200, 'raw' => '5',
+                      'body' => ['choices' => [['message' => ['content' => '5']]]]];
+             $bad  = aiCatParse($r, 'کفشِ مردانه', $cats, 'm1', 10, [5]);
+             $good = aiCatParse($r, 'کفشِ مردانه', $cats, 'm1', 10, []);
+             return ($bad['ok'] ?? true) === false && ($bad['repeat'] ?? false) === true
+                 && ($good['ok'] ?? false) === true && (int)($good['category_id'] ?? 0) === 5;
+         })());
+    $add('10.12', 'اجماعِ چندمدلی با حدِ نصاب، موازی‌سازی و کش تعریف شده است',
+         strpos($selfSrc, 'function aiCatConsensus') !== false
+      && strpos($selfSrc, 'aiParallelCalls(') !== false
+      && strpos($selfSrc, "'quorum'") !== false
+      && strpos($selfSrc, "'from_cache'") !== false);
+    $add('10.12', 'اجماع پس از رسیدن به حدِ نصاب می‌ایستد و بقیهٔ مدل‌ها را نمی‌پرسد',
+         (function () use ($selfSrc) {
+             // مرحله‌بندی: مرحلهٔ اول فقط به‌اندازهٔ حدِ نصاب مدل می‌پرسد
+             return strpos($selfSrc, '$stages') !== false
+                 && strpos($selfSrc, "'agreement'") !== false
+                 && strpos($selfSrc, "'asked'") !== false
+                 && strpos($selfSrc, "'per_model'") !== false;
+         })());
+    $add('10.12', 'رأیِ مدل‌ها با سابقهٔ بردشان وزن می‌گیرد (نه رأیِ ساده)',
+         strpos($selfSrc, 'aiScoreOf(') !== false
+      && (function () {
+             // aiScoreOf باید کلیدهای wins/votes را بخواند
+             $s = aiScoreOf(['wins' => 8, 'votes' => 10]);
+             $w = aiScoreOf(['wins' => 1, 'votes' => 10]);
+             return is_numeric($s) && is_numeric($w) && $s > $w;
+         })());
+    $add('10.12', 'اندپوینتِ مدیریتِ حافظهٔ تلاش‌ها هر سه عملیات را دارد',
+         strpos($selfSrc, "=== 'cat_" . "tried'") !== false
+      && strpos($selfSrc, "\$op === 'clear'") !== false
+      && strpos($selfSrc, "\$op === 'list'") !== false
+      && strpos($selfSrc, 'catTriedStats()') !== false);
+    $add('10.12', 'مودالِ فاز ۲ نشانگرِ حافظه و دکمهٔ پاک‌سازی دارد',
+         strpos($selfSrc, 'id=\"p2TriedInfo\"')  !== false
+      && strpos($selfSrc, 'id=\"p2ClrTriedBtn\"') !== false
+      && strpos($selfSrc, 'function p2ClearTried') !== false
+      && strpos($selfSrc, 'function p2RefreshTried') !== false);
+    $add('10.12', 'پاک‌کردنِ حافظهٔ تلاش‌ها بدونِ تأیید انجام نمی‌شود',
+         strpos($selfSrc, 'حافظهٔ «دسته‌های امتحان‌شده» پاک شود؟') !== false);
+    $add('10.12', 'هر محصول دکمهٔ دیدنِ تلاش‌های قبلیِ خودش را دارد',
+         strpos($selfSrc, 'function p2ShowTried') !== false
+      && strpos($selfSrc, "p2ShowTri" . "ed('+p.id+')") !== false
+      && strpos($selfSrc, "'p2tr-'+pid") !== false);
+    $add('10.12', 'گزارشِ زندهٔ مستر، اجماع و حذفِ تکراری‌ها را نشان می‌دهد',
+         strpos($selfSrc, "d.step==='consensus'") !== false
+      && strpos($selfSrc, "d.step==='exclude'") !== false
+      && strpos($selfSrc, "d.status==='skipped'") !== false);
+    $add('10.12', 'شمارنده‌های «رد شده» در پاسخِ پایانیِ اصلاحِ گروهی هست',
+         substr_count($selfSrc, "'skip_same'") >= 1
+      && substr_count($selfSrc, "'skip_tried'") >= 1);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -23406,6 +23729,148 @@ function aiParallelCalls(array $jobs, array $net, int $concurrency = 4): array {
     return $out;
 }
 
+/* =====================================================================
+ *  v10.12 (۲۵): «اجماعِ مرحله‌ای» — وقتی چند مدل کاندید انتخاب شده،
+ *  چطور سریع‌تر به بهترین دسته برسیم.
+ *
+ *  چهار سازوکار روی هم:
+ *
+ *  ۱) موازی‌سازی: همهٔ مدل‌های یک مرحله با curl_multi هم‌زمان پرسیده
+ *     می‌شوند، نه یکی‌یکی. با ۵ مدل، زمان از «مجموعِ تأخیرها» به
+ *     «کندترین تأخیر» می‌رسد.
+ *
+ *  ۲) توقفِ زودهنگام: اول فقط «حدِ نصاب» مدلِ برترِ جدول (پیش‌فرض ۲) را
+ *     می‌پرسیم. اگر هم‌نظر بودند همان‌جا تمام است و بقیهٔ مدل‌ها اصلاً
+ *     فراخوانی نمی‌شوند — هم سریع‌تر، هم مصرفِ سهمیهٔ کمتر. فقط وقتی
+ *     اختلاف باشد مرحلهٔ دوم اجرا می‌شود.
+ *
+ *  ۳) رأیِ وزنی: در مرحلهٔ دوم رأی‌ها با سابقهٔ آماری هر مدل
+ *     (aiScoreOf، همان جدولِ برد/باخت) وزن می‌گیرند؛ پس مدلی که در
+ *     گذشته بیشتر درست گفته، در تساوی برنده می‌شود.
+ *
+ *  ۴) کشِ هم‌کلمه: نتیجهٔ هر عنوان با کلیدِ «چند کلمهٔ اول» کش می‌شود.
+ *     در غرفه‌هایی که ده‌ها «شال نخی ...» دارند، فقط اولی از مدل‌ها
+ *     می‌پرسد و بقیه رایگان و آنی جواب می‌گیرند.
+ *
+ *  خروجی: ['ok','category_id','category_name','agreement','votes','asked',
+ *           'stages','from_cache','per_model','error']
+ * ===================================================================== */
+function aiCatConsensus(array $cands, array $providers, string $title, array $cats,
+                        array $leafCats, array $exclude, ?array $net = null,
+                        array $opts = []): array {
+    $net    = $net ?? aiNetCfg();
+    $quorum = max(1, min(8, (int)($opts['quorum'] ?? 2)));
+    $conc   = max(1, min(16, (int)($opts['concurrency'] ?? 4)));
+    $useCache = ($opts['cache'] ?? true) !== false;
+    $triedInfo = (array)($opts['tried_info'] ?? []);
+    $empty = ['ok' => false, 'category_id' => 0, 'category_name' => '', 'agreement' => 0,
+              'votes' => [], 'asked' => 0, 'stages' => 0, 'from_cache' => false,
+              'per_model' => [], 'error' => ''];
+    if ($title === '' || !$cands) return array_merge($empty, ['error' => 'کاندید یا عنوان خالی']);
+
+    /* ۴) کشِ هم‌کلمه — کلیدِ کش شاملِ فهرستِ ممنوعه است، چون با تغییرِ
+       آن فضای انتخاب عوض می‌شود و جوابِ قبلی دیگر معتبر نیست. */
+    static $cache = [];
+    $ck = catFirstWords($title, catLearnWordCount()) . '|' . implode(',', $exclude);
+    if ($useCache && $ck !== '|' && isset($cache[$ck])) {
+        /* توجه: عملگرِ + کلیدِ موجود را بازنویسی نمی‌کند، پس
+           from_cache باید صریح ست شود نه با آرایهٔ پیش‌فرض. */
+        $hit = $cache[$ck];
+        $hit['from_cache'] = true;
+        return $hit;
+    }
+
+    $catList = aiCatListBuild($leafCats, $exclude);
+    if (trim($catList) === '') return array_merge($empty, ['error' => 'همهٔ دسته‌ها قبلاً امتحان شده‌اند']);
+    $payload = aiCatPayload($title, $catList, $triedInfo);
+
+    // مرتب‌سازی کاندیدها بر اساس امتیازِ تاریخی (بهترین‌ها اولِ صف)
+    $v = aiVotesLoad();
+    $ranked = $cands;
+    usort($ranked, function ($a, $b) use ($v) {
+        return aiScoreOf($v['scores'][$b['key']] ?? []) <=> aiScoreOf($v['scores'][$a['key']] ?? []);
+    });
+
+    $perModel = []; $votes = []; $asked = 0; $stages = 0;
+    $run = function (array $group) use (&$perModel, &$votes, &$asked, $providers, $payload,
+                                        $net, $conc, $title, $cats, $exclude) {
+        $jobs = [];
+        foreach ($group as $c) {
+            $pp = $providers[$c['provider']] ?? null;
+            if ($pp === null) continue;
+            $jobs[$c['key']] = ['p' => $pp, 'mid' => $c['model'], 'payload' => $payload, 'cand' => $c];
+        }
+        if (!$jobs) return;
+        $t0  = microtime(true);
+        $res = aiParallelCalls($jobs, $net, $conc);
+        $lat = (int)round((microtime(true) - $t0) * 1000);
+        foreach ($res as $k => $row) {
+            $asked++;
+            $c   = $row['cand'];
+            $par = aiCatParse((array)$row['r'], $title, $cats, (string)$c['model'], $lat, $exclude);
+            $perModel[] = ['key' => $k, 'model' => $c['model'], 'provider' => $c['providerName'] ?? $c['provider'],
+                           'ok' => !empty($par['ok']), 'category_id' => (int)$par['category_id'],
+                           'category_name' => (string)$par['category_name'],
+                           'repeat' => !empty($par['repeat']), 'error' => (string)$par['error'],
+                           'latency' => (int)$par['latency']];
+            if (!empty($par['ok']) && (int)$par['category_id'] > 0) {
+                $cid = (string)$par['category_id'];
+                if (!isset($votes[$cid])) $votes[$cid] = ['n' => 0, 'w' => 0.0, 'name' => '', 'keys' => []];
+                $votes[$cid]['n']++;
+                $votes[$cid]['name'] = (string)$par['category_name'];
+                $votes[$cid]['keys'][] = $k;
+            }
+        }
+    };
+
+    // ── مرحلهٔ ۱: فقط بهترین‌ها ─────────────────────────────────────
+    $stage1 = array_slice($ranked, 0, $quorum);
+    $stages++; $run($stage1);
+
+    $decide = function () use (&$votes, $v, $cands) {
+        if (!$votes) return null;
+        /* ۳) وزنِ هر دسته = مجموعِ امتیازِ تاریخیِ رأی‌دهنده‌ها (+۱ پایه
+           تا مدلِ بی‌سابقه هم صفر نشود). تعدادِ رأی مقدم است، وزن
+           فقط تساوی را می‌شکند. */
+        foreach ($votes as $cid => &$row) {
+            $w = 0.0;
+            foreach ($row['keys'] as $k) $w += 1.0 + aiScoreOf($v['scores'][$k] ?? []);
+            $row['w'] = round($w, 3);
+        }
+        unset($row);
+        $bestId = 0; $bestN = -1; $bestW = -1.0;
+        foreach ($votes as $cid => $row) {
+            if ($row['n'] > $bestN || ($row['n'] === $bestN && $row['w'] > $bestW)) {
+                $bestN = $row['n']; $bestW = $row['w']; $bestId = (int)$cid;
+            }
+        }
+        return $bestId > 0 ? ['id' => $bestId, 'n' => $bestN] : null;
+    };
+
+    // ۲) توقفِ زودهنگام: اگر همهٔ پرسیده‌شده‌های مرحلهٔ ۱ یک چیز گفتند، تمام
+    $d = $decide();
+    $unanimous = ($d !== null && count($votes) === 1 && $d['n'] >= min($quorum, count($stage1)));
+    if (!$unanimous && count($ranked) > count($stage1)) {
+        $stages++; $run(array_slice($ranked, count($stage1)));
+        $d = $decide();
+    }
+
+    if ($d === null) {
+        $err = 'هیچ مدلی دستهٔ تازه‌ای نداد';
+        foreach ($perModel as $pm) { if (!empty($pm['repeat'])) { $err = 'همهٔ پیشنهادها تکراری بودند'; break; } }
+        return array_merge($empty, ['asked' => $asked, 'stages' => $stages,
+                                    'per_model' => $perModel, 'error' => $err, 'votes' => $votes]);
+    }
+    $winner = (string)$d['id'];
+    $out = ['ok' => true, 'category_id' => (int)$d['id'],
+            'category_name' => (string)($votes[$winner]['name'] ?? bslCatNameById((int)$d['id'])),
+            'agreement' => (int)$d['n'], 'votes' => $votes, 'asked' => $asked,
+            'stages' => $stages, 'from_cache' => false, 'per_model' => $perModel,
+            'winner_keys' => (array)($votes[$winner]['keys'] ?? []), 'error' => ''];
+    if ($useCache && $ck !== '|') $cache[$ck] = $out;
+    return $out;
+}
+
 /* v9.99: نتیجهٔ یک مدل را ارزیابی و برچسب‌گذاری می‌کند.
    یک نقطهٔ مشترک تا مسیرِ موازی و ترتیبی دقیقاً یکسان قضاوت کنند. */
 function aiTestJudge(array $r, string $mid, string $pid = ''): array {
@@ -25142,13 +25607,35 @@ $sse(['type'=>'step','msg'=>'دسته فرزند یافت شد: '.$catName.' ('.
 $sse(['type'=>'step','msg'=>'دسته یک دسته فرزین است']);
 }
 
+/* v10.12 (۲۵): دو نگهبان پیش از PATCH.
+   الف) اگر پیشنهاد همان دستهٔ فعلیِ محصول باشد، ارسالش بی‌فایده است و
+        فقط یک چرخهٔ رد دیگر می‌سازد.
+   ب) اگر این دسته قبلاً برای همین محصول امتحان و رد شده، دوباره نفرست. */
+$curCat=bslProductCatId($p);
+$triedIds=catTriedExclude($productId,$curCat);
+if($curCat>0&&$aiCatId===$curCat){
+catTriedRecord($productId,$aiCatId,$catName,'ai_text','skipped',$pName,$curCat);
+$sse(['type'=>'error','msg'=>'⛔ دستهٔ پیشنهادی («'.$catName.'») دقیقاً همان دستهٔ فعلیِ محصول است — ارسال نشد. متن AI دستهٔ تازه‌ای پیشنهاد نکرده است.','category_id'=>$aiCatId,'current_cat_id'=>$curCat]);exit;
+}
+if(catTriedHas($productId,$aiCatId)){
+$tr=catTriedRow($productId);
+$prevN=(int)($tr['tried'][(string)$aiCatId]['n']??1);
+catTriedRecord($productId,$aiCatId,$catName,'ai_text','skipped',$pName,$curCat);
+$sse(['type'=>'error','msg'=>'⛔ دستهٔ «'.$catName.'» ('.$aiCatId.') قبلاً '.aiFaNum($prevN).' بار برای این محصول امتحان و رد شده — دوباره ارسال نشد. از «تصحیح با مستر/چند مدل» استفاده کنید تا دستهٔ متفاوتی پیشنهاد شود.','category_id'=>$aiCatId,'tried'=>$triedIds]);exit;
+}
+if($triedIds){
+$sse(['type'=>'step','msg'=>aiFaNum(count($triedIds)).' دستهٔ قبلاً امتحان‌شده برای این محصول در حافظه هست و از کاندیدها حذف شد']);
+}
+
 $sse(['type'=>'step','msg'=>'ارسال درخواست اصلاح دسته‌بندی (وضعیت: در انتظار بررسی مجدد)...']);
 $bu=['category_id'=>$aiCatId,'status'=>3568];
 $r=bslReq($tk,'PATCH','products/'.$productId,$bu);
 if($r['code']===404)$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$productId,$bu);
 if($r['ok']&&!empty($r['body']['id'])){
-$sse(['type'=>'done','ok'=>true,'msg'=>'✅ اصلاح شد و ارسال به بررسی مجدد: '.$catName.' ('.$aiCatId.')','product_id'=>$productId,'category_id'=>$aiCatId,'category_name'=>$catName,'ai_text'=>mb_substr($aiText,0,200)]);
+catTriedRecord($productId,$aiCatId,$catName,'ai_text','applied',$pName,$curCat);
+$sse(['type'=>'done','ok'=>true,'msg'=>'✅ اصلاح شد و ارسال به بررسی مجدد: '.$catName.' ('.$aiCatId.')','product_id'=>$productId,'category_id'=>$aiCatId,'category_name'=>$catName,'ai_text'=>mb_substr($aiText,0,200),'tried_count'=>count($triedIds)+1]);
 }else{
+catTriedRecord($productId,$aiCatId,$catName,'ai_text','failed',$pName,$curCat);
 $errDetail=($r['body']['message']??($r['body']['error']??''));
 $sse(['type'=>'step','msg'=>'PATCH مستقیم ناموفق ('.$errDetail.') — تلاش با روش جایگزین...']);
 
@@ -25181,7 +25668,7 @@ if(empty($cats)){
 $sse(['type'=>'error','msg'=>'دسته‌بندی‌ها بارگذاری نشد']);exit;
 }
 $sse(['type'=>'step','msg'=>'دسته‌بندی‌ها دریافت شد: '.count($cats).' دسته']);
-$fixed=0;$failed=0;$noAi=0;$noCat=0;$total=0;
+$fixed=0;$failed=0;$noAi=0;$noCat=0;$total=0;$skipSame=0;$skipTried=0;
 
 $sse(['type'=>'step','msg'=>'دریافت لیست محصولات ردشده (تأیید نشده)...']);
 $allProducts=[];
@@ -25228,6 +25715,25 @@ $sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName
 $sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'step'=>'find_leaf','rawCatId'=>$aiCatId]);
 $aiCatId=findLeafCategory($aiCatId,$cats);
 $catName=bslCatNameById($aiCatId);
+
+/* v10.12 (۲۵): همان دو نگهبانِ مسیرِ تکی، اینجا هم. در حالتِ جمعی
+   مهم‌تر است: بدونِ آن، هر بار اجرا همان دستهٔ ردشده را برای ده‌ها
+   محصول دوباره می‌فرستد و فقط سهمیهٔ API را می‌سوزاند. */
+$curCat=bslProductCatId($p);
+if($curCat>0&&$aiCatId===$curCat){
+$skipSame++;
+catTriedRecord($pId,$aiCatId,$catName,'ai_text','skipped',$pName,$curCat);
+$sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'skipped','catId'=>$aiCatId,'catName'=>$catName,'msg'=>'رد شد: پیشنهاد همان دستهٔ فعلی است ('.$catName.')']);
+continue;
+}
+if(catTriedHas($pId,$aiCatId)){
+$skipTried++;
+$tr=catTriedRow($pId);
+$prevN=(int)($tr['tried'][(string)$aiCatId]['n']??1);
+catTriedRecord($pId,$aiCatId,$catName,'ai_text','skipped',$pName,$curCat);
+$sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'skipped','catId'=>$aiCatId,'catName'=>$catName,'msg'=>'رد شد: «'.$catName.'» قبلاً '.aiFaNum($prevN).' بار امتحان و رد شده']);
+continue;
+}
 $sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'step'=>'patching','catId'=>$aiCatId,'catName'=>$catName]);
 
 $bu=['category_id'=>$aiCatId,'status'=>3568];
@@ -25235,15 +25741,17 @@ $r2=bslReq($tk,'PATCH','products/'.$pId,$bu);
 if($r2['code']===404)$r2=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$pId,$bu);
 if($r2['ok']&&!empty($r2['body']['id'])){
 $fixed++;
+catTriedRecord($pId,$aiCatId,$catName,'ai_text','applied',$pName,$curCat);
 $sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'fixed','catId'=>$aiCatId,'catName'=>$catName,'msg'=>'اصلاح شد و ارسال به بررسی مجدد: '.$catName.' ('.$aiCatId.')']);
 }else{
 $failed++;
+catTriedRecord($pId,$aiCatId,$catName,'ai_text','failed',$pName,$curCat);
 $errDetail=($r2['body']['message']??($r2['body']['error']??''));
 $sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'failed','catId'=>$aiCatId,'catName'=>$catName,'msg'=>'PATCH ناموفق: '.$errDetail]);
 }
 usleep(500000);
 }
-$sse(['type'=>'done','fixed'=>$fixed,'failed'=>$failed,'no_ai'=>$noAi,'no_cat'=>$noCat,'total'=>$total,'msg'=>'✅ اصلاح شد: '.$fixed.' | بدون AI: '.$noAi.' | دسته یافت نشد: '.$noCat.' | ناموفق: '.$failed.' (از '.$total.' محصول)']);
+$sse(['type'=>'done','fixed'=>$fixed,'failed'=>$failed,'no_ai'=>$noAi,'no_cat'=>$noCat,'skipped'=>$skipSame+$skipTried,'skip_same'=>$skipSame,'skip_tried'=>$skipTried,'total'=>$total,'msg'=>'✅ اصلاح شد: '.$fixed.' | بدون AI: '.$noAi.' | دسته یافت نشد: '.$noCat.' | تکراری/همان دسته: '.($skipSame+$skipTried).' | ناموفق: '.$failed.' (از '.$total.' محصول)']);
 if(function_exists('fastcgi_finish_request'))fastcgi_finish_request();
 exit;
 }
@@ -25291,11 +25799,22 @@ if(empty($cats)){
 $sse(['type'=>'error','msg'=>'دسته‌بندی‌ها بارگذاری نشد']);exit;
 }
 bslSetCatNameMap($cats);
-$catList='';$leafCats=[];
-foreach($cats as $c){if(($c['level']??0)>=2){$catList.=$c['id'].': '.$c['name']."\n";$leafCats[]=$c;}}
-if(empty($leafCats)){foreach($cats as $c){$catList.=$c['id'].': '.$c['name']."\n";$leafCats[]=$c;}}
-if(strlen($catList)>3000){$catList='';$leafCats=array_slice($leafCats,0,200);foreach($leafCats as $c){$catList.=$c['id'].': '.$c['name']."\n";}}
-$sse(['type'=>'step','msg'=>count($cats).' دسته دریافت شد']);
+$leafCats=[];
+foreach($cats as $c){if(($c['level']??0)>=2)$leafCats[]=$c;}
+if(empty($leafCats))$leafCats=$cats;
+$catList=aiCatListBuild($leafCats,[]);
+$sse(['type'=>'step','msg'=>count($cats).' دسته دریافت شد ('.count($leafCats).' دستهٔ برگ)']);
+
+/* v10.12 (۲۵): حالتِ چندمدلی. اگر بیش از یک کاندید انتخاب شده باشد،
+   به‌جای پرسیدنِ ترتیبیِ فقط مستر، از موتورِ اجماع استفاده می‌کنیم:
+   موازی‌سازی + توقفِ زودهنگام + رأیِ وزنی + کشِ هم‌کلمه. */
+$multi=count($cands)>1&&(($_GET['single'] ?? '')!=='1');
+$quorum=max(1,min(count($cands),(int)($_GET['quorum']??2)));
+if($multi){
+$sse(['type'=>'step','msg'=>'حالت چندمدلی: '.aiFaNum(count($cands)).' مدل کاندید — حدنصابِ مرحلهٔ اول: '.aiFaNum($quorum).' مدل (در صورت توافق، بقیه پرسیده نمی‌شوند)']);
+}else{
+$sse(['type'=>'step','msg'=>'حالت تک‌مدلی (مستر)']);
+}
 
 $sse(['type'=>'step','msg'=>'دریافت محصولات ردشده (تأیید نشده)...']);
 $allProducts=[];
@@ -25309,8 +25828,8 @@ foreach($data as $p)$allProducts[]=$p;
 if($pg>=$tp)break;
 }
 $total=count($allProducts);
-$sse(['type'=>'start','total'=>$total,'msg'=>'شروع مشورت با مستر برای '.count($allProducts).' محصول...']);
-$fixed=0;$failed=0;$noCat=0;$idx=0;
+$sse(['type'=>'start','total'=>$total,'msg'=>'شروع مشورت '.($multi?'چندمدلی':'با مستر').' برای '.count($allProducts).' محصول...']);
+$fixed=0;$failed=0;$noCat=0;$idx=0;$skipSame=0;$skipTried=0;$askTotal=0;$cacheHits=0;
 foreach($allProducts as $p){
 $idx++;
 $pId=(int)($p['id']??0);
@@ -25320,12 +25839,50 @@ if($pName===''){
 $failed++;
 $sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'failed','msg'=>'عنوان محصول خالی']);continue;
 }
-$res=aiCandidateCategory($mp,$master['model'],$pName,$cats,$leafCats,$catList,$net);
+/* v10.12 (۲۵): دستهٔ فعلی + همهٔ دسته‌های قبلاً امتحان‌شده از فهرستِ
+   کاندیدهای این محصول حذف می‌شوند تا مدل مجبور شود گزینهٔ تازه بدهد. */
+$curCat=bslProductCatId($p);
+$exclude=catTriedExclude($pId,$curCat);
+$triedInfo=[];
+$trRow=catTriedRow($pId);
+foreach(($trRow['tried']??[]) as $tcid=>$tinfo){$triedInfo[]=['id'=>(int)$tcid,'name'=>(string)($tinfo['name']??'')];}
+if($exclude){
+$sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'step'=>'exclude','excluded'=>count($exclude)]);
+}
+if($multi){
+$con=aiCatConsensus($cands,$providers,$pName,$cats,$leafCats,$exclude,$net,['quorum'=>$quorum,'tried_info'=>$triedInfo]);
+$askTotal+=(int)($con['asked']??0);
+if(!empty($con['from_cache']))$cacheHits++;
+$catId=(int)($con['category_id']??0);
+$catName=(string)($con['category_name']??'');
+$okRes=!empty($con['ok']);
+$errRes=(string)($con['error']??'');
+$winKeys=(array)($con['winner_keys']??[]);
+if($okRes){
+$sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'step'=>'consensus','catId'=>$catId,'catName'=>$catName,'agreement'=>(int)($con['agreement']??0),'asked'=>(int)($con['asked']??0),'stages'=>(int)($con['stages']??0),'from_cache'=>!empty($con['from_cache']),'per_model'=>(array)($con['per_model']??[])]);
+}
+}else{
+$res=aiCandidateCategory($mp,$master['model'],$pName,$cats,$leafCats,aiCatListBuild($leafCats,$exclude),$net,$exclude,$triedInfo);
+$askTotal++;
 $catId=(int)($res['category_id']??0);
 $catName=(string)($res['category_name']??'');
-if(empty($res['ok'])||$catId<=0){
+$okRes=!empty($res['ok']);
+$errRes=(string)($res['error']??'');
+$winKeys=[$masterKey];
+}
+if(!$okRes||$catId<=0){
 $noCat++;
-$sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'no_cat','msg'=>'مستر دستهٔ معتبری نداد','err'=>(string)($res['error']??'')]);continue;
+$sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'no_cat','msg'=>($multi?'اجماع به دستهٔ تازه‌ای نرسید':'مستر دستهٔ معتبری نداد').($errRes!==''?' — '.$errRes:''),'err'=>$errRes]);continue;
+}
+if($curCat>0&&$catId===$curCat){
+$skipSame++;
+catTriedRecord($pId,$catId,$catName,$multi?'consensus':'master','skipped',$pName,$curCat);
+$sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'skipped','catId'=>$catId,'catName'=>$catName,'msg'=>'رد شد: پیشنهاد همان دستهٔ فعلی است']);continue;
+}
+if(catTriedHas($pId,$catId)){
+$skipTried++;
+catTriedRecord($pId,$catId,$catName,$multi?'consensus':'master','skipped',$pName,$curCat);
+$sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'skipped','catId'=>$catId,'catName'=>$catName,'msg'=>'رد شد: «'.$catName.'» قبلاً امتحان و رد شده']);continue;
 }
 $sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'step'=>'patching','catId'=>$catId,'catName'=>$catName]);
 $bu=['category_id'=>$catId,'status'=>3568];
@@ -25333,18 +25890,28 @@ $r2=bslReq($tk,'PATCH','products/'.$pId,$bu);
 if($r2['code']===404)$r2=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$pId,$bu);
 if($r2['ok']&&!empty($r2['body']['id'])){
 $fixed++;
-// رأی و یادگیری: همین انتخابِ مستر، مرجعِ کاندیدها و یادگیریِ بعدی شود
-aiVoteRecord('category',$pName,$masterKey,$candKeys);
+/* رأی و یادگیری: در حالتِ چندمدلی برندهٔ اجماع رأی می‌گیرد (نه لزوماً
+   مستر)، پس آمار دیگر به‌نفعِ مستر تحریف نمی‌شود. */
+foreach(array_unique($winKeys?:[$masterKey]) as $wk)aiVoteRecord('category',$pName,$wk,$candKeys);
 catLearnRecord($pName,$catId,$catName);
+catTriedRecord($pId,$catId,$catName,$multi?'consensus':'master','applied',$pName,$curCat);
 $sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'fixed','catId'=>$catId,'catName'=>$catName,'msg'=>'اصلاح شد و ارسال به بررسی مجدد: '.$catName.' ('.$catId.')']);
 }else{
 $failed++;
+catTriedRecord($pId,$catId,$catName,$multi?'consensus':'master','failed',$pName,$curCat);
 $errDetail=($r2['body']['message']??($r2['body']['error']??''));
 $sse(['type'=>'item','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'status'=>'failed','catId'=>$catId,'catName'=>$catName,'msg'=>'PATCH ناموفق: '.$errDetail]);
 }
 usleep(500000);
 }
-$sse(['type'=>'done','fixed'=>$fixed,'failed'=>$failed,'no_cat'=>$noCat,'total'=>$total,'msg'=>'✅ اصلاح با مستر انجام شد: '.$fixed.' | دسته نیافت: '.$noCat.' | ناموفق: '.$failed.' (از '.$total.')']);
+$savedMsg='';
+if($multi&&$total>0){
+$maxCalls=$total*count($cands);
+$saved=$maxCalls-$askTotal;
+if($saved>0)$savedMsg=' | صرفه‌جویی: '.aiFaNum($saved).' فراخوانی از '.aiFaNum($maxCalls).' ('.aiFaNum((int)round($saved*100/max(1,$maxCalls))).'٪)';
+if($cacheHits>0)$savedMsg.=' | از کش: '.aiFaNum($cacheHits);
+}
+$sse(['type'=>'done','fixed'=>$fixed,'failed'=>$failed,'no_cat'=>$noCat,'total'=>$total,'skipped'=>$skipSame+$skipTried,'skip_same'=>$skipSame,'skip_tried'=>$skipTried,'asked'=>$askTotal,'cache_hits'=>$cacheHits,'multi'=>$multi,'msg'=>'✅ اصلاح '.($multi?'چندمدلی':'با مستر').' انجام شد: '.$fixed.' | دسته نیافت: '.$noCat.' | تکراری: '.($skipSame+$skipTried).' | ناموفق: '.$failed.' (از '.$total.')'.$savedMsg]);
 if(function_exists('fastcgi_finish_request'))fastcgi_finish_request();
 exit;
 }
@@ -35401,6 +35968,36 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.12', t:'🧠 دسته‌بندیِ هوشمند: نه دستهٔ تکراری، نه تلاشِ تکراری، و رأی‌گیریِ چندمدلی', items:[
+    '🚫 <b>دستهٔ فعلیِ محصول دیگر پیشنهاد نمی‌شود.</b> تا حالا مدل بارها همان',
+    '   دسته‌ای را برمی‌گرداند که باسلام همین الان ردش کرده بود و اصلاح بی‌نتیجه',
+    '   می‌ماند. حالا دستهٔ ثبت‌شدهٔ خودِ محصول پیش از پرسش از فهرستِ کاندیدها',
+    '   حذف می‌شود و اگر مدل باز هم همان را بگوید، پاسخ «تکراری» علامت می‌خورد.',
+    '',
+    '🧠 <b>حافظهٔ دسته‌های امتحان‌شده.</b> هر دسته‌ای که برای یک محصول امتحان و',
+    '   رد شده در فایلِ <code>category_attempts.json</code> می‌ماند و در تلاش‌های',
+    '   بعدی از کاندیدها بیرون گذاشته می‌شود. یعنی هر بار که دکمه را می‌زنید',
+    '   واقعاً یک <b>گزینهٔ تازه</b> امتحان می‌شود، نه چرخیدن روی همان دو سه دسته.',
+    '   نتیجهٔ هر تلاش (اعمال شد / رد شد / ناموفق) هم با تعداد دفعات ثبت می‌شود.',
+    '',
+    '👁️ زیرِ هر محصول در فاز ۲ دکمهٔ «🧠 تلاش‌های قبلی» هست: می‌بینید چه',
+    '   دسته‌هایی قبلاً امتحان شده‌اند و چه شد. بالای مودال هم آمارِ کلی',
+    '   («N محصول / M تلاش») و دکمهٔ «🧹 پاک‌کردن تلاش‌ها» برای شروعِ دوباره.',
+    '',
+    '🗳️ <b>رأی‌گیریِ چندمدلی با توقفِ زودهنگام.</b> اگر چند مدلِ کاندید انتخاب',
+    '   کرده باشید، دیگر یکی‌یکی و ترتیبی پرسیده نمی‌شوند: چند مدل <b>هم‌زمان</b>',
+    '   پرسیده می‌شوند و به‌محضِ اینکه دو مدل روی یک دسته توافق کنند، همان‌جا',
+    '   کار تمام می‌شود و بقیه پرسیده نمی‌شوند — هم سریع‌تر، هم کم‌هزینه‌تر.',
+    '   اگر توافق نشد، مرحلهٔ دوم بقیهٔ مدل‌ها را می‌پرسد و رأیِ اکثریت برنده است.',
+    '',
+    '⚖️ رأی‌ها <b>وزن‌دار</b>اند: مدلی که در آمارِ همین برنامه بیشتر برنده شده،',
+    '   رأیش سنگین‌تر است. نتیجهٔ هر عنوان هم کش می‌شود تا محصولاتِ هم‌نام',
+    '   دوباره هزینهٔ فراخوانی نداشته باشند.',
+    '',
+    '📊 گزارشِ زندهٔ «اصلاح با مستر» حالا می‌گوید چند دستهٔ تکراری حذف شد، چند',
+    '   مدل پرسیده شد، چند رأی موافق بود، در چند مرحله، و پاسخِ تک‌تکِ مدل‌ها',
+    '   چه بود. محصولاتی که به‌خاطر تکراری‌بودن رد شده‌اند جدا شمرده می‌شوند.',
+  ]},
   {v:'10.01', t:'🔑 چند کلید API برای هر ارائه‌دهنده + چرخشِ خودکار', items:[
     '🔑 حالا برای هر ارائه‌دهنده می‌توانید <b>چند کلید API</b> ثبت کنید — مثلاً',
     '   سه حسابِ رایگانِ Groq یا دو کلیدِ Mistral. زیرِ «ارائه‌دهنده/مدل» یک',
@@ -46020,6 +46617,13 @@ function showPhase2Modal(rejected,cats){
       +'<button class="btn btn-orange" onclick="bslMasterFixAll()" id="p2MasterBtn" '
       +'style="font-size:11px;padding:5px 10px" title="با مدل مستر (بهترین کاندید از نظر آمار) مشورت و بقیهٔ محصولاتِ ردشده را دسته‌بندی و اصلاح کن">'
       +'🎯 اصلاح بقیه با مستر</button>'
+      /* v10.12 (۲۵): نشانگر و پاک‌کنندهٔ حافظهٔ «دسته‌های امتحان‌شده».
+         بدون این دکمه، اگر حافظه پر شود کاربر راهی برای شروعِ دوباره ندارد. */
+      +'<span id="p2TriedInfo" style="font-size:11px;color:#f0abfc" '
+      +'title="دسته‌هایی که قبلاً برای این محصولات امتحان و رد شده‌اند و دیگر پیشنهاد نمی‌شوند"></span>'
+      +'<button class="btn btn-gray" onclick="p2ClearTried()" id="p2ClrTriedBtn" '
+      +'style="font-size:11px;padding:5px 10px" title="پاک‌کردن حافظهٔ دسته‌های امتحان‌شده تا همهٔ دسته‌ها دوباره کاندید شوند">'
+      +'🧹 پاک‌کردن تلاش‌ها</button>'
       +'</div>';
     h+='<div class="bsl-modal-body" style="max-height:64vh;overflow:auto;padding:10px">';
     if(!rows.length){
@@ -46050,6 +46654,12 @@ function showPhase2Modal(rejected,cats){
          + 'onclick="p2AskCandidates('+p.id+')" style="font-size:11px;padding:5px 9px" '
          + 'title="دسته‌بندی همهٔ کاندیدها برای این محصول">'
          + '🏷️ همهٔ کاندیدها</button>';
+        /* v10.12 (۲۵): دیدنِ اینکه چه دسته‌هایی قبلاً برای همین محصول
+           امتحان و رد شده‌اند — تا کاربر بفهمد چرا پیشنهادها عوض شده‌اند. */
+        h+='<button class="btn btn-gray" id="p2trb-'+p.id+'" '
+         + 'onclick="p2ShowTried('+p.id+')" style="font-size:11px;padding:5px 9px" '
+         + 'title="دسته‌هایی که قبلاً برای این محصول امتحان شده‌اند">'
+         + '🧠 تلاش‌های قبلی</button>';
         h+=  '<div class="p2-search">'
            + '<input type="hidden" id="cat-'+p.id+'" value="0">'
            + '<input type="text" id="catSearch-'+p.id+'" placeholder="جستجوی دسته..." autocomplete="off">'
@@ -46059,6 +46669,7 @@ function showPhase2Modal(rejected,cats){
            + 'id="btn-'+p.id+'-m">🔄 ارسال</button>';
         h+=  '</div>';                     // p2-actions
         h+=  '<div class="p2-ai" id="p2aiBox-'+p.id+'"></div>';
+        h+=  '<div class="p2-tried" id="p2tr-'+p.id+'" data-open="0" style="padding:2px 0"></div>';
         h+=  '<div class="p2-status" id="p2st-'+p.id+'"></div>';
         h+='</div>';                       // p2-card  ← این دو بسته‌شدن قبلاً نبود
     });
@@ -46067,6 +46678,7 @@ function showPhase2Modal(rejected,cats){
     const div=document.createElement('div');div.id='phase2Container';div.innerHTML=h;
     document.body.appendChild(div);
     rejected.forEach(p=>{setupPhase2CatSearch(p.id,cats);});
+    p2RefreshTried();   // v10.12 (۲۵): آمارِ حافظهٔ تلاش‌ها
 }
 
 /* =====================================================================
@@ -46234,18 +46846,34 @@ function bslMasterFixAll(){
       else if(d.type==='start'){addRow('<span style="color:#c4b5fd;font-weight:700">🚀 '+esc(d.msg)+'</span>');}
       else if(d.type==='progress'){
         const idx=d.idx||0,tot=d.total||0;
-        if(d.step==='ask_master'){addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+esc(d.pName||'')+' — مشورت با مستر...</span>');}
+        if(d.step==='ask_master'){addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+esc(d.pName||'')+' — مشورت با مدل‌ها...</span>');}
+        /* v10.12 (۲۵): چند دسته از فهرست حذف شد چون قبلاً امتحان شده بود */
+        else if(d.step==='exclude'){addRow('<span style="color:#f0abfc">['+idx+'/'+tot+'] 🧠 '+toFa(d.excluded||0)+' دستهٔ امتحان‌شده از کاندیدها حذف شد</span>');}
+        /* v10.12 (۲۵): گزارشِ اجماعِ چندمدلی — چند مدل پرسیده شد، چند تا موافق بودند */
+        else if(d.step==='consensus'){
+          const pm=(d.per_model||[]).map(function(x){
+            return esc(x.model||'')+'→'+(x.ok?(esc(x.category_name||'')+'('+x.category_id+')'):(x.repeat?'تکراری':'—'));
+          }).join(' · ');
+          addRow('<span style="color:#c4b5fd">['+idx+'/'+tot+'] 🗳️ اجماع: '+esc(d.catName||'')+' ('+d.catId+') — '
+            +toFa(d.agreement||0)+' رأی از '+toFa(d.asked||0)+' مدلِ پرسیده‌شده'
+            +(d.stages>1?' · '+toFa(d.stages)+' مرحله':' · توقفِ زودهنگام ✔')
+            +(d.from_cache?' · از کش ⚡':'')
+            +(pm?'<br><span style="color:#64748b;font-size:10.5px">'+pm+'</span>':'')+'</span>');
+        }
         else if(d.step==='patching'){addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+esc(d.pName||'')+' — اعمال: '+esc(d.catName||'')+' ('+d.catId+')...</span>');}
       }
       else if(d.type==='item'){
         if(d.status==='fixed'){addRow('<span style="color:#4ade80;font-weight:700">✅ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' → '+esc(d.catName||'')+' ('+d.catId+')</span>');}
-        else if(d.status==='no_cat'){addRow('<span style="color:#fbbf24">⚠️ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' — مستر دستهٔ معتبری نداد'+(d.err?' ('+esc(d.err)+')':'')+'</span>');}
+        else if(d.status==='no_cat'){addRow('<span style="color:#fbbf24">⚠️ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' — '+esc(d.msg||'دستهٔ معتبری نداد')+'</span>');}
+        /* v10.12 (۲۵): رد شده چون تکراری یا همان دستهٔ فعلی بود */
+        else if(d.status==='skipped'){addRow('<span style="color:#94a3b8">⏭️ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' — '+esc(d.msg||'')+'</span>');}
         else if(d.status==='failed'){addRow('<span style="color:#f87171">❌ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' — '+esc(d.msg||'')+'</span>');}
       }
       else if(d.type==='done'){
         addRow('<span style="color:#4ade80;font-weight:700">🏁 '+esc(d.msg)+'</span>');
-        showToast('✅ اصلاح با مستر: '+toFa(d.fixed||0)+' محصول');
+        showToast('✅ اصلاح'+(d.multi?' چندمدلی':' با مستر')+': '+toFa(d.fixed||0)+' محصول');
         evtSrc.close();
+        p2RefreshTried();   // v10.12 (۲۵): آمارِ تلاش‌ها بعد از اجرا عوض شده
         if(btn){btn.disabled=false;btn.textContent='🎯 اصلاح بقیه با مستر';}
         if((d.fixed||0)>0)setTimeout(()=>{closeBslMasterFixModal();bslPhase2Check();},2000);
       }
@@ -46257,6 +46885,53 @@ function bslMasterFixAll(){
 function closeBslMasterFixModal(){const m=document.getElementById('bslMasterFixModal');if(m)m.remove();const evtSrc=window._bslMasterEvtSrc;if(evtSrc)evtSrc.close();}
 
 /** پیشنهاد هوش مصنوعی برای همهٔ موارد باقی‌مانده، یکی‌یکی */
+/* v10.12 (۲۵): آمارِ حافظهٔ تلاش را می‌گیرد و در نوارِ فاز ۲ نشان می‌دهد. */
+function p2RefreshTried(){
+  const el=document.getElementById('p2TriedInfo');
+  if(!el)return;
+  const fd=new FormData();fd.append('action','cat_tried');fd.append('op','stats');
+  fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(j=>{
+    if(!j||!j.ok){el.textContent='';return;}
+    const pr=+(j.products||0), at=+(j.attempts||0);
+    el.textContent=pr>0?('🧠 '+toFa(pr)+' محصول / '+toFa(at)+' تلاش ثبت‌شده'):'';
+  }).catch(()=>{el.textContent='';});
+}
+/* پاک‌کردن حافظهٔ تلاش‌ها — با تأیید، چون برگشت‌ناپذیر است. */
+function p2ClearTried(){
+  if(!confirm('حافظهٔ «دسته‌های امتحان‌شده» پاک شود؟\n\nبعد از پاک‌کردن، دسته‌هایی که قبلاً رد شده بودند دوباره می‌توانند پیشنهاد شوند.'))return;
+  const btn=document.getElementById('p2ClrTriedBtn');
+  if(btn){btn.disabled=true;btn.textContent='⏳ ...';}
+  const fd=new FormData();fd.append('action','cat_tried');fd.append('op','clear');fd.append('pid','0');
+  fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(j=>{
+    showToast((j&&j.msg)?j.msg:'پاک شد',!(j&&j.ok));
+    p2RefreshTried();
+    document.querySelectorAll('.p2-tried').forEach(e=>{e.innerHTML='';});
+  }).catch(e=>{showToast('خطا: '+e.message,1);})
+   .finally(()=>{if(btn){btn.disabled=false;btn.textContent='🧹 پاک‌کردن تلاش‌ها';}});
+}
+/* نمایش/پنهان‌کردنِ تلاش‌های قبلیِ یک محصول زیر ردیفِ خودش. */
+function p2ShowTried(pid){
+  const box=document.getElementById('p2tr-'+pid);
+  if(!box)return;
+  if(box.dataset.open==='1'){box.dataset.open='0';box.innerHTML='';return;}
+  box.dataset.open='1';
+  box.innerHTML='<span style="color:#64748b;font-size:11px">در حال دریافت…</span>';
+  const fd=new FormData();fd.append('action','cat_tried');fd.append('op','list');fd.append('pid',String(pid));
+  fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(j=>{
+    if(!j||!j.ok){box.innerHTML='<span style="color:#f87171;font-size:11px">خطا</span>';return;}
+    const t=j.tried||[];
+    if(!t.length){box.innerHTML='<span style="color:#64748b;font-size:11px">هنوز هیچ دسته‌ای برای این محصول امتحان نشده</span>';return;}
+    const lbl={applied:'اعمال شد',rejected:'رد شد',failed:'ناموفق',skipped:'تکراری'};
+    const col={applied:'#4ade80',rejected:'#f87171',failed:'#fbbf24',skipped:'#94a3b8'};
+    box.innerHTML='<div style="font-size:11px;color:#cbd5e1;margin-bottom:3px">'
+      +'🧠 '+toFa(t.length)+' دستهٔ امتحان‌شده (دیگر پیشنهاد نمی‌شوند):</div>'
+      +t.map(x=>'<span style="display:inline-block;margin:2px 3px;padding:2px 7px;border-radius:9px;'
+        +'background:#1e293b;border:1px solid #334155;font-size:10.5px;color:'+(col[x.res]||'#cbd5e1')+'">'
+        +esc(x.name||('#'+x.id))+' ('+toFa(x.id)+')'
+        +(x.n>1?' ×'+toFa(x.n):'')
+        +' — '+(lbl[x.res]||x.res)+'</span>').join('');
+  }).catch(e=>{box.innerHTML='<span style="color:#f87171;font-size:11px">خطا: '+esc(e.message)+'</span>';});
+}
 function p2AskAiAll(){
   const rows=(window._phase2Rows||[]).filter(p=>{
     const el=document.getElementById('p2-'+p.id);
