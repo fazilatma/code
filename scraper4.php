@@ -120,7 +120,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.09';
+const APP_VERSION = '10.10';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -13660,11 +13660,29 @@ if (isset($_GET['agent_tools'])) {
     exit;
 }
 
+/** v10.10 (۲۳): آیا مدلی که کاربر در پنلِ ایجنت انتخاب کرده، واقعاً به یکی از
+ *  اتصال‌های ثبت‌شده می‌خورد؟ بدون این، انتخابِ مدل «بی‌صدا» نادیده گرفته
+ *  می‌شد و کاربر خیال می‌کرد اجرا با مدلِ دلخواهش رفته است. */
+if (isset($_GET['agent_model_check'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $mid = trim((string)($_GET['model'] ?? ($_POST['model'] ?? '')));
+    $pin = $mid === '' ? [] : autoResolveModel($mid);
+    echo json_encode(['ok' => true, 'model' => $mid, 'found' => !empty($pin),
+        'via'      => (string)($pin['via'] ?? ''),
+        'provider' => (string)($pin['provider']['name'] ?? ''),
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['agent_start'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $mode = (string)($_GET['mode'] ?? 'dry');
     if (!in_array($mode, ['sim', 'dry', 'live'], true)) $mode = 'dry';
     $task = trim((string)($_POST['task'] ?? ($_GET['task'] ?? '')));
+    /* v10.10 (۲۳): مدلِ انتخابیِ کاربر در پنلِ ایجنت. تا نسخهٔ ۱۰٫۰۹ فقط
+       کارهای زمان‌بندی‌شده می‌توانستند مدل داشته باشند و اجرای دستی همیشه
+       با مدلِ پیش‌فرضِ اتصالات می‌رفت؛ حالا همان مسیر برای هر دو یکی است. */
+    $model = trim((string)($_POST['model'] ?? ($_GET['model'] ?? '')));
     if ($task === '') {
         echo json_encode(['ok' => false, 'error' => 'دستورِ کار خالی است'], JSON_UNESCAPED_UNICODE); exit;
     }
@@ -13681,8 +13699,10 @@ if (isset($_GET['agent_start'])) {
     @unlink(AGENT_PROGRESS_FILE);
     @unlink(AGENT_RESULT_FILE);
     agentProgress(['running' => true, 'done' => false, 'mode' => $mode, 'task' => $task,
+        'model' => $model,
         'started_at' => time(), 'step' => 0, 'calls' => 0, 'changes' => 0, 'phase' => 'start',
-        'log_add' => ['🚀 شروعِ ایجنت — ' . agentModeLabel($mode)]]);
+        'log_add' => ['🚀 شروعِ ایجنت — ' . agentModeLabel($mode)
+                      . ($model !== '' ? ' — مدلِ انتخابی: ' . $model : ' — مدلِ پیش‌فرضِ اتصالات')]]);
 
     $early = json_encode(['ok' => true, 'started' => true, 'mode' => $mode], JSON_UNESCAPED_UNICODE);
     header('Connection: close');
@@ -13696,7 +13716,7 @@ if (isset($_GET['agent_start'])) {
     });
 
     try {
-        $rep = agentRun($cn, $task, $mode);
+        $rep = agentRun($cn, $task, $mode, $model);
     } catch (Throwable $e) {
         agentProgress(['running' => false, 'done' => true, 'error' => $e->getMessage(),
             'log_add' => ['❌ خطا: ' . $e->getMessage()]]);
@@ -17263,7 +17283,7 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, "ms.value = ''; apModelHint();") !== false);
     $add('10.08', 'فیلترِ برچسبی فهرست را محدود می‌کند بی‌آنکه کاتالوگ را دوباره بگیرد',
          strpos($selfSrc, 'function apRenderModelFilter') !== false
-      && strpos($selfSrc, 'apModelsCache.filter(function(m){return m.tag===tag;})') !== false);
+      && strpos($selfSrc, 'apModelsCache.filter(function(m){return m.tag===t;})') !== false);
 
     /* ---------- v10.09 (۲۲): افزودنِ Leanstral 1.5 و Ternary Bonsai ---------- */
     $add('10.09', 'Leanstral 1.5 در کاتالوگِ انتخاب هست و زیرِ میسترال نشسته',
@@ -17313,6 +17333,84 @@ if (isset($_GET['selftest'])) {
              return count($m) >= 41 && count($p) >= 9
                  && count($ids) === count(array_unique($ids));
          })());
+
+    /* ---------- v10.10 (۲۳): انتخابِ مدل در ایجنت + نظمِ اتوماسیون ---------- */
+    $add('10.10', 'پنلِ ایجنت منویِ انتخابِ مدل و راهنمای آن را دارد',
+         strpos($selfSrc, 'id="agModelSel"')  !== false
+      && strpos($selfSrc, 'id="agModelHint"') !== false
+      && strpos($selfSrc, 'function agFillModelSelect') !== false
+      && strpos($selfSrc, 'function agModelHint')       !== false
+      && strpos($selfSrc, 'function agModelReset')      !== false);
+    $add('10.10', 'منویِ مدلِ ایجنت گزینهٔ «پیش‌فرضِ اتصالات» را در صدر دارد',
+         strpos($selfSrc, "var h = '<option value=\"\">🔗 مدلِ پیش‌فرضِ اتصالات</option>';") !== false);
+    $add('10.10', 'انتخابِ ناموجود در منویِ ایجنت بی‌صدا نمی‌ماند و به پیش‌فرض برمی‌گردد',
+         strpos($selfSrc, "if (keep) { sel.value = keep; if (sel.value !== keep) sel.value = ''; }") !== false);
+    $add('10.10', 'مدلِ انتخابیِ ایجنت واقعاً در درخواستِ شروع فرستاده می‌شود',
+         strpos($selfSrc, "fd.append('model', (\$('agModelSel') || { value: '' }).value || '');") !== false);
+    $add('10.10', 'بک‌اندِ ?agent_start مدل را می‌خواند و به agentRun پاس می‌دهد',
+         strpos($selfSrc, "\$model = trim((string)(\$_POST['model'] ?? (\$_GET['model'] ?? '')));") !== false
+      && strpos($selfSrc, 'agentRun($cn, $task, $mode, $model);') !== false);
+    $add('10.10', 'اندپوینتِ بررسیِ رسیدن‌پذیریِ مدل هست و از autoResolveModel استفاده می‌کند',
+         strpos($selfSrc, "isset(\$_GET['agent_model_check'])") !== false
+      && strpos($selfSrc, "\$pin = \$mid === '' ? [] : autoResolveModel(\$mid);") !== false);
+    $add('10.10', 'مدلِ ناموجود found=false می‌گیرد و مدلِ کاتالوگ بدونِ اتصال هم همین‌طور',
+         (function () {
+             $a = autoResolveModel('یک-مدلِ-قطعاً-ناموجود-۱۰۱۰');
+             $b = autoResolveModel('');
+             return $a === [] && $b === [];
+         })());
+    $add('10.10', 'تبِ ایجنت هنگامِ باز شدن کاتالوگ و ابزارها را می‌گیرد',
+         strpos($selfSrc, "if(tab==='agent'){ agLoadCatalog(); agLoadTools(); }") !== false);
+    $add('10.10', 'هیچ showToast‌ای دیگر رشتهٔ error/info به‌جای بولین نمی‌گیرد',
+         substr_count($selfSrc, "showToast(") > 20
+      && strpos($selfSrc, ", '" . "error');") === false
+      && strpos($selfSrc, ", '" . "info');")  === false);
+    $add('10.10', 'فیلترِ مدل‌ها داخلِ کادرِ خودش نشسته و دکمهٔ فعال هایلایت می‌شود',
+         (function () use ($selfSrc) {
+             /* ترتیب را روی خودِ HTML می‌سنجیم (آخرین رخدادها)، نه روی متنِ همین
+                ادعاها که بالاتر در فایل آمده‌اند. */
+             $sr = strrpos($selfSrc, 'id="apModelSearch"');
+             $fl = strrpos($selfSrc, 'id="apModelFilter"');
+             $ls = strrpos($selfSrc, 'id="apModelList"');
+             return $sr !== false && $fl !== false && $ls !== false
+                 && $sr < $fl && $fl < $ls
+                 && strpos($selfSrc, "let apModelTag = 'all';") !== false
+                 && strpos($selfSrc, "return apModelTag===k ? 'btn btn-blue' : 'btn btn-gray';") !== false;
+         })());
+    $add('10.10', 'فهرستِ کارها جست‌وجو و نمای وضعیت دارد',
+         strpos($selfSrc, 'id="apJobSearch"') !== false
+      && strpos($selfSrc, 'id="apJobFilter"') !== false
+      && strpos($selfSrc, 'function apRenderJobFilter') !== false
+      && strpos($selfSrc, 'function apJobFilterSet') !== false);
+    $add('10.10', 'رندرِ کارها بدون آرگومان هم کار می‌کند (جست‌وجو بدون درخواستِ تازه)',
+         strpos($selfSrc, 'if(!d) d = apJobsMeta;') !== false
+      && strpos($selfSrc, "oninput=\"apRenderJobs()\"") !== false);
+    $add('10.10', 'حالتِ ناشناختهٔ کار «undefined» نشان نمی‌دهد',
+         strpos($selfSrc, "return modeLbl[m] || ('❔ '+(m||'نامشخص'));") !== false
+      && strpos($selfSrc, "return modeCol[m] || '#64748b';") !== false);
+    $add('10.10', 'شاخهٔ مردهٔ readOnly در apUsePreset حذف شده است',
+         strpos($selfSrc, "readOnly ? " . "'dry' : 'dry'") === false
+      && strpos($selfSrc, 'const writes = /اصلاح|صفر کن|تغییر بده') !== false);
+    $add('10.10', 'حالتِ ویرایش با نشان و متنِ دکمه از حالتِ «کارِ تازه» جدا می‌شود',
+         strpos($selfSrc, 'id="apEditBadge"') !== false
+      && strpos($selfSrc, 'id="apSaveBtn"') !== false
+      && strpos($selfSrc, "sb.textContent = '💾 ذخیرهٔ تغییرات';") !== false
+      && strpos($selfSrc, "sb.textContent = '💾 ذخیرهٔ کار';") !== false);
+    $add('10.10', 'حالتِ اجرا راهنمای زنده دارد و «واقعی» هشدارِ قرمز می‌گیرد',
+         strpos($selfSrc, 'id="apModeHint"') !== false
+      && strpos($selfSrc, 'function apModeHint') !== false
+      && strpos($selfSrc, 'onchange="apModeHint()"') !== false);
+    $add('10.10', 'کارتِ هر کار مدلِ اختصاصی‌اش را نشان می‌دهد',
+         strpos($selfSrc, 'function apModelName') !== false
+      && strpos($selfSrc, "j.model ? '<span style=\"font-size:9px;color:#a78bfa") !== false);
+    $add('10.10', 'بخش‌های راهنمایِ اتوماسیون کشویی شده‌اند تا فهرستِ کارها نزدیک بماند',
+         substr_count($selfSrc, '<summary style="color:#60a5fa">' . '🆓 مدل‌های رایگانی') === 1
+      && substr_count($selfSrc, '<summary style="color:#facc15">' . '🧰 ایجنت چه کارهایی') === 1
+      && substr_count($selfSrc, 'details class="hint-collapse" ' . 'style="margin-top:12px;background:#0f172a') === 1);
+    $add('10.10', 'انتخابِ مدلِ ایجنت برای دفعهٔ بعد به یاد می‌ماند',
+         strpos($selfSrc, "var AG_MODEL_LS = 'ag_model_pick';") !== false
+      && strpos($selfSrc, 'localStorage.setItem(AG_MODEL_LS') !== false
+      && strpos($selfSrc, 'localStorage.getItem(AG_MODEL_LS)') !== false);
 
     /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -29849,6 +29947,13 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-gray" onclick="agLoadTools()" style="flex:0;font-size:10px;padding:4px 8px">🔄 بررسی</button>
 </div>
 
+<div class="crow" style="align-items:center;margin-top:6px">
+<label>مدلِ این اجرا:</label>
+<select id="agModelSel" style="flex:1;font-size:11px"></select>
+<button class="btn btn-gray" onclick="agModelReset()" style="flex:0;font-size:10px;padding:4px 8px" title="بازگشت به مدلِ پیش‌فرضِ اتصالات">↺</button>
+</div>
+<div style="font-size:9.5px;color:#64748b;margin:2px 0 0;line-height:1.7" id="agModelHint">مدلِ پیش‌فرضِ اتصالات استفاده می‌شود</div>
+
 <div style="margin-top:8px">
 <div style="font-size:10.5px;color:#94a3b8;margin-bottom:4px">دستورِ کار:</div>
 <textarea id="agTask" rows="3" style="width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;padding:8px;font-size:11.5px;font-family:inherit;line-height:1.8" placeholder="مثال: محصول‌های عطر و ادکلن را پیدا کن و عنوان آن‌ها را در سایت snappshop.ir پیدا کن و قیمت و موجودی آن‌ها را در باسلام و ووکامرس آپدیت کن">محصول‌های عطر و ادکلن را پیدا کن و عنوان آن‌ها را در سایت snappshop.ir پیدا کن و قیمت و موجودی آن‌ها را در باسلام و ووکامرس آپدیت کن</textarea>
@@ -29913,6 +30018,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-gray hidden" id="apCancelBtn" onclick="apResetForm()" style="flex:0;font-size:10px;padding:3px 8px">✖ انصراف</button>
 </div>
 <input type="hidden" id="apJobId" value="">
+<div id="apEditBadge" class="hidden" style="font-size:9.5px;color:#fbbf24;background:#422006;border:1px solid #a16207;border-radius:6px;padding:4px 7px;margin-bottom:6px;line-height:1.7">✏️ در حالِ ویرایشِ یک کارِ موجود — با «ذخیره» همان کار به‌روزرسانی می‌شود، نه اینکه کارِ تازه ساخته شود.</div>
 
 <div style="font-size:10.5px;color:#94a3b8;margin-bottom:4px">آمادهٔ استفاده — یکی را بزنید تا فرم پر شود:</div>
 <div id="apPresets" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px"></div>
@@ -29940,12 +30046,13 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 
 <div class="crow" style="align-items:center;margin-top:6px">
 <label>حالت اجرا:</label>
-<select id="apMode" style="flex:1;font-size:11px">
+<select id="apMode" onchange="apModeHint()" style="flex:1;font-size:11px">
 <option value="sim">🧪 شبیه‌سازی — دادهٔ نمونه، بدون هیچ اتصالی</option>
 <option value="dry" selected>🔍 آزمایشی — می‌خواند ولی نمی‌نویسد</option>
 <option value="live">🔥 اجرای واقعی — قیمت و موجودی تغییر می‌کند</option>
 </select>
 </div>
+<div style="font-size:9.5px;color:#64748b;margin:2px 0 0;line-height:1.7" id="apModeHint">می‌خواند و گزارش می‌دهد ولی چیزی نمی‌نویسد — امن‌ترین حالت برای شروع.</div>
 
 <div class="crow" style="align-items:center;margin-top:6px">
 <label>از همان ابتدا فعال:</label>
@@ -29954,39 +30061,48 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 
 <div class="cact" style="margin-top:8px">
-<button class="btn btn-green" onclick="apSaveJob()" style="flex:1;font-size:11px">💾 ذخیرهٔ کار</button>
+<button class="btn btn-green" id="apSaveBtn" onclick="apSaveJob()" style="flex:1;font-size:11px">💾 ذخیرهٔ کار</button>
 </div>
 </div>
 
 <!-- ── فهرستِ کارها ── -->
 <div style="margin-top:10px">
 <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-<span style="font-size:11px;color:#94a3b8;font-weight:700;flex:1">📋 کارهای تعریف‌شده</span>
+<span style="font-size:11px;color:#94a3b8;font-weight:700;flex:1">📋 کارهای تعریف‌شده <span id="apJobCount" style="font-size:9px;color:#64748b;font-weight:400"></span></span>
 <button class="btn btn-gray" onclick="apLoadJobs()" style="flex:0;font-size:10px;padding:3px 8px">🔄 تازه‌سازی</button>
+</div>
+<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+<input type="text" id="apJobSearch" oninput="apRenderJobs()" placeholder="🔎 جست‌وجو در عنوان و دستور…" style="flex:1;min-width:140px;font-size:10px;padding:3px 7px">
+<div id="apJobFilter" style="display:flex;gap:4px;flex-wrap:wrap"></div>
 </div>
 <div id="apJobList" style="font-size:11px;color:#64748b">در حالِ بارگذاری…</div>
 </div>
 
-<!-- ── مدل‌های رایگانِ ابزاردار ── -->
-<div id="apModelFilter" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px"></div>
-<div style="margin-top:12px">
-<div style="font-size:11px;color:#60a5fa;font-weight:700;margin-bottom:4px">🆓 مدل‌های رایگانی که فراخوانیِ ابزار دارند</div>
+<!-- ── مدل‌های رایگانِ ابزاردار (v10.10: فیلتر داخلِ کادرِ خودش، کشویی) ── -->
+<details class="hint-collapse" style="margin-top:12px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:8px 10px">
+<summary style="color:#60a5fa">🆓 مدل‌های رایگانی که فراخوانیِ ابزار دارند</summary>
+<div class="hint-body">
 <div style="font-size:10px;color:#64748b;margin-bottom:6px;line-height:1.8">
 این مدل‌ها لایهٔ رایگانِ واقعی دارند، از <b style="color:#94a3b8">tools/tool_choice</b> پشتیبانی می‌کنند و اندپوینتشان سازگار با OpenAI است — یعنی همین ایجنت مستقیم رویشان کار می‌کند.
 سقف‌ها تقریبی‌اند و ارائه‌دهنده‌ها مرتب تغییرشان می‌دهند.
 </div>
+<input type="text" id="apModelSearch" oninput="apRenderModelList()" placeholder="🔎 جست‌وجو در نام، شناسه یا ارائه‌دهنده…" style="width:100%;font-size:10px;padding:3px 7px;margin-bottom:6px">
+<div id="apModelFilter" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px"></div>
 <div id="apModelList" style="font-size:11px;color:#64748b">—</div>
 </div>
+</details>
 
 <!-- ── کارهایی که ایجنت می‌تواند بکند ── -->
-<div style="margin-top:12px">
-<div style="font-size:11px;color:#facc15;font-weight:700;margin-bottom:4px">🧰 ایجنت چه کارهایی می‌تواند بکند؟</div>
+<details class="hint-collapse" style="margin-top:8px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:8px 10px">
+<summary style="color:#facc15">🧰 ایجنت چه کارهایی می‌تواند بکند؟</summary>
+<div class="hint-body">
 <div style="font-size:10px;color:#64748b;margin-bottom:6px;line-height:1.8">
 دستهٔ اول مخصوصِ همین فروشگاه است و با ابزارهای داخلیِ برنامه کار می‌کند؛ دستهٔ دوم کارهای عمومی‌ای است که هر ایجنتِ ابزاردار می‌تواند انجام دهد.
 روی هرکدام بزنید تا به‌عنوان کارِ تازه در فرمِ بالا بنشیند.
 </div>
 <div id="apTaskList" style="font-size:11px;color:#64748b">—</div>
 </div>
+</details>
 
 </div>
 
@@ -39265,6 +39381,8 @@ function aiTab(tab){
     panels.forEach(p=>{p.style.display=(p.getAttribute('data-ai-panel')===tab)?'block':'none';});
     // v10.05: تبِ اتوماسیون در نخستین باز شدن، کاتالوگ/کارها/وضعیتِ کران را می‌گیرد
     if(tab==='autopilot'){ apLoadCatalog(); apLoadJobs(); apCronState(); }
+    // v10.10 (۲۳): تبِ ایجنت هم کاتالوگِ مدل‌ها و وضعیتِ مدلِ فعال را می‌گیرد
+    if(tab==='agent'){ agLoadCatalog(); agLoadTools(); }
 }
 
 /* ===== v10.05 (۱۹): اتوماسیونِ ایجنتی — کارهای زمان‌بندی‌شده ===== */
@@ -39274,6 +39392,9 @@ let apJobsCache = [];      // آخرین فهرستِ کارها
 let apModelsCache = [];    // v10.08: کاتالوگِ مدل‌های ابزاردار
 let apTagsCache = {};      // v10.08: برچسب‌های جنسِ مدل
 let apProvCache = {};      // v10.08: اطلاعاتِ ارائه‌دهنده‌ها
+let apModelTag = 'all';    // v10.10: برچسبِ فعالِ فیلترِ مدل‌ها
+let apJobView  = 'all';    // v10.10: نمای فعالِ فهرستِ کارها (all|on|off|due|fail)
+let apJobsMeta = null;     // v10.10: آخرین پاسخِ ?auto_jobs (برای رندرِ دوباره بدون fetch)
 
 /** انتخابِ یک مدل از فهرست ⇒ نشستن در منویِ فرمِ کار */
 function apPickModel(id){
@@ -39287,7 +39408,12 @@ function apPickModel(id){
     apModelHint();
     fxOkFlash('apModel');
     const m = apModelsCache.filter(function(x){return x.id===id;})[0];
-    showToast('مدل انتخاب شد: ' + (m ? m.name : id));
+    /* v10.10: اگر فرم در حالتِ ویرایش است بگو مدل روی کدام کار می‌نشیند —
+       قبلاً کاربر نمی‌فهمید انتخابش به کارِ در حالِ ویرایش خورده یا کارِ تازه. */
+    const jid = ($('apJobId')||{value:''}).value;
+    const jb  = jid ? apJobsCache.filter(function(x){return x.id===jid;})[0] : null;
+    showToast('مدل انتخاب شد: ' + (m ? m.name : id)
+        + (jb ? ' — برای کارِ «'+jb.title+'» (هنوز ذخیره نشده)' : ''));
     softScrollIntoView(sel,{behavior:'smooth',block:'center'});
 }
 let apLogTimer = null;     // تایمرِ نوسازیِ مودالِ لاگ
@@ -39329,7 +39455,7 @@ function apRenderCatalog(){
     apProvCache   = d.providers || {};
     apFillModelSelect();
     apRenderModelFilter();
-    apRenderModelList('all');
+    apRenderModelList();
 
     // ── کارهای ممکن ──
     const tl = $('apTaskList');
@@ -39399,12 +39525,15 @@ function apRenderModelFilter(){
     if(!f) return;
     const counts = {};
     apModelsCache.forEach(function(m){ counts[m.tag] = (counts[m.tag]||0)+1; });
-    let h = '<button class="btn btn-blue" onclick="apRenderModelList(\'all\')" '
+    /* v10.10: دکمهٔ فیلترِ فعال باید دیده شود؛ قبلاً همه خاکستری می‌ماندند و
+       کاربر نمی‌دانست فهرستِ زیرش فیلترشده است یا کامل. */
+    const cls = function(k){ return apModelTag===k ? 'btn btn-blue' : 'btn btn-gray'; };
+    let h = '<button class="'+cls('all')+'" onclick="apRenderModelList(\'all\')" '
           + 'style="flex:0;font-size:9px;padding:2px 7px">همه ('+toFa(apModelsCache.length)+')</button>';
     Object.keys(apTagsCache).forEach(function(k){
         if(!counts[k]) return;
         const t = apTagsCache[k];
-        h += '<button class="btn btn-gray" onclick="apRenderModelList(\''+k+'\')" '
+        h += '<button class="'+cls(k)+'" onclick="apRenderModelList(\''+k+'\')" '
           +  'style="flex:0;font-size:9px;padding:2px 7px">'+t.icon+' '+esc(t.label)
           +  ' ('+toFa(counts[k])+')</button>';
     });
@@ -39415,8 +39544,15 @@ function apRenderModelFilter(){
 function apRenderModelList(tag){
     const ml = $('apModelList');
     if(!ml) return;
-    const rows = (tag==='all') ? apModelsCache
-               : apModelsCache.filter(function(m){return m.tag===tag;});
+    if(tag !== undefined && tag !== null){ apModelTag = tag; apRenderModelFilter(); }
+    const t = apModelTag;
+    const q = (($('apModelSearch')||{value:''}).value||'').trim().toLowerCase();
+    let rows = (t==='all') ? apModelsCache
+             : apModelsCache.filter(function(m){return m.tag===t;});
+    if(q) rows = rows.filter(function(m){
+        const pn = (apProvCache[m.provider]||{name:m.provider}).name || '';
+        return (m.name+' '+m.id+' '+m.provider+' '+pn+' '+(m.note||'')).toLowerCase().indexOf(q) >= 0;
+    });
     const byProv = {};
     rows.forEach(function(m){ (byProv[m.provider] = byProv[m.provider] || []).push(m); });
     let h = '';
@@ -39447,7 +39583,7 @@ function apRenderModelList(tag){
             });
         h += '</div>';
     });
-    ml.innerHTML = h || '<div style="color:#64748b;font-size:10px">موردی نیست</div>';
+    ml.innerHTML = h || '<div style="color:#64748b;font-size:10px">موردی با این فیلتر/جست‌وجو پیدا نشد</div>';
 }
 
 /** پر کردنِ فرم از روی یک کارِ آماده */
@@ -39462,11 +39598,19 @@ function apUsePreset(key){
     if(sel) for(let i=0;i<sel.options.length;i++){
         if(+sel.options[i].value === +t.every){ sel.selectedIndex = i; break; }
     }
-    // کارهایی که فقط گزارش می‌دهند خطری ندارند ⇒ پیش‌فرضِ امن‌تر
-    const readOnly = /گزارش|ممیزی|پیدا کن|بررسی/.test(t.prompt) && !/اصلاح|صفر کن|تغییر بده/.test(t.prompt);
-    $('apMode').value = readOnly ? 'dry' : 'dry';
+    /* v10.10: تا ۱۰٫۰۹ هر دو شاخهٔ این شرط 'dry' بود (کدِ مرده) و readOnly
+       هیچ اثری نداشت. کارهای فقط‌خواندنی می‌توانند بی‌خطر در «شبیه‌سازی» هم
+       دیده شوند، ولی چیزی که کاربر واقعاً لازم دارد آگاهی از خطرِ کار است:
+       کارهای نویسنده را در «آزمایشی» نگه می‌داریم و صریح هشدار می‌دهیم. */
+    const writes = /اصلاح|صفر کن|تغییر بده|به‌روزرسانی|بروزرسانی|هم‌ترازی|همترازی/.test(t.prompt);
+    $('apMode').value = 'dry';
+    apModeHint();
     $('apTitle').focus();
-    showToast('«'+t.title+'» در فرم نشست — در صورت نیاز ویرایش و ذخیره کنید');
+    softScrollIntoView($('apTitle'),{behavior:'smooth',block:'center'});
+    showToast('«'+t.title+'» در فرم نشست — '
+        + (writes ? 'این کار می‌تواند بنویسد؛ فعلاً روی «آزمایشی» است'
+                  : 'کارِ فقط‌گزارشی است')
+        + ' — در صورت نیاز ویرایش و ذخیره کنید');
 }
 
 /** خالی کردنِ فرم و بازگشت به حالتِ «کارِ تازه» */
@@ -39483,6 +39627,23 @@ function apResetForm(){
     }
     const ft = $('apFormTitle'); if(ft) ft.textContent = '➕ کارِ تازه';
     const cb = $('apCancelBtn'); if(cb) cb.classList.add('hidden');
+    const eb = $('apEditBadge'); if(eb) eb.classList.add('hidden');
+    const sb = $('apSaveBtn');   if(sb) sb.textContent = '💾 ذخیرهٔ کار';
+    apModeHint();
+}
+
+/** v10.10: هشدارِ زندهٔ حالتِ اجرا — «واقعی» باید قبل از ذخیره به چشم بیاید */
+function apModeHint(){
+    const sel = $('apMode'); if(!sel) return;
+    const box = $('apModeHint');
+    if(!box) return;
+    if(sel.value === 'live'){
+        box.innerHTML = '<span style="color:#f87171">🔥 در این حالت قیمت و موجودی واقعاً تغییر می‌کند و برگشت‌پذیر نیست.</span>';
+    } else if(sel.value === 'sim'){
+        box.innerHTML = 'دادهٔ نمونه؛ به هیچ سرویسی وصل نمی‌شود — برای آزمودنِ متنِ دستور خوب است.';
+    } else {
+        box.innerHTML = 'می‌خواند و گزارش می‌دهد ولی چیزی نمی‌نویسد — امن‌ترین حالت برای شروع.';
+    }
 }
 
 /** ذخیرهٔ کارِ تازه یا ویرایشِ کارِ موجود */
@@ -39514,32 +39675,90 @@ function apLoadJobs(){
     fetch('?auto_jobs=1').then(r=>r.json()).then(d=>{
         if(!d||!d.ok) return;
         apJobsCache = d.jobs||[];
+        apJobsMeta  = d;
         apRenderJobs(d);
     }).catch(()=>{});
 }
 
+/** v10.10: دکمه‌های نمای فهرستِ کارها (همه/فعال/خاموش/سررسید/خطادار) */
+function apRenderJobFilter(all){
+    const f = $('apJobFilter'); if(!f) return;
+    const cnt = {
+        all:  all.length,
+        on:   all.filter(function(j){return j.enabled;}).length,
+        off:  all.filter(function(j){return !j.enabled;}).length,
+        due:  all.filter(function(j){return j.due && j.enabled;}).length,
+        fail: all.filter(function(j){return j.fails>0;}).length
+    };
+    const defs = [['all','همه'],['on','▶ فعال'],['off','⏸ خاموش'],['due','⏰ سررسید'],['fail','⚠️ خطادار']];
+    f.innerHTML = defs.map(function(d){
+        return '<button class="btn '+(apJobView===d[0]?'btn-blue':'btn-gray')+'" '
+             + 'onclick="apJobFilterSet(\''+d[0]+'\')" style="flex:0;font-size:9px;padding:2px 7px">'
+             + d[1]+' ('+toFa(cnt[d[0]])+')</button>';
+    }).join('');
+}
+
+function apJobFilterSet(v){ apJobView = v; apRenderJobs(); }
+
+/** v10.10: نامِ خوانای مدل از کاتالوگ (اگر نبود، خودِ شناسه) */
+function apModelName(id){
+    const m = apModelsCache.filter(function(x){return x.id===id;})[0];
+    return m ? m.name : id;
+}
+
 function apRenderJobs(d){
     const box = $('apJobList'); if(!box) return;
-    const jobs = d.jobs||[];
+    /* v10.10: بدون آرگومان هم کار کند تا جست‌وجو/فیلتر بدون رفت‌وبرگشت به
+       سرور فهرست را دوباره بسازد. */
+    if(!d) d = apJobsMeta;
+    if(!d) return;
+    const all = d.jobs||[];
 
-    // ── شمارنده‌های بالا ──
+    // ── شمارنده‌های بالا (همیشه رویِ کلِ کارها، نه فهرستِ فیلترشده) ──
     let on=0, runs=0, ch=0, fails=0;
-    jobs.forEach(function(j){ if(j.enabled) on++; runs+=j.runs; ch+=j.changes; fails+=j.fails; });
-    if($('apStatJobs'))    $('apStatJobs').textContent    = toFa(jobs.length);
+    all.forEach(function(j){ if(j.enabled) on++; runs+=j.runs; ch+=j.changes; fails+=j.fails; });
+    if($('apStatJobs'))    $('apStatJobs').textContent    = toFa(all.length);
     if($('apStatOn'))      $('apStatOn').textContent      = toFa(on);
     if($('apStatRuns'))    $('apStatRuns').textContent    = toFa(runs);
     if($('apStatChanges')) $('apStatChanges').textContent = toFa(ch);
     if($('apStatFails'))   $('apStatFails').textContent   = toFa(fails);
 
-    if(!jobs.length){
+    apRenderJobFilter(all);
+
+    if(!all.length){
+        if($('apJobCount')) $('apJobCount').textContent = '';
         box.innerHTML = '<div style="background:#0f172a;border:1px dashed #334155;border-radius:8px;padding:14px;'
             + 'text-align:center;color:#64748b;font-size:10.5px;line-height:1.9">'
             + 'هنوز کاری تعریف نشده است.<br>یکی از دکمه‌های آمادهٔ بالا را بزنید یا دستورِ خودتان را بنویسید.</div>';
         return;
     }
 
+    const q = (($('apJobSearch')||{value:''}).value||'').trim().toLowerCase();
+    let jobs = all.filter(function(j){
+        if(apJobView==='on'   && !j.enabled) return false;
+        if(apJobView==='off'  &&  j.enabled) return false;
+        if(apJobView==='due'  && !(j.due && j.enabled)) return false;
+        if(apJobView==='fail' && !(j.fails>0)) return false;
+        if(q && ((j.title||'')+' '+(j.prompt||'')+' '+(j.model||'')).toLowerCase().indexOf(q) < 0) return false;
+        return true;
+    });
+
+    if($('apJobCount')) $('apJobCount').textContent =
+        (jobs.length===all.length) ? '('+toFa(all.length)+')'
+                                   : '('+toFa(jobs.length)+' از '+toFa(all.length)+')';
+
+    if(!jobs.length){
+        box.innerHTML = '<div style="background:#0f172a;border:1px dashed #334155;border-radius:8px;padding:12px;'
+            + 'text-align:center;color:#64748b;font-size:10.5px">هیچ کاری با این فیلتر/جست‌وجو پیدا نشد.</div>';
+        return;
+    }
+
+    /* v10.10: mode ممکن است از فایلِ قدیمی مقدارِ ناشناخته داشته باشد ⇒ fallback
+       تا به‌جای «undefined» چیزی معنادار دیده شود. */
     const modeLbl = {sim:'🧪 شبیه‌سازی', dry:'🔍 آزمایشی', live:'🔥 واقعی'};
     const modeCol = {sim:'#94a3b8', dry:'#60a5fa', live:'#f87171'};
+    const mLbl = function(m){ return modeLbl[m] || ('❔ '+(m||'نامشخص')); };
+    const mCol = function(m){ return modeCol[m] || '#64748b'; };
 
     box.innerHTML = jobs.map(function(j){
         const st = (j.last_ok===null||j.last_ok===undefined) ? {t:'—',c:'#64748b'}
@@ -39548,7 +39767,8 @@ function apRenderJobs(d){
           + ';border-radius:8px;padding:8px;margin-bottom:6px'+(j.enabled?'':';opacity:.6')+'">'
           + '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:5px">'
           +   '<b style="color:#e2e8f0;font-size:11.5px">'+esc(j.title)+'</b>'
-          +   '<span style="font-size:9px;color:'+modeCol[j.mode]+';background:#111c31;padding:1px 6px;border-radius:4px">'+modeLbl[j.mode]+'</span>'
+          +   '<span style="font-size:9px;color:'+mCol(j.mode)+';background:#111c31;padding:1px 6px;border-radius:4px">'+esc(mLbl(j.mode))+'</span>'
+          +   (j.model ? '<span style="font-size:9px;color:#a78bfa;background:#111c31;padding:1px 6px;border-radius:4px" title="'+esc(j.model)+'">🧠 '+esc(apModelName(j.model))+'</span>' : '')
           +   (j.due&&j.enabled ? '<span style="font-size:9px;color:#facc15;background:#422006;padding:1px 6px;border-radius:4px">سررسید</span>' : '')
           +   '<span style="margin-right:auto;font-size:9.5px;color:#64748b">🕒 '+esc(j.next_label)+'</span>'
           + '</div>'
@@ -39591,6 +39811,9 @@ function apEditJob(id){
     }
     const ft = $('apFormTitle'); if(ft) ft.textContent = '✏️ ویرایشِ «'+j.title+'»';
     const cb = $('apCancelBtn'); if(cb) cb.classList.remove('hidden');
+    const eb = $('apEditBadge'); if(eb) eb.classList.remove('hidden');
+    const sb = $('apSaveBtn');   if(sb) sb.textContent = '💾 ذخیرهٔ تغییرات';
+    apModeHint();
     softScrollIntoView($('apTitle'),{behavior:'smooth',block:'center'});
 }
 
@@ -43226,6 +43449,94 @@ function agLog(msg) {
     box.scrollTop = box.scrollHeight;
 }
 
+/* ══ v10.10 (۲۳): انتخابِ مدل برای اجرای دستیِ ایجنت ══
+   تا ۱۰٫۰۹ فقط کارهای زمان‌بندی‌شده مدلِ اختصاصی داشتند و اجرای دستی همیشه
+   با مدلِ پیش‌فرضِ اتصالات می‌رفت. حالا همان کاتالوگِ مدل‌های ابزاردار
+   (?auto_catalog=1) اینجا هم نشان داده می‌شود و انتخاب تا agentRun می‌رود. */
+var AG_MODEL_LS = 'ag_model_pick';
+
+function agLoadCatalog() {
+    var fill = function () { agFillModelSelect(); };
+    if (apCatalog) {
+        if (!apModelsCache.length) {
+            apModelsCache = apCatalog.models || [];
+            apTagsCache   = apCatalog.tags || {};
+            apProvCache   = apCatalog.providers || {};
+        }
+        fill(); return;
+    }
+    fetch('?auto_catalog=1').then(function (r) { return r.json(); }).then(function (d) {
+        if (!d || !d.ok) return;
+        apCatalog     = d;
+        apModelsCache = d.models || [];
+        apTagsCache   = d.tags || {};
+        apProvCache   = d.providers || {};
+        fill();
+    }).catch(function () { });
+}
+
+/** پر کردنِ منویِ مدلِ ایجنت — گروه‌بندی‌شده بر اساسِ ارائه‌دهنده */
+function agFillModelSelect() {
+    var sel = $('agModelSel');
+    if (!sel) return;
+    var keep = sel.value || '';
+    if (!keep) { try { keep = localStorage.getItem(AG_MODEL_LS) || ''; } catch (e) { keep = ''; } }
+    var h = '<option value="">🔗 مدلِ پیش‌فرضِ اتصالات</option>';
+    var byProv = {};
+    apModelsCache.forEach(function (m) { (byProv[m.provider] = byProv[m.provider] || []).push(m); });
+    Object.keys(byProv).forEach(function (pv) {
+        var info = apProvCache[pv] || { name: pv };
+        h += '<optgroup label="' + esc(info.name) + '">';
+        byProv[pv].forEach(function (m) {
+            var t = apTagsCache[m.tag] || { icon: '', label: '' };
+            h += '<option value="' + esc(m.id) + '">' + t.icon + ' ' + esc(m.name)
+              +  ' — ' + '★'.repeat(m.quality) + '</option>';
+        });
+        h += '</optgroup>';
+    });
+    sel.innerHTML = h;
+    /* مثل apFillModelSelect: اگر شناسهٔ ذخیره‌شده دیگر در کاتالوگ نباشد،
+       مرورگر value را بی‌صدا خالی می‌کند ⇒ به پیش‌فرض برمی‌گردیم. */
+    if (keep) { sel.value = keep; if (sel.value !== keep) sel.value = ''; }
+    sel.onchange = agModelHint;
+    agModelHint();
+}
+
+/** توضیحِ زیرِ منو + ذخیرهٔ انتخاب برای دفعهٔ بعد */
+function agModelHint() {
+    var sel = $('agModelSel'), hint = $('agModelHint');
+    if (!sel || !hint) return;
+    try { localStorage.setItem(AG_MODEL_LS, sel.value || ''); } catch (e) { }
+    var m = apModelsCache.filter(function (x) { return x.id === sel.value; })[0];
+    if (!m) {
+        hint.innerHTML = 'مدلِ پیش‌فرضِ اتصالات استفاده می‌شود — همان چیزی که بالا زیرِ «مدل فعال» می‌بینید.';
+        return;
+    }
+    var info = apProvCache[m.provider] || { name: m.provider, key: '' };
+    hint.innerHTML = '<b style="color:#93c5fd">' + esc(info.name) + '</b> · 📊 '
+        + toFa(Math.round(m.context / 1000)) + 'K حافظه · ⏱ ' + esc(m.limit)
+        + '<br>💡 ' + esc(m.note)
+        + '<br><span style="color:#fbbf24">کلید از ' + esc(info.key) + ' — باید در «اتصالات» ثبت شده باشد</span>';
+    /* آیا این مدل واقعاً به یکی از اتصال‌های ثبت‌شده می‌خورد؟ */
+    fetch('?agent_model_check&model=' + encodeURIComponent(m.id))
+        .then(function (r) { return r.json(); }).then(function (d) {
+            if (!d || !d.ok) return;
+            if ($('agModelSel') && $('agModelSel').value !== m.id) return;
+            hint.innerHTML += d.found
+                ? '<br><span style="color:#4ade80">✅ به اتصالِ «' + esc(d.provider) + '» وصل می‌شود</span>'
+                : '<br><span style="color:#f87171">⚠️ هیچ اتصالِ فعالی برای این مدل نیست — اجرا با مدلِ پیش‌فرض می‌رود</span>';
+        }).catch(function () { });
+}
+
+/** بازگشت به مدلِ پیش‌فرضِ اتصالات */
+function agModelReset() {
+    var sel = $('agModelSel');
+    if (!sel) return;
+    sel.value = '';
+    agModelHint();
+    showToast('به مدلِ پیش‌فرضِ اتصالات برگشت');
+}
+
 function agLoadTools() {
     var el = $('agModel');
     if (el) el.textContent = 'در حال بررسی…';
@@ -43244,7 +43555,7 @@ function agLoadTools() {
 
 function agShowTools() {
     fetch('?agent_tools').then(function (r) { return r.json(); }).then(function (j) {
-        if (!j || !j.ok) { showToast('خطا در خواندن ابزارها', 'error'); return; }
+        if (!j || !j.ok) { showToast('خطا در خواندن ابزارها', true); return; }
         var h = '<div style="background:#0b1120;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px">'
               + '<div style="color:#c084fc;font-weight:700;margin-bottom:7px">🧰 ابزارهایی که در اختیار مدل است</div>';
         j.tools.forEach(function (t) {
@@ -43264,7 +43575,7 @@ function agStart() {
     if (agBusy) return;
     var task = ($('agTask') || {}).value || '';
     task = task.trim();
-    if (!task) { showToast('لطفاً کارِ موردنظر را بنویسید', 'error'); return; }
+    if (!task) { showToast('لطفاً کارِ موردنظر را بنویسید', true); return; }
     var mode = ($('agMode') || {}).value || 'dry';
     if (mode === 'live' && !confirm('حالت «اجرای واقعی» انتخاب شده است.\n\nقیمت و موجودی محصولات در باسلام و ووکامرس واقعاً تغییر می‌کند و برگشت‌پذیر نیست.\n\nادامه می‌دهید؟')) return;
 
@@ -43278,18 +43589,19 @@ function agStart() {
 
     var fd = new FormData();
     fd.append('task', task);
+    fd.append('model', ($('agModelSel') || { value: '' }).value || '');
     fetch('?agent_start&mode=' + encodeURIComponent(mode), { method: 'POST', body: fd })
         .then(function (r) { return r.json(); })
         .then(function (j) {
             if (!j || !j.ok) {
                 agSetBusy(false);
                 if ($('agStatus')) $('agStatus').textContent = (j && j.error) || 'شروع نشد';
-                showToast((j && j.error) || 'ایجنت شروع نشد', 'error');
+                showToast((j && j.error) || 'ایجنت شروع نشد', true);
                 return;
             }
             agWatch();
         })
-        .catch(function () { agSetBusy(false); showToast('خطای ارتباط با سرور', 'error'); });
+        .catch(function () { agSetBusy(false); showToast('خطای ارتباط با سرور', true); });
 }
 
 function agWatch() {
@@ -43320,7 +43632,7 @@ function agPoll() {
 }
 
 function agStop() {
-    fetch('?agent_stop').then(function () { showToast('درخواست توقف ارسال شد', 'info'); });
+    fetch('?agent_stop').then(function () { showToast('درخواست توقف ارسال شد'); });
 }
 
 function agFinish() {
