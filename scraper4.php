@@ -126,8 +126,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.15';
-const APP_VERSION_DATE = '1405/06/01';
+const APP_VERSION = '10.16';
+const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -1652,6 +1652,36 @@ function aiProvidersSave(array $p): bool {
  *       پاک می‌کند تا دوباره تست شوند.
  * ===================================================================== */
 
+/**
+ * v10.16: آیا این ارائه‌دهنده کنارِ توکن «شمارهٔ حساب» هم می‌خواهد؟
+ *
+ * فقط کلادفلر. تشخیص از روی آدرس است، نه شناسهٔ ثابت، چون کاربر می‌تواند
+ * ارائه‌دهندهٔ دستیِ کلادفلری با هر نامی بسازد.
+ */
+function aiProviderNeedsAccount(array $p): bool {
+    $url = strtolower(trim((string)($p['url'] ?? '')));
+    if ($url === '') return (string)($p['id'] ?? '') === 'cloudflare';
+    return strpos($url, '/ai/run') !== false
+        || strpos($url, 'api.cloudflare.com') !== false;
+}
+
+/**
+ * v10.16: پاک‌سازیِ ورودیِ شمارهٔ حساب.
+ * کاربر معمولاً کلِ آدرسِ داشبورد را کپی می‌کند
+ * (dash.cloudflare.com/<acct>/ai یا api.cloudflare.com/.../accounts/<acct>/...)
+ * پس اگر چیزی شبیهِ آدرس بود، شناسه را از دلش بیرون می‌کشیم.
+ */
+function aiNormalizeAccountId(string $raw): string {
+    $raw = trim($raw);
+    if ($raw === '') return '';
+    if (preg_match('~accounts/([0-9a-f]{16,})~i', $raw, $m)) return strtolower($m[1]);
+    if (preg_match('~cloudflare\.com/([0-9a-f]{16,})~i', $raw, $m)) return strtolower($m[1]);
+    if (preg_match('~^[0-9a-f]{16,}$~i', $raw)) return strtolower($raw);
+    /* چیزی که نه هگز است نه آدرس: همان را برمی‌گردانیم تا خطای واقعیِ
+       سرویس به کاربر نشان داده شود، نه یک «قبول شد»ِ دروغین. */
+    return preg_replace('~[^0-9A-Za-z._-]~', '', $raw);
+}
+
 /** شناسهٔ کوتاه و پایدارِ یک کلید — خودِ کلید هیچ‌جا در شناسه نمی‌آید */
 function aiKeyId(string $key): string {
     $key = trim($key);
@@ -1690,16 +1720,21 @@ function aiProviderKeys(array $p): array {
             $k     = trim((string)($row['key'] ?? ''));
             $label = trim((string)($row['label'] ?? ''));
             $en    = ($row['enabled'] ?? true) !== false;
+            $acct  = trim((string)($row['acct'] ?? ''));
         } else {
-            $k = trim((string)$row); $label = ''; $en = true;
+            $k = trim((string)$row); $label = ''; $en = true; $acct = '';
         }
         if ($k === '' || isset($seen[$k])) continue;
         $seen[$k] = true;
-        $out[] = ['id' => aiKeyId($k), 'key' => $k, 'label' => $label, 'enabled' => $en];
+        $out[] = ['id' => aiKeyId($k), 'key' => $k, 'label' => $label,
+                  'enabled' => $en, 'acct' => $acct];
     }
     $legacy = trim((string)($p['apiKey'] ?? ''));
     if ($legacy !== '' && !isset($seen[$legacy])) {
-        array_unshift($out, ['id' => aiKeyId($legacy), 'key' => $legacy, 'label' => '', 'enabled' => true]);
+        /* v10.16: کلیدِ قدیمی شمارهٔ حسابِ جدا ندارد؛ حسابش همان است که در
+           آدرسِ ارائه‌دهنده نوشته شده. acct خالی دقیقاً یعنی همین. */
+        array_unshift($out, ['id' => aiKeyId($legacy), 'key' => $legacy,
+                             'label' => '', 'enabled' => true, 'acct' => '']);
     }
     return $out;
 }
@@ -1715,6 +1750,9 @@ function aiProviderSetKeys(array $p, array $keys): array {
                    'key'     => $key,
                    'label'   => trim((string)($k['label'] ?? '')),
                    'enabled' => ($k['enabled'] ?? true) !== false,
+                   /* v10.16: شمارهٔ حسابِ اختصاصیِ این کلید (فعلاً کلادفلر).
+                      خالی = از آدرسِ خودِ ارائه‌دهنده استفاده کن. */
+                   'acct'    => trim((string)($k['acct'] ?? '')),
                    'addedAt' => (int)($k['addedAt'] ?? time())];
     }
     $p['apiKeys'] = $rows;
@@ -2287,6 +2325,28 @@ function aiProviderEndpoint(array $p, string $model = ''): array {
     return ['kind' => 'openai', 'url' => rtrim($raw, '/') . '/chat/completions', 'model' => $model];
 }
 
+/**
+ * v10.16: نشاندنِ شمارهٔ حسابِ یک کلید روی آدرسِ ارائه‌دهنده.
+ *
+ * چرا لازم شد: در کلادفلر «اعتبار» به حساب بسته است، نه به توکن. وقتی
+ * نورونِ روزانهٔ یک حساب تمام می‌شود، توکنِ دومِ همان حساب هم بی‌فایده است؛
+ * کاربر باید حسابِ دیگری بگذارد. ولی شمارهٔ حساب داخلِ URL است
+ * (accounts/<acct>/ai/run) و چرخشِ کلید فقط apiKey را عوض می‌کرد — یعنی
+ * توکنِ حسابِ دوم به حسابِ اول فرستاده می‌شد و ۱۰۴۰۹/۴۰۱ می‌گرفت.
+ *
+ * اگر کلید شمارهٔ حسابِ خودش را داشته باشد، همان را جای شمارهٔ داخلِ آدرس
+ * می‌نشانیم. خالی بودنِ acct یعنی «همان حسابِ آدرس» (رفتارِ قدیمی).
+ */
+function aiApplyKeyAccount(array $p, array $key): array {
+    $acct = trim((string)($key['acct'] ?? ''));
+    if ($acct === '') return $p;
+    $url = trim((string)($p['url'] ?? ''));
+    if ($url === '') return $p;
+    $new = preg_replace('~(/accounts/)([^/]+)(/)~i', '${1}' . rawurlencode($acct) . '${3}', $url, 1, $n);
+    if ($n > 0 && is_string($new)) $p['url'] = $new;
+    return $p;
+}
+
 /** فراخوانی native Cloudflare و نرمال‌سازی پاسخ به شکل OpenAI */
 /** استخراج پیام خطای Cloudflare از پاسخ خطا */
 function aiCloudflareError(array $r): string {
@@ -2568,7 +2628,10 @@ function aiProviderCall(array $p, string $model, array $payload, ?array $net = n
     if (count($keys) < 2) {
         /* یک کلید (یا هیچ کلید) ⇒ مسیرِ ساده، بدون هیچ سربار؛ فقط نتیجهٔ
            موفق/ناموفقِ همان کلید ثبت می‌شود تا در UI دیده شود. */
-        $r = aiProviderCallOnce($p, $model, $payload, $net);
+        /* v10.16: حتی با یک کلید هم اگر شمارهٔ حسابِ اختصاصی دارد باید
+           اعمال شود — کاربر ممکن است حسابِ اولش را عوض کرده باشد. */
+        $p1 = $keys ? aiApplyKeyAccount($p, $keys[0]) : $p;
+        $r = aiProviderCallOnce($p1, $model, $payload, $net);
         $kid = $keys ? $keys[0]['id'] : '';
         if ($kid !== '' && $pid !== '') {
             if (!empty($r['ok'])) aiKeyMarkOk($pid, $kid);
@@ -2589,6 +2652,9 @@ function aiProviderCall(array $p, string $model, array $payload, ?array $net = n
         $kid = (string)$pick['id'];
         $pk  = $p;
         $pk['apiKey'] = (string)$pick['key'];
+        /* v10.16: کلید و حسابش با هم عوض می‌شوند. بدون این، توکنِ حسابِ دوم
+           به آدرسِ حسابِ اول می‌رفت و چرخش عملاً بی‌اثر بود. */
+        $pk = aiApplyKeyAccount($pk, $pick);
         $r = aiProviderCallOnce($pk, $model, $payload, $net);
         $r['keyId']      = $kid;
         $r['keyLabel']   = (string)$pick['label'];
@@ -3260,6 +3326,10 @@ function aiProvidersSummary(): array {
                 'id'      => $kk['id'],
                 'label'   => $kk['label'],
                 'preview' => aiKeyPreview($kk['key']),
+                /* v10.16: شمارهٔ حسابِ اختصاصیِ کلید (کلادفلر). خودِ شماره
+                   محرمانه نیست — در آدرسِ داشبورد هم پیداست — ولی برای
+                   خوانایی کوتاه‌شده نمایش داده می‌شود. */
+                'acct'    => (string)($kk['acct'] ?? ''),
                 'enabled' => $kk['enabled'],
                 'blocked' => $h['blocked'],
                 'kind'    => $h['kind'],
@@ -3276,6 +3346,8 @@ function aiProvidersSummary(): array {
             'url'     => $p['url'] ?? '',
             'enabled' => ($p['enabled'] ?? true) !== false,
             'has_key' => $key !== '',
+            /* v10.16: به رابط کاربری بگو این ارائه‌دهنده شمارهٔ حساب هم لازم دارد */
+            'needs_acct' => aiProviderNeedsAccount($p),
             'keys'        => $keyRows,
             'key_count'   => count($keyRows),
             'key_healthy' => $healthy,
@@ -18644,8 +18716,136 @@ if (isset($_GET['selftest'])) {
     $add('10.15', 'راهنمای فارسیِ فیلدِ قیمت به کاربر نمایش داده می‌شود',
          strpos($selfSrc, 'قیمت (v10.' . '15):') !== false
       && strpos($selfSrc, 'ستونِ جدیدی ' . 'نمی‌سازد') !== false);
-    $add('10.15', 'نسخه به 10.15 رسید و در CHANGELOG ثبت شد',
-         APP_VERSION === '10.' . '15' && strpos($selfSrc, "{v:'10." . "15'") !== false);
+    /* v10.16: این ادعا قبلاً APP_VERSION را با عددِ ثابتِ خودش برابر می‌گرفت،
+       پس با هر بالا رفتنِ نسخه بی‌دلیل قرمز می‌شد. چیزی که واقعاً باید تضمین
+       شود این است: ورودیِ ۱۰٫۱۵ در CHANGELOG هست و نسخه از آن عقب‌تر نیست. */
+    $add('10.15', 'نسخهٔ 10.15 در CHANGELOG ثبت شد و نسخهٔ برنامه از آن عقب‌تر نیست',
+         version_compare(APP_VERSION, '10.15', '>=') && strpos($selfSrc, "{v:'10." . "15'") !== false);
+
+/* ---------- v10.16 (۲۹): حسابِ پشتیبانِ کلادفلر + تستِ تک‌کلید + قیمتِ import ---------- */
+    $add('10.16', 'ورودیِ CHANGELOG برای 10.16 ثبت شده',
+         strpos($selfSrc, "{v:'10." . "16',") !== false
+      && version_compare(APP_VERSION, '10.16', '>='));
+
+    /* ۲۹ب — حساب و توکن جفتی */
+    $add('10.16', 'aiProviderKeys شمارهٔ حسابِ هر کلید را حمل می‌کند',
+         strpos($selfSrc, "\$acct  = trim((string)(\$row['acct'] ?? ''));") !== false
+      && strpos($selfSrc, "'enabled' => \$en, 'acct' => \$acct]") !== false);
+
+    $add('10.16', 'aiProviderSetKeys شمارهٔ حساب را ذخیره می‌کند',
+         strpos($selfSrc, "'acct'    => trim((string)(\$k['acct'] ?? '')),") !== false);
+
+    $add('10.16', 'aiApplyKeyAccount شمارهٔ حساب را در آدرس می‌نشاند',
+         function_exists('aiApplyKeyAccount')
+      && strpos($selfSrc, "(/accounts/)([^/]+)(/)") !== false);
+
+    /* رفتار، نه فقط متن: حساب واقعاً جایگزین شود */
+    $_a1 = aiApplyKeyAccount(
+        ['url' => 'https://api.cloudflare.com/client/v4/accounts/AAAA1111/ai/run/@cf/x'],
+        ['key' => 'k', 'acct' => 'bbbb2222']);
+    $add('10.16', 'آدرس با شمارهٔ حسابِ کلید بازنویسی می‌شود',
+         strpos((string)$_a1['url'], '/accounts/bbbb2222/ai/run/') !== false
+      && strpos((string)$_a1['url'], 'AAAA1111') === false);
+
+    /* acct خالی = رفتارِ قدیمی، دست نخورد */
+    $_a2 = aiApplyKeyAccount(
+        ['url' => 'https://api.cloudflare.com/client/v4/accounts/AAAA1111/ai/run/'],
+        ['key' => 'k', 'acct' => '']);
+    $add('10.16', 'کلیدِ بدونِ شمارهٔ حساب آدرس را دست‌نخورده می‌گذارد',
+         (string)$_a2['url'] === 'https://api.cloudflare.com/client/v4/accounts/AAAA1111/ai/run/');
+
+    /* آدرسی که اصلاً accounts ندارد نباید خراب شود */
+    $_a3 = aiApplyKeyAccount(
+        ['url' => 'https://api.openai.com/v1/chat/completions'],
+        ['key' => 'k', 'acct' => 'zzzz9999']);
+    $add('10.16', 'آدرسِ غیرکلادفلری با acct دست‌نخورده می‌ماند',
+         (string)$_a3['url'] === 'https://api.openai.com/v1/chat/completions');
+
+    $add('10.16', 'aiNormalizeAccountId شناسه را از آدرسِ داشبورد بیرون می‌کشد',
+         function_exists('aiNormalizeAccountId')
+      && aiNormalizeAccountId('https://dash.cloudflare.com/0123456789abcdef0123/ai') === '0123456789abcdef0123'
+      && aiNormalizeAccountId('accounts/ABCDEF0123456789ABCD/ai/run') === 'abcdef0123456789abcd'
+      && aiNormalizeAccountId('  0123456789ABCDEF0123  ') === '0123456789abcdef0123'
+      && aiNormalizeAccountId('') === '');
+
+    $add('10.16', 'aiProviderNeedsAccount فقط کلادفلر را می‌شناسد',
+         function_exists('aiProviderNeedsAccount')
+      && aiProviderNeedsAccount(['url' => 'https://api.cloudflare.com/client/v4/accounts/x/ai/run/']) === true
+      && aiProviderNeedsAccount(['url' => 'https://api.openai.com/v1/chat/completions']) === false
+      && aiProviderNeedsAccount(['id' => 'cloudflare', 'url' => '']) === true);
+
+    $add('10.16', 'چرخشِ کلید حساب را هم با خودش عوض می‌کند',
+         strpos($selfSrc, '$pk = aiApplyKeyAccount($pk, $pick);') !== false);
+
+    $add('10.16', 'مسیرِ تک‌کلید هم شمارهٔ حساب را اعمال می‌کند',
+         strpos($selfSrc, '$p1 = $keys ? aiApplyKeyAccount($p, $keys[0]) : $p;') !== false);
+
+    $add('10.16', 'افزودنِ کلیدِ کلادفلر بدونِ شمارهٔ حساب رد می‌شود',
+         strpos($selfSrc, "if (\$acct === '' && aiProviderNeedsAccount(\$p)) {") !== false);
+
+    $add('10.16', 'خلاصهٔ ارائه‌دهنده needs_acct و acct را به رابط کاربری می‌دهد',
+         strpos($selfSrc, "'needs_acct' => aiProviderNeedsAccount(\$p),") !== false
+      && strpos($selfSrc, "'acct'    => (string)(\$kk['acct'] ?? ''),") !== false);
+
+    $add('10.16', 'کادرِ شمارهٔ حساب در رابط کاربری هست و پیش‌فرض پنهان است',
+         strpos($selfSrc, 'id="aiKeyAcct"') !== false
+      && strpos($selfSrc, 'id="aiKeyAcctRow" ') !== false
+      && strpos($selfSrc, 'class="crow hidden" id="aiKeyAcctRow"') !== false);
+
+    $add('10.16', 'رابط کاربری کادرِ حساب را فقط برای کلادفلر باز می‌کند',
+         strpos($selfSrc, 'const needAcct=!!(p&&p.needs_acct);') !== false
+      && strpos($selfSrc, "el.classList.toggle('hidden',!needAcct);") !== false);
+
+    $add('10.16', 'aiKeyAdd شمارهٔ حساب را می‌فرستد و خالی‌بودنش را می‌گیرد',
+         strpos($selfSrc, "fd.append('account_id',av);") !== false
+      && strpos($selfSrc, 'if(p&&p.needs_acct&&!av){') !== false);
+
+    /* ۲۹ج — دکمهٔ تست کنارِ هر کلید */
+    $add('10.16', 'اندپوینتِ ai_keys_test وجود دارد',
+         strpos($selfSrc, "if ((\$_POST['action'] ?? '') === 'ai_keys_" . "test') {") !== false);
+
+    $add('10.16', 'تستِ کلید بدونِ چرخش و با همان کلید انجام می‌شود',
+         strpos($selfSrc, "\$pk['apiKey'] = (string)\$hit['key'];\n\$pk = aiApplyKeyAccount(\$pk, \$hit);") !== false
+      && strpos($selfSrc, '$r  = aiProviderCallOnce($pk, $mid,') !== false);
+
+    $add('10.16', 'نتیجهٔ تستِ کلید در دفترِ سلامت ثبت می‌شود',
+         strpos($selfSrc, 'if ($ok) { aiKeyMarkOk($pid, $kid);') !== false
+      && strpos($selfSrc, "elseif (\$kf['kind'] !== '') aiKeyMarkFail(\$pid, \$kid,") !== false);
+
+    $add('10.16', 'دکمهٔ 🧪 تست کنارِ هر کلید رندر می‌شود',
+         strpos($selfSrc, "onclick=\"aiKeyTest(\\''+jsAttr(k.id)+'\\')") !== false
+      && strpos($selfSrc, "'<span id=\"aiKeyT_'+esc(k.id)+'\"") !== false);
+
+    $add('10.16', 'aiKeyTest نتیجه را کنارِ همان ردیف می‌نشاند',
+         strpos($selfSrc, 'function aiKeyTest(kid){') !== false
+      && strpos($selfSrc, "fd.append('action','ai_keys_test');") !== false
+      && strpos($selfSrc, "out.textContent='✓ '+toFa(d.latencyMs||0)+'ms'") !== false);
+
+    /* ۲۹الف — قیمتِ جزئیات برای محصولاتِ درون‌ریزی‌شده */
+    $add('10.16', 'importPullFromProducts جزئیات را به ردیف‌های فایل برمی‌گرداند',
+         strpos($selfSrc, 'function importPullFromProducts(){') !== false
+      && strpos($selfSrc, 'applyImportPriceAdjust') !== false
+      && strpos($selfSrc, 'importPullFromProducts();\n    const mode=') !== false);
+
+    $add('10.16', 'قیمتِ تازه پایهٔ تعدیل می‌شود و کشِ _origPrice نو می‌شود',
+         strpos($selfSrc, 'ip._origPrice=String(v);') !== false
+      && strpos($selfSrc, 'delete ip.final_price;') !== false);
+
+    $add('10.16', 'همگام‌سازیِ فایل مقدارِ خالی را روی دادهٔ استخراج‌شده نمی‌ریزد',
+         strpos($selfSrc, "if (v === undefined || v === null || v === '') return;") !== false
+      && strpos($selfSrc, 'if (Array.isArray(v) && !v.length) return;') !== false
+      && strpos($selfSrc, 'Object.keys(p).forEach(k => {') !== false);
+
+    $add('10.16', 'پیامِ خطای کلادفلر (errors[]) در نتیجهٔ تستِ کلید نشان داده می‌شود',
+         strpos($selfSrc, '$cfe = is_array($body) ? aiCloudflareError($r)') !== false);
+
+    $add('10.16', 'دلیلِ خرابی روی نشانگرِ کنارِ کلید هم می‌ماند نه فقط در توست',
+         strpos($selfSrc, "const why=d.note||d.error||('کد '+toFa(d.code||0));") !== false
+      && strpos($selfSrc, 'out.title=why;') !== false);
+
+    $add('10.16', 'تعدیلِ قیمت بعد از استخراج تجمعی نمی‌شود',
+         strpos($selfSrc, "const fin=String(ip.final_price===undefined?'':ip.final_price);") !== false
+      && strpos($selfSrc, "if(fin!==''&&String(v)===fin)return;") !== false);
 
 /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -24013,6 +24213,13 @@ if ($act === 'ai_keys_add') {
        بچسباند — چون معمولاً چند حسابِ رایگان را یکجا کپی می‌کند. */
     $raw   = (string)($_POST['api_key'] ?? '');
     $label = trim((string)($_POST['label'] ?? ''));
+    /* v10.16: شمارهٔ حسابِ اختصاصیِ کلید. برای کلادفلر «کلیدِ دیگر» عملاً
+       یعنی «حسابِ دیگر»، چون سهمیه به حساب بسته است نه به توکن؛ پس توکن و
+       شمارهٔ حساب باید جفتی ذخیره شوند. */
+    $acct  = aiNormalizeAccountId((string)($_POST['account_id'] ?? ''));
+    if ($acct === '' && aiProviderNeedsAccount($p)) {
+        echo json_encode(['ok'=>false,'error'=>'برای Cloudflare باید شمارهٔ حساب (Account ID) را هم وارد کنید — سهمیه به حساب بسته است نه به توکن.'], JSON_UNESCAPED_UNICODE); exit;
+    }
     $parts = preg_split('~[\r\n,;\s]+~u', $raw);
     $have  = [];
     foreach ($keys as $k) $have[$k['key']] = true;
@@ -24024,7 +24231,7 @@ if ($act === 'ai_keys_add') {
         $have[$one] = true;
         $keys[] = ['id' => aiKeyId($one), 'key' => $one,
                    'label' => $label !== '' ? $label : ('کلید ' . (count($keys) + 1)),
-                   'enabled' => true, 'addedAt' => time()];
+                   'enabled' => true, 'acct' => $acct, 'addedAt' => time()];
         $added++;
     }
     if ($added === 0) {
@@ -24118,6 +24325,76 @@ echo json_encode(['ok'=>$ok,'provider'=>$pid,'model'=>$mid,'reasoning'=>$on,
 exit;
 }
 /* تست یک مدل و ذخیرهٔ نتیجه در همان مدل */
+/* =====================================================================
+ *  v10.16 (۲۹ج): تستِ یک کلیدِ مشخص — دکمهٔ «تست» کنارِ هر کلید.
+ *
+ *  چرا اندپوینتِ جدا: aiProviderCall عمداً «اولین کلیدِ سالم» را برمی‌دارد
+ *  و روی خطا می‌چرخد. اینجا دقیقاً برعکسش را می‌خواهیم — همان کلیدی که
+ *  کاربر رویش کلیک کرده باید امتحان شود، حتی اگر قبلاً سوخته علامت خورده
+ *  باشد (کاربر معمولاً وقتی تست می‌زند که فکر می‌کند سهمیه‌اش تازه شده).
+ *  پس مستقیم aiProviderCallOnce صدا زده می‌شود، با کلید و حسابِ خودِ ردیف.
+ * ===================================================================== */
+if (($_POST['action'] ?? '') === 'ai_keys_test') {
+header('Content-Type: application/json; charset=UTF-8');
+$pid = trim($_POST['provider_id'] ?? '');
+$kid = trim($_POST['key_id'] ?? '');
+$providers = aiProvidersLoad();
+if (!isset($providers[$pid])) { echo json_encode(['ok'=>false,'error'=>'ارائه‌دهنده یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+$p = $providers[$pid];
+$hit = null;
+foreach (aiProviderKeys($p) as $k) { if ($k['id'] === $kid) { $hit = $k; break; } }
+if ($hit === null) { echo json_encode(['ok'=>false,'error'=>'کلید یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+
+/* مدلِ آزمون: مدلِ انتخاب‌شدهٔ همین ارائه‌دهنده، وگرنه اولین مدلش. */
+$mid = trim((string)($_POST['model_id'] ?? ''));
+if ($mid === '') {
+    $sel = aiActiveConfig();
+    $selPid = is_array($sel['provider'] ?? null) ? (string)($sel['provider']['id'] ?? '') : '';
+    if ($selPid === $pid && (string)$sel['model'] !== '') $mid = (string)$sel['model'];
+}
+if ($mid === '') {
+    foreach ((array)($p['models'] ?? []) as $m) {
+        if (!empty($m['id'])) { $mid = (string)$m['id']; break; }
+    }
+}
+if ($mid === '') { echo json_encode(['ok'=>false,'error'=>'این ارائه‌دهنده هیچ مدلی ندارد تا کلید با آن تست شود'],JSON_UNESCAPED_UNICODE); exit; }
+
+/* فقط همین کلید، بدون چرخش. */
+$pk = $p;
+$pk['apiKey'] = (string)$hit['key'];
+$pk = aiApplyKeyAccount($pk, $hit);
+$t0 = microtime(true);
+$r  = aiProviderCallOnce($pk, $mid, ['messages'=>[['role'=>'user','content'=>'سلام']],
+                                     'temperature'=>0.3, 'max_tokens'=>300], aiNetCfg());
+$latency = (int)round((microtime(true) - $t0) * 1000);
+$code = (int)($r['code'] ?? 0);
+$ok   = $code === 200 && !empty($r['ok']);
+$body = $r['body'] ?? [];
+$ans  = $ok ? aiExtractAnswer($body) : '';
+/* کلادفلر پیامِ خطا را در errors[] می‌گذارد نه error.message؛ اگر آن را
+   نخوانیم کاربر فقط یک «HTTP 402»ِ بی‌معنا می‌بیند و نمی‌فهمد باید حساب را
+   شارژ کند یا توکن را عوض کند. */
+$err  = '';
+if (!$ok) {
+    $cfe = is_array($body) ? aiCloudflareError($r) : '';
+    $err = $cfe !== '' ? $cfe
+         : ($body['error']['message'] ?? ($body['message'] ?? ($r['error'] ?? ('HTTP '.$code))));
+}
+
+/* نتیجه در همان دفترِ سلامتِ کلیدها ثبت می‌شود تا رنگِ ردیف بی‌درنگ
+   درست شود — تستِ موفق یعنی «سهمیه‌اش برگشته». */
+$kf = aiKeyFailureKind($r);
+if ($ok) { aiKeyMarkOk($pid, $kid); $providers[$pid] = aiResetKeyRelatedFailures($p); aiProvidersSave($providers); }
+elseif ($kf['kind'] !== '') aiKeyMarkFail($pid, $kid, $kf['kind'], $kf['label'], $kf['msg']);
+
+echo json_encode(['ok'=>true, 'pass'=>$ok, 'code'=>$code, 'model'=>$mid,
+    'latencyMs'=>$latency, 'answer'=>mb_substr((string)$ans, 0, 200),
+    'error'=>mb_substr((string)$err, 0, 300),
+    'kind'=>(string)$kf['kind'], 'note'=>(string)$kf['label'],
+    'acct'=>(string)($hit['acct'] ?? ''),
+    'preview'=>aiKeyPreview((string)$hit['key'])], JSON_UNESCAPED_UNICODE);
+exit;
+}
 if (($_POST['action'] ?? '') === 'ai_test_one') {
 header('Content-Type: application/json; charset=UTF-8');
 $pid = trim($_POST['provider_id'] ?? '');
@@ -31440,6 +31717,14 @@ html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-
 <div class="crow" style="margin-top:6px">
 <input type="password" id="aiKeyNew" dir="ltr" spellcheck="false" autocomplete="off" placeholder="کلید API تازه — می‌توانید چند کلید را هر خط یکی بچسبانید" style="flex:1;font-family:ui-monospace,monospace;font-size:11px" onkeydown="if(event.key==='Enter'){event.preventDefault();aiKeyAdd();}">
 </div>
+<!-- v10.16 (۲۹ب): برای کلادفلر «کلیدِ دیگر» یعنی «حسابِ دیگر»؛ سهمیه به
+     حساب بسته است نه به توکن. پس توکن و شمارهٔ حساب جفتی گرفته می‌شوند. -->
+<div class="crow hidden" id="aiKeyAcctRow" style="margin-top:4px">
+<input type="text" id="aiKeyAcct" dir="ltr" spellcheck="false" autocomplete="off" placeholder="شمارهٔ حساب (Account ID) همین کلید — از آدرسِ داشبورد هم می‌شود چسباند" style="flex:1;font-family:ui-monospace,monospace;font-size:11px" onkeydown="if(event.key==='Enter'){event.preventDefault();aiKeyAdd();}">
+</div>
+<div class="hidden" id="aiKeyAcctHint" style="font-size:10px;color:#c4b5fd;margin-top:3px;line-height:1.7">
+در Cloudflare اعتبار به <b>حساب</b> بسته است، نه به توکن؛ توکنِ دومِ همان حساب دردی دوا نمی‌کند. برای ادامهٔ کار یک <b>حساب دیگر</b> بسازید و شمارهٔ حساب و توکنش را با هم اینجا بگذارید. شمارهٔ حساب را از آدرسِ داشبورد بردارید: <span dir="ltr" style="font-family:ui-monospace,monospace">dash.cloudflare.com/<b style="color:#f0abfc">&lt;اینجا&gt;</b>/ai</span>
+</div>
 <div class="crow" style="margin-top:4px">
 <input type="text" id="aiKeyLabel" placeholder="برچسب دلخواه (مثلاً: حساب دوم)" style="flex:1;font-size:11px">
 </div>
@@ -36809,6 +37094,36 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.16', t:'🔑 حسابِ پشتیبان برای Cloudflare + دکمهٔ تست کنارِ هر کلید', items:[
+    '🔑 <b>مسئلهٔ اصلی.</b> در Cloudflare اعتبار به <b>حساب</b> بسته است، نه به توکن.',
+    '   وقتی سهمیهٔ روزانهٔ یک حساب تمام می‌شود، ساختنِ توکنِ دومِ همان حساب هیچ',
+    '   کمکی نمی‌کند؛ باید <b>حسابِ دیگری</b> اضافه شود. ولی شمارهٔ حساب داخلِ آدرس',
+    '   است (<span dir="ltr">accounts/&lt;id&gt;/ai/run</span>) و چرخشِ کلید فقط توکن را',
+    '   عوض می‌کرد — یعنی توکنِ حسابِ دوم به آدرسِ حسابِ اول فرستاده می‌شد و رد می‌شد.',
+    '🏷 <b>راه‌حل.</b> حالا هر کلید می‌تواند <b>شمارهٔ حسابِ خودش</b> را داشته باشد.',
+    '   موقعِ افزودنِ کلید برای Cloudflare، کادرِ «شمارهٔ حساب» هم ظاهر می‌شود و پر',
+    '   کردنش اجباری است. هنگامِ چرخش، توکن و حساب <b>با هم</b> عوض می‌شوند.',
+    '   می‌توانید کلِ آدرسِ داشبورد را هم بچسبانید؛ شناسه از دلش بیرون کشیده می‌شود.',
+    '🧪 <b>دکمهٔ تست کنارِ هر کلید.</b> برای همهٔ ارائه‌دهنده‌ها، کنارِ هر کلید یک',
+    '   دکمهٔ «🧪 تست» هست که فقط با <b>همان کلید</b> یک «سلام» می‌فرستد — بدون چرخش',
+    '   به کلیدهای دیگر. نتیجه (سبز با زمانِ پاسخ، یا قرمز با کدِ خطا) کنارِ خودِ',
+    '   همان ردیف می‌نشیند، پس دقیقاً معلوم می‌شود کدام حساب زنده است.',
+    '   کلیدی که قبلاً «سوخته» علامت خورده هم تست می‌شود؛ اگر جواب داد، برچسبش',
+    '   پاک می‌شود و مدل‌هایی که به‌خاطر اتمام اعتبار رد شده بودند آزاد می‌شوند.',
+    '💰 <b>قیمتِ جزئیات در محصولاتِ درون‌ریزی‌شده.</b> «قیمت در جزئیات» بیشتر برای',
+    '   فایل‌های وارد‌شده کاربرد دارد. اما دو انبارِ جدا وجود داشت: استخراجِ تفصیلی',
+    '   فقط جدولِ نتایج را به‌روز می‌کرد، در حالی که «ارسال به ووکامرس/باسلام» از',
+    '   ردیف‌های فایل می‌خواند — پس قیمتِ تازه استخراج می‌شد ولی قیمتِ کهنهٔ فایل',
+    '   ارسال می‌شد. حالا نتیجهٔ استخراج به ردیف‌های فایل برمی‌گردد و پایهٔ تعدیلِ',
+    '   درصدی هم همان قیمتِ تازه می‌شود، نه عددِ داخلِ فایل.',
+    '🛡 ستونِ خالیِ فایل دیگر دادهٔ استخراج‌شده را پاک نمی‌کند (قبلاً با هر بار',
+    '   همگام‌سازی، فیلدِ خالیِ فایل روی جزئیاتِ استخراج‌شده می‌نشست).',
+    '🔁 <b>تعدیلِ قیمت دیگر تجمعی نمی‌شود.</b> چند بار زدنِ دکمهٔ تعدیل، درصد را',
+    '   روی قیمتِ تعدیل‌شدهٔ قبلی اعمال نمی‌کند (۱۰۰ ⇒ ۱۱۰ ⇒ ۱۲۱ ⇒ …).',
+    '💬 در نتیجهٔ تستِ کلید، پیامِ واقعیِ Cloudflare نمایش داده می‌شود (مثلاً',
+    '   «Account exceeded its Neuron quota») نه فقط یک کدِ عددیِ بی‌معنا؛ متنِ',
+    '   کامل با نگه‌داشتنِ نشانگر روی نتیجه هم دیده می‌شود.',
+  ]},
   {v:'10.15', t:'💰 «قیمت» به فیلدهای جزئیات محصول اضافه شد', items:[
     '💰 <b>چه چیزی اضافه شد.</b> تا این نسخه قیمت فقط از <b>صفحهٔ فهرست</b> خوانده می‌شد.',
     '   خیلی از سایت‌ها در فهرست قیمتِ ناقص می‌گذارند (بدونِ تخفیف، «از … تومان»،',
@@ -42764,6 +43079,17 @@ function aiKeyRender(){
     const list=document.getElementById('aiKeyList');if(!list)return;
     const cnt=document.getElementById('aiKeyCount');
     const p=aiCurrentProvider();
+    /* v10.16: کادرِ «شمارهٔ حساب» فقط برای ارائه‌دهنده‌هایی که واقعاً لازمش
+       دارند (کلادفلر) دیده می‌شود — بقیه شلوغ نشوند. */
+    const needAcct=!!(p&&p.needs_acct);
+    ['aiKeyAcctRow','aiKeyAcctHint'].forEach(function(id){
+        const el=document.getElementById(id);
+        if(el)el.classList.toggle('hidden',!needAcct);
+    });
+    const _kn=document.getElementById('aiKeyNew');
+    if(_kn)_kn.placeholder=needAcct
+        ?'توکنِ API همین حساب — برای Cloudflare هر کلید یک حسابِ جداست'
+        :'کلید API تازه — می‌توانید چند کلید را هر خط یکی بچسبانید';
     if(!p){
         list.innerHTML='<div style="padding:8px;color:#64748b;font-size:11px">ابتدا یک ارائه‌دهنده انتخاب کنید.</div>';
         if(cnt)cnt.textContent='';return;
@@ -42789,10 +43115,17 @@ function aiKeyRender(){
            +'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
              +'<span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10.5px;color:#e2e8f0">'+esc(k.preview||'')+'</span>'
              +(k.label?' <span style="color:#94a3b8;font-size:10px">· '+esc(k.label)+'</span>':'')
+             /* v10.16: شمارهٔ حسابِ اختصاصیِ کلید — برای کلادفلر مهم است چون
+                هر کلید در واقع «یک حسابِ دیگر» است. */
+             +(k.acct?' <span dir="ltr" style="color:#a78bfa;font-size:9.5px" title="شمارهٔ حساب این کلید: '+esc(k.acct)+'">🏷 '+esc(String(k.acct).slice(0,8))+'…</span>':'')
            +'</span>'
+           +'<span id="aiKeyT_'+esc(k.id)+'" style="font-size:9.5px;white-space:nowrap"></span>'
            +(active&&i===0?'<span style="font-size:9.5px;color:#67e8f9;white-space:nowrap">در حال استفاده</span>':'')
            +(k.fails?'<span style="font-size:9.5px;color:#64748b;white-space:nowrap" title="تعداد خطاهای ثبت‌شده">'+toFa(k.fails)+' خطا</span>':'')
            +'<span style="font-size:10px;color:'+color+';white-space:nowrap">'+badge+'</span>'
+           /* v10.16 (۲۹ج): تستِ همین کلید — بدون چرخش، تا معلوم شود دقیقاً
+              این حساب زنده است یا نه. */
+           +'<button class="btn btn-blue" id="aiKeyTB_'+esc(k.id)+'" style="padding:2px 6px;font-size:10px" onclick="aiKeyTest(\''+jsAttr(k.id)+'\')" title="یک پیامِ «سلام» فقط با همین کلید فرستاده می‌شود">🧪 تست</button>'
            +(k.kind?'<button class="btn btn-cyan" style="padding:2px 6px;font-size:10px" onclick="aiKeyReset(\''+jsAttr(k.id)+'\')" title="سهمیه‌ام تازه شده — برچسبِ خطا را پاک کن">↺</button>':'')
            +'<button class="btn btn-red" style="padding:2px 6px;font-size:10px" onclick="aiKeyDel(\''+jsAttr(k.id)+'\')" title="حذف این کلید">🗑</button>'
            +'</div>';
@@ -42824,15 +43157,67 @@ function aiKeyPost(fd,okMsg){
 function aiKeyAdd(){
     const inp=document.getElementById('aiKeyNew');
     const lab=document.getElementById('aiKeyLabel');
+    const acc=document.getElementById('aiKeyAcct');
     const v=inp?inp.value.trim():'';
     if(!v){showToast('کلید را وارد کنید',1);return;}
+    /* v10.16: برای کلادفلر «کلیدِ دیگر» یعنی «حسابِ دیگر» — سهمیه به حساب
+       بسته است نه به توکن — پس شمارهٔ حساب هم اجباری است. */
+    const p=aiCurrentProvider();
+    const av=acc?acc.value.trim():'';
+    if(p&&p.needs_acct&&!av){
+        showToast('برای Cloudflare شمارهٔ حساب (Account ID) هم لازم است',1);
+        if(acc)acc.focus();
+        return;
+    }
     const fd=new FormData();
     fd.append('action','ai_keys_add');
     fd.append('api_key',v);
     fd.append('label',lab?lab.value.trim():'');
+    fd.append('account_id',av);
     if(inp)inp.value='';
     if(lab)lab.value='';
+    if(acc)acc.value='';
     aiKeyPost(fd,'کلید افزوده شد');
+}
+/* v10.16 (۲۹ج): تستِ یک کلیدِ مشخص. نتیجه کنارِ خودِ ردیف می‌نشیند تا
+   کاربر بفهمد کدام حساب زنده است — نه یک توستِ کلی. */
+function aiKeyTest(kid){
+    const p=aiCurrentProvider();
+    if(!p){showToast('ابتدا یک ارائه‌دهنده انتخاب کنید',1);return;}
+    const out=document.getElementById('aiKeyT_'+kid);
+    const btn=document.getElementById('aiKeyTB_'+kid);
+    if(out){out.style.color='#fbbf24';out.textContent='⏳ …';}
+    if(btn)btn.disabled=true;
+    const fd=new FormData();
+    fd.append('action','ai_keys_test');
+    fd.append('provider_id',p.id);
+    fd.append('key_id',kid);
+    const msel=document.getElementById('aiModelSel');
+    if(msel&&msel.value)fd.append('model_id',msel.value);
+    fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(btn)btn.disabled=false;
+        if(!d||!d.ok){
+            if(out){out.style.color='#f87171';out.textContent='✕ '+((d&&d.error)||'خطا');}
+            showToast('❌ '+((d&&d.error)||'خطا'),1);return;
+        }
+        if(d.pass){
+            if(out){out.style.color='#4ade80';out.textContent='✓ '+toFa(d.latencyMs||0)+'ms';
+                    out.title=(d.answer||'')?('پاسخ: '+d.answer):'';}
+            showToast('✓ این کلید سالم است — پاسخ در '+toFa(d.latencyMs||0)+' میلی‌ثانیه');
+        }else{
+            /* توست زودگذر است؛ دلیلِ خرابی باید کنارِ خودِ کلید هم بماند تا
+               کاربر بین چند حساب بتواند مقایسه کند کدام شارژ می‌خواهد. */
+            const why=d.note||d.error||('کد '+toFa(d.code||0));
+            if(out){out.style.color='#f87171';out.textContent='✕ '+toFa(d.code||0);out.title=why;}
+            showToast('❌ '+why,1);
+        }
+        /* وضعیتِ سلامت روی دیسک عوض شده ⇒ فهرست را تازه کن */
+        setTimeout(aiLoadProviders,900);
+    }).catch(()=>{
+        if(btn)btn.disabled=false;
+        if(out){out.style.color='#f87171';out.textContent='✕ شبکه';}
+        showToast('❌ خطای شبکه',1);
+    });
 }
 function aiKeyDel(kid){
     if(!confirm('این کلید حذف شود؟'))return;
@@ -46411,7 +46796,63 @@ function processImport(){
 }
 
 // v7.81: Apply price adjustment and title suffix to imported products
+/**
+ * v10.16 (۲۹الف): برگرداندنِ نتیجهٔ استخراجِ جزئیات به ردیف‌های درون‌ریزی‌شده.
+ *
+ * مسئله‌ای که کاربر گزارش داد: «قیمت در جزئیات» بیشتر برای پروفایل‌هایی
+ * به‌کار می‌آید که محصولاتشان با فایل وارد شده‌اند. ولی importProducts و
+ * products دو انبارِ جدا هستند: استخراجِ تفصیلی (SSE) فقط products را
+ * به‌روز می‌کند، در حالی که «ارسال به ووکامرس/باسلام» و تعدیلِ قیمت از روی
+ * importProducts کار می‌کنند. نتیجه اینکه قیمتِ تازهٔ صفحهٔ محصول استخراج
+ * می‌شد، در جدولِ نتایج هم دیده می‌شد، ولی موقعِ ارسال همان قیمتِ کهنهٔ
+ * داخلِ فایل می‌رفت.
+ *
+ * اینجا فیلدهای جزئیات را از products به importProducts برمی‌گردانیم.
+ * قیمت جدا حساب می‌شود: چون _origPrice پایهٔ تعدیل است، با آمدنِ قیمتِ
+ * تازه باید کش هم تازه شود وگرنه تعدیل روی عددِ کهنه اعمال می‌ماند.
+ */
+function importPullFromProducts(){
+    if(!importProducts||!importProducts.length)return 0;
+    let n=0;
+    const flds=(typeof DETAIL_FIELDS!=='undefined')?DETAIL_FIELDS:[];
+    importProducts.forEach(ip=>{
+        if(!ip||!ip.key)return;
+        const src=products.get(ip.key);
+        if(!src)return;
+        flds.forEach(f=>{
+            const v=src[f.key];
+            if(v===undefined||v===null||v==='')return;
+            if(f.key==='price'){
+                /* قیمتِ تازهٔ صفحهٔ محصول باید پایهٔ تعدیل شود، نه قیمتِ فایل.
+                   اما مراقب باش: وقتی ردیفِ فایل و محصول یک شیء مشترک‌اند،
+                   applyImportPriceAdjust خودش قیمتِ تعدیل‌شده را روی همین شیء
+                   می‌نویسد. اگر آن را «قیمتِ تازهٔ استخراج‌شده» بگیریم، هر بار
+                   پایه بالاتر می‌رود و تعدیل تجمعی می‌شود (۱۰۰ ⇒ ۱۱۰ ⇒ ۱۲۱ ⇒ …).
+                   خروجیِ خودمان در final_price ثبت است؛ همان را کنار می‌گذاریم. */
+                const fin=String(ip.final_price===undefined?'':ip.final_price);
+                if(fin!==''&&String(v)===fin)return;
+                if(String(v)!==String(ip._origPrice===undefined?ip.price:ip._origPrice)){
+                    ip._origPrice=String(v);
+                    ip.price=String(v);
+                    delete ip.final_price;
+                    n++;
+                }
+                return;
+            }
+            if(String(ip[f.key]||'')!==String(v)){ip[f.key]=v;n++;}
+        });
+        if(Array.isArray(src.images)&&src.images.length>1){
+            ip.images=src.images;
+            if(src.image)ip.image=src.image;
+            n++;
+        }
+    });
+    return n;
+}
+
 function applyImportPriceAdjust(){
+    /* v10.16: پیش از هر تعدیلی، تازه‌ترین دادهٔ استخراجِ جزئیات را بردار */
+    importPullFromProducts();
     const mode=$('impPriceMode')?$('impPriceMode').value:'none';
     const val=parseFloat($('impPriceVal')?$('impPriceVal').value:0)||0;
     const roundMode=$('impRoundPrice')?$('impRoundPrice').value:'0';
@@ -46492,7 +46933,19 @@ function importSyncToProducts(){
         const key = p.key;
         if(!key) return;
         if(!products.has(key)){ products.set(key, p); order.push(key); added++; }
-        else Object.assign(products.get(key), p);
+        else {
+            /* v10.16 (۲۹الف): Object.assign خامْ همهٔ فیلدهای فایل را روی
+               محصولِ موجود می‌ریخت و جزئیاتِ تازه‌استخراج‌شده (به‌ویژه قیمتِ
+               صفحهٔ محصول) را با مقدارِ کهنهٔ فایل پاک می‌کرد. مقدارِ خالیِ
+               فایل هرگز نباید دادهٔ استخراج‌شده را از بین ببرد. */
+            const cur = products.get(key);
+            Object.keys(p).forEach(k => {
+                const v = p[k];
+                if (v === undefined || v === null || v === '') return;
+                if (Array.isArray(v) && !v.length) return;
+                cur[k] = v;
+            });
+        }
     });
     return added;
 }
