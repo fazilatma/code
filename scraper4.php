@@ -126,7 +126,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.13';
+const APP_VERSION = '10.14';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -11774,13 +11774,18 @@ if (isset($_GET['backup_export'])) {
     $cfg['include_code'] = false;
     // v9.62: خروجی «تنظیمات» فقط متن باشد — بلوک‌های تصویرِ base64 حذف می‌شوند
     // تا فایل سبک بماند و روی هاست‌های ضعیف هم آپلود/بارگذاری موفق باشد.
-    $bundle = backupBuildBundle($cfg, true);
     /* v10.13 (۲۶): برون‌ریزیِ گزینشی. sections می‌تواند شناسهٔ بخش یا
-       زیربخش باشد؛ خالی یعنی «همه» تا لینکِ قدیمیِ ?backup_export=1
-       دقیقاً مثل قبل کار کند. */
+       زیربخش باشد؛ خالی یعنی «پیش‌فرض‌ها» تا لینکِ قدیمیِ ?backup_export=1
+       دقیقاً همان چیزی را بدهد که همیشه می‌داد.
+       v10.14 (۲۶ب): «خالی» دیگر به‌معنیِ تحت‌اللفظیِ «همه» نیست. حالا
+       زیربخش‌های توکن‌دارِ سیستمی هم در نقشه هستند و اگر خالی را «همه»
+       معنی می‌کردیم، همان لینکِ قدیمی یک‌شبه شروع می‌کرد به بیرون دادنِ
+       توکنِ گیت‌هاب — بی‌آنکه کاربر چیزی عوض کرده باشد. */
     $selRaw = (string)($_GET['sections'] ?? $_POST['sections'] ?? '');
-    $sel = $selRaw === '' ? [] : explode(',', $selRaw);
-    if ($sel) $bundle = backupApplySections($bundle, $sel);
+    $sel  = $selRaw === '' ? [] : explode(',', $selRaw);
+    $subs = backupExpandSections($sel);
+    $bundle = backupBuildBundle($cfg, true, $subs);
+    $bundle = backupApplySections($bundle, $sel);
     if (empty($bundle['files'])) {
         echo json_encode(['ok' => false, 'error' => $sel
             ? 'بخش‌های انتخاب‌شده هیچ داده‌ای روی این نصب ندارند'
@@ -11805,7 +11810,9 @@ if (isset($_GET['backup_sections'])) {
         foreach ((array)($sec['subs'] ?? []) as $sid => $sub) {
             $st = backupSubStat($sid);
             $subs[] = ['id' => $sid, 'title' => (string)$sub['title'],
-                       'desc' => (string)($sub['desc'] ?? '')] + $st;
+                       'desc' => (string)($sub['desc'] ?? ''),
+                       'secret' => !empty($sub['secret']),
+                       'off' => !empty($sub['off'])] + $st;
         }
         $out[] = ['id' => $secId, 'title' => (string)$sec['title'],
                   'desc' => (string)($sec['desc'] ?? ''), 'subs' => $subs];
@@ -12186,6 +12193,31 @@ function backupSectionMap(): array {
                 'ar_log'   => ['title' => 'گزارشِ پاسخِ خودکار', 'desc' => 'تاریخچه — برای انتقال معمولاً لازم نیست', 'files' => ['autoreply_log.json']],
             ],
         ],
+        'system' => [
+            'title' => '⚙️ تنظیماتِ سیستمی',
+            'desc'  => 'به‌روزرسانی، مخزنِ گیت‌هاب، توکن‌ها و زمان‌بندیِ بکاپ',
+            'subs'  => [
+                /* v10.14: پیش‌فرض خاموش. تا نسخهٔ قبل توکنِ گیت‌هاب اصلاً
+                   در فایلِ خروجی نبود؛ اگر حالا بی‌صدا تیک‌خورده باشد،
+                   هرکس فایلِ تنظیماتش را برای عیب‌یابی به دیگری بدهد
+                   توکنش را هم داده است. تیک‌زدنش با خودِ کاربر. */
+                'sys_update' => [
+                    'title' => 'به‌روزرسانی و مخزنِ گیت‌هاب',
+                    'desc'  => '⚠️ شاملِ توکنِ گیت‌هاب و توکنِ deploy — پیش‌فرض خاموش',
+                    'files' => ['.versioncheck.json'], 'secret' => true, 'off' => true,
+                ],
+                'sys_backupcfg' => [
+                    'title' => 'زمان‌بندی و مقصدِ بکاپِ خودکار',
+                    'desc'  => '⚠️ شاملِ توکنِ مخزنِ بکاپ و دورهٔ اجرا — پیش‌فرض خاموش',
+                    'files' => ['.backup-config.json'], 'secret' => true, 'off' => true,
+                ],
+                'sys_backuplog' => [
+                    'title' => 'گزارشِ بکاپ‌ها',
+                    'desc'  => 'تاریخچهٔ اجرا — برای انتقال معمولاً لازم نیست',
+                    'files' => ['.backup-log.json'], 'off' => true,
+                ],
+            ],
+        ],
         'automation' => [
             'title' => '⏱ اتوماسیون و کران',
             'desc'  => 'کارهای زمان‌بندی‌شده و نشانه‌های زمانیِ اجرا',
@@ -12199,6 +12231,21 @@ function backupSectionMap(): array {
             ],
         ],
     ];
+}
+
+/**
+ * v10.14: زیربخش‌هایی که پیش‌فرض روشن‌اند — یعنی همان چیزی که تا نسخهٔ
+ * قبل در بستهٔ «همهٔ تنظیمات» می‌آمد. زیربخش‌های نشان‌دارِ off (توکن‌دار
+ * یا صرفاً تاریخچه) باید آگاهانه تیک بخورند.
+ */
+function backupDefaultSubIds(): array {
+    $out = [];
+    foreach (backupSectionMap() as $sec) {
+        foreach ((array)($sec['subs'] ?? []) as $sid => $sub) {
+            if (empty($sub['off'])) $out[] = $sid;
+        }
+    }
+    return $out;
 }
 
 /** فهرستِ شناسهٔ همهٔ زیربخش‌ها، به ترتیبِ نقشه */
@@ -12217,7 +12264,9 @@ function backupAllSubIds(): array {
  */
 function backupExpandSections(array $sel): array {
     $sel = array_values(array_filter(array_map('trim', $sel), fn($v) => $v !== ''));
-    if (!$sel) return backupAllSubIds();
+    /* v10.14: خالی ⇒ پیش‌فرض‌ها (نه تحت‌اللفظیِ «همه»). زیربخش‌های
+       نشان‌دارِ off توکن دارند و نباید بدونِ تیکِ صریح راه بیفتند. */
+    if (!$sel) return backupDefaultSubIds();
     $map = backupSectionMap();
     $out = [];
     foreach ($sel as $id) {
@@ -12308,9 +12357,11 @@ function backupFilterFileContent(string $file, string $content, array $subs) {
 function backupApplySections(array $bundle, array $sel): array {
     $subs = backupExpandSections($sel);
     $all  = backupAllSubIds();
-    sort($subs); sort($all);
-    if ($subs === $all) return $bundle;      // «همه» ⇒ دست نزن
-    $subs = backupExpandSections($sel);
+    $cmp  = $subs; sort($cmp); sort($all);
+    /* v10.14: میان‌برِ «همه ⇒ دست نزن» فقط وقتی درست است که واقعاً همهٔ
+       زیربخش‌ها تیک خورده باشند. با انتخابِ پیش‌فرض باید فیلتر اجرا شود،
+       وگرنه فایلِ سیستمیِ تیک‌نخورده در بسته می‌ماند. */
+    if ($cmp === $all) return $bundle;
     $files = []; $bytes = 0;
     foreach ((array)($bundle['files'] ?? []) as $name => $meta) {
         $raw = b64dec((string)($meta['b64'] ?? ''));
@@ -12363,6 +12414,8 @@ function backupInspectBundle(array $bundle): array {
             if ($in && !empty($sub['slice']) && $count === 0) $in = false;
             $subs[] = ['id' => $sid, 'title' => (string)$sub['title'],
                        'desc' => (string)($sub['desc'] ?? ''),
+                       'secret' => !empty($sub['secret']),
+                       'off' => !empty($sub['off']),
                        'exists' => $in, 'bytes' => $bytes, 'count' => $count];
         }
         $out[] = ['id' => $secId, 'title' => (string)$sec['title'],
@@ -12416,10 +12469,38 @@ function backupCodeFiles(): array {
     }
     return $out;
 }
-function backupFileList(array $cfg): array {
+/**
+ * v10.14 (۲۶ب): «تنظیماتِ سیستمی» — سه فایلِ پیکربندیِ سطحِ نصب. اسمشان
+ * با نقطه شروع می‌شود و backupCodeFiles() صراحتاً ردشان می‌کند
+ * ($f[0] === '.')، پس تا این نسخه در هیچ مسیری بکاپ نمی‌شدند: نه
+ * به‌عنوان داده، نه به‌عنوان کد. یعنی با نوسازیِ هاست، مخزن و برنچ و
+ * توکن و کلِ زمان‌بندیِ بکاپ از بین می‌رفت و باید دستی بازساخته می‌شد.
+ *
+ * عمداً در backupDataFiles() نیست: آن فهرست را backupRun() می‌خورد و
+ * بی‌سروصدا روی گیت‌هاب پوش می‌کند. اگر اینجا می‌گذاشتیمش، توکنِ گیت‌هاب
+ * خودبه‌خود داخلِ مخزنِ بکاپ می‌نشست. فقط با تیکِ صریح سفر می‌کند.
+ */
+function backupSystemFiles(): array {
+    return ['.versioncheck.json', '.backup-config.json', '.backup-log.json'];
+}
+
+/** آیا این نام یکی از فایل‌های سیستمیِ توکن‌دار است؟ */
+function backupIsSecretFile(string $name): bool {
+    return in_array($name, ['.versioncheck.json', '.backup-config.json'], true);
+}
+
+function backupFileList(array $cfg, array $subs = []): array {
     $list = [];
     if (!empty($cfg['include_data'])) $list = array_merge($list, backupDataFiles());
     if (!empty($cfg['include_code'])) $list = array_merge($list, backupCodeFiles());
+    /* فایل‌های سیستمی فقط وقتی که زیربخششان صراحتاً انتخاب شده باشد */
+    foreach ($subs as $sid) {
+        $d = backupSubDef((string)$sid);
+        if (!$d) continue;
+        foreach ((array)($d['files'] ?? []) as $f) {
+            if (in_array($f, backupSystemFiles(), true)) $list[] = $f;
+        }
+    }
     return array_values(array_unique($list));
 }
 
@@ -12447,8 +12528,8 @@ function ghApi(string $token, string $method, string $url, ?array $body = null):
 }
 
 /** یک بستهٔ بکاپ می‌سازد: همهٔ فایل‌ها به‌صورت base64 داخل یک JSON */
-function backupBuildBundle(array $cfg, bool $stripImages = false): array {
-    $files = backupFileList($cfg);
+function backupBuildBundle(array $cfg, bool $stripImages = false, array $subs = []): array {
+    $files = backupFileList($cfg, $subs);
     $bundle = ['app' => 'scraper', 'version' => APP_VERSION,
                'created_at' => time(), 'created_at_h' => date('Y/m/d H:i:s'),
                'host' => (string)($_SERVER['HTTP_HOST'] ?? 'cli'),
@@ -12556,6 +12637,11 @@ function backupRestoreBundle(array $bundle, array $only = [], array $sections = 
         $safe = basename((string)$name);
         if ($safe === '' || $safe !== $name) { $skipped[] = $name; continue; }
         if ($only && !in_array($safe, $only, true)) continue;
+        /* v10.14: فایلِ سیستمی فقط با انتخابِ صریح بازیابی می‌شود.
+           انتخابِ خالی یعنی «هرچه در بسته هست» و اگر استثنا نمی‌گذاشتیم،
+           بازیابیِ یک بستهٔ توکن‌دار روی هاستِ مقصد، مخزن و زمان‌بندیِ
+           بکاپِ خودِ آن هاست را هم بی‌خبر بازنویسی می‌کرد. */
+        if (!$subs && in_array($safe, backupSystemFiles(), true)) { $skipped[] = $safe; continue; }
         $data = b64dec((string)($meta['b64'] ?? ''));
         if ($data === false) { $skipped[] = $safe; continue; }
         $dst = __DIR__ . '/' . $safe;
@@ -12570,7 +12656,14 @@ function backupRestoreBundle(array $bundle, array $only = [], array $sections = 
         }
         // نسخهٔ فعلی کنار گذاشته شود تا بازیابیِ اشتباه هم برگشت‌پذیر باشد
         if (is_file($dst)) @copy($dst, $dst . '.before-restore');
-        if (@file_put_contents($dst, $data, LOCK_EX) !== false) $done[] = $safe;
+        if (@file_put_contents($dst, $data, LOCK_EX) !== false) {
+            /* v10.14: فایل‌های سیستمیِ توکن‌دار با 0600 نوشته می‌شوند —
+               دقیقاً مثل vc_save(). بدونِ این، بازیابی توکن را با مجوزِ
+               پیش‌فرض روی دیسک می‌گذاشت و برای بقیهٔ کاربرانِ هاست
+               خواندنی می‌شد. */
+            if (backupIsSecretFile($safe)) @chmod($dst, 0600);
+            $done[] = $safe;
+        }
         else $skipped[] = $safe;
     }
     $res = ['ok' => !empty($done), 'restored' => $done, 'skipped' => $skipped];
@@ -16246,10 +16339,10 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'function backupStrip' . 'ImageData(') !== false
          && strpos($selfSrc, "data:im" . "age/") !== false);
     $add('9.62', 'دانلودِ «تنظیمات» با حالتِ فقط-متن ساخته می‌شود (stripImages روی backup_export)',
-         strpos($selfSrc, 'backupBuildBundle($cfg, true' . ');') !== false
+         strpos($selfSrc, 'backupBuildBundle($cfg, true' . ', $subs);') !== false
          && strpos($selfSrc, '$stripped = backupStrip' . 'ImageData($c)') !== false);
     $add('9.62', 'بکاپِ کاملِ گیت‌هاب/محلی همچنان عکس‌ها را نگه می‌دارد (پیش‌فرض stripImages=false)',
-         strpos($selfSrc, 'function backupBuild' . 'Bundle(array $cfg, bool $stripImages = false)') !== false);
+         strpos($selfSrc, 'function backupBuild' . 'Bundle(array $cfg, bool $stripImages = false, array $subs = [])') !== false);
 
     /* ---------- v9.63: روشن/خاموش کردن انفرادیِ ارائه‌دهنده‌های هوش مصنوعی ---------- */
     $add('9.63', 'اندپوینتِ روشن/خاموش کردن یک ارائه‌دهنده (ai_toggle_provider) اضافه شده',
@@ -18320,8 +18413,11 @@ if (isset($_GET['selftest'])) {
        و کاربر با انتقالِ بسته همهٔ کلیدهای هوش مصنوعی‌اش را از دست می‌داد. */
     $add('10.13', 'ارائه‌دهنده‌های هوش مصنوعی جزوِ فایل‌های بکاپ هستند',
          strpos($selfSrc, "'ai_provi" . "ders.json','ai_votes.json','ai_key_state.json'") !== false);
-    $add('10.13', 'انتخابِ خالی یعنی «همه» تا رفتارِ نسخه‌های قبل نشکند',
-         backupExpandSections([]) === backupAllSubIds()
+    /* v10.14: معنای «خالی» عمداً از «همه» به «پیش‌فرض‌ها» تغییر کرد تا
+       زیربخش‌های توکن‌دارِ سیستمی بدونِ تیکِ صریح بیرون نروند. برای هر
+       چیزی که پیش از v10.14 وجود داشت، این دو یکی هستند. */
+    $add('10.13', 'انتخابِ خالی یعنی «پیش‌فرض‌ها» و شناسهٔ ناشناخته نادیده گرفته می‌شود',
+         backupExpandSections([]) === backupDefaultSubIds()
       && backupExpandSections(['nope_zz']) === []);
     $add('10.13', 'شناسهٔ بخش به زیربخش‌هایش باز می‌شود و تکرار حذف می‌شود',
          (function () {
@@ -18406,7 +18502,58 @@ if (isset($_GET['selftest'])) {
          substr_count($selfSrc, 'bkSecAppend(fd)') >= 2
       && strpos($selfSrc, "if(sel)fd.append('sections',sel)") !== false);
 
-    /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
+    /* ---------- v10.14 (۲۶ب): «تنظیماتِ سیستمی» در بکاپ ---------- */
+    $sysF = backupSystemFiles();
+    $add('10.14', 'backupSystemFiles() سه فایلِ نقطه‌دار را می‌شناسد',
+         count($sysF) === 3 && in_array('.versioncheck' . '.json', $sysF, true)
+      && in_array('.backup-config' . '.json', $sysF, true));
+    $add('10.14', 'فایل‌های سیستمی وارد backupDataFiles() نشده‌اند (بکاپِ خودکار توکن پوش نکند)',
+         !array_intersect($sysF, backupDataFiles()));
+    $add('10.14', 'backupCodeFiles() هم شاملشان نیست',
+         !array_intersect($sysF, backupCodeFiles()));
+    $m1014 = backupSectionMap();
+    $add('10.14', 'بخشِ system با سه زیربخش به نقشه اضافه شد',
+         isset($m1014['system']) && count((array)$m1014['system']['subs']) === 3
+      && isset($m1014['system']['subs']['sys_update'])
+      && isset($m1014['system']['subs']['sys_backupcfg'])
+      && isset($m1014['system']['subs']['sys_backuplog']));
+    $add('10.14', 'زیربخش‌های توکن‌دار نشانِ secret و off دارند',
+         !empty($m1014['system']['subs']['sys_update']['secret'])
+      && !empty($m1014['system']['subs']['sys_update']['off'])
+      && !empty($m1014['system']['subs']['sys_backupcfg']['secret']));
+    $def1014 = backupDefaultSubIds();
+    $all1014 = backupAllSubIds();
+    $add('10.14', 'پیش‌فرض‌ها = همه منهای سه زیربخشِ خاموش',
+         count($def1014) === count($all1014) - 3
+      && !in_array('sys_update', $def1014, true)
+      && in_array('sys_update', $all1014, true));
+    $add('10.14', 'انتخابِ خالی یعنی «پیش‌فرض‌ها»، نه تحت‌اللفظیِ «همه»',
+         backupExpandSections([]) === $def1014);
+    $cfg1014 = ['include_data' => true, 'include_code' => false];
+    $add('10.14', 'با انتخابِ پیش‌فرض هیچ فایلِ سیستمی در فهرست نیست',
+         !array_intersect($sysF, backupFileList($cfg1014, backupExpandSections([]))));
+    $add('10.14', 'با انتخابِ صریحِ system هر سه فایل وارد فهرست می‌شوند',
+         count(array_intersect($sysF, backupFileList($cfg1014, backupExpandSections(['system'])))) === 3);
+    $add('10.14', 'backupFileList بدونِ آرگومانِ زیربخش فایلِ سیستمی نمی‌دهد (مسیرِ backupRun)',
+         !array_intersect($sysF, backupFileList($cfg1014)));
+    $add('10.14', 'فیلترِ محتوا فایلِ سیستمیِ انتخاب‌نشده را حذف می‌کند',
+         backupFilterFileContent('.versioncheck' . '.json', '{"a":1}', ['ai_votes']) === null
+      && backupFilterFileContent('.versioncheck' . '.json', '{"a":1}', ['sys_update']) === '{"a":1}');
+    $add('10.14', 'بازیابی با انتخابِ خالی فایلِ سیستمی را رد می‌کند',
+         strpos($selfSrc, 'if (!$subs && in_array($safe, backupSystemFiles(), true))') !== false);
+    $add('10.14', 'فایلِ توکن‌دار پس از بازیابی 0600 می‌شود',
+         strpos($selfSrc, 'if (backupIsSecretFile($safe)) @chmod($dst, 0' . '600);') !== false);
+    $add('10.14', 'رابطِ کاربری نشانِ کلید و هشدارِ توکن دارد',
+         strpos($selfSrc, 'function sxSecretOn(') !== false
+      && strpos($selfSrc, 'توکنِ گیت‌هاب</b> دارد') !== false);
+    $add('10.14', 'پیش‌فرضِ تیکِ زیربخش‌ها به x.off احترام می‌گذارد',
+         strpos($selfSrc, 'SX_ON[x.id]=!x.off') !== false);
+    $add('10.14', 'sxSel() وقتی انتخاب = پیش‌فرض است رشتهٔ خالی می‌دهد',
+         strpos($selfSrc, 'const same=on.length===def.length') !== false);
+    $add('10.14', 'نسخه به 10.14 رسید و در CHANGELOG ثبت شد',
+         APP_VERSION === '10.' . '14' && strpos($selfSrc, "{v:'10." . "14'") !== false);
+
+/* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
          strpos($selfSrc, '.hamburger-btn,.fullwidth-btn' . '{z-index:10050}') !== false
       && (function () {
@@ -36532,6 +36679,27 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.14', t:'⚙️ «تنظیماتِ سیستمی» هم بکاپ می‌شود (بخشِ هشتم)', items:[
+    '⚙️ <b>یک شکافِ واقعی بسته شد.</b> سه فایلِ پیکربندیِ سطحِ نصب —',
+    '   <code>.versioncheck.json</code> (مخزن، برنچ، توکنِ گیت‌هاب، فایلِ deploy)،',
+    '   <code>.backup-config.json</code> (زمان‌بندی و مقصدِ بکاپِ خودکار) و',
+    '   <code>.backup-log.json</code> (تاریخچه) — <b>تا این نسخه در هیچ بکاپی نبودند</b>.',
+    '   نامشان با نقطه شروع می‌شود و کدِ بکاپِ کد صراحتاً ردشان می‌کرد، در فهرستِ',
+    '   دادهٔ بکاپ هم نبودند. یعنی با نوسازیِ هاست، مخزن و توکن و کلِ زمان‌بندیِ',
+    '   بکاپ از بین می‌رفت و باید دستی دوباره وارد می‌شد.',
+    '🧩 حالا بخشِ هشتمِ «⚙️ تنظیماتِ سیستمی» با سه زیربخش در همان انتخابگرِ',
+    '   بخش‌ها آمده؛ هم در دانلود، هم در بازیابی، هم در کاوشِ فایلِ انتخابی.',
+    '🔑 <b>ولی پیش‌فرض خاموش‌اند.</b> این فایل‌ها توکنِ گیت‌هاب دارند و تا دیروز',
+    '   هیچ‌وقت در فایلِ خروجی نبودند. اگر بی‌صدا تیک‌خورده می‌شدند، هرکس فایلِ',
+    '   تنظیماتش را برای عیب‌یابی به دیگری می‌داد، توکنش را هم داده بود.',
+    '   کنارشان نشانِ 🔑 و هنگام تیک‌زدن هشدارِ قرمز نشان داده می‌شود.',
+    '🛡 بکاپِ خودکارِ گیت‌هاب هم دست نخورد: این سه فایل عمداً بیرونِ فهرستِ دادهٔ',
+    '   بکاپ ماندند تا توکن خودبه‌خود داخلِ مخزنِ بکاپ پوش نشود.',
+    '🛡 بازیابی هم محافظت شد: با انتخابِ خالی، فایلِ سیستمیِ داخلِ بسته',
+    '   <b>نادیده گرفته می‌شود</b> — وگرنه بازیابیِ یک بستهٔ توکن‌دار روی هاستِ',
+    '   مقصد، مخزن و زمان‌بندیِ بکاپِ خودِ آن هاست را بی‌خبر بازنویسی می‌کرد.',
+    '🔒 فایلِ توکن‌دار پس از بازیابی با مجوزِ <code>0600</code> نوشته می‌شود.',
+  ]},
   {v:'10.13', t:'🧩 انتخابِ بخش‌ها هنگام دانلود و بازیابیِ تنظیمات', items:[
     '🧩 <b>دیگر «همه یا هیچ» نیست.</b> بالای «💾 ذخیره و بازیابی همهٔ تنظیمات»',
     '   یک دکمهٔ <b>«انتخابِ بخش‌ها»</b> آمده که ۷ بخش و ۱۹ زیربخش را با چک‌باکس',
@@ -40374,16 +40542,30 @@ function bkRestoreUpload(){
  * ===================================================================== */
 let SX_SECS=[], SX_ON={}, SX_MODE='local';   // local = دادهٔ همین نصب، bundle = فایلِ آپلودشده
 function sxSecCount(){let n=0;for(const k in SX_ON)if(SX_ON[k])n++;return n;}
+/** v10.14: آیا زیربخشِ توکن‌داری تیک خورده؟ */
+function sxSecretOn(){
+    let y=false;SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{if(x.secret&&SX_ON[x.id])y=true;}));
+    return y;
+}
 function sxSecTotal(){let n=0;SX_SECS.forEach(s=>n+=(s.subs||[]).length);return n;}
-/** فهرستِ زیربخش‌های تیک‌خورده؛ اگر همه تیک باشند رشتهٔ خالی (= رفتارِ قدیمی) */
+/** فهرستِ زیربخش‌های تیک‌خورده؛ اگر دقیقاً همان پیش‌فرض باشد رشتهٔ خالی
+ *  v10.14: قبلاً «همه تیک ⇒ خالی» بود. حالا که خالی سمتِ سرور یعنی
+ *  «پیش‌فرض‌ها»، اگر با تیکِ همه رشتهٔ خالی می‌فرستادیم، همان فایل‌های
+ *  سیستمی که کاربر عمداً تیک زده بود بی‌صدا از بسته می‌افتادند. */
 function sxSel(){
-    const on=[];SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{if(SX_ON[x.id])on.push(x.id);}));
-    return on.length===sxSecTotal()?'':on.join(',');
+    const on=[],def=[];
+    SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{
+        if(SX_ON[x.id])on.push(x.id);
+        if(!x.off)def.push(x.id);
+    }));
+    const same=on.length===def.length&&def.every(id=>SX_ON[id]);
+    return same?'':on.join(',');
 }
 function sxPickBtnSync(){
     const b=$('sxPickBtn');if(!b)return;
     const n=sxSecCount(),t=sxSecTotal();
-    b.textContent='🧩 انتخابِ بخش‌ها — '+(t===0?'…':(n===t?'همهٔ بخش‌ها':(n===0?'هیچ بخشی انتخاب نشده':toFa(n)+' از '+toFa(t)+' بخش')));
+    b.textContent='🧩 انتخابِ بخش‌ها — '+(t===0?'…':(n===t?'همهٔ بخش‌ها':(n===0?'هیچ بخشی انتخاب نشده':toFa(n)+' از '+toFa(t)+' بخش')))
+        +(sxSecretOn()?' 🔑':'');
     b.className='btn '+(n===0?'btn-red':(n===t?'btn-teal':'btn-yellow'));
 }
 function sxTogglePicker(){
@@ -40395,7 +40577,9 @@ function sxLoadSections(){
     fetch('?backup_sections=1').then(r=>r.json()).then(d=>{
         if(!d||!d.ok)return;
         SX_SECS=d.sections||[];SX_MODE='local';
-        SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{if(SX_ON[x.id]===undefined)SX_ON[x.id]=true;}));
+        /* v10.14: زیربخش‌های نشان‌دارِ off (توکنِ گیت‌هاب، گزارشِ بکاپ)
+           پیش‌فرض تیک نمی‌خورند — کاربر باید آگاهانه انتخابشان کند. */
+        SX_SECS.forEach(s=>(s.subs||[]).forEach(x=>{if(SX_ON[x.id]===undefined)SX_ON[x.id]=!x.off;}));
         sxRenderSections();
     }).catch(()=>{const e=$('sxSecList');if(e)e.textContent='فهرست بخش‌ها بارگذاری نشد';});
 }
@@ -40411,7 +40595,10 @@ function sxRenderSections(){
     const srcNote=SX_MODE==='bundle'
         ?'<div style="font-size:10px;color:#fbbf24;margin-bottom:8px;line-height:1.7">📄 اعداد زیر از <b>فایلِ انتخاب‌شده</b> است، نه از این نصب. بخش‌هایی که داخلِ فایل نیستند غیرفعال شده‌اند.</div>'
         :'<div style="font-size:10px;color:#64748b;margin-bottom:8px;line-height:1.7">📊 اعداد زیر دادهٔ <b>همین نصب</b> است.</div>';
-    box.innerHTML=srcNote+SX_SECS.map(sec=>{
+    const secretNote=sxSecretOn()
+        ?'<div style="font-size:10px;color:#fca5a5;background:#3f1d1d;border:1px solid #7f1d1d;border-radius:6px;padding:6px 8px;margin-bottom:8px;line-height:1.7">🔑 بخشی که تیک زده‌اید <b>توکنِ گیت‌هاب</b> دارد. فایلِ خروجی را جای امن نگه دارید و برای عیب‌یابی به کسی ندهید.</div>'
+        :'';
+    box.innerHTML=srcNote+secretNote+SX_SECS.map(sec=>{
         const subs=sec.subs||[];
         const on=subs.filter(x=>SX_ON[x.id]).length;
         const rows=subs.map(x=>{
@@ -40419,11 +40606,12 @@ function sxRenderSections(){
             const meta=x.exists
                 ?('<span style="color:#4ade80">'+toFa(x.count)+' مورد · '+sxHuman(x.bytes)+'</span>')
                 :'<span style="color:#64748b">'+(SX_MODE==='bundle'?'در این فایل نیست':'خالی')+'</span>';
+            const key=x.secret?'<span title="حاوی توکن" style="color:#fbbf24">🔑 </span>':'';
             return '<label style="display:flex;gap:6px;align-items:flex-start;padding:5px 6px;border-radius:6px;'
                 +(dis?'opacity:.45;':'cursor:pointer;')+'">'
                 +'<input type="checkbox" data-sxsub="'+esc(x.id)+'" '+(SX_ON[x.id]&&!dis?'checked':'')+(dis?' disabled':'')
                 +' onchange="sxToggleSub(this)" style="margin-top:2px">'
-                +'<span style="flex:1"><span style="color:#e2e8f0">'+esc(x.title)+'</span> '+meta
+                +'<span style="flex:1">'+key+'<span style="color:#e2e8f0">'+esc(x.title)+'</span> '+meta
                 +'<br><span style="font-size:9.5px;color:#64748b">'+esc(x.desc||'')+'</span></span></label>';
         }).join('');
         return '<div style="border:1px solid #334155;border-radius:8px;padding:6px 8px;margin-bottom:6px;background:#111827">'
