@@ -449,17 +449,17 @@ test('standalone spreadsheet import understands Persian CSV headers, keeps Woo s
 test('advanced import: analyze detects columns, mapping + options control the import, and history is recorded',async()=>{
   const db=new MemoryD1();
   await call(db,'/api/profiles',jsonInit({id:'adv-import',name:'پیشرفته',url:'',noExtract:true,pages:1,pagination:'none',selectors:{container:'.p',title:'h2',price:'.price',link:'a',image:'img'},enabled:true}));
-  const csv='عنوان محصول,قیمت (ریال),کد,موجودی\nعطر گل محمدی,4500000,SKU-1,5\nعطر گل محمدی,4300000,SKU-2,3\nکرم دست,800000,SKU-3,2\n';
+  const csv='عنوان محصول,قیمت (ریال),کد,موجودی,ویژگی‌ها\nعطر گل محمدی,4500000,SKU-1,5,رنگ:قرمز، آبی|سایز:M\nعطر گل محمدی,4300000,SKU-2,3,رنگ:آبی\nکرم دست,800000,SKU-3,2,حجم:۵۰ میل\n';
   const analyzed=await call(db,'/api/import/analyze?format=csv',{method:'POST',headers:{'content-type':'text/csv; charset=utf-8'},body:csv}),analysis=await analyzed.json();
   assert.equal(analyzed.status,200);assert.equal(analysis.total,3);assert.ok(analysis.headers.includes('عنوان محصول'));
   const mapping=Object.fromEntries(analysis.mapping.map(m=>[m.column,m.field]));
   assert.equal(mapping['عنوان محصول'],'title');assert.equal(mapping['قیمت (ریال)'],'price');assert.equal(mapping['کد'],'sku');
   assert.equal(analysis.issues.missingTitle,0);assert.equal(analysis.issues.invalidPrice,0);assert.ok(analysis.priceHint==='rial'||analysis.priceHint===null);
-  const opts=encodeURIComponent(JSON.stringify({mapping:{'عنوان محصول':'title','قیمت (ریال)':'price','کد':'sku','موجودی':'stock'},priceUnit:'rial',dedupe:'first',skipMissingTitle:true,skipMissingPrice:false,defaultStock:0}));
+  const opts=encodeURIComponent(JSON.stringify({mapping:{'عنوان محصول':'title','قیمت (ریال)':'price','کد':'sku','موجودی':'stock','ویژگی‌ها':'attributes'},priceUnit:'rial',dedupe:'first',skipMissingTitle:true,skipMissingPrice:false,defaultStock:0}));
   const executed=await call(db,'/api/profiles/adv-import/import?format=csv&opts='+opts+'&name=products.csv',{method:'POST',headers:{'content-type':'text/csv; charset=utf-8'},body:csv}),report=await executed.json();
   assert.equal(executed.status,200);assert.equal(report.imported,2,'duplicate title kept once (dedupe=first)');assert.equal(report.skipped,1);
   const products=[...db.products.values()].map(row=>JSON.parse(row.data));
-  const kept=products.find(p=>p.sku==='SKU-1');assert.ok(kept,'first duplicate variant was kept');assert.equal(kept.price,450000,'rial price divided by 10 into toman');
+  const kept=products.find(p=>p.sku==='SKU-1');assert.ok(kept,'first duplicate variant was kept');assert.equal(kept.price,450000,'rial price divided by 10 into toman');const groups=kept.variationGroups||[];assert.ok(groups.some(g=>g.name==='رنگ'&&g.values.includes('قرمز')&&g.values.includes('آبی')),'attributes column parsed into variationGroups');assert.ok(groups.some(g=>g.name==='سایز'&&g.values.includes('M')),'multi-attribute row parsed');const cream=products.find(p=>p.sku==='SKU-3');assert.ok(cream&&cream.variationGroups.some(g=>g.name==='حجم'&&g.values.includes('۵۰ میل')),'plain single attribute with Persian digits parsed');
   const history=await call(db,'/api/import/history').then(r=>r.json());
   assert.ok(history.items.length>=1);assert.equal(history.items[history.items.length-1].imported,2);assert.equal(history.items[history.items.length-1].fileName,'products.csv');
   const cleared=await call(db,'/api/import/history/clear',{method:'POST',body:'{}'}).then(r=>r.json());assert.equal(cleared.ok,true);

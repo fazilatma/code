@@ -30,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.19.0',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.19.1',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -42,7 +42,7 @@ app.get('/api/status',async c=>{const connections=await loadConnections();return
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.19.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.19.1',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -151,7 +151,7 @@ app.post('/api/profiles/:id/scrape',async c=>createProfileJob(c,c.req.param('id'
 app.post('/api/profiles/:id/sync',async c=>createProfileJob(c,c.req.param('id'),'sync'));
 app.get('/api/profiles/:id/products',async c=>c.json({ok:true,...await listProducts(c.req.param('id'),Math.min(500,Number(c.req.query('limit'))||100),Math.max(0,Number(c.req.query('offset'))||0),c.req.query('q')||'')}));
 app.get('/api/profiles/:id/export.csv',async c=>{const result=await listProducts(c.req.param('id'),100000,0,''),fields=['sourceKey','title','price','url','image','sku','brand','stock','weight','category','shortDesc','longDesc','variations','variationGroups'],csv='\uFEFF'+fields.join(',')+'\n'+result.products.map(p=>fields.map(field=>csvCell((p as any)[field])).join(',')).join('\n');return c.body(csv,200,{'content-type':'text/csv; charset=utf-8','content-disposition':`attachment; filename="${c.req.param('id').replace(/[^a-z0-9_.-]/gi,'_')}.csv"`})});
-app.post('/api/profiles/:id/import',async c=>{const profile=await getProfile(c.req.param('id'));if(!profile)return c.json({ok:false,error:'Profile not found'},404);const{records,format,wooStatus}=await importRecords(c);const opts=parseImportOptions(c.req.query('opts'));let imported=0,failed=0,skipped=0;const errors:string[]=[],mapping=opts.mapping,dedupe=String(opts.dedupe||'none');const lastTitle=new Map<string,number>();if(dedupe==='last'){for(let i=records.length-1;i>=0;i--){const rawRow=records[i],row=mapping&&Object.keys(mapping).length?applyImportMapping(rawRow,mapping):rawRow;const title=String(row.title||row.name||'').trim();if(title&&!lastTitle.has(title))lastTitle.set(title,i)}}const seenTitle=new Set<string>();for(const[index,rawRow]of records.entries())try{const row=mapping&&Object.keys(mapping).length?applyImportMapping(rawRow,mapping):rawRow;const title=String(row.title||row.name||'').trim();if(!title){if(opts.skipMissingTitle){skipped++;continue}throw new Error('title is empty')}if(dedupe==='first'&&seenTitle.has(title)){skipped++;continue}if(dedupe==='last'&&lastTitle.get(title)!==index){skipped++;continue}seenTitle.add(title);const priceRaw=String(row.price??row.priceText??'').trim();const price=normalizeImportPrice(priceRaw,opts);if(price===null){if(opts.skipMissingPrice){skipped++;continue}throw new Error(`invalid price "${priceRaw.slice(0,40)}"`)}const key=String(row.sourceKey||row.key||crypto.randomUUID()),image=String(row.image||'');await upsertProduct(profile.id,{sourceKey:key,title,price,priceText:priceRaw,url:String(row.url||row.link||''),image,images:image?[image]:[],sku:String(row.sku||''),brand:String(row.brand||''),stock:row.stock==null||String(row.stock).trim()===''?(opts.defaultStock>0?opts.defaultStock:undefined):Number(String(row.stock).replace(/[^\d.-]/g,'')),weight:row.weight==null?undefined:Number(String(row.weight).replace(/[^\d.-]/g,'')),category:String(row.category||''),shortDesc:String(row.shortDesc||''),longDesc:String(row.longDesc||''),variations:jsonValue(row.variations,[]),variationGroups:jsonValue(row.variationGroups,[]),destinationStatus:wooStatus||undefined,sourcePage:'import',scrapedAt:new Date().toISOString()});imported++}catch(error){failed++;if(errors.length<50)errors.push(`row ${index+1}: ${message(error)}`)}await pushImportHistory({fileName:String(c.req.query('name')||'').slice(0,200),format,rows:records.length,imported,failed,skipped,wooStatus:wooStatus||undefined,opts,at:new Date().toISOString()});return c.json({ok:failed===0&&skipped<records.length,format,wooStatus,rows:records.length,imported,failed,skipped,errors})});
+app.post('/api/profiles/:id/import',async c=>{const profile=await getProfile(c.req.param('id'));if(!profile)return c.json({ok:false,error:'Profile not found'},404);const{records,format,wooStatus}=await importRecords(c);const opts=parseImportOptions(c.req.query('opts'));let imported=0,failed=0,skipped=0;const errors:string[]=[],mapping=opts.mapping,dedupe=String(opts.dedupe||'none');const lastTitle=new Map<string,number>();if(dedupe==='last'){for(let i=records.length-1;i>=0;i--){const rawRow=records[i],row=mapping&&Object.keys(mapping).length?applyImportMapping(rawRow,mapping):rawRow;const title=String(row.title||row.name||'').trim();if(title&&!lastTitle.has(title))lastTitle.set(title,i)}}const seenTitle=new Set<string>();for(const[index,rawRow]of records.entries())try{const row=mapping&&Object.keys(mapping).length?applyImportMapping(rawRow,mapping):rawRow;const title=String(row.title||row.name||'').trim();if(!title){if(opts.skipMissingTitle){skipped++;continue}throw new Error('title is empty')}if(dedupe==='first'&&seenTitle.has(title)){skipped++;continue}if(dedupe==='last'&&lastTitle.get(title)!==index){skipped++;continue}seenTitle.add(title);const priceRaw=String(row.price??row.priceText??'').trim();const price=normalizeImportPrice(priceRaw,opts);if(price===null){if(opts.skipMissingPrice){skipped++;continue}throw new Error(`invalid price "${priceRaw.slice(0,40)}"`)}const attrGroups:ImportAttrGroup[]=[];if(mapping&&Object.keys(mapping).length)for(const[col,field]of Object.entries(mapping)){if(field==='attributes'&&rawRow[col]!=null&&String(rawRow[col]).trim()!=='')attrGroups.push(...parseImportAttributes(rawRow[col],col))}const parsedGroups:Array<{name:string;values:string[]}>=Array.isArray(jsonValue(row.variationGroups,[]))?jsonValue(row.variationGroups,[]) as Array<{name:string;values:string[]}>:[];const variationGroups=mergeVariationGroups([...parsedGroups,...attrGroups]);const key=String(row.sourceKey||row.key||crypto.randomUUID()),image=String(row.image||'');await upsertProduct(profile.id,{sourceKey:key,title,price,priceText:priceRaw,url:String(row.url||row.link||''),image,images:image?[image]:[],sku:String(row.sku||''),brand:String(row.brand||''),stock:row.stock==null||String(row.stock).trim()===''?(opts.defaultStock>0?opts.defaultStock:undefined):Number(String(row.stock).replace(/[^\d.-]/g,'')),weight:row.weight==null?undefined:Number(String(row.weight).replace(/[^\d.-]/g,'')),category:String(row.category||''),shortDesc:String(row.shortDesc||''),longDesc:String(row.longDesc||''),variations:jsonValue(row.variations,[]),variationGroups,destinationStatus:wooStatus||undefined,sourcePage:'import',scrapedAt:new Date().toISOString()});imported++}catch(error){failed++;if(errors.length<50)errors.push(`row ${index+1}: ${message(error)}`)}await pushImportHistory({fileName:String(c.req.query('name')||'').slice(0,200),format,rows:records.length,imported,failed,skipped,wooStatus:wooStatus||undefined,opts,at:new Date().toISOString()});return c.json({ok:failed===0&&skipped<records.length,format,wooStatus,rows:records.length,imported,failed,skipped,errors})});
 
 // ─── Advanced import: analyze file, column mapping, history ──────────────────
 app.post('/api/import/analyze',async c=>{
@@ -245,7 +245,8 @@ const IMPORT_FIELDS:Array<{field:string;labels:string[]}>=[
   {field:'longDesc',labels:['longdesc','description','desc','توضیحات','توضیحکامل','متن']},
   {field:'tags',labels:['tags','تگ','برچسب']},
   {field:'sourceKey',labels:['sourcekey','key','شناسه','شناسهمحصول','id']},
-  {field:'variations',labels:['variations','تنوع','تنوعها']}
+  {field:'variations',labels:['variations','تنوع','تنوعها']},
+  {field:'attributes',labels:['attributes','attribute','attr','ویژگی','ویژگیها','خصوصیات','مشخصات','خصیصه','خصوصیت']}
 ];
 const normalizeImportHeader=(value:string)=>String(value||'').trim().toLowerCase().replace(/[يى]/g,'ی').replace(/ك/g,'ک').replace(/[\s_\-‌.]+/g,'').replace(/[«»"']/g,'');
 function detectImportMapping(headers:string[]):Array<{column:string;field:string;confidence:number}>{
@@ -271,6 +272,31 @@ function applyImportMapping(row:Record<string,any>,mapping:Record<string,string>
   for(const[column,field]of Object.entries(mapping||{})){if(column in row)out[field]=row[column]}
   for(const[key,value]of Object.entries(row)){out[key]??=value}
   return out;
+}
+
+// ─── Import: product attributes (ویژگی‌ها) parsing ───────────────────────────
+type ImportAttrGroup={name:string;values:string[]};
+/** Parses a mapped column cell into attribute groups:
+ *  JSON: [{"name":"رنگ","values":["قرمز","آبی"]}] or {"رنگ":"قرمز"}
+ *  Text: "رنگ:قرمز، آبی|سایز:M، L" (groups split by | ; : or = after name; values by ، , /)
+ *  Plain values: "قرمز، آبی" → attribute name becomes the column header. */
+function parseImportAttributes(value:unknown,columnName=''):ImportAttrGroup[]{
+  const raw=String(value??'').trim();if(!raw)return[];
+  const out:ImportAttrGroup[]=[],merge=(name:string,vals:string[])=>{const n=String(name||'').trim().slice(0,60),list=vals.map(v=>String(v||'').trim()).filter(Boolean).slice(0,200);if(!n||!list.length)return;const found=out.find(g=>g.name===n);if(found)found.values=[...new Set([...found.values,...list])];else out.push({name:n,values:[...new Set(list)]})};
+  if(raw.startsWith('[')||raw.startsWith('{')){try{const parsed=JSON.parse(raw);
+    if(Array.isArray(parsed))for(const item of parsed){if(item&&typeof item==='object'){const name=String(item.name||item.attr||'').trim(),values=Array.isArray(item.values)?item.values:item.value!==undefined?[item.value]:item.options;if(name&&values)merge(name,(values as unknown[]).map(String))}}
+    else if(parsed&&typeof parsed==='object')for(const[name,values]of Object.entries(parsed))merge(name,Array.isArray(values)?(values as unknown[]).map(String):[String(values)]);
+    if(out.length)return out}catch{/* fall through to text parsing */}}
+  const groupParts=raw.split(/[|;\\n]/).map(p=>p.trim()).filter(Boolean);
+  for(const part of groupParts){
+    const colon=part.search(/[:=]/);
+    if(colon>0){const name=part.slice(0,colon).trim(),values=part.slice(colon+1).split(/[,،/]+/).map(v=>v.trim()).filter(Boolean);if(name&&values.length)merge(name,values)}
+    else{const values=part.split(/[,،/]+/).map(v=>v.trim()).filter(Boolean);if(values.length)merge(columnName||'ویژگی',values)}
+  }
+  return out;
+}
+function mergeVariationGroups(groups:Array<{name:string;values:string[]}>):Array<{name:string;values:string[]}>{
+  const out:Array<{name:string;values:string[]}>=[];for(const group of groups||[]){const name=String(group?.name||'').trim(),values=Array.isArray(group?.values)?group.values.map(String):[];if(!name||!values.length)continue;const found=out.find(g=>g.name===name);if(found)found.values=[...new Set([...found.values,...values])];else out.push({name,values:[...new Set(values)]})}return out;
 }
 type ImportOptions={mapping:Record<string,string>;skipMissingTitle:boolean;skipMissingPrice:boolean;priceUnit:'toman'|'rial'|'multiply10'|'none';defaultStock:number;dedupe:'none'|'first'|'last'};
 function parseImportOptions(raw:unknown):ImportOptions{
