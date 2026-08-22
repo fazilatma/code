@@ -126,7 +126,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.16';
+const APP_VERSION = '10.17';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -1895,6 +1895,84 @@ function aiHealthyKeyCount(array $p, string $pid = ''): int {
 }
 
 /**
+ * v10.17 (۳۰): «اسلاتِ تست» — هر کلیدِ فعالِ یک ارائه‌دهنده یک ردیفِ جداگانه
+ * در «تست مدل‌ها» می‌گیرد، چون در دسترس بودنِ یک مدل به کلید بستگی دارد
+ * (اعتبارِ تمام‌شده، سهمیهٔ پرشده یا حسابِ متفاوت روی همان مدل).
+ *
+ * قرارداد:
+ *   • صفر یا یک کلید ⇒ یک اسلاتِ «بی‌پسوند» با id خالی؛ رفتارِ نسخه‌های قبل
+ *     دقیقاً حفظ می‌شود (هیچ کلیدی پین نمی‌شود و چرخشِ عادی کار می‌کند).
+ *   • دو کلید یا بیشتر ⇒ به‌ازای هر کلید یک اسلات با پسوندِ یکتا؛ پس تعدادِ
+ *     ردیف‌های تست در همان ارائه‌دهنده ضرب‌درِ تعدادِ کلید می‌شود.
+ * پسوند از برچسبِ کلید ساخته می‌شود و اگر برچسب نداشت «#k1، #k2، …».
+ */
+function aiTestKeySlots(array $p): array {
+    $on = [];
+    foreach (aiProviderKeys($p) as $k) {
+        if (empty($k['enabled'])) continue;
+        $on[] = $k;
+    }
+    if (count($on) < 2) {
+        return [['id' => '', 'label' => '', 'suffix' => '', 'n' => 1,
+                 'key' => $on ? (string)$on[0]['key'] : '',
+                 'acct' => $on ? (string)($on[0]['acct'] ?? '') : '']];
+    }
+    $out = []; $i = 0; $seen = [];
+    foreach ($on as $k) {
+        $i++;
+        $lab = trim((string)($k['label'] ?? ''));
+        $sfx = $lab !== '' ? $lab : ('k' . $i);
+        $sfx = trim(preg_replace('~\s+~u', '_', $sfx));
+        if ($sfx === '' || isset($seen[$sfx])) $sfx = ($sfx === '' ? 'k' : $sfx . '_') . $i;
+        $seen[$sfx] = true;
+        $out[] = ['id' => (string)$k['id'], 'label' => $lab, 'suffix' => '#' . $sfx, 'n' => $i,
+                  'key' => (string)$k['key'], 'acct' => (string)($k['acct'] ?? '')];
+    }
+    return $out;
+}
+
+/** همان اسلات، از روی شناسهٔ کلید (برای اجرا؛ خودِ کلید در صف ذخیره نمی‌شود) */
+function aiTestKeySlot(array $p, string $kid): ?array {
+    if ($kid === '') return null;
+    foreach (aiTestKeySlots($p) as $sl) if ($sl['id'] === $kid) return $sl;
+    return null;
+}
+
+/**
+ * v10.17: نسخه‌ای از ارائه‌دهنده که فقط همان یک کلید را دارد (کلید «پین» شده).
+ * چون فهرستِ کلیدها به یک عضو کاهش می‌یابد، aiProviderCall خودش مسیرِ
+ * تک‌کلیدی را می‌رود و هیچ چرخشی به کلیدِ دیگر انجام نمی‌دهد — دقیقاً همان
+ * چیزی که برای «تستِ این مدل با این کلید» لازم است. شمارهٔ حسابِ کلید هم
+ * (کلادفلر) اعمال می‌شود.
+ */
+function aiPinProviderKey(array $p, string $kid): array {
+    if ($kid === '') return $p;
+    $sl = aiTestKeySlot($p, $kid);
+    if ($sl === null || (string)$sl['key'] === '') return $p;
+    $p['apiKey']  = (string)$sl['key'];
+    $p['apiKeys'] = [['id' => $kid, 'key' => (string)$sl['key'], 'label' => (string)$sl['label'],
+                      'enabled' => true, 'acct' => (string)$sl['acct']]];
+    return aiApplyKeyAccount($p, ['acct' => (string)$sl['acct']]);
+}
+
+/** کلیدِ یکتای یک ردیفِ تست: مدل + (در حالتِ چندکلیدی) شناسهٔ کلید */
+function aiTestRowKey(string $pid, string $mid, string $kid = ''): string {
+    return $pid . '|' . $mid . ($kid !== '' ? '#' . $kid : '');
+}
+
+/**
+ * v10.17: «این مدل با این کلید قبلاً تست شده؟» — پایهٔ تیکِ «فقط تست‌نشده».
+ * با یک کلید همان پرچمِ قدیمیِ tested است؛ با چند کلید، هر کلید حسابِ خودش
+ * را دارد تا افزودنِ کلیدِ تازه باعثِ تستِ دوبارهٔ کلیدهای قبلی نشود.
+ */
+function aiModelKeyTested(array $m, string $kid): bool {
+    if ($kid === '') return !empty($m['tested']);
+    $kt = $m['keyTests'] ?? null;
+    if (!is_array($kt) || !isset($kt[$kid]) || !is_array($kt[$kid])) return false;
+    return !empty($kt[$kid]['tested']);
+}
+
+/**
  * وقتی کلیدِ تازه‌ای اضافه می‌شود، نتیجهٔ «اعتبار/سهمیه»ی مدل‌ها دیگر معتبر
  * نیست: کلیدِ نو ممکن است همان مدل‌ها را باز کند. پس آن ردیف‌ها به حالتِ
  * «تست‌نشده» برمی‌گردند تا در تستِ بعدی (حتی با تیکِ «فقط تست‌نشده») دوباره
@@ -3352,13 +3430,27 @@ function aiProvidersSummary(): array {
             'key_count'   => count($keyRows),
             'key_healthy' => $healthy,
             'key_preview' => $key !== '' ? (mb_substr($key, 0, 4) . '…' . mb_substr($key, -4)) : '',
+            /* v10.17 (۳۰): اسلات‌های تست — با دو کلیدِ فعال، هر مدل در فهرستِ
+               «تست مدل‌ها» دو ردیف می‌گیرد که با پسوند از هم جدا می‌شوند. */
+            'test_slots' => array_map(function ($sl) {
+                return ['id' => $sl['id'], 'label' => $sl['label'], 'suffix' => $sl['suffix'], 'n' => $sl['n']];
+            }, aiTestKeySlots($p)),
             'models'  => array_map(function ($m) {
+                /* v10.17: نتیجهٔ هر کلید روی همان مدل (بدون خودِ کلید) */
+                $kt = [];
+                foreach ((array)($m['keyTests'] ?? []) as $kid2 => $kv2) {
+                    if (!is_array($kv2)) continue;
+                    $kt[(string)$kid2] = ['tested' => !empty($kv2['tested']), 'available' => !empty($kv2['available']),
+                                          'latency' => (int)($kv2['latencyMs'] ?? 0), 'status' => (int)($kv2['status'] ?? 0),
+                                          'kind' => (string)($kv2['kind'] ?? ''), 'error' => (string)($kv2['error'] ?? '')];
+                }
                 return ['id' => $m['id'], 'name' => $m['name'] ?? $m['id'],
                         'tested' => !empty($m['tested']), 'available' => !empty($m['available']),
                         'rateLimited' => !empty($m['rateLimited']), 'toolCalling' => !empty($m['toolCalling']),
                         // v9.94: وضعیت استدلالی + اینکه دستی تعیین شده یا خودکار
                         'reasoning' => aiIsReasoningModel($m),
                         'reasoningManual' => array_key_exists('reasoning', $m),
+                        'keyTests' => $kt,
                         'latency' => (int)($m['testDetails']['latencyMs'] ?? 0)];
             }, $p['models'] ?? []),
         ];
@@ -17302,14 +17394,18 @@ if (isset($_GET['selftest'])) {
              $fn = strpos($selfSrc, 'function aiRunTestBackground(int $per');
              if ($fn === false) return false;
              $cat = strpos($selfSrc, '$catByKey = [];', $fn);
-             $msg = strpos($selfSrc, "\$jobs[] = ['p'=>\$p, 'mid'=>\$q['mid'], 'pid'=>\$q['pid'], 'payload'=>\$payloadBase", $fn);
+             /* v10.17: نامِ متغیرِ ارائه‌دهنده در این خط به $pk (نسخهٔ پین‌شده
+                به کلیدِ همان ردیف) تغییر کرد؛ لنگر به‌روز شد. */
+             $msg = strpos($selfSrc, "\$jobs[] = ['p'=>\$pk, 'mid'=>\$q['mid'], 'pid'=>\$q['pid'], 'kid'=>\$kid", $fn);
              return $cat !== false && $msg !== false && $cat < $msg;
          })());
     $add('10.00', 'دسته‌بندی هم مثل پیام موازی (curl_multi) می‌رود نه تک‌تک',
          strpos($selfSrc, 'foreach (aiParallelCalls($catJobs, $net, $concurrency) as $cr) {') !== false
-      && strpos($selfSrc, "\$catJobs[] = ['p'=>\$p, 'mid'=>\$q['mid'], 'pid'=>\$q['pid'], 'payload'=>\$catPayload") !== false);
+      /* v10.17: ارائه‌دهنده پیش از ساختِ جاب به کلیدِ ردیف پین می‌شود */
+      && strpos($selfSrc, "\$catJobs[] = ['p'=>aiPinProviderKey(\$p, \$kid), 'mid'=>\$q['mid'], 'pid'=>\$q['pid'],") !== false);
     $add('10.00', 'نتیجهٔ دسته‌بندی از حافظه خوانده می‌شود و درخواستِ دوباره نمی‌رود',
-         strpos($selfSrc, "\$cc = \$catByKey[\$pid . '|' . \$mid] ?? null;") !== false
+         /* v10.17: کلیدِ نگاشت حالا شناسهٔ کلید را هم دارد (aiTestRowKey) */
+         strpos($selfSrc, "\$cc = \$catByKey[aiTestRowKey(\$pid, \$mid, \$kid)] ?? null;") !== false
       /* رشته را تکه‌تکه می‌سازیم تا متنِ خودِ این آزمون به چشم نیاید */
       && strpos($selfSrc, 'if ($ok && $doCat)' . ' $catResponse = aiRunTest' . 'Category(') === false);
     $add('10.00', 'اگر دسته‌بندی خطای قطعی داد (اعتبار/مدلِ نامعتبر/۴۰۱/۴۰۴) پیام زده نمی‌شود',
@@ -17324,7 +17420,9 @@ if (isset($_GET['selftest'])) {
              $e0 = strpos($selfSrc, "\nexit;\n}", $s0);
              $blk = substr($selfSrc, $s0, $e0 - $s0);
              $cat = strpos($blk, '$catResponse = aiRunTestCategory(');
-             $msg = strpos($blk, '$r = aiProviderCall($providers[$pid], $mid, $payload, aiNetCfg());');
+             /* v10.17 (۳۰): نامِ متغیر از $providers[$pid] به $pRun تغییر کرد
+                (کلیدِ پین‌شدهٔ همان ردیف)؛ لنگرِ ادعا هم به‌روز شد. */
+             $msg = strpos($blk, '$r = aiProviderCall($pRun, $mid, $payload, aiNetCfg());');
              return $cat !== false && $msg !== false && $cat < $msg;
          })());
     $add('10.00', 'نوارِ وضعیتِ مودال مرحلهٔ جاری (دسته‌بندی/پیام) را نشان می‌دهد',
@@ -18846,6 +18944,130 @@ if (isset($_GET['selftest'])) {
     $add('10.16', 'تعدیلِ قیمت بعد از استخراج تجمعی نمی‌شود',
          strpos($selfSrc, "const fin=String(ip.final_price===undefined?'':ip.final_price);") !== false
       && strpos($selfSrc, "if(fin!==''&&String(v)===fin)return;") !== false);
+
+    /* ---------- v10.17 (۳۰): هر کلیدِ اضافه ⇒ یک ردیفِ تستِ جدا ---------- */
+    $add('10.17', 'توابعِ اسلاتِ کلید برای تست وجود دارند',
+         function_exists('aiTestKeySlots') && function_exists('aiTestKeySlot')
+      && function_exists('aiTestRowKey')   && function_exists('aiPinProviderKey')
+      && function_exists('aiModelKeyTested'));
+
+    $add('10.17', 'با یک کلید فقط یک اسلاتِ بی‌پسوند ساخته می‌شود (سازگاریِ عقب‌رو)',
+         (function () {
+             $sl = aiTestKeySlots(['id'=>'x', 'apiKey'=>'sk-only-one']);
+             return count($sl) === 1 && $sl[0]['id'] === '' && $sl[0]['suffix'] === '';
+         })());
+
+    $add('10.17', 'با دو کلید دو اسلاتِ پسونددار ساخته می‌شود',
+         (function () {
+             $sl = aiTestKeySlots(['id'=>'x', 'apiKeys'=>[
+                 ['key'=>'sk-aaa1111', 'label'=>''],
+                 ['key'=>'sk-bbb2222', 'label'=>''],
+             ]]);
+             return count($sl) === 2 && $sl[0]['suffix'] === '#k1' && $sl[1]['suffix'] === '#k2'
+                 && $sl[0]['id'] !== '' && $sl[0]['id'] !== $sl[1]['id'];
+         })());
+
+    $add('10.17', 'اگر کلید برچسب دارد، پسوند از همان برچسب ساخته می‌شود',
+         (function () {
+             $sl = aiTestKeySlots(['id'=>'x', 'apiKeys'=>[
+                 ['key'=>'sk-aaa1111', 'label'=>'حساب یک'],
+                 ['key'=>'sk-bbb2222', 'label'=>''],
+             ]]);
+             return count($sl) === 2 && $sl[0]['suffix'] === '#حساب_یک' && $sl[1]['suffix'] === '#k2';
+         })());
+
+    $add('10.17', 'کلیدِ خاموش اسلات نمی‌گیرد',
+         (function () {
+             $sl = aiTestKeySlots(['id'=>'x', 'apiKeys'=>[
+                 ['key'=>'sk-aaa1111', 'enabled'=>true],
+                 ['key'=>'sk-bbb2222', 'enabled'=>false],
+             ]]);
+             return count($sl) === 1 && $sl[0]['suffix'] === '';
+         })());
+
+    $add('10.17', 'صفِ تست با دو کلید دو برابرِ مدل‌ها ردیف می‌سازد',
+         (function () {
+             $prov = ['x' => ['id'=>'x', 'enabled'=>true,
+                 'apiKeys'=>[['key'=>'sk-aaa1111'], ['key'=>'sk-bbb2222']],
+                 'models'=>[['id'=>'m-one'], ['id'=>'m-two']]]];
+             $stq = [];
+             $q = aiTestBuildQueue($prov, 50, false, false, $stq);
+             $sfx = [];
+             foreach ($q as $row) $sfx[] = $row['mid'] . $row['ksuffix'];
+             sort($sfx);
+             return count($q) === 4 && $sfx === ['m-one#k1', 'm-one#k2', 'm-two#k1', 'm-two#k2'];
+         })());
+
+    $add('10.17', 'با یک کلید تعدادِ ردیف‌ها همان تعدادِ مدل می‌ماند',
+         (function () {
+             $prov = ['x' => ['id'=>'x', 'enabled'=>true, 'apiKey'=>'sk-only',
+                 'models'=>[['id'=>'m-one'], ['id'=>'m-two']]]];
+             $stq = [];
+             $q = aiTestBuildQueue($prov, 50, false, false, $stq);
+             return count($q) === 2 && $q[0]['kid'] === '' && $q[0]['ksuffix'] === '';
+         })());
+
+    $add('10.17', '«فقط تست‌نشده» برای هر کلید جداگانه حساب می‌شود',
+         (function () {
+             $k1 = aiKeyId('sk-aaa1111');
+             $prov = ['x' => ['id'=>'x', 'enabled'=>true,
+                 'apiKeys'=>[['key'=>'sk-aaa1111'], ['key'=>'sk-bbb2222']],
+                 'models'=>[['id'=>'m-one', 'tested'=>true,
+                             'keyTests'=>[$k1 => ['tested'=>true, 'available'=>true]]]]]];
+             $stq = [];
+             $q = aiTestBuildQueue($prov, 50, true, false, $stq);
+             return count($q) === 1 && $q[0]['ksuffix'] === '#k2';
+         })());
+
+    $add('10.17', 'پین‌کردنِ کلید فهرستِ کلیدها را به همان یکی محدود می‌کند (بدون چرخش)',
+         (function () {
+             $p = ['id'=>'x', 'apiKeys'=>[['key'=>'sk-aaa1111'], ['key'=>'sk-bbb2222']]];
+             $kid = aiKeyId('sk-bbb2222');
+             $pp  = aiPinProviderKey($p, $kid);
+             $kk  = aiProviderKeys($pp);
+             return count($kk) === 1 && $kk[0]['key'] === 'sk-bbb2222' && $pp['apiKey'] === 'sk-bbb2222';
+         })());
+
+    $add('10.17', 'حسابِ اختصاصیِ کلید هنگامِ پین‌شدن روی آدرس می‌نشیند',
+         (function () {
+             $p = ['id'=>'cf', 'url'=>'https://api.cloudflare.com/client/v4/accounts/AAA/ai/run/',
+                   'apiKeys'=>[['key'=>'tok-1111', 'acct'=>''], ['key'=>'tok-2222', 'acct'=>'BBB']]];
+             $pp = aiPinProviderKey($p, aiKeyId('tok-2222'));
+             return strpos((string)$pp['url'], '/accounts/BBB/') !== false;
+         })());
+
+    $add('10.17', 'کلیدِ نگاشتِ نتیجه شاملِ شناسهٔ کلید است تا ردیف‌ها روی هم نیفتند',
+         aiTestRowKey('p', 'm') === 'p|m'
+      && aiTestRowKey('p', 'm', 'k1') === 'p|m#k1'
+      && aiTestRowKey('p', 'm', 'k1') !== aiTestRowKey('p', 'm', 'k2')
+      && strpos($selfSrc, '$catByKey[aiTestRowKey((string)$cr[\'pid\']') !== false);
+
+    $add('10.17', 'نتیجهٔ هر کلید جدا روی مدل ذخیره می‌شود و «در دسترس» یعنی دستِ‌کم یک کلید',
+         strpos($selfSrc, "\$providers[\$pid]['models'][\$i]['keyTests'] = \$kt;") !== false
+      && strpos($selfSrc, '$anyOk = $ok;') !== false);
+
+    $add('10.17', 'aiModelKeyTested نتیجهٔ هر کلید را جدا می‌خواند',
+         aiModelKeyTested(['tested'=>true], '') === true
+      && aiModelKeyTested(['tested'=>true], 'kX') === false
+      && aiModelKeyTested(['keyTests'=>['kX'=>['tested'=>true]]], 'kX') === true);
+
+    $add('10.17', 'فهرستِ مدل‌ها در رابط کاربری به‌ازای هر کلید یک ردیف می‌سازد',
+         strpos($selfSrc, 'models.forEach(m=>{slots.forEach(sl=>rows.push({m:m,sl:sl}));});') !== false
+      && strpos($selfSrc, "const slots=(p.test_slots&&p.test_slots.length)?p.test_slots:") !== false);
+
+    $add('10.17', 'ردیفِ جدولِ نتایج با شناسهٔ کلید یکتا می‌شود',
+         strpos($selfSrc, "const key=(d.provider||'')+'::'+(d.model||'')+'::'+(d.keyId||'');") !== false);
+
+    $add('10.17', 'تستِ تکی هم پارامترِ key_id را می‌پذیرد و فقط با همان کلید می‌زند',
+         strpos($selfSrc, "\$kid  = trim((string)(\$_POST['key_id'] ?? ''));") !== false
+      && strpos($selfSrc, "if(kid)fd.append('key_id',kid);") !== false);
+
+    $add('10.17', 'خلاصهٔ ارائه‌دهنده اسلات‌های تست را به رابط کاربری می‌دهد',
+         strpos($selfSrc, "'test_slots' => array_map(") !== false);
+
+    $add('10.17', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '17', '>=')
+      && strpos($selfSrc, 'v:' . "'10.17'") !== false);
 
 /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -24406,6 +24628,13 @@ foreach ($providers[$pid]['models'] as $i => $m) {
     if (($m['id'] ?? '') === $mid) { $found = true; break; }
 }
 if (!$found) { echo json_encode(['ok'=>false,'error'=>'مدل یافت نشد'],JSON_UNESCAPED_UNICODE); exit; }
+/* v10.17 (۳۰): اگر شناسهٔ کلید آمده، تست فقط با همان کلید انجام می‌شود
+   (بدون چرخش) — دقیقاً همان ردیفی که کاربر در فهرست دیده. */
+$kid  = trim((string)($_POST['key_id'] ?? ''));
+$slot = $kid !== '' ? aiTestKeySlot($providers[$pid], $kid) : null;
+if ($kid !== '' && $slot === null) { echo json_encode(['ok'=>false,'error'=>'کلید یافت نشد یا خاموش است'],JSON_UNESCAPED_UNICODE); exit; }
+$ksfx = $slot ? (string)$slot['suffix'] : '';
+$pRun = $kid !== '' ? aiPinProviderKey($providers[$pid], $kid) : $providers[$pid];
 // v9.52: پیام تست و دستهٔ تستِ قابل‌تنظیم (پیش‌فرض «سلام» و «ادو پرفیوم»)
 $testMsg = trim((string)($_POST['msg'] ?? 'سلام'));
 if ($testMsg === '') $testMsg = 'سلام';
@@ -24415,13 +24644,13 @@ if ($testCat === '') $testCat = 'ادو پرفیوم';
    دلیل: ریت‌لیمیتِ دقیقه‌ایِ سرویس‌های رایگان معمولاً درخواستِ *دوم* را رد
    می‌کند و دسته‌بندی برای کاربر مهم‌تر از پیامِ نمونه است. */
 $catMeta = null;
-$catResponse = aiRunTestCategory($providers[$pid], $mid, $testCat, aiTestCategoryData(), null, $catMeta);
+$catResponse = aiRunTestCategory($pRun, $mid, $testCat, aiTestCategoryData(), null, $catMeta);
 $t0 = microtime(true);
 // v9.57: سقف توکن برای تست بالاتر رفت (۳۰۰) — مدل‌های reasoning (مثل gpt-oss،
 // qwen، nemotron و...) اول روی «فکر کردن» توکن می‌سوزانند و اگر سقف پایین باشد
 // (۳۰) هیچ‌وقت به content نمی‌رسند و پاسخِ خالی برمی‌گردد.
 $payload = ['messages'=>[['role'=>'user','content'=>$testMsg]], 'temperature'=>0.3, 'max_tokens'=>300];
-$r = aiProviderCall($providers[$pid], $mid, $payload, aiNetCfg());
+$r = aiProviderCall($pRun, $mid, $payload, aiNetCfg());
 $latency = (int)round((microtime(true) - $t0) * 1000);
 $code = (int)$r['code'];
 $ok = $code === 200;
@@ -24444,22 +24673,38 @@ $details = ['status'=>$code, 'error'=>mb_substr((string)$err,0,300), 'response'=
             'catRaw'=>(string)($catMeta['raw'] ?? ''), 'catStatus'=>(int)($catMeta['status'] ?? 0),
             'catVia'=>(string)($catMeta['via'] ?? ''), 'catAiText'=>(string)($catMeta['aiText'] ?? ''),
             // v10.01: دستهٔ خطا و توضیحِ فارسیِ آن — مثل مسیرِ گروهی
-            'kind'=>(string)$j['kind'], 'note'=>(string)$j['note']];
+            'kind'=>(string)$j['kind'], 'note'=>(string)$j['note'],
+            // v10.17 (۳۰): این نتیجه با کدام کلید گرفته شد
+            'keyId'=>$kid, 'keySuffix'=>$ksfx, 'keyLabel'=>$slot ? (string)$slot['label'] : ''];
 foreach ($providers[$pid]['models'] as $i => $m) {
     if (($m['id'] ?? '') === $mid) {
+        /* v10.17 (۳۰): نتیجهٔ همین کلید جدا ثبت می‌شود و «در دسترس بودن»ِ
+           مدل «یا»ی همهٔ کلیدهاست — کلیدِ خرابِ دوم مدلِ سالم را قرمز نکند. */
+        $anyOk = $ok;
+        if ($kid !== '') {
+            $kt = (array)($providers[$pid]['models'][$i]['keyTests'] ?? []);
+            $kt[$kid] = ['tested'=>true, 'available'=>$ok, 'label'=>$slot ? (string)$slot['label'] : '',
+                         'suffix'=>$ksfx, 'latencyMs'=>$latency, 'status'=>$code,
+                         'kind'=>(string)$j['kind'], 'error'=>mb_substr((string)$err,0,200),
+                         'billing'=>(string)$j['billing'], 'testedAt'=>gmdate('c')];
+            $providers[$pid]['models'][$i]['keyTests'] = $kt;
+            foreach ($kt as $kk2 => $kv2) { if ($kk2 !== $kid && !empty($kv2['available'])) { $anyOk = true; break; } }
+        }
         $providers[$pid]['models'][$i]['tested'] = true;
-        $providers[$pid]['models'][$i]['available'] = $ok;
-        $providers[$pid]['models'][$i]['rateLimited'] = $rateLimited;
+        $providers[$pid]['models'][$i]['available'] = $anyOk;
+        $providers[$pid]['models'][$i]['rateLimited'] = $rateLimited && !$anyOk;
         // v10.01: علتِ «اعتبار/اشتراک» اینجا هم ثبت می‌شود تا افزودنِ کلیدِ
         // تازه بتواند این مدل را برای تستِ دوباره آزاد کند.
-        if ($j['billing'] !== '') $providers[$pid]['models'][$i]['billingIssue'] = $j['billing'];
-        else                      unset($providers[$pid]['models'][$i]['billingIssue']);
+        if ($j['billing'] !== '' && !$anyOk) $providers[$pid]['models'][$i]['billingIssue'] = $j['billing'];
+        else                                 unset($providers[$pid]['models'][$i]['billingIssue']);
         $providers[$pid]['models'][$i]['testDetails'] = $details;
         break;
     }
 }
 aiProvidersSave($providers);
 echo json_encode(['ok'=>true, 'model'=>$mid, 'provider'=>$pid, 'available'=>$ok,
+    // v10.17 (۳۰): پسوندِ کلیدی که این تست با آن انجام شد
+    'keyId'=>$kid, 'keySuffix'=>$ksfx,
     'rateLimited'=>$rateLimited, 'latencyMs'=>$latency, 'code'=>$code, 'error'=>$err,
     'response'=>mb_substr($response,0,200), 'catResponse'=>(string)$catResponse,
     // v10.01: توضیحِ فارسیِ خطا و وضعیتِ چرخشِ کلید برای نمایشِ بی‌درنگ
@@ -24645,34 +24890,58 @@ function aiRunTestCategory(array $p, string $mid, string $testCat, ?array $catDa
  *  aiParallelCalls():  یک دسته درخواست را با curl_multi هم‌زمان می‌فرستد.
  * ===================================================================== */
 function aiTestBuildQueue(array $providers, int $per, bool $onlyUntested, bool $skipNonChat = true, array &$stats = []): array {
-    $stats = ['skipped' => 0, 'nonchat' => 0];
+    $stats = ['skipped' => 0, 'nonchat' => 0, 'keys' => 0, 'multikey' => 0];
     // ۱) فهرستِ مدل‌های هر ارائه‌دهنده (با رعایتِ سقف و فیلترها)
     $byProv = [];
     foreach ($providers as $pid => $p) {
         if (($p['enabled'] ?? true) === false) continue;
+        /* v10.17 (۳۰): هر کلیدِ فعال یک «اسلات» است. با دو کلید، هر مدل دو
+           بار (یک‌بار با هر کلید) وارد صف می‌شود و ردیف‌ها با پسوند از هم
+           جدا می‌مانند. سقفِ «مدل به‌ازای هر ارائه‌دهنده» همچنان روی *مدل*
+           اعمال می‌شود نه روی ردیف — یعنی سقفِ ۵۰ با دو کلید ۱۰۰ ردیف
+           می‌سازد، همان‌طور که کاربر انتظار دارد. */
+        $slots = aiTestKeySlots($p);
+        $stats['keys'] += count($slots);
+        if (count($slots) > 1) $stats['multikey']++;
         $n = 0; $list = [];
         foreach ((array)($p['models'] ?? []) as $m) {
             $mid = (string)($m['id'] ?? '');
             if ($mid === '') continue;
-            if ($onlyUntested && !empty($m['tested'])) continue;
             /* v9.99: مدل‌های غیرچت (امبدینگ/تصویر/صوت/rerank) اصلاً وارد صف
                نمی‌شوند — تستِ چت روی آن‌ها همیشه شکست می‌خورد. */
             if ($skipNonChat) {
                 $why = aiNonChatModel($mid, is_array($m) ? $m : []);
                 if ($why !== '') { $stats['nonchat']++; continue; }
             }
-            if ($n >= $per) { $stats['skipped']++; $n++; continue; }
+            /* v10.17: «فقط تست‌نشده» حالا برای هر کلید جداگانه سنجیده
+               می‌شود؛ اگر مدل با کلیدِ اول تست شده ولی با کلیدِ دوم نه،
+               فقط اسلاتِ کلیدِ دوم وارد صف می‌شود. */
+            $mSlots = [];
+            foreach ($slots as $sl) {
+                if ($onlyUntested && aiModelKeyTested(is_array($m) ? $m : [], (string)$sl['id'])) continue;
+                $mSlots[] = $sl;
+            }
+            if (!$mSlots) continue;
+            if ($n >= $per) { $stats['skipped'] += count($mSlots); $n++; continue; }
             $n++;
-            $list[] = $mid;
+            foreach ($mSlots as $sl) {
+                $list[] = ['mid' => $mid, 'kid' => (string)$sl['id'],
+                           'ksuffix' => (string)$sl['suffix'], 'klabel' => (string)$sl['label']];
+            }
         }
         if ($list) $byProv[$pid] = $list;
     }
-    // ۲) چرخش: دور i = مدلِ i-امِ هر ارائه‌دهنده
+    // ۲) چرخش: دور i = ردیفِ i-امِ هر ارائه‌دهنده
     $queue = []; $round = 0; $max = 0;
     foreach ($byProv as $l) $max = max($max, count($l));
     for ($i = 0; $i < $max; $i++) {
         foreach ($byProv as $pid => $l) {
-            if (isset($l[$i])) $queue[] = ['pid' => $pid, 'mid' => $l[$i], 'round' => $i];
+            if (!isset($l[$i])) continue;
+            $it = $l[$i];
+            $queue[] = ['pid' => $pid, 'mid' => $it['mid'], 'round' => $i,
+                        /* v10.17: شناسهٔ کلیدِ پین‌شده + پسوندِ نمایشی. خودِ
+                           کلید هرگز در صف/وضعیت ذخیره نمی‌شود. */
+                        'kid' => $it['kid'], 'ksuffix' => $it['ksuffix'], 'klabel' => $it['klabel']];
         }
         $round++;
     }
@@ -25038,6 +25307,20 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
     $st['nonchat'] = (int)($qstats['nonchat'] ?? 0);
     $st['rounds']  = (int)($qstats['rounds'] ?? 0);
     $st['total']   = count($queue);
+    /* v10.17 (۳۰): نگاشتِ «ارائه‌دهنده|کلید ⇒ پسوندِ نمایشی» تا در حلقهٔ
+       نتیجه‌ها بدون دسترسی دوباره به کلیدها، برچسبِ ردیف ساخته شود. */
+    $sfxByKey = [];
+    foreach ($queue as $q0) {
+        $k0 = (string)($q0['kid'] ?? '');
+        if ($k0 === '') continue;
+        $sfxByKey[$q0['pid'] . '|' . $k0] = ['suffix'=>(string)($q0['ksuffix'] ?? ''), 'label'=>(string)($q0['klabel'] ?? '')];
+    }
+    /* key_rows = تعدادِ کلِ ردیف‌های صف (مدل × کلید)، key_slots = تعدادِ
+       کلیدهای فعالِ همهٔ ارائه‌دهنده‌ها، multi_key = چند ارائه‌دهنده بیش از
+       یک کلید دارند. */
+    $st['key_rows']  = count($queue);
+    $st['key_slots'] = (int)($qstats['keys'] ?? 0);
+    $st['multi_key'] = (int)($qstats['multikey'] ?? 0);
     aiTestStateSave($st);
 
     /* مدل‌های غیرچت را در همان provider علامت بزن تا کاربر ببیند چرا تست نشدند */
@@ -25097,7 +25380,11 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
             foreach ($items as $q) {
                 $p = $providers[$q['pid']] ?? null;
                 if (!$p) continue;
-                $catJobs[] = ['p'=>$p, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'payload'=>$catPayload, 't0'=>microtime(true)];
+                /* v10.17 (۳۰): اگر این ردیف به یک کلیدِ مشخص گره خورده، همان
+                   کلید پین می‌شود تا نتیجه واقعاً «این مدل با این کلید» باشد. */
+                $kid = (string)($q['kid'] ?? '');
+                $catJobs[] = ['p'=>aiPinProviderKey($p, $kid), 'mid'=>$q['mid'], 'pid'=>$q['pid'],
+                              'kid'=>$kid, 'payload'=>$catPayload, 't0'=>microtime(true)];
             }
             if ($catJobs) {
                 $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1) . ' · تستِ دسته‌بندی', 'model'=>count($catJobs) . ' مدل هم‌زمان'];
@@ -25106,7 +25393,7 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
                     $crr    = (array)$cr['r'];
                     $clat   = (int)round((microtime(true) - (float)$cr['t0']) * 1000);
                     $parsed = aiCatParse($crr, $testCat, (array)$catData['cats'], (string)$cr['mid'], $clat);
-                    $catByKey[(string)$cr['pid'] . '|' . (string)$cr['mid']] =
+                    $catByKey[aiTestRowKey((string)$cr['pid'], (string)$cr['mid'], (string)($cr['kid'] ?? ''))] =
                         ['res'=>$parsed, 'r'=>$crr, 'summary'=>aiCatSummary($parsed), 'meta'=>aiCatMeta($parsed), 'lat'=>$clat];
                 }
             }
@@ -25124,18 +25411,21 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
         foreach ($items as $q) {
             $p = $providers[$q['pid']] ?? null;
             if (!$p) continue;
-            $cc = $catByKey[(string)$q['pid'] . '|' . (string)$q['mid']] ?? null;
+            $kid = (string)($q['kid'] ?? '');
+            $pk  = aiPinProviderKey($p, $kid);   // v10.17 (۳۰): کلیدِ همین ردیف
+            $cc = $catByKey[aiTestRowKey((string)$q['pid'], (string)$q['mid'], $kid)] ?? null;
             if ($cc !== null) {
                 $cj    = aiTestJudge((array)$cc['r'], (string)$q['mid'], (string)$q['pid']);
                 $ccode = (int)($cc['r']['code'] ?? 0);
                 if ($cj['billing'] !== '' || $cj['kind'] === 'badmodel' || in_array($ccode, [401, 404], true)) {
-                    $reuse[] = ['p'=>$p, 'mid'=>$q['mid'], 'pid'=>$q['pid'],
+                    $reuse[] = ['p'=>$pk, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'kid'=>$kid,
                                 't0'=>microtime(true) - ((int)$cc['lat']) / 1000,
                                 'r'=>((array)$cc['r']) + ['msg_skipped'=>true]];
                     continue;
                 }
             }
-            $jobs[] = ['p'=>$p, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'payload'=>$payloadBase, 't0'=>microtime(true)];
+            $jobs[] = ['p'=>$pk, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'kid'=>$kid,
+                       'payload'=>$payloadBase, 't0'=>microtime(true)];
         }
         $results = [];
         if ($jobs) {
@@ -25150,6 +25440,11 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
         foreach ($results as $res) {
             if (aiTestStopRequested()) { $st['stopped'] = true; break 2; }
             $pid = (string)$res['pid']; $mid = (string)$res['mid'];
+            /* v10.17 (۳۰): این نتیجه مالِ کدام کلید است؟ */
+            $kid  = (string)($res['kid'] ?? '');
+            $ksf  = $sfxByKey[$pid . '|' . $kid] ?? ['suffix'=>'', 'label'=>''];
+            $ksfx = (string)$ksf['suffix'];
+            $midLabel = $mid . $ksfx;      // نامِ نمایشیِ ردیف (با پسوندِ کلید)
             $p = $providers[$pid] ?? null;
             if (!$p) continue;
             $r = (array)$res['r'];
@@ -25180,7 +25475,7 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
 
             /* v10.00 (۱۴ب): نتیجهٔ دسته‌بندی همین دور از پیش (قبل از پیام)
                گرفته شده؛ اینجا فقط خوانده می‌شود و درخواستِ تازه‌ای نمی‌رود. */
-            $cc = $catByKey[$pid . '|' . $mid] ?? null;
+            $cc = $catByKey[aiTestRowKey($pid, $mid, $kid)] ?? null;
             $catMeta     = $cc ? (array)$cc['meta'] : null;
             $catResponse = $cc ? (string)$cc['summary'] : null;
             $catLatency  = $cc ? (int)$cc['lat'] : 0;
@@ -25188,11 +25483,34 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
             if (isset($providers[$pid]['models'])) {
                 foreach ($providers[$pid]['models'] as $i => $m) {
                     if (($m['id'] ?? '') === $mid) {
+                        /* v10.17 (۳۰): در حالتِ چندکلیدی، نتیجهٔ هر کلید جدا
+                           نگه داشته می‌شود و وضعیتِ کلیِ مدل «یا»ی آن‌هاست:
+                           اگر با دستِ‌کم یک کلید جواب داد، مدل در دسترس است.
+                           بدون این، کلیدِ خرابِ دوم مدلِ سالم را قرمز می‌کرد. */
+                        if ($kid !== '') {
+                            $kt = (array)($providers[$pid]['models'][$i]['keyTests'] ?? []);
+                            $kt[$kid] = ['tested'=>true, 'available'=>$ok, 'label'=>(string)$ksf['label'],
+                                         'suffix'=>$ksfx, 'latencyMs'=>$latency, 'status'=>$code,
+                                         'kind'=>(string)$j['kind'], 'error'=>mb_substr((string)$err,0,200),
+                                         'billing'=>(string)$j['billing'], 'testedAt'=>gmdate('c')];
+                            $providers[$pid]['models'][$i]['keyTests'] = $kt;
+                            $anyOk = $ok;
+                            foreach ($kt as $kk2 => $kv2) {
+                                if ($kk2 === $kid) continue;
+                                if (!empty($kv2['available'])) { $anyOk = true; break; }
+                            }
+                            $providers[$pid]['models'][$i]['available'] = $anyOk;
+                            $providers[$pid]['models'][$i]['rateLimited'] = !$anyOk && in_array($code, [429], true);
+                        } else {
+                            $anyOk = $ok;
+                            $providers[$pid]['models'][$i]['available'] = $ok;
+                            $providers[$pid]['models'][$i]['rateLimited'] = in_array($code, [429], true);
+                        }
                         $providers[$pid]['models'][$i]['tested'] = true;
-                        $providers[$pid]['models'][$i]['available'] = $ok;
-                        $providers[$pid]['models'][$i]['rateLimited'] = in_array($code, [429], true);
-                        // v9.99: علتِ رفع‌نشدنی (اعتبار/اشتراک) جدا ثبت می‌شود
-                        if ($j['billing'] !== '') {
+                        /* v9.99: علتِ رفع‌نشدنی (اعتبار/اشتراک) جدا ثبت می‌شود
+                           v10.17 (۳۰): اگر کلیدِ دیگری همین مدل را باز کرده،
+                           مشکلِ اعتبارِ این کلید نباید کلِ مدل را قفل کند. */
+                        if ($j['billing'] !== '' && !$anyOk) {
                             $providers[$pid]['models'][$i]['billingIssue'] = $j['billing'];
                         } else {
                             unset($providers[$pid]['models'][$i]['billingIssue']);
@@ -25209,6 +25527,8 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
                             'msgSkipped'=>!empty($r['msg_skipped']),
                             // v9.99: دستهٔ خطا و توضیحِ فارسیِ آن
                             'kind'=>(string)$j['kind'], 'note'=>(string)$j['note'],
+                            // v10.17 (۳۰): این جزئیات مالِ کدام کلید است
+                            'keyId'=>$kid, 'keySuffix'=>$ksfx, 'keyLabel'=>(string)$ksf['label'],
                             'retriedSeq'=>!empty($r['retried_seq'])];
                         break;
                     }
@@ -25216,7 +25536,11 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
             }
             $st['tested']++;
             if ($ok) $st['available']++; else $st['failed']++;
-            $st['items'][] = ['provider'=>$pid, 'providerName'=>$p['name']??$pid, 'model'=>$mid,
+            $st['items'][] = ['provider'=>$pid, 'providerName'=>$p['name']??$pid, 'model'=>$midLabel,
+                /* v10.17 (۳۰): نامِ خامِ مدل و مشخصاتِ کلید جدا نگه داشته
+                   می‌شوند؛ ستونِ «مدل» پسوندِ کلید را نشان می‌دهد ولی کلیکِ
+                   ردیف باید سراغِ همان مدلِ واقعی برود. */
+                'baseModel'=>$mid, 'keyId'=>$kid, 'keySuffix'=>$ksfx, 'keyLabel'=>(string)$ksf['label'],
                 'ok'=>$ok, 'latencyMs'=>$latency, 'error'=>mb_substr((string)$err,0,120),
                 'cat'=>$diag['cat'], 'label'=>$diag['label'], 'kind'=>(string)$j['kind'],
                 'round'=>$st['round'],
@@ -37094,6 +37418,29 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.17', t:'🔑 هر کلیدِ API یک ردیفِ تستِ جدا — فهرستِ تست ضرب‌در تعدادِ کلید', items:[
+    '🔢 <b>خواستهٔ اصلی.</b> تا پیش از این، اضافه‌کردنِ کلیدِ دوم به یک ارائه‌دهنده',
+    '   هیچ تغییری در تعدادِ ردیف‌های «تست مدل‌ها» نمی‌داد: هر مدل یک ردیف داشت و',
+    '   تست فقط با «اولین کلیدِ سالم» انجام می‌شد. حالا هر <b>کلیدِ فعال</b> برای هر',
+    '   مدل یک ردیفِ مستقل می‌سازد ⇒ با دو کلید، تعدادِ ردیف‌ها <b>دو برابر</b> می‌شود.',
+    '🏷 <b>تفکیک با پسوند.</b> ردیف‌ها با پسوندی کنارِ نامِ مدل از هم جدا می‌شوند:',
+    '   اگر برای کلید برچسب گذاشته باشید همان برچسب (<span dir="ltr">gpt-4o#حساب_دوم</span>)',
+    '   وگرنه شمارهٔ ترتیبی (<span dir="ltr">gpt-4o#k1</span> و <span dir="ltr">gpt-4o#k2</span>).',
+    '   پسوند هم در فهرستِ مدل‌ها و هم در ستونِ «مدل»ِ جدولِ نتایجِ زنده دیده می‌شود.',
+    '📌 <b>کلید واقعاً پین می‌شود.</b> ردیفِ هر کلید دقیقاً با همان کلید تست می‌شود و',
+    '   چرخشِ خودکار به کلیدِ بعدی در آن ردیف انجام نمی‌گیرد — وگرنه نتیجهٔ دو ردیف',
+    '   یکی می‌شد. شمارهٔ حسابِ اختصاصیِ کلید (کلادفلر) هم همراهش اعمال می‌شود.',
+    '🟢 <b>وضعیتِ کلیِ مدل «یا»ی کلیدهاست.</b> اگر مدل با دستِ‌کم یک کلید جواب بدهد،',
+    '   «در دسترس» می‌ماند؛ کلیدِ سوختهٔ دوم دیگر مدلِ سالم را قرمز نمی‌کند و پرچمِ',
+    '   «اعتبار/اشتراک» هم فقط وقتی می‌نشیند که <b>هیچ</b> کلیدی کار نکند.',
+    '⏭ <b>«فقط تست‌نشده» هوشمندتر شد.</b> حالا برای هر کلید جداگانه حساب می‌شود:',
+    '   با افزودنِ کلیدِ تازه، فقط ردیف‌های همان کلیدِ نو تست می‌شوند و کلیدهای قبلی',
+    '   بی‌خود دوباره سهمیه نمی‌سوزانند.',
+    '🧪 <b>تستِ تکی.</b> دکمهٔ 🧪 کنارِ هر ردیف همان کلیدِ خودش را می‌فرستد',
+    '   (<span dir="ltr">key_id</span>)، پس می‌توانید یک مدل را با کلیدِ دلخواه تست کنید.',
+    '↩️ <b>سازگاریِ کامل.</b> با صفر یا یک کلید، هیچ پسوندی ظاهر نمی‌شود و رفتار',
+    '   دقیقاً همان نسخه‌های قبل است.',
+  ]},
   {v:'10.16', t:'🔑 حسابِ پشتیبان برای Cloudflare + دکمهٔ تست کنارِ هر کلید', items:[
     '🔑 <b>مسئلهٔ اصلی.</b> در Cloudflare اعتبار به <b>حساب</b> بسته است، نه به توکن.',
     '   وقتی سهمیهٔ روزانهٔ یک حساب تمام می‌شود، ساختنِ توکنِ دومِ همان حساب هیچ',
@@ -43275,11 +43622,31 @@ function aiRenderModels(){
     if(list){
         const models=(p.models||[]);
         if(!models.length){list.innerHTML='<div style="padding:8px;color:#64748b;font-size:11px">این ارائه‌دهنده مدلی ندارد.</div>';return;}
+        /* v10.17 (۳۰): با بیش از یک کلیدِ فعال، هر مدل به‌ازای هر کلید یک
+           ردیف می‌گیرد و ردیف‌ها با پسوند (#برچسب یا #k۱/#k۲) از هم جدا
+           می‌شوند — یعنی با دو کلید تعدادِ ردیف‌های قابلِ تست دو برابر است. */
+        const slots=(p.test_slots&&p.test_slots.length)?p.test_slots:[{id:'',label:'',suffix:''}];
+        const multi=slots.length>1;
+        const rows=[];
+        models.forEach(m=>{slots.forEach(sl=>rows.push({m:m,sl:sl}));});
         let h='';
-        models.forEach((m,i)=>{
-            const st=m.available?'🟢':(m.tested?'🔴':'⚪');
-            const lat=m.latency?' · '+toFa(m.latency)+'ms':'';
+        if(multi){
+            h+='<div style="padding:5px 8px;border-bottom:1px solid #1e293b;font-size:10px;color:#67e8f9;background:#0b1729">'
+              +'🔑 '+toFa(slots.length)+' کلیدِ فعال ⇒ '+toFa(models.length)+' مدل × '+toFa(slots.length)+' کلید = <b>'+toFa(rows.length)+'</b> ردیفِ تست'
+              +' <span style="color:#64748b">(هر ردیف با پسوندِ کلیدش)</span></div>';
+        }
+        rows.forEach(function(row,i){
+            const m=row.m, sl=row.sl;
+            const kt=(m.keyTests&&sl.id&&m.keyTests[sl.id])?m.keyTests[sl.id]:null;
+            /* در حالتِ چندکلیدی وضعیتِ همان کلید ملاک است، نه وضعیتِ کلیِ مدل */
+            const tested=multi?(kt?!!kt.tested:false):!!m.tested;
+            const avail =multi?(kt?!!kt.available:false):!!m.available;
+            const latMs =multi?(kt?(kt.latency||0):0):(m.latency||0);
+            const st=avail?'🟢':(tested?'🔴':'⚪');
+            const lat=latMs?' · '+toFa(latMs)+'ms':'';
             const tool=m.toolCalling?' 🔧':'';
+            const sfx=multi?(sl.suffix||''):'';
+            const kTitle=multi?('کلید: '+(sl.label||('#k'+(sl.n||'')))+(kt&&kt.status?(' · وضعیت '+kt.status):'')):'';
             /* v9.94: تیکِ «مدل استدلالی». وقتی روشن است، سقفِ توکن چند برابر
                می‌شود و بلوکِ «فکر کردن» از پاسخ جدا می‌شود؛ بدون آن، مدل‌های
                استدلالی در دسته‌بندی و پاسخ به مشتری پاسخِ خالی می‌دادند. */
@@ -43287,19 +43654,21 @@ function aiRenderModels(){
               ?'تعیینِ دستی: '+(m.reasoning?'استدلالی':'غیراستدلالی')
               :'تشخیصِ خودکار از روی نام مدل: '+(m.reasoning?'استدلالی':'غیراستدلالی')+' — برای تعیینِ دستی تیک بزنید';
             h+='<div style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-bottom:1px solid #1e293b;font-size:10.5px">'
-              +'<span title="'+(m.available?'در دسترس':(m.tested?'ناموفق':'تست نشده'))+'">'+st+'</span>'
-              +'<span style="flex:1;color:#e2e8f0;direction:ltr;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.name||m.id)+'</span>'
+              +'<span title="'+(avail?'در دسترس':(tested?'ناموفق':'تست نشده'))+(kTitle?(' — '+esc(kTitle)):'')+'">'+st+'</span>'
+              +'<span style="flex:1;color:#e2e8f0;direction:ltr;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.name||m.id)
+              +(sfx?'<span style="color:#fbbf24" title="'+esc(kTitle)+'">'+esc(sfx)+'</span>':'')+'</span>'
               +'<span style="color:#64748b">'+lat+'</span>'+tool
               +'<label class="ai-rsn" title="'+esc(rTitle)+'" style="display:flex;align-items:center;gap:3px;cursor:pointer;color:'+(m.reasoning?'#c4b5fd':'#64748b')+';white-space:nowrap">'
               +'<input type="checkbox" style="width:13px;height:13px;flex:0 0 auto" '+(m.reasoning?'checked':'')
               +' data-p="'+esc(p.id)+'" data-m="'+esc(m.id)+'" onchange="aiToggleReasoningFrom(this)">🧠</label>'
-              +'<button class="btn btn-gray" style="font-size:9px;padding:2px 6px" data-p="'+esc(p.id)+'" data-m="'+esc(m.id)+'" onclick="aiTestOneFrom(this)">🧪</button>'
+              +'<button class="btn btn-gray" style="font-size:9px;padding:2px 6px" data-p="'+esc(p.id)+'" data-m="'+esc(m.id)+'" data-k="'+esc(sl.id||'')+'" onclick="aiTestOneFrom(this)">🧪</button>'
               +'</div>';
         });
         list.innerHTML=h;
     }
 }
-function aiTestOneFrom(btn){if(btn&&btn.dataset)aiTestOne(btn.dataset.p,btn.dataset.m);}
+/* v10.17 (۳۰): سومین پارامتر = شناسهٔ کلیدِ همان ردیف (خالی = رفتارِ قدیمی) */
+function aiTestOneFrom(btn){if(btn&&btn.dataset)aiTestOne(btn.dataset.p,btn.dataset.m,btn.dataset.k||'');}
 /* v9.94: روشن/خاموش کردنِ دستیِ «مدل استدلالی» */
 function aiToggleReasoningFrom(cb){if(cb&&cb.dataset)aiToggleReasoning(cb.dataset.p,cb.dataset.m,cb.checked);}
 function aiToggleReasoning(pid,mid,on){
@@ -43541,17 +43910,19 @@ function aiOpenRowDetail(pid,mid){
         b.innerHTML=h;
       }).catch(()=>{const b=document.getElementById('aiRowDetailBody');if(b)b.innerHTML='<div style="color:#fca5a5">✗ خطا در ارتباط</div>';});
 }
-function aiTestOne(pid,mid){
+function aiTestOne(pid,mid,kid){
     // v9.52: پیام و دستهٔ تست را از فیلدهای جاری می‌گیرد (مودال یا بخش بیرونی)
     const msg=($('aiTestMsg')&&$('aiTestMsg').value.trim())||'سلام';
     const cat=($('aiTestCat')&&$('aiTestCat').value.trim())||'ادو پرفیوم';
     const fd=new FormData();fd.append('action','ai_test_one');fd.append('provider_id',pid);fd.append('model_id',mid);
+    // v10.17 (۳۰): اگر ردیف به کلیدِ خاصی گره خورده، تست فقط با همان کلید
+    if(kid)fd.append('key_id',kid);
     fd.append('msg',msg);fd.append('cat',cat);
     fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
         const r=$('aiTR');if(r){
             const ok=d&&d.available;
             r.innerHTML='<div style="background:'+(ok?'#14532d':'#7f1d1d')+';color:'+(ok?'#86efac':'#fca5a5')+';padding:8px;font-size:11px">'
-              +(ok?'✓':'✗')+' <b dir="ltr">'+esc(mid)+'</b> — '+(ok?('پاسخ پیام: '+esc(d.response||'')):esc(d.error||'خطا'))
+              +(ok?'✓':'✗')+' <b dir="ltr">'+esc(mid)+esc((d&&d.keySuffix)||'')+'</b> — '+(ok?('پاسخ پیام: '+esc(d.response||'')):esc(d.error||'خطا'))
               +(d.catResponse?'<div style="margin-top:3px;color:#c4b5fd">🏷️ دسته: '+esc(d.catResponse)+'</div>':'')
               +' <span style="color:#94a3b8">('+toFa(d.latencyMs||0)+'ms)</span></div>';
         }
@@ -43682,7 +44053,9 @@ function aiTestApplyGreenFilter(){
 }
 function aiEnsureTestRow(d){
     const tbody=$('aiTestTbody');if(!tbody)return null;
-    const key=(d.provider||'')+'::'+(d.model||'');
+    /* v10.17 (۳۰): با چند کلید، یک مدل چند ردیف دارد؛ شناسهٔ ردیف باید
+       شاملِ کلید باشد وگرنه ردیف‌ها روی هم می‌افتند. */
+    const key=(d.provider||'')+'::'+(d.model||'')+'::'+(d.keyId||'');
     if(aiTestRows[key])return aiTestRows[key];
     aiTestTotCount++;aiTestWaitCount++;
     const tr=document.createElement('tr');
@@ -43691,14 +44064,18 @@ function aiEnsureTestRow(d){
     tr.style.cursor='pointer';
     tr.title='برای دیدنِ اطلاعات کامل و پاسخ خامِ مدل کلیک کنید';
     tr.dataset.aiProvider=d.provider||'';
-    tr.dataset.aiModel=d.model||'';
+    // v10.17 (۳۰): مودالِ جزئیات با نامِ *خامِ* مدل کار می‌کند، نه نامِ باپسوند
+    tr.dataset.aiModel=d.baseModel||d.model||'';
+    tr.dataset.aiKey=d.keyId||'';
     tr.addEventListener('mouseenter',function(){tr.style.background='#16233c';});
     tr.addEventListener('mouseleave',function(){tr.style.background='';});
     tr.addEventListener('click',function(){aiOpenRowDetail(tr.dataset.aiProvider,tr.dataset.aiModel);});
     tr.innerHTML='<td style="padding:6px;text-align:center;color:#64748b">'+toFa(aiTestTotCount)+'</td>'
       +'<td style="padding:6px;text-align:center"><span class="aiSt">⏳</span></td>'
       +'<td style="padding:6px;text-align:right;color:#94a3b8">'+esc(d.providerName||d.provider||'')+'</td>'
-      +'<td style="padding:6px;text-align:left;direction:ltr;color:#e2e8f0;word-break:break-all">'+esc(d.model||'')+'</td>'
+      +'<td style="padding:6px;text-align:left;direction:ltr;color:#e2e8f0;word-break:break-all">'
+      +esc(d.baseModel||d.model||'')
+      +(d.keySuffix?'<span style="color:#fbbf24" title="'+esc('کلید: '+(d.keyLabel||d.keySuffix))+'">'+esc(d.keySuffix)+'</span>':'')+'</td>'
       +'<td style="padding:6px;text-align:center;color:#64748b" class="aiLat">—</td>'
       +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiMsgRes">…</td>'
       +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiCatRes">…</td>';
