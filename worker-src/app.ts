@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
 import readXlsxFile from 'read-excel-file/web-worker';
-import { aiCall, aiChat, aiProviders, getLastAiTestResults, getLeaderboard, isChatCompatibleAiModel, isReasoningAiModel, recordVote, suggestCategoryWithModel, testModelBatch } from './ai.js';
+import { aiCall, aiChat, aiProviders, getLastAiTestResults, getLeaderboard, isChatCompatibleAiModel, isReasoningAiModel, parseModelKeySuffix, providerKeys, providerWithKey, recordVote, suggestCategoryWithModel, testModelBatch } from './ai.js';
 import { AGENT_PROMPT_TEMPLATES, AGENT_TOOLS, AGENT_TOOL_MODELS, agentCronTick, agentModelSetupHint, controlAgentRun, createOrUpdateAgentPrompt, currentAgentRun, getAgentRunPublic, listAgentRunsPublic, publicAgentRun, removeAgentPrompt, resetAgentRun, startAgentRun } from './agent.js';
 import { automationTick, autoreplyLogs, autoreplyRun, basalamChatMessagesOverview, basalamChatsOverview, basalamOrders, digest, generateReply } from './automation.js';
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
@@ -30,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.20.0',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.21.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -42,7 +42,7 @@ app.get('/api/status',async c=>{const connections=await loadConnections();return
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.20.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.21.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -53,7 +53,7 @@ app.post('/api/ai/test-runs/control',async c=>{const b=await jsonBody(c),action=
 app.post('/api/ai/test-runs/reset',async c=>{await resetBackgroundRun('ai-test');return c.json({ok:true,run:await getPublicBackgroundRun('ai-test')})});
 app.post('/api/ai/test-runs/retry',async c=>{const b=await jsonBody(c),part=String(b.part)==='category'?'category':'message';return c.json({part,...await retryAiTestPart(String(b.key||''),part)})});
 app.get('/api/ai/test-results',async c=>c.json({ok:true,...await getLastAiTestResults()}));
-app.post('/api/ai/call',async c=>{const b=await jsonBody(c),provider=(await aiProviders()).find(p=>p.id===b.provider);if(!provider)return c.json({ok:false,error:'Provider not found'},404);return c.json(await aiCall(provider,String(b.model||''),String(b.prompt||'سلام')))});
+app.post('/api/ai/call',async c=>{const b=await jsonBody(c),provider=(await aiProviders()).find(p=>p.id===b.provider);if(!provider)return c.json({ok:false,error:'Provider not found'},404);const{model,keyIndex}=parseModelKeySuffix(String(b.model||''));return c.json(await aiCall(providerWithKey(provider,keyIndex),model,String(b.prompt||'سلام')))});
 app.post('/api/ai/vote',async c=>{const b=await jsonBody(c);return c.json({ok:true,leaderboard:await recordVote(String(b.task||'manual'),String(b.winner||''),Array.isArray(b.candidates)?b.candidates.map(String):[])})});
 app.get('/api/ai/leaderboard',async c=>c.json({ok:true,leaderboard:await getLeaderboard()}));
 // ─── AI chat with capability-filtered model picker ───────────────────────────
@@ -61,22 +61,23 @@ app.get('/api/ai/chat-models',async c=>{
   const providers=(await aiProviders()).filter(p=>p.enabled!==false);
   const toolIds=new Set(AGENT_TOOL_MODELS.filter(m=>m.id!=='*configured').map(m=>m.id));
   const models:any[]=[];
-  for(const p of providers)for(const model of p.models||[])models.push({providerId:p.id,providerName:p.name,model,chat:isChatCompatibleAiModel(p,model),toolCalling:toolIds.has(model),reasoning:isReasoningAiModel(p,model)});
+  for(const p of providers)for(const model of p.models||[])models.push({providerId:p.id,providerName:p.name,model,chat:isChatCompatibleAiModel(p,model),toolCalling:toolIds.has(model),reasoning:isReasoningAiModel(p,model),keyCount:Math.max(1,providerKeys(p).length)});
   return c.json({ok:true,models:models.sort((a,b)=>String(a.providerName).localeCompare(String(b.providerName))||a.model.localeCompare(b.model))});
 });
 app.post('/api/ai/chat',async c=>{
   const b=await jsonBody(c),provider=(await aiProviders()).find(p=>p.id===String(b.providerId||''));
   if(!provider)return c.json({ok:false,error:'ارائه‌دهنده پیدا نشد.'},404);
   const model=String(b.model||'').trim();if(!model)return c.json({ok:false,error:'نام مدل لازم است.'},400);
+  const{model:cleanModel,keyIndex}=parseModelKeySuffix(model);
   const messages=(Array.isArray(b.messages)?b.messages:[]).slice(-40).map((m:{role?:unknown;content?:unknown})=>({role:String(m.role||'user'),content:String(m.content??'')})).filter((m:{content:string})=>m.content);
   if(!messages.length||messages[messages.length-1].role!=='user')return c.json({ok:false,error:'آخرین پیام باید از سمت کاربر باشد.'},400);
-  return c.json(await aiChat(provider,model,messages));
+  return c.json(await aiChat(providerWithKey(provider,keyIndex),cleanModel,messages,undefined,undefined,undefined,keyIndex));
 });
 
 
 // ─── Agentic AI: tool-calling models, prompts, scheduled runs and logs ───────
 app.get('/api/ai/workers-catalog',async c=>{const{workersAiTaskGroups}=await import('./workers-ai-catalog.js');return c.json({ok:true,groups:workersAiTaskGroups(),total:(await import('./workers-ai-catalog.js')).WORKERS_AI_MODELS.length})});
-app.get('/api/agent/models',async c=>{const providers=(await aiProviders()).filter(p=>p.enabled!==false);const configured=providers.flatMap(p=>(p.models||[]).map(model=>({providerId:p.id,providerName:p.name,model})));return c.json({ok:true,models:AGENT_TOOL_MODELS,configured,setupHint:await agentModelSetupHint()})});
+app.get('/api/agent/models',async c=>{const providers=(await aiProviders()).filter(p=>p.enabled!==false);const configured=providers.flatMap(p=>(p.models||[]).map(model=>({providerId:p.id,providerName:p.name,model,keyCount:Math.max(1,providerKeys(p).length)})));return c.json({ok:true,models:AGENT_TOOL_MODELS,configured,setupHint:await agentModelSetupHint()})});
 app.get('/api/agent/templates',c=>c.json({ok:true,templates:AGENT_PROMPT_TEMPLATES}));
 app.get('/api/agent/tasks',c=>c.json({ok:true,tools:AGENT_TOOLS}));
 app.get('/api/agent/prompts',async c=>{const{listAgentPrompts}=await import('./db.js');return c.json({ok:true,items:(await listAgentPrompts()).map(row=>({id:row.id,name:row.name,description:row.description,prompt:row.prompt,tools:JSON.parse(row.tools||'[]'),scheduleMinutes:row.scheduleMinutes,modelKey:row.modelKey,enabled:row.enabled,maxSteps:row.maxSteps,lastRunAt:row.lastRunAt,createdAt:row.createdAt,updatedAt:row.updatedAt}))})});

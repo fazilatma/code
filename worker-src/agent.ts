@@ -3,7 +3,7 @@
  * Prompts (with optional minute-based schedules) are stored in D1 and executed on the
  * Queue with checkpoints, so long agent runs never depend on an open browser tab.
  */
-import { aiAgentCall, aiProviders, type AiTool } from './ai.js';
+import { aiAgentCall, aiProviders, parseModelKeySuffix, providerWithKey, type AiTool } from './ai.js';
 import { loadConnections } from './connections.js';
 import { deleteAgentPrompt, deleteAgentRun, deleteAgentRunsForPrompt, getAgentPrompt, getAgentRun, getState, listAgentPrompts, listAgentRuns, listAutoreplyLog, listCategoryLearning, listJobs, listProducts, listProfiles, profileStats, saveAgentPrompt, saveAgentRun, setState, touchAgentPromptLastRun, updateAgentRun, deleteState, type AgentPromptRow, type AgentRunRow } from './db.js';
 import { buildDedupGroups, normalizeDedupKeep, parseSuffixFormats, type DedupCandidate } from './dedup.js';
@@ -162,14 +162,14 @@ async function resolveAgentModel(modelKey:string,providerId:string,model:string)
   const curatedIds=new Set(AGENT_TOOL_MODELS.filter(m=>m.id!=='*configured').map(m=>m.id));
   const wanted=String(modelKey||'').trim();
   if(wanted&&wanted!=='*configured'){
-    const[pid,...parts]=wanted.split('::'),wantedModel=parts.length?parts.join('::'):wanted;
-    const provider=parts.length?providers.find(item=>item.id===pid):providers.find(item=>item.models.includes(wantedModel));
-    if(provider&&provider.models.includes(wantedModel))return{provider,model:wantedModel,resolvedKey:wanted};
+    const[pid,...parts]=wanted.split('::'),rawModel=parts.length?parts.join('::'):wanted,parsed=parseModelKeySuffix(rawModel);
+    const provider=parts.length?providers.find(item=>item.id===pid):providers.find(item=>item.models.includes(parsed.model));
+    if(provider&&provider.models.includes(parsed.model))return{provider:providerWithKey(provider,parsed.keyIndex),model:parsed.model,resolvedKey:parsed.keyIndex?`${provider.id}::${parsed.model}::k${parsed.keyIndex+1}`:`${provider.id}::${parsed.model}`};
   }
   if(providerId&&model){
-    const provider=providers.find(item=>item.id===providerId);
-    if(provider&&provider.models.includes(model))return{provider,model,resolvedKey:`${provider.id}::${model}`};
-    if(provider&&curatedIds.has(model))return{provider,model,resolvedKey:`${provider.id}::${model}`};
+    const provider=providers.find(item=>item.id===providerId),parsed=parseModelKeySuffix(model);
+    if(provider&&provider.models.includes(parsed.model))return{provider:providerWithKey(provider,parsed.keyIndex),model:parsed.model,resolvedKey:parsed.keyIndex?`${provider.id}::${parsed.model}::k${parsed.keyIndex+1}`:`${provider.id}::${parsed.model}`};
+    if(provider&&curatedIds.has(parsed.model))return{provider:providerWithKey(provider,parsed.keyIndex),model:parsed.model,resolvedKey:parsed.keyIndex?`${provider.id}::${parsed.model}::k${parsed.keyIndex+1}`:`${provider.id}::${parsed.model}`};
   }
   for(const provider of providers){
     for(const modelId of provider.models){
@@ -297,7 +297,7 @@ export async function startAgentRun(input:any,waitUntil?:(promise:Promise<unknow
   const modelKey=String(input?.modelKey||promptRow?.modelKey||'');
   const resolved=await resolveAgentModel(modelKey,String(input?.providerId||''),String(input?.model||''));
   if(!resolved)throw new Error(await agentModelSetupHint());
-  const timestamp=now(),id=crypto.randomUUID(),run:AgentRun={id,promptId:String(input?.promptId||promptRow?.id||''),name:String(input?.name||promptRow?.name||'اجرای دستی'),prompt,providerId:resolved.provider.id,model:resolved.model,tools:toolsFinal,maxSteps,status:'queued',phase:'starting',messages:[],logs:[],steps:0,result:null,stopRequested:false,attempts:0,error:null,createdAt:timestamp,updatedAt:timestamp,startedAt:null,finishedAt:null};
+  const timestamp=now(),id=crypto.randomUUID(),run:AgentRun={id,promptId:String(input?.promptId||promptRow?.id||''),name:String(input?.name||promptRow?.name||'اجرای دستی'),prompt,providerId:resolved.provider.id,model:modelKey.includes('::')&&modelKey!=='*configured'?modelKey.split('::').slice(1).join('::'):String(input?.model||resolved.model),tools:toolsFinal,maxSteps,status:'queued',phase:'starting',messages:[],logs:[],steps:0,result:null,stopRequested:false,attempts:0,error:null,createdAt:timestamp,updatedAt:timestamp,startedAt:null,finishedAt:null};
   await saveAgentRun(toRow(run));await setState(pointerKey,id);
   try{await enqueue({task:'agent',runId:id},waitUntil)}catch(error){run.status='failed';run.error=error instanceof Error?error.message:String(error);await writeRun(run)}
   return{run:publicAgentRun(run),existing:false};

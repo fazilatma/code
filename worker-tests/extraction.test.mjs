@@ -213,6 +213,18 @@ test('workflow panes match the reference hierarchy and every new control is oper
   const appSource=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');assert.match(appSource,/read-excel-file\/web-worker/);assert.match(appSource,/destinationStatus:wooStatus\|\|undefined/);
 });
 
+test('provider editor supports multiple API keys and model lists show key suffixes',async()=>{
+  const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),ai=await readFile(new URL('../worker-src/ai.ts',import.meta.url),'utf8'),vault=await readFile(new URL('../worker-src/vault.ts',import.meta.url),'utf8');
+  for(const token of ['aiEditKeys','ai-key-add','ai-key-remove','renderAiEditKeys','aiKeySuffixLabel','aiProviderKeyCount'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
+  assert.match(ai,/apiKeys\?:string\[\]/);
+  assert.match(ai,/providerKeys\(provider/);
+  assert.match(ai,/providerWithKey\(provider/);
+  assert.match(ai,/parseModelKeySuffix\(/);
+  assert.match(ai,/keyLabel:aiKeySuffixLabel\(ki\)/,'test tasks carry a visible key suffix');
+  assert.match(vault,/apiKeys:string\[\]/);
+  assert.match(dash,/apiKeys:keys\.length\?keys/,'export/import round-trips the keys array');
+});
+
 test('import preview header mapping selects + row detail modal + Workers AI catalog UI are wired',async()=>{
   const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),app=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8'),catalog=await readFile(new URL('../worker-src/workers-ai-catalog.ts',import.meta.url),'utf8');
   assert.match(source,/head-map-sel/);assert.match(source,/data-head-col/);assert.match(source,/preview-row/);assert.match(source,/openImportRowModal/);

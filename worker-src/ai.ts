@@ -3,12 +3,21 @@ import { loadConnections } from './connections.js';
 import { getState, setState } from './db.js';
 import { assertPublicUrl, safeFetch } from './network.js';
 
-export type Provider={id:string;name:string;baseUrl:string;apiKey:string;models:string[];reasoningModels:string[];enabled:boolean};
+export type Provider={id:string;name:string;baseUrl:string;apiKey:string;apiKeys?:string[];models:string[];reasoningModels:string[];enabled:boolean};
 type Network={mode:string;proxyUrl:string;workerUrl:string;dohUrl:string;resolveIp:string};
 type AiAttempt={endpoint:string;body:string|string[];model:string;httpStatus?:number;phase:'network'|'http'|'success';error?:string};
 type RequestResult={response?:Response;body?:any;rawText?:string;networkError?:string};
 
-function providersFromAi(ai:any):Provider[]{return ai.providers.length?ai.providers.map((provider:any)=>({...provider,reasoningModels:Array.isArray(provider.reasoningModels)?provider.reasoningModels.map(String):[]})):[{id:'default',name:'Default',baseUrl:ai.baseUrl,apiKey:ai.apiKey,models:ai.model?[ai.model]:[],reasoningModels:[],enabled:true}]}
+function providersFromAi(ai:any):Provider[]{return ai.providers.length?ai.providers.map((provider:any)=>{const keys=Array.isArray(provider.apiKeys)&&provider.apiKeys.length?provider.apiKeys.map(String).filter(Boolean):provider.apiKey?[String(provider.apiKey)]:[];const apiKey=keys[0]||String(provider.apiKey||'');return{...provider,apiKey,apiKeys:keys.length?keys:(apiKey?[apiKey]:[]),reasoningModels:Array.isArray(provider.reasoningModels)?provider.reasoningModels.map(String):[]}}):[{id:'default',name:'Default',baseUrl:ai.baseUrl,apiKey:ai.apiKey,apiKeys:ai.apiKey?[String(ai.apiKey)]:[],models:ai.model?[ai.model]:[],reasoningModels:[],enabled:true}]}
+
+/** Active API keys of a provider (fallback to the single apiKey). */
+export function providerKeys(provider:Provider):string[]{const keys=Array.isArray(provider.apiKeys)&&provider.apiKeys.length?provider.apiKeys.map(String).filter(Boolean):provider.apiKey?[String(provider.apiKey)]:[];return keys.length?keys:provider.apiKey?[String(provider.apiKey)]:[]}
+/** Clone of the provider bound to the n-th key (falls back to the first key). */
+export function providerWithKey(provider:Provider,index=0):Provider{const keys=providerKeys(provider),apiKey=keys[index]??keys[0]??(provider.apiKey||'');return{...provider,apiKey}}
+/** Parses an optional trailing `::k<n>` suffix from a model reference. */
+export function parseModelKeySuffix(raw:string):{model:string;keyIndex:number}{const match=String(raw||'').match(/^(.*?)::k(\d+)$/);return match?{model:match[1],keyIndex:Math.max(0,Number(match[2])-1)}:{model:String(raw||''),keyIndex:0}}
+/** Display suffix for non-primary keys, e.g. index 1 -> ' [K۲]'. */
+export function aiKeySuffixLabel(index:number):string{return index>0?` [K${index+1}]`:''}
 export async function aiProviders():Promise<Provider[]>{return providersFromAi((await loadConnections()).ai)}
 
 /** Explicit user flags win first; the fallback covers common reasoning families already saved before this setting existed. */
@@ -58,7 +67,7 @@ export async function aiCall(provider:Provider,model:string,prompt:string,networ
 
 
 /** Chat with full conversation history (aiCall only sends a single prompt). */
-export async function aiChat(provider:Provider,model:string,messages:Array<{role:string;content:string}>,networkOverride?:Network,timeoutMs?:number,maxTokens=1200){
+export async function aiChat(provider:Provider,model:string,messages:Array<{role:string;content:string}>,networkOverride?:Network,timeoutMs?:number,maxTokens=1200,keyIndex=0){const providerUsed=providerWithKey(provider,keyIndex);provider=providerUsed;
   const network=networkOverride||(await loadConnections()).ai.network;
   if(!provider.baseUrl||!provider.apiKey||!model)throw new Error('تنظیمات ارائه‌دهنده/مدل کامل نیست');
   const started=Date.now(),chatMessages=messages.slice(-40).map(m=>({role:String(m.role||'user'),content:String(m.content||'')}));
@@ -227,7 +236,7 @@ function cloudflareModelIds(raw:string):string[]{
 function canonicalAiModel(model:string){return String(model||'').trim().replace(/^~+/,'')}
 function isOpenRouter(provider:Pick<Provider,'id'|'name'|'baseUrl'>,endpoint=''){return provider.id==='openrouter'||/openrouter/i.test(String(provider.name||''))||/openrouter\.ai/i.test(String(provider.baseUrl||endpoint||''))}
 function aiRequestHeaders(provider:Provider,endpoint:string,method:'POST'|'GET'='POST'):Record<string,string>{
-  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.20.0'};
+  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.21.0'};
   if(method==='POST')headers['content-type']='application/json';
   if(isOpenRouter(provider,endpoint)){headers['http-referer']='https://scraper4.workers.dev';headers.referer='https://scraper4.workers.dev';headers['x-title']='Scraper 4'}
   return headers;
@@ -325,13 +334,13 @@ async function categoryWithTask(task:AiTestTask,title:string,categories:AiCatego
 export async function suggestCategoryWithModel(title:string,modelKey:string,categories:AiCategoryOption[]){
   const ai=(await loadConnections()).ai,providers=providersFromAi(ai),[providerId,...modelParts]=String(modelKey||'').split('::'),model=modelParts.join('::'),provider=providers.find(item=>item.id===providerId&&item.enabled!==false&&item.models.includes(model));
   if(!String(title||'').trim())throw new Error('عنوان محصول برای دسته‌بندی لازم است.');if(!provider||!model)throw new Error('مدل انتخاب‌شده در تنظیمات فعال هوش مصنوعی پیدا نشد.');
-  const task={p:provider,model,key:`${provider.id}::${model}`};try{return{...await categoryWithTask(task,String(title).trim(),categories,ai.network),key:task.key}}catch(error){return aiTestFailure(error,task,String(title).trim())}
+  const task={p:provider,model,key:`${provider.id}::${model}`,keyIndex:0,keyLabel:''};try{return{...await categoryWithTask(task,String(title).trim(),categories,ai.network),key:task.key}}catch(error){return aiTestFailure(error,task,String(title).trim())}
 }
 
 /** One model per provider per invocation keeps each provider at 1 in-flight request (avoids rate limits) while finishing the list faster. */
 export const AI_TEST_MAX_PARALLEL=10;
 const AI_TEST_MODELS_PER_INVOCATION=AI_TEST_MAX_PARALLEL;
-type AiTestTask={p:Provider;model:string;key:string};
+type AiTestTask={p:Provider;model:string;key:string;keyIndex:number;keyLabel:string};
 type StoredAiTest={runId:string;startedAt:string;updatedAt:string;prompt:string;categoryTitle:string;onlyCandidates:boolean;total:number;results:any[]};
 type AiTestOptions={onlyCandidates?:boolean;cursor?:number;runId?:string;categoryTitle?:string;categories?:AiCategoryOption[];skipCurrent?:boolean;skipReason?:string;timeoutMs?:number;retryKey?:string;retryKeys?:string[];retryPart?:'message'|'category'|'both'};
 export function aiTestProviderId(key:string){return String(key||'').split('::')[0]}
@@ -358,14 +367,24 @@ function aiTestTasks(ai:any,providers:Provider[],onlyCandidates:boolean):AiTestT
   for(const p of providers){
     if(p.enabled===false)continue;
     const column:AiTestTask[]=[];
-    for(const rawModel of p.models||[]){const model=String(rawModel||'').trim(),key=`${p.id}::${model}`;if(!model||onlyCandidates&&(!wanted.has(key)||!isChatCompatibleAiModel(p,model)))continue;column.push({p,model,key})}
+    const keyCount=Math.max(1,providerKeys(p).length);
+    for(const rawModel of p.models||[]){
+      const model=String(rawModel||'').trim();if(!model)continue;
+      const primaryKey=`${p.id}::${model}`;
+      if(onlyCandidates&&(!wanted.has(primaryKey)||!isChatCompatibleAiModel(p,model)))continue;
+      // One task per API key; models of the 2nd+ keys get a visible suffix.
+      for(let ki=0;ki<keyCount;ki++){
+        const key=ki===0?primaryKey:`${p.id}::${model}::k${ki+1}`;
+        column.push({p:providerWithKey(p,ki),model,key,keyIndex:ki,keyLabel:aiKeySuffixLabel(ki)});
+      }
+    }
     if(column.length)columns.push(column);
   }
   const tasks:AiTestTask[]=[],max=columns.reduce((n,column)=>Math.max(n,column.length),0);
   for(let i=0;i<max;i++)for(const column of columns)if(column[i])tasks.push(column[i]);
   return tasks;
 }
-function aiTestFailure(error:unknown,task:AiTestTask,prompt:string){return error instanceof AiResponseError?{...error.detail,key:task.key}:{ok:false,phase:'unknown',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey),raw:{error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey)}}}
+function aiTestFailure(error:unknown,task:AiTestTask,prompt:string){return error instanceof AiResponseError?{...error.detail,key:task.key,keyIndex:task.keyIndex,keyLabel:task.keyLabel}:{ok:false,phase:'unknown',key:task.key,keyIndex:task.keyIndex,keyLabel:task.keyLabel,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey),raw:{error:safeError(error instanceof Error?error.message:String(error),'',task.p.apiKey)}}}
 
 function aiTestResponse(saved:StoredAiTest,tasks:AiTestTask[],cursor:number,nextCursor:number,batchResults:any[],replayed=false){
   const results=saved.results,done=nextCursor>=tasks.length,messageSucceeded=results.filter(x=>x.ok).length,messageFailed=results.filter(x=>!x.ok).length,categoryAttempted=Boolean(saved.categoryTitle),categorySucceeded=categoryAttempted?results.filter(x=>x.categoryResult?.ok).length:0,categorySkipped=categoryAttempted?results.filter(x=>x.categoryResult?.skipped).length:0,categoryFailed=categoryAttempted?results.filter(x=>x.categoryResult&&!x.categoryResult.ok&&!x.categoryResult.skipped).length:0,skipped=results.filter(x=>x.skipped||x.phase==='transport-skip').length;
@@ -373,7 +392,7 @@ function aiTestResponse(saved:StoredAiTest,tasks:AiTestTask[],cursor:number,next
 }
 function skippedAiTestResult(task:AiTestTask,prompt:string,categoryTitle:string,reason:string){
   const error=String(reason||'پس از چند تلاش، پاسخ این نوبت از Worker دریافت نشد.');
-  return{ok:false,skipped:true,retryable:true,phase:'transport-skip',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error,raw:{error},categoryTitle,categoryResult:categoryTitle?{ok:false,skipped:true,phase:'transport-skip',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error,raw:{error}}:null,catResponse:categoryTitle?error:''};
+  return{ok:false,skipped:true,retryable:true,phase:'transport-skip',key:task.key,keyIndex:task.keyIndex,keyLabel:task.keyLabel,provider:task.p.id,providerName:task.p.name,model:task.model,prompt,latencyMs:0,error,raw:{error},categoryTitle,categoryResult:categoryTitle?{ok:false,skipped:true,phase:'transport-skip',key:task.key,keyIndex:task.keyIndex,keyLabel:task.keyLabel,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error,raw:{error}}:null,catResponse:categoryTitle?error:''};
 }
 async function executeAiTestTask(task:AiTestTask,prompt:string,categoryTitle:string,categories:AiCategoryOption[],network:Network,timeoutMs?:number,skipCurrent=false,skipReason='',batchId=''){
   if(skipCurrent)return skippedAiTestResult(task,prompt,categoryTitle,skipReason);
@@ -382,14 +401,14 @@ async function executeAiTestTask(task:AiTestTask,prompt:string,categoryTitle:str
   if(categoryTitle&&!message.ok)categoryResult={ok:false,skipped:true,phase:'message-failed',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error:'چون پاسخ پیام ناموفق بود، تست دسته‌بندی این مدل رد شد تا صف گیر نکند.',raw:{reason:'message-failed'}};
   else if(categoryTitle&&!isChatCompatibleAiModel(task.p,task.model))categoryResult={ok:false,skipped:true,phase:'unsupported-task',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,endpointType:aiModelEndpoint(task.p,task.model),chatCompatible:false,latencyMs:0,error:'این مدل endpoint اختصاصی دارد؛ تست خود مدل انجام شد اما برای دسته‌بندی گفت‌وگویی مناسب نیست.',raw:{reason:'dedicated endpoint model'}};
   else if(categoryTitle&&categories.length)try{categoryResult={...await categoryWithTask(task,categoryTitle,categories,network,timeoutMs),key:task.key}}catch(error){categoryResult=aiTestFailure(error,task,categoryTitle)}
-  const row:any={...message,categoryTitle,categoryResult,catResponse:categoryResult?.ok?`${categoryResult.categoryName} (#${categoryResult.categoryId})`:categoryResult?.error||(!categories.length?'فهرست دسته‌بندی در دسترس نیست':'')};
+  const row:any={...message,categoryTitle,categoryResult,keyIndex:task.keyIndex,keyLabel:task.keyLabel,catResponse:categoryResult?.ok?`${categoryResult.categoryName} (#${categoryResult.categoryId})`:categoryResult?.error||(!categories.length?'فهرست دسته‌بندی در دسترس نیست':'')};
   row.retryable=isRetryableAiResult(row);return row;
 }
 function categoryResponseText(categoryResult:any,categories:AiCategoryOption[]){return categoryResult?.ok?`${categoryResult.categoryName} (#${categoryResult.categoryId})`:categoryResult?.error||(!categories.length?'فهرست دسته‌بندی در دسترس نیست':'')}
 async function executeAiTestPart(task:AiTestTask,prompt:string,categoryTitle:string,categories:AiCategoryOption[],network:Network,timeoutMs:number|undefined,part:'message'|'category',previousRow:any){
   if(part==='message'){
     let message:any;try{message={...await aiCall(task.p,task.model,prompt,network,timeoutMs,String(previousRow?.batchId||'')),key:task.key}}catch(error){message=aiTestFailure(error,task,prompt)}
-    const row:any={...previousRow,...message,key:task.key,categoryTitle,categoryResult:previousRow?.categoryResult??null,catResponse:previousRow?.catResponse||'',messageRetryCount:Number(previousRow?.messageRetryCount||0)+1,retryCount:Number(previousRow?.retryCount||0)+1};
+    const row:any={...previousRow,...message,key:task.key,keyIndex:task.keyIndex,keyLabel:task.keyLabel,categoryTitle,categoryResult:previousRow?.categoryResult??null,catResponse:previousRow?.catResponse||'',messageRetryCount:Number(previousRow?.messageRetryCount||0)+1,retryCount:Number(previousRow?.retryCount||0)+1};
     row.retryable=isRetryableAiResult(row);return row;
   }
   let categoryResult:any=null;
@@ -397,7 +416,7 @@ async function executeAiTestPart(task:AiTestTask,prompt:string,categoryTitle:str
   else if(!isChatCompatibleAiModel(task.p,task.model))categoryResult={ok:false,skipped:true,phase:'unsupported-task',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,endpointType:aiModelEndpoint(task.p,task.model),chatCompatible:false,latencyMs:0,error:'این مدل endpoint اختصاصی دارد و برای دسته‌بندی گفت‌وگویی مناسب نیست.',raw:{reason:'dedicated endpoint model'}};
   else if(!categories.length)categoryResult={ok:false,phase:'configuration',key:task.key,provider:task.p.id,providerName:task.p.name,model:task.model,prompt:categoryTitle,latencyMs:0,error:'فهرست دسته‌بندی در دسترس نیست',raw:{reason:'no-categories'}};
   else try{categoryResult={...await categoryWithTask(task,categoryTitle,categories,network,timeoutMs),key:task.key}}catch(error){categoryResult=aiTestFailure(error,task,categoryTitle)}
-  const row:any={...previousRow,key:task.key,categoryTitle,categoryResult,catResponse:categoryResponseText(categoryResult,categories),categoryRetryCount:Number(previousRow?.categoryRetryCount||0)+1,retryCount:Number(previousRow?.retryCount||0)+1};
+  const row:any={...previousRow,key:task.key,keyIndex:task.keyIndex,keyLabel:task.keyLabel,categoryTitle,categoryResult,catResponse:categoryResponseText(categoryResult,categories),categoryRetryCount:Number(previousRow?.categoryRetryCount||0)+1,retryCount:Number(previousRow?.retryCount||0)+1};
   row.retryable=isRetryableAiResult(row);return row;
 }
 async function executeAiTestRound(batch:AiTestTask[],prompt:string,categoryTitle:string,categories:AiCategoryOption[],network:Network,timeoutMs:number|undefined,skipCurrent:boolean,skipReason:string,results:any[]){

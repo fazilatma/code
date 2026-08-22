@@ -127,6 +127,28 @@ test('AI result modal can retry message or category independently',async()=>{
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('multi-key providers: keys are saved, exported and used per model suffix in chat',async()=>{
+  const db=new MemoryD1();
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'mk',name:'MultiKey',baseUrl:'https://mk.example/v1',apiKey:'key-one',apiKeys:['key-one','key-two'],models:['m1'],enabled:true}],candidates:[],master:'',model:'',network:{mode:'direct'}}}));
+  const loaded=await call(db,'/api/connections').then(r=>r.json());
+  const provider=loaded.connections.ai.providers.find(p=>p.id==='mk');
+  assert.deepEqual(provider.apiKeys,['key-one','key-two'],'both keys persist');
+  assert.equal(provider.apiKey,'key-one','primary key is the first key');
+  const modelsResp=await call(db,'/api/ai/chat-models').then(r=>r.json());
+  assert.equal(modelsResp.models[0].keyCount,2,'chat-models exposes the key count');
+  const auths=[];
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async(_url,init={})=>{const h=new Headers(init.headers||{});auths.push(String(h.get('authorization')||''));return new Response(JSON.stringify({choices:[{message:{role:'assistant',content:'ok'}}]}),{status:200,headers:{'content-type':'application/json'}})};
+  try{
+    const r1=await call(db,'/api/ai/chat',jsonInit({providerId:'mk',model:'m1',messages:[{role:'user',content:'hi'}]})).then(r=>r.json());
+    assert.equal(r1.ok,true);
+    const r2=await call(db,'/api/ai/chat',jsonInit({providerId:'mk',model:'m1::k2',messages:[{role:'user',content:'hi'}]})).then(r=>r.json());
+    assert.equal(r2.ok,true,'model with ::k2 suffix resolves');
+    assert.equal(auths.length,2);
+    assert.ok(auths[0].includes('key-one')&&auths[1].includes('key-two'),'each key is used by its own model entry');
+  }finally{globalThis.fetch=originalFetch}
+});
+
 test('AI chat lists capability-filtered models and returns conversation replies',async()=>{
   const db=new MemoryD1();
   await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'chat-pro',name:'Chat Provider',baseUrl:'https://chat.example/v1',apiKey:'k',models:['m-chat','m-reason'],reasoningModels:['m-reason'],enabled:true},{id:'mistral',name:'Mistral',baseUrl:'https://api.mistral.ai/v1',apiKey:'k',models:['mistral-ocr-latest'],enabled:true}],candidates:[],master:'',model:'',network:{mode:'direct'}}}));

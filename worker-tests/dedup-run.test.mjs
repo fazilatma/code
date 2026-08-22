@@ -58,7 +58,11 @@ const stubs={
     export async function suggestCategoryWithModel(){return{ok:false}}
     export async function testModelBatch(){return{done:true,results:[],batchResults:[],total:0,nextCursor:0}}
     export async function aiAgentCall(){return{text:'پاسخ آزمایشی',toolCalls:[],raw:{},latencyMs:1,providerId:'test',model:'test'}}
-    export async function aiProviders(){return[]}`,
+    export async function aiProviders(){return[]}
+    export function parseModelKeySuffix(raw){return{model:String(raw||''),keyIndex:0}}
+    export function providerWithKey(provider){return provider}
+    export function providerKeys(provider){return provider?.apiKey?[String(provider.apiKey)]:[]}
+    export function aiKeySuffixLabel(){return''}`,
 };
 const stubPlugin={name:'dedup-stubs',setup(pluginBuild){
   pluginBuild.onResolve({filter:/^\.\/(maintenance|connections|db|env|ai)\.js$/},args=>({path:args.path,namespace:'dedup-stub'}));
