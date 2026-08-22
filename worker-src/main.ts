@@ -3,6 +3,7 @@ import { configureEnv, type Env } from './env.js';
 import { ensureSchema, listQueuedJobs } from './db.js';
 import { processJob } from './processor.js';
 import { listQueuedBackgroundRuns, processBackgroundMessage } from './background.js';
+import { isWriteQuotaError } from './utils.js';
 import type { JobMessage } from './types.js';
 
 type ExecutionContext={waitUntil(promise:Promise<unknown>):void};
@@ -60,7 +61,17 @@ export default {
           }
         }
         item.ack();
-      }catch(error){console.error('queue delivery failed',error);item.retry({delaySeconds:30})}
+      }catch(error){
+        console.error('queue delivery failed',error);
+        if(isWriteQuotaError(error)){
+          // D1 daily write quota exhausted: ack instead of retrying forever — every
+          // retry would only fail again. Queued jobs/runs are re-dispatched by the
+          // cron sweep and resume automatically once the quota resets (00:00 UTC).
+          item.ack();
+        }else{
+          item.retry({delaySeconds:30});
+        }
+      }
     }
   },
   async scheduled(_controller:ScheduledController,env:Env,ctx:ExecutionContext):Promise<void>{

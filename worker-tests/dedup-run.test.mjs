@@ -49,7 +49,9 @@ const stubs={
       bind(...values){this.values=values;return this}
       async first(){if(this.sql.startsWith('SELECT value FROM app_state WHERE key=')){const v=h.states.get(this.values[0]);return v===undefined?null:{value:v}}return null}
       async run(){const v=this.values;
+        if(h.quotaFail&&(this.sql.startsWith('INSERT')||this.sql.startsWith('UPDATE')||this.sql.startsWith('DELETE')))throw new Error('you exceeded write operations quota');
         if(this.sql.startsWith('INSERT INTO app_state')){const lease=this.sql.includes('WHERE app_state.updated_at<?'),cur=h.states.get(v[0]),curAt=h.stateUpdatedAt.get(v[0])||'';if(!lease||cur===undefined||curAt<v[3]){h.states.set(v[0],v[1]);h.stateUpdatedAt.set(v[0],v[2])}return{success:true}}
+        if(this.sql.startsWith('UPDATE app_state SET value=')){if(h.states.get(v[2])===v[3]){h.states.set(v[2],v[0]);h.stateUpdatedAt.set(v[2],v[1]);return{success:true,meta:{changes:1}}}return{success:true,meta:{changes:0}}}
         if(this.sql.startsWith('DELETE FROM app_state WHERE key=? AND value=?')){if(h.states.get(v[0])===v[1]){h.states.delete(v[0]);h.stateUpdatedAt.delete(v[0])}return{success:true}}
         return{success:true}}}
     export function getEnv(){return{DB:{prepare:sql=>new Stmt(sql)},JOBS:null,AI_TEST_TIMEOUT_MS:'',AI_TEST_MODEL_BUDGET_MS:''}}
@@ -171,8 +173,34 @@ test('dedup run stays within a small D1 write budget (no per-item persistence)',
   const run=await background.getPublicBackgroundRun('dedup');
   assert.equal(run.status,'done');assert.equal(run.removed,3);
   const writes=harness.writeCount['background_run:dedup:'+runId]||0;
-  // initial + 2 listing pages + grouping + one removal chunk = 5; the old code
-  // added one more write per invocation (start write) = 8. Keep the guard tight.
+  // Run-row writes: start(1) + 2 listing pages + grouping + one removal chunk = 5.
+  // The old code added one start write per invocation, reaching 9. Lease rows are
+  // counted separately and are not part of this budget.
   assert.ok(writes<=5,'run-state writes stay bounded (got '+writes+', expected <= 5)');
   assert.equal(harness.statusChanges.length,3);
+});
+
+test('D1 write quota pauses the run without a retry storm and it resumes after the quota clears',async()=>{
+  await background.resetBackgroundRun('dedup');
+  harness.statusChanges.length=0;harness.quotaFail=false;
+  harness.pages=[{products:[
+    product(1,'عطر گل محمدی (کد:1)',90,'2026-01-01T00:00:00Z'),
+    product(2,'عطر گل محمدی #22',70,'2026-02-01T00:00:00Z'),
+    product(3,'کیف چرم',50,'2026-01-05T00:00:00Z'),
+    product(4,'کیف چرم (کد:4)',40,'2026-02-05T00:00:00Z')]}];
+  const started=await background.startDedupRun('woo',{keep:'cheapest',suffixFormats:'(کد:x)، #x',apply:true},waitUntil);
+  const runId=started.run.id;
+  harness.quotaFail=true;
+  // In production the queue consumer catches the quota error (claim/lease write) and
+  // acks without retrying; here processBackgroundMessage surfaces it directly.
+  await assert.rejects(background.processBackgroundMessage({task:'dedup',runId}),/quota/i);
+  assert.equal(harness.statusChanges.length,0,'no destination changes happen while writes are blocked');
+  let run=readRun(runId);
+  assert.equal(run.status,'queued','run keeps its queued checkpoint while the quota is exhausted');
+  harness.quotaFail=false;
+  await pump(runId);
+  run=readRun(runId);
+  assert.equal(run.status,'done');
+  assert.equal(run.removed,2,'cheapest wins: perfume loser (1) and bag loser (3) are removed');
+  assert.equal(harness.statusChanges.length,2);
 });

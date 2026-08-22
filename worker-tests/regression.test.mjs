@@ -28,6 +28,8 @@ class MemoryStatement {
   }
   async all(){const s=this.sql;let results=[];if(s.startsWith('SELECT * FROM profiles ORDER BY'))results=[...this.db.profiles.values()];if(s.startsWith('SELECT * FROM jobs ORDER BY'))results=[...this.db.jobs.values()].sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0,Number(this.values[0])||200);if(s.startsWith('SELECT id FROM jobs WHERE status IN'))results=[...this.db.jobs.values()].filter(job=>['done','failed','stopped'].includes(job.status)).sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).map(job=>({id:job.id}));if(s.startsWith('SELECT * FROM category_learning ORDER BY'))results=[...this.db.categoryLearning.values()].sort((a,b)=>b.hits-a.hits).slice(0,Number(this.values[0])||1000);return{success:true,results}}
   async run(){const s=this.sql,v=this.values;
+    if(this.db.quotaFail&&(s.startsWith('INSERT')||s.startsWith('UPDATE')||s.startsWith('DELETE')))throw new Error('you exceeded write operations quota');
+    if(s.startsWith('UPDATE app_state SET value=')){if(this.db.states.get(v[2])===v[3]){this.db.states.set(v[2],v[0]);this.db.stateUpdatedAt.set(v[2],v[1]);return{success:true,meta:{changes:1}}}return{success:true,meta:{changes:0}}}
     if(s.startsWith('INSERT INTO app_state')){
       const lease=s.includes('WHERE app_state.updated_at<?'),current=this.db.states.get(v[0]),currentAt=this.db.stateUpdatedAt.get(v[0])||'';
       if(!lease||current===undefined||currentAt<v[3]){this.db.states.set(v[0],v[1]);this.db.stateUpdatedAt.set(v[0],v[2])}
@@ -383,6 +385,30 @@ test('AI queue checkpoints results server-side until all models finish after a r
     const started=await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام پایدار'}),extra).then(response=>response.json());assert.equal(started.run.status,'queued');assert.equal(sent.length,1);
     await deliver(sent.shift().message);const refreshed=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());assert.equal(refreshed.run.status,'queued');assert.equal(refreshed.run.cursor,1);assert.equal(refreshed.run.result.results.length,1);assert.equal(refreshed.run.result.serverSide,true);
     await deliver(sent.shift().message);assert.equal(sent.length,0);const completed=await call(db,'/api/ai/test-runs/current',{},extra).then(response=>response.json());assert.equal(completed.run.status,'done');assert.equal(completed.run.cursor,2);assert.equal(completed.run.result.results.length,2);assert.deepEqual(models,['model-1','model-2'])
+  }finally{globalThis.fetch=originalFetch}
+});
+
+test('D1 write quota pauses background runs without a retry storm and they resume after the quota clears',async()=>{
+  const db=new MemoryD1(),sent=[],extra={JOBS:{send:async(message,options)=>sent.push({message,options})}},env={DB:db,VAULT_SECRET:'vault-secret',JOBS:null,JOBS_DLQ:{send:async()=>{}}};env.JOBS=extra.JOBS;
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'quota-ai',name:'Quota AI',baseUrl:'https://ai.example/v1',apiKey:'quota-secret',models:['model-1','model-2'],enabled:true}],network:{mode:'direct'}}}),extra);
+  const originalFetch=globalThis.fetch;globalThis.fetch=async()=>jsonResponse({choices:[{message:{content:'پاسخ'}}]});
+  try{
+    const started=await call(db,'/api/ai/test-runs',jsonInit({prompt:'سلام'}),extra).then(r=>r.json());
+    assert.equal(started.run.status,'queued');
+    db.quotaFail=true;
+    let acked=false,retried=false;
+    await worker.queue({messages:[{body:sent.shift().message,ack(){acked=true},retry(){retried=true}}]},env,ctx);
+    assert.ok(acked);assert.equal(retried,false,'quota failure must be acked, not retried forever');
+    assert.equal(sent.length,0,'no continue message is re-queued while the quota is exhausted');
+    const stuck=await call(db,'/api/ai/test-runs/current',{},extra).then(r=>r.json());
+    assert.equal(stuck.run.status,'queued','run keeps its last checkpoint (the pause write also fails under quota)');
+    db.quotaFail=false;
+    // Cron recovery re-dispatches after the daily reset; simulate it here.
+    await worker.queue({messages:[{body:{task:'ai-test',runId:started.run.id},ack(){},retry(){assert.fail('should ack after reset')}}]},env,ctx);
+    for(let i=0;i<12&&sent.length;i++)await worker.queue({messages:[{body:sent.shift().message,ack(){},retry(){}}]},env,ctx);
+    const done=await call(db,'/api/ai/test-runs/current',{},extra).then(r=>r.json());
+    assert.equal(done.run.status,'done');
+    assert.equal(done.run.result.results.length,2);
   }finally{globalThis.fetch=originalFetch}
 });
 

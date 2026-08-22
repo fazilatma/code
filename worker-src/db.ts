@@ -1,5 +1,6 @@
 import { getEnv, type D1Database, type D1PreparedStatement } from './env.js';
 import { SCHEMA } from './schema.js';
+import { isWriteQuotaError } from './utils.js';
 import type { Job, Product, Profile } from './types.js';
 
 const ready = new WeakMap<object, Promise<void>>();
@@ -11,6 +12,12 @@ const json = <T>(value: unknown, fallback: T): T => {
 };
 const clean = (values: unknown[]) => values.map(value => value === undefined ? null : typeof value === 'boolean' ? Number(value) : value);
 function statement(sql: string, values: unknown[] = []): D1PreparedStatement { return getEnv().DB.prepare(sql).bind(...clean(values)); }
+
+// Best-effort D1 write-quota signal (isolate-local; resets with the isolate).
+// A write that succeeds after a quota failure clears it, so the task manager can
+// tell the user "write quota exhausted — background activity is paused until 00:00 UTC".
+let writeQuotaAt: string | null = null;
+export function getWriteQuotaState(): { writeExceeded: boolean; at: string | null } { return { writeExceeded: Boolean(writeQuotaAt), at: writeQuotaAt }; }
 async function rows<T = any>(sql: string, values: unknown[] = []): Promise<T[]> {
   const result = await statement(sql, values).all<T>();
   if (!result.success) throw new Error(result.error || 'D1 query failed');
@@ -18,7 +25,11 @@ async function rows<T = any>(sql: string, values: unknown[] = []): Promise<T[]> 
 }
 async function run(sql: string, values: unknown[] = []): Promise<number> {
   const result = await statement(sql, values).run();
-  if (!result.success) throw new Error(result.error || 'D1 query failed');
+  const errorText = String(result.error || '');
+  if (errorText && isWriteQuotaError(errorText)) { writeQuotaAt = writeQuotaAt || now(); throw new Error(errorText); }
+  if (!result.success) throw new Error(errorText || 'D1 query failed');
+  // A successful write means the quota is (again) available — clear the stale flag.
+  if (writeQuotaAt) writeQuotaAt = null;
   return Number(result.meta?.changes || 0);
 }
 

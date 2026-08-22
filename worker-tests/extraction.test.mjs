@@ -266,6 +266,10 @@ test('task manager panel is wired and the activity endpoint exists',async()=>{
   assert.match(main,/listQueuedBackgroundRuns/,'queue consumer dispatches background runs by priority');
   for(const token of ['data-job-delete','data-run-delete','data-clear-finished','activityDeleteJob','activityDeleteRun','activityClearFinished'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
   assert.match(app,/category-runs\/reset/,'category-all reset route exists');
+  assert.match(app,/getWriteQuotaState/,'activity reports the D1 write-quota state');
+  assert.match(app,/quota:\{writeExceeded/,'activity payload carries the quota flag');
+  assert.match(dash,/سهمیهٔ نوشتن D1 تمام شده است/,'task manager shows the quota banner');
+  assert.match(dash,/r\.phase==='quota'/,'run rows label the quota phase in Persian');
   assert.match(main,/processBackgroundMessage\(item\.body\)/,'displaced incoming run gets its turn instead of starving');
   assert.match(main,/env\.JOBS\.send\(item\.body,\{delaySeconds:2\}\)/,'displaced run message is re-queued so the queue never drains');
   assert.match(main,/processJob\(jobId\)/,'displaced incoming job gets its turn');

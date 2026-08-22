@@ -1,4 +1,5 @@
 import { deleteState, getRunPriorities, getState, getTriedBasalamCategories, markBasalamCategoriesTried, setState } from './db.js';
+import { isWriteQuotaError } from './utils.js';
 import { getEnv } from './env.js';
 import { getLastAiTestResults, isChatCompatibleAiModel, isRetryableAiResult, nextAiTestBatch, suggestCategoryWithModel, testModelBatch } from './ai.js';
 import { loadConnections } from './connections.js';
@@ -27,7 +28,6 @@ const active=(run:BackgroundRun|null)=>Boolean(run&&['queued','running','paused'
 /** If a run shows no progress for this long, skip the current model and continue. */
 const STALL_MS=45_000;
 /** Lease must expire sooner than STALL so a dead isolate cannot block the watchdog. */
-const LEASE_MS=35_000;
 const DEFAULT_SKIP_TIMEOUT_MS=1_000;
 export function aiSkipTimeoutMs(settings:any):number{
   const fromSettings=Number(settings?.ai?.skipTimeoutMs),fromEnv=Number(getEnv().AI_TEST_TIMEOUT_MS);
@@ -41,9 +41,11 @@ async function raceBudget<T>(work:Promise<T>,ms:number):Promise<T|undefined>{
   try{return await Promise.race([work,timeout])}finally{if(timer)clearTimeout(timer)}
 }
 
-// Queue delivery is at-least-once. This D1 compare-and-set lease ensures two deliveries
-// cannot process the same checkpoint concurrently. A crashed isolate is recoverable after
-// the lease expires and the scheduled recovery pass re-enqueues the run.
+// Queue delivery is at-least-once. A D1 compare-and-set lease (one small row per run)
+// guarantees two deliveries can never process the same checkpoint concurrently — the
+// losing delivery is 'ignored' before any external side effect (e.g. a Woo/Basalam
+// status change) can run twice. A crashed isolate is recoverable after the lease
+// expires and the scheduled recovery pass re-enqueues the run.
 async function claimRun(kind:BackgroundRun['kind'],id:string):Promise<string|null>{
   const token=crypto.randomUUID(),key=leaseKey(kind,id),stamp=now(),stale=new Date(Date.now()-LEASE_MS).toISOString(),value=JSON.stringify({token});
   await getEnv().DB.prepare(`INSERT INTO app_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at WHERE app_state.updated_at<?`).bind(key,value,stamp,stale).run();
@@ -53,6 +55,7 @@ async function claimRun(kind:BackgroundRun['kind'],id:string):Promise<string|nul
 async function releaseRun(kind:BackgroundRun['kind'],id:string,token:string):Promise<void>{
   await getEnv().DB.prepare('DELETE FROM app_state WHERE key=? AND value=?').bind(leaseKey(kind,id),JSON.stringify({token})).run();
 }
+const LEASE_MS=35_000;
 
 async function readRun(kind:BackgroundRun['kind'],id:string):Promise<BackgroundRun|null>{return getState<BackgroundRun|null>(runKey(kind,id),null)}
 async function writeRun(run:BackgroundRun):Promise<void>{run.updatedAt=now();await setState(runKey(run.kind,run.id),run)}
@@ -219,9 +222,17 @@ async function listCategoryProducts(run:CategoryRun):Promise<BackgroundOutcome>{
   if(run.page<run.totalPages){run.page++;run.status='queued';run.phase='listing'}else{run.total=run.products.length;run.status='queued';run.phase='categorizing'}
   await writeRun(run);return{outcome:'continue',delaySeconds:1};
 }
-async function categorizeOne(run:CategoryRun):Promise<BackgroundOutcome>{
-  if(run.cursor>=run.products.length){run.status='done';run.phase='finished';run.finishedAt=now();await writeRun(run);return{outcome:'complete'}}
-  const product=run.products[run.cursor],categories=(await destinationCategories()).items,currentCategory=Number(product.categoryId)||0,tried=new Set(await getTriedBasalamCategories(product.shopId,product.id));
+/**
+ * Categorizes up to CATEGORY_BATCH products per queue message and commits ONE
+ * checkpoint at the end. Every message costs ~3 D1 writes (lease + checkpoint +
+ * lease release) regardless of how many products it handles, so batching products
+ * cuts the daily D1 write-quota burn proportionally (5x here) while staying far
+ * below the 50 subrequest ceiling (each product = 2-3 model calls + one PATCH).
+ */
+const CATEGORY_BATCH=5;
+async function categorizeProduct(run:CategoryRun,product:any,categories:any[]):Promise<boolean>{
+  // Returns true to keep going (stop requested by the user).
+  const currentCategory=Number(product.categoryId)||0,tried=new Set(await getTriedBasalamCategories(product.shopId,product.id));
   // Sequential voting with early stop: models answer one by one; as soon as a category
   // reaches the majority threshold we stop asking the remaining models.
   const modelKeys=run.modelKeys,threshold=Math.floor(modelKeys.length/2)+1,votes=new Map<number,{count:number;row:any}>(),triedHits:number[]=[];
@@ -249,15 +260,29 @@ async function categorizeOne(run:CategoryRun):Promise<BackgroundOutcome>{
     run.failed++;appendCategoryItem(run,{...product,ok:false,error:'همهٔ دسته‌بندی‌های پیشنهادی مدل‌ها قبلاً برای این محصول امتحان شده‌اند و نتیجهٔ قطعی نداشتند؛ در اجرای بعدی از آنها صرف‌نظر می‌شود.'});
   }else{run.failed++;appendCategoryItem(run,{...product,ok:false,error:'هیچ مدل فعال، شناسهٔ دسته‌بندی معتبر برنگرداند.'})}
   run.cursor++;run.processed++;run.attempts=0;
-  const latest=await readRun('category-all',run.id);if(latest?.stopRequested){run.stopRequested=true;run.status='paused';run.phase='paused'}else if(run.cursor>=run.products.length){run.status='done';run.phase='finished';run.finishedAt=now()}else{run.status='queued';run.phase='categorizing'}
+  const latest=await readRun('category-all',run.id);
+  if(latest?.stopRequested){run.stopRequested=true;run.status='paused';run.phase='paused'}
+  return !run.stopRequested;
+}
+async function categorizeBatch(run:CategoryRun):Promise<BackgroundOutcome>{
+  if(run.cursor>=run.products.length){run.status='done';run.phase='finished';run.finishedAt=now();await writeRun(run);return{outcome:'complete'}}
+  const categories=(await destinationCategories()).items;
+  const end=Math.min(run.products.length,run.cursor+CATEGORY_BATCH);
+  for(let i=run.cursor;i<end;i++){
+    const product=run.products[i];
+    const keepGoing=await categorizeProduct(run,product,categories);
+    if(!keepGoing)break;
+  }
+  if(run.status==='paused'){await writeRun(run);return{outcome:'complete'}}
+  if(run.cursor>=run.products.length){run.status='done';run.phase='finished';run.finishedAt=now()}else{run.status='queued';run.phase='categorizing'}
   await writeRun(run);return{outcome:run.status==='queued'?'continue':'complete',delaySeconds:1};
 }
 async function processCategoryRun(run:CategoryRun):Promise<BackgroundOutcome>{
   if(run.stopRequested||run.status==='paused')return{outcome:'complete'};
-  // No start write: categorizeOne/listCategoryProducts persist the checkpoint at
+  // No start write: categorizeBatch/listCategoryProducts persist the checkpoint at
   // the end of every invocation, so an extra write here only wastes D1 write quota.
   run.status='running';run.startedAt ||= now();
-  return run.phase==='listing'||run.products.length===0?listCategoryProducts(run):categorizeOne(run);
+  return run.phase==='listing'||run.products.length===0?listCategoryProducts(run):categorizeBatch(run);
 }
 
 function appendDedupItem(run:DedupRun,item:DedupItemLog){run.items.push({...item,name:String(item.name||'').slice(0,160),...(item.error?{error:String(item.error).slice(0,400)}:{})});if(run.items.length>400)run.items=run.items.slice(-400)}
@@ -332,6 +357,14 @@ export async function processBackgroundMessage(message:BackgroundMessage):Promis
     const run=await readRun(message.task,message.runId);if(!run||['done','failed','paused'].includes(run.status))return{outcome:'ignored'};
     try{return run.kind==='ai-test'?await processAiTest(run):run.kind==='dedup'?await processDedupRun(run):await processCategoryRun(run)}catch(error){
       run.attempts=(run.attempts||0)+1;run.error=error instanceof Error?error.message:String(error);
+      if(isWriteQuotaError(error)){
+        // D1's daily write quota is exhausted: pause cleanly instead of retry-storming.
+        // The write below may fail too (quota) — that is fine; the run stays at its
+        // last checkpoint and the cron recovery auto-resumes it after 00:00 UTC.
+        run.status='paused';run.phase='quota';run.error='سهمیهٔ نوشتن D1 (۱۰۰هزار/روز) تمام شده؛ فعالیت پس از ریست ۰۰:۰۰ UTC خودکار ادامه می‌یابد.';
+        try{await writeRun(run)}catch{/* quota still exhausted — nothing to persist */}
+        return{outcome:'complete'};
+      }
       if(run.attempts>=5){run.status='failed';run.phase='failed';run.finishedAt=now()}else{run.status='queued';run.phase=run.kind==='category-all'&&run.products.length===0?'listing':'retrying'}
       await writeRun(run);return{outcome:run.status==='failed'?'complete':'continue',delaySeconds:Math.min(60,Math.pow(2,run.attempts))};
     }
@@ -342,6 +375,11 @@ export async function recoverBackgroundRuns(waitUntil?:(promise:Promise<unknown>
   await recoverAgentRun(waitUntil);
   for(const kind of ['ai-test','category-all','dedup'] as const){
     const run=await currentBackgroundRun(kind);
+    // A run paused by the D1 write-quota resumes itself as soon as writes work again.
+    if(run?.status==='paused'&&run.phase==='quota'){
+      try{run.status='queued';run.phase=kind==='ai-test'?'waiting':run.kind==='dedup'?(run.listingDone?'removing':'listing'):'categorizing';run.error=null;await writeRun(run);await enqueue({task:kind,runId:run.id},waitUntil)}catch{/* quota still exhausted — stay paused */}
+      continue;
+    }
     if(!run||run.stopRequested||run.status==='paused'||['done','failed'].includes(run.status))continue;
     if(runAge(run)<=STALL_MS)continue;
     if(run.kind==='ai-test'){
