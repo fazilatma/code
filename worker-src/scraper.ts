@@ -28,7 +28,7 @@ type FieldName='title'|'price'|'link'|'image'|'sku';
 type RankedValue={value:string;rank:number};
 type Card={values:Partial<Record<FieldName,RankedValue>>};
 type DetailResult={
-  shortDesc:string;longDesc:string;sku:string;brand:string;stock:string;weight:string;category:string;tags:string;mainImage:string;
+  shortDesc:string;longDesc:string;price:string;sku:string;brand:string;stock:string;weight:string;category:string;tags:string;mainImage:string;
   images:string[];variations:string[];variationGroups:VariationGroup[];variationPrices:Record<string,number>;
 };
 
@@ -40,7 +40,7 @@ const FALLBACKS:Record<FieldName,string>={
   image:'img.wp-post-image, img.product-image, [itemprop="image"], picture img, img, source',
   sku:'[data-sku], [itemprop="sku"], .sku'
 };
-const DETAIL_KEYS=['shortDesc','sku','category','tags','weight','stock','brand'] as const;
+const DETAIL_KEYS=['shortDesc','price','sku','category','tags','weight','stock','brand'] as const;
 const IMAGE_ATTRS=['data-zoom-image','data-large_image','data-large-image','data-full','data-src','data-lazy-src','data-original','src','content','href'];
 const LINK_ATTRS=['data-href','href','data-url','data-link','data-product-url','data-product-link','content'];
 function onclickUrl(element:HtmlElement):string{return element.getAttribute('onclick')?.match(/(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/i)?.[1]||''}
@@ -326,7 +326,7 @@ function extractMarkedFragment(html:string,marker:string):string{
 function stripUnsafeHtml(html:string):string{return html.replace(/<(script|style|iframe|object|embed|form)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,'').replace(/<(script|style|iframe|object|embed|form)\b[^>]*\/?\s*>/gi,'').replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi,'').replace(/\s+(href|src|srcdoc)\s*=\s*(["'])\s*(?:javascript|data\s*:\s*text\/html)[\s\S]*?\2/gi,'')}
 
 export async function parseDetailPage(html:string,baseUrl:string,selectors:SelectorMap):Promise<DetailResult>{
-  const result:DetailResult={shortDesc:'',longDesc:'',sku:'',brand:'',stock:'',weight:'',category:'',tags:'',mainImage:'',images:[],variations:[],variationGroups:[],variationPrices:{}};
+  const result:DetailResult={shortDesc:'',longDesc:'',price:'',sku:'',brand:'',stock:'',weight:'',category:'',tags:'',mainImage:'',images:[],variations:[],variationGroups:[],variationPrices:{}};
   const values=new Map<string,string>(),rewriter=new HTMLRewriter();
   for(const key of DETAIL_KEYS)for(const selector of selectorParts(selectors[key]))safeOn(rewriter,selector,new ScalarHandler(key,values));
   const marker=`SCRAPER4_${Math.random().toString(36).slice(2)}`;
@@ -343,15 +343,17 @@ export async function parseDetailPage(html:string,baseUrl:string,selectors:Selec
     safeOn(rewriter,selector,gallery);
     for(const suffix of ['img','source','a','meta','[data-src]','[data-zoom-image]'])safeOn(rewriter,`${selector} ${suffix}`,gallery);
   }
+  const includeGallery=multilineSelectorParts(selectors.gallery).length>0;
   const variationContext=new VariationContext();
   for(const selector of multilineSelectorParts(selectors.variations)){
     safeOn(rewriter,`${selector} select`,new VariationScopeHandler(variationContext));
     safeOn(rewriter,selector,new VariationHandler(result,baseUrl,variationContext));
     for(const suffix of ['option','button','input','[data-value]','[data-variation]','[data-product_variation]'])safeOn(rewriter,`${selector} ${suffix}`,new VariationHandler(result,baseUrl,variationContext));
+    // تنوع‌ها به‌عنوان گالری عکس: تصاویر داخل عناصر تنوع هم به گالری اضافه می‌شوند، نه فقط متن.
+    if(includeGallery)for(const suffix of ['img','source','a[href]','[data-src]','[data-large_image]','[data-zoom-image]'])safeOn(rewriter,`${selector} ${suffix}`,gallery);
   }
   let transformed='';try{transformed=await rewriter.transform(new Response(html,{headers:{'content-type':'text/html; charset=UTF-8'}})).text()}catch(error){throw new Error(`پردازش HTML جزئیات شکست خورد: ${error instanceof Error?error.message:String(error)}`)}
   for(const key of DETAIL_KEYS)result[key]=values.get(key)||'';
-  const includeGallery=multilineSelectorParts(selectors.gallery).length>0;
   result.longDesc=stripUnsafeHtml(extractMarkedFragment(transformed,marker));if(includeGallery)for(const image of result.images)addGalleryImage(galleryImages,image,baseUrl,galleryMax);result.images=galleryImages;
   applyJsonLdDetail(html,baseUrl,result,galleryMax,includeGallery);
   if(selectors.gallerySkipFirst&&result.images.length)result.images=result.images.slice(1);
@@ -386,7 +388,8 @@ export async function scrapeDetails(product:Product,selectors:Selectors,indirect
   const {text}=await sourceText(product.url,indirect,maxBytes);
   const detail=await parseDetailPage(text,product.url,selectors);
   const mainImage=detail.mainImage||product.image||'',images=[...new Set([mainImage,...detail.images].filter(Boolean))];
-  return {...product,shortDesc:detail.shortDesc||product.shortDesc,longDesc:detail.longDesc||product.longDesc,sku:detail.sku||product.sku,brand:detail.brand||product.brand,stock:detail.stock?numberFromText(detail.stock):product.stock,weight:detail.weight?numberFromText(detail.weight):product.weight,category:detail.category||product.category,tags:detail.tags||product.tags,images,image:mainImage||images[0]||product.image,variations:detail.variations.length?detail.variations:(product.variations||[]),variationGroups:detail.variationGroups.length?detail.variationGroups:(product.variationGroups||[]),variationPrices:Object.keys(detail.variationPrices).length?detail.variationPrices:(product.variationPrices||{})};
+  const detailPrice=detail.price?numberFromText(detail.price):0;
+  return {...product,price:detailPrice>0?detailPrice:product.price,priceText:detailPrice>0?(detail.price||product.priceText):product.priceText,shortDesc:detail.shortDesc||product.shortDesc,longDesc:detail.longDesc||product.longDesc,sku:detail.sku||product.sku,brand:detail.brand||product.brand,stock:detail.stock?numberFromText(detail.stock):product.stock,weight:detail.weight?numberFromText(detail.weight):product.weight,category:detail.category||product.category,tags:detail.tags||product.tags,images,image:mainImage||images[0]||product.image,variations:detail.variations.length?detail.variations:(product.variations||[]),variationGroups:detail.variationGroups.length?detail.variationGroups:(product.variationGroups||[]),variationPrices:Object.keys(detail.variationPrices).length?detail.variationPrices:(product.variationPrices||{})};
 }
 
 export async function extractVariations(html:string,baseUrl:string,selector:string):Promise<Pick<Product,'variations'|'variationGroups'|'variationPrices'|'images'>>{
@@ -479,7 +482,7 @@ const SUGGESTION_CANDIDATES:Record<string,{type?:'text'|'link'|'image';selectors
   container:{selectors:['li.product','article.product','.products .product','.product-card','.product-item','[data-product-id]']},title:{selectors:['.woocommerce-loop-product__title','.product-title','.card-title','h2','h3','[itemprop="name"]']},price:{selectors:['.price ins','.sale-price','.price','[itemprop="price"]','.amount']},link:{type:'link',selectors:['a.woocommerce-LoopProduct-link','a.product-link','a[href*="/product/"]','a[href]']},image:{type:'image',selectors:['img.wp-post-image','img.product-image','picture img','img']},shortDesc:{selectors:['.woocommerce-product-details__short-description','.short-description','[itemprop="description"]']},longDesc:{selectors:['#tab-description','.woocommerce-Tabs-panel--description','.product-description','.description']},sku:{selectors:['.sku','[itemprop="sku"]','[data-sku]']},brand:{selectors:['.brand','[itemprop="brand"]','.product-brand']},stock:{selectors:['.stock','[itemprop="availability"]','.inventory']},weight:{selectors:['.product_weight','.weight','[data-weight]']},category:{selectors:['.posted_in','.product_meta .category','.breadcrumb']},tags:{selectors:['.tagged_as','.product_meta .tags','[rel="tag"]']},detailImage:{type:'image',selectors:['.woocommerce-product-gallery__image img','.product-main-image img','img.wp-post-image','[itemprop="image"]']},gallery:{type:'image',selectors:['.woocommerce-product-gallery img','.product-gallery img','[data-gallery] img','.gallery img']},variations:{selectors:['.variations','.variations_form','[data-product_variations]','.product-options']}
 };
 export async function suggestSelectors(url:string,mode:'list'|'detail'|'all'='all'){
-  const page=await safeText(url,4_000_000),wanted=mode==='list'?['container','title','price','link','image']:mode==='detail'?['shortDesc','longDesc','sku','category','tags','weight','stock','brand','detailImage','gallery','variations']:Object.keys(SUGGESTION_CANDIDATES),selectors:Record<string,string>={},evidence:Record<string,unknown>={};
+  const page=await safeText(url,4_000_000),wanted=mode==='list'?['container','title','price','link','image']:mode==='detail'?['shortDesc','price','longDesc','sku','category','tags','weight','stock','brand','detailImage','gallery','variations']:Object.keys(SUGGESTION_CANDIDATES),selectors:Record<string,string>={},evidence:Record<string,unknown>={};
   for(const field of wanted){const config=SUGGESTION_CANDIDATES[field];for(const candidate of config.selectors)try{const values=await extractSelectorValues(page.text,page.url,candidate,config.type||'text');const count=values.length,minimum=field==='container'?2:1;if(count>=minimum){selectors[field]=candidate;evidence[field]={count,sample:values[0]||''};break}}catch{/* try the next known selector */}}
   return {url:page.url,mode,selectors,evidence};
 }

@@ -20,9 +20,11 @@ export type Selectors = {
 };
 
 export type GalleryConfig = {
-  mode: 'off'|'auto'|'manual'|'number';
+  mode: 'off'|'auto'|'manual'|'number'|'variations';
   box: string;
   selectors: string;
+  /** For mode 'variations': the product-variations selector whose images become the gallery. */
+  variations?: string;
   pattern: string;
   from: number;
   to: number;

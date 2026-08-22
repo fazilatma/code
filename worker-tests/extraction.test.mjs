@@ -225,6 +225,19 @@ test('settings restore shows a section picker and the changelog keeps growing',a
   assert.match(dash,/نسخهٔ ۱\.۲۲\.۰/,'changelog includes 1.22.0');
 });
 
+test('selector tab: sticky sub-tabs, product dropdown for detail sample, price detail field, variations-as-gallery',async()=>{
+  const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),scraper=await readFile(new URL('../worker-src/scraper.ts',import.meta.url),'utf8'),types=await readFile(new URL('../worker-src/types.ts',import.meta.url),'utf8');
+  assert.match(dash,/\#pane-selector \.sub-tabs\{[^}]*position:sticky/,'sub-tabs sticky');
+  assert.match(dash,/id="detailSampleSelect"/,'detail sample product dropdown');
+  assert.match(dash,/loadDetailSampleProducts/,'loader fn');
+  assert.match(dash,/\[\['shortDesc','توضیحات کوتاه'\],\['price','💰 قیمت'\]/,'price added to detail fields');
+  assert.match(dash,/value="variations">🎨 تصاویر تنوع‌ها/,'variations gallery mode option');
+  assert.match(types,/'off'\|'auto'\|'manual'\|'number'\|'variations'/);
+  assert.match(scraper,/shortDesc:string;longDesc:string;price:string;/,'DetailResult carries price');
+  assert.match(scraper,/DETAIL_KEYS=\['shortDesc','price'/,'price in detail keys');
+  assert.match(scraper,/تنوع‌ها به‌عنوان گالری عکس/,'variation images feed the gallery');
+});
+
 test('Cloudflare AI provider editor shows account-id/token fields and export transforms them',async()=>{
   const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),vault=await readFile(new URL('../worker-src/vault.ts',import.meta.url),'utf8');
   for(const token of ['aiEditAccountId','aiEditCfToken','aiCloudflareBox','aiIsCloudflareBase','aiCloudflareAccountFromBase','aiCloudflareBaseFromParts'])assert.match(dash,new RegExp(token),token);
