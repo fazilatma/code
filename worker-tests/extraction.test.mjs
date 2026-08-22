@@ -238,6 +238,17 @@ test('selector tab: sticky sub-tabs, product dropdown for detail sample, price d
   assert.match(scraper,/تنوع‌ها به‌عنوان گالری عکس/,'variation images feed the gallery');
 });
 
+test('provider list: collapsible cards, sticky header, restore after edit, collapsed descriptions',async()=>{
+  const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
+  assert.match(dash,/provider-card/,'collapsible provider card');
+  assert.match(dash,/data-provider-card/,'card index attr');
+  assert.match(dash,/provider-card\[open\]>summary\{position:sticky/,'sticky header when open');
+  assert.match(dash,/aiProviderPrevOpen/,'remembers previous open state');
+  assert.match(dash,/restoreAiProviderListUi/,'restore helper exists');
+  assert.match(dash,/menu-desc/,'section descriptions are collapsible');
+  assert.match(dash,/provider-head-actions/,'actions visible in header');
+});
+
 test('task manager panel is wired and the activity endpoint exists',async()=>{
   const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),app=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');
   for(const token of ['activityBtn','openActivityManager','activityPoll','/api/activity','activity-stats','activity-runs'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
