@@ -134,7 +134,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.18';
+const APP_VERSION = '10.19';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -14385,6 +14385,296 @@ if (isset($_GET['auto_catalog'])) {
     exit;
 }
 
+/* ==================================================================
+ *  v10.19 (۳۲): مدیر وظیفه — یک پنجرهٔ واحد برای همهٔ کارهای پس‌زمینه
+ *
+ *  مسئله: کارهای بلندمدت این برنامه هرکدام در تبِ خودشان دفن شده‌اند —
+ *  ارسال به باسلام در یک تب، استخراج در تبی دیگر، حذفِ تکراری، ایجنت،
+ *  تستِ مدل‌ها و کارهای زمان‌بندی‌شده هرکدام جای دیگر. کاربر برای اینکه
+ *  بفهمد «الان چه چیزی در حال اجراست» باید تب‌به‌تب بگردد، و برای توقفِ
+ *  یک کار باید همان تب را پیدا کند. اگر یک کار نصفه‌کاره مانده باشد
+ *  (پردازه مرده ولی فایلِ پیشرفت هنوز running=true است) هیچ‌جا معلوم
+ *  نمی‌شود.
+ *
+ *  راه‌حل: همهٔ کارها یک «رجیستری» مشترک دارند. هر ردیفِ رجیستری می‌گوید
+ *  وضعیتش را از کدام فایل بخوان، چطور درصد و برچسبش را بساز، و با کدام
+ *  اندپوینت متوقفش کن. مدیر وظیفه فقط روی همین رجیستری کار می‌کند، پس
+ *  افزودنِ کارِ جدید در آینده یعنی یک ردیفِ تازه — نه دست‌کاریِ رابط.
+ *
+ *  عمداً هیچ مسیرِ اجرایی‌ای بازنویسی نشد: مدیر وظیفه همان فایل‌های
+ *  پیشرفتِ موجود را می‌خواند و همان اندپوینت‌های توقفِ موجود را صدا
+ *  می‌زند. پس رفتارِ هر کار دقیقاً همان است که در تبِ خودش بود.
+ * ================================================================== */
+
+/** کارِ پس‌زمینه‌ای که بیش از این بی‌خبر بماند، «رهاشده» حساب می‌شود.
+ *  هر کارِ زنده حداقل هر چند ثانیه یک‌بار فایلِ پیشرفتش را لمس می‌کند؛
+ *  اگر مدت‌ها خبری نشد یعنی پردازه وسطِ کار کشته شده (تایم‌اوتِ هاست،
+ *  ری‌استارتِ PHP-FPM). چنین کاری تا ابد «در حال اجرا» می‌ماند و دکمهٔ
+ *  شروعِ دوباره را قفل می‌کند. */
+const TASKS_STALE_SEC = 300;
+
+/** رجیستریِ کارهای پس‌زمینه.
+ *
+ *  هر ردیف: کلید ⇒ [عنوان، ایموجی، فایلِ پیشرفت، اندپوینتِ توقف یا ''،
+ *  تبِ مربوطه، تابعِ خلاصه‌ساز]. خلاصه‌ساز از آرایهٔ خامِ پیشرفت،
+ *  «شمارنده‌های خوانا» می‌سازد چون هر کار واژگانِ خودش را دارد
+ *  (ارسال «sent/failed» دارد، حذفِ تکراری «groups/deleted»).
+ */
+function tasksRegistry(): array {
+    return [
+        'bsl_send' => [
+            'title' => 'ارسال به باسلام', 'icon' => '🚀', 'file' => BSL_PROGRESS_FILE,
+            'stop' => 'bsl_stop', 'tab' => 'ارسال',
+            'stat' => function (array $p): array {
+                return ['ارسال' => (int)($p['sent'] ?? 0), 'به‌روز' => (int)($p['updated'] ?? 0),
+                        'رد' => (int)($p['skipped'] ?? 0), 'ناموفق' => (int)($p['failed'] ?? 0)];
+            },
+        ],
+        'woo_send' => [
+            'title' => 'ارسال به ووکامرس', 'icon' => '🛍', 'file' => WOO_PROGRESS_FILE,
+            'stop' => 'woo_stop', 'tab' => 'ارسال',
+            'stat' => function (array $p): array {
+                return ['ارسال' => (int)($p['sent'] ?? 0), 'به‌روز' => (int)($p['updated'] ?? 0),
+                        'رد' => (int)($p['skipped'] ?? 0), 'ناموفق' => (int)($p['failed'] ?? 0)];
+            },
+        ],
+        'extract' => [
+            'title' => 'استخراج محصولات', 'icon' => '🔎', 'file' => EXTRACT_PROGRESS_FILE,
+            'stop' => 'extract_stop', 'tab' => 'استخراج',
+            'stat' => function (array $p): array {
+                return ['استخراج' => (int)($p['extracted'] ?? 0), 'تازه' => (int)($p['new'] ?? 0),
+                        'تغییرِ قیمت' => (int)($p['price_changed'] ?? 0), 'حذف‌شده' => (int)($p['removed'] ?? 0)];
+            },
+        ],
+        'dedup' => [
+            'title' => 'حذفِ محصولات تکراری', 'icon' => '🧹', 'file' => DEDUP_PROGRESS_FILE,
+            'stop' => 'dedup_stop', 'tab' => 'ابزارها',
+            'stat' => function (array $p): array {
+                return ['گروه' => (int)($p['groups'] ?? 0), 'تکراری' => (int)($p['dups'] ?? 0),
+                        'حذف‌شده' => (int)($p['deleted'] ?? 0), 'ناموفق' => (int)($p['failed'] ?? 0)];
+            },
+        ],
+        'agent' => [
+            'title' => 'ایجنتِ مدیریت محصولات', 'icon' => '🤖', 'file' => AGENT_PROGRESS_FILE,
+            'stop' => 'agent_stop', 'tab' => 'هوش مصنوعی',
+            'stat' => function (array $p): array {
+                return ['گام' => (int)($p['step'] ?? 0), 'فراخوانیِ ابزار' => (int)($p['calls'] ?? 0),
+                        'تغییر' => (int)($p['changes'] ?? 0)];
+            },
+        ],
+        'ai_test' => [
+            'title' => 'تستِ مدل‌های هوش مصنوعی', 'icon' => '🧪', 'file' => AI_TEST_STATE_FILE,
+            'stop' => 'ai_test_stop', 'tab' => 'هوش مصنوعی',
+            'stat' => function (array $p): array {
+                $o = ['تست‌شده' => (int)($p['tested'] ?? 0), 'در دسترس' => (int)($p['available'] ?? 0),
+                      'ناموفق' => (int)($p['failed'] ?? 0)];
+                if ((int)($p['retry_tried'] ?? 0) > 0) $o['تلاشِ دوباره'] = (int)$p['retry_tried'];
+                return $o;
+            },
+        ],
+        'recon' => [
+            'title' => 'مغایرت‌گیریِ مبدأ و مقصد', 'icon' => '⚖', 'file' => RECON_PROGRESS_FILE,
+            'stop' => '', 'tab' => 'ابزارها',
+            'stat' => function (array $p): array {
+                return ['بررسی‌شده' => (int)($p['checked'] ?? 0), 'مغایرت' => (int)($p['diffs'] ?? 0)];
+            },
+        ],
+        'suffix' => [
+            'title' => 'گزارشِ پسوندِ پروفایل', 'icon' => '🏷', 'file' => SUFFIX_PROGRESS_FILE,
+            'stop' => '', 'tab' => 'ابزارها',
+            'stat' => function (array $p): array {
+                return ['بررسی‌شده' => (int)($p['checked'] ?? 0), 'یافته' => (int)($p['found'] ?? 0)];
+            },
+        ],
+        'bulkedit' => [
+            'title' => 'ویرایشِ گروهی', 'icon' => '✏', 'file' => BULKEDIT_PROGRESS_FILE,
+            'stop' => '', 'tab' => 'ابزارها',
+            'stat' => function (array $p): array {
+                return ['ویرایش‌شده' => (int)($p['edited'] ?? 0), 'ناموفق' => (int)($p['failed'] ?? 0)];
+            },
+        ],
+        'photofix' => [
+            'title' => 'بازسازیِ عکس‌ها', 'icon' => '🖼', 'file' => PHOTOFIX_PROGRESS_FILE,
+            'stop' => '', 'tab' => 'ابزارها',
+            'stat' => function (array $p): array {
+                return ['اصلاح‌شده' => (int)($p['fixed'] ?? 0), 'ناموفق' => (int)($p['failed'] ?? 0)];
+            },
+        ],
+    ];
+}
+
+/** درصدِ پیشرفت را از شکل‌های مختلفِ فایل‌های پیشرفت بیرون می‌کشد.
+ *  اگر کار «کل» را نمی‌داند (مثلِ ایجنت که از قبل نمی‌داند چند گام
+ *  می‌رود) مقدارِ -1 برمی‌گردد یعنی «نامعلوم» — نوارِ پیشرفت آن‌وقت
+ *  حالتِ نامعین می‌گیرد به‌جای اینکه دروغِ ۰٪ نشان بدهد. */
+function tasksPercent(array $p): int {
+    $total = (int)($p['total'] ?? 0);
+    if ($total <= 0) return -1;
+    $cur = (int)($p['current'] ?? $p['processed'] ?? $p['tested'] ?? $p['checked'] ?? 0);
+    if ($cur < 0) $cur = 0;
+    if ($cur > $total) $cur = $total;
+    return (int)floor($cur * 100 / $total);
+}
+
+/** وضعیتِ یک کار: running | stale | done | idle
+ *
+ *  «stale» همان تشخیصی است که تا حالا وجود نداشت: فایل می‌گوید در حال
+ *  اجراست ولی مدت‌هاست به‌روز نشده. بدونِ این، کارِ مرده تا ابد قفل
+ *  می‌ماند و کاربر نمی‌فهمد چرا دکمهٔ شروع کار نمی‌کند. */
+function tasksState(array $p, int $now): string {
+    if (!is_array($p) || !$p) return 'idle';
+    $running = !empty($p['running']);
+    $done    = !empty($p['done']);
+    if ($running && !$done) {
+        $ts = (int)($p['ts'] ?? $p['updated_at'] ?? $p['started_at'] ?? 0);
+        if ($ts > 0 && ($now - $ts) > TASKS_STALE_SEC) return 'stale';
+        return 'running';
+    }
+    if ($done || (int)($p['started_at'] ?? 0) > 0) return 'done';
+    return 'idle';
+}
+
+/** یک ردیفِ آمادهٔ نمایش از روی رجیستری + فایلِ پیشرفت */
+function tasksBuildRow(string $key, array $def, int $now): array {
+    $file = (string)$def['file'];
+    $p    = is_file($file) ? (array)json_decode((string)@file_get_contents($file), true) : [];
+    $st   = tasksState($p, $now);
+    $ts   = (int)($p['ts'] ?? $p['updated_at'] ?? $p['started_at'] ?? 0);
+    $stat = [];
+    foreach (($def['stat'])($p) as $k => $v) if ((int)$v !== 0) $stat[] = ['k' => $k, 'v' => (int)$v];
+    /* لاگِ این کار — هر کار شکلِ خودش را دارد (log یا recent_log) */
+    $log = [];
+    $raw = is_array($p['log'] ?? null) ? $p['log'] : (is_array($p['recent_log'] ?? null) ? $p['recent_log'] : []);
+    foreach (array_slice($raw, -6) as $l)
+        $log[] = is_array($l) ? (string)($l['m'] ?? '') : (string)$l;
+    return [
+        'key'       => $key,
+        'title'     => (string)$def['title'],
+        'icon'      => (string)$def['icon'],
+        'tab'       => (string)$def['tab'],
+        'state'     => $st,
+        'percent'   => $st === 'running' || $st === 'stale' ? tasksPercent($p) : ($st === 'done' ? 100 : 0),
+        'total'     => (int)($p['total'] ?? 0),
+        'current'   => (int)($p['current'] ?? $p['processed'] ?? $p['tested'] ?? 0),
+        'phase'     => (string)($p['phase'] ?? ''),
+        'last'      => (string)($p['last_title'] ?? $p['summary'] ?? ''),
+        'started'   => (int)($p['started_at'] ?? 0),
+        'ts'        => $ts,
+        'age'       => $ts > 0 ? max(0, $now - $ts) : 0,
+        'cancelled' => !empty($p['cancelled']),
+        'stoppable' => (string)$def['stop'] !== '' && $st === 'running',
+        'stop'      => (string)$def['stop'],
+        'clearable' => $st === 'done' || $st === 'stale',
+        'stats'     => $stat,
+        'log'       => $log,
+    ];
+}
+
+/** فهرستِ زندهٔ همهٔ کارها + کارهای زمان‌بندی‌شده در یک پاسخ.
+ *  مدیر وظیفه فقط همین یک اندپوینت را poll می‌کند تا با باز بودنِ
+ *  پنجره ده‌تا درخواستِ موازی روی هاستِ اشتراکی نریزد. */
+if (isset($_GET['tasks_list'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $now  = time();
+    $rows = [];
+    foreach (tasksRegistry() as $key => $def) $rows[] = tasksBuildRow($key, $def, $now);
+
+    /* کارهای زمان‌بندی‌شدهٔ ایجنت هم بخشی از «وظایفِ پس‌زمینه»اند، ولی
+       جنسشان فرق دارد: تکرارشونده‌اند و اولویت/فاصله دارند. جدا برمی‌گردند
+       تا رابط بتواند برایشان دکمه‌های خودشان را بگذارد. */
+    $jobs = [];
+    foreach (autoLoadJobs() as $j) {
+        $j['next_label'] = autoNextRunLabel($j, $now);
+        $j['due']        = autoJobDue($j, $now);
+        $jobs[] = $j;
+    }
+    $running = 0; $stale = 0;
+    foreach ($rows as $r) { if ($r['state'] === 'running') $running++; if ($r['state'] === 'stale') $stale++; }
+    echo json_encode(['ok' => true, 'now' => $now, 'tasks' => $rows, 'jobs' => $jobs,
+        'running' => $running, 'stale' => $stale,
+        'stale_after' => TASKS_STALE_SEC], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** توقفِ یک کار — همان اندپوینتِ توقفِ خودِ آن کار را داخلی صدا می‌زند.
+ *  به‌جای تکرارِ منطقِ توقف، فقط فایلِ سیگنالِ همان کار نوشته می‌شود؛
+ *  دقیقاً همان کاری که دکمهٔ توقفِ داخلِ تب می‌کند. */
+if (isset($_GET['tasks_stop'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $key = (string)($_GET['key'] ?? '');
+    $reg = tasksRegistry();
+    if (!isset($reg[$key])) { echo json_encode(['ok' => false, 'error' => 'کارِ ناشناخته'], JSON_UNESCAPED_UNICODE); exit; }
+    $map = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
+            'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE, 'ai_test_stop' => AI_TEST_STOP_FILE];
+    $sf = $map[(string)$reg[$key]['stop']] ?? '';
+    if ($sf === '') { echo json_encode(['ok' => false, 'error' => 'این کار توقفِ دستی ندارد'], JSON_UNESCAPED_UNICODE); exit; }
+    @file_put_contents($sf, json_encode(['at' => time()]));
+    echo json_encode(['ok' => true, 'stopped' => $key], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** پاک‌کردنِ ردِ یک کارِ تمام‌شده یا رهاشده.
+ *  فایلِ پیشرفت حذف می‌شود تا کار از «تمام‌شده» به «بی‌کار» برگردد و
+ *  قفلِ احتمالی‌اش هم برداشته شود — همان کاری که تا حالا باید دستی با
+ *  حذفِ فایل روی هاست انجام می‌شد. */
+if (isset($_GET['tasks_clear'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $key = (string)($_GET['key'] ?? '');
+    $reg = tasksRegistry();
+    if ($key === 'all') {
+        $n = 0; $now = time();
+        foreach ($reg as $k => $def) {
+            $row = tasksBuildRow($k, $def, $now);
+            if ($row['state'] === 'running') continue;   // کارِ زنده دست نمی‌خورد
+            if (@unlink((string)$def['file'])) $n++;
+        }
+        echo json_encode(['ok' => true, 'cleared' => $n], JSON_UNESCAPED_UNICODE); exit;
+    }
+    if (!isset($reg[$key])) { echo json_encode(['ok' => false, 'error' => 'کارِ ناشناخته'], JSON_UNESCAPED_UNICODE); exit; }
+    $now = time();
+    $row = tasksBuildRow($key, $reg[$key], $now);
+    if ($row['state'] === 'running') {
+        echo json_encode(['ok' => false, 'error' => 'این کار در حال اجراست — اول متوقفش کنید'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    /* کارِ رهاشده ممکن است قفلش هم جا مانده باشد */
+    $locks = ['dedup' => DEDUP_LOCK_FILE, 'agent' => AGENT_LOCK_FILE];
+    if (isset($locks[$key])) @unlink($locks[$key]);
+    @unlink((string)$reg[$key]['file']);
+    echo json_encode(['ok' => true, 'cleared' => 1], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** اولویت‌بندیِ کارهای زمان‌بندی‌شده: جابه‌جاییِ یک کار در صف.
+ *
+ *  ترتیبِ آرایه واقعاً معنا دارد — autoTick از بالا به پایین می‌رود و
+ *  در هر تیک فقط AUTO_MAX_PER_TICK کار را می‌دواند. پس کاری که بالاتر
+ *  باشد زودتر اجرا می‌شود. تا حالا این ترتیب فقط با حذف و ساختِ دوباره
+ *  قابلِ تغییر بود.
+ */
+if (isset($_GET['tasks_reorder'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $id  = trim((string)($_GET['id'] ?? ''));
+    $dir = (string)($_GET['dir'] ?? '');
+    $jobs = autoLoadJobs();
+    $idx = -1;
+    foreach ($jobs as $i => $j) if ((string)$j['id'] === $id) { $idx = $i; break; }
+    if ($idx < 0) { echo json_encode(['ok' => false, 'error' => 'کار پیدا نشد'], JSON_UNESCAPED_UNICODE); exit; }
+    $to = $idx;
+    if ($dir === 'up')        $to = max(0, $idx - 1);
+    elseif ($dir === 'down')  $to = min(count($jobs) - 1, $idx + 1);
+    elseif ($dir === 'top')   $to = 0;
+    elseif ($dir === 'bottom') $to = count($jobs) - 1;
+    else { echo json_encode(['ok' => false, 'error' => 'جهتِ نامعتبر'], JSON_UNESCAPED_UNICODE); exit; }
+    if ($to !== $idx) {
+        $row = $jobs[$idx];
+        array_splice($jobs, $idx, 1);
+        array_splice($jobs, $to, 0, [$row]);
+        autoSaveJobs($jobs);
+    }
+    echo json_encode(['ok' => true, 'from' => $idx, 'to' => $to], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 /** فهرستِ کارها با وضعیتِ زندهٔ هرکدام */
 if (isset($_GET['auto_jobs'])) {
     header('Content-Type: application/json; charset=UTF-8');
@@ -17370,9 +17660,16 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn' . '{z-index:10}') !== false
       && strpos($selfSrc, "document.body.classList.add('modal-" . "open');") !== false
       && strpos($selfSrc, "document.body.classList.remove('modal-" . "open');") !== false);
-    $add('10.00', 'کلاس modal-open دقیقاً موقعِ باز/بسته شدنِ همان مودال ست/پاک می‌شود',
-         substr_count($selfSrc, "document.body.classList.add('modal-" . "open')") === 1
-      && substr_count($selfSrc, "document.body.classList.remove('modal-" . "open')") === 1);
+    /* v10.19 (۳۲): مدیر وظیفه دومین مودالی است که این کلاس را می‌گذارد، پس
+       شرط از «دقیقاً یک بار» به «هر گذاشتنی برداشتنِ خودش را دارد» تعمیم
+       یافت — همان چیزی که واقعاً مهم است: کلاس نباید جا بماند و دکمه‌های
+       شناور را برای همیشه زیرِ صفحه نگه دارد. */
+    $add('10.00', 'هر جا کلاس modal-open گذاشته می‌شود، برداشتنش هم هست',
+         (function () use ($selfSrc) {
+             $a = substr_count($selfSrc, "document.body.classList.add('modal-" . "open')");
+             $r = substr_count($selfSrc, "document.body.classList.remove('modal-" . "open')");
+             return $a >= 1 && $a === $r;
+         })());
 
     /* ---------- ۱۴ب: اول دسته‌بندی، بعد پیام ---------- */
     $add('10.00', 'هلپرهای مشترکِ دسته‌بندی جدا شده‌اند (payload/parse/summary/meta)',
@@ -19195,6 +19492,206 @@ if (isset($_GET['selftest'])) {
     $add('10.18', 'نسخه و گزارشِ تغییرات به‌روز است',
          version_compare(APP_VERSION, '10.' . '18', '>=')
       && strpos($selfSrc, 'v:' . "'10.18'") !== false);
+
+    /* ---------- v10.19 (۳۲): مدیر وظیفه ---------- */
+
+    $add('10.19', 'رجیستریِ کارها هر ۱۰ کارِ پس‌زمینه را می‌شناسد',
+         (function () {
+             $r = tasksRegistry();
+             foreach (['bsl_send','woo_send','extract','dedup','agent','ai_test','recon','suffix','bulkedit','photofix'] as $k)
+                 if (!isset($r[$k])) return false;
+             return count($r) === 10;
+         })());
+
+    $add('10.19', 'هر ردیفِ رجیستری عنوان، فایل، تب و خلاصه‌ساز دارد',
+         (function () {
+             foreach (tasksRegistry() as $d) {
+                 foreach (['title','icon','file','stop','tab','stat'] as $k) if (!array_key_exists($k, $d)) return false;
+                 if ($d['title'] === '' || $d['file'] === '' || !is_callable($d['stat'])) return false;
+             }
+             return true;
+         })());
+
+    $add('10.19', 'خلاصه‌سازِ هر کار عدد برمی‌گرداند، نه چیزِ دیگر',
+         (function () {
+             foreach (tasksRegistry() as $d) {
+                 $o = ($d['stat'])(['sent' => 3, 'failed' => 1, 'groups' => 2, 'step' => 4, 'tested' => 5,
+                                    'checked' => 6, 'edited' => 7, 'fixed' => 8, 'extracted' => 9]);
+                 if (!is_array($o) || !$o) return false;
+                 foreach ($o as $v) if (!is_int($v)) return false;
+             }
+             return true;
+         })());
+
+    $add('10.19', 'کارِ در حال اجرا با خبرِ تازه، «running» است',
+         tasksState(['running' => true, 'ts' => time()], time()) === 'running');
+
+    $add('10.19', 'کارِ بی‌خبرمانده «stale» می‌شود، نه «running»',
+         tasksState(['running' => true, 'ts' => time() - TASKS_STALE_SEC - 30], time()) === 'stale');
+
+    $add('10.19', 'مرزِ دقیقِ رهاشدگی رعایت می‌شود',
+         tasksState(['running' => true, 'ts' => time() - TASKS_STALE_SEC + 5], time()) === 'running'
+      && TASKS_STALE_SEC === 300);
+
+    $add('10.19', 'کارِ تمام‌شده «done» و فایلِ خالی «idle» است',
+         tasksState(['running' => false, 'done' => true, 'ts' => time()], time()) === 'done'
+      && tasksState([], time()) === 'idle');
+
+    $add('10.19', 'کارِ done با running=true هنوز done می‌ماند (رقابتِ نوشتن)',
+         tasksState(['running' => true, 'done' => true, 'ts' => time()], time()) === 'done');
+
+    $add('10.19', 'درصد از current/total درست حساب می‌شود',
+         tasksPercent(['current' => 25, 'total' => 100]) === 25
+      && tasksPercent(['current' => 1, 'total' => 3]) === 33);
+
+    $add('10.19', 'نبودِ total یعنی «نامعلوم» (‎-1)، نه صفرِ دروغین',
+         tasksPercent(['current' => 40]) === -1
+      && tasksPercent(['total' => 0, 'current' => 5]) === -1);
+
+    $add('10.19', 'درصد هرگز از ۱۰۰ رد نمی‌شود و منفی نمی‌ماند',
+         tasksPercent(['current' => 500, 'total' => 100]) === 100
+      && tasksPercent(['current' => -7, 'total' => 100]) === 0);
+
+    $add('10.19', 'شمارندهٔ پیشرفت از نام‌های مختلفِ کارها خوانده می‌شود',
+         tasksPercent(['processed' => 10, 'total' => 20]) === 50
+      && tasksPercent(['tested' => 5, 'total' => 20]) === 25
+      && tasksPercent(['checked' => 15, 'total' => 20]) === 75);
+
+    $add('10.19', 'ردیفِ کارِ بدونِ فایل، «idle» و غیرقابلِ توقف است',
+         (function () {
+             $r = tasksBuildRow('bsl_send', array_merge(tasksRegistry()['bsl_send'], ['file' => __DIR__ . '/__tm_nope.json']), time());
+             return $r['state'] === 'idle' && empty($r['stoppable']) && empty($r['clearable']);
+         })());
+
+    $add('10.19', 'ردیف، شمارنده‌های صفر را دور می‌ریزد و بقیه را نگه می‌دارد',
+         (function () {
+             $f = __DIR__ . '/__tm_t1.json';
+             @file_put_contents($f, json_encode(['running' => true, 'ts' => time(), 'total' => 10, 'current' => 4,
+                                                 'sent' => 3, 'updated' => 0, 'failed' => 2]));
+             $r = tasksBuildRow('bsl_send', array_merge(tasksRegistry()['bsl_send'], ['file' => $f]), time());
+             @unlink($f);
+             $keys = array_column($r['stats'], 'k');
+             return $r['state'] === 'running' && $r['percent'] === 40 && !empty($r['stoppable'])
+                 && in_array('ارسال', $keys, true) && in_array('ناموفق', $keys, true)
+                 && !in_array('به‌روز', $keys, true);
+         })());
+
+    $add('10.19', 'ردیف هم log و هم recent_log را می‌فهمد و به ۶ خط می‌بُرد',
+         (function () {
+             $f = __DIR__ . '/__tm_t2.json';
+             @file_put_contents($f, json_encode(['running' => true, 'ts' => time(),
+                 'log' => ['a','b','c','d','e','f','g','h']]));
+             $a = tasksBuildRow('dedup', array_merge(tasksRegistry()['dedup'], ['file' => $f]), time());
+             @file_put_contents($f, json_encode(['running' => true, 'ts' => time(),
+                 'recent_log' => [['m' => 'یک'], ['m' => 'دو']]]));
+             $b = tasksBuildRow('bsl_send', array_merge(tasksRegistry()['bsl_send'], ['file' => $f]), time());
+             @unlink($f);
+             return count($a['log']) === 6 && $a['log'][0] === 'c' && $a['log'][5] === 'h'
+                 && $b['log'] === ['یک', 'دو'];
+         })());
+
+    $add('10.19', 'کارِ رهاشده قابلِ پاک‌کردن است ولی توقف برایش بی‌معناست',
+         (function () {
+             $f = __DIR__ . '/__tm_t3.json';
+             @file_put_contents($f, json_encode(['running' => true, 'ts' => time() - 9999, 'total' => 8, 'current' => 3]));
+             $r = tasksBuildRow('agent', array_merge(tasksRegistry()['agent'], ['file' => $f]), time());
+             @unlink($f);
+             return $r['state'] === 'stale' && !empty($r['clearable']) && empty($r['stoppable']);
+         })());
+
+    $add('10.19', 'کارهای بدونِ سیگنالِ توقف، دکمهٔ توقف نمی‌گیرند',
+         (function () {
+             $r = tasksRegistry();
+             foreach (['recon','suffix','bulkedit','photofix'] as $k) if ($r[$k]['stop'] !== '') return false;
+             foreach (['bsl_send','woo_send','extract','dedup','agent','ai_test'] as $k) if ($r[$k]['stop'] === '') return false;
+             return true;
+         })());
+
+    $add('10.19', 'هر سیگنالِ توقفِ رجیستری به فایلِ واقعیِ همان کار نگاشت دارد',
+         (function () {
+             $map = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
+                     'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE, 'ai_test_stop' => AI_TEST_STOP_FILE];
+             foreach (tasksRegistry() as $d) {
+                 $st = (string)$d['stop'];
+                 if ($st !== '' && !isset($map[$st])) return false;
+             }
+             return count($map) === 6;
+         })());
+
+    $add('10.19', 'سه اندپوینتِ مدیر وظیفه و اندپوینتِ اولویت وجود دارند',
+         strpos($selfSrc, "isset(\$_GET['tasks_list'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['tasks_stop'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['tasks_clear'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['tasks_reorder'])") !== false);
+
+    $add('10.19', 'پاک‌سازیِ گروهی کارِ در حال اجرا را رد می‌کند',
+         strpos($selfSrc, "if (\$row['state'] === 'running') continue;") !== false);
+
+    $add('10.19', 'پاک‌کردنِ کارِ رهاشده قفلِ جامانده‌اش را هم برمی‌دارد',
+         strpos($selfSrc, "\$locks = ['dedup' => DEDUP_LOCK_FILE, 'agent' => AGENT_LOCK_FILE];") !== false);
+
+    $add('10.19', 'اولویت‌بندی هر چهار جهت را می‌پذیرد و در فایل ذخیره می‌کند',
+         strpos($selfSrc, "if (\$dir === 'up')") !== false
+      && strpos($selfSrc, "elseif (\$dir === 'top')   \$to = 0;") !== false
+      && strpos($selfSrc, "elseif (\$dir === 'bottom')") !== false
+      && strpos($selfSrc, 'array_splice($jobs, $to, 0, [$row]);') !== false);
+
+    $add('10.19', 'فهرستِ کارها هم کارهای زنده و هم صفِ زمان‌بندی را برمی‌گرداند',
+         strpos($selfSrc, "'tasks' => \$rows, 'jobs' => \$jobs,") !== false
+      && strpos($selfSrc, "'stale_after' => TASKS_STALE_SEC") !== false);
+
+    $add('10.19', 'دکمهٔ 🗂 در هدر کنارِ ☰ و ⛶ نشسته و مدیر وظیفه را باز می‌کند',
+         strpos($selfSrc, 'class="tasks-btn" id="tasksBtn" onclick="tmOpen()"') !== false
+      && strpos($selfSrc, '.tasks-btn{position:fixed;top:10px;left:110px') !== false);
+
+    $add('10.19', 'دکمه در حالتِ اجرا نبض می‌زند و شمارنده نشان می‌دهد',
+         strpos($selfSrc, '.tasks-btn.busy{border-color:#22c55e') !== false
+      && strpos($selfSrc, '@keyframes tmPulse') !== false
+      && strpos($selfSrc, '.tasks-btn.busy .tasks-badge{display:flex}') !== false);
+
+    $add('10.19', 'دکمهٔ تازه همان قواعدِ z-index دکمه‌های قدیمی را دارد',
+         strpos($selfSrc, '.tasks-btn' . '{z-index:10050}') !== false
+      && strpos($selfSrc, 'body.modal-open .tasks-btn' . '{z-index:10}') !== false
+      && strpos($selfSrc, 'body.spanel-open .tasks-btn{box-shadow') !== false);
+
+    $add('10.19', 'دکمه در موبایل جابه‌جا می‌شود تا روی ☰ و ⛶ نیفتد',
+         strpos($selfSrc, '@media(max-width:620px){.tasks-btn{left:auto;right:10px;top:auto;bottom:14px}') !== false);
+
+    $add('10.19', 'نوارِ پیشرفت حالتِ «نامعین» برای کارهای بی‌کل دارد',
+         strpos($selfSrc, '.tmbar.ind>i{width:35%') !== false
+      && strpos($selfSrc, "if(t.percent>=0) h+='<div class=\"tmbar\">") !== false);
+
+    $add('10.19', 'پنجره باز که باشد تندتر و بسته که باشد کندتر poll می‌شود',
+         strpos($selfSrc, 'tmTimer=setInterval(tmPulse,2500);') !== false
+      && strpos($selfSrc, 'if(!tmTimer) tmPulse(); },15000)') !== false);
+
+    $add('10.19', 'توقف/پاک/پاک‌سازی/جابه‌جایی هر کدام تابعِ خودشان را دارند',
+         strpos($selfSrc, 'function tmStop(key)') !== false
+      && strpos($selfSrc, 'function tmClear(key)') !== false
+      && strpos($selfSrc, 'function tmClearAll()') !== false
+      && strpos($selfSrc, 'function tmMove(id,dir)') !== false);
+
+    $add('10.19', 'پاک‌سازیِ گروهی قبل از اجرا تأیید می‌گیرد',
+         strpos($selfSrc, "if(!confirm('ردِ همهٔ کارهای تمام‌شده و رهاشده پاک شود؟") !== false);
+
+    $add('10.19', 'پنجره با Esc و با کلیک روی پس‌زمینه بسته می‌شود',
+         strpos($selfSrc, "if(e.key==='Escape'&&document.getElementById('tmModal'))tmClose();") !== false
+      && strpos($selfSrc, "m.addEventListener('click',function(e){if(e.target===m)tmClose();});") !== false);
+
+    $add('10.19', 'فیلترِ «فقط فعال‌ها» کارهای تمام‌شده را پنهان می‌کند',
+         strpos($selfSrc, "tasks=tasks.filter(t=>t.state==='running'||t.state==='stale')") !== false);
+
+    $add('10.19', 'کارِ رهاشده در رابط توضیحِ روشن می‌گیرد، نه فقط برچسب',
+         strpos($selfSrc, 'این کار مدت‌هاست خبری نداده') !== false);
+
+    $add('10.19', 'ردیفِ کارِ زمان‌بندی‌شده شمارهٔ نوبت و دکمه‌های ترتیب دارد',
+         strpos($selfSrc, 'class="tmrank" title="نوبتِ اجرا"') !== false
+      && strpos($selfSrc, "tmMove(\\'')") === false
+      && strpos($selfSrc, 'title="بردن به ابتدای صف"') !== false);
+
+    $add('10.19', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '19', '>=')
+      && strpos($selfSrc, 'v:' . "'10.19'") !== false);
 
 /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
@@ -31682,6 +32179,54 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 /* v9.61: دکمهٔ «تمام‌عرض کردن منو» کنار همبرگر — پنل تنظیمات را به‌جای
    ۴۰۰ پیکسل، تمام عرض صفحه می‌کند تا همهٔ محتوا/بخش‌ها در یک نگاه باز شوند. */
 .fullwidth-btn{position:fixed;top:10px;left:60px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.fullwidth-btn:hover{background:#334155}.fullwidth-btn.active{background:#7c3aed;color:#fff}.settings-panel.full{width:100vw;max-width:100vw;left:0}.settings-panel.full .smenu-body.open{max-height:none;overflow:visible}
+/* v10.19 (۳۲): دکمهٔ مدیر وظیفه — سومین دکمهٔ شناورِ هدر، کنارِ ☰ و ⛶ */
+.tasks-btn{position:fixed;top:10px;left:110px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:19px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}
+.tasks-btn:hover{background:#334155}
+.tasks-btn.active{background:#0891b2;color:#fff}
+/* وقتی کاری در حال اجراست دکمه نفس می‌کشد — تنها راهی که کاربر بدونِ
+   باز کردنِ چیزی بفهمد پس‌زمینه مشغول است */
+.tasks-btn.busy{border-color:#22c55e;background:#14321f;color:#86efac;animation:tmPulse 1.8s ease-in-out infinite}
+@keyframes tmPulse{0%,100%{box-shadow:0 2px 12px rgba(0,0,0,.4),0 0 0 0 rgba(34,197,94,.55)}50%{box-shadow:0 2px 12px rgba(0,0,0,.4),0 0 0 7px rgba(34,197,94,0)}}
+.tasks-badge{position:absolute;top:-5px;right:-5px;min-width:18px;height:18px;padding:0 4px;border-radius:9px;background:#22c55e;color:#04210f;font-size:10px;font-weight:800;display:none;align-items:center;justify-content:center;box-shadow:0 1px 5px rgba(0,0,0,.5)}
+.tasks-btn.busy .tasks-badge{display:flex}
+.tasks-btn.warn{border-color:#f59e0b;background:#3a2a0c;color:#fcd34d;animation:none}
+.tasks-btn.warn .tasks-badge{display:flex;background:#f59e0b;color:#3a2a0c}
+.tmc{border:1px solid #334155;border-radius:10px;background:#111c31;padding:9px 11px;margin-bottom:8px;transition:border-color .2s,background .2s}
+.tmc:hover{border-color:#475569}
+.tmc.run{border-color:#22c55e55;background:#0f2419}
+.tmc.stale{border-color:#f59e0b66;background:#2a1f08}
+.tmc.done{border-color:#33415588}
+.tmc.idle{opacity:.62}
+.tmc-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tmc-t{font-weight:700;color:#e2e8f0;font-size:12.5px}
+.tmc-tab{font-size:9px;color:#64748b;background:#0f172a;border:1px solid #263449;border-radius:5px;padding:1px 6px}
+.tmc-badge{font-size:9.5px;font-weight:700;border-radius:5px;padding:2px 7px}
+.tmb-run{background:#14532d;color:#86efac}.tmb-stale{background:#78350f;color:#fcd34d}
+.tmb-done{background:#1e3a5f;color:#93c5fd}.tmb-idle{background:#1e293b;color:#64748b}
+/* نوارِ پیشرفت؛ حالتِ نامعین برای کارهایی که «کل» را نمی‌دانند */
+.tmbar{height:6px;border-radius:4px;background:#0b1220;overflow:hidden;margin-top:7px;border:1px solid #1e293b}
+.tmbar>i{display:block;height:100%;background:linear-gradient(90deg,#22c55e,#67e8f9);transition:width .4s ease}
+.tmbar.ind>i{width:35%;background:linear-gradient(90deg,transparent,#22c55e,transparent);animation:tmSlide 1.4s linear infinite}
+@keyframes tmSlide{0%{transform:translateX(-120%)}100%{transform:translateX(340%)}}
+.tmstat{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
+.tmstat span{font-size:9.5px;color:#94a3b8;background:#0f172a;border:1px solid #263449;border-radius:5px;padding:2px 7px}
+.tmstat b{color:#67e8f9;font-weight:700}
+.tmlog{margin-top:7px;background:#0a1120;border:1px solid #1e293b;border-radius:7px;padding:6px 8px;max-height:96px;overflow:auto;font-size:10px;color:#94a3b8;line-height:1.75;white-space:pre-wrap}
+.tmrow{display:flex;align-items:center;gap:7px;padding:7px 9px;border:1px solid #334155;border-radius:9px;background:#111c31;margin-bottom:6px}
+.tmrow.off{opacity:.5}
+.tmord{display:flex;flex-direction:column;gap:2px}
+.tmord button{width:22px;height:15px;line-height:1;padding:0;font-size:9px;border-radius:4px;background:#1e293b;border:1px solid #334155;color:#94a3b8;cursor:pointer}
+.tmord button:hover:not(:disabled){background:#334155;color:#e2e8f0}
+.tmord button:disabled{opacity:.28;cursor:default}
+.tmrank{min-width:22px;height:22px;border-radius:6px;background:#0891b2;color:#04212b;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center}
+/* قواعدِ همزیستی با ☰ و ⛶ — جداگانه نوشته شده‌اند تا رشته‌های اصلیِ
+   آن دو دست‌نخورده بمانند (selftest عیناً همان‌ها را چک می‌کند) */
+.tasks-btn{z-index:10050}
+body.spanel-open .tasks-btn{box-shadow:0 2px 14px rgba(0,0,0,.65)}
+body.modal-open .tasks-btn{z-index:10}
+html[data-fx="on"] .tasks-btn{transition:background-color .2s,transform .25s var(--fx-ease),box-shadow .25s var(--fx-ease);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+html[data-fx="on"] .tasks-btn:hover{transform:translateY(-2px) scale(1.06);box-shadow:0 8px 24px rgba(0,0,0,.7)}
+@media(max-width:620px){.tasks-btn{left:auto;right:10px;top:auto;bottom:14px}html[data-fx="on"] .tasks-btn{backdrop-filter:none;-webkit-backdrop-filter:none}}
 /* v9.94 (۸الف): دکمه‌های ☰ و ⛶ همیشه بالای پنل تنظیمات بمانند.
    قبلاً z-index:10001 بود ولی پنل (z-index:9999) با پس‌زمینهٔ مات و
    عرضِ 100vw در حالت «تمام‌عرض» روی آن‌ها می‌افتاد و کلیک را می‌بلعید. */
@@ -31994,6 +32539,7 @@ html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-
 <body>
 <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleSettingsPanel()">☰</button>
 <button class="fullwidth-btn" id="fullBtn" onclick="toggleFullSettings()" title="تمام عرض کردن منو و محتویات آن">⛶</button>
+<button class="tasks-btn" id="tasksBtn" onclick="tmOpen()" title="مدیر وظیفه — کارهای در حال اجرا">🗂<span class="tasks-badge" id="tasksBadge">0</span></button>
 <div class="container">
 <h1><span class="h1-name"><span class="h1-ico">🛒</span> <span class="h1-txt">اسکرپر</span></span>
   <span class="app-ver" id="appVer" title="نسخهٔ کد — برای بررسی به‌روزرسانی کلیک کنید"
@@ -37763,6 +38309,40 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.19', t:'🗂 مدیر وظیفه — یک پنجره برای همهٔ کارهای پس‌زمینه', items:[
+    '🗂 <b>مسئله: نمی‌شد فهمید الان چه چیزی در حال اجراست.</b> کارهای بلندمدتِ',
+    '   برنامه هرکدام در تبِ خودشان دفن شده بودند — ارسال به باسلام یک‌جا،',
+    '   استخراج جای دیگر، حذفِ تکراری و ایجنت و تستِ مدل‌ها هرکدام گوشه‌ای.',
+    '   برای اینکه بدانی پس‌زمینه مشغول است یا نه باید تب‌به‌تب می‌گشتی، و برای',
+    '   متوقف‌کردنِ یک کار باید همان تب را پیدا می‌کردی.',
+    '🗂 <b>حالا یک دکمهٔ 🗂 کنارِ ☰ و ⛶ در بالای صفحه</b> هست که از هر تبی در',
+    '   دسترس است و «مدیر وظیفه» را باز می‌کند: فهرستِ زندهٔ همهٔ کارها با',
+    '   وضعیت، نوارِ پیشرفت، شمارنده‌ها (ارسال‌شده/ناموفق/به‌روز‌شده) و شش خطِ',
+    '   آخرِ لاگِ هر کار — همه در یک نگاه.',
+    '🟢 <b>خودِ دکمه هم خبر می‌دهد.</b> وقتی کاری در حال اجراست سبز می‌شود و',
+    '   نبض می‌زند، با شمارندهٔ تعدادِ کارهای فعال روی گوشه‌اش. پس بدونِ باز',
+    '   کردنِ چیزی می‌فهمی پس‌زمینه مشغول است. اگر کارِ رهاشده‌ای باشد نارنجی',
+    '   می‌شود.',
+    '⚠ <b>تشخیصِ کارِ رهاشده — چیزی که تا حالا اصلاً وجود نداشت.</b> اگر پردازهٔ',
+    '   یک کار وسطِ راه کشته شود (تایم‌اوتِ هاست، ری‌استارتِ PHP)، فایلِ',
+    '   پیشرفتش تا ابد می‌گوید «در حال اجرا» و دکمهٔ شروعِ دوباره قفل می‌ماند.',
+    '   حالا کاری که بیش از ۵ دقیقه خبری نداده «رهاشده» علامت می‌خورد و با یک',
+    '   کلیک آزاد می‌شود — قفلِ جامانده‌اش هم برداشته می‌شود.',
+    '⏹ <b>توقف و پاک‌سازی از همان‌جا.</b> هر کارِ در حال اجرا دکمهٔ توقف دارد که',
+    '   دقیقاً همان سیگنالِ همیشگیِ خودش را می‌فرستد (رفتارِ کارها ذره‌ای تغییر',
+    '   نکرده). کارهای تمام‌شده و رهاشده دکمهٔ «پاک» دارند، و یک دکمهٔ',
+    '   «🧽 پاک‌سازی» همهٔ ردهای کهنه را یک‌جا جمع می‌کند — کارهای در حال اجرا',
+    '   دست نمی‌خورند.',
+    '↕ <b>اولویت‌بندیِ کارهای زمان‌بندی‌شده.</b> صفِ ایجنتِ خودکار در هر تیک فقط',
+    '   چند کارِ اول را می‌دواند، پس ترتیبِ صف واقعاً روی نوبتِ اجرا اثر دارد؛',
+    '   ولی تا حالا تغییرِ این ترتیب فقط با حذف و ساختِ دوبارهٔ کار ممکن بود.',
+    '   حالا هر کار دکمه‌های ▲ ▼ و «⤒ اول» دارد و شمارهٔ نوبتش را نشان می‌دهد.',
+    '🔎 <b>فیلترِ «فقط فعال‌ها»</b> برای وقتی که ده‌ها ردِ قدیمی جلوی دیدت را',
+    '   گرفته‌اند. پنجره هر ۲.۵ ثانیه خودش را تازه می‌کند و با Esc بسته می‌شود.',
+    '🧱 پشتِ کار یک «رجیستری» نشسته: هر کار یک ردیف است که می‌گوید وضعیتش را',
+    '   از کجا بخوان و با چه چیزی متوقفش کن. افزودنِ کارِ جدید در آینده یعنی یک',
+    '   ردیفِ تازه، نه دست‌کاریِ رابط.'
+  ]},
   {v:'10.18', t:'🩹 پاسخِ کلادفلر شناخته شد · ↻ تلاشِ دوبارهٔ پایانِ صفِ تست · 📄 عبور از صفحهٔ خرابِ باسلام', items:[
     '🧩 <b>۳۱الف — «پاسخ خالی» روی مدل‌هایی که واقعاً جواب داده بودند.</b> بعضی',
     '   مدل‌های کلادفلر جوابشان را در <code>result.choices[0].message.content</code>',
@@ -43704,6 +44284,231 @@ function aiCandReplyTest(){
   setTimeout(()=>{const i=$('aiCandReplyInput');if(i)i.focus();},50);
 }
 function aiCandReplyClose(){const m=document.getElementById('aiCandReplyModal');if(m)m.remove();}
+
+/* ==================================================================
+ *  v10.19 (۳۲): مدیر وظیفه — رابطِ کاربری
+ *
+ *  یک پنجرهٔ واحد که همهٔ کارهای پس‌زمینه را نشان می‌دهد و می‌گذارد
+ *  متوقف/پاک/مرتب‌شان کنی. دو بخش دارد: «کارهای الان» (وضعیتِ زندهٔ
+ *  ۱۰ کارِ رجیستری) و «کارهای زمان‌بندی‌شده» (صفِ ایجنتِ خودکار که
+ *  ترتیبش واقعاً روی نوبتِ اجرا اثر دارد).
+ *
+ *  نکتهٔ طراحی: نبضِ دکمهٔ هدر مستقل از باز بودنِ پنجره کار می‌کند و
+ *  کند (هر ۱۵ ثانیه) است؛ وقتی پنجره باز است تندتر (هر ۲.۵ ثانیه)
+ *  می‌شود. هدف این است که پولینگِ دائمی روی هاستِ اشتراکی بار نیندازد
+ *  ولی کاربر همیشه بداند چیزی در حال اجراست.
+ * ================================================================== */
+let tmTimer=null, tmPulseTimer=null, tmData=null, tmBusy=false, tmOnlyActive=false;
+
+/** فاصلهٔ زمانی را خوانا می‌کند: «۴۲ ثانیه»، «۳ دقیقه»، «۲ ساعت» */
+function tmAgo(sec){
+  sec=Math.max(0,parseInt(sec)||0);
+  if(sec<60)   return toFa(sec)+' ثانیه';
+  if(sec<3600) return toFa(Math.floor(sec/60))+' دقیقه';
+  if(sec<86400)return toFa(Math.floor(sec/3600))+' ساعت';
+  return toFa(Math.floor(sec/86400))+' روز';
+}
+
+/** نبضِ دکمهٔ هدر — سبک‌ترین درخواستِ ممکن، فقط برای شمارشِ کارهای فعال */
+function tmPulse(){
+  fetch('?tasks_list=1').then(r=>r.json()).then(d=>{
+    if(!d||!d.ok)return;
+    tmData=d;
+    tmPaintBtn(d);
+    if(document.getElementById('tmModal')) tmRender();
+  }).catch(()=>{});
+}
+
+/** ظاهرِ دکمه: سبزِ نبض‌دار = کاری در حال اجرا، نارنجی = کارِ رهاشده */
+function tmPaintBtn(d){
+  const b=document.getElementById('tasksBtn'), n=document.getElementById('tasksBadge');
+  if(!b||!n)return;
+  const run=parseInt(d.running)||0, st=parseInt(d.stale)||0;
+  b.classList.toggle('busy', run>0);
+  b.classList.toggle('warn', run===0 && st>0);
+  n.textContent=toFa(run>0?run:st);
+  b.title = run>0 ? (toFa(run)+' کار در حال اجرا — مدیر وظیفه')
+          : st>0  ? (toFa(st)+' کارِ رهاشده — مدیر وظیفه')
+                  : 'مدیر وظیفه — کارهای پس‌زمینه';
+}
+
+function tmOpen(){
+  let m=document.getElementById('tmModal'); if(m){tmClose();return;}
+  m=document.createElement('div'); m.id='tmModal'; m.className='bsl-modal-overlay';
+  m.innerHTML='<div class="bsl-modal" style="width:900px;max-width:96vw">'
+    +'<div class="bsl-modal-head"><h2>🗂 مدیر وظیفه</h2>'
+    +'<div style="display:flex;gap:6px;align-items:center">'
+    +'<label style="font-size:10px;color:#94a3b8;display:flex;gap:4px;align-items:center;cursor:pointer">'
+    +'<input type="checkbox" id="tmOnlyActive" onchange="tmToggleFilter()"> فقط فعال‌ها</label>'
+    +'<button class="btn btn-gray" onclick="tmClearAll()" style="font-size:10px;padding:4px 9px" title="پاک‌کردنِ ردِ همهٔ کارهای تمام‌شده">🧽 پاک‌سازی</button>'
+    +'<button class="btn btn-gray" onclick="tmClose()" style="font-size:11px;padding:4px 9px">✕</button></div></div>'
+    +'<div class="bsl-modal-body" id="tmBody" style="min-height:320px;max-height:72vh;overflow:auto;padding:12px">'
+    +'<div style="color:#93c5fd;font-size:11px">⏳ در حال خواندنِ وضعیت…</div></div></div>';
+  m.addEventListener('click',function(e){if(e.target===m)tmClose();});
+  document.body.appendChild(m);
+  document.body.classList.add('modal-open');
+  const b=document.getElementById('tasksBtn'); if(b)b.classList.add('active');
+  const c=document.getElementById('tmOnlyActive'); if(c)c.checked=tmOnlyActive;
+  if(tmData)tmRender();
+  tmPulse();
+  if(tmTimer)clearInterval(tmTimer);
+  tmTimer=setInterval(tmPulse,2500);
+}
+
+function tmClose(){
+  const m=document.getElementById('tmModal'); if(m)m.remove();
+  document.body.classList.remove('modal-open');
+  const b=document.getElementById('tasksBtn'); if(b)b.classList.remove('active');
+  if(tmTimer){clearInterval(tmTimer);tmTimer=null;}
+}
+
+function tmToggleFilter(){
+  const c=document.getElementById('tmOnlyActive');
+  tmOnlyActive=!!(c&&c.checked);
+  tmRender();
+}
+
+/** کارتِ یک کارِ پس‌زمینه */
+function tmCard(t){
+  const lbl={running:'در حال اجرا',stale:'رهاشده',done:'تمام‌شده',idle:'بی‌کار'}[t.state]||t.state;
+  const cls={running:'run',stale:'stale',done:'done',idle:'idle'}[t.state]||'idle';
+  const bcl={running:'tmb-run',stale:'tmb-stale',done:'tmb-done',idle:'tmb-idle'}[t.state]||'tmb-idle';
+  let h='<div class="tmc '+cls+'">'
+    +'<div class="tmc-head"><span style="font-size:15px">'+esc(t.icon)+'</span>'
+    +'<span class="tmc-t">'+esc(t.title)+'</span>'
+    +'<span class="tmc-tab">'+esc(t.tab)+'</span>'
+    +'<span class="tmc-badge '+bcl+'">'+esc(lbl)+'</span>';
+  if(t.cancelled) h+='<span class="tmc-badge tmb-stale">لغو شده</span>';
+  h+='<span style="flex:1"></span>';
+  if(t.stoppable)
+    h+='<button class="btn btn-red" style="font-size:10px;padding:3px 10px" onclick="tmStop(\''+jsAttr(t.key)+'\')">⏹ توقف</button>';
+  if(t.clearable)
+    h+='<button class="btn btn-gray" style="font-size:10px;padding:3px 10px" onclick="tmClear(\''+jsAttr(t.key)+'\')" title="حذفِ ردِ این کار">🗑 پاک</button>';
+  h+='</div>';
+
+  /* خطِ توضیح: مرحله، پیشرفتِ عددی، آخرین به‌روزرسانی */
+  const bits=[];
+  if(t.phase) bits.push(esc(t.phase));
+  if(t.total>0) bits.push(toFa(t.current)+' از '+toFa(t.total));
+  if(t.ts>0) bits.push('آخرین خبر: '+tmAgo(t.age)+' پیش');
+  if(bits.length) h+='<div style="font-size:10px;color:#94a3b8;margin-top:5px">'+bits.join(' · ')+'</div>';
+  if(t.last) h+='<div style="font-size:10px;color:#64748b;margin-top:3px" dir="auto">↳ '+esc(t.last)+'</div>';
+
+  /* نوارِ پیشرفت — percent = -1 یعنی «کل نامعلوم است» */
+  if(t.state==='running'||t.state==='stale'){
+    if(t.percent>=0) h+='<div class="tmbar"><i style="width:'+t.percent+'%"></i></div>';
+    else             h+='<div class="tmbar ind"><i></i></div>';
+  }
+  if((t.stats||[]).length){
+    h+='<div class="tmstat">';
+    t.stats.forEach(x=>{h+='<span>'+esc(x.k)+' <b>'+toFa(x.v)+'</b></span>';});
+    h+='</div>';
+  }
+  if(t.state==='stale')
+    h+='<div style="font-size:10px;color:#fcd34d;margin-top:6px">⚠ این کار مدت‌هاست خبری نداده — احتمالاً پردازه‌اش وسطِ کار قطع شده. با «پاک» آزادش کنید تا بتوانید دوباره شروع کنید.</div>';
+  if((t.log||[]).length)
+    h+='<div class="tmlog">'+t.log.map(l=>esc(l)).join('\n')+'</div>';
+  return h+'</div>';
+}
+
+/** ردیفِ یک کارِ زمان‌بندی‌شده با دکمه‌های اولویت */
+function tmJobRow(j,i,n){
+  const first=(i===0), last=(i===n-1);
+  const modeLbl={sim:'شبیه‌سازی',dry:'آزمایشی',live:'واقعی'}[j.mode]||j.mode||'';
+  let h='<div class="tmrow'+(j.enabled?'':' off')+'">'
+    +'<div class="tmord">'
+    +'<button onclick="tmMove(\''+jsAttr(j.id)+'\',\'up\')" '+(first?'disabled':'')+' title="یک پله بالا">▲</button>'
+    +'<button onclick="tmMove(\''+jsAttr(j.id)+'\',\'down\')" '+(last?'disabled':'')+' title="یک پله پایین">▼</button></div>'
+    +'<div class="tmrank" title="نوبتِ اجرا">'+toFa(i+1)+'</div>'
+    +'<div style="flex:1;min-width:0">'
+    +'<div style="font-size:11.5px;color:'+(j.enabled?'#e2e8f0':'#64748b')+';font-weight:700">'+esc(j.title||j.id)+'</div>'
+    +'<div style="font-size:9.5px;color:#64748b;margin-top:2px">'
+    +esc(modeLbl)+' · '+(j.due?'<span style="color:#86efac">اکنون نوبتش است</span>':esc(j.next_label||''))
+    +(parseInt(j.runs)>0?' · '+toFa(j.runs)+' اجرا':'')
+    +(parseInt(j.fails)>0?' · <span style="color:#f87171">'+toFa(j.fails)+' خطا</span>':'')
+    +'</div></div>'
+    +'<button class="btn btn-gray" style="font-size:9px;padding:3px 8px" onclick="tmMove(\''+jsAttr(j.id)+'\',\'top\')" '+(first?'disabled':'')+' title="بردن به ابتدای صف">⤒ اول</button>'
+    +'</div>';
+  return h;
+}
+
+function tmRender(){
+  const body=document.getElementById('tmBody'); if(!body||!tmData)return;
+  const d=tmData;
+  let tasks=(d.tasks||[]);
+  if(tmOnlyActive) tasks=tasks.filter(t=>t.state==='running'||t.state==='stale');
+  const run=parseInt(d.running)||0, st=parseInt(d.stale)||0;
+
+  let h='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">'
+    +'<span class="tmc-badge '+(run>0?'tmb-run':'tmb-idle')+'">'+toFa(run)+' در حال اجرا</span>'
+    +(st>0?'<span class="tmc-badge tmb-stale">'+toFa(st)+' رهاشده</span>':'')
+    +'<span class="tmc-badge tmb-done">'+toFa((d.jobs||[]).length)+' کارِ زمان‌بندی‌شده</span>'
+    +'<span style="flex:1"></span>'
+    +'<span style="font-size:9.5px;color:#64748b;align-self:center">به‌روزرسانیِ خودکار هر ۲.۵ ثانیه</span></div>';
+
+  h+='<div style="font-size:11px;color:#67e8f9;font-weight:700;margin:4px 0 7px">▸ کارهای پس‌زمینه</div>';
+  if(!tasks.length) h+='<div style="color:#64748b;font-size:11px;padding:14px;text-align:center">'+(tmOnlyActive?'هیچ کارِ فعالی نیست.':'کاری ثبت نشده.')+'</div>';
+  else tasks.forEach(t=>{h+=tmCard(t);});
+
+  const jobs=d.jobs||[];
+  h+='<div style="font-size:11px;color:#c084fc;font-weight:700;margin:14px 0 4px">▸ کارهای زمان‌بندی‌شده — اولویت با ترتیبِ صف</div>'
+    +'<div style="font-size:9.5px;color:#64748b;margin-bottom:7px">در هر تیک فقط چند کارِ اولِ صف اجرا می‌شوند، پس کارِ بالاتر زودتر نوبت می‌گیرد.</div>';
+  if(!jobs.length) h+='<div style="color:#64748b;font-size:11px;padding:12px;text-align:center">کارِ زمان‌بندی‌شده‌ای تعریف نشده.</div>';
+  else jobs.forEach((j,i)=>{h+=tmJobRow(j,i,jobs.length);});
+
+  body.innerHTML=h;
+}
+
+function tmStop(key){
+  if(tmBusy)return; tmBusy=true;
+  fetch('?tasks_stop=1&key='+encodeURIComponent(key)).then(r=>r.json()).then(d=>{
+    tmBusy=false;
+    if(d&&d.ok) showToast('⏹ درخواستِ توقف ثبت شد — کار پس از مرحلهٔ جاری می‌ایستد');
+    else showToast('✗ '+((d&&d.error)||'توقف ناموفق'),true);
+    tmPulse();
+  }).catch(()=>{tmBusy=false;showToast('✗ خطا شبکه',true);});
+}
+
+function tmClear(key){
+  if(tmBusy)return; tmBusy=true;
+  fetch('?tasks_clear=1&key='+encodeURIComponent(key)).then(r=>r.json()).then(d=>{
+    tmBusy=false;
+    if(d&&d.ok) showToast('🗑 ردِ کار پاک شد');
+    else showToast('✗ '+((d&&d.error)||'پاک‌سازی ناموفق'),true);
+    tmPulse();
+  }).catch(()=>{tmBusy=false;showToast('✗ خطا شبکه',true);});
+}
+
+function tmClearAll(){
+  if(!confirm('ردِ همهٔ کارهای تمام‌شده و رهاشده پاک شود؟ کارهای در حال اجرا دست نمی‌خورند.'))return;
+  if(tmBusy)return; tmBusy=true;
+  fetch('?tasks_clear=1&key=all').then(r=>r.json()).then(d=>{
+    tmBusy=false;
+    if(d&&d.ok) showToast('🧽 '+toFa(d.cleared||0)+' کار پاک شد');
+    else showToast('✗ '+((d&&d.error)||'پاک‌سازی ناموفق'),true);
+    tmPulse();
+  }).catch(()=>{tmBusy=false;showToast('✗ خطا شبکه',true);});
+}
+
+function tmMove(id,dir){
+  if(tmBusy)return; tmBusy=true;
+  fetch('?tasks_reorder=1&id='+encodeURIComponent(id)+'&dir='+encodeURIComponent(dir)).then(r=>r.json()).then(d=>{
+    tmBusy=false;
+    if(!d||!d.ok) showToast('✗ '+((d&&d.error)||'جابه‌جایی ناموفق'),true);
+    tmPulse();
+  }).catch(()=>{tmBusy=false;showToast('✗ خطا شبکه',true);});
+}
+
+/* Esc پنجره را می‌بندد — انتظارِ همیشگیِ کاربر از یک مودال */
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&document.getElementById('tmModal'))tmClose();
+});
+
+/* نبضِ کندِ پس‌زمینه: بدونِ باز کردنِ چیزی، دکمهٔ هدر همیشه می‌گوید
+   پس‌زمینه مشغول است یا نه. */
+setTimeout(tmPulse,1500);
+if(!tmPulseTimer) tmPulseTimer=setInterval(function(){ if(!tmTimer) tmPulse(); },15000);
+
 function aiCandReplyRun(){
   const inp=$('aiCandReplyInput');const t=(inp?inp.value:'').trim();if(!t){if(inp)inp.focus();return;}
   const body=$('aiCandReplyBody'); if(!body)return;
