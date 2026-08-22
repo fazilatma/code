@@ -134,7 +134,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.19';
+const APP_VERSION = '10.20';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3563,11 +3563,16 @@ function bslNetCfg(?array $cn = null): array {
 }
 
 /** اجرای یک درخواست باسلام با یک روشِ اتصال مشخص (direct/doh/dns/proxy/worker). */
-function bslReqMode(string $url, string $tk, string $m, $d, bool $mp, array $net, string $mode): array {
-    $ch = curl_init($url);
+/* v10.20 (۳۳الف): ساختِ گزینه‌های cURL یک درخواستِ باسلام، جدا از اجرای آن.
+   تا امروز ساختِ گزینه‌ها و curl_exec در یک تابع قفل شده بودند، برای همین
+   هیچ‌جای مسیر باسلام نمی‌شد چند درخواست را همزمان اجرا کرد. حالا همین یک
+   منبع هم به bslReqMode (تک‌درخواستی) خدمات می‌دهد و هم به bslReqMulti
+   (همزمان با curl_multi) — پس رفتار شبکه در هر دو دقیقاً یکی است. */
+function bslCurlOpts(string $url, string $tk, string $m, $d, bool $mp, array $net, string $mode): array {
     $h = ['Accept: application/json', 'Authorization: Bearer ' . $tk];
     if (!$mp) $h[] = 'Content-Type: application/json';
     $opt = [
+        CURLOPT_URL => $url,
         CURLOPT_RETURNTRANSFER => 1, CURLOPT_FOLLOWLOCATION => 1,
         CURLOPT_CONNECTTIMEOUT => 10, CURLOPT_TIMEOUT => 30,
         CURLOPT_SSL_VERIFYPEER => 0, CURLOPT_SSL_VERIFYHOST => 0,
@@ -3604,12 +3609,98 @@ function bslReqMode(string $url, string $tk, string $m, $d, bool $mp, array $net
     if ($mode !== 'direct' && !empty($net['ipv4']) && defined('CURL_IPRESOLVE_V4')) {
         $opt[CURLOPT_IPRESOLVE] = CURL_IPRESOLVE_V4;
     }
+    return $opt;
+}
+
+function bslReqMode(string $url, string $tk, string $m, $d, bool $mp, array $net, string $mode): array {
+    $opt = bslCurlOpts($url, $tk, $m, $d, $mp, $net, $mode);
+    $ch = curl_init();
     curl_setopt_array($ch, $opt);
     $b = curl_exec($ch); $e = curl_error($ch);
     $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     curl_close($ch);
     return ['ok' => $code >= 200 && $code < 300, 'code' => $code, 'error' => $e,
             'body' => @json_decode($b, true), 'raw' => $b, 'mode' => $mode];
+}
+
+/* =====================================================================
+ *  v10.20 (۳۳الف): اجرای همزمانِ چند درخواستِ باسلام (curl_multi)
+ *
+ *  چرا لازم شد: تیکِ «ارسال به همهٔ غرفه‌ها» از v9.69 وجود داشت ولی
+ *  غرفه‌ها یکی‌یکی و پشتِ‌سرِهم پردازش می‌شدند. با ۳ غرفه و ۵۰ محصول،
+ *  زمانِ ارسال سه برابر می‌شد و هاستِ اشتراکی وسطِ کار تایم‌اوت می‌داد؛
+ *  عملاً کاربر فکر می‌کرد تیک «کار نمی‌کند».
+ *
+ *  حالا محصولِ n برای همهٔ غرفه‌ها همزمان می‌رود: هر غرفه یک هندلِ جدا
+ *  با توکنِ خودش. ورودی آرایه‌ای از ['tk','m','ep','d','mp','net'] است و
+ *  خروجی با همان کلیدها برمی‌گردد (ترتیب حفظ می‌شود).
+ *
+ *  نکته‌های عملی که رعایت شده‌اند:
+ *   • در PHP 8 هندلِ cURL شیء است و نمی‌شود کلیدِ آرایه شود ⇒ نگاشت با
+ *     شمارندهٔ ساده انجام می‌شود.
+ *   • سقفِ همزمانی محدود است (پیش‌فرض ۴، حداکثر ۸) تا باسلام ما را
+ *     محدود نکند؛ درخواست‌ها دسته‌دسته اجرا می‌شوند.
+ *   • سیگنالِ توقف قبل از هر دسته چک می‌شود، دقیقاً مثل bslReq.
+ *   • اگر curl_multi در دسترس نباشد، به اجرای ترتیبی برمی‌گردیم.
+ * ===================================================================== */
+function bslReqMulti(array $jobs, int $concurrency = 4, bool $skipStop = false): array {
+    $out = [];
+    if (!$jobs) return $out;
+    $concurrency = max(1, min(8, $concurrency));
+    if (!function_exists('curl_multi_init')) {
+        foreach ($jobs as $k => $j) {
+            $out[$k] = bslReq((string)($j['tk'] ?? ''), (string)($j['m'] ?? 'GET'), (string)($j['ep'] ?? ''),
+                              $j['d'] ?? null, !empty($j['mp']), $j['net'] ?? null, $skipStop);
+        }
+        return $out;
+    }
+    $keys = array_keys($jobs);
+    for ($off = 0; $off < count($keys); $off += $concurrency) {
+        // توقف وسطِ کار: بقیهٔ دسته‌ها اجرا نمی‌شوند
+        if (!$skipStop) {
+            clearstatcache(true, BSL_STOP_FILE);
+            if (file_exists(BSL_STOP_FILE) && (time() - (int)@filemtime(BSL_STOP_FILE)) <= BSL_STOP_HOLD_SEC) {
+                foreach (array_slice($keys, $off) as $kk) {
+                    $out[$kk] = ['ok' => false, 'code' => 0, 'error' => 'stopped', 'body' => null, 'raw' => '', 'mode' => 'multi'];
+                }
+                return $out;
+            }
+        }
+        $slice = array_slice($keys, $off, $concurrency);
+        $mh = curl_multi_init();
+        $hs = [];   // شمارندهٔ ساده → [هندل، کلید]  (هندل در PHP 8 شیء است)
+        foreach ($slice as $kk) {
+            $j   = $jobs[$kk];
+            $tk  = (string)($j['tk'] ?? '');
+            $net = is_array($j['net'] ?? null) ? $j['net'] : (function_exists('bslNetCfg') ? bslNetCfg() : ['indirect' => false, 'mode' => 'direct']);
+            $url = bslApiBase() . ltrim((string)($j['ep'] ?? ''), '/');
+            // همان روشِ اتصالی که کاربر انتخاب کرده؛ زنجیرهٔ جایگزین اینجا اجرا
+            // نمی‌شود (آن کار برای مسیرِ تک‌درخواستیِ bslReq است)
+            $mmode = !empty($net['indirect']) ? (string)($net['mode'] ?? 'direct') : 'direct';
+            $opt = bslCurlOpts($url, $tk, (string)($j['m'] ?? 'GET'), $j['d'] ?? null, !empty($j['mp']), $net, $mmode);
+            $ch  = curl_init();
+            curl_setopt_array($ch, $opt);
+            curl_multi_add_handle($mh, $ch);
+            $hs[] = ['h' => $ch, 'k' => $kk];
+        }
+        $running = null;
+        do {
+            $st = curl_multi_exec($mh, $running);
+            if ($running) curl_multi_select($mh, 0.5);
+        } while ($running > 0 && $st === CURLM_OK);
+        foreach ($hs as $row) {
+            $ch = $row['h'];
+            $b  = curl_multi_getcontent($ch);
+            $e  = curl_error($ch);
+            $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+            $out[$row['k']] = ['ok' => $code >= 200 && $code < 300, 'code' => $code, 'error' => $e,
+                               'body' => @json_decode((string)$b, true), 'raw' => $b, 'mode' => 'multi'];
+            curl_multi_remove_handle($mh, $ch);
+            curl_close($ch);
+        }
+        curl_multi_close($mh);
+    }
+    return $out;
 }
 
 function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false, ?array $net=null, bool $skipStop=false): array {
@@ -10114,7 +10205,7 @@ if (($_POST['action'] ?? '') === 'save_connections') {
 header('Content-Type: application/json; charset=UTF-8');
 $conn = loadConnections();
 if (isset($_POST['woocommerce'])) { $w = json_decode($_POST['woocommerce'], true) ?: []; $conn['woocommerce'] = ['enabled'=>!empty($w['enabled']),'store_url'=>trim($w['store_url']??''),'consumer_key'=>trim($w['consumer_key']??''),'consumer_secret'=>trim($w['consumer_secret']??''),'default_category'=>(int)($w['default_category']??0),'default_status'=>$w['default_status']??'draft','stock_quantity'=>(int)($w['stock_quantity']??10),'manage_stock'=>!empty($w['manage_stock']),'price_mode'=>in_array(($w['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$w['price_mode']:'none','price_val'=>(float)($w['price_val']??0),'price_round'=>max(0,(int)($w['price_round']??0))]; }
-if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??''),'price_mode'=>in_array(($v['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$v['price_mode']:'none','price_val'=>(float)($v['price_val']??0)];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'net_indirect'=>!empty($b['net_indirect']),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors,'price_mode'=>in_array(($b['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$b['price_mode']:'none','price_val'=>(float)($b['price_val']??0),'price_round'=>max(0,(int)($b['price_round']??0))]; }
+if (isset($_POST['basalam'])) { $b = json_decode($_POST['basalam'], true) ?: []; $fallbackCats=array_values(array_filter(array_map('intval',$b['fallback_cat_ids']??[]),function($v){return $v>0;})); $vendors=[]; if(!empty($b['vendors'])&&is_array($b['vendors'])){foreach($b['vendors'] as $v){$vid=(int)($v['vendor_id']??0);$vt=trim($v['token']??'');if($vid>0&&$vt!=='')$vendors[]=['vendor_id'=>$vid,'token'=>$vt,'name'=>trim($v['name']??''),'shop_name'=>trim($v['shop_name']??''),'price_mode'=>in_array(($v['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$v['price_mode']:'none','price_val'=>(float)($v['price_val']??0)];}} $conn['basalam'] = ['enabled'=>!empty($b['enabled']),'token'=>trim($b['token']??''),'vendor_id'=>(int)($b['vendor_id']??0),'preparation_days'=>(int)($b['preparation_days']??3),'weight'=>(int)($b['weight']??500),'package_weight'=>(int)($b['package_weight']??0),'stock'=>(int)($b['stock']??10),'net_indirect'=>!empty($b['net_indirect']),'category_id'=>(int)($b['category_id']??0),'auto_category'=>!empty($b['auto_category']),'send_all_shops'=>!empty($b['send_all_shops']),'fallback_cat_ids'=>$fallbackCats,'vendors'=>$vendors,'price_mode'=>in_array(($b['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$b['price_mode']:'none','price_val'=>(float)($b['price_val']??0),'price_round'=>max(0,(int)($b['price_round']??0))]; }
 
 if (isset($_POST['ai'])) { $a = json_decode($_POST['ai'], true) ?: []; $conn['ai'] = ['enabled'=>!empty($a['enabled']),'api_key'=>trim($a['api_key']??''),'base_url'=>trim($a['base_url']??'https://dashscope.aliyuncs.com/compatible-mode/v1'),'model'=>trim($a['model']??'qwen-plus'),'temperature'=>(float)($a['temperature']??0.1)]; }
 // v8.61: تنظیمات روش عبور برای سرویس‌های هوش مصنوعی
@@ -11614,6 +11705,216 @@ function bslShopPriceForProfile(array $profile, $rawPrice, array $shop, int $rou
    می‌کنیم: جست‌وجو (bslFindExisting) → اگر بود PATCH (با قیمتِ خودِ آن غرفه)؛
    اگر نبود POST. این تابع خودش کامل است (بدون وابستگی به حلقهٔ اصلی) تا هر
    غرفه با token و قیمتِ خودش پردازش شود. */
+/* v10.20 (۳۳الف): کلیدِ دفترچهٔ نگاشت، جدا برای هر غرفه.
+   باگِ قدیمی: دفترچه (remote map) برای هر محصول فقط یک شناسه نگه می‌داشت و
+   آن شناسه مالِ غرفهٔ پیش‌فرض بود. موقعِ ارسال به غرفهٔ دوم همان شناسه خوانده
+   می‌شد و PATCH با توکنِ غرفهٔ دوم روی محصولِ غرفهٔ اول می‌رفت — که یا ۴۰۳
+   می‌گرفت یا بی‌صدا شکست می‌خورد. حالا هر غرفهٔ غیرپیش‌فرض فضای نامِ خودش را
+   دارد (کلید#vشناسهٔ‌غرفه) و شناسه‌ها با هم قاطی نمی‌شوند. */
+function bslShopMapKey(string $productKey, array $shop): string {
+    if ($productKey === '') return '';
+    if (!empty($shop['is_default'])) return $productKey;
+    $vid = (int)($shop['vendor_id'] ?? 0);
+    return $vid > 0 ? $productKey . '#v' . $vid : $productKey;
+}
+
+/** v10.20 (۳۳الف): شناسهٔ محصول در یک غرفهٔ مشخص را در دفترچه ثبت می‌کند */
+function bslShopMapRecord(array $p, array $shop, int $remoteId, string $title): void {
+    if ($remoteId <= 0) return;
+    $mk = bslShopMapKey((string)($p['key'] ?? ''), $shop);
+    if ($mk === '') return;
+    remoteMapRecord('bsl', [['key' => $mk, 'remote_id' => $remoteId, 'title' => $title]]);
+}
+
+/* v10.20 (۳۳الف): شناسهٔ محصولِ موجود را در چند غرفه «همزمان» پیدا می‌کند.
+   اول دفترچهٔ نگاشتِ همان غرفه (بدون هیچ درخواستی)، بعد برای بقیهٔ غرفه‌ها
+   یک درخواستِ جست‌وجوی عنوان که همه با هم اجرا می‌شوند.
+   خروجی: [vendor_id => product_id] فقط برای غرفه‌هایی که محصول در آن‌ها هست. */
+function bslShopsFindExistingMulti(string $title, string $productKey, array $shops, int $conc = 4): array {
+    $ids = []; $need = [];
+    $map = remoteMapLoad()['bsl'] ?? [];
+    foreach ($shops as $sh) {
+        $vid = (int)($sh['vendor_id'] ?? 0);
+        if ($vid <= 0 || trim((string)($sh['token'] ?? '')) === '') continue;
+        $mk = bslShopMapKey($productKey, $sh);
+        $known = $mk !== '' ? (int)($map[$mk]['id'] ?? 0) : 0;
+        if ($known > 0) { $ids[$vid] = $known; continue; }
+        $need[$vid] = $sh;
+    }
+    if ($need) {
+        $q = bslNormalizeTitle($title);
+        if ($q === '') $q = trim($title);
+        $jobs = [];
+        foreach ($need as $vid => $sh) {
+            $jobs[$vid] = ['tk' => (string)$sh['token'], 'm' => 'GET',
+                'ep' => 'vendors/' . $vid . '/products?per_page=50' . bslStatusQuery()
+                        . '&title=' . urlencode($q)];
+        }
+        foreach (bslReqMulti($jobs, $conc) as $vid => $r) {
+            if (empty($r['ok'])) continue;
+            $rows = $r['body']['data'] ?? [];
+            if (!is_array($rows) || !$rows) continue;
+            $how = '';
+            $hit = findRemoteByTitle($rows, $title, '', 'title', $how);
+            if (is_array($hit) && (int)($hit['id'] ?? 0) > 0) $ids[(int)$vid] = (int)$hit['id'];
+        }
+    }
+    return $ids;
+}
+
+/* =====================================================================
+ *  v10.20 (۳۳الف): ارسالِ «همزمان» یک محصول به چند غرفه
+ *
+ *  تیکِ «ارسال به همهٔ غرفه‌ها» از v9.69 بود ولی غرفه‌ها یکی‌یکی و کاملاً
+ *  ترتیبی پردازش می‌شدند: غرفهٔ دوم تا وقتی کلِ غرفهٔ اول تمام نمی‌شد شروع
+ *  نمی‌کرد. با ۵۰ محصول و ۳ غرفه یعنی سه برابرِ زمان، و روی هاستِ اشتراکی
+ *  معمولاً وسطِ راه تایم‌اوت. برای کاربر شبیهِ «کار نمی‌کند» بود.
+ *
+ *  حالا هر محصول یک بار پردازش می‌شود و همهٔ غرفه‌ها با هم می‌روند:
+ *    فاز ۱ — جست‌وجوی همزمانِ شناسه در همهٔ غرفه‌ها
+ *    فاز ۲ — PATCHِ همزمان برای غرفه‌هایی که محصول را دارند
+ *    فاز ۳ — POSTِ همزمان برای غرفه‌هایی که ندارند
+ *    فاز ۴ — هر غرفه‌ای که در فاز ۲/۳ شکست خورد، از مسیرِ تکیِ آزمودهٔ
+ *            bslUpsertToShop رد می‌شود (جست‌وجوی عمیق، «نام تکراری»،
+ *            دسته‌های جایگزین). یعنی سرعت اضافه شده، ولی هیچ توانایی‌ای
+ *            از دست نرفته.
+ *
+ *  خروجی: [vendor_id => ['ok'=>bool,'id'=>int,'action'=>'created|updated','error'=>string]]
+ * ===================================================================== */
+function bslUpsertManyShops(array $p, array $shops, array $opts, int $conc = 4): array {
+    $out = [];
+    $title = trim((string)($p['title'] ?? ($p['name'] ?? '')));
+    $pKey  = (string)($p['key'] ?? '');
+    if ($title === '') {
+        foreach ($shops as $sh) { $v = (int)($sh['vendor_id'] ?? 0); if ($v > 0) $out[$v] = ['ok' => false, 'error' => 'عنوان خالی']; }
+        return $out;
+    }
+    $round   = (int)($opts['round'] ?? 0);
+    $profile = is_array($opts['profile'] ?? null) ? $opts['profile'] : null;
+
+    // قیمتِ هر غرفه (محاسبهٔ محلی، بدون هیچ درخواستی)
+    $prices = []; $live = [];
+    foreach ($shops as $sh) {
+        $vid = (int)($sh['vendor_id'] ?? 0); $tk = trim((string)($sh['token'] ?? ''));
+        if ($vid <= 0 || $tk === '') continue;
+        $rawP = (string)($p['price'] ?? ($p['orig_price'] ?? ''));
+        if ($profile && $rawP !== '' && extractPriceNum($rawP) > 0) {
+            $pf = bslShopPriceForProfile($profile, $rawP, $sh, $round);
+        } else {
+            $baseP = (int)preg_replace("/[^0-9]/", "", (string)($p['final_price'] ?? '0'));
+            if ($baseP <= 0) { $out[$vid] = ['ok' => false, 'error' => 'قیمت ۰']; continue; }
+            $pf = bslShopPriceFor($baseP, $sh, $round);
+        }
+        if ((int)($pf['price'] ?? 0) <= 0) { $out[$vid] = ['ok' => false, 'error' => 'قیمت نامعتبر']; continue; }
+        $pr = (int)$pf['price'];
+        if ((string)($p['price_unit'] ?? '') !== 'rial') $pr = $pr * 10;
+        $prices[$vid] = $pr; $live[$vid] = $sh;
+    }
+    if (!$live) return $out;
+
+    $stock  = (int)($opts['stock'] ?? 10);
+    $prepD  = (int)($opts['preparation_days'] ?? 3);
+    $weight = (int)($opts['weight'] ?? 500);
+    $pkgW   = (int)($opts['package_weight'] ?? ($weight + 100));
+    $catId  = (int)($opts['category_id'] ?? 0);
+    $autoCat= !empty($opts['auto_category']);
+    $flatCats = is_array($opts['flat_cats'] ?? null) ? $opts['flat_cats'] : [];
+    $cData    = is_array($opts['cdata'] ?? null) ? $opts['cdata'] : [];
+
+    // ---- فاز ۱: شناسه‌ها، همزمان
+    $ids = bslShopsFindExistingMulti($title, $pKey, $live, $conc);
+
+    // ---- فاز ۲: آپدیتِ همزمان
+    $ledger = [];
+    if ($ids) {
+        $jobs = [];
+        foreach ($ids as $vid => $exId) {
+            if (!isset($live[$vid])) continue;
+            $bu = ['primary_price' => $prices[$vid], 'stock' => $stock, 'status' => 2976,
+                   'preparation_days' => $prepD, 'weight' => $weight, 'package_weight' => $pkgW];
+            if ($catId > 0) $bu['category_id'] = $catId;
+            $jobs[$vid] = ['tk' => (string)$live[$vid]['token'], 'm' => 'PATCH',
+                           'ep' => 'products/' . $exId, 'd' => $bu];
+        }
+        $rs = bslReqMulti($jobs, $conc);
+        // موجِ دوم: هرکدام ۴۰۴ گرفت، با مسیرِ غرفه‌ای دوباره امتحان می‌شود
+        $again = [];
+        foreach ($rs as $vid => $r) {
+            if ((int)($r['code'] ?? 0) === 404) {
+                $again[$vid] = ['tk' => (string)$live[$vid]['token'], 'm' => 'PATCH',
+                                'ep' => 'vendors/' . $vid . '/products/' . $ids[$vid], 'd' => $jobs[$vid]['d']];
+            }
+        }
+        if ($again) foreach (bslReqMulti($again, $conc) as $vid => $r2) $rs[$vid] = $r2;
+        foreach ($rs as $vid => $r) {
+            if (!empty($r['ok']) && !empty($r['body']['id'])) {
+                $out[(int)$vid] = ['ok' => true, 'id' => (int)$ids[$vid], 'action' => 'updated'];
+                $ledger[(int)$vid] = (int)$ids[$vid];
+            }
+        }
+    }
+
+    // ---- فاز ۳: ساختِ همزمان برای غرفه‌هایی که محصول را ندارند
+    $toCreate = [];
+    foreach ($live as $vid => $sh) if (empty($out[$vid]['ok'])) $toCreate[$vid] = $sh;
+    if ($toCreate) {
+        $catUsed = $catId;
+        if ($catUsed <= 0 && $autoCat && !empty($flatCats)) {
+            $_ac = autoMatchBslCategory($title, $flatCats);
+            if ($_ac > 0) $catUsed = $_ac;
+        }
+        if ($catUsed > 0 && !empty($cData)) $catUsed = findLeafCategory($catUsed, $cData);
+        $brief = trim(strip_tags((string)($p['short_desc'] ?? '')));
+        $desc  = trim((string)($p['long_desc'] ?? ''));
+        if ($brief === '') $brief = trim(strip_tags($title));
+        if ($desc === '')  $desc  = $brief;
+        $jobs = [];
+        foreach ($toCreate as $vid => $sh) {
+            $bp = ['name' => mb_substr($title, 0, 120), 'brief' => mb_substr($brief, 0, 250),
+                   'description' => $desc, 'primary_price' => $prices[$vid], 'stock' => $stock,
+                   'preparation_days' => $prepD, 'weight' => $weight, 'package_weight' => $pkgW,
+                   'is_wholesale' => false, 'category_id' => $catUsed, 'status' => 3790];
+            if (!empty($p['sku'])) $bp['sku'] = $p['sku'];
+            $jobs[$vid] = ['tk' => (string)$sh['token'], 'm' => 'POST',
+                           'ep' => 'vendors/' . $vid . '/products', 'd' => $bp];
+        }
+        foreach (bslReqMulti($jobs, $conc) as $vid => $r) {
+            if (!empty($r['ok']) && !empty($r['body']['id'])) {
+                $out[(int)$vid] = ['ok' => true, 'id' => (int)$r['body']['id'], 'action' => 'created'];
+                $ledger[(int)$vid] = (int)$r['body']['id'];
+            } else {
+                $em = $r['body']['message'] ?? $r['body']['error'] ?? ($r['error'] ?? '؟');
+                if (is_array($em)) $em = json_encode($em, JSON_UNESCAPED_UNICODE);
+                $out[(int)$vid] = ['ok' => false, 'error' => mb_substr((string)$em, 0, 140)];
+            }
+        }
+    }
+
+    // ---- فاز ۴: هر شکستی از مسیرِ تکیِ کاملِ قدیمی رد می‌شود.
+    //      اگر سیگنالِ توقف رسیده باشد این فاز اجرا نمی‌شود، وگرنه هر غرفه
+    //      یک 'stopped' می‌گیرد و آن محصول بی‌دلیل «خطا» شمرده می‌شود.
+    clearstatcache(true, BSL_STOP_FILE);
+    $__stopNow = file_exists(BSL_STOP_FILE) && (time() - (int)@filemtime(BSL_STOP_FILE)) <= BSL_STOP_HOLD_SEC;
+    foreach ($live as $vid => $sh) {
+        if (!empty($out[$vid]['ok'])) continue;
+        if ($__stopNow) { $out[(int)$vid] = ['ok' => false, 'stopped' => true, 'error' => 'stopped']; continue; }
+        $one = bslUpsertToShop($p, $sh, $opts);
+        $out[(int)$vid] = $one;
+        if (!empty($one['ok']) && (int)($one['id'] ?? 0) > 0) $ledger[(int)$vid] = (int)$one['id'];
+    }
+
+    // شناسه‌ها را برای دفعهٔ بعد ثبت کن تا جست‌وجو لازم نشود
+    if ($ledger && $pKey !== '') {
+        $rows = [];
+        foreach ($ledger as $vid => $rid) {
+            $mk = bslShopMapKey($pKey, $live[$vid]);
+            if ($mk !== '') $rows[] = ['key' => $mk, 'remote_id' => $rid, 'title' => $title];
+        }
+        if ($rows) remoteMapRecord('bsl', $rows);
+    }
+    return $out;
+}
+
 function bslUpsertToShop(array $p, array $shop, array $opts): array {
     $tk   = (string)($shop['token'] ?? '');
     $vid  = (int)($shop['vendor_id'] ?? 0);
@@ -11645,7 +11946,8 @@ function bslUpsertToShop(array $p, array $shop, array $opts): array {
     $flatCats= is_array($opts['flat_cats'] ?? null) ? $opts['flat_cats'] : [];
     $cData   = is_array($opts['cdata'] ?? null) ? $opts['cdata'] : [];
 
-    $existing = bslFindExisting($tk, $vid, $title, (string)($p['key'] ?? ''));
+    // v10.20 (۳۳الف): دفترچهٔ نگاشتِ همین غرفه، نه شناسهٔ غرفهٔ پیش‌فرض
+    $existing = bslFindExisting($tk, $vid, $title, bslShopMapKey((string)($p['key'] ?? ''), $shop));
     $exId = is_array($existing) ? (int)($existing['id'] ?? 0) : 0;
 
     if ($exId > 0) {
@@ -11655,6 +11957,7 @@ function bslUpsertToShop(array $p, array $shop, array $opts): array {
         $r = bslReq($tk, 'PATCH', 'products/' . $exId, $bu);
         if ($r['code'] === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $exId, $bu);
         if (!empty($r['ok']) && !empty($r['body']['id'])) {
+            bslShopMapRecord($p, $shop, $exId, $title);   // v10.20 (۳۳الف)
             return ['ok' => true, 'id' => $exId, 'action' => 'updated'];
         }
         return ['ok' => false, 'error' => 'آپدیت در این غرفه ناموفق: ' . mb_substr((string)($r['body']['message'] ?? ($r['error'] ?? '?')), 0, 120)];
@@ -11677,10 +11980,12 @@ function bslUpsertToShop(array $p, array $shop, array $opts): array {
     if (!empty($p['sku'])) $bp['sku'] = $p['sku'];
     $r = bslReq($tk, 'POST', 'vendors/' . $vid . '/products', $bp);
     if (!empty($r['ok']) && !empty($r['body']['id'])) {
+        bslShopMapRecord($p, $shop, (int)$r['body']['id'], $title);   // v10.20 (۳۳الف)
         return ['ok' => true, 'id' => (int)$r['body']['id'], 'action' => 'created'];
     }
     $fb = bslTryCreateWithFallback($tk, $vid, $bp, $fallback, $title, $autoCat, $flatCats, $cData);
     if (!empty($fb['ok']) && !empty($fb['body']['id'])) {
+        bslShopMapRecord($p, $shop, (int)$fb['body']['id'], $title);  // v10.20 (۳۳الف)
         return ['ok' => true, 'id' => (int)$fb['body']['id'], 'action' => 'created'];
     }
     $em = $r['body']['message'] ?? $r['body']['error'] ?? ($r['error'] ?? '؟');
@@ -19493,7 +19798,151 @@ if (isset($_GET['selftest'])) {
          version_compare(APP_VERSION, '10.' . '18', '>=')
       && strpos($selfSrc, 'v:' . "'10.18'") !== false);
 
-    /* ---------- v10.19 (۳۲): مدیر وظیفه ---------- */
+    /* ---------- v10.20 (۳۳): ارسال همزمانِ چندغرفه‌ای · باکسِ کشویی · نوارِ هدر ---------- */
+    $add('10.20', 'ساختِ گزینه‌های cURL از اجرای آن جدا شده تا موازی‌سازی ممکن شود',
+         strpos($selfSrc, 'function bslCurlOpts(') !== false
+      && strpos($selfSrc, '$opt = bslCurlOpts($url, $tk, $m, $d, $mp, $net, $mode);') !== false
+      && function_exists('bslCurlOpts'));
+
+    $add('10.20', 'گزینه‌های ساخته‌شده خودِ آدرس را هم در خود دارند',
+         (function () {
+             if (!function_exists('bslCurlOpts')) return false;
+             $o = bslCurlOpts('https://x.test/products', 'TK', 'POST', ['a' => 1], false,
+                              ['indirect' => false, 'mode' => 'direct'], 'direct');
+             return ($o[CURLOPT_URL] ?? '') === 'https://x.test/products'
+                 && ($o[CURLOPT_CUSTOMREQUEST] ?? '') === 'POST'
+                 && strpos((string)($o[CURLOPT_POSTFIELDS] ?? ''), '"a":1') !== false
+                 && in_array('Authorization: Bearer TK', (array)($o[CURLOPT_HTTPHEADER] ?? []), true);
+         })());
+
+    $add('10.20', 'لایهٔ اجرای همزمانِ باسلام با curl_multi وجود دارد',
+         strpos($selfSrc, 'function bslReqMulti(') !== false
+      && strpos($selfSrc, 'curl_multi_init()') !== false
+      && strpos($selfSrc, 'curl_multi_add_handle($mh, $ch)') !== false
+      && strpos($selfSrc, 'curl_multi_close($mh)') !== false
+      && function_exists('bslReqMulti'));
+
+    $add('10.20', 'همزمانی سقف دارد و درخواستِ خالی هزینه‌ای ندارد',
+         strpos($selfSrc, '$concurrency = max(1, min(8, $concurrency));') !== false
+      && function_exists('bslReqMulti') && bslReqMulti([]) === []);
+
+    $add('10.20', 'هندلِ cURL هرگز کلیدِ آرایه نمی‌شود (PHP 8 شیء برمی‌گرداند)',
+         strpos($selfSrc, "\$hs[] = ['h' => \$ch, 'k' => \$kk];") !== false);
+
+    $add('10.20', 'ارسالِ همزمانِ یک محصول به چند غرفه پیاده شده',
+         strpos($selfSrc, 'function bslUpsertManyShops(') !== false
+      && strpos($selfSrc, 'function bslShopsFindExistingMulti(') !== false
+      && function_exists('bslUpsertManyShops'));
+
+    $add('10.20', 'هر غرفه فضای نامِ خودش را در دفترچهٔ نگاشت دارد',
+         function_exists('bslShopMapKey')
+      && bslShopMapKey('k1', ['vendor_id' => 7, 'is_default' => true]) === 'k1'
+      && bslShopMapKey('k1', ['vendor_id' => 7]) === 'k1' . '#v7'
+      && bslShopMapKey('', ['vendor_id' => 7]) === '');
+
+    $add('10.20', 'جست‌وجوی شناسه در غرفه‌ها هم از کلیدِ همان غرفه استفاده می‌کند',
+         strpos($selfSrc, 'bslFindExisting($tk, $vid, $title, bslShopMapKey(') !== false
+      && strpos($selfSrc, 'function bslShopMapRecord(') !== false);
+
+    $add('10.20', 'محصولِ بی‌قیمت در همهٔ غرفه‌ها بی‌سروصدا رد نمی‌شود بلکه خطا می‌گیرد',
+         (function () {
+             if (!function_exists('bslUpsertManyShops')) return false;
+             $r = bslUpsertManyShops(['title' => 'x', 'final_price' => '0'],
+                                     [['vendor_id' => 5, 'token' => 't']], []);
+             return isset($r[5]) && empty($r[5]['ok']);
+         })());
+
+    $add('10.20', 'محصولِ بی‌عنوان برای همهٔ غرفه‌ها خطا برمی‌گرداند، نه استثنا',
+         (function () {
+             if (!function_exists('bslUpsertManyShops')) return false;
+             $r = bslUpsertManyShops(['title' => ''], [['vendor_id' => 9, 'token' => 't']], []);
+             return isset($r[9]) && empty($r[9]['ok']) && ($r[9]['error'] ?? '') === 'عنوان خالی';
+         })());
+
+    $add('10.20', 'بک‌اند حلقه را روی محصول می‌بندد و غرفه‌ها را با هم می‌فرستد',
+         strpos($selfSrc, '$__resAll = bslUpsertManyShops($p, $__liveShops, $__shopOpts, $__conc);') !== false
+      && strpos($selfSrc, 'if($__sendAllShops) break;   // v10.20') !== false);
+
+    $add('10.20', 'تیکِ «همهٔ غرفه‌ها» از تنظیماتِ ذخیره‌شده هم خوانده می‌شود',
+         strpos($selfSrc, "!empty(\$__cn2['basalam']['send_all_shops'])") !== false
+      && strpos($selfSrc, "'send_all_shops'=>!empty(\$b['send_all_shops'])") !== false
+      && strpos($selfSrc, 'send_all_shops:$(' . "'bsSendAllShops')?.checked") !== false);
+
+    $add('10.20', 'تیک بعد از رفرش برمی‌گردد و تعداد غرفهٔ فعال را نشان می‌دهد',
+         strpos($selfSrc, "if(\$('bsSendAllShops')){\$('bsSendAllShops').checked=!!b.send_all_shops;") !== false
+      && strpos($selfSrc, 'function bslActiveShopCount()') !== false
+      && strpos($selfSrc, 'function bslRenderShopsHint()') !== false
+      && strpos($selfSrc, 'id="bsShopsHint"') !== false);
+
+    $add('10.20', 'سیگنالِ توقف وسطِ ارسالِ همزمان هم دیده می‌شود',
+         strpos($selfSrc, "\$out[\$kk] = ['ok' => false, 'code' => 0, 'error' => 'stopped'") !== false
+      && strpos($selfSrc, '$__msStop=true; break;') !== false);
+
+    $add('10.20', 'توقفِ خواستهٔ کاربر «خطا» شمرده نمی‌شود',
+         strpos($selfSrc, "elseif(!empty(\$__res['stopped'])||(\$__res['error']??'')==='stopped')") !== false
+      && strpos($selfSrc, "\$out[(int)\$vid] = ['ok' => false, 'stopped' => true, 'error' => 'stopped']; continue;") !== false);
+
+    $add('10.20', 'هر شکستِ موازی از مسیرِ تکیِ کاملِ قدیمی دوباره رد می‌شود',
+         strpos($selfSrc, '$one = bslUpsertToShop($p, $sh, $opts);') !== false
+      && strpos($selfSrc, 'فاز ۴') !== false);
+
+    $add('10.20', 'نبودِ curl_multi برنامه را نمی‌شکند و به مسیرِ ترتیبی برمی‌گردد',
+         strpos($selfSrc, "if (!function_exists('curl_multi_init'))") !== false);
+
+    $add('10.20', 'باکسِ «مشکلات مدل‌ها» کشویی است و پیش‌فرض بسته',
+         strpos($selfSrc, 'let aiDiagOpen=false') !== false
+      && strpos($selfSrc, 'function aiRenderDiagBox(') !== false
+      && strpos($selfSrc, 'function aiToggleDiag()') !== false
+      && strpos($selfSrc, "aiDiagOpen=false; aiDiagSig='';") !== false);
+
+    $add('10.20', 'جزئیاتِ باکس تا کلیک نکنی نمایش داده نمی‌شود',
+         strpos($selfSrc, "'<div id=\"aiDiagBody\" style=\"display:'+(aiDiagOpen?'block':'none')") !== false
+      && strpos($selfSrc, "onclick=\"aiToggleDiag()\"") !== false);
+
+    $add('10.20', 'پولینگِ دوثانیه‌ای باکسِ بازشده را دوباره نمی‌بندد',
+         strpos($selfSrc, "if(db.dataset.sig===sig&&db.dataset.open===(aiDiagOpen?'1':'0'))return;") !== false);
+
+    $add('10.20', 'هر دو حالتِ نارنجی و قرمز از همان باکسِ کشویی رد می‌شوند',
+         strpos($selfSrc, "aiRenderDiagBox(db,'net',netIssues.length,") !== false
+      && strpos($selfSrc, "aiRenderDiagBox(db,'unreach',unreach.length,") !== false);
+
+    $add('10.20', 'سه دکمهٔ هدر در یک نوارِ چسبانِ واحد نشسته‌اند',
+         strpos($selfSrc, '<div class="hdr-tools" id="hdrTools">') !== false
+      && strpos($selfSrc, '.hdr-tools' . '{position:fixed;top:10px;left:10px;right:10px') !== false
+      && strpos($selfSrc, 'display:flex;align-items:stretch;gap:0;height:44px') !== false);
+
+    $add('10.20', 'دکمه‌ها داخلِ نوار شناور نیستند و فاصله‌شان صفر است',
+         strpos($selfSrc, '.hdr-tools .hamburger-btn,.hdr-tools .fullwidth-btn,.hdr-tools .tasks-btn' . '{position:static') !== false
+      && strpos($selfSrc, 'border-radius:0;box-shadow:none;border-right-width:0}') !== false);
+
+    $add('10.20', 'دکمهٔ مدیر وظیفه تمام‌عرضِ باقی‌ماندهٔ نوار را می‌گیرد',
+         strpos($selfSrc, '.hdr-tools .tasks-btn' . '{flex:1 1 auto;width:auto;min-width:0') !== false);
+
+    $add('10.20', 'مدیر وظیفه آیکون و برچسبِ گویا دارد، نه فقط یک تصویرک',
+         strpos($selfSrc, 'class="tasks-lbl">مدیر وظیفه<') !== false
+      && strpos($selfSrc, 'class="tasks-sub" id="tasksSub"') !== false
+      && strpos($selfSrc, '>📋<') !== false);
+
+    $add('10.20', 'زیرنویسِ دکمه وضعیتِ واقعیِ کارها را می‌نویسد',
+         strpos($selfSrc, "sub.textContent = run>0 ? (toFa(run)+' کار در حال اجرا')") !== false
+      && strpos($selfSrc, "if(n.style)n.style.display=(run>0||st>0)?'flex':'none';") !== false);
+
+    $add('10.20', 'نشانگرِ عددی داخلِ نوار جای شناور نمی‌گیرد',
+         strpos($selfSrc, '.hdr-tools .tasks-badge' . '{position:static') !== false);
+
+    $add('10.20', 'در نمایشگرِ خیلی باریک برچسب جمع می‌شود ولی دکمه در نوار می‌ماند',
+         strpos($selfSrc, '@media(max-width:400px){.tasks-lbl{display:none}') !== false
+      && strpos($selfSrc, '.tasks-sub{display:none}') !== false);
+
+    $add('10.20', 'قواعدِ z-index به خودِ نوار منتقل شده‌اند',
+         strpos($selfSrc, 'body.modal-open .hdr-tools' . '{z-index:10}') !== false
+      && strpos($selfSrc, 'body.spanel-open .hdr-tools{box-shadow') !== false);
+
+    $add('10.20', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '20', '>=')
+      && strpos($selfSrc, 'v:' . "'10.20'") !== false);
+
+/* ---------- v10.19 (۳۲): مدیر وظیفه ---------- */
 
     $add('10.19', 'رجیستریِ کارها هر ۱۰ کارِ پس‌زمینه را می‌شناسد',
          (function () {
@@ -19640,7 +20089,7 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "'tasks' => \$rows, 'jobs' => \$jobs,") !== false
       && strpos($selfSrc, "'stale_after' => TASKS_STALE_SEC") !== false);
 
-    $add('10.19', 'دکمهٔ 🗂 در هدر کنارِ ☰ و ⛶ نشسته و مدیر وظیفه را باز می‌کند',
+    $add('10.19', 'دکمهٔ مدیر وظیفه در هدر نشسته و مدیر وظیفه را باز می‌کند',
          strpos($selfSrc, 'class="tasks-btn" id="tasksBtn" onclick="tmOpen()"') !== false
       && strpos($selfSrc, '.tasks-btn{position:fixed;top:10px;left:110px') !== false);
 
@@ -19654,8 +20103,8 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'body.modal-open .tasks-btn' . '{z-index:10}') !== false
       && strpos($selfSrc, 'body.spanel-open .tasks-btn{box-shadow') !== false);
 
-    $add('10.19', 'دکمه در موبایل جابه‌جا می‌شود تا روی ☰ و ⛶ نیفتد',
-         strpos($selfSrc, '@media(max-width:620px){.tasks-btn{left:auto;right:10px;top:auto;bottom:14px}') !== false);
+    $add('10.19', 'دکمه در موبایل هم در همان نوار می‌ماند (v10.20 جایگزین شد)',
+         strpos($selfSrc, '@media(max-width:620px){.hdr-tools .tasks-btn' . '{padding:0 9px;gap:6px}') !== false);
 
     $add('10.19', 'نوارِ پیشرفت حالتِ «نامعین» برای کارهای بی‌کل دارد',
          strpos($selfSrc, '.tmbar.ind>i{width:35%') !== false
@@ -29396,8 +29845,14 @@ else{ $fail++;$bslFailedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'error
    غرفهٔ اضافی محصولات را با bslUpsertToShop می‌سازیم/به‌روز می‌کنیم (جست‌وجو →
    PATCH یا POST با قیمتِ خودِ آن غرفه). اگر تیک خاموش باشد، فقط مثل قبل قیمتِ
    محصولاتِ ازقبل‌موجود در آن غرفه‌ها را با تعدیلِ دولایه به‌روز می‌کنیم. */
-$__sendAllShops = !empty($qCfg['send_all_shops']);
+/* v10.20 (۳۳الف): تیک از سه جا می‌تواند بیاید — درخواستِ همین صف، تنظیماتِ
+   ذخیره‌شدهٔ باسلام، یا صفِ سینکِ خودکار. قبلاً فقط حالتِ اول خوانده می‌شد،
+   برای همین سینکِ خودکار و هر ارسالی که از مسیر دیگری می‌آمد هیچ‌وقت به
+   غرفه‌های اضافی نمی‌رفت. */
 $__cn2=loadConnections();
+$__sendAllShops = isset($qCfg['send_all_shops'])
+    ? !empty($qCfg['send_all_shops'])
+    : !empty($__cn2['basalam']['send_all_shops']);
 $__profiles2=loadProfiles();
 $__profile2=($nextEntry['profile_key'] ?? '')!=='' ? ($__profiles2[$nextEntry['profile_key']] ?? null) : null;
 $__extraShops=bslAllShops($__cn2);
@@ -29414,30 +29869,74 @@ $__shopOpts = [
     'flat_cats' => $bslFlatCats,
     'cdata' => $cData,
 ];
-foreach($__extraShops as $__sh){
-    if(!empty($__sh['is_default'])) continue;
-    $sTk=(string)$__sh['token']; $sVid=(int)$__sh['vendor_id'];
-    if($sTk===''||$sVid<=0) continue;
-    if($__sendAllShops){
-        $shopFixed=0; $shopCreated=0; $shopFail=0;
-        foreach($pd as $__i=>$p){
-            clearstatcache(true,BSL_STOP_FILE);
-            if(file_exists(BSL_STOP_FILE)) break;
-            $__res = bslUpsertToShop($p, $__sh, $__shopOpts);
+/* v10.20 (۳۳الف): فهرستِ غرفه‌های فعالِ غیرپیش‌فرض — همان تعریفِ همیشگی
+   («شناسه>۰ و توکن غیرخالی»)، ولی یک بار حساب می‌شود تا هم برای ارسالِ
+   همزمان و هم برای پیامِ وضعیت به کار برود. */
+$__liveShops=[];
+foreach($__extraShops as $__sh0){
+    if(!empty($__sh0['is_default'])) continue;
+    if(trim((string)($__sh0['token']??''))===''||(int)($__sh0['vendor_id']??0)<=0) continue;
+    $__liveShops[]=$__sh0;
+}
+
+if($__sendAllShops && $__liveShops){
+    /* ============================================================
+       v10.20 (۳۳الف): ارسالِ همزمان به همهٔ غرفه‌های فعال.
+
+       قبلاً: حلقهٔ بیرونی روی غرفه‌ها و حلقهٔ داخلی روی محصولات — یعنی
+       غرفهٔ دوم تا پایانِ کاملِ غرفهٔ اول اصلاً شروع نمی‌شد. با ۵۰ محصول
+       و ۳ غرفه، ۱۵۰ رفت‌وبرگشتِ پشت‌سرهم که روی هاستِ اشتراکی تقریباً
+       همیشه به تایم‌اوت می‌خورد. برای کاربر یعنی «تیک کار نمی‌کند».
+
+       حالا: حلقه روی محصولات است و همهٔ غرفه‌ها برای هر محصول با هم
+       (curl_multi) می‌روند. زمان تقریباً به اندازهٔ کندترین غرفه است،
+       نه جمعِ همه.
+       ============================================================ */
+    $__conc = max(1, min(8, count($__liveShops)));
+    $__shopStat = [];   // vendor_id => [created, updated, failed]
+    foreach($__liveShops as $__sh1) $__shopStat[(int)$__sh1['vendor_id']]=['c'=>0,'u'=>0,'f'=>0];
+    $__msDone=0; $__msStop=false;
+    bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',
+        '🚚 ارسال همزمان به '.count($__liveShops).' غرفهٔ فعال — '.$total.' محصول (همزمانی: '.$__conc.')');
+    foreach($pd as $__i=>$p){
+        clearstatcache(true,BSL_STOP_FILE);
+        if(file_exists(BSL_STOP_FILE)){ $__msStop=true; break; }
+        $__resAll = bslUpsertManyShops($p, $__liveShops, $__shopOpts, $__conc);
+        foreach($__resAll as $__vid=>$__res){
+            $__vid=(int)$__vid;
+            if(!isset($__shopStat[$__vid])) $__shopStat[$__vid]=['c'=>0,'u'=>0,'f'=>0];
             if(!empty($__res['ok'])){
-                if($__res['action']==='created'){$shopCreated++;}
-                else {$shopFixed++;}
+                if(($__res['action']??'')==='created') $__shopStat[$__vid]['c']++;
+                else                                   $__shopStat[$__vid]['u']++;
                 $updated++;
+            } elseif(!empty($__res['stopped'])||($__res['error']??'')==='stopped'){
+                // v10.20: توقفِ خواستهٔ کاربر «خطا» نیست — نه شمرده می‌شود نه
+                // در گزارشِ ناموفق‌ها می‌نشیند، وگرنه هر توقف چند ردیفِ قرمزِ
+                // بی‌معنی به گزارش اضافه می‌کرد.
+                $__msStop=true;
             } else {
-                $shopFail++;
-                $bslFailedList[] = ['title'=>trim($p['title']??$p['name']??''),'key'=>$p['key']??'','error'=>'غرفه '.$sVid.': '.($__res['error']??'?')];
+                $__shopStat[$__vid]['f']++;
+                $bslFailedList[] = ['title'=>trim($p['title']??$p['name']??''),'key'=>$p['key']??'','error'=>'غرفه '.$__vid.': '.($__res['error']??'?')];
             }
-            usleep(($bslDelayMs??500)*1000);
         }
-        if($shopFixed>0||$shopCreated>0||$shopFail>0)
+        $__msDone++;
+        // هر ۵ محصول یک خط وضعیت، تا لاگ پر نشود ولی کاربر بداند زنده است
+        if($__msDone%5===0||$__msDone===$total)
+            bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,mb_substr(trim($p['title']??''),0,30),
+                "🚚 چندغرفه‌ای: $__msDone/$total محصول");
+        usleep(($bslDelayMs??500)*1000);
+    }
+    foreach($__shopStat as $__vid=>$__st){
+        if($__st['c']||$__st['u']||$__st['f'])
             bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',
-                "🏪 غرفهٔ $sVid: $shopCreated ساخته، $shopFixed آپدیت، $shopFail خطا");
-    } else {
+                "🏪 غرفهٔ $__vid: {$__st['c']} ساخته، {$__st['u']} آپدیت، {$__st['f']} خطا");
+    }
+    if($__msStop) bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'','⏹ ارسالِ چندغرفه‌ای با سیگنالِ توقف نیمه‌کاره ماند');
+}
+foreach($__liveShops as $__sh){
+    if($__sendAllShops) break;   // v10.20: مسیرِ همزمانِ بالا کارِ همه را کرده
+    $sTk=(string)$__sh['token']; $sVid=(int)$__sh['vendor_id'];
+    {
         $shopRound=(int)($__cn2['basalam']['price_round']??0);
         $shopFixed=0;
         foreach($pd as $__i=>$p){
@@ -29453,7 +29952,7 @@ foreach($__extraShops as $__sh){
                 $__pf=bslShopPriceFor($__baseP,$__sh,$shopRound);
             }
             if($__pf['price']<=0)continue;
-            $__found=bslFindExisting($sTk,$sVid,$__pt,(string)($p['key']??''));
+            $__found=bslFindExisting($sTk,$sVid,$__pt,bslShopMapKey((string)($p['key']??''),$__sh));   // v10.20 (۳۳الف)
             if(!$__found||(int)($__found['id']??0)<=0) continue;
             $__exId=(int)$__found['id'];
             $__np=$__pf['price'];
@@ -32183,6 +32682,29 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 .tasks-btn{position:fixed;top:10px;left:110px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:19px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}
 .tasks-btn:hover{background:#334155}
 .tasks-btn.active{background:#0891b2;color:#fff}
+/* ==================================================================
+   v10.20 (۳۳ج): سه دکمهٔ هدر در یک نوارِ واقعی می‌نشینند.
+
+   قبلاً هر سه جداگانه position:fixed با left ثابت (۱۰/۶۰/۱۱۰) بودند.
+   نتیجه: بینشان ۶ پیکسل فاصلهٔ نامنظم می‌افتاد، در موبایل دکمهٔ 🗂 به
+   گوشهٔ مخالفِ صفحه پرت می‌شد، و مدیر وظیفه فقط یک آیکونِ 🗂 بی‌برچسب
+   بود که معلوم نبود چیست.
+
+   حالا یک نوارِ فلکسِ چسبان (.hdr-tools) هر سه را نگه می‌دارد؛ دکمه‌ها
+   داخلش با position:static می‌نشینند و کاملاً به هم چسبیده‌اند. دکمهٔ
+   مدیر وظیفه تمام‌عرضِ باقی‌ماندهٔ نوار را می‌گیرد و برچسبِ متنی دارد.
+   ================================================================== */
+.hdr-tools{position:fixed;top:10px;left:10px;right:10px;z-index:10050;display:flex;align-items:stretch;gap:0;height:44px;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.4);overflow:hidden;direction:ltr}
+/* دکمه‌ها داخلِ نوار دیگر شناور نیستند؛ کنار هم و بدون فاصله می‌نشینند */
+.hdr-tools .hamburger-btn,.hdr-tools .fullwidth-btn,.hdr-tools .tasks-btn{position:static;top:auto;left:auto;right:auto;bottom:auto;flex:0 0 auto;height:44px;margin:0;border-radius:0;box-shadow:none;border-right-width:0}
+.hdr-tools .tasks-btn{flex:1 1 auto;width:auto;min-width:0;justify-content:flex-start;gap:8px;padding:0 12px;border-right-width:1px;font-size:17px;overflow:hidden;direction:rtl}
+/* برچسبِ متنی — «گویاتر» یعنی متن هم داشته باشد، نه فقط یک تصویرکِ مبهم */
+.tasks-lbl{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.2px}
+.tasks-sub{font-size:10px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:400;flex:1 1 auto;min-width:0}
+.tasks-btn.busy .tasks-sub{color:#86efac}
+.tasks-btn.warn .tasks-sub{color:#fcd34d}
+/* نشانگرِ عددی داخلِ نوار جای شناور ندارد؛ کنارِ متن می‌نشیند */
+.hdr-tools .tasks-badge{position:static;top:auto;right:auto;box-shadow:none;flex:0 0 auto}
 /* وقتی کاری در حال اجراست دکمه نفس می‌کشد — تنها راهی که کاربر بدونِ
    باز کردنِ چیزی بفهمد پس‌زمینه مشغول است */
 .tasks-btn.busy{border-color:#22c55e;background:#14321f;color:#86efac;animation:tmPulse 1.8s ease-in-out infinite}
@@ -32224,9 +32746,17 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 .tasks-btn{z-index:10050}
 body.spanel-open .tasks-btn{box-shadow:0 2px 14px rgba(0,0,0,.65)}
 body.modal-open .tasks-btn{z-index:10}
+/* v10.20 (۳۳ج): حالا z-index روی خودِ نوار است، نه تک‌تکِ دکمه‌ها */
+body.spanel-open .hdr-tools{box-shadow:0 2px 14px rgba(0,0,0,.65)}
+body.modal-open .hdr-tools{z-index:10}
+.hdr-tools .tasks-btn,.hdr-tools .hamburger-btn,.hdr-tools .fullwidth-btn{z-index:auto}
 html[data-fx="on"] .tasks-btn{transition:background-color .2s,transform .25s var(--fx-ease),box-shadow .25s var(--fx-ease);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 html[data-fx="on"] .tasks-btn:hover{transform:translateY(-2px) scale(1.06);box-shadow:0 8px 24px rgba(0,0,0,.7)}
-@media(max-width:620px){.tasks-btn{left:auto;right:10px;top:auto;bottom:14px}html[data-fx="on"] .tasks-btn{backdrop-filter:none;-webkit-backdrop-filter:none}}
+/* v10.20 (۳۳ج): در موبایل هم دکمه در همان نوار می‌ماند — قبلاً به گوشهٔ
+   پایین-راست پرت می‌شد و از بقیهٔ دکمه‌ها جدا می‌افتاد. فقط زیرنویس حذف
+   می‌شود تا جا کم نیاید. */
+@media(max-width:620px){.hdr-tools .tasks-btn{padding:0 9px;gap:6px}.tasks-sub{display:none}html[data-fx="on"] .tasks-btn{backdrop-filter:none;-webkit-backdrop-filter:none}}
+@media(max-width:400px){.tasks-lbl{display:none}.hdr-tools .tasks-btn{flex:0 0 auto;width:44px;justify-content:center;padding:0}}
 /* v9.94 (۸الف): دکمه‌های ☰ و ⛶ همیشه بالای پنل تنظیمات بمانند.
    قبلاً z-index:10001 بود ولی پنل (z-index:9999) با پس‌زمینهٔ مات و
    عرضِ 100vw در حالت «تمام‌عرض» روی آن‌ها می‌افتاد و کلیک را می‌بلعید. */
@@ -32537,9 +33067,13 @@ html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-
 </style>
 </head>
 <body>
+<!-- v10.20 (۳۳ج): نوارِ ابزارِ هدر — سه دکمه چسبیده به هم؛ مدیر وظیفه
+     تمام‌عرضِ باقی‌مانده را می‌گیرد و برچسبِ گویا دارد -->
+<div class="hdr-tools" id="hdrTools">
 <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleSettingsPanel()">☰</button>
 <button class="fullwidth-btn" id="fullBtn" onclick="toggleFullSettings()" title="تمام عرض کردن منو و محتویات آن">⛶</button>
-<button class="tasks-btn" id="tasksBtn" onclick="tmOpen()" title="مدیر وظیفه — کارهای در حال اجرا">🗂<span class="tasks-badge" id="tasksBadge">0</span></button>
+<button class="tasks-btn" id="tasksBtn" onclick="tmOpen()" title="مدیر وظیفه — کارهای در حال اجرا"><span aria-hidden="true">📋</span><span class="tasks-lbl">مدیر وظیفه</span><span class="tasks-sub" id="tasksSub">کارهای پس‌زمینه</span><span class="tasks-badge" id="tasksBadge">0</span></button>
+</div>
 <div class="container">
 <h1><span class="h1-name"><span class="h1-ico">🛒</span> <span class="h1-txt">اسکرپر</span></span>
   <span class="app-ver" id="appVer" title="نسخهٔ کد — برای بررسی به‌روزرسانی کلیک کنید"
@@ -34806,10 +35340,11 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="alert alert-info" style="margin-bottom:8px">💡 <b id="bsN">۰</b> محصول با قیمت از <span id="bsT2">۰</span> کل</div>
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
 <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:#c4b5fd">
-<input type="checkbox" id="bsSendAllShops" style="width:15px;height:15px">
-<span>🚚 ارسال به همهٔ غرفه‌ها</span>
-<span style="color:#64748b;font-size:9px">(پیش‌فرض + غرفه‌های اضافی، هرکدام با قیمتِ خودش)</span>
+<input type="checkbox" id="bsSendAllShops" onchange="bslToggleAllShops()" style="width:15px;height:15px">
+<span>🚚 ارسال همزمان به همهٔ غرفه‌ها</span>
+<span style="color:#64748b;font-size:9px">(پیش‌فرض + غرفه‌های اضافی، هرکدام با قیمتِ خودش — موازی)</span>
 </label>
+<span id="bsShopsHint" style="font-size:10px;color:#67e8f9"></span>
 </div>
 <div class="cact"><button class="btn btn-cyan" id="bSB" onclick="sendBsl()" style="flex:1">🚀 ارسال باسلام</button><button class="btn btn-green" id="bSBlegacy" onclick="sendBslClient()" style="flex:1">🚀 ارسال فرات</button><button class="btn btn-orange hidden" id="bRB" onclick="sendBsl()" style="flex:1">🔄 تلاش مجدد</button><button class="btn btn-teal" onclick="showBslProductsModal()" style="flex-shrink:0;font-size:12px;padding:6px 10px">🏪 مدیریت جامع محصولات باسلام</button><button class="btn btn-red hidden" id="bST" onclick="stopBslProcess()">⏹ توقف</button></div>
 <div class="progress hidden" id="bP"><div class="progress-bar" id="bPB" style="background:linear-gradient(90deg,#0891b2,#22d3ee)"></div></div>
@@ -35190,12 +35725,38 @@ function renderBslFallbackCats(ids){bslFallbackCatIds=ids;const list=$('bslFallb
 function getBslFallbackCatIds(){return bslFallbackCatIds;}
 function initBslFallbackCatSearch(){const si=$('bslFallbackCatSearch');const dl=$('bslFallbackCatDropList');if(!si||!dl)return;si.onfocus=function(){if(bslAllCats.length>0){dl.style.display='block';renderBslFallbackCatDropList(bslAllCats,'');}};si.onblur=function(){setTimeout(()=>{dl.style.display='none';},200);};si.oninput=function(){const q=si.value.toLowerCase().trim();renderBslFallbackCatDropList(bslAllCats,q);};}
 function renderBslFallbackCatDropList(cats,q){const dl=$('bslFallbackCatDropList');if(!dl)return;dl.innerHTML='';const filtered=cats.filter(c=>!q||c.name.toLowerCase().includes(q)).slice(0,100);if(filtered.length===0){dl.innerHTML='<div style="padding:8px;color:#64748b;font-size:11px;text-align:center">دسته‌ای یافت نشد</div>';return;}filtered.forEach(c=>{const d=document.createElement('div');d.style.cssText='padding:6px 10px;cursor:pointer;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b';d.textContent=c.name+' ('+c.id+')';d.onmousedown=function(){bslFallbackSelectedCatId=c.id;$('bslFallbackCatSearch').value=c.name;dl.style.display='none';};dl.appendChild(d);});}
+/* v10.20 (۳۳الف): تیکِ «ارسال همزمان به همهٔ غرفه‌ها».
+
+   دو ایرادِ قدیمی که باعث می‌شد کاربر فکر کند تیک کار نمی‌کند:
+   ۱) تیک هیچ‌جا ذخیره نمی‌شد — با هر بار رفرش خاموش می‌شد و کاربر بدون
+      اینکه بفهمد دوباره تک‌غرفه‌ای می‌فرستاد.
+   ۲) هیچ بازخوردی نبود؛ اگر هیچ غرفهٔ اضافیِ فعالی تعریف نشده بود، تیک
+      روشن می‌ماند و در عمل هیچ اتفاقی نمی‌افتاد.
+   حالا هم ذخیره می‌شود و هم تعدادِ غرفه‌های فعال کنارش نوشته می‌شود. */
+function bslActiveShopCount(){
+  let n=0;
+  if($('bsTk')&&$('bsTk').value.trim()!==''&&(parseInt(($('bsVid')||{}).value)||0)>0)n++;
+  (Array.isArray(bslExtraVendors)?bslExtraVendors:[]).forEach(function(v){
+    if(v&&(parseInt(v.vendor_id)||0)>0&&String(v.token||'').trim()!=='')n++;
+  });
+  return n;
+}
+function bslRenderShopsHint(){
+  const el=$('bsShopsHint'); if(!el)return;
+  const on=$('bsSendAllShops')&&$('bsSendAllShops').checked;
+  if(!on){el.textContent='';return;}
+  const n=bslActiveShopCount();
+  if(n<=1){el.style.color='#fbbf24';el.textContent='⚠ فقط غرفهٔ پیش‌فرض فعال است — غرفهٔ اضافی در تنظیمات اضافه کنید';}
+  else{el.style.color='#67e8f9';el.textContent='✓ '+toFa(n)+' غرفهٔ فعال — همزمان ارسال می‌شود';}
+}
+function bslToggleAllShops(){bslRenderShopsHint();try{saveConn();}catch(e){}}
+
 // v8.17: Multi-vendor management
 let bslExtraVendors=[];
 function addBslVendor(){bslExtraVendors.push({vendor_id:0,token:'',name:'',shop_name:''});renderBslVendors();}
 function removeBslVendor(idx){if(!confirm('حذف این غرفه؟'))return;bslExtraVendors.splice(idx,1);renderBslVendors();}
 function testBslVendor(idx){const v=bslExtraVendors[idx];if(!v||!v.token){showToast('توکن خالی است',1);return;}const btn=document.getElementById('bslVTestBtn_'+idx);if(btn){btn.disabled=true;btn.textContent='⏳';}const fd=new FormData();fd.append('action','test_basalam');fd.append('token',v.token);if($('bsIndirect'))fd.append('net_indirect',$('bsIndirect').checked?'1':'0');fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(btn){btn.disabled=false;btn.textContent='🔗';}if(d.ok){bslExtraVendors[idx].vendor_id=d.vendor_id||0;bslExtraVendors[idx].name=d.user_name||d.username||'';bslExtraVendors[idx].shop_name=d.vendor_title||'';renderBslVendors();showToast('✓ '+d.vendor_title+' (#'+d.vendor_id+')');}else{showToast('❌ '+(d.error||'خطا'),1);}}).catch(()=>{if(btn){btn.disabled=false;btn.textContent='🔗';}showToast('❌ خطا شبکه',1);});}
-function renderBslVendors(){const list=$('bslVendorsList');if(!list)return;list.innerHTML='';if(bslExtraVendors.length===0){list.innerHTML='<div style="color:#64748b;font-size:11px;text-align:center;padding:8px">غرفه اضافی وجود ندارد</div>';return;}bslExtraVendors.forEach((v,idx)=>{const card=document.createElement('div');card.style.cssText='background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px';const info=v.shop_name?'<div style="color:#22d3ee;font-size:11px;margin-bottom:4px">'+esc(v.shop_name)+' (#'+v.vendor_id+')</div>':'';const nameVal=v.name||'';const pm=v.price_mode||'none';const pv=v.price_val||0;card.innerHTML='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-size:11px;color:#fbbf24;font-weight:700">غرفه '+(idx+1)+'</span><button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="removeBslVendor('+idx+')">✕</button></div>'+info+'<div style="display:flex;gap:6px;margin-bottom:6px"><input type="text" id="bslVName_'+idx+'" value="'+esc(nameVal)+'" placeholder="نام" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px;direction:rtl" oninput="bslExtraVendors['+idx+'].name=this.value"></div><div style="display:flex;gap:6px;margin-bottom:6px"><input type="password" id="bslVToken_'+idx+'" value="'+esc(v.token||'')+'" placeholder="Token" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].token=this.value"></div><div style="display:flex;gap:6px"><input type="number" id="bslVVid_'+idx+'" value="'+(v.vendor_id||'')+'" placeholder="شماره غرفه" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].vendor_id=parseInt(this.value)||0"><button class="btn btn-cyan" id="bslVTestBtn_'+idx+'" style="font-size:10px;padding:4px 8px" onclick="testBslVendor('+idx+')">🔗 تست</button></div>'
+function renderBslVendors(){try{bslRenderShopsHint();}catch(e){}const list=$('bslVendorsList');if(!list)return;list.innerHTML='';if(bslExtraVendors.length===0){list.innerHTML='<div style="color:#64748b;font-size:11px;text-align:center;padding:8px">غرفه اضافی وجود ندارد</div>';return;}bslExtraVendors.forEach((v,idx)=>{const card=document.createElement('div');card.style.cssText='background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px';const info=v.shop_name?'<div style="color:#22d3ee;font-size:11px;margin-bottom:4px">'+esc(v.shop_name)+' (#'+v.vendor_id+')</div>':'';const nameVal=v.name||'';const pm=v.price_mode||'none';const pv=v.price_val||0;card.innerHTML='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-size:11px;color:#fbbf24;font-weight:700">غرفه '+(idx+1)+'</span><button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="removeBslVendor('+idx+')">✕</button></div>'+info+'<div style="display:flex;gap:6px;margin-bottom:6px"><input type="text" id="bslVName_'+idx+'" value="'+esc(nameVal)+'" placeholder="نام" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px;direction:rtl" oninput="bslExtraVendors['+idx+'].name=this.value"></div><div style="display:flex;gap:6px;margin-bottom:6px"><input type="password" id="bslVToken_'+idx+'" value="'+esc(v.token||'')+'" placeholder="Token" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].token=this.value"></div><div style="display:flex;gap:6px"><input type="number" id="bslVVid_'+idx+'" value="'+(v.vendor_id||'')+'" placeholder="شماره غرفه" dir="ltr" style="flex:1;padding:6px 8px;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:12px" oninput="bslExtraVendors['+idx+'].vendor_id=parseInt(this.value)||0"><button class="btn btn-cyan" id="bslVTestBtn_'+idx+'" style="font-size:10px;padding:4px 8px" onclick="testBslVendor('+idx+')">🔗 تست</button></div>'
  // v9.68: تعدیل قیمتِ این غرفه (نسبت به قیمت پایهٔ محصول) + نمایش درصدِ مؤثر
  +'<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e293b">'
  +'<div style="font-size:10px;color:#94a3b8;margin-bottom:4px">💰 تعدیل قیمتِ این غرفه (روی قیمت پایه):</div>'
@@ -38309,6 +38870,47 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.20', t:'🚚 ارسالِ همزمان به همهٔ غرفه‌ها · ⚠️ باکسِ کشوییِ مشکلات مدل‌ها · 🧰 نوارِ یکپارچهٔ هدر', items:[
+    '🚚 <b>۳۳الف — تیکِ «ارسال به همهٔ غرفه‌ها» بالاخره واقعاً کار می‌کند.</b>',
+    '   این تیک از v9.69 بود ولی در عمل سه ایراد داشت که هرکدام کافی بود کل',
+    '   قابلیت را بی‌اثر کند:',
+    '   <b>۱) ترتیبی بود، نه همزمان.</b> حلقه اول روی غرفه‌ها می‌چرخید و بعد روی',
+    '   محصولات؛ یعنی غرفهٔ دوم تا پایانِ کاملِ غرفهٔ اول شروع نمی‌شد. با ۵۰',
+    '   محصول و ۳ غرفه، ۱۵۰ رفت‌وبرگشتِ پشتِ‌سرِهم — که روی هاستِ اشتراکی',
+    '   تقریباً همیشه وسطِ راه تایم‌اوت می‌خورد و کاربر فقط می‌دید «چیزی نرفت».',
+    '   <b>۲) تیک ذخیره نمی‌شد.</b> با هر بار رفرش خاموش می‌شد و ارسالِ بعدی',
+    '   بی‌سروصدا تک‌غرفه‌ای می‌رفت. در سینکِ خودکار هم اصلاً خوانده نمی‌شد.',
+    '   <b>۳) دفترچهٔ شناسه‌ها بین غرفه‌ها قاطی بود.</b> شناسهٔ محصول در غرفهٔ',
+    '   پیش‌فرض ثبت می‌شد و موقعِ ارسال به غرفهٔ دوم همان خوانده می‌شد؛ یعنی',
+    '   PATCH با توکنِ غرفهٔ دوم روی محصولِ غرفهٔ اول می‌رفت و شکست می‌خورد.',
+    '⚡ <b>حالا:</b> حلقه روی محصول است و همهٔ غرفه‌ها برای هر محصول با هم می‌روند',
+    '   (curl_multi، تا ۸ همزمان). هر محصول در چهار فاز پردازش می‌شود: جست‌وجوی',
+    '   همزمانِ شناسه → PATCHِ همزمان → POSTِ همزمانِ آنچه نبود → و هر شکستی از',
+    '   مسیرِ تکیِ آزمودهٔ قبلی (جست‌وجوی عمیق، «نام تکراری»، دسته‌های جایگزین)',
+    '   دوباره رد می‌شود. یعنی سرعت اضافه شده ولی هیچ توانایی‌ای کم نشده.',
+    '   زمانِ ارسال حالا تقریباً اندازهٔ کندترین غرفه است، نه جمعِ همه.',
+    '🔑 هر غرفه فضای نامِ خودش را در دفترچهٔ نگاشت گرفت (<code>کلید#vشناسه</code>)، پس',
+    '   شناسه‌ها دیگر قاطی نمی‌شوند و دفعهٔ بعد بدونِ هیچ جست‌وجویی مستقیم آپدیت',
+    '   می‌شود. تیک هم ذخیره می‌شود و کنارش می‌نویسد چند غرفهٔ فعال دارید —',
+    '   اگر فقط غرفهٔ پیش‌فرض باشد، به‌جای سکوت هشدار می‌دهد.',
+    '⏹ سیگنالِ توقف در همین مسیر هم چک می‌شود؛ توقف وسطِ کار بقیهٔ دسته‌ها را',
+    '   اجرا نمی‌کند. اگر <code>curl_multi</code> روی هاست نباشد، خودکار به مسیرِ',
+    '   ترتیبیِ قبلی برمی‌گردد.',
+    '⚠️ <b>۳۳ب — باکسِ «مشکلات مدل‌ها» کشویی شد و پیش‌فرض بسته است.</b> این',
+    '   کادرِ نارنجی/قرمز پایینِ مودالِ تستِ مدل‌ها همیشه کامل باز بود و با چند',
+    '   ارائه‌دهندهٔ مشکل‌دار چند سطر می‌شد؛ جدولِ نتایج را می‌فشرد و در موبایل',
+    '   نیمی از پنجره را می‌گرفت. حالا یک نوارِ یک‌خطی با تعدادِ مشکل می‌بینید و',
+    '   جزئیات را خودتان باز می‌کنید. پولینگِ هر دو ثانیه هم دیگر باکسی را که',
+    '   تازه باز کرده‌اید نمی‌بندد.',
+    '🧰 <b>۳۳ج — سه دکمهٔ بالای صفحه یک نوارِ واحد شدند.</b> قبلاً ☰ و ⛶ و 🗂 هر',
+    '   کدام جداگانه شناور بودند با فاصلهٔ نامنظمِ ۶ پیکسل، و در موبایل دکمهٔ',
+    '   مدیر وظیفه به گوشهٔ پایین-راستِ صفحه پرت می‌شد و از بقیه جدا می‌افتاد.',
+    '   حالا یک نوارِ چسبان هر سه را کنارِ هم نگه می‌دارد.',
+    '📋 <b>مدیر وظیفه از یک آیکونِ مبهم به یک دکمهٔ گویا تبدیل شد:</b> تمام‌عرضِ',
+    '   باقی‌ماندهٔ نوار را می‌گیرد، آیکونِ 📋 دارد، برچسبِ «مدیر وظیفه» و یک',
+    '   زیرنویسِ زنده که می‌گوید «۳ کار در حال اجرا» یا «۱ کارِ رهاشده». پیش از',
+    '   این فقط یک عددِ کوچک کنارِ 🗂 بود که معلوم نبود یعنی چه.'
+  ]},
   {v:'10.19', t:'🗂 مدیر وظیفه — یک پنجره برای همهٔ کارهای پس‌زمینه', items:[
     '🗂 <b>مسئله: نمی‌شد فهمید الان چه چیزی در حال اجراست.</b> کارهای بلندمدتِ',
     '   برنامه هرکدام در تبِ خودشان دفن شده بودند — ارسال به باسلام یک‌جا،',
@@ -42871,7 +43473,7 @@ function loadConn(){fetch('',{method:'POST',body:new URLSearchParams('action=loa
 function applyCn(){const w=cn.woocommerce||{},b=cn.basalam||{};if(w.store_url&&$('wcUrl'))$('wcUrl').value=w.store_url;if(w.consumer_key&&$('wcCK'))$('wcCK').value=w.consumer_key;if(w.consumer_secret&&$('wcCS'))$('wcCS').value=w.consumer_secret;if(w.default_status&&$('wcSt'))$('wcSt').value=w.default_status;if(w.default_category&&$('wcCat'))$('wcCat').value=w.default_category;if($('wcMS'))$('wcMS').checked=!!w.manage_stock;if(w.stock_quantity&&$('wcSQ'))$('wcSQ').value=w.stock_quantity;if($('wcPMode'))$('wcPMode').value=w.price_mode||'none';if($('wcPVal'))$('wcPVal').value=(w.price_val!==undefined?w.price_val:0);if($('wcPRound'))$('wcPRound').value=String(w.price_round||0);if($('bsPMode'))$('bsPMode').value=b.price_mode||'none';if($('bsPVal'))$('bsPVal').value=(b.price_val!==undefined?b.price_val:0);if($('bsPRound'))$('bsPRound').value=String(b.price_round||0);try{destPricePreview('wc');destPricePreview('bs');}catch(e){}if(b.token&&$('bsTk'))$('bsTk').value=b.token;if(b.vendor_id&&$('bsVid'))$('bsVid').value=b.vendor_id;if(b.preparation_days&&$('bsPD'))$('bsPD').value=b.preparation_days;if(b.weight&&$('bsW'))$('bsW').value=b.weight;if($('bsPW')&&b.package_weight)$('bsPW').value=b.package_weight;if(b.stock&&$('bsSt'))$('bsSt').value=b.stock;// v9.80: سوییچ «اتصال غیرمستقیم» باسلام
 if($('bsIndirect'))$('bsIndirect').checked=!!b.net_indirect;// v7.48: Restore category in searchable dropdown
 if(b.category_id){$('bsCat').value=String(b.category_id);bslSelectedCatId=b.category_id;if(bslAllCats.length>0){renderBslCatDropdown(bslAllCats,b.category_id);}else{loadBslCats();}}else{$('bsCat').value='0';bslSelectedCatId=0;if($('bsCatSearch'))$('bsCatSearch').value='';}
-if($('bsAutoCat'))$('bsAutoCat').checked=!!b.auto_category;if($('bsDelayMs')&&b.delay_ms)$('bsDelayMs').value=b.delay_ms;if($('bsRetryDelayMs')&&b.retry_delay_ms)$('bsRetryDelayMs').value=b.retry_delay_ms;
+if($('bsAutoCat'))$('bsAutoCat').checked=!!b.auto_category;if($('bsSendAllShops')){$('bsSendAllShops').checked=!!b.send_all_shops;try{bslRenderShopsHint();}catch(e){}}if($('bsDelayMs')&&b.delay_ms)$('bsDelayMs').value=b.delay_ms;if($('bsRetryDelayMs')&&b.retry_delay_ms)$('bsRetryDelayMs').value=b.retry_delay_ms;
 // v8.17: Restore global fallback categories
 if(b.fallback_cat_ids&&Array.isArray(b.fallback_cat_ids)){renderBslFallbackCats(b.fallback_cat_ids);}
 // v8.17: Restore extra vendors
@@ -42913,7 +43515,7 @@ function destPricePreview(pre){
     +toFa(res.toLocaleString('en-US'))
     +'  ('+(diff>=0?'+':'')+toFa(pct)+'٪)';
 }
-function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10,price_mode:($('wcPMode')||{}).value||'none',price_val:parseFloat(($('wcPVal')||{}).value)||0,price_round:parseInt(($('wcPRound')||{}).value)||0}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,net_indirect:$('bsIndirect')?.checked||false,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors,price_mode:($('bsPMode')||{}).value||'none',price_val:parseFloat(($('bsPVal')||{}).value)||0,price_round:parseInt(($('bsPRound')||{}).value)||0}));
+function saveConn(){const fd=new FormData();fd.append('action','save_connections');fd.append('woocommerce',JSON.stringify({enabled:1,store_url:$('wcUrl').value.trim(),consumer_key:$('wcCK').value.trim(),consumer_secret:$('wcCS').value.trim(),default_status:$('wcSt').value,default_category:parseInt($('wcCat').value)||0,manage_stock:$('wcMS').checked,stock_quantity:parseInt($('wcSQ').value)||10,price_mode:($('wcPMode')||{}).value||'none',price_val:parseFloat(($('wcPVal')||{}).value)||0,price_round:parseInt(($('wcPRound')||{}).value)||0}));fd.append('basalam',JSON.stringify({enabled:1,token:$('bsTk').value.trim(),vendor_id:parseInt($('bsVid').value)||0,preparation_days:parseInt($('bsPD').value)||3,weight:parseInt($('bsW').value)||500,package_weight:parseInt($('bsPW')?.value)||0,stock:parseInt($('bsSt').value)||10,net_indirect:$('bsIndirect')?.checked||false,category_id:parseInt($('bsCat').value)||0,auto_category:$('bsAutoCat')?.checked||false,send_all_shops:$('bsSendAllShops')?.checked||false,delay_ms:parseInt($('bsDelayMs')?.value)||500,retry_delay_ms:parseInt($('bsRetryDelayMs')?.value)||1000,fallback_cat_ids:getBslFallbackCatIds(),vendors:bslExtraVendors,price_mode:($('bsPMode')||{}).value||'none',price_val:parseFloat(($('bsPVal')||{}).value)||0,price_round:parseInt(($('bsPRound')||{}).value)||0}));
 // v8.06: Save AI settings
 fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
@@ -44327,9 +44929,16 @@ function tmPaintBtn(d){
   b.classList.toggle('busy', run>0);
   b.classList.toggle('warn', run===0 && st>0);
   n.textContent=toFa(run>0?run:st);
+  if(n.style)n.style.display=(run>0||st>0)?'flex':'none';
   b.title = run>0 ? (toFa(run)+' کار در حال اجرا — مدیر وظیفه')
           : st>0  ? (toFa(st)+' کارِ رهاشده — مدیر وظیفه')
                   : 'مدیر وظیفه — کارهای پس‌زمینه';
+  /* v10.20 (۳۳ج): زیرنویسِ دکمه هم خبر می‌دهد — تا حالا فقط رنگ و عدد بود
+     و کاربر باید حدس می‌زد عددِ کنارِ 🗂 یعنی چه. */
+  const sub=document.getElementById('tasksSub');
+  if(sub) sub.textContent = run>0 ? (toFa(run)+' کار در حال اجرا')
+                          : st>0  ? (toFa(st)+' کارِ رهاشده')
+                                  : 'کارهای پس‌زمینه';
 }
 
 function tmOpen(){
@@ -45120,6 +45729,7 @@ function aiOpenTestModal(){
     m.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.72);z-index:10080;display:flex;align-items:center;justify-content:center;padding:20px';
     // v10.00 (۱۴الف): تا وقتی این مودال باز است، دکمه‌های شناورِ ☰ و ⛶ زیر آن بروند
     document.body.classList.add('modal-open');
+    aiDiagOpen=false; aiDiagSig='';   // v10.20 (۳۳ب): «مشکلات مدل‌ها» هر بار بسته باز شود
     m.innerHTML='<style>'
       // v9.64: سوییچِ اسلایدری «فقط سبزها» — نمایش فقط مدل‌های دارای چراغ سبز
       +'.ai-switch{width:34px;height:20px;border-radius:20px;background:#334155;position:relative;display:inline-block;transition:background .2s;flex:0 0 auto;vertical-align:middle}'
@@ -45172,6 +45782,11 @@ function aiOpenTestModal(){
       +'<th style="padding:8px;text-align:right">پاسخ پیام</th>'
       +'<th style="padding:8px;text-align:right">پاسخ دسته</th>'
       +'</tr></thead><tbody id="aiTestTbody"></tbody></table></div>'
+      /* v10.20 (۳۳ب): «مشکلات مدل‌ها» حالا کشویی است و بسته باز می‌شود.
+         قبلاً این باکسِ نارنجی/قرمز باز و کامل چاپ می‌شد و با چند ارائه‌دهندهٔ
+         مشکل‌دار، چند سطر متن پایینِ مودال را می‌خورد و جدول را می‌فشرد.
+         حالا فقط یک نوارِ جمع‌وجور با تعدادِ مشکل دیده می‌شود؛ باز کردنش
+         با کاربر است و انتخابش تا پایانِ همان جلسه یادش می‌ماند. */
       +'<div id="aiTestDiag" style="flex:0 0 auto;padding:0 16px 10px"></div>'
       +'</div>';
     m.addEventListener('click',function(e){if(e.target===m)aiCloseTestModal();});
@@ -45313,19 +45928,62 @@ function aiRenderTestState(st){
         const netIssues=Object.entries(st.diag).filter(([,d])=>d&&d.net_issue===true);
         const unreach=Object.entries(st.diag).filter(([,d])=>d&&d.reachable===false&&d.net_issue!==true);
         if(netIssues.length){
-            db.innerHTML='<div style="margin-top:8px;padding:8px;background:#422006;border:1px solid #f59e0b;border-radius:6px;font-size:11px;color:#fcd34d">'
-              +'<b>⚠️ روش اتصال فعلی روی این شبکه کار نمی‌کند:</b><br>'
+            aiRenderDiagBox(db,'net',netIssues.length,
+              '<b>⚠️ روش اتصال فعلی روی این شبکه کار نمی‌کند:</b><br>'
               +netIssues.map(([id,d])=>'• <b dir="ltr">'+esc(id)+'</b>: '+esc(d.net_hint||d.first_error||'')).join('<br>')
-              +'<br><span style="color:#fbbf24">خودِ هاست به اندپوینت دسترسی دارد (مستقیم جواب می‌دهد). روش اتصال را روی «مستقیم» بگذارید، یا یک Worker/پروکسی سالم اضافه کنید.</span></div>';
+              +'<br><span style="color:#fbbf24">خودِ هاست به اندپوینت دسترسی دارد (مستقیم جواب می‌دهد). روش اتصال را روی «مستقیم» بگذارید، یا یک Worker/پروکسی سالم اضافه کنید.</span>');
         } else if(unreach.length){
-            db.innerHTML='<div style="margin-top:8px;padding:8px;background:#3b1e1e;border:1px solid #ef4444;border-radius:6px;font-size:11px;color:#fca5a5">'
-              +'<b>⚠️ هاست به این ارائه‌دهنده‌ها دسترسی ندارد:</b><br>'
+            aiRenderDiagBox(db,'unreach',unreach.length,
+              '<b>⚠️ هاست به این ارائه‌دهنده‌ها دسترسی ندارد:</b><br>'
               +unreach.map(([id,d])=>'• <b dir="ltr">'+esc(id)+'</b>: '+esc(d.first_error||d.last_label||'')).join('<br>')
-              +'<br><span style="color:#fbbf24">این معمولاً DNS بسته/مسموم، تایم‌اوت یا بلاک IP هاست است. روش اتصال (DoH/پروکسی/Worker) را عوض کنید.</span></div>';
+              +'<br><span style="color:#fbbf24">این معمولاً DNS بسته/مسموم، تایم‌اوت یا بلاک IP هاست است. روش اتصال (DoH/پروکسی/Worker) را عوض کنید.</span>');
         } else {
             db.innerHTML='';
         }
     }
+}
+/* ==================================================================
+ *  v10.20 (۳۳ب): باکسِ «مشکلات مدل‌ها» — کشویی و پیش‌فرض بسته
+ *
+ *  این باکس در پایینِ مودالِ تستِ مدل‌ها همیشه باز بود و با چند
+ *  ارائه‌دهندهٔ مشکل‌دار چند سطر می‌شد؛ جدولِ نتایج را می‌فشرد و در
+ *  موبایل عملاً نیمی از پنجره را می‌گرفت. حالا فقط یک نوارِ یک‌خطی
+ *  با تعدادِ مشکل دیده می‌شود و جزئیات با کلیک باز می‌شود.
+ *
+ *  دو نکتهٔ ریز که رعایت شده:
+ *   • حالتِ باز/بسته در aiDiagOpen نگه داشته می‌شود تا پولینگِ هر
+ *     دو ثانیه‌ای، باکسی را که کاربر تازه باز کرده دوباره نبندد.
+ *   • فقط وقتی محتوا واقعاً عوض شود دوباره رسم می‌شود، وگرنه هر
+ *     رفرش انتخابِ متنِ کاربر را می‌پراند.
+ * ================================================================== */
+let aiDiagOpen=false, aiDiagSig='';
+function aiRenderDiagBox(db,kind,count,innerHtml){
+    const sig=kind+'|'+count+'|'+innerHtml.length;
+    if(db.dataset.sig===sig&&db.dataset.open===(aiDiagOpen?'1':'0'))return;   // بدون تغییر، دست نزن
+    db.dataset.sig=sig; db.dataset.open=aiDiagOpen?'1':'0';
+    const warm = kind==='net';
+    const bg   = warm?'#422006':'#3b1e1e';
+    const bd   = warm?'#f59e0b':'#ef4444';
+    const fg   = warm?'#fcd34d':'#fca5a5';
+    const ttl  = warm?'مشکلِ روشِ اتصال':'ارائه‌دهنده‌های خارج از دسترس';
+    db.innerHTML='<div style="margin-top:8px;background:'+bg+';border:1px solid '+bd+';border-radius:6px;overflow:hidden">'
+      +'<div onclick="aiToggleDiag()" style="display:flex;align-items:center;gap:7px;padding:7px 9px;cursor:pointer;font-size:11px;color:'+fg+';user-select:none">'
+      +'<span id="aiDiagCaret" style="display:inline-block;transition:transform .18s;transform:rotate('+(aiDiagOpen?'90':'0')+'deg)">◀</span>'
+      +'<b>⚠️ مشکلات مدل‌ها</b>'
+      +'<span style="background:'+bd+';color:'+bg+';border-radius:9px;padding:0 7px;font-size:10px;font-weight:800">'+toFa(count)+'</span>'
+      +'<span style="color:'+fg+';opacity:.75;font-size:10px">'+esc(ttl)+'</span>'
+      +'<span style="flex:1"></span>'
+      +'<span id="aiDiagLbl" style="font-size:10px;opacity:.7">'+(aiDiagOpen?'بستن':'نمایش جزئیات')+'</span></div>'
+      +'<div id="aiDiagBody" style="display:'+(aiDiagOpen?'block':'none')+';padding:0 9px 9px;font-size:11px;color:'+fg+';line-height:1.85">'
+      +innerHtml+'</div></div>';
+}
+function aiToggleDiag(){
+    aiDiagOpen=!aiDiagOpen;
+    const b=$('aiDiagBody'), c=$('aiDiagCaret'), db=$('aiTestDiag');
+    if(b)b.style.display=aiDiagOpen?'block':'none';
+    if(c)c.style.transform='rotate('+(aiDiagOpen?'90':'0')+'deg)';
+    const l=$('aiDiagLbl'); if(l)l.textContent=aiDiagOpen?'بستن':'نمایش جزئیات';
+    if(db)db.dataset.open=aiDiagOpen?'1':'0';
 }
 function aiTestAll(){
     const per=$('aiTestPerProvider')?parseInt($('aiTestPerProvider').value)||50:50;
