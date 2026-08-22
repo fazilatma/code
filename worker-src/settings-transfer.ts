@@ -19,12 +19,16 @@ const STATE_FILES: Record<string,string> = {
 
 export async function createPhpSettingsBundle(host='cloudflare-worker'): Promise<PhpSettingsBundle> {
   const files: Record<string,{size:number;b64:string}> = {};
-  const profiles=await listProfiles(); const phpProfiles:Record<string,unknown>={};
+  const profiles=await listProfiles(); const phpProfiles:Record<string,unknown>={},phpProducts:Record<string,unknown>={};
   for(const profile of profiles){
     const products=(await allProducts(profile.id)).map(product=>[product.sourceKey,stripImages(product)]);
-    phpProfiles[profile.id]={...profile,pagType:profile.pagination,pagVal:profile.paginationValue,priceVal:profile.priceValue,bslCategoryId:profile.basalamCategoryId,bslFallbackCatIds:profile.basalamFallbackCategoryIds||[],net_indirect:Boolean(profile.networkIndirect),syncConfig:{enabled:Boolean(profile.intervalMinutes),interval:profile.intervalMinutes*60,target:profile.syncWoo&&profile.syncBasalam?'both':profile.syncWoo?'woo':profile.syncBasalam?'basalam':'none',noExtract:Boolean(profile.noExtract)},products,productsOrder:products.map(item=>item[0])};
+    // Profile settings and profile products are kept in separate files so the user can
+    // export/import them independently (تنظیمات پروفایل / محصولات پروفایل).
+    phpProfiles[profile.id]={...profile,pagType:profile.pagination,pagVal:profile.paginationValue,priceVal:profile.priceValue,bslCategoryId:profile.basalamCategoryId,bslFallbackCatIds:profile.basalamFallbackCategoryIds||[],net_indirect:Boolean(profile.networkIndirect),syncConfig:{enabled:Boolean(profile.intervalMinutes),interval:profile.intervalMinutes*60,target:profile.syncWoo&&profile.syncBasalam?'both':profile.syncWoo?'woo':profile.syncBasalam?'basalam':'none',noExtract:Boolean(profile.noExtract)}};
+    phpProducts[profile.id]=products;
   }
   addFile(files,'profiles.json',phpProfiles);
+  if(Object.keys(phpProducts).length)addFile(files,'profile_products.json',phpProducts);
   const c=await loadConnections(true);
   addFile(files,'connections.json',{
     woocommerce:{url:c.woo.url,consumer_key:c.woo.key,consumer_secret:c.woo.secret,ck:c.woo.key,cs:c.woo.secret,category_id:c.woo.categoryId},

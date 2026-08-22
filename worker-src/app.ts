@@ -30,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.23.1',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.24.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -42,7 +42,7 @@ app.get('/api/status',async c=>{const connections=await loadConnections();return
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.23.1',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.24.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -395,7 +395,42 @@ export function normalizeProfile(raw:any):Profile {
   };
 }
 function legacyProducts(raw:unknown):Product[]{const entries:Array<[string,any]>=[];if(Array.isArray(raw))for(const item of raw){if(Array.isArray(item)&&item.length>=2)entries.push([String(item[0]),item[1]]);else if(item&&typeof item==='object')entries.push([String((item as any).sourceKey||(item as any).key||crypto.randomUUID()),item])}else if(raw&&typeof raw==='object')for(const[key,value]of Object.entries(raw as Record<string,any>))entries.push([key,value]);return entries.filter(([,p])=>p&&p.title).map(([key,p])=>{const images=Array.isArray(p.images)?p.images.filter((x:unknown)=>typeof x==='string'&&!String(x).startsWith('data:')):[],image=String(p.image||images[0]||'');if(image&&!images.includes(image)&&!image.startsWith('data:'))images.unshift(image);return{sourceKey:key,title:String(p.title),price:numberFromText(String(p.finalPrice??p.price??0)),priceText:String(p.priceText??p.price??''),url:String(p.url||p.link||''),image:image.startsWith('data:')?'':image,images,shortDesc:String(p.shortDesc||''),longDesc:String(p.longDesc||''),sku:String(p.sku||''),brand:String(p.brand||''),stock:p.stock==null?undefined:Number(p.stock),weight:p.weight==null?undefined:Number(p.weight),category:String(p.category||''),variations:Array.isArray(p.variations)?p.variations.map(String):[],variationGroups:Array.isArray(p.variationGroups||p.variation_groups)?(p.variationGroups||p.variation_groups):[],variationPrices:p.variationPrices||p.variation_prices||{},sourcePage:String(p.sourcePage||''),scrapedAt:new Date().toISOString()}})}
-async function importPhpSettings(bundle:any){const files=decodePhpSettingsBundle(bundle);let profiles=0,products=0,states=0,categories=0,autoreplyLogs=0,connections=false;const warnings:string[]=[];const rawProfiles=files['profiles.json'];if(rawProfiles&&typeof rawProfiles==='object')for(const[id,raw]of Object.entries(rawProfiles as Record<string,any>))try{const profile=normalizeProfile({...raw,id});await saveProfile(profile);profiles++;for(const product of legacyProducts(raw?.products)){await upsertProduct(profile.id,product);products++}}catch(error){warnings.push(`${id}: ${message(error)}`)}const rawConnections=files['connections.json'] as any;if(rawConnections){const woo=rawConnections.woocommerce||rawConnections.woo||{},basalam=rawConnections.basalam||{},ai=rawConnections.ai||{};await saveConnections({woo:{url:woo.url||woo.store_url||'',key:woo.consumer_key||woo.ck||woo.key||'',secret:woo.consumer_secret||woo.cs||woo.secret||'',categoryId:woo.category_id||0},basalam:{token:basalam.token||'',vendorId:String(basalam.vendor_id||basalam.vendorId||''),api:basalam.api_base||basalam.api||'https://openapi.basalam.com/v1',preparationDays:basalam.preparation_days,weight:basalam.weight,packageWeight:basalam.package_weight,stock:basalam.stock,categoryId:basalam.category_id,fallbackCategoryIds:basalam.fallback_cat_ids,autoCategory:basalam.auto_category,netIndirect:basalam.net_indirect,shops:basalam.shops||((basalam.vendors||[]).map((shop:any)=>({name:shop.name||shop.shop_name||'',token:shop.token||'',vendorId:String(shop.vendor_id||shop.vendorId||''),pricePercent:shop.price_mode==='percent'?Number(shop.price_val||0):0})))},ai:{baseUrl:ai.base_url||ai.baseUrl||'',apiKey:ai.api_key||ai.apiKey||'',model:ai.model||'',providers:ai.providers,candidates:ai.candidates,master:ai.master,network:ai.network||(rawConnections.src_network?{mode:rawConnections.src_network.mode,proxyUrl:rawConnections.src_network.proxy||'',workerUrl:rawConnections.src_network.worker_url||'',dohUrl:rawConnections.src_network.doh_url||'',resolveIp:rawConnections.src_network.resolve_ip||''}:undefined)},notifications:rawConnections.notifications||{}});connections=true}if(files['category_learning.json'])categories=await importCategoryLearning(files['category_learning.json']);if(files['autoreply_log.json'])autoreplyLogs=await importAutoreplyLog(files['autoreply_log.json']);for(const[file,value]of Object.entries(files)){const key=stateKeyForFile(file);if(key){await setState(key,value);states++}}return{ok:true,format:'scraper4-php-compatible',imported:{profiles,products,states,categories,autoreplyLogs,connections},warnings}}
+async function importPhpSettings(bundle:any){
+  const files=decodePhpSettingsBundle(bundle);
+  let profiles=0,products=0,states=0,categories=0,autoreplyLogs=0,connections=false;
+  const warnings:string[]=[];
+  const rawProfiles=files['profiles.json'],rawProfileProducts=files['profile_products.json'] as Record<string,unknown>|undefined;
+  if(rawProfiles&&typeof rawProfiles==='object')for(const[id,raw]of Object.entries(rawProfiles as Record<string,any>))try{
+    const profile=normalizeProfile({...raw,id});await saveProfile(profile);profiles++;
+    // Products come from the dedicated file (new exports) or from legacy combined entries.
+    const productSource=rawProfileProducts?.[id]??raw?.products;
+    for(const product of legacyProducts(productSource)){await upsertProduct(profile.id,product);products++}
+  }catch(error){warnings.push(`${id}: ${message(error)}`)}
+  const rawConnections=files['connections.json'] as any;
+  if(rawConnections){
+    // Import only the connection groups present in the file so partial imports never
+    // wipe out the untouched groups (ووکامرس / باسلام / هوش مصنوعی / اعلان‌ها).
+    const partialConn:any={};
+    if(rawConnections.woocommerce||rawConnections.woo){
+      const woo=rawConnections.woocommerce||rawConnections.woo||{};
+      partialConn.woo={url:woo.url||woo.store_url||'',key:woo.consumer_key||woo.ck||woo.key||'',secret:woo.consumer_secret||woo.cs||woo.secret||'',categoryId:woo.category_id||0};
+    }
+    if(rawConnections.basalam){
+      const basalam=rawConnections.basalam||{};
+      partialConn.basalam={token:basalam.token||'',vendorId:String(basalam.vendor_id||basalam.vendorId||''),api:basalam.api_base||basalam.api||'https://openapi.basalam.com/v1',preparationDays:basalam.preparation_days,weight:basalam.weight,packageWeight:basalam.package_weight,stock:basalam.stock,categoryId:basalam.category_id,fallbackCategoryIds:basalam.fallback_cat_ids,autoCategory:basalam.auto_category,netIndirect:basalam.net_indirect,shops:basalam.shops||((basalam.vendors||[]).map((shop:any)=>({name:shop.name||shop.shop_name||'',token:shop.token||'',vendorId:String(shop.vendor_id||shop.vendorId||''),pricePercent:shop.price_mode==='percent'?Number(shop.price_val||0):0})))};
+    }
+    if(rawConnections.ai||rawConnections.src_network){
+      const ai=rawConnections.ai||{};
+      partialConn.ai={baseUrl:ai.base_url||ai.baseUrl||'',apiKey:ai.api_key||ai.apiKey||'',model:ai.model||'',providers:ai.providers,candidates:ai.candidates,master:ai.master,network:ai.network||(rawConnections.src_network?{mode:rawConnections.src_network.mode,proxyUrl:rawConnections.src_network.proxy||'',workerUrl:rawConnections.src_network.worker_url||'',dohUrl:rawConnections.src_network.doh_url||'',resolveIp:rawConnections.src_network.resolve_ip||''}:undefined)};
+    }
+    if(rawConnections.notifications)partialConn.notifications=rawConnections.notifications;
+    if(Object.keys(partialConn).length){await saveConnections(partialConn);connections=true}
+  }
+  if(files['category_learning.json'])categories=await importCategoryLearning(files['category_learning.json']);
+  if(files['autoreply_log.json'])autoreplyLogs=await importAutoreplyLog(files['autoreply_log.json']);
+  for(const[file,value]of Object.entries(files)){const key=stateKeyForFile(file);if(key){await setState(key,value);states++}}
+  return{ok:true,format:'scraper4-php-compatible',imported:{profiles,products,states,categories,autoreplyLogs,connections},warnings};
+}
 
 export async function scheduledTasks(env:Env,waitUntil:(promise:Promise<unknown>)=>void):Promise<void>{
   configureEnv(env);await ensureSchema(env.DB);

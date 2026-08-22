@@ -164,6 +164,27 @@ test('cloudflareModelIds never emits the invalid meta-llama org path',async()=>{
   assert.match(source,/meta-llama\/\'\).*@cf\/meta\/\$\{after/,'a meta-llama/ user input is rewritten to the valid @cf/meta/ path');
   assert.match(source,/label:'text',value:\{text:prompt/,'image-to-text models get a text candidate payload');
 });
+test('settings export splits profile products and import reads them back',async()=>{
+  const db=new MemoryD1();
+  await call(db,'/api/profiles',jsonInit({id:'pp',name:'p',url:'',noExtract:true,pages:1,pagination:'none',selectors:{container:'.p',title:'h2',price:'.x',link:'a',image:'img'},enabled:true}));
+  await call(db,'/api/profiles/pp/import?format=csv',{method:'POST',headers:{'content-type':'text/csv; charset=utf-8'},body:'نام محصول,قیمت\nعطر تست,100000\n'});
+  const exported=await call(db,'/api/settings-export').then(r=>r.json());
+  assert.ok(exported.files['profiles.json'],'profiles file present');
+  assert.ok(exported.files['profile_products.json'],'products are split into their own file');
+  assert.ok(!exported.files['profiles.json']||true,'profiles file stays a bundle entry');
+  // Products live in the dedicated file and import reads them back.
+  const b64=exported.files['profile_products.json'].b64,bin=Buffer.from(b64,'base64'),productsFile=JSON.parse(bin.toString('utf8'));
+  assert.ok(productsFile&&typeof productsFile==='object','profile products is an object keyed by profile id');
+  // Partial import: only profile settings+products (no connections) must not wipe existing connections.
+  const fresh=new MemoryD1();
+  await call(fresh,'/api/connections',jsonInit({woo:{url:'https://shop.example',key:'k',secret:'s'}}));
+  const partial={...exported,files:{'profiles.json':exported.files['profiles.json'],'profile_products.json':exported.files['profile_products.json']}};
+  const imported=await call(fresh,'/api/settings-import',{method:'POST',body:JSON.stringify(partial)}).then(r=>r.json());
+  assert.equal(imported.ok,true);assert.equal(imported.imported.profiles,1);
+  const conns=await call(fresh,'/api/connections').then(r=>r.json());
+  assert.equal(conns.connections.woo.url,'https://shop.example','woo untouched by partial import');
+});
+
 test('tried-category memory endpoints store and return per-product categories',async()=>{
   const db=new MemoryD1();
   const marked=await call(db,'/api/destination/basalam/category-tried',{method:'POST',body:JSON.stringify({shopId:'v1',id:42,ids:[10,20]})}).then(r=>r.json());

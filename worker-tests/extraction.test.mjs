@@ -215,11 +215,12 @@ test('workflow panes match the reference hierarchy and every new control is oper
 
 test('settings restore shows a section picker and the changelog keeps growing',async()=>{
   const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
-  for(const token of ['RESTORE_SECTIONS','openRestoreSectionsModal','filterAndRestore','doRestoreSettings','data-restore-sec','data-restore-confirm','restoreAll'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
+  for(const token of ['SETTINGS_SECTIONS','openRestoreSectionsModal','openExportSectionsModal','doExportWithSections','filterBundleFiles','settingsSectionsHtml','data-restore-sec','data-restore-group','data-export-confirm','restoreAll'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
   assert.match(dash,/profiles\.json/,'profiles section listed');
   assert.match(dash,/connections\.json/,'connections/AI section listed');
   assert.match(dash,/category_learning\.json/,'category learning listed');
   assert.match(dash,/render_settings\.json/,'system settings listed');
+  assert.match(dash,/profiles-settings/,'profile settings subsection');assert.match(dash,/profiles-products/,'profile products subsection');assert.match(dash,/conn-woo/);assert.match(dash,/conn-basalam/);assert.match(dash,/conn-ai/);assert.match(dash,/conn-notif/);
   assert.match(dash,/نسخهٔ ۱\.۲۳\.۰/,'changelog includes 1.23.0');
   assert.match(dash,/نسخهٔ ۱\.۲۲\.۰/,'changelog includes 1.22.0');
 });
