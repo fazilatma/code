@@ -181,7 +181,7 @@ async function processAiTest(run:AiTestRun):Promise<BackgroundOutcome>{
   const settings=await getState<any>('settings',{}),callTimeout=aiSkipTimeoutMs(settings),envBudget=Number(getEnv().AI_TEST_MODEL_BUDGET_MS);
   const budget=Math.max(callTimeout+50,Math.min(60_000,Number.isFinite(envBudget)&&envBudget>0?envBudget:callTimeout*2+200));
   const retrying=Array.isArray(run.retryJobs)&&run.retryJobs.length>0;
-  run.status='running';run.phase=retrying?'retrying':'testing';run.startedAt||=now();run.currentStartedAt=now();run.error=null;await writeRun(run);
+  run.status='running';run.phase=retrying?'retrying':'testing';run.startedAt||=now();run.currentStartedAt=now();run.error=null;
   let categories:any[]=[];if(run.categoryTitle)try{categories=(await destinationCategories()).items}catch{/* Model response tests continue without Basalam categories. */}
   const skip=Boolean(run.skipNext);run.skipNext=false;const started=Date.now();
   const options:any={runId:run.id,cursor:run.cursor,onlyCandidates:run.onlyCandidates,categoryTitle:run.categoryTitle,categories,timeoutMs:callTimeout,skipCurrent:skip,skipReason:skip?'این مدل پاسخ نداد و نگهبان صف برای جلوگیری از گیر کردن آن را رد کرد.':''};
@@ -254,7 +254,9 @@ async function categorizeOne(run:CategoryRun):Promise<BackgroundOutcome>{
 }
 async function processCategoryRun(run:CategoryRun):Promise<BackgroundOutcome>{
   if(run.stopRequested||run.status==='paused')return{outcome:'complete'};
-  run.status='running';run.startedAt ||= now();await writeRun(run);
+  // No start write: categorizeOne/listCategoryProducts persist the checkpoint at
+  // the end of every invocation, so an extra write here only wastes D1 write quota.
+  run.status='running';run.startedAt ||= now();
   return run.phase==='listing'||run.products.length===0?listCategoryProducts(run):categorizeOne(run);
 }
 
@@ -281,10 +283,17 @@ async function dedupGroupProducts(run:DedupRun):Promise<BackgroundOutcome>{
   if(!run.apply||run.duplicates===0){run.status='done';run.phase='finished';run.finishedAt=now();await writeRun(run);return{outcome:'complete'}}
   run.status='queued';run.phase='removing';await writeRun(run);return{outcome:'continue',delaySeconds:1};
 }
-/** Removes at most 4 duplicates per invocation; Woo goes to trash, Basalam to archive 4184 — both reversible. */
+/**
+ * Removes up to DEDUP_REMOVE_BATCH duplicates per invocation. Every invocation costs
+ * ~3 D1 writes (lease + checkpoint + lease release) regardless of how many products
+ * it removes, so a bigger batch cuts the daily D1 write quota burn significantly.
+ * 10 sequential destination status calls stay far below the subrequest ceiling.
+ */
+const DEDUP_REMOVE_BATCH=10;
+/** Woo goes to trash, Basalam to archive 4184 — both reversible. */
 async function dedupRemoveBatch(run:DedupRun):Promise<BackgroundOutcome>{
   let done=0;
-  while(done<4){
+  while(done<DEDUP_REMOVE_BATCH){
     const group=run.groups[run.groupCursor];
     if(!group)break;
     const item=group.remove[run.removeCursor];
@@ -306,7 +315,10 @@ async function dedupRemoveBatch(run:DedupRun):Promise<BackgroundOutcome>{
 }
 async function processDedupRun(run:DedupRun):Promise<BackgroundOutcome>{
   if(run.stopRequested||run.status==='paused')return{outcome:'complete'};
-  run.status='running';run.startedAt ||= now();await writeRun(run);
+  // No write here on purpose: every phase function persists the full checkpoint
+  // at the end of the invocation, so this extra write would only burn D1's daily
+  // write quota (100k rows/day on the free plan) without adding safety.
+  run.status='running';run.startedAt ||= now();
   if(!run.listingDone)return dedupListPage(run);
   if(!run.grouped)return dedupGroupProducts(run);
   return dedupRemoveBatch(run);

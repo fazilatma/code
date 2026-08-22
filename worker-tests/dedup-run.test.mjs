@@ -11,7 +11,7 @@ import {build} from 'esbuild';
  * chunked removal and safe stop all happen through processBackgroundMessage exactly like
  * Queue deliveries in production. Destination/network modules are stubbed in memory.
  */
-const harness=globalThis.__dedupHarness={pages:[],statusChanges:[],states:new Map(),stateUpdatedAt:new Map()};
+const harness=globalThis.__dedupHarness={pages:[],statusChanges:[],states:new Map(),stateUpdatedAt:new Map(),writeCount:{}};
 
 const stubs={
   './maintenance.js':`const h=globalThis.__dedupHarness;
@@ -22,7 +22,7 @@ const stubs={
   './connections.js':`export async function loadConnections(){return{woo:{url:'https://shop.example',key:'k',secret:'s'},basalam:{token:'t',vendorId:'10',api:'https://core.basalam.com/v3',shops:[]},ai:{providers:[],candidates:[],master:'',model:''}}}`,
   './db.js':`const h=globalThis.__dedupHarness;
     export async function getState(key,fallback){return h.states.has(key)?JSON.parse(h.states.get(key)):fallback}
-    export async function setState(key,value){h.states.set(key,JSON.stringify(value));h.stateUpdatedAt.set(key,new Date().toISOString())}
+    export async function setState(key,value){h.states.set(key,JSON.stringify(value));h.stateUpdatedAt.set(key,new Date().toISOString());h.writeCount[key]=(h.writeCount[key]||0)+1}
     export async function deleteState(key){h.states.delete(key);h.stateUpdatedAt.delete(key)}
     export async function getAgentRun(){return null}
     export async function saveAgentRun(){}
@@ -137,23 +137,42 @@ test('preview mode reports duplicates without touching the destination and basal
 test('stop pauses at a checkpoint and resume continues from the same cursor',async()=>{
   await background.resetBackgroundRun('dedup');
   harness.statusChanges.length=0;
-  // 30 same-named copies: the inline drain (5 passes = listing + grouping + 3 removal chunks of 4)
-  // cannot finish, leaving a mid-run checkpoint to stop at.
-  harness.pages=[{products:Array.from({length:30},(_,i)=>product(100+i,'محصول تکراری #'+(i+1),50+i,'2026-01-0'+((i%8)+1)+'T00:00:00Z'))}];
+  // 60 same-named copies: the inline drain (5 passes = listing + grouping + 3 removal
+  // chunks of 10) cannot finish, leaving a mid-run checkpoint to stop at.
+  harness.pages=[{products:Array.from({length:60},(_,i)=>product(100+i,'محصول تکراری #'+(i+1),50+i,'2026-01-0'+((i%8)+1)+'T00:00:00Z'))}];
   const started=await background.startDedupRun('woo',{keep:'oldest',apply:true},waitUntil);
   const runId=started.run.id;
   await settle();
-  assert.equal(harness.statusChanges.length,12,'each removal chunk archives at most 4 duplicates');
+  assert.equal(harness.statusChanges.length,30,'each removal chunk archives at most 10 duplicates');
   assert.equal(readRun(runId).status,'queued');
   await background.controlBackgroundRun('dedup','stop');
   const paused=await background.getPublicBackgroundRun('dedup');
   assert.equal(paused.status,'paused');
   assert.equal((await background.processBackgroundMessage({task:'dedup',runId})).outcome,'ignored','paused runs ignore late deliveries');
-  assert.equal(harness.statusChanges.length,12,'no removal happens while paused');
+  assert.equal(harness.statusChanges.length,30,'no removal happens while paused');
   await background.controlBackgroundRun('dedup','resume',waitUntil);
   const run=await pump(runId);
   assert.equal(run.status,'done');
-  assert.equal(run.removed,29,'29 of 30 same-named copies are removed, the oldest stays');
-  assert.equal(harness.statusChanges.length,29);
+  assert.equal(run.removed,59,'59 of 60 same-named copies are removed, the oldest stays');
+  assert.equal(harness.statusChanges.length,59);
   assert.ok(!harness.statusChanges.some(x=>x.id===100),'the oldest copy (smallest id on equal dates) survives');
+});
+
+test('dedup run stays within a small D1 write budget (no per-item persistence)',async()=>{
+  await background.resetBackgroundRun('dedup');
+  harness.writeCount={};harness.statusChanges.length=0;
+  harness.pages=[
+    {products:[product(1,'عطر گل محمدی (کد:1)',90,'2026-01-01T00:00:00Z'),product(2,'عطر گل محمدی #22',70,'2026-02-01T00:00:00Z'),product(3,'کیف چرم',50,'2026-01-05T00:00:00Z')]},
+    {products:[product(4,'عطر گل محمدی',80,'2026-03-01T00:00:00Z'),product(5,'کیف چرم (کد:۴۵)',40,'2026-04-01T00:00:00Z')]},
+  ];
+  const started=await background.startDedupRun('woo',{keep:'cheapest',suffixFormats:'(کد:x)، #x',apply:true},waitUntil);
+  const runId=started.run.id;
+  await pump(runId);
+  const run=await background.getPublicBackgroundRun('dedup');
+  assert.equal(run.status,'done');assert.equal(run.removed,3);
+  const writes=harness.writeCount['background_run:dedup:'+runId]||0;
+  // initial + 2 listing pages + grouping + one removal chunk = 5; the old code
+  // added one more write per invocation (start write) = 8. Keep the guard tight.
+  assert.ok(writes<=5,'run-state writes stay bounded (got '+writes+', expected <= 5)');
+  assert.equal(harness.statusChanges.length,3);
 });
