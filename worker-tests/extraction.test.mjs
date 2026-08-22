@@ -254,6 +254,11 @@ test('task manager panel is wired and the activity endpoint exists',async()=>{
   for(const token of ['activityBtn','openActivityManager','activityPoll','/api/activity','activity-stats','activity-runs'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
   assert.match(app,/\/api\/activity/,'activity endpoint');
   assert.match(app,/getPublicBackgroundRun\('ai-test'\)/);
+  for(const token of ['data-activity-up','data-activity-down','data-job-id','activityReorderQueued','saveActivityPriorities','activityMoveQueued','wireActivityControls'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
+  assert.match(dash,/draggable="true"/,'queued jobs are draggable');
+  assert.match(dash,/\/api\/jobs\/priority/,'priority endpoint is wired in the dashboard');
+  assert.match(app,/app\.post\('\/api\/jobs\/priority'/,'priority endpoint exists');
+  assert.match(app,/listQueuedJobs/,'cron and consumer use the priority-ordered queue');
 });
 
 test('aiEditorAccounts state is always declared so provider edit never throws',async()=>{

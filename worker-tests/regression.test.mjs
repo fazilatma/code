@@ -237,6 +237,29 @@ test('activity endpoint returns a lightweight summary without heavy data',async(
   assert.ok('cron' in d&&'version' in d&&'ts' in d);
 });
 
+test('task manager drag order persists as priority and drives active job ordering',async()=>{
+  const db=new MemoryD1();
+  await call(db,'/api/profiles',jsonInit({id:'p1',name:'p',url:'',noExtract:true,pages:1,pagination:'none',selectors:{container:'.x',title:'h2',price:'.p',link:'a',image:'img'},enabled:true}));
+  const job=(id,created,status='queued')=>db.jobs.set(id,{id,profile_id:'p1',kind:'scrape',target:'woo',status,phase:status==='queued'?'waiting':'details',total:2,processed:0,added:0,updated:0,failed:0,stop_requested:0,error:null,log:'[]',created_at:created,updated_at:created,started_at:null,finished_at:null});
+  job('job-old','2026-08-20T10:00:00.000Z');job('job-mid','2026-08-21T10:00:00.000Z');job('job-new','2026-08-22T10:00:00.000Z');job('job-run','2026-08-22T11:00:00.000Z','running');
+  // User drags job-new to the top, job-mid last: POST the desired execution order.
+  const reordered=await call(db,'/api/jobs/priority',jsonInit({ids:['job-new','job-old','job-mid']})).then(r=>r.json());
+  assert.equal(reordered.ok,true);assert.equal(reordered.count,3);
+  assert.equal(JSON.parse(db.states.get('job_priorities_v1'))['job-new'],3);
+  assert.equal(JSON.parse(db.states.get('job_priorities_v1'))['job-old'],2);
+  assert.equal(JSON.parse(db.states.get('job_priorities_v1'))['job-mid'],1);
+  // The running job is ignored by the reorder endpoint (it cannot be dragged).
+  const ignored=await call(db,'/api/jobs/priority',jsonInit({ids:['job-run']})).then(r=>r.json());
+  assert.equal(ignored.count,0);
+  // Activity lists queued jobs in priority order first, then the running job.
+  const d=await call(db,'/api/activity').then(r=>r.json());
+  assert.deepEqual(d.activeJobs.map(j=>j.id),['job-new','job-old','job-mid','job-run']);
+  assert.equal(d.activeJobs[0].priority,3);assert.equal(d.activeJobs[3].status,'running');
+  // Empty request is rejected instead of wiping the saved order.
+  const empty=await call(db,'/api/jobs/priority',jsonInit({ids:[]})).then(r=>r.json());
+  assert.equal(empty.ok,false);
+});
+
 test('scheduled cron uses live general settings for watchdog, report retention, lock and cron ping',async()=>{
   const db=new MemoryD1(),pending=[],pings=[],localCtx={waitUntil(promise){pending.push(promise)},passThroughOnException(){}};
   await call(db,'/api/settings',jsonInit({general:{cronLockMin:1,keepReports:2,queueDedup:true,queueDedupStale:1,contentSync:false},watchdog:{enabled:true,stallAfter:60},notifications:{events:{cronPing:true},pingEvery:1}}));

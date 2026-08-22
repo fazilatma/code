@@ -87,6 +87,24 @@ export async function createJob(profileId: string, kind: Job['kind'], target: Jo
 }
 export async function getJob(id:string):Promise<Job|null>{const row=await statement('SELECT * FROM jobs WHERE id=?',[id]).first();return row?jobFromRow(row):null;}
 export async function listJobs(limit=50):Promise<Job[]>{return(await rows('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?',[Math.max(1,limit)])).map(jobFromRow);}
+// ─── Job priority map (task-manager drag order) ─────────────────────────────
+// Priorities live in app_state (no schema change): the first queued job in the
+// user-defined order gets the highest number and is processed first. New jobs
+// without an entry fall back to priority 0 (below every prioritized job).
+const JOB_PRIORITY_KEY='job_priorities_v1';
+export async function getJobPriorities():Promise<Record<string,number>>{return getState<Record<string,number>>(JOB_PRIORITY_KEY,{});}
+export async function setJobPriorities(ids:string[]):Promise<Record<string,number>>{
+  const valid=[...new Set(ids.map(String).filter(Boolean))],map:Record<string,number>={};
+  valid.forEach((id,index)=>{map[id]=valid.length-index});
+  await setState(JOB_PRIORITY_KEY,map);
+  return map;
+}
+function jobPriority(map:Record<string,number>,job:Job):number{return Number(map[job.id])||0;}
+export async function listQueuedJobs(limit=200):Promise<Job[]>{
+  const jobs=(await rows(`SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT ?`,[Math.max(1,limit)])).map(jobFromRow);
+  const map=await getJobPriorities();
+  return jobs.sort((a,b)=>jobPriority(map,b)-jobPriority(map,a)||a.createdAt.localeCompare(b.createdAt));
+}
 export async function claimJob(id?:string):Promise<Job|null>{
   const candidate=id?await statement("SELECT id FROM jobs WHERE id=? AND status='queued'",[id]).first<{id:string}>():await statement("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1").first<{id:string}>();
   if(!candidate)return null;const timestamp=now();const changed=await run("UPDATE jobs SET status='running',phase='starting',started_at=?,updated_at=? WHERE id=? AND status='queued'",[timestamp,timestamp,candidate.id]);

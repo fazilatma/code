@@ -6,7 +6,7 @@ import { AGENT_PROMPT_TEMPLATES, AGENT_TOOLS, AGENT_TOOL_MODELS, agentCronTick, 
 import { automationTick, autoreplyLogs, autoreplyRun, basalamChatMessagesOverview, basalamChatsOverview, basalamOrders, digest, generateReply } from './automation.js';
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
 import { DASHBOARD, DASHBOARD_JS } from './dashboard.js';
-import { allProducts, clearFinishedJobs, createBackup, createJob, deleteJob, deleteProfile, enqueueDueProfiles, ensureSchema, findLearnedCategory, getJob, getProduct, getProfile, getState, getTriedBasalamCategories, importAutoreplyLog, importCategoryLearning, learnCategory, listCategoryLearning, listJobs, listProducts, listProfiles, markBasalamCategoriesTried, profileStats, pruneFinishedJobs, reapStalledJobs, restoreBackup, retryJob, saveProfile, setState, updateJob, upsertProduct } from './db.js';
+import { allProducts, clearFinishedJobs, createBackup, createJob, deleteJob, deleteProfile, enqueueDueProfiles, ensureSchema, findLearnedCategory, getJob, getJobPriorities, getProduct, getProfile, getState, getTriedBasalamCategories, importAutoreplyLog, importCategoryLearning, learnCategory, listCategoryLearning, listJobs, listProducts, listProfiles, listQueuedJobs, markBasalamCategoriesTried, profileStats, pruneFinishedJobs, reapStalledJobs, restoreBackup, retryJob, saveProfile, setJobPriorities, setState, updateJob, upsertProduct } from './db.js';
 import { configureEnv, type Env } from './env.js';
 import { bulkEdit, destinationBulkEdit, destinationCatalog, destinationCategories, destinationChangeStatus, destinationDelete, destinationOverview, destinationProduct, destinationUpdate, findDestinationDuplicates, photoFix, rebuildMap, recon, retire } from './maintenance.js';
 import { safeFetch, safeText, safeWooFetch } from './network.js';
@@ -30,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.27.1',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.28.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -41,7 +41,7 @@ app.post('/api/visual-ticket',async c=>{const body=await c.req.json() as any,url
 app.get('/api/status',async c=>{const connections=await loadConnections();return c.json({ok:true,profiles:(await listProfiles()).length,jobs:await listJobs(10),connections:connectionStatus(connections),queue:Boolean(c.env.JOBS),storage:{d1:true,r2:Boolean(c.env.BACKUPS)}})});
 // ─── Task-manager style live activity (lightweight) ──────────────────────────
 app.get('/api/activity',async c=>{
-  const[profiles,jobs,aiRun,dedupRun,catRun,agentRun,cronLock,version]=await Promise.all([
+  const[profiles,jobs,aiRun,dedupRun,catRun,agentRun,cronLock,priorities,version]=await Promise.all([
     listProfiles(),
     listJobs(Math.min(30,Number(c.req.query('limit'))||15)),
     getPublicBackgroundRun('ai-test'),
@@ -49,9 +49,14 @@ app.get('/api/activity',async c=>{
     getPublicBackgroundRun('category-all'),
     publicAgentRun(await currentAgentRun()),
     getState<any>('cron_lock',{}),
+    getJobPriorities(),
     Promise.resolve(c.env.WORKER_VERSION||'1.0.0')
   ]);
-  const active=jobs.filter(j=>['queued','running'].includes(j.status));
+  const active=jobs.filter(j=>['queued','running'].includes(j.status)).sort((a,b)=>{
+    if(a.status!==b.status)return a.status==='queued'?-1:1; // queued (reorderable) first, running below
+    const pa=Number(priorities[a.id])||0,pb=Number(priorities[b.id])||0;
+    return pa!==pb?pb-pa:a.createdAt.localeCompare(b.createdAt);
+  });
   const runs=[aiRun,dedupRun,catRun,agentRun].filter(Boolean).map(r=>({
     kind:r.kind||'run',name:r.kind==='ai-test'?'تست مدل‌های هوش مصنوعی':r.kind==='dedup'?'حذف تکراری‌های مقصد':r.kind==='category-all'?'دسته‌بندی همهٔ باسلام':'عملیات ایجنتیک',
     status:r.status,phase:r.phase,progress:r.total?Math.round((Number(r.processed||r.cursor||0)/Number(r.total))*100):(r.steps&&r.maxSteps?Math.round(r.steps/r.maxSteps*100):0),
@@ -61,7 +66,7 @@ app.get('/api/activity',async c=>{
   const cronAge=cronLock?.at?Date.now()-Date.parse(cronLock.at):null;
   return c.json({ok:true,ts:new Date().toISOString(),queue:Boolean(c.env.JOBS),version,
     counts:{profiles:profiles.length,jobs:jobs.length,active:active.length,runningRuns:runs.filter(r=>['queued','running'].includes(r.status)).length},
-    activeJobs:active.slice(0,15).map(j=>({id:j.id.slice(0,8),profileId:j.profileId.slice(0,12),kind:j.kind,target:j.target,status:j.status,phase:j.phase,progress:j.total?Math.round(j.processed/j.total*100):0,detail:`${j.processed}/${j.total}`,updatedAt:j.updatedAt,error:j.error?String(j.error).slice(0,120):null})),
+    activeJobs:active.slice(0,15).map(j=>({id:j.id,shortId:j.id.slice(0,8),profileId:j.profileId.slice(0,12),kind:j.kind,target:j.target,status:j.status,phase:j.phase,priority:Number(priorities[j.id])||0,progress:j.total?Math.round(j.processed/j.total*100):0,detail:`${j.processed}/${j.total}`,updatedAt:j.updatedAt,error:j.error?String(j.error).slice(0,120):null})),
     runs,
     cron:{held:Boolean(cronLock?.held),ageSec:cronAge?Math.round(cronAge/1000):null,lastTick:cronLock?.at||null},
     lastJobs:jobs.slice(0,8).map(j=>({id:j.id.slice(0,8),kind:j.kind,status:j.status,phase:j.phase,at:j.updatedAt,error:j.error?String(j.error).slice(0,120):null}))
@@ -70,7 +75,7 @@ app.get('/api/activity',async c=>{
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.27.1',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.28.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -205,6 +210,20 @@ app.post('/api/jobs/:id/stop',async c=>{await updateJob(c.req.param('id'),{stopR
 app.post('/api/jobs/:id/retry',async c=>{const job=await retryJob(c.req.param('id'));if(!job)return c.json({ok:false,error:'Job cannot be retried'},409);await enqueueJob(job,p=>c.executionCtx.waitUntil(p));return c.json({ok:true,job})});
 app.delete('/api/jobs/:id',async c=>c.json({ok:await deleteJob(c.req.param('id'))}));
 app.delete('/api/jobs',async c=>c.json({ok:true,deleted:await clearFinishedJobs()}));
+// Reorder queued jobs by priority: ids are sent in the desired execution order
+// (first = highest priority). Only still-queued jobs are honored; running or
+// finished jobs are ignored so a stale drag never locks anything.
+app.post('/api/jobs/priority',async c=>{
+  const b=await jsonBody(c),ids=Array.isArray(b.ids)?b.ids.map(String):[];
+  if(!ids.length)return c.json({ok:false,error:'هیچ کاری برای اولویت‌بندی ارسال نشد.'},400);
+  const valid:string[]=[];
+  for(const id of ids){const job=await getJob(id);if(job&&job.status==='queued')valid.push(id)}
+  // An empty result (e.g. every dragged job already started) must never wipe the
+  // saved order, so we only persist when at least one queued job was reordered.
+  if(!valid.length)return c.json({ok:true,count:0,priorities:await getJobPriorities()});
+  const priorities=await setJobPriorities(valid);
+  return c.json({ok:true,count:valid.length,priorities});
+});
 
 // Stable compatibility routes retained for clients of the first Worker port.
 app.get('/legacy/profiles',async c=>c.json({ok:true,data:await listProfiles()}));
@@ -470,7 +489,7 @@ export async function scheduledTasks(env:Env,waitUntil:(promise:Promise<unknown>
   try{
     if(settings.watchdog?.enabled!==false)await reapStalledJobs(Math.max(0.5,Number(settings.watchdog?.stallAfter||300)/60));
     await pruneFinishedJobs(clampNumber(settings.general?.keepReports,20,1,200));
-    const due=await enqueueDueProfiles(),queued=(await listJobs(200)).filter(job=>job.status==='queued'),seen=new Set<string>();
+    const due=await enqueueDueProfiles(),queued=await listQueuedJobs(200),seen=new Set<string>();
     for(const job of [...due,...queued])if(!seen.has(job.id)){seen.add(job.id);await enqueueJob(job,waitUntil)}
     await recoverBackgroundRuns(waitUntil);
     waitUntil(agentCronTick((promise:Promise<unknown>)=>waitUntil(promise)));
