@@ -238,6 +238,13 @@ test('selector tab: sticky sub-tabs, product dropdown for detail sample, price d
   assert.match(scraper,/تنوع‌ها به‌عنوان گالری عکس/,'variation images feed the gallery');
 });
 
+test('task manager panel is wired and the activity endpoint exists',async()=>{
+  const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8'),app=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');
+  for(const token of ['activityBtn','openActivityManager','activityPoll','/api/activity','activity-stats','activity-runs'])assert.match(dash,new RegExp(token.replace(/[.\/]/g,'\\$&')),token);
+  assert.match(app,/\/api\/activity/,'activity endpoint');
+  assert.match(app,/getPublicBackgroundRun\('ai-test'\)/);
+});
+
 test('aiEditorAccounts state is always declared so provider edit never throws',async()=>{
   const dash=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
   assert.match(dash,/aiEditorKeys=\[\],aiEditorAccounts=\[\]/,'aiEditorAccounts is declared next to aiEditorKeys');

@@ -228,6 +228,15 @@ test('AI chat lists capability-filtered models and returns conversation replies'
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('activity endpoint returns a lightweight summary without heavy data',async()=>{
+  const db=new MemoryD1();
+  await call(db,'/api/profiles',jsonInit({id:'p1',name:'p',url:'',noExtract:true,pages:1,pagination:'none',selectors:{container:'.x',title:'h2',price:'.p',link:'a',image:'img'},enabled:true}));
+  const d=await call(db,'/api/activity').then(r=>r.json());
+  assert.equal(d.ok,true);assert.equal(d.counts.profiles,1);
+  assert.ok(Array.isArray(d.activeJobs)&&Array.isArray(d.runs)&&Array.isArray(d.lastJobs));
+  assert.ok('cron' in d&&'version' in d&&'ts' in d);
+});
+
 test('scheduled cron uses live general settings for watchdog, report retention, lock and cron ping',async()=>{
   const db=new MemoryD1(),pending=[],pings=[],localCtx={waitUntil(promise){pending.push(promise)},passThroughOnException(){}};
   await call(db,'/api/settings',jsonInit({general:{cronLockMin:1,keepReports:2,queueDedup:true,queueDedupStale:1,contentSync:false},watchdog:{enabled:true,stallAfter:60},notifications:{events:{cronPing:true},pingEvery:1}}));

@@ -30,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.26.2',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.27.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -39,10 +39,38 @@ app.use('/api/*',async(c,next)=>{if(!c.env.DB)return c.json({ok:false,error:'D1 
 
 app.post('/api/visual-ticket',async c=>{const body=await c.req.json() as any,url=new URL(String(body.url||''));if(!['http:','https:'].includes(url.protocol))return c.json({ok:false,error:'Invalid visual selector URL'},400);return c.json({ok:true,ticket:await createVisualTicket(url.href),expiresIn:300})});
 app.get('/api/status',async c=>{const connections=await loadConnections();return c.json({ok:true,profiles:(await listProfiles()).length,jobs:await listJobs(10),connections:connectionStatus(connections),queue:Boolean(c.env.JOBS),storage:{d1:true,r2:Boolean(c.env.BACKUPS)}})});
+// ─── Task-manager style live activity (lightweight) ──────────────────────────
+app.get('/api/activity',async c=>{
+  const[profiles,jobs,aiRun,dedupRun,catRun,agentRun,cronLock,version]=await Promise.all([
+    listProfiles(),
+    listJobs(Math.min(30,Number(c.req.query('limit'))||15)),
+    getPublicBackgroundRun('ai-test'),
+    getPublicBackgroundRun('dedup'),
+    getPublicBackgroundRun('category-all'),
+    publicAgentRun(await currentAgentRun()),
+    getState<any>('cron_lock',{}),
+    Promise.resolve(c.env.WORKER_VERSION||'1.0.0')
+  ]);
+  const active=jobs.filter(j=>['queued','running'].includes(j.status));
+  const runs=[aiRun,dedupRun,catRun,agentRun].filter(Boolean).map(r=>({
+    kind:r.kind||'run',name:r.kind==='ai-test'?'تست مدل‌های هوش مصنوعی':r.kind==='dedup'?'حذف تکراری‌های مقصد':r.kind==='category-all'?'دسته‌بندی همهٔ باسلام':'عملیات ایجنتیک',
+    status:r.status,phase:r.phase,progress:r.total?Math.round((Number(r.processed||r.cursor||0)/Number(r.total))*100):(r.steps&&r.maxSteps?Math.round(r.steps/r.maxSteps*100):0),
+    detail:r.kind==='dedup'?`${r.scanned||0} بررسی · ${r.removed||0} حذف`:r.kind==='category-all'?`${r.processed||0}/${r.total||0}`:r.kind==='agent'?`گام ${r.steps||0}/${r.maxSteps||0}`:`${r.messageSucceeded??r.succeeded??0} موفق`,
+    updatedAt:r.updatedAt
+  }));
+  const cronAge=cronLock?.at?Date.now()-Date.parse(cronLock.at):null;
+  return c.json({ok:true,ts:new Date().toISOString(),queue:Boolean(c.env.JOBS),version,
+    counts:{profiles:profiles.length,jobs:jobs.length,active:active.length,runningRuns:runs.filter(r=>['queued','running'].includes(r.status)).length},
+    activeJobs:active.slice(0,15).map(j=>({id:j.id.slice(0,8),profileId:j.profileId.slice(0,12),kind:j.kind,target:j.target,status:j.status,phase:j.phase,progress:j.total?Math.round(j.processed/j.total*100):0,detail:`${j.processed}/${j.total}`,updatedAt:j.updatedAt,error:j.error?String(j.error).slice(0,120):null})),
+    runs,
+    cron:{held:Boolean(cronLock?.held),ageSec:cronAge?Math.round(cronAge/1000):null,lastTick:cronLock?.at||null},
+    lastJobs:jobs.slice(0,8).map(j=>({id:j.id.slice(0,8),kind:j.kind,status:j.status,phase:j.phase,at:j.updatedAt,error:j.error?String(j.error).slice(0,120):null}))
+  });
+});
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.26.2',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.27.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
