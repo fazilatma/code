@@ -19,9 +19,10 @@ test('the free tool-calling model catalog is present, unique and clearly tagged'
   assert.ok(agent.AGENT_TOOL_MODELS.filter(m=>m.free).length>=5,'the free models are listed');
   assert.ok(agent.AGENT_TOOL_MODELS.filter(m=>m.id!=='*configured').every(m=>m.toolCalling===true),'every curated model carries the toolCalling tag');
   assert.equal(agent.AGENT_TOOL_MODELS.find(m=>m.id==='*configured').toolCalling,false,'the configured-provider option is explicitly non-tagged');
-  const leanstral=agent.AGENT_TOOL_MODELS.find(m=>m.id==='labs-leanstral-2603');
-  assert.ok(leanstral&&leanstral.toolCalling===true,'labs-leanstral-2603 is listed as a tool-calling model');
-  assert.equal(leanstral.free,false,'Leanstral is a paid lab model');
+  const leanstral=agent.AGENT_TOOL_MODELS.find(m=>m.id==='labs-leanstral-1-5');
+  assert.ok(leanstral&&leanstral.toolCalling===true,'labs-leanstral-1-5 is listed as a tool-calling model');
+  assert.equal(leanstral.free,true,'Leanstral 1.5 is on the free Mistral Labs tier');
+  assert.ok(!agent.AGENT_TOOL_MODELS.some(m=>m.id==='labs-leanstral-2603'),'the retired labs-leanstral-2603 id is removed');
   const prism=agent.AGENT_TOOL_MODELS.find(m=>m.id==='Prism-ML/Ternary-Bonsai-27B');
   assert.ok(prism&&prism.toolCalling===true,'Together Prism (Ternary Bonsai 27B) is listed as a tool-calling model');
   assert.equal(prism.free,true,'Together Prism is on the free tier');

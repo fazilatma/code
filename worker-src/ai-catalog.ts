@@ -41,8 +41,10 @@ export const MISTRAL_CATALOG_V1_MODELS=[
   'ministral-14b-latest'
 ] as const;
 
-export const MISTRAL_CATALOG_VERSION=2;
+export const MISTRAL_CATALOG_VERSION=3;
 const MISTRAL_CATALOG_V2_ADDITIONS=['mistral-ocr-latest','mistral-embed'] as const;
+/** Leanstral 2603 retired 2026-06-30; replaced by the free Labs model labs-leanstral-1-5. */
+export const MISTRAL_CATALOG_V3_ADDITIONS=['labs-leanstral-1-5'] as const;
 
 function mistralProvider(ai:AiProviderCatalog){return ai.providers?.find(provider=>provider.id==='mistral'||/api\.mistral\.ai/i.test(String(provider.baseUrl||'')))}
 function appendModels(provider:NonNullable<AiProviderCatalog['providers']>[number],models:readonly string[]){provider.models=[...new Set([...(Array.isArray(provider.models)?provider.models.map(String):[]),...models])]}
@@ -61,6 +63,7 @@ export function upgradeAiProviderCatalog(ai:AiProviderCatalog):boolean{
   }
   if(version<1){appendModels(provider,MISTRAL_CATALOG_V1_MODELS);version=1;changed=true}
   if(version<2){appendModels(provider,MISTRAL_CATALOG_V2_ADDITIONS);version=2;changed=true}
+  if(version<3){appendModels(provider,MISTRAL_CATALOG_V3_ADDITIONS);version=3;changed=true}
   if(ai.catalogVersion!==version){ai.catalogVersion=version;changed=true}
   return changed;
 }

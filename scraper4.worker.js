@@ -10052,6 +10052,7 @@ var MISTRAL_CATALOG_V1_MODELS = [
   "ministral-14b-latest"
 ];
 var MISTRAL_CATALOG_V2_ADDITIONS = ["mistral-ocr-latest", "mistral-embed"];
+var MISTRAL_CATALOG_V3_ADDITIONS = ["labs-leanstral-1-5"];
 function mistralProvider(ai) {
   return ai.providers?.find((provider) => provider.id === "mistral" || /api\.mistral\.ai/i.test(String(provider.baseUrl || "")));
 }
@@ -10074,6 +10075,11 @@ function upgradeAiProviderCatalog(ai) {
   if (version < 2) {
     appendModels(provider, MISTRAL_CATALOG_V2_ADDITIONS);
     version = 2;
+    changed = true;
+  }
+  if (version < 3) {
+    appendModels(provider, MISTRAL_CATALOG_V3_ADDITIONS);
+    version = 3;
     changed = true;
   }
   if (ai.catalogVersion !== version) {
@@ -10635,7 +10641,7 @@ function isOpenRouter(provider, endpoint = "") {
   return provider.id === "openrouter" || /openrouter/i.test(String(provider.name || "")) || /openrouter\.ai/i.test(String(provider.baseUrl || endpoint || ""));
 }
 function aiRequestHeaders(provider, endpoint, method = "POST") {
-  const headers = { authorization: `Bearer ${provider.apiKey}`, accept: "application/json", "user-agent": "Scraper4/1.19.1" };
+  const headers = { authorization: `Bearer ${provider.apiKey}`, accept: "application/json", "user-agent": "Scraper4/1.19.2" };
   if (method === "POST") headers["content-type"] = "application/json";
   if (isOpenRouter(provider, endpoint)) {
     headers["http-referer"] = "https://scraper4.workers.dev";
@@ -11739,7 +11745,7 @@ var AGENT_TOOL_MODELS = [
   { id: "@cf/meta/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout 17B", vendor: "Meta \u2014 Workers AI", free: true, toolCalling: true, note: "\u0646\u0633\u0644 \u062C\u062F\u06CC\u062F Llama \u0628\u0627 \u067E\u0634\u062A\u06CC\u0628\u0627\u0646\u06CC \u0627\u0632 \u0641\u0631\u0627\u062E\u0648\u0627\u0646\u06CC \u0627\u0628\u0632\u0627\u0631." },
   { id: "@cf/meta/llama-4-maverick-17b-128e-instruct", name: "Llama 4 Maverick 17B", vendor: "Meta \u2014 Workers AI", free: true, toolCalling: true, note: "\u0642\u0648\u06CC\u200C\u062A\u0631\u06CC\u0646 \u0645\u062F\u0644 \u0631\u0627\u06CC\u06AF\u0627\u0646\u0650 \u0627\u06CC\u0646 \u0641\u0647\u0631\u0633\u062A \u0628\u0631\u0627\u06CC tool use." },
   { id: "Prism-ML/Ternary-Bonsai-27B", name: "Prism Ternary Bonsai 27B", vendor: "PrismML \u2014 Together AI", free: true, toolCalling: true, note: "\u0631\u0627\u06CC\u06AF\u0627\u0646 \u0631\u0648\u06CC Together AI (api.together.xyz/v1)\u061B \u0645\u062F\u0644 \u0627\u0633\u062A\u062F\u0644\u0627\u0644\u06CC \u0628\u0627 \u0641\u0631\u0627\u062E\u0648\u0627\u0646\u06CC \u0627\u0628\u0632\u0627\u0631. \u0628\u0631\u0627\u06CC \u0627\u0633\u062A\u0641\u0627\u062F\u0647\u060C \u06CC\u06A9 \u0627\u0631\u0627\u0626\u0647\u200C\u062F\u0647\u0646\u062F\u0647 \u0628\u0627 Base URL \xABhttps://api.together.xyz/v1\xBB \u0628\u0633\u0627\u0632\u06CC\u062F \u0648 \u0647\u0645\u06CC\u0646 \u0634\u0646\u0627\u0633\u0647 \u0631\u0627 \u0628\u0647 \u0645\u062F\u0644\u200C\u0647\u0627\u06CC\u0634 \u0627\u0636\u0627\u0641\u0647 \u06A9\u0646\u06CC\u062F." },
-  { id: "labs-leanstral-2603", name: "Leanstral 2603 (119B)", vendor: "Mistral AI (labs)", free: false, toolCalling: true, note: "\u0645\u062F\u0644 \u0622\u0632\u0645\u0627\u06CC\u0634\u06AF\u0627\u0647\u06CC Mistral \u0628\u0627 \u0641\u0631\u0627\u062E\u0648\u0627\u0646\u06CC \u0627\u0628\u0632\u0627\u0631 \u0648 \u0627\u0633\u062A\u062F\u0644\u0627\u0644\u061B \u0627\u0632 \u0637\u0631\u06CC\u0642 API \u0645\u0627\u06CC\u0633\u062A\u0631\u0627\u0644 (labs-leanstral-2603) \u062F\u0631 \u062F\u0633\u062A\u0631\u0633 \u0627\u0633\u062A." },
+  { id: "labs-leanstral-1-5", name: "Leanstral 1.5 (119B)", vendor: "Mistral AI (Labs \u2014 \u0631\u0627\u06CC\u06AF\u0627\u0646)", free: true, toolCalling: true, note: "\u062C\u0627\u06CC\u06AF\u0632\u06CC\u0646 Leanstral 2603 (\u0628\u0627\u0632\u0646\u0634\u0633\u062A\u0647). \u0631\u0627\u06CC\u06AF\u0627\u0646 \u0631\u0648\u06CC Labs \u0645\u0627\u06CC\u0633\u062A\u0631\u0627\u0644 \u0628\u0627 \u0641\u0631\u0627\u062E\u0648\u0627\u0646\u06CC \u0627\u0628\u0632\u0627\u0631 \u0648 \u0627\u0633\u062A\u062F\u0644\u0627\u0644\u061B \u0634\u0646\u0627\u0633\u0647\u0654 API: labs-leanstral-1-5." },
   { id: "*configured", name: "\u0645\u062F\u0644\u200C\u0647\u0627\u06CC \u0627\u0631\u0627\u0626\u0647\u200C\u062F\u0647\u0646\u062F\u0647\u200C\u0647\u0627\u06CC \u062A\u0646\u0638\u06CC\u0645\u200C\u0634\u062F\u0647", vendor: "OpenAI-compatible (GPT\u060C DeepSeek\u060C Qwen \u0648\u2026)", free: false, toolCalling: false, note: "\u0627\u0632 \u0645\u062F\u0644\u200C\u0647\u0627\u06CC \u0630\u062E\u06CC\u0631\u0647\u200C\u0634\u062F\u0647\u0654 \u062E\u0648\u062F\u062A\u0627\u0646 \u0627\u0646\u062A\u062E\u0627\u0628 \u06A9\u0646\u06CC\u062F\u061B \u0645\u062F\u0644 \u0628\u0627\u06CC\u062F \u0641\u0631\u0627\u062E\u0648\u0627\u0646\u06CC \u0627\u0628\u0632\u0627\u0631 (tool calling) \u067E\u0634\u062A\u06CC\u0628\u0627\u0646\u06CC \u06A9\u0646\u062F." }
 ];
 var AGENT_PROMPT_TEMPLATES = [
@@ -14966,7 +14972,7 @@ app.onError((error, c) => {
   const text = message(error), status = /Unauthorized/.test(text) ? 401 : /not found/i.test(text) ? 404 : /Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text) ? 413 : /timeout|مهلت دریافت/i.test(text) ? 504 : /invalid|required|empty|خالی|نامعتبر/i.test(text) ? 400 : /HTTP|fetch|network|اتصال/i.test(text) ? 502 : 500;
   return c.json({ ok: false, error: text, requestId: c.get("requestId") }, status);
 });
-app.get("/health", (c) => c.json({ ok: true, app: "scraper4-cloudflare", runtime: "cloudflare-workers", databaseReady: Boolean(c.env.DB), databaseError: c.env.DB ? null : "D1 binding DB is missing", workerInWeb: Boolean(c.env.JOBS), authenticationRequired: false, version: c.env.WORKER_VERSION || "1.19.1", time: (/* @__PURE__ */ new Date()).toISOString() }));
+app.get("/health", (c) => c.json({ ok: true, app: "scraper4-cloudflare", runtime: "cloudflare-workers", databaseReady: Boolean(c.env.DB), databaseError: c.env.DB ? null : "D1 binding DB is missing", workerInWeb: Boolean(c.env.JOBS), authenticationRequired: false, version: c.env.WORKER_VERSION || "1.19.2", time: (/* @__PURE__ */ new Date()).toISOString() }));
 app.get("/", async (c) => {
   await ensureSchema(c.env.DB);
   return c.html(DASHBOARD);
@@ -14995,7 +15001,7 @@ app.get("/api/status", async (c) => {
 app.get("/api/selftest", async (c) => c.json(await runSelftest()));
 app.get("/api/debug", async (c) => c.json(await runDiagnostics()));
 app.get("/api/parity", (c) => c.json({ ok: true, total: PHP_MENU_CAPABILITIES.length, capabilities: PHP_MENU_CAPABILITIES, dispatcherAudit: { reference: "scraper4.php v9.80", total: 178, get: 150, post: 28, mapped: 178, missing: 0, artifact: "parity-manifest.json" } }));
-app.get("/api/version", (c) => c.json({ ok: true, version: c.env.WORKER_VERSION || "1.19.1", runtime: "cloudflare-workers", deployment: "wrangler versions deploy / wrangler rollback" }));
+app.get("/api/version", (c) => c.json({ ok: true, version: c.env.WORKER_VERSION || "1.19.2", runtime: "cloudflare-workers", deployment: "wrangler versions deploy / wrangler rollback" }));
 app.get("/api/connections", async (c) => c.json({ ok: true, connections: await loadConnections(true) }));
 app.post("/api/connections", async (c) => c.json({ ok: true, connections: await saveConnections(await c.req.json()) }));
 app.get("/api/ai/providers", async (c) => c.json({ ok: true, providers: await aiProviders(), leaderboard: await getLeaderboard() }));
