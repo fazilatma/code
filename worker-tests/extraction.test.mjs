@@ -311,6 +311,11 @@ test('provider editor supports multiple API keys and model lists show key suffix
   assert.match(dash,/id="aiTestEstimate"/,'test panel shows the per-key test-entry estimate');
   assert.match(dash,/aiTestOnlyUntested'\)\?\.addEventListener\('change',renderAiTestEstimate/,'candidate checkbox refreshes the estimate');
   assert.match(dash,/last\.keyLabel/,'live progress shows the per-key suffix of the current model');
+  assert.match(dash,/aiEditorAccounts\[i\]=\{accountId:el\.matches/,'typing in a CF account row updates the editor state live');
+  assert.match(dash,/aiEditorKeys\[i\]=el\.value\.trim\(\)/,'typing in a generic key input updates the editor state live');
+  assert.match(dash,/row=rows\[Number\(index\)\],acc=aiEditorAccounts/,'per-account test reads the live row values');
+  assert.match(dash,/if\(apiKeys\.length>1\)notice/,'saving a multi-key provider confirms the doubled test list');
+  assert.match(dash,/\u00d7 '\+fa\(keyCount\)\+' /,'provider card shows models × keys = test entries');
 });
 
 test('import preview header mapping selects + row detail modal + Workers AI catalog UI are wired',async()=>{
