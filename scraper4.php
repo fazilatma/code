@@ -67,6 +67,11 @@ const DEDUP_RESULT_FILE   = __DIR__ . '/dedup_result.json';
 const DEDUP_STOP_FILE     = __DIR__ . '/dedup_stop.json';
 const DEDUP_LOCK_FILE     = __DIR__ . '/dedup.lock';
 const DEDUP_MAX_GROUPS    = 1200;
+/* v10.18 (۳۱ج): هر صفحهٔ برداشت تا این تعداد با مکثِ فزاینده تکرار می‌شود،
+   تا یک خطای گذرای HTTP 500 کلِ «حذفِ تکراری» را در صفحهٔ اول نبندد. */
+const DEDUP_PAGE_TRIES     = 3;
+const DEDUP_PAGE_WAIT_BASE = 2;    // ثانیه — تلاشِ دوم ۲s، سومی ۴s
+const DEDUP_PAGE_WAIT_MAX  = 15;
 // v10.04 (۱۸): انتقالِ رابطِ «ایجنتِ مدیریت محصولات» از تبِ ارسال به تبِ تازهٔ «🤖 ایجنت» در بخشِ هوش مصنوعی
 // v10.03 (۱۷): محیطِ آزمایشیِ «ایجنتِ مدیریت محصولات» — مدل با فراخوانیِ ابزار (tool calling)
 const AGENT_PROGRESS_FILE = __DIR__ . '/agent_progress.json';
@@ -94,6 +99,9 @@ const AI_PROVIDERS_FILE = __DIR__ . '/ai_providers.json';
    مرورگر آن را poll می‌کند؛ فایل توقف برای قطع صریح اجرا. */
 const AI_TEST_STATE_FILE = __DIR__ . '/ai_test_state.json';
 const AI_TEST_STOP_FILE  = __DIR__ . '/ai_test_stop.json';
+/* v10.18 (۳۱ب): پس از اتمامِ صفِ تست، ردیف‌هایی که خطایشان *ربطی به اعتبار
+   ندارد* تا این تعداد دور دوباره تست می‌شوند، هر دور با تایم‌اوتِ بزرگ‌تر. */
+const AI_TEST_RETRY_PASSES = 3;
 /* v10.01 (۱۵): وضعیتِ سلامتِ هر «کلید API».
    چرا فایلِ جدا و نه داخلِ ai_providers.json: هنگام «تست همهٔ مدل‌ها» آرایهٔ
    ارائه‌دهنده‌ها در حافظه نگه داشته و در پایانِ هر دور یکجا بازنویسی می‌شود؛
@@ -126,7 +134,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.17';
+const APP_VERSION = '10.18';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -2618,7 +2626,7 @@ function aiCloudflareCall(array $p, string $model, array $payload, array $net): 
    (choices[0].text ، output.choices[0].text ، output_text ، output[0].message...).
    این تابع چند ساختارِ رایج را امتحان می‌کند تا پاسخِ واقعی دیده شود و در
    جدولِ تست به‌جای «پاسخ گرفت» بی‌محتوا، متنِ واقعی بیاید. */
-function aiExtractText($body): string {
+function aiExtractText($body, int $depth = 0): string {
     if (!is_array($body)) return '';
     // ۱) OpenAI / اکثر ارائه‌دهنده‌های سازگار
     $c = $body['choices'] ?? null;
@@ -2680,6 +2688,23 @@ function aiExtractText($body): string {
     // ۴) Cloudflare native: result.response
     if (isset($body['result']['response']) && trim((string)$body['result']['response']) !== '')
         return (string)$body['result']['response'];
+    /* ۴ب) v10.18 (۳۱الف): Cloudflare پاسخِ سازگارِ OpenAI را هم داخلِ همان
+       پوستهٔ result می‌گذارد:
+         {"result":{"choices":[{"message":{"content":"…","reasoning":"…"}}]}}
+       تا اینجا فقط result.response شناخته می‌شد، پس متنِ این مدل‌ها گم
+       می‌شد و تست «پاسخ خالی/پاسخ نامعتبر» گزارش می‌کرد در حالی که مدل
+       واقعاً جواب داده بود. حالا همان منطقِ بالا یک بار روی خودِ result
+       اجرا می‌شود (عمقِ محدود، تا حلقهٔ بی‌پایان ممکن نشود). */
+    if ($depth < 2 && isset($body['result']) && is_array($body['result'])) {
+        $inner = aiExtractText($body['result'], $depth + 1);
+        if (trim($inner) !== '') return $inner;
+    }
+    /* ۴ج) v10.18: بعضی دروازه‌ها کلِ پاسخ را زیر data/output می‌پیچند */
+    if ($depth < 2 && isset($body['data']) && is_array($body['data'])
+        && (isset($body['data']['choices']) || isset($body['data']['message']))) {
+        $inner = aiExtractText($body['data'], $depth + 1);
+        if (trim($inner) !== '') return $inner;
+    }
     // ۵) برخی سرویس‌ها پاسخ را مستقیم در «response» یا «text» می‌دهند
     if (isset($body['response']) && is_string($body['response']) && trim($body['response']) !== '')
         return $body['response'];
@@ -19069,6 +19094,108 @@ if (isset($_GET['selftest'])) {
          version_compare(APP_VERSION, '10.' . '17', '>=')
       && strpos($selfSrc, 'v:' . "'10.17'") !== false);
 
+    /* ---------- v10.18 (۳۱الف/۳۱ب/۳۱ج) ---------- */
+
+    $add('10.18', '۳۱الف: پاسخِ پیچیده در result (سبکِ کلادفلر) خوانده می‌شود',
+         aiExtractText(['result' => ['choices' => [['message' => ['content' => 'سلام']]]]]) === 'سلام');
+
+    $add('10.18', '۳۱الف: reasoning داخلِ result هم fallback دارد',
+         aiExtractText(['result' => ['choices' => [['message' => ['content' => '', 'reasoning' => 'فکر']]]]]) === 'فکر');
+
+    $add('10.18', '۳۱الف: بدنهٔ پیچیده در data هم پشتیبانی می‌شود',
+         aiExtractText(['data' => ['choices' => [['text' => 'متن']]]]) === 'متن');
+
+    $add('10.18', '۳۱الف: result.response (رفتارِ قدیمیِ کلادفلر) نشکسته',
+         aiExtractText(['result' => ['response' => 'پاسخ']]) === 'پاسخ');
+
+    $add('10.18', '۳۱الف: choices سطحِ بالا (OpenAI) دست‌نخورده مانده',
+         aiExtractText(['choices' => [['message' => ['content' => 'hi']]]]) === 'hi');
+
+    $add('10.18', '۳۱الف: بازگشتِ تودرتو عمق‌دار است و حلقهٔ بی‌پایان نمی‌سازد',
+         aiExtractText(['result' => ['result' => ['result' => ['choices' => [['message' => ['content' => 'x']]]]]]]) === '');
+
+    $add('10.18', '۳۱الف: پاسخِ سالمِ کلادفلر دیگر «خالی» قضاوت نمی‌شود',
+         aiSuspectAnswer(aiExtractAnswer(['result' => ['choices' => [['message' =>
+             ['content' => 'وعليكم السلام! كيف يمكنني مساعدتك اليوم؟']]]]]), '@cf/x') === '');
+
+    $add('10.18', '۳۱ب: خطای موقت (۵xx) نامزدِ تلاشِ دوباره است',
+         aiTestRetryable(['ok' => false, 'code' => 500, 'kind' => '', 'billing' => '', 'diag' => []]) !== '');
+
+    $add('10.18', '۳۱ب: محدودیتِ نرخ (۴۲۹) نامزدِ تلاشِ دوباره است',
+         aiTestRetryable(['ok' => false, 'code' => 429, 'kind' => '', 'billing' => '', 'diag' => []]) !== '');
+
+    $add('10.18', '۳۱ب: خطای شبکه/تایم‌اوت نامزدِ تلاشِ دوباره است',
+         aiTestRetryable(['ok' => false, 'code' => 0, 'kind' => '', 'billing' => '',
+                          'diag' => ['cat' => 'timeout']]) !== '');
+
+    $add('10.18', '۳۱ب: خطای اعتبار هرگز دوباره تلاش نمی‌شود',
+         aiTestRetryable(['ok' => false, 'code' => 402, 'kind' => 'billing:credit',
+                          'billing' => 'credit', 'diag' => []]) === '');
+
+    $add('10.18', '۳۱ب: کلیدِ نامعتبر (۴۰۱) دوباره تلاش نمی‌شود',
+         aiTestRetryable(['ok' => false, 'code' => 401, 'kind' => '', 'billing' => '', 'diag' => []]) === '');
+
+    $add('10.18', '۳۱ب: مدلِ نامعتبر و پاسخِ بی‌معنی دوباره تلاش نمی‌شوند',
+         aiTestRetryable(['ok' => false, 'code' => 400, 'kind' => 'badmodel', 'billing' => '', 'diag' => []]) === ''
+      && aiTestRetryable(['ok' => false, 'code' => 200, 'kind' => 'bogus', 'billing' => '', 'diag' => []]) === '');
+
+    $add('10.18', '۳۱ب: ردیفِ موفق نامزدِ تلاشِ دوباره نیست',
+         aiTestRetryable(['ok' => true, 'code' => 200, 'kind' => '', 'billing' => '', 'diag' => []]) === '');
+
+    $add('10.18', '۳۱ب: تایم‌اوتِ دورها فزاینده است',
+         aiTestRetryTimeout(20, 1) < aiTestRetryTimeout(20, 2)
+      && aiTestRetryTimeout(20, 2) < aiTestRetryTimeout(20, 3));
+
+    $add('10.18', '۳۱ب: تایم‌اوتِ تلاشِ دوباره بینِ ۵ تا ۱۲۰ ثانیه مهار شده',
+         aiTestRetryTimeout(1, 1) >= 5 && aiTestRetryTimeout(100, 3) === 120);
+
+    $add('10.18', '۳۱ب: سه دورِ جبرانی تعریف شده است',
+         AI_TEST_RETRY_PASSES === 3);
+
+    $add('10.18', '۳۱ب: ثبتِ نتیجه در یک کلوژرِ مشترک است تا دورِ جبرانی همان مسیر را برود',
+         strpos($selfSrc, '$recordResult = function (array $res, array $catByKey)') !== false
+      && strpos($selfSrc, '$recordResult($res, $catByKey2);') !== false);
+
+    $add('10.18', '۳۱ب: دورِ جبرانی ردیف را دوباره نمی‌شمارد',
+         strpos($selfSrc, '$st[' . "'tested'" . '] = max(0, (int)$st[' . "'tested'" . '] - 1);') !== false);
+
+    $add('10.18', '۳۱ب: خلاصهٔ پایانی تلاش‌های دوباره را گزارش می‌کند',
+         strpos($selfSrc, "' · ↻ ' . (int)" . '$st[' . "'retry_tried'] . ' تلاشِ دوباره در '") !== false);
+
+    $add('10.18', '۳۱ج: ثابت‌های تلاشِ مجددِ صفحه تعریف شده‌اند',
+         DEDUP_PAGE_TRIES === 3 && DEDUP_PAGE_WAIT_BASE === 2 && DEDUP_PAGE_WAIT_MAX === 15);
+
+    $add('10.18', '۳۱ج: dedupFetchPage صفحهٔ سالم را فقط یک بار می‌خواند',
+         (function () {
+             $n = 0;
+             $r = dedupFetchPage(function () use (&$n) { $n++; return ['ok' => true, 'code' => 200]; }, 1, 'تست');
+             return $n === 1 && !empty($r['ok']) && (int)$r['tries'] === 1;
+         })());
+
+    $add('10.18', '۳۱ج: خطای ۵۰۰ گذرا با تلاشِ دوم جبران می‌شود',
+         (function () {
+             $n = 0;
+             $r = dedupFetchPage(function () use (&$n) {
+                 $n++; return $n < 2 ? ['ok' => false, 'code' => 500] : ['ok' => true, 'code' => 200];
+             }, 2, 'تست');
+             return $n === 2 && !empty($r['ok']) && (int)$r['tries'] === 2;
+         })());
+
+    $add('10.18', '۳۱ج: صفحهٔ همیشه‌خراب دقیقاً سه بار تلاش می‌شود',
+         (function () {
+             $n = 0;
+             $r = dedupFetchPage(function () use (&$n) { $n++; return ['ok' => false, 'code' => 500]; }, 3, 'تست');
+             return $n === 3 && empty($r['ok']) && (int)$r['tries'] === 3;
+         })());
+
+    $add('10.18', '۳۱ج: باسلام و ووکامرس هر دو از مسیرِ تلاشِ مجدد می‌روند',
+         strpos($selfSrc, '}, $page, ' . "'باسلام');") !== false
+      && strpos($selfSrc, '}, $page, ' . "'ووکامرس');") !== false);
+
+    $add('10.18', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '18', '>=')
+      && strpos($selfSrc, 'v:' . "'10.18'") !== false);
+
 /* ---------- v9.94 (۸الف/۸ب): دکمهٔ تمام‌عرض + سربخشِ چسبانِ منو ---------- */
     $add('9.94', 'دکمه‌های ☰ و ⛶ بالاتر از پنل تنظیمات قرار می‌گیرند',
          strpos($selfSrc, '.hamburger-btn,.fullwidth-btn' . '{z-index:10050}') !== false
@@ -25276,6 +25403,49 @@ function aiTestJudge(array $r, string $mid, string $pid = ''): array {
             'billing' => $bill['is'] ? $bill['kind'] : ''];
 }
 
+/* =====================================================================
+ *  v10.18 (۳۱ب): دورِ جبرانیِ پایانِ صف — تلاشِ مجدد با تایم‌اوتِ فزاینده
+ *
+ *  خواستهٔ کاربر: «بعد از اتمامِ صفِ تستِ مدل‌ها، خطاهای غیرمرتبط با اعتبار
+ *  تا سه بار با تایم‌اوتِ فزاینده دوباره تلاش شوند.»
+ *
+ *  چرا لازم است: بخشِ بزرگی از قرمزهای یک اجرا موقتی‌اند — تایم‌اوت،
+ *  قطعِ اتصال، ۵۰۰/۵۰۲/۵۰۳ سرویس، ۴۲۹ ریت‌لیمیت، خطای DNS/پروکسی. تا
+ *  اینجا این‌ها همان‌قدر قرمز می‌ماندند که یک مدلِ واقعاً خراب، و کاربر
+ *  مجبور بود کلِ تست را از نو بزند.
+ *
+ *  در مقابل، خطاهایی که تکرارشان بی‌فایده است رد می‌شوند:
+ *    • اعتبار/اشتراک/سهمیهٔ تمام‌شده (billing) — خواستهٔ صریحِ کاربر
+ *    • مدلِ ناموجود/غیرچت (badmodel) و ۴۰۱/۴۰۳/۴۰۴ — با تکرار درست نمی‌شود
+ *    • پاسخِ بی‌معنی (bogus) — مدل جواب داد، فقط جوابش بی‌ربط بود
+ *
+ *  خروجی: رشتهٔ خالی = تلاشِ دوباره نکن، وگرنه دلیلِ کوتاهِ فارسی.
+ * ===================================================================== */
+function aiTestRetryable(array $j): string {
+    if (!empty($j['ok'])) return '';
+    $kind = (string)($j['kind'] ?? '');
+    $code = (int)($j['code'] ?? 0);
+    /* اعتبار/اشتراک — طبقِ خواستهٔ کاربر هرگز دوباره تلاش نمی‌شود */
+    if ((string)($j['billing'] ?? '') !== '' || strpos($kind, 'billing') === 0) return '';
+    if ($kind === 'badmodel' || $kind === 'bogus') return '';
+    if (in_array($code, [400, 401, 403, 404, 405, 422], true)) return '';
+    $cat = (string)($j['diag']['cat'] ?? '');
+    if ($code === 0) return 'خطای شبکه/اتصال';                   // تایم‌اوت، DNS، refused
+    if ($code === 429) return 'محدودیتِ نرخ (۴۲۹)';
+    if ($code >= 500) return 'خطای موقتِ سرویس (' . $code . ')';
+    if ($kind === 'proxy' || $cat === 'proxy') return 'خطای مسیرِ عبور';
+    if (in_array($cat, ['dns','timeout','refused','connect','ssl','network'], true)) return 'خطای شبکه';
+    return '';
+}
+
+/* v10.18 (۳۱ب): تایم‌اوتِ دورِ جبرانیِ n-ام.
+   هر دور سخاوتمندانه‌تر از قبلی صبر می‌کند (۱٫۷۵×)، چون بخشِ زیادی از این
+   شکست‌ها صرفاً «سرویس کُند بود» است. سقفِ ۱۲۰ ثانیه همان سقفِ aiNetCfg. */
+function aiTestRetryTimeout(int $base, int $pass): int {
+    $t = (int)round(max(5, $base) * pow(1.75, max(1, $pass)));
+    return max(5, min(120, $t));
+}
+
 /* هستهٔ اجرای تست — یک تابع تا هم از مسیر پس‌زمینه و هم از مسیر هم‌زمان استفاده کند */
 function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'سلام', string $testCat = 'ادو پرفیوم', int $delayMs = 120, int $concurrency = 4, bool $skipNonChat = true, bool $doCat = true): array {
     @set_time_limit(0); @ignore_user_abort(true);
@@ -25350,95 +25520,14 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
        همهٔ مدل‌ها یکسان است (فقط نامِ مدل داخلِ aiParallelCalls عوض می‌شود). */
     $catPayload = ($doCat && $catData && $testCat !== '') ? aiCatPayload($testCat, (string)$catData['catList']) : null;
 
-    foreach ($rounds as $rIdx => $items) {
-        clearstatcache(true, AI_TEST_STOP_FILE);
-        if (is_file(AI_TEST_STOP_FILE)) { $st['stopped'] = true; break; }
-        $st['round'] = (int)$rIdx + 1;
-        $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1), 'model'=>count($items) . ' مدل هم‌زمان'];
-        aiTestStateSave($st);
-
-        $t0r = microtime(true);
-
-        /* =============================================================
-         *  v10.00 (۱۴ب): گامِ ۱ — «تستِ دسته‌بندی» *اول* زده می‌شود.
-         *
-         *  چرا ترتیب عوض شد: هر مدل در این برنامه دو درخواست می‌گیرد
-         *  (پیامِ نمونه + دسته‌بندیِ یک عنوانِ نمونه). خیلی از سرویس‌های
-         *  رایگان ریت‌لیمیتِ *دقیقه‌ای* دارند؛ وقتی دو درخواست پشت‌سرهم
-         *  می‌رود، معمولاً درخواستِ دوم است که ۴۲۹ می‌خورد. تا نسخهٔ ۹٫۹۹
-         *  درخواستِ دوم «دسته‌بندی» بود و دقیقاً همان چیزی که برای کاربر
-         *  مهم‌تر است (توانایی مدل در انتخابِ دستهٔ باسلام) قربانی می‌شد.
-         *  حالا دسته‌بندی اول می‌رود و اگر سهمیه ته کشید، پیام رد می‌شود
-         *  که کم‌اهمیت‌تر است.
-         *
-         *  ضمناً دسته‌بندی هم مثل پیام با curl_multi موازی می‌رود (قبلاً
-         *  تک‌تک و ترتیبی بود) ⇒ کلِ تست سریع‌تر تمام می‌شود.
-         * ============================================================= */
-        $catByKey = [];
-        if ($catPayload !== null) {
-            $catJobs = [];
-            foreach ($items as $q) {
-                $p = $providers[$q['pid']] ?? null;
-                if (!$p) continue;
-                /* v10.17 (۳۰): اگر این ردیف به یک کلیدِ مشخص گره خورده، همان
-                   کلید پین می‌شود تا نتیجه واقعاً «این مدل با این کلید» باشد. */
-                $kid = (string)($q['kid'] ?? '');
-                $catJobs[] = ['p'=>aiPinProviderKey($p, $kid), 'mid'=>$q['mid'], 'pid'=>$q['pid'],
-                              'kid'=>$kid, 'payload'=>$catPayload, 't0'=>microtime(true)];
-            }
-            if ($catJobs) {
-                $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1) . ' · تستِ دسته‌بندی', 'model'=>count($catJobs) . ' مدل هم‌زمان'];
-                aiTestStateSave($st);
-                foreach (aiParallelCalls($catJobs, $net, $concurrency) as $cr) {
-                    $crr    = (array)$cr['r'];
-                    $clat   = (int)round((microtime(true) - (float)$cr['t0']) * 1000);
-                    $parsed = aiCatParse($crr, $testCat, (array)$catData['cats'], (string)$cr['mid'], $clat);
-                    $catByKey[aiTestRowKey((string)$cr['pid'], (string)$cr['mid'], (string)($cr['kid'] ?? ''))] =
-                        ['res'=>$parsed, 'r'=>$crr, 'summary'=>aiCatSummary($parsed), 'meta'=>aiCatMeta($parsed), 'lat'=>$clat];
-                }
-            }
-            if (aiTestStopRequested()) { $st['stopped'] = true; break; }
-            /* فاصلهٔ کوتاه بین دو موجِ درخواست به همان ارائه‌دهنده‌ها */
-            if ($catByKey && $delayMs > 0) usleep($delayMs * 1000);
-        }
-
-        /* گامِ ۲ — تستِ پیام. اگر دسته‌بندی با خطای «قطعی» برگشته (اعتبار/
-           اشتراک، مدلِ ناموجود، کلیدِ نامعتبر) درخواستِ دوم هم دقیقاً همان
-           خطا را می‌گیرد ⇒ زده نمی‌شود و همان نتیجه بازاستفاده می‌شود.
-           این هم سهمیه را نمی‌سوزاند و هم تست را کوتاه‌تر می‌کند. */
-        $jobs = []; $reuse = [];
-        $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1) . ' · تستِ پیام', 'model'=>count($items) . ' مدل هم‌زمان'];
-        foreach ($items as $q) {
-            $p = $providers[$q['pid']] ?? null;
-            if (!$p) continue;
-            $kid = (string)($q['kid'] ?? '');
-            $pk  = aiPinProviderKey($p, $kid);   // v10.17 (۳۰): کلیدِ همین ردیف
-            $cc = $catByKey[aiTestRowKey((string)$q['pid'], (string)$q['mid'], $kid)] ?? null;
-            if ($cc !== null) {
-                $cj    = aiTestJudge((array)$cc['r'], (string)$q['mid'], (string)$q['pid']);
-                $ccode = (int)($cc['r']['code'] ?? 0);
-                if ($cj['billing'] !== '' || $cj['kind'] === 'badmodel' || in_array($ccode, [401, 404], true)) {
-                    $reuse[] = ['p'=>$pk, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'kid'=>$kid,
-                                't0'=>microtime(true) - ((int)$cc['lat']) / 1000,
-                                'r'=>((array)$cc['r']) + ['msg_skipped'=>true]];
-                    continue;
-                }
-            }
-            $jobs[] = ['p'=>$pk, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'kid'=>$kid,
-                       'payload'=>$payloadBase, 't0'=>microtime(true)];
-        }
-        $results = [];
-        if ($jobs) {
-            aiTestStateSave($st);
-            $results = array_values(aiParallelCalls($jobs, $net, $concurrency));
-        }
-        foreach ($reuse as $ru) $results[] = $ru;
-        if (!$results) continue;
-        if (aiTestStopRequested()) { $st['stopped'] = true; break; }
-        $roundMs = (int)round((microtime(true) - $t0r) * 1000);
-
-        foreach ($results as $res) {
-            if (aiTestStopRequested()) { $st['stopped'] = true; break 2; }
+    $rowJudge = [];
+        /* v10.18 (۳۱ب): ثبتِ نتیجهٔ یک ردیف در یک نقطه جمع شد.
+           تا اینجا این منطق فقط داخلِ حلقهٔ دورها بود؛ چون «دورِ جبرانیِ»
+           پایانِ صف باید دقیقاً همان کار را بکند (وگرنه خطرِ شمارشِ دوگانه
+           و واگراییِ رفتار داریم)، به یک کلوژرِ مشترک تبدیل شد.
+           خروجی: false یعنی توقف خواسته شده. */
+        $recordResult = function (array $res, array $catByKey) use (&$st, &$providers, &$rowJudge,
+                                  $sfxByKey, $net, $testMsg, $testCat): bool {
             $pid = (string)$res['pid']; $mid = (string)$res['mid'];
             /* v10.17 (۳۰): این نتیجه مالِ کدام کلید است؟ */
             $kid  = (string)($res['kid'] ?? '');
@@ -25446,7 +25535,7 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
             $ksfx = (string)$ksf['suffix'];
             $midLabel = $mid . $ksfx;      // نامِ نمایشیِ ردیف (با پسوندِ کلید)
             $p = $providers[$pid] ?? null;
-            if (!$p) continue;
+            if (!$p) return true;
             $r = (array)$res['r'];
             $latency = (int)round((microtime(true) - (float)$res['t0']) * 1000);
             $j = aiTestJudge($r, $mid, $pid);
@@ -25546,6 +25635,104 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
                 'round'=>$st['round'],
                 'msgResponse'=>mb_substr($response,0,150), 'catResponse'=>mb_substr((string)$catResponse,0,150)];
             if (count($st['items']) > 1000) $st['items'] = array_slice($st['items'], -1000);
+            /* v10.18 (۳۱ب): قضاوتِ این ردیف را نگه دار تا دورِ جبرانی بداند
+               کدام شکست‌ها ارزشِ تلاشِ دوباره دارند. */
+            $rowJudge[aiTestRowKey($pid, $mid, $kid)] = ['ok'=>$ok, 'code'=>$code,
+                'kind'=>(string)$j['kind'], 'billing'=>(string)$j['billing'],
+                'diag'=>['cat'=>(string)($diag['cat'] ?? '')]];
+            return true;
+        };
+
+    foreach ($rounds as $rIdx => $items) {
+        clearstatcache(true, AI_TEST_STOP_FILE);
+        if (is_file(AI_TEST_STOP_FILE)) { $st['stopped'] = true; break; }
+        $st['round'] = (int)$rIdx + 1;
+        $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1), 'model'=>count($items) . ' مدل هم‌زمان'];
+        aiTestStateSave($st);
+
+        $t0r = microtime(true);
+
+        /* =============================================================
+         *  v10.00 (۱۴ب): گامِ ۱ — «تستِ دسته‌بندی» *اول* زده می‌شود.
+         *
+         *  چرا ترتیب عوض شد: هر مدل در این برنامه دو درخواست می‌گیرد
+         *  (پیامِ نمونه + دسته‌بندیِ یک عنوانِ نمونه). خیلی از سرویس‌های
+         *  رایگان ریت‌لیمیتِ *دقیقه‌ای* دارند؛ وقتی دو درخواست پشت‌سرهم
+         *  می‌رود، معمولاً درخواستِ دوم است که ۴۲۹ می‌خورد. تا نسخهٔ ۹٫۹۹
+         *  درخواستِ دوم «دسته‌بندی» بود و دقیقاً همان چیزی که برای کاربر
+         *  مهم‌تر است (توانایی مدل در انتخابِ دستهٔ باسلام) قربانی می‌شد.
+         *  حالا دسته‌بندی اول می‌رود و اگر سهمیه ته کشید، پیام رد می‌شود
+         *  که کم‌اهمیت‌تر است.
+         *
+         *  ضمناً دسته‌بندی هم مثل پیام با curl_multi موازی می‌رود (قبلاً
+         *  تک‌تک و ترتیبی بود) ⇒ کلِ تست سریع‌تر تمام می‌شود.
+         * ============================================================= */
+        $catByKey = [];
+        if ($catPayload !== null) {
+            $catJobs = [];
+            foreach ($items as $q) {
+                $p = $providers[$q['pid']] ?? null;
+                if (!$p) continue;
+                /* v10.17 (۳۰): اگر این ردیف به یک کلیدِ مشخص گره خورده، همان
+                   کلید پین می‌شود تا نتیجه واقعاً «این مدل با این کلید» باشد. */
+                $kid = (string)($q['kid'] ?? '');
+                $catJobs[] = ['p'=>aiPinProviderKey($p, $kid), 'mid'=>$q['mid'], 'pid'=>$q['pid'],
+                              'kid'=>$kid, 'payload'=>$catPayload, 't0'=>microtime(true)];
+            }
+            if ($catJobs) {
+                $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1) . ' · تستِ دسته‌بندی', 'model'=>count($catJobs) . ' مدل هم‌زمان'];
+                aiTestStateSave($st);
+                foreach (aiParallelCalls($catJobs, $net, $concurrency) as $cr) {
+                    $crr    = (array)$cr['r'];
+                    $clat   = (int)round((microtime(true) - (float)$cr['t0']) * 1000);
+                    $parsed = aiCatParse($crr, $testCat, (array)$catData['cats'], (string)$cr['mid'], $clat);
+                    $catByKey[aiTestRowKey((string)$cr['pid'], (string)$cr['mid'], (string)($cr['kid'] ?? ''))] =
+                        ['res'=>$parsed, 'r'=>$crr, 'summary'=>aiCatSummary($parsed), 'meta'=>aiCatMeta($parsed), 'lat'=>$clat];
+                }
+            }
+            if (aiTestStopRequested()) { $st['stopped'] = true; break; }
+            /* فاصلهٔ کوتاه بین دو موجِ درخواست به همان ارائه‌دهنده‌ها */
+            if ($catByKey && $delayMs > 0) usleep($delayMs * 1000);
+        }
+
+        /* گامِ ۲ — تستِ پیام. اگر دسته‌بندی با خطای «قطعی» برگشته (اعتبار/
+           اشتراک، مدلِ ناموجود، کلیدِ نامعتبر) درخواستِ دوم هم دقیقاً همان
+           خطا را می‌گیرد ⇒ زده نمی‌شود و همان نتیجه بازاستفاده می‌شود.
+           این هم سهمیه را نمی‌سوزاند و هم تست را کوتاه‌تر می‌کند. */
+        $jobs = []; $reuse = [];
+        $st['current'] = ['provider'=>'دورِ ' . ($rIdx + 1) . ' · تستِ پیام', 'model'=>count($items) . ' مدل هم‌زمان'];
+        foreach ($items as $q) {
+            $p = $providers[$q['pid']] ?? null;
+            if (!$p) continue;
+            $kid = (string)($q['kid'] ?? '');
+            $pk  = aiPinProviderKey($p, $kid);   // v10.17 (۳۰): کلیدِ همین ردیف
+            $cc = $catByKey[aiTestRowKey((string)$q['pid'], (string)$q['mid'], $kid)] ?? null;
+            if ($cc !== null) {
+                $cj    = aiTestJudge((array)$cc['r'], (string)$q['mid'], (string)$q['pid']);
+                $ccode = (int)($cc['r']['code'] ?? 0);
+                if ($cj['billing'] !== '' || $cj['kind'] === 'badmodel' || in_array($ccode, [401, 404], true)) {
+                    $reuse[] = ['p'=>$pk, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'kid'=>$kid,
+                                't0'=>microtime(true) - ((int)$cc['lat']) / 1000,
+                                'r'=>((array)$cc['r']) + ['msg_skipped'=>true]];
+                    continue;
+                }
+            }
+            $jobs[] = ['p'=>$pk, 'mid'=>$q['mid'], 'pid'=>$q['pid'], 'kid'=>$kid,
+                       'payload'=>$payloadBase, 't0'=>microtime(true)];
+        }
+        $results = [];
+        if ($jobs) {
+            aiTestStateSave($st);
+            $results = array_values(aiParallelCalls($jobs, $net, $concurrency));
+        }
+        foreach ($reuse as $ru) $results[] = $ru;
+        if (!$results) continue;
+        if (aiTestStopRequested()) { $st['stopped'] = true; break; }
+        $roundMs = (int)round((microtime(true) - $t0r) * 1000);
+
+        foreach ($results as $res) {
+            if (aiTestStopRequested()) { $st['stopped'] = true; break 2; }
+            if (!$recordResult($res, $catByKey)) { $st['stopped'] = true; break 2; }
         }
         $st['current'] = ['provider'=>'', 'model'=>''];
         $st['last_round_ms'] = $roundMs;
@@ -25553,6 +25740,104 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
         aiTestStateSave($st);
         /* تاخیر بینِ دورها (نه بینِ تک‌تکِ درخواست‌ها): چون هر دور فقط یک
            درخواست به هر ارائه‌دهنده می‌زند، همین فاصله برای رعایتِ RPM کافی است. */
+        if ($delayMs > 0 && !aiTestStopRequested()) usleep($delayMs * 1000);
+    }
+
+    /* =================================================================
+     *  v10.18 (۳۱ب): دورهای جبرانیِ پایانِ صف
+     *
+     *  صفِ اصلی تمام شد. حالا هر ردیفی که با خطای *غیرمرتبط با اعتبار*
+     *  قرمز شده (تایم‌اوت، ۵۰۰/۵۰۲، ۴۲۹، قطعِ اتصال، خطای پروکسی) تا سه
+     *  بار دوباره تست می‌شود و هر بار تایم‌اوتِ شبکه بزرگ‌تر می‌شود
+     *  (۱٫۷۵× در هر دور، سقفِ ۱۲۰ ثانیه). ردیف‌های اعتباری/مدلِ نامعتبر
+     *  اصلاً وارد این دورها نمی‌شوند — تکرارشان فقط سهمیه می‌سوزاند.
+     *
+     *  نتیجهٔ هر تلاش از همان $recordResult عبور می‌کند، پس شمارنده‌ها،
+     *  keyTests و جزئیات دقیقاً مثل دورِ اصلی به‌روز می‌شوند؛ فقط تعدادِ
+     *  «tested» را دستی برمی‌گردانیم تا یک ردیف چند بار شمرده نشود.
+     * ================================================================= */
+    $st['retry_passes'] = 0;
+    $st['retry_fixed']  = 0;
+    $st['retry_tried']  = 0;
+    $baseTimeout = (int)($net['timeout'] ?? 25);
+    for ($pass = 1; $pass <= AI_TEST_RETRY_PASSES; $pass++) {
+        if ($st['stopped'] || aiTestStopRequested()) break;
+        /* کدام ردیف‌ها هنوز قرمزند و ارزشِ تلاشِ دوباره دارند؟ */
+        $todo = [];
+        foreach ($queue as $q) {
+            $rk = aiTestRowKey((string)$q['pid'], (string)$q['mid'], (string)($q['kid'] ?? ''));
+            $j0 = $rowJudge[$rk] ?? null;
+            if ($j0 === null || !empty($j0['ok'])) continue;
+            $why = aiTestRetryable($j0);
+            if ($why === '') continue;
+            $todo[] = ['q'=>$q, 'why'=>$why];
+        }
+        if (!$todo) break;
+
+        $retNet = $net;
+        $retNet['timeout'] = aiTestRetryTimeout($baseTimeout, $pass);
+        $st['retry_passes'] = $pass;
+        $st['retry_tried'] += count($todo);
+        $st['current'] = ['provider'=>'تلاشِ دوبارهٔ ' . aiFaNum($pass) . ' از ' . aiFaNum(AI_TEST_RETRY_PASSES),
+                          'model'=>aiFaNum(count($todo)) . ' مدل · تایم‌اوت ' . aiFaNum($retNet['timeout']) . ' ثانیه'];
+        aiTestStateSave($st);
+
+        /* گامِ ۱ — دسته‌بندی (اگر روشن است) تا جزئیاتِ ردیف کامل بماند */
+        $catByKey2 = [];
+        if ($catPayload !== null) {
+            $cj2 = [];
+            foreach ($todo as $t) {
+                $p = $providers[$t['q']['pid']] ?? null;
+                if (!$p) continue;
+                $kid = (string)($t['q']['kid'] ?? '');
+                $cj2[] = ['p'=>aiPinProviderKey($p, $kid), 'mid'=>$t['q']['mid'], 'pid'=>$t['q']['pid'],
+                          'kid'=>$kid, 'payload'=>$catPayload, 't0'=>microtime(true)];
+            }
+            if ($cj2) {
+                foreach (aiParallelCalls($cj2, $retNet, $concurrency) as $cr) {
+                    $crr    = (array)$cr['r'];
+                    $clat   = (int)round((microtime(true) - (float)$cr['t0']) * 1000);
+                    $parsed = aiCatParse($crr, $testCat, (array)$catData['cats'], (string)$cr['mid'], $clat);
+                    $catByKey2[aiTestRowKey((string)$cr['pid'], (string)$cr['mid'], (string)($cr['kid'] ?? ''))] =
+                        ['res'=>$parsed, 'r'=>$crr, 'summary'=>aiCatSummary($parsed), 'meta'=>aiCatMeta($parsed), 'lat'=>$clat];
+                }
+            }
+            if (aiTestStopRequested()) { $st['stopped'] = true; break; }
+            if ($delayMs > 0) usleep($delayMs * 1000);
+        }
+
+        /* گامِ ۲ — پیام */
+        $jobs2 = [];
+        foreach ($todo as $t) {
+            $p = $providers[$t['q']['pid']] ?? null;
+            if (!$p) continue;
+            $kid = (string)($t['q']['kid'] ?? '');
+            $jobs2[] = ['p'=>aiPinProviderKey($p, $kid), 'mid'=>$t['q']['mid'], 'pid'=>$t['q']['pid'],
+                        'kid'=>$kid, 'payload'=>$payloadBase, 't0'=>microtime(true)];
+        }
+        if (!$jobs2) break;
+        $res2 = array_values(aiParallelCalls($jobs2, $retNet, $concurrency));
+        if (aiTestStopRequested()) { $st['stopped'] = true; break; }
+
+        foreach ($res2 as $res) {
+            if (aiTestStopRequested()) { $st['stopped'] = true; break 2; }
+            $rk  = aiTestRowKey((string)$res['pid'], (string)$res['mid'], (string)($res['kid'] ?? ''));
+            $was = $rowJudge[$rk] ?? null;
+            /* ردیف قبلاً شمرده شده؛ شمارنده‌ها را عقب بکش تا ثبتِ تازه
+               جای نتیجهٔ قبلی بنشیند نه اینکه رویش اضافه شود. */
+            $st['tested'] = max(0, (int)$st['tested'] - 1);
+            $st['failed'] = max(0, (int)$st['failed'] - 1);
+            if ($was !== null && (string)$was['billing'] !== '') $st['billing'] = max(0, (int)$st['billing'] - 1);
+            if ($was !== null && $was['kind'] === 'proxy')   $st['proxy']    = max(0, (int)$st['proxy'] - 1);
+            if ($was !== null && $was['kind'] === 'bogus')   $st['bogus']    = max(0, (int)$st['bogus'] - 1);
+            if ($was !== null && $was['kind'] === 'badmodel') $st['badmodel'] = max(0, (int)$st['badmodel'] - 1);
+            $res['retry_pass'] = $pass;
+            $recordResult($res, $catByKey2);
+            if (!empty($rowJudge[$rk]['ok'])) $st['retry_fixed']++;
+        }
+        $st['current'] = ['provider'=>'', 'model'=>''];
+        aiProvidersSave($providers);
+        aiTestStateSave($st);
         if ($delayMs > 0 && !aiTestStopRequested()) usleep($delayMs * 1000);
     }
 
@@ -25564,6 +25849,11 @@ function aiRunTestBackground(int $per, bool $onlyUntested, string $testMsg = 'س
     if ($st['billing'] > 0) $extra .= ' · 💳 ' . $st['billing'] . ' اعتبار/اشتراک';
     if ($st['proxy'] > 0)   $extra .= ' · 🛰 ' . $st['proxy'] . ' مسیرِ عبور';
     if ($st['bogus'] > 0)   $extra .= ' · ⚠ ' . $st['bogus'] . ' پاسخِ نامعتبر';
+    /* v10.18 (۳۱ب): نتیجهٔ دورهای جبرانی را صریح گزارش کن */
+    if ((int)($st['retry_tried'] ?? 0) > 0)
+        $extra .= ' · ↻ ' . (int)$st['retry_tried'] . ' تلاشِ دوباره در '
+                . (int)($st['retry_passes'] ?? 0) . ' دور'
+                . ((int)($st['retry_fixed'] ?? 0) > 0 ? ' (' . (int)$st['retry_fixed'] . ' مورد درست شد)' : '');
     $st['summary'] = $st['stopped']
         ? 'توقف خواسته شد — '.$st['tested'].' تست انجام شد'
         : 'تمام شد — '.$st['tested'].' تست · 🟢 '.$st['available'].' · 🔴 '.$st['failed'].$extra;
@@ -30423,15 +30713,63 @@ function dedupClearStop(): void { @unlink(DEDUP_STOP_FILE); }
 
 /* --------------------- گرفتنِ محصولات از مقصد --------------------- */
 
+/* =====================================================================
+ *  v10.18 (۳۱ج): تلاشِ مجددِ صفحه در برداشتِ «حذفِ تکراری»
+ *
+ *  گزارشِ کاربر: لاگ با «صفحهٔ 1/400: 100 محصول» شروع می‌شد و بلافاصله
+ *  «⚠️ صفحهٔ 2 ناموفق (HTTP 500)» می‌آمد و کلِ عملیات با ۱۰۰ محصول از
+ *  ۴۰۰ صفحه تمام می‌شد. علت: هر دو تابعِ برداشت در اولین خطای HTTP بی‌درنگ
+ *  break می‌کردند — یک خطای گذرای ۵۰۰/۵۰۲/۴۲۹ که چند ثانیه بعد رفع می‌شود
+ *  کلِ کار را می‌بست. (bslReq فقط خطای *شبکه* را دوباره می‌زند؛ وقتی سرور
+ *  کدِ HTTP برگرداند آن را «پاسخِ گرفته‌شده» می‌داند و تکرار نمی‌کند.)
+ *
+ *  حالا هر صفحه تا DEDUP_PAGE_TRIES بار با مکثِ فزاینده تکرار می‌شود و
+ *  فقط اگر همهٔ تلاش‌ها شکست خورد کار متوقف می‌شود.
+ *
+ *  $fetch: تابعی که یک بار درخواست را می‌زند و آرایهٔ پاسخ برمی‌گرداند.
+ *  خروجی: همان پاسخ (موفق یا آخرین شکست) + کلیدِ tries.
+ * ===================================================================== */
+function dedupFetchPage(callable $fetch, int $page, string $who): array {
+    $tries = max(1, (int)DEDUP_PAGE_TRIES);
+    $r = ['ok' => false, 'code' => 0];
+    for ($try = 1; $try <= $tries; $try++) {
+        if ($try > 1 && dedupStopRequested()) break;
+        $r = (array)$fetch();
+        if (!empty($r['ok'])) {
+            /* موفقیت بعد از شکست را صریح بگو تا کاربر بداند چه شد */
+            if ($try > 1) dedupProgress(['log_add' => ['✅ ' . $who . ' صفحهٔ ' . $page
+                . ' در تلاشِ ' . $try . 'ام موفق شد']]);
+            $r['tries'] = $try;
+            return $r;
+        }
+        if ($try < $tries) {
+            /* مکثِ فزاینده: ۲، ۴، ۸ … ثانیه (سقفِ DEDUP_PAGE_WAIT_MAX) */
+            $wait = min((int)DEDUP_PAGE_WAIT_MAX, (int)(DEDUP_PAGE_WAIT_BASE * pow(2, $try - 1)));
+            dedupProgress(['log_add' => ['↻ ' . $who . ' صفحهٔ ' . $page . ' ناموفق (HTTP '
+                . ($r['code'] ?? '?') . ') — تلاشِ ' . ($try + 1) . ' از ' . $tries
+                . ' بعد از ' . $wait . ' ثانیه']]);
+            sleep($wait);
+        }
+    }
+    $r['tries'] = $tries;
+    return $r;
+}
+
 /** همهٔ محصولاتِ باسلام برای حذفِ تکراری (با قیمت/موجودی/وضعیت) */
 function dedupFetchBsl(string $tk, int $vid, int $maxPages = 200): array {
     $rows = [];
     $statuses = '&statuses=2976&statuses=3790&statuses=3567&statuses=3568&statuses=4184';
     for ($page = 1; $page <= $maxPages; $page++) {
         if (dedupStopRequested()) { dedupProgress(['log_add' => ['⏹ توقف در صفحهٔ ' . $page]]); break; }
-        $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?page=' . $page . '&per_page=100' . $statuses);
+        /* v10.18 (۳۱ج): به‌جای توقفِ فوری، همین صفحه چند بار با مکثِ فزاینده
+           دوباره خواسته می‌شود؛ خطای گذرای ۵۰۰ دیگر کلِ برداشت را نمی‌بندد. */
+        $r = dedupFetchPage(function () use ($tk, $vid, $page, $statuses) {
+            return bslReq($tk, 'GET', 'vendors/' . $vid . '/products?page=' . $page . '&per_page=100' . $statuses);
+        }, $page, 'باسلام');
         if (empty($r['ok'])) {
-            dedupProgress(['log_add' => ['⚠️ صفحهٔ ' . $page . ' ناموفق (HTTP ' . ($r['code'] ?? '?') . ')']]);
+            dedupProgress(['log_add' => ['⚠️ صفحهٔ ' . $page . ' بعد از ' . (int)($r['tries'] ?? 1)
+                . ' تلاش ناموفق ماند (HTTP ' . ($r['code'] ?? '?') . ') — برداشت با '
+                . count($rows) . ' محصول متوقف شد']]);
             break;
         }
         $batch = $r['body']['data'] ?? [];
@@ -30466,10 +30804,17 @@ function dedupFetchWoo(array $w, int $maxPages = 200): array {
     $rows = [];
     for ($page = 1; $page <= $maxPages; $page++) {
         if (dedupStopRequested()) { dedupProgress(['log_add' => ['⏹ توقف در صفحهٔ ' . $page]]); break; }
-        $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET',
-            'products?per_page=100&status=any&orderby=id&order=asc&page=' . $page);
+        /* v10.18 (۳۱ج): همان تلاشِ مجددِ باسلام برای ووکامرس */
+        $r = dedupFetchPage(function () use ($w, $page) {
+            $rr = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET',
+                'products?per_page=100&status=any&orderby=id&order=asc&page=' . $page);
+            if (!is_array($rr['body'] ?? null)) $rr['ok'] = false;
+            return $rr;
+        }, $page, 'ووکامرس');
         if (empty($r['ok']) || !is_array($r['body'])) {
-            dedupProgress(['log_add' => ['⚠️ صفحهٔ ' . $page . ' ناموفق (HTTP ' . ($r['code'] ?? '?') . ')']]);
+            dedupProgress(['log_add' => ['⚠️ صفحهٔ ' . $page . ' بعد از ' . (int)($r['tries'] ?? 1)
+                . ' تلاش ناموفق ماند (HTTP ' . ($r['code'] ?? '?') . ') — برداشت با '
+                . count($rows) . ' محصول متوقف شد']]);
             break;
         }
         $batch = $r['body'];
@@ -37418,6 +37763,38 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.18', t:'🩹 پاسخِ کلادفلر شناخته شد · ↻ تلاشِ دوبارهٔ پایانِ صفِ تست · 📄 عبور از صفحهٔ خرابِ باسلام', items:[
+    '🧩 <b>۳۱الف — «پاسخ خالی» روی مدل‌هایی که واقعاً جواب داده بودند.</b> بعضی',
+    '   مدل‌های کلادفلر جوابشان را در <code>result.choices[0].message.content</code>',
+    '   می‌گذارند (شکلِ OpenAI که یک لایه داخلِ <code>result</code> پیچیده شده)، نه در',
+    '   <code>result.response</code>. استخراج‌گر فقط شکلِ دوم را می‌شناخت، پس متنِ سالمِ',
+    '   «وعليكم السلام! كيف يمكنني مساعدتك اليوم؟» را نمی‌دید و ردیف را قرمز و',
+    '   «پاسخ خالی/نامعتبر» علامت می‌زد — در حالی که مدل‌های دیگرِ همان ارائه‌دهنده',
+    '   درست کار می‌کردند. حالا استخراج‌گر اگر داخلِ <code>result</code> یا',
+    '   <code>data</code> بدنه‌ای ببیند، همان قواعدِ همیشگی را <b>یک سطح تودرتوتر</b>',
+    '   دوباره اجرا می‌کند؛ پس <code>choices</code>، <code>output_text</code>،',
+    '   <code>text</code> و fallbackهای <code>reasoning</code>/<code>reasoning_content</code>',
+    '   همگی در حالتِ پیچیده هم کار می‌کنند. عمقِ بازگشت محدود است تا بدنهٔ',
+    '   عجیب حلقهٔ بی‌پایان نسازد.',
+    '↻ <b>۳۱ب — تلاشِ دوباره در پایانِ صفِ تستِ مدل‌ها.</b> تا حالا یک تایم‌اوت یا',
+    '   یک HTTP 500 گذرا کافی بود تا مدلِ سالم تا پایانِ اجرا قرمز بماند. حالا',
+    '   وقتی صف تمام شد، ردیف‌های قرمز دوباره بررسی می‌شوند و آن‌هایی که خطایشان',
+    '   <b>ربطی به اعتبار و سهمیه ندارد</b> — تایم‌اوت، قطعِ اتصال، DNS، خطای',
+    '   پروکسی، ۴۲۹ و ۵xx — <b>تا سه دور</b> دوباره تست می‌شوند.',
+    '⏱ هر دور <b>تایم‌اوتِ بزرگ‌تری</b> می‌گیرد (۱٫۷۵ برابرِ دورِ قبل، بینِ ۵ تا ۱۲۰',
+    '   ثانیه)، چون علتِ رایجِ این خطاها کندیِ موقتِ سرویس است نه خرابیِ مدل.',
+    '🚫 خطاهای اعتباری، کلیدِ نامعتبر (۴۰۱/۴۰۳)، مدلِ ناموجود (۴۰۴/۴۰۰) و پاسخِ',
+    '   بی‌معنی <b>وارد دورهای جبرانی نمی‌شوند</b>؛ تکرارشان فقط سهمیه می‌سوزاند.',
+    '🔢 نتیجهٔ تلاشِ دوباره جایگزینِ نتیجهٔ قبلیِ همان ردیف می‌شود، نه اضافه بر آن:',
+    '   شمارنده‌های «تست‌شده / در دسترس / ناموفق» دقیق می‌مانند و خلاصهٔ پایانی',
+    '   می‌گوید چند تلاشِ دوباره انجام شد و چند مورد درست شد.',
+    '📄 <b>۳۱ج — حذفِ تکراری روی صفحهٔ دومِ باسلام متوقف می‌شد.</b> گزارشِ کاربر:',
+    '   «صفحهٔ ۱/۴۰۰: ۱۰۰ محصول» و بلافاصله «⚠️ صفحهٔ ۲ ناموفق (HTTP 500)» و پایانِ',
+    '   کار با ۱۰۰ محصول و ۰ گروه. علت: حلقهٔ صفحه‌بندی با اولین خطا <code>break</code>',
+    '   می‌کرد. حالا هر صفحه <b>تا سه بار</b> با مکثِ فزاینده (۲، ۴، ۸ ثانیه، سقفِ',
+    '   ۱۵ ثانیه) خوانده می‌شود و فقط اگر هر سه بار شکست خورد کار متوقف می‌شود.',
+    '   همین مسیر برای ووکامرس هم به کار می‌رود.',
+  ]},
   {v:'10.17', t:'🔑 هر کلیدِ API یک ردیفِ تستِ جدا — فهرستِ تست ضرب‌در تعدادِ کلید', items:[
     '🔢 <b>خواستهٔ اصلی.</b> تا پیش از این، اضافه‌کردنِ کلیدِ دوم به یک ارائه‌دهنده',
     '   هیچ تغییری در تعدادِ ردیف‌های «تست مدل‌ها» نمی‌داد: هر مدل یک ردیف داشت و',
