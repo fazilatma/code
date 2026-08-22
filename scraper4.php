@@ -134,7 +134,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.20';
+const APP_VERSION = '10.21';
 const APP_VERSION_DATE = '1405/05/31';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -727,6 +727,69 @@ function extractNormalizeDetailSelectors($raw): array {
         }
     }
     return $out;
+}
+
+/* =====================================================================
+ *  v10.21 (۳۴الف): سینکِ دوره‌ایِ پروفایل‌های «بدون استخراج» (اکسل/CSV)
+ *
+ *  این پروفایل‌ها صفحهٔ فهرست ندارند (نه URL نه سلکتورِ ظرف) ولی هر
+ *  محصولشان می‌تواند «لینکِ صفحهٔ محصول» داشته باشد — همان ستونی که در
+ *  درون‌ریزیِ فایل به link نگاشت می‌شود. تازه‌سازیِ دوره‌ای از همان راه
+ *  انجام می‌شود: فازِ detail، که فقط صفحاتِ محصول را باز می‌کند.
+ * ===================================================================== */
+
+/** محصولاتِ ذخیره‌شدهٔ یک پروفایل را به شکلِ «کلید => محصول» برمی‌گرداند.
+ *  روی دیسک دو شکل ممکن است باشد: نگاشتِ ساده، یا آرایه‌ای از جفت‌های
+ *  [کلید, محصول] (شکلِ فشرده). هر دو باید پشتیبانی شوند. */
+function profileProductsMap(array $profile): array {
+    $raw = $profile['products'] ?? [];
+    if (!is_array($raw) || !$raw) return [];
+    $first = reset($raw);
+    if (is_array($first) && count($first) >= 2 && isset($first[0]) && isset($first[1])) {
+        $out = [];
+        foreach ($raw as $entry) {
+            if (is_array($entry) && count($entry) >= 2 && is_array($entry[1])) $out[(string)$entry[0]] = $entry[1];
+        }
+        return $out;
+    }
+    return $raw;
+}
+
+/** چند محصولِ این پروفایل لینکِ صفحهٔ محصول دارند (شرطِ تازه‌سازی) */
+function noExtractLinkedCount(array $profile): int {
+    $n = 0;
+    foreach (profileProductsMap($profile) as $p) {
+        if (is_array($p) && trim((string)($p['link'] ?? '')) !== '') $n++;
+    }
+    return $n;
+}
+
+/** آیا تازه‌سازیِ دوره‌ایِ جزئیات برای این پروفایل روشن است؟
+ *  پیش‌فرض روشن است: کاربری که «بدون استخراج» را زده می‌خواهد قیمت و
+ *  موجودی‌اش به‌روز بماند؛ اگر نمی‌خواهد، صریح خاموشش می‌کند. */
+function noExtractRefreshOn(array $syncCfg): bool {
+    return !array_key_exists('noExtractRefresh', $syncCfg) || !empty($syncCfg['noExtractRefresh']);
+}
+
+/* v10.21 (۳۴الف): موجودیِ مؤثرِ یک محصول برای ارسال به مقصد.
+
+   اگر تازه‌سازیِ جزئیات محصول را «ناموجود» تشخیص داده باشد (in_stock=false)
+   موجودی صفر می‌رود، وگرنه همان موجودیِ پیش‌فرضِ تنظیمات. بدونِ این تابع،
+   تشخیصِ ناموجودی فقط روی دیسک می‌نشست و هیچ‌وقت به غرفه/فروشگاه نمی‌رسید. */
+function effectiveStock(array $p, int $defaultStock): int {
+    if (array_key_exists('in_stock', $p) && empty($p['in_stock'])) return 0;
+    return $defaultStock;
+}
+
+/* v10.21 (۳۴الف): «ناموجود» از روی قیمتِ صفحهٔ محصول.
+ *
+ *  خواستهٔ کاربر: موجود بودن از روی قیمت تشخیص داده شود. منطق ساده و
+ *  محافظه‌کارانه است تا یک خطای موقتِ شبکه کلِ غرفه را صفر نکند:
+ *  فقط وقتی «صفحه با موفقیت باز شد» و «قیمت در آن خالی یا صفر بود»
+ *  محصول ناموجود حساب می‌شود. اگر صفحه اصلاً باز نشد، دست نمی‌زنیم. */
+function detailStockFromPrice(array $p, bool $pageOk): ?bool {
+    if (!$pageOk) return null;                       // صفحه باز نشد ⇒ قضاوت نکن
+    return extractPriceNum($p['price'] ?? '') > 0;   // قیمت دارد ⇒ موجود
 }
 
 /** عدد خالص قیمت برای مقایسه (ارقام فارسی/عربی و جداکننده‌ها حذف می‌شوند) */
@@ -10747,7 +10810,17 @@ if(!filter_var($url,FILTER_VALIDATE_URL)){
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'error'=>'URL نامعتبر','total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['❌ URL نامعتبر'],'total_log_count'=>1]);
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'error'=>'URL نامعتبر'];
 }
-if(empty($selectors)||empty($selectors['container'])){
+/* v10.21 (۳۴الف): سلکتورِ «فهرست» فقط برای پیمایشِ صفحهٔ دسته لازم است.
+   پروفایل‌های ساخته‌شده با درون‌ریزیِ اکسل/CSV هیچ‌وقت صفحهٔ فهرست ندارند —
+   محصولاتشان از فایل آمده و هرکدام لینکِ صفحهٔ خودشان را دارند. تا اینجا
+   همین گیت، فازِ جزئیاتِ آن‌ها را هم رد می‌کرد و سینکِ دوره‌ای بی‌صدا شکست
+   می‌خورد. حالا در فازِ detail فقط سلکتورِ جزئیات لازم است. */
+if($phase==='detail'){
+if(empty($detailSelectors)){
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'error'=>'سلکتورِ جزئیات ذخیره نشده','total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['❌ سلکتورِ جزئیات ذخیره نشده'],'total_log_count'=>1]);
+return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'error'=>'سلکتورِ جزئیات ذخیره نشده'];
+}
+} elseif(empty($selectors)||empty($selectors['container'])){
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'error'=>'سلکتورها ذخیره نشده — ابتدا با فرانت‌اند استخراج کنید','total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['❌ سلکتورها ذخیره نشده'],'total_log_count'=>1]);
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'error'=>'سلکتورها ذخیره نشده'];
 }
@@ -11117,6 +11190,8 @@ $galleryFound=0;$galleryImgsTotal=0;
    هیچ ردی در لاگ نمی‌ماند و کاربر فقط می‌دید کار کند است. */
 $detailOk=0;$detailFail=0;$detailFields=0;$detailNoField=0;$varFound=0;$imgMain=0;
 $failSamples=[];$emptySamples=[];
+// v10.21 (۳۴الف): شمارندهٔ تغییرِ موجودی که از روی قیمت تشخیص داده شد
+$_stockOut=0;$_stockBack=0;
 // v8.97: وقتی فاز جزئیات اصلاً اجرا نشود هم باید تعریف‌شده باشد
 $_ranOut=false;
 $detailLog=[];   // چند خط آخر، برای نمایش در نوار پیشرفت
@@ -11204,6 +11279,12 @@ return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'cancelled'=>true];
 $detailDone++;
 $_pTitle=mb_substr(trim((string)($p['title']??$key)),0,42);
 $_gotFields=0;$_gotImgs=0;$_gotVars=0;
+/* v10.21 (۳۴الف): قیمتِ برداشته‌شده در همین دور، جدا از مقدارِ قبلی.
+   وقتی سلکتور چیزی پیدا نکند مقدارِ قدیمی دست‌نخورده می‌ماند (عمدی، تا یک
+   خطای موقتی داده را پاک نکند) — ولی برای تشخیصِ ناموجودی همان «پیدا نشد»
+   دقیقاً همان سیگنالی است که لازم داریم. پس قضاوتِ موجودی روی این متغیر
+   انجام می‌شود، نه روی $allProducts[$key]['price']. */
+$_freshPrice=null;
 $dr=fetch_html($p['link'],10);
 if($dr['ok']){
 $detailOk++;
@@ -11240,6 +11321,7 @@ if($field==='image'){
 $val=galleryImgFromNode($ns->item(0),$dr['url']);
 }elseif($field==='price'){
 $val=extractPrice($ns->item(0)->textContent);
+$_freshPrice=(string)$val; // v10.21: حتی اگر خالی باشد، یعنی «این بار قیمتی نبود»
 }elseif($field==='shortDesc'||$field==='longDesc'){
 /* v9.19: توضیحات با ساختارشان برداشته می‌شوند، نه به‌صورت متن خام.
 
@@ -11277,6 +11359,27 @@ if($nImg>1){$galleryFound++;$galleryImgsTotal+=$nImg;}
 }
 }
 $detailFields+=$_gotFields;
+/* v10.21 (۳۴الف): «موجود بودن» از روی قیمتِ صفحهٔ محصول.
+
+   خواستهٔ کاربر برای پروفایل‌های اکسل/CSV این بود که سینکِ دوره‌ای هم
+   قیمت و هم موجودی را تازه کند. سایت‌ها معمولاً محصولِ ناموجود را با
+   حذفِ قیمت (یا «تماس بگیرید») نشان می‌دهند، پس همین سیگنال کافی است و
+   نیازی به سلکتورِ تازه ندارد.
+
+   محافظه‌کارانه: فقط وقتی صفحه واقعاً باز شده باشد قضاوت می‌کنیم. اگر
+   مبدأ در دسترس نبود، دست به موجودی نمی‌زنیم — وگرنه یک قطعیِ چنددقیقه‌ای
+   کلِ غرفه را ناموجود می‌کرد. */
+if(!empty($detailSelectors['price'])){
+    $_wasIn = !array_key_exists('in_stock',$allProducts[$key]) || !empty($allProducts[$key]['in_stock']);
+    $_isIn  = detailStockFromPrice(['price'=>($_freshPrice===null?'':$_freshPrice)], true);
+    if($_isIn !== null){
+        $allProducts[$key]['in_stock']    = $_isIn;
+        $allProducts[$key]['stock_src']   = 'detail_price';
+        $allProducts[$key]['stock_at']    = time();
+        if($_wasIn && !$_isIn){ $_stockOut++;  $pushLog('  ⛔ '.$_pTitle.' — قیمت ندارد ⇒ ناموجود'); }
+        elseif(!$_wasIn && $_isIn){ $_stockBack++; $pushLog('  ✅ '.$_pTitle.' — دوباره موجود شد'); }
+    }
+}
 if($_gotFields===0&&$_gotImgs<=1){
 $detailNoField++;
 if(count($emptySamples)<3)$emptySamples[]=$_pTitle;
@@ -11462,6 +11565,9 @@ $finalLog[]='   • ⛔ گالری روشن است ولی هیچ تصویری پ
 $finalLog[]='   • یعنی سلکتور کادر با صفحهٔ محصول نمی‌خواند، یا عکس‌ها با جاوااسکریپت می‌آیند';
 }
 if($varFound>0)$finalLog[]='   • 🎨 '.$varFound.' محصول تنوع دارد';
+// v10.21 (۳۴الف): تغییرِ موجودی که از روی قیمتِ صفحه تشخیص داده شد
+if($_stockOut>0||$_stockBack>0)
+$finalLog[]='   • 📦 موجودی: '.$_stockOut.' ناموجود شد · '.$_stockBack.' دوباره موجود شد';
 if($detailNoField>0)$finalLog[]='   • ⚠️ '.$detailNoField.' محصول هیچ فیلدی نداد — سلکتورها را بررسی کنید';
 if($failSamples)$finalLog[]='   • ✗ '.implode(' | ',$failSamples);
 }
@@ -11485,7 +11591,9 @@ extractSaveReport($queueId, [
 foreach($queue['entries'] as &$qe){if($qe['id']===$queueId){$qe['status']='done';$qe['products_count']=count($allProducts);$qe['total']=count($allProducts);$qe['current']=count($allProducts);$qe['done_at']=time();$qe['new']=$newCount;$qe['price_changed']=$priceChanged;$qe['removed']=$removedCount;$qe['unchanged']=$unchanged;$qe['price_up']=$priceUp;$qe['price_down']=$priceDown;$qe['gallery_images']=$galleryImgsTotal;$qe['gallery_products']=$galleryFound;$qe['detail_ok']=$detailOk;$qe['detail_fail']=$detailFail;$qe['detail_fields']=$detailFields;$qe['variation_products']=$varFound;$qe['detail_total']=$detailTotal;$qe['detail_skip_why']=$_skipWhy;$qe['detail_no_link']=$_noLink;$qe['detail_already']=$_alreadyDone;$qe['gallery_blank']=($galleryCfg['enabled']&&$detailOk>0&&$galleryImgsTotal===0)?1:0;$qe['gallery_box']=(string)$galleryCfg['box'];$qe['has_report']=true;break;}}unset($qe);
 extractWriteQueue($queue);
 
-return ['__early_sent'=>$emitEarlyResponse, 'ok'=>true,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url)];
+// v10.21 (۳۴الف): سینکِ «بدون استخراج» باید بداند چند صفحه واقعاً باز شد و
+// آیا بودجهٔ زمانی تمام شد (تا در نوبتِ بعدی از همان‌جا ادامه دهد)
+return ['__early_sent'=>$emitEarlyResponse, 'ok'=>true,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url),'detail_done'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'ran_out'=>!empty($_ranOut),'stock_out'=>$_stockOut??0,'stock_back'=>$_stockBack??0];
 }
 
 if(isset($_GET['action']) && $_GET['action'] === 'backend_extract'){
@@ -11812,7 +11920,7 @@ function bslUpsertManyShops(array $p, array $shops, array $opts, int $conc = 4):
     }
     if (!$live) return $out;
 
-    $stock  = (int)($opts['stock'] ?? 10);
+    $stock  = effectiveStock($p, (int)($opts['stock'] ?? 10));    // v10.21 (۳۴الف)
     $prepD  = (int)($opts['preparation_days'] ?? 3);
     $weight = (int)($opts['weight'] ?? 500);
     $pkgW   = (int)($opts['package_weight'] ?? ($weight + 100));
@@ -11936,7 +12044,7 @@ function bslUpsertToShop(array $p, array $shop, array $opts): array {
     if ($priceToman <= 0) return ['ok' => false, 'error' => 'قیمت نامعتبر'];
     $priceRial = (($p['price_unit'] ?? '') !== 'rial') ? $priceToman * 10 : $priceToman;
 
-    $stock   = (int)($opts['stock'] ?? 10);
+    $stock   = effectiveStock($p, (int)($opts['stock'] ?? 10));   // v10.21 (۳۴الف)
     $prepD   = (int)($opts['preparation_days'] ?? 3);
     $weight  = (int)($opts['weight'] ?? 500);
     $pkgW    = (int)($opts['package_weight'] ?? ($weight + 100));
@@ -13399,13 +13507,53 @@ if ($lockAge < $cronLockSec) {
        جزئیات چیزی نمی‌فرستد؛ فقط صفحهٔ محصول را می‌خواند و روی دیسک
        می‌نویسد، و خودش با محافظ تکراری‌نبودنِ صف و نشانهٔ مرحله در
        برابر اجرای هم‌زمان محافظت می‌شود. ارسال همچنان پشت قفل می‌ماند. */
-    notifCronPing($cnLock, ['profiles' => [], 'locked' => $lockAge]);
+    /* v10.21 (۳۴ج): نتیجهٔ پینگ در گزارش هم بنشیند. تا حالا این فراخوانی
+       خروجی‌اش دور ریخته می‌شد، پس اگر پینگ در همین مسیر شکست می‌خورد
+       (مثلاً توکن پیام‌رسان پاک شده بود) هیچ‌جا ردی نمی‌ماند. */
+    try {
+        $_lp = notifCronPing($cnLock, ['profiles' => [], 'locked' => $lockAge]);
+        if (!empty($_lp['sent']))          $lockOut['ping'] = 'sent';
+        elseif (!empty($_lp['skipped']))   $lockOut['ping'] = $_lp['skipped'];
+        elseif (!empty($_lp['error']))     $lockOut['ping'] = ['error' => $_lp['error']];
+    } catch (Throwable $e) {
+        $lockOut['ping'] = ['error' => mb_substr($e->getMessage(), 0, 200)];
+    }
     // v9.06: اتصال بالاتر بسته شده — خروجی به فایل می‌رود، نه به اتصالِ مرده
     cronEmit($lockOut);
     exit;
 }
 @file_put_contents($cronLock, (string)time());
 register_shutdown_function(function () use ($cronLock) { @unlink($cronLock); });
+
+/* =====================================================================
+   v10.21 (۳۴ج): «نبضِ کران» — علتِ قطع‌شدنِ اعلانِ دوره‌ای
+
+   گزارش کاربر: پیامِ دوره‌ای پیام‌رسان دیگر نمی‌آید.
+
+   ریشه: notifCronPing آخرین کارِ کران است. بینِ شروعِ اجرا و رسیدن به
+   آن، کلِ چرخهٔ استخراج/ارسال/ایجنت اجرا می‌شود — روی کاتالوگِ بزرگ
+   چند دقیقه. هاستِ اشتراکی معمولاً پردازهٔ پس‌زمینه را قبل از پایان
+   می‌کُشد (سقفِ FcgidIOTimeout / request_terminate_timeout). آن‌وقت:
+     • پینگ هرگز فرستاده نمی‌شود،
+     • cron_last_run.json هم نوشته نمی‌شود،
+     • و قفل جا می‌ماند، پس تیک‌های بعدی هم تا نیم ساعت رد می‌شوند.
+   نتیجه از بیرون دقیقاً «اعلان قطع شد» است، بدون هیچ ردی.
+   با v10.05 که autoTick (کارهای ایجنتِ هوش مصنوعی، ده‌ها ثانیه) درست
+   قبل از پینگ اضافه شد، احتمالِ این اتفاق به‌مراتب بیشتر شد — همان
+   «بعد از یکی از به‌روزرسانی‌های اخیر قطع شد».
+
+   راه‌حل: نبض «اولِ» اجرا زده می‌شود، نه آخر. اینجا هنوز هیچ کارِ
+   طولانی‌ای شروع نشده، پس تقریباً همیشه می‌رسد. throttle (ping_every)
+   دقیقاً مثل قبل رعایت می‌شود؛ فقط جای فراخوانی عوض شده. خلاصهٔ کارِ
+   انجام‌شده هم از دست نمی‌رود: پینگِ آخرِ کار سرِ جایش می‌ماند و اگر
+   اجرا سالم به آخر برسد، همان گزارشِ کامل را می‌فرستد (و چون
+   last_cron_ping تازه شده، پیامِ تکراری نمی‌آید مگر دوره‌اش رسیده باشد).
+   ===================================================================== */
+try {
+    $_cnPing = loadConnections();
+    $_hb = notifCronPing($_cnPing, ['profiles' => [], 'heartbeat' => true]);
+    if (!empty($_hb['sent'])) $results_heartbeat = 'sent';
+} catch (Throwable $e) { /* نبض هرگز نباید جلوی کارِ اصلی را بگیرد */ }
 
 $now = time();
 $profiles = loadProfiles();
@@ -13416,6 +13564,8 @@ $results = ['ok' => true, 'time' => $now, 'profiles' => []];
 /* v9.08: اگر قفلِ یک اجرای مرده برداشته شد، در گزارش بماند. بدون این،
    کاربر فقط می‌دید کران گاهی کار می‌کند و گاهی نه، بدون هیچ توضیحی. */
 if (!empty($results_lockReaped)) $results['lock_reaped'] = true;
+// v10.21 (۳۴ج): نبضِ ابتدای اجرا در گزارش هم بماند
+if (!empty($results_heartbeat)) $results['heartbeat'] = $results_heartbeat;
 
 /* =====================================================================
    v9.10: استخراج دوره‌ای جزئیات — حلقهٔ مستقل، قبل از همگام‌سازی.
@@ -13564,14 +13714,78 @@ if ($target === 'none') { $pResult['send'] = 'disabled_by_target'; }
    لازم است نه ممکن (هیچ URL/سلکتوری ندارند). */
 $noExtract = !empty($syncCfg['noExtract']);
 if ($noExtract) {
-    $pResult['step'] = 'no_extract';
+    /* =================================================================
+       v10.21 (۳۴الف): در پروفایلِ «بدون استخراج»، سینکِ دوره‌ای از راهِ
+       «استخراجِ تفصیلیِ جزئیات» قیمت و موجودی را تازه می‌کند.
+
+       مسئله: تا اینجا «بدون استخراج» یعنی هیچ‌چیز از مبدأ خوانده نشود و
+       فقط همان قیمتِ لحظهٔ درون‌ریزیِ فایل دوباره فرستاده شود. یعنی
+       پروفایل‌های اکسل/CSV عملاً منجمد بودند: قیمتِ فایلِ سه ماه پیش هر
+       شب دوباره به باسلام/ووکامرس می‌رفت و هیچ‌وقت به‌روز نمی‌شد.
+
+       ولی این محصولات «لینکِ صفحهٔ محصول» دارند (ستونِ link فایل). پس
+       منبعِ به‌روزرسانی موجود است — فقط فازِ فهرست است که برایشان معنا
+       ندارد (نه URLِ فهرست دارند نه سلکتورِ ظرف). دقیقاً همان چیزی که
+       فازِ 'detail' انجام می‌دهد: صفحهٔ تک‌تکِ محصولاتِ روی دیسک را باز
+       می‌کند، بدون اینکه سراغِ صفحهٔ فهرست برود.
+
+       پس در این حالت runBackendExtract با phase='detail' صدا زده می‌شود.
+       شرطش هم روشن است: پروفایل باید سلکتورِ جزئیات (دستِ‌کم قیمت) یا
+       گالری داشته باشد و محصولاتش لینک داشته باشند؛ وگرنه مثل قبل فقط
+       ارسالِ دوباره انجام می‌شود.
+       ================================================================= */
     $pResult['no_extract'] = true;
-    $pResult['extracted'] = 0;
-    // برای ارسالِ «فقط محصولاتِ موجود»، exRes را موفق و بدون تغییراتِ جدید بگذار
-    $exRes = ['ok'=>true, 'extracted'=>0, 'no_extract'=>true,
-              'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,
-              'new_items'=>[],'changed_items'=>[],'removed_items'=>[],
-              'price_up'=>0,'price_down'=>0];
+    $_neSel   = extractNormalizeDetailSelectors($profile['detailSelectors'] ?? []);
+    $_neGal   = galleryNormalizeCfg($profile['gallery'] ?? []);
+    $_neHasCfg = false;
+    foreach ($_neSel as $_nsv) { if (!empty($_nsv)) { $_neHasCfg = true; break; } }
+    if (!$_neHasCfg && !empty($_neGal['enabled'])) $_neHasCfg = true;
+    // چند محصولِ روی دیسک لینکِ صفحهٔ محصول دارند؟
+    $_neLinked = noExtractLinkedCount($profile);
+    $_neDue    = $_neHasCfg && $_neLinked > 0 && noExtractRefreshOn($syncCfg);
+
+    if ($_neDue) {
+        $pResult['step'] = 'no_extract_detail';
+        $pResult['detail_linked'] = $_neLinked;
+        // فازِ detail: فقط صفحاتِ محصول باز می‌شوند، صفحهٔ فهرست هرگز
+        $exRes = runBackendExtract($key, 'auto', false, 'detail', false);
+        if (!empty($exRes['ok'])) {
+            $pResult['extracted']      = (int)($exRes['extracted'] ?? 0);
+            $pResult['extract_method'] = 'no_extract_detail';
+            $pResult['price_changed']  = (int)($exRes['price_changed'] ?? 0);
+            $pResult['detail_done']    = (int)($exRes['detail_done'] ?? 0);
+            if (!empty($exRes['ran_out'])) $pResult['detail_partial'] = true;
+            // v10.21: تغییرِ موجودی هم در گزارشِ کران دیده شود
+            if (!empty($exRes['stock_out']))  $pResult['stock_out']  = (int)$exRes['stock_out'];
+            if (!empty($exRes['stock_back'])) $pResult['stock_back'] = (int)$exRes['stock_back'];
+            /* اعلانِ گران/ارزان و موجود/ناموجود شدن — همان مسیرِ پروفایل‌های
+               عادی. تا حالا پروفایل‌های اکسل/CSV هیچ اعلانی نمی‌گرفتند. */
+            $srcN = notifSourceChanges($cn, $exRes, $profile['name'] ?? $key);
+            if (!empty($srcN['sent'])) $pResult['src_notified'] = $srcN['sent'];
+            $profiles = loadProfiles();
+            $profile  = $profiles[$key] ?? $profile;
+        } else {
+            $pResult['extract_error'] = $exRes['error'] ?? 'خطای نامشخص';
+            notifRunFailure($cn, 'تازه‌سازی جزئیات', $profile['name'] ?? $key, $pResult['extract_error']);
+            // شکستِ تازه‌سازی نباید جلوی ارسالِ دوره‌ای را بگیرد
+            $exRes = ['ok'=>true,'extracted'=>0,'no_extract'=>true,
+                      'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,
+                      'new_items'=>[],'changed_items'=>[],'removed_items'=>[],
+                      'price_up'=>0,'price_down'=>0];
+        }
+    } else {
+        $pResult['step'] = 'no_extract';
+        $pResult['extracted'] = 0;
+        // چرا تازه‌سازی انجام نشد — سکوت باعث می‌شد کاربر نداند چه خبر است
+        if (!noExtractRefreshOn($syncCfg))  $pResult['no_refresh_why'] = 'disabled';
+        elseif (!$_neHasCfg)                $pResult['no_refresh_why'] = 'no_detail_selectors';
+        elseif ($_neLinked === 0)           $pResult['no_refresh_why'] = 'no_product_links';
+        // برای ارسالِ «فقط محصولاتِ موجود»، exRes را موفق و بدون تغییراتِ جدید بگذار
+        $exRes = ['ok'=>true, 'extracted'=>0, 'no_extract'=>true,
+                  'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,
+                  'new_items'=>[],'changed_items'=>[],'removed_items'=>[],
+                  'price_up'=>0,'price_down'=>0];
+    }
     // گیتِ ارسال را باز کن: در حافظه (نه روی دیسک) نشانه را complete بگذار
     $profile['_extract_stage'] = 'complete';
     $profile['_extract_stage_at'] = time();
@@ -13823,7 +14037,7 @@ if ($bslDup !== null) {
     $pResult['bsl'] = 'already_queued';
     $pResult['bsl_queue_id'] = $bslDup['id'] ?? '';
 } else {
-$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
+$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, /* v10.21 (۳۴ب): سینکِ خودکار هم باید به همهٔ غرفه‌های فعال بفرستد. تا حالا این کلید فقط از مسیرِ دکمهٔ دستی وارد صف می‌شد، پس ارسالِ چندغرفه‌ای در کران هرگز اجرا نمی‌شد — تیک روشن بود ولی شب‌ها فقط غرفهٔ پیش‌فرض به‌روز می‌شد. */ 'send_all_shops' => !empty($cn['basalam']['send_all_shops'])], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
 bslWriteQueue($queue);
 $syncState[$key] = array_merge(is_array($syncState[$key] ?? null) ? $syncState[$key] : [], ['lastRun' => $now, 'status' => 'queued_bsl', 'price_sig' => $priceSig]);   // v9.11
 $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
@@ -13842,11 +14056,25 @@ saveSyncState($syncState);
 /* v8.97: نگهبان قبل از حلقه اجرا شد؛ این اجرای دوم برای چیزهایی است که
    «در همین نوبت» گیر کرده‌اند (مثلاً ارسالی که همین حالا صف شد و
    نگرفت). نتیجهٔ اجرای اول را پاک نمی‌کند. */
-$wd = cronWatchdogs($cn);
-foreach ($wd as $k => $v) { if (!empty($v) && empty($results[$k])) $results[$k] = $v; }
+try {
+    $wd = cronWatchdogs($cn);
+    foreach ($wd as $k => $v) { if (!empty($v) && empty($results[$k])) $results[$k] = $v; }
+} catch (Throwable $e) {
+    $results['watchdog_error'] = mb_substr($e->getMessage(), 0, 200);
+}
 
-$notifyResult = bslCheckNotifications($cn);
-if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
+/* v10.21 (۳۴ج): هر کارِ کران داخل try/catch.
+   ریشهٔ «اعلان دوره‌ای قطع شد» همین بود: پینگ آخرین کارِ کران است و هر
+   استثنایی در کارهای قبل از آن (اعلان‌ها، پاسخ خودکار، گزارش شبانه) کلِ
+   اجرا را می‌کشت — پس نه پینگ می‌رفت، نه cron_last_run نوشته می‌شد، و
+   کاربر فقط سکوت می‌دید. حالا هر کار جدا محافظت می‌شود و شکستِ یکی
+   بقیه را زمین نمی‌زند. */
+try {
+    $notifyResult = bslCheckNotifications($cn);
+    if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
+} catch (Throwable $e) {
+    $results['notifications'] = ['error' => mb_substr($e->getMessage(), 0, 200)];
+}
 
 // v8.64: پاسخ خودکار به پیام مشتریان — بعد از اعلان‌ها، تا اول خبر برسد
 // و بعد ربات جواب دهد. مهلت ادب داخل خود موتور رعایت می‌شود.
@@ -13886,14 +14114,23 @@ try {
 }
 
 // v8.62: گزارش شبانه — اگر ساعتش رسیده و امروز فرستاده نشده
-$digRes = digestMaybeSend($cn, $now);
-if (!empty($digRes['sent'])) $results['digest'] = $digRes['totals'] ?? 'sent';
-elseif (!empty($digRes['skipped']) && $digRes['skipped'] !== 'not_due') $results['digest'] = $digRes['skipped'];
+try {
+    $digRes = digestMaybeSend($cn, $now);
+    if (!empty($digRes['sent'])) $results['digest'] = $digRes['totals'] ?? 'sent';
+    elseif (!empty($digRes['skipped']) && $digRes['skipped'] !== 'not_due') $results['digest'] = $digRes['skipped'];
+} catch (Throwable $e) {
+    $results['digest'] = ['error' => mb_substr($e->getMessage(), 0, 200)];
+}
 
 // v8.37: پینگ — آخرین کار، تا خلاصهٔ همین اجرا را هم بتواند گزارش کند
-$pingRes = notifCronPing($cn, $results);
-if (!empty($pingRes['sent'])) $results['ping'] = 'sent';
-elseif (!empty($pingRes['skipped'])) $results['ping'] = $pingRes['skipped'];
+try {
+    $pingRes = notifCronPing($cn, $results);
+    if (!empty($pingRes['sent'])) $results['ping'] = 'sent';
+    elseif (!empty($pingRes['skipped'])) $results['ping'] = $pingRes['skipped'];
+    elseif (!empty($pingRes['error']))   $results['ping'] = ['error' => $pingRes['error']];
+} catch (Throwable $e) {
+    $results['ping'] = ['error' => mb_substr($e->getMessage(), 0, 200)];
+}
 
 /* v8.92: در حالت پس‌زمینه پاسخ قبلاً فرستاده شده و اتصال بسته است.
    چاپ دوباره یعنی JSON دوتکه؛ خلاصه در فایل کران می‌نشیند تا مرورگر
@@ -13915,6 +14152,99 @@ if (isset($_GET['cron_last'])) {
     if (!is_array($d)) { echo json_encode(['ok' => false, 'error' => 'گزارش ناخوانا'], JSON_UNESCAPED_UNICODE); exit; }
     $d['finished_at'] = (int)@filemtime($f);
     echo json_encode($d, JSON_UNESCAPED_UNICODE); exit;
+}
+
+/* =====================================================================
+ *  v10.21 (۳۴ج): «سلامتِ اعلان‌ها» — چرا پیامی نمی‌آید؟
+ *
+ *  وقتی اعلانِ دوره‌ای قطع می‌شود، علت می‌تواند هر کدام از این‌ها باشد:
+ *  تیکِ پینگ خاموش است، توکنِ پیام‌رسان پاک شده، فاصلهٔ پینگ خیلی زیاد
+ *  تنظیم شده، کران‌جاب اصلاً اجرا نمی‌شود، یا اجرا شروع می‌شود ولی هاست
+ *  وسطِ کار پردازه را می‌کُشد. تا حالا هیچ‌کدام از بیرون قابلِ تشخیص
+ *  نبود و کاربر فقط سکوت می‌دید. این اندپوینت هر شش را جدا جدا می‌گوید.
+ * ===================================================================== */
+if (isset($_GET['notif_health'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cnH = loadConnections();
+    $stH = notifLoadState();
+    $now = time();
+    $out = ['ok' => true, 'now' => $now, 'checks' => [], 'problems' => []];
+
+    $add = function (string $k, bool $ok, string $msg, $extra = null) use (&$out) {
+        $row = ['ok' => $ok, 'msg' => $msg];
+        if ($extra !== null) $row['detail'] = $extra;
+        $out['checks'][$k] = $row;
+        if (!$ok) $out['problems'][] = $msg;
+    };
+
+    // ۱) پیام‌رسان تنظیم است؟
+    $hasBaleh  = trim((string)($cnH['baleh']['token'] ?? '')) !== '' && trim((string)($cnH['baleh']['chat_id'] ?? '')) !== '';
+    $hasRubika = trim((string)($cnH['rubika']['token'] ?? '')) !== '' && trim((string)($cnH['rubika']['chat_id'] ?? '')) !== '';
+    $add('messenger', $hasBaleh || $hasRubika,
+         ($hasBaleh || $hasRubika) ? ('پیام‌رسان فعال: ' . trim(($hasBaleh ? 'بله ' : '') . ($hasRubika ? 'روبیکا' : '')))
+                                   : 'هیچ پیام‌رسانی تنظیم نشده (توکن یا شناسهٔ چت خالی است)');
+
+    // ۲) پیش‌نیازهای اعلان (توکن باسلام و شناسهٔ غرفه)
+    $why = notifPrereq($cnH);
+    $add('prereq', $why === null, $why === null ? 'پیش‌نیازها کامل است' : ('پیش‌نیاز ناقص: ' . $why));
+
+    // ۳) تیکِ پینگ روشن است؟
+    $pingOn = !empty($cnH['notif_events']['cron_ping']);
+    $add('ping_enabled', $pingOn, $pingOn ? 'تیکِ پینگِ کران‌جاب روشن است'
+                                          : 'تیکِ «📡 پینگ اجرای کران‌جاب» خاموش است — پیامِ دوره‌ای فرستاده نمی‌شود');
+
+    // ۴) فاصلهٔ پینگ
+    $every = (int)($cnH['ping_every'] ?? 360);
+    $lastP = (int)($stH['last_cron_ping'] ?? 0);
+    $sinceP = $lastP > 0 ? $now - $lastP : -1;
+    $add('ping_interval', true,
+         'فاصلهٔ پینگ: ' . ($every > 0 ? $every . ' دقیقه' : 'هر اجرا'),
+         ['every_min' => $every, 'last_ping_at' => $lastP, 'since_sec' => $sinceP]);
+    if ($lastP > 0 && $every > 0 && $sinceP > $every * 60 * 3) {
+        $out['problems'][] = 'آخرین پینگ ' . (int)round($sinceP / 3600) . ' ساعت پیش بوده — بیش از سه برابرِ فاصلهٔ تنظیم‌شده';
+    }
+
+    // ۵) کران‌جاب اصلاً اجرا می‌شود؟
+    $doneF  = __DIR__ . '/cron_last_run.json';
+    $doneAt = is_file($doneF) ? (int)@filemtime($doneF) : 0;
+    $startAt = (int)($stH['last_cron_start'] ?? 0);
+    $ranOk  = $doneAt > 0 && ($now - $doneAt) < 86400;
+    $add('cron_runs', $ranOk,
+         $doneAt > 0 ? ('آخرین اجرای کاملِ کران: ' . date('Y-m-d H:i:s', $doneAt))
+                     : 'هیچ اجرای کاملی ثبت نشده — کران‌جاب را بررسی کنید',
+         ['last_complete_at' => $doneAt, 'last_start_at' => $startAt]);
+
+    // ۶) اجرا شروع می‌شود ولی نیمه‌کاره می‌ماند؟ (پردازه کشته می‌شود)
+    $killed = $startAt > 0 && $doneAt > 0 && ($startAt - $doneAt) > 120;
+    $add('cron_completes', !$killed,
+         $killed ? 'کران شروع می‌شود ولی به پایان نمی‌رسد — هاست پردازه را وسطِ کار می‌کُشد'
+                 : 'اجراها تا پایان می‌روند');
+
+    // ۷) قفلِ جامانده
+    $lockF = __DIR__ . '/.cron_run.lock';
+    $lockAgeH = is_file($lockF) ? ($now - max((int)trim((string)@file_get_contents($lockF)), (int)@filemtime($lockF))) : -1;
+    $lockStuck = $lockAgeH > 1800;
+    $add('lock', !$lockStuck,
+         $lockAgeH < 0 ? 'قفلی وجود ندارد'
+                       : ($lockStuck ? ('قفلِ جامانده از ' . (int)round($lockAgeH / 60) . ' دقیقه پیش — اجراها رد می‌شوند')
+                                     : ('قفلِ فعال، سنِ ' . $lockAgeH . ' ثانیه')),
+         ['age_sec' => $lockAgeH]);
+
+    $out['healthy'] = empty($out['problems']);
+    echo json_encode($out, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* v10.21 (۳۴ج): ارسالِ فوریِ یک پیامِ آزمایشی به پیام‌رسان‌ها */
+if (isset($_GET['notif_test_send'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cnT = loadConnections();
+    $why = notifPrereq($cnT);
+    if ($why !== null) { echo json_encode(['ok' => false, 'error' => $why], JSON_UNESCAPED_UNICODE); exit; }
+    $d = notifSend($cnT, "🔔 پیام آزمایشی\nزمان سرور: " . date('Y-m-d H:i:s') . "\nنسخه: " . APP_VERSION);
+    $anyOk = in_array('sent', array_values($d), true);
+    echo json_encode(['ok' => $anyOk, 'delivery' => $d], JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
 /* =====================================================================
@@ -19798,7 +20128,150 @@ if (isset($_GET['selftest'])) {
          version_compare(APP_VERSION, '10.' . '18', '>=')
       && strpos($selfSrc, 'v:' . "'10.18'") !== false);
 
-    /* ---------- v10.20 (۳۳): ارسال همزمانِ چندغرفه‌ای · باکسِ کشویی · نوارِ هدر ---------- */
+    /* ---------- v10.21 (۳۴): سینکِ پروفایلِ اکسل/CSV · چندغرفه‌ای در کران · سلامتِ اعلان ---------- */
+    $add('10.21', 'پروفایلِ «بدون استخراج» جزئیات را دوره‌ای تازه می‌کند',
+         strpos($selfSrc, "\$exRes = runBackendExtract(\$key, 'auto', false, 'detail', false);") !== false
+      && strpos($selfSrc, "\$pResult['step'] = 'no_extract_detail';") !== false
+      && strpos($selfSrc, "'extract_method'] = 'no_extract_detail'") !== false);
+
+    $add('10.21', 'تازه‌سازی فقط با سلکتورِ جزئیات و محصولِ لینک‌دار اجرا می‌شود',
+         strpos($selfSrc, '$_neDue    = $_neHasCfg && $_neLinked > 0 && noExtractRefreshOn($syncCfg);') !== false
+      && function_exists('noExtractLinkedCount')
+      && function_exists('noExtractRefreshOn'));
+
+    $add('10.21', 'شمارشِ محصولاتِ لینک‌دار هر دو شکلِ ذخیره را می‌فهمد',
+         (function () {
+             if (!function_exists('noExtractLinkedCount')) return false;
+             $flat = ['products' => ['a' => ['link' => 'http://x/1'], 'b' => ['link' => ''], 'c' => ['link' => 'http://x/3']]];
+             $pair = ['products' => [['a', ['link' => 'http://x/1']], ['b', ['link' => '']], ['c', ['link' => 'http://x/3']]]];
+             return noExtractLinkedCount($flat) === 2 && noExtractLinkedCount($pair) === 2
+                 && noExtractLinkedCount(['products' => []]) === 0;
+         })());
+
+    $add('10.21', 'تازه‌سازی پیش‌فرض روشن است ولی می‌شود خاموشش کرد',
+         function_exists('noExtractRefreshOn')
+      && noExtractRefreshOn([]) === true
+      && noExtractRefreshOn(['noExtractRefresh' => true]) === true
+      && noExtractRefreshOn(['noExtractRefresh' => false]) === false);
+
+    $add('10.21', 'نبودِ قیمت در صفحهٔ محصول یعنی ناموجود',
+         function_exists('detailStockFromPrice')
+      && detailStockFromPrice(['price' => '250000'], true) === true
+      && detailStockFromPrice(['price' => ''], true) === false
+      && detailStockFromPrice(['price' => '0'], true) === false
+      && detailStockFromPrice(['price' => '۱۲۳۴۵'], true) === true);
+
+    $add('10.21', 'اگر صفحه باز نشود، دربارهٔ موجودی قضاوت نمی‌شود',
+         function_exists('detailStockFromPrice')
+      && detailStockFromPrice(['price' => ''], false) === null
+      && detailStockFromPrice(['price' => '9000'], false) === null);
+
+    $add('10.21', 'محصولِ ناموجود در مقصد موجودیِ صفر می‌گیرد',
+         function_exists('effectiveStock')
+      && effectiveStock(['in_stock' => false], 10) === 0
+      && effectiveStock(['in_stock' => true], 10) === 10
+      && effectiveStock([], 10) === 10
+      && effectiveStock(['in_stock' => true], 7) === 7);
+
+    $add('10.21', 'موجودیِ مؤثر در هر دو مقصد به کار می‌رود',
+         substr_count($selfSrc, 'effectiveStock($p,(int)($w[' . "'stock_quantity']??10))") >= 2
+      && substr_count($selfSrc, "effectiveStock(\$p,(int)(\$cn['basalam']['stock']??10))") >= 3
+      && strpos($selfSrc, "\$stock   = effectiveStock(\$p, (int)(\$opts['stock'] ?? 10));") !== false);
+
+    $add('10.21', 'تشخیصِ ناموجودی فقط با سلکتورِ قیمت فعال می‌شود',
+         strpos($selfSrc, "if(!empty(\$detailSelectors['price'])){") !== false
+      && strpos($selfSrc, "\$allProducts[\$key]['stock_src']   = 'detail_price';") !== false);
+
+    $add('10.21', 'تغییرِ موجودی شمرده و در لاگ گزارش می‌شود',
+         strpos($selfSrc, '$_stockOut=0;$_stockBack=0;') !== false
+      && strpos($selfSrc, "' ناموجود شد · '") !== false
+      && strpos($selfSrc, "'stock_out'=>\$_stockOut??0") !== false);
+
+    $add('10.21', 'فازِ جزئیات می‌گوید چند تا انجام شد و آیا وقت تمام شد',
+         strpos($selfSrc, "'detail_done'=>\$detailDone,'detail_total'=>\$detailTotal") !== false
+      && strpos($selfSrc, "'ran_out'=>!empty(\$_ranOut)") !== false);
+
+    $add('10.21', 'دلیلِ اجرانشدنِ تازه‌سازی گزارش می‌شود، نه سکوت',
+         strpos($selfSrc, "\$pResult['no_refresh_why'] = 'disabled'") !== false
+      && strpos($selfSrc, "\$pResult['no_refresh_why'] = 'no_detail_selectors'") !== false
+      && strpos($selfSrc, "\$pResult['no_refresh_why'] = 'no_product_links'") !== false);
+
+    $add('10.21', 'شکستِ تازه‌سازی جلوی ارسالِ دوره‌ای را نمی‌گیرد',
+         strpos($selfSrc, 'شکستِ تازه‌سازی نباید جلوی ارسالِ دوره‌ای را بگیرد') !== false);
+
+    $add('10.21', 'جعبهٔ تازه‌سازی در رابط هست و با تیک باز/بسته می‌شود',
+         strpos($selfSrc, 'id="profileSyncNoExtractRefresh"') !== false
+      && strpos($selfSrc, 'id="syncNoExtractBox"') !== false
+      && strpos($selfSrc, 'function syncToggleNoExtractBox()') !== false
+      && strpos($selfSrc, 'function syncRenderNoExtractStat()') !== false);
+
+    $add('10.21', 'تنظیمِ تازه‌سازی ذخیره و بازیابی می‌شود',
+         strpos($selfSrc, 'noExtractRefresh:!$(' . "'profileSyncNoExtractRefresh')") !== false
+      && strpos($selfSrc, 'checked=(sc.noExtractRefresh!==false)') !== false
+      && strpos($selfSrc, 'checked=(p.syncConfig.noExtractRefresh!==false)') !== false);
+
+    $add('10.21', 'سینکِ خودکار هم به همهٔ غرفه‌های فعال می‌فرستد',
+         strpos($selfSrc, "'send_all_shops' => !empty(\$cn['basalam']['send_all_shops'])") !== false);
+
+    $add('10.21', 'نبضِ کران در ابتدای اجرا زده می‌شود، نه فقط در پایان',
+         strpos($selfSrc, "\$_hb = notifCronPing(\$_cnPing, ['profiles' => [], 'heartbeat' => true]);") !== false
+      && strpos($selfSrc, "if (!empty(\$_hb['sent'])) \$results_heartbeat = 'sent';") !== false);
+
+    $add('10.21', 'زمانِ شروعِ اجرا ثبت می‌شود تا اجرای ناتمام تشخیص داده شود',
+         strpos($selfSrc, "if (\$hb) \$st['last_cron_start'] = \$now;") !== false
+      && strpos($selfSrc, "\$_startAt = (int)(\$st['last_cron_start'] ?? 0);") !== false);
+
+    $add('10.21', 'پینگ دربارهٔ اجرای نیمه‌کاره هشدار می‌دهد',
+         strpos($selfSrc, 'اجرای قبلی نیمه‌کاره ماند (هاست پردازه را کشت)') !== false
+      && strpos($selfSrc, '$_startAt - $_doneAt > 120') !== false);
+
+    $add('10.21', 'هر کارِ کران داخل try/catch است تا یکی بقیه را نکشد',
+         strpos($selfSrc, "\$results['notifications'] = ['error' => mb_substr(\$e->getMessage(), 0, 200)];") !== false
+      && strpos($selfSrc, "\$results['digest'] = ['error' => mb_substr(\$e->getMessage(), 0, 200)];") !== false
+      && strpos($selfSrc, "\$results['ping'] = ['error' => mb_substr(\$e->getMessage(), 0, 200)];") !== false
+      && strpos($selfSrc, "\$results['watchdog_error'] = mb_substr(\$e->getMessage(), 0, 200);") !== false);
+
+    $add('10.21', 'مسیرِ قفل هم نتیجهٔ پینگ را گزارش می‌کند',
+         strpos($selfSrc, "\$_lp = notifCronPing(\$cnLock, ['profiles' => [], 'locked' => \$lockAge]);") !== false
+      && strpos($selfSrc, "if (!empty(\$_lp['sent']))          \$lockOut['ping'] = 'sent';") !== false);
+
+    $add('10.21', 'اندپوینتِ سلامتِ اعلان‌ها هفت بررسی انجام می‌دهد',
+         strpos($selfSrc, "isset(\$_GET['notif_health'])") !== false
+      && strpos($selfSrc, "\$add('messenger',") !== false
+      && strpos($selfSrc, "\$add('ping_enabled',") !== false
+      && strpos($selfSrc, "\$add('cron_runs',") !== false
+      && strpos($selfSrc, "\$add('cron_completes',") !== false
+      && strpos($selfSrc, "\$add('lock',") !== false);
+
+    $add('10.21', 'ارسالِ پیامِ آزمایشی اندپوینتِ خودش را دارد',
+         strpos($selfSrc, "isset(\$_GET['notif_test_send'])") !== false
+      && strpos($selfSrc, "\$anyOk = in_array('sent', array_values(\$d), true);") !== false);
+
+    $add('10.21', 'نگاشتِ محصولاتِ پروفایل هر دو شکلِ دیسک را می‌خواند',
+         function_exists('profileProductsMap')
+      && count(profileProductsMap(['products' => [['k1', ['title' => 'x']]]])) === 1
+      && count(profileProductsMap(['products' => ['k1' => ['title' => 'x']]])) === 1
+      && profileProductsMap(['products' => []]) === []);
+
+    $add('10.21', 'فازِ جزئیات سلکتورِ فهرست نمی‌خواهد',
+         strpos($selfSrc, "if(\$phase==='detail'){\nif(empty(\$detailSelectors)){") !== false
+      && strpos($selfSrc, "'error'=>'سلکتورِ جزئیات ذخیره نشده'];") !== false
+      && strpos($selfSrc, "} elseif(empty(\$selectors)||empty(\$selectors['container'])){") !== false);
+
+    $add('10.21', 'موجودی از روی قیمتِ همین دور سنجیده می‌شود، نه مقدارِ قدیمی',
+         strpos($selfSrc, '$_freshPrice=null;') !== false
+      && strpos($selfSrc, '$_freshPrice=(string)$val;') !== false
+      && strpos($selfSrc, "detailStockFromPrice(['price'=>(\$_freshPrice===null?'':\$_freshPrice)], true)") !== false);
+
+    $add('10.21', 'تغییرِ موجودی به گزارشِ کران می‌رسد',
+         strpos($selfSrc, "\$pResult['stock_out']  = (int)\$exRes['stock_out'];") !== false
+      && strpos($selfSrc, "\$pResult['stock_back'] = (int)\$exRes['stock_back'];") !== false);
+
+    $add('10.21', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '21', '>=')
+      && strpos($selfSrc, 'v:' . "'10.21'") !== false);
+
+/* ---------- v10.20 (۳۳): ارسال همزمانِ چندغرفه‌ای · باکسِ کشویی · نوارِ هدر ---------- */
     $add('10.20', 'ساختِ گزینه‌های cURL از اجرای آن جدا شده تا موازی‌سازی ممکن شود',
          strpos($selfSrc, 'function bslCurlOpts(') !== false
       && strpos($selfSrc, '$opt = bslCurlOpts($url, $tk, $m, $d, $mp, $net, $mode);') !== false
@@ -22088,18 +22561,39 @@ function notifCronPing(array $cn, array $results, bool $force = false): array {
     }
     $sinceTxt = $last > 0 ? gmdate('H:i', min(359999, $now - $last)) : '—';
 
-    $msg = "📡 کران‌جاب اجرا شد"
+    /* v10.21 (۳۴ج): اگر اجرای قبلی نیمه‌کاره مانده باشد، پینگ باید بگوید.
+       نشانه‌اش روشن است: کران شروع شده (نبض ثبت شده) ولی گزارشِ پایان
+       (cron_last_run.json) از آن قدیمی‌تر است — یعنی هاست وسطِ راه پردازه
+       را کشته. تا حالا این حالت کاملاً بی‌صدا بود و کاربر فقط می‌دید
+       اعلان‌ها کم‌کم قطع شده‌اند. */
+    $incomplete = '';
+    $_startAt = (int)($st['last_cron_start'] ?? 0);
+    $_doneF   = __DIR__ . '/cron_last_run.json';
+    $_doneAt  = is_file($_doneF) ? (int)@filemtime($_doneF) : 0;
+    if ($_startAt > 0 && $_doneAt > 0 && $_startAt - $_doneAt > 120) {
+        $incomplete = "\n⚠️ اجرای قبلی نیمه‌کاره ماند (هاست پردازه را کشت)"
+                    . "\n   آخرین اجرای کاملِ ثبت‌شده: " . date('m-d H:i', $_doneAt);
+    }
+    $hb = !empty($results['heartbeat']);
+
+    $msg = ($hb ? "📡 کران‌جاب شروع شد" : "📡 کران‌جاب اجرا شد")
          . "\nزمان سرور: " . date('Y-m-d H:i:s')
          . "\nنسخه: " . APP_VERSION
-         . "\nپروفایل‌های اجراشده: " . $ran
-         . ($notDue > 0 ? " · نوبتشان نبود: " . $notDue : '')
+         . (!$hb ? "\nپروفایل‌های اجراشده: " . $ran : '')
+         . (!$hb && $notDue > 0 ? " · نوبتشان نبود: " . $notDue : '')
          . ($extracted > 0 ? "\nمحصولات استخراج‌شده: " . $extracted : '')
          . ($errs > 0 ? "\n⚠️ خطا در " . $errs . " پروفایل" : '')
+         . (!empty($results['locked']) ? "\n🔒 اجرای قبلی هنوز در جریان است (" . (int)$results['locked'] . " ثانیه)" : '')
+         . $incomplete
          . ($last > 0 ? "\nفاصله از پینگ قبلی: " . $sinceTxt : '')
          . ($force ? "\n(پینگ آزمایشی)" : '');
 
     $delivery = notifSend($cn, $msg);
-    if (!$force) { $st['last_cron_ping'] = $now; notifSaveState($st); }
+    if (!$force) {
+        $st['last_cron_ping'] = $now;
+        if ($hb) $st['last_cron_start'] = $now;   // v10.21: زمانِ شروعِ این اجرا
+        notifSaveState($st);
+    }
     return ['ok' => true, 'sent' => true, 'delivery' => $delivery, 'message' => $msg];
 }
 
@@ -27175,7 +27669,7 @@ send_sse('send_info',['msg'=>"[$n] ⏭ بدون قیمت — رد شد"]);
 continue;
 }
 send_sse('send_info',['msg'=>"[$n/$total] بررسی: ".mb_substr($pTitle,0,60)." | قیمت: $pPrice"]);
-$wp=['name'=>$pTitle,'type'=>'simple','regular_price'=>$pPrice,'status'=>$w['default_status']??'draft','manage_stock'=>!empty($w['manage_stock']),'stock_quantity'=>(int)($w['stock_quantity']??10)];
+$wp=['name'=>$pTitle,'type'=>'simple','regular_price'=>$pPrice,'status'=>$w['default_status']??'draft','manage_stock'=>!empty($w['manage_stock']),'stock_quantity'=>effectiveStock($p,(int)($w['stock_quantity']??10))];   // v10.21 (۳۴الف)
 if(!empty($p['short_desc']))$wp['short_description']=$p['short_desc'];
 if(!empty($p['long_desc']))$wp['description']=$p['long_desc'];
 if(!empty($p['sku']))$wp['sku']=$p['sku'];
@@ -27239,7 +27733,7 @@ if($existing){
 $exId=$existing['id']??'?';
 $exPrice=trim((string)($existing['regular_price']??''));
 $exStock=(int)($existing['stock_quantity']??0);
-$newStock=(int)($w['stock_quantity']??10);
+$newStock=effectiveStock($p,(int)($w['stock_quantity']??10));   // v10.21 (۳۴الف)
 send_sse('send_info',['msg'=>"[$n] تکراری یافت شد: ID#$exId | قیمت: $exPrice | موجودی: $exStock"]);
 // v8.58: اگر مقصد تصویر ندارد، «تکراری» حساب نکن — تصویر را اضافه کن
 $exHasImgS=!empty($existing['images'])&&is_array($existing['images']);
@@ -27435,7 +27929,7 @@ wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 continue;
 }
 
-$wp=['name'=>$pTitle,'type'=>'simple','regular_price'=>$pPrice,'status'=>$w['default_status']??'draft','manage_stock'=>!empty($w['manage_stock']),'stock_quantity'=>(int)($w['stock_quantity']??10)];
+$wp=['name'=>$pTitle,'type'=>'simple','regular_price'=>$pPrice,'status'=>$w['default_status']??'draft','manage_stock'=>!empty($w['manage_stock']),'stock_quantity'=>effectiveStock($p,(int)($w['stock_quantity']??10))];   // v10.21 (۳۴الف)
 if(!empty($p['short_desc']))$wp['short_description']=$p['short_desc'];
 if(!empty($p['long_desc']))$wp['description']=$p['long_desc'];
 if(!empty($p['sku']))$wp['sku']=$p['sku'];
@@ -27483,7 +27977,7 @@ if($existing){
 $exId=$existing['id']??'?';
 $exPrice=trim((string)($existing['regular_price']??''));
 $exStock=(int)($existing['stock_quantity']??0);
-$newStock=(int)($w['stock_quantity']??10);
+$newStock=effectiveStock($p,(int)($w['stock_quantity']??10));   // v10.21 (۳۴الف)
 $editUrl=rtrim($w['store_url'],'/').'/wp-admin/post.php?post='.$exId.'&action=edit';
 
 // v8.58: «تکراری» فقط وقتی که تصویر هم سر جایش باشد.
@@ -29769,7 +30263,7 @@ $bsBrief=trim(strip_tags($p['short_desc']??''));$bsDesc=trim($p['long_desc']??''
 $catId=(int)($cn['basalam']['category_id']??0);
 if($catId<=0&&$autoCat&&!empty($bslFlatCats)){$acId=autoMatchBslCategory($pTitle,$bslFlatCats);if($acId>0)$catId=$acId;}
 if($catId>0&&!empty($cData)&&is_array($cData)){$catId=findLeafCategory($catId,$cData);}
-$bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>(int)($cn['basalam']['stock']??10),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'status'=>3790];
+$bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>effectiveStock($p,(int)($cn['basalam']['stock']??10)),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'status'=>3790];
 if(!empty($p['sku']))$bp['sku']=$p['sku'];
 $r=bslReq($tk,'POST','vendors/'.$vid.'/products',$bp);
 if($r['ok']&&!empty($r['body']['id'])){
@@ -29793,7 +30287,7 @@ bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,3
 usleep($bslDelayMs*1000);continue;
 }
 $bsBrief=trim(strip_tags($p['short_desc']??''));$bsDesc=trim($p['long_desc']??'');if($bsBrief==='')$bsBrief=trim(strip_tags($pTitle));if($bsDesc==='')$bsDesc=$bsBrief;
-$bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>(int)($cn['basalam']['stock']??10),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'photo'=>$pid,'photos'=>(!empty($galIdsB)?$galIdsB:[$pid])];
+$bp=['name'=>mb_substr($pTitle,0,120),'brief'=>mb_substr($bsBrief,0,250),'description'=>$bsDesc,'primary_price'=>$pn,'stock'=>effectiveStock($p,(int)($cn['basalam']['stock']??10)),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'photo'=>$pid,'photos'=>(!empty($galIdsB)?$galIdsB:[$pid])];
 if(mb_strlen($bsBrief)>=3&&mb_strlen($bsDesc)>=3)$bp['status']=2976;else $bp['status']=3790;if(!empty($p['sku']))$bp['sku']=$p['sku'];
 $r=bslReq($tk,'POST','vendors/'.$vid.'/products',$bp);
 if($r['ok']&&!empty($r['body']['id'])){ $sent++;$bslSentList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$r['body']['id']],$card);bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ✅ #{$r['body']['id']}");
@@ -29817,7 +30311,7 @@ else bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitl
 if($dupName){
 
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⚡ نام تکراری → آپدیت اجباری...");
-$bu2=['primary_price'=>$pn,'stock'=>(int)($cn['basalam']['stock']??10),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'status'=>2976];
+$bu2=['primary_price'=>$pn,'stock'=>effectiveStock($p,(int)($cn['basalam']['stock']??10)),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'status'=>2976];
 if($catId>0)$bu2['category_id']=$catId;
 if($pid){$bu2['photo']=$pid;$bu2['photos']=(!empty($galIdsB)?$galIdsB:[$pid]);}
 $okUpd=false;$updId=(int)($exId??0);
@@ -30055,7 +30549,7 @@ if($exRTfound){
 $skipped++;$bslSkippedList[]=array_merge(['title'=>$pRT,'key'=>$pRetry['key']??'','reason'=>'duplicate in Phase 3','remote_id'=>0],['image'=>$pRetry['image']??'','price'=>0,'category'=>'','link'=>'']);
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'','⏭ ['.mb_substr($pRT,0,30).'] تکرار — Phase 3');
 }else{
-$bpR=['name'=>mb_substr($pRT,0,120),'brief'=>mb_substr($pRBrief,0,250),'description'=>$pRDesc,'primary_price'=>$pRP,'stock'=>(int)($cn['basalam']['stock']??10),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'photo'=>$pid3,'photos'=>[$pid3]];
+$bpR=['name'=>mb_substr($pRT,0,120),'brief'=>mb_substr($pRBrief,0,250),'description'=>$pRDesc,'primary_price'=>$pRP,'stock'=>effectiveStock(is_array($pRetry)?$pRetry:[],(int)($cn['basalam']['stock']??10)),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'is_wholesale'=>false,'category_id'=>$catId,'photo'=>$pid3,'photos'=>[$pid3]];
 if(mb_strlen($pRBrief)>=3&&mb_strlen($pRDesc)>=3)$bpR['status']=2976;else $bpR['status']=3790;
 if($pRSku)$bpR['sku']=$pRSku;
 
@@ -34527,11 +35021,28 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 
             <div class="row" style="margin-bottom:4px;align-items:center">
                 <label style="min-width:80px;font-size:12px;color:#94a3b8">🚫 استخراج:</label>
+                <div style="flex:1;display:flex;flex-direction:column;gap:4px">
                 <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px">
-                    <input type="checkbox" id="profileSyncNoExtract" onchange="scheduleSave();updateSyncStatusText()">
+                    <input type="checkbox" id="profileSyncNoExtract" onchange="scheduleSave();updateSyncStatusText();syncToggleNoExtractBox()">
                     <span style="color:#fbbf24">بدون استخراج — فقط آپدیت دوره‌ای قیمت و موجودی</span>
                     <span style="color:#64748b;font-size:9px">(برای پروفایل‌های واردشده با اکسل/CSV)</span>
                 </label>
+                <!-- v10.21 (۳۴الف): تازه‌سازیِ دوره‌ای از راهِ صفحهٔ محصول -->
+                <div id="syncNoExtractBox" class="hidden" style="margin-right:20px;padding:8px 10px;background:#1a2e05;border:1px solid #65a30d;border-radius:8px">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px">
+                        <input type="checkbox" id="profileSyncNoExtractRefresh" checked onchange="scheduleSave();updateSyncStatusText()">
+                        <span style="color:#bef264">🔄 تازه‌سازی قیمت و موجودی از صفحهٔ هر محصول</span>
+                    </label>
+                    <div style="font-size:9.5px;color:#94a3b8;margin-top:5px;line-height:1.8">
+                        در هر نوبتِ سینک، صفحهٔ محصولاتی که ستون «لینک» دارند باز می‌شود و قیمت تازه خوانده می‌شود.
+                        محصولی که قیمتش از صفحه برداشته شده باشد <b style="color:#fca5a5">ناموجود</b> علامت می‌خورد و
+                        موجودی‌اش در مقصد صفر می‌شود.
+                        <br>هر نوبت تا سقفِ زمانیِ هاست جلو می‌رود و نوبتِ بعد از همان‌جا ادامه می‌دهد.
+                        <span style="color:#fbbf24">نیازمندِ سلکتورِ «قیمت» در تبِ جزئیات است.</span>
+                    </div>
+                    <div id="syncNoExtractStat" style="font-size:10px;color:#67e8f9;margin-top:5px"></div>
+                </div>
+                </div>
             </div>
 
             <div class="row" style="margin-bottom:4px;align-items:center">
@@ -38870,6 +39381,48 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.21', t:'📄 سینکِ دوره‌ایِ پروفایل‌های اکسل/CSV · 🚚 چندغرفه‌ای در کران · 📡 رفعِ قطعِ اعلانِ دوره‌ای', items:[
+    '📄 <b>۳۴الف — پروفایل‌های اکسل/CSV دیگر منجمد نیستند.</b> تیک «بدون استخراج»',
+    '   تا حالا معنایش این بود که هیچ‌چیز از مبدأ خوانده نشود؛ یعنی همان قیمتِ',
+    '   لحظهٔ درون‌ریزیِ فایل، هر شب دوباره به باسلام و ووکامرس می‌رفت. قیمتِ',
+    '   فایلِ سه ماه پیش تا ابد تکرار می‌شد و موجودی هم هیچ‌وقت به‌روز نمی‌شد.',
+    '🔄 <b>حالا سینکِ دوره‌ای از راهِ صفحهٔ خودِ محصول قیمت و موجودی را تازه',
+    '   می‌کند.</b> این محصولات ستونِ «لینک» دارند، پس منبعِ به‌روزرسانی از اول',
+    '   موجود بوده — فقط صفحهٔ فهرست است که برایشان معنا ندارد. در هر نوبتِ',
+    '   سینک، فازِ «استخراجِ تفصیلی» اجرا می‌شود که مستقیم سراغِ صفحهٔ تک‌تکِ',
+    '   محصولات می‌رود و اصلاً به صفحهٔ فهرست کاری ندارد.',
+    '📦 <b>«ناموجود» از روی قیمت تشخیص داده می‌شود.</b> سایت‌ها محصولِ تمام‌شده را',
+    '   معمولاً با برداشتنِ قیمت نشان می‌دهند. اگر صفحه باز شود و قیمتی نداشته',
+    '   باشد، محصول ناموجود علامت می‌خورد و موجودی‌اش در مقصد صفر می‌شود.',
+    '   محافظه‌کارانه: اگر صفحه اصلاً باز نشود (قطعیِ شبکه) دربارهٔ موجودی',
+    '   قضاوتی نمی‌شود — وگرنه یک قطعیِ چنددقیقه‌ای کلِ غرفه را صفر می‌کرد.',
+    '⏱ هر نوبت تا سقفِ زمانیِ هاست جلو می‌رود و نوبتِ بعد از همان‌جا ادامه',
+    '   می‌دهد، پس کاتالوگِ بزرگ هم بدونِ تایم‌اوت دوره‌ای پوشش داده می‌شود.',
+    '   اعلانِ گران/ارزان و موجود/ناموجود شدن هم برای این پروفایل‌ها فعال شد.',
+    '🚚 <b>۳۴ب — ارسالِ همزمان به غرفه‌ها حالا در کران هم کار می‌کند.</b> در نسخهٔ',
+    '   قبل ارسالِ موازی ساخته شد ولی کلیدش فقط از مسیرِ دکمهٔ دستی وارد صف',
+    '   می‌شد. یعنی تیک روشن بود، دستی درست کار می‌کرد، ولی سینکِ شبانه همچنان',
+    '   فقط غرفهٔ پیش‌فرض را به‌روز می‌کرد. حالا صفِ سینکِ خودکار هم همان تنظیم',
+    '   را با خود می‌برد.',
+    '📡 <b>۳۴ج — چرا اعلانِ دوره‌ای قطع شده بود.</b> پیامِ «کران‌جاب اجرا شد»',
+    '   آخرین کارِ کران بود. بینِ شروعِ اجرا تا رسیدن به آن، کلِ چرخهٔ استخراج و',
+    '   ارسال و کارهای ایجنت اجرا می‌شد — روی کاتالوگِ بزرگ چند دقیقه. هاستِ',
+    '   اشتراکی پردازه را قبل از پایان می‌کُشت، پس نه پیام می‌رفت، نه گزارشی',
+    '   نوشته می‌شد، و قفل هم جا می‌ماند و تیک‌های بعدی تا نیم ساعت رد می‌شدند.',
+    '   از بیرون دقیقاً شبیه «اعلان قطع شد» بود، بدون هیچ ردی. با افزوده‌شدنِ',
+    '   کارهای ایجنت درست قبل از پینگ (v10.05)، این اتفاق بسیار محتمل‌تر شد.',
+    '💓 <b>راه‌حل: نبض حالا اولِ اجرا زده می‌شود، نه آخر.</b> در آن لحظه هنوز هیچ',
+    '   کارِ سنگینی شروع نشده، پس پیام تقریباً همیشه می‌رسد. فاصلهٔ زمانیِ',
+    '   تنظیم‌شده هم دقیقاً مثل قبل رعایت می‌شود.',
+    '🛡 <b>هر کارِ کران داخل try/catch رفت.</b> پیش از این یک استثنا در اعلان‌ها یا',
+    '   گزارشِ شبانه کلِ اجرا را می‌کشت و همه‌چیزِ بعد از خودش را می‌بلعید.',
+    '⚠️ <b>پیام حالا خودش می‌گوید اجرای قبلی نیمه‌کاره مانده</b> — یعنی به‌جای',
+    '   سکوت، می‌فهمید هاست دارد پردازه را می‌کُشد.',
+    '🩺 <b>ابزارِ تازهٔ عیب‌یابی:</b> <code>?notif_health=1</code> هفت بررسی جدا انجام',
+    '   می‌دهد (پیام‌رسان، پیش‌نیازها، تیکِ پینگ، فاصله، اجرای کران، کامل‌شدنِ',
+    '   اجرا، قفلِ جامانده) و دقیقاً می‌گوید کدام حلقه شکسته است.',
+    '   <code>?notif_test_send=1</code> هم یک پیامِ آزمایشیِ فوری می‌فرستد.'
+  ]},
   {v:'10.20', t:'🚚 ارسالِ همزمان به همهٔ غرفه‌ها · ⚠️ باکسِ کشوییِ مشکلات مدل‌ها · 🧰 نوارِ یکپارچهٔ هدر', items:[
     '🚚 <b>۳۳الف — تیکِ «ارسال به همهٔ غرفه‌ها» بالاخره واقعاً کار می‌کند.</b>',
     '   این تیک از v9.69 بود ولی در عمل سه ایراد داشت که هرکدام کافی بود کل',
@@ -49300,12 +49853,16 @@ function loadProfileSyncConfig(){
             $('profileSyncBslAddUpdate').checked=!!sc.bslAddUpdate;
             // v9.45: بدون استخراج (پروفایل‌های اکسل/CSV)
             if($('profileSyncNoExtract'))$('profileSyncNoExtract').checked=!!sc.noExtract;
+            // v10.21 (۳۴الف): تازه‌سازیِ دوره‌ای — نبودِ کلید یعنی روشن
+            if($('profileSyncNoExtractRefresh'))$('profileSyncNoExtractRefresh').checked=(sc.noExtractRefresh!==false);
+            syncToggleNoExtractBox();
             updateSyncStatusText();
         }else{
             $('profileSyncEn').checked=false;
             $('profileSyncWooAddUpdate').checked=false;
             $('profileSyncBslAddUpdate').checked=false;
             if($('profileSyncNoExtract'))$('profileSyncNoExtract').checked=false;
+            syncToggleNoExtractBox();
             $('profileSyncStatus').textContent='';
         }
     }).catch(()=>{});
@@ -49321,8 +49878,40 @@ function getSyncConfig(){
         wooAddUpdate:$('profileSyncWooAddUpdate').checked,
         bslAddUpdate:$('profileSyncBslAddUpdate').checked,
         // v9.45: بدون استخراج — فقط آپدیت دوره‌ای قیمت/موجودی (پروفایل‌های اکسل/CSV)
-        noExtract:!!($('profileSyncNoExtract')&&$('profileSyncNoExtract').checked)
+        noExtract:!!($('profileSyncNoExtract')&&$('profileSyncNoExtract').checked),
+        /* v10.21 (۳۴الف): تازه‌سازیِ دوره‌ایِ قیمت/موجودی از صفحهٔ محصول.
+           پیش‌فرض روشن — کاربری که «بدون استخراج» را می‌زند می‌خواهد قیمتش
+           به‌روز بماند؛ اگر نمی‌خواهد، صریح خاموشش می‌کند. */
+        noExtractRefresh:!$('profileSyncNoExtractRefresh')||!!$('profileSyncNoExtractRefresh').checked
     };
+}
+/* v10.21 (۳۴الف): جعبهٔ تازه‌سازی فقط وقتی «بدون استخراج» روشن است دیده شود */
+function syncToggleNoExtractBox(){
+    const on=$('profileSyncNoExtract')&&$('profileSyncNoExtract').checked;
+    const box=$('syncNoExtractBox');
+    if(box)box.classList.toggle('hidden',!on);
+    if(on)syncRenderNoExtractStat();
+}
+/* چند محصولِ همین پروفایل لینکِ صفحهٔ محصول دارد + آیا سلکتورِ قیمت هست */
+function syncRenderNoExtractStat(){
+    const el=$('syncNoExtractStat'); if(!el)return;
+    let linked=0,total=0;
+    products.forEach(p=>{total++;if(p&&p.link&&String(p.link).trim())linked++;});
+    const hasPrice=(typeof getEnabledDetailFields==='function')
+        ? getEnabledDetailFields().indexOf('price')>=0 : false;
+    if(total===0){el.style.color='#94a3b8';el.textContent='هنوز محصولی در این پروفایل نیست';return;}
+    if(linked===0){
+        el.style.color='#fbbf24';
+        el.textContent='⚠ هیچ‌کدام از '+toFa(total)+' محصول لینکِ صفحه ندارند — تازه‌سازی ممکن نیست';
+        return;
+    }
+    if(!hasPrice){
+        el.style.color='#fbbf24';
+        el.textContent='⚠ '+toFa(linked)+' محصول لینک دارد، ولی سلکتورِ «قیمت» در تبِ جزئیات انتخاب نشده';
+        return;
+    }
+    el.style.color='#67e8f9';
+    el.textContent='✓ '+toFa(linked)+' از '+toFa(total)+' محصول لینکِ صفحه دارد — قیمت و موجودی تازه می‌شود';
 }
 // v7.81: Update sync status text when any sync config changes
 function updateSyncStatusText(){
@@ -49331,7 +49920,13 @@ function updateSyncStatusText(){
     const intv=$('profileSyncInterval').options[$('profileSyncInterval').selectedIndex].text;
     const wm=$('profileSyncWooAddUpdate').checked?'➕🔄 ووکامرس':'🆕 ووکامرس';
     const bm=$('profileSyncBslAddUpdate').checked?'➕🔄 باسلام':'🆕 باسلام';
-    const ne=($('profileSyncNoExtract')&&$('profileSyncNoExtract').checked)?' 🚫بدون استخراج':'';
+    /* v10.21 (۳۴الف): وقتی تازه‌سازی روشن است، «بدون استخراج» دیگر یعنی
+       «بدون فهرست» نه «بدون هیچ‌چیز» — متن باید همین را بگوید. */
+    let ne='';
+    if($('profileSyncNoExtract')&&$('profileSyncNoExtract').checked){
+        const rf=!$('profileSyncNoExtractRefresh')||$('profileSyncNoExtractRefresh').checked;
+        ne=rf?' 🚫بدون فهرست · 🔄 تازه‌سازی قیمت/موجودی':' 🚫بدون استخراج';
+    }
     /* v9.91: مقصدِ «هیچ‌کدام» — استخراج انجام می‌شود ولی چیزی ارسال نمی‌شود،
        پس نشان‌دادن حالتِ ووکامرس/باسلام گمراه‌کننده است. */
     const tg=$('profileSyncTarget')?$('profileSyncTarget').value:'woo';
@@ -49374,12 +49969,16 @@ applyProfile=function(p){
         $('profileSyncBslAddUpdate').checked=!!p.syncConfig.bslAddUpdate;
         // v9.45: بدون استخراج (پروفایل‌های اکسل/CSV)
         if($('profileSyncNoExtract'))$('profileSyncNoExtract').checked=!!p.syncConfig.noExtract;
+        // v10.21 (۳۴الف)
+        if($('profileSyncNoExtractRefresh'))$('profileSyncNoExtractRefresh').checked=(p.syncConfig.noExtractRefresh!==false);
+        syncToggleNoExtractBox();
         updateSyncStatusText();
     }else{
         $('profileSyncEn').checked=false;
         $('profileSyncWooAddUpdate').checked=false;
         $('profileSyncBslAddUpdate').checked=false;
         if($('profileSyncNoExtract'))$('profileSyncNoExtract').checked=false;
+        syncToggleNoExtractBox();
         $('profileSyncStatus').textContent='';
     }
     // v9.67: اتصال غیرمستقیمِ این پروفایل (پیش‌فرض: خاموش = مستقیم)
