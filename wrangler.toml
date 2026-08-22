@@ -37,7 +37,7 @@ max_concurrency = 2
 crons = ["* * * * *"]
 
 [vars]
-WORKER_VERSION = "1.18.0"
+WORKER_VERSION = "1.18.1"
 REQUEST_TIMEOUT_MS = "25000"
 MAX_RESPONSE_BYTES = "8000000"
 DETAIL_CONCURRENCY = "2"

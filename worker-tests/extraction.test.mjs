@@ -213,6 +213,18 @@ test('workflow panes match the reference hierarchy and every new control is oper
   const appSource=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');assert.match(appSource,/read-excel-file\/web-worker/);assert.match(appSource,/destinationStatus:wooStatus\|\|undefined/);
 });
 
+test('DASHBOARD_JS parses as a single valid script (no broken template literal)',async()=>{
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
+  const start=source.indexOf('export const DASHBOARD_JS');
+  const bt=source.indexOf('`',start);
+  const close=source.indexOf('`;\n\nfunction escapeHtml',bt);
+  assert.ok(start>=0&&bt>=0&&close>bt,'DASHBOARD_JS template literal markers found');
+  const js=source.slice(bt+1,close);
+  // eslint-disable-next-line no-new-func
+  assert.doesNotThrow(()=>new Function(js),'the dashboard script must compile; a broken template literal breaks every button/tab');
+  assert.ok(js.length>100000,'dashboard script has real content');
+});
+
 test('remaining dashboard content follows a topic-first novice workflow without dropping advanced tools',async()=>{
   const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
   const home=source.slice(source.indexOf('<section id="pane-home"'),source.indexOf('<section id="pane-selector"'));
