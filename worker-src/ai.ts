@@ -56,6 +56,47 @@ export async function aiCall(provider:Provider,model:string,prompt:string,networ
   return validatedChatSuccess(provider,model,prompt,reportedEndpoint,latencyMs,response,body,{endpointType:'chat-completions',chatCompatible:true,reasoning});
 }
 
+
+/** Chat with full conversation history (aiCall only sends a single prompt). */
+export async function aiChat(provider:Provider,model:string,messages:Array<{role:string;content:string}>,networkOverride?:Network,timeoutMs?:number,maxTokens=1200){
+  const network=networkOverride||(await loadConnections()).ai.network;
+  if(!provider.baseUrl||!provider.apiKey||!model)throw new Error('تنظیمات ارائه‌دهنده/مدل کامل نیست');
+  const started=Date.now(),chatMessages=messages.slice(-40).map(m=>({role:String(m.role||'user'),content:String(m.content||'')}));
+  if(!chatMessages.length||chatMessages[chatMessages.length-1].role!=='user')throw new Error('آخرین پیام باید از سمت کاربر باشد.');
+  const lastPrompt=chatMessages[chatMessages.length-1].content;
+  if(isCloudflareNative(provider.baseUrl)){
+    const accountId=cloudflareAccountId(provider.baseUrl);
+    if(!accountId)throw new AiResponseError('شمارهٔ حساب Cloudflare در آدرس پیدا نشد',{ok:false,phase:'configuration',provider:provider.id,providerName:provider.name,model,prompt:lastPrompt,latencyMs:Date.now()-started});
+    const models=cloudflareModelIds(model),base=`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/`;
+    for(const modelId of models){
+      const endpoint=base+modelId.replace(/^\/+/,''),payload={messages:chatMessages,max_tokens:maxTokens};
+      const result=await requestAi(endpoint,payload,provider,network,timeoutMs);
+      if(result.networkError)throw new AiResponseError(safeError(result.networkError,endpoint,provider.apiKey),{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt:lastPrompt,endpoint:safeEndpoint(endpoint),latencyMs:Date.now()-started,raw:{error:safeError(result.networkError,endpoint,provider.apiKey)}});
+      const response=result.response!,body=result.body,errorText=aiErrorMessage(body)||response.statusText||'Cloudflare AI error';
+      if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${errorText}`,{ok:false,phase:'http',provider:provider.id,providerName:provider.name,model,prompt:lastPrompt,endpoint:safeEndpoint(endpoint),latencyMs:Date.now()-started,httpStatus:response.status,raw:body});
+      const text=String(body?.result?.response||body?.choices?.[0]?.message?.content||'').trim();
+      if(!text)throw new AiResponseError('مدل پاسخی برنگرداند.',{ok:false,phase:'validation',provider:provider.id,providerName:provider.name,model,prompt:lastPrompt,endpoint:safeEndpoint(endpoint),latencyMs:Date.now()-started,raw:body});
+      return{ok:true,text,provider:provider.id,providerName:provider.name,model:modelId,latencyMs:Date.now()-started};
+    }
+    throw new AiResponseError('هیچ مدل Cloudflare برای این شناسه پیدا نشد',{ok:false,phase:'configuration',provider:provider.id,providerName:provider.name,model,prompt:lastPrompt,latencyMs:Date.now()-started});
+  }
+  const endpoint=openAiEndpoint(provider.baseUrl),reportedEndpoint=safeEndpoint(endpoint),reasoning=isReasoningAiModel(provider,model),chatModel=canonicalAiModel(model),payload:any={model:chatModel,messages:chatMessages,max_tokens:reasoning?maxTokens:Math.min(maxTokens,800)};if(!reasoning)payload.temperature=.7;
+  let result=await requestAi(endpoint,payload,provider,network,timeoutMs),usedPayload=payload;
+  for(let attempt=0;attempt<3;attempt++){
+    if(result.networkError||!result.response||result.response.ok||isCreditAiStatus(result.response.status,aiErrorMessage(result.body)))break;
+    const errorText=aiErrorMessage(result.body);
+    if(!isPayloadShapeError(result.response.status,errorText))break;
+    const adapted=adjustChatPayload(usedPayload,errorText);if(!adapted)break;
+    usedPayload=adapted;result=await requestAi(endpoint,usedPayload,provider,network,timeoutMs);
+  }
+  if(result.networkError){const reason=safeError(result.networkError,endpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt:lastPrompt,endpoint:reportedEndpoint,latencyMs:Date.now()-started,raw:{error:reason}})}
+  const response=result.response!,body=result.body,latencyMs=Date.now()-started,errorText=aiErrorMessage(body)||response.statusText||'AI error';
+  if(!response.ok)throw new AiResponseError(`HTTP ${response.status}: ${errorText}`,{ok:false,phase:'http',provider:provider.id,providerName:provider.name,model,prompt:lastPrompt,endpoint:reportedEndpoint,latencyMs,httpStatus:response.status,raw:body});
+  const text=String(body?.choices?.[0]?.message?.content||body?.result?.response||'').trim();
+  if(!text)throw new AiResponseError('مدل با وجود پاسخ HTTP موفق، هیچ متن یا پاسخ نهایی برنگرداند.',{ok:false,phase:'validation',provider:provider.id,providerName:provider.name,model,prompt:lastPrompt,endpoint:reportedEndpoint,latencyMs,raw:body});
+  return{ok:true,text,provider:provider.id,providerName:provider.name,model:chatModel,latencyMs};
+}
+
 const MISTRAL_OCR_TEST_IMAGE='https://raw.githubusercontent.com/mistralai/cookbook/main/mistral/ocr/receipt.png';
 
 // ─── Agentic AI: tool calling (function calling) ─────────────────────────────
@@ -186,7 +227,7 @@ function cloudflareModelIds(raw:string):string[]{
 function canonicalAiModel(model:string){return String(model||'').trim().replace(/^~+/,'')}
 function isOpenRouter(provider:Pick<Provider,'id'|'name'|'baseUrl'>,endpoint=''){return provider.id==='openrouter'||/openrouter/i.test(String(provider.name||''))||/openrouter\.ai/i.test(String(provider.baseUrl||endpoint||''))}
 function aiRequestHeaders(provider:Provider,endpoint:string,method:'POST'|'GET'='POST'):Record<string,string>{
-  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.18.1'};
+  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.19.0'};
   if(method==='POST')headers['content-type']='application/json';
   if(isOpenRouter(provider,endpoint)){headers['http-referer']='https://scraper4.workers.dev';headers.referer='https://scraper4.workers.dev';headers['x-title']='Scraper 4'}
   return headers;

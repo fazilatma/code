@@ -127,6 +127,26 @@ test('AI result modal can retry message or category independently',async()=>{
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('AI chat lists capability-filtered models and returns conversation replies',async()=>{
+  const db=new MemoryD1();
+  await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'chat-pro',name:'Chat Provider',baseUrl:'https://chat.example/v1',apiKey:'k',models:['m-chat','m-reason'],reasoningModels:['m-reason'],enabled:true},{id:'mistral',name:'Mistral',baseUrl:'https://api.mistral.ai/v1',apiKey:'k',models:['mistral-ocr-latest'],enabled:true}],candidates:[],master:'',model:'',network:{mode:'direct'}}}));
+  const modelsResp=await call(db,'/api/ai/chat-models'),models=(await modelsResp.json()).models;
+  assert.equal(modelsResp.status,200);
+  assert.equal(models.length,3);
+  const chat=models.find(m=>m.model==='m-chat');assert.equal(chat.chat,true);assert.equal(chat.toolCalling,false);assert.equal(chat.reasoning,false);
+  const reason=models.find(m=>m.model==='m-reason');assert.equal(reason.chat,true);assert.equal(reason.reasoning,true);
+  assert.equal(models.find(m=>m.model==='mistral-ocr-latest').chat,false,'dedicated-endpoint models are not chat-capable');
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async()=>new Response(JSON.stringify({choices:[{message:{role:'assistant',content:'سلام! در خدمتم.'}}]}),{status:200,headers:{'content-type':'application/json'}});
+  try{
+    const resp=await call(db,'/api/ai/chat',jsonInit({providerId:'chat-pro',model:'m-chat',messages:[{role:'user',content:'سلام'}]})),d=await resp.json();
+    assert.equal(resp.status,200);assert.equal(d.ok,true);assert.equal(d.text,'سلام! در خدمتم.');assert.equal(d.model,'m-chat');assert.equal(d.provider,'chat-pro');
+    assert.ok(Number.isFinite(d.latencyMs));
+    const bad=await call(db,'/api/ai/chat',jsonInit({providerId:'chat-pro',model:'m-chat',messages:[{role:'assistant',content:'بدون پیام کاربر'}]}));assert.equal(bad.status,400);
+    const missing=await call(db,'/api/ai/chat',jsonInit({providerId:'nope',model:'m-chat',messages:[{role:'user',content:'x'}]}));assert.equal(missing.status,404);
+  }finally{globalThis.fetch=originalFetch}
+});
+
 test('scheduled cron uses live general settings for watchdog, report retention, lock and cron ping',async()=>{
   const db=new MemoryD1(),pending=[],pings=[],localCtx={waitUntil(promise){pending.push(promise)},passThroughOnException(){}};
   await call(db,'/api/settings',jsonInit({general:{cronLockMin:1,keepReports:2,queueDedup:true,queueDedupStale:1,contentSync:false},watchdog:{enabled:true,stallAfter:60},notifications:{events:{cronPing:true},pingEvery:1}}));

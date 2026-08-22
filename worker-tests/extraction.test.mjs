@@ -213,6 +213,15 @@ test('workflow panes match the reference hierarchy and every new control is oper
   const appSource=await readFile(new URL('../worker-src/app.ts',import.meta.url),'utf8');assert.match(appSource,/read-excel-file\/web-worker/);assert.match(appSource,/destinationStatus:wooStatus\|\|undefined/);
 });
 
+test('AI chat tab exposes a capability-filtered model picker and chat wiring',async()=>{
+  const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
+  assert.match(source,/data-ai-tab="chat"/);
+  assert.match(source,/data-ai-panel="chat"/);
+  for(const id of ['chatModelSel','chatMessages','chatInput','chatSend'])assert.match(source,new RegExp(`id="${id}"`));
+  assert.match(source,/data-chat-filter="chat"/);assert.match(source,/data-chat-filter="toolCalling"/);assert.match(source,/data-chat-filter="reasoning"/);
+  for(const token of ["/api/ai/chat-models","/api/ai/chat","function chatFilteredModels","function chatSend","function chatClear","chatState.filters"])assert.match(source,new RegExp(token.replace(/[.\/]/g,'\\$&')));
+});
+
 test('DASHBOARD_JS parses as a single valid script (no broken template literal)',async()=>{
   const source=await readFile(new URL('../worker-src/dashboard.ts',import.meta.url),'utf8');
   const start=source.indexOf('export const DASHBOARD_JS');
