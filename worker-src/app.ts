@@ -30,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.19.2',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.19.3',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -42,7 +42,7 @@ app.get('/api/status',async c=>{const connections=await loadConnections();return
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.19.2',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.19.3',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -157,7 +157,7 @@ app.post('/api/profiles/:id/import',async c=>{const profile=await getProfile(c.r
 app.post('/api/import/analyze',async c=>{
   const file=await readImportFile(c),table=file.rows,headers=file.headers;
   const mapping=detectImportMapping(headers),mappingObj=Object.fromEntries(mapping.map(m=>[m.column,m.field]));
-  const samples=table.slice(0,6).map(values=>Object.fromEntries(headers.map((h,i)=>[h,values[i]??''])));
+  const samples=table.slice(0,100).map(values=>Object.fromEntries(headers.map((h,i)=>[h,values[i]??''])));
   let missingTitle=0,missingPrice=0,zeroPrice=0,invalidPrice=0,limit=Math.min(10000,table.length);
   for(let i=0;i<limit;i++){const values=table[i],obj=Object.fromEntries(headers.map((h,j)=>[h,values[j]??''])),row=Object.keys(mappingObj).length?applyImportMapping(obj,mappingObj):normalizeImportRecord(obj),title=String(row.title||'').trim();if(!title)missingTitle++;else{const price=normalizeImportPrice(String(row.price??''),{priceUnit:'toman'});if(price===null)invalidPrice++;else if(price===0)zeroPrice++;else if(price<0)invalidPrice++}if(!String(row.price??'').trim())missingPrice++}
   const priceHint=file.rows.length?detectPriceUnit(samples):null;
