@@ -6,7 +6,7 @@ import { AGENT_PROMPT_TEMPLATES, AGENT_TOOLS, AGENT_TOOL_MODELS, agentCronTick, 
 import { automationTick, autoreplyLogs, autoreplyRun, basalamChatMessagesOverview, basalamChatsOverview, basalamOrders, digest, generateReply } from './automation.js';
 import { connectionStatus, loadConnections, saveConnections } from './connections.js';
 import { DASHBOARD, DASHBOARD_JS } from './dashboard.js';
-import { allProducts, clearFinishedJobs, createBackup, createJob, deleteJob, deleteProfile, enqueueDueProfiles, ensureSchema, findLearnedCategory, getJob, getProduct, getProfile, getState, importAutoreplyLog, importCategoryLearning, learnCategory, listCategoryLearning, listJobs, listProducts, listProfiles, profileStats, pruneFinishedJobs, reapStalledJobs, restoreBackup, retryJob, saveProfile, setState, updateJob, upsertProduct } from './db.js';
+import { allProducts, clearFinishedJobs, createBackup, createJob, deleteJob, deleteProfile, enqueueDueProfiles, ensureSchema, findLearnedCategory, getJob, getProduct, getProfile, getState, getTriedBasalamCategories, importAutoreplyLog, importCategoryLearning, learnCategory, listCategoryLearning, listJobs, listProducts, listProfiles, markBasalamCategoriesTried, profileStats, pruneFinishedJobs, reapStalledJobs, restoreBackup, retryJob, saveProfile, setState, updateJob, upsertProduct } from './db.js';
 import { configureEnv, type Env } from './env.js';
 import { bulkEdit, destinationBulkEdit, destinationCatalog, destinationCategories, destinationChangeStatus, destinationDelete, destinationOverview, destinationProduct, destinationUpdate, findDestinationDuplicates, photoFix, rebuildMap, recon, retire } from './maintenance.js';
 import { safeFetch, safeText, safeWooFetch } from './network.js';
@@ -30,7 +30,7 @@ app.use('*',async(c,next)=>{configureEnv(c.env);c.set('requestId',crypto.randomU
 app.use('*',async(c,next)=>c.req.path==='/visual'?next():dashboardSecurity(c,next));
 app.onError((error,c)=>{console.error(JSON.stringify({requestId:c.get('requestId'),path:c.req.path,error:message(error)}));const text=message(error),status=/Unauthorized/.test(text)?401:/not found/i.test(text)?404:/Response exceeds|بیش از.*بایت|حداکثر.*مگابایت|too large/i.test(text)?413:/timeout|مهلت دریافت/i.test(text)?504:/invalid|required|empty|خالی|نامعتبر/i.test(text)?400:/HTTP|fetch|network|اتصال/i.test(text)?502:500;return c.json({ok:false,error:text,requestId:c.get('requestId')},status as any)});
 
-app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.21.0',time:new Date().toISOString()}));
+app.get('/health',c=>c.json({ok:true,app:'scraper4-cloudflare',runtime:'cloudflare-workers',databaseReady:Boolean(c.env.DB),databaseError:c.env.DB?null:'D1 binding DB is missing',workerInWeb:Boolean(c.env.JOBS),authenticationRequired:false,version:c.env.WORKER_VERSION||'1.22.0',time:new Date().toISOString()}));
 app.get('/',async c=>{await ensureSchema(c.env.DB);return c.html(DASHBOARD)});
 app.get('/dashboard.js',c=>c.body(DASHBOARD_JS,200,{'content-type':'application/javascript; charset=utf-8','cache-control':'no-store'}));
 app.get('/assets/fonts/:file',async c=>{const file=c.req.param('file'),css=file.match(/^([a-z]+)\.css$/i),woff=file.match(/^([a-z]+)-(\d+)\.woff2$/i);if(css)return fontStylesheet(css[1]);return woff?fontFile(woff[1],woff[2]):c.notFound()});
@@ -42,7 +42,7 @@ app.get('/api/status',async c=>{const connections=await loadConnections();return
 app.get('/api/selftest',async c=>c.json(await runSelftest()));
 app.get('/api/debug',async c=>c.json(await runDiagnostics()));
 app.get('/api/parity',c=>c.json({ok:true,total:PHP_MENU_CAPABILITIES.length,capabilities:PHP_MENU_CAPABILITIES,dispatcherAudit:{reference:'scraper4.php v9.80',total:178,get:150,post:28,mapped:178,missing:0,artifact:'parity-manifest.json'}}));
-app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.21.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
+app.get('/api/version',c=>c.json({ok:true,version:c.env.WORKER_VERSION||'1.22.0',runtime:'cloudflare-workers',deployment:'wrangler versions deploy / wrangler rollback'}));
 app.get('/api/connections',async c=>c.json({ok:true,connections:await loadConnections(true)}));
 app.post('/api/connections',async c=>c.json({ok:true,connections:await saveConnections(await c.req.json())}));
 app.get('/api/ai/providers',async c=>c.json({ok:true,providers:await aiProviders(),leaderboard:await getLeaderboard()}));
@@ -130,6 +130,9 @@ app.post('/api/destination/:target/dedup-runs/reset',async c=>{validDestination(
 app.get('/api/destination/:target/product/:id',async c=>c.json({ok:true,product:await destinationProduct(validDestination(c.req.param('target')),Number(c.req.param('id')),c.req.query('shop')||'')}));
 app.post('/api/destination/:target/bulk',async c=>{const target=validDestination(c.req.param('target')),b=await jsonBody(c);if(Array.isArray(b.ids)&&b.ids.length>20)return c.json({ok:false,error:'در هر نوبت حداکثر ۲۰ محصول قابل ویرایش است.'},400);return c.json(await destinationBulkEdit(target,b,b.confirm==='APPLY'))});
 app.post('/api/destination/basalam/category/suggest',async c=>{const b=await jsonBody(c),title=String(b.title||'').trim(),mode=String(b.mode||'learned');if(!title)return c.json({ok:false,error:'عنوان محصول خالی است.'},400);if(mode==='learned')return c.json({ok:true,mode,result:await findLearnedCategory(title,Number(b.maxWords)||5)});if(mode!=='ai')return c.json({ok:false,error:'روش پیشنهاد دسته‌بندی نامعتبر است.'},400);const categories=(await destinationCategories(Boolean(b.refreshCategories))).items,result=await suggestCategoryWithModel(title,String(b.modelKey||''),categories);return c.json({mode,categories:categories.length,...result})});
+// Tried-category memory for the bulk Basalam category fix (avoids repeating failed suggestions).
+app.get('/api/destination/basalam/category-tried',async c=>{const shopId=String(c.req.query('shopId')||''),id=Number(c.req.query('id'));return c.json({ok:true,tried:await getTriedBasalamCategories(shopId,id)})});
+app.post('/api/destination/basalam/category-tried',async c=>{const b=await jsonBody(c);return c.json({ok:true,tried:await markBasalamCategoriesTried(String(b.shopId||''),Number(b.id),Array.isArray(b.ids)?b.ids:[])})});
 app.post('/api/destination/basalam/category-runs',async c=>{const started=await startAllUnapprovedCategoryRun((promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise));return c.json({ok:true,...started},started.existing?200:202)});
 app.get('/api/destination/basalam/category-runs/current',async c=>c.json({ok:true,run:await getPublicBackgroundRun('category-all')}));
 app.post('/api/destination/basalam/category-runs/control',async c=>{const b=await jsonBody(c),action=String(b.action)==='resume'?'resume':'stop';return c.json({ok:true,run:await controlBackgroundRun('category-all',action,(promise:Promise<unknown>)=>c.executionCtx.waitUntil(promise))})});

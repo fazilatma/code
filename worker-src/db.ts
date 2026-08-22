@@ -145,6 +145,18 @@ export async function addAutoreplyLog(row:{chatId:number;customer:string;input:s
 export async function importAutoreplyLog(raw:any):Promise<number>{if(!Array.isArray(raw))return 0;let count=0;for(const row of raw.slice(-5000)){await run('INSERT INTO autoreply_log(chat_id,customer,input_text,output_text,source,created_at) VALUES(?,?,?,?,?,?)',[Number(row.chat_id||0)||null,String(row.customer||row.who||''),String(row.input_text||row.in||''),String(row.output_text||row.out||''),String(row.source||row.rule||''),row.created_at||row.at?new Date(row.created_at||Number(row.at)*1000).toISOString():now()]);count++}return count;}
 export async function listAutoreplyLog(limit=100):Promise<any[]>{return rows('SELECT * FROM autoreply_log ORDER BY created_at DESC LIMIT ?',[limit]);}
 
+// ─── Basalam category bulk-fix: tried-category memory ─────────────────────────
+export async function getTriedBasalamCategories(shopId:string,id:number):Promise<number[]>{
+  const data=await getState<Record<string,number[]>>('basalam_tried_categories_v1',{});
+  return Array.isArray(data[`${shopId}:${id}`])?data[`${shopId}:${id}`]:[];
+}
+export async function markBasalamCategoriesTried(shopId:string,id:number,ids:Array<number|string>):Promise<number[]>{
+  const data=await getState<Record<string,number[]>>('basalam_tried_categories_v1',{}),key=`${shopId}:${id}`,set=new Set(Array.isArray(data[key])?data[key]:[]);
+  for(const raw of ids||[]){const n=Number(raw);if(Number.isInteger(n)&&n>0)set.add(n)}
+  data[key]=[...set].slice(-50);
+  await setState('basalam_tried_categories_v1',data);
+  return data[key];
+}
 export async function getState<T>(key:string,fallback:T):Promise<T>{const row=await statement('SELECT value FROM app_state WHERE key=?',[key]).first<{value:string}>();return row?json(row.value,fallback):fallback;}
 export async function setState(key:string,value:unknown):Promise<void>{await run(`INSERT INTO app_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,[key,JSON.stringify(value),now()]);}
 export async function deleteState(key:string):Promise<void>{await run('DELETE FROM app_state WHERE key=?',[key]);}

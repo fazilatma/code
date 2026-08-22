@@ -1,4 +1,4 @@
-import { deleteState, getState, setState } from './db.js';
+import { deleteState, getState, getTriedBasalamCategories, markBasalamCategoriesTried, setState } from './db.js';
 import { getEnv } from './env.js';
 import { getLastAiTestResults, isChatCompatibleAiModel, isRetryableAiResult, nextAiTestBatch, suggestCategoryWithModel, testModelBatch } from './ai.js';
 import { loadConnections } from './connections.js';
@@ -11,7 +11,7 @@ export type BackgroundOutcome={outcome:'complete'|'continue'|'ignored';delaySeco
 type RunStatus='queued'|'running'|'paused'|'done'|'failed';
 type BaseRun={id:string;kind:'ai-test'|'category-all'|'dedup';status:RunStatus;phase:string;stopRequested:boolean;createdAt:string;updatedAt:string;startedAt:string|null;finishedAt:string|null;attempts:number;error:string|null};
 type AiTestRun=BaseRun&{kind:'ai-test';prompt:string;categoryTitle:string;onlyCandidates:boolean;delayMs:number;cursor:number;result:any;skipNext?:boolean;currentStartedAt?:string|null;currentKey?:string|null;retryJobs?:{key:string;left:number}[]};
-type CategoryProduct={id:number;shopId:string;title:string};
+type CategoryProduct={id:number;shopId:string;title:string;categoryId?:number};
 type CategoryRunItem={id:number;shopId:string;title:string;ok:boolean;categoryId?:number;categoryName?:string;source?:string;confidence?:number;error?:string};
 type CategoryRun=BaseRun&{kind:'category-all';modelKeys:string[];page:number;totalPages:number;products:CategoryProduct[];cursor:number;total:number;processed:number;changed:number;failed:number;items:CategoryRunItem[]};
 type DedupTarget='woo'|'basalam';
@@ -198,19 +198,39 @@ function compactCategoryItem(row:any):CategoryRunItem{return{id:Number(row.id),s
 function appendCategoryItem(run:CategoryRun,item:CategoryRunItem){run.items.push(compactCategoryItem(item));if(run.items.length>300)run.items=run.items.slice(-300)}
 async function listCategoryProducts(run:CategoryRun):Promise<BackgroundOutcome>{
   const data:any=await destinationCatalog('basalam',{page:run.page,perPage:100,status:'3567',shopId:'all'}),seen=new Set(run.products.map(row=>`${row.shopId}:${row.id}`));
-  for(const raw of data.products||[]){const row={id:Number(raw.id),shopId:String(raw.shopId||''),title:String(raw.title||raw.name||'').trim()},key=`${row.shopId}:${row.id}`;if(row.id>0&&row.title&&!seen.has(key)){seen.add(key);run.products.push(row)}}
+  for(const raw of data.products||[]){const row={id:Number(raw.id),shopId:String(raw.shopId||''),title:String(raw.title||raw.name||'').trim(),categoryId:Number(raw.categoryId||raw.category_id||raw.raw?.category_id||0)||undefined},key=`${row.shopId}:${row.id}`;if(row.id>0&&row.title&&!seen.has(key)){seen.add(key);run.products.push(row)}}
   run.totalPages=Math.max(run.totalPages,Number(data.totalPages)||1);run.total=Math.max(Number(data.total)||0,run.products.length);run.attempts=0;
   if(run.page<run.totalPages){run.page++;run.status='queued';run.phase='listing'}else{run.total=run.products.length;run.status='queued';run.phase='categorizing'}
   await writeRun(run);return{outcome:'continue',delaySeconds:1};
 }
 async function categorizeOne(run:CategoryRun):Promise<BackgroundOutcome>{
   if(run.cursor>=run.products.length){run.status='done';run.phase='finished';run.finishedAt=now();await writeRun(run);return{outcome:'complete'}}
-  const product=run.products[run.cursor],categories=(await destinationCategories()).items,suggestions=await Promise.all(run.modelKeys.map(async key=>{try{return await suggestCategoryWithModel(product.title,key,categories)}catch(error){return{ok:false,key,error:error instanceof Error?error.message:String(error)}}})),valid=suggestions.filter((row:any)=>row.ok&&Number(row.categoryId)>0),votes=new Map<number,{count:number;row:any}>();
-  for(const row of valid){const id=Number(row.categoryId),vote=votes.get(id)||{count:0,row};vote.count++;votes.set(id,vote)}
+  const product=run.products[run.cursor],categories=(await destinationCategories()).items,currentCategory=Number(product.categoryId)||0,tried=new Set(await getTriedBasalamCategories(product.shopId,product.id));
+  // Sequential voting with early stop: models answer one by one; as soon as a category
+  // reaches the majority threshold we stop asking the remaining models.
+  const modelKeys=run.modelKeys,threshold=Math.floor(modelKeys.length/2)+1,votes=new Map<number,{count:number;row:any}>(),triedHits:number[]=[];
+  let responded=0;
+  for(const key of modelKeys){
+    responded++;
+    let suggestion:any;
+    try{suggestion=await suggestCategoryWithModel(product.title,key,categories)}catch(error){suggestion={ok:false,key,error:error instanceof Error?error.message:String(error)}}
+    if(!suggestion?.ok)continue;
+    const id=Number(suggestion.categoryId);
+    if(!(Number.isInteger(id)&&id>0))continue;
+    if(tried.has(id)){triedHits.push(id);continue}
+    const vote=votes.get(id)||{count:0,row:suggestion};vote.count++;votes.set(id,vote);
+    if(vote.count>=threshold)break;
+  }
   const winner=[...votes.values()].sort((a,b)=>b.count-a.count)[0];
-  if(winner){
-    try{const source=`هوش مصنوعی سرورساید: ${winner.count} از ${valid.length} رأی`;await applyBasalamCategory(product.id,product.shopId,Number(winner.row.categoryId),product.title,String(winner.row.categoryName||''),source);run.changed++;appendCategoryItem(run,{...product,ok:true,categoryId:Number(winner.row.categoryId),categoryName:String(winner.row.categoryName||''),source,confidence:valid.length?Math.round(winner.count/valid.length*100):0})}
-    catch(error){run.failed++;appendCategoryItem(run,{...product,ok:false,error:error instanceof Error?error.message:String(error)})}
+  if(winner&&currentCategory&&Number(winner.row.categoryId)===currentCategory){
+    // The model's majority already matches the product's stored category: nothing to do.
+    run.processed++;appendCategoryItem(run,{...product,ok:true,categoryId:currentCategory,categoryName:String(winner.row.categoryName||''),source:`دستهٔ فعلی تأیید شد (${winner.count} از ${responded} مدل)`,confidence:responded?Math.round(winner.count/responded*100):0,error:undefined});
+  }else if(winner){
+    try{const source=`هوش مصنوعی سرورساید: ${winner.count} از ${responded} مدل`;await applyBasalamCategory(product.id,product.shopId,Number(winner.row.categoryId),product.title,String(winner.row.categoryName||''),source);run.changed++;appendCategoryItem(run,{...product,ok:true,categoryId:Number(winner.row.categoryId),categoryName:String(winner.row.categoryName||''),source,confidence:responded?Math.round(winner.count/responded*100):0})}
+    catch(error){await markBasalamCategoriesTried(product.shopId,product.id,[Number(winner.row.categoryId)]);run.failed++;appendCategoryItem(run,{...product,ok:false,error:(error instanceof Error?error.message:String(error))+' (دستهٔ پیشنهادی برای این محصول ثبت شد تا دوباره امتحان نشود.)'})}
+  }else if(triedHits.length){
+    // Every suggestion the models made for this product was already tried before.
+    run.failed++;appendCategoryItem(run,{...product,ok:false,error:'همهٔ دسته‌بندی‌های پیشنهادی مدل‌ها قبلاً برای این محصول امتحان شده‌اند و نتیجهٔ قطعی نداشتند؛ در اجرای بعدی از آنها صرف‌نظر می‌شود.'});
   }else{run.failed++;appendCategoryItem(run,{...product,ok:false,error:'هیچ مدل فعال، شناسهٔ دسته‌بندی معتبر برنگرداند.'})}
   run.cursor++;run.processed++;run.attempts=0;
   const latest=await readRun('category-all',run.id);if(latest?.stopRequested){run.stopRequested=true;run.status='paused';run.phase='paused'}else if(run.cursor>=run.products.length){run.status='done';run.phase='finished';run.finishedAt=now()}else{run.status='queued';run.phase='categorizing'}

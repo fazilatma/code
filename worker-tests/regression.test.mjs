@@ -149,6 +149,22 @@ test('multi-key providers: keys are saved, exported and used per model suffix in
   }finally{globalThis.fetch=originalFetch}
 });
 
+test('cloudflareModelIds never emits the invalid meta-llama org path',async()=>{
+  const source=await readFile(new URL('../worker-src/ai.ts',import.meta.url),'utf8');
+  assert.doesNotMatch(source,/\/meta-llama\/\$\{after\}/,'the wrong @cf/meta-llama/ fallback is gone');
+  assert.match(source,/meta-llama\/\'\).*@cf\/meta\/\$\{after/,'a meta-llama/ user input is rewritten to the valid @cf/meta/ path');
+  assert.match(source,/label:'text',value:\{text:prompt/,'image-to-text models get a text candidate payload');
+});
+test('tried-category memory endpoints store and return per-product categories',async()=>{
+  const db=new MemoryD1();
+  const marked=await call(db,'/api/destination/basalam/category-tried',{method:'POST',body:JSON.stringify({shopId:'v1',id:42,ids:[10,20]})}).then(r=>r.json());
+  assert.equal(marked.ok,true);assert.deepEqual(marked.tried,[10,20]);
+  const got=await call(db,'/api/destination/basalam/category-tried?shopId=v1&id=42').then(r=>r.json());
+  assert.deepEqual(got.tried,[10,20]);
+  const other=await call(db,'/api/destination/basalam/category-tried?shopId=v1&id=99').then(r=>r.json());
+  assert.deepEqual(other.tried,[]);
+});
+
 test('AI chat lists capability-filtered models and returns conversation replies',async()=>{
   const db=new MemoryD1();
   await call(db,'/api/connections',jsonInit({ai:{providers:[{id:'chat-pro',name:'Chat Provider',baseUrl:'https://chat.example/v1',apiKey:'k',models:['m-chat','m-reason'],reasoningModels:['m-reason'],enabled:true},{id:'mistral',name:'Mistral',baseUrl:'https://api.mistral.ai/v1',apiKey:'k',models:['mistral-ocr-latest'],enabled:true}],candidates:[],master:'',model:'',network:{mode:'direct'}}}));

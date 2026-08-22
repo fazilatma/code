@@ -35,6 +35,8 @@ const stubs={
     export async function deleteAgentPrompt(){}
     export async function deleteAgentRunsForPrompt(){}
     export async function touchAgentPromptLastRun(){}
+    export async function getTriedBasalamCategories(){return[]}
+    export async function markBasalamCategoriesTried(){return[]}
     export async function listProducts(){return{products:[],total:0}}
     export async function listJobs(){return[]}
     export async function listProfiles(){return[]}

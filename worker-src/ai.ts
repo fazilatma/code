@@ -191,7 +191,7 @@ async function cloudflareCall(provider:Provider,model:string,prompt:string,netwo
   const reasoning=isReasoningAiModel(provider,model),maxTokens=reasoning?1600:400,models=cloudflareModelIds(model),base=`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/`,messages=[{role:'user',content:prompt}],attempts:AiAttempt[]=[];
   let last:RequestResult|undefined,lastEndpoint=base+models[0];
   for(const modelId of models){
-    const endpoint=base+modelId.replace(/^\/+/,''),bodies:Array<{label:string;value:any}>=[{label:'prompt',value:{prompt,max_tokens:maxTokens}},{label:'messages',value:{messages,max_tokens:maxTokens}}];
+    const endpoint=base+modelId.replace(/^\/+/,''),bodies:Array<{label:string;value:any}>=[{label:'prompt',value:{prompt,max_tokens:maxTokens}},{label:'messages',value:{messages,max_tokens:maxTokens}},{label:'text',value:{text:prompt,max_tokens:maxTokens}}];
     for(const candidate of bodies){
       const result=await requestAi(endpoint,candidate.value,provider,network,timeoutMs);last=result;lastEndpoint=endpoint;
       const error=result.networkError?safeError(result.networkError,endpoint,provider.apiKey):result.response?.ok?'':aiErrorMessage(result.body)||result.response?.statusText||'Cloudflare AI error';
@@ -209,7 +209,8 @@ async function cloudflareCall(provider:Provider,model:string,prompt:string,netwo
   const latencyMs=Date.now()-started,cloudflare={mode:'failed',triedModels:models,attempts};
   if(last?.networkError){const reason=safeError(last.networkError,lastEndpoint,provider.apiKey);throw new AiResponseError(reason,{ok:false,phase:'network',provider:provider.id,providerName:provider.name,model,prompt,endpoint:safeEndpoint(lastEndpoint),latencyMs,cloudflare,raw:{error:reason}})}
   const response=last?.response,status=response?.status||0,body=last?.body,message=aiErrorMessage(body)||(models.length>1?`مدل «${models[0]}» یافت نشد؛ مسیر org دار «${models[1]}» نیز امتحان شد.`:'پاسخی از Cloudflare AI دریافت نشد.');
-  throw new AiResponseError(`HTTP ${status}: ${message}`,{...failureDetail(provider,model,prompt,safeEndpoint(lastEndpoint),latencyMs,response,body),cloudflare});
+const guide=/no such model|not found|bad input|oneof|one of/i.test(message)?' این مدل در کاتالوگ فعلی Workers AI وجود ندارد (احتمالاً بازنشسته شده یا شناسه اشتباه است). از AI ← راهنما ← کاتالوگ کامل مدل‌های Workers AI یک مدل فعال انتخاب کنید.':' برای مدل‌های تصویری، ورودی «text» نیز امتحان شد.';
+  throw new AiResponseError(`HTTP ${status}: ${message}${guide}`,{...failureDetail(provider,model,prompt,safeEndpoint(lastEndpoint),latencyMs,response,body),cloudflare});
 }
 
 function isCloudflareNative(raw:string):boolean{return /\/accounts\/[^/]+\/ai\/run(?:\/|$)/i.test(unmarkdownUrl(raw))}
@@ -229,14 +230,16 @@ function cloudflareModelIds(raw:string):string[]{
   const model=String(raw||'').trim().replace(/^\/+/,''),out=[model],after=model.replace(/^@cf\//i,'');
   if(after&&after.indexOf('/')<0){
     const rules:Array<[string,string]>=[['gemma-sea-lion','aisingapore'],['mistral-small','mistralai'],['llama-guard','meta'],['gpt-oss','openai'],['deepseek','deepseek-ai'],['nemotron','nvidia'],['moondream','moondream'],['embeddinggemma','google'],['hermes','nousresearch'],['uform','unum-cloud'],['plamo','pfnet'],['granite','ibm-granite'],['kimi','moonshotai'],['gemma','google'],['mistral','mistral'],['glm','zai-org'],['phi','microsoft'],['bge','baai'],['llama','meta'],['qwen','qwen'],['qwq','qwen'],['sqlcoder','defog'],['florence','microsoft'],['llava','llava-hf']];
-    const rule=rules.find(([prefix])=>after.toLowerCase().startsWith(prefix));if(rule)out.push(`@cf/${rule[1]}/${after}`);if(after.toLowerCase().startsWith('llama'))out.push(`@cf/meta-llama/${after}`);
+    const rule=rules.find(([prefix])=>after.toLowerCase().startsWith(prefix));if(rule)out.push(`@cf/${rule[1]}/${after}`);
+    // Meta's hosted ids use `meta/llama-*`, never `meta-llama/*`; rewrite a user-typed meta-llama/ prefix.
+    if(after.startsWith('meta-llama/'))out.push(`@cf/meta/${after.slice('meta-llama/'.length)}`);
   }
   return [...new Set(out.filter(Boolean))];
 }
 function canonicalAiModel(model:string){return String(model||'').trim().replace(/^~+/,'')}
 function isOpenRouter(provider:Pick<Provider,'id'|'name'|'baseUrl'>,endpoint=''){return provider.id==='openrouter'||/openrouter/i.test(String(provider.name||''))||/openrouter\.ai/i.test(String(provider.baseUrl||endpoint||''))}
 function aiRequestHeaders(provider:Provider,endpoint:string,method:'POST'|'GET'='POST'):Record<string,string>{
-  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.21.0'};
+  const headers:Record<string,string>={authorization:`Bearer ${provider.apiKey}`,accept:'application/json','user-agent':'Scraper4/1.22.0'};
   if(method==='POST')headers['content-type']='application/json';
   if(isOpenRouter(provider,endpoint)){headers['http-referer']='https://scraper4.workers.dev';headers.referer='https://scraper4.workers.dev';headers['x-title']='Scraper 4'}
   return headers;
