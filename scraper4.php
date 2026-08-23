@@ -93,6 +93,23 @@ const CATFIX_RESULT_FILE   = __DIR__ . '/catfix_result.json';
 const CATFIX_STOP_FILE     = __DIR__ . '/catfix_stop.json';
 const CATFIX_LOCK_FILE     = __DIR__ . '/catfix.lock';
 const CATFIX_MAX_PAGES     = 40;   // صفحاتِ فهرستِ محصولاتِ ردشده
+
+/* v10.24 (۳۷الف): اولویتِ کارهای پس‌زمینه.
+ *
+ *  تا اینجا فقط «کارهای زمان‌بندی‌شده» (jobs) اولویت داشتند — ترتیبشان در
+ *  auto_jobs.json معنا داشت چون autoTick از بالا به پایین می‌رفت. ولی ده‌
+ *  دوازده کارِ پس‌زمینهٔ اصلی (ارسال، استخراج، حذفِ تکراری، اصلاحِ دسته…)
+ *  هیچ ترتیبی نداشتند: همیشه به ترتیبِ ثابتِ رجیستری فهرست می‌شدند و اگر
+ *  دو کار همزمان نوبتِ ادامه/بازیابی داشتند، هیچ‌کس نمی‌گفت کدام مهم‌تر است.
+ *
+ *  حالا هر کار یک عددِ اولویت دارد که کاربر با ▲▼⤒ جابه‌جایش می‌کند و در
+ *  این فایل می‌نشیند. این ترتیب دو جای واقعی اثر دارد، نه فقط ظاهر:
+ *    ۱) فهرستِ مدیر وظیفه به همین ترتیب مرتب می‌شود.
+ *    ۲) نگهبانِ کران و «ادامهٔ همه» کارهای رهاشده را به همین ترتیب
+ *       برمی‌گردانند، پس کارِ مهم‌ترِ کاربر اول جان می‌گیرد.
+ */
+const TASKS_ORDER_FILE = __DIR__ . '/tasks_order.json';
+
 // v10.04 (۱۸): انتقالِ رابطِ «ایجنتِ مدیریت محصولات» از تبِ ارسال به تبِ تازهٔ «🤖 ایجنت» در بخشِ هوش مصنوعی
 // v10.03 (۱۷): محیطِ آزمایشیِ «ایجنتِ مدیریت محصولات» — مدل با فراخوانیِ ابزار (tool calling)
 const AGENT_PROGRESS_FILE = __DIR__ . '/agent_progress.json';
@@ -155,7 +172,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.23';
+const APP_VERSION = '10.24';
 const APP_VERSION_DATE = '1405/06/01';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -12309,6 +12326,33 @@ function cronMarkRun(string $key, string $status = 'running'): void {
     saveSyncState($st);
 }
 
+/**
+ * v10.24 (۳۷الف): ترتیبِ بازیابیِ صف‌های گیرکرده، بر پایهٔ اولویتِ کاربر.
+ *
+ * عمداً مستقیم فایلِ ترتیب را می‌خواند و به tasksOrder() تکیه نمی‌کند:
+ * نگهبانِ کران در خطِ ~۱۳۶۸۰ اجرا می‌شود، ولی tasksRegistry()/tasksOrder()
+ * پایین‌ترِ فایل تعریف می‌شوند و در آن لحظه هنوز وجود ندارند
+ * (Call to undefined function). این تابع فقط دو کلیدِ صف را می‌شناسد و
+ * هر چیزِ دیگری در فایل را نادیده می‌گیرد، پس به رجیستری نیاز ندارد.
+ */
+function cronWatchdogQueueOrder(): array {
+    $def = ['bsl', 'woo'];
+    if (!is_file(TASKS_ORDER_FILE)) return $def;
+    $d = json_decode((string)@file_get_contents(TASKS_ORDER_FILE), true);
+    $saved = is_array($d['order'] ?? null) ? $d['order'] : [];
+    if (!$saved) return $def;
+    /* کلیدهای رجیستری «bsl_send»/«woo_send» هستند؛ نگهبان با «bsl»/«woo»
+       کار می‌کند، پس نگاشت می‌شود. */
+    $map = ['bsl_send' => 'bsl', 'woo_send' => 'woo'];
+    $out = [];
+    foreach ($saved as $k) {
+        $q = $map[(string)$k] ?? '';
+        if ($q !== '' && !in_array($q, $out, true)) $out[] = $q;
+    }
+    foreach ($def as $q) if (!in_array($q, $out, true)) $out[] = $q;
+    return $out;
+}
+
 function cronWatchdogs(array $cn): array {
     $results = ['watchdog' => []];
 // v8.33: مرحلهٔ نگهبان — اگر ارسالی وسط راه گیر کرده، ادامه‌اش بده.
@@ -12317,7 +12361,12 @@ function cronWatchdogs(array $cn): array {
     $stallWake = !isset($cn['stall_watchdog']) || !empty($cn['stall_watchdog']);
     if ($stallWake) {
         $results['watchdog'] = [];
-        foreach (['bsl', 'woo'] as $wq) {
+        /* v10.24 (۳۷الف): ترتیبِ بازیابی دیگر ثابتِ ['bsl','woo'] نیست.
+           این تنها جایی است که اولویتِ چیده‌شدهٔ کاربر اثرِ خودکار دارد:
+           وقتی هر دو صف با هم گیر کرده‌اند، آنکه بالاترِ فهرستِ مدیر وظیفه
+           است زودتر جان می‌گیرد — روی هاستِ اشتراکی که یک نوبتِ کران فقط
+           برای یکی‌شان وقت دارد، این تفاوتِ واقعی می‌سازد. */
+        foreach (cronWatchdogQueueOrder() as $wq) {
             $w = queueStallRecover($wq, $stallCfg);
             if (!empty($w['stalled'])) {
                 $results['watchdog'][] = $w;
@@ -15349,6 +15398,71 @@ function tasksState(array $p, int $now): string {
     return 'idle';
 }
 
+/* ---------------- v10.24 (۳۷الف): اولویتِ کارهای پس‌زمینه ---------------- */
+
+/**
+ * ترتیبِ ذخیره‌شده را می‌خواند و با رجیستریِ فعلی آشتی می‌دهد.
+ *
+ * دو حالتِ لبه که حتماً باید درست کار کنند:
+ *   • کارِ تازه‌ای به رجیستری اضافه شده که در فایل نیست ⇒ ته صف می‌رود
+ *     (نه اینکه ناپدید شود).
+ *   • کاری از رجیستری حذف شده ولی هنوز در فایل هست ⇒ نادیده گرفته می‌شود
+ *     (نه اینکه یک ردیفِ ارواح بسازد).
+ * خروجی همیشه دقیقاً همان کلیدهای رجیستری است، فقط مرتب‌شده.
+ */
+function tasksOrder(?array $reg = null): array {
+    if ($reg === null) $reg = tasksRegistry();
+    $keys  = array_keys($reg);
+    $saved = [];
+    if (is_file(TASKS_ORDER_FILE)) {
+        $d = json_decode((string)@file_get_contents(TASKS_ORDER_FILE), true);
+        if (is_array($d['order'] ?? null)) $saved = $d['order'];
+    }
+    $out = [];
+    foreach ($saved as $k) {
+        $k = (string)$k;
+        if (isset($reg[$k]) && !in_array($k, $out, true)) $out[] = $k;
+    }
+    foreach ($keys as $k) if (!in_array($k, $out, true)) $out[] = $k;
+    return $out;
+}
+
+/** ترتیبِ تازه را می‌نویسد (فقط کلیدهای معتبر) */
+function tasksOrderSave(array $order): bool {
+    $reg = tasksRegistry();
+    $clean = [];
+    foreach ($order as $k) {
+        $k = (string)$k;
+        if (isset($reg[$k]) && !in_array($k, $clean, true)) $clean[] = $k;
+    }
+    foreach (array_keys($reg) as $k) if (!in_array($k, $clean, true)) $clean[] = $k;
+    return (bool)@file_put_contents(TASKS_ORDER_FILE,
+        json_encode(['order' => $clean, 'at' => time()], JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/**
+ * یک کار را در صف جابه‌جا می‌کند. خروجی: [ok, from, to, order]
+ * $dir: up | down | top | bottom
+ */
+function tasksOrderMove(string $key, string $dir): array {
+    $order = tasksOrder();
+    $idx = array_search($key, $order, true);
+    if ($idx === false) return ['ok' => false, 'error' => 'کارِ ناشناخته'];
+    $n = count($order);
+    $to = $idx;
+    if     ($dir === 'up')     $to = max(0, $idx - 1);
+    elseif ($dir === 'down')   $to = min($n - 1, $idx + 1);
+    elseif ($dir === 'top')    $to = 0;
+    elseif ($dir === 'bottom') $to = $n - 1;
+    else return ['ok' => false, 'error' => 'جهتِ نامعتبر'];
+    if ($to !== $idx) {
+        array_splice($order, $idx, 1);
+        array_splice($order, $to, 0, [$key]);
+        tasksOrderSave($order);
+    }
+    return ['ok' => true, 'from' => $idx, 'to' => $to, 'order' => $order];
+}
+
 /** یک ردیفِ آمادهٔ نمایش از روی رجیستری + فایلِ پیشرفت */
 function tasksBuildRow(string $key, array $def, int $now): array {
     $file = (string)$def['file'];
@@ -15398,14 +15512,71 @@ function tasksBuildRow(string $key, array $def, int $now): array {
     ];
 }
 
+/**
+ * v10.24 (۳۷ج): ادامه/شروعِ دوبارهٔ یک کار — منطقِ مشترکِ «تکی» و «همه».
+ *
+ * پیش از این، این منطق داخلِ خودِ اندپوینتِ ?tasks_resume نوشته شده بود.
+ * با آمدنِ «ادامهٔ همه» باید دو جا صدا زده می‌شد، و کپی‌کردنش یعنی دیر یا
+ * زود یکی از دو نسخه اصلاح شود و دیگری نه — مثلاً قفلِ یک کارِ تازه فقط
+ * در یکی از دو مسیر پاک شود.
+ */
+function tasksResumeOne(string $key): array {
+    $reg = tasksRegistry();
+    if (!isset($reg[$key])) return ['ok' => false, 'error' => 'کارِ ناشناخته'];
+    $def = $reg[$key];
+    $row = tasksBuildRow($key, $def, time());
+    if ($row['state'] === 'running')
+        return ['ok' => false, 'error' => 'این کار همین حالا در حال اجراست'];
+    $url = (string)$row['resume'];
+    if ($url === '')
+        return ['ok' => false, 'error' => 'برای این کار «ادامه» تعریف نشده — از تبِ خودش دوباره شروعش کنید'];
+
+    /* قفلِ جامانده و پیشرفتِ مرده کنار می‌روند، وگرنه شروعِ تازه پشتِ همان
+       قفل می‌ماند و کاربر پیامِ «در حال اجراست» می‌گیرد. */
+    $locks = ['dedup' => DEDUP_LOCK_FILE, 'agent' => AGENT_LOCK_FILE, 'catfix' => CATFIX_LOCK_FILE];
+    if ($row['state'] === 'stale') {
+        if (isset($locks[$key])) @unlink($locks[$key]);
+        @unlink((string)$def['file']);
+    }
+    /* سیگنالِ توقفِ جامانده هم برداشته می‌شود؛ وگرنه کارِ تازه در اولین
+       بررسی فوراً خودش را متوقف می‌کند. */
+    $stopMap = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
+                'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE,
+                'ai_test_stop' => AI_TEST_STOP_FILE, 'catfix_stop' => CATFIX_STOP_FILE];
+    $sf = $stopMap[(string)($def['stop'] ?? '')] ?? '';
+    if ($sf !== '') @unlink($sf);
+
+    $started = fireAndForget($url, 2500);
+    return ['ok' => true, 'resumed' => $key, 'url' => $url, 'dispatched' => $started];
+}
+
+/**
+ * v10.24 (۳۷الف): همهٔ ردیف‌ها، مرتب‌شده بر اساس اولویتِ کاربر.
+ *
+ *  یک جا ساخته می‌شود تا هر مصرف‌کننده‌ای (فهرستِ مدیر وظیفه، نگهبانِ کران،
+ *  «ادامهٔ همه») دقیقاً همان ترتیب را ببیند. اگر هرکدام خودش مرتب می‌کرد،
+ *  دیر یا زود دو جا از هم واگرا می‌شدند و کاربر می‌دید ترتیبی که چیده در
+ *  رفتارِ واقعی رعایت نمی‌شود.
+ */
+function tasksRowsOrdered(int $now): array {
+    $reg  = tasksRegistry();
+    $rows = [];
+    foreach (tasksOrder($reg) as $rank => $key) {
+        $row = tasksBuildRow($key, $reg[$key], $now);
+        $row['rank'] = $rank + 1;        // نمایشِ ۱-پایه
+        $rows[] = $row;
+    }
+    return $rows;
+}
+
 /** فهرستِ زندهٔ همهٔ کارها + کارهای زمان‌بندی‌شده در یک پاسخ.
  *  مدیر وظیفه فقط همین یک اندپوینت را poll می‌کند تا با باز بودنِ
  *  پنجره ده‌تا درخواستِ موازی روی هاستِ اشتراکی نریزد. */
 if (isset($_GET['tasks_list'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $now  = time();
-    $rows = [];
-    foreach (tasksRegistry() as $key => $def) $rows[] = tasksBuildRow($key, $def, $now);
+    /* v10.24 (۳۷الف): ترتیب دیگر ترتیبِ ثابتِ رجیستری نیست — اولویتِ کاربر است */
+    $rows = tasksRowsOrdered($now);
 
     /* کارهای زمان‌بندی‌شدهٔ ایجنت هم بخشی از «وظایفِ پس‌زمینه»اند، ولی
        جنسشان فرق دارد: تکرارشونده‌اند و اولویت/فاصله دارند. جدا برمی‌گردند
@@ -15456,38 +15627,52 @@ if (isset($_GET['tasks_stop'])) {
  */
 if (isset($_GET['tasks_resume'])) {
     header('Content-Type: application/json; charset=UTF-8');
-    $key = (string)($_GET['key'] ?? '');
-    $reg = tasksRegistry();
-    if (!isset($reg[$key])) { echo json_encode(['ok' => false, 'error' => 'کارِ ناشناخته'], JSON_UNESCAPED_UNICODE); exit; }
-    $def = $reg[$key];
-    $now = time();
-    $row = tasksBuildRow($key, $def, $now);
-    if ($row['state'] === 'running') {
-        echo json_encode(['ok' => false, 'error' => 'این کار همین حالا در حال اجراست'], JSON_UNESCAPED_UNICODE); exit;
-    }
-    $url = (string)$row['resume'];
-    if ($url === '') {
-        echo json_encode(['ok' => false,
-            'error' => 'برای این کار «ادامه» تعریف نشده — از تبِ خودش دوباره شروعش کنید'], JSON_UNESCAPED_UNICODE); exit;
-    }
-    /* قفلِ جامانده و پیشرفتِ مرده کنار می‌روند، وگرنه شروعِ تازه پشتِ همان
-       قفل می‌ماند و کاربر پیامِ «در حال اجراست» می‌گیرد. */
-    $locks = ['dedup' => DEDUP_LOCK_FILE, 'agent' => AGENT_LOCK_FILE, 'catfix' => CATFIX_LOCK_FILE];
-    if ($row['state'] === 'stale') {
-        if (isset($locks[$key])) @unlink($locks[$key]);
-        @unlink((string)$def['file']);
-    }
-    /* سیگنالِ توقفِ جامانده هم برداشته می‌شود؛ وگرنه کارِ تازه در اولین
-       بررسی فوراً خودش را متوقف می‌کند. */
-    $stopMap = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
-                'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE,
-                'ai_test_stop' => AI_TEST_STOP_FILE, 'catfix_stop' => CATFIX_STOP_FILE];
-    $sf = $stopMap[(string)($def['stop'] ?? '')] ?? '';
-    if ($sf !== '') @unlink($sf);
+    $res = tasksResumeOne((string)($_GET['key'] ?? ''));
+    echo json_encode($res, JSON_UNESCAPED_UNICODE);
+    exit;
+}
 
-    $started = fireAndForget($url, 2500);
-    echo json_encode(['ok' => true, 'resumed' => $key, 'url' => $url, 'dispatched' => $started],
-        JSON_UNESCAPED_UNICODE);
+/**
+ * v10.24 (۳۷ج): «ادامهٔ همهٔ کارهای گیرکرده» — با رعایتِ اولویت.
+ *
+ * وقتی هاست یک بار ری‌استارت می‌شود، معمولاً چند کار با هم می‌میرند. تا
+ * اینجا کاربر باید تک‌تک روی «▶ ادامه» می‌زد. حالا یک دکمه همه را برمی‌گرداند،
+ * و مهم‌تر: **به ترتیبِ اولویتی که خودش چیده** — چون روی هاستِ اشتراکی
+ * راه‌انداختنِ همزمانِ چند کارِ سنگین یعنی همه با هم کند شوند، پس بینشان
+ * فاصله می‌اندازیم و کارِ بالاترِ صف اول جان می‌گیرد.
+ */
+if (isset($_GET['tasks_resume_all'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $now  = time();
+    $only = (string)($_GET['only'] ?? 'stale');   // stale | stale_done
+    $rows = tasksRowsOrdered($now);
+    $done = []; $skipped = [];
+    foreach ($rows as $r) {
+        $st = (string)$r['state'];
+        $want = $only === 'stale_done' ? in_array($st, ['stale', 'done'], true) : ($st === 'stale');
+        if (!$want) continue;
+        if (empty($r['resumable'])) { $skipped[] = ['key' => $r['key'], 'why' => 'ادامه ندارد']; continue; }
+        $one = tasksResumeOne((string)$r['key']);
+        if (!empty($one['ok'])) $done[] = ['key' => $r['key'], 'title' => $r['title'], 'rank' => $r['rank']];
+        else $skipped[] = ['key' => $r['key'], 'why' => (string)($one['error'] ?? '')];
+        /* فاصله تا چند کارِ سنگین همزمان روی هاستِ اشتراکی نیفتند */
+        if (count($done) > 0) usleep(400000);
+    }
+    echo json_encode(['ok' => true, 'resumed' => $done, 'skipped' => $skipped,
+        'count' => count($done)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** v10.24 (۳۷الف): جابه‌جاییِ اولویتِ یک کارِ پس‌زمینه */
+if (isset($_GET['tasks_order'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $key = (string)($_GET['key'] ?? '');
+    $dir = (string)($_GET['dir'] ?? '');
+    if ($dir === 'reset') {
+        @unlink(TASKS_ORDER_FILE);
+        echo json_encode(['ok' => true, 'reset' => true, 'order' => tasksOrder()], JSON_UNESCAPED_UNICODE); exit;
+    }
+    echo json_encode(tasksOrderMove($key, $dir), JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -20799,6 +20984,92 @@ if (isset($_GET['selftest'])) {
     $add('10.23', 'نسخه و گزارشِ تغییرات به‌روز است',
          version_compare(APP_VERSION, '10.' . '23', '>=')
       && strpos($selfSrc, 'v:' . "'10.23'") !== false);
+
+    /* ---------- v10.24 (۳۷): اولویتِ کارهای پس‌زمینه + ادامهٔ همه ---------- */
+
+    $add('10.24', 'فایل و توابعِ ترتیبِ کارهای پس‌زمینه وجود دارند',
+         defined('TASKS_ORDER_FILE')
+      && function_exists('tasksOrder') && function_exists('tasksOrderSave')
+      && function_exists('tasksOrderMove') && function_exists('tasksRowsOrdered'));
+
+    /* مهم‌ترین قیدِ درستی: ترتیب هرچه باشد، مجموعهٔ کارها باید دقیقاً همان
+       کلیدهای رجیستری بماند — نه کارِ گم‌شده، نه ردیفِ ارواح. */
+    $ordK = tasksOrder();
+    $regK = array_keys(tasksRegistry());
+    sort($ordK); sort($regK);
+    $add('10.24', 'ترتیب با رجیستری آشتی می‌کند (بدون کارِ گم‌شده یا ارواح)',
+         $ordK === $regK && count($ordK) === count(array_unique($ordK)));
+
+    /* جابه‌جایی روی کارِ ناشناخته باید خطا بدهد، نه اینکه بی‌صدا چیزی بسازد */
+    $mvBad = tasksOrderMove('__nope__', 'up');
+    $add('10.24', 'جابه‌جاییِ کارِ ناشناخته یا جهتِ نامعتبر رد می‌شود',
+         empty($mvBad['ok'])
+      && empty(tasksOrderMove((string)(tasksOrder()[0] ?? ''), 'sideways')['ok']));
+
+    /* بالا بردنِ ردیفِ اول نباید از صف بیرونش بیندازد یا صف را کوتاه کند */
+    $ord0 = tasksOrder();
+    $mvTop = tasksOrderMove((string)($ord0[0] ?? ''), 'up');
+    $add('10.24', 'بالا بردنِ ردیفِ اول بی‌اثر است و صف را خراب نمی‌کند',
+         !empty($mvTop['ok']) && (int)$mvTop['to'] === 0
+      && count($mvTop['order'] ?? []) === count($ord0));
+
+    $add('10.24', 'اندپوینت‌های ترتیب و ادامهٔ همه ثبت شده‌اند',
+         strpos($selfSrc, "isset(\$_GET['tasks_order'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['tasks_resume_all'])") !== false
+      && strpos($selfSrc, "\$dir === 'reset'") !== false);
+
+    $add('10.24', 'فهرستِ مدیر وظیفه از ترتیبِ اولویت استفاده می‌کند',
+         strpos($selfSrc, 'tasksRowsOrdered($now)') !== false
+      && strpos($selfSrc, "\$row['rank'] = \$rank + 1") !== false);
+
+    /* اثرِ واقعیِ اولویت: نگهبانِ کران دیگر ترتیبِ ثابت ندارد */
+    $add('10.24', 'نگهبانِ کران صف‌ها را به ترتیبِ اولویت بازیابی می‌کند',
+         function_exists('cronWatchdogQueueOrder')
+      && strpos($selfSrc, 'foreach (cronWatchdogQueueOrder() as $wq)') !== false
+      && strpos($selfSrc, "foreach (['bsl', 'woo'] as \$wq)") === false);
+
+    /* نگاشتِ کلیدِ رجیستری به کلیدِ صف باید هر دو صف را برگرداند و
+       بدونِ فایلِ ترتیب هم پیش‌فرضِ سالم بدهد */
+    $wq = cronWatchdogQueueOrder();
+    sort($wq);
+    $add('10.24', 'ترتیبِ نگهبان همیشه دقیقاً دو صفِ bsl و woo است',
+         $wq === ['bsl', 'woo']);
+
+    /* هر دو مسیرِ ادامه (تکی و همه) باید به همان یک تابع بروند. رشته‌ها
+       تکه‌تکه ساخته می‌شوند وگرنه متنِ خودِ همین ادعا هم شمرده می‌شود. */
+    $rsFn = 'tasksResume' . 'One(';
+    $add('10.24', 'منطقِ ادامه یک تابعِ مشترک است، نه دو نسخهٔ کپی‌شده',
+         function_exists('tasksResumeOne')
+      && substr_count($selfSrc, $rsFn) === 3
+      && strpos($selfSrc, '$res = ' . $rsFn . "(string)(\$_GET['key'] ?? ''));") !== false
+      && strpos($selfSrc, '$one = ' . $rsFn . "(string)\$r['key']);") !== false);
+
+    $add('10.24', 'ادامهٔ همه فقط کارهای رهاشدهٔ قابلِ ادامه را می‌گیرد و فاصله می‌اندازد',
+         strpos($selfSrc, "\$only === 'stale_done'") !== false
+      && strpos($selfSrc, "if (empty(\$r['resumable']))") !== false
+      && strpos($selfSrc, 'usleep(400000)') !== false);
+
+    $add('10.24', 'کارتِ مدیر وظیفه دکمه‌های اولویت و شمارهٔ رتبه دارد',
+         strpos($selfSrc, 'function tmOrder(key,dir)') !== false
+      && strpos($selfSrc, 'function tmOrderReset()') !== false
+      && strpos($selfSrc, 'class="tmord"') !== false
+      && strpos($selfSrc, 'class="tmrank"') !== false);
+
+    /* همان تلهٔ ۱۰.۲۳: کارت خودش onclick دارد، پس هر دکمهٔ داخلش باید
+       جلوی انتشارِ رویداد را بگیرد وگرنه ▲ کاربر را از پنجره بیرون می‌برد */
+    $stopOrd = 'event.stopPropagation();tm' . 'Order(';
+    $add('10.24', 'دکمه‌های اولویت رویداد را متوقف می‌کنند (کارت کلیک‌پذیر است)',
+         substr_count($selfSrc, $stopOrd) === 3       // ▲ ▼ و کلیک روی خودِ شمارهٔ رتبه
+      && substr_count($selfSrc, 'tm' . "Order(\\'") === 3);
+
+    $add('10.24', 'دکمهٔ ادامهٔ همه فقط وقتی کارِ رهاشدهٔ قابلِ ادامه هست دیده می‌شود',
+         strpos($selfSrc, 'function tmResumeAll()') !== false
+      && strpos($selfSrc, 'staleResumable>0?') !== false
+      && strpos($selfSrc, "tasks_resume_all=1&only=stale") !== false);
+
+    $add('10.24', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '24', '>=')
+      && strpos($selfSrc, 'v:' . "'10.24'") !== false);
 
     $add('10.21', 'اندپوینتِ سلامتِ اعلان‌ها هفت بررسی انجام می‌دهد',
          strpos($selfSrc, "isset(\$_GET['notif_health'])") !== false
@@ -34265,6 +34536,15 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 .tmc-t{font-weight:700;color:#e2e8f0;font-size:12.5px}
 .tmc-tab{font-size:9px;color:#64748b;background:#0f172a;border:1px solid #263449;border-radius:5px;padding:1px 6px}
 .tmc-badge{font-size:9.5px;font-weight:700;border-radius:5px;padding:2px 7px}
+/* v10.24 (۳۷الف): ستونِ اولویتِ کارهای پس‌زمینه */
+.tmord{display:flex;flex-direction:column;gap:1px}
+.tmord button{background:#16233a;border:1px solid #263449;color:#94a3b8;border-radius:4px;
+  font-size:8px;line-height:1;padding:2px 5px;cursor:pointer}
+.tmord button:hover:not(:disabled){background:#1e3a5f;color:#67e8f9;border-color:#3b6ea5}
+.tmord button:disabled{opacity:.28;cursor:default}
+.tmrank{font-size:9.5px;font-weight:800;color:#67e8f9;background:#0f172a;border:1px solid #263449;
+  border-radius:5px;min-width:17px;text-align:center;padding:2px 4px}
+.tmrank:hover{background:#1e3a5f;border-color:#3b6ea5}
 .tmb-run{background:#14532d;color:#86efac}.tmb-stale{background:#78350f;color:#fcd34d}
 .tmb-done{background:#1e3a5f;color:#93c5fd}.tmb-idle{background:#1e293b;color:#64748b}
 /* نوارِ پیشرفت؛ حالتِ نامعین برای کارهایی که «کل» را نمی‌دانند */
@@ -40455,6 +40735,35 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.24', t:'🔢 اولویت‌بندیِ کارهای پس‌زمینه — و «ادامهٔ همه» به همان ترتیب', items:[
+    '🔢 <b>الف — کارهای پس‌زمینه بالاخره اولویت گرفتند.</b> تا اینجا فقط',
+    '   «کارهای زمان‌بندی‌شده» ترتیب داشتند (چون autoTick فهرستشان را از بالا',
+    '   به پایین می‌خواند). ولی ده‌دوازده کارِ پس‌زمینهٔ اصلی — ارسال به',
+    '   باسلام و ووکامرس، استخراج، حذفِ تکراری، اصلاحِ دسته، ایجنت… — همیشه',
+    '   به ترتیبِ ثابتِ کدنویسی‌شده فهرست می‌شدند و هیچ راهی نبود بگویید',
+    '   کدامشان برایتان مهم‌تر است. حالا هر کارت یک شمارهٔ اولویت و دکمه‌های',
+    '   ▲▼ دارد؛ کلیک روی خودِ شماره کار را یک‌راست به ابتدای صف می‌برد.',
+    '   ترتیب در <code>tasks_order.json</code> می‌ماند و دکمهٔ «↩ ترتیبِ',
+    '   پیش‌فرض» همیشه برش می‌گرداند.',
+    '⚙️ <b>و این اولویت فقط ظاهری نیست.</b> یک ترتیبِ تزیینی که هیچ‌جا رعایت',
+    '   نشود بدتر از نبودنش است، چون کاربر فکر می‌کند چیزی را تنظیم کرده.',
+    '   پس همان عدد دو جای واقعی اثر می‌گذارد: (۱) فهرستِ مدیر وظیفه به همین',
+    '   ترتیب چیده می‌شود؛ (۲) <b>نگهبانِ خودکارِ کران</b> که صف‌های گیرکرده',
+    '   را برمی‌گرداند دیگر ترتیبِ ثابتِ «اول باسلام، بعد ووکامرس» را ندارد',
+    '   و از روی اولویتِ شما می‌رود — روی هاستِ اشتراکی که یک نوبتِ کران',
+    '   عملاً فقط برای یکی از دو صف وقت دارد، این تفاوتِ واقعی است.',
+    '▶▶ <b>ج — «ادامهٔ همه» برای کارهای گیرکرده.</b> کارها معمولاً تک‌تک گیر',
+    '   نمی‌کنند: یک ری‌استارتِ هاست چند کار را با هم می‌کشد. تا اینجا باید',
+    '   روی تک‌تکشان «▶ ادامه» می‌زدید. حالا کنارِ شمارندهٔ «رهاشده» یک دکمه',
+    '   هست که همه را برمی‌گرداند — <b>به ترتیبِ اولویت و با فاصله بینشان</b>،',
+    '   نه همه با هم، وگرنه چند کارِ سنگینِ همزمان روی هاستِ اشتراکی یعنی هر',
+    '   سه‌تا کند شوند. قبل از اجرا فهرستِ کارهایی که قرار است شروع شوند را',
+    '   نشان می‌دهد و در پایان می‌گوید چندتا راه افتاد و چندتا رد شد.',
+    '🧹 <b>پاک‌سازیِ زیرِ پوست.</b> منطقِ «ادامه دادنِ یک کار» (برداشتنِ قفلِ',
+    '   جامانده، پاک‌کردنِ پیشرفتِ مرده، بی‌اثر کردنِ سیگنالِ توقفِ قدیمی)',
+    '   داخلِ خودِ اندپوینت نوشته شده بود؛ حالا یک تابعِ مشترک است تا مسیرِ',
+    '   «تکی» و «همه» نتوانند از هم واگرا شوند.',
+  ]},
   {v:'10.23', t:'🗂 مدیر وظیفهٔ واقعاً کاربردی، و اصلاحِ دسته‌بندی که دیگر با بستنِ تب نمی‌میرد', items:[
     '🖱 <b>الف — کلیک روی کارتِ مدیر وظیفه بالاخره کاری می‌کند.</b> تا اینجا',
     '   ستونِ «تب» فقط یک برچسبِ متنی بود («ارسال»، «ابزارها») و کلیک روی',
@@ -46765,9 +47074,19 @@ function tmCard(t){
      روی هر دکمه event.stopPropagation می‌گذاریم وگرنه «توقف» هم کاربر را
      از پنجره بیرون می‌برد. */
   const nav=!!(t.pane||t.open);
+  /* v10.24 (۳۷الف): ستونِ اولویت در ابتدای کارت — همان الگویِ ▲▼ کارهای
+     زمان‌بندی‌شده، ولی برای کارهای پس‌زمینه. رتبه هم کنارش نوشته می‌شود
+     وگرنه کاربر نمی‌فهمد این دکمه‌ها چه چیزی را جابه‌جا می‌کنند. */
+  const first=(t.rank<=1), last=!!(tmData&&t.rank>=((tmData.tasks||[]).length));
   let h='<div class="tmc '+cls+'"'+(nav?(' onclick="tmGo(\''+jsAttr(t.key)+'\')" style="cursor:pointer"'
         +' title="کلیک: رفتن به «'+jsAttr(t.tab)+'» و بازکردنِ پنجرهٔ همین کار"'):'')+'>'
-    +'<div class="tmc-head"><span style="font-size:15px">'+esc(t.icon)+'</span>'
+    +'<div class="tmc-head">'
+    +'<span class="tmord" onclick="event.stopPropagation()" style="margin-left:2px">'
+    + '<button onclick="event.stopPropagation();tmOrder(\''+jsAttr(t.key)+'\',\'up\')" '+(first?'disabled':'')+' title="یک پله بالاتر — زودتر بازیابی می‌شود">▲</button>'
+    + '<button onclick="event.stopPropagation();tmOrder(\''+jsAttr(t.key)+'\',\'down\')" '+(last?'disabled':'')+' title="یک پله پایین‌تر">▼</button></span>'
+    +'<span class="tmrank" onclick="event.stopPropagation();tmOrder(\''+jsAttr(t.key)+'\',\'top\')" '
+    + 'style="cursor:pointer" title="کلیک: بردن به ابتدای صف">'+toFa(t.rank||0)+'</span>'
+    +'<span style="font-size:15px">'+esc(t.icon)+'</span>'
     +'<span class="tmc-t">'+esc(t.title)+'</span>'
     +'<span class="tmc-tab">'+esc(t.tab)+(nav?' ↗':'')+'</span>'
     +'<span class="tmc-badge '+bcl+'">'+esc(lbl)+'</span>';
@@ -46846,14 +47165,25 @@ function tmRender(){
   if(tmOnlyActive) tasks=tasks.filter(t=>t.state==='running'||t.state==='stale');
   const run=parseInt(d.running)||0, st=parseInt(d.stale)||0;
 
+  /* v10.24 (۳۷ج): چند کارِ گیرکرده معمولاً با هم می‌میرند (یک ری‌استارتِ
+     هاست)، پس دکمهٔ جمعی کنارِ شمارندهٔ «رهاشده» می‌نشیند. */
+  const staleResumable=(d.tasks||[]).filter(t=>t.state==='stale'&&t.resumable).length;
   let h='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">'
     +'<span class="tmc-badge '+(run>0?'tmb-run':'tmb-idle')+'">'+toFa(run)+' در حال اجرا</span>'
     +(st>0?'<span class="tmc-badge tmb-stale">'+toFa(st)+' رهاشده</span>':'')
     +'<span class="tmc-badge tmb-done">'+toFa((d.jobs||[]).length)+' کارِ زمان‌بندی‌شده</span>'
+    +(staleResumable>0?'<button class="btn btn-green" style="font-size:10px;padding:3px 10px" '
+      +'onclick="tmResumeAll()" title="همهٔ کارهای گیرکرده را به ترتیبِ اولویت دوباره شروع کن">'
+      +'▶▶ ادامهٔ همه ('+toFa(staleResumable)+')</button>':'')
     +'<span style="flex:1"></span>'
     +'<span style="font-size:9.5px;color:#64748b;align-self:center">به‌روزرسانیِ خودکار هر ۲.۵ ثانیه</span></div>';
 
-  h+='<div style="font-size:11px;color:#67e8f9;font-weight:700;margin:4px 0 7px">▸ کارهای پس‌زمینه</div>';
+  h+='<div style="display:flex;align-items:center;gap:6px;margin:4px 0 3px">'
+    +'<span style="font-size:11px;color:#67e8f9;font-weight:700">▸ کارهای پس‌زمینه — اولویت با ترتیبِ صف</span>'
+    +'<span style="flex:1"></span>'
+    +'<button class="btn btn-gray" style="font-size:9px;padding:2px 8px" onclick="tmOrderReset()" '
+    +'title="بازگرداندنِ ترتیب به حالتِ پیش‌فرض">↩ ترتیبِ پیش‌فرض</button></div>'
+    +'<div style="font-size:9.5px;color:#64748b;margin-bottom:7px">با ▲▼ ترتیب را بچینید؛ همین ترتیب در «ادامهٔ همه» و بازیابیِ خودکارِ کارهای گیرکرده هم رعایت می‌شود.</div>';
   if(!tasks.length) h+='<div style="color:#64748b;font-size:11px;padding:14px;text-align:center">'+(tmOnlyActive?'هیچ کارِ فعالی نیست.':'کاری ثبت نشده.')+'</div>';
   else tasks.forEach(t=>{h+=tmCard(t);});
 
@@ -46873,6 +47203,66 @@ function tmStop(key){
     if(d&&d.ok) showToast('⏹ درخواستِ توقف ثبت شد — کار پس از مرحلهٔ جاری می‌ایستد');
     else showToast('✗ '+((d&&d.error)||'توقف ناموفق'),true);
     tmPulse();
+  }).catch(()=>{tmBusy=false;showToast('✗ خطا شبکه',true);});
+}
+
+/* v10.24 (۳۷الف): جابه‌جاییِ اولویتِ یک کارِ پس‌زمینه.
+   ترتیب فوراً و بدونِ انتظار برای پاسخِ سرور روی صفحه اعمال می‌شود، وگرنه
+   کاربر روی هاستِ کند دو بار پشتِ‌هم می‌زند و کار دو پله می‌پرد. */
+function tmOrder(key,dir){
+  if(tmBusy)return;
+  if(tmData&&tmData.tasks){
+    const arr=tmData.tasks, i=arr.findIndex(x=>x.key===key);
+    if(i>=0){
+      let to=i;
+      if(dir==='up')to=Math.max(0,i-1);
+      else if(dir==='down')to=Math.min(arr.length-1,i+1);
+      else if(dir==='top')to=0;
+      else if(dir==='bottom')to=arr.length-1;
+      if(to!==i){
+        const row=arr.splice(i,1)[0];
+        arr.splice(to,0,row);
+        arr.forEach((x,n)=>{x.rank=n+1;});
+        tmRender();
+      }
+    }
+  }
+  tmBusy=true;
+  fetch('?tasks_order=1&key='+encodeURIComponent(key)+'&dir='+encodeURIComponent(dir))
+    .then(r=>r.json()).then(d=>{
+      tmBusy=false;
+      if(!d||!d.ok){showToast('✗ '+((d&&d.error)||'جابه‌جایی ناموفق'),true);tmPulse();}
+    }).catch(()=>{tmBusy=false;showToast('✗ خطا شبکه',true);tmPulse();});
+}
+
+/* v10.24 (۳۷الف): بازگرداندنِ ترتیب به حالتِ پیش‌فرضِ رجیستری */
+function tmOrderReset(){
+  if(tmBusy)return;
+  if(!confirm('ترتیبِ اولویتِ کارهای پس‌زمینه به حالتِ پیش‌فرض برگردد؟'))return;
+  tmBusy=true;
+  fetch('?tasks_order=1&dir=reset').then(r=>r.json()).then(d=>{
+    tmBusy=false;
+    if(d&&d.ok)showToast('↩ ترتیب به پیش‌فرض برگشت');
+    tmPulse();
+  }).catch(()=>{tmBusy=false;showToast('✗ خطا شبکه',true);});
+}
+
+/* v10.24 (۳۷ج): ادامهٔ همهٔ کارهای گیرکرده، به ترتیبِ اولویت */
+function tmResumeAll(){
+  if(tmBusy)return;
+  const stale=((tmData&&tmData.tasks)||[]).filter(t=>t.state==='stale'&&t.resumable);
+  if(!stale.length){showToast('کارِ رهاشده‌ای برای ادامه نیست');return;}
+  if(!confirm(toFa(stale.length)+' کارِ گیرکرده به ترتیبِ اولویت دوباره شروع شوند؟\n'
+     +stale.map((t,i)=>'  '+toFa(i+1)+'. '+t.title).join('\n')))return;
+  tmBusy=true;
+  showToast('⏳ در حال راه‌اندازی '+toFa(stale.length)+' کار...');
+  fetch('?tasks_resume_all=1&only=stale').then(r=>r.json()).then(d=>{
+    tmBusy=false;
+    if(d&&d.ok){
+      showToast('▶ '+toFa(d.count||0)+' کار دوباره شروع شد'
+        +((d.skipped||[]).length?(' · '+toFa(d.skipped.length)+' مورد رد شد'):''));
+    }else showToast('✗ '+((d&&d.error)||'ناموفق'),true);
+    setTimeout(tmPulse,1500); tmPulse();
   }).catch(()=>{tmBusy=false;showToast('✗ خطا شبکه',true);});
 }
 
