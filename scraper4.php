@@ -189,7 +189,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.25';
+const APP_VERSION = '10.26';
 const APP_VERSION_DATE = '1405/06/01';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -16080,6 +16080,12 @@ if (isset($_GET['agent_status'])) {
     $log = is_array($p['log'] ?? null) ? $p['log'] : [];
     $p['log'] = array_slice($log, $since);
     $p['log_total'] = count($log);
+    /* v10.26 (۳۹ب): جریانِ گفتگو هم مثل لاگ افزایشی فرستاده می‌شود تا
+       نظرسنجیِ هر ۱٫۲ ثانیه کلِ تاریخچه را دوباره روی سیم نبرد. */
+    $cs = max(0, (int)($_GET['csince'] ?? 0));
+    $convo = is_array($p['convo'] ?? null) ? $p['convo'] : [];
+    $p['convo'] = array_slice($convo, $cs);
+    $p['convo_total'] = count($convo);
     $p['ok'] = true;
     echo json_encode($p, JSON_UNESCAPED_UNICODE);
     exit;
@@ -16182,6 +16188,11 @@ if (isset($_GET['selagent_status'])) {
     $sLog = is_array($sp['log'] ?? null) ? $sp['log'] : [];
     $sp['log'] = array_slice($sLog, $sSince);
     $sp['log_total'] = count($sLog);
+    /* v10.26 (۳۹ب): گفتگوی زندهٔ همین ایجنت، افزایشی. */
+    $sCs = max(0, (int)($_GET['csince'] ?? 0));
+    $sConvo = is_array($sp['convo'] ?? null) ? $sp['convo'] : [];
+    $sp['convo'] = array_slice($sConvo, $sCs);
+    $sp['convo_total'] = count($sConvo);
     $sp['ok'] = true;
     echo json_encode($sp, JSON_UNESCAPED_UNICODE);
     exit;
@@ -21324,6 +21335,93 @@ if (isset($_GET['selftest'])) {
          version_compare(APP_VERSION, '10.' . '25', '>=')
       && strpos($selfSrc, 'v:' . "'10.25'") !== false);
 
+    /* ═══ v10.26 (۳۹): گفتگوی زندهٔ ایجنت‌ها + جمع‌شدنِ راهنماها + حذفِ بنر ═══
+       نکته‌ای که سه بار در ۱۰٫۲۵ گاز گرفت: اگر رشتهٔ جست‌وجو عیناً در متنِ
+       همین ادعا بیاید، خطِ خودِ ادعا هم شمرده می‌شود. پس هرجا شمارش در کار
+       است رشته را با الحاق تکه‌تکه می‌سازیم. */
+
+    /* --- ۳۹ب، بک‌اند --- */
+    $add('10.26', 'هر دو موتورِ پیشرفت کلیدِ گفتگو را می‌پذیرند',
+         substr_count($selfSrc, "\$p['con" . "vo']") >= 2
+      && strpos($selfSrc, 'function agentProgress') !== false
+      && strpos($selfSrc, 'function selagentProgress') !== false);
+
+    $add('10.26', 'سه هلپرِ مشترکِ ساختِ پیامِ گفتگو تعریف شده‌اند',
+         strpos($selfSrc, 'function agentConvo' . 'Trim(') !== false
+      && strpos($selfSrc, 'function agentConvo' . 'Assistant(') !== false
+      && strpos($selfSrc, 'function agentConvo' . 'Tool(') !== false);
+
+    $add('10.26', 'گفتگو سقفِ حجم دارد تا فایلِ پیشرفت باد نکند',
+         strpos($selfSrc, 'agentConvoTrim(string $s, int $max = 1' . '400)') !== false
+      && substr_count($selfSrc, 'array_slice($convo, -2' . '40)') >= 2);
+
+    $add('10.26', 'هر سه نقطهٔ ایجنتِ محصولات ثبت می‌شود (آغاز، پاسخِ مدل، نتیجهٔ ابزار)',
+         substr_count($selfSrc, "'convo_" . "add' =>") >= 6);
+
+    $add('10.26', 'هر دو اندپوینتِ وضعیت پارامترِ csince را می‌فهمند',
+         substr_count($selfSrc, "\$_GET['csi" . "nce']") >= 2
+      && substr_count($selfSrc, "'convo_to" . "tal'") >= 2);
+
+    /* --- ۳۹ب، فرانت --- */
+    $add('10.26', 'رندرِ گفتگو یک تابعِ مشترک است، نه سه کپیِ جدا',
+         strpos($selfSrc, 'function cvoRen' . 'der(boxId, msgs, running)') !== false
+      && strpos($selfSrc, 'function cvoMsg' . 'Html(m)') !== false
+      && strpos($selfSrc, 'function cvo' . 'Who(role)') !== false);
+
+    $add('10.26', 'چهار نقشِ گفتگو ظاهرِ جدا دارند',
+         strpos($selfSrc, '.cvo-sys' . 'tem{') !== false
+      && strpos($selfSrc, '.cvo-us' . 'er{') !== false
+      && strpos($selfSrc, '.cvo-assist' . 'ant{') !== false
+      && strpos($selfSrc, '.cvo-to' . 'ol{') !== false);
+
+    $add('10.26', 'ابزارِ ناموفق در گفتگو قرمز دیده می‌شود',
+         strpos($selfSrc, '.cvo-tool.b' . 'ad{') !== false
+      && strpos($selfSrc, "m.ok === false ? ' bad' : ''") !== false);
+
+    $add('10.26', 'باکسِ گفتگو در هر سه جا هست: ایجنتِ محصولات، ایجنتِ سلکتور، اتوماسیون',
+         strpos($selfSrc, 'id="ag' . 'Convo"') !== false
+      && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
+      && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
+
+    $add('10.26', 'هر سه فرانت فقط پیام‌های تازه را می‌گیرند (نه کلِ گفتگو در هر تیک)',
+         substr_count($selfSrc, "'&csi" . "nce=' +") + substr_count($selfSrc, "&csi" . "nce=' + ap") >= 2
+      && strpos($selfSrc, 'agCSi' . 'nce') !== false
+      && strpos($selfSrc, 'selagCSi' . 'nce') !== false
+      && strpos($selfSrc, 'apCSi' . 'nce') !== false);
+
+    $add('10.26', 'مودالِ لاگِ اتوماسیون تایمرِ گفتگو را هنگام بسته‌شدن خاموش می‌کند',
+         strpos($selfSrc, 'function apConvo' . 'Tick()') !== false
+      && substr_count($selfSrc, 'clearInterval(apConvoTimer)') >= 3);
+
+    $add('10.26', 'ایجنتِ محصولات هم بعد از رفرشِ صفحه بازیابی می‌شود',
+         strpos($selfSrc, 'function agRes' . 'ume()') !== false
+      && strpos($selfSrc, 'try{ agRes' . 'ume(); }catch(e){}') !== false);
+
+    $add('10.26', 'باکسِ گفتگو وقتی پیامی نیست خودش را پنهان می‌کند',
+         strpos($selfSrc, "det.classList.toggle('hidden', msgs.length === " . "0)") !== false
+      && strpos($selfSrc, 'cvo-em' . 'pty">هنوز پیامی رد و بدل نشده است.') !== false);
+
+    /* --- ۳۹الف: راهنماها کشویی و بسته --- */
+    $add('10.26', 'هیچ باکسِ راهنمایی پیش‌فرض باز نمانده است',
+         substr_count($selfSrc, '<details' . ' open') === 0
+      && substr_count($selfSrc, '<details class="alert alert-info"' . ' open') === 0);
+
+    $add('10.26', 'راهنماهای ریزِ زیرِ فیلدها ظاهرِ اختصاصیِ کشویی گرفتند',
+         strpos($selfSrc, '.hint-mi' . 'ni{display:block') !== false
+      && substr_count($selfSrc, 'class="hint-mi' . 'ni"') >= 12);
+
+    $add('10.26', 'هیچ باکسِ آبیِ راهنمای ثابتی در markup باقی نمانده',
+         substr_count($selfSrc, '<div class="alert alert-in' . 'fo">') === 0);
+
+    /* --- ۳۹ج: حذفِ نوارِ سبز --- */
+    $add('10.26', 'نوارِ سبزِ «خلاصه گزارش کارهای انجام شده» برداشته شد',
+         strpos($selfSrc, 'id="verBan' . 'ner"') === false
+      && strpos($selfSrc, 'این نسخه شام' . 'ل:') === false);
+
+    $add('10.26', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '26', '>=')
+      && strpos($selfSrc, 'v:' . "'10.26'") !== false);
+
     $add('10.21', 'اندپوینتِ سلامتِ اعلان‌ها هفت بررسی انجام می‌دهد',
          strpos($selfSrc, "isset(\$_GET['notif_health'])") !== false
       && strpos($selfSrc, "\$add('messenger',") !== false
@@ -22156,9 +22254,14 @@ if (isset($_GET['selftest'])) {
     $add('9.12', 'whoami مسیر و اثر انگشت فایل را می‌گوید',
          strpos($selfSrc, 'اثر انگشت فایل (md' . '5): ') !== false
          && strpos($selfSrc, 'مسیر فایلِ اجرا' . 'شونده: ') !== false);
-    $add('9.12', 'بنر، تاریخ و اثر انگشت فایل را نشان می‌دهد',
-         strpos($selfSrc, 'h(substr((string)@md5_' . 'file(__FILE__), 0, 8))?>') !== false
-         && strpos($selfSrc, 'h(date(\'Y/m/d H:i\', (int)@file' . 'mtime(__FILE__)))?>') !== false);
+    /* v10.26 (۳۹ج): بنرِ سبزِ نسخه به درخواستِ کاربر حذف شد، پس ادعای
+       قدیمیِ v9.12 دربارهٔ محتوای آن بی‌موضوع است. جایش را ادعای معکوس
+       گرفت: بنر واقعاً رفته باشد و راهِ جایگزینِ دیدنِ اثرِ انگشت (?whoami)
+       سرِ جایش مانده باشد. رشته‌ها تکه‌تکه ساخته می‌شوند تا خطِ خودِ ادعا
+       شمرده نشود. */
+    $add('10.26', 'نوارِ سبزِ خلاصهٔ کارها حذف شده ولی اثرِ انگشت از ?whoami در دسترس است',
+         strpos($selfSrc, 'id="verBan' . 'ner"') === false
+         && strpos($selfSrc, '@md5_' . 'file($f)') !== false);
 
     /* ---------- v9.09: هر بسته شدن ردیف باید علتش را بگوید ---------- */
     $add('9.09', 'مسیر «محصولی روی سرور نیست» علت ثبت می‌کند',
@@ -23189,8 +23292,10 @@ if (isset($_GET['selftest'])) {
         $add('8.70', 'پیش‌فرض مسیر، نام واقعی فایل است',
              (vc_defaults()['path'] ?? '') === basename(__FILE__));
     }
-    $add('8.70', 'نوار نسخه بالای صفحه هست',
-         strpos($selfSrc, 'id="verBanner"') !== false);
+    /* v10.26 (۳۹ج): نوارِ سبزِ نسخه حذف شد؛ حالا نبودنش را ادعا می‌کنیم.
+       رشته تکه‌تکه ساخته می‌شود تا خودِ همین خط شمرده نشود. */
+    $add('10.26', 'نوار سبزِ خلاصهٔ کارها حذف شده است',
+         strpos($selfSrc, 'id="ver' . 'Banner"') === false);
     $add('8.70', 'اندپوینت بررسی امنیت هست',
          strpos($selfSrc, "_GET['sec" . "_check']") !== false
          && strpos($selfSrc, 'function sec' . 'Check(') !== false);
@@ -34048,9 +34153,62 @@ function agentProgress(array $patch): void {
         if (count($steps) > 300) $steps = array_slice($steps, -300);
         unset($patch['step_add']);
     }
+    /* v10.26 (۳۹ب): جریانِ «گفتگو». تا اینجا فقط یک لاگِ خلاصه داشتیم
+       («گامِ ۳ — پرسش از مدل…») که نمی‌گفت مدل واقعاً چه گفت و ابزار چه
+       برگرداند. حالا خودِ پیام‌ها هم ذخیره می‌شوند تا کاربر بتواند زنده
+       ببیند چه در جریان است — به‌ویژه در اجراهای چنددقیقه‌ای. */
+    $convo = is_array($cur['convo'] ?? null) ? $cur['convo'] : [];
+    if (isset($patch['convo_add'])) {
+        foreach ((array)$patch['convo_add'] as $c) {
+            if (!is_array($c)) continue;
+            $c['t'] = time();
+            $convo[] = $c;
+        }
+        if (count($convo) > 240) $convo = array_slice($convo, -240);
+        unset($patch['convo_add']);
+    }
     $cur = array_merge($cur, $patch);
-    $cur['log'] = $log; $cur['steps'] = $steps; $cur['ts'] = time();
+    $cur['log'] = $log; $cur['steps'] = $steps; $cur['convo'] = $convo; $cur['ts'] = time();
     @file_put_contents(AGENT_PROGRESS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/* =====================================================================
+ *  v10.26 (۳۹ب): ابزارهای مشترکِ «گفتگوی زنده»
+ *  ---------------------------------------------------------------------
+ *  هر دو ایجنت (مدیریتِ محصولات و کشفِ سلکتور) و کارهای اتوماسیون از
+ *  همین دو تابع استفاده می‌کنند تا شکلِ پیام‌ها یکی باشد و فرانت فقط یک
+ *  رندرکننده لازم داشته باشد.
+ *
+ *  ساختارِ هر پیام:
+ *    ['role' => system|user|assistant|tool, 'text' => '…',
+ *     'calls' => [ ['name'=>..,'args'=>'json'], … ],   (فقط assistant)
+ *     'name'  => 'نامِ ابزار', 'ok' => true|false]     (فقط tool)
+ * ===================================================================== */
+
+/** متنِ بلند را برای ذخیره در فایلِ پیشرفت کوتاه می‌کند.
+ *  بدونِ این، یک پاسخِ ۴۰ کیلوبایتی مدل فایلِ JSON را باد می‌کند و هر
+ *  نظرسنجیِ ۱٫۲ ثانیه‌ای همان حجم را روی شبکه می‌فرستد. */
+function agentConvoTrim(string $s, int $max = 1400): string {
+    $s = trim($s);
+    if ($s === '') return '';
+    if (mb_strlen($s) <= $max) return $s;
+    return mb_substr($s, 0, $max) . ' … [' . aiFaNum(mb_strlen($s) - $max) . ' نویسهٔ دیگر بریده شد]';
+}
+
+/** پیامِ assistant را از متن و فهرستِ tool_call ها می‌سازد. */
+function agentConvoAssistant(string $text, array $tcs): array {
+    $calls = [];
+    foreach ($tcs as $c) {
+        $calls[] = ['name' => (string)($c['name'] ?? '?'),
+                    'args' => agentConvoTrim(json_encode($c['args'] ?? [], JSON_UNESCAPED_UNICODE) ?: '{}', 600)];
+    }
+    return ['role' => 'assistant', 'text' => agentConvoTrim($text), 'calls' => $calls];
+}
+
+/** پیامِ نتیجهٔ یک ابزار. */
+function agentConvoTool(string $name, array $res): array {
+    return ['role' => 'tool', 'name' => $name, 'ok' => !empty($res['ok']),
+            'text' => agentConvoTrim(json_encode($res, JSON_UNESCAPED_UNICODE) ?: '', 800)];
 }
 function agentStopRequested(): bool { return is_file(AGENT_STOP_FILE); }
 function agentClearStop(): void { @unlink(AGENT_STOP_FILE); }
@@ -34509,6 +34667,12 @@ function agentRun(array $cn, string $task, string $mode, string $model = ''): ar
         ['role' => 'system', 'content' => agentSystemPrompt($mode)],
         ['role' => 'user',   'content' => $task],
     ];
+    /* v10.26 (۳۹ب): همان دو پیامِ آغازین را در جریانِ گفتگو هم بگذار تا
+       کاربر ببیند ایجنت با چه دستوری راه افتاده است. */
+    agentProgress(['convo_add' => [
+        ['role' => 'system', 'text' => agentConvoTrim(agentSystemPrompt($mode), 700)],
+        ['role' => 'user',   'text' => agentConvoTrim($task)],
+    ]]);
 
     $calls = 0; $changes = []; $finalText = ''; $stoppedBy = '';
     $usedTools = []; $nativeTools = null;
@@ -34556,9 +34720,11 @@ function agentRun(array $cn, string $task, string $mode, string $model = ''): ar
 
         if (!$tcs) {
             $finalText = trim($text);
-            agentProgress(['log_add' => ['💬 مدل بدونِ ابزار پاسخِ متنی داد؛ پایان']]);
+            agentProgress(['convo_add' => [['role' => 'assistant', 'text' => agentConvoTrim($finalText), 'calls' => []]],
+                'log_add' => ['💬 مدل بدونِ ابزار پاسخِ متنی داد؛ پایان']]);
             break;
         }
+        agentProgress(['convo_add' => [agentConvoAssistant($text, $tcs)]]);
 
         // پیامِ assistant را عیناً به تاریخچه اضافه کن (لازمهٔ پروتکل)
         $asst = aiAssistantMessage($body);
@@ -34610,6 +34776,7 @@ function agentRun(array $cn, string $task, string $mode, string $model = ''): ar
 
             $messages[] = ['role' => 'tool', 'tool_call_id' => $c['id'], 'name' => $c['name'],
                            'content' => json_encode($res, JSON_UNESCAPED_UNICODE)];
+            agentProgress(['convo_add' => [agentConvoTool($c['name'], $res)]]);
 
             if ($c['name'] === 'finish') {
                 $finalText = (string)($res['summary'] ?? '');
@@ -34672,8 +34839,19 @@ function selagentProgress(array $patch): void {
         if (count($steps) > 200) $steps = array_slice($steps, -200);
         unset($patch['step_add']);
     }
+    /* v10.26 (۳۹ب): همان جریانِ گفتگوی agentProgress، اینجا هم. */
+    $convo = is_array($cur['convo'] ?? null) ? $cur['convo'] : [];
+    if (isset($patch['convo_add'])) {
+        foreach ((array)$patch['convo_add'] as $c) {
+            if (!is_array($c)) continue;
+            $c['t'] = time();
+            $convo[] = $c;
+        }
+        if (count($convo) > 240) $convo = array_slice($convo, -240);
+        unset($patch['convo_add']);
+    }
     $cur = array_merge($cur, $patch);
-    $cur['log'] = $log; $cur['steps'] = $steps; $cur['ts'] = time();
+    $cur['log'] = $log; $cur['steps'] = $steps; $cur['convo'] = $convo; $cur['ts'] = time();
     @file_put_contents(SELAGENT_PROGRESS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
 }
 function selagentStopRequested(): bool { return is_file(SELAGENT_STOP_FILE); }
@@ -34983,6 +35161,12 @@ function selagentRun(string $url, string $kind, string $model = ''): array {
         ['role' => 'user',   'content' => "نقشهٔ ساختارِ این صفحه:\n\n" . $map
             . "\n\nحالا سلکتورها را پیدا کن. هر حدس را با probe_selector بسنج و در پایان submit_selectors را صدا بزن."],
     ];
+    /* v10.26 (۳۹ب): نقشهٔ DOM می‌تواند ده‌ها کیلوبایت باشد؛ فقط سرش را
+       در گفتگو نشان می‌دهیم تا معلوم باشد مدل چه دیده است. */
+    selagentProgress(['convo_add' => [
+        ['role' => 'system', 'text' => agentConvoTrim(selagentSystemPrompt($kind, $url), 700)],
+        ['role' => 'user',   'text' => agentConvoTrim("نقشهٔ ساختارِ این صفحه:\n\n" . $map, 900)],
+    ]]);
 
     $calls = 0; $probes = 0; $confirmed = []; $submitted = null; $note = '';
     $stoppedBy = ''; $nativeTools = null; $finalText = '';
@@ -35029,9 +35213,11 @@ function selagentRun(string $url, string $kind, string $model = ''): array {
 
         if (!$tcs) {
             $finalText = trim($text);
-            selagentProgress(['log_add' => ['💬 مدل بدونِ ابزار پاسخ داد؛ پایانِ حلقه']]);
+            selagentProgress(['convo_add' => [['role' => 'assistant', 'text' => agentConvoTrim($finalText), 'calls' => []]],
+                'log_add' => ['💬 مدل بدونِ ابزار پاسخ داد؛ پایانِ حلقه']]);
             break;
         }
+        selagentProgress(['convo_add' => [agentConvoAssistant($text, $tcs)]]);
 
         $asst = aiAssistantMessage($body);
         if (is_array($asst) && isset($asst['tool_calls'])) {
@@ -35101,6 +35287,7 @@ function selagentRun(string $url, string $kind, string $model = ''): array {
                 'args' => $c['args'], 'ok' => !empty($out['ok'])]]]);
             $messages[] = ['role' => 'tool', 'tool_call_id' => $c['id'], 'name' => $c['name'],
                            'content' => json_encode($out, JSON_UNESCAPED_UNICODE)];
+            selagentProgress(['convo_add' => [agentConvoTool($c['name'], $out)]]);
             if ($finished) break;
         }
         if ($finished || $stoppedBy !== '') break;
@@ -35441,6 +35628,40 @@ body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn{z-index:10}
 .hint-collapse summary::before{content:"▼";font-size:9px;color:#64748b;transition:transform .2s;display:inline-block}
 .hint-collapse[open] summary::before{transform:rotate(180deg)}
 .hint-collapse .hint-body{padding-top:6px}
+/* v10.26 (۳۹الف): واریانتِ «راهنمای ریز» — همان رفتارِ کشویی، ولی با ظاهرِ
+   همان توضیح‌های کم‌رنگِ زیرِ فیلدها (نه باکسِ آبیِ alert). هرجا قبلاً یک
+   <div> توضیحیِ ثابت بود که فضای پنل را می‌گرفت، به این تبدیل شده تا
+   پیش‌فرض بسته باشد و با یک کلیک باز شود. */
+.hint-mini{display:block;margin:0 0 6px}
+.hint-mini>summary{cursor:pointer;font-size:10px;font-weight:700;color:#64748b;list-style:none;display:flex;align-items:center;gap:5px;padding:3px 0}
+.hint-mini>summary::-webkit-details-marker{display:none}
+.hint-mini>summary::before{content:"▼";font-size:8px;color:#475569;transition:transform .2s;display:inline-block}
+.hint-mini[open]>summary::before{transform:rotate(180deg)}
+.hint-mini>summary:hover{color:#94a3b8}
+.hint-mini .hint-body{padding-top:4px}
+/* v10.26 (۳۹ب): باکسِ کشویی «گفتگوی زنده» — همان استایل برای هر سه جا
+   (ایجنتِ محصولات، ایجنتِ کشفِ سلکتور، مودالِ لاگِ اتوماسیون). */
+.cvo{margin-top:8px;background:#0b1120;border:1px solid #1e293b;border-radius:8px;overflow:hidden}
+.cvo>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:7px;padding:7px 9px;font-size:11px;font-weight:700;color:#a5b4fc;background:#111c31}
+.cvo>summary::-webkit-details-marker{display:none}
+.cvo>summary::before{content:"▼";font-size:8px;color:#64748b;transition:transform .2s;display:inline-block}
+.cvo[open]>summary::before{transform:rotate(180deg)}
+.cvo>summary:hover{background:#16233c}
+.cvo-live{font-size:9px;color:#0b1120;background:#4ade80;border-radius:4px;padding:1px 5px;font-weight:700}
+.cvo-n{margin-right:auto;font-size:9.5px;color:#64748b;font-weight:400}
+.cvo-bd{padding:8px;max-height:320px;overflow:auto;direction:rtl}
+.cvo-msg{border-radius:7px;padding:6px 8px;margin-bottom:5px;font-size:10.5px;line-height:1.9;border:1px solid transparent}
+.cvo-msg .cvo-who{display:block;font-size:9.5px;font-weight:700;margin-bottom:2px;opacity:.85}
+.cvo-msg .cvo-t{float:left;font-style:normal;font-weight:400;color:#475569;font-family:ui-monospace,monospace;font-size:9px}
+.cvo-msg .cvo-tx{color:#cbd5e1;white-space:pre-wrap;word-break:break-word}
+.cvo-system{background:#0f172a;border-color:#1e293b}   .cvo-system .cvo-who{color:#64748b}
+.cvo-user{background:#12233b;border-color:#1e3a5f}      .cvo-user .cvo-who{color:#60a5fa}
+.cvo-assistant{background:#1c1233;border-color:#4c1d95} .cvo-assistant .cvo-who{color:#c084fc}
+.cvo-tool{background:#0d1f1a;border-color:#14532d}      .cvo-tool .cvo-who{color:#34d399}
+.cvo-tool.bad{background:#1f1214;border-color:#7f1d1d}  .cvo-tool.bad .cvo-who{color:#f87171}
+.cvo-call{margin-top:4px;background:#0b1120;border:1px dashed #4c1d95;border-radius:6px;padding:4px 6px;font-size:10px;color:#ddd6fe;direction:ltr;text-align:left;word-break:break-all}
+.cvo-call b{color:#f0abfc}
+.cvo-empty{color:#64748b;font-size:10.5px;text-align:center;padding:10px}
 /* v9.60: تب‌های بخش هوش مصنوعی */
 .prof-net-switch .prof-net-slider{width:36px;height:20px;border-radius:20px;background:#334155;position:relative;display:inline-block;transition:background .2s;flex:0 0 auto;vertical-align:middle}.prof-net-switch .prof-net-slider::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#e2e8f0;transition:transform .2s}.prof-net-switch input:checked + .prof-net-slider{background:#22c55e}.prof-net-switch input:checked + .prof-net-slider::after{transform:translateX(16px)}.smenu-body.open.ai-tabs-open{max-height:4000px}.ai-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;border-bottom:1px solid #334155;padding-bottom:6px;direction:rtl}.ai-tab-btn{padding:7px 12px;font-size:11px;color:#94a3b8;background:#111c31;border:1px solid #334155;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap;flex:1;min-width:80px;text-align:center}.ai-tab-btn:hover{background:#1e293b;color:#e2e8f0}.ai-tab-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6;font-weight:700}.ai-tab-panel{display:none}.ai-tab-panel.active{display:block}.ai-mdl-err{margin-top:6px;padding:7px 9px;border-radius:8px;font-size:10.5px;line-height:1.8;background:#7f1d1d20;border:1px solid #b91c1c;color:#fca5a5}.ai-mdl-err b{color:#fecaca}.ai-mdl-err button{margin-top:5px;font-size:10px;padding:3px 9px}.ai-chat-box{margin-top:8px;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;min-height:120px;max-height:340px;overflow-y:auto;display:flex;flex-direction:column;gap:6px}.ai-chat-empty{font-size:10.5px;color:#64748b;text-align:center;padding:22px 6px}.ai-msg{max-width:88%;padding:7px 10px;border-radius:10px;font-size:11.5px;line-height:1.9;white-space:pre-wrap;word-break:break-word}.ai-msg.me{align-self:flex-start;background:#1e293b;border:1px solid #334155;color:#e2e8f0}.ai-msg.bot{align-self:flex-end;background:#14532d30;border:1px solid #166534;color:#dcfce7}.ai-msg.err{align-self:flex-end;background:#7f1d1d20;border:1px solid #b91c1c;color:#fca5a5}.ai-msg .mt{display:block;margin-top:4px;font-size:9px;color:#64748b}.ai-chip{padding:3px 9px;border-radius:20px;font-size:10px;cursor:pointer;border:1px solid #334155;background:#111c31;color:#94a3b8;transition:.15s;user-select:none}.ai-chip:hover{background:#1e293b;color:#e2e8f0}.ai-chip.on{background:#3b82f6;border-color:#3b82f6;color:#fff;font-weight:700}
 .live-cnt .lc:hover{background:#1e293b;transform:translateY(-1px)}.live-cnt .lc b{font-size:17px;line-height:1.2;font-family:ui-monospace,monospace}.live-cnt .lc span{font-size:9px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.live-cnt .lc i{font-size:9px;font-style:normal;font-family:ui-monospace,monospace}@media(max-width:620px){.live-cnt{grid-template-columns:repeat(3,1fr)}}.pdir{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700}.pdir-up{background:#7f1d1d;color:#fca5a5}.pdir-down{background:#14532d;color:#86efac}.pdir-same{background:#334155;color:#94a3b8}.app-ver{display:inline-block;background:#0f172a;border:1px solid #334155;color:#67e8f9;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;font-family:ui-monospace,monospace;cursor:pointer;transition:.15s;vertical-align:middle}
@@ -35728,33 +35949,10 @@ html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-
   <span id="profileStatus" class="profile-indicator unsaved">جدید</span>
 </h1>
 
-<!-- v8.70: نوار «این فایل چه دارد».
-     وقتی هاست فایل را حذف می‌کند و نسخهٔ قدیمی دوباره آپلود می‌شود، از
-     ظاهر برنامه معلوم نیست کدام نسخه بالاست و کاربر دنبال قابلیتی می‌گردد
-     که در فایلِ روی هاست اصلاً وجود ندارد. این نوار همان لحظه می‌گوید. -->
-<div id="verBanner" style="background:#0f172a;border:1px solid #334155;border-right:4px solid #22c55e;
-     border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:11.5px;line-height:1.9;color:#cbd5e1">
-  <b style="color:#4ade80">نسخهٔ فایلِ روی این هاست: v<?=APP_VERSION?></b>
-  <span style="color:#64748b">·</span>
-  <?php /* v9.12: زمان و اثر انگشت خودِ فایل. اگر نسخهٔ تازه را آپلود
-           کرده‌اید ولی این تاریخ قدیمی است، فایل روی هاست عوض نشده یا
-           وب‌سرور نسخهٔ دیگری را اجرا می‌کند. */ ?>
-  <span style="color:#64748b;font-size:10px">آپلودشده
-    <?=h(date('Y/m/d H:i', (int)@filemtime(__FILE__)))?>
-    · <code style="direction:ltr"><?=h(substr((string)@md5_file(__FILE__), 0, 8))?></code>
-    · <a href="?whoami=1" target="_blank" style="color:#67e8f9">بررسی نسخهٔ اجراشونده</a>
-  </span>
-  <span style="color:#64748b">·</span>
-  <span style="color:#94a3b8">این نسخه شامل:</span>
-  <span style="color:#86efac">🎨 تنوع‌ها</span> ·
-  <span style="color:#86efac">🖼 گالری چندعکسی</span> ·
-  <span style="color:#86efac">🖥 پنل انتخاب بیرونی</span> ·
-  <span style="color:#86efac">↩ پروفایل پیش‌فرض</span> ·
-  <span style="color:#86efac">🔄 آپدیت محتوای تکراری‌ها</span> ·
-  <span style="color:#86efac">🎯 نوار سلکتور چسبیده به المان + میان‌برها</span>
-  <button class="btn btn-gray" onclick="this.parentNode.style.display='none'"
-          style="float:left;font-size:10px;padding:2px 8px">بستن</button>
-</div>
+<!-- v10.26 (۳۹ج): نوارِ سبزِ «خلاصهٔ کارهای انجام‌شده» بالای تب‌ها به
+     درخواستِ کاربر حذف شد. اطلاعاتِ همان نوار (نسخه، تاریخِ آپلود، اثرِ
+     انگشتِ فایل) از دست نرفته است: هم در ?whoami=1 هست و هم در پانویسِ
+     صفحه و گزارشِ تغییرات. -->
 
 <div class="main-tabs" id="mainTabs">
     <button class="main-tab active" data-tab="start" onclick="switchMainTab('start')">
@@ -35865,10 +36063,13 @@ html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-
 <div class="smenu-hdr" onclick="toggleSmenu(this)" style="padding:9px 0;border-top:1px solid #1e293b">
 <h3 style="font-size:12px;color:#94a3b8">⚙️ منبع و نصب‌کننده</h3><span class="arrow">▼</span></div>
 <div class="smenu-body" style="padding:0">
-<div class="alert alert-info" style="font-size:10.5px;line-height:1.7;margin-bottom:10px">
+<details class="alert alert-info hint-collapse" style="font-size:10.5px;line-height:1.7;margin-bottom:10px">
+<summary>ℹ️ نصب چطور انجام می‌شود؟</summary>
+<div class="hint-body">
 نصب توسط <b>deploy.php</b> انجام می‌شود که فایلی جداگانه است. این اسکریپت
 هرگز خودش را بازنویسی نمی‌کند تا اسکنر امنیتی هاست آن را مشکوک نشناسد.
 </div>
+</details>
 <div class="crow">
   <label>ریپو:</label>
   <input id="vcRepo" placeholder="user/repo" dir="ltr" oninput="vcDirty()" style="flex:1">
@@ -36270,10 +36471,11 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="aiNetWorker" style="display:none">
 <div class="crow"><label>آدرس Worker:</label>
 <input type="url" id="aiNetWorkerUrl" dir="ltr" placeholder="https://xxx.workers.dev" style="flex:1"></div>
-<div style="font-size:10px;color:#64748b;margin:-4px 0 6px;line-height:1.8">
+<details class="hint-mini" style="margin:-4px 0 6px"><summary>راهنمای Worker</summary>
+<div class="hint-body" style="font-size:10px;color:#64748b;line-height:1.8">
 💡 کد آمادهٔ Worker را با دکمهٔ «📄 کد Worker» بگیرید و در حساب رایگان Cloudflare بگذارید.<br>
 اگر آدرس شامل <code style="direction:ltr">{url}</code> باشد، آدرس مقصد جای آن می‌نشیند.
-</div>
+</div></details>
 <div class="cact" style="margin-top:0"><button class="btn btn-gray" onclick="aiShowWorkerCode()" style="flex:1;font-size:11px">📄 کد Worker</button></div>
 </div>
 
@@ -36311,12 +36513,13 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="ai-tab-panel" data-ai-panel="agent">
 <div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px">
 <div style="font-size:11px;color:#c084fc;font-weight:700;margin-bottom:6px">🤖 ایجنتِ مدیریت محصولات <span style="font-size:9px;background:#7c3aed;color:#fff;padding:1px 6px;border-radius:5px">آزمایشی</span></div>
-<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+<details class="hint-mini" style="margin-bottom:8px"><summary>این ایجنت چه می‌کند؟</summary>
+<div class="hint-body" style="font-size:10.5px;color:#64748b;line-height:1.8">
 کارتان را <b style="color:#94a3b8">به زبان فارسی</b> بنویسید؛ مدل خودش تصمیم می‌گیرد کدام ابزار را صدا بزند:
 فهرستِ محصولات، جست‌وجو در snappshop.ir، و به‌روزرسانیِ قیمت/موجودی در باسلام و ووکامرس.<br>
 ⚠️ نیازمند مدلی با پشتیبانیِ <b style="color:#94a3b8">فراخوانی ابزار</b> (Mistral، Gemini، Groq، GPT-OSS و…).
 اگر مدل پشتیبانی نکند، خودکار به حالتِ متنی سوییچ می‌شود.
-</div>
+</div></details>
 
 <div class="crow" style="align-items:center">
 <label>مدل فعال:</label>
@@ -36370,6 +36573,13 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 
 <div id="agStatus" style="margin-top:6px;font-size:11px;color:#c084fc"></div>
 <div id="agLog" class="hidden" style="margin-top:8px;background:#0b1120;border:1px solid #1e293b;border-radius:8px;padding:9px;max-height:260px;overflow:auto;font-size:11px;line-height:1.9;direction:rtl"></div>
+<!-- v10.26 (۳۹ب): گفتگوی زندهٔ ایجنت. لاگِ بالا فقط می‌گفت «گامِ ۳ — پرسش
+     از مدل…»؛ اینجا خودِ پیامِ مدل، ورودیِ هر ابزار و پاسخِ آن دیده می‌شود
+     تا در اجراهای طولانی کاربر بی‌خبر نماند. پیش‌فرض بسته است. -->
+<details class="cvo hidden" id="agConvo">
+<summary><span>💬 گفتگوی زنده با مدل</span><span class="cvo-live hidden" id="agConvoLive">در جریان</span><span class="cvo-n" id="agConvoN">۰ پیام</span></summary>
+<div class="cvo-bd" id="agConvoBody"><div class="cvo-empty">هنوز پیامی رد و بدل نشده است.</div></div>
+</details>
 <div id="agReport" class="hidden" style="margin-top:8px"></div>
 </div>
 
@@ -36389,11 +36599,12 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 
 <div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:10px">
 <div style="font-size:11px;color:#34d399;font-weight:700;margin-bottom:6px">🗓 اتوماسیونِ ایجنتی <span style="font-size:9px;background:#059669;color:#fff;padding:1px 6px;border-radius:5px">خودکار</span></div>
-<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+<details class="hint-mini" style="margin-bottom:8px"><summary>اتوماسیون چطور کار می‌کند؟</summary>
+<div class="hint-body" style="font-size:10.5px;color:#64748b;line-height:1.8">
 کارهای آماده تعریف کنید تا <b style="color:#94a3b8">خودشان در دوره‌های معین</b> اجرا شوند — بدون اینکه هر بار دستی دستور بدهید.
 هر کار یک دستورِ فارسی است که ایجنت با ابزارهایش انجام می‌دهد و نتیجه‌اش در لاگِ همان کار ثبت می‌شود.<br>
 ⚠️ اجرا روی <b style="color:#94a3b8">همان کرانِ برنامه</b> سوار است؛ اگر کران فعال نباشد هیچ کاری اجرا نمی‌شود.
-</div>
+</div></details>
 
 <div class="crow" style="align-items:center">
 <label>وضعیت کران:</label>
@@ -36652,9 +36863,10 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="crow"><label>حداکثر ٪ حذف:</label><input type="number" id="retireMaxPct" value="30" min="1" max="100" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">اگر بیشتر شد، متوقف شو</span></div>
 <div class="crow"><label>حداکثر تعداد:</label><input type="number" id="retireMaxCount" value="50" min="1" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">سقف در هر اجرا</span></div>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer;margin-bottom:6px"><input type="checkbox" id="notifRetire" checked style="width:15px;height:15px"><span>🔔 اعلان نتیجه به پیام‌رسان‌ها</span></label>
-<div style="font-size:10px;color:#f87171;background:#7f1d1d20;padding:6px 8px;border-radius:6px;margin-bottom:6px">
-⚠️ محافظ: اگر سایت مبدأ خراب شود و همه‌چیز «حذف‌شده» به نظر برسد، این دو سقف جلوی پاک شدن کل فروشگاه را می‌گیرند.
-</div>
+<details class="hint-mini" style="background:#7f1d1d20;padding:6px 8px;border-radius:6px;margin-bottom:6px"><summary style="color:#f87171">⚠️ محافظِ حذفِ انبوه</summary>
+<div class="hint-body" style="font-size:10px;color:#f87171;line-height:1.8">
+اگر سایت مبدأ خراب شود و همه‌چیز «حذف‌شده» به نظر برسد، این دو سقف جلوی پاک شدن کل فروشگاه را می‌گیرند.
+</div></details>
 <div class="cact">
 <button class="btn btn-gray" onclick="retirePreview()" style="flex:1">👁 پیش‌نمایش</button>
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
@@ -36851,17 +37063,19 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🔍 مغایرت‌گیری با مقصد</h3><span class="arrow">▼</span></div>
 <div class="smenu-body">
-<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
+<details class="hint-mini" style="margin-bottom:8px"><summary>این بررسی چه می‌کند؟</summary>
+<div class="hint-body" style="font-size:10.5px;color:#64748b;line-height:1.7">
 همهٔ پروفایل‌هایی که «همگام‌سازی دوره‌ای» آن‌ها روشن است را با فروشگاه مقایسه می‌کند:
 محصولی که در هیچ پروفایلی نیست، و محصولی که قیمتش مغایرت دارد.
 اول فقط گزارش می‌گیرد؛ اعمال تغییرات با تأیید شماست.
-</div>
+</div></details>
 <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;margin-bottom:6px;cursor:pointer">
 <input type="checkbox" id="reconAllProfiles" checked style="width:14px;height:14px">
 <span>همهٔ پروفایل‌ها (نه فقط آن‌هایی که همگام‌سازی دوره‌ای دارند)</span></label>
-<div style="font-size:10px;color:#64748b;margin:-2px 0 8px;line-height:1.8">
+<details class="hint-mini" style="margin:-2px 0 8px"><summary>چرا این تیک مهم است؟</summary>
+<div class="hint-body" style="font-size:10px;color:#64748b;line-height:1.8">
 💡 اگر محصولات را دستی می‌فرستید، این گزینه باید روشن باشد؛ وگرنه گزارش خالی درمی‌آید.
-</div>
+</div></details>
 <div class="cact">
 <button class="btn btn-purple" onclick="reconScan('woo')" style="flex:1">🛒 بررسی ووکامرس</button>
 <button class="btn btn-cyan" onclick="reconScan('bsl')" style="flex:1">🏪 بررسی باسلام</button>
@@ -36901,12 +37115,13 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <option value="5">۵ کلمه</option>
 </select>
 </div>
-<div style="font-size:10.5px;color:#64748b;margin:-2px 0 8px;line-height:1.8">
+<details class="hint-mini" style="margin:-2px 0 8px"><summary>«چند کلمهٔ اول» یعنی چه؟</summary>
+<div class="hint-body" style="font-size:10.5px;color:#64748b;line-height:1.8">
 💡 دسته‌بندی خودکار دوربه‌دور اجرا می‌شود: اگر ۲ باشد، اول با «کلمهٔ اول» تلاش می‌کند
 و اگر نتیجه‌ای نداد، دور بعد با «دو کلمهٔ اول».<br>
 🧠 یادگیری هم برای همهٔ طول‌های ۱ تا همین عدد ثبت می‌شود، پس تغییر این تنظیم
 آموخته‌های قبلی را بی‌فایده نمی‌کند.
-</div>
+</div></details>
 <div class="cact">
 <button class="btn btn-gray" onclick="catLearnShow()" style="flex:1">📚 آموخته‌ها</button>
 <button class="btn btn-gray" onclick="catLearnTest()" style="flex:1">🧪 آزمایش عنوان</button>
@@ -36930,18 +37145,20 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>✏️ ویرایش محصولات مقصد</h3><span class="arrow">▼</span></div>
 <div class="smenu-body">
-<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+<details class="hint-mini" style="margin-bottom:8px"><summary>ویرایشگر چه می‌کند؟</summary>
+<div class="hint-body" style="font-size:10.5px;color:#64748b;line-height:1.8">
 ویرایش تکی یا گروهی محصولات روی ووکامرس و باسلام: قیمت، موجودی، وضعیت، توضیحات و حذف.
 همه‌چیز سمت سرور اجرا می‌شود و گزارش به پیام‌رسان‌ها می‌رود.
-</div>
+</div></details>
 <div class="cact">
 <button class="btn btn-purple" onclick="editorOpen('woo')" style="flex:1">🛒 ویرایش ووکامرس</button>
 <button class="btn btn-cyan" onclick="editorOpen('bsl')" style="flex:1">🏪 ویرایش باسلام</button>
 </div>
-<div style="font-size:10px;color:#fbbf24;margin-top:6px;line-height:1.8">
-⚠️ باسلام در API خود «حذف همیشگی» ندارد؛ نزدیک‌ترین کار <b>بایگانی</b> است که محصول را از غرفه برمی‌دارد.
+<details class="hint-mini" style="margin-top:6px"><summary style="color:#fbbf24">⚠️ نکتهٔ حذف در باسلام و ووکامرس</summary>
+<div class="hint-body" style="font-size:10px;color:#fbbf24;line-height:1.8">
+باسلام در API خود «حذف همیشگی» ندارد؛ نزدیک‌ترین کار <b>بایگانی</b> است که محصول را از غرفه برمی‌دارد.
 در ووکامرس هم حذف به زباله‌دان می‌رود مگر گزینهٔ حذف همیشگی را بزنید.
-</div>
+</div></details>
 </div></div>
 
 <!-- v8.62: عکس‌دار کردن محصولات ووکامرس -->
@@ -37077,9 +37294,10 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="cact">
 <button class="btn btn-gray" onclick="arShowLog()" style="flex:1">📜 پاسخ‌های اخیر</button>
 </div>
-<div style="font-size:10px;color:#fbbf24;margin-top:4px;line-height:1.8">
-⚠️ «پیش‌نمایش» هیچ پیامی نمی‌فرستد. اجرای دوره‌ای به کران‌جاب وابسته است.
-</div>
+<details class="hint-mini" style="margin-top:4px"><summary style="color:#fbbf24">⚠️ دربارهٔ «پیش‌نمایش»</summary>
+<div class="hint-body" style="font-size:10px;color:#fbbf24;line-height:1.8">
+«پیش‌نمایش» هیچ پیامی نمی‌فرستد. اجرای دوره‌ای به کران‌جاب وابسته است.
+</div></details>
 </div>
 
 <div id="arR" style="margin-top:8px"></div>
@@ -37224,11 +37442,13 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                     </label>
                 </div>
             </div>
-            <div style="font-size:10px;color:#64748b;line-height:1.7;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px 8px;margin-top:4px">
+            <details class="hint-mini" style="background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px 8px;margin-top:4px"><summary>چرا «فقط تغییرات»؟</summary>
+                <div class="hint-body" style="font-size:10px;color:#64748b;line-height:1.7">
                 💡 بدون این تیک‌ها، هر اجرای خودکار <b>کل</b> محصولات را دوباره می‌فرستد.
                 با تیک، فقط تفاوت‌های نسبت به اجرای قبلی ارسال می‌شود — برای فهرست‌های بزرگ بسیار سریع‌تر است.
                 محصولات حذف‌شده از مبدأ مسیر جداگانه دارند («🗂 محصولات رفته از مبدأ»).
-            </div>
+                </div>
+            </details>
             <div id="profileSyncStatus" style="font-size:10px;color:#64748b;margin-top:6px"></div>
             <div class="row" style="margin-top:8px;padding-top:8px;border-top:1px solid #1e293b;align-items:center">
                 <label style="min-width:80px;font-size:12px;color:#94a3b8">🌐 اتصال:</label>
@@ -37306,7 +37526,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         </div>
 
         <div id="visualCtrl" class="hidden">
-            <div class="alert alert-info">به تب «سلکتورها» بروید و المان‌ها را انتخاب کنید.</div>
+            <details class="alert alert-info hint-collapse"><summary>ℹ️ راهنمای حالتِ بصری</summary><div class="hint-body">به تب «سلکتورها» بروید و المان‌ها را انتخاب کنید.</div></details>
             <div class="row">
                 <button class="btn btn-blue" id="startVisBtn" onclick="startVisual()" style="flex:1" disabled>▶ شروع (نیاز به کانتینر)</button>
                 <button class="btn btn-gray" onclick="switchMainTab('selectors')">🎨 انتخاب</button>
@@ -37352,11 +37572,13 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                 <option value="100000">صد هزار (100,000)</option>
             </select>
         </div>
-        <div style="font-size:11px;color:#64748b;margin-top:6px;line-height:1.8">
+        <details class="hint-mini" style="margin-top:6px"><summary>راهنمای درصد، ضریب و گرد کردن</summary>
+            <div class="hint-body" style="font-size:11px;color:#64748b;line-height:1.8">
             💡 <b>درصد:</b> ۲۰ = افزایش ۲۰٪ | -۱۰ = کاهش ۱۰٪<br>
             💡 <b>ضریب:</b> ۱.۵ = ۵۰٪ افزایش | ۰.۹ = ۱۰٪ کاهش<br>
             💡 <b>گرد کردن:</b> بعد از اعمال درصد/ضریب به نزدیک‌ترین ضریب گرد می‌شود
-        </div>
+            </div>
+        </details>
 
         <!-- v8.88: تعدیل جداگانه برای هر مقصد — همان‌جایی که بقیهٔ تنظیمات
              قیمت هست، نه در منوی همبرگری. -->
@@ -37446,9 +37668,11 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <label>حداقل قیمت:</label>
             <input type="number" id="minPrice" value="10000" step="1000" placeholder="10000" style="flex:1" oninput="scheduleSave()">
         </div>
-        <div style="font-size:11px;color:#64748b;margin-bottom:10px;line-height:1.6">
+        <details class="hint-mini" style="margin-bottom:10px"><summary>«حداقل قیمت» چه می‌کند؟</summary>
+            <div class="hint-body" style="font-size:11px;color:#64748b;line-height:1.6">
             💡 محصولاتی که قیمت نهایی آن‌ها کمتر از این مقدار باشد، با دکمه زیر حذف می‌شوند.
-        </div>
+            </div>
+        </details>
         <div class="row">
             <button class="btn btn-orange" onclick="removeBelowMinPrice()" style="flex:1">🚫 حذف زیر حداقل</button>
             <button class="btn btn-red" onclick="removeNoPrice()" style="flex:1">🗑️ حذف بدون قیمت</button>
@@ -37525,7 +37749,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         <div class="smenu-body open sel-open">
     <div class="card">
         <div class="section-title">🎨 سلکتورهای لیست محصولات</div>
-        <details class="alert alert-info hint-collapse" open>
+        <details class="alert alert-info hint-collapse">
             <summary>💡 نکته مهم — راهنمای انتخاب سلکتورها</summary>
             <div class="hint-body">
                 💡 <b>نکته مهم:</b> پس از کلیک روی هر المان، یک <b>پیش‌نمایش زنده</b> از متنی که در خروجی می‌آید می‌بینید.
@@ -37553,7 +37777,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <button class="btn btn-cyan" onclick="copyInspectorScript()" style="flex:1" title="کپی اسکریپت بازرسی — در سایت مقصد اجرا کنید">📋 کپی اسکریپت بازرسی</button>
         </div>
 
-        <details style="margin-top:6px;font-size:11px;color:#94a3b8">
+        <details class="hint-collapse" style="margin-top:6px;font-size:11px;color:#94a3b8">
             <summary style="cursor:pointer;color:#67e8f9;font-size:12px">📖 راهنمای بازرسی المان (بدون نیاز به کامپیوتر)</summary>
             <div style="padding:8px;background:#0f172a;border:1px solid #334155;border-radius:8px;margin-top:6px">
                 <b style="color:#fbbf24">🔍 بازرسی تمام صفحه:</b><br>
@@ -37718,7 +37942,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         <div class="smenu-body open sel-open">
     <div class="card" style="margin-top:14px;border-color:#a855f7">
         <div class="section-title purple">📄 سلکتورهای صفحه جزئیات محصول</div>
-        <details class="alert alert-purple hint-collapse" open>
+        <details class="alert alert-purple hint-collapse">
             <summary>💡 راهنمای استخراج جزئیات</summary>
             <div class="hint-body">
                 💡 ابتدا حداقل یک محصول را در لیست استخراج کنید، سپس با دکمه زیر صفحه نمونه آن را باز کنید و روی هر فیلد کلیک کنید.<br>
@@ -37751,7 +37975,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         <div class="smenu-body sel-open">
     <div class="card" style="margin-top:14px;border-color:#ec4899">
         <div class="section-title" style="color:#f9a8d4">🖼 چند عکس از صفحهٔ محصول (گالری)</div>
-        <details class="alert hint-collapse" style="background:#500724;border:1px solid #ec4899;color:#fbcfe8" open>
+        <details class="alert hint-collapse" style="background:#500724;border:1px solid #ec4899;color:#fbcfe8">
             <summary>💡 راهنمای گالری تصاویر</summary>
             <div class="hint-body">
                 💡 پیش‌فرض هر محصول فقط یک عکس دارد. اینجا می‌توانید بقیهٔ عکس‌های صفحهٔ محصول را هم بردارید.
@@ -37769,7 +37993,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         </div>
 
         <div id="galAutoBox" class="hidden">
-            <details class="hint-collapse" open>
+            <details class="hint-collapse">
                 <summary style="color:#94a3b8;font-size:10.5px">📖 راهنمای روش خودکار</summary>
                 <div class="hint-body" style="font-size:10.5px;color:#94a3b8;line-height:1.8">
                     سلکتور <b>ظرف گالری</b> را بدهید (نه خودِ عکس‌ها). هر تصویری داخلش باشد برداشته می‌شود
@@ -37786,7 +38010,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         </div>
 
         <div id="galManualBox" class="hidden">
-            <details class="hint-collapse" open>
+            <details class="hint-collapse">
                 <summary style="color:#94a3b8;font-size:10.5px">📖 راهنمای روش دستی</summary>
                 <div class="hint-body" style="font-size:10.5px;color:#94a3b8;line-height:1.8">
                     هر سلکتور را در یک خط بنویسید (یا با <code>|</code> جدا کنید).
@@ -37799,7 +38023,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         </div>
 
         <div id="galNumberBox" class="hidden">
-            <details class="hint-collapse" open>
+            <details class="hint-collapse">
                 <summary style="color:#94a3b8;font-size:10.5px">📖 راهنمای روش شماره‌دار</summary>
                 <div class="hint-body" style="font-size:10.5px;color:#94a3b8;line-height:1.8">
                     اگر سلکتور عکس‌ها شماره‌دار است، الگو را با <code>{n}</code> بنویسید.
@@ -37830,7 +38054,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <div class="row">
                 <button class="btn btn-pink" onclick="galleryTest()" style="flex:1">🧪 آزمایش روی یک محصول</button>
             </div>
-            <details class="hint-collapse" open>
+            <details class="hint-collapse">
                 <summary style="font-size:10px;color:#fbbf24">⚠️ نکتهٔ سرعت استخراج</summary>
                 <div class="hint-body" style="font-size:10px;color:#fbbf24;line-height:1.8">
                     با روشن بودن گالری، هنگام استخراج صفحهٔ <b>همهٔ</b> محصولات باز می‌شود (نه فقط بی‌عکس‌ها)،
@@ -37968,7 +38192,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 
 <div class="card">
 <div class="section-title" style="color:#a78bfa">📤 ارسال ووکامرس</div>
-<div class="alert alert-info" style="margin-bottom:8px">💡 <b id="wcN">۰</b> محصول با قیمت از <span id="wcT">۰</span> کل</div>
+<details class="alert alert-info hint-collapse" style="margin-bottom:8px"><summary><span>💡 <b id="wcN">۰</b> محصول با قیمت از <span id="wcT">۰</span> کل</span></summary><div class="hint-body" style="font-size:11px">فقط محصولاتی به ووکامرس فرستاده می‌شوند که <b>قیمت</b> داشته باشند؛ بقیه نادیده گرفته می‌شوند. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود و در <b>مدیر وظیفه</b> هم دیده می‌شود.</div></details>
 <div class="cact"><button class="btn btn-purple" id="wSB" onclick="sendWoo()" style="flex:1">🚀 ارسال ووکامرس</button><button class="btn btn-orange hidden" id="wRB" onclick="sendWoo()" style="flex:1">🔄 تلاش مجدد</button><button class="btn btn-red hidden" id="wST" onclick="wooStop()">⏹</button></div>
 <div class="progress hidden" id="wP"><div class="progress-bar" id="wPB" style="background:linear-gradient(90deg,#7c3aed,#a78bfa)"></div></div>
 <div class="status" id="wSS" style="color:#c4b5fd"></div>
@@ -37993,7 +38217,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="wooDedupBody" style="display:none;padding:10px;background:#0f172a">
 <!-- v10.02 (۱۶): پنلِ مشترکِ حذفِ تکراری. همین قالب برای باسلام هم در مودال
      بازتولید می‌شود تا رفتار و تنظیماتِ هر دو مقصد دقیقاً یکسان باشد. -->
-<div class="alert alert-info" style="margin-bottom:8px;font-size:11px">💡 محصولاتِ هم‌نام شناسایی می‌شوند و طبق معیارِ شما یکی می‌ماند و بقیه حذف. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود؛ بستنِ مرورگر مشکلی ایجاد نمی‌کند.</div>
+<details class="alert alert-info hint-collapse" style="margin-bottom:8px;font-size:11px"><summary>💡 حذفِ تکراری‌ها چطور کار می‌کند؟</summary><div class="hint-body">محصولاتِ هم‌نام شناسایی می‌شوند و طبق معیارِ شما یکی می‌ماند و بقیه حذف. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود؛ بستنِ مرورگر مشکلی ایجاد نمی‌کند.</div></details>
 <div id="ddCfgHost"></div>
 <div class="cact" style="margin-top:8px">
     <button class="btn btn-orange" id="ddBtn" onclick="ddStart('woo','scan')" style="flex:1">🔍 گزارشِ تکراری‌ها</button>
@@ -38035,7 +38259,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="crow"><label>🔄 تاخیر:</label><input type="number" id="bsRetryDelayMs" value="1000" min="0" max="30000" step="100" style="max-width:120px" dir="ltr"><small>ms</small></div>
 </div>
 
-<div class="alert alert-info" style="margin-bottom:8px">💡 <b id="bsN">۰</b> محصول با قیمت از <span id="bsT2">۰</span> کل</div>
+<details class="alert alert-info hint-collapse" style="margin-bottom:8px"><summary><span>💡 <b id="bsN">۰</b> محصول با قیمت از <span id="bsT2">۰</span> کل</span></summary><div class="hint-body" style="font-size:11px">فقط محصولاتِ دارای <b>قیمت</b> به باسلام فرستاده می‌شوند. با تیکِ «ارسال همزمان به همهٔ غرفه‌ها» هر غرفه قیمتِ خودش را می‌گیرد.</div></details>
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
 <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:#c4b5fd">
 <input type="checkbox" id="bsSendAllShops" onchange="bslToggleAllShops()" style="width:15px;height:15px">
@@ -38080,19 +38304,24 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
     <button class="btn btn-teal" onclick="showBslProductsModal()" style="flex:1">🏪 مدیریت جامع محصولات</button>
     <button class="btn btn-cyan" onclick="bslPhase2Check()" style="flex:1" title="فهرستِ محصولاتِ ردشده با امکانِ انتخابِ دستیِ دسته">🔄 فاز ۲ — ردشده‌ها</button>
 </div>
-<div style="font-size:10px;color:#64748b;margin-top:7px;line-height:1.8">
+<details class="hint-mini" style="margin-top:7px"><summary>این ابزارها در پس‌زمینه اجرا می‌شوند</summary>
+<div class="hint-body" style="font-size:10px;color:#64748b;line-height:1.8">
 💡 هر دوی «تکراری‌ها» و «اصلاح دسته‌بندی» در <b>پس‌زمینهٔ سرور</b> اجرا می‌شوند: می‌توانید پنجره را ببندید، و پیشرفت/توقفشان در <b>🗂 مدیر وظیفه</b> هم در دسترس است.
-</div>
+</div></details>
 </div>
 </div>
 </div>
 
 <div class="card" style="margin-top:14px">
 <div class="section-title" style="color:#22d3ee">🔄 سینک دوره‌ای (همگام‌سازی خودکار)</div>
-<div class="alert alert-info" style="margin-bottom:8px;font-size:11px">💡 هر پروفایل می‌تواند سینک دوره‌ای خود را داشته باشد. تنظیمات سینک در تب «شروع» بخش پروفایل انجام می‌شود.<br>
+<details class="alert alert-info hint-collapse" style="margin-bottom:8px;font-size:11px">
+<summary>💡 سینکِ دوره‌ای و راه‌اندازیِ cron</summary>
+<div class="hint-body">
+هر پروفایل می‌تواند سینک دوره‌ای خود را داشته باشد. تنظیمات سینک در تب «شروع» بخش پروفایل انجام می‌شود.<br>
 🔗 برای فعال‌سازی سینک خودکار از سرور، یک <b>cron job</b> به آدرس زیر اضافه کنید:<br>
 <code style="background:#0f172a;padding:2px 8px;border-radius:4px;font-size:10px;direction:ltr">*/5 * * * * curl -s "https://yourdomain.com/scraper4.php?cron_run" > /dev/null</code>
 </div>
+</details>
 <div id="syncProfilesList" style="margin-bottom:10px"></div>
 <div class="cact">
     <button class="btn btn-cyan" onclick="refreshSyncStatus()" style="flex:1">🔄 بروزرسانی وضعیت</button>
@@ -38108,12 +38337,15 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
     <div style="padding:8px;background:#22c55e;color:#000;font-size:12px;font-weight:bold;text-align:center;border-radius:8px;margin-bottom:10px">✅ تب درون‌ریزی v7.81b — اگر این متن را می‌بینید، تب فعال است!</div>
     <div class="card">
         <div class="section-title">📥 آپلود فایل CSV/Excel محصولات</div>
-        <div class="alert alert-info" style="margin-bottom:10px;font-size:11px">
-            💡 فایل CSV یا Excel را آپلود کنید. ستون‌ها به صورت خودکار شناسایی و نگاشت می‌شوند.<br>
+        <details class="alert alert-info hint-collapse" style="margin-bottom:10px;font-size:11px">
+            <summary>💡 راهنمای آپلودِ فایل</summary>
+            <div class="hint-body">
+            فایل CSV یا Excel را آپلود کنید. ستون‌ها به صورت خودکار شناسایی و نگاشت می‌شوند.<br>
             فرمت‌های مجاز: CSV, XLS (Excel XML), XLSX<br>
             <span style="color:#f9a8d4">🎯 اگر فایل ستون <b>لینک صفحهٔ محصول</b> داشته باشد، می‌توانید بعد از وارد کردن،
             همان صفحه را باز کنید و توضیحات، تنوع‌ها و گالری را با کلیک انتخاب کنید — درست مثل سایت اسکرپ‌شده.</span>
-        </div>
+            </div>
+        </details>
         <div class="row" style="align-items:center">
             <input type="file" id="importFile" accept=".csv,.xls,.xlsx,.xml" style="flex:1">
             <button class="btn btn-blue" onclick="uploadImportFile()" id="btnUploadImport">📤 آپلود و تحلیل</button>
@@ -38123,9 +38355,12 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 
     <div class="card hidden" id="importMappingCard">
         <div class="section-title">🗺️ نگاشت ستون‌ها</div>
-        <div class="alert alert-info" style="margin-bottom:10px;font-size:11px">
+        <details class="alert alert-info hint-collapse" style="margin-bottom:10px;font-size:11px">
+            <summary>ℹ️ راهنمای نگاشتِ ستون‌ها</summary>
+            <div class="hint-body">
             ستون‌های فایل شما را به فیلدهای محصول متصل کنید. نگاشت خودکار انجام شده، در صورت نیاز اصلاح کنید.
-        </div>
+            </div>
+        </details>
         <div id="importMappingRows" style="margin-bottom:12px"></div>
         <div id="importPreview" style="margin-bottom:12px"></div>
 
@@ -38206,11 +38441,12 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
              سایت اسکرپ‌شده، صفحهٔ محصول را باز کرد و جزئیات را انتخاب کرد. -->
         <div id="impDetailBox" class="hidden" style="margin-bottom:10px;padding:10px;background:#3b0764;border:1px solid #a855f7;border-radius:8px">
             <div style="font-weight:700;font-size:12px;color:#e9d5ff;margin-bottom:6px">🎯 انتخاب جزئیات از روی صفحهٔ محصول</div>
-            <div style="font-size:11px;color:#c4b5fd;line-height:1.9;margin-bottom:8px">
+            <details class="hint-mini" style="margin-bottom:8px"><summary style="color:#c4b5fd">راهنمای انتخابِ جزئیات</summary>
+            <div class="hint-body" style="font-size:11px;color:#c4b5fd;line-height:1.9">
                 <span id="impLinkCount"></span>
                 صفحهٔ محصول از روی همین لینک‌ها باز می‌شود و می‌توانید توضیحات، تنوع‌ها، گالری و بقیهٔ فیلدها را
                 با کلیک انتخاب کنید — دقیقاً مثل سایت اسکرپ‌شده.
-            </div>
+            </div></details>
             <div class="row">
                 <button class="btn btn-pink" onclick="importOpenDetailPicker()" style="flex:2">🎯 باز کردن صفحهٔ محصول و انتخاب جزئیات</button>
                 <button class="btn btn-purple" onclick="importSuggestDetail()" style="flex:1">💡 پیشنهاد خودکار</button>
@@ -39808,6 +40044,8 @@ let selagLines = [];     // خطوطِ لاگ که تا حالا گرفته‌ا
 let selagTimer = null;   // شناسهٔ setInterval نظرسنجی
 let selagKind  = 'list'; // آخرین نوعِ اجرا
 let selagLast  = null;   // آخرین نتیجهٔ کامل (?selagent_result)
+let selagConvo = [];     // v10.26 (۳۹ب): پیام‌های ردوبدل‌شده با مدل
+let selagCSince = 0;     // v10.26 (۳۹ب): چند پیام را تا حالا گرفته‌ایم
 
 /** نشانیِ صفحه‌ای که باید کاوش شود، بسته به نوعِ کار. */
 function selagUrlFor(kind) {
@@ -39828,6 +40066,7 @@ function selagStart(kind) {
     selagKind = kind;
     selagLines = [];
     selagLast = null;
+    selagConvo = []; selagCSince = 0;   // v10.26 (۳۹ب)
     selagState = { running: true, kind: kind, url: url, phase: 'start', step: 0, calls: 0, probes: 0, confirmed: 0 };
     selagRender();
 
@@ -39866,11 +40105,18 @@ function selagPollStop() {
 }
 
 function selagTick() {
-    fetch('?selagent_status=1&since=' + selagLines.length)
+    fetch('?selagent_status=1&since=' + selagLines.length + '&csince=' + selagCSince)
         .then(function (r) { return r.json(); })
         .then(function (p) {
             if (!p || !p.ok) return;
             (p.log || []).forEach(function (l) { selagLines.push(l && l.m ? l.m : String(l)); });
+            /* v10.26 (۳۹ب): پیام‌های تازهٔ گفتگو */
+            if (p.convo && p.convo.length) {
+                p.convo.forEach(function (m) { selagConvo.push(m); });
+                selagCSince = p.convo_total || selagConvo.length;
+            } else if (typeof p.convo_total === 'number') {
+                selagCSince = p.convo_total;
+            }
             selagState = p;
             selagRender();
             if (p.done || p.running === false) {
@@ -39910,6 +40156,8 @@ function selagPct(p) {
     const st = +(p.step || 0), mx = 16;
     return Math.max(3, Math.min(97, Math.round(st / mx * 100)));
 }
+
+let selagConvoOpen = false;   // v10.26 (۳۹ب): باکسِ گفتگو باز است یا نه
 
 /** رندرِ یکسانِ پنل در هر سه جا (زیرتبِ لیست، زیرتبِ جزئیات، تبِ ایجنت). */
 function selagRender() {
@@ -39963,6 +40211,20 @@ function selagPanelHtml() {
         h += '<div class="selag-log" id="selagLogBox">';
         selagLines.slice(-120).forEach(function (l) { h += '<div>' + esc(l) + '</div>'; });
         h += '</div>';
+    }
+
+    /* v10.26 (۳۹ب): گفتگوی زنده. چون selagRender کلِ پنل را دوباره
+       می‌سازد، وضعیتِ باز/بستهٔ details را در selagConvoOpen نگه می‌داریم
+       تا با هر نوسازیِ ۱٫۴ ثانیه‌ای زیرِ دستِ کاربر بسته نشود. */
+    if (selagConvo.length) {
+        h += '<details class="cvo"' + (selagConvoOpen ? ' open' : '')
+           + ' ontoggle="selagConvoOpen=this.open">'
+           + '<summary><span>💬 گفتگوی زنده با مدل</span>'
+           + (p.running ? '<span class="cvo-live">در جریان</span>' : '')
+           + '<span class="cvo-n">' + toFa(selagConvo.length) + ' پیام</span></summary>'
+           + '<div class="cvo-bd">';
+        selagConvo.forEach(function (m) { h += cvoMsgHtml(m); });
+        h += '</div></details>';
     }
 
     h += selagResultHtml();
@@ -40034,6 +40296,7 @@ function selagApply() {
 
 function selagDismiss() {
     selagState = null; selagLast = null; selagLines = [];
+    selagConvo = []; selagCSince = 0;    // v10.26 (۳۹ب)
     selagRender();
 }
 
@@ -40041,11 +40304,13 @@ function selagDismiss() {
  *  برای بقیهٔ کارها می‌کند. بدون این، اگر کاربر وسطِ کار F5 بزند فکر
  *  می‌کند اجرا مرده است. */
 function selagResume() {
-    fetch('?selagent_status=1&since=0')
+    fetch('?selagent_status=1&since=0&csince=0')
         .then(function (r) { return r.json(); })
         .then(function (p) {
             if (!p || !p.ok || !p.started_at) return;
             selagLines = (p.log || []).map(function (l) { return l && l.m ? l.m : String(l); });
+            selagConvo = p.convo || [];                         // v10.26 (۳۹ب)
+            selagCSince = p.convo_total || selagConvo.length;
             selagState = p;
             if (p.running) { selagRender(); selagPollStart(); }
             else if (p.result_ok) { selagRender(); selagFetchResult(); }
@@ -41903,6 +42168,35 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.26', t:'💬 گفتگوی زندهٔ ایجنت‌ها — و جمع‌شدنِ همهٔ راهنماها', items:[
+    '💬 <b>ب — دیگر وسطِ کارِ ایجنت بی‌خبر نمی‌مانید.</b> شکایتِ دقیقی که این',
+    '   بند از آن زاده شد: ایجنتِ استخراجِ جزئیات چند دقیقه کار می‌کرد و تنها',
+    '   چیزی که دیده می‌شد یک خطِ «گامِ ۳ — پرسش از مدل…» بود؛ معلوم نبود مدل',
+    '   چه گفته، چه ابزاری صدا زده و آن ابزار چه برگردانده. حالا کنارِ همان',
+    '   لاگ، یک <b>باکسِ کشویی «💬 گفتگوی زنده با مدل»</b> نشسته که خودِ',
+    '   پیام‌ها را نشان می‌دهد: دستورِ سیستمی، خواستهٔ کاربر، متنِ پاسخِ مدل،',
+    '   نامِ هر ابزار با آرگومان‌هایش، و نتیجهٔ برگشتی — هر کدام با رنگ و',
+    '   برچسبِ خودش. هر ۱٫۲ ثانیه فقط پیام‌های <i>تازه</i> گرفته می‌شوند، پس',
+    '   نه شبکه بار می‌بیند نه اسکرولِ شما می‌پرد.',
+    '🧲 <b>و این برای هر سه مسیر یکی است.</b> ایجنتِ مدیریتِ محصولات، ایجنتِ',
+    '   کشفِ سلکتور (در هر دو زیرتب)، و کارهای <b>اتوماسیون</b>: با «⚡ اجرای',
+    '   فوری» همان پنجرهٔ لاگ حالا گفتگو را زنده نشان می‌دهد، نه اینکه تا',
+    '   پایانِ اجرا خالی بماند. متن‌های خیلی بلند کوتاه می‌شوند تا فایلِ',
+    '   پیشرفت باد نکند.',
+    '↩️ <b>و رفرشِ صفحه دیگر اجرا را «گم» نمی‌کند.</b> اگر وسطِ کار F5 بزنید،',
+    '   پنلِ ایجنت خودش وضعیت و کلِ گفتگو را از سرور برمی‌دارد و نظرسنجی را',
+    '   ادامه می‌دهد — همان کاری که ایجنتِ سلکتور از ۱۰٫۲۵ می‌کرد.',
+    '📕 <b>الف — همهٔ باکس‌های راهنما جمع شدند.</b> ده‌ها توضیحِ ثابت در سراسرِ',
+    '   برنامه بودند که همیشه باز بودند و هر پنل را دو برابر بلندتر می‌کردند؛',
+    '   بارِ اولْ مفید، بارِ صدمْ فقط اسکرول. حالا همه‌شان <code>&lt;details&gt;</code>',
+    '   کشویی‌اند و <b>پیش‌فرض بسته</b>: هشت باکسِ آبیِ راهنما، هفت کشوییِ',
+    '   قبلاً-باز، و سیزده توضیحِ ریزِ زیرِ فیلدها با ظاهرِ تازهٔ',
+    '   <code>.hint-mini</code> که همان کم‌رنگیِ قبلی را دارد ولی یک سربرگِ',
+    '   قابلِ کلیک. متن‌ها دست‌نخورده‌اند — فقط تا وقتی لازمشان ندارید پنهان‌اند.',
+    '🗑 <b>ج — نوارِ سبزِ «خلاصه گزارش کارهای انجام شده» برداشته شد.</b> بالای',
+    '   صفحه یک باکسِ همیشگی بود که فهرستِ کارهای همان نسخه را تکرار می‌کرد؛',
+    '   همان اطلاعات در «📋 تغییرات نسخه‌ها» هست و اینجا فقط جا می‌گرفت.',
+  ]},
   {v:'10.25', t:'🧲 ایجنتِ کشفِ سلکتور — و دو نیم‌شدنِ تبِ سلکتور', items:[
     '🧲 <b>ج — دکمهٔ «پیشنهاد» دیگر حدس نمی‌زند؛ ایجنت واقعاً صفحه را می‌خوانَد.</b>',
     '   پیشنهاددهندهٔ قدیمی یک فهرستِ ثابت از الگوهای رایج (<code>.product</code>،',
@@ -46839,6 +47133,7 @@ document.addEventListener('DOMContentLoaded',function(){
     try{ selCtlInit(); }catch(e){}           // v9.90: تیک‌های نمایش کنترل‌های سلکتور
     try{ selSubRestore(); }catch(e){}        // v10.25 (۳۸ب): زیرتبِ آخرِ تبِ سلکتور
     try{ selagResume(); }catch(e){}          // v10.25 (۳۸ج): بازیابیِ ایجنتِ در جریان
+    try{ agResume(); }catch(e){}             // v10.26 (۳۹ب): بازیابیِ ایجنتِ محصولات + گفتگوی زنده
     const si=$('bsCatSearch');
     if(si){
         si.addEventListener('focus',function(){renderBslCatFilter(this.value);$('bsCatList').style.display='block';});
@@ -47128,6 +47423,8 @@ function apPickModel(id){
     softScrollIntoView(sel,{behavior:'smooth',block:'center'});
 }
 let apLogTimer = null;     // تایمرِ نوسازیِ مودالِ لاگ
+let apConvoTimer = null;   // v10.26 (۳۹ب): تایمرِ گفتگوی زنده
+let apConvo = [], apCSince = 0;
 
 /** کاتالوگ را یک‌بار می‌گیرد و بخش‌های ثابتِ تب را می‌سازد */
 function apLoadCatalog(force){
@@ -47600,17 +47897,53 @@ function apShowLog(id, live){
         +     '<button class="btn btn-gray" onclick="apCloseLog()" style="font-size:10px;padding:4px 8px">✕</button>'
         +   '</div>'
         + '</div>'
-        + '<div id="apLogBody" style="font-size:11px">در حالِ بارگذاری…</div>'
+        /* v10.26 (۳۹ب): گفتگوی زندهٔ همین اجرا، داخلِ همین پنجره. تا اینجا
+           کاربر بعد از «⚡ اجرای فوری» فقط یک لاگِ پس از پایان می‌دید و در
+           تمامِ مدتِ اجرا بی‌خبر بود. */
+        + '<details class="cvo hidden" id="apConvo">'
+        +   '<summary><span>💬 گفتگوی زندهٔ این اجرا</span>'
+        +     '<span class="cvo-live hidden" id="apConvoLive">در جریان</span>'
+        +     '<span class="cvo-n" id="apConvoN">۰ پیام</span></summary>'
+        +   '<div class="cvo-bd" id="apConvoBody"></div>'
+        + '</details>'
+        + '<div id="apLogBody" style="font-size:11px;margin-top:10px">در حالِ بارگذاری…</div>'
         + '</div>';
     apLoadLog();
     if(apLogTimer){ clearInterval(apLogTimer); apLogTimer = null; }
     if(live) apLogTimer = setInterval(apLoadLog, 3000);
+    /* گفتگو را تندتر از لاگ نو کن (لاگ فقط بعد از پایانِ اجرا پر می‌شود،
+       ولی گفتگو همان لحظه معنا دارد). */
+    apConvo = []; apCSince = 0;
+    cvoRender('apConvo', [], !!live);
+    if(apConvoTimer){ clearInterval(apConvoTimer); apConvoTimer = null; }
+    apConvoTick();
+    apConvoTimer = setInterval(apConvoTick, 1500);
+}
+
+/** v10.26 (۳۹ب): نظرسنجیِ گفتگوی ایجنت برای مودالِ اتوماسیون.
+ *  کارهای اتوماسیون از همان agentRun می‌گذرند، پس همان فایلِ پیشرفت را
+ *  می‌خوانیم — نیازی به اندپوینتِ تازه نیست. */
+function apConvoTick(){
+    const m = $('apLogModal');
+    if(!m || m.style.display === 'none'){ if(apConvoTimer){ clearInterval(apConvoTimer); apConvoTimer = null; } return; }
+    fetch('?agent_status&since=99999&csince=' + apCSince).then(r=>r.json()).then(p=>{
+        if(!p) return;
+        if(p.convo && p.convo.length){
+            p.convo.forEach(function(x){ apConvo.push(x); });
+            apCSince = p.convo_total || apConvo.length;
+        } else if(typeof p.convo_total === 'number'){
+            apCSince = p.convo_total;
+        }
+        cvoRender('apConvo', apConvo, !p.done && !!p.running);
+        if(p.done && apConvoTimer){ clearInterval(apConvoTimer); apConvoTimer = null; }
+    }).catch(()=>{});
 }
 
 function apCloseLog(){
     const m = $('apLogModal');
     if(m) m.style.display = 'none';
     if(apLogTimer){ clearInterval(apLogTimer); apLogTimer = null; }
+    if(apConvoTimer){ clearInterval(apConvoTimer); apConvoTimer = null; }   // v10.26 (۳۹ب)
     apLoadJobs();
 }
 
@@ -51783,8 +52116,69 @@ function ddStatusBadge(p){
     return '<span style="color:'+v[1]+';font-size:10px">'+v[0]+'</span>';
 }
 
+/* =====================================================================
+ *  v10.26 (۳۹ب): رندرکنندهٔ مشترکِ «گفتگوی زنده»
+ *  ---------------------------------------------------------------------
+ *  هر سه مصرف‌کننده (ایجنتِ محصولات، ایجنتِ کشفِ سلکتور، مودالِ لاگِ
+ *  اتوماسیون) همین توابع را صدا می‌زنند تا شکلِ پیام‌ها یکی باشد.
+ * ================================================================== */
+
+/** برچسبِ فارسیِ نقشِ هر پیام. */
+function cvoWho(role) {
+    if (role === 'user')      return '🧑 دستورِ کاربر';
+    if (role === 'assistant') return '🤖 مدل';
+    if (role === 'tool')      return '🔧 نتیجهٔ ابزار';
+    return '⚙️ پیامِ سیستمی';
+}
+
+/** HTMLِ یک پیام. */
+function cvoMsgHtml(m) {
+    if (!m || !m.role) return '';
+    var role = String(m.role);
+    var cls  = 'cvo-msg cvo-' + (['system', 'user', 'assistant', 'tool'].indexOf(role) >= 0 ? role : 'system');
+    if (role === 'tool' && m.ok === false) cls += ' bad';
+    var who = cvoWho(role);
+    if (role === 'tool' && m.name) who += ' — ' + esc(String(m.name)) + (m.ok === false ? ' ✗' : ' ✓');
+    /* v10.26 (۳۹ب): ساعتِ پیام. در اجرایی که چند دقیقه طول می‌کشد، «آخرین
+       پیام ۴ دقیقه پیش بوده» تفاوتِ «کُند است» با «گیر کرده» را می‌سازد. */
+    if (m.t) {
+        var dt = new Date(m.t * 1000);
+        who += '<i class="cvo-t">' + toFa(('0' + dt.getHours()).slice(-2) + ':'
+             + ('0' + dt.getMinutes()).slice(-2) + ':' + ('0' + dt.getSeconds()).slice(-2)) + '</i>';
+    }
+    var h = '<div class="' + cls + '"><span class="cvo-who">' + who + '</span>';
+    if (m.text) h += '<span class="cvo-tx">' + esc(String(m.text)) + '</span>';
+    (m.calls || []).forEach(function (c) {
+        h += '<div class="cvo-call"><b>' + esc(String(c.name || '?')) + '</b>(' + esc(String(c.args || '')) + ')</div>';
+    });
+    return h + '</div>';
+}
+
+/** کلِ باکس را از روی آرایهٔ پیام‌ها می‌سازد.
+ *  اگر کاربر خودش تا ته اسکرول کرده باشد، بعد از افزودنِ پیامِ تازه هم
+ *  ته می‌ماند؛ وگرنه جای اسکرولش دست نمی‌خورد تا وسطِ خواندن نپرد. */
+function cvoRender(boxId, msgs, running) {
+    var det = $(boxId);
+    if (!det) return;
+    msgs = msgs || [];
+    det.classList.toggle('hidden', msgs.length === 0);
+    var cnt = $(boxId + 'N');
+    if (cnt) cnt.textContent = toFa(msgs.length) + ' پیام';
+    var lv = $(boxId + 'Live');
+    if (lv) lv.classList.toggle('hidden', !running);
+    var b = $(boxId + 'Body');
+    if (!b) return;
+    if (!msgs.length) { b.innerHTML = '<div class="cvo-empty">هنوز پیامی رد و بدل نشده است.</div>'; return; }
+    var atEnd = (b.scrollHeight - b.scrollTop - b.clientHeight) < 40;
+    var h = '';
+    msgs.forEach(function (m) { h += cvoMsgHtml(m); });
+    b.innerHTML = h;
+    if (atEnd) b.scrollTop = b.scrollHeight;
+}
+
 /* ===== v10.03 — ایجنتِ مدیریت محصولات (tool calling) ===== */
 var agTimer = null, agSince = 0, agBusy = false;
+var agConvo = [], agCSince = 0;   // v10.26 (۳۹ب): جریانِ گفتگوی ایجنت
 
 function agSetBusy(b) {
     agBusy = b;
@@ -52070,6 +52464,8 @@ function agStart() {
     if (mode === 'live' && !confirm('حالت «اجرای واقعی» انتخاب شده است.\n\nقیمت و موجودی محصولات در باسلام و ووکامرس واقعاً تغییر می‌کند و برگشت‌پذیر نیست.\n\nادامه می‌دهید؟')) return;
 
     agSince = 0;
+    agConvo = []; agCSince = 0;          // v10.26 (۳۹ب)
+    cvoRender('agConvo', [], true);
     var box = $('agLog'); if (box) { box.innerHTML = ''; box.classList.remove('hidden'); }
     var rp = $('agReport'); if (rp) { rp.innerHTML = ''; rp.classList.add('hidden'); }
     var sm = $('agSum'); if (sm) sm.classList.remove('hidden');
@@ -52101,10 +52497,19 @@ function agWatch() {
 }
 
 function agPoll() {
-    fetch('?agent_status&since=' + agSince).then(function (r) { return r.json(); }).then(function (p) {
+    fetch('?agent_status&since=' + agSince + '&csince=' + agCSince).then(function (r) { return r.json(); }).then(function (p) {
         if (!p) return;
         (p.log || []).forEach(function (l) { agLog(l.m || ''); });
         agSince = p.log_total || agSince;
+        /* v10.26 (۳۹ب): پیام‌های تازهٔ گفتگو را به همان آرایه بچسبان و
+           باکس را دوباره بکش. csince تضمین می‌کند تکراری نگیریم. */
+        if (p.convo && p.convo.length) {
+            p.convo.forEach(function (m) { agConvo.push(m); });
+            agCSince = p.convo_total || agConvo.length;
+        } else if (typeof p.convo_total === 'number') {
+            agCSince = p.convo_total;
+        }
+        cvoRender('agConvo', agConvo, !p.done);
         if ($('agSteps')) $('agSteps').textContent = toFa(p.step || 0);
         if ($('agCalls')) $('agCalls').textContent = toFa(p.calls || 0);
         if ($('agChanges')) $('agChanges').textContent = toFa(p.changes || 0);
@@ -52123,6 +52528,32 @@ function agPoll() {
 
 function agStop() {
     fetch('?agent_stop').then(function () { showToast('درخواست توقف ارسال شد'); });
+}
+
+/** v10.26 (۳۹ب): بازیابیِ اجرای در جریان بعد از رفرشِ صفحه.
+ *  بدونِ این، اگر کاربر وسطِ یک اجرای چنددقیقه‌ای F5 بزند، پنل خالی
+ *  می‌ماند و فکر می‌کند ایجنت مرده — دقیقاً همان بی‌خبری‌ای که بندِ ۳۹ب
+ *  برای رفعش نوشته شد. */
+function agResume() {
+    fetch('?agent_status&since=0&csince=0').then(function (r) { return r.json(); }).then(function (p) {
+        if (!p || !p.started_at) return;
+        agSince  = p.log_total  || 0;
+        agConvo  = p.convo || [];
+        agCSince = p.convo_total || agConvo.length;
+        (p.log || []).forEach(function (l) { agLog(l.m || ''); });
+        cvoRender('agConvo', agConvo, !p.done);
+        if ($('agSteps'))   $('agSteps').textContent   = toFa(p.step || 0);
+        if ($('agCalls'))   $('agCalls').textContent   = toFa(p.calls || 0);
+        if ($('agChanges')) $('agChanges').textContent = toFa(p.changes || 0);
+        var sm = $('agSum'); if (sm && p.step) sm.classList.remove('hidden');
+        if (!p.done && p.running) {
+            agSetBusy(true);
+            if ($('agStatus')) $('agStatus').textContent = 'در حال اجرا — گامِ ' + toFa(p.step || 0);
+            agWatch();
+        } else if ($('agStatus') && p.step) {
+            $('agStatus').textContent = p.error ? ('خطا: ' + p.error) : 'پایان یافت';
+        }
+    }).catch(function () { });
 }
 
 function agFinish() {
@@ -53482,7 +53913,7 @@ function catfixOpen(mode){
       +'<div class="bsl-modal-head"><h2>📂 اصلاح دسته‌بندی محصولات باسلام</h2>'
       +'<button class="btn btn-gray" onclick="catfixClose()">✕</button></div>'
       +'<div class="bsl-modal-body" style="padding:12px;max-height:80vh;overflow-y:auto">'
-      +'<div class="alert alert-info" style="font-size:11px;margin-bottom:8px">💡 محصولاتِ «تأیید نشده» که دلیلِ ردشان دسته‌بندی است، دستهٔ تازه می‌گیرند و به بررسیِ مجدد می‌روند. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود — می‌توانید این پنجره را ببندید یا مرورگر را ببندید؛ در <b>مدیر وظیفه</b> هم دیده می‌شود.</div>'
+      +'<details class="alert alert-info hint-collapse" style="font-size:11px;margin-bottom:8px"><summary>💡 این کار دقیقاً چه می‌کند؟</summary><div class="hint-body">محصولاتِ «تأیید نشده» که دلیلِ ردشان دسته‌بندی است، دستهٔ تازه می‌گیرند و به بررسیِ مجدد می‌روند. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود — می‌توانید این پنجره را ببندید یا مرورگر را ببندید؛ در <b>مدیر وظیفه</b> هم دیده می‌شود.</div></details>'
       +'<div style="background:#0b1220;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px">'
       +'<label style="display:block">🧭 روشِ تشخیصِ دسته'
       +'<select id="cfMode" class="inp" style="width:100%;margin-top:4px" onchange="catfixModeHint()">'+modeOpts+'</select></label>'
@@ -53809,7 +54240,7 @@ function bslFindDuplicates(){
       +'<div class="bsl-modal-head"><h2>\u{1F50D} حذفِ محصولاتِ تکراری باسلام</h2>'
       +'<button class="btn btn-gray" onclick="bslCloseDup()">\u2715</button></div>'
       +'<div class="bsl-modal-body" style="padding:12px;max-height:80vh;overflow-y:auto">'
-      +'<div class="alert alert-info" style="font-size:11px;margin-bottom:8px">💡 در باسلام «حذف» وجود ندارد؛ نسخه‌های اضافی <b>بایگانی</b> می‌شوند (وضعیت ۴۱۸۴) و از غرفه ناپدید. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود — می‌توانید این پنجره را ببندید.</div>'
+      +'<details class="alert alert-info hint-collapse" style="font-size:11px;margin-bottom:8px"><summary>💡 «حذف» در باسلام یعنی چه؟</summary><div class="hint-body">در باسلام «حذف» وجود ندارد؛ نسخه‌های اضافی <b>بایگانی</b> می‌شوند (وضعیت ۴۱۸۴) و از غرفه ناپدید. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود — می‌توانید این پنجره را ببندید.</div></details>'
       +'<div id="bdCfgHost"></div>'
       +'<div style="display:flex;gap:6px;margin-top:8px">'
       +'<button class="btn btn-orange" id="bdBtn" onclick="ddStart(\'bsl\',\'scan\')" style="flex:1">\u{1F50D} گزارشِ تکراری‌ها</button>'
