@@ -189,8 +189,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.26';
-const APP_VERSION_DATE = '1405/06/01';
+const APP_VERSION = '10.27';
+const APP_VERSION_DATE = '1405/06/02';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -16124,9 +16124,17 @@ if (isset($_GET['selagent_start'])) {
     $saUrl  = trim((string)($_POST['url'] ?? ($_GET['url'] ?? '')));
     $saKind = ((string)($_POST['kind'] ?? ($_GET['kind'] ?? 'list')) === 'detail') ? 'detail' : 'list';
     $saModel = trim((string)($_POST['model'] ?? ($_GET['model'] ?? '')));
-    if (!filter_var($saUrl, FILTER_VALIDATE_URL)) {
+    /* v10.27 (۴۰): pk = کلیدِ پروفایل تا تنظیمِ «اتصالِ غیرمستقیمِ همین پروفایل»
+       دقیقاً مثل iframeِ ?visual_proxy اعمال شود؛ list_url = آدرسِ صفحهٔ فهرست
+       تا ایجنتِ جزئیات وقتی هیچ محصولی نیست بتواند خودش زنجیره را کامل کند. */
+    $saPk   = trim((string)($_POST['pk'] ?? ($_GET['pk'] ?? '')));
+    $saList = trim((string)($_POST['list_url'] ?? ($_GET['list_url'] ?? '')));
+    if ($saUrl === '' && $saKind === 'detail' && filter_var($saList, FILTER_VALIDATE_URL)) {
+        $saUrl = '';   // عمداً خالی: selagentRun خودش صفحهٔ نمونه را می‌سازد
+    } elseif (!filter_var($saUrl, FILTER_VALIDATE_URL)) {
         echo json_encode(['ok' => false, 'error' => 'آدرسِ صفحه معتبر نیست'], JSON_UNESCAPED_UNICODE); exit;
     }
+    if ($saPk === '') $saPk = profileKey($saUrl !== '' ? $saUrl : $saList);
     $saLock = fopen(SELAGENT_LOCK_FILE, 'c');
     if (!$saLock || !flock($saLock, LOCK_EX | LOCK_NB)) {
         if ($saLock) fclose($saLock);
@@ -16141,7 +16149,7 @@ if (isset($_GET['selagent_start'])) {
         'model' => $saModel, 'started_at' => time(), 'step' => 0, 'calls' => 0,
         'probes' => 0, 'confirmed' => 0, 'phase' => 'start',
         'log_add' => ['🚀 کشفِ سلکتورهای ' . ($saKind === 'detail' ? 'صفحهٔ جزئیات' : 'صفحهٔ فهرست')
-                      . ' — ' . $saUrl
+                      . ' — ' . ($saUrl !== '' ? $saUrl : ('صفحهٔ نمونه از ' . $saList))
                       . ($saModel !== '' ? (' — مدل: ' . $saModel) : ' — مدلِ پیش‌فرضِ اتصالات')]]);
 
     $saEarly = json_encode(['ok' => true, 'started' => true, 'kind' => $saKind], JSON_UNESCAPED_UNICODE);
@@ -16156,7 +16164,7 @@ if (isset($_GET['selagent_start'])) {
     });
 
     try {
-        $saRep = selagentRun($saUrl, $saKind, $saModel);
+        $saRep = selagentRun($saUrl, $saKind, $saModel, $saPk, $saList);
     } catch (Throwable $e) {
         selagentProgress(['running' => false, 'done' => true, 'error' => $e->getMessage(),
             'log_add' => ['❌ خطا: ' . $e->getMessage()]]);
@@ -21383,6 +21391,94 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
       && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
 
+    /* ================= v10.27 (۴۰) ================= */
+    /* --- ۴۰الف: اول iframeِ پروکسی، بعد مستقیم با وب‌تولز --- */
+    $add('10.27', 'ایجنتِ سلکتور دیگر مستقیماً fetch_html خام صدا نمی‌زند',
+         strpos($selfSrc, 'function selagentFetch' . 'Page(') !== false
+      && strpos($selfSrc, '$res = selagentFetch' . 'Page($url, $pk,') !== false
+      && strpos($selfSrc, "selagentProgress(['phase' => 'fetch', 'log_add' => ['🌐 دریافتِ صفحه…']]);\n    \$res = fetch_ht" . 'ml(') === false);
+
+    $add('10.27', 'پلهٔ اول دقیقاً مثل iframeِ پروکسی است: اتصالِ پروفایل + مهلتِ تنظیمات',
+         strpos($selfSrc, "srcNetSetProfileIndirect(\$pk);") !== false
+      && strpos($selfSrc, "\$cn['proxy_timeout_' . 'sec'] ?? 0") !== false
+      && strpos($selfSrc, '$t = max(10, min(180, $t));') !== false);
+
+    $add('10.27', 'تلاشِ دوم فقط برای خطاهای «کند» و با مهلتِ دوبرابر',
+         strpos($selfSrc, 'function selagentSlow' . 'Error(') !== false
+      && strpos($selfSrc, 'min(180, $t * 2)') !== false);
+
+    $add('10.27', 'پلهٔ دوم: بارگذاری مستقیم بدونِ پروکسی (معادلِ وب‌تولز)',
+         strpos($selfSrc, "\$GLOBALS['_srcNetProfileIndirect'] = false;") !== false
+      && strpos($selfSrc, "\$res2['via'] = 'dir" . "ect';") !== false
+      && strpos($selfSrc, "\$res['via'] = 'pro" . "xy';") !== false);
+
+    $add('10.27', 'پیامِ شکستِ نهایی هر سه راهِ دستی را نام می‌برد',
+         strpos($selfSrc, 'نه از راهِ iframeِ پروکسی باز شد نه به‌صورتِ مستقیم') !== false
+      && strpos($selfSrc, 'بارگذاری مستقیم» یا «🔍 بازرسی تمام صفحه') !== false
+      && strpos($selfSrc, 'اسکریپت بازرسی» سلکتور را دستی') !== false);
+
+    $add('10.27', 'اندپوینتِ شروع کلیدِ پروفایل و آدرسِ فهرست را می‌پذیرد',
+         strpos($selfSrc, "\$saPk   = trim((string)(\$_POST['pk']") !== false
+      && strpos($selfSrc, "\$saList = trim((string)(\$_POST['list_" . "url']") !== false
+      && strpos($selfSrc, 'selagentRun($saUrl, $saKind, $saModel, $saPk, $saList)') !== false);
+
+    $add('10.27', 'فرانت هم pk و آدرسِ فهرست را می‌فرستد',
+         strpos($selfSrc, 'pk: profileKey(listUrl || url), list_url: listUrl') !== false
+      && strpos($selfSrc, 'function selagList' . 'Url()') !== false);
+
+    $add('10.27', 'راهِ استفاده‌شده در پنل به کاربر نشان داده می‌شود',
+         strpos($selfSrc, "'fetch_via' => 'dir" . "ect'") !== false
+      && strpos($selfSrc, 'صفحه از راهِ iframeِ پروکسی باز شد') !== false
+      && strpos($selfSrc, 'مستقیم با قابلیت‌های وب‌تولز گرفته شد') !== false);
+
+    /* --- ۴۰ب: نبودِ محصول، بن‌بستِ ایجنتِ جزئیات نیست --- */
+    $add('10.27', 'زنجیرهٔ ساختِ محصولِ نمونه وجود دارد',
+         strpos($selfSrc, 'function selagentSeed' . 'Products(') !== false
+      && strpos($selfSrc, "\$seed = selagentSeedProducts(\$listUrl, \$pk, \$model);") !== false);
+
+    $add('10.27', 'زنجیره از ارزان به گران می‌رود: ذخیره‌شده ← سلکتورِ پروفایل ← ایجنتِ فهرست',
+         strpos($selfSrc, "'from' => 'sto" . "red'") !== false
+      && strpos($selfSrc, "\$from = 'profile_selec" . "tors'") !== false
+      && strpos($selfSrc, "\$sub = selagentRun(\$listUrl, 'list', \$model, \$pk);") !== false);
+
+    $add('10.27', 'ایجنتِ فهرست مستقیم صدا زده می‌شود، نه از راهِ اندپوینتِ قفل‌دار',
+         strpos($selfSrc, 'صدا زده می‌شود و نه اندپوینتِ ?selagent_start') !== false
+      && substr_count($selfSrc, "selagentRun(\$listUrl, 'list'") === 1);
+
+    $add('10.27', 'بعد از کشفِ سلکتورِ فهرست، واقعاً محصول استخراج می‌شود',
+         strpos($selfSrc, 'parse_with_selectors((string)$lres[\'html\']') !== false
+      && strpos($selfSrc, 'از صفحهٔ فهرست هیچ محصولِ دارای لینکی استخراج نشد') !== false);
+
+    $add('10.27', 'محصولاتِ ساخته‌شده در پروفایل هم می‌نشینند',
+         strpos($selfSrc, "if (!profileProductsMap(\$profiles[\$pk])) \$profiles[\$pk]['products'] = \$pairs;") !== false
+      && strpos($selfSrc, '@saveProfiles($profiles);') !== false);
+
+    $add('10.27', 'خروجیِ ایجنت محصولاتِ ساخته‌شده را به فرانت می‌رساند',
+         strpos($selfSrc, "'seeded' => \$seeded") !== false
+      && strpos($selfSrc, '$seeded = $seed;') !== false);
+
+    $add('10.27', 'فرانت محصولاتِ ساخته‌شده را در همان تب می‌نشاند',
+         strpos($selfSrc, 'function selagAdopt' . 'Seeded(') !== false
+      && strpos($selfSrc, 'selagAdoptSeeded(d);') !== false
+      && strpos($selfSrc, 'if (products.has(k)) return;') !== false);
+
+    $add('10.27', 'نشاندنِ محصولات ذخیره را هم زمان‌بندی می‌کند (وگرنه ذخیرهٔ خودکار پاکش می‌کرد)',
+         strpos($selfSrc, "showToast('🧺 ' + toFa(added) + ' محصول توسط ایجنت استخراج") !== false
+      && strpos($selfSrc, 'refreshViews();' . "\n    update();" . "\n    scheduleSave();") !== false);
+
+    $add('10.27', 'زیرتبِ جزئیات با نبودِ محصول دیگر متوقف نمی‌شود',
+         strpos($selfSrc, 'const u = detailSampleUrl(true);') !== false
+      && strpos($selfSrc, 'هیچ محصولی نیست — ایجنت اول فهرست را استخراج می‌کند') !== false
+      && strpos($selfSrc, 'if (url === null || url === undefined) return;') !== false);
+
+    $add('10.27', 'فازِ تازهٔ «زنجیره» برچسبِ فارسی دارد',
+         strpos($selfSrc, "chain: 'ساختِ محصولِ نمونه") !== false
+      && strpos($selfSrc, "'phase' => 'ch" . "ain'") !== false);
+
+    $add('10.27', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '27', '>=')
+      && strpos($selfSrc, 'v:' . "'10.27'") !== false);
+
     $add('10.26', 'هر سه فرانت فقط پیام‌های تازه را می‌گیرند (نه کلِ گفتگو در هر تیک)',
          substr_count($selfSrc, "'&csi" . "nce=' +") + substr_count($selfSrc, "&csi" . "nce=' + ap") >= 2
       && strpos($selfSrc, 'agCSi' . 'nce') !== false
@@ -22368,8 +22464,11 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'if ($vpTimeout <= 0) $vpTimeout = ' . '45;') !== false
          && strpos($selfSrc, 'if ($dpTimeout <= 0) $dpTimeout = ' . '45;') !== false
          && substr_count($selfSrc, '$res = fetch_html($url, ' . '20);') === 0);
+    /* v10.27: تا ۱۰.۲۶ دو مسیر این الگو را داشتند (?visual_proxy و
+       ?detail_proxy). حالا ایجنتِ کشفِ سلکتور هم همان دو پله را می‌رود،
+       پس شمارش سه شد — نه یک رگرسیون، یک مسیرِ سومِ اضافه‌شده. */
     $add('8.99', 'در صورت کندی یک بار دیگر تلاش می‌شود',
-         substr_count($selfSrc, '$res = fetch_html($url, min' . '(180,') === 2);
+         substr_count($selfSrc, '$res = fetch_html($url, min' . '(180,') === 3);
     $add('8.99', 'خطا توضیح می‌دهد که مشکل از سرور است نه سایت',
          strpos($selfSrc, 'بارگذاری مستقیم</b> را بزنید — صفحه را مرورگر خودتان ' . 'می‌گیرد') !== false);
     $add('8.99', 'تنظیم مهلت در رابط کاربری هست',
@@ -35090,6 +35189,192 @@ function selagentCallLabel(string $name, array $args): string {
 }
 
 /** پیامِ سیستمی — قواعد را صریح و شماره‌دار می‌دهیم چون مدل‌های کوچک‌تر با شرحِ کلی گم می‌شوند. */
+/* =====================================================================
+ *  v10.27 (۴۰الف): دریافتِ صفحه برای ایجنت — «اول iframeِ پروکسی، بعد
+ *  مستقیم با قابلیت‌های وب‌تولز».
+ *
+ *  چرا لازم شد: تا ۱۰.۲۶ هر دو ایجنت مستقیماً fetch_html($url, 25) را
+ *  صدا می‌زدند. این یعنی سه چیز از مسیرِ جاافتادهٔ «بارگذاری صفحه» در تبِ
+ *  سلکتور جا می‌افتاد:
+ *    ۱) تنظیمِ «اتصالِ غیرمستقیمِ همین پروفایل» اصلاً اعمال نمی‌شد؛
+ *    ۲) مهلت ثابتِ ۲۵ ثانیه بود، نه مهلتِ تنظیماتِ کاربر (پیش‌فرض ۴۵)؛
+ *    ۳) هیچ تلاشِ دومی برای کندی نبود.
+ *  نتیجه‌اش این می‌شد که صفحه‌ای که در iframeِ انتخابگر عالی باز می‌شد،
+ *  زیرِ دستِ ایجنت «دریافتِ صفحه ناموفق بود» می‌گرفت.
+ *
+ *  حالا دقیقاً همان دو پلهٔ ?visual_proxy طی می‌شود، و اگر باز هم نشد،
+ *  پلهٔ سومی اضافه شده که معادلِ «🌐 بارگذاری مستقیم / 🔍 بازرسی تمام
+ *  صفحه» است: بدونِ پروکسی و بدونِ iframe، همان‌طور که وب‌تولزِ مرورگر
+ *  صفحه را می‌گیرد. روی سایت‌هایی که فقط پروکسی/Worker را می‌بندند این
+ *  پله جواب می‌دهد.
+ *
+ *  خروجی: همان آرایهٔ fetch_html به‌علاوهٔ کلیدِ via = proxy|direct|none
+ * ===================================================================== */
+function selagentFetchPage(string $url, string $pk = '', string $label = 'صفحه'): array {
+    $cn = function_exists('loadConnections') ? loadConnections() : [];
+    $t = (int)($cn['proxy_timeout_sec'] ?? 0);
+    if ($t <= 0) $t = 45;
+    $t = max(10, min(180, $t));
+
+    /* پلهٔ ۱ — همان مسیرِ iframeِ پروکسی: اتصالِ پروفایل + مهلتِ تنظیمات */
+    selagentProgress(['log_add' => ['🖼 آزمایشِ باز شدنِ ' . $label . ' از راهِ iframeِ پروکسی…']]);
+    srcNetSetProfileIndirect($pk);
+    $res = fetch_html($url, $t);
+    if (empty($res['ok']) && selagentSlowError((string)($res['error'] ?? ''))) {
+        selagentProgress(['log_add' => ['   ↳ کند بود؛ تلاشِ دوم با مهلتِ '
+            . aiFaNum(min(180, $t * 2)) . ' ثانیه…']]);
+        $res = fetch_html($url, min(180, $t * 2));
+    }
+    if (!empty($res['ok'])) {
+        $res['via'] = 'proxy';
+        selagentProgress(['fetch_via' => 'proxy',
+            'log_add' => ['   ↳ ✅ ' . $label . ' از راهِ پروکسی باز شد']]);
+        return $res;
+    }
+    $proxyErr = (string)($res['error'] ?? 'ناموفق');
+
+    /* پلهٔ ۲ — «وب‌تولز»: مستقیم، بدونِ پروکسی و بدونِ iframe */
+    selagentProgress(['log_add' => ['   ↳ ⚠️ از راهِ پروکسی باز نشد ('
+        . mb_substr($proxyErr, 0, 60) . ') — تلاشِ مستقیم با قابلیت‌های وب‌تولز…']]);
+    $GLOBALS['_srcNetProfileIndirect'] = false;      // اجبار به اتصالِ مستقیم
+    $res2 = fetch_html($url, max(30, $t));
+    if (empty($res2['ok']) && selagentSlowError((string)($res2['error'] ?? ''))) {
+        $res2 = fetch_html($url, min(180, max(60, $t * 2)));
+    }
+    if (!empty($res2['ok'])) {
+        $res2['via'] = 'direct';
+        selagentProgress(['fetch_via' => 'direct',
+            'log_add' => ['   ↳ ✅ ' . $label . ' به‌صورتِ مستقیم (وب‌تولز) باز شد']]);
+        return $res2;   // اتصالِ مستقیم را نگه می‌داریم؛ بقیهٔ درخواست‌ها هم از همین راه
+    }
+    srcNetSetProfileIndirect($pk);                   // برگرداندنِ حالتِ پروفایل
+    $directErr = (string)($res2['error'] ?? 'ناموفق');
+    selagentProgress(['fetch_via' => 'none',
+        'log_add' => ['   ↳ ❌ نه پروکسی نه مستقیم — ' . mb_substr($directErr, 0, 60)]]);
+    return ['ok' => false, 'via' => 'none',
+            'error' => 'پروکسی: ' . $proxyErr . ' · مستقیم: ' . $directErr,
+            'proxy_error' => $proxyErr, 'direct_error' => $directErr,
+            'code' => (int)($res2['code'] ?? 0), 'url' => $url, 'html' => ''];
+}
+
+/** آیا این خطا از جنسِ «کند بود» است؟ فقط برای این‌ها تلاشِ دوم می‌ارزد. */
+function selagentSlowError(string $e): bool {
+    return stripos($e, 'timed out') !== false || stripos($e, 'timeout') !== false
+        || stripos($e, 'Empty') !== false || trim($e) === '';
+}
+
+/* =====================================================================
+ *  v10.27 (۴۰ب): «ایجنتِ جزئیات وقتی هیچ محصولی نیست».
+ *
+ *  تا ۱۰.۲۶ اگر کاربر روی «🤖 پیشنهاد (ایجنت)»ِ زیرتبِ جزئیات می‌زد و
+ *  هنوز محصولی استخراج نشده بود، فقط یک توستِ «ابتدا محصولات را استخراج
+ *  کنید» می‌گرفت و کار همان‌جا می‌ایستاد. ولی همهٔ چیزهایی که برای برداشتنِ
+ *  آن قدم لازم است همین‌جا موجود است: آدرسِ صفحهٔ فهرست، ایجنتِ کشفِ
+ *  سلکتورِ فهرست، و parse_with_selectors. پس خودِ ایجنت زنجیره را کامل
+ *  می‌کند: سلکتورِ فهرست ← چند محصول ← صفحهٔ نمونه ← سلکتورهای جزئیات.
+ *
+ *  ترتیبِ عمداً محافظه‌کارانه (ارزان به گران):
+ *    ۱) محصولاتِ ذخیره‌شدهٔ همین پروفایل روی دیسک
+ *    ۲) سلکتورِ فهرستِ ذخیره‌شدهٔ همین پروفایل روی صفحهٔ فهرست
+ *    ۳) اجرای کاملِ ایجنتِ کشفِ سلکتورِ فهرست، بعد استخراج
+ *
+ *  چرا selagentRun مستقیم صدا زده می‌شود و نه اندپوینتِ ?selagent_start:
+ *  آن اندپوینت SELAGENT_LOCK_FILE را می‌گیرد و ما همین حالا داخلِ همان
+ *  قفل هستیم؛ صدا زدنش قطعاً «یک کشف در جریان است» می‌گرفت.
+ * ===================================================================== */
+function selagentSeedProducts(string $listUrl, string $pk, string $model = '', int $want = 12): array {
+    $out = ['ok' => false, 'products' => [], 'list_selectors' => [], 'from' => '', 'error' => ''];
+    $listUrl = trim($listUrl);
+    if ($pk === '' && $listUrl !== '') $pk = profileKey($listUrl);
+
+    /* ۱) محصولاتِ روی دیسک */
+    $profiles = loadProfiles();
+    $prof = is_array($profiles[$pk] ?? null) ? $profiles[$pk] : [];
+    $stored = [];
+    foreach (profileProductsMap($prof) as $k => $p) {
+        if (is_array($p) && trim((string)($p['link'] ?? '')) !== '') {
+            $p['key'] = (string)$k;
+            $stored[] = [(string)$k, $p];
+            if (count($stored) >= $want) break;
+        }
+    }
+    if ($stored) {
+        selagentProgress(['log_add' => ['📦 ' . aiFaNum(count($stored))
+            . ' محصولِ ذخیره‌شدهٔ این پروفایل پیدا شد — نیازی به استخراجِ تازه نیست']]);
+        return ['ok' => true, 'products' => $stored, 'list_selectors' => (array)($prof['selectors'] ?? []),
+                'from' => 'stored', 'error' => ''];
+    }
+
+    if ($listUrl === '' || !filter_var($listUrl, FILTER_VALIDATE_URL)) {
+        $out['error'] = 'برای ساختنِ محصولِ نمونه، آدرسِ صفحهٔ فهرست لازم است';
+        return $out;
+    }
+
+    /* ۲) سلکتورِ فهرستِ ذخیره‌شده */
+    $sel = (array)($prof['selectors'] ?? []);
+    $from = 'profile_selectors';
+    if (trim((string)($sel['container'] ?? '')) === '') {
+        /* ۳) هیچ سلکتوری نیست ⇒ ایجنتِ فهرست را همین‌جا اجرا کن */
+        selagentProgress(['phase' => 'chain', 'log_add' => [
+            '🔗 هیچ محصولی در نتایج و در پروفایل نیست — اول ایجنتِ کشفِ سلکتورِ فهرست اجرا می‌شود',
+        ], 'convo_add' => [['role' => 'system',
+            'text' => 'برای صفحهٔ جزئیات هیچ محصولی موجود نیست؛ ابتدا ایجنتِ فهرست روی ' . $listUrl . ' اجرا می‌شود.']]]);
+        $sub = selagentRun($listUrl, 'list', $model, $pk);
+        if (empty($sub['ok'])) {
+            $out['error'] = 'ایجنتِ فهرست موفق نشد: ' . (string)($sub['error'] ?? '');
+            return $out;
+        }
+        $sel = (array)($sub['selectors'] ?? []);
+        $from = 'agent';
+        if (trim((string)($sel['container'] ?? '')) === '') {
+            $out['error'] = 'ایجنتِ فهرست سلکتورِ ظرفِ محصول پیدا نکرد';
+            $out['list_selectors'] = $sel;
+            return $out;
+        }
+        selagentProgress(['log_add' => ['   ↳ ✅ سلکتورِ فهرست کشف شد: ' . (string)$sel['container']]]);
+    } else {
+        selagentProgress(['log_add' => ['🔗 سلکتورِ فهرستِ ذخیره‌شدهٔ پروفایل استفاده می‌شود: '
+            . (string)$sel['container']]]);
+    }
+
+    /* حالا صفحهٔ فهرست را بگیر و چند محصول بیرون بکش */
+    selagentProgress(['phase' => 'chain', 'log_add' => ['🧺 استخراجِ چند محصول از صفحهٔ فهرست…']]);
+    $lres = selagentFetchPage($listUrl, $pk, 'صفحهٔ فهرست');
+    if (empty($lres['ok'])) {
+        $out['error'] = 'صفحهٔ فهرست باز نشد — ' . (string)($lres['error'] ?? '');
+        $out['list_selectors'] = $sel;
+        return $out;
+    }
+    $rows = parse_with_selectors((string)$lres['html'], (string)($lres['url'] ?? $listUrl), $sel);
+    $pairs = [];
+    foreach ($rows as $k => $p) {
+        if (!is_array($p) || trim((string)($p['link'] ?? '')) === '') continue;
+        $p['key'] = (string)$k;
+        $pairs[] = [(string)$k, $p];
+        if (count($pairs) >= $want) break;
+    }
+    if (!$pairs) {
+        $out['error'] = 'از صفحهٔ فهرست هیچ محصولِ دارای لینکی استخراج نشد';
+        $out['list_selectors'] = $sel;
+        return $out;
+    }
+    selagentProgress(['log_add' => ['   ↳ ✅ ' . aiFaNum(count($pairs)) . ' محصول استخراج شد']]);
+
+    /* در پروفایل هم بنشانیم تا دفعهٔ بعد این زنجیره لازم نشود */
+    $profiles = loadProfiles();
+    if (empty($GLOBALS['_profilesCorrupt'])) {
+        if (!is_array($profiles[$pk] ?? null)) $profiles[$pk] = ['url' => $listUrl, 'created' => time()];
+        if (trim((string)($profiles[$pk]['url'] ?? '')) === '') $profiles[$pk]['url'] = $listUrl;
+        if (trim((string)(((array)($profiles[$pk]['selectors'] ?? []))['container'] ?? '')) === '')
+            $profiles[$pk]['selectors'] = $sel;
+        if (!profileProductsMap($profiles[$pk])) $profiles[$pk]['products'] = $pairs;
+        $profiles[$pk]['updated'] = time();
+        @saveProfiles($profiles);
+    }
+
+    return ['ok' => true, 'products' => $pairs, 'list_selectors' => $sel, 'from' => $from, 'error' => ''];
+}
+
 function selagentSystemPrompt(string $kind, string $url): string {
     $s  = "تو یک متخصصِ استخراجِ داده از صفحاتِ وب هستی. وظیفه‌ات پیدا کردنِ سلکتورهای CSSِ درست برای یک صفحهٔ مشخص است.\n";
     $s .= "آدرسِ صفحه: " . $url . "\n\n";
@@ -35125,18 +35410,51 @@ function selagentSystemPrompt(string $kind, string $url): string {
  * که tools ندارند، همان سقف‌ها، همان الگوی ثبتِ پیشرفت) تا نگهداری‌اش یک
  * چیز باشد نه دو چیز.
  */
-function selagentRun(string $url, string $kind, string $model = ''): array {
+function selagentRun(string $url, string $kind, string $model = '', string $pk = '', string $listUrl = ''): array {
     $t0 = microtime(true);
     $kind = ($kind === 'detail') ? 'detail' : 'list';
+    $url = trim($url); $listUrl = trim($listUrl);
+    if ($pk === '') $pk = profileKey($url !== '' ? $url : $listUrl);
+    $seeded = null;
+
+    /* v10.27 (۴۰ب): ایجنتِ جزئیات بدونِ هیچ محصولی هم باید بتواند شروع کند.
+       آدرسِ صفحهٔ نمونه خالی است ⇒ خودمان می‌سازیمش: سلکتورِ فهرست (از
+       پروفایل یا با اجرای ایجنتِ فهرست) ← استخراجِ چند محصول ← لینکِ اولی. */
+    if ($kind === 'detail' && ($url === '' || !filter_var($url, FILTER_VALIDATE_URL))) {
+        $seed = selagentSeedProducts($listUrl, $pk, $model);
+        if (empty($seed['ok'])) {
+            $err = 'برای کشفِ سلکتورهای جزئیات صفحهٔ محصولی در دست نبود و ساختنش هم نشد — '
+                 . (string)($seed['error'] ?? '');
+            selagentProgress(['log_add' => ['❌ ' . $err]]);
+            return ['ok' => false, 'error' => $err, 'url' => $url, 'kind' => $kind,
+                    'seeded' => $seed, 'took' => round(microtime(true) - $t0, 1)];
+        }
+        $seeded = $seed;
+        $url = (string)($seed['products'][0][1]['link'] ?? '');
+        selagentProgress(['phase' => 'fetch', 'log_add' => [
+            '🎯 صفحهٔ نمونه از محصولِ «'
+            . mb_substr((string)($seed['products'][0][1]['title'] ?? '—'), 0, 40) . '» انتخاب شد',
+        ], 'convo_add' => [['role' => 'system',
+            'text' => aiFaNum(count($seed['products'])) . ' محصول آماده شد؛ صفحهٔ نمونه: ' . $url]]]);
+    }
 
     selagentProgress(['phase' => 'fetch', 'log_add' => ['🌐 دریافتِ صفحه…']]);
-    $res = fetch_html($url, 25);
+    $res = selagentFetchPage($url, $pk, $kind === 'detail' ? 'صفحهٔ محصول' : 'صفحهٔ فهرست');
     if (empty($res['ok'])) {
-        $err = 'دریافتِ صفحه ناموفق بود: ' . (string)($res['error'] ?? '');
+        $err = 'دریافتِ صفحه ناموفق بود: ' . (string)($res['error'] ?? '')
+             . ' — این صفحه نه از راهِ iframeِ پروکسی باز شد نه به‌صورتِ مستقیم.'
+             . ' می‌توانید در تبِ سلکتور «🌐 بارگذاری مستقیم» یا «🔍 بازرسی تمام صفحه» را بزنید،'
+             . ' یا با «📋 اسکریپت بازرسی» سلکتور را دستی بردارید.';
         selagentProgress(['log_add' => ['❌ ' . $err]]);
         return ['ok' => false, 'error' => $err, 'url' => $url, 'kind' => $kind,
+                'via' => (string)($res['via'] ?? 'none'), 'seeded' => $seeded,
                 'took' => round(microtime(true) - $t0, 1)];
     }
+    $fetchVia = (string)($res['via'] ?? 'proxy');
+    selagentProgress(['convo_add' => [['role' => 'system',
+        'text' => 'صفحه ' . ($fetchVia === 'direct'
+            ? 'از راهِ iframeِ پروکسی باز نشد؛ به‌صورتِ مستقیم (قابلیت‌های وب‌تولز) گرفته شد.'
+            : 'از راهِ iframeِ پروکسی گرفته شد.')]]]);
     $html = (string)$res['html'];
     $baseUrl = (string)($res['url'] ?? $url);
 
@@ -35197,6 +35515,7 @@ function selagentRun(string $url, string $kind, string $model = ''): array {
             selagentProgress(['log_add' => ['❌ خطای مدل: ' . $err]]);
             return ['ok' => false, 'error' => $err, 'url' => $url, 'kind' => $kind,
                     'steps' => $step, 'calls' => $calls, 'confirmed' => $confirmed,
+                    'via' => $fetchVia, 'seeded' => $seeded,
                     'took' => round(microtime(true) - $t0, 1)];
         }
 
@@ -35314,7 +35633,8 @@ function selagentRun(string $url, string $kind, string $model = ''): array {
     return ['ok' => true, 'url' => $url, 'kind' => $kind, 'selectors' => $final,
             'preview' => $preview, 'note' => $note, 'summary' => $finalText,
             'calls' => $calls, 'probes' => $probes, 'stopped_by' => $stoppedBy,
-            'native_tools' => $nativeTools, 'took' => round(microtime(true) - $t0, 1)];
+            'native_tools' => $nativeTools, 'via' => $fetchVia, 'seeded' => $seeded,
+            'took' => round(microtime(true) - $t0, 1)];
 }
 
 /** تکه‌ای از HTML برای مدل (پاک‌سازی‌شده از script/style که فقط توکن می‌سوزانند) */
@@ -40047,11 +40367,33 @@ let selagLast  = null;   // آخرین نتیجهٔ کامل (?selagent_result)
 let selagConvo = [];     // v10.26 (۳۹ب): پیام‌های ردوبدل‌شده با مدل
 let selagCSince = 0;     // v10.26 (۳۹ب): چند پیام را تا حالا گرفته‌ایم
 
-/** نشانیِ صفحه‌ای که باید کاوش شود، بسته به نوعِ کار. */
+/** نشانیِ صفحهٔ فهرست — همان چیزی که در کادرِ بالای صفحه است. */
+function selagListUrl() {
+    return ($('url') && $('url').value || '').trim();
+}
+
+/**
+ * نشانیِ صفحه‌ای که باید کاوش شود، بسته به نوعِ کار.
+ *
+ * v10.27 (۴۰ب): برای «جزئیات» دیگر نبودِ محصول بن‌بست نیست. تا ۱۰.۲۶
+ * detailSampleUrl() یک توستِ «ابتدا محصولات را استخراج کنید» می‌داد و
+ * کار می‌ایستاد. حالا اگر محصولی نیست ولی آدرسِ صفحهٔ فهرست را داریم،
+ * رشتهٔ خالی برمی‌گردانیم و به سرور می‌گوییم خودش زنجیره را کامل کند:
+ * ایجنتِ فهرست ← استخراجِ چند محصول ← صفحهٔ نمونه ← سلکتورهای جزئیات.
+ */
 function selagUrlFor(kind) {
-    if (kind === 'detail') return detailSampleUrl();
-    const u = ($('url') && $('url').value || '').trim();
-    if (!u) { showToast('اول آدرسِ صفحهٔ فهرست را وارد کنید', true); return ''; }
+    if (kind === 'detail') {
+        const u = detailSampleUrl(true);
+        if (u) return u;
+        if (selagListUrl()) {
+            showToast('هیچ محصولی نیست — ایجنت اول فهرست را استخراج می‌کند');
+            return '';   // '' یعنی «بساز»، برخلافِ null که یعنی «نشد»
+        }
+        detailSampleUrl();   // پیامِ راهنمای همیشگی
+        return null;
+    }
+    const u = selagListUrl();
+    if (!u) { showToast('اول آدرسِ صفحهٔ فهرست را وارد کنید', true); return null; }
     return u;
 }
 
@@ -40060,7 +40402,9 @@ function selagUrlFor(kind) {
 function selagStart(kind) {
     kind = (kind === 'detail') ? 'detail' : 'list';
     const url = selagUrlFor(kind);
-    if (!url) return;
+    if (url === null || url === undefined) return;
+    const listUrl = selagListUrl();
+    if (!url && !listUrl) return;
     if (selagState && selagState.running) { showToast('یک کشف همین حالا در جریان است', true); return; }
 
     selagKind = kind;
@@ -40070,7 +40414,12 @@ function selagStart(kind) {
     selagState = { running: true, kind: kind, url: url, phase: 'start', step: 0, calls: 0, probes: 0, confirmed: 0 };
     selagRender();
 
-    const body = new URLSearchParams({ kind: kind, url: url });
+    /* v10.27 (۴۰الف): pk را می‌فرستیم تا سرور دقیقاً همان اتصالی را
+       به کار ببرد که iframeِ ?visual_proxy می‌برد (تنظیمِ «اتصالِ
+       غیرمستقیمِ این پروفایل»). بدونِ آن، ایجنت روی سایتی که در
+       انتخابگر عالی باز می‌شود «دریافتِ صفحه ناموفق» می‌گرفت. */
+    const body = new URLSearchParams({ kind: kind, url: url || '',
+        pk: profileKey(listUrl || url), list_url: listUrl });
     fetch('?selagent_start=1', { method: 'POST', body: body })
         .then(function (r) { return r.json(); })
         .then(function (d) {
@@ -40133,6 +40482,7 @@ function selagFetchResult() {
         .then(function (r) { return r.json(); })
         .then(function (d) {
             selagLast = d;
+            selagAdoptSeeded(d);       // v10.27 (۴۰ب)
             selagRender();
             const n = d && d.selectors ? Object.keys(d.selectors).length : 0;
             showToast(n > 0 ? ('✓ ' + toFa(n) + ' سلکتور کشف شد — برای اعمال دکمه را بزنید')
@@ -40141,10 +40491,54 @@ function selagFetchResult() {
         .catch(function () {});
 }
 
+/**
+ * v10.27 (۴۰ب): محصولاتی که ایجنتِ جزئیات برای ساختنِ صفحهٔ نمونه استخراج
+ * کرده، باید در همین تب هم دیده شوند.
+ *
+ * چرا صرفاً «سرور ذخیره کرده» کافی نیست: تبِ باز هنوز نقشهٔ محصولاتِ خالیِ
+ * خودش را دارد و اولین ذخیرهٔ خودکار همان خالی را روی دیسک می‌نویسد —
+ * دقیقاً همان باگی که در ۸.۸۳ سرِ گالری‌ها آمد. پس همین‌جا نتیجه را در
+ * حافظهٔ تب می‌نشانیم و بعد ذخیره را زمان‌بندی می‌کنیم.
+ *
+ * ادغام محافظه‌کارانه است: محصولِ موجود هرگز بازنویسی نمی‌شود.
+ */
+function selagAdoptSeeded(d) {
+    const sd = d && d.seeded;
+    if (!sd || !sd.ok || !Array.isArray(sd.products) || !sd.products.length) return 0;
+    let added = 0;
+    sd.products.forEach(function (e) {
+        if (!Array.isArray(e) || e.length < 2) return;
+        const k = String(e[0] || ''), p = e[1];
+        if (!k || !p || typeof p !== 'object') return;
+        if (products.has(k)) return;
+        products.set(k, p);
+        order.push(k);
+        added++;
+    });
+    if (!added) return 0;
+    /* سلکتورهای فهرستی که ایجنت در همین زنجیره کشف کرده هم حیف است */
+    const ls = sd.list_selectors || {};
+    if (ls.container && !sel.container && typeof setSel === 'function') {
+        ['container', 'title', 'price', 'link', 'image'].forEach(function (f) {
+            if (ls[f] && !sel[f]) setSel(f, ls[f]);
+        });
+    }
+    if (!detailSampleKey) {
+        const first = detailSampleList()[0];
+        if (first) detailSampleKey = first[0];
+    }
+    refreshViews();
+    update();
+    scheduleSave();
+    showToast('🧺 ' + toFa(added) + ' محصول توسط ایجنت استخراج و به نتایج اضافه شد');
+    return added;
+}
+
 /** برچسبِ فارسیِ فازِ جاری. */
 function selagPhaseLabel(ph) {
     const m = { start: 'آماده‌سازی', fetch: 'دریافتِ صفحه', map: 'نقشه‌برداری از ساختار',
-                think: 'تحلیل توسط مدل', tool: 'اجرای ابزار', verify: 'اعتبارسنجیِ نهایی' };
+                think: 'تحلیل توسط مدل', tool: 'اجرای ابزار', verify: 'اعتبارسنجیِ نهایی',
+                chain: 'ساختِ محصولِ نمونه (اجرای ایجنتِ فهرست)' };
     return m[ph] || ph || '—';
 }
 
@@ -40204,6 +40598,13 @@ function selagPanelHtml() {
     h += '<span class="selag-chip">آزمایشِ سلکتور ' + toFa(+(p.probes || 0)) + '</span>';
     h += '<span class="selag-chip">تأییدشده ' + toFa(+(p.confirmed || 0)) + '</span>';
     h += '</div>';
+
+    /* v10.27 (۴۰الف): از کدام راه صفحه گرفته شد. وقتی «مستقیم» است یعنی
+       iframeِ پروکسی این سایت را باز نمی‌کند — دانستنش برای کاربر مهم است
+       چون انتخابگر عالی هم روی همین سایت خالی می‌ماند. */
+    const _via = p.fetch_via || (selagLast && selagLast.via) || '';
+    if (_via === 'proxy') h += '<div style="font-size:10.5px;color:#86efac;margin-bottom:6px">🖼 صفحه از راهِ iframeِ پروکسی باز شد</div>';
+    else if (_via === 'direct') h += '<div style="font-size:10.5px;color:#fbbf24;margin-bottom:6px">🌐 iframeِ پروکسی این صفحه را باز نکرد — مستقیم با قابلیت‌های وب‌تولز گرفته شد</div>';
 
     if (p.error) h += '<div class="alert alert-danger" style="font-size:11px;margin:0 0 7px">❌ ' + esc(p.error) + '</div>';
 
@@ -42168,6 +42569,47 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.27', t:'🧲 ایجنتِ سلکتور: صفحه را هرجور شده باز می‌کند — و اگر محصولی نباشد، خودش می‌سازد', items:[
+    '🌐 <b>الف — «دریافتِ صفحه ناموفق بود» دیگر آخرِ خط نیست.</b> تا دیروز هر',
+    '   دو ایجنتِ کشفِ سلکتور (فهرست و جزئیات) صفحه را با یک تلاشِ خشکِ ۲۵',
+    '   ثانیه‌ای می‌گرفتند: بدونِ تنظیمِ «اتصالِ غیرمستقیمِ این پروفایل»، بدونِ',
+    '   مهلتی که خودتان در اتصالات گذاشته‌اید، و بدونِ هیچ تلاشِ دوم. نتیجه‌اش',
+    '   آزاردهنده بود — صفحه‌ای که در <b>انتخابگر عالی</b> قشنگ باز می‌شد، زیرِ',
+    '   دستِ ایجنت شکست می‌خورد و کاربر حق داشت بگوید «مگر همین صفحه همین‌جا',
+    '   باز نشد؟».',
+    '🖼 <b>حالا ایجنت اول همان راهی را می‌رود که iframeِ پروکسی می‌رود:</b> همان',
+    '   کلیدِ پروفایل، همان مهلتِ تنظیمات (پیش‌فرض ۴۵ ثانیه)، و همان تلاشِ',
+    '   دومِ دوبرابر اگر فقط «کند» بوده باشد. یعنی هر صفحه‌ای که انتخابگرِ',
+    '   عالی باز می‌کند، ایجنت هم باز می‌کند — دیگر اختلافِ رفتار بینشان نیست.',
+    '🔧 <b>و اگر پروکسی نتوانست، مستقیم می‌رود.</b> این همان پلهٔ تازه است:',
+    '   ایجنت بدونِ پروکسی و بدونِ iframe سراغِ صفحه می‌رود — دقیقاً کاری که',
+    '   دکمه‌های «🌐 بارگذاری مستقیم» و «🔍 بازرسی تمام صفحه» با قابلیت‌های',
+    '   وب‌تولزِ مرورگر می‌کنند. سایت‌هایی که فقط مسیرِ پروکسی/Worker را',
+    '   می‌بندند، از این راه باز می‌شوند و کشفِ سلکتور کاملاً عادی جلو می‌رود.',
+    '   در پنل هم می‌بینید از کدام راه گرفته شده: «🖼 از راهِ پروکسی» یا',
+    '   «🌐 پروکسی باز نکرد — مستقیم گرفته شد». اگر هیچ‌کدام نشد، پیامِ خطا',
+    '   دیگر بن‌بست نیست و سه راهِ دستیِ موجود را نام می‌برد.',
+    '🧺 <b>ب — ایجنتِ جزئیات دیگر پشتِ «ابتدا محصولات را استخراج کنید» نمی‌ماند.</b>',
+    '   وضعیتِ رایج: پروفایل تازه است، هنوز چیزی استخراج نشده، کاربر می‌رود',
+    '   سراغِ زیرتبِ جزئیات و «🤖 پیشنهاد (ایجنت)» را می‌زند — و فقط یک توست',
+    '   می‌گیرد. ولی همهٔ چیزی که برای برداشتنِ آن قدم لازم است همان‌جا هست:',
+    '   آدرسِ صفحهٔ فهرست در کادرِ بالا، و ایجنتی که بلد است سلکتورِ فهرست را',
+    '   کشف کند. پس حالا خودِ ایجنت زنجیره را کامل می‌کند.',
+    '🔗 <b>زنجیره، از ارزان به گران:</b> اول محصولاتِ ذخیره‌شدهٔ همین پروفایل را',
+    '   نگاه می‌کند؛ نبود، سلکتورِ فهرستِ ذخیره‌شده را روی صفحهٔ فهرست اجرا',
+    '   می‌کند؛ آن هم نبود، <b>ایجنتِ کشفِ سلکتورِ فهرست را کامل اجرا می‌کند</b>،',
+    '   بعد چند محصول استخراج می‌کند، صفحهٔ اولی را به‌عنوان نمونه برمی‌دارد و',
+    '   تازه می‌رود سراغِ سلکتورهای جزئیات. همهٔ این مراحل زنده در لاگ و در',
+    '   «💬 گفتگوی زنده» دیده می‌شود.',
+    '📦 <b>محصولاتِ به‌دست‌آمده حیف نمی‌شوند.</b> هم در پروفایل ذخیره می‌شوند و',
+    '   هم بلافاصله در همان تبِ باز به نتایج اضافه می‌شوند — چون اگر فقط سرور',
+    '   ذخیره می‌کرد، اولین ذخیرهٔ خودکارِ تبِ باز همان فهرستِ خالی را رویش',
+    '   می‌نوشت (همان دردی که در ۸.۸۳ سرِ گالری‌ها کشیدیم). سلکتورهای فهرستی',
+    '   که در همین مسیر کشف شده‌اند هم، اگر جای خالی داشته باشید، پر می‌شوند.',
+    '🛡 <b>هیچ‌چیز بازنویسی نمی‌شود:</b> محصولی که از قبل در نتایج هست دست‌نخورده',
+    '   می‌ماند، سلکتوری که خودتان پر کرده‌اید عوض نمی‌شود، و اگر کشفِ فهرست',
+    '   شکست بخورد پیامِ دقیقِ همان مرحله را می‌گیرید نه یک «ناموفق»ِ کلی.',
+  ]},
   {v:'10.26', t:'💬 گفتگوی زندهٔ ایجنت‌ها — و جمع‌شدنِ همهٔ راهنماها', items:[
     '💬 <b>ب — دیگر وسطِ کارِ ایجنت بی‌خبر نمی‌مانید.</b> شکایتِ دقیقی که این',
     '   بند از آن زاده شد: ایجنتِ استخراجِ جزئیات چند دقیقه کار می‌کرد و تنها',
