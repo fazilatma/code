@@ -119,6 +119,23 @@ const AGENT_LOCK_FILE     = __DIR__ . '/agent.lock';
 const AGENT_MAX_STEPS     = 24;   // سقفِ دورِ گفت‌وگو با مدل (ضدِ حلقهٔ بی‌پایان)
 const AGENT_MAX_CALLS     = 80;   // سقفِ کلِ فراخوانیِ ابزار در یک اجرا
 
+/* v10.25 (۳۸ج): «ایجنتِ کشفِ سلکتور».
+ *
+ *  چرا یک ایجنتِ جدا و نه همان agentRun؟ چون ابزارهای این کار کاملاً
+ *  متفاوت‌اند: آن ایجنت با فروشگاه (ووکامرس/باسلام) کار می‌کند، این یکی
+ *  با DOMِ یک صفحهٔ بیرونی. قاطی‌کردنشان یعنی مدل در هر اجرا ۸ ابزارِ
+ *  بی‌ربط می‌بیند و دقتِ انتخاب پایین می‌آید.
+ *
+ *  فایلِ پیشرفت جداست تا در «مدیر وظیفه» یک ردیفِ مستقل بگیرد و اجرای
+ *  ایجنتِ محصولات را از صفحه پاک نکند (بندِ ۳۸د).
+ */
+const SELAGENT_PROGRESS_FILE = __DIR__ . '/selagent_progress.json';
+const SELAGENT_RESULT_FILE   = __DIR__ . '/selagent_result.json';
+const SELAGENT_STOP_FILE     = __DIR__ . '/selagent_stop.json';
+const SELAGENT_LOCK_FILE     = __DIR__ . '/selagent.lock';
+const SELAGENT_MAX_STEPS     = 16;   // کشفِ سلکتور کارِ کوتاهی است؛ سقفِ کمتر = هزینهٔ کمتر
+const SELAGENT_MAX_CALLS     = 60;
+
 /* v10.05 (۱۹): اتوماسیونِ ایجنتی — کارهای زمان‌بندی‌شده */
 const AUTO_JOBS_FILE     = __DIR__ . '/auto_jobs.json';
 const AUTO_LOG_DIR       = __DIR__ . '/auto_logs';
@@ -172,7 +189,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.24';
+const APP_VERSION = '10.25';
 const APP_VERSION_DATE = '1405/06/01';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -15263,6 +15280,19 @@ function tasksRegistry(): array {
                         'تغییر' => (int)($p['changes'] ?? 0)];
             },
         ],
+        /* v10.25 (۳۸د): ایجنتِ کشفِ سلکتور یک کارِ پس‌زمینهٔ مستقل است، پس
+           باید ردیفِ خودش را در مدیر وظیفه داشته باشد — با همان دکمهٔ پرش،
+           همان «توقف» و همان نوارِ پیشرفت. `pane` روی selectors است تا پرش
+           کاربر را به همان تبی ببرد که کار را از آنجا شروع کرده. */
+        'selagent' => [
+            'title' => 'کشفِ خودکارِ سلکتور (ایجنت)', 'icon' => '🧲', 'file' => SELAGENT_PROGRESS_FILE,
+            'stop' => 'selagent_stop', 'tab' => 'سلکتور',
+            'pane' => 'selectors', 'open' => 'selAgentOpenLast', 'resume' => 'selagent_start=1',
+            'stat' => function (array $p): array {
+                return ['گام' => (int)($p['step'] ?? 0), 'آزمایشِ سلکتور' => (int)($p['probes'] ?? 0),
+                        'تأییدشده' => (int)($p['confirmed'] ?? 0)];
+            },
+        ],
         'ai_test' => [
             'title' => 'تستِ مدل‌های هوش مصنوعی', 'icon' => '🧪', 'file' => AI_TEST_STATE_FILE,
             'stop' => 'ai_test_stop', 'tab' => 'هوش مصنوعی',
@@ -15347,6 +15377,16 @@ function tasksResumeUrl(string $key, array $def, array $p): string {
             if ($task === '') return '';
             $q = $base . '&mode=' . rawurlencode((string)($p['mode'] ?? 'dry'))
                . '&task=' . rawurlencode($task);
+            if (trim((string)($p['model'] ?? '')) !== '') $q .= '&model=' . rawurlencode((string)$p['model']);
+            return $q;
+        /* v10.25 (۳۸د): ادامهٔ کشفِ سلکتور یعنی «همان صفحه را دوباره کاوش کن».
+           بدونِ url هیچ معنایی ندارد، پس اگر فایلِ پیشرفت آدرس نداشت اصلاً
+           دکمهٔ ادامه نشان داده نمی‌شود. */
+        case 'selagent':
+            $u = trim((string)($p['url'] ?? ''));
+            if ($u === '') return '';
+            $q = $base . '&kind=' . (((string)($p['kind'] ?? 'list')) === 'detail' ? 'detail' : 'list')
+               . '&url=' . rawurlencode($u);
             if (trim((string)($p['model'] ?? '')) !== '') $q .= '&model=' . rawurlencode((string)$p['model']);
             return $q;
         case 'recon':
@@ -15533,7 +15573,8 @@ function tasksResumeOne(string $key): array {
 
     /* قفلِ جامانده و پیشرفتِ مرده کنار می‌روند، وگرنه شروعِ تازه پشتِ همان
        قفل می‌ماند و کاربر پیامِ «در حال اجراست» می‌گیرد. */
-    $locks = ['dedup' => DEDUP_LOCK_FILE, 'agent' => AGENT_LOCK_FILE, 'catfix' => CATFIX_LOCK_FILE];
+    $locks = ['dedup' => DEDUP_LOCK_FILE, 'agent' => AGENT_LOCK_FILE, 'catfix' => CATFIX_LOCK_FILE,
+              'selagent' => SELAGENT_LOCK_FILE];   // v10.25 (۳۸د)
     if ($row['state'] === 'stale') {
         if (isset($locks[$key])) @unlink($locks[$key]);
         @unlink((string)$def['file']);
@@ -15542,7 +15583,8 @@ function tasksResumeOne(string $key): array {
        بررسی فوراً خودش را متوقف می‌کند. */
     $stopMap = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
                 'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE,
-                'ai_test_stop' => AI_TEST_STOP_FILE, 'catfix_stop' => CATFIX_STOP_FILE];
+                'ai_test_stop' => AI_TEST_STOP_FILE, 'catfix_stop' => CATFIX_STOP_FILE,
+                'selagent_stop' => SELAGENT_STOP_FILE];   // v10.25 (۳۸د)
     $sf = $stopMap[(string)($def['stop'] ?? '')] ?? '';
     if ($sf !== '') @unlink($sf);
 
@@ -15605,7 +15647,8 @@ if (isset($_GET['tasks_stop'])) {
     if (!isset($reg[$key])) { echo json_encode(['ok' => false, 'error' => 'کارِ ناشناخته'], JSON_UNESCAPED_UNICODE); exit; }
     $map = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
             'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE, 'ai_test_stop' => AI_TEST_STOP_FILE,
-            'catfix_stop' => CATFIX_STOP_FILE];   // v10.23 (۳۶د)
+            'catfix_stop' => CATFIX_STOP_FILE,                 // v10.23 (۳۶د)
+            'selagent_stop' => SELAGENT_STOP_FILE];            // v10.25 (۳۸د)
     $sf = $map[(string)$reg[$key]['stop']] ?? '';
     if ($sf === '') { echo json_encode(['ok' => false, 'error' => 'این کار توقفِ دستی ندارد'], JSON_UNESCAPED_UNICODE); exit; }
     @file_put_contents($sf, json_encode(['at' => time()]));
@@ -15701,7 +15744,8 @@ if (isset($_GET['tasks_clear'])) {
     }
     /* کارِ رهاشده ممکن است قفلش هم جا مانده باشد */
     $locks = ['dedup' => DEDUP_LOCK_FILE, 'agent' => AGENT_LOCK_FILE,
-              'catfix' => CATFIX_LOCK_FILE];   // v10.23 (۳۶د)
+              'catfix' => CATFIX_LOCK_FILE,                      // v10.23 (۳۶د)
+              'selagent' => SELAGENT_LOCK_FILE];                 // v10.25 (۳۸د)
     if (isset($locks[$key])) @unlink($locks[$key]);
     @unlink((string)$reg[$key]['file']);
     echo json_encode(['ok' => true, 'cleared' => 1], JSON_UNESCAPED_UNICODE);
@@ -16054,6 +16098,108 @@ if (isset($_GET['agent_stop'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @file_put_contents(AGENT_STOP_FILE, json_encode(['at' => time()]));
     agentProgress(['log_add' => ['⏹ درخواستِ توقف ثبت شد — پس از گامِ جاری متوقف می‌شود']]);
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v10.25 (۳۸ج): اندپوینت‌های ایجنتِ کشفِ سلکتور
+ *    ?selagent_start=1&kind=list|detail&url=…[&model=…]  → شروع در پس‌زمینه
+ *    ?selagent_status=1[&since=n]                        → وضعیتِ زنده
+ *    ?selagent_result=1                                  → نتیجهٔ کامل
+ *    ?selagent_stop=1                                    → درخواستِ توقف
+ *
+ *  عمداً همان الگوی agent_start: قفلِ flock ⇒ بستنِ زودهنگامِ پاسخ ⇒ ادامهٔ
+ *  کار در پس‌زمینه. اگر این کار را نکنیم مرورگر تا پایانِ کلِ گفت‌وگو با
+ *  مدل (گاهی یک دقیقه) منتظر می‌ماند و اکثرِ هاست‌ها وسطش قطع می‌کنند.
+ * ================================================================== */
+if (isset($_GET['selagent_start'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $saUrl  = trim((string)($_POST['url'] ?? ($_GET['url'] ?? '')));
+    $saKind = ((string)($_POST['kind'] ?? ($_GET['kind'] ?? 'list')) === 'detail') ? 'detail' : 'list';
+    $saModel = trim((string)($_POST['model'] ?? ($_GET['model'] ?? '')));
+    if (!filter_var($saUrl, FILTER_VALIDATE_URL)) {
+        echo json_encode(['ok' => false, 'error' => 'آدرسِ صفحه معتبر نیست'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $saLock = fopen(SELAGENT_LOCK_FILE, 'c');
+    if (!$saLock || !flock($saLock, LOCK_EX | LOCK_NB)) {
+        if ($saLock) fclose($saLock);
+        echo json_encode(['ok' => false, 'running' => true,
+            'error' => 'یک کشفِ سلکتور همین حالا در جریان است'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    @set_time_limit(0); @ignore_user_abort(true);
+    selagentClearStop();
+    @unlink(SELAGENT_PROGRESS_FILE);
+    @unlink(SELAGENT_RESULT_FILE);
+    selagentProgress(['running' => true, 'done' => false, 'kind' => $saKind, 'url' => $saUrl,
+        'model' => $saModel, 'started_at' => time(), 'step' => 0, 'calls' => 0,
+        'probes' => 0, 'confirmed' => 0, 'phase' => 'start',
+        'log_add' => ['🚀 کشفِ سلکتورهای ' . ($saKind === 'detail' ? 'صفحهٔ جزئیات' : 'صفحهٔ فهرست')
+                      . ' — ' . $saUrl
+                      . ($saModel !== '' ? (' — مدل: ' . $saModel) : ' — مدلِ پیش‌فرضِ اتصالات')]]);
+
+    $saEarly = json_encode(['ok' => true, 'started' => true, 'kind' => $saKind], JSON_UNESCAPED_UNICODE);
+    header('Connection: close');
+    header('Content-Length: ' . strlen($saEarly));
+    echo $saEarly;
+    @ob_flush(); @flush();
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+
+    register_shutdown_function(function () use ($saLock) {
+        @flock($saLock, LOCK_UN); @fclose($saLock); @unlink(SELAGENT_LOCK_FILE);
+    });
+
+    try {
+        $saRep = selagentRun($saUrl, $saKind, $saModel);
+    } catch (Throwable $e) {
+        selagentProgress(['running' => false, 'done' => true, 'error' => $e->getMessage(),
+            'log_add' => ['❌ خطا: ' . $e->getMessage()]]);
+        selagentClearStop();
+        exit;
+    }
+    @file_put_contents(SELAGENT_RESULT_FILE, json_encode($saRep, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    $saStopped = selagentStopRequested();
+    selagentClearStop();
+    $saN = count((array)($saRep['selectors'] ?? []));
+    selagentProgress(['running' => false, 'done' => true, 'stopped' => $saStopped,
+        'result_ok' => !empty($saRep['ok']), 'error' => $saRep['error'] ?? '',
+        'found' => $saN,
+        'log_add' => [empty($saRep['ok'])
+            ? ('❌ ' . ($saRep['error'] ?? 'ناموفق'))
+            : ('🏁 پایان در ' . $saRep['took'] . ' ثانیه — ' . aiFaNum($saN)
+               . ' سلکتورِ تأییدشده از ' . aiFaNum((int)($saRep['probes'] ?? 0)) . ' آزمایش')]]);
+    exit;
+}
+
+if (isset($_GET['selagent_status'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $sp = [];
+    if (is_file(SELAGENT_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(SELAGENT_PROGRESS_FILE), true);
+        if (is_array($d)) $sp = $d;
+    }
+    $sSince = max(0, (int)($_GET['since'] ?? 0));
+    $sLog = is_array($sp['log'] ?? null) ? $sp['log'] : [];
+    $sp['log'] = array_slice($sLog, $sSince);
+    $sp['log_total'] = count($sLog);
+    $sp['ok'] = true;
+    echo json_encode($sp, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['selagent_result'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    if (!is_file(SELAGENT_RESULT_FILE)) {
+        echo json_encode(['ok' => false, 'error' => 'هنوز نتیجه‌ای وجود ندارد'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    echo (string)@file_get_contents(SELAGENT_RESULT_FILE);
+    exit;
+}
+
+if (isset($_GET['selagent_stop'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @file_put_contents(SELAGENT_STOP_FILE, json_encode(['at' => time()]));
+    selagentProgress(['log_add' => ['⏹ درخواستِ توقف ثبت شد — پس از گامِ جاری متوقف می‌شود']]);
     echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -20861,8 +21007,8 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, "'error' => 'این کار همین حالا در حال اجراست'") !== false);
 
     /* ۳۶د — اصلاحِ دستهٔ باسلام به‌عنوان کارِ پس‌زمینه */
-    $add('10.23', 'رجیستری یازده کار دارد و «catfix» جزوشان است',
-         isset(tasksRegistry()['catfix']) && count(tasksRegistry()) === 11);
+    $add('10.23', 'رجیستری «catfix» را دارد (v10.25: شمار به ۱۲ رسید)',
+         isset(tasksRegistry()['catfix']) && count(tasksRegistry()) === 12);
 
     $add('10.23', 'موتور و اندپوینت‌های اصلاحِ دسته وجود دارند',
          function_exists('catfixRun') && function_exists('catfixProgress')
@@ -21070,6 +21216,113 @@ if (isset($_GET['selftest'])) {
     $add('10.24', 'نسخه و گزارشِ تغییرات به‌روز است',
          version_compare(APP_VERSION, '10.' . '24', '>=')
       && strpos($selfSrc, 'v:' . "'10.24'") !== false);
+
+    /* ═══ v10.25 (۳۸): ایجنتِ سلکتور + زیرتب‌ها + دکمهٔ پنجرهٔ اصلی ═══ */
+
+    $add('10.25', 'شش ثابتِ SELAGENT تعریف شده‌اند',
+         defined('SELAGENT_PROGRESS_FILE') && defined('SELAGENT_RESULT_FILE')
+      && defined('SELAGENT_STOP_FILE') && defined('SELAGENT_LOCK_FILE')
+      && defined('SELAGENT_MAX_STEPS') && defined('SELAGENT_MAX_CALLS')
+      && SELAGENT_MAX_STEPS > 0 && SELAGENT_MAX_CALLS > SELAGENT_MAX_STEPS);
+
+    $add('10.25', 'موتورِ ایجنتِ کشفِ سلکتور کامل است',
+         function_exists('selagentRun') && function_exists('selagentProgress')
+      && function_exists('selagentDomMap') && function_exists('selagentProbe')
+      && function_exists('selagentToolSpecs') && function_exists('selagentSystemPrompt')
+      && function_exists('selagentVerifyAll') && function_exists('selagentFields')
+      && function_exists('selagentStopRequested') && function_exists('selagentClearStop'));
+
+    $add('10.25', 'فیلدهای هر دو حالت دقیقاً با فرم‌های موجود می‌خوانند',
+         array_keys(selagentFields('list')) === ['container', 'title', 'price', 'link', 'image']
+      && count(selagentFields('detail')) === 9
+      && array_key_exists('shortDesc', selagentFields('detail'))
+      && array_key_exists('sku', selagentFields('detail')));
+
+    $add('10.25', 'ایجنت هر سه ابزارِ آزمودن/بازرسی/تحویل را دارد',
+         (function () {
+             $names = array_map(function ($t) { return $t['function']['name']; }, selagentToolSpecs('list'));
+             return in_array('probe_selector', $names, true)
+                 && in_array('inspect_html', $names, true)
+                 && in_array('submit_selectors', $names, true);
+         })());
+
+    $add('10.25', 'چهار اندپوینتِ ایجنتِ سلکتور وجود دارند',
+         strpos($selfSrc, "isset(\$_GET['selagent_start'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['selagent_status'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['selagent_result'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['selagent_stop'])") !== false);
+
+    $add('10.25', 'شروعِ ایجنت با قفلِ انحصاری از اجرای موازی جلو می‌گیرد',
+         strpos($selfSrc, '$saLock = fopen(SELAGENT_LOCK_FILE') !== false
+      && strpos($selfSrc, 'flock($saLock, LOCK_EX | LOCK_NB)') !== false
+      && strpos($selfSrc, "'error' => 'یک کشفِ سلکتور همین حالا در جریان است'") !== false);
+
+    $add('10.25', 'کارِ «selagent» در مدیر وظیفه ثبت شده و پرشِ اختصاصی دارد',
+         (function () {
+             $r = tasksRegistry();
+             if (!isset($r['selagent'])) return false;
+             $t = $r['selagent'];
+             return $t['file'] === SELAGENT_PROGRESS_FILE && $t['stop'] === 'selagent_stop'
+                 && $t['pane'] === 'selectors' && ($t['open'] ?? '') === 'selAgentOpenLast'
+                 && strpos((string)$t['resume'], 'selagent_start=1') !== false;
+         })());
+
+    $add('10.25', 'ادامهٔ کشفِ سلکتور بدونِ آدرسِ ذخیره‌شده پیشنهاد نمی‌شود',
+         tasksResumeUrl('selagent', tasksRegistry()['selagent'], []) === ''
+      && strpos(tasksResumeUrl('selagent', tasksRegistry()['selagent'],
+                ['url' => 'https://a.example/p', 'kind' => 'detail']), 'kind=detail') !== false);
+
+    /* رشته‌ها تکه‌تکه ساخته می‌شوند وگرنه خودِ همین خطِ ادعا هم شمرده می‌شود */
+    $add('10.25', 'قفل و سیگنالِ توقفِ ایجنتِ سلکتور در پاک‌سازیِ کارِ رهاشده هم آمده',
+         substr_count($selfSrc, "'selagent' =>" . ' SELAGENT_LOCK_FILE') === 2
+      && substr_count($selfSrc, "'selagent_stop' =>" . ' SELAGENT_STOP_FILE') === 3);
+
+    $add('10.25', 'تبِ سلکتور دو زیرتبِ لیست/جزئیات دارد',
+         strpos($selfSrc, 'class="selsub-tabs"') !== false
+      && strpos($selfSrc, 'id="selsub-list"') !== false
+      && strpos($selfSrc, 'id="selsub-detail"') !== false
+      && strpos($selfSrc, 'استخراج لیست محصولات</button>') !== false
+      && strpos($selfSrc, 'استخراج جزئیات محصولات</button>') !== false);
+
+    $add('10.25', 'زیرتب‌ها کلاسِ جدا از .sub-tab دارند تا switchView قاطیشان نکند',
+         strpos($selfSrc, '.selsub-tab{') !== false
+      && strpos($selfSrc, '.selsub-tab.active{') !== false
+      && strpos($selfSrc, "function selSub(v)") !== false
+      && strpos($selfSrc, "localStorage.setItem('selSubView'") !== false);
+
+    $add('10.25', 'هر دو زیرتب دکمهٔ ایجنتیِ پیشنهاد دارند',
+         strpos($selfSrc, "selagStart('list')") !== false
+      && strpos($selfSrc, "selagStart('detail')") !== false
+      && substr_count($selfSrc, '🤖 پیشنهاد (ایجنت)' . '</button>') === 2);
+
+    $add('10.25', 'پیشرفتِ ایجنت در هر سه نما (لیست/جزئیات/تبِ ایجنت) رندر می‌شود',
+         strpos($selfSrc, 'id="selagBody-list"') !== false
+      && strpos($selfSrc, 'id="selagBody-detail"') !== false
+      && strpos($selfSrc, 'id="selagBody-ai"') !== false
+      && strpos($selfSrc, "['list', 'detail', 'ai'].forEach") !== false);
+
+    $add('10.25', 'یک تایمرِ واحد نظرسنجی می‌کند (نه سه تایمرِ جداگانه)',
+         substr_count($selfSrc, 'selagTimer = ' . 'setInterval') === 1
+      && strpos($selfSrc, 'function selagTick()') !== false
+      && strpos($selfSrc, "'?selagent_status=1&since=' + selagLines.length") !== false);
+
+    $add('10.25', 'نتیجهٔ ایجنت از همان مسیرِ همیشگیِ ذخیره اعمال می‌شود',
+         strpos($selfSrc, 'function selagApply()') !== false
+      && strpos($selfSrc, 'setSel(f, sels[f]);') !== false
+      && strpos($selfSrc, 'renderDetailFieldsList();') !== false);
+
+    $add('10.25', 'اجرای در جریان بعد از رفرشِ صفحه بازیابی می‌شود',
+         strpos($selfSrc, 'function selagResume()') !== false
+      && strpos($selfSrc, 'try{ selagResume(); }catch(e){}') !== false
+      && strpos($selfSrc, 'try{ selSubRestore(); }catch(e){}') !== false);
+
+    $add('10.25', 'کارتِ مدیر وظیفه دکمهٔ صریحِ «پنجرهٔ اصلی» دارد',
+         strpos($selfSrc, '↗ پنجرهٔ اصلی</button>') !== false
+      && strpos($selfSrc, 'event.stopPropagation();tm' . "Go(\\'") !== false);
+
+    $add('10.25', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '25', '>=')
+      && strpos($selfSrc, 'v:' . "'10.25'") !== false);
 
     $add('10.21', 'اندپوینتِ سلامتِ اعلان‌ها هفت بررسی انجام می‌دهد',
          strpos($selfSrc, "isset(\$_GET['notif_health'])") !== false
@@ -21368,15 +21621,15 @@ if (isset($_GET['selftest'])) {
 
     $add('10.19', 'هر سیگنالِ توقفِ رجیستری به فایلِ واقعیِ همان کار نگاشت دارد',
          (function () {
-             /* v10.23 (۳۶د): catfix_stop هم به نگاشت اضافه شد */
+             /* v10.23 (۳۶د): catfix_stop — v10.25 (۳۸د): selagent_stop */
              $map = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
                      'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE, 'ai_test_stop' => AI_TEST_STOP_FILE,
-                     'catfix_stop' => CATFIX_STOP_FILE];
+                     'catfix_stop' => CATFIX_STOP_FILE, 'selagent_stop' => SELAGENT_STOP_FILE];
              foreach (tasksRegistry() as $d) {
                  $st = (string)$d['stop'];
                  if ($st !== '' && !isset($map[$st])) return false;
              }
-             return count($map) === 7;
+             return count($map) === 8;
          })());
 
     $add('10.19', 'سه اندپوینتِ مدیر وظیفه و اندپوینتِ اولویت وجود دارند',
@@ -34379,6 +34632,556 @@ function agentRun(array $cn, string $task, string $mode, string $model = ''): ar
             'native_tools' => $nativeTools, 'took' => round(microtime(true) - $t0, 1)];
 }
 
+/* =====================================================================
+ *  v10.25 (۳۸ج): ایجنتِ کشفِ سلکتور
+ *  ---------------------------------------------------------------------
+ *  تا نسخهٔ ۱۰٫۲۴ دکمهٔ «💡 پیشنهاد» فقط یک فهرستِ ثابت از الگوهای
+ *  ووکامرس را روی صفحه امتحان می‌کرد. روی هر سایتی که قالبِ ووکامرسیِ
+ *  استاندارد نداشت (اکثرِ فروشگاه‌های ایرانی) خروجی یا خالی بود یا
+ *  سلکتوری می‌داد که موقعِ استخراج رشتهٔ خالی برمی‌گرداند.
+ *
+ *  حالا یک ایجنتِ واقعی این کار را می‌کند:
+ *    ۱) صفحه را می‌گیرد و یک «نقشهٔ فشرده» از DOM می‌سازد (نه خودِ HTML —
+ *       یک صفحهٔ فروشگاهی ۸۰۰ کیلوبایت است و در هیچ کانتکستی جا نمی‌شود).
+ *    ۲) مدل با ابزارها روی همان DOM کاوش می‌کند: probe_selector می‌زند،
+ *       نمونهٔ واقعی می‌بیند، اشتباهش را می‌فهمد و سلکتورِ بعدی را امتحان
+ *       می‌کند.
+ *    ۳) هر سلکتوری که مدل نهایی می‌کند، پیش از پذیرش *دوباره روی همان
+ *       صفحه اعتبارسنجی می‌شود*. مدل نمی‌تواند سلکتورِ خیالی تحویل بدهد.
+ *
+ *  همهٔ گام‌ها با selagentProgress ثبت می‌شوند تا هم‌زمان در «مدیر وظیفه»
+ *  و در تبِ «🤖 ایجنت» دیده شوند (بندِ ۳۸د).
+ * ================================================================== */
+
+/** ثبتِ پیشرفت — دقیقاً همان قراردادِ agentProgress، روی فایلِ خودِ این ایجنت. */
+function selagentProgress(array $patch): void {
+    $cur = [];
+    if (is_file(SELAGENT_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(SELAGENT_PROGRESS_FILE), true);
+        if (is_array($d)) $cur = $d;
+    }
+    $log = is_array($cur['log'] ?? null) ? $cur['log'] : [];
+    if (isset($patch['log_add'])) {
+        foreach ((array)$patch['log_add'] as $l) $log[] = ['t' => time(), 'm' => (string)$l];
+        if (count($log) > 400) $log = array_slice($log, -400);
+        unset($patch['log_add']);
+    }
+    $steps = is_array($cur['steps'] ?? null) ? $cur['steps'] : [];
+    if (isset($patch['step_add'])) {
+        foreach ((array)$patch['step_add'] as $s) $steps[] = $s;
+        if (count($steps) > 200) $steps = array_slice($steps, -200);
+        unset($patch['step_add']);
+    }
+    $cur = array_merge($cur, $patch);
+    $cur['log'] = $log; $cur['steps'] = $steps; $cur['ts'] = time();
+    @file_put_contents(SELAGENT_PROGRESS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+function selagentStopRequested(): bool { return is_file(SELAGENT_STOP_FILE); }
+function selagentClearStop(): void { @unlink(SELAGENT_STOP_FILE); }
+
+/** فیلدهای هر حالت — همان کلیدهایی که فرمِ تبِ سلکتور می‌شناسد. */
+function selagentFields(string $kind): array {
+    if ($kind === 'detail') {
+        return ['price' => 'قیمت', 'shortDesc' => 'توضیحاتِ کوتاه', 'longDesc' => 'توضیحاتِ بلند',
+                'sku' => 'کدِ کالا (SKU)', 'category' => 'دسته‌بندی', 'tags' => 'برچسب‌ها',
+                'weight' => 'وزن', 'stock' => 'موجودی', 'brand' => 'برند'];
+    }
+    return ['container' => 'ظرفِ هر محصول', 'title' => 'عنوان', 'price' => 'قیمت',
+            'link' => 'لینکِ صفحهٔ محصول', 'image' => 'عکس'];
+}
+
+/**
+ * نقشهٔ فشردهٔ DOM برای مدل.
+ *
+ * ایدهٔ کلیدی: مدل به خودِ HTML نیاز ندارد، به «کدام کلاس‌ها چند بار
+ * تکرار شده‌اند و داخلشان چه هست» نیاز دارد. برای صفحهٔ فهرست، ظرفِ
+ * محصول همیشه یک کلاسِ پرتکرار است؛ برای صفحهٔ جزئیات، فیلدها کلاس‌های
+ * یکتای معنادار دارند. پس یک هیستوگرامِ کلاس + چند نمونه‌متن می‌سازیم.
+ */
+function selagentDomMap(DOMXPath $xp, string $kind, int $budget = 7000): string {
+    $out = [];
+
+    /* هیستوگرامِ کلاس‌ها: کلاس ⇒ [تعداد، تگِ غالب، آیا لینک دارد، آیا عکس دارد، آیا عدد دارد] */
+    $hist = [];
+    $nodes = @$xp->query('//*[@class]');
+    $seen = 0;
+    if ($nodes) foreach ($nodes as $n) {
+        if (++$seen > 6000) break;
+        if (!($n instanceof DOMElement)) continue;
+        $tag = strtolower($n->tagName);
+        if (in_array($tag, ['script', 'style', 'noscript', 'svg', 'path'], true)) continue;
+        $txt = trim(preg_replace('/\s+/u', ' ', (string)$n->textContent));
+        foreach (preg_split('/\s+/', trim((string)$n->getAttribute('class')), -1, PREG_SPLIT_NO_EMPTY) as $c) {
+            if (mb_strlen($c) > 40 || mb_strlen($c) < 2) continue;
+            // کلاس‌های هش‌شدهٔ ابزارهای بیلد (مثل css-1a2b3c) برای انسان و مدل بی‌معنی‌اند
+            if (preg_match('/^(css|sc|jsx|_)-?[0-9a-f]{5,}$/i', $c)) continue;
+            $k = $tag . '.' . $c;
+            if (!isset($hist[$k])) $hist[$k] = ['n' => 0, 'a' => 0, 'img' => 0, 'num' => 0, 'len' => 0, 'ex' => ''];
+            $hist[$k]['n']++;
+            if (strpos($n->textContent, '') !== false) { /* no-op */ }
+            $a = @$xp->query('.//a[@href]', $n);   if ($a && $a->length) $hist[$k]['a']++;
+            $i = @$xp->query('.//img', $n);        if ($i && $i->length) $hist[$k]['img']++;
+            if (preg_match('/[0-9۰-۹٠-٩]{3,}/u', $txt)) $hist[$k]['num']++;
+            $hist[$k]['len'] += mb_strlen($txt);
+            if ($hist[$k]['ex'] === '' && $txt !== '') $hist[$k]['ex'] = mb_substr($txt, 0, 60);
+        }
+    }
+
+    if ($kind === 'list') {
+        /* برای فهرست: کلاس‌هایی که چند بار تکرار شده‌اند کاندیدِ ظرف‌اند. */
+        $rep = array_filter($hist, fn($v) => $v['n'] >= 2 && $v['n'] <= 200);
+        uasort($rep, function ($a, $b) {
+            // امتیاز: تکرارِ زیاد + داشتنِ لینک و عکس در بیشترِ نمونه‌ها
+            $sa = $a['n'] + ($a['a'] * 2) + ($a['img'] * 2);
+            $sb = $b['n'] + ($b['a'] * 2) + ($b['img'] * 2);
+            return $sb <=> $sa;
+        });
+        $out[] = 'کلاس‌های تکرارشونده (کاندیدِ ظرفِ محصول) — قالب: سلکتور | تکرار | چندتا لینک دارند | چندتا عکس دارند | نمونهٔ متن:';
+        $c = 0;
+        foreach ($rep as $k => $v) {
+            if (++$c > 60) break;
+            $out[] = $k . ' | ' . $v['n'] . ' | ' . $v['a'] . ' | ' . $v['img'] . ' | ' . $v['ex'];
+        }
+    } else {
+        /* برای جزئیات: کلاس‌های کم‌تکرار (یکتا) معنادارند. */
+        $uniq = array_filter($hist, fn($v) => $v['n'] <= 6 && $v['ex'] !== '');
+        uasort($uniq, fn($a, $b) => $b['len'] <=> $a['len']);
+        $out[] = 'عناصرِ معنادارِ صفحه — قالب: سلکتور | تکرار | نمونهٔ متن:';
+        $c = 0;
+        foreach ($uniq as $k => $v) {
+            if (++$c > 80) break;
+            $out[] = $k . ' | ' . $v['n'] . ' | ' . $v['ex'];
+        }
+        /* عنوانِ صفحه و متاها اغلب مستقیماً به فیلدها می‌خورند */
+        $h1 = @$xp->query('//h1');
+        if ($h1 && $h1->length) $out[] = 'h1 | 1 | ' . mb_substr(trim(preg_replace('/\s+/u', ' ', $h1->item(0)->textContent)), 0, 60);
+    }
+
+    $s = implode("\n", $out);
+    if (mb_strlen($s) > $budget) $s = mb_substr($s, 0, $budget) . "\n… (فهرست بریده شد)";
+    return $s;
+}
+
+/**
+ * یک سلکتور را روی صفحه امتحان می‌کند و می‌گوید *واقعاً* چه چیزی برمی‌دارد.
+ *
+ * این قلبِ ایجنت است: مدل حدس می‌زند، این تابع حقیقت را برمی‌گرداند.
+ * $scope: اگر داده شود، جست‌وجو داخلِ اولین تطبیقِ آن انجام می‌شود
+ * (برای فیلدهای داخلِ ظرفِ محصول).
+ */
+function selagentProbe(DOMXPath $xp, string $selector, string $field, string $baseUrl, string $scope = ''): array {
+    $selector = trim($selector);
+    if ($selector === '') return ['ok' => false, 'error' => 'سلکتور خالی است'];
+    $xpath = cssToXpath($selector);
+    if ($xpath === '') return ['ok' => false, 'error' => 'این سلکتورِ CSS قابلِ ترجمه نیست؛ ساده‌ترش کن (فقط تگ، کلاس، #id و > مجازند)'];
+
+    $roots = [null];
+    if ($scope !== '') {
+        $sx = cssToXpath($scope);
+        if ($sx === '') return ['ok' => false, 'error' => 'سلکتورِ ظرف قابلِ ترجمه نیست'];
+        $sn = @$xp->query($sx);
+        if (!$sn || !$sn->length) return ['ok' => false, 'error' => 'ظرفِ داده‌شده روی صفحه پیدا نشد'];
+        $roots = [];
+        foreach ($sn as $i => $one) { if ($i >= 5) break; $roots[] = $one; }
+    }
+
+    $samples = []; $hit = 0; $rootsWith = 0;
+    foreach ($roots as $root) {
+        $q = $root === null ? $xpath : ('.' . $xpath);
+        $nodes = $root === null ? @$xp->query($q) : @$xp->query($q, $root);
+        if (!$nodes || !$nodes->length) continue;
+        $rootsWith++;
+        $hit += $nodes->length;
+        $lim = $root === null ? 3 : 1;
+        foreach ($nodes as $i => $n) {
+            if ($i >= $lim) break;
+            $samples[] = selagentValueOf($xp, $n, $field, $baseUrl);
+        }
+        if (count($samples) >= 5) break;
+    }
+
+    if (!$hit) return ['ok' => false, 'found' => 0,
+        'error' => 'هیچ عنصری با این سلکتور پیدا نشد' . ($scope !== '' ? ' (داخلِ ظرف)' : '')];
+
+    $nonEmpty = 0;
+    foreach ($samples as $s) if (trim((string)$s) !== '') $nonEmpty++;
+
+    $r = ['ok' => true, 'found' => $hit, 'samples' => $samples,
+          'non_empty' => $nonEmpty, 'empty' => count($samples) - $nonEmpty];
+    if ($scope !== '') $r['containers_matched'] = $rootsWith . ' از ' . count($roots) . ' ظرفِ نمونه';
+    if ($nonEmpty === 0) $r['warning'] = 'سلکتور تطبیق می‌خورد ولی مقدارِ استخراج‌شده خالی است — این به دردِ استخراج نمی‌خورد';
+    return $r;
+}
+
+/** مقدارِ واقعیِ یک گره برای یک فیلد — همان منطقِ ?test_selector، فشرده. */
+function selagentValueOf(DOMXPath $xp, DOMNode $node, string $field, string $baseUrl): string {
+    if ($field === 'price') {
+        $v = extractPrice($node->textContent);
+        return $v !== '' ? $v : '';
+    }
+    if ($field === 'link') {
+        $link = '';
+        if ($node instanceof DOMElement) {
+            if (strtolower($node->tagName) === 'a') $link = (string)$node->getAttribute('href');
+            if ($link === '') {
+                $a = @$xp->query('.//a[@href]', $node);
+                if ($a && $a->length) $link = (string)$a->item(0)->getAttribute('href');
+            }
+            if ($link === '') {
+                $p = $node->parentNode;
+                for ($i = 0; $i < 5 && $p instanceof DOMElement; $i++) {
+                    if (strtolower($p->tagName) === 'a' && $p->getAttribute('href')) { $link = (string)$p->getAttribute('href'); break; }
+                    $p = $p->parentNode;
+                }
+            }
+        }
+        return $link === '' ? '' : make_absolute_url($link, $baseUrl);
+    }
+    if ($field === 'image') {
+        $img = '';
+        $cand = null;
+        if ($node instanceof DOMElement && strtolower($node->tagName) === 'img') $cand = $node;
+        else { $in = @$xp->query('.//img', $node); if ($in && $in->length) $cand = $in->item(0); }
+        if ($cand instanceof DOMElement) {
+            foreach (['data-src', 'data-lazy-src', 'data-original', 'srcset', 'src'] as $at) {
+                $v = trim((string)$cand->getAttribute($at));
+                if ($at === 'srcset' && $v !== '') $v = trim(explode(' ', explode(',', $v)[0])[0]);
+                if ($v !== '' && url_is_image($v)) { $img = $v; break; }
+            }
+        }
+        return $img === '' ? '' : make_absolute_url($img, $baseUrl);
+    }
+    if ($field === 'container') {
+        /* برای ظرف، «مقدار» یعنی خلاصه‌ای از آنچه داخلش هست تا مدل بفهمد
+           ظرفِ درستی گرفته یا مثلاً کلِ صفحه را. */
+        $t = @$xp->query('.//h1|.//h2|.//h3|.//h4|.//a[@title]', $node);
+        $a = @$xp->query('.//a[@href]', $node);
+        $i = @$xp->query('.//img', $node);
+        $head = ($t && $t->length) ? mb_substr(normalize_text($t->item(0)->textContent), 0, 45) : '—';
+        return 'عنوان: ' . $head . ' · لینک: ' . (($a && $a->length) ? 'دارد' : 'ندارد')
+             . ' · عکس: ' . (($i && $i->length) ? 'دارد' : 'ندارد');
+    }
+    return mb_substr(normalize_text($node->textContent), 0, 120);
+}
+
+/** مشخصاتِ ابزارها — با شرحِ فارسی، چون مدل‌ها با شرحِ دقیق بهتر ابزار می‌زنند. */
+function selagentToolSpecs(string $kind): array {
+    $fields = implode('، ', array_keys(selagentFields($kind)));
+    $probeProps = [
+        'field'    => ['type' => 'string', 'description' => 'فیلدی که این سلکتور برایش است. یکی از: ' . $fields],
+        'selector' => ['type' => 'string', 'description' => 'سلکتورِ CSS. فقط تگ، .کلاس، #شناسه، فاصله و > پشتیبانی می‌شوند. از :nth-child و + و ~ استفاده نکن.'],
+    ];
+    if ($kind === 'list') {
+        $probeProps['scope'] = ['type' => 'string', 'description' => 'سلکتورِ ظرفِ محصول. برای همهٔ فیلدها به‌جز container حتماً این را بده تا سلکتور *داخلِ* ظرف سنجیده شود.'];
+    }
+    return [
+        ['type' => 'function', 'function' => [
+            'name' => 'probe_selector',
+            'description' => 'یک سلکتورِ CSS را روی همین صفحه امتحان می‌کند و می‌گوید چند عنصر گرفت و *واقعاً* چه مقداری استخراج می‌شود. پیش از نهایی‌کردنِ هر فیلد حتماً این را صدا بزن؛ حدس زدن ممنوع است.',
+            'parameters' => ['type' => 'object', 'properties' => $probeProps, 'required' => ['field', 'selector']],
+        ]],
+        ['type' => 'function', 'function' => [
+            'name' => 'inspect_html',
+            'description' => 'تکه‌ای از HTMLِ خامِ صفحه را نشان می‌دهد تا ساختارِ دقیقِ تگ‌ها را ببینی. وقتی نقشهٔ کلاس‌ها کافی نبود از این استفاده کن.',
+            'parameters' => ['type' => 'object', 'properties' => [
+                'selector' => ['type' => 'string', 'description' => 'سلکتورِ عنصری که می‌خواهی HTMLش را ببینی؛ خالی یعنی ابتدای صفحه'],
+                'max_chars' => ['type' => 'integer', 'description' => 'حداکثر کاراکتر (پیش‌فرض ۱۵۰۰، سقف ۴۰۰۰)'],
+            ], 'required' => []],
+        ]],
+        ['type' => 'function', 'function' => [
+            'name' => 'submit_selectors',
+            'description' => 'وقتی همهٔ سلکتورها را با probe_selector تأیید کردی، نتیجهٔ نهایی را با این ابزار تحویل بده. فیلدی که سلکتورِ مطمئنی برایش پیدا نکردی را اصلاً نفرست؛ سلکتورِ اشتباه از نبودِ سلکتور بدتر است.',
+            'parameters' => ['type' => 'object', 'properties' => [
+                'selectors' => ['type' => 'object', 'description' => 'نگاشتِ فیلد به سلکتور، مثلاً {"container":"li.product","title":"h2 a"}. کلیدهای مجاز: ' . $fields],
+                'note' => ['type' => 'string', 'description' => 'توضیحِ کوتاهِ فارسی دربارهٔ ساختارِ صفحه و اینکه چه فیلدی پیدا نشد و چرا'],
+            ], 'required' => ['selectors']],
+        ]],
+    ];
+}
+
+/** برچسبِ فارسیِ یک فراخوانی برای لاگِ زنده */
+function selagentCallLabel(string $name, array $args): string {
+    if ($name === 'probe_selector')
+        return '🔬 آزمایشِ «' . (string)($args['selector'] ?? '') . '» برای ' . (string)($args['field'] ?? '?')
+             . (trim((string)($args['scope'] ?? '')) !== '' ? (' داخلِ ' . $args['scope']) : '');
+    if ($name === 'inspect_html')
+        return '🔎 نگاه به HTMLِ ' . (trim((string)($args['selector'] ?? '')) === '' ? 'ابتدای صفحه' : $args['selector']);
+    if ($name === 'submit_selectors')
+        return '📨 تحویلِ ' . aiFaNum(count((array)($args['selectors'] ?? []))) . ' سلکتور';
+    return '🔧 ' . $name;
+}
+
+/** پیامِ سیستمی — قواعد را صریح و شماره‌دار می‌دهیم چون مدل‌های کوچک‌تر با شرحِ کلی گم می‌شوند. */
+function selagentSystemPrompt(string $kind, string $url): string {
+    $s  = "تو یک متخصصِ استخراجِ داده از صفحاتِ وب هستی. وظیفه‌ات پیدا کردنِ سلکتورهای CSSِ درست برای یک صفحهٔ مشخص است.\n";
+    $s .= "آدرسِ صفحه: " . $url . "\n\n";
+    if ($kind === 'list') {
+        $s .= "این صفحه یک «فهرستِ محصولات» است. باید این فیلدها را پیدا کنی:\n";
+        $s .= "- container: سلکتورِ ظرفی که *هر محصول* را دربر می‌گیرد. مهم‌ترین فیلد است؛ اگر این غلط باشد بقیه بی‌فایده‌اند. ظرفِ درست معمولاً بین ۵ تا ۱۰۰ بار در صفحه تکرار شده و داخلِ هرکدام هم لینک هست هم عنوان.\n";
+        $s .= "- title: عنوانِ محصول، *داخلِ* ظرف\n- price: قیمت، داخلِ ظرف\n- link: لینکِ صفحهٔ محصول، داخلِ ظرف\n- image: عکسِ محصول، داخلِ ظرف\n\n";
+        $s .= "روشِ کار:\n";
+        $s .= "۱) اول container را با probe_selector پیدا و تأیید کن. تعدادِ تطبیق باید منطقی باشد (نه ۱، نه ۵۰۰) و نمونه‌ها باید هم عنوان هم لینک داشته باشند.\n";
+        $s .= "۲) بعد برای هر فیلدِ دیگر probe_selector را با پارامترِ scope برابرِ همان container صدا بزن. سلکتورِ فیلد باید *نسبی* باشد (مثل h2 a) نه مطلق.\n";
+        $s .= "۳) اگر نتیجه empty بود یا warning داشت، آن سلکتور را نپذیر و سلکتورِ دیگری امتحان کن.\n";
+    } else {
+        $s .= "این صفحه یک «صفحهٔ جزئیاتِ یک محصول» است. باید سلکتورهای این فیلدها را پیدا کنی:\n";
+        foreach (selagentFields('detail') as $k => $fa) $s .= "- $k: $fa\n";
+        $s .= "\nروشِ کار:\n";
+        $s .= "۱) برای هر فیلد یک سلکتور حدس بزن و با probe_selector تأییدش کن.\n";
+        $s .= "۲) نمونه‌ای که برمی‌گردد را بخوان: اگر متنِ برگشتی به آن فیلد نمی‌خورد (مثلاً برای «وزن» یک پاراگرافِ توضیحات آمده) آن را نپذیر.\n";
+        $s .= "۳) فیلدی که واقعاً روی این صفحه وجود ندارد را رها کن؛ لازم نیست همهٔ فیلدها پر شوند.\n";
+    }
+    $s .= "\nقواعدِ عمومی:\n";
+    $s .= "۴) هرگز سلکتوری را تحویل نده که با probe_selector تأیید نکرده‌ای.\n";
+    $s .= "۵) سلکتورها را ساده نگه دار: فقط تگ، .کلاس، #شناسه، فاصله و >. از :nth-child، [attr]، + و ~ استفاده نکن چون پشتیبانی نمی‌شوند.\n";
+    $s .= "۶) کلاس‌های هش‌شده و تصادفی (مثل .css-1x2y3z) را انتخاب نکن؛ با تغییرِ سایت می‌شکنند. کلاسِ معنادار را ترجیح بده.\n";
+    $s .= "۷) در پایان حتماً submit_selectors را صدا بزن.\n";
+    $s .= "همیشه فارسی توضیح بده.";
+    return $s;
+}
+
+/**
+ * حلقهٔ ایجنتِ کشفِ سلکتور.
+ *
+ * ساختارش عمداً آینهٔ agentRun است (همان fallbackِ حالتِ متنی برای مدل‌هایی
+ * که tools ندارند، همان سقف‌ها، همان الگوی ثبتِ پیشرفت) تا نگهداری‌اش یک
+ * چیز باشد نه دو چیز.
+ */
+function selagentRun(string $url, string $kind, string $model = ''): array {
+    $t0 = microtime(true);
+    $kind = ($kind === 'detail') ? 'detail' : 'list';
+
+    selagentProgress(['phase' => 'fetch', 'log_add' => ['🌐 دریافتِ صفحه…']]);
+    $res = fetch_html($url, 25);
+    if (empty($res['ok'])) {
+        $err = 'دریافتِ صفحه ناموفق بود: ' . (string)($res['error'] ?? '');
+        selagentProgress(['log_add' => ['❌ ' . $err]]);
+        return ['ok' => false, 'error' => $err, 'url' => $url, 'kind' => $kind,
+                'took' => round(microtime(true) - $t0, 1)];
+    }
+    $html = (string)$res['html'];
+    $baseUrl = (string)($res['url'] ?? $url);
+
+    libxml_use_internal_errors(true);
+    $dom = new DOMDocument('1.0', 'UTF-8');
+    @$dom->loadHTML('<?xml encoding="UTF-8"><meta charset="UTF-8">' . $html, LIBXML_NOERROR);
+    $xp = new DOMXPath($dom);
+    libxml_clear_errors();
+
+    selagentProgress(['phase' => 'map', 'html_bytes' => strlen($html),
+        'log_add' => ['📄 صفحه گرفته شد (' . aiFaNum((int)round(strlen($html) / 1024)) . ' کیلوبایت) — ساختِ نقشهٔ ساختار…']]);
+    $map = selagentDomMap($xp, $kind);
+
+    $pin = $model !== '' ? autoResolveModel($model) : [];
+    if ($model !== '' && !$pin) {
+        selagentProgress(['log_add' => ['⚠️ مدلِ «' . $model . '» پیدا نشد؛ مدلِ پیش‌فرض استفاده می‌شود']]);
+    }
+
+    $tools = selagentToolSpecs($kind);
+    $messages = [
+        ['role' => 'system', 'content' => selagentSystemPrompt($kind, $url)],
+        ['role' => 'user',   'content' => "نقشهٔ ساختارِ این صفحه:\n\n" . $map
+            . "\n\nحالا سلکتورها را پیدا کن. هر حدس را با probe_selector بسنج و در پایان submit_selectors را صدا بزن."],
+    ];
+
+    $calls = 0; $probes = 0; $confirmed = []; $submitted = null; $note = '';
+    $stoppedBy = ''; $nativeTools = null; $finalText = '';
+
+    for ($step = 1; $step <= SELAGENT_MAX_STEPS; $step++) {
+        if (selagentStopRequested()) { $stoppedBy = 'کاربر'; break; }
+        selagentProgress(['step' => $step, 'phase' => 'think',
+            'log_add' => ['🤔 گامِ ' . aiFaNum($step) . ' — پرسش از مدل…']]);
+
+        $payload = ['messages' => $messages, 'tools' => $tools, 'tool_choice' => 'auto',
+                    'temperature' => 0.1, 'max_tokens' => 1200];
+        $r = $pin ? aiProviderCall($pin['provider'], $pin['model'], $payload) : aiActiveChat($payload);
+
+        if (empty($r['ok'])) {
+            $err = (string)($r['error'] ?? ('HTTP ' . (int)($r['code'] ?? 0)));
+            if ((int)($r['code'] ?? 0) === 400 && $nativeTools !== false) {
+                $nativeTools = false;
+                selagentProgress(['log_add' => ['⚠️ مدل فیلدِ tools را نپذیرفت؛ حالتِ متنی امتحان می‌شود']]);
+                $messages[0]['content'] = selagentSystemPrompt($kind, $url) . "\n\n"
+                    . "این مدل فراخوانیِ ابزارِ بومی ندارد. برای صدا زدنِ ابزار فقط و فقط یک بلوکِ JSON بنویس:\n"
+                    . '{"tool":"نامِ ابزار","args":{...}}' . "\n"
+                    . 'ابزارها: ' . json_encode(array_map(fn($t) => [
+                          'name' => $t['function']['name'],
+                          'params' => array_keys($t['function']['parameters']['properties'] ?? []),
+                      ], $tools), JSON_UNESCAPED_UNICODE);
+                continue;
+            }
+            selagentProgress(['log_add' => ['❌ خطای مدل: ' . $err]]);
+            return ['ok' => false, 'error' => $err, 'url' => $url, 'kind' => $kind,
+                    'steps' => $step, 'calls' => $calls, 'confirmed' => $confirmed,
+                    'took' => round(microtime(true) - $t0, 1)];
+        }
+
+        $body = $r['body'];
+        $tcs  = aiExtractToolCalls($body);
+        $text = aiExtractText($body);
+        if (!$tcs) {
+            $tcs = agentParseTextCall($text);
+            if ($tcs) selagentProgress(['log_add' => ['🧩 فراخوانیِ ابزار از متنِ مدل استخراج شد']]);
+        } elseif ($nativeTools === null) {
+            $nativeTools = true;
+            selagentProgress(['native_tools' => true, 'log_add' => ['✅ مدل فراخوانیِ ابزارِ بومی دارد']]);
+        }
+
+        if (!$tcs) {
+            $finalText = trim($text);
+            selagentProgress(['log_add' => ['💬 مدل بدونِ ابزار پاسخ داد؛ پایانِ حلقه']]);
+            break;
+        }
+
+        $asst = aiAssistantMessage($body);
+        if (is_array($asst) && isset($asst['tool_calls'])) {
+            $messages[] = $asst;
+        } else {
+            $messages[] = ['role' => 'assistant', 'content' => $text !== '' ? $text : null,
+                'tool_calls' => array_map(fn($c) => [
+                    'id' => $c['id'], 'type' => 'function',
+                    'function' => ['name' => $c['name'],
+                                   'arguments' => json_encode($c['args'], JSON_UNESCAPED_UNICODE)],
+                ], $tcs)];
+        }
+
+        $finished = false;
+        foreach ($tcs as $c) {
+            if (selagentStopRequested()) { $stoppedBy = 'کاربر'; break; }
+            if ($calls >= SELAGENT_MAX_CALLS) { $stoppedBy = 'سقفِ فراخوانی'; break; }
+            $calls++;
+            selagentProgress(['phase' => 'tool', 'calls' => $calls,
+                'log_add' => [selagentCallLabel($c['name'], $c['args'])]]);
+
+            $out = ['ok' => false, 'error' => 'ابزارِ ناشناخته'];
+            if ($c['name'] === 'probe_selector') {
+                $probes++;
+                $f = (string)($c['args']['field'] ?? '');
+                $sc = (string)($c['args']['scope'] ?? '');
+                if ($kind === 'list' && $f !== 'container' && $sc === '' && isset($confirmed['container']))
+                    $sc = $confirmed['container'];   // مدل گاهی scope را جا می‌اندازد؛ خودمان پرش می‌کنیم
+                $out = selagentProbe($xp, (string)($c['args']['selector'] ?? ''), $f, $baseUrl, $sc);
+                if (!empty($out['ok']) && (int)($out['non_empty'] ?? 0) > 0) {
+                    /* سلکتورِ سالم را همین‌جا نگه می‌داریم؛ اگر مدل در پایان
+                       submit را خراب کرد یا اصلاً نزد، باز هم دستِ کاربر پر است. */
+                    $confirmed[$f] = (string)$c['args']['selector'];
+                }
+                $lbl = !empty($out['ok'])
+                    ? ('✔ ' . aiFaNum((int)$out['found']) . ' تطبیق'
+                       . (isset($out['samples'][0]) && trim((string)$out['samples'][0]) !== ''
+                          ? (' · نمونه: ' . mb_substr((string)$out['samples'][0], 0, 50)) : '')
+                       . (isset($out['warning']) ? ' ⚠' : ''))
+                    : ('✘ ' . (string)($out['error'] ?? 'ناموفق'));
+                selagentProgress(['probes' => $probes, 'confirmed' => count($confirmed),
+                    'log_add' => ['   ↳ ' . $lbl]]);
+            } elseif ($c['name'] === 'inspect_html') {
+                $out = selagentInspect($dom, $xp, (string)($c['args']['selector'] ?? ''),
+                                       (int)($c['args']['max_chars'] ?? 1500));
+                selagentProgress(['log_add' => ['   ↳ ' . (!empty($out['ok'])
+                    ? (aiFaNum(mb_strlen((string)$out['html'])) . ' کاراکتر HTML')
+                    : ('⚠️ ' . (string)($out['error'] ?? '')))]]);
+            } elseif ($c['name'] === 'submit_selectors') {
+                $sel = (array)($c['args']['selectors'] ?? []);
+                $note = trim((string)($c['args']['note'] ?? ''));
+                $verify = selagentVerifyAll($xp, $sel, $kind, $baseUrl);
+                $submitted = $verify['accepted'];
+                foreach ($verify['accepted'] as $k => $v) $confirmed[$k] = $v;
+                $out = ['ok' => true, 'accepted' => $verify['accepted'], 'rejected' => $verify['rejected']];
+                selagentProgress(['log_add' => ['   ↳ پذیرفته: ' . aiFaNum(count($verify['accepted']))
+                    . ' · ردشده: ' . aiFaNum(count($verify['rejected']))]]);
+                if (!$verify['rejected']) { $finished = true; }
+                else {
+                    /* رد شد؟ به مدل بگو چرا و بگذار دوباره تلاش کند — همین
+                       حلقهٔ اصلاح است که کیفیت را از «الگوی ثابت» بالاتر می‌برد. */
+                    $out['hint'] = 'سلکتورهای ردشده روی صفحه مقدارِ معتبری ندادند. آن‌ها را با probe_selector اصلاح کن و دوباره submit_selectors بزن.';
+                }
+            }
+
+            selagentProgress(['step_add' => [['step' => $step, 'tool' => $c['name'],
+                'args' => $c['args'], 'ok' => !empty($out['ok'])]]]);
+            $messages[] = ['role' => 'tool', 'tool_call_id' => $c['id'], 'name' => $c['name'],
+                           'content' => json_encode($out, JSON_UNESCAPED_UNICODE)];
+            if ($finished) break;
+        }
+        if ($finished || $stoppedBy !== '') break;
+    }
+
+    if ($submitted === null && $confirmed) {
+        /* مدل نرسید submit بزند ولی چند سلکتورِ تأییدشده داریم — دور نریزیم. */
+        $v = selagentVerifyAll($xp, $confirmed, $kind, $baseUrl);
+        $submitted = $v['accepted'];
+        $note = $note !== '' ? $note : 'مدل نتیجه را رسماً تحویل نداد؛ سلکتورهای تأییدشده در میانهٔ کار نگه داشته شدند.';
+        if ($stoppedBy === '') $stoppedBy = 'سقفِ گام‌ها';
+    }
+    $final = is_array($submitted) ? $submitted : [];
+
+    /* پیش‌نمایشِ نهایی: همان چیزی که کاربر در فرم خواهد دید */
+    $preview = [];
+    $scope = ($kind === 'list' && isset($final['container'])) ? $final['container'] : '';
+    foreach ($final as $f => $s) {
+        $p = selagentProbe($xp, $s, $f, $baseUrl, ($f === 'container' ? '' : $scope));
+        $preview[$f] = ['selector' => $s, 'found' => (int)($p['found'] ?? 0),
+                        'sample' => (string)($p['samples'][0] ?? '')];
+    }
+
+    return ['ok' => true, 'url' => $url, 'kind' => $kind, 'selectors' => $final,
+            'preview' => $preview, 'note' => $note, 'summary' => $finalText,
+            'calls' => $calls, 'probes' => $probes, 'stopped_by' => $stoppedBy,
+            'native_tools' => $nativeTools, 'took' => round(microtime(true) - $t0, 1)];
+}
+
+/** تکه‌ای از HTML برای مدل (پاک‌سازی‌شده از script/style که فقط توکن می‌سوزانند) */
+function selagentInspect(DOMDocument $dom, DOMXPath $xp, string $selector, int $max): array {
+    $max = max(300, min(4000, $max ?: 1500));
+    $node = null;
+    if (trim($selector) !== '') {
+        $x = cssToXpath(trim($selector));
+        if ($x === '') return ['ok' => false, 'error' => 'سلکتور قابلِ ترجمه نیست'];
+        $n = @$xp->query($x);
+        if (!$n || !$n->length) return ['ok' => false, 'error' => 'عنصری با این سلکتور نیست'];
+        $node = $n->item(0);
+    } else {
+        $b = @$xp->query('//body');
+        $node = ($b && $b->length) ? $b->item(0) : $dom->documentElement;
+    }
+    if (!$node) return ['ok' => false, 'error' => 'صفحه خالی است'];
+    $h = (string)@$dom->saveHTML($node);
+    $h = preg_replace('~<(script|style|noscript)\b[^>]*>.*?</\1>~is', '', $h);
+    $h = preg_replace('/\s+/u', ' ', $h);
+    return ['ok' => true, 'html' => mb_substr($h, 0, $max)];
+}
+
+/**
+ * دروازهٔ نهایی: هر سلکتوری که مدل تحویل داده دوباره روی همان صفحه سنجیده
+ * می‌شود. این تنها چیزی است که بین «ایجنتِ قابل‌اعتماد» و «ایجنتی که
+ * سلکتورِ خیالی می‌سازد» فرق می‌گذارد.
+ */
+function selagentVerifyAll(DOMXPath $xp, array $sel, string $kind, string $baseUrl): array {
+    $allowed = array_keys(selagentFields($kind));
+    $accepted = []; $rejected = [];
+
+    /* ظرف باید اول تأیید شود چون scopeِ بقیه است */
+    $order = $allowed;
+    $scope = '';
+    if ($kind === 'list' && isset($sel['container'])) {
+        $p = selagentProbe($xp, (string)$sel['container'], 'container', $baseUrl, '');
+        if (!empty($p['ok']) && (int)$p['found'] >= 2) { $accepted['container'] = trim((string)$sel['container']); $scope = $accepted['container']; }
+        else $rejected['container'] = (string)($p['error'] ?? 'ظرف باید حداقل ۲ بار در صفحه تکرار شود');
+    }
+    foreach ($order as $f) {
+        if ($f === 'container' || !isset($sel[$f])) continue;
+        $s = trim((string)$sel[$f]);
+        if ($s === '') continue;
+        $p = selagentProbe($xp, $s, $f, $baseUrl, $scope);
+        if (!empty($p['ok']) && (int)($p['non_empty'] ?? 0) > 0) $accepted[$f] = $s;
+        else $rejected[$f] = (string)($p['warning'] ?? $p['error'] ?? 'مقدارِ معتبری نداد');
+    }
+    foreach ($sel as $f => $s) {
+        if (!in_array($f, $allowed, true)) $rejected[(string)$f] = 'فیلدِ ناشناخته';
+    }
+    return ['accepted' => $accepted, 'rejected' => $rejected];
+}
+
 function normalizeTitle(string $title): string {
 $t=mb_strtolower(trim($title),'UTF-8');
 $t=preg_replace("/\s+/u",' ',$t);
@@ -34441,7 +35244,29 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 .btn{padding:11px 14px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;transition:.15s;white-space:nowrap}.btn:hover{opacity:.9}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:not-allowed}.btn-blue{background:linear-gradient(135deg,#3b82f6,#06b6d4);color:#000}.btn-red{background:#ef4444;color:#fff}.btn-green{background:#22c55e;color:#000}.btn-purple{background:#a855f7;color:#fff}.btn-orange{background:#f97316;color:#000}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:#eab308;color:#000}.btn-cyan{background:#06b6d4;color:#000}.btn-teal{background:#14b8a6;color:#000}.btn-pink{background:#ec4899;color:#fff}.btn-indigo{background:#6366f1;color:#fff}.hidden{display:none!important}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
 .stat{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.stat b{font-size:20px;display:block}.stat span{color:#64748b;font-size:10px}.progress{height:5px;background:#334155;border-radius:5px;margin:10px 0;overflow:hidden}.progress-bar{height:100%;background:linear-gradient(90deg,#3b82f6,#a855f7);width:0;transition:.3s}.progress-bar.pink{background:linear-gradient(90deg,#ec4899,#f59e0b)}.status{color:#94a3b8;font-size:12px;margin-bottom:8px}.logs{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:140px;overflow-y:auto;font-family:monospace;font-size:11px;margin-bottom:10px;direction:ltr;text-align:left}.log{padding:2px 0;border-bottom:1px solid #1e293b}.log-ok{color:#4ade80}.log-err{color:#f87171}.log-info{color:#60a5fa}.log-detail{color:#f0abfc}
 .main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #334155;display:flex;z-index:1000;box-shadow:0 -4px 20px rgba(0,0,0,.5);padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:10px 4px 8px;border:none;background:transparent;color:#64748b;font-size:11px;font-family:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative;transition:color .2s}.main-tab .t-icon{font-size:20px}.main-tab .t-label{font-weight:600}.main-tab.active{color:#3b82f6;background:#1e293b}.main-tab .badge{position:absolute;top:4px;right:calc(50% - 20px);background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:10px;min-width:16px;text-align:center}.main-tab .badge.ok{background:#22c55e;color:#000}.tab-pane{display:none;animation:fadeIn .3s ease}.tab-pane.active{display:block}
-@keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.sub-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.sub-tab.active{background:#3b82f6;color:#000}.mode-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.mode-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.mode-tab.active{background:#3b82f6;color:#000}.visual-container{display:grid;grid-template-columns:1fr;gap:14px}
+@keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.sub-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.sub-tab.active{background:#3b82f6;color:#000}.mode-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.mode-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.mode-tab.active{background:#3b82f6;color:#000}
+/* v10.25 (۳۸ب): زیرتب‌های تبِ سلکتور. عمداً کلاسِ جدا از .sub-tab گرفتند،
+   چون switchView() روی همهٔ .sub-tabهای سند کار می‌کند و اگر از همان کلاس
+   استفاده می‌کردیم انتخابِ نمای نتایج، زیرتبِ سلکتور را هم جابه‌جا می‌کرد. */
+.selsub-tabs{display:flex;gap:4px;background:#0f172a;border:1px solid #1e293b;padding:4px;border-radius:12px;margin-bottom:14px}
+.selsub-tab{flex:1;padding:11px 8px;border:none;border-radius:9px;font-weight:700;cursor:pointer;background:transparent;color:#94a3b8;font-size:12.5px;font-family:inherit;text-align:center}
+.selsub-tab.active{background:linear-gradient(90deg,#3b82f6,#6366f1);color:#fff;box-shadow:0 3px 12px #3b82f640}
+.selsub-tab:hover:not(.active){background:#1e293b;color:#cbd5e1}
+/* v10.25 (۳۸ج): پنلِ ایجنتِ کشفِ سلکتور */
+.selag-panel{background:#0b1220;border:1px solid #1e3a5f;border-radius:12px;margin-bottom:14px;overflow:hidden}
+.selag-panel:empty,.selag-panel>div:empty{display:none}
+.selag-hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 12px;background:linear-gradient(90deg,#132a4d,#0b1220);border-bottom:1px solid #1e3a5f;font-size:12px;font-weight:700;color:#dbeafe}
+.selag-bd{padding:10px 12px}
+.selag-bar{height:7px;background:#0f172a;border-radius:99px;overflow:hidden;margin:6px 0 8px}
+.selag-bar>i{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#22d3ee);border-radius:99px;transition:width .35s ease}
+.selag-log{max-height:190px;overflow:auto;background:#070d18;border:1px solid #1e293b;border-radius:9px;padding:7px 9px;font-size:11px;line-height:2;color:#cbd5e1;direction:rtl}
+.selag-log div{border-bottom:1px dashed #16233a;padding:1px 0}
+.selag-log div:last-child{border-bottom:none}
+.selag-chip{display:inline-block;background:#132a4d;border:1px solid #1e3a5f;border-radius:99px;padding:2px 9px;font-size:10.5px;color:#93c5fd}
+.selag-res{margin-top:9px;display:grid;gap:6px}
+.selag-row{display:flex;align-items:center;gap:7px;flex-wrap:wrap;background:#0f172a;border:1px solid #1e293b;border-radius:9px;padding:6px 9px;font-size:11px}
+.selag-row code{background:#070d18;border:1px solid #1e293b;border-radius:6px;padding:2px 6px;color:#7dd3fc;direction:ltr;font-size:10.5px;word-break:break-all}
+.selag-row .ok{color:#4ade80}.selag-row .no{color:#f87171}.visual-container{display:grid;grid-template-columns:1fr;gap:14px}
 .iframe-wrap{background:#0f172a;border:1px solid #334155;border-radius:0 0 10px 10px;overflow:auto;height:600px;position:relative;resize:vertical;min-height:300px;max-height:95vh}.iframe-wrap iframe{width:100%;height:100%;border:none;background:#fff;min-height:100%}.iframe-wrap .if-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:13px}.iframe-size-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#1e293b;border:1px solid #334155;border-radius:10px 10px 0 0;font-size:12px;color:#94a3b8}.iframe-size-bar input[type=range]{flex:1;cursor:pointer}.iframe-size-bar .size-val{color:#67e8f9;font-weight:700;min-width:50px;text-align:center;font-size:13px}.iframe-size-bar label{cursor:pointer;color:#94a3b8}.selector-panel{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px}
 .selector-panel h3{margin:0 0 10px;font-size:14px;color:#67e8f9}.sel-item{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:8px;transition:border-color .2s}.sel-item.has{border-color:#22c55e;background:#14532d20}.sel-item.has label{color:#4ade80}.sel-item label{display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px;color:#94a3b8}.sel-item input{width:100%;font-family:monospace;font-size:11px;padding:6px 8px}.sel-item .sel-preview{font-size:10px;color:#86efac;padding:4px 8px;background:#0f172a;border:1px solid #22c55e;border-radius:4px;margin-top:6px;font-family:var(--app-font,Tahoma,sans-serif);word-break:break-word;max-height:60px;overflow:hidden;line-height:1.4}.sel-item .sel-preview.price-prev{color:#fbbf24;border-color:#f59e0b;font-family:monospace;direction:ltr;text-align:left}
 .sel-item .sel-preview.link-prev{color:#a78bfa;border-color:#8b5cf6;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.img-prev{color:#f472b6;border-color:#ec4899;font-family:monospace;font-size:9px;direction:ltr;text-align:left}.sel-item .sel-preview.empty{color:#fca5a5;border-color:#ef4444;background:#7f1d1d30}.sel-item .sel-actions-row{display:flex;gap:4px;margin-top:6px}.sel-item .sel-actions-row .btn{padding:4px 8px;font-size:10px;flex:1}.sel-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}.suggest-list{max-height:150px;overflow-y:auto;background:#1e293b;border:1px solid #334155;border-radius:6px;margin-top:6px}.suggest-item{padding:8px;font-size:11px;cursor:pointer;font-family:monospace;border-bottom:1px solid #334155}.suggest-item:hover{background:#334155}
@@ -35546,6 +36371,17 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="agStatus" style="margin-top:6px;font-size:11px;color:#c084fc"></div>
 <div id="agLog" class="hidden" style="margin-top:8px;background:#0b1120;border:1px solid #1e293b;border-radius:8px;padding:9px;max-height:260px;overflow:auto;font-size:11px;line-height:1.9;direction:rtl"></div>
 <div id="agReport" class="hidden" style="margin-top:8px"></div>
+</div>
+
+<!-- v10.25 (۳۸ج): آینهٔ زندهٔ ایجنتِ کشفِ سلکتور داخلِ تبِ «ایجنت».
+     خواستهٔ کاربر این بود که فرآیند «هم در مدیر وظیفه و هم در بخشِ ایجنت»
+     دیده شود؛ پس همان selagRender که زیرتب‌های سلکتور را می‌سازد اینجا هم
+     صدا زده می‌شود و هر سه نما از یک منبعِ واحد تغذیه می‌شوند. -->
+<div class="selag-panel" id="selagPanel-ai" style="margin-top:10px"><div id="selagBody-ai"></div></div>
+<div id="selagIdleAi" style="margin-top:10px;background:#111c31;border:1px dashed #334155;border-radius:8px;padding:10px;font-size:10.5px;color:#64748b;line-height:1.9">
+🧲 <b style="color:#93c5fd">کشفِ خودکارِ سلکتور</b> — از تبِ «سلکتور» (زیرتبِ لیست یا جزئیات) دکمهٔ
+<b style="color:#facc15">💡 پیشنهاد (ایجنت)</b> را بزنید؛ پیشرفتِ کامل همین‌جا هم زنده نمایش داده می‌شود.
+<div style="margin-top:6px"><button class="btn btn-blue" onclick="switchMainTab('selectors')" style="font-size:10px;padding:4px 10px">↗ رفتن به تبِ سلکتور</button></div>
 </div>
 </div>
 
@@ -36670,6 +37506,20 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="tab-pane" id="pane-selectors">
     <!-- v9.78: همهٔ بخش‌های تب سلکتورها به منوی کشویی (آکاردئون) تبدیل شدند.
          هر بخش با کلیک روی سربرگ باز/بسته می‌شود تا تب فشرده‌تر و مرتب‌تر باشد. -->
+
+    <!-- v10.25 (۳۸ب): تبِ سلکتور به دو زیرتب تقسیم شد. تا پیش از این هر پنج
+         آکاردئون پشتِ سر هم بودند و کاربر برای رسیدن به «جزئیات» باید از کنارِ
+         کلِ بخشِ لیست رد می‌شد. حالا هر زیرتب فقط آکاردئون‌های مربوط به خودش را
+         نشان می‌دهد و انتخابِ کاربر در localStorage می‌ماند. -->
+    <div class="selsub-tabs">
+        <button class="selsub-tab active" id="selsubBtn-list"   data-sv="list"   onclick="selSub('list')">🧾 استخراج لیست محصولات</button>
+        <button class="selsub-tab"        id="selsubBtn-detail" data-sv="detail" onclick="selSub('detail')">📄 استخراج جزئیات محصولات</button>
+    </div>
+
+    <div class="selsub-pane" id="selsub-list">
+    <!-- v10.25 (۳۸ج): پنلِ زندهٔ ایجنتِ کشفِ سلکتور. بدنه‌اش را selagRender
+         پر می‌کند تا همان markup برای هر دو زیرتب یک‌بار نوشته شود. -->
+    <div class="selag-panel" id="selagPanel-list"><div id="selagBody-list"></div></div>
     <div class="smenu" style="background:#111c31;border:1px solid #334155;border-radius:12px;margin-bottom:14px;overflow:hidden">
         <div class="smenu-hdr" onclick="toggleSmenu(this)" style="background:linear-gradient(90deg,#1e3a5f,#0f172a)"><h3>🎨 سلکتورهای لیست محصولات</h3><span class="arrow">▼</span></div>
         <div class="smenu-body open sel-open">
@@ -36692,7 +37542,9 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         <div class="row">
             <button class="btn btn-orange" onclick="loadVisual()" style="flex:1">🔄 بارگذاری صفحه</button>
             <button class="btn btn-green" onclick="loadDirect()" style="flex:1" title="بارگذاری مستقیم بدون پراکسی — برای سایت‌های SPA مثل snappshop">🌐 بارگذاری مستقیم</button>
-            <button class="btn btn-yellow" onclick="suggestSelectors()" style="flex:1">💡 پیشنهاد</button>
+            <button class="btn btn-yellow" onclick="suggestSelectors()" style="flex:1" title="پیشنهادِ سریعِ الگومحور — بدون هوش مصنوعی">💡 پیشنهاد</button>
+            <!-- v10.25 (۳۸ج): نسخهٔ ایجنتی؛ صفحه را واقعاً باز می‌کند و سلکتورها را می‌آزماید -->
+            <button class="btn btn-blue" onclick="selagStart('list')" style="flex:1" id="selagBtn-list" title="ایجنتِ AI صفحه را باز می‌کند، ساختارش را می‌خواند و سلکتورها را یکی‌یکی آزمایش می‌کند">🤖 پیشنهاد (ایجنت)</button>
             <button class="btn btn-gray" onclick="clearSel()">🗑️</button>
         </div>
 
@@ -36857,6 +37709,10 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         </div>
     </div>
 
+    </div><!-- /selsub-list -->
+
+    <div class="selsub-pane hidden" id="selsub-detail">
+    <div class="selag-panel" id="selagPanel-detail"><div id="selagBody-detail"></div></div>
     <div class="smenu" style="background:#111c31;border:1px solid #334155;border-radius:12px;margin-bottom:14px;overflow:hidden">
         <div class="smenu-hdr" onclick="toggleSmenu(this)" style="background:linear-gradient(90deg,#4c1d95,#0f172a)"><h3>📄 سلکتورهای صفحهٔ جزئیات محصول</h3><span class="arrow">▼</span></div>
         <div class="smenu-body open sel-open">
@@ -36877,7 +37733,9 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         </details>
         <div class="row">
             <button class="btn btn-pink" onclick="openDetailProxy()" style="flex:1" id="detailProxyBtn">🎯 باز کردن نمونه</button>
-            <button class="btn btn-purple" onclick="suggestDetailSelectors()" style="flex:1">💡 پیشنهاد</button>
+            <button class="btn btn-purple" onclick="suggestDetailSelectors()" style="flex:1" title="پیشنهادِ سریعِ الگومحور — بدون هوش مصنوعی">💡 پیشنهاد</button>
+            <!-- v10.25 (۳۸ج) -->
+            <button class="btn btn-blue" onclick="selagStart('detail')" style="flex:1" id="selagBtn-detail" title="ایجنتِ AI صفحهٔ نمونه را باز می‌کند و برای هر فیلد سلکتور پیدا و آزمایش می‌کند">🤖 پیشنهاد (ایجنت)</button>
             <button class="btn btn-gray" onclick="clearDetailSel()">🗑️</button>
         </div>
         <!-- v8.77: کدام محصول به‌عنوان نمونه باز شده و امکان عوض کردنش -->
@@ -37057,6 +37915,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
     </div>
         </div>
     </div>
+    </div><!-- /selsub-detail -->
 </div>
 
 <div class="tab-pane" id="pane-results">
@@ -38893,6 +39752,315 @@ function suggestSelectors(){
       showToast('پیشنهادها در پنل کناری');
     })
     .catch(e=>{$('status').textContent='خطا';showToast('خطا در دریافت',true);});
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ *  v10.25 (۳۸ب+۳۸ج): زیرتب‌های تبِ سلکتور + ایجنتِ کشفِ خودکارِ سلکتور
+ *
+ *  چرا این‌طور نوشته شد:
+ *
+ *  ۱) زیرتب‌ها — پیش از این، پنج آکاردئونِ تبِ سلکتور پشتِ سرِ هم بودند
+ *     و «لیست» و «جزئیات» درهم می‌رفتند. حالا دو پنلِ selsub-list و
+ *     selsub-detail داریم و انتخابِ کاربر در localStorage می‌ماند تا با
+ *     هر رفرش به زیرتبِ پیش‌فرض برنگردد.
+ *
+ *  ۲) ایجنت — دکمهٔ «💡 پیشنهاد» قدیمی یک heuristicِ سرور‌سمتی بود که
+ *     فقط چند الگوی ثابت (`.product`, `.price`, …) را امتحان می‌کرد.
+ *     نسخهٔ ایجنتی به‌جای حدس زدن، صفحه را واقعاً می‌گیرد، نقشهٔ فشردهٔ
+ *     DOM را به مدل می‌دهد و مدل با ابزارِ probe_selector هر حدسش را
+ *     روی همان صفحه می‌آزماید. بنابراین چیزی که تحویل می‌دهد از قبل
+ *     تست‌شده است — نه یک لیستِ آرزویی.
+ *
+ *  ۳) چرا نظرسنجیِ مشترک: خواستهٔ کاربر این بود که پیشرفت هم در تبِ
+ *     سلکتور، هم در تبِ «🤖 ایجنت» و هم در «مدیر وظیفه» دیده شود. اگر
+ *     هر نما جداگانه poll می‌زد، سه تایمرِ ناهماهنگ داشتیم و سرور سه
+ *     برابر بار می‌گرفت. پس یک تایمرِ واحد (selagTimer) داریم که وضعیت
+ *     را می‌گیرد و آن را در هر سه جا رندر می‌کند.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/** زیرتبِ فعالِ تبِ سلکتور: 'list' یا 'detail'. */
+let selSubView = 'list';
+
+function selSub(v) {
+    if (v !== 'list' && v !== 'detail') v = 'list';
+    selSubView = v;
+    ['list', 'detail'].forEach(function (k) {
+        const pane = $('selsub-' + k);
+        if (pane) pane.classList.toggle('hidden', k !== v);
+        const btn = $('selsubBtn-' + k);
+        if (btn) btn.classList.toggle('active', k === v);
+    });
+    try { localStorage.setItem('selSubView', v); } catch (e) {}
+    /* پنلِ ایجنت باید بعد از سوییچ دوباره کشیده شود، وگرنه اگر کاربر
+       وسطِ اجرا زیرتب عوض کند پنلِ مقصد خالی می‌ماند تا تیکِ بعدی. */
+    selagRender();
+}
+
+function selSubRestore() {
+    let v = 'list';
+    try { v = localStorage.getItem('selSubView') || 'list'; } catch (e) {}
+    selSub(v);
+}
+
+/* ── حالتِ ایجنتِ سلکتور ─────────────────────────────────────────── */
+let selagState = null;   // آخرین پاسخِ ?selagent_status
+let selagLines = [];     // خطوطِ لاگ که تا حالا گرفته‌ایم
+let selagTimer = null;   // شناسهٔ setInterval نظرسنجی
+let selagKind  = 'list'; // آخرین نوعِ اجرا
+let selagLast  = null;   // آخرین نتیجهٔ کامل (?selagent_result)
+
+/** نشانیِ صفحه‌ای که باید کاوش شود، بسته به نوعِ کار. */
+function selagUrlFor(kind) {
+    if (kind === 'detail') return detailSampleUrl();
+    const u = ($('url') && $('url').value || '').trim();
+    if (!u) { showToast('اول آدرسِ صفحهٔ فهرست را وارد کنید', true); return ''; }
+    return u;
+}
+
+/** شروعِ ایجنت. عمداً مدل را نمی‌فرستیم تا سرور از «مدلِ فعالِ اتصالات»
+ *  استفاده کند — همان مدلی که کاربر در تبِ هوش مصنوعی انتخاب کرده. */
+function selagStart(kind) {
+    kind = (kind === 'detail') ? 'detail' : 'list';
+    const url = selagUrlFor(kind);
+    if (!url) return;
+    if (selagState && selagState.running) { showToast('یک کشف همین حالا در جریان است', true); return; }
+
+    selagKind = kind;
+    selagLines = [];
+    selagLast = null;
+    selagState = { running: true, kind: kind, url: url, phase: 'start', step: 0, calls: 0, probes: 0, confirmed: 0 };
+    selagRender();
+
+    const body = new URLSearchParams({ kind: kind, url: url });
+    fetch('?selagent_start=1', { method: 'POST', body: body })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d.ok) {
+                selagState = { running: false, done: true, error: d.error || 'شروع نشد', kind: kind, url: url };
+                selagRender();
+                showToast(d.error || 'شروع نشد', true);
+                return;
+            }
+            showToast('🧲 ایجنتِ کشفِ سلکتور شروع شد');
+            selagPollStart();
+        })
+        .catch(function () {
+            selagState = { running: false, done: true, error: 'ارتباط با سرور برقرار نشد', kind: kind, url: url };
+            selagRender();
+            showToast('خطا در ارتباط', true);
+        });
+}
+
+function selagStop() {
+    fetch('?selagent_stop=1').then(function () { showToast('⏹ درخواستِ توقف ثبت شد'); });
+}
+
+function selagPollStart() {
+    if (selagTimer) clearInterval(selagTimer);
+    selagTick();
+    selagTimer = setInterval(selagTick, 1400);
+}
+
+function selagPollStop() {
+    if (selagTimer) { clearInterval(selagTimer); selagTimer = null; }
+}
+
+function selagTick() {
+    fetch('?selagent_status=1&since=' + selagLines.length)
+        .then(function (r) { return r.json(); })
+        .then(function (p) {
+            if (!p || !p.ok) return;
+            (p.log || []).forEach(function (l) { selagLines.push(l && l.m ? l.m : String(l)); });
+            selagState = p;
+            selagRender();
+            if (p.done || p.running === false) {
+                selagPollStop();
+                if (p.result_ok) selagFetchResult();
+                else if (p.error) showToast('❌ ' + p.error, true);
+            }
+        })
+        .catch(function () {});
+}
+
+function selagFetchResult() {
+    fetch('?selagent_result=1')
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            selagLast = d;
+            selagRender();
+            const n = d && d.selectors ? Object.keys(d.selectors).length : 0;
+            showToast(n > 0 ? ('✓ ' + toFa(n) + ' سلکتور کشف شد — برای اعمال دکمه را بزنید')
+                            : 'ایجنت سلکتوری پیدا نکرد');
+        })
+        .catch(function () {});
+}
+
+/** برچسبِ فارسیِ فازِ جاری. */
+function selagPhaseLabel(ph) {
+    const m = { start: 'آماده‌سازی', fetch: 'دریافتِ صفحه', map: 'نقشه‌برداری از ساختار',
+                think: 'تحلیل توسط مدل', tool: 'اجرای ابزار', verify: 'اعتبارسنجیِ نهایی' };
+    return m[ph] || ph || '—';
+}
+
+/** درصدِ تقریبیِ پیشرفت. مبنا نسبتِ گامِ جاری به سقفِ گام‌هاست؛ وقتی
+ *  کار تمام شده صریحاً ۱۰۰ می‌دهیم تا نوار نیمه‌کاره نماند. */
+function selagPct(p) {
+    if (!p) return 0;
+    if (p.done) return 100;
+    const st = +(p.step || 0), mx = 16;
+    return Math.max(3, Math.min(97, Math.round(st / mx * 100)));
+}
+
+/** رندرِ یکسانِ پنل در هر سه جا (زیرتبِ لیست، زیرتبِ جزئیات، تبِ ایجنت). */
+function selagRender() {
+    const html = selagPanelHtml();
+    ['list', 'detail', 'ai'].forEach(function (slot) {
+        const box = $('selagBody-' + slot);
+        if (!box) return;
+        /* در زیرتب‌ها فقط پنلِ همان نوع را نشان بده؛ در تبِ ایجنت همیشه. */
+        const show = (slot === 'ai') || (selagState && selagState.kind === slot) ||
+                     (!selagState && false);
+        box.innerHTML = show ? html : '';
+    });
+    const idle = $('selagIdleAi');
+    if (idle) idle.classList.toggle('hidden', !!(selagState && html));
+    /* دکمه‌ها هنگام اجرا قفل می‌شوند تا کاربر دو اجرا روی هم نیندازد. */
+    ['list', 'detail'].forEach(function (k) {
+        const b = $('selagBtn-' + k);
+        if (b) b.disabled = !!(selagState && selagState.running);
+    });
+}
+
+function selagPanelHtml() {
+    const p = selagState;
+    if (!p) return '';
+    const kindFa = (p.kind === 'detail') ? 'صفحهٔ جزئیات' : 'صفحهٔ فهرست';
+    const pct = selagPct(p);
+    let h = '';
+
+    h += '<div class="selag-hd">';
+    h += '<span>🧲 ایجنتِ کشفِ سلکتور — ' + esc(kindFa) + '</span>';
+    if (p.running) h += '<span class="selag-chip">⏳ ' + esc(selagPhaseLabel(p.phase)) + '</span>';
+    else if (p.error) h += '<span class="selag-chip" style="color:#fca5a5;border-color:#7f1d1d">❌ ناموفق</span>';
+    else if (p.done) h += '<span class="selag-chip" style="color:#86efac;border-color:#166534">✓ پایان‌یافته</span>';
+    h += '<span style="flex:1"></span>';
+    if (p.running) h += '<button class="btn btn-red" onclick="selagStop()" style="font-size:10px;padding:3px 10px">⏹ توقف</button>';
+    else h += '<button class="btn btn-gray" onclick="selagDismiss()" style="font-size:10px;padding:3px 10px">✕ بستن</button>';
+    h += '</div><div class="selag-bd">';
+
+    if (p.url) h += '<div style="font-size:10px;color:#64748b;direction:ltr;text-align:left;word-break:break-all;margin-bottom:5px">' + esc(p.url) + '</div>';
+    h += '<div class="selag-bar"><i style="width:' + pct + '%"></i></div>';
+    h += '<div style="display:flex;gap:6px;flex-wrap:wrap;font-size:10.5px;color:#94a3b8;margin-bottom:6px">';
+    h += '<span class="selag-chip">گام ' + toFa(+(p.step || 0)) + '</span>';
+    h += '<span class="selag-chip">فراخوانِ مدل ' + toFa(+(p.calls || 0)) + '</span>';
+    h += '<span class="selag-chip">آزمایشِ سلکتور ' + toFa(+(p.probes || 0)) + '</span>';
+    h += '<span class="selag-chip">تأییدشده ' + toFa(+(p.confirmed || 0)) + '</span>';
+    h += '</div>';
+
+    if (p.error) h += '<div class="alert alert-danger" style="font-size:11px;margin:0 0 7px">❌ ' + esc(p.error) + '</div>';
+
+    if (selagLines.length) {
+        h += '<div class="selag-log" id="selagLogBox">';
+        selagLines.slice(-120).forEach(function (l) { h += '<div>' + esc(l) + '</div>'; });
+        h += '</div>';
+    }
+
+    h += selagResultHtml();
+    h += '</div>';
+    return h;
+}
+
+function selagResultHtml() {
+    const d = selagLast;
+    if (!d || !d.ok) return '';
+    const sels = d.selectors || {};
+    const keys = Object.keys(sels);
+    if (!keys.length) return '<div style="margin-top:8px;font-size:11px;color:#fbbf24">ایجنت هیچ سلکتورِ قابلِ اعتمادی پیدا نکرد.</div>';
+
+    let h = '<div class="selag-res">';
+    if (d.note) h += '<div style="font-size:10.5px;color:#a5b4fc;line-height:1.9">📝 ' + esc(d.note) + '</div>';
+    keys.forEach(function (f) {
+        const pv = (d.preview && d.preview[f]) || {};
+        const found = +(pv.found || 0);
+        h += '<div class="selag-row">';
+        h += '<b style="color:#e2e8f0;min-width:64px">' + esc(selagFieldFa(f)) + '</b>';
+        h += '<code>' + esc(sels[f]) + '</code>';
+        h += '<span class="' + (found > 0 ? 'ok' : 'no') + '">' + (found > 0 ? ('✓ ' + toFa(found) + ' مورد') : '✗ بی‌نتیجه') + '</span>';
+        if (pv.sample) h += '<span style="color:#64748b;font-size:10px">« ' + esc(String(pv.sample).slice(0, 60)) + ' »</span>';
+        h += '</div>';
+    });
+    h += '</div>';
+    h += '<div class="row" style="margin-top:9px">';
+    h += '<button class="btn btn-green" onclick="selagApply()" style="flex:1;font-size:11px">✅ اعمالِ همهٔ سلکتورها</button>';
+    h += '<button class="btn btn-blue" onclick="selagStart(\'' + esc(d.kind || 'list') + '\')" style="font-size:11px">🔁 اجرای دوباره</button>';
+    h += '</div>';
+    return h;
+}
+
+function selagFieldFa(f) {
+    const m = { container: 'کانتینر', title: 'عنوان', price: 'قیمت', link: 'لینک', image: 'تصویر',
+                shortDesc: 'توضیحِ کوتاه', longDesc: 'توضیحِ بلند', sku: 'کدِ کالا', category: 'دسته',
+                tags: 'برچسب‌ها', weight: 'وزن', stock: 'موجودی', brand: 'برند' };
+    return m[f] || f;
+}
+
+/** اعمالِ نتیجه روی همان فرم‌هایی که تا امروز دستی پر می‌شدند. عمداً از
+ *  setSel و detailSel استفاده می‌کنیم تا مسیرِ ذخیره/تست دقیقاً همان
+ *  مسیرِ همیشگی باشد و رفتارِ تازه‌ای وارد نشود. */
+function selagApply() {
+    const d = selagLast;
+    if (!d || !d.ok || !d.selectors) { showToast('نتیجه‌ای برای اعمال نیست', true); return; }
+    const sels = d.selectors;
+    let n = 0;
+    if ((d.kind || 'list') === 'detail') {
+        Object.keys(sels).forEach(function (f) {
+            if (typeof detailSel === 'undefined' || !detailSel[f]) return;
+            detailSel[f].selector = sels[f];
+            detailSel[f].enabled = true;
+            n++;
+        });
+        if (typeof renderDetailFieldsList === 'function') renderDetailFieldsList();
+        if (typeof refreshViews === 'function') refreshViews();
+        scheduleSave();
+    } else {
+        ['container', 'title', 'price', 'link', 'image'].forEach(function (f) {
+            if (!sels[f]) return;
+            setSel(f, sels[f]);
+            n++;
+        });
+    }
+    showToast(n > 0 ? ('✅ ' + toFa(n) + ' سلکتور اعمال شد') : 'چیزی برای اعمال نبود');
+}
+
+function selagDismiss() {
+    selagState = null; selagLast = null; selagLines = [];
+    selagRender();
+}
+
+/** بازیابیِ اجرای در جریان بعد از رفرشِ صفحه — همان کاری که مدیر وظیفه
+ *  برای بقیهٔ کارها می‌کند. بدون این، اگر کاربر وسطِ کار F5 بزند فکر
+ *  می‌کند اجرا مرده است. */
+function selagResume() {
+    fetch('?selagent_status=1&since=0')
+        .then(function (r) { return r.json(); })
+        .then(function (p) {
+            if (!p || !p.ok || !p.started_at) return;
+            selagLines = (p.log || []).map(function (l) { return l && l.m ? l.m : String(l); });
+            selagState = p;
+            if (p.running) { selagRender(); selagPollStart(); }
+            else if (p.result_ok) { selagRender(); selagFetchResult(); }
+        })
+        .catch(function () {});
+}
+
+/** ورودیِ «مدیر وظیفه» برای این کار: کاربر را به زیرتبِ درست می‌برد. */
+function selAgentOpenLast() {
+    switchMainTab('selectors');
+    const k = (selagState && selagState.kind === 'detail') ? 'detail' : 'list';
+    selSub(k);
+    selagRender();
+    const el = $('selagPanel-' + k);
+    if (el && typeof softScrollIntoView === 'function') softScrollIntoView(el);
 }
 
 function setSel(type,val){
@@ -40735,6 +41903,37 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.25', t:'🧲 ایجنتِ کشفِ سلکتور — و دو نیم‌شدنِ تبِ سلکتور', items:[
+    '🧲 <b>ج — دکمهٔ «پیشنهاد» دیگر حدس نمی‌زند؛ ایجنت واقعاً صفحه را می‌خوانَد.</b>',
+    '   پیشنهاددهندهٔ قدیمی یک فهرستِ ثابت از الگوهای رایج (<code>.product</code>،',
+    '   <code>.price</code>، <code>.title</code>…) را روی صفحه امتحان می‌کرد. روی',
+    '   قالب‌های معروف جواب می‌داد و روی هر سایتِ سفارشی‌شده‌ای دست‌خالی برمی‌گشت.',
+    '   حالا کنارش دکمهٔ <b>🤖 پیشنهاد (ایجنت)</b> نشسته: صفحه گرفته می‌شود، یک',
+    '   <b>نقشهٔ فشرده از ساختارِ DOM</b> (هیستوگرامِ <code>tag.class</code> با شمارشِ',
+    '   لینک و عکس و عدد و نمونهٔ متن) برای مدل فرستاده می‌شود، و مدل با سه ابزار',
+    '   —<code>probe_selector</code> برای آزمودن، <code>inspect_html</code> برای',
+    '   دیدنِ HTMLِ یک گوشه، <code>submit_selectors</code> برای تحویل— جلو می‌رود.',
+    '✅ <b>و هیچ سلکتوری بدونِ آزمایش تحویل نمی‌شود.</b> این مهم‌ترین تفاوت است:',
+    '   هر حدسِ مدل همان لحظه روی همان صفحه اجرا می‌شود و تعدادِ موردِ یافته و',
+    '   نمونهٔ متنِ استخراج‌شده برمی‌گردد. آخرِ کار هم کلِ مجموعه دوباره از صفر',
+    '   سنجیده می‌شود. پس چیزی که می‌بینید «پیشنهاد» نیست — نتیجهٔ تست‌شده است.',
+    '   سلکتورهای تأییدشدهٔ میانِ راه هم نگه داشته می‌شوند تا اگر مدل زودتر',
+    '   تمام کرد، دستاوردش دور نریزد.',
+    '👀 <b>و کلِ فرآیند جلوی چشمتان است — در هر سه جا.</b> نوارِ پیشرفت، فاز',
+    '   جاری (دریافت/نقشه‌برداری/تحلیل/اجرای ابزار)، شمارندهٔ گام و فراخوانِ',
+    '   مدل و آزمایشِ سلکتور، و لاگِ خط‌به‌خط: هم در خودِ تبِ سلکتور، هم در تبِ',
+    '   <b>🤖 ایجنت</b> بخشِ هوش مصنوعی، و هم به‌صورتِ یک کارِ کاملِ',
+    '   <b>مدیر وظیفه</b> با توقف و ادامه و بازیابیِ پس از رفرش.',
+    '🧾 <b>ب — تبِ سلکتور دو زیرتب شد.</b> پنج آکاردئونِ این تب دو کارِ کاملاً',
+    '   جدا را سرویس می‌دادند و پشتِ سر هم چیده شده بودند؛ برای رسیدن به',
+    '   «جزئیات» باید از کنارِ کلِ بخشِ «لیست» رد می‌شدید. حالا دو زیرتبِ',
+    '   <b>🧾 استخراج لیست محصولات</b> و <b>📄 استخراج جزئیات محصولات</b> هست و',
+    '   انتخابتان تا دفعهٔ بعد یادش می‌ماند.',
+    '↗ <b>الف — دکمهٔ صریحِ «پنجرهٔ اصلی» روی هر کارتِ مدیر وظیفه.</b> از v10.23',
+    '   خودِ کارت کلیک‌پذیر بود و شما را به پنجرهٔ اورجینالِ همان کار می‌برد،',
+    '   ولی چون شبیهِ دکمه نبود عملاً کسی پیدایش نمی‌کرد. حالا کنارِ «توقف» و',
+    '   «ادامه» یک دکمهٔ مستقلِ <b>↗ پنجرهٔ اصلی</b> هست.',
+  ]},
   {v:'10.24', t:'🔢 اولویت‌بندیِ کارهای پس‌زمینه — و «ادامهٔ همه» به همان ترتیب', items:[
     '🔢 <b>الف — کارهای پس‌زمینه بالاخره اولویت گرفتند.</b> تا اینجا فقط',
     '   «کارهای زمان‌بندی‌شده» ترتیب داشتند (چون autoTick فهرستشان را از بالا',
@@ -45638,6 +46837,8 @@ document.addEventListener('DOMContentLoaded',function(){
     try{ initAppFxPref(); }catch(e){}        // v10.06: جلوه‌های بصری
     try{ syncSmenuStickyOffsets(); }catch(e){}  // v9.94: افستِ سربخش‌های چسبان
     try{ selCtlInit(); }catch(e){}           // v9.90: تیک‌های نمایش کنترل‌های سلکتور
+    try{ selSubRestore(); }catch(e){}        // v10.25 (۳۸ب): زیرتبِ آخرِ تبِ سلکتور
+    try{ selagResume(); }catch(e){}          // v10.25 (۳۸ج): بازیابیِ ایجنتِ در جریان
     const si=$('bsCatSearch');
     if(si){
         si.addEventListener('focus',function(){renderBslCatFilter(this.value);$('bsCatList').style.display='block';});
@@ -47092,6 +48293,12 @@ function tmCard(t){
     +'<span class="tmc-badge '+bcl+'">'+esc(lbl)+'</span>';
   if(t.cancelled) h+='<span class="tmc-badge tmb-stale">لغو شده</span>';
   h+='<span style="flex:1"></span>';
+  /* v10.25 (۳۸الف): دکمهٔ صریحِ «پنجرهٔ اصلی». تا v10.24 خودِ کارت کلیک‌پذیر
+     بود، ولی چون هیچ نشانهٔ دیداریِ دکمه‌مانندی نداشت خیلی از کاربران اصلاً
+     نمی‌دانستند می‌شود از اینجا به پنجرهٔ اورجینالِ کار پرید. حالا کنارِ
+     «توقف/ادامه» یک دکمهٔ مستقل هست که دقیقاً همان tmGo را صدا می‌زند. */
+  if(nav)
+    h+='<button class="btn btn-blue" style="font-size:10px;padding:3px 10px" onclick="event.stopPropagation();tmGo(\''+jsAttr(t.key)+'\')" title="رفتن به تبِ «'+jsAttr(t.tab)+'» و بازکردنِ پنجرهٔ اصلیِ همین کار">↗ پنجرهٔ اصلی</button>';
   if(t.stoppable)
     h+='<button class="btn btn-red" style="font-size:10px;padding:3px 10px" onclick="event.stopPropagation();tmStop(\''+jsAttr(t.key)+'\')">⏹ توقف</button>';
   /* v10.23 (۳۶ج): «▶ ادامه» — همان اندپوینتِ شروعِ اصلیِ کار، با پارامترهای
