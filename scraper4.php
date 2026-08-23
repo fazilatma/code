@@ -189,7 +189,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.27';
+const APP_VERSION = '10.28';
 const APP_VERSION_DATE = '1405/06/02';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -416,6 +416,9 @@ function app_theme_hsl2hex(float $h, float $s, float $l, string $alpha = ''): st
  *  nLift : تیره‌تر/روشن‌تر کردنِ زمینه‌ها (فقط خنثی‌های تیره؛ متن‌ها دست‌نخورده)
  *  aRot  : چرخشِ رنگ‌مایهٔ رنگ‌های تأکیدی (سبز/قرمز/زرد/آبی) بر حسب درجه
  *  aSat  : ضریبِ اشباعِ رنگ‌های تأکیدی
+ *  skin  : (v10.28، اختیاری) نامِ «پوسته» — یک لایهٔ CSSِ اضافه که پشتِ
+ *          html[data-theme="<کلید>"] می‌نشیند و سایه/براقیت/شمایلِ سه‌بعدی
+ *          می‌آورد. تم‌هایی که این کلید را ندارند هیچ تغییری نمی‌کنند.
  *
  *  چرا همه تیره‌اند؟ چون رنگِ متنِ ~۲۲۰۰ عنصر در همین فایل سخت‌کد است و
  *  در «تمِ روشن» بخشی از آن‌ها (مثل color:#fff روی input) سفیدِ روی سفید
@@ -437,7 +440,17 @@ function app_themes_registry(): array {
         'oled'     => ['label' => '⚫ سیاهِ مطلق (OLED)',      'nHue' => 220, 'nSat' => 0.30, 'nLift' => -0.06, 'aRot' =>   0, 'aSat' => 1.05],
         'cyber'    => ['label' => '🛸 سایبرپانکِ نئونی',       'nHue' => 287, 'nSat' => 1.35, 'nLift' => -0.02, 'aRot' =>  34, 'aSat' => 1.20],
         'nordic'   => ['label' => '❄️ یخِ نوردیک',             'nHue' => 205, 'nSat' => 0.80, 'nLift' =>  0.03, 'aRot' =>  -6, 'aSat' => 0.88],
+        /* v10.28 (۴۱): تنها تمی که «پوسته» دارد — سایه، براقیت و شمایلِ
+           سه‌بعدیِ منوی پایین. رنگ‌بندی‌اش بنفشِ شبانه با کمی گرمای طلایی
+           است تا درخششِ لبه‌ها روی آن دیده شود. */
+        'aurora'   => ['label' => '💎 بلورِ شبانه (سه‌بعدی)',   'nHue' => 252, 'nSat' => 0.55, 'nLift' => -0.02, 'aRot' =>  -8, 'aSat' => 1.12, 'skin' => 'gloss'],
     ];
+}
+
+/** پوستهٔ تمِ داده‌شده ('' یعنی بدون پوسته). فقط v10.28 به بعد. */
+function app_theme_skin(string $key): string {
+    $t = app_themes_registry()[$key] ?? null;
+    return is_array($t) ? (string)($t['skin'] ?? '') : '';
 }
 
 /** آیا این رنگِ پایه «خنثی» است (رمپِ خاکستری-آبیِ رابط)؟ */
@@ -515,7 +528,10 @@ function app_theme_ob_start(): void {
  */
 function app_theme_boot(): string {
     $reg = [];
-    foreach (app_themes_registry() as $k => $v) $reg[$k] = ['label' => $v['label']];
+    foreach (app_themes_registry() as $k => $v) {
+        /* v10.28: پوسته هم به مرورگر می‌رسد تا data-skin بدونِ رفت‌وبرگشت ست شود */
+        $reg[$k] = ['label' => $v['label'], 'skin' => (string)($v['skin'] ?? '')];
+    }
     $json = json_encode($reg, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
     return '<script>(function(){' . "\n"
          . 'var T=' . $json . ',KEY=' . json_encode(APP_THEME_KEY) . ',DEF=' . json_encode(APP_THEME_DEFAULT) . ';' . "\n"
@@ -528,6 +544,10 @@ function app_theme_boot(): string {
          . '  if(save){try{localStorage.setItem(KEY,k);}catch(e){}}' . "\n"
          . '  writeCookie(k);' . "\n"
          . '  try{document.documentElement.setAttribute("data-theme",k);' . "\n"
+         . '      /* v10.28: پوستهٔ تم — کلیدِ CSSِ لایهٔ سایه/براقیت */' . "\n"
+         . '      var sk=(T[k]&&T[k].skin)?T[k].skin:"";' . "\n"
+         . '      if(sk)document.documentElement.setAttribute("data-skin",sk);' . "\n"
+         . '      else document.documentElement.removeAttribute("data-skin");' . "\n"
          . '      document.documentElement.style.colorScheme="dark";}catch(e){}' . "\n"
          . '  window.APP_THEME_CURRENT=k;return k;}' . "\n"
          . 'window.appThemeApply=applyTheme;window.appThemeCurrent=readTheme;' . "\n"
@@ -21391,6 +21411,67 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
       && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
 
+    /* ================= v10.28 (۴۱) ================= */
+    /* --- ۴۱: تمِ «بلورِ شبانه» + لایهٔ پوسته --- */
+    $add('10.28', 'تمِ تازهٔ aurora در رجیستری هست و رجیستری ۱۴ تم دارد',
+         isset(app_themes_registry()['aur' . 'ora'])
+      && count(app_themes_registry()) === 14
+      && strpos(app_themes_registry()['aur' . 'ora']['label'], 'بلورِ شبانه') !== false);
+
+    $add('10.28', 'کلیدِ skin فقط روی همین یک تم است و بقیه دست‌نخورده‌اند',
+         count(array_filter(app_themes_registry(),
+               static function ($t) { return isset($t['sk' . 'in']) && $t['sk' . 'in'] !== ''; })) === 1
+      && app_theme_skin('aur' . 'ora') === 'gl' . 'oss'
+      && app_theme_skin('oc' . 'ean') === ''
+      && app_theme_skin('nor' . 'dic') === ''
+      && app_theme_skin('__nope__') === '');
+
+    $add('10.28', 'راه‌اندازِ تم صفتِ data-skin را روی html ست/حذف می‌کند',
+         strpos($selfSrc, 'var sk=(T[k]&&T[k].sk' . 'in)?T[k].sk' . 'in:""') !== false
+      && strpos($selfSrc, 'setAttribute("data-sk' . 'in",sk)') !== false
+      && strpos($selfSrc, 'removeAttribute("data-sk' . 'in")') !== false);
+
+    $add('10.28', 'بلاکِ CSSِ پوسته وجود دارد و کاملاً پشتِ data-skin قفل شده',
+         strpos($selfSrc, 'SKIN-ST' . 'ART') !== false
+      && strpos($selfSrc, 'SKIN-' . 'END') !== false
+      && substr_count($selfSrc, 'html[data-sk' . 'in="gloss"]') >= 20);
+
+    $add('10.28', 'پوسته هر سه خواسته را دارد: سایه، براقیت، شمایلِ سه‌بعدی',
+         strpos($selfSrc, 'html[data-skin="gloss"] .card{') !== false
+      && strpos($selfSrc, '0 10px 26px -12px var(--sk-' . 'sh)') !== false
+      && strpos($selfSrc, 'html[data-skin="gloss"] .main-tab .t-ico' . '3d{') !== false
+      && strpos($selfSrc, 'radial-gradient(120% 120% at 50% 0%') !== false);
+
+    $add('10.28', 'شمایلِ دومِ سه‌بعدی در هر شش تبِ پایین هست و پیش‌فرض پنهان است',
+         substr_count($selfSrc, 'class="t-ico' . '3d" aria-hidden="true"') === 6
+      && strpos($selfSrc, 'html[data-skin="gloss"] .main-tab .t-ic' . 'on{display:none}') !== false
+      && substr_count($selfSrc, 'class="t-ic' . 'on">') === 6);
+
+    $add('10.28', 'شمایل‌های تازه به موضوعِ اسکرپرِ فروشگاه نزدیک‌ترند',
+         strpos($selfSrc, '<span class="t-ico' . '3d" aria-hidden="true">🛒</span>') !== false
+      && strpos($selfSrc, '<span class="t-ico' . '3d" aria-hidden="true">📦</span>') !== false
+      && strpos($selfSrc, '<span class="t-ico' . '3d" aria-hidden="true">🚚</span>') !== false);
+
+    /* هزینهٔ رندر روی صفحهٔ سنگین: پوسته حق ندارد backdrop-filter یا blurِ
+       تازه بیاورد، و تنها انیمیشنش باید روی تبِ فعال باشد که یکی بیشتر نیست. */
+    $add('10.28', 'پوسته هیچ backdrop-filter یا blurِ تازه‌ای اضافه نکرده',
+         preg_match('/html\[data-sk' . 'in="gloss"\][^{]*\{[^}]*backdrop-filter/', $selfSrc) === 0
+      && preg_match('/html\[data-sk' . 'in="gloss"\][^{]*\{[^}]*filter:\s*blur/', $selfSrc) === 0
+      && substr_count($selfSrc, 'html[data-skin="gloss"]') >= 20);
+
+    $add('10.28', 'تنها انیمیشنِ پوسته روی تبِ فعال است و به لایهٔ جلوه‌ها گره خورده',
+         substr_count($selfSrc, 'animation:skGl' . 'oss') === 1
+      && strpos($selfSrc, 'html[data-skin="gloss"][data-fx="on"] .main-tab.active .t-ico3d::after') !== false
+      && strpos($selfSrc, '@keyframes skGl' . 'oss') !== false);
+
+    $add('10.28', 'پوسته روی موبایل سبک می‌شود و به prefers-reduced-motion احترام می‌گذارد',
+         strpos($selfSrc, 'html[data-skin="gloss"] .card{box-shadow:inset 0 1px 0 var(--sk-hi),0 4px 10px -8px var(--sk-sh)}') !== false
+      && strpos($selfSrc, 'html[data-skin="gloss"][data-fx="on"] .main-tab.active .t-ico3d::after{animation:none}') !== false);
+
+    $add('10.28', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '28', '>=')
+      && strpos($selfSrc, 'v:' . "'10.28'") !== false);
+
     /* ================= v10.27 (۴۰) ================= */
     /* --- ۴۰الف: اول iframeِ پروکسی، بعد مستقیم با وب‌تولز --- */
     $add('10.27', 'ایجنتِ سلکتور دیگر مستقیماً fetch_html خام صدا نمی‌زند',
@@ -36251,7 +36332,151 @@ html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-
 /* ۳۲) موبایل و کم‌حرکت: گران‌ترین‌ها اول خاموش می‌شوند */
 @media(max-width:620px){html[data-fx="on"] .settings-panel,html[data-fx="on"] .bsl-modal,html[data-fx="on"] .toast,html[data-fx="on"] .hamburger-btn,html[data-fx="on"] .fullwidth-btn{backdrop-filter:none;-webkit-backdrop-filter:none}html[data-fx="on"] .card::after{display:none}}
 @media(prefers-reduced-motion:reduce){html[data-fx="on"] .fx-glow,html[data-fx="on"] .fx-live::before,html[data-fx="on"] #fxTop{animation:none}}
+
 /* FX-END ========================================================== */
+
+/* ══════════════════════════════════════════════════════════════════
+   SKIN-START — v10.28 (۴۱): پوستهٔ «بلورِ شبانه» (data-skin="gloss")
+
+   تمِ aurora تنها تمی است که کلیدِ skin دارد؛ راه‌اندازِ تم روی
+   <html> صفتِ data-skin="gloss" می‌گذارد و همهٔ قواعدِ زیر پشتِ
+   همان صفت قفل شده‌اند. پس:
+     • ۱۳ تمِ قبلی صفرِ تغییر می‌گیرند (هیچ قاعده‌ای مطابقت نمی‌کند)
+     • کاربری که تم را عوض می‌کند فوراً برمی‌گردد به حالتِ قبل
+
+   قیدِ سختِ این فایل: صفحه سنگین است (~۱٫۲ مگابایت HTML و ده‌ها
+   هزار گره). پس پوسته عمداً از سه چیز پرهیز می‌کند:
+     ۱) هیچ backdrop-filterِ تازه‌ای — گران‌ترین خاصیتِ مرورگر است
+     ۲) هیچ انیمیشنِ بی‌پایان روی عنصرِ پرشمار — فقط روی تبِ فعالِ
+        منوی پایین که یک عنصر است
+     ۳) هیچ blur روی ظرفِ بزرگ — لایهٔ رسترِ تمام‌صفحه می‌سازد
+   سایه و براقیت فقط با box-shadow و background-image (گرادیان)
+   ساخته می‌شوند که هر دو را گی‌پی‌یو مستقیم رسم می‌کند.
+
+   و مهم: رنگ‌های این بلاک عمداً rgba() هستند نه hex، تا فیلترِ
+   strtrِ تم (app_theme_filter) آن‌ها را دوباره ترجمه نکند — این
+   لایه باید روی هر رنگِ پایه‌ای که زیرش باشد یکسان کار کند.
+   ══════════════════════════════════════════════════════════════════ */
+html[data-skin="gloss"]{
+  /* سه متغیرِ پوسته — همهٔ قواعدِ زیر فقط این‌ها را مصرف می‌کنند */
+  --sk-hi:rgba(255,255,255,.13);      /* لبهٔ روشنِ بالا */
+  --sk-lo:rgba(0,0,0,.34);            /* لبهٔ تیرهٔ پایین */
+  --sk-sh:rgba(0,0,0,.45);            /* سایهٔ پرتابی */
+}
+
+/* ۱) سایه و براقیتِ کارت‌ها.
+   براقیت = یک گرادیانِ بسیار کم‌جان روی خودِ background-image؛ زمینهٔ
+   رنگیِ کارت (که از تم می‌آید) دست‌نخورده زیرِ آن می‌ماند، پس پوسته
+   رنگِ تم را خراب نمی‌کند فقط رویش نور می‌اندازد. */
+html[data-skin="gloss"] .card{
+  background-image:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,0) 42%,rgba(0,0,0,.10));
+  box-shadow:inset 0 1px 0 var(--sk-hi),inset 0 -1px 0 var(--sk-lo),0 10px 26px -12px var(--sk-sh);
+}
+html[data-skin="gloss"] .stat{
+  background-image:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,0) 55%);
+  box-shadow:inset 0 1px 0 var(--sk-hi),0 4px 12px -8px var(--sk-sh);
+}
+
+/* ۲) دکمه‌ها: لبهٔ بالا روشن، کفِ تیره، سایهٔ کوتاه — دکمه جسم پیدا می‌کند.
+   روی :active فرو می‌رود (سایه داخلی می‌شود) — حسِ فشردنِ دکمهٔ واقعی. */
+html[data-skin="gloss"] .btn{
+  background-image:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,0) 48%,rgba(0,0,0,.16));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.22),inset 0 -2px 0 var(--sk-lo),0 3px 8px -4px var(--sk-sh);
+}
+html[data-skin="gloss"] .btn:active:not(:disabled){
+  box-shadow:inset 0 2px 5px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.06);
+}
+html[data-skin="gloss"] .btn:disabled{box-shadow:none;background-image:none}
+
+/* ۳) منوی پایین — قلبِ این پوسته.
+   خودِ نوار یک لبهٔ نورانی در بالا و سایهٔ بلندتر در پایین می‌گیرد،
+   طوری که از محتوای پشتِ خود جدا بایستد (بدونِ blur). */
+html[data-skin="gloss"] .main-tabs{
+  background-image:linear-gradient(180deg,rgba(255,255,255,.07),rgba(0,0,0,.22));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 -6px 26px -6px rgba(0,0,0,.65);
+}
+/* تبِ فعال: یک «قرصِ» برآمده زیرِ شمایل */
+html[data-skin="gloss"] .main-tab{border-radius:12px}
+html[data-skin="gloss"] .main-tab.active{
+  background-image:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.02) 60%,rgba(0,0,0,.14));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.24),inset 0 -2px 0 rgba(0,0,0,.28),0 4px 14px -8px var(--sk-sh);
+}
+
+/* ۴) شمایلِ سه‌بعدی.
+   دو لایه روی هم: t-icon مخفی می‌شود و t-ico3d جایش را می‌گیرد.
+   حجم از سه چیز می‌آید و هر سه ارزان‌اند:
+     الف) قرصِ ته‌نشست (::before) با گرادیانِ کروی و لبهٔ داخلی
+     ب) دو drop-shadow روی خودِ شکلک — سایهٔ واقعیِ مطابقِ شکل، نه کادر
+     ج) یک برقِ بیضی (::after) که روی قرص می‌نشیند — همان «براقیت» */
+html[data-skin="gloss"] .main-tab .t-icon{display:none}
+html[data-skin="gloss"] .main-tab .t-ico3d{
+  display:inline-flex;align-items:center;justify-content:center;
+  position:relative;width:30px;height:30px;font-size:16px;line-height:1;
+  border-radius:50%;
+  filter:drop-shadow(0 1px 0 rgba(255,255,255,.28)) drop-shadow(0 3px 4px rgba(0,0,0,.55));
+  transform:translateZ(0);
+}
+html[data-skin="gloss"] .main-tab .t-ico3d::before{
+  content:"";position:absolute;inset:0;z-index:-1;border-radius:50%;
+  background:radial-gradient(120% 120% at 50% 0%,rgba(255,255,255,.30),rgba(255,255,255,.06) 46%,rgba(0,0,0,.30));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.42),inset 0 -2px 3px rgba(0,0,0,.42),0 2px 6px -3px rgba(0,0,0,.7);
+}
+html[data-skin="gloss"] .main-tab .t-ico3d::after{
+  content:"";position:absolute;top:2px;right:6px;left:6px;height:38%;z-index:1;
+  border-radius:50% 50% 40% 40%/60% 60% 40% 40%;pointer-events:none;
+  background:linear-gradient(180deg,rgba(255,255,255,.42),rgba(255,255,255,0));
+  opacity:.75;
+}
+/* تبِ فعال: قرص روشن‌تر و کمی بزرگ‌تر می‌شود (فقط transform — ریفلو ندارد) */
+html[data-skin="gloss"] .main-tab.active .t-ico3d{transform:translateY(-1px) scale(1.1)}
+html[data-skin="gloss"] .main-tab.active .t-ico3d::before{
+  background:radial-gradient(120% 120% at 50% 0%,rgba(255,255,255,.44),rgba(255,255,255,.10) 46%,rgba(0,0,0,.26));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 -2px 3px rgba(0,0,0,.38),0 3px 9px -3px rgba(0,0,0,.75);
+}
+/* در دسکتاپ تب‌ها افقی می‌شوند و جا تنگ‌تر است */
+@media(min-width:900px){
+  html[data-skin="gloss"] .main-tab .t-ico3d{width:26px;height:26px;font-size:14px}
+}
+
+/* ۵) براقیتِ متحرک — فقط وقتی لایهٔ جلوه‌ها روشن است و فقط روی تبِ
+   فعال (یک عنصر در کلِ صفحه). دو قیدِ توامان تضمین می‌کند که خاموش
+   کردنِ جلوه‌ها یا عوض کردنِ تم، هر دو، این را می‌برند. */
+html[data-skin="gloss"][data-fx="on"] .main-tab.active .t-ico3d::after{
+  animation:skGloss 3.6s var(--fx-ease) infinite;
+}
+@keyframes skGloss{0%,72%{opacity:.55}84%{opacity:1}100%{opacity:.55}}
+/* دکمه: یک باریکهٔ نور که فقط روی هاور رد می‌شود */
+html[data-skin="gloss"][data-fx="on"] .btn:hover:not(:disabled){
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.3),inset 0 -2px 0 var(--sk-lo),0 8px 20px -8px var(--sk-sh);
+}
+
+/* ۶) سطح‌های شناور: پنل، مودال، توست — فقط لبه و سایه، بدونِ blur */
+html[data-skin="gloss"] .settings-panel,html[data-skin="gloss"] .bsl-modal,html[data-skin="gloss"] .toast{
+  box-shadow:inset 0 1px 0 var(--sk-hi),0 18px 48px -16px rgba(0,0,0,.8);
+}
+html[data-skin="gloss"] .app-ver,html[data-skin="gloss"] .sub-tab.active,html[data-skin="gloss"] .selsub-tab.active{
+  background-image:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,0) 60%,rgba(0,0,0,.12));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.2),0 2px 6px -3px var(--sk-sh);
+}
+/* نوارِ پیشرفت: لولهٔ شیشه‌ای */
+html[data-skin="gloss"] .progress{box-shadow:inset 0 1px 3px rgba(0,0,0,.5)}
+html[data-skin="gloss"] .progress-bar{
+  background-image:linear-gradient(180deg,rgba(255,255,255,.34),rgba(255,255,255,0) 55%,rgba(0,0,0,.18));
+}
+
+/* ۷) دو دریچهٔ فرار: کم‌حرکت و موبایل.
+   روی موبایل سایه‌های کم‌ارزش‌تر (کارت، دکمه) ساده می‌شوند — در
+   یک فهرستِ ۲۰۰ کارتی، ۲۰۰ box-shadowِ تار هزینه دارد. شمایل‌های
+   سه‌بعدی می‌مانند چون فقط ۶ تایند و همان چیزی‌اند که دیده می‌شود. */
+@media(max-width:620px){
+  html[data-skin="gloss"] .card{box-shadow:inset 0 1px 0 var(--sk-hi),0 4px 10px -8px var(--sk-sh)}
+  html[data-skin="gloss"] .btn{box-shadow:inset 0 1px 0 rgba(255,255,255,.18),inset 0 -2px 0 var(--sk-lo)}
+  html[data-skin="gloss"] .stat{box-shadow:inset 0 1px 0 var(--sk-hi)}
+}
+@media(prefers-reduced-motion:reduce){
+  html[data-skin="gloss"][data-fx="on"] .main-tab.active .t-ico3d::after{animation:none}
+}
+/* SKIN-END ======================================================== */
 </style>
 </head>
 <body>
@@ -36274,30 +36499,39 @@ html[data-fx="on"] .fx-live::before{content:"";position:absolute;top:50%;right:-
      انگشتِ فایل) از دست نرفته است: هم در ?whoami=1 هست و هم در پانویسِ
      صفحه و گزارشِ تغییرات. -->
 
+<!-- v10.28 (۴۱): کنار هر شمایلِ موجود یک شمایلِ دوم (t-ico3d) نشسته که
+     پیش‌فرض display:none است و فقط زیرِ پوستهٔ تم (html[data-skin]) دیده
+     می‌شود. پس ۱۳ تمِ قبلی دقیقاً همان‌طور می‌مانند که بودند. -->
 <div class="main-tabs" id="mainTabs">
     <button class="main-tab active" data-tab="start" onclick="switchMainTab('start')">
         <span class="t-icon">🎯</span>
+        <span class="t-ico3d" aria-hidden="true">🛒</span>
         <span class="t-label">شروع</span>
     </button>
     <button class="main-tab" data-tab="settings" onclick="switchMainTab('settings')">
         <span class="t-icon">⚙️</span>
+        <span class="t-ico3d" aria-hidden="true">⚙️</span>
         <span class="t-label">تنظیمات</span>
     </button>
     <button class="main-tab" data-tab="selectors" onclick="switchMainTab('selectors')">
         <span class="t-icon">🎨</span>
+        <span class="t-ico3d" aria-hidden="true">🏷️</span>
         <span class="t-label">سلکتورها</span>
     </button>
     <button class="main-tab" data-tab="results" onclick="switchMainTab('results')">
         <span class="t-icon">📊</span>
+        <span class="t-ico3d" aria-hidden="true">📦</span>
         <span class="t-label">نتایج</span>
         <span class="badge hidden" id="resultsBadge">0</span>
     </button>
     <button class="main-tab" data-tab="send" onclick="switchMainTab('send')">
         <span class="t-icon">📤</span>
+        <span class="t-ico3d" aria-hidden="true">🚚</span>
         <span class="t-label">ارسال</span>
     </button>
     <button class="main-tab" data-tab="import" onclick="switchMainTab('import')">
         <span class="t-icon">📥</span>
+        <span class="t-ico3d" aria-hidden="true">🛍️</span>
         <span class="t-label">درون‌ریزی</span>
     </button>
 </div>
@@ -42569,6 +42803,36 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.28', t:'💎 تمِ تازه «بلورِ شبانه»: سایه، براقیت، و شمایل‌های سه‌بعدیِ منوی پایین', items:[
+    '🎨 <b>یک تمِ چهاردهم به فهرستِ تم‌ها اضافه شد: «💎 بلورِ شبانه (سه‌بعدی)».</b>',
+    '   از تنظیمات ← ظاهر انتخابش کنید. رنگش بنفشِ سرد با تأکیدِ آبیِ روشن است',
+    '   (کنتراستِ متن روی زمینه ۱۴٫۹، یعنی خیلی بالاتر از حدِ خوانایی)، ولی',
+    '   نکتهٔ اصلی‌اش رنگ نیست — <b>بافت</b> است.',
+    '✨ <b>سایه و براقیت.</b> این تم برخلافِ سیزده تمِ قبلی فقط رنگ‌ها را عوض',
+    '   نمی‌کند؛ یک لایهٔ ظاهریِ کامل هم با خودش می‌آورد: کارت‌ها لبهٔ روشن در',
+    '   بالا و سایهٔ نرم در پایین می‌گیرند و از زمینه جدا می‌ایستند، دکمه‌ها',
+    '   برجسته می‌شوند و موقعِ فشردن واقعاً فرو می‌روند، نوارِ پیشرفت شکلِ',
+    '   لولهٔ شیشه‌ای می‌گیرد، و پنل و مودال و توست سایهٔ عمیقِ شناور دارند.',
+    '🛒 <b>شمایل‌های منوی پایین سه‌بعدی و موضوعی شدند.</b> زیرِ این تم هر شش',
+    '   شمایلِ فوتر روی یک قرصِ برجسته با گرادیانِ کروی، لبهٔ داخلی و برقِ',
+    '   بیضی می‌نشیند — و خودِ شمایل‌ها هم به کارِ برنامه نزدیک‌تر شدند:',
+    '   🛒 شروع، ⚙️ تنظیمات، 🏷️ سلکتورها، 📦 نتایج، 🚚 ارسال،',
+    '   🛍️ درون‌ریزی. تبِ فعال کمی بزرگ‌تر و روشن‌تر می‌شود و اگر لایهٔ',
+    '   «جلوه‌های حرکتی» روشن باشد، هر چند ثانیه یک بار برقش رد می‌شود.',
+    '🪶 <b>سیزده تمِ قبلی مو به مو دست‌نخورده‌اند.</b> کلِ این لایه پشتِ صفتِ',
+    '   <code>data-skin</code> روی تگِ html قفل شده و فقط همین تم آن را روشن',
+    '   می‌کند؛ بقیهٔ تم‌ها هیچ قاعده‌ای از آن را مطابقت نمی‌کنند. برگردید به',
+    '   تمِ قبلی‌تان، دقیقاً همان چیزی است که بود.',
+    '🏎 <b>روی صفحهٔ سنگین هم می‌چرخد — این قید از اول رعایت شد.</b> صفحهٔ',
+    '   برنامه بزرگ است، پس پوسته عمداً از سه چیزِ گران‌قیمت پرهیز می‌کند:',
+    '   هیچ <code>backdrop-filter</code>ِ تازه‌ای، هیچ blur روی ظرفِ بزرگ، و',
+    '   هیچ انیمیشنِ بی‌پایان روی عنصرِ پرشمار. تنها انیمیشنِ پوسته روی',
+    '   <i>یک</i> عنصر است: شمایلِ تبِ فعال. سایه‌ها هم فقط',
+    '   <code>box-shadow</code> و گرادیان‌اند که کارتِ گرافیک مستقیم رسم',
+    '   می‌کند. زیر ۶۲۰ پیکسل حتی همان سایه‌های کم‌ارزش‌تر (کارت و دکمه) هم',
+    '   ساده می‌شوند تا فهرستِ چندصد کارتی روان بماند، و',
+    '   <code>prefers-reduced-motion</code> براقیتِ متحرک را خاموش می‌کند.',
+  ]},
   {v:'10.27', t:'🧲 ایجنتِ سلکتور: صفحه را هرجور شده باز می‌کند — و اگر محصولی نباشد، خودش می‌سازد', items:[
     '🌐 <b>الف — «دریافتِ صفحه ناموفق بود» دیگر آخرِ خط نیست.</b> تا دیروز هر',
     '   دو ایجنتِ کشفِ سلکتور (فهرست و جزئیات) صفحه را با یک تلاشِ خشکِ ۲۵',
