@@ -133,8 +133,15 @@ const SELAGENT_PROGRESS_FILE = __DIR__ . '/selagent_progress.json';
 const SELAGENT_RESULT_FILE   = __DIR__ . '/selagent_result.json';
 const SELAGENT_STOP_FILE     = __DIR__ . '/selagent_stop.json';
 const SELAGENT_LOCK_FILE     = __DIR__ . '/selagent.lock';
-const SELAGENT_MAX_STEPS     = 16;   // کشفِ سلکتور کارِ کوتاهی است؛ سقفِ کمتر = هزینهٔ کمتر
-const SELAGENT_MAX_CALLS     = 60;
+/* v10.30 (۴۳ب): پرامپتِ سفارشیِ کاربر برای ایجنتِ کشفِ سلکتور.
+   جدا از connections.json نگه داشته می‌شود تا ویرایشِ متنِ چندخطی
+   هیچ‌وقت فایلِ حساسِ اتصالات را در خطر نگذارد. */
+const SELAGENT_PROMPT_FILE   = __DIR__ . '/selagent_prompt.json';
+/* v10.30 (۴۳الف): سقف‌ها بالا رفت. با ابزارهای تازه (page_data، find_text،
+   inspect_html صفحه‌بندی‌شده) ایجنت روی صفحاتِ SPA چند گامِ کاوش بیشتر
+   لازم دارد؛ ۱۶ گام وسطِ کار تمام می‌شد و «سقفِ گام‌ها» می‌خورد. */
+const SELAGENT_MAX_STEPS     = 24;
+const SELAGENT_MAX_CALLS     = 90;
 
 /* v10.05 (۱۹): اتوماسیونِ ایجنتی — کارهای زمان‌بندی‌شده */
 const AUTO_JOBS_FILE     = __DIR__ . '/auto_jobs.json';
@@ -189,8 +196,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.29';
-const APP_VERSION_DATE = '1405/06/03';
+const APP_VERSION = '10.30';
+const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -16235,6 +16242,55 @@ if (isset($_GET['selagent_result'])) {
     exit;
 }
 
+/* =====================================================================
+ *  v10.30 (۴۳ب): اندپوینت‌های پرامپتِ سفارشیِ ایجنتِ کشفِ سلکتور.
+ *    ?selagent_prompt=1                 → خواندنِ تنظیمِ فعلی + متنِ پیش‌فرض
+ *    ?selagent_prompt_save=1 (POST)     → ذخیره
+ *    ?selagent_prompt_preview=1 (POST)  → پیش‌نمایشِ متنِ نهایی بدونِ ذخیره
+ * ===================================================================== */
+if (isset($_GET['selagent_prompt'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $spKind = ((string)($_GET['kind'] ?? 'list') === 'detail') ? 'detail' : 'list';
+    $spCfg  = selagentLoadPrompts();
+    $spUrl  = trim((string)($_GET['url'] ?? 'https://example.com/page'));
+    echo json_encode(['ok' => true, 'kind' => $spKind,
+        'prompts' => ['list' => $spCfg['list'], 'detail' => $spCfg['detail']],
+        'updated' => (int)$spCfg['updated'],
+        'default' => selagentDefaultPrompt($spKind, $spUrl),
+        'floor'   => selagentPromptFloor($spKind),
+        'fields'  => array_keys(selagentFields($spKind)),
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['selagent_prompt_save'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $spCur = selagentLoadPrompts();
+    $spKind = ((string)($_POST['kind'] ?? ($_GET['kind'] ?? 'list')) === 'detail') ? 'detail' : 'list';
+    $spNew = ['list' => $spCur['list'], 'detail' => $spCur['detail']];
+    $spNew[$spKind] = ['mode' => (string)($_POST['mode'] ?? 'append'),
+                       'text' => (string)($_POST['text'] ?? '')];
+    $spOk = selagentSavePrompts($spNew);
+    $spAfter = selagentLoadPrompts();
+    echo json_encode(['ok' => $spOk, 'kind' => $spKind,
+        'saved' => $spAfter[$spKind],
+        'error' => $spOk ? '' : 'نوشتنِ فایلِ پرامپت ناموفق بود (دسترسیِ نوشتن را بررسی کنید)',
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['selagent_prompt_preview'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $spKind = ((string)($_POST['kind'] ?? ($_GET['kind'] ?? 'list')) === 'detail') ? 'detail' : 'list';
+    $spUrl  = trim((string)($_POST['url'] ?? ($_GET['url'] ?? '')));
+    if ($spUrl === '') $spUrl = 'https://example.com/page';
+    $spFinal = selagentSystemPrompt($spKind, $spUrl,
+        ['mode' => (string)($_POST['mode'] ?? 'append'), 'text' => (string)($_POST['text'] ?? '')]);
+    echo json_encode(['ok' => true, 'kind' => $spKind, 'prompt' => $spFinal,
+        'chars' => mb_strlen($spFinal)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['selagent_stop'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @file_put_contents(SELAGENT_STOP_FILE, json_encode(['at' => time()]));
@@ -21410,6 +21466,250 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'id="ag' . 'Convo"') !== false
       && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
       && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
+
+    /* ================= v10.30 (۴۳) ================= */
+    /* --- ۴۳الف: ابزارهای تازهٔ ایجنتِ کشفِ سلکتور روی صفحاتِ SPA --- */
+    $add('10.30', 'سه ابزارِ تازهٔ کاوشِ صفحه تعریف شده‌اند',
+         function_exists('selagentFindText')
+      && function_exists('selagentListChildren')
+      && function_exists('selagentPageData'));
+
+    $add('10.30', 'هر سه ابزار در فهرستِ ابزارهای مدل ثبت شده‌اند',
+         (function () {
+             $names = array_map(static function ($t) { return $t['function']['name'] ?? ''; },
+                                selagentToolSpecs('detail'));
+             return in_array('find' . '_text', $names, true)
+                 && in_array('list' . '_children', $names, true)
+                 && in_array('page' . '_data', $names, true)
+                 && in_array('probe' . '_selector', $names, true)
+                 && in_array('submit' . '_selectors', $names, true);
+         })());
+
+    /* هر ابزارِ ثبت‌شده باید در حلقهٔ اجرا هم شاخهٔ اجرا داشته باشد،
+       وگرنه مدل صدایش می‌زند و هیچ جوابی نمی‌گیرد. */
+    $add('10.30', 'هر سه ابزار در حلقهٔ اجرای ایجنت شاخهٔ اجرا دارند',
+         strpos($selfSrc, "\$c['name'] === 'find" . "_text'") !== false
+      && strpos($selfSrc, "\$c['name'] === 'list" . "_children'") !== false
+      && strpos($selfSrc, "\$c['name'] === 'page" . "_data'") !== false);
+
+    /* find_text: قلبِ کار. باید از رویِ متن، سلکتورِ پایدار بسازد. */
+    $t43dom = new DOMDocument();
+    libxml_use_internal_errors(true);
+    $t43dom->loadHTML('<?xml encoding="UTF-8"><html><body><div id="pdp">'
+        . '<h1 data-testid="ttl" class="css-9z8y7x">کفشِ ورزشی مدلِ آلفا</h1>'
+        . '<span class="css-1a2b3c" itemprop="price">۲٬۴۵۰٬۰۰۰</span>'
+        . '<span class="css-1a2b3c">تومان</span></div></body></html>');
+    libxml_clear_errors();
+    $t43xp = new DOMXPath($t43dom);
+
+    $t43f = selagentFindText($t43xp, '۲٬۴۵۰٬۰۰۰', 6);
+    $t43sels = [];
+    foreach (($t43f['hits'] ?? []) as $h)
+        foreach (($h['candidates'] ?? []) as $c) $t43sels[] = $c['selector'];
+    $add('10.30', 'find_text عنصرِ حاویِ متن را پیدا و سلکتورِ پایدار پیشنهاد می‌کند',
+         !empty($t43f['ok']) && (int)($t43f['found'] ?? 0) === 1
+      && in_array('span[item' . 'prop="price"]', $t43sels, true));
+
+    /* ترتیب مهم است: ویژگیِ پایدار باید جلوتر از کلاسِ هش‌شده بیاید،
+       چون مدل معمولاً کاندیدِ اول را برمی‌دارد. */
+    $add('10.30', 'کاندیدِ مبتنی بر ویژگی جلوتر از کلاسِ هش‌شده پیشنهاد می‌شود',
+         isset($t43sels[0]) && strpos($t43sels[0], 'item' . 'prop') !== false);
+
+    $add('10.30', 'سلکتورِ پیشنهادیِ find_text واقعاً با موتورِ سلکتورِ برنامه کار می‌کند',
+         (function () use ($t43xp) {
+             $x = cssToXpath('span[item' . 'prop="price"]');
+             if ($x === '') return false;
+             $q = @$t43xp->query($x);
+             return $q && $q->length === 1;
+         })());
+
+    $t43lc = selagentListChildren($t43xp, '#pdp', 1, 40);
+    $add('10.30', 'list_children فرزندان را با سلکتور و نمونهٔ متن فهرست می‌کند',
+         !empty($t43lc['ok']) && (int)($t43lc['children'] ?? 0) === 3
+      && isset($t43lc['rows'][0]) && strpos($t43lc['rows'][0], 'کفشِ ورزشی') !== false);
+
+    /* page_data: قیمت/sku که فقط داخلِ JSON-LD اند باید بیرون بیایند. */
+    $t43html = '<html><head><meta property="og:title" content="کفشِ آلفا">'
+             . '<script type="application/ld+json">{"@type":"Product","name":"کفشِ آلفا",'
+             . '"sku":"ALF-77","offers":{"price":"2450000"}}</script></head><body>x</body></html>';
+    $t43pd = selagentPageData($t43html, '', 3500);
+    $add('10.30', 'page_data قیمت و SKUِ پنهان در JSON-LD را بیرون می‌کشد',
+         !empty($t43pd['ok'])
+      && strpos((string)$t43pd['data'], 'offers.price = 2450000') !== false
+      && strpos((string)$t43pd['data'], 'sku = ALF-77') !== false
+      && strpos((string)$t43pd['data'], 'og:title') !== false);
+
+    $t43pdw = selagentPageData($t43html, 'sku', 2000);
+    $add('10.30', 'فیلترِ want در page_data فقط خطوطِ مرتبط را برمی‌گرداند',
+         !empty($t43pdw['ok'])
+      && strpos((string)$t43pdw['data'], 'ALF-77') !== false
+      && strpos((string)$t43pdw['data'], 'og:title') === false);
+
+    /* تکراری‌نبودن: __NEXT_DATA__ با هر دو الگو گرفته می‌شود. */
+    $t43nx = selagentPageData('<html><body><script id="__NEXT_DATA__" type="application/json">'
+           . '{"props":{"price":123456}}</script></body></html>', '', 3000);
+    $add('10.30', 'دادهٔ __NEXT_DATA__ دوباره‌کاری نمی‌شود',
+         !empty($t43nx['ok'])
+      && substr_count((string)$t43nx['data'], 'props.price = 123456') === 1);
+
+    /* --- ۴۳الف: پنجرهٔ inspect_html باز شد --- */
+    $t43big = new DOMDocument();
+    libxml_use_internal_errors(true);
+    $t43big->loadHTML('<?xml encoding="UTF-8"><html><body><div id="big">'
+        . str_repeat('<p>پاراگرافِ آزمایشیِ به‌اندازهٔ کافی طولانی برای بریده‌شدن</p>', 90)
+        . '</div></body></html>');
+    libxml_clear_errors();
+    $t43bxp = new DOMXPath($t43big);
+
+    $t43i1 = selagentInspect($t43big, $t43bxp, '#big', 800, 0);
+    $add('10.30', 'inspect_html وقتی خروجی بریده می‌شود آفستِ ادامه را می‌دهد',
+         !empty($t43i1['ok']) && !empty($t43i1['truncated'])
+      && (int)($t43i1['next_offset'] ?? 0) > 0
+      && (int)($t43i1['total_chars'] ?? 0) > 800);
+
+    $t43i2 = selagentInspect($t43big, $t43bxp, '#big', 800, (int)$t43i1['next_offset']);
+    $add('10.30', 'تکهٔ دومِ inspect_html واقعاً ادامهٔ تکهٔ اول است نه تکرارِ آن',
+         !empty($t43i2['ok']) && $t43i2['html'] !== $t43i1['html']);
+
+    /* سقفِ ۴۰۰۰ باید به ۱۲۰۰۰ رفته باشد */
+    $t43i3 = selagentInspect($t43big, $t43bxp, '#big', 99999, 0);
+    $add('10.30', 'سقفِ کاراکترِ inspect_html از ۴۰۰۰ به ۱۲۰۰۰ رسید',
+         !empty($t43i3['ok']) && mb_strlen((string)$t43i3['html']) > 4000
+      && mb_strlen((string)$t43i3['html']) <= 12000);
+
+    /* --- ۴۳الف: نقشهٔ ساختار حالا عناصرِ نشان‌دار را هم می‌بیند --- */
+    $t43map = selagentDomMap($t43xp, 'detail', 12000);
+    $add('10.30', 'نقشهٔ ساختار عناصرِ data-testid/itemprop را جدا فهرست می‌کند',
+         strpos($t43map, 'عناصرِ نشان‌دار') !== false
+      && strpos($t43map, 'h1[data-testid="ttl"]') !== false
+      && strpos($t43map, 'span[item' . 'prop="price"]') !== false);
+
+    /* --- ۴۳الف: سقفِ گام‌ها و فراخوانی‌ها --- */
+    $add('10.30', 'سقفِ گام‌ها ۲۴ و سقفِ فراخوانی ۹۰ شد و همچنان سازگارند',
+         SELAGENT_MAX_STEPS === 24 && SELAGENT_MAX_CALLS === 90
+      && SELAGENT_MAX_CALLS > SELAGENT_MAX_STEPS);
+
+    /* --- ۴۳الف: محدودیتِ ساختگیِ سلکتور برداشته شد --- */
+    $t43sp = selagentSystemPrompt('detail', 'https://example.com/p/1', ['mode' => 'off', 'text' => '']);
+    $add('10.30', 'پرامپت دیگر [ویژگی] و :nth-child را ممنوع نمی‌کند',
+         strpos($t43sp, 'nth-' . 'child') !== false
+      && strpos($t43sp, '[ویژگی="مقدار"]') !== false
+      && strpos($t43sp, 'از :nth-child و + و ~ استفاده نکن') === false);
+
+    $add('10.30', 'پرامپت مسیرِ کارِ صفحاتِ SPA را صریح آموزش می‌دهد',
+         strpos($t43sp, 'page' . '_data') !== false
+      && strpos($t43sp, 'find' . '_text') !== false
+      && strpos($t43sp, 'list' . '_children') !== false
+      && strpos($t43sp, 'هش‌شده') !== false);
+
+    /* پیامِ خطای پروب هم باید همان فهرستِ درست را بدهد، نه فهرستِ قدیمیِ غلط */
+    $t43pe = selagentProbe($t43xp, 'div + span', 'price', 'https://example.com');
+    $add('10.30', 'پیامِ خطای سلکتورِ نامعتبر فهرستِ درستِ مجاز/غیرمجاز را می‌دهد',
+         empty($t43pe['ok'])
+      && strpos((string)($t43pe['supported'] ?? ''), 'nth-' . 'child') !== false
+      && strpos((string)($t43pe['not_supported'] ?? ''), ':not()') !== false);
+
+    /* --- ۴۳ب: پرامپتِ سفارشی --- */
+    $add('10.30', 'توابعِ خواندن/ذخیرهٔ پرامپتِ سفارشی و فایلِ اختصاصی‌اش هست',
+         function_exists('selagentLoadPrompts')
+      && function_exists('selagentSavePrompts')
+      && function_exists('selagentPromptFloor')
+      && function_exists('selagentDefaultPrompt')
+      && defined('SELAGENT_PROMPT_FILE')
+      && substr(SELAGENT_PROMPT_FILE, -20) === 'selagent' . '_prompt.json');
+
+    /* پرامپتِ سفارشی نباید به فایلِ اتصالات یا پروفایل‌ها دست بزند */
+    $add('10.30', 'پرامپت در فایلِ جداگانه ذخیره می‌شود نه در اتصالات/پروفایل‌ها',
+         SELAGENT_PROMPT_FILE !== CONNECTIONS_FILE
+      && SELAGENT_PROMPT_FILE !== PROFILES_FILE);
+
+    $t43ap = selagentSystemPrompt('list', 'https://shop.test/c/1',
+                                  ['mode' => 'append', 'text' => 'قیمتِ دوم را بگیر']);
+    $add('10.30', 'حالتِ «افزودن» متنِ کاربر را کنارِ پرامپتِ استاندارد می‌گذارد',
+         strpos($t43ap, 'قیمتِ دوم را بگیر') !== false
+      && strpos($t43ap, 'تو یک متخصصِ استخراجِ داده') !== false
+      && strpos($t43ap, 'دستورالعملِ اختصاصیِ کاربر') !== false);
+
+    $t43rp = selagentSystemPrompt('list', 'https://shop.test/c/1',
+                                  ['mode' => 'replace', 'text' => 'فقط همین را انجام بده']);
+    $add('10.30', 'حالتِ «جایگزینی» پرامپتِ استاندارد را کنار می‌گذارد',
+         strpos($t43rp, 'فقط همین را انجام بده') !== false
+      && strpos($t43rp, 'تو یک متخصصِ استخراجِ داده') === false);
+
+    /* مهم‌ترین ادعای بخشِ ب: جایگزینی نباید ایجنت را خراب کند */
+    $add('10.30', 'حتی در حالتِ جایگزینی، قواعدِ فنیِ ضروری ته پرامپت می‌مانند',
+         strpos($t43rp, 'submit' . '_selectors') !== false
+      && strpos($t43rp, 'probe' . '_selector') !== false
+      && strpos($t43rp, 'قواعدِ فنیِ ثابت') !== false);
+
+    $t43op = selagentSystemPrompt('list', 'https://shop.test/c/1',
+                                  ['mode' => 'off', 'text' => 'این نباید دیده شود']);
+    $add('10.30', 'حالتِ «غیرفعال» متنِ کاربر را نادیده می‌گیرد',
+         strpos($t43op, 'این نباید دیده شود') === false
+      && strpos($t43op, 'تو یک متخصصِ استخراجِ داده') !== false);
+
+    /* جانگهدارها */
+    $t43ph = selagentSystemPrompt('detail', 'https://shop.test/p/9',
+                                  ['mode' => 'replace', 'text' => 'آدرس: {{url}} / نوع: {{kind}} / فیلدها: {{fields}}']);
+    $add('10.30', 'جانگهدارهای {{url}} و {{kind}} و {{fields}} جایگزین می‌شوند',
+         strpos($t43ph, 'https://shop.test/p/9') !== false
+      && strpos($t43ph, 'جزئیاتِ محصول') !== false
+      && strpos($t43ph, 'price') !== false
+      && strpos($t43ph, '{{url}}') === false
+      && strpos($t43ph, '{{fields}}') === false);
+
+    $t43pd2 = selagentSystemPrompt('list', 'https://shop.test/c/2',
+                                   ['mode' => 'replace', 'text' => 'سرآغاز' . "\n" . '{{default}}']);
+    $add('10.30', 'جانگهدارِ {{default}} کلِ پرامپتِ استاندارد را جاسازی می‌کند',
+         strpos($t43pd2, 'سرآغاز') !== false
+      && strpos($t43pd2, 'تو یک متخصصِ استخراجِ داده') !== false
+      && strpos($t43pd2, '{{default}}') === false);
+
+    /* متنِ خالی نباید هیچ چیزی به پرامپت اضافه کند */
+    $add('10.30', 'پرامپتِ خالی همان پیش‌فرضِ دست‌نخورده را می‌دهد',
+         selagentSystemPrompt('list', 'https://shop.test/c/3', ['mode' => 'append', 'text' => '  '])
+         === selagentDefaultPrompt('list', 'https://shop.test/c/3'));
+
+    /* ذخیره باید حالتِ نامعتبر را به append برگرداند و متن را ببُرد */
+    $add('10.30', 'حالتِ نامعتبرِ پرامپت به «افزودن» برمی‌گردد و متن سقفِ طول دارد',
+         strpos($selfSrc, "in_array(\$mode, ['append', 'replace', 'off'], true)") !== false
+      && strpos($selfSrc, "mb_substr(trim((string)(\$row['text'] ?? '')), 0, 8000)") !== false);
+
+    $add('10.30', 'اندپوینت‌های خواندن/ذخیره/پیش‌نمایشِ پرامپت هست',
+         strpos($selfSrc, "isset(\$_GET['selagent" . "_prompt'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['selagent" . "_prompt_save'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['selagent" . "_prompt_preview'])") !== false);
+
+    /* UI: ویرایشگر باید در هر دو زیرتب باشد، نه فقط یکی */
+    $add('10.30', 'ویرایشگرِ پرامپت در هر دو زیرتبِ لیست و جزئیات درج شده',
+         function_exists('selagentPromptEditorHtml')
+      && strpos($selfSrc, "selagentPromptEditorHtml('list')") !== false
+      && strpos($selfSrc, "selagentPromptEditorHtml('detail')") !== false);
+
+    $t43ui = selagentPromptEditorHtml('detail');
+    $add('10.30', 'فرمِ ویرایشگر سه حالت، جعبهٔ متن و دکمه‌های ذخیره/پیش‌نمایش دارد',
+         substr_count($t43ui, 'name="spmode-detail"') === 3
+      && strpos($t43ui, 'id="spromptText-detail"') !== false
+      && strpos($t43ui, "spromptSave('detail')") !== false
+      && strpos($t43ui, "spromptPreview('detail')") !== false);
+
+    $add('10.30', 'توابعِ JSِ ویرایشگرِ پرامپت تعریف شده‌اند',
+         strpos($selfSrc, 'function sprompt' . 'Save(kind)') !== false
+      && strpos($selfSrc, 'function sprompt' . 'Preview(kind)') !== false
+      && strpos($selfSrc, 'function sprompt' . 'ShowDefault(kind)') !== false
+      && strpos($selfSrc, 'function sprompt' . 'Ins(kind, token)') !== false);
+
+    /* CSSِ ویرایشگر باید بعد از پایانِ بلاکِ جلوه‌ها باشد تا ادعای v10.06
+       نشکند. نامِ آن نشانه را عمداً تکه‌تکه می‌نویسیم، چون همان ادعا
+       شمارشِ یکتاییِ نشانه را می‌سنجد و نوشتنِ کاملش این‌جا می‌شکندش. */
+    $add('10.30', 'CSSِ ویرایشگرِ پرامپت مرزبندی‌شده و بعد از بلاکِ جلوه‌هاست',
+         substr_count($selfSrc, '/* SPROMPT' . '-START') === 1
+      && substr_count($selfSrc, '/* SPROMPT' . '-END') === 1
+      && strpos($selfSrc, '/* SPROMPT' . '-START') > strpos($selfSrc, 'FX-' . 'END'));
+
+    $add('10.30', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '30', '>=')
+      && strpos($selfSrc, 'v:' . "'10.30'") !== false);
 
     /* ================= v10.29 (۴۲) ================= */
     /* --- ۴۲: ورودِ دستیِ سلکتورهای «جزئیات» --- */
@@ -35133,7 +35433,7 @@ function selagentFields(string $kind): array {
  * محصول همیشه یک کلاسِ پرتکرار است؛ برای صفحهٔ جزئیات، فیلدها کلاس‌های
  * یکتای معنادار دارند. پس یک هیستوگرامِ کلاس + چند نمونه‌متن می‌سازیم.
  */
-function selagentDomMap(DOMXPath $xp, string $kind, int $budget = 7000): string {
+function selagentDomMap(DOMXPath $xp, string $kind, int $budget = 12000): string {
     $out = [];
 
     /* هیستوگرامِ کلاس‌ها: کلاس ⇒ [تعداد، تگِ غالب، آیا لینک دارد، آیا عکس دارد، آیا عدد دارد] */
@@ -35192,6 +35492,56 @@ function selagentDomMap(DOMXPath $xp, string $kind, int $budget = 7000): string 
         if ($h1 && $h1->length) $out[] = 'h1 | 1 | ' . mb_substr(trim(preg_replace('/\s+/u', ' ', $h1->item(0)->textContent)), 0, 60);
     }
 
+    /* =================================================================
+     *  v10.30 (۴۳الف): بخشِ «عناصرِ نشان‌دار».
+     *
+     *  تا ۱۰.۲۹ نقشه فقط //*[@class] را می‌خواند و کلاس‌های هش‌شده را هم
+     *  دور می‌ریخت. روی صفحه‌ای مثل snappshop.ir/product/... که تمامِ
+     *  کلاس‌هایش css-xxxxxx است، نتیجه یک نقشهٔ عملاً خالی می‌شد و مدل
+     *  چیزی برای شروع نداشت. ولی همان صفحه پر است از data-testid و
+     *  itemprop و id — که سلکتورِ ساخته‌شده از رویشان از کلاس هم پایدارتر
+     *  است. پس یک بخشِ جدا برایشان می‌گذاریم.
+     * ================================================================= */
+    $attrRows = [];
+    $attrList = selagentStableAttrs();
+    $q = [];
+    foreach ($attrList as $at) $q[] = '//*[@' . $at . ']';
+    $q[] = '//*[@id]';
+    $marked = @$xp->query(implode(' | ', $q));
+    $seenSel = [];
+    if ($marked) foreach ($marked as $n) {
+        if (count($attrRows) >= 45) break;
+        if (!($n instanceof DOMElement)) continue;
+        $tag = strtolower($n->tagName);
+        if (in_array($tag, ['script', 'style', 'noscript', 'svg', 'path', 'html', 'head', 'body'], true)) continue;
+        $sel = selagentSelectorFor($n)[0];
+        if ($sel === $tag) continue;                 // چیزی برای گفتن ندارد
+        if (isset($seenSel[$sel])) continue;
+        $seenSel[$sel] = 1;
+        $cnt = 0;
+        $x = cssToXpath($sel);
+        if ($x !== '') { $qq = @$xp->query($x); $cnt = $qq ? $qq->length : 0; }
+        $txt = trim(preg_replace('/\s+/u', ' ', (string)$n->textContent));
+        $extra = '';
+        if ($tag === 'img') $extra = ' [عکس]';
+        elseif ($tag === 'a') $extra = ' [لینک]';
+        $attrRows[] = $sel . ' | ' . ($cnt ?: 1) . $extra . ' | ' . ($txt === '' ? '—' : mb_substr($txt, 0, 55));
+    }
+    if ($attrRows) {
+        $out[] = '';
+        $out[] = 'عناصرِ نشان‌دار (data-testid / itemprop / id / role) — قالب: سلکتور | تکرار | نمونهٔ متن:';
+        foreach ($attrRows as $r) $out[] = $r;
+    }
+
+    /* اگر صفحه تقریباً هیچ کلاسِ معناداری نداشت، صریح به مدل بگو از کجا
+       شروع کند؛ وگرنه شروع می‌کند به حدس زدنِ کلاس‌هایی که وجود ندارند. */
+    if (count($out) < 6) {
+        $out[] = '';
+        $out[] = '⚠️ این صفحه کلاسِ معنادارِ کمی دارد (احتمالاً SPA با کلاس‌های هش‌شده).'
+               . ' حدس نزن: اول page_data را بزن تا مقدارِ درستِ فیلدها را ببینی،'
+               . ' بعد با find_text همان مقدار را در صفحه پیدا کن، و با list_children ساختار را باز کن.';
+    }
+
     $s = implode("\n", $out);
     if (mb_strlen($s) > $budget) $s = mb_substr($s, 0, $budget) . "\n… (فهرست بریده شد)";
     return $s;
@@ -35208,7 +35558,15 @@ function selagentProbe(DOMXPath $xp, string $selector, string $field, string $ba
     $selector = trim($selector);
     if ($selector === '') return ['ok' => false, 'error' => 'سلکتور خالی است'];
     $xpath = cssToXpath($selector);
-    if ($xpath === '') return ['ok' => false, 'error' => 'این سلکتورِ CSS قابلِ ترجمه نیست؛ ساده‌ترش کن (فقط تگ، کلاس، #id و > مجازند)'];
+    /* v10.30 (۴۳الف): پیامِ قبلی می‌گفت «فقط تگ، کلاس، #id و > مجازند» و
+       همین مدل را از [data-testid=...] و :nth-child می‌ترساند — دقیقاً دو
+       چیزی که روی صفحاتِ SPA تنها راهِ نجات‌اند و cssToXpath از v9.85
+       پشتیبانی‌شان می‌کند. حالا دقیقاً می‌گوییم چه چیزی کار نمی‌کند. */
+    if ($xpath === '') return ['ok' => false,
+        'error' => 'این سلکتورِ CSS قابلِ ترجمه نیست.',
+        'supported' => 'تگ، .کلاس، #شناسه، [ویژگی]، [ویژگی="مقدار"]، [ویژگی^=]، [ویژگی*=]، [ویژگی$=]، :nth-child(n)، :first-child، :last-child، فاصله، > و کاما',
+        'not_supported' => '+ و ~ و :not() و شبه‌کلاس‌های حالت مثل :hover',
+        'hint' => 'اگر به کلاسِ هش‌شده گیر کرده‌ای، به‌جایش از [data-testid="..."] یا [itemprop="..."] استفاده کن؛ با find_text می‌توانی پیدایشان کنی.'];
 
     $roots = [null];
     if ($scope !== '') {
@@ -35299,12 +35657,341 @@ function selagentValueOf(DOMXPath $xp, DOMNode $node, string $field, string $bas
     return mb_substr(normalize_text($node->textContent), 0, 120);
 }
 
+/* =====================================================================
+ *  v10.30 (۴۳الف): چرا ایجنت روی صفحه‌ای مثل
+ *  https://snappshop.ir/product/snp-1540201588 گیر می‌کرد.
+ *
+ *  تا ۱۰.۲۹ ایجنت سه چشم داشت: «نقشهٔ کلاس‌ها»، probe_selector، و
+ *  inspect_html. روی یک صفحهٔ محصولِ Next.js هیچ‌کدام کار نمی‌کرد:
+ *
+ *   ۱) کلاس‌ها هش‌شده‌اند (css-1a2b3c) و خودِ selagentDomMap عمداً
+ *      دورشان می‌ریخت ⇒ نقشه تقریباً خالی درمی‌آمد.
+ *   ۲) عنصرهای معنادارِ این صفحات کلاس ندارند؛ data-testid / itemprop /
+ *      id دارند. ولی نقشه فقط //*[@class] را می‌خواند ⇒ نامرئی بودند.
+ *   ۳) پرامپت صریح می‌گفت «از [attr] و :nth-child استفاده نکن» — در حالی
+ *      که cssToXpath از v9.85 کاملاً [attr]، [attr^=]، [attr*=]، [attr$=]
+ *      و :nth-child/:first-child/:last-child را ترجمه می‌کند. یعنی ایجنت
+ *      از تنها ابزاری که روی این صفحه جواب می‌داد منع شده بود.
+ *   ۴) قیمت و SKU و برندِ چنین صفحاتی اصلاً در HTMLِ سرور نیستند؛ در
+ *      JSON-LD و __NEXT_DATA__ نشسته‌اند و مدل هیچ راهی به آن‌ها نداشت.
+ *   ۵) «پارامترِ اندازهٔ کاراکترِ ۲۰۰۰»: inspect_html همیشه از کاراکترِ صفرِ
+ *      همان گره شروع می‌کرد و سقفش ۴۰۰۰ بود. در یک SPA، دو هزار کاراکترِ
+ *      اولِ body فقط <div id="__next"> و چند wrapper است؛ راهی برای رفتن
+ *      به کاراکترِ ۲۰۰۱ به بعد نبود ⇒ مدل همان تکهٔ بی‌فایده را بارها
+ *      می‌گرفت تا سقفِ گام‌ها تمام شود.
+ *
+ *  پاسخِ ۱۰.۳۰: سه ابزارِ تازه (page_data، find_text، list_children)،
+ *  inspect_html با offset و سقفِ ۱۲۰۰۰، نقشهٔ DOM که ویژگی‌ها را هم
+ *  می‌بیند، سقفِ گام/فراخوانیِ بالاتر، و پرامپتی که دیگر دروغ نمی‌گوید.
+ * ===================================================================== */
+
+/** کلاس‌های «انسانی» یک گره — هش‌شده‌ها و کلاس‌های یک‌بارمصرف کنار گذاشته می‌شوند. */
+function selagentNiceClasses(DOMElement $n): array {
+    $out = [];
+    foreach (preg_split('/\s+/', trim((string)$n->getAttribute('class')), -1, PREG_SPLIT_NO_EMPTY) as $c) {
+        if (mb_strlen($c) > 40 || mb_strlen($c) < 2) continue;
+        if (preg_match('/^(css|sc|jsx|_)-?[0-9a-f]{5,}$/i', $c)) continue;
+        if (preg_match('/^[a-z]{1,4}[-_]?[0-9a-f]{6,}$/i', $c)) continue;
+        $out[] = $c;
+    }
+    return $out;
+}
+
+/** ویژگی‌هایی که سلکتورِ ساخته‌شده از رویشان با تغییرِ استایلِ سایت نمی‌شکند. */
+function selagentStableAttrs(): array {
+    return ['data-testid', 'data-test', 'data-test-id', 'data-cy', 'data-qa',
+            'itemprop', 'data-role', 'data-field', 'data-name', 'role', 'name'];
+}
+
+/**
+ * v10.30 (۴۳الف): چند سلکتورِ کاندید برای یک گره، از پایدار به شکننده.
+ *
+ * ترتیب عمدی است: #id ← [data-testid] ← .کلاسِ معنادار ← تگِ خالی.
+ * روی صفحاتِ هش‌شده تنها گزینهٔ زنده همان [data-testid] است، و تا ۱۰.۲۹
+ * ایجنت اصلاً به آن فکر نمی‌کرد چون نه در نقشه می‌دیدش نه پرامپت اجازه
+ * می‌داد.
+ */
+function selagentSelectorFor(DOMElement $n): array {
+    $tag = strtolower($n->tagName);
+    $c = [];
+    $id = trim((string)$n->getAttribute('id'));
+    if ($id !== '' && preg_match('~^[A-Za-z][\w:-]*$~', $id) && !preg_match('/[0-9a-f]{8,}/i', $id))
+        $c[] = '#' . $id;
+    foreach (selagentStableAttrs() as $at) {
+        $v = trim((string)$n->getAttribute($at));
+        if ($v === '' || mb_strlen($v) > 40) continue;
+        if (preg_match('~["\'\]\[]~', $v)) continue;
+        $c[] = $tag . '[' . $at . '="' . $v . '"]';
+    }
+    foreach (selagentNiceClasses($n) as $cl) $c[] = $tag . '.' . $cl;
+    $c[] = $tag;
+    return array_values(array_unique($c));
+}
+
+/**
+ * v10.30 (۴۳الف) — ابزارِ find_text.
+ *
+ * مهم‌ترین ابزارِ تازه. کاربر روی صفحه یک قیمت یا یک عنوان *می‌بیند*؛
+ * مسئلهٔ ایجنت این است که «کدام سلکتور همان را برمی‌دارد». تا ۱۰.۲۹ راهی
+ * جز حدس‌زدنِ کلاس نبود. حالا مدل خودِ متن را می‌دهد و ما عمیق‌ترین گرهی
+ * که آن را دربر دارد پیدا می‌کنیم و سلکتورهای کاندید را با تعدادِ تطبیقِ
+ * واقعی برمی‌گردانیم.
+ */
+function selagentFindText(DOMXPath $xp, string $needle, int $limit = 6): array {
+    $needle = trim(preg_replace('/\s+/u', ' ', $needle));
+    if (mb_strlen($needle) < 2)
+        return ['ok' => false, 'error' => 'متنِ جست‌وجو خیلی کوتاه است (حداقل ۲ کاراکتر)'];
+    $limit = max(1, min(12, $limit));
+    $nd = mb_strtolower(persianToEnglish($needle));
+
+    $nodes = @$xp->query('//body//*');
+    if (!$nodes || !$nodes->length) $nodes = @$xp->query('//*');
+    $hits = []; $seen = 0;
+    if ($nodes) foreach ($nodes as $n) {
+        if (++$seen > 14000) break;
+        if (!($n instanceof DOMElement)) continue;
+        $tag = strtolower($n->tagName);
+        if (in_array($tag, ['script', 'style', 'noscript', 'svg', 'path', 'head', 'html'], true)) continue;
+        $txt = trim(preg_replace('/\s+/u', ' ', (string)$n->textContent));
+        if ($txt === '' || mb_strlen($txt) > 4000) continue;
+        if (mb_strpos(mb_strtolower(persianToEnglish($txt)), $nd) === false) continue;
+        /* فقط عمیق‌ترین گره؛ وگرنه body و همهٔ والدها هم «تطبیق» می‌شوند. */
+        $deepest = true;
+        foreach ($n->childNodes as $ch) {
+            if (!($ch instanceof DOMElement)) continue;
+            $ct = trim(preg_replace('/\s+/u', ' ', (string)$ch->textContent));
+            if ($ct !== '' && mb_strpos(mb_strtolower(persianToEnglish($ct)), $nd) !== false) { $deepest = false; break; }
+        }
+        if (!$deepest) continue;
+        $hits[] = $n;
+        if (count($hits) >= $limit) break;
+    }
+
+    if (!$hits) return ['ok' => false, 'found' => 0,
+        'error' => 'این متن در HTMLِ صفحه نیست',
+        'hint' => 'شاید با جاوااسکریپت ساخته می‌شود. ابزارِ page_data را صدا بزن؛ چنین مقادیری معمولاً در JSON-LD یا __NEXT_DATA__ هستند.'];
+
+    $res = [];
+    foreach ($hits as $n) {
+        $row = ['tag' => strtolower($n->tagName),
+                'text' => mb_substr(normalize_text($n->textContent), 0, 90),
+                'candidates' => []];
+        foreach (selagentSelectorFor($n) as $cand) {
+            $x = cssToXpath($cand);
+            if ($x === '') continue;
+            $q = @$xp->query($x);
+            if (!$q || !$q->length) continue;
+            $row['candidates'][] = ['selector' => $cand, 'matches' => $q->length];
+            if (count($row['candidates']) >= 4) break;
+        }
+        /* زنجیرهٔ والدها: وقتی خودِ گره سلکتورِ یکتا ندارد، «والد > فرزند»
+           می‌سازد. همان کاری که یک انسان در وب‌تولز می‌کند. */
+        $chain = []; $p = $n->parentNode;
+        for ($i = 0; $i < 4 && $p instanceof DOMElement; $i++) {
+            $cs = selagentSelectorFor($p);
+            $chain[] = $cs[0];
+            $p = $p->parentNode;
+        }
+        $row['ancestors'] = $chain;
+        $res[] = $row;
+    }
+    return ['ok' => true, 'found' => count($res), 'hits' => $res,
+            'hint' => 'هر کاندید را با probe_selector بسنج. اگر matches خیلی زیاد بود، سلکتورِ والد را با فاصله جلویش بگذار (مثل: div[data-testid="pdp"] span.price).'];
+}
+
+/**
+ * v10.30 (۴۳الف) — ابزارِ list_children.
+ *
+ * برای وقتی که مدل ظرف را پیدا کرده ولی نمی‌داند داخلش چه هست. به‌جای
+ * ریختنِ HTMLِ خام (که توکن می‌سوزاند و مدل‌های کوچک را گم می‌کند)، یک
+ * جدولِ تمیز از فرزندان با سلکتورِ پیشنهادی و نمونهٔ متن می‌دهد.
+ */
+function selagentListChildren(DOMXPath $xp, string $selector, int $depth = 1, int $limit = 40): array {
+    $selector = trim($selector);
+    $depth = max(1, min(3, $depth));
+    $limit = max(5, min(80, $limit));
+    if ($selector === '') {
+        $b = @$xp->query('//body');
+        $root = ($b && $b->length) ? $b->item(0) : null;
+    } else {
+        $x = cssToXpath($selector);
+        if ($x === '') return ['ok' => false, 'error' => 'سلکتور قابلِ ترجمه نیست'];
+        $q = @$xp->query($x);
+        if (!$q || !$q->length) return ['ok' => false, 'error' => 'عنصری با این سلکتور نیست'];
+        $root = $q->item(0);
+    }
+    if (!($root instanceof DOMElement)) return ['ok' => false, 'error' => 'ریشه پیدا نشد'];
+
+    $rows = [];
+    $walk = function (DOMElement $el, int $d, string $pre) use (&$walk, &$rows, $depth, $limit, $xp) {
+        foreach ($el->childNodes as $ch) {
+            if (count($rows) >= $limit) return;
+            if (!($ch instanceof DOMElement)) continue;
+            $tag = strtolower($ch->tagName);
+            if (in_array($tag, ['script', 'style', 'noscript', 'svg', 'path'], true)) continue;
+            $sel = selagentSelectorFor($ch)[0];
+            $txt = trim(preg_replace('/\s+/u', ' ', (string)$ch->textContent));
+            $atts = [];
+            foreach (selagentStableAttrs() as $at) {
+                $v = trim((string)$ch->getAttribute($at));
+                if ($v !== '' && mb_strlen($v) <= 40) $atts[] = $at . '=' . $v;
+            }
+            if ($tag === 'img') {
+                foreach (['src', 'data-src', 'srcset'] as $at) {
+                    $v = trim((string)$ch->getAttribute($at));
+                    if ($v !== '') { $atts[] = $at . '=' . mb_substr($v, 0, 60); break; }
+                }
+            }
+            if ($tag === 'a') {
+                $v = trim((string)$ch->getAttribute('href'));
+                if ($v !== '') $atts[] = 'href=' . mb_substr($v, 0, 60);
+            }
+            $rows[] = $pre . $sel
+                    . ($atts ? (' | ' . implode(' ', array_slice($atts, 0, 3))) : '')
+                    . ' | ' . ($txt === '' ? '—' : mb_substr($txt, 0, 60));
+            if ($d < $depth) $walk($ch, $d + 1, $pre . '  ');
+        }
+    };
+    $walk($root, 1, '');
+    if (!$rows) return ['ok' => true, 'children' => 0,
+        'note' => 'این عنصر فرزندِ عنصری ندارد (فقط متن). با inspect_html نگاهش کن.'];
+    return ['ok' => true, 'children' => count($rows),
+            'format' => 'سلکتورِ پیشنهادی | ویژگی‌ها | نمونهٔ متن',
+            'rows' => $rows];
+}
+
+/** یک JSON را به خطوطِ «مسیر = مقدار» صاف می‌کند تا مدل بتواند بخواندش. */
+function selagentJsonFlatten($node, string $prefix, array &$out, int $cap = 500, int $depth = 0): void {
+    if (count($out) >= $cap || $depth > 14 || !is_array($node)) return;
+    foreach ($node as $k => $v) {
+        if (count($out) >= $cap) return;
+        $p = ($prefix === '') ? (string)$k : ($prefix . '.' . $k);
+        if (is_array($v)) { selagentJsonFlatten($v, $p, $out, $cap, $depth + 1); continue; }
+        if (is_bool($v)) $v = $v ? 'true' : 'false';
+        if ($v === null) continue;
+        $s = trim(preg_replace('/\s+/u', ' ', (string)$v));
+        if ($s === '') continue;
+        $out[] = $p . ' = ' . mb_substr($s, 0, 160);
+    }
+}
+
+/**
+ * v10.30 (۴۳الف) — ابزارِ page_data: دادهٔ ساخت‌یافتهٔ صفحه.
+ *
+ * این همان چیزی است که نبودش ایجنت را روی صفحاتِ SPA زمین می‌زد. قیمت،
+ * SKU، برند و توضیحاتِ چنین صفحاتی در HTMLِ رندرشده نیستند؛ در
+ * application/ld+json یا __NEXT_DATA__ یا __NUXT__ یا متاتگ‌ها هستند.
+ * وقتی مدل این‌ها را ببیند، دستِ‌کم می‌فهمد قیمتِ درست چند است و بعد با
+ * find_text دنبالِ همان عدد در DOM می‌گردد.
+ */
+function selagentPageData(string $html, string $want = '', int $max = 3500): array {
+    $max = max(600, min(9000, $max ?: 3500));
+    $want = trim(mb_strtolower(persianToEnglish($want)));
+    $sec = [];
+
+    /* ۱) متاتگ‌ها — ارزان‌ترین و مطمئن‌ترین منبعِ عنوان/عکس/توضیح */
+    $meta = [];
+    if (preg_match_all('~<meta\b[^>]*>~i', $html, $mm)) {
+        foreach ($mm[0] as $tag) {
+            if (!preg_match('~(?:property|name|itemprop)\s*=\s*["\']([^"\']+)["\']~i', $tag, $k)) continue;
+            if (!preg_match('~content\s*=\s*["\']([^"\']*)["\']~i', $tag, $v)) continue;
+            $key = trim($k[1]); $val = trim(preg_replace('/\s+/u', ' ', html_entity_decode($v[1], ENT_QUOTES, 'UTF-8')));
+            if ($val === '' || mb_strlen($key) > 50) continue;
+            if (!preg_match('~^(og:|twitter:|product:|description$|keywords$|author$|price|sku|brand)~i', $key)) continue;
+            $meta[] = $key . ' = ' . mb_substr($val, 0, 150);
+            if (count($meta) >= 30) break;
+        }
+    }
+    if ($meta) $sec['meta'] = $meta;
+
+    /* ۲) JSON-LD */
+    $ld = [];
+    if (preg_match_all('~<script[^>]+application/ld\+json[^>]*>(.*?)</script>~si', $html, $m)) {
+        foreach ($m[1] as $blk) {
+            $d = json_decode(trim($blk), true);
+            if (!is_array($d)) continue;
+            selagentJsonFlatten($d, '', $ld, 220);
+            if (count($ld) >= 220) break;
+        }
+    }
+    if ($ld) $sec['json_ld'] = $ld;
+
+    /* ۳) __NEXT_DATA__ / __NUXT__ / هر <script type="application/json"> */
+    $emb = [];
+    $blobs = [];
+    if (preg_match('~<script[^>]*id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>~si', $html, $m)) $blobs[] = $m[1];
+    if (preg_match('~window\.__NUXT__\s*=\s*(\{.*?\});?\s*</script>~si', $html, $m)) $blobs[] = $m[1];
+    if (preg_match_all('~<script[^>]+type=["\']application/json["\'][^>]*>(.*?)</script>~si', $html, $m)) {
+        foreach ($m[1] as $b) { $blobs[] = $b; if (count($blobs) >= 6) break; }
+    }
+    /* __NEXT_DATA__ هم id دارد هم type="application/json"، پس با هر دو الگو
+       گرفته می‌شود و بدونِ این dedupe هر خط دو بار به مدل می‌رسید. */
+    $seenBlob = [];
+    foreach ($blobs as $b) {
+        $b = trim($b);
+        $sig = md5($b);
+        if (isset($seenBlob[$sig])) continue;
+        $seenBlob[$sig] = 1;
+        $d = json_decode($b, true);
+        if (!is_array($d)) continue;
+        selagentJsonFlatten($d, '', $emb, 900);
+        if (count($emb) >= 900) break;
+    }
+    /* Next.js با App Router داده را تکه‌تکه در self.__next_f.push می‌ریزد؛
+       آن‌جا JSON معتبرِ یکپارچه نداریم، پس جفتِ «کلید»:«مقدار» را برمی‌داریم. */
+    if (!$emb && strpos($html, '__next_f') !== false) {
+        if (preg_match_all('~"(title|name|price|final_price|min_price|sku|brand|category|stock|availability|description)"\s*:\s*("(?:[^"\\\\]|\\\\.){0,160}"|[0-9.]+)~i', $html, $m, PREG_SET_ORDER)) {
+            foreach ($m as $one) {
+                $emb[] = $one[1] . ' = ' . mb_substr(trim($one[2], '"'), 0, 160);
+                if (count($emb) >= 200) break;
+            }
+        }
+    }
+    if ($emb) {
+        /* این بخش می‌تواند هزاران خط باشد؛ فقط کلیدهای به‌دردبخور را نگه می‌داریم. */
+        $keep = [];
+        foreach ($emb as $line) {
+            if (preg_match('~(^|\.)(title|name|price|final_price|min_price|max_price|discount|sku|code|barcode|brand|category|categories|stock|quantity|available|availability|description|summary|image|images|url|slug|weight|tag|tags)([0-9]*)\s*=~i', $line))
+                $keep[] = $line;
+            if (count($keep) >= 160) break;
+        }
+        $sec['embedded_json'] = $keep ?: array_slice($emb, 0, 60);
+    }
+
+    if (!$sec) return ['ok' => false,
+        'error' => 'این صفحه هیچ دادهٔ ساخت‌یافته‌ای (JSON-LD، __NEXT_DATA__، متاتگ) ندارد',
+        'hint' => 'پس داده در خودِ HTML است؛ با find_text و list_children جلو برو.'];
+
+    /* فیلترِ اختیاری: مدل می‌تواند بگوید فقط دنبالِ «price» می‌گردم. */
+    if ($want !== '') {
+        foreach ($sec as $k => $lines) {
+            $f = [];
+            foreach ($lines as $l) if (mb_strpos(mb_strtolower(persianToEnglish($l)), $want) !== false) $f[] = $l;
+            if ($f) $sec[$k] = $f; else unset($sec[$k]);
+        }
+        if (!$sec) return ['ok' => false, 'error' => 'در دادهٔ ساخت‌یافتهٔ صفحه چیزی شاملِ «' . $want . '» نبود'];
+    }
+
+    $txt = '';
+    foreach ($sec as $k => $lines) {
+        $txt .= '── ' . $k . " ──\n" . implode("\n", $lines) . "\n";
+    }
+    $trunc = false;
+    if (mb_strlen($txt) > $max) { $txt = mb_substr($txt, 0, $max); $trunc = true; }
+    return ['ok' => true, 'sections' => array_keys($sec), 'data' => $txt,
+            'truncated' => $trunc,
+            'hint' => $trunc ? 'بریده شد — با پارامترِ want (مثلاً want="price") فیلتر کن.' : ''];
+}
+
 /** مشخصاتِ ابزارها — با شرحِ فارسی، چون مدل‌ها با شرحِ دقیق بهتر ابزار می‌زنند. */
 function selagentToolSpecs(string $kind): array {
     $fields = implode('، ', array_keys(selagentFields($kind)));
     $probeProps = [
         'field'    => ['type' => 'string', 'description' => 'فیلدی که این سلکتور برایش است. یکی از: ' . $fields],
-        'selector' => ['type' => 'string', 'description' => 'سلکتورِ CSS. فقط تگ، .کلاس، #شناسه، فاصله و > پشتیبانی می‌شوند. از :nth-child و + و ~ استفاده نکن.'],
+        /* v10.30 (۴۳الف): شرحِ قبلی غلط بود و می‌گفت [attr] و :nth-child
+           پشتیبانی نمی‌شوند. cssToXpath از v9.85 هر دو را ترجمه می‌کند و
+           روی صفحاتِ با کلاسِ هش‌شده تنها گزینهٔ جواب‌ده همان [attr] است. */
+        'selector' => ['type' => 'string', 'description' => 'سلکتورِ CSS. پشتیبانی می‌شود: تگ، .کلاس، #شناسه، [ویژگی]، [ویژگی="مقدار"]، [ویژگی^="شروع"]، [ویژگی*="شامل"]، [ویژگی$="پایان"]، :nth-child(n)، :first-child، :last-child، فاصله، > و کاما. پشتیبانی نمی‌شود: + و ~ و :not() و :hover.'],
     ];
     if ($kind === 'list') {
         $probeProps['scope'] = ['type' => 'string', 'description' => 'سلکتورِ ظرفِ محصول. برای همهٔ فیلدها به‌جز container حتماً این را بده تا سلکتور *داخلِ* ظرف سنجیده شود.'];
@@ -35317,10 +36004,38 @@ function selagentToolSpecs(string $kind): array {
         ]],
         ['type' => 'function', 'function' => [
             'name' => 'inspect_html',
-            'description' => 'تکه‌ای از HTMLِ خامِ صفحه را نشان می‌دهد تا ساختارِ دقیقِ تگ‌ها را ببینی. وقتی نقشهٔ کلاس‌ها کافی نبود از این استفاده کن.',
+            'description' => 'تکه‌ای از HTMLِ خامِ صفحه را نشان می‌دهد تا ساختارِ دقیقِ تگ‌ها را ببینی. وقتی نقشهٔ کلاس‌ها کافی نبود از این استفاده کن. اگر خروجی بریده شد (truncated=true) دوباره با offset برابرِ next_offset صدا بزن تا تکهٔ بعدی را ببینی.',
             'parameters' => ['type' => 'object', 'properties' => [
                 'selector' => ['type' => 'string', 'description' => 'سلکتورِ عنصری که می‌خواهی HTMLش را ببینی؛ خالی یعنی ابتدای صفحه'],
-                'max_chars' => ['type' => 'integer', 'description' => 'حداکثر کاراکتر (پیش‌فرض ۱۵۰۰، سقف ۴۰۰۰)'],
+                'max_chars' => ['type' => 'integer', 'description' => 'حداکثر کاراکتر (پیش‌فرض ۲۵۰۰، سقف ۱۲۰۰۰)'],
+                'offset' => ['type' => 'integer', 'description' => 'از کاراکترِ چندم شروع شود (پیش‌فرض ۰). برای دیدنِ ادامهٔ یک تکهٔ بریده‌شده، این را برابرِ next_offset بگذار.'],
+            ], 'required' => []],
+        ]],
+        /* v10.30 (۴۳الف): سه ابزارِ تازه — بدونِ این‌ها ایجنت روی صفحاتِ
+           SPA (کلاسِ هش‌شده، دادهٔ داخلِ JSON) هیچ راهی نداشت. */
+        ['type' => 'function', 'function' => [
+            'name' => 'find_text',
+            'description' => 'کارآمدترین ابزار: یک متنی را که روی صفحه می‌بینی (مثلاً قیمت «۲٬۴۵۰٬۰۰۰» یا بخشی از عنوانِ محصول) می‌دهی و این ابزار می‌گوید کدام عنصر آن را دربر دارد و چه سلکتورهایی به آن می‌رسند. وقتی کلاس‌های صفحه هش‌شده و بی‌معنی‌اند، از این شروع کن نه از حدس زدنِ کلاس.',
+            'parameters' => ['type' => 'object', 'properties' => [
+                'text'  => ['type' => 'string',  'description' => 'متنی که دنبالش می‌گردی؛ بخشی از آن هم کافی است'],
+                'limit' => ['type' => 'integer', 'description' => 'حداکثر چند عنصر برگردد (پیش‌فرض ۶، سقف ۱۲)'],
+            ], 'required' => ['text']],
+        ]],
+        ['type' => 'function', 'function' => [
+            'name' => 'list_children',
+            'description' => 'فرزندانِ یک عنصر را به‌صورتِ فهرستِ تمیز نشان می‌دهد: سلکتورِ پیشنهادیِ هرکدام، ویژگی‌های پایدارش و نمونهٔ متنش. وقتی ظرف را پیدا کرده‌ای و می‌خواهی بدانی داخلش چه چیزی هست، این را به‌جای inspect_html بزن؛ خیلی خواناتر است.',
+            'parameters' => ['type' => 'object', 'properties' => [
+                'selector' => ['type' => 'string',  'description' => 'سلکتورِ عنصرِ والد؛ خالی یعنی body'],
+                'depth'    => ['type' => 'integer', 'description' => 'تا چند لایه پایین برود (پیش‌فرض ۱، سقف ۳)'],
+                'limit'    => ['type' => 'integer', 'description' => 'حداکثر چند سطر (پیش‌فرض ۴۰، سقف ۸۰)'],
+            ], 'required' => []],
+        ]],
+        ['type' => 'function', 'function' => [
+            'name' => 'page_data',
+            'description' => 'دادهٔ ساخت‌یافتهٔ صفحه را می‌خواند: متاتگ‌های og/product، JSON-LD و دادهٔ تزریق‌شدهٔ فریم‌ورک (__NEXT_DATA__ و مانندش). در سایت‌های مدرن قیمت و SKU و برند اغلب فقط این‌جا هستند و در HTMLِ دیده‌شده نیستند. اول این را بزن تا بدانی مقدارِ درست چیست، بعد با find_text دنبالِ همان مقدار در صفحه بگرد.',
+            'parameters' => ['type' => 'object', 'properties' => [
+                'want'      => ['type' => 'string',  'description' => 'فیلترِ اختیاری، مثلاً price یا sku یا brand — فقط خطوطی که این واژه در آن‌هاست برمی‌گردد'],
+                'max_chars' => ['type' => 'integer', 'description' => 'حداکثر کاراکتر (پیش‌فرض ۳۵۰۰، سقف ۹۰۰۰)'],
             ], 'required' => []],
         ]],
         ['type' => 'function', 'function' => [
@@ -35340,7 +36055,16 @@ function selagentCallLabel(string $name, array $args): string {
         return '🔬 آزمایشِ «' . (string)($args['selector'] ?? '') . '» برای ' . (string)($args['field'] ?? '?')
              . (trim((string)($args['scope'] ?? '')) !== '' ? (' داخلِ ' . $args['scope']) : '');
     if ($name === 'inspect_html')
-        return '🔎 نگاه به HTMLِ ' . (trim((string)($args['selector'] ?? '')) === '' ? 'ابتدای صفحه' : $args['selector']);
+        return '🔎 نگاه به HTMLِ ' . (trim((string)($args['selector'] ?? '')) === '' ? 'ابتدای صفحه' : $args['selector'])
+             . (((int)($args['offset'] ?? 0)) > 0 ? (' از کاراکترِ ' . aiFaNum((int)$args['offset'])) : '');
+    /* v10.30 (۴۳الف) */
+    if ($name === 'find_text')
+        return '🔤 جست‌وجوی متنِ «' . mb_substr((string)($args['text'] ?? ''), 0, 40) . '» در صفحه';
+    if ($name === 'list_children')
+        return '🌳 فرزندانِ ' . (trim((string)($args['selector'] ?? '')) === '' ? 'body' : $args['selector']);
+    if ($name === 'page_data')
+        return '🗄 خواندنِ دادهٔ ساخت‌یافتهٔ صفحه'
+             . (trim((string)($args['want'] ?? '')) !== '' ? (' — فیلتر: ' . $args['want']) : '');
     if ($name === 'submit_selectors')
         return '📨 تحویلِ ' . aiFaNum(count((array)($args['selectors'] ?? []))) . ' سلکتور';
     return '🔧 ' . $name;
@@ -35533,7 +36257,108 @@ function selagentSeedProducts(string $listUrl, string $pk, string $model = '', i
     return ['ok' => true, 'products' => $pairs, 'list_selectors' => $sel, 'from' => $from, 'error' => ''];
 }
 
-function selagentSystemPrompt(string $kind, string $url): string {
+/* =====================================================================
+ *  v10.30 (۴۳ب): پرامپتِ سفارشیِ ایجنتِ کشفِ سلکتور.
+ *
+ *  چرا: پرامپتِ پیش‌فرض عمومی است، ولی کاربر سایت‌های خودش را می‌شناسد
+ *  («در این فروشگاه قیمتِ درست همیشه دومی است»، «برچسبِ تخفیف را نگیر»).
+ *  تا ۱۰.۲۹ هیچ راهی برای گفتنِ این‌ها به ایجنت نبود.
+ *
+ *  طراحی عمداً محافظه‌کارانه است:
+ *   • دو حالت — «افزودن» (پیش‌فرض؛ متنِ کاربر ته پرامپتِ استاندارد
+ *     می‌چسبد) و «جایگزینی» (کاربر کلِ پرامپت را خودش می‌نویسد).
+ *   • جایگزینی خطرناک است، چون اگر کاربر یادش برود بگوید «در پایان
+ *     submit_selectors را صدا بزن» ایجنت هیچ‌وقت نتیجه نمی‌دهد. پس
+ *     در هر دو حالت یک «حداقلِ ضروری» ته متن اضافه می‌شود.
+ *   • برای هر kind (فهرست/جزئیات) یک متنِ جدا نگه داشته می‌شود.
+ *   • جانگهدارها: {{url}} {{kind}} {{fields}} {{default}}
+ * ===================================================================== */
+
+/** پرامپت‌های سفارشیِ ذخیره‌شده. ساختار: [list=>[mode,text], detail=>[...]] */
+function selagentLoadPrompts(): array {
+    $d = [];
+    if (is_file(SELAGENT_PROMPT_FILE)) {
+        $j = json_decode((string)@file_get_contents(SELAGENT_PROMPT_FILE), true);
+        if (is_array($j)) $d = $j;
+    }
+    $out = [];
+    foreach (['list', 'detail'] as $k) {
+        $row = is_array($d[$k] ?? null) ? $d[$k] : [];
+        $mode = (string)($row['mode'] ?? 'append');
+        if (!in_array($mode, ['append', 'replace', 'off'], true)) $mode = 'append';
+        $out[$k] = ['mode' => $mode, 'text' => (string)($row['text'] ?? '')];
+    }
+    $out['updated'] = (int)($d['updated'] ?? 0);
+    return $out;
+}
+
+function selagentSavePrompts(array $p): bool {
+    $out = ['updated' => time()];
+    foreach (['list', 'detail'] as $k) {
+        $row = is_array($p[$k] ?? null) ? $p[$k] : [];
+        $mode = (string)($row['mode'] ?? 'append');
+        if (!in_array($mode, ['append', 'replace', 'off'], true)) $mode = 'append';
+        /* سقف تا یک پرامپتِ اشتباهاً چسبانده‌شده (مثلاً کلِ یک صفحهٔ HTML)
+           هر بار کلِ پنجرهٔ متنِ مدل را نخورد. */
+        $out[$k] = ['mode' => $mode, 'text' => mb_substr(trim((string)($row['text'] ?? '')), 0, 8000)];
+    }
+    return (bool)@file_put_contents(SELAGENT_PROMPT_FILE,
+        json_encode($out, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX);
+}
+
+/** markupِ ویرایشگرِ پرامپت؛ چون برای هر دو زیرتب یکسان است یک‌جا ساخته می‌شود. */
+function selagentPromptEditorHtml(string $kind): string {
+    $k   = ($kind === 'detail') ? 'detail' : 'list';
+    $cfg = selagentLoadPrompts()[$k];
+    $fa  = ($k === 'detail') ? 'جزئیاتِ محصول' : 'فهرستِ محصولات';
+    $md  = $cfg['mode'];
+    $on  = ($cfg['text'] !== '' && $md !== 'off');
+    $r   = function ($v) use ($md) { return $md === $v ? ' checked' : ''; };
+    $h  = '<details class="sprompt" id="sprompt-' . $k . '">';
+    $h .= '<summary>🧠 پرامپتِ ایجنتِ کشفِ سلکتورِ ' . $fa
+        . ' <span class="sprompt-badge" id="spromptBadge-' . $k . '">'
+        . ($on ? ($md === 'replace' ? 'جایگزینِ سفارشی' : 'افزودهٔ سفارشی') : 'پیش‌فرض')
+        . '</span></summary>';
+    $h .= '<div class="sprompt-bd">';
+    $h .= '<div class="sprompt-note">دستورالعملِ اختصاصیِ خودت را برای این ایجنت بنویس؛ مثلاً «قیمتِ نهایی همیشه عنصرِ دوم است، اولی قیمتِ خط‌خورده است» یا «برچسبِ تخفیف را به‌عنوانِ قیمت انتخاب نکن».</div>';
+    $h .= '<div class="sprompt-modes">'
+        . '<label><input type="radio" name="spmode-' . $k . '" value="append" onchange="spromptDirty(\'' . $k . '\')"' . $r('append') . '> افزودن به پرامپتِ استاندارد (امن)</label>'
+        . '<label><input type="radio" name="spmode-' . $k . '" value="replace" onchange="spromptDirty(\'' . $k . '\')"' . $r('replace') . '> جایگزینیِ کاملِ پرامپت</label>'
+        . '<label><input type="radio" name="spmode-' . $k . '" value="off" onchange="spromptDirty(\'' . $k . '\')"' . $r('off') . '> غیرفعال (فقط پیش‌فرض)</label>'
+        . '</div>';
+    $h .= '<textarea id="spromptText-' . $k . '" oninput="spromptDirty(\'' . $k . '\')" placeholder="مثال: در این سایت عنوانِ محصول داخلِ h1 با ویژگیِ data-testid است. قیمت را از عنصری بگیر که کلمهٔ «تومان» کنارش باشد.">'
+        . htmlspecialchars($cfg['text'], ENT_QUOTES, 'UTF-8') . '</textarea>';
+    $h .= '<div class="sprompt-ph">جانگهدارها (کلیک = درج): '
+        . '<code onclick="spromptIns(\'' . $k . '\',\'{{url}}\')">{{url}}</code> '
+        . '<code onclick="spromptIns(\'' . $k . '\',\'{{kind}}\')">{{kind}}</code> '
+        . '<code onclick="spromptIns(\'' . $k . '\',\'{{fields}}\')">{{fields}}</code> '
+        . '<code onclick="spromptIns(\'' . $k . '\',\'{{default}}\')">{{default}}</code>'
+        . ' — <b>{{default}}</b> کلِ پرامپتِ استاندارد را همان‌جا می‌گذارد (به‌دردِ حالتِ جایگزینی می‌خورد).</div>';
+    $h .= '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+        . '<button class="btn" style="font-size:11.5px;padding:6px 12px" onclick="spromptSave(\'' . $k . '\')">💾 ذخیرهٔ پرامپت</button>'
+        . '<button class="btn btn-secondary" style="font-size:11.5px;padding:6px 12px" onclick="spromptPreview(\'' . $k . '\')">👁 پیش‌نمایشِ پرامپتِ نهایی</button>'
+        . '<button class="btn btn-secondary" style="font-size:11.5px;padding:6px 12px" onclick="spromptShowDefault(\'' . $k . '\')">📄 دیدنِ پرامپتِ پیش‌فرض</button>'
+        . '<button class="btn btn-secondary" style="font-size:11.5px;padding:6px 12px" onclick="spromptReset(\'' . $k . '\')">↩️ خالی‌کردن</button>'
+        . '<span id="spromptMsg-' . $k . '" style="font-size:11px;color:#94a3b8;align-self:center"></span>'
+        . '</div>';
+    $h .= '<div class="sprompt-out hidden" id="spromptOut-' . $k . '"></div>';
+    $h .= '<div class="sprompt-note">⚠️ در حالتِ «جایگزینی» هم چند قاعدهٔ فنیِ ضروری (تأیید با probe_selector، صدا زدنِ submit_selectors، نحوِ سلکتورهای مجاز) به‌صورتِ خودکار ته پرامپت اضافه می‌شوند تا ایجنت خراب نشود.</div>';
+    $h .= '</div></details>';
+    return $h;
+}
+
+/** قواعدی که بدونشان ایجنت اصلاً کار نمی‌کند — حتی در حالتِ «جایگزینی» می‌مانند. */
+function selagentPromptFloor(string $kind): string {
+    return "\n\n[قواعدِ فنیِ ثابت — این‌ها را نمی‌شود تغییر داد]\n"
+         . "• هرگز سلکتوری را تحویل نده که با probe_selector تأیید نکرده‌ای.\n"
+         . "• در پایان حتماً ابزارِ submit_selectors را صدا بزن؛ بدونِ آن هیچ نتیجه‌ای ثبت نمی‌شود.\n"
+         . "• سلکتورهای پشتیبانی‌شده: تگ، .کلاس، #شناسه، [ویژگی]، [ویژگی=\"مقدار\"]، [ویژگی^=]، [ویژگی*=]، [ویژگی\$=]، :nth-child(n)، :first-child، :last-child، فاصله، > و کاما."
+         . " پشتیبانی نمی‌شوند: + و ~ و :not() و شبه‌کلاس‌های حالت.\n"
+         . "• کلیدهای مجازِ خروجی: " . implode('، ', array_keys(selagentFields($kind))) . "\n";
+}
+
+/** متنِ پیش‌فرضِ کارخانه — همان چیزی که تا ۱۰.۲۹ ثابت بود. */
+function selagentDefaultPrompt(string $kind, string $url): string {
     $s  = "تو یک متخصصِ استخراجِ داده از صفحاتِ وب هستی. وظیفه‌ات پیدا کردنِ سلکتورهای CSSِ درست برای یک صفحهٔ مشخص است.\n";
     $s .= "آدرسِ صفحه: " . $url . "\n\n";
     if ($kind === 'list') {
@@ -35552,13 +36377,59 @@ function selagentSystemPrompt(string $kind, string $url): string {
         $s .= "۲) نمونه‌ای که برمی‌گردد را بخوان: اگر متنِ برگشتی به آن فیلد نمی‌خورد (مثلاً برای «وزن» یک پاراگرافِ توضیحات آمده) آن را نپذیر.\n";
         $s .= "۳) فیلدی که واقعاً روی این صفحه وجود ندارد را رها کن؛ لازم نیست همهٔ فیلدها پر شوند.\n";
     }
+
+    /* v10.30 (۴۳الف): بخشِ تازه — دستورالعملِ صفحاتِ SPA.
+       بدونِ این، مدل روی صفحه‌ای با کلاس‌های هش‌شده فقط کلاس حدس می‌زند و
+       بعد از چند گام به سقف می‌خورد. حالا مسیرِ درست را صریح می‌گوییم. */
+    $s .= "\nابزارهایی که داری و ترتیبِ درستِ استفاده‌شان:\n";
+    $s .= "• page_data — دادهٔ ساخت‌یافتهٔ صفحه (متاتگ‌ها، JSON-LD، __NEXT_DATA__). قیمت و SKU و برندِ درست معمولاً این‌جاست.\n";
+    $s .= "• find_text — متنی را که می‌دانی روی صفحه هست می‌دهی و سلکتورهای رسیدن به آن را می‌گیری.\n";
+    $s .= "• list_children — فرزندانِ یک عنصر را خوانا فهرست می‌کند (به‌جای HTMLِ خام).\n";
+    $s .= "• inspect_html — HTMLِ خام؛ اگر بریده شد با offset=next_offset ادامه‌اش را بگیر.\n";
+    $s .= "• probe_selector — سنجشِ واقعیِ یک سلکتور روی همین صفحه.\n";
+    $s .= "• submit_selectors — تحویلِ نتیجهٔ نهایی.\n\n";
+    $s .= "اگر کلاس‌های صفحه هش‌شده و بی‌معنی بودند (مثل css-1a2b3c) این مسیر را برو:\n";
+    $s .= "الف) page_data را بزن تا مقدارِ درستِ فیلدها (مثلاً عددِ قیمت) را ببینی.\n";
+    $s .= "ب) همان مقدار را به find_text بده تا بفهمی کدام عنصر آن را نشان می‌دهد.\n";
+    $s .= "پ) از کاندیدهای برگشتی، آن‌که ویژگیِ پایدار دارد ([data-testid]، [itemprop]، #id) را انتخاب کن نه کلاسِ هش‌شده را.\n";
+    $s .= "ت) با probe_selector تأییدش کن.\n";
+
     $s .= "\nقواعدِ عمومی:\n";
     $s .= "۴) هرگز سلکتوری را تحویل نده که با probe_selector تأیید نکرده‌ای.\n";
-    $s .= "۵) سلکتورها را ساده نگه دار: فقط تگ، .کلاس، #شناسه، فاصله و >. از :nth-child، [attr]، + و ~ استفاده نکن چون پشتیبانی نمی‌شوند.\n";
-    $s .= "۶) کلاس‌های هش‌شده و تصادفی (مثل .css-1x2y3z) را انتخاب نکن؛ با تغییرِ سایت می‌شکنند. کلاسِ معنادار را ترجیح بده.\n";
-    $s .= "۷) در پایان حتماً submit_selectors را صدا بزن.\n";
+    $s .= "۵) سلکتور را تا جای ممکن ساده نگه دار، ولی [ویژگی=\"مقدار\"] و :nth-child مجازند و روی سایت‌های مدرن اغلب تنها راه‌اند. فقط + و ~ و :not() کار نمی‌کنند.\n";
+    $s .= "۶) کلاس‌های هش‌شده و تصادفی (مثل .css-1x2y3z) را انتخاب نکن؛ با تغییرِ سایت می‌شکنند. کلاسِ معنادار یا ویژگیِ پایدار را ترجیح بده.\n";
+    $s .= "۷) اگر یک ابزار دو بار پشتِ سرِ هم همان نتیجه را داد، تکرارش نکن؛ ابزارِ دیگری را امتحان کن.\n";
+    $s .= "۸) در پایان حتماً submit_selectors را صدا بزن.\n";
     $s .= "همیشه فارسی توضیح بده.";
     return $s;
+}
+
+/**
+ * پرامپتِ نهایی = پیش‌فرض (یا متنِ کاربر) + قواعدِ فنیِ ثابت.
+ *
+ * $override برای «پیش‌نمایش» در UI است تا کاربر بدونِ ذخیره‌کردن ببیند
+ * متنش چه شکلی درمی‌آید.
+ */
+function selagentSystemPrompt(string $kind, string $url, ?array $override = null): string {
+    $kind = ($kind === 'detail') ? 'detail' : 'list';
+    $def = selagentDefaultPrompt($kind, $url);
+
+    $cfg = $override ?? (selagentLoadPrompts()[$kind] ?? ['mode' => 'append', 'text' => '']);
+    $mode = (string)($cfg['mode'] ?? 'append');
+    $txt  = trim((string)($cfg['text'] ?? ''));
+
+    if ($txt === '' || $mode === 'off') return $def;
+
+    /* جانگهدارها — تا کاربر بتواند متنِ پیش‌فرض را داخلِ متنِ خودش جا بدهد */
+    $txt = strtr($txt, [
+        '{{url}}'     => $url,
+        '{{kind}}'    => ($kind === 'detail' ? 'صفحهٔ جزئیاتِ محصول' : 'صفحهٔ فهرستِ محصولات'),
+        '{{fields}}'  => implode('، ', array_keys(selagentFields($kind))),
+        '{{default}}' => $def,
+    ]);
+
+    if ($mode === 'replace') return $txt . selagentPromptFloor($kind);
+    return $def . "\n\n[دستورالعملِ اختصاصیِ کاربر — بر قواعدِ بالا اولویت دارد، مگر قواعدِ فنیِ ثابت]\n" . $txt;
 }
 
 /**
@@ -35739,9 +36610,34 @@ function selagentRun(string $url, string $kind, string $model = '', string $pk =
                     'log_add' => ['   ↳ ' . $lbl]]);
             } elseif ($c['name'] === 'inspect_html') {
                 $out = selagentInspect($dom, $xp, (string)($c['args']['selector'] ?? ''),
-                                       (int)($c['args']['max_chars'] ?? 1500));
+                                       (int)($c['args']['max_chars'] ?? 2500),
+                                       (int)($c['args']['offset'] ?? 0));
                 selagentProgress(['log_add' => ['   ↳ ' . (!empty($out['ok'])
-                    ? (aiFaNum(mb_strlen((string)$out['html'])) . ' کاراکتر HTML')
+                    ? (aiFaNum(mb_strlen((string)$out['html'])) . ' کاراکتر HTML'
+                       . (!empty($out['truncated']) ? (' · ادامه از ' . aiFaNum((int)$out['next_offset'])) : ''))
+                    : ('⚠️ ' . (string)($out['error'] ?? '')))]]);
+            /* v10.30 (۴۳الف): سه ابزارِ تازهٔ کاوشِ صفحه */
+            } elseif ($c['name'] === 'find_text') {
+                $out = selagentFindText($xp, (string)($c['args']['text'] ?? ''),
+                                        (int)($c['args']['limit'] ?? 6));
+                selagentProgress(['log_add' => ['   ↳ ' . (!empty($out['ok'])
+                    ? (aiFaNum((int)$out['found']) . ' عنصر شاملِ این متن'
+                       . (isset($out['hits'][0]['candidates'][0]['selector'])
+                          ? (' · بهترین کاندید: ' . $out['hits'][0]['candidates'][0]['selector']) : ''))
+                    : ('⚠️ ' . (string)($out['error'] ?? '')))]]);
+            } elseif ($c['name'] === 'list_children') {
+                $out = selagentListChildren($xp, (string)($c['args']['selector'] ?? ''),
+                                            (int)($c['args']['depth'] ?? 1),
+                                            (int)($c['args']['limit'] ?? 40));
+                selagentProgress(['log_add' => ['   ↳ ' . (!empty($out['ok'])
+                    ? (aiFaNum((int)($out['children'] ?? 0)) . ' فرزند')
+                    : ('⚠️ ' . (string)($out['error'] ?? '')))]]);
+            } elseif ($c['name'] === 'page_data') {
+                $out = selagentPageData($html, (string)($c['args']['want'] ?? ''),
+                                        (int)($c['args']['max_chars'] ?? 3500));
+                selagentProgress(['log_add' => ['   ↳ ' . (!empty($out['ok'])
+                    ? ('منابع: ' . implode('، ', (array)($out['sections'] ?? []))
+                       . ' · ' . aiFaNum(mb_strlen((string)$out['data'])) . ' کاراکتر')
                     : ('⚠️ ' . (string)($out['error'] ?? '')))]]);
             } elseif ($c['name'] === 'submit_selectors') {
                 $sel = (array)($c['args']['selectors'] ?? []);
@@ -35795,9 +36691,20 @@ function selagentRun(string $url, string $kind, string $model = '', string $pk =
             'took' => round(microtime(true) - $t0, 1)];
 }
 
-/** تکه‌ای از HTML برای مدل (پاک‌سازی‌شده از script/style که فقط توکن می‌سوزانند) */
-function selagentInspect(DOMDocument $dom, DOMXPath $xp, string $selector, int $max): array {
-    $max = max(300, min(4000, $max ?: 1500));
+/**
+ * تکه‌ای از HTML برای مدل (پاک‌سازی‌شده از script/style که فقط توکن می‌سوزانند)
+ *
+ * v10.30 (۴۳الف): دو تغییرِ کلیدی.
+ *  ۱) offset اضافه شد. تا ۱۰.۲۹ همیشه از کاراکترِ صفر شروع می‌شد، پس روی
+ *     یک صفحهٔ SPA مدل هرچقدر هم دوباره صدا می‌زد باز همان
+ *     <div id="__next"><div class="css-1a2b3c"> را می‌گرفت و هیچ‌وقت به
+ *     محتوای واقعی نمی‌رسید — دقیقاً همان بن‌بستِ «۲۰۰۰ کاراکتر».
+ *  ۲) سقف از ۴۰۰۰ به ۱۲۰۰۰ رفت و اندازهٔ کل و next_offset برگردانده
+ *     می‌شود تا مدل بداند چقدر باقی مانده و از کجا ادامه بدهد.
+ */
+function selagentInspect(DOMDocument $dom, DOMXPath $xp, string $selector, int $max, int $offset = 0): array {
+    $max = max(300, min(12000, $max ?: 2500));
+    $offset = max(0, $offset);
     $node = null;
     if (trim($selector) !== '') {
         $x = cssToXpath(trim($selector));
@@ -35813,7 +36720,21 @@ function selagentInspect(DOMDocument $dom, DOMXPath $xp, string $selector, int $
     $h = (string)@$dom->saveHTML($node);
     $h = preg_replace('~<(script|style|noscript)\b[^>]*>.*?</\1>~is', '', $h);
     $h = preg_replace('/\s+/u', ' ', $h);
-    return ['ok' => true, 'html' => mb_substr($h, 0, $max)];
+    $total = mb_strlen($h);
+    if ($offset >= $total && $total > 0)
+        return ['ok' => false, 'total_chars' => $total,
+                'error' => 'offset از اندازهٔ این عنصر (' . $total . ' کاراکتر) بیشتر است'];
+    $chunk = mb_substr($h, $offset, $max);
+    $end = $offset + mb_strlen($chunk);
+    $r = ['ok' => true, 'html' => $chunk, 'offset' => $offset,
+          'total_chars' => $total, 'truncated' => $end < $total];
+    if ($end < $total) {
+        $r['next_offset'] = $end;
+        $r['hint'] = 'این عنصر ' . $total . ' کاراکتر است و فقط تا ' . $end
+                   . ' را دیدی. برای ادامه دوباره inspect_html را با offset=' . $end . ' صدا بزن،'
+                   . ' یا بهتر: به‌جای خواندنِ HTMLِ خام از list_children و find_text استفاده کن.';
+    }
+    return $r;
 }
 
 /**
@@ -36570,6 +37491,26 @@ html[data-skin="gloss"] .progress-bar{
 .dman-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 4px;font-size:12px}
 .dman-bar label{display:flex;align-items:center;gap:6px;cursor:pointer;color:#94a3b8}
 /* DMAN-END ======================================================== */
+/* SPROMPT-START — v10.30 (۴۳ب): ویرایشگرِ پرامپتِ ایجنتِ کشفِ سلکتور.
+   یک <details> جمع‌شونده بالای هر زیرتب؛ بسته که باشد فقط یک نوارِ باریک
+   است، پس فضایی از فرمِ سلکتورها نمی‌گیرد. رنگ‌ها همه از پالتِ پایه‌اند
+   تا هر ۱۴ تم سالم بمانند. */
+.sprompt{background:#0b1220;border:1px solid #334155;border-radius:12px;margin-bottom:14px;overflow:hidden}
+.sprompt>summary{cursor:pointer;list-style:none;padding:9px 12px;font-size:12px;font-weight:700;color:#c4b5fd;background:linear-gradient(90deg,#2e1065,#0b1220);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sprompt>summary::-webkit-details-marker{display:none}
+.sprompt>summary::after{content:'▼';margin-inline-start:auto;font-size:10px;color:#64748b}
+.sprompt[open]>summary::after{content:'▲'}
+.sprompt-bd{padding:10px 12px;display:grid;gap:8px}
+.sprompt-bd textarea{width:100%;min-height:130px;background:#070d18;border:1px solid #475569;color:#e2e8f0;border-radius:9px;padding:9px 11px;font-size:12px;font-family:inherit;line-height:1.9;direction:rtl;resize:vertical}
+.sprompt-bd textarea:focus{outline:none;border-color:#a855f7}
+.sprompt-modes{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:#94a3b8}
+.sprompt-modes label{display:flex;align-items:center;gap:5px;cursor:pointer}
+.sprompt-ph{font-size:10.5px;color:#64748b;line-height:2}
+.sprompt-ph code{background:#0f172a;border:1px solid #334155;border-radius:5px;padding:1px 5px;color:#7dd3fc;direction:ltr;cursor:pointer}
+.sprompt-note{font-size:10.5px;color:#94a3b8;line-height:1.9}
+.sprompt-out{max-height:230px;overflow:auto;background:#070d18;border:1px solid #1e293b;border-radius:9px;padding:8px 10px;font-size:11px;line-height:1.95;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;direction:rtl}
+.sprompt-badge{display:inline-block;background:#2e1065;border:1px solid #6d28d9;border-radius:99px;padding:2px 9px;font-size:10px;color:#ddd6fe}
+/* SPROMPT-END ====================================================== */
 </style>
 </head>
 <body>
@@ -38391,6 +39332,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
     <!-- v10.25 (۳۸ج): پنلِ زندهٔ ایجنتِ کشفِ سلکتور. بدنه‌اش را selagRender
          پر می‌کند تا همان markup برای هر دو زیرتب یک‌بار نوشته شود. -->
     <div class="selag-panel" id="selagPanel-list"><div id="selagBody-list"></div></div>
+    <?= selagentPromptEditorHtml('list') ?>
     <div class="smenu" style="background:#111c31;border:1px solid #334155;border-radius:12px;margin-bottom:14px;overflow:hidden">
         <div class="smenu-hdr" onclick="toggleSmenu(this)" style="background:linear-gradient(90deg,#1e3a5f,#0f172a)"><h3>🎨 سلکتورهای لیست محصولات</h3><span class="arrow">▼</span></div>
         <div class="smenu-body open sel-open">
@@ -38584,6 +39526,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 
     <div class="selsub-pane hidden" id="selsub-detail">
     <div class="selag-panel" id="selagPanel-detail"><div id="selagBody-detail"></div></div>
+    <?= selagentPromptEditorHtml('detail') ?>
     <div class="smenu" style="background:#111c31;border:1px solid #334155;border-radius:12px;margin-bottom:14px;overflow:hidden">
         <div class="smenu-hdr" onclick="toggleSmenu(this)" style="background:linear-gradient(90deg,#4c1d95,#0f172a)"><h3>📄 سلکتورهای صفحهٔ جزئیات محصول</h3><span class="arrow">▼</span></div>
         <div class="smenu-body open sel-open">
@@ -40844,6 +41787,119 @@ function selagUrlFor(kind) {
     return u;
 }
 
+/* ====================================================================
+ *  v10.30 (۴۳ب): ویرایشگرِ پرامپتِ ایجنتِ کشفِ سلکتور.
+ *  حالتِ ذخیره‌شده سمتِ سرور در selagent_prompt.json می‌نشیند، پس این‌جا
+ *  فقط فرم را می‌خوانیم/می‌فرستیم و چیزی در localStorage نگه نمی‌داریم.
+ * ==================================================================== */
+function spromptEl(kind, part) { return document.getElementById('sprompt' + part + '-' + kind); }
+/* آدرسِ نمونه برای پیش‌نمایش. عمداً selagUrlFor را صدا نمی‌زنیم چون آن
+   وقتی آدرس نیست toastِ خطا می‌دهد، و پیش‌نمایشِ پرامپت اصلاً به آدرسِ
+   واقعی نیاز ندارد — فقط جایِ {{url}} را پر می‌کند. */
+function spromptUrl(kind) {
+    try {
+        if (kind === 'detail') { const d = detailSampleUrl(true); if (d) return d; }
+        const l = selagListUrl();
+        if (l) return l;
+    } catch (e) {}
+    return '';
+}
+function spromptMode(kind) {
+    const r = document.querySelector('input[name="spmode-' + kind + '"]:checked');
+    return r ? r.value : 'append';
+}
+function spromptMsg(kind, txt, bad) {
+    const m = spromptEl(kind, 'Msg');
+    if (!m) return;
+    m.textContent = txt || '';
+    m.style.color = bad ? '#fca5a5' : '#86efac';
+}
+/** بعد از هر تغییر، برچسبِ بالای پنل را با وضعیتِ ذخیره‌نشده هماهنگ کن. */
+function spromptDirty(kind) {
+    const b = spromptEl(kind, 'Badge');
+    if (b) { b.textContent = 'ذخیره‌نشده'; b.style.borderColor = '#f59e0b'; b.style.color = '#fcd34d'; }
+    spromptMsg(kind, '');
+}
+function spromptIns(kind, token) {
+    const t = spromptEl(kind, 'Text');
+    if (!t) return;
+    const a = t.selectionStart || 0, b = t.selectionEnd || 0;
+    t.value = t.value.slice(0, a) + token + t.value.slice(b);
+    t.focus();
+    t.selectionStart = t.selectionEnd = a + token.length;
+    spromptDirty(kind);
+}
+function spromptOut(kind, txt) {
+    const o = spromptEl(kind, 'Out');
+    if (!o) return;
+    o.textContent = txt;
+    o.classList.remove('hidden');
+}
+function spromptSave(kind) {
+    const t = spromptEl(kind, 'Text');
+    if (!t) return;
+    const fd = new FormData();
+    fd.append('kind', kind);
+    fd.append('mode', spromptMode(kind));
+    fd.append('text', t.value);
+    spromptMsg(kind, 'در حالِ ذخیره…');
+    fetch('?selagent_prompt_save=1', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(j => {
+            if (!j || !j.ok) { spromptMsg(kind, '⚠️ ' + ((j && j.error) || 'ذخیره نشد'), true); return; }
+            const md = (j.saved && j.saved.mode) || 'append';
+            const on = !!(j.saved && j.saved.text && md !== 'off');
+            const b = spromptEl(kind, 'Badge');
+            if (b) {
+                b.textContent = on ? (md === 'replace' ? 'جایگزینِ سفارشی' : 'افزودهٔ سفارشی') : 'پیش‌فرض';
+                b.style.borderColor = ''; b.style.color = '';
+            }
+            spromptMsg(kind, '✓ ذخیره شد — از اجرای بعدیِ ایجنت اعمال می‌شود');
+            if (typeof showToast === 'function') showToast('پرامپتِ ایجنت ذخیره شد');
+        })
+        .catch(e => spromptMsg(kind, '⚠️ ' + e, true));
+}
+function spromptPreview(kind) {
+    const t = spromptEl(kind, 'Text');
+    if (!t) return;
+    const fd = new FormData();
+    fd.append('kind', kind);
+    fd.append('mode', spromptMode(kind));
+    fd.append('text', t.value);
+    fd.append('url', spromptUrl(kind));
+    spromptMsg(kind, 'در حالِ ساختِ پیش‌نمایش…');
+    fetch('?selagent_prompt_preview=1', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(j => {
+            if (!j || !j.ok) { spromptMsg(kind, '⚠️ پیش‌نمایش ناموفق', true); return; }
+            spromptOut(kind, j.prompt);
+            spromptMsg(kind, 'پرامپتِ نهایی: ' + j.chars + ' کاراکتر');
+        })
+        .catch(e => spromptMsg(kind, '⚠️ ' + e, true));
+}
+function spromptShowDefault(kind) {
+    fetch('?selagent_prompt=1&kind=' + kind + '&url=' + encodeURIComponent(spromptUrl(kind)))
+        .then(r => r.json())
+        .then(j => {
+            if (!j || !j.ok) { spromptMsg(kind, '⚠️ خواندن ناموفق', true); return; }
+            spromptOut(kind, j['default']);
+            spromptMsg(kind, 'این متنِ پیش‌فرضِ کارخانه است (فقط برای دیدن؛ چیزی تغییر نکرد)');
+        })
+        .catch(e => spromptMsg(kind, '⚠️ ' + e, true));
+}
+function spromptReset(kind) {
+    const t = spromptEl(kind, 'Text');
+    if (!t) return;
+    if (t.value.trim() !== '' && !confirm('متنِ پرامپتِ سفارشی پاک شود؟')) return;
+    t.value = '';
+    const r = document.querySelector('input[name="spmode-' + kind + '"][value="append"]');
+    if (r) r.checked = true;
+    const o = spromptEl(kind, 'Out');
+    if (o) o.classList.add('hidden');
+    spromptDirty(kind);
+    spromptMsg(kind, 'خالی شد — برای اعمال «ذخیرهٔ پرامپت» را بزنید');
+}
+
 /** شروعِ ایجنت. عمداً مدل را نمی‌فرستیم تا سرور از «مدلِ فعالِ اتصالات»
  *  استفاده کند — همان مدلی که کاربر در تبِ هوش مصنوعی انتخاب کرده. */
 function selagStart(kind) {
@@ -43016,6 +44072,62 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.30', t:'🧠 ایجنتِ کشفِ سلکتور دیگر روی صفحاتِ سنگین گیر نمی‌کند + پرامپتش قابلِ ویرایش شد', items:[
+    '🕳 <b>مشکلی که داشتید.</b> روی صفحه‌های فروشگاهیِ مدرن (نمونهٔ خودتان:',
+    '   snappshop.ir) ایجنتِ کشفِ سلکتور عملاً فلج بود. چند بار fetch_probe و',
+    '   fetch_html می‌زد، دو هزار کاراکترِ اولِ صفحه را می‌گرفت که چیزی جز',
+    '   چند لایه &lt;div&gt; خالی نبود، بعد به سقفِ گام‌ها می‌خورد و دست‌خالی',
+    '   برمی‌گشت. علتش پنج چیز بود که هر پنج‌تا در این نسخه رفع شد.',
+    '❶ <b>کلاس‌های بی‌معنی.</b> این سایت‌ها به‌جای class="price" چیزی مثل',
+    '   class="css-1a2b3c" می‌گذارند که با هر بار بیلد عوض می‌شود. نقشهٔ',
+    '   ساختارِ صفحه هم عمداً این‌ها را دور می‌ریخت، پس ایجنت یک نقشهٔ خالی',
+    '   می‌گرفت و مجبور بود کلاس حدس بزند. حالا نقشه یک بخشِ دوم دارد:',
+    '   «عناصرِ نشان‌دار» — هر عنصری که data-testid یا itemprop یا id یا role',
+    '   دارد، با سلکتورِ آماده و نمونهٔ متنش. این‌ها از کلاس هم پایدارترند.',
+    '❷ <b>ابزارِ «متن را پیدا کن» (find_text).</b> کاربردی‌ترین چیزِ این نسخه.',
+    '   ایجنت متنی را که روی صفحه می‌بیند — مثلاً قیمتِ «۱۸٬۴۵۰٬۰۰۰» — می‌دهد',
+    '   و فهرستی از سلکتورهایی می‌گیرد که دقیقاً به همان عنصر می‌رسند، به',
+    '   ترتیبِ پایداری، به‌همراه زنجیرهٔ والدهایش. یعنی به‌جای حدس زدن، از',
+    '   روی چیزی که واقعاً روی صفحه هست کار می‌کند.',
+    '❸ <b>ابزارِ «فرزندان را فهرست کن» (list_children).</b> به‌جای ریختنِ HTMLِ',
+    '   خام جلوی مدل، یک جدولِ تمیز می‌دهد: سلکتورِ پیشنهادیِ هر فرزند،',
+    '   ویژگی‌های پایدارش و نمونهٔ متنش. تا سه لایه پایین می‌رود.',
+    '❹ <b>ابزارِ «دادهٔ ساخت‌یافته» (page_data).</b> در این سایت‌ها قیمت و SKU',
+    '   و برند اغلب اصلاً در HTMLِ دیده‌شده نیستند و فقط داخلِ JSON-LD یا',
+    '   __NEXT_DATA__ نشسته‌اند. حالا ایجنت اول این‌ها را می‌خواند تا بفهمد',
+    '   «مقدارِ درست» چیست، بعد با find_text دنبالِ همان مقدار در صفحه می‌گردد.',
+    '❺ <b>پنجرهٔ ۲۰۰۰ کاراکتری باز شد.</b> ابزارِ دیدنِ HTMLِ خام همیشه از',
+    '   کاراکترِ صفر شروع می‌کرد و سقفش ۴۰۰۰ بود؛ روی یک صفحهٔ بزرگ هرچقدر',
+    '   هم دوباره صدا می‌زد باز همان سرِ صفحه را می‌گرفت. حالا پارامترِ offset',
+    '   دارد، سقفش ۱۲۰۰۰ شده و در هر پاسخ می‌گوید چقدر باقی مانده و از کجا',
+    '   باید ادامه بدهد.',
+    '🔓 <b>یک محدودیتِ ساختگی هم برداشته شد.</b> پرامپت و پیامِ خطای ایجنت',
+    '   می‌گفتند «فقط تگ و کلاس و #id مجازند»، در حالی که موتورِ سلکتورِ',
+    '   برنامه از خیلی وقت پیش [data-testid="..."] و [itemprop="..."] و',
+    '   :nth-child را هم می‌فهمد. همین جملهٔ غلط باعث می‌شد مدل دقیقاً از',
+    '   ابزاری که به دردش می‌خورد پرهیز کند. حالا فهرستِ درست به او داده',
+    '   می‌شود و فقط + و ~ و :not() ممنوع اعلام شده‌اند.',
+    '⏱ <b>سقفِ کار بالاتر رفت.</b> گام‌ها از ۱۶ به ۲۴ و فراخوانی‌ها از ۶۰ به',
+    '   ۹۰ رسید، چون حالا ابزارهای بیشتری برای گشتن دارد.',
+    '🧠 <b>حالا می‌توانید پرامپتِ ایجنت را خودتان بنویسید.</b> بالای هر دو زیرتبِ',
+    '   «لیست» و «جزئیات» یک بخشِ جمع‌شونده آمده که داخلش دستورالعملِ',
+    '   اختصاصیِ خودتان را می‌نویسید — مثلاً «در این فروشگاه قیمتِ اول',
+    '   خط‌خورده است، دومی را بگیر» یا «برچسبِ تخفیف را به‌عنوانِ قیمت',
+    '   انتخاب نکن». سه حالت دارد: افزودن به پرامپتِ استاندارد (پیشنهاد ما)،',
+    '   جایگزینیِ کامل، و غیرفعال.',
+    '🔖 <b>جانگهدار.</b> داخلِ متنتان می‌توانید {{url}} و {{kind}} و {{fields}}',
+    '   بگذارید تا موقعِ اجرا با آدرسِ صفحه، نوعِ کار و فهرستِ فیلدها پر شوند؛',
+    '   و {{default}} کلِ پرامپتِ استاندارد را همان‌جا جاسازی می‌کند.',
+    '👁 <b>پیش‌نمایش.</b> دکمهٔ «پیش‌نمایشِ پرامپتِ نهایی» دقیقاً همان متنی را',
+    '   که به مدل می‌رسد نشان می‌دهد، بدونِ اینکه چیزی ذخیره شود. یک دکمهٔ',
+    '   «دیدنِ پرامپتِ پیش‌فرض» هم هست تا ببینید از اول چه نوشته شده بود.',
+    '🛟 <b>ضدِ خرابکاری.</b> حتی در حالتِ «جایگزینیِ کامل»، چند قاعدهٔ فنیِ',
+    '   ضروری خودکار ته پرامپت اضافه می‌شوند (تأییدِ هر سلکتور پیش از تحویل،',
+    '   صدا زدنِ submit_selectors در پایان، و نحوِ سلکتورهای مجاز) تا یک',
+    '   پرامپتِ ناقص کلِ ایجنت را از کار نیندازد.',
+    '💾 پرامپت‌ها در فایلِ جداگانهٔ selagent_prompt.json ذخیره می‌شوند، برای',
+    '   «لیست» و «جزئیات» جدا، و به پروفایلِ سایت‌ها دست نمی‌زنند.',
+  ]},
   {v:'10.29', t:'✏️ سلکتورهای «جزئیات محصول» را حالا می‌شود دستی تایپ کرد', items:[
     '✏️ <b>زیرتبِ «📄 استخراج جزئیات محصولات» تیکِ «وارد کردن دستی سلکتور» گرفت</b>',
     '   — دقیقاً همان تیکی که زیرتبِ «لیست» از قدیم داشت. بالای فهرستِ فیلدها',
