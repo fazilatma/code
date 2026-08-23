@@ -189,8 +189,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.28';
-const APP_VERSION_DATE = '1405/06/02';
+const APP_VERSION = '10.29';
+const APP_VERSION_DATE = '1405/06/03';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -21411,6 +21411,83 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
       && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
 
+    /* ================= v10.29 (۴۲) ================= */
+    /* --- ۴۲: ورودِ دستیِ سلکتورهای «جزئیات» --- */
+    $add('10.29', 'زیرتبِ جزئیات تیکِ «وارد کردن دستی سلکتور» دارد',
+         strpos($selfSrc, 'id="manual' . 'DetailSelMode"') !== false
+      && strpos($selfSrc, 'onchange="toggleManual' . 'DetailSelMode()"') !== false
+      && strpos($selfSrc, '✏️ وارد کردن دستی سلکتور') !== false);
+
+    /* برشِ خطیْ نه preg: فاصلهٔ این دو نشانه ~۱مگابایت است و
+       .*?ِ تنبل به pcre.backtrack_limit می‌خورد و false برمی‌گرداند. */
+    $add('10.29', 'تیکِ تازه داخلِ پنلِ جزئیات است، نه پنلِ لیست',
+         (function () use ($selfSrc) {
+             $open = strrpos($selfSrc, 'id="selsub-detail"');
+             $chk  = strpos($selfSrc, 'id="manual' . 'DetailSelMode"');
+             $lst  = strrpos($selfSrc, 'id="selsub-list"');
+             return $open !== false && $chk !== false && $lst !== false
+                 && $chk > $open && $open > $lst;
+         })()
+      && substr_count($selfSrc, 'id="manual' . 'DetailSelMode"') === 1);
+
+    $add('10.29', 'تیکِ قدیمیِ زیرتبِ لیست دست‌نخورده مانده',
+         substr_count($selfSrc, 'id="manual' . 'SelMode"') === 1
+      && strpos($selfSrc, 'function toggleManual' . 'SelMode()') !== false
+      && strpos($selfSrc, 'function onManual' . 'SelInput(key)') !== false);
+
+    $add('10.29', 'ورودی‌های جزئیات پیش‌فرض readonly اند و با تیک باز می‌شوند',
+         strpos($selfSrc, "\${manual ? '' : 'read" . "only'}") !== false
+      && strpos($selfSrc, 'function dman' . 'On()') !== false);
+
+    $add('10.29', 'هر ورودیِ جزئیات شناسهٔ یکتا گرفت (تا تست و تمرکز کار کند)',
+         strpos($selfSrc, 'id="dsel-${f.key}"') !== false
+      && strpos($selfSrc, 'id="dprev-${f.key}"') !== false);
+
+    /* ریشهٔ باگ: تا اینجا هر کاراکتر کلِ فهرست را innerHTML می‌کرد و
+       تمرکزِ ورودی می‌پرید. ادعا می‌کند آن فراخوانی دیگر آن‌جا نیست. */
+    $add('10.29', 'تایپ دیگر کلِ فهرست را بازسازی نمی‌کند (مکان‌نما نمی‌پرد)',
+         strpos($selfSrc, "detailSel[key].enabled = true;\n\n    const card = document.querySelector") !== false
+      && strpos($selfSrc, "if (val.trim()) {\n        detailSel[key].enabled = true;\n    }\n    renderDetailFieldsList();") === false);
+
+    $add('10.29', 'کارتِ همان فیلد نقطه‌ای به‌روز می‌شود (کلاس + تیک)',
+         strpos($selfSrc, "card.classList.toggle('enabled'") !== false
+      && strpos($selfSrc, "card.querySelector('.ftoggle input')") !== false);
+
+    $add('10.29', 'کنارِ هر فیلدِ دستی دکمهٔ «تست» با اندپوینتِ همیشگی هست',
+         strpos($selfSrc, 'function testDetail' . 'Sel(key)') !== false
+      && strpos($selfSrc, "onclick=\"testDetailSel('\${f.key}')\"") !== false
+      && strpos($selfSrc, "test_selector: url, type: t, selector: selector") !== false);
+
+    $add('10.29', 'تستِ جزئیات روی صفحهٔ نمونهٔ محصول اجرا می‌شود، نه صفحهٔ فهرست',
+         strpos($selfSrc, "const url = detailSampleUrl();\n    if (!url) { out.className = 'dtest bad';") !== false);
+
+    $add('10.29', 'تستِ هر فیلد دیبانس دارد (مثل زیرتبِ لیست)',
+         strpos($selfSrc, 'let dTestTimers = {};') !== false
+      && strpos($selfSrc, 'if (dTestTimers[key]) clearTimeout(dTestTimers[key]);') !== false);
+
+    $add('10.29', 'وضعیتِ تیک بعد از رفرش برمی‌گردد',
+         strpos($selfSrc, 'function manualDetailSel' . 'Restore()') !== false
+      && strpos($selfSrc, "try{ manualDetailSelRestore(); }catch(e){}") !== false
+      && strpos($selfSrc, "localStorage.setItem('manualDetailSelMode'") !== false);
+
+    $add('10.29', 'اگر صفحهٔ نمونه باز نشد، حالتِ دستی خودکار روشن می‌شود',
+         strpos($selfSrc, 'function manualDetailSel' . 'On()') !== false
+      && strpos($selfSrc, 'حالتِ دستی روشن شد؛ سلکتورها را تایپ کنید') !== false
+      && strpos($selfSrc, 'try { manualDetailSelOn(); } catch (_e) {}') !== false);
+
+    $add('10.29', 'CSSِ حالتِ دستی مرزبندی شده و رنگِ تازه‌ای بیرونِ پالت ندارد',
+         strpos($selfSrc, '/* DMAN-START') !== false
+      && strpos($selfSrc, '/* DMAN-END') !== false
+      && (bool)preg_match('~\.detail-field\.dman \.fselector\{[^}]*border-color:#f59e0b~', $selfSrc));
+
+    $add('10.29', 'مسیرِ ذخیره/بازیابیِ پروفایل همان detailSel است (سلکتورِ دستی ذخیره می‌شود)',
+         strpos($selfSrc, 'if (p.detailSelectors) {') !== false
+      && strpos($selfSrc, 'selector: p.detailSelectors[f.key].selector') !== false);
+
+    $add('10.29', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '29', '>=')
+      && strpos($selfSrc, 'v:' . "'10.29'") !== false);
+
     /* ================= v10.28 (۴۱) ================= */
     /* --- ۴۱: تمِ «بلورِ شبانه» + لایهٔ پوسته --- */
     $add('10.28', 'تمِ تازهٔ aurora در رجیستری هست و رجیستری ۱۴ تم دارد',
@@ -36477,6 +36554,22 @@ html[data-skin="gloss"] .progress-bar{
   html[data-skin="gloss"][data-fx="on"] .main-tab.active .t-ico3d::after{animation:none}
 }
 /* SKIN-END ======================================================== */
+
+/* DMAN-START — v10.29 (۴۲): حالتِ «ورودِ دستیِ سلکتور» برای زیرتبِ جزئیات.
+   قرینهٔ همان تیکی که زیرتبِ «لیست» از v7.81 دارد. سه کارِ بصری می‌کند:
+   ۱) ورودی‌های سلکتورِ جزئیات وقتی دستی‌اند رنگِ کهربایی می‌گیرند تا معلوم
+      باشد قابلِ تایپ‌اند، ۲) دکمهٔ «👁 تست» کنارِ هر فیلد جا می‌گیرد،
+   ۳) نتیجهٔ تست زیرِ همان فیلد نشان داده می‌شود.
+   هیچ‌کدام رنگِ تازه‌ای بیرون از پالتِ پایه معرفی نمی‌کنند، پس ۱۴ تم سالم‌اند. */
+.detail-field .fselector[readonly]{opacity:.85;cursor:default}
+.detail-field.dman .fselector{background:#1e293b;border-color:#f59e0b;cursor:text}
+.detail-field-row .ftest{flex:0 0 auto;font-size:10px;padding:5px 8px}
+.detail-field .dtest{margin-top:6px;font-size:10.5px;line-height:1.7;color:#86efac;background:#0f172a;border:1px solid #22c55e;border-radius:6px;padding:4px 7px;word-break:break-word}
+.detail-field .dtest.bad{color:#fca5a5;border-color:#ef4444}
+.detail-field .dtest.wait{color:#94a3b8;border-color:#334155}
+.dman-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 4px;font-size:12px}
+.dman-bar label{display:flex;align-items:center;gap:6px;cursor:pointer;color:#94a3b8}
+/* DMAN-END ======================================================== */
 </style>
 </head>
 <body>
@@ -38518,6 +38611,16 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         </div>
         <!-- v8.77: کدام محصول به‌عنوان نمونه باز شده و امکان عوض کردنش -->
         <div id="detailSampleBar" style="margin-top:8px;font-size:11px;color:#cbd5e1;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px 9px;line-height:1.9"></div>
+        <!-- v10.29 (۴۲): همان تیکِ «ورود دستی» که زیرتبِ لیست دارد، این‌بار
+             برای جزئیات. بدونِ آن، ورودی‌های این‌جا فقط با کلیک روی صفحهٔ
+             نمونه پر می‌شدند و تایپِ دستی عملاً کار نمی‌کرد (هر کاراکتر
+             کلِ فهرست را بازمی‌ساخت و تمرکزِ ورودی می‌پرید). -->
+        <div class="dman-bar">
+            <label>
+                <input type="checkbox" id="manualDetailSelMode" onchange="toggleManualDetailSelMode()"> <b style="color:#fbbf24">✏️ وارد کردن دستی سلکتور</b>
+            </label>
+            <span style="font-size:10px;color:#64748b">برای صفحاتی که در پیش‌نمایش باز نمی‌شوند — سلکتور را مستقیم تایپ کنید و با 👁 تست بسنجید</span>
+        </div>
         <div id="detailFieldsList" style="margin-top:12px"></div>
     </div>
         </div>
@@ -39429,25 +39532,83 @@ function getDetailColumns() {
     return getEnabledDetailFields().filter(f => f.key !== 'price');
 }
 
+/* =====================================================================
+ *  v10.29 (۴۲): ورودِ دستیِ سلکتورهای «جزئیات»
+ *
+ *  زیرتبِ «لیست» از v7.81 تیکِ «✏️ وارد کردن دستی سلکتور» داشت، ولی
+ *  زیرتبِ «📄 استخراج جزئیات محصولات» نداشت. آن‌جا ورودی‌ها ظاهراً باز
+ *  بودند اما عملاً تایپ‌کردنی نبودند، چون updateDetailSelector روی هر
+ *  کاراکتر کلِ فهرست را innerHTML می‌کرد: ورودی دور ریخته می‌شد، تمرکز
+ *  می‌پرید و مکان‌نما به آخرِ خط برمی‌گشت. نتیجه این بود که تنها راهِ
+ *  پرکردنِ این فیلدها کلیک روی صفحهٔ نمونه بود؛ و اگر صفحهٔ نمونه در
+ *  iframe باز نمی‌شد (X-Frame-Options، جاوااسکریپتِ سنگین، لاگین)،
+ *  کاربر هیچ راهی نداشت.
+ *
+ *  حالا: تیک ورودی‌ها را از readonly درمی‌آورد، تایپ بدونِ بازسازیِ
+ *  DOM ذخیره می‌شود، و کنارِ هر فیلد یک «👁 تست» هست که همان اندپوینتِ
+ *  ?test_selector را روی صفحهٔ نمونهٔ محصول می‌زند.
+ * ===================================================================== */
+
+/** آیا حالتِ دستیِ جزئیات روشن است؟ */
+function dmanOn() {
+    const c = $('manualDetailSelMode');
+    return !!(c && c.checked);
+}
+
+/** تیکِ حالتِ دستی — قرینهٔ toggleManualSelMode()ِ زیرتبِ لیست */
+function toggleManualDetailSelMode() {
+    try { localStorage.setItem('manualDetailSelMode', dmanOn() ? '1' : '0'); } catch (e) {}
+    renderDetailFieldsList();
+    if (dmanOn()) showToast('✏️ حالت دستی جزئیات فعال — سلکتورها را مستقیم تایپ کنید');
+}
+
+/** v10.29 (۴۲): وضعیتِ تیک بعد از رفرش برمی‌گردد — مثل زیرتبِ فعال
+    (selSubRestore). کسی که سایتش در iframe باز نمی‌شود هر بار مجبور
+    نباشد دوباره تیک بزند. */
+function manualDetailSelRestore() {
+    const c = $('manualDetailSelMode');
+    if (!c) return;
+    let v = '0';
+    try { v = localStorage.getItem('manualDetailSelMode') || '0'; } catch (e) {}
+    if (v === '1') { c.checked = true; renderDetailFieldsList(); }
+}
+
+/** v10.29 (۴۲): روشن کردنِ حالتِ دستی از بیرون (وقتی صفحهٔ نمونه باز نشد) */
+function manualDetailSelOn() {
+    const c = $('manualDetailSelMode');
+    if (!c || c.checked) return;
+    c.checked = true;
+    toggleManualDetailSelMode();
+}
+
+/* هر فیلد تایمرِ دیبانسِ خودش را دارد؛ مثل testTimersِ زیرتبِ لیست */
+let dTestTimers = {};
+
 function renderDetailFieldsList() {
     // v8.77: نوار نمونه هم همین‌جا تازه شود تا قبل از باز کردن پیش‌نمایش
     // هم معلوم باشد کدام محصول نمونه است
     try { renderSampleBar(); } catch (e) {}
     const container = $('detailFieldsList');
     if (!container) return;
+    const manual = dmanOn();
     let html = '';
     DETAIL_FIELDS.forEach(f => {
         const cfg = detailSel[f.key] || {enabled:false, selector:''};
         html += `
-            <div class="detail-field ${cfg.enabled ? 'enabled' : ''}" data-f="${f.key}">
+            <div class="detail-field ${cfg.enabled ? 'enabled' : ''} ${manual ? 'dman' : ''}" data-f="${f.key}">
                 <div class="detail-field-row">
                     <span class="fname">${f.icon} ${f.label}</span>
                     <label class="switch ftoggle">
                         <input type="checkbox" ${cfg.enabled ? 'checked' : ''} onchange="toggleDetailField('${f.key}', this.checked)">
                         <span class="slider"></span>
                     </label>
-                    <input class="fselector" type="text" value="${esc(cfg.selector||'')}" placeholder="سلکتور CSS" oninput="updateDetailSelector('${f.key}', this.value)">
+                    <input class="fselector" id="dsel-${f.key}" type="text" ${manual ? '' : 'readonly'}
+                           value="${esc(cfg.selector||'')}"
+                           placeholder="${manual ? 'سلکتور CSS را تایپ کنید…' : 'با کلیک روی صفحهٔ نمونه پر می‌شود'}"
+                           oninput="updateDetailSelector('${f.key}', this.value)">
+                    ${manual ? `<button class="btn btn-indigo ftest" onclick="testDetailSel('${f.key}')" title="سلکتور را روی صفحهٔ نمونهٔ محصول بسنج">👁 تست</button>` : ''}
                 </div>
+                ${manual ? `<div class="dtest wait" id="dprev-${f.key}">در انتظار تست…</div>` : ''}
             </div>
         `;
     });
@@ -39462,15 +39623,61 @@ function toggleDetailField(key, enabled) {
     scheduleSave();
 }
 
+/* v10.29 (۴۲): دیگر موقعِ تایپ کلِ فهرست بازسازی نمی‌شود.
+   فقط وضعیتِ همان کارت (کلاسِ enabled و تیکِ کنارش) دستی به‌روز می‌شود،
+   تا مکان‌نما سرِ جایش بماند و بشود سلکتورِ بلند را تا آخر تایپ کرد. */
 function updateDetailSelector(key, val) {
     if (!detailSel[key]) detailSel[key] = {enabled:false, selector:''};
+    const had = detailSel[key].enabled;
     detailSel[key].selector = val.trim();
-    if (val.trim()) {
-        detailSel[key].enabled = true;
+    if (val.trim()) detailSel[key].enabled = true;
+
+    const card = document.querySelector('.detail-field[data-f="' + key + '"]');
+    if (card) {
+        card.classList.toggle('enabled', !!detailSel[key].enabled);
+        const cb = card.querySelector('.ftoggle input');
+        if (cb) cb.checked = !!detailSel[key].enabled;
+    } else {
+        renderDetailFieldsList();
     }
-    renderDetailFieldsList();
-    refreshViews();
+    // اگر فیلدی تازه فعال شد، ستون‌های خروجی عوض می‌شوند
+    if (!had && detailSel[key].enabled) refreshViews();
     scheduleSave();
+}
+
+/** v10.29 (۴۲): سنجشِ یک سلکتورِ جزئیات روی صفحهٔ نمونهٔ محصول.
+    از همان اندپوینتِ ?test_selector استفاده می‌کند که زیرتبِ لیست هم
+    می‌زند، فقط URLش صفحهٔ محصول است نه صفحهٔ فهرست. */
+function testDetailSel(key) {
+    const out = $('dprev-' + key);
+    const inp = $('dsel-' + key);
+    if (!out || !inp) return;
+    const selector = (inp.value || '').trim();
+    if (!selector) { out.className = 'dtest bad'; out.textContent = '❌ اول سلکتور را بنویسید'; return; }
+
+    const url = detailSampleUrl();
+    if (!url) { out.className = 'dtest bad'; out.textContent = '❌ صفحهٔ نمونه‌ای نیست — اول فهرست را استخراج کنید'; return; }
+
+    out.className = 'dtest wait';
+    out.textContent = '⏳ در حال تست روی صفحهٔ نمونه…';
+
+    if (dTestTimers[key]) clearTimeout(dTestTimers[key]);
+    dTestTimers[key] = setTimeout(() => {
+        // image و price در بک‌اند شاخهٔ اختصاصی دارند؛ بقیه متنِ گره‌اند
+        const t = (key === 'image') ? 'image' : (key === 'price' ? 'price' : 'text');
+        const params = new URLSearchParams({test_selector: url, type: t, selector: selector});
+        fetch('?' + params.toString())
+            .then(r => r.json())
+            .then(d => {
+                if (!d.ok) { out.className = 'dtest bad'; out.textContent = '❌ ' + (d.error || 'خطا'); return; }
+                const many = d.count > 1 ? ' (' + toFa(d.count) + ' مورد)' : '';
+                const v = (d.value || '').trim();
+                if (!v) { out.className = 'dtest bad'; out.textContent = '⚠️ پیدا شد ولی خالی بود' + many; return; }
+                out.className = 'dtest';
+                out.textContent = '✓ ' + (v.length > 180 ? v.slice(0, 180) + '…' : v) + many;
+            })
+            .catch(() => { out.className = 'dtest bad'; out.textContent = '❌ خطا در ارتباط'; });
+    }, 300);
 }
 
 /* =====================================================================
@@ -39719,7 +39926,13 @@ function openDetailProxy(keepScroll) {
         $('detailStatus').textContent = '✓ نوع فیلد را از پنل بالا انتخاب کنید، بعد روی صفحه کلیک کنید';
         pkSetMode(($('pkMode') || {}).value || 'shortDesc');
     };
-    fr.onerror = () => { $('detailStatus').textContent = '✗ صفحهٔ نمونه باز نشد'; };
+    /* v10.29 (۴۲): اگر صفحهٔ نمونه باز نشد، کاربر بن‌بست نمی‌ماند —
+       حالتِ دستی خودکار روشن می‌شود تا سلکتورها را تایپ کند. همان
+       رفتاری که loadDirect() از v7.81 برای زیرتبِ لیست دارد. */
+    fr.onerror = () => {
+        $('detailStatus').textContent = '✗ صفحهٔ نمونه باز نشد — حالتِ دستی روشن شد؛ سلکتورها را تایپ کنید';
+        try { manualDetailSelOn(); } catch (_e) {}
+    };
     // v8.77: موقع عوض کردن نمونه، صفحه را دوباره بالا نپران
     if (!keepScroll)
         setTimeout(() => { const p = $('pickerPanel') || $('detailFrameWrap');
@@ -42803,6 +43016,34 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.29', t:'✏️ سلکتورهای «جزئیات محصول» را حالا می‌شود دستی تایپ کرد', items:[
+    '✏️ <b>زیرتبِ «📄 استخراج جزئیات محصولات» تیکِ «وارد کردن دستی سلکتور» گرفت</b>',
+    '   — دقیقاً همان تیکی که زیرتبِ «لیست» از قدیم داشت. بالای فهرستِ فیلدها',
+    '   است؛ می‌زنیدش و هر یازده فیلد (قیمت، توضیحات کوتاه و بلند، SKU،',
+    '   دسته‌بندی، برچسب، وزن، موجودی، برند، عکس اصلی، تنوع‌ها) قابلِ تایپ',
+    '   می‌شوند و کادرشان کهربایی می‌شود.',
+    '🐞 <b>چرا لازم بود.</b> این ورودی‌ها ظاهراً باز بودند ولی عملاً تایپ‌کردنی',
+    '   نبودند: با هر کاراکتری که می‌زدید کلِ فهرست از نو ساخته می‌شد، تمرکز',
+    '   از کادر می‌پرید و مکان‌نما به آخرِ خط برمی‌گشت. نوشتنِ یک سلکتورِ',
+    '   چندکاراکتری عملاً ناممکن بود، پس تنها راهِ پرکردنشان کلیک روی صفحهٔ',
+    '   نمونه بود. حالا تایپ بدونِ بازسازیِ فهرست ذخیره می‌شود و مکان‌نما سرِ',
+    '   جایش می‌ماند.',
+    '👁 <b>کنارِ هر فیلد یک دکمهٔ «تست» آمد.</b> سلکتور را می‌نویسید، تست',
+    '   می‌زنید و همان‌جا زیرِ فیلد می‌بینید چه چیزی از <b>صفحهٔ خودِ محصول</b>',
+    '   (نه صفحهٔ فهرست) درمی‌آید و چند مورد پیدا شده. اگر گره پیدا شود ولی',
+    '   خالی باشد، همان را هم می‌گوید.',
+    '🧯 <b>وقتی صفحهٔ نمونه اصلاً باز نمی‌شود.</b> بعضی فروشگاه‌ها با',
+    '   X-Frame-Options یا لاگین یا جاوااسکریپتِ سنگین داخلِ پیش‌نمایش بالا',
+    '   نمی‌آیند و کاربر بن‌بست می‌ماند. حالا اگر بارگذاریِ نمونه شکست بخورد،',
+    '   حالتِ دستی خودش روشن می‌شود تا بتوانید سلکتور را از وب‌تولزِ مرورگرتان',
+    '   بردارید و همین‌جا بچسبانید.',
+    '💾 <b>تیک یادش می‌ماند.</b> بعد از رفرشِ صفحه همان‌طور که گذاشته بودید',
+    '   برمی‌گردد. سلکتورهای دستی هم مثل همیشه در پروفایل ذخیره می‌شوند و',
+    '   استخراج و صف‌بندی از همان مسیرِ همیشگی می‌خوانندشان.',
+    '🪶 <b>هیچ‌چیزِ دیگری عوض نشد.</b> تیکِ زیرتبِ لیست، انتخابِ کلیکی روی',
+    '   صفحهٔ نمونه، پیشنهادِ الگومحور و ایجنتِ AI همگی مثل قبل کار می‌کنند؛',
+    '   حالتِ دستیِ لیست و حالتِ دستیِ جزئیات هم مستقل از هم‌اند.',
+  ]},
   {v:'10.28', t:'💎 تمِ تازه «بلورِ شبانه»: سایه، براقیت، و شمایل‌های سه‌بعدیِ منوی پایین', items:[
     '🎨 <b>یک تمِ چهاردهم به فهرستِ تم‌ها اضافه شد: «💎 بلورِ شبانه (سه‌بعدی)».</b>',
     '   از تنظیمات ← ظاهر انتخابش کنید. رنگش بنفشِ سرد با تأکیدِ آبیِ روشن است',
@@ -47838,6 +48079,7 @@ document.addEventListener('DOMContentLoaded',function(){
     try{ syncSmenuStickyOffsets(); }catch(e){}  // v9.94: افستِ سربخش‌های چسبان
     try{ selCtlInit(); }catch(e){}           // v9.90: تیک‌های نمایش کنترل‌های سلکتور
     try{ selSubRestore(); }catch(e){}        // v10.25 (۳۸ب): زیرتبِ آخرِ تبِ سلکتور
+    try{ manualDetailSelRestore(); }catch(e){}  // v10.29 (۴۲): حالتِ دستیِ سلکتورهای جزئیات
     try{ selagResume(); }catch(e){}          // v10.25 (۳۸ج): بازیابیِ ایجنتِ در جریان
     try{ agResume(); }catch(e){}             // v10.26 (۳۹ب): بازیابیِ ایجنتِ محصولات + گفتگوی زنده
     const si=$('bsCatSearch');
