@@ -72,6 +72,27 @@ const DEDUP_MAX_GROUPS    = 1200;
 const DEDUP_PAGE_TRIES     = 3;
 const DEDUP_PAGE_WAIT_BASE = 2;    // ثانیه — تلاشِ دوم ۲s، سومی ۴s
 const DEDUP_PAGE_WAIT_MAX  = 15;
+/* v10.23 (۳۶ب): سه ضعفِ پایداریِ «حذفِ تکراری» که در عمل کار را نیمه‌کاره
+   می‌گذاشتند:
+   ۱) سقفِ ۲۰۰ صفحه‌ی سرِ کد سخت — غرفه/فروشگاهی با ۴۰۰ صفحه نصفش دیده نمی‌شد
+      و هیچ هشداری هم نمی‌داد.
+   ۲) خودِ حذف/بایگانی هیچ تلاشِ مجددی نداشت؛ یک ۵۰۰ گذرا = یک «ناموفق» دائمی.
+   ۳) گاردِ «کارِ مرده» ۹۰ ثانیه بود، در حالی که یک صفحهٔ سه‌بار-تلاش‌شده
+      به‌تنهایی می‌تواند بیش از ۹۰ ثانیه طول بکشد ⇒ کارِ زنده «مرده» اعلام
+      می‌شد. حالا با آستانهٔ مدیر وظیفه یکی است. */
+const DEDUP_MAX_PAGES      = 2000;
+const DEDUP_DEL_TRIES      = 3;
+const DEDUP_DEL_WAIT_BASE  = 2;    // ثانیه — تلاشِ دوم ۲s، سومی ۴s
+const DEDUP_STALE_SEC      = 300;
+/* v10.23 (۳۶د): «اصلاح دسته‌بندی محصولات باسلام» مثل dedup/agent به کارِ
+   پس‌زمینهٔ سرور تبدیل شد. تا اینجا هر سه مسیرِ آن (متنِ AIِ باسلام، مستر،
+   اجماعِ چندمدلی) فقط SSE بودند: با بستنِ مرورگر کار می‌مرد، هیچ قفلی نبود
+   (دو تب = دو اجرای موازی روی یک غرفه) و در مدیر وظیفه اصلاً دیده نمی‌شد. */
+const CATFIX_PROGRESS_FILE = __DIR__ . '/catfix_progress.json';
+const CATFIX_RESULT_FILE   = __DIR__ . '/catfix_result.json';
+const CATFIX_STOP_FILE     = __DIR__ . '/catfix_stop.json';
+const CATFIX_LOCK_FILE     = __DIR__ . '/catfix.lock';
+const CATFIX_MAX_PAGES     = 40;   // صفحاتِ فهرستِ محصولاتِ ردشده
 // v10.04 (۱۸): انتقالِ رابطِ «ایجنتِ مدیریت محصولات» از تبِ ارسال به تبِ تازهٔ «🤖 ایجنت» در بخشِ هوش مصنوعی
 // v10.03 (۱۷): محیطِ آزمایشیِ «ایجنتِ مدیریت محصولات» — مدل با فراخوانیِ ابزار (tool calling)
 const AGENT_PROGRESS_FILE = __DIR__ . '/agent_progress.json';
@@ -134,8 +155,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.22';
-const APP_VERSION_DATE = '1405/05/31';
+const APP_VERSION = '10.23';
+const APP_VERSION_DATE = '1405/06/01';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -11710,6 +11731,49 @@ function destPriceCfg(array $cn, string $dest): array {
     ];
 }
 
+/* v10.23 (۳۶ه): شمارنده‌های تفکیکیِ هر غرفه برای صفِ ارسالِ باسلام.
+   جدولِ سراسری اینجا مقداردهی می‌شود، نه داخلِ خودِ اندپوینتِ ارسال — چون
+   دو تابعِ زیر از هر مسیری (از جمله selftest) صدا زده می‌شوند و اگر متغیرِ
+   سراسری موجود نباشد PHP اخطارِ «undefined variable» می‌دهد. */
+$GLOBALS['bslShopStats']      = $GLOBALS['bslShopStats']      ?? [];
+$GLOBALS['bslDefaultVid']     = $GLOBALS['bslDefaultVid']     ?? 0;
+$GLOBALS['bslDefaultShopName'] = $GLOBALS['bslDefaultShopName'] ?? '';
+
+/** v10.23 (۳۶ه): آمارِ یک غرفهٔ اضافی را در جدولِ سراسری می‌نشاند/به‌روز می‌کند */
+function bslShopStatBump(int $vid, string $name, string $field, int $n = 1): void {
+    global $bslShopStats;
+    if (!is_array($bslShopStats)) $bslShopStats = [];
+    if ($vid <= 0) return;
+    if (!isset($bslShopStats[$vid])) $bslShopStats[$vid] = ['name' => $name !== '' ? $name : ('غرفهٔ ' . $vid),
+        'c' => 0, 'u' => 0, 's' => 0, 'f' => 0];
+    if ($name !== '') $bslShopStats[$vid]['name'] = $name;
+    if (isset($bslShopStats[$vid][$field])) $bslShopStats[$vid][$field] += $n;
+}
+
+/** v10.23 (۳۶ه): جدولِ شمارنده‌ها به شکلِ آمادهٔ نمایش (غرفهٔ پیش‌فرض اول) */
+function bslShopStatRows(int $s, int $u, int $sk, int $f): array {
+    global $bslShopStats, $bslDefaultVid, $bslDefaultShopName;
+    if (!is_array($bslShopStats)) $bslShopStats = [];
+    $bslDefaultVid = (int)($bslDefaultVid ?? 0);
+    $bslDefaultShopName = (string)($bslDefaultShopName ?? '');
+    $rows = [];
+    if ((int)$bslDefaultVid > 0) {
+        $rows[] = ['vid' => (int)$bslDefaultVid,
+                   'name' => $bslDefaultShopName !== '' ? $bslDefaultShopName : 'غرفهٔ پیش‌فرض',
+                   'is_default' => true,
+                   'sent' => (int)$s, 'updated' => (int)$u, 'skipped' => (int)$sk, 'failed' => (int)$f];
+    }
+    foreach ((array)$bslShopStats as $vid => $row) {
+        if ((int)$vid === (int)$bslDefaultVid) continue;
+        $rows[] = ['vid' => (int)$vid,
+                   'name' => (string)($row['name'] ?? ('غرفهٔ ' . $vid)),
+                   'is_default' => false,
+                   'sent' => (int)($row['c'] ?? 0), 'updated' => (int)($row['u'] ?? 0),
+                   'skipped' => (int)($row['s'] ?? 0), 'failed' => (int)($row['f'] ?? 0)];
+    }
+    return $rows;
+}
+
 /* v9.47: فهرست غرفه‌های باسلام (پیش‌فرض + اضافی) برای دراپ‌داون «انتخاب غرفه».
    هر غرفه: ['vendor_id'=>int,'token'=>string,'shop_name'=>string]. */
 function bslAllShops(array $cn): array {
@@ -15070,12 +15134,28 @@ const TASKS_STALE_SEC = 300;
  *  تبِ مربوطه، تابعِ خلاصه‌ساز]. خلاصه‌ساز از آرایهٔ خامِ پیشرفت،
  *  «شمارنده‌های خوانا» می‌سازد چون هر کار واژگانِ خودش را دارد
  *  (ارسال «sent/failed» دارد، حذفِ تکراری «groups/deleted»).
+ *
+ *  v10.23 (۳۶الف): سه فیلدِ ناوبری اضافه شد. تا اینجا فیلدِ `tab` فقط یک
+ *  *برچسبِ متنی* بود («ارسال»، «ابزارها») و کلیک روی کارت هیچ کاری نمی‌کرد؛
+ *  کاربر باید خودش می‌گشت تا پنجرهٔ اصلیِ آن کار را پیدا کند. حالا هر ردیف
+ *  می‌گوید دقیقاً کجا باز شود:
+ *    pane  — کدام تبِ اصلی (id پنل بدونِ پیشوندِ pane-)
+ *    smenu — اگر جایش داخلِ پنلِ تنظیمات است، تکه‌ای از عنوانِ آن آکاردئون
+ *    ai    — اگر داخلِ بخشِ «هوش مصنوعی» است، نامِ زیرتبِ آن
+ *    el    — شناسهٔ عنصری که باید به آن اسکرول و چند لحظه برجسته شود
+ *    open  — نامِ تابعی که پنجرهٔ اصلیِ آن کار را باز می‌کند
+ *
+ *  v10.23 (۳۶ج): فیلدِ `resume` — اندپوینتِ *شروعِ اصلیِ* همان کار. برای
+ *  کارِ رهاشده تا حالا فقط «🗑 پاک» بود؛ یعنی کاربر باید ردِ کار را پاک
+ *  می‌کرد، بعد خودش می‌گشت و دکمهٔ شروع را دوباره می‌زد. حالا مدیر وظیفه
+ *  خودش می‌تواند همان اندپوینت را صدا بزند.
  */
 function tasksRegistry(): array {
     return [
         'bsl_send' => [
             'title' => 'ارسال به باسلام', 'icon' => '🚀', 'file' => BSL_PROGRESS_FILE,
             'stop' => 'bsl_stop', 'tab' => 'ارسال',
+            'pane' => 'send', 'el' => 'bslQueueSection', 'resume' => 'action=bsl_backend',
             'stat' => function (array $p): array {
                 return ['ارسال' => (int)($p['sent'] ?? 0), 'به‌روز' => (int)($p['updated'] ?? 0),
                         'رد' => (int)($p['skipped'] ?? 0), 'ناموفق' => (int)($p['failed'] ?? 0)];
@@ -15084,6 +15164,7 @@ function tasksRegistry(): array {
         'woo_send' => [
             'title' => 'ارسال به ووکامرس', 'icon' => '🛍', 'file' => WOO_PROGRESS_FILE,
             'stop' => 'woo_stop', 'tab' => 'ارسال',
+            'pane' => 'send', 'el' => 'wooQueueSection', 'resume' => 'action=woo_backend',
             'stat' => function (array $p): array {
                 return ['ارسال' => (int)($p['sent'] ?? 0), 'به‌روز' => (int)($p['updated'] ?? 0),
                         'رد' => (int)($p['skipped'] ?? 0), 'ناموفق' => (int)($p['failed'] ?? 0)];
@@ -15092,6 +15173,7 @@ function tasksRegistry(): array {
         'extract' => [
             'title' => 'استخراج محصولات', 'icon' => '🔎', 'file' => EXTRACT_PROGRESS_FILE,
             'stop' => 'extract_stop', 'tab' => 'استخراج',
+            'pane' => 'start', 'el' => 'extractProgress', 'resume' => 'action=backend_extract',
             'stat' => function (array $p): array {
                 return ['استخراج' => (int)($p['extracted'] ?? 0), 'تازه' => (int)($p['new'] ?? 0),
                         'تغییرِ قیمت' => (int)($p['price_changed'] ?? 0), 'حذف‌شده' => (int)($p['removed'] ?? 0)];
@@ -15100,14 +15182,33 @@ function tasksRegistry(): array {
         'dedup' => [
             'title' => 'حذفِ محصولات تکراری', 'icon' => '🧹', 'file' => DEDUP_PROGRESS_FILE,
             'stop' => 'dedup_stop', 'tab' => 'ابزارها',
+            /* یک کارِ dedup هست ولی دو خانه دارد (ووکامرس و باسلام) — کدام
+               باز شود از خودِ فایلِ پیشرفت (target) خوانده می‌شود. */
+            'pane' => 'send', 'open' => 'dedupOpenLast', 'resume' => 'dedup_start=1',
             'stat' => function (array $p): array {
                 return ['گروه' => (int)($p['groups'] ?? 0), 'تکراری' => (int)($p['dups'] ?? 0),
                         'حذف‌شده' => (int)($p['deleted'] ?? 0), 'ناموفق' => (int)($p['failed'] ?? 0)];
             },
         ],
+        /* v10.23 (۳۶د): «اصلاح دسته‌بندی محصولات باسلام» — از این نسخه یک
+           کارِ پس‌زمینهٔ تمام‌عیار است، نه یک جریانِ زندهٔ وابسته به مرورگر. */
+        'catfix' => [
+            'title' => 'اصلاح دسته‌بندی محصولات باسلام', 'icon' => '📂', 'file' => CATFIX_PROGRESS_FILE,
+            'stop' => 'catfix_stop', 'tab' => 'باسلام',
+            'pane' => 'send', 'open' => 'catfixOpen', 'resume' => 'catfix_start=1',
+            'stat' => function (array $p): array {
+                $o = ['اصلاح‌شده' => (int)($p['fixed'] ?? 0), 'دسته نیافت' => (int)($p['no_cat'] ?? 0),
+                      'ردشده' => (int)($p['skip_same'] ?? 0) + (int)($p['skip_tried'] ?? 0),
+                      'ناموفق' => (int)($p['failed'] ?? 0)];
+                if ((int)($p['no_ai'] ?? 0) > 0) $o['بدون متنِ AI'] = (int)$p['no_ai'];
+                if ((int)($p['asked'] ?? 0) > 0) $o['پرسشِ مدل'] = (int)$p['asked'];
+                return $o;
+            },
+        ],
         'agent' => [
             'title' => 'ایجنتِ مدیریت محصولات', 'icon' => '🤖', 'file' => AGENT_PROGRESS_FILE,
             'stop' => 'agent_stop', 'tab' => 'هوش مصنوعی',
+            'pane' => 'settings', 'smenu' => 'هوش مصنوعی', 'ai' => 'agent', 'resume' => 'agent_start=1',
             'stat' => function (array $p): array {
                 return ['گام' => (int)($p['step'] ?? 0), 'فراخوانیِ ابزار' => (int)($p['calls'] ?? 0),
                         'تغییر' => (int)($p['changes'] ?? 0)];
@@ -15116,6 +15217,7 @@ function tasksRegistry(): array {
         'ai_test' => [
             'title' => 'تستِ مدل‌های هوش مصنوعی', 'icon' => '🧪', 'file' => AI_TEST_STATE_FILE,
             'stop' => 'ai_test_stop', 'tab' => 'هوش مصنوعی',
+            'pane' => 'settings', 'smenu' => 'هوش مصنوعی', 'ai' => 'test', 'resume' => 'ai_test_start=1',
             'stat' => function (array $p): array {
                 $o = ['تست‌شده' => (int)($p['tested'] ?? 0), 'در دسترس' => (int)($p['available'] ?? 0),
                       'ناموفق' => (int)($p['failed'] ?? 0)];
@@ -15126,6 +15228,7 @@ function tasksRegistry(): array {
         'recon' => [
             'title' => 'مغایرت‌گیریِ مبدأ و مقصد', 'icon' => '⚖', 'file' => RECON_PROGRESS_FILE,
             'stop' => '', 'tab' => 'ابزارها',
+            'pane' => 'settings', 'smenu' => 'مغایرت‌گیری با مقصد', 'resume' => 'recon=1',
             'stat' => function (array $p): array {
                 return ['بررسی‌شده' => (int)($p['checked'] ?? 0), 'مغایرت' => (int)($p['diffs'] ?? 0)];
             },
@@ -15133,6 +15236,7 @@ function tasksRegistry(): array {
         'suffix' => [
             'title' => 'گزارشِ پسوندِ پروفایل', 'icon' => '🏷', 'file' => SUFFIX_PROGRESS_FILE,
             'stop' => '', 'tab' => 'ابزارها',
+            'pane' => 'settings', 'smenu' => 'آمار محصولات هر پروفایل', 'resume' => 'suffix_report=1',
             'stat' => function (array $p): array {
                 return ['بررسی‌شده' => (int)($p['checked'] ?? 0), 'یافته' => (int)($p['found'] ?? 0)];
             },
@@ -15140,6 +15244,9 @@ function tasksRegistry(): array {
         'bulkedit' => [
             'title' => 'ویرایشِ گروهی', 'icon' => '✏', 'file' => BULKEDIT_PROGRESS_FILE,
             'stop' => '', 'tab' => 'ابزارها',
+            /* ویرایشِ گروهی بدونِ فهرستِ شناسه‌ها و عملیات معنا ندارد، پس
+               «ادامه» برایش تعریف نمی‌شود — کاربر باید انتخابش را دوباره بکند. */
+            'pane' => 'settings', 'smenu' => 'ویرایش محصولات مقصد', 'resume' => '',
             'stat' => function (array $p): array {
                 return ['ویرایش‌شده' => (int)($p['edited'] ?? 0), 'ناموفق' => (int)($p['failed'] ?? 0)];
             },
@@ -15147,11 +15254,68 @@ function tasksRegistry(): array {
         'photofix' => [
             'title' => 'بازسازیِ عکس‌ها', 'icon' => '🖼', 'file' => PHOTOFIX_PROGRESS_FILE,
             'stop' => '', 'tab' => 'ابزارها',
+            'pane' => 'settings', 'smenu' => 'عکس‌دار کردن محصولات ووکامرس', 'resume' => 'photo_fix=1',
             'stat' => function (array $p): array {
                 return ['اصلاح‌شده' => (int)($p['fixed'] ?? 0), 'ناموفق' => (int)($p['failed'] ?? 0)];
             },
         ],
     ];
+}
+
+/**
+ * v10.23 (۳۶ج): نشانیِ «شروعِ دوباره»ی یک کار.
+ *
+ * فقط نامِ اندپوینت کافی نیست: بیشترِ کارها بدونِ پارامترهای اصلی‌شان
+ * دوباره اجرا نمی‌شوند (dedup بدونِ مقصد، recon بدونِ target، ایجنت بدونِ
+ * دستورِ کار). خوشبختانه همهٔ این‌ها در خودِ فایلِ پیشرفتِ اجرای قبلی ثبت
+ * شده‌اند، پس دقیقاً همان اجرا را بازسازی می‌کنیم. اگر پارامترِ حیاتی نبود،
+ * رشتهٔ خالی برمی‌گردد و دکمهٔ «ادامه» اصلاً نشان داده نمی‌شود — بهتر از
+ * دکمه‌ای که کلیکش خطا می‌دهد.
+ */
+function tasksResumeUrl(string $key, array $def, array $p): string {
+    $base = trim((string)($def['resume'] ?? ''));
+    if ($base === '') return '';
+    switch ($key) {
+        case 'extract':
+            $u = trim((string)($p['url'] ?? ''));
+            if ($u === '') return '';
+            return $base . '&url=' . rawurlencode($u);
+        case 'dedup':
+            $t = (string)($p['target'] ?? '');
+            if ($t !== 'woo' && $t !== 'bsl') return '';
+            /* حالتِ حذف عمداً به «گزارش» برگردانده نمی‌شود: اگر کاربر حذف را
+               شروع کرده بود، ادامه هم باید حذف باشد وگرنه کار نیمه می‌ماند. */
+            $m = ((string)($p['mode'] ?? 'scan')) === 'delete' ? 'delete' : 'scan';
+            return $base . '&target=' . $t . '&mode=' . $m;
+        case 'catfix':
+            $m = (string)($p['mode'] ?? 'ai_text');
+            if (!in_array($m, ['ai_text', 'master', 'quorum'], true)) $m = 'ai_text';
+            $q = $base . '&mode=' . $m;
+            if ((int)($p['product_id'] ?? 0) > 0) $q .= '&product_id=' . (int)$p['product_id'];
+            return $q;
+        case 'agent':
+            $task = trim((string)($p['task'] ?? ''));
+            if ($task === '') return '';
+            $q = $base . '&mode=' . rawurlencode((string)($p['mode'] ?? 'dry'))
+               . '&task=' . rawurlencode($task);
+            if (trim((string)($p['model'] ?? '')) !== '') $q .= '&model=' . rawurlencode((string)$p['model']);
+            return $q;
+        case 'recon':
+            $t = (string)($p['target'] ?? '');
+            if ($t !== 'woo' && $t !== 'bsl') return '';
+            $q = $base . '&target=' . $t;
+            if (!empty($p['all_profiles'])) $q .= '&all_profiles=1';
+            /* اعمالِ تغییرات هرگز خودکار تکرار نمی‌شود — فقط گزارش */
+            return $q;
+        case 'suffix':
+            $t = (string)($p['target'] ?? '');
+            if ($t !== 'woo' && $t !== 'bsl') return '';
+            return $base . '&target=' . $t;
+        case 'photofix':
+            return $base . (!empty($p['dry']) ? '&dry=1' : '');
+        default:
+            return $base;
+    }
 }
 
 /** درصدِ پیشرفت را از شکل‌های مختلفِ فایل‌های پیشرفت بیرون می‌کشد.
@@ -15198,11 +15362,24 @@ function tasksBuildRow(string $key, array $def, int $now): array {
     $raw = is_array($p['log'] ?? null) ? $p['log'] : (is_array($p['recent_log'] ?? null) ? $p['recent_log'] : []);
     foreach (array_slice($raw, -6) as $l)
         $log[] = is_array($l) ? (string)($l['m'] ?? '') : (string)$l;
+    /* v10.23 (۳۶ج): «ادامه» فقط برای کارِ رهاشده یا تمام‌شده معنا دارد؛ روی
+       کارِ در حال اجرا نشان دادنش فقط باعثِ اجرای موازیِ ناخواسته می‌شود. */
+    $resumeUrl = ($st === 'stale' || $st === 'done' || $st === 'idle')
+        ? tasksResumeUrl($key, $def, $p) : '';
     return [
         'key'       => $key,
         'title'     => (string)$def['title'],
         'icon'      => (string)$def['icon'],
         'tab'       => (string)$def['tab'],
+        /* v10.23 (۳۶الف): نشانیِ ناوبریِ کلیک روی کارت */
+        'pane'      => (string)($def['pane'] ?? ''),
+        'smenu'     => (string)($def['smenu'] ?? ''),
+        'ai'        => (string)($def['ai'] ?? ''),
+        'el'        => (string)($def['el'] ?? ''),
+        'open'      => (string)($def['open'] ?? ''),
+        /* v10.23 (۳۶ج) */
+        'resume'    => $resumeUrl,
+        'resumable' => $resumeUrl !== '',
         'state'     => $st,
         'percent'   => $st === 'running' || $st === 'stale' ? tasksPercent($p) : ($st === 'done' ? 100 : 0),
         'total'     => (int)($p['total'] ?? 0),
@@ -15256,11 +15433,61 @@ if (isset($_GET['tasks_stop'])) {
     $reg = tasksRegistry();
     if (!isset($reg[$key])) { echo json_encode(['ok' => false, 'error' => 'کارِ ناشناخته'], JSON_UNESCAPED_UNICODE); exit; }
     $map = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
-            'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE, 'ai_test_stop' => AI_TEST_STOP_FILE];
+            'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE, 'ai_test_stop' => AI_TEST_STOP_FILE,
+            'catfix_stop' => CATFIX_STOP_FILE];   // v10.23 (۳۶د)
     $sf = $map[(string)$reg[$key]['stop']] ?? '';
     if ($sf === '') { echo json_encode(['ok' => false, 'error' => 'این کار توقفِ دستی ندارد'], JSON_UNESCAPED_UNICODE); exit; }
     @file_put_contents($sf, json_encode(['at' => time()]));
     echo json_encode(['ok' => true, 'stopped' => $key], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/**
+ * v10.23 (۳۶ج): ادامه/شروعِ دوبارهٔ یک کارِ گیرکرده.
+ *
+ * چرا لازم بود: وقتی پردازهٔ یک کار وسطِ راه کشته می‌شد (تایم‌اوتِ هاست،
+ * ری‌استارتِ PHP-FPM)، مدیر وظیفه آن را «رهاشده» نشان می‌داد ولی تنها
+ * دکمه‌اش «🗑 پاک» بود. کاربر باید ردِ کار را پاک می‌کرد، بعد خودش می‌گشت
+ * تا تبِ اصلیِ آن کار و دکمهٔ شروعش را پیدا کند — و اگر پارامترها را
+ * یادش نبود، از اول تنظیمشان می‌کرد.
+ *
+ * حالا همان‌جا: قفل و فایلِ پیشرفتِ مرده پاک می‌شود و اندپوینتِ شروعِ اصلیِ
+ * همان کار — با همان پارامترهای اجرای قبلی — از داخلِ سرور صدا زده می‌شود.
+ */
+if (isset($_GET['tasks_resume'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $key = (string)($_GET['key'] ?? '');
+    $reg = tasksRegistry();
+    if (!isset($reg[$key])) { echo json_encode(['ok' => false, 'error' => 'کارِ ناشناخته'], JSON_UNESCAPED_UNICODE); exit; }
+    $def = $reg[$key];
+    $now = time();
+    $row = tasksBuildRow($key, $def, $now);
+    if ($row['state'] === 'running') {
+        echo json_encode(['ok' => false, 'error' => 'این کار همین حالا در حال اجراست'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $url = (string)$row['resume'];
+    if ($url === '') {
+        echo json_encode(['ok' => false,
+            'error' => 'برای این کار «ادامه» تعریف نشده — از تبِ خودش دوباره شروعش کنید'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    /* قفلِ جامانده و پیشرفتِ مرده کنار می‌روند، وگرنه شروعِ تازه پشتِ همان
+       قفل می‌ماند و کاربر پیامِ «در حال اجراست» می‌گیرد. */
+    $locks = ['dedup' => DEDUP_LOCK_FILE, 'agent' => AGENT_LOCK_FILE, 'catfix' => CATFIX_LOCK_FILE];
+    if ($row['state'] === 'stale') {
+        if (isset($locks[$key])) @unlink($locks[$key]);
+        @unlink((string)$def['file']);
+    }
+    /* سیگنالِ توقفِ جامانده هم برداشته می‌شود؛ وگرنه کارِ تازه در اولین
+       بررسی فوراً خودش را متوقف می‌کند. */
+    $stopMap = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
+                'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE,
+                'ai_test_stop' => AI_TEST_STOP_FILE, 'catfix_stop' => CATFIX_STOP_FILE];
+    $sf = $stopMap[(string)($def['stop'] ?? '')] ?? '';
+    if ($sf !== '') @unlink($sf);
+
+    $started = fireAndForget($url, 2500);
+    echo json_encode(['ok' => true, 'resumed' => $key, 'url' => $url, 'dispatched' => $started],
+        JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -15288,7 +15515,8 @@ if (isset($_GET['tasks_clear'])) {
         echo json_encode(['ok' => false, 'error' => 'این کار در حال اجراست — اول متوقفش کنید'], JSON_UNESCAPED_UNICODE); exit;
     }
     /* کارِ رهاشده ممکن است قفلش هم جا مانده باشد */
-    $locks = ['dedup' => DEDUP_LOCK_FILE, 'agent' => AGENT_LOCK_FILE];
+    $locks = ['dedup' => DEDUP_LOCK_FILE, 'agent' => AGENT_LOCK_FILE,
+              'catfix' => CATFIX_LOCK_FILE];   // v10.23 (۳۶د)
     if (isset($locks[$key])) @unlink($locks[$key]);
     @unlink((string)$reg[$key]['file']);
     echo json_encode(['ok' => true, 'cleared' => 1], JSON_UNESCAPED_UNICODE);
@@ -15779,6 +16007,8 @@ if (isset($_GET['dedup_start'])) {
         'result_ok' => !empty($rep['ok']), 'error' => $rep['error'] ?? '',
         'groups' => $rep['groups'] ?? 0, 'dups' => $rep['duplicates'] ?? 0,
         'deleted' => $rep['deleted'] ?? 0, 'failed' => $rep['failed'] ?? 0,
+        'partial' => !empty($rep['partial']),          // v10.23 (۳۶ب)
+        'partial_msg' => (string)($rep['partial_msg'] ?? ''),
         'log_add' => [empty($rep['ok'])
             ? ('❌ ' . ($rep['error'] ?? 'ناموفق'))
             : ('🏁 پایان در ' . $rep['took'] . ' ثانیه — '
@@ -15812,9 +16042,13 @@ if (isset($_GET['dedup_status'])) {
     $since = max(0, (int)($_GET['since'] ?? 0));
     $st['log_total'] = count($log);
     $st['log'] = $since > 0 ? array_slice($log, $since) : array_slice($log, -60);
-    // اگر پردازه مرده باشد ولی فایل هنوز running بگوید، قفل را ملاک بگیر
+    /* اگر پردازه مرده باشد ولی فایل هنوز running بگوید، قفل را ملاک بگیر.
+       v10.23 (۳۶ب): آستانه از ۹۰ ثانیه به DEDUP_STALE_SEC رسید — با سه‌بار
+       تلاشِ یک صفحه (۲+۴ ثانیه مکث + تایم‌اوتِ خودِ درخواست‌ها) کارِ کاملاً
+       سالم هم می‌توانست بیش از ۹۰ ثانیه بی‌صدا بماند و «مرده» اعلام شود؛
+       آن‌وقت رابط دست از پایش برمی‌داشت در حالی که سرور هنوز کار می‌کرد. */
     if (!empty($st['running']) && !is_file(DEDUP_LOCK_FILE)
-        && (time() - (int)($st['ts'] ?? 0)) > 90) {
+        && (time() - (int)($st['ts'] ?? 0)) > DEDUP_STALE_SEC) {
         $st['running'] = false; $st['done'] = true; $st['stale'] = true;
     }
     $st['ok'] = true;
@@ -15835,6 +16069,115 @@ if (isset($_GET['dedup_stop'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @file_put_contents(DEDUP_STOP_FILE, json_encode(['at' => time()]));
     dedupProgress(['log_add' => ['⏹ درخواستِ توقف ثبت شد — پس از موردِ جاری متوقف می‌شود']]);
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v10.23 (۳۶د): اندپوینت‌های «اصلاح دستهٔ باسلام» به‌عنوان کارِ پس‌زمینه
+ *
+ *  چهار اندپوینت، دقیقاً هم‌شکلِ خانوادهٔ dedup_* و agent_*:
+ *    ?catfix_start  · شروع (قفل + پاسخِ زودهنگام + ادامه در پس‌زمینه)
+ *    ?catfix_status · پیشرفت و لاگِ افزایشی
+ *    ?catfix_result · گزارشِ نهایی
+ *    ?catfix_stop   · درخواستِ توقفِ نرم
+ * ===================================================================== */
+if (isset($_GET['catfix_start'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $mode = (string)($_GET['mode'] ?? 'ai_text');
+    if (!in_array($mode, ['ai_text', 'master', 'quorum'], true)) $mode = 'ai_text';
+    $opts = ['quorum' => (int)($_GET['quorum'] ?? 2),
+             'product_id' => (int)($_GET['product_id'] ?? 0)];
+
+    $lockFp = fopen(CATFIX_LOCK_FILE, 'c');
+    if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
+        if ($lockFp) fclose($lockFp);
+        echo json_encode(['ok' => false, 'running' => true,
+            'error' => 'یک اصلاحِ دسته‌بندی همین حالا در جریان است'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    @set_time_limit(0); @ignore_user_abort(true);
+    catfixClearStop();
+    $cn = loadConnections();
+
+    @unlink(CATFIX_PROGRESS_FILE);
+    @unlink(CATFIX_RESULT_FILE);
+    catfixProgress(['running' => true, 'done' => false, 'mode' => $mode,
+        'product_id' => (int)$opts['product_id'], 'started_at' => time(),
+        'total' => 0, 'current' => 0, 'fixed' => 0, 'failed' => 0, 'no_ai' => 0,
+        'no_cat' => 0, 'skip_same' => 0, 'skip_tried' => 0, 'asked' => 0, 'phase' => 'start',
+        'log_add' => ['🚀 شروعِ اصلاحِ دسته‌بندی — روش: ' . catfixModeLabel($mode)
+            . ((int)$opts['product_id'] > 0 ? (' · فقط محصول #' . (int)$opts['product_id']) : ' · همهٔ محصولاتِ ردشده')]]);
+
+    // پاسخِ فوری، سپس ادامهٔ کار در پس‌زمینه
+    $early = json_encode(['ok' => true, 'started' => true, 'mode' => $mode], JSON_UNESCAPED_UNICODE);
+    header('Connection: close');
+    header('Content-Length: ' . strlen($early));
+    echo $early;
+    @ob_flush(); @flush();
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+
+    register_shutdown_function(function () use ($lockFp) {
+        @flock($lockFp, LOCK_UN); @fclose($lockFp); @unlink(CATFIX_LOCK_FILE);
+    });
+
+    try {
+        $rep = catfixRun($cn, $mode, $opts);
+    } catch (Throwable $e) {
+        catfixProgress(['running' => false, 'done' => true, 'error' => $e->getMessage(),
+            'log_add' => ['❌ خطا: ' . $e->getMessage()]]);
+        catfixClearStop();
+        exit;
+    }
+    @file_put_contents(CATFIX_RESULT_FILE, json_encode($rep, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    $stopped = catfixStopRequested();
+    catfixClearStop();
+    catfixProgress(['running' => false, 'done' => true, 'stopped' => $stopped,
+        'result_ok' => !empty($rep['ok']), 'error' => $rep['error'] ?? '',
+        'fixed' => $rep['fixed'] ?? 0, 'failed' => $rep['failed'] ?? 0,
+        'no_ai' => $rep['no_ai'] ?? 0, 'no_cat' => $rep['no_cat'] ?? 0,
+        'skip_same' => $rep['skip_same'] ?? 0, 'skip_tried' => $rep['skip_tried'] ?? 0,
+        'asked' => $rep['asked'] ?? 0,
+        'log_add' => [empty($rep['ok'])
+            ? ('❌ ' . ($rep['error'] ?? 'ناموفق'))
+            : ('🏁 پایان در ' . $rep['took'] . ' ثانیه — ' . $rep['msg'])]]);
+    exit;
+}
+
+if (isset($_GET['catfix_status'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $st = [];
+    if (is_file(CATFIX_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(CATFIX_PROGRESS_FILE), true);
+        if (is_array($d)) $st = $d;
+    }
+    $log = is_array($st['log'] ?? null) ? $st['log'] : [];
+    $since = max(0, (int)($_GET['since'] ?? 0));
+    $st['log_total'] = count($log);
+    $st['log'] = $since > 0 ? array_slice($log, $since) : array_slice($log, -60);
+    /* همان گاردِ dedup: اگر پردازه مرده ولی فایل هنوز running می‌گوید */
+    if (!empty($st['running']) && !is_file(CATFIX_LOCK_FILE)
+        && (time() - (int)($st['ts'] ?? 0)) > DEDUP_STALE_SEC) {
+        $st['running'] = false; $st['done'] = true; $st['stale'] = true;
+    }
+    $st['ok'] = true;
+    $st['has_result'] = is_file(CATFIX_RESULT_FILE);
+    echo json_encode($st, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['catfix_result'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    if (!is_file(CATFIX_RESULT_FILE)) {
+        echo json_encode(['ok' => false, 'error' => 'هنوز گزارشی گرفته نشده'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    echo (string)@file_get_contents(CATFIX_RESULT_FILE);
+    exit;
+}
+
+if (isset($_GET['catfix_stop'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @file_put_contents(CATFIX_STOP_FILE, json_encode(['at' => time()]));
+    catfixProgress(['log_add' => ['⏹ درخواستِ توقف ثبت شد — پس از محصولِ جاری متوقف می‌شود']]);
     echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -20269,6 +20612,194 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, "unset(\$_pingResults['heartbeat']);") !== false
       && strpos($selfSrc, '$pingRes = notifCronPing($cn, $_pingResults);') !== false);
 
+/* ---------- v10.23 (۳۶): مدیر وظیفه، dedup، اصلاحِ دسته، صفِ غرفه‌ها ---------- */
+
+    /* ۳۶الف — پرشِ کلیکی */
+    $add('10.23', 'هر کارِ رجیستری نشانیِ ناوبری دارد (pane یا open)',
+         (function () {
+             foreach (tasksRegistry() as $k => $d) {
+                 if (trim((string)($d['pane'] ?? '')) === '' && trim((string)($d['open'] ?? '')) === '') return false;
+             }
+             return true;
+         })());
+
+    $add('10.23', 'ردیفِ ساخته‌شده فیلدهای ناوبری را به رابط می‌رساند',
+         (function () {
+             $r = tasksBuildRow('dedup', tasksRegistry()['dedup'], time());
+             foreach (['pane','smenu','ai','el','open','resume','resumable'] as $k)
+                 if (!array_key_exists($k, $r)) return false;
+             return true;
+         })());
+
+    $add('10.23', 'کارهای هوش مصنوعی زیرتبِ خودشان را می‌شناسند',
+         (tasksRegistry()['agent']['ai'] ?? '') === 'agent'
+      && (tasksRegistry()['ai_test']['ai'] ?? '') === 'test'
+      && (tasksRegistry()['agent']['pane'] ?? '') === 'settings');
+
+    $add('10.23', 'رابط تابعِ پرش و برجسته‌سازی را دارد',
+         strpos($selfSrc, 'function tmGo(key){') !== false
+      && strpos($selfSrc, 'function tmSpot(el){') !== false
+      && strpos($selfSrc, 'function tmOpenSmenu(titlePart){') !== false
+      && strpos($selfSrc, 'function dedupOpenLast(){') !== false);
+
+    $add('10.23', 'دکمه‌های داخلِ کارت پرشِ کارت را خنثی می‌کنند',
+         strpos($selfSrc, "onclick=\"event.stopPropagation();tmStop(") !== false
+      && strpos($selfSrc, "onclick=\"event.stopPropagation();tmClear(") !== false
+      && strpos($selfSrc, "onclick=\"event.stopPropagation();tmResume(") !== false);
+
+    /* ۳۶ج — ادامهٔ دستیِ کارِ گیرکرده */
+    $add('10.23', 'نشانیِ ادامه پارامترهای اجرای قبلی را بازمی‌سازد',
+         tasksResumeUrl('dedup', tasksRegistry()['dedup'], ['target' => 'bsl', 'mode' => 'delete'])
+             === 'dedup_start=1&target=bsl&mode=delete'
+      && tasksResumeUrl('suffix', tasksRegistry()['suffix'], ['target' => 'woo'])
+             === 'suffix_report=1&target=woo'
+      && tasksResumeUrl('catfix', tasksRegistry()['catfix'], ['mode' => 'quorum'])
+             === 'catfix_start=1&mode=quorum');
+
+    $add('10.23', 'بدونِ پارامترِ حیاتی، «ادامه» پیشنهاد نمی‌شود',
+         tasksResumeUrl('dedup', tasksRegistry()['dedup'], []) === ''
+      && tasksResumeUrl('agent', tasksRegistry()['agent'], ['mode' => 'dry']) === ''
+      && tasksResumeUrl('bulkedit', tasksRegistry()['bulkedit'], []) === '');
+
+    $add('10.23', 'کارِ در حال اجرا دکمهٔ ادامه نمی‌گیرد',
+         (function () use ($selfSrc) {
+             $run = tasksBuildRow('catfix', tasksRegistry()['catfix'], time());
+             /* بدونِ فایلِ پیشرفت وضعیت idle است و ادامه مجاز — کافی است
+                مطمئن شویم منطق به state گره خورده، نه همیشه روشن. */
+             return strpos($selfSrc, "\$resumeUrl = (\$st === 'stale' || \$st === 'done' || \$st === 'idle')") !== false
+                 && is_array($run) && array_key_exists('resumable', $run);
+         })());
+
+    $add('10.23', 'اندپوینتِ ادامه قفل و سیگنالِ توقفِ جامانده را برمی‌دارد',
+         strpos($selfSrc, "isset(\$_GET['tasks_resume'])") !== false
+      && strpos($selfSrc, '$started = fireAndForget($url, 2500);') !== false
+      && strpos($selfSrc, "'error' => 'این کار همین حالا در حال اجراست'") !== false);
+
+    /* ۳۶د — اصلاحِ دستهٔ باسلام به‌عنوان کارِ پس‌زمینه */
+    $add('10.23', 'رجیستری یازده کار دارد و «catfix» جزوشان است',
+         isset(tasksRegistry()['catfix']) && count(tasksRegistry()) === 11);
+
+    $add('10.23', 'موتور و اندپوینت‌های اصلاحِ دسته وجود دارند',
+         function_exists('catfixRun') && function_exists('catfixProgress')
+      && function_exists('catfixFetchRejected') && function_exists('catfixFlatCats')
+      && function_exists('catfixStopRequested') && function_exists('catfixModeLabel'));
+
+    $add('10.23', 'چهار اندپوینتِ catfix روی الگویِ dedup سوارند',
+         strpos($selfSrc, "isset(\$_GET['catfix_start'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['catfix_status'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['catfix_result'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['catfix_stop'])") !== false);
+
+    $add('10.23', 'شروعِ اصلاحِ دسته قفل می‌گیرد و زودهنگام پاسخ می‌دهد',
+         strpos($selfSrc, "\$lockFp = fopen(CATFIX_LOCK_FILE, 'c');") !== false
+      && strpos($selfSrc, "'error' => 'یک اصلاحِ دسته‌بندی همین حالا در جریان است'") !== false
+      && strpos($selfSrc, '@flock($lockFp, LOCK_UN); @fclose($lockFp); @unlink(CATFIX_LOCK_FILE);') !== false);
+
+    $add('10.23', 'سه روشِ اصلاح شناخته می‌شوند و ناشناخته به متنِ باسلام برمی‌گردد',
+         catfixModeLabel('ai_text') === 'متنِ بررسیِ باسلام'
+      && catfixModeLabel('master') === 'مدلِ مستر'
+      && catfixModeLabel('quorum') === 'اجماعِ چندمدلی'
+      && strpos($selfSrc, "if (!in_array(\$mode, ['ai_text', 'master', 'quorum'], true)) \$mode = 'ai_text';") !== false);
+
+    $add('10.23', 'توقفِ catfix از مدیر وظیفه هم کار می‌کند',
+         (tasksRegistry()['catfix']['stop'] ?? '') === 'catfix_stop'
+      && strpos($selfSrc, "'catfix_stop' => CATFIX_STOP_FILE];   // v10.23 (۳۶د)") !== false
+      && strpos($selfSrc, "'catfix' => CATFIX_LOCK_FILE];   // v10.23 (۳۶د)") !== false);
+
+    /* رشته‌ها تکه‌تکه ساخته می‌شوند وگرنه خودِ همین ادعا در سورس پیدا
+       می‌شود و چکِ «وجود ندارد» همیشه شکست می‌خورد. */
+    $add('10.23', 'رابطِ SSEِ قدیمیِ اصلاحِ دسته برداشته شد',
+         strpos($selfSrc, 'new Event' . "Source('?bsl_fix_ai_cat_batch=1')") === false
+      && strpos($selfSrc, 'new Event' . "Source('?bsl_master_fix=1')") === false
+      && strpos($selfSrc, 'new Event' . "Source('?bsl_fix_ai_cat=1&product_id='") === false
+      && strpos($selfSrc, "function bslBatchFixAiCat(){ catfixOpen('ai_text'); }") !== false
+      && strpos($selfSrc, "function bslMasterFixAll(){ catfixOpen('quorum'); }") !== false);
+
+    $add('10.23', 'پنجرهٔ تازهٔ اصلاحِ دسته فقط سه اندپوینت را صدا می‌زند',
+         strpos($selfSrc, "function catfixOpen(mode){") !== false
+      && strpos($selfSrc, "fetch('?catfix_status=1&since='+cfSeen)") !== false
+      && strpos($selfSrc, "fetch('?catfix_result=1')") !== false
+      && strpos($selfSrc, "fetch('?catfix_stop=1')") !== false);
+
+    /* ۳۶ب — پایداریِ dedup */
+    $add('10.23', 'برداشتِ ناقص با پرچمِ partial گزارش می‌شود',
+         strpos($selfSrc, 'function dedupFetchBsl(string $tk, int $vid, int $maxPages = DEDUP_MAX_PAGES, ?array &$partial = null)') !== false
+      && strpos($selfSrc, 'function dedupFetchWoo(array $w, int $maxPages = DEDUP_MAX_PAGES, ?array &$partial = null)') !== false
+      && strpos($selfSrc, "\$partial = ['partial' => true, 'reason' => 'max_pages'") !== false);
+
+    $add('10.23', 'با فهرستِ ناقص، حذف انجام نمی‌شود',
+         strpos($selfSrc, "if (\$mode === 'delete') \$mode = 'scan';") !== false
+      && strpos($selfSrc, '$isPartial = !empty($partial[') !== false);
+
+    $add('10.23', 'خودِ حذف/بایگانی تلاشِ مجدد دارد',
+         DEDUP_DEL_TRIES === 3
+      && strpos($selfSrc, 'for ($dt = 1; $dt <= (int)DEDUP_DEL_TRIES; $dt++)') !== false
+      && strpos($selfSrc, 'if (in_array($code, [400, 401, 403, 404], true)) break;') !== false);
+
+    $add('10.23', 'سقفِ صفحات و آستانهٔ رهاشدگیِ dedup اصلاح شد',
+         DEDUP_MAX_PAGES === 2000 && DEDUP_STALE_SEC === 300
+      && strpos($selfSrc, '&& (time() - (int)($st[\'ts\'] ?? 0)) > DEDUP_STALE_SEC) {') !== false);
+
+    $add('10.23', 'هشدارِ فهرستِ ناقص در گزارشِ رابط نشان داده می‌شود',
+         strpos($selfSrc, 'function ddPartialHtml(d){') !== false
+      && strpos($selfSrc, 'فهرست ناقص دریافت شد') !== false);
+
+    $add('10.23', 'دکمهٔ تکراری‌های باسلام در تبِ ارسال هم هست',
+         strpos($selfSrc, 'function toggleBslTools(){') !== false
+      && strpos($selfSrc, 'onclick="bslFindDuplicates()" style="flex:1"') !== false
+      && strpos($selfSrc, 'id="bslToolsBody"') !== false);
+
+    /* ۳۶ه — شمارنده‌های تفکیکیِ غرفه */
+    $add('10.23', 'توابعِ آمارِ تفکیکیِ غرفه وجود دارند',
+         function_exists('bslShopStatBump') && function_exists('bslShopStatRows'));
+
+    $add('10.23', 'غرفهٔ پیش‌فرض ردیفِ اول است و بقیه پشتِ سرش',
+         (function () {
+             $GLOBALS['bslShopStats'] = [];
+             $GLOBALS['bslDefaultVid'] = 11;
+             $GLOBALS['bslDefaultShopName'] = 'اصلی';
+             bslShopStatBump(22, 'دومی', 'c', 3);
+             bslShopStatBump(22, 'دومی', 'f', 1);
+             $r = bslShopStatRows(5, 2, 1, 0);
+             $ok = count($r) === 2
+                && $r[0]['vid'] === 11 && $r[0]['is_default'] === true && $r[0]['sent'] === 5
+                && $r[1]['vid'] === 22 && $r[1]['name'] === 'دومی'
+                && $r[1]['sent'] === 3 && $r[1]['failed'] === 1;
+             $GLOBALS['bslShopStats'] = []; $GLOBALS['bslDefaultVid'] = 0; $GLOBALS['bslDefaultShopName'] = '';
+             return $ok;
+         })());
+
+    $add('10.23', 'غرفهٔ پیش‌فرض دوباره در فهرست تکرار نمی‌شود',
+         (function () {
+             $GLOBALS['bslShopStats'] = [];
+             $GLOBALS['bslDefaultVid'] = 7;
+             $GLOBALS['bslDefaultShopName'] = 'یک';
+             bslShopStatBump(7, 'یک', 'u', 4);      // همان پیش‌فرض
+             bslShopStatBump(0, 'بی‌شناسه', 'u', 9); // نامعتبر، باید نادیده برود
+             $r = bslShopStatRows(1, 1, 0, 0);
+             $ok = count($r) === 1 && $r[0]['vid'] === 7;
+             $GLOBALS['bslShopStats'] = []; $GLOBALS['bslDefaultVid'] = 0; $GLOBALS['bslDefaultShopName'] = '';
+             return $ok;
+         })());
+
+    $add('10.23', 'شمارنده‌ها در پیشرفت و ردیفِ صف ماندگار می‌شوند',
+         strpos($selfSrc, "if(\$__ss)\$d['shop_stats']=\$__ss;") !== false
+      && strpos($selfSrc, "\$qe['shop_stats']=\$bslFinalShopStats;") !== false
+      && strpos($selfSrc, "if(is_array(\$progress['shop_stats']??null))\$e['shop_stats']=\$progress['shop_stats'];") !== false);
+
+    $add('10.23', 'بین شمارنده‌های دو غرفه خطِ جداکننده کشیده می‌شود',
+         strpos($selfSrc, 'function bslShopStatsHtml(rows,compact){') !== false
+      && strpos($selfSrc, "(i>0?';border-top:1px dashed #334155':'')") !== false
+      && strpos($selfSrc, 'if(!Array.isArray(rows)||rows.length<2)return') !== false);
+
+    /* دو فراخوانِ واقعی (صف و گزارشِ تفصیلی) + یک بار در متنِ همین ادعا */
+    $add('10.23', 'شمارنده‌های تفکیکی هم در صف و هم در گزارشِ تفصیلی می‌آیند',
+         substr_count($selfSrc, 'bslShopStats' . 'Html(e.shop_stats)') === 2);
+
+    $add('10.23', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '23', '>=')
+      && strpos($selfSrc, 'v:' . "'10.23'") !== false);
+
     $add('10.21', 'اندپوینتِ سلامتِ اعلان‌ها هفت بررسی انجام می‌دهد',
          strpos($selfSrc, "isset(\$_GET['notif_health'])") !== false
       && strpos($selfSrc, "\$add('messenger',") !== false
@@ -20451,12 +20982,13 @@ if (isset($_GET['selftest'])) {
 
 /* ---------- v10.19 (۳۲): مدیر وظیفه ---------- */
 
+    /* v10.23 (۳۶د): «catfix» یازدهمین کار شد؛ ده کارِ اصلی باید سرِ جایشان بمانند */
     $add('10.19', 'رجیستریِ کارها هر ۱۰ کارِ پس‌زمینه را می‌شناسد',
          (function () {
              $r = tasksRegistry();
              foreach (['bsl_send','woo_send','extract','dedup','agent','ai_test','recon','suffix','bulkedit','photofix'] as $k)
                  if (!isset($r[$k])) return false;
-             return count($r) === 10;
+             return count($r) >= 10;
          })());
 
     $add('10.19', 'هر ردیفِ رجیستری عنوان، فایل، تب و خلاصه‌ساز دارد',
@@ -20565,13 +21097,15 @@ if (isset($_GET['selftest'])) {
 
     $add('10.19', 'هر سیگنالِ توقفِ رجیستری به فایلِ واقعیِ همان کار نگاشت دارد',
          (function () {
+             /* v10.23 (۳۶د): catfix_stop هم به نگاشت اضافه شد */
              $map = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
-                     'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE, 'ai_test_stop' => AI_TEST_STOP_FILE];
+                     'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE, 'ai_test_stop' => AI_TEST_STOP_FILE,
+                     'catfix_stop' => CATFIX_STOP_FILE];
              foreach (tasksRegistry() as $d) {
                  $st = (string)$d['stop'];
                  if ($st !== '' && !isset($map[$st])) return false;
              }
-             return count($map) === 6;
+             return count($map) === 7;
          })());
 
     $add('10.19', 'سه اندپوینتِ مدیر وظیفه و اندپوینتِ اولویت وجود دارند',
@@ -29505,6 +30039,8 @@ $e['failed']=$progress['failed']??0;
 $e['current']=$progress['current']??0;
 $e['total']=$progress['total']??$e['total']??0;
 $e['done']=$progress['done']??false;
+/* v10.23 (۳۶ه): شمارنده‌های تفکیکیِ غرفه‌ها زنده به صف می‌رسند */
+if(is_array($progress['shop_stats']??null))$e['shop_stats']=$progress['shop_stats'];
 
 if($progress['paused']){$e['status']='paused';$e['paused_at']=time();}
 else if($progress['done']){$e['status']='done';$e['done_at']=time();}
@@ -29839,6 +30375,8 @@ $entry['failed_details']=$progress['failed_details']??$entry['failed_details']??
 $entry['recent_log']=$progress['recent_log']??$entry['recent_log']??[];
 $entry['total_log_count']=$progress['total_log_count']??$entry['total_log_count']??0;
 $entry['started_at']=$progress['started_at']??$entry['started_at'];
+/* v10.23 (۳۶ه) */
+if(is_array($progress['shop_stats']??null))$entry['shop_stats']=$progress['shop_stats'];
 }
 
 $products=@json_decode(@file_get_contents($entry['products_file']??'')?:'[]',true)?:[];
@@ -30031,6 +30569,13 @@ register_shutdown_function(function()use($bslLockFp,$bslLockFile){@flock($bslLoc
 $startedAt=time();
 $GLOBALS['startedAt']=$startedAt;
 $bslQueueId=''; $bslSentList=[]; $bslUpdatedList=[]; $bslSkippedList=[]; $bslFailedList=[]; $bslLog=[]; $bslFlatCats=[];
+/* v10.23 (۳۶ه): شمارنده‌های تفکیکیِ هر غرفه.
+   تا اینجا صفِ ارسال فقط یک مجموعه شمارنده داشت (جدید/آپدیت/تکراری/خطا) که
+   جمعِ کورِ همهٔ غرفه‌ها بود. با «ارسال همزمان به همهٔ غرفه‌ها» این عدد عملاً
+   بی‌معنی می‌شد: نمی‌شد فهمید کدام غرفه اصلاً چیزی نگرفته یا کدام‌یک همهٔ
+   خطاها را داده. حالا هر غرفه ردیفِ شمارندهٔ خودش را دارد.
+   کلید = vendor_id، مقدار = ['name','c'(ساخته),'u'(آپدیت),'s'(رد),'f'(خطا)] */
+$bslShopStats=[]; $bslDefaultVid=0; $bslDefaultShopName='';
 
 function bslBackendProgress($s,$u,$sk,$f,$t,$c,$lt,$log=null,$extra=[]){
 global $bslLog,$bslSentList,$bslUpdatedList,$bslSkippedList,$bslFailedList,$bslQueueId;
@@ -30039,6 +30584,10 @@ $totalLog=count($bslLog);
 $recentSlice=$totalLog>200?array_slice($bslLog,-200):$bslLog;
 $d=['running'=>true,'sent'=>$s,'updated'=>$u,'skipped'=>$sk,'failed'=>$f,'total'=>$t,'last_title'=>$lt,'current'=>$c,'done'=>false,'started_at'=>$GLOBALS['startedAt'],'last_progress_ts'=>time(),'recent_log'=>$recentSlice,'total_log_count'=>$totalLog,'sent_details'=>$bslSentList,'updated_details'=>$bslUpdatedList,'skipped_details'=>$bslSkippedList,'failed_details'=>$bslFailedList];
 if($bslQueueId!='')$d['queue_id']=$bslQueueId;
+/* v10.23 (۳۶ه): شمارنده‌های هر غرفه در هر ضربانِ پیشرفت هم می‌روند تا صف
+   بتواند «زنده» نشانشان بدهد، نه فقط در پایانِ کار. */
+$__ss=bslShopStatRows((int)$s,(int)$u,(int)$sk,(int)$f);
+if($__ss)$d['shop_stats']=$__ss;
 if(!empty($extra))$d=array_merge($d,$extra);
 writeProgress(BSL_PROGRESS_FILE,$d);
 clearstatcache();
@@ -30159,6 +30708,10 @@ bslBackendProgress(0,0,0,0,0,0,'',['⏱ سینک خودکار — پروفایل
 
 $tk=$cn['basalam']['token'];$vid=(int)$cn['basalam']['vendor_id'];
 $autoCat=!empty($cn['basalam']['auto_category']);
+/* v10.23 (۳۶ه): هویتِ غرفهٔ پیش‌فرض برای ردیفِ اولِ شمارنده‌های تفکیکی */
+$bslDefaultVid=$vid;
+$bslDefaultShopName=trim((string)($cn['basalam']['shop_name']??''));
+if($bslDefaultShopName==='')$bslDefaultShopName='غرفهٔ پیش‌فرض';
 
 $bslDelayMs=max(0,(int)($cn['basalam']['delay_ms']??500));
 $bslRetryDelayMs=max(0,(int)($cn['basalam']['retry_delay_ms']??1000));
@@ -30470,7 +31023,13 @@ if($__sendAllShops && $__liveShops){
        ============================================================ */
     $__conc = max(1, min(8, count($__liveShops)));
     $__shopStat = [];   // vendor_id => [created, updated, failed]
-    foreach($__liveShops as $__sh1) $__shopStat[(int)$__sh1['vendor_id']]=['c'=>0,'u'=>0,'f'=>0];
+    $__shopName = [];   // v10.23 (۳۶ه): نامِ خواناى هر غرفه برای صفِ ارسال
+    foreach($__liveShops as $__sh1){
+        $__v1=(int)$__sh1['vendor_id'];
+        $__shopStat[$__v1]=['c'=>0,'u'=>0,'f'=>0];
+        $__shopName[$__v1]=trim((string)($__sh1['shop_name']??''));
+        bslShopStatBump($__v1,$__shopName[$__v1],'c',0);   // ردیفش از همان اول پیدا شود
+    }
     $__msDone=0; $__msStop=false;
     bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',
         '🚚 ارسال همزمان به '.count($__liveShops).' غرفهٔ فعال — '.$total.' محصول (همزمانی: '.$__conc.')');
@@ -30482,8 +31041,8 @@ if($__sendAllShops && $__liveShops){
             $__vid=(int)$__vid;
             if(!isset($__shopStat[$__vid])) $__shopStat[$__vid]=['c'=>0,'u'=>0,'f'=>0];
             if(!empty($__res['ok'])){
-                if(($__res['action']??'')==='created') $__shopStat[$__vid]['c']++;
-                else                                   $__shopStat[$__vid]['u']++;
+                if(($__res['action']??'')==='created'){ $__shopStat[$__vid]['c']++; bslShopStatBump($__vid,(string)($__shopName[$__vid]??''),'c'); }
+                else                                  { $__shopStat[$__vid]['u']++; bslShopStatBump($__vid,(string)($__shopName[$__vid]??''),'u'); }
                 $updated++;
             } elseif(!empty($__res['stopped'])||($__res['error']??'')==='stopped'){
                 // v10.20: توقفِ خواستهٔ کاربر «خطا» نیست — نه شمرده می‌شود نه
@@ -30492,6 +31051,7 @@ if($__sendAllShops && $__liveShops){
                 $__msStop=true;
             } else {
                 $__shopStat[$__vid]['f']++;
+                bslShopStatBump($__vid,(string)($__shopName[$__vid]??''),'f');
                 $bslFailedList[] = ['title'=>trim($p['title']??$p['name']??''),'key'=>$p['key']??'','error'=>'غرفه '.$__vid.': '.($__res['error']??'?')];
             }
         }
@@ -30535,7 +31095,8 @@ foreach($__liveShops as $__sh){
             if(($p['price_unit']??'')!=='rial')$__np=$__np*10;
             $__ru=bslReq($sTk,'PATCH','products/'.$__exId,['primary_price'=>$__np]);
             if($__ru['code']===404)$__ru=bslReq($sTk,'PATCH','vendors/'.$sVid.'/products/'.$__exId,['primary_price'=>$__np]);
-            if($__ru['ok']&&!empty($__ru['body']['id'])){ $shopFixed++; $updated++; }
+            if($__ru['ok']&&!empty($__ru['body']['id'])){ $shopFixed++; $updated++; bslShopStatBump($sVid,trim((string)($__sh['shop_name']??'')),'u'); }
+            else { bslShopStatBump($sVid,trim((string)($__sh['shop_name']??'')),'f'); }
             usleep(($bslDelayMs??500)*1000);
         }
         if($shopFixed>0)bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',"🏪 غرفهٔ $sVid: قیمت $shopFixed محصول با تعدیلِ خودِ آن غرفه (و لایهٔ پروفایل) به‌روز شد");
@@ -30657,13 +31218,17 @@ $finalLog="پایان: $sent جدید, $updated آپدیت, $skipped تکرار�
 $bslLog[]=$finalLog;
 @unlink(BSL_PRODUCTS_FILE);
 remoteMapRecord('bsl',array_merge($bslSentList,$bslUpdatedList),(string)($nextEntry['profile_key']??''));
-$finalProgress=['running'=>false,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'last_title'=>'','current'=>$total,'done'=>true,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$bslQueueId,'recent_log'=>$bslLog,'total_log_count'=>count($bslLog),'log'=>$finalLog,'sent_details'=>$bslSentList,'updated_details'=>$bslUpdatedList,'skipped_details'=>$bslSkippedList,'failed_details'=>$bslFailedList];
+/* v10.23 (۳۶ه): شمارنده‌های تفکیکیِ غرفه در پیشرفتِ نهایی و در خودِ ردیفِ صف
+   می‌نشینند تا بعد از تمام‌شدنِ کار هم — با ریفرشِ صفحه — باقی بمانند. */
+$bslFinalShopStats=bslShopStatRows($sent,$updated,$skipped,$fail);
+$finalProgress=['running'=>false,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'last_title'=>'','current'=>$total,'done'=>true,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$bslQueueId,'recent_log'=>$bslLog,'total_log_count'=>count($bslLog),'log'=>$finalLog,'sent_details'=>$bslSentList,'updated_details'=>$bslUpdatedList,'skipped_details'=>$bslSkippedList,'failed_details'=>$bslFailedList,'shop_stats'=>$bslFinalShopStats];
 writeProgress(BSL_PROGRESS_FILE,$finalProgress);
 
 $queue=bslReadQueue();foreach($queue['entries'] as &$qe){
 if($qe['id']===$bslQueueId&&$qe['status']==='running'){
 $qe['status']='done';$qe['sent']=$sent;$qe['updated']=$updated;$qe['skipped']=$skipped;$qe['failed']=$fail;$qe['current']=$total;$qe['done_at']=time();
 $qe['sent_details']=$bslSentList;$qe['updated_details']=$bslUpdatedList;$qe['skipped_details']=$bslSkippedList;$qe['failed_details']=$bslFailedList;
+$qe['shop_stats']=$bslFinalShopStats;
 $qe['recent_log']=array_slice($bslLog,-50);break;
 }
 }
@@ -32327,12 +32892,22 @@ function dedupFetchPage(callable $fetch, int $page, string $who): array {
     return $r;
 }
 
-/** همهٔ محصولاتِ باسلام برای حذفِ تکراری (با قیمت/موجودی/وضعیت) */
-function dedupFetchBsl(string $tk, int $vid, int $maxPages = 200): array {
+/** همهٔ محصولاتِ باسلام برای حذفِ تکراری (با قیمت/موجودی/وضعیت)
+ *
+ *  v10.23 (۳۶ب): $partial با ارجاع پر می‌شود. قبلاً وقتی برداشت وسطِ کار
+ *  می‌شکست (یا کاربر توقف می‌زد) تابع همان چیزی را که تا آن لحظه گرفته بود
+ *  برمی‌گرداند و کسی نمی‌فهمید فهرست ناقص است — بعد گروه‌بندی روی نصفِ
+ *  محصولات انجام می‌شد و «تکراری‌ها» ناقص گزارش می‌شدند. حالا این پرچم تا
+ *  گزارشِ نهایی و رابط بالا می‌آید و در حالتِ حذف، از حذف جلوگیری می‌کند. */
+function dedupFetchBsl(string $tk, int $vid, int $maxPages = DEDUP_MAX_PAGES, ?array &$partial = null): array {
     $rows = [];
     $statuses = '&statuses=2976&statuses=3790&statuses=3567&statuses=3568&statuses=4184';
     for ($page = 1; $page <= $maxPages; $page++) {
-        if (dedupStopRequested()) { dedupProgress(['log_add' => ['⏹ توقف در صفحهٔ ' . $page]]); break; }
+        if (dedupStopRequested()) {
+            dedupProgress(['log_add' => ['⏹ توقف در صفحهٔ ' . $page]]);
+            if ($partial !== null) $partial = ['partial' => true, 'reason' => 'stopped', 'page' => $page];
+            break;
+        }
         /* v10.18 (۳۱ج): به‌جای توقفِ فوری، همین صفحه چند بار با مکثِ فزاینده
            دوباره خواسته می‌شود؛ خطای گذرای ۵۰۰ دیگر کلِ برداشت را نمی‌بندد. */
         $r = dedupFetchPage(function () use ($tk, $vid, $page, $statuses) {
@@ -32342,6 +32917,8 @@ function dedupFetchBsl(string $tk, int $vid, int $maxPages = 200): array {
             dedupProgress(['log_add' => ['⚠️ صفحهٔ ' . $page . ' بعد از ' . (int)($r['tries'] ?? 1)
                 . ' تلاش ناموفق ماند (HTTP ' . ($r['code'] ?? '?') . ') — برداشت با '
                 . count($rows) . ' محصول متوقف شد']]);
+            if ($partial !== null) $partial = ['partial' => true, 'reason' => 'http',
+                'page' => $page, 'code' => (int)($r['code'] ?? 0), 'tries' => (int)($r['tries'] ?? 1)];
             break;
         }
         $batch = $r['body']['data'] ?? [];
@@ -32366,16 +32943,27 @@ function dedupFetchBsl(string $tk, int $vid, int $maxPages = 200): array {
             'log_add' => ['📄 باسلام صفحهٔ ' . $page . '/' . $tp . ': ' . count($batch)
                 . ' محصول (مجموع ' . count($rows) . ')']]);
         if ($page >= $tp || count($batch) < 100) break;
+        /* v10.23 (۳۶ب): رسیدن به سقفِ صفحات هم «برداشتِ ناقص» است */
+        if ($page >= $maxPages) {
+            dedupProgress(['log_add' => ['⚠️ سقفِ ' . $maxPages . ' صفحه پر شد ولی فروشگاه '
+                . $tp . ' صفحه دارد — فهرست ناقص است']]);
+            if ($partial !== null) $partial = ['partial' => true, 'reason' => 'max_pages',
+                'page' => $page, 'pages' => $tp];
+        }
         usleep(150000);
     }
     return $rows;
 }
 
-/** همهٔ محصولاتِ ووکامرس برای حذفِ تکراری */
-function dedupFetchWoo(array $w, int $maxPages = 200): array {
+/** همهٔ محصولاتِ ووکامرس برای حذفِ تکراری (v10.23 (۳۶ب): با پرچمِ ناقص‌بودن) */
+function dedupFetchWoo(array $w, int $maxPages = DEDUP_MAX_PAGES, ?array &$partial = null): array {
     $rows = [];
     for ($page = 1; $page <= $maxPages; $page++) {
-        if (dedupStopRequested()) { dedupProgress(['log_add' => ['⏹ توقف در صفحهٔ ' . $page]]); break; }
+        if (dedupStopRequested()) {
+            dedupProgress(['log_add' => ['⏹ توقف در صفحهٔ ' . $page]]);
+            if ($partial !== null) $partial = ['partial' => true, 'reason' => 'stopped', 'page' => $page];
+            break;
+        }
         /* v10.18 (۳۱ج): همان تلاشِ مجددِ باسلام برای ووکامرس */
         $r = dedupFetchPage(function () use ($w, $page) {
             $rr = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'GET',
@@ -32387,6 +32975,8 @@ function dedupFetchWoo(array $w, int $maxPages = 200): array {
             dedupProgress(['log_add' => ['⚠️ صفحهٔ ' . $page . ' بعد از ' . (int)($r['tries'] ?? 1)
                 . ' تلاش ناموفق ماند (HTTP ' . ($r['code'] ?? '?') . ') — برداشت با '
                 . count($rows) . ' محصول متوقف شد']]);
+            if ($partial !== null) $partial = ['partial' => true, 'reason' => 'http',
+                'page' => $page, 'code' => (int)($r['code'] ?? 0), 'tries' => (int)($r['tries'] ?? 1)];
             break;
         }
         $batch = $r['body'];
@@ -32411,6 +33001,10 @@ function dedupFetchWoo(array $w, int $maxPages = 200): array {
             'log_add' => ['📄 ووکامرس صفحهٔ ' . $page . ': ' . count($batch)
                 . ' محصول (مجموع ' . count($rows) . ')']]);
         if (count($batch) < 100) break;
+        if ($page >= $maxPages) {
+            dedupProgress(['log_add' => ['⚠️ سقفِ ' . $maxPages . ' صفحه پر شد و صفحهٔ پُر هم آمد — فهرست ناقص است']]);
+            if ($partial !== null) $partial = ['partial' => true, 'reason' => 'max_pages', 'page' => $page];
+        }
         usleep(150000);
     }
     return $rows;
@@ -32426,16 +33020,38 @@ function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
     $t0 = microtime(true);
     dedupProgress(['phase' => 'fetch', 'log_add' => ['🔍 دریافتِ فهرستِ محصولات...']]);
 
+    /* v10.23 (۳۶ب): پرچمِ «برداشتِ ناقص» — با ارجاع پر می‌شود */
+    $partial = [];
     if ($target === 'bsl') {
         $bs = $cn['basalam'] ?? [];
         if (empty($bs['token']) || empty($bs['vendor_id'])) return ['ok' => false, 'error' => 'تنظیمات باسلام ناقص است'];
-        $rows = dedupFetchBsl((string)$bs['token'], (int)$bs['vendor_id']);
+        $rows = dedupFetchBsl((string)$bs['token'], (int)$bs['vendor_id'], DEDUP_MAX_PAGES, $partial);
     } else {
         $w = $cn['woocommerce'] ?? [];
         if (empty($w['store_url'])) return ['ok' => false, 'error' => 'تنظیمات ووکامرس ناقص است'];
-        $rows = dedupFetchWoo($w);
+        $rows = dedupFetchWoo($w, DEDUP_MAX_PAGES, $partial);
     }
     if (!$rows) return ['ok' => false, 'error' => 'هیچ محصولی دریافت نشد'];
+
+    /* v10.23 (۳۶ب): اگر فهرست ناقص باشد، حذف بسیار خطرناک است — «تنها نسخهٔ
+       باقی‌مانده» ممکن است در صفحه‌ای باشد که اصلاً دریافت نشده و آن‌وقت
+       نسخه‌ای که اینجا «تکراری» دیده می‌شود در واقع تنها نسخهٔ موجود است.
+       پس در حالتِ حذف فقط گزارش می‌دهیم و صریح می‌گوییم چرا. */
+    $partialReason = [
+        'stopped'   => 'کاربر وسطِ برداشت توقف زد',
+        'http'      => 'یک صفحه بعد از چند تلاش هم نیامد',
+        'max_pages' => 'سقفِ صفحاتِ برداشت پر شد',
+    ];
+    $isPartial = !empty($partial['partial']);
+    if ($isPartial) {
+        dedupProgress(['partial' => true,
+            'partial_reason' => (string)($partial['reason'] ?? ''),
+            'log_add' => ['⚠️ فهرست ناقص است ('
+                . ($partialReason[(string)($partial['reason'] ?? '')] ?? 'نامعلوم')
+                . ') — فقط ' . count($rows) . ' محصول دریافت شد'
+                . ($mode === 'delete' ? '؛ برای ایمنی حذف انجام نمی‌شود' : '')]]);
+        if ($mode === 'delete') $mode = 'scan';
+    }
 
     dedupProgress(['phase' => 'group', 'total' => count($rows),
         'log_add' => ['🧮 ' . count($rows) . ' محصول دریافت شد؛ گروه‌بندی بر اساس عنوان...']]);
@@ -32465,23 +33081,43 @@ function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
                 if (dedupStopRequested()) break;
                 $did = (int)($d['id'] ?? 0);
                 if ($did <= 0) continue;
-                if ($target === 'bsl') {
-                    $bs = $cn['basalam'] ?? [];
-                    $r = bslArchiveProduct((string)$bs['token'], (int)$bs['vendor_id'], $did);
-                    $ok = !empty($r['ok']) || in_array((int)($r['code'] ?? 0), [200, 204], true);
-                    $em = $r['body']['message'] ?? ($r['body']['error'] ?? ('HTTP ' . ($r['code'] ?? '?')));
-                } else {
-                    $w = $cn['woocommerce'] ?? [];
-                    $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
-                        'DELETE', 'products/' . $did . '?force=true');
-                    $ok = !empty($r['ok']);
-                    $em = $r['body']['message'] ?? ('HTTP ' . ($r['code'] ?? '?'));
+                /* v10.23 (۳۶ب): خودِ حذف/بایگانی هم تلاشِ مجدد دارد. تا اینجا
+                   فقط *برداشتِ* صفحات retry داشت؛ خودِ عملیات یک‌باره بود و
+                   یک ۵۰۰/۴۲۹ گذرا محصول را برای همیشه در ستونِ «ناموفق»
+                   می‌نشاند. مکث فزاینده است تا ریت‌لیمیت هم فرصت بازیابی بگیرد. */
+                $ok = false; $em = ''; $dTries = 0;
+                for ($dt = 1; $dt <= (int)DEDUP_DEL_TRIES; $dt++) {
+                    $dTries = $dt;
+                    if ($dt > 1 && dedupStopRequested()) break;
+                    if ($target === 'bsl') {
+                        $bs = $cn['basalam'] ?? [];
+                        $r = bslArchiveProduct((string)$bs['token'], (int)$bs['vendor_id'], $did);
+                        $ok = !empty($r['ok']) || in_array((int)($r['code'] ?? 0), [200, 204], true);
+                        $em = $r['body']['message'] ?? ($r['body']['error'] ?? ('HTTP ' . ($r['code'] ?? '?')));
+                    } else {
+                        $w = $cn['woocommerce'] ?? [];
+                        $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                            'DELETE', 'products/' . $did . '?force=true');
+                        $ok = !empty($r['ok']);
+                        $em = $r['body']['message'] ?? ('HTTP ' . ($r['code'] ?? '?'));
+                    }
+                    if ($ok) break;
+                    /* ۴۰۴/۴۰۳ یعنی «دیگر نیست یا اجازه نداریم» — تکرارش بی‌فایده است */
+                    $code = (int)($r['code'] ?? 0);
+                    if (in_array($code, [400, 401, 403, 404], true)) break;
+                    if ($dt < (int)DEDUP_DEL_TRIES) {
+                        $wait = min((int)DEDUP_PAGE_WAIT_MAX, (int)(DEDUP_DEL_WAIT_BASE * pow(2, $dt - 1)));
+                        dedupProgress(['log_add' => ['↻ #' . $did . ' ناموفق (HTTP ' . ($code ?: '?')
+                            . ') — تلاشِ ' . ($dt + 1) . ' از ' . DEDUP_DEL_TRIES . ' بعد از ' . $wait . ' ثانیه']]);
+                        sleep($wait);
+                    }
                 }
                 $done++;
                 if ($ok) {
                     $deleted++;
                     dedupProgress(['deleted' => $deleted, 'failed' => $failed, 'processed' => $done,
                         'log_add' => ['✅ ' . ($target === 'bsl' ? 'بایگانی' : 'حذف') . ' #' . $did
+                            . ($dTries > 1 ? (' (تلاشِ ' . $dTries . 'ام)') : '')
                             . ' — ' . mb_substr((string)$d['name'], 0, 45, 'UTF-8')]]);
                 } else {
                     $failed++;
@@ -32511,9 +33147,339 @@ function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
     return ['ok' => true, 'target' => $target, 'mode' => $mode, 'cfg' => $cfg,
             'total' => count($rows), 'groups' => count($dupGroups), 'duplicates' => $dupCount,
             'deleted' => $deleted, 'failed' => $failed, 'errors' => $errors,
+            'partial' => $isPartial,
+            'partial_reason' => $isPartial ? (string)($partial['reason'] ?? '') : '',
+            'partial_msg' => $isPartial
+                ? ('فهرست ناقص دریافت شد — ' . ($partialReason[(string)($partial['reason'] ?? '')] ?? 'علتِ نامعلوم')
+                   . '. گروه‌بندی روی همین ' . count($rows) . ' محصول انجام شد و برای ایمنی حذفی صورت نگرفت.')
+                : '',
             'truncated' => count($dupGroups) > DEDUP_MAX_GROUPS,
             'took' => round(microtime(true) - $t0, 1), 'at' => time(),
             'duplicates_list' => $out];
+}
+
+/* =====================================================================
+ *  v10.23 (۳۶د): «اصلاح دسته‌بندی محصولات باسلام» — موتورِ پس‌زمینه
+ *
+ *  چه چیزی عوض شد و چرا:
+ *
+ *  تا نسخهٔ ۱۰٫۲۲ هر سه مسیرِ این جریان (اصلاح با متنِ AIِ خودِ باسلام،
+ *  اصلاح با مدلِ مستر، و اجماعِ چندمدلی) فقط «رویدادِ زنده» (SSE) بودند.
+ *  یعنی کار در همان درخواستِ مرورگر می‌دوید. عوارضش دقیقاً همان چیزهایی
+ *  بود که کاربر گزارش کرد:
+ *
+ *    • بستنِ تب یا رفتنِ گوشی به حالتِ خواب ⇒ کار وسطِ راه می‌مرد و
+ *      محصولاتِ بعدی هیچ‌وقت اصلاح نمی‌شدند.
+ *    • هیچ قفلی نبود ⇒ دو تبِ باز = دو اجرای موازی روی یک غرفه؛ هر دو
+ *      همان محصول را PATCH می‌کردند و سهمیهٔ API دوبرابر می‌سوخت.
+ *    • هیچ دکمهٔ توقفی وجود نداشت؛ تنها راه، بستنِ پنجره بود.
+ *    • و مهم‌تر از همه: در «مدیر وظیفه» اصلاً دیده نمی‌شد. کاربر نمی‌دانست
+ *      چنین کاری اصلاً در جریان است.
+ *
+ *  حالا عیناً همان الگویِ dedup/ایجنت را دارد: قفلِ انحصاری، پاسخِ زودهنگام
+ *  و ادامهٔ کار در پس‌زمینهٔ سرور، فایلِ پیشرفت با لاگ و درصد، فایلِ نتیجه،
+ *  فایلِ سیگنالِ توقف — و یک ردیف در رجیستریِ مدیر وظیفه.
+ * ===================================================================== */
+
+function catfixProgress(array $patch): void {
+    $cur = [];
+    if (is_file(CATFIX_PROGRESS_FILE)) {
+        $d = json_decode((string)@file_get_contents(CATFIX_PROGRESS_FILE), true);
+        if (is_array($d)) $cur = $d;
+    }
+    $log = is_array($cur['log'] ?? null) ? $cur['log'] : [];
+    if (isset($patch['log_add'])) {
+        foreach ((array)$patch['log_add'] as $l) $log[] = ['t' => time(), 'm' => (string)$l];
+        if (count($log) > 400) $log = array_slice($log, -400);
+        unset($patch['log_add']);
+    }
+    $cur = array_merge($cur, $patch);
+    $cur['log'] = $log; $cur['ts'] = time();
+    @file_put_contents(CATFIX_PROGRESS_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+function catfixStopRequested(): bool { return is_file(CATFIX_STOP_FILE); }
+function catfixClearStop(): void { @unlink(CATFIX_STOP_FILE); }
+
+/** برچسبِ خوانای حالت‌های اجرا */
+function catfixModeLabel(string $mode): string {
+    $m = ['ai_text' => 'متنِ بررسیِ باسلام', 'master' => 'مدلِ مستر', 'quorum' => 'اجماعِ چندمدلی'];
+    return $m[$mode] ?? $mode;
+}
+
+/** درختِ دسته‌بندیِ باسلام را تخت می‌کند — همان تابعِ درون‌خطیِ چهار اندپوینتِ قبلی */
+function catfixFlatCats(string $tk): array {
+    $r = bslReq($tk, 'GET', 'categories');
+    if (empty($r['ok'])) return [];
+    $data = $r['body']['data'] ?? [];
+    if (!is_array($data)) return [];
+    $walk = function ($items, $lv = 0) use (&$walk) {
+        $o = [];
+        foreach ($items as $c) {
+            $t = trim((string)($c['title'] ?? ($c['name'] ?? '')));
+            $id = (int)($c['id'] ?? 0);
+            if ($id > 0) $o[] = ['id' => $id, 'name' => $t, 'level' => $lv];
+            $ch = $c['children'] ?? [];
+            if (is_array($ch) && $ch) foreach ($walk($ch, $lv + 1) as $s) $o[] = $s;
+        }
+        return $o;
+    };
+    return $walk($data, 0);
+}
+
+/** فهرستِ محصولاتِ ردشده (وضعیت ۳۵۶۷) — با پرچمِ ناقص‌بودن، مثلِ dedup */
+function catfixFetchRejected(string $tk, int $vid, ?array &$partial = null): array {
+    $all = [];
+    for ($pg = 1; $pg <= CATFIX_MAX_PAGES; $pg++) {
+        if (catfixStopRequested()) {
+            if ($partial !== null) $partial = ['partial' => true, 'reason' => 'stopped'];
+            catfixProgress(['log_add' => ['⏹ توقف هنگام دریافتِ صفحهٔ ' . $pg]]);
+            break;
+        }
+        $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?page=' . $pg . '&per_page=100&statuses=3567');
+        if (empty($r['ok'])) {
+            if ($partial !== null) $partial = ['partial' => true, 'reason' => 'http', 'code' => (int)($r['code'] ?? 0)];
+            catfixProgress(['log_add' => ['⚠️ صفحهٔ ' . $pg . ' نیامد (HTTP ' . ($r['code'] ?? '?')
+                . ') — فهرست با ' . count($all) . ' محصول بسته شد']]);
+            break;
+        }
+        $data = $r['body']['data'] ?? [];
+        if (!$data) break;
+        $tp = max(1, (int)($r['body']['total_page'] ?? 1));
+        foreach ($data as $p) if (is_array($p)) $all[] = $p;
+        catfixProgress(['fetched' => count($all), 'page' => $pg, 'pages' => $tp,
+            'log_add' => ['📄 صفحهٔ ' . $pg . '/' . $tp . ' — مجموعاً ' . count($all) . ' محصولِ ردشده']]);
+        if ($pg >= $tp) break;
+        usleep(120000);
+    }
+    return $all;
+}
+
+/**
+ * اجرای کاملِ اصلاحِ دسته — می‌تواند چند دقیقه طول بکشد و فقط از مسیرِ
+ * پس‌زمینه صدا زده می‌شود.
+ *
+ * $mode: 'ai_text' متنِ بررسیِ خودِ باسلام · 'master' فقط مدلِ مستر ·
+ *        'quorum' اجماعِ چند مدلِ کاندید
+ * $opts: ['quorum'=>int, 'product_id'=>int (فقط همین یک محصول)]
+ */
+function catfixRun(array $cn, string $mode, array $opts = []): array {
+    $t0 = microtime(true);
+    $bs = $cn['basalam'] ?? [];
+    if (empty($bs['token']) || empty($bs['vendor_id']))
+        return ['ok' => false, 'error' => 'تنظیمات باسلام ناقص است'];
+    $tk = (string)$bs['token']; $vid = (int)$bs['vendor_id'];
+
+    catfixProgress(['phase' => 'cats', 'log_add' => ['📂 دریافتِ درختِ دسته‌بندی‌های باسلام...']]);
+    $cats = catfixFlatCats($tk);
+    if (!$cats) return ['ok' => false, 'error' => 'دسته‌بندی‌ها بارگذاری نشد'];
+    bslSetCatNameMap($cats);
+    $leafCats = [];
+    foreach ($cats as $c) if ((int)($c['level'] ?? 0) >= 2) $leafCats[] = $c;
+    if (!$leafCats) $leafCats = $cats;
+    catfixProgress(['log_add' => [count($cats) . ' دسته دریافت شد (' . count($leafCats) . ' دستهٔ برگ)']]);
+
+    /* --- آماده‌سازیِ مدل‌ها فقط در حالت‌های هوش مصنوعی --- */
+    $cands = []; $providers = []; $master = null; $mp = null; $masterKey = ''; $net = []; $candKeys = [];
+    $quorum = 2;
+    if ($mode === 'master' || $mode === 'quorum') {
+        $cands = aiCandidates();
+        if (!$cands) return ['ok' => false, 'error' => 'هیچ مدل کاندیدی انتخاب نشده — اول در بخش 🤖 چند مدل کاندید اضافه کنید'];
+        $providers = aiProvidersLoad();
+        $masterKey = aiMasterKey();
+        foreach ($cands as $c) if ($c['key'] === $masterKey) { $master = $c; break; }
+        if ($master === null) $master = $cands[0];
+        $mp = $providers[$master['provider']] ?? null;
+        if ($mp === null) return ['ok' => false, 'error' => 'ارائه‌دهندهٔ مدل مستر یافت نشد'];
+        $net = aiNetCfg();
+        $candKeys = array_map(function ($c) { return $c['key']; }, $cands);
+        $quorum = max(1, min(count($cands), (int)($opts['quorum'] ?? 2)));
+        catfixProgress(['log_add' => ['🧠 مستر: ' . $master['providerName'] . ' / ' . $master['model']
+            . ($mode === 'quorum'
+               ? (' · اجماع با ' . aiFaNum(count($cands)) . ' مدل، حدنصابِ مرحلهٔ اول: ' . aiFaNum($quorum))
+               : ' · حالتِ تک‌مدلی')]]);
+        if ($mode === 'quorum' && count($cands) < 2) {
+            $mode = 'master';
+            catfixProgress(['log_add' => ['ℹ️ فقط یک کاندید هست — به حالتِ تک‌مدلی برگشت']]);
+        }
+    }
+
+    /* --- فهرستِ محصولات --- */
+    $onlyId = (int)($opts['product_id'] ?? 0);
+    $partial = [];
+    if ($onlyId > 0) {
+        catfixProgress(['phase' => 'fetch', 'log_add' => ['🔎 دریافتِ محصول #' . $onlyId]]);
+        $rg = bslReq($tk, 'GET', 'products/' . $onlyId);
+        if (empty($rg['ok'])) $rg = bslReq($tk, 'GET', 'vendors/' . $vid . '/products/' . $onlyId);
+        if (empty($rg['ok'])) return ['ok' => false, 'error' => 'محصول یافت نشد (HTTP ' . ($rg['code'] ?? '?') . ')'];
+        $products = [(array)($rg['body'] ?? [])];
+    } else {
+        catfixProgress(['phase' => 'fetch', 'log_add' => ['🔎 دریافتِ محصولاتِ ردشده (وضعیت ۳۵۶۷)...']]);
+        $products = catfixFetchRejected($tk, $vid, $partial);
+    }
+    $total = count($products);
+    if ($total === 0) {
+        return ['ok' => true, 'mode' => $mode, 'total' => 0, 'fixed' => 0, 'failed' => 0,
+                'no_ai' => 0, 'no_cat' => 0, 'skip_same' => 0, 'skip_tried' => 0,
+                'asked' => 0, 'cache_hits' => 0, 'items' => [],
+                'partial' => !empty($partial['partial']),
+                'took' => round(microtime(true) - $t0, 1), 'at' => time(),
+                'msg' => 'هیچ محصولِ ردشده‌ای پیدا نشد'];
+    }
+    catfixProgress(['phase' => 'run', 'total' => $total, 'current' => 0,
+        'log_add' => ['🚀 شروعِ اصلاح — ' . aiFaNum($total) . ' محصول · روش: ' . catfixModeLabel($mode)]]);
+
+    $fixed = 0; $failed = 0; $noAi = 0; $noCat = 0; $skipSame = 0; $skipTried = 0;
+    $asked = 0; $cacheHits = 0; $idx = 0; $items = []; $stopped = false;
+
+    foreach ($products as $p) {
+        $idx++;
+        if (catfixStopRequested()) {
+            $stopped = true;
+            catfixProgress(['log_add' => ['⏹ توقف با درخواستِ کاربر — ' . aiFaNum($idx - 1) . ' محصول پردازش شده بود']]);
+            break;
+        }
+        $pId   = (int)($p['id'] ?? 0);
+        $pName = trim((string)($p['title'] ?? ($p['name'] ?? '')));
+        $rev   = $p['revision'] ?? [];
+        $curCat = bslProductCatId($p);
+        $push = function (string $status, string $msg, int $catId = 0, string $catName = '') use (&$items, $pId, $pName) {
+            if (count($items) < 500)
+                $items[] = ['id' => $pId, 'title' => $pName, 'status' => $status,
+                            'cat_id' => $catId, 'cat_name' => $catName, 'msg' => $msg];
+        };
+        catfixProgress(['current' => $idx, 'last_title' => mb_substr($pName, 0, 50, 'UTF-8'),
+            'fixed' => $fixed, 'failed' => $failed, 'no_ai' => $noAi, 'no_cat' => $noCat,
+            'skip_same' => $skipSame, 'skip_tried' => $skipTried, 'asked' => $asked]);
+
+        if ($pName === '' && $mode !== 'ai_text') {
+            $failed++; $push('failed', 'عنوانِ محصول خالی است');
+            catfixProgress(['log_add' => ['❌ [' . $idx . '/' . $total . '] عنوانِ خالی — #' . $pId]]);
+            continue;
+        }
+
+        $catId = 0; $catName = ''; $winKeys = [];
+
+        if ($mode === 'ai_text') {
+            /* متنِ توصیهٔ خودِ باسلام + علتِ ردها */
+            $aiText = trim((string)($rev['metadata']['description'] ?? ''));
+            foreach ((array)($rev['rejection_reasons'] ?? []) as $rr) {
+                $d = trim((string)($rr['description'] ?? ''));
+                if ($d !== '' && mb_strlen($d, 'UTF-8') > 5) $aiText .= ($aiText ? ' ' : '') . $d;
+            }
+            if ($aiText === '') {
+                $noAi++; $push('no_ai', 'متنِ بررسیِ باسلام برای این محصول وجود ندارد');
+                catfixProgress(['log_add' => ['⚠️ [' . $idx . '/' . $total . '] ' . mb_substr($pName, 0, 40, 'UTF-8') . ' — متنِ AI ندارد']]);
+                continue;
+            }
+            $res = extractAiCategoryFromTextEx($aiText, $cats);
+            $catId = (int)($res['catId'] ?? 0);
+            if ($catId <= 0) {
+                $noCat++; $push('no_cat', 'از متنِ بررسی هیچ دسته‌ای استخراج نشد');
+                catfixProgress(['log_add' => ['⚠️ [' . $idx . '/' . $total . '] ' . mb_substr($pName, 0, 40, 'UTF-8') . ' — دسته از متن درنیامد']]);
+                continue;
+            }
+            $catId = findLeafCategory($catId, $cats);
+            $catName = bslCatNameById($catId);
+        } else {
+            $exclude   = catTriedExclude($pId, $curCat);
+            $triedInfo = [];
+            $trRow = catTriedRow($pId);
+            foreach ((array)($trRow['tried'] ?? []) as $tcid => $tinfo)
+                $triedInfo[] = ['id' => (int)$tcid, 'name' => (string)($tinfo['name'] ?? '')];
+            if ($mode === 'quorum') {
+                $con = aiCatConsensus($cands, $providers, $pName, $cats, $leafCats, $exclude, $net,
+                    ['quorum' => $quorum, 'tried_info' => $triedInfo]);
+                $asked += (int)($con['asked'] ?? 0);
+                if (!empty($con['from_cache'])) $cacheHits++;
+                $catId   = (int)($con['category_id'] ?? 0);
+                $catName = (string)($con['category_name'] ?? '');
+                $ok      = !empty($con['ok']);
+                $err     = (string)($con['error'] ?? '');
+                $winKeys = (array)($con['winner_keys'] ?? []);
+                if ($ok) catfixProgress(['log_add' => ['🗳️ [' . $idx . '/' . $total . '] اجماع: ' . $catName
+                    . ' (' . $catId . ') — ' . aiFaNum((int)($con['agreement'] ?? 0)) . ' رأی از '
+                    . aiFaNum((int)($con['asked'] ?? 0)) . ' مدل' . (!empty($con['from_cache']) ? ' · از کش ⚡' : '')]]);
+            } else {
+                $res = aiCandidateCategory($mp, $master['model'], $pName, $cats, $leafCats,
+                    aiCatListBuild($leafCats, $exclude), $net, $exclude, $triedInfo);
+                $asked++;
+                $catId   = (int)($res['category_id'] ?? 0);
+                $catName = (string)($res['category_name'] ?? '');
+                $ok      = !empty($res['ok']);
+                $err     = (string)($res['error'] ?? '');
+                $winKeys = [$masterKey];
+            }
+            if (!$ok || $catId <= 0) {
+                $noCat++;
+                $m = ($mode === 'quorum' ? 'اجماع به دستهٔ تازه‌ای نرسید' : 'مستر دستهٔ معتبری نداد')
+                     . ($err !== '' ? ' — ' . $err : '');
+                $push('no_cat', $m);
+                catfixProgress(['log_add' => ['⚠️ [' . $idx . '/' . $total . '] ' . mb_substr($pName, 0, 40, 'UTF-8') . ' — ' . $m]]);
+                continue;
+            }
+        }
+
+        /* --- دو نگهبانِ همیشگی: همان دستهٔ فعلی، و دستهٔ قبلاً امتحان‌شده --- */
+        if ($curCat > 0 && $catId === $curCat) {
+            $skipSame++;
+            catTriedRecord($pId, $catId, $catName, $mode, 'skipped', $pName, $curCat);
+            $push('skipped', 'پیشنهاد همان دستهٔ فعلی است («' . $catName . '»)', $catId, $catName);
+            catfixProgress(['log_add' => ['⏭️ [' . $idx . '/' . $total . '] ' . mb_substr($pName, 0, 40, 'UTF-8') . ' — همان دستهٔ فعلی']]);
+            continue;
+        }
+        if (catTriedHas($pId, $catId)) {
+            $skipTried++;
+            catTriedRecord($pId, $catId, $catName, $mode, 'skipped', $pName, $curCat);
+            $push('skipped', '«' . $catName . '» قبلاً برای این محصول امتحان و رد شده', $catId, $catName);
+            catfixProgress(['log_add' => ['⏭️ [' . $idx . '/' . $total . '] ' . mb_substr($pName, 0, 40, 'UTF-8') . ' — «' . $catName . '» قبلاً امتحان شده']]);
+            continue;
+        }
+
+        /* --- اعمال: دسته + ارسال به بررسیِ مجدد --- */
+        $bu = ['category_id' => $catId, 'status' => 3568];
+        $r2 = bslReq($tk, 'PATCH', 'products/' . $pId, $bu);
+        if ((int)($r2['code'] ?? 0) === 404) $r2 = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $pId, $bu);
+        if (!empty($r2['ok']) && !empty($r2['body']['id'])) {
+            $fixed++;
+            if ($mode !== 'ai_text') {
+                foreach (array_unique($winKeys ?: [$masterKey]) as $wk) aiVoteRecord('category', $pName, $wk, $candKeys);
+                catLearnRecord($pName, $catId, $catName);
+            }
+            catTriedRecord($pId, $catId, $catName, $mode, 'applied', $pName, $curCat);
+            $push('fixed', 'اصلاح شد و به بررسیِ مجدد رفت', $catId, $catName);
+            catfixProgress(['log_add' => ['✅ [' . $idx . '/' . $total . '] ' . mb_substr($pName, 0, 40, 'UTF-8')
+                . ' → ' . $catName . ' (' . $catId . ')']]);
+        } else {
+            $failed++;
+            catTriedRecord($pId, $catId, $catName, $mode, 'failed', $pName, $curCat);
+            $err = (string)($r2['body']['message'] ?? ($r2['body']['error'] ?? ('HTTP ' . ($r2['code'] ?? '?'))));
+            $push('failed', 'PATCH ناموفق: ' . $err, $catId, $catName);
+            catfixProgress(['log_add' => ['❌ [' . $idx . '/' . $total . '] ' . mb_substr($pName, 0, 40, 'UTF-8')
+                . ' — ' . mb_substr($err, 0, 70, 'UTF-8')]]);
+        }
+        usleep(500000);
+    }
+
+    $savedMsg = '';
+    if ($mode === 'quorum' && $total > 0 && $cands) {
+        $maxCalls = $total * count($cands);
+        $saved = $maxCalls - $asked;
+        if ($saved > 0) $savedMsg = ' | صرفه‌جویی: ' . aiFaNum($saved) . ' فراخوانی از ' . aiFaNum($maxCalls);
+        if ($cacheHits > 0) $savedMsg .= ' | از کش: ' . aiFaNum($cacheHits);
+    }
+    $msg = '✅ اصلاح: ' . $fixed . ' | دسته نیافت: ' . $noCat
+         . ($mode === 'ai_text' ? (' | بدون متنِ AI: ' . $noAi) : '')
+         . ' | تکراری/همان دسته: ' . ($skipSame + $skipTried)
+         . ' | ناموفق: ' . $failed . ' (از ' . $total . ')' . $savedMsg;
+
+    return ['ok' => true, 'mode' => $mode, 'total' => $total, 'processed' => $idx,
+            'fixed' => $fixed, 'failed' => $failed, 'no_ai' => $noAi, 'no_cat' => $noCat,
+            'skip_same' => $skipSame, 'skip_tried' => $skipTried,
+            'skipped' => $skipSame + $skipTried, 'asked' => $asked, 'cache_hits' => $cacheHits,
+            'stopped' => $stopped, 'partial' => !empty($partial['partial']),
+            'items' => $items, 'took' => round(microtime(true) - $t0, 1), 'at' => time(),
+            'msg' => $msg];
 }
 
 /* =====================================================================
@@ -35952,6 +36918,32 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-gray" onclick="clearBslQueueDone()" style="font-size:10px;padding:4px 8px">🗑️ پاکسازی انجام‌شده</button>
 </div>
 <div id="bslQueueList" style="font-size:11px;color:#64748b">صف خالی — برای افزودن، دکمه «🚀 ارسال باسلام» را کلیک کنید</div>
+</div>
+</div>
+
+<!-- v10.23 (۳۶ب): «تکراری‌های باسلام» تا اینجا سه کلیک عمق داشت — باید
+     «مدیریت جامع محصولات» را باز می‌کردی، منتظرِ بارگذاریِ فهرست می‌ماندی و
+     بعد دکمه‌اش را در نوارِ بالای مودال پیدا می‌کردی. حالا دقیقاً قرینهٔ
+     ووکامرس، همین‌جا در تبِ ارسال و در دسترسِ یک کلیک است.
+     v10.23 (۳۶د): «اصلاح دسته‌بندی» هم کنارش آمد چون از این نسخه یک کارِ
+     پس‌زمینهٔ مستقل است و دیگر لازم نیست از دلِ فاز ۲ صدایش بزنی. -->
+<div style="margin-top:10px;border:1px solid #475569;border-radius:8px;overflow:hidden">
+<div onclick="toggleBslTools()" style="cursor:pointer;padding:10px 14px;background:#1e293b;display:flex;justify-content:space-between;align-items:center">
+<span style="color:#22d3ee;font-weight:700;font-size:13px">🧰 ابزارهای غرفهٔ باسلام</span>
+<span id="bslToolsArrow" style="color:#94a3b8;font-size:12px">▼</span>
+</div>
+<div id="bslToolsBody" style="display:none;padding:10px;background:#0f172a">
+<div class="cact">
+    <button class="btn btn-red" onclick="bslFindDuplicates()" style="flex:1" title="محصولاتِ هم‌نامِ غرفه را پیدا و نسخه‌های اضافی را بایگانی می‌کند — در پس‌زمینهٔ سرور">🔍 تکراری‌های باسلام</button>
+    <button class="btn btn-purple" onclick="catfixOpen()" style="flex:1" title="محصولاتِ ردشده به‌دلیلِ دسته‌بندی را دستهٔ تازه می‌دهد و به بررسیِ مجدد می‌فرستد — در پس‌زمینهٔ سرور">📂 اصلاح دسته‌بندی</button>
+</div>
+<div class="cact" style="margin-top:6px">
+    <button class="btn btn-teal" onclick="showBslProductsModal()" style="flex:1">🏪 مدیریت جامع محصولات</button>
+    <button class="btn btn-cyan" onclick="bslPhase2Check()" style="flex:1" title="فهرستِ محصولاتِ ردشده با امکانِ انتخابِ دستیِ دسته">🔄 فاز ۲ — ردشده‌ها</button>
+</div>
+<div style="font-size:10px;color:#64748b;margin-top:7px;line-height:1.8">
+💡 هر دوی «تکراری‌ها» و «اصلاح دسته‌بندی» در <b>پس‌زمینهٔ سرور</b> اجرا می‌شوند: می‌توانید پنجره را ببندید، و پیشرفت/توقفشان در <b>🗂 مدیر وظیفه</b> هم در دسترس است.
+</div>
 </div>
 </div>
 </div>
@@ -39463,6 +40455,62 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.23', t:'🗂 مدیر وظیفهٔ واقعاً کاربردی، و اصلاحِ دسته‌بندی که دیگر با بستنِ تب نمی‌میرد', items:[
+    '🖱 <b>الف — کلیک روی کارتِ مدیر وظیفه بالاخره کاری می‌کند.</b> تا اینجا',
+    '   ستونِ «تب» فقط یک برچسبِ متنی بود («ارسال»، «ابزارها») و کلیک روی',
+    '   کارت هیچ اتفاقی نمی‌انداخت؛ کاربر می‌فهمید کاری در جریان است ولی',
+    '   باید خودش می‌گشت تا پنجرهٔ اصلیِ آن کار را پیدا کند. حالا هر کار در',
+    '   بک‌اند آدرسِ خانه‌اش را دارد و کلیک، کلِ مسیر را می‌رود: تبِ اصلی ⇐',
+    '   بازکردنِ پنلِ تنظیمات و آکاردئونِ مربوط ⇐ زیرتبِ هوش مصنوعی ⇐ باز',
+    '   کردنِ خودِ پنجره، و در پایان عنصرِ هدف چند ثانیه برجسته می‌شود تا گم',
+    '   نشود. «حذفِ تکراری» چون دو خانه دارد، از روی مقصدِ آخرین اجرا تصمیم',
+    '   می‌گیرد ووکامرس را باز کند یا باسلام را.',
+    '▶ <b>ج — «ادامه» برای کارِ گیرکرده.</b> کارِ رهاشده تا حالا فقط دکمهٔ',
+    '   «🗑 پاک» داشت: کاربر باید ردش را پاک می‌کرد، بعد تبِ خودش را پیدا',
+    '   می‌کرد و پارامترها را از نو می‌چید. حالا دکمهٔ «▶ ادامه» همان',
+    '   اندپوینتِ شروعِ اصلیِ کار را — <b>با پارامترهای دقیقِ اجرای قبلی</b>',
+    '   که از فایلِ پیشرفت بیرون کشیده می‌شود — صدا می‌زند: مقصد و حالتِ',
+    '   dedup، دستورِ کار و مدلِ ایجنت، نشانیِ پروفایلِ استخراج… . قفل و',
+    '   سیگنالِ توقفِ جامانده هم اول برداشته می‌شوند وگرنه کارِ تازه یا پشتِ',
+    '   قفل می‌ماند یا در اولین بررسی خودش را می‌کشد. برای کارِ تمام‌شده هم',
+    '   همین دکمه «اجرای دوباره» است. اگر کاری پارامترِ حیاتی‌اش قابلِ',
+    '   بازسازی نباشد (مثل ویرایشِ گروهی که فهرستِ شناسه می‌خواهد) دکمه اصلاً',
+    '   نشان داده نمی‌شود — بهتر از دکمه‌ای که کلیکش خطا بدهد.',
+    '📂 <b>د — «اصلاح دسته‌بندی محصولات باسلام» کاملاً سمتِ سرور شد.</b> هر سه',
+    '   مسیرِ این جریان (متنِ بررسیِ خودِ باسلام، مدلِ مستر، اجماعِ چندمدلی)',
+    '   تا اینجا فقط جریانِ زندهٔ مرورگر بودند. یعنی: بستنِ تب یا خوابِ گوشی',
+    '   کار را وسطِ راه می‌کشت؛ هیچ قفلی نبود پس دو تبِ باز = دو اجرای موازی',
+    '   روی یک غرفه و دوبرابر سوختنِ سهمیهٔ API؛ دکمهٔ توقف وجود نداشت؛ و در',
+    '   مدیر وظیفه اصلاً دیده نمی‌شد. حالا دقیقاً مثل «حذفِ تکراری» است:',
+    '   قفلِ انحصاری، پاسخِ فوری و ادامهٔ کار در پس‌زمینه، فایلِ پیشرفت با',
+    '   درصد و لاگ، فایلِ نتیجه، توقفِ نرم — و یک ردیفِ کامل در مدیر وظیفه',
+    '   که بندهای الف و ج هم رویش کار می‌کنند.',
+    '🔍 <b>ب — پایداریِ «حذفِ تکراری».</b> سه ضعف که کار را بی‌صدا نیمه‌کاره',
+    '   می‌گذاشتند: (۱) اگر برداشتِ فهرست وسطِ کار می‌شکست، گزارش با همان',
+    '   نصفِ محصولات ساخته می‌شد و <b>هیچ نشانه‌ای</b> نداشت — و بدتر، حذف',
+    '   روی همان فهرستِ ناقص انجام می‌شد؛ حالا پرچمِ «ناقص» تا رابط بالا',
+    '   می‌آید و در حالتِ ناقص حذف اصلاً انجام نمی‌شود (چون «تکراری»ِ ظاهری',
+    '   ممکن است تنها نسخهٔ موجود باشد). (۲) خودِ حذف/بایگانی هیچ تلاشِ',
+    '   مجددی نداشت و یک خطای گذرا محصول را برای همیشه «ناموفق» می‌کرد؛',
+    '   حالا تا سه بار با مکثِ فزاینده تکرار می‌شود (۴۰۴/۴۰۳ بی‌درنگ رد',
+    '   می‌شوند چون تکرارشان بی‌فایده است). (۳) سقفِ ۲۰۰ صفحه برداشته شد و',
+    '   آستانهٔ «کارِ مرده» از ۹۰ ثانیه به ۵ دقیقه رفت — یک صفحهٔ سه‌بار',
+    '   تلاش‌شده به‌تنهایی می‌توانست بیش از ۹۰ ثانیه طول بکشد و کارِ سالم',
+    '   «مرده» اعلام شود.',
+    '🔍 <b>ب — و دکمه‌اش هم پیدا شد.</b> «تکراری‌های باسلام» سه کلیک عمق',
+    '   داشت (مدیریتِ جامع ⇐ صبر برای بارگذاری ⇐ نوارِ بالای مودال). حالا',
+    '   دقیقاً قرینهٔ ووکامرس، در تبِ ارسال یک جعبهٔ «🧰 ابزارهای غرفهٔ',
+    '   باسلام» هست که تکراری‌ها، اصلاحِ دسته‌بندی، مدیریتِ جامع و فاز ۲ را',
+    '   یک‌کلیکی می‌کند.',
+    '🏪 <b>ه — شمارندهٔ جدا برای هر غرفه در صفِ ارسالِ باسلام.</b> صف یک',
+    '   مجموعه شمارنده داشت که جمعِ کورِ همهٔ غرفه‌ها بود؛ با «ارسال همزمان',
+    '   به همهٔ غرفه‌ها» عملاً بی‌معنی می‌شد — نمی‌شد فهمید کدام غرفه اصلاً',
+    '   چیزی نگرفته یا کدام‌یک منبعِ همهٔ خطاهاست. حالا هر غرفه بلوکِ',
+    '   شمارندهٔ خودش را دارد (جدید/آپدیت/تکراری/خطا) با نام و شناسه، و',
+    '   <b>بینِ هر دو غرفه یک خطِ جداکننده</b> کشیده می‌شود. این آمار هم زنده',
+    '   در صف می‌آید و هم در ردیفِ صف ماندگار می‌شود تا بعد از ریفرش باقی',
+    '   بماند؛ در گزارشِ تفصیلیِ همان وظیفه هم تکرار می‌شود.',
+  ]},
   {v:'10.22', t:'🔔 چرا اعلان‌ها واقعاً قطع شده بودند — سه باگ، نه یکی', items:[
     '🔎 <b>اول: مدیر وظیفه بی‌گناه بود.</b> نسخهٔ ۱۰.۱۹ به گمانِ اینکه مقصر است',
     '   بررسی شد، ولی تستِ کنارِهم روی سه نسخهٔ ۱۰.۱۸ و ۱۰.۱۹ و ۱۰.۲۰ نشان داد',
@@ -45643,22 +46691,103 @@ function tmToggleFilter(){
   tmRender();
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ *  v10.23 (۳۶الف): پرشِ کلیکی از کارتِ مدیر وظیفه به خانهٔ همان کار
+ *
+ *  گزارشِ کاربر: «کلیک روی کارت هیچ کاری نمی‌کند». درست بود — فیلدِ tab
+ *  فقط یک برچسبِ متنی بود و هیچ ناوبری‌ای پشتش نبود. حالا بک‌اند برای هر
+ *  کار می‌گوید کجا باید برویم (pane/smenu/ai/el/open) و این تابع همان
+ *  مسیر را طی می‌کند: تبِ اصلی ⇒ (در صورت لزوم) پنلِ تنظیمات و بازکردنِ
+ *  آکاردئونِ مربوط ⇒ زیرتبِ هوش مصنوعی ⇒ بازکردنِ پنجرهٔ اصلی یا اسکرول
+ *  و برجسته‌سازیِ عنصرِ هدف.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/** آکاردئونِ پنلِ تنظیمات را با تکه‌ای از عنوانش پیدا و باز می‌کند */
+function tmOpenSmenu(titlePart){
+  if(!titlePart)return null;
+  const hdrs=document.querySelectorAll('#settingsPanel .smenu-hdr');
+  for(let i=0;i<hdrs.length;i++){
+    const h3=hdrs[i].querySelector('h3');
+    if(!h3)continue;
+    if(h3.textContent.indexOf(titlePart)>=0){
+      if(!hdrs[i].classList.contains('open'))toggleSmenu(hdrs[i]);
+      return hdrs[i];
+    }
+  }
+  return null;
+}
+
+/** عنصر را وسطِ دید می‌آورد و چند لحظه برجسته می‌کند تا گم نشود.
+ *  اسکرول از نگهبانِ softScrollIntoView رد می‌شود تا تنظیمِ «پرشِ خودکارِ
+ *  صفحه» کاربر (که روی موبایل پیش‌فرض خاموش است) محترم بماند. */
+function tmSpot(el){
+  if(!el)return;
+  softScrollIntoView(el,{behavior:'smooth',block:'center'});
+  const old=el.style.boxShadow, oldT=el.style.transition;
+  el.style.transition='box-shadow .25s';
+  el.style.boxShadow='0 0 0 2px #22d3ee, 0 0 18px #22d3ee66';
+  setTimeout(function(){el.style.boxShadow=old;el.style.transition=oldT;},2200);
+}
+
+/** پرش به خانهٔ یک کار */
+function tmGo(key){
+  const t=((tmData&&tmData.tasks)||[]).find(x=>x.key===key);
+  if(!t){showToast('این کار پیدا نشد',1);return;}
+  if(!t.pane&&!t.open){showToast('برای این کار پنجرهٔ اختصاصی ثبت نشده',1);return;}
+  tmClose();
+  if(t.pane==='settings'){
+    const p=document.getElementById('settingsPanel');
+    if(p&&!p.classList.contains('open'))toggleSettingsPanel();
+  }else if(t.pane){
+    /* اگر پنلِ تنظیمات باز مانده باشد روی تبِ اصلی می‌افتد و کاربر فکر
+       می‌کند کلیک بی‌اثر بوده — پس اول بسته می‌شود. */
+    const p=document.getElementById('settingsPanel');
+    if(p&&p.classList.contains('open'))toggleSettingsPanel();
+    switchMainTab(t.pane);
+  }
+  setTimeout(function(){
+    if(t.smenu)tmOpenSmenu(t.smenu);
+    if(t.ai&&typeof aiTab==='function')aiTab(t.ai);
+    setTimeout(function(){
+      if(t.open&&typeof window[t.open]==='function'){ try{ window[t.open](); }catch(e){} }
+      if(t.el)tmSpot(document.getElementById(t.el));
+      else if(t.smenu){const hd=tmOpenSmenu(t.smenu);if(hd)tmSpot(hd);}
+    },260);
+  },160);
+}
+
 /** کارتِ یک کارِ پس‌زمینه */
 function tmCard(t){
   const lbl={running:'در حال اجرا',stale:'رهاشده',done:'تمام‌شده',idle:'بی‌کار'}[t.state]||t.state;
   const cls={running:'run',stale:'stale',done:'done',idle:'idle'}[t.state]||'idle';
   const bcl={running:'tmb-run',stale:'tmb-stale',done:'tmb-done',idle:'tmb-idle'}[t.state]||'tmb-idle';
-  let h='<div class="tmc '+cls+'">'
+  /* v10.23 (۳۶الف): خودِ کارت کلیک‌پذیر است، ولی دکمه‌های داخلش نه — پس
+     روی هر دکمه event.stopPropagation می‌گذاریم وگرنه «توقف» هم کاربر را
+     از پنجره بیرون می‌برد. */
+  const nav=!!(t.pane||t.open);
+  let h='<div class="tmc '+cls+'"'+(nav?(' onclick="tmGo(\''+jsAttr(t.key)+'\')" style="cursor:pointer"'
+        +' title="کلیک: رفتن به «'+jsAttr(t.tab)+'» و بازکردنِ پنجرهٔ همین کار"'):'')+'>'
     +'<div class="tmc-head"><span style="font-size:15px">'+esc(t.icon)+'</span>'
     +'<span class="tmc-t">'+esc(t.title)+'</span>'
-    +'<span class="tmc-tab">'+esc(t.tab)+'</span>'
+    +'<span class="tmc-tab">'+esc(t.tab)+(nav?' ↗':'')+'</span>'
     +'<span class="tmc-badge '+bcl+'">'+esc(lbl)+'</span>';
   if(t.cancelled) h+='<span class="tmc-badge tmb-stale">لغو شده</span>';
   h+='<span style="flex:1"></span>';
   if(t.stoppable)
-    h+='<button class="btn btn-red" style="font-size:10px;padding:3px 10px" onclick="tmStop(\''+jsAttr(t.key)+'\')">⏹ توقف</button>';
+    h+='<button class="btn btn-red" style="font-size:10px;padding:3px 10px" onclick="event.stopPropagation();tmStop(\''+jsAttr(t.key)+'\')">⏹ توقف</button>';
+  /* v10.23 (۳۶ج): «▶ ادامه» — همان اندپوینتِ شروعِ اصلیِ کار، با پارامترهای
+     اجرای قبلی. برای کارِ رهاشده حیاتی است؛ برای کارِ تمام‌شده هم «اجرای
+     دوباره» است. */
+  if(t.resumable&&t.state!=='running'){
+    const isStale=(t.state==='stale');
+    h+='<button class="btn '+(isStale?'btn-green':'btn-gray')+'" style="font-size:10px;padding:3px 10px"'
+      +' onclick="event.stopPropagation();tmResume(\''+jsAttr(t.key)+'\')"'
+      +' title="'+(isStale?'قفل و ردِ کارِ گیرکرده پاک می‌شود و همان کار دوباره شروع می‌شود'
+                          :'همین کار با تنظیماتِ اجرای قبلی دوباره اجرا می‌شود')+'">'
+      +(isStale?'▶ ادامه':'▶ اجرای دوباره')+'</button>';
+  }
   if(t.clearable)
-    h+='<button class="btn btn-gray" style="font-size:10px;padding:3px 10px" onclick="tmClear(\''+jsAttr(t.key)+'\')" title="حذفِ ردِ این کار">🗑 پاک</button>';
+    h+='<button class="btn btn-gray" style="font-size:10px;padding:3px 10px" onclick="event.stopPropagation();tmClear(\''+jsAttr(t.key)+'\')" title="حذفِ ردِ این کار">🗑 پاک</button>';
   h+='</div>';
 
   /* خطِ توضیح: مرحله، پیشرفتِ عددی، آخرین به‌روزرسانی */
@@ -45680,7 +46809,10 @@ function tmCard(t){
     h+='</div>';
   }
   if(t.state==='stale')
-    h+='<div style="font-size:10px;color:#fcd34d;margin-top:6px">⚠ این کار مدت‌هاست خبری نداده — احتمالاً پردازه‌اش وسطِ کار قطع شده. با «پاک» آزادش کنید تا بتوانید دوباره شروع کنید.</div>';
+    h+='<div style="font-size:10px;color:#fcd34d;margin-top:6px">⚠ این کار مدت‌هاست خبری نداده — احتمالاً پردازه‌اش وسطِ کار قطع شده. '
+      +(t.resumable
+        ? 'با «▶ ادامه» قفلش برداشته و همان کار دوباره شروع می‌شود؛ یا با «پاک» فقط ردش را ببرید.'
+        : 'با «پاک» آزادش کنید تا بتوانید از تبِ خودش دوباره شروع کنید.')+'</div>';
   if((t.log||[]).length)
     h+='<div class="tmlog">'+t.log.map(l=>esc(l)).join('\n')+'</div>';
   return h+'</div>';
@@ -45740,6 +46872,25 @@ function tmStop(key){
     tmBusy=false;
     if(d&&d.ok) showToast('⏹ درخواستِ توقف ثبت شد — کار پس از مرحلهٔ جاری می‌ایستد');
     else showToast('✗ '+((d&&d.error)||'توقف ناموفق'),true);
+    tmPulse();
+  }).catch(()=>{tmBusy=false;showToast('✗ خطا شبکه',true);});
+}
+
+/* v10.23 (۳۶ج): ادامه/اجرای دوبارهٔ یک کار از داخلِ مدیر وظیفه */
+function tmResume(key){
+  if(tmBusy)return;
+  const t=((tmData&&tmData.tasks)||[]).find(x=>x.key===key);
+  const isStale=!!(t&&t.state==='stale');
+  const q=isStale
+    ? 'کارِ گیرکردهٔ «'+((t&&t.title)||key)+'» دوباره شروع شود؟\nقفل و ردِ اجرای قبلی پاک می‌شود.'
+    : 'کارِ «'+((t&&t.title)||key)+'» با تنظیماتِ اجرای قبلی دوباره اجرا شود؟';
+  if(!confirm(q))return;
+  tmBusy=true;
+  fetch('?tasks_resume=1&key='+encodeURIComponent(key)).then(r=>r.json()).then(d=>{
+    tmBusy=false;
+    if(d&&d.ok) showToast('▶ شروع شد — چند لحظه بعد وضعیتش اینجا به‌روز می‌شود');
+    else showToast('✗ '+((d&&d.error)||'شروع نشد'),true);
+    setTimeout(tmPulse,1500);
     tmPulse();
   }).catch(()=>{tmBusy=false;showToast('✗ خطا شبکه',true);});
 }
@@ -48017,6 +49168,43 @@ function checkBslQueue(){
         }
     }).catch(()=>{});
 }
+/* v10.23 (۳۶ه): بلوکِ شمارنده‌های تفکیکیِ غرفه‌ها.
+ *
+ *  ورودی: آرایهٔ shop_stats که بک‌اند می‌سازد — هر عضو
+ *  {vid,name,is_default,sent,updated,skipped,failed}. اگر فقط یک غرفه در
+ *  کار باشد چیزی نشان داده نمی‌شود، چون ردیفِ جمعِ بالای کارت همان است و
+ *  تکرارش فقط شلوغی است.
+ *
+ *  خطِ جداکننده: بین هر دو غرفه یک <div> با border-top کشیده می‌شود (نه
+ *  border روی خودِ بلوک) تا بالای غرفهٔ اول و پایینِ غرفهٔ آخر خطِ اضافه
+ *  نیفتد و مرزها دقیقاً «بینِ» غرفه‌ها دیده شوند.
+ */
+function bslShopStatsHtml(rows,compact){
+    if(!Array.isArray(rows)||rows.length<2)return '';
+    const cell=function(v,color,icon,label){
+        return '<span style="display:inline-flex;align-items:center;gap:3px;color:'+color+'">'
+              +icon+' <b>'+toFa(v||0)+'</b>'
+              +(compact?'':'<span style="color:#64748b">'+label+'</span>')+'</span>';
+    };
+    let h='<div style="margin-top:6px;background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 8px">'
+      +'<div style="font-size:9.5px;color:#67e8f9;font-weight:700;margin-bottom:4px">🏪 تفکیکِ غرفه‌ها</div>';
+    rows.forEach(function(s,i){
+        h+='<div style="padding:5px 0'+(i>0?';border-top:1px dashed #334155':'')+'">'
+          +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+          +'<span style="color:#e2e8f0;font-size:10.5px;font-weight:700">'+esc(s.name||('غرفهٔ '+s.vid))+'</span>'
+          +(s.is_default?'<span style="font-size:8.5px;color:#0f172a;background:#67e8f9;border-radius:4px;padding:0 5px">پیش‌فرض</span>':'')
+          +'<span style="color:#475569;font-size:9px;font-family:ui-monospace,monospace">#'+toFa(s.vid)+'</span>'
+          +'<span style="flex:1"></span>'
+          +'<span style="display:flex;gap:9px;font-size:10px">'
+          + cell(s.sent,'#4ade80','✅','جدید')
+          + cell(s.updated,'#facc15','⚡','آپدیت')
+          + cell(s.skipped,'#94a3b8','⏭','تکراری')
+          + cell(s.failed,'#f87171','❌','خطا')
+          +'</span></div></div>';
+    });
+    return h+'</div>';
+}
+
 function renderBslQueue(q){
     const section=$('bslQueueSection');
     const list=$('bslQueueList');
@@ -48079,6 +49267,12 @@ function renderBslQueue(q){
         if(progText){
             html+='<div style="color:#94a3b8;font-size:10px;margin-top:3px">'+progText+'</div>';
         }
+        /* v10.23 (۳۶ه): شمارنده‌های تفکیکیِ هر غرفه.
+           تا اینجا فقط یک ردیفِ جمعِ کور بود؛ با «ارسال همزمان به همهٔ
+           غرفه‌ها» نمی‌شد فهمید کدام غرفه چیزی نگرفته یا کدام‌یک منبعِ
+           همهٔ خطاهاست. حالا هر غرفه بلوکِ خودش را دارد و بینِ دو غرفه
+           یک خطِ جداکنندهٔ صریح کشیده می‌شود. */
+        html+=bslShopStatsHtml(e.shop_stats);
         // Row 4: Elapsed time
         if((e.status==='running'||e.status==='paused')&&e.started_at>0){
             const elapsedSec=Math.floor(Date.now()/1000-(e.started_at||0));
@@ -48295,6 +49489,27 @@ function toggleWooDedup(){
         if(arrow)arrow.textContent='▼';
     }
 }
+/* v10.23 (۳۶الف): «حذفِ تکراری» یک کار است ولی دو خانه دارد. مدیر وظیفه از
+   روی مقصدِ آخرین اجرا تصمیم می‌گیرد کدام را باز کند، وگرنه کاربری که روی
+   باسلام کار می‌کرد به پنلِ ووکامرس می‌رفت و فکر می‌کرد پرش غلط است. */
+function dedupOpenLast(){
+    fetch('?dedup_status=1').then(r=>r.json()).then(st=>{
+        if(st&&st.target==='bsl'){ if(typeof bslFindDuplicates==='function')bslFindDuplicates(); return; }
+        if(typeof toggleBslTools==='function'){const b=$('bslToolsBody');if(b&&b.style.display==='block')toggleBslTools();}
+        const body=$('wooDedupBody');
+        if(body&&body.style.display!=='block'&&typeof toggleWooDedup==='function')toggleWooDedup();
+    }).catch(()=>{ if(typeof toggleWooDedup==='function'){const b=$('wooDedupBody');if(b&&b.style.display!=='block')toggleWooDedup();} });
+}
+
+/* v10.23 (۳۶ب/۳۶د): جعبهٔ ابزارِ غرفهٔ باسلام در تبِ ارسال */
+function toggleBslTools(){
+    const body=$('bslToolsBody'), arrow=$('bslToolsArrow');
+    if(!body)return;
+    const open=(body.style.display==='none'||body.style.display==='');
+    body.style.display=open?'block':'none';
+    if(arrow)arrow.textContent=open?'▲':'▼';
+}
+
 function clearBslQueueDone(){
     fetch('?bsl_queue_clear_done=1').then(r=>r.json()).then(d=>{
         checkBslQueue();
@@ -48343,6 +49558,8 @@ function showBslQueueDetail(qid){
         detailHtml+='<div style="text-align:center"><b style="color:#94a3b8;font-size:16px">'+toFa(e.skipped||0)+'</b><div style="color:#64748b;font-size:10px">⏭ تکراری</div></div>';
         detailHtml+='<div style="text-align:center"><b style="color:#f87171;font-size:16px">'+toFa(e.failed||0)+'</b><div style="color:#64748b;font-size:10px">❌ خطا</div></div>';
         detailHtml+='</div>';
+        /* v10.23 (۳۶ه): همان شمارنده‌های تفکیکیِ غرفه، اینجا با ابعادِ بزرگ‌تر */
+        detailHtml+=bslShopStatsHtml(e.shop_stats);
         // Progress bar
         const progPercent=e.total>0?Math.round((e.current||0)/e.total*100):0;
         detailHtml+='<div style="margin-bottom:12px"><div style="height:6px;background:#1e293b;border-radius:3px;overflow:hidden"><div style="height:100%;background:'+statusColors[e.status]+';width:'+progPercent+'%;border-radius:3px"></div></div><div style="color:#94a3b8;font-size:11px;margin-top:4px">'+toFa(e.current||0)+'/'+toFa(e.total)+' ('+progPercent+'٪)</div></div>';
@@ -48928,6 +50145,18 @@ function ddApplyStatus(st){
     }
 }
 
+/* v10.23 (۳۶ب): هشدارِ «فهرست ناقص».
+   تا اینجا اگر برداشت وسطِ کار می‌شکست، گزارش با همان چند صد محصول ساخته و
+   بی‌هیچ نشانه‌ای «کامل» نشان داده می‌شد — و بدتر، حذف روی همان فهرستِ ناقص
+   انجام می‌شد. حالا سرور صریح می‌گوید ناقص است و اینجا هم بالای گزارش
+   می‌نشیند. */
+function ddPartialHtml(d){
+    if(!d||!d.partial)return '';
+    return '<div class="alert alert-warn" style="font-size:11px;margin-bottom:6px">'
+      +'⚠️ <b>فهرست ناقص دریافت شد.</b> '+esc(d.partial_msg||'')
+      +' برای گرفتنِ گزارشِ کامل، دوباره «گزارشِ تکراری‌ها» را بزنید.</div>';
+}
+
 function ddStop(){
     fetch('?dedup_stop=1').then(()=>{showToast('⏹ درخواستِ توقف ثبت شد');}).catch(()=>{});
 }
@@ -49355,8 +50584,9 @@ function agRenderReport(rep) {
 function ddRenderReport(d){
     const E=ddEl;const host=E('Report');if(!host)return;
     const list=d.duplicates_list||[];
-    if(!list.length){host.innerHTML='<div style="color:#4ade80;font-size:12px;padding:8px">✓ هیچ محصولِ تکراری‌ای پیدا نشد.</div>';return;}
-    let h='<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:6px">'
+    if(!list.length){host.innerHTML=ddPartialHtml(d)+'<div style="color:#4ade80;font-size:12px;padding:8px">✓ هیچ محصولِ تکراری‌ای پیدا نشد.</div>';return;}
+    let h=ddPartialHtml(d)
+      +'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:6px">'
       +'<div style="color:#fb923c;font-size:12px;font-weight:700">🔴 '+toFa(d.groups)+' گروه · '+toFa(d.duplicates)+' نسخهٔ اضافی</div>'
       +'<button class="btn btn-red" style="font-size:11px;padding:4px 10px" onclick="ddDeleteAllFromReport()">🗑 حذفِ همهٔ موارد نشان‌داده‌شده</button></div>';
     if(d.truncated)h+='<div class="alert alert-warn" style="font-size:11px;margin-bottom:6px">⚠️ فقط بخشی از گروه‌ها نمایش داده می‌شود.</div>';
@@ -50625,98 +51855,241 @@ function showBslProductDetail(idx){
 function closeBslDetailPopup(){const m=document.getElementById('bslDetailPopup');if(m)m.remove();}
 // v7.48: Inline category fix functions for BaSalam products modal
 let bslInlineSelectedCat={}; // productId -> selected catId
-function bslBatchFixAiCat(){
-    const btn=document.getElementById('bslBatchAiBtn');
-    if(btn)btn.disabled=true;
-    let modal=document.getElementById('bslAiBatchModal');
-    if(modal)modal.remove();
-    modal=document.createElement('div');
-    modal.id='bslAiBatchModal';
-    modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslAiBatchModal()"><div class="bsl-modal" style="width:800px"><div class="bsl-modal-head"><h2>\u{1F916} \u0627\u0635\u0644\u0627\u062D \u062F\u0633\u062A\u0647\u200C\u0628\u0646\u062F\u06CC \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06CC \u2014 \u06AF\u0632\u0627\u0631\u0634 \u0632\u0646\u062F\u0647</h2><button class="btn btn-gray" onclick="closeBslAiBatchModal()">\u2715</button></div><div class="bsl-modal-body" style="padding:0"><div id="bslAiBatchSummary" class="mbar" style="padding:7px 14px;background:#1e293b;border-bottom:1px solid #334155;font-size:11.5px;color:#94a3b8;direction:rtl"><span>\u0627\u0632: <b id="bslAiBatchTotal" style="color:#67e8f9">0</b></span><span>\u2705 \u0627\u0635\u0644\u0627\u062D: <b id="bslAiBatchFixed" style="color:#4ade80">0</b></span><span>\u26A0\uFE0F \u0628\u062F\u0648\u0646 AI: <b id="bslAiBatchNoAi" style="color:#fbbf24">0</b></span><span>\u26A0\uFE0F \u062F\u0633\u062A\u0647 \u0646\u06CC\u0633\u062A: <b id="bslAiBatchNoCat" style="color:#fbbf24">0</b></span><span>\u274C \u0646\u0627\u0645\u0648\u0641\u0642: <b id="bslAiBatchFailed" style="color:#f87171">0</b></span></div><div id="bslAiBatchLog" style="max-height:60vh;overflow-y:auto;padding:8px;font-size:11px;direction:rtl"></div></div><div class="bsl-modal-pager"><button class="btn btn-gray" onclick="closeBslAiBatchModal()">\u0628\u0633\u062A\u0646</button></div></div></div>';
-    document.body.appendChild(modal);
-    const logEl=document.getElementById('bslAiBatchLog');
-    let fixed=0,failed=0,noAi=0,noCat=0,total=0;
-    const addRow=function(html){
-        const d=document.createElement('div');
-        d.style.cssText='padding:4px 6px;border-bottom:1px solid #1e293b;direction:rtl';
-        d.innerHTML=html;
-        logEl.appendChild(d);
-        logEl.scrollTop=logEl.scrollHeight;
-    };
-    const updCounters=function(){
-        const e1=document.getElementById('bslAiBatchTotal');if(e1)e1.textContent=toFa(total);
-        const e2=document.getElementById('bslAiBatchFixed');if(e2)e2.textContent=toFa(fixed);
-        const e3=document.getElementById('bslAiBatchNoAi');if(e3)e3.textContent=toFa(noAi);
-        const e4=document.getElementById('bslAiBatchNoCat');if(e4)e4.textContent=toFa(noCat);
-        const e5=document.getElementById('bslAiBatchFailed');if(e5)e5.textContent=toFa(failed);
-    };
-    addRow('<span style="color:#67e8f9">\u2139\uFE0F \u062F\u0631\u06CC\u0627\u0641\u062A \u062F\u0633\u062A\u0647\u200C\u0628\u0646\u062F\u06CC\u200C\u0647\u0627 \u0648 \u0645\u062D\u0635\u0648\u0644\u0627\u062A \u0631\u062F\u0634\u062F\u0647...</span>');
-    const evtSrc=new EventSource('?bsl_fix_ai_cat_batch=1');
-    window._bslAiBatchEvtSrc=evtSrc;
-    evtSrc.onmessage=function(e){
-        try{
-            const d=JSON.parse(e.data);
-            if(d.type==='step'){
-                addRow('<span style="color:#67e8f9">\u2139\uFE0F '+esc(d.msg)+'</span>');
-            }else if(d.type==='start'){
-                total=d.total||0;
-                updCounters();
-                addRow('<span style="color:#c4b5fd;font-weight:700">\u{1F680} '+esc(d.msg)+'</span>');
-            }else if(d.type==='progress'){
-                const idx=d.idx||0;const tot=d.total||0;
-                const pName=esc(d.pName||'');
-                if(d.step==='check_ai'){
-                    addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+pName+' \u2014 \u0628\u0631\u0631\u0633\u06CC \u0645\u062A\u0646 AI...</span>');
-                }else if(d.step==='extract_cat'){
-                    addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+pName+' \u2014 \u0627\u0633\u062A\u062E\u0631\u0627\u062C \u062F\u0633\u062A\u0647...</span>');
-                }else if(d.step==='ai_result'){
-                    const methodLabel=d.method==='regex'?'<span style="color:#4ade80">\u0627\u0644\u06AF\u0648\u06CC \u0645\u062A\u0646\u06CC</span>':'<span style="color:#fbbf24">\u062A\u0637\u0628\u06CC\u0642 \u0646\u0627\u0645</span>';
-                    const catName=esc(d.catName||'');
-                    const catId=d.catId||'';
-                    const score=d.score||0;
-                    const aiText=esc((d.ai_text||'').substring(0,200));
-                    addRow('<div style="background:#1e1b4b;padding:6px 8px;border-radius:6px;margin:2px 0"><div style="color:#c4b5fd;font-weight:700">\u{1F916} ['+idx+'/'+tot+'] '+pName+'</div><div style="color:#fbbf24;font-size:12px;margin-top:2px">\u{1F4CD} \u062F\u0633\u062A\u0647 \u062A\u0648\u0635\u06CC\u0647\u200C\u0634\u062F\u0647: <b>'+catName+' ('+catId+')</b> \u2014 \u0627\u0645\u062A\u06CC\u0627\u0632: '+score+' \u2014 '+methodLabel+'</div><div style="color:#67e8f9;font-size:10px;margin-top:2px">\u{1F4AC} '+aiText+'</div>'+(d.candidates&&d.candidates.length>1?'<div style="color:#94a3b8;font-size:10px;margin-top:2px">\u{1F4CB} \u0633\u0627\u06CC\u0631: '+d.candidates.slice(1,4).map(c=>esc(c.catName||'')+'('+c.catId+')='+c.score).join(' | ')+'</div>':'')+'</div>');
-                }else if(d.step==='find_leaf'){
-                    addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+pName+' \u2014 \u062C\u0633\u062A\u062C\u0648\u06CC \u062F\u0633\u062A\u0647 \u0641\u0631\u0632\u06CC\u0646...</span>');
-                }else if(d.step==='patching'){
-                    addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+pName+' \u2014 \u0627\u0631\u0633\u0627\u0644 \u0627\u0635\u0644\u0627\u062D: '+esc(d.catName||'')+' ('+d.catId+')...</span>');
-                }
-            }else if(d.type==='item'){
-                if(d.status==='fixed'){
-                    fixed++;
-                    addRow('<span style="color:#4ade80;font-weight:700">\u2705 ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' \u2192 '+esc(d.catName||'')+' ('+d.catId+')</span>');
-                }else if(d.status==='no_ai'){
-                    noAi++;
-                    addRow('<span style="color:#fbbf24">\u26A0\uFE0F ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' \u2014 \u0645\u062A\u0646 AI \u06CC\u0627\u0641\u062A \u0646\u0634\u062F</span>');
-                }else if(d.status==='no_cat'){
-                    noCat++;
-                    addRow('<span style="color:#fbbf24">\u26A0\uFE0F ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' \u2014 \u062F\u0633\u062A\u0647 \u0627\u0632 \u0645\u062A\u0646 AI \u0627\u0633\u062A\u062E\u0631\u0627\u062C \u0646\u0634\u062F</span>'+(d.ai_text?'<div style="color:#94a3b8;font-size:10px;padding-right:20px">\u{1F4AC} '+esc((d.ai_text||'').substring(0,200))+'</div>':''));
-                }else if(d.status==='failed'){
-                    failed++;
-                    addRow('<span style="color:#f87171">\u274C ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' \u2014 '+esc(d.msg||'')+'</span>');
-                }
-                updCounters();
-            }else if(d.type==='done'){
-                addRow('<span style="color:#4ade80;font-weight:700">\u{1F3C1} '+esc(d.msg)+'</span>');
-                showToast('\u2705 '+fixed+' \u0645\u062D\u0635\u0648\u0644 \u0627\u0635\u0644\u0627\u062D \u0634\u062F');
-                evtSrc.close();
-                if(btn)btn.disabled=false;
-                if(fixed>0)setTimeout(()=>{closeBslAiBatchModal();showBslProductsModal(1,'not_approved');},2000);
-            }else if(d.type==='error'){
-                addRow('<span style="color:#f87171">\u274C '+esc(d.msg)+'</span>');
-                evtSrc.close();
-                if(btn)btn.disabled=false;
-            }
-        }catch(ex){}
-    };
-    evtSrc.onerror=function(){
-        addRow('<span style="color:#f87171">\u274C \u062E\u0637\u0627 \u0634\u0628\u06A9\u0647 \u2014 \u0627\u062A\u0635\u0627\u0644 \u0642\u0637\u0639 \u0634\u062F</span>');
-        if(btn)btn.disabled=false;
-        evtSrc.close();
-    };
+/* ═══════════════════════════════════════════════════════════════════
+ *  v10.23 (۳۶د): «اصلاح دسته‌بندی محصولات باسلام» — رابطِ کارِ پس‌زمینه
+ *
+ *  جایگزینِ سه رابطِ SSEِ قبلی (اصلاح همه با متنِ AI، اصلاح تکی، اصلاح
+ *  بقیه با مستر). آن‌ها روی EventSource سوار بودند: کار در همان تبِ مرورگر
+ *  می‌دوید، با بستنِ پنجره می‌مرد، دکمهٔ توقف نداشت و در مدیر وظیفه دیده
+ *  نمی‌شد. حالا هر سه به یک پنجرهٔ واحد رسیده‌اند که فقط سه کار می‌کند:
+ *  ?catfix_start را صدا می‌زند، ?catfix_status را می‌خواند، و در پایان
+ *  ?catfix_result را نشان می‌دهد — دقیقاً مثل «حذفِ تکراری».
+ * ═══════════════════════════════════════════════════════════════════ */
+let cfIsRun=false, cfTimer=null, cfSeen=0, cfMode='ai_text';
+
+const CF_MODES=[['ai_text','📝 متنِ بررسیِ باسلام','از متنِ توصیه/علتِ ردِ خودِ باسلام دسته را بیرون می‌کشد — رایگان و بدونِ مدلِ هوش مصنوعی'],
+                ['master','🎯 مدلِ مستر','فقط از بهترین مدلِ کاندید (بر اساس آمارِ رأی‌ها) می‌پرسد — سریع‌تر و کم‌هزینه‌تر'],
+                ['quorum','🗳️ اجماعِ چندمدلی','از چند مدلِ کاندید می‌پرسد و رأیِ اکثریت را اعمال می‌کند — دقیق‌تر ولی پرهزینه‌تر']];
+
+function catfixOpen(mode){
+    if(mode)cfMode=mode;
+    let m=document.getElementById('catfixModal');
+    if(m){m.remove();}
+    m=document.createElement('div');m.id='catfixModal';
+    let modeOpts='';
+    CF_MODES.forEach(function(x){
+        modeOpts+='<option value="'+x[0]+'"'+(x[0]===cfMode?' selected':'')+'>'+x[1]+'</option>';
+    });
+    m.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)catfixClose()">'
+      +'<div class="bsl-modal" style="width:880px;max-width:96vw">'
+      +'<div class="bsl-modal-head"><h2>📂 اصلاح دسته‌بندی محصولات باسلام</h2>'
+      +'<button class="btn btn-gray" onclick="catfixClose()">✕</button></div>'
+      +'<div class="bsl-modal-body" style="padding:12px;max-height:80vh;overflow-y:auto">'
+      +'<div class="alert alert-info" style="font-size:11px;margin-bottom:8px">💡 محصولاتِ «تأیید نشده» که دلیلِ ردشان دسته‌بندی است، دستهٔ تازه می‌گیرند و به بررسیِ مجدد می‌روند. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود — می‌توانید این پنجره را ببندید یا مرورگر را ببندید؛ در <b>مدیر وظیفه</b> هم دیده می‌شود.</div>'
+      +'<div style="background:#0b1220;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px">'
+      +'<label style="display:block">🧭 روشِ تشخیصِ دسته'
+      +'<select id="cfMode" class="inp" style="width:100%;margin-top:4px" onchange="catfixModeHint()">'+modeOpts+'</select></label>'
+      +'<div id="cfModeHint" style="color:#64748b;font-size:10px;margin-top:5px"></div>'
+      +'<label id="cfQuorumWrap" style="display:none;margin-top:8px">🗳️ حدنصابِ اجماع (چند مدل باید موافق باشند)'
+      +'<input type="number" id="cfQuorum" class="inp" value="2" min="1" max="8" style="width:90px;margin-right:6px" dir="ltr"></label>'
+      +'</div>'
+      +'<div style="display:flex;gap:6px;margin-top:8px">'
+      +'<button class="btn btn-green" id="cfBtn" onclick="catfixStart()" style="flex:1">▶ شروعِ اصلاح</button>'
+      +'<button class="btn btn-red hidden" id="cfStopBtn" onclick="catfixStop()" style="flex:0">⏹ توقف</button>'
+      +'</div>'
+      +'<div class="progress hidden" id="cfP" style="margin-top:8px"><div class="progress-bar" id="cfPB" style="background:linear-gradient(90deg,#7c3aed,#c084fc)"></div></div>'
+      +'<div class="status" id="cfSS" style="color:#c4b5fd"></div>'
+      +'<div class="ssum hidden" id="cfSM">'
+      +'<div class="si"><b id="cfTot" style="color:#60a5fa">۰</b><span>کل</span></div>'
+      +'<div class="si"><b id="cfFixed" style="color:#4ade80">۰</b><span>اصلاح شد</span></div>'
+      +'<div class="si"><b id="cfNoCat" style="color:#fbbf24">۰</b><span>دسته نیافت</span></div>'
+      +'<div class="si"><b id="cfSkip" style="color:#94a3b8">۰</b><span>رد شد</span></div>'
+      +'<div class="si"><b id="cfFail" style="color:#f87171">۰</b><span>ناموفق</span></div>'
+      +'</div>'
+      +'<div class="sres hidden" id="cfLog" style="max-height:300px;overflow-y:auto;margin-top:8px"></div>'
+      +'<div id="cfReport" style="margin-top:8px"></div>'
+      +'</div></div></div>';
+    document.body.appendChild(m);
+    catfixModeHint();
+    // وضعیتِ زنده را بگیر: شاید کاری از قبل (یا از تبِ دیگری) در جریان باشد
+    catfixPoll(true);
 }
 
-function closeBslAiBatchModal(){const m=document.getElementById('bslAiBatchModal');if(m)m.remove();const evtSrc=window._bslAiBatchEvtSrc;if(evtSrc)evtSrc.close();}
+function catfixClose(){
+    clearInterval(cfTimer);cfTimer=null;cfIsRun=false;
+    const m=document.getElementById('catfixModal');if(m)m.remove();
+}
+
+function catfixModeHint(){
+    const sel=document.getElementById('cfMode');if(!sel)return;
+    cfMode=sel.value;
+    const row=CF_MODES.find(x=>x[0]===cfMode);
+    const h=document.getElementById('cfModeHint');
+    if(h&&row)h.textContent=row[2];
+    const q=document.getElementById('cfQuorumWrap');
+    if(q)q.style.display=(cfMode==='quorum')?'block':'none';
+}
+
+function catfixStart(productId){
+    if(cfIsRun){showToast('⏳ یک اصلاح در حال اجراست',1);return;}
+    const sel=document.getElementById('cfMode');
+    if(sel)cfMode=sel.value;
+    let url='?catfix_start=1&mode='+encodeURIComponent(cfMode);
+    if(cfMode==='quorum'){
+        const q=document.getElementById('cfQuorum');
+        url+='&quorum='+encodeURIComponent((q&&q.value)||2);
+    }
+    if(productId)url+='&product_id='+encodeURIComponent(productId);
+    cfSeen=0;
+    const L=id=>document.getElementById(id);
+    if(L('cfBtn'))L('cfBtn').classList.add('hidden');
+    if(L('cfStopBtn'))L('cfStopBtn').classList.remove('hidden');
+    if(L('cfP'))L('cfP').classList.remove('hidden');
+    if(L('cfPB'))L('cfPB').style.width='4%';
+    if(L('cfLog')){L('cfLog').classList.remove('hidden');L('cfLog').innerHTML='';}
+    if(L('cfReport'))L('cfReport').innerHTML='';
+    if(L('cfSS'))L('cfSS').textContent='⏳ در حال شروع...';
+    cfIsRun=true;
+    fetch(url).then(r=>r.json()).then(d=>{
+        if(!d||!d.ok){
+            cfIsRun=false;
+            if(L('cfSS'))L('cfSS').textContent='✗ '+((d&&d.error)||'شروع نشد');
+            catfixFinishUi();
+            if(d&&d.running)catfixWatch();   // کارِ دیگری در جریان است — فقط تماشا کن
+            return;
+        }
+        if(L('cfSS'))L('cfSS').textContent='🚀 اجرا در پس‌زمینهٔ سرور — می‌توانید این پنجره را ببندید';
+        catfixWatch();
+    }).catch(()=>{
+        // حتی اگر پاسخِ شروع گم شود، کار روی سرور آغاز شده
+        if(L('cfSS'))L('cfSS').textContent='… اتصال کند است، وضعیت را دنبال می‌کنیم';
+        catfixWatch();
+    });
+}
+
+function catfixStop(){
+    fetch('?catfix_stop=1').then(r=>r.json()).then(()=>{
+        showToast('⏹ درخواستِ توقف ثبت شد — پس از محصولِ جاری متوقف می‌شود');
+    }).catch(()=>showToast('✗ خطا شبکه',1));
+}
+
+function catfixWatch(){
+    clearInterval(cfTimer);
+    cfTimer=setInterval(function(){catfixPoll(false);},1400);
+}
+
+function catfixPoll(first){
+    fetch('?catfix_status=1&since='+cfSeen).then(r=>r.json()).then(st=>{
+        if(!st)return;
+        catfixApply(st,first);
+    }).catch(()=>{});
+}
+
+function catfixApply(st,first){
+    const L=id=>document.getElementById(id);
+    if(!document.getElementById('catfixModal'))return;
+    if(first&&st.running){cfIsRun=true;catfixWatch();
+        if(L('cfBtn'))L('cfBtn').classList.add('hidden');
+        if(L('cfStopBtn'))L('cfStopBtn').classList.remove('hidden');
+        if(L('cfP'))L('cfP').classList.remove('hidden');
+        if(L('cfLog'))L('cfLog').classList.remove('hidden');
+        if(L('cfSS'))L('cfSS').textContent='🔄 کاری از قبل در جریان است — وضعیتش را دنبال می‌کنیم';
+    }
+    if(st.log&&st.log.length&&L('cfLog')){
+        let h='';
+        st.log.forEach(function(l){
+            const m=(l&&l.m)||'';
+            let c='#94a3b8';
+            if(m.indexOf('✅')>=0)c='#4ade80';
+            else if(m.indexOf('❌')>=0)c='#f87171';
+            else if(m.indexOf('⚠')>=0||m.indexOf('⏭')>=0)c='#fbbf24';
+            else if(m.indexOf('🗳')>=0||m.indexOf('🚀')>=0)c='#c4b5fd';
+            else if(m.indexOf('📄')>=0||m.indexOf('📂')>=0)c='#67e8f9';
+            h+='<div style="color:'+c+';font-size:10.5px;padding:1px 0">'+esc(m)+'</div>';
+        });
+        L('cfLog').insertAdjacentHTML('beforeend',h);
+        L('cfLog').scrollTop=L('cfLog').scrollHeight;
+        cfSeen=parseInt(st.log_total)||cfSeen;
+    }
+    const tot=parseInt(st.total)||0, cur=parseInt(st.current)||0;
+    if(L('cfSM'))L('cfSM').classList.remove('hidden');
+    if(L('cfTot'))L('cfTot').textContent=toFa(tot);
+    if(L('cfFixed'))L('cfFixed').textContent=toFa(st.fixed||0);
+    if(L('cfNoCat'))L('cfNoCat').textContent=toFa((st.no_cat||0)+(st.no_ai||0));
+    if(L('cfSkip'))L('cfSkip').textContent=toFa((st.skip_same||0)+(st.skip_tried||0));
+    if(L('cfFail'))L('cfFail').textContent=toFa(st.failed||0);
+    if(L('cfPB'))L('cfPB').style.width=(tot>0?Math.max(3,Math.round(cur*100/tot)):5)+'%';
+    if(st.running&&L('cfSS')&&tot>0)
+        L('cfSS').textContent='🔄 '+toFa(cur)+' از '+toFa(tot)+' — '+(st.last_title||'');
+    if(st.done){
+        clearInterval(cfTimer);cfTimer=null;cfIsRun=false;
+        catfixFinishUi();
+        if(L('cfSS'))L('cfSS').textContent=st.error?('✗ '+st.error):(st.stopped?'⏹ متوقف شد':'🏁 پایان یافت');
+        catfixFetchResult();
+        if(typeof tmPulse==='function')tmPulse();
+    }
+}
+
+function catfixFinishUi(){
+    const L=id=>document.getElementById(id);
+    if(L('cfBtn'))L('cfBtn').classList.remove('hidden');
+    if(L('cfStopBtn'))L('cfStopBtn').classList.add('hidden');
+}
+
+function catfixFetchResult(){
+    fetch('?catfix_result=1').then(r=>r.json()).then(d=>{
+        const box=document.getElementById('cfReport');
+        if(!box||!d)return;
+        if(!d.ok){box.innerHTML='<div class="no2">✗ '+esc(d.error||'گزارشی نیست')+'</div>';return;}
+        let h='<div style="background:#0b1220;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px">'
+          +'<div style="color:#c4b5fd;font-weight:700;margin-bottom:6px">🏁 '+esc(d.msg||'')+'</div>'
+          +'<div style="color:#64748b;font-size:10px">روش: '+esc({ai_text:'متنِ بررسیِ باسلام',master:'مدلِ مستر',quorum:'اجماعِ چندمدلی'}[d.mode]||d.mode||'')
+          +' · زمان: '+toFa(d.took||0)+' ثانیه'+(d.partial?' · <span style="color:#fbbf24">فهرست ناقص بود</span>':'')+'</div>';
+        const items=d.items||[];
+        if(items.length){
+            const col={fixed:'#4ade80',failed:'#f87171',no_cat:'#fbbf24',no_ai:'#fbbf24',skipped:'#94a3b8'};
+            const ico={fixed:'✅',failed:'❌',no_cat:'⚠️',no_ai:'⚠️',skipped:'⏭'};
+            h+='<div style="max-height:280px;overflow-y:auto;margin-top:8px;border-top:1px solid #1e293b;padding-top:6px">';
+            items.forEach(function(it){
+                h+='<div style="display:flex;gap:6px;align-items:baseline;padding:3px 0;border-bottom:1px solid #111c31">'
+                  +'<span style="width:18px">'+(ico[it.status]||'•')+'</span>'
+                  +'<span style="flex:1;color:#e2e8f0">'+esc(it.title||('#'+it.id))+'</span>'
+                  +(it.cat_name?'<span style="color:#67e8f9">'+esc(it.cat_name)+'</span>':'')
+                  +'<span style="color:'+(col[it.status]||'#64748b')+';font-size:10px">'+esc(it.msg||'')+'</span></div>';
+            });
+            h+='</div>';
+        }
+        box.innerHTML=h+'</div>';
+        if(typeof p2RefreshTried==='function')p2RefreshTried();
+    }).catch(()=>{});
+}
+
+/* --- پل‌های سازگاری با دکمه‌های قدیمی ---------------------------------
+   نامِ این سه تابع در چند جای رابط hard-code شده بود؛ به‌جای گشتنِ همهٔ
+   دکمه‌ها، خودِ توابع به پنجرهٔ تازه هدایت می‌شوند. */
+
+/** «🔄 اصلاح همه» در مدیریتِ جامعِ محصولات — با متنِ بررسیِ باسلام */
+function bslBatchFixAiCat(){ catfixOpen('ai_text'); }
+
+/** «🎯 اصلاح بقیه با مستر» در فاز ۲ — اجماعِ چندمدلی، با برگشت به تک‌مدلی */
+function bslMasterFixAll(){ catfixOpen('quorum'); }
+
+/** اصلاحِ همین یک محصول با متنِ بررسیِ باسلام — باز هم در پس‌زمینه */
+function bslFixAiCat(productId){
+    const pid=parseInt(productId,10)||0;
+    if(pid<=0){showToast('شناسهٔ محصول نامعتبر',1);return;}
+    catfixOpen('ai_text');
+    setTimeout(function(){ catfixStart(pid); },120);
+}
+
+/* v10.23 (۳۶د): مودالِ SSEِ قدیمی دیگر ساخته نمی‌شود، ولی نامش ممکن است در
+   نسخهٔ کشِ مرورگرِ کاربر یا در کدِ دیگری مانده باشد — پس یک بسته‌کنندهٔ
+   بی‌خطر باقی می‌ماند که پنجرهٔ تازه را هم می‌بندد. */
+function closeBslAiBatchModal(){
+    const m=document.getElementById('bslAiBatchModal');if(m)m.remove();
+    const evtSrc=window._bslAiBatchEvtSrc;if(evtSrc)try{evtSrc.close();}catch(e){}
+    if(typeof catfixClose==='function')catfixClose();
+}
 
 // v8.06: Download all AI review texts as a text file
 function bslDownloadAiTexts(){
@@ -50885,69 +52258,6 @@ function bslDeleteDuplicates(ids,groupName){
     if(!ids||!ids.length)return;
     if(!confirm(toFa(ids.length)+' نسخهٔ تکراری از «'+(groupName||'')+'» بایگانی شود؟'))return;
     ddDeleteIds(ids.map(x=>parseInt(x,10)));
-}
-
-function bslFixAiCat(productId){
-    const btn=document.getElementById('bslAiFixBtn-'+productId);
-    const result=document.getElementById('bslAiFixResult-'+productId);
-    if(btn)btn.disabled=true;
-    let logEl=document.getElementById('bslAiFixLog-'+productId);
-    if(!logEl){
-        logEl=document.createElement('div');
-        logEl.id='bslAiFixLog-'+productId;
-        logEl.style.cssText='max-height:250px;overflow-y:auto;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:6px;font-size:11px;direction:rtl;margin-top:4px';
-        if(result&&result.parentElement)result.parentElement.appendChild(logEl);
-    }
-    logEl.innerHTML='';
-    if(result)result.innerHTML='<div style="color:#67e8f9">\u{1F916} \u0628\u0631\u0631\u0633\u06CC \u062A\u0648\u0635\u06CC\u0647 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06CC \u0628\u0627\u0633\u0644\u0627\u0645...</div>';
-    const addRow=function(html){
-        const d=document.createElement('div');
-        d.style.cssText='padding:2px 0;border-bottom:1px solid #1e293b;direction:rtl';
-        d.innerHTML=html;
-        logEl.appendChild(d);
-        logEl.scrollTop=logEl.scrollHeight;
-    };
-    const evtSrc=new EventSource('?bsl_fix_ai_cat=1&product_id='+productId);
-    evtSrc.onmessage=function(e){
-        try{
-            const d=JSON.parse(e.data);
-            if(d.type==='step'){
-                addRow('<span style="color:#67e8f9">\u2139\uFE0F '+esc(d.msg)+'</span>');
-            }else if(d.type==='done'){
-                addRow('<span style="color:#4ade80;font-weight:700">\u2705 '+esc(d.msg)+'</span>');
-                if(result)result.innerHTML='<div style="color:#4ade80;font-weight:700">\u2705 '+esc(d.msg)+'</div>';
-                showToast('\u2705 \u0627\u0635\u0644\u0627\u062D \u062F\u0633\u062A\u0647 \u0628\u0631 \u0627\u0633\u0627\u0633 \u062A\u0648\u0635\u06CC\u0647 AI');
-                evtSrc.close();
-            }else if(d.type==='fallback'){
-                addRow('<span style="color:#fbbf24">\u26A0\uFE0F PATCH \u0645\u0633\u062A\u0642\u06CC\u0645 \u0646\u0627\u0645\u0648\u0641\u0642 \u2014 \u062A\u0644\u0627\u0634 \u0628\u0627 \u0631\u0648\u0634 \u062C\u0627\u06CC\u06AF\u0632\u06CC\u0646...</span>');
-                if(result)result.innerHTML='<div style="color:#fbbf24">\u26A0\uFE0F \u062A\u0644\u0627\u0634 \u0628\u0627 \u0631\u0648\u0634 \u062C\u0627\u06CC\u06AF\u0632\u06CC\u0646...</div>';
-                evtSrc.close();
-                if(d.redirect_url){
-                    fetch(d.redirect_url).then(r2=>r2.json()).then(d2=>{
-                        if(d2&&d2.ok){
-                            addRow('<span style="color:#4ade80;font-weight:700">\u2705 \u0627\u0635\u0644\u0627\u062D \u0634\u062F (\u062C\u0627\u06CC\u06AF\u0632\u06CC\u0646): '+esc(d2.msg||'')+'</span>');
-                            if(result)result.innerHTML='<div style="color:#4ade80;font-weight:700">\u2705 '+esc(d2.msg||'')+'</div>';
-                            showToast('\u2705 \u0627\u0635\u0644\u0627\u062D \u062F\u0633\u062A\u0647 (\u062C\u0627\u06CC\u06AF\u0632\u06CC\u0646)');
-                        }else{
-                            addRow('<span style="color:#f87171">\u274C '+(d2&&d2.error||'\u062E\u0637\u0627')+'</span>');
-                            if(result)result.innerHTML='<div style="color:#f87171">\u274C '+(d2&&d2.error||'\u062E\u0637\u0627')+'</div>';
-                            if(btn)btn.disabled=false;
-                        }
-                    }).catch(()=>{addRow('<span style="color:#f87171">\u274C \u062E\u0637\u0627 \u0634\u0628\u06A9\u0647</span>');if(result)result.innerHTML='<div style="color:#f87171">\u274C \u062E\u0637\u0627 \u0634\u0628\u06A9\u0647</div>';if(btn)btn.disabled=false;});
-                }else{if(btn)btn.disabled=false;}
-            }else if(d.type==='error'){
-                addRow('<span style="color:#f87171">\u274C '+esc(d.msg)+'</span>');
-                if(result)result.innerHTML='<div style="color:#f87171">\u274C '+esc(d.msg)+'</div>';
-                evtSrc.close();
-                if(btn)btn.disabled=false;
-            }
-        }catch(ex){}
-    };
-    evtSrc.onerror=function(){
-        if(result)result.innerHTML='<div style="color:#f87171">\u274C \u062E\u0637\u0627 \u0634\u0628\u06A9\u0647</div>';
-        if(btn)btn.disabled=false;
-        evtSrc.close();
-    };
 }
 
 /**
@@ -51281,64 +52591,6 @@ function p2RecordCandVote(pid, catId, catName){
   setTimeout(()=>{if(typeof aiCandRender==='function')aiCandRender();},400);
 }
 
-/** v9.49: با مدل مستر مشورت و بقیهٔ محصولاتِ تأیید‌نشده را دسته‌بندی و اصلاح کن */
-function bslMasterFixAll(){
-  const btn=document.getElementById('p2MasterBtn');
-  if(btn){btn.disabled=true;btn.textContent='⏳ ...';}
-  let modal=document.getElementById('bslMasterFixModal');
-  if(modal)modal.remove();
-  modal=document.createElement('div');modal.id='bslMasterFixModal';
-  modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)closeBslMasterFixModal()"><div class="bsl-modal" style="width:800px"><div class="bsl-modal-head"><h2>🎯 اصلاح بقیه با مستر — گزارش زنده</h2><button class="btn btn-gray" onclick="closeBslMasterFixModal()">✕</button></div><div class="bsl-modal-body" style="padding:0"><div id="bslMasterFixLog" style="max-height:62vh;overflow-y:auto;padding:8px;font-size:11px;direction:rtl"></div></div><div class="bsl-modal-pager"><button class="btn btn-gray" onclick="closeBslMasterFixModal()">بستن</button></div></div></div>';
-  document.body.appendChild(modal);
-  const logEl=document.getElementById('bslMasterFixLog');
-  const addRow=function(html){const d=document.createElement('div');d.style.cssText='padding:4px 6px;border-bottom:1px solid #1e293b;direction:rtl';d.innerHTML=html;logEl.appendChild(d);logEl.scrollTop=logEl.scrollHeight;};
-  addRow('<span style="color:#67e8f9">ℹ️ در حال مشورت با مدل مستر برای همهٔ محصولات ردشده...</span>');
-  const evtSrc=new EventSource('?bsl_master_fix=1');
-  window._bslMasterEvtSrc=evtSrc;
-  evtSrc.onmessage=function(e){
-    try{
-      const d=JSON.parse(e.data);
-      if(d.type==='step'){addRow('<span style="color:#67e8f9">ℹ️ '+esc(d.msg)+'</span>');}
-      else if(d.type==='start'){addRow('<span style="color:#c4b5fd;font-weight:700">🚀 '+esc(d.msg)+'</span>');}
-      else if(d.type==='progress'){
-        const idx=d.idx||0,tot=d.total||0;
-        if(d.step==='ask_master'){addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+esc(d.pName||'')+' — مشورت با مدل‌ها...</span>');}
-        /* v10.12 (۲۵): چند دسته از فهرست حذف شد چون قبلاً امتحان شده بود */
-        else if(d.step==='exclude'){addRow('<span style="color:#f0abfc">['+idx+'/'+tot+'] 🧠 '+toFa(d.excluded||0)+' دستهٔ امتحان‌شده از کاندیدها حذف شد</span>');}
-        /* v10.12 (۲۵): گزارشِ اجماعِ چندمدلی — چند مدل پرسیده شد، چند تا موافق بودند */
-        else if(d.step==='consensus'){
-          const pm=(d.per_model||[]).map(function(x){
-            return esc(x.model||'')+'→'+(x.ok?(esc(x.category_name||'')+'('+x.category_id+')'):(x.repeat?'تکراری':'—'));
-          }).join(' · ');
-          addRow('<span style="color:#c4b5fd">['+idx+'/'+tot+'] 🗳️ اجماع: '+esc(d.catName||'')+' ('+d.catId+') — '
-            +toFa(d.agreement||0)+' رأی از '+toFa(d.asked||0)+' مدلِ پرسیده‌شده'
-            +(d.stages>1?' · '+toFa(d.stages)+' مرحله':' · توقفِ زودهنگام ✔')
-            +(d.from_cache?' · از کش ⚡':'')
-            +(pm?'<br><span style="color:#64748b;font-size:10.5px">'+pm+'</span>':'')+'</span>');
-        }
-        else if(d.step==='patching'){addRow('<span style="color:#94a3b8">['+idx+'/'+tot+'] '+esc(d.pName||'')+' — اعمال: '+esc(d.catName||'')+' ('+d.catId+')...</span>');}
-      }
-      else if(d.type==='item'){
-        if(d.status==='fixed'){addRow('<span style="color:#4ade80;font-weight:700">✅ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' → '+esc(d.catName||'')+' ('+d.catId+')</span>');}
-        else if(d.status==='no_cat'){addRow('<span style="color:#fbbf24">⚠️ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' — '+esc(d.msg||'دستهٔ معتبری نداد')+'</span>');}
-        /* v10.12 (۲۵): رد شده چون تکراری یا همان دستهٔ فعلی بود */
-        else if(d.status==='skipped'){addRow('<span style="color:#94a3b8">⏭️ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' — '+esc(d.msg||'')+'</span>');}
-        else if(d.status==='failed'){addRow('<span style="color:#f87171">❌ ['+d.idx+'/'+d.total+'] '+esc(d.pName||'')+' — '+esc(d.msg||'')+'</span>');}
-      }
-      else if(d.type==='done'){
-        addRow('<span style="color:#4ade80;font-weight:700">🏁 '+esc(d.msg)+'</span>');
-        showToast('✅ اصلاح'+(d.multi?' چندمدلی':' با مستر')+': '+toFa(d.fixed||0)+' محصول');
-        evtSrc.close();
-        p2RefreshTried();   // v10.12 (۲۵): آمارِ تلاش‌ها بعد از اجرا عوض شده
-        if(btn){btn.disabled=false;btn.textContent='🎯 اصلاح بقیه با مستر';}
-        if((d.fixed||0)>0)setTimeout(()=>{closeBslMasterFixModal();bslPhase2Check();},2000);
-      }
-      else if(d.type==='error'){addRow('<span style="color:#f87171">❌ '+esc(d.msg)+'</span>');evtSrc.close();if(btn){btn.disabled=false;btn.textContent='🎯 اصلاح بقیه با مستر';}}
-    }catch(ex){}
-  };
-  evtSrc.onerror=function(){addRow('<span style="color:#f87171">❌ خطای شبکه — اتصال قطع شد</span>');evtSrc.close();if(btn){btn.disabled=false;btn.textContent='🎯 اصلاح بقیه با مستر';}};
-}
-function closeBslMasterFixModal(){const m=document.getElementById('bslMasterFixModal');if(m)m.remove();const evtSrc=window._bslMasterEvtSrc;if(evtSrc)evtSrc.close();}
 
 /** پیشنهاد هوش مصنوعی برای همهٔ موارد باقی‌مانده، یکی‌یکی */
 /* v10.12 (۲۵): آمارِ حافظهٔ تلاش را می‌گیرد و در نوارِ فاز ۲ نشان می‌دهد. */
