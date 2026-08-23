@@ -196,8 +196,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.30';
-const APP_VERSION_DATE = '1405/06/04';
+const APP_VERSION = '10.31';
+const APP_VERSION_DATE = '1405/06/05';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -20544,9 +20544,11 @@ if (isset($_GET['selftest'])) {
     $add('10.15', 'getDetailColumns() قیمت را از ستون‌ها کنار می‌گذارد',
          strpos($selfSrc, 'function getDetail' . 'Columns() {') !== false
       && strpos($selfSrc, "getEnabledDetailFields().filter(f => f.key !== " . "'price')") !== false);
-    /* هر پنج نقطهٔ نمایش/خروجی: renderRow، updateTableHeaders، genTxt، getCSV، dl */
-    $add('10.15', 'هر پنج نقطهٔ جدول/خروجی از getDetailColumns استفاده می‌کنند',
-         substr_count($selfSrc, '= getDetail' . 'Columns();') === 5);
+    /* نقاطِ نمایش/خروجی: renderRow، updateTableHeaders، genTxt، getCSV، dl
+       + از v10.31 (۴۴) نقطهٔ ششم: rowHtml() که بدنهٔ ردیف را برای رندرِ
+       انبوهِ جدول می‌سازد و همان ستون‌ها را باید بشناسد. */
+    $add('10.15', 'هر شش نقطهٔ جدول/خروجی از getDetailColumns استفاده می‌کنند',
+         substr_count($selfSrc, '= getDetail' . 'Columns();') === 6);
     $add('10.15', 'اندپوینتِ پیشنهاد برای قیمت سلکتور دارد و ins را جلوتر می‌گذارد',
          strpos($selfSrc, "'p.price ins " . ".amount',") !== false
       && strpos($selfSrc, "'p.price ins " . ".amount',") < strpos($selfSrc, "'p.price " . ".amount',"));
@@ -21466,6 +21468,71 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'id="ag' . 'Convo"') !== false
       && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
       && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
+
+    /* ================= v10.31 (۴۴) ================= */
+    /* رندرِ تنبلِ نتایج. گلوگاه این بود که refreshViews() هر سه نما را
+       برای همهٔ محصولات می‌ساخت، حتی وقتی تبِ نتایج بسته بود. */
+    $add('10.31', 'بدنهٔ کارت و ردیف به تابعِ جدا در آمده تا رندرِ انبوه رشته بسازد',
+         strpos($selfSrc, 'function cardHtml(p,_k){') !== false
+      && strpos($selfSrc, 'function rowHtml(p,i){') !== false);
+    $add('10.31', 'پرچمِ کهنگیِ سه نما و ثابت‌های تکه‌بندی تعریف شده‌اند',
+         strpos($selfSrc, 'let rvDirty = {grid:true, table:true, text:true};') !== false
+      && strpos($selfSrc, 'const RV_CHUNK = 120;') !== false
+      && strpos($selfSrc, 'const RV_HEAVY = 400;') !== false);
+    $add('10.31', 'نمای پیش‌فرضِ نتایج جدول است، نه کارت',
+         strpos($selfSrc, "let rvCurView = 'table';") !== false
+      && strpos($selfSrc, '<button class="sub-tab" data-v="grid"') !== false
+      && strpos($selfSrc, '<button class="sub-tab active" data-v="table"') !== false);
+    $add('10.31', 'کانتینرِ گرید در HTML مخفی و کانتینرِ جدول نمایان است',
+         strpos($selfSrc, '<div id="vGrid" class="grid hidden">') !== false
+      && strpos($selfSrc, '<div id="vTable" class="table-wrap">') !== false);
+    $add('10.31', 'refreshViews وقتی تبِ نتایج بسته است چیزی نمی‌سازد',
+         strpos($selfSrc, 'function resultsVisible(){') !== false
+      && strpos($selfSrc, '} else if (resultsVisible()) {') !== false
+      && strpos($selfSrc, 'rvMarkDirty();') !== false);
+    /* حالتِ خالی باید بی‌توجه به تبِ باز پاک شود، وگرنه بعد از پاک‌کردنِ
+       نتایج، کارت‌های قدیمی روی نمای مخفی جا می‌مانند. */
+    $add('10.31', 'خالی‌شدنِ نتایج هر دو نما را بدونِ شرطِ تب پاک می‌کند',
+         strpos($selfSrc, 'if (products.size === 0) {' . "\n" . '        /* حالتِ خالی') !== false);
+    $add('10.31', 'سه سازندهٔ نما و درگاهِ rvEnsure موجودند',
+         strpos($selfSrc, 'function rvBuildTable(){') !== false
+      && strpos($selfSrc, 'function rvBuildGrid(){') !== false
+      && strpos($selfSrc, 'function rvBuildText(){') !== false
+      && strpos($selfSrc, 'function rvEnsure(v){') !== false);
+    $add('10.31', 'نمای کارتی تکه‌تکه و با setTimeout رندر می‌شود',
+         strpos($selfSrc, 'rvChunkTimer=setTimeout(step,0);') !== false
+      && strpos($selfSrc, 'function rvCancelChunks(){') !== false);
+    $add('10.31', 'switchView نما را در صورت نیاز می‌سازد و انتخاب را حفظ می‌کند',
+         strpos($selfSrc, 'rvCurView=v;') !== false
+      && strpos($selfSrc, 'rvRememberView(v);') !== false
+      && strpos($selfSrc, "const RV_VIEW_KEY = 'scraper_results_view';") !== false);
+    $add('10.31', 'کلیک روی کارتِ سنگین اول پیام می‌دهد بعد رندر می‌کند',
+         strpos($selfSrc, "if(v==='grid'&&rvDirty.grid&&products.size>=RV_HEAVY){") !== false
+      && strpos($selfSrc, 'function rvHint(msg){') !== false);
+    $add('10.31', 'نمای ذخیره‌شده هرگز کارت برنمی‌گرداند تا رفرش سبک بماند',
+         strpos($selfSrc, 'function rvSavedView(){') !== false
+      && strpos($selfSrc, "return (v==='table'||v==='text')?v:'table';") !== false);
+    $add('10.31', 'ورود به تبِ نتایج نمای کهنه را همان لحظه می‌سازد',
+         strpos($selfSrc, "if (name === 'results' && typeof rvEnsure === 'function') rvEnsure(rvCurView);") !== false);
+    $add('10.31', 'رصدِ تصاویر به پایانِ ساختِ گرید گره خورده، نه به هر refreshViews',
+         strpos($selfSrc, 'window.rvAfterGrid=function(){ observeImages(); };') !== false
+      && strpos($selfSrc, "if(typeof rvCurView!=='undefined'&&rvCurView==='grid'&&!rvDirty.grid){") !== false);
+    $add('10.31', 'استخراجِ زنده هر دو نما را تازه علامت می‌زند تا دوباره ساخته نشوند',
+         strpos($selfSrc, 'rvDirty.grid=false; rvDirty.table=false; rvDirty.text=true;') !== false);
+    $add('10.31', 'ریست به نمای سبکِ جدول برمی‌گردد',
+         strpos($selfSrc, "update();rvMarkDirty();switch" . "View('table');") !== false
+      && substr_count($selfSrc, "switch" . "View('grid');") === 0);
+    $add('10.31', 'بازیابیِ نما هنگامِ بوت پیش از انتخابِ تب انجام می‌شود',
+         strpos($selfSrc, 'setTimeout(() => switchView(rvSavedView()), 20);') !== false
+      && strpos($selfSrc, 'setTimeout(() => switchView(rvSavedView()), 20);')
+         < strpos($selfSrc, 'setTimeout(() => switchMainTab(want), 50);'));
+    $add('10.31', 'انتخابِ پروفایل دیگر به‌زور تبِ نتایج را باز نمی‌کند',
+         strpos($selfSrc, 'function applyProfile(p, keepTab) {') !== false
+      && substr_count($selfSrc, "if (!keepTab) switch" . "MainTab('results');") === 0);
+    $add('10.31', 'CSSِ پیامِ آماده‌سازی با مرزِ اختصاصی درج شده',
+         strpos($selfSrc, '/* RVIEW-START') !== false
+      && strpos($selfSrc, '/* RVIEW-END') !== false
+      && strpos($selfSrc, '.rv-hint{grid-column:1/-1;') !== false);
 
     /* ================= v10.30 (۴۳) ================= */
     /* --- ۴۳الف: ابزارهای تازهٔ ایجنتِ کشفِ سلکتور روی صفحاتِ SPA --- */
@@ -22641,10 +22708,14 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "MAIN_TABS = ['start','settings','selectors','results','send','import']") !== false
       // نسخهٔ سخت‌کدشدهٔ قدیمی در بازیابیِ هش دیگر نیست
       && substr_count($selfSrc, ']' . '.includes(hash)') === 0);
-    $add('9.91', 'بازیابیِ خودکارِ پروفایل دیگر تبِ کاربر را عوض نمی‌کند',
+    /* v10.31 (۴۴): این ادعا سخت‌گیرتر شد. تا v10.30 فقط بازیابیِ خودکار
+       (silent) تب را حفظ می‌کرد و انتخابِ دستیِ پروفایل به «نتایج» می‌پرید؛
+       حالا هیچ مسیری تب را عوض نمی‌کند، پس دیگر نباید هیچ نمونه‌ای از
+       switchMainTab('results') در applyProfile بماند. */
+    $add('9.91', 'بارگذاریِ پروفایل در هیچ مسیری تبِ کاربر را عوض نمی‌کند',
          strpos($selfSrc, 'function applyProfile(p, keepTab) {') !== false
       && strpos($selfSrc, 'applyProfile(d.profile, !!silent);') !== false
-      && strpos($selfSrc, "if (!keepTab) switchMainTab('results');") !== false);
+      && substr_count($selfSrc, "if (!keepTab) switch" . "MainTab('results');") === 0);
     $add('9.91', 'کشویی هدفِ همگام‌سازی گزینهٔ «هیچ‌کدام» دارد',
          strpos($selfSrc, '<option value="no' . 'ne">هیچ‌کدام') !== false);
     $add('9.91', 'مقدارِ نامعتبرِ هدف به woo برمی‌گردد و none معتبر است',
@@ -37511,6 +37582,12 @@ html[data-skin="gloss"] .progress-bar{
 .sprompt-out{max-height:230px;overflow:auto;background:#070d18;border:1px solid #1e293b;border-radius:9px;padding:8px 10px;font-size:11px;line-height:1.95;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;direction:rtl}
 .sprompt-badge{display:inline-block;background:#2e1065;border:1px solid #6d28d9;border-radius:99px;padding:2px 9px;font-size:10px;color:#ddd6fe}
 /* SPROMPT-END ====================================================== */
+/* RVIEW-START — v10.31 (۴۴): پیامِ کوتاهِ «در حال آماده‌سازیِ کارت‌ها».
+   عمداً بعد از بلاکِ ویرایشگرِ پرامپت آمده تا مرزبندیِ CSSها به‌هم نریزد. */
+.rv-hint{grid-column:1/-1;text-align:center;padding:26px 14px;color:#94a3b8;font-size:12.5px;
+         background:#0b1220;border:1px dashed #334155;border-radius:12px;line-height:2}
+.rv-hint b{color:#7dd3fc}
+/* RVIEW-END ======================================================== */
 </style>
 </head>
 <body>
@@ -39745,8 +39822,10 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="tab-pane" id="pane-results">
     <div class="card" id="resultsCard">
         <div class="sb-tbs">
-            <button class="sub-tab active" data-v="grid" onclick="switchView('grid')">📊 کارت</button>
-            <button class="sub-tab" data-v="table" onclick="switchView('table')">📋 جدول</button>
+            <!-- v10.31 (۴۴): جدول پیش‌فرض است، نه کارت. کارت تصویر دارد و
+                 روی پروفایل‌های بزرگ سنگین است؛ فقط با کلیکِ کاربر پر می‌شود. -->
+            <button class="sub-tab" data-v="grid" onclick="switchView('grid')">📊 کارت</button>
+            <button class="sub-tab active" data-v="table" onclick="switchView('table')">📋 جدول</button>
             <button class="sub-tab" data-v="text" onclick="switchView('text')">📝 متن</button>
         </div>
         <div class="row">
@@ -39770,13 +39849,13 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <button class="rf-btn" data-f="changed" onclick="setResultFilter('changed')">🔄 آپدیت (<span id="rfChgN">۰</span>)</button>
             <button class="rf-btn" data-f="unchanged" onclick="setResultFilter('unchanged')">بدون تغییر (<span id="rfUncN">۰</span>)</button>
         </div>
-        <div id="vGrid" class="grid">
+        <div id="vGrid" class="grid hidden">
             <div class="empty-state" id="emptyState">
                 <div class="icon">📭</div>
                 <p>هنوز محصولی اسکرپ نشده است.</p>
             </div>
         </div>
-        <div id="vTable" class="table-wrap hidden"><table><thead><tr></tr></thead><tbody id="tBody"></tbody></table></div>
+        <div id="vTable" class="table-wrap"><table><thead><tr></tr></thead><tbody id="tBody"></tbody></table></div>
         <div id="vText" class="text-view hidden"><button class="btn btn-blue copy-btn" onclick="copyTxt()">📋</button><div class="text-content" id="txtContent"></div></div>
     </div>
 
@@ -40228,6 +40307,9 @@ function switchMainTab(name) {
     softScrollTo({top:0,behavior:'smooth'});
     try { history.replaceState(null, '', '#' + name); } catch(e) {}
     rememberMainTab(name);   // v9.91: تا رفرشِ بعدی همین‌جا باز شود
+    /* v10.31 (۴۴): نتایج تا لحظهٔ دیده‌شدن ساخته نمی‌شوند. ورود به تب
+       همان لحظه است — پس اگر نمای جاری کهنه است، همین‌جا ساختش. */
+    if (name === 'results' && typeof rvEnsure === 'function') rvEnsure(rvCurView);
 }
 // v8.17: Settings panel toggle
 function toggleSettingsPanel(){const p=document.getElementById('settingsPanel');const o=document.getElementById('settingsOverlay');const b=document.getElementById('hamburgerBtn');if(p.classList.contains('open')){p.classList.remove('open');o.classList.remove('open');if(b)b.classList.remove('active');document.body.classList.remove('spanel-open');}else{p.classList.add('open');o.classList.add('open');if(b)b.classList.add('active');document.body.classList.add('spanel-open');syncSmenuStickyOffsets();}}
@@ -40378,6 +40460,11 @@ function bslSelectProfileCat(catId){bslProfileSelectedCatId=catId;$('bslProfileC
        بازِ کردنِ ساده هشی وجود ندارد، همیشه «شروع» می‌آمد. */
     const hash = window.location.hash.replace('#','');
     const want = MAIN_TABS.includes(hash) ? hash : lastMainTab();
+    /* v10.31 (۴۴): نمای نتایج را از حافظه برگردان — ولی هرگز روی «کارت»،
+       چون رفرش باید سبک بماند. rvSavedView خودش کارت را به جدول می‌برد. */
+    if (typeof switchView === 'function') {
+        setTimeout(() => switchView(rvSavedView()), 20);
+    }
     if (want) {
         setTimeout(() => switchMainTab(want), 50);
     }
@@ -41161,8 +41248,13 @@ function applyProfile(p, keepTab) {
             }
         });
         refreshViews();
-        // v9.91: در بازیابیِ خودکار، تبِ فعلیِ کاربر حفظ می‌شود
-        if (!keepTab) switchMainTab('results');
+        /* v9.91: در بازیابیِ خودکار، تبِ فعلیِ کاربر حفظ می‌شود.
+           v10.31 (۴۴): حالا در هیچ حالتی تب عوض نمی‌شود. پریدن به «نتایج»
+           یعنی رندرِ فوریِ کلِ محصولات، و روی پروفایل‌های بزرگ همان چیزی
+           است که بارگذاری را کند می‌کرد. اگر کاربر نتایج بخواهد، خودش
+           روی تب می‌زند و همان لحظه ساخته می‌شود. پارامترِ keepTab برای
+           سازگاریِ امضای تابع می‌ماند. */
+        void keepTab;
         showToast('✓ پروفایل "' + (p.name || '') + '" بارگذاری شد (' + toFa(products.size) + ' محصول)');
     } else {
         refreshViews();
@@ -42770,6 +42862,30 @@ function ensureKey(p,fallback){
   return p.key||'';
 }
 
+/* v10.31 (۴۴): بدنهٔ کارت جدا شد تا رندرِ انبوه بتواند بدون جست‌وجوی DOM
+   و بدون appendChildِ تک‌تک، رشته بسازد. renderCard خودش دست‌نخورده
+   می‌ماند و همان رفتار قبلی را دارد. */
+function cardHtml(p,_k){
+  let title = getFinalTitle(p.title);
+  let price = getFinalPrice(p.price);
+  let origPrice = getOriginalPrice(p.price);
+  let origDiffers = origPrice !== '0' && origPrice !== price;
+  let shortDesc = '';
+  if (detailSel.shortDesc && detailSel.shortDesc.enabled && p.shortDesc) {
+      shortDesc = stripHtml(p.shortDesc);
+  }
+  const _st=prodStatus(p);
+  const _nImg=(p.images&&p.images.length)||0;
+  const _galBadge=_nImg>1?`<span style="position:absolute;bottom:4px;left:4px;background:#000b;color:#f9a8d4;font-size:9px;font-weight:700;padding:1px 6px;border-radius:10px">🖼 ${toFa(_nImg)}</span>`:'';
+  return `<div class="thumb" style="position:relative">${p.image?`<img class="lazy-img" data-src="?image_proxy=${encodeURIComponent(p.image)}" loading="lazy">`:'<div class="noimg">بدون تصویر</div>'}${_galBadge}</div>
+  <div class="pbody"><div class="ptitle">${statusBadge(_st)}${esc(title||'بدون عنوان')}</div>
+  ${shortDesc ? `<div class="pdetail-short">${esc(shortDesc)}</div>` : ''}
+  ${origDiffers ? `<span class="price-orig">${esc(origPrice)}</span>` : ''}
+  <div class="price ${price!=='0'?'':'no-price'}">${price!=='0'?esc(price):'؟'}</div>
+  ${p.link?`<a class="plink" href="${esc(p.link)}" target="_blank">مشاهده</a>
+  <button class="btn btn-pink" onclick="useAsDetailSample('${_k}')" style="font-size:9.5px;padding:3px 7px;margin-top:4px;width:100%" title="همین محصول را در سلکتور جزئیات باز کن">🎯 نمونهٔ سلکتور</button>`:''}</div>`;
+}
+
 function renderCard(p,k){
   const _k=ensureKey(p,k);
   if(!_k)return;                       // بدون کلید نمی‌توان کارت ساخت
@@ -42803,6 +42919,42 @@ function renderCard(p,k){
          el.innerHTML=html;el.className=_cls+_pop;el.style.display=matchFilter(_st)?'':'none';}
   else{const d=document.createElement('div');d.className=_cls;d.dataset.k=_k;d.innerHTML=html;
        d.style.display=matchFilter(_st)?'':'none';$('vGrid').appendChild(d);fxWatchCard(d);}
+}
+
+/* v10.31 (۴۴): همان تفکیک برای ردیفِ جدول. */
+function rowHtml(p,i){
+  let title = getFinalTitle(p.title);
+  let price = getFinalPrice(p.price);
+  let origPrice = getOriginalPrice(p.price);
+  let customTd = isCustomColEnabled() ? `<td>${esc(getCustomColVal())}</td>` : '';
+  let detailTds = '';
+  const enabledFields = getDetailColumns();
+  enabledFields.forEach(f => {
+      const val = p[f.key] || '';
+      let display = val;
+      if (f.key === 'shortDesc' || f.key === 'longDesc') {
+          display = shortText(stripHtml(val), 60);
+      }
+      detailTds += `<td class="td-detail" title="${esc(stripHtml(val))}">${esc(display) || '-'}</td>`;
+  });
+  const _st=prodStatus(p);
+  const _imgs=Array.isArray(p.images)?p.images.filter(Boolean):[];
+  const _n=_imgs.length;
+  let galTd;
+  if(_n>1){
+      const thumbs=_imgs.slice(0,4).map(u=>
+          `<img src="?image_proxy=${encodeURIComponent(u)}" loading="lazy" `
+        + `style="width:22px;height:22px;object-fit:cover;border-radius:3px;border:1px solid #334155">`).join('');
+      galTd=`<td class="td-gal" title="${esc(_imgs.join('\n'))}">`
+          + `<div style="display:flex;gap:2px;align-items:center">`
+          + `<b style="color:#f9a8d4;font-size:10px">🖼 ${toFa(_n)}</b>${thumbs}`
+          + (_n>4?`<span style="color:#64748b;font-size:9px">+${toFa(_n-4)}</span>`:'')
+          + `</div></td>`;
+  }else{
+      galTd=`<td class="td-gal" style="color:#64748b;font-size:10px">${_n===1?'۱ عکس':'—'}</td>`;
+  }
+  return `<td>${toFa(i)}</td><td>${statusBadge(_st)}${esc(title)}</td><td class="td-orig">${esc(origPrice)}</td><td style="direction:ltr;text-align:right">${esc(price)}</td>
+  <td>${p.link?`<a href="${esc(p.link)}" target="_blank">لینک</a>`:'-'}</td><td style="direction:ltr;text-align:left;font-size:9px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.image||'')}">${esc(p.image||'-')}</td>${galTd}${detailTds}${customTd}`;
 }
 
 function renderRow(p,i,k){
@@ -42867,19 +43019,141 @@ function updateTableHeaders() {
     thead.innerHTML = baseHeaders;
 }
 
-function refreshViews() {
-    updateTableHeaders();
-    $('vGrid').innerHTML = '';
-    $('tBody').innerHTML = '';
-    if (products.size === 0) {
-        $('vGrid').innerHTML = '<div class="empty-state" id="emptyState"><div class="icon">📭</div><p>هنوز محصولی اسکرپ نشده است.</p></div>';
-    } else {
-        order.forEach((k, i) => {
-            renderCard(products.get(k),k);
-            renderRow(products.get(k), i + 1, k);
-        });
+/* =====================================================================
+ *  v10.31 (۴۴): رندرِ تنبلِ نتایج
+ *
+ *  مشکل: refreshViews() هر بار هر سه نما را برای همهٔ محصولات می‌ساخت —
+ *  کارت + ردیفِ جدول + متنِ کامل — حتی وقتی تبِ نتایج اصلاً باز نبود.
+ *  با یک پروفایلِ چندهزار محصولی، بارگذاری پروفایل یا رفرشِ صفحه یعنی
+ *  ده‌ها هزار گرهِ DOM و به‌ازای هر محصول دو querySelector روی سند.
+ *  نتیجه: چند ثانیه فریزِ کامل، آن هم برای چیزی که کاربر نمی‌بیند.
+ *
+ *  حالا:
+ *    ۱) اگر تبِ نتایج باز نیست، هیچ نمایی ساخته نمی‌شود؛ فقط علامت
+ *       «کثیف» می‌خورد و لحظهٔ ورود به تب ساخته می‌شود.
+ *    ۲) نمای پیش‌فرضِ تبِ نتایج «جدول» است، نه «کارت» — جدول بدونِ
+ *       تصویر و بدونِ IntersectionObserver است و بسیار سبک‌تر.
+ *    ۳) هر نما فقط وقتی ساخته می‌شود که واقعاً دیده شود، و همان‌جا هم
+ *       کش می‌شود تا سوییچِ بعدی رایگان باشد.
+ *    ۴) نمای کارتی روی پروفایل‌های بزرگ تکه‌تکه (chunk) رندر می‌شود تا
+ *       رشتهٔ اصلی آزاد بماند و صفحه قفل نکند.
+ * ===================================================================== */
+const RV_CHUNK = 120;          // تعداد کارت در هر تکهٔ رندر
+const RV_HEAVY = 400;          // از این تعداد به بالا «سنگین» حساب می‌شود
+let rvDirty = {grid:true, table:true, text:true};
+let rvChunkTimer = null;
+let rvCurView = 'table';       // v10.31: پیش‌فرضِ تبِ نتایج جدول است
+
+/** آیا تبِ نتایج همین حالا روی صفحه است؟ */
+function resultsVisible(){
+  const p=document.getElementById('pane-results');
+  return !!(p&&p.classList.contains('active'));
+}
+/** همهٔ نماها را «کهنه» علامت بزن (بدون ساختن) */
+function rvMarkDirty(){ rvDirty.grid=true; rvDirty.table=true; rvDirty.text=true; }
+
+/** اگر رندرِ تکه‌تکهٔ کارت در جریان است، لغوش کن */
+function rvCancelChunks(){
+  if(rvChunkTimer){ clearTimeout(rvChunkTimer); rvChunkTimer=null; }
+}
+
+/** نوارِ «برای دیدن کارت‌ها کلیک کنید» وقتی نمای سنگین هنوز ساخته نشده */
+function rvHint(msg){
+  return '<div class="rv-hint">'+msg+'</div>';
+}
+
+/** ساختِ نمای جدولی — سبک است، یک‌جا و بدون تصویرِ بزرگ */
+function rvBuildTable(){
+  updateTableHeaders();
+  const tb=$('tBody');
+  if(!tb)return;
+  if(products.size===0){ tb.innerHTML=''; rvDirty.table=false; return; }
+  const buf=[];
+  order.forEach((k,i)=>{
+    const p=products.get(k);
+    if(!p)return;
+    const _k=ensureKey(p,k);
+    if(!_k)return;
+    const st=prodStatus(p);
+    buf.push('<tr data-k="'+esc(_k)+'"'+(matchFilter(st)?'':' style="display:none"')+'>'
+             +rowHtml(p,i+1)+'</tr>');
+  });
+  tb.innerHTML=buf.join('');
+  rvDirty.table=false;
+}
+
+/** ساختِ نمای کارتی — سنگین است، پس تکه‌تکه */
+function rvBuildGrid(){
+  rvCancelChunks();
+  const g=$('vGrid');
+  if(!g)return;
+  if(products.size===0){
+    g.innerHTML='<div class="empty-state" id="emptyState"><div class="icon">📭</div><p>هنوز محصولی اسکرپ نشده است.</p></div>';
+    rvDirty.grid=false;
+    return;
+  }
+  g.innerHTML='';
+  let i=0;
+  const total=order.length;
+  const step=()=>{
+    const end=Math.min(i+RV_CHUNK,total);
+    const buf=[];
+    for(;i<end;i++){
+      const k=order[i];
+      const p=products.get(k);
+      if(!p)continue;
+      const _k=ensureKey(p,k);
+      if(!_k)continue;
+      const st=prodStatus(p);
+      buf.push('<div class="product'+(st==='new'?' is-new':st==='changed'?' is-chg':'')
+               +'" data-k="'+esc(_k)+'"'+(matchFilter(st)?'':' style="display:none"')+'>'
+               +cardHtml(p,_k)+'</div>');
     }
-    if ($('txtContent')) $('txtContent').textContent = genTxt();
+    g.insertAdjacentHTML('beforeend',buf.join(''));
+    if(i<total){
+      rvChunkTimer=setTimeout(step,0);      // نفس بکش تا صفحه قفل نکند
+    }else{
+      rvChunkTimer=null;
+      rvDirty.grid=false;
+      if(typeof window.rvAfterGrid==='function')window.rvAfterGrid();
+    }
+  };
+  step();
+}
+
+/** ساختِ نمای متنی */
+function rvBuildText(){
+  const t=$('txtContent');
+  if(!t)return;
+  t.textContent=genTxt();
+  rvDirty.text=false;
+}
+
+/** نمای خواسته‌شده را در صورت نیاز بساز */
+function rvEnsure(v){
+  if(v==='table'&&rvDirty.table)rvBuildTable();
+  else if(v==='grid'&&rvDirty.grid)rvBuildGrid();
+  else if(v==='text'&&rvDirty.text)rvBuildText();
+}
+
+/**
+ * جایگزینِ refreshViews قدیمی.
+ *
+ * دیگر چیزی نمی‌سازد مگر آن‌که همان لحظه دیده شود. بقیه «کهنه» می‌مانند
+ * و لحظهٔ نمایش ساخته می‌شوند.
+ */
+function refreshViews() {
+    rvCancelChunks();
+    rvMarkDirty();
+    if (products.size === 0) {
+        /* حالتِ خالی آن‌قدر ارزان است که همیشه و بدونِ توجه به تبِ باز
+           درستش می‌کنیم — وگرنه اگر کاربر روی نمای متن باشد، کارت‌ها و
+           ردیف‌های قدیمی روی صفحه جا می‌مانند. */
+        rvBuildGrid();
+        rvBuildTable();
+    } else if (resultsVisible()) {
+        rvEnsure(rvCurView);
+    }
     update();
 }
 
@@ -42954,13 +43228,36 @@ function genTxt(){
   return t;
 }
 
+/* v10.31 (۴۴): نما فقط لحظهٔ انتخاب ساخته می‌شود.
+   نمای کارتی روی پروفایل‌های بزرگ اول یک پیامِ کوتاه نشان می‌دهد و بعد
+   تکه‌تکه پر می‌شود، تا کلیک روی «کارت» صفحه را قفل نکند. */
+const RV_VIEW_KEY = 'scraper_results_view';
+function rvRememberView(v){
+  try{ if(v==='grid'||v==='table'||v==='text')localStorage.setItem(RV_VIEW_KEY,v); }catch(e){}
+}
+/** نمای ذخیره‌شده — ولی «کارت» عمداً بازیابی نمی‌شود تا رفرش سبک بماند */
+function rvSavedView(){
+  try{
+    const v=localStorage.getItem(RV_VIEW_KEY)||'';
+    return (v==='table'||v==='text')?v:'table';
+  }catch(e){ return 'table'; }
+}
+
 function switchView(v){
   document.querySelectorAll('.sub-tab').forEach(t=>t.classList.toggle('active',t.dataset.v===v));
   $('vGrid').classList.toggle('hidden',v!=='grid');
   $('vTable').classList.toggle('hidden',v!=='table');
   $('vText').classList.toggle('hidden',v!=='text');
-  if(v==='table') updateTableHeaders();
-  if(v==='text')$('txtContent').textContent=genTxt();
+  rvCurView=v;
+  rvRememberView(v);
+  /* رندرِ کارتیِ سنگین را یک تیک عقب می‌اندازیم تا اول خودِ تب عوض شود
+     و کاربر بازخوردِ فوری ببیند، بعد کارت‌ها بیایند. */
+  if(v==='grid'&&rvDirty.grid&&products.size>=RV_HEAVY){
+    $('vGrid').innerHTML=rvHint('⏳ در حال آماده‌سازیِ '+toFa(products.size)+' کارت…');
+    setTimeout(()=>{ if(rvCurView==='grid')rvBuildGrid(); },30);
+    return;
+  }
+  rvEnsure(v);
 }
 
 // v7.66: Auto extract — uses saved selectors from profile, no need to re-select
@@ -43740,7 +44037,11 @@ function start(useSel=false){
   if (isDirty) saveProfileSilent();
 
   products.clear();order=[];pages=0;details=0;running=true;
+  /* v10.31 (۴۴): استخراجِ زنده محصولات را تک‌تک می‌نشاند، پس هر دو نما
+     از همین حالا «تازه» حساب می‌شوند و نباید بعداً دوباره ساخته شوند. */
+  rvCancelChunks();
   $('vGrid').innerHTML='';$('tBody').innerHTML='';
+  rvDirty.grid=false; rvDirty.table=false; rvDirty.text=true;
   resetResultFilter();
   log('▶ شروع: '+url,'info');
 
@@ -43986,7 +44287,8 @@ function reset(){
   $('vGrid').innerHTML='<div class="empty-state" id="emptyState"><div class="icon">📭</div><p>هنوز محصولی اسکرپ نشده است.</p></div>';
   $('tBody').innerHTML='';$('txtContent').textContent='';
   $('logs').innerHTML='<div class="log log-info">ریست شد</div>';
-  $('progress').classList.add('hidden');$('status').textContent='آماده';update();switchView('grid');
+  /* v10.31 (۴۴): ریست هم به نمای سبکِ جدول برمی‌گردد، نه کارت */
+  $('progress').classList.add('hidden');$('status').textContent='آماده';update();rvMarkDirty();switchView('table');
   clearSel();
   clearDetailSel();
   currentProfileKey = null;
@@ -44072,6 +44374,32 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.31', t:'⚡ باز شدنِ پروفایل‌های پرمحصول دیگر صفحه را قفل نمی‌کند', items:[
+    '🐢 <b>مشکلی که داشتید.</b> با پروفایل‌هایی که چند هزار محصول داشتند،',
+    '   هر بار رفرشِ صفحه یا انتخابِ پروفایل چند ثانیه همه‌چیز می‌خُشکید.',
+    '   علتش این بود که برنامه به محضِ بارگذاری، <b>هر سه نمای</b> نتایج را',
+    '   برای <b>همهٔ</b> محصولات یک‌جا می‌ساخت: کارت + ردیفِ جدول + متنِ کامل.',
+    '   یعنی برای ۳۰۰۰ محصول، ده‌ها هزار عنصر روی صفحه — آن هم وقتی شما',
+    '   اصلاً در تبِ نتایج نبودید و هیچ‌کدامشان را نمی‌دیدید.',
+    '❶ <b>دیگر خودکار به تبِ «نتایج» پرت نمی‌شوید.</b> تا حالا انتخابِ پروفایل',
+    '   از کشویی، شما را به‌زور می‌بُرد به تبِ نتایج و همان‌جا رندرِ سنگین',
+    '   شروع می‌شد. حالا هر تبی که باز باشد، باز می‌ماند. اگر نتایج بخواهید،',
+    '   خودتان روی تبش می‌زنید.',
+    '❷ <b>زیرتبِ پیش‌فرض حالا «جدول» است، نه «کارت».</b> جدول تصویر ندارد و',
+    '   بسیار سبک‌تر است. کارت‌ها عکس دارند و سنگینیِ اصلی از آن‌ها می‌آمد.',
+    '❸ <b>کارت‌ها فقط با کلیکِ خودتان ساخته می‌شوند.</b> تا وقتی روی زیرتبِ',
+    '   «📊 کارت» نزده‌اید، حتی یک کارت هم ساخته نمی‌شود.',
+    '❹ <b>رندرِ تکه‌تکه.</b> وقتی هم روی «کارت» بزنید، اگر تعداد زیاد باشد اول',
+    '   پیامِ «در حال آماده‌سازی…» می‌بینید و کارت‌ها دسته‌دسته می‌آیند، تا',
+    '   مرورگر بینشان نفس بکشد و صفحه هیچ‌وقت کاملاً قفل نشود.',
+    '❺ <b>یک‌بار ساخته، بارها استفاده.</b> هر نما بعد از ساخته‌شدن کش می‌شود؛',
+    '   جابه‌جاییِ بعدی بینِ جدول و کارت و متن آنی است.',
+    '❻ <b>نمای انتخابی‌تان یادش می‌ماند</b> — مگر «کارت»، که عمداً برنمی‌گردد',
+    '   تا رفرشِ صفحه همیشه سبک بماند.',
+    '🔍 <b>رصدِ تصاویر</b> هم اصلاح شد: قبلاً هر بار کلِ صفحه برای عکس‌ها',
+    '   اسکن می‌شد حتی وقتی هیچ کارتی وجود نداشت؛ حالا دقیقاً به پایانِ',
+    '   ساختِ کارت‌ها گره خورده است.'
+  ]},
   {v:'10.30', t:'🧠 ایجنتِ کشفِ سلکتور دیگر روی صفحاتِ سنگین گیر نمی‌کند + پرامپتش قابلِ ویرایش شد', items:[
     '🕳 <b>مشکلی که داشتید.</b> روی صفحه‌های فروشگاهیِ مدرن (نمونهٔ خودتان:',
     '   snappshop.ir) ایجنتِ کشفِ سلکتور عملاً فلج بود. چند بار fetch_probe و',
@@ -53940,8 +54268,18 @@ function finFM(done,found,failed,total){
     const el=document.querySelector(`.product[data-k="${(p&&p.key)||k||''}"]`);
     if(el){const img=el.querySelector('img.lazy-img[data-src]');if(img)observeSingle(img);}
   };
+  /* v10.31 (۴۴): تا قبل از این، هر refreshViews یک اسکنِ کاملِ سند برای
+     تصاویر راه می‌انداخت — حتی وقتی نمای کارتی اصلاً ساخته نشده بود.
+     حالا رصدِ تصاویر دقیقاً به پایانِ ساختِ نمای کارتی گره خورده است. */
+  window.rvAfterGrid=function(){ observeImages(); };
   const _refreshViews=refreshViews;
-  refreshViews=function(){_refreshViews();setTimeout(observeImages,200);};
+  refreshViews=function(){
+    _refreshViews();
+    /* فقط اگر گرید همین حالا ساخته و دیده می‌شود */
+    if(typeof rvCurView!=='undefined'&&rvCurView==='grid'&&!rvDirty.grid){
+      setTimeout(observeImages,200);
+    }
+  };
   setTimeout(observeImages,500);
 })();
 // ========== v10.02 (۱۶): هستهٔ مشترکِ حذفِ تکراری (ووکامرس + باسلام) ==========
