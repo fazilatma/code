@@ -242,8 +242,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.35';
-const APP_VERSION_DATE = '1405/06/02';
+const APP_VERSION = '10.36';
+const APP_VERSION_DATE = '1405/06/03';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -767,6 +767,124 @@ function extractLockTouch(string $queueId): void {
     if (!is_array($cur) || (string)($cur['queue_id'] ?? '') !== $queueId) return;
     $cur['at'] = time();
     @file_put_contents(EXTRACT_LOCK_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/* =====================================================================
+ *  v10.36 (۴۹الف): «شاهدِ حرکت» — کارِ زنده دیگر مرده اعلام نمی‌شود
+ *
+ *  گزارشِ کاربر: کارِ استخراج در حال کار است — شمارندهٔ محصولات همین یک
+ *  دقیقه پیش عوض شد — ولی مدیر وظیفه «۴۰ دقیقه پیش» می‌نویسد، ردیفِ صف
+ *  قرمز می‌شود، «پردازش نیمه‌کاره رها شد» می‌گیرد و مدام به پیام‌رسان
+ *  خطا می‌رود. همین برای ارسال‌ها هم دیده شده.
+ *
+ *  چرا اتفاق می‌افتاد: تشخیصِ زنده‌بودن فقط به یک شاهد بند بود — زمانِ
+ *  آخرین نوشتن در فایلِ پیشرفت، آن هم فقط وقتی queue_id فایل با ردیف
+ *  یکی باشد. این شاهد در چند حالتِ کاملاً عادی از دست می‌رفت:
+ *    • دو اجرای هم‌زمان (کران + دکمهٔ دستی) که فایلِ پیشرفتِ مشترک را
+ *      بازنویسی می‌کنند ⇒ queue_id عوض می‌شود ⇒ ردیفِ زنده «غریبه»
+ *    • نسخه‌های قدیمی‌تر که queue_id نمی‌نوشتند
+ *    • ارسال‌کننده‌ها که اصلاً ردیف‌به‌ردیف queue_id ندارند
+ *  و آن‌وقت مبنا می‌شد started_at، یعنی «سنِ کار» به‌جای «بی‌حرکتی» —
+ *  پس هر کارِ طولانیِ سالم، حتماً و بی‌استثنا مرده اعلام می‌شد.
+ *
+ *  شاهدِ تازه دقیقاً همان چیزی است که خودِ کاربر می‌بیند: عددها دارند
+ *  عوض می‌شوند. هر بار که ناظری (رابط کاربری، نگهبان، هر اندپوینتی)
+ *  شمارنده‌های یک ردیف را می‌بیند، اگر با دفعهٔ قبل فرق کرده باشد یک
+ *  مهرِ زمانی ثبت می‌شود. این شاهد از پردازه‌ها مستقل است و دقیقاً وقتی
+ *  کار می‌کند که بقیهٔ شواهد از دست رفته‌اند.
+ * ===================================================================== */
+const QUEUE_BEAT_FILE = __DIR__ . '/queue_beats.json';
+const QUEUE_BEAT_KEEP = 60;      // چند ردیفِ آخر نگه داشته شود
+
+function queueBeatsLoad(): array {
+    if (!is_file(QUEUE_BEAT_FILE)) return [];
+    $d = json_decode((string)@file_get_contents(QUEUE_BEAT_FILE), true);
+    return is_array($d) ? $d : [];
+}
+
+/**
+ * حرکتِ یک ردیف را ثبت و آخرین زمانِ حرکتش را برمی‌گرداند.
+ *
+ * $sig امضای پیشرفتِ ردیف است (هر رشته‌ای که با پیشرفت عوض شود). اگر با
+ * دفعهٔ قبل فرق کند یعنی کار جلو رفته و همین حالا زنده است.
+ *
+ * خروجی: زمانِ آخرین حرکتِ دیده‌شده (۰ یعنی هرگز چیزی ندیده‌ایم).
+ */
+function queueBeatSee(string $kind, string $rowId, string $sig): int {
+    if ($rowId === '' || $sig === '') return 0;
+    $k    = $kind . ':' . $rowId;
+    $all  = queueBeatsLoad();
+    $now  = time();
+    $prev = is_array($all[$k] ?? null) ? $all[$k] : null;
+    if ($prev !== null && (string)($prev['sig'] ?? '') === $sig) {
+        return (int)($prev['at'] ?? 0);   // حرکتی نبوده؛ همان مهرِ قبلی
+    }
+    $all[$k] = ['sig' => $sig, 'at' => $now];
+    /* هرس: فقط ردیف‌های تازه بمانند تا فایل بی‌نهایت رشد نکند */
+    if (count($all) > QUEUE_BEAT_KEEP) {
+        uasort($all, fn($a, $b) => ((int)($b['at'] ?? 0)) <=> ((int)($a['at'] ?? 0)));
+        $all = array_slice($all, 0, QUEUE_BEAT_KEEP, true);
+    }
+    @file_put_contents(QUEUE_BEAT_FILE, json_encode($all, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    return $now;
+}
+
+/** امضای پیشرفتِ یک ردیفِ صف — هر عددی که با جلو رفتنِ کار عوض می‌شود */
+function queueRowSig(array $row, array $prog = []): string {
+    $pick = function (array $a, array $keys): string {
+        $out = '';
+        foreach ($keys as $k) $out .= '|' . (string)($a[$k] ?? '');
+        return $out;
+    };
+    $keys = ['current', 'total', 'sent', 'updated', 'skipped', 'failed',
+             'extracted', 'detail_current', 'page', 'total_log_count'];
+    return $pick($row, $keys) . $pick($prog, $keys);
+}
+
+/**
+ * آیا این ردیفِ «در حال اجرا» واقعاً بی‌حرکت است؟
+ *
+ * همهٔ شواهد با هم سنجیده می‌شوند و تازه‌ترین‌شان برنده است. فلسفه‌اش
+ * عمدی است: «مرده اعلام کردنِ کارِ زنده» خیلی پرهزینه‌تر از «چند دقیقه
+ * دیرتر فهمیدنِ مرگِ واقعی» است — اولی کار را نصفه رها می‌کند و به کاربر
+ * خطای دروغ می‌فرستد، دومی فقط کمی صبر است.
+ *
+ * خروجی: ['idle'=>int, 'beat'=>int, 'why'=>string]
+ */
+function queueRowIdle(string $kind, array $row, array $prog, int $now, array $extraBeats = []): array {
+    $rowId = (string)($row['id'] ?? '');
+    $beats = [];
+
+    /* ۱) فایلِ پیشرفت — فقط وقتی مالِ همین ردیف است */
+    $pid = (string)($prog['queue_id'] ?? '');
+    if ($pid !== '' && $rowId !== '' && $pid === $rowId) {
+        $b = tasksHeartbeat($prog);
+        if ($b > 0) $beats['progress'] = $b;
+    } elseif ($pid === '' && !empty($prog)) {
+        /* فایلِ پیشرفتِ بی‌نام: مالِ کیست معلوم نیست، ولی اگر فقط همین یک
+           ردیف در حال اجراست تقریباً قطعاً مالِ همین است. محتاطانه
+           می‌پذیریم — چون بدترین پیامدش «کمی دیرتر بستن» است. */
+        $b = tasksHeartbeat($prog);
+        if ($b > 0) $beats['progress_unnamed'] = $b;
+    }
+
+    /* ۲) شواهدِ بیرونی (قفلِ استخراج و مانندِ آن) */
+    foreach ($extraBeats as $name => $b) if ((int)$b > 0) $beats[(string)$name] = (int)$b;
+
+    /* ۳) شاهدِ حرکت — عددها عوض شده‌اند یا نه */
+    $mv = queueBeatSee($kind, $rowId, queueRowSig($row, $prog));
+    if ($mv > 0) $beats['moved'] = $mv;
+
+    /* ۴) آخرین چاره: زمانِ شروع (فقط اگر هیچ شاهدی نبود) */
+    if (!$beats) {
+        $s = (int)($row['started_at'] ?? 0);
+        if ($s > 0) $beats['started'] = $s;
+    }
+
+    if (!$beats) return ['idle' => PHP_INT_MAX, 'beat' => 0, 'why' => 'هیچ نشانه‌ای نیست'];
+    $best = max($beats);
+    $why  = (string)array_search($best, $beats, true);
+    return ['idle' => max(0, $now - $best), 'beat' => $best, 'why' => $why];
 }
 
 /**
@@ -3387,9 +3505,44 @@ function aiVoteRecord(string $task, string $input, string $winner, array $candid
  *    aiCatSummary()  → خلاصهٔ کوتاهِ فارسی برای ستونِ «پاسخ دسته»
  *    aiCatMeta()     → متادیتای خام برای مودالِ «جزئیات کامل»
  * ===================================================================== */
-function aiCatPayload(string $title, string $catList, array $tried = []): array {
+/* =====================================================================
+ *  v10.36 (۴۹ه): بافتِ پروفایل به مدل داده می‌شود
+ *
+ *  خواستهٔ کاربر: «هنگام اجرای دسته‌بندی با هوش مصنوعی، از اسمِ پروفایل
+ *  کمک گرفته شود».
+ *
+ *  چرا واقعاً کمک می‌کند: عنوانِ محصول به‌تنهایی اغلب مبهم است. «ست ۳
+ *  تکه» در پروفایلِ «لوازم آشپزخانه» یعنی ظرف، و در پروفایلِ «پوشاک
+ *  کودک» یعنی لباس. مدل بدونِ این بافت باید حدس بزند — و همان حدس‌ها
+ *  بودند که رد می‌شدند و محصول را در حلقهٔ «پیشنهاد ⇒ رد» می‌انداختند.
+ *
+ *  نامِ پروفایل معمولاً دقیقاً همان حوزهٔ کاری است (کاربر خودش نامش را
+ *  گذاشته)، پس ارزان‌ترین و دقیق‌ترین سرنخی است که در دست داریم.
+ *
+ *  عمداً به‌عنوان «راهنما» و نه «حکم» داده می‌شود: اگر محصولی واقعاً به
+ *  حوزهٔ پروفایل نخورد، مدل نباید به‌زور در آن دسته بچپاندش.
+ * ===================================================================== */
+function aiCatProfileHint(string $profileName, string $extra = ''): string {
+    $n = trim($profileName);
+    $e = trim($extra);
+    if ($n === '' && $e === '') return '';
+    $s = '';
+    if ($n !== '') {
+        $s .= "CONTEXT: this product belongs to the seller's catalog named \"" . $n . "\". "
+            . "That name usually describes the shop's product domain, so prefer categories "
+            . "consistent with it when the title alone is ambiguous. "
+            . "If the product clearly does not fit that domain, ignore this hint.\n";
+    }
+    if ($e !== '') $s .= "Additional context: " . $e . "\n";
+    return $s . "\n";
+}
+
+function aiCatPayload(string $title, string $catList, array $tried = [], string $profileHint = ''): array {
     $prompt = "You are a product categorization assistant for a Persian (Farsi) e-commerce platform (BaSalam).\n"
             . "Given this product title: \"" . $title . "\"\n\n"
+            /* v10.36 (۴۹ه): بافتِ پروفایل — پیش از فهرست می‌آید تا مدل با
+               ذهنیتِ درست فهرست را بخواند، نه بعد از آن. */
+            . $profileHint
             . "Select the BEST category ID from this list:\n" . $catList . "\n\n";
     /* v10.12 (۲۵): دسته‌های امتحان‌شده از خودِ فهرست حذف شده‌اند، ولی یک
        تذکرِ صریح هم می‌دهیم: بعضی مدل‌ها شناسه‌ای را از حافظه می‌سازند که
@@ -3465,10 +3618,12 @@ function aiCatMeta(array $res): array {
 /** دسته‌بندی یک کاندید خاص (برای آزمون چند-کاندیدی) */
 function aiCandidateCategory(array $p, string $model, string $title, array $cats,
                               array $leafCats, string $catList, ?array $net = null,
-                              array $exclude = [], array $triedInfo = []): array {
+                              array $exclude = [], array $triedInfo = [],
+                              string $profileHint = ''): array {
     if ($net === null) $net = aiNetCfg();
     $t0 = microtime(true);
-    $r = aiProviderCall($p, $model, aiCatPayload($title, $catList, $triedInfo), $net);
+    // v10.36 (۴۹ه): بافتِ پروفایل هم به مدل می‌رسد
+    $r = aiProviderCall($p, $model, aiCatPayload($title, $catList, $triedInfo, $profileHint), $net);
     return aiCatParse($r, $title, $cats, $model, (int)round((microtime(true) - $t0) * 1000), $exclude);
 }
 
@@ -10908,22 +11063,19 @@ foreach($queue['entries'] as &$qe){
     /* پردازه‌ای که مرده، خودش running=true را در فایل پیشرفت جا گذاشته —
        دقیقاً چون فرصت نکرده done بنویسد. پس «زنده بودن» را نمی‌شود از
        همان فایل پرسید؛ تنها شاهد قابل اعتماد، زمان آخرین نوشتن است. */
-    $mine=((string)($progress['queue_id']??''))===((string)($qe['id']??''));
-    $ts=$mine?(int)($progress['last_progress_ts']??0):0;
     /* v10.32 (۴۵ج): شاهدِ دوم — قفلِ سراسری. اگر فایلِ پیشرفت به هر دلیلی
        مالِ این ردیف نبود (اجرای هم‌زمانِ دیگری بازنویسی‌اش کرده، یا نسخهٔ
        قدیمیِ کد queue_id را ننوشته)، هنوز نمی‌شود گفت «مرده». قفل نامِ
        صاحبِ واقعیِ اجرا را نگه می‌دارد؛ اگر قفل دستِ همین ردیف است و تازه
-       ضربان زده، این کار زنده است و نباید «خطا» بخورد. این دقیقاً همان
-       موردی بود که کاربر می‌دید: ردیفِ قرمز که با کلیک معلوم می‌شد مشغول
-       است. */
-    if($ts<=0){
-        $_lk=@json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE),true);
-        if(is_array($_lk)&&((string)($_lk['queue_id']??''))===((string)($qe['id']??'')))
-            $ts=(int)($_lk['at']??0);
-    }
-    if($ts<=0)$ts=(int)($qe['started_at']??$now);
-    $idle=$now-$ts;
+       ضربان زده، این کار زنده است و نباید «خطا» بخورد.
+       v10.36 (۴۹الف): حالا شاهدِ سومی هم هست — «حرکتِ شمارنده‌ها». همان
+       چیزی که کاربر با چشم می‌دید و برنامه نمی‌دید. */
+    $_lkBeat=0;
+    $_lk=@json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE),true);
+    if(is_array($_lk)&&((string)($_lk['queue_id']??''))===((string)($qe['id']??'')))
+        $_lkBeat=(int)($_lk['at']??0);
+    $_iw=queueRowIdle('extract',$qe,$progress,$now,['lock'=>$_lkBeat]);
+    $idle=(int)$_iw['idle'];
     if($idle>$exIdleMax){
         $qe['status']='failed';
         $qe['error']='پردازش نیمه‌کاره رها شد ('.$idle.' ثانیه بی‌حرکت — وقفهٔ سرور؟)';
@@ -11026,7 +11178,16 @@ $p=readProgress(EXTRACT_PROGRESS_FILE);
    نگهبانی در کار نیست. این اندپوینت همان چیزی است که مرورگر هر ۱.۵
    ثانیه صدا می‌زند، پس بهترین جا برای تشخیص است. */
 if(!empty($p['running'])&&empty($p['done'])){
-    $_pTs=(int)($p['last_progress_ts']??($p['started_at']??0));
+    /* v10.36 (۴۹الف): قفلِ استخراج هم شاهد است. بدونِ آن، اجرایی که وسطِ
+       یک صفحهٔ کندِ سایتِ مبدأ منتظر مانده (fetch با مهلتِ ۲۰ ثانیه، چند
+       بار پشتِ‌هم) می‌توانست بی‌حرکت به نظر برسد و رابط کاربری وسطِ کار
+       «رها شد» اعلام کند. */
+    $_pTs=tasksHeartbeat($p);
+    $_pLk=@json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE),true);
+    if(is_array($_pLk)&&(string)($_pLk['queue_id']??'')===(string)($p['queue_id']??'')){
+        $_pLkAt=(int)($_pLk['at']??0);
+        if($_pLkAt>$_pTs)$_pTs=$_pLkAt;
+    }
     $_pIdle=$_pTs>0?(time()-$_pTs):PHP_INT_MAX;
     $_pMax=max(120,(int)(loadConnections()['stall_after']??300));
     if($_pIdle>$_pMax){
@@ -12152,7 +12313,24 @@ function bslShopStatBump(int $vid, string $name, string $field, int $n = 1): voi
     if (isset($bslShopStats[$vid][$field])) $bslShopStats[$vid][$field] += $n;
 }
 
-/** v10.23 (۳۶ه): جدولِ شمارنده‌ها به شکلِ آمادهٔ نمایش (غرفهٔ پیش‌فرض اول) */
+/**
+ * v10.23 (۳۶ه): جدولِ شمارنده‌ها به شکلِ آمادهٔ نمایش (غرفهٔ پیش‌فرض اول)
+ *
+ * v10.36 (۴۹ب): دو ایرادِ ریشه‌ای که باعث می‌شد کاربر بگوید «هنوز در
+ * ارسال‌ها تفکیک بین چند غرفه دیده نمی‌شود»:
+ *
+ *  ۱) شمارنده‌های سراسری ($s,$u,$sk,$f) که به ردیفِ غرفهٔ پیش‌فرض نسبت
+ *     داده می‌شدند، در مسیرِ چندغرفه‌ای «جمعِ همهٔ غرفه‌ها» بودند نه سهمِ
+ *     غرفهٔ پیش‌فرض: حلقهٔ ارسالِ همزمان به‌ازای هر غرفه $updated++ می‌کرد.
+ *     پس ردیفِ اول عددی بزرگ‌تر از کلِ محصولات نشان می‌داد و تفکیک
+ *     بی‌معنی می‌شد.
+ *  ۲) اگر فقط یک ردیف ساخته می‌شد، سمتِ جاوااسکریپت (rows.length<2) کلِ
+ *     بلوک را پنهان می‌کرد — یعنی دقیقاً وقتی چیزی برای دیدن نبود.
+ *
+ * حالا اگر غرفهٔ پیش‌فرض هم آمارِ صریحِ خودش را ثبت کرده باشد (کلیدِ
+ * bslShopStats با همان vendor_id)، همان مبنا قرار می‌گیرد و از جمعِ
+ * سراسری استفاده نمی‌شود.
+ */
 function bslShopStatRows(int $s, int $u, int $sk, int $f): array {
     global $bslShopStats, $bslDefaultVid, $bslDefaultShopName;
     if (!is_array($bslShopStats)) $bslShopStats = [];
@@ -12160,10 +12338,19 @@ function bslShopStatRows(int $s, int $u, int $sk, int $f): array {
     $bslDefaultShopName = (string)($bslDefaultShopName ?? '');
     $rows = [];
     if ((int)$bslDefaultVid > 0) {
+        $own = $bslShopStats[(int)$bslDefaultVid] ?? null;
+        /* آمارِ اختصاصیِ غرفهٔ پیش‌فرض فقط وقتی معتبر است که واقعاً چیزی
+           در آن ثبت شده باشد؛ ردیفِ صفرِ «جای‌نگه‌دار» نباید جمعِ واقعی را
+           پنهان کند. */
+        $hasOwn = is_array($own) && (((int)($own['c'] ?? 0)) || ((int)($own['u'] ?? 0))
+                                  || ((int)($own['s'] ?? 0)) || ((int)($own['f'] ?? 0)));
         $rows[] = ['vid' => (int)$bslDefaultVid,
                    'name' => $bslDefaultShopName !== '' ? $bslDefaultShopName : 'غرفهٔ پیش‌فرض',
                    'is_default' => true,
-                   'sent' => (int)$s, 'updated' => (int)$u, 'skipped' => (int)$sk, 'failed' => (int)$f];
+                   'sent'    => $hasOwn ? (int)$own['c'] : (int)$s,
+                   'updated' => $hasOwn ? (int)$own['u'] : (int)$u,
+                   'skipped' => $hasOwn ? (int)$own['s'] : (int)$sk,
+                   'failed'  => $hasOwn ? (int)$own['f'] : (int)$f];
     }
     foreach ((array)$bslShopStats as $vid => $row) {
         if ((int)$vid === (int)$bslDefaultVid) continue;
@@ -12951,18 +13138,17 @@ function cronWatchdogs(array $cn): array {
                قبلی را «تازه» نشان می‌داد و نگهبان هیچ‌وقت نمی‌بستش.
                شرط $alive هم برداشته شد: پردازهٔ مرده دقیقاً به این دلیل
                running=true جا می‌گذارد که فرصت نکرده done بنویسد. */
-            $mine = ((string)($exProg['queue_id'] ?? '')) === ((string)($qe['id'] ?? ''));
-            $ts = $mine ? (int)($exProg['last_progress_ts'] ?? 0) : 0;
             /* v10.32 (۴۵ج): همان شاهدِ دومِ extract_queue_status — قفل.
                بدون این، نگهبان ردیفِ زندهٔ یک اجرای طولانی را از صف
-               برمی‌داشت و استخراج عملاً نیمه‌کاره رها می‌شد. */
-            if ($ts <= 0) {
-                $_lkW = @json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE), true);
-                if (is_array($_lkW) && ((string)($_lkW['queue_id'] ?? '')) === ((string)($qe['id'] ?? '')))
-                    $ts = (int)($_lkW['at'] ?? 0);
-            }
-            if ($ts <= 0) $ts = (int)($qe['started_at'] ?? 0);
-            $idle = $ts > 0 ? ($exNow - $ts) : PHP_INT_MAX;
+               برمی‌داشت و استخراج عملاً نیمه‌کاره رها می‌شد.
+               v10.36 (۴۹الف): و شاهدِ سوم — حرکتِ شمارنده‌ها. نگهبان دقیقاً
+               همان چیزی بود که ردیفِ زنده را می‌بست و به پیام‌رسان خطای
+               دروغ می‌فرستاد؛ حالا هر سه شاهد را با هم می‌سنجد. */
+            $_lkW = @json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE), true);
+            $_lkWBeat = (is_array($_lkW) && ((string)($_lkW['queue_id'] ?? '')) === ((string)($qe['id'] ?? '')))
+                ? (int)($_lkW['at'] ?? 0) : 0;
+            $_iwW = queueRowIdle('extract', $qe, $exProg, $exNow, ['lock' => $_lkWBeat]);
+            $idle = (int)$_iwW['idle'];
             if ($idle <= $stallCfg) continue;
             /* v9.75: به‌جای «بستن و رها کردن»، ردیفِ گیرکرده را از صف برمی‌داریم
                (تا محافظِ تکراری، پروفایل را بلاک نکند) و همان پروفایل را برای
@@ -16353,6 +16539,44 @@ function tasksPercent(array $p): int {
     return (int)floor($cur * 100 / $total);
 }
 
+/* =====================================================================
+ *  v10.36 (۴۹الف): «ضربانِ» یک کار — تنها منبعِ حقیقت برای زنده‌بودن.
+ *
+ *  باگی که کاربر گزارش کرد: کارِ استخراج چند لحظه بعد از شروع در مدیر
+ *  وظیفه برچسبِ «رهاشده» می‌گرفت و می‌نوشت «۴۰ دقیقه پیش»، در حالی که
+ *  شمارندهٔ همان کارت یک دقیقه پیش عوض شده بود.
+ *
+ *  ریشه: موتورهای واقعی (استخراج، ارسالِ ووکامرس، ارسالِ باسلام) زمانِ
+ *  ضربان را در کلیدِ «last_progress_ts» می‌نویسند — این کلید در تمام
+ *  writeProgress‌های آن‌ها هست. ولی tasksState و tasksBuildRow فقط
+ *  ts / updated_at / started_at را می‌خواندند. هیچ‌کدام از این سه هرگز
+ *  به‌روز نمی‌شد، پس عملاً همیشه started_at خوانده می‌شد: یعنی «سنِ کار»
+ *  به‌جای «مدتِ بی‌حرکتی». هر کاری که بیش از ۵ دقیقه طول می‌کشید، از
+ *  دقیقهٔ پنجم به بعد «رهاشده» بود — هرچقدر هم فعال.
+ *
+ *  همین اشتباه پیامدهای زنجیره‌ای داشت: نگهبانِ کران ردیفِ زنده را
+ *  «مرده» می‌دید، به پیام‌رسان خطا می‌فرستاد، ردیف را قرمز می‌کرد و چون
+ *  ردیفِ قبلی هیچ‌وقت درست بسته نمی‌شد، کارِ بعدی هم راه نمی‌افتاد.
+ *
+ *  حالا یک تابعِ واحد همهٔ شکل‌های ضربان را می‌شناسد و همه‌جا از همین
+ *  استفاده می‌شود، تا دوباره دو تعریفِ واگرا پیدا نشود.
+ * ===================================================================== */
+function tasksHeartbeat(array $p): int {
+    if (!is_array($p) || !$p) return 0;
+    $best = 0;
+    /* ترتیب مهم نیست چون بیشینه می‌گیریم؛ مهم این است که هیچ‌کدام جا نیفتد.
+       last_progress_ts = موتورهای استخراج/ارسال · ts = کارهای ایجنتی
+       updated_at = فایل‌های قدیمی‌تر · at = برخی فایل‌های وضعیت */
+    foreach (['last_progress_ts', 'ts', 'updated_at', 'at', 'progress_at'] as $k) {
+        $v = (int)($p[$k] ?? 0);
+        if ($v > $best) $best = $v;
+    }
+    /* started_at آخرین چاره است: کارِ تازه‌شروع‌شده هنوز ضربانی ننوشته و
+       نباید فوراً «رهاشده» شود. ولی هرگز جایگزینِ ضربانِ واقعی نمی‌شود. */
+    if ($best <= 0) $best = (int)($p['started_at'] ?? 0);
+    return $best;
+}
+
 /** وضعیتِ یک کار: running | stale | done | idle
  *
  *  «stale» همان تشخیصی است که تا حالا وجود نداشت: فایل می‌گوید در حال
@@ -16363,7 +16587,8 @@ function tasksState(array $p, int $now): string {
     $running = !empty($p['running']);
     $done    = !empty($p['done']);
     if ($running && !$done) {
-        $ts = (int)($p['ts'] ?? $p['updated_at'] ?? $p['started_at'] ?? 0);
+        // v10.36 (۴۹الف): ضربانِ واقعی، نه سنِ کار
+        $ts = tasksHeartbeat($p);
         if ($ts > 0 && ($now - $ts) > TASKS_STALE_SEC) return 'stale';
         return 'running';
     }
@@ -16441,7 +16666,7 @@ function tasksBuildRow(string $key, array $def, int $now): array {
     $file = (string)$def['file'];
     $p    = is_file($file) ? (array)json_decode((string)@file_get_contents($file), true) : [];
     $st   = tasksState($p, $now);
-    $ts   = (int)($p['ts'] ?? $p['updated_at'] ?? $p['started_at'] ?? 0);
+    $ts   = tasksHeartbeat($p);   // v10.36 (۴۹الف): همان ضربانی که وضعیت با آن سنجیده شد
     $stat = [];
     foreach (($def['stat'])($p) as $k => $v) if ((int)$v !== 0) $stat[] = ['k' => $k, 'v' => (int)$v];
     /* لاگِ این کار — هر کار شکلِ خودش را دارد (log یا recent_log) */
@@ -22385,6 +22610,196 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
       && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
 
+    /* ═══════════════════ v10.36 (۴۹) ═══════════════════
+       الف) کارِ زنده دیگر «رهاشده» اعلام نمی‌شود
+       ب) تفکیکِ غرفه‌ها در ارسال‌ها
+       ج) عرضِ ستون‌های جدولِ تست مدل‌ها
+       د) کارت‌های آمارِ مدل‌ها
+       ه) بافتِ نامِ پروفایل در دسته‌بندیِ هوش مصنوعی */
+
+    /* ---------- ۴۹الف: ضربان و زنده‌بودن ---------- */
+    $add('10.36', 'تابعِ ضربان همهٔ شکل‌های مهرِ زمانی را می‌شناسد',
+         function_exists('tasksHeartbeat')
+      && tasksHeartbeat(['last_progress_ts' => 1000]) === 1000
+      && tasksHeartbeat(['ts' => 1000]) === 1000
+      && tasksHeartbeat(['updated_at' => 1000]) === 1000
+      && tasksHeartbeat(['last_progress_ts' => 900, 'ts' => 1500]) === 1500
+      && tasksHeartbeat(['started_at' => 77]) === 77
+      && tasksHeartbeat([]) === 0);
+
+    /* دقیقاً سناریویی که کاربر گزارش کرد: شروع ۴۰ دقیقه پیش، ولی
+       شمارنده یک دقیقه پیش جلو رفته ⇒ باید «در حال اجرا» باشد. */
+    $add('10.36', 'کارِ زنده با ضربانِ تازه دیگر «رهاشده» نمی‌شود',
+         (function () {
+             $now = time();
+             $live = ['running' => true, 'done' => false,
+                      'started_at' => $now - 2400, 'last_progress_ts' => $now - 60];
+             $dead = ['running' => true, 'done' => false,
+                      'started_at' => $now - 2400, 'last_progress_ts' => $now - 2000];
+             return tasksState($live, $now) === 'running'
+                 && tasksState($dead, $now) === 'stale';
+         })());
+
+    $add('10.36', 'ردیفِ مدیر وظیفه همان ضربانی را نشان می‌دهد که وضعیت با آن سنجیده شد',
+         strpos($selfSrc, '$ts   = tasksHeartbeat($p);') !== false
+      && strpos($selfSrc, '$ts = tasksHeartbeat($p);' . "\n") !== false);
+
+    $add('10.36', 'شاهدِ حرکتِ شمارنده‌ها تعریف شده و فایل و سقف دارد',
+         function_exists('queueBeatSee') && function_exists('queueRowSig')
+      && function_exists('queueRowIdle') && function_exists('queueBeatsLoad')
+      && defined('QUEUE_BEAT_FILE') && defined('QUEUE_BEAT_KEEP') && QUEUE_BEAT_KEEP > 0);
+
+    $add('10.36', 'امضای ردیف با جلو رفتنِ کار عوض می‌شود',
+         queueRowSig(['current' => 5]) !== queueRowSig(['current' => 6])
+      && queueRowSig(['current' => 5]) === queueRowSig(['current' => 5])
+      && queueRowSig(['sent' => 1]) !== queueRowSig(['sent' => 2]));
+
+    $add('10.36', 'حرکتِ شمارنده مهرِ تازه می‌زند و سکون مهرِ قبلی را نگه می‌دارد',
+         (function () {
+             $bak = is_file(QUEUE_BEAT_FILE) ? @file_get_contents(QUEUE_BEAT_FILE) : null;
+             @unlink(QUEUE_BEAT_FILE);
+             $a = queueBeatSee('selftest', 'r1', 'sigA');
+             $b = queueBeatSee('selftest', 'r1', 'sigA');   // بدونِ حرکت
+             $c = queueBeatSee('selftest', 'r1', 'sigB');   // با حرکت
+             $ok = $a > 0 && $b === $a && $c >= $a;
+             if ($bak !== null) @file_put_contents(QUEUE_BEAT_FILE, $bak, LOCK_EX);
+             else @unlink(QUEUE_BEAT_FILE);
+             return $ok;
+         })());
+
+    $add('10.36', 'قفلِ خودی، ردیفی را که فایلِ پیشرفتش غریبه است نجات می‌دهد',
+         (function () {
+             $bak = is_file(QUEUE_BEAT_FILE) ? @file_get_contents(QUEUE_BEAT_FILE) : null;
+             $now = time();
+             $row = ['id' => 'sq1', 'started_at' => $now - 3000, 'current' => 4];
+             @file_put_contents(QUEUE_BEAT_FILE, json_encode(
+                 ['extract:sq1' => ['sig' => queueRowSig($row, ['queue_id' => 'OTHER']), 'at' => $now - 900]],
+                 JSON_UNESCAPED_UNICODE), LOCK_EX);
+             $r = queueRowIdle('extract', $row, ['queue_id' => 'OTHER'], $now, ['lock' => $now - 20]);
+             if ($bak !== null) @file_put_contents(QUEUE_BEAT_FILE, $bak, LOCK_EX);
+             else @unlink(QUEUE_BEAT_FILE);
+             return $r['why'] === 'lock' && $r['idle'] <= 21;
+         })());
+
+    $add('10.36', 'هر سه نگهبان از تصمیمِ مشترکِ بی‌حرکتی استفاده می‌کنند',
+         substr_count($selfSrc, 'queueRow' . 'Idle(') >= 4
+      && strpos($selfSrc, "\$_iw=queueRowIdle('extract',\$qe,\$progress,\$now,['lock'=>\$_lkBeat]);") !== false
+      && strpos($selfSrc, "\$_iwW = queueRowIdle('extract', \$qe, \$exProg, \$exNow, ['lock' => \$_lkWBeat]);") !== false
+      && strpos($selfSrc, '$_iwS = queueRowIdle($which, $running, $prog, $now,') !== false);
+
+    /* ---------- ۴۹ب: تفکیکِ غرفه‌ها ---------- */
+    $add('10.36', 'آمارِ اختصاصیِ غرفهٔ پیش‌فرض جایگزینِ جمعِ آلوده می‌شود',
+         (function () {
+             $bs = $GLOBALS['bslShopStats'] ?? []; $bv = $GLOBALS['bslDefaultVid'] ?? 0;
+             $bn = $GLOBALS['bslDefaultShopName'] ?? '';
+             $GLOBALS['bslShopStats'] = []; $GLOBALS['bslDefaultVid'] = 7;
+             $GLOBALS['bslDefaultShopName'] = 'اصلی';
+             bslShopStatBump(7, 'اصلی', 'c', 5); bslShopStatBump(7, 'اصلی', 'u', 3);
+             bslShopStatBump(9, 'دومی', 'c', 4);
+             $rows = bslShopStatRows(99, 88, 0, 0);      // جمعِ آلوده
+             $okA = count($rows) === 2 && $rows[0]['sent'] === 5 && $rows[0]['updated'] === 3;
+             /* و برعکس: بدونِ آمارِ اختصاصی باید از جمعِ سراسری پر شود */
+             $GLOBALS['bslShopStats'] = [];
+             $rows2 = bslShopStatRows(12, 4, 2, 1);
+             $okB = count($rows2) === 1 && $rows2[0]['sent'] === 12 && $rows2[0]['updated'] === 4;
+             $GLOBALS['bslShopStats'] = $bs; $GLOBALS['bslDefaultVid'] = $bv;
+             $GLOBALS['bslDefaultShopName'] = $bn;
+             return $okA && $okB;
+         })());
+
+    $add('10.36', 'غرفهٔ پیش‌فرض در مسیرِ چندغرفه‌ای عکسِ شمارنده‌هایش را می‌گیرد',
+         strpos($selfSrc, "\$__shopStat[\$bslDefaultVid]=['c'=>(int)\$sent,'u'=>(int)\$updated,'f'=>(int)\$fail,'s'=>(int)\$skipped];") !== false);
+
+    /* آستانهٔ نمایش از ۲ به ۱ آمد. ادعا به «شرطِ فعلی» بسته شده، نه به
+       نبودِ رشتهٔ قدیمی — چون متنِ همین ادعا هم در فایل جست‌وجو می‌شود. */
+    $add('10.36', 'بلوکِ تفکیک با یک غرفه هم نشان داده می‌شود',
+         strpos($selfSrc, 'Array.isArray(rows)||rows.length<' . "1)return") !== false);
+
+    $add('10.36', 'تفکیکِ غرفه‌ها در پنلِ زندهٔ ارسال هم رندر می‌شود',
+         strpos($selfSrc, 'id="bsl' . 'LiveShops"') !== false
+      && strpos($selfSrc, 'lsBox.innerHTML=bslShopStatsHtml(d.shop_stats);') !== false);
+
+    /* ---------- ۴۹ج: عرضِ ستون‌های جدولِ تست ---------- */
+    $add('10.36', 'جدولِ نتایج چیدمانِ ثابت و colgroup دارد',
+         strpos($selfSrc, 'table-layout:fixed') !== false
+      && strpos($selfSrc, '<col' . 'group>') !== false
+      && strpos($selfSrc, 'class="aiTestTable"') !== false);
+
+    /* ادعا فقط به «هست بودنِ» قواعدِ تازه بسته شده. بررسیِ «نبودنِ» قاعدهٔ
+       قدیمی عمداً حذف شد: متنِ توضیحیِ همین نسخه آن رشته را نام می‌برد و
+       ادعا خودش را فیل می‌کرد. */
+    $add('10.36', 'سلولِ نام حداکثر دو خط می‌شود، نه نویسه‌نویسه',
+         strpos($selfSrc, '-webkit-line-clamp:' . '2') !== false
+      && strpos($selfSrc, 'overflow-wrap:' . 'anywhere') !== false
+      && strpos($selfSrc, 'td.aiCell' . '2{') !== false);
+
+    $add('10.36', 'نامِ مدل tooltip دارد تا متنِ کامل از دست نرود',
+         strpos($selfSrc, 'class="aiCell2 aiModelCell"') !== false
+      && substr_count($selfSrc, "+'title=\"'+esc(d.baseModel") >= 1
+      && substr_count($selfSrc, 'class="aiCell' . '2"') >= 1);
+
+    /* ---------- ۴۹د: کارت‌های آمارِ مدل‌ها ---------- */
+    $add('10.36', 'اندپوینتِ آمارِ مدل‌ها هست و کلیدهای اصلی را می‌دهد',
+         strpos($selfSrc, "isset(\$_GET['ai_stats'])") !== false
+      && strpos($selfSrc, "'health_pct'") !== false
+      && strpos($selfSrc, "'coverage_pct'") !== false
+      && strpos($selfSrc, "'by_provider'") !== false
+      && strpos($selfSrc, "'fastest'") !== false);
+
+    $add('10.36', 'کارت‌ها و نوارها در رابط کاربری هستند',
+         strpos($selfSrc, 'id="aiStatCards"') !== false
+      && strpos($selfSrc, 'id="aiStatBars"') !== false
+      && strpos($selfSrc, 'id="aiStatWhen"') !== false
+      && strpos($selfSrc, 'function aiStatsLoad()') !== false
+      && strpos($selfSrc, 'function aiStatCard(') !== false
+      && strpos($selfSrc, 'function aiStatBar(') !== false);
+
+    $add('10.36', 'کارت‌ها شبکهٔ واکنش‌گرا دارند و بعد از تست تازه می‌شوند',
+         strpos($selfSrc, '.ai-stat-grid{display:grid') !== false
+      && strpos($selfSrc, '.ai-stat-card{') !== false
+      && strpos($selfSrc, 'try{ aiStatsLoad(); }catch(e){}') !== false);
+
+    /* ---------- ۴۹ه: بافتِ پروفایل در دسته‌بندی ---------- */
+    $add('10.36', 'سازندهٔ بافتِ پروفایل، راهنما می‌دهد نه حکم',
+         function_exists('aiCatProfileHint')
+      && aiCatProfileHint('') === ''
+      && mb_strpos(aiCatProfileHint('لوازم آشپزخانه'), 'لوازم آشپزخانه') !== false
+      && stripos(aiCatProfileHint('x'), 'ignore this hint') !== false);
+
+    $add('10.36', 'بافت داخلِ پرامپت و پیش از فهرستِ دسته‌ها می‌نشیند',
+         (function () {
+             $h = aiCatProfileHint('لوازم آشپزخانه');
+             $p = aiCatPayload('ست ۳ تکه', "11: قابلمه\n22: لباس", [], $h);
+             $c = $p['messages'][1]['content'];
+             $bare = aiCatPayload('ست ۳ تکه', "11: قابلمه")['messages'][1]['content'];
+             return mb_strpos($c, 'لوازم آشپزخانه') !== false
+                 && mb_strpos($c, 'لوازم آشپزخانه') < mb_strpos($c, '11: قابلمه')
+                 && ($p['max_tokens'] ?? 0) === 20
+                 && mb_strpos($bare, 'لوازم آشپزخانه') === false;   // بدونِ بافت، دست‌نخورده
+         })());
+
+    $add('10.36', 'تشخیصِ پروفایل اول دفترچه و بعد پسوندِ عنوان را می‌بیند',
+         function_exists('catProfileResolver')
+      && strpos($selfSrc, "\$pProf = \$profOf(\$pId, \$pName);") !== false
+      && strpos($selfSrc, '$profOf = catProfileResolver(') !== false);
+
+    $add('10.36', 'هر دو مسیرِ دسته‌بندی بافت را می‌فرستند',
+         substr_count($selfSrc, "'profile_hint'") >= 2
+      && strpos($selfSrc, '$net, $exclude, $triedInfo, $pHint);') !== false
+      && strpos($selfSrc, '$net,$exclude,$triedInfo,$__pHint);') !== false);
+
+    $add('10.36', 'کشِ اجماع بافت را در کلیدش دارد تا دو پروفایل قاطی نشوند',
+         strpos($selfSrc, "\$profileHint = (string)(\$opts['profile_hint'] ?? '');") !== false
+      && strpos($selfSrc, "'|' . md5(\$profileHint)") !== false);
+
+    $add('10.36', 'سهمِ بافت در گزارشِ پایانی دیده می‌شود',
+         strpos($selfSrc, "'profile_hints' => \$profHits") !== false
+      && strpos($selfSrc, 'با بافتِ پروفایل: ') !== false);
+
+    $add('10.36', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '36', '>=')
+      && strpos($selfSrc, 'v:' . "'10.36'") !== false);
+
     /* ═══════════════════ v10.35 (۴۷) ═══════════════════
        الف) دفترچه per-vendor · ب) کشِ کاتالوگ · ج) بایگانیِ مقصدمحور
        د) گزارشِ کاملِ همگام‌سازی · ه) دکمهٔ همگام‌سازیِ دستی
@@ -26895,15 +27310,22 @@ function queueStallCheck(string $which, int $staleAfter = 300): array {
     }
 
     if ($running !== null) {
-        $ts = (int)($prog['last_progress_ts'] ?? 0);
-        if ($ts <= 0) $ts = (int)($running['started_at'] ?? 0);
-        $idle = $ts > 0 ? ($now - $ts) : PHP_INT_MAX;
+        /* v10.36 (۴۹الف): همان اصلاحِ استخراج، برای ارسال‌ها.
+           کاربر گزارش داد این داستان «برای ارسال‌ها هم دیده شده» — و
+           دقیقاً همان ریشه را داشت: ردیف‌های صفِ ارسال اصلاً queue_id
+           جداگانه در فایلِ پیشرفت ندارند، پس هر وقت فایل مالِ ردیفِ دیگری
+           بود مبنا می‌شد started_at، یعنی سنِ کار. ارسالِ ۵۰۰ محصولی که
+           نیم ساعت طول می‌کشد، از دقیقهٔ پنجم «گیرکرده» اعلام می‌شد. */
+        $_iwS = queueRowIdle($which, $running, $prog, $now,
+            $lockFresh ? ['lock' => $now] : []);
+        $idle = (int)$_iwS['idle'];
         if ($lockFresh && $idle <= $staleAfter) {
             return ['stalled' => false, 'reason' => 'در حال اجرا', 'idle' => $idle];
         }
         if ($idle > $staleAfter) {
             return ['stalled' => true, 'kind' => 'running', 'idle' => $idle,
                 'queue_id' => $running['id'] ?? '', 'lock_held' => $lockFresh,
+                'beat_from' => (string)$_iwS['why'],
                 'current' => (int)($running['current'] ?? 0),
                 'total' => (int)($running['total'] ?? 0)];
         }
@@ -27664,6 +28086,56 @@ function suffixProfiles(): array {
                   'suffix' => $sfx, 'target' => (string)($p['syncConfig']['target'] ?? 'woo')];
     }
     return $out;
+}
+
+/* =====================================================================
+ *  v10.36 (۴۹ه): «این محصولِ مقصد مالِ کدام پروفایل است؟»
+ *
+ *  برای دادنِ نامِ پروفایل به مدل، اول باید بدانیم محصول مالِ کدام
+ *  پروفایل است. سه راه داریم، به ترتیبِ دقت:
+ *    ۱) دفترچهٔ نگاشت (v8.65 + v10.35) — شناسهٔ مقصد ⇒ پروفایل. دقیق‌ترین
+ *       است چون خودمان موقعِ ارسال ثبتش کرده‌ایم و به عنوان وابسته نیست.
+ *    ۲) پسوندِ یکتای پروفایل در عنوان — همان چیزی که suffixProfiles
+ *       برایش ساخته شده.
+ *    ۳) هیچ‌کدام ⇒ رشتهٔ خالی، و مدل مثل قبل فقط با عنوان کار می‌کند.
+ *
+ *  خروجی یک کلوژر است تا دفترچه و فهرستِ پروفایل‌ها فقط یک بار خوانده
+ *  شوند؛ صدا زدنش برای هر محصول در حلقه هیچ ورودی/خروجی‌ای ندارد.
+ * ===================================================================== */
+function catProfileResolver(string $target = 'bsl'): callable {
+    $byId = [];
+    $profiles = [];
+    if (function_exists('remoteMapLoad')) {
+        foreach ((remoteMapLoad()[$target] ?? []) as $k => $v) {
+            $id = (int)($v['id'] ?? 0);
+            $pk = trim((string)($v['profile'] ?? ''));
+            if ($id > 0 && $pk !== '') $byId[$id] = $pk;
+        }
+    }
+    foreach (loadProfiles() as $key => $p) {
+        $profiles[$key] = trim((string)($p['name'] ?? $key));
+    }
+    $sfx = suffixProfiles();
+    /* پسوندِ بلندتر اول سنجیده شود: اگر «فروشگاه الف» و «الف» هر دو پسوند
+       باشند، عنوانی که هر دو را دارد باید به بلندتر نسبت داده شود. */
+    usort($sfx, fn($a, $b) => mb_strlen($b['suffix']) <=> mb_strlen($a['suffix']));
+
+    return function (int $remoteId, string $title) use ($byId, $profiles, $sfx): string {
+        if ($remoteId > 0 && isset($byId[$remoteId])) {
+            $pk = $byId[$remoteId];
+            $nm = trim((string)($profiles[$pk] ?? ''));
+            if ($nm !== '') return $nm;
+            if ($pk !== '') return $pk;
+        }
+        $t = trim($title);
+        if ($t !== '') {
+            foreach ($sfx as $s) {
+                if ($s['suffix'] !== '' && mb_strpos($t, $s['suffix']) !== false)
+                    return (string)$s['name'];
+            }
+        }
+        return '';
+    };
 }
 
 /* =====================================================================
@@ -30139,6 +30611,78 @@ if (!empty($st['running']) && empty($st['done'])) {
 echo json_encode($st, JSON_UNESCAPED_UNICODE);
 exit;
 }
+/* =====================================================================
+ *  v10.36 (۴۹د): آمارِ تفصیلیِ مدل‌ها — پشتِ کارت‌های زیرِ دکمه‌های تست
+ *
+ *  ?ai_stats=1
+ *
+ *  چرا از ai_providers.json و نه از فایلِ وضعیتِ تست: فایلِ وضعیت فقط
+ *  «همین اجرا» را می‌شناسد و با هر اجرای تازه صفر می‌شود. ولی نتیجهٔ هر
+ *  مدل بلافاصله در کاتالوگِ ارائه‌دهنده‌ها ذخیره می‌شود، پس آمارِ آنجا
+ *  ماندگار و کامل است — حتی برای مدل‌هایی که ماه‌ها پیش آزموده شده‌اند.
+ * ===================================================================== */
+if (isset($_GET['ai_stats'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $provs = aiProvidersLoad();
+    $tot = 0; $tested = 0; $okN = 0; $failN = 0; $rate = 0;
+    $tool = 0; $reason = 0; $free = 0;
+    $latSum = 0; $latN = 0; $fastest = [];
+    $byProv = []; $keyTotal = 0; $keyHealthy = 0;
+
+    foreach ($provs as $pid => $p) {
+        if (!is_array($p)) continue;
+        $pname = trim((string)($p['name'] ?? $pid));
+        $models = is_array($p['models'] ?? null) ? $p['models'] : [];
+        $pRow = ['id' => (string)$pid, 'name' => $pname !== '' ? $pname : (string)$pid,
+                 'total' => 0, 'tested' => 0, 'ok' => 0, 'fail' => 0, 'lat' => 0];
+        $pLatSum = 0; $pLatN = 0;
+        foreach ((array)(aiTestKeySlots($p)) as $sl) { $keyTotal++; }
+        foreach ($models as $m) {
+            if (!is_array($m)) continue;
+            $tot++; $pRow['total']++;
+            if (!empty($m['toolCalling'])) $tool++;
+            if (function_exists('aiIsReasoningModel') && aiIsReasoningModel($m)) $reason++;
+            if (!empty($m['free'])) $free++;
+            $isT = !empty($m['tested']);
+            $isA = !empty($m['available']);
+            if (!empty($m['rateLimited'])) $rate++;
+            if ($isT) {
+                $tested++; $pRow['tested']++;
+                if ($isA) { $okN++; $pRow['ok']++; } else { $failN++; $pRow['fail']++; }
+            }
+            $lat = (int)($m['testDetails']['latencyMs'] ?? 0);
+            if ($isT && $isA && $lat > 0) {
+                $latSum += $lat; $latN++; $pLatSum += $lat; $pLatN++;
+                $fastest[] = ['model' => (string)($m['id'] ?? ''), 'provider' => $pRow['name'], 'lat' => $lat];
+            }
+        }
+        if ($pLatN > 0) $pRow['lat'] = (int)round($pLatSum / $pLatN);
+        if ($pRow['total'] > 0) $byProv[] = $pRow;
+    }
+    /* سالم‌ترین ارائه‌دهنده‌ها اول — معیار «تعدادِ مدلِ سالم» است نه درصد،
+       چون ارائه‌دهنده‌ای با یک مدلِ سالم نباید بالاتر از یکی با ۴۰ بنشیند. */
+    usort($byProv, fn($a, $b) => ($b['ok'] <=> $a['ok']) ?: ($a['lat'] <=> $b['lat']));
+    usort($fastest, fn($a, $b) => $a['lat'] <=> $b['lat']);
+
+    $st = aiTestStateLoad();
+    echo json_encode([
+        'ok' => true,
+        'total' => $tot, 'tested' => $tested, 'untested' => max(0, $tot - $tested),
+        'available' => $okN, 'failed' => $failN, 'rate_limited' => $rate,
+        'tool_calling' => $tool, 'reasoning' => $reason, 'free' => $free,
+        'providers' => count($byProv), 'key_slots' => $keyTotal,
+        'avg_latency' => $latN > 0 ? (int)round($latSum / $latN) : 0,
+        'health_pct' => $tested > 0 ? (int)round($okN * 100 / $tested) : 0,
+        'coverage_pct' => $tot > 0 ? (int)round($tested * 100 / $tot) : 0,
+        'by_provider' => array_slice($byProv, 0, 12),
+        'fastest' => array_slice($fastest, 0, 5),
+        'last_run' => (int)($st['updated_at'] ?? $st['started_at'] ?? 0),
+        'last_summary' => (string)($st['summary'] ?? ''),
+        'running' => !empty($st['running']) && empty($st['done']),
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['ai_test_stop'])) {
     /* v9.42: فایل توقف را مقاوم بنویس — writeJsonFile اول با قفل تلاش می‌کند
        و اگر قفل روی FUSE/ترموکس پشتیبانی نشد، بدون قفل می‌نویسد. قبلاً با
@@ -30435,8 +30979,14 @@ function aiCatConsensus(array $cands, array $providers, string $title, array $ca
 
     /* ۴) کشِ هم‌کلمه — کلیدِ کش شاملِ فهرستِ ممنوعه است، چون با تغییرِ
        آن فضای انتخاب عوض می‌شود و جوابِ قبلی دیگر معتبر نیست. */
+    /* v10.36 (۴۹ه): بافتِ پروفایل هم باید در کلیدِ کش باشد. دو محصولِ
+       هم‌کلمه در دو پروفایلِ متفاوت جوابِ متفاوت می‌گیرند (همان مثالِ
+       «ست ۳ تکه»)؛ بدونِ این، جوابِ پروفایلِ اول به دومی هم داده می‌شد و
+       کلِ فایدهٔ بافت از بین می‌رفت. */
+    $profileHint = (string)($opts['profile_hint'] ?? '');
     static $cache = [];
-    $ck = catFirstWords($title, catLearnWordCount()) . '|' . implode(',', $exclude);
+    $ck = catFirstWords($title, catLearnWordCount()) . '|' . implode(',', $exclude)
+        . '|' . md5($profileHint);
     if ($useCache && $ck !== '|' && isset($cache[$ck])) {
         /* توجه: عملگرِ + کلیدِ موجود را بازنویسی نمی‌کند، پس
            from_cache باید صریح ست شود نه با آرایهٔ پیش‌فرض. */
@@ -30447,7 +30997,7 @@ function aiCatConsensus(array $cands, array $providers, string $title, array $ca
 
     $catList = aiCatListBuild($leafCats, $exclude);
     if (trim($catList) === '') return array_merge($empty, ['error' => 'همهٔ دسته‌ها قبلاً امتحان شده‌اند']);
-    $payload = aiCatPayload($title, $catList, $triedInfo);
+    $payload = aiCatPayload($title, $catList, $triedInfo, $profileHint);   // v10.36 (۴۹ه)
 
     // مرتب‌سازی کاندیدها بر اساس امتیازِ تاریخی (بهترین‌ها اولِ صف)
     $v = aiVotesLoad();
@@ -32719,6 +33269,10 @@ if($pg>=$tp)break;
 $total=count($allProducts);
 $sse(['type'=>'start','total'=>$total,'msg'=>'شروع مشورت '.($multi?'چندمدلی':'با مستر').' برای '.count($allProducts).' محصول...']);
 $fixed=0;$failed=0;$noCat=0;$idx=0;$skipSame=0;$skipTried=0;$askTotal=0;$cacheHits=0;
+/* v10.36 (۴۹ه): همان بافتِ پروفایل که در catfixRun اضافه شد، برای این مسیرِ
+   زنده (SSE) هم لازم است — وگرنه دو مسیرِ دسته‌بندی رفتارِ متفاوت پیدا
+   می‌کنند و کاربر بسته به اینکه از کدام دکمه آمده، جوابِ متفاوت می‌گیرد. */
+$__profOf=catProfileResolver('bsl');
 foreach($allProducts as $p){
 $idx++;
 $pId=(int)($p['id']??0);
@@ -32735,11 +33289,13 @@ $exclude=catTriedExclude($pId,$curCat);
 $triedInfo=[];
 $trRow=catTriedRow($pId);
 foreach(($trRow['tried']??[]) as $tcid=>$tinfo){$triedInfo[]=['id'=>(int)$tcid,'name'=>(string)($tinfo['name']??'')];}
+$__pProf=$__profOf($pId,$pName);            // v10.36 (۴۹ه)
+$__pHint=aiCatProfileHint($__pProf);
 if($exclude){
 $sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'step'=>'exclude','excluded'=>count($exclude)]);
 }
 if($multi){
-$con=aiCatConsensus($cands,$providers,$pName,$cats,$leafCats,$exclude,$net,['quorum'=>$quorum,'tried_info'=>$triedInfo]);
+$con=aiCatConsensus($cands,$providers,$pName,$cats,$leafCats,$exclude,$net,['quorum'=>$quorum,'tried_info'=>$triedInfo,'profile_hint'=>$__pHint]);
 $askTotal+=(int)($con['asked']??0);
 if(!empty($con['from_cache']))$cacheHits++;
 $catId=(int)($con['category_id']??0);
@@ -32751,7 +33307,7 @@ if($okRes){
 $sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'step'=>'consensus','catId'=>$catId,'catName'=>$catName,'agreement'=>(int)($con['agreement']??0),'asked'=>(int)($con['asked']??0),'stages'=>(int)($con['stages']??0),'from_cache'=>!empty($con['from_cache']),'per_model'=>(array)($con['per_model']??[])]);
 }
 }else{
-$res=aiCandidateCategory($mp,$master['model'],$pName,$cats,$leafCats,aiCatListBuild($leafCats,$exclude),$net,$exclude,$triedInfo);
+$res=aiCandidateCategory($mp,$master['model'],$pName,$cats,$leafCats,aiCatListBuild($leafCats,$exclude),$net,$exclude,$triedInfo,$__pHint);
 $askTotal++;
 $catId=(int)($res['category_id']??0);
 $catName=(string)($res['category_name']??'');
@@ -34203,6 +34759,23 @@ if($__sendAllShops && $__liveShops){
         $__shopStat[$__v1]=['c'=>0,'u'=>0,'f'=>0,'s'=>0];   // v10.33 (۴۶): s = پرشِ بی‌تغییر
         $__shopName[$__v1]=trim((string)($__sh1['shop_name']??''));
         bslShopStatBump($__v1,$__shopName[$__v1],'c',0);   // ردیفش از همان اول پیدا شود
+    }
+    /* v10.36 (۴۹ب): غرفهٔ پیش‌فرض هم ردیفِ خودش را از همین ابتدا بگیرد.
+       تا اینجا فقط غرفه‌های «اضافی» ثبت می‌شدند و سهمِ غرفهٔ پیش‌فرض از
+       شمارنده‌های سراسری برداشت می‌شد — همان‌هایی که در این مسیر جمعِ
+       همهٔ غرفه‌ها بودند. نتیجه: عددِ ردیفِ اول از کلِ محصولات بیشتر
+       می‌شد و تفکیک به‌جای روشن‌کردن، گمراه می‌کرد. */
+    if($bslDefaultVid>0){
+        if(!isset($__shopStat[$bslDefaultVid])) $__shopStat[$bslDefaultVid]=['c'=>0,'u'=>0,'f'=>0,'s'=>0];
+        if(!isset($__shopName[$bslDefaultVid])) $__shopName[$bslDefaultVid]=$bslDefaultShopName;
+        /* عددهای غرفهٔ پیش‌فرض همین حالا قطعی‌اند: حلقهٔ اصلیِ بالا کارش را
+           تمام کرده و هنوز هیچ غرفهٔ اضافی چیزی به شمارنده‌ها اضافه نکرده.
+           پس همین لحظه عکس می‌گیریم — بعدش دیگر قابل بازیابی نیست. */
+        $__shopStat[$bslDefaultVid]=['c'=>(int)$sent,'u'=>(int)$updated,'f'=>(int)$fail,'s'=>(int)$skipped];
+        bslShopStatBump($bslDefaultVid,$bslDefaultShopName,'c',(int)$sent);
+        bslShopStatBump($bslDefaultVid,$bslDefaultShopName,'u',(int)$updated);
+        bslShopStatBump($bslDefaultVid,$bslDefaultShopName,'s',(int)$skipped);
+        bslShopStatBump($bslDefaultVid,$bslDefaultShopName,'f',(int)$fail);
     }
     $__msDone=0; $__msStop=false;
     bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',
@@ -36529,6 +37102,10 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
 
     $fixed = 0; $failed = 0; $noAi = 0; $noCat = 0; $skipSame = 0; $skipTried = 0;
     $asked = 0; $cacheHits = 0; $idx = 0; $items = []; $stopped = false;
+    /* v10.36 (۴۹ه): نامِ پروفایلِ هر محصول به‌عنوان بافت به مدل داده می‌شود.
+       یک بار ساخته می‌شود و در حلقه هزینه‌ای ندارد. */
+    $profOf = catProfileResolver('bsl');
+    $profHits = 0;
 
     foreach ($products as $p) {
         $idx++;
@@ -36585,9 +37162,14 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
             $trRow = catTriedRow($pId);
             foreach ((array)($trRow['tried'] ?? []) as $tcid => $tinfo)
                 $triedInfo[] = ['id' => (int)$tcid, 'name' => (string)($tinfo['name'] ?? '')];
+            /* v10.36 (۴۹ه): نامِ پروفایلِ همین محصول — سرنخی که عنوانِ مبهم
+               را معنادار می‌کند («ست ۳ تکه» در «لوازم آشپزخانه» ≠ در «پوشاک»). */
+            $pProf = $profOf($pId, $pName);
+            $pHint = aiCatProfileHint($pProf);
+            if ($pProf !== '') $profHits++;
             if ($mode === 'quorum') {
                 $con = aiCatConsensus($cands, $providers, $pName, $cats, $leafCats, $exclude, $net,
-                    ['quorum' => $quorum, 'tried_info' => $triedInfo]);
+                    ['quorum' => $quorum, 'tried_info' => $triedInfo, 'profile_hint' => $pHint]);
                 $asked += (int)($con['asked'] ?? 0);
                 if (!empty($con['from_cache'])) $cacheHits++;
                 $catId   = (int)($con['category_id'] ?? 0);
@@ -36597,10 +37179,11 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
                 $winKeys = (array)($con['winner_keys'] ?? []);
                 if ($ok) catfixProgress(['log_add' => ['🗳️ [' . $idx . '/' . $total . '] اجماع: ' . $catName
                     . ' (' . $catId . ') — ' . aiFaNum((int)($con['agreement'] ?? 0)) . ' رأی از '
-                    . aiFaNum((int)($con['asked'] ?? 0)) . ' مدل' . (!empty($con['from_cache']) ? ' · از کش ⚡' : '')]]);
+                    . aiFaNum((int)($con['asked'] ?? 0)) . ' مدل' . (!empty($con['from_cache']) ? ' · از کش ⚡' : '')
+                    . ($pProf !== '' ? ' · بافت: ' . $pProf : '')]]);   // v10.36 (۴۹ه)
             } else {
                 $res = aiCandidateCategory($mp, $master['model'], $pName, $cats, $leafCats,
-                    aiCatListBuild($leafCats, $exclude), $net, $exclude, $triedInfo);
+                    aiCatListBuild($leafCats, $exclude), $net, $exclude, $triedInfo, $pHint);
                 $asked++;
                 $catId   = (int)($res['category_id'] ?? 0);
                 $catName = (string)($res['category_name'] ?? '');
@@ -36666,6 +37249,9 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
         if ($saved > 0) $savedMsg = ' | صرفه‌جویی: ' . aiFaNum($saved) . ' فراخوانی از ' . aiFaNum($maxCalls);
         if ($cacheHits > 0) $savedMsg .= ' | از کش: ' . aiFaNum($cacheHits);
     }
+    // v10.36 (۴۹ه): سهمِ بافتِ پروفایل هم در خلاصه دیده شود
+    if ($mode !== 'ai_text' && $profHits > 0)
+        $savedMsg .= ' | با بافتِ پروفایل: ' . aiFaNum($profHits);
     $msg = '✅ اصلاح: ' . $fixed . ' | دسته نیافت: ' . $noCat
          . ($mode === 'ai_text' ? (' | بدون متنِ AI: ' . $noAi) : '')
          . ' | تکراری/همان دسته: ' . ($skipSame + $skipTried)
@@ -36676,6 +37262,10 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
             'skip_same' => $skipSame, 'skip_tried' => $skipTried,
             'skipped' => $skipSame + $skipTried, 'asked' => $asked, 'cache_hits' => $cacheHits,
             'stopped' => $stopped, 'partial' => !empty($partial['partial']),
+            /* v10.36 (۴۹ه): چند محصول توانستند بافتِ پروفایل بگیرند — اگر
+               این عدد صفر باشد یعنی نه دفترچه شناسه‌ای دارد نه پسوندی
+               تعریف شده، و کاربر باید بداند چرا بافت اثری نداشته. */
+            'profile_hints' => $profHits,
             'items' => $items, 'took' => round(microtime(true) - $t0, 1), 'at' => time(),
             'msg' => $msg];
 }
@@ -38899,6 +39489,38 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 .mbar .mb-el{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .mstat{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#1e293b;border:1px solid #334155;border-radius:20px;padding:2px 9px;font-size:10.5px;color:#fbbf24;line-height:1.7}
 .mstat:empty{display:none}
+/* =====================================================================
+   v10.36 (۴۹ج): سلولِ «حداکثر دو خط» در جدولِ نتایجِ تست مدل‌ها.
+   line-clamp متن را در دو خط نگه می‌دارد و بقیه را با «…» می‌بندد، پس
+   ارتفاعِ ردیف‌ها یکنواخت می‌ماند و جدول با یک نامِ بلند به‌هم نمی‌ریزد.
+   overflow-wrap:anywhere فقط وقتی وسطِ کلمه می‌شکند که چاره‌ای نباشد —
+   برخلافِ word-break:break-all که همیشه می‌شکست و نام را نویسه‌نویسه
+   می‌کرد. ===================================================================== */
+.aiTestTable td.aiCell2{white-space:normal;overflow:hidden;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;
+  line-height:1.5;max-height:3em}
+.aiTestTable td.aiModelCell{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px}
+.aiTestTable th,.aiTestTable td{vertical-align:top}
+@media(max-width:720px){
+.aiTestTable{font-size:10px}
+.aiTestTable td.aiModelCell{font-size:9.5px}
+}
+/* =====================================================================
+   v10.36 (۴۹د): کارت‌های شمارندهٔ آمارِ مدل‌ها.
+   auto-fit به‌جای ستونِ ثابت: روی موبایل دو ستون و روی دسکتاپ چهار ستون
+   می‌شود بدون هیچ media query جدا. ===================================== */
+.ai-stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:6px}
+.ai-stat-card{background:linear-gradient(160deg,#111c31,#0b1220);border:1px solid #1e293b;
+  border-radius:9px;padding:8px 6px;text-align:center;position:relative;overflow:hidden;
+  transition:border-color .2s,transform .2s}
+.ai-stat-card:hover{border-color:#334155;transform:translateY(-1px)}
+.ai-stat-ico{font-size:13px;line-height:1;margin-bottom:3px;opacity:.85}
+.ai-stat-val{font-size:17px;font-weight:800;line-height:1.15;font-variant-numeric:tabular-nums}
+.ai-stat-lbl{font-size:9px;color:#64748b;margin-top:2px;line-height:1.3}
+@media(max-width:420px){
+.ai-stat-grid{grid-template-columns:repeat(auto-fit,minmax(74px,1fr));gap:5px}
+.ai-stat-val{font-size:15px}
+}
 .bsl-modal-head{gap:8px}
 .bsl-modal-head h2{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media(max-width:620px){
@@ -39989,6 +40611,26 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 <div class="cact" style="margin-top:4px">
 <button class="btn" onclick="aiTestUnstick()" style="flex:1;background:#7c2d12;border-color:#9a3412" title="اگر تست وسطِ کار گیر کرده (پردازهٔ پس‌زمینه مرده)، قفل را آزاد می‌کند و از همان‌جا که مانده ادامه می‌دهد — مدل‌های تست‌شده دوباره تست نمی‌شوند">🔧 رفعِ گیر و ادامه</button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     v10.36 (۴۹د): کارت‌های شمارندهٔ تفصیلی و آماری زیرِ دکمه‌های تست.
+
+     تا اینجا برای دیدنِ «چند مدل سالم دارم» باید مودالِ جدول را باز
+     می‌کردید و آن هم فقط شمارنده‌های همان اجرا را نشان می‌داد. اینجا
+     تصویرِ کلی و ماندگار است: از کلِ کاتالوگِ مدل‌ها چقدر آزموده شده،
+     چقدر سالم است، سریع‌ترین‌ها کدام‌اند و آخرین اجرا کِی بوده.
+     ═══════════════════════════════════════════════════════════════ -->
+<div style="margin-top:10px;padding-top:9px;border-top:1px solid #334155">
+<div style="display:flex;align-items:center;gap:6px;margin-bottom:7px">
+<span style="font-size:11.5px;color:#67e8f9;font-weight:700;flex:1">📊 آمارِ مدل‌ها</span>
+<span id="aiStatWhen" style="font-size:9.5px;color:#64748b"></span>
+<button class="btn btn-gray" onclick="aiStatsLoad()" style="flex:0;font-size:9.5px;padding:3px 9px">🔄 تازه‌سازی</button>
+</div>
+<div id="aiStatCards" class="ai-stat-grid">
+<div style="grid-column:1/-1;color:#64748b;font-size:10.5px;padding:6px 2px">برای دیدنِ آمار، «تازه‌سازی» را بزنید.</div>
+</div>
+<div id="aiStatBars" style="margin-top:8px"></div>
 </div>
 </div>
 </div>
@@ -41986,6 +42628,8 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="progress hidden" id="bP"><div class="progress-bar" id="bPB" style="background:linear-gradient(90deg,#0891b2,#22d3ee)"></div></div>
 <div class="status" id="bSS" style="color:#67e8f9"></div>
 <div class="ssum hidden" id="bSM"><div class="si" style="cursor:pointer" onclick="showBslReport('sent')"><b id="bO" style="color:#4ade80">۰</b><span>جدید</span></div><div class="si" style="cursor:pointer" onclick="showBslReport('updated')"><b id="bU" style="color:#facc15">۰</b><span>آپدیت</span></div><div class="si" style="cursor:pointer" onclick="showBslReport('skipped')"><b id="bK" style="color:#fb923c">۰</b><span>تکراری</span></div><div class="si" style="cursor:pointer" onclick="showBslReport('failed')"><b id="bF" style="color:#f87171">۰</b><span>خطا</span></div><div class="si" style="cursor:pointer" onclick="showBslReport('all')"><b id="bT" style="color:#60a5fa">۰</b><span>کل</span></div></div>
+<!-- v10.36 (۴۹ب): تفکیکِ زندهٔ غرفه‌ها حینِ ارسال — تا حالا فقط در کارتِ صف بود -->
+<div id="bslLiveShops" style="margin-top:6px"></div>
 <div class="sres hidden" id="bR"></div>
 
 <div id="bslQueueSection" style="margin-top:10px">
@@ -46610,6 +47254,52 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.36', t:'🩺 کارِ در حال اجرا دیگر «رهاشده» اعلام نمی‌شود · 🏪 تفکیکِ غرفه‌ها · 📊 آمارِ مدل‌ها', items:[
+    '🧨 <b>مهم‌ترین مشکل — کارِ زنده، مرده اعلام می‌شد.</b> چند دقیقه بعد از',
+    '   شروعِ استخراج، مدیر وظیفه برچسبِ «رهاشده» می‌زد و می‌نوشت «۴۰ دقیقه',
+    '   پیش» — در حالی که شمارندهٔ همان کارت یک دقیقه پیش عوض شده بود.',
+    '   ردیفِ صف قرمز می‌شد، «پردازش نیمه‌کاره رها شد» می‌گرفت، مدام به',
+    '   پیام‌رسان خطا می‌رفت، و بدتر از همه: کارِ بعدی هم راه نمی‌افتاد.',
+    '   همین داستان برای ارسال‌ها هم بود.',
+    '❶ <b>علتش یک ناهماهنگیِ ساده بود.</b> موتورهای استخراج و ارسال، زمانِ',
+    '   ضربانشان را در یک کلید می‌نوشتند و مدیر وظیفه از کلیدِ دیگری',
+    '   می‌خواند. آن کلیدِ دوم هیچ‌وقت به‌روز نمی‌شد، پس عملاً «سنِ کار»',
+    '   سنجیده می‌شد نه «مدتِ بی‌حرکتی» — یعنی هر کاری که بیش از ۵ دقیقه',
+    '   طول می‌کشید، حتماً و بی‌استثنا رهاشده اعلام می‌شد.',
+    '❷ <b>حالا همان چیزی که شما می‌بینید، ملاک است: حرکتِ شمارنده‌ها.</b>',
+    '   اگر عددهای یک کار جلو رفته باشند، آن کار زنده است — نقطه. سه شاهدِ',
+    '   مستقل (ضربانِ موتور، قفلِ اجرا، و حرکتِ شمارنده) با هم سنجیده',
+    '   می‌شوند و تازه‌ترینشان برنده است.',
+    '   کارِ واقعاً مرده همچنان تشخیص داده می‌شود؛ فقط دیگر کارِ سالم',
+    '   قربانی نمی‌شود. وقتی کاری راه نیفتد هم دلیلش دیگر ردیفِ اشتباهاً',
+    '   قرمزشدهٔ قبلی نیست.',
+    '🏪 <b>تفکیکِ غرفه‌ها بالاخره دیده می‌شود.</b> دو ایراد داشت: اولاً',
+    '   بلوکِ تفکیک فقط وقتی نمایش داده می‌شد که <i>دو ردیف یا بیشتر</i>',
+    '   ساخته شده باشد — یعنی دقیقاً وقتی غرفهٔ دومتان چیزی نگرفته بود',
+    '   (توکن یا شناسهٔ غلط) کلِ بلوک ناپدید می‌شد. ثانیاً عددِ غرفهٔ',
+    '   پیش‌فرض «جمعِ همهٔ غرفه‌ها» بود، پس از کلِ محصولات هم بیشتر می‌شد.',
+    '   حالا هر غرفه عددِ واقعیِ خودش را دارد، ردیفش همیشه دیده می‌شود، و',
+    '   تفکیک علاوه بر کارتِ صف، در خودِ پنلِ ارسال هم زنده نمایش داده',
+    '   می‌شود — همان‌جا که موقعِ ارسال نگاه می‌کنید.',
+    '📊 <b>کارت‌های آمارِ مدل‌ها زیرِ دکمه‌های تست.</b> یک نگاه و می‌فهمید',
+    '   چند مدل دارید، چندتا سالم است، چندتا هنوز تست نشده، میانگینِ سرعت',
+    '   چقدر است و چند مدلِ ابزارپذیر در اختیار دارید. دو نوارِ «پوشش» و',
+    '   «سلامت» نسبت‌ها را نشان می‌دهند، و دو فهرستِ بازشو تفکیکِ هر',
+    '   ارائه‌دهنده و سریع‌ترین مدل‌ها را. برخلافِ شمارنده‌های داخلِ مودال',
+    '   که با هر اجرا صفر می‌شدند، این آمار ماندگار است.',
+    '📖 <b>جدولِ نتایجِ تست، خوانا شد.</b> ستونِ نامِ مدل آن‌قدر باریک شده',
+    '   بود که نام‌ها نویسه‌نویسه و عمودی می‌شکستند. حالا عرضِ ستون‌ها بر',
+    '   اساسِ محتوا تعیین می‌شود، سهمِ بزرگ به نامِ مدل می‌رسد، و هر نام',
+    '   حداکثر در دو خط می‌آید و بعد «…» می‌خورد. متنِ کامل با نگه‌داشتنِ',
+    '   نشانگر و در پنجرهٔ جزئیات در دسترس است.',
+    '🎯 <b>دسته‌بندیِ هوش مصنوعی حالا نامِ پروفایل را هم می‌بیند.</b>',
+    '   عنوانِ محصول به‌تنهایی اغلب مبهم است: «ست ۳ تکه» در پروفایلِ لوازم',
+    '   آشپزخانه یعنی ظرف و در پوشاک یعنی لباس. مدل تا حالا باید حدس',
+    '   می‌زد. حالا نامِ پروفایلِ همان محصول به‌عنوان راهنما همراهِ سؤال',
+    '   می‌رود — و اگر محصول واقعاً به آن حوزه نخورد، مدل آزاد است',
+    '   نادیده‌اش بگیرد. پروفایلِ هر محصول از دفترچهٔ شناسه‌ها (دقیق) یا از',
+    '   پسوندِ عنوان تشخیص داده می‌شود.',
+  ]},
   {v:'10.35', t:'⚡ ارسال چند برابر سریع‌تر · 🗂 هر غرفه فایلِ خودش · 🔄 یک دکمه برای کلِ کار', items:[
     '🧨 <b>مشکلِ اول — کندیِ ارسال.</b> برنامه برای هر محصول تا ۲۴ درخواست',
     '   به باسلام می‌فرستاد، فقط تا بفهمد آن محصول در غرفه هست یا نه. روی',
@@ -54385,14 +55075,37 @@ function aiOpenTestModal(){
       +'<span style="font-size:11px;color:#94a3b8">فقط سبزها</span>'
       +'<input type="checkbox" id="aiTestOnlyGreen" onchange="aiTestToggleOnlyGreen(this.checked)" style="display:none">'
       +'<span class=\"ai-switch\"></span></label></div>'
+      /* ═══════════════════════════════════════════════════════════════
+         v10.36 (۴۹ج): عرضِ ستون‌ها بر اساس محتوا.
+
+         گزارشِ کاربر: «ستونِ نامِ مدل بسیار باریک شده و خواندنِ نام بسیار
+         سخت است». درست بود و دو علتِ همزمان داشت:
+           ۱) جدول در حالتِ پیش‌فرضِ auto بود، پس مرورگر عرض را بین
+              ستون‌ها بر اساسِ *کلِ* متن پخش می‌کرد. دو ستونِ «پاسخ پیام» و
+              «پاسخ دسته» می‌توانند جمله‌های بلند داشته باشند، پس تقریباً
+              همهٔ عرض را می‌بلعیدند و نامِ مدل به چند نویسه می‌رسید.
+           ۲) روی همان سلول word-break:break-all بود — یعنی هر جا لازم شد
+              وسطِ کلمه بشکن. با ستونِ باریک، نامِ مدل عمودی و نویسه‌نویسه
+              می‌شد؛ بدترین حالتِ ممکن برای خواندن.
+
+         حالا: چیدمانِ ثابت با درصدهای صریح، سهمِ بزرگ برای نامِ مدل، و
+         شکستنِ حداکثر دو خط (line-clamp) به‌جای شکستنِ بی‌نهایت. متنِ کاملِ
+         هر سلول در tooltip و در مودالِ جزئیات هست، پس چیزی از دست نمی‌رود.
+         ═══════════════════════════════════════════════════════════════ */
       +'<div style="flex:1;overflow:auto;padding:0">'
-      +'<table style="width:100%;border-collapse:collapse;font-size:11px">'
+      +'<table class="aiTestTable" style="width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed">'
+      +'<colgroup>'
+      +'<col style="width:34px"><col style="width:46px">'
+      +'<col style="width:13%"><col style="width:32%">'
+      +'<col style="width:64px">'
+      +'<col style="width:20%"><col style="width:20%">'
+      +'</colgroup>'
       +'<thead><tr style="background:#1e293b;position:sticky;top:0;color:#94a3b8">'
-      +'<th style="padding:8px;text-align:center;width:34px">#</th>'
-      +'<th style="padding:8px;text-align:center;width:44px">وضعیت</th>'
+      +'<th style="padding:8px;text-align:center">#</th>'
+      +'<th style="padding:8px;text-align:center">وضعیت</th>'
       +'<th style="padding:8px;text-align:right">ارائه‌دهنده</th>'
       +'<th style="padding:8px;text-align:left;direction:ltr">مدل</th>'
-      +'<th style="padding:8px;text-align:center;width:70px">تأخیر</th>'
+      +'<th style="padding:8px;text-align:center">تأخیر</th>'
       +'<th style="padding:8px;text-align:right">پاسخ پیام</th>'
       +'<th style="padding:8px;text-align:right">پاسخ دسته</th>'
       +'</tr></thead><tbody id="aiTestTbody"></tbody></table></div>'
@@ -54427,6 +55140,10 @@ function aiPollTest(){
             if(!st.running&&st.done){
                 if(window._aiPollTimer){clearInterval(window._aiPollTimer);window._aiPollTimer=null;}
                 aiLoadProviders();
+                /* v10.36 (۴۹د): تستِ تازه تمام شد ⇒ کارت‌های آمار هم باید
+                   عددِ تازه نشان بدهند، وگرنه کاربر بعد از یک اجرای کامل
+                   همان آمارِ قدیمی را می‌بیند و فکر می‌کند کار نکرده. */
+                try{ aiStatsLoad(); }catch(e){}
             }
         }).catch(()=>{});
     },1200);
@@ -54483,13 +55200,19 @@ function aiEnsureTestRow(d){
     tr.addEventListener('click',function(){aiOpenRowDetail(tr.dataset.aiProvider,tr.dataset.aiModel);});
     tr.innerHTML='<td style="padding:6px;text-align:center;color:#64748b">'+toFa(aiTestTotCount)+'</td>'
       +'<td style="padding:6px;text-align:center"><span class="aiSt">⏳</span></td>'
-      +'<td style="padding:6px;text-align:right;color:#94a3b8">'+esc(d.providerName||d.provider||'')+'</td>'
-      +'<td style="padding:6px;text-align:left;direction:ltr;color:#e2e8f0;word-break:break-all">'
+      /* v10.36 (۴۹ج): نامِ ارائه‌دهنده و مدل حداکثر دو خط می‌شوند و بعد
+         «…» می‌خورند؛ متنِ کامل در tooltip می‌ماند. شکستن روی مرزِ کلمه
+         است نه وسطِ نویسه‌ها، پس شناسه‌هایی مثل «meta-llama/Llama-3.3-70B»
+         روی خط‌تیره و اسلش می‌شکنند و خوانا می‌مانند. */
+      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiCell2" '
+      +'title="'+esc(d.providerName||d.provider||'')+'">'+esc(d.providerName||d.provider||'')+'</td>'
+      +'<td style="padding:6px;text-align:left;direction:ltr;color:#e2e8f0;font-weight:600" class="aiCell2 aiModelCell" '
+      +'title="'+esc(d.baseModel||d.model||'')+'">'
       +esc(d.baseModel||d.model||'')
       +(d.keySuffix?'<span style="color:#fbbf24" title="'+esc('کلید: '+(d.keyLabel||d.keySuffix))+'">'+esc(d.keySuffix)+'</span>':'')+'</td>'
       +'<td style="padding:6px;text-align:center;color:#64748b" class="aiLat">—</td>'
-      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiMsgRes">…</td>'
-      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiCatRes">…</td>';
+      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiMsgRes aiCell2">…</td>'
+      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiCatRes aiCell2">…</td>';
     tbody.appendChild(tr);
     aiTestRenderCounters();
     return aiTestRows[key]={tr:tr};
@@ -54681,6 +55404,112 @@ function aiResumeTestModalOnLoad(){
 /* v9.53: دکمهٔ «شروع / ادامه» — اگر تستی در حال اجراست آن را ادامه می‌دهد
    (مودالِ زنده را باز می‌کند و poll را ادامه می‌دهد، بدون شروعِ تازه)، و اگر
    نه، یک تستِ تازه با مقادیرِ جاریِ پیام/دسته شروع می‌کند. */
+/* ═══════════════════════════════════════════════════════════════════
+ *  v10.36 (۴۹د): کارت‌های شمارندهٔ تفصیلی و آماری مدل‌ها
+ *
+ *  سه لایه اطلاعات، از کلی به جزئی:
+ *    ۱) کارت‌های بزرگ — عددهایی که یک نگاه باید جواب بدهند
+ *    ۲) دو نوارِ پوشش و سلامت — نسبت‌ها بهتر از عددِ خام درک می‌شوند
+ *    ۳) تفکیکِ ارائه‌دهنده و سریع‌ترین مدل‌ها — برای انتخابِ مدلِ مستر
+ * ═══════════════════════════════════════════════════════════════════ */
+function aiStatCard(icon,label,val,color,hint){
+    return '<div class="ai-stat-card"'+(hint?(' title="'+esc(hint)+'"'):'')+'>'
+      +'<div class="ai-stat-ico">'+icon+'</div>'
+      +'<div class="ai-stat-val" style="color:'+color+'">'+val+'</div>'
+      +'<div class="ai-stat-lbl">'+esc(label)+'</div></div>';
+}
+function aiStatBar(label,pct,color,note){
+    const p=Math.max(0,Math.min(100,parseInt(pct)||0));
+    return '<div style="margin-bottom:7px">'
+      +'<div style="display:flex;align-items:center;gap:6px;font-size:10px;color:#94a3b8;margin-bottom:3px">'
+      +'<span style="flex:1">'+esc(label)+'</span>'
+      +'<b style="color:'+color+'">'+toFa(p)+'٪</b>'
+      +(note?'<span style="color:#64748b">'+esc(note)+'</span>':'')+'</div>'
+      +'<div style="height:6px;background:#1e293b;border-radius:3px;overflow:hidden">'
+      +'<div style="height:100%;width:'+p+'%;background:'+color+';border-radius:3px;transition:width .5s"></div>'
+      +'</div></div>';
+}
+function aiStatsRender(d){
+    const box=$('aiStatCards'); if(!box)return;
+    if(!d||!d.ok){box.innerHTML='<div style="grid-column:1/-1;color:#f87171;font-size:10.5px">✗ آمار خوانده نشد</div>';return;}
+    if(!d.total){
+        box.innerHTML='<div style="grid-column:1/-1;color:#64748b;font-size:10.5px;padding:6px 2px">'
+          +'هنوز هیچ ارائه‌دهنده‌ای درون‌ریزی نشده — اول از تبِ «ارائه‌دهنده‌ها» فهرست مدل‌ها را بگیرید.</div>';
+        const b0=$('aiStatBars'); if(b0)b0.innerHTML='';
+        return;
+    }
+    let h='';
+    h+=aiStatCard('🧠','کلِ مدل‌ها',toFa(d.total),'#e2e8f0','همهٔ مدل‌های درون‌ریزی‌شده از همهٔ ارائه‌دهنده‌ها');
+    h+=aiStatCard('🟢','سالم',toFa(d.available),'#4ade80','تست شده و پاسخ داد');
+    h+=aiStatCard('🔴','ناموفق',toFa(d.failed),'#f87171','تست شده ولی خطا داد');
+    h+=aiStatCard('⏳','تست‌نشده',toFa(d.untested),'#fbbf24','هنوز یک بار هم آزموده نشده');
+    h+=aiStatCard('⚡','میانگین تأخیر',d.avg_latency>0?(toFa(d.avg_latency)+'<span style="font-size:9px;color:#64748b">ms</span>'):'—','#67e8f9','میانگینِ زمانِ پاسخ در مدل‌های سالم');
+    h+=aiStatCard('🏢','ارائه‌دهنده',toFa(d.providers),'#c4b5fd','ارائه‌دهنده‌هایی که دستِ‌کم یک مدل دارند');
+    h+=aiStatCard('🔧','ابزارپذیر',toFa(d.tool_calling),'#a78bfa','مدل‌هایی که tool calling دارند — لازمِ ایجنت');
+    h+=aiStatCard('🐢','ریت‌لیمیت',toFa(d.rate_limited),'#fb923c','سهمیه‌شان پر شده — بعداً دوباره تست کنید');
+    box.innerHTML=h;
+
+    const bars=$('aiStatBars');
+    if(bars){
+        let b='';
+        b+=aiStatBar('پوششِ تست (چقدر از کاتالوگ آزموده شده)',d.coverage_pct,'#67e8f9',
+              toFa(d.tested)+' از '+toFa(d.total));
+        b+=aiStatBar('سلامت (از آزموده‌شده‌ها چقدر جواب داد)',d.health_pct,
+              d.health_pct>=50?'#4ade80':(d.health_pct>=20?'#fbbf24':'#f87171'),
+              toFa(d.available)+' از '+toFa(d.tested));
+        if(Array.isArray(d.by_provider)&&d.by_provider.length){
+            b+='<details style="margin-top:6px"><summary style="cursor:pointer;font-size:10.5px;color:#94a3b8">'
+              +'🏢 تفکیکِ ارائه‌دهنده‌ها ('+toFa(d.by_provider.length)+')</summary>'
+              +'<div style="margin-top:5px;background:#0b1220;border:1px solid #1e293b;border-radius:7px;padding:6px 8px">';
+            d.by_provider.forEach(function(p,i){
+                b+='<div style="display:flex;align-items:center;gap:6px;font-size:10px;padding:3px 0'
+                  +(i>0?';border-top:1px dashed #1e293b':'')+'">'
+                  +'<span style="color:#cbd5e1;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(p.name)+'</span>'
+                  +'<span style="color:#4ade80">🟢'+toFa(p.ok)+'</span>'
+                  +'<span style="color:#f87171">🔴'+toFa(p.fail)+'</span>'
+                  +'<span style="color:#64748b">/'+toFa(p.total)+'</span>'
+                  +(p.lat>0?'<span style="color:#67e8f9;font-family:ui-monospace,monospace">'+toFa(p.lat)+'ms</span>':'')
+                  +'</div>';
+            });
+            b+='</div></details>';
+        }
+        if(Array.isArray(d.fastest)&&d.fastest.length){
+            b+='<details style="margin-top:5px"><summary style="cursor:pointer;font-size:10.5px;color:#94a3b8">'
+              +'🚀 سریع‌ترین مدل‌های سالم</summary>'
+              +'<div style="margin-top:5px;background:#0b1220;border:1px solid #1e293b;border-radius:7px;padding:6px 8px">';
+            d.fastest.forEach(function(f,i){
+                b+='<div style="display:flex;align-items:center;gap:6px;font-size:10px;padding:3px 0'
+                  +(i>0?';border-top:1px dashed #1e293b':'')+'">'
+                  +'<span style="color:#64748b">'+toFa(i+1)+'.</span>'
+                  +'<span style="color:#e2e8f0;flex:1;direction:ltr;text-align:left;font-family:ui-monospace,monospace;'
+                  +'overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(f.model)+'">'+esc(f.model)+'</span>'
+                  +'<span style="color:#94a3b8">'+esc(f.provider)+'</span>'
+                  +'<span style="color:#67e8f9;font-family:ui-monospace,monospace">'+toFa(f.lat)+'ms</span></div>';
+            });
+            b+='</div></details>';
+        }
+        bars.innerHTML=b;
+    }
+    const w=$('aiStatWhen');
+    if(w){
+        if(d.running)w.textContent='🔄 تست در حال اجراست';
+        else if(d.last_run>0){
+            const mins=Math.floor((Date.now()/1000-d.last_run)/60);
+            w.textContent='آخرین تست: '+(mins<1?'همین حالا':(mins<60?(toFa(mins)+' دقیقه پیش'):(toFa(Math.floor(mins/60))+' ساعت پیش')));
+        } else w.textContent='';
+    }
+}
+function aiStatsLoad(){
+    const box=$('aiStatCards');
+    if(box&&!box.dataset.loaded)box.innerHTML='<div style="grid-column:1/-1;color:#93c5fd;font-size:10.5px;padding:6px 2px">⏳ در حال خواندن…</div>';
+    fetch('?ai_stats=1').then(r=>r.json()).then(d=>{
+        if(box)box.dataset.loaded='1';
+        aiStatsRender(d);
+    }).catch(()=>{
+        if(box)box.innerHTML='<div style="grid-column:1/-1;color:#f87171;font-size:10.5px">✗ خطا در ارتباط</div>';
+    });
+}
+
 function aiTestStartContinue(){
     const btn=document.getElementById('aiTestStartContinue');
     if(btn){btn.disabled=true;const t=btn.textContent;btn.textContent='⏳ ...';setTimeout(()=>{btn.disabled=false;btn.textContent=t;},1500);}
@@ -54856,6 +55685,12 @@ function pollBslProgress() {
         $('bK').textContent=toFa(skipped);
         $('bF').textContent=toFa(failed);
         $('bT').textContent=toFa(total);
+        /* v10.36 (۴۹ب): تفکیکِ غرفه‌ها همین‌جا، زیرِ شمارنده‌های کلی.
+           تا اینجا shop_stats فقط در کارتِ صف رندر می‌شد — یعنی کاربری که
+           حینِ ارسال به همین پنل نگاه می‌کرد، هیچ‌وقت تفکیک نمی‌دید و
+           درست می‌گفت «تفکیک بین چند غرفه مشاهده نمی‌شود». */
+        const lsBox=$('bslLiveShops');
+        if(lsBox) lsBox.innerHTML=bslShopStatsHtml(d.shop_stats);
         // v7.48: Calculate elapsed time and ETA
         let elapsedStr='',etaStr='';
         if(startedAt>0){
@@ -55977,7 +56812,13 @@ function checkBslQueue(){
  *  نیفتد و مرزها دقیقاً «بینِ» غرفه‌ها دیده شوند.
  */
 function bslShopStatsHtml(rows,compact){
-    if(!Array.isArray(rows)||rows.length<2)return '';
+    /* v10.36 (۴۹ب): شرطِ «کمتر از ۲ ردیف ⇒ چیزی نشان نده» برداشته شد.
+       منطقش این بود که «با یک غرفه، ردیفِ جمعِ بالا همان است». ولی در عمل
+       دقیقاً همان حالتی را پنهان می‌کرد که کاربر دنبالش بود: وقتی غرفهٔ
+       دوم هنوز هیچ ردیفی نساخته (توکن غلط، شناسهٔ اشتباه) فقط یک ردیف
+       ساخته می‌شد و کلِ بلوک ناپدید می‌شد — یعنی «تفکیک دیده نمی‌شود».
+       حالا هر وقت دستِ‌کم یک ردیف باشد نشان داده می‌شود. */
+    if(!Array.isArray(rows)||rows.length<1)return '';
     const cell=function(v,color,icon,label){
         return '<span style="display:inline-flex;align-items:center;gap:3px;color:'+color+'">'
               +icon+' <b>'+toFa(v||0)+'</b>'
