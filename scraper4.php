@@ -209,8 +209,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.33';
-const APP_VERSION_DATE = '1405/06/07';
+const APP_VERSION = '10.34';
+const APP_VERSION_DATE = '1405/06/09';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -10466,6 +10466,17 @@ if (isset($_POST['retire_mode'])) {
     $rm = (string)$_POST['retire_mode'];
     $conn['retire_mode'] = isset(retireModes()[$rm]) ? $rm : 'off';
 }
+/* v10.34 (۴۸الف): اقدامِ هر مقصد در حالتِ «افزودن/آپدیت» — کاربر خودش
+   انتخاب می‌کند. ووکامرس چهار گزینه دارد (از جمله حذفِ همیشگی)، باسلام سه
+   گزینه چون API‌اش حذفِ واقعی ندارد. */
+if (isset($_POST['retire_woo_action'])) {
+    $rwa = (string)$_POST['retire_woo_action'];
+    $conn['retire_woo_action'] = isset(retireWooActions()[$rwa]) ? $rwa : 'delete';
+}
+if (isset($_POST['retire_bsl_action'])) {
+    $rba = (string)$_POST['retire_bsl_action'];
+    $conn['retire_bsl_action'] = isset(retireBslActions()[$rba]) ? $rba : 'delete';
+}
 if (isset($_POST['retire_max_pct']))   $conn['retire_max_pct']   = max(1, min(100, (float)$_POST['retire_max_pct']));
 if (isset($_POST['retire_max_count'])) $conn['retire_max_count'] = max(1, (int)$_POST['retire_max_count']);
 // v8.33: تنظیمات نگهبان صف
@@ -12443,6 +12454,82 @@ function profilePriceSignature(array $profile): string {
          . trim((string)($profile['titleSuffix'] ?? ''));
 }
 
+/* =====================================================================
+ *  v10.34 (۴۸ب): امضای ضرایبِ تعدیلِ مقصدها و غرفه‌ها.
+ *
+ *  profilePriceSignature فقط ضریبِ خودِ پروفایل را می‌دید. ولی قیمتِ
+ *  نهاییِ یک محصول از سه لایه می‌آید:
+ *      ۱) تعدیلِ پروفایل            (priceMode/priceVal/roundPrice)
+ *      ۲) تعدیلِ مقصد               (woocommerce/basalam · price_mode…)
+ *      ۳) تعدیلِ مخصوصِ هر غرفه      (basalam.vendors[].price_mode…)
+ *
+ *  اگر کاربر لایهٔ ۲ یا ۳ را عوض می‌کرد، قیمتِ همهٔ محصولات عوض می‌شد ولی
+ *  هیچ‌کس خبردار نمی‌شد: امضا دست‌نخورده می‌ماند، تیکِ «فقط تغییرات» روشن
+ *  بود و مبدأ هم چیزی تغییر نداده بود — پس هیچ محصولی صف نمی‌شد و قیمتِ
+ *  تازه هرگز به مقصد نمی‌رسید. تنها راهِ اعمالش خاموش‌کردنِ دستیِ تیک بود.
+ *
+ *  حالا این امضا جدا نگه داشته می‌شود (کلیدِ shop_sig در وضعیتِ سینک) و
+ *  هر تغییری در آن یک نوبت ارسالِ «همه با دستور آپدیت» راه می‌اندازد.
+ *  جدا بودنش از price_sig عمدی است: ردیف‌های قدیمی این کلید را ندارند و
+ *  نبودنش «تغییر» حساب نمی‌شود، وگرنه صرفاً با نصبِ این نسخه یک ارسالِ
+ *  کاملِ ناخواسته برای همهٔ پروفایل‌ها راه می‌افتاد.
+ * ===================================================================== */
+function shopPricingSignature(array $cn): string {
+    $parts = [];
+    foreach (['woocommerce', 'basalam'] as $dest) {
+        $d = $cn[$dest] ?? [];
+        $parts[] = $dest . ':' . (string)($d['price_mode'] ?? 'none')
+                 . '/' . (string)($d['price_val'] ?? 0)
+                 . '/' . (string)($d['price_round'] ?? 0);
+    }
+    /* غرفهٔ پیش‌فرض هم ضریبِ خودش را دارد و باید دیده شود */
+    $parts[] = 'v0:' . (int)($cn['basalam']['vendor_id'] ?? 0);
+    $vendors = $cn['basalam']['vendors'] ?? [];
+    if (is_array($vendors)) {
+        $rows = [];
+        foreach ($vendors as $v) {
+            if (!is_array($v)) continue;
+            $vid = (int)($v['vendor_id'] ?? 0);
+            if ($vid <= 0) continue;
+            $rows[] = 'v' . $vid . ':' . (string)($v['price_mode'] ?? 'none')
+                    . '/' . (string)($v['price_val'] ?? 0);
+        }
+        sort($rows);   // ترتیبِ ردیف‌ها در تنظیمات نباید «تغییر» حساب شود
+        $parts = array_merge($parts, $rows);
+    }
+    return implode('|', $parts);
+}
+
+/* =====================================================================
+ *  v10.34 (۴۸الف): اقدامِ حالتِ «افزودن/آپدیت» روی محصولاتِ رفته از مبدأ.
+ *
+ *  خواستهٔ کاربر: وقتی تیکِ افزودن/آپدیت روشن است، فرآیند باید
+ *  «افزودن/آپدیت/بایگانی» برای باسلام و «افزودن/آپدیت/حذف» برای ووکامرس
+ *  باشد — یعنی خودِ تیک، بازنشستگی را هم روشن می‌کند و دیگر لازم نیست
+ *  کاربر جداگانه تنظیمِ سراسریِ «محصولات رفته از مبدأ» را از off دربیاورد.
+ *
+ *  اقدامِ ووکامرس قابلِ انتخاب است (کاربر صراحتاً خواست): زباله‌دان
+ *  (پیش‌فرض و برگشت‌پذیر)، حذفِ همیشگی، پیش‌نویس، یا ناموجود.
+ *  اقدامِ باسلام هم قابلِ انتخاب است ولی «حذفِ همیشگی» ندارد، چون API
+ *  باسلام اصلاً حذف ندارد و نزدیک‌ترین چیز بایگانی (4184) است.
+ * ===================================================================== */
+function retireWooActions(): array {
+    return ['delete' => 'حذف (زباله‌دان)', 'delete_force' => 'حذف همیشگی',
+            'draft' => 'پیش‌نویس', 'outofstock' => 'ناموجود'];
+}
+function retireBslActions(): array {
+    return ['delete' => 'بایگانی', 'draft' => 'غیرفعال', 'outofstock' => 'ناموجود'];
+}
+/** اقدامِ مؤثرِ هر مقصد در حالتِ «افزودن/آپدیت» — با اعتبارسنجی و پیش‌فرضِ امن */
+function retireAddUpdateAction(array $cn, string $dest): string {
+    if ($dest === 'woo') {
+        $a = (string)($cn['retire_woo_action'] ?? 'delete');
+        return isset(retireWooActions()[$a]) ? $a : 'delete';
+    }
+    $a = (string)($cn['retire_bsl_action'] ?? 'delete');
+    return isset(retireBslActions()[$a]) ? $a : 'delete';
+}
+
 /** محصول ذخیره‌شده را به همان شکلی درمی‌آورد که مرورگر می‌فرستد */
 function prepareForSend(array $profile, string $key, array $p): array {
     $raw = (string)($p['price'] ?? '');
@@ -14240,12 +14327,44 @@ $srcN = notifSourceChanges($cn, $exRes, $profile['name'] ?? $key);
 if (!empty($srcN['sent'])) $pResult['src_notified'] = $srcN['sent'];
 
 // v8.34: محصولاتی که از مبدأ رفته‌اند را روی مقصد بازنشسته کن
+/* =================================================================
+   v10.34 (۴۸الف): تیکِ «افزودن/آپدیت» خودش بازنشستگی را روشن می‌کند.
+
+   خواستهٔ کاربر: با تیکِ روشن، چرخه باید «افزودن/آپدیت/بایگانی» برای
+   باسلام و «افزودن/آپدیت/حذف» برای ووکامرس باشد. تا اینجا بازنشستگی
+   فقط به تنظیمِ سراسریِ retire_mode بند بود که پیش‌فرضش off است، پس
+   نیمهٔ سومِ کار عملاً هیچ‌وقت اجرا نمی‌شد مگر کاربر جای دیگری هم
+   تنظیمش می‌کرد. حالا تیکِ همان مقصد کافی است.
+
+   مقصدِ بازنشستگی هم محدود می‌شود به همان مقصدهایی که تیکشان روشن
+   است: اگر فقط تیکِ باسلام روشن باشد، نباید چیزی از ووکامرس حذف شود.
+   محافظِ ۳۰٪/۵۰ مورد سرِ جایش می‌ماند و هر اقدام لاگ و گزارش می‌شود.
+   ================================================================= */
 $retireMode = (string)($cn['retire_mode'] ?? 'off');
+$_auWoo = !empty($syncCfg['wooAddUpdate']);
+$_auBsl = !empty($syncCfg['bslAddUpdate']);
+$_auTargets = [];
+if ($_auWoo && ($target === 'woo' || $target === 'both')) $_auTargets[] = 'woo';
+if ($_auBsl && ($target === 'bsl' || $target === 'both')) $_auTargets[] = 'bsl';
+$_retireTarget = $target; $_retirePer = null;
+if ($_auTargets) {
+    $_retireTarget = count($_auTargets) === 2 ? 'both' : $_auTargets[0];
+    $_retirePer = ['woo' => retireAddUpdateAction($cn, 'woo'),
+                   'bsl' => retireAddUpdateAction($cn, 'bsl')];
+    if ($retireMode === 'off') $retireMode = 'delete';   // تیک روشن ⇒ اقدام لازم است
+}
 if ($retireMode !== 'off' && !empty($exRes['removed_items'])) {
-    $rt = retireRemoved($cn, $exRes['removed_items'], $target, $retireMode,
-                        (int)($exRes['extracted'] ?? 0), false, (string)($profile['name'] ?? $key));
+    $rt = retireRemoved($cn, $exRes['removed_items'], $_retireTarget, $retireMode,
+                        (int)($exRes['extracted'] ?? 0), false, (string)($profile['name'] ?? $key),
+                        $_retirePer);
     $pResult['retire'] = ['mode' => $retireMode, 'retired' => (int)($rt['retired'] ?? 0),
         'not_found' => (int)($rt['not_found'] ?? 0), 'failed' => (int)($rt['failed'] ?? 0)];
+    if ($_retirePer !== null) {
+        $pResult['retire']['by_addupdate'] = true;
+        $pResult['retire']['target'] = $_retireTarget;
+        $pResult['retire']['woo_action'] = $_retirePer['woo'];
+        $pResult['retire']['bsl_action'] = $_retirePer['bsl'];
+    }
     if (!empty($rt['skipped'])) $pResult['retire']['skipped'] = $rt['skipped'];
     notifRetire($cn, $rt, $profile['name'] ?? $key);
 }
@@ -14296,6 +14415,31 @@ if ($pricingChanged && $changedKeys !== null) {
     $pResult['pricing_to'] = $priceSig;
 }
 
+/* =====================================================================
+   v10.34 (۴۸ب): ضریبِ تعدیلِ مقصد یا غرفه هم که عوض شود، «همهٔ» محصولاتِ
+   ذخیره‌شده باید یک نوبت با دستورِ آپدیت به ووکامرس و باسلام بروند.
+
+   v8.44 همین کار را برای ضریبِ پروفایل می‌کرد، ولی دو لایهٔ دیگر را
+   نمی‌دید: تعدیلِ مخصوصِ مقصد (تنظیماتِ ووکامرس/باسلام) و تعدیلِ مخصوصِ هر
+   غرفه. کاربر درصدِ یک غرفه را عوض می‌کرد، مبدأ هیچ تغییری نداشت، پس
+   syncChangedKeys خالی برمی‌گشت و قیمتِ تازه هرگز ارسال نمی‌شد.
+
+   دو کارِ همزمان انجام می‌شود:
+     • فیلترِ «فقط تغییرات» یک نوبت کنار می‌رود (کلِ کاتالوگ صف می‌شود).
+     • پرشِ دفترچهٔ باسلام (bslSkipUnchanged) هم برای همان نوبت خاموش
+       می‌شود، وگرنه دفترچه می‌گفت «قیمت همان است» و PATCH نمی‌رفت —
+       دقیقاً همان قیمتی که خودمان محاسبه کرده‌ایم، نه قیمتِ تازه.
+   ===================================================================== */
+$shopSig     = shopPricingSignature($cn);
+$lastShopSig = (string)($syncState[$key]['shop_sig'] ?? '');
+$shopPricingChanged = ($lastShopSig !== '' && $lastShopSig !== $shopSig);
+if ($shopPricingChanged) {
+    $changedKeys = null;                    // کلِ کاتالوگ، با دستورِ آپدیت
+    $pResult['shop_pricing_changed'] = true;
+    $pResult['shop_pricing_from'] = $lastShopSig;
+    $pResult['shop_pricing_to']   = $shopSig;
+}
+
 /* v8.94: دروازهٔ ارسال — مرحلهٔ جزئیات باید تمام شده باشد.
 
    دو حالت جلوی ارسال را می‌گیرند:
@@ -14340,6 +14484,21 @@ $changedProducts = $changedKeys === null
     ? $orderedProducts
     : profileOrderedProducts($profile, $changedKeys);
 
+/* =====================================================================
+   v10.34 (۴۸ج): «ارسالِ کامل بدون مقایسه» وقتی تیک خاموش است.
+
+   تیکِ افزودن/آپدیت خاموش یعنی خواستهٔ کاربر «همهٔ محصولات کامل ارسال
+   شوند، بدون مقایسه با محصولاتِ موجود در غرفه‌های باسلام». تا اینجا نیمی
+   از این خواسته اجرا می‌شد: کلِ کاتالوگ صف می‌شد، ولی دفترچهٔ نگاشتِ
+   v10.33 همچنان می‌گفت «قیمت و موجودی همان است» و PATCH را می‌انداخت.
+   نتیجه: ارسالِ «کامل» عملاً چند ده محصول را بی‌صدا رد می‌کرد.
+
+   حالا خاموش‌بودنِ تیک (یا عوض‌شدنِ ضرایبِ مقصد/غرفه) یک نشانهٔ force_all
+   در ردیفِ صف می‌گذارد و ارسال‌کننده با دیدنش هر پرشِ مبتنی بر مقایسه را
+   کنار می‌گذارد. */
+$wooForceAll = (!$wooOnlyChanged) || $shopPricingChanged;
+$bslForceAll = (!$bslOnlyChanged) || $shopPricingChanged;
+
 if ($changedKeys !== null) {
     $pResult['changed_only'] = count($changedProducts);
     $pResult['catalog_size'] = count($orderedProducts);
@@ -14376,7 +14535,7 @@ $wooStatus=$wooBusy?'waiting':'running';
 if($wooStatus==='running'){
 @file_put_contents(WOO_PRODUCTS_FILE,json_encode($wooSend,JSON_UNESCAPED_UNICODE),LOCK_EX);
 }
-$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>$wooStatus,'products_file'=>$wooQFile,'total'=>count($wooSend),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$wooStatus==='running'?$now:0,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'only_changed'=>$wooOnlyChanged,'config'=>['title_suffix'=>$wooSuffix,'category_id'=>$wooCatId]];
+$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>$wooStatus,'products_file'=>$wooQFile,'total'=>count($wooSend),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$wooStatus==='running'?$now:0,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'only_changed'=>$wooOnlyChanged,'config'=>['title_suffix'=>$wooSuffix,'category_id'=>$wooCatId,'force_all'=>$wooForceAll]];
 wooWriteQueue($wooQueue);
 $pResult['woo']='queued';$pResult['woo_total']=count($wooSend);$pResult['woo_status']=$wooStatus;
 }
@@ -14411,7 +14570,7 @@ if ($bslDup !== null) {
     $pResult['bsl'] = 'already_queued';
     $pResult['bsl_queue_id'] = $bslDup['id'] ?? '';
 } else {
-$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, /* v10.21 (۳۴ب): سینکِ خودکار هم باید به همهٔ غرفه‌های فعال بفرستد. تا حالا این کلید فقط از مسیرِ دکمهٔ دستی وارد صف می‌شد، پس ارسالِ چندغرفه‌ای در کران هرگز اجرا نمی‌شد — تیک روشن بود ولی شب‌ها فقط غرفهٔ پیش‌فرض به‌روز می‌شد. */ 'send_all_shops' => !empty($cn['basalam']['send_all_shops'])], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
+$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, /* v10.21 (۳۴ب): سینکِ خودکار هم باید به همهٔ غرفه‌های فعال بفرستد. تا حالا این کلید فقط از مسیرِ دکمهٔ دستی وارد صف می‌شد، پس ارسالِ چندغرفه‌ای در کران هرگز اجرا نمی‌شد — تیک روشن بود ولی شب‌ها فقط غرفهٔ پیش‌فرض به‌روز می‌شد. */ 'send_all_shops' => !empty($cn['basalam']['send_all_shops']), /* v10.34 (۴۸ج): تیکِ خاموش ⇒ ارسالِ کامل بدون مقایسه با غرفه */ 'force_all' => $bslForceAll], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
 bslWriteQueue($queue);
 $syncState[$key] = array_merge(is_array($syncState[$key] ?? null) ? $syncState[$key] : [], ['lastRun' => $now, 'status' => 'queued_bsl', 'price_sig' => $priceSig]);   // v9.11
 $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
@@ -14423,6 +14582,9 @@ $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
 // تکرار شود، نه در هر اجرای بعدی.
 if (!isset($syncState[$key])) $syncState[$key] = ['lastRun' => $now, 'status' => 'idle'];
 $syncState[$key]['price_sig'] = $priceSig;
+/* v10.34 (۴۸ب): امضای ضرایبِ مقصد/غرفه هم ثبت شود تا ارسالِ کاملِ ناشی از
+   تغییرِ ضریب فقط یک نوبت اجرا شود، نه در هر اجرای بعدی. */
+$syncState[$key]['shop_sig'] = $shopSig;
 $results['profiles'][] = $pResult;
 }
 saveSyncState($syncState);
@@ -21725,6 +21887,111 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
       && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
 
+    /* ================= v10.34 (۴۸) ================= */
+    /* الف) تیکِ افزودن/آپدیت = چرخهٔ سه‌گانه، با اقدامِ انتخابیِ هر مقصد */
+    $add('10.34', 'اقدامِ بازنشستگیِ هر مقصد فهرست و اعتبارسنجی دارد',
+         count(retireWooActions()) === 4 && count(retireBslActions()) === 3
+      && isset(retireWooActions()['delete_force'])
+      && !isset(retireBslActions()['delete_force'])
+      && retireAddUpdateAction([], 'woo') === 'delete'
+      && retireAddUpdateAction([], 'bsl') === 'delete');
+
+    $add('10.34', 'اقدامِ نامعتبر به پیش‌فرضِ امن برمی‌گردد',
+         retireAddUpdateAction(['retire_woo_action' => 'nonsense'], 'woo') === 'delete'
+      && retireAddUpdateAction(['retire_bsl_action' => 'delete_force'], 'bsl') === 'delete'
+      && retireAddUpdateAction(['retire_woo_action' => 'draft'], 'woo') === 'draft'
+      && retireAddUpdateAction(['retire_bsl_action' => 'outofstock'], 'bsl') === 'outofstock');
+
+    $add('10.34', 'retireRemoved اقدامِ جدا برای هر مقصد می‌پذیرد',
+         strpos($selfSrc, 'string $profileName = \'\',' . "\n" . '                       ?array $perTarget = null): array {') !== false
+      && strpos($selfSrc, '$modeWoo = ($perTarget !== null && isset($perTarget[') !== false
+      && strpos($selfSrc, '$modeBsl = ($perTarget !== null && isset($perTarget[') !== false);
+
+    $add('10.34', 'حذفِ همیشگیِ ووکامرس فقط با انتخابِ صریح اجرا می‌شود',
+         strpos($selfSrc, "elseif (\$modeWoo === 'delete_force') {") !== false
+      && strpos($selfSrc, "'products/' . \$id . '?force=true'") !== false
+      && strpos($selfSrc, "'products/' . \$id . '?force=false'") !== false);
+
+    $add('10.34', 'باسلام هیچ‌وقت حذفِ همیشگی نمی‌گیرد و بایگانی می‌شود',
+         strpos($selfSrc, "if (\$modeBsl === 'delete' || \$modeBsl === 'delete_force') {") !== false
+      && strpos($selfSrc, 'bslArchiveProduct($tk, $vid, $id);') !== false);
+
+    $add('10.34', 'تیکِ روشن بازنشستگی را روشن می‌کند حتی با تنظیمِ خاموش',
+         strpos($selfSrc, '$_auWoo = !empty($syncCfg[') !== false
+      && strpos($selfSrc, '$_auBsl = !empty($syncCfg[') !== false
+      && strpos($selfSrc, "if (\$retireMode === 'off') \$retireMode = 'delete';") !== false);
+
+    $add('10.34', 'مقصدِ بازنشستگی محدود به همان تیک‌های روشن است',
+         strpos($selfSrc, '$_retireTarget = count($_auTargets) === 2 ?') !== false
+      && strpos($selfSrc, '$_retirePer = [') !== false
+      && strpos($selfSrc, '$_retireTarget, $retireMode,') !== false);
+
+    $add('10.34', 'محافظِ حذفِ انبوه در مسیرِ تازه هم اجرا می‌شود',
+         strpos($selfSrc, '$guard = retireGuard(count($items), $extracted, $cn);') !== false
+      && (retireGuard(60, 100, [])['allow'] ?? true) === false
+      && (retireGuard(5, 100, [])['allow'] ?? false) === true);
+
+    /* ب) امضای ضرایبِ مقصد و غرفه */
+    $add('10.34', 'امضای ضرایب هر سه لایه را می‌بیند',
+         shopPricingSignature(['basalam' => ['price_mode' => 'percent', 'price_val' => 5]])
+         !== shopPricingSignature(['basalam' => ['price_mode' => 'percent', 'price_val' => 6]])
+      && shopPricingSignature(['woocommerce' => ['price_round' => 100]])
+         !== shopPricingSignature(['woocommerce' => ['price_round' => 500]])
+      && shopPricingSignature(['basalam' => ['vendors' => [['vendor_id' => 7, 'price_mode' => 'percent', 'price_val' => 3]]]])
+         !== shopPricingSignature(['basalam' => ['vendors' => [['vendor_id' => 7, 'price_mode' => 'percent', 'price_val' => 9]]]]));
+
+    $add('10.34', 'ترتیبِ غرفه‌ها در تنظیمات تغییرِ ضریب حساب نمی‌شود',
+         shopPricingSignature(['basalam' => ['vendors' => [
+                ['vendor_id' => 2, 'price_mode' => 'percent', 'price_val' => 4],
+                ['vendor_id' => 9, 'price_mode' => 'none', 'price_val' => 0]]]])
+      === shopPricingSignature(['basalam' => ['vendors' => [
+                ['vendor_id' => 9, 'price_mode' => 'none', 'price_val' => 0],
+                ['vendor_id' => 2, 'price_mode' => 'percent', 'price_val' => 4]]]]));
+
+    $add('10.34', 'غرفهٔ بی‌شناسه امضا را خراب نمی‌کند',
+         shopPricingSignature(['basalam' => ['vendors' => [['vendor_id' => 0, 'price_val' => 99]]]])
+      === shopPricingSignature(['basalam' => ['vendors' => []]]));
+
+    $add('10.34', 'تغییرِ ضریب یک نوبت ارسالِ کامل راه می‌اندازد و ثبت می‌شود',
+         strpos($selfSrc, '$shopSig     = shopPricingSignature($cn);') !== false
+      && strpos($selfSrc, '$shopPricingChanged = ($lastShopSig !== ') !== false
+      && strpos($selfSrc, "\$syncState[\$key]['shop_sig'] = \$shopSig;") !== false);
+
+    $add('10.34', 'نبودِ امضای قبلی ارسالِ کاملِ ناخواسته راه نمی‌اندازد',
+         strpos($selfSrc, "\$lastShopSig = (string)(\$syncState[\$key]['shop_sig'] ?? '');") !== false
+      && strpos($selfSrc, '$shopPricingChanged = ($lastShopSig !== \'\' && $lastShopSig !== $shopSig);') !== false);
+
+    /* ج) تیکِ خاموش = ارسالِ کامل بدون مقایسه */
+    $add('10.34', 'پرچمِ ارسالِ کامل از تیکِ خاموش یا ضریبِ تازه می‌آید',
+         strpos($selfSrc, '$wooForceAll = (!$wooOnlyChanged) || $shopPricingChanged;') !== false
+      && strpos($selfSrc, '$bslForceAll = (!$bslOnlyChanged) || $shopPricingChanged;') !== false);
+
+    $add('10.34', 'پرچم در هر دو ردیفِ صف نوشته می‌شود',
+         strpos($selfSrc, "'force_all'=>\$wooForceAll]") !== false
+      && strpos($selfSrc, "'force_all' => \$bslForceAll]") !== false);
+
+    $add('10.34', 'ارسال‌کنندهٔ باسلام با پرچم، دفترچه را کنار می‌گذارد',
+         strpos($selfSrc, "\$bslForceAllRun=!empty(\$qCfg['force_all']);") !== false
+      && strpos($selfSrc, "if(\$bslForceAllRun&&!defined('BSL_FORCE_SYNC'))define('BSL_FORCE_SYNC',true);") !== false
+      && strpos($selfSrc, "if (defined('BSL_FORCE_SYNC') && BSL_FORCE_SYNC) return false;") !== false);
+
+    $add('10.34', 'با پرچم، هیچ محصولی در باسلام تکراری شمرده نمی‌شود',
+         strpos($selfSrc, 'if(!empty($bslForceAllRun)){$needUpdate=true;') !== false);
+
+    $add('10.34', 'ارسال‌کنندهٔ ووکامرس هم پرچم را از صف می‌خواند و اعمال می‌کند',
+         strpos($selfSrc, "if(!empty(\$qe['config']['force_all']))\$wooForceAllRun=true;") !== false
+      && strpos($selfSrc, 'if(!$wooForceAllRun&&$exPrice===$pPrice&&$exStock===$newStock') !== false);
+
+    $add('10.34', 'اقدامِ هر مقصد از تنظیمات ذخیره و بازخوانی می‌شود',
+         strpos($selfSrc, "isset(retireWooActions()[\$rwa]) ? \$rwa : 'delete'") !== false
+      && strpos($selfSrc, "isset(retireBslActions()[\$rba]) ? \$rba : 'delete'") !== false
+      && strpos($selfSrc, "id=\"retire" . "WooAction\"") !== false
+      && strpos($selfSrc, "id=\"retire" . "BslAction\"") !== false);
+
+    $add('10.34', 'نشانگرِ بازنشستگی حالتِ ناشی از تیک را هم نشان می‌دهد',
+         strpos($selfSrc, 'const auOn=(($(' . "'profileSyncWooAddUpdate')") !== false
+      && strpos($selfSrc, "el.textContent='➕🔄 '+wl+'/'+bl;") !== false);
+
     /* ================= v10.33 (۴۶) ================= */
     /* پرشِ آپدیتِ بی‌مورد: قیمتِ ارسال‌شده در دفترچه می‌ماند و اگر
        تغییر نکرده باشد، PATCH زده نمی‌شود. */
@@ -26097,9 +26364,16 @@ function retireLogAdd(array $rows): int {
  * $items همان removed_items استخراج است.
  */
 function retireRemoved(array $cn, array $items, string $target, string $mode,
-                       int $extracted, bool $dryRun = false, string $profileName = ''): array {
+                       int $extracted, bool $dryRun = false, string $profileName = '',
+                       ?array $perTarget = null): array {
+    /* v10.34 (۴۸الف): اقدامِ هر مقصد می‌تواند جدا باشد. $perTarget اگر داده
+       شود کلیدهای 'woo' و 'bsl' را می‌پذیرد و جای $mode را برای همان مقصد
+       می‌گیرد؛ مسیرهای قدیمی که آن را نمی‌دهند دقیقاً مثل قبل کار می‌کنند. */
+    $modeWoo = ($perTarget !== null && isset($perTarget['woo'])) ? (string)$perTarget['woo'] : $mode;
+    $modeBsl = ($perTarget !== null && isset($perTarget['bsl'])) ? (string)$perTarget['bsl'] : $mode;
     $out = ['mode' => $mode, 'target' => $target, 'checked' => 0,
             'retired' => 0, 'not_found' => 0, 'failed' => 0, 'items' => [], 'dry_run' => $dryRun];
+    if ($perTarget !== null) { $out['mode_woo'] = $modeWoo; $out['mode_bsl'] = $modeBsl; }
     if ($mode === 'off' || !$items) { $out['skipped'] = 'غیرفعال'; return $out; }
     // v9.91: مقصدِ «هیچ‌کدام» یعنی هیچ تماسی با ووکامرس/باسلام گرفته نشود
     if ($target === 'none') { $out['skipped'] = 'مقصد «هیچ‌کدام» است'; return $out; }
@@ -26127,10 +26401,15 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
             elseif ($dryRun) { $row['woo'] = 'آماده: #' . $ex['id']; }
             else {
                 $id = (int)$ex['id'];
-                if ($mode === 'delete') {
+                if ($modeWoo === 'delete') {
                     $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
                         'DELETE', 'products/' . $id . '?force=false');   // به زباله‌دان، نه نابودی
-                } elseif ($mode === 'outofstock') {
+                } elseif ($modeWoo === 'delete_force') {
+                    /* v10.34 (۴۸الف): حذفِ همیشگی — فقط وقتی کاربر خودش
+                       این گزینه را انتخاب کرده باشد. برگشت‌پذیر نیست. */
+                    $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
+                        'DELETE', 'products/' . $id . '?force=true');
+                } elseif ($modeWoo === 'outofstock') {
                     $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
                         'PUT', 'products/' . $id, ['stock_status' => 'outofstock', 'stock_quantity' => 0]);
                 } else {
@@ -26148,18 +26427,18 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
             elseif ($dryRun) { $row['bsl'] = 'آماده: #' . $ex['id']; }
             else {
                 $id = (int)$ex['id'];
-                if ($mode === 'delete') {
+                if ($modeBsl === 'delete' || $modeBsl === 'delete_force') {
                     // v8.62: باسلام حذف واقعی ندارد — بایگانی نزدیک‌ترین معادل است.
                     // قبلاً DELETE به اندپوینتی می‌رفت که وجود ندارد و همیشه ۴۰۴ می‌شد.
                     $r = bslArchiveProduct($tk, $vid, $id);
-                } elseif ($mode === 'outofstock') {
+                } elseif ($modeBsl === 'outofstock') {
                     $r = bslEditProduct($tk, $vid, $id, ['stock' => 0]);
                 } else {
                     $r = bslEditProduct($tk, $vid, $id, ['status' => 3790]);   // غیرفعال
                 }
                 if (!empty($r['ok'])) {
                     $out['retired']++;
-                    $row['bsl'] = ($mode === 'delete' ? 'بایگانی شد #' : 'انجام شد #') . $id;
+                    $row['bsl'] = (($modeBsl === 'delete' || $modeBsl === 'delete_force') ? 'بایگانی شد #' : 'انجام شد #') . $id;
                 }
                 else { $out['failed']++; $row['bsl'] = 'خطا ' . (int)($r['code'] ?? 0); }
             }
@@ -26173,7 +26452,10 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
             $didB = isset($row['bsl']) && (strpos((string)$row['bsl'], 'انجام شد') !== false
                                         || strpos((string)$row['bsl'], 'بایگانی شد') !== false);
             if ($didW || $didB) {
-                $_rlRows[] = ['title' => (string)$row['title'], 'mode' => $mode,
+                /* v10.34 (۴۸الف): وقتی اقدامِ دو مقصد فرق دارد، ثبتِ یک «mode»
+                   گمراه‌کننده است — هر مقصد اقدامِ خودش را در لاگ می‌گذارد. */
+                $_rlMode = $modeWoo === $modeBsl ? $modeWoo : ($modeWoo . '/' . $modeBsl);
+                $_rlRows[] = ['title' => (string)$row['title'], 'mode' => $_rlMode,
                     'target' => $target, 'profile' => $profileName,
                     'reason' => (string)($row['reason'] ?? ''),
                     'woo' => (string)($row['woo'] ?? ''), 'bsl' => (string)($row['bsl'] ?? ''),
@@ -30158,12 +30440,14 @@ $bslDelayMs=max(0,(int)($cn['basalam']['delay_ms']??500));
 $wooTitleSuffix='';
 $wooQueueCatId=-1;
 $wooQueueProfileKey='';   // v8.65: برای ثبت در دفترچهٔ شناسه‌ها
+$wooForceAllRun=false;    // v10.34 (۴۸ج): ارسالِ کامل بدون مقایسه
 $wooContentSync=contentSyncOn($cn);   // v8.69: آپدیت محتوای تازه
 $wooQueue=wooReadQueue();
 foreach($wooQueue['entries'] as $qe){
 if(($qe['status']??'')!=='running')continue;
 if(!empty($qe['config']['title_suffix']))$wooTitleSuffix=trim($qe['config']['title_suffix']);
 if(isset($qe['config']['category_id']))$wooQueueCatId=(int)$qe['config']['category_id'];
+if(!empty($qe['config']['force_all']))$wooForceAllRun=true;
 $wooQueueProfileKey=(string)($qe['profile_key']??'');
 break;
 }
@@ -30277,7 +30561,11 @@ $exHasImg=!empty($existing['images'])&&is_array($existing['images']);
 $needImg=!$exHasImg&&!empty($p['image']);
 // v8.69: محتوای تازه (توضیحات، گالری، تنوع، SKU) هم دلیل آپدیت است
 $contentDiff=$wooContentSync?contentChanges($p,wooRemoteContent($existing)):[];
-if($exPrice===$pPrice&&$exStock===$newStock&&!$needImg&&!$contentDiff){
+/* v10.34 (۴۸ج): ارسالِ کامل — تیکِ «افزودن/آپدیت ووکامرس» خاموش است یا
+   ضریبِ تعدیلِ مقصد/غرفه عوض شده. در این حالت هیچ محصولی «تکراری» شمرده
+   نمی‌شود و همه با دستورِ PUT دوباره نوشته می‌شوند. */
+if($wooForceAllRun)wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] 🔁 ارسال کامل (بدون مقایسه)");
+if(!$wooForceAllRun&&$exPrice===$pPrice&&$exStock===$newStock&&!$needImg&&!$contentDiff){
 $skipped++;$wooSkippedList[]=array_merge(['title'=>$pTitle,'key'=>$pKey,'remote_id'=>$exId,'reason'=>'تکرار: نام+قیمت+موجودی+محتوا یکسان','edit_url'=>$editUrl],$card);
 wooBackendProgress($sent,$updated,$skipped,$fail,$total,$n,mb_substr($pTitle,0,30),"[{$n}] ⏭ تکرار: $pTitle");
 continue;
@@ -32371,6 +32659,18 @@ if(isset($qCfg['retry_delay_ms']))$cn['basalam']['retry_delay_ms']=(int)$qCfg['r
 if(!empty($qCfg['fallback_cat_ids'])&&is_array($qCfg['fallback_cat_ids'])){
 $cn['basalam']['fallback_cat_ids']=$qCfg['fallback_cat_ids'];
 }
+/* =====================================================================
+   v10.34 (۴۸ج): «ارسالِ کامل، بدون مقایسه با محصولاتِ موجود در غرفه».
+
+   ردیفِ صف با force_all علامت می‌خورد وقتی تیکِ افزودن/آپدیت خاموش باشد
+   یا ضریبِ تعدیلِ مقصد/غرفه عوض شده باشد. در آن حالت دفترچهٔ نگاشتِ
+   v10.33 نباید هیچ محصولی را «بدون تغییر» اعلام کند — همان ثابتی که
+   bslSkipUnchanged از قبل برایش گارد داشت، اینجا تعریف می‌شود.
+
+   چون define یک‌بارمصرف است و این اندپوینت در هر اجرا فقط یک ردیفِ صف را
+   پردازش می‌کند، تعریفِ سراسری اینجا دقیقاً به همان یک ردیف محدود می‌ماند. */
+$bslForceAllRun=!empty($qCfg['force_all']);
+if($bslForceAllRun&&!defined('BSL_FORCE_SYNC'))define('BSL_FORCE_SYNC',true);
 
 $queue['entries'][$nextIdx]['status']='running';
 $queue['entries'][$nextIdx]['started_at']=$startedAt;
@@ -32522,6 +32822,10 @@ continue;
 }
 
 $needUpdate=false;$updateChanges=[];
+/* v10.34 (۴۸ج): در ارسالِ کامل (تیکِ افزودن/آپدیت خاموش یا ضریبِ تعدیل
+   عوض‌شده) هیچ محصولی «تکراری» شمرده نمی‌شود — همه با دستورِ آپدیت
+   دوباره روی مقصد نوشته می‌شوند. */
+if(!empty($bslForceAllRun)){$needUpdate=true;$updateChanges[]='ارسال کامل (بدون مقایسه)';}
 if($exPrice!=$pn){$needUpdate=true;$updateChanges[]='قیمت '.($exPrice/10).'→'.($pn/10).' تومان';}
 if($exStock!=$newStock){$needUpdate=true;$updateChanges[]='موجودی';}
 // v8.69: محتوای تازه (توضیحات، گالری، تنوع، SKU) هم آپدیت می‌خواهد
@@ -38966,6 +39270,32 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <option value="outofstock">ناموجود کن</option>
 <option value="delete">حذف کن (زباله‌دان)</option>
 </select></div>
+<!-- v10.34 (۴۸الف): اقدامِ حالتِ «افزودن/آپدیت» — جدا برای هر مقصد -->
+<div style="margin:8px 0;padding:7px 8px;background:#0f172a;border:1px solid #334155;border-radius:6px">
+<div style="font-size:10.5px;color:#c4b5fd;font-weight:700;margin-bottom:6px">➕🔄 وقتی تیکِ «افزودن/آپدیت» روشن است</div>
+<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:7px">
+با آن تیک، چرخه می‌شود <b style="color:#c4b5fd">افزودن/آپدیت/حذف</b> برای ووکامرس و
+<b style="color:#67e8f9">افزودن/آپدیت/بایگانی</b> برای باسلام — بدون نیاز به تنظیمِ بالا.
+محصولی که از مبدأ رفته باشد، اینجا تعیین می‌کنید چه بلایی سرش بیاید.
+</div>
+<div class="crow"><label>ووکامرس:</label>
+<select id="retireWooAction" onchange="updateRetireBadge()" style="flex:1">
+<option value="delete">حذف — زباله‌دان (برگشت‌پذیر)</option>
+<option value="delete_force">حذف همیشگی (بدون بازگشت)</option>
+<option value="draft">پیش‌نویس</option>
+<option value="outofstock">ناموجود</option>
+</select></div>
+<div class="crow"><label>باسلام:</label>
+<select id="retireBslAction" onchange="updateRetireBadge()" style="flex:1">
+<option value="delete">بایگانی</option>
+<option value="draft">غیرفعال</option>
+<option value="outofstock">ناموجود</option>
+</select></div>
+<div style="font-size:9.5px;color:#fbbf24;line-height:1.7;margin-top:5px">
+⚠️ باسلام حذفِ واقعی ندارد؛ نزدیک‌ترین معادل «بایگانی» است.
+دو سقفِ پایین اینجا هم اعمال می‌شوند.
+</div>
+</div>
 <div class="crow"><label>حداکثر ٪ حذف:</label><input type="number" id="retireMaxPct" value="30" min="1" max="100" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">اگر بیشتر شد، متوقف شو</span></div>
 <div class="crow"><label>حداکثر تعداد:</label><input type="number" id="retireMaxCount" value="50" min="1" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">سقف در هر اجرا</span></div>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer;margin-bottom:6px"><input type="checkbox" id="notifRetire" checked style="width:15px;height:15px"><span>🔔 اعلان نتیجه به پیام‌رسان‌ها</span></label>
@@ -39552,22 +39882,27 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                 <label style="min-width:80px;font-size:12px;color:#94a3b8">➕🔄 حالت:</label>
                 <div style="flex:1;display:flex;flex-direction:column;gap:4px">
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px">
-                        <input type="checkbox" id="profileSyncWooAddUpdate" onchange="scheduleSave();updateSyncStatusText()">
-                        <span style="color:#c4b5fd">افزودن/آپدیت ووکامرس</span>
-                        <span style="color:#64748b;font-size:9px">(فقط محصولات جدید و تغییرکرده ارسال شوند)</span>
+                        <input type="checkbox" id="profileSyncWooAddUpdate" onchange="scheduleSave();updateSyncStatusText();try{updateRetireBadge()}catch(e){}">
+                        <span style="color:#c4b5fd">افزودن/آپدیت/حذف ووکامرس</span>
+                        <span style="color:#64748b;font-size:9px">(فقط جدید و تغییرکرده؛ رفته‌ها از مبدأ حذف می‌شوند)</span>
                     </label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px">
-                        <input type="checkbox" id="profileSyncBslAddUpdate" onchange="scheduleSave();updateSyncStatusText()">
-                        <span style="color:#67e8f9">افزودن/آپدیت باسلام</span>
-                        <span style="color:#64748b;font-size:9px">(فقط محصولات جدید و تغییرکرده ارسال شوند)</span>
+                        <input type="checkbox" id="profileSyncBslAddUpdate" onchange="scheduleSave();updateSyncStatusText();try{updateRetireBadge()}catch(e){}">
+                        <span style="color:#67e8f9">افزودن/آپدیت/بایگانی باسلام</span>
+                        <span style="color:#64748b;font-size:9px">(فقط جدید و تغییرکرده؛ رفته‌ها از مبدأ بایگانی می‌شوند)</span>
                     </label>
                 </div>
             </div>
             <details class="hint-mini" style="background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px 8px;margin-top:4px"><summary>چرا «فقط تغییرات»؟</summary>
                 <div class="hint-body" style="font-size:10px;color:#64748b;line-height:1.7">
-                💡 بدون این تیک‌ها، هر اجرای خودکار <b>کل</b> محصولات را دوباره می‌فرستد.
-                با تیک، فقط تفاوت‌های نسبت به اجرای قبلی ارسال می‌شود — برای فهرست‌های بزرگ بسیار سریع‌تر است.
-                محصولات حذف‌شده از مبدأ مسیر جداگانه دارند («🗂 محصولات رفته از مبدأ»).
+                💡 <b>تیکِ روشن</b> = چرخهٔ سه‌گانه: افزودن محصولِ جدید، آپدیتِ تغییرکرده‌ها، و
+                حذف (ووکامرس) / بایگانی (باسلام) برای آنچه از مبدأ رفته است. فقط تفاوت‌ها ارسال می‌شوند،
+                پس برای فهرست‌های بزرگ بسیار سریع‌تر است. اقدامِ دقیقِ هر مقصد در
+                «🗂 محصولات رفته از مبدأ» انتخاب می‌شود و محافظِ حذفِ انبوه هم آنجا اعمال می‌شود.
+                <br>💡 <b>تیکِ خاموش</b> = ارسالِ کاملِ همهٔ محصولات، بدون هیچ مقایسه‌ای با محصولاتِ
+                موجود در غرفه‌های باسلام یا ووکامرس — همه با دستورِ آپدیت دوباره نوشته می‌شوند.
+                <br>💡 اگر ضریبِ تعدیلِ قیمت در پروفایل، در تنظیماتِ مقصد یا در تنظیماتِ یک غرفه عوض شود،
+                یک نوبت <b>همهٔ</b> محصولاتِ پایگاه داده با دستورِ آپدیت ارسال می‌شوند تا قیمتِ تازه همه‌جا بنشیند.
                 </div>
             </details>
             <div id="profileSyncStatus" style="font-size:10px;color:#64748b;margin-top:6px"></div>
@@ -44830,6 +45165,38 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.34', t:'➕🔄🗑 تیکِ افزودن/آپدیت حالا چرخهٔ کامل است — و ضریبِ تازه به همه می‌رسد', items:[
+    '🧨 <b>مشکلِ اول.</b> تیکِ «افزودن/آپدیت» فقط دو کار از سه کار را انجام',
+    '   می‌داد: محصولِ جدید را می‌ساخت، تغییرکرده را آپدیت می‌کرد، ولی',
+    '   محصولی که از سایتِ مبدأ رفته بود همان‌جا در غرفه می‌ماند. برداشتنش',
+    '   به یک تنظیمِ جداگانه در بخشِ دیگری بند بود که پیش‌فرضش خاموش است،',
+    '   پس عملاً هیچ‌وقت اجرا نمی‌شد.',
+    '❶ <b>حالا خودِ تیک هر سه کار را انجام می‌دهد.</b> با تیکِ روشن، چرخه',
+    '   می‌شود <b>افزودن/آپدیت/حذف</b> برای ووکامرس و',
+    '   <b>افزودن/آپدیت/بایگانی</b> برای باسلام. اقدامِ دقیقِ هر مقصد را',
+    '   خودتان در «🗂 محصولات رفته از مبدأ» انتخاب می‌کنید: برای ووکامرس',
+    '   زباله‌دان (پیش‌فرض و برگشت‌پذیر)، حذفِ همیشگی، پیش‌نویس یا ناموجود؛',
+    '   برای باسلام بایگانی، غیرفعال یا ناموجود.',
+    '🛡 <b>محافظِ حذفِ انبوه سرِ جایش است.</b> همان دو سقفِ ۳۰٪ و ۵۰ مورد',
+    '   اینجا هم اعمال می‌شود، هر اقدام در گزارشِ بایگانی ثبت و به',
+    '   پیام‌رسان اعلام می‌شود. اگر فقط تیکِ یک مقصد روشن باشد، فقط همان',
+    '   مقصد دست می‌خورد.',
+    '🧨 <b>مشکلِ دوم.</b> وقتی تیک را خاموش می‌کردید انتظار داشتید همهٔ',
+    '   محصولات کامل و بدون مقایسه ارسال شوند. کلِ فهرست صف می‌شد، ولی',
+    '   دفترچهٔ نگاشتِ نسخهٔ قبل همچنان می‌گفت «قیمت و موجودی همان است» و',
+    '   بی‌صدا ردشان می‌کرد. ارسالِ «کامل» عملاً کامل نبود.',
+    '❷ <b>حالا تیکِ خاموش یعنی واقعاً همه.</b> هیچ محصولی تکراری شمرده',
+    '   نمی‌شود و همه با دستورِ آپدیت دوباره روی مقصد نوشته می‌شوند.',
+    '🧨 <b>مشکلِ سوم.</b> اگر ضریبِ تعدیلِ قیمت را عوض می‌کردید، قیمتِ تازه',
+    '   به مقصد نمی‌رسید. برنامه فقط ضریبِ خودِ پروفایل را می‌دید؛ تغییر در',
+    '   تنظیماتِ ووکامرس/باسلام یا در ضریبِ مخصوصِ یک غرفه را نمی‌فهمید.',
+    '   مبدأ هم که چیزی عوض نکرده بود، پس هیچ محصولی صف نمی‌شد و قیمتِ',
+    '   جدید تا مدت‌ها هیچ‌جا اعمال نمی‌شد.',
+    '❸ <b>حالا هر سه لایهٔ ضریب زیر نظر است.</b> ضریبِ پروفایل، ضریبِ مقصد و',
+    '   ضریبِ هر غرفه. تا یکی‌شان عوض شود، یک نوبت <b>همهٔ</b> محصولاتِ',
+    '   ذخیره‌شده با دستورِ آپدیت به ووکامرس و باسلام می‌روند تا قیمتِ تازه',
+    '   همه‌جا بنشیند — بعد چرخه به حالتِ عادیِ خودش برمی‌گردد.',
+  ]},
   {v:'10.33', t:'⏭ محصولی که تغییر نکرده، دیگر بی‌دلیل آپدیت نمی‌شود', items:[
     '🧨 <b>مشکلی که داشتید.</b> هر بار که ارسال می‌زدید، برنامه برای',
     '   <i>تک‌تکِ</i> محصولاتِ موجود در غرفه یک درخواستِ آپدیت می‌فرستاد —',
@@ -48851,6 +49218,19 @@ function updateRetireBadge(){
   const el=$('retireS'),sel=$('retireMode');
   if(!el||!sel)return;
   const lbl={off:'خاموش',draft:'پیش‌نویس',outofstock:'ناموجود',delete:'حذف'}[sel.value]||'خاموش';
+  /* v10.34 (۴۸الف): تیکِ «افزودن/آپدیت» خودش بازنشستگی را روشن می‌کند، پس
+     نشانگر نباید «خاموش» بگوید در حالی که هر شب چیزی حذف/بایگانی می‌شود. */
+  const auOn=(($('profileSyncWooAddUpdate')&&$('profileSyncWooAddUpdate').checked)
+           ||($('profileSyncBslAddUpdate')&&$('profileSyncBslAddUpdate').checked));
+  if(sel.value==='off'&&auOn){
+    const wl={delete:'حذف',delete_force:'حذف همیشگی',draft:'پیش‌نویس',outofstock:'ناموجود'}
+             [$('retireWooAction')?$('retireWooAction').value:'delete']||'حذف';
+    const bl={delete:'بایگانی',draft:'غیرفعال',outofstock:'ناموجود'}
+             [$('retireBslAction')?$('retireBslAction').value:'delete']||'بایگانی';
+    el.textContent='➕🔄 '+wl+'/'+bl;
+    el.className='cst on';
+    return;
+  }
   el.textContent=lbl;
   el.className='cst '+(sel.value==='off'?'off':'on');
 }
@@ -49953,7 +50333,7 @@ if(typeof aiResumeTestModalOnLoad==='function')setTimeout(aiResumeTestModalOnLoa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
 arApplyCfg(cn.autoreply||{});arLoad();}
 /* v8.87: پیش‌نمایش زندهٔ تعدیل قیمت مقصد.
@@ -49988,7 +50368,7 @@ fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
@@ -56251,8 +56631,10 @@ function updateSyncStatusText(){
     const en=$('profileSyncEn').checked;
     if(!en){$('profileSyncStatus').textContent='';return;}
     const intv=$('profileSyncInterval').options[$('profileSyncInterval').selectedIndex].text;
-    const wm=$('profileSyncWooAddUpdate').checked?'➕🔄 ووکامرس':'🆕 ووکامرس';
-    const bm=$('profileSyncBslAddUpdate').checked?'➕🔄 باسلام':'🆕 باسلام';
+    /* v10.34 (۴۸الف/ج): متن باید همان چیزی را بگوید که واقعاً اجرا می‌شود —
+       تیکِ روشن یعنی سه‌گانهٔ افزودن/آپدیت/حذف، تیکِ خاموش یعنی ارسالِ کامل. */
+    const wm=$('profileSyncWooAddUpdate').checked?'➕🔄🗑 ووکامرس':'📦 ووکامرسِ کامل';
+    const bm=$('profileSyncBslAddUpdate').checked?'➕🔄🗄 باسلام':'📦 باسلامِ کامل';
     /* v10.21 (۳۴الف): وقتی تازه‌سازی روشن است، «بدون استخراج» دیگر یعنی
        «بدون فهرست» نه «بدون هیچ‌چیز» — متن باید همین را بگوید. */
     let ne='';
