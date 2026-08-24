@@ -152,6 +152,19 @@ const AUTO_LOG_KEEP      = 50;    // چند اجرای آخرِ هر کار نگ
 const AUTO_MAX_PER_TICK  = 2;     // سقفِ کارهای اجراشده در هر تیکِ کران
 const EXTRACT_STOP_FILE = __DIR__ . '/extract_stop_signal.json';
 const EXTRACT_QUEUE_FILE = __DIR__ . '/extract_queue.json';
+/* v10.32 (۴۵ب): قفلِ سراسریِ استخراج. تا اینجا dedup/agent/catfix/selagent/
+   auto هرکدام قفل داشتند ولی خودِ استخراج نداشت — تنها محافظش «تکراری‌نبودنِ
+   پروفایل» بود، که فقط جلوی دو اجرای *همان* پروفایل را می‌گرفت. دو پروفایلِ
+   متفاوت آزادانه هم‌زمان اجرا می‌شدند و چون هر دو در یک فایلِ پیشرفتِ مشترک
+   می‌نوشتند، هرکدام queue_id دیگری را پاک می‌کرد؛ نتیجه‌اش رها شدنِ استخراج
+   وسطِ کار و «خطا»ی دروغین بود. */
+const EXTRACT_LOCK_FILE = __DIR__ . '/extract.lock';
+const EXTRACT_LOCK_TTL  = 3600;   // قفلِ کهنه‌تر از این، مالِ پردازهٔ مرده است
+/* v10.32 (۴۵د): بایگانیِ محصولاتِ رفته از مبدأ — لاگِ ماندگار.
+   retireRemoved نتیجه‌اش را فقط برمی‌گرداند و به اعلان می‌داد؛ هیچ‌جا ذخیره
+   نمی‌شد، برای همین «گزارشِ بایگانی‌شده‌ها» اصلاً وجود نداشت. */
+const RETIRE_LOG_FILE = __DIR__ . '/retire_log.json';
+const RETIRE_LOG_KEEP = 300;      // چند موردِ آخر نگه داشته شود
 /* v9.20: ارائه‌دهنده‌های هوش مصنوعی (چند-ارائه‌دهنده) — فایل جدا از
    connections.json نگه داشته می‌شود چون چند صد مدل و کلید API دارد و
    «تست همهٔ مدل‌ها» آن را تکه‌تکه به‌روز می‌کند. */
@@ -196,8 +209,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.31';
-const APP_VERSION_DATE = '1405/06/05';
+const APP_VERSION = '10.32';
+const APP_VERSION_DATE = '1405/06/06';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -648,6 +661,79 @@ function queueDedupStale(?array $cn = null): int {
 
 function extractWriteQueue(array $queue): void {
 @file_put_contents(EXTRACT_QUEUE_FILE, json_encode($queue, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/* =====================================================================
+ *  v10.32 (۴۵ب): قفلِ سراسریِ استخراج
+ *
+ *  چرا لازم شد: استخراج تنها زیرسیستمِ سنگینی بود که قفل نداشت. محافظِ
+ *  «این پروفایل الان در صف است» فقط هم‌پروفایلی را می‌گرفت؛ دو پروفایلِ
+ *  متفاوت می‌توانستند هم‌زمان بدوند. ولی فایلِ پیشرفت یکی بیشتر نیست، پس
+ *  اجرای دوم queue_id اولی را بازنویسی می‌کرد و از آن لحظه:
+ *    • نگهبان و extract_queue_status، ردیفِ اولی را «غریبه» می‌دیدند و
+ *      بی‌حرکتی‌اش را از started_at حساب می‌کردند ⇒ «خطا»ی دروغین.
+ *    • نوارِ پیشرفتِ رابط، اعدادِ دو اجرا را قاطی نشان می‌داد.
+ *    • نگهبان ردیفِ زندهٔ اولی را از صف برمی‌داشت ⇒ استخراج نیمه‌کاره رها.
+ *
+ *  عمداً flock نیست: روی بعضی هاست‌های اشتراکی (NFS) flock بی‌صدا موفق
+ *  می‌شود و هیچ‌چیز را قفل نمی‌کند. اینجا با فایلِ نشانه‌دار + PID + TTL
+ *  کار می‌کنیم که همه‌جا رفتارِ یکسان دارد.
+ * ===================================================================== */
+
+/** قفل را برمی‌دارد. اگر قفلِ زنده‌ای هست، اطلاعاتش را برمی‌گرداند. */
+function extractLockAcquire(string $queueId, string $profileKey): array {
+    $now = time();
+    $cur = @json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE), true);
+    if (is_array($cur) && !empty($cur['queue_id'])) {
+        /* v10.32 (۴۵ب): قفل نسبت به صاحبِ خودش بازورودی است. اگر همین
+           اجرا دوباره درخواست بدهد (تلاشِ مجدد، یا مسیری که دو بار از
+           همین‌جا رد می‌شود) نباید خودش را قفل‌شده ببیند — فقط ضربان
+           می‌زنیم و اجازه می‌دهیم ادامه دهد. */
+        if ((string)$cur['queue_id'] === $queueId) {
+            $cur['at'] = $now;
+            @file_put_contents(EXTRACT_LOCK_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
+            return ['ok' => true, 'reentrant' => true];
+        }
+        $age = $now - (int)($cur['at'] ?? 0);
+        /* قفلِ کهنه یعنی پردازه‌اش مرده و فرصت نکرده آزادش کند. مهلت را
+           با همان stall_after کاربر هماهنگ می‌کنیم تا دو عدد جدا نداشته
+           باشیم، ولی هرگز از یک ساعت بیشتر نشود. */
+        $ttl = max(120, min((int)EXTRACT_LOCK_TTL,
+                            (int)(loadConnections()['stall_after'] ?? 300) * 3));
+        $prog = readProgress(EXTRACT_PROGRESS_FILE);
+        /* اگر فایلِ پیشرفت مالِ همین قفل است و تازه نوشته شده، اجرا قطعاً
+           زنده است — حتی اگر خودِ قفل قدیمی باشد (استخراجِ طولانیِ سالم). */
+        $mine = ((string)($prog['queue_id'] ?? '')) === ((string)$cur['queue_id']);
+        $beat = $mine ? (int)($prog['last_progress_ts'] ?? 0) : 0;
+        if ($beat > 0 && ($now - $beat) < $ttl) $age = $now - $beat;
+        if ($age < $ttl) {
+            return ['ok' => false, 'busy' => true, 'age' => $age,
+                    'queue_id' => (string)$cur['queue_id'],
+                    'profile_key' => (string)($cur['profile_key'] ?? ''),
+                    'profile_name' => (string)($cur['profile_name'] ?? '')];
+        }
+        $stale = true;
+    }
+    $ok = @file_put_contents(EXTRACT_LOCK_FILE, json_encode(
+        ['queue_id' => $queueId, 'profile_key' => $profileKey, 'pid' => (int)@getmypid(),
+         'at' => $now], JSON_UNESCAPED_UNICODE), LOCK_EX);
+    return ['ok' => $ok !== false, 'stale_cleared' => !empty($stale)];
+}
+
+/** قفل را فقط اگر مالِ خودمان باشد آزاد می‌کند (قفلِ دیگری را نمی‌دزدد). */
+function extractLockRelease(string $queueId): void {
+    $cur = @json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE), true);
+    if (!is_array($cur)) { @unlink(EXTRACT_LOCK_FILE); return; }
+    if ((string)($cur['queue_id'] ?? '') !== $queueId) return;   // مالِ ما نیست
+    @unlink(EXTRACT_LOCK_FILE);
+}
+
+/** ضربانِ قفل — تا استخراجِ طولانیِ سالم «کهنه» حساب نشود. */
+function extractLockTouch(string $queueId): void {
+    $cur = @json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE), true);
+    if (!is_array($cur) || (string)($cur['queue_id'] ?? '') !== $queueId) return;
+    $cur['at'] = time();
+    @file_put_contents(EXTRACT_LOCK_FILE, json_encode($cur, JSON_UNESCAPED_UNICODE), LOCK_EX);
 }
 
 /**
@@ -10612,6 +10698,18 @@ foreach($queue['entries'] as &$qe){
        همان فایل پرسید؛ تنها شاهد قابل اعتماد، زمان آخرین نوشتن است. */
     $mine=((string)($progress['queue_id']??''))===((string)($qe['id']??''));
     $ts=$mine?(int)($progress['last_progress_ts']??0):0;
+    /* v10.32 (۴۵ج): شاهدِ دوم — قفلِ سراسری. اگر فایلِ پیشرفت به هر دلیلی
+       مالِ این ردیف نبود (اجرای هم‌زمانِ دیگری بازنویسی‌اش کرده، یا نسخهٔ
+       قدیمیِ کد queue_id را ننوشته)، هنوز نمی‌شود گفت «مرده». قفل نامِ
+       صاحبِ واقعیِ اجرا را نگه می‌دارد؛ اگر قفل دستِ همین ردیف است و تازه
+       ضربان زده، این کار زنده است و نباید «خطا» بخورد. این دقیقاً همان
+       موردی بود که کاربر می‌دید: ردیفِ قرمز که با کلیک معلوم می‌شد مشغول
+       است. */
+    if($ts<=0){
+        $_lk=@json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE),true);
+        if(is_array($_lk)&&((string)($_lk['queue_id']??''))===((string)($qe['id']??'')))
+            $ts=(int)($_lk['at']??0);
+    }
     if($ts<=0)$ts=(int)($qe['started_at']??$now);
     $idle=$now-$ts;
     if($idle>$exIdleMax){
@@ -10952,6 +11050,23 @@ return ['__early_sent'=>$emitEarlyResponse,'ok'=>false,'error'=>$msg,
    می‌گرفتند؛ آن‌وقت به‌روزرسانی وضعیت روی ردیف اشتباهی می‌نشست و گزارش
    هر کدام گزارش دیگری را بازنویسی می‌کرد. */
 $queueId='ex_'.$profileKey.'_'.time().'_'.substr(bin2hex(random_bytes(3)),0,6);
+/* v10.32 (۴۵ب): قفلِ سراسری. محافظِ بالا فقط «همین پروفایل» را می‌دید؛
+   این یکی هر استخراجِ هم‌زمانِ دیگری را هم می‌گیرد. فازِ جزئیات استثناست:
+   کران بلافاصله بعد از فازِ فهرست صدایش می‌زند و قفل هنوز دستِ همان اجراست. */
+if($phase!=='detail'){
+    $_lk=extractLockAcquire($queueId,$profileKey);
+    if(empty($_lk['ok'])){
+        $_lkWho=trim((string)($_lk['profile_name']??''));
+        if($_lkWho==='')$_lkWho=trim((string)($_lk['profile_key']??''));
+        $msg='استخراجِ دیگری در حال اجراست'.($_lkWho!==''?(' («'.$_lkWho.'»)'):'')
+            .' — '.(int)($_lk['age']??0).' ثانیه پیش شروع شده. برای اینکه دو اجرا'
+            .' نتایج همدیگر را خراب نکنند، این نوبت رد شد.';
+        writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'error'=>$msg,
+        'total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['⏭ '.$msg],'total_log_count'=>1]);
+        return ['__early_sent'=>$emitEarlyResponse,'ok'=>false,'error'=>$msg,
+        'locked'=>true,'busy_queue_id'=>(string)($_lk['queue_id']??'')];
+    }
+}
 $queue['entries'][]=['id'=>$queueId,'status'=>'running','profile_key'=>$profileKey,'url'=>$url,'profile_name'=>$profile['name']??$profileKey,'started_at'=>time(),'products_count'=>0,'total'=>0,'current'=>0,'new'=>0,'price_changed'=>0,'removed'=>0,'unchanged'=>0,'trigger'=>$trigger,'phase'=>$phase];
 extractWriteQueue($queue);
 
@@ -11003,6 +11118,7 @@ if($phase==='detail'){
            پروفایل روی دیسک محصولی ندارد. */
         foreach($queue['entries'] as &$qe){if(($qe['id']??'')===$queueId){$qe['status']='done';$qe['done_at']=time();$qe['products_count']=0;$qe['detail_skip_why']='no_products';$qe['detail_total']=0;$qe['detail_no_link']=0;$qe['detail_already']=0;break;}}unset($qe);
         extractWriteQueue($queue);
+        if($phase!=='detail')extractLockRelease($queueId);   // v10.32 (۴۵ب)
         return ['__early_sent'=>$emitEarlyResponse,'ok'=>true,'extracted'=>0,'phase'=>'detail','note'=>'فهرستی وجود ندارد'];
     }
 }
@@ -11019,6 +11135,7 @@ $pkFinal=$profileKey!==''?$profileKey:profileKey($url);
 for($page=1;$phase!=='detail'&&$page<=$maxPages;$page++){
 if(file_exists(EXTRACT_STOP_FILE)){@unlink(EXTRACT_STOP_FILE);
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'total'=>count($allProducts),'current'=>$page,'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>2,'extracted'=>count($allProducts)]);
+if($phase!=='detail')extractLockRelease($queueId);   // v10.32 (۴۵ب)
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'cancelled'=>true];
 }
 if($page===1){$pageUrl=$url;}
@@ -11034,6 +11151,7 @@ $logs[]='❌ خطا: '.mb_substr($res['error']??'HTTP error',0,80);
 // v8.91: علت شکست صفحهٔ اول را نگه دار تا محافظِ پایین بداند
 // «صفر محصول» به‌خاطر قطعی بوده، نه به‌خاطر خالی شدن فروشگاه.
 if($page===1)$fetchFail='صفحهٔ اول باز نشد: '.mb_substr($res['error']??('HTTP '.(int)($res['code']??0)),0,60);
+extractLockTouch($queueId);   // v10.32 (۴۵ب): ضربان، تا قفلِ اجرای سالم کهنه نشود
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>0,'current'=>$page,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>false]);
 if($page===1)break;
 else continue;
@@ -11193,6 +11311,7 @@ notifRunFailure(loadConnections(),'استخراج',$profile['name']??$profileKey
   ($_kept>0
     ?'استخراج هیچ محصولی برنگرداند و متوقف شد تا داده‌های قبلی پاک نشوند. علت: '
     :'استخراج هیچ محصولی پیدا نکرد. علت: ').$_why);
+if($phase!=='detail')extractLockRelease($queueId);   // v10.32 (۴۵ب)
 return ['__early_sent'=>$emitEarlyResponse,'ok'=>false,'error'=>'استخراج بی‌نتیجه — '.$_why,
         'guard'=>'empty_result','kept'=>count($prevByKey)];
 }
@@ -11342,7 +11461,14 @@ $logs=['🔍 فاز ۲ — باز کردن صفحهٔ محصول‌ها: '.$deta
 $logs[]='   • فیلدها: '.($_wantFields?implode('، ',$_wantFields):'—')
         .($galleryCfg['enabled']?(' · گالری: روشن ('.$galleryCfg['mode'].')'):' · گالری: خاموش');
 $logs[]='   • ⏱ سقف زمانی این نوبت: '.$_budget.' ثانیه — بقیه در نوبت بعد ادامه می‌یابد';
-writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'recent_log'=>$logs,'total_log_count'=>$totalPages+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>0,'detail_total'=>$detailTotal]);
+/* v10.32 (۴۵الف): 'queue_id' و 'last_progress_ts' اینجا جا افتاده بودند.
+   writeProgress کلِ فایل را بازنویسی می‌کند، پس نبودِ کلید یعنی حذفش. از
+   لحظه‌ای که فازِ جزئیات شروع می‌شد، فایلِ پیشرفت دیگر نمی‌گفت مالِ کدام
+   ردیفِ صف است؛ آن‌وقت شرطِ $mine در نگهبان و در extract_queue_status
+   false می‌شد، زمانِ بی‌حرکتی از started_at حساب می‌شد و ردیفِ کاملاً
+   زنده «پردازش نیمه‌کاره رها شد» می‌خورد. دقیقاً همان چیزی که کاربر
+   می‌دید: صف «خطا» ولی کار در جریان. */
+writeProgress(EXTRACT_PROGRESS_FILE,['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$totalPages+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>0,'detail_total'=>$detailTotal]);
 
 foreach($needDetail as $key=>$p){
 /* v8.97: وقت تمام شد؟ تمیز بیرون بیا، نه اینکه منتظر بمانی تا هاست بکشد.
@@ -11356,6 +11482,7 @@ extractCheckpoint($pkFinal,$allProducts,
     ['_extract_stage'=>'stopped','_extract_stage_at'=>time(),
      '_extract_detail_done'=>$detailDone,'_extract_detail_total'=>$detailTotal]);
 writeProgress(EXTRACT_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'extracted'=>count($allProducts),'started_at'=>$startedAt,'recent_log'=>['❌ متوقف شد'],'total_log_count'=>$totalPages+$detailDone+1]);
+if($phase!=='detail')extractLockRelease($queueId);   // v10.32 (۴۵ب)
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>false,'cancelled'=>true];
 }
 $detailDone++;
@@ -11499,7 +11626,8 @@ if($failSamples)$logs[]='   • ✗ نمونهٔ خطا: '.implode(' | ',$failSa
 foreach($detailLog as $_dl)$logs[]=$_dl;
 // قیمت‌ها در این مرحله ممکن است تکمیل شوند، پس مقایسه دوباره محاسبه می‌شود
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
-writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>$logs,'total_log_count'=>$totalPages+$detailDone,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
+extractLockTouch($queueId);   // v10.32 (۴۵ب): ضربان، تا قفلِ اجرای سالم کهنه نشود
+writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailDone,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$totalPages+$detailDone,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
 }
 /* v8.94: هر ۵ محصول، کارِ انجام‌شده روی دیسک بنشیند.
 
@@ -11550,7 +11678,7 @@ $_sumLines[]='   • یعنی IP هاست بلاک یا محدود شده — س
 $_sumLines[]='   • تنظیمات ← «اتصال به سایت مبدأ»: فاصلهٔ بین درخواست‌ها را زیاد کنید یا پروکسی بگذارید';
 }
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
-writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>$_sumLines,'total_log_count'=>$totalPages+$detailDone+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
+writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages+$detailTotal,'current'=>$totalPages+$detailTotal,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$_sumLines,'total_log_count'=>$totalPages+$detailDone+1,'extracted'=>count($allProducts),'phase'=>'detail','detail_current'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'detail_fields'=>$detailFields,'detail_nofield'=>$detailNoField,'gallery_products'=>$galleryFound,'gallery_images'=>$galleryImgsTotal,'variation_products'=>$varFound],$liveCmp));
 }
 
 $newCount=0;$priceChanged=0;$unchanged=0;$removedCount=0;
@@ -11675,6 +11803,7 @@ extractWriteQueue($queue);
 
 // v10.21 (۳۴الف): سینکِ «بدون استخراج» باید بداند چند صفحه واقعاً باز شد و
 // آیا بودجهٔ زمانی تمام شد (تا در نوبتِ بعدی از همان‌جا ادامه دهد)
+if($phase!=='detail')extractLockRelease($queueId);   // v10.32 (۴۵ب)
 return ['__early_sent'=>$emitEarlyResponse, 'ok'=>true,'extracted'=>count($allProducts),'new'=>$newCount,'price_changed'=>$priceChanged,'removed'=>$removedCount,'unchanged'=>$unchanged,'price_up'=>$priceUp,'price_down'=>$priceDown,'new_items'=>$newItems,'changed_items'=>$changedItems,'removed_items'=>$removedItems,'products_saved'=>true,'profile_key'=>$profileKey??profileKey($url),'detail_done'=>$detailDone,'detail_total'=>$detailTotal,'detail_ok'=>$detailOk,'detail_fail'=>$detailFail,'ran_out'=>!empty($_ranOut),'stock_out'=>$_stockOut??0,'stock_back'=>$_stockBack??0];
 }
 
@@ -12444,6 +12573,14 @@ function cronWatchdogs(array $cn): array {
                running=true جا می‌گذارد که فرصت نکرده done بنویسد. */
             $mine = ((string)($exProg['queue_id'] ?? '')) === ((string)($qe['id'] ?? ''));
             $ts = $mine ? (int)($exProg['last_progress_ts'] ?? 0) : 0;
+            /* v10.32 (۴۵ج): همان شاهدِ دومِ extract_queue_status — قفل.
+               بدون این، نگهبان ردیفِ زندهٔ یک اجرای طولانی را از صف
+               برمی‌داشت و استخراج عملاً نیمه‌کاره رها می‌شد. */
+            if ($ts <= 0) {
+                $_lkW = @json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE), true);
+                if (is_array($_lkW) && ((string)($_lkW['queue_id'] ?? '')) === ((string)($qe['id'] ?? '')))
+                    $ts = (int)($_lkW['at'] ?? 0);
+            }
             if ($ts <= 0) $ts = (int)($qe['started_at'] ?? 0);
             $idle = $ts > 0 ? ($exNow - $ts) : PHP_INT_MAX;
             if ($idle <= $stallCfg) continue;
@@ -14026,7 +14163,7 @@ if (!empty($srcN['sent'])) $pResult['src_notified'] = $srcN['sent'];
 $retireMode = (string)($cn['retire_mode'] ?? 'off');
 if ($retireMode !== 'off' && !empty($exRes['removed_items'])) {
     $rt = retireRemoved($cn, $exRes['removed_items'], $target, $retireMode,
-                        (int)($exRes['extracted'] ?? 0));
+                        (int)($exRes['extracted'] ?? 0), false, (string)($profile['name'] ?? $key));
     $pResult['retire'] = ['mode' => $retireMode, 'retired' => (int)($rt['retired'] ?? 0),
         'not_found' => (int)($rt['not_found'] ?? 0), 'failed' => (int)($rt['failed'] ?? 0)];
     if (!empty($rt['skipped'])) $pResult['retire']['skipped'] = $rt['skipped'];
@@ -14664,10 +14801,49 @@ if (isset($_GET['retire_run'])) {
             JSON_UNESCAPED_UNICODE); exit;
     }
     $items = $rep['removed_items'] ?? [];
-    $res = retireRemoved($cn, $items, $target, $mode, (int)($rep['extracted'] ?? 0), $dry);
+    $res = retireRemoved($cn, $items, $target, $mode, (int)($rep['extracted'] ?? 0), $dry, (string)($profile['name'] ?? $key));
     $res['ok'] = true; $res['profile'] = $profile['name'] ?? $key;
     $res['report_time'] = $newest;
     echo json_encode($res, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v10.32 (۴۵ه): گزارشِ بایگانی‌شده‌ها
+ *  ?retire_log=1[&limit=N]  → فهرست + خلاصه
+ *  ?retire_log_clear=1      → پاک کردن
+ * ===================================================================== */
+if (isset($_GET['retire_log'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $log   = retireLogRead();
+    $items = $log['items'];
+    $limit = max(1, min((int)RETIRE_LOG_KEEP, (int)($_GET['limit'] ?? 100)));
+    /* خلاصه روی *کلِ* لاگ حساب می‌شود، نه فقط تکه‌ای که برمی‌گردانیم —
+       وگرنه با limit کوچک، اعدادِ بالای گزارش هم کوچک می‌شدند. */
+    $byMode = []; $byProfile = []; $modes = retireModes();
+    foreach ($items as $it) {
+        $m = (string)($it['mode'] ?? '?');
+        $byMode[$m] = ($byMode[$m] ?? 0) + 1;
+        $pn = trim((string)($it['profile'] ?? ''));
+        if ($pn !== '') $byProfile[$pn] = ($byProfile[$pn] ?? 0) + 1;
+    }
+    arsort($byProfile);
+    $rows = [];
+    foreach (array_slice($items, 0, $limit) as $it) {
+        $at = (int)($it['at'] ?? 0);
+        $rows[] = $it + ['mode_label' => $modes[(string)($it['mode'] ?? '')] ?? '?',
+                         'at_h' => $at > 0 ? date('Y/m/d H:i', $at) : '—'];
+    }
+    echo json_encode(['ok' => true, 'total' => count($items), 'shown' => count($rows),
+        'updated' => (int)($log['updated'] ?? 0),
+        'by_mode' => $byMode, 'by_profile' => array_slice($byProfile, 0, 10, true),
+        'items' => $rows], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (isset($_GET['retire_log_clear'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @unlink(RETIRE_LOG_FILE);
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -21469,6 +21645,64 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
       && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
 
+    /* ================= v10.32 (۴۵) ================= */
+    /* زنجیرهٔ استخراج → ارسالِ باسلام: قفلِ اجرا، برچسبِ درستِ خطا،
+       نمودِ چندغرفه‌ای، و گزارشِ ماندگارِ بایگانی. */
+    $add('10.32', 'قفلِ سراسریِ استخراج با سه تابعِ گرفتن/آزادکردن/ضربان تعریف شده',
+         strpos($selfSrc, 'function extractLock' . 'Acquire(') !== false
+      && strpos($selfSrc, 'function extractLock' . 'Release(') !== false
+      && strpos($selfSrc, 'function extractLock' . 'Touch(') !== false
+      && defined('EXTRACT_LOCK_FILE') && defined('EXTRACT_LOCK_TTL'));
+
+    $add('10.32', 'قفل پیش از فازِ فهرست گرفته می‌شود و فازِ جزئیات دوباره قفل نمی‌گیرد',
+         strpos($selfSrc, '$_lk=extractLock' . 'Acquire($queueId,$profileKey);') !== false
+      && strpos($selfSrc, "if(\$phase!=='detail'){") !== false
+      && strpos($selfSrc, 'استخراجِ دیگری در حال اجراست') !== false);
+
+    $add('10.32', 'قفل در همهٔ مسیرهای خروجِ استخراج آزاد می‌شود',
+         substr_count($selfSrc, "if(\$phase!=='detail')extractLock" . 'Release($queueId);') >= 5);
+
+    $add('10.32', 'حلقهٔ صفحه و حلقهٔ جزئیات به قفل ضربان می‌زنند',
+         substr_count($selfSrc, 'extractLock' . 'Touch($queueId);') >= 2);
+
+    $add('10.32', 'هر سه نوشتنِ پیشرفتِ فازِ جزئیات شناسهٔ صف را هم می‌نویسند',
+         substr_count($selfSrc, "'queue_id'" . '=>$queueId') >= 20);
+
+    $add('10.32', 'نگهبان و وضعیتِ صف پیش از برچسبِ خطا، قفل را هم شاهد می‌گیرند',
+         substr_count($selfSrc, 'json_decode((string)@file_get_contents(EXTRACT_LOCK' . '_FILE)') >= 2);
+
+    $add('10.32', 'لاگِ ماندگارِ بایگانی با خواندن، افزودن و سقفِ نگهداری',
+         strpos($selfSrc, 'function retireLog' . 'Read(') !== false
+      && strpos($selfSrc, 'function retireLog' . 'Add(') !== false
+      && defined('RETIRE_LOG_FILE') && (int)RETIRE_LOG_KEEP > 0);
+
+    $add('10.32', 'بازنشستگی نامِ پروفایل را می‌گیرد و فقط اقدامِ واقعی را ثبت می‌کند',
+         strpos($selfSrc, "bool \$dryRun = false, string \$profileName = ''") !== false
+      && strpos($selfSrc, 'if (!$dryRun) {') !== false
+      && strpos($selfSrc, 'retireLog' . 'Add($_rlRows);') !== false);
+
+    $add('10.32', 'اندپوینتِ گزارشِ بایگانی و پاک‌کردنش وجود دارد',
+         strpos($selfSrc, "isset(\$_GET['retire_" . "log'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['retire_log_" . "clear'])") !== false
+      && strpos($selfSrc, "'by_mode' => \$byMode") !== false);
+
+    $add('10.32', 'گزارشِ بایگانی در پنلِ محصولاتِ رفته از مبدأ نمایش داده می‌شود',
+         strpos($selfSrc, 'id="rl' . 'Box"') !== false
+      && strpos($selfSrc, 'function rl' . 'Load(){') !== false
+      && strpos($selfSrc, 'function rl' . 'Render(){') !== false
+      && strpos($selfSrc, 'function rl' . 'Clear(){') !== false);
+
+    $add('10.32', 'جست‌وجوی گزارشِ بایگانی محلی است و به سرور درخواست نمی‌زند',
+         strpos($selfSrc, 'id="rl' . 'Search" oninput="rlRender()"') !== false);
+
+    $add('10.32', 'خطِ زندهٔ ارسالِ چندغرفه‌ای تفکیکِ هر غرفه را نشان می‌دهد',
+         strpos($selfSrc, 'چندغرفه‌ای: $__msDone/$total محصول — ') !== false
+      && strpos($selfSrc, '$__brk[]=$__bn') !== false);
+
+    $add('10.32', 'غرفهٔ بی‌نتیجه هشدارِ صریح می‌گیرد و خطاها نامِ غرفه دارند',
+         strpos($selfSrc, 'هیچ محصولی ثبت نشد — توکن و شناسهٔ غرفه را بررسی کنید') !== false
+      && strpos($selfSrc, "'غرفهٔ '.((\$__shopName[\$__vid]??'')!==''") !== false);
+
     /* ================= v10.31 (۴۴) ================= */
     /* رندرِ تنبلِ نتایج. گلوگاه این بود که refreshViews() هر سه نما را
        برای همهٔ محصولات می‌ساخت، حتی وقتی تبِ نتایج بسته بود. */
@@ -25698,12 +25932,44 @@ function bslFindByTitle(string $tk, int $vid, string $title): ?array {
     return null;
 }
 
+/* =====================================================================
+ *  v10.32 (۴۵د/۴۵ه): لاگِ ماندگارِ بایگانی
+ *
+ *  تا اینجا نتیجهٔ retireRemoved فقط برگردانده و به اعلان داده می‌شد.
+ *  هیچ‌جا نمی‌ماند، پس این سؤالِ کاملاً بجای کاربر بی‌جواب بود: «کدام
+ *  محصول‌ها بایگانی شده‌اند؟» حالا هر موردِ واقعاً اعمال‌شده یک ردیف
+ *  می‌گیرد و از اندپوینتِ ?retire_log خوانده می‌شود.
+ * ===================================================================== */
+
+/** لاگ را می‌خواند: ['items'=>[...], 'updated'=>int] */
+function retireLogRead(): array {
+    if (!file_exists(RETIRE_LOG_FILE)) return ['items' => [], 'updated' => 0];
+    $d = @json_decode((string)@file_get_contents(RETIRE_LOG_FILE), true);
+    if (!is_array($d)) return ['items' => [], 'updated' => 0];
+    if (!isset($d['items']) || !is_array($d['items'])) $d['items'] = [];
+    return $d;
+}
+
+/** ردیف‌های تازه را جلوی لاگ می‌گذارد (تازه‌ترین اول) و هرس می‌کند. */
+function retireLogAdd(array $rows): int {
+    if (!$rows) return 0;
+    $log = retireLogRead();
+    /* تازه‌ترین بالا. کلیدِ یکتا نداریم چون یک محصول ممکن است در دو نوبت
+       بایگانی شود (مثلاً برگشته و دوباره رفته) و هر دو باید دیده شوند. */
+    $log['items'] = array_merge($rows, $log['items']);
+    if (count($log['items']) > (int)RETIRE_LOG_KEEP)
+        $log['items'] = array_slice($log['items'], 0, (int)RETIRE_LOG_KEEP);
+    $log['updated'] = time();
+    @file_put_contents(RETIRE_LOG_FILE, json_encode($log, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    return count($rows);
+}
+
 /**
  * محصولات رفته از مبدأ را روی مقصد بازنشسته می‌کند.
  * $items همان removed_items استخراج است.
  */
 function retireRemoved(array $cn, array $items, string $target, string $mode,
-                       int $extracted, bool $dryRun = false): array {
+                       int $extracted, bool $dryRun = false, string $profileName = ''): array {
     $out = ['mode' => $mode, 'target' => $target, 'checked' => 0,
             'retired' => 0, 'not_found' => 0, 'failed' => 0, 'items' => [], 'dry_run' => $dryRun];
     if ($mode === 'off' || !$items) { $out['skipped'] = 'غیرفعال'; return $out; }
@@ -25718,6 +25984,7 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
     $tk  = (string)($cn['basalam']['token'] ?? '');
     $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
     $suffix = trim((string)($w['title_suffix'] ?? ''));
+    $_rlRows = [];   // v10.32 (۴۵د): ردیف‌های لاگِ ماندگار
 
     foreach ($items as $it) {
         $title = trim((string)($it['title'] ?? ''));
@@ -25770,7 +26037,25 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
             }
         }
         if (count($out['items']) < 50) $out['items'][] = $row;
+        /* v10.32 (۴۵د): ردیفِ لاگ فقط وقتی ساخته می‌شود که واقعاً کاری
+           انجام شده باشد — پیش‌نمایش (dry run) و «یافت نشد» ثبت نمی‌شوند،
+           وگرنه گزارش پر می‌شد از چیزهایی که هیچ‌وقت بایگانی نشده‌اند. */
+        if (!$dryRun) {
+            $didW = isset($row['woo']) && strpos((string)$row['woo'], 'انجام شد') !== false;
+            $didB = isset($row['bsl']) && (strpos((string)$row['bsl'], 'انجام شد') !== false
+                                        || strpos((string)$row['bsl'], 'بایگانی شد') !== false);
+            if ($didW || $didB) {
+                $_rlRows[] = ['title' => (string)$row['title'], 'mode' => $mode,
+                    'target' => $target, 'profile' => $profileName,
+                    'reason' => (string)($row['reason'] ?? ''),
+                    'woo' => (string)($row['woo'] ?? ''), 'bsl' => (string)($row['bsl'] ?? ''),
+                    'at' => time()];
+            }
+        }
     }
+    /* v10.32 (۴۵د): یک بار نوشتن در پایان، نه یک بار به‌ازای هر محصول —
+       با ۵۰ حذف‌شده، ۵۰ بار بازنویسیِ کلِ فایل روی هاستِ اشتراکی گران است. */
+    if (!empty($_rlRows)) { retireLogAdd($_rlRows); $out['logged'] = count($_rlRows); }
     return $out;
 }
 
@@ -32309,20 +32594,37 @@ if($__sendAllShops && $__liveShops){
             } else {
                 $__shopStat[$__vid]['f']++;
                 bslShopStatBump($__vid,(string)($__shopName[$__vid]??''),'f');
-                $bslFailedList[] = ['title'=>trim($p['title']??$p['name']??''),'key'=>$p['key']??'','error'=>'غرفه '.$__vid.': '.($__res['error']??'?')];
+                $bslFailedList[] = ['title'=>trim($p['title']??$p['name']??''),'key'=>$p['key']??'','error'=>'غرفهٔ '.(($__shopName[$__vid]??'')!==''?$__shopName[$__vid].' (#'.$__vid.')':'#'.$__vid).': '.($__res['error']??'?')];
             }
         }
         $__msDone++;
         // هر ۵ محصول یک خط وضعیت، تا لاگ پر نشود ولی کاربر بداند زنده است
-        if($__msDone%5===0||$__msDone===$total)
+        if($__msDone%5===0||$__msDone===$total){
+            /* v10.32 (۴۵و): تا اینجا فقط «۱۲/۵۰ محصول» دیده می‌شد و کاربر
+               نمی‌فهمید غرفهٔ دومش اصلاً دارد کار می‌کند یا همهٔ ارسال‌ها
+               به غرفهٔ پیش‌فرض رفته. حالا تفکیکِ زندهٔ هر غرفه در همان خط
+               می‌آید: نام (ساخته/آپدیت/خطا). */
+            $__brk=[];
+            foreach($__shopStat as $__bv=>$__bs){
+                $__bn=trim((string)($__shopName[$__bv]??'')); if($__bn==='')$__bn='#'.$__bv;
+                $__brk[]=$__bn.' '.$__bs['c'].'+'.$__bs['u'].($__bs['f']?'/✗'.$__bs['f']:'');
+            }
             bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,mb_substr(trim($p['title']??''),0,30),
-                "🚚 چندغرفه‌ای: $__msDone/$total محصول");
+                "🚚 چندغرفه‌ای: $__msDone/$total محصول — ".implode(' · ',$__brk));
+        }
         usleep(($bslDelayMs??500)*1000);
     }
     foreach($__shopStat as $__vid=>$__st){
+        $__nm=trim((string)($__shopName[$__vid]??'')); $__nm=$__nm!==''?$__nm.' (#'.$__vid.')':'#'.$__vid;
         if($__st['c']||$__st['u']||$__st['f'])
             bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',
-                "🏪 غرفهٔ $__vid: {$__st['c']} ساخته، {$__st['u']} آپدیت، {$__st['f']} خطا");
+                "🏪 غرفهٔ $__nm: {$__st['c']} ساخته، {$__st['u']} آپدیت، {$__st['f']} خطا");
+        else
+            /* v10.32 (۴۵و): غرفه‌ای که صفرِ مطلق خورده مهم‌ترین چیزی است که
+               باید دیده شود — یعنی توکن/شناسه‌اش ایراد دارد. سکوت در این
+               حالت دقیقاً همان «معلوم نیست ارسال شد یا نه»ی کاربر بود. */
+            bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',
+                "⚠️ غرفهٔ $__nm: هیچ محصولی ثبت نشد — توکن و شناسهٔ غرفه را بررسی کنید");
     }
     if($__msStop) bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'','⏹ ارسالِ چندغرفه‌ای با سیگنالِ توقف نیمه‌کاره ماند');
 }
@@ -38537,6 +38839,21 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-cyan" onclick="saveConn()" style="flex:1">💾 ذخیره</button>
 </div>
 <div id="retireR" style="margin-top:8px"></div>
+
+<!-- v10.32 (۴۵ه): گزارشِ بایگانی — تا حالا هیچ‌جا معلوم نبود چه چیزی بایگانی شده -->
+<div style="margin-top:10px;padding-top:8px;border-top:1px solid #334155">
+<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+<span style="font-size:11px;color:#fbbf24;font-weight:700;flex:1">🗄 گزارشِ بایگانی‌شده‌ها <span id="rlCount" style="font-size:9px;color:#64748b;font-weight:400"></span></span>
+<button class="btn btn-gray" onclick="rlLoad()" style="flex:0;font-size:10px;padding:3px 8px">🔄 نمایش</button>
+<button class="btn btn-gray" onclick="rlClear()" style="flex:0;font-size:10px;padding:3px 8px">🗑 پاک‌کردن</button>
+</div>
+<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:6px">
+هر محصولی که واقعاً بایگانی/پیش‌نویس/حذف شده اینجا می‌ماند (تا <?= (int)RETIRE_LOG_KEEP ?> مورد، تازه‌ترین بالا).
+پیش‌نمایش‌ها ثبت نمی‌شوند.
+</div>
+<input type="text" id="rlSearch" oninput="rlRender()" placeholder="🔎 جست‌وجو در عنوان و پروفایل…" style="width:100%;font-size:10px;padding:3px 7px;margin-bottom:6px">
+<div id="rlBox" style="font-size:11px;color:#64748b">برای دیدن، «نمایش» را بزنید.</div>
+</div>
 </div></div>
 
 <div class="smenu">
@@ -44374,6 +44691,30 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.32', t:'🔒 استخراج دیگر روی هم نمی‌افتد و بایگانی گزارش دارد', items:[
+    '🧨 <b>مشکلی که داشتید.</b> وقتی یک استخراج در حالِ اجرا بود و کرانِ خودکار',
+    '   یا کلیکِ دوباره یک استخراجِ تازه شروع می‌کرد، هر دو روی یک فایلِ',
+    '   پیشرفت می‌نوشتند. نتیجه‌اش این بود که کارِ اولی «رهاشده» تشخیص داده',
+    '   می‌شد و نگهبان از صف برش می‌داشت — یعنی استخراج نیمه‌کاره می‌ماند.',
+    '❶ <b>قفلِ سراسریِ استخراج.</b> هر لحظه فقط یک استخراج اجازهٔ اجرا دارد.',
+    '   نفرِ دوم به‌جای خراب کردنِ کارِ اولی، پیامِ روشنِ «استخراجِ دیگری در',
+    '   حال اجراست» می‌گیرد. قفل TTL دارد، پس اگر اجرایی واقعاً بمیرد،',
+    '   قفلش خودبه‌خود باز می‌شود و چیزی برای همیشه گیر نمی‌کند.',
+    '❷ <b>برچسبِ «خطا»ی نابه‌جا رفع شد.</b> ردیف‌هایی که واقعاً مشغول بودند',
+    '   قرمز می‌شدند، چون فایلِ پیشرفت مالِ اجرای دیگری بود. حالا پیش از',
+    '   هر قضاوت، شناسهٔ صف و قفل هم بررسی می‌شوند و کارِ زنده «مرده»',
+    '   اعلام نمی‌شود.',
+    '❸ <b>ارسال به غرفه‌های غیرپیش‌فرض حالا دیده می‌شود.</b> پیش‌تر فقط',
+    '   «۱۲ از ۵۰ محصول» می‌دیدید و معلوم نبود غرفهٔ دوم و سومتان اصلاً',
+    '   چیزی گرفته‌اند یا نه. حالا در همان خط، تفکیکِ زندهٔ هر غرفه با نامش',
+    '   می‌آید و غرفه‌ای که هیچ محصولی ثبت نکرده هشدارِ صریح می‌گیرد تا',
+    '   بفهمید توکن یا شناسه‌اش ایراد دارد.',
+    '❹ <b>گزارشِ بایگانی.</b> تا حالا محصولی که از مبدأ حذف شده بود بایگانی',
+    '   می‌شد ولی هیچ‌جا نمی‌ماند که چه چیزی بایگانی شده. حالا در پنلِ',
+    '   «🗂 محصولات رفته از مبدأ» فهرستِ کاملش هست: عنوان، اقدام، تاریخ و',
+    '   پروفایل — با جست‌وجو و امکانِ پاک‌کردن. پیش‌نمایش‌ها ثبت نمی‌شوند،',
+    '   پس فهرست فقط چیزهایی را نشان می‌دهد که واقعاً اتفاق افتاده‌اند.',
+  ]},
   {v:'10.31', t:'⚡ باز شدنِ پروفایل‌های پرمحصول دیگر صفحه را قفل نمی‌کند', items:[
     '🐢 <b>مشکلی که داشتید.</b> با پروفایل‌هایی که چند هزار محصول داشتند،',
     '   هر بار رفرشِ صفحه یا انتخابِ پروفایل چند ثانیه همه‌چیز می‌خُشکید.',
@@ -48394,6 +48735,68 @@ function retirePreview(){
     h+='</div>';
     box.innerHTML=h;
   }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';});
+}
+
+/* ---------------------------------------------------------------------
+ *  v10.32 (۴۵ه): گزارشِ بایگانی‌شده‌ها
+ *  یک بار از سرور می‌گیریم و در rlData نگه می‌داریم؛ جست‌وجو محلی است تا
+ *  با هر حرفِ تایپ‌شده یک درخواست به سرور نرود.
+ * ------------------------------------------------------------------- */
+let rlData=null;
+function rlLoad(){
+  const box=$('rlBox');
+  if(box)box.innerHTML='<div style="color:#93c5fd">⏳ در حال خواندن…</div>';
+  fetch('?retire_log=1&limit=300').then(r=>r.json()).then(d=>{
+    if(!d.ok){if(box)box.innerHTML='<div style="color:#f87171">✗ خطا</div>';return;}
+    rlData=d;
+    const c=$('rlCount'); if(c)c.textContent=d.total?('('+toFa(d.total)+' مورد)'):'';
+    rlRender();
+  }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171">✗ خطا در ارتباط</div>';});
+}
+function rlRender(){
+  const box=$('rlBox'); if(!box)return;
+  if(!rlData){box.innerHTML='برای دیدن، «نمایش» را بزنید.';return;}
+  const q=($('rlSearch')?$('rlSearch').value:'').trim().toLowerCase();
+  let items=rlData.items||[];
+  if(q)items=items.filter(it=>((it.title||'')+' '+(it.profile||'')).toLowerCase().indexOf(q)>=0);
+  if(!items.length){
+    box.innerHTML='<div style="color:#94a3b8;background:#0f172a;padding:8px;border-radius:8px">'
+      +(rlData.total?'چیزی با این جست‌وجو پیدا نشد.':'هنوز چیزی بایگانی نشده است.')+'</div>';
+    return;
+  }
+  const cl={draft:'#fbbf24',outofstock:'#67e8f9',delete:'#f87171'};
+  let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px">';
+  /* خلاصهٔ بالای فهرست: تفکیکِ اقدام و پرتکرارترین پروفایل‌ها */
+  const bm=rlData.by_mode||{}; let sum=[];
+  Object.keys(bm).forEach(k=>{sum.push('<span style="color:'+(cl[k]||'#94a3b8')+'">'
+    +esc({draft:'پیش‌نویس',outofstock:'ناموجود',delete:'حذف'}[k]||k)+': '+toFa(bm[k])+'</span>');});
+  if(sum.length)h+='<div style="margin-bottom:5px;font-size:10.5px">'+sum.join(' · ')+'</div>';
+  const bp=rlData.by_profile||{}; const pk=Object.keys(bp);
+  if(pk.length)h+='<div style="color:#64748b;font-size:10px;margin-bottom:5px">پروفایل‌ها: '
+    +pk.map(k=>esc(k)+' ('+toFa(bp[k])+')').join(' · ')+'</div>';
+  items.forEach(it=>{
+    h+='<div style="border-top:1px solid #1e293b;padding:4px 0">'
+      +'<div style="color:#cbd5e1">• '+esc(it.title||'—')+'</div>'
+      +'<div style="color:#64748b;font-size:10px;padding-right:10px">'
+      +'<span style="color:'+(cl[it.mode]||'#94a3b8')+'">'+esc(it.mode_label||it.mode||'')+'</span>'
+      +' · '+esc(it.at_h||'—')
+      +(it.profile?' · '+esc(it.profile):'')
+      +(it.reason?' · '+esc(it.reason):'')
+      +(it.woo?' · <span style="color:#67e8f9">woo</span>':'')
+      +(it.bsl?' · <span style="color:#c4b5fd">bsl</span>':'')
+      +'</div></div>';
+  });
+  if(rlData.total>items.length&&!q)
+    h+='<div style="color:#64748b;font-size:10px;margin-top:5px">'+toFa(rlData.total-items.length)+' مورد قدیمی‌تر نمایش داده نشد.</div>';
+  h+='</div>';
+  box.innerHTML=h;
+}
+function rlClear(){
+  if(!confirm('کلِ گزارشِ بایگانی پاک شود؟ خودِ محصولات دست نمی‌خورند.'))return;
+  fetch('?retire_log_clear=1').then(r=>r.json()).then(()=>{
+    rlData=null; const c=$('rlCount'); if(c)c.textContent='';
+    const box=$('rlBox'); if(box)box.innerHTML='<div style="color:#4ade80">✓ پاک شد</div>';
+  }).catch(()=>{});
 }
 
 /** v8.34: بررسی دستی وضعیت گیر کردن صف */
