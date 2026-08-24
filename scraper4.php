@@ -209,8 +209,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.32';
-const APP_VERSION_DATE = '1405/06/06';
+const APP_VERSION = '10.33';
+const APP_VERSION_DATE = '1405/06/07';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -12081,11 +12081,68 @@ function bslShopMapKey(string $productKey, array $shop): string {
 }
 
 /** v10.20 (۳۳الف): شناسهٔ محصول در یک غرفهٔ مشخص را در دفترچه ثبت می‌کند */
-function bslShopMapRecord(array $p, array $shop, int $remoteId, string $title): void {
+function bslShopMapRecord(array $p, array $shop, int $remoteId, string $title,
+                          int $priceRial = 0, int $stock = -1): void {
     if ($remoteId <= 0) return;
     $mk = bslShopMapKey((string)($p['key'] ?? ''), $shop);
     if ($mk === '') return;
-    remoteMapRecord('bsl', [['key' => $mk, 'remote_id' => $remoteId, 'title' => $title]]);
+    $row = ['key' => $mk, 'remote_id' => $remoteId, 'title' => $title];
+    /* v10.33 (۴۶): قیمت و موجودیِ واقعاً ارسال‌شده هم ثبت می‌شود تا دفعهٔ
+       بعد بشود فهمید چیزی عوض شده یا نه. تا اینجا دفترچه فقط شناسه را
+       نگه می‌داشت، برای همین هر اجرا مجبور بود کورکورانه PATCH بزند. */
+    if ($priceRial > 0) $row['price_rial'] = $priceRial;
+    if ($stock >= 0)    $row['stock'] = $stock;
+    remoteMapRecord('bsl', [$row]);
+}
+
+/* =====================================================================
+ *  v10.33 (۴۶): پرشِ آپدیتِ بی‌مورد
+ *
+ *  مشکل: مسیرِ ارسال، محصولِ موجود را همیشه PATCH می‌کرد — حتی وقتی
+ *  قیمت و موجودی مو نمی‌زد. روی پروفایلِ ۳۰۰۰ محصولی که ۴۰ قیمتش عوض
+ *  شده، یعنی ۳۰۰۰ درخواستِ نوشتن برای انجامِ ۴۰ کار. روی هاستِ اشتراکی
+ *  همین یکی از دلایلِ اصلیِ تایم‌اوت بود.
+ *
+ *  حالا آخرین چیزی که خودمان فرستادیم در دفترچه می‌ماند و اگر این بار
+ *  دقیقاً همان باشد، PATCH اصلاً زده نمی‌شود.
+ *
+ *  چرا «بازبینیِ دوره‌ای» هم داریم: دفترچه آینهٔ کارِ خودِ ماست، نه خودِ
+ *  باسلام. اگر کسی از پنلِ باسلام قیمتی را دستی عوض کند، دفترچه بی‌خبر
+ *  می‌ماند و آن اختلاف برای همیشه ماندگار می‌شود. کاربر گفته دستکاریِ
+ *  دستی «بسیار به‌ندرت» دارد، پس این ریسک کوچک است — ولی صفر نیست و
+ *  خطایش هم بی‌صداست. برای همین هر محصول هرچند وقت یک‌بار به‌زور آپدیت
+ *  می‌شود تا هر انحرافی خودبه‌خود جوش بخورد. با پیش‌فرضِ ۷ روز، هزینه‌اش
+ *  در بدترین حالت یک‌هفتم حالتِ قبلی است.
+ * ===================================================================== */
+const BSL_REVERIFY_SEC = 604800;   // ۷ روز
+
+/**
+ * آیا می‌شود از آپدیتِ این محصول در این غرفه صرف‌نظر کرد؟
+ * فقط وقتی «آری» که شناسه، قیمت و موجودیِ ثبت‌شده همگی با حالا یکی باشند
+ * و از آخرین تأیید هم خیلی نگذشته باشد.
+ */
+function bslSkipUnchanged(string $mapKey, int $exId, int $priceRial, int $stock,
+                          ?array $ledgerRow = null): bool {
+    if ($mapKey === '' || $exId <= 0) return false;
+    if (defined('BSL_FORCE_SYNC') && BSL_FORCE_SYNC) return false;
+    if ($ledgerRow === null) $ledgerRow = (remoteMapLoad()['bsl'][$mapKey] ?? null);
+    if (!is_array($ledgerRow)) return false;
+    if ((int)($ledgerRow['id'] ?? 0) !== $exId) return false;
+    /* نبودِ قیمت در دفترچه یعنی ردیفِ قدیمیِ پیش از v10.33 — دربارهٔ آن
+       چیزی نمی‌دانیم، پس محافظه‌کارانه آپدیت می‌کنیم تا ردیف تازه شود. */
+    if (!isset($ledgerRow['price_rial'])) return false;
+    if ((int)$ledgerRow['price_rial'] !== $priceRial) return false;
+    if (isset($ledgerRow['stock']) && (int)$ledgerRow['stock'] !== $stock) return false;
+    $at = (int)($ledgerRow['at'] ?? 0);
+    if ($at <= 0 || (time() - $at) > (int)BSL_REVERIFY_SEC) return false;   // بازبینیِ دوره‌ای
+    return true;
+}
+
+/** شمارندهٔ پرش‌ها، فقط برای اینکه در گزارش دیده شود چقدر صرفه‌جویی شد. */
+function bslSkipCount(int $add = 0): int {
+    static $n = 0;
+    if ($add > 0) $n += $add;
+    return $n;
 }
 
 /* v10.20 (۳۳الف): شناسهٔ محصولِ موجود را در چند غرفه «همزمان» پیدا می‌کند.
@@ -12190,8 +12247,19 @@ function bslUpsertManyShops(array $p, array $shops, array $opts, int $conc = 4):
     $ledger = [];
     if ($ids) {
         $jobs = [];
+        /* v10.33 (۴۶): دفترچه یک بار خوانده می‌شود، نه یک بار برای هر غرفه.
+           در حلقهٔ چند هزار محصولی، خواندنِ مکررِ همین فایل خودش گران است. */
+        $__bslMap = remoteMapLoad()['bsl'] ?? [];
         foreach ($ids as $vid => $exId) {
             if (!isset($live[$vid])) continue;
+            $__mk = bslShopMapKey($pKey, $live[$vid]);
+            if (bslSkipUnchanged($__mk, (int)$exId, (int)$prices[$vid], $stock,
+                                 $__bslMap[$__mk] ?? null)) {
+                bslSkipCount(1);
+                $out[(int)$vid] = ['ok' => true, 'id' => (int)$exId,
+                                   'action' => 'unchanged', 'skipped' => true];
+                continue;   // نه PATCH، نه ثبتِ دوباره در دفترچه
+            }
             $bu = ['primary_price' => $prices[$vid], 'stock' => $stock, 'status' => 2976,
                    'preparation_days' => $prepD, 'weight' => $weight, 'package_weight' => $pkgW];
             if ($catId > 0) $bu['category_id'] = $catId;
@@ -12270,7 +12338,12 @@ function bslUpsertManyShops(array $p, array $shops, array $opts, int $conc = 4):
         $rows = [];
         foreach ($ledger as $vid => $rid) {
             $mk = bslShopMapKey($pKey, $live[$vid]);
-            if ($mk !== '') $rows[] = ['key' => $mk, 'remote_id' => $rid, 'title' => $title];
+            /* v10.33 (۴۶): قیمت و موجودی حتماً باید همراهِ همین ردیف نوشته
+               شوند. remoteMapRecord کلِ ردیف را جایگزین می‌کند، پس اگر
+               اینجا بدونشان بنویسیم، چیزی که چند خط بالاتر ثبت شده پاک
+               می‌شود و پرشِ دفعهٔ بعد هیچ‌وقت اتفاق نمی‌افتد. */
+            if ($mk !== '') $rows[] = ['key' => $mk, 'remote_id' => $rid, 'title' => $title,
+                                       'price_rial' => (int)($prices[$vid] ?? 0), 'stock' => $stock];
         }
         if ($rows) remoteMapRecord('bsl', $rows);
     }
@@ -12309,17 +12382,24 @@ function bslUpsertToShop(array $p, array $shop, array $opts): array {
     $cData   = is_array($opts['cdata'] ?? null) ? $opts['cdata'] : [];
 
     // v10.20 (۳۳الف): دفترچهٔ نگاشتِ همین غرفه، نه شناسهٔ غرفهٔ پیش‌فرض
-    $existing = bslFindExisting($tk, $vid, $title, bslShopMapKey((string)($p['key'] ?? ''), $shop));
+    $__mk = bslShopMapKey((string)($p['key'] ?? ''), $shop);
+    $existing = bslFindExisting($tk, $vid, $title, $__mk);
     $exId = is_array($existing) ? (int)($existing['id'] ?? 0) : 0;
 
     if ($exId > 0) {
+        /* v10.33 (۴۶): اگر قیمت و موجودی همانی است که خودمان آخرین بار
+           فرستادیم، این PATCH هیچ کاری نمی‌کند جز مصرفِ یک درخواست. */
+        if (bslSkipUnchanged($__mk, $exId, $priceRial, $stock)) {
+            bslSkipCount(1);
+            return ['ok' => true, 'id' => $exId, 'action' => 'unchanged', 'skipped' => true];
+        }
         $bu = ['primary_price' => $priceRial, 'stock' => $stock, 'status' => 2976,
                'preparation_days' => $prepD, 'weight' => $weight, 'package_weight' => $pkgW];
         if ($catId > 0) $bu['category_id'] = $catId;
         $r = bslReq($tk, 'PATCH', 'products/' . $exId, $bu);
         if ($r['code'] === 404) $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $exId, $bu);
         if (!empty($r['ok']) && !empty($r['body']['id'])) {
-            bslShopMapRecord($p, $shop, $exId, $title);   // v10.20 (۳۳الف)
+            bslShopMapRecord($p, $shop, $exId, $title, $priceRial, $stock);   // v10.20 (۳۳الف) · v10.33 (۴۶)
             return ['ok' => true, 'id' => $exId, 'action' => 'updated'];
         }
         return ['ok' => false, 'error' => 'آپدیت در این غرفه ناموفق: ' . mb_substr((string)($r['body']['message'] ?? ($r['error'] ?? '?')), 0, 120)];
@@ -12342,7 +12422,7 @@ function bslUpsertToShop(array $p, array $shop, array $opts): array {
     if (!empty($p['sku'])) $bp['sku'] = $p['sku'];
     $r = bslReq($tk, 'POST', 'vendors/' . $vid . '/products', $bp);
     if (!empty($r['ok']) && !empty($r['body']['id'])) {
-        bslShopMapRecord($p, $shop, (int)$r['body']['id'], $title);   // v10.20 (۳۳الف)
+        bslShopMapRecord($p, $shop, (int)$r['body']['id'], $title, $priceRial, $stock);   // v10.20 (۳۳الف) · v10.33 (۴۶)
         return ['ok' => true, 'id' => (int)$r['body']['id'], 'action' => 'created'];
     }
     $fb = bslTryCreateWithFallback($tk, $vid, $bp, $fallback, $title, $autoCat, $flatCats, $cData);
@@ -21645,6 +21725,51 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
       && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
 
+    /* ================= v10.33 (۴۶) ================= */
+    /* پرشِ آپدیتِ بی‌مورد: قیمتِ ارسال‌شده در دفترچه می‌ماند و اگر
+       تغییر نکرده باشد، PATCH زده نمی‌شود. */
+    $add('10.33', 'تابعِ تصمیمِ پرش و شمارنده‌اش تعریف شده‌اند',
+         strpos($selfSrc, 'function bslSkip' . 'Unchanged(') !== false
+      && strpos($selfSrc, 'function bslSkip' . 'Count(') !== false
+      && defined('BSL_REVERIFY_SEC') && BSL_REVERIFY_SEC > 0);
+
+    $add('10.33', 'پرش فقط با تطابقِ کاملِ شناسه و قیمت رخ می‌دهد',
+         strpos($selfSrc, "(int)(\$ledgerRow['id'] ?? 0) !== \$exId") !== false
+      && strpos($selfSrc, "(int)\$ledgerRow['price_rial'] !== \$priceRial") !== false);
+
+    $add('10.33', 'ردیفِ قدیمیِ بدونِ قیمت باعثِ پرشِ ناایمن نمی‌شود',
+         strpos($selfSrc, "if (!isset(\$ledgerRow['price_rial'])) return false;") !== false);
+
+    $add('10.33', 'بازبینیِ دوره‌ای اجباری است تا انحرافِ دستی ماندگار نشود',
+         strpos($selfSrc, '(time() - $at) > (int)BSL_REVERIFY_SEC') !== false);
+
+    $add('10.33', 'دفترچه قیمت و موجودیِ ارسال‌شده را ذخیره می‌کند',
+         strpos($selfSrc, "\$add[\$k]['price_rial'] = (int)\$r['price_rial']") !== false
+      && strpos($selfSrc, "\$add[\$k]['stock']      = (int)\$r['stock']") !== false);
+
+    $add('10.33', 'امضای bslShopMapRecord قیمت و موجودی را می‌پذیرد',
+         strpos($selfSrc, 'int $priceRial = 0, int $stock = -1') !== false
+      && strpos($selfSrc, "if (\$priceRial > 0) \$row['price_rial'] = \$priceRial;") !== false);
+
+    $add('10.33', 'مسیرِ تکی پیش از PATCH پرش را بررسی می‌کند',
+         strpos($selfSrc, 'if (bslSkip' . "Unchanged(\$__mk, \$exId, \$priceRial, \$stock)) {") !== false
+      && strpos($selfSrc, "'action' => 'unchanged', 'skipped' => true") !== false);
+
+    $add('10.33', 'مسیرِ همزمان هم پرش دارد و دفترچه را یک بار می‌خواند',
+         strpos($selfSrc, "\$__bslMap = remoteMapLoad()['bsl'] ?? [];") !== false
+      && strpos($selfSrc, 'bslSkip' . "Unchanged(\$__mk, (int)\$exId, (int)\$prices[\$vid], \$stock,") !== false);
+
+    $add('10.33', 'ثبتِ پایانیِ مسیرِ همزمان قیمت را پاک نمی‌کند',
+         strpos($selfSrc, "'price_rial' => (int)(\$prices[\$vid] ?? 0), 'stock' => \$stock") !== false);
+
+    $add('10.33', 'پرش جزو آپدیت‌ها شمرده نمی‌شود و ستونِ خودش را دارد',
+         strpos($selfSrc, "elseif(!empty(\$__res['skipped'])){ \$__shopStat[\$__vid]['s']++; }") !== false
+      && strpos($selfSrc, "if(empty(\$__res['skipped'])) \$updated++;") !== false);
+
+    $add('10.33', 'شمارندهٔ بی‌تغییر در گزارشِ پایانیِ هر غرفه می‌آید',
+         strpos($selfSrc, 'بی‌تغییر، ') !== false
+      && strpos($selfSrc, "!empty(\$__st['s'])") !== false);
+
     /* ================= v10.32 (۴۵) ================= */
     /* زنجیرهٔ استخراج → ارسالِ باسلام: قفلِ اجرا، برچسبِ درستِ خطا،
        نمودِ چندغرفه‌ای، و گزارشِ ماندگارِ بایگانی. */
@@ -22355,8 +22480,11 @@ if (isset($_GET['selftest'])) {
       && bslShopMapKey('k1', ['vendor_id' => 7]) === 'k1' . '#v7'
       && bslShopMapKey('', ['vendor_id' => 7]) === '');
 
+    /* v10.33 (۴۶): این ادعا به متنِ عینیِ فراخوان بسته بود و با استخراجِ
+       کلید در $__mk می‌شکست. حالا به خودِ رفتار بسته است، نه به شکلِ نوشتن. */
     $add('10.20', 'جست‌وجوی شناسه در غرفه‌ها هم از کلیدِ همان غرفه استفاده می‌کند',
-         strpos($selfSrc, 'bslFindExisting($tk, $vid, $title, bslShopMapKey(') !== false
+         strpos($selfSrc, '$__mk = bslShopMapKey(' . '(string)($p[\'key\'] ?? \'\'), $shop);') !== false
+      && strpos($selfSrc, 'bslFindExisting($tk, $vid, $title, $__mk);') !== false
       && strpos($selfSrc, 'function bslShopMapRecord(') !== false);
 
     $add('10.20', 'محصولِ بی‌قیمت در همهٔ غرفه‌ها بی‌سروصدا رد نمی‌شود بلکه خطا می‌گیرد',
@@ -26130,6 +26258,10 @@ function remoteMapRecord(string $target, array $rows, string $profileKey = ''): 
         if ($k === '' || $id <= 0) continue;
         $add[$k] = ['id' => $id, 'title' => mb_substr((string)($r['title'] ?? ''), 0, 120),
                     'profile' => $profileKey, 'at' => time()];
+        /* v10.33 (۴۶): آخرین قیمت/موجودیِ ارسال‌شده، اگر فراخوان داده باشد.
+           هر دو اختیاری‌اند تا فراخوان‌های قدیمی دست‌نخورده کار کنند. */
+        if (isset($r['price_rial']) && (int)$r['price_rial'] > 0) $add[$k]['price_rial'] = (int)$r['price_rial'];
+        if (isset($r['stock']) && (int)$r['stock'] >= 0)          $add[$k]['stock']      = (int)$r['stock'];
     }
     if (!$add) return 0;
     $m = remoteMapLoad();
@@ -32568,7 +32700,7 @@ if($__sendAllShops && $__liveShops){
     $__shopName = [];   // v10.23 (۳۶ه): نامِ خواناى هر غرفه برای صفِ ارسال
     foreach($__liveShops as $__sh1){
         $__v1=(int)$__sh1['vendor_id'];
-        $__shopStat[$__v1]=['c'=>0,'u'=>0,'f'=>0];
+        $__shopStat[$__v1]=['c'=>0,'u'=>0,'f'=>0,'s'=>0];   // v10.33 (۴۶): s = پرشِ بی‌تغییر
         $__shopName[$__v1]=trim((string)($__sh1['shop_name']??''));
         bslShopStatBump($__v1,$__shopName[$__v1],'c',0);   // ردیفش از همان اول پیدا شود
     }
@@ -32581,11 +32713,16 @@ if($__sendAllShops && $__liveShops){
         $__resAll = bslUpsertManyShops($p, $__liveShops, $__shopOpts, $__conc);
         foreach($__resAll as $__vid=>$__res){
             $__vid=(int)$__vid;
-            if(!isset($__shopStat[$__vid])) $__shopStat[$__vid]=['c'=>0,'u'=>0,'f'=>0];
+            if(!isset($__shopStat[$__vid])) $__shopStat[$__vid]=['c'=>0,'u'=>0,'f'=>0,'s'=>0];
             if(!empty($__res['ok'])){
                 if(($__res['action']??'')==='created'){ $__shopStat[$__vid]['c']++; bslShopStatBump($__vid,(string)($__shopName[$__vid]??''),'c'); }
+                /* v10.33 (۴۶): «بی‌تغییر» موفقیت است ولی آپدیت نیست. اگر
+                   جزو آپدیت‌ها بشماریمش، گزارش می‌گوید ۳۰۰۰ محصول به‌روز
+                   شد در حالی که فقط ۴۰ تا واقعاً نوشته شده — یعنی همان
+                   عددی که کاربر به آن نگاه می‌کند دروغ می‌شود. */
+                elseif(!empty($__res['skipped'])){ $__shopStat[$__vid]['s']++; }
                 else                                  { $__shopStat[$__vid]['u']++; bslShopStatBump($__vid,(string)($__shopName[$__vid]??''),'u'); }
-                $updated++;
+                if(empty($__res['skipped'])) $updated++;
             } elseif(!empty($__res['stopped'])||($__res['error']??'')==='stopped'){
                 // v10.20: توقفِ خواستهٔ کاربر «خطا» نیست — نه شمرده می‌شود نه
                 // در گزارشِ ناموفق‌ها می‌نشیند، وگرنه هر توقف چند ردیفِ قرمزِ
@@ -32607,7 +32744,8 @@ if($__sendAllShops && $__liveShops){
             $__brk=[];
             foreach($__shopStat as $__bv=>$__bs){
                 $__bn=trim((string)($__shopName[$__bv]??'')); if($__bn==='')$__bn='#'.$__bv;
-                $__brk[]=$__bn.' '.$__bs['c'].'+'.$__bs['u'].($__bs['f']?'/✗'.$__bs['f']:'');
+                $__brk[]=$__bn.' '.$__bs['c'].'+'.$__bs['u']
+                    .(!empty($__bs['s'])?'⏭'.$__bs['s']:'').($__bs['f']?'/✗'.$__bs['f']:'');
             }
             bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,mb_substr(trim($p['title']??''),0,30),
                 "🚚 چندغرفه‌ای: $__msDone/$total محصول — ".implode(' · ',$__brk));
@@ -32616,9 +32754,10 @@ if($__sendAllShops && $__liveShops){
     }
     foreach($__shopStat as $__vid=>$__st){
         $__nm=trim((string)($__shopName[$__vid]??'')); $__nm=$__nm!==''?$__nm.' (#'.$__vid.')':'#'.$__vid;
-        if($__st['c']||$__st['u']||$__st['f'])
+        if($__st['c']||$__st['u']||$__st['f']||!empty($__st['s']))
             bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',
-                "🏪 غرفهٔ $__nm: {$__st['c']} ساخته، {$__st['u']} آپدیت، {$__st['f']} خطا");
+                "🏪 غرفهٔ $__nm: {$__st['c']} ساخته، {$__st['u']} آپدیت، "
+                .(!empty($__st['s'])?"{$__st['s']} بی‌تغییر، ":"")."{$__st['f']} خطا");
         else
             /* v10.32 (۴۵و): غرفه‌ای که صفرِ مطلق خورده مهم‌ترین چیزی است که
                باید دیده شود — یعنی توکن/شناسه‌اش ایراد دارد. سکوت در این
@@ -44691,6 +44830,28 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.33', t:'⏭ محصولی که تغییر نکرده، دیگر بی‌دلیل آپدیت نمی‌شود', items:[
+    '🧨 <b>مشکلی که داشتید.</b> هر بار که ارسال می‌زدید، برنامه برای',
+    '   <i>تک‌تکِ</i> محصولاتِ موجود در غرفه یک درخواستِ آپدیت می‌فرستاد —',
+    '   حتی وقتی نه قیمت عوض شده بود نه موجودی. روی ۳۰۰۰ محصول که فقط',
+    '   ۴۰ تایش قیمتِ تازه داشت، یعنی ۳۰۰۰ درخواست برای انجامِ ۴۰ کار.',
+    '   همین بود که ارسال را کُند می‌کرد و روی هاستِ اشتراکی وسطِ راه',
+    '   به تایم‌اوت می‌خورد.',
+    '❶ <b>حالا آخرین قیمتی که فرستاده‌ایم را یادمان می‌ماند.</b> اگر این بار',
+    '   قیمت و موجودی دقیقاً همان باشد، آن محصول رد می‌شود و هیچ درخواستی',
+    '   برایش نمی‌رود. در اجراهای روزمره که معمولاً چند درصدِ قیمت‌ها عوض',
+    '   می‌شود، حجمِ کار چند برابر کمتر می‌شود.',
+    '❷ <b>در گزارش هم صادقانه دیده می‌شود.</b> این محصولات جزو «آپدیت‌شده»',
+    '   شمرده نمی‌شوند؛ ستونِ جداگانهٔ «بی‌تغییر» دارند. پس عددِ آپدیت که',
+    '   می‌بینید، یعنی واقعاً همان‌قدر محصول در غرفه تغییر کرده.',
+    '❸ <b>هفته‌ای یک‌بار بازبینیِ اجباری.</b> این حافظه آینهٔ کارِ خودِ ماست،',
+    '   نه خودِ باسلام. اگر قیمتی را دستی از پنلِ باسلام عوض کنید، برنامه',
+    '   خبر ندارد. برای اینکه چنین اختلافی برای همیشه نماند، هر محصول',
+    '   دست‌کم هفته‌ای یک‌بار به‌هرحال آپدیت می‌شود تا خودبه‌خود جوش بخورد.',
+    '⛑ <b>محتاطانه عمل می‌کند.</b> محصولی که هنوز قیمتِ ثبت‌شده‌ای برایش',
+    '   نداریم (یعنی از قبلِ این نسخه مانده)، مثل گذشته آپدیت می‌شود.',
+    '   پرش فقط وقتی رخ می‌دهد که مطمئن باشیم چیزی عوض نشده.',
+  ]},
   {v:'10.32', t:'🔒 استخراج دیگر روی هم نمی‌افتد و بایگانی گزارش دارد', items:[
     '🧨 <b>مشکلی که داشتید.</b> وقتی یک استخراج در حالِ اجرا بود و کرانِ خودکار',
     '   یا کلیکِ دوباره یک استخراجِ تازه شروع می‌کرد، هر دو روی یک فایلِ',
