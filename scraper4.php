@@ -242,8 +242,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.37';
-const APP_VERSION_DATE = '1405/06/02';
+const APP_VERSION = '10.38';
+const APP_VERSION_DATE = '1405/06/03';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -15550,9 +15550,18 @@ if (isset($_GET['digest']) && !isset($_GET['bsl_notify_selected'])) {
 if (isset($_GET['retire_run'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $cn  = loadConnections();
-    $key = (string)($_GET['profile'] ?? '');
+    $key = trim((string)($_GET['profile'] ?? ''));
     $dry = !isset($_GET['dry']) || $_GET['dry'] !== '0';   // پیش‌فرض: فقط پیش‌نمایش
     $profiles = loadProfiles();
+    /* v10.38 (۵۱الف): کشویی «انتخاب سایت» مقدارش URL است نه کلیدِ پروفایل
+       (renderProfileDropdown: opt.value = p.url)، ولی اینجا کلید لازم بود.
+       نتیجه: هر «پیش‌نمایش» با «پروفایل نامعتبر» رد می‌شد و کلِ بازنشستگیِ
+       دستی از کار افتاده بود. حالا هر دو شکل پذیرفته می‌شود — درست مثل
+       ?load_profile که از همان اول URL را با profileKey() تبدیل می‌کرد. */
+    if ($key !== '' && !isset($profiles[$key])) {
+        $_rkAlt = profileKey($key);
+        if ($_rkAlt !== '' && isset($profiles[$_rkAlt])) $key = $_rkAlt;
+    }
     if ($key === '' || !isset($profiles[$key])) {
         echo json_encode(['ok' => false, 'error' => 'پروفایل نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
     }
@@ -22916,6 +22925,10 @@ if (isset($_GET['selftest'])) {
          version_compare(APP_VERSION, '10.' . '37', '>=')
       && strpos($selfSrc, 'v:' . "'10.37'") !== false);
 
+    $add('10.38', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '38', '>=')
+      && strpos($selfSrc, 'v:' . "'10.38'") !== false);
+
     /* ═══════════════════ v10.35 (۴۷) ═══════════════════
        الف) دفترچه per-vendor · ب) کشِ کاتالوگ · ج) بایگانیِ مقصدمحور
        د) گزارشِ کاملِ همگام‌سازی · ه) دکمهٔ همگام‌سازیِ دستی
@@ -23081,6 +23094,56 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "\$res['confirm_token'] = retirePlanSave(") !== false
       && strpos($selfSrc, 'function retireApply(token,n)') !== false
       && strpos($selfSrc, "'?retire_run=1&dry=0&confirm='") !== false);
+
+    /* ---------- ۵۱: بازنشستگی — تطبیقِ کلید و مالکیت ---------- */
+    /* ادعای رفتاری: کشویی URL می‌دهد، سرور کلید می‌خواهد. هر دو باید به یک
+       کلید برسند، وگرنه «پروفایل نامعتبر» برمی‌گردد و کلِ بازنشستگی می‌خوابد. */
+    $add('10.38', 'URL و کلیدِ پروفایل به یک کلیدِ یکسان نرمال می‌شوند',
+         profileKey('https://shop.example.com/products') === 'shop.example.com_products'
+      && profileKey('https://shop.example.com/products/') === 'shop.example.com_products');
+
+    /* مالکیت: ردیفی که صف با URL ثبت کرده، برای همان پروفایل «خودی» است. */
+    $add('10.38', 'مالکیتِ دفترچه با مالکِ URL و پرسشِ کلیدی جور درمی‌آید',
+         (function () {
+             $bak = is_file(REMOTEMAP_FILE) ? @file_get_contents(REMOTEMAP_FILE) : null;
+             @file_put_contents(REMOTEMAP_FILE, json_encode(['bsl' => ['k51' =>
+                 ['id' => 777, 'profile' => 'https://s51.example.com/p', 'at' => time()]]]));
+             remoteMapCacheClear();
+             $same  = retireOwnership('bsl', 'k51', 's51.example.com_p');
+             $other = retireOwnership('bsl', 'k51', 'other.example.com_x');
+             if ($bak !== null) @file_put_contents(REMOTEMAP_FILE, $bak, LOCK_EX);
+             else @unlink(REMOTEMAP_FILE);
+             remoteMapCacheClear();
+             return !empty($same['known']) && !empty($same['owned']) && (int)$same['id'] === 777
+                 && !empty($other['known']) && empty($other['owned']);
+         })());
+
+    /* نوشتنِ دفترچه هم باید مالک را به شکلِ کلید ذخیره کند، نه URL خام. */
+    $add('10.38', 'دفترچه مالکیت را به شکلِ کلید ذخیره می‌کند نه URL',
+         (function () {
+             $bak = is_file(REMOTEMAP_FILE) ? @file_get_contents(REMOTEMAP_FILE) : null;
+             @unlink(REMOTEMAP_FILE); remoteMapCacheClear();
+             remoteMapRecord('woo', [['key' => 'k51w', 'remote_id' => 42, 'title' => 'ت']],
+                 'https://s51.example.com/p');
+             $row = remoteMapLoad()['woo']['k51w'] ?? [];
+             if ($bak !== null) @file_put_contents(REMOTEMAP_FILE, $bak, LOCK_EX);
+             else @unlink(REMOTEMAP_FILE);
+             remoteMapCacheClear();
+             return ($row['profile'] ?? '') === 's51.example.com_p';
+         })());
+
+    /* گزارشِ بایگانی: نوشتن و خواندن باید رفت‌وبرگشت کند و تازه‌ترین بالا باشد. */
+    $add('10.38', 'لاگِ بایگانی رفت‌وبرگشت می‌کند و تازه‌ترین را بالا می‌گذارد',
+         (function () {
+             $bak = is_file(RETIRE_LOG_FILE) ? @file_get_contents(RETIRE_LOG_FILE) : null;
+             @unlink(RETIRE_LOG_FILE);
+             retireLogAdd([['title' => 'کهنه', 'mode' => 'draft', 'at' => time() - 60]]);
+             retireLogAdd([['title' => 'تازه', 'mode' => 'delete', 'at' => time()]]);
+             $items = retireLogRead()['items'] ?? [];
+             if ($bak !== null) @file_put_contents(RETIRE_LOG_FILE, $bak, LOCK_EX);
+             else @unlink(RETIRE_LOG_FILE);
+             return count($items) === 2 && ($items[0]['title'] ?? '') === 'تازه';
+         })());
 
     /* ---------- ۴۷د: گزارشِ کاملِ همگام‌سازی ---------- */
     $add('10.35', 'توابعِ گزارشِ همگام‌سازی و ثابت‌هایش موجودند',
@@ -27737,7 +27800,15 @@ function retireOwnership(string $target, string $productKey, string $profileKey)
     /* مالکِ ثبت‌نشده یعنی ردیفِ قدیمیِ پیش از ثبتِ پروفایل — مانع نمی‌شویم،
        چون در آن دوره هیچ پروفایلی ثبت نمی‌شد و بلاک‌کردنش یعنی بازنشستگی
        برای همهٔ کاربرانِ قدیمی از کار بیفتد. */
-    if ($owner !== '' && $profileKey !== '' && $owner !== $profileKey) $out['owned'] = false;
+    /* v10.38 (۵۱ب): صف‌های ووکامرس/باسلام مقدارِ خامِ کشویی را به‌عنوان
+       profile_key در دفترچه ثبت می‌کنند و آن مقدار URL است، نه کلید. پس
+       ردیف‌های واقعی «مالک = URL» دارند و مقایسه با کلید همیشه نابرابر
+       می‌شد ⇒ همه چیز «مالِ پروفایلِ دیگر» و هیچ‌وقت هیچ چیز بایگانی
+       نمی‌شد. هر دو شکل را به کلید نرمال می‌کنیم و بعد مقایسه. */
+    $_own = $owner; $_ask = $profileKey;
+    if ($_own !== '' && strpos($_own, '://') !== false) { $_k = profileKey($_own); if ($_k !== '') $_own = $_k; }
+    if ($_ask !== '' && strpos($_ask, '://') !== false) { $_k = profileKey($_ask); if ($_k !== '') $_ask = $_k; }
+    if ($_own !== '' && $_ask !== '' && $_own !== $_ask) $out['owned'] = false;
     return $out;
 }
 
@@ -27856,6 +27927,14 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
             }
         }
 
+        /* v10.38 (۵۱ج): تا اینجا اگر مقصد باسلام بود ولی توکن/شناسهٔ غرفه
+           تنظیم نبود، این شاخه بی‌صدا رد می‌شد: نه فیلدی در ردیف، نه
+           شمارنده‌ای، نه پیامی. کاربر فقط می‌دید «۲ بررسی‌شده، ۰ آماده» و
+           هیچ سرنخی نداشت. حالا صریح گفته می‌شود. */
+        if (($target === 'bsl' || $target === 'both') && ($tk === '' || $vid <= 0)) {
+            $row['bsl'] = 'اتصالِ باسلام تنظیم نیست (توکن/شناسهٔ غرفه)';
+            $out['no_conn'] = ($out['no_conn'] ?? 0) + 1;
+        }
         if (($target === 'bsl' || $target === 'both') && $tk !== '' && $vid > 0) {
             /* v10.35 (۴۷ج): همان منطقِ مالکیت برای باسلام. کلیدِ غرفهٔ
                پیش‌فرض خودِ productKey است (bslShopMapKey)، پس همین کافی است. */
@@ -28124,6 +28203,14 @@ function remoteMapSave(array $m): bool {
  */
 function remoteMapRecord(string $target, array $rows, string $profileKey = ''): int {
     if ($target !== 'woo' && $target !== 'bsl') return 0;
+    /* v10.38 (۵۱ب): فراخوان‌ها این را از مقدارِ خامِ کشویی می‌گیرند که URL
+       است. مالکیت را همیشه به شکلِ کلید ذخیره کن تا مقایسهٔ بعدی در
+       retireOwnership درست باشد و ردیف‌های تازه دیگر کج ثبت نشوند. */
+    $profileKey = trim($profileKey);
+    if ($profileKey !== '' && strpos($profileKey, '://') !== false) {
+        $_pk = profileKey($profileKey);
+        if ($_pk !== '') $profileKey = $_pk;
+    }
     $add = [];
     foreach ($rows as $r) {
         if (!is_array($r)) continue;
@@ -47403,6 +47490,30 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.38', t:'🗃 بایگانی/بازنشستگیِ باسلام دوباره کار می‌کند — سه باگِ زنجیره‌ای', items:[
+    '🧨 <b>عذرخواهی — بایگانی «هیچ‌جا» کار نمی‌کرد و حق با شما بود.</b>',
+    '   دکمهٔ «پیش‌نمایش» همیشه <b>«پروفایل نامعتبر»</b> می‌داد و «گزارشِ',
+    '   بایگانی‌شده‌ها» همیشه <b>«هنوز چیزی بایگانی نشده است»</b>. این دو یک',
+    '   باگ نبودند؛ یک زنجیره بودند.',
+    '① <b>ریشه:</b> کشویی «انتخاب سایت» مقدارش <b>نشانیِ سایت</b> است، ولی',
+    '   سرورِ بازنشستگی <b>کلیدِ پروفایل</b> می‌خواست. بقیهٔ صفحه این تبدیل را',
+    '   انجام می‌داد و فقط همین مسیر جا افتاده بود؛ برای همین درخواست قبل از',
+    '   هر کاری رد می‌شد. حالا هر دو شکل پذیرفته می‌شود.',
+    '② <b>باگِ دوم — و بدترشان:</b> فقط با رفعِ مورد یک هم باز هیچ‌چیز بایگانی',
+    '   نمی‌شد. دفترچهٔ محصولات، مالکِ هر محصول را با <b>نشانی</b> ثبت می‌کرد',
+    '   ولی بازنشستگی آن را با <b>کلید</b> می‌سنجید. چون این دو هیچ‌وقت برابر',
+    '   نمی‌شدند، همهٔ محصولات «مالِ پروفایلِ دیگر — دست نخورد» علامت می‌خوردند',
+    '   و شمارِ آماده صفر می‌ماند. حالا هر دو طرف به یک شکل سنجیده می‌شوند و',
+    '   ثبت‌های تازه هم درست ذخیره می‌شوند؛ ردیف‌های قدیمیِ کج هم خوانده می‌شوند.',
+    '③ <b>سکوتِ گمراه‌کننده:</b> اگر مقصد باسلام بود ولی توکن یا شناسهٔ غرفه',
+    '   تنظیم نبود، آن مرحله بی‌هیچ پیامی رد می‌شد و شما فقط «۰ مورد آماده»',
+    '   می‌دیدید. حالا صریح می‌نویسد «اتصالِ باسلام تنظیم نیست».',
+    '✅ <b>نتیجه:</b> پیش‌نمایش فهرست و دکمهٔ «تأیید و اجرا» را می‌دهد، اجرا',
+    '   انجام می‌شود و همان لحظه در «گزارشِ بایگانی‌شده‌ها» ثبت می‌گردد. آن',
+    '   گزارش از اول سالم بود — فقط چون هیچ اجرایی موفق نمی‌شد، خالی می‌ماند.',
+    '🛡 «اقدامِ بازنشستگی» همچنان پیش‌فرض روی <b>«کاری نکن»</b> است؛ تا خودتان',
+    '   انتخاب نکنید هیچ محصولی دست نمی‌خورد و اجرای واقعی هم تأییدِ جدا دارد.',
+  ]},
   {v:'10.37', t:'🗂 کارت‌های کشوییِ مدیرِ وظیفه · 🧮 جدولِ مرتبِ نتایجِ تست با سربرگِ مرتب‌کننده', items:[
     '🧨 <b>عذرخواهی — نظمِ جدولِ نتایجِ تست را خودِ نسخهٔ قبل به‌هم ریخته بود.</b>',
     '   در v10.36 برای اینکه نامِ بلندِ مدل‌ها حداکثر دو خط شود، قاعدهٔ',
@@ -51611,7 +51722,10 @@ function updateStallBadge(){
  */
 function retirePreview(){
   const box=$('retireR');
-  const key=$('profileSelect')?$('profileSelect').value:'';
+  /* v10.38 (۵۱الف): مقدارِ کشویی URL است؛ سرور کلیدِ پروفایل می‌خواهد.
+     تبدیل نکردن همان باگی بود که همیشه «پروفایل نامعتبر» می‌داد. */
+  const _pv=$('profileSelect')?$('profileSelect').value:'';
+  const key=_pv&&_pv.indexOf('://')>=0?(profileKey(_pv)||_pv):_pv;
   if(!key){if(box)box.innerHTML='<div style="color:#fca5a5;font-size:11px">اول یک پروفایل انتخاب کنید</div>';return;}
   const mode=$('retireMode')?$('retireMode').value:'draft';
   if(mode==='off'){if(box)box.innerHTML='<div style="color:#94a3b8;font-size:11px">اقدام روی «کاری نکن» است</div>';return;}
@@ -51657,7 +51771,10 @@ function retirePreview(){
 /* v10.35 (۴۷ج): اجرای واقعیِ بازنشستگی — فقط با توکنِ همان پیش‌نمایش */
 function retireApply(token,n){
   const box=$('retireR');
-  const key=$('profileSelect')?$('profileSelect').value:'';
+  /* v10.38 (۵۱الف): مقدارِ کشویی URL است؛ سرور کلیدِ پروفایل می‌خواهد.
+     تبدیل نکردن همان باگی بود که همیشه «پروفایل نامعتبر» می‌داد. */
+  const _pv=$('profileSelect')?$('profileSelect').value:'';
+  const key=_pv&&_pv.indexOf('://')>=0?(profileKey(_pv)||_pv):_pv;
   if(!key||!token)return;
   if(!confirm('اجرای واقعی روی '+toFa(n)+' محصول؟\n\n'
      +'اقدامی که در بالا انتخاب کرده‌اید اعمال می‌شود. '
