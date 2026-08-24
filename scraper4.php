@@ -202,6 +202,39 @@ const AUTOREPLY_LOG_FILE   = __DIR__ . '/autoreply_log.json';         // v8.64
 // v8.65: دفترچهٔ «کلید محصول ↔ شناسهٔ مقصد». تطبیق با عنوان شکننده است؛
 // محصولی که در مقصد تغییر نام بدهد دیگر پیدا نمی‌شود. شناسه هرگز عوض نمی‌شود.
 const REMOTEMAP_FILE = __DIR__ . '/remote_map.json';                  // v8.65
+/* =====================================================================
+   v10.35 (۴۷الف): دفترچهٔ نگاشت، یک فایلِ جدا برای هر غرفه.
+
+   خواستهٔ کاربر: «برای هر غرفه یک فایلِ جداگانه در نظر بگیر تا تداخل
+   به‌وجود نیاید».
+
+   چرا واقعاً لازم بود: remote_map.json یک فایلِ مشترک بود و هر ثبت،
+   *کلِ* فایل را بازنویسی می‌کرد. وقتی ارسال به دو غرفه هم‌زمان جلو
+   می‌رفت (یا کران و دکمهٔ دستی با هم)، هر نویسنده نسخه‌ای را می‌نوشت که
+   پیش از شروعِ کارِ دیگری خوانده بود — یعنی شناسه‌های تازهٔ غرفهٔ دیگر
+   بی‌صدا پاک می‌شدند. نتیجه‌اش این بود که محصول «گم» می‌شد و دفعهٔ بعد
+   دوباره از آبشارِ گران‌قیمتِ جست‌وجو رد می‌شد یا بدتر، تکراری ساخته
+   می‌شد.
+
+   حالا هر غرفهٔ غیرپیش‌فرض shardِ خودش را دارد و نوشتنِ غرفهٔ ۷ هیچ
+   بایتی از غرفهٔ ۹ را لمس نمی‌کند. فایلِ قدیمی همچنان shardِ صفر است
+   (ووکامرس + غرفهٔ پیش‌فرض) و ردیف‌های #v قدیمی در اولین خواندن به
+   shardِ خودشان کوچ می‌کنند — بدون هیچ کارِ دستی از سمتِ کاربر. */
+const REMOTEMAP_VENDOR_PREFIX = __DIR__ . '/remote_map_v';
+const REMOTEMAP_MAX_ROWS = 20000;
+/* v10.35 (۴۷ب): کشِ کاتالوگِ غرفه — جایگزینِ آبشارِ پرهزینهٔ جست‌وجو.
+   یک بار کلِ فهرستِ غرفه خوانده می‌شود و تا TTL در همین فایل می‌ماند؛
+   بعد از آن پیدا کردنِ «آیا این محصول در غرفه هست؟» بدونِ هیچ درخواستی
+   انجام می‌شود. شیر اطمینان: TTL و بازسازیِ دستی. */
+const BSL_CATALOG_PREFIX   = __DIR__ . '/bsl_catalog_v';
+const BSL_CATALOG_TTL      = 21600;   // ۶ ساعت
+const BSL_CATALOG_MAX_PAGES = 60;     // سقفِ ۶۰۰۰ محصول در هر غرفه
+/* v10.35 (۴۷د/ه): همگام‌سازیِ دستی — کارِ پس‌زمینه با ردیفِ خودش در مدیر
+   وظیفه، و گزارشِ کاملِ ماندگارِ هر همگام‌سازی. */
+const MANUAL_SYNC_PROGRESS_FILE = __DIR__ . '/manual_sync_progress.json';
+const MANUAL_SYNC_STOP_FILE     = __DIR__ . '/manual_sync_stop.json';
+const SYNC_REPORT_FILE          = __DIR__ . '/sync_report.json';
+const SYNC_REPORT_KEEP          = 200;
 /* v9.16: بکاپ کامل پوشه روی گیت‌هاب.
    BACKUP_CFG رمز و مخزن را نگه می‌دارد (هرگز داخل کد نوشته نمی‌شود). */
 const BACKUP_CFG_FILE  = __DIR__ . '/.backup-config.json';
@@ -209,8 +242,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.34';
-const APP_VERSION_DATE = '1405/06/09';
+const APP_VERSION = '10.35';
+const APP_VERSION_DATE = '1405/06/02';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -5290,6 +5323,157 @@ function bslStatusQuery(): string {
     return $q;
 }
 
+/* =====================================================================
+ *  v10.35 (۴۷ب): کشِ کاتالوگِ غرفه — به‌جای آبشارِ جست‌وجو برای هر محصول
+ *
+ *  مشکل: bslFindExisting برای هر محصولی که در دفترچه نبود، تا پنج مرحله
+ *  جست‌وجو می‌رفت و در بدترین حالت ۲۰ صفحهٔ ۱۰۰تایی از غرفه را پیمایش
+ *  می‌کرد — یعنی تا ۲۴ درخواست برای *یک* محصول، و همهٔ این کار فقط برای
+ *  جوابِ «هست یا نیست». روی یک پروفایلِ چندهزارتایی این ده‌ها هزار
+ *  درخواست است؛ روی هاستِ اشتراکی یعنی تایم‌اوت.
+ *
+ *  کلیدِ ماجرا این است که آن آبشار هر بار *همان* داده را دوباره می‌گیرد:
+ *  فهرستِ محصولاتِ غرفه. پس یک بار کاملش را می‌گیریم و نگه می‌داریم.
+ *  با ۳۰۰۰ محصول، ۳۰ درخواست به‌جای ده‌ها هزار.
+ *
+ *  ⚠️ شیر اطمینان (خواستهٔ صریحِ کاربر در بندِ ۴۶): این کش آینهٔ کارِ
+ *  خودِ ماست و اگر کسی از پنلِ باسلام محصولی اضافه/حذف کند، از آن بی‌خبر
+ *  است. پس:
+ *    • TTL دارد (۶ ساعت) و بعد از آن خودبه‌خود از نو ساخته می‌شود.
+ *    • اگر کاتالوگ به سقفِ صفحه‌ها خورده باشد (partial)، «نبودن» در کش
+ *      هرگز به‌عنوانِ «وجود ندارد» پذیرفته نمی‌شود و آبشارِ کامل اجرا
+ *      می‌شود — یعنی بدترین حالتش رفتارِ نسخهٔ قبل است، نه بدتر.
+ *    • دکمهٔ بازسازیِ دستی هم هست (?bsl_catalog=rebuild).
+ * ===================================================================== */
+
+function bslCatalogFile(int $vid): string {
+    return BSL_CATALOG_PREFIX . max(0, $vid) . '.json';
+}
+
+/** کشِ روی دیسک را می‌خواند (بدون هیچ درخواستِ شبکه‌ای) */
+function bslCatalogRead(int $vid): array {
+    $f = bslCatalogFile($vid);
+    if (!is_file($f)) return [];
+    $d = json_decode((string)@file_get_contents($f), true);
+    if (!is_array($d) || !is_array($d['items'] ?? null)) return [];
+    return $d;
+}
+
+/** آیا کشِ این غرفه تازه است؟ */
+function bslCatalogFresh(int $vid, ?array $c = null): bool {
+    if ($c === null) $c = bslCatalogRead($vid);
+    if (!$c) return false;
+    $at = (int)($c['at'] ?? 0);
+    return $at > 0 && (time() - $at) <= (int)BSL_CATALOG_TTL;
+}
+
+/**
+ * کلِ فهرستِ محصولاتِ یک غرفه را می‌گیرد و به شکلِ «عنوانِ نرمال ⇒ شناسه»
+ * روی دیسک می‌نشاند.
+ * خروجی: ['ok','count','pages','partial','from'=>'cache|network']
+ */
+function bslCatalogBuild(string $tk, int $vid, bool $force = false): array {
+    if ($tk === '' || $vid <= 0) return ['ok' => false, 'error' => 'غرفهٔ نامعتبر'];
+    if (!$force) {
+        $c = bslCatalogRead($vid);
+        if (bslCatalogFresh($vid, $c))
+            return ['ok' => true, 'count' => (int)($c['count'] ?? 0), 'pages' => (int)($c['pages'] ?? 0),
+                    'partial' => !empty($c['partial']), 'from' => 'cache'];
+    }
+    $statuses = bslStatusQuery();
+    $items = []; $pages = 0; $partial = false;
+    for ($page = 1; $page <= (int)BSL_CATALOG_MAX_PAGES; $page++) {
+        $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=100&page=' . $page . $statuses);
+        if (empty($r['ok'])) {
+            /* شکستِ وسطِ راه ⇒ کشِ ناقص. ذخیره‌اش می‌کنیم (برای hitها مفید
+               است) ولی partial علامت می‌خورد تا «نبودن» هرگز قطعی نشود. */
+            $partial = true; break;
+        }
+        $rows = $r['body']['data'] ?? [];
+        if (!is_array($rows) || !$rows) break;
+        $pages++;
+        foreach ($rows as $row) {
+            if (!is_array($row)) continue;
+            $id = (int)($row['id'] ?? 0);
+            $t  = (string)($row['title'] ?? ($row['name'] ?? ''));
+            if ($id <= 0 || $t === '') continue;
+            $n = reconNormTitle($t);
+            if ($n !== '' && !isset($items[$n])) $items[$n] = $id;
+            /* بدونِ پسوندِ کد محصول هم ثبت می‌شود — همان تسامحی که آبشار
+               در آخرین مرحله‌اش داشت، وگرنه کش از آن ضعیف‌تر می‌شد. */
+            $n2 = reconNormTitle(stripProductCode($t));
+            if ($n2 !== '' && !isset($items[$n2])) $items[$n2] = $id;
+        }
+        $tp = (int)($r['body']['total_page'] ?? 1);
+        if ($page >= max(1, $tp)) break;
+        if ($page >= (int)BSL_CATALOG_MAX_PAGES) $partial = true;
+    }
+    $data = ['vendor_id' => $vid, 'at' => time(), 'pages' => $pages,
+             'count' => count($items), 'partial' => $partial, 'items' => $items];
+    @file_put_contents(bslCatalogFile($vid), json_encode($data, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    $GLOBALS['_bslCatalog'][$vid] = $data;
+    return ['ok' => true, 'count' => count($items), 'pages' => $pages,
+            'partial' => $partial, 'from' => 'network'];
+}
+
+/** کشِ غرفه، با کشِ درون‌پردازه‌ای تا در یک اجرا صدها بار از دیسک خوانده نشود */
+function bslCatalogGet(string $tk, int $vid, bool $build = true): array {
+    if (isset($GLOBALS['_bslCatalog'][$vid]) && bslCatalogFresh($vid, $GLOBALS['_bslCatalog'][$vid]))
+        return $GLOBALS['_bslCatalog'][$vid];
+    $c = bslCatalogRead($vid);
+    if (bslCatalogFresh($vid, $c)) { $GLOBALS['_bslCatalog'][$vid] = $c; return $c; }
+    if (!$build) return [];
+    bslCatalogBuild($tk, $vid, true);
+    return $GLOBALS['_bslCatalog'][$vid] ?? [];
+}
+
+/**
+ * پاسخِ کش به «این عنوان در این غرفه هست؟»
+ *   > 0  ⇒ شناسهٔ محصول
+ *   0    ⇒ کش می‌گوید نیست و *قابل اعتماد* است (کش کامل و تازه)
+ *   -1   ⇒ کش نمی‌داند (نبود، کهنه بود، یا ناقص بود) ⇒ آبشار را اجرا کن
+ */
+function bslCatalogLookup(string $tk, int $vid, string $title, bool $build = true): int {
+    if ($vid <= 0 || trim($title) === '') return -1;
+    $c = bslCatalogGet($tk, $vid, $build);
+    if (!$c || !is_array($c['items'] ?? null)) return -1;
+    foreach ([reconNormTitle($title), reconNormTitle(stripProductCode($title))] as $n) {
+        if ($n !== '' && isset($c['items'][$n])) return (int)$c['items'][$n];
+    }
+    return !empty($c['partial']) ? -1 : 0;
+}
+
+/** محصولِ تازه‌ساخته/تازه‌پیداشده را همان لحظه وارد کش می‌کند */
+function bslCatalogNote(int $vid, string $title, int $id): void {
+    if ($vid <= 0 || $id <= 0 || trim($title) === '') return;
+    $c = $GLOBALS['_bslCatalog'][$vid] ?? bslCatalogRead($vid);
+    if (!$c || !is_array($c['items'] ?? null)) return;
+    $ch = false;
+    foreach ([reconNormTitle($title), reconNormTitle(stripProductCode($title))] as $n) {
+        if ($n !== '' && ($c['items'][$n] ?? 0) !== $id) { $c['items'][$n] = $id; $ch = true; }
+    }
+    if (!$ch) return;
+    $c['count'] = count($c['items']);
+    $GLOBALS['_bslCatalog'][$vid] = $c;
+    @file_put_contents(bslCatalogFile($vid), json_encode($c, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/** پاک‌کردنِ کش — vid=0 یعنی همهٔ غرفه‌ها. خروجی: تعداد فایلِ پاک‌شده */
+function bslCatalogClear(int $vid = 0): int {
+    $GLOBALS['_bslCatalog'] = [];
+    if ($vid > 0) return @unlink(bslCatalogFile($vid)) ? 1 : 0;
+    $n = 0;
+    foreach (glob(BSL_CATALOG_PREFIX . '*.json') ?: [] as $f) if (@unlink($f)) $n++;
+    return $n;
+}
+
+/** شمارندهٔ صرفه‌جویی — چند بار کش جلوی آبشار را گرفت */
+function bslCatalogSaved(int $add = 0): int {
+    static $n = 0;
+    if ($add > 0) $n += $add;
+    return $n;
+}
+
 function bslFindExisting(string $tk, int $vid, string $title, string $productKey = ''): ?array {
     $q = bslNormalizeTitle($title);
     $statuses = bslStatusQuery();
@@ -5307,6 +5491,23 @@ function bslFindExisting(string $tk, int $vid, string $title, string $productKey
             return ['id' => $mapped, 'title' => $title, '__from_ledger' => true];
         }
     }
+    /* =================================================================
+       v10.35 (۴۷ب): گامِ دومِ ارزان — کشِ کاتالوگِ غرفه.
+
+       پیش از هر درخواستی، از فهرستی که یک بار گرفته‌ایم می‌پرسیم. سه
+       جوابِ ممکن دارد و هر سه معنی‌دارند:
+         شناسه ⇒ همان‌جا برمی‌گردیم (صفر درخواست)
+         «نیست» با کشِ کامل و تازه ⇒ محصول واقعاً در غرفه نیست، پس
+             آبشارِ ۵ مرحله‌ای هیچ چیزی پیدا نمی‌کند و فقط وقت می‌سوزاند
+         «نمی‌دانم» ⇒ دقیقاً مثل قبل ادامه می‌دهیم
+       ================================================================= */
+    $__cat = bslCatalogLookup($tk, $vid, $title);
+    if ($__cat > 0) {
+        bslCatalogSaved(1);
+        return ['id' => $__cat, 'title' => $title, '__from_catalog' => true];
+    }
+    if ($__cat === 0) { bslCatalogSaved(1); return null; }
+
     /* v8.79: پارامتر درست «title» است نه «search». باسلام پارامتر ناشناخته
        را بی‌صدا نادیده می‌گیرد، پس تا حالا این درخواست یک صفحهٔ دلخواه از
        غرفه را برمی‌گرداند و تطبیق عنوان تقریباً همیشه شکست می‌خورد. همین
@@ -10460,7 +10661,7 @@ if (isset($_POST['ai_net'])) {
 
 if (isset($_POST['baleh'])) { $bl = json_decode($_POST['baleh'], true) ?: []; $conn['baleh'] = ['enabled'=>!empty($bl['enabled']),'token'=>trim($bl['token']??''),'chat_id'=>trim($bl['chat_id']??'')]; }
 if (isset($_POST['rubika'])) { $rb = json_decode($_POST['rubika'], true) ?: []; $conn['rubika'] = ['enabled'=>!empty($rb['enabled']),'token'=>trim($rb['token']??''),'chat_id'=>trim($rb['chat_id']??'')]; }
-if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund']),'src_price'=>!empty($ne['src_price']),'src_stock'=>!empty($ne['src_stock']),'run_fail'=>!empty($ne['run_fail']),'retire'=>!empty($ne['retire']),'cron_ping'=>!empty($ne['cron_ping'])]; }
+if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund']),'src_price'=>!empty($ne['src_price']),'src_stock'=>!empty($ne['src_stock']),'run_fail'=>!empty($ne['run_fail']),'retire'=>!empty($ne['retire']),'cron_ping'=>!empty($ne['cron_ping']),/* v10.35 (۴۷د): گزارشِ همگام‌سازی — پیش‌فرض روشن، پس نبودِ کلید یعنی روشن */'sync_report'=>!isset($ne['sync_report'])||!empty($ne['sync_report'])]; }
 // v8.34: تنظیمات بازنشستگی محصولات رفته از مبدأ
 if (isset($_POST['retire_mode'])) {
     $rm = (string)$_POST['retire_mode'];
@@ -12104,6 +12305,11 @@ function bslShopMapRecord(array $p, array $shop, int $remoteId, string $title,
     if ($priceRial > 0) $row['price_rial'] = $priceRial;
     if ($stock >= 0)    $row['stock'] = $stock;
     remoteMapRecord('bsl', [$row]);
+    /* v10.35 (۴۷ب): کشِ کاتالوگ هم همان لحظه به‌روز شود. بدونِ این، محصولی
+       که همین حالا ساختیم تا پایانِ TTL در کش «نیست» می‌ماند و اگر در
+       همان اجرا دوباره سراغش برویم، مسیرِ «ایجاد» می‌رفت و باسلام خطای
+       نام تکراری می‌داد. */
+    bslCatalogNote((int)($shop['vendor_id'] ?? 0), $title, $remoteId);
 }
 
 /* =====================================================================
@@ -12169,6 +12375,12 @@ function bslShopsFindExistingMulti(string $title, string $productKey, array $sho
         $mk = bslShopMapKey($productKey, $sh);
         $known = $mk !== '' ? (int)($map[$mk]['id'] ?? 0) : 0;
         if ($known > 0) { $ids[$vid] = $known; continue; }
+        /* v10.35 (۴۷ب): پیش از فرستادنِ درخواست، از کشِ کاتالوگِ همان غرفه
+           بپرس. کشِ کاملِ تازه هم «هست» را جواب می‌دهد و هم «نیست» — و
+           «نیست» یعنی این غرفه اصلاً لازم نیست در موجِ درخواست‌ها باشد. */
+        $hit = bslCatalogLookup((string)$sh['token'], $vid, $title);
+        if ($hit > 0)  { $ids[$vid] = $hit; bslCatalogSaved(1); continue; }
+        if ($hit === 0) { bslCatalogSaved(1); continue; }
         $need[$vid] = $sh;
     }
     if ($need) {
@@ -12355,6 +12567,7 @@ function bslUpsertManyShops(array $p, array $shops, array $opts, int $conc = 4):
                می‌شود و پرشِ دفعهٔ بعد هیچ‌وقت اتفاق نمی‌افتد. */
             if ($mk !== '') $rows[] = ['key' => $mk, 'remote_id' => $rid, 'title' => $title,
                                        'price_rial' => (int)($prices[$vid] ?? 0), 'stock' => $stock];
+            bslCatalogNote((int)$vid, $title, (int)$rid);   // v10.35 (۴۷ب)
         }
         if ($rows) remoteMapRecord('bsl', $rows);
     }
@@ -13820,6 +14033,61 @@ if (isCliRun()) {
     }
 }
 
+/* =====================================================================
+ *  v10.35 (۴۷ه): «همگام‌سازیِ دستی» — یک دکمه، کلِ زنجیره
+ *
+ *  ?manual_sync=1&profile=<key>[&force=1]
+ *
+ *  کاری که می‌کند: پرچمِ کار را می‌گذارد و بعد دقیقاً همان چرخهٔ کران را
+ *  اجرا می‌کند (استخراج ⇒ بازنشستگی ⇒ صف‌سازی ⇒ ارسال ⇒ گزارش). چون از
+ *  همان مسیر رد می‌شود، هر بهبودی که به کران داده شود خودبه‌خود اینجا هم
+ *  هست و هیچ‌وقت دو رفتارِ متفاوت پیدا نمی‌کنند.
+ *
+ *  ?manual_sync_stop=1 سیگنالِ توقف می‌گذارد؛ حلقه بینِ دو پروفایل و
+ *  ارسال‌کننده‌ها در اولین بررسی می‌ایستند.
+ * ===================================================================== */
+if (isset($_GET['manual_sync_stop'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @file_put_contents(MANUAL_SYNC_STOP_FILE, json_encode(['at' => time()]));
+    echo json_encode(['ok' => true, 'stopped' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (isset($_GET['manual_sync_status'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode(['ok' => true, 'progress' => readProgress(MANUAL_SYNC_PROGRESS_FILE)],
+        JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (isset($_GET['manual_sync'])) {
+    /* اگر یک همگام‌سازیِ دستیِ زنده در جریان است، دومی راه نیفتد — وگرنه
+       دو پردازه روی یک فایلِ پیشرفت می‌نویسند و هیچ‌کدام قابلِ رصد نیست.
+       معیارِ «زنده» همان معیارِ همیشگی است: پیشرفتِ تازه. */
+    $_msPrev = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+    $_msAge  = time() - (int)($_msPrev['last_progress_ts'] ?? ($_msPrev['ts'] ?? 0));
+    if (!empty($_msPrev['running']) && empty($_msPrev['done']) && $_msAge < 300 && empty($_GET['takeover'])) {
+        header('Content-Type: application/json; charset=UTF-8');
+        echo json_encode(['ok' => false, 'busy' => true,
+            'error' => 'یک همگام‌سازیِ دستی همین حالا در حال اجراست'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    @unlink(MANUAL_SYNC_STOP_FILE);
+    $_msKey  = trim((string)($_GET['profile'] ?? ''));
+    $_msProf = $_msKey !== '' ? (loadProfiles()[$_msKey] ?? null) : null;
+    writeProgress(MANUAL_SYNC_PROGRESS_FILE, [
+        'running' => true, 'done' => false, 'cancelled' => false,
+        'phase' => 'شروع', 'started_at' => time(), 'ts' => time(),
+        'last_progress_ts' => time(),
+        'total' => 3, 'current' => 0,
+        'profile_key' => $_msKey,
+        'profile_name' => is_array($_msProf) ? (string)($_msProf['name'] ?? $_msKey) : $_msKey,
+        'recent_log' => ['▶ همگام‌سازیِ دستی شروع شد'], 'total_log_count' => 1,
+    ]);
+    /* از همین‌جا وارد مسیرِ کران می‌شویم — کپیِ منطق ممنوع */
+    $_GET['cron_run'] = '1';
+    $_GET['force']    = '1';
+    if ($_msKey !== '') $_GET['only'] = $_msKey;
+}
+
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
 header('Content-Type: application/json; charset=UTF-8');
 @set_time_limit(0);
@@ -13934,6 +14202,16 @@ if (is_file($cronLock) && $lockAge < $cronLockSec) {
         $results_lockReaped = true;
     }
 }
+/* v10.35 (۴۷ه): همگام‌سازیِ دستی پشتِ قفلِ کران معطل نمی‌ماند.
+
+   کاربر خودش دکمه را زده و انتظار دارد همین حالا کاری بشود؛ اگر پیامِ
+   «اجرای قبلی هنوز تمام نشده» بگیرد، دکمه از نظرِ او خراب است. خطرِ
+   هم‌پوشانی هم اینجا مهار شده: فیلترِ only فقط یک پروفایل را می‌گیرد و
+   محافظِ تکراریِ صف (queueHasProfile) جلوی صف‌شدنِ دوباره‌اش را می‌گیرد. */
+if ($lockAge < $cronLockSec && manualSyncActive()) {
+    $lockAge = PHP_INT_MAX;
+    $results_manualBypass = true;
+}
 if ($lockAge < $cronLockSec) {
     // v8.37: حتی وقتی به‌خاطر قفل رد می‌شویم هم پینگ بفرست — وگرنه یک قفلِ
     // گیرکرده دقیقاً شبیه «کران‌جاب اصلاً اجرا نمی‌شود» به نظر می‌رسد.
@@ -13983,8 +14261,14 @@ if ($lockAge < $cronLockSec) {
     cronEmit($lockOut);
     exit;
 }
-@file_put_contents($cronLock, (string)time());
-register_shutdown_function(function () use ($cronLock) { @unlink($cronLock); });
+/* v10.35 (۴۷ه): اجرای دستی که از قفل رد شده، نباید قفلِ اجرای زندهٔ کران
+   را بازنویسی و بعد در پایانِ کارِ خودش پاکش کند — آن‌وقت دو اجرا واقعاً
+   روی هم می‌افتادند. پس فقط اجرایی که قفل را «گرفته» آن را می‌نویسد و
+   برمی‌دارد. */
+if (empty($results_manualBypass)) {
+    @file_put_contents($cronLock, (string)time());
+    register_shutdown_function(function () use ($cronLock) { @unlink($cronLock); });
+}
 
 /* =====================================================================
    v10.21 (۳۴ج): «نبضِ کران» — علتِ قطع‌شدنِ اعلانِ دوره‌ای
@@ -14146,10 +14430,29 @@ if (!empty($wdEarly['extract_resume'])) {
     $syncState = loadSyncState();
 }
 
+/* =====================================================================
+   v10.35 (۴۷ه): «همگام‌سازیِ دستی» از همین مسیر رد می‌شود، نه از یک مسیرِ
+   موازی.
+
+   خواستهٔ کاربر: یک دکمه در تبِ شروع که کلِ فرآیند را از استخراج تا
+   ارسال اجرا کند. وسوسه‌انگیز بود که یک اندپوینتِ جدا نوشته شود، ولی
+   آن‌وقت دو نسخه از منطقِ «چه چیزی صف شود، با کدام تنظیمات، با کدام
+   محافظ» می‌داشتیم و دیر یا زود از هم واگرا می‌شدند — همان چیزی که در
+   v8.92 برای سه دکمهٔ استخراج اتفاق افتاده بود.
+
+   پس دکمهٔ دستی دقیقاً همین حلقه را اجرا می‌کند، فقط با دو تفاوت:
+     only=<key>  ⇒ فقط همان پروفایل
+     force=1     ⇒ گیتِ «هنوز نوبتش نشده» یک بار نادیده گرفته می‌شود
+   ===================================================================== */
+$_onlyKey  = trim((string)($_GET['only'] ?? ''));
+$_forceRun = !empty($_GET['force']);
 foreach ($profiles as $key => $profile) {
+if ($_onlyKey !== '' && $key !== $_onlyKey) continue;
+/* توقفِ دستی: بینِ دو پروفایل بررسی می‌شود تا کارِ نیمه‌کاره نماند */
+if (manualSyncActive() && manualSyncStopped()) { $results['manual_stopped'] = true; break; }
 $syncCfg = $profile['syncConfig'] ?? [];
 $pResult = ['key' => $key, 'name' => $profile['name'] ?? $key];
-if (empty($syncCfg['enabled'])) { $pResult['status'] = 'sync_disabled'; $results['profiles'][] = $pResult; continue; }
+if (empty($syncCfg['enabled']) && !$_forceRun) { $pResult['status'] = 'sync_disabled'; $results['profiles'][] = $pResult; continue; }
 $interval = (int)($syncCfg['interval'] ?? 3600);
 $lastRun = (int)($syncState[$key]['lastRun'] ?? 0);
 $target = $syncCfg['target'] ?? 'woo';
@@ -14157,7 +14460,8 @@ $target = $syncCfg['target'] ?? 'woo';
    مقدارِ none با هیچ‌کدام از شرط‌های woo/bsl/both جور درنمی‌آید، پس صف‌ها خالی
    می‌مانند. فقط برای اینکه گزارشِ کران روشن باشد، صریح علامت می‌زنیم. */
 if (!in_array($target, ['woo', 'bsl', 'both', 'none'], true)) $target = 'woo';
-if ($interval > 0 && ($now - $lastRun < $interval)) { $pResult['status'] = 'not_due'; $pResult['remaining'] = $interval - ($now - $lastRun); $results['profiles'][] = $pResult; continue; }
+/* v10.35 (۴۷ه): force=1 (همگام‌سازیِ دستی) گیتِ نوبت را یک بار رد می‌کند */
+if (!$_forceRun && $interval > 0 && ($now - $lastRun < $interval)) { $pResult['status'] = 'not_due'; $pResult['remaining'] = $interval - ($now - $lastRun); $results['profiles'][] = $pResult; continue; }
 /* v9.92: نوبت همین‌جا — پیش از هر کارِ طولانی — مصرف و روی دیسک ثبت شود.
    جزئیاتِ چرایی بالای cronMarkRun(). خلاصه: تا حالا lastRun فقط در مسیرِ
    کاملاً موفق ذخیره می‌شد، پس یک استخراجِ طولانی که هاست وسطش پردازه را
@@ -14167,6 +14471,9 @@ cronMarkRun($key, 'running');
 if (!isset($syncState[$key]) || !is_array($syncState[$key])) $syncState[$key] = [];
 $syncState[$key]['lastRun'] = $now;
 $pResult['status'] = 'syncing'; $pResult['target'] = $target;
+manualSyncProgress(['phase' => 'استخراج', 'current' => 1,
+    'last_title' => (string)($profile['name'] ?? $key)],
+    '🔎 استخراج: ' . (string)($profile['name'] ?? $key));   // v10.35 (۴۷ه)
 if ($target === 'none') { $pResult['send'] = 'disabled_by_target'; }
 /* v9.45: پروفایل‌های واردشده با اکسل/CSV — بدون استخراج، فقط آپدیت قیمت/موجودی.
    وقتی تیک «بدون استخراج» روشن است، مرحلهٔ استخراج (فهرست/جزئیات) کاملاً رد
@@ -14356,7 +14663,7 @@ if ($_auTargets) {
 if ($retireMode !== 'off' && !empty($exRes['removed_items'])) {
     $rt = retireRemoved($cn, $exRes['removed_items'], $_retireTarget, $retireMode,
                         (int)($exRes['extracted'] ?? 0), false, (string)($profile['name'] ?? $key),
-                        $_retirePer);
+                        $_retirePer, $key);   // v10.35 (۴۷ج): کلیدِ پروفایل برای بررسیِ مالکیت
     $pResult['retire'] = ['mode' => $retireMode, 'retired' => (int)($rt['retired'] ?? 0),
         'not_found' => (int)($rt['not_found'] ?? 0), 'failed' => (int)($rt['failed'] ?? 0)];
     if ($_retirePer !== null) {
@@ -14504,6 +14811,9 @@ if ($changedKeys !== null) {
     $pResult['catalog_size'] = count($orderedProducts);
 }
 
+manualSyncProgress(['phase' => 'صف‌سازی و ارسال', 'current' => 2],
+    '📤 آمادهٔ ارسال: ' . count($changedProducts) . ' از ' . count($orderedProducts));   // v10.35 (۴۷ه)
+
 if ($target === 'woo' || $target === 'both') {
 // v8.21: Queue products for WooCommerce (not just set sync state)
 // v8.39: با تیک «افزودن/آپدیت ووکامرس» فقط تغییرات ارسال می‌شود
@@ -14585,6 +14895,24 @@ $syncState[$key]['price_sig'] = $priceSig;
 /* v10.34 (۴۸ب): امضای ضرایبِ مقصد/غرفه هم ثبت شود تا ارسالِ کاملِ ناشی از
    تغییرِ ضریب فقط یک نوبت اجرا شود، نه در هر اجرای بعدی. */
 $syncState[$key]['shop_sig'] = $shopSig;
+/* =====================================================================
+   v10.35 (۴۷د): گزارشِ کاملِ همین پروفایل — یک بار ثبت، یک بار ارسال.
+
+   جای درستش دقیقاً همین‌جاست: بعد از اینکه استخراج، بازنشستگی و صف‌سازی
+   هر سه تصمیمشان را گرفته‌اند، ولی هنوز داخلِ حلقه‌ایم و $pResult کامل
+   است. اگر بیرونِ حلقه می‌گذاشتیم، اجرایی که وسطِ پروفایلِ دوم کشته
+   می‌شود هیچ گزارشی از پروفایلِ اول هم نمی‌داد. */
+try {
+    $_sr = syncReportBuild($pResult, manualSyncActive() ? 'manual' : 'cron', (int)$now);
+    $_srRes = syncReportEmit($cn, $_sr);
+    $pResult['report'] = ['logged' => (int)($_srRes['logged'] ?? 0)]
+        + (!empty($_srRes['skipped']) ? ['skipped' => $_srRes['skipped']] : []);
+    manualSyncProgress(['phase' => 'گزارش', 'current' => 3,
+        'summary' => mb_substr(syncReportText($_sr), 0, 400)],
+        '📄 گزارش ثبت و ارسال شد');
+} catch (Throwable $e) {
+    $pResult['report'] = ['error' => mb_substr($e->getMessage(), 0, 160)];
+}
 $results['profiles'][] = $pResult;
 }
 saveSyncState($syncState);
@@ -14680,6 +15008,25 @@ try {
    بعد از پایانِ رصد بتواند بخواندش.
    v9.06: حالا اتصال «همیشه» بسته است، پس همیشه همین مسیر است. خلاصه در
    cron_last_run.json می‌نشیند و با ?cron_last خوانده می‌شود. */
+/* v10.35 (۴۷ه): بستنِ ردیفِ همگام‌سازیِ دستی در مدیر وظیفه. باید *قبل* از
+   cronEmit باشد، چون آن تابع در مسیرِ CLI چیزی چاپ می‌کند و بعدش exit. */
+if (manualSyncActive()) {
+    $_msDone = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+    $_msDone['running']   = false;
+    $_msDone['done']      = true;
+    $_msDone['cancelled'] = !empty($results['manual_stopped']);
+    $_msDone['current']   = 3;
+    $_msDone['phase']     = !empty($results['manual_stopped']) ? 'متوقف شد' : 'تمام شد';
+    $_msDone['ts']        = time();
+    $_msDone['last_progress_ts'] = time();
+    $_msDone['profiles_done'] = count($results['profiles'] ?? []);
+    $_lg = is_array($_msDone['recent_log'] ?? null) ? $_msDone['recent_log'] : [];
+    $_lg[] = !empty($results['manual_stopped']) ? '⏹ با درخواستِ کاربر متوقف شد' : '✅ همگام‌سازیِ دستی تمام شد';
+    $_msDone['recent_log'] = array_slice($_lg, -40);
+    writeProgress(MANUAL_SYNC_PROGRESS_FILE, $_msDone);
+    @unlink(MANUAL_SYNC_STOP_FILE);
+    $results['manual_sync'] = true;
+}
 cronEmit($results);
 exit;
 }
@@ -15043,10 +15390,98 @@ if (isset($_GET['retire_run'])) {
             JSON_UNESCAPED_UNICODE); exit;
     }
     $items = $rep['removed_items'] ?? [];
-    $res = retireRemoved($cn, $items, $target, $mode, (int)($rep['extracted'] ?? 0), $dry, (string)($profile['name'] ?? $key));
+
+    /* =================================================================
+       v10.35 (۴۷ج): اجرای واقعی فقط با تأییدِ همان پیش‌نمایشی که دیده شد.
+
+       تا اینجا dry=0 مستقیم عمل می‌کرد. یعنی یک آدرسِ ساده در نوارِ
+       مرورگر می‌توانست ده‌ها محصول را حذف کند، بدون اینکه کسی فهرستش را
+       دیده باشد. حالا چرخه دو مرحله‌ای است:
+         ۱) پیش‌نمایش (پیش‌فرض) ⇒ فهرست + یک توکنِ یک‌بارمصرف
+         ۲) اجرا ⇒ dry=0 به‌علاوهٔ همان توکن (confirm=)
+       توکن یک ساعت اعتبار دارد و پس از مصرف باطل می‌شود، پس «تأیید» واقعاً
+       به همان فهرست گره خورده است نه به یک کلیکِ کور.
+       ================================================================= */
+    if (!$dry) {
+        $tokenIn = trim((string)($_GET['confirm'] ?? ''));
+        $plan = retirePlanTake($tokenIn);
+        if ($plan === null) {
+            echo json_encode(['ok' => false, 'need_confirm' => true,
+                'error' => 'برای اجرای واقعی، اول پیش‌نمایش بگیرید و بعد همان را تأیید کنید'],
+                JSON_UNESCAPED_UNICODE); exit;
+        }
+        if ((string)($plan['profile_key'] ?? '') !== $key) {
+            echo json_encode(['ok' => false,
+                'error' => 'این تأیید مالِ پروفایلِ دیگری است'], JSON_UNESCAPED_UNICODE); exit;
+        }
+        /* عمداً از فهرستِ خودِ نقشه استفاده می‌شود، نه از گزارشِ تازه: کاربر
+           همان فهرست را دیده و تأیید کرده. اگر بینِ دو مرحله استخراجِ
+           تازه‌ای اجرا شده باشد، نباید بی‌خبر چیزهای دیگری هم حذف شوند. */
+        $items  = is_array($plan['items'] ?? null) ? $plan['items'] : $items;
+        $mode   = (string)($plan['mode'] ?? $mode);
+        $target = (string)($plan['target'] ?? $target);
+    }
+
+    $res = retireRemoved($cn, $items, $target, $mode, (int)($rep['extracted'] ?? 0), $dry,
+                         (string)($profile['name'] ?? $key), null, $key);
     $res['ok'] = true; $res['profile'] = $profile['name'] ?? $key;
+    $res['profile_key'] = $key;
     $res['report_time'] = $newest;
+    if ($dry && empty($res['skipped'])) {
+        /* فقط چیزهایی که واقعاً «آماده» شده‌اند وارد نقشه می‌شوند — یعنی
+           مالکیتشان تأیید شده و روی مقصد پیدا شده‌اند. */
+        $ready = [];
+        foreach ($items as $it) {
+            if (!is_array($it)) continue;
+            $t = trim((string)($it['title'] ?? ''));
+            if ($t === '') continue;
+            foreach ($res['items'] as $ri) {
+                if (mb_substr($t, 0, 60) !== (string)($ri['title'] ?? '')) continue;
+                $okW = isset($ri['woo']) && strpos((string)$ri['woo'], 'آماده') === 0;
+                $okB = isset($ri['bsl']) && strpos((string)$ri['bsl'], 'آماده') === 0;
+                if ($okW || $okB) $ready[] = $it;
+                break;
+            }
+        }
+        $res['ready'] = count($ready);
+        if ($ready) $res['confirm_token'] = retirePlanSave(
+            ['profile_key' => $key, 'mode' => $mode, 'target' => $target, 'items' => $ready]);
+    }
     echo json_encode($res, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v10.35 (۴۷ب): مدیریتِ کشِ کاتالوگِ غرفه‌ها
+ *  ?bsl_catalog=1              → وضعیتِ کشِ همهٔ غرفه‌ها
+ *  ?bsl_catalog=1&rebuild=1    → بازسازیِ اجباری
+ *  ?bsl_catalog=1&clear=1      → پاک‌کردن
+ * ===================================================================== */
+if (isset($_GET['bsl_catalog'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(300);
+    if (!empty($_GET['clear'])) {
+        $n = bslCatalogClear((int)($_GET['vendor_id'] ?? 0));
+        echo json_encode(['ok' => true, 'cleared' => $n], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $cnC   = loadConnections();
+    $shops = bslAllShops($cnC);
+    $only  = (int)($_GET['vendor_id'] ?? 0);
+    $rows  = [];
+    foreach ($shops as $sh) {
+        $v = (int)($sh['vendor_id'] ?? 0);
+        if ($v <= 0 || ($only > 0 && $v !== $only)) continue;
+        if (!empty($_GET['rebuild'])) bslCatalogBuild((string)$sh['token'], $v, true);
+        $c = bslCatalogRead($v);
+        $rows[] = ['vendor_id' => $v, 'shop_name' => (string)($sh['shop_name'] ?? ''),
+                   'count' => (int)($c['count'] ?? 0), 'pages' => (int)($c['pages'] ?? 0),
+                   'partial' => !empty($c['partial']), 'at' => (int)($c['at'] ?? 0),
+                   'at_h' => !empty($c['at']) ? date('Y/m/d H:i', (int)$c['at']) : '—',
+                   'fresh' => bslCatalogFresh($v, $c),
+                   'age' => !empty($c['at']) ? time() - (int)$c['at'] : 0];
+    }
+    echo json_encode(['ok' => true, 'ttl' => (int)BSL_CATALOG_TTL, 'vendors' => $rows,
+        'rebuilt' => !empty($_GET['rebuild'])], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -15085,6 +15520,40 @@ if (isset($_GET['retire_log'])) {
 if (isset($_GET['retire_log_clear'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @unlink(RETIRE_LOG_FILE);
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v10.35 (۴۷د): گزارشِ همگام‌سازی‌ها
+ *  ?sync_report=1[&limit=N][&profile=<key>]  → فهرست + متنِ خوانا
+ *  ?sync_report_clear=1                      → پاک کردن
+ * ===================================================================== */
+if (isset($_GET['sync_report'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $log   = syncReportRead();
+    $items = is_array($log['items'] ?? null) ? $log['items'] : [];
+    $pf    = trim((string)($_GET['profile'] ?? ''));
+    if ($pf !== '') {
+        $items = array_values(array_filter($items,
+            fn($r) => is_array($r) && ((string)($r['key'] ?? '') === $pf)));
+    }
+    $limit = max(1, min((int)SYNC_REPORT_KEEP, (int)($_GET['limit'] ?? 50)));
+    $rows = [];
+    foreach (array_slice($items, 0, $limit) as $r) {
+        if (!is_array($r)) continue;
+        $at = (int)($r['at'] ?? 0);
+        $r['at_h'] = $at > 0 ? date('Y/m/d H:i', $at) : '—';
+        $r['text'] = syncReportText($r);
+        $rows[] = $r;
+    }
+    echo json_encode(['ok' => true, 'total' => count($items), 'shown' => count($rows),
+        'updated' => (int)($log['updated'] ?? 0), 'items' => $rows], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (isset($_GET['sync_report_clear'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @unlink(SYNC_REPORT_FILE);
     echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -15663,6 +16132,17 @@ const TASKS_STALE_SEC = 300;
  */
 function tasksRegistry(): array {
     return [
+        /* v10.35 (۴۷ه): «همگام‌سازیِ دستی» — بالای فهرست، چون وقتی کاربر
+           دکمه را می‌زند دقیقاً همین را دنبال می‌کند. سه گامِ ثابت دارد
+           (استخراج ⇒ ارسال ⇒ گزارش) پس نوارِ پیشرفتش معنی‌دار است. */
+        'manual_sync' => [
+            'title' => 'همگام‌سازیِ دستی', 'icon' => '🔄', 'file' => MANUAL_SYNC_PROGRESS_FILE,
+            'stop' => 'manual_sync_stop', 'tab' => 'شروع',
+            'pane' => 'start', 'el' => 'manualSyncBox', 'resume' => 'manual_sync=1',
+            'stat' => function (array $p): array {
+                return ['پروفایل' => (int)($p['profiles_done'] ?? 0)];
+            },
+        ],
         'bsl_send' => [
             'title' => 'ارسال به باسلام', 'icon' => '🚀', 'file' => BSL_PROGRESS_FILE,
             'stop' => 'bsl_stop', 'tab' => 'ارسال',
@@ -15800,6 +16280,14 @@ function tasksResumeUrl(string $key, array $def, array $p): string {
     $base = trim((string)($def['resume'] ?? ''));
     if ($base === '') return '';
     switch ($key) {
+        /* v10.35 (۴۷ه): ادامهٔ همگام‌سازیِ دستی یعنی «همان پروفایل را دوباره
+           از اول اجرا کن». بدونِ کلیدِ پروفایل، اجرای مجدد کلِ پروفایل‌ها را
+           راه می‌انداخت — رفتاری که کاربر انتظارش را ندارد، پس دکمه اصلاً
+           نشان داده نمی‌شود. */
+        case 'manual_sync':
+            $pk = trim((string)($p['profile_key'] ?? ''));
+            if ($pk === '') return '';
+            return $base . '&profile=' . rawurlencode($pk) . '&force=1&takeover=1';
         case 'extract':
             $u = trim((string)($p['url'] ?? ''));
             if ($u === '') return '';
@@ -16029,7 +16517,8 @@ function tasksResumeOne(string $key): array {
     $stopMap = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
                 'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE,
                 'ai_test_stop' => AI_TEST_STOP_FILE, 'catfix_stop' => CATFIX_STOP_FILE,
-                'selagent_stop' => SELAGENT_STOP_FILE];   // v10.25 (۳۸د)
+                'selagent_stop' => SELAGENT_STOP_FILE,    // v10.25 (۳۸د)
+                'manual_sync_stop' => MANUAL_SYNC_STOP_FILE];   // v10.35 (۴۷ه)
     $sf = $stopMap[(string)($def['stop'] ?? '')] ?? '';
     if ($sf !== '') @unlink($sf);
 
@@ -16093,7 +16582,8 @@ if (isset($_GET['tasks_stop'])) {
     $map = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
             'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE, 'ai_test_stop' => AI_TEST_STOP_FILE,
             'catfix_stop' => CATFIX_STOP_FILE,                 // v10.23 (۳۶د)
-            'selagent_stop' => SELAGENT_STOP_FILE];            // v10.25 (۳۸د)
+            'selagent_stop' => SELAGENT_STOP_FILE,             // v10.25 (۳۸د)
+            'manual_sync_stop' => MANUAL_SYNC_STOP_FILE];      // v10.35 (۴۷ه)
     $sf = $map[(string)$reg[$key]['stop']] ?? '';
     if ($sf === '') { echo json_encode(['ok' => false, 'error' => 'این کار توقفِ دستی ندارد'], JSON_UNESCAPED_UNICODE); exit; }
     @file_put_contents($sf, json_encode(['at' => time()]));
@@ -21522,8 +22012,16 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, "'error' => 'این کار همین حالا در حال اجراست'") !== false);
 
     /* ۳۶د — اصلاحِ دستهٔ باسلام به‌عنوان کارِ پس‌زمینه */
-    $add('10.23', 'رجیستری «catfix» را دارد (v10.25: شمار به ۱۲ رسید)',
-         isset(tasksRegistry()['catfix']) && count(tasksRegistry()) === 12);
+    /* v10.35 (۴۷ه): شمار به ۱۳ رسید (manual_sync). عددِ ثابت با هر کارِ
+       تازه می‌شکند، پس ادعا به «هست بودنِ کارها» بسته شد نه به شمارش. */
+    $add('10.23', 'رجیستری «catfix» را دارد و هیچ کارِ شناخته‌شده‌ای گم نشده',
+         (function () {
+             $r = tasksRegistry();
+             foreach (['catfix', 'bsl_send', 'woo_send', 'extract', 'dedup', 'agent',
+                       'selagent', 'ai_test', 'recon', 'suffix', 'bulkedit', 'photofix'] as $k)
+                 if (!isset($r[$k])) return false;
+             return count($r) >= 12;
+         })());
 
     $add('10.23', 'موتور و اندپوینت‌های اصلاحِ دسته وجود دارند',
          function_exists('catfixRun') && function_exists('catfixProgress')
@@ -21887,6 +22385,262 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'id="ap' . 'Convo"') !== false
       && strpos($selfSrc, "ontoggle=\"selagConvoOpen=this.open\"") !== false);
 
+    /* ═══════════════════ v10.35 (۴۷) ═══════════════════
+       الف) دفترچه per-vendor · ب) کشِ کاتالوگ · ج) بایگانیِ مقصدمحور
+       د) گزارشِ کاملِ همگام‌سازی · ه) دکمهٔ همگام‌سازیِ دستی
+
+       درسِ نسخه‌های قبل رعایت شده: هیچ ادعایی به متنِ عینیِ یک امضا یا به
+       یک عددِ ثابتِ شمارشی بسته نشده — همه یا رفتاری‌اند یا به «وجود
+       داشتنِ» چیزی. */
+
+    /* ---------- ۴۷الف: دفترچه، یک فایل برای هر غرفه ---------- */
+    $add('10.35', 'توابعِ shardِ دفترچه تعریف شده‌اند',
+         function_exists('remoteMapShardOf') && function_exists('remoteMapFile')
+      && function_exists('remoteMapShards') && function_exists('remoteMapReadShard')
+      && function_exists('remoteMapWriteShard') && function_exists('remoteMapMigrateLegacy')
+      && defined('REMOTEMAP_VENDOR_PREFIX'));
+
+    $add('10.35', 'کلیدِ غرفه‌دار به shardِ خودش می‌رود و کلیدِ ساده به فایلِ اصلی',
+         remoteMapShardOf('abc') === ''
+      && remoteMapShardOf('abc' . '#v7') === 'v7'
+      && remoteMapShardOf('abc' . '#v') === ''
+      && remoteMapShardOf('abc' . '#vxx') === ''
+      && remoteMapFile('') === REMOTEMAP_FILE
+      && remoteMapFile('v7') !== REMOTEMAP_FILE
+      && strpos(remoteMapFile('v7'), '7') !== false);
+
+    $add('10.35', 'نوشتنِ یک غرفه فایلِ غرفهٔ دیگر را لمس نمی‌کند', (function () {
+        /* روی فایل‌های واقعی می‌نویسیم و بعد همه را برمی‌گردانیم */
+        $paths = [REMOTEMAP_FILE, remoteMapFile('v9101'), remoteMapFile('v9102')];
+        $bak = [];
+        foreach ($paths as $p) $bak[$p] = is_file($p) ? @file_get_contents($p) : null;
+        remoteMapCacheClear(true);
+        remoteMapRecord('bsl', [['key' => 'st47' . '#v9101', 'remote_id' => 111, 'title' => 'الف']]);
+        $snap = @file_get_contents(remoteMapFile('v9101'));
+        remoteMapRecord('bsl', [['key' => 'st47' . '#v9102', 'remote_id' => 222, 'title' => 'ب']]);
+        $untouched = @file_get_contents(remoteMapFile('v9101')) === $snap;
+        remoteMapCacheClear(true);
+        $m = remoteMapLoad();
+        $merged = (int)($m['bsl']['st47' . '#v9101']['id'] ?? 0) === 111
+               && (int)($m['bsl']['st47' . '#v9102']['id'] ?? 0) === 222;
+        foreach ($bak as $p => $c) { if ($c === null) @unlink($p); else @file_put_contents($p, $c, LOCK_EX); }
+        remoteMapCacheClear(true);
+        return $untouched && $merged;
+    })());
+
+    $add('10.35', 'ردیفِ قدیمیِ داخلِ فایلِ مشترک خودبه‌خود کوچ می‌کند', (function () {
+        $paths = [REMOTEMAP_FILE, remoteMapFile('v9103')];
+        $bak = [];
+        foreach ($paths as $p) $bak[$p] = is_file($p) ? @file_get_contents($p) : null;
+        @file_put_contents(REMOTEMAP_FILE, json_encode(
+            ['woo' => [], 'bsl' => ['legacy47' . '#v9103' => ['id' => 333, 'at' => time()]]],
+            JSON_UNESCAPED_UNICODE), LOCK_EX);
+        @unlink(remoteMapFile('v9103'));
+        remoteMapCacheClear(true);   // سلف‌تست فایل را زیرِ پا عوض کرد
+        $m = remoteMapLoad();
+        $stillVisible = (int)($m['bsl']['legacy47' . '#v9103']['id'] ?? 0) === 333;
+        $movedOut = !isset(remoteMapReadShard('')['bsl']['legacy47' . '#v9103']);
+        $movedIn  = (int)(remoteMapReadShard('v9103')['bsl']['legacy47' . '#v9103']['id'] ?? 0) === 333;
+        foreach ($bak as $p => $c) { if ($c === null) @unlink($p); else @file_put_contents($p, $c, LOCK_EX); }
+        remoteMapCacheClear(true);
+        return $stillVisible && $movedOut && $movedIn;
+    })());
+
+    /* ---------- ۴۷ب: کشِ کاتالوگِ غرفه ---------- */
+    $add('10.35', 'توابعِ کشِ کاتالوگ و ثابت‌هایش موجودند',
+         function_exists('bslCatalogBuild') && function_exists('bslCatalogLookup')
+      && function_exists('bslCatalogNote') && function_exists('bslCatalogClear')
+      && function_exists('bslCatalogFresh') && function_exists('bslCatalogSaved')
+      && defined('BSL_CATALOG_TTL') && BSL_CATALOG_TTL > 0
+      && defined('BSL_CATALOG_MAX_PAGES') && BSL_CATALOG_MAX_PAGES > 0);
+
+    $add('10.35', 'کشِ کامل «هست» و «نیست» را قطعی جواب می‌دهد', (function () {
+        $vid = 9104; $f = bslCatalogFile($vid);
+        $bak = is_file($f) ? @file_get_contents($f) : null;
+        $GLOBALS['_bslCatalog'] = [];
+        @file_put_contents($f, json_encode(['vendor_id' => $vid, 'at' => time(), 'partial' => false,
+            'count' => 1, 'items' => [reconNormTitle('کیف چرم') => 555]], JSON_UNESCAPED_UNICODE), LOCK_EX);
+        $hit  = bslCatalogLookup('tk', $vid, 'کیف چرم', false);
+        $miss = bslCatalogLookup('tk', $vid, 'چیزی که نیست', false);
+        if ($bak === null) @unlink($f); else @file_put_contents($f, $bak, LOCK_EX);
+        $GLOBALS['_bslCatalog'] = [];
+        return $hit === 555 && $miss === 0;
+    })());
+
+    $add('10.35', 'کشِ ناقص یا کهنه هرگز «نیست» نمی‌گوید', (function () {
+        $vid = 9105; $f = bslCatalogFile($vid);
+        $bak = is_file($f) ? @file_get_contents($f) : null;
+        $GLOBALS['_bslCatalog'] = [];
+        // ناقص و تازه ⇒ باید -1 بدهد (یعنی برو آبشار را اجرا کن)
+        @file_put_contents($f, json_encode(['vendor_id' => $vid, 'at' => time(), 'partial' => true,
+            'count' => 0, 'items' => []], JSON_UNESCAPED_UNICODE), LOCK_EX);
+        $partial = bslCatalogLookup('tk', $vid, 'هرچیزی', false);
+        // کامل ولی کهنه ⇒ باز هم -1
+        @file_put_contents($f, json_encode(['vendor_id' => $vid, 'at' => time() - (int)BSL_CATALOG_TTL - 60,
+            'partial' => false, 'count' => 0, 'items' => []], JSON_UNESCAPED_UNICODE), LOCK_EX);
+        $GLOBALS['_bslCatalog'] = [];
+        $stale = bslCatalogLookup('tk', $vid, 'هرچیزی', false);
+        if ($bak === null) @unlink($f); else @file_put_contents($f, $bak, LOCK_EX);
+        $GLOBALS['_bslCatalog'] = [];
+        return $partial === -1 && $stale === -1;
+    })());
+
+    $add('10.35', 'آبشارِ جست‌وجو پیش از هر درخواستی از کش می‌پرسد',
+         strpos($selfSrc, '$__cat = bslCatalog' . 'Lookup($tk, $vid, $title);') !== false
+      && strpos($selfSrc, "if (\$__cat === 0) { bslCatalogSaved(1); return null; }") !== false);
+
+    $add('10.35', 'محصولِ تازه‌ساخته همان لحظه وارد کش می‌شود',
+         substr_count($selfSrc, 'bslCatalog' . 'Note(') >= 3);
+
+    $add('10.35', 'اندپوینتِ مدیریتِ کش هست و سه کارِ وضعیت/بازسازی/پاک را دارد',
+         strpos($selfSrc, "isset(\$_GET['bsl_catalog'])") !== false
+      && strpos($selfSrc, "if (!empty(\$_GET['rebuild'])) bslCatalogBuild(") !== false
+      && strpos($selfSrc, "bslCatalogClear((int)(\$_GET['vendor_id'] ?? 0))") !== false);
+
+    /* ---------- ۴۷ج: بایگانیِ مقصدمحور با مالکیت و تأیید ---------- */
+    $add('10.35', 'استعلامِ مالکیت تعریف شده و پروفایلِ بیگانه را رد می‌کند',
+         function_exists('retireOwnership')
+      && (function () {
+             $paths = [REMOTEMAP_FILE];
+             $bak = is_file(REMOTEMAP_FILE) ? @file_get_contents(REMOTEMAP_FILE) : null;
+             remoteMapCacheClear();
+             @file_put_contents(REMOTEMAP_FILE, json_encode(['woo' => [
+                 'own47' => ['id' => 77, 'profile' => 'pA', 'at' => time()],
+                 'oth47' => ['id' => 88, 'profile' => 'pB', 'at' => time()],
+                 'old47' => ['id' => 99, 'profile' => '',   'at' => time()],
+             ], 'bsl' => []], JSON_UNESCAPED_UNICODE), LOCK_EX);
+             remoteMapCacheClear(true);
+             $mine   = retireOwnership('woo', 'own47', 'pA');
+             $theirs = retireOwnership('woo', 'oth47', 'pA');
+             $legacy = retireOwnership('woo', 'old47', 'pA');
+             $none   = retireOwnership('woo', 'nope47', 'pA');
+             if ($bak === null) @unlink(REMOTEMAP_FILE); else @file_put_contents(REMOTEMAP_FILE, $bak, LOCK_EX);
+             remoteMapCacheClear(true);
+             return $mine['owned'] && $mine['id'] === 77 && $mine['known']
+                 && !$theirs['owned'] && $theirs['owner'] === 'pB'
+                 && $legacy['owned'] && $legacy['known']       // مالکِ ثبت‌نشده مانع نیست
+                 && !$none['known'] && $none['owned'];          // ردیفی نیست ⇒ مسیرِ عنوان
+         })());
+
+    $add('10.35', 'بازنشستگی اول از دفترچه می‌پرسد و مالکِ بیگانه را نمی‌زند',
+         strpos($selfSrc, "\$own = retireOwnership('woo', \$pKey, \$profileKey);") !== false
+      && strpos($selfSrc, "\$own = retireOwnership('bsl', \$pKey, \$profileKey);") !== false
+      && substr_count($selfSrc, "\$out['not_owned']++;") >= 2);
+
+    $add('10.35', 'نقشهٔ تأیید یک‌بارمصرف است و پس از مصرف باطل می‌شود',
+         function_exists('retirePlanSave') && function_exists('retirePlanTake')
+      && (function () {
+             $bak = is_file(retirePlanFile()) ? @file_get_contents(retirePlanFile()) : null;
+             $tok = retirePlanSave(['profile_key' => 'pX', 'mode' => 'draft',
+                                    'target' => 'woo', 'items' => [['title' => 'الف']]]);
+             $first  = retirePlanTake($tok);
+             $second = retirePlanTake($tok);
+             $bogus  = retirePlanTake('doesnotexist');
+             if ($bak === null) @unlink(retirePlanFile()); else @file_put_contents(retirePlanFile(), $bak, LOCK_EX);
+             return $tok !== '' && is_array($first) && ($first['profile_key'] ?? '') === 'pX'
+                 && $second === null && $bogus === null;
+         })());
+
+    $add('10.35', 'اجرای واقعیِ بازنشستگی بدونِ تأیید رد می‌شود',
+         strpos($selfSrc, "'need_confirm' => true") !== false
+      && strpos($selfSrc, "\$plan = retirePlanTake(\$tokenIn);") !== false
+      && strpos($selfSrc, "'error' => 'این تأیید مالِ پروفایلِ دیگری است'") !== false);
+
+    $add('10.35', 'پیش‌نمایش دکمهٔ اجرا با توکنِ همان فهرست می‌سازد',
+         strpos($selfSrc, "\$res['confirm_token'] = retirePlanSave(") !== false
+      && strpos($selfSrc, 'function retireApply(token,n)') !== false
+      && strpos($selfSrc, "'?retire_run=1&dry=0&confirm='") !== false);
+
+    /* ---------- ۴۷د: گزارشِ کاملِ همگام‌سازی ---------- */
+    $add('10.35', 'توابعِ گزارشِ همگام‌سازی و ثابت‌هایش موجودند',
+         function_exists('syncReportRead') && function_exists('syncReportAdd')
+      && function_exists('syncReportBuild') && function_exists('syncReportText')
+      && function_exists('syncReportEmit')
+      && defined('SYNC_REPORT_FILE') && defined('SYNC_REPORT_KEEP') && SYNC_REPORT_KEEP > 0);
+
+    $add('10.35', 'گزارش هر بخشِ کار را در متنِ خوانا می‌آورد', (function () {
+        $rep = syncReportBuild([
+            'key' => 'k1', 'name' => 'پروفایلِ آزمون', 'target' => 'both', 'status' => 'syncing',
+            'extracted' => 120, 'new' => 4, 'price_changed' => 7, 'removed' => 2,
+            'retire' => ['retired' => 2, 'not_found' => 1, 'failed' => 0, 'not_owned' => 3],
+            'woo' => 'queued', 'woo_total' => 11, 'bsl' => 'queued', 'bsl_total' => 11,
+            'changed_only' => 11, 'catalog_size' => 120, 'shop_pricing_changed' => true,
+        ], 'manual', time() - 5);
+        $t = syncReportText($rep);
+        return ($rep['extract']['extracted'] ?? 0) === 120
+            && ($rep['woo']['total'] ?? 0) === 11
+            && mb_strpos($t, 'پروفایلِ آزمون') !== false
+            && mb_strpos($t, 'دستی') !== false
+            && mb_strpos($t, 'بازنشستگی') !== false
+            && mb_strpos($t, 'مالِ پروفایلِ دیگر') !== false
+            && mb_strpos($t, 'ووکامرس') !== false
+            && mb_strpos($t, 'ارسالِ کامل') !== false;
+    })());
+
+    $add('10.35', 'فقط عددهای غیرصفر وارد گزارش می‌شوند', (function () {
+        $rep = syncReportBuild(['key' => 'k2', 'name' => 'ب', 'extracted' => 5,
+                                'new' => 0, 'price_changed' => 0], 'cron');
+        $ex = $rep['extract'] ?? [];
+        return isset($ex['extracted']) && !isset($ex['new']) && !isset($ex['price_changed']);
+    })());
+
+    $add('10.35', 'گزارش هم ثبت می‌شود هم فرستاده — و خاموشیِ صریح محترم است',
+         strpos($selfSrc, "\$out = ['logged' => syncReportAdd(\$rep), 'delivery' => null];") !== false
+      && strpos($selfSrc, "if (isset(\$ne['sync_report']) && empty(\$ne['sync_report'])) {") !== false
+      && strpos($selfSrc, '$_srRes = syncReportEmit($cn, $_sr);') !== false);
+
+    $add('10.35', 'تیکِ گزارش در تنظیمات ذخیره و بازخوانی می‌شود',
+         strpos($selfSrc, "id=\"notif" . "SyncReport\"") !== false
+      && strpos($selfSrc, "ne.sync_report!==false") !== false
+      && strpos($selfSrc, "sync_report:\$('notifSyncReport')") !== false
+      && strpos($selfSrc, "'sync_report'=>!isset(\$ne['sync_report'])") !== false);
+
+    $add('10.35', 'اندپوینتِ خواندن و پاک‌کردنِ گزارش‌ها هست',
+         strpos($selfSrc, "isset(\$_GET['sync_report'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['sync_report_clear'])") !== false);
+
+    /* ---------- ۴۷ه: دکمهٔ همگام‌سازیِ دستی ---------- */
+    $add('10.35', 'توابع و فایل‌های همگام‌سازیِ دستی تعریف شده‌اند',
+         function_exists('manualSyncActive') && function_exists('manualSyncStopped')
+      && function_exists('manualSyncProgress')
+      && defined('MANUAL_SYNC_PROGRESS_FILE') && defined('MANUAL_SYNC_STOP_FILE'));
+
+    $add('10.35', 'دکمهٔ دستی مسیرِ موازی نمی‌سازد و وارد همان چرخهٔ کران می‌شود',
+         strpos($selfSrc, "\$_GET['cron_run'] = '1';" . "\n" . "    \$_GET['force']    = '1';") !== false
+      && strpos($selfSrc, "if (\$_msKey !== '') \$_GET['only'] = \$_msKey;") !== false);
+
+    $add('10.35', 'فیلترِ پروفایل و نادیده‌گرفتنِ نوبت فقط با دستور اعمال می‌شوند',
+         strpos($selfSrc, "if (\$_onlyKey !== '' && \$key !== \$_onlyKey) continue;") !== false
+      && strpos($selfSrc, 'if (!$_forceRun && $interval > 0 && ($now - $lastRun < $interval))') !== false);
+
+    $add('10.35', 'اجرای دستیِ دوم روی اجرای زنده سوار نمی‌شود',
+         strpos($selfSrc, "'error' => 'یک همگام‌سازیِ دستی همین حالا در حال اجراست'") !== false);
+
+    $add('10.35', 'اجرای دستی قفلِ کرانِ زنده را پاک نمی‌کند',
+         strpos($selfSrc, '$results_manualBypass = true;') !== false
+      && strpos($selfSrc, 'if (empty($results_manualBypass)) {') !== false);
+
+    $add('10.35', 'کارِ دستی ردیف، توقف و ادامه در مدیر وظیفه دارد',
+         isset(tasksRegistry()['manual_sync'])
+      && (string)tasksRegistry()['manual_sync']['stop'] === 'manual_sync_stop'
+      && tasksResumeUrl('manual_sync', tasksRegistry()['manual_sync'], ['profile_key' => 'pk1']) !== ''
+      && tasksResumeUrl('manual_sync', tasksRegistry()['manual_sync'], []) === '');
+
+    $add('10.35', 'توقفِ دستی بینِ پروفایل‌ها بررسی می‌شود و ردیف را می‌بندد',
+         strpos($selfSrc, "if (manualSyncActive() && manualSyncStopped()) { \$results['manual_stopped'] = true; break; }") !== false
+      && strpos($selfSrc, "\$_msDone['cancelled'] = !empty(\$results['manual_stopped']);") !== false);
+
+    $add('10.35', 'دکمه و رصدکنندهٔ همگام‌سازیِ دستی در رابط کاربری هستند',
+         strpos($selfSrc, 'id="manual' . 'SyncBtn"') !== false
+      && strpos($selfSrc, 'id="manual' . 'SyncBox"') !== false
+      && strpos($selfSrc, 'function startManualSync()') !== false
+      && strpos($selfSrc, 'function stopManualSync()') !== false
+      && strpos($selfSrc, "'?manual_sync=1&profile='") !== false);
+
+    $add('10.35', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '35', '>=')
+      && strpos($selfSrc, 'v:' . "'10.35'") !== false);
+
     /* ================= v10.34 (۴۸) ================= */
     /* الف) تیکِ افزودن/آپدیت = چرخهٔ سه‌گانه، با اقدامِ انتخابیِ هر مقصد */
     $add('10.34', 'اقدامِ بازنشستگیِ هر مقصد فهرست و اعتبارسنجی دارد',
@@ -21902,8 +22656,16 @@ if (isset($_GET['selftest'])) {
       && retireAddUpdateAction(['retire_woo_action' => 'draft'], 'woo') === 'draft'
       && retireAddUpdateAction(['retire_bsl_action' => 'outofstock'], 'bsl') === 'outofstock');
 
+    /* v10.35: ادعا از متنِ عینیِ امضا جدا شد — با افزودنِ پارامترِ
+       profileKey در ۴۷ج می‌شکست، در حالی که خودِ قابلیت سرِ جایش بود. */
     $add('10.34', 'retireRemoved اقدامِ جدا برای هر مقصد می‌پذیرد',
-         strpos($selfSrc, 'string $profileName = \'\',' . "\n" . '                       ?array $perTarget = null): array {') !== false
+         (function () {
+             if (!function_exists('retireRemoved')) return false;
+             $rp = new ReflectionFunction('retireRemoved');
+             foreach ($rp->getParameters() as $prm)
+                 if ($prm->getName() === 'perTarget') return $prm->isOptional();
+             return false;
+         })()
       && strpos($selfSrc, '$modeWoo = ($perTarget !== null && isset($perTarget[') !== false
       && strpos($selfSrc, '$modeBsl = ($perTarget !== null && isset($perTarget[') !== false);
 
@@ -22969,15 +23731,17 @@ if (isset($_GET['selftest'])) {
 
     $add('10.19', 'هر سیگنالِ توقفِ رجیستری به فایلِ واقعیِ همان کار نگاشت دارد',
          (function () {
-             /* v10.23 (۳۶د): catfix_stop — v10.25 (۳۸د): selagent_stop */
+             /* v10.23 (۳۶د): catfix_stop — v10.25 (۳۸د): selagent_stop
+                v10.35 (۴۷ه): manual_sync_stop */
              $map = ['bsl_stop' => BSL_STOP_FILE, 'woo_stop' => WOO_STOP_FILE, 'extract_stop' => EXTRACT_STOP_FILE,
                      'dedup_stop' => DEDUP_STOP_FILE, 'agent_stop' => AGENT_STOP_FILE, 'ai_test_stop' => AI_TEST_STOP_FILE,
-                     'catfix_stop' => CATFIX_STOP_FILE, 'selagent_stop' => SELAGENT_STOP_FILE];
+                     'catfix_stop' => CATFIX_STOP_FILE, 'selagent_stop' => SELAGENT_STOP_FILE,
+                     'manual_sync_stop' => MANUAL_SYNC_STOP_FILE];
              foreach (tasksRegistry() as $d) {
                  $st = (string)$d['stop'];
                  if ($st !== '' && !isset($map[$st])) return false;
              }
-             return count($map) === 8;
+             return count($map) >= 9;
          })());
 
     $add('10.19', 'سه اندپوینتِ مدیر وظیفه و اندپوینتِ اولویت وجود دارند',
@@ -26002,6 +26766,45 @@ function selfBaseUrl(): string {
     return ($https ? 'https' : 'http') . '://' . $host . ($_SERVER['SCRIPT_NAME'] ?? '');
 }
 
+/* =====================================================================
+ *  v10.35 (۴۷ه): وضعیتِ «همگام‌سازیِ دستی»
+ *
+ *  دکمهٔ تبِ شروع یک کارِ پس‌زمینه راه می‌اندازد که ممکن است دقایقی طول
+ *  بکشد. برای اینکه در مدیر وظیفه ردیفِ خودش را داشته باشد (با نوار
+ *  پیشرفت، دکمهٔ توقف و «ادامه»)، مثل بقیهٔ کارها یک فایلِ پیشرفتِ
+ *  استاندارد می‌نویسد.
+ * ===================================================================== */
+
+/** آیا این اجرا یک همگام‌سازیِ دستی است؟ */
+function manualSyncActive(): bool {
+    return !empty($_GET['manual_sync']);
+}
+
+/** سیگنالِ توقف — فقط وقتی تازه باشد معتبر است */
+function manualSyncStopped(): bool {
+    clearstatcache(true, MANUAL_SYNC_STOP_FILE);
+    if (!file_exists(MANUAL_SYNC_STOP_FILE)) return false;
+    return (time() - (int)@filemtime(MANUAL_SYNC_STOP_FILE)) <= 900;
+}
+
+/** یک خط در پیشرفتِ همگام‌سازیِ دستی می‌نویسد (اگر اجرای دستی نباشد بی‌اثر است) */
+function manualSyncProgress(array $patch, string $log = ''): void {
+    if (!manualSyncActive()) return;
+    $p = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+    if (!is_array($p)) $p = [];
+    foreach ($patch as $k => $v) $p[$k] = $v;
+    if ($log !== '') {
+        $lg = is_array($p['recent_log'] ?? null) ? $p['recent_log'] : [];
+        $lg[] = $log;
+        if (count($lg) > 40) $lg = array_slice($lg, -40);
+        $p['recent_log'] = $lg;
+        $p['total_log_count'] = (int)($p['total_log_count'] ?? 0) + 1;
+    }
+    $p['ts'] = time();
+    $p['last_progress_ts'] = time();
+    writeProgress(MANUAL_SYNC_PROGRESS_FILE, $p);
+}
+
 /** یک فراخوانی «شلیک کن و فراموش کن» به خود اسکریپت */
 function fireAndForget(string $qs, int $timeoutMs = 1200, ?array $post = null): bool {
     $base = selfBaseUrl();
@@ -26359,13 +27162,91 @@ function retireLogAdd(array $rows): int {
     return count($rows);
 }
 
+/* =====================================================================
+ *  v10.35 (۴۷ج): بایگانیِ مقصدمحور — فقط چیزی که خودمان فرستاده‌ایم
+ *
+ *  تا اینجا بازنشستگی محصول را با «عنوان» در مقصد پیدا می‌کرد. دو خطرِ
+ *  واقعی داشت:
+ *
+ *   ۱) مالکیت. اگر محصولی با همان عنوان در غرفه بود ولی مالِ پروفایلِ
+ *      دیگری (یا اصلاً دستیِ خودِ کاربر) بود، حذف می‌شد. یعنی یک پروفایلِ
+ *      کوچک می‌توانست محصولِ پروفایلِ دیگر را ببرد.
+ *   ۲) شکنندگی. عنوان در مقصد عوض می‌شود (ویرایشِ دستی، تغییرِ پسوند) و
+ *      آن‌وقت محصول «یافت نشد» می‌شد و برای همیشه در غرفه می‌ماند.
+ *
+ *  دفترچهٔ نگاشت هر دو را حل می‌کند: کلیدِ محصول ⇒ شناسهٔ مقصد ⇒ نامِ
+ *  پروفایلی که آن را فرستاده. پس اول از دفترچه می‌پرسیم:
+ *      • ردیف هست و مالِ همین پروفایل است ⇒ مستقیم با شناسه (بدونِ
+ *        جست‌وجو، بدونِ وابستگی به عنوان)
+ *      • ردیف هست ولی مالِ پروفایلِ دیگری است ⇒ دست نمی‌زنیم
+ *      • ردیفی نیست ⇒ مثل قبل با عنوان می‌گردیم (سازگاریِ عقب‌رو برای
+ *        محصولاتی که پیش از دفترچه ارسال شده‌اند)
+ * ===================================================================== */
+
+/**
+ * مالکیتِ یک محصولِ رفته را از دفترچه استعلام می‌کند.
+ * خروجی: ['id'=>int, 'known'=>bool, 'owned'=>bool, 'owner'=>string]
+ */
+function retireOwnership(string $target, string $productKey, string $profileKey): array {
+    $out = ['id' => 0, 'known' => false, 'owned' => true, 'owner' => ''];
+    if ($productKey === '' || ($target !== 'woo' && $target !== 'bsl')) return $out;
+    $row = remoteMapLoad()[$target][$productKey] ?? null;
+    if (!is_array($row)) return $out;
+    $id = (int)($row['id'] ?? 0);
+    if ($id <= 0) return $out;
+    $owner = trim((string)($row['profile'] ?? ''));
+    $out['id'] = $id; $out['known'] = true; $out['owner'] = $owner;
+    /* مالکِ ثبت‌نشده یعنی ردیفِ قدیمیِ پیش از ثبتِ پروفایل — مانع نمی‌شویم،
+       چون در آن دوره هیچ پروفایلی ثبت نمی‌شد و بلاک‌کردنش یعنی بازنشستگی
+       برای همهٔ کاربرانِ قدیمی از کار بیفتد. */
+    if ($owner !== '' && $profileKey !== '' && $owner !== $profileKey) $out['owned'] = false;
+    return $out;
+}
+
+/* -------------------- نقشهٔ بازنشستگی: پیش‌نمایش و تأیید -------------------- */
+
+/** فایلِ نقشه‌های در انتظارِ تأیید */
+function retirePlanFile(): string { return __DIR__ . '/retire_plan.json'; }
+
+/** نقشهٔ پیش‌نمایش را ذخیره می‌کند و توکنش را برمی‌گرداند */
+function retirePlanSave(array $plan): string {
+    $token = substr(hash('sha256', uniqid('rp', true) . mt_rand()), 0, 24);
+    $all = json_decode((string)@file_get_contents(retirePlanFile()), true);
+    if (!is_array($all)) $all = [];
+    $now = time();
+    /* نقشه‌های کهنه (بیش از یک ساعت) دور ریخته می‌شوند: تأییدِ چیزی که
+       نیم‌روز پیش دیده شده، تأیید نیست. */
+    foreach ($all as $t => $p) if ($now - (int)($p['at'] ?? 0) > 3600) unset($all[$t]);
+    $plan['at'] = $now;
+    $all[$token] = $plan;
+    if (count($all) > 20) $all = array_slice($all, -20, null, true);
+    @file_put_contents(retirePlanFile(), json_encode($all, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    return $token;
+}
+
+/** نقشه را می‌خواند و (در صورت مصرف) حذفش می‌کند */
+function retirePlanTake(string $token, bool $consume = true): ?array {
+    if ($token === '') return null;
+    $all = json_decode((string)@file_get_contents(retirePlanFile()), true);
+    if (!is_array($all) || !isset($all[$token]) || !is_array($all[$token])) return null;
+    $plan = $all[$token];
+    if (time() - (int)($plan['at'] ?? 0) > 3600) { unset($all[$token]);
+        @file_put_contents(retirePlanFile(), json_encode($all, JSON_UNESCAPED_UNICODE), LOCK_EX);
+        return null; }
+    if ($consume) {
+        unset($all[$token]);
+        @file_put_contents(retirePlanFile(), json_encode($all, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    }
+    return $plan;
+}
+
 /**
  * محصولات رفته از مبدأ را روی مقصد بازنشسته می‌کند.
  * $items همان removed_items استخراج است.
  */
 function retireRemoved(array $cn, array $items, string $target, string $mode,
                        int $extracted, bool $dryRun = false, string $profileName = '',
-                       ?array $perTarget = null): array {
+                       ?array $perTarget = null, string $profileKey = ''): array {
     /* v10.34 (۴۸الف): اقدامِ هر مقصد می‌تواند جدا باشد. $perTarget اگر داده
        شود کلیدهای 'woo' و 'bsl' را می‌پذیرد و جای $mode را برای همان مقصد
        می‌گیرد؛ مسیرهای قدیمی که آن را نمی‌دهند دقیقاً مثل قبل کار می‌کنند. */
@@ -26387,17 +27268,33 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
     $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
     $suffix = trim((string)($w['title_suffix'] ?? ''));
     $_rlRows = [];   // v10.32 (۴۵د): ردیف‌های لاگِ ماندگار
+    $out['not_owned'] = 0;   // v10.35 (۴۷ج): مالِ پروفایلِ دیگری بود ⇒ دست نخورد
 
     foreach ($items as $it) {
         $title = trim((string)($it['title'] ?? ''));
         if ($title === '') continue;
+        $pKey  = trim((string)($it['key'] ?? ''));
         $out['checked']++;
-        $row = ['title' => mb_substr($title, 0, 60), 'reason' => $it['reason'] ?? ''];
+        $row = ['title' => mb_substr($title, 0, 60), 'reason' => $it['reason'] ?? '',
+                'key' => $pKey];
 
         if ($target === 'woo' || $target === 'both') {
-            $t = $suffix !== '' && mb_strpos($title, $suffix) === false ? $title . $suffix : $title;
-            $ex = wooFindByTitle($w, $t) ?: wooFindByTitle($w, $title);
-            if (!$ex) { $out['not_found']++; $row['woo'] = 'یافت نشد'; }
+            /* v10.35 (۴۷ج): اول دفترچه — هم دقیق‌تر است هم مالکیت را می‌داند */
+            $own = retireOwnership('woo', $pKey, $profileKey);
+            if ($own['known'] && !$own['owned']) {
+                $out['not_owned']++;
+                $row['woo'] = 'مالِ پروفایلِ دیگر (' . $own['owner'] . ') — دست نخورد';
+                $ex = null;
+            } elseif ($own['known']) {
+                $ex = ['id' => $own['id']];
+                $row['woo_match'] = 'ledger';
+            } else {
+                $t = $suffix !== '' && mb_strpos($title, $suffix) === false ? $title . $suffix : $title;
+                $ex = wooFindByTitle($w, $t) ?: wooFindByTitle($w, $title);
+                if ($ex) $row['woo_match'] = 'title';
+            }
+            if (isset($row['woo']) && $row['woo'] !== '') { /* مالکیتِ رد‌شده — کاری نکن */ }
+            elseif (!$ex) { $out['not_found']++; $row['woo'] = 'یافت نشد'; }
             elseif ($dryRun) { $row['woo'] = 'آماده: #' . $ex['id']; }
             else {
                 $id = (int)$ex['id'];
@@ -26422,8 +27319,22 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
         }
 
         if (($target === 'bsl' || $target === 'both') && $tk !== '' && $vid > 0) {
-            $ex = bslFindByTitle($tk, $vid, $title);
-            if (!$ex) { $out['not_found']++; $row['bsl'] = 'یافت نشد'; }
+            /* v10.35 (۴۷ج): همان منطقِ مالکیت برای باسلام. کلیدِ غرفهٔ
+               پیش‌فرض خودِ productKey است (bslShopMapKey)، پس همین کافی است. */
+            $own = retireOwnership('bsl', $pKey, $profileKey);
+            if ($own['known'] && !$own['owned']) {
+                $out['not_owned']++;
+                $row['bsl'] = 'مالِ پروفایلِ دیگر (' . $own['owner'] . ') — دست نخورد';
+                $ex = null;
+            } elseif ($own['known']) {
+                $ex = ['id' => $own['id']];
+                $row['bsl_match'] = 'ledger';
+            } else {
+                $ex = bslFindByTitle($tk, $vid, $title);
+                if ($ex) $row['bsl_match'] = 'title';
+            }
+            if (isset($row['bsl']) && $row['bsl'] !== '') { /* مالکیتِ رد‌شده */ }
+            elseif (!$ex) { $out['not_found']++; $row['bsl'] = 'یافت نشد'; }
             elseif ($dryRun) { $row['bsl'] = 'آماده: #' . $ex['id']; }
             else {
                 $id = (int)$ex['id'];
@@ -26513,22 +27424,165 @@ function retireRemoved(array $cn, array $items, string $target, string $mode,
  *  می‌شود و عنوان فقط راه دوم است.
  * ===================================================================== */
 
-function remoteMapLoad(): array {
-    if (!is_file(REMOTEMAP_FILE)) return ['woo' => [], 'bsl' => []];
-    $d = json_decode((string)@file_get_contents(REMOTEMAP_FILE), true);
-    if (!is_array($d)) return ['woo' => [], 'bsl' => []];
-    $d['woo'] = is_array($d['woo'] ?? null) ? $d['woo'] : [];
-    $d['bsl'] = is_array($d['bsl'] ?? null) ? $d['bsl'] : [];
-    return $d;
+/* =====================================================================
+ *  v10.35 (۴۷الف): دفترچه، جدا برای هر غرفه
+ *
+ *  کلیدِ هر ردیف از v10.20 به این شکل است:
+ *      productKey            → ووکامرس یا غرفهٔ پیش‌فرضِ باسلام
+ *      productKey#v{vid}     → غرفهٔ غیرپیش‌فرضِ شمارهٔ vid
+ *
+ *  همین پسوند تعیین می‌کند ردیف در کدام فایل بنشیند. پس «جداسازی» هیچ
+ *  تغییری در کلیدها یا در رفتارِ خواننده‌ها لازم ندارد؛ فقط نوشتن است
+ *  که دیگر روی یک فایلِ مشترک نمی‌رود.
+ * ===================================================================== */
+
+/** shardِ یک کلید: رشتهٔ خالی برای فایلِ اصلی، وگرنه «v{vid}» */
+function remoteMapShardOf(string $key): string {
+    $p = strrpos($key, '#v');
+    if ($p === false) return '';
+    $vid = substr($key, $p + 2);
+    return ($vid !== '' && ctype_digit($vid)) ? 'v' . $vid : '';
 }
 
+/** مسیرِ فایلِ یک shard */
+function remoteMapFile(string $shard): string {
+    return $shard === '' ? REMOTEMAP_FILE
+                         : REMOTEMAP_VENDOR_PREFIX . substr($shard, 1) . '.json';
+}
+
+/** shardهایی که همین حالا روی دیسک هستند (همیشه شاملِ فایلِ اصلی).
+ *  الگو از خودِ ثابت ساخته می‌شود، نه از نامِ فایلِ نوشته‌شده در کد — وگرنه
+ *  تغییرِ مسیر (یا هارنسِ تست که مسیرِ دیگری تعریف می‌کند) باعث می‌شد
+ *  shardها اصلاً پیدا نشوند و دفترچه بی‌صدا نصفه دیده شود. */
+function remoteMapShards(): array {
+    $out = [''];
+    $pre = REMOTEMAP_VENDOR_PREFIX;
+    foreach (glob($pre . '*.json') ?: [] as $f) {
+        if (strpos($f, $pre) !== 0) continue;
+        $vid = substr($f, strlen($pre), -5);   // ".json" را بردار
+        if ($vid !== '' && ctype_digit($vid)) $out[] = 'v' . $vid;
+    }
+    return array_values(array_unique($out));
+}
+
+/** خواندنِ خامِ یک shard — بدون کش، بدون مهاجرت */
+function remoteMapReadShard(string $shard): array {
+    $f = remoteMapFile($shard);
+    if (!is_file($f)) return ['woo' => [], 'bsl' => []];
+    $d = json_decode((string)@file_get_contents($f), true);
+    if (!is_array($d)) return ['woo' => [], 'bsl' => []];
+    return ['woo' => is_array($d['woo'] ?? null) ? $d['woo'] : [],
+            'bsl' => is_array($d['bsl'] ?? null) ? $d['bsl'] : []];
+}
+
+/** نوشتنِ یک shard. shardِ کاملاً خالی حذف می‌شود تا آشغال جا نماند. */
+function remoteMapWriteShard(string $shard, array $m): bool {
+    $f = remoteMapFile($shard);
+    $woo = is_array($m['woo'] ?? null) ? $m['woo'] : [];
+    $bsl = is_array($m['bsl'] ?? null) ? $m['bsl'] : [];
+    if ($shard !== '' && !$woo && !$bsl) { @unlink($f); return true; }
+    return @file_put_contents($f, json_encode(['woo' => $woo, 'bsl' => $bsl],
+        JSON_UNESCAPED_UNICODE), LOCK_EX) !== false;
+}
+
+/**
+ * مهاجرتِ تنبل: ردیف‌های «#v» که هنوز در فایلِ اصلی مانده‌اند به shardِ
+ * خودشان منتقل می‌شوند. یک بار در هر پردازه اجرا می‌شود و اگر چیزی برای
+ * انتقال نباشد هزینه‌اش صفر است.
+ *
+ * چرا تنبل و نه یک اسکریپتِ مهاجرت: کاربر نباید هیچ کاری بکند و هیچ
+ * لحظه‌ای نباید دفترچه ناقص باشد. اگر وسطِ کار پردازه بمیرد، بدترین حالت
+ * این است که ردیف در هر دو فایل باشد — و چون کلید یکی است، خواندنِ
+ * ادغام‌شده همان مقدار را می‌دهد.
+ */
+/* $rescan فقط برای سلف‌تست است. در اجرای عادی نباید true شود: پویشِ
+   دوبارهٔ فایلِ اصلی به‌ازای هر ثبت، روی دفترچهٔ بیست‌هزارتایی گران است و
+   بعد از اولین مهاجرت هم هیچ ردیفی برای انتقال باقی نمانده. */
+function remoteMapMigrateLegacy(bool $rescan = false): array {
+    static $done = false;
+    $base = remoteMapReadShard('');
+    if ($done && !$rescan) return $base;
+    $move = [];
+    foreach (['woo', 'bsl'] as $t) {
+        foreach ($base[$t] as $k => $v) {
+            $sh = remoteMapShardOf((string)$k);
+            if ($sh === '') continue;
+            $move[$sh][$t][$k] = $v;
+        }
+    }
+    if ($move) {
+        foreach ($move as $sh => $byTarget) {
+            $cur = remoteMapReadShard($sh);
+            foreach ($byTarget as $t => $rows) {
+                foreach ($rows as $k => $v) {
+                    if (!isset($cur[$t][$k])) $cur[$t][$k] = $v;
+                    unset($base[$t][$k]);
+                }
+            }
+            remoteMapWriteShard($sh, $cur);
+        }
+        remoteMapWriteShard('', $base);
+    }
+    $done = true;
+    return $base;
+}
+
+/** کشِ درون‌پردازه‌ایِ نمای ادغام‌شده — با هر نوشتن باطل می‌شود.
+ *  $rescan نگهبانِ «یک بار مهاجرت» را هم باز می‌کند؛ فقط سلف‌تست که
+ *  فایل‌ها را زیرِ پای برنامه عوض می‌کند به آن نیاز دارد. */
+function remoteMapCacheClear(bool $rescan = false): void {
+    $GLOBALS['_remoteMapCache'] = null;
+    if ($rescan) $GLOBALS['_remoteMapRescan'] = true;
+}
+
+/**
+ * نمای ادغام‌شدهٔ همهٔ shardها — دقیقاً همان شکلی که همهٔ خواننده‌های
+ * قبلی انتظار دارند، پس هیچ نقطهٔ مصرفی لازم نیست عوض شود.
+ */
+function remoteMapLoad(): array {
+    if (isset($GLOBALS['_remoteMapCache']) && is_array($GLOBALS['_remoteMapCache']))
+        return $GLOBALS['_remoteMapCache'];
+    $out = remoteMapMigrateLegacy(!empty($GLOBALS['_remoteMapRescan']));
+    $GLOBALS['_remoteMapRescan'] = false;
+    foreach (remoteMapShards() as $sh) {
+        if ($sh === '') continue;
+        $d = remoteMapReadShard($sh);
+        foreach (['woo', 'bsl'] as $t) {
+            foreach ($d[$t] as $k => $v) $out[$t][$k] = $v;
+        }
+    }
+    $GLOBALS['_remoteMapCache'] = $out;
+    return $out;
+}
+
+/**
+ * ذخیرهٔ نمای ادغام‌شده — هر ردیف به shardِ خودش می‌رود.
+ * shardهایی که در ورودی ردیفی ندارند صریحاً خالی نوشته (یا حذف) می‌شوند،
+ * وگرنه «پاک‌کردنِ دفترچه» فقط فایلِ اصلی را پاک می‌کرد.
+ */
 function remoteMapSave(array $m): bool {
-    return @file_put_contents(REMOTEMAP_FILE, json_encode($m, JSON_UNESCAPED_UNICODE), LOCK_EX) !== false;
+    $byShard = [];
+    foreach (remoteMapShards() as $sh) $byShard[$sh] = ['woo' => [], 'bsl' => []];
+    foreach (['woo', 'bsl'] as $t) {
+        foreach ((is_array($m[$t] ?? null) ? $m[$t] : []) as $k => $v) {
+            $sh = remoteMapShardOf((string)$k);
+            if (!isset($byShard[$sh])) $byShard[$sh] = ['woo' => [], 'bsl' => []];
+            $byShard[$sh][$t][$k] = $v;
+        }
+    }
+    $ok = true;
+    foreach ($byShard as $sh => $data) $ok = remoteMapWriteShard($sh, $data) && $ok;
+    remoteMapCacheClear();
+    return $ok;
 }
 
 /**
  * فهرست «کلید → شناسه» را برای یک مقصد ثبت می‌کند.
  * $rows همان sent_details/updated_details است: هر ردیف key و remote_id دارد.
+ *
+ * v10.35 (۴۷الف): نوشتن shard به shard. اگر ارسال به غرفهٔ ۷ و غرفهٔ ۹
+ * هم‌زمان جلو برود، هرکدام فقط فایلِ خودش را می‌خواند و می‌نویسد، پس
+ * دیگر هیچ‌کدام کارِ دیگری را بازنویسی نمی‌کند.
  */
 function remoteMapRecord(string $target, array $rows, string $profileKey = ''): int {
     if ($target !== 'woo' && $target !== 'bsl') return 0;
@@ -26546,14 +27600,20 @@ function remoteMapRecord(string $target, array $rows, string $profileKey = ''): 
         if (isset($r['stock']) && (int)$r['stock'] >= 0)          $add[$k]['stock']      = (int)$r['stock'];
     }
     if (!$add) return 0;
-    $m = remoteMapLoad();
-    foreach ($add as $k => $v) $m[$target][$k] = $v;
-    // سقف منطقی تا فایل بی‌نهایت رشد نکند
-    if (count($m[$target]) > 20000) {
-        uasort($m[$target], fn($a, $b) => ((int)($b['at'] ?? 0)) <=> ((int)($a['at'] ?? 0)));
-        $m[$target] = array_slice($m[$target], 0, 20000, true);
+    remoteMapMigrateLegacy();          // پیش از هر نوشتنی، ردیف‌های قدیمی سرِ جایشان
+    $byShard = [];
+    foreach ($add as $k => $v) $byShard[remoteMapShardOf((string)$k)][$k] = $v;
+    foreach ($byShard as $sh => $rowsIn) {
+        $m = remoteMapReadShard((string)$sh);
+        foreach ($rowsIn as $k => $v) $m[$target][$k] = $v;
+        // سقف منطقی تا فایل بی‌نهایت رشد نکند
+        if (count($m[$target]) > REMOTEMAP_MAX_ROWS) {
+            uasort($m[$target], fn($a, $b) => ((int)($b['at'] ?? 0)) <=> ((int)($a['at'] ?? 0)));
+            $m[$target] = array_slice($m[$target], 0, REMOTEMAP_MAX_ROWS, true);
+        }
+        remoteMapWriteShard((string)$sh, $m);
     }
-    remoteMapSave($m);
+    remoteMapCacheClear();
     return count($add);
 }
 
@@ -27650,6 +28710,142 @@ function reconRun(array $cn, string $target, bool $apply = false,
             usleep(200000);
         }
     }
+    return $out;
+}
+
+/* =====================================================================
+ *  v10.35 (۴۷د): گزارشِ کاملِ هر همگام‌سازی
+ *
+ *  خواستهٔ کاربر: «بعد از هر عملیاتِ همگام‌سازی، یک گزارشِ کامل در مدیرِ
+ *  وظایف ثبت کن و همان گزارش را به پیام‌رسان هم بفرست».
+ *
+ *  تا اینجا هر تکه از کار جای خودش را داشت — اعلانِ تغییرِ مبدأ یک پیام،
+ *  اعلانِ بایگانی یک پیام، پینگِ کران یک پیام دیگر — ولی هیچ‌جا یک تصویرِ
+ *  واحد از «این نوبت چه اتفاقی افتاد» نبود. و هیچ‌کدام روی دیسک نمی‌ماند،
+ *  پس اگر پیام‌رسان تنظیم نبود یا پیام گم می‌شد، هیچ ردی باقی نمی‌ماند.
+ *
+ *  حالا یک ردیفِ گزارشِ ماندگار ساخته می‌شود که همه‌چیز را یک‌جا دارد و
+ *  هم در مدیر وظیفه دیده می‌شود، هم به پیام‌رسان می‌رود.
+ * ===================================================================== */
+
+function syncReportRead(): array {
+    if (!is_file(SYNC_REPORT_FILE)) return ['items' => [], 'updated' => 0];
+    $d = json_decode((string)@file_get_contents(SYNC_REPORT_FILE), true);
+    if (!is_array($d) || !is_array($d['items'] ?? null)) return ['items' => [], 'updated' => 0];
+    return $d;
+}
+
+/** تازه‌ترین گزارش بالای فهرست می‌نشیند */
+function syncReportAdd(array $rep): int {
+    $log = syncReportRead();
+    $rep['at'] = (int)($rep['at'] ?? time());
+    array_unshift($log['items'], $rep);
+    if (count($log['items']) > (int)SYNC_REPORT_KEEP)
+        $log['items'] = array_slice($log['items'], 0, (int)SYNC_REPORT_KEEP);
+    $log['updated'] = time();
+    @file_put_contents(SYNC_REPORT_FILE, json_encode($log, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    return count($log['items']);
+}
+
+/**
+ * از نتیجهٔ یک پروفایل در حلقهٔ کران (یا همگام‌سازیِ دستی) یک ردیفِ گزارش
+ * می‌سازد. فقط چیزهایی که واقعاً عدد دارند وارد می‌شوند تا گزارش پر از
+ * صفر نشود.
+ */
+function syncReportBuild(array $p, string $trigger = 'cron', int $startedAt = 0): array {
+    $rep = [
+        'at'       => time(),
+        'trigger'  => $trigger,
+        'profile'  => (string)($p['name'] ?? ($p['key'] ?? '')),
+        'key'      => (string)($p['key'] ?? ''),
+        'target'   => (string)($p['target'] ?? ''),
+        'status'   => (string)($p['status'] ?? ''),
+        'took'     => $startedAt > 0 ? max(0, time() - $startedAt) : 0,
+    ];
+    foreach (['extracted', 'new', 'price_changed', 'removed', 'unchanged',
+              'price_up', 'price_down', 'gone_from_site', 'no_price'] as $k) {
+        if ((int)($p[$k] ?? 0) !== 0) $rep['extract'][$k] = (int)$p[$k];
+    }
+    if (!empty($p['extract_error'])) $rep['extract_error'] = (string)$p['extract_error'];
+    if (!empty($p['retire']))        $rep['retire']  = $p['retire'];
+    if (isset($p['woo']))            $rep['woo']     = ['state' => (string)$p['woo'], 'total' => (int)($p['woo_total'] ?? 0)];
+    if (isset($p['bsl']))            $rep['bsl']     = ['state' => (string)$p['bsl'], 'total' => (int)($p['bsl_total'] ?? 0)];
+    if (isset($p['changed_only']))   $rep['changed_only'] = (int)$p['changed_only'];
+    if (isset($p['catalog_size']))   $rep['catalog_size'] = (int)$p['catalog_size'];
+    if (!empty($p['pricing_changed']))      $rep['pricing_changed'] = true;
+    if (!empty($p['shop_pricing_changed'])) $rep['shop_pricing_changed'] = true;
+    if (!empty($p['add_update_hold']))      $rep['hold'] = (string)$p['add_update_hold'];
+    /* v10.35 (۴۷ب): صرفه‌جوییِ کش هم بخشی از گزارش است — کاربر باید ببیند
+       این نسخه چقدر درخواستِ بی‌مورد را حذف کرده. */
+    $saved = bslCatalogSaved();
+    if ($saved > 0) $rep['catalog_hits'] = $saved;
+    $skips = function_exists('bslSkipCount') ? bslSkipCount() : 0;
+    if ($skips > 0) $rep['unchanged_skips'] = $skips;
+    return $rep;
+}
+
+/** همان گزارش، به شکلِ متنِ خوانا برای پیام‌رسان و برای مدیر وظیفه */
+function syncReportText(array $r): string {
+    $trig = ['cron' => 'خودکار', 'manual' => 'دستی', 'manual_sync' => 'دستی'][(string)($r['trigger'] ?? '')] ?? (string)($r['trigger'] ?? '');
+    $L = ['🔄 گزارشِ همگام‌سازی — ' . (string)($r['profile'] ?? '?')
+          . ($trig !== '' ? ' (' . $trig . ')' : '')];
+    $L[] = '🕐 ' . date('Y/m/d H:i', (int)($r['at'] ?? time()))
+         . ((int)($r['took'] ?? 0) > 0 ? ' · ' . (int)$r['took'] . ' ثانیه' : '');
+
+    $ex = is_array($r['extract'] ?? null) ? $r['extract'] : [];
+    if ($ex) {
+        $lbl = ['extracted' => 'استخراج', 'new' => 'تازه', 'price_changed' => 'تغییرِ قیمت',
+                'removed' => 'رفته از مبدأ', 'unchanged' => 'بی‌تغییر', 'price_up' => 'گران',
+                'price_down' => 'ارزان', 'gone_from_site' => 'حذف از سایت', 'no_price' => 'بی‌قیمت'];
+        $parts = [];
+        foreach ($ex as $k => $v) $parts[] = ($lbl[$k] ?? $k) . ': ' . (int)$v;
+        $L[] = '📦 ' . implode(' · ', $parts);
+    }
+    if (!empty($r['extract_error'])) $L[] = '❌ استخراج: ' . (string)$r['extract_error'];
+
+    if (!empty($r['retire']) && is_array($r['retire'])) {
+        $rt = $r['retire'];
+        $L[] = '🗂 بازنشستگی: انجام‌شده ' . (int)($rt['retired'] ?? 0)
+             . ' · یافت‌نشده ' . (int)($rt['not_found'] ?? 0)
+             . ' · ناموفق ' . (int)($rt['failed'] ?? 0)
+             . ((int)($rt['not_owned'] ?? 0) > 0 ? ' · مالِ پروفایلِ دیگر ' . (int)$rt['not_owned'] : '')
+             . (!empty($rt['skipped']) ? ' — ' . (string)$rt['skipped'] : '');
+    }
+
+    $stLbl = ['queued' => 'صف شد', 'already_queued' => 'از قبل در صف بود',
+              'no_changes' => 'تغییری نبود', 'no_products' => 'محصولی نبود',
+              'file_save_error' => 'خطای ذخیرهٔ فایل'];
+    foreach ([['woo', '🛍 ووکامرس'], ['bsl', '🏪 باسلام']] as [$k, $ttl]) {
+        if (empty($r[$k]) || !is_array($r[$k])) continue;
+        $s = (string)($r[$k]['state'] ?? '');
+        $L[] = $ttl . ': ' . ($stLbl[$s] ?? $s)
+             . ((int)($r[$k]['total'] ?? 0) > 0 ? ' — ' . (int)$r[$k]['total'] . ' محصول' : '');
+    }
+    if (isset($r['changed_only']))
+        $L[] = '🎯 فقط تغییرات: ' . (int)$r['changed_only']
+             . (isset($r['catalog_size']) ? ' از ' . (int)$r['catalog_size'] : '');
+    if (!empty($r['pricing_changed']))      $L[] = '💰 ضریبِ پروفایل عوض شده بود — یک نوبت ارسالِ کامل';
+    if (!empty($r['shop_pricing_changed'])) $L[] = '💰 ضریبِ مقصد/غرفه عوض شده بود — یک نوبت ارسالِ کامل';
+    if (!empty($r['hold']))                 $L[] = '⏸ ارسال نگه داشته شد: ' . (string)$r['hold'];
+    if ((int)($r['catalog_hits'] ?? 0) > 0)
+        $L[] = '⚡ ' . (int)$r['catalog_hits'] . ' جست‌وجو از کشِ غرفه جواب گرفت';
+    if ((int)($r['unchanged_skips'] ?? 0) > 0)
+        $L[] = '⏭ ' . (int)$r['unchanged_skips'] . ' محصولِ بی‌تغییر رد شد';
+    return implode("\n", $L);
+}
+
+/** ثبت + ارسالِ گزارش. خروجی: ['logged'=>int,'delivery'=>array|null] */
+function syncReportEmit(array $cn, array $rep): array {
+    $out = ['logged' => syncReportAdd($rep), 'delivery' => null];
+    /* پیش‌فرض روشن است (خواستهٔ صریحِ کاربر)؛ کاربر می‌تواند خاموشش کند. */
+    $ne = $cn['notif_events'] ?? [];
+    if (isset($ne['sync_report']) && empty($ne['sync_report'])) {
+        $out['skipped'] = 'disabled'; return $out;
+    }
+    $hasMsgr = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
+            || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '');
+    if (!$hasMsgr) { $out['skipped'] = 'no_messenger'; return $out; }
+    $out['delivery'] = notifSend($cn, syncReportText($rep));
     return $out;
 }
 
@@ -39214,6 +40410,12 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSrcPrice" checked style="width:15px;height:15px"><span>💰 گران/ارزان شدن مبدأ</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSrcStock" checked style="width:15px;height:15px"><span>📦 موجود/ناموجود شدن مبدأ</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifRunFail" checked style="width:15px;height:15px"><span>⚠️ خطای اجرای خودکار</span></label>
+<!-- v10.35 (۴۷د): گزارشِ کاملِ هر همگام‌سازی — پیش‌فرض روشن -->
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifSyncReport" checked style="width:15px;height:15px"><span>🔄 گزارشِ کاملِ هر همگام‌سازی</span></label>
+<div style="font-size:10px;color:#64748b;padding-right:21px;line-height:1.6;margin-bottom:4px">
+پس از هر همگام‌سازی (خودکار یا دستی) یک گزارشِ کامل ثبت می‌شود و همان متن به پیام‌رسان می‌رود:
+استخراج، بایگانی، صف‌سازی و صرفه‌جویی‌ها. گزارش‌ها در تبِ «شروع» هم قابل مرورند.
+</div>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifCronPing" style="width:15px;height:15px"><span>📡 پینگ اجرای کران‌جاب</span></label>
 <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;padding-right:21px">
 <span>حداکثر هر</span>
@@ -39959,6 +41161,32 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             </div>
             <div class="row" style="margin-top:6px">
                 <button class="btn btn-purple" id="startBackendBtn" onclick="startBackendSync()" style="flex:1;font-size:13px;padding:8px 12px;background:linear-gradient(135deg,#7c3aed,#a855f7);color:#fff;border:none;border-radius:8px;cursor:pointer">⚡ استخراج بک‌اند</button>
+            </div>
+
+            <!-- v10.35 (۴۷ه): همگام‌سازیِ دستی — یک دکمه برای کلِ زنجیره -->
+            <div id="manualSyncBox" style="margin-top:8px;padding:10px;background:#0f172a;border:1px solid #334155;border-radius:10px">
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+                    <span style="font-size:12px;font-weight:700;color:#34d399;flex:1">🔄 همگام‌سازیِ دستی</span>
+                    <span class="cst off" id="msState">آماده</span>
+                </div>
+                <div style="font-size:10.5px;color:#64748b;line-height:1.7;margin-bottom:8px">
+                    کلِ فرآیندِ همین پروفایل را همین حالا اجرا می‌کند:
+                    <b style="color:#93c5fd">استخراج</b> ← <b style="color:#fbbf24">بایگانیِ رفته‌ها</b> ←
+                    <b style="color:#c4b5fd">صف‌سازی و ارسال</b> ← <b style="color:#34d399">گزارشِ کامل</b>.
+                    منتظرِ نوبتِ زمان‌بندی نمی‌ماند و در پایان، گزارش هم در مدیر وظیفه ثبت
+                    می‌شود و هم به پیام‌رسان می‌رود.
+                </div>
+                <div class="row">
+                    <button class="btn btn-green" id="manualSyncBtn" onclick="startManualSync()" style="flex:1;font-size:13px;padding:8px 12px">🔄 همگام‌سازیِ دستی</button>
+                    <button class="btn btn-red hidden" id="manualSyncStopBtn" onclick="stopManualSync()" style="flex:0;font-size:11px;padding:8px 12px">⏹ توقف</button>
+                    <button class="btn btn-gray" onclick="srLoad()" style="flex:0;font-size:11px;padding:8px 12px" title="گزارشِ همگام‌سازی‌های قبلی">📄 گزارش‌ها</button>
+                </div>
+                <div id="manualSyncProgress" style="display:none;margin-top:8px">
+                    <div class="progress"><div class="progress-bar" id="msBar" style="background:linear-gradient(90deg,#059669,#34d399);width:0%"></div></div>
+                    <div id="msPhase" style="font-size:11px;color:#34d399;margin-top:4px"></div>
+                    <div id="msLog" style="max-height:160px;overflow-y:auto;font-size:10.5px;color:#94a3b8;margin-top:4px;line-height:1.8"></div>
+                </div>
+                <div id="msReport" style="margin-top:8px"></div>
             </div>
 
             <div class="hidden" id="extractProgress" style="margin-top:8px;padding:10px;background:#1e293b;border:1px solid #475569;border-radius:8px">
@@ -40738,6 +41966,22 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </label>
 <span id="bsShopsHint" style="font-size:10px;color:#67e8f9"></span>
 </div>
+
+<!-- v10.35 (۴۷ب): کشِ کاتالوگِ غرفه — همان چیزی که ارسال را چند برابر سریع می‌کند -->
+<div style="margin-bottom:8px;padding:8px 10px;background:#0f172a;border:1px solid #334155;border-radius:8px">
+<div style="display:flex;align-items:center;gap:6px;margin-bottom:5px">
+<span style="font-size:11px;color:#34d399;font-weight:700;flex:1">⚡ کشِ کاتالوگِ غرفه‌ها</span>
+<button class="btn btn-gray" onclick="bcLoad()" style="font-size:9.5px;padding:2px 8px">🔄 وضعیت</button>
+<button class="btn btn-green" onclick="bcRebuild()" style="font-size:9.5px;padding:2px 8px" title="فهرستِ همهٔ غرفه‌ها را از نو بگیر">🏗 بازسازی</button>
+<button class="btn btn-gray" onclick="bcClear()" style="font-size:9.5px;padding:2px 8px">🗑 پاک</button>
+</div>
+<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:6px">
+تا این نسخه، برنامه برای هر محصول تا ۲۴ درخواست می‌فرستاد فقط تا بفهمد آن محصول در غرفه هست یا نه.
+حالا یک بار کلِ فهرستِ غرفه گرفته و نگه داشته می‌شود، پس همان پرسش بدونِ هیچ درخواستی جواب می‌گیرد.
+کش هر ۶ ساعت خودبه‌خود تازه می‌شود؛ اگر از پنلِ باسلام محصولی دستی اضافه/حذف کردید، «بازسازی» را بزنید.
+</div>
+<div id="bcBox" style="font-size:10.5px;color:#64748b">برای دیدن، «وضعیت» را بزنید.</div>
+</div>
 <div class="cact"><button class="btn btn-cyan" id="bSB" onclick="sendBsl()" style="flex:1">🚀 ارسال باسلام</button><button class="btn btn-green" id="bSBlegacy" onclick="sendBslClient()" style="flex:1">🚀 ارسال فرات</button><button class="btn btn-orange hidden" id="bRB" onclick="sendBsl()" style="flex:1">🔄 تلاش مجدد</button><button class="btn btn-teal" onclick="showBslProductsModal()" style="flex-shrink:0;font-size:12px;padding:6px 10px">🏪 مدیریت جامع محصولات باسلام</button><button class="btn btn-red hidden" id="bST" onclick="stopBslProcess()">⏹ توقف</button></div>
 <div class="progress hidden" id="bP"><div class="progress-bar" id="bPB" style="background:linear-gradient(90deg,#0891b2,#22d3ee)"></div></div>
 <div class="status" id="bSS" style="color:#67e8f9"></div>
@@ -41183,6 +42427,61 @@ function bslRenderShopsHint(){
   else{el.style.color='#67e8f9';el.textContent='✓ '+toFa(n)+' غرفهٔ فعال — همزمان ارسال می‌شود';}
 }
 function bslToggleAllShops(){bslRenderShopsHint();try{saveConn();}catch(e){}}
+
+/* ═══════════════════════════════════════════════════════════════════
+ *  v10.35 (۴۷ب): کشِ کاتالوگِ غرفه — وضعیت، بازسازی، پاک‌کردن
+ *
+ *  بازسازی می‌تواند دقایقی طول بکشد (هر ۱۰۰ محصول یک درخواست)، پس دکمه
+ *  قفل می‌شود و پیام صریح می‌دهد؛ وگرنه کاربر چند بار می‌زند و چند
+ *  پیمایشِ همزمان راه می‌افتد.
+ * ═══════════════════════════════════════════════════════════════════ */
+function bcRender(d){
+  const box=$('bcBox'); if(!box)return;
+  const rows=(d&&d.vendors)||[];
+  if(!rows.length){
+    box.innerHTML='<div style="color:#fbbf24">غرفهٔ فعالی پیدا نشد — توکن و شمارهٔ غرفه را تنظیم کنید.</div>';
+    return;
+  }
+  let h='';
+  rows.forEach(v=>{
+    const col=v.fresh?'#4ade80':(v.count>0?'#fbbf24':'#64748b');
+    const st=v.count<=0?'ساخته نشده':(v.fresh?'تازه':'کهنه — در ارسالِ بعدی از نو ساخته می‌شود');
+    h+='<div style="border-top:1px solid #1e293b;padding:3px 0;display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
+      +'<span style="color:#cbd5e1;flex:1">🏪 '+esc(v.shop_name||('#'+v.vendor_id))+' <span style="color:#64748b">#'+v.vendor_id+'</span></span>'
+      +'<span style="color:'+col+'">'+toFa(v.count||0)+' عنوان</span>'
+      +'<span style="color:#64748b">'+esc(v.at_h||'—')+'</span>'
+      +'<span style="color:'+col+'">'+esc(st)+'</span>'
+      +(v.partial?'<span style="color:#f87171" title="کش ناقص است — «نبودنِ» محصول در آن قطعی شمرده نمی‌شود">⚠ ناقص</span>':'')
+      +'</div>';
+  });
+  h+='<div style="color:#64748b;margin-top:5px">مدتِ اعتبار: '+toFa(Math.round((d.ttl||0)/3600))+' ساعت</div>';
+  box.innerHTML=h;
+}
+function bcLoad(){
+  const box=$('bcBox'); if(box)box.innerHTML='<div style="color:#93c5fd">⏳ در حال خواندن…</div>';
+  fetch('?bsl_catalog=1').then(r=>r.json()).then(d=>{
+    if(!d.ok){if(box)box.innerHTML='<div style="color:#f87171">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    bcRender(d);
+  }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171">✗ خطا در ارتباط</div>';});
+}
+function bcRebuild(){
+  if(!confirm('فهرستِ همهٔ غرفه‌ها از نو گرفته شود؟\n\n'
+     +'بسته به تعدادِ محصولات ممکن است یکی‌دو دقیقه طول بکشد. '
+     +'در این مدت صفحه را نبندید.'))return;
+  const box=$('bcBox');
+  if(box)box.innerHTML='<div style="color:#93c5fd">🏗 در حال گرفتنِ فهرستِ غرفه‌ها… (چند دقیقه)</div>';
+  fetch('?bsl_catalog=1&rebuild=1').then(r=>r.json()).then(d=>{
+    if(!d.ok){if(box)box.innerHTML='<div style="color:#f87171">✗ '+esc(d.error||'خطا')+'</div>';return;}
+    bcRender(d);
+    showToast('✓ کشِ کاتالوگ بازسازی شد');
+  }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171">✗ خطا یا مهلت تمام شد — «وضعیت» را بزنید</div>';});
+}
+function bcClear(){
+  if(!confirm('کشِ کاتالوگ پاک شود؟ دفعهٔ بعد از نو ساخته می‌شود (کندتر، ولی بی‌خطر).'))return;
+  fetch('?bsl_catalog=1&clear=1').then(r=>r.json()).then(()=>{
+    const box=$('bcBox'); if(box)box.innerHTML='<div style="color:#4ade80">✓ پاک شد</div>';
+  }).catch(()=>showToast('✗ خطا شبکه',1));
+}
 
 // v8.17: Multi-vendor management
 let bslExtraVendors=[];
@@ -44164,6 +45463,152 @@ function startBackendSync(){
     backendExtractFor(url);
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ *  v10.35 (۴۷ه): همگام‌سازیِ دستی
+ *
+ *  دکمه فقط یک درخواستِ «شلیک کن و فراموش کن» می‌فرستد و بعد فایلِ
+ *  پیشرفت را رصد می‌کند. این عمدی است: کلِ زنجیره ممکن است چند دقیقه
+ *  طول بکشد و اگر منتظرِ پاسخ می‌ماندیم، بستنِ تب یا خوابِ گوشی کار را
+ *  «به نظر» شکست‌خورده نشان می‌داد — دقیقاً همان اشتباهی که در v9.07
+ *  برای استخراجِ تفصیلی رفع شد.
+ * ═══════════════════════════════════════════════════════════════════ */
+let msTimer=null;
+
+function msSetState(txt,cls){
+  const el=$('msState');
+  if(el){el.textContent=txt;el.className='cst '+(cls||'off');}
+}
+
+function startManualSync(){
+  const url=($('url')&&$('url').value.trim())
+            ||($('profileSelect')&&$('profileSelect').value.trim())||'';
+  if(!url){
+    showToast('⚠️ ابتدا یک پروفایل انتخاب یا ذخیره کنید',1);
+    switchMainTab('profiles');
+    return;
+  }
+  if(!confirm('کلِ فرآیندِ همین پروفایل همین حالا اجرا شود؟\n\n'
+     +'استخراج ← بایگانیِ محصولاتِ رفته ← صف‌سازی و ارسال ← گزارش\n\n'
+     +'بسته به تعدادِ محصولات ممکن است چند دقیقه طول بکشد؛ بستنِ صفحه کار را قطع نمی‌کند.'))return;
+  const go=()=>msFire(profileKey(url));
+  /* موتورِ سرور پروفایل را از دیسک می‌خواند، پس تغییرِ ذخیره‌نشده اول
+     باید بنشیند وگرنه با سلکتور/ضریبِ قدیمی اجرا می‌شود. */
+  if(typeof isDirty!=='undefined'&&isDirty&&typeof saveProfileSilent==='function'){
+    saveProfileSilent();
+    showToast('💾 ذخیره شد — شروع همگام‌سازی...');
+    setTimeout(go,900);
+    return;
+  }
+  go();
+}
+
+function msFire(pkey){
+  const btn=$('manualSyncBtn'); if(btn)btn.disabled=true;
+  const box=$('manualSyncProgress'); if(box)box.style.display='block';
+  const sb=$('manualSyncStopBtn'); if(sb)sb.classList.remove('hidden');
+  const rep=$('msReport'); if(rep)rep.innerHTML='';
+  msSetState('در حال اجرا','on');
+  if($('msPhase'))$('msPhase').textContent='⏳ در حال شروع…';
+  if($('msLog'))$('msLog').innerHTML='';
+  fetch('?manual_sync=1&profile='+encodeURIComponent(pkey))
+    .then(r=>r.json()).then(d=>{
+      /* پاسخِ فوری فقط می‌گوید «شروع شد»؛ نتیجهٔ واقعی از فایلِ پیشرفت
+         می‌آید. تنها حالتی که همین‌جا باید متوقف شویم، رد شدن است. */
+      if(d&&d.ok===false){
+        msFinish(false,(d.error||'شروع نشد'));
+        return;
+      }
+    }).catch(()=>{/* مهلت تمام‌شدن یعنی کار در پس‌زمینه ادامه دارد */});
+  showToast('🔄 همگام‌سازی شروع شد — پیشرفت را همین‌جا ببینید');
+  msWatch();
+}
+
+function msWatch(){
+  if(msTimer)clearInterval(msTimer);
+  msTimer=setInterval(msPoll,2000);
+  setTimeout(msPoll,600);
+}
+
+function msPoll(){
+  fetch('?manual_sync_status=1').then(r=>r.json()).then(d=>{
+    const p=(d&&d.progress)||{};
+    const tot=parseInt(p.total)||3, cur=Math.min(tot,parseInt(p.current)||0);
+    const bar=$('msBar'); if(bar)bar.style.width=Math.round(cur*100/Math.max(1,tot))+'%';
+    const ph=$('msPhase');
+    if(ph)ph.textContent=(p.phase?('▸ '+p.phase):'')+(p.profile_name?(' — '+p.profile_name):'');
+    const lg=$('msLog');
+    if(lg&&Array.isArray(p.recent_log))
+      lg.innerHTML=p.recent_log.slice(-20).map(l=>'<div>'+esc(String(l))+'</div>').join('');
+    if(p.done){
+      msFinish(!p.cancelled, p.cancelled?'با درخواستِ شما متوقف شد':'', p.summary||'');
+    }
+  }).catch(()=>{});
+}
+
+function msFinish(ok,msg,summary){
+  if(msTimer){clearInterval(msTimer);msTimer=null;}
+  const btn=$('manualSyncBtn'); if(btn)btn.disabled=false;
+  const sb=$('manualSyncStopBtn'); if(sb)sb.classList.add('hidden');
+  msSetState(ok?'تمام شد':'متوقف','off');
+  const bar=$('msBar'); if(bar&&ok)bar.style.width='100%';
+  const rep=$('msReport');
+  if(rep){
+    if(summary){
+      rep.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;'
+        +'font-size:11px;color:#cbd5e1;white-space:pre-wrap;line-height:1.9">'+esc(summary)+'</div>';
+    }else if(msg){
+      rep.innerHTML='<div style="color:'+(ok?'#4ade80':'#fbbf24')+';font-size:11px">'+esc(msg)+'</div>';
+    }
+  }
+  showToast(ok?'✅ همگام‌سازی تمام شد — گزارش ثبت و ارسال شد':('⏹ '+(msg||'متوقف شد')),!ok);
+  try{refreshExtractQueue();}catch(e){}
+  try{tmPulse();}catch(e){}
+}
+
+function stopManualSync(){
+  if(!confirm('همگام‌سازیِ دستی متوقف شود؟ کارِ نیمه‌تمام در نوبتِ بعدی ادامه پیدا می‌کند.'))return;
+  fetch('?manual_sync_stop=1').then(r=>r.json()).then(()=>{
+    showToast('⏹ درخواستِ توقف ثبت شد — پس از پروفایلِ جاری می‌ایستد');
+  }).catch(()=>showToast('✗ خطا شبکه',1));
+}
+
+/* v10.35 (۴۷د): گزارشِ همگام‌سازی‌های گذشته */
+function srLoad(){
+  const rep=$('msReport'); if(!rep)return;
+  rep.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال خواندن…</div>';
+  fetch('?sync_report=1&limit=25').then(r=>r.json()).then(d=>{
+    if(!d.ok){rep.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا</div>';return;}
+    const items=d.items||[];
+    if(!items.length){
+      rep.innerHTML='<div style="color:#64748b;font-size:11px;background:#0f172a;padding:8px;border-radius:8px">'
+        +'هنوز هیچ همگام‌سازی‌ای ثبت نشده.</div>';
+      return;
+    }
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px">'
+      +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'
+      +'<span style="font-size:11px;color:#34d399;font-weight:700;flex:1">📄 '+toFa(d.total)+' گزارشِ ثبت‌شده</span>'
+      +'<button class="btn btn-gray" onclick="srClear()" style="font-size:9.5px;padding:2px 8px">🗑 پاک‌کردن</button></div>';
+    items.forEach((r,i)=>{
+      h+='<details style="border-top:1px solid #1e293b;padding:4px 0">'
+        +'<summary style="cursor:pointer;color:#cbd5e1;font-size:11px">'
+        +esc(r.at_h||'—')+' — '+esc(r.profile||'?')
+        +(r.trigger==='manual'?' <span style="color:#34d399">دستی</span>':'')
+        +'</summary>'
+        +'<div style="white-space:pre-wrap;color:#94a3b8;font-size:10.5px;line-height:1.9;padding:4px 8px 2px">'
+        +esc(r.text||'')+'</div></details>';
+    });
+    h+='</div>';
+    rep.innerHTML=h;
+  }).catch(()=>{rep.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';});
+}
+
+function srClear(){
+  if(!confirm('کلِ گزارشِ همگام‌سازی‌ها پاک شود؟ خودِ محصولات دست نمی‌خورند.'))return;
+  fetch('?sync_report_clear=1').then(r=>r.json()).then(()=>{
+    const rep=$('msReport'); if(rep)rep.innerHTML='<div style="color:#4ade80;font-size:11px">✓ پاک شد</div>';
+  }).catch(()=>{});
+}
+
 /**
  * v8.28: پنل پیشرفت استخراج — یک ظاهر واحد برای هر سه مسیر
  * (دکمهٔ استخراج بک‌اند، دکمهٔ اجرای حالا، و کران‌جاب). قبلاً هرکدام
@@ -45165,6 +46610,52 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.35', t:'⚡ ارسال چند برابر سریع‌تر · 🗂 هر غرفه فایلِ خودش · 🔄 یک دکمه برای کلِ کار', items:[
+    '🧨 <b>مشکلِ اول — کندیِ ارسال.</b> برنامه برای هر محصول تا ۲۴ درخواست',
+    '   به باسلام می‌فرستاد، فقط تا بفهمد آن محصول در غرفه هست یا نه. روی',
+    '   یک پروفایلِ سه‌هزارتایی این ده‌ها هزار درخواست است — همان چیزی که',
+    '   ارسال را کش می‌داد و روی هاستِ اشتراکی وسطِ راه به تایم‌اوت می‌خورد.',
+    '❶ <b>حالا فهرستِ غرفه یک بار گرفته و نگه داشته می‌شود.</b> با ۳۰۰۰',
+    '   محصول یعنی حدودِ ۳۰ درخواست به‌جای ده‌ها هزار. همان پرسشِ «هست یا',
+    '   نیست» بعد از آن بدونِ هیچ درخواستی جواب می‌گیرد.',
+    '   این فهرست هر ۶ ساعت خودبه‌خود تازه می‌شود. اگر از پنلِ خودِ باسلام',
+    '   محصولی دستی اضافه یا حذف کردید، در تبِ ارسال دکمهٔ «🏗 بازسازی» هست.',
+    '⛑ <b>محتاطانه عمل می‌کند.</b> اگر گرفتنِ فهرست ناقص مانده باشد، «نبودنِ»',
+    '   یک محصول در آن هرگز قطعی شمرده نمی‌شود و برنامه مثل قبل کاملاً',
+    '   می‌گردد. یعنی بدترین حالتش دقیقاً رفتارِ نسخهٔ قبل است، نه بدتر.',
+    '🧨 <b>مشکلِ دوم — تداخلِ غرفه‌ها.</b> دفترچهٔ شناسه‌ها یک فایلِ مشترک بود',
+    '   و هر ثبت، کلِ فایل را بازنویسی می‌کرد. وقتی ارسال به دو غرفه هم‌زمان',
+    '   جلو می‌رفت، شناسه‌های تازهٔ یکی بی‌صدا پاک می‌شد — محصول «گم» می‌شد و',
+    '   دفعهٔ بعد یا دوباره از اول جست‌وجو می‌شد یا تکراری ساخته می‌شد.',
+    '❷ <b>حالا هر غرفه فایلِ جداگانهٔ خودش را دارد.</b> نوشتنِ غرفهٔ اول هیچ',
+    '   بایتی از غرفهٔ دوم را لمس نمی‌کند. اطلاعاتِ قبلی‌تان هم خودبه‌خود و',
+    '   بی‌صدا سرِ جای درستش می‌رود — هیچ کاری از شما لازم نیست.',
+    '🧨 <b>مشکلِ سوم — بایگانی می‌توانست محصولِ اشتباه را ببرد.</b> محصولاتِ',
+    '   رفته از مبدأ فقط با «عنوان» روی مقصد پیدا می‌شدند. اگر محصولی با همان',
+    '   عنوان مالِ پروفایلِ دیگری (یا دستیِ خودتان) بود، می‌رفت. و برعکس، اگر',
+    '   عنوان در مقصد ویرایش شده بود، محصول «یافت نشد» می‌شد و برای همیشه',
+    '   می‌ماند.',
+    '❸ <b>حالا اول از دفترچه می‌پرسد.</b> محصولی که <b>خودِ همان پروفایل</b>',
+    '   فرستاده باشد با شناسه پیدا می‌شود — دقیق، و بی‌اعتنا به تغییرِ عنوان.',
+    '   محصولی که مالِ پروفایلِ دیگری است اصلاً دست نمی‌خورد و در گزارش هم',
+    '   جدا شمرده می‌شود.',
+    '👁 <b>و پیش‌نمایش بالاخره به یک دکمهٔ اجرا وصل شد.</b> تا حالا پیش‌نمایش',
+    '   می‌گرفتید و بعد راهی نبود جز انتظار برای اجرای خودکارِ بعدی. حالا',
+    '   همان‌جا دکمهٔ «✔ تأیید و اجرا» هست. تأیید به همان فهرستی که دیده‌اید',
+    '   گره خورده، یک‌بارمصرف است و یک ساعت اعتبار دارد — پس هیچ‌وقت چیزی',
+    '   که ندیده‌اید حذف نمی‌شود.',
+    '📄 <b>گزارشِ کامل بعد از هر همگام‌سازی.</b> تا حالا خبرها تکه‌تکه بود:',
+    '   یک پیام برای تغییرِ قیمتِ مبدأ، یکی برای بایگانی، یکی هم پینگِ کران —',
+    '   و هیچ‌جا یک تصویرِ واحد از «این نوبت چه شد» نبود. حالا یک گزارشِ',
+    '   یکپارچه ساخته می‌شود: استخراج، بایگانی، صف‌سازی، ارسال و صرفه‌جویی‌ها.',
+    '   هم روی سرور ثبت می‌شود (پس اگر پیامی گم شود ردش باقی است) و هم به',
+    '   بله/روبیکا می‌رود. گزارش‌های قبلی را در تبِ «شروع» می‌بینید.',
+    '🔄 <b>دکمهٔ «همگام‌سازیِ دستی» در تبِ شروع.</b> یک کلیک، کلِ زنجیره:',
+    '   <b>استخراج ← بایگانیِ رفته‌ها ← صف‌سازی و ارسال ← گزارش</b>.',
+    '   منتظرِ نوبتِ زمان‌بندی نمی‌ماند و پشتِ قفلِ اجرای خودکار هم معطل',
+    '   نمی‌شود. کار روی سرور اجرا می‌شود، پس بستنِ صفحه قطعش نمی‌کند؛',
+    '   ردیفِ خودش را در مدیر وظیفه دارد با نوارِ پیشرفت، دکمهٔ توقف و ادامه.',
+  ]},
   {v:'10.34', t:'➕🔄🗑 تیکِ افزودن/آپدیت حالا چرخهٔ کامل است — و ضریبِ تازه به همه می‌رسد', items:[
     '🧨 <b>مشکلِ اول.</b> تیکِ «افزودن/آپدیت» فقط دو کار از سه کار را انجام',
     '   می‌داد: محصولِ جدید را می‌ساخت، تغییرکرده را آپدیت می‌کرد، ولی',
@@ -49265,16 +50756,60 @@ function retirePreview(){
     }
     let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
     h+='<div style="color:#fbbf24;margin-bottom:4px">پیش‌نمایش — هیچ تغییری اعمال نشد</div>';
-    h+='<div style="color:#94a3b8">بررسی‌شده: '+toFa(d.checked||0)+' · یافت‌نشده: '+toFa(d.not_found||0)+'</div>';
+    h+='<div style="color:#94a3b8">بررسی‌شده: '+toFa(d.checked||0)+' · یافت‌نشده: '+toFa(d.not_found||0)
+      +(d.not_owned?(' · <span style="color:#fbbf24">مالِ پروفایلِ دیگر: '+toFa(d.not_owned)+'</span>'):'')
+      +'</div>';
     (d.items||[]).slice(0,12).forEach(it=>{
       h+='<div style="border-top:1px solid #1e293b;padding:3px 0;color:#cbd5e1">• '+esc(it.title||'')
         +' <span style="color:#64748b">'+esc(it.reason||'')+'</span>'
         +(it.woo?' <span style="color:#67e8f9">woo: '+esc(it.woo)+'</span>':'')
         +(it.bsl?' <span style="color:#c4b5fd">bsl: '+esc(it.bsl)+'</span>':'')+'</div>';
     });
-    h+='<div style="margin-top:6px;color:#94a3b8">برای اجرای واقعی، «اقدام» را ذخیره کنید تا در اجرای خودکار بعدی انجام شود.</div>';
+    /* v10.35 (۴۷ج): اجرای واقعی از همین‌جا، با تأییدِ همین فهرست.
+       تا حالا کاربر پیش‌نمایش می‌گرفت و بعد راهی نداشت جز اینکه منتظرِ
+       اجرای خودکارِ بعدی بماند — یعنی «پیش‌نمایش» عملاً به هیچ عملی
+       وصل نبود. توکن یک‌بارمصرف است و به همین فهرست گره خورده. */
+    if(d.confirm_token&&d.ready>0){
+      h+='<div style="margin-top:8px;padding:7px 8px;background:#7f1d1d20;border:1px solid #7f1d1d;border-radius:6px">'
+        +'<div style="color:#fca5a5;margin-bottom:6px">'+toFa(d.ready)+' مورد آمادهٔ اجراست. '
+        +'فقط محصولاتی که <b>خودِ همین پروفایل</b> فرستاده باشد دست می‌خورند.</div>'
+        +'<button class="btn btn-red" style="font-size:11px;padding:4px 10px" '
+        +'onclick="retireApply(\''+esc(d.confirm_token)+'\','+d.ready+')">✔ تأیید و اجرا</button></div>';
+    }else{
+      h+='<div style="margin-top:6px;color:#94a3b8">موردِ آماده‌ای برای اجرا نیست.</div>';
+    }
     h+='</div>';
     box.innerHTML=h;
+  }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';});
+}
+
+/* v10.35 (۴۷ج): اجرای واقعیِ بازنشستگی — فقط با توکنِ همان پیش‌نمایش */
+function retireApply(token,n){
+  const box=$('retireR');
+  const key=$('profileSelect')?$('profileSelect').value:'';
+  if(!key||!token)return;
+  if(!confirm('اجرای واقعی روی '+toFa(n)+' محصول؟\n\n'
+     +'اقدامی که در بالا انتخاب کرده‌اید اعمال می‌شود. '
+     +'«زباله‌دان» و «پیش‌نویس» و «ناموجود» برگشت‌پذیرند؛ «حذف همیشگی» نیست.'))return;
+  if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال اجرا…</div>';
+  const mode=$('retireMode')?$('retireMode').value:'draft';
+  fetch('?retire_run=1&dry=0&confirm='+encodeURIComponent(token)
+        +'&profile='+encodeURIComponent(key)+'&mode='+encodeURIComponent(mode))
+   .then(r=>r.json()).then(d=>{
+    if(!box)return;
+    if(!d.ok){
+      box.innerHTML='<div style="color:#f87171;font-size:11px;background:#7f1d1d20;padding:6px 8px;border-radius:6px">✗ '
+        +esc(d.error||'خطا')+'</div>';
+      return;
+    }
+    box.innerHTML='<div style="background:#064e3b30;border:1px solid #065f46;border-radius:8px;padding:8px;font-size:11px">'
+      +'<div style="color:#4ade80;margin-bottom:4px">✓ اجرا شد</div>'
+      +'<div style="color:#94a3b8">انجام‌شده: '+toFa(d.retired||0)
+      +' · یافت‌نشده: '+toFa(d.not_found||0)
+      +' · ناموفق: '+toFa(d.failed||0)
+      +(d.not_owned?(' · مالِ پروفایلِ دیگر: '+toFa(d.not_owned)):'')+'</div>'
+      +'<div style="color:#64748b;margin-top:4px">جزئیات در «گزارشِ بایگانی‌شده‌ها» پایین ثبت شد.</div></div>';
+    try{rlLoad();}catch(e){}
   }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';});
 }
 
@@ -50333,7 +51868,7 @@ if(typeof aiResumeTestModalOnLoad==='function')setTimeout(aiResumeTestModalOnLoa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifSyncReport'))$('notifSyncReport').checked=ne.sync_report!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
 arApplyCfg(cn.autoreply||{});arLoad();}
 /* v8.87: پیش‌نمایش زندهٔ تعدیل قیمت مقصد.
@@ -50368,7 +51903,7 @@ fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
