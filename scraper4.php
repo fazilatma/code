@@ -242,8 +242,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.36';
-const APP_VERSION_DATE = '1405/06/03';
+const APP_VERSION = '10.37';
+const APP_VERSION_DATE = '1405/06/02';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -22725,18 +22725,16 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, '<col' . 'group>') !== false
       && strpos($selfSrc, 'class="aiTestTable"') !== false);
 
-    /* ادعا فقط به «هست بودنِ» قواعدِ تازه بسته شده. بررسیِ «نبودنِ» قاعدهٔ
-       قدیمی عمداً حذف شد: متنِ توضیحیِ همین نسخه آن رشته را نام می‌برد و
-       ادعا خودش را فیل می‌کرد. */
-    $add('10.36', 'سلولِ نام حداکثر دو خط می‌شود، نه نویسه‌نویسه',
+    /* v10.37 (۵۰الف): همان هدفِ «دو خط»، ولی روی پوششِ داخلی. جزئیاتِ
+       اشتباهِ v10.36 در ادعای بعدی آزموده می‌شود. */
+    $add('10.37', 'سلولِ نام حداکثر دو خط می‌شود، نه نویسه‌نویسه',
          strpos($selfSrc, '-webkit-line-clamp:' . '2') !== false
       && strpos($selfSrc, 'overflow-wrap:' . 'anywhere') !== false
-      && strpos($selfSrc, 'td.aiCell' . '2{') !== false);
+      && strpos($selfSrc, '.aiTestTable .c' . '2{') !== false);
 
-    $add('10.36', 'نامِ مدل tooltip دارد تا متنِ کامل از دست نرود',
-         strpos($selfSrc, 'class="aiCell2 aiModelCell"') !== false
-      && substr_count($selfSrc, "+'title=\"'+esc(d.baseModel") >= 1
-      && substr_count($selfSrc, 'class="aiCell' . '2"') >= 1);
+    $add('10.37', 'نامِ مدل tooltip دارد تا متنِ کامل از دست نرود',
+         strpos($selfSrc, 'class="aiModelCell" title=') !== false
+      && substr_count($selfSrc, "const mn=esc(d.baseModel") >= 1);
 
     /* ---------- ۴۹د: کارت‌های آمارِ مدل‌ها ---------- */
     $add('10.36', 'اندپوینتِ آمارِ مدل‌ها هست و کلیدهای اصلی را می‌دهد',
@@ -22799,6 +22797,124 @@ if (isset($_GET['selftest'])) {
     $add('10.36', 'نسخه و گزارشِ تغییرات به‌روز است',
          version_compare(APP_VERSION, '10.' . '36', '>=')
       && strpos($selfSrc, 'v:' . "'10.36'") !== false);
+
+    /* ═══════════════════ v10.37 (۵۰) ═══════════════════
+       الف) بازسازیِ جدولِ نتایجِ تست + سربرگ‌های مرتب‌کننده
+       ب) کارت‌های کشوییِ مدیرِ وظیفه، پیش‌فرض بسته
+       ═══════════════════════════════════════════════════ */
+
+    /* ---------- ۵۰الف: جدولِ منظم و مرتب‌شونده ---------- */
+
+    /* رگرسیونِ اصلیِ v10.36: قاعدهٔ line-clamp روی خودِ td بود و چون
+       display:-webkit-box با table-cell ناسازگار است، سلول از جدول بیرون
+       می‌افتاد. ادعا رفتاری بسته شده: در تمامِ شیوه‌نامه نباید هیچ قاعده‌ای
+       باشد که همزمان سلولِ جدول را هدف بگیرد و حالتِ جعبه‌ای بدهد. */
+    $add('10.37', 'قاعدهٔ دو خطی به سلولِ جدول چسبانده نشده',
+         (function () use ($selfSrc) {
+             $sel = 'td.aiCell' . '2';
+             $box = '-webkit-box' . '-orient';
+             // نباید هیچ بلوکی باشد که هم آن انتخابگر را دارد و هم جعبه‌ای می‌کند
+             foreach (explode('}', $selfSrc) as $blk) {
+                 if (strpos($blk, $sel) !== false && strpos($blk, $box) !== false) return false;
+             }
+             return true;
+         })());
+
+    $add('10.37', 'پوششِ دو خطی روی یک div داخلِ سلول است',
+         strpos($selfSrc, '.aiTestTable .c' . '2{') !== false
+      && strpos($selfSrc, '<div class="c' . '2">') !== false
+      && strpos($selfSrc, 'querySelector(\'.aiMsgRes .c2\')') !== false
+      && strpos($selfSrc, 'querySelector(\'.aiCatRes .c2\')') !== false);
+
+    $add('10.37', 'هر پنج ستونِ مرتب‌شونده سربرگِ کلیک‌پذیر دارد',
+         (function () use ($selfSrc) {
+             foreach (['idx', 'st', 'prov', 'model', 'lat'] as $k) {
+                 if (strpos($selfSrc, "aiTestSort(\\'" . $k . "\\')") === false) return false;
+                 if (strpos($selfSrc, 'data-sk="' . $k . '"') === false) return false;
+             }
+             return true;
+         })());
+
+    $add('10.37', 'کلیک روی سربرگ چرخهٔ صعودی/نزولی/طبیعی دارد',
+         strpos($selfSrc, 'function aiTestSort(k){') !== false
+      && strpos($selfSrc, 'aiTestSortDir=-1;') !== false
+      && strpos($selfSrc, "aiTestSortKey=''; aiTestSortDir=1;") !== false);
+
+    /* ردیف‌های تازه هم باید سرِ جای مرتب بنشینند، نه ته جدول */
+    $add('10.37', 'ردیفِ تازه با مرتب‌سازیِ فعال دوباره جای‌گذاری می‌شود',
+         strpos($selfSrc, 'if(aiTestSortKey) aiTestSortApply();') !== false
+      && strpos($selfSrc, 'function aiTestSortApply(){') !== false);
+
+    /* مرتب‌سازی نباید فیلترِ «فقط سبزها» را خراب کند: هیچ‌جای موتورِ
+       مرتب‌سازی نباید style.display را دست بزند. */
+    /* strrpos عمدی است: رشتهٔ نامِ تابع در متنِ همین ادعا هم هست، پس
+       strpos به جای خودِ تابع، این ادعا را پیدا می‌کرد. */
+    $add('10.37', 'مرتب‌سازی با فیلترِ فقط‌سبزها تداخل ندارد',
+         (function () use ($selfSrc) {
+             $a = strrpos($selfSrc, 'function aiTestSort' . 'Apply(){');
+             $b = strrpos($selfSrc, 'function aiTestSort' . 'MarkHeads(){');
+             if ($a === false || $b === false || $b <= $a) return false;
+             $body = substr($selfSrc, $a, $b - $a);
+             return strpos($body, 'style.dis' . 'play') === false
+                 && strpos($body, 'createDocument' . 'Fragment') !== false;
+         })());
+
+    $add('10.37', 'کلیدهای مرتب‌سازی روی ردیف ذخیره می‌شوند',
+         strpos($selfSrc, 'tr.dataset.aiIdx=') !== false
+      && strpos($selfSrc, 'tr.dataset.aiLatV=') !== false
+      && strpos($selfSrc, 'tr.dataset.aiStV=') !== false
+      && strpos($selfSrc, 'tr.dataset.aiProvName=') !== false);
+
+    /* ---------- ۵۰ب: کارت‌های کشوییِ مدیرِ وظیفه ---------- */
+
+    $add('10.37', 'کارت‌های مدیرِ وظیفه کشویی‌اند',
+         strpos($selfSrc, 'function tmToggleCard(k){') !== false
+      && strpos($selfSrc, 'function tmIsOpen(k){') !== false
+      && strpos($selfSrc, 'const tmOpenCards={};') !== false
+      && strpos($selfSrc, 'tmToggleCard(') !== false);
+
+    /* «پیش‌فرض بسته» رفتاری آزموده می‌شود: نگهدارنده باید خالی ساخته شود و
+       خودِ سازندهٔ کارت فقط آن را *بخواند*، نه اینکه بنویسد. اگر روزی کسی
+       داخلِ tmCard کارتی را خودکار باز کند، همین‌جا گیر می‌افتد.
+       نامِ نگهدارنده تکه‌تکه نوشته شده تا متنِ خودِ ادعا با آن اشتباه نشود. */
+    $add('10.37', 'کارت‌ها در ابتدا بسته‌اند',
+         (function () use ($selfSrc) {
+             $store = 'tmOpen' . 'Cards';
+             if (strpos($selfSrc, 'const ' . $store . '={};') === false) return false;
+             $a = strrpos($selfSrc, 'function tmCard(t){');
+             $b = strrpos($selfSrc, 'function tmJobRow(');
+             if ($a === false || $b === false || $b <= $a) return false;
+             $body = substr($selfSrc, $a, $b - $a);
+             // سازندهٔ کارت فقط می‌پرسد، تصمیم نمی‌گیرد
+             return strpos($body, $store . '[') === false
+                 && strpos($body, 'tmIs' . 'Open(t.key)') !== false;
+         })());
+
+    $add('10.37', 'بدنهٔ کارتِ بسته اصلاً رندر نمی‌شود',
+         strpos($selfSrc, 'if(!opened){') !== false
+      && strpos($selfSrc, 'const opened=tmIsOpen(t.key);') !== false
+      && strpos($selfSrc, '.tmc-body{') !== false);
+
+    /* حتی در حالتِ بسته، خلاصه و نوارِ باریکِ پیشرفت می‌ماند */
+    $add('10.37', 'کارتِ بسته خلاصه و نوارِ باریک نشان می‌دهد',
+         strpos($selfSrc, 'class="tmc-sum"') !== false
+      && strpos($selfSrc, '.tmbar.mini{') !== false
+      && strpos($selfSrc, 'tmbar mini ind') !== false);
+
+    $add('10.37', 'دکمهٔ جمعیِ باز/بستنِ همه هست',
+         strpos($selfSrc, 'function tmToggleAllCards()') !== false
+      && strpos($selfSrc, 'tmToggleAllCards()') !== false
+      && strpos($selfSrc, 'const anyOpen=tasks.some(') !== false);
+
+    /* پرشِ ناخواسته: کلیکِ روی کارت دیگر نباید کاربر را به تبِ دیگر ببرد؛
+       آن کار فقط با دکمهٔ صریح انجام می‌شود. */
+    $add('10.37', 'کلیک روی کارت فقط بازوبسته می‌کند و کاربر را نمی‌پراند',
+         strpos($selfSrc, 'class="tmc-head" onclick="tmToggleCard(') !== false
+      && strpos($selfSrc, 'class="tmchev"') !== false);
+
+    $add('10.37', 'نسخه و گزارشِ تغییرات به‌روز است',
+         version_compare(APP_VERSION, '10.' . '37', '>=')
+      && strpos($selfSrc, 'v:' . "'10.37'") !== false);
 
     /* ═══════════════════ v10.35 (۴۷) ═══════════════════
        الف) دفترچه per-vendor · ب) کشِ کاتالوگ · ج) بایگانیِ مقصدمحور
@@ -39490,20 +39606,45 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 .mstat{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#1e293b;border:1px solid #334155;border-radius:20px;padding:2px 9px;font-size:10.5px;color:#fbbf24;line-height:1.7}
 .mstat:empty{display:none}
 /* =====================================================================
-   v10.36 (۴۹ج): سلولِ «حداکثر دو خط» در جدولِ نتایجِ تست مدل‌ها.
-   line-clamp متن را در دو خط نگه می‌دارد و بقیه را با «…» می‌بندد، پس
-   ارتفاعِ ردیف‌ها یکنواخت می‌ماند و جدول با یک نامِ بلند به‌هم نمی‌ریزد.
-   overflow-wrap:anywhere فقط وقتی وسطِ کلمه می‌شکند که چاره‌ای نباشد —
-   برخلافِ word-break:break-all که همیشه می‌شکست و نام را نویسه‌نویسه
-   می‌کرد. ===================================================================== */
-.aiTestTable td.aiCell2{white-space:normal;overflow:hidden;overflow-wrap:anywhere;
-  display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;
-  line-height:1.5;max-height:3em}
-.aiTestTable td.aiModelCell{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px}
-.aiTestTable th,.aiTestTable td{vertical-align:top}
+   v10.37 (۵۰الف): جدولِ نتایجِ تست — بازسازیِ چیدمان.
+
+   🧨 اشتباهِ v10.36: برای دو خطی کردنِ سلول‌ها، «display:-webkit-box»
+   مستقیم روی خودِ <td> گذاشته شد. ولی این خاصیت، «display:table-cell»
+   را باطل می‌کند — یعنی آن سلول دیگر سلولِ جدول نیست. نتیجه: ستون‌ها از
+   colgroup پیروی نکردند، ردیف‌ها از هم پاشیدند و نظمِ جدول به‌هم ریخت.
+   دقیقاً همان چیزی که کاربر گزارش کرد.
+
+   ✅ درستش این است که خودِ <td> سلول بماند و «قلمِ دو خطی» روی یک
+   پوشش (<div class="c2">) داخلش اعمال شود. حالا هم چیدمانِ جدول سالم
+   است و هم متنِ بلند در دو خط جمع می‌شود.
+   ===================================================================== */
+.aiTestTable{width:100%;border-collapse:separate;border-spacing:0;font-size:11px;table-layout:fixed}
+.aiTestTable th,.aiTestTable td{vertical-align:middle;box-sizing:border-box}
+.aiTestTable td{padding:6px 7px;border-bottom:1px solid #16233c}
+/* پوششِ دو خطی — روی div است نه td، وگرنه سلول از جدول بیرون می‌افتد */
+.aiTestTable .c2{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;
+  line-height:1.55;max-height:3.1em;word-break:normal}
+.aiTestTable .c1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aiTestTable td.aiModelCell .c2{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:10.5px;direction:ltr;text-align:left}
+.aiTestTable tbody tr{transition:background .15s}
+.aiTestTable tbody tr:nth-child(even){background:#0e1729}
+.aiTestTable tbody tr:hover{background:#16233c}
+/* سربرگِ مرتب‌کننده */
+.aiTestTable thead th{position:sticky;top:0;z-index:2;background:#1e293b;color:#94a3b8;
+  padding:7px 8px;font-size:10.5px;font-weight:700;border-bottom:1px solid #334155;
+  white-space:nowrap;user-select:none}
+.aiTestTable thead th.srt{cursor:pointer}
+.aiTestTable thead th.srt:hover{background:#25344b;color:#e2e8f0}
+.aiTestTable thead th .sarw{font-size:8px;opacity:.35;margin-right:3px;display:inline-block}
+.aiTestTable thead th.on{color:#67e8f9;background:#22344d}
+.aiTestTable thead th.on .sarw{opacity:1;color:#67e8f9}
 @media(max-width:720px){
 .aiTestTable{font-size:10px}
-.aiTestTable td.aiModelCell{font-size:9.5px}
+.aiTestTable td.aiModelCell .c2{font-size:9.5px}
+.aiTestTable thead th{font-size:9.5px;padding:6px 5px}
+.aiTestTable td{padding:5px}
 }
 /* =====================================================================
    v10.36 (۴۹د): کارت‌های شمارندهٔ آمارِ مدل‌ها.
@@ -39572,6 +39713,14 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 .tasks-btn.warn{border-color:#f59e0b;background:#3a2a0c;color:#fcd34d;animation:none}
 .tasks-btn.warn .tasks-badge{display:flex;background:#f59e0b;color:#3a2a0c}
 .tmc{border:1px solid #334155;border-radius:10px;background:#111c31;padding:9px 11px;margin-bottom:8px;transition:border-color .2s,background .2s}
+/* v10.37 (۵۰ب): کارتِ کشویی — سربرگ همیشه، جزئیات فقط وقتی باز است */
+.tmc.open{background:#132038;border-color:#3b5578}
+.tmc-body{margin-top:2px;animation:tmFold .16s ease-out}
+@keyframes tmFold{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+.tmchev{color:#67e8f9;font-size:10px;width:11px;display:inline-block;text-align:center;flex:0 0 auto}
+.tmc-sum{font-size:10px;color:#94a3b8;margin-top:5px;padding-right:17px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tmbar.mini{height:3px;margin-top:5px}
 .tmc:hover{border-color:#475569}
 .tmc.run{border-color:#22c55e55;background:#0f2419}
 .tmc.stale{border-color:#f59e0b66;background:#2a1f08}
@@ -47254,6 +47403,38 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.37', t:'🗂 کارت‌های کشوییِ مدیرِ وظیفه · 🧮 جدولِ مرتبِ نتایجِ تست با سربرگِ مرتب‌کننده', items:[
+    '🧨 <b>عذرخواهی — نظمِ جدولِ نتایجِ تست را خودِ نسخهٔ قبل به‌هم ریخته بود.</b>',
+    '   در v10.36 برای اینکه نامِ بلندِ مدل‌ها حداکثر دو خط شود، قاعدهٔ',
+    '   line-clamp مستقیم روی خودِ خانهٔ جدول (td) گذاشته شد. اما آن قاعده',
+    '   خانه را از حالتِ «خانهٔ جدول» خارج می‌کند؛ یعنی آن سلول دیگر عضوِ',
+    '   ستون نیست. نتیجه: عرض‌هایی که در همان نسخه تعریف شده بود اعمال',
+    '   نمی‌شد، ستون‌ها زیرِ هم نمی‌افتادند و ردیف‌ها پله‌پله می‌شدند.',
+    '✅ <b>حالا:</b> خانهٔ جدول دوباره خانهٔ جدول است و «دو خطی شدن» روی یک',
+    '   پوششِ داخلی اعمال می‌شود. هم چیدمان سالم است، هم نامِ بلند در دو',
+    '   خط جمع می‌شود و متنِ کاملش در tooltip می‌ماند.',
+    '📐 جدول از نو چیده شد: ستونِ مدل سهمِ بزرگ‌تری گرفت، ردیف‌ها یک‌درمیان',
+    '   سایه دارند، سربرگ هنگام اسکرول می‌چسبد و ارتفاعِ ردیف‌ها یکنواخت است.',
+    '🧮 <b>سربرگ‌های مرتب‌کننده.</b> روی «#»، «وضعیت»، «ارائه‌دهنده»، «مدل» یا',
+    '   «تأخیر» کلیک کنید تا جدول بر همان اساس مرتب شود. بارِ اول صعودی،',
+    '   بارِ دوم نزولی، بارِ سوم برگشت به ترتیبِ طبیعی. جهتِ فعلی با ▲/▼',
+    '   روی سربرگ دیده می‌شود.',
+    '   • «تأخیر» سریع‌ترین مدل را بالا می‌آورد؛ مدل‌هایی که هنوز پاسخ',
+    '     نداده‌اند همیشه ته صف می‌مانند تا صدرِ جدول بی‌معنی نشود.',
+    '   • «وضعیت» سالم‌ها را جدا می‌کند بدونِ اینکه بقیه پنهان شوند.',
+    '   • مرتب‌سازی حینِ اجرای تست هم کار می‌کند و ردیف‌های تازه سرِ جای',
+    '     درستشان می‌نشینند، نه ته جدول. با فیلترِ «فقط سبزها» هم سازگار است.',
+    '🗂 <b>کارت‌های مدیرِ وظیفه حالا کشویی‌اند و پیش‌فرض بسته‌اند.</b> تا پیش از',
+    '   این هر کارت همهٔ جزئیاتش — نوارِ پیشرفت، آمار، هشدار و لاگ — را',
+    '   همیشه باز نشان می‌داد و با چند کارِ همزمان، پنجره یک دیوارِ بلندِ',
+    '   اسکرول می‌شد. حالا فقط سربرگ دیده می‌شود و با کلیک باز می‌شود.',
+    '   • کارتِ بسته هم بی‌خبر نیست: یک خطِ خلاصه (مرحله، پیشرفت، آخرین خبر)',
+    '     و یک نوارِ باریکِ پیشرفت دارد، پس «زنده بودنِ» کار با یک نگاه معلوم است.',
+    '   • دکمهٔ «بازکردنِ همه / بستنِ همه» برای وقتی که می‌خواهید همه را با هم ببینید.',
+    '   • وضعیتِ باز و بسته در به‌روزرسانیِ خودکارِ هر ۲.۵ ثانیه حفظ می‌شود.',
+    '   • کلیک روی کارت دیگر شما را به تبِ دیگری پرت نمی‌کند؛ آن کار فقط با',
+    '     دکمهٔ صریحِ «↗ پنجرهٔ اصلی» انجام می‌شود.',
+  ]},
   {v:'10.36', t:'🩺 کارِ در حال اجرا دیگر «رهاشده» اعلام نمی‌شود · 🏪 تفکیکِ غرفه‌ها · 📊 آمارِ مدل‌ها', items:[
     '🧨 <b>مهم‌ترین مشکل — کارِ زنده، مرده اعلام می‌شد.</b> چند دقیقه بعد از',
     '   شروعِ استخراج، مدیر وظیفه برچسبِ «رهاشده» می‌زد و می‌نوشت «۴۰ دقیقه',
@@ -54157,6 +54338,36 @@ function tmGo(key){
 }
 
 /** کارتِ یک کارِ پس‌زمینه */
+/* ═══════════════════════════════════════════════════════════════════════
+   v10.37 (۵۰ب): وضعیتِ باز/بستهٔ کارت‌های مدیرِ وظیفه.
+
+   جدولِ کارت‌ها هر ۲.۵ ثانیه کاملاً از نو ساخته می‌شود، پس وضعیتِ باز
+   بودن نمی‌تواند داخلِ DOM بماند — با اولین به‌روزرسانی پاک می‌شد. اینجا
+   بیرون از DOM نگه داشته می‌شود و tmCard در هر رندر از آن می‌پرسد.
+
+   پیش‌فرض: همه بسته. عمداً هیچ کارتی — حتی «در حال اجرا» — خودکار باز
+   نمی‌شود؛ خواستهٔ صریحِ کاربر «در ابتدا بسته» بود و باز شدنِ خودکارِ
+   کارِ در حال اجرا دوباره همان دیوارِ بلند را می‌ساخت.
+   ═══════════════════════════════════════════════════════════════════════ */
+const tmOpenCards={};
+
+function tmIsOpen(k){ return !!tmOpenCards[k]; }
+
+function tmToggleCard(k){
+  if(tmOpenCards[k]) delete tmOpenCards[k];
+  else tmOpenCards[k]=1;
+  tmRender();          // بازسازیِ فوری، بدونِ انتظار برای تیکِ بعدی
+}
+
+/* دکمهٔ جمعی: اگر حتی یکی باز است همه را ببند، وگرنه همه را باز کن */
+function tmToggleAllCards(){
+  const tasks=(tmData&&tmData.tasks)||[];
+  const anyOpen=tasks.some(t=>tmIsOpen(t.key));
+  Object.keys(tmOpenCards).forEach(k=>{delete tmOpenCards[k];});
+  if(!anyOpen) tasks.forEach(t=>{tmOpenCards[t.key]=1;});
+  tmRender();
+}
+
 function tmCard(t){
   const lbl={running:'در حال اجرا',stale:'رهاشده',done:'تمام‌شده',idle:'بی‌کار'}[t.state]||t.state;
   const cls={running:'run',stale:'stale',done:'done',idle:'idle'}[t.state]||'idle';
@@ -54165,13 +54376,22 @@ function tmCard(t){
      روی هر دکمه event.stopPropagation می‌گذاریم وگرنه «توقف» هم کاربر را
      از پنجره بیرون می‌برد. */
   const nav=!!(t.pane||t.open);
+  /* v10.37 (۵۰ب): کارت کشویی است و پیش‌فرض بسته. تا v10.36 هر کارت کلِ
+     جزئیاتش (نوارِ پیشرفت، آمار، هشدار، لاگ) را همیشه باز نشان می‌داد و
+     با چند کارِ همزمان، پنجرهٔ مدیرِ وظیفه یک دیوارِ بلندِ اسکرول می‌شد.
+     حالا فقط سربرگ دیده می‌شود و جزئیات با کلیک باز می‌شود. */
+  const opened=tmIsOpen(t.key);
   /* v10.24 (۳۷الف): ستونِ اولویت در ابتدای کارت — همان الگویِ ▲▼ کارهای
      زمان‌بندی‌شده، ولی برای کارهای پس‌زمینه. رتبه هم کنارش نوشته می‌شود
      وگرنه کاربر نمی‌فهمد این دکمه‌ها چه چیزی را جابه‌جا می‌کنند. */
   const first=(t.rank<=1), last=!!(tmData&&t.rank>=((tmData.tasks||[]).length));
-  let h='<div class="tmc '+cls+'"'+(nav?(' onclick="tmGo(\''+jsAttr(t.key)+'\')" style="cursor:pointer"'
-        +' title="کلیک: رفتن به «'+jsAttr(t.tab)+'» و بازکردنِ پنجرهٔ همین کار"'):'')+'>'
-    +'<div class="tmc-head">'
+  /* کلیک روی سربرگ = باز/بستنِ همین کارت. تا v10.36 کلیکِ روی کارت کاربر
+     را به تبِ دیگری می‌برد؛ حالا آن کار فقط با دکمهٔ صریحِ «پنجرهٔ اصلی»
+     انجام می‌شود، وگرنه باز کردنِ یک کارت کاربر را از پنجره بیرون می‌انداخت. */
+  let h='<div class="tmc '+cls+(opened?' open':'')+'" data-tmkey="'+jsAttr(t.key)+'">'
+    +'<div class="tmc-head" onclick="tmToggleCard(\''+jsAttr(t.key)+'\')" style="cursor:pointer"'
+    +' title="'+(opened?'کلیک: بستنِ جزئیات':'کلیک: نمایشِ جزئیاتِ این کار')+'">'
+    +'<span class="tmchev" aria-hidden="true">'+(opened?'▾':'▸')+'</span>'
     +'<span class="tmord" onclick="event.stopPropagation()" style="margin-left:2px">'
     + '<button onclick="event.stopPropagation();tmOrder(\''+jsAttr(t.key)+'\',\'up\')" '+(first?'disabled':'')+' title="یک پله بالاتر — زودتر بازیابی می‌شود">▲</button>'
     + '<button onclick="event.stopPropagation();tmOrder(\''+jsAttr(t.key)+'\',\'down\')" '+(last?'disabled':'')+' title="یک پله پایین‌تر">▼</button></span>'
@@ -54206,6 +54426,28 @@ function tmCard(t){
     h+='<button class="btn btn-gray" style="font-size:10px;padding:3px 10px" onclick="event.stopPropagation();tmClear(\''+jsAttr(t.key)+'\')" title="حذفِ ردِ این کار">🗑 پاک</button>';
   h+='</div>';
 
+  /* ── بدنهٔ کشویی ───────────────────────────────────────────────────
+     وقتی بسته است اصلاً رندر نمی‌شود (نه اینکه فقط پنهان شود)، تا با ده‌ها
+     کار، هر تیکِ ۲.۵ ثانیه‌ای گره‌های بی‌مصرف نسازد. اما یک خطِ خلاصه در
+     سربرگ می‌ماند تا کاربر بدونِ باز کردن هم بداند کار کجاست. */
+  if(!opened){
+    const sum=[];
+    if(t.phase) sum.push(esc(t.phase));
+    if(t.total>0) sum.push(toFa(t.current)+' از '+toFa(t.total)+(t.percent>=0?' ('+toFa(t.percent)+'٪)':''));
+    else if(t.current>0) sum.push(toFa(t.current));
+    if(t.ts>0) sum.push(tmAgo(t.age)+' پیش');
+    if(sum.length) h+='<div class="tmc-sum">'+sum.join(' · ')+'</div>';
+    /* نوارِ پیشرفتِ باریک حتی در حالتِ بسته — «زنده بودن» مهم‌ترین چیزی
+       است که کاربر با یک نگاه می‌خواهد بفهمد. */
+    if(t.state==='running'||t.state==='stale'){
+      if(t.percent>=0) h+='<div class="tmbar mini"><i style="width:'+t.percent+'%"></i></div>';
+      else             h+='<div class="tmbar mini ind"><i></i></div>';
+    }
+    return h+'</div>';
+  }
+
+  h+='<div class="tmc-body">';
+
   /* خطِ توضیح: مرحله، پیشرفتِ عددی، آخرین به‌روزرسانی */
   const bits=[];
   if(t.phase) bits.push(esc(t.phase));
@@ -54231,7 +54473,7 @@ function tmCard(t){
         : 'با «پاک» آزادش کنید تا بتوانید از تبِ خودش دوباره شروع کنید.')+'</div>';
   if((t.log||[]).length)
     h+='<div class="tmlog">'+t.log.map(l=>esc(l)).join('\n')+'</div>';
-  return h+'</div>';
+  return h+'</div></div>';   /* بستنِ .tmc-body و .tmc */
 }
 
 /** ردیفِ یک کارِ زمان‌بندی‌شده با دکمه‌های اولویت */
@@ -54275,12 +54517,17 @@ function tmRender(){
     +'<span style="flex:1"></span>'
     +'<span style="font-size:9.5px;color:#64748b;align-self:center">به‌روزرسانیِ خودکار هر ۲.۵ ثانیه</span></div>';
 
+  // v10.37 (۵۰ب): برچسبِ دکمهٔ جمعی از وضعیتِ فعلی خوانده می‌شود
+  const anyOpen=tasks.some(t=>tmIsOpen(t.key));
   h+='<div style="display:flex;align-items:center;gap:6px;margin:4px 0 3px">'
     +'<span style="font-size:11px;color:#67e8f9;font-weight:700">▸ کارهای پس‌زمینه — اولویت با ترتیبِ صف</span>'
     +'<span style="flex:1"></span>'
+    +'<button class="btn btn-gray" style="font-size:9px;padding:2px 8px" onclick="tmToggleAllCards()" '
+    +'title="'+(anyOpen?'بستنِ جزئیاتِ همهٔ کارت‌ها':'نمایشِ جزئیاتِ همهٔ کارت‌ها')+'">'
+    +(anyOpen?'▴ بستنِ همه':'▾ بازکردنِ همه')+'</button>'
     +'<button class="btn btn-gray" style="font-size:9px;padding:2px 8px" onclick="tmOrderReset()" '
     +'title="بازگرداندنِ ترتیب به حالتِ پیش‌فرض">↩ ترتیبِ پیش‌فرض</button></div>'
-    +'<div style="font-size:9.5px;color:#64748b;margin-bottom:7px">با ▲▼ ترتیب را بچینید؛ همین ترتیب در «ادامهٔ همه» و بازیابیِ خودکارِ کارهای گیرکرده هم رعایت می‌شود.</div>';
+    +'<div style="font-size:9.5px;color:#64748b;margin-bottom:7px">روی هر کارت کلیک کنید تا جزئیاتش باز شود. با ▲▼ ترتیب را بچینید؛ همین ترتیب در «ادامهٔ همه» و بازیابیِ خودکارِ کارهای گیرکرده هم رعایت می‌شود.</div>';
   if(!tasks.length) h+='<div style="color:#64748b;font-size:11px;padding:14px;text-align:center">'+(tmOnlyActive?'هیچ کارِ فعالی نیست.':'کاری ثبت نشده.')+'</div>';
   else tasks.forEach(t=>{h+=tmCard(t);});
 
@@ -55076,38 +55323,33 @@ function aiOpenTestModal(){
       +'<input type="checkbox" id="aiTestOnlyGreen" onchange="aiTestToggleOnlyGreen(this.checked)" style="display:none">'
       +'<span class=\"ai-switch\"></span></label></div>'
       /* ═══════════════════════════════════════════════════════════════
-         v10.36 (۴۹ج): عرضِ ستون‌ها بر اساس محتوا.
+         v10.37 (۵۰الف): جدولِ منظم با سربرگ‌های مرتب‌کننده.
 
-         گزارشِ کاربر: «ستونِ نامِ مدل بسیار باریک شده و خواندنِ نام بسیار
-         سخت است». درست بود و دو علتِ همزمان داشت:
-           ۱) جدول در حالتِ پیش‌فرضِ auto بود، پس مرورگر عرض را بین
-              ستون‌ها بر اساسِ *کلِ* متن پخش می‌کرد. دو ستونِ «پاسخ پیام» و
-              «پاسخ دسته» می‌توانند جمله‌های بلند داشته باشند، پس تقریباً
-              همهٔ عرض را می‌بلعیدند و نامِ مدل به چند نویسه می‌رسید.
-           ۲) روی همان سلول word-break:break-all بود — یعنی هر جا لازم شد
-              وسطِ کلمه بشکن. با ستونِ باریک، نامِ مدل عمودی و نویسه‌نویسه
-              می‌شد؛ بدترین حالتِ ممکن برای خواندن.
+         عرضِ ستون‌ها با colgroup تعیین می‌شود (سهمِ بزرگ برای نامِ مدل) و
+         چون table-layout ثابت است، یک نامِ خیلی بلند دیگر نمی‌تواند بقیهٔ
+         ستون‌ها را له کند.
 
-         حالا: چیدمانِ ثابت با درصدهای صریح، سهمِ بزرگ برای نامِ مدل، و
-         شکستنِ حداکثر دو خط (line-clamp) به‌جای شکستنِ بی‌نهایت. متنِ کاملِ
-         هر سلول در tooltip و در مودالِ جزئیات هست، پس چیزی از دست نمی‌رود.
+         هر سربرگِ مرتب‌کننده onclick دارد و جهتِ فعلی را با ▲/▼ نشان
+         می‌دهد. مرتب‌سازی سمتِ مرورگر است و روی همان ردیف‌هایی که تا این
+         لحظه آمده‌اند اعمال می‌شود — بدونِ هیچ درخواستی به سرور و بدونِ
+         قطعِ تستِ در حال اجرا.
          ═══════════════════════════════════════════════════════════════ */
       +'<div style="flex:1;overflow:auto;padding:0">'
-      +'<table class="aiTestTable" style="width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed">'
+      +'<table class="aiTestTable">'
       +'<colgroup>'
-      +'<col style="width:34px"><col style="width:46px">'
-      +'<col style="width:13%"><col style="width:32%">'
-      +'<col style="width:64px">'
-      +'<col style="width:20%"><col style="width:20%">'
+      +'<col style="width:38px"><col style="width:52px">'
+      +'<col style="width:14%"><col style="width:30%">'
+      +'<col style="width:72px">'
+      +'<col style="width:19%"><col style="width:19%">'
       +'</colgroup>'
-      +'<thead><tr style="background:#1e293b;position:sticky;top:0;color:#94a3b8">'
-      +'<th style="padding:8px;text-align:center">#</th>'
-      +'<th style="padding:8px;text-align:center">وضعیت</th>'
-      +'<th style="padding:8px;text-align:right">ارائه‌دهنده</th>'
-      +'<th style="padding:8px;text-align:left;direction:ltr">مدل</th>'
-      +'<th style="padding:8px;text-align:center">تأخیر</th>'
-      +'<th style="padding:8px;text-align:right">پاسخ پیام</th>'
-      +'<th style="padding:8px;text-align:right">پاسخ دسته</th>'
+      +'<thead><tr>'
+      +'<th class="srt" data-sk="idx"  onclick="aiTestSort(\'idx\')"  style="text-align:center" title="ترتیبِ ورود">#<span class="sarw"></span></th>'
+      +'<th class="srt" data-sk="st"   onclick="aiTestSort(\'st\')"   style="text-align:center" title="مرتب‌سازی بر اساسِ وضعیت (سالم اول)">وضعیت<span class="sarw"></span></th>'
+      +'<th class="srt" data-sk="prov" onclick="aiTestSort(\'prov\')" style="text-align:right"  title="مرتب‌سازی الفبایی بر اساسِ ارائه‌دهنده">ارائه‌دهنده<span class="sarw"></span></th>'
+      +'<th class="srt" data-sk="model" onclick="aiTestSort(\'model\')" style="text-align:left;direction:ltr" title="مرتب‌سازی الفبایی بر اساسِ نامِ مدل">مدل<span class="sarw"></span></th>'
+      +'<th class="srt" data-sk="lat"  onclick="aiTestSort(\'lat\')"  style="text-align:center" title="مرتب‌سازی بر اساسِ سرعتِ پاسخ">تأخیر<span class="sarw"></span></th>'
+      +'<th style="text-align:right">پاسخ پیام</th>'
+      +'<th style="text-align:right">پاسخ دسته</th>'
       +'</tr></thead><tbody id="aiTestTbody"></tbody></table></div>'
       /* v10.20 (۳۳ب): «مشکلات مدل‌ها» حالا کشویی است و بسته باز می‌شود.
          قبلاً این باکسِ نارنجی/قرمز باز و کامل چاپ می‌شد و با چند ارائه‌دهندهٔ
@@ -55179,6 +55421,83 @@ function aiTestApplyGreenFilter(){
         r.tr.style.display=(txt==='🟢')?'':'none';
     });
 }
+/* ═══════════════════════════════════════════════════════════════════════
+   v10.37 (۵۰الف): مرتب‌سازیِ جدولِ نتایجِ تست از روی سربرگ‌ها.
+
+   کلیک روی هر سربرگ: بارِ اول صعودی، بارِ دوم نزولی، بارِ سوم برگشت به
+   ترتیبِ طبیعیِ ورود (idx صعودی). این «چرخهٔ سه‌حالته» عمدی است — کاربر
+   بدونِ رفرش می‌تواند به نمای اولیه برگردد.
+
+   نکتهٔ سازگاری: فیلترِ «فقط سبزها» با tr.style.display کار می‌کند. چون ما
+   فقط ترتیبِ گره‌ها را عوض می‌کنیم و display را دست نمی‌زنیم، هر دو با هم
+   کار می‌کنند. ردیف‌های پنهان هم مرتب می‌شوند تا اگر فیلتر برداشته شد،
+   جدول همچنان مرتب باشد. ═══════════════════════════════════════════════ */
+let aiTestSortKey='';    // '' یعنی ترتیبِ طبیعیِ ورود
+let aiTestSortDir=1;     // ۱ صعودی، ‎-۱ نزولی
+
+function aiTestSortVal(tr,k){
+    const ds=tr.dataset||{};
+    if(k==='idx')  return parseInt(ds.aiIdx||'0',10)||0;
+    if(k==='st')   return parseInt(ds.aiStV||'2',10);
+    if(k==='lat'){
+        // مدل‌هایی که هنوز عددی ندارند همیشه ته صف می‌مانند — چه صعودی
+        // چه نزولی — وگرنه در حالتِ صعودی «بی‌پاسخ»ها بالای سریع‌ترین‌ها
+        // می‌نشستند و ستون بی‌معنی می‌شد.
+        const v=parseInt(ds.aiLatV||'',10);
+        return isNaN(v)?null:v;
+    }
+    if(k==='prov') return (ds.aiProvName||'').toLowerCase();
+    if(k==='model')return (ds.aiModel||'').toLowerCase();
+    return 0;
+}
+
+function aiTestSortApply(){
+    const tbody=$('aiTestTbody'); if(!tbody)return;
+    const rows=Array.prototype.slice.call(tbody.children);
+    if(!rows.length)return;
+    const k=aiTestSortKey||'idx', dir=aiTestSortKey?aiTestSortDir:1;
+    rows.sort(function(a,b){
+        const va=aiTestSortVal(a,k), vb=aiTestSortVal(b,k);
+        // null (بی‌مقدار) همیشه پایین، مستقل از جهت
+        if(va===null&&vb===null){}
+        else if(va===null)return 1;
+        else if(vb===null)return -1;
+        else if(typeof va==='string'||typeof vb==='string'){
+            const c=String(va).localeCompare(String(vb),'en');
+            if(c)return c*dir;
+        }
+        else if(va!==vb) return (va<vb?-1:1)*dir;
+        // گره‌گشا: ترتیبِ ورود، تا مرتب‌سازی پایدار و قابلِ پیش‌بینی بماند
+        return aiTestSortVal(a,'idx')-aiTestSortVal(b,'idx');
+    });
+    const frag=document.createDocumentFragment();
+    rows.forEach(function(tr){frag.appendChild(tr);});
+    tbody.appendChild(frag);
+    aiTestSortMarkHeads();
+}
+
+/* نشانهٔ ▲/▼ روی سربرگِ فعال */
+function aiTestSortMarkHeads(){
+    const tb=$('aiTestTbody'); if(!tb)return;
+    const tbl=tb.parentNode; if(!tbl)return;
+    const ths=tbl.querySelectorAll('thead th.srt');
+    Array.prototype.forEach.call(ths,function(th){
+        const on=(th.dataset.sk===aiTestSortKey);
+        th.classList.toggle('on',on);
+        const ar=th.querySelector('.sarw');
+        if(ar)ar.textContent=on?(aiTestSortDir>0?'▲':'▼'):'';
+        if(on)th.setAttribute('aria-sort',aiTestSortDir>0?'ascending':'descending');
+        else  th.removeAttribute('aria-sort');
+    });
+}
+
+function aiTestSort(k){
+    if(aiTestSortKey!==k){ aiTestSortKey=k; aiTestSortDir=1; }
+    else if(aiTestSortDir===1){ aiTestSortDir=-1; }
+    else { aiTestSortKey=''; aiTestSortDir=1; }   // چرخه: صعودی ← نزولی ← طبیعی
+    aiTestSortApply();
+}
+
 function aiEnsureTestRow(d){
     const tbody=$('aiTestTbody');if(!tbody)return null;
     /* v10.17 (۳۰): با چند کلید، یک مدل چند ردیف دارد؛ شناسهٔ ردیف باید
@@ -55198,23 +55517,35 @@ function aiEnsureTestRow(d){
     tr.addEventListener('mouseenter',function(){tr.style.background='#16233c';});
     tr.addEventListener('mouseleave',function(){tr.style.background='';});
     tr.addEventListener('click',function(){aiOpenRowDetail(tr.dataset.aiProvider,tr.dataset.aiModel);});
-    tr.innerHTML='<td style="padding:6px;text-align:center;color:#64748b">'+toFa(aiTestTotCount)+'</td>'
-      +'<td style="padding:6px;text-align:center"><span class="aiSt">⏳</span></td>'
-      /* v10.36 (۴۹ج): نامِ ارائه‌دهنده و مدل حداکثر دو خط می‌شوند و بعد
-         «…» می‌خورند؛ متنِ کامل در tooltip می‌ماند. شکستن روی مرزِ کلمه
-         است نه وسطِ نویسه‌ها، پس شناسه‌هایی مثل «meta-llama/Llama-3.3-70B»
-         روی خط‌تیره و اسلش می‌شکنند و خوانا می‌مانند. */
-      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiCell2" '
-      +'title="'+esc(d.providerName||d.provider||'')+'">'+esc(d.providerName||d.provider||'')+'</td>'
-      +'<td style="padding:6px;text-align:left;direction:ltr;color:#e2e8f0;font-weight:600" class="aiCell2 aiModelCell" '
-      +'title="'+esc(d.baseModel||d.model||'')+'">'
-      +esc(d.baseModel||d.model||'')
-      +(d.keySuffix?'<span style="color:#fbbf24" title="'+esc('کلید: '+(d.keyLabel||d.keySuffix))+'">'+esc(d.keySuffix)+'</span>':'')+'</td>'
-      +'<td style="padding:6px;text-align:center;color:#64748b" class="aiLat">—</td>'
-      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiMsgRes aiCell2">…</td>'
-      +'<td style="padding:6px;text-align:right;color:#94a3b8" class="aiCatRes aiCell2">…</td>';
+    /* v10.37 (۵۰الف): کلیدهای مرتب‌سازی روی خودِ ردیف ذخیره می‌شوند تا
+       aiTestSort مجبور نباشد هر بار متنِ سلول‌ها را دوباره پارس کند.
+       aiIdx ترتیبِ ورود است — همان چیزی که «#» نشان می‌دهد و حالتِ
+       پیش‌فرضِ جدول به آن برمی‌گردد. aiLatV با هر پاسخ به‌روز می‌شود و
+       aiStV وضعیت را عددی می‌کند (۰=سالم، ۱=خطا، ۲=هنوز منتظر). */
+    tr.dataset.aiIdx=String(aiTestTotCount);
+    tr.dataset.aiLatV='';
+    tr.dataset.aiStV='2';
+    tr.dataset.aiProvName=(d.providerName||d.provider||'');
+    /* v10.37 (۵۰الف): سلول‌ها دوباره <td>ی ساده‌اند و «دو خطی شدن» روی یک
+       div داخلشان است. در v10.36 خودِ td حالتِ webkit-box گرفته بود و
+       چون آن حالت با table-cell ناسازگار است، ستون‌ها از colgroup پیروی
+       نمی‌کردند و کلِ جدول به‌هم می‌ریخت. */
+    const pn=esc(d.providerName||d.provider||'');
+    const mn=esc(d.baseModel||d.model||'');
+    tr.innerHTML='<td style="text-align:center;color:#64748b" class="aiIdxCell">'+toFa(aiTestTotCount)+'</td>'
+      +'<td style="text-align:center"><span class="aiSt">⏳</span></td>'
+      +'<td style="text-align:right;color:#94a3b8" title="'+pn+'"><div class="c2">'+pn+'</div></td>'
+      +'<td style="color:#e2e8f0;font-weight:600" class="aiModelCell" title="'+mn+'"><div class="c2">'+mn
+      +(d.keySuffix?'<span style="color:#fbbf24" title="'+esc('کلید: '+(d.keyLabel||d.keySuffix))+'">'+esc(d.keySuffix)+'</span>':'')
+      +'</div></td>'
+      +'<td style="text-align:center;color:#64748b" class="aiLat">—</td>'
+      +'<td style="text-align:right;color:#94a3b8" class="aiMsgRes"><div class="c2">…</div></td>'
+      +'<td style="text-align:right;color:#94a3b8" class="aiCatRes"><div class="c2">…</div></td>';
     tbody.appendChild(tr);
     aiTestRenderCounters();
+    /* اگر کاربر ستونی را برای مرتب‌سازی انتخاب کرده، ردیفِ تازه هم باید
+       سرِ جای درستش بنشیند نه ته جدول. */
+    if(aiTestSortKey) aiTestSortApply();
     return aiTestRows[key]={tr:tr};
 }
 function aiSetTestRow(d){
@@ -55223,9 +55554,13 @@ function aiSetTestRow(d){
     if(d.ok!==undefined){ if(aiTestWaitCount>0)aiTestWaitCount--; if(d.ok)aiTestOkCount++; else aiTestFailCount++; }
     r.tr.querySelector('.aiSt').textContent=d.ok?'🟢':'🔴';
     r.tr.querySelector('.aiSt').style.color=d.ok?'#4ade80':'#f87171';
+    // v10.37 (۵۰الف): کلیدهای مرتب‌سازی همراهِ نتیجه به‌روز می‌شوند
+    if(d.ok!==undefined) r.tr.dataset.aiStV=d.ok?'0':'1';
+    r.tr.dataset.aiLatV=(d.latencyMs>0)?String(d.latencyMs):'';
     const lat=r.tr.querySelector('.aiLat');if(lat)lat.textContent=(d.latencyMs>0)?(toFa(d.latencyMs)+'ms'):'—';
     // v9.52: پاسخِ پیام و پاسخِ دستهٔ هر مدل در دو ستونِ جدا
-    const mr=r.tr.querySelector('.aiMsgRes');
+    // v10.37 (۵۰الف): محتوا داخلِ پوششِ .c2 می‌رود، نه مستقیم داخلِ td
+    const mr=r.tr.querySelector('.aiMsgRes .c2')||r.tr.querySelector('.aiMsgRes');
     if(mr){
         if(d.ok){
             // v9.57: اگر پاسخِ متن خالی بود (مدل ۲۰۰ داد ولی content نداشت)،
@@ -55237,7 +55572,7 @@ function aiSetTestRow(d){
         }
         else mr.innerHTML='<span style="color:#f87171" title="'+esc(d.label||'')+'">'+esc(d.error||d.label||'خطا')+'</span>';
     }
-    const cr=r.tr.querySelector('.aiCatRes');
+    const cr=r.tr.querySelector('.aiCatRes .c2')||r.tr.querySelector('.aiCatRes');
     if(cr){
         if(d.catResponse)cr.innerHTML='<span style="color:#a78bfa">'+esc(d.catResponse)+'</span>';
         else cr.innerHTML='<span style="color:#64748b">—</span>';
