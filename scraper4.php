@@ -27758,11 +27758,14 @@ function bslNormalizeChat(array $c): array {
     if ($who === '') $who = 'مشتری';
     $type = (string)($lm['message_type'] ?? '');
     if ($txt === '') $txt = $type !== '' && $type !== 'text' ? '[' . $type . ']' : '—';
+    $unseen = $c['unseen_message_count'] ?? $c['unread_message_count']
+        ?? $c['unread_count'] ?? $c['unseen_count'] ?? $c['messages_unread']
+        ?? $c['unread_messages_count'] ?? 0;
     return [
         'chat_id'    => (int)($c['id'] ?? 0),
         'who'        => $who,
         'text'       => $txt,
-        'unseen'     => max(0, (int)($c['unseen_message_count'] ?? ($c['unread_message_count'] ?? ($c['unread_count'] ?? ($c['unseen_count'] ?? ($c['messages_unread'] ?? ($c['unread_messages_count'] ?? 0)))))),
+        'unseen'     => max(0, (int)$unseen),
         'updated_at' => (string)($c['updated_at'] ?? ($c['last_message']['created_at'] ?? ($c['created_at'] ?? ''))),
         'chat_type'  => (string)($c['chat_type'] ?? ''),
         'sender'     => trim((string)($lm['sender']['name'] ?? '')),
