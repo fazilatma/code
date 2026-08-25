@@ -272,7 +272,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.54';
+const APP_VERSION = '10.55';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -14777,6 +14777,13 @@ if (isCliRun()) {
 if (isset($_GET['manual_sync_stop'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @file_put_contents(MANUAL_SYNC_STOP_FILE, json_encode(['at' => time()]));
+    /* v10.55 (۶۹): توقفِ دستی باید به پردازنده‌هایِ در حالِ اجرایِ ارسال/استخراج
+       هم برسد — آن‌ها فقط سیگنالِ توقفِ خودشان را می‌بینند. بدونِ این، «توقف»
+       فقط زنجیرهٔ میانِ دو نوبت را می‌ایستاند و ردیفِ در حالِ ارسال تا آخر
+       (و با v10.53 ردیف‌های بعدیِ صف هم!) فرستاده می‌شد. */
+    @file_put_contents(BSL_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));
+    @file_put_contents(WOO_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));
+    @file_put_contents(EXTRACT_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));
     echo json_encode(['ok' => true, 'stopped' => true], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -14996,6 +15003,16 @@ if ($lockAge < $cronLockSec) {
 if (empty($results_manualBypass)) {
     @file_put_contents($cronLock, (string)time());
     register_shutdown_function(function () use ($cronLock) { @unlink($cronLock); });
+} else {
+    /* v10.55 (۶۹): اجرایِ دستی قفلِ «زندهٔ» کران را بازنویسی نمی‌کند (همان
+       قانونِ v10.35) ولی اگر قفلی در کار نباشد، برمی‌دارد: همگام‌سازیِ دستی
+       می‌تواند ساعت‌ها طول بکشد (زنجیرهٔ ارسالِ سرورساید) و اگر قفل آزاد
+       باشد، کرانِ دوره‌ای همان لحظه موازی راه می‌افتد — دو اجرا روی صفِ
+       یک‌پوشه (خواندن/نوشتنِ صف بدون قفل) و تکرارِ کارِ همان پروفایل‌ها. */
+    if (!is_file($cronLock)) {
+        @file_put_contents($cronLock, (string)time());
+        register_shutdown_function(function () use ($cronLock) { @unlink($cronLock); });
+    }
 }
 
 /* =====================================================================
@@ -19057,6 +19074,82 @@ if (isset($_GET['ar_log'])) {
     echo json_encode(['ok' => true, 'log' => array_slice(arLogRead(), 0, 30),
         'last_run' => (int)($stAR['last_run'] ?? 0), 'daily' => $stAR['daily'] ?? []],
         JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v10.55 (69): پاسخ دستی به پیام‌های مشتری
+ *
+ *  خواستهٔ کاربر: برای جواب دادن به مشتری نباید رفت پلتفرمِ باسلام را
+ *  باز کرد. گفتگوها داخلِ پنل باز می‌شوند و پاسخ همین‌جا فرستاده می‌شود.
+ *  • bsl_chats         — فهرستِ گفتگوهایِ تازه (با شمارِ خوانده‌نشده)
+ *  • bsl_chat_messages — تاریخچهٔ کاملِ یک گفتگو (هر دو طرف)
+ *  • bsl_chat_reply    — ارسالِ پاسخ (فرستندهٔ واقعی همان bslSendChatMessage
+ *                        است — یک فرستنده برای همهٔ پاسخ‌ها)
+ * ===================================================================== */
+if (isset($_GET['bsl_chats'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(60);
+    $cnMR = loadConnections(); $bsMR = $cnMR['basalam'] ?? [];
+    if (empty($bsMR['token'])) { echo json_encode(['ok' => false, 'error' => 'توکنِ باسلام تنظیم نشده'], JSON_UNESCAPED_UNICODE); exit; }
+    $limMR = max(5, min(50, (int)($_GET['limit'] ?? 30)));
+    $rMR = bslReqRead($bsMR['token'], 'chats?limit=' . $limMR . '&order_by=updated_at');
+    if (empty($rMR['ok'])) {
+        echo json_encode(['ok' => false, 'error' => bslApiError($rMR, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $rowsMR = $rMR['body']['data']['chats'] ?? ($rMR['body']['data'] ?? []);
+    if (!is_array($rowsMR)) $rowsMR = [];
+    $myIdMR = bslMyUserId($bsMR['token']);
+    $outMR = [];
+    foreach ($rowsMR as $cMR) {
+        if (!is_array($cMR)) continue;
+        $ncMR = bslNormalizeChat($cMR);
+        $lmMR = is_array($cMR['last_message'] ?? null) ? $cMR['last_message'] : [];
+        if ($ncMR['chat_id'] <= 0) continue;
+        $outMR[] = [
+            'chat_id'      => $ncMR['chat_id'],
+            'who'          => $ncMR['who'],
+            'text'         => $ncMR['text'],
+            'unseen'       => $ncMR['unseen'],
+            'updated_at'   => $ncMR['updated_at'],
+            'last_is_mine' => ($myIdMR > 0 && (int)($lmMR['sender']['id'] ?? 0) === $myIdMR),
+        ];
+    }
+    echo json_encode(['ok' => true, 'chats' => $outMR], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['bsl_chat_messages'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(60);
+    $cnMR = loadConnections(); $bsMR = $cnMR['basalam'] ?? [];
+    if (empty($bsMR['token'])) { echo json_encode(['ok' => false, 'error' => 'توکنِ باسلام تنظیم نشده'], JSON_UNESCAPED_UNICODE); exit; }
+    $chatIdMR = (int)($_GET['chat_id'] ?? 0);
+    $limMR = max(1, min(50, (int)($_GET['limit'] ?? 30)));
+    if ($chatIdMR <= 0) { echo json_encode(['ok' => false, 'error' => 'شناسهٔ گفتگو نامعتبر'], JSON_UNESCAPED_UNICODE); exit; }
+    echo json_encode(['ok' => true, 'messages' => bslChatThread($bsMR['token'], $chatIdMR, $limMR)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['bsl_chat_reply'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(60);
+    $cnMR = loadConnections(); $bsMR = $cnMR['basalam'] ?? [];
+    if (empty($bsMR['token'])) { echo json_encode(['ok' => false, 'error' => 'توکنِ باسلام تنظیم نشده'], JSON_UNESCAPED_UNICODE); exit; }
+    $chatIdMR = (int)($_POST['chat_id'] ?? $_GET['chat_id'] ?? 0);
+    $textMR = trim((string)($_POST['text'] ?? $_GET['text'] ?? ''));
+    if ($chatIdMR <= 0 || $textMR === '') { echo json_encode(['ok' => false, 'error' => 'شناسهٔ گفتگو و متن پیام لازم است'], JSON_UNESCAPED_UNICODE); exit; }
+    $rMR = bslSendChatMessage($bsMR['token'], $chatIdMR, $textMR);
+    /* پاسخِ دستی هم در همان لاگِ پاسخ‌ها ثبت می‌شود (با نوعِ متفاوت) —
+       تا معلوم باشد چه وقت و چه کسی (ربات یا شما) به مشتری جواب داده. */
+    arLogAdd(['type' => 'manual', 'chat_id' => $chatIdMR, 'who' => '', 'text' => mb_substr($textMR, 0, 90),
+              'ok' => !empty($rMR['ok']), 'source' => 'manual']);
+    if (empty($rMR['ok'])) {
+        echo json_encode(['ok' => false, 'error' => $rMR['error'] ?? 'ارسال ناموفق'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -23386,6 +23479,27 @@ if (isset($_GET['selftest'])) {
     $add('10.44', 'نتایجِ جست‌وجو شناسهٔ تکراری ندارند',
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
+
+    /* ==== ۶۹ (v10.55) ==== */
+    $add('10.55', 'نسخهٔ ۱۰.۵۵',
+         str_contains($selfSrc, "const APP_VERSION = '10.55';"));
+    $add('10.55', 'Manual stop also stops running send/extract workers',
+         (strpos($selfSrc, "if (isset(\$_GET['manual_sync_stop'])) {") !== false
+          && substr_count($selfSrc, "@file_put_contents(BSL_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));") >= 1
+          && (strpos($selfSrc, "@file_put_contents(WOO_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));") !== false)
+          && (strpos($selfSrc, "@file_put_contents(EXTRACT_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));") !== false)));
+    $add('10.55', 'Manual sync takes the cron lock when free (no parallel cron tick)',
+         (strpos($selfSrc, "/* v10.55 (۶۹): اجرایِ دستی قفلِ «زندهٔ» کران را بازنویسی نمی‌کند") !== false
+          && (preg_match('~if \(!is_file\(\$cronLock\)\) \{~', $selfSrc) === 1)));
+    $add('10.55', 'Manual customer reply: chats + thread + reply endpoints',
+         (strpos($selfSrc, "function bslChatThread(string \$tk, int \$chatId, int \$limit = 30): array {") !== false
+          && strpos($selfSrc, "if (isset(\$_GET['bsl_chats'])) {") !== false
+          && strpos($selfSrc, "if (isset(\$_GET['bsl_chat_messages'])) {") !== false
+          && strpos($selfSrc, "if (isset(\$_GET['bsl_chat_reply'])) {") !== false
+          && strpos($selfSrc, "'type' => 'manual', 'chat_id' => \$chatIdMR") !== false
+          && strpos($selfSrc, "async function mrLoadChats(){") !== false
+          && strpos($selfSrc, "async function mrSend(){") !== false
+          && strpos($selfSrc, "💬 پاسخ دستی به مشتریان") !== false));
 
     /* ==== ۶۸ (v10.54) ==== */
     $add('10.54', 'نسخهٔ ۱۰.۵۴',
@@ -28556,6 +28670,36 @@ function bslSendChatMessage(string $tk, int $chatId, string $text): array {
     return ['ok' => !empty($r['ok']), 'code' => (int)($r['code'] ?? 0),
             'error' => bslApiError($r, 'ارسال پیام ناموفق', 'chats/{id}/messages', 'customer.chat.write'),
             'body' => $r['body'] ?? null];
+}
+
+/**
+ * v10.55 (69): تاریخچهٔ یک گفتگو — هر دو طرف (مشتری + خودِ ما)،
+ * قدیم به جدید. بر خلاف bslFetchChatMessages که برای اعلان فقط طرفِ
+ * مقابل را برمی‌گرداند، برای پنجرهٔ «پاسخ دستی» است تا بافتِ
+ * گفتگو قبل از جواب دیدنی باشد.
+ */
+function bslChatThread(string $tk, int $chatId, int $limit = 30): array {
+    if ($chatId <= 0) return [];
+    $myId = bslMyUserId($tk);
+    $lim = max(1, min(50, $limit));
+    $r = bslReqRead($tk, 'chats/' . $chatId . '/messages?limit=' . $lim . '&order=desc');
+    if (!$r['ok']) return [];
+    $rows = $r['body']['data']['messages'] ?? ($r['body']['data'] ?? []);
+    if (!is_array($rows)) return [];
+    $out = [];
+    foreach ($rows as $m) {
+        if (!is_array($m)) continue;
+        $sid = (int)($m['sender']['id'] ?? 0);
+        $mt  = (string)($m['message_type'] ?? '');
+        $txt = $m['content']['text'] ?? null;
+        if (!is_string($txt) || trim($txt) === '') $txt = ($mt !== '' && $mt !== 'text') ? '[' . $mt . ']' : '';
+        $out[] = ['mine'   => ($myId > 0 && $sid === $myId),
+                  'sender' => trim((string)($m['sender']['name'] ?? '')),
+                  'text'   => trim((string)$txt),
+                  'at'     => (string)($m['created_at'] ?? ''),
+                  'type'   => $mt];
+    }
+    return array_reverse($out);
 }
 
 /** آخرین ۲۰ پاسخ خودکار، برای نمایش در رابط کاربری */
@@ -44321,6 +44465,35 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="arR" style="margin-top:8px"></div>
 </div></div>
 
+<!-- ===== v10.55 (69): پاسخ دستی به مشتریان ===== -->
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>💬 پاسخ دستی به مشتریان</h3><span class="arrow">▼</span></div>
+<div class="smenu-body">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+گفتگوهای باسلام را همین‌جا ببینید و بدونِ رفتن به پلتفرمِ باسلام پاسخ بدهید.
+پاسخ‌ها در همان لاگِ پاسخ‌ها (با نوع «دستی») ثبت می‌شوند.
+</div>
+<div class="cact" style="margin-bottom:8px">
+<button class="btn btn-cyan" onclick="mrLoadChats()" style="flex:1">🔄 بررسی گفتگوها</button>
+<span id="mrInfo" style="font-size:10.5px;color:#64748b;align-self:center"></span>
+</div>
+<div style="display:flex;gap:10px;flex-wrap:wrap">
+<div id="mrList" style="flex:1;min-width:210px;max-height:340px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:5px;background:#0b1220">
+<div class="empty" style="padding:16px 6px">اول «بررسی گفتگوها» را بزنید</div>
+</div>
+<div id="mrThread" style="flex:1.5;min-width:250px">
+<div id="mrMsgs" style="height:252px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:8px;background:#0b1220;font-size:11.5px;line-height:1.8">
+<div class="empty" style="padding:20px 6px">یک گفتگو را انتخاب کنید</div>
+</div>
+<div style="display:flex;gap:6px;margin-top:8px">
+<textarea id="mrText" rows="2" placeholder="متنِ پاسخ برای مشتری…" style="flex:1;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px;font-size:11.5px;font-family:inherit;resize:vertical"></textarea>
+<button class="btn btn-green" onclick="mrSend()">📤 ارسال</button>
+</div>
+<div id="mrMsg" class="msg" style="margin-top:6px"></div>
+</div>
+</div>
+</div></div>
+
 <!-- v8.62: گزارش شبانه -->
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🌙 گزارش شبانهٔ محصولات</h3><span class="cst off" id="digestS">خاموش</span><span class="arrow">▼</span></div>
@@ -50016,6 +50189,22 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.55', t:'💬 پاسخ دستی به مشتریان + بازبینی کاملِ زنجیرهٔ همگام‌سازی', items:[
+    '💬 <b>پاسخ دستی به پیام‌های مشتری:</b> در تنظیمات، بخشِ تازهٔ «پاسخ دستی به',
+    '   مشتریان» — گفتگوهای باسلام را همان‌جا ببینید (با شمارِ خوانده‌نشده)، تاریخچهٔ',
+    '   کاملِ گفتگو (مشتری + خودِ ما) را باز کنید و بدونِ رفتن به پلتفرمِ باسلام',
+    '   جواب بدهید. پاسخ‌ها در همان لاگِ پاسخ‌ها ثبت می‌شوند.',
+    '🔎 <b>بازبینیِ کاملِ زنجیرهٔ همگام‌سازی (دستی/خودکار) — دو نقصِ پیدا‌شده:</b>',
+    '   ۱) دکمهٔ «توقف»ِ همگام‌سازیِ دستی تا حالا فقط حلقهٔ پروفایل‌ها را می‌ایستاند؛',
+    '   وِرکرِ ارسالِ در حال اجرا سیگنالِ خودش (stop) را می‌بیند و آن نوشته نمی‌شد.',
+    '   حالا توقفِ دستی، سیگنالِ ارسالِ باسلام/ووکامرس و استخراج را هم می‌گذارد و',
+    '   ارسالِ نیمه‌کاره در اولین محصولِ بعد می‌ایستد.',
+    '   ۲) اجرایِ دستی قفلِ کران را «اگر آزاد باشد» برمی‌دارد تا کرانِ دوره‌ای',
+    '   وسطِ همگام‌سازیِ دستی (که می‌تواند ساعت‌ها طول بکشد) روی صف‌ها موازی',
+    '   کار نکند و دو اجرا روی صفِ همان پروفایل برخوردند.',
+    '   بقیهٔ زنجیره (استخراج ⇒ صف‌سازی ⇒ ارسالِ نوبتی ⇒ گزارش ⇒ پمپ/نگهبان)',
+    '   بررسی شد و درست کار می‌کند.',
+  ]},
   {v:'10.54', t:'🩹 رفعِ خطایِ JS در فهرستِ تغییراتِ نسخه‌ها', items:[
     '🩹 ورودیِ نسخهٔ ۱۰.۵۳ در فهرستِ تغییرات با قالبِ نادرست نوشته شده بود و',
     '   وقتی منویِ «تغییراتِ نسخه‌ها» رندر می‌شد، خطای',
@@ -53800,6 +53989,51 @@ function arLoad(force){
     arApplyCfg(d.cfg||{});
     arRenderRules();
   }).catch(()=>{});
+}
+
+/* v10.55 (69): پاسخ دستی به مشتریان — گفتگوها، تاریخچه و ارسالِ پاسخ */
+let MR_CHAT=null;
+function mrMsg(t,c){const m=$('mrMsg'); if(m){m.innerHTML=t; m.className='msg on '+(c||'');}}
+async function mrLoadChats(){
+  const box=$('mrList'); if(box)box.innerHTML='<div class="empty" style="padding:14px 6px">در حالِ بارگذاری…</div>';
+  const d=await fetch('?bsl_chats=1&limit=30').then(r=>r.json()).catch(()=>({ok:false,error:'خطای شبکه'}));
+  if(!d.ok) return (box && (box.innerHTML='<div class="empty" style="padding:14px 6px">✗ '+esc(d.error||'خطا')+'</div>'));
+  const info=$('mrInfo'); if(info)info.textContent=' '+toFa(d.chats.length)+' گفتگو';
+  if(!d.chats.length) return (box && (box.innerHTML='<div class="empty" style="padding:14px 6px">گفتگویی پیدا نشد</div>'));
+  box.innerHTML=d.chats.map(c=>
+    '<div onclick="mrOpenChat('+c.chat_id+')" style="padding:7px 9px;border-bottom:1px solid #1e293b;cursor:pointer;border-radius:6px" '+
+    'onmouseover="this.style.background=\'#16233d\'" onmouseout="this.style.background=\'\'">'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px">'+
+    '<b style="font-size:11.5px;color:#e2e8f0">'+esc(c.who)+'</b>'+
+    (c.unseen>0?'<span style="background:#dc2626;color:#fff;border-radius:9px;font-size:9.5px;padding:0 6px;flex:0 0 auto">'+toFa(c.unseen)+'</span>':'')+
+    '</div>'+
+    '<div style="font-size:10.5px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">'+
+    (c.last_is_mine?'<span style="color:#60a5fa">شما:</span> ':'')+esc(c.text||'—')+
+    '</div></div>').join('');
+}
+async function mrOpenChat(id){
+  MR_CHAT={id:id};
+  const box=$('mrMsgs'); if(box)box.innerHTML='<div class="empty" style="padding:14px 6px">در حالِ بارگذاری…</div>';
+  const d=await fetch('?bsl_chat_messages=1&chat_id='+id+'&limit=30').then(r=>r.json()).catch(()=>({ok:false,error:'خطای شبکه'}));
+  if(!d.ok) return (box && (box.innerHTML='<div class="empty" style="padding:14px 6px">✗ '+esc(d.error||'خطا')+'</div>'));
+  if(!d.messages||!d.messages.length) return (box && (box.innerHTML='<div class="empty" style="padding:14px 6px">پیامی در این گفتگو نیست</div>'));
+  box.innerHTML=d.messages.map(m=>
+    '<div style="margin-bottom:9px">'+
+    '<div style="font-size:9.5px;color:#64748b;margin-bottom:2px">'+esc(m.sender||(m.mine?'شما':'مشتری'))+(m.at?' · '+esc(m.at):'')+'</div>'+
+    '<div style="background:'+(m.mine?'#173254':'#1e293b')+';border-radius:7px;padding:6px 9px;color:#e2e8f0;word-break:break-word">'+esc(m.text||'')+'</div></div>').join('');
+  box.scrollTop=box.scrollHeight;
+}
+async function mrSend(){
+  if(!MR_CHAT) return;
+  const t=$('mrText').value.trim();
+  if(!t) return;
+  const fd=new FormData(); fd.append('chat_id',MR_CHAT.id); fd.append('text',t);
+  const d=await fetch('?bsl_chat_reply=1',{method:'POST',body:fd}).then(r=>r.json()).catch(()=>({ok:false,error:'خطای شبکه'}));
+  if(!d.ok) return mrMsg('✗ '+esc(d.error||'ارسال ناموفق'),'m-err');
+  mrMsg('✓ پاسخ ارسال شد','m-ok');
+  $('mrText').value='';
+  mrOpenChat(MR_CHAT.id);
+  setTimeout(mrLoadChats,400);
 }
 
 function arRenderRules(){
