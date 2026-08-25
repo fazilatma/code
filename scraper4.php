@@ -267,7 +267,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.49';
+const APP_VERSION = '10.50';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -15753,6 +15753,25 @@ try {
    بعد از پایانِ رصد بتواند بخواندش.
    v9.06: حالا اتصال «همیشه» بسته است، پس همیشه همین مسیر است. خلاصه در
    cron_last_run.json می‌نشیند و با ?cron_last خوانده می‌شود. */
+/* =====================================================================
+   v10.50 (۶۴): ارسالِ همگام‌سازیِ دستی، کاملاً سرورساید.
+
+   کارگرِ دستی پاسخش را از همان ابتدای اجرا فرستاده و در سرور زنده است؛
+   کاربر می‌تواند تب را ببندد. از این‌جا تا پیش از «تمام شد»، اگر چیزی
+   در صفِ ارسال مانده باشد، نوبت‌به‌نوبت پردازش می‌شود (هر نوبت یک
+   درخواستِ فرزند با مهلتِ طولانی). اگر کارگر وسط راه بمیرد، پمپِ
+   کرانِ v10.49 از همان چک‌پوینت برمی‌دارد.
+   ===================================================================== */
+if (manualSyncActive() && empty($results['manual_stopped'])) {
+    try {
+        $_msSendRes = manualServerSendRun();
+        if (!empty($_msSendRes['stopped'])) $results['manual_stopped'] = true;
+        $results['ms_server_send'] = $_msSendRes;
+    } catch (Throwable $e) {
+        $results['ms_server_send'] = ['error' => mb_substr($e->getMessage(), 200)];
+    }
+}
+
 /* v10.35 (۴۷ه): بستنِ ردیفِ همگام‌سازیِ دستی در مدیر وظیفه. باید *قبل* از
    cronEmit باشد، چون آن تابع در مسیرِ CLI چیزی چاپ می‌کند و بعدش exit. */
 if (manualSyncActive()) {
@@ -15777,8 +15796,12 @@ if (manualSyncActive()) {
             }
         }
     }
-    if ($_msQPending > 0 && empty($results['manual_stopped'])) {
-        $_lg[] = '📤 ' . $_msQPending . ' product entered the send queue — sending will start automatically (please keep this tab open)';
+    if (empty($results['manual_stopped'])) {
+        if ($_msQPending > 0) {
+            $_lg[] = '📤 ' . $_msQPending . ' product entered the send queue — sending is continuing server-side — no need to keep the tab open';
+        } else {
+            $_lg[] = '✅ sending finished server-side';
+        }
     }
     $_msDone['recent_log'] = array_slice($_lg, -40);
     writeProgress(MANUAL_SYNC_PROGRESS_FILE, $_msDone);
@@ -23295,6 +23318,20 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۶۴ (v10.50) ==== */
+    $add('10.50', 'نسخهٔ ۱۰.۵۰',
+         str_contains($selfSrc, "const APP_VERSION = '10.50';"));
+    $add('10.50', 'Manual sync send is fully server-side: manual worker drives queue in rounds',
+         (strpos($selfSrc, "function manualServerSendRun(int \$roundMs = 1500000, int \$maxRounds = 12): array {") !== false
+          && strpos($selfSrc, "function msQueuePendingRow(string \$which): ?array {") !== false
+          && strpos($selfSrc, "function msLockFresh(string \$which): bool {") !== false
+          && strpos($selfSrc, "\$_msSendRes = manualServerSendRun();") !== false
+          && strpos($selfSrc, "if (manualSyncActive() && empty(\$results['manual_stopped'])) {") !== false));
+    $add('10.50', 'No more keep-the-tab-open in manual flow',
+         (strpos($selfSrc, 'sending is continuing server-side — no need to keep the tab open') !== false
+          && strpos($selfSrc, 'Sending is handled fully server-side') !== false
+          && strpos($selfSrc, 'please keep this ' . 'tab open') === false));
+
     /* ==== ۶۳ (v10.49) ==== */
     $add('10.49', 'نسخهٔ ۱۰.۴۹',
          str_contains($selfSrc, "const APP_VERSION = '10.49';"));
@@ -29256,6 +29293,85 @@ function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = 
         $chk['attempt'] = $st[$k]['n'];
     }
     return $chk;
+}
+
+/* =====================================================================
+ *  v10.50 (۶۴): ارسالِ همگام‌سازیِ دستی، کاملاً سرورساید.
+ *
+ *  کارگرِ دستی پاسخش را از همان ابتدای اجرا فرستاده و در سرور زنده
+ *  می‌ماند؛ کاربر آزاد است تبِ مرورگر را ببندد. این تابع تا وقتی که
+ *  کارگر زنده است صفِ ارسال را نوبت‌به‌نوبت جلو می‌رساند: در هر نوبت
+ *  یک پردازندهٔ ارسال (bsl_backend / woo_backend) به‌صورت درخواستِ
+ *  فرزند با مهلتِ طولانی راه می‌اندازد و منتظرش می‌ماند، بعد صف را
+ *  دوباره بررسی می‌کند؛ اگر ردیفِ درانتظار مانده باشد نوبتِ بعدی.
+ *  چون پیشرفت به‌ازایِ هر محصول چک‌پوینت شده است (v8.22)، اگر خودِ
+ *  کارگر وسط راه بمیرد، پمپِ کرانِ v10.49 از همان نقطهٔ قطع‌شده
+ *  برمی‌دارد. قفلِ flock جلوی دو پردازندهٔ هم‌زمان را می‌گیرد، پس
+ *  شلیکِ تکراری (دکمهٔ ارسال، msKickSend مرورگر) بی‌خطر است.
+ * ===================================================================== */
+function msLockFresh(string $which): bool {
+    $lock = __DIR__ . ($which === 'bsl' ? '/bsl_backend.lock' : '/woo_backend.lock');
+    if (!is_file($lock)) return false;
+    $fp = @fopen($lock, 'c');
+    if (!$fp) return false;
+    $held = !@flock($fp, LOCK_EX | LOCK_NB);
+    if (!$held) @flock($fp, LOCK_UN);
+    @fclose($fp);
+    return $held;
+}
+
+function msQueuePendingRow(string $which): ?array {
+    $q = $which === 'bsl' ? bslReadQueue() : wooReadQueue();
+    $entries = is_array($q['entries'] ?? null) ? $q['entries'] : [];
+    foreach ($entries as $e) {
+        if (is_array($e) && in_array((string)($e['status'] ?? ''), ['waiting', 'running', 'paused'], true)) {
+            return $e;
+        }
+    }
+    return null;
+}
+
+function manualServerSendRun(int $roundMs = 1500000, int $maxRounds = 12): array {
+    $out = ['rounds' => 0, 'stopped' => false, 'dests' => []];
+    foreach (cronWatchdogQueueOrder() as $dest) {
+        $isBsl  = ($dest === 'bsl');
+        $pFile  = $isBsl ? BSL_PROGRESS_FILE : WOO_PROGRESS_FILE;
+        $action = $isBsl ? 'bsl_backend' : 'woo_backend';
+        $label  = $isBsl ? 'باسلام' : 'ووکامرس';
+        $lastSig = '';
+        $stuck = 0;
+        for ($round = 1; $round <= $maxRounds; $round++) {
+            if (manualSyncStopped()) { $out['stopped'] = true; break; }
+            $row = msQueuePendingRow($dest);
+            if ($row === null) break;                    // صف این مقصد خالی شد
+            $pg = readProgress($pFile);
+            manualSyncProgress(['phase' => 'ارسال ' . $label, 'current' => 3,
+                'summary' => ((int)($row['current'] ?? 0)) . '/' . ((int)($row['total'] ?? 0)) . ' در صفِ ' . $label],
+                '📤 ارسال سرورساید: ' . $label . ' — ردیف ' . (string)($row['id'] ?? '') . ' (' . (int)($row['current'] ?? 0) . '/' . (int)($row['total'] ?? 0) . ')');
+            /* اگر پردازندهٔ زنده دیگری (دکمهٔ ارسال / msKickSend) قفل را
+               در دست دارد، چند لحظه منتظر بمانیم تا او ادامه بدهد — این
+               نوبت «گیر» شمرده نمی‌شود. */
+            for ($w = 0; $w < 6 && msLockFresh($dest); $w++) sleep(5);
+            if (msLockFresh($dest)) continue;
+            $sig = (string)($row['id'] ?? '') . ':' . (int)($row['current'] ?? 0)
+                 . ':' . (int)($pg['current'] ?? 0) . ':' . (int)($pg['sent'] ?? 0)
+                 . ':' . (int)($pg['updated'] ?? 0) . ':' . (int)($pg['skipped'] ?? 0);
+            $fired = fireAndForget('action=' . $action, $roundMs, ['from_file' => '1']);
+            $out['rounds']++;
+            if (!$fired || $sig === $lastSig) { $stuck++; } else { $stuck = 0; }
+            if ($sig !== '') $lastSig = $sig;
+            if ($stuck >= 2) {
+                manualSyncProgress(['phase' => 'ارسال ' . $label, 'current' => 3],
+                    '⚠ پیشرفتِ ارسال دیده نشد — ادامه با پمپِ کران');
+                break;
+            }
+        }
+        $rowAfter = msQueuePendingRow($dest);
+        $out['dests'][$dest] = $rowAfter === null ? 'done'
+            : ('pending:' . (int)($rowAfter['total'] ?? 0) . ':' . (int)($rowAfter['current'] ?? 0));
+        if (!empty($out['stopped'])) break;
+    }
+    return $out;
 }
 
 /* =====================================================================
@@ -48482,7 +48598,11 @@ function msFinish(ok,msg,summary){
    منتظر است، پردازنده را با یک fetch مرورگری راه بیندازیم — روی هاستِ
    شما پردژهٔ ارسال فقط تا وقتی که یک کلاینت وصل است زنده می‌ماند، و
    مرورگرِ همین تب آن کلاینت است. بدون این، صف به حالِ خود رها می‌ماند
-   و کران هر ۵ دقیقه فقط چند ثانیه جلویش می‌راند. */
+   و کران هر ۵ دقیقه فقط چند ثانیه جلویش می‌راند.
+   v10.50 (۶۴): حالا کارگرِ دستی خودش ارسال را کاملاً سرورساید جلو می‌رساند،
+   پس هشدارِ «تب را باز نگه دارید» لازم نیست؛ این کیک فقط شتاب‌دهندهٔ
+   اختیاری و پشتیبانِ زمانی است که کارگرِ سرورساید زنده نیست (در آن
+   حالت قفلِ flock جلوی تداخل را می‌گیرد). */
 function msKickSend(){
   const box=$('msReport');
   const kick=(label,statusUrl,actionName)=>{
@@ -48496,7 +48616,7 @@ function msKickSend(){
       if(box)box.innerHTML+='<div style="margin-top:8px;background:#1e293b;border:1px solid #475569;border-radius:8px;padding:8px;font-size:11px;color:#cbd5e1;line-height:1.8">'
         +'📤 <b>'+toFa(pend)+'</b> product for <b>'+label+'</b> entered the send queue'
         +(waiting.length?' — starting send…':' — a send is in progress')
-        +'. <b style="color:#fbbf24">Please keep this tab open</b> until sending is complete (on this host, closing the tab interrupts sending).'
+        +'. <b style="color:#34d399">Sending is handled fully server-side</b> — no need to keep this tab open; if the server-side worker is not running, this kick keeps the send alive with the browser connection.'
         +' <button class="btn btn-cyan" onclick="switchMainTab(\'send\')" style="font-size:9.5px;padding:2px 8px;margin-right:6px">📡 See sending</button></div>';
       if(waiting.length&&running.length===0){
         /* no live process ⇒ start it ourselves with a connection that stays open */
@@ -49554,6 +49674,21 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.50', t:'🖥️ ارسالِ همگام‌سازیِ دستی، کاملاً سرورساید — دیگر لازم نیست تب را باز نگه دارید', items:[
+    '❌ <b>نقصِ نسخهٔ قبل:</b> v10.49 ارسال را به اتصالِ همین تبِ مرورگر گره',
+    '   زده بود — تا تب باز باشد ارسال پیش می‌رفت و «تب را باز نگه دارید»',
+    '   نوشته بود. اگر تب بسته می‌شد یا مرورگر می‌خوابید، ارسال نیمه‌کاره می‌ماند.',
+    '✅ <b>حالا چه می‌شود:</b> خودِ کارگرِ همگام‌سازیِ دستی — که از همان شروع',
+    '   پاسخ داده و در سرور زنده است — بعد از صف‌سازی، <b>نوبت‌به‌نوبت</b> صفِ',
+    '   ارسال را پردازش می‌کند: در هر نوبت یک پردازندهٔ ارسال را با مهلتِ',
+    '   طولانی راه می‌اندازد و منتظرش می‌ماند، بعد صف را دوباره بررسی می‌کند و',
+    '   تا خالی‌شدن (یا توقفِ دستی) ادامه می‌دهد. یعنی کلِ راه‌اندازیِ ارسال',
+    '   <b>سرورساید</b> است و تبِ مرورگر هیچ نقشی ندارد — می‌توانید ببندید.',
+    '🛡 <b>اگر کارگر سرورساید وسط راه بمیرد:</b> پیشرفت به‌ازایِ هر محصول',
+    '   چک‌پوینت شده است، پس پمپِ کرانِ v10.49 از همان نقطهٔ قطع‌شده برمی‌دارد؛',
+    '   کیکِ مرورگریِ v10.49 هم به‌عنوانِ شتاب‌دهندهٔ پشتیبان می‌ماند (قفلِ',
+    '   flock جلوی تداخلِ آن‌ها را می‌گیرد).',
+  ]},
   {v:'10.49', t:'📤 ارسال دیگر به حالِ خود رها نمی‌شود + خطای بایگانی حالا گویا است', items:[
     '❌ <b>مشکل ۱ (همگام‌سازی به مرحلهٔ ارسال نمی‌رسید):</b> همگام‌سازی، محصولات را',
     '   «در صفِ ارسال» می‌نشیند و پردازندهٔ جداگانه‌ای باید آن‌ها را بفرستد. اما آن',
