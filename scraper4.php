@@ -267,7 +267,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.46';
+const APP_VERSION = '10.47';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -15861,6 +15861,7 @@ if (isset($_GET['notif_health'])) {
     }
     $out['last_notif_seen'] = is_array($stH['last_notif_seen'] ?? null) ? $stH['last_notif_seen'] : null;
     $out['last_notif_found'] = is_array($stH['last_notif_found'] ?? null) ? $stH['last_notif_found'] : null;
+    $out['last_notif_pending'] = (int)($stH['last_notif_pending'] ?? 0); /* v10.47 (۶۱) */
 
     $out['healthy'] = empty($out['problems']);
     echo json_encode($out, JSON_UNESCAPED_UNICODE);
@@ -23235,6 +23236,21 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۶۱ (v10.47) ==== */
+    $add('10.47', 'نسخهٔ ۱۰.۴۷',
+         str_contains($selfSrc, "const APP_VERSION = '10.47';"));
+    $add('10.47.1', 'پینگ، وضعیتِ کاملِ بررسیِ اعلان‌ها را گزارش می‌کند',
+         str_contains($selfSrc, "\$_nres = \$results['notifications'] ?? null;")
+      && str_contains($selfSrc, "'گفتگو ' . (int)\$_nres['seen_chats']"));
+    $add('10.47.2', 'نتیجهٔ بررسی، «دیده‌شده» و «بی‌جواب» را دارد',
+         str_contains($selfSrc, "\$out['seen_chats'] = \$seen['chats'];")
+      && str_contains($selfSrc, "\$stN['last_notif_pending'] = \$pending;"));
+    $add('10.47.3', 'امضای پشتیبان updated_at را هم می‌بیند (سکوتِ دائمی نمی‌شود)',
+         str_contains($selfSrc, "(string)\$nc['updated_at']), 0, 12)"));
+    $add('10.47.4', 'تست، «متن نمی‌آید» و نمونهٔ خام را نشان می‌دهد',
+         str_contains($selfSrc, "'⚠️ نمونه دادهٔ خام باسلام (برای بررسی ساختار):';")
+      && str_contains($selfSrc, "'pending' => \$pendShop, 'no_text' => \$noText]"));
+
     /* ==== ۶۰ (v10.46) ==== */
     $add('10.46', 'نسخهٔ ۱۰.۴۶',
          str_contains($selfSrc, "const APP_VERSION = '10.46';"));
@@ -27744,13 +27760,36 @@ function notifCronPing(array $cn, array $results, bool $force = false): array {
          . ($last > 0 ? "\nفاصله از پینگ قبلی: " . $sinceTxt : '')
          . ($force ? "\n(پینگ آزمایشی)" : '');
 
-    /* v10.45 (۵۹): رویدادها سکوت کرد، دلیلش در همین پینگ باشد.
-       اگر بررسی‌های اعلان در این اجرا خطا داشتند (توکن منقضی، بدون
-       اسکوپ، ...)، کاربر فقط پینگ را می‌بیند و بقیه را می‌شمارد —
-       حالا خطا را هم با خودش می‌آورد. */
-    $_neErr = $results['notifications']['errors'] ?? null;
-    if (is_array($_neErr) && $_neErr) {
-        $msg .= "\n⚠️ اعلان‌ها: " . mb_substr(implode('؛ ', array_slice(array_unique($_neErr), 0, 2)), 0, 180);
+    /* v10.47 (۶۱): پینگ تنها پیامی است که کاربر قطعاً هر بار آن را
+       می‌بیند — پس وضعیتِ کاملِ بررسیِ اعلان‌ها سوارِ همان پیام شود:
+       اجرا شد؟ غرفه دید؟ چند گفتگو، چند بی‌جواب؟ خطایی بود؟
+       با این، «چرا اعلانی نمی‌آید» دیگر گمان‌زنی نیست: خطِ
+       «اعلان‌ها: ...» را از خودِ پینگ بخوانید. */
+    $_nres = $results['notifications'] ?? null;
+    if (is_array($_nres) && !empty($_nres['skipped'])) {
+        $_why = $_nres['skipped'] === 'no_basalam_shops'
+              ? 'هیچ غرفهٔ باسلامی با توکن تنظیم نشده'
+              : (string)$_nres['skipped'];
+        $msg .= "\n⚠️ اعلان‌ها: اجرا نشد — " . $_why;
+    } elseif (is_array($_nres) && !empty($_nres['events_off'])) {
+        $msg .= "\nاعلان‌ها: اجرا نشد — هیچ رویدادی روشن نیست";
+    } elseif (is_array($_nres) && !empty($_nres['error'])) {
+        $msg .= "\n⚠️ اعلان‌ها: خطا در بررسی — " . mb_substr((string)$_nres['error'], 0, 120);
+    } elseif (is_array($_nres) && $_nres) {
+        $_bits = [];
+        if (isset($_nres['seen_chats'])) {
+            $_bits[] = 'گفتگو ' . (int)$_nres['seen_chats']
+                     . (!empty($_nres['pending_chats']) ? ' (' . (int)$_nres['pending_chats'] . ' بی‌جواب)' : '');
+        }
+        if (isset($_nres['seen_orders']))   $_bits[] = 'سفارش ' . (int)$_nres['seen_orders'];
+        if (isset($_nres['seen_products'])) $_bits[] = 'محصول ' . (int)$_nres['seen_products'];
+        if (!empty($_nres['found_total']))  $_bits[] = '🔔 ' . (int)$_nres['found_total'] . ' رویداد اعلان شد';
+        if (is_array($_nres['errors'] ?? null) && $_nres['errors']) {
+            $_bits[] = '⚠️ ' . mb_substr(implode('؛ ', array_slice(array_unique($_nres['errors']), 0, 2)), 0, 140);
+        }
+        $msg .= "\nاعلان‌ها: " . implode(' · ', $_bits);
+    } else {
+        $msg .= "\nاعلان‌ها: اجرا نشد (پیام‌رسان یا غرفهٔ باسلام ندارد)";
     }
 
     $delivery = notifSend($cn, $msg);
@@ -28625,7 +28664,7 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
     $st = notifLoadState(); $now = time(); $cfg = notifRemindCfg($cn);
     $multi = count($shops) > 1;
     $found = 0; $reminded = 0; $totalSeen = 0; $sentTo = []; $samples = [];
-    $shopRows = []; $errors = []; $testFound = 0;
+    $shopRows = []; $errors = []; $testFound = 0; $pendingNow = 0; $rawSample = '';
 
     foreach ($shops as $sh) {
         $tk = trim((string)$sh['token']); $vid = (int)$sh['vendor_id'];
@@ -28654,12 +28693,30 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
             // در امضا بیاوریم، جواب دادن مشتری (۲ → ۰) مثل «رویداد تازه» دیده
             // می‌شود و یک اعلان بی‌مورد می‌فرستد.
             // v10.45 (۵۹): اگر شناسهٔ آخرین پیام نبود، امضا از متنِ پیام ساخته می‌شود.
+            // v10.47 (۶۱): و اگر متن هم نیامد (تغییرِ ساختارِ API)، updated_at
+            // آخرین نشانهٔ «پیام تازه» است — وگرنه امضا برای همیشه ثابت می‌ماند
+            // و هیچ رویدادی دیگر دیده نمی‌شود (سکوتِ کاملِ بی‌صدا).
             $sig = $lastId > 0 ? (string)$lastId
-                               : ('t' . substr(md5((string)$nc['text']), 0, 10));
+                               : ('t' . substr(md5(((string)$nc['text']) . '|' . (string)$nc['updated_at']), 0, 12));
             $norm[] = ['nc' => $nc, 'key' => ($isDef ? 'chat:' : 'chat:' . $vid . ':') . $nc['chat_id'],
                        'sig' => $sig,
                        'ts' => strtotime($nc['updated_at'] ?: 'now') ?: $now,
                        'pending' => $nc['unseen'] > 0];
+        }
+
+        /* v10.47 (۶۱): شمارشِ «بی‌جواب» (موردِ یادآوری) و تشخیصِ
+           «متنِ پیام نمی‌آید» — اگر ساختارِ پاسخِ باسلام عوض شده باشد،
+           این دو نشانه در تست دیده می‌شوند: pending صفر می‌ماند و متن
+           «—» می‌شود، بدون اینکه خطایی گزارش شود. */
+        $pendShop = 0; $noText = 0;
+        foreach ($norm as $f) {
+            if (!empty($f['pending'])) $pendShop++;
+            $t = trim((string)$f['nc']['text']);
+            if ($t === '' || $t === '—') $noText++;
+        }
+        $pendingNow += $pendShop;
+        if ($noText > 0 && $rawSample === '' && isset($rows[0]) && is_array($rows[0])) {
+            $rawSample = mb_substr((string)json_encode($rows[0], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 0, 320);
         }
 
         $wmKey = $isDef ? 'last_chat_check' : 'last_chat_check:' . $vid;
@@ -28668,7 +28725,8 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
         if ($test) {
             $testFound += count($norm);
             $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
-                           'seen' => count($rows), 'found' => count($norm)];
+                           'seen' => count($rows), 'found' => count($norm),
+                           'pending' => $pendShop, 'no_text' => $noText];
             if ($norm) {
                 $f = $norm[0];
                 $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, max(1, $f['nc']['unseen']))) : [];
@@ -28719,7 +28777,8 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
         }
         $st[$wmKey] = $now;
         $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
-                       'seen' => count($rows), 'found' => $shopFound, 'reminded' => $shopRemind];
+                       'seen' => count($rows), 'found' => $shopFound, 'reminded' => $shopRemind,
+                       'pending' => $pendShop]; /* v10.47 (۶۱): چند گفتگوی بی‌جواب است */
     }
 
     if ($test) {
@@ -28728,19 +28787,26 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
             foreach ($shopRows as $sr) {
                 if (empty($sr['ok'])) { $lines[] = '• ' . $sr['shop_name'] . ' — ✗ ' . $sr['error']; continue; }
                 $lines[] = '• ' . $sr['shop_name'] . ' — ' . (int)$sr['seen']
-                         . ' گفتگوی اخیر · ' . (int)$sr['found'] . ' مورد قابل اعلان';
+                         . ' گفتگوی اخیر · ' . (int)$sr['found'] . ' مورد قابل اعلان'
+                         /* v10.47 (۶۱): «بی‌جواب» و «متن نمی‌آید» را هم نشان بده */
+                         . (!empty($sr['pending']) ? ' · ' . (int)$sr['pending'] . ' بی‌جواب' : '')
+                         . (!empty($sr['no_text']) ? ' · ⚠️ متنِ پیام نمی‌آید' : '');
+            }
+            if ($rawSample !== '') {
+                $lines[] = '⚠️ نمونه دادهٔ خام باسلام (برای بررسی ساختار):';
+                $lines[] = $rawSample;
             }
             if ($samples) { $lines[] = '━━━ نمونه:'; $lines[] = mb_substr((string)$samples[0], 0, 400); }
             $sentTo = notifSend($cn, implode("\n", $lines));
         }
-        return ['ok' => true, 'found' => $testFound, 'total_seen' => $totalSeen,
+        return ['ok' => true, 'found' => $testFound, 'total_seen' => $totalSeen, 'pending' => $pendingNow, /* v10.47 (۶۱) */
                 'sent' => $sentTo, 'sample' => $samples[0] ?? '',
                 'shops' => $shopRows, 'errors' => $errors];
     }
 
     notifPrune($st, $now);
     notifSaveState($st);
-    return ['ok' => true, 'found' => $found, 'reminded' => $reminded,
+    return ['ok' => true, 'found' => $found, 'reminded' => $reminded, 'pending' => $pendingNow, /* v10.47 (۶۱) */
             'total_seen' => $totalSeen, 'sent' => $sentTo, 'sample' => $samples[0] ?? '',
             'shops' => $shopRows, 'errors' => $errors];
 }
@@ -31288,6 +31354,10 @@ function bslCheckNotifications(array $cn): array {
     $errors = [];
     $seen = ['orders' => 0, 'chats' => 0, 'products' => 0];
     $found = ['orders' => 0, 'chats' => 0, 'products' => 0];
+    $pending = 0; /* v10.47 (۶۱): چند گفتگوی بی‌جواب است (موردِ یادآوری) */
+    if (!(notifEventOn($ne, 'order_new') || notifEventOn($ne, 'order_status')
+          || notifEventOn($ne, 'chat_msg') || notifEventOn($ne, 'product_status')
+          || notifEventOn($ne, 'product_new'))) $out['events_off'] = true;
     if (notifEventOn($ne, 'order_new') || notifEventOn($ne, 'order_status')) {
         $r = notifCheckOrders($cn);
         $seen['orders'] += (int)($r['total_seen'] ?? 0);
@@ -31299,6 +31369,7 @@ function bslCheckNotifications(array $cn): array {
         $r = notifCheckChats($cn);
         $seen['chats'] += (int)($r['total_seen'] ?? 0);
         $found['chats'] += (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        $pending += (int)($r['pending'] ?? 0);
         if ($found['chats'] > 0) $out['chats'] = $found['chats'];
         if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
@@ -31310,6 +31381,14 @@ function bslCheckNotifications(array $cn): array {
         if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
     if ($errors) $out['errors'] = array_values(array_unique($errors));
+    /* v10.47 (۶۱): پینگ (که کاربر هر بار آن را می‌بیند) همین اعداد را
+       نمایش می‌دهد؛ پس «چرا اعلانی نیامد» از همان پینگ خوانده می‌شود. */
+    $out['seen_chats'] = $seen['chats'];
+    $out['seen_orders'] = $seen['orders'];
+    $out['seen_products'] = $seen['products'];
+    if ($pending > 0) $out['pending_chats'] = $pending;
+    $_ft = $found['orders'] + $found['chats'] + $found['products'];
+    if ($_ft > 0) $out['found_total'] = $_ft;
 
     /* v10.46 (۶۰): هر دور، خلاصهٔ «چرا چیزی نیامد» روی دیسک بنشیند —
        حتی وقتی هیچ رویدادی نباشد. این دقیقاً همان سوالی است که کاربر
@@ -31319,6 +31398,7 @@ function bslCheckNotifications(array $cn): array {
         $stN = notifLoadState();
         $stN['last_notif_run'] = time();
         $stN['last_notif_seen'] = $seen;
+        $stN['last_notif_pending'] = $pending; /* v10.47 (۶۱) */
         $stN['last_notif_found'] = $found;
         $stN['last_notif_errors'] = $errors ?: [];
         notifSaveState($stN);
@@ -49323,6 +49403,27 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.47', t:'📡 پینگ خودِ گزارش‌گر است: هر پینگ می‌گوید اعلان‌ها چه دید و چه نشد', items:[
+    ' <b>هر پیامِ پینگ</b> (همان پیامی که می‌آید و می‌گوید «کران اجرا شد») حالا یک',
+    '   خطِ تازه دارد: <b>«اعلان‌ها: گفتگو ۸ (۲ بی‌جواب) · سفارش ۱۲ · محصول ۵»</b>',
+    '   — یا دلیلِ اجرا نشدن: «اجرا نشد — هیچ غرفهٔ باسلامی با توکن تنظیم نشده»،',
+    '   «هیچ رویدادی روشن نیست»، یا خطای باسلام. یعنی <b>دقیقاً همان پیامی که',
+    '   الان می‌بینید، به شما می‌گوید چرا اعلانی نمی‌رسد</b> — بدون نیاز به',
+    '   هیچ کلیک دیگری.',
+    '🔍 <b>چرا این مهم است:</b> اگر پینگ می‌آید ولی اعلان نمی‌آید، یا بررسی',
+    '   اجرا نمی‌شود (غرفه/توکن ندارد) یا اجرا می‌شود ولی باسلام خالی/خطا',
+    '   برمی‌گرداند. حالا هر دو صورت را خودِ پینگ می‌گوید: صفرِ واقعی (گفتگو ۰)',
+    '   از «اجرا نشد» قابل تمایز است.',
+    '🛡 <b>ضدِ سکوتِ ساختاری:</b> اگر APIِ باسلام ساختارِ پاسخ را عوض کند و',
+    '   شناسهٔ/متنِ پیام نیامد، امضای پشتیبان حالا <b>updated_at</b> را هم می‌بیند —',
+    '   یعنی پیامِ تازه دیگر نمی‌تواند برای همیشه نامرئی بماند. دکمهٔ «تستِ',
+    '   پیام‌ها» هم اگر متن نمی‌آید، می‌گوید «⚠️ متنِ پیام نمی‌آید» و یک نمونه',
+    '   از دادهٔ خامِ باسلام را می‌فرستد تا ساختار درست قابل بررسی باشد؛ و',
+    '   تعدادِ «بی‌جواب» (موردِ یادآوری) را جدا نشان می‌دهد.',
+    '📌 <b>یادآوری فقط برای «بی‌جواب» است:</b> اگر پیام را در پنل باسلام خوانده',
+    '   باشید، شمارِ «دیده‌نشده» صفر می‌شود و یادآوری‌اش متوقف می‌شود (طراحی',
+    '   همین است: یادآوریِ پیامی که جواب خورده، مزاحمت است).',
+  ]},
   {v:'10.46', t:'🏪 انتخاب غرفه برای اعلانِ «پیام مشتری» + خطِ وضعیتِ زندهٔ اعلان‌ها', items:[
     ' <b>دراپ‌داونِ «غرفهٔ پیام‌ها»:</b> زیرِ تیکِ «💬 پیام مشتری» در بخشِ',
     '   اعلان‌ها، حالا می‌توانید انتخاب کنید اعلانِ پیام از کدام غرفه بیاید:',
@@ -52472,7 +52573,7 @@ function renderNotifHealth(){
     if(d.last_notif_run){
       bits.push('آخرین بررسی: '+(d.last_notif_run_fa||'—'));
       if(d.last_notif_seen){
-        bits.push('دیده‌شده: '+toFa(d.last_notif_seen.chats||0)+' گفتگو · '+toFa(d.last_notif_seen.orders||0)+' سفارش · '+toFa(d.last_notif_seen.products||0)+' محصول');
+        bits.push('دیده‌شده: '+toFa(d.last_notif_seen.chats||0)+' گفتگو'+(d.last_notif_pending>0?' ('+toFa(d.last_notif_pending)+' بی‌جواب)':'')+' · '+toFa(d.last_notif_seen.orders||0)+' سفارش · '+toFa(d.last_notif_seen.products||0)+' محصول');
       }
       const fN=(d.last_notif_found?(d.last_notif_found.chats||0)+(d.last_notif_found.orders||0)+(d.last_notif_found.products||0):0);
       if(fN>0)bits.push('اعلان: '+toFa(fN)+' مورد');
