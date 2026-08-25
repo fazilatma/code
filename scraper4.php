@@ -272,7 +272,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.55';
+const APP_VERSION = '10.56';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -23480,6 +23480,24 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۷۰ (v10.56) ==== */
+    $add('10.56', 'نسخهٔ ۱۰.۵۶',
+         str_contains($selfSrc, "const APP_VERSION = '10.56';"));
+    $add('10.56', 'ادامهٔ ارسال از چک‌پوینت (نه از اول) — وِرکرِ باسلام',
+         (strpos($selfSrc, '$bslResumeStart=0;$bslResumeCounters=false;') !== false
+          && strpos($selfSrc, "if((\$i+1)<\$bslResumeStart)continue;") !== false
+          && strpos($selfSrc, "if(isset(\$GLOBALS['_bslQueueIdNow']))") !== false
+          && strpos($selfSrc, '$bslPrevProg=readProgress(BSL_PROGRESS_FILE);') !== false));
+    $add('10.56', 'ادامهٔ ارسال از چک‌پوینت (نه از اول) — وِرکرِ ووکامرس',
+         (strpos($selfSrc, '$wooResumeStart=0;$wooResumeCounters=false;') !== false
+          && strpos($selfSrc, "if((\$i+1)<\$wooResumeStart)continue;") !== false
+          && strpos($selfSrc, "\$d['queue_id']=\$GLOBALS['_wooQueueIdNow'];") !== false
+          && strpos($selfSrc, "\$wooRunId=(string)(\$qe['id']??'');") !== false));
+    $add('10.56', 'نقص‌یابِ گیرکردن چک‌پوینتِ واقعی را گزارش می‌دهد (ردیف + فایلِ پیشرفت)',
+         (strpos($selfSrc, "'resume_from' => \$stCur") !== false
+          && strpos($selfSrc, "\$stPgQ === (string)(\$running['id'] ?? '')") !== false
+          && strpos($selfSrc, "\$chk['resume_from'] ?? \$chk['current'] ?? 0") !== false));
+
     /* ==== ۶۹ (v10.55) ==== */
     $add('10.55', 'نسخهٔ ۱۰.۵۵',
          str_contains($selfSrc, "const APP_VERSION = '10.55';"));
@@ -29505,10 +29523,23 @@ function queueStallCheck(string $which, int $staleAfter = 300): array {
             return ['stalled' => false, 'reason' => 'در حال اجرا', 'idle' => $idle];
         }
         if ($idle > $staleAfter) {
+            /* v10.56 (۷۰): چک‌پوینتِ ادامه. در طولِ ارسالِ طولانی «current»ِ
+               ردیفِ صف صفر می‌ماند (وِرکر آن را فقط در پایان و در هنگام پُلِ
+               مرورگر می‌نویسد) — نگهبان اگر فقط ردیف را بخواند، وظیفه را از
+               محصولِ ۱ دوباره راه می‌اندازد. حالا اگر فایلِ پیشرفت مالِ همین
+               ردیف است، currentِ خودش هم مبنا می‌شود. معنای «current»:
+               شمارهٔ ۱‌مبنا از آخرینِ محصولِ در حالِ کار — یعنی اولینِ
+               محصولی که باید (دوباره) پردازش شود. */
+            $stCur = (int)($running['current'] ?? 0);
+            $stPgQ = trim((string)($prog['queue_id'] ?? ''));
+            if ($stPgQ === (string)($running['id'] ?? '')) {
+                $stCur = max($stCur, (int)($prog['current'] ?? 0));
+            }
             return ['stalled' => true, 'kind' => 'running', 'idle' => $idle,
                 'queue_id' => $running['id'] ?? '', 'lock_held' => $lockFresh,
                 'beat_from' => (string)$_iwS['why'],
-                'current' => (int)($running['current'] ?? 0),
+                'current' => $stCur,
+                'resume_from' => $stCur,
                 'total' => (int)($running['total'] ?? 0)];
         }
         return ['stalled' => false, 'reason' => 'تازه شروع شده', 'idle' => $idle];
@@ -29536,7 +29567,10 @@ function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = 
     if (empty($chk['stalled']) || $dryRun) { $chk['resumed'] = false; return $chk; }
 
     $qid   = (string)($chk['queue_id'] ?? '');
-    $start = max(0, (int)($chk['current'] ?? 0));
+    /* v10.56 (۷۰): resume_from = چک‌پوینتِ واقعی (از فایلِ پیشرفتِ وِرکر،
+       وقتی مالِ همین ردیف بود) — قبلاً فقط currentِ ردیف می‌آمد که در طولِ
+       اجرا صفر می‌ماند و ادامه، از اول شروع می‌شد. */
+    $start = max(0, (int)($chk['resume_from'] ?? $chk['current'] ?? 0));
 
     // قفلِ رهاشدهٔ پردازهٔ مرده را پاک کن، وگرنه تلاش بعدی «در حال اجرا» می‌بیند
     if (empty($chk['lock_held'])) {
@@ -34773,9 +34807,29 @@ if($log!==null){$wooLog[]=$log;}
 $totalLog=count($wooLog);
 $recentSlice=$totalLog>200?array_slice($wooLog,-200):$wooLog;
 $d=['running'=>true,'sent'=>$s,'updated'=>$u,'skipped'=>$sk,'failed'=>$f,'total'=>$t,'last_title'=>$lt,'current'=>$c,'done'=>false,'started_at'=>$GLOBALS['startedAt'],'last_progress_ts'=>time(),'recent_log'=>$recentSlice,'total_log_count'=>$totalLog,'sent_details'=>$wooSentList,'updated_details'=>$wooUpdatedList,'skipped_details'=>$wooSkippedList,'failed_details'=>$wooFailedList];
+/* v10.56 (۷۰): فایلِ پیشرفتِ ووکامرس هم مالکیتِ ردیفِ صف را نشان می‌دهد —
+   برای اینکه ادامهٔ بعدی مطمئن باشد چک‌پوینت مالِ همین ردیف است. */
+if(!empty($GLOBALS['_wooQueueIdNow']))$d['queue_id']=$GLOBALS['_wooQueueIdNow'];
 if(!empty($extra))$d=array_merge($d,$extra);
 writeProgress(WOO_PROGRESS_FILE,$d);
 clearstatcache();
+/* v10.56 (۷۰): «current»ِ ردیفِ صف را هم با هر ضربان به‌روز نگه می‌داریم
+   (همانِ کارِ وِرکرِ باسلام) — تا در نبودِ پُلِ مرورگر، ردیفِ صف جایِ
+   درستِ کار را نشان بدهد. */
+if(!empty($GLOBALS['_wooQueueIdNow'])){
+try{
+$__wq=wooReadQueue();$__wchg=false;
+foreach($__wq['entries'] as &$__we){
+if($__we['id']===$GLOBALS['_wooQueueIdNow']){
+if(((int)$c)!==(int)($__we['current']??0)){($__we['current']=(int)$c);($__wchg=true);}
+$__we['sent']=$s;$__we['updated']=$u;$__we['skipped']=$sk;$__we['failed']=$f;
+break;
+}
+}
+unset($__we);
+if($__wchg)wooWriteQueue($__wq);
+}catch(Exception $__wex){}
+}
 }
 
 $cn=loadConnections();$w=$cn['woocommerce']??[];
@@ -34786,6 +34840,19 @@ exit;
 
 $raw=@file_get_contents(WOO_PRODUCTS_FILE);
 $pd=json_decode($raw?:'[]',true)?:[];
+/* v10.56 (۷۰): اگر فایلِ مشترکِ محصولات گم شده باشد (مثلاً بعد از کشتنِ
+   فرایند)، از فایلِ اختصاصیِ ردیفِ در حالِ اجرا برگردان — وگرنه ادامه
+   بلافاصله با «بدونِ محصول» تمام می‌شد. */
+if(empty($pd)){
+$__wq0=wooReadQueue();
+foreach($__wq0['entries'] as $__qe0){
+if(($__qe0['status']??'')==='running'){
+$__wf=__DIR__.'/woo_queue_products_'.(string)($__qe0['id']??'').'.json';
+if(file_exists($__wf)){$pd=json_decode((string)@file_get_contents($__wf)?:'[]',true)?:[];}
+break;
+}
+}
+}
 if(empty($pd)){
 writeProgress(WOO_PROGRESS_FILE,['running'=>false,'done'=>true,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['❌ فایل محصولات خالی'],'total_log_count'=>1,'sent_details'=>[],'updated_details'=>[],'skipped_details'=>[],'failed_details'=>[]]);
 exit;
@@ -34802,14 +34869,18 @@ $wooQueueProfileKey='';   // v8.65: برای ثبت در دفترچهٔ شناس
 $wooForceAllRun=false;    // v10.34 (۴۸ج): ارسالِ کامل بدون مقایسه
 $wooContentSync=contentSyncOn($cn);   // v8.69: آپدیت محتوای تازه
 $wooQueue=wooReadQueue();
+$wooRunId='';
 foreach($wooQueue['entries'] as $qe){
 if(($qe['status']??'')!=='running')continue;
 if(!empty($qe['config']['title_suffix']))$wooTitleSuffix=trim($qe['config']['title_suffix']);
 if(isset($qe['config']['category_id']))$wooQueueCatId=(int)$qe['config']['category_id'];
 if(!empty($qe['config']['force_all']))$wooForceAllRun=true;
 $wooQueueProfileKey=(string)($qe['profile_key']??'');
+$wooRunId=(string)($qe['id']??'');
 break;
 }
+/* v10.56 (۷۰): برای مالکیتِ فایلِ پیشرفت (queue_id) در ضربان‌های بعد. */
+$GLOBALS['_wooQueueIdNow']=$wooRunId;
 if($wooTitleSuffix===''){$wooTitleSuffix=trim($cn['basalam']['title_suffix']??'');}
 // v8.87: تعدیل قیمت مخصوص ووکامرس (جدا از تنظیم قیمت پروفایل)
 $wooPriceCfg=destPriceCfg($cn,'woocommerce');
@@ -34822,9 +34893,31 @@ wooBackendProgress(0,0,0,0,0,0,'','💰 تعدیل قیمت ووکامرس: '
 $wooSendCatId=$wooQueueCatId>=0?$wooQueueCatId:(int)($w['default_category']??0);
 $GLOBALS['_currentProductLink']='';
 
+/* v10.56 (۷۰): چک‌پوینتِ ادامه — فایلِ پیشرفت را پُر از اولینِ ضربانِ تازه
+   می‌خوانیم (ضربانِ تازه current=0 می‌نویسد و چک‌پوینت از بین می‌رود).
+   معنای start: شمارهٔ ۱‌مبنا از اولینِ محصولی که باید (دوباره) پردازش شود.
+   فقط وقتی مبنا می‌شود که queue_idِ فایل مالِ همین ردیف باشد. */
+$wooPrevProg=readProgress(WOO_PROGRESS_FILE);
+$wooPrevQid=trim((string)($wooPrevProg['queue_id']??''));
+$wooResumeStart=0;$wooResumeCounters=false;
+if($wooRunId!==''&&$wooPrevQid===$wooRunId){
+$wooResumeStart=(int)($wooPrevProg['current']??0);
+$wooResumeCounters=isset($wooPrevProg['sent']);
+}
+$wooPostStart=max(0,(int)($_POST['start_index']??0));
+$wooPostQid=trim((string)($_POST['queue_id']??''));
+if($wooPostStart>0&&$wooRunId!==''&&($wooPostQid===''||$wooPostQid===$wooRunId))$wooResumeStart=max($wooResumeStart,$wooPostStart);
+$wooResumeStart=max(0,min($wooResumeStart,$total+1));
+if($wooResumeStart>0&&$wooResumeCounters){
+$sent=(int)($wooPrevProg['sent']??0);$updated=(int)($wooPrevProg['updated']??0);
+$skipped=(int)($wooPrevProg['skipped']??0);$fail=(int)($wooPrevProg['failed']??0);
+}
+
 wooBackendProgress(0,0,0,0,$total,0,'',['✅ [v8.22 woo_backend] شروع — '.$total.' محصول']);
 
 foreach($pd as $i=>$p){
+/* v10.56 (۷۰): محصولاتِ قبلِ چک‌پوینت را رد کن (در اجرأ قبلی انجام شده‌اند). */
+if(($i+1)<$wooResumeStart)continue;
 if(file_exists(WOO_STOP_FILE)){
 @unlink(WOO_STOP_FILE);
 wooBackendProgress($sent,$updated,$skipped,$fail,$total,$i,'',['❌ متوقف شد']);
@@ -36943,6 +37036,24 @@ if($__ss)$d['shop_stats']=$__ss;
 if(!empty($extra))$d=array_merge($d,$extra);
 writeProgress(BSL_PROGRESS_FILE,$d);
 clearstatcache();
+/* v10.56 (۷۰): «current»ِ ردیفِ صف را هم با هر ضربان به‌روز نگه می‌داریم.
+   قبلاً این فقط هنگام پُلِ مرورگر یا در پایان نوشته می‌شد — پس در ارسالِ
+   طولانیِ رهاشده (بدونِ مرورگر) ردیف صفر می‌ماند و هر کسِ آن را بخواند
+   (نگهبان، پمپ، مدیرِ وظایف) می‌فهمد هنوز از اول شروع نشده. */
+if(isset($GLOBALS['_bslQueueIdNow'])){
+try{
+$__q=bslReadQueue();$__chg=false;
+foreach($__q['entries'] as &$__e){
+if($__e['id']===$GLOBALS['_bslQueueIdNow']){
+if(((int)$c)!==(int)($__e['current']??0)){($__e['current']=(int)$c);($__chg=true);}
+$__e['sent']=$s;$__e['updated']=$u;$__e['skipped']=$sk;$__e['failed']=$f;
+break;
+}
+}
+unset($__e);
+if($__chg)bslWriteQueue($__q);
+}catch(Exception $__ex){}
+}
 }
 
 /* v10.53 (۶۷): یک وِرکر = صفِ کامل. هر وقت یک ردیف تمام شد و ردیفِ «در انتظار»
@@ -37025,6 +37136,24 @@ exit;
 
 $bslQueueId=$nextEntry['id'];
 
+/* v10.56 (۷۰): چک‌پوینتِ ادامه — فایلِ پیشرفت را پُر از پاک‌کردن می‌خوانیم:
+   موقعِ شروعِ درست (شمارهٔ ۱‌مبنا از اولینِ محصولی که باید پردازش شود) و
+   شمارنده‌های اجرأ قبلی، اگر فرایندِ قبلی وسطِ کار مُرده باشد و نگهبان
+   (یا «ادامه») ما را دوباره راه انداخته باشد. بدونِ این، هر بارِ شروع از
+   محصولِ ۱ از نو — ارسالِ بزرگ یا بسیار طولانی می‌شد یا غیرممکن.
+   فایلِ پیشرفت فقط وقتی مبنا می‌شود که queue_id مالِ همین ردیف باشد. */
+$bslPrevProg=readProgress(BSL_PROGRESS_FILE);
+$bslPrevQid=trim((string)($bslPrevProg['queue_id']??''));
+$bslResumeStart=0;$bslResumeCounters=false;
+if($bslPrevQid===$bslQueueId){
+$bslResumeStart=(int)($bslPrevProg['current']??0);
+$bslResumeCounters=isset($bslPrevProg['sent']);
+}
+$bslPostStart=max(0,(int)($_POST['start_index']??0));
+$bslPostQid=trim((string)($_POST['queue_id']??''));
+if($bslPostStart>0&&($bslPostQid===''||$bslPostQid===$bslQueueId))$bslResumeStart=max($bslResumeStart,$bslPostStart);
+$bslResumeStart=max(0,$bslResumeStart);
+$GLOBALS['_bslQueueIdNow']=$bslQueueId;
 @unlink(BSL_PROGRESS_FILE);@unlink(BSL_STOP_FILE);@unlink(BSL_PRODUCTS_FILE);
 if(!file_exists($nextEntry['products_file'])){
 $queue['entries'][$nextIdx]['status']='failed';
@@ -37129,10 +37258,22 @@ bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',[count($bslFlatCats).' د
 
 bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['🚀 شروع ارسال — جستجوی هر محصول قبل از ارسال...']);
 $pd=$verifyProducts;$total=count($pd);$sent=0;$updated=0;$skipped=0;$fail=0;
+/* v10.56 (۷۰): ادامه — شمارنده‌ها را از فایلِ پیشرفتِ قبلی برمی‌گردانیم
+   (فایلِ محصولاتِ هر ردیفِ صف ثابت است، پس شمارشِ اجرأ قبلی معتبر است).
+   محصولِ «در حالِ کار» موقعِ مرگ (شمارهٔ start) دوباره پردازش می‌شود — اگر
+   قبلاً فرستاده شده باشد با جستجو آپدیت می‌شود و تکراری ساخته نمی‌شود.
+   فهرستِ جزئیاتِ بخشِ اول در فایلِ پیشرفت جایی نمی‌گیرد؛ کلِ نهایی درست است. */
+$bslResumeStart=min($bslResumeStart,$total+1);
+if($bslResumeStart>0&&$bslResumeCounters){
+$sent=(int)($bslPrevProg['sent']??0);$updated=(int)($bslPrevProg['updated']??0);
+$skipped=(int)($bslPrevProg['skipped']??0);$fail=(int)($bslPrevProg['failed']??0);
+}
 $bslExisting=[];$bslExistingNorm=[];$bslArchivedMap=[];
 // v8.22: Phase 1 removed — per-product search replaces bulk loading
 
 foreach($pd as $i=>$p){
+/* v10.56 (۷۰): محصولاتِ قبلِ چک‌پوینت را رد کن (در اجرأ قبلی انجام شده‌اند). */
+if(($i+1)<$bslResumeStart)continue;
 // v8.59: نتیجهٔ file_exists در PHP کش می‌شود؛ بدون پاک‌کردن کش ممکن است
 // حلقه سیگنال توقفِ تازه‌نوشته‌شده را چند دور نبیند.
 clearstatcache(true,BSL_STOP_FILE);
@@ -50189,6 +50330,24 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.56', t:'⏩ ادامه ارسال از جایی که مانده بود — نه از اول', items:[
+    '🛠 <b>نقصِ گزارش‌شده:</b> وقتی نگهبان (یا «پمپِ ارسالِ» کران) می‌فهمید',
+    '   وِرکرِ ارسال وسطِ کار مُرده و گیر کرده است، کار را دوباره راه می‌انداخت اما',
+    '   <b>از محصولِ ۱</b> — نه از همان جایی که مُرده بود. برای کاتالوگِ بزرگ',
+    '   یعنی ساعت‌ها تکرار، و با کشتنِ مکررِ فرایند توسط هاست، رسیدن به آخرِ',
+    '   کار تقریباً غیرممکن بود.',
+    '🔎 <b>سه‌ریشه:</b> ۱) وِرکرهایِ ارسال اصلاً start_index را نمی‌خواندند.',
+    '   ۲) نگهبان «جایِ گیرکردن» را از ردیفِ صف می‌خواند که در طولِ اجرا صفر',
+    '   می‌ماند (فقط در پایان یا هنگام پُلِ مرورگر نوشته می‌شد). ۳) فایلِ',
+    '   پیشرفتِ دقیقِ وِرکر، پیش از خواندنِ محلِ ادامه، پاک می‌شد.',
+    '✅ <b>حالا:</b> نگهبان چک‌پوینتِ واقعی (از فایلِ پیشرفتِ متعلق به همان',
+    '   ردیفِ صف) را می‌فرستد؛ وِرکر شمارنده‌ها را برمی‌گرداند، محصولاتِ',
+    '   انجام‌شده را رد می‌کند و فقط از همان محصولِ مُرده‌شده ادامه می‌دهد.',
+    '   اگر محصولِ نیمه‌کاره قبلاً فرستاده شده باشد، با جستجو آپدیت می‌شود —',
+    '   تکراری ساخته نمی‌شود. «current»ِ ردیفِ صف هم همین‌حالا با هر ضربان',
+    '   به‌روز می‌شود تا همه (نگهبان/پمپ/مدیرِ وظایف) جایِ درست را ببینند.',
+    '🔁 اعمال بر: صفِ ارسالِ باسلام و ووکامرس — بازیابیِ نگهبان، پمپِ کران',
+    '   و دکمهٔ «ادامه» همه از همین چک‌پوینت استفاده می‌کنند.']},
   {v:'10.55', t:'💬 پاسخ دستی به مشتریان + بازبینی کاملِ زنجیرهٔ همگام‌سازی', items:[
     '💬 <b>پاسخ دستی به پیام‌های مشتری:</b> در تنظیمات، بخشِ تازهٔ «پاسخ دستی به',
     '   مشتریان» — گفتگوهای باسلام را همان‌جا ببینید (با شمارِ خوانده‌نشده)، تاریخچهٔ',
