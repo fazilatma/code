@@ -227,7 +227,7 @@ const REMOTEMAP_MAX_ROWS = 20000;
    بعد از آن پیدا کردنِ «آیا این محصول در غرفه هست؟» بدونِ هیچ درخواستی
    انجام می‌شود. شیر اطمینان: TTL و بازسازیِ دستی. */
 const BSL_CATALOG_PREFIX   = __DIR__ . '/bsl_catalog_v';
-const BSL_CATALOG_TTL      = 21600;   // ۶ ساعت
+const BSL_CATALOG_TTL      = 21600;   // ۶ ساعت — پیش‌فرض؛ از تنظیمات قابل تغییر است (bslCatalogTtl)
 const BSL_CATALOG_MAX_PAGES = 60;     // سقفِ ۶۰۰۰ محصول در هر غرفه
 /* v10.35 (۴۷د/ه): همگام‌سازیِ دستی — کارِ پس‌زمینه با ردیفِ خودش در مدیر
    وظیفه، و گزارشِ کاملِ ماندگارِ هر همگام‌سازی. */
@@ -235,6 +235,13 @@ const MANUAL_SYNC_PROGRESS_FILE = __DIR__ . '/manual_sync_progress.json';
 const MANUAL_SYNC_STOP_FILE     = __DIR__ . '/manual_sync_stop.json';
 const SYNC_REPORT_FILE          = __DIR__ . '/sync_report.json';
 const SYNC_REPORT_KEEP          = 200;
+/* v10.39 (۵۲): ادامهٔ خودکارِ کارهای رهاشده.
+   دفترچهٔ تلاش‌ها لازم است چون یک کارِ واقعاً خراب (مثلاً دسترسیِ فایل قطع
+   شده) هر تیکِ کران دوباره رها می‌شود؛ بدونِ سقف، نگهبان تا ابد همان کار را
+   شلیک می‌کند و روی هاستِ اشتراکی جای بقیه را تنگ می‌کند. پنجرهٔ ۱ ساعته
+   می‌گذارد یک اختلالِ گذرا خودش جبران شود ولی حلقهٔ بی‌پایان نسازد. */
+const AUTO_RESUME_LOG_FILE = __DIR__ . '/auto_resume_log.json';
+const AUTO_RESUME_WINDOW   = 3600;
 /* v9.16: بکاپ کامل پوشه روی گیت‌هاب.
    BACKUP_CFG رمز و مخزن را نگه می‌دارد (هرگز داخل کد نوشته نمی‌شود). */
 const BACKUP_CFG_FILE  = __DIR__ . '/.backup-config.json';
@@ -242,7 +249,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.38';
+const APP_VERSION = '10.39';
 const APP_VERSION_DATE = '1405/06/03';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -5505,6 +5512,20 @@ function bslCatalogFile(int $vid): string {
     return BSL_CATALOG_PREFIX . max(0, $vid) . '.json';
 }
 
+/**
+ * v10.39 (۵۳): بازهٔ تازه‌سازیِ کش، قابل تنظیم از رابط کاربری.
+ *
+ * تا ۱۰.۳۸ عددِ ۶ ساعت در ثابت هاردکد بود. کاربر ممکن است غرفه‌ای پرتغییر
+ * داشته باشد (بازهٔ کوتاه‌تر) یا غرفه‌ای که ماه‌ها ثابت است (بازهٔ بلندتر و
+ * صرفه‌جوییِ بیشتر). کف ۱۵ دقیقه است تا کسی سهواً کش را بی‌اثر نکند.
+ */
+function bslCatalogTtl(?array $cn = null): int {
+    if ($cn === null) $cn = loadConnections();
+    $h = $cn['bsl_catalog_ttl_h'] ?? 0;
+    if ((float)$h <= 0) return (int)BSL_CATALOG_TTL;
+    return max(900, min(604800, (int)round((float)$h * 3600)));
+}
+
 /** کشِ روی دیسک را می‌خواند (بدون هیچ درخواستِ شبکه‌ای) */
 function bslCatalogRead(int $vid): array {
     $f = bslCatalogFile($vid);
@@ -5519,7 +5540,7 @@ function bslCatalogFresh(int $vid, ?array $c = null): bool {
     if ($c === null) $c = bslCatalogRead($vid);
     if (!$c) return false;
     $at = (int)($c['at'] ?? 0);
-    return $at > 0 && (time() - $at) <= (int)BSL_CATALOG_TTL;
+    return $at > 0 && (time() - $at) <= bslCatalogTtl();
 }
 
 /**
@@ -5536,7 +5557,7 @@ function bslCatalogBuild(string $tk, int $vid, bool $force = false): array {
                     'partial' => !empty($c['partial']), 'from' => 'cache'];
     }
     $statuses = bslStatusQuery();
-    $items = []; $pages = 0; $partial = false;
+    $items = []; $pages = 0; $partial = false; $rowsFull = [];
     for ($page = 1; $page <= (int)BSL_CATALOG_MAX_PAGES; $page++) {
         $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=100&page=' . $page . $statuses);
         if (empty($r['ok'])) {
@@ -5558,13 +5579,28 @@ function bslCatalogBuild(string $tk, int $vid, bool $force = false): array {
                در آخرین مرحله‌اش داشت، وگرنه کش از آن ضعیف‌تر می‌شد. */
             $n2 = reconNormTitle(stripProductCode($t));
             if ($n2 !== '' && !isset($items[$n2])) $items[$n2] = $id;
+            /* v10.39 (۵۳): ردیفِ کامل هم نگه داشته می‌شود تا مصرف‌کننده‌هایی
+               مثل حذفِ تکراری بتوانند بدونِ یک برداشتِ *دوباره* از باسلام
+               کارشان را بکنند. تا ۱۰.۳۸ فقط «عنوان ⇒ شناسه» ذخیره می‌شد و
+               برای همین dedup مجبور بود همان صفحه‌ها را از نو بگیرد. */
+            $rv = $row['revision']['data'] ?? [];
+            $st = $row['status'] ?? null;
+            $rowsFull[] = [
+                'id'     => $id,
+                'name'   => trim($t),
+                'status' => (int)(is_array($st) ? ($st['value'] ?? 0) : $st),
+                'price'  => (int)($rv['primary_price'] ?? ($row['price'] ?? 0)),
+                'stock'  => (int)($rv['stock'] ?? ($row['stock'] ?? 0)),
+                'ts'     => $id,
+            ];
         }
         $tp = (int)($r['body']['total_page'] ?? 1);
         if ($page >= max(1, $tp)) break;
         if ($page >= (int)BSL_CATALOG_MAX_PAGES) $partial = true;
     }
     $data = ['vendor_id' => $vid, 'at' => time(), 'pages' => $pages,
-             'count' => count($items), 'partial' => $partial, 'items' => $items];
+             'count' => count($items), 'partial' => $partial, 'items' => $items,
+             'rows' => $rowsFull, 'rows_count' => count($rowsFull)];
     @file_put_contents(bslCatalogFile($vid), json_encode($data, JSON_UNESCAPED_UNICODE), LOCK_EX);
     $GLOBALS['_bslCatalog'][$vid] = $data;
     return ['ok' => true, 'count' => count($items), 'pages' => $pages,
@@ -5627,6 +5663,37 @@ function bslCatalogSaved(int $add = 0): int {
     static $n = 0;
     if ($add > 0) $n += $add;
     return $n;
+}
+
+/**
+ * v10.39 (۵۳): ردیف‌های کاملِ یک غرفه از روی کش.
+ *
+ * این همان چیزی است که تا حالا هر مصرف‌کننده خودش با ده‌ها درخواست از
+ * باسلام می‌گرفت. حالا یک بار در کش می‌نشیند و همه از همان می‌خوانند.
+ *
+ * $build=false یعنی «اگر کش نیست/کهنه است، شبکه را دست نزن» — برای جاهایی
+ * که فقط می‌خواهند وضعیتِ کش را گزارش کنند.
+ * خروجی: ['rows'=>[], 'from'=>'cache|network|none', 'partial'=>bool, 'at'=>int]
+ */
+function bslCatalogRows(string $tk, int $vid, bool $build = true): array {
+    $c = null;
+    if (isset($GLOBALS['_bslCatalog'][$vid]) && bslCatalogFresh($vid, $GLOBALS['_bslCatalog'][$vid]))
+        $c = $GLOBALS['_bslCatalog'][$vid];
+    if ($c === null) { $r = bslCatalogRead($vid); if (bslCatalogFresh($vid, $r)) $c = $r; }
+    $from = 'cache';
+    /* کشِ ساختهٔ نسخه‌های قبل فقط items داشت و rows نداشت؛ آن هم باید
+       دوباره ساخته شود وگرنه مصرف‌کننده فهرستِ خالی می‌بیند. */
+    if ($c !== null && !is_array($c['rows'] ?? null)) $c = null;
+    if ($c === null) {
+        if (!$build) return ['rows' => [], 'from' => 'none', 'partial' => true, 'at' => 0];
+        bslCatalogBuild($tk, $vid, true);
+        $c = $GLOBALS['_bslCatalog'][$vid] ?? bslCatalogRead($vid);
+        $from = 'network';
+    }
+    if (!is_array($c) || !is_array($c['rows'] ?? null))
+        return ['rows' => [], 'from' => 'none', 'partial' => true, 'at' => 0];
+    return ['rows' => $c['rows'], 'from' => $from,
+            'partial' => !empty($c['partial']), 'at' => (int)($c['at'] ?? 0)];
 }
 
 function bslFindExisting(string $tk, int $vid, string $title, string $productKey = ''): ?array {
@@ -10838,6 +10905,13 @@ if (isset($_POST['retire_max_count'])) $conn['retire_max_count'] = max(1, (int)$
 // v8.33: تنظیمات نگهبان صف
 if (isset($_POST['stall_watchdog'])) $conn['stall_watchdog'] = !empty($_POST['stall_watchdog']) && $_POST['stall_watchdog'] !== 'false';
 if (isset($_POST['stall_after']))    $conn['stall_after']    = max(60, (int)$_POST['stall_after']);
+/* v10.39 (۵۲): ادامهٔ خودکارِ کارهای رهاشده — کنارِ همین نگهبان می‌نشیند
+   چون هر دو یک آستانه (stall_after) را می‌خوانند و با هم خاموش می‌شوند. */
+if (isset($_POST['auto_resume']))     $conn['auto_resume']     = !empty($_POST['auto_resume']) && $_POST['auto_resume'] !== 'false';
+if (isset($_POST['auto_resume_max'])) $conn['auto_resume_max'] = max(1, min(10, (int)$_POST['auto_resume_max']));
+/* v10.39 (۵۳): فهرستِ آمادهٔ محصولاتِ باسلام — بازهٔ تازه‌سازی و کلیدِ خودکار */
+if (isset($_POST['bsl_catalog_auto']))  $conn['bsl_catalog_auto']  = !empty($_POST['bsl_catalog_auto']) && $_POST['bsl_catalog_auto'] !== 'false';
+if (isset($_POST['bsl_catalog_ttl_h'])) $conn['bsl_catalog_ttl_h'] = max(0.25, min(168, (float)$_POST['bsl_catalog_ttl_h']));
 // v8.97: سقف زمانی فاز جزئیات در هر نوبت — جلوی کشته شدن پردازه توسط هاست
 if (isset($_POST['detail_budget_sec'])) $conn['detail_budget_sec'] = max(0, min(3600, (int)$_POST['detail_budget_sec']));
 // v8.99: مهلت گرفتن صفحه از روی سرور (انتخابگر بصری و انتخابگر جزئیات)
@@ -13176,6 +13250,84 @@ function cronWatchdogs(array $cn): array {
                 . 'همان پروفایل در همین نوبت ادامه داده می‌شود (از همان مرحله‌ای که مانده بود).');
         }
     }
+
+    /* ═══════ v10.39 (۵۳): ساختِ زمان‌بندی‌شدهٔ فهرستِ محصولاتِ باسلام ═══════
+
+       هدف: وقتی کاربر «حذفِ تکراری» یا هر کارِ دیگری را اجرا می‌کند، فهرست
+       از قبل آماده باشد و آن لحظه صرفِ گرفتنِ هزاران محصول از باسلام نشود.
+       اینجا داخلِ کران است، یعنی در پس‌زمینه و بدونِ اینکه کاربر منتظر بماند.
+
+       فقط غرفه‌هایی بازسازی می‌شوند که کششان کهنه شده؛ اگر همه تازه باشند
+       این بلوک عملاً رایگان است و هیچ درخواستی نمی‌زند. */
+    if (!empty($cn['bsl_catalog_auto']) || !isset($cn['bsl_catalog_auto'])) {
+        if (function_exists('bslAllShops') && function_exists('bslCatalogBuild')) {
+            $catBuilt = []; $catAge = bslCatalogTtl($cn);
+            foreach (bslAllShops($cn) as $csh) {
+                $cvid = (int)($csh['vendor_id'] ?? 0);
+                $ctok = (string)($csh['token'] ?? '');
+                if ($cvid <= 0 || $ctok === '') continue;
+                if (bslCatalogFresh($cvid)) continue;
+                $cr = bslCatalogBuild($ctok, $cvid, true);
+                $catBuilt[] = ['vendor_id' => $cvid,
+                               'shop_name' => (string)($csh['shop_name'] ?? ''),
+                               'count' => (int)($cr['count'] ?? 0),
+                               'ok' => !empty($cr['ok']), 'partial' => !empty($cr['partial'])];
+            }
+            if ($catBuilt) $results['bsl_catalog'] = ['ttl' => $catAge, 'built' => $catBuilt];
+        }
+    }
+
+    /* ═══════ v10.39 (۵۲): ادامهٔ خودکارِ بقیهٔ کارهای رهاشده ═══════
+
+       دو نگهبانِ بالا فقط صفِ ارسال و استخراج را پوشش می‌دهند. این بخش
+       همان کاری را می‌کند که تا حالا فقط دکمهٔ «▶ ادامهٔ همه» انجام می‌داد،
+       ولی خودکار — و عمداً محافظه‌کارتر از آن دکمه:
+
+         • فقط کارهای «رهاشده» (stale). کارِ تمام‌شده دوباره اجرا نمی‌شود؛
+           «done» یعنی نتیجه گرفته، نه اینکه ناقص مانده.
+         • صف و استخراج رد می‌شوند چون بالاتر نگهبانِ اختصاصیِ دقیق‌تری
+           دارند (سه شاهد). شلیکِ دوباره از اینجا یعنی اجرای موازیِ همان کار.
+         • سقفِ تلاش در پنجرهٔ یک‌ساعته، تا کارِ واقعاً خراب حلقه نسازد.
+         • تکی: هر نوبتِ کران فقط یک کار. روی هاستِ اشتراکی راه‌انداختنِ
+           همزمانِ چند کارِ سنگین همه را کند می‌کند و اصلِ مشکل را برمی‌گرداند.
+         • ترتیب همان اولویتی است که کاربر در مدیر وظیفه چیده. */
+    $autoCfg = !isset($cn['auto_resume']) || !empty($cn['auto_resume']);
+    if ($stallWake && $autoCfg && function_exists('tasksRowsOrdered')) {
+        $arMax  = max(1, (int)($cn['auto_resume_max'] ?? 2));
+        /* این دو، نگهبانِ اختصاصیِ خودشان را دارند */
+        $arSkip = ['bsl_send' => 1, 'woo_send' => 1, 'extract' => 1];
+        $arNow  = time();
+        $arDone = null; $arBlocked = [];
+        foreach (tasksRowsOrdered($arNow) as $arRow) {
+            $arKey = (string)$arRow['key'];
+            if (isset($arSkip[$arKey]))            continue;
+            if ((string)$arRow['state'] !== 'stale') continue;
+            if (empty($arRow['resumable']))        continue;
+            $arTried = autoResumeCount($arKey, $arNow);
+            if ($arTried >= $arMax) {
+                /* از سقف رد شده: دیگر خودکار دست نمی‌زنیم ولی سکوت هم
+                   نمی‌کنیم — همین ردیف است که نیازِ نگاهِ آدم دارد. */
+                $arBlocked[] = ['key' => $arKey, 'title' => (string)$arRow['title'],
+                                'tries' => $arTried];
+                continue;
+            }
+            autoResumeMark($arKey, $arNow);
+            $arRes = tasksResumeOne($arKey);
+            $arDone = ['key' => $arKey, 'title' => (string)$arRow['title'],
+                       'idle' => (int)$arRow['age'], 'try' => $arTried + 1, 'max' => $arMax,
+                       'ok' => !empty($arRes['ok']), 'error' => (string)($arRes['error'] ?? '')];
+            notifRunFailure($cn, 'ادامهٔ خودکار', (string)$arRow['title'],
+                'این کار ' . (int)$arRow['age'] . ' ثانیه بی‌حرکت مانده بود — '
+                . (!empty($arRes['ok'])
+                    ? 'خودکار ادامه داده شد ✅'
+                    : 'ادامه ناموفق ❌ ' . (string)($arRes['error'] ?? ''))
+                . ' (تلاشِ ' . ($arTried + 1) . ' از ' . $arMax . ' در یک ساعت)');
+            break;   // فقط یک کار در هر نوبت
+        }
+        if ($arDone)     $results['auto_resume'] = $arDone;
+        if ($arBlocked)  $results['auto_resume_blocked'] = $arBlocked;
+    }
+
     return $results;
 }
 
@@ -15673,9 +15825,14 @@ if (isset($_GET['bsl_catalog'])) {
                    'partial' => !empty($c['partial']), 'at' => (int)($c['at'] ?? 0),
                    'at_h' => !empty($c['at']) ? date('Y/m/d H:i', (int)$c['at']) : '—',
                    'fresh' => bslCatalogFresh($v, $c),
-                   'age' => !empty($c['at']) ? time() - (int)$c['at'] : 0];
+                   /* v10.39 (۵۳): تعدادِ ردیفِ کاملِ ذخیره‌شده — کشِ نسخه‌های
+                      قدیمی این کلید را ندارد و ۰ برمی‌گرداند */
+                   'rows_count' => (int)($c['rows_count'] ?? (is_array($c['rows'] ?? null) ? count($c['rows']) : 0)),
+                   'age' => !empty($c['at']) ? time() - (int)$c['at'] : 0,
+                   'age_fa' => !empty($c['at']) ? dedupAgeFa(time() - (int)$c['at']) : '—'];
     }
-    echo json_encode(['ok' => true, 'ttl' => (int)BSL_CATALOG_TTL, 'vendors' => $rows,
+    echo json_encode(['ok' => true, 'ttl' => bslCatalogTtl($cnC), 'vendors' => $rows,
+        'auto' => (!isset($cnC['bsl_catalog_auto']) || !empty($cnC['bsl_catalog_auto'])),
         'rebuilt' => !empty($_GET['rebuild'])], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -16758,6 +16915,52 @@ function tasksResumeOne(string $key): array {
 
     $started = fireAndForget($url, 2500);
     return ['ok' => true, 'resumed' => $key, 'url' => $url, 'dispatched' => $started];
+}
+
+/* ═══════════ v10.39 (۵۲): ادامهٔ خودکارِ کارهای رهاشده ═══════════
+ *
+ * تا ۱۰.۳۸ فقط سه چیز خودکار جان می‌گرفتند: صفِ باسلام، صفِ ووکامرس و
+ * استخراج. پنج کارِ دیگر (همگام‌سازیِ دستی، حذفِ تکراری، اصلاحِ دسته،
+ * ایجنت، کشفِ سلکتور) فقط با دکمهٔ دستی ادامه می‌یافتند — یعنی اگر شبانه
+ * هاست ری‌استارت می‌شد، کار تا وقتی خودتان صفحه را باز نمی‌کردید رها
+ * می‌ماند. خودِ موتورِ «ادامه» (tasksResumeOne) از ۱۰.۲۴ آماده بود و فقط
+ * هیچ‌وقت از سمتِ سرور صدا زده نمی‌شد.
+ *
+ * چرا با سقف و نه بی‌قید: کاری که علتِ خرابی‌اش پابرجاست (دسترسیِ فایل،
+ * توکنِ منقضی) هر تیک دوباره رها می‌شود. بدونِ سقف این می‌شود یک حلقهٔ
+ * بی‌پایانِ شلیک که روی هاستِ اشتراکی بقیهٔ کارها را هم کند می‌کند.
+ */
+
+/** دفترچهٔ تلاش‌های خودکار: کلیدِ کار ⇒ فهرستِ زمان‌ها (فقط داخلِ پنجره) */
+function autoResumeLogRead(): array {
+    if (!is_file(AUTO_RESUME_LOG_FILE)) return [];
+    $d = json_decode((string)@file_get_contents(AUTO_RESUME_LOG_FILE), true);
+    return is_array($d) ? $d : [];
+}
+
+/** شمارشِ تلاش‌های همین کار در پنجرهٔ اخیر. رکوردهای کهنه همین‌جا می‌ریزند
+ *  دور تا فایل بی‌نهایت رشد نکند. */
+function autoResumeCount(string $key, int $now): int {
+    $log = autoResumeLogRead();
+    $hits = is_array($log[$key] ?? null) ? $log[$key] : [];
+    $keep = [];
+    foreach ($hits as $t) if (($now - (int)$t) < AUTO_RESUME_WINDOW) $keep[] = (int)$t;
+    return count($keep);
+}
+
+/** ثبتِ یک تلاشِ خودکار + پاک‌سازیِ رکوردهای خارج از پنجره */
+function autoResumeMark(string $key, int $now): void {
+    $log = autoResumeLogRead();
+    $out = [];
+    foreach ($log as $k => $hits) {
+        if (!is_array($hits)) continue;
+        $keep = [];
+        foreach ($hits as $t) if (($now - (int)$t) < AUTO_RESUME_WINDOW) $keep[] = (int)$t;
+        if ($keep) $out[$k] = $keep;
+    }
+    $out[$key][] = $now;
+    @file_put_contents(AUTO_RESUME_LOG_FILE,
+        json_encode($out, JSON_UNESCAPED_UNICODE), LOCK_EX);
 }
 
 /**
@@ -22432,8 +22635,13 @@ if (isset($_GET['selftest'])) {
        تکه‌تکه ساخته می‌شوند وگرنه متنِ خودِ همین ادعا هم شمرده می‌شود. */
     $rsFn = 'tasksResume' . 'One(';
     $add('10.24', 'منطقِ ادامه یک تابعِ مشترک است، نه دو نسخهٔ کپی‌شده',
+         /* v10.39: شمارشِ دقیق (=== 3) شکننده بود — با افزودنِ «ادامهٔ خودکار»
+            در کران یک فراخوانِ چهارم اضافه شد و ادعا بی‌دلیل شکست. منظورِ اصلی
+            این بود که *یک* تعریف وجود داشته باشد و همه از همان استفاده کنند؛
+            حالا دقیقاً همان سنجیده می‌شود، نه تعدادِ مصرف‌کننده‌ها. */
          function_exists('tasksResumeOne')
-      && substr_count($selfSrc, $rsFn) === 3
+      && substr_count($selfSrc, 'function ' . $rsFn) === 1
+      && substr_count($selfSrc, $rsFn) >= 3
       && strpos($selfSrc, '$res = ' . $rsFn . "(string)(\$_GET['key'] ?? ''));") !== false
       && strpos($selfSrc, '$one = ' . $rsFn . "(string)\$r['key']);") !== false);
 
@@ -23144,6 +23352,97 @@ if (isset($_GET['selftest'])) {
              else @unlink(RETIRE_LOG_FILE);
              return count($items) === 2 && ($items[0]['title'] ?? '') === 'تازه';
          })());
+
+/* ---------- v10.39 (۵۲/۵۳): ادامهٔ خودکار + حذفِ تکراریِ چندغرفه‌ای + فهرستِ آماده ---------- */
+    $add('10.39', 'ورودیِ CHANGELOG برای 10.39 ثبت شده و نسخهٔ برنامه عقب‌تر نیست',
+         strpos($selfSrc, "{v:'10." . "39',") !== false
+      && version_compare(APP_VERSION, '10.39', '>='));
+
+    $add('10.39', 'چهار کلیدِ تازهٔ حذفِ تکراری پیش‌فرضِ روشن دارند', (function () {
+        $d = dedupDefaultCfg();
+        foreach (['active_only', 'skip_multi', 'all_vendors', 'use_cache'] as $k) {
+            if (!array_key_exists($k, $d) || $d[$k] !== true) return false;
+        }
+        return true;
+    })());
+
+    $add('10.39', 'کلیدهای تازه از تنظیمات به bool تبدیل می‌شوند', (function () {
+        $c = dedupCfg(['dedup' => ['active_only' => '0', 'skip_multi' => '1', 'use_cache' => 'false']]);
+        return $c['active_only'] === false && $c['skip_multi'] === true
+            && $c['use_cache'] === false && $c['all_vendors'] === true;
+    })());
+
+    $add('10.39', 'گروه‌بندی دو غرفهٔ متفاوت را با هم یکی نمی‌کند', (function () {
+        $cfg  = dedupCfg([]);
+        $rows = [
+            ['id' => 1, 'name' => 'کفش چرم مردانه', 'vendor_id' => 11],
+            ['id' => 2, 'name' => 'کفش چرم مردانه', 'vendor_id' => 22],
+            ['id' => 3, 'name' => 'کفش چرم مردانه', 'vendor_id' => 11],
+        ];
+        $g = dedupGroup($rows, $cfg);
+        /* باید دو گروه شود: غرفهٔ ۱۱ با دو قلم، غرفهٔ ۲۲ با یک قلم */
+        if (count($g) !== 2) return false;
+        $sizes = array_map('count', array_values($g));
+        sort($sizes);
+        return $sizes === [1, 2];
+    })());
+
+    $add('10.39', 'عنوانِ نمایشیِ گروه بدونِ پسوندِ غرفه برمی‌گردد',
+         dedupGroupNorm('کفش چرم' . "\x00" . '11') === 'کفش چرم'
+      && dedupGroupNorm('کفش چرم') === 'کفش چرم');
+
+    $add('10.39', 'بازهٔ تازه‌سازیِ فهرست از تنظیمات خوانده و مهار می‌شود',
+         bslCatalogTtl([]) === (int)BSL_CATALOG_TTL
+      && bslCatalogTtl(['bsl_catalog_ttl_h' => 2]) === 7200
+      && bslCatalogTtl(['bsl_catalog_ttl_h' => 0.01]) === 900
+      && bslCatalogTtl(['bsl_catalog_ttl_h' => 99999]) === 604800);
+
+    $add('10.39', 'فهرستِ آماده ردیفِ کامل را هم نگه می‌دارد نه فقط عنوان',
+         strpos($selfSrc, "'rows' => \$rowsFull") !== false
+      && strpos($selfSrc, "'rows_count' => count(\$rowsFull)") !== false
+      && function_exists('bslCatalogRows'));
+
+    $add('10.39', 'سنِ خوانا سه بازه را درست می‌گوید',
+         dedupAgeFa(30) === 'کمتر از یک دقیقه'
+      && dedupAgeFa(600) === '10 دقیقه'
+      && strpos(dedupAgeFa(7200), '2') === 0);
+
+    $add('10.39', 'حذفِ تکراری از مسیرِ چندغرفه‌ای عبور می‌کند',
+         function_exists('dedupFetchBslAll')
+      && strpos($selfSrc, 'dedupFetchBslAll($cn, $cfg, $partial)') !== false);
+
+    $add('10.39', 'بایگانی با توکنِ خودِ همان غرفه انجام می‌شود',
+         strpos($selfSrc, 'bslArchiveProduct($dTok, $dVid, $did)') !== false
+      && strpos($selfSrc, "\$dVid = (int)(\$d['vendor_id'] ?? 0);") !== false);
+
+    $add('10.39', 'کران فهرستِ غرفه‌های کهنه‌شده را در پس‌زمینه می‌سازد',
+         strpos($selfSrc, "\$results['bsl_catalog']") !== false
+      && strpos($selfSrc, 'if (bslCatalogFresh($cvid)) continue;') !== false);
+
+    $add('10.39', 'تنظیماتِ فهرستِ آماده ذخیره و مهار می‌شوند',
+         strpos($selfSrc, "\$conn['bsl_catalog_ttl_h'] = max(0.25, min(168,") !== false
+      && strpos($selfSrc, "\$_POST['bsl_catalog_auto']") !== false);
+
+    $add('10.39', 'سه گزینهٔ دامنهٔ جست‌وجو فقط برای باسلام رندر می‌شوند',
+         strpos($selfSrc, "(pfx==='bd'") !== false
+      && strpos($selfSrc, "id=\"'+pfx+'ActOnly") !== false
+      && strpos($selfSrc, "id=\"'+pfx+'SkipMulti") !== false
+      && strpos($selfSrc, "id=\"'+pfx+'UseCache") !== false);
+
+    $add('10.39', 'گزینه‌های رندرنشده در ذخیره ارسال نمی‌شوند تا پاک نشوند',
+         strpos($selfSrc, 'if(v!==undefined)extra[s[1]]=v;') !== false);
+
+    $add('10.39', 'تیکِ ادامهٔ خودکار و سقفِ تلاشش در رابط هست',
+         strpos($selfSrc, 'id="autoResume"') !== false
+      && strpos($selfSrc, 'id="autoResumeMax"') !== false
+      && strpos($selfSrc, "fd.append('auto_resume'") !== false
+      && strpos($selfSrc, "cn.auto_resume!==false") !== false);
+
+    $add('10.39', 'دکمه‌های وضعیت و بازسازیِ فهرست به رابط وصل‌اند',
+         strpos($selfSrc, 'function bslCatStatus()') !== false
+      && strpos($selfSrc, 'function bslCatRebuild()') !== false
+      && strpos($selfSrc, "onclick=\"bslCatStatus()\"") !== false
+      && strpos($selfSrc, "onclick=\"bslCatRebuild()\"") !== false);
 
     /* ---------- ۴۷د: گزارشِ کاملِ همگام‌سازی ---------- */
     $add('10.35', 'توابعِ گزارشِ همگام‌سازی و ثابت‌هایش موجودند',
@@ -36588,6 +36887,11 @@ function dedupDefaultCfg(): array {
         'norm_digits'   => true,       // ارقامِ فارسی/عربی ⇒ لاتین
         'norm_arabic'   => true,       // ي/ك عربی ⇒ ی/ک فارسی و حذف اعراب
         'min_len'       => 3,          // عنوانِ کوتاه‌تر از این نادیده گرفته شود
+        /* v10.39 (۵۳) — هر دو فقط برای باسلام معنا دارند */
+        'active_only'   => true,       // فقط محصولاتِ فعال (۲۹۷۶) مقایسه شوند
+        'skip_multi'    => true,       // عنوانی که در چند غرفه هست، اصلاً دست نخورد
+        'all_vendors'   => true,       // همهٔ غرفه‌ها اسکن شوند، نه فقط پیش‌فرض
+        'use_cache'     => true,       // از فهرستِ آمادهٔ باسلام استفاده کن
     ];
 }
 
@@ -36787,7 +37091,15 @@ function dedupPickKeeper(array $items, array $cfg): array {
     return ['keep' => $keeper, 'drop' => $drop];
 }
 
-/** گروه‌بندیِ محصولات بر اساس عنوانِ نرمال‌شده */
+/**
+ * گروه‌بندیِ محصولات بر اساس عنوانِ نرمال‌شده.
+ *
+ * v10.39 (۵۳): اگر ردیف‌ها از چند غرفه آمده باشند (vendor_id دارند)، شناسهٔ
+ * غرفه هم واردِ کلید می‌شود. یعنی دو محصولِ هم‌نام در دو غرفهٔ متفاوت هرگز
+ * یک گروه نمی‌شوند و «تکراری» شمرده نمی‌شوند — دقیقاً همان چیزی که کاربر
+ * خواست: حذف فقط *داخلِ* هر غرفه. جداکنندهٔ \x00 است تا با هیچ عنوانِ
+ * واقعی‌ای اشتباه نشود.
+ */
 function dedupGroup(array $rows, array $cfg): array {
     $pats = dedupPatterns($cfg);
     $g = [];
@@ -36795,9 +37107,16 @@ function dedupGroup(array $rows, array $cfg): array {
         $name = (string)($r['name'] ?? ($r['title'] ?? ''));
         $n = dedupNormalize($name, $cfg, $pats);
         if ($n === '' || mb_strlen($n, 'UTF-8') < (int)$cfg['min_len']) continue;
-        $g[$n][] = $r;
+        $vid = (int)($r['vendor_id'] ?? 0);
+        $g[$vid > 0 ? $n . "\x00" . $vid : $n][] = $r;
     }
     return $g;
+}
+
+/** عنوانِ نمایشیِ گروه — پسوندِ غرفه از کلید برداشته می‌شود */
+function dedupGroupNorm(string $key): string {
+    $p = strpos($key, "\x00");
+    return $p === false ? $key : substr($key, 0, $p);
 }
 
 /* --------------------- پیشرفتِ کارِ پس‌زمینه --------------------- */
@@ -36929,6 +37248,112 @@ function dedupFetchBsl(string $tk, int $vid, int $maxPages = DEDUP_MAX_PAGES, ?a
     return $rows;
 }
 
+/* =====================================================================
+ *  v10.39 (۵۳): برداشتِ چندغرفه‌ایِ باسلام برای حذفِ تکراری
+ *
+ *  سه تغییرِ خواستهٔ کاربر، همه اینجا جمع‌اند:
+ *
+ *  ۱) «فقط در محصولات فعال جستجو کند» — تا ۱۰.۳۸ پنج وضعیت پرس‌وجو
+ *     می‌شد (فعال، غیرفعال، تأییدنشده، در انتظار، بایگانی) و بعد همه با هم
+ *     مقایسه می‌شدند. یعنی یک محصولِ فعال می‌توانست به بهانهٔ هم‌نامیِ یک
+ *     نسخهٔ بایگانی حذف شود. حالا فیلترِ 2976 پیش از گروه‌بندی اعمال
+ *     می‌شود.
+ *
+ *  ۲) «اگر محصول در دو یا چند غرفه باشد نادیده گرفته شود» — عنوانی که در
+ *     بیش از یک غرفه دیده شود کلاً از گروه‌بندی کنار می‌رود. این عمداً
+ *     محافظه‌کارانه است: چنین عنوانی معمولاً همان محصول است که به چند غرفه
+ *     ارسال شده، نه یک تکراریِ اشتباهی. تکراریِ *داخلِ* یک غرفه همچنان
+ *     حذف می‌شود (انتخابِ صریحِ کاربر).
+ *
+ *  ۳) «فهرستِ آماده» — به‌جای برداشتِ زنده از سرورِ باسلام، از کشِ
+ *     کاتالوگ خوانده می‌شود که هر چند ساعت یک‌بار ساخته می‌شود.
+ * ===================================================================== */
+function dedupFetchBslAll(array $cn, array $cfg, ?array &$partial = null): array {
+    $shops = bslAllShops($cn);
+    if (empty($cfg['all_vendors'])) {
+        /* فقط غرفهٔ پیش‌فرض — رفتارِ نسخه‌های قبل */
+        $shops = array_values(array_filter($shops, function ($s) { return !empty($s['is_default']); }));
+        if (!$shops) $shops = array_slice(bslAllShops($cn), 0, 1);
+    }
+    if (!$shops) return [];
+
+    $useCache = !empty($cfg['use_cache']);
+    $rows = []; $byTitleVendors = []; $anyPartial = false; $reason = '';
+    /* الگوها یک‌بار ساخته می‌شوند؛ dedupNormalize بدونِ این آرگومان هر بار
+       برای *هر ردیف* دوباره regexها را می‌سازد و روی چند هزار محصول
+       به‌شدت کند می‌شود. */
+    $pats = dedupPatterns($cfg);
+
+    foreach ($shops as $sh) {
+        if (dedupStopRequested()) {
+            $anyPartial = true; $reason = 'stopped'; break;
+        }
+        $vid = (int)($sh['vendor_id'] ?? 0);
+        $tk  = (string)($sh['token'] ?? '');
+        if ($vid <= 0 || $tk === '') continue;
+        $nm = (string)($sh['shop_name'] ?? ('غرفهٔ ' . $vid));
+
+        if ($useCache) {
+            $got  = bslCatalogRows($tk, $vid, true);
+            $vr   = $got['rows'];
+            if (!empty($got['partial'])) { $anyPartial = true; if ($reason === '') $reason = 'cache_partial'; }
+            $age  = $got['at'] > 0 ? max(0, time() - (int)$got['at']) : 0;
+            dedupProgress(['log_add' => ['🗂 ' . $nm . ': ' . count($vr) . ' محصول از '
+                . ($got['from'] === 'network' ? 'فهرستِ تازه‌ساخته' : 'فهرستِ آماده')
+                . ($got['from'] === 'cache' ? ' (' . dedupAgeFa($age) . ' پیش)' : '')]]);
+        } else {
+            $vp = [];
+            $vr = dedupFetchBsl($tk, $vid, DEDUP_MAX_PAGES, $vp);
+            if (!empty($vp['partial'])) {
+                $anyPartial = true;
+                if ($reason === '') $reason = (string)($vp['reason'] ?? 'http');
+            }
+        }
+
+        foreach ($vr as $r) {
+            if (!is_array($r)) continue;
+            /* فیلترِ «فقط فعال» — پیش از هر مقایسه‌ای */
+            if (!empty($cfg['active_only']) && (int)($r['status'] ?? 0) !== 2976) continue;
+            $r['vendor_id']   = $vid;
+            $r['vendor_name'] = $nm;
+            $rows[] = $r;
+            $n = dedupNormalize((string)($r['name'] ?? ''), $cfg, $pats);
+            if ($n !== '') $byTitleVendors[$n][$vid] = true;
+        }
+    }
+
+    /* گامِ «نادیده‌گرفتنِ محصولاتِ چندغرفه‌ای» */
+    $skipped = 0; $skipTitles = 0;
+    if (!empty($cfg['skip_multi'])) {
+        $keep = [];
+        foreach ($rows as $r) {
+            $n = dedupNormalize((string)($r['name'] ?? ''), $cfg, $pats);
+            if ($n !== '' && count($byTitleVendors[$n] ?? []) > 1) { $skipped++; continue; }
+            $keep[] = $r;
+        }
+        foreach ($byTitleVendors as $vs) if (count($vs) > 1) $skipTitles++;
+        $rows = $keep;
+    }
+
+    dedupProgress(['multi_skipped' => $skipped, 'multi_titles' => $skipTitles,
+        'vendors' => count($shops), 'fetched' => count($rows),
+        'log_add' => ['✅ مجموعاً ' . count($rows) . ' محصول'
+            . (!empty($cfg['active_only']) ? ' (فقط فعال)' : '')
+            . ' از ' . count($shops) . ' غرفه'
+            . ($skipped > 0 ? ' — ' . $skipTitles . ' عنوان که در چند غرفه بود ('
+                . $skipped . ' محصول) نادیده گرفته شد' : '')]]);
+
+    if ($anyPartial && $partial !== null) $partial = ['partial' => true, 'reason' => $reason ?: 'http'];
+    return $rows;
+}
+
+/** سنِ خوانا برای گزارشِ فهرستِ آماده */
+function dedupAgeFa(int $sec): string {
+    if ($sec < 60)   return 'کمتر از یک دقیقه';
+    if ($sec < 3600) return (int)round($sec / 60) . ' دقیقه';
+    return round($sec / 3600, 1) . ' ساعت';
+}
+
 /** همهٔ محصولاتِ ووکامرس برای حذفِ تکراری (v10.23 (۳۶ب): با پرچمِ ناقص‌بودن) */
 function dedupFetchWoo(array $w, int $maxPages = DEDUP_MAX_PAGES, ?array &$partial = null): array {
     $rows = [];
@@ -36999,7 +37424,8 @@ function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
     if ($target === 'bsl') {
         $bs = $cn['basalam'] ?? [];
         if (empty($bs['token']) || empty($bs['vendor_id'])) return ['ok' => false, 'error' => 'تنظیمات باسلام ناقص است'];
-        $rows = dedupFetchBsl((string)$bs['token'], (int)$bs['vendor_id'], DEDUP_MAX_PAGES, $partial);
+        /* v10.39 (۵۳): چندغرفه‌ای + فقط فعال + از فهرستِ آماده */
+        $rows = dedupFetchBslAll($cn, $cfg, $partial);
     } else {
         $w = $cn['woocommerce'] ?? [];
         if (empty($w['store_url'])) return ['ok' => false, 'error' => 'تنظیمات ووکامرس ناقص است'];
@@ -37036,7 +37462,9 @@ function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
         if (count($items) < 2) continue;
         $pick = dedupPickKeeper($items, $cfg);
         $dupCount += count($pick['drop']);
-        $dupGroups[] = ['norm' => $norm, 'count' => count($items),
+        $dupGroups[] = ['norm' => dedupGroupNorm((string)$norm), 'count' => count($items),
+                        'vendor_id'   => (int)($items[0]['vendor_id'] ?? 0),
+                        'vendor_name' => (string)($items[0]['vendor_name'] ?? ''),
                         'keep' => $pick['keep'], 'drop' => $pick['drop']];
     }
     usort($dupGroups, function ($a, $b) { return $b['count'] <=> $a['count']; });
@@ -37065,7 +37493,18 @@ function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
                     if ($dt > 1 && dedupStopRequested()) break;
                     if ($target === 'bsl') {
                         $bs = $cn['basalam'] ?? [];
-                        $r = bslArchiveProduct((string)$bs['token'], (int)$bs['vendor_id'], $did);
+                        /* v10.39 (۵۳): با اسکنِ چندغرفه‌ای، محصول لزوماً مالِ
+                           غرفهٔ پیش‌فرض نیست. توکن/شناسهٔ خودِ همان غرفه باید
+                           استفاده شود وگرنه باسلام ۴۰۳ می‌دهد. */
+                        $dVid = (int)($d['vendor_id'] ?? 0);
+                        $dTok = ''; 
+                        if ($dVid > 0) {
+                            foreach (bslAllShops($cn) as $sh) {
+                                if ((int)($sh['vendor_id'] ?? 0) === $dVid) { $dTok = (string)$sh['token']; break; }
+                            }
+                        }
+                        if ($dVid <= 0 || $dTok === '') { $dVid = (int)$bs['vendor_id']; $dTok = (string)$bs['token']; }
+                        $r = bslArchiveProduct($dTok, $dVid, $did);
                         $ok = !empty($r['ok']) || in_array((int)($r['code'] ?? 0), [200, 204], true);
                         $em = $r['body']['message'] ?? ($r['body']['error'] ?? ('HTTP ' . ($r['code'] ?? '?')));
                     } else {
@@ -37114,7 +37553,10 @@ function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
                     'status' => (int)($p['status'] ?? 0), 'wstatus' => (string)($p['wstatus'] ?? ''),
                     'ts' => dedupTs($p), 'date_created' => (string)($p['date_created'] ?? '')];
         };
+        /* v10.39 (۵۳): نامِ غرفه هم می‌رود تا در گزارشِ چندغرفه‌ای معلوم باشد
+           هر گروه مالِ کدام غرفه است */
         $out[] = ['normalized' => $g['norm'], 'count' => $g['count'],
+                  'vendor_name' => (string)($g['vendor_name'] ?? ''),
                   'keep' => $mk($g['keep']), 'drop' => array_map($mk, $g['drop'])];
     }
 
@@ -41535,6 +41977,38 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 <div class="crow"><label>فعال:</label><input type="checkbox" id="stallWatchdog" onchange="updateStallBadge()" checked style="width:16px;height:16px"></div>
 <div class="crow"><label>آستانه (ثانیه):</label><input type="number" id="stallAfter" value="300" min="60" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">بی‌حرکتی بیش از این = گیر کرده</span></div>
+
+<!-- v10.39 (۵۲): ادامهٔ خودکارِ بقیهٔ کارها — همین‌جا نشسته چون همان
+     آستانهٔ بالا را می‌خواند و با خاموش‌شدنِ نگهبان، خودش هم می‌خوابد -->
+<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="autoResume" checked style="width:15px;height:15px"><span>▶️ ادامهٔ خودکارِ کارهای رهاشده</span></label>
+<div style="font-size:10px;color:#64748b;padding-right:21px;line-height:1.7;margin:4px 0 6px">
+تا حالا فقط <b>صفِ ارسال</b> و <b>استخراج</b> خودکار ادامه می‌یافتند؛ بقیه
+(همگام‌سازیِ دستی، حذفِ تکراری، اصلاحِ دسته، ایجنت، کشفِ سلکتور) منتظرِ
+دکمهٔ «▶ ادامهٔ همه» می‌ماندند. با این گزینه، هر کاری که بیش از آستانهٔ بالا
+بی‌حرکت مانده باشد در نوبتِ بعدیِ کران خودش ادامه داده می‌شود.
+<b style="color:#94a3b8">هر نوبت فقط یک کار</b>، تا هاست زیر بار نرود.
+</div>
+<div class="crow"><label>حداکثر تلاش در ساعت:</label><input type="number" id="autoResumeMax" value="2" min="1" max="10" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">برای هر کار · جلوی حلقهٔ بی‌پایان را می‌گیرد</span></div>
+</div>
+
+<!-- v10.39 (۵۳): فهرستِ آمادهٔ محصولاتِ باسلام -->
+<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="bslCatAuto" checked style="width:15px;height:15px"><span>🗂 فهرستِ آمادهٔ محصولاتِ باسلام</span></label>
+<div style="font-size:10px;color:#64748b;padding-right:21px;line-height:1.7;margin:4px 0 6px">
+فهرستِ محصولاتِ هر غرفه هر چند ساعت یک‌بار در پس‌زمینه گرفته و ذخیره می‌شود.
+بعد، کارهایی مثل <b>حذفِ تکراری</b> و <b>جست‌وجوی محصولِ موجود</b> به‌جای گرفتنِ
+دوبارهٔ هزاران محصول از باسلام، از همین فهرست می‌خوانند — بسیار سریع‌تر و
+بدونِ فشار روی سرورِ باسلام.
+</div>
+<div class="crow"><label>تازه‌سازی هر:</label><input type="number" id="bslCatTtl" value="6" min="0.25" max="168" step="0.25" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">ساعت · کمتر = تازه‌تر، بیشتر = صرفه‌جوترد</span></div>
+<div class="cact" style="margin-top:6px">
+<button class="btn btn-gray" onclick="bslCatStatus()" style="flex:1;font-size:10px;padding:4px 8px">📋 وضعیت</button>
+<button class="btn btn-gray" onclick="bslCatRebuild()" style="flex:1;font-size:10px;padding:4px 8px">🔄 بازسازی حالا</button>
+</div>
+<div id="bslCatBox" style="margin-top:6px;font-size:10.5px;color:#64748b"></div>
+</div>
+
 <div class="crow"><label>سقف فاز جزئیات (ثانیه):</label><input type="number" id="detailBudget" value="0" min="0" max="3600" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = خودکار · هر نوبت تا این مدت جزئیات می‌گیرد و بقیه را به نوبت بعد می‌سپارد</span></div>
 <div class="crow"><label>مهلت بارگذاری صفحه (ثانیه):</label><input type="number" id="proxyTimeout" value="45" min="10" max="180" style="max-width:90px" dir="ltr"><span style="font-size:10px;color:#64748b">برای «🔄 بارگذاری صفحه» در تب سلکتور · اگر تایم‌اوت می‌دهد بالاتر ببرید</span></div>
 
@@ -47490,6 +47964,41 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.39', t:'🧹 حذفِ تکراریِ هوشمند در همهٔ غرفه‌ها + فهرستِ آمادهٔ محصولات', items:[
+    '<b>۱) حذفِ تکراریِ باسلام سه تغییرِ مهم کرد.</b>',
+    '✅ <b>فقط محصولاتِ فعال.</b> تا نسخهٔ قبل، هر پنج وضعیت (فعال، غیرفعال،',
+    '   تأییدنشده، در انتظار، بایگانی) با هم مقایسه می‌شدند و یک محصولِ',
+    '   <b>فعال</b> می‌توانست به بهانهٔ هم‌نامی با یک نسخهٔ <b>بایگانی</b> حذف شود.',
+    '   حالا تیکِ «فقط بین محصولات فعال بگرد» هست و <b>پیش‌فرض روشن</b> است؛',
+    '   اگر خواستید می‌توانید خاموشش کنید تا رفتارِ قبلی برگردد.',
+    '✅ <b>همهٔ غرفه‌ها، نه فقط غرفهٔ پیش‌فرض.</b> تا حالا فقط غرفهٔ اصلی اسکن',
+    '   می‌شد و تکراری‌های بقیهٔ غرفه‌ها اصلاً دیده نمی‌شدند.',
+    '✅ <b>محصولِ چندغرفه‌ای دست‌نخورده می‌ماند.</b> عنوانی که در دو غرفه یا',
+    '   بیشتر هست، «تکراری» شمرده نمی‌شود — چون معمولاً همان محصول است که',
+    '   عمداً به چند غرفه ارسال شده. فقط تکراریِ <b>داخلِ خودِ یک غرفه</b> حذف',
+    '   می‌شود. تعدادش هم در گزارش نوشته می‌شود.',
+    '✅ حذف حالا با توکنِ <b>خودِ همان غرفه</b> انجام می‌شود؛ پیش از این با',
+    '   اسکنِ چندغرفه‌ای، باسلام برای غرفه‌های دیگر خطای ۴۰۳ می‌داد.',
+    '',
+    '<b>۲) فهرستِ آمادهٔ محصولاتِ باسلام.</b>',
+    '✅ فهرستِ محصولاتِ هر غرفه هر چند ساعت یک‌بار در پس‌زمینه گرفته و ذخیره',
+    '   می‌شود؛ کارهای بعدی به‌جای گرفتنِ دوبارهٔ هزاران محصول، از همین فهرست',
+    '   می‌خوانند. نتیجه: حذفِ تکراری در چند ثانیه به‌جای چند دقیقه، و فشارِ',
+    '   بسیار کمتر روی سرورِ باسلام.',
+    '✅ <b>بازهٔ تازه‌سازی قابل تنظیم است</b> (پیش‌فرض ۶ ساعت، از ۱۵ دقیقه تا',
+    '   یک هفته) — در «⚙️ تنظیمات ← 🩺 نگهبان صف ارسال».',
+    '✅ دکمه‌های «📋 وضعیت» و «🔄 بازسازی حالا» هم کنارش هست تا ببینید فهرستِ',
+    '   هر غرفه چقدر تازه است و در صورت نیاز دستی به‌روزش کنید.',
+    '✅ فهرست حالا قیمت، موجودی و وضعیتِ هر محصول را هم نگه می‌دارد، نه فقط',
+    '   عنوان و شناسه را.',
+    '',
+    '<b>۳) ادامهٔ خودکارِ کارهای رهاشده (تکمیلِ درخواستِ قبلی).</b>',
+    '✅ تا حالا فقط <b>صفِ ارسال</b> و <b>استخراج</b> خودکار ادامه می‌یافتند؛',
+    '   همگام‌سازیِ دستی، حذفِ تکراری، اصلاحِ دسته، ایجنت و کشفِ سلکتور اگر',
+    '   وسطِ راه رها می‌شدند منتظرِ دکمهٔ دستی می‌ماندند.',
+    '✅ حالا یک تیکِ «▶️ ادامهٔ خودکارِ کارهای رهاشده» کنارِ همان نگهبانِ صف',
+    '   اضافه شده که هر کارِ بی‌حرکت‌مانده را در نوبتِ بعدیِ کران ادامه می‌دهد.',
+    '   هر نوبت فقط یک کار، با سقفِ تلاشِ قابل تنظیم تا حلقهٔ بی‌پایان نشود.'],},
   {v:'10.38', t:'🗃 بایگانی/بازنشستگیِ باسلام دوباره کار می‌کند — سه باگِ زنجیره‌ای', items:[
     '🧨 <b>عذرخواهی — بایگانی «هیچ‌جا» کار نمی‌کرد و حق با شما بود.</b>',
     '   دکمهٔ «پیش‌نمایش» همیشه <b>«پروفایل نامعتبر»</b> می‌داد و «گزارشِ',
@@ -51863,6 +52372,49 @@ function rlClear(){
   }).catch(()=>{});
 }
 
+/* ═══ v10.39 (۵۳): فهرستِ آمادهٔ محصولاتِ باسلام ═══ */
+
+/** جدولِ وضعیتِ فهرستِ هر غرفه را می‌سازد */
+function bslCatRender(d){
+  const box=$('bslCatBox'); if(!box)return;
+  if(!d||!d.ok){box.innerHTML='<div style="color:#f87171">✗ '+esc((d&&d.error)||'خطا')+'</div>';return;}
+  const rows=d.vendors||[];
+  if(!rows.length){box.innerHTML='<div style="color:#64748b">هنوز هیچ غرفه‌ای تنظیم نشده.</div>';return;}
+  let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px;line-height:1.9">';
+  rows.forEach(v=>{
+    const ok=!!v.fresh;
+    h+='<div style="display:flex;gap:6px;align-items:center;border-bottom:1px solid #1e293b;padding:2px 0">'
+      +'<span style="flex:1;color:#e2e8f0">'+esc(v.shop_name||('غرفه '+v.vendor_id))+'</span>'
+      +'<span style="color:'+(ok?'#4ade80':'#fbbf24')+'">'+(ok?'✓ تازه':'⏳ کهنه')+'</span>'
+      +'<span style="color:#94a3b8">'+toFa(v.count||0)+' عنوان</span>'
+      +(v.rows_count?'<span style="color:#64748b">· '+toFa(v.rows_count)+' ردیف</span>':'')
+      +(v.partial?'<span style="color:#f87171">· ناقص</span>':'')
+      +'<span style="color:#64748b">'+esc(v.age_fa||'—')+'</span>'
+      +'</div>';
+  });
+  h+='<div style="margin-top:4px;color:#64748b">تازه‌سازی هر '+toFa(Math.round(((d.ttl||21600)/3600)*100)/100)+' ساعت · پس از آن، نوبتِ بعدیِ کران خودش بازسازی می‌کند.</div></div>';
+  box.innerHTML=h;
+}
+
+/** وضعیتِ فعلی را می‌خواند (بدون هیچ درخواستی به باسلام) */
+function bslCatStatus(){
+  const box=$('bslCatBox');
+  if(box)box.innerHTML='<div style="color:#93c5fd">⏳ در حال خواندن…</div>';
+  fetch('?bsl_catalog=1').then(r=>r.json()).then(bslCatRender)
+    .catch(()=>{if(box)box.innerHTML='<div style="color:#f87171">✗ خطای شبکه</div>';});
+}
+
+/** بازسازیِ فوری — ممکن است چند ده ثانیه طول بکشد */
+function bslCatRebuild(){
+  if(!confirm('فهرستِ همهٔ غرفه‌ها دوباره از باسلام گرفته شود؟ بسته به تعدادِ محصولات ممکن است کمی طول بکشد.'))return;
+  const box=$('bslCatBox');
+  if(box)box.innerHTML='<div style="color:#93c5fd">⏳ در حال گرفتن از باسلام… صبر کنید.</div>';
+  fetch('?bsl_catalog=1&rebuild=1').then(r=>r.json()).then(d=>{
+    bslCatRender(d);
+    showToast(d&&d.ok?'✓ فهرست به‌روز شد':'خطا',!(d&&d.ok));
+  }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171">✗ خطای شبکه</div>';});
+}
+
 /** v8.34: بررسی دستی وضعیت گیر کردن صف */
 function watchdogCheck(){
   const box=$('watchdogR');
@@ -52856,7 +53408,7 @@ if(typeof aiResumeTestModalOnLoad==='function')setTimeout(aiResumeTestModalOnLoa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifSyncReport'))$('notifSyncReport').checked=ne.sync_report!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifSyncReport'))$('notifSyncReport').checked=ne.sync_report!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('autoResume'))$('autoResume').checked=cn.auto_resume!==false;if($('autoResumeMax'))$('autoResumeMax').value=(cn.auto_resume_max||2);if($('bslCatAuto'))$('bslCatAuto').checked=cn.bsl_catalog_auto!==false;if($('bslCatTtl'))$('bslCatTtl').value=(cn.bsl_catalog_ttl_h!==undefined?cn.bsl_catalog_ttl_h:6);if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
 arApplyCfg(cn.autoreply||{});arLoad();}
 /* v8.87: پیش‌نمایش زندهٔ تعدیل قیمت مقصد.
@@ -52891,7 +53443,7 @@ fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('auto_resume',$('autoResume')?.checked?1:0);fd.append('auto_resume_max',$('autoResumeMax')?.value||2);fd.append('bsl_catalog_auto',$('bslCatAuto')?.checked?1:0);fd.append('bsl_catalog_ttl_h',$('bslCatTtl')?.value||6);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
@@ -58072,6 +58624,15 @@ function ddCfgHtml(pfx){
     +'<label style="flex:1;min-width:170px">↔️ اگر مساوی شدند<select id="'+pfx+'Tie" class="inp" style="width:100%;margin-top:3px">'+opts+'</select></label>'
     +'</div>'
     +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="'+pfx+'PrefAct"> <span>اول نسخهٔ <b style="color:#4ade80">فعال/منتشرشده</b> را نگه دار (بعد معیار بالا)</span></label>'
+    /* v10.39 (۵۳): سه گزینهٔ مخصوصِ باسلام — دامنهٔ جست‌وجو. برای ووکامرس
+       معنا ندارند (نه چند غرفه دارد نه کشِ کاتالوگ) پس رندر نمی‌شوند. */
+    +(pfx==='bd'
+      ?'<div style="border-top:1px solid #1e293b;padding-top:8px;margin-bottom:6px;color:#94a3b8">🎯 <b>دامنهٔ جست‌وجو</b></div>'
+      +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px"><input type="checkbox" id="'+pfx+'ActOnly"> <span>فقط بین <b style="color:#4ade80">محصولات فعال</b> بگرد <span style="color:#64748b">(غیرفعال، تأییدنشده، در انتظار و بایگانی اصلاً دیده نشوند)</span></span></label>'
+      +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px"><input type="checkbox" id="'+pfx+'SkipMulti"> <span>محصولی که در <b style="color:#fbbf24">چند غرفه</b> هست نادیده گرفته شود <span style="color:#64748b">(دست‌نخورده می‌ماند؛ تکراریِ داخلِ هر غرفه حذف می‌شود)</span></span></label>'
+      +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px"><input type="checkbox" id="'+pfx+'AllVend"> <span>همهٔ غرفه‌ها اسکن شوند <span style="color:#64748b">(خاموش = فقط غرفهٔ پیش‌فرض)</span></span></label>'
+      +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="'+pfx+'UseCache"> <span>از <b style="color:#38bdf8">فهرستِ آماده</b> استفاده کن <span style="color:#64748b">(بسیار سریع‌تر؛ خاموش = برداشتِ زنده از باسلام)</span></span></label>'
+      :'')
     +'<div style="border-top:1px solid #1e293b;padding-top:8px;margin-bottom:6px;color:#94a3b8">🧩 <b>پسوندهایی که هنگام مقایسه نادیده گرفته شوند</b> — «۱۲» یعنی هر عددِ چندرقمی</div>'
     +'<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px">'
     +'<label style="cursor:pointer"><input type="checkbox" id="'+pfx+'SCode"> <code>(کد:۱۲)</code></label>'
@@ -58108,18 +58669,29 @@ function ddFillCfg(c){
     g('SParen').checked=!!c.strip_paren; g('SDash').checked=!!c.strip_dash;
     g('SCustom').value=c.strip_custom||'';
     g('Ci').checked=!!c.ci; g('ND').checked=!!c.norm_digits; g('NA').checked=!!c.norm_arabic;
+    // v10.39 (۵۳): فقط در نسخهٔ باسلام رندر شده‌اند
+    if(g('ActOnly'))g('ActOnly').checked=!!c.active_only;
+    if(g('SkipMulti'))g('SkipMulti').checked=!!c.skip_multi;
+    if(g('AllVend'))g('AllVend').checked=!!c.all_vendors;
+    if(g('UseCache'))g('UseCache').checked=!!c.use_cache;
 }
 
 function ddReadCfg(){
     const p=ddPfx(); const g=id=>document.getElementById(p+id);
     if(!g('Keep'))return ddCfg||{};
-    return {keep:g('Keep').value,tie:g('Tie').value,
+    const b=id=>g(id)?(g(id).checked?'1':'0'):undefined;
+    const extra={};
+    // v10.39 (۵۳): اگر رندر نشده‌اند اصلاً فرستاده نمی‌شوند تا مقدارِ
+    // ذخیره‌شده با یک ذخیرهٔ ووکامرس پاک نشود
+    ['ActOnly:active_only','SkipMulti:skip_multi','AllVend:all_vendors','UseCache:use_cache']
+      .forEach(function(pair){const s=pair.split(':');const v=b(s[0]);if(v!==undefined)extra[s[1]]=v;});
+    return Object.assign({keep:g('Keep').value,tie:g('Tie').value,
         prefer_active:g('PrefAct').checked?'1':'0',
         strip_code:g('SCode').checked?'1':'0',strip_hash:g('SHash').checked?'1':'0',
         strip_paren:g('SParen').checked?'1':'0',strip_dash:g('SDash').checked?'1':'0',
         strip_custom:g('SCustom').value,
         ci:g('Ci').checked?'1':'0',norm_digits:g('ND').checked?'1':'0',
-        norm_arabic:g('NA').checked?'1':'0'};
+        norm_arabic:g('NA').checked?'1':'0'},extra);
 }
 
 function ddLoadCfg(target,hostId){
@@ -58791,7 +59363,7 @@ function ddRenderReport(d){
     h+='<div style="max-height:340px;overflow-y:auto;border:1px solid #334155;border-radius:8px">';
     list.forEach((g,gi)=>{
         h+='<div style="border-bottom:1px solid #1e293b;padding:6px 8px">';
-        h+='<div style="color:#e2e8f0;font-size:11px;font-weight:700;margin-bottom:3px">'+esc(g.normalized)+' <span style="color:#f97316">×'+toFa(g.count)+'</span></div>';
+        h+='<div style="color:#e2e8f0;font-size:11px;font-weight:700;margin-bottom:3px">'+esc(g.normalized)+' <span style="color:#f97316">×'+toFa(g.count)+'</span>'+(g.vendor_name?' <span style="color:#38bdf8;font-weight:400">🏪 '+esc(g.vendor_name)+'</span>':'')+'</div>';
         h+='<div style="font-size:10px;color:#4ade80;padding:2px 6px">✅ می‌ماند: #'+toFa(g.keep.id)+' — '+esc(g.keep.name)+' · '+toFa(g.keep.price)+' · '+ddStatusBadge(g.keep)+'</div>';
         g.drop.forEach(p=>{
             h+='<div style="font-size:10px;color:#fca5a5;padding:2px 6px;display:flex;justify-content:space-between;align-items:center">'
