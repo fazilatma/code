@@ -89,3 +89,6 @@ storage_errors.log
 node_modules/
 render-dist/
 .wrangler/
+
+# v10.57: chat list cache (runtime, 2s TTL)
+bsl_chats_cache.json

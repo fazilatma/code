@@ -272,8 +272,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.56';
-const APP_VERSION_DATE = '1405/06/04';
+const APP_VERSION = '10.57';
+const APP_VERSION_DATE = '1405/06/05';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -19090,66 +19090,150 @@ if (isset($_GET['ar_log'])) {
 if (isset($_GET['bsl_chats'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @set_time_limit(60);
-    $cnMR = loadConnections(); $bsMR = $cnMR['basalam'] ?? [];
-    if (empty($bsMR['token'])) { echo json_encode(['ok' => false, 'error' => 'توکنِ باسلام تنظیم نشده'], JSON_UNESCAPED_UNICODE); exit; }
+    $cnMR = loadConnections();
+    $shopsMR = bslChatShops($cnMR);
+    if (!$shopsMR) { echo json_encode(['ok' => false, 'error' => 'غرفهٔ باسلامی با توکن تنظیم نشده است'], JSON_UNESCAPED_UNICODE); exit; }
     $limMR = max(5, min(50, (int)($_GET['limit'] ?? 30)));
-    $rMR = bslReqRead($bsMR['token'], 'chats?limit=' . $limMR . '&order_by=updated_at');
-    if (empty($rMR['ok'])) {
-        echo json_encode(['ok' => false, 'error' => bslApiError($rMR, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')], JSON_UNESCAPED_UNICODE);
-        exit;
+    $onlyMR = (int)($_GET['shop'] ?? 0);   // 0 = همهٔ غرفه‌ها
+    /* v10.57 (۷۱): کشِ ۲ ثانیه‌ای — رابط کاربری هر ثانیه پُل می‌زند؛ با کش
+       هر غرفه در هر ۲ ثانیه یک‌بار به API می‌رسد، نه هر ثانیه. */
+    $cFileMR = __DIR__ . '/bsl_chats_cache.json';
+    $cachedMR = [];
+    if (is_file($cFileMR) && time() - (int)@filemtime($cFileMR) <= 2) {
+        $cD = json_decode((string)@file_get_contents($cFileMR), true);
+        if (is_array($cD) && is_array($cD['rows'] ?? null)) $cachedMR = $cD['rows'];
     }
-    $rowsMR = $rMR['body']['data']['chats'] ?? ($rMR['body']['data'] ?? []);
-    if (!is_array($rowsMR)) $rowsMR = [];
-    $myIdMR = bslMyUserId($bsMR['token']);
-    $outMR = [];
-    foreach ($rowsMR as $cMR) {
-        if (!is_array($cMR)) continue;
-        $ncMR = bslNormalizeChat($cMR);
-        $lmMR = is_array($cMR['last_message'] ?? null) ? $cMR['last_message'] : [];
-        if ($ncMR['chat_id'] <= 0) continue;
-        $outMR[] = [
-            'chat_id'      => $ncMR['chat_id'],
-            'who'          => $ncMR['who'],
-            'text'         => $ncMR['text'],
-            'unseen'       => $ncMR['unseen'],
-            'updated_at'   => $ncMR['updated_at'],
-            'last_is_mine' => ($myIdMR > 0 && (int)($lmMR['sender']['id'] ?? 0) === $myIdMR),
-        ];
+    $rowsMR = []; $shopErrMR = []; $shopOutMR = [];
+    foreach ($shopsMR as $shMR) {
+        if ($onlyMR > 0 && (int)$shMR['shop'] !== $onlyMR) continue;
+        $kMR = (string)$shMR['shop'];
+        if (isset($cachedMR[$kMR])) {
+            $rowsMR = array_merge($rowsMR, $cachedMR[$kMR]);
+            $shopOutMR[] = ['shop' => (int)$shMR['shop'], 'name' => $shMR['name'], 'ok' => true, 'n' => count($cachedMR[$kMR])];
+            continue;
+        }
+        $outShMR = [];
+        $rMR = bslReqRead($shMR['token'], 'chats?limit=' . $limMR . '&order_by=updated_at');
+        if (empty($rMR['ok'])) {
+            $shopErrMR[] = ['shop' => (int)$shMR['shop'], 'name' => $shMR['name'],
+                            'error' => bslApiError($rMR, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')];
+            $shopOutMR[] = ['shop' => (int)$shMR['shop'], 'name' => $shMR['name'], 'ok' => false, 'n' => 0];
+            continue;
+        }
+        $myIdMR = bslMyUserId($shMR['token']);
+        $rawMR = $rMR['body']['data']['chats'] ?? ($rMR['body']['data'] ?? []);
+        if (!is_array($rawMR)) $rawMR = [];
+        foreach ($rawMR as $cMR) {
+            if (!is_array($cMR)) continue;
+            $ncMR = bslNormalizeChat($cMR);
+            $lmMR = is_array($cMR['last_message'] ?? null) ? $cMR['last_message'] : [];
+            if ($ncMR['chat_id'] <= 0) continue;
+            $outShMR[] = [
+                'chat_id'      => $ncMR['chat_id'],
+                'who'          => $ncMR['who'],
+                'text'         => $ncMR['text'],
+                'unseen'       => $ncMR['unseen'],
+                'updated_at'   => $ncMR['updated_at'],
+                'last_is_mine' => ($myIdMR > 0 && (int)($lmMR['sender']['id'] ?? 0) === $myIdMR),
+                'shop'         => (int)$shMR['shop'],
+                'shop_name'    => $shMR['name'],
+                'vendor_id'    => (int)$shMR['vendor_id'],
+            ];
+        }
+        $rowsMR = array_merge($rowsMR, $outShMR);
+        $cachedMR[$kMR] = $outShMR;
+        $shopOutMR[] = ['shop' => (int)$shMR['shop'], 'name' => $shMR['name'], 'ok' => true, 'n' => count($outShMR)];
     }
-    echo json_encode(['ok' => true, 'chats' => $outMR], JSON_UNESCAPED_UNICODE);
+    @file_put_contents($cFileMR, json_encode(['rows' => $cachedMR], JSON_UNESCAPED_UNICODE), LOCK_EX);
+    usort($rowsMR, function ($a, $b) { return strcmp((string)($b['updated_at'] ?? ''), (string)($a['updated_at'] ?? '')); });
+    echo json_encode(['ok' => true, 'chats' => $rowsMR, 'shops' => $shopOutMR, 'shop_errors' => $shopErrMR], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
 if (isset($_GET['bsl_chat_messages'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @set_time_limit(60);
-    $cnMR = loadConnections(); $bsMR = $cnMR['basalam'] ?? [];
-    if (empty($bsMR['token'])) { echo json_encode(['ok' => false, 'error' => 'توکنِ باسلام تنظیم نشده'], JSON_UNESCAPED_UNICODE); exit; }
+    $cnMR = loadConnections();
+    $shopsMR = bslChatShops($cnMR);
+    if (!$shopsMR) { echo json_encode(['ok' => false, 'error' => 'غرفهٔ باسلامی با توکن تنظیم نشده است'], JSON_UNESCAPED_UNICODE); exit; }
     $chatIdMR = (int)($_GET['chat_id'] ?? 0);
     $limMR = max(1, min(50, (int)($_GET['limit'] ?? 30)));
+    $shopNMR = (int)($_GET['shop'] ?? 0);
     if ($chatIdMR <= 0) { echo json_encode(['ok' => false, 'error' => 'شناسهٔ گفتگو نامعتبر'], JSON_UNESCAPED_UNICODE); exit; }
-    echo json_encode(['ok' => true, 'messages' => bslChatThread($bsMR['token'], $chatIdMR, $limMR)], JSON_UNESCAPED_UNICODE);
+    /* v10.57 (۷۱): اگر شمارهٔ غرفه آمده فقط همان؛ وگرنه گفتگو ممکن است از
+       هر غرفه‌ای باشد — به ترتیب امتحان می‌کنیم تا یکی جواب بدهد. */
+    $tryMR = ($shopNMR > 0)
+        ? array_values(array_filter($shopsMR, function ($x) use ($shopNMR) { return (int)$x['shop'] === $shopNMR; }))
+        : $shopsMR;
+    $msgsMR = []; $shMR = null;
+    foreach ($tryMR as $candMR) {
+        $msgsMR = bslChatThread($candMR['token'], $chatIdMR, $limMR);
+        if ($msgsMR) { $shMR = $candMR; break; }
+    }
+    echo json_encode(['ok' => true, 'messages' => $msgsMR,
+                      'shop' => $shMR ? (int)$shMR['shop'] : 0,
+                      'shop_name' => $shMR ? $shMR['name'] : ''], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
 if (isset($_GET['bsl_chat_reply'])) {
     header('Content-Type: application/json; charset=UTF-8');
-    @set_time_limit(60);
-    $cnMR = loadConnections(); $bsMR = $cnMR['basalam'] ?? [];
-    if (empty($bsMR['token'])) { echo json_encode(['ok' => false, 'error' => 'توکنِ باسلام تنظیم نشده'], JSON_UNESCAPED_UNICODE); exit; }
+    @set_time_limit(90);
+    @ini_set('post_max_size', '16M');
+    @ini_set('upload_max_filesize', '16M');
+    $cnMR = loadConnections();
+    $shopsMR = bslChatShops($cnMR);
+    if (!$shopsMR) { echo json_encode(['ok' => false, 'error' => 'غرفهٔ باسلامی با توکن تنظیم نشده است'], JSON_UNESCAPED_UNICODE); exit; }
     $chatIdMR = (int)($_POST['chat_id'] ?? $_GET['chat_id'] ?? 0);
     $textMR = trim((string)($_POST['text'] ?? $_GET['text'] ?? ''));
-    if ($chatIdMR <= 0 || $textMR === '') { echo json_encode(['ok' => false, 'error' => 'شناسهٔ گفتگو و متن پیام لازم است'], JSON_UNESCAPED_UNICODE); exit; }
-    $rMR = bslSendChatMessage($bsMR['token'], $chatIdMR, $textMR);
-    /* پاسخِ دستی هم در همان لاگِ پاسخ‌ها ثبت می‌شود (با نوعِ متفاوت) —
-       تا معلوم باشد چه وقت و چه کسی (ربات یا شما) به مشتری جواب داده. */
-    arLogAdd(['type' => 'manual', 'chat_id' => $chatIdMR, 'who' => '', 'text' => mb_substr($textMR, 0, 90),
-              'ok' => !empty($rMR['ok']), 'source' => 'manual']);
-    if (empty($rMR['ok'])) {
-        echo json_encode(['ok' => false, 'error' => $rMR['error'] ?? 'ارسال ناموفق'], JSON_UNESCAPED_UNICODE);
-        exit;
+    $shopNMR = (int)($_POST['shop'] ?? $_GET['shop'] ?? 0);
+    $shMR = $shopNMR > 0 ? bslShopByNum($shopsMR, $shopNMR) : null;
+    if ($shMR === null) $shMR = $shopsMR[0];   // عقب‌نشینی: اولینِ (پیش‌فرض)
+    if ($chatIdMR <= 0) { echo json_encode(['ok' => false, 'error' => 'شناسهٔ گفتگو لازم است'], JSON_UNESCAPED_UNICODE); exit; }
+    /* v10.57 (۷۱): تصویر (dataURL یا base64) — اول به سرویسِ آپلودِ باسلام
+       می‌رود (chat.photo)، بعد به‌صورتِ attachment به گفتگو پیوست می‌شود. */
+    $fileMR = null;
+    $imgB64MR = trim((string)($_POST['image_b64'] ?? ''));
+    $imgNameMR = trim((string)($_POST['image_name'] ?? ''));
+    if ($imgNameMR === '') $imgNameMR = 'تصویر';
+    $imgMimeMR = trim((string)($_POST['image_mime'] ?? ''));
+    if ($imgB64MR !== '') {
+        if (preg_match('/^data:(image\/[^;]+);base64,(.+)$/is', $imgB64MR, $mImgMR)) {
+            $imgMimeMR = $mImgMR[1]; $imgB64MR = $mImgMR[2];
+        }
+        $b64LenMR = strlen($imgB64MR);
+        if ($b64LenMR < 100 || $b64LenMR > 9500000) {
+            echo json_encode(['ok' => false, 'error' => 'تصویر نامعتبر است (بیش‌ازحد بزرگ — حداکثر حدود ۷ مگابایت)'], JSON_UNESCAPED_UNICODE); exit;
+        }
+        $binMR = base64_decode($imgB64MR, true);
+        if ($binMR === false) { echo json_encode(['ok' => false, 'error' => 'فایلِ تصویر خراب است'], JSON_UNESCAPED_UNICODE); exit; }
+        $tmpMR = tempnam(sys_get_temp_dir(), 'mrimg_');
+        if ($tmpMR === false || file_put_contents($tmpMR, $binMR) === false) {
+            echo json_encode(['ok' => false, 'error' => 'ذخیرهٔ موقتِ تصویر ناموفق بود'], JSON_UNESCAPED_UNICODE); exit;
+        }
+        $isImgMR = (strpos($imgMimeMR, 'image/') === 0);
+        $upMR = bslChatUploadFile($shMR['token'], $tmpMR, $imgMimeMR, $imgNameMR, $isImgMR ? 'chat.photo' : 'chat.file');
+        @unlink($tmpMR);
+        if (empty($upMR['ok'])) {
+            echo json_encode(['ok' => false, 'error' => 'آپلود تصویر: ' . ($upMR['error'] ?? 'ناموفق')], JSON_UNESCAPED_UNICODE); exit;
+        }
+        $fileMR = ['id' => $upMR['id'], 'url' => $upMR['url'], 'width' => $upMR['width'],
+                   'height' => $upMR['height'], 'size' => $upMR['size'],
+                   'name' => $imgNameMR, 'type' => $isImgMR ? 'picture' : 'file'];
     }
-    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    if ($textMR === '' && $fileMR === null) {
+        echo json_encode(['ok' => false, 'error' => 'متنِ پیام یا یک تصویر لازم است'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $rMR = bslChatSendEx($shMR['token'], $chatIdMR, $textMR, $fileMR);
+    /* پاسخِ دستی (متن یا تصویر) هم در همان لاگِ پاسخ‌ها ثبت می‌شود. */
+    arLogAdd(['type' => 'manual', 'chat_id' => $chatIdMR, 'who' => '',
+              'text' => mb_substr($textMR !== '' ? $textMR : '🖼 تصویر', 0, 90),
+              'ok' => !empty($rMR['ok']), 'source' => 'manual',
+              'shop' => (int)$shMR['shop'], 'has_image' => $fileMR !== null]);
+    if (empty($rMR['ok'])) {
+        echo json_encode(['ok' => false, 'error' => $rMR['error'] ?? 'ارسال ناموفق'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    echo json_encode(['ok' => true, 'shop' => (int)$shMR['shop']], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -23479,6 +23563,25 @@ if (isset($_GET['selftest'])) {
     $add('10.44', 'نتایجِ جست‌وجو شناسهٔ تکراری ندارند',
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
+
+    /* ==== ۷۱ (v10.57) ==== */
+    $add('10.57', 'نسخهٔ ۱۰.۵۷',
+         str_contains($selfSrc, "const APP_VERSION = '10.57';"));
+    $add('10.57', 'اتاقِ چت: فهرستِ غرفه‌ها + آپلود + ارسالِ چندرسانه‌ای (PHP)',
+         (strpos($selfSrc, "function bslChatShops(array \$cn): array {") !== false
+          && strpos($selfSrc, "function bslChatUploadFile(string \$tk, string \$tmpPath") !== false
+          && strpos($selfSrc, "function bslChatSendEx(string \$tk, int \$chatId, string \$text, ?array \$file = null): array {") !== false
+          && strpos($selfSrc, "'attachment' => ['files' => [['id' => (int)\$file['id'], 'url' => (string)\$file['url']]]]") !== false
+          && strpos($selfSrc, 'chat.photo') !== false
+          && strpos($selfSrc, "'image_b64'") !== false
+          && strpos($selfSrc, 'bsl_chats_cache.json') !== false));
+    $add('10.57', 'اتاقِ چت: رابطِ زندهٔ ۱ ثانیه‌ای + موبایلِ کشویی + چیپِ غرفه (JS)',
+         (strpos($selfSrc, 'let MR_SHOP_FILTER=0;') !== false
+          && strpos($selfSrc, 'setInterval(mrPoll,1000);') !== false
+          && strpos($selfSrc, '.mr-collapsed{display:none!important}') !== false
+          && strpos($selfSrc, 'function mrPickImage(inp){') !== false
+          && strpos($selfSrc, 'async function mrLoadChats(){') !== false
+          && strpos($selfSrc, 'async function mrSend(){') !== false));
 
     /* ==== ۷۰ (v10.56) ==== */
     $add('10.56', 'نسخهٔ ۱۰.۵۶',
@@ -28690,6 +28793,83 @@ function bslSendChatMessage(string $tk, int $chatId, string $text): array {
             'body' => $r['body'] ?? null];
 }
 
+/* =====================================================================
+ *  v10.57 (۷۱): محیطِ چتِ چندغرفه‌ای + آپلود تصویر + ارسالِ چندرسانه‌ای
+ *
+ *  • bslChatShops      — فهرستِ غرفه‌هایِ فعال (نرخ‌شمارهٔ ۱‌مبنا ثابت است:
+ *                        همانِ ترتیبِ bslAllShops — پیش‌فرض اول، بقیه بعد)
+ *  • bslChatUploadFile — آپلود تصویر به سرویسِ آپلود باسلام (chat.photo)
+ *  • bslChatSendEx     — ارسالِ پیامِ متن و/یا تصویر (attachment)
+ * ===================================================================== */
+
+/** فهرستِ غرفه‌هایِ باسلامِ دارایِ توکن، با شمارهٔ پایدارِ ۱‌مبنا */
+function bslChatShops(array $cn): array {
+    $out = [];
+    foreach (bslAllShops($cn) as $sh) {
+        $tok = trim((string)($sh['token'] ?? ''));
+        $vid = (int)($sh['vendor_id'] ?? 0);
+        if ($tok === '' || $vid <= 0) continue;
+        $out[] = ['shop' => count($out) + 1, 'vendor_id' => $vid, 'token' => $tok,
+                  'name' => (string)($sh['shop_name'] ?? ('غرفهٔ ' . $vid)),
+                  'is_default' => !empty($sh['is_default'])];
+    }
+    return array_slice($out, 0, 8);   // سقفِ محافظ: پُلِ هر ثانیه روی ۸ غرفه نمی‌چرخد
+}
+
+function bslShopByNum(array $shops, int $num): ?array {
+    foreach ($shops as $sh) if ((int)$sh['shop'] === $num) return $sh;
+    return null;
+}
+
+/**
+ * v10.57 (۷۱): آپلودِ یک فایل (معمولاً تصویر) به سرویسِ آپلود باسلام.
+ * طبق openapi: POST /v1/files — multipart با fieldِ «file» و «file_type»
+ * (برای چت: chat.photo / chat.file). خروجی id + url است که در
+ * attachmentِ پیام استفاده می‌شود.
+ */
+function bslChatUploadFile(string $tk, string $tmpPath, string $mime, string $name, string $fileType = 'chat.photo'): array {
+    if (!class_exists('CURLFile')) return ['ok' => false, 'error' => 'کلاسِ CURLFile در دسترس نیست'];
+    if (!is_file($tmpPath)) return ['ok' => false, 'error' => 'فایلِ موقت پیدا نشد'];
+    $cf = new CURLFile($tmpPath, $mime !== '' ? $mime : 'application/octet-stream', $name !== '' ? $name : 'upload.jpg');
+    $r = bslReq($tk, 'POST', 'files', ['file' => $cf, 'file_type' => $fileType], true, null, true, 1);
+    $b = is_array($r['body'] ?? null) ? $r['body'] : [];
+    $id = (int)($b['id'] ?? 0);
+    $url = (string)($b['urls']['primary'] ?? ($b['url'] ?? ''));
+    if (!empty($r['ok']) && $id > 0 && $url !== '') {
+        return ['ok' => true, 'id' => $id, 'url' => $url,
+                'width' => (int)($b['width'] ?? 0), 'height' => (int)($b['height'] ?? 0),
+                'size' => (int)($b['size'] ?? 0)];
+    }
+    return ['ok' => false, 'id' => $id, 'url' => $url, 'code' => (int)($r['code'] ?? 0),
+            'error' => bslApiError($r, 'آپلود فایل ناموفق', 'files (upload)', 'upload')];
+}
+
+/**
+ * v10.57 (۷۱): ارسالِ پیام به یک گفتگو — متن و/یا تصویر.
+ * $file = ['id'=>int,'url'=>str,'width'=>int,'height'=>int,'size'=>int,'name'=>str,'type'=>'picture'|'file']
+ * (id و url از bslChatUploadFile می‌آیند؛ attachment طبق openapi).
+ */
+function bslChatSendEx(string $tk, int $chatId, string $text, ?array $file = null): array {
+    if ($chatId <= 0) return ['ok' => false, 'error' => 'ورودی نامعتبر'];
+    if ($file) {
+        $body = ['message_type' => (($file['type'] ?? '') === 'file') ? 'file' : 'picture',
+                 'attachment' => ['files' => [['id' => (int)$file['id'], 'url' => (string)$file['url']]]]];
+        if (!empty($file['width']))  $body['attachment']['files'][0]['width'] = (int)$file['width'];
+        if (!empty($file['height'])) $body['attachment']['files'][0]['height'] = (int)$file['height'];
+        if (!empty($file['size']))   $body['attachment']['files'][0]['size'] = (int)$file['size'];
+        if (trim((string)($file['name'] ?? '')) !== '') $body['attachment']['files'][0]['name'] = (string)$file['name'];
+        if (trim($text) !== '') $body['content'] = ['text' => mb_substr($text, 0, 3000)];
+    } else {
+        $body = ['content' => ['text' => mb_substr($text, 0, 3000)], 'message_type' => 'text'];
+    }
+    $r = bslReq($tk, 'POST', 'chats/' . $chatId . '/messages', $body, false, null, true);
+    if (empty($r['ok'])) {
+        return ['ok' => false, 'code' => (int)($r['code'] ?? 0),
+                'error' => bslApiError($r, 'ارسال پیام ناموفق', 'chats/{id}/messages', 'customer.chat.write')];
+    }
+    return ['ok' => true];
+}
+
 /**
  * v10.55 (69): تاریخچهٔ یک گفتگو — هر دو طرف (مشتری + خودِ ما)،
  * قدیم به جدید. بر خلاف bslFetchChatMessages که برای اعلان فقط طرفِ
@@ -28711,11 +28891,21 @@ function bslChatThread(string $tk, int $chatId, int $limit = 30): array {
         $mt  = (string)($m['message_type'] ?? '');
         $txt = $m['content']['text'] ?? null;
         if (!is_string($txt) || trim($txt) === '') $txt = ($mt !== '' && $mt !== 'text') ? '[' . $mt . ']' : '';
+        /* v10.57 (۷۱): اگر پیام تصویر/فایل است، آدرسش را از شکل‌هایِ ممکنِ
+           پاسخ بردار تا در پنجرهٔ چت نمایش داده شود. */
+        $imgMR = '';
+        foreach ([$m['attachment']['files'][0]['url'] ?? null,
+                  $m['content']['url'] ?? null,
+                  $m['content']['files'][0]['url'] ?? null,
+                  $m['url'] ?? null] as $uImgMR) {
+            if (is_string($uImgMR) && strncmp($uImgMR, 'http', 4) === 0) { $imgMR = $uImgMR; break; }
+        }
         $out[] = ['mine'   => ($myId > 0 && $sid === $myId),
                   'sender' => trim((string)($m['sender']['name'] ?? '')),
                   'text'   => trim((string)$txt),
                   'at'     => (string)($m['created_at'] ?? ''),
-                  'type'   => $mt];
+                  'type'   => $mt,
+                  'img'    => $imgMR];
     }
     return array_reverse($out);
 }
@@ -43115,6 +43305,17 @@ html[data-skin="gloss"] .progress-bar{
          background:#0b1220;border:1px dashed #334155;border-radius:12px;line-height:2}
 .rv-hint b{color:#7dd3fc}
 /* RVIEW-END ======================================================== */
+
+/* v10.57 (۷۱): اتاقِ چتِ باسلام — چیپ‌های غرفه و لیستِ کشوییِ موبایل */
+.mrchip{display:inline-block;font-size:9.5px;border:1px solid #334155;border-radius:10px;
+        padding:2.5px 8px;color:#94a3b8;cursor:pointer;background:#111c31;line-height:1.5}
+.mrchip.on{background:#173254;color:#e2e8f0;border-color:#3b82f6}
+.mr-collapsed{display:none!important}
+#mrMsgs img{border-radius:6px}
+@media (max-width:720px){
+  #mrListWrap,#mrThread{flex:1 1 100%!important;min-width:0!important}
+  #mrMsgs{height:320px}
+}
 </style>
 </head>
 <body>
@@ -44606,31 +44807,52 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="arR" style="margin-top:8px"></div>
 </div></div>
 
-<!-- ===== v10.55 (69): پاسخ دستی به مشتریان ===== -->
+<!-- ===== v10.57 (۷۱): اتاقِ چتِ باسلام — چندغرفه‌ای، زنده، با تصویر ===== -->
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>💬 پاسخ دستی به مشتریان</h3><span class="arrow">▼</span></div>
-<div class="smenu-body">
+<div class="smenu-body" id="mrBody">
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
-گفتگوهای باسلام را همین‌جا ببینید و بدونِ رفتن به پلتفرمِ باسلام پاسخ بدهید.
-پاسخ‌ها در همان لاگِ پاسخ‌ها (با نوع «دستی») ثبت می‌شوند.
+گفتگوهایِ مشتریانِ <b>همهٔ غرفه‌ها</b> همین‌جا و زنده — بدونِ رفتن به پلتفرمِ باسلام.
+عددِ تویِ پرانتز = شمارهٔ غرفه (با رنگِ متفاوت). پاسخ‌ها در همان لاگِ پاسخ‌ها (نوعِ «دستی») ثبت می‌شوند.
 </div>
-<div class="cact" style="margin-bottom:8px">
-<button class="btn btn-cyan" onclick="mrLoadChats()" style="flex:1">🔄 بررسی گفتگوها</button>
-<span id="mrInfo" style="font-size:10.5px;color:#64748b;align-self:center"></span>
-</div>
+<div id="mrShopChips" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:7px"></div>
 <div style="display:flex;gap:10px;flex-wrap:wrap">
-<div id="mrList" style="flex:1;min-width:210px;max-height:340px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:5px;background:#0b1220">
-<div class="empty" style="padding:16px 6px">اول «بررسی گفتگوها» را بزنید</div>
+<div id="mrListWrap" style="flex:1;min-width:215px">
+<div id="mrListHdr" onclick="mrToggleList()" style="display:none;align-items:center;justify-content:space-between;gap:6px;padding:7px 9px;cursor:pointer;background:#16233d;border:1px solid #334155;border-radius:8px">
+<b style="font-size:11px">👥 لیستِ مشتری‌ها</b><span id="mrListBadge" style="font-size:9.5px;color:#64748b"></span><span id="mrListArrow" style="font-size:10px;color:#64748b">▼</span>
 </div>
-<div id="mrThread" style="flex:1.5;min-width:250px">
-<div id="mrMsgs" style="height:252px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:8px;background:#0b1220;font-size:11.5px;line-height:1.8">
+<div id="mrList" style="max-height:345px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:5px;background:#0b1220">
+<div class="empty" style="padding:16px 6px">در حالِ بارگذاریِ گفتگوها…</div>
+</div>
+</div>
+<div id="mrThread" style="flex:1.5;min-width:255px">
+<div id="mrThrHdr" style="display:none;align-items:center;justify-content:space-between;gap:6px;padding:6px 9px;background:#16233d;border:1px solid #334155;border-radius:8px">
+<button id="mrBackBtn" onclick="mrCloseChat()" style="display:none;background:none;border:1px solid #334155;color:#94a3b8;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px">← بازگشت</button>
+<b id="mrWho" style="font-size:11.5px;color:#e2e8f0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></b>
+<span id="mrShopTag" style="font-size:9.5px;flex:0 0 auto"></span>
+</div>
+<div id="mrMsgs" style="height:285px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:8px;background:#0b1220;font-size:12px">
 <div class="empty" style="padding:20px 6px">یک گفتگو را انتخاب کنید</div>
 </div>
-<div style="display:flex;gap:6px;margin-top:8px">
-<textarea id="mrText" rows="2" placeholder="متنِ پاسخ برای مشتری…" style="flex:1;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px;font-size:11.5px;font-family:inherit;resize:vertical"></textarea>
-<button class="btn btn-green" onclick="mrSend()">📤 ارسال</button>
+<div id="mrQuick" style="display:flex;gap:5px;flex-wrap:wrap;margin-top:7px">
+<button class="btn btn-gray" style="font-size:10px;padding:3px 8px" onclick="mrQuick('سلام، وقت بخیر. چطور می‌تونم کمکتون کنم؟')">👋 سلام</button>
+<button class="btn btn-gray" style="font-size:10px;padding:3px 8px" onclick="mrQuick('بله، در موجودی هست.')">✅ موجودی</button>
+<button class="btn btn-gray" style="font-size:10px;padding:3px 8px" onclick="mrQuick('لطفاً کد پستی و نامِ گیرنده را بفرمایید.')">📮 آدرس</button>
+<button class="btn btn-gray" style="font-size:10px;padding:3px 8px" onclick="mrQuick('ممنون از پیگیریتون، در اولینِ فرصت پاسخ می‌دم.')">🙏 پیگیری</button>
+</div>
+<div id="mrImgPrev" style="display:none;margin-top:7px;align-items:center;gap:7px;background:#111c31;border:1px solid #334155;border-radius:8px;padding:6px 8px"></div>
+<div style="display:flex;gap:6px;margin-top:7px">
+<input type="file" id="mrFile" accept="image/*" style="display:none" onchange="mrPickImage(this)">
+<button class="btn btn-gray" onclick="mrFileClick()" style="flex:0 0 auto" title="ارسالِ تصویر">🖼</button>
+<textarea id="mrText" rows="2" placeholder="متنِ پاسخ برای مشتری… (Enter = ارسال)" style="flex:1;min-width:110px;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:7px 9px;font-size:12px;resize:none" onkeydown="mrKeydown(event)"></textarea>
+<button id="mrSendBtn" class="btn btn-green" onclick="mrSend()" style="flex:0 0 auto">📤 ارسال</button>
 </div>
 <div id="mrMsg" class="msg" style="margin-top:6px"></div>
+</div>
+</div>
+<div style="display:flex;align-items:center;gap:7px;margin-top:5px">
+<button class="btn btn-cyan" onclick="mrLoadChats()" style="flex:0 0 auto;font-size:10px;padding:3px 9px" title="اکنون به‌روز کن">🔄 به‌روزرسانی</button>
+<span id="mrInfo" style="font-size:9.5px;color:#64748b;flex:1"></span>
 </div>
 </div>
 </div></div>
@@ -50330,6 +50552,25 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.57', t:'📱 اتاقِ چتِ باسلام — چندغرفه‌ای، زنده، موبایل‌محور، با تصویر', items:[
+    '🔄 <b>همهٔ غرفه‌ها در یک لیست:</b> گفتگوهای مشتریانِ همهٔ غرفه‌های باسلام',
+    '   کنار هم. جلوی هر مشتری، شمارهٔ غرفه با رنگِ متفاوت تویِ پرانتز',
+    '   (مثلاً <span style="color:#60a5fa">(۱)</span> یا <span style="color:#34d399">(۲)</span>) و با کلیکِ روی',
+    '   چیپِ بالایِ لیست می‌توانید فقط گفتگوهایِ یک غرفه را ببینید.',
+    ' <b>همیشه تازه:</b> لیست هر ۱ ثانیه خودکار به‌روز می‌شود و پیام‌هایِ جدیدِ',
+    '   گفتگویِ باز هم همان لحظه ظاهر می‌شوند (بدونِ رفرش). فقط وقتی پنجرهٔ',
+    '   چت باز است پُل می‌زند؛ برای کاهشِ بارِ API، هر غرفه هر ۲ ثانیه یک‌بار',
+    '   به سرورِ باسلام می‌رسد (کشِ سمتِ سرور).',
+    '📱 <b>موبایل‌محور:</b> در موبایل، لیستِ مشتری‌ها کشویی می‌شود — یک مشتری را',
+    '   انتخاب می‌کنید، در پنجرهٔ اصلی با او چت می‌کنید و با «بازگشت» برمی‌گردید',
+    '   به لیست. زمانِ نسبیِ هر گفتگو (چند دقیقه پیش) هم دیده می‌شود.',
+    '🖼 <b>ارسالِ تصویر:</b> با دکمهٔ 🖼 یک تصویر انتخاب کنید (تا حدود ۷ مگابایت)،',
+    '   پیش‌نمایشش را ببینید و با یا بدونِ توضیح بفرستید. تصویر از طریقِ سرویسِ',
+    '   آپلودِ رسمیِ باسلام (chat.photo) و به‌صورتِ پیامِ تصویری می‌رود؛',
+    '   تصاویرِ مشتری در پنجرهٔ چت هم نمایش داده می‌شوند.',
+    '💬 <b>دستیارِ پاسخ:</b> چهار دکمهٔ پاسخِ سریع (سلام/موجودی/آدرس/پیگیری) برای',
+    '   تایپِ کمتر روی موبایل، و Enter برایِ ارسال. اگر توکنِ یک غرفه خطا بدهد،',
+    '   بقیهٔ غرفه‌ها خراب نمی‌شوند — فقط همان چیپ علامت ⚠️ می‌گیرد.']},
   {v:'10.56', t:'⏩ ادامه ارسال از جایی که مانده بود — نه از اول', items:[
     '🛠 <b>نقصِ گزارش‌شده:</b> وقتی نگهبان (یا «پمپِ ارسالِ» کران) می‌فهمید',
     '   وِرکرِ ارسال وسطِ کار مُرده و گیر کرده است، کار را دوباره راه می‌انداخت اما',
@@ -54150,50 +54391,191 @@ function arLoad(force){
   }).catch(()=>{});
 }
 
-/* v10.55 (69): پاسخ دستی به مشتریان — گفتگوها، تاریخچه و ارسالِ پاسخ */
-let MR_CHAT=null;
+/* v10.57 (۷۱): اتاقِ چتِ باسلام — چندغرفه‌ای، زنده (هر ۱ ثانیه)، موبایل‌محور،
+   با تصویر. لیستِ مشتری‌ها در موبایل کشویی است؛ عددِ پرانتزی = شمارهٔ غرفه. */
+let MR_CHAT=null;           // {id, shop, shop_name, who, _count, _lastId}
+let MR_SHOP_FILTER=0;       // 0 = همهٔ غرفه‌ها
+let MR_IMG=null;            // {dataURL, name, mime}
+let MR_SHOPS=[];            // [{shop,name,ok,n}]
+let MR_LAST_CHATS=[];
+const MR_COLORS=['#60a5fa','#34d399','#fbbf24','#f472b6','#a78bfa','#fb923c','#4ade80','#e879f9'];
+function mrShopColor(n){return MR_COLORS[(n-1)%MR_COLORS.length];}
+function mrIsMobile(){return window.innerWidth<720;}
 function mrMsg(t,c){const m=$('mrMsg'); if(m){m.innerHTML=t; m.className='msg on '+(c||'');}}
-async function mrLoadChats(){
-  const box=$('mrList'); if(box)box.innerHTML='<div class="empty" style="padding:14px 6px">در حالِ بارگذاری…</div>';
-  const d=await fetch('?bsl_chats=1&limit=30').then(r=>r.json()).catch(()=>({ok:false,error:'خطای شبکه'}));
-  if(!d.ok) return (box && (box.innerHTML='<div class="empty" style="padding:14px 6px">✗ '+esc(d.error||'خطا')+'</div>'));
-  const info=$('mrInfo'); if(info)info.textContent=' '+toFa(d.chats.length)+' گفتگو';
-  if(!d.chats.length) return (box && (box.innerHTML='<div class="empty" style="padding:14px 6px">گفتگویی پیدا نشد</div>'));
-  box.innerHTML=d.chats.map(c=>
-    '<div onclick="mrOpenChat('+c.chat_id+')" style="padding:7px 9px;border-bottom:1px solid #1e293b;cursor:pointer;border-radius:6px" '+
-    'onmouseover="this.style.background=\'#16233d\'" onmouseout="this.style.background=\'\'">'+
-    '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px">'+
-    '<b style="font-size:11.5px;color:#e2e8f0">'+esc(c.who)+'</b>'+
-    (c.unseen>0?'<span style="background:#dc2626;color:#fff;border-radius:9px;font-size:9.5px;padding:0 6px;flex:0 0 auto">'+toFa(c.unseen)+'</span>':'')+
-    '</div>'+
-    '<div style="font-size:10.5px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">'+
-    (c.last_is_mine?'<span style="color:#60a5fa">شما:</span> ':'')+esc(c.text||'—')+
-    '</div></div>').join('');
+function mrBodyOpen(){const b=$('mrBody'); return !!(b&&b.classList.contains('open')&&b.offsetParent!==null);}
+function mrRelTime(v){
+  if(!v)return'';
+  let t=Date.parse(String(v));
+  if(isNaN(t))t=Date.parse(String(v).replace(' ','T'));
+  if(isNaN(t))return'';
+  const df=(Date.now()-t)/1000;
+  if(df<60)return'همین حالا';
+  if(df<3600)return toFa(Math.floor(df/60))+' دقیقه پیش';
+  if(df<86400)return toFa(Math.floor(df/3600))+' ساعت پیش';
+  return toFa(Math.floor(df/86400))+' روز پیش';
 }
-async function mrOpenChat(id){
-  MR_CHAT={id:id};
-  const box=$('mrMsgs'); if(box)box.innerHTML='<div class="empty" style="padding:14px 6px">در حالِ بارگذاری…</div>';
-  const d=await fetch('?bsl_chat_messages=1&chat_id='+id+'&limit=30').then(r=>r.json()).catch(()=>({ok:false,error:'خطای شبکه'}));
-  if(!d.ok) return (box && (box.innerHTML='<div class="empty" style="padding:14px 6px">✗ '+esc(d.error||'خطا')+'</div>'));
-  if(!d.messages||!d.messages.length) return (box && (box.innerHTML='<div class="empty" style="padding:14px 6px">پیامی در این گفتگو نیست</div>'));
-  box.innerHTML=d.messages.map(m=>
-    '<div style="margin-bottom:9px">'+
-    '<div style="font-size:9.5px;color:#64748b;margin-bottom:2px">'+esc(m.sender||(m.mine?'شما':'مشتری'))+(m.at?' · '+esc(m.at):'')+'</div>'+
-    '<div style="background:'+(m.mine?'#173254':'#1e293b')+';border-radius:7px;padding:6px 9px;color:#e2e8f0;word-break:break-word">'+esc(m.text||'')+'</div></div>').join('');
-  box.scrollTop=box.scrollHeight;
+async function mrFetchChats(){
+  const d=await fetch('?bsl_chats=1&limit=30&shop='+MR_SHOP_FILTER).then(r=>r.json()).catch(()=>null);
+  return (d&&d.ok)?d:null;
+}
+async function mrPoll(){
+  if(document.visibilityState!=='visible'||!mrBodyOpen())return;
+  const d=await mrFetchChats();
+  if(!d)return;
+  MR_SHOPS=d.shops||[];
+  mrRenderChips();
+  mrRenderList(d.chats||[]);
+  const info=$('mrInfo');
+  if(info){
+    const n=(d.chats||[]).length;
+    const bad=(d.shop_errors||[]).length;
+    info.textContent='به‌روزرسانیِ خودکارِ هر ۱ ثانیه'+(n?' · '+toFa(n)+' گفتگو':'')+(bad?' · '+toFa(bad)+' غرفه خطا دارد':'');
+  }
+  if(MR_CHAT)mrPollThread(false);
+}
+function mrRenderChips(){
+  const box=$('mrShopChips'); if(!box)return;
+  box.innerHTML='<span class="mrchip'+(MR_SHOP_FILTER===0?' on':'')+'" onclick="mrFilterShop(0)">همه</span>'+
+    MR_SHOPS.map(x=>'<span class="mrchip'+(MR_SHOP_FILTER===x.shop?' on':'')+'" onclick="mrFilterShop('+x.shop+')" title="'+esc(x.name)+'"><span style="color:'+mrShopColor(x.shop)+'">('+toFa(x.shop)+')</span> '+esc(x.name)+(x.ok===false?' ⚠️':'')+'</span>').join('');
+}
+function mrFilterShop(n){
+  MR_SHOP_FILTER=n;
+  mrRenderChips();
+  mrRenderList(MR_LAST_CHATS.filter(c=>n===0||(c.shop||1)===n));
+  mrPoll();
+}
+function mrRenderList(chats){
+  const box=$('mrList'); if(!box)return;
+  const badge=$('mrListBadge');
+  const tot=chats.reduce((a,c)=>a+(c.unseen||0),0);
+  if(badge)badge.innerHTML=tot>0?'<span style="background:#dc2626;color:#fff;border-radius:9px;font-size:9.5px;padding:0 6px">'+toFa(tot)+' جدید</span>':'<span style="color:#64748b;font-size:9.5px">'+toFa(chats.length)+' گفتگو</span>';
+  if(!chats.length){box.innerHTML='<div class="empty" style="padding:16px 6px">گفتگویی پیدا نشد</div>';return;}
+  box.innerHTML=chats.map(c=>{
+    const col=mrShopColor(c.shop||1);
+    const active=MR_CHAT&&MR_CHAT.id===c.chat_id;
+    return '<div onclick="mrOpenChat('+c.chat_id+','+(c.shop||1)+')" style="padding:7px 9px;border-bottom:1px solid #1e293b;cursor:pointer;border-radius:6px'+(active?';background:#16233d':'')+'">'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px">'+
+      '<b style="font-size:11.5px;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.who)+'</b>'+
+      '<span style="display:flex;gap:4px;align-items:center;flex:0 0 auto">'+
+      '<span style="color:'+col+';font-size:9.5px;border:1px solid '+col+'66;border-radius:8px;padding:0 5px" title="'+esc(c.shop_name||'')+'">('+toFa(c.shop||1)+')</span>'+
+      (c.unseen>0?'<span style="background:#dc2626;color:#fff;border-radius:9px;font-size:9.5px;padding:0 6px">'+toFa(c.unseen)+'</span>':'')+
+      '</span></div>'+
+      '<div style="font-size:10.5px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">'+
+      (c.last_is_mine?'<span style="color:#60a5fa">شما:</span> ':'')+esc(c.text||'—')+'</div>'+
+      '<div style="font-size:9px;color:#475569;margin-top:1px">'+mrRelTime(c.updated_at)+'</div>'+
+      '</div>';
+  }).join('');
+}
+async function mrOpenChat(id,shop){
+  shop=shop||1;
+  const c=MR_LAST_CHATS.find(x=>x.chat_id===id)||null;
+  MR_CHAT={id:id, shop:shop, shop_name:c?(c.shop_name||''):'', who:c?(c.who||'مشتری'):'مشتری'};
+  mrRenderList(MR_LAST_CHATS);
+  const hdr=$('mrThrHdr'); if(hdr)hdr.style.display='flex';
+  const w=$('mrWho'); if(w)w.textContent=MR_CHAT.who;
+  const tag=$('mrShopTag');
+  if(tag){tag.textContent='('+toFa(shop)+') '+(MR_CHAT.shop_name||''); tag.style.color=mrShopColor(shop);}
+  if(mrIsMobile()){
+    $('mrList').classList.add('mr-collapsed');
+    const a=$('mrListArrow'); if(a)a.textContent='▲';
+    $('mrBackBtn').style.display='inline-block';
+    const t=$('mrThread'); if(t)t.scrollIntoView({behavior:'smooth',block:'nearest'});
+  }
+  $('mrMsgs').innerHTML='<div class="empty" style="padding:14px 6px">در حالِ بارگذاری…</div>';
+  await mrPollThread(true);
+}
+async function mrPollThread(force){
+  if(!MR_CHAT)return;
+  const d=await fetch('?bsl_chat_messages=1&chat_id='+MR_CHAT.id+'&shop='+MR_CHAT.shop+'&limit=40').then(r=>r.json()).catch(()=>null);
+  if(!d||!d.ok)return;
+  const msgs=d.messages||[];
+  if(d.shop)MR_CHAT.shop=d.shop;
+  const box=$('mrMsgs'); if(!box)return;
+  const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<80;
+  const changed=force||MR_CHAT._lastId===undefined||msgs.length!==MR_CHAT._count||msgs.length>0&&msgs[msgs.length-1].id!==MR_CHAT._lastId;
+  if(changed){
+    box.innerHTML=msgs.length?msgs.map(mrMsgHtml).join(''):'<div class="empty" style="padding:20px 6px">پیامی در این گفتگو نیست</div>';
+  }
+  MR_CHAT._count=msgs.length;
+  MR_CHAT._lastId=msgs.length?msgs[msgs.length-1].id:null;
+  if(force||atBottom)box.scrollTop=box.scrollHeight;
+}
+function mrMsgHtml(m){
+  let inner='';
+  if(m.img)inner+='<div style="margin-top:4px"><img src="'+esc(m.img)+'" alt="تصویر" style="max-width:180px;max-height:180px;border-radius:6px;display:block;cursor:pointer" onclick="window.open(this.src)"></div>';
+  if(m.text)inner+='<div>'+esc(m.text)+'</div>';
+  else if(!m.img&&m.type&&m.type!=='text')inner+='<span style="color:#64748b">['+esc(m.type)+']</span>';
+  const mine=!!m.mine;
+  return '<div style="margin-bottom:9px">'+
+    '<div style="font-size:9.5px;color:#64748b;margin-bottom:2px">'+esc(m.sender||(mine?'شما':'مشتری'))+(m.at?' · '+mrRelTime(m.at):'')+'</div>'+
+    '<div style="display:inline-block;max-width:88%;background:'+(mine?'#173254':'#1e293b')+';border-radius:7px;padding:6px 9px;color:#e2e8f0;word-break:break-word">'+inner+'</div></div>';
+}
+function mrCloseChat(){
+  MR_CHAT=null;
+  const hdr=$('mrThrHdr'); if(hdr)hdr.style.display='none';
+  const b=$('mrBackBtn'); if(b)b.style.display='none';
+  const m=$('mrMsgs'); if(m)m.innerHTML='<div class="empty" style="padding:20px 6px">یک گفتگو را انتخاب کنید</div>';
+  const L=$('mrList'); if(L)L.classList.remove('mr-collapsed');
+  const a=$('mrListArrow'); if(a)a.textContent='▼';
+  mrRenderList(MR_LAST_CHATS);
+}
+function mrToggleList(){
+  const L=$('mrList'); if(!L)return;
+  L.classList.toggle('mr-collapsed');
+  const a=$('mrListArrow'); if(a)a.textContent=L.classList.contains('mr-collapsed')?'▲':'▼';
+}
+function mrFileClick(){const f=$('mrFile'); if(f)f.click();}
+function mrPickImage(inp){
+  const f=inp.files&&inp.files[0]; inp.value='';
+  if(!f)return;
+  if(f.size>7500000){mrMsg('✗ تصویر خیلی بزرگ است (حداکثر حدود ۷ مگابایت)','m-err');return;}
+  const rd=new FileReader();
+  rd.onload=()=>{
+    MR_IMG={dataURL:rd.result,name:f.name,mime:f.type||'image/jpeg'};
+    const p=$('mrImgPrev');
+    p.style.display='flex';
+    p.innerHTML='<img src="'+rd.result+'" style="width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid #334155;display:block"><span style="font-size:10.5px;color:#94a3b8;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(f.name)+'</span><button type="button" class="btn btn-gray" style="flex:0 0 auto;padding:2px 9px;font-size:10px" onclick="mrClearImage()">✕ حذف</button>';
+  };
+  rd.onerror=()=>mrMsg('✗ خواندنِ فایل ناموفق بود','m-err');
+  rd.readAsDataURL(f);
+}
+function mrClearImage(){MR_IMG=null;const p=$('mrImgPrev'); if(p){p.style.display='none';p.innerHTML='';}}
+function mrQuick(t){const el=$('mrText'); if(el){el.value=(el.value?el.value+' ':'')+t; el.focus();}}
+function mrKeydown(e){
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();mrSend();}
+}
+async function mrLoadChats(){
+  mrMsg('در حالِ بررسیِ گفتگوها…','');
+  mrPoll();
+  setTimeout(()=>{const m=$('mrMsg'); if(m&&!m.classList.contains('m-err'))mrMsg('✓ به‌روز شد','m-ok');},1200);
 }
 async function mrSend(){
-  if(!MR_CHAT) return;
+  if(!MR_CHAT)return;
   const t=$('mrText').value.trim();
-  if(!t) return;
-  const fd=new FormData(); fd.append('chat_id',MR_CHAT.id); fd.append('text',t);
+  if(!t&&!MR_IMG)return;
+  const btn=$('mrSendBtn'); if(btn)btn.disabled=true;
+  const fd=new FormData();
+  fd.append('chat_id',MR_CHAT.id);
+  fd.append('shop',MR_CHAT.shop);
+  fd.append('text',t);
+  if(MR_IMG){
+    fd.append('image_b64',MR_IMG.dataURL);
+    fd.append('image_name',MR_IMG.name);
+    fd.append('image_mime',MR_IMG.mime);
+  }
+  mrMsg(MR_IMG?'📤 آپلودِ تصویر و ارسال…':'در حالِ ارسال…','');
   const d=await fetch('?bsl_chat_reply=1',{method:'POST',body:fd}).then(r=>r.json()).catch(()=>({ok:false,error:'خطای شبکه'}));
-  if(!d.ok) return mrMsg('✗ '+esc(d.error||'ارسال ناموفق'),'m-err');
-  mrMsg('✓ پاسخ ارسال شد','m-ok');
+  if(btn)btn.disabled=false;
+  if(!d.ok)return mrMsg('✗ '+esc(d.error||'ارسال ناموفق'),'m-err');
+  mrMsg('✓ '+(MR_IMG?'تصویر ارسال شد':'پاسخ ارسال شد'),'m-ok');
   $('mrText').value='';
-  mrOpenChat(MR_CHAT.id);
-  setTimeout(mrLoadChats,400);
+  if(MR_IMG)mrClearImage();
+  mrPollThread(true);
+  setTimeout(mrPoll,300);
 }
+/* v10.57 (۷۱): ضربانِ سراسریِ ۱ ثانیه‌ای — فقط وقتی اتاقِ چت باز است و تب
+   دیده می‌شود درخواست می‌فرستد (وگرنه بلافاصله برمی‌گردد). */
+setInterval(mrPoll,1000);
 
 function arRenderRules(){
   const box=$('arRules'); if(!box)return;
