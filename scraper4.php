@@ -27758,15 +27758,18 @@ function bslNormalizeChat(array $c): array {
     if ($who === '') $who = 'مشتری';
     $type = (string)($lm['message_type'] ?? '');
     if ($txt === '') $txt = $type !== '' && $type !== 'text' ? '[' . $type . ']' : '—';
-    $unseen = $c['unseen_message_count'] ?? $c['unread_message_count']
-        ?? $c['unread_count'] ?? $c['unseen_count'] ?? $c['messages_unread']
-        ?? $c['unread_messages_count'] ?? 0;
+    $unseen = 0;
+    foreach (['unseen_message_count', 'unread_message_count', 'unread_count',
+              'unseen_count', 'messages_unread', 'unread_messages_count'] as $uk) {
+        if (isset($c[$uk])) { $unseen = (int)$c[$uk]; break; }
+    }
+    $updatedAt = $c['updated_at'] ?? ($lm['created_at'] ?? ($c['created_at'] ?? ''));
     return [
         'chat_id'    => (int)($c['id'] ?? 0),
         'who'        => $who,
         'text'       => $txt,
         'unseen'     => max(0, (int)$unseen),
-        'updated_at' => (string)($c['updated_at'] ?? ($c['last_message']['created_at'] ?? ($c['created_at'] ?? ''))),
+        'updated_at' => (string)$updatedAt,
         'chat_type'  => (string)($c['chat_type'] ?? ''),
         'sender'     => trim((string)($lm['sender']['name'] ?? '')),
         'sender_role' => strtolower((string)($lm['sender']['role'] ?? ($lm['sender']['type'] ?? ''))),
