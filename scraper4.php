@@ -267,7 +267,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.48';
+const APP_VERSION = '10.49';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -15053,6 +15053,41 @@ if (arCfg($cn)['enabled']) {
     }
 }
 
+/* v10.49 (۶۳): پمپِ ارسال — عمرِ همین دور را «ارسال» کنیم، نه استخراج.
+
+   روی هاستِ شما پردژهٔ جداشدهٔ ارسال بعد از چند ثانیه می‌میرد (کلاینت
+   برود ⇒ کارگر آزاد شود): fireAndForgetِ کلاسیک ۱٫۵ ثانیه می‌ماند و
+   curl قطع می‌شود. نتیجه: صفی که به حالِ خود رها شده باشد، عملاً هرگز
+   جلو نمی‌رود — همان «استخراج انجام می‌شود ولی ارسال نه».
+
+   حالا در ابتدای هر تیک، اگر صفِ ارسال کارِ گیر دارد (ردیفِ waiting،
+   یا runningِ بی‌حرکت)، پردازنده را راه می‌اندازیم و همین پردژه تا
+   ۱۲۰ ثانیه منتظر می‌ماند؛ هر تیک چقدر که هاست اجازه بدهد جلو می‌رود و
+   checkpoint (start_index) پیشرفت را حفظ می‌کند. اگر صف خالی باشد یا
+   پردازندهٔ زنده روی آن کار کند، هزینه صفر است. در همگام‌سازیِ دستی
+   اجرا نمی‌شود: آنجا مرورگر وصل است و رابط خودش ارسال را با اتصالِ زنده
+   راه می‌اندازد (msKickSend). */
+if (!manualSyncActive()) {
+    try {
+        $_pumpStall = max(120, (int)($cn['stall_after'] ?? 300));
+        foreach (cronWatchdogQueueOrder() as $_pq) {
+            $_pqChk = queueStallCheck($_pq, $_pumpStall);
+            if (empty($_pqChk['stalled'])) continue;
+            $_pqRec = queueStallRecover($_pq, $_pumpStall, false, 120000);
+            $results['send_pump'][$_pq] = [
+                'from'    => (int)($_pqChk['current'] ?? 0),
+                'total'   => (int)($_pqChk['total'] ?? 0),
+                'resumed' => !empty($_pqRec['resumed']),
+            ];
+            $_pqAfter = queueStallCheck($_pq, $_pumpStall);
+            $results['send_pump'][$_pq]['now'] = (int)($_pqAfter['current'] ?? 0);
+            if (empty($_pqAfter['stalled'])) break;
+        }
+    } catch (Throwable $e) {
+        $results['send_pump_error'] = mb_substr($e->getMessage(), 0, 200);
+    }
+}
+
 /* =====================================================================
    v9.10: استخراج دوره‌ای جزئیات — حلقهٔ مستقل، قبل از همگام‌سازی.
 
@@ -15732,6 +15767,19 @@ if (manualSyncActive()) {
     $_msDone['profiles_done'] = count($results['profiles'] ?? []);
     $_lg = is_array($_msDone['recent_log'] ?? null) ? $_msDone['recent_log'] : [];
     $_lg[] = !empty($results['manual_stopped']) ? '⏹ با درخواستِ کاربر متوقف شد' : '✅ همگام‌سازیِ دستی تمام شد';
+    /* v10.49 (۶۳): اگر چیزی به صفِ ارسال رفته، کاربر همان‌جا ببیند —
+       و رابط (msKickSend) بلافاصله ارسال را با اتصالِ مرورگر می‌کوبد. */
+    $_msQPending = 0;
+    foreach (['باسلام' => bslReadQueue(), 'ووکامرس' => wooReadQueue()] as $_msQN => $_msQ) {
+        foreach ((array)($_msQ['entries'] ?? []) as $_msQe) {
+            if (in_array((string)($_msQe['status'] ?? ''), ['waiting', 'running', 'paused'], true)) {
+                $_msQPending += max(0, (int)($_msQe['total'] ?? 0) - (int)($_msQe['current'] ?? 0));
+            }
+        }
+    }
+    if ($_msQPending > 0 && empty($results['manual_stopped'])) {
+        $_lg[] = '📤 ' . $_msQPending . ' product entered the send queue — sending will start automatically (please keep this tab open)';
+    }
     $_msDone['recent_log'] = array_slice($_lg, -40);
     writeProgress(MANUAL_SYNC_PROGRESS_FILE, $_msDone);
     @unlink(MANUAL_SYNC_STOP_FILE);
@@ -23247,6 +23295,24 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۶۳ (v10.49) ==== */
+    $add('10.49', 'نسخهٔ ۱۰.۴۹',
+         str_contains($selfSrc, "const APP_VERSION = '10.49';"));
+    $add('10.49.1', 'پمپِ ارسالِ کران: صفِ گیر را تا ۱۲۰ ثانیه جلو می‌راند',
+         str_contains($selfSrc, "\$_pqRec = queueStallRecover(\$_pq, \$_pumpStall, false, 120000);")
+      && str_contains($selfSrc, "\$results['send_pump'][\$_pq]"));
+    $add('10.49.2', 'queueStallRecover مهلتِ انتظارِ قابل‌تنظیم دارد',
+         str_contains($selfSrc, "function queueStallRecover(string \$which, int \$staleAfter = 300, bool \$dryRun = false, int \$waitMs = 1500): array {")
+      && str_contains($selfSrc, "\$chk['resumed'] = fireAndForget('action=' . \$action, \$waitMs, \$post);"));
+    $add('10.49.3', 'پمپ در همگام‌سازیِ دستی اجرا نمی‌شود (مرورگر خودش می‌کوبد)',
+         str_contains($selfSrc, "if (!manualSyncActive()) {"));
+    $add('10.49.4', 'رابط بعد از همگام‌سازیِ دستی ارسال را می‌کوبد',
+         str_contains($selfSrc, "function msKickSend(){")
+      && str_contains($selfSrc, "if(ok)msKickSend();"));
+    $add('10.49.5', 'بایگانی: فالبک مسیرِ غرفه روی ۴۲۲ + خطای گویا',
+         str_contains($selfSrc, "in_array((int)(\$r['code'] ?? 0), [401, 403, 404, 422], true) && \$vid > 0")
+      && str_contains($selfSrc, "bslApiError(\$r,'بایگانی ناموفق','products/'.\$productId)"));
+
     /* ==== ۶۲ (v10.48) ==== */
     $add('10.48', 'نسخهٔ ۱۰.۴۸',
          str_contains($selfSrc, "const APP_VERSION = '10.48';"));
@@ -29157,7 +29223,7 @@ function queueStallCheck(string $which, int $staleAfter = 300): array {
  * بررسی می‌شدند و در بدترین حالت دوباره ارسال. حالا شمارهٔ محصول جاری،
  * شناسهٔ صف و پرچم from_file فرستاده می‌شوند.
  */
-function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = false): array {
+function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = false, int $waitMs = 1500): array {
     $chk = queueStallCheck($which, $staleAfter);
     $chk['which'] = $which;
     if (empty($chk['stalled']) || $dryRun) { $chk['resumed'] = false; return $chk; }
@@ -29177,7 +29243,9 @@ function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = 
     if ($qid !== '') $post['queue_id'] = $qid;
 
     $chk['resume_from'] = $start;
-    $chk['resumed'] = fireAndForget('action=' . $action, 1500, $post);
+    /* v10.49 (۶۳): $waitMs — «پمپِ ارسال» کران تا ۱۲۰ ثانیه منتظر می‌ماند
+       تا پردازندهٔ فرزند پیش برود؛ حالتِ کلاسیکِ نگهبان ۱٫۵ ثانیه است. */
+    $chk['resumed'] = fireAndForget('action=' . $action, $waitMs, $post);
     if ($chk['resumed']) {
         // شمارندهٔ تلاش را نگه دار تا اگر بارها گیر کرد بتوان تشخیص داد
         $st = notifLoadState();
@@ -29264,7 +29332,9 @@ function bslEditProduct(string $tk, int $vid, int $pid, array $fields): array {
        (و گاهی ۴۰۱) می‌دهد، نه ۴۰۴ — یعنی دقیقاً همان حالتی که مسیرِ
        زیرِ غرفه می‌توانست نجاتش بدهد، فالبک نمی‌خورد و عملیات بی‌صدا
        شکست می‌خورد. حالا هر سه کدِ «دسترسی/نبودن» فالبک می‌گیرند. */
-    if (in_array((int)($r['code'] ?? 0), [401, 403, 404], true) && $vid > 0) {
+    /* v10.49 (۶۳): ۲۲ هم فالبک می‌گیرد — گاهی مسیرِ سراسریِ products/{id}
+       پارامتر را می‌پرسد ولی مسیرِ زیرِ غرفه قبولش می‌کند (و برعکس). */
+    if (in_array((int)($r['code'] ?? 0), [401, 403, 404, 422], true) && $vid > 0) {
         $r2 = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $pid, $fields);
         /* فقط وقتی جایگزین می‌شود که واقعاً بهتر باشد؛ وگرنه خطای اولیه
            گویاتر است و نباید با یک ۴۰۴ِ مسیرِ دوم پوشانده شود. */
@@ -35432,7 +35502,8 @@ if($r['code']===404)$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$productI
 if($r['ok']&&!empty($r['body']['id'])){
 echo json_encode(['ok'=>true,'msg'=>'محصول #'.$productId.' → '.$label.' ('.$newStatus.')'],JSON_UNESCAPED_UNICODE);
 }else{
-echo json_encode(['ok'=>false,'error'=>'تغییر وضعیت ناموفق ('.$r['code'].'): '.($r['body']['message']??$r['body']['error']??'خطا')],JSON_UNESCAPED_UNICODE);
+/* v10.49 (۶۳): همان خطای گویا برای تغییر وضعیت */
+echo json_encode(['ok'=>false,'error'=>bslApiError($r,'تغییر وضعیت ناموفق','products/'.$productId)],JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -35450,7 +35521,9 @@ $r=bslArchiveProduct($tk,$vid,$productId);
 if($r['ok']||$r['code']===204||$r['code']===200){
 echo json_encode(['ok'=>true,'archived'=>true,'msg'=>'محصول #'.$productId.' بایگانی شد (باسلام حذف همیشگی ندارد)'],JSON_UNESCAPED_UNICODE);
 }else{
-echo json_encode(['ok'=>false,'error'=>'بایگانی ناموفق ('.$r['code'].'): '.($r['body']['message']??$r['body']['error']??'خطا')],JSON_UNESCAPED_UNICODE);
+/* v10.49 (۶۳): خطای گویا — ۴۲۲ یعنی «پارامتر نامعتبر»؛ جزئیاتِ دقیق
+   (کدام فیلد، چه مقبول است) را از بدنه بیرون بکشیم که کاربر/ما ببیند. */
+echo json_encode(['ok'=>false,'error'=>bslApiError($r,'بایگانی ناموفق','products/'.$productId)],JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -48402,6 +48475,38 @@ function msFinish(ok,msg,summary){
   showToast(ok?'✅ همگام‌سازی تمام شد — گزارش ثبت و ارسال شد':('⏹ '+(msg||'متوقف شد')),!ok);
   try{refreshExtractQueue();}catch(e){}
   try{tmPulse();}catch(e){}
+  if(ok)msKickSend(); /* v10.49 (۶۳): اگر چیزی صف شده، ارسال را با اتصالِ مرورگر بکوب */
+}
+
+/* v10.49 (۶۳): بعد از پایانِ همگام‌سازیِ دستی، اگر محصولی در صفِ ارسال
+   منتظر است، پردازنده را با یک fetch مرورگری راه بیندازیم — روی هاستِ
+   شما پردژهٔ ارسال فقط تا وقتی که یک کلاینت وصل است زنده می‌ماند، و
+   مرورگرِ همین تب آن کلاینت است. بدون این، صف به حالِ خود رها می‌ماند
+   و کران هر ۵ دقیقه فقط چند ثانیه جلویش می‌راند. */
+function msKickSend(){
+  const box=$('msReport');
+  const kick=(label,statusUrl,actionName)=>{
+    fetch(statusUrl).then(r=>r.json()).then(q=>{
+      const entries=Array.isArray(q.entries)?q.entries:[];
+      const waiting=entries.filter(e=>e.status==='waiting'||e.status==='paused');
+      const running=entries.filter(e=>e.status==='running');
+      if(!waiting.length&&!running.length)return;
+      const pend=entries.filter(e=>['waiting','running','paused'].includes(e.status))
+        .reduce((a,e)=>a+Math.max(0,(parseInt(e.total)||0)-(parseInt(e.current)||0)),0);
+      if(box)box.innerHTML+='<div style="margin-top:8px;background:#1e293b;border:1px solid #475569;border-radius:8px;padding:8px;font-size:11px;color:#cbd5e1;line-height:1.8">'
+        +'📤 <b>'+toFa(pend)+'</b> product for <b>'+label+'</b> entered the send queue'
+        +(waiting.length?' — starting send…':' — a send is in progress')
+        +'. <b style="color:#fbbf24">Please keep this tab open</b> until sending is complete (on this host, closing the tab interrupts sending).'
+        +' <button class="btn btn-cyan" onclick="switchMainTab(\'send\')" style="font-size:9.5px;padding:2px 8px;margin-right:6px">📡 See sending</button></div>';
+      if(waiting.length&&running.length===0){
+        /* no live process ⇒ start it ourselves with a connection that stays open */
+        fetch('?action='+actionName,{method:'GET'}).catch(()=>{});
+      }
+      try{ if(actionName==='bsl_backend'){bSend=true;pollBslProgress();}else{pollWooProgress();} }catch(e){}
+    }).catch(()=>{});
+  };
+  kick('باسلام','?bsl_queue_status=1','bsl_backend');
+  kick('ووکامرس','?woo_queue_status=1','woo_backend');
 }
 
 function stopManualSync(){
@@ -49449,6 +49554,25 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.49', t:'📤 ارسال دیگر به حالِ خود رها نمی‌شود + خطای بایگانی حالا گویا است', items:[
+    '❌ <b>مشکل ۱ (همگام‌سازی به مرحلهٔ ارسال نمی‌رسید):</b> همگام‌سازی، محصولات را',
+    '   «در صفِ ارسال» می‌نشیند و پردازندهٔ جداگانه‌ای باید آن‌ها را بفرستد. اما آن',
+    '   پردازنده فقط تا وقتی زنده می‌ماند که یک کلاینت به آن وصل باشد؛ کران از راهِ',
+    '   فایروالِ خودِ هاست فقط ۱٫۵ ثانیه وصل می‌ماند و بعد می‌رود — پس صف عملاً هرگز',
+    '   جلو نمی‌رفت و شما «استخراج انجام شد، ارسال نه» می‌دیدید.',
+    '✅ <b>چه شد:</b> (الف) کران حالا «پمپِ ارسال» دارد: در ابتدای هر تیک، اگر کارِ',
+    '   گیر در صف باشد، پردازنده را راه می‌اندازد و تا ۱۲۰ ثانیه منتظر می‌ماند — هر',
+    '   تیک چقدر که هاست اجازه بدهد صف را جلو می‌راند و چون چک‌پوینتی دارد، چیزی',
+    '   از دست نمی‌رود. (ب) همگام‌سازیِ دستی دیگر ارسال را به کران واگذار نمی‌کند:',
+    '   با پایانِ صف‌سازی، همین تبِ مرورگر پردازنده را با اتصالِ زنده راه می‌اندازد',
+    '   و نوارِ پیشرفتِ ارسال همان‌جا (و در تبِ «ارسال») دیده می‌شود. به همین دلیل:',
+    '   <b>تب را تا پایانِ ارسال باز نگه دارید</b> — بستنِ تب، ارسال را قطع می‌کند.',
+    '❌ <b>مشکل ۲ (بایگانی با ۴۲۲):</b> (الف) اگر مسیرِ سراسریِ محصول پارامتر را',
+    '   نپذیرفت (۴۲)، حالا مسیرِ زیرِ غرفه هم امتحان می‌شود — همان‌طور که برای',
+    '   ۴۰/۴۰۳/۴۰۴ انجام می‌شد. (ب) پیامِ خطا حالا <b>جزئیاتِ دقیقِ باسلام</b> را',
+    '   می‌گوید (کدام فیلد، چه ایرادی) به‌جای «خطا» — اگر باز هم ۴۲ دیدید، متنِ',
+    '   همان خطا را عکس بگیرید تا دقیقاً درستش کنیم.',
+  ]},
   {v:'10.48', t:'🏃 اعلان‌ها اولِ کران: دیگر گروگانِ پردژهٔ کشته‌شده نیستند', items:[
     '❌ <b>مشکل (که خودِ پینگ گفت):</b> «⚠️ اجرای قبلی نیمه‌کاره ماند (هاست پردازه را',
     '   کشت)» — هاست شما پردژهٔ PHP را وسطِ اجرا می‌کشد. بررسیِ اعلان‌ها تا حالا در',
