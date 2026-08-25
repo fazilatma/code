@@ -267,7 +267,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.50';
+const APP_VERSION = '10.51';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -715,6 +715,30 @@ function queueDedupStale(?array $cn = null): int {
     $cn = $cn ?? loadConnections();
     $v = (int)($cn['queue_dedup_stale'] ?? 7200);
     return $v > 0 ? max(300, $v) : 0;
+}
+
+/** v10.51 (۶۵): تنظیماتِ «اثرگذار بر ارسال» عوض شده‌اند؟
+    اگر بله، ردیفِ قدیمیِ صف نباید جلوی ردیفِ جدید را بگیرد — وگرنه
+    مثلاً کاربر پسوندِ عنوان را درست می‌کند و در «نتایج» پسوندِ درست
+    را می‌بیند، ولی ارسال از روی تنظیماتِ ذخیره‌شدهٔ ردیفِ قدیمی هنوز
+    با پسوندِ قبلی ادامه پیدا می‌کند. */
+function queueCfgChanged(?array $oldCfg, array $newCfg): bool {
+    $oldCfg = is_array($oldCfg) ? $oldCfg : [];
+    // ردیف‌های قدیمیِ بدونِ config اصلاً چیزی ذخیره ندارند و پردازنده
+    // تنظیماتِ جاری را می‌گیرد — با آن‌ها ناسازگاری فرض نمی‌شود.
+    $known = ['title_suffix', 'category_id', 'auto_category', 'force_all', 'send_all_shops'];
+    $hasOld = false;
+    foreach ($known as $k) { if (array_key_exists($k, $oldCfg)) { $hasOld = true; break; } }
+    if (!$hasOld) return false;
+    foreach ($known as $k) {
+        if (!array_key_exists($k, $newCfg)) continue;
+        if (!array_key_exists($k, $oldCfg)) return true;
+        if ($k === 'category_id') { if ((int)$oldCfg[$k] !== (int)$newCfg[$k]) return true; }
+        elseif (in_array($k, ['auto_category', 'force_all', 'send_all_shops'], true)) {
+            if ((bool)$oldCfg[$k] !== (bool)$newCfg[$k]) return true;
+        } else { if (trim((string)$oldCfg[$k]) !== trim((string)$newCfg[$k])) return true; }
+    }
+    return false;
 }
 
 function extractWriteQueue(array $queue): void {
@@ -15596,9 +15620,28 @@ if ($target === 'woo' || $target === 'both') {
 $wooSend = $wooOnlyChanged ? $changedProducts : $orderedProducts;
 if(!empty($wooSend)){
 $wooSuffix=trim($profile['titleSuffix']??'') ?: trim($cn['basalam']['title_suffix']??'');
+// v8.56: دستهٔ ووکامرس این پروفایل، وگرنه دستهٔ پیش‌فرض تنظیمات عمومی
+$wooCatId=(int)($profile['wooCategoryId']??0);
+if($wooCatId<=0)$wooCatId=(int)($cn['woocommerce']['default_category']??0);
 $wooQueue=wooReadQueue();
 // v8.55: همین پروفایل اگر در صف ووکامرس هست، دوباره اضافه نشود
 $wooDup=queueDedupOn($cn)?queueHasProfile($wooQueue['entries'],$key,queueDedupStale($cn)):null;
+if($wooDup!==null){
+/* v10.51 (۶۵): همان قواعدِ جایگزینیِ ردیفِ کهنه، برای صفِ ووکامرس */
+if(queueCfgChanged($wooDup['config']??null,
+        ['title_suffix'=>$wooSuffix,'category_id'=>$wooCatId,'force_all'=>$wooForceAll])
+    && in_array((string)($wooDup['status']??''),['waiting','paused'],true)){
+foreach($wooQueue['entries'] as &$_qe){
+if(is_array($_qe)&&($_qe['id']??'')===($wooDup['id']??'')){
+$_qe['status']='failed';$_qe['done_at']=time();
+$_qe['fail_reason']='تنظیماتِ ارسال تغییر کرد — با ردیفِ جدید جایگزین شد';
+}}
+unset($_qe);
+wooWriteQueue($wooQueue);
+$pResult['woo_superseded']=true;
+$wooDup=null;
+}
+}
 if($wooDup!==null){
 $pResult['woo']='already_queued';
 $pResult['woo_queue_id']=$wooDup['id']??'';
@@ -15608,9 +15651,6 @@ $wooQueueId='cron_woo_'.$key.'_'.$now;
 // و اجرای بعدی محصولات اجرای قبلی را می‌فرستاد.
 $wooQFile=__DIR__.'/woo_queue_products_'.$wooQueueId.'.json';
 @file_put_contents($wooQFile,json_encode($wooSend,JSON_UNESCAPED_UNICODE),LOCK_EX);
-// v8.56: دستهٔ ووکامرس این پروفایل، وگرنه دستهٔ پیش‌فرض تنظیمات عمومی
-$wooCatId=(int)($profile['wooCategoryId']??0);
-if($wooCatId<=0)$wooCatId=(int)($cn['woocommerce']['default_category']??0);
 // v8.56: در یک اجرای کران ممکن است چند پروفایل صف شوند. قبلاً همه با
 // وضعیت «running» ثبت می‌شدند و هرکدام روی فایل مشترک می‌نوشتند؛ نتیجه
 // این بود که محصولاتِ آخرین پروفایل با تنظیماتِ اولین پروفایل ارسال
@@ -15651,6 +15691,30 @@ $allFallbackCats = array_values(array_unique(array_merge($profileFallbackCats, $
 $queue = bslReadQueue();
 // v8.55: از ورود دوبارهٔ همین پروفایل به صف باسلام جلوگیری کن
 $bslDup = queueDedupOn($cn) ? queueHasProfile($queue['entries'], $key, queueDedupStale($cn)) : null;
+if ($bslDup !== null) {
+    /* v10.51 (۶۵): اگر تنظیماتِ اثرگذار بر ارسال عوض شده باشند — مهم‌تر
+       از همهٔ پسوندِ عنوان — ردیفِ قدیمیِ منتظر/توقف‌خورده دیگر معتبر
+       نیست و نباید جلوی ردیفِ جدید را بگیرد؛ وگرنه کاربر پسوند را درست
+       می‌کند، در «نتایج» درست دیده می‌شود، ولی ارسال تا صف خالی شود با
+       همان پسوندِ کهنهٔ ذخیره‌شدهٔ ردیفِ قدیمی ادامه می‌یابد. ردیفِ در
+       حالِ اجرا دست نمی‌خورد (با تنظیماتی که شروع کرده تمام می‌کند). */
+    if (queueCfgChanged($bslDup['config'] ?? null,
+            ['title_suffix' => $titleSuffix, 'category_id' => $catId, 'auto_category' => $autoCat,
+             'force_all' => $bslForceAll, 'send_all_shops' => !empty($cn['basalam']['send_all_shops'])])
+        && in_array((string)($bslDup['status'] ?? ''), ['waiting', 'paused'], true)) {
+        foreach ($queue['entries'] as &$_qe) {
+            if (is_array($_qe) && ($_qe['id'] ?? '') === ($bslDup['id'] ?? '')) {
+                $_qe['status'] = 'failed';
+                $_qe['done_at'] = time();
+                $_qe['fail_reason'] = 'تنظیماتِ ارسال تغییر کرد — با ردیفِ جدید جایگزین شد';
+            }
+        }
+        unset($_qe);
+        bslWriteQueue($queue);
+        $pResult['bsl_superseded'] = true;
+        $bslDup = null;
+    }
+}
 if ($bslDup !== null) {
     @unlink($qFile);
     $pResult['bsl'] = 'already_queued';
@@ -23318,6 +23382,22 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۶۵ (v10.51) ==== */
+    $add('10.51', 'نسخهٔ ۱۰.۵۱',
+         str_contains($selfSrc, "const APP_VERSION = '10.51';"));
+    $add('10.51', 'Archive/status change is multi-strategy (simple, full-payload, archive endpoint)',
+         (strpos($selfSrc, "function bslSetProductStatus(string \$tk, int \$vid, int \$pid, int \$newStatus): array {") !== false
+          && strpos($selfSrc, "function bslProductFullPatch(array \$row, int \$newStatus): ?array {") !== false
+          && strpos($selfSrc, "function bslGetProductRow(string \$tk, int \$vid, int \$pid): ?array {") !== false
+          && strpos($selfSrc, "$r=bslSetProductStatus($tk,$vid,$productId,$newStatus);") !== false
+          && strpos($selfSrc, "   $r = bslSetProductStatus($tk, $vid, $pid, 4184);") !== false
+          && strpos($selfSrc, "' . $endpoint) . $att;") !== false));
+    $add('10.51', 'Stale send-config queue rows are superseded instead of blocking (old suffix bug)',
+         (strpos($selfSrc, "function queueCfgChanged(?array \$oldCfg, array \$newCfg): bool {") !== false
+          && strpos($selfSrc, "تنظیماتِ ارسال تغییر کرد — با ردیفِ جدید جایگزین شد") !== false
+          && strpos($selfSrc, "e.fail_reason?('⚠ '+esc(e.fail_reason)") !== false
+          && strpos($selfSrc, "fail_reason") !== false));
+
     /* ==== ۶۴ (v10.50) ==== */
     $add('10.50', 'نسخهٔ ۱۰.۵۰',
          str_contains($selfSrc, "const APP_VERSION = '10.50';"));
@@ -28002,11 +28082,12 @@ function bslApiError(array $r, string $what, string $endpoint, string $scope = '
             $m   = (string)($d['msg'] ?? '');
             if ($loc !== '' || $m !== '') $det[] = trim($loc . ' ' . $m);
         }
+        $att = is_array($r['attempts'] ?? null) ? ' — روش‌های امتحان‌شده: ' . implode('، ', $r['attempts']) : '';
         return $what . ' — پارامتر نامعتبر (۴۲۲)'
-             . ($det ? ': ' . mb_substr(implode(' · ', $det), 0, 160) : ' در ' . $endpoint);
+             . ($det ? ': ' . mb_substr(implode(' · ', $det), 0, 160) : ' در ' . $endpoint) . $att;
     }
     if ($c === 0)   return $what . ' — ارتباط با باسلام برقرار نشد';
-    return $what . ' — خطای HTTP ' . $c;
+    return $what . ' — خطای HTTP ' . $c . $att;
 }
 
 /* =====================================================================
@@ -29459,13 +29540,115 @@ function bslEditProduct(string $tk, int $vid, int $pid, array $fields): array {
     return $r;
 }
 
+/* =====================================================================
+ *  v10.51 (۶۵): تغییرِ وضعیتِ محصول (و بایگانی) با روشِ چندگانه.
+ *
+ *  گزارشِ کاربر: بایگانیِ دستی و حذفِ تکراری‌ها با وجودِ فالبکِ مسیرِ
+ *  غرفه (v10.49) باز هم ۴۲۲ می‌داد — یعنی خودِ باسلام PATCHِ «فقط
+ *  وضعیت» را در این نصب رد می‌کند (۴۲۲ لاراول = اعتبارسنجیِ فرم).
+ *  چون آپدیتِ همگام‌سازیِ همین برنامه با «پیلودِ کامل» (قیمت، موجودی،
+ *  عکس...) موفق است، اینجا اول محصول را می‌خوانیم، وضعیتِ جدید را در
+ *  پیلودِ کامل می‌گذاریم و می‌فرستیم؛ اگر باز نشد، نسخه‌هایی از API
+ *  اندپوینتِ اختصاصیِ «بایگانی» دارند — آن را هم می‌آزماییم. فهرستِ
+ *  تلاش‌ها در پیامِ خطای نهایی هم می‌آید تا علت دقیق معلوم شود.
+ * ===================================================================== */
+
+/** یک محصول را می‌خواند — ردیفِ کامل، وگرنه null */
+function bslGetProductRow(string $tk, int $vid, int $pid): ?array {
+    $r = bslReq($tk, 'GET', 'products/' . $pid);
+    $row = $r['body']['data'] ?? ($r['body'] ?? null);
+    if (!empty($r['ok']) && is_array($row) && (int)($row['id'] ?? 0) > 0) return $row;
+    if ($vid > 0) {
+        $r2 = bslReq($tk, 'GET', 'vendors/' . $vid . '/products/' . $pid);
+        $row2 = $r2['body']['data'] ?? ($r2['body'] ?? null);
+        if (!empty($r2['ok']) && is_array($row2) && (int)($row2['id'] ?? 0) > 0) return $row2;
+    }
+    return null;
+}
+
+/** پیلودِ «کاملِ» آپدیت از روی ردیفِ جاریِ محصول — با وضعیتِ جدید */
+function bslProductFullPatch(array $row, int $newStatus): ?array {
+    $name = trim((string)($row['title'] ?? $row['name'] ?? ''));
+    $bu = ['status' => $newStatus];
+    if ($name !== '') $bu['name'] = mb_substr($name, 0, 120);
+    if (isset($row['brief']))            $bu['brief'] = (string)$row['brief'];
+    if (isset($row['description']))      $bu['description'] = (string)$row['description'];
+    if (isset($row['primary_price']))    $bu['primary_price'] = (int)$row['primary_price'];
+    if (isset($row['inventory']))        $bu['stock'] = (int)$row['inventory'];
+    elseif (isset($row['stock']))        $bu['stock'] = (int)$row['stock'];
+    if (isset($row['preparation_days'])) $bu['preparation_days'] = (int)$row['preparation_days'];
+    if (isset($row['weight']))           $bu['weight'] = (int)$row['weight'];
+    if (isset($row['category_id']))      $bu['category_id'] = (int)$row['category_id'];
+    if (isset($row['sku']))              $bu['sku'] = (string)$row['sku'];
+    $photos = [];
+    if (isset($row['photos']) && is_array($row['photos'])) {
+        foreach ($row['photos'] as $ph) {
+            $id = is_array($ph) ? (int)($ph['id'] ?? 0) : (int)$ph;
+            if ($id > 0) $photos[] = $id;
+        }
+    }
+    $photo = 0;
+    if (isset($row['photo'])) {
+        $photo = is_array($row['photo']) ? (int)($row['photo']['id'] ?? 0) : (int)$row['photo'];
+    }
+    if ($photo > 0 && !in_array($photo, $photos, true)) array_unshift($photos, $photo);
+    if ($photos) { $bu['photos'] = $photos; $bu['photo'] = $photos[0]; }
+    if (count($bu) <= 1) return null;   // دادهٔ کافی برای پیلودِ کامل نداریم
+    return $bu;
+}
+
+/**
+ * وضعیتِ محصول را با چند روشِ به‌ترتیب عوض می‌کند:
+ * ۱) PATCH فقط-وضعیت (اول مسیرِ زیرِ غرفه، بعد سراسری)
+ * ۲) PATCH پیلودِ کامل (داده‌های جاریِ محصول + وضعیتِ جدید)
+ * ۳) اندپوینتِ اختصاصیِ «archive» (اگر API داشته باشد)
+ * خروجی بهترین پاسخ است؛ در صورتِ شکست، فهرستِ 'attempts' هم دارد.
+ */
+function bslSetProductStatus(string $tk, int $vid, int $pid, int $newStatus): array {
+    $attempts = [];
+    $last = null;
+    $payloads = [['simple', ['status' => $newStatus]]];
+    $row = bslGetProductRow($tk, $vid, $pid);
+    if ($row !== null) {
+        $full = bslProductFullPatch($row, $newStatus);
+        if ($full !== null) $payloads[] = ['full', $full];
+    }
+    $eps = [];
+    if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid;
+    $eps[] = 'products/' . $pid;
+    foreach ($payloads as $pl) {
+        foreach ($eps as $ep) {
+            $r = bslReq($tk, 'PATCH', $ep, $pl[1]);
+            $attempts[] = $pl[0] . '@' . $ep . '=' . (int)($r['code'] ?? 0);
+            $last = $r;
+            if (!empty($r['ok'])) { $r['status_strategy'] = $pl[0]; return $r; }
+            if ((int)($r['code'] ?? 0) !== 404) break;  // ۴۰۴ = این مسیر نیست؛ خطای دیگر = پیلودِ بعدی
+        }
+    }
+    /* برخی نسخه‌های API اندپوینتِ جداگانهٔ «بایگانی» دارند */
+    $arcEps = [];
+    if ($vid > 0) $arcEps[] = 'vendors/' . $vid . '/products/' . $pid . '/archive';
+    $arcEps[] = 'products/' . $pid . '/archive';
+    foreach ($arcEps as $ep) {
+        $r = bslReq($tk, 'POST', $ep, []);
+        $attempts[] = 'archive@' . $ep . '=' . (int)($r['code'] ?? 0);
+        if (!empty($r['ok'])) { $r['status_strategy'] = 'archive'; $r['archived'] = true; return $r; }
+        if ((int)($r['code'] ?? 0) !== 404) { $last = $r; break; }
+    }
+    if ($last === null) $last = ['ok' => false, 'code' => 0, 'body' => null];
+    $last['attempts'] = $attempts;
+    return $last;
+}
+
 /**
  * «حذف» محصول باسلام = بایگانی کردن (4184).
  * چون API حذف واقعی ندارد، این تنها راه برداشتن محصول از غرفه است.
+ * v10.51 (۶۵): از مسیرِ چندروشهِ bslSetProductStatus می‌رود — قبلاً
+ * فقط PATCHِ فقط-وضعیت بود که در بعضی نصب‌ها ۴۲۲ می‌گرفت.
  */
 function bslArchiveProduct(string $tk, int $vid, int $pid): array {
-    $r = bslEditProduct($tk, $vid, $pid, ['status' => 4184]);
-    if (!empty($r['ok'])) $r['archived'] = true;
+    $r = bslSetProductStatus($tk, $vid, $pid, 4184);
+    if (!empty($r['ok']) || !empty($r['archived'])) $r['archived'] = true;
     return $r;
 }
 
@@ -35612,9 +35795,9 @@ $newStatus=(int)($_GET['status']??0);
 if($productId<=0||$newStatus<=0){echo json_encode(['ok'=>false,'error'=>'شناسه یا وضعیت نامعتبر'],JSON_UNESCAPED_UNICODE);exit;}
 $statusLabels=['2976'=>'فعال','3790'=>'غیرفعال','3568'=>'در انتظار تأیید'];
 $label=$statusLabels[$newStatus]??$newStatus;
-$bu=['status'=>$newStatus];
-$r=bslReq($tk,'PATCH','products/'.$productId,$bu);
-if($r['code']===404)$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$productId,$bu);
+/* v10.51 (۶۵): دقیقاً همان مسیرِ چندروشهِ بایگانی — PATCHِ فقط-وضعیت
+   گاهی ۴۲ می‌گیرد؛ پیلودِ کامل یا اندپوینتِ archive ممکن است ببرد. */
+$r=bslSetProductStatus($tk,$vid,$productId,$newStatus);
 if($r['ok']&&!empty($r['body']['id'])){
 echo json_encode(['ok'=>true,'msg'=>'محصول #'.$productId.' → '.$label.' ('.$newStatus.')'],JSON_UNESCAPED_UNICODE);
 }else{
@@ -49674,6 +49857,28 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.51', t:'🔧 پسوندِ کهنهٔ صفِ ارسال + بایگانیِ چندروشهِ باسلام', items:[
+    '❌ <b>مشکل ۱ (ارسال با پسوندِ قبلی):</b> تنظیماتِ هر ارسال (از جملهٔ',
+    '   پسوندِ عنوان) در لحظهٔ صف‌سازی روی خودِ ردیفِ صف ذخیره می‌شود و یک',
+    '   محافظ «ردیفِ تکراری دوباره نساز» تا ۲ ساعت جلوی صف‌سازیِ دوباره را می‌گیرد.',
+    '   نتیجه: وقتی پسوند را درست کردید، در «نتایج» پسوندِ درست دیده می‌شد ولی صف',
+    '   همان ردیفِ کهنه را داشت و ارسال با پسوندِ قبلی ادامه می‌یافت.',
+    '✅ <b>چه شد:</b> حالا اگر تنظیماتِ اثرگذار بر ارسال (پسوندِ عنوان، دسته،',
+    '   «فقط تغییرات»، ارسال به همهٔ غرفه‌ها) عوض شده باشند، ردیفِ قدیمیِ',
+    '   منتظر/توقف‌خورده خودکار «جایگزین شد» می‌شود (در تبِ «ارسال» با علتش) و',
+    '   ردیفِ تازه با تنظیماتِ درست ساخته می‌شود — برای باسلام و ووکامرس.',
+    '❌ <b>مشکل ۲ (بایگانی و حذفِ تکراری‌ها با ۴۲):</b> بایگانی در باسلام یعنی',
+    '   «تغییر وضعیت» به ۴۱۴ (API حذفِ واقعی ندارد) و قبلاً فقط یک PATCHِ',
+    '   فقط-وضعیت می‌زدیم که در نصبِ شما ۴۲۲ می‌گرفت.',
+    '✅ <b>چه شد:</b> حالا سه روش به‌ترتیب امتحان می‌شود: (۱) PATCH فقط-وضعیت،',
+    '   (۲) PATCH با پیلودِ کامل (داده‌های جاریِ محصول + وضعیتِ جدید — همان',
+    '   الگویی که آپدیتِ همگام‌سازی با موفقیت انجام می‌دهد)، (۳) اندپوینتِ',
+    '   اختصاصیِ archive اگر API داشته باشد. اگر باز هم نشد، پیامِ خطا',
+    '   <b>دقیقاً می‌گوید کدام روش‌ها با چه کدی امتحان شده‌اند</b> + جزئیاتِ ۴۲۲',
+    '   را نشان می‌دهد؛ لطفاً متنِ همان خطا را بفرستید تا روشِ درستِ نصبِ شما را',
+    '   دقیق تنظیم کنیم. این مسیرِ جدید هم بایگانیِ دستی و هم حذفِ تکراری‌ها را',
+    '   می‌پوشاند.',
+  ]},
   {v:'10.50', t:'🖥️ ارسالِ همگام‌سازیِ دستی، کاملاً سرورساید — دیگر لازم نیست تب را باز نگه دارید', items:[
     '❌ <b>نقصِ نسخهٔ قبل:</b> v10.49 ارسال را به اتصالِ همین تبِ مرورگر گره',
     '   زده بود — تا تب باز باشد ارسال پیش می‌رفت و «تب را باز نگه دارید»',
@@ -60086,7 +60291,8 @@ function renderWooQueue(q){
         }else if(e.status==='waiting'){
             progText=toFa(e.total)+' محصول — منتظر شروع';
         }else if(e.status==='failed'){
-            progText='❌ '+toFa(e.failed)+' خطا';
+            /* v10.51 (۶۵): اگر ردیف به‌خاطرِ تغییرِ تنظیمات جایگزین شده، علت را نشان بده */
+            progText=(e.fail_reason?('⚠ '+esc(e.fail_reason)+' — '):'')+'❌ '+toFa(e.failed)+' خطا';
         }
         html+='<div style="cursor:pointer;padding:8px 10px;border:1px solid #334155;border-radius:8px;margin:4px 0;background:'+statusBg[e.status]+';transition:background 0.2s" onmouseover="this.style.borderColor=\'#a78bfa\'" onmouseout="this.style.borderColor=\'#334155\'">';
         html+='<div style="display:flex;justify-content:space-between;align-items:center">';
