@@ -262,7 +262,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.42';
+const APP_VERSION = '10.43';
 const APP_VERSION_DATE = '1405/06/03';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -23061,6 +23061,38 @@ if (isset($_GET['selftest'])) {
 
     $add('10.42', 'شکستِ کامل در نوار وضعیت پنهان نمی‌ماند',
          strpos($selfSrc, "else if((st.failed||0)>0)E('SS').textContent='✗ هیچ موردی '+VV+' نشد") !== false);
+
+    /* ============ ۵۷ — دکمهٔ «حذفِ همهٔ موارد نشان‌داده‌شده» ============ */
+
+    $add('10.43', 'رندرِ گزارش و حافظهٔ دکمه از هم جدا نمی‌افتند',
+         (strpos($selfSrc, 'function ddRenderReport(d){') !== false
+          && preg_match('~function ddRenderReport\(d\)\{.{0,900}?ddLastResult\s*=\s*d;~su', $selfSrc) === 1));
+
+    $add('10.43', 'حذفِ همه دیگر با return بی‌صدا شروع نمی‌شود',
+         (strpos($selfSrc, 'function ddDeleteAllFromReport(){') !== false
+          && strpos($selfSrc, 'function ddDeleteAllFromReport(){' . "\n" . '    if(!ddLastResult)return;') === false));
+
+    $add('10.43', 'اگر حافظه خالی بود، گزارش از سرور دوباره گرفته می‌شود',
+         (preg_match('~function ddDeleteAllFromReport\(\)\{.{0,1400}?dedup_result=1~su', $selfSrc) === 1
+          && strpos($selfSrc, 'گزارشی در دسترس نیست') !== false));
+
+    $add('10.43', 'بدنهٔ واقعیِ حذفِ همه در تابعِ جدا و سقف‌آگاه است',
+         (strpos($selfSrc, 'function ddDelAllWith(d){') !== false
+          && strpos($selfSrc, 'const CAP=200,go=ids.slice(0,CAP),rest=ids.length-go.length;') !== false));
+
+    $add('10.43', 'گروهِ بدونِ فهرستِ حذف، دکمه را با خطا نمی‌شکند',
+         (strpos($selfSrc, '((d&&d.duplicates_list)||[]).forEach(g=>((g&&g.drop)||[]).forEach(') !== false
+          && strpos($selfSrc, "(g.drop||[]).forEach(p=>{") !== false));
+
+    $add('10.43', 'خواندنِ ناموفقِ گزارش دیگر خاموش نیست',
+         (preg_match('~function ddFetchResult\(\)\{.{0,700}?if\(!d\|\|!d\.ok\)\{~su', $selfSrc) === 1
+          && strpos($selfSrc, 'خطا در خواندنِ گزارش') !== false));
+
+    $add('10.43', 'بازکردنِ گزارش از مدیرِ وظایف، نتیجه را هم بار می‌کند',
+         (preg_match('~function dedupOpenLast\(\)\{.{0,1400}?ddFetchResult\(\)~su', $selfSrc) === 1));
+
+    $add('10.43', 'شناسه‌های تکراری در فهرستِ حذف یک‌بار شمرده می‌شوند',
+         strpos($selfSrc, 'if(id>0&&ids.indexOf(id)<0)ids.push(id);') !== false);
 
 
     $add('10.23', 'دکمهٔ تکراری‌های باسلام در تبِ ارسال هم هست',
@@ -48744,6 +48776,28 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.43', t:'🗑 دکمهٔ «حذفِ همهٔ موارد نشان‌داده‌شده» دیگر بی‌صدا نمی‌مانَد', items:[
+    '❌ <b>مشکل:</b> در بخشِ تکراری‌ها، فهرستِ گروه‌ها درست نشان داده می‌شد، ولی',
+    '   با زدنِ دکمهٔ «حذفِ همهٔ موارد نشان‌داده‌شده» <b>هیچ اتفاقی نمی‌افتاد</b>:',
+    '   نه چیزی بایگانی می‌شد، نه پیامی، نه نوارِ پیشرفتی، نه حتی خطایی.',
+    '🔍 <b>چرا؟</b> برنامه گزارش را در دو جای جدا نگه می‌داشت: یکی چیزی که روی',
+    '   صفحه <b>می‌دیدید</b> و یکی نسخهٔ درونی که دکمه از آن می‌خواند. این دو',
+    '   می‌توانستند از هم جدا بیفتند — مثلاً وقتی پنل را می‌بستید و باز می‌کردید،',
+    '   یا صفحه را تازه می‌کردید، یا از «مدیرِ وظایف» به گزارش برمی‌گشتید. آن‌وقت',
+    '   فهرست روی صفحه بود ولی نسخهٔ درونی <b>خالی</b> بود، و اولین خطِ دکمه دقیقاً',
+    '   در همین حالت بدونِ هیچ پیامی از کار برمی‌گشت.',
+    '✅ <b>چه چیزی درست شد:</b>',
+    '   • هر بار که گزارش روی صفحه رندر می‌شود، همان لحظه نسخهٔ درونی هم ست',
+    '     می‌شود؛ پس آنچه می‌بینید همیشه همانی است که دکمه می‌بیند.',
+    '   • اگر باز هم نسخهٔ درونی خالی بود، دکمه به‌جای سکوت، گزارش را <b>از سرور</b>',
+    '     دوباره می‌گیرد و کار را ادامه می‌دهد.',
+    '   • اگر هیچ گزارشی در دسترس نبود، پیامِ روشن می‌بینید:',
+    '     «گزارشی در دسترس نیست — یک‌بار گزارشِ تکراری‌ها را بگیرید».',
+    '   • بازکردنِ گزارش از «مدیرِ وظایف» حالا خودش گزارشِ ذخیره‌شده را بارگذاری می‌کند.',
+    '   • سقفِ ۲۰۰ موردی در هر درخواست دیگر پنهان نیست: اگر بیشتر بود، در همان',
+    '     پیامِ تأیید می‌گوید چند مورد این دور می‌رود و چند مورد باقی می‌مانَد.',
+    '   • گروهِ ناقص (بدونِ فهرستِ حذف) دیگر کلِ دکمه را با خطا از کار نمی‌اندازد.',
+  ]},
   {v:'10.42', t:'🗃 دکمهٔ «بایگانیِ تکراری‌ها» بالاخره واقعاً کار می‌کند', items:[
     '❌ <b>مشکل:</b> در گزارشِ محصولاتِ تکراریِ باسلام، اسکن درست کار می‌کرد و مثلاً',
     '   ۴۰ نسخهٔ اضافی پیدا می‌کرد؛ ولی وقتی دکمهٔ حذف را می‌زدید، <b>هیچ محصولی</b>',
@@ -59011,10 +59065,15 @@ function toggleWooDedup(){
    باسلام کار می‌کرد به پنلِ ووکامرس می‌رفت و فکر می‌کرد پرش غلط است. */
 function dedupOpenLast(){
     fetch('?dedup_status=1').then(r=>r.json()).then(st=>{
+        /* v10.43 (۵۷): پس از بازکردنِ پنل، گزارشِ روی دیسک هم بارگذاری شود.
+           این تابع فقط پنل را باز می‌کرد و ddFetchResult را صدا نمی‌زد، پس
+           مسیرِ «ادامه از مدیرِ وظایف» گزارش را بدونِ state نشان می‌داد. */
         if(st&&st.target==='bsl'){ if(typeof bslFindDuplicates==='function')bslFindDuplicates(); return; }
         if(typeof toggleBslTools==='function'){const b=$('bslToolsBody');if(b&&b.style.display==='block')toggleBslTools();}
         const body=$('wooDedupBody');
         if(body&&body.style.display!=='block'&&typeof toggleWooDedup==='function')toggleWooDedup();
+        ddTarget='woo';
+        if(st&&st.has_result&&typeof ddFetchResult==='function')ddFetchResult();
     }).catch(()=>{ if(typeof toggleWooDedup==='function'){const b=$('wooDedupBody');if(b&&b.style.display!=='block')toggleWooDedup();} });
 }
 
@@ -59724,10 +59783,17 @@ function ddFinish(){
 }
 
 function ddFetchResult(){
-    fetch('?dedup_result=1').then(r=>r.json()).then(d=>{
-        if(!d||!d.ok)return;
-        ddLastResult=d;ddRenderReport(d);
-    }).catch(()=>{});
+    return fetch('?dedup_result=1').then(r=>r.json()).then(d=>{
+        /* v10.43 (۵۷): شکست دیگر بی‌صدا نیست — قبلاً اینجا خاموش return
+           می‌شد و ddLastResult خالی می‌ماند و دکمهٔ حذفِ همه مرده می‌شد. */
+        if(!d||!d.ok){
+            const E=ddEl;const ss=E&&E('SS');
+            const m=(d&&d.error)||'گزارشی در دسترس نیست';
+            if(ss)ss.textContent='✗ '+m;else showToast('✗ '+m,1);
+            return null;
+        }
+        ddLastResult=d;ddRenderReport(d);return d;
+    }).catch(e=>{showToast('✗ خطا در خواندنِ گزارش: '+(e&&e.message||e),1);return null;});
 }
 
 function ddStatusBadge(p){
@@ -60233,6 +60299,13 @@ function agRenderReport(rep) {
 
 function ddRenderReport(d){
     const E=ddEl;const host=E('Report');if(!host)return;
+    /* v10.43 (۵۷): هرچه رندر می‌شود همان‌جا در state هم می‌نشیند.
+       پیش‌تر ddLastResult فقط داخلِ ddFetchResult پر می‌شد و اگر گزارش از
+       مسیرِ دیگری رندر می‌شد (بازکردنِ دوبارهٔ پنل، از دست رفتنِ polling،
+       ddStart که آن را null می‌کرد و هرگز به done نمی‌رسید) کاربر فهرست را
+       می‌دید ولی دکمهٔ «حذفِ همه» روی یک stateِ خالی می‌نشست و بی‌صدا
+       return می‌کرد — «هیچ اتفاقی نمی‌افتد». */
+    ddLastResult=d;
     const list=d.duplicates_list||[];
     if(!list.length){host.innerHTML=ddPartialHtml(d)+'<div style="color:#4ade80;font-size:12px;padding:8px">✓ هیچ محصولِ تکراری‌ای پیدا نشد.</div>';return;}
     let h=ddPartialHtml(d)
@@ -60245,7 +60318,7 @@ function ddRenderReport(d){
         h+='<div style="border-bottom:1px solid #1e293b;padding:6px 8px">';
         h+='<div style="color:#e2e8f0;font-size:11px;font-weight:700;margin-bottom:3px">'+esc(g.normalized)+' <span style="color:#f97316">×'+toFa(g.count)+'</span>'+(g.vendor_name?' <span style="color:#38bdf8;font-weight:400">🏪 '+esc(g.vendor_name)+'</span>':'')+'</div>';
         h+='<div style="font-size:10px;color:#4ade80;padding:2px 6px">✅ می‌ماند: #'+toFa(g.keep.id)+' — '+esc(g.keep.name)+' · '+toFa(g.keep.price)+' · '+ddStatusBadge(g.keep)+'</div>';
-        g.drop.forEach(p=>{
+        (g.drop||[]).forEach(p=>{
             h+='<div style="font-size:10px;color:#fca5a5;padding:2px 6px;display:flex;justify-content:space-between;align-items:center">'
               +'<span>🗑 #'+toFa(p.id)+' — '+esc(p.name)+' · '+toFa(p.price)+' · '+ddStatusBadge(p)+'</span>'
               +'<button class="btn btn-red" style="font-size:9px;padding:1px 6px" onclick="ddDeleteIds(['+p.id+'])">حذف</button></div>';
@@ -60257,11 +60330,36 @@ function ddRenderReport(d){
 }
 
 function ddDeleteAllFromReport(){
-    if(!ddLastResult)return;
-    const ids=[];(ddLastResult.duplicates_list||[]).forEach(g=>g.drop.forEach(p=>ids.push(p.id)));
+    /* v10.43 (۵۷): این تابع قبلاً با `if(!ddLastResult)return;` شروع می‌شد و
+       این تنها مسیرِ کاملاً بی‌صدای دکمه بود: نه toast، نه لاگ، نه هیچ
+       نشانه‌ای. حالا اگر state خالی بود، به‌جای مردن، گزارش را از سرور
+       (?dedup_result=1) دوباره می‌گیریم و بعد ادامه می‌دهیم؛ اگر آن هم
+       نبود، پیامِ روشن می‌دهیم. */
+    if(ddLastResult){ddDelAllWith(ddLastResult);return;}
+    showToast('⏳ گزارش را از سرور می‌گیرم…');
+    fetch('?dedup_result=1').then(r=>r.json()).then(d=>{
+        if(!d||!d.ok||!(d.duplicates_list||[]).length){
+            showToast('❌ گزارشی در دسترس نیست — یک‌بار «گزارشِ تکراری‌ها» را بگیرید',1);return;
+        }
+        ddLastResult=d;ddRenderReport(d);ddDelAllWith(d);
+    }).catch(e=>{showToast('❌ خطا در گرفتنِ گزارش: '+(e&&e.message||e),1);});
+}
+
+/* v10.43 (۵۷): بدنهٔ واقعیِ «حذفِ همه» — از state یا از گزارشِ تازه‌گرفته‌شده */
+function ddDelAllWith(d){
+    const ids=[];
+    ((d&&d.duplicates_list)||[]).forEach(g=>((g&&g.drop)||[]).forEach(p=>{
+        const id=parseInt(p&&p.id,10);if(id>0&&ids.indexOf(id)<0)ids.push(id);
+    }));
     if(!ids.length){showToast('چیزی برای حذف نیست');return;}
-    if(!confirm(toFa(ids.length)+' محصول '+(ddTarget==='bsl'?'بایگانی':'حذف')+' می‌شود. مطمئنید؟'))return;
-    ddDeleteIds(ids);
+    const V=(ddTarget==='bsl'?'بایگانی':'حذف');
+    /* سقفِ سمتِ سرور ۲۰۰ شناسه در هر درخواست است؛ اگر بیشتر بود کاربر باید
+       بداند این دور فقط بخشی را می‌برد، نه اینکه بی‌خبر ۲۰۱ به بعد گم شود. */
+    const CAP=200,go=ids.slice(0,CAP),rest=ids.length-go.length;
+    if(!confirm(toFa(go.length)+' محصول '+V+' می‌شود'
+        +(rest>0?(' (از '+toFa(ids.length)+' مورد؛ '+toFa(rest)+' موردِ باقی‌مانده را با زدنِ دوبارهٔ همین دکمه ادامه دهید)'):'')
+        +'. مطمئنید؟'))return;
+    ddDeleteIds(go);
 }
 
 /**
