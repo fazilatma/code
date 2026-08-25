@@ -272,8 +272,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.59';
-const APP_VERSION_DATE = '1405/06/07';
+const APP_VERSION = '10.60';
+const APP_VERSION_DATE = '1405/06/08';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -19323,6 +19323,9 @@ if (isset($_GET['bsl_chats'])) {
                 'unseen'       => $ncMR['unseen'],
                 'updated_at'   => $ncMR['updated_at'],
                 'last_is_mine' => ($myIdMR > 0 && (int)($lmMR['sender']['id'] ?? 0) === $myIdMR),
+                /* v10.60 (۷۴): شناسهٔ آخرین پیام — مبنای کشفِ پیامِ تازهٔ مشتری
+                   برای نوتیفیکیشنِ زنده (کارتِ سوایپ‌شونده). */
+                'last_msg_id'  => (int)($lmMR['id'] ?? 0),
                 'shop'         => (int)$shMR['shop'],
                 'shop_name'    => $shMR['name'],
                 'vendor_id'    => (int)$shMR['vendor_id'],
@@ -23751,6 +23754,19 @@ if (isset($_GET['selftest'])) {
     $add('10.44', 'نتایجِ جست‌وجو شناسهٔ تکراری ندارند',
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
+
+    /* ==== ۷۴ (v10.60) ==== */
+    $add('10.60', 'نسخهٔ ۱۰.۶۰',
+         str_contains($selfSrc, "const APP_VERSION = '10.60';"));
+    $add('10.60', 'نوتیفِ زندهٔ پیامِ مشتری: کشفِ سرور + کارتِ سوایپ‌شونده',
+         (strpos($selfSrc, "'last_msg_id'  => (int)(\$lmMR['id'] ?? 0),") !== false
+          && strpos($selfSrc, 'function mrNotifPoll(){') !== false
+          && strpos($selfSrc, 'function mrNotifSwipe(card,n){') !== false
+          && strpos($selfSrc, 'function mrNotifReply(n){') !== false
+          && strpos($selfSrc, 'setInterval(mrNotifPoll,5000);') !== false
+          && strpos($selfSrc, 'mrNotifHost') !== false
+          && strpos($selfSrc, '@keyframes mrNotifIn') !== false
+          && strpos($selfSrc, 'mr_notif_seen') !== false));
 
     /* ==== ۷۳ (v10.59) ==== */
     $add('10.59', 'نسخهٔ ۱۰.۵۹',
@@ -43596,6 +43612,9 @@ html[data-skin="gloss"] .progress-bar{
   #mrListWrap,#mrThread{flex:1 1 100%!important;min-width:0!important}
   #mrMsgs{height:320px}
 }
+/* v10.60 (۷۴): نوتیفِ زندهٔ پیامِ مشتری — ورودِ کارت و نوارِ منقضی‌شدن */
+@keyframes mrNotifIn{from{transform:translateX(-125%);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes mrNotifFade{from{width:100%}to{width:0%}}
 </style>
 </head>
 <body>
@@ -50871,6 +50890,10 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.60', t:'🔔 نوتیفِ زندهٔ پیام‌های مشتری — با سوایپِ راست، پاسخ!', items:[
+    '💬 <b>با هر پیامِ تازهٔ مشتری</b> (از هر غرفه) یک کارتِ شیک با نام، غرفه، متن و زمان روی صفحه بالا می‌آید — با صدایِ ملایمِ «دینگ» و انیمیشنِ ورود.',
+    '👉 <b>سوایپِ راست</b> = اتاقِ چت روی همان گفتگو باز می‌شود و تکست‌باکسِ پاسخ فوکوس می‌شود — مستقیم تایپ کنید. <b>سوایپِ چپ</b> = کارت بسته می‌شود. (دکمه‌های 💬 / ✕ هم هستن برای موس.)',
+    '🧠 هوشمند: پیام‌های قدیمی نوتیف نمی‌کنند؛ اگر گفتگو را خودتان باز داشته باشید نوتیف تکرار نمی‌شود؛ پیام‌های تازهٔ زمانِ نبودتان با بازگشت می‌آیند؛ کارت تا ۳۰ ثانیه می‌ماند (نوارِ پایین) و با پیامِ بعدیِ همان مشتری تازه می‌شود.'],},
   {v:'10.59', t:'🚑 بازسازیِ خودکارِ ارسالِ گیرکرده + بستنِ خودکارِ وظیفهٔ تمام‌شده', items:[
     '🧊 <b>رفعِ «ارسال بعد از آخرین محصول فریز می‌ماند»:</b> وقتی وِرکرِ ارسال توسط هاست کشته می‌شد، ردیف تا ابد «در حال ارسال» می‌ماند و فقط دکمهٔ توقف آن را (و هم به اشتباه) می‌بست. حالا ردیفی که کارش تمام شده ولی بسته نشده — آخرین محصول فرستاده شده، «current» به «total» رسیده — به‌محضِ اولینِ بازدیدِ رابط (هر ۲ ثانیه) خودکار «تمام شد» علامت می‌خورد.',
     '🔁 <b>بازسازیِ خودکارِ بدونِ وابستگیِ به کران:</b> پویینگِ تبِ ارسال (هر ۲ ثانیه) حالا موتورِ بازیابیِ صف است: اگر صف گیر کرده باشد — ردیفِ در حالِ اجرای بی‌حرکت یا ردیفِ منتظرِ بی‌پردازنده — پردازنده خودکار از چک‌پوینت دوباره راه می‌افتد؛ حتی اگر کرانِ هاست اصلاً کار نکند. کول‌داونِ ۱۲۰ ثانیه‌ای و قفلِ flock جلوی تکرار و تداخل را می‌گیرند.',
@@ -54904,6 +54927,216 @@ async function mrSend(){
 /* v10.57 (۷۱): ضربانِ سراسریِ ۱ ثانیه‌ای — فقط وقتی اتاقِ چت باز است و تب
    دیده می‌شود درخواست می‌فرستد (وگرنه بلافاصله برمی‌گردد). */
 setInterval(mrPoll,1000);
+
+/* =====================================================================
+   v10.60 (۷۴): نوتیفیکیشنِ زندهٔ پیام‌های تازهٔ مشتری
+   ---------------------------------------------------------------------
+   با رسیدنِ هر پیامِ جدیدِ مشتری (از هر غرفه) یک کارتِ شیک بالا می‌آید:
+     • سوایپِ چپ   ⇒ بسته می‌شود
+     • سوایپِ راست ⇒ اتاقِ چت روی همان گفتگو باز می‌شود و تکست‌باکسِ
+       پاسخ فوکوس می‌شود — آمادهٔ تایپ (دکمه‌های ✕ / 💬 هم هستن).
+   کشف: هر ۵ ثانیه (و بی‌وابستگی به باز بودنِ اتاقِ چت) فهرستِ گفتگوها
+   خوانده می‌شود (کشِ ۲ ثانیه‌ایِ سرور، ارزان) و «شناسهٔ آخرین پیامِ
+   مشتری» هر گفتگو با دفعهٔ قبل (localStorage) مقایسه می‌شود. اولین
+   بار بی‌صدا seed می‌شود تا پیام‌های قدیمی نوتیف نکنند؛ پیام‌های تازهٔ
+   زمانِ نبودِ کاربر در نوبتِ اولِ بازگشت می‌آیند. اگر کاربر خودش آن
+   گفتگو را باز داشته باشد، نوتیف نمی‌آید ولی «دیده‌شده» به‌روز می‌شود
+   تا بعد از بستنِ اتاق، بارِ نوتیفِ قدیمی نداند.
+   ===================================================================== */
+let MR_NOTIFS=[];
+let MR_SEEN={};
+let MR_NOTIF_BOOTED=false;
+const MR_NOTIF_TTL=30000;
+function mrNotifLoad(){try{return JSON.parse(localStorage.getItem('mr_notif_seen')||'{}')||{};}catch(e){return{};}}
+function mrNotifSave(){try{localStorage.setItem('mr_notif_seen',JSON.stringify(MR_SEEN));}catch(e){}}
+function mrNotifDing(){
+  try{
+    const AC=window.AudioContext||window.webkitAudioContext; if(!AC)return;
+    const C=new AC(); const t=C.currentTime;
+    const o=C.createOscillator(),g=C.createGain();
+    o.type='sine';
+    o.frequency.setValueAtTime(740,t);
+    o.frequency.exponentialRampToValueAtTime(1180,t+0.08);
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(0.10,t+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+0.45);
+    o.connect(g);g.connect(C.destination);o.start(t);o.stop(t+0.5);
+    setTimeout(()=>{try{C.close();}catch(e){}},800);
+  }catch(e){}
+}
+function mrNotifLabel(t){
+  return ({picture:'🖼 تصویر',gallery:'🖼 تصاویر',voice:'🎤 پیامِ صوتی',video:'🎬 ویدیو',
+    location:'📍 موقعیت',sticker:'😀 استیکر',file:'📄 فایل',voice_call_phone:'📞 تماس',
+    agreement:'📝 توافق‌نامه'})[t]||null;
+}
+function mrNotifText(c){
+  const t=String(c.text||'').trim();
+  if(!t)return'—';
+  const m=t.match(/^\[([a-z_]+)\]$/);
+  if(m)return mrNotifLabel(m[1])||t;
+  return t;
+}
+function mrNotifHost(){
+  let h=$('mrNotifHost');
+  if(!h){
+    h=document.createElement('div');h.id='mrNotifHost';
+    h.style.cssText='position:fixed;top:66px;left:14px;z-index:9500;display:flex;flex-direction:column;gap:10px;width:322px;max-width:calc(100vw - 28px)';
+    document.body.appendChild(h);
+  }
+  return h;
+}
+function mrNotifInitial(who){
+  const w=String(who||'م').replace(/[«»"\s]/g,'').trim();
+  return w?w.slice(0,1):'م';
+}
+function mrNotifClose(el){
+  const i=MR_NOTIFS.findIndex(x=>x.el===el); if(i<0)return;
+  const n=MR_NOTIFS[i]; MR_NOTIFS.splice(i,1);
+  if(n.timer)clearTimeout(n.timer);
+  if(el){
+    el.style.transition='transform .3s ease,opacity .3s ease';
+    el.style.transform='translateX(-130%) rotate(-5deg)';
+    el.style.opacity='0';
+    setTimeout(()=>{el.remove();},320);
+  }
+}
+function mrNotifReply(n){
+  const i=MR_NOTIFS.findIndex(x=>x.chat_id===n.chat_id);
+  if(i>=0){
+    const el=MR_NOTIFS[i].el; MR_NOTIFS.splice(i,1);
+    if(n.timer)clearTimeout(n.timer);
+    if(el){
+      el.style.transition='transform .3s ease,opacity .3s ease';
+      el.style.transform='translateX(130%) rotate(5deg)';
+      el.style.opacity='0';
+      setTimeout(()=>{el.remove();},320);
+    }
+  }
+  const body=$('mrBody');
+  const hdr=body?body.previousElementSibling:null;
+  if(hdr&&!hdr.classList.contains('open'))toggleSmenu(hdr);
+  mrOpenChat(n.chat_id,n.shop||1);
+  setTimeout(()=>{const t=$('mrText');if(t){t.focus();t.scrollIntoView({block:'nearest'});}},500);
+}
+function mrNotifPush(c){
+  let n=MR_NOTIFS.find(x=>x.chat_id===c.chat_id);
+  if(n){
+    /* همان گفتگو دوباره پیام داد — کارتِ موجود تازه شود، نوتیف دوم نرود */
+    n.text=mrNotifText(c);
+    const tx=n.el.querySelector('.mrntext'); if(tx)tx.textContent=n.text;
+    const tt=n.el.querySelector('.mrntime'); if(tt)tt.textContent='همین حالا';
+    const bar=n.el.querySelector('.mrnbar');
+    if(bar){bar.style.animation='none'; void bar.offsetHeight; bar.style.animation='';}
+    if(n.timer)clearTimeout(n.timer);
+    n.timer=setTimeout(()=>mrNotifClose(n.el),MR_NOTIF_TTL);
+    return;
+  }
+  const host=mrNotifHost();
+  const col=MR_COLORS[(((c.chat_id||1)+((c.shop||1)-1)*3))%MR_COLORS.length];
+  const shopCol=mrShopColor(c.shop||1);
+  const card=document.createElement('div');
+  card.style.cssText='position:relative;overflow:hidden;border-radius:14px;border:1px solid #334155;background:linear-gradient(135deg,#111d36 0%,#0d1526 75%);box-shadow:0 12px 30px rgba(0,0,0,.45);cursor:grab;user-select:none;-webkit-user-select:none;touch-action:pan-y;animation:mrNotifIn .38s cubic-bezier(.2,.9,.3,1.2)';
+  card.innerHTML=
+    '<div style="display:flex;align-items:center;gap:9px;padding:11px 12px 7px">'+
+      '<div style="width:37px;height:37px;flex:0 0 auto;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;color:#0b1220;background:'+col+';box-shadow:0 0 0 2px '+col+'55">'+esc(mrNotifInitial(c.who))+'</div>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="display:flex;align-items:center;gap:6px">'+
+          '<b style="font-size:12px;color:#f1f5f9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.who)+'</b>'+
+          '<span style="font-size:9px;color:'+shopCol+';border:1px solid '+shopCol+'66;border-radius:8px;padding:0 5px;flex:0 0 auto" title="غرفهٔ '+toFa(c.shop||1)+'">'+esc(c.shop_name||('غرفهٔ '+toFa(c.shop||1)))+'</span>'+
+        '</div>'+
+        '<div class="mrntime" style="font-size:9.5px;color:#64748b;margin-top:2px">'+mrRelTime(c.updated_at)+'</div>'+
+      '</div>'+
+      '<button class="mrnbtn-close" style="flex:0 0 auto;background:none;border:none;color:#475569;font-size:13px;cursor:pointer;padding:2px 4px" title="بستن">✕</button>'+
+    '</div>'+
+    '<div class="mrntext" style="font-size:11.5px;color:#cbd5e1;line-height:1.8;padding:0 12px 8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">'+esc(mrNotifText(c))+'</div>'+
+    '<div style="display:flex;align-items:center;gap:8px;padding:7px 12px;background:#0b122066;border-top:1px solid #1e293b">'+
+      '<button class="mrnbtn-reply" style="flex:0 0 auto;background:#059669;border:none;color:#fff;font-size:10.5px;font-weight:700;border-radius:8px;padding:4px 11px;cursor:pointer">💬 پاسخ</button>'+
+      '<span class="mrnhint" style="flex:1;text-align:center;font-size:9px;color:#475569">⬅ بستن · پاسخ ➡</span>'+
+    '</div>'+
+    '<div class="mrnbar" style="position:absolute;bottom:0;right:0;height:3px;width:100%;background:linear-gradient(90deg,'+col+'99,'+col+'22);animation:mrNotifFade '+MR_NOTIF_TTL+'ms linear forwards"></div>';
+  host.appendChild(card);
+  n={el:card, chat_id:c.chat_id, shop:c.shop||1, text:mrNotifText(c), timer:null};
+  n.timer=setTimeout(()=>mrNotifClose(card),MR_NOTIF_TTL);
+  MR_NOTIFS.push(n);
+  const bc=card.querySelector('.mrnbtn-close'); if(bc)bc.addEventListener('click',e=>{e.stopPropagation();mrNotifClose(card);});
+  const br=card.querySelector('.mrnbtn-reply'); if(br)br.addEventListener('click',e=>{e.stopPropagation();mrNotifReply(n);});
+  mrNotifSwipe(card,n);
+  while(MR_NOTIFS.length>4){const old=MR_NOTIFS.shift(); if(old)mrNotifClose(old.el);}
+  mrNotifDing();
+}
+function mrNotifSwipe(card,n){
+  let sx=0,dx=0,drag=false;
+  card.addEventListener('pointerdown',e=>{
+    if(e.target.closest('button'))return;
+    drag=true;sx=e.clientX;dx=0;
+    card.style.transition='none';card.style.cursor='grabbing';
+    const bar=card.querySelector('.mrnbar'); if(bar)bar.style.animationPlayState='paused';
+    try{card.setPointerCapture(e.pointerId);}catch(err){}
+    e.preventDefault();
+  });
+  card.addEventListener('pointermove',e=>{
+    if(!drag)return;
+    dx=e.clientX-sx;
+    card.style.transform='translateX('+dx+'px) rotate('+(dx/38)+'deg)';
+    card.style.opacity=String(Math.max(0.55,1-Math.abs(dx)/320));
+    const hint=card.querySelector('.mrnhint');
+    if(hint)hint.textContent=dx>45?'↩️ بکش برای پاسخ به مشتری':(dx<-45?'بستن ⇠':'⬅ بستن · پاسخ ➡');
+  });
+  const up=()=>{
+    if(!drag)return;drag=false;
+    card.style.cursor='grab';
+    const bar=card.querySelector('.mrnbar'); if(bar)bar.style.animationPlayState='running';
+    if(dx>85){mrNotifReply(n);return;}
+    if(dx<-85){mrNotifClose(card);return;}
+    card.style.transition='transform .28s cubic-bezier(.2,.9,.3,1.3),opacity .28s ease';
+    card.style.transform='';card.style.opacity='';
+    const hint=card.querySelector('.mrnhint');
+    if(hint)hint.textContent='⬅ بستن · پاسخ ➡';
+    dx=0;
+  };
+  card.addEventListener('pointerup',up);
+  card.addEventListener('pointercancel',up);
+}
+async function mrNotifFetch(){
+  const d=await fetch('?bsl_chats=1&limit=30&shop=0').then(r=>r.json()).catch(()=>null);
+  return (d&&d.ok)?d:null;
+}
+async function mrNotifPoll(){
+  if(document.visibilityState!=='visible')return;
+  const d=await mrNotifFetch(); if(!d)return;
+  const chats=d.chats||[];
+  if(!MR_NOTIF_BOOTED){
+    /* seedِ بی‌صدا: پیام‌های قبلی نوتیف نمی‌کنند؛ اما اگر در localStorage
+       شناسهٔ قدیمی‌تری داشته باشیم (بازدیدِ قبل)، پیام‌های تازهٔ زمانِ
+       نبود در اولین پویینگ می‌آیند. */
+    MR_SEEN=Object.assign({},mrNotifLoad());
+    chats.forEach(c=>{
+      const key=c.shop+':'+c.chat_id;
+      if(!c.last_is_mine&&(c.last_msg_id>0)&&(MR_SEEN[key]==null))MR_SEEN[key]=c.last_msg_id;
+    });
+    MR_NOTIF_BOOTED=true;mrNotifSave();return;
+  }
+  const reading=(mrBodyOpen()&&MR_CHAT)?MR_CHAT.id:0;
+  chats.forEach(c=>{
+    const key=c.shop+':'+c.chat_id;
+    const id=c.last_msg_id>0?c.last_msg_id:0;
+    if(c.chat_id<=0||id<=0)return;
+    if(c.chat_id===reading){
+      /* کاربر همین حالا دارد آن گفتگو را می‌خواند — فقط «دیده‌شده» را
+         به‌روز کن تا بعد از بستنِ اتاق، نوتیفِ عقب‌افتاده نداند. */
+      if(id>(MR_SEEN[key]||0))MR_SEEN[key]=id;
+      return;
+    }
+    if(!c.last_is_mine&&id>(MR_SEEN[key]||0)){
+      MR_SEEN[key]=id;
+      mrNotifPush(c);
+    }
+  });
+  mrNotifSave();
+}
+/* v10.60 (۷۴): ضربانِ ۵ ثانیه‌ای — با کشِ ۲ ثانیه‌ایِ سرور بسیار ارزان است */
+setTimeout(mrNotifPoll,2500);
+setInterval(mrNotifPoll,5000);
 
 function arRenderRules(){
   const box=$('arRules'); if(!box)return;
