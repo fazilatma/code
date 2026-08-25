@@ -267,7 +267,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.47';
+const APP_VERSION = '10.48';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -15011,6 +15011,48 @@ if (!empty($results_lockReaped)) $results['lock_reaped'] = true;
 // v10.21 (۳۴ج): نبضِ ابتدای اجرا در گزارش هم بماند
 if (!empty($results_heartbeat)) $results['heartbeat'] = $results_heartbeat;
 
+/* v10.48 (۶۲): اعلان‌ها و پاسخ خودکار «اولِ» کران، قبل از هر کار بلند.
+
+   دلایلش همان الگویی است که قبلاً برای نگهبان (۸.۹۷)، بکاپ (۹.۱۶) و
+   حلقهٔ جزئیات (۹.۲۰) استفاده شد: هاستِ شما پردازهٔ PHP را وسطِ اجرا
+   می‌کشد (پینگِ نبض خود می‌گوید: «اجرای قبلی نیمه‌کاره ماند»). اعلان‌ها
+   تا حالا در میانهٔ کران — بعد از تمامِ همگام‌سازی‌ها — اجرا می‌شدند،
+   یعنی دقیقاً بعد از همان جایی که پردژه کشته می‌شود؛ کاربر فقط پینگِ
+   «شروع شد» را می‌دید و هیچ اعلانی. حالا بررسیِ اعلان (سفارش، پیام،
+   محصول) و پاسخ خودکار — که هر دو سبک‌اند و فقط باسلام را می‌خوانند —
+   درست بعد از نبض و قبل از بکاپ/جزئیات/همگام‌سازی می‌نشینند؛ حتی اگر
+   هاست همین چند ثانیهٔ بعد پردژه را بکشد، اعلانِ همین دور رفته است. */
+/* v10.21 (۳۴ج): هر کارِ کران داخل try/catch.
+   ریشهٔ «اعلان دوره‌ای قطع شد» همین بود: پینگ آخرین کارِ کران است و هر
+   استثنایی در کارهای قبل از آن (اعلان‌ها، پاسخ خودکار، گزارش شبانه) کلِ
+   اجرا را می‌کشت — پس نه پینگ می‌رفت، نه cron_last_run نوشته می‌شد، و
+   کاربر فقط سکوت می‌دید. حالا هر کار جدا محافظت می‌شود و شکستِ یکی
+   بقیه را زمین نمی‌زند. */
+try {
+    $notifyResult = bslCheckNotifications($cn);
+    if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
+} catch (Throwable $e) {
+    $results['notifications'] = ['error' => mb_substr($e->getMessage(), 0, 200)];
+}
+
+// v8.64: پاسخ خودکار به پیام مشتریان — بعد از اعلان‌ها، تا اول خبر برسد
+// و بعد ربات جواب دهد. مهلت ادب داخل خود موتور رعایت می‌شود.
+if (arCfg($cn)['enabled']) {
+    try {
+        $arRes = autoReplyRun($cn, false);
+        if (!empty($arRes['replied']) || !empty($arRes['failed'])) {
+            $results['autoreply'] = ['replied' => (int)$arRes['replied'],
+                                     'failed' => (int)$arRes['failed'],
+                                     'checked' => (int)$arRes['checked']];
+            if (arCfg($cn)['notify'] && (int)$arRes['replied'] > 0) notifSend($cn, arMsg($arRes));
+        } elseif (!empty($arRes['error'])) {
+            $results['autoreply'] = ['error' => $arRes['error']];
+        }
+    } catch (Throwable $e) {
+        $results['autoreply'] = ['error' => $e->getMessage()];
+    }
+}
+
 /* =====================================================================
    v9.10: استخراج دوره‌ای جزئیات — حلقهٔ مستقل، قبل از همگام‌سازی.
 
@@ -15624,37 +15666,6 @@ try {
     foreach ($wd as $k => $v) { if (!empty($v) && empty($results[$k])) $results[$k] = $v; }
 } catch (Throwable $e) {
     $results['watchdog_error'] = mb_substr($e->getMessage(), 0, 200);
-}
-
-/* v10.21 (۳۴ج): هر کارِ کران داخل try/catch.
-   ریشهٔ «اعلان دوره‌ای قطع شد» همین بود: پینگ آخرین کارِ کران است و هر
-   استثنایی در کارهای قبل از آن (اعلان‌ها، پاسخ خودکار، گزارش شبانه) کلِ
-   اجرا را می‌کشت — پس نه پینگ می‌رفت، نه cron_last_run نوشته می‌شد، و
-   کاربر فقط سکوت می‌دید. حالا هر کار جدا محافظت می‌شود و شکستِ یکی
-   بقیه را زمین نمی‌زند. */
-try {
-    $notifyResult = bslCheckNotifications($cn);
-    if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
-} catch (Throwable $e) {
-    $results['notifications'] = ['error' => mb_substr($e->getMessage(), 0, 200)];
-}
-
-// v8.64: پاسخ خودکار به پیام مشتریان — بعد از اعلان‌ها، تا اول خبر برسد
-// و بعد ربات جواب دهد. مهلت ادب داخل خود موتور رعایت می‌شود.
-if (arCfg($cn)['enabled']) {
-    try {
-        $arRes = autoReplyRun($cn, false);
-        if (!empty($arRes['replied']) || !empty($arRes['failed'])) {
-            $results['autoreply'] = ['replied' => (int)$arRes['replied'],
-                                     'failed' => (int)$arRes['failed'],
-                                     'checked' => (int)$arRes['checked']];
-            if (arCfg($cn)['notify'] && (int)$arRes['replied'] > 0) notifSend($cn, arMsg($arRes));
-        } elseif (!empty($arRes['error'])) {
-            $results['autoreply'] = ['error' => $arRes['error']];
-        }
-    } catch (Throwable $e) {
-        $results['autoreply'] = ['error' => $e->getMessage()];
-    }
 }
 
 /* v10.05 (۱۹): زمان‌بندِ کارهای ایجنتی.
@@ -23236,6 +23247,17 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۶۲ (v10.48) ==== */
+    $add('10.48', 'نسخهٔ ۱۰.۴۸',
+         str_contains($selfSrc, "const APP_VERSION = '10.48';"));
+    $add('10.48.1', 'اعلان‌ها «اول»ِ کران اجرا می‌شوند (قبل از کارهای بلند)',
+         (preg_match('~^\s*\$notifyResult = bslCheckNotifications\(\$cn\);~m', $selfSrc) === 1)
+      && (strpos($selfSrc, "$notifyResult = bslCheckNotifications($cn);")
+          < strpos($selfSrc, '/* v9.16: بکاپ خودکار')));
+    $add('10.48.2', 'پینگِ نبض، آخرین بررسی ثبت‌شده را نشان می‌دهد (نه «اجرا نشد» غلط)',
+         str_contains($selfSrc, "\$_faHb = \$_ageHb < 90 ? \$_ageHb . ' ثانیه پیش'")
+      && str_contains($selfSrc, "if (!empty(\$results['heartbeat'])) {"));
+
     /* ==== ۶۱ (v10.47) ==== */
     $add('10.47', 'نسخهٔ ۱۰.۴۷',
          str_contains($selfSrc, "const APP_VERSION = '10.47';"));
@@ -27766,7 +27788,31 @@ function notifCronPing(array $cn, array $results, bool $force = false): array {
        با این، «چرا اعلانی نمی‌آید» دیگر گمان‌زنی نیست: خطِ
        «اعلان‌ها: ...» را از خودِ پینگ بخوانید. */
     $_nres = $results['notifications'] ?? null;
-    if (is_array($_nres) && !empty($_nres['skipped'])) {
+    /* v10.48 (۶۲): پینگِ نبض سرِ «شروع» اجرا می‌رود — بررسیٔ اعلان هنوز
+       در همین دور انجام نشده، پس نتیجهٔ «این» دور آنجا وجود ندارد.
+       پیامِ غلطِ «پیام‌رسان یا غرفه ندارد» را با وضعیتِ آخرین بررسیِ
+       ثبت‌شده عوض می‌کنیم — همان چیزی که کاربر برای قضاوت نیاز دارد. */
+    if (!empty($results['heartbeat'])) {
+        $_stHb = notifLoadState();
+        $_lrHb = (int)($_stHb['last_notif_run'] ?? 0);
+        if ($_lrHb > 0) {
+            $_ageHb = max(0, time() - $_lrHb);
+            $_faHb = $_ageHb < 90 ? $_ageHb . ' ثانیه پیش'
+                     : ($_ageHb < 5400 ? (int)round($_ageHb / 60) . ' دقیقه پیش'
+                                       : (int)round($_ageHb / 3600) . ' ساعت پیش');
+            $_seenHb = is_array($_stHb['last_notif_seen'] ?? null) ? $_stHb['last_notif_seen'] : [];
+            $_pendHb = (int)($_stHb['last_notif_pending'] ?? 0);
+            $msg .= "\nاعلان‌ها (آخرین بررسی " . $_faHb . "): گفتگو " . (int)($_seenHb['chats'] ?? 0)
+                 . ($_pendHb > 0 ? ' (' . $_pendHb . ' بی‌جواب)' : '')
+                 . ' · سفارش ' . (int)($_seenHb['orders'] ?? 0)
+                 . ' · محصول ' . (int)($_seenHb['products'] ?? 0);
+            if (is_array($_stHb['last_notif_errors'] ?? null) && $_stHb['last_notif_errors']) {
+                $msg .= "\n⚠️ خطای آخرین بررسی: " . mb_substr(implode('؛ ', array_slice((array)$_stHb['last_notif_errors'], 0, 2)), 0, 140);
+            }
+        } else {
+            $msg .= "\nاعلان‌ها: هنوز بررسی‌ای ثبت نشده (اولین دور)";
+        }
+    } elseif (is_array($_nres) && !empty($_nres['skipped'])) {
         $_why = $_nres['skipped'] === 'no_basalam_shops'
               ? 'هیچ غرفهٔ باسلامی با توکن تنظیم نشده'
               : (string)$_nres['skipped'];
@@ -49403,6 +49449,28 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.48', t:'🏃 اعلان‌ها اولِ کران: دیگر گروگانِ پردژهٔ کشته‌شده نیستند', items:[
+    '❌ <b>مشکل (که خودِ پینگ گفت):</b> «⚠️ اجرای قبلی نیمه‌کاره ماند (هاست پردازه را',
+    '   کشت)» — هاست شما پردژهٔ PHP را وسطِ اجرا می‌کشد. بررسیِ اعلان‌ها تا حالا در',
+    '   <b>میانهٔ</b> کران — بعد از تمامِ همگام‌سازی‌ها — اجرا می‌شد؛ یعنی دقیقاً بعد از',
+    '   همان جایی که پردژه کشته می‌شد. برای همین شما فقط پینگِ «شروع شد» را می‌دیدید',
+    '   و نه اعلان، نه گزارشِ «اجرا شد».',
+    '✅ <b>چه شد:</b> بررسیِ اعلان‌ها (سفارش، پیام، محصول) و پاسخِ خودکار — که هر دو',
+    '   <b>سبک</b>‌اند و فقط باسلام را می‌خوانند — حالا <b>درست بعد از نبض و قبل از',
+    '   بکاپ/جزئیات/همگام‌سازی</b> اجرا می‌شوند. همان الگویی که قبلاً برای نگهبان',
+    '   (۸.۹۷)، بکاپ (۹.۱۶) و حلقهٔ جزئیات (۹.۲۰) استفاده شد: کارهای مهم و سریع',
+    '   اول، کارهای بلند بعد. حالا حتی اگر هاست چند ثانیهٔ بعد پردژه را بکشد،',
+    '   اعلانِ همان دور رفته است.',
+    '📡 <b>پینگِ نبض دیگر گمراه نمی‌کند:</b> پینگِ «شروع شد» به‌جای «اجرا نشد',
+    '   (پیام‌رسان یا غرفهٔ باسلام ندارد)» — که دروغ بود چون بررسی هنوز نشده بود —',
+    '   حالا می‌گوید: «اعلان‌ها (آخرین بررسی ۵ دقیقه پیش): گفتگو ۸ (۲ بی‌جواب) ·',
+    '   سفارش ۱۲ · محصول ۵».',
+    '📌 <b>دربارهٔ همگام‌سازیِ دستی:</b> همگام‌سازیِ کامل (استخراج+ارسالِ یک پروفایل',
+    '   بزرگ) ممکن است باز هم توسط هاست وسطِ ارسال کشته شود؛ نگران نباشید،',
+    '   <b>صف پایدار است</b> — با زدنِ دوبارهٔ همگام‌سازی از همان‌جایی که قطع شد',
+    '   ادامه می‌شود و چیزِ انجام‌شده تکرار نمی‌شود. بازگشایِ تبِ مرورگر تا پایان',
+    '   اجرا، عمرِ پردژه را در هاست بیشتر نگه می‌دارد.',
+  ]},
   {v:'10.47', t:'📡 پینگ خودِ گزارش‌گر است: هر پینگ می‌گوید اعلان‌ها چه دید و چه نشد', items:[
     ' <b>هر پیامِ پینگ</b> (همان پیامی که می‌آید و می‌گوید «کران اجرا شد») حالا یک',
     '   خطِ تازه دارد: <b>«اعلان‌ها: گفتگو ۸ (۲ بی‌جواب) · سفارش ۱۲ · محصول ۵»</b>',
