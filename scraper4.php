@@ -272,8 +272,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.57';
-const APP_VERSION_DATE = '1405/06/05';
+const APP_VERSION = '10.58';
+const APP_VERSION_DATE = '1405/06/06';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -14789,8 +14789,32 @@ if (isset($_GET['manual_sync_stop'])) {
 }
 if (isset($_GET['manual_sync_status'])) {
     header('Content-Type: application/json; charset=UTF-8');
-    echo json_encode(['ok' => true, 'progress' => readProgress(MANUAL_SYNC_PROGRESS_FILE)],
-        JSON_UNESCAPED_UNICODE);
+    $msSt = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+    /* v10.58 (۷۲): اجرایِ دستیِ کشته‌شدهٔ هاست، فایل را تا ابد «در حال
+       اجرا» جا می‌گذارد — رابط روی همان تصویر می‌ماند، دکمه می‌گوید
+       «شغال»، و از دید کاربر «اصلاً کار نمی‌کند». همین‌جا همان معیارِ
+       زنده‌بودنِ نگهبان اعمال می‌شود: اگر پیشرفت بیش از stall_after بی‌حرکت
+       باشد، آن اجرا مرده است. با پیامِ روشن بسته می‌شود تا رابط برگردد و
+       کاربر دوباره امتحان کند — بخشِ انجام‌شده روی دیسک است و
+       چک‌پوینت جلوی تکرارِ کار را می‌گیرد. */
+    if (!empty($msSt['running']) && empty($msSt['done'])) {
+        $msIdleD = time() - (int)($msSt['last_progress_ts'] ?? ($msSt['ts'] ?? 0));
+        $msMaxD  = max(120, (int)(loadConnections()['stall_after'] ?? 300));
+        if ($msIdleD > $msMaxD) {
+            $msSt['running']   = false;
+            $msSt['done']      = true;
+            $msSt['cancelled'] = false;
+            $msSt['phase']     = 'نیمه‌کاره ماند';
+            $msSt['error']     = 'اجرا نیمه‌کاره رها شد (' . $msIdleD . ' ثانیه بی‌حرکت) — احتمالاً هاست پردازه را قطع کرده. بخشِ انجام‌شده روی دیسک است؛ دوباره اجرا کنید تا از چک‌پوینت ادامه دهد.';
+            $msLgD = is_array($msSt['recent_log'] ?? null) ? $msSt['recent_log'] : [];
+            $msLgD[] = '⚠️ اجرایِ قبلی نیمه‌کاره ماند — وضعیت به‌صورتِ خودکار به‌روزرسانی شد. می‌توانید دوباره امتحان کنید.';
+            $msSt['recent_log'] = array_slice($msLgD, -40);
+            $msSt['ts'] = time();
+            $msSt['last_progress_ts'] = time();
+            writeProgress(MANUAL_SYNC_PROGRESS_FILE, $msSt);
+        }
+    }
+    echo json_encode(['ok' => true, 'progress' => $msSt], JSON_UNESCAPED_UNICODE);
     exit;
 }
 if (isset($_GET['manual_sync'])) {
@@ -14799,11 +14823,27 @@ if (isset($_GET['manual_sync'])) {
        معیارِ «زنده» همان معیارِ همیشگی است: پیشرفتِ تازه. */
     $_msPrev = readProgress(MANUAL_SYNC_PROGRESS_FILE);
     $_msAge  = time() - (int)($_msPrev['last_progress_ts'] ?? ($_msPrev['ts'] ?? 0));
-    if (!empty($_msPrev['running']) && empty($_msPrev['done']) && $_msAge < 300 && empty($_GET['takeover'])) {
-        header('Content-Type: application/json; charset=UTF-8');
-        echo json_encode(['ok' => false, 'busy' => true,
-            'error' => 'یک همگام‌سازیِ دستی همین حالا در حال اجراست'], JSON_UNESCAPED_UNICODE);
-        exit;
+    /* v10.58 (۷۲): پیش از ردِّ اجرایِ دوم، مطمئن شو که اجرایِ اول زنده است.
+       اجرایِ کشته‌شدهٔ هاست (پیشرفتِ بی‌حرکت) نباید دکمه را چند دقیقه
+       قفل کند: به‌عنوانِ «نیمه‌کاره» بسته و اجرأ تازه شروع می‌شود —
+       چک‌پوینتِ رویِ دیسک جلوی تکرارِ کارِ شده را می‌گیرد. */
+    if (!empty($_msPrev['running']) && empty($_msPrev['done']) && empty($_GET['takeover'])) {
+        $_msMaxD = max(300, (int)(loadConnections()['stall_after'] ?? 300) * 2);
+        if ($_msAge >= $_msMaxD) {
+            $_msPrev['running']   = false;
+            $_msPrev['done']      = true;
+            $_msPrev['cancelled'] = false;
+            $_msPrev['phase']     = 'نیمه‌کاره ماند';
+            $_msPrev['error']     = 'اجرایِ قبلی نیمه‌کاره ماند (' . $_msAge . ' ثانیه بی‌حرکت) — بسته شد و اجرایِ تازه شروع می‌شود.';
+            $_msPrev['ts'] = time();
+            $_msPrev['last_progress_ts'] = time();
+            writeProgress(MANUAL_SYNC_PROGRESS_FILE, $_msPrev);
+        } else {
+            header('Content-Type: application/json; charset=UTF-8');
+            echo json_encode(['ok' => false, 'busy' => true,
+                'error' => 'یک همگام‌سازیِ دستی همین حالا در حال اجراست'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
     }
     @unlink(MANUAL_SYNC_STOP_FILE);
     $_msKey  = trim((string)($_GET['profile'] ?? ''));
@@ -15099,40 +15139,6 @@ if (arCfg($cn)['enabled']) {
     }
 }
 
-/* v10.49 (۶۳): پمپِ ارسال — عمرِ همین دور را «ارسال» کنیم، نه استخراج.
-
-   روی هاستِ شما پردژهٔ جداشدهٔ ارسال بعد از چند ثانیه می‌میرد (کلاینت
-   برود ⇒ کارگر آزاد شود): fireAndForgetِ کلاسیک ۱٫۵ ثانیه می‌ماند و
-   curl قطع می‌شود. نتیجه: صفی که به حالِ خود رها شده باشد، عملاً هرگز
-   جلو نمی‌رود — همان «استخراج انجام می‌شود ولی ارسال نه».
-
-   حالا در ابتدای هر تیک، اگر صفِ ارسال کارِ گیر دارد (ردیفِ waiting،
-   یا runningِ بی‌حرکت)، پردازنده را راه می‌اندازیم و همین پردژه تا
-   ۱۲۰ ثانیه منتظر می‌ماند؛ هر تیک چقدر که هاست اجازه بدهد جلو می‌رود و
-   checkpoint (start_index) پیشرفت را حفظ می‌کند. اگر صف خالی باشد یا
-   پردازندهٔ زنده روی آن کار کند، هزینه صفر است. در همگام‌سازیِ دستی
-   اجرا نمی‌شود: آنجا مرورگر وصل است و رابط خودش ارسال را با اتصالِ زنده
-   راه می‌اندازد (msKickSend). */
-if (!manualSyncActive()) {
-    try {
-        $_pumpStall = max(120, (int)($cn['stall_after'] ?? 300));
-        foreach (cronWatchdogQueueOrder() as $_pq) {
-            $_pqChk = queueStallCheck($_pq, $_pumpStall);
-            if (empty($_pqChk['stalled'])) continue;
-            $_pqRec = queueStallRecover($_pq, $_pumpStall, false, 120000);
-            $results['send_pump'][$_pq] = [
-                'from'    => (int)($_pqChk['current'] ?? 0),
-                'total'   => (int)($_pqChk['total'] ?? 0),
-                'resumed' => !empty($_pqRec['resumed']),
-            ];
-            $_pqAfter = queueStallCheck($_pq, $_pumpStall);
-            $results['send_pump'][$_pq]['now'] = (int)($_pqAfter['current'] ?? 0);
-            if (empty($_pqAfter['stalled'])) break;
-        }
-    } catch (Throwable $e) {
-        $results['send_pump_error'] = mb_substr($e->getMessage(), 0, 200);
-    }
-}
 
 /* =====================================================================
    v9.10: استخراج دوره‌ای جزئیات — حلقهٔ مستقل، قبل از همگام‌سازی.
@@ -15165,19 +15171,6 @@ if (!manualSyncActive()) {
 
    حالا اول کارهای گیرکرده آزاد می‌شوند و بعد سراغ کار تازه می‌رویم.
    هزینه‌اش وقتی چیزی گیر نکرده چند خط خواندن فایل است. */
-/* v9.16: بکاپ خودکار — اول از همه، قبل از هر کاری که ممکن است داده را
-   خراب کند. اگر پروفایل‌ها همین امروز پاک شوند، آخرین نسخهٔ سالمشان
-   از قبل روی گیت‌هاب نشسته است. */
-$_bkCfg = backupCfg();
-if (!empty($_bkCfg['auto'])) {
-    $_bkDue = ($now - (int)$_bkCfg['last_run']) >= (max(1, (int)$_bkCfg['auto_every_h']) * 3600);
-    if ($_bkDue) {
-        $_bkRes = backupRun($_bkCfg);
-        $results['backup'] = ['ok' => !empty($_bkRes['ok']),
-            'files' => (int)($_bkRes['files'] ?? 0),
-            'github' => (string)($_bkRes['github'] ?? '-')];
-    }
-}
 
 $wdEarly = cronWatchdogs($cn);
 foreach ($wdEarly as $k => $v) { if (!empty($v)) $results[$k] = $v; }
@@ -15789,6 +15782,73 @@ try {
     $results['watchdog_error'] = mb_substr($e->getMessage(), 0, 200);
 }
 
+/* =====================================================================
+   v10.58 (۷۲): ترتیبِ تازه — دو کارِ پرمهلت، بعد از حلقهٔ همگام‌سازی.
+
+   گزارشِ کاربر: «همگام‌سازی‌های دوره‌ای اصلاً کار نمی‌کنند، دستی هم
+   همین‌طور؛ هیچ‌کدام یک کارت/ردیف به صفِ استخراج نمی‌افزایند؛ فرانتِ
+   کاربری و بک‌اند هماهنگ به نظر نمی‌رسند.»
+
+   ریشه: پمپِ ارسال (منتظرِ تا ۱۲۰ ثانیه) و بکاپِ خودکار (git push،
+   چند دقیقه) پیش از حلقهٔ همگام‌سازی اجرا می‌شدند. روی هاستی که
+   پردژهٔ پس‌زمینه را می‌کُشد (همان هاست شما)، پردژه در همین پنجره
+   می‌مرد و هرگز به حلقهٔ استخراج نمی‌رسید — پس نه کارتی به صفِ
+   استخراج می‌نشست و همگام‌سازی از بیرون «مرده» به نظر می‌رسید.
+
+   ترتیبِ تازه: قفل ← نبض ← اعلان ← پاسخِ خودکار ← نگهبان ←
+   <b>حلقهٔ همگام‌سازی (کارت همین‌جا فوراً به صفِ استخراج می‌نشیند)</b>
+   ← پمپِ ارسال ← بکاپ ← ایجنت/گزارش/پینگِ پایانی.
+
+   حالا اگر پردژه کشته شود، بعد از استخراج کشته می‌شود: کارت در صف
+   است، بخشِ انجام‌شده روی دیسک است، و نگهبان در تیکِ بعدی از
+   چک‌پوینت ادامه می‌دهد.
+   ===================================================================== */
+/* v9.16: بکاپ خودکار — قبل از هر کاری که ممکن است داده را خراب کند.
+   v10.58 (۷۲): جابجایی به بعد از حلقهٔ همگام‌سازی (سرِ مطلبِ بالا را ببینید).
+   قبلاً بی‌درنگِ اولِ تیک بود؛ یک git push چنددقیقه‌ای پردژه را نگه می‌داشت
+   (و بعد هاست می‌کُشتش) و به حلقهٔ استخراج هرگز نمی‌رسید. داده‌ها همین حالا
+   روی دیسک ذخیره می‌شوند، پس امن است بکاپ به انتهای صف برود — مهم،
+   استخراج است. */
+$_bkCfg = backupCfg();
+if (!empty($_bkCfg['auto'])) {
+    $_bkDue = ($now - (int)$_bkCfg['last_run']) >= (max(1, (int)$_bkCfg['auto_every_h']) * 3600);
+    if ($_bkDue) {
+        $_bkRes = backupRun($_bkCfg);
+        $results['backup'] = ['ok' => !empty($_bkRes['ok']),
+            'files' => (int)($_bkRes['files'] ?? 0),
+            'github' => (string)($_bkRes['github'] ?? '-')];
+    }
+}
+
+/* v10.49 (۶۳): پمپِ ارسال — عمرِ همین دور را «ارسال» کنیم، نه استخراج.
+   v10.58 (۷۲): جابجایی به بعد از حلقهٔ همگام‌سازی (سرِ مطلبِ بالا را ببینید).
+   قبلاً پیش از استخراج می‌نشست و انتظارِ تا ۱۲۰ ثانیه‌اش تضمین می‌کرد که
+   هاست پردژه را پیش از رسیدن به استخراج بکشد — همان «همگام‌سازی اصلاً
+   کار نمی‌کند» که گزارش می‌شد. نقشش عوض نشد: اگر صفِ ارسال کارِ گیر دارد،
+   چقدر که هاست اجازه بدهد جلویش می‌راند (چک‌پوینت پیشرفت را نگه می‌دارد).
+   در همگام‌سازیِ دستی اجرا نمی‌شود: آنجا مرورگر وصل است و رابط خودش
+   ارسال را با اتصالِ زنده راه می‌اندازد (msKickSend). */
+if (!manualSyncActive()) {
+    try {
+        $_pumpStall = max(120, (int)($cn['stall_after'] ?? 300));
+        foreach (cronWatchdogQueueOrder() as $_pq) {
+            $_pqChk = queueStallCheck($_pq, $_pumpStall);
+            if (empty($_pqChk['stalled'])) continue;
+            $_pqRec = queueStallRecover($_pq, $_pumpStall, false, 120000);
+            $results['send_pump'][$_pq] = [
+                'from'    => (int)($_pqChk['current'] ?? 0),
+                'total'   => (int)($_pqChk['total'] ?? 0),
+                'resumed' => !empty($_pqRec['resumed']),
+            ];
+            $_pqAfter = queueStallCheck($_pq, $_pumpStall);
+            $results['send_pump'][$_pq]['now'] = (int)($_pqAfter['current'] ?? 0);
+            if (empty($_pqAfter['stalled'])) break;
+        }
+    } catch (Throwable $e) {
+        $results['send_pump_error'] = mb_substr($e->getMessage(), 0, 200);
+    }
+}
+
 /* v10.05 (۱۹): زمان‌بندِ کارهای ایجنتی.
 
    چرا اینجا و نه بالاترِ کران: هر اجرای ایجنت ده‌ها ثانیه طول می‌کشد و
@@ -15909,6 +15969,134 @@ if (isset($_GET['cron_last'])) {
     if (!is_array($d)) { echo json_encode(['ok' => false, 'error' => 'گزارش ناخوانا'], JSON_UNESCAPED_UNICODE); exit; }
     $d['finished_at'] = (int)@filemtime($f);
     echo json_encode($d, JSON_UNESCAPED_UNICODE); exit;
+}
+
+/* =====================================================================
+ *  v10.58 (۷۲): «دکترِ همگام‌سازی» — چرا کار نمی‌کند؟
+ *
+ *  گزارشِ کاربر: «دوره‌ای و دستی هیچ‌کدام کار نمی‌کنند؛ کارت به صفِ
+ *  استخراج نمی‌آید؛ فرانت و بک هماهنگ نیستند.» مشکلِ واقعی: وضعیتِ
+ *  زنجیره هیچ‌جا دیده نمی‌شد — قفلِ کران، قفلِ استخراج، آخرین تیک،
+ *  وضعیتِ هر پروفایل — همه پراکنده در فایل‌ها، بدونِ اندپوینتی که
+ *  جمعشان کند و بگوید کدام حلقه گیر دارد. این اندپوینت کلِ زنجیره را
+ *  معاینه می‌کند و برای هر حلقه، به زبانِ ساده، نتیجه و راهِ حل را
+ *  می‌گوید. دکمهٔ «🩺 تشخیص» در بخشِ همگام‌سازیِ دستی همین را می‌خواند.
+ * ===================================================================== */
+if (isset($_GET['sync_diagnose'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $dgNow = time();
+    $dgCn  = loadConnections();
+    $dgStall = max(120, (int)($dgCn['stall_after'] ?? 300));
+    $dgOut = ['ok' => true, 'now' => $dgNow, 'stall_after' => $dgStall,
+              'checks' => [], 'profiles' => [], 'last_cron' => null];
+    $chk = function (string $k, bool $ok, string $msg, $extra = null) use (&$dgOut) {
+        $c = ['key' => $k, 'ok' => $ok, 'msg' => $msg];
+        if ($extra !== null) $c['extra'] = $extra;
+        $dgOut['checks'][] = $c;
+    };
+    /* ۱ — آیا کرانِ هاست اصلاً به ما می‌رسد؟ */
+    $cllFile = __DIR__ . '/cron_last_run.json';
+    $cllAt = 0;
+    if (is_file($cllFile)) {
+        $cllAt = (int)@filemtime($cllFile);
+        $dgOut['last_cron'] = json_decode((string)@file_get_contents($cllFile), true);
+    }
+    $cllAge = $cllAt > 0 ? ($dgNow - $cllAt) : null;
+    if ($cllAge === null) {
+        $chk('last_tick', false,
+            'هیچ تیکِ کرانی ثبت نشده — کرانِ هاست (یا سرویسِ کرانِ خارجی) اصلاً به این آدرس نمی‌رسد. آدرسِ کران (با api_token اگر هست) و لاگِ سرویسِ کران را بررسی کنید.');
+    } else {
+        $dc = is_array($dgOut['last_cron']) ? $dgOut['last_cron'] : [];
+        $reason = trim((string)($dc['reason'] ?? ''));
+        $chk('last_tick', $cllAge <= max(900, (int)($dgCn['cron_lock_min'] ?? 30) * 60),
+            'آخرین تیکِ کران: ' . $cllAge . ' ثانیه پیش'
+            . ($reason ? (' — ' . $reason) : ''),
+            ['at' => $cllAt, 'ok' => $dc['ok'] ?? null, 'skipped' => $dc['skipped'] ?? null]);
+    }
+    /* ۲ — قفلِ کران */
+    $crLock = __DIR__ . '/.cron_run.lock';
+    if (is_file($crLock)) {
+        $dgSt = (int)trim((string)@file_get_contents($crLock));
+        if ($dgSt <= 0) $dgSt = (int)@filemtime($crLock);
+        $dgLa = max(0, $dgNow - $dgSt);
+        $dgProg = readProgress(EXTRACT_PROGRESS_FILE);
+        $dgTs = (int)($dgProg['last_progress_ts'] ?? (int)($dgProg['started_at'] ?? 0));
+        $dgDead = (!empty($dgProg['done']) || empty($dgProg['running']))
+            ? ($dgLa > $dgStall)
+            : (($dgTs > 0 && ($dgNow - $dgTs) > $dgStall && $dgLa > $dgStall));
+        $chk('cron_lock', $dgDead, $dgDead
+            ? 'قفلِ کران کهنه و مرده است — در تیکِ بعدی خودبه‌خود برداشته می‌شود.'
+            : 'قفلِ کران دستِ یک اجرای زنده است (' . $dgLa . ' ثانیه پیش). تا آن اجرا تمام شود، تیک‌های بعدی منتظر می‌مانند — اگر این پیام مدام می‌آید، در «گزارشِ آخرین اجرا» علت را ببینید.',
+            ['age' => $dgLa]);
+    } else {
+        $chk('cron_lock', true, 'قفلِ کران آزاد است.');
+    }
+    /* ۳ — قفلِ سراسریِ استخراج */
+    $exLk = json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE), true);
+    if (is_array($exLk) && !empty($exLk['queue_id'])) {
+        $dgAge = $dgNow - (int)($exLk['at'] ?? 0);
+        $dgTtl = max(120, min((int)EXTRACT_LOCK_TTL, $dgStall * 3));
+        $dgWho = trim((string)($exLk['profile_name'] ?? $exLk['profile_key'] ?? ''));
+        $chk('extract_lock', $dgAge >= $dgTtl, $dgAge >= $dgTtl
+            ? 'قفلِ استخراج کهنه است (صاحب: ' . ($dgWho ?: '?') . ') — اجرایِ بعدی خودبه‌خود برمی‌دارد.'
+            : 'قفلِ استخراج دستِ یک استخراجِ زنده است (' . ($dgWho ?: '?') . '، ' . $dgAge . ' ثانیه). استخراجِ‌های تازه نوبتشان را می‌گیرند — این طبیعی است.',
+            ['age' => $dgAge, 'ttl' => $dgTtl, 'profile' => $exLk['profile_key'] ?? null]);
+    } else {
+        $chk('extract_lock', true, 'قفلِ استخراج آزاد است.');
+    }
+    /* ۴ — وضعیتِ همگام‌سازیِ دستی */
+    $msP = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+    if (!empty($msP['running']) && empty($msP['done'])) {
+        $msIdleD = $dgNow - (int)($msP['last_progress_ts'] ?? ($msP['ts'] ?? 0));
+        $chk('manual_sync', $msIdleD <= $dgStall, $msIdleD <= $dgStall
+            ? 'یک همگام‌سازیِ دستی در جریان است (فاز: ' . (string)($msP['phase'] ?? '?') . '، آخرین پیشرفت ' . $msIdleD . ' ثانیه پیش).'
+            : 'اجرایِ دستی نیمه‌کاره مانده (' . $msIdleD . ' ثانیه بی‌حرکت). اولین بازدید از وضعیت، خودش را بسته و دکمه دوباره کار می‌کند.',
+            ['idle' => $msIdleD]);
+    } else {
+        $chk('manual_sync', true, 'همگام‌سازیِ دستی آماده است.'
+            . (!empty($msP['done']) && !empty($msP['error']) ? ' آخرین اجرا: ' . (string)$msP['error'] : ''));
+    }
+    /* ۵ — صفِ استخراج */
+    $qD = extractReadQueue();
+    $entriesD = is_array($qD['entries'] ?? null) ? $qD['entries'] : [];
+    $bySt = [];
+    $activeQ = 0;
+    foreach ($entriesD as $eD) {
+        $sD = (string)($eD['status'] ?? 'unknown');
+        $bySt[$sD] = (int)($bySt[$sD] ?? 0) + 1;
+        if (in_array($sD, ['running', 'waiting', 'paused'], true)) $activeQ++;
+    }
+    $chk('extract_queue', $activeQ === 0, $activeQ === 0
+        ? 'صفِ استخراج ردیفِ فعال ندارد (' . count($entriesD) . ' ردیفِ گذشته).'
+        : $activeQ . ' ردیفِ فعال در صفِ استخراج — اگر بیشتر از ' . $dgStall . ' ثانیه بی‌حرکت بماند، نگهبان ادامه‌اش می‌دهد.',
+        ['by_status' => $bySt, 'total' => count($entriesD)]);
+    /* ۶ — هر پروفایل */
+    $profilesD = loadProfiles();
+    $syncStateD = loadSyncState();
+    foreach ($profilesD as $kD => $pD) {
+        if (!is_array($pD)) continue;
+        $sc = $pD['syncConfig'] ?? [];
+        $iv = (int)($sc['interval'] ?? 3600);
+        $lr = (int)($syncStateD[$kD]['lastRun'] ?? 0);
+        $issues = [];
+        if (empty($sc['enabled'])) $issues[] = 'همگام‌سازی در تنظیماتِ پروفایل خاموش است';
+        elseif ($iv > 0 && $lr > 0 && ($dgNow - $lr) < $iv)
+            $issues[] = 'هنوز نوبتش نشده (' . ($iv - ($dgNow - $lr)) . ' ثانیه مانده)';
+        if (queueHasProfile($entriesD, (string)$kD, 0) !== null) $issues[] = 'ردیفِ فعال در صفِ استخراج دارد';
+        if (!empty($sc['noExtract'])) {
+            $issues[] = 'پروفایلِ «بدون استخراج» است (انتظارِ کارتِ فهرست نداشته باشید)';
+        } elseif (empty($pD['selectors']['container']) && empty($pD['products'])) {
+            $issues[] = 'نه سلکتورِ فهرست دارد نه محصولِ واردشده — استخراج چیزی نمی‌سازد';
+        }
+        $dgOut['profiles'][] = [
+            'key' => (string)$kD, 'name' => (string)($pD['name'] ?? $kD),
+            'enabled' => !empty($sc['enabled']), 'interval' => $iv,
+            'last_run_age' => $lr > 0 ? $dgNow - $lr : null,
+            'issues' => $issues, 'ok' => !$issues,
+        ];
+    }
+    echo json_encode($dgOut, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
 }
 
 /* =====================================================================
@@ -23563,6 +23751,26 @@ if (isset($_GET['selftest'])) {
     $add('10.44', 'نتایجِ جست‌وجو شناسهٔ تکراری ندارند',
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
+
+    /* ==== ۷۲ (v10.58) ==== */
+    $add('10.58', 'نسخهٔ ۱۰.۵۸',
+         str_contains($selfSrc, "const APP_VERSION = '10.58';"));
+    $add('10.58', 'دکترِ همگام‌سازی: اندپوینت + دکمه + رندرِ رابط',
+         (strpos($selfSrc, "if (isset(\$_GET['sync_diagnose']))") !== false
+          && strpos($selfSrc, "\$chk('last_tick'") !== false
+          && strpos($selfSrc, 'function syncDiagnose(){') !== false
+          && strpos($selfSrc, 'id="syncDiagnoseBox"') !== false
+          && strpos($selfSrc, 'onclick="syncDiagnose()"') !== false));
+    $_v58Pump = strpos($selfSrc, "send_pump_error'");
+    $_v58Loop = strpos($selfSrc, "saveSyncState(\$syncState);\n\n/* v8.97: نگهبان قبل از حلقه");
+    $_v58Send = strpos($selfSrc, "if (manualSyncActive() && empty(\$results['manual_stopped']))");
+    $add('10.58', 'ترتیب: پمپ و بکاپ بعد از حلقهٔ همگام‌سازی',
+         ($_v58Pump !== false && $_v58Loop !== false && $_v58Send !== false
+          && $_v58Loop < $_v58Pump && $_v58Pump < $_v58Send));
+    $add('10.58', 'بستنِ خودکارِ اجرایِ دستیِ نیمه‌کاره (وضعیت + گاردِ شغلی)',
+         (strpos($selfSrc, "if (\$msIdleD > \$msMaxD) {") !== false
+          && strpos($selfSrc, "if (\$_msAge >= \$_msMaxD) {") !== false
+          && strpos($selfSrc, 'نیمه‌کاره ماند') !== false));
 
     /* ==== ۷۱ (v10.57) ==== */
     $add('10.57', 'نسخهٔ ۱۰.۵۷',
@@ -45081,6 +45289,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                     <button class="btn btn-green" id="manualSyncBtn" onclick="startManualSync()" style="flex:1;font-size:13px;padding:8px 12px">🔄 همگام‌سازیِ دستی</button>
                     <button class="btn btn-red hidden" id="manualSyncStopBtn" onclick="stopManualSync()" style="flex:0;font-size:11px;padding:8px 12px">⏹ توقف</button>
                     <button class="btn btn-gray" onclick="srLoad()" style="flex:0;font-size:11px;padding:8px 12px" title="گزارشِ همگام‌سازی‌های قبلی">📄 گزارش‌ها</button>
+                    <button class="btn btn-gray" onclick="syncDiagnose()" style="flex:0;font-size:11px;padding:8px 12px" title="چرا همگام‌سازی کار نمی‌کند؟ — معاینهٔ کلِ زنجیره">🩺 تشخیص</button>
                 </div>
                 <div id="manualSyncProgress" style="display:none;margin-top:8px">
                     <div class="progress"><div class="progress-bar" id="msBar" style="background:linear-gradient(90deg,#059669,#34d399);width:0%"></div></div>
@@ -45088,6 +45297,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                     <div id="msLog" style="max-height:160px;overflow-y:auto;font-size:10.5px;color:#94a3b8;margin-top:4px;line-height:1.8"></div>
                 </div>
                 <div id="msReport" style="margin-top:8px"></div>
+<div id="syncDiagnoseBox" style="display:none;margin-top:8px"></div>
             </div>
 
             <div class="hidden" id="extractProgress" style="margin-top:8px;padding:10px;background:#1e293b;border:1px solid #475569;border-radius:8px">
@@ -49443,7 +49653,10 @@ function msPoll(){
     if(lg&&Array.isArray(p.recent_log))
       lg.innerHTML=p.recent_log.slice(-20).map(l=>'<div>'+esc(String(l))+'</div>').join('');
     if(p.done){
-      msFinish(!p.cancelled, p.cancelled?'با درخواستِ شما متوقف شد':'', p.summary||'');
+      /* v10.58 (۷۲): اگر اجرا از دستِ هاست نیمه‌کاره مانده، سرور آن را با
+         error بسته است — پیامش را نشان بده تا کاربر بداند و دوباره بزند. */
+      msFinish(!p.cancelled && !p.error,
+        p.cancelled?'با درخواستِ شما متوقف شد':(p.error||''), p.summary||'');
     }
   }).catch(()=>{});
 }
@@ -49590,6 +49803,40 @@ function stopBackendExtract(){
 // v8.20: Extraction queue rendered in the same visual language as the
 // Basalam/WooCommerce send queues (status badge, progress bar, counters,
 // elapsed time, per-row actions).
+/* v10.58 (۷۲): دکترِ همگام‌سازی — چرا کار نمی‌کند؟ */
+function syncDiagnose(){
+  const box=$('syncDiagnoseBox'); if(!box)return;
+  box.style.display='block';
+  box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حالِ معاینهٔ زنجیره…</div>';
+  fetch('?sync_diagnose=1').then(r=>r.json()).then(d=>{
+    if(!d.ok){box.innerHTML='<div style="color:#f87171;font-size:11px">✗ معاینه نشد</div>';return;}
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px">';
+    h+='<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'
+      +'<span style="font-size:11px;color:#34d399;font-weight:700;flex:1">🩺 معاینهٔ زنجیرهٔ همگام‌سازی</span>'
+      +'<button class="btn btn-gray" onclick="syncDiagnose()" style="font-size:9.5px;padding:2px 8px">↺ تکرار</button></div>';
+    (d.checks||[]).forEach(c=>{
+      h+='<div style="font-size:10.5px;color:'+(c.ok?'#86efac':'#fca5a5')+';line-height:1.7;padding:2px 0">'
+        +(c.ok?'✅ ':'⚠️ ')+esc(c.msg)+'</div>';
+    });
+    const bad=(d.profiles||[]).filter(p=>!p.ok);
+    if((d.profiles||[]).length){
+      h+='<div style="font-size:10px;color:#94a3b8;margin-top:6px;border-top:1px solid #1e293b;padding-top:4px"><b>پروفایل‌ها:</b></div>';
+      (d.profiles||[]).forEach(p=>{
+        h+='<div style="font-size:10px;color:'+(p.ok?'#86efac':'#fbbf24')+';padding:1px 0">'
+          +(p.ok?'✅ ':'⚠️ ')+esc(p.name)
+          +(p.issues.length?(' — '+p.issues.map(esc).join('، ')):' — آمادهٔ اجرا')+'</div>';
+      });
+    }
+    const problems=(d.checks||[]).filter(c=>!c.ok).length + bad.length;
+    h+='<div style="margin-top:6px;font-size:11px;font-weight:700;color:'+(problems===0?'#4ade80':'#fbbf24')+'">'
+      +(problems===0
+        ?'✅ کلِ زنجیره باز است. اگر کارتی در صف نمی‌بینید، همین حالا «همگام‌سازیِ دستی» را بزنید و صف را نگاه کنید.'
+        :'⚠️ '+toFa(problems)+' نکته نیاز به رسیدگی دارد — جزئیات را در بالا ببینید.')+'</div>';
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(()=>{box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطای شبکه</div>';});
+}
+
 function refreshExtractQueue(){
     fetch('?extract_queue_status=1').then(r=>r.json()).then(d=>{
         if(!d.ok)return;
@@ -50552,6 +50799,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.58', t:'🩺 دکترِ همگام‌سازی + رفعِ «همگام‌سازی اصلاً کار نمی‌کند»', items:[
+    '🔗 <b>ترتیبِ تازهٔ کران:</b> حلقهٔ همگام‌سازی — یعنی استخراجی که <b>کارت به صفِ استخراج می‌نشیند</b> — حالا <b>اولِ</b> هر تیک اجرا می‌شود؛ پمپِ ارسال (انتظارِ تا ۱۲۰ ثانیه) و بکاپِ خودکار (git push، چند دقیقه) به <b>بعد</b> از حلقه جابجا شدند. قبلاً روی هاستی که پردژهٔ پس‌زمینه را می‌کُشد، پردژه پیش از رسیدن به استخراج می‌مرد و هیچ‌وقت کارتی به صف نمی‌آمد.',
+    '💀 <b>بستنِ خودکارِ اجرایِ نیمه‌کاره:</b> اجرایِ دستیِ کشته‌شدهٔ هاست دیگر تا ابد «در حال اجرا» نمی‌ماند؛ بعد از آستانهٔ بی‌حرکتی، اندپوینتِ وضعیت خودش را با پیامِ روشن می‌بندد و دکمه بلافاصله دوباره کار می‌کند.',
+    '🩺 <b>دکمهٔ « تشخیص»</b> (کنار همگام‌سازیِ دستی) — کلِ زنجیره را معاینه می‌کند: آخرین تیکِ کران، قفلِ کران، قفلِ استخراج، وضعیتِ دستی، صفِ استخراج و وضعیتِ تک‌تکِ پروفایل‌ها — و به زبانِ ساده می‌گوید کدام حلقه گیر دارد و چه باید کرد.',
+    '⏳ <b>بررسیِ زنده‌بودنِ «شغال»:</b> گاردِ شغلیِ دستی دیگر ۵ دقیقهٔ ثابت نمی‌سنجد؛ اگر اجرایِ قبلی مرده باشد (بی‌حرکت)، خودکار بسته و اجرایِ تازه بدونِ انتظار شروع می‌شود.'],},
   {v:'10.57', t:'📱 اتاقِ چتِ باسلام — چندغرفه‌ای، زنده، موبایل‌محور، با تصویر', items:[
     '🔄 <b>همهٔ غرفه‌ها در یک لیست:</b> گفتگوهای مشتریانِ همهٔ غرفه‌های باسلام',
     '   کنار هم. جلوی هر مشتری، شمارهٔ غرفه با رنگِ متفاوت تویِ پرانتز',
