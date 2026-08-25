@@ -82,6 +82,11 @@ const DEDUP_PAGE_WAIT_MAX  = 15;
       می‌شد. حالا با آستانهٔ مدیر وظیفه یکی است. */
 const DEDUP_MAX_PAGES      = 2000;
 const DEDUP_DEL_TRIES      = 3;
+const DEDUP_SEARCH_MAX_PAGES = 60;   // v10.44: پیمایشِ جست‌وجوی عمیق
+const DEDUP_SEARCH_MAX_HITS  = 500;  // v10.44: سقفِ نتایجِ جست‌وجو
+const DEDUP_SEARCH_MAX_SEC   = 45;   // v10.44: سقفِ زمانیِ جست‌وجوی عمیق
+const DEDUP_DEL_MAX        = 2000;  // سقفِ هر درخواستِ حذف (v10.44: پس‌زمینه‌ای شد)
+const DEDUP_DEL_RESULT_FILE = __DIR__ . '/dedup_del_result.json';
 const DEDUP_DEL_WAIT_BASE  = 2;    // ثانیه — تلاشِ دوم ۲s، سومی ۴s
 const DEDUP_STALE_SEC      = 300;
 /* v10.23 (۳۶د): «اصلاح دسته‌بندی محصولات باسلام» مثل dedup/agent به کارِ
@@ -262,7 +267,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.43';
+const APP_VERSION = '10.44';
 const APP_VERSION_DATE = '1405/06/03';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -18455,7 +18460,7 @@ if (($_POST['action'] ?? '') === 'dedup_delete_ids') {
     $ids = json_decode((string)($_POST['ids'] ?? '[]'), true);
     if (!is_array($ids)) $ids = [];
     $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
-    $ids = array_slice($ids, 0, 200);
+    $ids = array_slice($ids, 0, DEDUP_DEL_MAX);
     if (!$ids || ($target !== 'woo' && $target !== 'bsl')) {
         echo json_encode(['ok' => false, 'error' => 'ورودی نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
     }
@@ -18485,17 +18490,53 @@ if (($_POST['action'] ?? '') === 'dedup_delete_ids') {
         }
     }
 
-    $done = 0; $fail = 0; $items = [];
+    /* v10.44 (۵۸): این هندلر تا اینجا یک درخواستِ *همگام* بود: برای هر
+       شناسه یک تماسِ شبکه + ۰٫۲ ثانیه مکث. روی ۲۰۰ مورد یعنی چند دقیقه
+       انتظار در یک درخواست — همان چیزی که کامنتِ بالای همین بخش هشدار
+       می‌داد: «هیچ مرورگر/پروکسی/هاستی این‌قدر صبر نمی‌کند». مرورگر
+       تایم‌اوت می‌کرد، پاسخ هرگز نمی‌رسید و کاربر می‌دید «دکمه کار
+       نمی‌کند» — در حالی که سرور داشت کار می‌کرد. حالا دقیقاً مثل
+       dedup_start: پاسخِ فوری + اجرا در پس‌زمینه + گزارشِ زنده. */
+    $lockFp = fopen(DEDUP_LOCK_FILE, 'c');
+    if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
+        if ($lockFp) fclose($lockFp);
+        echo json_encode(['ok' => false, 'running' => true,
+            'error' => 'یک عملیاتِ تکراری‌ها همین حالا در حال اجراست'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    dedupClearStop();
+    $total = count($ids);
+    $verbFa = ($target === 'bsl' ? 'بایگانی' : 'حذف');
+    @unlink(DEDUP_PROGRESS_FILE);
+    dedupProgress(['running' => true, 'done' => false, 'target' => $target, 'mode' => 'delete',
+        'started_at' => time(), 'phase' => 'delete', 'total' => $total, 'dups' => $total,
+        'groups' => 0, 'processed' => 0, 'deleted' => 0, 'failed' => 0,
+        'log_add' => ['🗑 شروعِ ' . $verbFa . ' ' . aiFaNum($total) . ' مورد']]);
+
+    $early = json_encode(['ok' => true, 'started' => true, 'target' => $target, 'count' => $total],
+        JSON_UNESCAPED_UNICODE);
+    header('Connection: close');
+    header('Content-Length: ' . strlen($early));
+    echo $early;
+    @ob_flush(); @flush();
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+
+    register_shutdown_function(function () use ($lockFp) {
+        @flock($lockFp, LOCK_UN); @fclose($lockFp); @unlink(DEDUP_LOCK_FILE);
+    });
+
+    $done = 0; $fail = 0; $items = []; $seen = 0; $stopped = false;
     foreach ($ids as $did) {
+        if (dedupStopRequested()) { $stopped = true; break; }
+        $seen++;
         if ($target === 'bsl') {
-            if (!bslAllShops($cn)) { echo json_encode(['ok' => false, 'error' => 'تنظیمات باسلام ناقص'], JSON_UNESCAPED_UNICODE); exit; }
+            if (!bslAllShops($cn)) { dedupProgress(['running'=>false,'done'=>true,'error'=>'تنظیمات باسلام ناقص','log_add'=>['❌ تنظیمات باسلام ناقص']]); exit; }
             $r  = bslArchiveSmart($cn, $did, (int)($vidOf[$did] ?? 0));
             $ok = !empty($r['ok']);
             $em = (string)($r['msg'] ?? '');
             $vn = (string)($r['vendor_name'] ?? '');
         } else {
             $w = $cn['woocommerce'] ?? [];
-            if (empty($w['store_url'])) { echo json_encode(['ok' => false, 'error' => 'تنظیمات ووکامرس ناقص'], JSON_UNESCAPED_UNICODE); exit; }
+            if (empty($w['store_url'])) { dedupProgress(['running'=>false,'done'=>true,'error'=>'تنظیمات ووکامرس ناقص','log_add'=>['❌ تنظیمات ووکامرس ناقص']]); exit; }
             $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'DELETE', 'products/' . $did . '?force=true');
             $ok = !empty($r['ok']);
             $em = $r['body']['message'] ?? ('HTTP ' . ($r['code'] ?? '?'));
@@ -18503,6 +18544,12 @@ if (($_POST['action'] ?? '') === 'dedup_delete_ids') {
         }
         if ($ok) { $done++; $items[] = ['id' => $did, 'ok' => true, 'vendor' => $vn]; }
         else     { $fail++; $items[] = ['id' => $did, 'ok' => false, 'msg' => (string)$em, 'vendor' => $vn]; }
+        /* گزارشِ زنده: هر مورد همان لحظه در پنل دیده می‌شود */
+        dedupProgress(['processed' => $seen, 'deleted' => $done, 'failed' => $fail,
+            'phase' => 'delete', 'dups' => $total,
+            'log_add' => [($ok ? '✅ ' : '❌ ') . '#' . $did
+                . ($vn !== '' ? (' · 🏪 ' . $vn) : '')
+                . ($ok ? (' — ' . $verbFa . ' شد') : (' — ' . mb_substr((string)$em, 0, 90, 'UTF-8')))]]);
         usleep(200000);
     }
     /* v10.42 (۵۶): وقتی *همه* ناموفق‌اند، ok=false برمی‌گردد. تا اینجا حتی
@@ -18512,13 +18559,23 @@ if (($_POST['action'] ?? '') === 'dedup_delete_ids') {
     $firstErr = '';
     foreach ($items as $it) if (empty($it['ok']) && ($it['msg'] ?? '') !== '') { $firstErr = (string)$it['msg']; break; }
     $verb = ($target === 'bsl' ? ' محصول بایگانی شد' : ' محصول حذف شد');
-    echo json_encode(['ok' => $done > 0, 'deleted' => $done, 'failed' => $fail, 'items' => $items,
+    /* v10.44 (۵۸): پاسخ زودتر رفته؛ نتیجهٔ نهایی در فایلِ پیشرفت می‌نشیند تا
+       ddWatch آن را ببیند. متنِ خلاصه همان قبلی است تا رابط تغییر نکند. */
+    $summary = aiFaNum($done) . $verb
+             . ($fail ? ('؛ ' . aiFaNum($fail) . ' ناموفق'
+                         . ($firstErr !== '' ? (' (' . mb_substr($firstErr, 0, 80, 'UTF-8') . ')') : '')) : '');
+    dedupProgress([
+        'running' => false, 'done' => true, 'phase' => 'delete', 'stopped' => $stopped,
+        'processed' => $seen, 'deleted' => $done, 'failed' => $fail, 'dups' => $total,
+        'del_ok' => $done > 0, 'del_msg' => $summary,
         'error' => $done === 0 ? ('هیچ محصولی ' . ($target === 'bsl' ? 'بایگانی' : 'حذف') . ' نشد'
                                   . ($firstErr !== '' ? (' — ' . $firstErr) : '')) : '',
-        'msg' => aiFaNum($done) . $verb
-                 . ($fail ? ('؛ ' . aiFaNum($fail) . ' ناموفق'
-                             . ($firstErr !== '' ? (' (' . mb_substr($firstErr, 0, 80, 'UTF-8') . ')') : '')) : '')],
-        JSON_UNESCAPED_UNICODE);
+        'log_add' => [($stopped ? '⏹ متوقف شد — ' : '🏁 پایان — ') . $summary]]);
+    /* گزارشِ ریزِ هر مورد برای «آخرین نتیجه» */
+    @file_put_contents(DEDUP_DEL_RESULT_FILE, json_encode(
+        ['ok' => $done > 0, 'at' => time(), 'target' => $target, 'deleted' => $done,
+         'failed' => $fail, 'stopped' => $stopped, 'items' => $items, 'msg' => $summary],
+        JSON_UNESCAPED_UNICODE), LOCK_EX);
     exit;
 }
 
@@ -23078,7 +23135,7 @@ if (isset($_GET['selftest'])) {
 
     $add('10.43', 'بدنهٔ واقعیِ حذفِ همه در تابعِ جدا و سقف‌آگاه است',
          (strpos($selfSrc, 'function ddDelAllWith(d){') !== false
-          && strpos($selfSrc, 'const CAP=200,go=ids.slice(0,CAP),rest=ids.length-go.length;') !== false));
+          && strpos($selfSrc, 'const CAP=DD_DEL_MAX,go=ids.slice(0,CAP),rest=ids.length-go.length;') !== false));
 
     $add('10.43', 'گروهِ بدونِ فهرستِ حذف، دکمه را با خطا نمی‌شکند',
          (strpos($selfSrc, '((d&&d.duplicates_list)||[]).forEach(g=>((g&&g.drop)||[]).forEach(') !== false
@@ -23093,6 +23150,54 @@ if (isset($_GET['selftest'])) {
 
     $add('10.43', 'شناسه‌های تکراری در فهرستِ حذف یک‌بار شمرده می‌شوند',
          strpos($selfSrc, 'if(id>0&&ids.indexOf(id)<0)ids.push(id);') !== false);
+
+    /* ==== ۵۸ (v10.44) ==== */
+
+    $add('10.44', 'حذفِ گروهی پس‌زمینه‌ای است و بی‌درنگ پاسخ می‌دهد',
+         (preg_match('~dedup_delete_ids.{0,6000}?fastcgi_finish_request~su', $selfSrc) === 1
+          && preg_match('~dedup_delete_ids.{0,6000}?[\x27"]started[\x27"]~su', $selfSrc) === 1));
+
+    $add('10.44', 'حذفِ گروهی پیشرفتِ زنده می‌نویسد',
+         (preg_match('~dedup_delete_ids.{0,9000}?dedupProgress\(\[[\x27"]processed[\x27"]~su', $selfSrc) === 1
+          && preg_match('~dedup_delete_ids.{0,9000}?[\x27"]phase[\x27"]\s*=>\s*[\x27"]delete[\x27"]~su', $selfSrc) === 1));
+
+    $add('10.44', 'حذفِ گروهی با درخواستِ توقف می‌ایستد',
+         preg_match('~dedup_delete_ids.{0,7000}?if \(dedupStopRequested\(\)\)~su', $selfSrc) === 1);
+
+    $add('10.44', 'حذفِ گروهی با قفل از اجرای هم‌زمان جلوگیری می‌کند',
+         preg_match('~dedup_delete_ids.{0,4000}?flock\(\$lockFp, LOCK_EX \| LOCK_NB\)~su', $selfSrc) === 1);
+
+    $add('10.44', 'خطای پیکربندی در حذفِ گروهی هم در گزارشِ زنده می‌نشیند',
+         preg_match('~dedup_delete_ids.{0,7000}?dedupProgress\(\[[\x27"]running[\x27"]=>false,[\x27"]done[\x27"]=>true,[\x27"]error[\x27"]~su', $selfSrc) === 1);
+
+    $add('10.44', 'سمتِ کلاینت پس از شروعِ حذف، پایش را روشن می‌کند',
+         (preg_match('~function ddDeleteIds\(ids\)\{.{0,2600}?ddDelWatch=true;~su', $selfSrc) === 1
+          && preg_match('~function ddDeleteIds\(ids\)\{.{0,3000}?ddWatch\(\);~su', $selfSrc) === 1));
+
+    $add('10.44', 'پایانِ حذف، اسکنِ تازه می‌زند نه گزارشِ کهنه',
+         preg_match('~if\(ddDelWatch\)\{.{0,600}?ddStart\(ddTarget,[\x27"]scan[\x27"]\)~su', $selfSrc) === 1);
+
+    $add('10.44', 'سقفِ حذف بینِ سرور و کلاینت یکی است',
+         (strpos($selfSrc, 'const DD_DEL_MAX=<?= (int)DEDUP_DEL_MAX ?>;') !== false
+          && strpos($selfSrc, 'array_slice($ids, 0, DEDUP_DEL_MAX)') !== false));
+
+    $add('10.44', 'جست‌وجوی محصولاتِ باسلام دیگر پشتِ «صفحهٔ اول خالی» قفل نیست',
+         (strpos($selfSrc, 'if($q!==\'\'&&empty($data)){') === false
+          && preg_match('~\$foundBy=\$hits\?[\x27"]deep[\x27"]:\$foundBy;~su', $selfSrc) === 1));
+
+    $add('10.44', 'شمارشِ نتایجِ جست‌وجو روی کلِ تطبیق‌هاست، نه یک صفحه',
+         (strpos($selfSrc, '$totalCount=count($hits);') !== false
+          && strpos($selfSrc, '$totalPage=max(1,(int)ceil($totalCount/max(1,$perPage)));') !== false
+          && strpos($selfSrc, '$data=array_slice($hits,max(0,($page-1)*$perPage),$perPage);') !== false));
+
+    $add('10.44', 'جست‌وجوی عمیق سقفِ صفحه/نتیجه/زمان دارد',
+         (DEDUP_SEARCH_MAX_PAGES >= 25 && DEDUP_SEARCH_MAX_HITS >= 100
+          && DEDUP_SEARCH_MAX_SEC > 0
+          && strpos($selfSrc, 'if((microtime(true)-$deepT0)>DEDUP_SEARCH_MAX_SEC)') !== false));
+
+    $add('10.44', 'نتایجِ جست‌وجو شناسهٔ تکراری ندارند',
+         preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
+      || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
 
     $add('10.23', 'دکمهٔ تکراری‌های باسلام در تبِ ارسال هم هست',
@@ -26560,9 +26665,13 @@ if (isset($_GET['selftest'])) {
          && strpos($selfSrc, "\$url.='&ti" . "tle='.urlencode(\$q);") !== false);
     $add('8.82', 'جست‌وجو با شناسهٔ عددی مستقیم محصول را می‌خواند',
          strpos($selfSrc, "\$one=bslReq(\$tk,'GET','products/'.\$searchId);") !== false);
+    /* v10.44 (۵۸): این ادعا به متنِ دقیقِ «$foundBy='deep'» گره خورده بود و با
+       پس‌زمینه‌شدنِ شرطِ جست‌وجو شکست. حالا به خودِ *رفتار* گره خورده است:
+       مسیرِ عمیق باید وجود داشته باشد و برچسبِ deep بزند. */
     $add('8.82', 'اگر سرور چیزی نداد، کل غرفه گشته می‌شود',
-         strpos($selfSrc, "\$foundBy='de" . "ep'") !== false
-         && strpos($selfSrc, 'reconNormTitle(stripProductCode($q))') !== false);
+         strpos($selfSrc, "'de" . "ep'") !== false
+         && strpos($selfSrc, 'reconNormTitle(stripProductCode($q))') !== false
+         && preg_match('~for\(\$pg=1;\$pg<=DEDUP_SEARCH_MAX_PAGES;\$pg\+\+\)~su', $selfSrc) === 1);
     $add('8.82', 'جست‌وجوی عمیق همهٔ وضعیت‌ها را می‌بیند',
          strpos($selfSrc, 'foreach(bslAllStatuses() as $sv){$allSt') !== false);
     // رابط کاربری
@@ -34219,15 +34328,28 @@ exit;
    ی/ک عربی و پسوند «(کد: ۱)» حساس. مقایسهٔ خودمان همهٔ این‌ها را یکسان
    می‌بیند، پس اگر سرور چیزی برنگرداند خودمان کل غرفه را می‌گردیم.
    محصولی که «بازگردانی ناموفق» خورده دقیقاً همین‌جا گم می‌شد. */
-if($q!==''&&empty($data)){
+/* v10.44 (۵۸): شرط از «فهرست کاملاً خالی» به «جست‌وجو در جریان است»
+   تغییر کرد. تا اینجا اگر صفحهٔ اولِ سرور *یک* تطبیق برمی‌گرداند،
+   جست‌وجوی عمیق اصلاً اجرا نمی‌شد و بقیهٔ صفحه‌ها هرگز دیده نمی‌شدند —
+   دقیقاً همان چیزی که کاربر گزارش کرد: «جستجو فقط صفحهٔ اول را می‌گردد».
+   حالا همیشه کلِ غرفه پیمایش می‌شود و نتیجهٔ صفحهٔ اول هم داخلِ همان
+   مجموعه ادغام می‌شود (بدونِ تکرارِ شناسه). */
+if($q!==''){
 $want=reconNormTitle($q);
 $wantBare=reconNormTitle(stripProductCode($q));
-$hits=[];
+$hits=[];$seenIds=[];$deepT0=microtime(true);$deepCut=false;
+foreach(($page<=1?$data:[]) as $row){
+if(!is_array($row))continue;
+$rid=(int)($row['id']??0);
+if($rid>0&&isset($seenIds[$rid]))continue;
+if($rid>0)$seenIds[$rid]=true;
+$hits[]=$row;
+}
 $allSt='';foreach(bslAllStatuses() as $sv){$allSt.='&statuses='.$sv;}
 foreach($shops as $sp){
 $sTk=(string)$sp['token'];$sVid=(int)$sp['vendor_id'];
 if($sTk===''||$sVid<=0)continue;
-for($pg=1;$pg<=25;$pg++){
+for($pg=1;$pg<=DEDUP_SEARCH_MAX_PAGES;$pg++){
 $sr=bslReqRead($sTk,'vendors/'.$sVid.'/products?page='.$pg.'&per_page=100'.$allSt);
 if(empty($sr['ok']))break;
 $rows=bslRowsOf($sr['body']);
@@ -34241,19 +34363,31 @@ if($nt===''&&$nb==='')continue;
 if($nt===$want||$nb===$wantBare
    ||($want!==''&&mb_strpos($nt,$want)!==false)
    ||($wantBare!==''&&mb_strpos($nb,$wantBare)!==false)){
+$rid=(int)($row['id']??0);
+if($rid>0&&isset($seenIds[$rid]))continue;   /* v10.44: تکراری نشود */
+if($rid>0)$seenIds[$rid]=true;
 $row['shop']=$sVid;$row['shop_name']=(string)($sp['shop_name']??'');
 $hits[]=$row;
 }
 }
 $tp=bslMetaInt($sr['body'],'total_page',1);
 if($pg>=max(1,$tp))break;
-if(count($hits)>=$perPage)break;
+/* v10.44 (۵۸): قبلاً همین‌جا با پرشدنِ یک صفحه (perPage) پیمایش قطع
+   می‌شد، پس شمارشِ «کل نتایج» هم غلط بود. حالا تا سقفِ امن ادامه
+   می‌دهیم و همهٔ تطبیق‌ها را می‌شماریم. سقفِ زمانی هم می‌گذاریم تا
+   غرفهٔ خیلی بزرگ باعثِ تایم‌اوتِ درخواست نشود. */
+if(count($hits)>=DEDUP_SEARCH_MAX_HITS)break;
+if((microtime(true)-$deepT0)>DEDUP_SEARCH_MAX_SEC){$deepCut=true;break;}
 }
+if($deepCut||count($hits)>=DEDUP_SEARCH_MAX_HITS)break;
 }
-if($hits){
-$data=array_slice($hits,0,$perPage);
-$totalPage=1;$totalCount=count($hits);$foundBy='deep';
-}
+/* v10.44 (۵۸): صفحه‌بندیِ نتیجه روی *کلِ* تطبیق‌ها انجام می‌شود، نه روی
+   صفحهٔ اولِ سرور؛ پس total_count و total_page واقعی‌اند. */
+$totalCount=count($hits);
+$totalPage=max(1,(int)ceil($totalCount/max(1,$perPage)));
+$data=array_slice($hits,max(0,($page-1)*$perPage),$perPage);
+$foundBy=$hits?'deep':$foundBy;
+if($deepCut&&$shopErrs===[]){$shopErrs[]='جست‌وجو به سقفِ زمانی رسید؛ نتایج ممکن است کامل نباشد';}
 }
 
 $cats=[];
@@ -34261,7 +34395,7 @@ $cr=bslReqRead((string)($shops[0]['token']??''),'categories');
 if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
 /* v9.83: اگر فهرست خالی بود ولی خطایی هم بوده، پیام را همراه پاسخ بفرست
    تا مودال به‌جای سکوت، دلیلِ خالی بودن را نشان بدهد. */
-$warn=(!$data&&$shopErrs)?implode(' | ',array_slice($shopErrs,0,3)):'';
+$warn=((!$data||!empty($deepCut))&&$shopErrs)?implode(' | ',array_slice($shopErrs,0,3)):'';
 echo json_encode(['ok'=>true,'products'=>$data,'page'=>$page,'total_page'=>$totalPage,'total_count'=>$totalCount,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'q'=>$q,'found_by'=>$foundBy,'warn'=>$warn,'shop_id'=>$curShopId,'shops'=>$allShops],JSON_UNESCAPED_UNICODE);
 exit;
 }
@@ -48776,6 +48910,39 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.44', t:'🗑 گزارشِ زنده هنگام حذف + جست‌وجویی که واقعاً همهٔ محصولات را می‌گردد', items:[
+    '❌ <b>مشکل ۱:</b> دکمهٔ «حذفِ همهٔ موارد نشان‌داده‌شده» باز هم انگار کار',
+    '   نمی‌کرد: می‌زدید، یک پیامِ «در حال حذف...» می‌آمد و بعد هیچ — نه پیشرفتی،',
+    '   نه نتیجه‌ای. گاهی هم بعد از چند دقیقه فقط خطای شبکه.',
+    '🔍 <b>چرا؟</b> حذف در <b>همان درخواست</b> انجام می‌شد: برای هر محصول یک تماس',
+    '   با باسلام به‌علاوهٔ ۰٫۲ ثانیه مکث. روی ۲۰۰ محصول یعنی چند دقیقه در یک',
+    '   درخواست — و هیچ مرورگر/پروکسی/هاستی این‌قدر صبر نمی‌کند. سرور واقعاً',
+    '   داشت کار می‌کرد، ولی پاسخ هرگز به مرورگر نمی‌رسید و شما «سکوت» می‌دیدید.',
+    '✅ <b>چه چیزی درست شد:</b>',
+    '   • حالا سرور <b>بی‌درنگ</b> جواب می‌دهد و کار را در پس‌زمینه ادامه می‌دهد،',
+    '     دقیقاً مثل خودِ «گزارشِ تکراری‌ها».',
+    '   • همان پنلِ پیشرفت باز می‌شود و <b>گزارشِ زنده</b> می‌آید: هر محصول با',
+    '     شناسه، نامِ غرفه و نتیجه (✅/❌) همان لحظه در فهرست می‌نشیند.',
+    '   • نوارِ درصد، شمارندهٔ «بایگانی‌شده» و دکمهٔ <b>توقف</b> کار می‌کنند؛',
+    '     می‌توانید وسطِ کار متوقف کنید.',
+    '   • بستنِ صفحه کار را قطع نمی‌کند؛ برگردید، همان‌جا ادامه دارد.',
+    '   • در پایان به‌طور خودکار یک اسکنِ تازه می‌خورد تا فهرستِ به‌روز را ببینید.',
+    '   • چون دیگر انتظاری در کار نیست، سقفِ هر دور از ۲۰۰ به ۲۰۰۰ رفت.',
+    '   • قفل گذاشته شد تا دو عملیاتِ حذف هم‌زمان اجرا نشوند.',
+    '❌ <b>مشکل ۲:</b> در «مدیریت جامع محصولات باسلام» جست‌وجو فقط <b>صفحهٔ اول</b>',
+    '   را می‌گشت؛ محصولی که در صفحهٔ ۳ بود پیدا نمی‌شد.',
+    '🔍 <b>چرا؟</b> جست‌وجوی عمیقِ چندصفحه‌ای وجود داشت، ولی پشتِ شرطِ «اگر صفحهٔ',
+    '   اول <b>کاملاً خالی</b> بود» قفل شده بود. کافی بود سرورِ باسلام یک تطبیقِ',
+    '   ضعیف در صفحهٔ اول برگرداند تا جست‌وجوی عمیق هرگز اجرا نشود.',
+    '✅ <b>چه چیزی درست شد:</b>',
+    '   • هر جست‌وجو حالا <b>کلِ غرفه</b> را می‌گردد (تا ۶۰ صفحه × ۱۰۰ محصول، همهٔ',
+    '     وضعیت‌ها) و نتیجهٔ صفحهٔ اول هم در همان مجموعه ادغام می‌شود.',
+    '   • «تعداد کل» و صفحه‌بندی روی <b>همهٔ</b> تطبیق‌ها حساب می‌شود، نه یک صفحه؛',
+    '     پس صفحهٔ ۲ و ۳ نتایج هم واقعاً کار می‌کنند.',
+    '   • شناسهٔ تکراری یک‌بار شمرده می‌شود.',
+    '   • سقفِ زمانیِ ۴۵ ثانیه گذاشته شد تا غرفهٔ خیلی بزرگ باعثِ تایم‌اوت نشود؛',
+    '     اگر به سقف بخورد، همان بالای فهرست هشدار می‌دهد که نتیجه ممکن است کامل نباشد.',
+  ]},
   {v:'10.43', t:'🗑 دکمهٔ «حذفِ همهٔ موارد نشان‌داده‌شده» دیگر بی‌صدا نمی‌مانَد', items:[
     '❌ <b>مشکل:</b> در بخشِ تکراری‌ها، فهرستِ گروه‌ها درست نشان داده می‌شد، ولی',
     '   با زدنِ دکمهٔ «حذفِ همهٔ موارد نشان‌داده‌شده» <b>هیچ اتفاقی نمی‌افتاد</b>:',
@@ -59545,6 +59712,8 @@ function finFM(done,found,failed,total){
 // آکاردئون رندر می‌شود و باسلام داخلِ مودال. تنظیمات، نظرسنجیِ پیشرفت،
 // گزارش و حذفِ دستی همگی مشترک‌اند.
 let ddIsRun=false, ddTimer=null, ddSeen=0, ddTarget='woo', ddCfg=null, ddLastResult=null;
+let ddDelWatch=false;   // v10.44 (۵۸): پایشِ فعلی مالِ یک عملیاتِ حذف است
+const DD_DEL_MAX=<?= (int)DEDUP_DEL_MAX ?>;   // v10.44 (۵۸): همان سقفِ سرور
 const DD_KEEP=[['newest','جدیدترین بماند'],['oldest','قدیمی‌ترین بماند'],['cheapest','ارزان‌ترین بماند'],['expensive','گران‌ترین بماند'],['most_stock','بیشترین موجودی بماند'],['best_status','بهترین وضعیت بماند']];
 
 // شناسه‌ها با پیشوند تفکیک می‌شوند تا دو نسخهٔ همزمان در صفحه تداخل نکنند
@@ -59679,7 +59848,7 @@ function ddStart(target,mode){
     ddTarget=target;
     if(mode==='delete'&&!confirm('محصولاتِ تکراری واقعاً حذف می‌شوند'+(target==='bsl'?' (در باسلام: بایگانی)':'')+'.\nمعیار: '+(document.getElementById(ddPfx()+'Keep')||{value:''}).value+'\nادامه می‌دهید؟'))return;
     ddSaveCfg(0).then(()=>{
-        ddIsRun=true;ddSeen=0;ddLastResult=null;
+        ddIsRun=true;ddSeen=0;ddLastResult=null;ddDelWatch=false;   // v10.44 (۵۸)
         fxTopBar(true);                       // v10.07: نوارِ پیشرفتِ بالای صفحه
         const E=ddEl;
         if(E('Btn'))E('Btn').classList.add('hidden');
@@ -59712,7 +59881,20 @@ function ddWatch(){
         fetch('?dedup_status=1&since='+ddSeen).then(r=>r.json()).then(st=>{
             if(!st)return;
             ddApplyStatus(st);
-            if(st.done){clearInterval(ddTimer);ddFinish();ddFetchResult();}
+            if(st.done){
+                clearInterval(ddTimer);ddFinish();
+                /* v10.44 (۵۸): پایانِ یک *حذف* گزارشِ اسکنِ قدیمی را بار
+                   نمی‌کند — آن فهرست دیگر منسوخ است. به‌جایش یک اسکنِ تازه
+                   می‌زنیم تا کاربر وضعیتِ واقعیِ بعد از حذف را ببیند. */
+                if(ddDelWatch){
+                    ddDelWatch=false;
+                    const ok=!!st.del_ok,msg=st.del_msg||'';
+                    if(msg)showToast(((st.failed||0)>0?'⚠️ ':(ok?'✅ ':'❌ '))+msg,(ok&&!(st.failed||0))?0:1);
+                    setTimeout(()=>{if(!ddIsRun)ddStart(ddTarget,'scan');},600);
+                }else{
+                    ddFetchResult();
+                }
+            }
         }).catch(()=>{});
     },1200);
 }
@@ -60353,9 +60535,10 @@ function ddDelAllWith(d){
     }));
     if(!ids.length){showToast('چیزی برای حذف نیست');return;}
     const V=(ddTarget==='bsl'?'بایگانی':'حذف');
-    /* سقفِ سمتِ سرور ۲۰۰ شناسه در هر درخواست است؛ اگر بیشتر بود کاربر باید
-       بداند این دور فقط بخشی را می‌برد، نه اینکه بی‌خبر ۲۰۱ به بعد گم شود. */
-    const CAP=200,go=ids.slice(0,CAP),rest=ids.length-go.length;
+    /* v10.44 (۵۸): چون عملیات دیگر مسدودکننده نیست (سرور پس‌زمینه‌ای کار
+       می‌کند و پیشرفت زنده می‌آید)، سقف از ۲۰۰ به DEDUP_DEL_MAX رسید؛ باز
+       هم اگر بیشتر بود کاربر باید بداند این دور فقط بخشی را می‌برد. */
+    const CAP=DD_DEL_MAX,go=ids.slice(0,CAP),rest=ids.length-go.length;
     if(!confirm(toFa(go.length)+' محصول '+V+' می‌شود'
         +(rest>0?(' (از '+toFa(ids.length)+' مورد؛ '+toFa(rest)+' موردِ باقی‌مانده را با زدنِ دوبارهٔ همین دکمه ادامه دهید)'):'')
         +'. مطمئنید؟'))return;
@@ -60372,18 +60555,40 @@ function ddDelAllWith(d){
  */
 function ddDeleteIds(ids){
     if(!ids||!ids.length)return;
+    if(ddIsRun){showToast('⏳ یک عملیات در حال اجراست',1);return;}
     const isB=(ddTarget==='bsl'), V=isB?'بایگانی':'حذف';
     const fd=new FormData();fd.append('action','dedup_delete_ids');
     fd.append('target',ddTarget);fd.append('ids',JSON.stringify(ids));
+    /* v10.44 (۵۸): سرور حالا پس‌زمینه‌ای کار می‌کند و بی‌درنگ پاسخ می‌دهد؛
+       پس به‌جای انتظار برای پاسخِ طولانی (که تایم‌اوت می‌شد و کاربر می‌دید
+       «دکمه کار نمی‌کند»)، همان پنلِ گزارشِ زنده را باز می‌کنیم و پیشرفت را
+       مورد‌به‌مورد نشان می‌دهیم — دقیقاً مثل خودِ اسکن. */
+    ddIsRun=true;ddSeen=0;
+    fxTopBar(true);
+    const E=ddEl;
+    if(E('Btn'))E('Btn').classList.add('hidden');
+    if(E('DelBtn'))E('DelBtn').classList.add('hidden');
+    if(E('Stop'))E('Stop').classList.remove('hidden');
+    if(E('P'))E('P').classList.remove('hidden');
+    if(E('PB'))E('PB').style.width='5%';
+    if(E('SM'))E('SM').classList.remove('hidden');
+    if(E('Running')){E('Running').classList.remove('hidden');E('Running').innerHTML='';}
+    if(E('SS'))E('SS').textContent='⏳ در حال '+V+' '+toFa(ids.length)+' مورد...';
     showToast('⏳ در حال '+V+' '+toFa(ids.length)+' مورد...');
+    ddDelWatch=true;
     fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
-        if(d&&d.ok){
-            showToast((d.failed>0?'⚠️ ':'✅ ')+(d.msg||(V+' انجام شد')),d.failed>0?1:0);
-            ddStart(ddTarget,'scan');
-        }else{
-            showToast('❌ '+((d&&(d.error||d.msg))||(V+' ناموفق')),1);
+        if(!d||!d.ok){
+            ddDelWatch=false;ddFinish();
+            const m=(d&&(d.error||d.msg))||(V+' ناموفق');
+            if(E('SS'))E('SS').textContent='✗ '+m;
+            showToast('❌ '+m,1);return;
         }
-    }).catch(()=>showToast('❌ خطای شبکه',1));
+        ddWatch();
+    }).catch(()=>{
+        /* پاسخِ شروع ممکن است گم شود ولی کار روی سرور آغاز شده — فقط تماشا کن */
+        if(E('SS'))E('SS').textContent='… اتصال کند است، وضعیت را دنبال می‌کنیم';
+        ddWatch();
+    });
 }
 
 // سازگاریِ عقب‌رو: نام‌های قدیمی هنوز کار می‌کنند
