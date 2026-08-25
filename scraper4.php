@@ -137,6 +137,9 @@ const SELAGENT_LOCK_FILE     = __DIR__ . '/selagent.lock';
    جدا از connections.json نگه داشته می‌شود تا ویرایشِ متنِ چندخطی
    هیچ‌وقت فایلِ حساسِ اتصالات را در خطر نگذارد. */
 const SELAGENT_PROMPT_FILE   = __DIR__ . '/selagent_prompt.json';
+/* v10.40 (۵۴ب): پرامپتِ سفارشیِ کاربر برای «اصلاحِ دسته‌بندی با هوش
+   مصنوعی». همان دلیلِ بالا: فایلِ جدا، دور از connections.json. */
+const CATPROMPT_FILE         = __DIR__ . '/catfix_prompt.json';
 /* v10.30 (۴۳الف): سقف‌ها بالا رفت. با ابزارهای تازه (page_data، find_text،
    inspect_html صفحه‌بندی‌شده) ایجنت روی صفحاتِ SPA چند گامِ کاوش بیشتر
    لازم دارد؛ ۱۶ گام وسطِ کار تمام می‌شد و «سقفِ گام‌ها» می‌خورد. */
@@ -228,7 +231,7 @@ const REMOTEMAP_MAX_ROWS = 20000;
    انجام می‌شود. شیر اطمینان: TTL و بازسازیِ دستی. */
 const BSL_CATALOG_PREFIX   = __DIR__ . '/bsl_catalog_v';
 const BSL_CATALOG_TTL      = 21600;   // ۶ ساعت — پیش‌فرض؛ از تنظیمات قابل تغییر است (bslCatalogTtl)
-const BSL_CATALOG_MAX_PAGES = 60;     // سقفِ ۶۰۰۰ محصول در هر غرفه
+const BSL_CATALOG_MAX_PAGES = 400;    // v10.40 (۵۴الف): سقفِ ۴۰۰۰۰ محصول در هر غرفه (تا ۱۰.۳۹ فقط ۶۰ صفحه = ۶۰۰۰ بود)
 /* v10.35 (۴۷د/ه): همگام‌سازیِ دستی — کارِ پس‌زمینه با ردیفِ خودش در مدیر
    وظیفه، و گزارشِ کاملِ ماندگارِ هر همگام‌سازی. */
 const MANUAL_SYNC_PROGRESS_FILE = __DIR__ . '/manual_sync_progress.json';
@@ -249,7 +252,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.39';
+const APP_VERSION = '10.40';
 const APP_VERSION_DATE = '1405/06/03';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -3544,13 +3547,81 @@ function aiCatProfileHint(string $profileName, string $extra = ''): string {
     return $s . "\n";
 }
 
-function aiCatPayload(string $title, string $catList, array $tried = [], string $profileHint = ''): array {
+/* =====================================================================
+ *  v10.40 (۵۴ب): پرامپتِ سفارشیِ دسته‌بندی.
+ *
+ *  چرا: قواعدِ درستِ دسته‌بندی برای هر غرفه فرق می‌کند و فقط صاحبِ غرفه
+ *  آن‌ها را می‌داند — «پوشاکِ بچگانه را همیشه زیر سیسمونی نبر»، «هر چیزی
+ *  که با زعفران است زیر خواروبار برود نه سوغات». تا ۱۰.۳۹ هیچ راهی برای
+ *  گفتنِ این‌ها نبود و کاربر فقط می‌توانست نتیجهٔ بد را ببیند.
+ *
+ *  طراحی عمداً آینهٔ selagentLoadPrompts است (همان سه حالت، همان سقفِ
+ *  ۸۰۰۰ نویسه، همان جانگهدارها) تا نگهداری یک الگو باشد نه دو تا.
+ *  در حالتِ «جایگزینی» هم قواعدِ فنیِ ثابت ته متن می‌مانند، وگرنه مدل
+ *  چیزی جز «فقط عدد برگردان» نمی‌فهمد و کلِ خروجی غیرقابلِ تجزیه می‌شود.
+ * ===================================================================== */
+function catPromptLoad(): array {
+    $d = [];
+    if (is_file(CATPROMPT_FILE)) {
+        $j = json_decode((string)@file_get_contents(CATPROMPT_FILE), true);
+        if (is_array($j)) $d = $j;
+    }
+    $mode = (string)($d['mode'] ?? 'append');
+    if (!in_array($mode, ['append', 'replace', 'off'], true)) $mode = 'append';
+    return ['mode' => $mode, 'text' => (string)($d['text'] ?? ''),
+            'updated' => (int)($d['updated'] ?? 0)];
+}
+
+function catPromptSave(array $p): bool {
+    $mode = (string)($p['mode'] ?? 'append');
+    if (!in_array($mode, ['append', 'replace', 'off'], true)) $mode = 'append';
+    $out = ['mode' => $mode,
+            'text' => mb_substr(trim((string)($p['text'] ?? '')), 0, 8000),
+            'updated' => time()];
+    return (bool)@file_put_contents(CATPROMPT_FILE,
+        json_encode($out, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX);
+}
+
+/** قواعدی که بدونشان پاسخ اصلاً قابلِ استفاده نیست — حتی در حالتِ جایگزینی */
+function catPromptFloor(): string {
+    return "\n\n[Hard technical rules — these always apply]\n"
+         . "• Use ONLY category IDs that literally appear in the provided list. Never invent an ID.\n"
+         . "• Return ONLY the numeric category ID. No text, no explanation, no category name, no punctuation.\n";
+}
+
+/** جانگهدارها را باز می‌کند */
+function catPromptExpand(string $txt, string $title, string $catList, string $profileHint): string {
+    return strtr($txt, [
+        '{{title}}'   => $title,
+        '{{cats}}'    => $catList,
+        '{{profile}}' => trim($profileHint),
+    ]);
+}
+
+function aiCatPayload(string $title, string $catList, array $tried = [], string $profileHint = '', ?array $cpOverride = null): array {
+    /* v10.40 (۵۴ب): پرامپت بازنویسی شد. نسخهٔ قبلی فقط می‌گفت «بهترین را
+       انتخاب کن» و هیچ روشی نمی‌داد؛ با فهرستِ چندهزارتایی، مدل به اولین
+       چیزی که سطحی شبیه بود می‌چسبید. حالا روشِ تصمیم صریح است: اول نوعِ
+       کالا، بعد مشخص‌ترین دستهٔ سازگار، و قاعدهٔ صریح برای صفت‌های گمراه‌کننده. */
     $prompt = "You are a product categorization assistant for a Persian (Farsi) e-commerce platform (BaSalam).\n"
             . "Given this product title: \"" . $title . "\"\n\n"
             /* v10.36 (۴۹ه): بافتِ پروفایل — پیش از فهرست می‌آید تا مدل با
                ذهنیتِ درست فهرست را بخواند، نه بعد از آن. */
             . $profileHint
-            . "Select the BEST category ID from this list:\n" . $catList . "\n\n";
+            . "How to decide:\n"
+            . "1. First identify WHAT THE PRODUCT ACTUALLY IS. In Persian titles the head noun "
+            . "(the product type) comes FIRST and everything after it is an attribute: material, "
+            . "colour, size, pattern, brand, target user, packaging. Example: in \"کیف چرم زنانه\" "
+            . "the product is a bag (کیف), not leather (چرم).\n"
+            . "2. Ignore marketing words when choosing: ارسال رایگان, تخفیف, ویژه, اصل, درجه یک, "
+            . "کد, مدل, سایز, بسته, ست, عمده.\n"
+            . "3. Pick the MOST SPECIFIC category that is still certainly correct. Prefer a precise "
+            . "sub-category over a broad one, but never guess a specific category if you are unsure — "
+            . "in that case choose the closest safe parent.\n"
+            . "4. The category must match the product ITSELF, not what it is made of, not who it is "
+            . "for, and not what it can be used with.\n"
+            . "5. Use ONLY IDs that literally appear in the list below. Never invent an ID.\n\n"
+            . "Category list (id: name), most relevant first:\n" . $catList . "\n\n";
     /* v10.12 (۲۵): دسته‌های امتحان‌شده از خودِ فهرست حذف شده‌اند، ولی یک
        تذکرِ صریح هم می‌دهیم: بعضی مدل‌ها شناسه‌ای را از حافظه می‌سازند که
        اصلاً در فهرست نبوده. با این جمله، تکرارِ گزینهٔ ردشده کمتر می‌شود. */
@@ -3569,6 +3640,29 @@ function aiCatPayload(string $title, string $catList, array $tried = [], string 
         }
     }
     $prompt .= "Return ONLY the category ID number. Do not return any text, explanation, or name. Just the numeric ID.";
+
+    /* v10.40 (۵۴ب): دستورالعملِ سفارشیِ کاربر.
+       «افزودن» ته پرامپتِ استاندارد می‌نشیند و بر قواعدِ عمومی اولویت
+       دارد؛ «جایگزینی» کلِ متن را عوض می‌کند ولی قواعدِ فنیِ ثابت
+       (فقط عدد، فقط شناسه‌های موجود) همیشه می‌مانند. */
+    /* $cpOverride: فقط پیش‌نمایشِ UI از آن استفاده می‌کند تا متنِ ذخیره‌نشده
+       را بدونِ دست‌زدن به فایل رندر کند. */
+    $cp = is_array($cpOverride) ? [
+            'mode' => in_array((string)($cpOverride['mode'] ?? 'append'), ['append','replace','off'], true)
+                        ? (string)$cpOverride['mode'] : 'append',
+            'text' => (string)($cpOverride['text'] ?? ''),
+          ] : catPromptLoad();
+    $cpTxt = trim((string)$cp['text']);
+    if ($cpTxt !== '' && $cp['mode'] !== 'off') {
+        $cpTxt = catPromptExpand($cpTxt, $title, $catList, $profileHint);
+        if ($cp['mode'] === 'replace') {
+            $prompt = $cpTxt . catPromptFloor();
+        } else {
+            $prompt .= "\n\n[Seller's own rules — these take priority over the general guidance above,"
+                     . " except the hard technical rules]\n" . $cpTxt;
+        }
+    }
+
     return ['messages' => [
         ['role' => 'system', 'content' => 'You are a product categorization assistant. Return ONLY the numeric category ID.'],
         ['role' => 'user', 'content' => $prompt],
@@ -4548,17 +4642,93 @@ function catTriedClear(int $pid = 0): int {
  * می‌کند. حذف از خودِ فهرست از «نگو این را انتخاب کن» قوی‌تر است: مدل
  * اصلاً گزینه را نمی‌بیند، پس نمی‌تواند تکرارش کند.
  */
-function aiCatListBuild(array $leafCats, array $exclude = [], int $maxLen = 3000): string {
+/**
+ * فهرستِ دسته‌ها برای پرامپت.
+ *
+ * ⚠️ v10.40 (۵۴ب) — ریشهٔ «پیشنهادهای افتضاح»:
+ *
+ * تا ۱۰.۳۹ این تابع فهرست را در ۳۰۰۰ *بایت* می‌برید. نامِ دسته‌ها فارسی
+ * است و هر حرفِ فارسی در UTF-8 دو بایت می‌گیرد؛ یعنی هر سطر حدود ۴۳ بایت.
+ * نتیجه: از چند هزار دستهٔ باسلام فقط **حدود ۶۹ تای اول** به مدل می‌رسید،
+ * آن هم به ترتیبِ درختِ دسته‌ها نه به ترتیبِ ربط. مدل بهترین دسته را
+ * انتخاب نمی‌کرد چون اصلاً ندیده بودش — فقط بینِ ۶۹ دستهٔ بی‌ربط بهترین
+ * را می‌زد. هیچ خطایی هم لاگ نمی‌شد.
+ *
+ * دو اصلاح:
+ *  ۱) بریدن با mb_strlen (نویسه، نه بایت) و سقفِ خیلی بزرگ‌تر.
+ *  ۲) اگر $title داده شود، دسته‌ها **پیش از بریدن** بر اساسِ ربط به عنوانِ
+ *     محصول مرتب می‌شوند. پس اگر باز هم مجبور به بریدن شدیم، چیزی که
+ *     می‌ماند مرتبط‌ترین‌هاست نه اولین‌های الفبایی.
+ */
+function aiCatListBuild(array $leafCats, array $exclude = [], int $maxLen = 24000, string $title = ''): string {
     $ex = [];
     foreach ($exclude as $e) { $e = (int)$e; if ($e > 0) $ex[$e] = true; }
-    $out = ''; $n = 0;
+
+    $pool = [];
     foreach ($leafCats as $c) {
         $id = (int)($c['id'] ?? 0);
         if ($id <= 0 || isset($ex[$id])) continue;
-        $line = $id . ': ' . (string)($c['name'] ?? '') . "\n";
-        if (strlen($out) + strlen($line) > $maxLen) break;
-        $out .= $line; $n++;
+        $pool[] = $c;
     }
+    if ($title !== '' && count($pool) > 1) $pool = aiCatRank($title, $pool);
+
+    $out = ''; $len = 0;
+    foreach ($pool as $c) {
+        $line = (int)$c['id'] . ': ' . (string)($c['name'] ?? '') . "\n";
+        $ll = mb_strlen($line, 'UTF-8');
+        if ($len + $ll > $maxLen) break;
+        $out .= $line; $len += $ll;
+    }
+    return $out;
+}
+
+/**
+ * v10.40 (۵۴ب): مرتب‌سازیِ دسته‌ها بر اساسِ ربط به عنوانِ محصول.
+ *
+ * امتیازدهیِ ساده و بدونِ هزینهٔ شبکه: اشتراکِ کلمه بینِ عنوان و نامِ
+ * دسته، با وزنِ بیشتر برای کلماتِ ابتداییِ عنوان (کلمهٔ اول معمولاً نوعِ
+ * کالاست و بقیه صفت‌اند — همان منطقی که autoMatchBslCategory دارد).
+ * ترتیبِ اصلی به‌عنوان معیارِ پایداری حفظ می‌شود تا خروجی قطعی بماند.
+ */
+function aiCatRank(string $title, array $cats): array {
+    $norm = function (string $s): array {
+        $s = mb_strtolower(trim($s), 'UTF-8');
+        $s = str_replace(["\u{200c}", 'ي', 'ك'], [' ', 'ی', 'ک'], $s);
+        $s = preg_replace('/[^\p{L}\p{N}\s]+/u', ' ', $s);
+        $w = preg_split('/\s+/u', (string)$s, -1, PREG_SPLIT_NO_EMPTY);
+        return array_values(array_filter((array)$w, function ($x) {
+            return mb_strlen($x, 'UTF-8') >= 2;
+        }));
+    };
+    $tw = $norm($title);
+    if (!$tw) return $cats;
+    /* وزنِ کلمه: اولی ۳، دومی ۲، بقیه ۱ */
+    $wt = [];
+    foreach ($tw as $i => $w) $wt[$w] = max($wt[$w] ?? 0, $i === 0 ? 3 : ($i === 1 ? 2 : 1));
+
+    $scored = [];
+    foreach ($cats as $i => $c) {
+        $cw = $norm((string)($c['name'] ?? ''));
+        $sc = 0.0;
+        foreach ($cw as $x) {
+            foreach ($wt as $w => $weight) {
+                if ($x === $w) { $sc += 3 * $weight; continue; }
+                /* پیشوند/پسوندِ کامل — «کفش» در «کفشِ ورزشی» */
+                $lx = mb_strlen($x, 'UTF-8'); $lw = mb_strlen($w, 'UTF-8');
+                if ($lx > $lw && mb_strpos($x, $w, 0, 'UTF-8') !== false) $sc += 1.5 * $weight;
+                elseif ($lw > $lx && mb_strpos($w, $x, 0, 'UTF-8') !== false) $sc += 1.0 * $weight;
+            }
+        }
+        /* دستهٔ عمیق‌تر مشخص‌تر است و معمولاً انتخابِ درست‌تری است */
+        $sc += (float)($c['level'] ?? 0) * 0.3;
+        $scored[] = ['c' => $c, 's' => $sc, 'i' => $i];
+    }
+    usort($scored, function ($a, $b) {
+        if ($a['s'] === $b['s']) return $a['i'] <=> $b['i'];
+        return $b['s'] <=> $a['s'];
+    });
+    $out = [];
+    foreach ($scored as $r) $out[] = $r['c'];
     return $out;
 }
 
@@ -5554,10 +5724,14 @@ function bslCatalogBuild(string $tk, int $vid, bool $force = false): array {
         $c = bslCatalogRead($vid);
         if (bslCatalogFresh($vid, $c))
             return ['ok' => true, 'count' => (int)($c['count'] ?? 0), 'pages' => (int)($c['pages'] ?? 0),
+                    'products' => (int)($c['products'] ?? 0), 'total_count' => (int)($c['total_count'] ?? 0),
                     'partial' => !empty($c['partial']), 'from' => 'cache'];
     }
     $statuses = bslStatusQuery();
-    $items = []; $pages = 0; $partial = false; $rowsFull = [];
+    $items = []; $pages = 0; $partial = false; $rowsFull = []; $seenId = [];
+    /* v10.40 (۵۴الف): «تعدادِ کلِ محصول» را از خودِ پاسخ می‌گیریم تا شرطِ
+       پایان فقط به total_page وابسته نباشد. */
+    $totalCount = 0;
     for ($page = 1; $page <= (int)BSL_CATALOG_MAX_PAGES; $page++) {
         $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=100&page=' . $page . $statuses);
         if (empty($r['ok'])) {
@@ -5565,14 +5739,21 @@ function bslCatalogBuild(string $tk, int $vid, bool $force = false): array {
                است) ولی partial علامت می‌خورد تا «نبودن» هرگز قطعی نشود. */
             $partial = true; break;
         }
-        $rows = $r['body']['data'] ?? [];
+        /* v10.40 (۵۴الف): تا ۱۰.۳۹ فقط $r['body']['data'] خوانده می‌شد. اگر
+           باسلام روی این مسیر ردیف‌ها را زیر data.products (یا items/results)
+           بگذارد، $rows خالی می‌شد و حلقه *بی‌صدا* در همان صفحه می‌ایستاد.
+           bslRowsOf همهٔ آن شکل‌ها را می‌فهمد و در ?bsl_products هم
+           سال‌هاست همین استفاده می‌شود. */
+        $rows = bslRowsOf($r['body']);
         if (!is_array($rows) || !$rows) break;
+        if ($totalCount <= 0) $totalCount = bslMetaInt($r['body'], 'total_count', 0);
         $pages++;
         foreach ($rows as $row) {
             if (!is_array($row)) continue;
             $id = (int)($row['id'] ?? 0);
             $t  = (string)($row['title'] ?? ($row['name'] ?? ''));
             if ($id <= 0 || $t === '') continue;
+            $seenId[$id] = true;   // v10.40 (۵۴الف): شمارشِ محصولِ یکتا، مستقل از کلیدهای عنوان
             $n = reconNormTitle($t);
             if ($n !== '' && !isset($items[$n])) $items[$n] = $id;
             /* بدونِ پسوندِ کد محصول هم ثبت می‌شود — همان تسامحی که آبشار
@@ -5594,16 +5775,50 @@ function bslCatalogBuild(string $tk, int $vid, bool $force = false): array {
                 'ts'     => $id,
             ];
         }
-        $tp = (int)($r['body']['total_page'] ?? 1);
-        if ($page >= max(1, $tp)) break;
+        /* =============================================================
+           v10.40 (۵۴الف): شرطِ پایانِ حلقه بازنویسی شد.
+
+           باگ: تا ۱۰.۳۹ اینجا مستقیم $r['body']['total_page'] خوانده
+           می‌شد. باسلام این کلید را — بسته به مسیر — زیر body، یا زیر
+           body['meta'] / body['pagination'] / body['data'] می‌گذارد.
+           وقتی کلید سرِ جای خام نبود، مقدار به پیش‌فرضِ ۱ می‌افتاد و
+           حلقه در پایانِ *همان صفحه* می‌شکست. برداشت ناقص می‌ماند و
+           هیچ‌کس خبردار نمی‌شد، چون partial هم علامت نمی‌خورد.
+           هلپرِ bslMetaInt دقیقاً برای همین نوشته شده بود و ?bsl_products
+           از آن استفاده می‌کرد؛ فقط این مسیر جا مانده بود.
+
+           حالا سه لایهٔ پایان داریم و «صفحهٔ ناقص» معتبرترین‌شان است:
+             ۱) صفحه‌ای که کمتر از per_page ردیف داد ⇒ قطعاً آخرین است.
+                این نشانه از هر متادیتایی قابل‌اعتمادتر است، چون از خودِ
+                داده می‌آید نه از ادعای سرور.
+             ۲) total_page، اما فقط وقتی واقعاً >۰ باشد. اگر متادیتا
+                غایب بود دیگر «۱» فرض نمی‌کنیم — ادامه می‌دهیم تا
+                شرطِ (۱) یا (۳) برسد.
+             ۳) total_count: اگر سرور گفته کلاً N محصول دارد و ما N
+                شناسهٔ یکتا دیده‌ایم، کار تمام است.
+           ============================================================= */
+        $tp = bslMetaInt($r['body'], 'total_page', 0);
+        if (count($rows) < 100) break;                       // (۱) صفحهٔ ناقص = آخرین صفحه
+        if ($tp > 0 && $page >= $tp) break;                  // (۲) متادیتای معتبر
+        if ($totalCount > 0 && count($seenId) >= $totalCount) break;   // (۳) همه را گرفته‌ایم
         if ($page >= (int)BSL_CATALOG_MAX_PAGES) $partial = true;
+        /* غرفهٔ چندهزارتایی یعنی چند صد درخواستِ پشتِ‌هم؛ کمی مکث تا
+           باسلام محدودیتِ نرخ نزند و برداشت وسطِ راه نشکند. */
+        usleep(80000);
     }
     $data = ['vendor_id' => $vid, 'at' => time(), 'pages' => $pages,
              'count' => count($items), 'partial' => $partial, 'items' => $items,
-             'rows' => $rowsFull, 'rows_count' => count($rowsFull)];
+             'rows' => $rowsFull, 'rows_count' => count($rowsFull),
+             /* v10.40 (۵۴الف): تعدادِ محصولِ *واقعی* (شناسهٔ یکتا). تا ۱۰.۳۹
+                فقط count بود که کلیدهای نرمال‌شده را می‌شمرد — و چون هر
+                محصول تا دو کلید می‌سازد، عددِ نمایش‌داده‌شده هیچ‌وقت
+                «تعدادِ محصول» نبود. */
+             'products' => count($seenId),
+             'total_count' => $totalCount];
     @file_put_contents(bslCatalogFile($vid), json_encode($data, JSON_UNESCAPED_UNICODE), LOCK_EX);
     $GLOBALS['_bslCatalog'][$vid] = $data;
     return ['ok' => true, 'count' => count($items), 'pages' => $pages,
+            'products' => count($seenId), 'total_count' => $totalCount,
             'partial' => $partial, 'from' => 'network'];
 }
 
@@ -5791,8 +6006,10 @@ function bslFindExisting(string $tk, int $vid, string $title, string $productKey
     for ($page = 1; $page <= 20; $page++) {
         $r = bslReq($tk, 'GET', 'vendors/' . $vid . '/products?per_page=100&page=' . $page . $statuses);
         if (empty($r['ok'])) break;
-        $rows = $r['body']['data'] ?? [];
-        if (!is_array($rows) || !$rows) break;
+        /* v10.40 (۵۴الف): همان اصلاحِ صفحه‌بندی — ردیف‌ها از هر سه شکلِ
+           پاسخ خوانده می‌شوند، نه فقط data. */
+        $rows = bslRowsOf($r['body']);
+        if (!$rows) break;
         $how = '';
         $hit = findRemoteByTitle($rows, $title, '', 'title', $how);
         if ($hit) return $hit;
@@ -5804,8 +6021,12 @@ function bslFindExisting(string $tk, int $vid, string $title, string $productKey
             $rt = reconNormTitle(stripProductCode((string)($row['title'] ?? '')));
             if ($rt !== '' && $rt === reconNormTitle(stripProductCode($title))) return $row;
         }
-        $tp = (int)($r['body']['total_page'] ?? 1);
-        if ($page >= max(1, $tp)) break;
+        /* v10.40 (۵۴الف): صفحهٔ ناقص معتبرترین نشانهٔ پایان است؛
+           total_page فقط اگر واقعاً آمده باشد اعمال می‌شود (پیش‌فرضِ ۱
+           باعث می‌شد پیمایش همیشه در پایانِ صفحهٔ اول بایستد). */
+        if (count($rows) < 100) break;
+        $tp = bslMetaInt($r['body'], 'total_page', 0);
+        if ($tp > 0 && $page >= $tp) break;
     }
     return null;
 }
@@ -15822,6 +16043,11 @@ if (isset($_GET['bsl_catalog'])) {
         $c = bslCatalogRead($v);
         $rows[] = ['vendor_id' => $v, 'shop_name' => (string)($sh['shop_name'] ?? ''),
                    'count' => (int)($c['count'] ?? 0), 'pages' => (int)($c['pages'] ?? 0),
+                   /* v10.40 (۵۴الف): products = تعدادِ محصولِ واقعی · count = کلیدهای
+                      عنوانِ نرمال‌شده (هر محصول تا ۲ کلید). قبلاً فقط count نشان
+                      داده می‌شد و کاربر آن را «تعدادِ محصول» می‌خواند. */
+                   'products' => (int)($c['products'] ?? 0),
+                   'total_count' => (int)($c['total_count'] ?? 0),
                    'partial' => !empty($c['partial']), 'at' => (int)($c['at'] ?? 0),
                    'at_h' => !empty($c['at']) ? date('Y/m/d H:i', (int)$c['at']) : '—',
                    'fresh' => bslCatalogFresh($v, $c),
@@ -17633,6 +17859,54 @@ if (isset($_GET['selagent_prompt_preview'])) {
         ['mode' => (string)($_POST['mode'] ?? 'append'), 'text' => (string)($_POST['text'] ?? '')]);
     echo json_encode(['ok' => true, 'kind' => $spKind, 'prompt' => $spFinal,
         'chars' => mb_strlen($spFinal)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v10.40 (۵۴ب): اندپوینت‌های پرامپتِ سفارشیِ «اصلاحِ دسته‌بندی با AI».
+ *    ?catprompt=1                → تنظیمِ فعلی + پرامپتِ پیش‌فرض
+ *    ?catprompt_save=1   (POST)  → ذخیره (mode/text)
+ *    ?catprompt_preview=1 (POST) → پیش‌نمایشِ پرامپتِ نهایی بدونِ ذخیره
+ *  عمداً هم‌شکلِ selagent_prompt* است.
+ * ===================================================================== */
+if (isset($_GET['catprompt'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cpCur   = catPromptLoad();
+    $cpTitle = trim((string)($_GET['title'] ?? '')) ?: 'کیف چرم زنانه دست دوز';
+    /* پیش‌فرض = همان پرامپتی که بدونِ متنِ سفارشی ساخته می‌شود */
+    $cpDefP  = aiCatPayload($cpTitle, "11: کیف و کوله\n22: چرم و مصنوعات چرمی\n33: پوشاک زنانه", [], '',
+        ['mode' => 'off', 'text' => '']);
+    echo json_encode(['ok' => true,
+        'mode'    => $cpCur['mode'],
+        'text'    => $cpCur['text'],
+        'updated' => (int)$cpCur['updated'],
+        'default' => (string)($cpDefP['messages'][1]['content'] ?? ''),
+        'floor'   => catPromptFloor(),
+        'vars'    => ['{{title}}', '{{cats}}', '{{profile}}'],
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['catprompt_save'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cpOk = catPromptSave(['mode' => (string)($_POST['mode'] ?? 'append'),
+                           'text' => (string)($_POST['text'] ?? '')]);
+    $cpAf = catPromptLoad();
+    echo json_encode(['ok' => $cpOk, 'saved' => ['mode' => $cpAf['mode'], 'text' => $cpAf['text']],
+        'error' => $cpOk ? '' : 'نوشتنِ فایلِ پرامپت ناموفق بود (دسترسیِ نوشتن را بررسی کنید)',
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['catprompt_preview'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $cpTitle = trim((string)($_POST['title'] ?? ($_GET['title'] ?? ''))) ?: 'کیف چرم زنانه دست دوز';
+    /* پیش‌نمایش نباید فایل را بخواند — متنِ در حالِ ویرایش را موقتاً می‌نشانیم */
+    $cpP = aiCatPayload($cpTitle, "11: کیف و کوله\n22: چرم و مصنوعات چرمی\n33: پوشاک زنانه", [], '',
+        ['mode' => (string)($_POST['mode'] ?? 'append'), 'text' => (string)($_POST['text'] ?? '')]);
+    $cpTxt = (string)($cpP['messages'][1]['content'] ?? '');
+    echo json_encode(['ok' => true, 'prompt' => $cpTxt, 'chars' => mb_strlen($cpTxt)],
+        JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -23443,6 +23717,118 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'function bslCatRebuild()') !== false
       && strpos($selfSrc, "onclick=\"bslCatStatus()\"") !== false
       && strpos($selfSrc, "onclick=\"bslCatRebuild()\"") !== false);
+
+/* ---------- v10.40 (۵۴): برداشتِ کاملِ فهرست + دسته‌بندیِ قابلِ تنظیم ---------- */
+    $add('10.40', 'ورودیِ CHANGELOG برای 10.40 ثبت شده و نسخهٔ برنامه عقب‌تر نیست',
+         strpos($selfSrc, "{v:'10." . "40',") !== false
+      && version_compare(APP_VERSION, '10.40', '>='));
+
+    /* ۵۴الف — صفحه‌بندیِ فهرستِ محصولات */
+    $add('10.40', 'سقفِ صفحاتِ فهرستِ محصولات برای ۴۰۰۰۰ محصول کافی است',
+         defined('BSL_CATALOG_MAX_PAGES') && BSL_CATALOG_MAX_PAGES >= 400);
+
+    $add('10.40', 'پایانِ صفحه‌بندی از صفحهٔ ناقص فهمیده می‌شود، نه فقط از متادیتای سرور',
+         substr_count($selfSrc, 'if (count($rows) < 100) break;') >= 1
+      && strpos($selfSrc, 'if ($tp > 0 && $page >= $tp) break;') !== false);
+
+    $add('10.40', 'شمارهٔ آخرین صفحه دیگر پیش‌فرضِ ۱ ندارد',
+         strpos($selfSrc, "'total_page'" . ", 0)") !== false
+      && strpos($selfSrc, "\$r['body']['total_" . "page'] ?? 1") === false);
+
+    $add('10.40', 'تعدادِ محصولِ یکتا جدا از کلیدهای عنوان شمرده می‌شود',
+         strpos($selfSrc, '$seenId[$id] = true;') !== false
+      && strpos($selfSrc, "'products' =>") !== false
+      && strpos($selfSrc, "'total_count' =>") !== false);
+
+    /* ۵۴ب — فهرستِ دسته‌ها */
+    $add('10.40', 'فهرستِ دسته‌ها با نویسه بریده می‌شود نه بایت، و سقفش بزرگ است', (function () {
+        $leaf = [];
+        for ($i = 0; $i < 400; $i++) $leaf[] = ['id' => 1000 + $i, 'name' => 'دستهٔ آزمایشی شمارهٔ ' . $i, 'level' => 2];
+        $out = aiCatListBuild($leaf, []);
+        // با سقفِ بایتیِ قدیمی (۳۰۰۰) کمتر از ۸۰ سطر می‌ماند
+        return substr_count($out, "\n") >= 200;
+    })());
+
+    $add('10.40', 'دسته‌های مرتبط با عنوانِ محصول اولِ فهرست می‌آیند', (function () {
+        $leaf = [];
+        for ($i = 0; $i < 60; $i++) $leaf[] = ['id' => 500 + $i, 'name' => 'کالای نامربوط ' . $i, 'level' => 2];
+        $leaf[] = ['id' => 9999, 'name' => 'کفش ورزشی مردانه', 'level' => 3];
+        $out = aiCatListBuild($leaf, [], 24000, 'کفش ورزشی مردانه سایز ۴۲');
+        return strpos($out, '9999:') === 0;
+    })());
+
+    $add('10.40', 'بدونِ عنوان، ترتیبِ اصلیِ دسته‌ها دست‌نخورده می‌ماند', (function () {
+        $leaf = [['id' => 7, 'name' => 'هفت'], ['id' => 8, 'name' => 'هشت'], ['id' => 9, 'name' => 'نه']];
+        return aiCatListBuild($leaf, []) === "7: هفت\n8: هشت\n9: نه\n";
+    })());
+
+    /* ۵۴ب — پرامپتِ سفارشی */
+    $add('10.40', 'فایل و توابعِ پرامپتِ سفارشیِ دسته‌بندی تعریف شده‌اند',
+         defined('CATPROMPT_FILE') && function_exists('catPromptLoad')
+      && function_exists('catPromptSave') && function_exists('catPromptFloor')
+      && function_exists('catPromptExpand'));
+
+    $add('10.40', 'حالتِ نامعتبر به «افزودن» برمی‌گردد و متن سقفِ ۸۰۰۰ نویسه دارد', (function () {
+        $bak = is_file(CATPROMPT_FILE) ? @file_get_contents(CATPROMPT_FILE) : null;
+        catPromptSave(['mode' => 'چرند', 'text' => str_repeat('ب', 9000)]);
+        $c = catPromptLoad();
+        $ok = $c['mode'] === 'append' && mb_strlen($c['text']) === 8000;
+        @unlink(CATPROMPT_FILE);
+        if ($bak !== null) @file_put_contents(CATPROMPT_FILE, $bak);
+        return $ok;
+    })());
+
+    $add('10.40', 'سه حالتِ پرامپتِ سفارشی درست عمل می‌کنند', (function () {
+        $std = 'How to decide';
+        $ap = aiCatPayload('زعفران', '11: خواروبار', [], '',
+                ['mode' => 'append', 'text' => 'MYRULE'])['messages'][1]['content'];
+        $rp = aiCatPayload('زعفران', '11: خواروبار', [], '',
+                ['mode' => 'replace', 'text' => 'MYRULE'])['messages'][1]['content'];
+        $of = aiCatPayload('زعفران', '11: خواروبار', [], '',
+                ['mode' => 'off', 'text' => 'MYRULE'])['messages'][1]['content'];
+        return strpos($ap, 'MYRULE') !== false && strpos($ap, $std) !== false
+            && strpos($rp, 'MYRULE') !== false && strpos($rp, $std) === false
+            && strpos($of, 'MYRULE') === false && strpos($of, $std) !== false;
+    })());
+
+    $add('10.40', 'در حالتِ جایگزینی هم قواعدِ فنیِ اجباری باقی می‌مانند', (function () {
+        $u = aiCatPayload('x', '1: y', [], '',
+              ['mode' => 'replace', 'text' => 'ONLY MY TEXT'])['messages'][1]['content'];
+        return strpos($u, 'Return ONLY the numeric category ID') !== false
+            && strpos($u, 'Never invent an ID') !== false;
+    })());
+
+    $add('10.40', 'جانگهدارهای پرامپتِ سفارشی جایگزین می‌شوند', (function () {
+        $u = aiCatPayload('کیف چرم', "11: کیف", [], 'HINTX',
+              ['mode' => 'append', 'text' => 'T={{title}} C={{cats}} P={{profile}}'])['messages'][1]['content'];
+        return strpos($u, 'T=کیف چرم') !== false && strpos($u, 'C=11: کیف') !== false
+            && strpos($u, 'P=HINTX') !== false;
+    })());
+
+    $add('10.40', 'پرامپتِ بازنویسی‌شده قاعدهٔ «کلمهٔ اول نوعِ کالاست» را دارد',
+         strpos($selfSrc, 'WHAT THE PRODUCT ACTUALLY IS') !== false
+      && strpos($selfSrc, 'the head noun') !== false
+      && strpos($selfSrc, 'MOST SPECIFIC category') !== false);
+
+    $add('10.40', 'پرامپتِ سفارشی امضای پایدارِ درخواست را نمی‌شکند', (function () {
+        $p = aiCatPayload('کفش', "1: یک", [['id' => 9, 'name' => 'نُه']], '',
+              ['mode' => 'append', 'text' => 'RULE']);
+        return count($p['messages']) === 2 && (int)$p['max_tokens'] === 20
+            && ($p['messages'][0]['role'] ?? '') === 'system'
+            && strpos((string)$p['messages'][1]['content'], 'Do NOT return any of them') !== false;
+    })());
+
+    $add('10.40', 'سه اندپوینتِ پرامپتِ دسته‌بندی وجود دارند',
+         strpos($selfSrc, "isset(\$_GET['catprompt'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['catprompt_save'])") !== false
+      && strpos($selfSrc, "isset(\$_GET['catprompt_preview'])") !== false);
+
+    $add('10.40', 'ویرایشگرِ پرامپت در پنجرهٔ اصلاحِ دسته‌بندی هست',
+         strpos($selfSrc, "id=\"cpromptText\"") !== false
+      && strpos($selfSrc, 'function cpromptSave(){') !== false
+      && strpos($selfSrc, 'function cpromptPreview(){') !== false
+      && strpos($selfSrc, 'function cpromptLoad(){') !== false
+      && strpos($selfSrc, "name=\"cpmode\"") !== false);
 
     /* ---------- ۴۷د: گزارشِ کاملِ همگام‌سازی ---------- */
     $add('10.35', 'توابعِ گزارشِ همگام‌سازی و ثابت‌هایش موجودند',
@@ -31234,10 +31620,14 @@ function aiTestCategoryData(): ?array {
         }
     }
     if (!$cats) return null;
-    $catList = ''; $leafCats = [];
-    foreach ($cats as $c) { if (($c['level'] ?? 0) >= 2) { $catList .= $c['id'] . ': ' . $c['name'] . "\n"; $leafCats[] = $c; } }
-    if (!$leafCats) { foreach ($cats as $c) { $catList .= $c['id'] . ': ' . $c['name'] . "\n"; $leafCats[] = $c; } }
-    if (strlen($catList) > 3000) { $catList = ''; $leafCats = array_slice($leafCats, 0, 200); foreach ($leafCats as $c) { $catList .= $c['id'] . ': ' . $c['name'] . "\n"; } }
+    $leafCats = [];
+    foreach ($cats as $c) { if (($c['level'] ?? 0) >= 2) $leafCats[] = $c; }
+    if (!$leafCats) $leafCats = $cats;
+    /* v10.40 (۵۴ب): ساختِ فهرست به هلپرِ مشترک سپرده شد. نسخهٔ قبلی
+       دستیِ اینجا هم همان باگِ «بریدن با بایت» را داشت (۳۰۰۰ بایت روی
+       متنِ فارسی ≈ ۶۹ دسته) و علاوه بر آن با array_slice(…,200) فقط
+       ۲۰۰ دستهٔ اولِ درخت را نگه می‌داشت. */
+    $catList = aiCatListBuild($leafCats, []);
     return ['cats' => $cats, 'leafCats' => $leafCats, 'catList' => $catList];
 }
 
@@ -31497,7 +31887,8 @@ function aiCatConsensus(array $cands, array $providers, string $title, array $ca
         return $hit;
     }
 
-    $catList = aiCatListBuild($leafCats, $exclude);
+    /* v10.40 (۵۴ب): عنوان هم داده می‌شود تا مرتبط‌ترین دسته‌ها اولِ فهرست بیایند */
+    $catList = aiCatListBuild($leafCats, $exclude, 24000, $title);
     if (trim($catList) === '') return array_merge($empty, ['error' => 'همهٔ دسته‌ها قبلاً امتحان شده‌اند']);
     $payload = aiCatPayload($title, $catList, $triedInfo, $profileHint);   // v10.36 (۴۹ه)
 
@@ -33809,7 +34200,7 @@ if($okRes){
 $sse(['type'=>'progress','idx'=>$idx,'total'=>$total,'pId'=>$pId,'pName'=>$pName,'step'=>'consensus','catId'=>$catId,'catName'=>$catName,'agreement'=>(int)($con['agreement']??0),'asked'=>(int)($con['asked']??0),'stages'=>(int)($con['stages']??0),'from_cache'=>!empty($con['from_cache']),'per_model'=>(array)($con['per_model']??[])]);
 }
 }else{
-$res=aiCandidateCategory($mp,$master['model'],$pName,$cats,$leafCats,aiCatListBuild($leafCats,$exclude),$net,$exclude,$triedInfo,$__pHint);
+$res=aiCandidateCategory($mp,$master['model'],$pName,$cats,$leafCats,aiCatListBuild($leafCats,$exclude,24000,$pName),$net,$exclude,$triedInfo,$__pHint);
 $askTotal++;
 $catId=(int)($res['category_id']??0);
 $catName=(string)($res['category_name']??'');
@@ -37214,9 +37605,13 @@ function dedupFetchBsl(string $tk, int $vid, int $maxPages = DEDUP_MAX_PAGES, ?a
                 'page' => $page, 'code' => (int)($r['code'] ?? 0), 'tries' => (int)($r['tries'] ?? 1)];
             break;
         }
-        $batch = $r['body']['data'] ?? [];
+        /* v10.40 (۵۴الف): همان اصلاحِ bslCatalogBuild — ردیف‌ها با bslRowsOf
+           (شکل‌های data/products/items) و total_page با bslMetaInt (زیرِ
+           meta/pagination هم می‌گردد). با پیش‌فرضِ ۱، برداشت در پایانِ
+           صفحهٔ یک می‌شکست بدونِ اینکه ناقص علامت بخورد. */
+        $batch = bslRowsOf($r['body']);
         if (!$batch) break;
-        $tp = max(1, (int)($r['body']['total_page'] ?? 1));
+        $tp = bslMetaInt($r['body'], 'total_page', 0);
         foreach ($batch as $p) {
             if (!is_array($p)) continue;
             $rev  = $p['revision']['data'] ?? [];
@@ -37233,13 +37628,16 @@ function dedupFetchBsl(string $tk, int $vid, int $maxPages = DEDUP_MAX_PAGES, ?a
             ];
         }
         dedupProgress(['fetched' => count($rows), 'page' => $page, 'pages' => $tp,
-            'log_add' => ['📄 باسلام صفحهٔ ' . $page . '/' . $tp . ': ' . count($batch)
+            'log_add' => ['📄 باسلام صفحهٔ ' . $page . '/' . ($tp > 0 ? $tp : '?') . ': ' . count($batch)
                 . ' محصول (مجموع ' . count($rows) . ')']]);
-        if ($page >= $tp || count($batch) < 100) break;
+        /* صفحهٔ ناقص قطعی‌ترین نشانهٔ پایان است؛ total_page فقط وقتی
+           معتبر است که واقعاً آمده باشد. */
+        if (count($batch) < 100) break;
+        if ($tp > 0 && $page >= $tp) break;
         /* v10.23 (۳۶ب): رسیدن به سقفِ صفحات هم «برداشتِ ناقص» است */
         if ($page >= $maxPages) {
             dedupProgress(['log_add' => ['⚠️ سقفِ ' . $maxPages . ' صفحه پر شد ولی فروشگاه '
-                . $tp . ' صفحه دارد — فهرست ناقص است']]);
+                . ($tp > 0 ? $tp : 'بیش از این') . ' صفحه دارد — فهرست ناقص است']]);
             if ($partial !== null) $partial = ['partial' => true, 'reason' => 'max_pages',
                 'page' => $page, 'pages' => $tp];
         }
@@ -37659,13 +38057,18 @@ function catfixFetchRejected(string $tk, int $vid, ?array &$partial = null): arr
                 . ') — فهرست با ' . count($all) . ' محصول بسته شد']]);
             break;
         }
-        $data = $r['body']['data'] ?? [];
+        /* v10.40 (۵۴الف): bslRowsOf + bslMetaInt — پیش از این، اگر باسلام
+           total_page را زیر meta می‌گذاشت، فهرستِ محصولاتِ ردشده در همان
+           صفحهٔ اول بسته می‌شد و «اصلاحِ دسته‌بندی» فقط ۱۰۰ محصولِ اول را
+           می‌دید. */
+        $data = bslRowsOf($r['body']);
         if (!$data) break;
-        $tp = max(1, (int)($r['body']['total_page'] ?? 1));
+        $tp = bslMetaInt($r['body'], 'total_page', 0);
         foreach ($data as $p) if (is_array($p)) $all[] = $p;
         catfixProgress(['fetched' => count($all), 'page' => $pg, 'pages' => $tp,
-            'log_add' => ['📄 صفحهٔ ' . $pg . '/' . $tp . ' — مجموعاً ' . count($all) . ' محصولِ ردشده']]);
-        if ($pg >= $tp) break;
+            'log_add' => ['📄 صفحهٔ ' . $pg . '/' . ($tp > 0 ? $tp : '?') . ' — مجموعاً ' . count($all) . ' محصولِ ردشده']]);
+        if (count($data) < 100) break;
+        if ($tp > 0 && $pg >= $tp) break;
         usleep(120000);
     }
     return $all;
@@ -37828,7 +38231,7 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
                     . ($pProf !== '' ? ' · بافت: ' . $pProf : '')]]);   // v10.36 (۴۹ه)
             } else {
                 $res = aiCandidateCategory($mp, $master['model'], $pName, $cats, $leafCats,
-                    aiCatListBuild($leafCats, $exclude), $net, $exclude, $triedInfo, $pHint);
+                    aiCatListBuild($leafCats, $exclude, 24000, $pName), $net, $exclude, $triedInfo, $pHint);
                 $asked++;
                 $catId   = (int)($res['category_id'] ?? 0);
                 $catName = (string)($res['category_name'] ?? '');
@@ -47964,6 +48367,50 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.40', t:'📦 برداشتِ کاملِ فهرستِ محصولات + دسته‌بندیِ هوشمندِ قابلِ تنظیم', items:[
+    '<b>۱) فهرستِ محصولاتِ باسلام دیگر ناقص ساخته نمی‌شود.</b>',
+    '❌ <b>مشکل:</b> بازسازیِ فهرست فقط حدودِ <b>۶۰۰</b> محصول می‌آورد، در حالی',
+    '   که غرفه بیش از <b>۱۷۰۰۰</b> محصول داشت — و هیچ هشداری هم داده نمی‌شد.',
+    '   نتیجه اینکه «حذفِ تکراری» و «اصلاحِ دسته» روی یک فهرستِ ناقص کار',
+    '   می‌کردند و بیشترِ محصولات را اصلاً نمی‌دیدند.',
+    '🔍 <b>ریشه:</b> برنامه شمارهٔ آخرین صفحه را فقط از یک جای پاسخِ سرور',
+    '   می‌خواند؛ وقتی باسلام آن را جای دیگری می‌گذاشت، مقدارش <b>۱</b> فرض',
+    '   می‌شد و حلقه در پایانِ صفحهٔ اول می‌ایستاد.',
+    '✅ حالا معیارِ پایان، <b>رسیدن به یک صفحهٔ ناقص</b> است (کمتر از ۱۰۰ ردیف)',
+    '   که مطمئن‌ترین نشانه است؛ اطلاعاتِ صفحه‌بندیِ سرور فقط وقتی معتبر باشد',
+    '   کمکی استفاده می‌شود.',
+    '✅ سقفِ صفحات از ۶۰ به <b>۴۰۰</b> رفت: تا <b>۴۰۰۰۰</b> محصول به‌جای ۶۰۰۰.',
+    '✅ شمارشِ «تعدادِ محصول» تفکیک شد: عددی که می‌بینید حالا <b>شناسه‌های یکتا</b>',
+    '   است، نه تعدادِ کلیدهای جست‌وجو (که برای هر محصول تا ۲ تا بود). عددِ',
+    '   اعلامیِ خودِ سرور هم کنارش نشان داده می‌شود تا اختلاف فوراً دیده شود.',
+    '✅ همین اصلاح در «حذفِ تکراری» و «اصلاحِ دسته‌بندی» هم اعمال شد.',
+    '<b>۲) «اصلاح دسته‌بندی با هوش مصنوعی» بازسازی شد.</b>',
+    '❌ <b>مشکل:</b> پیشنهادها بی‌ربط بودند.',
+    '🔍 <b>ریشه:</b> فهرستِ دسته‌ها پیش از ارسال به مدل در ۳۰۰۰ <b>بایت</b>',
+    '   بریده می‌شد. هر حرفِ فارسی دو بایت است، پس عملاً فقط <b>۶۹ دستهٔ اول</b>',
+    '   به مدل می‌رسید — آن هم به ترتیبِ درختِ دسته‌ها، نه ربط. مدل دستهٔ درست',
+    '   را انتخاب نمی‌کرد چون اصلاً ندیده بودش.',
+    '✅ بریدن حالا بر اساسِ <b>نویسه</b> است و سقف بسیار بالاتر رفت: در عمل',
+    '   <b>بیش از ۸۰۰</b> دسته به‌جای ۶۹ تا.',
+    '✅ مهم‌تر: دسته‌ها پیش از بریدن بر اساسِ <b>ربط به عنوانِ محصول</b> مرتب',
+    '   می‌شوند؛ پس مرتبط‌ترین‌ها همیشه به مدل می‌رسند، حتی اگر فهرست بریده شود.',
+    '✅ خودِ پرامپت هم بازنویسی شد: به مدل توضیح داده می‌شود که در عنوانِ',
+    '   فارسی <b>کلمهٔ اول نوعِ کالاست</b> و بقیه صفت‌اند (در «کیف چرم زنانه»',
+    '   محصول کیف است نه چرم)، کلماتِ تبلیغاتی نادیده گرفته شوند، و دستهٔ',
+    '   مشخص بر دستهٔ کلی ترجیح دارد.',
+    '<b>۳) حالا می‌توانید پرامپتِ دسته‌بندی را خودتان بنویسید.</b>',
+    '✅ در پنجرهٔ «اصلاح دسته‌بندی» بخشِ <b>✏️ ویرایشِ پرامپتِ هوش مصنوعی</b>',
+    '   اضافه شد. قواعدِ خاصِ غرفهٔ خودتان را می‌نویسید — مثلاً «هر چیزی که',
+    '   زعفران دارد زیر خواروبار برود، نه سوغاتی».',
+    '✅ سه حالت: <b>افزودن</b> به پرامپتِ استاندارد (پیش‌فرض)، <b>جایگزینیِ</b>',
+    '   کامل، یا <b>غیرفعال</b>.',
+    '✅ متغیرهای <code>{{title}}</code>، <code>{{cats}}</code> و <code>{{profile}}</code> در متنِ شما جایگزین می‌شوند.',
+    '✅ دکمهٔ <b>پیش‌نمایش</b> پرامپتِ نهایی را دقیقاً همان‌طور که به مدل می‌رود',
+    '   نشان می‌دهد، و <b>پرامپتِ پیش‌فرض</b> متنِ استاندارد را نمایش می‌دهد.',
+    '🛡 حتی در حالتِ جایگزینیِ کامل، دو قاعدهٔ فنی همیشه حفظ می‌شوند (فقط عدد',
+    '   برگردان، فقط شناسه‌های موجود) وگرنه پاسخ اصلاً قابلِ خواندن نمی‌شد.',
+    '💾 متن در فایلِ جداگانهٔ <code>catfix_prompt.json</code> ذخیره می‌شود.',
+  ]},
   {v:'10.39', t:'🧹 حذفِ تکراریِ هوشمند در همهٔ غرفه‌ها + فهرستِ آمادهٔ محصولات', items:[
     '<b>۱) حذفِ تکراریِ باسلام سه تغییرِ مهم کرد.</b>',
     '✅ <b>فقط محصولاتِ فعال.</b> تا نسخهٔ قبل، هر پنج وضعیت (فعال، غیرفعال،',
@@ -60665,6 +61112,29 @@ function catfixOpen(mode){
       +'<label id="cfQuorumWrap" style="display:none;margin-top:8px">🗳️ حدنصابِ اجماع (چند مدل باید موافق باشند)'
       +'<input type="number" id="cfQuorum" class="inp" value="2" min="1" max="8" style="width:90px;margin-right:6px" dir="ltr"></label>'
       +'</div>'
+      /* v10.40 (۵۴ب): ویرایشگرِ پرامپتِ سفارشی — هم‌شکلِ ویرایشگرِ ایجنتِ سلکتور */
+      +'<details class="sprompt" id="cpromptBox" style="margin-top:8px" ontoggle="if(this.open)cpromptLoad()">'
+      +'<summary style="cursor:pointer;font-size:11px;padding:6px 8px">✏️ ویرایشِ پرامپتِ هوش مصنوعی <span id="cpromptBadge" style="color:#64748b;font-size:10px"></span></summary>'
+      +'<div style="padding:8px;font-size:11px">'
+      +'<div style="color:#94a3b8;font-size:10px;margin-bottom:6px;line-height:1.7">'
+      +'قواعدِ اختصاصیِ غرفهٔ خودتان را اینجا بنویسید — مثلاً «هر محصولی که زعفران دارد زیر خواروبار برود، نه سوغاتی» یا «پوشاکِ بچگانه هیچ‌وقت زیر سیسمونی نرود».'
+      +'<br>متغیرها: <code dir="ltr">{{title}}</code> عنوانِ محصول · <code dir="ltr">{{cats}}</code> فهرستِ دسته‌ها · <code dir="ltr">{{profile}}</code> بافتِ غرفه.'
+      +'</div>'
+      +'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px">'
+      +'<label><input type="radio" name="cpmode" value="append" checked> افزودن به پرامپتِ استاندارد</label>'
+      +'<label><input type="radio" name="cpmode" value="replace"> جایگزینیِ کامل</label>'
+      +'<label><input type="radio" name="cpmode" value="off"> غیرفعال</label>'
+      +'</div>'
+      +'<textarea id="cpromptText" class="inp" rows="7" style="width:100%;font-family:monospace;font-size:11px" placeholder="قواعدِ اختصاصیِ شما…"></textarea>'
+      +'<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'
+      +'<button class="btn btn-green" style="flex:1;min-width:90px" onclick="cpromptSave()">💾 ذخیره</button>'
+      +'<button class="btn btn-gray" style="flex:1;min-width:90px" onclick="cpromptPreview()">👁 پیش‌نمایش</button>'
+      +'<button class="btn btn-gray" style="flex:1;min-width:90px" onclick="cpromptShowDefault()">📄 پرامپتِ پیش‌فرض</button>'
+      +'<button class="btn btn-gray" style="flex:0;min-width:70px" onclick="cpromptClear()">🗑 پاک</button>'
+      +'</div>'
+      +'<div id="cpromptMsg" style="font-size:10px;margin-top:5px"></div>'
+      +'<pre id="cpromptOut" class="hidden" dir="ltr" style="white-space:pre-wrap;background:#0b1220;border:1px solid #334155;border-radius:6px;padding:8px;font-size:10px;max-height:280px;overflow:auto;margin-top:6px"></pre>'
+      +'</div></details>'
       +'<div style="display:flex;gap:6px;margin-top:8px">'
       +'<button class="btn btn-green" id="cfBtn" onclick="catfixStart()" style="flex:1">▶ شروعِ اصلاح</button>'
       +'<button class="btn btn-red hidden" id="cfStopBtn" onclick="catfixStop()" style="flex:0">⏹ توقف</button>'
@@ -60690,6 +61160,62 @@ function catfixOpen(mode){
 function catfixClose(){
     clearInterval(cfTimer);cfTimer=null;cfIsRun=false;
     const m=document.getElementById('catfixModal');if(m)m.remove();
+}
+
+/* ── v10.40 (۵۴ب): ویرایشگرِ پرامپتِ سفارشیِ دسته‌بندی ──────────────── */
+let cpromptDefault='';
+function cpromptMode(){
+    const r=document.querySelector('input[name="cpmode"]:checked');
+    return r?r.value:'append';
+}
+function cpromptMsg(t,c){
+    const e=document.getElementById('cpromptMsg');
+    if(e){e.textContent=t;e.style.color=c||'#94a3b8';}
+}
+function cpromptLoad(){
+    fetch('?catprompt=1').then(r=>r.json()).then(d=>{
+        if(!d||!d.ok)return;
+        cpromptDefault=d.default||'';
+        const t=document.getElementById('cpromptText');
+        if(t)t.value=d.text||'';
+        const r=document.querySelector('input[name="cpmode"][value="'+(d.mode||'append')+'"]');
+        if(r)r.checked=true;
+        const b=document.getElementById('cpromptBadge');
+        if(b)b.textContent=(d.text&&d.mode!=='off')?('— فعال ('+(d.mode==='replace'?'جایگزین':'افزوده')+')'):'— پیش‌فرض';
+        cpromptMsg('');
+    }).catch(()=>cpromptMsg('خواندنِ پرامپت ناموفق بود','#f87171'));
+}
+function cpromptSave(){
+    const fd=new FormData();
+    fd.append('mode',cpromptMode());
+    fd.append('text',(document.getElementById('cpromptText')||{}).value||'');
+    cpromptMsg('در حالِ ذخیره…');
+    fetch('?catprompt_save=1',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        if(d&&d.ok){cpromptMsg('✅ ذخیره شد — از اجرای بعدی اعمال می‌شود','#4ade80');cpromptLoad();}
+        else cpromptMsg('❌ '+((d&&d.error)||'ناموفق'),'#f87171');
+    }).catch(()=>cpromptMsg('❌ خطای شبکه','#f87171'));
+}
+function cpromptPreview(){
+    const fd=new FormData();
+    fd.append('mode',cpromptMode());
+    fd.append('text',(document.getElementById('cpromptText')||{}).value||'');
+    cpromptMsg('در حالِ ساختِ پیش‌نمایش…');
+    fetch('?catprompt_preview=1',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+        const o=document.getElementById('cpromptOut');
+        if(o&&d&&d.ok){o.textContent=d.prompt||'';o.classList.remove('hidden');
+            cpromptMsg('پرامپتِ نهایی — '+(d.chars||0)+' نویسه','#94a3b8');}
+        else cpromptMsg('❌ پیش‌نمایش ناموفق','#f87171');
+    }).catch(()=>cpromptMsg('❌ خطای شبکه','#f87171'));
+}
+function cpromptShowDefault(){
+    const o=document.getElementById('cpromptOut');
+    if(o){o.textContent=cpromptDefault||'(هنوز بارگذاری نشده)';o.classList.remove('hidden');}
+    cpromptMsg('این پرامپتِ استاندارد است؛ متنِ شما به آن افزوده (یا جایگزینش) می‌شود','#94a3b8');
+}
+function cpromptClear(){
+    const t=document.getElementById('cpromptText');if(t)t.value='';
+    const o=document.getElementById('cpromptOut');if(o)o.classList.add('hidden');
+    cpromptMsg('پاک شد — برای اعمال، ذخیره کنید','#fbbf24');
 }
 
 function catfixModeHint(){
