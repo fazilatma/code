@@ -232,6 +232,16 @@ const REMOTEMAP_MAX_ROWS = 20000;
 const BSL_CATALOG_PREFIX   = __DIR__ . '/bsl_catalog_v';
 const BSL_CATALOG_TTL      = 21600;   // ۶ ساعت — پیش‌فرض؛ از تنظیمات قابل تغییر است (bslCatalogTtl)
 const BSL_CATALOG_MAX_PAGES = 400;    // v10.40 (۵۴الف): سقفِ ۴۰۰۰۰ محصول در هر غرفه (تا ۱۰.۳۹ فقط ۶۰ صفحه = ۶۰۰۰ بود)
+/* v10.41 (۵۵): درختِ دسته‌بندیِ باسلام — یک‌بار گرفته می‌شود و می‌ماند.
+   تا ۱۰.۴۰ فهرستِ دسته‌ها در ۱۸ نقطهٔ مختلفِ کد مستقیماً از API گرفته
+   می‌شد: هر بار اصلاحِ دسته، هر بار ارسالِ محصول، هر بار تستِ مدل. روی
+   یک اجرای اصلاحِ دسته‌بندی این یعنی ده‌ها درخواستِ تکراری برای داده‌ای
+   که عملاً هیچ‌وقت عوض نمی‌شود.
+   درختِ دسته‌ها برخلافِ فهرستِ محصولاتِ غرفه، دادهٔ سراسریِ خودِ باسلام
+   است (نه غرفه‌ای)، پس یک فایلِ مشترک کافی است و TTL آن هم می‌تواند
+   بسیار بلندتر باشد. شیر اطمینان: TTL ۳۰ روزه + بازسازیِ دستی. */
+const BSL_CATS_FILE = __DIR__ . '/bsl_categories.json';
+const BSL_CATS_TTL  = 2592000;  // ۳۰ روز
 /* v10.35 (۴۷د/ه): همگام‌سازیِ دستی — کارِ پس‌زمینه با ردیفِ خودش در مدیر
    وظیفه، و گزارشِ کاملِ ماندگارِ هر همگام‌سازی. */
 const MANUAL_SYNC_PROGRESS_FILE = __DIR__ . '/manual_sync_progress.json';
@@ -252,7 +262,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.40';
+const APP_VERSION = '10.41';
 const APP_VERSION_DATE = '1405/06/03';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -5680,6 +5690,129 @@ function bslStatusQuery(): string {
 
 function bslCatalogFile(int $vid): string {
     return BSL_CATALOG_PREFIX . max(0, $vid) . '.json';
+}
+
+/* =====================================================================
+ * v10.41 (۵۵): کشِ درختِ دسته‌بندیِ باسلام
+ *
+ * مسئله: `GET categories` کلِ درخت را در یک پاسخ برمی‌گرداند، ولی تا
+ * ۱۰.۴۰ در ۱۸ نقطهٔ پراکندهٔ کد مستقیماً صدا زده می‌شد و هرکدام هم یک
+ * نسخهٔ کپی‌شدهٔ همان تابعِ «تخت‌کردنِ بازگشتی» را داشت. نتیجه: روی یک
+ * اجرای «اصلاح دسته‌بندی» ده‌ها بار همان چند صد کیلوبایت دوباره دانلود
+ * می‌شد، و اگر یک بارِ آن‌ها تایم‌اوت می‌خورد، آن اندپوینت با فهرستِ
+ * خالی ادامه می‌داد.
+ *
+ * راه‌حل: یک واکشیِ کامل، ذخیره روی دیسک، و بقیهٔ کد فقط از کش می‌خوانند.
+ *   • bslCatsFetch()  — واکشیِ خام + تخت‌کردن (تنها نقطه‌ای که شبکه می‌زند)
+ *   • bslCatsRead()   — خواندنِ کش، بدونِ هیچ درخواستی
+ *   • bslCatsAll()    — نقطهٔ ورودِ همه: کش هست؟ بده. نیست؟ یک‌بار بگیر.
+ *   • bslCatsLeaves() — همان با فیلترِ برگ (level >= 2)
+ *
+ * درختِ دسته‌ها دادهٔ سراسریِ باسلام است نه غرفه‌ای، پس فایل مشترک است.
+ * شیر اطمینان: TTL ۳۰ روزه + بازسازیِ دستی (?bsl_cats=rebuild). اگر
+ * واکشی شکست خورد ولی کشِ منقضی موجود بود، همان کشِ کهنه برگردانده
+ * می‌شود — فهرستِ کمی قدیمی بی‌نهایت بهتر از فهرستِ خالی است.
+ * ===================================================================== */
+
+/** درختِ خامِ باسلام را به آرایهٔ تختِ ['id','name','level'] تبدیل می‌کند */
+function bslCatsFlatten($items, int $lv = 0): array {
+    if (!is_array($items)) return [];
+    $out = [];
+    foreach ($items as $c) {
+        if (!is_array($c)) continue;
+        $id = (int)($c['id'] ?? 0);
+        $nm = trim((string)($c['title'] ?? ($c['name'] ?? '')));
+        if ($id > 0) $out[] = ['id' => $id, 'name' => $nm, 'level' => $lv];
+        $ch = $c['children'] ?? [];
+        if (is_array($ch) && $ch) {
+            foreach (bslCatsFlatten($ch, $lv + 1) as $s) $out[] = $s;
+        }
+    }
+    return $out;
+}
+
+/** کشِ دسته‌ها را می‌خواند (بدون هیچ درخواستِ شبکه‌ای) */
+function bslCatsRead(): array {
+    if (!is_file(BSL_CATS_FILE)) return [];
+    $j = json_decode((string)@file_get_contents(BSL_CATS_FILE), true);
+    if (!is_array($j) || empty($j['items']) || !is_array($j['items'])) return [];
+    return $j;
+}
+
+/** آیا کشِ موجود هنوز تازه است؟ */
+function bslCatsFresh(array $c): bool {
+    if (empty($c['items'])) return false;
+    $at = (int)($c['at'] ?? 0);
+    return $at > 0 && (time() - $at) < (int)BSL_CATS_TTL;
+}
+
+/**
+ * تنها نقطه‌ای که واقعاً `GET categories` را صدا می‌زند.
+ * برمی‌گرداند: ['ok'=>bool,'items'=>[],'roots'=>int,'error'=>string]
+ */
+function bslCatsFetch(string $tk): array {
+    $r = bslReq($tk, 'GET', 'categories');
+    if (empty($r['ok'])) {
+        return ['ok' => false, 'items' => [], 'roots' => 0,
+                'error' => 'HTTP ' . (int)($r['code'] ?? 0) . ' ' . mb_substr((string)($r['raw'] ?? ''), 0, 200)];
+    }
+    $data = $r['body']['data'] ?? ($r['body'] ?? []);
+    if (!is_array($data)) $data = [];
+    $flat = bslCatsFlatten($data, 0);
+    if (!$flat) return ['ok' => false, 'items' => [], 'roots' => 0, 'error' => 'پاسخِ خالی'];
+    return ['ok' => true, 'items' => $flat, 'roots' => count($data), 'error' => ''];
+}
+
+/** کش را روی دیسک می‌نویسد */
+function bslCatsWrite(array $items, int $roots): bool {
+    $lv = [];
+    foreach ($items as $c) { $l = (int)($c['level'] ?? 0); $lv[$l] = ($lv[$l] ?? 0) + 1; }
+    ksort($lv);
+    $rec = ['at' => time(), 'count' => count($items), 'roots' => $roots,
+            'levels' => $lv, 'items' => $items];
+    return (bool)@file_put_contents(BSL_CATS_FILE, json_encode($rec, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+/**
+ * نقطهٔ ورودِ همهٔ مصرف‌کننده‌ها.
+ *
+ * $force=true فقط برای بازسازیِ دستی است؛ مسیرهای عادی هرگز آن را
+ * نمی‌فرستند، پس در یک اجرای اصلاحِ دسته‌بندی حداکثر یک درخواست می‌رود.
+ * در همان اجرا هم نتیجه در حافظه نگه داشته می‌شود تا حتی فایل دوباره
+ * خوانده نشود.
+ */
+function bslCatsAll(string $tk, bool $force = false): array {
+    static $mem = null;
+    if (!$force && is_array($mem)) return $mem;
+
+    $c = bslCatsRead();
+    if (!$force && bslCatsFresh($c)) { $mem = $c['items']; return $mem; }
+
+    $f = bslCatsFetch($tk);
+    if (!empty($f['ok'])) {
+        bslCatsWrite($f['items'], (int)$f['roots']);
+        $mem = $f['items'];
+        return $mem;
+    }
+    /* واکشی شکست خورد: کشِ کهنه بهتر از هیچ */
+    if (!empty($c['items'])) { $mem = $c['items']; return $mem; }
+    return [];
+}
+
+/** فقط دسته‌های برگ (level >= 2) — همان فیلترِ تکراریِ چند اندپوینت */
+function bslCatsLeaves(string $tk): array {
+    $o = [];
+    foreach (bslCatsAll($tk) as $c) if ((int)($c['level'] ?? 0) >= 2) $o[] = $c;
+    return $o;
+}
+
+/** وضعیتِ کش برای نمایش در رابط کاربری */
+function bslCatsStatus(): array {
+    $c = bslCatsRead();
+    if (empty($c['items'])) return ['cached' => false, 'count' => 0, 'at' => 0, 'fresh' => false, 'levels' => []];
+    return ['cached' => true, 'count' => (int)($c['count'] ?? count($c['items'])),
+            'at' => (int)($c['at'] ?? 0), 'fresh' => bslCatsFresh($c),
+            'roots' => (int)($c['roots'] ?? 0), 'levels' => $c['levels'] ?? []];
 }
 
 /**
@@ -16025,6 +16158,35 @@ if (isset($_GET['retire_run'])) {
  *  ?bsl_catalog=1&rebuild=1    → بازسازیِ اجباری
  *  ?bsl_catalog=1&clear=1      → پاک‌کردن
  * ===================================================================== */
+/* v10.41 (۵۵): وضعیت و بازسازیِ دستیِ کشِ درختِ دسته‌ها.
+ *   ?bsl_cats=1          → وضعیت (بدونِ هیچ درخواستی به باسلام)
+ *   ?bsl_cats=1&rebuild=1 → واکشیِ دوباره و نوشتنِ کش
+ *   ?bsl_cats=1&clear=1   → پاک‌کردنِ کش (واکشیِ بعدی دوباره می‌گیرد) */
+if (isset($_GET['bsl_cats'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(300);
+    if (!empty($_GET['clear'])) {
+        $okC = @unlink(BSL_CATS_FILE);
+        echo json_encode(['ok' => true, 'cleared' => (bool)$okC], JSON_UNESCAPED_UNICODE); exit;
+    }
+    if (!empty($_GET['rebuild'])) {
+        $cnK = loadConnections();
+        $shK = bslAllShops($cnK);
+        $tkK = '';
+        foreach ($shK as $sh) { $t = trim((string)($sh['token'] ?? '')); if ($t !== '') { $tkK = $t; break; } }
+        if ($tkK === '') { echo json_encode(['ok' => false, 'error' => 'توکنِ باسلام موجود نیست'], JSON_UNESCAPED_UNICODE); exit; }
+        $got = bslCatsAll($tkK, true);
+        echo json_encode(['ok' => (bool)$got, 'rebuilt' => true, 'count' => count($got),
+            'cache' => bslCatsStatus()], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $st = bslCatsStatus();
+    $st['ttl'] = (int)BSL_CATS_TTL;
+    $st['at_h'] = !empty($st['at']) ? date('Y/m/d H:i', (int)$st['at']) : '—';
+    $st['age_fa'] = !empty($st['at']) ? dedupAgeFa(time() - (int)$st['at']) : '—';
+    echo json_encode(['ok' => true] + $st, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['bsl_catalog'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @set_time_limit(300);
@@ -23830,6 +23992,78 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, 'function cpromptLoad(){') !== false
       && strpos($selfSrc, "name=\"cpmode\"") !== false);
 
+    /* ---------- ۵۵: کشِ درختِ دسته‌بندی ---------- */
+    $add('10.41', 'توابع و ثابت‌های کشِ دسته‌بندی موجودند',
+         function_exists('bslCatsAll') && function_exists('bslCatsRead')
+      && function_exists('bslCatsFetch') && function_exists('bslCatsWrite')
+      && function_exists('bslCatsFlatten') && function_exists('bslCatsLeaves')
+      && function_exists('bslCatsFresh') && function_exists('bslCatsStatus')
+      && defined('BSL_CATS_FILE') && defined('BSL_CATS_TTL') && BSL_CATS_TTL > 0);
+
+    $add('10.41', 'تخت‌کردنِ درخت همهٔ سطوح را با levelِ درست می‌دهد', (function () {
+        $tree = [
+            ['id' => 1, 'title' => 'خوراکی', 'children' => [
+                ['id' => 11, 'title' => 'شیرینی', 'children' => [
+                    ['id' => 111, 'name' => 'گز'],
+                    ['id' => 112, 'title' => 'سوهان', 'children' => [['id' => 1121, 'title' => 'سوهان عسلی']]],
+                ]],
+            ]],
+            ['id' => 2, 'name' => 'پوشاک'],
+        ];
+        $f = bslCatsFlatten($tree, 0);
+        $by = []; foreach ($f as $c) $by[$c['id']] = $c;
+        return count($f) === 6
+            && $by[1]['level'] === 0 && $by[2]['level'] === 0
+            && $by[11]['level'] === 1
+            && $by[111]['level'] === 2 && $by[111]['name'] === 'گز'   // کلیدِ name هم خوانده می‌شود
+            && $by[112]['level'] === 2
+            && $by[1121]['level'] === 3                                // عمقِ ۴ هم گم نمی‌شود
+            && $by[11]['name'] === 'شیرینی';
+    })());
+
+    $add('10.41', 'کشِ تازه هیچ درخواستی به باسلام نمی‌فرستد', (function () {
+        $bak = is_file(BSL_CATS_FILE) ? @file_get_contents(BSL_CATS_FILE) : null;
+        $items = [['id' => 7, 'name' => 'تستی', 'level' => 0], ['id' => 8, 'name' => 'برگ', 'level' => 2]];
+        bslCatsWrite($items, 1);
+        $c = bslCatsRead();
+        $fresh = bslCatsFresh($c);
+        // کهنه‌سازیِ دستی ⇒ دیگر تازه نیست
+        $old = $c; $old['at'] = time() - (int)BSL_CATS_TTL - 60;
+        $stale = bslCatsFresh($old);
+        $st = bslCatsStatus();
+        if ($bak === null) @unlink(BSL_CATS_FILE); else @file_put_contents(BSL_CATS_FILE, $bak, LOCK_EX);
+        return $fresh === true && $stale === false
+            && count($c['items']) === 2 && (int)$c['count'] === 2
+            && !empty($st['cached']) && (int)$st['count'] === 2;
+    })());
+
+    $add('10.41', 'کشِ خالی یا خراب «تازه» شمرده نمی‌شود',
+         bslCatsFresh([]) === false
+      && bslCatsFresh(['items' => [], 'at' => time()]) === false
+      && bslCatsFresh(['items' => [['id' => 1]], 'at' => 0]) === false);
+
+    $add('10.41', 'هیچ نقطه‌ای جز واکشیِ مرکزی دیگر categories را مستقیم نمی‌گیرد',
+         substr_count($selfSrc, "bslReq($tk, 'GET', " . "'categories')") <= 1
+      && strpos($selfSrc, "bslReq($tk,'GET'," . "'categories')") === false
+      && strpos($selfSrc, "bslReqRead($shops[0]['token']," . "'categories')") === false);
+
+    $add('10.41', 'مصرف‌کننده‌های دسته‌بندی به کش وصل‌اند',
+         substr_count($selfSrc, 'bslCatsAll(') >= 12
+      && strpos($selfSrc, '$bslFlatCats=bslCatsAll($tk);') !== false
+      && strpos($selfSrc, '$cats=bslCatsAll($tk);') !== false);
+
+    $add('10.41', 'اندپوینتِ وضعیت/بازسازیِ کشِ دسته‌ها هست',
+         strpos($selfSrc, "isset(\$_GET['bsl_cats'])") !== false
+      && strpos($selfSrc, 'bslCatsAll($tkK, true)') !== false);
+
+    $add('10.41', 'فیلترِ برگ همان level >= 2 است',
+         (function () {
+             $all = [['id' => 1, 'name' => 'a', 'level' => 0], ['id' => 2, 'name' => 'b', 'level' => 1],
+                     ['id' => 3, 'name' => 'c', 'level' => 2], ['id' => 4, 'name' => 'd', 'level' => 3]];
+             $leaf = []; foreach ($all as $c) if ((int)($c['level'] ?? 0) >= 2) $leaf[] = $c['id'];
+             return $leaf === [3, 4];
+         })());
+
     /* ---------- ۴۷د: گزارشِ کاملِ همگام‌سازی ---------- */
     $add('10.35', 'توابعِ گزارشِ همگام‌سازی و ثابت‌هایش موجودند',
          function_exists('syncReportRead') && function_exists('syncReportAdd')
@@ -31605,20 +31839,7 @@ function aiTestCategoryData(): ?array {
     $tk = trim((string)($bs['token'] ?? ''));
     if ($tk === '') return null;
     $cats = [];
-    $cr = bslReq($tk, 'GET', 'categories');
-    if ($cr['ok']) {
-        $cData = $cr['body']['data'] ?? [];
-        if (is_array($cData)) {
-            $cFlat = function ($items, $lv = 0) use (&$cFlat) {
-                $o = []; foreach ($items as $c) {
-                    $t = trim($c['title'] ?? $c['name'] ?? ''); $id = (int)($c['id'] ?? 0);
-                    if ($id > 0) $o[] = ['id' => $id, 'name' => $t, 'level' => $lv];
-                    $ch = $c['children'] ?? []; if (is_array($ch) && count($ch) > 0) { foreach ($cFlat($ch, $lv + 1) as $s) $o[] = $s; }
-                } return $o;
-            };
-            $cats = $cFlat($cData, 0);
-        }
-    }
+    $cats = bslCatsAll($tk); /* v10.41 (۵۵): از کشِ مشترک */
     if (!$cats) return null;
     $leafCats = [];
     foreach ($cats as $c) { if (($c['level'] ?? 0) >= 2) $leafCats[] = $c; }
@@ -32689,20 +32910,7 @@ if (isset($_GET['ai_candidates_category'])) {
     $cn = loadConnections(); $tk = (string)($cn['basalam']['token'] ?? '');
     $cats = [];
     if (!empty($tk)) {
-        $cr = bslReq($tk, 'GET', 'categories');
-        if ($cr['ok']) {
-            $cData = $cr['body']['data'] ?? [];
-            if (is_array($cData)) {
-                $cFlat = function ($items, $lv = 0) use (&$cFlat) {
-                    $o = []; foreach ($items as $c) {
-                        $t = trim($c['title'] ?? $c['name'] ?? ''); $id = (int)($c['id'] ?? 0);
-                        if ($id > 0) $o[] = ['id' => $id, 'name' => $t, 'level' => $lv];
-                        $ch = $c['children'] ?? []; if (is_array($ch) && count($ch) > 0) { foreach ($cFlat($ch, $lv + 1) as $s) $o[] = $s; }
-                    } return $o;
-                };
-                $cats = $cFlat($cData, 0);
-            }
-        }
+        $cats = bslCatsAll($tk); /* v10.41 (۵۵): از کشِ مشترک */
     }
     if (!$cats) { echo json_encode(['ok' => false, 'error' => 'دسته‌بندی‌های باسلام در دسترس نیست'], JSON_UNESCAPED_UNICODE); exit; }
     $catList = ''; $leafCats = [];
@@ -32758,8 +32966,7 @@ if(empty($productTitle)){echo json_encode(['ok'=>false,'error'=>'عنوان مح
 
 $tk=$bs['token']??'';$cats=[];
 if(!empty($tk)){
-$cr=bslReq($tk,'GET','categories');
-if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
+$cats=bslCatsAll($tk); /* v10.41 (۵۵): از کشِ مشترک */
 }
 if(empty($cats)){echo json_encode(['ok'=>false,'error'=>'دسته‌بندی‌های باسلام در دسترس نیست','category_id'=>0],JSON_UNESCAPED_UNICODE);exit;}
 
@@ -32795,26 +33002,10 @@ header('Content-Type: application/json; charset=UTF-8');
 $cn=loadConnections();$tk=$cn['basalam']['token']??'';$vid=(int)($cn['basalam']['vendor_id']??0);
 if (!$tk) { echo json_encode(['ok' => false, 'error' => 'توکن باسلام ذخیره نشده'], JSON_UNESCAPED_UNICODE); exit; }
 $cats=[];
-$r=bslReq($tk,'GET','categories');
-if(!$r['ok']){echo json_encode(['ok'=>false,'error'=>'خطا دریافت دسته‌ها (HTTP '.$r['code'].') '.mb_substr($r['raw']??'',0,200)],JSON_UNESCAPED_UNICODE);exit;}
-$data=$r['body']['data']??$r['body']??[];
-if(!is_array($data))$data=[];
-$flatten=function($items,$level=0)use(&$flatten){
-$out=[];
-foreach($items as $c){
-$title=trim($c['title']??$c['name']??'');
-$id=(int)($c['id']??0);
-if($id>0)$out[]=['id'=>$id,'name'=>$title,'level'=>$level];
-$children=$c['children']??[];
-if(is_array($children)&&count($children)>0){
-$sub=$flatten($children,$level+1);
-foreach($sub as $s)$out[]=$s;
-}
-}
-return $out;
-};
-$cats=$flatten($data,0);
-echo json_encode(['ok'=>true,'categories'=>$cats],JSON_UNESCAPED_UNICODE);
+/* v10.41 (۵۵): از کشِ مشترک — فقط بارِ اول از باسلام گرفته می‌شود */
+$cats=bslCatsAll($tk);
+if(!$cats){echo json_encode(['ok'=>false,'error'=>'خطا دریافت دسته‌ها از باسلام'],JSON_UNESCAPED_UNICODE);exit;}
+echo json_encode(['ok'=>true,'categories'=>$cats,'cache'=>bslCatsStatus()],JSON_UNESCAPED_UNICODE);
 exit;
 }
 
@@ -33699,8 +33890,7 @@ $foundOne=$row;break;
 }
 }
 if($foundOne){
-$cr=bslReqRead($shops[0]['token'],'categories');
-if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
+$cats=bslCatsAll($shops[0]['token']); /* v10.41 (۵۵): از کشِ مشترک */
 echo json_encode(['ok'=>true,'products'=>[$foundOne],'page'=>1,'total_page'=>1,'total_count'=>1,'per_page'=>$perPage,'categories'=>$cats,'status'=>$statusParam,'found_by'=>'id','shop_id'=>$curShopId,'shops'=>$allShops],JSON_UNESCAPED_UNICODE);
 exit;
 }
@@ -33850,8 +34040,7 @@ $rejected[]=['id'=>$p['id'],'title'=>$p['title']??$revData['title']??'','status'
 if($pg>=2&&count($data)<100)break;
 }
 
-$cr=bslReq($tk,'GET','categories');
-if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
+$cats=bslCatsAll($tk); /* v10.41 (۵۵): از کشِ مشترک */
 echo json_encode(['ok'=>true,'rejected'=>$rejected,'categories'=>$cats],JSON_UNESCAPED_UNICODE);
 exit;
 }
@@ -33902,8 +34091,7 @@ $sse(['type'=>'step','msg'=>'متن AI یافت شد: '.mb_substr($aiText,0,200)
 
 $sse(['type'=>'step','msg'=>'دریافت دسته‌بندی‌ها از باسلام...']);
 $cats=[];
-$cr=bslReq($tk,'GET','categories');
-if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
+$cats=bslCatsAll($tk); /* v10.41 (۵۵): از کشِ مشترک */
 bslSetCatNameMap($cats);
 if(empty($cats)){
 $sse(['type'=>'error','msg'=>'دسته‌بندی‌ها بارگذاری نشد']);exit;
@@ -33993,8 +34181,7 @@ $sse=function($d){echo "data: ".json_encode($d,JSON_UNESCAPED_UNICODE)."\n\n";if
 $sse(['type'=>'step','msg'=>'دریافت دسته‌بندی‌ها از باسلام...']);
 
 $cats=[];
-$cr=bslReq($tk,'GET','categories');
-if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
+$cats=bslCatsAll($tk); /* v10.41 (۵۵): از کشِ مشترک */
 bslSetCatNameMap($cats);
 if(empty($cats)){
 $sse(['type'=>'error','msg'=>'دسته‌بندی‌ها بارگذاری نشد']);exit;
@@ -34125,8 +34312,7 @@ $candKeys=array_map(function($c){return $c['key'];},$cands);
 
 $sse(['type'=>'step','msg'=>'دریافت دسته‌بندی‌ها از باسلام...']);
 $cats=[];
-$cr=bslReq($tk,'GET','categories');
-if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
+$cats=bslCatsAll($tk); /* v10.41 (۵۵): از کشِ مشترک */
 if(empty($cats)){
 $sse(['type'=>'error','msg'=>'دسته‌بندی‌ها بارگذاری نشد']);exit;
 }
@@ -34535,16 +34721,11 @@ function bslCatNameMapCached(): array {
     $cn = loadConnections();
     $tk = (string)($cn['basalam']['token'] ?? '');
     if ($tk === '') return $map;
-    $r = bslReq($tk, 'GET', 'categories');
-    if (empty($r['ok'])) return $map;
-    $walk = function ($items) use (&$walk, &$map) {
-        foreach ((array)$items as $c) {
-            $id = (int)($c['id'] ?? 0);
-            if ($id > 0) $map[$id] = trim((string)($c['title'] ?? $c['name'] ?? ''));
-            if (!empty($c['children']) && is_array($c['children'])) $walk($c['children']);
-        }
-    };
-    $walk($r['body']['data'] ?? $r['body'] ?? []);
+    /* v10.41 (۵۵): از کشِ مشترک — نه یک واکشیِ مستقلِ دیگر */
+    foreach (bslCatsAll($tk) as $c) {
+        $id = (int)($c['id'] ?? 0);
+        if ($id > 0) $map[$id] = (string)($c['name'] ?? '');
+    }
     if ($map) @file_put_contents($cacheFile, json_encode($map, JSON_UNESCAPED_UNICODE), LOCK_EX);
     return $map;
 }
@@ -35353,12 +35534,9 @@ exit;
 bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['✅ احراز هویت موفق']);
 
 bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['دریافت دسته‌بندی‌ها...']);
-$cr=bslReq($tk,'GET','categories');
-if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){
-$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1) as $s)$o[]=$s;}}return $o;};
-$bslFlatCats=$cFlat($cData,0);
+/* v10.41 (۵۵): از کشِ مشترک */
+$bslFlatCats=bslCatsAll($tk);
 bslSetCatNameMap($bslFlatCats);
-}}
 bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',[count($bslFlatCats).' دسته']);
 
 bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['🚀 شروع ارسال — جستجوی هر محصول قبل از ارسال...']);
@@ -35929,8 +36107,7 @@ if(empty($_aiCfg['provider'])){echo json_encode(['ok'=>false,'error'=>'هیچ ا
 $tk=$bs['token']??'';
 $cats=[];
 if(!empty($tk)){
-$cr=bslReq($tk,'GET','categories');
-if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;};$cats=$cFlat($cData,0);}}
+$cats=bslCatsAll($tk); /* v10.41 (۵۵): از کشِ مشترک */
 }
 if(empty($cats)){echo json_encode(['ok'=>false,'error'=>'دسته‌بندی‌های باسلام در دسترس نیست','category_id'=>0],JSON_UNESCAPED_UNICODE);exit;}
 
@@ -36061,8 +36238,8 @@ if(mb_strlen($pTitle)<6||count($titleWords)<2){echo json_encode(['ok'=>false,'ac
 if($pn<=0){echo json_encode(['ok'=>false,'action'=>'fail','error'=>'قیمت 0','key'=>$pKey,'title'=>$pTitle,'image'=>$cardImg,'price'=>$cardPrice,'price_unit'=>$priceUnit,'category_id'=>$cardCatId,'category'=>'','link'=>$cardLink],JSON_UNESCAPED_UNICODE);exit;}
 
 $bslFlatCats=[];$cData=[];
-$cr=bslReq($tk,'GET','categories');
-if($cr['ok']){$cData=$cr['body']['data']??[];if(is_array($cData)){$cFlat=function($items,$lv=0)use(&$cFlat){$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1) as $s)$o[]=$s;}}return $o;};$bslFlatCats=$cFlat($cData,0);}}
+/* v10.41 (۵۵): از کشِ مشترک */
+$bslFlatCats=bslCatsAll($tk);
 
 bslSetCatNameMap($bslFlatCats);
 
@@ -36325,17 +36502,9 @@ clearstatcache();
 bslUpdateProgress(0,0,0,0,$total,0,'',['✅ دریافت '.$total.' محصول ('.($fromFile?'از فایل':'از POST').($isResume?' | ادامه از #'.($startIndex+1):'').')']);
 
 bslUpdateProgress(0,0,0,0,$total,0,'',['دریافت دسته‌بندی‌های باسلام...']);
-$cr=bslReq($tk,'GET','categories');
-if($cr['ok']){
-$cData=$cr['body']['data']??[];
-if(is_array($cData)){
-$cFlat=function($items,$lv=0)use(&$cFlat){
-$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1)as $s)$o[]=$s;}}return $o;
-};
-$bslFlatCats=$cFlat($cData,0);
+/* v10.41 (۵۵): از کشِ مشترک */
+$bslFlatCats=bslCatsAll($tk);
 bslSetCatNameMap($bslFlatCats);
-}
-}
 bslUpdateProgress(0,0,0,0,$total,0,'',[count($bslFlatCats).' دسته بارگذاری']);
 $bslLog=[];
 
@@ -37021,17 +37190,9 @@ $GLOBALS['_bslRetryDelayMs']=$bslRetryDelayMs;
 send_sse('send_info',['msg'=>'شروع ارسال '.$total.' محصول به باسلام (client-side)']);
 
 $bslFlatCats=[];
-$cr=bslReq($tk,'GET','categories');
-if($cr['ok']){
-$cData=$cr['body']['data']??[];
-if(is_array($cData)){
-$cFlat=function($items,$lv=0)use(&$cFlat){
-$o=[];foreach($items as $c){$t=trim($c['title']??$c['name']??'');$id=(int)($c['id']??0);if($id>0)$o[]=['id'=>$id,'name'=>$t,'level'=>$lv];$ch=$c['children']??[];if(is_array($ch)&&count($ch)>0){foreach($cFlat($ch,$lv+1) as $s)$o[]=$s;}}return $o;
-};
-$bslFlatCats=$cFlat($cData,0);
+/* v10.41 (۵۵): از کشِ مشترک */
+$bslFlatCats=bslCatsAll($tk);
 bslSetCatNameMap($bslFlatCats);
-}
-}
 send_sse('send_info',['msg'=>count($bslFlatCats).' دسته بارگذاری']);
 
 // v8.22: Phase 1 removed — per-product search replaces bulk loading
@@ -38023,22 +38184,8 @@ function catfixModeLabel(string $mode): string {
 
 /** درختِ دسته‌بندیِ باسلام را تخت می‌کند — همان تابعِ درون‌خطیِ چهار اندپوینتِ قبلی */
 function catfixFlatCats(string $tk): array {
-    $r = bslReq($tk, 'GET', 'categories');
-    if (empty($r['ok'])) return [];
-    $data = $r['body']['data'] ?? [];
-    if (!is_array($data)) return [];
-    $walk = function ($items, $lv = 0) use (&$walk) {
-        $o = [];
-        foreach ($items as $c) {
-            $t = trim((string)($c['title'] ?? ($c['name'] ?? '')));
-            $id = (int)($c['id'] ?? 0);
-            if ($id > 0) $o[] = ['id' => $id, 'name' => $t, 'level' => $lv];
-            $ch = $c['children'] ?? [];
-            if (is_array($ch) && $ch) foreach ($walk($ch, $lv + 1) as $s) $o[] = $s;
-        }
-        return $o;
-    };
-    return $walk($data, 0);
+    /* v10.41 (۵۵): از کشِ مشترک — دیگر هر بار از باسلام گرفته نمی‌شود */
+    return bslCatsAll($tk);
 }
 
 /** فهرستِ محصولاتِ ردشده (وضعیت ۳۵۶۷) — با پرچمِ ناقص‌بودن، مثلِ dedup */
@@ -48367,6 +48514,27 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.41', t:'🗂 فهرستِ دسته‌بندی‌های باسلام فقط یک‌بار گرفته می‌شود', items:[
+    '❌ <b>مشکل:</b> هر بار که «دسته‌بندی» یا «اصلاح دسته‌بندی» را باز می‌کردید،',
+    '   برنامه کلِ فهرستِ دسته‌های باسلام را <b>از نو</b> دانلود می‌کرد. این کار در',
+    '   <b>۱۸ جای مختلفِ</b> برنامه تکرار شده بود: موقعِ ارسالِ محصول، موقعِ اصلاحِ',
+    '   دسته، موقعِ تستِ مدل، موقعِ ساختِ فهرستِ ردشده‌ها و…',
+    '   نتیجه: در یک اجرای اصلاحِ دسته‌بندی ده‌ها درخواستِ کاملاً تکراری برای',
+    '   داده‌ای که عملاً هیچ‌وقت عوض نمی‌شود — کندی، مصرفِ بی‌خودِ سهمیه، و',
+    '   اگر یکی از آن درخواست‌ها خطا می‌خورد، همان بخش با فهرستِ <b>خالی</b> ادامه',
+    '   می‌داد و پیغامِ «دسته‌بندی‌ها بارگذاری نشد» می‌گرفتید.',
+    '✅ <b>راه‌حل:</b> فهرستِ دسته‌ها <b>یک بار به‌طور کامل</b> از باسلام گرفته و روی',
+    '   دیسک ذخیره می‌شود؛ از آن به بعد همهٔ بخش‌ها از همان نسخهٔ ذخیره‌شده',
+    '   می‌خوانند و <b>هیچ درخواستِ دوباره‌ای</b> فرستاده نمی‌شود.',
+    '   • کلِ درخت ذخیره می‌شود (دسته‌های اصلی، زیرشاخه‌ها و زیرزیرشاخه‌ها).',
+    '   • فقط اگر ذخیره‌ای وجود نداشته باشد دوباره گرفته می‌شود.',
+    '   • اگر واکشیِ تازه شکست بخورد، نسخهٔ ذخیره‌شدهٔ قبلی به‌کار می‌رود —',
+    '     فهرستِ کمی قدیمی بی‌نهایت بهتر از فهرستِ خالی است.',
+    '   • تازه‌سازیِ خودکار هر <b>۳۰ روز</b>، به‌علاوهٔ دکمهٔ بازسازیِ دستی',
+    '     (<code>?bsl_cats=1&amp;rebuild=1</code>) برای وقتی که باسلام دسته‌ای اضافه کرد.',
+    '🧹 <b>مرتب‌سازی:</b> همان تابعِ «بازکردنِ درختِ دسته‌ها» که ۱۸ بار کپی شده بود',
+    '   حالا یک تابعِ مشترک است، پس رفتارِ همهٔ بخش‌ها دقیقاً یکسان شد.',
+  ]},
   {v:'10.40', t:'📦 برداشتِ کاملِ فهرستِ محصولات + دسته‌بندیِ هوشمندِ قابلِ تنظیم', items:[
     '<b>۱) فهرستِ محصولاتِ باسلام دیگر ناقص ساخته نمی‌شود.</b>',
     '❌ <b>مشکل:</b> بازسازیِ فهرست فقط حدودِ <b>۶۰۰</b> محصول می‌آورد، در حالی',
