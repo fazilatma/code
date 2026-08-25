@@ -262,7 +262,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.41';
+const APP_VERSION = '10.42';
 const APP_VERSION_DATE = '1405/06/03';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -16911,7 +16911,7 @@ function tasksRegistry(): array {
             },
         ],
         'dedup' => [
-            'title' => 'حذفِ محصولات تکراری', 'icon' => '🧹', 'file' => DEDUP_PROGRESS_FILE,
+            'title' => 'حذف/بایگانیِ محصولات تکراری', 'icon' => '🧹', 'file' => DEDUP_PROGRESS_FILE,
             'stop' => 'dedup_stop', 'tab' => 'ابزارها',
             /* یک کارِ dedup هست ولی دو خانه دارد (ووکامرس و باسلام) — کدام
                باز شود از خودِ فایلِ پیشرفت (target) خوانده می‌شود. */
@@ -18174,6 +18174,14 @@ if (isset($_GET['dedup_start'])) {
     }
     @set_time_limit(0); @ignore_user_abort(true);
     dedupClearStop();
+    /* v10.42 (۵۶): سیگنالِ توقفِ *ارسالِ باسلام* هم پاک می‌شود.
+       BSL_STOP_FILE مشترک است و bslReq پیش از هر تماس آن را می‌بیند و
+       بدونِ رفتن به شبکه code=0/error='stopped' برمی‌گرداند. اگر کاربر
+       قبلاً یک ارسال را متوقف کرده بود و فایل جا مانده بود، کلِ اسکن و
+       بایگانیِ تکراری‌ها بی‌صدا شکست می‌خورد — بدونِ هیچ خطای قابلِ
+       دیدن. (همین الگو در توقفِ ارسال @۲۸۴۹۵ هم هست.) */
+    if (defined('BSL_STOP_FILE') && is_file(BSL_STOP_FILE)) { @unlink(BSL_STOP_FILE); }
+    clearstatcache(true,BSL_STOP_FILE);
     $cn  = loadConnections();
     $cfg = dedupCfg($cn);
 
@@ -18451,29 +18459,66 @@ if (($_POST['action'] ?? '') === 'dedup_delete_ids') {
     if (!$ids || ($target !== 'woo' && $target !== 'bsl')) {
         echo json_encode(['ok' => false, 'error' => 'ورودی نامعتبر'], JSON_UNESCAPED_UNICODE); exit;
     }
+    /* v10.42 (۵۶): همان محافظِ dedup_start — سیگنالِ جامانده bslReq را
+       بی‌صدا خفه می‌کند و کاربر «هیچ اتفاقی نمی‌افتد» می‌بیند. */
+    if (defined('BSL_STOP_FILE') && is_file(BSL_STOP_FILE)) { @unlink(BSL_STOP_FILE); }
+    clearstatcache(true,BSL_STOP_FILE);
     $cn = loadConnections();
+
+    /* v10.42 (۵۶): نگاشتِ «شناسهٔ محصول ⇒ شناسهٔ غرفه» از آخرین گزارشِ اسکن.
+       فرانت‌اند فقط فهرستِ id می‌فرستد، ولی از v10.39 آن idها می‌توانند مالِ
+       چند غرفهٔ متفاوت باشند. بدونِ این نگاشت، همه با توکنِ غرفهٔ پیش‌فرض
+       PATCH می‌شدند و هرچه مالِ غرفهٔ دیگری بود ۴۰۳ می‌گرفت — همان باگی که
+       کاربر دید: «اسکن X مورد پیدا می‌کند ولی حذف هیچ‌کدام را بایگانی
+       نمی‌کند». گزارش روی دیسک است، پس نیازی به تغییرِ قراردادِ درخواست
+       نیست و گزارش‌های قدیمی (بدونِ vendor_id) هم نمی‌شکنند. */
+    $vidOf = [];
+    if ($target === 'bsl' && is_file(DEDUP_RESULT_FILE)) {
+        $rep = json_decode((string)@file_get_contents(DEDUP_RESULT_FILE), true);
+        foreach ((array)($rep['duplicates_list'] ?? []) as $g) {
+            if (!is_array($g)) continue;
+            foreach ((array)($g['drop'] ?? []) as $p) {
+                $pid = (int)($p['id'] ?? 0);
+                $pv  = (int)($p['vendor_id'] ?? ($g['vendor_id'] ?? 0));
+                if ($pid > 0 && $pv > 0) $vidOf[$pid] = $pv;
+            }
+        }
+    }
+
     $done = 0; $fail = 0; $items = [];
     foreach ($ids as $did) {
         if ($target === 'bsl') {
-            $bs = $cn['basalam'] ?? [];
-            if (empty($bs['token'])) { echo json_encode(['ok' => false, 'error' => 'تنظیمات باسلام ناقص'], JSON_UNESCAPED_UNICODE); exit; }
-            $r = bslArchiveProduct((string)$bs['token'], (int)$bs['vendor_id'], $did);
-            $ok = !empty($r['ok']) || in_array((int)($r['code'] ?? 0), [200, 204], true);
-            $em = $r['body']['message'] ?? ('HTTP ' . ($r['code'] ?? '?'));
+            if (!bslAllShops($cn)) { echo json_encode(['ok' => false, 'error' => 'تنظیمات باسلام ناقص'], JSON_UNESCAPED_UNICODE); exit; }
+            $r  = bslArchiveSmart($cn, $did, (int)($vidOf[$did] ?? 0));
+            $ok = !empty($r['ok']);
+            $em = (string)($r['msg'] ?? '');
+            $vn = (string)($r['vendor_name'] ?? '');
         } else {
             $w = $cn['woocommerce'] ?? [];
             if (empty($w['store_url'])) { echo json_encode(['ok' => false, 'error' => 'تنظیمات ووکامرس ناقص'], JSON_UNESCAPED_UNICODE); exit; }
             $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'], 'DELETE', 'products/' . $did . '?force=true');
             $ok = !empty($r['ok']);
             $em = $r['body']['message'] ?? ('HTTP ' . ($r['code'] ?? '?'));
+            $vn = '';
         }
-        if ($ok) { $done++; $items[] = ['id' => $did, 'ok' => true]; }
-        else     { $fail++; $items[] = ['id' => $did, 'ok' => false, 'msg' => (string)$em]; }
+        if ($ok) { $done++; $items[] = ['id' => $did, 'ok' => true, 'vendor' => $vn]; }
+        else     { $fail++; $items[] = ['id' => $did, 'ok' => false, 'msg' => (string)$em, 'vendor' => $vn]; }
         usleep(200000);
     }
-    echo json_encode(['ok' => true, 'deleted' => $done, 'failed' => $fail, 'items' => $items,
-        'msg' => aiFaNum($done) . ($target === 'bsl' ? ' محصول بایگانی شد' : ' محصول حذف شد')
-                 . ($fail ? ('؛ ' . aiFaNum($fail) . ' ناموفق') : '')], JSON_UNESCAPED_UNICODE);
+    /* v10.42 (۵۶): وقتی *همه* ناموفق‌اند، ok=false برمی‌گردد. تا اینجا حتی
+       با صفر موفقیت هم ok=true می‌رفت و مرورگر «✅ ۰ محصول بایگانی شد» نشان
+       می‌داد — دقیقاً همان «انگار هیچ اتفاقی نمی‌افتد». حالا علتِ واقعیِ
+       اولین شکست هم در پیام می‌آید تا کاربر بفهمد مشکل توکن است یا دسترسی. */
+    $firstErr = '';
+    foreach ($items as $it) if (empty($it['ok']) && ($it['msg'] ?? '') !== '') { $firstErr = (string)$it['msg']; break; }
+    $verb = ($target === 'bsl' ? ' محصول بایگانی شد' : ' محصول حذف شد');
+    echo json_encode(['ok' => $done > 0, 'deleted' => $done, 'failed' => $fail, 'items' => $items,
+        'error' => $done === 0 ? ('هیچ محصولی ' . ($target === 'bsl' ? 'بایگانی' : 'حذف') . ' نشد'
+                                  . ($firstErr !== '' ? (' — ' . $firstErr) : '')) : '',
+        'msg' => aiFaNum($done) . $verb
+                 . ($fail ? ('؛ ' . aiFaNum($fail) . ' ناموفق'
+                             . ($firstErr !== '' ? (' (' . mb_substr($firstErr, 0, 80, 'UTF-8') . ')') : '')) : '')],
+        JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -22961,6 +23006,63 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, 'function ddPartialHtml(d){') !== false
       && strpos($selfSrc, 'فهرست ناقص دریافت شد') !== false);
 
+    /* ===== v10.42 (۵۶): بایگانیِ تکراری‌ها واقعاً اجرا شود ===== */
+
+    $add('10.42', 'خطای باسلام به متنِ خواندنی تبدیل می‌شود، نه «HTTP ?»',
+         (function () {
+             $a = bslErrText(['code' => 403, 'body' => []]);
+             $b = bslErrText(['code' => 422, 'body' => ['message' => 'قیمت نامعتبر']]);
+             $c = bslErrText(['code' => 400, 'body' => ['errors' => ['title' => ['الزامی است']]]]);
+             $d = bslErrText(['code' => 0, 'error' => 'stopped']);
+             return mb_strpos($a, '403') !== false && mb_strpos($a, 'دسترسی') !== false
+                 && $b === 'قیمت نامعتبر'
+                 && mb_strpos($c, 'الزامی است') !== false
+                 && mb_strpos($d, 'توقف') !== false;
+         })());
+
+    $add('10.42', 'توکنِ هر غرفه از vendor_id پیدا می‌شود',
+         (function () {
+             $cn = ['basalam' => ['token' => 'T1', 'vendor_id' => 11, 'shop_name' => 'اصلی',
+                    'vendors' => [['token' => 'T2', 'vendor_id' => 22, 'shop_name' => 'دومی']]]];
+             return bslShopTokenFor($cn, 22) === 'T2' && bslShopTokenFor($cn, 11) === 'T1'
+                 && bslShopTokenFor($cn, 99) === '' && bslShopTokenFor($cn, 0) === ''
+                 && bslShopNameFor($cn, 22) === 'دومی';
+         })());
+
+    /* این ادعا قلبِ باگِ ۵۶ است: گزارش باید vendor_id هر ردیف را نگه دارد،
+       وگرنه هندلرِ حذف نمی‌داند با کدام توکن PATCH بزند و همه ۴۰۳ می‌گیرند. */
+    $add('10.42', 'گزارشِ تکراری‌ها vendor_id هر محصول را نگه می‌دارد',
+         (strpos($selfSrc, "'vendor_id' => (int)(\$p['vendor_id'] ?? (\$g['vendor_id'] ?? 0))") !== false
+          && strpos($selfSrc, '$mk = function (array $p) use ($g) {') !== false));
+
+    $add('10.42', 'هندلرِ حذف نگاشتِ محصول⇐غرفه را از گزارش می‌خواند',
+         (strpos($selfSrc, '$vidOf = [];') !== false
+          && strpos($selfSrc, '$vidOf[$pid] = $pv;') !== false
+          && strpos($selfSrc, 'bslArchiveSmart($cn, $did, (int)($vidOf[$did] ?? 0))') !== false));
+
+    $add('10.42', 'بایگانیِ هوشمند وقتی غرفه معلوم است سراغِ بقیه نمی‌رود',
+         (strpos($selfSrc, 'function bslArchiveSmart(') !== false
+          && strpos($selfSrc, 'if ($vid > 0) break;') !== false));
+
+    $add('10.42', 'ویرایشِ محصول روی ۴۰۳ هم مسیرِ زیرِ غرفه را امتحان می‌کند',
+         strpos($selfSrc, 'in_array((int)($r[' . "'code'" . '] ?? 0), [401, 403, 404], true) && $vid > 0') !== false);
+
+    $add('10.42', 'شروعِ اسکن و حذف، سیگنالِ جاماندهٔ توقفِ باسلام را پاک می‌کند',
+         substr_count($selfSrc, "if (defined('BSL_STOP_FILE') && is_file(BSL_STOP_FILE)) { @unlink(BSL_STOP_FILE); }") >= 2);
+
+    $add('10.42', 'وقتی هیچ محصولی بایگانی نشد، پاسخ ok=false و علتِ واقعی دارد',
+         (strpos($selfSrc, "'ok' => \$done > 0,") !== false
+          && strpos($selfSrc, '$firstErr') !== false));
+
+    $add('10.42', 'برچسب‌های باسلام «بایگانی» می‌گویند، نه «حذف»',
+         (strpos($selfSrc, 'بایگانیِ محصولاتِ تکراری باسلام') !== false
+          && strpos($selfSrc, "const VV=(ddTarget==='bsl')?" . "'بایگانی':'حذف';") !== false
+          && strpos($selfSrc, "const isB=(ddTarget==='bsl'), V=isB?" . "'بایگانی':'حذف';") !== false));
+
+    $add('10.42', 'شکستِ کامل در نوار وضعیت پنهان نمی‌ماند',
+         strpos($selfSrc, "else if((st.failed||0)>0)E('SS').textContent='✗ هیچ موردی '+VV+' نشد") !== false);
+
+
     $add('10.23', 'دکمهٔ تکراری‌های باسلام در تبِ ارسال هم هست',
          strpos($selfSrc, 'function toggleBslTools(){') !== false
       && strpos($selfSrc, 'onclick="bslFindDuplicates()" style="flex:1"') !== false
@@ -23847,9 +23949,18 @@ if (isset($_GET['selftest'])) {
          function_exists('dedupFetchBslAll')
       && strpos($selfSrc, 'dedupFetchBslAll($cn, $cfg, $partial)') !== false);
 
+    /* v10.42 (۵۶): این تضمین سرِ جایش است ولی جایش عوض شد — انتخابِ توکنِ
+       غرفه از تنِ dedupRun به bslArchiveSmart منتقل شد تا مسیرِ حذفِ انبوه و
+       مسیرِ دکمهٔ حذف دقیقاً یک رفتار داشته باشند. ادعا رفتاری بازنویسی شد. */
     $add('10.39', 'بایگانی با توکنِ خودِ همان غرفه انجام می‌شود',
-         strpos($selfSrc, 'bslArchiveProduct($dTok, $dVid, $did)') !== false
-      && strpos($selfSrc, "\$dVid = (int)(\$d['vendor_id'] ?? 0);") !== false);
+         (function () {
+             $cn = ['basalam' => ['token' => 'T1', 'vendor_id' => 11, 'shop_name' => 'اصلی',
+                    'vendors' => [['token' => 'T2', 'vendor_id' => 22, 'shop_name' => 'دومی']]]];
+             /* غرفهٔ ۲۲ باید توکنِ خودش را بگیرد، نه توکنِ غرفهٔ پیش‌فرض */
+             return bslShopTokenFor($cn, 22) === 'T2'
+                 && bslShopTokenFor($cn, 11) === 'T1'
+                 && function_exists('bslArchiveSmart');
+         })());
 
     $add('10.39', 'کران فهرستِ غرفه‌های کهنه‌شده را در پس‌زمینه می‌سازد',
          strpos($selfSrc, "\$results['bsl_catalog']") !== false
@@ -28547,9 +28658,17 @@ function bslStatusMap(): array {
 function bslEditProduct(string $tk, int $vid, int $pid, array $fields): array {
     if ($pid <= 0 || empty($fields)) return ['ok' => false, 'code' => 0, 'error' => 'ورودی ناقص'];
     $r = bslReq($tk, 'PATCH', 'products/' . $pid, $fields);
-    // بعضی نصب‌ها فقط مسیر زیر غرفه را قبول می‌کنند
-    if ((int)($r['code'] ?? 0) === 404 && $vid > 0) {
-        $r = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $pid, $fields);
+    /* بعضی نصب‌ها فقط مسیر زیر غرفه را قبول می‌کنند.
+       v10.42 (۵۶): تا اینجا فالبک *فقط* روی ۴۰۴ بود. ولی وقتی توکن مالِ
+       غرفهٔ دیگری باشد، باسلام روی مسیرِ سراسریِ products/{id} پاسخِ ۴۰۳
+       (و گاهی ۴۰۱) می‌دهد، نه ۴۰۴ — یعنی دقیقاً همان حالتی که مسیرِ
+       زیرِ غرفه می‌توانست نجاتش بدهد، فالبک نمی‌خورد و عملیات بی‌صدا
+       شکست می‌خورد. حالا هر سه کدِ «دسترسی/نبودن» فالبک می‌گیرند. */
+    if (in_array((int)($r['code'] ?? 0), [401, 403, 404], true) && $vid > 0) {
+        $r2 = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $pid, $fields);
+        /* فقط وقتی جایگزین می‌شود که واقعاً بهتر باشد؛ وگرنه خطای اولیه
+           گویاتر است و نباید با یک ۴۰۴ِ مسیرِ دوم پوشانده شود. */
+        if (!empty($r2['ok']) || (int)($r2['code'] ?? 0) !== 404) $r = $r2;
     }
     return $r;
 }
@@ -28562,6 +28681,115 @@ function bslArchiveProduct(string $tk, int $vid, int $pid): array {
     $r = bslEditProduct($tk, $vid, $pid, ['status' => 4184]);
     if (!empty($r['ok'])) $r['archived'] = true;
     return $r;
+}
+
+/* =====================================================================
+ *  v10.42 (۵۶): انتخابِ توکنِ درستِ هر غرفه — و بایگانیِ «چندغرفه‌آگاه»
+ *
+ *  گزارشِ کاربر: اسکنِ حذفِ تکراری X موردِ تکراری را پیدا می‌کرد، ولی
+ *  زدنِ دکمهٔ حذف حتی یک محصول را هم بایگانی نمی‌کرد.
+ *
+ *  ریشه: از v10.39 اسکن چندغرفه‌ای شد (همهٔ غرفه‌های $b['vendors'] خوانده
+ *  می‌شوند) ولی مسیرِ بایگانی همان تک‌غرفه‌ایِ قدیمی ماند و همیشه با
+ *  توکن/شناسهٔ *غرفهٔ پیش‌فرض* PATCH می‌زد. محصولی که مالِ غرفهٔ دوم بود
+ *  با توکنِ غرفهٔ اول ⇒ ۴۰۳ ⇒ «ناموفق». چون شمارشِ ناموفق‌ها هم به چشمِ
+ *  کاربر نمی‌آمد، نتیجه «هیچ اتفاقی نمی‌افتد» دیده می‌شد.
+ *
+ *  bslArchiveSmart همین را می‌بندد: اگر شناسهٔ غرفه معلوم باشد مستقیم با
+ *  توکنِ خودش می‌رود؛ اگر معلوم نباشد (مثلاً گزارشِ ذخیره‌شدهٔ نسخه‌های
+ *  قبل که vendor_id نداشت) همهٔ غرفه‌ها را به ترتیب امتحان می‌کند تا
+ *  یکی بگیرد. خروجی همیشه می‌گوید کدام غرفه جواب داد.
+ * ===================================================================== */
+
+/** توکنِ غرفه‌ای با این vendor_id — رشتهٔ خالی یعنی چنین غرفه‌ای نداریم */
+function bslShopTokenFor(array $cn, int $vid): string {
+    if ($vid <= 0) return '';
+    foreach (bslAllShops($cn) as $sh) {
+        if ((int)($sh['vendor_id'] ?? 0) === $vid) return (string)($sh['token'] ?? '');
+    }
+    return '';
+}
+
+/** نامِ خواناى غرفه برای پیام‌های خطا */
+function bslShopNameFor(array $cn, int $vid): string {
+    foreach (bslAllShops($cn) as $sh) {
+        if ((int)($sh['vendor_id'] ?? 0) === $vid) return (string)($sh['shop_name'] ?? ('غرفهٔ ' . $vid));
+    }
+    return $vid > 0 ? ('غرفهٔ ' . $vid) : 'غرفهٔ نامعلوم';
+}
+
+/**
+ * بایگانیِ یک محصول با توکنِ غرفهٔ خودش.
+ * $vid=0 یعنی «نمی‌دانم مالِ کدام غرفه است» ⇒ همه را امتحان کن.
+ * خروجی: ['ok','code','msg','vendor_id','vendor_name','tried']
+ */
+function bslArchiveSmart(array $cn, int $pid, int $vid = 0): array {
+    $shops = bslAllShops($cn);
+    if (!$shops) return ['ok' => false, 'code' => 0, 'msg' => 'هیچ غرفهٔ باسلامی تنظیم نشده است',
+                         'vendor_id' => 0, 'vendor_name' => '', 'tried' => 0];
+    /* غرفهٔ خودِ محصول اول امتحان می‌شود؛ بقیه فقط وقتی که آن نگرفت. */
+    $order = [];
+    if ($vid > 0) foreach ($shops as $sh) if ((int)$sh['vendor_id'] === $vid) $order[] = $sh;
+    foreach ($shops as $sh) if ($vid <= 0 || (int)$sh['vendor_id'] !== $vid) $order[] = $sh;
+
+    $lastCode = 0; $lastMsg = ''; $tried = 0;
+    foreach ($order as $sh) {
+        $tk = (string)($sh['token'] ?? '');
+        $sv = (int)($sh['vendor_id'] ?? 0);
+        if ($tk === '' || $sv <= 0) continue;
+        $tried++;
+        $r  = bslArchiveProduct($tk, $sv, $pid);
+        $ok = !empty($r['ok']) || in_array((int)($r['code'] ?? 0), [200, 204], true);
+        if ($ok) {
+            return ['ok' => true, 'code' => (int)($r['code'] ?? 200), 'msg' => '',
+                    'vendor_id' => $sv, 'vendor_name' => (string)($sh['shop_name'] ?? ''), 'tried' => $tried];
+        }
+        $lastCode = (int)($r['code'] ?? 0);
+        $lastMsg  = bslErrText($r);
+        /* ۴۰۳/۴۰۴ = «مالِ این غرفه نیست» ⇒ سراغِ غرفهٔ بعدی معنا دارد.
+           هر چیزِ دیگر (۰ شبکه، ۴۲۹، ۵xx) مشکلِ خودِ درخواست است و
+           تکرارش روی غرفه‌های دیگر فقط وقت تلف می‌کند. */
+        if (!in_array($lastCode, [401, 403, 404], true)) break;
+        /* وقتی شناسهٔ غرفه معلوم بوده و خودش رد کرده، گشتنِ کورکورانه در
+           بقیهٔ غرفه‌ها بی‌معناست — محصول مالِ همان غرفه است. */
+        if ($vid > 0) break;
+    }
+    return ['ok' => false, 'code' => $lastCode,
+            'msg' => $lastMsg !== '' ? $lastMsg : ('HTTP ' . ($lastCode ?: '?')),
+            'vendor_id' => $vid, 'vendor_name' => bslShopNameFor($cn, $vid), 'tried' => $tried];
+}
+
+/**
+ * v10.42 (۵۶): متنِ خطای باسلام را از هر شکلی که آمده بیرون می‌کشد.
+ * باسلام گاهی message، گاهی error_description و گاهی آرایهٔ errors می‌دهد؛
+ * تا اینجا فقط message خوانده می‌شد و بقیه به «HTTP ?» تنزل می‌کرد.
+ */
+function bslErrText(array $r): string {
+    $b = $r['body'] ?? null;
+    if (is_array($b)) {
+        foreach (['message', 'error_description', 'error', 'detail', 'title'] as $k) {
+            $v = $b[$k] ?? null;
+            if (is_string($v) && trim($v) !== '') return trim($v);
+        }
+        if (is_array($b['errors'] ?? null)) {
+            $parts = [];
+            foreach ($b['errors'] as $k => $v) {
+                if (is_array($v)) $v = implode('، ', array_map('strval', $v));
+                $parts[] = (is_string($k) ? ($k . ': ') : '') . (string)$v;
+            }
+            if ($parts) return mb_substr(implode(' | ', $parts), 0, 160, 'UTF-8');
+        }
+    }
+    $code = (int)($r['code'] ?? 0);
+    $net  = trim((string)($r['error'] ?? ''));
+    if ($code === 0) {
+        if ($net === 'stopped') return 'سیگنالِ «توقفِ ارسال» فعال است — درخواست اصلاً به باسلام نرفت';
+        return $net !== '' ? ('خطای شبکه: ' . $net) : 'پاسخی از باسلام نیامد';
+    }
+    $known = [401 => 'توکن نامعتبر یا منقضی', 403 => 'این توکن به این محصول دسترسی ندارد (غرفهٔ اشتباه؟)',
+              404 => 'محصول پیدا نشد', 422 => 'داده‌های ارسالی را باسلام نپذیرفت',
+              429 => 'محدودیتِ نرخِ باسلام'];
+    return 'HTTP ' . $code . (isset($known[$code]) ? (' — ' . $known[$code]) : '');
 }
 
 /**
@@ -38051,21 +38279,17 @@ function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
                     $dTries = $dt;
                     if ($dt > 1 && dedupStopRequested()) break;
                     if ($target === 'bsl') {
-                        $bs = $cn['basalam'] ?? [];
                         /* v10.39 (۵۳): با اسکنِ چندغرفه‌ای، محصول لزوماً مالِ
                            غرفهٔ پیش‌فرض نیست. توکن/شناسهٔ خودِ همان غرفه باید
-                           استفاده شود وگرنه باسلام ۴۰۳ می‌دهد. */
-                        $dVid = (int)($d['vendor_id'] ?? 0);
-                        $dTok = ''; 
-                        if ($dVid > 0) {
-                            foreach (bslAllShops($cn) as $sh) {
-                                if ((int)($sh['vendor_id'] ?? 0) === $dVid) { $dTok = (string)$sh['token']; break; }
-                            }
-                        }
-                        if ($dVid <= 0 || $dTok === '') { $dVid = (int)$bs['vendor_id']; $dTok = (string)$bs['token']; }
-                        $r = bslArchiveProduct($dTok, $dVid, $did);
-                        $ok = !empty($r['ok']) || in_array((int)($r['code'] ?? 0), [200, 204], true);
-                        $em = $r['body']['message'] ?? ($r['body']['error'] ?? ('HTTP ' . ($r['code'] ?? '?')));
+                           استفاده شود وگرنه باسلام ۴۰۳ می‌دهد.
+                           v10.42 (۵۶): همان منطق حالا در bslArchiveSmart جمع
+                           شده تا این مسیر و مسیرِ dedup_delete_ids دقیقاً یک
+                           رفتار داشته باشند (قبلاً فقط این یکی درست بود) و
+                           متنِ خطا هم به‌جای «HTTP ?» گویا باشد. */
+                        $dVid = (int)($d['vendor_id'] ?? ($g['vendor_id'] ?? 0));
+                        $r  = bslArchiveSmart($cn, $did, $dVid);
+                        $ok = !empty($r['ok']);
+                        $em = (string)($r['msg'] ?? '');
                     } else {
                         $w = $cn['woocommerce'] ?? [];
                         $r = wooReq($w['store_url'], $w['consumer_key'], $w['consumer_secret'],
@@ -38106,15 +38330,21 @@ function dedupRun(array $cn, string $target, array $cfg, string $mode): array {
     // فقط بخشی از گروه‌ها را در نتیجه نگه می‌داریم تا فایل غول‌آسا نشود
     $out = [];
     foreach (array_slice($dupGroups, 0, DEDUP_MAX_GROUPS) as $g) {
-        $mk = function (array $p) {
+        /* v10.42 (۵۶): vendor_id هر ردیف هم در گزارش می‌ماند. بدونِ آن،
+           هندلرِ dedup_delete_ids (که فقط فهرستِ id می‌گیرد) نمی‌دانست هر
+           محصول مالِ کدام غرفه است و همه را با توکنِ غرفهٔ پیش‌فرض بایگانی
+           می‌کرد ⇒ ۴۰۳ برای هرچه مالِ غرفهٔ دیگری بود. */
+        $mk = function (array $p) use ($g) {
             return ['id' => (int)($p['id'] ?? 0), 'name' => (string)($p['name'] ?? ''),
                     'price' => dedupPrice($p), 'stock' => (int)($p['stock'] ?? 0),
                     'status' => (int)($p['status'] ?? 0), 'wstatus' => (string)($p['wstatus'] ?? ''),
+                    'vendor_id' => (int)($p['vendor_id'] ?? ($g['vendor_id'] ?? 0)),
                     'ts' => dedupTs($p), 'date_created' => (string)($p['date_created'] ?? '')];
         };
         /* v10.39 (۵۳): نامِ غرفه هم می‌رود تا در گزارشِ چندغرفه‌ای معلوم باشد
            هر گروه مالِ کدام غرفه است */
         $out[] = ['normalized' => $g['norm'], 'count' => $g['count'],
+                  'vendor_id'   => (int)($g['vendor_id'] ?? 0),
                   'vendor_name' => (string)($g['vendor_name'] ?? ''),
                   'keep' => $mk($g['keep']), 'drop' => array_map($mk, $g['drop'])];
     }
@@ -48514,6 +48744,36 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.42', t:'🗃 دکمهٔ «بایگانیِ تکراری‌ها» بالاخره واقعاً کار می‌کند', items:[
+    '❌ <b>مشکل:</b> در گزارشِ محصولاتِ تکراریِ باسلام، اسکن درست کار می‌کرد و مثلاً',
+    '   ۴۰ نسخهٔ اضافی پیدا می‌کرد؛ ولی وقتی دکمهٔ حذف را می‌زدید، <b>هیچ محصولی</b>',
+    '   واقعاً بایگانی نمی‌شد و برنامه هم هیچ خطایی نشان نمی‌داد — انگار دکمه',
+    '   اصلاً کار نمی‌کند.',
+    '🔍 <b>چرا؟</b> سه ایراد دست‌به‌دستِ هم داده بودند:',
+    '   • <b>غرفهٔ اشتباه:</b> از نسخهٔ ۱۰.۳۹ اسکن همهٔ غرفه‌ها را می‌خوانَد، ولی',
+    '     مرحلهٔ بایگانی همیشه با کلیدِ <b>غرفهٔ پیش‌فرض</b> اقدام می‌کرد. هر محصولی',
+    '     که مالِ غرفهٔ دوم یا سوم بود، باسلام درخواست را رد می‌کرد.',
+    '   • <b>خطای بی‌صدا:</b> پاسخِ برنامه حتی وقتی همهٔ موارد شکست خورده بودند',
+    '     باز هم «موفق» بود و پیغامِ «✅ ۰ محصول بایگانی شد» نشان می‌داد.',
+    '   • <b>سیگنالِ جامانده:</b> اگر قبلاً یک ارسال را وسطِ کار متوقف کرده بودید،',
+    '     نشانهٔ آن توقف روی سرور می‌ماند و جلوی <b>همهٔ</b> تماس‌های بعدی با باسلام',
+    '     را می‌گرفت — بدونِ اینکه چیزی به شما گفته شود.',
+    '✅ <b>راه‌حل:</b>',
+    '   • حالا شناسهٔ غرفهٔ هر محصول در گزارش ذخیره می‌شود و بایگانی با کلیدِ',
+    '     <b>خودِ همان غرفه</b> انجام می‌گیرد. اگر غرفه معلوم نباشد (گزارش‌های قدیمی)،',
+    '     غرفه‌ها یکی‌یکی امتحان می‌شوند.',
+    '   • اگر باسلام درخواست را روی مسیرِ عمومی رد کند، مسیرِ مخصوصِ غرفه هم',
+    '     امتحان می‌شود (قبلاً فقط در یک حالتِ خاص این کار انجام می‌شد).',
+    '   • سیگنالِ توقفِ جامانده در شروعِ هر اسکن و هر بایگانی پاک می‌شود.',
+    '💬 <b>دیگر سکوت نمی‌کند:</b> اگر بایگانی نشد، <b>علتِ واقعی</b> را می‌بینید —',
+    '   «این کلید به این محصول دسترسی ندارد»، «کلید منقضی شده»، «محصول پیدا نشد»',
+    '   یا متنِ دقیقی که خودِ باسلام برگردانده؛ به‌جای پیامِ مبهمِ قبلی.',
+    '🏷 <b>برچسب‌ها اصلاح شدند:</b> در باسلام «حذف» وجود ندارد و کار در واقع',
+    '   <b>بایگانی</b> است (محصول از غرفه ناپدید می‌شود ولی پاک نمی‌شود). حالا عنوانِ',
+    '   پنجره، نوارِ وضعیت، پیام‌ها و نامِ کار در مدیرِ وظایف همگی «بایگانی»',
+    '   می‌گویند تا انتظارِ اشتباه ساخته نشود. برای ووکامرس همچنان «حذف» است،',
+    '   چون آنجا حذف واقعاً دائمی است.',
+  ]},
   {v:'10.41', t:'🗂 فهرستِ دسته‌بندی‌های باسلام فقط یک‌بار گرفته می‌شود', items:[
     '❌ <b>مشکل:</b> هر بار که «دسته‌بندی» یا «اصلاح دسته‌بندی» را باز می‌کردید،',
     '   برنامه کلِ فهرستِ دسته‌های باسلام را <b>از نو</b> دانلود می‌کرد. این کار در',
@@ -59419,15 +59679,20 @@ function ddApplyStatus(st){
         else if(st.done)pct=100;
         E('PB').style.width=pct+'%';
     }
+    /* v10.42 (۵۶): در باسلام «حذف» وجود ندارد — کار بایگانی (۴۱۸۴) است.
+       تا اینجا همین نوار وضعیت هم «حذف» می‌گفت و انتظارِ اشتباه می‌ساخت. */
+    const VV=(ddTarget==='bsl')?'بایگانی':'حذف';
     if(E('SS')&&!st.done){
         if(st.phase==='fetch')E('SS').textContent='📄 دریافت محصولات... ('+toFa(st.fetched||0)+')';
         else if(st.phase==='group')E('SS').textContent='🧮 گروه‌بندی عنوان‌ها...';
-        else if(st.phase==='delete')E('SS').textContent='🗑 حذف '+toFa(st.processed||0)+' از '+toFa(st.dups||0);
+        else if(st.phase==='delete')E('SS').textContent='🗑 '+VV+' '+toFa(st.processed||0)+' از '+toFa(st.dups||0);
     }
     if(st.done&&E('SS')){
         if(st.error)E('SS').textContent='✗ '+st.error;
-        else if(st.stopped)E('SS').textContent='⏹ متوقف شد — حذف‌شده: '+toFa(st.deleted||0);
-        else if((st.deleted||0)>0)E('SS').textContent='✓ '+toFa(st.deleted)+' مورد حذف شد'+((st.failed||0)?('، '+toFa(st.failed)+' ناموفق'):'');
+        else if(st.stopped)E('SS').textContent='⏹ متوقف شد — '+VV+'شده: '+toFa(st.deleted||0);
+        else if((st.deleted||0)>0)E('SS').textContent='✓ '+toFa(st.deleted)+' مورد '+VV+' شد'+((st.failed||0)?('، '+toFa(st.failed)+' ناموفق'):'');
+        /* شکستِ کامل دیگر پشتِ «گزارش آماده است» پنهان نمی‌شود */
+        else if((st.failed||0)>0)E('SS').textContent='✗ هیچ موردی '+VV+' نشد — '+toFa(st.failed)+' ناموفق (گزارش را باز کنید)';
         else E('SS').textContent='✓ گزارش آماده است — '+toFa(st.dups||0)+' نسخهٔ اضافی در '+toFa(st.groups||0)+' گروه';
     }
 }
@@ -59999,14 +60264,27 @@ function ddDeleteAllFromReport(){
     ddDeleteIds(ids);
 }
 
+/**
+ * v10.42 (۵۶): دو ایرادِ این تابع رفع شد.
+ *  ۱) همیشه «حذف» می‌گفت، حتی برای باسلام که در آن حذف وجود ندارد و
+ *     کار واقعاً «بایگانی» (وضعیت ۴۱۸۴) است.
+ *  ۲) اگر سرور با failed>0 برمی‌گشت ولی ok=true بود، فقط پیامِ موفقیت
+ *     دیده می‌شد. حالا شکستِ جزئی هشدار می‌دهد و شکستِ کامل خطای
+ *     واقعیِ باسلام (۴۰۳/توکن/شبکه) را نشان می‌دهد، نه «حذف ناموفق».
+ */
 function ddDeleteIds(ids){
     if(!ids||!ids.length)return;
+    const isB=(ddTarget==='bsl'), V=isB?'بایگانی':'حذف';
     const fd=new FormData();fd.append('action','dedup_delete_ids');
     fd.append('target',ddTarget);fd.append('ids',JSON.stringify(ids));
-    showToast('⏳ در حال حذف '+toFa(ids.length)+' مورد...');
+    showToast('⏳ در حال '+V+' '+toFa(ids.length)+' مورد...');
     fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
-        if(d&&d.ok){showToast('✅ '+d.msg);ddStart(ddTarget,'scan');}
-        else showToast('❌ '+((d&&d.error)||'حذف ناموفق'),1);
+        if(d&&d.ok){
+            showToast((d.failed>0?'⚠️ ':'✅ ')+(d.msg||(V+' انجام شد')),d.failed>0?1:0);
+            ddStart(ddTarget,'scan');
+        }else{
+            showToast('❌ '+((d&&(d.error||d.msg))||(V+' ناموفق')),1);
+        }
     }).catch(()=>showToast('❌ خطای شبکه',1));
 }
 
@@ -61675,10 +61953,10 @@ function bslFindDuplicates(){
     modal=document.createElement('div');modal.id='bslDupModal';
     modal.innerHTML='<div class="bsl-modal-overlay" onclick="if(event.target===this)bslCloseDup()">'
       +'<div class="bsl-modal" style="width:900px;max-width:95vw">'
-      +'<div class="bsl-modal-head"><h2>\u{1F50D} حذفِ محصولاتِ تکراری باسلام</h2>'
+      +'<div class="bsl-modal-head"><h2>\u{1F5C3} بایگانیِ محصولاتِ تکراری باسلام</h2>'
       +'<button class="btn btn-gray" onclick="bslCloseDup()">\u2715</button></div>'
       +'<div class="bsl-modal-body" style="padding:12px;max-height:80vh;overflow-y:auto">'
-      +'<details class="alert alert-info hint-collapse" style="font-size:11px;margin-bottom:8px"><summary>💡 «حذف» در باسلام یعنی چه؟</summary><div class="hint-body">در باسلام «حذف» وجود ندارد؛ نسخه‌های اضافی <b>بایگانی</b> می‌شوند (وضعیت ۴۱۸۴) و از غرفه ناپدید. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود — می‌توانید این پنجره را ببندید.</div></details>'
+      +'<details class="alert alert-info hint-collapse" style="font-size:11px;margin-bottom:8px"><summary>💡 چرا «بایگانی» و نه «حذف»؟</summary><div class="hint-body">در باسلام «حذف» وجود ندارد؛ نسخه‌های اضافی <b>بایگانی</b> می‌شوند (وضعیت ۴۱۸۴) و از غرفه ناپدید. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود — می‌توانید این پنجره را ببندید.</div></details>'
       +'<div id="bdCfgHost"></div>'
       +'<div style="display:flex;gap:6px;margin-top:8px">'
       +'<button class="btn btn-orange" id="bdBtn" onclick="ddStart(\'bsl\',\'scan\')" style="flex:1">\u{1F50D} گزارشِ تکراری‌ها</button>'
