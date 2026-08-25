@@ -7,6 +7,8 @@ on:
     branches:
       - arena/019fb317-code
       - arena/019ffc06-code
+      - arena/01a01a63-code
+      - arena/01a038c7-code
       - main
     paths:
       - 'scraper4.php'

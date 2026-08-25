@@ -267,7 +267,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.45';
+const APP_VERSION = '10.46';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -11243,6 +11243,8 @@ if (isset($_POST['ai_net'])) {
 if (isset($_POST['baleh'])) { $bl = json_decode($_POST['baleh'], true) ?: []; $conn['baleh'] = ['enabled'=>!empty($bl['enabled']),'token'=>trim($bl['token']??''),'chat_id'=>trim($bl['chat_id']??'')]; }
 if (isset($_POST['rubika'])) { $rb = json_decode($_POST['rubika'], true) ?: []; $conn['rubika'] = ['enabled'=>!empty($rb['enabled']),'token'=>trim($rb['token']??''),'chat_id'=>trim($rb['chat_id']??'')]; }
 if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund']),'src_price'=>!empty($ne['src_price']),'src_stock'=>!empty($ne['src_stock']),'run_fail'=>!empty($ne['run_fail']),'retire'=>!empty($ne['retire']),'cron_ping'=>!empty($ne['cron_ping']),/* v10.35 (۴۷د): گزارشِ همگام‌سازی — پیش‌فرض روشن، پس نبودِ کلید یعنی روشن */'sync_report'=>!isset($ne['sync_report'])||!empty($ne['sync_report'])]; }
+/* v10.46 (۶۰): انتخاب غرفه برای رویداد «پیام مشتری» — 0 = همهٔ غرفه‌ها */
+if (isset($_POST['notif_chat_shop'])) $conn['notif_chat_shop'] = max(0, (int)$_POST['notif_chat_shop']);
 // v8.34: تنظیمات بازنشستگی محصولات رفته از مبدأ
 if (isset($_POST['retire_mode'])) {
     $rm = (string)$_POST['retire_mode'];
@@ -15845,6 +15847,20 @@ if (isset($_GET['notif_health'])) {
     $add('notif_errors', $lastNotifErr === null,
          $lastNotifErr === null ? 'خطای اعلان در آخرین اجرا: نیست'
                                 : 'خطای اعلان در آخرین اجرا: ' . $lastNotifErr);
+
+    /* ۹) v10.46 (۶۰): آخرین دورِ بررسی رویدادها کِی و چه دیده؟
+       اگر این تازه نباشد، کران اجرا نشده — و اگر تازه باشد ولی صفر،
+       بررسی شده ولی چیزی پیدا نشده (دکمه‌های تست می‌گویند چرا). */
+    $out['last_notif_run'] = (int)($stH['last_notif_run'] ?? 0);
+    if ($out['last_notif_run'] > 0) {
+        $_ageN = max(0, $now - $out['last_notif_run']);
+        $out['last_notif_run_fa'] = $_ageN < 90 ? $_ageN . ' ثانیه پیش'
+                             : ($_ageN < 5400 ? (int)round($_ageN / 60) . ' دقیقه پیش'
+                                              : (int)round($_ageN / 3600) . ' ساعت پیش');
+        if ($out['last_notif_run_fa'] === '0 ثانیه پیش') $out['last_notif_run_fa'] = 'همین حالا';
+    }
+    $out['last_notif_seen'] = is_array($stH['last_notif_seen'] ?? null) ? $stH['last_notif_seen'] : null;
+    $out['last_notif_found'] = is_array($stH['last_notif_found'] ?? null) ? $stH['last_notif_found'] : null;
 
     $out['healthy'] = empty($out['problems']);
     echo json_encode($out, JSON_UNESCAPED_UNICODE);
@@ -23219,6 +23235,28 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۶۰ (v10.46) ==== */
+    $add('10.46', 'نسخهٔ ۱۰.۴۶',
+         str_contains($selfSrc, "const APP_VERSION = '10.46';"));
+    $add('10.46.1', 'انتخاب غرفهٔ «پیام مشتری» در ذخیرهٔ اتصال ثبت می‌شود',
+         str_contains($selfSrc, "if (isset(\$_POST['notif_chat_shop'])) \$conn['notif_chat_shop'] = max(0, (int)\$_POST['notif_chat_shop']);"));
+    $add('10.46.2', 'بررسیِ پیام‌ها فقط از غرفهٔ انتخاب‌شده است',
+         str_contains($selfSrc, "\$onlyVid = (int)(\$cn['notif_chat_shop'] ?? 0);"));
+    $add('10.46.3', 'غرفهٔ انتخاب‌شدهٔ حذف‌شده → همهٔ غرفه‌ها (نه سکوتِ کامل)',
+         str_contains($selfSrc, "if (\$sel) \$shops = \$sel;"));
+    $add('10.46.4', 'هر دورِ بررسی، خلاصهٔ «چه دیده شد» روی دیسک می‌نشیند',
+         str_contains($selfSrc, "\$stN['last_notif_run'] = time();")
+      && str_contains($selfSrc, "\$stN['last_notif_seen'] = \$seen;"));
+    $add('10.46.5', 'سلامتِ اعلان آخرین بررسی و دیده‌شده‌ها را می‌بیند',
+         str_contains($selfSrc, "\$out['last_notif_run_fa'] = \$_ageN < 90 ? \$_ageN . ' ثانیه پیش'")
+      && str_contains($selfSrc, "\$out['last_notif_seen'] = is_array(\$stH['last_notif_seen'] ?? null) ? \$stH['last_notif_seen'] : null;"));
+    $add('10.46.6', 'رابط: دراپ‌داونِ غرفه + خطِ وضعیتِ زنده',
+         str_contains($selfSrc, 'id="notifChatShop"')
+      && str_contains($selfSrc, 'id="notifHealthLine"')
+      && str_contains($selfSrc, 'function renderNotifHealth(){'));
+    $add('10.46.7', 'رابط: انتخابِ غرفه با ذخیرهٔ تنظیمات ارسال می‌شود',
+         str_contains($selfSrc, "fd.append('notif_chat_shop',String(\$('notifChatShop')?.value||0));"));
+
     /* ==== ۵۹ (v10.45) ==== */
 
     $add('10.45', 'نبودِ کلیدِ رویداد یعنی روشن — همان چیزی که رابط نشان می‌دهد',
@@ -28576,6 +28614,14 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
     if (!$shops) return ['ok' => false, 'found' => 0, 'total_seen' => 0, 'shops' => [],
             'sent' => [], 'sample' => '',
             'errors' => ['تنظیمات باسلام ناقص است (توکن یا غرفه)']];
+    /* v10.46 (۶۰): انتخاب غرفه برای رویداد «پیام مشتری» (دراپ‌داونِ بخش
+       اعلان‌ها). 0 = همهٔ غرفه‌ها. اگر غرفهٔ انتخاب‌شده حذف شده باشد، به
+       جای سکوتِ کامل، همهٔ غرفه‌ها برگردانده می‌شوند. */
+    $onlyVid = (int)($cn['notif_chat_shop'] ?? 0);
+    if ($onlyVid > 0) {
+        $sel = array_values(array_filter($shops, fn($s) => (int)($s['vendor_id'] ?? 0) === $onlyVid));
+        if ($sel) $shops = $sel;
+    }
     $st = notifLoadState(); $now = time(); $cfg = notifRemindCfg($cn);
     $multi = count($shops) > 1;
     $found = 0; $reminded = 0; $totalSeen = 0; $sentTo = []; $samples = [];
@@ -31240,25 +31286,43 @@ function bslCheckNotifications(array $cn): array {
 
     $out = [];
     $errors = [];
+    $seen = ['orders' => 0, 'chats' => 0, 'products' => 0];
+    $found = ['orders' => 0, 'chats' => 0, 'products' => 0];
     if (notifEventOn($ne, 'order_new') || notifEventOn($ne, 'order_status')) {
         $r = notifCheckOrders($cn);
-        if (!empty($r['found']) || !empty($r['reminded']))
-            $out['orders'] = (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        $seen['orders'] += (int)($r['total_seen'] ?? 0);
+        $found['orders'] += (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        if ($found['orders'] > 0) $out['orders'] = $found['orders'];
         if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
     if (notifEventOn($ne, 'chat_msg')) {
         $r = notifCheckChats($cn);
-        if (!empty($r['found']) || !empty($r['reminded']))
-            $out['chats'] = (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        $seen['chats'] += (int)($r['total_seen'] ?? 0);
+        $found['chats'] += (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        if ($found['chats'] > 0) $out['chats'] = $found['chats'];
         if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
     if (notifEventOn($ne, 'product_status') || notifEventOn($ne, 'product_new')) {
         $r = notifCheckProducts($cn);
-        if (!empty($r['found']) || !empty($r['reminded']))
-            $out['products'] = (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        $seen['products'] += (int)($r['total_seen'] ?? 0);
+        $found['products'] += (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        if ($found['products'] > 0) $out['products'] = $found['products'];
         if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
     if ($errors) $out['errors'] = array_values(array_unique($errors));
+
+    /* v10.46 (۶۰): هر دور، خلاصهٔ «چرا چیزی نیامد» روی دیسک بنشیند —
+       حتی وقتی هیچ رویدادی نباشد. این دقیقاً همان سوالی است که کاربر
+       می‌پرسد: «آیا اصلاً بررسی شده؟ چه دیده؟» جوابش در بخشِ اعلان‌ها
+       و سلامتِ اعلان‌ها می‌درخشد. */
+    try {
+        $stN = notifLoadState();
+        $stN['last_notif_run'] = time();
+        $stN['last_notif_seen'] = $seen;
+        $stN['last_notif_found'] = $found;
+        $stN['last_notif_errors'] = $errors ?: [];
+        notifSaveState($stN);
+    } catch (Throwable $e) { /* خطای نوشتنِ وضعیت نباید خودِ اعلان را بکشد */ }
     return $out;
 }
 
@@ -43002,11 +43066,23 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="crow"><label>Chat ID:</label><input type="text" id="rubikaChatId" dir="ltr" placeholder="شناسه چت" style="flex:1"></div>
 <div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">📋 رویدادهای اعلان</div>
+<div id="notifHealthLine" style="font-size:10.5px;color:#64748b;margin-bottom:6px;line-height:1.6"></div>
 <div style="font-size:10px;color:#64748b;margin-bottom:6px">انتخاب کنید کدام رویدادهای باسلام به پیام‌رسان ارسال شوند:</div>
 <div style="display:flex;flex-direction:column;gap:4px">
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifOrderNew" checked style="width:15px;height:15px"><span>🛒 سفارش جدید</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifOrderStatus" checked style="width:15px;height:15px"><span>📦 تغییر وضعیت سفارش</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifChatMsg" checked style="width:15px;height:15px"><span>💬 پیام مشتری</span></label>
+<!-- v10.46 (۶۰): انتخاب غرفه برای رویداد «پیام مشتری» -->
+<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;padding-right:21px">
+<span>غرفهٔ پیام‌ها:</span>
+<select id="notifChatShop" style="background:#0f172a;border:1px solid #475569;border-radius:6px;color:#e2e8f0;font-size:11px;padding:4px 6px;max-width:180px;flex:1">
+<option value="0">همهٔ غرفه‌ها</option>
+</select>
+</div>
+<div style="font-size:10px;color:#64748b;padding-right:21px;line-height:1.6;margin-bottom:2px">
+اعلانِ «پیام مشتری» از کدام غرفه‌ها بیاید. «همه» یعنی همهٔ غرفه‌های تنظیم‌شده؛
+برای محدود کردن، یک غرفه را انتخاب کنید.
+</div>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifProductStatus" checked style="width:15px;height:15px"><span>📋 تغییر وضعیت محصول</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifProductNew" checked style="width:15px;height:15px"><span>➕ محصول جدید افزوده شد</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifOrderRefund" checked style="width:15px;height:15px"><span>🔄 بازگشت سفارش</span></label>
@@ -49247,6 +49323,23 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.46', t:'🏪 انتخاب غرفه برای اعلانِ «پیام مشتری» + خطِ وضعیتِ زندهٔ اعلان‌ها', items:[
+    ' <b>دراپ‌داونِ «غرفهٔ پیام‌ها»:</b> زیرِ تیکِ «💬 پیام مشتری» در بخشِ',
+    '   اعلان‌ها، حالا می‌توانید انتخاب کنید اعلانِ پیام از کدام غرفه بیاید:',
+    '   گزینهٔ پیش‌فرض <b>«همهٔ غرفه‌ها»</b> و بعد از آن یک گزینه برای هر',
+    '   غرفه (غرفهٔ پیش‌فرض + غرفه‌های اضافی). دکمهٔ «تستِ پیام‌ها» هم فقط',
+    '   همان غرفهٔ انتخاب‌شده را تست می‌کند. اگر غرفهٔ انتخاب‌شده بعداً حذف',
+    '   شود، بررسی به همهٔ غرفه‌ها برمی‌گردد — نه اینکه ساکت بماند.',
+    '🩺 <b>خطِ وضعیتِ زنده:</b> بالایِ فهرستِ رویدادها، حالا یک خط نشان',
+    '   می‌دهد: <b>«آخرین بررسی: X دقیقه پیش — دیده‌شده: N گفتگو، M سفارش،',
+    '   K محصول»</b> یا اولینِ مشکل‌ها (پیام‌رسان وصل نیست، کران اجرا نشده،',
+    '   تنظیمات باسلام ناقص و...). پس اگر فکر کنید «اعلان نمی‌آید»، دیگر',
+    '   گمان‌زنی نیست: یا کران اصلاً اجرا نمی‌شود (خطِ وضعیت می‌گوید)، یا',
+    '   اجرا می‌شود ولی باسلام خطا می‌دهد (خطا همان‌جا می‌درخشد)، یا واقعاً',
+    '   رویدادِ تازه‌ای نبوده (دیده‌شده‌ها را نشان می‌دهد).',
+    '   (هر دورِ کران، خلاصهٔ «چه دید» را هم روی دیسک می‌نشیند تا از',
+    '   «سلامتِ اعلان‌ها» هم قابل‌ببیندن باشد.)',
+  ]},
   {v:'10.45', t:'💬 اعلان‌های رویداد همهٔ غرفه‌ها را می‌بیند — و اگر سکوت کرد، دلیلش را می‌گوید', items:[
     '❌ <b>مشکل:</b> اعلانِ پیام‌های مشتری (و سفارش/محصول) نمی‌آمد، در حالی‌که',
     '   دکمهٔ پینگ و «ارسال چندگانه» بدون مشکل پیام را به پیام‌رسان می‌زدند.',
@@ -52368,6 +52461,36 @@ const CHANGELOG = [
  * v8.29: تست استعلام باسلام — واقعاً درخواست می‌فرستد، نه شبیه‌سازی.
  * حالت تست وضعیت را ذخیره نمی‌کند تا اعلان واقعی بعدی از دست نرود.
  */
+/* v10.46 (۶۰): یک خط از وضعیت اعلان‌ها — آخرین بررسی کِی بود، چه دیده،
+   و اگر مشکلی هست همان‌جا می‌درخشد تا «چیزی نمی‌آید» دیگر قابل‌گمان نباشد. */
+function renderNotifHealth(){
+  const line=$('notifHealthLine'); if(!line)return;
+  fetch('?notif_health=1').then(r=>r.json()).then(d=>{
+    if(!line)return;
+    if(!d||!d.ok){line.style.color='#f87171';line.textContent='⚠️ خواندن وضعیت اعلان‌ها ناموفق بود';return;}
+    const bits=[];
+    if(d.last_notif_run){
+      bits.push('آخرین بررسی: '+(d.last_notif_run_fa||'—'));
+      if(d.last_notif_seen){
+        bits.push('دیده‌شده: '+toFa(d.last_notif_seen.chats||0)+' گفتگو · '+toFa(d.last_notif_seen.orders||0)+' سفارش · '+toFa(d.last_notif_seen.products||0)+' محصول');
+      }
+      const fN=(d.last_notif_found?(d.last_notif_found.chats||0)+(d.last_notif_found.orders||0)+(d.last_notif_found.products||0):0);
+      if(fN>0)bits.push('اعلان: '+toFa(fN)+' مورد');
+    }else{
+      bits.push('هنوز دورِ بررسی‌ای ثبت نشده — منتظرِ اجرای بعدیِ کران‌جاب');
+    }
+    if(d.healthy){
+      line.style.color='#4ade80';
+      line.innerHTML='🩺 <b>همه چیز درست است</b> — '+esc(bits.join(' · '));
+    }else{
+      line.style.color='#fbbf24';
+      line.innerHTML='⚠️ <b>'+esc((d.problems||[]).slice(0,2).join('؛ '))+'</b>'
+        +(bits.length?' — '+esc(bits.join(' · ')):'' )
+        +'<span style="color:#64748b"> · جزئیات: <code>?notif_health=1</code></span>';
+    }
+  }).catch(()=>{if(line)line.textContent='';});
+}
+
 function notifTest(kind){
   const labels={orders:'🛒 سفارش‌ها',chats:'💬 پیام‌ها',products:'📋 محصولات',source:'💰 تغییرات مبدأ',ping:'📡 پینگ کران'};
   const box=$('notifTestR');
@@ -52407,6 +52530,7 @@ function notifTest(kind){
     h+='</div>';
     box.innerHTML=h;
     showToast('✓ تست '+(labels[kind]||kind)+' انجام شد');
+    renderNotifHealth(); /* v10.46 (۶۰): خطِ وضعیت را تازه کن */
   }).catch(()=>{
     if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';
     showToast('خطا شبکه',1);
@@ -54880,8 +55004,9 @@ if(typeof aiResumeTestModalOnLoad==='function')setTimeout(aiResumeTestModalOnLoa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};/* v10.45: نبودِ کلید = روشن، صریحِ 0 = خاموش — دقیقاً همان قاعدهٔ سروری (notifEventOn). تا حالا 0 هم «روشن» نشان داده می‌شد. */const neOn=k=>ne[k]===undefined?true:!!ne[k];if($('notifOrderNew'))$('notifOrderNew').checked=neOn('order_new');if($('notifOrderStatus'))$('notifOrderStatus').checked=neOn('order_status');if($('notifChatMsg'))$('notifChatMsg').checked=neOn('chat_msg');if($('notifProductStatus'))$('notifProductStatus').checked=neOn('product_status');if($('notifProductNew'))$('notifProductNew').checked=neOn('product_new');if($('notifOrderRefund'))$('notifOrderRefund').checked=neOn('order_refund');if($('notifSrcPrice'))$('notifSrcPrice').checked=neOn('src_price');if($('notifSrcStock'))$('notifSrcStock').checked=neOn('src_stock');if($('notifRunFail'))$('notifRunFail').checked=neOn('run_fail');if($('notifRetire'))$('notifRetire').checked=neOn('retire');if($('notifSyncReport'))$('notifSyncReport').checked=neOn('sync_report');if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('autoResume'))$('autoResume').checked=cn.auto_resume!==false;if($('autoResumeMax'))$('autoResumeMax').value=(cn.auto_resume_max||2);if($('bslCatAuto'))$('bslCatAuto').checked=cn.bsl_catalog_auto!==false;if($('bslCatTtl'))$('bslCatTtl').value=(cn.bsl_catalog_ttl_h!==undefined?cn.bsl_catalog_ttl_h:6);if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};/* v10.45: نبودِ کلید = روشن، صریحِ 0 = خاموش — دقیقاً همان قاعدهٔ سروری (notifEventOn). تا حالا 0 هم «روشن» نشان داده می‌شد. */const neOn=k=>ne[k]===undefined?true:!!ne[k];if($('notifOrderNew'))$('notifOrderNew').checked=neOn('order_new');if($('notifOrderStatus'))$('notifOrderStatus').checked=neOn('order_status');if($('notifChatMsg'))$('notifChatMsg').checked=neOn('chat_msg');/* v10.46 (۶۰): غرفهٔ «پیام مشتری» — گزینه‌ها از غرفهٔ پیش‌فرض + غرفه‌های اضافی می‌سازند */if($('notifChatShop')){const ncs=$('notifChatShop');const ncsCur=String(cn.notif_chat_shop||0);let ncsOpts='<option value="0">همهٔ غرفه‌ها</option>';const ncsDefVid=parseInt(b.vendor_id)||0;if(ncsDefVid>0&&b.token)ncsOpts+='<option value="'+ncsDefVid+'">غرفهٔ پیش‌فرض (#'+ncsDefVid+')</option>';(Array.isArray(bslExtraVendors)?bslExtraVendors:[]).forEach(v=>{const ncsVid=parseInt(v&&v.vendor_id)||0,ncsTok=String(v&&(v.token||''));if(ncsVid>0&&ncsTok)ncsOpts+='<option value="'+ncsVid+'">'+esc((v.shop_name||v.name)||('غرفه '+ncsVid))+' (#'+ncsVid+')</option>';});ncs.innerHTML=ncsOpts;ncs.value=(ncsCur!=='0'&&ncsOpts.indexOf('value="'+ncsCur+'"')>-1)?ncsCur:'0';}if($('notifProductStatus'))$('notifProductStatus').checked=neOn('product_status');if($('notifProductNew'))$('notifProductNew').checked=neOn('product_new');if($('notifOrderRefund'))$('notifOrderRefund').checked=neOn('order_refund');if($('notifSrcPrice'))$('notifSrcPrice').checked=neOn('src_price');if($('notifSrcStock'))$('notifSrcStock').checked=neOn('src_stock');if($('notifRunFail'))$('notifRunFail').checked=neOn('run_fail');if($('notifRetire'))$('notifRetire').checked=neOn('retire');if($('notifSyncReport'))$('notifSyncReport').checked=neOn('sync_report');if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('autoResume'))$('autoResume').checked=cn.auto_resume!==false;if($('autoResumeMax'))$('autoResumeMax').value=(cn.auto_resume_max||2);if($('bslCatAuto'))$('bslCatAuto').checked=cn.bsl_catalog_auto!==false;if($('bslCatTtl'))$('bslCatTtl').value=(cn.bsl_catalog_ttl_h!==undefined?cn.bsl_catalog_ttl_h:6);if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
+renderNotifHealth(); /* v10.46 (۶۰): خطِ وضعیتِ اعلان‌ها */
 arApplyCfg(cn.autoreply||{});arLoad();}
 /* v8.87: پیش‌نمایش زندهٔ تعدیل قیمت مقصد.
    روی یک قیمت نمونه نشان می‌دهد نتیجه چه می‌شود، تا قبل از ذخیره معلوم
@@ -54915,7 +55040,7 @@ fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('auto_resume',$('autoResume')?.checked?1:0);fd.append('auto_resume_max',$('autoResumeMax')?.value||2);fd.append('bsl_catalog_auto',$('bslCatAuto')?.checked?1:0);fd.append('bsl_catalog_ttl_h',$('bslCatTtl')?.value||6);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));/* v10.46 (۶۰): غرفهٔ انتخاب‌شده برای پیام مشتری */fd.append('notif_chat_shop',String($('notifChatShop')?.value||0));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('auto_resume',$('autoResume')?.checked?1:0);fd.append('auto_resume_max',$('autoResumeMax')?.value||2);fd.append('bsl_catalog_auto',$('bslCatAuto')?.checked?1:0);fd.append('bsl_catalog_ttl_h',$('bslCatTtl')?.value||6);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
