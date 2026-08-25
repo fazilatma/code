@@ -49,6 +49,11 @@ const BSL_PRODUCTS_FILE = __DIR__ . '/bsl_products_temp.json';
 const WOO_QUEUE_FILE = __DIR__ . '/woo_queue.json';
 const WOO_PRODUCTS_FILE = __DIR__ . '/woo_products_temp.json';
 const BSL_QUEUE_FILE = __DIR__ . '/bsl_queue.json';
+/* v10.53 (۶۷): سقفِ چند ردیفِ صف که یک وِرکرِ ارسال در هر اجرا به نوبت پردازش می‌کند.
+   بقیهٔ «در انتظارها» در اجرای بعد (پمپ/زنجیره/دستی) ادامه می‌یابند —
+   وِرکر پنجرهٔ زمانیِ هاست را رد نکند؛ اگر هم وسطِ اجرا قطع شود، هر ردیف
+   حالتِ مستقل دارد و ردیفِ بعدی سالم می‌ماند. */
+const BSL_MAX_ENTRIES_PER_RUN = 10;
 const EXTRACT_PROGRESS_FILE = __DIR__ . '/extract_progress.json';
 const CATLEARN_FILE = __DIR__ . '/category_learning.json';   // v8.48
 // v8.60: سقف «چند کلمهٔ اول» برای یادگیری و تطبیق خودکار دسته‌بندی
@@ -267,7 +272,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.52';
+const APP_VERSION = '10.53';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -15316,7 +15321,7 @@ if ($noExtract) {
         $pResult['step'] = 'no_extract_detail';
         $pResult['detail_linked'] = $_neLinked;
         // فازِ detail: فقط صفحاتِ محصول باز می‌شوند، صفحهٔ فهرست هرگز
-        $exRes = runBackendExtract($key, 'auto', false, 'detail', false);
+        $exRes = runBackendExtract($key, manualSyncActive() ? 'manual_sync' : 'auto', false, 'detail', false); /* v10.53 (۶۷): همگام‌سازیِ دستی ⇒ برچسبِ جدا در صف */
         if (!empty($exRes['ok'])) {
             $pResult['extracted']      = (int)($exRes['extracted'] ?? 0);
             $pResult['extract_method'] = 'no_extract_detail';
@@ -15405,7 +15410,7 @@ $detailWasUnfinished = in_array($stagePrev, ['list_done', 'detail'], true)
    اگر اجرای قبلی وسطِ جزئیات کشته شده باشد (stage=detail تازه)، مستقیم همان را
    با فازِ detail ادامه می‌دهیم (بدون گرفتن دوبارهٔ فهرست). */
 $stepMode = ($stagePrev === 'detail' && $stagePrevAge <= $stageStale) ? 'detail' : 'all';
-$exRes = runBackendExtract($key, 'auto', false, $stepMode);
+$exRes = runBackendExtract($key, manualSyncActive() ? 'manual_sync' : 'auto', false, $stepMode); /* v10.53 (۶۷) */
 $pResult['step'] = $stepMode;
 
 /* v9.67: «استخراج تفصیلیِ جداگانه» در هر اجرای کران حذف شد.
@@ -15661,7 +15666,7 @@ $wooStatus=$wooBusy?'waiting':'running';
 if($wooStatus==='running'){
 @file_put_contents(WOO_PRODUCTS_FILE,json_encode($wooSend,JSON_UNESCAPED_UNICODE),LOCK_EX);
 }
-$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>$wooStatus,'products_file'=>$wooQFile,'total'=>count($wooSend),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$wooStatus==='running'?$now:0,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'only_changed'=>$wooOnlyChanged,'config'=>['title_suffix'=>$wooSuffix,'category_id'=>$wooCatId,'force_all'=>$wooForceAll]];
+$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>$wooStatus,'products_file'=>$wooQFile,'total'=>count($wooSend),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$wooStatus==='running'?$now:0,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'only_changed'=>$wooOnlyChanged,'trigger'=>(manualSyncActive()?'manual_sync':'cron'),/* v10.53 (۶۷) */'config'=>['title_suffix'=>$wooSuffix,'category_id'=>$wooCatId,'force_all'=>$wooForceAll]];
 wooWriteQueue($wooQueue);
 $pResult['woo']='queued';$pResult['woo_total']=count($wooSend);$pResult['woo_status']=$wooStatus;
 }
@@ -15720,7 +15725,7 @@ if ($bslDup !== null) {
     $pResult['bsl'] = 'already_queued';
     $pResult['bsl_queue_id'] = $bslDup['id'] ?? '';
 } else {
-$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, /* v10.21 (۳۴ب): سینکِ خودکار هم باید به همهٔ غرفه‌های فعال بفرستد. تا حالا این کلید فقط از مسیرِ دکمهٔ دستی وارد صف می‌شد، پس ارسالِ چندغرفه‌ای در کران هرگز اجرا نمی‌شد — تیک روشن بود ولی شب‌ها فقط غرفهٔ پیش‌فرض به‌روز می‌شد. */ 'send_all_shops' => !empty($cn['basalam']['send_all_shops']), /* v10.34 (۴۸ج): تیکِ خاموش ⇒ ارسالِ کامل بدون مقایسه با غرفه */ 'force_all' => $bslForceAll], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
+$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, /* v10.21 (۳۴ب): سینکِ خودکار هم باید به همهٔ غرفه‌های فعال بفرستد. تا حالا این کلید فقط از مسیرِ دکمهٔ دستی وارد صف می‌شد، پس ارسالِ چندغرفه‌ای در کران هرگز اجرا نمی‌شد — تیک روشن بود ولی شب‌ها فقط غرفهٔ پیش‌فرض به‌روز می‌شد. */ 'send_all_shops' => !empty($cn['basalam']['send_all_shops']), /* v10.34 (۴۸ج): تیکِ خاموش ⇒ ارسالِ کامل بدون مقایسه با غرفه */ 'force_all' => $bslForceAll], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, /* v10.53 (۶۷): منشأِ ردیف (دستی/خودکار) تا در تبِ ارسال هم دیده شود */ 'trigger' => (manualSyncActive() ? 'manual_sync' : 'cron'), 'auto_sync' => true];
 bslWriteQueue($queue);
 $syncState[$key] = array_merge(is_array($syncState[$key] ?? null) ? $syncState[$key] : [], ['lastRun' => $now, 'status' => 'queued_bsl', 'price_sig' => $priceSig]);   // v9.11
 $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
@@ -23382,6 +23387,27 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۶۷ (v10.53) ==== */
+    $add('10.53', 'نسخهٔ ۱۰.۵۳',
+         str_contains($selfSrc, "const APP_VERSION = '10.53';"));
+    $add('10.53', 'Worker processes all waiting queue rows in sequence (one task per profile, sent به نوبت)',
+         (strpos($selfSrc, "const BSL_MAX_ENTRIES_PER_RUN = 10;") !== false
+          && strpos($selfSrc, "for (\$bslEntryRound = 0; \$bslEntryRound < BSL_MAX_ENTRIES_PER_RUN; \$bslEntryRound++) {") !== false
+          && strpos($selfSrc, "if (\$hasMore && \$bslEntryRound + 1 < BSL_MAX_ENTRIES_PER_RUN) continue;") !== false
+          && strpos($selfSrc, "'processed'=>\$bslEntriesDoneThisRun") !== false));
+    $add('10.53', 'Manual sync is visible: extract + send queues labeled «هنگامِ همگام‌سازیِ دستی»',
+         (substr_count($selfSrc, "manualSyncActive() ? 'manual_sync' : 'auto'") >= 2
+          && substr_count($selfSrc, "🤝 هنگامِ همگام‌سازیِ دستی") >= 3
+          && strpos($selfSrc, "'trigger' => (manualSyncActive() ? 'manual_sync' : 'cron')") !== false
+          && strpos($selfSrc, "'trigger'=>(manualSyncActive()?'manual_sync':'cron')") !== false));
+    $add('10.53', 'Delete ladder: archive → disable (3790) → hide (stock=0, price=0)',
+         (strpos($selfSrc, "(\$newStatus === 4184) ? ['simple', 'full', 'archive', 'disable', 'hide'] : ['simple', 'full']") !== false
+          && strpos($selfSrc, "['status' => 3790], false, null, false, \$maxAttempts") !== false
+          && strpos($selfSrc, "\$full['stock'] = 0;") !== false
+          && strpos($selfSrc, "\$full['primary_price'] = 0;") !== false
+          && strpos($selfSrc, "ناموجود شد: موجودی و قیمت صفر شد") !== false
+          && strpos($selfSrc, "(int)\$newStatus === 4184 ? ['simple', 'full', 'archive', 'disable', 'hide'] : ['simple', 'full'] as \$st") !== false));
+
     /* ==== ۶۶ (v10.52) ==== */
     $add('10.52', 'نسخهٔ ۱۰.۵۲',
          str_contains($selfSrc, "const APP_VERSION = '10.52';"));
@@ -29614,6 +29640,11 @@ function bslProductFullPatch(array $row, int $newStatus): ?array {
  *  'simple'  → PATCH فقط-وضعیت (زیرِ غرفه، بعد سراسری)       ≤ ۲ درخواست
  *  'full'    → خواندنِ محصول + PATCH پیلودِ کامل            ≤ ۴ درخواست
  *  'archive' → POST اندپوینتِ اختصاصیِ بایگانی               ≤ ۲ درخواست
+ *  'disable' → v10.53: PATCH فقط-وضعیت روی ۳۷ (غیرفعال)      ≤ ۲ درخواست
+ *  'hide'    → v10.53: پیلودِ کامل با موجودی=۰ و قیمت=۰      ≤ ۴ درخواست
+ *  v10.53 (۶۷): اگر بایگانی ممکن نبود، پلکان ادامه دارد:
+ *  اول «غیرفعال» (۳۷) و در بدترین حالت «ناموجود» (صفرکردنِ
+ *  موجودی و قیمت) تا محصول اصلاً پیدا نشود.
  * مسیرِ قدیمیِ v10.51 این سه گام را در یک درخواست تا ۸ بار پشتِ سرِ هم
  * می‌زد؛ روی هاست‌هایی که پنجرهٔ HTTP کوتاه دارند (تایم‌اوتِ LiteSpeed
  * یا فایروال) کلِ زنجیره از پنجره بیرون می‌خورد و ۵۰۲ می‌گرفت. حالا
@@ -29622,7 +29653,7 @@ function bslProductFullPatch(array $row, int $newStatus): ?array {
  * گام، کلیدِ 'next' گامِ بعدی را می‌گوید.
  */
 function bslStatusStep(string $tk, int $vid, int $pid, int $newStatus, string $step, int $maxAttempts = 1): array {
-    $order = ['simple', 'full', 'archive'];
+    $order = ($newStatus === 4184) ? ['simple', 'full', 'archive', 'disable', 'hide'] : ['simple', 'full']; /* v10.53 (۶۷): پلکانِ کامل فقط برای بایگانی (۴۱۸۴)؛ تغییرِ وضعیتِ دیگر فقط simple/full */
     $si = array_search($step, $order, true);
     $next = ($si === false || $si + 1 >= count($order)) ? null : $order[$si + 1];
     $r = null;
@@ -29648,7 +29679,7 @@ function bslStatusStep(string $tk, int $vid, int $pid, int $newStatus, string $s
                 if ((int)($r['code'] ?? 0) !== 404) break;
             }
         }
-    } else { // 'archive'
+    } elseif ($step === 'archive') {
         $eps = [];
         if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid . '/archive';
         $eps[] = 'products/' . $pid . '/archive';
@@ -29656,6 +29687,38 @@ function bslStatusStep(string $tk, int $vid, int $pid, int $newStatus, string $s
             $r = bslReq($tk, 'POST', $ep, [], false, null, false, $maxAttempts);
             if (!empty($r['ok'])) { $r['status_strategy'] = 'archive'; $r['archived'] = true; return $r; }
             if ((int)($r['code'] ?? 0) !== 404) break;
+        }
+    } elseif ($step === 'disable') {
+        /* v10.53 (۶۷): بایگانی ممکن نبود → حداقل محصول غیرفعال (۳۷)
+           شود تا در ویترین دیده نشود. */
+        $eps = [];
+        if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid;
+        $eps[] = 'products/' . $pid;
+        foreach ($eps as $ep) {
+            $r = bslReq($tk, 'PATCH', $ep, ['status' => 3790], false, null, false, $maxAttempts);
+            if (!empty($r['ok'])) { $r['status_strategy'] = 'disable'; return $r; }
+            if ((int)($r['code'] ?? 0) !== 404) break;
+        }
+    } else { // 'hide'
+        /* v10.53 (۶۷): آخرین راه — موجودی و قیمت را صفر کن تا محصول
+           نه دیده شود نه قابلِ خرید باشد. وضعیتِ فعلی دست‌نخورده می‌ماند
+           (پیلودِ کامل همان وضعیتِ موجود را نگه می‌دارد). */
+        $row = bslGetProductRow($tk, $vid, $pid, $maxAttempts);
+        if (is_array($row)) {
+            $curStatus = (int)($row['status'] ?? 0);
+            $full = bslProductFullPatch($row, $curStatus > 0 ? $curStatus : $newStatus);
+            if ($full !== null) {
+                $full['stock'] = 0;
+                $full['primary_price'] = 0;
+                $eps = [];
+                if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid;
+                $eps[] = 'products/' . $pid;
+                foreach ($eps as $ep) {
+                    $r = bslReq($tk, 'PATCH', $ep, $full, false, null, false, $maxAttempts);
+                    if (!empty($r['ok'])) { $r['status_strategy'] = 'hide'; return $r; }
+                    if ((int)($r['code'] ?? 0) !== 404) break;
+                }
+            }
         }
     }
     if ($r === null) $r = ['ok' => false, 'code' => 0, 'body' => null];
@@ -29669,12 +29732,14 @@ function bslStatusStep(string $tk, int $vid, int $pid, int $newStatus, string $s
  * v10.52 (۶۶): $step='auto' (کارگرِ سرورساید مثلِ حذفِ تکراری) هر سه
  * گام را پشتِ‌سرِ هم می‌زند؛ گامِ مشخص فقط همان گام (برای درخواست‌های
  * تعاملی که پنجرهٔ HTTPِ کوتاه دارند).
+ * v10.53 (۶۷): پلکان ۵ گامه شد (+غیرفعال +ناموجود)؛ 'auto' همهٔ ۵ گام را
+ * پشتِ‌سرِ هم می‌زند.
  */
 function bslSetProductStatus(string $tk, int $vid, int $pid, int $newStatus, string $step = 'auto'): array {
     if ($step !== 'auto') return bslStatusStep($tk, $vid, $pid, $newStatus, $step);
     $attempts = [];
     $last = null;
-    foreach (['simple', 'full', 'archive'] as $st) {
+    foreach ((int)$newStatus === 4184 ? ['simple', 'full', 'archive', 'disable', 'hide'] : ['simple', 'full'] as $st) { /* v10.53 (۶۷) */
         $r = bslStatusStep($tk, $vid, $pid, $newStatus, $st, 3);
         $last = $r;
         if (!empty($r['ok'])) return $r;
@@ -35846,7 +35911,7 @@ $label=$statusLabels[$newStatus]??$newStatus;
    بلندِ v10.51 در پنجرهٔ HTTPِ کوتاه ۵۰۲ می‌گرفت؛ کلاینت با 'next'
    خودکار به گامِ بعد می‌رود. */
 $_via=($_GET['via']??'');
-$_via=in_array($_via,['simple','full','archive'],true)?$_via:'simple';
+$_via=in_array($_via,['simple','full','archive','disable','hide'],true)?$_via:'simple'; /* v10.53 (۶۷): پلکانِ کامل */
 $r=bslSetProductStatus($tk,$vid,$productId,$newStatus,$_via);
 if($r['ok']&&!empty($r['body']['id'])){
 echo json_encode(['ok'=>true,'msg'=>'محصول #'.$productId.' → '.$label.' ('.$newStatus.')'],JSON_UNESCAPED_UNICODE);
@@ -35872,10 +35937,14 @@ if($productId<=0){echo json_encode(['ok'=>false,'error'=>'شناسه محصول 
    کارِ سریعِ قدیمی)؛ اگر ۴۲۲/۴۰۳/۴۰۴ داد، کلاینت با 'next' خودکار
    گامِ بعد (پیلودِ کامل، بعد archive) را در درخواستِ تازه می‌زند. */
 $_via=($_GET['via']??'');
-$_via=in_array($_via,['simple','full','archive'],true)?$_via:'simple';
+$_via=in_array($_via,['simple','full','archive','disable','hide'],true)?$_via:'simple'; /* v10.53 (۶۷): پلکانِ کامل */
 $r=bslSetProductStatus($tk,$vid,$productId,4184,$_via);
 if($r['ok']||$r['code']===204||$r['code']===200){
-echo json_encode(['ok'=>true,'archived'=>true,'msg'=>'محصول #'.$productId.' بایگانی شد (باسلام حذف همیشگی ندارد)'],JSON_UNESCAPED_UNICODE);
+$_strat=(string)($r['status_strategy']??''); /* v10.53 (۶۷): پیامِ دقیقِ نتیجه */
+if($_strat==='disable'){$_delMsg='محصول #'.$productId.' غیرفعال شد (بایگانی ممکن نشد)';}
+elseif($_strat==='hide'){$_delMsg='محصول #'.$productId.' ناموجود شد: موجودی و قیمت صفر شد (بایگانی و غیرفعال‌کردن ممکن نشد)';}
+else{$_delMsg='محصول #'.$productId.' بایگانی شد (باسلام حذف همیشگی ندارد)';}
+echo json_encode(['ok'=>true,'archived'=>in_array($_strat,['simple','full','archive'],true),'msg'=>$_delMsg],JSON_UNESCAPED_UNICODE);
 }else{
 /* v10.49 (۶۳): خطای گویا — ۴۲۲ یعنی «پارامتر نامعتبر»؛ جزئیاتِ دقیق
    (کدام فیلد، چه مقبول است) را از بدنه بیرون بکشیم که کاربر/ما ببیند. */
@@ -36708,15 +36777,6 @@ set_time_limit(0); ignore_user_abort(true);
 register_shutdown_function(function()use($bslLockFp,$bslLockFile){@flock($bslLockFp,LOCK_UN);@fclose($bslLockFp);@unlink($bslLockFile);});
 $startedAt=time();
 $GLOBALS['startedAt']=$startedAt;
-$bslQueueId=''; $bslSentList=[]; $bslUpdatedList=[]; $bslSkippedList=[]; $bslFailedList=[]; $bslLog=[]; $bslFlatCats=[];
-/* v10.23 (۳۶ه): شمارنده‌های تفکیکیِ هر غرفه.
-   تا اینجا صفِ ارسال فقط یک مجموعه شمارنده داشت (جدید/آپدیت/تکراری/خطا) که
-   جمعِ کورِ همهٔ غرفه‌ها بود. با «ارسال همزمان به همهٔ غرفه‌ها» این عدد عملاً
-   بی‌معنی می‌شد: نمی‌شد فهمید کدام غرفه اصلاً چیزی نگرفته یا کدام‌یک همهٔ
-   خطاها را داده. حالا هر غرفه ردیفِ شمارندهٔ خودش را دارد.
-   کلید = vendor_id، مقدار = ['name','c'(ساخته),'u'(آپدیت),'s'(رد),'f'(خطا)] */
-$bslShopStats=[]; $bslDefaultVid=0; $bslDefaultShopName='';
-
 function bslBackendProgress($s,$u,$sk,$f,$t,$c,$lt,$log=null,$extra=[]){
 global $bslLog,$bslSentList,$bslUpdatedList,$bslSkippedList,$bslFailedList,$bslQueueId;
 if($log!==null){$bslLog[]=$log;}
@@ -36732,6 +36792,30 @@ if(!empty($extra))$d=array_merge($d,$extra);
 writeProgress(BSL_PROGRESS_FILE,$d);
 clearstatcache();
 }
+
+/* v10.53 (۶۷): یک وِرکر = صفِ کامل. هر وقت یک ردیف تمام شد و ردیفِ «در انتظار»
+   دیگری باشد، همان‌جا ادامه می‌دهد (به نوبت) — دیگر برای هر پروفایل وِرکر
+   تازه لازم نیست. سقف (BSL_MAX_ENTRIES_PER_RUN) برای اینکه وِرکر پنجرهٔ هاست
+   را رد نکند؛ بقیه را اجرای بعد می‌گیرد. متغیرهای زیر برای هر ردیف از نو
+   شروع می‌شوند. */
+$bslEntriesDoneThisRun = 0;
+for ($bslEntryRound = 0; $bslEntryRound < BSL_MAX_ENTRIES_PER_RUN; $bslEntryRound++) {
+if ($bslEntryRound > 0) {
+    clearstatcache(true,BSL_STOP_FILE);
+    if (file_exists(BSL_STOP_FILE)) {
+        writeProgress(BSL_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'total'=>0,'current'=>0,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>['⏹ Between rows: stop signal — remaining rows will be sent in the next run'],'total_log_count'=>1]);
+        @unlink(BSL_PRODUCTS_FILE);
+        exit;
+    }
+}
+$bslQueueId=''; $bslSentList=[]; $bslUpdatedList=[]; $bslSkippedList=[]; $bslFailedList=[]; $bslLog=[]; $bslFlatCats=[];
+/* v10.23 (۳۶ه): شمارنده‌های تفکیکیِ هر غرفه.
+   تا اینجا صفِ ارسال فقط یک مجموعه شمارنده داشت (جدید/آپدیت/تکراری/خطا) که
+   جمعِ کورِ همهٔ غرفه‌ها بود. با «ارسال همزمان به همهٔ غرفه‌ها» این عدد عملاً
+   بی‌معنی می‌شد: نمی‌شد فهمید کدام غرفه اصلاً چیزی نگرفته یا کدام‌یک همهٔ
+   خطاها را داده. حالا هر غرفه ردیفِ شمارندهٔ خودش را دارد.
+   کلید = vendor_id، مقدار = ['name','c'(ساخته),'u'(آپدیت),'s'(رد),'f'(خطا)] */
+$bslShopStats=[]; $bslDefaultVid=0; $bslDefaultShopName='';
 
 $queue=bslReadQueue();
 
@@ -36783,7 +36867,7 @@ if(!$nextEntry){
 // زمان‌بندی خودکار کار کران‌جاب (cron_run) است، نه کار ارسال‌کننده.
 bslWriteQueue($queue);
 header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(['ok'=>true,'msg'=>'صف خالی — هیچ ورودی برای پردازش نیست','started'=>false,'processed'=>0],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'msg'=>'صف خالی — هیچ ورودی برای پردازش نیست','started'=>false,'processed'=>$bslEntriesDoneThisRun],JSON_UNESCAPED_UNICODE);
 exit;
 }
 
@@ -37434,15 +37518,20 @@ $syncState[$nextEntry['profile_key']]=['lastRun'=>time(),'status'=>'done','sent'
 saveSyncState($syncState);
 }
 
+$bslEntriesDoneThisRun++;
 $queue=bslReadQueue();
 $hasMore=false;
 foreach($queue['entries'] as $e2){
 if($e2['status']==='waiting'){ $hasMore=true; break; }
 }
 
+/* v10.53 (۶۷): ردیفِ «در انتظار» دیگری هست → همین‌جا ردیفِ بعد را به نوبت شروع کن. */
+if ($hasMore && $bslEntryRound + 1 < BSL_MAX_ENTRIES_PER_RUN) continue;
+
 header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(['ok'=>true,'msg'=>$finalLog,'started'=>true,'processed'=>1,'queue_id'=>$bslQueueId,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'has_more'=>$hasMore,'auto_sync'=>!empty($nextEntry['auto_sync'])],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'msg'=>$finalLog,'started'=>true,'processed'=>$bslEntriesDoneThisRun,'queue_id'=>$bslQueueId,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'has_more'=>$hasMore,'auto_sync'=>!empty($nextEntry['auto_sync'])],JSON_UNESCAPED_UNICODE);
 exit;
+} /* v10.53 (۶۷): پایان حلقهٔ «هر ردیفِ صف، به نوبت» */
 }
 
 if (isset($_GET['bsl_ai_category'])) {
@@ -48898,7 +48987,7 @@ function srLoad(){
       h+='<details style="border-top:1px solid #1e293b;padding:4px 0">'
         +'<summary style="cursor:pointer;color:#cbd5e1;font-size:11px">'
         +esc(r.at_h||'—')+' — '+esc(r.profile||'?')
-        +(r.trigger==='manual'?' <span style="color:#34d399">دستی</span>':'')
+        +(r.trigger==='manual'||r.trigger==='manual_sync'?' <span style="color:#34d399">دستی</span>':'') /* v10.53 (۶۷) */
         +'</summary>'
         +'<div style="white-space:pre-wrap;color:#94a3b8;font-size:10.5px;line-height:1.9;padding:4px 8px 2px">'
         +esc(r.text||'')+'</div></details>';
@@ -49053,6 +49142,9 @@ function renderExtractQueue(entries, progress){
             html+='<span style="color:#22d3ee;font-size:10px;background:#0e749020;padding:1px 6px;border-radius:4px">⏱ خودکار</span>';
         }else if(e.trigger==='manual'){
             html+='<span style="color:#a78bfa;font-size:10px;background:#4c1d9520;padding:1px 6px;border-radius:4px">👤 دستی</span>';
+        }else if(e.trigger==='manual_sync'){
+            /* v10.53 (۶۷): اجرایِ همگام‌سازیِ دستی — با برچسبِ جدا از «دستیِ عادی» */
+            html+='<span style="color:#34d399;font-size:10px;background:#064e3b40;padding:1px 6px;border-radius:4px">🤝 هنگامِ همگام‌سازیِ دستی</span>';
         }
         /* v9.04: کدام مرحله؟ بدون این، ردیف «فهرست» با شمارندهٔ صفرِ
            جزئیات شبیه یک اجرای ناموفق به نظر می‌رسید. */
@@ -49916,6 +50008,7 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.53',d:'۳ مورد: ۱) همگام‌سازیِ دستی حالا در صفِ استخراج با برچسب «🤝 هنگامِ همگام‌سازیِ دستی» ثبت می‌شود و همین برچسب روی ردیف‌های صفِ ارسال هم می‌ماند — دیگر «دستی» و «خودکار» قابلِ تمییزند. ۲) پلکانِ حذف: اگر بایگانی ممکن نبود، اول محصول غیرفعال (۳۷) می‌شود؛ اگر آن هم نشد، موجودی و قیمت صفر می‌شود تا اصلاً پیدا نشود — در هر حالت پیامِ دقیقِ نتیجه را می‌بینید. ۳) صفِ ارسالِ باسلام: هر اجرایِ وِرکر همهٔ ردیف‌های «در انتظار» را به نوبت پردازش می‌کند (سقف ۱۰ ردیف در هر اجرا؛ بقیه در اجرای بعد) — دیگر لازم نیست هر پروفایل را جدا جدا بفرستید.'},
   {v:'10.52', t:'⚡ بایگانی/تغییرِ وضعیت گام‌به‌گام — خداحافظی با ۵۰', items:[
     '❌ <b>مشکل:</b> نسخهٔ ۱۰.۵۱ سه روشِ بایگانی (فقط-وضعیت، پیلودِ کامل،',
     '   اندپوینتِ archive) را در <b>یک</b> درخواست پشتِ‌سرِ هم می‌زد — تا ۸',
@@ -60186,7 +60279,7 @@ function renderBslQueue(q){
         // Row 1: Status badge + count + action buttons
         html+='<div style="display:flex;justify-content:space-between;align-items:center">';
         html+='<div style="display:flex;align-items:center;gap:8px">';
-        html+='<span style="color:'+statusColors[e.status]+';font-weight:700;font-size:12px">'+statusLabels[e.status]+'</span>';
+        html+='<span style="color:'+statusColors[e.status]+';font-weight:700;font-size:12px">'+statusLabels[e.status]+'</span>';if(e.trigger==='manual_sync'){html+='<span style="color:#34d399;font-size:10px;background:#064e3b40;padding:1px 6px;border-radius:4px;margin-right:4px">🤝 هنگامِ همگام‌سازیِ دستی</span>';} /* v10.53 (۶۷) */
         if(e.auto_sync)html+='<span style="color:#22d3ee;font-size:10px;background:#0e749020;padding:1px 6px;border-radius:4px;margin-left:4px">⏱ سینک خودکار</span>';
         if(e.profile_name)html+='<span style="color:#94a3b8;font-size:10px;margin-left:4px">'+esc(e.profile_name)+'</span>';
         html+='<span style="color:#e2e8f0;font-weight:600;font-size:12px">'+toFa(e.total)+' محصول</span>';
@@ -60373,7 +60466,7 @@ function renderWooQueue(q){
         html+='<div style="cursor:pointer;padding:8px 10px;border:1px solid #334155;border-radius:8px;margin:4px 0;background:'+statusBg[e.status]+';transition:background 0.2s" onmouseover="this.style.borderColor=\'#a78bfa\'" onmouseout="this.style.borderColor=\'#334155\'">';
         html+='<div style="display:flex;justify-content:space-between;align-items:center">';
         html+='<div style="display:flex;align-items:center;gap:8px">';
-        html+='<span style="color:'+statusColors[e.status]+';font-weight:700;font-size:12px">'+statusLabels[e.status]+'</span>';
+        html+='<span style="color:'+statusColors[e.status]+';font-weight:700;font-size:12px">'+statusLabels[e.status]+'</span>';if(e.trigger==='manual_sync'){html+='<span style="color:#34d399;font-size:10px;background:#064e3b40;padding:1px 6px;border-radius:4px;margin-right:4px">🤝 هنگامِ همگام‌سازیِ دستی</span>';} /* v10.53 (۶۷) */
         html+='<span style="color:#e2e8f0;font-weight:600;font-size:12px">'+toFa(e.total)+' محصول</span>';
         html+='</div>';
         html+='<div style="display:flex;gap:4px">';
