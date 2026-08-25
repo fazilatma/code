@@ -14380,10 +14380,11 @@ function bslNormalizeChat(array $c): array {
         'chat_id'    => (int)($c['id'] ?? 0),
         'who'        => $who,
         'text'       => $txt,
-        'unseen'     => max(0, (int)($c['unseen_message_count'] ?? ($c['unread_message_count'] ?? ($c['unread_count'] ?? ($c['unseen_count'] ?? ($c['messages_unread'] ?? 0))))),
+        'unseen'     => max(0, (int)($c['unseen_message_count'] ?? ($c['unread_message_count'] ?? ($c['unread_count'] ?? ($c['unseen_count'] ?? ($c['messages_unread'] ?? ($c['unread_messages_count'] ?? 0)))))),
         'updated_at' => (string)($c['updated_at'] ?? ($c['last_message']['created_at'] ?? ($c['created_at'] ?? ''))),
         'chat_type'  => (string)($c['chat_type'] ?? ''),
         'sender'     => trim((string)($lm['sender']['name'] ?? '')),
+        'sender_role' => strtolower((string)($lm['sender']['role'] ?? ($lm['sender']['type'] ?? ''))),
     ];
 }
 
@@ -15032,7 +15033,8 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
         $norm[] = ['nc' => $nc, 'key' => 'chat:' . $nc['chat_id'],
                    'sig' => $sig,
                    'ts' => strtotime($nc['updated_at'] ?: 'now') ?: $now,
-                   'pending' => $nc['unseen'] > 0];
+                   'pending' => $nc['unseen'] > 0
+                               || in_array($nc['sender_role'], ['customer', 'buyer', 'user'], true)];
     }
 
     if ($test) {
