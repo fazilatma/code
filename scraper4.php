@@ -27762,10 +27762,11 @@ function bslNormalizeChat(array $c): array {
         'chat_id'    => (int)($c['id'] ?? 0),
         'who'        => $who,
         'text'       => $txt,
-        'unseen'     => (int)($c['unseen_message_count'] ?? 0),
-        'updated_at' => (string)($c['updated_at'] ?? ($c['created_at'] ?? '')),
+        'unseen'     => max(0, (int)($c['unseen_message_count'] ?? ($c['unread_message_count'] ?? ($c['unread_count'] ?? ($c['unseen_count'] ?? ($c['messages_unread'] ?? ($c['unread_messages_count'] ?? 0)))))),
+        'updated_at' => (string)($c['updated_at'] ?? ($c['last_message']['created_at'] ?? ($c['created_at'] ?? ''))),
         'chat_type'  => (string)($c['chat_type'] ?? ''),
         'sender'     => trim((string)($lm['sender']['name'] ?? '')),
+        'sender_role' => strtolower((string)($lm['sender']['role'] ?? ($lm['sender']['type'] ?? ''))),
     ];
 }
 
@@ -28406,14 +28407,17 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
         if (!is_array($c)) continue;
         $nc = bslNormalizeChat($c);
         if ($nc['chat_id'] <= 0) continue;
-        $lastId = (int)($c['last_message']['id'] ?? 0);
-        // v8.38: امضا فقط شناسهٔ آخرین پیام است. اگر تعداد خوانده‌نشده را هم
-        // در امضا بیاوریم، جواب دادن مشتری (۲ → ۰) مثل «رویداد تازه» دیده
-        // می‌شود و یک اعلان بی‌مورد می‌فرستد.
+        $lastId = (int)($c['last_message']['id'] ?? ($c['last_message_id'] ?? 0));
+        // برخی پاسخ‌های API شناسهٔ پیام را ندارند؛ متن و زمان آخرین پیام
+        // باعث می‌شود پیام جدید در این حالت هم از دست نرود.
+        $sig = $lastId > 0 ? (string)$lastId : sha1($nc['updated_at'] . '|' . $nc['text']);
+        // نقش فرستنده پشتیبان تعداد خوانده‌نشده است؛ بعضی نسخه‌های API
+        // این تعداد را برنمی‌گردانند.
         $norm[] = ['nc' => $nc, 'key' => 'chat:' . $nc['chat_id'],
-                   'sig' => (string)$lastId,
+                   'sig' => $sig,
                    'ts' => strtotime($nc['updated_at'] ?: 'now') ?: $now,
-                   'pending' => $nc['unseen'] > 0];
+                   'pending' => $nc['unseen'] > 0
+                               || in_array($nc['sender_role'], ['customer', 'buyer', 'user'], true)];
     }
 
     if ($test) {
