@@ -267,7 +267,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.51';
+const APP_VERSION = '10.52';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -4262,7 +4262,7 @@ function bslReqMulti(array $jobs, int $concurrency = 4, bool $skipStop = false):
     return $out;
 }
 
-function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false, ?array $net=null, bool $skipStop=false): array {
+function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false, ?array $net=null, bool $skipStop=false, int $maxAttempts=3): array {
 $url=bslApiBase().ltrim($ep,'/');
 if($net===null)$net = function_exists('bslNetCfg') ? bslNetCfg() : ['indirect'=>false,'mode'=>'direct','fallback'=>false];
 
@@ -4293,7 +4293,7 @@ if (!empty($net['indirect'])) {
 // بود، برای همیشه همهٔ درخواست‌ها را قطع می‌کرد. هندلر bsl_backend از
 // v8.57 نگه‌داشتِ ۱۵ دقیقه‌ای (BSL_STOP_HOLD_SEC) را رعایت می‌کرد ولی
 // خودِ bslReq نه — پس «توقف» عملاً دائمی می‌شد.
-$maxRetries=3;$retryDelay=3;
+$maxRetries=max(1,$maxAttempts);$retryDelay=3;
 $last=['ok'=>false,'code'=>0,'error'=>'هیچ روشی اجرا نشد','body'=>null,'raw'=>''];
 foreach($modes as $mode){
 $r=['ok'=>false];
@@ -23382,6 +23382,17 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۶۶ (v10.52) ==== */
+    $add('10.52', 'نسخهٔ ۱۰.۵۲',
+         str_contains($selfSrc, "const APP_VERSION = '10.52';"));
+    $add('10.52', 'Status change runs step-per-request (no 502): simple/full/archive + next hint',
+         (strpos($selfSrc, "function bslStatusStep(string \$tk, int \$vid, int \$pid, int \$newStatus, string \$step, int \$maxAttempts = 1): array {") !== false
+          && strpos($selfSrc, "string \$step = 'auto'): array {") !== false
+          && strpos($selfSrc, "in_array(\$_via,['simple','full','archive'],true)?\$_via:'simple';") !== false
+          && strpos($selfSrc, "if(!empty(\$r['next']))\$_resp['next']=\$r['next'];") !== false
+          && strpos($selfSrc, "tryStep(d.next);") !== false
+          && strpos($selfSrc, "int \$maxAttempts=3): array {") !== false));
+
     /* ==== ۶۵ (v10.51) ==== */
     $add('10.51', 'نسخهٔ ۱۰.۵۱',
          str_contains($selfSrc, "const APP_VERSION = '10.51';"));
@@ -29554,12 +29565,12 @@ function bslEditProduct(string $tk, int $vid, int $pid, array $fields): array {
  * ===================================================================== */
 
 /** یک محصول را می‌خواند — ردیفِ کامل، وگرنه null */
-function bslGetProductRow(string $tk, int $vid, int $pid): ?array {
-    $r = bslReq($tk, 'GET', 'products/' . $pid);
+function bslGetProductRow(string $tk, int $vid, int $pid, int $maxAttempts = 3): ?array {
+    $r = bslReq($tk, 'GET', 'products/' . $pid, null, false, null, false, $maxAttempts);
     $row = $r['body']['data'] ?? ($r['body'] ?? null);
     if (!empty($r['ok']) && is_array($row) && (int)($row['id'] ?? 0) > 0) return $row;
     if ($vid > 0) {
-        $r2 = bslReq($tk, 'GET', 'vendors/' . $vid . '/products/' . $pid);
+        $r2 = bslReq($tk, 'GET', 'vendors/' . $vid . '/products/' . $pid, null, false, null, false, $maxAttempts);
         $row2 = $r2['body']['data'] ?? ($r2['body'] ?? null);
         if (!empty($r2['ok']) && is_array($row2) && (int)($row2['id'] ?? 0) > 0) return $row2;
     }
@@ -29598,47 +29609,83 @@ function bslProductFullPatch(array $row, int $newStatus): ?array {
 }
 
 /**
- * وضعیتِ محصول را با چند روشِ به‌ترتیب عوض می‌کند:
- * ۱) PATCH فقط-وضعیت (اول مسیرِ زیرِ غرفه، بعد سراسری)
- * ۲) PATCH پیلودِ کامل (داده‌های جاریِ محصول + وضعیتِ جدید)
- * ۳) اندپوینتِ اختصاصیِ «archive» (اگر API داشته باشد)
- * خروجی بهترین پاسخ است؛ در صورتِ شکست، فهرستِ 'attempts' هم دارد.
+ * v10.52 (۶۶): هر «گام»ِ تغییرِ وضعیت، به‌تنهایی کفایتِ یک درخواستِ
+ * HTTPِ کوتاه:
+ *  'simple'  → PATCH فقط-وضعیت (زیرِ غرفه، بعد سراسری)       ≤ ۲ درخواست
+ *  'full'    → خواندنِ محصول + PATCH پیلودِ کامل            ≤ ۴ درخواست
+ *  'archive' → POST اندپوینتِ اختصاصیِ بایگانی               ≤ ۲ درخواست
+ * مسیرِ قدیمیِ v10.51 این سه گام را در یک درخواست تا ۸ بار پشتِ سرِ هم
+ * می‌زد؛ روی هاست‌هایی که پنجرهٔ HTTP کوتاه دارند (تایم‌اوتِ LiteSpeed
+ * یا فایروال) کلِ زنجیره از پنجره بیرون می‌خورد و ۵۰۲ می‌گرفت. حالا
+ * مسیرِ تعاملی (بایگانیِ دستی/تغییرِ وضعیت) هر گام را در یک درخواستِ
+ * جدا می‌زند و کلاینت (JS) خودکار به گامِ بعد می‌رود؛ در صورتِ شکستِ
+ * گام، کلیدِ 'next' گامِ بعدی را می‌گوید.
  */
-function bslSetProductStatus(string $tk, int $vid, int $pid, int $newStatus): array {
-    $attempts = [];
-    $last = null;
-    $payloads = [['simple', ['status' => $newStatus]]];
-    $row = bslGetProductRow($tk, $vid, $pid);
-    if ($row !== null) {
-        $full = bslProductFullPatch($row, $newStatus);
-        if ($full !== null) $payloads[] = ['full', $full];
-    }
-    $eps = [];
-    if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid;
-    $eps[] = 'products/' . $pid;
-    foreach ($payloads as $pl) {
+function bslStatusStep(string $tk, int $vid, int $pid, int $newStatus, string $step, int $maxAttempts = 1): array {
+    $order = ['simple', 'full', 'archive'];
+    $si = array_search($step, $order, true);
+    $next = ($si === false || $si + 1 >= count($order)) ? null : $order[$si + 1];
+    $r = null;
+    if ($step === 'simple') {
+        $eps = [];
+        if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid;
+        $eps[] = 'products/' . $pid;
         foreach ($eps as $ep) {
-            $r = bslReq($tk, 'PATCH', $ep, $pl[1]);
-            $attempts[] = $pl[0] . '@' . $ep . '=' . (int)($r['code'] ?? 0);
-            $last = $r;
-            if (!empty($r['ok'])) { $r['status_strategy'] = $pl[0]; return $r; }
-            if ((int)($r['code'] ?? 0) !== 404) break;  // ۴۰۴ = این مسیر نیست؛ خطای دیگر = پیلودِ بعدی
+            $r = bslReq($tk, 'PATCH', $ep, ['status' => $newStatus], false, null, false, $maxAttempts);
+            if (!empty($r['ok'])) { $r['status_strategy'] = 'simple'; return $r; }
+            if ((int)($r['code'] ?? 0) !== 404) break;   // ۴۰۴ = مسیر نیست؛ خطای دیگر = پایانِ گام
+        }
+    } elseif ($step === 'full') {
+        $row = bslGetProductRow($tk, $vid, $pid, $maxAttempts);
+        $full = is_array($row) ? bslProductFullPatch($row, $newStatus) : null;
+        if ($full !== null) {
+            $eps = [];
+            if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid;
+            $eps[] = 'products/' . $pid;
+            foreach ($eps as $ep) {
+                $r = bslReq($tk, 'PATCH', $ep, $full, false, null, false, $maxAttempts);
+                if (!empty($r['ok'])) { $r['status_strategy'] = 'full'; return $r; }
+                if ((int)($r['code'] ?? 0) !== 404) break;
+            }
+        }
+    } else { // 'archive'
+        $eps = [];
+        if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid . '/archive';
+        $eps[] = 'products/' . $pid . '/archive';
+        foreach ($eps as $ep) {
+            $r = bslReq($tk, 'POST', $ep, [], false, null, false, $maxAttempts);
+            if (!empty($r['ok'])) { $r['status_strategy'] = 'archive'; $r['archived'] = true; return $r; }
+            if ((int)($r['code'] ?? 0) !== 404) break;
         }
     }
-    /* برخی نسخه‌های API اندپوینتِ جداگانهٔ «بایگانی» دارند */
-    $arcEps = [];
-    if ($vid > 0) $arcEps[] = 'vendors/' . $vid . '/products/' . $pid . '/archive';
-    $arcEps[] = 'products/' . $pid . '/archive';
-    foreach ($arcEps as $ep) {
-        $r = bslReq($tk, 'POST', $ep, []);
-        $attempts[] = 'archive@' . $ep . '=' . (int)($r['code'] ?? 0);
-        if (!empty($r['ok'])) { $r['status_strategy'] = 'archive'; $r['archived'] = true; return $r; }
-        if ((int)($r['code'] ?? 0) !== 404) { $last = $r; break; }
+    if ($r === null) $r = ['ok' => false, 'code' => 0, 'body' => null];
+    $r['next'] = $next;
+    return $r;
+}
+
+/**
+ * وضعیتِ محصول را با چند روشِ به‌ترتیب عوض می‌کند:
+ * v10.51 (۶۵): سه روش — فقط-وضعیت / پیلودِ کامل / اندپوینتِ archive.
+ * v10.52 (۶۶): $step='auto' (کارگرِ سرورساید مثلِ حذفِ تکراری) هر سه
+ * گام را پشتِ‌سرِ هم می‌زند؛ گامِ مشخص فقط همان گام (برای درخواست‌های
+ * تعاملی که پنجرهٔ HTTPِ کوتاه دارند).
+ */
+function bslSetProductStatus(string $tk, int $vid, int $pid, int $newStatus, string $step = 'auto'): array {
+    if ($step !== 'auto') return bslStatusStep($tk, $vid, $pid, $newStatus, $step);
+    $attempts = [];
+    $last = null;
+    foreach (['simple', 'full', 'archive'] as $st) {
+        $r = bslStatusStep($tk, $vid, $pid, $newStatus, $st, 3);
+        $last = $r;
+        if (!empty($r['ok'])) return $r;
+        $attempts[] = $st . '=' . (int)($r['code'] ?? 0);
+        if (empty($r['next'])) break;
     }
     if ($last === null) $last = ['ok' => false, 'code' => 0, 'body' => null];
     $last['attempts'] = $attempts;
     return $last;
 }
+
 
 /**
  * «حذف» محصول باسلام = بایگانی کردن (4184).
@@ -35795,14 +35842,19 @@ $newStatus=(int)($_GET['status']??0);
 if($productId<=0||$newStatus<=0){echo json_encode(['ok'=>false,'error'=>'شناسه یا وضعیت نامعتبر'],JSON_UNESCAPED_UNICODE);exit;}
 $statusLabels=['2976'=>'فعال','3790'=>'غیرفعال','3568'=>'در انتظار تأیید'];
 $label=$statusLabels[$newStatus]??$newStatus;
-/* v10.51 (۶۵): دقیقاً همان مسیرِ چندروشهِ بایگانی — PATCHِ فقط-وضعیت
-   گاهی ۴۲ می‌گیرد؛ پیلودِ کامل یا اندپوینتِ archive ممکن است ببرد. */
-$r=bslSetProductStatus($tk,$vid,$productId,$newStatus);
+/* v10.52 (۶۶): هر گام در یک درخواستِ جدا (پارامترِ via) — زنجیرهٔ
+   بلندِ v10.51 در پنجرهٔ HTTPِ کوتاه ۵۰۲ می‌گرفت؛ کلاینت با 'next'
+   خودکار به گامِ بعد می‌رود. */
+$_via=($_GET['via']??'');
+$_via=in_array($_via,['simple','full','archive'],true)?$_via:'simple';
+$r=bslSetProductStatus($tk,$vid,$productId,$newStatus,$_via);
 if($r['ok']&&!empty($r['body']['id'])){
 echo json_encode(['ok'=>true,'msg'=>'محصول #'.$productId.' → '.$label.' ('.$newStatus.')'],JSON_UNESCAPED_UNICODE);
 }else{
 /* v10.49 (۶۳): همان خطای گویا برای تغییر وضعیت */
-echo json_encode(['ok'=>false,'error'=>bslApiError($r,'تغییر وضعیت ناموفق','products/'.$productId)],JSON_UNESCAPED_UNICODE);
+$_resp=['ok'=>false,'error'=>bslApiError($r,'تغییر وضعیت ناموفق','products/'.$productId)];
+if(!empty($r['next']))$_resp['next']=$r['next'];
+echo json_encode($_resp,JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -35816,13 +35868,20 @@ if($productId<=0){echo json_encode(['ok'=>false,'error'=>'شناسه محصول 
 // v8.62: باسلام متد DELETE برای محصول ندارد. تا امروز این کد به اندپوینتی
 // می‌رفت که وجود ندارد و همیشه ۴۰۴ می‌گرفت، یعنی حذف هیچ‌وقت انجام نمی‌شد.
 // معادل واقعی، بایگانی کردن است (وضعیت ۴۱۸۴).
-$r=bslArchiveProduct($tk,$vid,$productId);
+/* v10.52 (۶۶): بایگانیِ دستی گام‌به‌گام — اول فقط-وضعیت (همان
+   کارِ سریعِ قدیمی)؛ اگر ۴۲۲/۴۰۳/۴۰۴ داد، کلاینت با 'next' خودکار
+   گامِ بعد (پیلودِ کامل، بعد archive) را در درخواستِ تازه می‌زند. */
+$_via=($_GET['via']??'');
+$_via=in_array($_via,['simple','full','archive'],true)?$_via:'simple';
+$r=bslSetProductStatus($tk,$vid,$productId,4184,$_via);
 if($r['ok']||$r['code']===204||$r['code']===200){
 echo json_encode(['ok'=>true,'archived'=>true,'msg'=>'محصول #'.$productId.' بایگانی شد (باسلام حذف همیشگی ندارد)'],JSON_UNESCAPED_UNICODE);
 }else{
 /* v10.49 (۶۳): خطای گویا — ۴۲۲ یعنی «پارامتر نامعتبر»؛ جزئیاتِ دقیق
    (کدام فیلد، چه مقبول است) را از بدنه بیرون بکشیم که کاربر/ما ببیند. */
-echo json_encode(['ok'=>false,'error'=>bslApiError($r,'بایگانی ناموفق','products/'.$productId)],JSON_UNESCAPED_UNICODE);
+$_resp=['ok'=>false,'error'=>bslApiError($r,'بایگانی ناموفق','products/'.$productId)];
+if(!empty($r['next']))$_resp['next']=$r['next'];
+echo json_encode($_resp,JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -49857,6 +49916,23 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.52', t:'⚡ بایگانی/تغییرِ وضعیت گام‌به‌گام — خداحافظی با ۵۰', items:[
+    '❌ <b>مشکل:</b> نسخهٔ ۱۰.۵۱ سه روشِ بایگانی (فقط-وضعیت، پیلودِ کامل،',
+    '   اندپوینتِ archive) را در <b>یک</b> درخواست پشتِ‌سرِ هم می‌زد — تا ۸',
+    '   درخواستِ باسلام + خواندنِ محصول. روی هاستِ شما کلِ زنجیره از پنجرهٔ',
+    '   مهلتِ HTTP بیرون می‌خورد و به‌جای خطای باسلام، خطای ۵۰۲ (Gateway',
+    '   Error) می‌آمد.',
+    '✅ <b>چه شد:</b> حالا هر <b>گام</b> در یک درخواستِ کوتاهِ جدا اجرا',
+    '   می‌شود (حداکثر ۲ تا ۴ درخواستِ باسلام، بدون تکرارِ تلاشِ شبکه):',
+    '   گامِ ۱ فقط-وضعیت (همان کارِ سریعِ قدیمی) → اگر نبرد، رابطِ مرورگر',
+    '   <b>خودکار</b> گامِ ۲ (پیلودِ کامل) و بعد گامِ ۳ (archive) را در',
+    '   درخواستِ تازه می‌زند — بدون هیچ کلیکِ اضافی از سمتِ شما. کارگرِ',
+    '   سرورسایدِ «حذفِ تکراری» هم مثلِ قبل هر سه گام را یکجا می‌زند',
+    '   (آنجا پنجرهٔ HTTP محدودیت نیست).',
+    '🛠 اگر باز هم ۴۲۲ دیدید، پیامِ خطا همان جزئیاتِ دقیقِ باسلام + فهرستِ',
+    '   روش‌های امتحان‌شده را دارد — متنِ آن را بفرستید تا نصبِ شما را',
+    '   دقیق تنظیم کنیم.',
+  ]},
   {v:'10.51', t:'🔧 پسوندِ کهنهٔ صفِ ارسال + بایگانیِ چندروشهِ باسلام', items:[
     '❌ <b>مشکل ۱ (ارسال با پسوندِ قبلی):</b> تنظیماتِ هر ارسال (از جملهٔ',
     '   پسوندِ عنوان) در لحظهٔ صف‌سازی روی خودِ ردیفِ صف ذخیره می‌شود و یک',
@@ -62851,21 +62927,28 @@ function bslBatchStatusModal(ids,targetStatus,actionLabel){
             return;
         }
         const pid=ids[idx];idx++;
-        const url=targetStatus===-1?'?bsl_delete_product=1&product_id='+pid:'?bsl_change_status=1&product_id='+pid+'&status='+targetStatus;
-        fetch(url).then(r=>r.json()).then(d=>{
+        const urlBase=targetStatus===-1?'?bsl_delete_product=1&product_id='+pid:'?bsl_change_status=1&product_id='+pid+'&status='+targetStatus;
+        // v10.52 (۶۶): هر گام در یک درخواستِ کوتاه جدا — اگر روشِ فعلی
+        // نبرد، سرور 'next' را می‌فرستد و ما خودکار گامِ بعد را می‌زنیم
+        // (زنجیرهٔ بلندِ v10.51 در یک درخواست، ۵۰۲ می‌گرفت).
+        const tryStep=(via)=>fetch(urlBase+(via?'&via='+via:'')).then(r=>r.json()).then(d=>{
             if(d&&d.ok){
                 done++;
                 addRow('<span style="color:#4ade80">\u2705 #'+pid+' \u2014 '+esc(d.msg)+'</span>');
+                setTimeout(processNext,600);
+            }else if(d&&d.next){
+                tryStep(d.next);
             }else{
                 fail++;
                 addRow('<span style="color:#f87171">\u274C #'+pid+' \u2014 '+(d?.error||'\u062E\u0637\u0627')+'</span>');
+                setTimeout(processNext,600);
             }
-            setTimeout(processNext,600);
         }).catch(()=>{
             fail++;
             addRow('<span style="color:#f87171">\u274C #'+pid+' \u2014 \u062E\u0637\u0627 \u0634\u0628\u06A9\u0647</span>');
             setTimeout(processNext,600);
         });
+        tryStep('');
     }
     processNext();
 }
