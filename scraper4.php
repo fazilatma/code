@@ -272,8 +272,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.58';
-const APP_VERSION_DATE = '1405/06/06';
+const APP_VERSION = '10.59';
+const APP_VERSION_DATE = '1405/06/07';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -23752,6 +23752,19 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۷۳ (v10.59) ==== */
+    $add('10.59', 'نسخهٔ ۱۰.۵۹',
+         str_contains($selfSrc, "const APP_VERSION = '10.59';"));
+    $add('10.59', 'بازسازیِ خودکارِ صفِ ارسال از تبِ باز (poll)',
+         (strpos($selfSrc, 'function sendAutoRecover(string $which): ?array {') !== false
+          && strpos($selfSrc, "\$_recB = sendAutoRecover('bsl');") !== false
+          && strpos($selfSrc, "\$_recW = sendAutoRecover('woo');") !== false
+          && strpos($selfSrc, 'if(d.recovered)') !== false
+          && strpos($selfSrc, 'send_autorecover_state.json') !== false));
+    $add('10.59', 'ردیفِ تمام‌شدهٔ بسته‌نشده در وضعیتِ صف فوراً بسته می‌شود',
+         (strpos($selfSrc, "queueStallCheck('bsl', max(120, (int)(\$stB['stall_after'] ?? 300)));") !== false
+          && strpos($selfSrc, "queueStallCheck('woo', max(120, (int)(\$stW['stall_after'] ?? 300)));") !== false));
+
     /* ==== ۷۲ (v10.58) ==== */
     $add('10.58', 'نسخهٔ ۱۰.۵۸',
          str_contains($selfSrc, "const APP_VERSION = '10.58';"));
@@ -29997,6 +30010,50 @@ function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = 
     return $chk;
 }
 
+/**
+ * v10.59 (۷۳): بازسازیِ خودکارِ صفِ ارسال — از همان تبِ بازِ مرورگر.
+ *
+ * گزارشِ کاربر: «ارسال‌ها بعد از ارسالِ آخرین محصول فریز می‌مانند و
+ * وظیفه را تمام نمی‌کنند؛ همچنان در حالِ فعالیت دیده می‌شوند و گیر
+ * می‌کنند، مگر دستی دکمهٔ توقف را بزنیم.»
+ *
+ * ریشه: وِرکرِ ارسال وقتی توسط هاست کشته می‌شود (همان هاستی که پردژهٔ
+ * پس‌زمینه را می‌کُشد — v10.49/10.50/10.58) ردیفِ صف را «running» جا
+ * می‌گذارد. تنها راه‌هایِ بازیابی، تیکِ کران (نگهبان + پمپ) و دکمه‌های
+ * دستی بودند؛ و روی هاستی که کرانش اصلاً به آدرس نمی‌رسد، هیچ‌کدام
+ * اتفاق نمی‌افتاد. دکمهٔ توقف «حل» به نظر می‌رسید فقط چون خودش مستقیم
+ * وضعیت را روی «failed» می‌نشانَد.
+ *
+ * حالا: تبِ ارسال هر ۲ ثانیه poll_bsl/poll_woo را می‌زند — همین پویینگ
+ * موتورِ بازیابی می‌شود. اگر صف گیر کرده باشد (ردیفِ در حالِ اجرای
+ * بی‌حرکت، یا ردیفِ منتظرِ بی‌پردازنده)، پردازنده با همان چک‌پوینتِ
+ * v10.56 از جایی که مانده بود دوباره راه می‌افتد. دو محافظ:
+ *   ۱. کول‌داونِ ۱۲۰ ثانیه‌ای — پویینگِ ۲ ثانیه‌ای هرگز در چرخهٔ
+ *      تکراریِ راه‌اندازی نیفتد (اگر پردازندهٔ تازه واقعاً زنده باشد،
+ *      قفلِ flock هم نگهبان را «شغول» می‌بیند و اصلاً stalled نمی‌شود).
+ *   ۲. هر کاری که queueStallCheck/queueStallRecover می‌کنند همان
+ *      مکانیزمِ آزموده‌شدهٔ نگهبانِ کران است — منطقِ تازه‌ای اضافه نشده.
+ */
+function sendAutoRecover(string $which): ?array {
+    try {
+        $cnA  = loadConnections();
+        $stallA = max(120, (int)($cnA['stall_after'] ?? 300));
+        $chkA = queueStallCheck($which, $stallA);
+        if (empty($chkA['stalled'])) return null;
+        $nowA = time();
+        $stFileA = __DIR__ . '/send_autorecover_state.json';
+        $sdA = json_decode((string)@file_get_contents($stFileA), true);
+        $sdA = is_array($sdA) ? $sdA : [];
+        if ($nowA - (int)($sdA[$which] ?? 0) < 120) return null;   // کول‌داون
+        $resA = queueStallRecover($which, $stallA, false, 2000);
+        $sdA[$which] = $nowA;
+        @file_put_contents($stFileA, json_encode($sdA, JSON_UNESCAPED_UNICODE), LOCK_EX);
+        return $resA;
+    } catch (Throwable $eA) {
+        return null;   // بازسازی هرگز نباید خودِ پویینگ را خراب کند
+    }
+}
+
 /* =====================================================================
  *  v10.50 (۶۴): ارسالِ همگام‌سازیِ دستی، کاملاً سرورساید.
  *
@@ -35592,6 +35649,11 @@ foreach ($queue['entries'] as $e) {
 if ($e['status'] === 'waiting') { $hasMore = true; break; }
 }
 $p['has_more'] = $hasMore;
+/* v10.59 (۷۳): پویینگِ تبِ ارسال، موتورِ بازسازیِ صف می‌شود — توضیح کامل
+   در sendAutoRecover(). اگر صف گیر کرده باشد، همین‌جا از چک‌پوینت
+   خودکار ادامه می‌افتد و رابط با recovered=... یک توست نشان می‌دهد. */
+$_recB = sendAutoRecover('bsl');
+if ($_recB !== null) $p['recovered'] = $_recB;
 echo json_encode($p, JSON_UNESCAPED_UNICODE);
 exit;
 }
@@ -35623,6 +35685,9 @@ $hasMore=false;
 foreach($queue['entries'] as $e){if($e['status']==='waiting'){$hasMore=true;break;}}
 $p['has_more']=$hasMore;
 $p['queue_count']=count($queue['entries']);
+/* v10.59 (۷۳): همان موتورِ بازسازی برای صفِ ووکامرس (sendAutoRecover). */
+$_recW = sendAutoRecover('woo');
+if ($_recW !== null) $p['recovered'] = $_recW;
 echo json_encode($p, JSON_UNESCAPED_UNICODE);
 exit;
 }
@@ -35639,6 +35704,8 @@ function wooWriteQueue(array $queue): void {
 
 if(isset($_GET['woo_queue_status'])){
 header('Content-Type: application/json; charset=UTF-8');
+/* v10.59 (۷۳): همان بستنِ خودکارِ ردیفِ تمام‌شدهٔ بسته‌نشده برای ووکامرس. */
+try { $stW = loadConnections(); queueStallCheck('woo', max(120, (int)($stW['stall_after'] ?? 300))); } catch (Throwable $eW) {}
 $queue=wooReadQueue();
 $progress=readProgress(WOO_PROGRESS_FILE);
 foreach($queue['entries'] as &$e){
@@ -36879,6 +36946,11 @@ function wooQueueProductsFile(string $queueId): string {
 
 if(isset($_GET['bsl_queue_status'])){
 header('Content-Type: application/json; charset=UTF-8');
+/* v10.59 (۷۳): ردیفِ تمام‌شدهٔ بسته‌نشده — وِرکر کشته شده و «current» به
+   «total» رسیده (یا progress کامل است) ولی ردیف هنوز «running» است.
+   queueStallCheck دقیقاً همین ردیف را فوراً «done» می‌کند؛ پس قبل از
+   رندرِ رابط، یک بار بچکش تا کاربر دیگر وظیفهٔ تمام‌شدهٔ «فعال» نبیند. */
+try { $stB = loadConnections(); queueStallCheck('bsl', max(120, (int)($stB['stall_after'] ?? 300))); } catch (Throwable $eB) {}
 $queue=bslReadQueue();
 
 $progress=readProgress(BSL_PROGRESS_FILE);
@@ -50799,6 +50871,10 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.59', t:'🚑 بازسازیِ خودکارِ ارسالِ گیرکرده + بستنِ خودکارِ وظیفهٔ تمام‌شده', items:[
+    '🧊 <b>رفعِ «ارسال بعد از آخرین محصول فریز می‌ماند»:</b> وقتی وِرکرِ ارسال توسط هاست کشته می‌شد، ردیف تا ابد «در حال ارسال» می‌ماند و فقط دکمهٔ توقف آن را (و هم به اشتباه) می‌بست. حالا ردیفی که کارش تمام شده ولی بسته نشده — آخرین محصول فرستاده شده، «current» به «total» رسیده — به‌محضِ اولینِ بازدیدِ رابط (هر ۲ ثانیه) خودکار «تمام شد» علامت می‌خورد.',
+    '🔁 <b>بازسازیِ خودکارِ بدونِ وابستگیِ به کران:</b> پویینگِ تبِ ارسال (هر ۲ ثانیه) حالا موتورِ بازیابیِ صف است: اگر صف گیر کرده باشد — ردیفِ در حالِ اجرای بی‌حرکت یا ردیفِ منتظرِ بی‌پردازنده — پردازنده خودکار از چک‌پوینت دوباره راه می‌افتد؛ حتی اگر کرانِ هاست اصلاً کار نکند. کول‌داونِ ۱۲۰ ثانیه‌ای و قفلِ flock جلوی تکرار و تداخل را می‌گیرند.',
+    '📢 رابط با توستِ «⚠️ ارسال گیر کرده بود — خودکار ادامه داده شد» شما را از هر بازیابی باخبر می‌کند.'],},
   {v:'10.58', t:'🩺 دکترِ همگام‌سازی + رفعِ «همگام‌سازی اصلاً کار نمی‌کند»', items:[
     '🔗 <b>ترتیبِ تازهٔ کران:</b> حلقهٔ همگام‌سازی — یعنی استخراجی که <b>کارت به صفِ استخراج می‌نشیند</b> — حالا <b>اولِ</b> هر تیک اجرا می‌شود؛ پمپِ ارسال (انتظارِ تا ۱۲۰ ثانیه) و بکاپِ خودکار (git push، چند دقیقه) به <b>بعد</b> از حلقه جابجا شدند. قبلاً روی هاستی که پردژهٔ پس‌زمینه را می‌کُشد، پردژه پیش از رسیدن به استخراج می‌مرد و هیچ‌وقت کارتی به صف نمی‌آمد.',
     '💀 <b>بستنِ خودکارِ اجرایِ نیمه‌کاره:</b> اجرایِ دستیِ کشته‌شدهٔ هاست دیگر تا ابد «در حال اجرا» نمی‌ماند؛ بعد از آستانهٔ بی‌حرکتی، اندپوینتِ وضعیت خودش را با پیامِ روشن می‌بندد و دکمه بلافاصله دوباره کار می‌کند.',
@@ -60097,6 +60173,8 @@ let wooLastCardCount=0,wooLastUpdateTime=0,wooLastLogCount=0,wooResumeCount=0;
 function pollBslProgress() {
     fetch('?poll_bsl=1').then(r=>r.json()).then(d=>{
         if(!d) {setTimeout(pollBslProgress,2000);return;}
+        /* v10.59 (۷۳): صف گیرکرده خودکار ادامه داده شد — به کاربر خبر بده. */
+        if(d.recovered){showToast('⚠️ ارسال گیر کرده بود — خودکار از جایی که مانده بود ادامه داده شد', true);try{tmPulse();}catch(e){}}
         console.log('[BSL poll] running='+d.running+' done='+d.done+' paused='+d.paused+' total='+d.total+' sent='+d.sent+' current='+d.current+' started_at='+d.started_at);
         const running = d.running || false;
         const done = d.done || false;
@@ -60460,6 +60538,8 @@ queueWooSend(ps);
 function pollWooProgress(){
     fetch('?poll_woo=1').then(r=>r.json()).then(d=>{
         if(!d){setTimeout(pollWooProgress,2000);return;}
+        /* v10.59 (۷۳): صف گیرکرده خودکار ادامه داده شد — به کاربر خبر بده. */
+        if(d.recovered){showToast('⚠️ ارسال گیر کرده بود — خودکار از جایی که مانده بود ادامه داده شد', true);}
         const running=d.running||false;
         const done=d.done||false;
         const total=d.total||0;
