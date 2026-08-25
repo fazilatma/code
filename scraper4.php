@@ -267,8 +267,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.44';
-const APP_VERSION_DATE = '1405/06/03';
+const APP_VERSION = '10.45';
+const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -15774,15 +15774,21 @@ if (isset($_GET['notif_health'])) {
     /* ۲) پیش‌نیازهای اعلانِ باسلام (سفارش/چت/محصول).
        v10.22 (۳۵الف): این‌ها فقط اعلان‌های باسلام را محدود می‌کنند؛
        پینگِ دوره‌ای دیگر به آن‌ها وابسته نیست، پس نبودشان «مشکل» شمرده
-       نمی‌شود مگر کاربر واقعاً اعلانِ باسلام را روشن کرده باشد. */
-    $why = notifPrereq($cnH);
-    $wantsBsl = !empty($cnH['notif_events']['order_new']) || !empty($cnH['notif_events']['order_status'])
-             || !empty($cnH['notif_events']['chat_msg'])  || !empty($cnH['notif_events']['product_status'])
-             || !empty($cnH['notif_events']['product_new']);
-    $add('prereq', $why === null || !$wantsBsl,
-         $why === null ? 'پیش‌نیازها کامل است'
-                       : ($wantsBsl ? ('اعلان‌های باسلام کار نمی‌کنند — ' . $why)
-                                    : ('اعلانِ باسلام خاموش است (' . $why . ') — پینگِ دوره‌ای مستقل کار می‌کند)')));
+       نمی‌شود مگر کاربر واقعاً اعلانِ باسلام را روشن کرده باشد.
+       v10.45 (۵۹): پیش‌نیاز دیگر «کامل‌بودنِ غرفهٔ پیش‌فرض» نیست، بلکه
+       «حداقل یک غرفه با توکن» است — بررسی‌ها حالا غرفه‌به‌غرفه و با
+       توکنِ خودِ هرکدام انجام می‌شوند. */
+    $neH = $cnH['notif_events'] ?? [];
+    $shopsH = array_values(array_filter(bslAllShops($cnH), fn($s) => trim((string)($s['token'] ?? '')) !== ''));
+    $wantsBsl = notifEventOn($neH, 'order_new') || notifEventOn($neH, 'order_status')
+             || notifEventOn($neH, 'chat_msg')  || notifEventOn($neH, 'product_status')
+             || notifEventOn($neH, 'product_new');
+    $shopsOk = $shopsH !== [];
+    $add('prereq', $shopsOk || !$wantsBsl,
+         $shopsOk ? (count($shopsH) . ' غرفه با توکن در دسترس است'
+                    . (count($shopsH) > 1 ? ' — اعلان‌ها برای همهٔ غرفه‌هاست' : ''))
+                  : ($wantsBsl ? 'اعلان‌های باسلام کار نمی‌کنند — هیچ غرفه‌ای با توکن تنظیم نشده'
+                               : 'اعلانِ باسلام خاموش است — پینگِ دوره‌ای مستقل کار می‌کند'));
 
     // ۳) تیکِ پینگ روشن است؟
     $pingOn = !empty($cnH['notif_events']['cron_ping']);
@@ -15825,6 +15831,20 @@ if (isset($_GET['notif_health'])) {
                        : ($lockStuck ? ('قفلِ جامانده از ' . (int)round($lockAgeH / 60) . ' دقیقه پیش — اجراها رد می‌شوند')
                                      : ('قفلِ فعال، سنِ ' . $lockAgeH . ' ثانیه')),
          ['age_sec' => $lockAgeH]);
+
+    /* ۸) v10.45 (۵۹): آخرین اجرای کران خطای اعلان داشته؟
+       خطاها در cron_last_run.json می‌نشینند و در پینگِ بعدی هم
+       اعلام می‌شوند؛ اینجا دلیلِ «سکوت» را مستقیم نشان می‌دهیم. */
+    $lastNotifErr = null;
+    if (is_file($doneF)) {
+        $_lr = json_decode((string)@file_get_contents($doneF), true);
+        if (is_array($_lr) && is_array($_lr['notifications']['errors'] ?? null) && $_lr['notifications']['errors']) {
+            $lastNotifErr = implode('؛ ', array_slice($_lr['notifications']['errors'], 0, 2));
+        }
+    }
+    $add('notif_errors', $lastNotifErr === null,
+         $lastNotifErr === null ? 'خطای اعلان در آخرین اجرا: نیست'
+                                : 'خطای اعلان در آخرین اجرا: ' . $lastNotifErr);
 
     $out['healthy'] = empty($out['problems']);
     echo json_encode($out, JSON_UNESCAPED_UNICODE);
@@ -23199,6 +23219,68 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۵۹ (v10.45) ==== */
+
+    $add('10.45', 'نبودِ کلیدِ رویداد یعنی روشن — همان چیزی که رابط نشان می‌دهد',
+         function_exists('notifEventOn')
+      && notifEventOn([], 'chat_msg') === true
+      && notifEventOn(['chat_msg' => 0], 'chat_msg') === false
+      && notifEventOn(['chat_msg' => 1], 'chat_msg') === true
+      && notifEventOn([], 'cron_ping') === false
+      && notifEventOn(['cron_ping' => 1], 'cron_ping') === true);
+
+    $add('10.45', 'فهرستِ غرفه‌ها (پیش‌فرض + اضافی) برای بررسی‌ها در دسترس است',
+         (function () {
+             $cn = ['basalam' => ['token' => 'T1', 'vendor_id' => 11, 'shop_name' => 'اصلی',
+                    'vendors' => [['token' => 'T2', 'vendor_id' => 22, 'shop_name' => 'دومی']]]];
+             $shops = bslAllShops($cn);
+             return count($shops) === 2
+                 && !empty($shops[0]['is_default'])
+                 && (int)($shops[1]['vendor_id'] ?? 0) === 22
+                 && (string)($shops[1]['token'] ?? '') === 'T2';
+         })());
+
+    $add('10.45', 'هر سه بررسی همهٔ غرفه‌ها را با توکنِ خودشان می‌گیرند',
+         (preg_match('~function notifCheckOrders\(array \$cn.{0,1200}?bslAllShops\(\$cn\)~su', $selfSrc) === 1
+          && preg_match('~function notifCheckChats\(array \$cn.{0,1200}?bslAllShops\(\$cn\)~su', $selfSrc) === 1
+          && preg_match('~function notifCheckProducts\(array \$cn.{0,1200}?bslAllShops\(\$cn\)~su', $selfSrc) === 1
+          && preg_match('~function notifCheckChats\(array \$cn.{0,1600}?\$tk = trim\(\(string\)\$sh\[\'token\'\]\);~su', $selfSrc) === 1));
+
+    $add('10.45', 'وضعیتِ هر غرفه جداست — شناسهٔ تکراری دو غرفه قاطی نمی‌شود',
+         strpos($selfSrc, "'chat:' . \$vid . ':'") !== false
+      && strpos($selfSrc, "'order:' . \$vid . ':'") !== false
+      && strpos($selfSrc, "'prod:' . \$vid . ':'") !== false
+      && strpos($selfSrc, "'last_chat_check:' . \$vid") !== false
+      && strpos($selfSrc, "'last_order_check:' . \$vid") !== false
+      && strpos($selfSrc, "'last_product_check:' . \$vid") !== false);
+
+    $add('10.45', 'اولین مشاهدهٔ هر غرفه خاموش است — سیلِ اعلانِ قدیمی نمی‌آید',
+         substr_count($selfSrc, 'v10.45 (۵۹): اولین م' . 'شاهدهٔ این غرفه خاموش است') >= 3
+      && strpos($selfSrc, "'new_shop' => true") !== false);
+
+    $add('10.45', 'امضای گفتگو وقتی شناسهٔ پیام نبود، از متن می‌سازد',
+         strpos($selfSrc, "\$sig = \$lastId > 0 ? (string)\$lastId") !== false
+      && strpos($selfSrc, "'t' . substr(md5((string)\$nc['text']), 0, 10)") !== false
+      && strpos($selfSrc, "empty(\$st['chat_sig2'])") !== false);
+
+    $add('10.45', 'خطای اعلان دیگر بی‌صدا دور ریخته نمی‌شود',
+         preg_match('~function bslCheckNotifications\(array \$cn\).{0,3000}?\$out\[.errors.\] = array_values\(array_unique\(\$errors\)\);~su', $selfSrc) === 1);
+
+    $add('10.45', 'پینگ، خطای اعلانِ همان اجرا را هم اعلام می‌کند',
+         strpos($selfSrc, "\$_neErr = \$results['notifications']['errors'] ?? null;") !== false
+      && strpos($selfSrc, "\\n⚠️ اعلان‌ها: ") !== false);
+
+    $add('10.45', 'سلامتِ اعلان‌ها، خطای آخرین اجرا را هم می‌گوید',
+         strpos($selfSrc, "\$add('notif_errors',") !== false
+      && strpos($selfSrc, "'notifications']['errors'] ?? null") !== false);
+
+    $add('10.45', 'رابطِ کاربری، کلیدِ خاموشِ صریح را خاموش نشان می‌دهد',
+         strpos($selfSrc, "const neOn=k=>ne[k]===undefined?true:!!ne[k];") !== false
+      && strpos($selfSrc, "checked=neOn('chat_msg');") !== false);
+
+    $add('10.45', 'ورودیِ CHANGELOG برای 10.45 ثبت شده و نسخهٔ برنامه عقب‌تر نیست',
+         strpos($selfSrc, "{v:'10.45',") !== false
+      && version_compare(APP_VERSION, '10.45', '>='));
 
     $add('10.23', 'دکمهٔ تکراری‌های باسلام در تبِ ارسال هم هست',
          strpos($selfSrc, 'function toggleBslTools(){') !== false
@@ -26084,7 +26166,9 @@ if (isset($_GET['selftest'])) {
     $add('9.02', 'محصولی که هم گالری دارد هم فیلدها دوباره باز نمی‌شود',
          strpos($selfSrc, 'if($_galDone&&!$_field' . 'Missing){$_alreadyDone++;continue;}') !== false);
     $add('9.02', 'گزارش گام جزئیات تعداد واقعی را می‌گوید',
-         strpos($selfSrc, "'nothing_to_" . "do'") !== false
+         /* v10.45: نشانِ قدیمی «nothing_to_do» بود؛ نامِ واقعیِ علامت «هیچ
+            چیزی برای باز کردن نبود» در کد «nothing_selected» است. */
+         strpos($selfSrc, "'nothing_" . "selected'") !== false
          && strpos($selfSrc, "\$pResult['detail_pages']") !== false);
 
     /* ---------- v9.01: کران سه گام جدا — فهرست، جزئیات، ارسال ---------- */
@@ -27496,6 +27580,24 @@ function notifHead(string $why, string $base, int $n = 0): string {
     return $base === '' ? $tag : $tag . ' — ' . $base;
 }
 
+/* =====================================================================
+ *  v10.45 (۵۹): یک منبعِ حق برای «این رویداد روشن است؟»
+ *
+ *  تا اینجا رابطِ کاربری نبودِ کلید را «روشن» نشان می‌داد
+ *  (checked = ne.X !== false) ولی سرور آن را «خاموش» می‌شمرد
+ *  (!empty(...)). یعنی تیک روشن بود و هیچ رویدادی ارسال نمی‌شد —
+ *  دقیقاً همان «اعلان‌ها نمی‌آیند» که دلیلش هیچ‌جا دیده نمی‌شد.
+ *  حالا دو طرف روی یک توافق‌اند: نبودِ کلید = روشن (همان چیزی که
+ *  رابط پیش‌فرض نشان می‌دهد)، روشنِ صریح = روشن، خاموشِ صریح = خاموش.
+ *  تنها استثنای cron_ping است که در هر دو طرف پیش‌فرضِ خاموش دارد
+ *  (وگرنه بدون فاصلهٔ throttle روزی ۲۸ پیام می‌شد).
+ * ===================================================================== */
+function notifEventOn(array $ne, string $key): bool {
+    if ($key === 'cron_ping') return !empty($ne['cron_ping']);
+    if (!array_key_exists($key, $ne)) return true;
+    return !empty($ne[$key]);
+}
+
 /** ارسال یک پیام به همهٔ پیام‌رسان‌های فعال */
 function notifSend(array $cn, string $msg): array {
     $out = [];
@@ -27603,6 +27705,15 @@ function notifCronPing(array $cn, array $results, bool $force = false): array {
          . $incomplete
          . ($last > 0 ? "\nفاصله از پینگ قبلی: " . $sinceTxt : '')
          . ($force ? "\n(پینگ آزمایشی)" : '');
+
+    /* v10.45 (۵۹): رویدادها سکوت کرد، دلیلش در همین پینگ باشد.
+       اگر بررسی‌های اعلان در این اجرا خطا داشتند (توکن منقضی، بدون
+       اسکوپ، ...)، کاربر فقط پینگ را می‌بیند و بقیه را می‌شمارد —
+       حالا خطا را هم با خودش می‌آورد. */
+    $_neErr = $results['notifications']['errors'] ?? null;
+    if (is_array($_neErr) && $_neErr) {
+        $msg .= "\n⚠️ اعلان‌ها: " . mb_substr(implode('؛ ', array_slice(array_unique($_neErr), 0, 2)), 0, 180);
+    }
 
     $delivery = notifSend($cn, $msg);
     /* v10.22 (۳۵ب): پنجرهٔ throttle فقط وقتی مصرف می‌شود که پیام واقعاً
@@ -28327,189 +28438,379 @@ function arMsg(array $r): string {
 }
 
 /**
- * بررسی سفارش‌های جدید.
+ * بررسی سفارش‌های جدید یا تغییر‌یافته.
  * $test=true یعنی حالت آزمایشی: وضعیت ذخیره نمی‌شود تا اجرای بعدی هم
  * همان نتیجه را بدهد، و اگر چیزی نبود یک پیام نمونه فرستاده می‌شود.
+ *
+ * v10.45 (۵۹): حالا <b>همهٔ غرفه‌ها</b> را می‌گیرد، نه فقط پیش‌فرض.
+ * هر غرفه با <b>توکنِ خودِ خودش</b> و برای <b>vendor_idِ خودش</b>
+ * پرس‌وجو می‌شود. شناسهٔ ردیف‌های وضعیت هم با vendor_id نام‌گذاری شده
+ * تا شناسهٔ تکراری در دو غرفه (مثلاً سفارش #۵ در هر دو) قاطی نشود.
+ * اولین بازدید از هر غرفه <b>خاموش</b> است: وگرنه افزودنِ غرفهٔ دوم،
+ * ده موردِ قدیمی را یک‌جا «تازه» می‌دید و ده پیام پشت سر هم می‌فرستاد.
  */
 function notifCheckOrders(array $cn, bool $test = false, bool $send = true): array {
-    $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
-    $st = notifLoadState(); $since = (int)($st['last_order_check'] ?? 0);
-    // v8.31: مسیر درست طبق مستندات رسمی — سفارش‌های غرفه‌دار
-    $r = bslReqRead($tk, 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=10');
-    if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
-            'error' => bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read')];
+    $shops = array_values(array_filter(bslAllShops($cn),
+        fn($s) => trim((string)($s['token'] ?? '')) !== ''));
+    if (!$shops) return ['ok' => false, 'found' => 0, 'total_seen' => 0, 'shops' => [],
+            'sent' => [], 'sample' => '',
+            'errors' => ['تنظیمات باسلام ناقص است (توکن یا غرفه)']];
+    $st = notifLoadState(); $now = time(); $cfg = notifRemindCfg($cn);
+    $multi = count($shops) > 1;
+    $found = 0; $reminded = 0; $totalSeen = 0; $sentTo = []; $samples = [];
+    $shopRows = []; $errors = []; $testFound = 0;
 
-    $rows = $r['body']['data'] ?? [];
-    $now = time(); $cfg = notifRemindCfg($cn);
+    foreach ($shops as $sh) {
+        $tk = trim((string)$sh['token']); $vid = (int)$sh['vendor_id'];
+        $isDef = !empty($sh['is_default']); $name = (string)$sh['shop_name'];
+        // v8.31: مسیر درست طبق مستندات رسمی — سفارش‌های غرفه‌دار
+        $r = bslReqRead($tk, 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=10');
+        if (!$r['ok']) {
+            /* v10.45 (۵۹): خطا دیگر دور ریخته نمی‌شود؛ در 'errors' برمی‌گردد
+               تا در گزارشِ آخرین اجرا و پینگِ بعدی دیده شود. */
+            $err = bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read');
+            $errors[] = $name . ': ' . $err;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => false, 'error' => $err];
+            continue;
+        }
 
-    // v8.38: امضا = وضعیت سفارش. «بی‌جواب» یعنی هنوز ارسال نشده،
-    // پس تا وقتی غرفه‌دار کاری نکند یادآوری می‌شود.
-    $norm = [];
-    foreach ($rows as $o) {
-        if (!is_array($o)) continue;
-        $np = bslNormalizeParcel($o);
-        if ($np['parcel_id'] <= 0) continue;
-        $norm[] = ['np' => $np, 'key' => 'order:' . $np['parcel_id'],
-                   'sig' => (string)$np['status_id'],
-                   'ts' => strtotime($np['created_at'] ?: 'now') ?: $now,
-                   'pending' => !empty($np['unsent'])];
+        $rows = $r['body']['data'] ?? [];
+        $totalSeen += count($rows);
+
+        // v8.38: امضا = وضعیت سفارش. «بی‌جواب» یعنی هنوز ارسال نشده،
+        // پس تا وقتی غرفه‌دار کاری نکند یادآوری می‌شود.
+        $norm = [];
+        foreach ($rows as $o) {
+            if (!is_array($o)) continue;
+            $np = bslNormalizeParcel($o);
+            if ($np['parcel_id'] <= 0) continue;
+            $norm[] = ['np' => $np, 'key' => ($isDef ? 'order:' : 'order:' . $vid . ':') . $np['parcel_id'],
+                       'sig' => (string)$np['status_id'],
+                       'ts' => strtotime($np['created_at'] ?: 'now') ?: $now,
+                       'pending' => !empty($np['unsent'])];
+        }
+
+        /* نشانِ «آخرین بررسی» جدا برای هر غرفه؛ پیش‌فرض همان کلیدِ
+           قدیمی تا وضعیتِ قبلیِ کاربر به‌هم نریزد. */
+        $wmKey = $isDef ? 'last_order_check' : 'last_order_check:' . $vid;
+        $since = (int)($st[$wmKey] ?? 0);
+
+        if ($test) {
+            $testFound += count($norm);
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => count($norm)];
+            if ($norm) $samples[] = bslParcelMsg($norm[0]['np'], '🛒 سفارش جدید باسلام');
+            continue;   // حالت تست: وضعیت ذخیره نمی‌شود
+        }
+
+        if ($since <= 0) {
+            /* v10.45 (۵۹): اولین مشاهدهٔ این غرفه خاموش است (توضیح در بالای تابع). */
+            if (!isset($st['items']) || !is_array($st['items'])) $st['items'] = [];
+            foreach ($norm as $f) {
+                $st['items'][$f['key']] = ['sig' => $f['sig'], 'first' => (int)$f['ts'],
+                    'last' => $now, 'n' => 1, 'pending' => !empty($f['pending'])];
+            }
+            $st[$wmKey] = $now;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => 0, 'new_shop' => true];
+            continue;
+        }
+
+        notifSeedIfNeeded($st, $isDef ? 'orders' : 'orders:' . $vid, $norm, $since);
+        $suffix = $multi ? ' — ' . $name : '';
+        $shopFound = 0; $shopRemind = 0;
+        foreach ($norm as $f) {
+            $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
+            if ($why === '') continue;
+            $n = (int)($st['items'][$f['key']]['n'] ?? 1);
+            $base = $why === 'changed' ? '📦 تغییر وضعیت سفارش باسلام' : '🛒 سفارش جدید باسلام';
+            $msg = bslParcelMsg($f['np'], notifHead($why, $base . $suffix, $n - 1));
+            $samples[] = $msg;
+            if ($why === 'remind') { $shopRemind++; $reminded++; } else { $shopFound++; $found++; }
+            if ($send) $sentTo = notifSend($cn, $msg);
+        }
+        $st[$wmKey] = $now;
+        $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                       'seen' => count($rows), 'found' => $shopFound, 'reminded' => $shopRemind];
     }
 
     if ($test) {
-        $sentTo = [];
-        $sample = $norm ? bslParcelMsg($norm[0]['np'], '🛒 سفارش جدید باسلام') : '';
         if ($send) {
-            $msg = $sample ? ("🧪 تست سفارش‌ها\n" . $sample) : "🧪 تست سفارش‌ها\nهیچ سفارشی در ۱۰ مورد اخیر نبود، اما ارتباط برقرار است ✅";
-            $sentTo = notifSend($cn, $msg);
+            $lines = ['🧪 تست سفارش‌ها — ' . count($shops) . ' غرفه'];
+            foreach ($shopRows as $sr) {
+                if (empty($sr['ok'])) { $lines[] = '• ' . $sr['shop_name'] . ' — ✗ ' . $sr['error']; continue; }
+                $lines[] = '• ' . $sr['shop_name'] . ' — ' . (int)$sr['seen']
+                         . ' مورد اخیر · ' . (int)$sr['found'] . ' مورد قابل اعلان';
+            }
+            if ($samples) { $lines[] = '━━━ نمونه:'; $lines[] = mb_substr((string)$samples[0], 0, 400); }
+            $sentTo = notifSend($cn, implode("\n", $lines));
         }
-        return ['ok' => true, 'found' => count($norm), 'total_seen' => count($rows),
-                'sent' => $sentTo, 'sample' => $sample];
+        return ['ok' => true, 'found' => $testFound, 'total_seen' => $totalSeen,
+                'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+                'shops' => $shopRows, 'errors' => $errors];
     }
 
-    notifSeedIfNeeded($st, 'orders', $norm, $since);
-
-    $found = 0; $reminded = 0; $sentTo = []; $samples = [];
-    foreach ($norm as $f) {
-        $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
-        if ($why === '') continue;
-        $n = (int)($st['items'][$f['key']]['n'] ?? 1);
-        $base = $why === 'changed' ? '📦 تغییر وضعیت سفارش باسلام' : '🛒 سفارش جدید باسلام';
-        $msg = bslParcelMsg($f['np'], notifHead($why, $base, $n - 1));
-        $samples[] = $msg;
-        if ($why === 'remind') $reminded++; else $found++;
-        if ($send) $sentTo = notifSend($cn, $msg);
-    }
-    $st['last_order_check'] = $now;
     notifPrune($st, $now);
     notifSaveState($st);
     return ['ok' => true, 'found' => $found, 'reminded' => $reminded,
-            'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+            'total_seen' => $totalSeen, 'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+            'shops' => $shopRows, 'errors' => $errors];
 }
 
-/** بررسی پیام‌های جدید مشتری */
+/**
+ * بررسی پیام‌های جدید مشتری.
+ * v10.45 (۵۹): همهٔ غرفه‌ها با توکنِ خودشان (توضیح در بالای تابعِ سفارش‌ها).
+ *
+ * نکتهٔ مهمِ امضا: امضای هر گفتگو شناسهٔ آخرین پیام است. اگر باسلام برای
+ * آخرین پیام <b>شناسه برنگرداند</b>، امضا برای همیشه «0» می‌ماند و هیچ
+ * پیامِ تازه‌ای «تغییر» نمی‌سازد — یعنی اعلانِ پیامِ مشتری برای همیشه
+ * خاموش می‌ماند در حالی‌که همه‌چیز دیگر سالم به نظر می‌رسد. حالا در آن
+ * صورت امضا از <b>متنِ خودِ پیام</b> ساخته می‌شود (پیام تازه = متن تازه).
+ * یک‌بار هم که امضای جدید ساخته شد، تفاوت با امضای قدیمی <b>بی‌صدا</b>
+ * جبران می‌شود تا بلافاصله بعد از به‌روزرسانی سیلی پیام «تغییر وضعیت»
+ * فرستاده نشود.
+ */
 function notifCheckChats(array $cn, bool $test = false, bool $send = true): array {
-    $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
-    $st = notifLoadState(); $since = (int)($st['last_chat_check'] ?? 0);
-    // v8.31: مسیر درست — گفتگوها زیر ریشه است، نه زیر vendors
-    $r = bslReqRead($tk, 'chats?limit=10&order_by=updated_at');
-    if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
-            'error' => bslApiError($r, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')];
+    $shops = array_values(array_filter(bslAllShops($cn),
+        fn($s) => trim((string)($s['token'] ?? '')) !== ''));
+    if (!$shops) return ['ok' => false, 'found' => 0, 'total_seen' => 0, 'shops' => [],
+            'sent' => [], 'sample' => '',
+            'errors' => ['تنظیمات باسلام ناقص است (توکن یا غرفه)']];
+    $st = notifLoadState(); $now = time(); $cfg = notifRemindCfg($cn);
+    $multi = count($shops) > 1;
+    $found = 0; $reminded = 0; $totalSeen = 0; $sentTo = []; $samples = [];
+    $shopRows = []; $errors = []; $testFound = 0;
 
-    // v8.31: پاسخ chats به شکل data.chats است، نه data
-    $rows = $r['body']['data']['chats'] ?? ($r['body']['data'] ?? []);
-    $now = time(); $cfg = notifRemindCfg($cn);
+    foreach ($shops as $sh) {
+        $tk = trim((string)$sh['token']); $vid = (int)$sh['vendor_id'];
+        $isDef = !empty($sh['is_default']); $name = (string)$sh['shop_name'];
+        // v8.31: مسیر درست — گفتگوها زیر ریشه است، نه زیر vendors
+        $r = bslReqRead($tk, 'chats?limit=10&order_by=updated_at');
+        if (!$r['ok']) {
+            /* v10.45 (۵۹): خطا دیگر دور ریخته نمی‌شود (توضیح در تابع سفارش‌ها). */
+            $err = bslApiError($r, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read');
+            $errors[] = $name . ': ' . $err;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => false, 'error' => $err];
+            continue;
+        }
 
-    // v8.38: امضای هر گفتگو = شناسهٔ آخرین پیام + تعداد خوانده‌نشده.
-    // «بی‌جواب» یعنی هنوز پیام خوانده‌نشده دارد.
-    $norm = [];
-    foreach ($rows as $c) {
-        if (!is_array($c)) continue;
-        $nc = bslNormalizeChat($c);
-        if ($nc['chat_id'] <= 0) continue;
-        $lastId = (int)($c['last_message']['id'] ?? 0);
-        // v8.38: امضا فقط شناسهٔ آخرین پیام است. اگر تعداد خوانده‌نشده را هم
-        // در امضا بیاوریم، جواب دادن مشتری (۲ → ۰) مثل «رویداد تازه» دیده
-        // می‌شود و یک اعلان بی‌مورد می‌فرستد.
-        $norm[] = ['nc' => $nc, 'key' => 'chat:' . $nc['chat_id'],
-                   'sig' => (string)$lastId,
-                   'ts' => strtotime($nc['updated_at'] ?: 'now') ?: $now,
-                   'pending' => $nc['unseen'] > 0];
+        // v8.31: پاسخ chats به شکل data.chats است، نه data
+        $rows = $r['body']['data']['chats'] ?? ($r['body']['data'] ?? []);
+        $totalSeen += count($rows);
+
+        $norm = [];
+        foreach ($rows as $c) {
+            if (!is_array($c)) continue;
+            $nc = bslNormalizeChat($c);
+            if ($nc['chat_id'] <= 0) continue;
+            $lastId = (int)($c['last_message']['id'] ?? 0);
+            // v8.38: امضا فقط شناسهٔ آخرین پیام است. اگر تعداد خوانده‌نشده را هم
+            // در امضا بیاوریم، جواب دادن مشتری (۲ → ۰) مثل «رویداد تازه» دیده
+            // می‌شود و یک اعلان بی‌مورد می‌فرستد.
+            // v10.45 (۵۹): اگر شناسهٔ آخرین پیام نبود، امضا از متنِ پیام ساخته می‌شود.
+            $sig = $lastId > 0 ? (string)$lastId
+                               : ('t' . substr(md5((string)$nc['text']), 0, 10));
+            $norm[] = ['nc' => $nc, 'key' => ($isDef ? 'chat:' : 'chat:' . $vid . ':') . $nc['chat_id'],
+                       'sig' => $sig,
+                       'ts' => strtotime($nc['updated_at'] ?: 'now') ?: $now,
+                       'pending' => $nc['unseen'] > 0];
+        }
+
+        $wmKey = $isDef ? 'last_chat_check' : 'last_chat_check:' . $vid;
+        $since = (int)($st[$wmKey] ?? 0);
+
+        if ($test) {
+            $testFound += count($norm);
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => count($norm)];
+            if ($norm) {
+                $f = $norm[0];
+                $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, max(1, $f['nc']['unseen']))) : [];
+                $samples[] = bslChatMsg($f['nc'], '💬 پیام مشتری باسلام', $body);
+            }
+            continue;   // حالت تست: وضعیت ذخیره نمی‌شود
+        }
+
+        if ($since <= 0) {
+            /* v10.45 (۵۹): اولین مشاهدهٔ این غرفه خاموش است (توضیح در تابع سفارش‌ها). */
+            if (!isset($st['items']) || !is_array($st['items'])) $st['items'] = [];
+            foreach ($norm as $f) {
+                $st['items'][$f['key']] = ['sig' => $f['sig'], 'first' => (int)$f['ts'],
+                    'last' => $now, 'n' => 1, 'pending' => !empty($f['pending'])];
+            }
+            $st[$wmKey] = $now;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => 0, 'new_shop' => true];
+            continue;
+        }
+
+        /* v10.45 (۵۹): مهاجرتِ یک‌بارهٔ امضا — اگر برای ردیفی که قبلاً
+           ثبت شده امضای جدید شکلِ دیگری گرفت، امضا را بی‌صدا به‌روز می‌کنیم
+           تا یک سیلِ «تغییر وضعیت» نشود. */
+        if (empty($st['chat_sig2']) && isset($st['items']) && is_array($st['items'])) {
+            foreach ($norm as $f) {
+                $pk = $st['items'][$f['key']] ?? null;
+                if (is_array($pk) && (string)($pk['sig'] ?? '') !== $f['sig']) {
+                    $pk['sig'] = $f['sig'];
+                    $st['items'][$f['key']] = $pk;
+                }
+            }
+            $st['chat_sig2'] = $now;
+        }
+
+        notifSeedIfNeeded($st, $isDef ? 'chats' : 'chats:' . $vid, $norm, $since);
+        $suffix = $multi ? ' — ' . $name : '';
+        $shopFound = 0; $shopRemind = 0;
+        foreach ($norm as $f) {
+            $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
+            if ($why === '') continue;
+            $n = (int)($st['items'][$f['key']]['n'] ?? 1);
+            $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, max(1, $f['nc']['unseen']))) : [];
+            $msg = bslChatMsg($f['nc'], notifHead($why, '💬 پیام مشتری باسلام' . $suffix, $n - 1), $body);
+            $samples[] = $msg;
+            if ($why === 'remind') { $shopRemind++; $reminded++; } else { $shopFound++; $found++; }
+            if ($send) $sentTo = notifSend($cn, $msg);
+        }
+        $st[$wmKey] = $now;
+        $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                       'seen' => count($rows), 'found' => $shopFound, 'reminded' => $shopRemind];
     }
 
     if ($test) {
-        $sentTo = []; $sample = '';
-        if ($norm) {
-            $f = $norm[0];
-            $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, $f['nc']['unseen'])) : [];
-            $sample = bslChatMsg($f['nc'], '💬 پیام مشتری باسلام', $body);
-        }
         if ($send) {
-            $msg = $sample ? ("🧪 تست پیام‌ها\n" . $sample) : "🧪 تست پیام‌ها\nهیچ پیامی در ۱۰ مورد اخیر نبود، اما ارتباط برقرار است ✅";
-            $sentTo = notifSend($cn, $msg);
+            $lines = ['🧪 تست پیام‌ها — ' . count($shops) . ' غرفه'];
+            foreach ($shopRows as $sr) {
+                if (empty($sr['ok'])) { $lines[] = '• ' . $sr['shop_name'] . ' — ✗ ' . $sr['error']; continue; }
+                $lines[] = '• ' . $sr['shop_name'] . ' — ' . (int)$sr['seen']
+                         . ' گفتگوی اخیر · ' . (int)$sr['found'] . ' مورد قابل اعلان';
+            }
+            if ($samples) { $lines[] = '━━━ نمونه:'; $lines[] = mb_substr((string)$samples[0], 0, 400); }
+            $sentTo = notifSend($cn, implode("\n", $lines));
         }
-        return ['ok' => true, 'found' => count($norm), 'total_seen' => count($rows),
-                'sent' => $sentTo, 'sample' => $sample];
+        return ['ok' => true, 'found' => $testFound, 'total_seen' => $totalSeen,
+                'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+                'shops' => $shopRows, 'errors' => $errors];
     }
 
-    notifSeedIfNeeded($st, 'chats', $norm, $since);
-
-    $found = 0; $reminded = 0; $sentTo = []; $samples = [];
-    foreach ($norm as $f) {
-        $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
-        if ($why === '') continue;
-        $n = (int)($st['items'][$f['key']]['n'] ?? 1);
-        $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, $f['nc']['unseen'])) : [];
-        $msg = bslChatMsg($f['nc'], notifHead($why, '💬 پیام مشتری باسلام', $n - 1), $body);
-        $samples[] = $msg;
-        if ($why === 'remind') $reminded++; else $found++;
-        if ($send) $sentTo = notifSend($cn, $msg);
-    }
-    $st['last_chat_check'] = $now;
     notifPrune($st, $now);
     notifSaveState($st);
     return ['ok' => true, 'found' => $found, 'reminded' => $reminded,
-            'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+            'total_seen' => $totalSeen, 'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+            'shops' => $shopRows, 'errors' => $errors];
 }
 
-/** بررسی تغییر وضعیت یا افزوده شدن محصول */
+/**
+ * بررسی تغییر وضعیت یا افزوده شدن محصول.
+ * v10.45 (۵۹): همهٔ غرفه‌ها با توکنِ خودشان (توضیح در بالای تابعِ سفارش‌ها).
+ */
 function notifCheckProducts(array $cn, bool $test = false, bool $send = true): array {
-    $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
-    $st = notifLoadState(); $since = (int)($st['last_product_check'] ?? 0);
-    $r = bslReqRead($tk, 'vendors/' . $vid . '/products?per_page=10&statuses=2976&statuses=3790&statuses=3567');
-    if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
-            'error' => bslApiError($r, 'دریافت محصولات ناموفق', 'vendors/{id}/products', 'vendor.product.read')];
+    $shops = array_values(array_filter(bslAllShops($cn),
+        fn($s) => trim((string)($s['token'] ?? '')) !== ''));
+    if (!$shops) return ['ok' => false, 'found' => 0, 'total_seen' => 0, 'shops' => [],
+            'sent' => [], 'sample' => '',
+            'errors' => ['تنظیمات باسلام ناقص است (توکن یا غرفه)']];
+    $st = notifLoadState(); $now = time(); $cfg = notifRemindCfg($cn);
+    $multi = count($shops) > 1;
+    $found = 0; $reminded = 0; $totalSeen = 0; $sentTo = []; $samples = [];
+    $shopRows = []; $errors = []; $testFound = 0;
 
-    $rows = $r['body']['data'] ?? [];
-    $now = time(); $cfg = notifRemindCfg($cn);
+    foreach ($shops as $sh) {
+        $tk = trim((string)$sh['token']); $vid = (int)$sh['vendor_id'];
+        $isDef = !empty($sh['is_default']); $name = (string)$sh['shop_name'];
+        $r = bslReqRead($tk, 'vendors/' . $vid . '/products?per_page=10&statuses=2976&statuses=3790&statuses=3567');
+        if (!$r['ok']) {
+            /* v10.45 (۵۹): خطا دیگر دور ریخته نمی‌شود (توضیح در تابع سفارش‌ها). */
+            $err = bslApiError($r, 'دریافت محصولات ناموفق', 'vendors/{id}/products', 'vendor.product.read');
+            $errors[] = $name . ': ' . $err;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => false, 'error' => $err];
+            continue;
+        }
 
-    // v8.38: امضا = وضعیت محصول. «تأیید نشده» نیاز به اقدام دارد، پس
-    // تا وقتی درست نشود یادآوری می‌شود؛ محصول فعال یادآوری ندارد.
-    $norm = [];
-    foreach ($rows as $p) {
-        if (!is_array($p)) continue;
-        $pid = (int)($p['id'] ?? 0);
-        if ($pid <= 0) continue;
-        $ps = $p['status'] ?? [];
-        $val = is_array($ps) ? (int)($ps['value'] ?? 0) : (int)$ps;
-        $title = mb_substr((string)($p['title'] ?? ($p['name'] ?? 'محصول')), 0, 60);
-        if ($val === 3567)      { $txt = "📋 تغییر وضعیت محصول باسلام\nمحصول: " . $title . "\nوضعیت جدید: تأیید نشده ❌"; $pend = true; }
-        elseif ($val === 4184)  { $txt = "📋 تغییر وضعیت محصول باسلام\nمحصول: " . $title . "\nوضعیت جدید: بایگانی 🗑️"; $pend = false; }
-        elseif ($val === 2976)  { $txt = "➕ محصول جدید باسلام\nمحصول: " . $title . "\nوضعیت: فعال ✅"; $pend = false; }
-        else continue;
-        $norm[] = ['key' => 'prod:' . $pid, 'sig' => (string)$val, 'text' => $txt,
-                   'ts' => strtotime($p['created_at'] ?? 'now') ?: $now, 'pending' => $pend];
+        $rows = $r['body']['data'] ?? [];
+        $totalSeen += count($rows);
+
+        // v8.38: امضا = وضعیت محصول. «تأیید نشده» نیاز به اقدام دارد، پس
+        // تا وقتی درست نشود یادآوری می‌شود؛ محصول فعال یادآوری ندارد.
+        $norm = [];
+        $sfx = $multi ? ' — ' . $name : '';
+        foreach ($rows as $p) {
+            if (!is_array($p)) continue;
+            $pid = (int)($p['id'] ?? 0);
+            if ($pid <= 0) continue;
+            $ps = $p['status'] ?? [];
+            $val = is_array($ps) ? (int)($ps['value'] ?? 0) : (int)$ps;
+            $title = mb_substr((string)($p['title'] ?? ($p['name'] ?? 'محصول')), 0, 60);
+            if ($val === 3567)      { $txt = "📋 تغییر وضعیت محصول باسلام" . $sfx . "\nمحصول: " . $title . "\nوضعیت جدید: تأیید نشده ❌"; $pend = true; }
+            elseif ($val === 4184)  { $txt = "📋 تغییر وضعیت محصول باسلام" . $sfx . "\nمحصول: " . $title . "\nوضعیت جدید: بایگانی 🗑️"; $pend = false; }
+            elseif ($val === 2976)  { $txt = "➕ محصول جدید باسلام" . $sfx . "\nمحصول: " . $title . "\nوضعیت: فعال ✅"; $pend = false; }
+            else continue;
+            $norm[] = ['key' => ($isDef ? 'prod:' : 'prod:' . $vid . ':') . $pid, 'sig' => (string)$val, 'text' => $txt,
+                       'ts' => strtotime($p['created_at'] ?? 'now') ?: $now, 'pending' => $pend];
+        }
+
+        $wmKey = $isDef ? 'last_product_check' : 'last_product_check:' . $vid;
+        $since = (int)($st[$wmKey] ?? 0);
+
+        if ($test) {
+            $testFound += count($norm);
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => count($norm)];
+            if ($norm) $samples[] = $norm[0]['text'];
+            continue;   // حالت تست: وضعیت ذخیره نمی‌شود
+        }
+
+        if ($since <= 0) {
+            /* v10.45 (۵۹): اولین مشاهدهٔ این غرفه خاموش است (توضیح در تابع سفارش‌ها). */
+            if (!isset($st['items']) || !is_array($st['items'])) $st['items'] = [];
+            foreach ($norm as $f) {
+                $st['items'][$f['key']] = ['sig' => $f['sig'], 'first' => (int)$f['ts'],
+                    'last' => $now, 'n' => 1, 'pending' => !empty($f['pending'])];
+            }
+            $st[$wmKey] = $now;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => 0, 'new_shop' => true];
+            continue;
+        }
+
+        notifSeedIfNeeded($st, $isDef ? 'products' : 'products:' . $vid, $norm, $since);
+        $shopFound = 0; $shopRemind = 0;
+        foreach ($norm as $f) {
+            $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
+            if ($why === '') continue;
+            $n = (int)($st['items'][$f['key']]['n'] ?? 1);
+            $msg = $why === 'remind'
+                 ? notifHead($why, '', $n - 1) . "\n" . $f['text']
+                 : $f['text'];
+            $samples[] = $msg;
+            if ($why === 'remind') { $shopRemind++; $reminded++; } else { $shopFound++; $found++; }
+            if ($send) $sentTo = notifSend($cn, $msg);
+        }
+        $st[$wmKey] = $now;
+        $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                       'seen' => count($rows), 'found' => $shopFound, 'reminded' => $shopRemind];
     }
 
     if ($test) {
-        $sentTo = [];
-        $sample = $norm ? $norm[0]['text'] : '';
         if ($send) {
-            $msg = $sample ? ("🧪 تست محصولات\n" . $sample) : "🧪 تست محصولات\nتغییری در ۱۰ محصول اخیر نبود، اما ارتباط برقرار است ✅";
-            $sentTo = notifSend($cn, $msg);
+            $lines = ['🧪 تست محصولات — ' . count($shops) . ' غرفه'];
+            foreach ($shopRows as $sr) {
+                if (empty($sr['ok'])) { $lines[] = '• ' . $sr['shop_name'] . ' — ✗ ' . $sr['error']; continue; }
+                $lines[] = '• ' . $sr['shop_name'] . ' — ' . (int)$sr['seen']
+                         . ' محصول اخیر · ' . (int)$sr['found'] . ' مورد قابل اعلان';
+            }
+            if ($samples) { $lines[] = '━━━ نمونه:'; $lines[] = mb_substr((string)$samples[0], 0, 400); }
+            $sentTo = notifSend($cn, implode("\n", $lines));
         }
-        return ['ok' => true, 'found' => count($norm), 'total_seen' => count($rows),
-                'sent' => $sentTo, 'sample' => $sample];
+        return ['ok' => true, 'found' => $testFound, 'total_seen' => $totalSeen,
+                'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+                'shops' => $shopRows, 'errors' => $errors];
     }
 
-    notifSeedIfNeeded($st, 'products', $norm, $since);
-
-    $found = 0; $reminded = 0; $sentTo = []; $samples = [];
-    foreach ($norm as $f) {
-        $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
-        if ($why === '') continue;
-        $n = (int)($st['items'][$f['key']]['n'] ?? 1);
-        $msg = $why === 'remind'
-             ? notifHead($why, '', $n - 1) . "\n" . $f['text']
-             : $f['text'];
-        $samples[] = $msg;
-        if ($why === 'remind') $reminded++; else $found++;
-        if ($send) $sentTo = notifSend($cn, $msg);
-    }
-    $st['last_product_check'] = $now;
     notifPrune($st, $now);
     notifSaveState($st);
     return ['ok' => true, 'found' => $found, 'reminded' => $reminded,
-            'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+            'total_seen' => $totalSeen, 'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+            'shops' => $shopRows, 'errors' => $errors];
 }
 
 /* =====================================================================
@@ -30814,7 +31115,8 @@ function syncReportEmit(array $cn, array $rep): array {
 
 /** اعلان نتیجهٔ بازنشستگی به پیام‌رسان‌ها */
 function notifRetire(array $cn, array $res, string $profileName = ''): array {
-    if (empty($cn['notif_events']['retire'])) return ['ok' => true, 'skipped' => 'disabled'];
+    /* v10.45 (۵۹): نبودِ کلید = روشن — همان چیزی که رابط نشان می‌دهد. */
+    if (!notifEventOn($cn['notif_events'] ?? [], 'retire')) return ['ok' => true, 'skipped' => 'disabled'];
     if (notifPrereq($cn) !== null) return ['ok' => false];
     $modeLbl = retireModes()[$res['mode'] ?? 'off'] ?? '';
     if (!empty($res['guard']['blocked'])) {
@@ -30843,8 +31145,9 @@ function notifRetire(array $cn, array $res, string $profileName = ''): array {
  */
 function notifSourceChanges(array $cn, array $res, string $profileName = '', int $sampleLimit = 5): array {
     $ne = $cn['notif_events'] ?? [];
-    $wantPrice = !empty($ne['src_price']);
-    $wantStock = !empty($ne['src_stock']);
+    /* v10.45 (۵۹): نبودِ کلید = روشن — همان چیزی که رابط نشان می‌دهد. */
+    $wantPrice = notifEventOn($ne, 'src_price');
+    $wantStock = notifEventOn($ne, 'src_stock');
     if (!$wantPrice && !$wantStock) return ['ok' => true, 'skipped' => 'disabled'];
     if (notifPrereq($cn) !== null) return ['ok' => false, 'error' => notifPrereq($cn)];
 
@@ -30905,7 +31208,8 @@ function notifSourceChanges(array $cn, array $res, string $profileName = '', int
  * خراب شود باید خبردار شوید، نه اینکه روزها بی‌صدا بماند.
  */
 function notifRunFailure(array $cn, string $stage, string $profileName, string $error): array {
-    if (empty($cn['notif_events']['run_fail'])) return ['ok' => true, 'skipped' => 'disabled'];
+    /* v10.45 (۵۹): پیش‌فرض روشن — سکوت در شکست بدترین حالت است. */
+    if (!notifEventOn($cn['notif_events'] ?? [], 'run_fail')) return ['ok' => true, 'skipped' => 'disabled'];
     if (notifPrereq($cn) !== null) return ['ok' => false];
     $msg = "⚠️ خطا در اجرای خودکار\nمرحله: {$stage}"
          . ($profileName !== '' ? "\nپروفایل: {$profileName}" : '')
@@ -30916,24 +31220,45 @@ function notifRunFailure(array $cn, string $stage, string $profileName, string $
 /**
  * اجرای همهٔ بررسی‌های فعال — همان چیزی که کران‌جاب صدا می‌زند.
  * ترتیب عمدی: سفارش (پول)، پیام (مشتری منتظر است)، محصول (اطلاعی).
+ *
+ * v10.45 (۵۹): سه تغییر:
+ *  ۱) دیگر یک پیش‌نیازِ سراسری (غرفهٔ پیش‌فرض) کلِ بلوک را خاموش
+ *     نمی‌کند: هر غرفه‌ای که توکن دارد، با توکنِ خودش چک می‌شود.
+ *  ۲) خطاهای هر غرفه دیگر دور ریخته نمی‌شوند؛ در 'errors' برمی‌گردند
+ *     تا در گزارشِ آخرین اجرا و پینگِ بعدی دیده شوند.
+ *  ۳) روشن/خاموشِ هر رویداد با notifEventOn سنجیده می‌شود: نبودِ کلید
+ *     یعنی روشن — دقیقاً همان چیزی که رابطِ کاربری نشان می‌داد.
  */
 function bslCheckNotifications(array $cn): array {
-    $why = notifPrereq($cn);
-    if ($why !== null) return [];
     $ne = $cn['notif_events'] ?? [];
+    $hasMsgr = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
+            || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '');
+    if (!$hasMsgr) return [];   // فرستنده‌ای نیست که رویداد به آن برود
+    $shops = array_values(array_filter(bslAllShops($cn),
+        fn($s) => trim((string)($s['token'] ?? '')) !== ''));
+    if (!$shops) return ['skipped' => 'no_basalam_shops'];
+
     $out = [];
-    if (!empty($ne['order_new']) || !empty($ne['order_status'])) {
+    $errors = [];
+    if (notifEventOn($ne, 'order_new') || notifEventOn($ne, 'order_status')) {
         $r = notifCheckOrders($cn);
-        if (!empty($r['found'])) $out['orders'] = $r['found'];
+        if (!empty($r['found']) || !empty($r['reminded']))
+            $out['orders'] = (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
-    if (!empty($ne['chat_msg'])) {
+    if (notifEventOn($ne, 'chat_msg')) {
         $r = notifCheckChats($cn);
-        if (!empty($r['found'])) $out['chats'] = $r['found'];
+        if (!empty($r['found']) || !empty($r['reminded']))
+            $out['chats'] = (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
-    if (!empty($ne['product_status']) || !empty($ne['product_new'])) {
+    if (notifEventOn($ne, 'product_status') || notifEventOn($ne, 'product_new')) {
         $r = notifCheckProducts($cn);
-        if (!empty($r['found'])) $out['products'] = $r['found'];
+        if (!empty($r['found']) || !empty($r['reminded']))
+            $out['products'] = (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
+    if ($errors) $out['errors'] = array_values(array_unique($errors));
     return $out;
 }
 
@@ -30942,7 +31267,19 @@ if (isset($_GET['notif_test'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $kind = $_GET['kind'] ?? '';
     $cn = loadConnections();
-    $why = notifPrereq($cn);
+    /* v10.45 (۵۹): پینگ و تستِ تغییراتِ مبدأ به باسلام کاری ندارند
+       (فقط پیام‌رسان لازم است — همان قاعدهٔ v10.22). بقیهٔ تست‌ها فقط
+       به «حداقل یک غرفه با توکن» نیاز دارند، نه به کامل‌بودنِ
+       غرفهٔ پیش‌فرض. */
+    $hasMsgrN = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
+             || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '');
+    $why = null;
+    if (!$hasMsgrN) {
+        $why = 'هیچ پیام‌رسانی تنظیم نشده (بله یا روبیکا)';
+    } elseif ($kind !== 'ping' && $kind !== 'source'
+             && !array_values(array_filter(bslAllShops($cn), fn($s) => trim((string)($s['token'] ?? '')) !== ''))) {
+        $why = 'تنظیمات باسلام ناقص است (توکن غرفه)';
+    }
     if ($why !== null) { echo json_encode(['ok' => false, 'error' => $why], JSON_UNESCAPED_UNICODE); exit; }
 
     if ($kind === 'orders')        $r = notifCheckOrders($cn, true);
@@ -48910,6 +49247,33 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.45', t:'💬 اعلان‌های رویداد همهٔ غرفه‌ها را می‌بیند — و اگر سکوت کرد، دلیلش را می‌گوید', items:[
+    '❌ <b>مشکل:</b> اعلانِ پیام‌های مشتری (و سفارش/محصول) نمی‌آمد، در حالی‌که',
+    '   دکمهٔ پینگ و «ارسال چندگانه» بدون مشکل پیام را به پیام‌رسان می‌زدند.',
+    '🔍 <b>چرا؟</b> سه ایراد، و هر سه ساکت:',
+    '   • بررسی‌های خودکار فقط <b>غرفهٔ پیش‌فرض</b> را می‌گشتند؛ پیامِ مشتریِ',
+    '     غرفه‌های دیگر هرگز دیده نمی‌شد. (همان تله‌ای که نسخهٔ ۱۰.۴۲ برای',
+    '     «تکراری‌ها» گرفت.)',
+    '   • اگر کلیدِ رویدادی در تنظیمات نبود، رابط «روشن» نشان می‌داد ولی سرور',
+    '     «خاموش» فرض می‌کرد — و حتی اگر صریح خاموش شده بود، تیک باز هم',
+    '     «روشن» به نظر می‌رسید. هیچ خبری هم نمی‌داد.',
+    '   • اگر باسلام خطا می‌داد (توکن منقضی، بدون اسکوپ، ...)، خطا <b>بی‌صدا',
+    '     دور ریخته</b> می‌شد؛ نه در گزارشِ اجرا، نه در پینگ.',
+    '✅ <b>چه چیزی درست شد:</b>',
+    '   • حالا هر سه بررسی (سفارش، پیام، محصول) <b>همهٔ غرفه‌ها</b> را با توکنِ',
+    '     <b>خودِ همان غرفه</b> می‌گردند؛ در پیام‌ها نامِ غرفه هم هست و',
+    '     وضعیتِ هر غرفه جدا از بقیه نگه داشته می‌شود.',
+    '   • رویدادی که تیکش «روشن» است، واقعاً روشن است: نبودِ کلید = روشن و',
+    '     تیکِ خاموشِ صریح سرانجام واقعاً خاموش به نظر می‌رسد.',
+    '   • اولینِ بازدید از هر غرفه <b>خاموش</b> است: افزودنِ غرفهٔ دوم دیگر ده',
+    '     پیامِ قدیمی را یک‌جا نمی‌فرستد؛ از دورِ بعد تشخیص شروع می‌شود.',
+    '   • اگر باسلام برای آخرین پیام «شناسه» نداد، امضا از متنِ پیام ساخته',
+    '     می‌شود — پیامِ تازه دیگر هرگز گم نمی‌شود.',
+    '   • سکوت دیگر بی‌دلیل نیست: خطاها در <b>گزارشِ آخرین اجرا</b> می‌نشینند،',
+    '     در <b>پینگِ بعدی</b> با ⚠️ اعلام می‌شوند، و در «سلامتِ اعلان‌ها»',
+    '     می‌توانید ببینید دقیقاً چه چیزی گیر است. دکمه‌های «تست» هم حالا',
+    '     <b>غرفه‌به‌غرفه</b> گزارش می‌دهند: کدام وصل است، کدام نه، و چرا.',
+  ]},
   {v:'10.44', t:'🗑 گزارشِ زنده هنگام حذف + جست‌وجویی که واقعاً همهٔ محصولات را می‌گردد', items:[
     '❌ <b>مشکل ۱:</b> دکمهٔ «حذفِ همهٔ موارد نشان‌داده‌شده» باز هم انگار کار',
     '   نمی‌کرد: می‌زدید، یک پیامِ «در حال حذف...» می‌آمد و بعد هیچ — نه پیشرفتی،',
@@ -52026,6 +52390,18 @@ function notifTest(kind){
     let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
     h+='<div style="color:#4ade80;margin-bottom:4px">✓ ارتباط با باسلام برقرار است</div>';
     h+='<div style="color:#94a3b8">بررسی‌شده: '+toFa(d.total_seen||0)+' مورد · یافت‌شده: '+toFa(d.found||0)+'</div>';
+    /* v10.45: گزارشِ غرفه‌به‌غرفه — کدام وصل است، کدام نه، و چرا */
+    if(Array.isArray(d.shops)&&d.shops.length){
+      h+='<div style="margin-top:4px">';
+      d.shops.forEach(s=>{
+        h+='<div style="font-size:10px;color:'+(s.ok?'#94a3b8':'#fca5a5')+';margin-top:2px">'
+          +(s.ok?'✓ ':'✗ ')+esc(s.shop_name||('غرفه '+s.vendor_id))
+          +(s.ok?(' — '+toFa(s.seen||0)+' مورد اخیر · '+toFa(s.found||0)+' قابل اعلان'):(esc(s.error||'')))
+          +(s.new_shop?' (اولین بررسی — بدون اعلان)':'')
+          +'</div>';
+      });
+      h+='</div>';
+    }
     if(chips)h+='<div style="margin-top:4px">ارسال: '+chips+'</div>';
     if(d.sample)h+='<div style="margin-top:6px;color:#cbd5e1;background:#1e293b;padding:6px;border-radius:6px;white-space:pre-wrap;font-size:10.5px">'+esc(d.sample)+'</div>';
     h+='</div>';
@@ -54504,7 +54880,7 @@ if(typeof aiResumeTestModalOnLoad==='function')setTimeout(aiResumeTestModalOnLoa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifSyncReport'))$('notifSyncReport').checked=ne.sync_report!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('autoResume'))$('autoResume').checked=cn.auto_resume!==false;if($('autoResumeMax'))$('autoResumeMax').value=(cn.auto_resume_max||2);if($('bslCatAuto'))$('bslCatAuto').checked=cn.bsl_catalog_auto!==false;if($('bslCatTtl'))$('bslCatTtl').value=(cn.bsl_catalog_ttl_h!==undefined?cn.bsl_catalog_ttl_h:6);if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
+const ne=cn.notif_events||{};/* v10.45: نبودِ کلید = روشن، صریحِ 0 = خاموش — دقیقاً همان قاعدهٔ سروری (notifEventOn). تا حالا 0 هم «روشن» نشان داده می‌شد. */const neOn=k=>ne[k]===undefined?true:!!ne[k];if($('notifOrderNew'))$('notifOrderNew').checked=neOn('order_new');if($('notifOrderStatus'))$('notifOrderStatus').checked=neOn('order_status');if($('notifChatMsg'))$('notifChatMsg').checked=neOn('chat_msg');if($('notifProductStatus'))$('notifProductStatus').checked=neOn('product_status');if($('notifProductNew'))$('notifProductNew').checked=neOn('product_new');if($('notifOrderRefund'))$('notifOrderRefund').checked=neOn('order_refund');if($('notifSrcPrice'))$('notifSrcPrice').checked=neOn('src_price');if($('notifSrcStock'))$('notifSrcStock').checked=neOn('src_stock');if($('notifRunFail'))$('notifRunFail').checked=neOn('run_fail');if($('notifRetire'))$('notifRetire').checked=neOn('retire');if($('notifSyncReport'))$('notifSyncReport').checked=neOn('sync_report');if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('autoResume'))$('autoResume').checked=cn.auto_resume!==false;if($('autoResumeMax'))$('autoResumeMax').value=(cn.auto_resume_max||2);if($('bslCatAuto'))$('bslCatAuto').checked=cn.bsl_catalog_auto!==false;if($('bslCatTtl'))$('bslCatTtl').value=(cn.bsl_catalog_ttl_h!==undefined?cn.bsl_catalog_ttl_h:6);if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
 arApplyCfg(cn.autoreply||{});arLoad();}
 /* v8.87: پیش‌نمایش زندهٔ تعدیل قیمت مقصد.
@@ -60745,12 +61121,19 @@ function renderCronResult(d){
                 if(p.status==='not_due'){eLog.innerHTML+='<div style="color:#64748b;padding:2px 0">⏳ '+esc(p.name||p.key)+' — هنوز نوبت نیست</div>';}
             });
             // v8.29: مرحلهٔ سوم — نتیجهٔ استعلام اعلان‌ها
+            // v10.45: خطاها (errors) و «رد شد» (skipped) هم اینجا دیده می‌شوند
             const nf=d.notifications||{};
-            const nk=Object.keys(nf);
+            const nk=Object.keys(nf).filter(k=>k!=='errors'&&k!=='skipped');
             if(nk.length){
                 const lbl={orders:'🛒 سفارش جدید',chats:'💬 پیام جدید',products:'📋 تغییر محصول'};
                 nk.forEach(k=>{eLog.innerHTML+='<div style="color:#fbbf24;padding:2px 0">'+(lbl[k]||k)+': '+toFa(nf[k])+' مورد — اعلان ارسال شد</div>';});
-            }else{
+            }
+            if(nf.errors&&nf.errors.length){
+                nf.errors.forEach(e=>{eLog.innerHTML+='<div style="color:#f87171;padding:2px 0">⚠️ اعلان: '+esc(e)+'</div>';});
+            }else if(!nk.length&&nf.skipped){
+                eLog.innerHTML+='<div style="color:#64748b;padding:2px 0">🔔 استعلام اعلان‌ها: '+
+                  (nf.skipped==='no_basalam_shops'?'هیچ غرفهٔ باسلامی با توکن تنظیم نشده':esc(nf.skipped))+'</div>';
+            }else if(!nk.length){
                 eLog.innerHTML+='<div style="color:#64748b;padding:2px 0">🔔 استعلام اعلان‌ها: مورد جدیدی نبود</div>';
             }
             eLog.innerHTML+='<div style="color:#22c55e;padding:4px 0;font-weight:bold">✅ کران جاب کامل شد</div>';
