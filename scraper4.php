@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.82';
+const APP_VERSION = '10.83';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24280,6 +24280,15 @@ if (isset($_GET['selftest'])) {
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
 
+    /* ==== ۹۷ (v10.83) ==== */
+    $add('10.83', 'نسخهٔ ۱۰.۸۳',
+         str_contains($selfSrc, "const APP_VERSION = '10.83';"));
+    $add('10.83', '«پاسخ دستی به مشتریان» به‌صورتِ مودال ازِ نوارِ هدر',
+         strpos($selfSrc, 'id="mrModal"') !== false
+          && strpos($selfSrc, 'function mrOpenModal()') !== false
+          && strpos($selfSrc, 'function mrCloseModal()') !== false
+          && strpos($selfSrc, 'onclick="mrOpenModal()"') !== false);
+
     /* ==== ۹۶ (v10.82) ==== */
     $add('10.82', 'نسخهٔ ۱۰.۸۲',
          str_contains($selfSrc, "const APP_VERSION = '10.82';"));
@@ -45032,7 +45041,7 @@ html[data-skin="gloss"] .progress-bar{
 <button class="fullwidth-btn" id="fullBtn" onclick="toggleFullSettings()" title="تمام عرض کردن منو و محتویات آن">⛶</button>
 <button class="tasks-btn" id="tasksBtn" onclick="tmOpen()" title="مدیر وظیفه — کارهای در حال اجرا"><span aria-hidden="true">📋</span><span class="tasks-lbl">مدیر وظیفه</span><span class="tasks-sub" id="tasksSub">کارهای پس‌زمینه</span><span class="tasks-badge" id="tasksBadge">0</span></button>
 <!-- v10.82 (96): چت باسلام — باز کردن مودالِ گفتگوها از نوارِ هدر -->
-<button class="chat-hdr-btn" id="chatHdrBtn" onclick="openChatsModal()" title="چت باسلام — گفتگوها و پیام‌های مشتری"><span aria-hidden="true">💬</span><span class="chat-hdr-lbl">چت باسلام</span></button>
+<button class="chat-hdr-btn" id="chatHdrBtn" onclick="mrOpenModal()" title="پاسخ دستی به مشتریان — اتاقِ چتِ زنده"><span aria-hidden="true">💬</span><span class="chat-hdr-lbl">پاسخ دستی</span></button>
 </div>
 <div class="container">
 <h1><span class="h1-name"><span class="h1-ico">🛒</span> <span class="h1-txt">اسکرپر</span></span>
@@ -46637,6 +46646,14 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 </div>
 </div></div>
+
+<!-- v10.83 (97): مودالِ «پاسخ دستی به مشتریان» — گرهٔ زنده ازِ تنظیمات اینجا می‌آید -->
+<div id="mrModal" class="bsl-modal-overlay" style="display:none" onclick="if(event.target===this)mrCloseModal()">
+<div class="bsl-modal" style="max-width:900px">
+<div class="bsl-modal-head"><h2>💬 پاسخ دستی به مشتریان</h2><button class="btn btn-gray" onclick="mrCloseModal()">✕</button></div>
+<div id="mrModalHost" style="padding:14px;overflow-y:auto"></div>
+</div>
+</div>
 
 <!-- v8.62: گزارش شبانه -->
 <div class="smenu">
@@ -52445,6 +52462,10 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.83', t:'💬 «پاسخ دستی به مشتریان» به‌صورتِ مودال ازِ نوارِ هدر', items:[
+    '💬 <b>دکمهٔ «پاسخ دستی» در نوارِ بالا</b> (کنارِ «مدیرِ وظیفه») حالا خودِ بخشِ «پاسخ دستی به مشتریان» را به‌صورتِ مودال باز می‌کند: اتاقِ چتِ زنده با همهٔ غرفه‌ها، پاسخِ متنی/تصویری و دکمه‌هایِ آماده — بدونِ رفتن به تنظیمات.',
+    '🔧 اتاقِ چت <b>گرهٔ زنده</b> است، نه کپی: وقتی مودال باز است، بخشِ داخلِ تنظیمات جایِ خودش را نگه می‌دارد و برمی‌گردد؛ کارتِ نوتیفِ زندهٔ پیامِ تازه هم اگر لازم بود اتاق را ازِ مودال باز می‌کند.',
+  ]},
   {v:'10.82', t:'💬 دکمهٔ «چت باسلام» در نوارِ هدر + زنجیرهٔ ارسالِ چندمسیره', items:[
     '💬 <b>دکمهٔ تازه در نوارِ بالا</b> (کنارِ «مدیرِ وظیفه»): با یک کلیک مودالِ چتِ باسلام — گفتگوها و پیام‌های مشتری — باز می‌شود؛ همان مودالی که در تبِ استعلام است.',
     '🔧 <b>زنجیرهٔ ارسال هوشمندتر:</b> حالا همهٔ مسیرهایِ غیرمستقیمِ موجود (مسیرِ Push ← عبورِ هوش مصنوعی ← عبورِ مبدأ) به‌ترتیب امتحان می‌شوند تا یک مسیرِ مرده جلویِ مسیرِ زنده را نگیرد؛ شکستِ DoH هم دیگر خاموش نیست و در فهرستِ تلاش‌ها ثبت می‌شود.',
@@ -56641,6 +56662,40 @@ async function mrSend(){
    دیده می‌شود درخواست می‌فرستد (وگرنه بلافاصله برمی‌گردد). */
 setInterval(mrPoll,1000);
 
+/* v10.83 (97): اتاقِ چت درِ مودال — گرهٔ زندهٔ #mrBody جابه‌جا می‌شود
+   (نه کپی): همهٔ JSِ موجود (پُلیینگ، ارسال، تصویر) بدونِ تغییر کار می‌کند. */
+function mrOpenModal(){
+  const modal=$('mrModal'),body=$('mrBody');
+  if(!modal||!body)return;
+  if(body.parentNode.id!=='mrModalHost'){
+    if(!body.__mrPh){
+      const ph=document.createElement('div');
+      ph.id='mrBodyPh';
+      ph.innerHTML='<div style="font-size:10.5px;color:#64748b;padding:8px;line-height:1.8">این بخش الان به‌صورتِ مودال باز است (دکمهٔ 💬 بالایِ صفحه) — برایِ دیدنِ آنِجایی، مودال را ببندید.</div>';
+      body.parentNode.insertBefore(ph,body);
+      body.__mrPh=ph;
+    }
+    const h=$('mrModalHost'); if(h)h.appendChild(body);
+  }
+  body.classList.add('open');
+  clearTimeout(body.__smenuT);
+  setTimeout(()=>{if(body.classList.contains('open'))body.classList.add('smenu-done');},320);
+  modal.style.display='flex';
+  mrLoadChats();
+}
+function mrCloseModal(){
+  const modal=$('mrModal'),body=$('mrBody');
+  if(!modal||!body)return;
+  modal.style.display='none';
+  if(body.parentNode.id==='mrModalHost'){
+    const ph=body.__mrPh;
+    if(ph&&ph.parentNode)ph.parentNode.insertBefore(body,ph);
+    if(ph)ph.innerHTML='';
+    const hdr=body.previousElementSibling;
+    if(hdr&&!hdr.classList.contains('open'))body.classList.remove('open','smenu-done');
+  }
+}
+
 /* =====================================================================
    v10.60 (۷۴): نوتیفیکیشنِ زندهٔ پیام‌های تازهٔ مشتری
    ---------------------------------------------------------------------
@@ -56739,9 +56794,13 @@ function mrNotifReply(n){
       setTimeout(()=>{el.remove();},320);
     }
   }
-  const body=$('mrBody');
-  const hdr=body?body.previousElementSibling:null;
-  if(hdr&&!hdr.classList.contains('open'))toggleSmenu(hdr);
+  /* v10.83 (97): اگر اتاقِ چت جابه‌جا شده باشد (مودال)، ازِ مودال باز شود */
+  if(typeof mrOpenModal==='function'){ mrOpenModal(); }
+  else {
+    const body=$('mrBody');
+    const hdr=body?body.previousElementSibling:null;
+    if(hdr&&!hdr.classList.contains('open'))toggleSmenu(hdr);
+  }
   mrOpenChat(n.chat_id,n.shop||1);
   setTimeout(()=>{const t=$('mrText');if(t){t.focus();t.scrollIntoView({block:'nearest'});}},500);
 }
