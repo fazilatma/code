@@ -272,8 +272,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.61';
-const APP_VERSION_DATE = '1405/06/09';
+const APP_VERSION = '10.62';
+const APP_VERSION_DATE = '1405/06/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -19394,6 +19394,18 @@ if (isset($_GET['bsl_chats'])) {
             $ncMR = bslNormalizeChat($cMR);
             $lmMR = is_array($cMR['last_message'] ?? null) ? $cMR['last_message'] : [];
             if ($ncMR['chat_id'] <= 0) continue;
+            /* v10.62 (۷۶): آدرسِ تصویرِ آخرین پیام (اگر پیام تصویر باشد) —
+               پیش‌نمایش در کارتِ نوتیف و لیستِ گفتگوها. از همهٔ شکل‌هایِ
+               ممکنِ پاسخ برداشته می‌شود (همان الگوی bslChatThread). */
+            $lmImgMR = '';
+            foreach ([$lmMR['attachment']['files'][0]['url'] ?? null,
+                      $lmMR['content']['url'] ?? null,
+                      $lmMR['content']['files'][0]['url'] ?? null,
+                      $lmMR['url'] ?? null,
+                      $lmMR['content']['image'] ?? null,
+                      $lmMR['image'] ?? null] as $uImgMR) {
+                if (is_string($uImgMR) && strncmp($uImgMR, 'http', 4) === 0) { $lmImgMR = $uImgMR; break; }
+            }
             $outShMR[] = [
                 'chat_id'      => $ncMR['chat_id'],
                 'who'          => $ncMR['who'],
@@ -19404,6 +19416,8 @@ if (isset($_GET['bsl_chats'])) {
                 /* v10.60 (۷۴): شناسهٔ آخرین پیام — مبنای کشفِ پیامِ تازهٔ مشتری
                    برای نوتیفیکیشنِ زنده (کارتِ سوایپ‌شونده). */
                 'last_msg_id'  => (int)($lmMR['id'] ?? 0),
+                'last_img'     => $lmImgMR,
+                'last_type'    => (string)($lmMR['message_type'] ?? ''),
                 'shop'         => (int)$shMR['shop'],
                 'shop_name'    => $shMR['name'],
                 'vendor_id'    => (int)$shMR['vendor_id'],
@@ -23832,6 +23846,18 @@ if (isset($_GET['selftest'])) {
     $add('10.44', 'نتایجِ جست‌وجو شناسهٔ تکراری ندارند',
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
+
+    /* ==== ۷۶ (v10.62) ==== */
+    $add('10.62', 'نسخهٔ ۱۰.۶۲',
+         str_contains($selfSrc, "const APP_VERSION = '10.62';"));
+    $add('10.62', 'پاسخِ درِجای از روی کارتِ نوتیف + تصویرِ مشتری با بزرگ‌نمایی',
+         (strpos($selfSrc, "'last_img'     => \$lmImgMR,") !== false
+          && strpos($selfSrc, "'last_type'    => (string)(\$lmMR['message_type']") !== false
+          && strpos($selfSrc, 'function mrLightbox(url){') !== false
+          && strpos($selfSrc, 'function mrNotifOpenReply(n){') !== false
+          && strpos($selfSrc, "fdN.set('text',tN);") !== false
+          && strpos($selfSrc, 'onclick="event.stopPropagation();mrLightbox(this.src)"') !== false
+          && strpos($selfSrc, '@keyframes mrZoomIn') !== false));
 
     /* ==== ۷۵ (v10.61) ==== */
     $add('10.61', 'نسخهٔ ۱۰.۶۱',
@@ -43709,6 +43735,7 @@ html[data-skin="gloss"] .progress-bar{
 /* v10.60 (۷۴): نوتیفِ زندهٔ پیامِ مشتری — ورودِ کارت و نوارِ منقضی‌شدن */
 @keyframes mrNotifIn{from{transform:translateX(-125%);opacity:0}to{transform:translateX(0);opacity:1}}
 @keyframes mrNotifFade{from{width:100%}to{width:0%}}
+@keyframes mrZoomIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
 </style>
 </head>
 <body>
@@ -50989,6 +51016,10 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.62', t:'💬 پاسخ از روی همان نوتیف + نمایشِ تصاویرِ مشتری', items:[
+    '✍️ <b>پاسخِ درِجای:</b> با سوایپِ راست (یا دکمهٔ 💬) تکست‌باکسِ پاسخ همین‌داخلِ کارتِ نوتیف باز می‌شود — با چیپ‌هایِ سریع (👋 سلام / ✅ موجودی / 📮 آدرس) و Enter = ارسال — بدونِ رفتن به اتاقِ چت. اگر کلِ گفتگو را می‌خواهید، «🗨 گفتگوی کامل» همان‌جاست.',
+    '🖼 <b>تصاویرِ مشتری:</b> اگر پیامِ تازه تصویر باشد، پیش‌نمایشِ آن روی کارتِ نوتیف (و در لیستِ گفتگوها با بندانوشِ کوچک) می‌آید — با کلیک، بزرگ‌نماییِ تمام‌صفحه (Lightbox) باز می‌شود (کلیک یا Escape = بستن). تصاویرِ داخلِ اتاقِ چت هم حالا به‌جای باز شدنِ تبِ جدید، همین‌جا بزرگ می‌شوند.',
+    '⚡ بعد از ارسالِ موفق، کارت «✅ پاسخ ارسال شد» می‌گیرد و خودکار بسته می‌شود؛ اتاقِ چت (اگر باز باشد) هم همان لحظه به‌روز می‌شود.'],},
   {v:'10.61', t:'🔌 همگام‌سازیِ دستی دیگر «مرده» نمی‌ماند — اتصالِ مرورگر تا پایان کار باز است', items:[
     '🧠 <b>ریشهٔ «دکمهٔ دستی کارتی به صف نمی‌آورد»:</b> هاست پردژهٔ جداشده (بدون کلاینتِ وصل) را در چند ثانیه می‌کُشد؛ همگام‌سازیِ دستی از خطِ اول اتصال را می‌بست و کار می‌رفت پس‌زمینه — و چون کرانِ هاست هم روزهاست اجرا نمی‌شود، هیچ نجات‌دهنده‌ای نبود. پردژه پیش از رسیدن به حلقهٔ همگام‌سازی می‌مُرد.',
     '🔌 <b>حالا اتصال باز می‌ماند:</b> در همگام‌سازیِ دستی، مرورگر تا پایانِ کار «کلاینتِ زنده» است و کارگر می‌ماند (همان مدلِ پُلِ مرورگر). هر پروفایل، هر صفحه و هر محصولِ جزئیات یک خطِ پیشرفت (ndjson) روی اتصال می‌زند — هم خروجیِ زندهٔ برای سرور، هم ردِ پایِ کار.',
@@ -54915,8 +54946,10 @@ function mrRenderList(chats){
       '<span style="color:'+col+';font-size:9.5px;border:1px solid '+col+'66;border-radius:8px;padding:0 5px" title="'+esc(c.shop_name||'')+'">('+toFa(c.shop||1)+')</span>'+
       (c.unseen>0?'<span style="background:#dc2626;color:#fff;border-radius:9px;font-size:9.5px;padding:0 6px">'+toFa(c.unseen)+'</span>':'')+
       '</span></div>'+
-      '<div style="font-size:10.5px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">'+
-      (c.last_is_mine?'<span style="color:#60a5fa">شما:</span> ':'')+esc(c.text||'—')+'</div>'+
+      '<div style="display:flex;align-items:center;gap:5px;margin-top:2px">'+
+      (c.last_img?'<img src="'+esc(c.last_img)+'" alt="تصویر" onclick="event.stopPropagation();mrLightbox(this.src)" style="width:27px;height:27px;object-fit:cover;border-radius:6px;flex:0 0 auto;cursor:zoom-in;border:1px solid #334155" title="نمایش تصویر"/>':'')+
+      '<span style="font-size:10.5px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1">'+
+      (c.last_is_mine?'<span style="color:#60a5fa">شما:</span> ':'')+esc(c.text||'—')+'</span></div>'+
       '<div style="font-size:9px;color:#475569;margin-top:1px">'+mrRelTime(c.updated_at)+'</div>'+
       '</div>';
   }).join('');
@@ -54957,7 +54990,7 @@ async function mrPollThread(force){
 }
 function mrMsgHtml(m){
   let inner='';
-  if(m.img)inner+='<div style="margin-top:4px"><img src="'+esc(m.img)+'" alt="تصویر" style="max-width:180px;max-height:180px;border-radius:6px;display:block;cursor:pointer" onclick="window.open(this.src)"></div>';
+  if(m.img)inner+='<div style="margin-top:4px"><img src="'+esc(m.img)+'" alt="تصویر" style="max-width:180px;max-height:180px;border-radius:6px;display:block;cursor:zoom-in" title="برای بزرگ‌نمایی کلیک کنید" onclick="event.stopPropagation();mrLightbox(this.src)"></div>';
   if(m.text)inner+='<div>'+esc(m.text)+'</div>';
   else if(!m.img&&m.type&&m.type!=='text')inner+='<span style="color:#64748b">['+esc(m.type)+']</span>';
   const mine=!!m.mine;
@@ -55122,6 +55155,38 @@ function mrNotifReply(n){
   mrOpenChat(n.chat_id,n.shop||1);
   setTimeout(()=>{const t=$('mrText');if(t){t.focus();t.scrollIntoView({block:'nearest'});}},500);
 }
+/* v10.62 (۷۶): بزرگ‌نماییِ تصویر (Lightbox) — کلیک روی تصاویر */
+function mrLightbox(url){
+  if(!url)return;
+  let ov=$('mrLightbox');
+  if(!ov){
+    ov=document.createElement('div');
+    ov.id='mrLightbox';
+    ov.style.cssText='position:fixed;inset:0;z-index:99990;background:rgba(2,6,23,.93);display:flex;align-items:center;justify-content:center;cursor:zoom-out;animation:mrZoomIn .18s ease';
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML='<img src="'+esc(url)+'" alt="تصویر" style="max-width:94%;max-height:94%;border-radius:8px;box-shadow:0 20px 60px rgba(0,0,0,.6)"/>'+
+    '<div style="position:absolute;bottom:14px;left:0;right:0;text-align:center;color:#94a3b8;font-size:10px">کلیک یا Escape برای بستن</div>';
+  const closeOv=()=>{ov.remove();document.removeEventListener('keydown',ov._kd);};
+  ov.onclick=closeOv;
+  ov._kd=e=>{if(e.key==='Escape')closeOv();};
+  document.removeEventListener('keydown',ov._kd);
+  document.addEventListener('keydown',ov._kd);
+}
+/* v10.62 (۷۶): باز کردنِ پاسخِ درِجای درونِ کارت (سوایپِ راست / دکمهٔ 💬) */
+function mrNotifOpenReply(n){
+  const card=n.el;
+  card.style.transition='width .25s ease';
+  card.style.transform='';card.style.opacity='';
+  card.style.width='364px';
+  const foot=card.querySelector('.mrnfoot'); if(foot)foot.style.display='none';
+  const rep=card.querySelector('.mrnreply'); if(rep)rep.style.display='block';
+  if(n.timer){clearTimeout(n.timer);n.timer=null;}
+  const bar=card.querySelector('.mrnbar'); if(bar)bar.style.animationPlayState='paused';
+  card.style.maxHeight='calc(100vh - 90px)';
+  const ta=card.querySelector('.mrnta');
+  if(ta)setTimeout(()=>{ta.focus();},90);
+}
 function mrNotifPush(c){
   let n=MR_NOTIFS.find(x=>x.chat_id===c.chat_id);
   if(n){
@@ -55152,8 +55217,25 @@ function mrNotifPush(c){
       '</div>'+
       '<button class="mrnbtn-close" style="flex:0 0 auto;background:none;border:none;color:#475569;font-size:13px;cursor:pointer;padding:2px 4px" title="بستن">✕</button>'+
     '</div>'+
-    '<div class="mrntext" style="font-size:11.5px;color:#cbd5e1;line-height:1.8;padding:0 12px 8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">'+esc(mrNotifText(c))+'</div>'+
-    '<div style="display:flex;align-items:center;gap:8px;padding:7px 12px;background:#0b122066;border-top:1px solid #1e293b">'+
+    '<div class="mrntext" style="font-size:11.5px;color:#cbd5e1;line-height:1.8;padding:0 12px '+(c.last_img?'4px':'8px')+';overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">'+esc(mrNotifText(c))+'</div>'+
+    (c.last_img?'<div style="padding:0 12px 8px"><img src="'+esc(c.last_img)+'" alt="تصویرِ مشتری" onclick="event.stopPropagation();mrLightbox(this.src)" style="max-width:100%;max-height:120px;border-radius:10px;cursor:zoom-in;border:1px solid #334155" title="برای بزرگ‌نمایی کلیک کنید"></div>':'')+
+    '<div class="mrnreply" style="display:none;padding:8px 12px 10px;background:#0b122055;border-top:1px solid #1e293b">'+
+      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'+
+        '<b style="font-size:10.5px;color:#86efac;flex:1">💬 پاسخ به '+esc(c.who)+'</b>'+
+        '<button class="mrnbtn-full" style="background:none;border:none;color:#60a5fa;font-size:9.5px;cursor:pointer;padding:2px 4px">🗨 گفتگوی کامل</button>'+
+      '</div>'+
+      '<div style="display:flex;gap:5px;margin-bottom:6px;flex-wrap:wrap">'+
+        '<button class="mrnq" data-q="سلام، وقت بخیر. چطور می‌تونم کمکتون کنم؟" style="background:#173254;border:1px solid #33415555;color:#93c5fd;font-size:9px;border-radius:8px;padding:3px 8px;cursor:pointer">👋 سلام</button>'+
+        '<button class="mrnq" data-q="بله، در موجودی هست." style="background:#14532d33;border:1px solid #33415555;color:#86efac;font-size:9px;border-radius:8px;padding:3px 8px;cursor:pointer">✅ موجودی</button>'+
+        '<button class="mrnq" data-q="لطفاً کد پستی و نامِ گیرنده را بفرمایید." style="background:#42200633;border:1px solid #33415555;color:#fbbf24;font-size:9px;border-radius:8px;padding:3px 8px;cursor:pointer">📮 آدرس</button>'+
+      '</div>'+
+      '<div style="display:flex;gap:6px;align-items:flex-end">'+
+        '<textarea class="mrnta" rows="2" placeholder="پاسخ شما… (Enter = ارسال، Shift+Enter = خطِ جدید)" style="flex:1;resize:none;background:#111c31;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:11px;padding:6px 8px;font-family:inherit"></textarea>'+
+        '<button class="mrnbtn-send" style="flex:0 0 auto;background:#059669;border:none;color:#fff;font-size:12px;border-radius:8px;padding:7px 11px;cursor:pointer" title="ارسال پاسخ">📤</button>'+
+      '</div>'+
+      '<div class="mrnerr" style="display:none;color:#fca5a5;font-size:9.5px;margin-top:4px"></div>'+
+    '</div>'+
+    '<div class="mrnfoot" style="display:flex;align-items:center;gap:8px;padding:7px 12px;background:#0b122066;border-top:1px solid #1e293b">'+
       '<button class="mrnbtn-reply" style="flex:0 0 auto;background:#059669;border:none;color:#fff;font-size:10.5px;font-weight:700;border-radius:8px;padding:4px 11px;cursor:pointer">💬 پاسخ</button>'+
       '<span class="mrnhint" style="flex:1;text-align:center;font-size:9px;color:#475569">⬅ بستن · پاسخ ➡</span>'+
     '</div>'+
@@ -55161,9 +55243,45 @@ function mrNotifPush(c){
   host.appendChild(card);
   n={el:card, chat_id:c.chat_id, shop:c.shop||1, text:mrNotifText(c), timer:null};
   n.timer=setTimeout(()=>mrNotifClose(card),MR_NOTIF_TTL);
+  /* v10.62 (۷۶): پاسخِ درِجای — مستقیم از روی همین کارت */
+  const taN=card.querySelector('.mrnta');
+  const sendN=card.querySelector('.mrnbtn-send');
+  const errN=card.querySelector('.mrnerr');
+  card.querySelectorAll('.mrnq').forEach(bN=>{bN.addEventListener('click',e=>{e.stopPropagation();if(taN){taN.value=bN.getAttribute('data-q')||'';taN.focus();}});});
+  const fullN=card.querySelector('.mrnbtn-full');
+  if(fullN)fullN.addEventListener('click',e=>{e.stopPropagation();mrNotifReply(n);});
+  const doSendN=async()=>{
+    if(!sendN||sendN.disabled)return;
+    const tN=taN?taN.value.trim():'';
+    if(!tN)return;
+    sendN.disabled=true;sendN.textContent='…';
+    if(errN)errN.style.display='none';
+    try{
+      const fdN=new URLSearchParams();
+      fdN.set('chat_id',String(n.chat_id));
+      fdN.set('shop',String(n.shop||1));
+      fdN.set('text',tN);
+      const dN=await fetch('?bsl_chat_reply=1',{method:'POST',body:fdN}).then(r=>r.json()).catch(()=>({ok:false,error:'خطای شبکه'}));
+      if(dN&&dN.ok){
+        if(n.timer){clearTimeout(n.timer);n.timer=null;}
+        const barN=card.querySelector('.mrnbar'); if(barN)barN.style.display='none';
+        card.innerHTML='<div style="padding:20px 12px;text-align:center"><div style="color:#4ade80;font-weight:700;font-size:13px">✅ پاسخ ارسال شد</div><div style="color:#64748b;font-size:10px;margin-top:3px">در اتاقِ چت هم به‌روز شد</div></div>';
+        n.timer=setTimeout(()=>mrNotifClose(card),2600);
+        if(mrBodyOpen())setTimeout(()=>mrPoll(),400);
+      } else {
+        if(errN){errN.textContent='✗ '+((dN&&dN.error)||'ارسال ناموفق');errN.style.display='block';}
+        sendN.disabled=false;sendN.textContent='📤';
+      }
+    }catch(eN){
+      if(errN){errN.textContent='✗ خطای شبکه';errN.style.display='block';}
+      sendN.disabled=false;sendN.textContent='📤';
+    }
+  };
+  if(taN)taN.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSendN();}});
+  if(sendN)sendN.addEventListener('click',e=>{e.stopPropagation();doSendN();});
   MR_NOTIFS.push(n);
   const bc=card.querySelector('.mrnbtn-close'); if(bc)bc.addEventListener('click',e=>{e.stopPropagation();mrNotifClose(card);});
-  const br=card.querySelector('.mrnbtn-reply'); if(br)br.addEventListener('click',e=>{e.stopPropagation();mrNotifReply(n);});
+  const br=card.querySelector('.mrnbtn-reply'); if(br)br.addEventListener('click',e=>{e.stopPropagation();mrNotifOpenReply(n);}); /* v10.62 (۷۶): 💬 = پاسخِ درِجای */
   mrNotifSwipe(card,n);
   while(MR_NOTIFS.length>4){const old=MR_NOTIFS.shift(); if(old)mrNotifClose(old.el);}
   mrNotifDing();
@@ -55171,7 +55289,7 @@ function mrNotifPush(c){
 function mrNotifSwipe(card,n){
   let sx=0,dx=0,drag=false;
   card.addEventListener('pointerdown',e=>{
-    if(e.target.closest('button'))return;
+    if(e.target.closest('button,textarea,input'))return;
     drag=true;sx=e.clientX;dx=0;
     card.style.transition='none';card.style.cursor='grabbing';
     const bar=card.querySelector('.mrnbar'); if(bar)bar.style.animationPlayState='paused';
@@ -55190,7 +55308,7 @@ function mrNotifSwipe(card,n){
     if(!drag)return;drag=false;
     card.style.cursor='grab';
     const bar=card.querySelector('.mrnbar'); if(bar)bar.style.animationPlayState='running';
-    if(dx>85){mrNotifReply(n);return;}
+    if(dx>85){mrNotifOpenReply(n);return;}
     if(dx<-85){mrNotifClose(card);return;}
     card.style.transition='transform .28s cubic-bezier(.2,.9,.3,1.3),opacity .28s ease';
     card.style.transform='';card.style.opacity='';
