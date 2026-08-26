@@ -49,6 +49,11 @@ const BSL_PRODUCTS_FILE = __DIR__ . '/bsl_products_temp.json';
 const WOO_QUEUE_FILE = __DIR__ . '/woo_queue.json';
 const WOO_PRODUCTS_FILE = __DIR__ . '/woo_products_temp.json';
 const BSL_QUEUE_FILE = __DIR__ . '/bsl_queue.json';
+/* v10.53 (۶۷): سقفِ چند ردیفِ صف که یک وِرکرِ ارسال در هر اجرا به نوبت پردازش می‌کند.
+   بقیهٔ «در انتظارها» در اجرای بعد (پمپ/زنجیره/دستی) ادامه می‌یابند —
+   وِرکر پنجرهٔ زمانیِ هاست را رد نکند؛ اگر هم وسطِ اجرا قطع شود، هر ردیف
+   حالتِ مستقل دارد و ردیفِ بعدی سالم می‌ماند. */
+const BSL_MAX_ENTRIES_PER_RUN = 10;
 const EXTRACT_PROGRESS_FILE = __DIR__ . '/extract_progress.json';
 const CATLEARN_FILE = __DIR__ . '/category_learning.json';   // v8.48
 // v8.60: سقف «چند کلمهٔ اول» برای یادگیری و تطبیق خودکار دسته‌بندی
@@ -197,6 +202,17 @@ const AI_KEY_RATE_COOLDOWN = 90;
 // v9.38: پایگاه رایِ «مدل کاندید» — کدام مدل در آزمون‌ها بهتر جواب داده
 const AI_VOTES_FILE = __DIR__ . '/ai_votes.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
+/* v10.66 (۸۰): فیدِ رویدادهایِ زنده — مرورگر رویدادهایِ تازه را می‌خواند */
+const LIVE_FEED_FILE = __DIR__ . '/live_events_feed.json';
+/* v10.72 (88): Web Push — کلیدهای VAPID بخشی از کد هستند:
+   کلیدِ خصوصی روی سرور می‌ماند (امضای JWT) و کلیدِ عمومی به مرورگر
+   داده می‌شود (subscribe). تغییرِ کلید = تغییرِ کد — و اشتراک‌هایِ
+   کهنه با کلیدِ تازه به‌طورِ خودکار تازه‌سازی می‌شوند
+   (pushsubscriptionchange). */
+const PUSH_SUBS_FILE      = __DIR__ . '/push_subscriptions.json';
+const VAPID_PRIVATE_KEY_B64  = 'MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgsbGnrIvA/znDWZdBJQ6PFRRer8rMuPcoF4Vc6/dLRfmhRANCAAQWni5pMIvdeHj4dPYaNjmkDNH4NUbNyNxg3LC5NRliEs2okOqhrVcjuHveE9g7VXGSBTaZ9+Hv4C6wGpFerBWa';
+const VAPID_PUBLIC_KEY_B64URL = 'BBaeLmkwi914ePh09ho2OaQM0fg1Rs3I3GDcsLk1GWISzaiQ6qGtVyO4e94T2DtVcZIFNpn34e_gLrAakV6sFZo';
+const VAPID_SUBJECT = 'mailto:push@local';
 const BULKEDIT_PROGRESS_FILE = __DIR__ . '/bulkedit_progress.json';   // v8.62
 const BULKEDIT_RESULT_FILE   = __DIR__ . '/bulkedit_result.json';     // v8.62
 const PHOTOFIX_PROGRESS_FILE = __DIR__ . '/photofix_progress.json';   // v8.62
@@ -267,8 +283,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.44';
-const APP_VERSION_DATE = '1405/06/03';
+const APP_VERSION = '10.79';
+const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -715,6 +731,30 @@ function queueDedupStale(?array $cn = null): int {
     $cn = $cn ?? loadConnections();
     $v = (int)($cn['queue_dedup_stale'] ?? 7200);
     return $v > 0 ? max(300, $v) : 0;
+}
+
+/** v10.51 (۶۵): تنظیماتِ «اثرگذار بر ارسال» عوض شده‌اند؟
+    اگر بله، ردیفِ قدیمیِ صف نباید جلوی ردیفِ جدید را بگیرد — وگرنه
+    مثلاً کاربر پسوندِ عنوان را درست می‌کند و در «نتایج» پسوندِ درست
+    را می‌بیند، ولی ارسال از روی تنظیماتِ ذخیره‌شدهٔ ردیفِ قدیمی هنوز
+    با پسوندِ قبلی ادامه پیدا می‌کند. */
+function queueCfgChanged(?array $oldCfg, array $newCfg): bool {
+    $oldCfg = is_array($oldCfg) ? $oldCfg : [];
+    // ردیف‌های قدیمیِ بدونِ config اصلاً چیزی ذخیره ندارند و پردازنده
+    // تنظیماتِ جاری را می‌گیرد — با آن‌ها ناسازگاری فرض نمی‌شود.
+    $known = ['title_suffix', 'category_id', 'auto_category', 'force_all', 'send_all_shops'];
+    $hasOld = false;
+    foreach ($known as $k) { if (array_key_exists($k, $oldCfg)) { $hasOld = true; break; } }
+    if (!$hasOld) return false;
+    foreach ($known as $k) {
+        if (!array_key_exists($k, $newCfg)) continue;
+        if (!array_key_exists($k, $oldCfg)) return true;
+        if ($k === 'category_id') { if ((int)$oldCfg[$k] !== (int)$newCfg[$k]) return true; }
+        elseif (in_array($k, ['auto_category', 'force_all', 'send_all_shops'], true)) {
+            if ((bool)$oldCfg[$k] !== (bool)$newCfg[$k]) return true;
+        } else { if (trim((string)$oldCfg[$k]) !== trim((string)$newCfg[$k])) return true; }
+    }
+    return false;
 }
 
 function extractWriteQueue(array $queue): void {
@@ -1363,6 +1403,29 @@ $path = preg_replace('~\.(html|htm|php)$~i', '', $path);
 return $host . ($path ? '_' . preg_replace('~[^a-z0-9]+~i', '_', $path) : '');
 }
 
+/* v10.67 (81): حلِّ ممتنِ کلیدِ پروفایل.
+   فرمولِ مرورگرِ profileKey ممکن است با فرمولِ سروری دقیقاً یکی نباشد
+   (تفاوتِ percent-decode، یا اینکه کلان URL فرستاده شده باشد نه کلید).
+   اگر کلیدِ دقیق روی دیسک نبود، با URL ذخیره‌شدهٔ پروفایل‌ها بگردیم؛
+   اگر باز هم نبود null برمی‌گردد و صدا‌زننده باید خطا را صریح بگوید. */
+function profileResolveKey(string $given, array $profiles): ?string {
+    $g = trim($given);
+    if ($g === '') return null;
+    if (isset($profiles[$g])) return $g;
+    $cands = [];
+    foreach ($profiles as $k => $p) {
+        $u = (string)($p['url'] ?? '');
+        if ($u !== '' && $u === $g) $cands[] = (string)$k;
+        elseif ($u !== '' && profileKey($u) === $g) $cands[] = (string)$k;
+    }
+    if (count($cands) === 1) return $cands[0];
+    if (strpos($g, '://') !== false && filter_var($g, FILTER_VALIDATE_URL)) {
+        $pk = profileKey($g);
+        if (isset($profiles[$pk])) return $pk;
+    }
+    return null;
+}
+
 /* v9.92: خواندنِ پروفایل‌ها با تشخیصِ «فایلِ خراب» از «فایلِ خالی».
 
    تا ۹.۹۱ هر سه حالتِ «فایل نیست»، «فایل صفر بایت است» و «JSON خراب
@@ -1560,6 +1623,51 @@ function finishRequestNow(string $body = '', string $type = 'application/json; c
     @ob_flush(); @flush();
     define('REQ_DETACHED', true);
 }
+/**
+ * v10.61 (۷۵): همگام‌سازیِ دستی اتصال را «باز» نگه می‌دارد.
+ *
+ * ریشهٔ «دکمهٔ همگام‌سازی دستی کارتی به صفِ استخراج نمی‌آورد»:
+ * هاستِ شما پردژهٔ جداشده (بدون کلاینتِ وصل) را در چند ثانیه می‌کُشد —
+ * finishRequestNow اتصال را می‌بست و کار می‌رفت پس‌زمینه، و کرانِ هاست
+ * که تنها نجات‌دهندهٔ پس‌زمینه بود خودشان روزهاست اجرا نمی‌شود (نگارِ
+ * v10.58 «آخرین تیک ۸۰٬۰۰۰ ثانیه پیش»). نتیجه: پردژه پیش از رسیدن به
+ * حلقهٔ همگام‌سازی می‌مُرد و هیچ‌وقت کارتی به صف نمی‌نشست.
+ *
+ * حالا: در همگام‌سازیِ دستی، اتصالِ مرورگر تا پایانِ کار باز می‌ماند
+ * (همان مدلِ «پُلِ مرورگر» که ارسال‌ها با آن زنده می‌مانند). مرورگرِ
+ * وصل = پردژهٔ زنده. خطوطِ ndjson (هر خط یک JSON) هم «خروجیِ زنده»
+ * محسوب می‌شوند و پردازنده را از سقفِ بی‌خروجیِ سرور نجات می‌دهند.
+ */
+function msKeepConnStart(): void {
+    if (defined('MS_KEEP_CONN')) return;
+    if (isCliRun()) return;
+    @set_time_limit(0);
+    @ignore_user_abort(true);
+    while (@ob_get_level()) @ob_end_clean();
+    if (!headers_sent()) {
+        header('Content-Type: application/x-ndjson; charset=UTF-8');
+        header('Cache-Control: no-cache');
+        header('X-Accel-Buffering: no');
+        header('X-LiteSpeed-Buffering: no');
+    }
+    echo json_encode(['ok' => true, 'started' => true, 'detached' => false,
+        'keep_alive' => true, 'note' => 'اتصال تا پایانِ کار باز است — پیشرفت را در همین تب ببینید'],
+        JSON_UNESCAPED_UNICODE) . "\n";
+    @ob_flush(); @flush();
+    define('MS_KEEP_CONN', true);
+}
+
+/** ضربانِ اتصالِ همگام‌سازیِ دستی — بیرون از حالتِ keep-conn بی‌اثر است */
+function msAlive(string $phase = ''): void {
+    if (!defined('MS_KEEP_CONN')) return;
+    if ($phase !== '') $GLOBALS['_msKeepPhase'] = $phase;
+    try {
+        echo json_encode(['alive' => time(),
+            'phase' => (string)($GLOBALS['_msKeepPhase'] ?? '')], JSON_UNESCAPED_UNICODE) . "\n";
+        @ob_flush(); @flush();
+    } catch (Throwable $e) { /* ضربان هرگز نباید کار را خراب کند */ }
+}
+
 
 /** خروجی کران: اگر اتصال بسته شده، به فایل برود نه به اتصالِ مرده */
 function cronEmit(array $results): void {
@@ -4238,7 +4346,7 @@ function bslReqMulti(array $jobs, int $concurrency = 4, bool $skipStop = false):
     return $out;
 }
 
-function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false, ?array $net=null, bool $skipStop=false): array {
+function bslReq(string $tk, string $m, string $ep, $d=null, bool $mp=false, ?array $net=null, bool $skipStop=false, int $maxAttempts=3): array {
 $url=bslApiBase().ltrim($ep,'/');
 if($net===null)$net = function_exists('bslNetCfg') ? bslNetCfg() : ['indirect'=>false,'mode'=>'direct','fallback'=>false];
 
@@ -4269,7 +4377,7 @@ if (!empty($net['indirect'])) {
 // بود، برای همیشه همهٔ درخواست‌ها را قطع می‌کرد. هندلر bsl_backend از
 // v8.57 نگه‌داشتِ ۱۵ دقیقه‌ای (BSL_STOP_HOLD_SEC) را رعایت می‌کرد ولی
 // خودِ bslReq نه — پس «توقف» عملاً دائمی می‌شد.
-$maxRetries=3;$retryDelay=3;
+$maxRetries=max(1,$maxAttempts);$retryDelay=3;
 $last=['ok'=>false,'code'=>0,'error'=>'هیچ روشی اجرا نشد','body'=>null,'raw'=>''];
 foreach($modes as $mode){
 $r=['ok'=>false];
@@ -7032,6 +7140,130 @@ $list[] = [
 usort($list, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'] ?? 0));
 echo json_encode(['ok' => true, 'profiles' => $list], JSON_UNESCAPED_UNICODE);
 exit;
+}
+
+/* v10.69 (83): اسکریپتِ service worker از همین فایل سرو می‌شود.
+   نیازی به آپلودِ فایلِ جداگانهٔ sw.js نیست: مرورگر scraper4.php?sw=1
+   را می‌خواند و جاوااسکریپتِ خالصِ لازم برای نمایشِ مطمئنِ اعلان (مهم‌ترین
+   رویِ کرومِ اندروید) و مدیریتِ کلیکِ رویِ اعلان را می‌گیرد. چون اسکریپت
+   داخلِ خودِ کد است، نسخهٔ آن همیشه با کد یکی می‌ماند. */
+if (isset($_GET['sw'])) {
+    header('Content-Type: application/javascript; charset=UTF-8');
+    header('Cache-Control: no-cache');
+    header('Service-Worker-Allowed: /');
+    echo <<<'SWJS'
+/* scraper4 service worker — v10.69 (83) */
+self.addEventListener('install', e => { self.skipWaiting(); });
+self.addEventListener('activate', e => { e.waitUntil(self.clients.claim()); });
+self.addEventListener('message', e => {
+  const d = e.data || {};
+  if (d.type === 'showNotification' && d.title) {
+    const opt = { body: d.body || '', tag: d.tag || ('mr_live_' + Date.now()),
+                  requireInteraction: !!d.requireInteraction, data: d.data || {} };
+    if (d.icon) { opt.icon = d.icon; opt.badge = d.badge || d.icon; }
+    e.waitUntil(self.registration.showNotification(String(d.title), opt));
+  }
+});
+self.addEventListener('push', e => {
+  /* v10.72 (86): اعلانِ واقعی — بیدارشونده از سمتِ سرور.
+     حتی وقتی صفحه/تب بسته است، اندروید/ویندوز با همین رویداد
+     سرویس‌ورکر را بیدار و اعلان را نمایش می‌دهد. */
+  let data = {};
+  try { data = (e.data && e.data.json()) || {}; } catch (err) {
+    try { data = { title: '🔔 اعلان', body: e.data ? e.data.text() : '' }; } catch (err2) {}
+  }
+  const opt = {
+    body: (data.body || '').toString(),
+    tag: data.tag || ('mr_live_' + Date.now()),
+    requireInteraction: !!data.requireInteraction,
+    data: { url: data.url || self.registration.scope }
+  };
+  if (data.icon) opt.icon = data.icon;
+  e.waitUntil(self.registration.showNotification(String(data.title || '🔔 اعلان'), opt));
+});
+self.addEventListener('pushsubscriptionchange', e => {
+  /* وقتی مرورگر کلیدهایِ اشتراک را عوض کند، اشتراکِ تازه خودکار ثبت شود */
+  e.waitUntil(self.registration.pushManager.getSubscription().then(sub => {
+    if (!sub) return;
+    return fetch('?push_resubscribe=1', { method: 'POST', body: JSON.stringify(sub.toJSON()) });
+  }).catch(() => {}));
+});
+self.addEventListener('notificationclick', e => {
+  try { e.notification.close(); } catch (err) {}
+  const url = (e.notification.data && e.notification.data.url) || self.registration.scope;
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    for (const c of list) {
+      if ('focus' in c) { try { if ('navigate' in c) c.navigate(url); } catch (err) {} return c.focus(); }
+    }
+    return self.clients.openWindow(url);
+  }));
+});
+SWJS;
+    exit;
+}
+
+/* v10.72 (86): اندپوینت‌هایِ Web Push — ثبت/لغوِ اشتراک، تست، وضعیت */
+if (isset($_GET['push_subscribe']) || isset($_GET['push_resubscribe'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $rawIn = (string)@file_get_contents('php://input');
+    $subIn = json_decode($rawIn, true);
+    if (!is_array($subIn) || empty($subIn['endpoint']) || empty($subIn['keys']['p256dh']) || empty($subIn['keys']['auth'])) {
+        echo json_encode(['ok' => false, 'error' => 'اشتراک خوانا نیست'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    if (!pushUpsertSub($subIn)) {
+        echo json_encode(['ok' => false, 'error' => 'اشتراک خوانا بود ولی روی سرور ذخیره نشد (دسترسیِ نوشتنِ پوشه)'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    echo json_encode(['ok' => true, 'count' => count(pushLoadSubs())], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (isset($_GET['push_unsubscribe'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $rawIn = (string)@file_get_contents('php://input');
+    $subIn = json_decode($rawIn, true);
+    $ep = (string)($subIn['endpoint'] ?? ($_GET['endpoint'] ?? ''));
+    if ($ep !== '') pushDropSub($ep);
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (isset($_GET['push_test'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $r = webpushSend('📡 تستِ Push', 'این اعلان مستقیم از سرور (نه از صفحه) فرستاده شد — اگر آن را دیدید، مسیرِ اعلان‌هایِ واقعی درست کار می‌کند.', 'push_test');
+    echo json_encode(['ok' => true] + $r + ($r['total'] === 0 ? ['error' => 'اشتراکی ثبت نشده — اول کلیدِ «📡 اعلانِ Push» را روشن کنید'] : []), JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (isset($_GET['push_status'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $__prC = pushRouteCfg();
+    $__cnSt = loadConnections();
+    echo json_encode(['ok' => true, 'count' => count(pushLoadSubs()),
+                      'public_key' => VAPID_PUBLIC_KEY_B64URL,
+                      'route' => ['proxy' => $__prC['proxy'], 'worker_url' => $__prC['worker'], 'worker_token' => $__prC['token'], 'site_source' => (string)($__prC['site_source'] ?? '')],
+                      'najva_script' => (string)($__cnSt['najva_script'] ?? '')], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+/* v10.74 (88): ذخیرهٔ مسیرِ Push — پراکسیِ خارجی و/یا Workerِ واسط */
+if (isset($_GET['push_route_save'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $rawPr = json_decode((string)@file_get_contents('php://input'), true) ?: [];
+    $proxy = trim((string)($rawPr['proxy'] ?? ''));
+    $worker = trim((string)($rawPr['worker_url'] ?? ''));
+    if ($proxy !== '' && !preg_match('#^(https?|socks5)://#i', $proxy)) $proxy = '';
+    if ($worker !== '' && !preg_match('#^https://#i', $worker)) $worker = '';
+    $cnPr = loadConnections();
+    if (trim((string)($cnPr['push_route']['worker_token'] ?? '')) === '') {
+        $cnPr['push_route']['worker_token'] = bin2hex(random_bytes(16));
+    }
+    /* v10.78 (92): اسکریپتِ هدرِ نجوا — جایگزینِ تنظیماتِ API */
+    if (array_key_exists('najva_script', $rawPr)) {
+        $cnPr['najva_script'] = (string)($rawPr['najva_script'] ?? '');
+        unset($cnPr['najva']);   // تنظیماتِ قدیمیِ API پاک می‌شود
+    }
+    $cnPr['push_route'] = ['proxy' => $proxy, 'worker_url' => $worker, 'worker_token' => (string)$cnPr['push_route']['worker_token']];
+    if (!saveConnections($cnPr)) { echo json_encode(['ok' => false, 'error' => 'ذخیرهٔ تنظیماتِ مسیر ممکن نشد'], JSON_UNESCAPED_UNICODE); exit; }
+    echo json_encode(['ok' => true, 'worker_token' => $cnPr['push_route']['worker_token']], JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
 if (!empty($_GET['load_profile'])) {
@@ -11242,7 +11474,11 @@ if (isset($_POST['ai_net'])) {
 
 if (isset($_POST['baleh'])) { $bl = json_decode($_POST['baleh'], true) ?: []; $conn['baleh'] = ['enabled'=>!empty($bl['enabled']),'token'=>trim($bl['token']??''),'chat_id'=>trim($bl['chat_id']??'')]; }
 if (isset($_POST['rubika'])) { $rb = json_decode($_POST['rubika'], true) ?: []; $conn['rubika'] = ['enabled'=>!empty($rb['enabled']),'token'=>trim($rb['token']??''),'chat_id'=>trim($rb['chat_id']??'')]; }
+/* v10.78 (92): تلگرام — سومین پیام‌رسان، با همان ساختار بله/روبیکا */
+if (isset($_POST['telegram'])) { $tgm = json_decode($_POST['telegram'], true) ?: []; $conn['telegram'] = ['enabled'=>!empty($tgm['enabled']),'token'=>trim($tgm['token']??''),'chat_id'=>trim($tgm['chat_id']??'')]; }
 if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund']),'src_price'=>!empty($ne['src_price']),'src_stock'=>!empty($ne['src_stock']),'run_fail'=>!empty($ne['run_fail']),'retire'=>!empty($ne['retire']),'cron_ping'=>!empty($ne['cron_ping']),/* v10.35 (۴۷د): گزارشِ همگام‌سازی — پیش‌فرض روشن، پس نبودِ کلید یعنی روشن */'sync_report'=>!isset($ne['sync_report'])||!empty($ne['sync_report'])]; }
+/* v10.46 (۶۰): انتخاب غرفه برای رویداد «پیام مشتری» — 0 = همهٔ غرفه‌ها */
+if (isset($_POST['notif_chat_shop'])) $conn['notif_chat_shop'] = max(0, (int)$_POST['notif_chat_shop']);
 // v8.34: تنظیمات بازنشستگی محصولات رفته از مبدأ
 if (isset($_POST['retire_mode'])) {
     $rm = (string)$_POST['retire_mode'];
@@ -12028,6 +12264,7 @@ foreach ($_wantKeys as $_wk) {
 }
 if (!($_galDoneNow && !$_fieldMissingNow)) {
     $_inlineDetailDone++;
+    msAlive('جزئیات: ' . mb_substr((string)($p['title'] ?? $key), 0, 45));   /* v10.61 (۷۵) */
     extractProductDetailInline($allProducts, $key, $detailSelectors, $galleryCfg, false);
     extractCheckpoint($pkFinal, $allProducts,
         ['_extract_stage' => 'detail', '_extract_stage_at' => time(),
@@ -12038,6 +12275,7 @@ if (!($_galDoneNow && !$_fieldMissingNow)) {
 $logs[]='✓ +'.($newCount).' محصول (کل: '.count($allProducts).')';
 // v8.22: مقایسهٔ زنده — شمارنده‌ها و لیست‌ها همان لحظه محاسبه می‌شوند
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
+msAlive('صفحه ' . $page . ' — ' . count($allProducts) . ' محصول');   /* v10.61 (۷۵) */
 writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages,'current'=>$page,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>true,'page_new'=>$newCount,'page_total'=>count($allProducts)],$liveCmp));
 
 if($pagType==='next_selector'&&!empty($pagVal)){
@@ -12825,6 +13063,23 @@ function bslAllShops(array $cn): array {
                       'price_mode' => (string)($v['price_mode'] ?? 'none'),
                       'price_val'  => (float)($v['price_val'] ?? 0)];
         }
+    }
+    return $out;
+}
+
+/** v10.73 (87): غرفه‌های فعال برایِ fan-outِ صف — فقط غرفه‌هایی که
+    شناسهٔ سالم و توکنِ غیرخالی دارند (همان تعریفِ مسیرِ همزمان).
+    توکن برنمی‌گردد (در صف ذخیره نمی‌شود)؛ وِرکر توکن را تازه از
+    connections می‌خواند. خروجی: [vendor_id, shop_name, is_default] */
+function bslFanoutShops(?array $cn): array {
+    $cn = $cn ?: loadConnections();
+    $out = [];
+    foreach (bslAllShops($cn) as $sh) {
+        $vid = (int)($sh['vendor_id'] ?? 0);
+        $tok = trim((string)($sh['token'] ?? ''));
+        if ($vid <= 0 || $tok === '') continue;
+        $name = trim((string)($sh['shop_name'] ?? ''));
+        $out[] = ['vendor_id' => $vid, 'shop_name' => $name, 'is_default' => !empty($sh['is_default'])];
     }
     return $out;
 }
@@ -14746,13 +15001,44 @@ if (isCliRun()) {
 if (isset($_GET['manual_sync_stop'])) {
     header('Content-Type: application/json; charset=UTF-8');
     @file_put_contents(MANUAL_SYNC_STOP_FILE, json_encode(['at' => time()]));
+    /* v10.55 (۶۹): توقفِ دستی باید به پردازنده‌هایِ در حالِ اجرایِ ارسال/استخراج
+       هم برسد — آن‌ها فقط سیگنالِ توقفِ خودشان را می‌بینند. بدونِ این، «توقف»
+       فقط زنجیرهٔ میانِ دو نوبت را می‌ایستاند و ردیفِ در حالِ ارسال تا آخر
+       (و با v10.53 ردیف‌های بعدیِ صف هم!) فرستاده می‌شد. */
+    @file_put_contents(BSL_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));
+    @file_put_contents(WOO_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));
+    @file_put_contents(EXTRACT_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));
     echo json_encode(['ok' => true, 'stopped' => true], JSON_UNESCAPED_UNICODE);
     exit;
 }
 if (isset($_GET['manual_sync_status'])) {
     header('Content-Type: application/json; charset=UTF-8');
-    echo json_encode(['ok' => true, 'progress' => readProgress(MANUAL_SYNC_PROGRESS_FILE)],
-        JSON_UNESCAPED_UNICODE);
+    $msSt = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+    /* v10.58 (۷۲): اجرایِ دستیِ کشته‌شدهٔ هاست، فایل را تا ابد «در حال
+       اجرا» جا می‌گذارد — رابط روی همان تصویر می‌ماند، دکمه می‌گوید
+       «شغال»، و از دید کاربر «اصلاً کار نمی‌کند». همین‌جا همان معیارِ
+       زنده‌بودنِ نگهبان اعمال می‌شود: اگر پیشرفت بیش از stall_after بی‌حرکت
+       باشد، آن اجرا مرده است. با پیامِ روشن بسته می‌شود تا رابط برگردد و
+       کاربر دوباره امتحان کند — بخشِ انجام‌شده روی دیسک است و
+       چک‌پوینت جلوی تکرارِ کار را می‌گیرد. */
+    if (!empty($msSt['running']) && empty($msSt['done'])) {
+        $msIdleD = time() - (int)($msSt['last_progress_ts'] ?? ($msSt['ts'] ?? 0));
+        $msMaxD  = max(120, (int)(loadConnections()['stall_after'] ?? 300));
+        if ($msIdleD > $msMaxD) {
+            $msSt['running']   = false;
+            $msSt['done']      = true;
+            $msSt['cancelled'] = false;
+            $msSt['phase']     = 'نیمه‌کاره ماند';
+            $msSt['error']     = 'اجرا نیمه‌کاره رها شد (' . $msIdleD . ' ثانیه بی‌حرکت) — احتمالاً هاست پردازه را قطع کرده. بخشِ انجام‌شده روی دیسک است؛ دوباره اجرا کنید تا از چک‌پوینت ادامه دهد.';
+            $msLgD = is_array($msSt['recent_log'] ?? null) ? $msSt['recent_log'] : [];
+            $msLgD[] = '⚠️ اجرایِ قبلی نیمه‌کاره ماند — وضعیت به‌صورتِ خودکار به‌روزرسانی شد. می‌توانید دوباره امتحان کنید.';
+            $msSt['recent_log'] = array_slice($msLgD, -40);
+            $msSt['ts'] = time();
+            $msSt['last_progress_ts'] = time();
+            writeProgress(MANUAL_SYNC_PROGRESS_FILE, $msSt);
+        }
+    }
+    echo json_encode(['ok' => true, 'progress' => $msSt], JSON_UNESCAPED_UNICODE);
     exit;
 }
 if (isset($_GET['manual_sync'])) {
@@ -14761,15 +15047,64 @@ if (isset($_GET['manual_sync'])) {
        معیارِ «زنده» همان معیارِ همیشگی است: پیشرفتِ تازه. */
     $_msPrev = readProgress(MANUAL_SYNC_PROGRESS_FILE);
     $_msAge  = time() - (int)($_msPrev['last_progress_ts'] ?? ($_msPrev['ts'] ?? 0));
-    if (!empty($_msPrev['running']) && empty($_msPrev['done']) && $_msAge < 300 && empty($_GET['takeover'])) {
-        header('Content-Type: application/json; charset=UTF-8');
-        echo json_encode(['ok' => false, 'busy' => true,
-            'error' => 'یک همگام‌سازیِ دستی همین حالا در حال اجراست'], JSON_UNESCAPED_UNICODE);
-        exit;
+    /* v10.58 (۷۲): پیش از ردِّ اجرایِ دوم، مطمئن شو که اجرایِ اول زنده است.
+       اجرایِ کشته‌شدهٔ هاست (پیشرفتِ بی‌حرکت) نباید دکمه را چند دقیقه
+       قفل کند: به‌عنوانِ «نیمه‌کاره» بسته و اجرأ تازه شروع می‌شود —
+       چک‌پوینتِ رویِ دیسک جلوی تکرارِ کارِ شده را می‌گیرد. */
+    if (!empty($_msPrev['running']) && empty($_msPrev['done']) && empty($_GET['takeover'])) {
+        /* v10.67 (81): پنجرهٔ «در حال اجرا» حالا حداکثر یک چرخهٔ نگهبان
+           (نه دو): فایلِ پیشرفت در حینِ اجرا هر چند ثانیه تازه می‌شود،
+           پس اگر یک دورهٔ کامل چیز نوشته نشده، پردژه مرده است و دکمه
+           نباید قفل بماند. */
+        $_msMaxD = max(120, (int)(loadConnections()['stall_after'] ?? 300));
+        if ($_msAge >= $_msMaxD) {
+            $_msPrev['running']   = false;
+            $_msPrev['done']      = true;
+            $_msPrev['cancelled'] = false;
+            $_msPrev['phase']     = 'نیمه‌کاره ماند';
+            $_msPrev['error']     = 'اجرایِ قبلی نیمه‌کاره ماند (' . $_msAge . ' ثانیه بی‌حرکت) — بسته شد و اجرایِ تازه شروع می‌شود.';
+            $_msPrev['ts'] = time();
+            $_msPrev['last_progress_ts'] = time();
+            writeProgress(MANUAL_SYNC_PROGRESS_FILE, $_msPrev);
+        } else {
+            header('Content-Type: application/json; charset=UTF-8');
+            echo json_encode(['ok' => false, 'busy' => true,
+                'error' => 'یک همگام‌سازیِ دستی همین حالا در حال اجراست'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
     }
     @unlink(MANUAL_SYNC_STOP_FILE);
     $_msKey  = trim((string)($_GET['profile'] ?? ''));
     $_msProf = $_msKey !== '' ? (loadProfiles()[$_msKey] ?? null) : null;
+    /* v10.67 (81): حلِّ ممتنِ کلید. تا حالا اگر فرمولِ مرورگر با کلیدِ
+       رویِ دیسک دقیقاً نمی‌خورد (تفاوتِ percent-decode، یا کلان URL به‌جای
+       کلید)، حلقهٔ پروفایل‌ها سراسر را با فیلترِ only رد می‌کرد: نه ردیفی
+       به صف می‌نشست، نه خطایی — همگام‌سازی «تقریباً هیچ کاری نمی‌کرد».
+       حالا کلید با URL ذخیره‌شدهٔ پروفایل‌ها پیدا می‌شود؛ اگر اصلاً نباشد
+       همان لحظه خطای صریح برمی‌گردد، نه اجرایِ خالی. */
+    if ($_msKey !== '' && !is_array($_msProf)) {
+        $_msAll = loadProfiles();
+        $_msRes = profileResolveKey($_msKey, $_msAll);
+        if ($_msRes !== null && $_msRes !== $_msKey) {
+            $_msKey  = $_msRes;
+            $_msProf = $_msAll[$_msRes] ?? null;
+        }
+    }
+    if ($_msKey !== '' && !is_array($_msProf)) {
+        writeProgress(MANUAL_SYNC_PROGRESS_FILE, [
+            'running' => false, 'done' => true, 'cancelled' => false,
+            'phase' => 'خطا', 'started_at' => time(), 'ts' => time(),
+            'last_progress_ts' => time(), 'total' => 3, 'current' => 0,
+            'profile_key' => $_msKey, 'profile_name' => $_msKey,
+            'recent_log' => ['❌ پروفایلی با کلیدِ «' . mb_substr($_msKey, 0, 80) . '» روی سرور پیدا نشد'],
+            'total_log_count' => 1,
+        ]);
+        header('Content-Type: application/json; charset=UTF-8');
+        echo json_encode(['ok' => false,
+            'error' => 'پروفایلی با این کلید روی سرور پیدا نشد — اول پروفایل را ذخیره کنید، بعد همگام‌سازی کنید'],
+            JSON_UNESCAPED_UNICODE);
+        exit;
+    }
     writeProgress(MANUAL_SYNC_PROGRESS_FILE, [
         'running' => true, 'done' => false, 'cancelled' => false,
         'phase' => 'شروع', 'started_at' => time(), 'ts' => time(),
@@ -14783,6 +15118,9 @@ if (isset($_GET['manual_sync'])) {
     $_GET['cron_run'] = '1';
     $_GET['force']    = '1';
     if ($_msKey !== '') $_GET['only'] = $_msKey;
+    /* v10.61 (۷۵): همگام‌سازیِ دستی «جدا نمی‌شود» — اتصالِ مرورگر تا
+       پایانِ کار باز می‌ماند تا هاست پردژه را نکُشد (msKeepConnStart). */
+    $GLOBALS['_msKeepConn'] = true;
 }
 
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
@@ -14844,9 +15182,50 @@ header('Content-Type: application/json; charset=UTF-8');
    این گذرِ جداگانه در ابتدای کران نیست. */
 
 $_cronBg = !empty($_POST['bg']) || !empty($_GET['bg']);
-finishRequestNow(json_encode(['ok' => true, 'started' => true, 'bg' => $_cronBg,
-    'detached' => true, 'note' => 'اجرا در پس‌زمینه ادامه دارد — نتیجه در cron_last_run.json'],
-    JSON_UNESCAPED_UNICODE));
+/* v10.61 (۷۵): همگام‌سازیِ دستی «جدا نمی‌شود» — توضیح کامل در بالای
+   msKeepConnStart(). خلاصه: هاست شما پردژهٔ بدونِ کلاینت را در چند
+   ثانیه می‌کُشد و کرانِ هاست هم (به‌گزارشِ کاربر) روزهاست اجرا نمی‌شود،
+   پس همگام‌سازیِ دستی که جدا می‌شد، پیش از رسیدن به حلقهٔ همگام‌سازی
+   می‌مُرد و هیچ کارتی به صفِ استخراج نمی‌نشست. حالا در حالتِ دستی
+   اتصالِ مرورگر تا پایانِ کار باز می‌ماند (ndjson) و برای کران
+   رفتارِ قبلی (پاسخِ فوری + پس‌زمینه) دست‌نخورده است. */
+if (!empty($GLOBALS['_msKeepConn']) && !isCliRun()) {
+    msKeepConnStart();
+} else {
+    finishRequestNow(json_encode(['ok' => true, 'started' => true, 'bg' => $_cronBg,
+        'detached' => true, 'note' => 'اجرا در پس‌زمینه ادامه دارد — نتیجه در cron_last_run.json'],
+        JSON_UNESCAPED_UNICODE));
+}
+/* v10.67 (81): شبکهٔ ایمنیِ کُرش. وقتی هاست پردژه را می‌کُشد یا PHP به
+   خطای فیتال می‌خورد (حافظه و...)، رابطِ همگام‌سازیِ دستی نباید تا ابد روی
+   «در حال شروع» منجمد بماند: فایلِ پیشرفت با دلیلِ واقعی بسته می‌شود و
+   خطا در cron_last_run هم ثبت. این همان جایی است که «هیچ کاری نکردن» را
+   از «مردهٔ بی‌صدا» جدا می‌کند. */
+if (!isCliRun()) {
+    register_shutdown_function(function () {
+        $e = error_get_last();
+        if (!$e || empty($e['message'])) return;
+        if (!in_array($e['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true)) return;
+        $msg = $e['message'];
+        try {
+            $p = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+            if (!empty($p['running']) && empty($p['done'])) {
+                $p['running'] = false; $p['done'] = true; $p['cancelled'] = false;
+                $p['phase'] = 'خطای فیتال';
+                $p['error'] = 'پردژه در میانِ اجرا مُرد: ' . mb_substr($msg, 0, 300) . ' (خط ' . (int)($e['line'] ?? 0) . ')';
+                $lg = is_array($p['recent_log'] ?? null) ? $p['recent_log'] : [];
+                $lg[] = '💥 ' . $p['error'];
+                $p['recent_log'] = array_slice($lg, -40);
+                $p['ts'] = time(); $p['last_progress_ts'] = time();
+                writeProgress(MANUAL_SYNC_PROGRESS_FILE, $p);
+            }
+            $lr = ['ok' => false, 'fatal' => true, 'error' => mb_substr($msg, 0, 500),
+                   'line' => (int)($e['line'] ?? 0), 'time' => time()];
+            @file_put_contents(__DIR__ . '/cron_last_run.json',
+                json_encode($lr, JSON_UNESCAPED_UNICODE), LOCK_EX);
+        } catch (Throwable $t) {}
+    });
+}
 if ($_cronBg) define('CRON_BG', true);
 
 // قفل ضد هم‌پوشانی — یک اجرای طولانی نباید با اجرای بعدی تداخل کند
@@ -14954,6 +15333,16 @@ if ($lockAge < $cronLockSec) {
     } catch (Throwable $e) {
         $lockOut['ping'] = ['error' => mb_substr($e->getMessage(), 0, 200)];
     }
+    /* v10.61 (۷۵): اگر این یک همگام‌سازیِ دستی بود، وضعیتش را
+       «در حال اجرا» جا نگذار — علتِ رد شدن را بنویس و ببند. */
+    if (manualSyncActive()) {
+        $_msSk = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+        $_msSk['running'] = false; $_msSk['done'] = true; $_msSk['cancelled'] = false;
+        $_msSk['phase'] = 'رد شد';
+        $_msSk['error'] = (string)($lockOut['reason'] ?? 'رد شد: اجرای قبلی هنوز تمام نشده است');
+        $_msSk['ts'] = time(); $_msSk['last_progress_ts'] = time();
+        writeProgress(MANUAL_SYNC_PROGRESS_FILE, $_msSk);
+    }
     // v9.06: اتصال بالاتر بسته شده — خروجی به فایل می‌رود، نه به اتصالِ مرده
     cronEmit($lockOut);
     exit;
@@ -14965,6 +15354,16 @@ if ($lockAge < $cronLockSec) {
 if (empty($results_manualBypass)) {
     @file_put_contents($cronLock, (string)time());
     register_shutdown_function(function () use ($cronLock) { @unlink($cronLock); });
+} else {
+    /* v10.55 (۶۹): اجرایِ دستی قفلِ «زندهٔ» کران را بازنویسی نمی‌کند (همان
+       قانونِ v10.35) ولی اگر قفلی در کار نباشد، برمی‌دارد: همگام‌سازیِ دستی
+       می‌تواند ساعت‌ها طول بکشد (زنجیرهٔ ارسالِ سرورساید) و اگر قفل آزاد
+       باشد، کرانِ دوره‌ای همان لحظه موازی راه می‌افتد — دو اجرا روی صفِ
+       یک‌پوشه (خواندن/نوشتنِ صف بدون قفل) و تکرارِ کارِ همان پروفایل‌ها. */
+    if (!is_file($cronLock)) {
+        @file_put_contents($cronLock, (string)time());
+        register_shutdown_function(function () use ($cronLock) { @unlink($cronLock); });
+    }
 }
 
 /* =====================================================================
@@ -15009,6 +15408,49 @@ if (!empty($results_lockReaped)) $results['lock_reaped'] = true;
 // v10.21 (۳۴ج): نبضِ ابتدای اجرا در گزارش هم بماند
 if (!empty($results_heartbeat)) $results['heartbeat'] = $results_heartbeat;
 
+/* v10.48 (۶۲): اعلان‌ها و پاسخ خودکار «اولِ» کران، قبل از هر کار بلند.
+
+   دلایلش همان الگویی است که قبلاً برای نگهبان (۸.۹۷)، بکاپ (۹.۱۶) و
+   حلقهٔ جزئیات (۹.۲۰) استفاده شد: هاستِ شما پردازهٔ PHP را وسطِ اجرا
+   می‌کشد (پینگِ نبض خود می‌گوید: «اجرای قبلی نیمه‌کاره ماند»). اعلان‌ها
+   تا حالا در میانهٔ کران — بعد از تمامِ همگام‌سازی‌ها — اجرا می‌شدند،
+   یعنی دقیقاً بعد از همان جایی که پردژه کشته می‌شود؛ کاربر فقط پینگِ
+   «شروع شد» را می‌دید و هیچ اعلانی. حالا بررسیِ اعلان (سفارش، پیام،
+   محصول) و پاسخ خودکار — که هر دو سبک‌اند و فقط باسلام را می‌خوانند —
+   درست بعد از نبض و قبل از بکاپ/جزئیات/همگام‌سازی می‌نشینند؛ حتی اگر
+   هاست همین چند ثانیهٔ بعد پردژه را بکشد، اعلانِ همین دور رفته است. */
+/* v10.21 (۳۴ج): هر کارِ کران داخل try/catch.
+   ریشهٔ «اعلان دوره‌ای قطع شد» همین بود: پینگ آخرین کارِ کران است و هر
+   استثنایی در کارهای قبل از آن (اعلان‌ها، پاسخ خودکار، گزارش شبانه) کلِ
+   اجرا را می‌کشت — پس نه پینگ می‌رفت، نه cron_last_run نوشته می‌شد، و
+   کاربر فقط سکوت می‌دید. حالا هر کار جدا محافظت می‌شود و شکستِ یکی
+   بقیه را زمین نمی‌زند. */
+try {
+    $notifyResult = bslCheckNotifications($cn);
+    if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
+} catch (Throwable $e) {
+    $results['notifications'] = ['error' => mb_substr($e->getMessage(), 0, 200)];
+}
+
+// v8.64: پاسخ خودکار به پیام مشتریان — بعد از اعلان‌ها، تا اول خبر برسد
+// و بعد ربات جواب دهد. مهلت ادب داخل خود موتور رعایت می‌شود.
+if (arCfg($cn)['enabled']) {
+    try {
+        $arRes = autoReplyRun($cn, false);
+        if (!empty($arRes['replied']) || !empty($arRes['failed'])) {
+            $results['autoreply'] = ['replied' => (int)$arRes['replied'],
+                                     'failed' => (int)$arRes['failed'],
+                                     'checked' => (int)$arRes['checked']];
+            if (arCfg($cn)['notify'] && (int)$arRes['replied'] > 0) notifSend($cn, arMsg($arRes), 'ar');
+        } elseif (!empty($arRes['error'])) {
+            $results['autoreply'] = ['error' => $arRes['error']];
+        }
+    } catch (Throwable $e) {
+        $results['autoreply'] = ['error' => $e->getMessage()];
+    }
+}
+
+
 /* =====================================================================
    v9.10: استخراج دوره‌ای جزئیات — حلقهٔ مستقل، قبل از همگام‌سازی.
 
@@ -15040,21 +15482,15 @@ if (!empty($results_heartbeat)) $results['heartbeat'] = $results_heartbeat;
 
    حالا اول کارهای گیرکرده آزاد می‌شوند و بعد سراغ کار تازه می‌رویم.
    هزینه‌اش وقتی چیزی گیر نکرده چند خط خواندن فایل است. */
-/* v9.16: بکاپ خودکار — اول از همه، قبل از هر کاری که ممکن است داده را
-   خراب کند. اگر پروفایل‌ها همین امروز پاک شوند، آخرین نسخهٔ سالمشان
-   از قبل روی گیت‌هاب نشسته است. */
-$_bkCfg = backupCfg();
-if (!empty($_bkCfg['auto'])) {
-    $_bkDue = ($now - (int)$_bkCfg['last_run']) >= (max(1, (int)$_bkCfg['auto_every_h']) * 3600);
-    if ($_bkDue) {
-        $_bkRes = backupRun($_bkCfg);
-        $results['backup'] = ['ok' => !empty($_bkRes['ok']),
-            'files' => (int)($_bkRes['files'] ?? 0),
-            'github' => (string)($_bkRes['github'] ?? '-')];
-    }
-}
 
-$wdEarly = cronWatchdogs($cn);
+/* v10.67 (81): نگهبانِ ابتدایی هم در شبکهٔ catch — استثنأ بی‌جفتِ
+   اینجا کلِ همگام‌سازیِ دستی را پیش از حلقه می‌کُشت. */
+try {
+    $wdEarly = cronWatchdogs($cn);
+} catch (Throwable $e) {
+    $wdEarly = [];
+    $results['watchdog_error'] = 'ابتدایی: ' . mb_substr($e->getMessage(), 0, 200);
+}
 foreach ($wdEarly as $k => $v) { if (!empty($v)) $results[$k] = $v; }
 
 /* پروفایل‌ها و وضعیت دوباره خوانده می‌شوند تا همگام‌سازیِ پایین نسخهٔ
@@ -15145,6 +15581,9 @@ $_onlyKey  = trim((string)($_GET['only'] ?? ''));
 $_forceRun = !empty($_GET['force']);
 foreach ($profiles as $key => $profile) {
 if ($_onlyKey !== '' && $key !== $_onlyKey) continue;
+/* v10.61 (۷۵): ضربانِ اتصالِ دستی — پردازندهٔ بی‌خروجی را هاست می‌کُشد؛
+   هر پروفایل یک خطِ ndjson می‌زند تا اتصال «زنده» بماند. */
+msAlive('پروفایل: ' . (string)($profile['name'] ?? $key));
 /* توقفِ دستی: بینِ دو پروفایل بررسی می‌شود تا کارِ نیمه‌کاره نماند */
 if (manualSyncActive() && manualSyncStopped()) { $results['manual_stopped'] = true; break; }
 $syncCfg = $profile['syncConfig'] ?? [];
@@ -15213,7 +15652,7 @@ if ($noExtract) {
         $pResult['step'] = 'no_extract_detail';
         $pResult['detail_linked'] = $_neLinked;
         // فازِ detail: فقط صفحاتِ محصول باز می‌شوند، صفحهٔ فهرست هرگز
-        $exRes = runBackendExtract($key, 'auto', false, 'detail', false);
+        $exRes = runBackendExtract($key, manualSyncActive() ? 'manual_sync' : 'auto', false, 'detail', false); /* v10.53 (۶۷): همگام‌سازیِ دستی ⇒ برچسبِ جدا در صف */
         if (!empty($exRes['ok'])) {
             $pResult['extracted']      = (int)($exRes['extracted'] ?? 0);
             $pResult['extract_method'] = 'no_extract_detail';
@@ -15302,7 +15741,7 @@ $detailWasUnfinished = in_array($stagePrev, ['list_done', 'detail'], true)
    اگر اجرای قبلی وسطِ جزئیات کشته شده باشد (stage=detail تازه)، مستقیم همان را
    با فازِ detail ادامه می‌دهیم (بدون گرفتن دوبارهٔ فهرست). */
 $stepMode = ($stagePrev === 'detail' && $stagePrevAge <= $stageStale) ? 'detail' : 'all';
-$exRes = runBackendExtract($key, 'auto', false, $stepMode);
+$exRes = runBackendExtract($key, manualSyncActive() ? 'manual_sync' : 'auto', false, $stepMode); /* v10.53 (۶۷) */
 $pResult['step'] = $stepMode;
 
 /* v9.67: «استخراج تفصیلیِ جداگانه» در هر اجرای کران حذف شد.
@@ -15378,6 +15817,19 @@ $profile  = $profiles[$key] ?? $profile;
 } else {
 $pResult['extract_error'] = $exRes['error'] ?? 'خطای نامشخص';
 notifRunFailure($cn, 'استخراج', $profile['name'] ?? $key, $pResult['extract_error']);
+}
+/* v10.67 (81): رابطِ همگام‌سازیِ دستی باید نتیجهٔ واقعیِ استخراج را ببیند.
+   تا حالا وقتی استخراج رد می‌شد (ردیف تکراری در صف، قفلِ سراسری، یا
+   هر خطایی)، جعبهٔ همگام‌سازی «تمام شد» نشان می‌داد ولی چیزی به صف
+   استخراج نمی‌نشست و دلیل فقط به مسنجر می‌رفت — از دید کاربر دکمه
+   «تقریباً هیچ کاری نمی‌کرد». حالا دلیلِ واقعی همین‌جاست. */
+if (manualSyncActive()) {
+    if (!empty($exRes['ok'])) {
+        manualSyncProgress([], '✅ استخراج: ' . (int)($exRes['extracted'] ?? 0) . ' محصول ('
+            . (int)($exRes['new'] ?? 0) . ' جدید، ' . (int)($exRes['price_changed'] ?? 0) . ' تغییرِ قیمت)');
+    } else {
+        manualSyncProgress([], '❌ استخراج: ' . mb_substr((string)($exRes['error'] ?? 'خطای نامشخص'), 0, 300));
+    }
 }
 }   // پایانِ else حالتِ عادی (مقابل noExtract) — v9.45
 
@@ -15517,9 +15969,28 @@ if ($target === 'woo' || $target === 'both') {
 $wooSend = $wooOnlyChanged ? $changedProducts : $orderedProducts;
 if(!empty($wooSend)){
 $wooSuffix=trim($profile['titleSuffix']??'') ?: trim($cn['basalam']['title_suffix']??'');
+// v8.56: دستهٔ ووکامرس این پروفایل، وگرنه دستهٔ پیش‌فرض تنظیمات عمومی
+$wooCatId=(int)($profile['wooCategoryId']??0);
+if($wooCatId<=0)$wooCatId=(int)($cn['woocommerce']['default_category']??0);
 $wooQueue=wooReadQueue();
 // v8.55: همین پروفایل اگر در صف ووکامرس هست، دوباره اضافه نشود
 $wooDup=queueDedupOn($cn)?queueHasProfile($wooQueue['entries'],$key,queueDedupStale($cn)):null;
+if($wooDup!==null){
+/* v10.51 (۶۵): همان قواعدِ جایگزینیِ ردیفِ کهنه، برای صفِ ووکامرس */
+if(queueCfgChanged($wooDup['config']??null,
+        ['title_suffix'=>$wooSuffix,'category_id'=>$wooCatId,'force_all'=>$wooForceAll])
+    && in_array((string)($wooDup['status']??''),['waiting','paused'],true)){
+foreach($wooQueue['entries'] as &$_qe){
+if(is_array($_qe)&&($_qe['id']??'')===($wooDup['id']??'')){
+$_qe['status']='failed';$_qe['done_at']=time();
+$_qe['fail_reason']='تنظیماتِ ارسال تغییر کرد — با ردیفِ جدید جایگزین شد';
+}}
+unset($_qe);
+wooWriteQueue($wooQueue);
+$pResult['woo_superseded']=true;
+$wooDup=null;
+}
+}
 if($wooDup!==null){
 $pResult['woo']='already_queued';
 $pResult['woo_queue_id']=$wooDup['id']??'';
@@ -15529,9 +16000,6 @@ $wooQueueId='cron_woo_'.$key.'_'.$now;
 // و اجرای بعدی محصولات اجرای قبلی را می‌فرستاد.
 $wooQFile=__DIR__.'/woo_queue_products_'.$wooQueueId.'.json';
 @file_put_contents($wooQFile,json_encode($wooSend,JSON_UNESCAPED_UNICODE),LOCK_EX);
-// v8.56: دستهٔ ووکامرس این پروفایل، وگرنه دستهٔ پیش‌فرض تنظیمات عمومی
-$wooCatId=(int)($profile['wooCategoryId']??0);
-if($wooCatId<=0)$wooCatId=(int)($cn['woocommerce']['default_category']??0);
 // v8.56: در یک اجرای کران ممکن است چند پروفایل صف شوند. قبلاً همه با
 // وضعیت «running» ثبت می‌شدند و هرکدام روی فایل مشترک می‌نوشتند؛ نتیجه
 // این بود که محصولاتِ آخرین پروفایل با تنظیماتِ اولین پروفایل ارسال
@@ -15542,7 +16010,7 @@ $wooStatus=$wooBusy?'waiting':'running';
 if($wooStatus==='running'){
 @file_put_contents(WOO_PRODUCTS_FILE,json_encode($wooSend,JSON_UNESCAPED_UNICODE),LOCK_EX);
 }
-$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>$wooStatus,'products_file'=>$wooQFile,'total'=>count($wooSend),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$wooStatus==='running'?$now:0,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'only_changed'=>$wooOnlyChanged,'config'=>['title_suffix'=>$wooSuffix,'category_id'=>$wooCatId,'force_all'=>$wooForceAll]];
+$wooQueue['entries'][]=['id'=>$wooQueueId,'status'=>$wooStatus,'products_file'=>$wooQFile,'total'=>count($wooSend),'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$wooStatus==='running'?$now:0,'done_at'=>0,'profile_key'=>$key,'profile_name'=>($profile['name']??$key),'only_changed'=>$wooOnlyChanged,'trigger'=>(manualSyncActive()?'manual_sync':'cron'),/* v10.53 (۶۷) */'config'=>['title_suffix'=>$wooSuffix,'category_id'=>$wooCatId,'force_all'=>$wooForceAll]];
 wooWriteQueue($wooQueue);
 $pResult['woo']='queued';$pResult['woo_total']=count($wooSend);$pResult['woo_status']=$wooStatus;
 }
@@ -15573,11 +16041,47 @@ $queue = bslReadQueue();
 // v8.55: از ورود دوبارهٔ همین پروفایل به صف باسلام جلوگیری کن
 $bslDup = queueDedupOn($cn) ? queueHasProfile($queue['entries'], $key, queueDedupStale($cn)) : null;
 if ($bslDup !== null) {
+    /* v10.51 (۶۵): اگر تنظیماتِ اثرگذار بر ارسال عوض شده باشند — مهم‌تر
+       از همهٔ پسوندِ عنوان — ردیفِ قدیمیِ منتظر/توقف‌خورده دیگر معتبر
+       نیست و نباید جلوی ردیفِ جدید را بگیرد؛ وگرنه کاربر پسوند را درست
+       می‌کند، در «نتایج» درست دیده می‌شود، ولی ارسال تا صف خالی شود با
+       همان پسوندِ کهنهٔ ذخیره‌شدهٔ ردیفِ قدیمی ادامه می‌یابد. ردیفِ در
+       حالِ اجرا دست نمی‌خورد (با تنظیماتی که شروع کرده تمام می‌کند). */
+    if (queueCfgChanged($bslDup['config'] ?? null,
+            ['title_suffix' => $titleSuffix, 'category_id' => $catId, 'auto_category' => $autoCat,
+             'force_all' => $bslForceAll, 'send_all_shops' => !empty($cn['basalam']['send_all_shops'])])
+        && in_array((string)($bslDup['status'] ?? ''), ['waiting', 'paused'], true)) {
+        foreach ($queue['entries'] as &$_qe) {
+            if (is_array($_qe) && ($_qe['id'] ?? '') === ($bslDup['id'] ?? '')) {
+                $_qe['status'] = 'failed';
+                $_qe['done_at'] = time();
+                $_qe['fail_reason'] = 'تنظیماتِ ارسال تغییر کرد — با ردیفِ جدید جایگزین شد';
+            }
+        }
+        unset($_qe);
+        bslWriteQueue($queue);
+        $pResult['bsl_superseded'] = true;
+        $bslDup = null;
+    }
+}
+if ($bslDup !== null) {
     @unlink($qFile);
     $pResult['bsl'] = 'already_queued';
     $pResult['bsl_queue_id'] = $bslDup['id'] ?? '';
 } else {
-$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, /* v10.21 (۳۴ب): سینکِ خودکار هم باید به همهٔ غرفه‌های فعال بفرستد. تا حالا این کلید فقط از مسیرِ دکمهٔ دستی وارد صف می‌شد، پس ارسالِ چندغرفه‌ای در کران هرگز اجرا نمی‌شد — تیک روشن بود ولی شب‌ها فقط غرفهٔ پیش‌فرض به‌روز می‌شد. */ 'send_all_shops' => !empty($cn['basalam']['send_all_shops']), /* v10.34 (۴۸ج): تیکِ خاموش ⇒ ارسالِ کامل بدون مقایسه با غرفه */ 'force_all' => $bslForceAll], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'auto_sync' => true];
+/* v10.73 (87): همان fan-outِ مسیرِ دستی — هر غرفهٔ فعال یک ردیفِ مستقل.
+   ردیفِ اول با شناسهٔ اصلی و بقیه با پسوند _s{vendor_id}؛ همه زیرِ batch_id. */
+$bslFanout=!empty($cn['basalam']['send_all_shops'])?bslFanoutShops($cn):[];
+if (count($bslFanout) > 1) {
+    $__bfFirst=true;
+    foreach ($bslFanout as $__bfSh) {
+        $__bfVid=(int)$__bfSh['vendor_id'];
+        $queue['entries'][] = ['id' => $__bfFirst ? $queueId : $queueId . '_s' . $__bfVid, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, 'send_all_shops' => 0, 'fanout' => 1, 'shop_vendor_id' => $__bfVid, 'shop_name' => (string)$__bfSh['shop_name'], 'force_all' => $bslForceAll], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'shop_vendor_id' => $__bfVid, 'shop_name' => (string)$__bfSh['shop_name'], 'shop_is_default' => !empty($__bfSh['is_default']), 'batch_id' => $queueId, 'trigger' => (manualSyncActive() ? 'manual_sync' : 'cron'), 'auto_sync' => true];
+        $__bfFirst=false;
+    }
+} else {
+$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, /* v10.21 (۳۴ب): سینکِ خودکار هم باید به همهٔ غرفه‌های فعال بفرستد. تا حالا این کلید فقط از مسیرِ دکمهٔ دستی وارد صف می‌شد، پس ارسالِ چندغرفه‌ای در کران هرگز اجرا نمی‌شد — تیک روشن بود ولی شب‌ها فقط غرفهٔ پیش‌فرض به‌روز می‌شد. v10.73 (87): وقتی چند غرفهٔ فعال است، fan-outِ بالا هرکدام را یک ردیف می‌کند و این شاخه برایِ غرفهٔ تکی می‌ماند. */ 'send_all_shops' => !empty($cn['basalam']['send_all_shops']), /* v10.34 (۴۸ج): تیکِ خاموش ⇒ ارسالِ کامل بدون مقایسه با غرفه */ 'force_all' => $bslForceAll], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, /* v10.53 (۶۷): منشأِ ردیف (دستی/خودکار) تا در تبِ ارسال هم دیده شود */ 'trigger' => (manualSyncActive() ? 'manual_sync' : 'cron'), 'auto_sync' => true];
+}
 bslWriteQueue($queue);
 $syncState[$key] = array_merge(is_array($syncState[$key] ?? null) ? $syncState[$key] : [], ['lastRun' => $now, 'status' => 'queued_bsl', 'price_sig' => $priceSig]);   // v9.11
 $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
@@ -15624,34 +16128,70 @@ try {
     $results['watchdog_error'] = mb_substr($e->getMessage(), 0, 200);
 }
 
-/* v10.21 (۳۴ج): هر کارِ کران داخل try/catch.
-   ریشهٔ «اعلان دوره‌ای قطع شد» همین بود: پینگ آخرین کارِ کران است و هر
-   استثنایی در کارهای قبل از آن (اعلان‌ها، پاسخ خودکار، گزارش شبانه) کلِ
-   اجرا را می‌کشت — پس نه پینگ می‌رفت، نه cron_last_run نوشته می‌شد، و
-   کاربر فقط سکوت می‌دید. حالا هر کار جدا محافظت می‌شود و شکستِ یکی
-   بقیه را زمین نمی‌زند. */
-try {
-    $notifyResult = bslCheckNotifications($cn);
-    if (!empty($notifyResult)) $results['notifications'] = $notifyResult;
-} catch (Throwable $e) {
-    $results['notifications'] = ['error' => mb_substr($e->getMessage(), 0, 200)];
+/* =====================================================================
+   v10.58 (۷۲): ترتیبِ تازه — دو کارِ پرمهلت، بعد از حلقهٔ همگام‌سازی.
+
+   گزارشِ کاربر: «همگام‌سازی‌های دوره‌ای اصلاً کار نمی‌کنند، دستی هم
+   همین‌طور؛ هیچ‌کدام یک کارت/ردیف به صفِ استخراج نمی‌افزایند؛ فرانتِ
+   کاربری و بک‌اند هماهنگ به نظر نمی‌رسند.»
+
+   ریشه: پمپِ ارسال (منتظرِ تا ۱۲۰ ثانیه) و بکاپِ خودکار (git push،
+   چند دقیقه) پیش از حلقهٔ همگام‌سازی اجرا می‌شدند. روی هاستی که
+   پردژهٔ پس‌زمینه را می‌کُشد (همان هاست شما)، پردژه در همین پنجره
+   می‌مرد و هرگز به حلقهٔ استخراج نمی‌رسید — پس نه کارتی به صفِ
+   استخراج می‌نشست و همگام‌سازی از بیرون «مرده» به نظر می‌رسید.
+
+   ترتیبِ تازه: قفل ← نبض ← اعلان ← پاسخِ خودکار ← نگهبان ←
+   <b>حلقهٔ همگام‌سازی (کارت همین‌جا فوراً به صفِ استخراج می‌نشیند)</b>
+   ← پمپِ ارسال ← بکاپ ← ایجنت/گزارش/پینگِ پایانی.
+
+   حالا اگر پردژه کشته شود، بعد از استخراج کشته می‌شود: کارت در صف
+   است، بخشِ انجام‌شده روی دیسک است، و نگهبان در تیکِ بعدی از
+   چک‌پوینت ادامه می‌دهد.
+   ===================================================================== */
+/* v9.16: بکاپ خودکار — قبل از هر کاری که ممکن است داده را خراب کند.
+   v10.58 (۷۲): جابجایی به بعد از حلقهٔ همگام‌سازی (سرِ مطلبِ بالا را ببینید).
+   قبلاً بی‌درنگِ اولِ تیک بود؛ یک git push چنددقیقه‌ای پردژه را نگه می‌داشت
+   (و بعد هاست می‌کُشتش) و به حلقهٔ استخراج هرگز نمی‌رسید. داده‌ها همین حالا
+   روی دیسک ذخیره می‌شوند، پس امن است بکاپ به انتهای صف برود — مهم،
+   استخراج است. */
+$_bkCfg = backupCfg();
+if (!empty($_bkCfg['auto'])) {
+    $_bkDue = ($now - (int)$_bkCfg['last_run']) >= (max(1, (int)$_bkCfg['auto_every_h']) * 3600);
+    if ($_bkDue) {
+        $_bkRes = backupRun($_bkCfg);
+        $results['backup'] = ['ok' => !empty($_bkRes['ok']),
+            'files' => (int)($_bkRes['files'] ?? 0),
+            'github' => (string)($_bkRes['github'] ?? '-')];
+    }
 }
 
-// v8.64: پاسخ خودکار به پیام مشتریان — بعد از اعلان‌ها، تا اول خبر برسد
-// و بعد ربات جواب دهد. مهلت ادب داخل خود موتور رعایت می‌شود.
-if (arCfg($cn)['enabled']) {
+/* v10.49 (۶۳): پمپِ ارسال — عمرِ همین دور را «ارسال» کنیم، نه استخراج.
+   v10.58 (۷۲): جابجایی به بعد از حلقهٔ همگام‌سازی (سرِ مطلبِ بالا را ببینید).
+   قبلاً پیش از استخراج می‌نشست و انتظارِ تا ۱۲۰ ثانیه‌اش تضمین می‌کرد که
+   هاست پردژه را پیش از رسیدن به استخراج بکشد — همان «همگام‌سازی اصلاً
+   کار نمی‌کند» که گزارش می‌شد. نقشش عوض نشد: اگر صفِ ارسال کارِ گیر دارد،
+   چقدر که هاست اجازه بدهد جلویش می‌راند (چک‌پوینت پیشرفت را نگه می‌دارد).
+   در همگام‌سازیِ دستی اجرا نمی‌شود: آنجا مرورگر وصل است و رابط خودش
+   ارسال را با اتصالِ زنده راه می‌اندازد (msKickSend). */
+if (!manualSyncActive()) {
     try {
-        $arRes = autoReplyRun($cn, false);
-        if (!empty($arRes['replied']) || !empty($arRes['failed'])) {
-            $results['autoreply'] = ['replied' => (int)$arRes['replied'],
-                                     'failed' => (int)$arRes['failed'],
-                                     'checked' => (int)$arRes['checked']];
-            if (arCfg($cn)['notify'] && (int)$arRes['replied'] > 0) notifSend($cn, arMsg($arRes));
-        } elseif (!empty($arRes['error'])) {
-            $results['autoreply'] = ['error' => $arRes['error']];
+        $_pumpStall = max(120, (int)($cn['stall_after'] ?? 300));
+        foreach (cronWatchdogQueueOrder() as $_pq) {
+            $_pqChk = queueStallCheck($_pq, $_pumpStall);
+            if (empty($_pqChk['stalled'])) continue;
+            $_pqRec = queueStallRecover($_pq, $_pumpStall, false, 120000);
+            $results['send_pump'][$_pq] = [
+                'from'    => (int)($_pqChk['current'] ?? 0),
+                'total'   => (int)($_pqChk['total'] ?? 0),
+                'resumed' => !empty($_pqRec['resumed']),
+            ];
+            $_pqAfter = queueStallCheck($_pq, $_pumpStall);
+            $results['send_pump'][$_pq]['now'] = (int)($_pqAfter['current'] ?? 0);
+            if (empty($_pqAfter['stalled'])) break;
         }
     } catch (Throwable $e) {
-        $results['autoreply'] = ['error' => $e->getMessage()];
+        $results['send_pump_error'] = mb_substr($e->getMessage(), 0, 200);
     }
 }
 
@@ -15705,6 +16245,25 @@ try {
    بعد از پایانِ رصد بتواند بخواندش.
    v9.06: حالا اتصال «همیشه» بسته است، پس همیشه همین مسیر است. خلاصه در
    cron_last_run.json می‌نشیند و با ?cron_last خوانده می‌شود. */
+/* =====================================================================
+   v10.50 (۶۴): ارسالِ همگام‌سازیِ دستی، کاملاً سرورساید.
+
+   کارگرِ دستی پاسخش را از همان ابتدای اجرا فرستاده و در سرور زنده است؛
+   کاربر می‌تواند تب را ببندد. از این‌جا تا پیش از «تمام شد»، اگر چیزی
+   در صفِ ارسال مانده باشد، نوبت‌به‌نوبت پردازش می‌شود (هر نوبت یک
+   درخواستِ فرزند با مهلتِ طولانی). اگر کارگر وسط راه بمیرد، پمپِ
+   کرانِ v10.49 از همان چک‌پوینت برمی‌دارد.
+   ===================================================================== */
+if (manualSyncActive() && empty($results['manual_stopped'])) {
+    try {
+        $_msSendRes = manualServerSendRun();
+        if (!empty($_msSendRes['stopped'])) $results['manual_stopped'] = true;
+        $results['ms_server_send'] = $_msSendRes;
+    } catch (Throwable $e) {
+        $results['ms_server_send'] = ['error' => mb_substr($e->getMessage(), 200)];
+    }
+}
+
 /* v10.35 (۴۷ه): بستنِ ردیفِ همگام‌سازیِ دستی در مدیر وظیفه. باید *قبل* از
    cronEmit باشد، چون آن تابع در مسیرِ CLI چیزی چاپ می‌کند و بعدش exit. */
 if (manualSyncActive()) {
@@ -15719,6 +16278,23 @@ if (manualSyncActive()) {
     $_msDone['profiles_done'] = count($results['profiles'] ?? []);
     $_lg = is_array($_msDone['recent_log'] ?? null) ? $_msDone['recent_log'] : [];
     $_lg[] = !empty($results['manual_stopped']) ? '⏹ با درخواستِ کاربر متوقف شد' : '✅ همگام‌سازیِ دستی تمام شد';
+    /* v10.49 (۶۳): اگر چیزی به صفِ ارسال رفته، کاربر همان‌جا ببیند —
+       و رابط (msKickSend) بلافاصله ارسال را با اتصالِ مرورگر می‌کوبد. */
+    $_msQPending = 0;
+    foreach (['باسلام' => bslReadQueue(), 'ووکامرس' => wooReadQueue()] as $_msQN => $_msQ) {
+        foreach ((array)($_msQ['entries'] ?? []) as $_msQe) {
+            if (in_array((string)($_msQe['status'] ?? ''), ['waiting', 'running', 'paused'], true)) {
+                $_msQPending += max(0, (int)($_msQe['total'] ?? 0) - (int)($_msQe['current'] ?? 0));
+            }
+        }
+    }
+    if (empty($results['manual_stopped'])) {
+        if ($_msQPending > 0) {
+            $_lg[] = '📤 ' . $_msQPending . ' product entered the send queue — sending is continuing server-side — no need to keep the tab open';
+        } else {
+            $_lg[] = '✅ sending finished server-side';
+        }
+    }
     $_msDone['recent_log'] = array_slice($_lg, -40);
     writeProgress(MANUAL_SYNC_PROGRESS_FILE, $_msDone);
     @unlink(MANUAL_SYNC_STOP_FILE);
@@ -15739,6 +16315,178 @@ if (isset($_GET['cron_last'])) {
     if (!is_array($d)) { echo json_encode(['ok' => false, 'error' => 'گزارش ناخوانا'], JSON_UNESCAPED_UNICODE); exit; }
     $d['finished_at'] = (int)@filemtime($f);
     echo json_encode($d, JSON_UNESCAPED_UNICODE); exit;
+}
+
+/* =====================================================================
+ *  v10.58 (۷۲): «دکترِ همگام‌سازی» — چرا کار نمی‌کند؟
+ *
+ *  گزارشِ کاربر: «دوره‌ای و دستی هیچ‌کدام کار نمی‌کنند؛ کارت به صفِ
+ *  استخراج نمی‌آید؛ فرانت و بک هماهنگ نیستند.» مشکلِ واقعی: وضعیتِ
+ *  زنجیره هیچ‌جا دیده نمی‌شد — قفلِ کران، قفلِ استخراج، آخرین تیک،
+ *  وضعیتِ هر پروفایل — همه پراکنده در فایل‌ها، بدونِ اندپوینتی که
+ *  جمعشان کند و بگوید کدام حلقه گیر دارد. این اندپوینت کلِ زنجیره را
+ *  معاینه می‌کند و برای هر حلقه، به زبانِ ساده، نتیجه و راهِ حل را
+ *  می‌گوید. دکمهٔ «🩺 تشخیص» در بخشِ همگام‌سازیِ دستی همین را می‌خواند.
+ * ===================================================================== */
+if (isset($_GET['sync_diagnose'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $dgNow = time();
+    $dgCn  = loadConnections();
+    $dgStall = max(120, (int)($dgCn['stall_after'] ?? 300));
+    $dgOut = ['ok' => true, 'now' => $dgNow, 'stall_after' => $dgStall,
+              'checks' => [], 'profiles' => [], 'last_cron' => null];
+    $chk = function (string $k, bool $ok, string $msg, $extra = null) use (&$dgOut) {
+        $c = ['key' => $k, 'ok' => $ok, 'msg' => $msg];
+        if ($extra !== null) $c['extra'] = $extra;
+        $dgOut['checks'][] = $c;
+    };
+    /* ۱ — آیا کرانِ هاست اصلاً به ما می‌رسد؟ */
+    $cllFile = __DIR__ . '/cron_last_run.json';
+    $cllAt = 0;
+    if (is_file($cllFile)) {
+        $cllAt = (int)@filemtime($cllFile);
+        $dgOut['last_cron'] = json_decode((string)@file_get_contents($cllFile), true);
+    }
+    $cllAge = $cllAt > 0 ? ($dgNow - $cllAt) : null;
+    /* v10.61 (۷۵): آدرسِ دقیقِ کران را هم نشان بده تا کاربر همان را در
+       کنترلِ پنلِ هاست / سرویسِ کران تنظیم کند. */
+    $dgCronUrl = selfBaseUrl() . '?cron_run=1';
+    if ($cllAge === null) {
+        $chk('last_tick', false,
+            'هیچ تیکِ کرانی ثبت نشده — کرانِ هاست اصلاً به این آدرس نمی‌رسد. این آدرس را در کرانِ هاست تنظیم کنید: ' . $dgCronUrl . ' (هر ۵ دقیقه)');
+    } else {
+        $dc = is_array($dgOut['last_cron']) ? $dgOut['last_cron'] : [];
+        $reason = trim((string)($dc['reason'] ?? ''));
+        $chk('last_tick', $cllAge <= max(900, (int)($dgCn['cron_lock_min'] ?? 30) * 60),
+            'آخرین تیکِ کران: ' . $cllAge . ' ثانیه پیش'
+            . ($reason ? (' — ' . $reason) : '')
+            . ($cllAge > max(900, (int)($dgCn['cron_lock_min'] ?? 30) * 60) ? (' — کران قطع شده یا می‌مُرد؛ آدرسِ لازم: ' . $dgCronUrl) : ''),
+            ['at' => $cllAt, 'ok' => $dc['ok'] ?? null, 'skipped' => $dc['skipped'] ?? null, 'cron_url' => $dgCronUrl]);
+    }
+    /* ۲ — قفلِ کران */
+    $crLock = __DIR__ . '/.cron_run.lock';
+    if (is_file($crLock)) {
+        $dgSt = (int)trim((string)@file_get_contents($crLock));
+        if ($dgSt <= 0) $dgSt = (int)@filemtime($crLock);
+        $dgLa = max(0, $dgNow - $dgSt);
+        $dgProg = readProgress(EXTRACT_PROGRESS_FILE);
+        $dgTs = (int)($dgProg['last_progress_ts'] ?? (int)($dgProg['started_at'] ?? 0));
+        $dgDead = (!empty($dgProg['done']) || empty($dgProg['running']))
+            ? ($dgLa > $dgStall)
+            : (($dgTs > 0 && ($dgNow - $dgTs) > $dgStall && $dgLa > $dgStall));
+        $chk('cron_lock', $dgDead, $dgDead
+            ? 'قفلِ کران کهنه و مرده است — در تیکِ بعدی خودبه‌خود برداشته می‌شود.'
+            : 'قفلِ کران دستِ یک اجرای زنده است (' . $dgLa . ' ثانیه پیش). تا آن اجرا تمام شود، تیک‌های بعدی منتظر می‌مانند — اگر این پیام مدام می‌آید، در «گزارشِ آخرین اجرا» علت را ببینید.',
+            ['age' => $dgLa]);
+    } else {
+        $chk('cron_lock', true, 'قفلِ کران آزاد است.');
+    }
+    /* ۳ — قفلِ سراسریِ استخراج */
+    $exLk = json_decode((string)@file_get_contents(EXTRACT_LOCK_FILE), true);
+    if (is_array($exLk) && !empty($exLk['queue_id'])) {
+        $dgAge = $dgNow - (int)($exLk['at'] ?? 0);
+        $dgTtl = max(120, min((int)EXTRACT_LOCK_TTL, $dgStall * 3));
+        $dgWho = trim((string)($exLk['profile_name'] ?? $exLk['profile_key'] ?? ''));
+        $chk('extract_lock', $dgAge >= $dgTtl, $dgAge >= $dgTtl
+            ? 'قفلِ استخراج کهنه است (صاحب: ' . ($dgWho ?: '?') . ') — اجرایِ بعدی خودبه‌خود برمی‌دارد.'
+            : 'قفلِ استخراج دستِ یک استخراجِ زنده است (' . ($dgWho ?: '?') . '، ' . $dgAge . ' ثانیه). استخراجِ‌های تازه نوبتشان را می‌گیرند — این طبیعی است.',
+            ['age' => $dgAge, 'ttl' => $dgTtl, 'profile' => $exLk['profile_key'] ?? null]);
+    } else {
+        $chk('extract_lock', true, 'قفلِ استخراج آزاد است.');
+    }
+    /* ۴ — وضعیتِ همگام‌سازیِ دستی */
+    $msP = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+    if (!empty($msP['running']) && empty($msP['done'])) {
+        $msIdleD = $dgNow - (int)($msP['last_progress_ts'] ?? ($msP['ts'] ?? 0));
+        $chk('manual_sync', $msIdleD <= $dgStall, $msIdleD <= $dgStall
+            ? 'یک همگام‌سازیِ دستی در جریان است (فاز: ' . (string)($msP['phase'] ?? '?') . '، آخرین پیشرفت ' . $msIdleD . ' ثانیه پیش).'
+            : 'اجرایِ دستی نیمه‌کاره مانده (' . $msIdleD . ' ثانیه بی‌حرکت). اولین بازدید از وضعیت، خودش را بسته و دکمه دوباره کار می‌کند.',
+            ['idle' => $msIdleD]);
+    } else {
+        $chk('manual_sync', true, 'همگام‌سازیِ دستی آماده است.'
+            . (!empty($msP['done']) && !empty($msP['error']) ? ' آخرین اجرا: ' . (string)$msP['error'] : ''));
+    }
+    /* ۵ — صفِ استخراج */
+    $qD = extractReadQueue();
+    $entriesD = is_array($qD['entries'] ?? null) ? $qD['entries'] : [];
+    $bySt = [];
+    $activeQ = 0;
+    foreach ($entriesD as $eD) {
+        $sD = (string)($eD['status'] ?? 'unknown');
+        $bySt[$sD] = (int)($bySt[$sD] ?? 0) + 1;
+        if (in_array($sD, ['running', 'waiting', 'paused'], true)) $activeQ++;
+    }
+    $chk('extract_queue', $activeQ === 0, $activeQ === 0
+        ? 'صفِ استخراج ردیفِ فعال ندارد (' . count($entriesD) . ' ردیفِ گذشته).'
+        : $activeQ . ' ردیفِ فعال در صفِ استخراج — اگر بیشتر از ' . $dgStall . ' ثانیه بی‌حرکت بماند، نگهبان ادامه‌اش می‌دهد.',
+        ['by_status' => $bySt, 'total' => count($entriesD)]);
+    /* ۶ — هر پروفایل */
+    $profilesD = loadProfiles();
+    $syncStateD = loadSyncState();
+    foreach ($profilesD as $kD => $pD) {
+        if (!is_array($pD)) continue;
+        $sc = $pD['syncConfig'] ?? [];
+        $iv = (int)($sc['interval'] ?? 3600);
+        $lr = (int)($syncStateD[$kD]['lastRun'] ?? 0);
+        $issues = [];
+        if (empty($sc['enabled'])) $issues[] = 'همگام‌سازی در تنظیماتِ پروفایل خاموش است';
+        elseif ($iv > 0 && $lr > 0 && ($dgNow - $lr) < $iv)
+            $issues[] = 'هنوز نوبتش نشده (' . ($iv - ($dgNow - $lr)) . ' ثانیه مانده)';
+        if (queueHasProfile($entriesD, (string)$kD, 0) !== null) $issues[] = 'ردیفِ فعال در صفِ استخراج دارد';
+        if (!empty($sc['noExtract'])) {
+            $issues[] = 'پروفایلِ «بدون استخراج» است (انتظارِ کارتِ فهرست نداشته باشید)';
+        } elseif (empty($pD['selectors']['container']) && empty($pD['products'])) {
+            $issues[] = 'نه سلکتورِ فهرست دارد نه محصولِ واردشده — استخراج چیزی نمی‌سازد';
+        }
+        $dgOut['profiles'][] = [
+            'key' => (string)$kD, 'name' => (string)($pD['name'] ?? $kD),
+            'enabled' => !empty($sc['enabled']), 'interval' => $iv,
+            'last_run_age' => $lr > 0 ? $dgNow - $lr : null,
+            'issues' => $issues, 'ok' => !$issues,
+        ];
+    }
+    /* v10.66 (۸۰): صفِ استخراج + آخرین همگام‌سازیِ دستی + «چرا چیزی نمی‌آید؟» */
+    $dgExQ = extractReadQueue();
+    $dgExE = array_values($dgExQ['entries'] ?? []);
+    $dgExActive = 0; $dgExRows = [];
+    foreach (array_slice($dgExE, -8) as $dgE) {
+        $dgStt = (string)($dgE['status'] ?? '');
+        if (in_array($dgStt, queueActiveStatuses(), true)) $dgExActive++;
+        $dgExRows[] = [
+            'profile'  => (string)($dgE['profile_name'] ?? $dgE['profile_key'] ?? ''),
+            'status'   => $dgStt,
+            'age'      => (int)($dgE['started_at'] ?? 0) > 0 ? max(0, $dgNow - (int)$dgE['started_at']) : 0,
+            'products' => (int)($dgE['products_count'] ?? 0),
+            'error'    => mb_substr((string)($dgE['error'] ?? ''), 0, 120),
+        ];
+    }
+    $dgMsP = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+    $dgMs = [
+        'running'   => !empty($dgMsP['running']) && empty($dgMsP['done']),
+        'done'      => !empty($dgMsP['done']),
+        'cancelled' => !empty($dgMsP['cancelled']),
+        'phase'     => (string)($dgMsP['phase'] ?? ''),
+        'profile'   => (string)($dgMsP['profile_name'] ?? ''),
+        'error'     => mb_substr((string)($dgMsP['error'] ?? ''), 0, 200),
+        'age'       => (int)($dgMsP['last_progress_ts'] ?? 0) > 0 ? max(0, $dgNow - (int)$dgMsP['last_progress_ts']) : 0,
+        'log_tail'  => array_map(fn($l) => mb_substr((string)$l, 0, 160), array_slice((array)($dgMsP['recent_log'] ?? []), -10)),
+    ];
+    $dgWhy = null;
+    if ($dgMs['running']) {
+        $dgWhy = 'یک همگام‌سازیِ دستی همین حالا در جریان است (مرحله: ' . ($dgMs['phase'] ?: '?') . ') — صف در همان اجرا پر می‌شود.';
+    } elseif ($dgExActive > 0) {
+        $dgWhy = $dgExActive . ' ردیفِ فعال در صفِ استخراج هست — ردیف‌های تازه بعد از پایانِ همین ردیف اضافه می‌شوند.';
+    } elseif ($dgMs['done'] && $dgMs['age'] < 3600) {
+        $dgWhy = $dgMs['error'] !== ''
+            ? 'آخرین همگام‌سازیِ دستی با خطا تمام شده: ' . $dgMs['error']
+            : 'آخرین همگام‌سازیِ دستی بدونِ خطا تمام شده ولی ردیفی در صف نمانده — گزارشِ پایین را ببینید.';
+    } else {
+        $dgWhy = 'ردیفِ فعالی در صف نیست. اگر همگام‌سازی چیزی نمی‌آورد، وضعیتِ هر پروفایل در «آخرین اجرا» (بالا) را ببینید: هنوز نوبت نیست / غیرفعال / خطا.';
+    }
+    $dgOut['queue'] = ['count' => count($dgExE), 'active' => $dgExActive, 'rows' => $dgExRows,
+                       'manual' => $dgMs, 'why' => $dgWhy];
+    echo json_encode($dgOut, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
 }
 
 /* =====================================================================
@@ -15767,22 +16515,29 @@ if (isset($_GET['notif_health'])) {
     // ۱) پیام‌رسان تنظیم است؟
     $hasBaleh  = trim((string)($cnH['baleh']['token'] ?? '')) !== '' && trim((string)($cnH['baleh']['chat_id'] ?? '')) !== '';
     $hasRubika = trim((string)($cnH['rubika']['token'] ?? '')) !== '' && trim((string)($cnH['rubika']['chat_id'] ?? '')) !== '';
-    $add('messenger', $hasBaleh || $hasRubika,
-         ($hasBaleh || $hasRubika) ? ('پیام‌رسان فعال: ' . trim(($hasBaleh ? 'بله ' : '') . ($hasRubika ? 'روبیکا' : '')))
+    $hasTelegram = trim((string)($cnH['telegram']['token'] ?? '')) !== '' && trim((string)($cnH['telegram']['chat_id'] ?? '')) !== '';   // v10.78 (92)
+    $add('messenger', $hasBaleh || $hasRubika || $hasTelegram,
+         ($hasBaleh || $hasRubika || $hasTelegram) ? ('پیام‌رسان فعال: ' . trim(($hasBaleh ? 'بله ' : '') . ($hasRubika ? 'روبیکا ' : '') . ($hasTelegram ? 'تلگرام' : '')))
                                    : 'هیچ پیام‌رسانی تنظیم نشده (توکن یا شناسهٔ چت خالی است)');
 
     /* ۲) پیش‌نیازهای اعلانِ باسلام (سفارش/چت/محصول).
        v10.22 (۳۵الف): این‌ها فقط اعلان‌های باسلام را محدود می‌کنند؛
        پینگِ دوره‌ای دیگر به آن‌ها وابسته نیست، پس نبودشان «مشکل» شمرده
-       نمی‌شود مگر کاربر واقعاً اعلانِ باسلام را روشن کرده باشد. */
-    $why = notifPrereq($cnH);
-    $wantsBsl = !empty($cnH['notif_events']['order_new']) || !empty($cnH['notif_events']['order_status'])
-             || !empty($cnH['notif_events']['chat_msg'])  || !empty($cnH['notif_events']['product_status'])
-             || !empty($cnH['notif_events']['product_new']);
-    $add('prereq', $why === null || !$wantsBsl,
-         $why === null ? 'پیش‌نیازها کامل است'
-                       : ($wantsBsl ? ('اعلان‌های باسلام کار نمی‌کنند — ' . $why)
-                                    : ('اعلانِ باسلام خاموش است (' . $why . ') — پینگِ دوره‌ای مستقل کار می‌کند)')));
+       نمی‌شود مگر کاربر واقعاً اعلانِ باسلام را روشن کرده باشد.
+       v10.45 (۵۹): پیش‌نیاز دیگر «کامل‌بودنِ غرفهٔ پیش‌فرض» نیست، بلکه
+       «حداقل یک غرفه با توکن» است — بررسی‌ها حالا غرفه‌به‌غرفه و با
+       توکنِ خودِ هرکدام انجام می‌شوند. */
+    $neH = $cnH['notif_events'] ?? [];
+    $shopsH = array_values(array_filter(bslAllShops($cnH), fn($s) => trim((string)($s['token'] ?? '')) !== ''));
+    $wantsBsl = notifEventOn($neH, 'order_new') || notifEventOn($neH, 'order_status')
+             || notifEventOn($neH, 'chat_msg')  || notifEventOn($neH, 'product_status')
+             || notifEventOn($neH, 'product_new');
+    $shopsOk = $shopsH !== [];
+    $add('prereq', $shopsOk || !$wantsBsl,
+         $shopsOk ? (count($shopsH) . ' غرفه با توکن در دسترس است'
+                    . (count($shopsH) > 1 ? ' — اعلان‌ها برای همهٔ غرفه‌هاست' : ''))
+                  : ($wantsBsl ? 'اعلان‌های باسلام کار نمی‌کنند — هیچ غرفه‌ای با توکن تنظیم نشده'
+                               : 'اعلانِ باسلام خاموش است — پینگِ دوره‌ای مستقل کار می‌کند'));
 
     // ۳) تیکِ پینگ روشن است؟
     $pingOn = !empty($cnH['notif_events']['cron_ping']);
@@ -15826,8 +16581,46 @@ if (isset($_GET['notif_health'])) {
                                      : ('قفلِ فعال، سنِ ' . $lockAgeH . ' ثانیه')),
          ['age_sec' => $lockAgeH]);
 
+    /* ۸) v10.45 (۵۹): آخرین اجرای کران خطای اعلان داشته؟
+       خطاها در cron_last_run.json می‌نشینند و در پینگِ بعدی هم
+       اعلام می‌شوند؛ اینجا دلیلِ «سکوت» را مستقیم نشان می‌دهیم. */
+    $lastNotifErr = null;
+    if (is_file($doneF)) {
+        $_lr = json_decode((string)@file_get_contents($doneF), true);
+        if (is_array($_lr) && is_array($_lr['notifications']['errors'] ?? null) && $_lr['notifications']['errors']) {
+            $lastNotifErr = implode('؛ ', array_slice($_lr['notifications']['errors'], 0, 2));
+        }
+    }
+    $add('notif_errors', $lastNotifErr === null,
+         $lastNotifErr === null ? 'خطای اعلان در آخرین اجرا: نیست'
+                                : 'خطای اعلان در آخرین اجرا: ' . $lastNotifErr);
+
+    /* ۹) v10.46 (۶۰): آخرین دورِ بررسی رویدادها کِی و چه دیده؟
+       اگر این تازه نباشد، کران اجرا نشده — و اگر تازه باشد ولی صفر،
+       بررسی شده ولی چیزی پیدا نشده (دکمه‌های تست می‌گویند چرا). */
+    $out['last_notif_run'] = (int)($stH['last_notif_run'] ?? 0);
+    if ($out['last_notif_run'] > 0) {
+        $_ageN = max(0, $now - $out['last_notif_run']);
+        $out['last_notif_run_fa'] = $_ageN < 90 ? $_ageN . ' ثانیه پیش'
+                             : ($_ageN < 5400 ? (int)round($_ageN / 60) . ' دقیقه پیش'
+                                              : (int)round($_ageN / 3600) . ' ساعت پیش');
+        if ($out['last_notif_run_fa'] === '0 ثانیه پیش') $out['last_notif_run_fa'] = 'همین حالا';
+    }
+    $out['last_notif_seen'] = is_array($stH['last_notif_seen'] ?? null) ? $stH['last_notif_seen'] : null;
+    $out['last_notif_found'] = is_array($stH['last_notif_found'] ?? null) ? $stH['last_notif_found'] : null;
+    $out['last_notif_pending'] = (int)($stH['last_notif_pending'] ?? 0); /* v10.47 (۶۱) */
+
     $out['healthy'] = empty($out['problems']);
     echo json_encode($out, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* v10.66 (۸۰): فیدِ رویدادهایِ زنده برای مرورگر — رویدادهایِ غیرچت */
+if (isset($_GET['live_feed'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $lfSince = (int)($_GET['since'] ?? 0);
+    echo json_encode(['ok' => true, 'now' => time(),
+                      'events' => liveFeedLoad($lfSince)], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -15937,7 +16730,7 @@ if (isset($_GET['bulk_edit'])) {
     }
     if ($notify && !$dry) {
         $why = notifPrereq($cn);
-        if ($why === null) { $res['delivery'] = notifSend($cn, bulkEditMsg($res));
+        if ($why === null) { $res['delivery'] = notifSend($cn, bulkEditMsg($res), 'report');
             bulkProgress(['log_add' => ['📤 گزارش به پیام‌رسان‌ها فرستاده شد']]); }
         else { $res['notify_error'] = $why; bulkProgress(['log_add' => ['⚠️ ارسال نشد: ' . $why]]); }
     }
@@ -15998,7 +16791,7 @@ if (isset($_GET['photo_fix'])) {
     }
     if ($notify && !$dry) {
         $why = notifPrereq($cn);
-        if ($why === null) { $res['delivery'] = notifSend($cn, photoFixMsg($res));
+        if ($why === null) { $res['delivery'] = notifSend($cn, photoFixMsg($res), 'report');
             photoFixProgress(['log_add' => ['📤 گزارش فرستاده شد']]); }
         else { $res['notify_error'] = $why; }
     }
@@ -17046,7 +17839,7 @@ function tasksResumeUrl(string $key, array $def, array $p): string {
             return $base . '&target=' . $t . '&mode=' . $m;
         case 'catfix':
             $m = (string)($p['mode'] ?? 'ai_text');
-            if (!in_array($m, ['ai_text', 'master', 'quorum'], true)) $m = 'ai_text';
+            if (!in_array($m, ['ai_text', 'master', 'quorum', 'fallback'], true)) $m = 'ai_text';   /* v10.71 (85) */
             $q = $base . '&mode=' . $m;
             if ((int)($p['product_id'] ?? 0) > 0) $q .= '&product_id=' . (int)$p['product_id'];
             return $q;
@@ -18134,7 +18927,7 @@ if (isset($_GET['suffix_report'])) {
     if ($notify && !empty($rep['ok'])) {
         $why = notifPrereq($cn);
         if ($why === null) {
-            $rep['delivery'] = notifSend($cn, suffixReportMsg($rep));
+            $rep['delivery'] = notifSend($cn, suffixReportMsg($rep), 'report');
             suffixProgress(['log_add' => ['📤 گزارش به پیام‌رسان‌ها فرستاده شد']]);
         } else {
             $rep['notify_error'] = $why;
@@ -18305,7 +19098,7 @@ if (isset($_GET['dedup_stop'])) {
 if (isset($_GET['catfix_start'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $mode = (string)($_GET['mode'] ?? 'ai_text');
-    if (!in_array($mode, ['ai_text', 'master', 'quorum'], true)) $mode = 'ai_text';
+    if (!in_array($mode, ['ai_text', 'master', 'quorum', 'fallback'], true)) $mode = 'ai_text';   /* v10.71 (85): روشِ چهارم */
     $opts = ['quorum' => (int)($_GET['quorum'] ?? 2),
              'product_id' => (int)($_GET['product_id'] ?? 0)];
 
@@ -18614,7 +19407,7 @@ if (isset($_GET['suffix_notify'])) {
     if (!is_array($rep) || empty($rep['ok'])) {
         echo json_encode(['ok' => false, 'error' => 'اول یک گزارش بگیرید'], JSON_UNESCAPED_UNICODE); exit;
     }
-    echo json_encode(['ok' => true, 'delivery' => notifSend($cn, suffixReportMsg($rep))],
+    echo json_encode(['ok' => true, 'delivery' => notifSend($cn, suffixReportMsg($rep), 'report')],
         JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -18869,6 +19662,183 @@ if (isset($_GET['ar_log'])) {
     echo json_encode(['ok' => true, 'log' => array_slice(arLogRead(), 0, 30),
         'last_run' => (int)($stAR['last_run'] ?? 0), 'daily' => $stAR['daily'] ?? []],
         JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* =====================================================================
+ *  v10.55 (69): پاسخ دستی به پیام‌های مشتری
+ *
+ *  خواستهٔ کاربر: برای جواب دادن به مشتری نباید رفت پلتفرمِ باسلام را
+ *  باز کرد. گفتگوها داخلِ پنل باز می‌شوند و پاسخ همین‌جا فرستاده می‌شود.
+ *  • bsl_chats         — فهرستِ گفتگوهایِ تازه (با شمارِ خوانده‌نشده)
+ *  • bsl_chat_messages — تاریخچهٔ کاملِ یک گفتگو (هر دو طرف)
+ *  • bsl_chat_reply    — ارسالِ پاسخ (فرستندهٔ واقعی همان bslSendChatMessage
+ *                        است — یک فرستنده برای همهٔ پاسخ‌ها)
+ * ===================================================================== */
+if (isset($_GET['bsl_chats'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(60);
+    $cnMR = loadConnections();
+    $shopsMR = bslChatShops($cnMR);
+    if (!$shopsMR) { echo json_encode(['ok' => false, 'error' => 'غرفهٔ باسلامی با توکن تنظیم نشده است'], JSON_UNESCAPED_UNICODE); exit; }
+    $limMR = max(5, min(50, (int)($_GET['limit'] ?? 30)));
+    $onlyMR = (int)($_GET['shop'] ?? 0);   // 0 = همهٔ غرفه‌ها
+    /* v10.57 (۷۱): کشِ ۲ ثانیه‌ای — رابط کاربری هر ثانیه پُل می‌زند؛ با کش
+       هر غرفه در هر ۲ ثانیه یک‌بار به API می‌رسد، نه هر ثانیه. */
+    $cFileMR = __DIR__ . '/bsl_chats_cache.json';
+    $cachedMR = [];
+    if (is_file($cFileMR) && time() - (int)@filemtime($cFileMR) <= 2) {
+        $cD = json_decode((string)@file_get_contents($cFileMR), true);
+        if (is_array($cD) && is_array($cD['rows'] ?? null)) $cachedMR = $cD['rows'];
+    }
+    $rowsMR = []; $shopErrMR = []; $shopOutMR = [];
+    foreach ($shopsMR as $shMR) {
+        if ($onlyMR > 0 && (int)$shMR['shop'] !== $onlyMR) continue;
+        $kMR = (string)$shMR['shop'];
+        if (isset($cachedMR[$kMR])) {
+            $rowsMR = array_merge($rowsMR, $cachedMR[$kMR]);
+            $shopOutMR[] = ['shop' => (int)$shMR['shop'], 'name' => $shMR['name'], 'ok' => true, 'n' => count($cachedMR[$kMR])];
+            continue;
+        }
+        $outShMR = [];
+        $rMR = bslReqRead($shMR['token'], 'chats?limit=' . $limMR . '&order_by=updated_at');
+        if (empty($rMR['ok'])) {
+            $shopErrMR[] = ['shop' => (int)$shMR['shop'], 'name' => $shMR['name'],
+                            'error' => bslApiError($rMR, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')];
+            $shopOutMR[] = ['shop' => (int)$shMR['shop'], 'name' => $shMR['name'], 'ok' => false, 'n' => 0];
+            continue;
+        }
+        $myIdMR = bslMyUserId($shMR['token']);
+        $rawMR = $rMR['body']['data']['chats'] ?? ($rMR['body']['data'] ?? []);
+        if (!is_array($rawMR)) $rawMR = [];
+        foreach ($rawMR as $cMR) {
+            if (!is_array($cMR)) continue;
+            $ncMR = bslNormalizeChat($cMR);
+            $lmMR = is_array($cMR['last_message'] ?? null) ? $cMR['last_message'] : [];
+            if ($ncMR['chat_id'] <= 0) continue;
+            /* v10.62 (۷۶): آدرسِ تصویرِ آخرین پیام (اگر پیام تصویر باشد) —
+               پیش‌نمایش در کارتِ نوتیف و لیستِ گفتگوها. از همهٔ شکل‌هایِ
+               ممکنِ پاسخ برداشته می‌شود (همان الگوی bslChatThread). */
+            $lmImgMR = '';
+            foreach ([$lmMR['attachment']['files'][0]['url'] ?? null,
+                      $lmMR['content']['url'] ?? null,
+                      $lmMR['content']['files'][0]['url'] ?? null,
+                      $lmMR['url'] ?? null,
+                      $lmMR['content']['image'] ?? null,
+                      $lmMR['image'] ?? null] as $uImgMR) {
+                if (is_string($uImgMR) && strncmp($uImgMR, 'http', 4) === 0) { $lmImgMR = $uImgMR; break; }
+            }
+            $outShMR[] = [
+                'chat_id'      => $ncMR['chat_id'],
+                'who'          => $ncMR['who'],
+                'text'         => $ncMR['text'],
+                'unseen'       => $ncMR['unseen'],
+                'updated_at'   => $ncMR['updated_at'],
+                'last_is_mine' => ($myIdMR > 0 && (int)($lmMR['sender']['id'] ?? 0) === $myIdMR),
+                /* v10.60 (۷۴): شناسهٔ آخرین پیام — مبنای کشفِ پیامِ تازهٔ مشتری
+                   برای نوتیفیکیشنِ زنده (کارتِ سوایپ‌شونده). */
+                'last_msg_id'  => (int)($lmMR['id'] ?? 0),
+                'last_img'     => $lmImgMR,
+                'last_type'    => (string)($lmMR['message_type'] ?? ''),
+                'shop'         => (int)$shMR['shop'],
+                'shop_name'    => $shMR['name'],
+                'vendor_id'    => (int)$shMR['vendor_id'],
+            ];
+        }
+        $rowsMR = array_merge($rowsMR, $outShMR);
+        $cachedMR[$kMR] = $outShMR;
+        $shopOutMR[] = ['shop' => (int)$shMR['shop'], 'name' => $shMR['name'], 'ok' => true, 'n' => count($outShMR)];
+    }
+    @file_put_contents($cFileMR, json_encode(['rows' => $cachedMR], JSON_UNESCAPED_UNICODE), LOCK_EX);
+    usort($rowsMR, function ($a, $b) { return strcmp((string)($b['updated_at'] ?? ''), (string)($a['updated_at'] ?? '')); });
+    echo json_encode(['ok' => true, 'chats' => $rowsMR, 'shops' => $shopOutMR, 'shop_errors' => $shopErrMR], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['bsl_chat_messages'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(60);
+    $cnMR = loadConnections();
+    $shopsMR = bslChatShops($cnMR);
+    if (!$shopsMR) { echo json_encode(['ok' => false, 'error' => 'غرفهٔ باسلامی با توکن تنظیم نشده است'], JSON_UNESCAPED_UNICODE); exit; }
+    $chatIdMR = (int)($_GET['chat_id'] ?? 0);
+    $limMR = max(1, min(50, (int)($_GET['limit'] ?? 30)));
+    $shopNMR = (int)($_GET['shop'] ?? 0);
+    if ($chatIdMR <= 0) { echo json_encode(['ok' => false, 'error' => 'شناسهٔ گفتگو نامعتبر'], JSON_UNESCAPED_UNICODE); exit; }
+    /* v10.57 (۷۱): اگر شمارهٔ غرفه آمده فقط همان؛ وگرنه گفتگو ممکن است از
+       هر غرفه‌ای باشد — به ترتیب امتحان می‌کنیم تا یکی جواب بدهد. */
+    $tryMR = ($shopNMR > 0)
+        ? array_values(array_filter($shopsMR, function ($x) use ($shopNMR) { return (int)$x['shop'] === $shopNMR; }))
+        : $shopsMR;
+    $msgsMR = []; $shMR = null;
+    foreach ($tryMR as $candMR) {
+        $msgsMR = bslChatThread($candMR['token'], $chatIdMR, $limMR);
+        if ($msgsMR) { $shMR = $candMR; break; }
+    }
+    echo json_encode(['ok' => true, 'messages' => $msgsMR,
+                      'shop' => $shMR ? (int)$shMR['shop'] : 0,
+                      'shop_name' => $shMR ? $shMR['name'] : ''], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['bsl_chat_reply'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    @set_time_limit(90);
+    @ini_set('post_max_size', '16M');
+    @ini_set('upload_max_filesize', '16M');
+    $cnMR = loadConnections();
+    $shopsMR = bslChatShops($cnMR);
+    if (!$shopsMR) { echo json_encode(['ok' => false, 'error' => 'غرفهٔ باسلامی با توکن تنظیم نشده است'], JSON_UNESCAPED_UNICODE); exit; }
+    $chatIdMR = (int)($_POST['chat_id'] ?? $_GET['chat_id'] ?? 0);
+    $textMR = trim((string)($_POST['text'] ?? $_GET['text'] ?? ''));
+    $shopNMR = (int)($_POST['shop'] ?? $_GET['shop'] ?? 0);
+    $shMR = $shopNMR > 0 ? bslShopByNum($shopsMR, $shopNMR) : null;
+    if ($shMR === null) $shMR = $shopsMR[0];   // عقب‌نشینی: اولینِ (پیش‌فرض)
+    if ($chatIdMR <= 0) { echo json_encode(['ok' => false, 'error' => 'شناسهٔ گفتگو لازم است'], JSON_UNESCAPED_UNICODE); exit; }
+    /* v10.57 (۷۱): تصویر (dataURL یا base64) — اول به سرویسِ آپلودِ باسلام
+       می‌رود (chat.photo)، بعد به‌صورتِ attachment به گفتگو پیوست می‌شود. */
+    $fileMR = null;
+    $imgB64MR = trim((string)($_POST['image_b64'] ?? ''));
+    $imgNameMR = trim((string)($_POST['image_name'] ?? ''));
+    if ($imgNameMR === '') $imgNameMR = 'تصویر';
+    $imgMimeMR = trim((string)($_POST['image_mime'] ?? ''));
+    if ($imgB64MR !== '') {
+        if (preg_match('/^data:(image\/[^;]+);base64,(.+)$/is', $imgB64MR, $mImgMR)) {
+            $imgMimeMR = $mImgMR[1]; $imgB64MR = $mImgMR[2];
+        }
+        $b64LenMR = strlen($imgB64MR);
+        if ($b64LenMR < 100 || $b64LenMR > 9500000) {
+            echo json_encode(['ok' => false, 'error' => 'تصویر نامعتبر است (بیش‌ازحد بزرگ — حداکثر حدود ۷ مگابایت)'], JSON_UNESCAPED_UNICODE); exit;
+        }
+        $binMR = base64_decode($imgB64MR, true);
+        if ($binMR === false) { echo json_encode(['ok' => false, 'error' => 'فایلِ تصویر خراب است'], JSON_UNESCAPED_UNICODE); exit; }
+        $tmpMR = tempnam(sys_get_temp_dir(), 'mrimg_');
+        if ($tmpMR === false || file_put_contents($tmpMR, $binMR) === false) {
+            echo json_encode(['ok' => false, 'error' => 'ذخیرهٔ موقتِ تصویر ناموفق بود'], JSON_UNESCAPED_UNICODE); exit;
+        }
+        $isImgMR = (strpos($imgMimeMR, 'image/') === 0);
+        $upMR = bslChatUploadFile($shMR['token'], $tmpMR, $imgMimeMR, $imgNameMR, $isImgMR ? 'chat.photo' : 'chat.file');
+        @unlink($tmpMR);
+        if (empty($upMR['ok'])) {
+            echo json_encode(['ok' => false, 'error' => 'آپلود تصویر: ' . ($upMR['error'] ?? 'ناموفق')], JSON_UNESCAPED_UNICODE); exit;
+        }
+        $fileMR = ['id' => $upMR['id'], 'url' => $upMR['url'], 'width' => $upMR['width'],
+                   'height' => $upMR['height'], 'size' => $upMR['size'],
+                   'name' => $imgNameMR, 'type' => $isImgMR ? 'picture' : 'file'];
+    }
+    if ($textMR === '' && $fileMR === null) {
+        echo json_encode(['ok' => false, 'error' => 'متنِ پیام یا یک تصویر لازم است'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $rMR = bslChatSendEx($shMR['token'], $chatIdMR, $textMR, $fileMR);
+    /* پاسخِ دستی (متن یا تصویر) هم در همان لاگِ پاسخ‌ها ثبت می‌شود. */
+    arLogAdd(['type' => 'manual', 'chat_id' => $chatIdMR, 'who' => '',
+              'text' => mb_substr($textMR !== '' ? $textMR : '🖼 تصویر', 0, 90),
+              'ok' => !empty($rMR['ok']), 'source' => 'manual',
+              'shop' => (int)$shMR['shop'], 'has_image' => $fileMR !== null]);
+    if (empty($rMR['ok'])) {
+        echo json_encode(['ok' => false, 'error' => $rMR['error'] ?? 'ارسال ناموفق'], JSON_UNESCAPED_UNICODE); exit;
+    }
+    echo json_encode(['ok' => true, 'shop' => (int)$shMR['shop']], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -22906,7 +23876,7 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, "if (!empty(\$_lp['sent']))          \$lockOut['ping'] = 'sent';") !== false);
 
     $add('10.22', 'پینگِ دوره‌ای به توکنِ باسلام وابسته نیست',
-         strpos($selfSrc, "if (!\$_hasMsgr) return ['ok' => false, 'error' => 'هیچ پیام‌رسانی تنظیم نشده (بله یا روبیکا)'];") !== false
+         strpos($selfSrc, "if (!\$_hasMsgr) return ['ok' => false, 'error' => 'هیچ پیام‌رسانی تنظیم نشده (بله/روبیکا/تلگرام)'];") !== false
       && strpos($selfSrc, "\$_hasMsgr = (trim((string)(\$cn['baleh']['token'] ?? '')) !== ''") !== false);
 
     $add('10.22', 'پنجرهٔ throttle فقط با ارسالِ موفق مصرف می‌شود',
@@ -23018,7 +23988,7 @@ if (isset($_GET['selftest'])) {
          catfixModeLabel('ai_text') === 'متنِ بررسیِ باسلام'
       && catfixModeLabel('master') === 'مدلِ مستر'
       && catfixModeLabel('quorum') === 'اجماعِ چندمدلی'
-      && strpos($selfSrc, "if (!in_array(\$mode, ['ai_text', 'master', 'quorum'], true)) \$mode = 'ai_text';") !== false);
+      && strpos($selfSrc, "if (!in_array(\$mode, ['ai_text', 'master', 'quorum', 'fallback'], true)) \$mode = 'ai_text';") !== false);   /* v10.71 (85) */
 
     $add('10.23', 'توقفِ catfix از مدیر وظیفه هم کار می‌کند',
          (tasksRegistry()['catfix']['stop'] ?? '') === 'catfix_stop'
@@ -23199,6 +24169,566 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۸۶ (v10.72) ==== */
+    $add('10.72', 'نسخهٔ ۱۰.۷۲',
+         str_contains($selfSrc, "const APP_VERSION = '10.72';"));
+    $add('10.72', 'Web Push: موتورِ رمزگذاریِ RFC8291 + ارسالِ موازی',
+         strpos($selfSrc, 'function webpushBuildRequest(string $endpoint, array $keys, string $payloadJson): ?array {') !== false
+          && strpos($selfSrc, 'function webpushSend(string $title, string $body, ?string $kind = null): array {') !== false
+          && strpos($selfSrc, 'Content-Encoding: authE2048') !== false
+          && strpos($selfSrc, "const PUSH_SUBS_FILE      = __DIR__ . '/push_subscriptions.json';") !== false
+          && strpos($selfSrc, 'function pushHkdfExpand(string $prk, string $info, int $len): string {') !== false);
+    $add('10.72', 'سرویس‌ورکر: رویدادِ push + تجدیدنویسیِ خودکارِ اشتراک',
+         strpos($selfSrc, "self.addEventListener('push', e => {") !== false
+          && strpos($selfSrc, "self.addEventListener('pushsubscriptionchange', e => {") !== false
+          && strpos($selfSrc, "e.waitUntil(self.registration.showNotification(String(data.title || '🔔 اعلان'), opt));") !== false);
+    $add('10.72', 'بخشِ اعلان‌ها: کلید + تستِ Push (مستقیم از سرور)',
+         strpos($selfSrc, 'id="lnPush"') !== false
+          && strpos($selfSrc, 'id="lnPushStatus"') !== false
+          && strpos($selfSrc, 'onclick="mrLiveTestPush()"') !== false
+          && strpos($selfSrc, 'async function mrPushEnsure(){') !== false
+          && strpos($selfSrc, 'isset($_GET[' . "'push_test'" . '])') !== false);
+    $add('10.72', 'Push در کنارِ پیام‌رسان برایِ همهٔ رویدادها (لحظه‌ای + کران)',
+         strpos($selfSrc, 'در کنارِ پیام‌رسان، به دستگاهِ کاربر') !== false
+          && strpos($selfSrc, "\$out['push'] = webpushSend(\$_pt[\$feed] ?? '🔔 اعلان', mb_substr(\$msg, 0, 400), (string)\$feed, $cn);") !== false);
+
+    /* ==== ۸۷ (v10.73) ==== */
+    $add('10.73', 'نسخهٔ ۱۰.۷۳',
+         str_contains($selfSrc, "const APP_VERSION = '10.73';"));
+    $add('10.73', 'fan-out سرور: هر غرفهٔ فعال یک ردیفِ مستقل در صف (دستی + کران)',
+         strpos($selfSrc, 'function bslFanoutShops(?array $cn): array {') !== false
+          && strpos($selfSrc, "'shop_vendor_id'=>\$__fsVid,'shop_name'=>(string)\$__fs['shop_name'],'shop_is_default'=>!empty(\$__fs['is_default']),'batch_id'=>\$queueId,") !== false
+          && strpos($selfSrc, "\$queue['entries'][] = ['id' => \$__bfFirst ? \$queueId : \$queueId . '_s' . \$__bfVid,") !== false
+          && strpos($selfSrc, "'fanout'=>1,") !== false);
+    $add('10.73', 'وِرکر: ردیفِ اختصاصیِ غرفه (حلقهٔ تک‌غرفه‌ای با قیمتِ دولایه)',
+         strpos($selfSrc, 'if(!$__scopeShop){') !== false
+          && strpos($selfSrc, '$srAll=bslUpsertManyShops($p,[$__scopeShop],$sOpts,1);') !== false
+          && strpos($selfSrc, 'if($__scopeShop){') !== false
+          && strpos($selfSrc, 'if($__isFanoutRow)break;') !== false);
+    $add('10.73', 'رابطِ صف: نوارِ خلاصه + سربرگِ دسته + نشانِ غرفه',
+         strpos($selfSrc, '📦 چندغرفه‌ای — ') !== false
+          && strpos($selfSrc, "if(e.shop_name)html+='<span style=\"color:#fbbf24;") !== false
+          && strpos($selfSrc, 'هر غرفه، یک وظیفهٔ جدا') !== false);
+    $add('10.73', 'بخشِ اعلان‌ها چهار تب شد (پیام‌رسان/رویدادها/زنده/استعلام)',
+         strpos($selfSrc, 'id="ntab-messenger"') !== false
+          && strpos($selfSrc, 'id="ntab-events"') !== false
+          && strpos($selfSrc, 'id="ntab-live"') !== false
+          && strpos($selfSrc, 'id="ntab-query"') !== false
+          && strpos($selfSrc, 'function setNotifTab(name,btn){') !== false
+          && strpos($selfSrc, '.ntab{flex:0 0 auto;') !== false);
+
+    /* ==== ۸۸ (v10.74) ==== */
+    $add('10.74', 'نسخهٔ ۱۰.۷۴',
+         str_contains($selfSrc, "const APP_VERSION = '10.74';"));
+    $add('10.74', 'مسیرهایِ جایگزینِ Push: پراکسی + Worker با توکنِ ذخیره‌شده',
+         strpos($selfSrc, 'function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $via, array &$detail, array &$drop): array {') !== false
+          && strpos($selfSrc, 'function pushRouteCfg(?array $cn): array {') !== false
+          && strpos($selfSrc, 'push_route_save') !== false
+          && strpos($selfSrc, 'X-Push-Auth: ') !== false);
+    $add('10.74', 'تستِ Push گزارشِ مسیرِ هر اشتراک را می‌دهد (مستقیم/پراکسی/Worker)',
+         strpos($selfSrc, 'id="lnPushDiag"') !== false
+          && strpos($selfSrc, 'function mrPushRouteSave(){') !== false
+          && strpos($selfSrc, 'function mrPushWorkerCode(){') !== false
+          && strpos($selfSrc, 'function mrPushResub(){') !== false);
+    $add('10.74', 'شکستِ ثبت/ذخیرهٔ اشتراکِ Push صریح است و کلید خودکار خاموش می‌شود',
+         strpos($selfSrc, 'اشتراکِ Push ذخیره نشد') !== false
+          && strpos($selfSrc, 'if (!pushSaveSubs()) {') !== false
+          && strpos($selfSrc, 'mrPushLastErr') !== false
+          && strpos($selfSrc, "elPs.checked=false;localStorage.setItem('mr_push_on','0')") !== false);
+
+    /* ==== ۸۹ (v10.75) ==== */
+    $add('10.75', 'نسخهٔ ۱۰.۷۵',
+         str_contains($selfSrc, "const APP_VERSION = '10.75';"));
+    $add('10.75', 'مسیرِ دومِ Push = اتصالِ غیرمستقیمِ خودِ سایت (interface.php) با انتقالِ شفاف',
+         strpos($selfSrc, "'site_proxy'") !== false
+          && strpos($selfSrc, 'اتصالِ غیرمستقیمِ خودِ سایت (interface.php)') !== false
+          && strpos($selfSrc, 'rawurlencode($req') !== false);
+    $add('10.75', 'ردِ پراکسیِ سایت در گزارشِ تستِ Push با پیامِ خطایِ دقیق',
+         strpos($selfSrc, 'PROXY_TARGET_HOSTS') !== false
+          && strpos($selfSrc, 'اتصالِ غیرمستقیمِ سایت') !== false
+          && strpos($selfSrc, "const via=v.via==='site_proxy'") !== false);
+
+    /* ==== ۹۰ (v10.76) ==== */
+    $add('10.76', 'نسخهٔ ۱۰.۷۶',
+         str_contains($selfSrc, "const APP_VERSION = '10.76';"));
+    $add('10.76', 'مسیرِ Push خودکار از همان عبورِ تنظیم‌شده (ai_net/src_net با قالب {url})',
+         strpos($selfSrc, "site_source") !== false
+          && strpos($selfSrc, "strpos(\$w, '{url}')") !== false
+          && strpos($selfSrc, 'pushRouteSrc') !== false);
+
+    /* ==== ۹۱ (v10.77) ==== */
+    $add('10.77', 'نسخهٔ ۱۰.۷۷',
+         str_contains($selfSrc, "const APP_VERSION = '10.77';"));
+    /* v10.78 (92): روشِ نجوا به «اسکریپتِ هدر» تغییر کرد (مستنداتِ رسمی) */
+    $add('10.77', 'نجوا: اسکریپتِ هدر (جایگزینِ تنظیماتِ API) — کادر + ذخیره + تزریقِ head',
+         strpos($selfSrc, 'id="najvaScript"') !== false
+          && strpos($selfSrc, 'najva_script') !== false
+          && strpos($selfSrc, '__nvSc') !== false
+          && strpos($selfSrc, "d.najva_script") !== false);
+
+    /* ==== ۹۲ (v10.78) ==== */
+    $add('10.78', 'نسخهٔ ۱۰.۷۸',
+         str_contains($selfSrc, "const APP_VERSION = '10.78';"));
+    $add('10.78', 'تلگرام: تنظیمات + ارسالِ رویدادها + دکمهٔ تست',
+         strpos($selfSrc, 'function bslSendToTelegram(') !== false
+          && strpos($selfSrc, 'id="telegramToken"') !== false
+          && strpos($selfSrc, "testNotif('telegram')") !== false
+          && strpos($selfSrc, "'telegram'] = ") !== false);
+    $add('10.78', 'روبیکا/تلگرام: خطایِ دقیق (HTTP code + پیامِ سرویس) در تست و ارسال',
+         strpos($selfSrc, "'ok' => true, 'code' => ") !== false
+          && strpos($selfSrc, 'خطای شبکه: ') !== false);
+    $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
+         substr_count($selfSrc, "telegram']['token']") >= 8);
+
+    /* ==== ۹۳ (v10.79) ==== */
+    $add('10.79', 'نسخهٔ ۱۰.۷۹',
+         str_contains($selfSrc, "const APP_VERSION = '10.79';"));
+    $add('10.79', 'زنجیرهٔ پیام‌رسان: مستقیم ← DoH ← proxy.phpِ سایت',
+         strpos($selfSrc, 'function msgrSend(') !== false
+          && strpos($selfSrc, 'function msgrResolveDoH(') !== false
+          && strpos($selfSrc, 'function msgrSiteProxy(') !== false
+          && strpos($selfSrc, 'CURLOPT_RESOLVE') !== false);
+    $add('10.79', 'لاگِ پینگ + نمایشِ «پینگ‌هایِ آخر»',
+         strpos($selfSrc, 'notif_ping_log.json') !== false
+          && strpos($selfSrc, "isset(\$_GET['ping_log'])") !== false
+          && strpos($selfSrc, 'function showPingLog()') !== false);
+
+    /* ==== ۸۵ (v10.71) ==== */
+    $add('10.71', 'نسخهٔ ۱۰.۷۱',
+         str_contains($selfSrc, "const APP_VERSION = '10.71';"));
+    $add('10.71', 'روشِ چهارمِ اصلاح: زنجیرهٔ پشتیبان (مستر ← کاندیدها)',
+         strpos($selfSrc, "'fallback' => 'زنجیرهٔ پشتیبان (مستر ← کاندیدها)'") !== false
+          && strpos($selfSrc, "['fallback','🛟 زنجیرهٔ پشتیبان (مستر ← کاندیدها)',") !== false
+          && strpos($selfSrc, "elseif (\$mode === 'fallback') {") !== false
+          && strpos($selfSrc, '🛟 زنجیرهٔ پشتیبان — مستر: ') !== false
+          && strpos($selfSrc, "in_array(\$mode, ['master', 'quorum', 'fallback'], true)") !== false
+          && strpos($selfSrc, '\$fbRescued++') !== false
+          && strpos($selfSrc, 'نجات‌یافته با زنجیره: ') !== false);
+
+    /* ==== ۸۴ (v10.70) ==== */
+    $add('10.70', 'نسخهٔ ۱۰.۷۰',
+         str_contains($selfSrc, "const APP_VERSION = '10.70';"));
+    $add('10.70', 'صفِ استخراج به‌صورتِ خودکار تازه می‌شود (زنده)',
+         strpos($selfSrc, 'function exqSchedule(ms){') !== false
+          && strpos($selfSrc, 'exqSchedule(active?3000:15000);') !== false
+          && strpos($selfSrc, 'id="exqLive"') !== false
+          && strpos($selfSrc, '● زنده') !== false
+          && strpos($selfSrc, '● پایشِ آهسته') !== false);
+
+    /* ==== ۸۳ (v10.69) ==== */
+    $add('10.69', 'نسخهٔ ۱۰.۶۹',
+         str_contains($selfSrc, "const APP_VERSION = '10.69';"));
+    $add('10.69', 'service worker از خودِ فایل سرو می‌شود (?sw=1)',
+         strpos($selfSrc, "isset(\$_GET['sw'])") !== false
+          && strpos($selfSrc, "self.addEventListener('notificationclick'") !== false
+          && strpos($selfSrc, "e.waitUntil(self.registration.showNotification(String(d.title), opt));") !== false);
+    $add('10.69', 'مسیرِ اعلان اول سرویس‌ورکر، بعد فالبکِ صفحه',
+         strpos($selfSrc, 'async function mrFireSysNotif(title,body){') !== false
+          && strpos($selfSrc, 'function mrSwReady(){') !== false
+          && strpos($selfSrc, "reg.showNotification(String(title),{body:String(body||'').slice(0,500),") !== false);
+    $add('10.69', 'وضعیتِ سرویس‌ورکر در خطِ تشخیصِ اعلان',
+         strpos($selfSrc, 'function mrSwUpdateDiag(){') !== false
+          && strpos($selfSrc, 'سرویس‌ورکر ثبت شد') !== false
+          && strpos($selfSrc, 'mrSwReady();   // v10.69 (83): سرویس‌ورکر همان لحظهٔ بارگذاری صفحه ثبت می‌شود') !== false);
+
+    /* ==== ۸۲ (v10.68) ==== */
+    $add('10.68', 'نسخهٔ ۱۰.۶۸',
+         str_contains($selfSrc, "const APP_VERSION = '10.68';"));
+    $add('10.68', 'تشخیصگرِ اعلانِ سیستم: HTTPS/پشتیبانی/اجازه/سیستم‌عامل',
+         strpos($selfSrc, 'function mrSysDiag(){') !== false
+          && strpos($selfSrc, 'id="lnSysDiag"') !== false
+          && strpos($selfSrc, 'window.isSecureContext') !== false
+          && strpos($selfSrc, 'صفحه از طریقِ <b>HTTPS</b> باز نشده') !== false);
+    $add('10.68', 'دکمهٔ تست: پیامِ مرحله‌به‌مرحله + توضیحِ «sw.js لازم نیست»',
+         strpos($selfSrc, 'فایلِ sw.js لازم نیست') !== false
+          && strpos($selfSrc, 'اعلان به مرورگر داده شد') !== false);
+
+    /* ==== ۸۱ (v10.67) ==== */
+    $add('10.67', 'نسخهٔ ۱۰.۶۷',
+         str_contains($selfSrc, "const APP_VERSION = '10.67';"));
+    $add('10.67', 'همگام‌سازیِ دستی: حلِّ ممتنِ کلید + خطای صریحِ «پیدا نشد»',
+         strpos($selfSrc, 'function profileResolveKey(string $given, array $profiles): ?string {') !== false
+          && strpos($selfSrc, '❌ پروفایلی با کلیدِ «') !== false
+          && strpos($selfSrc, 'پروفایلی با این کلید روی سرور پیدا نشد') !== false);
+    $add('10.67', 'نتیجهٔ واقعیِ استخراج در جعبهٔ همگام‌سازی دیده می‌شود',
+         strpos($selfSrc, "manualSyncProgress([], '✅ استخراج: ' . (int)(\$exRes['extracted'] ?? 0)") !== false
+          && strpos($selfSrc, "manualSyncProgress([], '❌ استخراج: ' . mb_substr((string)(\$exRes['error'] ?? 'خطای نامشخص')") !== false);
+    $add('10.67', 'شبکهٔ ایمنیِ کُرش: خطای فیتال در پیشرفتِ همگام‌سازی نوشته می‌شود',
+         strpos($selfSrc, 'register_shutdown_function(function () {') !== false
+          && strpos($selfSrc, 'پردژه در میانِ اجرا مُرد: ') !== false);
+    $add('10.67', 'پنجرهٔ «در حال اجرا» به یک چرخهٔ نگهبان کاهش یافت',
+         strpos($selfSrc, "\$_msMaxD = max(120, (int)(loadConnections()['stall_after'] ?? 300));") !== false);
+    $add('10.67', 'فرمولِ کلیدِ مرورگر با سرور هم‌راستا شد (بدونِ دیکُدِ percent)',
+         strpos($selfSrc, 'const m=src.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\\/\\/[^/?#]*/);') !== false);
+
+    /* ==== ۸۰ (v10.66) ==== */
+    $add('10.66', 'نسخهٔ ۱۰.۶۶',
+         str_contains($selfSrc, "const APP_VERSION = '10.66';"));
+    $add('10.66', 'فیدِ رویدادهایِ زنده + تنظیماتِ بخشِ اعلان‌ها',
+         strpos($selfSrc, 'function liveFeedPush(string $kind, string $msg): void {') !== false
+          && strpos($selfSrc, "isset(\$_GET['live_feed'])") !== false
+          && strpos($selfSrc, 'function mrLiveEventCard(title,body,kind){') !== false
+          && strpos($selfSrc, 'id="lnCards"') !== false
+          && strpos($selfSrc, "function mrLiveSysNotif(title,body){") !== false);
+    $add('10.66', 'معاینهٔ صفِ استخراج در دکترِ همگام‌سازی',
+         strpos($selfSrc, "const LIVE_FEED_FILE = __DIR__ . '/live_events_feed.json';") !== false
+          && strpos($selfSrc, '$dgOut[\'queue\']') !== false
+          && strpos($selfSrc, 'log_tail') !== false);
+
+    /* ==== ۷۹ (v10.65) ==== */
+    $add('10.65', 'نسخهٔ ۱۰.۶۵',
+         str_contains($selfSrc, "const APP_VERSION = '10.65';"));
+    $add('10.65', 'تکست‌باکسِ پاسخِ همیشه‌آماده + عرضِ کارتِ درستِ موبایل',
+         strpos($selfSrc, 'display:block;padding:8px 12px 10px;background:#0b122055') !== false
+          && strpos($selfSrc, 'function mrNotifHold(card,n){') !== false
+          && strpos($selfSrc, 'overflow-x:hidden;overflow-y:auto;max-height:calc(100vh - 84px)') !== false
+          && strpos($selfSrc, 'taN.addEventListener(\'focus\',()=>mrNotifHold(card,n));') !== false);
+
+    /* ==== ۷۸ (v10.64) ==== */
+    $add('10.64', 'نسخهٔ ۱۰.۶۴',
+         str_contains($selfSrc, "const APP_VERSION = '10.64';"));
+    $add('10.64', 'رفعِ براکتِ جاافتادهٔ فهرستِ تغییرات',
+         str_contains($selfSrc, "  ]},\n  {v:'10.62',"));
+
+    /* ==== ۷۷ (v10.63) ==== */
+    $add('10.63', 'نسخهٔ ۱۰.۶۳',
+         str_contains($selfSrc, "const APP_VERSION = '10.63';"));
+    $add('10.63', 'اعلانِ سطحِ سیستم‌عامل با پاسخِ یک‌کلیکه',
+         strpos($selfSrc, 'function mrSysNotif(c){') !== false
+          && strpos($selfSrc, 'mr_sys_notif') !== false
+          && strpos($selfSrc, "class=\"mrnsys\"") !== false
+          && strpos($selfSrc, 'requireInteraction:true') !== false
+          && strpos($selfSrc, "ev.action==='mr-reply'") !== false);
+
+    /* ==== ۷۶ (v10.62) ==== */
+    $add('10.62', 'نسخهٔ ۱۰.۶۲',
+         str_contains($selfSrc, "const APP_VERSION = '10.62';"));
+    $add('10.62', 'پاسخِ درِجای از روی کارتِ نوتیف + تصویرِ مشتری با بزرگ‌نمایی',
+         (strpos($selfSrc, "'last_img'     => \$lmImgMR,") !== false
+          && strpos($selfSrc, "'last_type'    => (string)(\$lmMR['message_type']") !== false
+          && strpos($selfSrc, 'function mrLightbox(url){') !== false
+          && strpos($selfSrc, 'function mrNotifOpenReply(n){') !== false
+          && strpos($selfSrc, "fdN.set('text',tN);") !== false
+          && strpos($selfSrc, 'onclick="event.stopPropagation();mrLightbox(this.src)"') !== false
+          && strpos($selfSrc, '@keyframes mrZoomIn') !== false));
+
+    /* ==== ۷۵ (v10.61) ==== */
+    $add('10.61', 'نسخهٔ ۱۰.۶۱',
+         str_contains($selfSrc, "const APP_VERSION = '10.61';"));
+    $add('10.61', 'همگام‌سازیِ دستی اتصال را باز نگه می‌دارد (keep-conn + ndjson)',
+         (strpos($selfSrc, 'function msKeepConnStart(): void {') !== false
+          && strpos($selfSrc, "function msAlive(string \$phase = ''): void {") !== false
+          && strpos($selfSrc, "\$GLOBALS['_msKeepConn'] = true;") !== false
+          && strpos($selfSrc, "if (!empty(\$GLOBALS['_msKeepConn']) && !isCliRun()) {") !== false
+          && strpos($selfSrc, "msAlive('صفحه ' . \$page . ' — '") !== false
+          && strpos($selfSrc, "msAlive('ارسال ' . \$label . ' — '") !== false));
+    $add('10.61', 'رابطِ دستی پاسخِ ndjson را می‌خواند و تشخیص آدرسِ کران را نشان می‌دهد',
+         (strpos($selfSrc, "/* v10.61 (۷۵): پاسخ ndjson است") !== false
+          && strpos($selfSrc, "\$dgCronUrl = selfBaseUrl() . '?cron_run=1';") !== false
+          && strpos($selfSrc, "\$_msSk['phase'] = 'رد شد';") !== false));
+
+    /* ==== ۷۴ (v10.60) ==== */
+    $add('10.60', 'نسخهٔ ۱۰.۶۰',
+         str_contains($selfSrc, "const APP_VERSION = '10.60';"));
+    $add('10.60', 'نوتیفِ زندهٔ پیامِ مشتری: کشفِ سرور + کارتِ سوایپ‌شونده',
+         (strpos($selfSrc, "'last_msg_id'  => (int)(\$lmMR['id'] ?? 0),") !== false
+          && strpos($selfSrc, 'function mrNotifPoll(){') !== false
+          && strpos($selfSrc, 'function mrNotifSwipe(card,n){') !== false
+          && strpos($selfSrc, 'function mrNotifReply(n){') !== false
+          && strpos($selfSrc, 'setInterval(mrNotifPoll,5000);') !== false
+          && strpos($selfSrc, 'mrNotifHost') !== false
+          && strpos($selfSrc, '@keyframes mrNotifIn') !== false
+          && strpos($selfSrc, 'mr_notif_seen') !== false));
+
+    /* ==== ۷۳ (v10.59) ==== */
+    $add('10.59', 'نسخهٔ ۱۰.۵۹',
+         str_contains($selfSrc, "const APP_VERSION = '10.59';"));
+    $add('10.59', 'بازسازیِ خودکارِ صفِ ارسال از تبِ باز (poll)',
+         (strpos($selfSrc, 'function sendAutoRecover(string $which): ?array {') !== false
+          && strpos($selfSrc, "\$_recB = sendAutoRecover('bsl');") !== false
+          && strpos($selfSrc, "\$_recW = sendAutoRecover('woo');") !== false
+          && strpos($selfSrc, 'if(d.recovered)') !== false
+          && strpos($selfSrc, 'send_autorecover_state.json') !== false));
+    $add('10.59', 'ردیفِ تمام‌شدهٔ بسته‌نشده در وضعیتِ صف فوراً بسته می‌شود',
+         (strpos($selfSrc, "queueStallCheck('bsl', max(120, (int)(\$stB['stall_after'] ?? 300)));") !== false
+          && strpos($selfSrc, "queueStallCheck('woo', max(120, (int)(\$stW['stall_after'] ?? 300)));") !== false));
+
+    /* ==== ۷۲ (v10.58) ==== */
+    $add('10.58', 'نسخهٔ ۱۰.۵۸',
+         str_contains($selfSrc, "const APP_VERSION = '10.58';"));
+    $add('10.58', 'دکترِ همگام‌سازی: اندپوینت + دکمه + رندرِ رابط',
+         (strpos($selfSrc, "if (isset(\$_GET['sync_diagnose']))") !== false
+          && strpos($selfSrc, "\$chk('last_tick'") !== false
+          && strpos($selfSrc, 'function syncDiagnose(){') !== false
+          && strpos($selfSrc, 'id="syncDiagnoseBox"') !== false
+          && strpos($selfSrc, 'onclick="syncDiagnose()"') !== false));
+    $_v58Pump = strpos($selfSrc, "send_pump_error'");
+    $_v58Loop = strpos($selfSrc, "saveSyncState(\$syncState);\n\n/* v8.97: نگهبان قبل از حلقه");
+    $_v58Send = strpos($selfSrc, "if (manualSyncActive() && empty(\$results['manual_stopped']))");
+    $add('10.58', 'ترتیب: پمپ و بکاپ بعد از حلقهٔ همگام‌سازی',
+         ($_v58Pump !== false && $_v58Loop !== false && $_v58Send !== false
+          && $_v58Loop < $_v58Pump && $_v58Pump < $_v58Send));
+    $add('10.58', 'بستنِ خودکارِ اجرایِ دستیِ نیمه‌کاره (وضعیت + گاردِ شغلی)',
+         (strpos($selfSrc, "if (\$msIdleD > \$msMaxD) {") !== false
+          && strpos($selfSrc, "if (\$_msAge >= \$_msMaxD) {") !== false
+          && strpos($selfSrc, 'نیمه‌کاره ماند') !== false));
+
+    /* ==== ۷۱ (v10.57) ==== */
+    $add('10.57', 'نسخهٔ ۱۰.۵۷',
+         str_contains($selfSrc, "const APP_VERSION = '10.57';"));
+    $add('10.57', 'اتاقِ چت: فهرستِ غرفه‌ها + آپلود + ارسالِ چندرسانه‌ای (PHP)',
+         (strpos($selfSrc, "function bslChatShops(array \$cn): array {") !== false
+          && strpos($selfSrc, "function bslChatUploadFile(string \$tk, string \$tmpPath") !== false
+          && strpos($selfSrc, "function bslChatSendEx(string \$tk, int \$chatId, string \$text, ?array \$file = null): array {") !== false
+          && strpos($selfSrc, "'attachment' => ['files' => [['id' => (int)\$file['id'], 'url' => (string)\$file['url']]]]") !== false
+          && strpos($selfSrc, 'chat.photo') !== false
+          && strpos($selfSrc, "'image_b64'") !== false
+          && strpos($selfSrc, 'bsl_chats_cache.json') !== false));
+    $add('10.57', 'اتاقِ چت: رابطِ زندهٔ ۱ ثانیه‌ای + موبایلِ کشویی + چیپِ غرفه (JS)',
+         (strpos($selfSrc, 'let MR_SHOP_FILTER=0;') !== false
+          && strpos($selfSrc, 'setInterval(mrPoll,1000);') !== false
+          && strpos($selfSrc, '.mr-collapsed{display:none!important}') !== false
+          && strpos($selfSrc, 'function mrPickImage(inp){') !== false
+          && strpos($selfSrc, 'async function mrLoadChats(){') !== false
+          && strpos($selfSrc, 'async function mrSend(){') !== false));
+
+    /* ==== ۷۰ (v10.56) ==== */
+    $add('10.56', 'نسخهٔ ۱۰.۵۶',
+         str_contains($selfSrc, "const APP_VERSION = '10.56';"));
+    $add('10.56', 'ادامهٔ ارسال از چک‌پوینت (نه از اول) — وِرکرِ باسلام',
+         (strpos($selfSrc, '$bslResumeStart=0;$bslResumeCounters=false;') !== false
+          && strpos($selfSrc, "if((\$i+1)<\$bslResumeStart)continue;") !== false
+          && strpos($selfSrc, "if(isset(\$GLOBALS['_bslQueueIdNow']))") !== false
+          && strpos($selfSrc, '$bslPrevProg=readProgress(BSL_PROGRESS_FILE);') !== false));
+    $add('10.56', 'ادامهٔ ارسال از چک‌پوینت (نه از اول) — وِرکرِ ووکامرس',
+         (strpos($selfSrc, '$wooResumeStart=0;$wooResumeCounters=false;') !== false
+          && strpos($selfSrc, "if((\$i+1)<\$wooResumeStart)continue;") !== false
+          && strpos($selfSrc, "\$d['queue_id']=\$GLOBALS['_wooQueueIdNow'];") !== false
+          && strpos($selfSrc, "\$wooRunId=(string)(\$qe['id']??'');") !== false));
+    $add('10.56', 'نقص‌یابِ گیرکردن چک‌پوینتِ واقعی را گزارش می‌دهد (ردیف + فایلِ پیشرفت)',
+         (strpos($selfSrc, "'resume_from' => \$stCur") !== false
+          && strpos($selfSrc, "\$stPgQ === (string)(\$running['id'] ?? '')") !== false
+          && strpos($selfSrc, "\$chk['resume_from'] ?? \$chk['current'] ?? 0") !== false));
+
+    /* ==== ۶۹ (v10.55) ==== */
+    $add('10.55', 'نسخهٔ ۱۰.۵۵',
+         str_contains($selfSrc, "const APP_VERSION = '10.55';"));
+    $add('10.55', 'Manual stop also stops running send/extract workers',
+         (strpos($selfSrc, "if (isset(\$_GET['manual_sync_stop'])) {") !== false
+          && substr_count($selfSrc, "@file_put_contents(BSL_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));") >= 1
+          && (strpos($selfSrc, "@file_put_contents(WOO_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));") !== false)
+          && (strpos($selfSrc, "@file_put_contents(EXTRACT_STOP_FILE, json_encode(['stop' => true, 'time' => time()], LOCK_EX));") !== false)));
+    $add('10.55', 'Manual sync takes the cron lock when free (no parallel cron tick)',
+         (strpos($selfSrc, "/* v10.55 (۶۹): اجرایِ دستی قفلِ «زندهٔ» کران را بازنویسی نمی‌کند") !== false
+          && (preg_match('~if \(!is_file\(\$cronLock\)\) \{~', $selfSrc) === 1)));
+    $add('10.55', 'Manual customer reply: chats + thread + reply endpoints',
+         (strpos($selfSrc, "function bslChatThread(string \$tk, int \$chatId, int \$limit = 30): array {") !== false
+          && strpos($selfSrc, "if (isset(\$_GET['bsl_chats'])) {") !== false
+          && strpos($selfSrc, "if (isset(\$_GET['bsl_chat_messages'])) {") !== false
+          && strpos($selfSrc, "if (isset(\$_GET['bsl_chat_reply'])) {") !== false
+          && strpos($selfSrc, "'type' => 'manual', 'chat_id' => \$chatIdMR") !== false
+          && strpos($selfSrc, "async function mrLoadChats(){") !== false
+          && strpos($selfSrc, "async function mrSend(){") !== false
+          && strpos($selfSrc, "💬 پاسخ دستی به مشتریان") !== false));
+
+    /* ==== ۶۸ (v10.54) ==== */
+    $add('10.54', 'نسخهٔ ۱۰.۵۴',
+         str_contains($selfSrc, "const APP_VERSION = '10.54';"));
+    $add('10.54', 'Changelog entries use the t+items schema (no JS map error)',
+         (strpos($selfSrc, "{v:'10.54', t:") !== false
+          && strpos($selfSrc, "{v:'10.53', t:") !== false
+          && strpos($selfSrc, "{v:'10.53',d:") === false));
+
+    /* ==== ۶۷ (v10.53) ==== */
+    $add('10.53', 'نسخهٔ ۱۰.۵۳',
+         str_contains($selfSrc, "const APP_VERSION = '10.53';"));
+    $add('10.53', 'Worker processes all waiting queue rows in sequence (one task per profile, sent به نوبت)',
+         (strpos($selfSrc, "const BSL_MAX_ENTRIES_PER_RUN = 10;") !== false
+          && strpos($selfSrc, "for (\$bslEntryRound = 0; \$bslEntryRound < BSL_MAX_ENTRIES_PER_RUN; \$bslEntryRound++) {") !== false
+          && strpos($selfSrc, "if (\$hasMore && \$bslEntryRound + 1 < BSL_MAX_ENTRIES_PER_RUN) continue;") !== false
+          && strpos($selfSrc, "'processed'=>\$bslEntriesDoneThisRun") !== false));
+    $add('10.53', 'Manual sync is visible: extract + send queues labeled «هنگامِ همگام‌سازیِ دستی»',
+         (substr_count($selfSrc, "manualSyncActive() ? 'manual_sync' : 'auto'") >= 2
+          && substr_count($selfSrc, "🤝 هنگامِ همگام‌سازیِ دستی") >= 3
+          && strpos($selfSrc, "'trigger' => (manualSyncActive() ? 'manual_sync' : 'cron')") !== false
+          && strpos($selfSrc, "'trigger'=>(manualSyncActive()?'manual_sync':'cron')") !== false));
+    $add('10.53', 'Delete ladder: archive → disable (3790) → hide (stock=0, price=0)',
+         (strpos($selfSrc, "(\$newStatus === 4184) ? ['simple', 'full', 'archive', 'disable', 'hide'] : ['simple', 'full']") !== false
+          && strpos($selfSrc, "['status' => 3790], false, null, false, \$maxAttempts") !== false
+          && strpos($selfSrc, "\$full['stock'] = 0;") !== false
+          && strpos($selfSrc, "\$full['primary_price'] = 0;") !== false
+          && strpos($selfSrc, "ناموجود شد: موجودی و قیمت صفر شد") !== false
+          && strpos($selfSrc, "(int)\$newStatus === 4184 ? ['simple', 'full', 'archive', 'disable', 'hide'] : ['simple', 'full'] as \$st") !== false));
+
+    /* ==== ۶۶ (v10.52) ==== */
+    $add('10.52', 'نسخهٔ ۱۰.۵۲',
+         str_contains($selfSrc, "const APP_VERSION = '10.52';"));
+    $add('10.52', 'Status change runs step-per-request (no 502): simple/full/archive + next hint',
+         (strpos($selfSrc, "function bslStatusStep(string \$tk, int \$vid, int \$pid, int \$newStatus, string \$step, int \$maxAttempts = 1): array {") !== false
+          && strpos($selfSrc, "string \$step = 'auto'): array {") !== false
+          && strpos($selfSrc, "in_array(\$_via,['simple','full','archive'],true)?\$_via:'simple';") !== false
+          && strpos($selfSrc, "if(!empty(\$r['next']))\$_resp['next']=\$r['next'];") !== false
+          && strpos($selfSrc, "tryStep(d.next);") !== false
+          && strpos($selfSrc, "int \$maxAttempts=3): array {") !== false));
+
+    /* ==== ۶۵ (v10.51) ==== */
+    $add('10.51', 'نسخهٔ ۱۰.۵۱',
+         str_contains($selfSrc, "const APP_VERSION = '10.51';"));
+    $add('10.51', 'Archive/status change is multi-strategy (simple, full-payload, archive endpoint)',
+         (strpos($selfSrc, "function bslSetProductStatus(string \$tk, int \$vid, int \$pid, int \$newStatus): array {") !== false
+          && strpos($selfSrc, "function bslProductFullPatch(array \$row, int \$newStatus): ?array {") !== false
+          && strpos($selfSrc, "function bslGetProductRow(string \$tk, int \$vid, int \$pid): ?array {") !== false
+          && strpos($selfSrc, "$r=bslSetProductStatus($tk,$vid,$productId,$newStatus);") !== false
+          && strpos($selfSrc, "   $r = bslSetProductStatus($tk, $vid, $pid, 4184);") !== false
+          && strpos($selfSrc, "' . $endpoint) . $att;") !== false));
+    $add('10.51', 'Stale send-config queue rows are superseded instead of blocking (old suffix bug)',
+         (strpos($selfSrc, "function queueCfgChanged(?array \$oldCfg, array \$newCfg): bool {") !== false
+          && strpos($selfSrc, "تنظیماتِ ارسال تغییر کرد — با ردیفِ جدید جایگزین شد") !== false
+          && strpos($selfSrc, "e.fail_reason?('⚠ '+esc(e.fail_reason)") !== false
+          && strpos($selfSrc, "fail_reason") !== false));
+
+    /* ==== ۶۴ (v10.50) ==== */
+    $add('10.50', 'نسخهٔ ۱۰.۵۰',
+         str_contains($selfSrc, "const APP_VERSION = '10.50';"));
+    $add('10.50', 'Manual sync send is fully server-side: manual worker drives queue in rounds',
+         (strpos($selfSrc, "function manualServerSendRun(int \$roundMs = 1500000, int \$maxRounds = 12): array {") !== false
+          && strpos($selfSrc, "function msQueuePendingRow(string \$which): ?array {") !== false
+          && strpos($selfSrc, "function msLockFresh(string \$which): bool {") !== false
+          && strpos($selfSrc, "\$_msSendRes = manualServerSendRun();") !== false
+          && strpos($selfSrc, "if (manualSyncActive() && empty(\$results['manual_stopped'])) {") !== false));
+    $add('10.50', 'No more keep-the-tab-open in manual flow',
+         (strpos($selfSrc, 'sending is continuing server-side — no need to keep the tab open') !== false
+          && strpos($selfSrc, 'Sending is handled fully server-side') !== false
+          && strpos($selfSrc, 'please keep this ' . 'tab open') === false));
+
+    /* ==== ۶۳ (v10.49) ==== */
+    $add('10.49', 'نسخهٔ ۱۰.۴۹',
+         str_contains($selfSrc, "const APP_VERSION = '10.49';"));
+    $add('10.49.1', 'پمپِ ارسالِ کران: صفِ گیر را تا ۱۲۰ ثانیه جلو می‌راند',
+         str_contains($selfSrc, "\$_pqRec = queueStallRecover(\$_pq, \$_pumpStall, false, 120000);")
+      && str_contains($selfSrc, "\$results['send_pump'][\$_pq]"));
+    $add('10.49.2', 'queueStallRecover مهلتِ انتظارِ قابل‌تنظیم دارد',
+         str_contains($selfSrc, "function queueStallRecover(string \$which, int \$staleAfter = 300, bool \$dryRun = false, int \$waitMs = 1500): array {")
+      && str_contains($selfSrc, "\$chk['resumed'] = fireAndForget('action=' . \$action, \$waitMs, \$post);"));
+    $add('10.49.3', 'پمپ در همگام‌سازیِ دستی اجرا نمی‌شود (مرورگر خودش می‌کوبد)',
+         str_contains($selfSrc, "if (!manualSyncActive()) {"));
+    $add('10.49.4', 'رابط بعد از همگام‌سازیِ دستی ارسال را می‌کوبد',
+         str_contains($selfSrc, "function msKickSend(){")
+      && str_contains($selfSrc, "if(ok)msKickSend();"));
+    $add('10.49.5', 'بایگانی: فالبک مسیرِ غرفه روی ۴۲۲ + خطای گویا',
+         str_contains($selfSrc, "in_array((int)(\$r['code'] ?? 0), [401, 403, 404, 422], true) && \$vid > 0")
+      && str_contains($selfSrc, "bslApiError(\$r,'بایگانی ناموفق','products/'.\$productId)"));
+
+    /* ==== ۶۲ (v10.48) ==== */
+    $add('10.48', 'نسخهٔ ۱۰.۴۸',
+         str_contains($selfSrc, "const APP_VERSION = '10.48';"));
+    $add('10.48.1', 'اعلان‌ها «اول»ِ کران اجرا می‌شوند (قبل از کارهای بلند)',
+         (preg_match('~^\s*\$notifyResult = bslCheckNotifications\(\$cn\);~m', $selfSrc) === 1)
+      && (strpos($selfSrc, "$notifyResult = bslCheckNotifications($cn);")
+          < strpos($selfSrc, '/* v9.16: بکاپ خودکار')));
+    $add('10.48.2', 'پینگِ نبض، آخرین بررسی ثبت‌شده را نشان می‌دهد (نه «اجرا نشد» غلط)',
+         str_contains($selfSrc, "\$_faHb = \$_ageHb < 90 ? \$_ageHb . ' ثانیه پیش'")
+      && str_contains($selfSrc, "if (!empty(\$results['heartbeat'])) {"));
+
+    /* ==== ۶۱ (v10.47) ==== */
+    $add('10.47', 'نسخهٔ ۱۰.۴۷',
+         str_contains($selfSrc, "const APP_VERSION = '10.47';"));
+    $add('10.47.1', 'پینگ، وضعیتِ کاملِ بررسیِ اعلان‌ها را گزارش می‌کند',
+         str_contains($selfSrc, "\$_nres = \$results['notifications'] ?? null;")
+      && str_contains($selfSrc, "'گفتگو ' . (int)\$_nres['seen_chats']"));
+    $add('10.47.2', 'نتیجهٔ بررسی، «دیده‌شده» و «بی‌جواب» را دارد',
+         str_contains($selfSrc, "\$out['seen_chats'] = \$seen['chats'];")
+      && str_contains($selfSrc, "\$stN['last_notif_pending'] = \$pending;"));
+    $add('10.47.3', 'امضای پشتیبان updated_at را هم می‌بیند (سکوتِ دائمی نمی‌شود)',
+         str_contains($selfSrc, "(string)\$nc['updated_at']), 0, 12)"));
+    $add('10.47.4', 'تست، «متن نمی‌آید» و نمونهٔ خام را نشان می‌دهد',
+         str_contains($selfSrc, "'⚠️ نمونه دادهٔ خام باسلام (برای بررسی ساختار):';")
+      && str_contains($selfSrc, "'pending' => \$pendShop, 'no_text' => \$noText]"));
+
+    /* ==== ۶۰ (v10.46) ==== */
+    $add('10.46', 'نسخهٔ ۱۰.۴۶',
+         str_contains($selfSrc, "const APP_VERSION = '10.46';"));
+    $add('10.46.1', 'انتخاب غرفهٔ «پیام مشتری» در ذخیرهٔ اتصال ثبت می‌شود',
+         str_contains($selfSrc, "if (isset(\$_POST['notif_chat_shop'])) \$conn['notif_chat_shop'] = max(0, (int)\$_POST['notif_chat_shop']);"));
+    $add('10.46.2', 'بررسیِ پیام‌ها فقط از غرفهٔ انتخاب‌شده است',
+         str_contains($selfSrc, "\$onlyVid = (int)(\$cn['notif_chat_shop'] ?? 0);"));
+    $add('10.46.3', 'غرفهٔ انتخاب‌شدهٔ حذف‌شده → همهٔ غرفه‌ها (نه سکوتِ کامل)',
+         str_contains($selfSrc, "if (\$sel) \$shops = \$sel;"));
+    $add('10.46.4', 'هر دورِ بررسی، خلاصهٔ «چه دیده شد» روی دیسک می‌نشیند',
+         str_contains($selfSrc, "\$stN['last_notif_run'] = time();")
+      && str_contains($selfSrc, "\$stN['last_notif_seen'] = \$seen;"));
+    $add('10.46.5', 'سلامتِ اعلان آخرین بررسی و دیده‌شده‌ها را می‌بیند',
+         str_contains($selfSrc, "\$out['last_notif_run_fa'] = \$_ageN < 90 ? \$_ageN . ' ثانیه پیش'")
+      && str_contains($selfSrc, "\$out['last_notif_seen'] = is_array(\$stH['last_notif_seen'] ?? null) ? \$stH['last_notif_seen'] : null;"));
+    $add('10.46.6', 'رابط: دراپ‌داونِ غرفه + خطِ وضعیتِ زنده',
+         str_contains($selfSrc, 'id="notifChatShop"')
+      && str_contains($selfSrc, 'id="notifHealthLine"')
+      && str_contains($selfSrc, 'function renderNotifHealth(){'));
+    $add('10.46.7', 'رابط: انتخابِ غرفه با ذخیرهٔ تنظیمات ارسال می‌شود',
+         str_contains($selfSrc, "fd.append('notif_chat_shop',String(\$('notifChatShop')?.value||0));"));
+
+    /* ==== ۵۹ (v10.45) ==== */
+
+    $add('10.45', 'نبودِ کلیدِ رویداد یعنی روشن — همان چیزی که رابط نشان می‌دهد',
+         function_exists('notifEventOn')
+      && notifEventOn([], 'chat_msg') === true
+      && notifEventOn(['chat_msg' => 0], 'chat_msg') === false
+      && notifEventOn(['chat_msg' => 1], 'chat_msg') === true
+      && notifEventOn([], 'cron_ping') === false
+      && notifEventOn(['cron_ping' => 1], 'cron_ping') === true);
+
+    $add('10.45', 'فهرستِ غرفه‌ها (پیش‌فرض + اضافی) برای بررسی‌ها در دسترس است',
+         (function () {
+             $cn = ['basalam' => ['token' => 'T1', 'vendor_id' => 11, 'shop_name' => 'اصلی',
+                    'vendors' => [['token' => 'T2', 'vendor_id' => 22, 'shop_name' => 'دومی']]]];
+             $shops = bslAllShops($cn);
+             return count($shops) === 2
+                 && !empty($shops[0]['is_default'])
+                 && (int)($shops[1]['vendor_id'] ?? 0) === 22
+                 && (string)($shops[1]['token'] ?? '') === 'T2';
+         })());
+
+    $add('10.45', 'هر سه بررسی همهٔ غرفه‌ها را با توکنِ خودشان می‌گیرند',
+         (preg_match('~function notifCheckOrders\(array \$cn.{0,1200}?bslAllShops\(\$cn\)~su', $selfSrc) === 1
+          && preg_match('~function notifCheckChats\(array \$cn.{0,1200}?bslAllShops\(\$cn\)~su', $selfSrc) === 1
+          && preg_match('~function notifCheckProducts\(array \$cn.{0,1200}?bslAllShops\(\$cn\)~su', $selfSrc) === 1
+          && preg_match('~function notifCheckChats\(array \$cn.{0,1600}?\$tk = trim\(\(string\)\$sh\[\'token\'\]\);~su', $selfSrc) === 1));
+
+    $add('10.45', 'وضعیتِ هر غرفه جداست — شناسهٔ تکراری دو غرفه قاطی نمی‌شود',
+         strpos($selfSrc, "'chat:' . \$vid . ':'") !== false
+      && strpos($selfSrc, "'order:' . \$vid . ':'") !== false
+      && strpos($selfSrc, "'prod:' . \$vid . ':'") !== false
+      && strpos($selfSrc, "'last_chat_check:' . \$vid") !== false
+      && strpos($selfSrc, "'last_order_check:' . \$vid") !== false
+      && strpos($selfSrc, "'last_product_check:' . \$vid") !== false);
+
+    $add('10.45', 'اولین مشاهدهٔ هر غرفه خاموش است — سیلِ اعلانِ قدیمی نمی‌آید',
+         substr_count($selfSrc, 'v10.45 (۵۹): اولین م' . 'شاهدهٔ این غرفه خاموش است') >= 3
+      && strpos($selfSrc, "'new_shop' => true") !== false);
+
+    $add('10.45', 'امضای گفتگو وقتی شناسهٔ پیام نبود، از متن می‌سازد',
+         strpos($selfSrc, "\$sig = \$lastId > 0 ? (string)\$lastId") !== false
+      && strpos($selfSrc, "'t' . substr(md5((string)\$nc['text']), 0, 10)") !== false
+      && strpos($selfSrc, "empty(\$st['chat_sig2'])") !== false);
+
+    $add('10.45', 'خطای اعلان دیگر بی‌صدا دور ریخته نمی‌شود',
+         preg_match('~function bslCheckNotifications\(array \$cn\).{0,3000}?\$out\[.errors.\] = array_values\(array_unique\(\$errors\)\);~su', $selfSrc) === 1);
+
+    $add('10.45', 'پینگ، خطای اعلانِ همان اجرا را هم اعلام می‌کند',
+         strpos($selfSrc, "\$_neErr = \$results['notifications']['errors'] ?? null;") !== false
+      && strpos($selfSrc, "\\n⚠️ اعلان‌ها: ") !== false);
+
+    $add('10.45', 'سلامتِ اعلان‌ها، خطای آخرین اجرا را هم می‌گوید',
+         strpos($selfSrc, "\$add('notif_errors',") !== false
+      && strpos($selfSrc, "'notifications']['errors'] ?? null") !== false);
+
+    $add('10.45', 'رابطِ کاربری، کلیدِ خاموشِ صریح را خاموش نشان می‌دهد',
+         strpos($selfSrc, "const neOn=k=>ne[k]===undefined?true:!!ne[k];") !== false
+      && strpos($selfSrc, "checked=neOn('chat_msg');") !== false);
+
+    $add('10.45', 'ورودیِ CHANGELOG برای 10.45 ثبت شده و نسخهٔ برنامه عقب‌تر نیست',
+         strpos($selfSrc, "{v:'10.45',") !== false
+      && version_compare(APP_VERSION, '10.45', '>='));
 
     $add('10.23', 'دکمهٔ تکراری‌های باسلام در تبِ ارسال هم هست',
          strpos($selfSrc, 'function toggleBslTools(){') !== false
@@ -26084,7 +27614,9 @@ if (isset($_GET['selftest'])) {
     $add('9.02', 'محصولی که هم گالری دارد هم فیلدها دوباره باز نمی‌شود',
          strpos($selfSrc, 'if($_galDone&&!$_field' . 'Missing){$_alreadyDone++;continue;}') !== false);
     $add('9.02', 'گزارش گام جزئیات تعداد واقعی را می‌گوید',
-         strpos($selfSrc, "'nothing_to_" . "do'") !== false
+         /* v10.45: نشانِ قدیمی «nothing_to_do» بود؛ نامِ واقعیِ علامت «هیچ
+            چیزی برای باز کردن نبود» در کد «nothing_selected» است. */
+         strpos($selfSrc, "'nothing_" . "selected'") !== false
          && strpos($selfSrc, "\$pResult['detail_pages']") !== false);
 
     /* ---------- v9.01: کران سه گام جدا — فهرست، جزئیات، ارسال ---------- */
@@ -27309,7 +28841,7 @@ if (isset($_GET['selftest'])) {
         'نگهبان صف'           => (!isset($cnS['stall_watchdog']) || !empty($cnS['stall_watchdog'])) ? 'فعال' : 'خاموش',
         'آستانهٔ گیر کردن'    => (int)($cnS['stall_after'] ?? 300) . ' ثانیه',
         'توکن باسلام'         => trim((string)($cnS['basalam']['token'] ?? '')) !== '' ? 'تنظیم شده' : '— خالی',
-        'پیام‌رسان'           => (!empty($cnS['baleh']['token']) || !empty($cnS['rubika']['token'])) ? 'تنظیم شده' : '— خالی',
+        'پیام‌رسان'           => (!empty($cnS['baleh']['token']) || !empty($cnS['rubika']['token']) || !empty($cnS['telegram']['token'])) ? 'تنظیم شده' : '— خالی',
     ];
 
     $okCount = 0;
@@ -27379,6 +28911,21 @@ if (isset($_GET['selftest'])) {
  * ===================================================================== */
 
 
+/** v10.79 (93): لاگِ تلاش‌هایِ پینگ — ۳۰ آخرین، برایِ عیب‌یابیِ
+    «کجا گیر کرده» بدونِ گمان‌زنی. */
+function notifPingLog(array $entry): void {
+    $f = __DIR__ . '/notif_ping_log.json';
+    $d = json_decode((string)@file_get_contents($f), true);
+    $list = (is_array($d) && is_array($d['log'] ?? null)) ? $d['log'] : [];
+    array_unshift($list, $entry + ['at' => time(), 'time' => date('Y-m-d H:i:s')]);
+    @file_put_contents($f, json_encode(['log' => array_slice($list, 0, 30)], JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+function notifPingSrc(array $results, bool $force): string {
+    if ($force) return 'دستی';
+    if (!empty($results['heartbeat'])) return 'نبضِ کران';
+    if (array_key_exists('locked', $results)) return 'قفل';
+    return 'کران';
+}
 function notifLoadState(): array {
     if (!is_file(NOTIF_STATE_FILE)) return [];
     $d = json_decode((string)@file_get_contents(NOTIF_STATE_FILE), true);
@@ -27496,14 +29043,368 @@ function notifHead(string $why, string $base, int $n = 0): string {
     return $base === '' ? $tag : $tag . ' — ' . $base;
 }
 
+/* =====================================================================
+ *  v10.45 (۵۹): یک منبعِ حق برای «این رویداد روشن است؟»
+ *
+ *  تا اینجا رابطِ کاربری نبودِ کلید را «روشن» نشان می‌داد
+ *  (checked = ne.X !== false) ولی سرور آن را «خاموش» می‌شمرد
+ *  (!empty(...)). یعنی تیک روشن بود و هیچ رویدادی ارسال نمی‌شد —
+ *  دقیقاً همان «اعلان‌ها نمی‌آیند» که دلیلش هیچ‌جا دیده نمی‌شد.
+ *  حالا دو طرف روی یک توافق‌اند: نبودِ کلید = روشن (همان چیزی که
+ *  رابط پیش‌فرض نشان می‌دهد)، روشنِ صریح = روشن، خاموشِ صریح = خاموش.
+ *  تنها استثنای cron_ping است که در هر دو طرف پیش‌فرضِ خاموش دارد
+ *  (وگرنه بدون فاصلهٔ throttle روزی ۲۸ پیام می‌شد).
+ * ===================================================================== */
+function notifEventOn(array $ne, string $key): bool {
+    if ($key === 'cron_ping') return !empty($ne['cron_ping']);
+    if (!array_key_exists($key, $ne)) return true;
+    return !empty($ne[$key]);
+}
+
 /** ارسال یک پیام به همهٔ پیام‌رسان‌های فعال */
-function notifSend(array $cn, string $msg): array {
+/* v10.66 (۸۰): فیدِ رویداد — هر رویدادی که به پیام‌رسان رفته، اینجا هم می‌نشیند
+   تا مرورگر (کارتِ زنده + اعلانِ سیستم) آن را ببیند. چت استثناست: مرورگر
+   خودش هر ۵ ثانیه چت‌ها را مستقیم می‌پوید و تکرار نمی‌خواهد. */
+function liveFeedPush(string $kind, string $msg): void {
+    try {
+        $f = LIVE_FEED_FILE;
+        $d = is_file($f) ? (json_decode((string)@file_get_contents($f), true) ?: []) : [];
+        $ev = is_array($d['events'] ?? null) ? $d['events'] : [];
+        $flat = trim((string)preg_replace('/\s+/u', ' ', $msg));
+        $ev[] = ['ts' => time(), 'kind' => $kind, 'msg' => mb_substr($flat, 0, 600)];
+        $ev = array_slice($ev, -80);
+        @file_put_contents($f, json_encode(['events' => $ev], JSON_UNESCAPED_UNICODE), LOCK_EX);
+    } catch (Throwable $e) { /* فید نباید اعلان را قطع کند */ }
+}
+function liveFeedLoad(int $since = 0): array {
+    try {
+        if (!is_file(LIVE_FEED_FILE)) return [];
+        $d = json_decode((string)@file_get_contents(LIVE_FEED_FILE), true) ?: [];
+        $ev = is_array($d['events'] ?? null) ? $d['events'] : [];
+        if ($since > 0) $ev = array_values(array_filter($ev, fn($e) => (int)($e['ts'] ?? 0) > $since));
+        return array_slice($ev, -80);
+    } catch (Throwable $e) { return []; }
+}
+/* =====================================================================
+   v10.72 (86): Web Push — مسیرِ «واقعی»ِ اعلانِ سیستم.
+
+   چرا: اعلانِ سطحِ صفحه (new Notification یا showNotificationِ صدا
+   زده‌شده از صفحه) روی دسکتاپ خوب است، ولی روی اندروید وقتی کاربر
+   گوشی را قفل می‌کند یا اپ را عوض می‌کند، اندروید جاوااسکریپتِ صفحه
+   را در عرضِ چند ثانیه می‌کُشد — پس اعلان‌هایِ «واقعی» (رویدادهایی که
+   در زمانِ بسته‌بودنِ صفحه اتفاق می‌افتند) هرگز نمایش داده نمی‌شوند. Web Push تنها
+   مسیرِ مطمئن است: سرور اعلان را به سرویسِ push می‌فرستد، و سرویس
+   سرویس‌ورکرِ سایت را روی گوشیِ کاربر بیدار می‌کند و اعلان را
+   نمایش می‌دهد — حتی اگر صفحه هرگز باز نباشد.
+
+   چرخه: مرورگر با کلیدِ عمومیِ VAPID subscribe می‌کند و اشتراک روی
+   سرور ذخیره می‌شود (فایل push_subscriptions.json). با هر رویدادی که
+   باید به پیام‌رسان برود، webpushSend اعلان را به همهٔ اشتراک‌ها
+   می‌فرستد (curl_multi موازی، TTL کوتاه). رمزگذاری بر اساس RFC 8291
+   (authE2048): ECDH P-256 + HKDF + AES-128-GCM، امضای JWT با ES256.
+   ===================================================================== */
+function pushB64url($bytes): string {
+    return rtrim(strtr(base64_encode($bytes), '+/', '-_'), '=');
+}
+function pushB64urlDecode(string $s): ?string {
+    $b = strtr($s, '-_', '+/');
+    $pad = strlen($b) % 4;
+    if ($pad === 1) return null;
+    if ($pad === 2) $b .= '==';
+    elseif ($pad === 3) $b .= '=';
+    $raw = base64_decode($b, true);
+    return $raw === false ? null : $raw;
+}
+function pushSpkiFromRawPoint(string $raw65): string {
+    return "\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01"
+         . "\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00" . $raw65;
+}
+function pushEcdhRaw($privRes, string $peerSpkiDer): ?string {
+    $peerRes = openssl_pkey_get_public($peerSpkiDer);
+    if (!$peerRes || !$privRes) return null;
+    $ss = openssl_pkey_derive($peerRes, $privRes);
+    return ($ss === false || $ss === null) ? null : $ss;
+}
+function pushHkdfExpand(string $prk, string $info, int $len): string {
+    $t = ''; $tm = ''; $i = 1;
+    while (strlen($t) < $len) {
+        $tm = hash_hmac('sha256', $tm . $info . chr($i), $prk, true);
+        $t .= $tm; $i++;
+    }
+    return substr($t, 0, $len);
+}
+function pushAes128GcmEncrypt(string $key, string $iv, string $aad, string $pt): ?string {
+    $tag = '';
+    $ct = openssl_encrypt($pt, 'aes-128-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag, $aad, 16);
+    if ($ct === false || strlen($tag) !== 16) return null;
+    return $ct . $tag;
+}
+function pushLoadSubs(): array {
+    $d = json_decode((string)@file_get_contents(PUSH_SUBS_FILE), true);
+    return (is_array($d) && is_array($d['subs'] ?? null)) ? $d['subs'] : [];
+}
+function pushSaveSubs(array $subs): bool {
+    return @file_put_contents(PUSH_SUBS_FILE, json_encode(['subs' => $subs, 'at' => time()], JSON_UNESCAPED_UNICODE), LOCK_EX) !== false;
+}
+function pushUpsertSub(array $sub): bool {
+    $subs = pushLoadSubs();
+    $ep = (string)($sub['endpoint'] ?? '');
+    $p256 = (string)($sub['keys']['p256dh'] ?? '');
+    $auth = (string)($sub['keys']['auth'] ?? '');
+    if ($ep === '' || $p256 === '' || $auth === '') return false;
+    $subs[$ep] = ['endpoint' => $ep,
+                  'keys' => ['p256dh' => $p256, 'auth' => $auth],
+                  'at' => time()];
+    $subs = array_slice($subs, -30, null, true);   // سقف ۳۰ اشتراک
+    return pushSaveSubs($subs);
+}
+function pushDropSub(string $endpoint): void {
+    $subs = pushLoadSubs();
+    if (isset($subs[$endpoint])) {
+        unset($subs[$endpoint]);
+        pushSaveSubs($subs);
+    }
+}
+function pushDerToRawSig(string $der): ?string {
+    if (strlen($der) < 8 || ord($der[0]) !== 0x30) return null;
+    $len = ord($der[1]);
+    if ($len < 2 || 2 + $len > strlen($der)) return null;
+    $i = 2; $parts = [];
+    for ($n = 0; $n < 2; $n++) {
+        if ($i + 2 > strlen($der) || ord($der[$i]) !== 0x02) return null;
+        $il = ord($der[$i + 1]);
+        if ($i + 2 + $il > strlen($der)) return null;
+        $val = substr($der, $i + 2, $il);
+        $val = ltrim($val, "\x00");
+        if (strlen($val) > 32) return null;
+        $parts[] = str_pad($val, 32, "\x00", STR_PAD_LEFT);
+        $i += 2 + $il;
+    }
+    return $parts[0] . $parts[1];
+}
+function webpushVapidJwt(string $aud): ?string {
+    $priv = openssl_pkey_get_private(base64_decode(VAPID_PRIVATE_KEY_B64));
+    if (!$priv) return null;
+    $h = pushB64url(json_encode(['typ' => 'JWT', 'alg' => 'ES256']));
+    $p = pushB64url(json_encode(['aud' => $aud, 'exp' => time() + 120, 'iat' => time(), 'sub' => VAPID_SUBJECT]));
+    $sigInput = $h . '.' . $p;
+    if (!openssl_sign($sigInput, $derSig, $priv, OPENSSL_ALGO_SHA256)) return null;
+    $raw = pushDerToRawSig($derSig);
+    if ($raw === null || strlen($raw) !== 64) return null;
+    return $sigInput . '.' . pushB64url($raw);
+}
+function webpushBuildRequest(string $endpoint, array $keys, string $payloadJson): ?array {
+    $detRaw = pushB64urlDecode((string)($keys['p256dh'] ?? ''));
+    $serverRaw = pushB64urlDecode(VAPID_PUBLIC_KEY_B64URL);
+    if ($detRaw === null || strlen($detRaw) !== 65 || $detRaw[0] !== "\x04") return null;
+    if (pushB64urlDecode((string)($keys['auth'] ?? '')) === null) return null;
+    if ($serverRaw === null || strlen($serverRaw) !== 65) return null;
+    $epriv = openssl_pkey_new(['curve_name' => 'prime256v1']);
+    if (!$epriv) return null;
+    $ss = pushEcdhRaw($epriv, pushSpkiFromRawPoint($detRaw));
+    if ($ss === null) return null;
+    $ccek        = hash_hkdf('sha256', $ss, '', 'Content Cryptography Key', 16, true);
+    $contentSalt = hash_hkdf('sha256', $ss, '', 'Content Salt', 16, true);
+    $headerSalt  = hash_hkdf('sha256', $ss, '', 'Header Salt', 16, true);
+    $iv = random_bytes(12);
+    $ct = pushAes128GcmEncrypt($ccek, $iv, $contentSalt, $payloadJson);
+    if ($ct === null) return null;
+    $body = $iv . $ct;
+    /* نقطهٔ ephemeral برای هدرها: P256ECWSK + r1/r2 */
+    $det = openssl_pkey_get_details($epriv);
+    $epubRaw = '';
+    if (is_array($det) && !empty($det['ec']['x']) && !empty($det['ec']['y'])) {
+        $x = ltrim($det['ec']['x'], "\x00");
+        $y = ltrim($det['ec']['y'], "\x00");
+        if (strlen($x) > 32 || strlen($y) > 32) return null;
+        $epubRaw = "\x04" . str_pad($x, 32, "\x00", STR_PAD_LEFT) . str_pad($y, 32, "\x00", STR_PAD_LEFT);
+    }
+    if (strlen($epubRaw) !== 65) return null;
+    $r1 = substr($epubRaw, 1, 32);
+    $r2 = substr($epubRaw, 33, 16);
+    $b64Server = pushB64url($serverRaw);
+    $b64User   = pushB64url($detRaw);
+    $aad = "BePush2.0\x01" . $r2 . $b64Server . $b64User . $endpoint . "\x00\x01";
+    $host = parse_url($endpoint, PHP_URL_HOST);
+    if (empty($host)) return null;
+    $jwt = webpushVapidJwt(parse_url($endpoint, PHP_URL_SCHEME) . '://' . $host);
+    if ($jwt === null) return null;
+    $headers = [
+        'Authorization: WebPush ' . $jwt,
+        'Content-Encoding: authE2048',
+        'Content-Length: ' . strlen($body),
+        'TTL: 60',
+        'Crypto-Key: keyid="",r1=' . pushB64url($r1) . ',r2=' . pushB64url($r2),
+        'P256ECWSK: ' . pushB64url($epubRaw),
+        'AAD: ' . pushB64url($aad),
+    ];
+    return ['headers' => $headers, 'body' => $body];
+}
+/** v10.74 (88): مسیرهایِ ارسالِ Push — مستقیم / پراکسیِ خارجی / Workerِ واسط.
+    هاست‌هایِ داخلِ ایران به fcm.googleapis.com دسترسی ندارند؛ برای همین
+    دو مسیرِ جایگزین روی تنظیماتِ کاربر ذخیره شده و فقط وقتی مسیرِ مستقیم
+    اتصالِ برقرار نمی‌کند (HTTP 0) به کار می‌افتند. */
+function pushRouteCfg(?array $cn): array {
+    $cn = $cn ?: loadConnections();
+    $pr = is_array($cn['push_route'] ?? null) ? $cn['push_route'] : [];
+    $proxy = trim((string)($pr['proxy'] ?? ''));
+    $source = 'push_route';
+    if ($proxy === '') {
+        /* v10.76 (90): اگر کاربر مسیرِ جداگانهٔ Push نگذاشته، از همان
+           اتصالِ غیرمستقیمی که برایِ عبورِ «هوش مصنوعی» یا «سایت مبدأ»
+           تنظیم کرده استفاده می‌شود (قالبِ {url} یا آدرسِ proxy.php). */
+        foreach (['ai_net', 'src_net'] as $k) {
+            $w = trim((string)($cn[$k]['worker_url'] ?? ''));
+            if ($w === '') continue;
+            if (strpos($w, '{url}') !== false) { $proxy = $w; $source = $k; break; }
+            $pb = (string)(parse_url($w, PHP_URL_PATH) ?? '');
+            $bn = strtolower(basename($pb));
+            if ($bn !== '' && substr($bn, -4) === '.php') { $proxy = $w; $source = $k; break; }
+        }
+    }
+    return [
+        'proxy'  => $proxy,
+        'worker' => trim((string)($pr['worker_url'] ?? '')),
+        'token'  => (string)($pr['worker_token'] ?? ''),
+        'site_source' => $source,
+    ];
+}
+/** یک دورِ ارسال روی یک مسیر؛ برمی‌گرداند فهرستِ endpointهایی که هنوز
+    ارسالِ برقرار نشد (فقط اتصالِ ناموفق = HTTP 0) تا دورِ بعد امتحان شود.
+    v10.75 (89): مسیرِ تازهٔ «site_proxy» — انتقالِ شفاف از طریقِ
+    interface.php (اتصالِ غیرمستقیمِ خودِ سایت): POST {base}?url={endpoint}
+    با همان سردر و بدنهٔ Web Push؛ پاسخِ سرویسِ مقصد عیناً برمی‌گردد. */
+function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $via, array &$detail, array &$drop): array {
+    if (!$pending) return $pending;
+    $mh = curl_multi_init(); $chs = [];
+    foreach ($pending as $ep => $req) {
+        $ch = curl_init();
+        if ($via === 'worker') {
+            $wBody = json_encode(['url' => $req['endpoint'], 'headers' => $req['headers'], 'body_b64' => base64_encode($req['body'])], JSON_UNESCAPED_UNICODE);
+            $wHeaders = ['Content-Type: application/json'];
+            if ($routeCfg['token'] !== '') $wHeaders[] = 'X-Push-Auth: ' . $routeCfg['token'];
+            curl_setopt_array($ch, [CURLOPT_URL => $routeCfg['worker'], CURLOPT_POST => true, CURLOPT_POSTFIELDS => $wBody,
+                CURLOPT_HTTPHEADER => $wHeaders, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 25, CURLOPT_CONNECTTIMEOUT => 10]);
+        } elseif ($via === 'site_proxy') {
+            /* اتصالِ غیرمستقیمِ خودِ سایت (interface.php) — انتقالِ شفاف:
+               پراکسی سردرها و بدنه را بدونِ تغییر به fcm.googleapis.com می‌دهد
+               و وضعیت/بدنهٔ پاسخ را عیناً برمی‌گرداند. */
+            /* قالبِ {url} (همان قالبِ عبورِ هوش مصنوعی/مبدأ) یا آدرسِ ساده */
+            $pu = strpos($viaCfg['url'], '{url}') !== false
+                ? str_replace('{url}', rawurlencode($req['endpoint']), $viaCfg['url'])
+                : $viaCfg['url'] . (strpos($viaCfg['url'], '?') !== false ? '&' : '?') . 'url=' . rawurlencode($req['endpoint']);
+            curl_setopt_array($ch, [CURLOPT_URL => $pu,
+                CURLOPT_POST => true, CURLOPT_POSTFIELDS => $req['body'],
+                CURLOPT_HTTPHEADER => $req['headers'],
+                CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 40, CURLOPT_CONNECTTIMEOUT => 12, CURLOPT_SSL_VERIFYPEER => true]);
+        } else {
+            $opt = [CURLOPT_URL => $req['endpoint'], CURLOPT_POST => true, CURLOPT_POSTFIELDS => $req['body'],
+                CURLOPT_HTTPHEADER => $req['headers'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 12,
+                CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_SSL_VERIFYPEER => true];
+            if ($via === 'proxy') {
+                $opt[CURLOPT_PROXY] = $viaCfg['url'];
+                if ($viaCfg['auth'] !== '') $opt[CURLOPT_PROXYUSERPWD] = $viaCfg['auth'];
+            }
+            curl_setopt_array($ch, $opt);
+        }
+        curl_multi_add_handle($mh, $ch);
+        $chs[(string)$ep] = $ch;
+    }
+    $left = $pending;
+    if ($chs) {
+        do {
+            $act = curl_multi_exec($mh, $running);
+            if ($running > 0) curl_multi_select($mh, 0.2);
+        } while ($running > 0);
+        foreach ($chs as $ep => $ch) {
+            $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+            $err = (string)curl_error($ch);
+            $resp = (string)curl_result($ch);
+            if ($via === 'worker' && $code >= 200 && $code < 300) {
+                // Worker زنده است — وضعیتِ واقعیِ سرویسِ Push را از پاسخِ خودِ Worker بخوان
+                $wj = json_decode($resp, true);
+                if (is_array($wj) && isset($wj['status'])) $code = (int)$wj['status'];
+                else $err = 'پاسخِ Worker خوانا نبود';
+            }
+            if ($code < 200 || $code >= 300) {
+                /* v10.75 (89): پیامِ خطایِ JSONِ پراکسی/Worker را خوانا نشان بده */
+                $ej = json_decode($resp, true);
+                if (is_array($ej) && !empty($ej['message'])) $err = $ej['message'];
+                elseif ($err === '' && $resp !== '' && strlen($resp) < 200) $err = trim($resp);
+                if ($via === 'site_proxy' && $code === 403) $err .= ' — fcm.googleapis.com را به فهرستِ PROXY_TARGET_HOSTSِ interface.php اضافه کنید';
+            }
+            curl_multi_remove_handle($mh, $ch);
+            curl_close($ch);
+            $detail[(string)$ep] = ['via' => $via, 'code' => $code, 'error' => $err];
+            if ($code >= 200 && $code < 300) { unset($left[(string)$ep]); }
+            elseif (in_array($code, [404, 410], true)) { unset($left[(string)$ep]); $drop[] = (string)$ep; }
+            elseif ($code === 0) { /* اتصال برقرار نشد — این endpoint برای دورِ بعد می‌ماند */ }
+            else { unset($left[(string)$ep]); }
+        }
+    }
+    curl_multi_close($mh);
+    return $left;
+}
+function webpushSend(string $title, string $body, ?string $kind = null, ?array $cn = null): array {
+    $subs = pushLoadSubs();
+    if (!$subs) return ['sent' => 0, 'failed' => 0, 'total' => 0, 'detail' => []];
+    $payload = json_encode(['title' => $title, 'body' => $body,
+                            'kind' => $kind ?? '', 'tag' => 'mr_push_' . ($kind ?? 'event'),
+                            'requireInteraction' => true, 'at' => time()], JSON_UNESCAPED_UNICODE);
+    $routeCfg = pushRouteCfg();
+    $proxyUrl = ''; $proxyAuth = '';
+    if ($routeCfg['proxy'] !== '' && stripos($routeCfg['proxy'], '@') !== false) {
+        $at = stripos($routeCfg['proxy'], '@');
+        $proxyAuth = substr($routeCfg['proxy'], 0, $at);
+        $proxyUrl = substr($routeCfg['proxy'], $at + 1);
+    } else {
+        $proxyUrl = $routeCfg['proxy'];
+    }
+    $pending = []; $detail = []; $drop = [];
+    foreach ($subs as $ep => $sub) {
+        $req = webpushBuildRequest((string)$sub['endpoint'], (array)($sub['keys'] ?? []), $payload);
+        if ($req === null) { $drop[] = (string)$ep; $detail[(string)$ep] = ['via' => '-', 'code' => 0, 'error' => 'ساختِ درخواست ناموفق']; continue; }
+        $pending[(string)$ep] = ['endpoint' => (string)$sub['endpoint'], 'headers' => $req['headers'], 'body' => $req['body']];
+    }
+    /* v10.75 (89): زنجیرهٔ مسیرها — اول مستقیم؛ اگر اتصال برقرار نشود،
+       اتصالِ غیرمستقیمِ خودِ سایت (interface.php)؛ بعد (اختیاری) Worker.
+       هاستِ خارجی (دسترسیِ مستقیم) هرگز مسیرِ دوم را لمس نمی‌کند. */
+    $pending = pushSendRound($pending, $routeCfg, [], 'direct', $detail, $drop);
+    if ($proxyUrl !== '' && $pending) $pending = pushSendRound($pending, $routeCfg, ['url' => $proxyUrl, 'auth' => $proxyAuth], ($proxyAuth !== '' ? 'proxy' : 'site_proxy'), $detail, $drop);
+    if ($routeCfg['worker'] !== '' && $pending) $pending = pushSendRound($pending, $routeCfg, ['url' => $routeCfg['worker']], 'worker', $detail, $drop);
+    foreach (array_keys($pending) as $ep) $detail[(string)$ep] = $detail[(string)$ep] ?? ['via' => '-', 'code' => 0, 'error' => 'هیچ مسیری جواب نداد'];
+    if ($drop) { foreach (array_unique($drop) as $d) pushDropSub($d); }
+    $sent = 0; $failed = 0;
+    foreach ($detail as $v) {
+        $c = (int)($v['code'] ?? 0);
+        if (in_array($c, [404, 410], true)) continue;
+        if ($c >= 200 && $c < 300) $sent++;
+        else $failed++;
+    }
+    return ['sent' => $sent, 'failed' => $failed, 'total' => count($subs), 'detail' => $detail];
+}
+function notifSend(array $cn, string $msg, ?string $feed = null): array {
     $out = [];
     $bt = $cn['baleh']['token'] ?? '';  $bc = $cn['baleh']['chat_id'] ?? '';
     $rt = $cn['rubika']['token'] ?? ''; $rc = $cn['rubika']['chat_id'] ?? '';
-    if ($bt !== '' && $bc !== '')  $out['baleh']  = bslSendToBaleh($bt, $bc, $msg) ? 'sent' : 'fail';
-    if ($rt !== '' && $rc !== '')  $out['rubika'] = bslSendToRubika($rt, $rc, $msg) ? 'sent' : 'fail';
+    $tt = $cn['telegram']['token'] ?? ''; $tc = $cn['telegram']['chat_id'] ?? '';   // v10.78 (92): تلگرام
+    if ($bt !== '' && $bc !== '')  { $rb = bslSendToBaleh($bt, $bc, $msg); $out['baleh'] = $rb['ok'] ? 'sent' : 'fail'; if (!$rb['ok'] && $rb['error'] !== '') $out['baleh_err'] = $rb['error']; }   // v10.79 (93)
+    if ($rt !== '' && $rc !== '')  { $rr = bslSendToRubika($rt, $rc, $msg); $out['rubika'] = $rr['ok'] ? 'sent' : 'fail'; if (!$rr['ok'] && $rr['error'] !== '') $out['rubika_err'] = $rr['error']; }
+    if ($tt !== '' && $tc !== '')  { $tr = bslSendToTelegram($tt, $tc, $msg); $out['telegram'] = $tr['ok'] ? 'sent' : 'fail'; if (!$tr['ok'] && $tr['error'] !== '') $out['telegram_err'] = $tr['error']; }
     if (!$out) $out['none'] = 'no_messenger';
+    if ($feed !== null) liveFeedPush($feed, $msg);   /* v10.66 (۸۰) */
+    /* v10.72 (86): Web Push — در کنارِ پیام‌رسان، به دستگاهِ کاربر.
+       رویدادها چه «لحظه‌ای» (درخواستِ مرورگر) باشند چه «کران‌جاب» —
+       هر دو از همین تابع رد می‌شوند، پس هر دو Push می‌شوند. */
+    if ($feed !== null && is_file(PUSH_SUBS_FILE)) {
+        try {
+            $_pt = ['order' => '🛒 سفارش', 'product' => '📦 محصول', 'price' => '💰 قیمت/موجودی',
+                    'sync' => '🔄 همگام‌سازی', 'report' => '📄 گزارش', 'error' => '⚠️ خطا',
+                    'retire' => '🗂 بازنشستگی', 'remind' => '⏰ یادآوری', 'ar' => '↩️ پاسخ خودکار',
+                    'ping' => '💓 کران زنده است', 'digest' => '📊 خلاصه'];
+            $out['push'] = webpushSend($_pt[$feed] ?? '🔔 اعلان', mb_substr($msg, 0, 400), (string)$feed, $cn);   // v10.77 (91): کانالِ نجوا
+        } catch (Throwable $e) {}
+    }
     return $out;
 }
 
@@ -27528,14 +29429,16 @@ function notifCronPing(array $cn, array $results, bool $force = false): array {
        (vendor_id اصلی صفر)، پیامِ دوره‌ای‌اش کاملاً قطع می‌شد — دقیقاً
        همان «اعلان‌ها نمی‌آیند»، بدون هیچ ردی در گزارش. */
     $_hasMsgr = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
-             || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '');
-    if (!$_hasMsgr) return ['ok' => false, 'error' => 'هیچ پیام‌رسانی تنظیم نشده (بله یا روبیکا)'];
+             || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '')
+             || (trim((string)($cn['telegram']['token'] ?? '')) !== '' && trim((string)($cn['telegram']['chat_id'] ?? '')) !== '');   // v10.78 (92)
+    if (!$_hasMsgr) { notifPingLog(['ok' => false, 'src' => notifPingSrc($results, $force), 'error' => 'هیچ پیام‌رسانی تنظیم نشده']); return ['ok' => false, 'error' => 'هیچ پیام‌رسانی تنظیم نشده (بله/روبیکا/تلگرام)']; }
 
     $everyMin = (int)($cn['ping_every'] ?? 360);   // دقیقه
     $st  = notifLoadState();
     $last = (int)($st['last_cron_ping'] ?? 0);
     $now  = time();
     if (!$force && $everyMin > 0 && $last > 0 && ($now - $last) < $everyMin * 60) {
+        notifPingLog(['ok' => true, 'skipped' => 'throttled', 'src' => notifPingSrc($results, $force)]);
         return ['ok' => true, 'skipped' => 'throttled',
                 'next_in' => $everyMin * 60 - ($now - $last)];
     }
@@ -27588,6 +29491,7 @@ function notifCronPing(array $cn, array $results, bool $force = false): array {
         if ($_pDoneAt > 0 && ($_pStart <= 0 || $_pDoneAt >= $_pStart - 120)) {
             $st['last_cron_start'] = $now;
             notifSaveState($st);
+            notifPingLog(['ok' => true, 'skipped' => 'heartbeat_not_needed', 'src' => 'نبضِ کران']);
             return ['ok' => true, 'skipped' => 'heartbeat_not_needed'];
         }
     }
@@ -27604,7 +29508,63 @@ function notifCronPing(array $cn, array $results, bool $force = false): array {
          . ($last > 0 ? "\nفاصله از پینگ قبلی: " . $sinceTxt : '')
          . ($force ? "\n(پینگ آزمایشی)" : '');
 
-    $delivery = notifSend($cn, $msg);
+    /* v10.47 (۶۱): پینگ تنها پیامی است که کاربر قطعاً هر بار آن را
+       می‌بیند — پس وضعیتِ کاملِ بررسیِ اعلان‌ها سوارِ همان پیام شود:
+       اجرا شد؟ غرفه دید؟ چند گفتگو، چند بی‌جواب؟ خطایی بود؟
+       با این، «چرا اعلانی نمی‌آید» دیگر گمان‌زنی نیست: خطِ
+       «اعلان‌ها: ...» را از خودِ پینگ بخوانید. */
+    $_nres = $results['notifications'] ?? null;
+    /* v10.48 (۶۲): پینگِ نبض سرِ «شروع» اجرا می‌رود — بررسیٔ اعلان هنوز
+       در همین دور انجام نشده، پس نتیجهٔ «این» دور آنجا وجود ندارد.
+       پیامِ غلطِ «پیام‌رسان یا غرفه ندارد» را با وضعیتِ آخرین بررسیِ
+       ثبت‌شده عوض می‌کنیم — همان چیزی که کاربر برای قضاوت نیاز دارد. */
+    if (!empty($results['heartbeat'])) {
+        $_stHb = notifLoadState();
+        $_lrHb = (int)($_stHb['last_notif_run'] ?? 0);
+        if ($_lrHb > 0) {
+            $_ageHb = max(0, time() - $_lrHb);
+            $_faHb = $_ageHb < 90 ? $_ageHb . ' ثانیه پیش'
+                     : ($_ageHb < 5400 ? (int)round($_ageHb / 60) . ' دقیقه پیش'
+                                       : (int)round($_ageHb / 3600) . ' ساعت پیش');
+            $_seenHb = is_array($_stHb['last_notif_seen'] ?? null) ? $_stHb['last_notif_seen'] : [];
+            $_pendHb = (int)($_stHb['last_notif_pending'] ?? 0);
+            $msg .= "\nاعلان‌ها (آخرین بررسی " . $_faHb . "): گفتگو " . (int)($_seenHb['chats'] ?? 0)
+                 . ($_pendHb > 0 ? ' (' . $_pendHb . ' بی‌جواب)' : '')
+                 . ' · سفارش ' . (int)($_seenHb['orders'] ?? 0)
+                 . ' · محصول ' . (int)($_seenHb['products'] ?? 0);
+            if (is_array($_stHb['last_notif_errors'] ?? null) && $_stHb['last_notif_errors']) {
+                $msg .= "\n⚠️ خطای آخرین بررسی: " . mb_substr(implode('؛ ', array_slice((array)$_stHb['last_notif_errors'], 0, 2)), 0, 140);
+            }
+        } else {
+            $msg .= "\nاعلان‌ها: هنوز بررسی‌ای ثبت نشده (اولین دور)";
+        }
+    } elseif (is_array($_nres) && !empty($_nres['skipped'])) {
+        $_why = $_nres['skipped'] === 'no_basalam_shops'
+              ? 'هیچ غرفهٔ باسلامی با توکن تنظیم نشده'
+              : (string)$_nres['skipped'];
+        $msg .= "\n⚠️ اعلان‌ها: اجرا نشد — " . $_why;
+    } elseif (is_array($_nres) && !empty($_nres['events_off'])) {
+        $msg .= "\nاعلان‌ها: اجرا نشد — هیچ رویدادی روشن نیست";
+    } elseif (is_array($_nres) && !empty($_nres['error'])) {
+        $msg .= "\n⚠️ اعلان‌ها: خطا در بررسی — " . mb_substr((string)$_nres['error'], 0, 120);
+    } elseif (is_array($_nres) && $_nres) {
+        $_bits = [];
+        if (isset($_nres['seen_chats'])) {
+            $_bits[] = 'گفتگو ' . (int)$_nres['seen_chats']
+                     . (!empty($_nres['pending_chats']) ? ' (' . (int)$_nres['pending_chats'] . ' بی‌جواب)' : '');
+        }
+        if (isset($_nres['seen_orders']))   $_bits[] = 'سفارش ' . (int)$_nres['seen_orders'];
+        if (isset($_nres['seen_products'])) $_bits[] = 'محصول ' . (int)$_nres['seen_products'];
+        if (!empty($_nres['found_total']))  $_bits[] = '🔔 ' . (int)$_nres['found_total'] . ' رویداد اعلان شد';
+        if (is_array($_nres['errors'] ?? null) && $_nres['errors']) {
+            $_bits[] = '⚠️ ' . mb_substr(implode('؛ ', array_slice(array_unique($_nres['errors']), 0, 2)), 0, 140);
+        }
+        $msg .= "\nاعلان‌ها: " . implode(' · ', $_bits);
+    } else {
+        $msg .= "\nاعلان‌ها: اجرا نشد (پیام‌رسان یا غرفهٔ باسلام ندارد)";
+    }
+
+    $delivery = notifSend($cn, $msg, 'ping');
     /* v10.22 (۳۵ب): پنجرهٔ throttle فقط وقتی مصرف می‌شود که پیام واقعاً
        رسیده باشد.
 
@@ -27616,6 +29576,7 @@ function notifCronPing(array $cn, array $results, bool $force = false): array {
        حالا اگر هیچ مقصدی 'sent' نگرفت، حالت دست‌نخورده می‌ماند تا تیکِ
        بعدیِ کران دوباره تلاش کند. */
     $anySent = in_array('sent', array_values($delivery), true);
+    notifPingLog(['ok' => $anySent, 'src' => notifPingSrc($results, $force), 'delivery' => $delivery]);   // v10.79 (93)
     if (!$force && $anySent) {
         $st['last_cron_ping'] = $now;
         if ($hb) $st['last_cron_start'] = $now;   // v10.21: زمانِ شروعِ این اجرا
@@ -27633,8 +29594,9 @@ function notifPrereq(array $cn): ?string {
     if (trim((string)($cn['basalam']['token'] ?? '')) === '') return 'توکن باسلام تنظیم نشده';
     if ((int)($cn['basalam']['vendor_id'] ?? 0) <= 0)         return 'شناسهٔ غرفه تنظیم نشده';
     $hasMsgr = (!empty($cn['baleh']['token']) && !empty($cn['baleh']['chat_id']))
-            || (!empty($cn['rubika']['token']) && !empty($cn['rubika']['chat_id']));
-    if (!$hasMsgr) return 'هیچ پیام‌رسانی تنظیم نشده (بله یا روبیکا)';
+            || (!empty($cn['rubika']['token']) && !empty($cn['rubika']['chat_id']))
+            || (!empty($cn['telegram']['token']) && !empty($cn['telegram']['chat_id']));   // v10.78 (92)
+    if (!$hasMsgr) return 'هیچ پیام‌رسانی تنظیم نشده (بله/روبیکا/تلگرام)';
     return null;
 }
 
@@ -27665,11 +29627,12 @@ function bslApiError(array $r, string $what, string $endpoint, string $scope = '
             $m   = (string)($d['msg'] ?? '');
             if ($loc !== '' || $m !== '') $det[] = trim($loc . ' ' . $m);
         }
+        $att = is_array($r['attempts'] ?? null) ? ' — روش‌های امتحان‌شده: ' . implode('، ', $r['attempts']) : '';
         return $what . ' — پارامتر نامعتبر (۴۲۲)'
-             . ($det ? ': ' . mb_substr(implode(' · ', $det), 0, 160) : ' در ' . $endpoint);
+             . ($det ? ': ' . mb_substr(implode(' · ', $det), 0, 160) : ' در ' . $endpoint) . $att;
     }
     if ($c === 0)   return $what . ' — ارتباط با باسلام برقرار نشد';
-    return $what . ' — خطای HTTP ' . $c;
+    return $what . ' — خطای HTTP ' . $c . $att;
 }
 
 /* =====================================================================
@@ -28095,6 +30058,123 @@ function bslSendChatMessage(string $tk, int $chatId, string $text): array {
             'body' => $r['body'] ?? null];
 }
 
+/* =====================================================================
+ *  v10.57 (۷۱): محیطِ چتِ چندغرفه‌ای + آپلود تصویر + ارسالِ چندرسانه‌ای
+ *
+ *  • bslChatShops      — فهرستِ غرفه‌هایِ فعال (نرخ‌شمارهٔ ۱‌مبنا ثابت است:
+ *                        همانِ ترتیبِ bslAllShops — پیش‌فرض اول، بقیه بعد)
+ *  • bslChatUploadFile — آپلود تصویر به سرویسِ آپلود باسلام (chat.photo)
+ *  • bslChatSendEx     — ارسالِ پیامِ متن و/یا تصویر (attachment)
+ * ===================================================================== */
+
+/** فهرستِ غرفه‌هایِ باسلامِ دارایِ توکن، با شمارهٔ پایدارِ ۱‌مبنا */
+function bslChatShops(array $cn): array {
+    $out = [];
+    foreach (bslAllShops($cn) as $sh) {
+        $tok = trim((string)($sh['token'] ?? ''));
+        $vid = (int)($sh['vendor_id'] ?? 0);
+        if ($tok === '' || $vid <= 0) continue;
+        $out[] = ['shop' => count($out) + 1, 'vendor_id' => $vid, 'token' => $tok,
+                  'name' => (string)($sh['shop_name'] ?? ('غرفهٔ ' . $vid)),
+                  'is_default' => !empty($sh['is_default'])];
+    }
+    return array_slice($out, 0, 8);   // سقفِ محافظ: پُلِ هر ثانیه روی ۸ غرفه نمی‌چرخد
+}
+
+function bslShopByNum(array $shops, int $num): ?array {
+    foreach ($shops as $sh) if ((int)$sh['shop'] === $num) return $sh;
+    return null;
+}
+
+/**
+ * v10.57 (۷۱): آپلودِ یک فایل (معمولاً تصویر) به سرویسِ آپلود باسلام.
+ * طبق openapi: POST /v1/files — multipart با fieldِ «file» و «file_type»
+ * (برای چت: chat.photo / chat.file). خروجی id + url است که در
+ * attachmentِ پیام استفاده می‌شود.
+ */
+function bslChatUploadFile(string $tk, string $tmpPath, string $mime, string $name, string $fileType = 'chat.photo'): array {
+    if (!class_exists('CURLFile')) return ['ok' => false, 'error' => 'کلاسِ CURLFile در دسترس نیست'];
+    if (!is_file($tmpPath)) return ['ok' => false, 'error' => 'فایلِ موقت پیدا نشد'];
+    $cf = new CURLFile($tmpPath, $mime !== '' ? $mime : 'application/octet-stream', $name !== '' ? $name : 'upload.jpg');
+    $r = bslReq($tk, 'POST', 'files', ['file' => $cf, 'file_type' => $fileType], true, null, true, 1);
+    $b = is_array($r['body'] ?? null) ? $r['body'] : [];
+    $id = (int)($b['id'] ?? 0);
+    $url = (string)($b['urls']['primary'] ?? ($b['url'] ?? ''));
+    if (!empty($r['ok']) && $id > 0 && $url !== '') {
+        return ['ok' => true, 'id' => $id, 'url' => $url,
+                'width' => (int)($b['width'] ?? 0), 'height' => (int)($b['height'] ?? 0),
+                'size' => (int)($b['size'] ?? 0)];
+    }
+    return ['ok' => false, 'id' => $id, 'url' => $url, 'code' => (int)($r['code'] ?? 0),
+            'error' => bslApiError($r, 'آپلود فایل ناموفق', 'files (upload)', 'upload')];
+}
+
+/**
+ * v10.57 (۷۱): ارسالِ پیام به یک گفتگو — متن و/یا تصویر.
+ * $file = ['id'=>int,'url'=>str,'width'=>int,'height'=>int,'size'=>int,'name'=>str,'type'=>'picture'|'file']
+ * (id و url از bslChatUploadFile می‌آیند؛ attachment طبق openapi).
+ */
+function bslChatSendEx(string $tk, int $chatId, string $text, ?array $file = null): array {
+    if ($chatId <= 0) return ['ok' => false, 'error' => 'ورودی نامعتبر'];
+    if ($file) {
+        $body = ['message_type' => (($file['type'] ?? '') === 'file') ? 'file' : 'picture',
+                 'attachment' => ['files' => [['id' => (int)$file['id'], 'url' => (string)$file['url']]]]];
+        if (!empty($file['width']))  $body['attachment']['files'][0]['width'] = (int)$file['width'];
+        if (!empty($file['height'])) $body['attachment']['files'][0]['height'] = (int)$file['height'];
+        if (!empty($file['size']))   $body['attachment']['files'][0]['size'] = (int)$file['size'];
+        if (trim((string)($file['name'] ?? '')) !== '') $body['attachment']['files'][0]['name'] = (string)$file['name'];
+        if (trim($text) !== '') $body['content'] = ['text' => mb_substr($text, 0, 3000)];
+    } else {
+        $body = ['content' => ['text' => mb_substr($text, 0, 3000)], 'message_type' => 'text'];
+    }
+    $r = bslReq($tk, 'POST', 'chats/' . $chatId . '/messages', $body, false, null, true);
+    if (empty($r['ok'])) {
+        return ['ok' => false, 'code' => (int)($r['code'] ?? 0),
+                'error' => bslApiError($r, 'ارسال پیام ناموفق', 'chats/{id}/messages', 'customer.chat.write')];
+    }
+    return ['ok' => true];
+}
+
+/**
+ * v10.55 (69): تاریخچهٔ یک گفتگو — هر دو طرف (مشتری + خودِ ما)،
+ * قدیم به جدید. بر خلاف bslFetchChatMessages که برای اعلان فقط طرفِ
+ * مقابل را برمی‌گرداند، برای پنجرهٔ «پاسخ دستی» است تا بافتِ
+ * گفتگو قبل از جواب دیدنی باشد.
+ */
+function bslChatThread(string $tk, int $chatId, int $limit = 30): array {
+    if ($chatId <= 0) return [];
+    $myId = bslMyUserId($tk);
+    $lim = max(1, min(50, $limit));
+    $r = bslReqRead($tk, 'chats/' . $chatId . '/messages?limit=' . $lim . '&order=desc');
+    if (!$r['ok']) return [];
+    $rows = $r['body']['data']['messages'] ?? ($r['body']['data'] ?? []);
+    if (!is_array($rows)) return [];
+    $out = [];
+    foreach ($rows as $m) {
+        if (!is_array($m)) continue;
+        $sid = (int)($m['sender']['id'] ?? 0);
+        $mt  = (string)($m['message_type'] ?? '');
+        $txt = $m['content']['text'] ?? null;
+        if (!is_string($txt) || trim($txt) === '') $txt = ($mt !== '' && $mt !== 'text') ? '[' . $mt . ']' : '';
+        /* v10.57 (۷۱): اگر پیام تصویر/فایل است، آدرسش را از شکل‌هایِ ممکنِ
+           پاسخ بردار تا در پنجرهٔ چت نمایش داده شود. */
+        $imgMR = '';
+        foreach ([$m['attachment']['files'][0]['url'] ?? null,
+                  $m['content']['url'] ?? null,
+                  $m['content']['files'][0]['url'] ?? null,
+                  $m['url'] ?? null] as $uImgMR) {
+            if (is_string($uImgMR) && strncmp($uImgMR, 'http', 4) === 0) { $imgMR = $uImgMR; break; }
+        }
+        $out[] = ['mine'   => ($myId > 0 && $sid === $myId),
+                  'sender' => trim((string)($m['sender']['name'] ?? '')),
+                  'text'   => trim((string)$txt),
+                  'at'     => (string)($m['created_at'] ?? ''),
+                  'type'   => $mt,
+                  'img'    => $imgMR];
+    }
+    return array_reverse($out);
+}
+
 /** آخرین ۲۰ پاسخ خودکار، برای نمایش در رابط کاربری */
 function arLogAdd(array $row): void {
     $log = [];
@@ -28327,189 +30407,414 @@ function arMsg(array $r): string {
 }
 
 /**
- * بررسی سفارش‌های جدید.
+ * بررسی سفارش‌های جدید یا تغییر‌یافته.
  * $test=true یعنی حالت آزمایشی: وضعیت ذخیره نمی‌شود تا اجرای بعدی هم
  * همان نتیجه را بدهد، و اگر چیزی نبود یک پیام نمونه فرستاده می‌شود.
+ *
+ * v10.45 (۵۹): حالا <b>همهٔ غرفه‌ها</b> را می‌گیرد، نه فقط پیش‌فرض.
+ * هر غرفه با <b>توکنِ خودِ خودش</b> و برای <b>vendor_idِ خودش</b>
+ * پرس‌وجو می‌شود. شناسهٔ ردیف‌های وضعیت هم با vendor_id نام‌گذاری شده
+ * تا شناسهٔ تکراری در دو غرفه (مثلاً سفارش #۵ در هر دو) قاطی نشود.
+ * اولین بازدید از هر غرفه <b>خاموش</b> است: وگرنه افزودنِ غرفهٔ دوم،
+ * ده موردِ قدیمی را یک‌جا «تازه» می‌دید و ده پیام پشت سر هم می‌فرستاد.
  */
 function notifCheckOrders(array $cn, bool $test = false, bool $send = true): array {
-    $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
-    $st = notifLoadState(); $since = (int)($st['last_order_check'] ?? 0);
-    // v8.31: مسیر درست طبق مستندات رسمی — سفارش‌های غرفه‌دار
-    $r = bslReqRead($tk, 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=10');
-    if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
-            'error' => bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read')];
+    $shops = array_values(array_filter(bslAllShops($cn),
+        fn($s) => trim((string)($s['token'] ?? '')) !== ''));
+    if (!$shops) return ['ok' => false, 'found' => 0, 'total_seen' => 0, 'shops' => [],
+            'sent' => [], 'sample' => '',
+            'errors' => ['تنظیمات باسلام ناقص است (توکن یا غرفه)']];
+    $st = notifLoadState(); $now = time(); $cfg = notifRemindCfg($cn);
+    $multi = count($shops) > 1;
+    $found = 0; $reminded = 0; $totalSeen = 0; $sentTo = []; $samples = [];
+    $shopRows = []; $errors = []; $testFound = 0;
 
-    $rows = $r['body']['data'] ?? [];
-    $now = time(); $cfg = notifRemindCfg($cn);
+    foreach ($shops as $sh) {
+        $tk = trim((string)$sh['token']); $vid = (int)$sh['vendor_id'];
+        $isDef = !empty($sh['is_default']); $name = (string)$sh['shop_name'];
+        // v8.31: مسیر درست طبق مستندات رسمی — سفارش‌های غرفه‌دار
+        $r = bslReqRead($tk, 'vendor-parcels?items.vendor_ids=' . $vid . '&per_page=10');
+        if (!$r['ok']) {
+            /* v10.45 (۵۹): خطا دیگر دور ریخته نمی‌شود؛ در 'errors' برمی‌گردد
+               تا در گزارشِ آخرین اجرا و پینگِ بعدی دیده شود. */
+            $err = bslApiError($r, 'دریافت سفارش‌ها ناموفق', 'vendor-parcels', 'vendor.parcel.read');
+            $errors[] = $name . ': ' . $err;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => false, 'error' => $err];
+            continue;
+        }
 
-    // v8.38: امضا = وضعیت سفارش. «بی‌جواب» یعنی هنوز ارسال نشده،
-    // پس تا وقتی غرفه‌دار کاری نکند یادآوری می‌شود.
-    $norm = [];
-    foreach ($rows as $o) {
-        if (!is_array($o)) continue;
-        $np = bslNormalizeParcel($o);
-        if ($np['parcel_id'] <= 0) continue;
-        $norm[] = ['np' => $np, 'key' => 'order:' . $np['parcel_id'],
-                   'sig' => (string)$np['status_id'],
-                   'ts' => strtotime($np['created_at'] ?: 'now') ?: $now,
-                   'pending' => !empty($np['unsent'])];
+        $rows = $r['body']['data'] ?? [];
+        $totalSeen += count($rows);
+
+        // v8.38: امضا = وضعیت سفارش. «بی‌جواب» یعنی هنوز ارسال نشده،
+        // پس تا وقتی غرفه‌دار کاری نکند یادآوری می‌شود.
+        $norm = [];
+        foreach ($rows as $o) {
+            if (!is_array($o)) continue;
+            $np = bslNormalizeParcel($o);
+            if ($np['parcel_id'] <= 0) continue;
+            $norm[] = ['np' => $np, 'key' => ($isDef ? 'order:' : 'order:' . $vid . ':') . $np['parcel_id'],
+                       'sig' => (string)$np['status_id'],
+                       'ts' => strtotime($np['created_at'] ?: 'now') ?: $now,
+                       'pending' => !empty($np['unsent'])];
+        }
+
+        /* نشانِ «آخرین بررسی» جدا برای هر غرفه؛ پیش‌فرض همان کلیدِ
+           قدیمی تا وضعیتِ قبلیِ کاربر به‌هم نریزد. */
+        $wmKey = $isDef ? 'last_order_check' : 'last_order_check:' . $vid;
+        $since = (int)($st[$wmKey] ?? 0);
+
+        if ($test) {
+            $testFound += count($norm);
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => count($norm)];
+            if ($norm) $samples[] = bslParcelMsg($norm[0]['np'], '🛒 سفارش جدید باسلام');
+            continue;   // حالت تست: وضعیت ذخیره نمی‌شود
+        }
+
+        if ($since <= 0) {
+            /* v10.45 (۵۹): اولین مشاهدهٔ این غرفه خاموش است (توضیح در بالای تابع). */
+            if (!isset($st['items']) || !is_array($st['items'])) $st['items'] = [];
+            foreach ($norm as $f) {
+                $st['items'][$f['key']] = ['sig' => $f['sig'], 'first' => (int)$f['ts'],
+                    'last' => $now, 'n' => 1, 'pending' => !empty($f['pending'])];
+            }
+            $st[$wmKey] = $now;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => 0, 'new_shop' => true];
+            continue;
+        }
+
+        notifSeedIfNeeded($st, $isDef ? 'orders' : 'orders:' . $vid, $norm, $since);
+        $suffix = $multi ? ' — ' . $name : '';
+        $shopFound = 0; $shopRemind = 0;
+        foreach ($norm as $f) {
+            $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
+            if ($why === '') continue;
+            $n = (int)($st['items'][$f['key']]['n'] ?? 1);
+            $base = $why === 'changed' ? '📦 تغییر وضعیت سفارش باسلام' : '🛒 سفارش جدید باسلام';
+            $msg = bslParcelMsg($f['np'], notifHead($why, $base . $suffix, $n - 1));
+            $samples[] = $msg;
+            if ($why === 'remind') { $shopRemind++; $reminded++; } else { $shopFound++; $found++; }
+            if ($send) $sentTo = notifSend($cn, $msg, 'order');
+        }
+        $st[$wmKey] = $now;
+        $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                       'seen' => count($rows), 'found' => $shopFound, 'reminded' => $shopRemind];
     }
 
     if ($test) {
-        $sentTo = [];
-        $sample = $norm ? bslParcelMsg($norm[0]['np'], '🛒 سفارش جدید باسلام') : '';
         if ($send) {
-            $msg = $sample ? ("🧪 تست سفارش‌ها\n" . $sample) : "🧪 تست سفارش‌ها\nهیچ سفارشی در ۱۰ مورد اخیر نبود، اما ارتباط برقرار است ✅";
-            $sentTo = notifSend($cn, $msg);
+            $lines = ['🧪 تست سفارش‌ها — ' . count($shops) . ' غرفه'];
+            foreach ($shopRows as $sr) {
+                if (empty($sr['ok'])) { $lines[] = '• ' . $sr['shop_name'] . ' — ✗ ' . $sr['error']; continue; }
+                $lines[] = '• ' . $sr['shop_name'] . ' — ' . (int)$sr['seen']
+                         . ' مورد اخیر · ' . (int)$sr['found'] . ' مورد قابل اعلان';
+            }
+            if ($samples) { $lines[] = '━━━ نمونه:'; $lines[] = mb_substr((string)$samples[0], 0, 400); }
+            $sentTo = notifSend($cn, implode("\n", $lines), 'order');
         }
-        return ['ok' => true, 'found' => count($norm), 'total_seen' => count($rows),
-                'sent' => $sentTo, 'sample' => $sample];
+        return ['ok' => true, 'found' => $testFound, 'total_seen' => $totalSeen,
+                'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+                'shops' => $shopRows, 'errors' => $errors];
     }
 
-    notifSeedIfNeeded($st, 'orders', $norm, $since);
-
-    $found = 0; $reminded = 0; $sentTo = []; $samples = [];
-    foreach ($norm as $f) {
-        $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
-        if ($why === '') continue;
-        $n = (int)($st['items'][$f['key']]['n'] ?? 1);
-        $base = $why === 'changed' ? '📦 تغییر وضعیت سفارش باسلام' : '🛒 سفارش جدید باسلام';
-        $msg = bslParcelMsg($f['np'], notifHead($why, $base, $n - 1));
-        $samples[] = $msg;
-        if ($why === 'remind') $reminded++; else $found++;
-        if ($send) $sentTo = notifSend($cn, $msg);
-    }
-    $st['last_order_check'] = $now;
     notifPrune($st, $now);
     notifSaveState($st);
     return ['ok' => true, 'found' => $found, 'reminded' => $reminded,
-            'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+            'total_seen' => $totalSeen, 'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+            'shops' => $shopRows, 'errors' => $errors];
 }
 
-/** بررسی پیام‌های جدید مشتری */
+/**
+ * بررسی پیام‌های جدید مشتری.
+ * v10.45 (۵۹): همهٔ غرفه‌ها با توکنِ خودشان (توضیح در بالای تابعِ سفارش‌ها).
+ *
+ * نکتهٔ مهمِ امضا: امضای هر گفتگو شناسهٔ آخرین پیام است. اگر باسلام برای
+ * آخرین پیام <b>شناسه برنگرداند</b>، امضا برای همیشه «0» می‌ماند و هیچ
+ * پیامِ تازه‌ای «تغییر» نمی‌سازد — یعنی اعلانِ پیامِ مشتری برای همیشه
+ * خاموش می‌ماند در حالی‌که همه‌چیز دیگر سالم به نظر می‌رسد. حالا در آن
+ * صورت امضا از <b>متنِ خودِ پیام</b> ساخته می‌شود (پیام تازه = متن تازه).
+ * یک‌بار هم که امضای جدید ساخته شد، تفاوت با امضای قدیمی <b>بی‌صدا</b>
+ * جبران می‌شود تا بلافاصله بعد از به‌روزرسانی سیلی پیام «تغییر وضعیت»
+ * فرستاده نشود.
+ */
 function notifCheckChats(array $cn, bool $test = false, bool $send = true): array {
-    $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
-    $st = notifLoadState(); $since = (int)($st['last_chat_check'] ?? 0);
-    // v8.31: مسیر درست — گفتگوها زیر ریشه است، نه زیر vendors
-    $r = bslReqRead($tk, 'chats?limit=10&order_by=updated_at');
-    if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
-            'error' => bslApiError($r, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read')];
+    $shops = array_values(array_filter(bslAllShops($cn),
+        fn($s) => trim((string)($s['token'] ?? '')) !== ''));
+    if (!$shops) return ['ok' => false, 'found' => 0, 'total_seen' => 0, 'shops' => [],
+            'sent' => [], 'sample' => '',
+            'errors' => ['تنظیمات باسلام ناقص است (توکن یا غرفه)']];
+    /* v10.46 (۶۰): انتخاب غرفه برای رویداد «پیام مشتری» (دراپ‌داونِ بخش
+       اعلان‌ها). 0 = همهٔ غرفه‌ها. اگر غرفهٔ انتخاب‌شده حذف شده باشد، به
+       جای سکوتِ کامل، همهٔ غرفه‌ها برگردانده می‌شوند. */
+    $onlyVid = (int)($cn['notif_chat_shop'] ?? 0);
+    if ($onlyVid > 0) {
+        $sel = array_values(array_filter($shops, fn($s) => (int)($s['vendor_id'] ?? 0) === $onlyVid));
+        if ($sel) $shops = $sel;
+    }
+    $st = notifLoadState(); $now = time(); $cfg = notifRemindCfg($cn);
+    $multi = count($shops) > 1;
+    $found = 0; $reminded = 0; $totalSeen = 0; $sentTo = []; $samples = [];
+    $shopRows = []; $errors = []; $testFound = 0; $pendingNow = 0; $rawSample = '';
 
-    // v8.31: پاسخ chats به شکل data.chats است، نه data
-    $rows = $r['body']['data']['chats'] ?? ($r['body']['data'] ?? []);
-    $now = time(); $cfg = notifRemindCfg($cn);
+    foreach ($shops as $sh) {
+        $tk = trim((string)$sh['token']); $vid = (int)$sh['vendor_id'];
+        $isDef = !empty($sh['is_default']); $name = (string)$sh['shop_name'];
+        // v8.31: مسیر درست — گفتگوها زیر ریشه است، نه زیر vendors
+        $r = bslReqRead($tk, 'chats?limit=10&order_by=updated_at');
+        if (!$r['ok']) {
+            /* v10.45 (۵۹): خطا دیگر دور ریخته نمی‌شود (توضیح در تابع سفارش‌ها). */
+            $err = bslApiError($r, 'دریافت گفتگوها ناموفق', 'chats', 'customer.chat.read');
+            $errors[] = $name . ': ' . $err;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => false, 'error' => $err];
+            continue;
+        }
 
-    // v8.38: امضای هر گفتگو = شناسهٔ آخرین پیام + تعداد خوانده‌نشده.
-    // «بی‌جواب» یعنی هنوز پیام خوانده‌نشده دارد.
-    $norm = [];
-    foreach ($rows as $c) {
-        if (!is_array($c)) continue;
-        $nc = bslNormalizeChat($c);
-        if ($nc['chat_id'] <= 0) continue;
-        $lastId = (int)($c['last_message']['id'] ?? 0);
-        // v8.38: امضا فقط شناسهٔ آخرین پیام است. اگر تعداد خوانده‌نشده را هم
-        // در امضا بیاوریم، جواب دادن مشتری (۲ → ۰) مثل «رویداد تازه» دیده
-        // می‌شود و یک اعلان بی‌مورد می‌فرستد.
-        $norm[] = ['nc' => $nc, 'key' => 'chat:' . $nc['chat_id'],
-                   'sig' => (string)$lastId,
-                   'ts' => strtotime($nc['updated_at'] ?: 'now') ?: $now,
-                   'pending' => $nc['unseen'] > 0];
+        // v8.31: پاسخ chats به شکل data.chats است، نه data
+        $rows = $r['body']['data']['chats'] ?? ($r['body']['data'] ?? []);
+        $totalSeen += count($rows);
+
+        $norm = [];
+        foreach ($rows as $c) {
+            if (!is_array($c)) continue;
+            $nc = bslNormalizeChat($c);
+            if ($nc['chat_id'] <= 0) continue;
+            $lastId = (int)($c['last_message']['id'] ?? 0);
+            // v8.38: امضا فقط شناسهٔ آخرین پیام است. اگر تعداد خوانده‌نشده را هم
+            // در امضا بیاوریم، جواب دادن مشتری (۲ → ۰) مثل «رویداد تازه» دیده
+            // می‌شود و یک اعلان بی‌مورد می‌فرستد.
+            // v10.45 (۵۹): اگر شناسهٔ آخرین پیام نبود، امضا از متنِ پیام ساخته می‌شود.
+            // v10.47 (۶۱): و اگر متن هم نیامد (تغییرِ ساختارِ API)، updated_at
+            // آخرین نشانهٔ «پیام تازه» است — وگرنه امضا برای همیشه ثابت می‌ماند
+            // و هیچ رویدادی دیگر دیده نمی‌شود (سکوتِ کاملِ بی‌صدا).
+            $sig = $lastId > 0 ? (string)$lastId
+                               : ('t' . substr(md5(((string)$nc['text']) . '|' . (string)$nc['updated_at']), 0, 12));
+            $norm[] = ['nc' => $nc, 'key' => ($isDef ? 'chat:' : 'chat:' . $vid . ':') . $nc['chat_id'],
+                       'sig' => $sig,
+                       'ts' => strtotime($nc['updated_at'] ?: 'now') ?: $now,
+                       'pending' => $nc['unseen'] > 0];
+        }
+
+        /* v10.47 (۶۱): شمارشِ «بی‌جواب» (موردِ یادآوری) و تشخیصِ
+           «متنِ پیام نمی‌آید» — اگر ساختارِ پاسخِ باسلام عوض شده باشد،
+           این دو نشانه در تست دیده می‌شوند: pending صفر می‌ماند و متن
+           «—» می‌شود، بدون اینکه خطایی گزارش شود. */
+        $pendShop = 0; $noText = 0;
+        foreach ($norm as $f) {
+            if (!empty($f['pending'])) $pendShop++;
+            $t = trim((string)$f['nc']['text']);
+            if ($t === '' || $t === '—') $noText++;
+        }
+        $pendingNow += $pendShop;
+        if ($noText > 0 && $rawSample === '' && isset($rows[0]) && is_array($rows[0])) {
+            $rawSample = mb_substr((string)json_encode($rows[0], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 0, 320);
+        }
+
+        $wmKey = $isDef ? 'last_chat_check' : 'last_chat_check:' . $vid;
+        $since = (int)($st[$wmKey] ?? 0);
+
+        if ($test) {
+            $testFound += count($norm);
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => count($norm),
+                           'pending' => $pendShop, 'no_text' => $noText];
+            if ($norm) {
+                $f = $norm[0];
+                $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, max(1, $f['nc']['unseen']))) : [];
+                $samples[] = bslChatMsg($f['nc'], '💬 پیام مشتری باسلام', $body);
+            }
+            continue;   // حالت تست: وضعیت ذخیره نمی‌شود
+        }
+
+        if ($since <= 0) {
+            /* v10.45 (۵۹): اولین مشاهدهٔ این غرفه خاموش است (توضیح در تابع سفارش‌ها). */
+            if (!isset($st['items']) || !is_array($st['items'])) $st['items'] = [];
+            foreach ($norm as $f) {
+                $st['items'][$f['key']] = ['sig' => $f['sig'], 'first' => (int)$f['ts'],
+                    'last' => $now, 'n' => 1, 'pending' => !empty($f['pending'])];
+            }
+            $st[$wmKey] = $now;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => 0, 'new_shop' => true];
+            continue;
+        }
+
+        /* v10.45 (۵۹): مهاجرتِ یک‌بارهٔ امضا — اگر برای ردیفی که قبلاً
+           ثبت شده امضای جدید شکلِ دیگری گرفت، امضا را بی‌صدا به‌روز می‌کنیم
+           تا یک سیلِ «تغییر وضعیت» نشود. */
+        if (empty($st['chat_sig2']) && isset($st['items']) && is_array($st['items'])) {
+            foreach ($norm as $f) {
+                $pk = $st['items'][$f['key']] ?? null;
+                if (is_array($pk) && (string)($pk['sig'] ?? '') !== $f['sig']) {
+                    $pk['sig'] = $f['sig'];
+                    $st['items'][$f['key']] = $pk;
+                }
+            }
+            $st['chat_sig2'] = $now;
+        }
+
+        notifSeedIfNeeded($st, $isDef ? 'chats' : 'chats:' . $vid, $norm, $since);
+        $suffix = $multi ? ' — ' . $name : '';
+        $shopFound = 0; $shopRemind = 0;
+        foreach ($norm as $f) {
+            $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
+            if ($why === '') continue;
+            $n = (int)($st['items'][$f['key']]['n'] ?? 1);
+            $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, max(1, $f['nc']['unseen']))) : [];
+            $msg = bslChatMsg($f['nc'], notifHead($why, '💬 پیام مشتری باسلام' . $suffix, $n - 1), $body);
+            $samples[] = $msg;
+            if ($why === 'remind') { $shopRemind++; $reminded++; } else { $shopFound++; $found++; }
+            if ($send) $sentTo = notifSend($cn, $msg);
+        }
+        $st[$wmKey] = $now;
+        $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                       'seen' => count($rows), 'found' => $shopFound, 'reminded' => $shopRemind,
+                       'pending' => $pendShop]; /* v10.47 (۶۱): چند گفتگوی بی‌جواب است */
     }
 
     if ($test) {
-        $sentTo = []; $sample = '';
-        if ($norm) {
-            $f = $norm[0];
-            $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, $f['nc']['unseen'])) : [];
-            $sample = bslChatMsg($f['nc'], '💬 پیام مشتری باسلام', $body);
-        }
         if ($send) {
-            $msg = $sample ? ("🧪 تست پیام‌ها\n" . $sample) : "🧪 تست پیام‌ها\nهیچ پیامی در ۱۰ مورد اخیر نبود، اما ارتباط برقرار است ✅";
-            $sentTo = notifSend($cn, $msg);
+            $lines = ['🧪 تست پیام‌ها — ' . count($shops) . ' غرفه'];
+            foreach ($shopRows as $sr) {
+                if (empty($sr['ok'])) { $lines[] = '• ' . $sr['shop_name'] . ' — ✗ ' . $sr['error']; continue; }
+                $lines[] = '• ' . $sr['shop_name'] . ' — ' . (int)$sr['seen']
+                         . ' گفتگوی اخیر · ' . (int)$sr['found'] . ' مورد قابل اعلان'
+                         /* v10.47 (۶۱): «بی‌جواب» و «متن نمی‌آید» را هم نشان بده */
+                         . (!empty($sr['pending']) ? ' · ' . (int)$sr['pending'] . ' بی‌جواب' : '')
+                         . (!empty($sr['no_text']) ? ' · ⚠️ متنِ پیام نمی‌آید' : '');
+            }
+            if ($rawSample !== '') {
+                $lines[] = '⚠️ نمونه دادهٔ خام باسلام (برای بررسی ساختار):';
+                $lines[] = $rawSample;
+            }
+            if ($samples) { $lines[] = '━━━ نمونه:'; $lines[] = mb_substr((string)$samples[0], 0, 400); }
+            $sentTo = notifSend($cn, implode("\n", $lines));
         }
-        return ['ok' => true, 'found' => count($norm), 'total_seen' => count($rows),
-                'sent' => $sentTo, 'sample' => $sample];
+        return ['ok' => true, 'found' => $testFound, 'total_seen' => $totalSeen, 'pending' => $pendingNow, /* v10.47 (۶۱) */
+                'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+                'shops' => $shopRows, 'errors' => $errors];
     }
 
-    notifSeedIfNeeded($st, 'chats', $norm, $since);
-
-    $found = 0; $reminded = 0; $sentTo = []; $samples = [];
-    foreach ($norm as $f) {
-        $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
-        if ($why === '') continue;
-        $n = (int)($st['items'][$f['key']]['n'] ?? 1);
-        $body = $f['pending'] ? bslFetchChatMessages($tk, $f['nc']['chat_id'], min(10, $f['nc']['unseen'])) : [];
-        $msg = bslChatMsg($f['nc'], notifHead($why, '💬 پیام مشتری باسلام', $n - 1), $body);
-        $samples[] = $msg;
-        if ($why === 'remind') $reminded++; else $found++;
-        if ($send) $sentTo = notifSend($cn, $msg);
-    }
-    $st['last_chat_check'] = $now;
     notifPrune($st, $now);
     notifSaveState($st);
-    return ['ok' => true, 'found' => $found, 'reminded' => $reminded,
-            'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+    return ['ok' => true, 'found' => $found, 'reminded' => $reminded, 'pending' => $pendingNow, /* v10.47 (۶۱) */
+            'total_seen' => $totalSeen, 'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+            'shops' => $shopRows, 'errors' => $errors];
 }
 
-/** بررسی تغییر وضعیت یا افزوده شدن محصول */
+/**
+ * بررسی تغییر وضعیت یا افزوده شدن محصول.
+ * v10.45 (۵۹): همهٔ غرفه‌ها با توکنِ خودشان (توضیح در بالای تابعِ سفارش‌ها).
+ */
 function notifCheckProducts(array $cn, bool $test = false, bool $send = true): array {
-    $tk = $cn['basalam']['token'] ?? ''; $vid = (int)($cn['basalam']['vendor_id'] ?? 0);
-    $st = notifLoadState(); $since = (int)($st['last_product_check'] ?? 0);
-    $r = bslReqRead($tk, 'vendors/' . $vid . '/products?per_page=10&statuses=2976&statuses=3790&statuses=3567');
-    if (!$r['ok']) return ['ok' => false, 'code' => (int)($r['code'] ?? 0), 'found' => 0,
-            'error' => bslApiError($r, 'دریافت محصولات ناموفق', 'vendors/{id}/products', 'vendor.product.read')];
+    $shops = array_values(array_filter(bslAllShops($cn),
+        fn($s) => trim((string)($s['token'] ?? '')) !== ''));
+    if (!$shops) return ['ok' => false, 'found' => 0, 'total_seen' => 0, 'shops' => [],
+            'sent' => [], 'sample' => '',
+            'errors' => ['تنظیمات باسلام ناقص است (توکن یا غرفه)']];
+    $st = notifLoadState(); $now = time(); $cfg = notifRemindCfg($cn);
+    $multi = count($shops) > 1;
+    $found = 0; $reminded = 0; $totalSeen = 0; $sentTo = []; $samples = [];
+    $shopRows = []; $errors = []; $testFound = 0;
 
-    $rows = $r['body']['data'] ?? [];
-    $now = time(); $cfg = notifRemindCfg($cn);
+    foreach ($shops as $sh) {
+        $tk = trim((string)$sh['token']); $vid = (int)$sh['vendor_id'];
+        $isDef = !empty($sh['is_default']); $name = (string)$sh['shop_name'];
+        $r = bslReqRead($tk, 'vendors/' . $vid . '/products?per_page=10&statuses=2976&statuses=3790&statuses=3567');
+        if (!$r['ok']) {
+            /* v10.45 (۵۹): خطا دیگر دور ریخته نمی‌شود (توضیح در تابع سفارش‌ها). */
+            $err = bslApiError($r, 'دریافت محصولات ناموفق', 'vendors/{id}/products', 'vendor.product.read');
+            $errors[] = $name . ': ' . $err;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => false, 'error' => $err];
+            continue;
+        }
 
-    // v8.38: امضا = وضعیت محصول. «تأیید نشده» نیاز به اقدام دارد، پس
-    // تا وقتی درست نشود یادآوری می‌شود؛ محصول فعال یادآوری ندارد.
-    $norm = [];
-    foreach ($rows as $p) {
-        if (!is_array($p)) continue;
-        $pid = (int)($p['id'] ?? 0);
-        if ($pid <= 0) continue;
-        $ps = $p['status'] ?? [];
-        $val = is_array($ps) ? (int)($ps['value'] ?? 0) : (int)$ps;
-        $title = mb_substr((string)($p['title'] ?? ($p['name'] ?? 'محصول')), 0, 60);
-        if ($val === 3567)      { $txt = "📋 تغییر وضعیت محصول باسلام\nمحصول: " . $title . "\nوضعیت جدید: تأیید نشده ❌"; $pend = true; }
-        elseif ($val === 4184)  { $txt = "📋 تغییر وضعیت محصول باسلام\nمحصول: " . $title . "\nوضعیت جدید: بایگانی 🗑️"; $pend = false; }
-        elseif ($val === 2976)  { $txt = "➕ محصول جدید باسلام\nمحصول: " . $title . "\nوضعیت: فعال ✅"; $pend = false; }
-        else continue;
-        $norm[] = ['key' => 'prod:' . $pid, 'sig' => (string)$val, 'text' => $txt,
-                   'ts' => strtotime($p['created_at'] ?? 'now') ?: $now, 'pending' => $pend];
+        $rows = $r['body']['data'] ?? [];
+        $totalSeen += count($rows);
+
+        // v8.38: امضا = وضعیت محصول. «تأیید نشده» نیاز به اقدام دارد، پس
+        // تا وقتی درست نشود یادآوری می‌شود؛ محصول فعال یادآوری ندارد.
+        $norm = [];
+        $sfx = $multi ? ' — ' . $name : '';
+        foreach ($rows as $p) {
+            if (!is_array($p)) continue;
+            $pid = (int)($p['id'] ?? 0);
+            if ($pid <= 0) continue;
+            $ps = $p['status'] ?? [];
+            $val = is_array($ps) ? (int)($ps['value'] ?? 0) : (int)$ps;
+            $title = mb_substr((string)($p['title'] ?? ($p['name'] ?? 'محصول')), 0, 60);
+            if ($val === 3567)      { $txt = "📋 تغییر وضعیت محصول باسلام" . $sfx . "\nمحصول: " . $title . "\nوضعیت جدید: تأیید نشده ❌"; $pend = true; }
+            elseif ($val === 4184)  { $txt = "📋 تغییر وضعیت محصول باسلام" . $sfx . "\nمحصول: " . $title . "\nوضعیت جدید: بایگانی 🗑️"; $pend = false; }
+            elseif ($val === 2976)  { $txt = "➕ محصول جدید باسلام" . $sfx . "\nمحصول: " . $title . "\nوضعیت: فعال ✅"; $pend = false; }
+            else continue;
+            $norm[] = ['key' => ($isDef ? 'prod:' : 'prod:' . $vid . ':') . $pid, 'sig' => (string)$val, 'text' => $txt,
+                       'ts' => strtotime($p['created_at'] ?? 'now') ?: $now, 'pending' => $pend];
+        }
+
+        $wmKey = $isDef ? 'last_product_check' : 'last_product_check:' . $vid;
+        $since = (int)($st[$wmKey] ?? 0);
+
+        if ($test) {
+            $testFound += count($norm);
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => count($norm)];
+            if ($norm) $samples[] = $norm[0]['text'];
+            continue;   // حالت تست: وضعیت ذخیره نمی‌شود
+        }
+
+        if ($since <= 0) {
+            /* v10.45 (۵۹): اولین مشاهدهٔ این غرفه خاموش است (توضیح در تابع سفارش‌ها). */
+            if (!isset($st['items']) || !is_array($st['items'])) $st['items'] = [];
+            foreach ($norm as $f) {
+                $st['items'][$f['key']] = ['sig' => $f['sig'], 'first' => (int)$f['ts'],
+                    'last' => $now, 'n' => 1, 'pending' => !empty($f['pending'])];
+            }
+            $st[$wmKey] = $now;
+            $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                           'seen' => count($rows), 'found' => 0, 'new_shop' => true];
+            continue;
+        }
+
+        notifSeedIfNeeded($st, $isDef ? 'products' : 'products:' . $vid, $norm, $since);
+        $shopFound = 0; $shopRemind = 0;
+        foreach ($norm as $f) {
+            $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
+            if ($why === '') continue;
+            $n = (int)($st['items'][$f['key']]['n'] ?? 1);
+            $msg = $why === 'remind'
+                 ? notifHead($why, '', $n - 1) . "\n" . $f['text']
+                 : $f['text'];
+            $samples[] = $msg;
+            if ($why === 'remind') { $shopRemind++; $reminded++; } else { $shopFound++; $found++; }
+            if ($send) $sentTo = notifSend($cn, $msg, 'product');
+        }
+        $st[$wmKey] = $now;
+        $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
+                       'seen' => count($rows), 'found' => $shopFound, 'reminded' => $shopRemind];
     }
 
     if ($test) {
-        $sentTo = [];
-        $sample = $norm ? $norm[0]['text'] : '';
         if ($send) {
-            $msg = $sample ? ("🧪 تست محصولات\n" . $sample) : "🧪 تست محصولات\nتغییری در ۱۰ محصول اخیر نبود، اما ارتباط برقرار است ✅";
-            $sentTo = notifSend($cn, $msg);
+            $lines = ['🧪 تست محصولات — ' . count($shops) . ' غرفه'];
+            foreach ($shopRows as $sr) {
+                if (empty($sr['ok'])) { $lines[] = '• ' . $sr['shop_name'] . ' — ✗ ' . $sr['error']; continue; }
+                $lines[] = '• ' . $sr['shop_name'] . ' — ' . (int)$sr['seen']
+                         . ' محصول اخیر · ' . (int)$sr['found'] . ' مورد قابل اعلان';
+            }
+            if ($samples) { $lines[] = '━━━ نمونه:'; $lines[] = mb_substr((string)$samples[0], 0, 400); }
+            $sentTo = notifSend($cn, implode("\n", $lines), 'product');
         }
-        return ['ok' => true, 'found' => count($norm), 'total_seen' => count($rows),
-                'sent' => $sentTo, 'sample' => $sample];
+        return ['ok' => true, 'found' => $testFound, 'total_seen' => $totalSeen,
+                'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+                'shops' => $shopRows, 'errors' => $errors];
     }
 
-    notifSeedIfNeeded($st, 'products', $norm, $since);
-
-    $found = 0; $reminded = 0; $sentTo = []; $samples = [];
-    foreach ($norm as $f) {
-        $why = notifDecide($st, $f['key'], $f['sig'], $f['pending'], $cfg, $now);
-        if ($why === '') continue;
-        $n = (int)($st['items'][$f['key']]['n'] ?? 1);
-        $msg = $why === 'remind'
-             ? notifHead($why, '', $n - 1) . "\n" . $f['text']
-             : $f['text'];
-        $samples[] = $msg;
-        if ($why === 'remind') $reminded++; else $found++;
-        if ($send) $sentTo = notifSend($cn, $msg);
-    }
-    $st['last_product_check'] = $now;
     notifPrune($st, $now);
     notifSaveState($st);
     return ['ok' => true, 'found' => $found, 'reminded' => $reminded,
-            'total_seen' => count($rows), 'sent' => $sentTo, 'sample' => $samples[0] ?? ''];
+            'total_seen' => $totalSeen, 'sent' => $sentTo, 'sample' => $samples[0] ?? '',
+            'shops' => $shopRows, 'errors' => $errors];
 }
 
 /* =====================================================================
@@ -28673,10 +30978,23 @@ function queueStallCheck(string $which, int $staleAfter = 300): array {
             return ['stalled' => false, 'reason' => 'در حال اجرا', 'idle' => $idle];
         }
         if ($idle > $staleAfter) {
+            /* v10.56 (۷۰): چک‌پوینتِ ادامه. در طولِ ارسالِ طولانی «current»ِ
+               ردیفِ صف صفر می‌ماند (وِرکر آن را فقط در پایان و در هنگام پُلِ
+               مرورگر می‌نویسد) — نگهبان اگر فقط ردیف را بخواند، وظیفه را از
+               محصولِ ۱ دوباره راه می‌اندازد. حالا اگر فایلِ پیشرفت مالِ همین
+               ردیف است، currentِ خودش هم مبنا می‌شود. معنای «current»:
+               شمارهٔ ۱‌مبنا از آخرینِ محصولِ در حالِ کار — یعنی اولینِ
+               محصولی که باید (دوباره) پردازش شود. */
+            $stCur = (int)($running['current'] ?? 0);
+            $stPgQ = trim((string)($prog['queue_id'] ?? ''));
+            if ($stPgQ === (string)($running['id'] ?? '')) {
+                $stCur = max($stCur, (int)($prog['current'] ?? 0));
+            }
             return ['stalled' => true, 'kind' => 'running', 'idle' => $idle,
                 'queue_id' => $running['id'] ?? '', 'lock_held' => $lockFresh,
                 'beat_from' => (string)$_iwS['why'],
-                'current' => (int)($running['current'] ?? 0),
+                'current' => $stCur,
+                'resume_from' => $stCur,
                 'total' => (int)($running['total'] ?? 0)];
         }
         return ['stalled' => false, 'reason' => 'تازه شروع شده', 'idle' => $idle];
@@ -28698,13 +31016,16 @@ function queueStallCheck(string $which, int $staleAfter = 300): array {
  * بررسی می‌شدند و در بدترین حالت دوباره ارسال. حالا شمارهٔ محصول جاری،
  * شناسهٔ صف و پرچم from_file فرستاده می‌شوند.
  */
-function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = false): array {
+function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = false, int $waitMs = 1500): array {
     $chk = queueStallCheck($which, $staleAfter);
     $chk['which'] = $which;
     if (empty($chk['stalled']) || $dryRun) { $chk['resumed'] = false; return $chk; }
 
     $qid   = (string)($chk['queue_id'] ?? '');
-    $start = max(0, (int)($chk['current'] ?? 0));
+    /* v10.56 (۷۰): resume_from = چک‌پوینتِ واقعی (از فایلِ پیشرفتِ وِرکر،
+       وقتی مالِ همین ردیف بود) — قبلاً فقط currentِ ردیف می‌آمد که در طولِ
+       اجرا صفر می‌ماند و ادامه، از اول شروع می‌شد. */
+    $start = max(0, (int)($chk['resume_from'] ?? $chk['current'] ?? 0));
 
     // قفلِ رهاشدهٔ پردازهٔ مرده را پاک کن، وگرنه تلاش بعدی «در حال اجرا» می‌بیند
     if (empty($chk['lock_held'])) {
@@ -28718,7 +31039,9 @@ function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = 
     if ($qid !== '') $post['queue_id'] = $qid;
 
     $chk['resume_from'] = $start;
-    $chk['resumed'] = fireAndForget('action=' . $action, 1500, $post);
+    /* v10.49 (۶۳): $waitMs — «پمپِ ارسال» کران تا ۱۲۰ ثانیه منتظر می‌ماند
+       تا پردازندهٔ فرزند پیش برود؛ حالتِ کلاسیکِ نگهبان ۱٫۵ ثانیه است. */
+    $chk['resumed'] = fireAndForget('action=' . $action, $waitMs, $post);
     if ($chk['resumed']) {
         // شمارندهٔ تلاش را نگه دار تا اگر بارها گیر کرد بتوان تشخیص داد
         $st = notifLoadState();
@@ -28729,6 +31052,130 @@ function queueStallRecover(string $which, int $staleAfter = 300, bool $dryRun = 
         $chk['attempt'] = $st[$k]['n'];
     }
     return $chk;
+}
+
+/**
+ * v10.59 (۷۳): بازسازیِ خودکارِ صفِ ارسال — از همان تبِ بازِ مرورگر.
+ *
+ * گزارشِ کاربر: «ارسال‌ها بعد از ارسالِ آخرین محصول فریز می‌مانند و
+ * وظیفه را تمام نمی‌کنند؛ همچنان در حالِ فعالیت دیده می‌شوند و گیر
+ * می‌کنند، مگر دستی دکمهٔ توقف را بزنیم.»
+ *
+ * ریشه: وِرکرِ ارسال وقتی توسط هاست کشته می‌شود (همان هاستی که پردژهٔ
+ * پس‌زمینه را می‌کُشد — v10.49/10.50/10.58) ردیفِ صف را «running» جا
+ * می‌گذارد. تنها راه‌هایِ بازیابی، تیکِ کران (نگهبان + پمپ) و دکمه‌های
+ * دستی بودند؛ و روی هاستی که کرانش اصلاً به آدرس نمی‌رسد، هیچ‌کدام
+ * اتفاق نمی‌افتاد. دکمهٔ توقف «حل» به نظر می‌رسید فقط چون خودش مستقیم
+ * وضعیت را روی «failed» می‌نشانَد.
+ *
+ * حالا: تبِ ارسال هر ۲ ثانیه poll_bsl/poll_woo را می‌زند — همین پویینگ
+ * موتورِ بازیابی می‌شود. اگر صف گیر کرده باشد (ردیفِ در حالِ اجرای
+ * بی‌حرکت، یا ردیفِ منتظرِ بی‌پردازنده)، پردازنده با همان چک‌پوینتِ
+ * v10.56 از جایی که مانده بود دوباره راه می‌افتد. دو محافظ:
+ *   ۱. کول‌داونِ ۱۲۰ ثانیه‌ای — پویینگِ ۲ ثانیه‌ای هرگز در چرخهٔ
+ *      تکراریِ راه‌اندازی نیفتد (اگر پردازندهٔ تازه واقعاً زنده باشد،
+ *      قفلِ flock هم نگهبان را «شغول» می‌بیند و اصلاً stalled نمی‌شود).
+ *   ۲. هر کاری که queueStallCheck/queueStallRecover می‌کنند همان
+ *      مکانیزمِ آزموده‌شدهٔ نگهبانِ کران است — منطقِ تازه‌ای اضافه نشده.
+ */
+function sendAutoRecover(string $which): ?array {
+    try {
+        $cnA  = loadConnections();
+        $stallA = max(120, (int)($cnA['stall_after'] ?? 300));
+        $chkA = queueStallCheck($which, $stallA);
+        if (empty($chkA['stalled'])) return null;
+        $nowA = time();
+        $stFileA = __DIR__ . '/send_autorecover_state.json';
+        $sdA = json_decode((string)@file_get_contents($stFileA), true);
+        $sdA = is_array($sdA) ? $sdA : [];
+        if ($nowA - (int)($sdA[$which] ?? 0) < 120) return null;   // کول‌داون
+        $resA = queueStallRecover($which, $stallA, false, 2000);
+        $sdA[$which] = $nowA;
+        @file_put_contents($stFileA, json_encode($sdA, JSON_UNESCAPED_UNICODE), LOCK_EX);
+        return $resA;
+    } catch (Throwable $eA) {
+        return null;   // بازسازی هرگز نباید خودِ پویینگ را خراب کند
+    }
+}
+
+/* =====================================================================
+ *  v10.50 (۶۴): ارسالِ همگام‌سازیِ دستی، کاملاً سرورساید.
+ *
+ *  کارگرِ دستی پاسخش را از همان ابتدای اجرا فرستاده و در سرور زنده
+ *  می‌ماند؛ کاربر آزاد است تبِ مرورگر را ببندد. این تابع تا وقتی که
+ *  کارگر زنده است صفِ ارسال را نوبت‌به‌نوبت جلو می‌رساند: در هر نوبت
+ *  یک پردازندهٔ ارسال (bsl_backend / woo_backend) به‌صورت درخواستِ
+ *  فرزند با مهلتِ طولانی راه می‌اندازد و منتظرش می‌ماند، بعد صف را
+ *  دوباره بررسی می‌کند؛ اگر ردیفِ درانتظار مانده باشد نوبتِ بعدی.
+ *  چون پیشرفت به‌ازایِ هر محصول چک‌پوینت شده است (v8.22)، اگر خودِ
+ *  کارگر وسط راه بمیرد، پمپِ کرانِ v10.49 از همان نقطهٔ قطع‌شده
+ *  برمی‌دارد. قفلِ flock جلوی دو پردازندهٔ هم‌زمان را می‌گیرد، پس
+ *  شلیکِ تکراری (دکمهٔ ارسال، msKickSend مرورگر) بی‌خطر است.
+ * ===================================================================== */
+function msLockFresh(string $which): bool {
+    $lock = __DIR__ . ($which === 'bsl' ? '/bsl_backend.lock' : '/woo_backend.lock');
+    if (!is_file($lock)) return false;
+    $fp = @fopen($lock, 'c');
+    if (!$fp) return false;
+    $held = !@flock($fp, LOCK_EX | LOCK_NB);
+    if (!$held) @flock($fp, LOCK_UN);
+    @fclose($fp);
+    return $held;
+}
+
+function msQueuePendingRow(string $which): ?array {
+    $q = $which === 'bsl' ? bslReadQueue() : wooReadQueue();
+    $entries = is_array($q['entries'] ?? null) ? $q['entries'] : [];
+    foreach ($entries as $e) {
+        if (is_array($e) && in_array((string)($e['status'] ?? ''), ['waiting', 'running', 'paused'], true)) {
+            return $e;
+        }
+    }
+    return null;
+}
+
+function manualServerSendRun(int $roundMs = 1500000, int $maxRounds = 12): array {
+    $out = ['rounds' => 0, 'stopped' => false, 'dests' => []];
+    foreach (cronWatchdogQueueOrder() as $dest) {
+        $isBsl  = ($dest === 'bsl');
+        $pFile  = $isBsl ? BSL_PROGRESS_FILE : WOO_PROGRESS_FILE;
+        $action = $isBsl ? 'bsl_backend' : 'woo_backend';
+        $label  = $isBsl ? 'باسلام' : 'ووکامرس';
+        $lastSig = '';
+        $stuck = 0;
+        for ($round = 1; $round <= $maxRounds; $round++) {
+            if (manualSyncStopped()) { $out['stopped'] = true; break; }
+            $row = msQueuePendingRow($dest);
+            if ($row === null) break;                    // صف این مقصد خالی شد
+            $pg = readProgress($pFile);
+            manualSyncProgress(['phase' => 'ارسال ' . $label, 'current' => 3,
+                'summary' => ((int)($row['current'] ?? 0)) . '/' . ((int)($row['total'] ?? 0)) . ' در صفِ ' . $label],
+                '📤 ارسال سرورساید: ' . $label . ' — ردیف ' . (string)($row['id'] ?? '') . ' (' . (int)($row['current'] ?? 0) . '/' . (int)($row['total'] ?? 0) . ')');
+            /* اگر پردازندهٔ زنده دیگری (دکمهٔ ارسال / msKickSend) قفل را
+               در دست دارد، چند لحظه منتظر بمانیم تا او ادامه بدهد — این
+               نوبت «گیر» شمرده نمی‌شود. */
+            for ($w = 0; $w < 6 && msLockFresh($dest); $w++) sleep(5);
+            if (msLockFresh($dest)) continue;
+            $sig = (string)($row['id'] ?? '') . ':' . (int)($row['current'] ?? 0)
+                 . ':' . (int)($pg['current'] ?? 0) . ':' . (int)($pg['sent'] ?? 0)
+                 . ':' . (int)($pg['updated'] ?? 0) . ':' . (int)($pg['skipped'] ?? 0);
+            msAlive('ارسال ' . $label . ' — ' . (int)($row['current'] ?? 0) . '/' . (int)($row['total'] ?? 0));   /* v10.61 (۷۵) */
+            $fired = fireAndForget('action=' . $action, $roundMs, ['from_file' => '1']);
+            $out['rounds']++;
+            if (!$fired || $sig === $lastSig) { $stuck++; } else { $stuck = 0; }
+            if ($sig !== '') $lastSig = $sig;
+            if ($stuck >= 2) {
+                manualSyncProgress(['phase' => 'ارسال ' . $label, 'current' => 3],
+                    '⚠ پیشرفتِ ارسال دیده نشد — ادامه با پمپِ کران');
+                break;
+            }
+        }
+        $rowAfter = msQueuePendingRow($dest);
+        $out['dests'][$dest] = $rowAfter === null ? 'done'
+            : ('pending:' . (int)($rowAfter['total'] ?? 0) . ':' . (int)($rowAfter['current'] ?? 0));
+        if (!empty($out['stopped'])) break;
+    }
+    return $out;
 }
 
 /* =====================================================================
@@ -28805,7 +31252,9 @@ function bslEditProduct(string $tk, int $vid, int $pid, array $fields): array {
        (و گاهی ۴۰۱) می‌دهد، نه ۴۰۴ — یعنی دقیقاً همان حالتی که مسیرِ
        زیرِ غرفه می‌توانست نجاتش بدهد، فالبک نمی‌خورد و عملیات بی‌صدا
        شکست می‌خورد. حالا هر سه کدِ «دسترسی/نبودن» فالبک می‌گیرند. */
-    if (in_array((int)($r['code'] ?? 0), [401, 403, 404], true) && $vid > 0) {
+    /* v10.49 (۶۳): ۲۲ هم فالبک می‌گیرد — گاهی مسیرِ سراسریِ products/{id}
+       پارامتر را می‌پرسد ولی مسیرِ زیرِ غرفه قبولش می‌کند (و برعکس). */
+    if (in_array((int)($r['code'] ?? 0), [401, 403, 404, 422], true) && $vid > 0) {
         $r2 = bslReq($tk, 'PATCH', 'vendors/' . $vid . '/products/' . $pid, $fields);
         /* فقط وقتی جایگزین می‌شود که واقعاً بهتر باشد؛ وگرنه خطای اولیه
            گویاتر است و نباید با یک ۴۰۴ِ مسیرِ دوم پوشانده شود. */
@@ -28814,13 +31263,190 @@ function bslEditProduct(string $tk, int $vid, int $pid, array $fields): array {
     return $r;
 }
 
+/* =====================================================================
+ *  v10.51 (۶۵): تغییرِ وضعیتِ محصول (و بایگانی) با روشِ چندگانه.
+ *
+ *  گزارشِ کاربر: بایگانیِ دستی و حذفِ تکراری‌ها با وجودِ فالبکِ مسیرِ
+ *  غرفه (v10.49) باز هم ۴۲۲ می‌داد — یعنی خودِ باسلام PATCHِ «فقط
+ *  وضعیت» را در این نصب رد می‌کند (۴۲۲ لاراول = اعتبارسنجیِ فرم).
+ *  چون آپدیتِ همگام‌سازیِ همین برنامه با «پیلودِ کامل» (قیمت، موجودی،
+ *  عکس...) موفق است، اینجا اول محصول را می‌خوانیم، وضعیتِ جدید را در
+ *  پیلودِ کامل می‌گذاریم و می‌فرستیم؛ اگر باز نشد، نسخه‌هایی از API
+ *  اندپوینتِ اختصاصیِ «بایگانی» دارند — آن را هم می‌آزماییم. فهرستِ
+ *  تلاش‌ها در پیامِ خطای نهایی هم می‌آید تا علت دقیق معلوم شود.
+ * ===================================================================== */
+
+/** یک محصول را می‌خواند — ردیفِ کامل، وگرنه null */
+function bslGetProductRow(string $tk, int $vid, int $pid, int $maxAttempts = 3): ?array {
+    $r = bslReq($tk, 'GET', 'products/' . $pid, null, false, null, false, $maxAttempts);
+    $row = $r['body']['data'] ?? ($r['body'] ?? null);
+    if (!empty($r['ok']) && is_array($row) && (int)($row['id'] ?? 0) > 0) return $row;
+    if ($vid > 0) {
+        $r2 = bslReq($tk, 'GET', 'vendors/' . $vid . '/products/' . $pid, null, false, null, false, $maxAttempts);
+        $row2 = $r2['body']['data'] ?? ($r2['body'] ?? null);
+        if (!empty($r2['ok']) && is_array($row2) && (int)($row2['id'] ?? 0) > 0) return $row2;
+    }
+    return null;
+}
+
+/** پیلودِ «کاملِ» آپدیت از روی ردیفِ جاریِ محصول — با وضعیتِ جدید */
+function bslProductFullPatch(array $row, int $newStatus): ?array {
+    $name = trim((string)($row['title'] ?? $row['name'] ?? ''));
+    $bu = ['status' => $newStatus];
+    if ($name !== '') $bu['name'] = mb_substr($name, 0, 120);
+    if (isset($row['brief']))            $bu['brief'] = (string)$row['brief'];
+    if (isset($row['description']))      $bu['description'] = (string)$row['description'];
+    if (isset($row['primary_price']))    $bu['primary_price'] = (int)$row['primary_price'];
+    if (isset($row['inventory']))        $bu['stock'] = (int)$row['inventory'];
+    elseif (isset($row['stock']))        $bu['stock'] = (int)$row['stock'];
+    if (isset($row['preparation_days'])) $bu['preparation_days'] = (int)$row['preparation_days'];
+    if (isset($row['weight']))           $bu['weight'] = (int)$row['weight'];
+    if (isset($row['category_id']))      $bu['category_id'] = (int)$row['category_id'];
+    if (isset($row['sku']))              $bu['sku'] = (string)$row['sku'];
+    $photos = [];
+    if (isset($row['photos']) && is_array($row['photos'])) {
+        foreach ($row['photos'] as $ph) {
+            $id = is_array($ph) ? (int)($ph['id'] ?? 0) : (int)$ph;
+            if ($id > 0) $photos[] = $id;
+        }
+    }
+    $photo = 0;
+    if (isset($row['photo'])) {
+        $photo = is_array($row['photo']) ? (int)($row['photo']['id'] ?? 0) : (int)$row['photo'];
+    }
+    if ($photo > 0 && !in_array($photo, $photos, true)) array_unshift($photos, $photo);
+    if ($photos) { $bu['photos'] = $photos; $bu['photo'] = $photos[0]; }
+    if (count($bu) <= 1) return null;   // دادهٔ کافی برای پیلودِ کامل نداریم
+    return $bu;
+}
+
+/**
+ * v10.52 (۶۶): هر «گام»ِ تغییرِ وضعیت، به‌تنهایی کفایتِ یک درخواستِ
+ * HTTPِ کوتاه:
+ *  'simple'  → PATCH فقط-وضعیت (زیرِ غرفه، بعد سراسری)       ≤ ۲ درخواست
+ *  'full'    → خواندنِ محصول + PATCH پیلودِ کامل            ≤ ۴ درخواست
+ *  'archive' → POST اندپوینتِ اختصاصیِ بایگانی               ≤ ۲ درخواست
+ *  'disable' → v10.53: PATCH فقط-وضعیت روی ۳۷ (غیرفعال)      ≤ ۲ درخواست
+ *  'hide'    → v10.53: پیلودِ کامل با موجودی=۰ و قیمت=۰      ≤ ۴ درخواست
+ *  v10.53 (۶۷): اگر بایگانی ممکن نبود، پلکان ادامه دارد:
+ *  اول «غیرفعال» (۳۷) و در بدترین حالت «ناموجود» (صفرکردنِ
+ *  موجودی و قیمت) تا محصول اصلاً پیدا نشود.
+ * مسیرِ قدیمیِ v10.51 این سه گام را در یک درخواست تا ۸ بار پشتِ سرِ هم
+ * می‌زد؛ روی هاست‌هایی که پنجرهٔ HTTP کوتاه دارند (تایم‌اوتِ LiteSpeed
+ * یا فایروال) کلِ زنجیره از پنجره بیرون می‌خورد و ۵۰۲ می‌گرفت. حالا
+ * مسیرِ تعاملی (بایگانیِ دستی/تغییرِ وضعیت) هر گام را در یک درخواستِ
+ * جدا می‌زند و کلاینت (JS) خودکار به گامِ بعد می‌رود؛ در صورتِ شکستِ
+ * گام، کلیدِ 'next' گامِ بعدی را می‌گوید.
+ */
+function bslStatusStep(string $tk, int $vid, int $pid, int $newStatus, string $step, int $maxAttempts = 1): array {
+    $order = ($newStatus === 4184) ? ['simple', 'full', 'archive', 'disable', 'hide'] : ['simple', 'full']; /* v10.53 (۶۷): پلکانِ کامل فقط برای بایگانی (۴۱۸۴)؛ تغییرِ وضعیتِ دیگر فقط simple/full */
+    $si = array_search($step, $order, true);
+    $next = ($si === false || $si + 1 >= count($order)) ? null : $order[$si + 1];
+    $r = null;
+    if ($step === 'simple') {
+        $eps = [];
+        if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid;
+        $eps[] = 'products/' . $pid;
+        foreach ($eps as $ep) {
+            $r = bslReq($tk, 'PATCH', $ep, ['status' => $newStatus], false, null, false, $maxAttempts);
+            if (!empty($r['ok'])) { $r['status_strategy'] = 'simple'; return $r; }
+            if ((int)($r['code'] ?? 0) !== 404) break;   // ۴۰۴ = مسیر نیست؛ خطای دیگر = پایانِ گام
+        }
+    } elseif ($step === 'full') {
+        $row = bslGetProductRow($tk, $vid, $pid, $maxAttempts);
+        $full = is_array($row) ? bslProductFullPatch($row, $newStatus) : null;
+        if ($full !== null) {
+            $eps = [];
+            if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid;
+            $eps[] = 'products/' . $pid;
+            foreach ($eps as $ep) {
+                $r = bslReq($tk, 'PATCH', $ep, $full, false, null, false, $maxAttempts);
+                if (!empty($r['ok'])) { $r['status_strategy'] = 'full'; return $r; }
+                if ((int)($r['code'] ?? 0) !== 404) break;
+            }
+        }
+    } elseif ($step === 'archive') {
+        $eps = [];
+        if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid . '/archive';
+        $eps[] = 'products/' . $pid . '/archive';
+        foreach ($eps as $ep) {
+            $r = bslReq($tk, 'POST', $ep, [], false, null, false, $maxAttempts);
+            if (!empty($r['ok'])) { $r['status_strategy'] = 'archive'; $r['archived'] = true; return $r; }
+            if ((int)($r['code'] ?? 0) !== 404) break;
+        }
+    } elseif ($step === 'disable') {
+        /* v10.53 (۶۷): بایگانی ممکن نبود → حداقل محصول غیرفعال (۳۷)
+           شود تا در ویترین دیده نشود. */
+        $eps = [];
+        if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid;
+        $eps[] = 'products/' . $pid;
+        foreach ($eps as $ep) {
+            $r = bslReq($tk, 'PATCH', $ep, ['status' => 3790], false, null, false, $maxAttempts);
+            if (!empty($r['ok'])) { $r['status_strategy'] = 'disable'; return $r; }
+            if ((int)($r['code'] ?? 0) !== 404) break;
+        }
+    } else { // 'hide'
+        /* v10.53 (۶۷): آخرین راه — موجودی و قیمت را صفر کن تا محصول
+           نه دیده شود نه قابلِ خرید باشد. وضعیتِ فعلی دست‌نخورده می‌ماند
+           (پیلودِ کامل همان وضعیتِ موجود را نگه می‌دارد). */
+        $row = bslGetProductRow($tk, $vid, $pid, $maxAttempts);
+        if (is_array($row)) {
+            $curStatus = (int)($row['status'] ?? 0);
+            $full = bslProductFullPatch($row, $curStatus > 0 ? $curStatus : $newStatus);
+            if ($full !== null) {
+                $full['stock'] = 0;
+                $full['primary_price'] = 0;
+                $eps = [];
+                if ($vid > 0) $eps[] = 'vendors/' . $vid . '/products/' . $pid;
+                $eps[] = 'products/' . $pid;
+                foreach ($eps as $ep) {
+                    $r = bslReq($tk, 'PATCH', $ep, $full, false, null, false, $maxAttempts);
+                    if (!empty($r['ok'])) { $r['status_strategy'] = 'hide'; return $r; }
+                    if ((int)($r['code'] ?? 0) !== 404) break;
+                }
+            }
+        }
+    }
+    if ($r === null) $r = ['ok' => false, 'code' => 0, 'body' => null];
+    $r['next'] = $next;
+    return $r;
+}
+
+/**
+ * وضعیتِ محصول را با چند روشِ به‌ترتیب عوض می‌کند:
+ * v10.51 (۶۵): سه روش — فقط-وضعیت / پیلودِ کامل / اندپوینتِ archive.
+ * v10.52 (۶۶): $step='auto' (کارگرِ سرورساید مثلِ حذفِ تکراری) هر سه
+ * گام را پشتِ‌سرِ هم می‌زند؛ گامِ مشخص فقط همان گام (برای درخواست‌های
+ * تعاملی که پنجرهٔ HTTPِ کوتاه دارند).
+ * v10.53 (۶۷): پلکان ۵ گامه شد (+غیرفعال +ناموجود)؛ 'auto' همهٔ ۵ گام را
+ * پشتِ‌سرِ هم می‌زند.
+ */
+function bslSetProductStatus(string $tk, int $vid, int $pid, int $newStatus, string $step = 'auto'): array {
+    if ($step !== 'auto') return bslStatusStep($tk, $vid, $pid, $newStatus, $step);
+    $attempts = [];
+    $last = null;
+    foreach ((int)$newStatus === 4184 ? ['simple', 'full', 'archive', 'disable', 'hide'] : ['simple', 'full'] as $st) { /* v10.53 (۶۷) */
+        $r = bslStatusStep($tk, $vid, $pid, $newStatus, $st, 3);
+        $last = $r;
+        if (!empty($r['ok'])) return $r;
+        $attempts[] = $st . '=' . (int)($r['code'] ?? 0);
+        if (empty($r['next'])) break;
+    }
+    if ($last === null) $last = ['ok' => false, 'code' => 0, 'body' => null];
+    $last['attempts'] = $attempts;
+    return $last;
+}
+
+
 /**
  * «حذف» محصول باسلام = بایگانی کردن (4184).
  * چون API حذف واقعی ندارد، این تنها راه برداشتن محصول از غرفه است.
+ * v10.51 (۶۵): از مسیرِ چندروشهِ bslSetProductStatus می‌رود — قبلاً
+ * فقط PATCHِ فقط-وضعیت بود که در بعضی نصب‌ها ۴۲۲ می‌گرفت.
  */
 function bslArchiveProduct(string $tk, int $vid, int $pid): array {
-    $r = bslEditProduct($tk, $vid, $pid, ['status' => 4184]);
-    if (!empty($r['ok'])) $r['archived'] = true;
+    $r = bslSetProductStatus($tk, $vid, $pid, 4184);
+    if (!empty($r['ok']) || !empty($r['archived'])) $r['archived'] = true;
     return $r;
 }
 
@@ -30118,7 +32744,7 @@ function digestMaybeSend(array $cn, int $now): array {
     $why = notifPrereq($cn);
     if ($why !== null) return ['sent' => false, 'skipped' => $why];
     $d = digestBuild($cn, max(1, min(168, (int)($cn['digest_hours'] ?? 24))));
-    $res = notifSend($cn, digestMsg($d));
+    $res = notifSend($cn, digestMsg($d), 'digest');
     $st = digestLoadState();
     $st['last_date'] = date('Y-m-d', $now);
     $st['last_at'] = $now;
@@ -30806,22 +33432,24 @@ function syncReportEmit(array $cn, array $rep): array {
         $out['skipped'] = 'disabled'; return $out;
     }
     $hasMsgr = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
-            || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '');
+            || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '')
+            || (trim((string)($cn['telegram']['token'] ?? '')) !== '' && trim((string)($cn['telegram']['chat_id'] ?? '')) !== '');   // v10.78 (92)
     if (!$hasMsgr) { $out['skipped'] = 'no_messenger'; return $out; }
-    $out['delivery'] = notifSend($cn, syncReportText($rep));
+    $out['delivery'] = notifSend($cn, syncReportText($rep), 'sync');
     return $out;
 }
 
 /** اعلان نتیجهٔ بازنشستگی به پیام‌رسان‌ها */
 function notifRetire(array $cn, array $res, string $profileName = ''): array {
-    if (empty($cn['notif_events']['retire'])) return ['ok' => true, 'skipped' => 'disabled'];
+    /* v10.45 (۵۹): نبودِ کلید = روشن — همان چیزی که رابط نشان می‌دهد. */
+    if (!notifEventOn($cn['notif_events'] ?? [], 'retire')) return ['ok' => true, 'skipped' => 'disabled'];
     if (notifPrereq($cn) !== null) return ['ok' => false];
     $modeLbl = retireModes()[$res['mode'] ?? 'off'] ?? '';
     if (!empty($res['guard']['blocked'])) {
         return ['ok' => true, 'delivery' => notifSend($cn,
             "🛑 بازنشستگی خودکار متوقف شد" . ($profileName !== '' ? "\nپروفایل: {$profileName}" : '')
             . "\nعلت: " . ($res['guard']['reason'] ?? '')
-            . "\nهیچ محصولی تغییر نکرد — اگر درست است، دستی اجرا کنید.")];
+            . "\nهیچ محصولی تغییر نکرد — اگر درست است، دستی اجرا کنید.", 'retire')];
     }
     if ((int)($res['retired'] ?? 0) <= 0) return ['ok' => true, 'skipped' => 'nothing'];
     $lines = ["🗂 بازنشستگی محصولات رفته از مبدأ" . ($profileName !== '' ? " — {$profileName}" : ''),
@@ -30832,7 +33460,7 @@ function notifRetire(array $cn, array $res, string $profileName = ''): array {
     foreach (array_slice($res['items'] ?? [], 0, 8) as $it) {
         $lines[] = '• ' . ($it['title'] ?? '') . ' — ' . ($it['reason'] ?? '');
     }
-    return ['ok' => true, 'delivery' => notifSend($cn, implode("\n", $lines))];
+    return ['ok' => true, 'delivery' => notifSend($cn, implode("\n", $lines), 'retire')];
 }
 
 /**
@@ -30843,8 +33471,9 @@ function notifRetire(array $cn, array $res, string $profileName = ''): array {
  */
 function notifSourceChanges(array $cn, array $res, string $profileName = '', int $sampleLimit = 5): array {
     $ne = $cn['notif_events'] ?? [];
-    $wantPrice = !empty($ne['src_price']);
-    $wantStock = !empty($ne['src_stock']);
+    /* v10.45 (۵۹): نبودِ کلید = روشن — همان چیزی که رابط نشان می‌دهد. */
+    $wantPrice = notifEventOn($ne, 'src_price');
+    $wantStock = notifEventOn($ne, 'src_stock');
     if (!$wantPrice && !$wantStock) return ['ok' => true, 'skipped' => 'disabled'];
     if (notifPrereq($cn) !== null) return ['ok' => false, 'error' => notifPrereq($cn)];
 
@@ -30895,7 +33524,7 @@ function notifSourceChanges(array $cn, array $res, string $profileName = '', int
     if (!$blocks) return ['ok' => true, 'sent' => 0, 'nothing' => true];
 
     $sentCount = 0; $last = [];
-    foreach ($blocks as $b) { $last = notifSend($cn, $b); $sentCount++; }
+    foreach ($blocks as $b) { $last = notifSend($cn, $b, 'price'); $sentCount++; }
     return ['ok' => true, 'sent' => $sentCount, 'price_up' => $up, 'price_down' => $down,
             'no_price' => $noPrice, 'gone' => $gone, 'back' => $back, 'delivery' => $last];
 }
@@ -30905,46 +33534,123 @@ function notifSourceChanges(array $cn, array $res, string $profileName = '', int
  * خراب شود باید خبردار شوید، نه اینکه روزها بی‌صدا بماند.
  */
 function notifRunFailure(array $cn, string $stage, string $profileName, string $error): array {
-    if (empty($cn['notif_events']['run_fail'])) return ['ok' => true, 'skipped' => 'disabled'];
+    /* v10.45 (۵۹): پیش‌فرض روشن — سکوت در شکست بدترین حالت است. */
+    if (!notifEventOn($cn['notif_events'] ?? [], 'run_fail')) return ['ok' => true, 'skipped' => 'disabled'];
     if (notifPrereq($cn) !== null) return ['ok' => false];
     $msg = "⚠️ خطا در اجرای خودکار\nمرحله: {$stage}"
          . ($profileName !== '' ? "\nپروفایل: {$profileName}" : '')
          . "\nعلت: " . mb_substr($error, 0, 200);
-    return ['ok' => true, 'delivery' => notifSend($cn, $msg)];
+    return ['ok' => true, 'delivery' => notifSend($cn, $msg, 'error')];
 }
 
 /**
  * اجرای همهٔ بررسی‌های فعال — همان چیزی که کران‌جاب صدا می‌زند.
  * ترتیب عمدی: سفارش (پول)، پیام (مشتری منتظر است)، محصول (اطلاعی).
+ *
+ * v10.45 (۵۹): سه تغییر:
+ *  ۱) دیگر یک پیش‌نیازِ سراسری (غرفهٔ پیش‌فرض) کلِ بلوک را خاموش
+ *     نمی‌کند: هر غرفه‌ای که توکن دارد، با توکنِ خودش چک می‌شود.
+ *  ۲) خطاهای هر غرفه دیگر دور ریخته نمی‌شوند؛ در 'errors' برمی‌گردند
+ *     تا در گزارشِ آخرین اجرا و پینگِ بعدی دیده شوند.
+ *  ۳) روشن/خاموشِ هر رویداد با notifEventOn سنجیده می‌شود: نبودِ کلید
+ *     یعنی روشن — دقیقاً همان چیزی که رابطِ کاربری نشان می‌داد.
  */
 function bslCheckNotifications(array $cn): array {
-    $why = notifPrereq($cn);
-    if ($why !== null) return [];
     $ne = $cn['notif_events'] ?? [];
+    $hasMsgr = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
+            || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '')
+            || (trim((string)($cn['telegram']['token'] ?? '')) !== '' && trim((string)($cn['telegram']['chat_id'] ?? '')) !== '');   // v10.78 (92)
+    if (!$hasMsgr) return [];   // فرستنده‌ای نیست که رویداد به آن برود
+    $shops = array_values(array_filter(bslAllShops($cn),
+        fn($s) => trim((string)($s['token'] ?? '')) !== ''));
+    if (!$shops) return ['skipped' => 'no_basalam_shops'];
+
     $out = [];
-    if (!empty($ne['order_new']) || !empty($ne['order_status'])) {
+    $errors = [];
+    $seen = ['orders' => 0, 'chats' => 0, 'products' => 0];
+    $found = ['orders' => 0, 'chats' => 0, 'products' => 0];
+    $pending = 0; /* v10.47 (۶۱): چند گفتگوی بی‌جواب است (موردِ یادآوری) */
+    if (!(notifEventOn($ne, 'order_new') || notifEventOn($ne, 'order_status')
+          || notifEventOn($ne, 'chat_msg') || notifEventOn($ne, 'product_status')
+          || notifEventOn($ne, 'product_new'))) $out['events_off'] = true;
+    if (notifEventOn($ne, 'order_new') || notifEventOn($ne, 'order_status')) {
         $r = notifCheckOrders($cn);
-        if (!empty($r['found'])) $out['orders'] = $r['found'];
+        $seen['orders'] += (int)($r['total_seen'] ?? 0);
+        $found['orders'] += (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        if ($found['orders'] > 0) $out['orders'] = $found['orders'];
+        if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
-    if (!empty($ne['chat_msg'])) {
+    if (notifEventOn($ne, 'chat_msg')) {
         $r = notifCheckChats($cn);
-        if (!empty($r['found'])) $out['chats'] = $r['found'];
+        $seen['chats'] += (int)($r['total_seen'] ?? 0);
+        $found['chats'] += (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        $pending += (int)($r['pending'] ?? 0);
+        if ($found['chats'] > 0) $out['chats'] = $found['chats'];
+        if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
-    if (!empty($ne['product_status']) || !empty($ne['product_new'])) {
+    if (notifEventOn($ne, 'product_status') || notifEventOn($ne, 'product_new')) {
         $r = notifCheckProducts($cn);
-        if (!empty($r['found'])) $out['products'] = $r['found'];
+        $seen['products'] += (int)($r['total_seen'] ?? 0);
+        $found['products'] += (int)($r['found'] ?? 0) + (int)($r['reminded'] ?? 0);
+        if ($found['products'] > 0) $out['products'] = $found['products'];
+        if (!empty($r['errors'])) $errors = array_merge($errors, (array)$r['errors']);
     }
+    if ($errors) $out['errors'] = array_values(array_unique($errors));
+    /* v10.47 (۶۱): پینگ (که کاربر هر بار آن را می‌بیند) همین اعداد را
+       نمایش می‌دهد؛ پس «چرا اعلانی نیامد» از همان پینگ خوانده می‌شود. */
+    $out['seen_chats'] = $seen['chats'];
+    $out['seen_orders'] = $seen['orders'];
+    $out['seen_products'] = $seen['products'];
+    if ($pending > 0) $out['pending_chats'] = $pending;
+    $_ft = $found['orders'] + $found['chats'] + $found['products'];
+    if ($_ft > 0) $out['found_total'] = $_ft;
+
+    /* v10.46 (۶۰): هر دور، خلاصهٔ «چرا چیزی نیامد» روی دیسک بنشیند —
+       حتی وقتی هیچ رویدادی نباشد. این دقیقاً همان سوالی است که کاربر
+       می‌پرسد: «آیا اصلاً بررسی شده؟ چه دیده؟» جوابش در بخشِ اعلان‌ها
+       و سلامتِ اعلان‌ها می‌درخشد. */
+    try {
+        $stN = notifLoadState();
+        $stN['last_notif_run'] = time();
+        $stN['last_notif_seen'] = $seen;
+        $stN['last_notif_pending'] = $pending; /* v10.47 (۶۱) */
+        $stN['last_notif_found'] = $found;
+        $stN['last_notif_errors'] = $errors ?: [];
+        notifSaveState($stN);
+    } catch (Throwable $e) { /* خطای نوشتنِ وضعیت نباید خودِ اعلان را بکشد */ }
     return $out;
 }
 
+/** v10.79 (93): لاگِ آخرینِ پینگ‌ها */
+if (isset($_GET['ping_log'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $dL = json_decode((string)@file_get_contents(__DIR__ . '/notif_ping_log.json'), true);
+    $logL = (is_array($dL) && is_array($dL['log'] ?? null)) ? $dL['log'] : [];
+    echo json_encode(['ok' => true, 'log' => array_slice($logL, 0, 30)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
 /* دکمه‌های تست — هر بررسی را جدا اجرا و نتیجه را گزارش می‌کند */
 if (isset($_GET['notif_test'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $kind = $_GET['kind'] ?? '';
     $cn = loadConnections();
-    $why = notifPrereq($cn);
+    /* v10.45 (۵۹): پینگ و تستِ تغییراتِ مبدأ به باسلام کاری ندارند
+       (فقط پیام‌رسان لازم است — همان قاعدهٔ v10.22). بقیهٔ تست‌ها فقط
+       به «حداقل یک غرفه با توکن» نیاز دارند، نه به کامل‌بودنِ
+       غرفهٔ پیش‌فرض. */
+    $hasMsgrN = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
+             || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '')
+             || (trim((string)($cn['telegram']['token'] ?? '')) !== '' && trim((string)($cn['telegram']['chat_id'] ?? '')) !== '');   // v10.78 (92)
+    $why = null;
+    if (!$hasMsgrN) {
+        $why = 'هیچ پیام‌رسانی تنظیم نشده (بله/روبیکا/تلگرام)';
+    } elseif ($kind !== 'ping' && $kind !== 'source'
+             && !array_values(array_filter(bslAllShops($cn), fn($s) => trim((string)($s['token'] ?? '')) !== ''))) {
+        $why = 'تنظیمات باسلام ناقص است (توکن غرفه)';
+    }
     if ($why !== null) { echo json_encode(['ok' => false, 'error' => $why], JSON_UNESCAPED_UNICODE); exit; }
 
+    try {
     if ($kind === 'orders')        $r = notifCheckOrders($cn, true);
     elseif ($kind === 'chats')     $r = notifCheckChats($cn, true);
     elseif ($kind === 'products')  $r = notifCheckProducts($cn, true);
@@ -30987,8 +33693,14 @@ if (isset($_GET['notif_test'])) {
         if (!empty($sr['nothing'])) $r['sample'] = 'تغییری برای گزارش نبود';
     }
     else { echo json_encode(['ok' => false, 'error' => 'نوع تست نامعتبر']); exit; }
-
-    echo json_encode($r, JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $__e) {
+        /* v10.79 (93): خطایِ داخلی را نشان بده — نه پاسخِ خالی که
+           مرورگر به‌عنوانِ «خطای شبکه» گزارش می‌کرد. */
+        echo json_encode(['ok' => false, 'error' => 'خطای داخلی: ' . mb_substr($__e->getMessage(), 0, 200)], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $__outT = json_encode($r, JSON_UNESCAPED_UNICODE);
+    echo ($__outT === false) ? '{"ok":false,"error":"ساختِ پاسخ ناموفق"}' : $__outT;
     exit;
 }
 
@@ -31128,7 +33840,7 @@ if (isset($_GET['bsl_notify_selected'])) {
                          . ' — ' . mb_substr($n['text'], 0, 60);
             }
         }
-        $delivery = notifSend($cn, implode("\n", $lines));
+        $delivery = notifSend($cn, implode("\n", $lines), 'remind');
         $sent = 1;
     } else {
         foreach ($picked as $n) {
@@ -31139,7 +33851,7 @@ if (isset($_GET['bsl_notify_selected'])) {
                 $body = bslFetchChatMessages($tk, $n['chat_id'], max(1, min(10, $n['unseen'] ?: 1)));
                 $msg = bslChatMsg($n, '💬 پیام خوانده‌نشده', $body);
             }
-            $delivery = notifSend($cn, $msg);
+            $delivery = notifSend($cn, $msg, 'remind');
             $sent++;
             if ($sent >= 20) break;   // سقف ایمنی برای جلوگیری از هرزنامه
         }
@@ -31149,19 +33861,82 @@ if (isset($_GET['bsl_notify_selected'])) {
     exit;
 }
 
-function bslSendToBaleh(string $token, string $chatId, string $text): bool {
-$url = 'https://tapi.bale.ai/bot' . $token . '/sendMessage';
-$ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE), CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
-$resp = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
-return $code >= 200 && $code < 300;
+/** v10.79 (93): Resolve با DoH — همان رزولورِ موجودِ بخشِ هوش مصنوعی */
+function msgrResolveDoH(string $host): string {
+    $cn = loadConnections();
+    $doh = trim((string)($cn['ai_net']['doh_url'] ?? '')) ?: 'https://cloudflare-dns.com/dns-query';
+    $r = aiDohResolve($host, $doh, 8);
+    return (!empty($r['ok']) && !empty($r['ip'])) ? (string)$r['ip'] : '';
 }
-function bslSendToRubika(string $token, string $chatId, string $text): bool {
-$url = 'https://api.rubika.ir/v1/bot' . $token . '/sendMessage';
-$ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE), CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
-$resp = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
-return $code >= 200 && $code < 300;
+/** v10.79 (93): آدرسِ اتصالِ غیرمستقیمِ سایت — همان کشفِ Push
+    (فیلدِ جداگانه ← عبورِ هوش مصنوعی ← مبدأ). '' اگر نباشد یا
+    قالبِ قدیمیِ HTTP-proxy (user:pass@...) باشد. */
+function msgrSiteProxy(): string {
+    $rc = pushRouteCfg();
+    $u = (string)($rc['proxy'] ?? '');
+    if ($u === '' || stripos($u, '@') !== false) return '';
+    return $u;
+}
+/** v10.79 (93): ارسالِ مشترکِ پیام‌رسان — زنجیره:
+    مستقیم ← (اگر DNS/اتصال شکست) DoH با IP ثابت ← (اگر هنوز
+    نرسید) proxy.phpِ خودِ سایت. برمی‌گرداند {ok, code, error, via}. */
+function msgrSend(string $url, string $postJson): array {
+    $do = function (string $u, ?string $pinIp = null): array {
+        $ch = curl_init($u);
+        $opt = [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $postJson,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 20, CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_SSL_VERIFYPEER => true];
+        if ($pinIp !== null && $pinIp !== '') {
+            $h = (string)(parse_url($u, PHP_URL_HOST) ?? '');
+            if ($h !== '') $opt[CURLOPT_RESOLVE] = [$h . ':443:' . $pinIp];
+        }
+        curl_setopt_array($ch, $opt);
+        $resp = (string)curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err = (string)curl_error($ch);
+        curl_close($ch);
+        return [$code, $resp, $err];
+    };
+    $via = 'مستقیم';
+    [$code, $resp, $err] = $do($url);
+    $host = (string)(parse_url($url, PHP_URL_HOST) ?? '');
+    if ($code === 0 && $host !== '') {
+        $ip = msgrResolveDoH($host);
+        if ($ip !== '') {
+            [$c2, $r2, $e2] = $do($url, $ip);
+            if ($c2 !== 0) { [$code, $resp, $err] = [$c2, $r2, $e2]; $via = 'DoH(' . $ip . ')'; }
+        }
+        if ($code === 0) {
+            $proxy = msgrSiteProxy();
+            if ($proxy !== '') {
+                $pu = strpos($proxy, '{url}') !== false
+                    ? str_replace('{url}', rawurlencode($url), $proxy)
+                    : $proxy . (strpos($proxy, '?') !== false ? '&' : '?') . 'url=' . rawurlencode($url);
+                [$c3, $r3, $e3] = $do($pu);
+                if ($c3 !== 0) { [$code, $resp, $err] = [$c3, $r3, $e3]; $via .= ' ← proxy.php'; }
+            }
+        }
+    }
+    if ($code >= 200 && $code < 300) return ['ok' => true, 'code' => $code, 'error' => '', 'via' => $via];
+    $j = json_decode($resp, true);
+    $detail = '';
+    if (is_array($j)) $detail = (string)($j['description'] ?? ($j['error'] ?? ($j['message'] ?? ($j['detail'] ?? ''))));
+    if ($detail === '' && is_array($j) && isset($j['error_code'])) $detail = 'error_code=' . $j['error_code'];
+    if ($detail === '') $detail = mb_substr($resp, 0, 200);
+    $e = $err !== '' ? 'خطای شبکه: ' . $err : ($detail !== '' ? $detail : 'پاسخی نیامد');
+    return ['ok' => false, 'code' => $code, 'error' => ($via !== 'مستقیم' ? '[' . $via . '] ' : '') . $e, 'via' => $via];
+}
+function bslSendToBaleh(string $token, string $chatId, string $text): array {
+return msgrSend('https://tapi.bale.ai/bot' . $token . '/sendMessage', json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE));
+}
+function bslSendToRubika(string $token, string $chatId, string $text): array {
+return msgrSend('https://api.rubika.ir/v1/bot' . $token . '/sendMessage', json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE));
 }
 
+function bslSendToTelegram(string $token, string $chatId, string $text): array {
+return msgrSend('https://api.telegram.org/bot' . $token . '/sendMessage', json_encode(['chat_id' => $chatId, 'text' => $text, 'disable_web_page_preview' => true], JSON_UNESCAPED_UNICODE));
+}
 function bslTryCreateWithFallback(string $tk, int $vid, array $bp, array $fallbackCatIds, string $pTitle, bool $autoCat, array $bslFlatCats, array $cData): array {
 $tried = [(int)($bp['category_id'] ?? 0)];
 foreach ($fallbackCatIds as $fc) {
@@ -31258,13 +34033,17 @@ $chatId=trim($_POST['chat_id']??'');
 if(empty($token)||empty($chatId)){echo json_encode(['ok'=>false,'error'=>'Token و Chat ID الزامی است'],JSON_UNESCAPED_UNICODE);exit;}
 $testMsg='🔔 تست اعلان — '.date('H:i:s Y/m/d').' — Scraper v8.22';
 if($type==='baleh'){
-$ok=bslSendToBaleh($token,$chatId,$testMsg);
-if($ok){echo json_encode(['ok'=>true,'message'=>'پیام بله ارسال شد'],JSON_UNESCAPED_UNICODE);}
-else{echo json_encode(['ok'=>false,'error'=>'ارسال به بله ناموفق — Token یا Chat ID را بررسی کنید'],JSON_UNESCAPED_UNICODE);}
+$rr=bslSendToBaleh($token,$chatId,$testMsg);
+if($rr['ok']){echo json_encode(['ok'=>true,'message'=>'پیام بله ارسال شد (' . $rr['via'] . ')'],JSON_UNESCAPED_UNICODE);}
+else{echo json_encode(['ok'=>false,'error'=>'ارسال به بله ناموفق — HTTP ' . $rr['code'] . ' — ' . ($rr['error'] !== '' ? $rr['error'] : 'Token یا Chat ID را بررسی کنید'),'http_code'=>$rr['code'],'detail'=>$rr['error']],JSON_UNESCAPED_UNICODE);}
 }elseif($type==='rubika'){
-$ok=bslSendToRubika($token,$chatId,$testMsg);
-if($ok){echo json_encode(['ok'=>true,'message'=>'پیام روبیکا ارسال شد'],JSON_UNESCAPED_UNICODE);}
-else{echo json_encode(['ok'=>false,'error'=>'ارسال به روبیکا ناموفق — Token یا Chat ID را بررسی کنید'],JSON_UNESCAPED_UNICODE);}
+$rr=bslSendToRubika($token,$chatId,$testMsg);
+if($rr['ok']){echo json_encode(['ok'=>true,'message'=>'پیام روبیکا ارسال شد'],JSON_UNESCAPED_UNICODE);}
+else{echo json_encode(['ok'=>false,'error'=>'ارسال به روبیکا ناموفق — HTTP ' . $rr['code'] . ' — ' . ($rr['error'] !== '' ? $rr['error'] : 'Token یا Chat ID را بررسی کنید'),'http_code'=>$rr['code'],'detail'=>$rr['error']],JSON_UNESCAPED_UNICODE);}
+}elseif($type==='telegram'){
+$tr=bslSendToTelegram($token,$chatId,$testMsg);
+if($tr['ok']){echo json_encode(['ok'=>true,'message'=>'پیام تلگرام ارسال شد'],JSON_UNESCAPED_UNICODE);}
+else{echo json_encode(['ok'=>false,'error'=>'ارسال به تلگرام ناموفق — HTTP ' . $tr['code'] . ' — ' . ($tr['error'] !== '' ? $tr['error'] : 'Token یا Chat ID را بررسی کنید'),'http_code'=>$tr['code'],'detail'=>$tr['error']],JSON_UNESCAPED_UNICODE);}
 }else{
 echo json_encode(['ok'=>false,'error'=>'نوع اعلان نامعتبر'],JSON_UNESCAPED_UNICODE);
 }
@@ -33613,9 +36392,29 @@ if($log!==null){$wooLog[]=$log;}
 $totalLog=count($wooLog);
 $recentSlice=$totalLog>200?array_slice($wooLog,-200):$wooLog;
 $d=['running'=>true,'sent'=>$s,'updated'=>$u,'skipped'=>$sk,'failed'=>$f,'total'=>$t,'last_title'=>$lt,'current'=>$c,'done'=>false,'started_at'=>$GLOBALS['startedAt'],'last_progress_ts'=>time(),'recent_log'=>$recentSlice,'total_log_count'=>$totalLog,'sent_details'=>$wooSentList,'updated_details'=>$wooUpdatedList,'skipped_details'=>$wooSkippedList,'failed_details'=>$wooFailedList];
+/* v10.56 (۷۰): فایلِ پیشرفتِ ووکامرس هم مالکیتِ ردیفِ صف را نشان می‌دهد —
+   برای اینکه ادامهٔ بعدی مطمئن باشد چک‌پوینت مالِ همین ردیف است. */
+if(!empty($GLOBALS['_wooQueueIdNow']))$d['queue_id']=$GLOBALS['_wooQueueIdNow'];
 if(!empty($extra))$d=array_merge($d,$extra);
 writeProgress(WOO_PROGRESS_FILE,$d);
 clearstatcache();
+/* v10.56 (۷۰): «current»ِ ردیفِ صف را هم با هر ضربان به‌روز نگه می‌داریم
+   (همانِ کارِ وِرکرِ باسلام) — تا در نبودِ پُلِ مرورگر، ردیفِ صف جایِ
+   درستِ کار را نشان بدهد. */
+if(!empty($GLOBALS['_wooQueueIdNow'])){
+try{
+$__wq=wooReadQueue();$__wchg=false;
+foreach($__wq['entries'] as &$__we){
+if($__we['id']===$GLOBALS['_wooQueueIdNow']){
+if(((int)$c)!==(int)($__we['current']??0)){($__we['current']=(int)$c);($__wchg=true);}
+$__we['sent']=$s;$__we['updated']=$u;$__we['skipped']=$sk;$__we['failed']=$f;
+break;
+}
+}
+unset($__we);
+if($__wchg)wooWriteQueue($__wq);
+}catch(Exception $__wex){}
+}
 }
 
 $cn=loadConnections();$w=$cn['woocommerce']??[];
@@ -33626,6 +36425,19 @@ exit;
 
 $raw=@file_get_contents(WOO_PRODUCTS_FILE);
 $pd=json_decode($raw?:'[]',true)?:[];
+/* v10.56 (۷۰): اگر فایلِ مشترکِ محصولات گم شده باشد (مثلاً بعد از کشتنِ
+   فرایند)، از فایلِ اختصاصیِ ردیفِ در حالِ اجرا برگردان — وگرنه ادامه
+   بلافاصله با «بدونِ محصول» تمام می‌شد. */
+if(empty($pd)){
+$__wq0=wooReadQueue();
+foreach($__wq0['entries'] as $__qe0){
+if(($__qe0['status']??'')==='running'){
+$__wf=__DIR__.'/woo_queue_products_'.(string)($__qe0['id']??'').'.json';
+if(file_exists($__wf)){$pd=json_decode((string)@file_get_contents($__wf)?:'[]',true)?:[];}
+break;
+}
+}
+}
 if(empty($pd)){
 writeProgress(WOO_PROGRESS_FILE,['running'=>false,'done'=>true,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'total'=>0,'current'=>0,'started_at'=>$startedAt,'recent_log'=>['❌ فایل محصولات خالی'],'total_log_count'=>1,'sent_details'=>[],'updated_details'=>[],'skipped_details'=>[],'failed_details'=>[]]);
 exit;
@@ -33642,14 +36454,18 @@ $wooQueueProfileKey='';   // v8.65: برای ثبت در دفترچهٔ شناس
 $wooForceAllRun=false;    // v10.34 (۴۸ج): ارسالِ کامل بدون مقایسه
 $wooContentSync=contentSyncOn($cn);   // v8.69: آپدیت محتوای تازه
 $wooQueue=wooReadQueue();
+$wooRunId='';
 foreach($wooQueue['entries'] as $qe){
 if(($qe['status']??'')!=='running')continue;
 if(!empty($qe['config']['title_suffix']))$wooTitleSuffix=trim($qe['config']['title_suffix']);
 if(isset($qe['config']['category_id']))$wooQueueCatId=(int)$qe['config']['category_id'];
 if(!empty($qe['config']['force_all']))$wooForceAllRun=true;
 $wooQueueProfileKey=(string)($qe['profile_key']??'');
+$wooRunId=(string)($qe['id']??'');
 break;
 }
+/* v10.56 (۷۰): برای مالکیتِ فایلِ پیشرفت (queue_id) در ضربان‌های بعد. */
+$GLOBALS['_wooQueueIdNow']=$wooRunId;
 if($wooTitleSuffix===''){$wooTitleSuffix=trim($cn['basalam']['title_suffix']??'');}
 // v8.87: تعدیل قیمت مخصوص ووکامرس (جدا از تنظیم قیمت پروفایل)
 $wooPriceCfg=destPriceCfg($cn,'woocommerce');
@@ -33662,9 +36478,31 @@ wooBackendProgress(0,0,0,0,0,0,'','💰 تعدیل قیمت ووکامرس: '
 $wooSendCatId=$wooQueueCatId>=0?$wooQueueCatId:(int)($w['default_category']??0);
 $GLOBALS['_currentProductLink']='';
 
+/* v10.56 (۷۰): چک‌پوینتِ ادامه — فایلِ پیشرفت را پُر از اولینِ ضربانِ تازه
+   می‌خوانیم (ضربانِ تازه current=0 می‌نویسد و چک‌پوینت از بین می‌رود).
+   معنای start: شمارهٔ ۱‌مبنا از اولینِ محصولی که باید (دوباره) پردازش شود.
+   فقط وقتی مبنا می‌شود که queue_idِ فایل مالِ همین ردیف باشد. */
+$wooPrevProg=readProgress(WOO_PROGRESS_FILE);
+$wooPrevQid=trim((string)($wooPrevProg['queue_id']??''));
+$wooResumeStart=0;$wooResumeCounters=false;
+if($wooRunId!==''&&$wooPrevQid===$wooRunId){
+$wooResumeStart=(int)($wooPrevProg['current']??0);
+$wooResumeCounters=isset($wooPrevProg['sent']);
+}
+$wooPostStart=max(0,(int)($_POST['start_index']??0));
+$wooPostQid=trim((string)($_POST['queue_id']??''));
+if($wooPostStart>0&&$wooRunId!==''&&($wooPostQid===''||$wooPostQid===$wooRunId))$wooResumeStart=max($wooResumeStart,$wooPostStart);
+$wooResumeStart=max(0,min($wooResumeStart,$total+1));
+if($wooResumeStart>0&&$wooResumeCounters){
+$sent=(int)($wooPrevProg['sent']??0);$updated=(int)($wooPrevProg['updated']??0);
+$skipped=(int)($wooPrevProg['skipped']??0);$fail=(int)($wooPrevProg['failed']??0);
+}
+
 wooBackendProgress(0,0,0,0,$total,0,'',['✅ [v8.22 woo_backend] شروع — '.$total.' محصول']);
 
 foreach($pd as $i=>$p){
+/* v10.56 (۷۰): محصولاتِ قبلِ چک‌پوینت را رد کن (در اجرأ قبلی انجام شده‌اند). */
+if(($i+1)<$wooResumeStart)continue;
 if(file_exists(WOO_STOP_FILE)){
 @unlink(WOO_STOP_FILE);
 wooBackendProgress($sent,$updated,$skipped,$fail,$total,$i,'',['❌ متوقف شد']);
@@ -33941,6 +36779,11 @@ foreach ($queue['entries'] as $e) {
 if ($e['status'] === 'waiting') { $hasMore = true; break; }
 }
 $p['has_more'] = $hasMore;
+/* v10.59 (۷۳): پویینگِ تبِ ارسال، موتورِ بازسازیِ صف می‌شود — توضیح کامل
+   در sendAutoRecover(). اگر صف گیر کرده باشد، همین‌جا از چک‌پوینت
+   خودکار ادامه می‌افتد و رابط با recovered=... یک توست نشان می‌دهد. */
+$_recB = sendAutoRecover('bsl');
+if ($_recB !== null) $p['recovered'] = $_recB;
 echo json_encode($p, JSON_UNESCAPED_UNICODE);
 exit;
 }
@@ -33972,6 +36815,9 @@ $hasMore=false;
 foreach($queue['entries'] as $e){if($e['status']==='waiting'){$hasMore=true;break;}}
 $p['has_more']=$hasMore;
 $p['queue_count']=count($queue['entries']);
+/* v10.59 (۷۳): همان موتورِ بازسازی برای صفِ ووکامرس (sendAutoRecover). */
+$_recW = sendAutoRecover('woo');
+if ($_recW !== null) $p['recovered'] = $_recW;
 echo json_encode($p, JSON_UNESCAPED_UNICODE);
 exit;
 }
@@ -33988,6 +36834,8 @@ function wooWriteQueue(array $queue): void {
 
 if(isset($_GET['woo_queue_status'])){
 header('Content-Type: application/json; charset=UTF-8');
+/* v10.59 (۷۳): همان بستنِ خودکارِ ردیفِ تمام‌شدهٔ بسته‌نشده برای ووکامرس. */
+try { $stW = loadConnections(); queueStallCheck('woo', max(120, (int)($stW['stall_after'] ?? 300))); } catch (Throwable $eW) {}
 $queue=wooReadQueue();
 $progress=readProgress(WOO_PROGRESS_FILE);
 foreach($queue['entries'] as &$e){
@@ -34899,13 +37747,19 @@ $newStatus=(int)($_GET['status']??0);
 if($productId<=0||$newStatus<=0){echo json_encode(['ok'=>false,'error'=>'شناسه یا وضعیت نامعتبر'],JSON_UNESCAPED_UNICODE);exit;}
 $statusLabels=['2976'=>'فعال','3790'=>'غیرفعال','3568'=>'در انتظار تأیید'];
 $label=$statusLabels[$newStatus]??$newStatus;
-$bu=['status'=>$newStatus];
-$r=bslReq($tk,'PATCH','products/'.$productId,$bu);
-if($r['code']===404)$r=bslReq($tk,'PATCH','vendors/'.$vid.'/products/'.$productId,$bu);
+/* v10.52 (۶۶): هر گام در یک درخواستِ جدا (پارامترِ via) — زنجیرهٔ
+   بلندِ v10.51 در پنجرهٔ HTTPِ کوتاه ۵۰۲ می‌گرفت؛ کلاینت با 'next'
+   خودکار به گامِ بعد می‌رود. */
+$_via=($_GET['via']??'');
+$_via=in_array($_via,['simple','full','archive','disable','hide'],true)?$_via:'simple'; /* v10.53 (۶۷): پلکانِ کامل */
+$r=bslSetProductStatus($tk,$vid,$productId,$newStatus,$_via);
 if($r['ok']&&!empty($r['body']['id'])){
 echo json_encode(['ok'=>true,'msg'=>'محصول #'.$productId.' → '.$label.' ('.$newStatus.')'],JSON_UNESCAPED_UNICODE);
 }else{
-echo json_encode(['ok'=>false,'error'=>'تغییر وضعیت ناموفق ('.$r['code'].'): '.($r['body']['message']??$r['body']['error']??'خطا')],JSON_UNESCAPED_UNICODE);
+/* v10.49 (۶۳): همان خطای گویا برای تغییر وضعیت */
+$_resp=['ok'=>false,'error'=>bslApiError($r,'تغییر وضعیت ناموفق','products/'.$productId)];
+if(!empty($r['next']))$_resp['next']=$r['next'];
+echo json_encode($_resp,JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -34919,11 +37773,24 @@ if($productId<=0){echo json_encode(['ok'=>false,'error'=>'شناسه محصول 
 // v8.62: باسلام متد DELETE برای محصول ندارد. تا امروز این کد به اندپوینتی
 // می‌رفت که وجود ندارد و همیشه ۴۰۴ می‌گرفت، یعنی حذف هیچ‌وقت انجام نمی‌شد.
 // معادل واقعی، بایگانی کردن است (وضعیت ۴۱۸۴).
-$r=bslArchiveProduct($tk,$vid,$productId);
+/* v10.52 (۶۶): بایگانیِ دستی گام‌به‌گام — اول فقط-وضعیت (همان
+   کارِ سریعِ قدیمی)؛ اگر ۴۲۲/۴۰۳/۴۰۴ داد، کلاینت با 'next' خودکار
+   گامِ بعد (پیلودِ کامل، بعد archive) را در درخواستِ تازه می‌زند. */
+$_via=($_GET['via']??'');
+$_via=in_array($_via,['simple','full','archive','disable','hide'],true)?$_via:'simple'; /* v10.53 (۶۷): پلکانِ کامل */
+$r=bslSetProductStatus($tk,$vid,$productId,4184,$_via);
 if($r['ok']||$r['code']===204||$r['code']===200){
-echo json_encode(['ok'=>true,'archived'=>true,'msg'=>'محصول #'.$productId.' بایگانی شد (باسلام حذف همیشگی ندارد)'],JSON_UNESCAPED_UNICODE);
+$_strat=(string)($r['status_strategy']??''); /* v10.53 (۶۷): پیامِ دقیقِ نتیجه */
+if($_strat==='disable'){$_delMsg='محصول #'.$productId.' غیرفعال شد (بایگانی ممکن نشد)';}
+elseif($_strat==='hide'){$_delMsg='محصول #'.$productId.' ناموجود شد: موجودی و قیمت صفر شد (بایگانی و غیرفعال‌کردن ممکن نشد)';}
+else{$_delMsg='محصول #'.$productId.' بایگانی شد (باسلام حذف همیشگی ندارد)';}
+echo json_encode(['ok'=>true,'archived'=>in_array($_strat,['simple','full','archive'],true),'msg'=>$_delMsg],JSON_UNESCAPED_UNICODE);
 }else{
-echo json_encode(['ok'=>false,'error'=>'بایگانی ناموفق ('.$r['code'].'): '.($r['body']['message']??$r['body']['error']??'خطا')],JSON_UNESCAPED_UNICODE);
+/* v10.49 (۶۳): خطای گویا — ۴۲۲ یعنی «پارامتر نامعتبر»؛ جزئیاتِ دقیق
+   (کدام فیلد، چه مقبول است) را از بدنه بیرون بکشیم که کاربر/ما ببیند. */
+$_resp=['ok'=>false,'error'=>bslApiError($r,'بایگانی ناموفق','products/'.$productId)];
+if(!empty($r['next']))$_resp['next']=$r['next'];
+echo json_encode($_resp,JSON_UNESCAPED_UNICODE);
 }
 exit;
 }
@@ -35209,6 +38076,11 @@ function wooQueueProductsFile(string $queueId): string {
 
 if(isset($_GET['bsl_queue_status'])){
 header('Content-Type: application/json; charset=UTF-8');
+/* v10.59 (۷۳): ردیفِ تمام‌شدهٔ بسته‌نشده — وِرکر کشته شده و «current» به
+   «total» رسیده (یا progress کامل است) ولی ردیف هنوز «running» است.
+   queueStallCheck دقیقاً همین ردیف را فوراً «done» می‌کند؛ پس قبل از
+   رندرِ رابط، یک بار بچکش تا کاربر دیگر وظیفهٔ تمام‌شدهٔ «فعال» نبیند. */
+try { $stB = loadConnections(); queueStallCheck('bsl', max(120, (int)($stB['stall_after'] ?? 300))); } catch (Throwable $eB) {}
 $queue=bslReadQueue();
 
 $progress=readProgress(BSL_PROGRESS_FILE);
@@ -35321,6 +38193,23 @@ $__pf4=$__pf3??($__pf??loadProfiles());
 $catId=(int)($__pf4[$pKeyIn]['bslCategoryId']??0);
 }
 if($catId<=0)$catId=(int)($cn['basalam']['category_id']??0);
+// v10.73 (87): «ارسال به همهٔ غرفه‌ها» دیگر داخلِ یک ردیفِ صف پنهان نمی‌شود —
+// هر غرفهٔ فعال یک وظیفهٔ مستقل در صف می‌گیرد (ردیف، پیشرفت و گزارشِ خودش)،
+// و رابط کاربری آن‌ها را زیرِ سربرگِ دستهٔ مشترک نشان می‌دهد.
+$fanoutShops=!empty($_POST['send_all_shops'])?bslFanoutShops($cn):[];
+if(count($fanoutShops)>1){
+$fanStatus=$startImm?'running':'waiting';
+$fanFirst=true;
+foreach($fanoutShops as $__fs){
+$__fsVid=(int)$__fs['vendor_id'];
+$__fsId=$fanFirst?$queueId:$queueId.'_s'.$__fsVid;
+$queue['entries'][]=['id'=>$__fsId,'status'=>$fanFirst?$fanStatus:'waiting','products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$fanFirst&&$startImm?time():0,'done_at'=>0,'paused_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'shop_vendor_id'=>$__fsVid,'shop_name'=>(string)$__fs['shop_name'],'shop_is_default'=>!empty($__fs['is_default']),'batch_id'=>$queueId,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs,'fallback_cat_ids'=>$fbIn,'send_all_shops'=>0,'fanout'=>1,'shop_vendor_id'=>$__fsVid,'shop_name'=>(string)$__fs['shop_name']]];
+$fanFirst=false;
+}
+bslWriteQueue($queue);
+echo json_encode(['ok'=>true,'queue_id'=>$queueId,'status'=>$fanStatus,'shops'=>array_map(function($__x){return (string)$__x['shop_name'];},$fanoutShops),'shop_count'=>count($fanoutShops),'position'=>count($queue['entries']),'start_now'=>$startImm,'queue_count'=>count($queue['entries'])],JSON_UNESCAPED_UNICODE);
+exit;
+}
 $entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'paused_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs,'fallback_cat_ids'=>$fbIn,'send_all_shops'=>!empty($_POST['send_all_shops'])]];
 $queue['entries'][]=$entry;
 bslWriteQueue($queue);
@@ -35750,15 +38639,6 @@ set_time_limit(0); ignore_user_abort(true);
 register_shutdown_function(function()use($bslLockFp,$bslLockFile){@flock($bslLockFp,LOCK_UN);@fclose($bslLockFp);@unlink($bslLockFile);});
 $startedAt=time();
 $GLOBALS['startedAt']=$startedAt;
-$bslQueueId=''; $bslSentList=[]; $bslUpdatedList=[]; $bslSkippedList=[]; $bslFailedList=[]; $bslLog=[]; $bslFlatCats=[];
-/* v10.23 (۳۶ه): شمارنده‌های تفکیکیِ هر غرفه.
-   تا اینجا صفِ ارسال فقط یک مجموعه شمارنده داشت (جدید/آپدیت/تکراری/خطا) که
-   جمعِ کورِ همهٔ غرفه‌ها بود. با «ارسال همزمان به همهٔ غرفه‌ها» این عدد عملاً
-   بی‌معنی می‌شد: نمی‌شد فهمید کدام غرفه اصلاً چیزی نگرفته یا کدام‌یک همهٔ
-   خطاها را داده. حالا هر غرفه ردیفِ شمارندهٔ خودش را دارد.
-   کلید = vendor_id، مقدار = ['name','c'(ساخته),'u'(آپدیت),'s'(رد),'f'(خطا)] */
-$bslShopStats=[]; $bslDefaultVid=0; $bslDefaultShopName='';
-
 function bslBackendProgress($s,$u,$sk,$f,$t,$c,$lt,$log=null,$extra=[]){
 global $bslLog,$bslSentList,$bslUpdatedList,$bslSkippedList,$bslFailedList,$bslQueueId;
 if($log!==null){$bslLog[]=$log;}
@@ -35773,7 +38653,49 @@ if($__ss)$d['shop_stats']=$__ss;
 if(!empty($extra))$d=array_merge($d,$extra);
 writeProgress(BSL_PROGRESS_FILE,$d);
 clearstatcache();
+/* v10.56 (۷۰): «current»ِ ردیفِ صف را هم با هر ضربان به‌روز نگه می‌داریم.
+   قبلاً این فقط هنگام پُلِ مرورگر یا در پایان نوشته می‌شد — پس در ارسالِ
+   طولانیِ رهاشده (بدونِ مرورگر) ردیف صفر می‌ماند و هر کسِ آن را بخواند
+   (نگهبان، پمپ، مدیرِ وظایف) می‌فهمد هنوز از اول شروع نشده. */
+if(isset($GLOBALS['_bslQueueIdNow'])){
+try{
+$__q=bslReadQueue();$__chg=false;
+foreach($__q['entries'] as &$__e){
+if($__e['id']===$GLOBALS['_bslQueueIdNow']){
+if(((int)$c)!==(int)($__e['current']??0)){($__e['current']=(int)$c);($__chg=true);}
+$__e['sent']=$s;$__e['updated']=$u;$__e['skipped']=$sk;$__e['failed']=$f;
+break;
 }
+}
+unset($__e);
+if($__chg)bslWriteQueue($__q);
+}catch(Exception $__ex){}
+}
+}
+
+/* v10.53 (۶۷): یک وِرکر = صفِ کامل. هر وقت یک ردیف تمام شد و ردیفِ «در انتظار»
+   دیگری باشد، همان‌جا ادامه می‌دهد (به نوبت) — دیگر برای هر پروفایل وِرکر
+   تازه لازم نیست. سقف (BSL_MAX_ENTRIES_PER_RUN) برای اینکه وِرکر پنجرهٔ هاست
+   را رد نکند؛ بقیه را اجرای بعد می‌گیرد. متغیرهای زیر برای هر ردیف از نو
+   شروع می‌شوند. */
+$bslEntriesDoneThisRun = 0;
+for ($bslEntryRound = 0; $bslEntryRound < BSL_MAX_ENTRIES_PER_RUN; $bslEntryRound++) {
+if ($bslEntryRound > 0) {
+    clearstatcache(true,BSL_STOP_FILE);
+    if (file_exists(BSL_STOP_FILE)) {
+        writeProgress(BSL_PROGRESS_FILE,['running'=>false,'done'=>true,'cancelled'=>true,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'total'=>0,'current'=>0,'started_at'=>$startedAt,'last_progress_ts'=>time(),'recent_log'=>['⏹ Between rows: stop signal — remaining rows will be sent in the next run'],'total_log_count'=>1]);
+        @unlink(BSL_PRODUCTS_FILE);
+        exit;
+    }
+}
+$bslQueueId=''; $bslSentList=[]; $bslUpdatedList=[]; $bslSkippedList=[]; $bslFailedList=[]; $bslLog=[]; $bslFlatCats=[];
+/* v10.23 (۳۶ه): شمارنده‌های تفکیکیِ هر غرفه.
+   تا اینجا صفِ ارسال فقط یک مجموعه شمارنده داشت (جدید/آپدیت/تکراری/خطا) که
+   جمعِ کورِ همهٔ غرفه‌ها بود. با «ارسال همزمان به همهٔ غرفه‌ها» این عدد عملاً
+   بی‌معنی می‌شد: نمی‌شد فهمید کدام غرفه اصلاً چیزی نگرفته یا کدام‌یک همهٔ
+   خطاها را داده. حالا هر غرفه ردیفِ شمارندهٔ خودش را دارد.
+   کلید = vendor_id، مقدار = ['name','c'(ساخته),'u'(آپدیت),'s'(رد),'f'(خطا)] */
+$bslShopStats=[]; $bslDefaultVid=0; $bslDefaultShopName='';
 
 $queue=bslReadQueue();
 
@@ -35825,12 +38747,30 @@ if(!$nextEntry){
 // زمان‌بندی خودکار کار کران‌جاب (cron_run) است، نه کار ارسال‌کننده.
 bslWriteQueue($queue);
 header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(['ok'=>true,'msg'=>'صف خالی — هیچ ورودی برای پردازش نیست','started'=>false,'processed'=>0],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'msg'=>'صف خالی — هیچ ورودی برای پردازش نیست','started'=>false,'processed'=>$bslEntriesDoneThisRun],JSON_UNESCAPED_UNICODE);
 exit;
 }
 
 $bslQueueId=$nextEntry['id'];
 
+/* v10.56 (۷۰): چک‌پوینتِ ادامه — فایلِ پیشرفت را پُر از پاک‌کردن می‌خوانیم:
+   موقعِ شروعِ درست (شمارهٔ ۱‌مبنا از اولینِ محصولی که باید پردازش شود) و
+   شمارنده‌های اجرأ قبلی، اگر فرایندِ قبلی وسطِ کار مُرده باشد و نگهبان
+   (یا «ادامه») ما را دوباره راه انداخته باشد. بدونِ این، هر بارِ شروع از
+   محصولِ ۱ از نو — ارسالِ بزرگ یا بسیار طولانی می‌شد یا غیرممکن.
+   فایلِ پیشرفت فقط وقتی مبنا می‌شود که queue_id مالِ همین ردیف باشد. */
+$bslPrevProg=readProgress(BSL_PROGRESS_FILE);
+$bslPrevQid=trim((string)($bslPrevProg['queue_id']??''));
+$bslResumeStart=0;$bslResumeCounters=false;
+if($bslPrevQid===$bslQueueId){
+$bslResumeStart=(int)($bslPrevProg['current']??0);
+$bslResumeCounters=isset($bslPrevProg['sent']);
+}
+$bslPostStart=max(0,(int)($_POST['start_index']??0));
+$bslPostQid=trim((string)($_POST['queue_id']??''));
+if($bslPostStart>0&&($bslPostQid===''||$bslPostQid===$bslQueueId))$bslResumeStart=max($bslResumeStart,$bslPostStart);
+$bslResumeStart=max(0,$bslResumeStart);
+$GLOBALS['_bslQueueIdNow']=$bslQueueId;
 @unlink(BSL_PROGRESS_FILE);@unlink(BSL_STOP_FILE);@unlink(BSL_PRODUCTS_FILE);
 if(!file_exists($nextEntry['products_file'])){
 $queue['entries'][$nextIdx]['status']='failed';
@@ -35892,6 +38832,38 @@ $cn['basalam']['fallback_cat_ids']=$qCfg['fallback_cat_ids'];
 $bslForceAllRun=!empty($qCfg['force_all']);
 if($bslForceAllRun&&!defined('BSL_FORCE_SYNC'))define('BSL_FORCE_SYNC',true);
 
+/* =====================================================================
+   v10.73 (87): وظیفهٔ اختصاصیِ غرفه — ردیفِ صف به یک غرفه گره خورده است.
+
+   «ارسال به همهٔ غرفه‌ها» دیگر یعنی یک ردیف که داخلش روی غرفه‌ها حلقه
+   بزند: حالا هر غرفه ردیفِ مستقلِ خودش را در صف دارد (پیشرفت، گزارش و
+   دکمهٔ خودش). اگر این ردیف به غرفهٔ غیرپیش‌فرض گره خورده باشد، حلقهٔ
+   اصلیِ غرفهٔ پیش‌فرض رد می‌شود و به‌جای آن — بعد از احراز هویت —
+   همان حلقهٔ upsertِ تک‌غرفه‌ای که مسیرِ همزمان استفاده می‌کرد اجرا
+   می‌شود (قیمتِ دولایه، کلیدِ نگاشتِ مخصوصِ غرفه، دسته‌های جایگزین —
+   همه دقیقاً یکسان).
+   ===================================================================== */
+$__scopeVid=(int)($qCfg['shop_vendor_id']??0);
+$__scopeName=trim((string)($qCfg['shop_name']??''));
+$__isFanoutRow=!empty($qCfg['fanout']);
+$__scopeShop=null;
+if($__scopeVid>0){
+foreach(bslAllShops($cn) as $__shScope){
+if((int)$__shScope['vendor_id']===$__scopeVid){$__scopeShop=$__shScope;break;}
+}
+if(!$__scopeShop||trim((string)($__scopeShop['token']??''))===''){
+$queue['entries'][$nextIdx]['status']='failed';
+$queue['entries'][$nextIdx]['done_at']=time();
+$queue['entries'][$nextIdx]['fail_reason']='غرفهٔ هدف دیگر در تنظیمات نیست یا توکنش خالی است';
+bslWriteQueue($queue);
+writeProgress(BSL_PROGRESS_FILE,['running'=>false,'done'=>true,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'total'=>0,'current'=>0,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$bslQueueId,'recent_log'=>['❌ غرفه هدف یافت نشد'],'total_log_count'=>1,'sent_details'=>[],'updated_details'=>[],'skipped_details'=>[],'failed_details'=>[]]);
+@unlink(BSL_PRODUCTS_FILE);
+header('Content-Type: application/json; charset=UTF-8');
+echo json_encode(['ok'=>false,'error'=>'غرفهٔ هدف یافت نشد','queue_id'=>$bslQueueId],JSON_UNESCAPED_UNICODE);
+exit;
+}
+}
+
 $queue['entries'][$nextIdx]['status']='running';
 $queue['entries'][$nextIdx]['started_at']=$startedAt;
 bslWriteQueue($queue);
@@ -35906,6 +38878,18 @@ $autoCat=!empty($cn['basalam']['auto_category']);
 $bslDefaultVid=$vid;
 $bslDefaultShopName=trim((string)($cn['basalam']['shop_name']??''));
 if($bslDefaultShopName==='')$bslDefaultShopName='غرفهٔ پیش‌فرض';
+/* v10.73 (87): ردیفِ گره‌خورده به غرفه — همهٔ درخواست‌های همین اجرا
+   (احراز هویت، جستجو، آپلود، PATCH/POST) با توکن و شناسهٔ همان غرفه.
+   $cData/$catId هم برای فازهای ۲ و ۳ که بعد از این می‌آیند تعریف می‌شوند
+   (حلقهٔ اصلی که قبلاً آن‌ها را می‌ساخت، برای این ردیف رد می‌شود). */
+if($__scopeShop){
+$tk=trim((string)$__scopeShop['token']);
+$vid=$__scopeVid;
+$bslDefaultVid=$vid;
+$bslDefaultShopName=$__scopeName!==''?$__scopeName:(string)$__scopeShop['shop_name'];
+$cData=[];
+$catId=(int)($cn['basalam']['category_id']??0);
+}
 
 $bslDelayMs=max(0,(int)($cn['basalam']['delay_ms']??500));
 $bslRetryDelayMs=max(0,(int)($cn['basalam']['retry_delay_ms']??1000));
@@ -35926,6 +38910,7 @@ echo json_encode(['ok'=>false,'error'=>$authErr,'auth_fail'=>true,'queue_id'=>$b
 exit;
 }
 bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['✅ احراز هویت موفق']);
+if($__scopeShop){bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['🏪 این ردیفِ صف مخصوصِ غرفهٔ '.$bslDefaultShopName.' است — '.count($verifyProducts).' محصول']);}
 
 bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['دریافت دسته‌بندی‌ها...']);
 /* v10.41 (۵۵): از کشِ مشترک */
@@ -35935,10 +38920,25 @@ bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',[count($bslFlatCats).' د
 
 bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['🚀 شروع ارسال — جستجوی هر محصول قبل از ارسال...']);
 $pd=$verifyProducts;$total=count($pd);$sent=0;$updated=0;$skipped=0;$fail=0;
+/* v10.56 (۷۰): ادامه — شمارنده‌ها را از فایلِ پیشرفتِ قبلی برمی‌گردانیم
+   (فایلِ محصولاتِ هر ردیفِ صف ثابت است، پس شمارشِ اجرأ قبلی معتبر است).
+   محصولِ «در حالِ کار» موقعِ مرگ (شمارهٔ start) دوباره پردازش می‌شود — اگر
+   قبلاً فرستاده شده باشد با جستجو آپدیت می‌شود و تکراری ساخته نمی‌شود.
+   فهرستِ جزئیاتِ بخشِ اول در فایلِ پیشرفت جایی نمی‌گیرد؛ کلِ نهایی درست است. */
+$bslResumeStart=min($bslResumeStart,$total+1);
+if($bslResumeStart>0&&$bslResumeCounters){
+$sent=(int)($bslPrevProg['sent']??0);$updated=(int)($bslPrevProg['updated']??0);
+$skipped=(int)($bslPrevProg['skipped']??0);$fail=(int)($bslPrevProg['failed']??0);
+}
 $bslExisting=[];$bslExistingNorm=[];$bslArchivedMap=[];
 // v8.22: Phase 1 removed — per-product search replaces bulk loading
-
+/* v10.73 (87): شروعِ بلوکِ «غرفهٔ پیش‌فرض» — حلقهٔ اصلی + تعدیلِ قیمتِ
+   لایهٔ دوم برای ردیف‌های گره‌خورده به غرفهٔ غیرپیش‌فرض رد می‌شود (کارِ
+   آن‌ها را حلقهٔ تک‌غرفه‌ایِ بعد از این بلوک انجام می‌دهد). */
+if(!$__scopeShop){
 foreach($pd as $i=>$p){
+/* v10.56 (۷۰): محصولاتِ قبلِ چک‌پوینت را رد کن (در اجرأ قبلی انجام شده‌اند). */
+if(($i+1)<$bslResumeStart)continue;
 // v8.59: نتیجهٔ file_exists در PHP کش می‌شود؛ بدون پاک‌کردن کش ممکن است
 // حلقه سیگنال توقفِ تازه‌نوشته‌شده را چند دور نبیند.
 clearstatcache(true,BSL_STOP_FILE);
@@ -36307,6 +39307,7 @@ if($__sendAllShops && $__liveShops){
 }
 foreach($__liveShops as $__sh){
     if($__sendAllShops) break;   // v10.20: مسیرِ همزمانِ بالا کارِ همه را کرده
+    if($__isFanoutRow)break;   // v10.73 (87): در صفِ چندغرفه‌ای هر غرفه ردیفِ خودش را دارد
     $sTk=(string)$__sh['token']; $sVid=(int)$__sh['vendor_id'];
     {
         $shopRound=(int)($__cn2['basalam']['price_round']??0);
@@ -36337,6 +39338,48 @@ foreach($__liveShops as $__sh){
         }
         if($shopFixed>0)bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',"🏪 غرفهٔ $sVid: قیمت $shopFixed محصول با تعدیلِ خودِ آن غرفه (و لایهٔ پروفایل) به‌روز شد");
     }
+}
+} /* v10.73 (87): پایانِ بلوکِ «غرفهٔ پیش‌فرض» */
+/* v10.73 (87): وظیفهٔ اختصاصیِ غرفهٔ غیرپیش‌فرض — دقیقاً همان منطقِ
+   مسیرِ همزمانِ قبلی (bslUpsertManyShops با قیمتِ دولایه و کلیدِ
+   نگاشتِ مخصوصِ غرفه)، ولی فقط برای همین یک غرفه و به‌ترتیب — چون
+   هر غرفه حالا ردیفِ و پیشرفتِ خودش را در صف دارد. */
+if($__scopeShop){
+$sShopName=$__scopeName!==''?$__scopeName:(string)$__scopeShop['shop_name'];
+if($sShopName==='')$sShopName='غرفهٔ '.$__scopeVid;
+$sOpts=['round'=>(int)($cn['basalam']['price_round']??0),'profile'=>((string)($nextEntry['profile_key']??''))!==''?(loadProfiles()[$nextEntry['profile_key']]??null):null,'stock'=>(int)($cn['basalam']['stock']??10),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'category_id'=>(int)($cn['basalam']['category_id']??0),'auto_category'=>$autoCat,'fallback_cat_ids'=>$bslFallbackCats,'flat_cats'=>$bslFlatCats,'cdata'=>($cData??[])];
+$sStop=false;$sDone=0;
+bslBackendProgress(0,0,0,0,$total,0,'',['🏪 [غرفهٔ '.$sShopName.'] شروعِ ارسالِ اختصاصی — '.$total.' محصول — فاصله: '.$bslDelayMs.'ms']);
+foreach($pd as $si=>$p){
+clearstatcache(true,BSL_STOP_FILE);
+if(file_exists(BSL_STOP_FILE)){$sStop=true;break;}
+$srAll=bslUpsertManyShops($p,[$__scopeShop],$sOpts,1);
+if(isset($srAll[$__scopeVid])){
+$sr=$srAll[$__scopeVid];
+$srTitle=trim($p['title']??$p['name']??'');$srKey=$p['key']??'';
+$srCard=['image'=>$p['image']??'','price'=>0,'link'=>$p['link']??''];
+if(!empty($sr['ok'])){
+if(($sr['action']??'')==='created'){$sent++;$bslSentList[]=array_merge(['title'=>$srTitle,'key'=>$srKey,'remote_id'=>(int)($sr['id']??0)],$srCard);bslShopStatBump($__scopeVid,$sShopName,'c');}
+elseif(!empty($sr['skipped'])){$skipped++;$bslSkippedList[]=array_merge(['title'=>$srTitle,'key'=>$srKey,'reason'=>'بدون تغییر','remote_id'=>(int)($sr['id']??0)],$srCard);bslShopStatBump($__scopeVid,$sShopName,'s');}
+else{$updated++;$bslUpdatedList[]=array_merge(['title'=>$srTitle,'key'=>$srKey,'remote_id'=>(int)($sr['id']??0)],$srCard);bslShopStatBump($__scopeVid,$sShopName,'u');}
+}else{
+if(!empty($sr['stopped'])||($sr['error']??'')==='stopped'){$sStop=true;break;}
+$fail++;
+$bslFailedList[]=array_merge(['title'=>$srTitle,'key'=>$srKey,'error'=>mb_substr('غرفهٔ '.$sShopName.': '.($sr['error']??'?'),0,200)],$srCard);
+bslShopStatBump($__scopeVid,$sShopName,'f');
+}
+}
+$sDone++;
+if($sDone%5===0||$sDone===$total){
+bslBackendProgress($sent,$updated,$skipped,$fail,$total,$sDone,mb_substr(trim($p['title']??''),0,30),"🏪 [{$sShopName}] {$sDone}/{$total} محصول — {$sent}✅ {$updated}⚡ {$skipped}⏭ {$fail}❌");
+}
+usleep($bslDelayMs*1000);
+}
+if($sStop){
+bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',['⏹ ارسالِ غرفهٔ '.$sShopName.' با سیگنالِ توقف نیمه‌کاره ماند']);
+}else{
+bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',['🏪 غرفهٔ '.$sShopName.' تمام شد: '.$sent.' ساخته، '.$updated.' آپدیت، '.$skipped.' بی‌تغییر، '.$fail.' خطا']);
+}
 }
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'','🔍 فاز ۲: محصولات رد‌شده...');
 $catFixed=0;$catRetryFailed=0;$catRejected=[];
@@ -36476,15 +39519,20 @@ $syncState[$nextEntry['profile_key']]=['lastRun'=>time(),'status'=>'done','sent'
 saveSyncState($syncState);
 }
 
+$bslEntriesDoneThisRun++;
 $queue=bslReadQueue();
 $hasMore=false;
 foreach($queue['entries'] as $e2){
 if($e2['status']==='waiting'){ $hasMore=true; break; }
 }
 
+/* v10.53 (۶۷): ردیفِ «در انتظار» دیگری هست → همین‌جا ردیفِ بعد را به نوبت شروع کن. */
+if ($hasMore && $bslEntryRound + 1 < BSL_MAX_ENTRIES_PER_RUN) continue;
+
 header('Content-Type: application/json; charset=UTF-8');
-echo json_encode(['ok'=>true,'msg'=>$finalLog,'started'=>true,'processed'=>1,'queue_id'=>$bslQueueId,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'has_more'=>$hasMore,'auto_sync'=>!empty($nextEntry['auto_sync'])],JSON_UNESCAPED_UNICODE);
+echo json_encode(['ok'=>true,'msg'=>$finalLog,'started'=>true,'processed'=>$bslEntriesDoneThisRun,'queue_id'=>$bslQueueId,'sent'=>$sent,'updated'=>$updated,'skipped'=>$skipped,'failed'=>$fail,'total'=>$total,'has_more'=>$hasMore,'auto_sync'=>!empty($nextEntry['auto_sync'])],JSON_UNESCAPED_UNICODE);
 exit;
+} /* v10.53 (۶۷): پایان حلقهٔ «هر ردیفِ صف، به نوبت» */
 }
 
 if (isset($_GET['bsl_ai_category'])) {
@@ -38574,7 +41622,9 @@ function catfixClearStop(): void { @unlink(CATFIX_STOP_FILE); }
 
 /** برچسبِ خوانای حالت‌های اجرا */
 function catfixModeLabel(string $mode): string {
-    $m = ['ai_text' => 'متنِ بررسیِ باسلام', 'master' => 'مدلِ مستر', 'quorum' => 'اجماعِ چندمدلی'];
+    /* v10.71 (85): روشِ چهارم — زنجیرهٔ پشتیبان */
+    $m = ['ai_text' => 'متنِ بررسیِ باسلام', 'master' => 'مدلِ مستر', 'quorum' => 'اجماعِ چندمدلی',
+          'fallback' => 'زنجیرهٔ پشتیبان (مستر ← کاندیدها)'];
     return $m[$mode] ?? $mode;
 }
 
@@ -38644,7 +41694,8 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
     /* --- آماده‌سازیِ مدل‌ها فقط در حالت‌های هوش مصنوعی --- */
     $cands = []; $providers = []; $master = null; $mp = null; $masterKey = ''; $net = []; $candKeys = [];
     $quorum = 2;
-    if ($mode === 'master' || $mode === 'quorum') {
+    /* v10.71 (85): روشِ چهارم (زنجیرهٔ پشتیبان) هم مثلِ مستر به مدل‌ها نیاز دارد */
+    if (in_array($mode, ['master', 'quorum', 'fallback'], true)) {
         $cands = aiCandidates();
         if (!$cands) return ['ok' => false, 'error' => 'هیچ مدل کاندیدی انتخاب نشده — اول در بخش 🤖 چند مدل کاندید اضافه کنید'];
         $providers = aiProvidersLoad();
@@ -38659,10 +41710,15 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
         catfixProgress(['log_add' => ['🧠 مستر: ' . $master['providerName'] . ' / ' . $master['model']
             . ($mode === 'quorum'
                ? (' · اجماع با ' . aiFaNum(count($cands)) . ' مدل، حدنصابِ مرحلهٔ اول: ' . aiFaNum($quorum))
-               : ' · حالتِ تک‌مدلی')]]);
+               : ($mode === 'fallback'
+                  ? (' · زنجیرهٔ پشتیبان — اگر مستر نداد، ' . aiFaNum(max(0, count($cands) - 1)) . ' کاندید به‌ترتیب')
+                  : ' · حالتِ تک‌مدلی'))]]);   // v10.71 (85)
         if ($mode === 'quorum' && count($cands) < 2) {
             $mode = 'master';
             catfixProgress(['log_add' => ['ℹ️ فقط یک کاندید هست — به حالتِ تک‌مدلی برگشت']]);
+        }
+        if ($mode === 'fallback' && count($cands) < 2) {
+            catfixProgress(['log_add' => ['ℹ️ فقط یک کاندید هست — زنجیرهٔ پشتیبان عملاً حالتِ مستر است']]);   // v10.71 (85)
         }
     }
 
@@ -38693,6 +41749,7 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
 
     $fixed = 0; $failed = 0; $noAi = 0; $noCat = 0; $skipSame = 0; $skipTried = 0;
     $asked = 0; $cacheHits = 0; $idx = 0; $items = []; $stopped = false;
+    $fbRescued = 0;   // v10.71 (85): چند محصول با زنجیرهٔ پشتیبان نجات یافت
     /* v10.36 (۴۹ه): نامِ پروفایلِ هر محصول به‌عنوان بافت به مدل داده می‌شود.
        یک بار ساخته می‌شود و در حلقه هزینه‌ای ندارد. */
     $profOf = catProfileResolver('bsl');
@@ -38772,6 +41829,45 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
                     . ' (' . $catId . ') — ' . aiFaNum((int)($con['agreement'] ?? 0)) . ' رأی از '
                     . aiFaNum((int)($con['asked'] ?? 0)) . ' مدل' . (!empty($con['from_cache']) ? ' · از کش ⚡' : '')
                     . ($pProf !== '' ? ' · بافت: ' . $pProf : '')]]);   // v10.36 (۴۹ه)
+            } elseif ($mode === 'fallback') {
+                /* v10.71 (85): روشِ چهارم — زنجیرهٔ پشتیبان.
+                   «جوابِ معتبر» یعنی مدل بی‌خطا جواب داده باشد و دستهٔ موجود
+                   در درخت (category_id > 0) برگردانده باشد. اگر مستر خطا داد
+                   یا دستهٔ معتبر نداد، کاندیدهایِ دیگر به‌ترتیب امتحان
+                   می‌شوند تا اولین جوابِ معتبر. نگهبان‌هایِ همان‌دسته/امتحان‌شدهٔ
+                   پایین مثلِ روش‌هایِ دیگر بر دستهٔ برگزیده حاکم می‌مانند. */
+                $res = aiCandidateCategory($mp, $master['model'], $pName, $cats, $leafCats,
+                    aiCatListBuild($leafCats, $exclude, 24000, $pName), $net, $exclude, $triedInfo, $pHint);
+                $asked++;
+                $catId   = (int)($res['category_id'] ?? 0);
+                $catName = (string)($res['category_name'] ?? '');
+                $ok      = !empty($res['ok']);
+                $err     = (string)($res['error'] ?? '');
+                $winKeys = [$masterKey];
+                if (!$ok || $catId <= 0) {
+                    $fbChain = '🛟 زنجیرهٔ پشتیبان — مستر: ' . ($err !== '' ? $err : 'دستهٔ معتبر نداد');
+                    foreach ($cands as $fc) {
+                        if (catfixStopRequested()) break;
+                        if (($fc['key'] ?? '') === $masterKey) continue;
+                        $fcp = $providers[$fc['provider']] ?? null;
+                        if ($fcp === null) continue;
+                        $fres = aiCandidateCategory($fcp, $fc['model'], $pName, $cats, $leafCats,
+                            aiCatListBuild($leafCats, $exclude, 24000, $pName), $net, $exclude, $triedInfo, $pHint);
+                        $asked++;
+                        if (!empty($fres['ok']) && (int)($fres['category_id'] ?? 0) > 0) {
+                            $catId   = (int)$fres['category_id'];
+                            $catName = (string)($fres['category_name'] ?? '');
+                            $ok      = true;
+                            $err     = '';
+                            $winKeys = [(string)$fc['key']];
+                            $fbChain .= ' → ' . ($fc['providerName'] ?? $fc['provider']) . '/' . $fc['model'] . ' ✓';
+                            $fbRescued++;
+                            break;
+                        }
+                        $fbChain .= ' → ' . ($fc['providerName'] ?? $fc['provider']) . '/' . $fc['model'] . ' ✗';
+                    }
+                    catfixProgress(['log_add' => [$fbChain]]);
+                }
             } else {
                 $res = aiCandidateCategory($mp, $master['model'], $pName, $cats, $leafCats,
                     aiCatListBuild($leafCats, $exclude, 24000, $pName), $net, $exclude, $triedInfo, $pHint);
@@ -38784,7 +41880,9 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
             }
             if (!$ok || $catId <= 0) {
                 $noCat++;
-                $m = ($mode === 'quorum' ? 'اجماع به دستهٔ تازه‌ای نرسید' : 'مستر دستهٔ معتبری نداد')
+                /* v10.71 (85): پیامِ روشِ چهارم هم جدا */
+                $m = ($mode === 'quorum' ? 'اجماع به دستهٔ تازه‌ای نرسید'
+                    : ($mode === 'fallback' ? 'زنجیرهٔ پشتیبان به دستهٔ تازه‌ای نرسید' : 'مستر دستهٔ معتبری نداد'))
                      . ($err !== '' ? ' — ' . $err : '');
                 $push('no_cat', $m);
                 catfixProgress(['log_add' => ['⚠️ [' . $idx . '/' . $total . '] ' . mb_substr($pName, 0, 40, 'UTF-8') . ' — ' . $m]]);
@@ -38846,7 +41944,8 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
     $msg = '✅ اصلاح: ' . $fixed . ' | دسته نیافت: ' . $noCat
          . ($mode === 'ai_text' ? (' | بدون متنِ AI: ' . $noAi) : '')
          . ' | تکراری/همان دسته: ' . ($skipSame + $skipTried)
-         . ' | ناموفق: ' . $failed . ' (از ' . $total . ')' . $savedMsg;
+         . ' | ناموفق: ' . $failed . ' (از ' . $total . ')' . $savedMsg
+         . (($mode === 'fallback' && $fbRescued > 0) ? (' | نجات‌یافته با زنجیره: ' . $fbRescued) : '');
 
     return ['ok' => true, 'mode' => $mode, 'total' => $total, 'processed' => $idx,
             'fixed' => $fixed, 'failed' => $failed, 'no_ai' => $noAi, 'no_cat' => $noCat,
@@ -41273,6 +44372,9 @@ body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn{z-index:10}
 .settings-panel .smenu-body .smenu-hdr{top:calc(var(--spanel-head-h,58px) + var(--smenu-hdr-h,46px));z-index:4}
 .settings-panel .smenu-body .smenu-body .smenu-hdr{top:calc(var(--spanel-head-h,58px) + (var(--smenu-hdr-h,46px) * 2));z-index:3}
 .settings-panel .smenu-body .smenu-body .smenu-body .smenu-hdr{top:calc(var(--spanel-head-h,58px) + (var(--smenu-hdr-h,46px) * 3));z-index:2}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}
+/* v10.73 (87): تب‌های بخشِ اعلان‌ها */
+.ntab{flex:0 0 auto;font-size:11px;font-weight:700;padding:5px 10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#94a3b8;cursor:pointer;transition:all .15s}.ntab:hover{border-color:#67e8f9;color:#67e8f9}.ntab.active{background:linear-gradient(90deg,#164e63,#0f172a);border-color:#0e7490;color:#67e8f9}.ntabpane{animation:ntabIn .18s ease}
+@keyframes ntabIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 /* v9.94 (۸ب): بعد از پایانِ انیمیشنِ باز شدن، سقفِ ارتفاع برداشته می‌شود.
    دو سود دارد: (۱) بخش‌های بلندتر از ۲۰۰۰px دیگر بریده نمی‌شوند،
    (۲) overflow:visible باعث می‌شود سربخش‌های تودرتو هم واقعاً بچسبند
@@ -41775,7 +44877,23 @@ html[data-skin="gloss"] .progress-bar{
          background:#0b1220;border:1px dashed #334155;border-radius:12px;line-height:2}
 .rv-hint b{color:#7dd3fc}
 /* RVIEW-END ======================================================== */
+
+/* v10.57 (۷۱): اتاقِ چتِ باسلام — چیپ‌های غرفه و لیستِ کشوییِ موبایل */
+.mrchip{display:inline-block;font-size:9.5px;border:1px solid #334155;border-radius:10px;
+        padding:2.5px 8px;color:#94a3b8;cursor:pointer;background:#111c31;line-height:1.5}
+.mrchip.on{background:#173254;color:#e2e8f0;border-color:#3b82f6}
+.mr-collapsed{display:none!important}
+#mrMsgs img{border-radius:6px}
+@media (max-width:720px){
+  #mrListWrap,#mrThread{flex:1 1 100%!important;min-width:0!important}
+  #mrMsgs{height:320px}
+}
+/* v10.60 (۷۴): نوتیفِ زندهٔ پیامِ مشتری — ورودِ کارت و نوارِ منقضی‌شدن */
+@keyframes mrNotifIn{from{transform:translateX(-125%);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes mrNotifFade{from{width:100%}to{width:0%}}
+@keyframes mrZoomIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
 </style>
+<?php /* v10.78 (92): اسکریپتِ نجوا — از تنظیمات، پیش از تگِ پایانیِ head */ $__nvSc = trim((string)(loadConnections()['najva_script'] ?? '')); if ($__nvSc !== '') echo $__nvSc . "\n"; ?>
 </head>
 <body>
 <!-- v10.20 (۳۳ج): نوارِ ابزارِ هدر — سه دکمه چسبیده به هم؛ مدیر وظیفه
@@ -42657,19 +45775,51 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🔔 اعلان‌ها</h3><span class="cst off" id="balehS">غیرفعال</span><span class="arrow">▼</span></div>
 <div class="smenu-body">
+<!-- v10.73 (87): بخشِ اعلان‌ها چهار تب شد — تا اینجا یک ستونِ بلند بود که با هر نسخهٔ تازه بلندتر می‌شد -->
+<div style="display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap">
+<button type="button" class="ntab active" onclick="setNotifTab('messenger',this)">💬 پیام‌رسان</button>
+<button type="button" class="ntab" onclick="setNotifTab('events',this)">📋 رویدادها</button>
+<button type="button" class="ntab" onclick="setNotifTab('live',this)">🖥 زنده</button>
+<button type="button" class="ntab" onclick="setNotifTab('query',this)">🔍 استعلام</button>
+</div>
+<div id="ntab-messenger" class="ntabpane">
 <div class="crow"><label>بله فعال:</label><input type="checkbox" id="balehEnabled" style="width:16px;height:16px"></div>
 <div class="crow"><label>Token بله:</label><input type="password" id="balehToken" dir="ltr" placeholder="Bot Token" style="flex:1"></div>
 <div class="crow"><label>Chat ID:</label><input type="text" id="balehChatId" dir="ltr" placeholder="شناسه چت" style="flex:1"></div>
 <div class="crow"><label>روبیکا فعال:</label><input type="checkbox" id="rubikaEnabled" style="width:16px;height:16px"></div>
 <div class="crow"><label>Token روبیکا:</label><input type="password" id="rubikaToken" dir="ltr" placeholder="Bot Token" style="flex:1"></div>
 <div class="crow"><label>Chat ID:</label><input type="text" id="rubikaChatId" dir="ltr" placeholder="شناسه چت" style="flex:1"></div>
+<!-- v10.78 (92): تلگرام — سومین پیام‌رسان -->
+<div class="crow" style="margin-top:8px;padding-top:8px;border-top:1px solid #334155"><b style="font-size:11px">✈️ تلگرام</b></div>
+<div class="crow"><label>تلگرام فعال:</label><input type="checkbox" id="telegramEnabled" style="width:16px;height:16px"></div>
+<div class="crow"><label>Token تلگرام:</label><input type="password" id="telegramToken" dir="ltr" placeholder="Bot Token (از BotFather)" style="flex:1"></div>
+<div class="crow"><label>Chat ID:</label><input type="text" id="telegramChatId" dir="ltr" placeholder="شناسهٔ کاربر یا گروه (با -100)" style="flex:1"></div>
+<div class="cact" style="margin-top:10px">
+<button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button>
+<button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-gray" onclick="testNotif('telegram')">✈️ تست تلگرام</button>
+<button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button>
+</div>
+</div>
+<div id="ntab-events" class="ntabpane" style="display:none">
 <div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">📋 رویدادهای اعلان</div>
+<div id="notifHealthLine" style="font-size:10.5px;color:#64748b;margin-bottom:6px;line-height:1.6"></div>
 <div style="font-size:10px;color:#64748b;margin-bottom:6px">انتخاب کنید کدام رویدادهای باسلام به پیام‌رسان ارسال شوند:</div>
 <div style="display:flex;flex-direction:column;gap:4px">
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifOrderNew" checked style="width:15px;height:15px"><span>🛒 سفارش جدید</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifOrderStatus" checked style="width:15px;height:15px"><span>📦 تغییر وضعیت سفارش</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifChatMsg" checked style="width:15px;height:15px"><span>💬 پیام مشتری</span></label>
+<!-- v10.46 (۶۰): انتخاب غرفه برای رویداد «پیام مشتری» -->
+<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;padding-right:21px">
+<span>غرفهٔ پیام‌ها:</span>
+<select id="notifChatShop" style="background:#0f172a;border:1px solid #475569;border-radius:6px;color:#e2e8f0;font-size:11px;padding:4px 6px;max-width:180px;flex:1">
+<option value="0">همهٔ غرفه‌ها</option>
+</select>
+</div>
+<div style="font-size:10px;color:#64748b;padding-right:21px;line-height:1.6;margin-bottom:2px">
+اعلانِ «پیام مشتری» از کدام غرفه‌ها بیاید. «همه» یعنی همهٔ غرفه‌های تنظیم‌شده؛
+برای محدود کردن، یک غرفه را انتخاب کنید.
+</div>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifProductStatus" checked style="width:15px;height:15px"><span>📋 تغییر وضعیت محصول</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifProductNew" checked style="width:15px;height:15px"><span>➕ محصول جدید افزوده شد</span></label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifOrderRefund" checked style="width:15px;height:15px"><span>🔄 بازگشت سفارش</span></label>
@@ -42688,7 +45838,9 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <input type="number" id="pingEvery" value="360" min="0" style="max-width:70px;padding:4px 6px;font-size:11px" dir="ltr">
 <span>دقیقه</span>
 <button class="btn btn-gray" onclick="testPing()" style="font-size:10px;padding:3px 8px">📡 تست</button>
+<button class="btn btn-gray" onclick="showPingLog()" style="font-size:10px;padding:3px 8px" title="آخرینِ تلاش‌هایِ پینگ — دستی، کران و نبض">📜 پینگ‌هایِ آخر</button>
 </div>
+<div id="pingLogR" style="font-size:9.5px;color:#94a3b8;margin-top:4px;line-height:1.8"></div>
 <div style="font-size:10px;color:#64748b;padding-right:21px;line-height:1.6">
 کران معمولاً هر ۵ دقیقه اجرا می‌شود؛ بدون این فاصله روزی ۲۸۸ پیام می‌آید.
 صفر یعنی هر اجرا پیام بفرست.
@@ -42705,7 +45857,56 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="crow"><label>حداکثر تکرار:</label><input type="number" id="remindMax" value="0" min="0" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = بی‌نهایت</span></div>
 </div>
 </div>
-<div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
+</div>
+<div id="ntab-live" class="ntabpane" style="display:none">
+<!-- v10.66 (۸۰): تنظیماتِ اعلانِ زنده — درِ مرورگر + سیستم‌عامل -->
+<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🖥 اعلانِ زنده (درِ مرورگر + سیستم)</div>
+<div style="font-size:10px;color:#64748b;margin-bottom:6px;line-height:1.6">
+به‌جزِ پیامِ مشتری، <b>همهٔ رویدادها</b> (سفارش، محصول، قیمت/موجودی، گزارشِ همگام‌سازی، خطا و…)
+هم‌علاوهٔ ارسال به پیام‌رسان، همین‌جا به‌صورتِ کارتِ زنده و اعلانِ سیستمی هم دیده می‌شوند.</div>
+<div class="crow"><label>کارت‌هایِ درِ مرورگر:</label><input type="checkbox" id="lnCards" checked style="width:16px;height:16px"></div>
+<div class="crow"><label>اعلانِ سیستم (ویندوز/macOS/اندروید):</label><input type="checkbox" id="lnSys" style="width:16px;height:16px"></div>
+<div class="crow"><label>فاصلهٔ چک:</label><input type="number" id="lnPoll" value="5" min="3" style="max-width:70px" dir="ltr"><span style="font-size:10px;color:#64748b">ثانیه (حداقل ۳)</span></div>
+<div class="crow"><label>خودکار ببند بعد:</label><input type="number" id="lnTtl" value="30" min="5" style="max-width:70px" dir="ltr"><span style="font-size:10px;color:#64748b">ثانیه (حداقل ۵)</span></div>
+<div class="crow"><label>صدایِ کارت:</label><input type="checkbox" id="lnSound" checked style="width:16px;height:16px"></div>
+<!-- v10.72 (86): کلیدِ اعلانِ Push (Web Push) — زندهٔ کامل، حتی با صفحهٔ بسته -->
+<div class="crow"><label>📡 اعلانِ Push (زندهٔ کامل — حتی وقتی صفحه بسته است):</label><input type="checkbox" id="lnPush" style="width:16px;height:16px"><span id="lnPushStatus" style="font-size:9px;color:#64748b;margin-left:6px"></span></div>
+<div style="display:flex;gap:6px;margin-top:6px">
+<button class="btn btn-gray" onclick="mrLiveTestCard()" style="font-size:10px;padding:4px 10px">🧪 تستِ کارت</button>
+<button class="btn btn-gray" onclick="mrLiveTestSys()" style="font-size:10px;padding:4px 10px">🔔 تستِ اعلانِ سیستم</button>
+<button class="btn btn-gray" onclick="mrLiveTestPush()" style="font-size:10px;padding:4px 10px" title="اعلان را مستقیم از سرور می‌فرستد — امتحانِ مسیرِ واقعی">📡 تستِ Push</button>
+<button class="btn btn-gray" onclick="mrPushResub()" style="font-size:10px;padding:4px 10px" title="اشتراکِ Push را تازه می‌سازد و نتیجه را همین‌جا می‌نویسد">🔁 ثبتِ دوبارهٔ اشتراک</button>
+</div>
+<div id="lnPushDiag" style="margin-top:6px"></div>
+<!-- v10.74 (88): مسیرِ جایگزینِ Push — برای هاست‌هایی که به سرویسِ Pushِ گوگل دسترسی ندارند -->
+<div style="margin-top:8px;padding:8px;background:#0b1220;border:1px solid #1e293b;border-radius:8px">
+<div style="font-size:10px;color:#94a3b8;line-height:1.8;margin-bottom:6px">
+🌍 اگر هاستِ شما به سرویسِ Pushِ گوگل (fcm.googleapis.com) دسترسی ندارد، اعلان از سرور به دستگاه نمی‌رسد.
+ارسال اول <b>مستقیم</b> امتحان می‌شود و اگر اتصال برقرار نشود، از <b>اتصالِ غیرمستقیمِ خودِ سایت (interface.php)</b> می‌رود و در صورتِ تنظیم، از Workerِ واسط:</div>
+<div class="crow"><label>اتصالِ غیرمستقیمِ سایت:</label><input type="text" id="pushProxy" dir="ltr" placeholder="https://your-site.com/proxy.php?url={url}" style="flex:1"></div>
+<div id="pushRouteSrc" style="font-size:9.5px;color:#38bdf8;margin-top:4px"></div>
+<div style="font-size:9.5px;color:#64748b;margin-top:2px">اگر خالی باشد، از همان آدرسی که در بخشِ عبورِ «هوش مصنوعی» یا «سایت مبدأ» (قالبِ {url}) تنظیم کرده‌اید استفاده می‌شود. دامنهٔ fcm.googleapis.com باید در فهرستِ PROXY_TARGET_HOSTS باشد.</div>
+<div class="crow"><label>Workerِ واسط:</label><input type="text" id="pushWorker" dir="ltr" placeholder="https://push-relay.yourname.workers.dev" style="flex:1"></div>
+<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+<button class="btn btn-gray" onclick="mrPushRouteSave()" style="font-size:10px;padding:4px 10px">💾 ذخیرهٔ مسیر</button>
+<button class="btn btn-gray" onclick="mrPushWorkerCode()" style="font-size:10px;padding:4px 10px" title="کدِ Workerِ آماده (با توکنِ شما) برای Cloudflare">📋 کدِ Worker</button>
+</div>
+</div>
+<!-- v10.78 (92): نجوا — اسکریپتِ هدر (بر اساسِ مستنداتِ رسمیِ نجوا) -->
+<div style="margin-top:8px;padding:8px;background:#0b1220;border:1px solid #1e293b;border-radius:8px">
+<div style="font-size:11px;margin-bottom:6px">🇮🇷 <b>نجوا — اسکریپتِ هدر</b></div>
+<textarea id="najvaScript" rows="4" placeholder="کدِ پنلِ نجوا را اینجا بچسبانید (منو ← تنظیمات ← تنظیماتِ اسکریپت ← کدِ سرویس)..." style="width:100%;background:#020617;color:#a5f3fc;border:1px solid #1e293b;border-radius:8px;padding:8px;font-size:10.5px;direction:ltr;text-align:left;font-family:ui-monospace,monospace;box-sizing:border-box"></textarea>
+<div style="font-size:9.5px;color:#64748b;margin-top:4px;line-height:1.8">این کد خودکار <b>پیش از تگِ پایانیِ head</b> همین صفحه درج می‌شود (همان‌طور که مستندات می‌گوید). مراحل: پنلِ نجوا ← منو ← تنظیمات ← تنظیماتِ اسکریپت ← <b>ساختِ سرویسِ جدید</b> (نوع: وب‌سایت + دامنه) ← کپیِ کد ← اینجا بچسبانید و «💾 ذخیره مسیر» بزنید ← بعد در پنلِ نجوا «مرحلهٔ بعد» تا «تایید و نهایی‌سازی» تا وریفایِ نصب انجام شود.</div>
+</div>
+<!-- v10.68 (82): خطِ تشخیصِ زندهٔ اعلانِ سیستم — می‌گوید زنجیره کجا شکسته -->
+<div id="lnSysDiag" style="font-size:10px;color:#94a3b8;line-height:1.7;margin-top:5px"></div>
+<div style="font-size:10px;color:#64748b;line-height:1.6;margin-top:4px">
+این تنظیمات همین‌مرورگر (localStorage) ذخیره می‌شوند و <b>همان لحظه</b> اثر می‌کنند — دکمهٔ «ذخیره» لازم نیست.</div>
+</div>
+</div>
+<div id="ntab-query" class="ntabpane" style="display:none">
+<div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-gray" onclick="testNotif('telegram')">✈️ تست تلگرام</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
 <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">🔍 استعلام از باسلام</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
@@ -42722,6 +45923,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 <div id="notifTestR" style="margin-top:8px"></div>
 <div id="notifTR" style="margin-top:8px"></div>
+</div>
 </div></div>
 
 <div class="smenu">
@@ -43254,6 +46456,56 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="arR" style="margin-top:8px"></div>
 </div></div>
 
+<!-- ===== v10.57 (۷۱): اتاقِ چتِ باسلام — چندغرفه‌ای، زنده، با تصویر ===== -->
+<div class="smenu">
+<div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>💬 پاسخ دستی به مشتریان</h3><span class="arrow">▼</span></div>
+<div class="smenu-body" id="mrBody">
+<div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.8">
+گفتگوهایِ مشتریانِ <b>همهٔ غرفه‌ها</b> همین‌جا و زنده — بدونِ رفتن به پلتفرمِ باسلام.
+عددِ تویِ پرانتز = شمارهٔ غرفه (با رنگِ متفاوت). پاسخ‌ها در همان لاگِ پاسخ‌ها (نوعِ «دستی») ثبت می‌شوند.
+</div>
+<div id="mrShopChips" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:7px"></div>
+<div style="display:flex;gap:10px;flex-wrap:wrap">
+<div id="mrListWrap" style="flex:1;min-width:215px">
+<div id="mrListHdr" onclick="mrToggleList()" style="display:none;align-items:center;justify-content:space-between;gap:6px;padding:7px 9px;cursor:pointer;background:#16233d;border:1px solid #334155;border-radius:8px">
+<b style="font-size:11px">👥 لیستِ مشتری‌ها</b><span id="mrListBadge" style="font-size:9.5px;color:#64748b"></span><span id="mrListArrow" style="font-size:10px;color:#64748b">▼</span>
+</div>
+<div id="mrList" style="max-height:345px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:5px;background:#0b1220">
+<div class="empty" style="padding:16px 6px">در حالِ بارگذاریِ گفتگوها…</div>
+</div>
+</div>
+<div id="mrThread" style="flex:1.5;min-width:255px">
+<div id="mrThrHdr" style="display:none;align-items:center;justify-content:space-between;gap:6px;padding:6px 9px;background:#16233d;border:1px solid #334155;border-radius:8px">
+<button id="mrBackBtn" onclick="mrCloseChat()" style="display:none;background:none;border:1px solid #334155;color:#94a3b8;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px">← بازگشت</button>
+<b id="mrWho" style="font-size:11.5px;color:#e2e8f0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></b>
+<span id="mrShopTag" style="font-size:9.5px;flex:0 0 auto"></span>
+</div>
+<div id="mrMsgs" style="height:285px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:8px;background:#0b1220;font-size:12px">
+<div class="empty" style="padding:20px 6px">یک گفتگو را انتخاب کنید</div>
+</div>
+<div id="mrQuick" style="display:flex;gap:5px;flex-wrap:wrap;margin-top:7px">
+<button class="btn btn-gray" style="font-size:10px;padding:3px 8px" onclick="mrQuick('سلام، وقت بخیر. چطور می‌تونم کمکتون کنم؟')">👋 سلام</button>
+<button class="btn btn-gray" style="font-size:10px;padding:3px 8px" onclick="mrQuick('بله، در موجودی هست.')">✅ موجودی</button>
+<button class="btn btn-gray" style="font-size:10px;padding:3px 8px" onclick="mrQuick('لطفاً کد پستی و نامِ گیرنده را بفرمایید.')">📮 آدرس</button>
+<button class="btn btn-gray" style="font-size:10px;padding:3px 8px" onclick="mrQuick('ممنون از پیگیریتون، در اولینِ فرصت پاسخ می‌دم.')">🙏 پیگیری</button>
+</div>
+<div id="mrImgPrev" style="display:none;margin-top:7px;align-items:center;gap:7px;background:#111c31;border:1px solid #334155;border-radius:8px;padding:6px 8px"></div>
+<div style="display:flex;gap:6px;margin-top:7px">
+<input type="file" id="mrFile" accept="image/*" style="display:none" onchange="mrPickImage(this)">
+<button class="btn btn-gray" onclick="mrFileClick()" style="flex:0 0 auto" title="ارسالِ تصویر">🖼</button>
+<textarea id="mrText" rows="2" placeholder="متنِ پاسخ برای مشتری… (Enter = ارسال)" style="flex:1;min-width:110px;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:7px 9px;font-size:12px;resize:none" onkeydown="mrKeydown(event)"></textarea>
+<button id="mrSendBtn" class="btn btn-green" onclick="mrSend()" style="flex:0 0 auto">📤 ارسال</button>
+</div>
+<div id="mrMsg" class="msg" style="margin-top:6px"></div>
+</div>
+</div>
+<div style="display:flex;align-items:center;gap:7px;margin-top:5px">
+<button class="btn btn-cyan" onclick="mrLoadChats()" style="flex:0 0 auto;font-size:10px;padding:3px 9px" title="اکنون به‌روز کن">🔄 به‌روزرسانی</button>
+<span id="mrInfo" style="font-size:9.5px;color:#64748b;flex:1"></span>
+</div>
+</div>
+</div></div>
+
 <!-- v8.62: گزارش شبانه -->
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🌙 گزارش شبانهٔ محصولات</h3><span class="cst off" id="digestS">خاموش</span><span class="arrow">▼</span></div>
@@ -43478,6 +46730,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                     <button class="btn btn-green" id="manualSyncBtn" onclick="startManualSync()" style="flex:1;font-size:13px;padding:8px 12px">🔄 همگام‌سازیِ دستی</button>
                     <button class="btn btn-red hidden" id="manualSyncStopBtn" onclick="stopManualSync()" style="flex:0;font-size:11px;padding:8px 12px">⏹ توقف</button>
                     <button class="btn btn-gray" onclick="srLoad()" style="flex:0;font-size:11px;padding:8px 12px" title="گزارشِ همگام‌سازی‌های قبلی">📄 گزارش‌ها</button>
+                    <button class="btn btn-gray" onclick="syncDiagnose()" style="flex:0;font-size:11px;padding:8px 12px" title="چرا همگام‌سازی کار نمی‌کند؟ — معاینهٔ کلِ زنجیره">🩺 تشخیص</button>
                 </div>
                 <div id="manualSyncProgress" style="display:none;margin-top:8px">
                     <div class="progress"><div class="progress-bar" id="msBar" style="background:linear-gradient(90deg,#059669,#34d399);width:0%"></div></div>
@@ -43485,6 +46738,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                     <div id="msLog" style="max-height:160px;overflow-y:auto;font-size:10.5px;color:#94a3b8;margin-top:4px;line-height:1.8"></div>
                 </div>
                 <div id="msReport" style="margin-top:8px"></div>
+<div id="syncDiagnoseBox" style="display:none;margin-top:8px"></div>
             </div>
 
             <div class="hidden" id="extractProgress" style="margin-top:8px;padding:10px;background:#1e293b;border:1px solid #475569;border-radius:8px">
@@ -43499,7 +46753,8 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                         <span style="font-weight:700;font-size:12px;color:#a855f7">📋 صف استخراج بک‌اند</span>
                         <div style="display:flex;gap:4px">
                             <button class="btn btn-gray" onclick="clearExtractQueueDone()" style="font-size:10px;padding:3px 8px" title="پاک کردن تکمیل‌شده‌ها">🧹</button>
-                            <button class="btn btn-gray" onclick="refreshExtractQueue()" style="font-size:10px;padding:3px 8px" title="تازه‌سازی">🔄</button>
+                            <button class="btn btn-gray" onclick="refreshExtractQueue()" style="font-size:10px;padding:3px 8px" title="تازه‌سازیِ آنی (تازه‌سازیِ خودکار هم روشن است)">🔄</button>
+                            <span id="exqLive" style="font-size:9px;color:#4ade80;align-self:center;display:none" title="صف خودش تازه می‌شود — نیازی به کلیک نیست">● زنده</span>
                         </div>
                     </div>
                     <div id="extractQueueList" style="font-size:11px;color:#94a3b8">بارگذاری...</div>
@@ -44291,7 +47546,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="bslQueueSection" style="margin-top:10px">
 <div style="background:#1e293b;border:1px solid #475569;border-radius:10px;padding:14px">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-<span style="color:#67e8f9;font-weight:700;font-size:14px">📋 صف ارسال باسلام</span>
+<span style="color:#67e8f9;font-weight:700;font-size:14px">📋 صف ارسال باسلام <span style="font-size:9px;color:#64748b;font-weight:400">— هر غرفه، یک وظیفهٔ جدا</span></span>
 <button class="btn btn-gray" onclick="clearBslQueueDone()" style="font-size:10px;padding:4px 8px">🗑️ پاکسازی انجام‌شده</button>
 </div>
 <div id="bslQueueList" style="font-size:11px;color:#64748b">صف خالی — برای افزودن، دکمه «🚀 ارسال باسلام» را کلیک کنید</div>
@@ -47811,14 +51066,19 @@ function msFire(pkey){
   if($('msPhase'))$('msPhase').textContent='⏳ در حال شروع…';
   if($('msLog'))$('msLog').innerHTML='';
   fetch('?manual_sync=1&profile='+encodeURIComponent(pkey))
-    .then(r=>r.json()).then(d=>{
-      /* پاسخِ فوری فقط می‌گوید «شروع شد»؛ نتیجهٔ واقعی از فایلِ پیشرفت
-         می‌آید. تنها حالتی که همین‌جا باید متوقف شویم، رد شدن است. */
-      if(d&&d.ok===false){
-        msFinish(false,(d.error||'شروع نشد'));
+    .then(r=>r.text()).then(t=>{
+      /* v10.61 (۷۵): پاسخ ndjson است — خطِ اول «شروع شد» و هر خطِ بعدی
+         یک ضربانِ زنده تا پایانِ کار. نتیجهٔ واقعی را همان‌طور از فایلِ
+         پیشرفت می‌گیریم (msPoll)؛ تنها اگر خطِ آخر خطا/رد باشد همین‌جا
+         متوقف می‌شویم. */
+      let last=null;
+      const lines=String(t).trim().split('\n');
+      for(let i=lines.length-1;i>=0;i--){try{last=JSON.parse(lines[i]);break;}catch(e){}}
+      if(last&&last.ok===false){
+        msFinish(false,(last.error||'شروع نشد'));
         return;
       }
-    }).catch(()=>{/* مهلت تمام‌شدن یعنی کار در پس‌زمینه ادامه دارد */});
+    }).catch(()=>{/* خطای شبکه — وضعیت را از پویینگِ دستی می‌پرسیم */});
   showToast('🔄 همگام‌سازی شروع شد — پیشرفت را همین‌جا ببینید');
   msWatch();
 }
@@ -47840,7 +51100,10 @@ function msPoll(){
     if(lg&&Array.isArray(p.recent_log))
       lg.innerHTML=p.recent_log.slice(-20).map(l=>'<div>'+esc(String(l))+'</div>').join('');
     if(p.done){
-      msFinish(!p.cancelled, p.cancelled?'با درخواستِ شما متوقف شد':'', p.summary||'');
+      /* v10.58 (۷۲): اگر اجرا از دستِ هاست نیمه‌کاره مانده، سرور آن را با
+         error بسته است — پیامش را نشان بده تا کاربر بداند و دوباره بزند. */
+      msFinish(!p.cancelled && !p.error,
+        p.cancelled?'با درخواستِ شما متوقف شد':(p.error||''), p.summary||'');
     }
   }).catch(()=>{});
 }
@@ -47863,6 +51126,42 @@ function msFinish(ok,msg,summary){
   showToast(ok?'✅ همگام‌سازی تمام شد — گزارش ثبت و ارسال شد':('⏹ '+(msg||'متوقف شد')),!ok);
   try{refreshExtractQueue();}catch(e){}
   try{tmPulse();}catch(e){}
+  if(ok)msKickSend(); /* v10.49 (۶۳): اگر چیزی صف شده، ارسال را با اتصالِ مرورگر بکوب */
+}
+
+/* v10.49 (۶۳): بعد از پایانِ همگام‌سازیِ دستی، اگر محصولی در صفِ ارسال
+   منتظر است، پردازنده را با یک fetch مرورگری راه بیندازیم — روی هاستِ
+   شما پردژهٔ ارسال فقط تا وقتی که یک کلاینت وصل است زنده می‌ماند، و
+   مرورگرِ همین تب آن کلاینت است. بدون این، صف به حالِ خود رها می‌ماند
+   و کران هر ۵ دقیقه فقط چند ثانیه جلویش می‌راند.
+   v10.50 (۶۴): حالا کارگرِ دستی خودش ارسال را کاملاً سرورساید جلو می‌رساند،
+   پس هشدارِ «تب را باز نگه دارید» لازم نیست؛ این کیک فقط شتاب‌دهندهٔ
+   اختیاری و پشتیبانِ زمانی است که کارگرِ سرورساید زنده نیست (در آن
+   حالت قفلِ flock جلوی تداخل را می‌گیرد). */
+function msKickSend(){
+  const box=$('msReport');
+  const kick=(label,statusUrl,actionName)=>{
+    fetch(statusUrl).then(r=>r.json()).then(q=>{
+      const entries=Array.isArray(q.entries)?q.entries:[];
+      const waiting=entries.filter(e=>e.status==='waiting'||e.status==='paused');
+      const running=entries.filter(e=>e.status==='running');
+      if(!waiting.length&&!running.length)return;
+      const pend=entries.filter(e=>['waiting','running','paused'].includes(e.status))
+        .reduce((a,e)=>a+Math.max(0,(parseInt(e.total)||0)-(parseInt(e.current)||0)),0);
+      if(box)box.innerHTML+='<div style="margin-top:8px;background:#1e293b;border:1px solid #475569;border-radius:8px;padding:8px;font-size:11px;color:#cbd5e1;line-height:1.8">'
+        +'📤 <b>'+toFa(pend)+'</b> product for <b>'+label+'</b> entered the send queue'
+        +(waiting.length?' — starting send…':' — a send is in progress')
+        +'. <b style="color:#34d399">Sending is handled fully server-side</b> — no need to keep this tab open; if the server-side worker is not running, this kick keeps the send alive with the browser connection.'
+        +' <button class="btn btn-cyan" onclick="switchMainTab(\'send\')" style="font-size:9.5px;padding:2px 8px;margin-right:6px">📡 See sending</button></div>';
+      if(waiting.length&&running.length===0){
+        /* no live process ⇒ start it ourselves with a connection that stays open */
+        fetch('?action='+actionName,{method:'GET'}).catch(()=>{});
+      }
+      try{ if(actionName==='bsl_backend'){bSend=true;pollBslProgress();}else{pollWooProgress();} }catch(e){}
+    }).catch(()=>{});
+  };
+  kick('باسلام','?bsl_queue_status=1','bsl_backend');
+  kick('ووکامرس','?woo_queue_status=1','woo_backend');
 }
 
 function stopManualSync(){
@@ -47892,7 +51191,7 @@ function srLoad(){
       h+='<details style="border-top:1px solid #1e293b;padding:4px 0">'
         +'<summary style="cursor:pointer;color:#cbd5e1;font-size:11px">'
         +esc(r.at_h||'—')+' — '+esc(r.profile||'?')
-        +(r.trigger==='manual'?' <span style="color:#34d399">دستی</span>':'')
+        +(r.trigger==='manual'||r.trigger==='manual_sync'?' <span style="color:#34d399">دستی</span>':'') /* v10.53 (۶۷) */
         +'</summary>'
         +'<div style="white-space:pre-wrap;color:#94a3b8;font-size:10.5px;line-height:1.9;padding:4px 8px 2px">'
         +esc(r.text||'')+'</div></details>';
@@ -47951,11 +51250,97 @@ function stopBackendExtract(){
 // v8.20: Extraction queue rendered in the same visual language as the
 // Basalam/WooCommerce send queues (status badge, progress bar, counters,
 // elapsed time, per-row actions).
+/* v10.58 (۷۲): دکترِ همگام‌سازی — چرا کار نمی‌کند؟ */
+function syncDiagnose(){
+  const box=$('syncDiagnoseBox'); if(!box)return;
+  box.style.display='block';
+  box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حالِ معاینهٔ زنجیره…</div>';
+  fetch('?sync_diagnose=1').then(r=>r.json()).then(d=>{
+    if(!d.ok){box.innerHTML='<div style="color:#f87171;font-size:11px">✗ معاینه نشد</div>';return;}
+    let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px">';
+    h+='<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'
+      +'<span style="font-size:11px;color:#34d399;font-weight:700;flex:1">🩺 معاینهٔ زنجیرهٔ همگام‌سازی</span>'
+      +'<button class="btn btn-gray" onclick="syncDiagnose()" style="font-size:9.5px;padding:2px 8px">↺ تکرار</button></div>';
+    (d.checks||[]).forEach(c=>{
+      h+='<div style="font-size:10.5px;color:'+(c.ok?'#86efac':'#fca5a5')+';line-height:1.7;padding:2px 0">'
+        +(c.ok?'✅ ':'⚠️ ')+esc(c.msg)+'</div>';
+    });
+    const bad=(d.profiles||[]).filter(p=>!p.ok);
+    if((d.profiles||[]).length){
+      h+='<div style="font-size:10px;color:#94a3b8;margin-top:6px;border-top:1px solid #1e293b;padding-top:4px"><b>پروفایل‌ها:</b></div>';
+      (d.profiles||[]).forEach(p=>{
+        h+='<div style="font-size:10px;color:'+(p.ok?'#86efac':'#fbbf24')+';padding:1px 0">'
+          +(p.ok?'✅ ':'⚠️ ')+esc(p.name)
+          +(p.issues.length?(' — '+p.issues.map(esc).join('، ')):' — آمادهٔ اجرا')+'</div>';
+      });
+    }
+    /* v10.66 (۸۰): صفِ استخراج + آخرین همگام‌سازیِ دستی + تشخیص */
+    if(d.queue){
+      h+='<div style="font-size:10px;color:#94a3b8;margin-top:6px;border-top:1px solid #1e293b;padding-top:4px"><b>صفِ استخراج:</b></div>';
+      h+='<div style="font-size:10px;color:#e2e8f0;padding:1px 0">ردیف‌ها: '+toFa(d.queue.count||0)+' · فعال: '+toFa(d.queue.active||0)+'</div>';
+      (d.queue.rows||[]).forEach(r=>{
+        const cc=(r.status==='running'||r.status==='waiting'||r.status==='paused')?'#fbbf24':(r.status==='done'?'#86efac':'#f87171');
+        h+='<div style="font-size:10px;color:'+cc+';padding:1px 0">• '+esc(r.profile||'—')+' — '+esc(r.status)
+          +(r.products?(' · '+toFa(r.products)+' محصول'):'')
+          +(r.age>0?(' · '+toFa(r.age)+' ثانیه پیش'):'')
+          +(r.error?(' · '+esc(r.error)):'')+'</div>';
+      });
+      if(d.queue.manual){
+        const m=d.queue.manual;
+        const mst=m.running?'🔄 در حال اجرا':(m.cancelled?'⏹ متوقف شد':(m.done?'✅ انجام شد':'—'));
+        h+='<div style="font-size:10px;color:#e2e8f0;padding:2px 0">آخرین همگام‌سازیِ دستی: '+mst
+          +(m.profile?(' — '+esc(m.profile)):'')
+          +(m.phase?(' · '+esc(m.phase)):'')
+          +(m.age>0?(' · '+toFa(m.age)+' ثانیه پیش'):'')
+          +(m.error?('<div style="color:#f87171;font-size:10px">'+esc(m.error)+'</div>'):'')+'</div>';
+        (m.log_tail||[]).forEach(l=>{h+='<div style="font-size:9.5px;color:#64748b;padding:0 0 0 10px">'+esc(l)+'</div>';});
+      }
+      if(d.queue.why){
+        h+='<div style="font-size:10.5px;color:#fbbf24;padding:4px 0;line-height:1.7">💡 '+esc(d.queue.why)+'</div>';
+      }
+    }
+    const problems=(d.checks||[]).filter(c=>!c.ok).length + bad.length;
+    h+='<div style="margin-top:6px;font-size:11px;font-weight:700;color:'+(problems===0?'#4ade80':'#fbbf24')+'">'
+      +(problems===0
+        ?'✅ کلِ زنجیره باز است. اگر کارتی در صف نمی‌بینید، همین حالا «همگام‌سازیِ دستی» را بزنید و صف را نگاه کنید.'
+        :'⚠️ '+toFa(problems)+' نکته نیاز به رسیدگی دارد — جزئیات را در بالا ببینید.')+'</div>';
+    h+='</div>';
+    box.innerHTML=h;
+  }).catch(()=>{box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطای شبکه</div>';});
+}
+
+/* v10.70 (84): صفِ استخراج «زنده» — خودش تازه می‌شود.
+   تا حالا پیشرفتِ ردیف‌ها فقط با کلیکِ 🔄 (یا شروع/توقف/پاک‌سازی) دیده می‌شد،
+   پس کارِ پس‌زمینه (کران، نگهبان، ادامهٔ کارِ گیرکرده) را کاربر نمی‌دید مگر
+   ریفرش می‌زد. حالا هر بارِ خواندن، نوبتِ بعد را خودش می‌چیند:
+   ردیفِ فعال (در صف/در حال اجرا/متوقف) ⇒ هر ۳ ثانیه؛ وگرنه ⇒ هر ۱۵ ثانیه
+   تا شروعِ کارِ بعدی هم آنی دیده شود. دکمهٔ 🔄 همان کارِ قبلی را می‌کند
+   (و زمان‌سنج را هم از اول می‌شمارد). */
+let exqInFlight=false, exqTimer=null;
+function exqSchedule(ms){
+  if(exqTimer)clearTimeout(exqTimer);
+  exqTimer=setTimeout(refreshExtractQueue,ms);
+}
+function exqSetLive(active){
+  try{
+    const el=$('exqLive');
+    if(!el)return;
+    el.style.display='inline';
+    el.style.color=active?'#4ade80':'#64748b';
+    el.textContent=active?'● زنده':'● پایشِ آهسته';
+  }catch(e){}
+}
 function refreshExtractQueue(){
-    fetch('?extract_queue_status=1').then(r=>r.json()).then(d=>{
-        if(!d.ok)return;
-        renderExtractQueue(d.entries||[], d.progress||{});
-    }).catch(()=>{});
+  if(exqInFlight)return;
+  exqInFlight=true;
+  fetch('?extract_queue_status=1').then(r=>r.json()).then(d=>{
+    if(!d.ok)return;
+    renderExtractQueue(d.entries||[], d.progress||{});
+    const entries=d.entries||[];
+    const active=entries.some(e=>e.status==='waiting'||e.status==='running'||e.status==='paused');
+    exqSetLive(active);
+    exqSchedule(active?3000:15000);
+  }).catch(()=>exqSchedule(5000)).then(()=>{exqInFlight=false;});
 }
 
 function renderExtractQueue(entries, progress){
@@ -48047,6 +51432,9 @@ function renderExtractQueue(entries, progress){
             html+='<span style="color:#22d3ee;font-size:10px;background:#0e749020;padding:1px 6px;border-radius:4px">⏱ خودکار</span>';
         }else if(e.trigger==='manual'){
             html+='<span style="color:#a78bfa;font-size:10px;background:#4c1d9520;padding:1px 6px;border-radius:4px">👤 دستی</span>';
+        }else if(e.trigger==='manual_sync'){
+            /* v10.53 (۶۷): اجرایِ همگام‌سازیِ دستی — با برچسبِ جدا از «دستیِ عادی» */
+            html+='<span style="color:#34d399;font-size:10px;background:#064e3b40;padding:1px 6px;border-radius:4px">🤝 هنگامِ همگام‌سازیِ دستی</span>';
         }
         /* v9.04: کدام مرحله؟ بدون این، ردیف «فهرست» با شمارندهٔ صفرِ
            جزئیات شبیه یک اجرای ناموفق به نظر می‌رسید. */
@@ -48540,10 +51928,25 @@ function loadBackendExtractResults(key){
 }
 // Helper: profileKey from URL — mirrors PHP profileKey()
 function profileKey(url){
+    // v10.67 (81): فرمولِ سمتِ سرور (PHP) مسیرِ URL را «بدونِ دیکُدِ percent»
+    // می‌خواند، ولی new URL(url).pathname کاراکترهای %XX را دیکُد می‌کند؛
+    // برای لینک‌های دارایِ کاراکترِ فارسی/percent-encoded کلیدِ مرورگر با
+    // کلیدِ سرور یکی نبود و مثلاً همگام‌سازیِ دستی فیلترِ only هیچ
+    // پروفایلی نمی‌یافت. حالا مسیر را عینِ تایپ‌شده می‌گیریم تا دقیقاً
+    // هم‌زمانِ سرور بماند.
     try{
-        const parsed=new URL(url);
-        let host=parsed.hostname.toLowerCase();
-        let path=parsed.pathname.replace(/^\/|\/$/g,'');
+        const src=String(url);
+        const m=src.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#]*/);
+        let host='',rawPath='';
+        if(m){
+            host=m[0].replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//,'').replace(/:\d+$/,'').toLowerCase();
+            rawPath=src.slice(m[0].length).split(/[?#]/)[0];
+        }else{
+            const u=new URL(src);
+            host=u.hostname.toLowerCase();
+            rawPath=u.pathname;
+        }
+        let path=rawPath.replace(/^\/|\/$/g,'');
         // Remove /page/N suffix
         path=path.replace(/\/page\/\d+\/?$/i,'');
         // Remove .html/.htm/.php suffix
@@ -48910,6 +52313,353 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.79', t:'🩺 پیام‌رسان‌ها از مسیرِ غیرمستقیم + لاگِ پینگ + سفت‌کاریِ تست', items:[
+    '🩺 <b>زنجیرهٔ پیام‌رسان‌ها:</b> حالا که روی هاست شما «Could not resolve host: api.rubika.ir» می‌دهد، ارسالِ بله/روبیکا/تلگرام خودکار سه‌مرحله‌ای شد: <b>مستقیم ← DoH (رفعِ DNS با Cloudflare) ← proxy.phpِ خودِ سایت</b>. هر سه پیام‌رسان یک مسیرِ مشترک دارند و در گزارش می‌آید کدام مرحله جواب داده است.',
+    '📜 <b>لاگِ پینگ:</b> هر تلاشِ پینگ (دستی/کران/نبض) ثبت می‌شود — دکمهٔ «📜 پینگ‌هایِ آخر» زیرِ تنظیمِ پینگ، ۶ تلاشِ اخیر را با وضعیتِ تک‌تکِ پیام‌رسان‌ها نشان می‌دهد؛ «کجا گیر کرده» دیگر گمان‌زنی نیست.',
+    '🛡 <b>تستِ پینگ سفت‌کاری شد:</b> هر خطایِ داخلی به‌جایِ پاسخِ خالی (که «خطای شبکه» سمتِ مرورگر می‌گرفت) با پیامِ مشخص نمایش داده می‌شود.',
+    '⚙️ <b>interface.php:</b> سه دامنهٔ پیام‌رسان (api.rubika.ir / api.telegram.org / tapi.bale.ai) به فهرستِ مجازِ پراکسی اضافه شد تا زنجیره از مسیرِ proxy.php کار کند.',
+  ]},
+  {v:'10.78', t:'🇮🇷 اسکریپتِ هدرِ نجوا + تلگرام + تشخیصِ دقیقِ خطای روبیکا', items:[
+    '🇮🇷 <b>نجوا با روشِ مستنداتِ رسمی:</b> به‌جایِ تنظیماتِ API (توکن/API key)، حالا کادرِ «اسکریپتِ هدرِ نجوا» است — کدِ پنلِ نجوا (منو ← تنظیمات ← تنظیماتِ اسکریپت ← کدِ سرویس) را بچسبانید؛ اسکریپر آن را <b>پیش از تگِ پایانیِ head</b> همین صفحه درج می‌کند تا وریفایِ نصب در پنلِ نجوا قبول شود. (تنظیماتِ قدیمیِ API برداشته شد.)',
+    '✈️ <b>تلگرام اضافه شد:</b> در تبِ «💬 پیام‌رسان» — Token + Chat ID + دکمهٔ تست. همهٔ رویدادها (لحظه‌ای + کران) مثلِ بله/روبیکا به تلگرام هم می‌روند؛ در گروه هم کار می‌کند (chat_id گروه با -100).',
+    '🩺 <b>روبیکا (و تلگرام) دیگر بی‌صدا شکست نمی‌خورند:</b> دکمهٔ «🔔 تست» حالا HTTP code و <b>پیامِ خطایِ خودِ سرویس</b> را نشان می‌دهد (مثلاً chat not found / token نامعتبر) — برایِ عیب‌یابیِ «ارسالِ روبیکا کار نمی‌کند» دقیق بگویید کجا گیر است.',
+    '📌 <b>راهنمایِ روبیکا:</b> اول به ربات <span dir="ltr">/start</span> بدهید و یک پیام بفرستید؛ بعد chat_id درست از <span dir="ltr">api.rubika.ir/bot&lt;TOKEN&gt;/getUpdates</span> (فیلدِ <span dir="ltr">"chat":{"id":...}</span>) بگیرید. جزئیات در گزارشِ تست.',
+  ]},
+  {v:'10.77', t:'🇮🇷 نجوا — رویدادها به همهٔ مشترکینِ سایت (کانالِ مستقل)', items:[
+    '🇮🇷 <b>کانالِ جدید و مستقل: نجوا</b> — هر رویداد (لحظه‌ای + کران) علاوه برِ Web Push، از طریقِ وب‌سرویسِ <b>نجوا</b> به <b>همهٔ کاربرانی که از قبل از سایت عضوِ پوش شده‌اند</b> هم فرستاده می‌شود. اشتراک‌هایِ نجوا همان‌هایی هستند که سایت شما از قبل جمع کرده؛ کاربری تازه برایِ این کانال لازم نیست.',
+    '⚙️ <b>تنظیمات:</b> در تبِ «🖥 زنده» زیرِ جعبهٔ مسیر — کلیدِ «ارسال به مشترکینِ سایت با نجوا» + آدرسِ API (پیش‌فرض <span dir="ltr">https://api.najva.com</span>) + توکنِ فرستنده + API key (دوستور: پنلِ نجوا ← پوش نوتیفیکیشن ← تنظیمات ← تنظیمات اسکریپت ← مشخصاتِ API) + آدرسِ باز شدنِ بعد از کلیک.',
+    '🩺 <b>تستِ Push</b> نتیجهٔ فراخوانیِ نجوا را کنارِ مسیرهایِ Web Push گزارش می‌کند (HTTP 201 = درِ صفِ نجوا گذاشته شد).',
+    '🌍 <b>چرا نجوا برایِ هاستِ شما مطمئن‌ترین راه است:</b> سرویسِ ایرانی و از هاست‌هایِ ایران بدونِ هیچ پراکسی در دسترس است — زنجیره: Web Push (مستقیم/پراکسی/Worker) + نجوا، هر دو درِ هر رویداد.',
+  ]},
+  {v:'10.76', t:'🎯 Push خودکار از همان اتصالِ غیرمستقیمی که قبلاً تنظیم کرده‌اید', items:[
+    '🎯 <b>بدونِ وارد کردنِ آدرسِ تازه:</b> اگر در بخشِ عبورِ «هوش مصنوعی» یا «سایت مبدأ» همان <span dir="ltr">proxy.php</span> را با قالبِ <span dir="ltr">{url}</span> تنظیم کرده‌اید، Push دقیقاً از همان مسیر می‌رود — آدرس دوباره نوشته نمی‌شود.',
+    '🩺 <b>گزارش می‌دهد مسیر از کجا آمده:</b> زیرِ فیلدِ مسیر، نوشته می‌شود مسیرِ Push از «تنظیماتِ جداگانهٔ Push» است یا از «عبورِ هوش مصنوعی/مبدأ».',
+    '🔁 در فیلدِ «اتصالِ غیرمستقیمِ سایت» هر دو قالب کار می‌کند: <span dir="ltr">https://site.com/proxy.php?url={url}</span> (همان قالبِ عبور) یا <span dir="ltr">https://site.com/proxy.php</span> ساده.',
+  ]},
+  {v:'10.75', t:'🌐 Push از اتصالِ غیرمستقیمِ خودِ سایت (interface.php)', items:[
+    '🌐 <b>مسیرِ جایگزینِ اصلیِ Push، اتصالِ غیرمستقیمِ خودِ سایت شد:</b> به‌جایِ پراکسیِ خارجیِ جداگانه، کافی است آدرسِ interface.php (مثلاً <span dir="ltr">https://site.com/proxy.php</span>) را در فیلدِ «اتصالِ غیرمستقیمِ سایت» بگذارید. درخواستِ Push (سردر و بدنهٔ RFC8291) از آن <b>شفاف</b> به fcm.googleapis.com منتقل می‌شود — زنجیره: مستقیم ← سایت ← Worker.',
+    '⚙️ <b>interface.php:</b> دامنهٔ fcm.googleapis.com به فهرستِ PROXY_TARGET_HOSTS اضافه شد تا مسیرِ Push را بپذیرد (HTTPS و پورت 443 — هم‌راستا با محدودیت‌هایِ امنیتیِ پراکسی).',
+    '🩺 <b>خطاهایِ پراکسیِ سایت در گزارشِ تست خوانا می‌شوند:</b> مثلاً اگر دامنه در فهرستِ مجاز نباشد، تستِ Push همان پیامِ پراکسی را با راهنماییِ «fcm.googleapis.com را به PROXY_TARGET_HOSTS اضافه کنید» نشان می‌دهد.',
+    '🔁 قالبِ قدیمیِ HTTP-proxy (<span dir="ltr">user:pass@host:port</span>) در همان فیلد هنوز کار می‌کند و Workerِ واسط به‌عنوانِ مسیرِ سومِ اختیاری می‌ماند.',
+  ]},
+  {v:'10.74', t:'🌍 Push از هاست‌های بدون دسترسی به گوگل — پراکسی/Worker + تشخیص دقیق', items:[
+    '🌍 <b>مسیرِ جایگزینِ ارسالِ Push:</b> اگر هاستِ شما (مثلاً داخلِ ایران) به سرویسِ Pushِ گوگل (fcm.googleapis.com) دسترسی ندارد، اعلان از سرور به دستگاه نمی‌رسد. حالا در تبِ «🖥 زنده» دو مسیرِ جایگزین است: <b>پراکسیِ خارجی</b> (http://user:pass@host:port) و <b>Workerِ واسطِ Cloudflare</b>. ارسال اول <b>مستقیم</b> امتحان می‌شود و اگر اتصال برقرار نشود (HTTP 0)، به‌ترتیب از پراکسی و Worker می‌رود — هاستِ خارجی همان‌طور مستقیم می‌فرستد.',
+    '📋 <b>کدِ Worker با یک کلیک:</b> دکمهٔ « کدِ Worker» کدِ آماده را با <b>توکنِ مخصوصِ شما</b> می‌دهد — در Cloudflare (Workers & Pages) بسازید، کپی کنید، Deploy بزنید و آدرسش را در «Workerِ واسط» بگذارید. Cloudflare از ایران در دسترس است و Worker درخواستِ Push را از سرورِ شما گرفته و به گوگل می‌رساند.',
+    '🩺 <b>تستِ Push حالا دقیق می‌گوید کجا شکسته:</b> زیرِ دکمهٔ تست، برای هر اشتراک — مسیر (مستقیم/پراکسی/Worker) + کدِ HTTP + خطا نوشته می‌شود. «HTTP 0» یعنی همان مسیر از هاستِ شما در دسترس نیست (نشانِ تحریم/بلوک)؛ «HTTP 4xx/5xx» یعنی رسیده اما سرویسِ مقصد خطا داده.',
+    '🔁 <b>ثبتِ دوبارهٔ اشتراک با خطای صریح:</b> مشکلِ «دکمهٔ Push فعال است ولی اشتراکی ثبت نشده» — حالا کلید اگر نتواند اشتراک بسازد خودکار خاموش می‌شود و پیامِ خطایِ دقیق (سرویس‌ورکر ثبت نشد / اجازه داده نشده / کلید و…) کنارش نوشته می‌شود؛ دکمهٔ « ثبتِ دوبارهٔ اشتراک» هم هر وقت لازم شد اشتراک را تازه می‌سازد و بلافاصله یک تستِ Push می‌فرستد.',
+  ]},
+  {v:'10.73', t:'📦 صف ارسال چندغرفه‌ای + بخش اعلان‌ها چهار تبی شد', items:[
+    '📦 <b>هر غرفه، یک وظیفهٔ جدا در صف ارسال:</b> تا حالا وقتی «ارسال به همهٔ غرفه‌ها» روشن بود، صف فقط یک ردیف داشت و کارِ غرفه‌های غیرپیش‌فرض <b>داخلِ همان یک ردیف</b> پنهان می‌شد — کاربر نه می‌دید چه چیزی برای غرفه‌های دیگر در صف است و نه پیشرفتِ هرکدام. حالا سرور همان لحظهٔ صف‌گذاری، <b>برای هر غرفهٔ فعال یک ردیفِ مستقل</b> می‌سازد (با همان فایلِ محصولات، ولی پیشرفت، گزارش و دکمهٔ مستقل).',
+    '🏪 <b>ساختار ظاهریِ جدیدِ صف:</b> بالای صف نوارِ خلاصهٔ وضعیت (تعداد وظایف + چندتایش در صف/در حال ارسال/تمام‌شده/خطا)؛ ردیف‌های یک ارسالِ چندغرفه‌ای زیرِ سربرگِ «📦 چندغرفه‌ای — ۲ از ۴ غرفه» جمع می‌شوند و هر ردیف <b>نشانِ غرفهٔ خودش</b> را دارد (🏪 نام + پیش‌فرض). گزارشِ تفصیلیِ هر وظیفه هم «غرفهٔ هدف» را می‌گوید.',
+    '⚙️ <b>دقیقاً همان منطقِ ارسالِ همزمانِ قبلی:</b> قیمتِ دولایه (لایهٔ پروفایل + لایهٔ خودِ غرفه)، کلیدِ نگاشتِ مخصوصِ هر غرفه، دستهٔ جایگزین، توقف/ادامه و نگهبان — فقط این‌بار هر غرفه <b>ردیفِ و پیشرفتِ خودش</b> را در صف دارد و ردیف‌ها به نوبت می‌روند (دستی، همگام‌سازیِ دستی و کران — هر سه مسیر).',
+    '🗂 <b>بخشِ «🔔 اعلان‌ها» دیگر یک ستونِ بلند نیست:</b> چهار تب — «💬 پیام‌رسان» (بله/روبیکا + تست + ذخیره)، «📋 رویدادها» (۹ رویداد + یادآوری بی‌جواب‌ها + پینگِ کران)، «🖥 زنده» (کارت/اعلانِ سیستم/صدا/Push + دکمه‌های تست + تشخیص) و «🔍 استعلام» (سفارش‌ها/گفتگوها/تست محصولات). همهٔ تنظیمات همان‌جایِ قبلی‌اند — فقط مرتب‌تر.',
+  ]},
+  {v:'10.72', t:'📡 اعلانِ سیستمِ واقعی: Web Push — حتی وقتی صفحه بسته است', items:[
+    '📡 <b>چرا تست می‌آمد ولی اعلان‌هایِ واقعی نمی‌آمد:</b> اعلانِ سطحِ صفحه را خودِ صفحهٔ مرورگر می‌سازد؛ اما روی اندروید، وقتی گوشی قفل می‌شود یا اپ عوض می‌شود، کدِ صفحه در چند ثانیه می‌میرد — پس رویدادهایی که در زمانِ بسته‌بودنِ صفحه اتفاق می‌افتد (سفارش، قیمت، کران‌جاب) هیچ‌وقت اعلان نمی‌شدند. <b>Web Push</b> تنها مسیرِ مطمئن است: <b>سرور</b> اعلان را به سرویسِ push (گوگل) می‌فرستد و آن سرویس، سرویس‌ورکرِ سایت را روی گوشی شما بیدار و اعلان را نمایش می‌دهد — حتی اگر صفحه هرگز باز نباشد.',
+    '🔗 <b>در کنارِ پیام‌رسان + متصل به کران‌جاب:</b> هر رویدادی که تا حالا به پیام‌رسان می‌رفت (سفارش، محصول، قیمت/موجودی، گزارشِ همگام‌سازی، خطا، بازنشستگی، یادآوری، پاسخِ خودکار، پینگِ کران) حالا <b>هم‌زمان</b> به دستگاه‌هایِ ثبت‌شدهٔ شما Web Push می‌شود — چه لحظه‌ای در مرورگر رخ بدهد چه در کران‌جاب.',
+    '🎛 <b>راه‌اندازی:</b> در بخشِ «🔔 اعلان‌ها» کلیدِ «📡 اعلانِ Push» را روشن کنید و Allow بزنید (با روشن‌شدن، یک تستِ خودکار هم می‌فرستد)؛ دکمهٔ «📡 تستِ Push» اعلان را <b>مستقیم از سرور</b> می‌فرستد — یعنی امتحانِ همان مسیری که اعلان‌هایِ واقعی می‌روند، نه امتحانِ صفحه.',
+    '🔑 <b>بدونِ فایلِ اضافه و بدونِ سرویسِ خارجی:</b> کلیدهایِ VAPID بخشی از کد هستند (خصوصی روی سرور، عمومی در مرورگر)، سرویس‌ورکر همان‌طور از خودِ فایل می‌آید، و اگر مرورگر کلیدهایِ اشتراک را عوض کند، اشتراک به‌طورِ خودکار تازه می‌شود.',
+    '📌 <b>محدودیتِ شناخته‌شده:</b> Web Push فقط روی <b>HTTPS</b> و مرورگرهایِ دسکتاپ/اندرویدِ کروم‌پایه (و فایرفاکس دسکتاپ) کار می‌کند؛ سافاریِ iOS همچنان هیچ‌کدام از این مسیرها را ندارد.',
+  ]},
+  {v:'10.71', t:'🛟 اصلاح دسته‌بندی: روشِ چهارم — زنجیرهٔ پشتیبان (مستر ← کاندیدها)', items:[
+    '🛟 <b>روشِ چهارم در دراپ‌داونِ «🧭 روشِ تشخیصِ دسته»:</b> «زنجیرهٔ پشتیبان (مستر ← کاندیدها)» — اول از مدلِ <b>مستر</b> می‌پرسد؛ اگر <b>خطا</b> داد (شبکه، سقفِ درخواست، خرابیِ مدل) یا <b>دستهٔ معتبر</b> نداد، <b>کاندیدهایِ دیگر</b> را <b>به‌ترتیب</b> امتحان می‌کند تا اولین جوابِ معتبر به دست بیاید و اعمال شود.',
+    '📜 <b>لاگِ شفافِ زنجیره:</b> هر مرحلهٔ زنجیره در لاگِ اجرا نوشته می‌شود — «🛟 زنجیرهٔ پشتیبان — مستر: [خطا] → ارائه‌دهنده/مدل ✗ → ارائه‌دهنده/مدل ✓» — و در خلاصهٔ آخر می‌بینی «نجات‌یافته با زنجیره: N».',
+    '🔒 <b>نگهبان‌ها دست‌نخورده:</b> دو نگهبانِ همیشگی — «پیشنهاد همان دستهٔ فعلی است» و «این دسته قبلاً امتحان و رد شده» — روی دستهٔ برگزیده مثلِ روش‌هایِ دیگر حاکم می‌مانند.',
+    '💡 <b>هزینه:</b> زنجیره فقط وقتی به مدلِ بعد می‌رود که قبلی شکسته باشد — وقتی مستر سالم جواب می‌دهد، هزینه دقیقاً مثلِ حالتِ تک‌مدلی است.',
+  ]},
+  {v:'10.70', t:'📋 صفِ استخراج «زنده» شد — دیگر دکمهٔ ریفرش لازم نیست', items:[
+    '🔄 <b>تازه‌سازیِ خودکار:</b> تا حالا پیشرفتِ ردیف‌هایِ صفِ استخراج فقط با کلیکِ 🔄 (یا بعد از شروع/توقف/پاک‌سازی) دیده می‌شد؛ پیشرفتِ کارِ پس‌زمینه (کران، نگهبان، ادامهٔ کارِ گیرکرده) را نمی‌دیدی مگر ریفرش می‌زدی. حالا باکس خودش تازه می‌شود: وقتی ردیفِ فعالی هست (در صف، در حال استخراج، متوقف) <b>هر ۳ ثانیه</b>، و وقتی کار فعال نیست <b>هر ۱۵ ثانیه</b> — پس شروعِ هر کارِ تازهٔ پس‌زمینه هم آنی دیده می‌شود.',
+    '🟢 <b>نشانِ وضعیتِ زنده:</b> کنارِ دکمه‌ها یک نقطهٔ کوچک می‌گوید حالِ پایش کجاست: «● زنده» (فعال — ۳ ثانیه) یا «● پایشِ آهسته» (۱۵ ثانیه). دکمهٔ 🔄 برای تازه‌سازیِ آنیِ دستی هم همان‌جاست.',
+  ]},
+  {v:'10.69', t:'🛰 اعلانِ سیستم حالا از مسیرِ مطمئنِ «سرویس‌ورکر» می‌رود', items:[
+    '🛰 <b>اعلان از طریقِ service worker (طبقِ پیشنهادِ شما):</b> مسیرِ اصلیِ اعلانِ سیستم دیگر «صفحه» نیست، «سرویس‌ورکر» است — همان راهی که وب‌سایت‌هایِ بزرگ استفاده می‌کنند و روی کرومِ اندروید مطمئن‌تر نمایش داده می‌شود. نکته: <b>فایلِ جداگانه‌ای لازم نیست</b> — خودِ scraper4.php اسکریپتِ سرویس‌ورکر را در آدرسِ ?sw=1 می‌دهد، پس هرگز «فراموشِ آپلود» یا «نسخهٔ کهنه» ندارد.',
+    '🔀 <b>فالبکِ خودکار:</b> اگر سرویس‌ورکر ثبت نشد (مرورگرِ قدیمی یا صفحهٔ غیرHTTPS)، اعلان از مسیرِ معمولیِ صفحه می‌رود — هر دو مسیر پشت‌سرِ هم امتحان می‌شوند.',
+    '🩺 <b>خطِ تشخیص حالا می‌گوید کدام مسیر فعال است:</b> «🛰 سرویس‌ورکر ثبت شد ✅» یا «🛰 سرویس‌ورکر ثبت نشد» — بعد از آپدیت همین خط را نگاه کنید.',
+    '📌 <b>مهم‌ترین نکته:</b> سرویس‌ورکر هم (مثلِ همهٔ این قابلیت‌ها) <b>فقط روی HTTPS</b> ثبت می‌شود. اگر خطِ تشخیص «🔒 صفحه از طریقِ HTTPS باز نشده» را نشان می‌دهد، هیچ روشی — نه صفحه، نه سرویس‌ورکر — اعلان نمی‌دهد؛ باید سایت با https:// (با SSL) باز شود. در اندروید هم یک لایهٔ جدا هست: تنظیمِ «Site settings ← Notifications» کروم برای همین سایت باید Allow باشد.',
+  ]},
+  {v:'10.68', t:'🖥 اعلانِ سیستم: «چیز نمی‌آورد» — حالا دقیقاً می‌گوید کجا گیر است', items:[
+    '🩺 <b>تشخیصگرِ زندهٔ اعلانِ سیستم:</b> زیرِ دکمه‌هایِ تست، یک خطِ وضعیت همیشه تازه نشان می‌دهد که زنجیره کجا شکسته است: آیا صفحه <b>HTTPS</b> است؟ آیا مرورگر (Web Notification) را پشتیبانی می‌کند؟ اجازهٔ اعلان granted/denied/default است؟ و اگر همه‌چیز درست بود، می‌گوید مشکل از تنظیماتِ <b>سیستم‌عامل</b> است (ویندوز/macOS/اندروید) با مسیرِ دقیقِ هرکدام.',
+    '🧪 <b>دکمهٔ «تستِ اعلانِ سیستم» حالا مرحله‌به‌مرحله جواب می‌دهد:</b> ۱) اگر مرورگر پشتیبانی نمی‌کند (مثلاً سافاریِ آیفون یا صفحهٔ http) می‌گوید چرا؛ ۲) اگر اجازه لازم است همان لحظه می‌گیرد و اگر رد شده، مسیرِ Allow کردن را می‌گوید؛ ۳) اگر اعلان را به مرورگر داد ولی سیستم نمایش نداد، تنظیماتِ ویندوز (نشانِ Focus Assist)، macOS و اندروید را با مسیرِ دقیق می‌گوید.',
+    '📝 <b>پاسخ به سؤالِ sw.js:</b> برای «نمایش» اعلانِ زنده فایلِ <b>sw.js لازم نیست</b> — خودِ صفحه با Notification API اعلان را می‌سازد و مرورگرِ دسکتاپ (کروم/فایرفاکس/ایج) روی HTTPS آن را اجرا می‌کند. service worker فقط برای «push» است (وقتی صفحه کاملاً بسته باشد و سرور بخواهد بفرستد) و ما از آن مسیر نمی‌رویم.',
+  ]},
+  {v:'10.67', t:'🔧 همگام‌سازیِ دستی: «تقریباً هیچ کاری نمی‌کند» — حالا دلیلِ واقعی دیده می‌شود', items:[
+    '💡 <b>چرا دکمهٔ همگام‌سازی انگار هیچ کار نمی‌کرد:</b> وقتی استخراج رد می‌شد (ردیفِ تکراری در صف، قفلِ سراسریِ استخراج، یا هر خطای دیگری)، جعبهٔ همگام‌سازی «تمام شد» نشان می‌داد ولی هیچ ردیفی به صفِ استخراج نمی‌نشست و دلیل فقط به مسنجر می‌رفت. حالا جعبهٔ همگام‌سازی بلافاصله بعد از استخراج «✅ استخراج: N محصول» یا «❌ استخراج: دلیلِ واقعی» را همان‌جا می‌نویسد. اگر هم پردژه وسطِ اجرا مُرد (کُشیده‌شدهٔ هاست یا خطای فیتالِ PHP)، پیامِ فیتال — با شمارهٔ خط — در همان جعبه می‌نشیند.',
+    '🔑 <b>پیدا کردنِ پروفایل با کلیدِ ممتن:</b> فرمولِ کلیدِ مرورگر با سرور روی لینک‌های دارایِ کاراکترِ percent-encoded (فارسی) فرق می‌کرد و فیلترِ همگام‌سازی هیچ پروفایلی نمی‌یافت. حالا هر دو فرمول مسیرِ لینک را بدونِ دیکُد می‌خوانند؛ اگر کلیدِ فرستاده‌شده روی سرور نبود، با URL ذخیره‌شدهٔ پروفایل‌ها پیدایش می‌کنند؛ اگر باز هم نبود به‌جای اجرایِ خالیِ بی‌صدا، خطای صریح می‌بینید.',
+    '⏱ <b>قفلِ زودترِ همگام‌سازیِ گیرکرده:</b> پنجرهٔ «یک همگام‌سازی در حال اجراست» از دو چرخهٔ نگهبان به یک چرخه کم شد؛ اجرایِ کشته‌شده دیگر دکمه را مدام قفل نمی‌کند.',
+  ]},
+  {v:'10.66', t:'🖥 تنظیماتِ اعلانِ زنده در بخشِ «اعلان‌ها» + همهٔ رویدادها (نه فقط چت) به‌صورتِ زنده + معاینهٔ صفِ استخراج', items:[
+    '📋 <b>همهٔ رویدادها، نه فقط چت:</b> از این‌به‌بعد هر رویدادی که به پیام‌رسان می‌رود — سفارشِ جدید/تغییر وضعیت، محصولِ جدید/تغییر وضعیت، گران/ارزان و موجود/ناموجود، گزارشِ همگام‌سازی، خطای اجرا، یادآوری‌ها — به‌علاوهٔ کارتِ زندهٔ درِ مرورگر، اگر «اعلانِ سیستم» روشن باشد در اعلان‌هایِ ویندوز/macOS/اندروید هم می‌آید',
+    '⚙️ <b>تنظیماتِ کامل در بخشِ «🔔 اعلان‌ها»:</b> روشن/خاموشِ کارت‌هایِ درِ مرورگر و اعلانِ سیستم، فاصلهٔ چک (ثانیه)، زمانِ خودکاربستن، صدا — و دکمه‌هایِ <b>🧪 تستِ کارت</b> و <b>🔔 تستِ اعلانِ سیستم</b> برایِ امتحانِ آنی. همهٔ این‌ها همان لحظه اثر می‌کنند (ذخیرهٔ مرورگر)، بدونِ دکمهٔ ذخیره',
+    '🩺 <b>معاینهٔ صفِ استخراج در «دکترِ همگام‌سازی»:</b> حالا تعداد/وضعیتِ ردیف‌های صف، آخرین همگام‌سازیِ دستی (مرحله، خطا و ۱۰ خطِ آخرِ گزارش) و یک جملهٔ تشخیص «چرا چیزی روی صف نمی‌آید» را نشان می‌دهد — برایِ فهمیدنِ اینکه همگام‌سازی اصلاً اجرا شده یا ردیف جایی گیر کرده'
+  ]},
+  {v:'10.65', t:'⌨️ تکست‌باکسِ پاسخ همیشه آماده + کارتِ نوتیف دیگر از کادرِ موبایل بیرون نمی‌زند', items:[
+    '⌨️ <b>پاسخِ آماده از همانِ اول:</b> تکست‌باکسِ پاسخ (با دکمه‌هایِ سریعِ 👋/✅/📮) حالا از همانِ لحظهِٔ آمدنِ کارتِ نوتیف باز است — لازم نیست دکمهٔ 💬 بزنی؛ فقط بنویس و Enter. با شروعِ تایپ، کارت دیگر خودکار بسته نمی‌شود و اگر مشتری وسطِ تایپ دوباره پیام بدهد هم کارتِ شما را نمی‌بندد',
+    '📱 <b>عرضِ درستِ موبایل:</b> کارتِ نوتیف هنگامِ پاسخ‌دهی دیگر گشاد نمی‌شود و از کادرِ صفحهِٔ موبایل بیرون نمی‌زند؛ اگر هم کارت بلند شد، خودش در ارتفاعِ صفحه جا می‌شود (اسکرولِ داخلی)'
+  ]},
+  {v:'10.64', t:'🩹 رفعِ سریع — یک پرانتزِ ناقص در فهرستِ تغییرات، کلِ اسکریپتِ صفحه را از کار انداخته بود', items:[
+    '🩹 <b>مشکل:</b> در نسخهٔ ۱۰.۶۳، در کدِ فهرستِ تغییراتِ خودِ صفحه، براکتِ بستهٔ آیتمِ ۱۰.۶۳ جا افتاده بود؛ مرورگر به‌خاطرِ همینِ خطایِ دستوری، کلِ اسکریپتِ اصلی را اجرا نمی‌کرد (خطاهایی مثلِ «vcFilterFile is not defined» پیامِ همان بود). حالا درست شده و همهٔ بخش‌ها دوباره زنده‌اند.'
+  ]},
+  {v:'10.63', t:'🖥 اعلانِ سطحِ سیستم‌عامل — با متنِ کاملِ مشتری و پاسخِ یک‌کلیکه', items:[
+    '🔔 <b>اعلانِ سیستمی:</b> روی کارتِ نوتیف دکمهٔ 🖥 هست — با اولین کلیک مرورگر اجازه می‌خواهد و یک اعلانِ آزمایشی می‌فرستد؛ از آن‌به‌بعد با هر پیامِ تازهٔ مشتری، اعلان در مرکزِ اعلان‌هایِ سیستم (ویندوز/macOS/اندروید) هم می‌آید',
+    '💬 <b>متنِ کاملِ پیامِ مشتری</b> در بدنهٔ اعلانِ سیستمی + دکمهٔ «💬 پاسخ» روی خودِ اعلان — صفحه را فوکوس می‌کند و تکست‌باکسِ پاسخِ درِجای را باز می‌کند',
+    '👁 <b>تبِ پشتی هم پوشش می‌شود:</b> وقتی صفحه را کمینیت/پشتِ سر گذاشتید، پیام‌های تازه همچنان اعلانِ سیستمی می‌گیرند (تا حدِ مجازِ مرورگر)'
+  ]},
+  {v:'10.62', t:'💬 پاسخ از روی همان نوتیف + نمایشِ تصاویرِ مشتری', items:[
+    '✍️ <b>پاسخِ درِجای:</b> با سوایپِ راست (یا دکمهٔ 💬) تکست‌باکسِ پاسخ همین‌داخلِ کارتِ نوتیف باز می‌شود — با چیپ‌هایِ سریع (👋 سلام / ✅ موجودی / 📮 آدرس) و Enter = ارسال — بدونِ رفتن به اتاقِ چت. اگر کلِ گفتگو را می‌خواهید، «🗨 گفتگوی کامل» همان‌جاست.',
+    '🖼 <b>تصاویرِ مشتری:</b> اگر پیامِ تازه تصویر باشد، پیش‌نمایشِ آن روی کارتِ نوتیف (و در لیستِ گفتگوها با بندانوشِ کوچک) می‌آید — با کلیک، بزرگ‌نماییِ تمام‌صفحه (Lightbox) باز می‌شود (کلیک یا Escape = بستن). تصاویرِ داخلِ اتاقِ چت هم حالا به‌جای باز شدنِ تبِ جدید، همین‌جا بزرگ می‌شوند.',
+    '⚡ بعد از ارسالِ موفق، کارت «✅ پاسخ ارسال شد» می‌گیرد و خودکار بسته می‌شود؛ اتاقِ چت (اگر باز باشد) هم همان لحظه به‌روز می‌شود.'],},
+  {v:'10.61', t:'🔌 همگام‌سازیِ دستی دیگر «مرده» نمی‌ماند — اتصالِ مرورگر تا پایان کار باز است', items:[
+    '🧠 <b>ریشهٔ «دکمهٔ دستی کارتی به صف نمی‌آورد»:</b> هاست پردژهٔ جداشده (بدون کلاینتِ وصل) را در چند ثانیه می‌کُشد؛ همگام‌سازیِ دستی از خطِ اول اتصال را می‌بست و کار می‌رفت پس‌زمینه — و چون کرانِ هاست هم روزهاست اجرا نمی‌شود، هیچ نجات‌دهنده‌ای نبود. پردژه پیش از رسیدن به حلقهٔ همگام‌سازی می‌مُرد.',
+    '🔌 <b>حالا اتصال باز می‌ماند:</b> در همگام‌سازیِ دستی، مرورگر تا پایانِ کار «کلاینتِ زنده» است و کارگر می‌ماند (همان مدلِ پُلِ مرورگر). هر پروفایل، هر صفحه و هر محصولِ جزئیات یک خطِ پیشرفت (ndjson) روی اتصال می‌زند — هم خروجیِ زندهٔ برای سرور، هم ردِ پایِ کار.',
+    '🩺 <b>دکترِ همگام‌سازی حالا آدرسِ دقیقِ کران را می‌نویسد</b> — همان URL را کپی کنید و در کنترلِ پنلِ هاست (هر ۵ دقیقه) تنظیم کنید تا همگام‌سازی‌های دوره‌ای هم زنده شوند.',
+    '⏹ اگر همگام‌سازیِ دستی به هر دلیلی «رد» شود (مثلاً اجرای دیگری تازه تمام نشده)، وضعیتش همان لحظه بسته و علتش نوشته می‌شود — دیگر «در حال اجرا»ِ الکی نمی‌ماند.'],},
+  {v:'10.60', t:'🔔 نوتیفِ زندهٔ پیام‌های مشتری — با سوایپِ راست، پاسخ!', items:[
+    '💬 <b>با هر پیامِ تازهٔ مشتری</b> (از هر غرفه) یک کارتِ شیک با نام، غرفه، متن و زمان روی صفحه بالا می‌آید — با صدایِ ملایمِ «دینگ» و انیمیشنِ ورود.',
+    '👉 <b>سوایپِ راست</b> = اتاقِ چت روی همان گفتگو باز می‌شود و تکست‌باکسِ پاسخ فوکوس می‌شود — مستقیم تایپ کنید. <b>سوایپِ چپ</b> = کارت بسته می‌شود. (دکمه‌های 💬 / ✕ هم هستن برای موس.)',
+    '🧠 هوشمند: پیام‌های قدیمی نوتیف نمی‌کنند؛ اگر گفتگو را خودتان باز داشته باشید نوتیف تکرار نمی‌شود؛ پیام‌های تازهٔ زمانِ نبودتان با بازگشت می‌آیند؛ کارت تا ۳۰ ثانیه می‌ماند (نوارِ پایین) و با پیامِ بعدیِ همان مشتری تازه می‌شود.'],},
+  {v:'10.59', t:'🚑 بازسازیِ خودکارِ ارسالِ گیرکرده + بستنِ خودکارِ وظیفهٔ تمام‌شده', items:[
+    '🧊 <b>رفعِ «ارسال بعد از آخرین محصول فریز می‌ماند»:</b> وقتی وِرکرِ ارسال توسط هاست کشته می‌شد، ردیف تا ابد «در حال ارسال» می‌ماند و فقط دکمهٔ توقف آن را (و هم به اشتباه) می‌بست. حالا ردیفی که کارش تمام شده ولی بسته نشده — آخرین محصول فرستاده شده، «current» به «total» رسیده — به‌محضِ اولینِ بازدیدِ رابط (هر ۲ ثانیه) خودکار «تمام شد» علامت می‌خورد.',
+    '🔁 <b>بازسازیِ خودکارِ بدونِ وابستگیِ به کران:</b> پویینگِ تبِ ارسال (هر ۲ ثانیه) حالا موتورِ بازیابیِ صف است: اگر صف گیر کرده باشد — ردیفِ در حالِ اجرای بی‌حرکت یا ردیفِ منتظرِ بی‌پردازنده — پردازنده خودکار از چک‌پوینت دوباره راه می‌افتد؛ حتی اگر کرانِ هاست اصلاً کار نکند. کول‌داونِ ۱۲۰ ثانیه‌ای و قفلِ flock جلوی تکرار و تداخل را می‌گیرند.',
+    '📢 رابط با توستِ «⚠️ ارسال گیر کرده بود — خودکار ادامه داده شد» شما را از هر بازیابی باخبر می‌کند.'],},
+  {v:'10.58', t:'🩺 دکترِ همگام‌سازی + رفعِ «همگام‌سازی اصلاً کار نمی‌کند»', items:[
+    '🔗 <b>ترتیبِ تازهٔ کران:</b> حلقهٔ همگام‌سازی — یعنی استخراجی که <b>کارت به صفِ استخراج می‌نشیند</b> — حالا <b>اولِ</b> هر تیک اجرا می‌شود؛ پمپِ ارسال (انتظارِ تا ۱۲۰ ثانیه) و بکاپِ خودکار (git push، چند دقیقه) به <b>بعد</b> از حلقه جابجا شدند. قبلاً روی هاستی که پردژهٔ پس‌زمینه را می‌کُشد، پردژه پیش از رسیدن به استخراج می‌مرد و هیچ‌وقت کارتی به صف نمی‌آمد.',
+    '💀 <b>بستنِ خودکارِ اجرایِ نیمه‌کاره:</b> اجرایِ دستیِ کشته‌شدهٔ هاست دیگر تا ابد «در حال اجرا» نمی‌ماند؛ بعد از آستانهٔ بی‌حرکتی، اندپوینتِ وضعیت خودش را با پیامِ روشن می‌بندد و دکمه بلافاصله دوباره کار می‌کند.',
+    '🩺 <b>دکمهٔ « تشخیص»</b> (کنار همگام‌سازیِ دستی) — کلِ زنجیره را معاینه می‌کند: آخرین تیکِ کران، قفلِ کران، قفلِ استخراج، وضعیتِ دستی، صفِ استخراج و وضعیتِ تک‌تکِ پروفایل‌ها — و به زبانِ ساده می‌گوید کدام حلقه گیر دارد و چه باید کرد.',
+    '⏳ <b>بررسیِ زنده‌بودنِ «شغال»:</b> گاردِ شغلیِ دستی دیگر ۵ دقیقهٔ ثابت نمی‌سنجد؛ اگر اجرایِ قبلی مرده باشد (بی‌حرکت)، خودکار بسته و اجرایِ تازه بدونِ انتظار شروع می‌شود.'],},
+  {v:'10.57', t:'📱 اتاقِ چتِ باسلام — چندغرفه‌ای، زنده، موبایل‌محور، با تصویر', items:[
+    '🔄 <b>همهٔ غرفه‌ها در یک لیست:</b> گفتگوهای مشتریانِ همهٔ غرفه‌های باسلام',
+    '   کنار هم. جلوی هر مشتری، شمارهٔ غرفه با رنگِ متفاوت تویِ پرانتز',
+    '   (مثلاً <span style="color:#60a5fa">(۱)</span> یا <span style="color:#34d399">(۲)</span>) و با کلیکِ روی',
+    '   چیپِ بالایِ لیست می‌توانید فقط گفتگوهایِ یک غرفه را ببینید.',
+    ' <b>همیشه تازه:</b> لیست هر ۱ ثانیه خودکار به‌روز می‌شود و پیام‌هایِ جدیدِ',
+    '   گفتگویِ باز هم همان لحظه ظاهر می‌شوند (بدونِ رفرش). فقط وقتی پنجرهٔ',
+    '   چت باز است پُل می‌زند؛ برای کاهشِ بارِ API، هر غرفه هر ۲ ثانیه یک‌بار',
+    '   به سرورِ باسلام می‌رسد (کشِ سمتِ سرور).',
+    '📱 <b>موبایل‌محور:</b> در موبایل، لیستِ مشتری‌ها کشویی می‌شود — یک مشتری را',
+    '   انتخاب می‌کنید، در پنجرهٔ اصلی با او چت می‌کنید و با «بازگشت» برمی‌گردید',
+    '   به لیست. زمانِ نسبیِ هر گفتگو (چند دقیقه پیش) هم دیده می‌شود.',
+    '🖼 <b>ارسالِ تصویر:</b> با دکمهٔ 🖼 یک تصویر انتخاب کنید (تا حدود ۷ مگابایت)،',
+    '   پیش‌نمایشش را ببینید و با یا بدونِ توضیح بفرستید. تصویر از طریقِ سرویسِ',
+    '   آپلودِ رسمیِ باسلام (chat.photo) و به‌صورتِ پیامِ تصویری می‌رود؛',
+    '   تصاویرِ مشتری در پنجرهٔ چت هم نمایش داده می‌شوند.',
+    '💬 <b>دستیارِ پاسخ:</b> چهار دکمهٔ پاسخِ سریع (سلام/موجودی/آدرس/پیگیری) برای',
+    '   تایپِ کمتر روی موبایل، و Enter برایِ ارسال. اگر توکنِ یک غرفه خطا بدهد،',
+    '   بقیهٔ غرفه‌ها خراب نمی‌شوند — فقط همان چیپ علامت ⚠️ می‌گیرد.']},
+  {v:'10.56', t:'⏩ ادامه ارسال از جایی که مانده بود — نه از اول', items:[
+    '🛠 <b>نقصِ گزارش‌شده:</b> وقتی نگهبان (یا «پمپِ ارسالِ» کران) می‌فهمید',
+    '   وِرکرِ ارسال وسطِ کار مُرده و گیر کرده است، کار را دوباره راه می‌انداخت اما',
+    '   <b>از محصولِ ۱</b> — نه از همان جایی که مُرده بود. برای کاتالوگِ بزرگ',
+    '   یعنی ساعت‌ها تکرار، و با کشتنِ مکررِ فرایند توسط هاست، رسیدن به آخرِ',
+    '   کار تقریباً غیرممکن بود.',
+    '🔎 <b>سه‌ریشه:</b> ۱) وِرکرهایِ ارسال اصلاً start_index را نمی‌خواندند.',
+    '   ۲) نگهبان «جایِ گیرکردن» را از ردیفِ صف می‌خواند که در طولِ اجرا صفر',
+    '   می‌ماند (فقط در پایان یا هنگام پُلِ مرورگر نوشته می‌شد). ۳) فایلِ',
+    '   پیشرفتِ دقیقِ وِرکر، پیش از خواندنِ محلِ ادامه، پاک می‌شد.',
+    '✅ <b>حالا:</b> نگهبان چک‌پوینتِ واقعی (از فایلِ پیشرفتِ متعلق به همان',
+    '   ردیفِ صف) را می‌فرستد؛ وِرکر شمارنده‌ها را برمی‌گرداند، محصولاتِ',
+    '   انجام‌شده را رد می‌کند و فقط از همان محصولِ مُرده‌شده ادامه می‌دهد.',
+    '   اگر محصولِ نیمه‌کاره قبلاً فرستاده شده باشد، با جستجو آپدیت می‌شود —',
+    '   تکراری ساخته نمی‌شود. «current»ِ ردیفِ صف هم همین‌حالا با هر ضربان',
+    '   به‌روز می‌شود تا همه (نگهبان/پمپ/مدیرِ وظایف) جایِ درست را ببینند.',
+    '🔁 اعمال بر: صفِ ارسالِ باسلام و ووکامرس — بازیابیِ نگهبان، پمپِ کران',
+    '   و دکمهٔ «ادامه» همه از همین چک‌پوینت استفاده می‌کنند.']},
+  {v:'10.55', t:'💬 پاسخ دستی به مشتریان + بازبینی کاملِ زنجیرهٔ همگام‌سازی', items:[
+    '💬 <b>پاسخ دستی به پیام‌های مشتری:</b> در تنظیمات، بخشِ تازهٔ «پاسخ دستی به',
+    '   مشتریان» — گفتگوهای باسلام را همان‌جا ببینید (با شمارِ خوانده‌نشده)، تاریخچهٔ',
+    '   کاملِ گفتگو (مشتری + خودِ ما) را باز کنید و بدونِ رفتن به پلتفرمِ باسلام',
+    '   جواب بدهید. پاسخ‌ها در همان لاگِ پاسخ‌ها ثبت می‌شوند.',
+    '🔎 <b>بازبینیِ کاملِ زنجیرهٔ همگام‌سازی (دستی/خودکار) — دو نقصِ پیدا‌شده:</b>',
+    '   ۱) دکمهٔ «توقف»ِ همگام‌سازیِ دستی تا حالا فقط حلقهٔ پروفایل‌ها را می‌ایستاند؛',
+    '   وِرکرِ ارسالِ در حال اجرا سیگنالِ خودش (stop) را می‌بیند و آن نوشته نمی‌شد.',
+    '   حالا توقفِ دستی، سیگنالِ ارسالِ باسلام/ووکامرس و استخراج را هم می‌گذارد و',
+    '   ارسالِ نیمه‌کاره در اولین محصولِ بعد می‌ایستد.',
+    '   ۲) اجرایِ دستی قفلِ کران را «اگر آزاد باشد» برمی‌دارد تا کرانِ دوره‌ای',
+    '   وسطِ همگام‌سازیِ دستی (که می‌تواند ساعت‌ها طول بکشد) روی صف‌ها موازی',
+    '   کار نکند و دو اجرا روی صفِ همان پروفایل برخوردند.',
+    '   بقیهٔ زنجیره (استخراج ⇒ صف‌سازی ⇒ ارسالِ نوبتی ⇒ گزارش ⇒ پمپ/نگهبان)',
+    '   بررسی شد و درست کار می‌کند.',
+  ]},
+  {v:'10.54', t:'🩹 رفعِ خطایِ JS در فهرستِ تغییراتِ نسخه‌ها', items:[
+    '🩹 ورودیِ نسخهٔ ۱۰.۵۳ در فهرستِ تغییرات با قالبِ نادرست نوشته شده بود و',
+    '   وقتی منویِ «تغییراتِ نسخه‌ها» رندر می‌شد، خطای',
+    '   <code dir="ltr">Cannot read properties of undefined (reading map)</code>',
+    '   می‌داد. قالبِ صحیح (عنوان + فهرستِ موارد) برگردانده شد.',
+  ]},
+  {v:'10.53', t:'🤝 همگام‌سازیِ دستیِ قابلِ دید + پلکانِ حذف + صفِ ارسالِ نوبتی', items:[
+    '🤝 <b>همگام‌سازیِ دستی دیده می‌شود:</b> پروفایل‌هایِ همگام‌سازیِ دستی',
+    '   حالا در صفِ استخراج با برچسبِ «🤝 هنگامِ همگام‌سازیِ دستی» ثبت می‌شوند',
+    '   (قبلاً مثلِ خودکار/کران بودند) و ردیف‌هایِ صفِ ارسالِ ساخته‌شده در آن',
+    '   لحظه (باسلام/ووکامرس) هم همان برچسب را نشان می‌دهند.',
+    '🧯 <b>پلکانِ حذف (۵ گامه):</b> اگر بایگانی ممکن نبود، اول محصول',
+    '   غیرفعال (۳۷۰) می‌شود؛ اگر آن هم نشد، موجودی و قیمت صفر می‌شود تا',
+    '   اصلاً پیدا نشود — در هر حال پیامِ دقیقِ نتیجه را می‌بینید. (این دو',
+    '   گامِ اضافه فقط برای حذف/بایگانی فعال‌اند و تغییرِ وضعیتِ عادی را',
+    '   دست نمی‌زنند.)',
+    '📤 <b>صفِ ارسالِ نوبتی:</b> هر اجرایِ وِرکرِ ارسال، همهٔ ردیف‌های «در',
+    '   انتظار» را به نوبت پردازش می‌کند (هر پروفایل همان یک ردیفِ قبلی را',
+    '   دارد؛ سقف ۱۰ ردیف در هر اجرا) — دیگر لازم نیست پروفایل‌ها را یکی‌یکی',
+    '   بفرستید.',
+  ]},
+  {v:'10.52', t:'⚡ بایگانی/تغییرِ وضعیت گام‌به‌گام — خداحافظی با ۵۰', items:[
+    '❌ <b>مشکل:</b> نسخهٔ ۱۰.۵۱ سه روشِ بایگانی (فقط-وضعیت، پیلودِ کامل،',
+    '   اندپوینتِ archive) را در <b>یک</b> درخواست پشتِ‌سرِ هم می‌زد — تا ۸',
+    '   درخواستِ باسلام + خواندنِ محصول. روی هاستِ شما کلِ زنجیره از پنجرهٔ',
+    '   مهلتِ HTTP بیرون می‌خورد و به‌جای خطای باسلام، خطای ۵۰۲ (Gateway',
+    '   Error) می‌آمد.',
+    '✅ <b>چه شد:</b> حالا هر <b>گام</b> در یک درخواستِ کوتاهِ جدا اجرا',
+    '   می‌شود (حداکثر ۲ تا ۴ درخواستِ باسلام، بدون تکرارِ تلاشِ شبکه):',
+    '   گامِ ۱ فقط-وضعیت (همان کارِ سریعِ قدیمی) → اگر نبرد، رابطِ مرورگر',
+    '   <b>خودکار</b> گامِ ۲ (پیلودِ کامل) و بعد گامِ ۳ (archive) را در',
+    '   درخواستِ تازه می‌زند — بدون هیچ کلیکِ اضافی از سمتِ شما. کارگرِ',
+    '   سرورسایدِ «حذفِ تکراری» هم مثلِ قبل هر سه گام را یکجا می‌زند',
+    '   (آنجا پنجرهٔ HTTP محدودیت نیست).',
+    '🛠 اگر باز هم ۴۲۲ دیدید، پیامِ خطا همان جزئیاتِ دقیقِ باسلام + فهرستِ',
+    '   روش‌های امتحان‌شده را دارد — متنِ آن را بفرستید تا نصبِ شما را',
+    '   دقیق تنظیم کنیم.',
+  ]},
+  {v:'10.51', t:'🔧 پسوندِ کهنهٔ صفِ ارسال + بایگانیِ چندروشهِ باسلام', items:[
+    '❌ <b>مشکل ۱ (ارسال با پسوندِ قبلی):</b> تنظیماتِ هر ارسال (از جملهٔ',
+    '   پسوندِ عنوان) در لحظهٔ صف‌سازی روی خودِ ردیفِ صف ذخیره می‌شود و یک',
+    '   محافظ «ردیفِ تکراری دوباره نساز» تا ۲ ساعت جلوی صف‌سازیِ دوباره را می‌گیرد.',
+    '   نتیجه: وقتی پسوند را درست کردید، در «نتایج» پسوندِ درست دیده می‌شد ولی صف',
+    '   همان ردیفِ کهنه را داشت و ارسال با پسوندِ قبلی ادامه می‌یافت.',
+    '✅ <b>چه شد:</b> حالا اگر تنظیماتِ اثرگذار بر ارسال (پسوندِ عنوان، دسته،',
+    '   «فقط تغییرات»، ارسال به همهٔ غرفه‌ها) عوض شده باشند، ردیفِ قدیمیِ',
+    '   منتظر/توقف‌خورده خودکار «جایگزین شد» می‌شود (در تبِ «ارسال» با علتش) و',
+    '   ردیفِ تازه با تنظیماتِ درست ساخته می‌شود — برای باسلام و ووکامرس.',
+    '❌ <b>مشکل ۲ (بایگانی و حذفِ تکراری‌ها با ۴۲):</b> بایگانی در باسلام یعنی',
+    '   «تغییر وضعیت» به ۴۱۴ (API حذفِ واقعی ندارد) و قبلاً فقط یک PATCHِ',
+    '   فقط-وضعیت می‌زدیم که در نصبِ شما ۴۲۲ می‌گرفت.',
+    '✅ <b>چه شد:</b> حالا سه روش به‌ترتیب امتحان می‌شود: (۱) PATCH فقط-وضعیت،',
+    '   (۲) PATCH با پیلودِ کامل (داده‌های جاریِ محصول + وضعیتِ جدید — همان',
+    '   الگویی که آپدیتِ همگام‌سازی با موفقیت انجام می‌دهد)، (۳) اندپوینتِ',
+    '   اختصاصیِ archive اگر API داشته باشد. اگر باز هم نشد، پیامِ خطا',
+    '   <b>دقیقاً می‌گوید کدام روش‌ها با چه کدی امتحان شده‌اند</b> + جزئیاتِ ۴۲۲',
+    '   را نشان می‌دهد؛ لطفاً متنِ همان خطا را بفرستید تا روشِ درستِ نصبِ شما را',
+    '   دقیق تنظیم کنیم. این مسیرِ جدید هم بایگانیِ دستی و هم حذفِ تکراری‌ها را',
+    '   می‌پوشاند.',
+  ]},
+  {v:'10.50', t:'🖥️ ارسالِ همگام‌سازیِ دستی، کاملاً سرورساید — دیگر لازم نیست تب را باز نگه دارید', items:[
+    '❌ <b>نقصِ نسخهٔ قبل:</b> v10.49 ارسال را به اتصالِ همین تبِ مرورگر گره',
+    '   زده بود — تا تب باز باشد ارسال پیش می‌رفت و «تب را باز نگه دارید»',
+    '   نوشته بود. اگر تب بسته می‌شد یا مرورگر می‌خوابید، ارسال نیمه‌کاره می‌ماند.',
+    '✅ <b>حالا چه می‌شود:</b> خودِ کارگرِ همگام‌سازیِ دستی — که از همان شروع',
+    '   پاسخ داده و در سرور زنده است — بعد از صف‌سازی، <b>نوبت‌به‌نوبت</b> صفِ',
+    '   ارسال را پردازش می‌کند: در هر نوبت یک پردازندهٔ ارسال را با مهلتِ',
+    '   طولانی راه می‌اندازد و منتظرش می‌ماند، بعد صف را دوباره بررسی می‌کند و',
+    '   تا خالی‌شدن (یا توقفِ دستی) ادامه می‌دهد. یعنی کلِ راه‌اندازیِ ارسال',
+    '   <b>سرورساید</b> است و تبِ مرورگر هیچ نقشی ندارد — می‌توانید ببندید.',
+    '🛡 <b>اگر کارگر سرورساید وسط راه بمیرد:</b> پیشرفت به‌ازایِ هر محصول',
+    '   چک‌پوینت شده است، پس پمپِ کرانِ v10.49 از همان نقطهٔ قطع‌شده برمی‌دارد؛',
+    '   کیکِ مرورگریِ v10.49 هم به‌عنوانِ شتاب‌دهندهٔ پشتیبان می‌ماند (قفلِ',
+    '   flock جلوی تداخلِ آن‌ها را می‌گیرد).',
+  ]},
+  {v:'10.49', t:'📤 ارسال دیگر به حالِ خود رها نمی‌شود + خطای بایگانی حالا گویا است', items:[
+    '❌ <b>مشکل ۱ (همگام‌سازی به مرحلهٔ ارسال نمی‌رسید):</b> همگام‌سازی، محصولات را',
+    '   «در صفِ ارسال» می‌نشیند و پردازندهٔ جداگانه‌ای باید آن‌ها را بفرستد. اما آن',
+    '   پردازنده فقط تا وقتی زنده می‌ماند که یک کلاینت به آن وصل باشد؛ کران از راهِ',
+    '   فایروالِ خودِ هاست فقط ۱٫۵ ثانیه وصل می‌ماند و بعد می‌رود — پس صف عملاً هرگز',
+    '   جلو نمی‌رفت و شما «استخراج انجام شد، ارسال نه» می‌دیدید.',
+    '✅ <b>چه شد:</b> (الف) کران حالا «پمپِ ارسال» دارد: در ابتدای هر تیک، اگر کارِ',
+    '   گیر در صف باشد، پردازنده را راه می‌اندازد و تا ۱۲۰ ثانیه منتظر می‌ماند — هر',
+    '   تیک چقدر که هاست اجازه بدهد صف را جلو می‌راند و چون چک‌پوینتی دارد، چیزی',
+    '   از دست نمی‌رود. (ب) همگام‌سازیِ دستی دیگر ارسال را به کران واگذار نمی‌کند:',
+    '   با پایانِ صف‌سازی، همین تبِ مرورگر پردازنده را با اتصالِ زنده راه می‌اندازد',
+    '   و نوارِ پیشرفتِ ارسال همان‌جا (و در تبِ «ارسال») دیده می‌شود. به همین دلیل:',
+    '   <b>تب را تا پایانِ ارسال باز نگه دارید</b> — بستنِ تب، ارسال را قطع می‌کند.',
+    '❌ <b>مشکل ۲ (بایگانی با ۴۲۲):</b> (الف) اگر مسیرِ سراسریِ محصول پارامتر را',
+    '   نپذیرفت (۴۲)، حالا مسیرِ زیرِ غرفه هم امتحان می‌شود — همان‌طور که برای',
+    '   ۴۰/۴۰۳/۴۰۴ انجام می‌شد. (ب) پیامِ خطا حالا <b>جزئیاتِ دقیقِ باسلام</b> را',
+    '   می‌گوید (کدام فیلد، چه ایرادی) به‌جای «خطا» — اگر باز هم ۴۲ دیدید، متنِ',
+    '   همان خطا را عکس بگیرید تا دقیقاً درستش کنیم.',
+  ]},
+  {v:'10.48', t:'🏃 اعلان‌ها اولِ کران: دیگر گروگانِ پردژهٔ کشته‌شده نیستند', items:[
+    '❌ <b>مشکل (که خودِ پینگ گفت):</b> «⚠️ اجرای قبلی نیمه‌کاره ماند (هاست پردازه را',
+    '   کشت)» — هاست شما پردژهٔ PHP را وسطِ اجرا می‌کشد. بررسیِ اعلان‌ها تا حالا در',
+    '   <b>میانهٔ</b> کران — بعد از تمامِ همگام‌سازی‌ها — اجرا می‌شد؛ یعنی دقیقاً بعد از',
+    '   همان جایی که پردژه کشته می‌شد. برای همین شما فقط پینگِ «شروع شد» را می‌دیدید',
+    '   و نه اعلان، نه گزارشِ «اجرا شد».',
+    '✅ <b>چه شد:</b> بررسیِ اعلان‌ها (سفارش، پیام، محصول) و پاسخِ خودکار — که هر دو',
+    '   <b>سبک</b>‌اند و فقط باسلام را می‌خوانند — حالا <b>درست بعد از نبض و قبل از',
+    '   بکاپ/جزئیات/همگام‌سازی</b> اجرا می‌شوند. همان الگویی که قبلاً برای نگهبان',
+    '   (۸.۹۷)، بکاپ (۹.۱۶) و حلقهٔ جزئیات (۹.۲۰) استفاده شد: کارهای مهم و سریع',
+    '   اول، کارهای بلند بعد. حالا حتی اگر هاست چند ثانیهٔ بعد پردژه را بکشد،',
+    '   اعلانِ همان دور رفته است.',
+    '📡 <b>پینگِ نبض دیگر گمراه نمی‌کند:</b> پینگِ «شروع شد» به‌جای «اجرا نشد',
+    '   (پیام‌رسان یا غرفهٔ باسلام ندارد)» — که دروغ بود چون بررسی هنوز نشده بود —',
+    '   حالا می‌گوید: «اعلان‌ها (آخرین بررسی ۵ دقیقه پیش): گفتگو ۸ (۲ بی‌جواب) ·',
+    '   سفارش ۱۲ · محصول ۵».',
+    '📌 <b>دربارهٔ همگام‌سازیِ دستی:</b> همگام‌سازیِ کامل (استخراج+ارسالِ یک پروفایل',
+    '   بزرگ) ممکن است باز هم توسط هاست وسطِ ارسال کشته شود؛ نگران نباشید،',
+    '   <b>صف پایدار است</b> — با زدنِ دوبارهٔ همگام‌سازی از همان‌جایی که قطع شد',
+    '   ادامه می‌شود و چیزِ انجام‌شده تکرار نمی‌شود. بازگشایِ تبِ مرورگر تا پایان',
+    '   اجرا، عمرِ پردژه را در هاست بیشتر نگه می‌دارد.',
+  ]},
+  {v:'10.47', t:'📡 پینگ خودِ گزارش‌گر است: هر پینگ می‌گوید اعلان‌ها چه دید و چه نشد', items:[
+    ' <b>هر پیامِ پینگ</b> (همان پیامی که می‌آید و می‌گوید «کران اجرا شد») حالا یک',
+    '   خطِ تازه دارد: <b>«اعلان‌ها: گفتگو ۸ (۲ بی‌جواب) · سفارش ۱۲ · محصول ۵»</b>',
+    '   — یا دلیلِ اجرا نشدن: «اجرا نشد — هیچ غرفهٔ باسلامی با توکن تنظیم نشده»،',
+    '   «هیچ رویدادی روشن نیست»، یا خطای باسلام. یعنی <b>دقیقاً همان پیامی که',
+    '   الان می‌بینید، به شما می‌گوید چرا اعلانی نمی‌رسد</b> — بدون نیاز به',
+    '   هیچ کلیک دیگری.',
+    '🔍 <b>چرا این مهم است:</b> اگر پینگ می‌آید ولی اعلان نمی‌آید، یا بررسی',
+    '   اجرا نمی‌شود (غرفه/توکن ندارد) یا اجرا می‌شود ولی باسلام خالی/خطا',
+    '   برمی‌گرداند. حالا هر دو صورت را خودِ پینگ می‌گوید: صفرِ واقعی (گفتگو ۰)',
+    '   از «اجرا نشد» قابل تمایز است.',
+    '🛡 <b>ضدِ سکوتِ ساختاری:</b> اگر APIِ باسلام ساختارِ پاسخ را عوض کند و',
+    '   شناسهٔ/متنِ پیام نیامد، امضای پشتیبان حالا <b>updated_at</b> را هم می‌بیند —',
+    '   یعنی پیامِ تازه دیگر نمی‌تواند برای همیشه نامرئی بماند. دکمهٔ «تستِ',
+    '   پیام‌ها» هم اگر متن نمی‌آید، می‌گوید «⚠️ متنِ پیام نمی‌آید» و یک نمونه',
+    '   از دادهٔ خامِ باسلام را می‌فرستد تا ساختار درست قابل بررسی باشد؛ و',
+    '   تعدادِ «بی‌جواب» (موردِ یادآوری) را جدا نشان می‌دهد.',
+    '📌 <b>یادآوری فقط برای «بی‌جواب» است:</b> اگر پیام را در پنل باسلام خوانده',
+    '   باشید، شمارِ «دیده‌نشده» صفر می‌شود و یادآوری‌اش متوقف می‌شود (طراحی',
+    '   همین است: یادآوریِ پیامی که جواب خورده، مزاحمت است).',
+  ]},
+  {v:'10.46', t:'🏪 انتخاب غرفه برای اعلانِ «پیام مشتری» + خطِ وضعیتِ زندهٔ اعلان‌ها', items:[
+    ' <b>دراپ‌داونِ «غرفهٔ پیام‌ها»:</b> زیرِ تیکِ «💬 پیام مشتری» در بخشِ',
+    '   اعلان‌ها، حالا می‌توانید انتخاب کنید اعلانِ پیام از کدام غرفه بیاید:',
+    '   گزینهٔ پیش‌فرض <b>«همهٔ غرفه‌ها»</b> و بعد از آن یک گزینه برای هر',
+    '   غرفه (غرفهٔ پیش‌فرض + غرفه‌های اضافی). دکمهٔ «تستِ پیام‌ها» هم فقط',
+    '   همان غرفهٔ انتخاب‌شده را تست می‌کند. اگر غرفهٔ انتخاب‌شده بعداً حذف',
+    '   شود، بررسی به همهٔ غرفه‌ها برمی‌گردد — نه اینکه ساکت بماند.',
+    '🩺 <b>خطِ وضعیتِ زنده:</b> بالایِ فهرستِ رویدادها، حالا یک خط نشان',
+    '   می‌دهد: <b>«آخرین بررسی: X دقیقه پیش — دیده‌شده: N گفتگو، M سفارش،',
+    '   K محصول»</b> یا اولینِ مشکل‌ها (پیام‌رسان وصل نیست، کران اجرا نشده،',
+    '   تنظیمات باسلام ناقص و...). پس اگر فکر کنید «اعلان نمی‌آید»، دیگر',
+    '   گمان‌زنی نیست: یا کران اصلاً اجرا نمی‌شود (خطِ وضعیت می‌گوید)، یا',
+    '   اجرا می‌شود ولی باسلام خطا می‌دهد (خطا همان‌جا می‌درخشد)، یا واقعاً',
+    '   رویدادِ تازه‌ای نبوده (دیده‌شده‌ها را نشان می‌دهد).',
+    '   (هر دورِ کران، خلاصهٔ «چه دید» را هم روی دیسک می‌نشیند تا از',
+    '   «سلامتِ اعلان‌ها» هم قابل‌ببیندن باشد.)',
+  ]},
+  {v:'10.45', t:'💬 اعلان‌های رویداد همهٔ غرفه‌ها را می‌بیند — و اگر سکوت کرد، دلیلش را می‌گوید', items:[
+    '❌ <b>مشکل:</b> اعلانِ پیام‌های مشتری (و سفارش/محصول) نمی‌آمد، در حالی‌که',
+    '   دکمهٔ پینگ و «ارسال چندگانه» بدون مشکل پیام را به پیام‌رسان می‌زدند.',
+    '🔍 <b>چرا؟</b> سه ایراد، و هر سه ساکت:',
+    '   • بررسی‌های خودکار فقط <b>غرفهٔ پیش‌فرض</b> را می‌گشتند؛ پیامِ مشتریِ',
+    '     غرفه‌های دیگر هرگز دیده نمی‌شد. (همان تله‌ای که نسخهٔ ۱۰.۴۲ برای',
+    '     «تکراری‌ها» گرفت.)',
+    '   • اگر کلیدِ رویدادی در تنظیمات نبود، رابط «روشن» نشان می‌داد ولی سرور',
+    '     «خاموش» فرض می‌کرد — و حتی اگر صریح خاموش شده بود، تیک باز هم',
+    '     «روشن» به نظر می‌رسید. هیچ خبری هم نمی‌داد.',
+    '   • اگر باسلام خطا می‌داد (توکن منقضی، بدون اسکوپ، ...)، خطا <b>بی‌صدا',
+    '     دور ریخته</b> می‌شد؛ نه در گزارشِ اجرا، نه در پینگ.',
+    '✅ <b>چه چیزی درست شد:</b>',
+    '   • حالا هر سه بررسی (سفارش، پیام، محصول) <b>همهٔ غرفه‌ها</b> را با توکنِ',
+    '     <b>خودِ همان غرفه</b> می‌گردند؛ در پیام‌ها نامِ غرفه هم هست و',
+    '     وضعیتِ هر غرفه جدا از بقیه نگه داشته می‌شود.',
+    '   • رویدادی که تیکش «روشن» است، واقعاً روشن است: نبودِ کلید = روشن و',
+    '     تیکِ خاموشِ صریح سرانجام واقعاً خاموش به نظر می‌رسد.',
+    '   • اولینِ بازدید از هر غرفه <b>خاموش</b> است: افزودنِ غرفهٔ دوم دیگر ده',
+    '     پیامِ قدیمی را یک‌جا نمی‌فرستد؛ از دورِ بعد تشخیص شروع می‌شود.',
+    '   • اگر باسلام برای آخرین پیام «شناسه» نداد، امضا از متنِ پیام ساخته',
+    '     می‌شود — پیامِ تازه دیگر هرگز گم نمی‌شود.',
+    '   • سکوت دیگر بی‌دلیل نیست: خطاها در <b>گزارشِ آخرین اجرا</b> می‌نشینند،',
+    '     در <b>پینگِ بعدی</b> با ⚠️ اعلام می‌شوند، و در «سلامتِ اعلان‌ها»',
+    '     می‌توانید ببینید دقیقاً چه چیزی گیر است. دکمه‌های «تست» هم حالا',
+    '     <b>غرفه‌به‌غرفه</b> گزارش می‌دهند: کدام وصل است، کدام نه، و چرا.',
+  ]},
   {v:'10.44', t:'🗑 گزارشِ زنده هنگام حذف + جست‌وجویی که واقعاً همهٔ محصولات را می‌گردد', items:[
     '❌ <b>مشکل ۱:</b> دکمهٔ «حذفِ همهٔ موارد نشان‌داده‌شده» باز هم انگار کار',
     '   نمی‌کرد: می‌زدید، یک پیامِ «در حال حذف...» می‌آمد و بعد هیچ — نه پیشرفتی،',
@@ -52004,6 +55754,36 @@ const CHANGELOG = [
  * v8.29: تست استعلام باسلام — واقعاً درخواست می‌فرستد، نه شبیه‌سازی.
  * حالت تست وضعیت را ذخیره نمی‌کند تا اعلان واقعی بعدی از دست نرود.
  */
+/* v10.46 (۶۰): یک خط از وضعیت اعلان‌ها — آخرین بررسی کِی بود، چه دیده،
+   و اگر مشکلی هست همان‌جا می‌درخشد تا «چیزی نمی‌آید» دیگر قابل‌گمان نباشد. */
+function renderNotifHealth(){
+  const line=$('notifHealthLine'); if(!line)return;
+  fetch('?notif_health=1').then(r=>r.json()).then(d=>{
+    if(!line)return;
+    if(!d||!d.ok){line.style.color='#f87171';line.textContent='⚠️ خواندن وضعیت اعلان‌ها ناموفق بود';return;}
+    const bits=[];
+    if(d.last_notif_run){
+      bits.push('آخرین بررسی: '+(d.last_notif_run_fa||'—'));
+      if(d.last_notif_seen){
+        bits.push('دیده‌شده: '+toFa(d.last_notif_seen.chats||0)+' گفتگو'+(d.last_notif_pending>0?' ('+toFa(d.last_notif_pending)+' بی‌جواب)':'')+' · '+toFa(d.last_notif_seen.orders||0)+' سفارش · '+toFa(d.last_notif_seen.products||0)+' محصول');
+      }
+      const fN=(d.last_notif_found?(d.last_notif_found.chats||0)+(d.last_notif_found.orders||0)+(d.last_notif_found.products||0):0);
+      if(fN>0)bits.push('اعلان: '+toFa(fN)+' مورد');
+    }else{
+      bits.push('هنوز دورِ بررسی‌ای ثبت نشده — منتظرِ اجرای بعدیِ کران‌جاب');
+    }
+    if(d.healthy){
+      line.style.color='#4ade80';
+      line.innerHTML='🩺 <b>همه چیز درست است</b> — '+esc(bits.join(' · '));
+    }else{
+      line.style.color='#fbbf24';
+      line.innerHTML='⚠️ <b>'+esc((d.problems||[]).slice(0,2).join('؛ '))+'</b>'
+        +(bits.length?' — '+esc(bits.join(' · ')):'' )
+        +'<span style="color:#64748b"> · جزئیات: <code>?notif_health=1</code></span>';
+    }
+  }).catch(()=>{if(line)line.textContent='';});
+}
+
 function notifTest(kind){
   const labels={orders:'🛒 سفارش‌ها',chats:'💬 پیام‌ها',products:'📋 محصولات',source:'💰 تغییرات مبدأ',ping:'📡 پینگ کران'};
   const box=$('notifTestR');
@@ -52016,9 +55796,10 @@ function notifTest(kind){
       return;
     }
     const sent=d.sent||{};
-    const chips=Object.keys(sent).map(k=>{
+    const nmMap={baleh:'بله',rubika:'روبیکا',telegram:'تلگرام',none:'پیام‌رسان'};
+    const chips=Object.keys(sent).filter(k=>nmMap[k]).map(k=>{
       const okv=sent[k]==='sent';
-      const nm={baleh:'بله',rubika:'روبیکا',none:'پیام‌رسان'}[k]||k;
+      const nm=nmMap[k];
       return '<span style="font-size:10px;padding:1px 7px;border-radius:4px;margin-left:4px;background:'
         +(okv?'#14532d':'#7f1d1d')+';color:'+(okv?'#86efac':'#fca5a5')+'">'
         +(okv?'✓ ':'✗ ')+esc(nm)+'</span>';
@@ -52026,11 +55807,26 @@ function notifTest(kind){
     let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
     h+='<div style="color:#4ade80;margin-bottom:4px">✓ ارتباط با باسلام برقرار است</div>';
     h+='<div style="color:#94a3b8">بررسی‌شده: '+toFa(d.total_seen||0)+' مورد · یافت‌شده: '+toFa(d.found||0)+'</div>';
-    if(chips)h+='<div style="margin-top:4px">ارسال: '+chips+'</div>';
+    /* v10.45: گزارشِ غرفه‌به‌غرفه — کدام وصل است، کدام نه، و چرا */
+    if(Array.isArray(d.shops)&&d.shops.length){
+      h+='<div style="margin-top:4px">';
+      d.shops.forEach(s=>{
+        h+='<div style="font-size:10px;color:'+(s.ok?'#94a3b8':'#fca5a5')+';margin-top:2px">'
+          +(s.ok?'✓ ':'✗ ')+esc(s.shop_name||('غرفه '+s.vendor_id))
+          +(s.ok?(' — '+toFa(s.seen||0)+' مورد اخیر · '+toFa(s.found||0)+' قابل اعلان'):(esc(s.error||'')))
+          +(s.new_shop?' (اولین بررسی — بدون اعلان)':'')
+          +'</div>';
+      });
+      h+='</div>';
+    }
+    let errLines='';
+    Object.keys(sent).forEach(k=>{if(/_err$/.test(k)&&sent[k])errLines+='<div style="font-size:9.5px;color:#fca5a5;margin-top:2px">'+esc(nmMap[k.replace(/_err$/,'')]||k)+': '+esc(sent[k])+'</div>';});
+    if(chips||errLines)h+='<div style="margin-top:4px">'+(chips?'ارسال: '+chips:'')+errLines+'</div>';
     if(d.sample)h+='<div style="margin-top:6px;color:#cbd5e1;background:#1e293b;padding:6px;border-radius:6px;white-space:pre-wrap;font-size:10.5px">'+esc(d.sample)+'</div>';
     h+='</div>';
     box.innerHTML=h;
     showToast('✓ تست '+(labels[kind]||kind)+' انجام شد');
+    renderNotifHealth(); /* v10.46 (۶۰): خطِ وضعیت را تازه کن */
   }).catch(()=>{
     if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا در ارتباط</div>';
     showToast('خطا شبکه',1);
@@ -52039,6 +55835,29 @@ function notifTest(kind){
 
 /** v8.37: پینگ آزمایشی — همان پیامی که کران‌جاب می‌فرستد */
 function testPing(){notifTest('ping');}
+/** v10.79 (93): لاگِ پینگ‌هایِ اخیر — کجای زنجیره گیر است را نشان می‌دهد */
+function showPingLog(){
+  const box=$('pingLogR');if(!box)return;
+  box.innerHTML='<div>⏳ بارگذاری...</div>';
+  fetch('?ping_log=1').then(r=>r.json()).then(d=>{
+    const L=(d&&d.log)||[];
+    if(!L.length){box.innerHTML='<div>هنوز تلاشی ثبت نشده است.</div>';return;}
+    const nm={baleh:'بله',rubika:'روبیکا',telegram:'تلگرام',none:'پیام‌رسان'};
+    let h='';
+    L.slice(0,6).forEach(e=>{
+      const dv=e.delivery||{};
+      let chips='';
+      chips=Object.keys(dv).filter(k=>nm[k]).map(k=>'<span style="color:'+(dv[k]==='sent'?'#4ade80':'#f87171')+'">'+nm[k]+(dv[k]==='sent'?' ✓':' ✗')+'</span>').join(' · ');
+      let errs='';
+      Object.keys(dv).forEach(k=>{if(/_err$/.test(k)&&dv[k])errs+='<div style="color:#fca5a5;padding-left:12px">'+esc(k.replace(/_err$/,''))+': '+esc(dv[k])+'</div>';});
+      h+='<div style="margin-top:3px">'+(e.ok?'✓':'✗')+' '+esc(e.time||'')+' — '+esc(e.src||'')
+        +(e.skipped?' (رد شد: '+esc(e.skipped)+')':'')
+        +(chips?' — '+chips:'')
+        +((e.error&&!e.skipped)?' — '+esc(e.error):'')+'</div>'+errs;
+    });
+    box.innerHTML=h;
+  }).catch(()=>{box.innerHTML='<div>✗ خطای شبکه</div>';});
+}
 
 /* =====================================================================
  *  v8.47: مغایرت‌گیری — رابط کاربری
@@ -52471,6 +56290,1001 @@ function arLoad(force){
     arRenderRules();
   }).catch(()=>{});
 }
+
+/* v10.57 (۷۱): اتاقِ چتِ باسلام — چندغرفه‌ای، زنده (هر ۱ ثانیه)، موبایل‌محور،
+   با تصویر. لیستِ مشتری‌ها در موبایل کشویی است؛ عددِ پرانتزی = شمارهٔ غرفه. */
+let MR_CHAT=null;           // {id, shop, shop_name, who, _count, _lastId}
+let MR_SHOP_FILTER=0;       // 0 = همهٔ غرفه‌ها
+let MR_IMG=null;            // {dataURL, name, mime}
+let MR_SHOPS=[];            // [{shop,name,ok,n}]
+let MR_LAST_CHATS=[];
+const MR_COLORS=['#60a5fa','#34d399','#fbbf24','#f472b6','#a78bfa','#fb923c','#4ade80','#e879f9'];
+function mrShopColor(n){return MR_COLORS[(n-1)%MR_COLORS.length];}
+function mrIsMobile(){return window.innerWidth<720;}
+function mrMsg(t,c){const m=$('mrMsg'); if(m){m.innerHTML=t; m.className='msg on '+(c||'');}}
+function mrBodyOpen(){const b=$('mrBody'); return !!(b&&b.classList.contains('open')&&b.offsetParent!==null);}
+function mrRelTime(v){
+  if(!v)return'';
+  let t=Date.parse(String(v));
+  if(isNaN(t))t=Date.parse(String(v).replace(' ','T'));
+  if(isNaN(t))return'';
+  const df=(Date.now()-t)/1000;
+  if(df<60)return'همین حالا';
+  if(df<3600)return toFa(Math.floor(df/60))+' دقیقه پیش';
+  if(df<86400)return toFa(Math.floor(df/3600))+' ساعت پیش';
+  return toFa(Math.floor(df/86400))+' روز پیش';
+}
+async function mrFetchChats(){
+  const d=await fetch('?bsl_chats=1&limit=30&shop='+MR_SHOP_FILTER).then(r=>r.json()).catch(()=>null);
+  return (d&&d.ok)?d:null;
+}
+async function mrPoll(){
+  if(document.visibilityState!=='visible'||!mrBodyOpen())return;
+  const d=await mrFetchChats();
+  if(!d)return;
+  MR_SHOPS=d.shops||[];
+  mrRenderChips();
+  mrRenderList(d.chats||[]);
+  const info=$('mrInfo');
+  if(info){
+    const n=(d.chats||[]).length;
+    const bad=(d.shop_errors||[]).length;
+    info.textContent='به‌روزرسانیِ خودکارِ هر ۱ ثانیه'+(n?' · '+toFa(n)+' گفتگو':'')+(bad?' · '+toFa(bad)+' غرفه خطا دارد':'');
+  }
+  if(MR_CHAT)mrPollThread(false);
+}
+function mrRenderChips(){
+  const box=$('mrShopChips'); if(!box)return;
+  box.innerHTML='<span class="mrchip'+(MR_SHOP_FILTER===0?' on':'')+'" onclick="mrFilterShop(0)">همه</span>'+
+    MR_SHOPS.map(x=>'<span class="mrchip'+(MR_SHOP_FILTER===x.shop?' on':'')+'" onclick="mrFilterShop('+x.shop+')" title="'+esc(x.name)+'"><span style="color:'+mrShopColor(x.shop)+'">('+toFa(x.shop)+')</span> '+esc(x.name)+(x.ok===false?' ⚠️':'')+'</span>').join('');
+}
+function mrFilterShop(n){
+  MR_SHOP_FILTER=n;
+  mrRenderChips();
+  mrRenderList(MR_LAST_CHATS.filter(c=>n===0||(c.shop||1)===n));
+  mrPoll();
+}
+function mrRenderList(chats){
+  const box=$('mrList'); if(!box)return;
+  const badge=$('mrListBadge');
+  const tot=chats.reduce((a,c)=>a+(c.unseen||0),0);
+  if(badge)badge.innerHTML=tot>0?'<span style="background:#dc2626;color:#fff;border-radius:9px;font-size:9.5px;padding:0 6px">'+toFa(tot)+' جدید</span>':'<span style="color:#64748b;font-size:9.5px">'+toFa(chats.length)+' گفتگو</span>';
+  if(!chats.length){box.innerHTML='<div class="empty" style="padding:16px 6px">گفتگویی پیدا نشد</div>';return;}
+  box.innerHTML=chats.map(c=>{
+    const col=mrShopColor(c.shop||1);
+    const active=MR_CHAT&&MR_CHAT.id===c.chat_id;
+    return '<div onclick="mrOpenChat('+c.chat_id+','+(c.shop||1)+')" style="padding:7px 9px;border-bottom:1px solid #1e293b;cursor:pointer;border-radius:6px'+(active?';background:#16233d':'')+'">'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px">'+
+      '<b style="font-size:11.5px;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.who)+'</b>'+
+      '<span style="display:flex;gap:4px;align-items:center;flex:0 0 auto">'+
+      '<span style="color:'+col+';font-size:9.5px;border:1px solid '+col+'66;border-radius:8px;padding:0 5px" title="'+esc(c.shop_name||'')+'">('+toFa(c.shop||1)+')</span>'+
+      (c.unseen>0?'<span style="background:#dc2626;color:#fff;border-radius:9px;font-size:9.5px;padding:0 6px">'+toFa(c.unseen)+'</span>':'')+
+      '</span></div>'+
+      '<div style="display:flex;align-items:center;gap:5px;margin-top:2px">'+
+      (c.last_img?'<img src="'+esc(c.last_img)+'" alt="تصویر" onclick="event.stopPropagation();mrLightbox(this.src)" style="width:27px;height:27px;object-fit:cover;border-radius:6px;flex:0 0 auto;cursor:zoom-in;border:1px solid #334155" title="نمایش تصویر"/>':'')+
+      '<span style="font-size:10.5px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1">'+
+      (c.last_is_mine?'<span style="color:#60a5fa">شما:</span> ':'')+esc(c.text||'—')+'</span></div>'+
+      '<div style="font-size:9px;color:#475569;margin-top:1px">'+mrRelTime(c.updated_at)+'</div>'+
+      '</div>';
+  }).join('');
+}
+async function mrOpenChat(id,shop){
+  shop=shop||1;
+  const c=MR_LAST_CHATS.find(x=>x.chat_id===id)||null;
+  MR_CHAT={id:id, shop:shop, shop_name:c?(c.shop_name||''):'', who:c?(c.who||'مشتری'):'مشتری'};
+  mrRenderList(MR_LAST_CHATS);
+  const hdr=$('mrThrHdr'); if(hdr)hdr.style.display='flex';
+  const w=$('mrWho'); if(w)w.textContent=MR_CHAT.who;
+  const tag=$('mrShopTag');
+  if(tag){tag.textContent='('+toFa(shop)+') '+(MR_CHAT.shop_name||''); tag.style.color=mrShopColor(shop);}
+  if(mrIsMobile()){
+    $('mrList').classList.add('mr-collapsed');
+    const a=$('mrListArrow'); if(a)a.textContent='▲';
+    $('mrBackBtn').style.display='inline-block';
+    const t=$('mrThread'); if(t)t.scrollIntoView({behavior:'smooth',block:'nearest'});
+  }
+  $('mrMsgs').innerHTML='<div class="empty" style="padding:14px 6px">در حالِ بارگذاری…</div>';
+  await mrPollThread(true);
+}
+async function mrPollThread(force){
+  if(!MR_CHAT)return;
+  const d=await fetch('?bsl_chat_messages=1&chat_id='+MR_CHAT.id+'&shop='+MR_CHAT.shop+'&limit=40').then(r=>r.json()).catch(()=>null);
+  if(!d||!d.ok)return;
+  const msgs=d.messages||[];
+  if(d.shop)MR_CHAT.shop=d.shop;
+  const box=$('mrMsgs'); if(!box)return;
+  const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<80;
+  const changed=force||MR_CHAT._lastId===undefined||msgs.length!==MR_CHAT._count||msgs.length>0&&msgs[msgs.length-1].id!==MR_CHAT._lastId;
+  if(changed){
+    box.innerHTML=msgs.length?msgs.map(mrMsgHtml).join(''):'<div class="empty" style="padding:20px 6px">پیامی در این گفتگو نیست</div>';
+  }
+  MR_CHAT._count=msgs.length;
+  MR_CHAT._lastId=msgs.length?msgs[msgs.length-1].id:null;
+  if(force||atBottom)box.scrollTop=box.scrollHeight;
+}
+function mrMsgHtml(m){
+  let inner='';
+  if(m.img)inner+='<div style="margin-top:4px"><img src="'+esc(m.img)+'" alt="تصویر" style="max-width:180px;max-height:180px;border-radius:6px;display:block;cursor:zoom-in" title="برای بزرگ‌نمایی کلیک کنید" onclick="event.stopPropagation();mrLightbox(this.src)"></div>';
+  if(m.text)inner+='<div>'+esc(m.text)+'</div>';
+  else if(!m.img&&m.type&&m.type!=='text')inner+='<span style="color:#64748b">['+esc(m.type)+']</span>';
+  const mine=!!m.mine;
+  return '<div style="margin-bottom:9px">'+
+    '<div style="font-size:9.5px;color:#64748b;margin-bottom:2px">'+esc(m.sender||(mine?'شما':'مشتری'))+(m.at?' · '+mrRelTime(m.at):'')+'</div>'+
+    '<div style="display:inline-block;max-width:88%;background:'+(mine?'#173254':'#1e293b')+';border-radius:7px;padding:6px 9px;color:#e2e8f0;word-break:break-word">'+inner+'</div></div>';
+}
+function mrCloseChat(){
+  MR_CHAT=null;
+  const hdr=$('mrThrHdr'); if(hdr)hdr.style.display='none';
+  const b=$('mrBackBtn'); if(b)b.style.display='none';
+  const m=$('mrMsgs'); if(m)m.innerHTML='<div class="empty" style="padding:20px 6px">یک گفتگو را انتخاب کنید</div>';
+  const L=$('mrList'); if(L)L.classList.remove('mr-collapsed');
+  const a=$('mrListArrow'); if(a)a.textContent='▼';
+  mrRenderList(MR_LAST_CHATS);
+}
+function mrToggleList(){
+  const L=$('mrList'); if(!L)return;
+  L.classList.toggle('mr-collapsed');
+  const a=$('mrListArrow'); if(a)a.textContent=L.classList.contains('mr-collapsed')?'▲':'▼';
+}
+function mrFileClick(){const f=$('mrFile'); if(f)f.click();}
+function mrPickImage(inp){
+  const f=inp.files&&inp.files[0]; inp.value='';
+  if(!f)return;
+  if(f.size>7500000){mrMsg('✗ تصویر خیلی بزرگ است (حداکثر حدود ۷ مگابایت)','m-err');return;}
+  const rd=new FileReader();
+  rd.onload=()=>{
+    MR_IMG={dataURL:rd.result,name:f.name,mime:f.type||'image/jpeg'};
+    const p=$('mrImgPrev');
+    p.style.display='flex';
+    p.innerHTML='<img src="'+rd.result+'" style="width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid #334155;display:block"><span style="font-size:10.5px;color:#94a3b8;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(f.name)+'</span><button type="button" class="btn btn-gray" style="flex:0 0 auto;padding:2px 9px;font-size:10px" onclick="mrClearImage()">✕ حذف</button>';
+  };
+  rd.onerror=()=>mrMsg('✗ خواندنِ فایل ناموفق بود','m-err');
+  rd.readAsDataURL(f);
+}
+function mrClearImage(){MR_IMG=null;const p=$('mrImgPrev'); if(p){p.style.display='none';p.innerHTML='';}}
+function mrQuick(t){const el=$('mrText'); if(el){el.value=(el.value?el.value+' ':'')+t; el.focus();}}
+function mrKeydown(e){
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();mrSend();}
+}
+async function mrLoadChats(){
+  mrMsg('در حالِ بررسیِ گفتگوها…','');
+  mrPoll();
+  setTimeout(()=>{const m=$('mrMsg'); if(m&&!m.classList.contains('m-err'))mrMsg('✓ به‌روز شد','m-ok');},1200);
+}
+async function mrSend(){
+  if(!MR_CHAT)return;
+  const t=$('mrText').value.trim();
+  if(!t&&!MR_IMG)return;
+  const btn=$('mrSendBtn'); if(btn)btn.disabled=true;
+  const fd=new FormData();
+  fd.append('chat_id',MR_CHAT.id);
+  fd.append('shop',MR_CHAT.shop);
+  fd.append('text',t);
+  if(MR_IMG){
+    fd.append('image_b64',MR_IMG.dataURL);
+    fd.append('image_name',MR_IMG.name);
+    fd.append('image_mime',MR_IMG.mime);
+  }
+  mrMsg(MR_IMG?'📤 آپلودِ تصویر و ارسال…':'در حالِ ارسال…','');
+  const d=await fetch('?bsl_chat_reply=1',{method:'POST',body:fd}).then(r=>r.json()).catch(()=>({ok:false,error:'خطای شبکه'}));
+  if(btn)btn.disabled=false;
+  if(!d.ok)return mrMsg('✗ '+esc(d.error||'ارسال ناموفق'),'m-err');
+  mrMsg('✓ '+(MR_IMG?'تصویر ارسال شد':'پاسخ ارسال شد'),'m-ok');
+  $('mrText').value='';
+  if(MR_IMG)mrClearImage();
+  mrPollThread(true);
+  setTimeout(mrPoll,300);
+}
+/* v10.57 (۷۱): ضربانِ سراسریِ ۱ ثانیه‌ای — فقط وقتی اتاقِ چت باز است و تب
+   دیده می‌شود درخواست می‌فرستد (وگرنه بلافاصله برمی‌گردد). */
+setInterval(mrPoll,1000);
+
+/* =====================================================================
+   v10.60 (۷۴): نوتیفیکیشنِ زندهٔ پیام‌های تازهٔ مشتری
+   ---------------------------------------------------------------------
+   با رسیدنِ هر پیامِ جدیدِ مشتری (از هر غرفه) یک کارتِ شیک بالا می‌آید:
+     • سوایپِ چپ   ⇒ بسته می‌شود
+     • سوایپِ راست ⇒ اتاقِ چت روی همان گفتگو باز می‌شود و تکست‌باکسِ
+       پاسخ فوکوس می‌شود — آمادهٔ تایپ (دکمه‌های ✕ / 💬 هم هستن).
+   کشف: هر ۵ ثانیه (و بی‌وابستگی به باز بودنِ اتاقِ چت) فهرستِ گفتگوها
+   خوانده می‌شود (کشِ ۲ ثانیه‌ایِ سرور، ارزان) و «شناسهٔ آخرین پیامِ
+   مشتری» هر گفتگو با دفعهٔ قبل (localStorage) مقایسه می‌شود. اولین
+   بار بی‌صدا seed می‌شود تا پیام‌های قدیمی نوتیف نکنند؛ پیام‌های تازهٔ
+   زمانِ نبودِ کاربر در نوبتِ اولِ بازگشت می‌آیند. اگر کاربر خودش آن
+   گفتگو را باز داشته باشد، نوتیف نمی‌آید ولی «دیده‌شده» به‌روز می‌شود
+   تا بعد از بستنِ اتاق، بارِ نوتیفِ قدیمی نداند.
+   ===================================================================== */
+let MR_NOTIFS=[];
+let MR_SEEN={};
+let MR_NOTIF_BOOTED=false;
+const MR_NOTIF_TTL=30000;
+/* v10.66 (۸۰): تنظیماتِ اعلانِ زنده — درِ localStorage، اثرِ آنی، بدونِ دکمهٔ ذخیره */
+function mrLiveCfg(){
+  try{
+    return {
+      on: localStorage.getItem('mr_live_cards')!=='0',
+      sys: (localStorage.getItem('mr_sys_notif')==='1' && typeof Notification!=='undefined' && Notification.permission==='granted'),
+      poll: Math.max(3, parseInt(localStorage.getItem('mr_live_poll')||'5',10)||5),
+      ttl: Math.max(5, parseInt(localStorage.getItem('mr_live_ttl')||'30',10)||30),
+      sound: localStorage.getItem('mr_live_sound')!=='0'
+    };
+  }catch(e){ return {on:true,sys:false,poll:5,ttl:30,sound:true}; }
+}
+function mrNotifTtlMs(){ return mrLiveCfg().ttl*1000; }
+function mrNotifLoad(){try{return JSON.parse(localStorage.getItem('mr_notif_seen')||'{}')||{};}catch(e){return{};}}
+function mrNotifSave(){try{localStorage.setItem('mr_notif_seen',JSON.stringify(MR_SEEN));}catch(e){}}
+function mrNotifDing(){
+  try{
+    if(mrLiveCfg().sound===false)return; /* v10.66 (۸۰): صدایِ خاموش */
+    const AC=window.AudioContext||window.webkitAudioContext; if(!AC)return;
+    const C=new AC(); const t=C.currentTime;
+    const o=C.createOscillator(),g=C.createGain();
+    o.type='sine';
+    o.frequency.setValueAtTime(740,t);
+    o.frequency.exponentialRampToValueAtTime(1180,t+0.08);
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(0.10,t+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+0.45);
+    o.connect(g);g.connect(C.destination);o.start(t);o.stop(t+0.5);
+    setTimeout(()=>{try{C.close();}catch(e){}},800);
+  }catch(e){}
+}
+function mrNotifLabel(t){
+  return ({picture:'🖼 تصویر',gallery:'🖼 تصاویر',voice:'🎤 پیامِ صوتی',video:'🎬 ویدیو',
+    location:'📍 موقعیت',sticker:'😀 استیکر',file:'📄 فایل',voice_call_phone:'📞 تماس',
+    agreement:'📝 توافق‌نامه'})[t]||null;
+}
+function mrNotifText(c){
+  const t=String(c.text||'').trim();
+  if(!t)return'—';
+  const m=t.match(/^\[([a-z_]+)\]$/);
+  if(m)return mrNotifLabel(m[1])||t;
+  return t;
+}
+function mrNotifHost(){
+  let h=$('mrNotifHost');
+  if(!h){
+    h=document.createElement('div');h.id='mrNotifHost';
+    h.style.cssText='position:fixed;top:66px;left:14px;z-index:9500;display:flex;flex-direction:column;gap:10px;width:322px;max-width:calc(100vw - 28px)';
+    document.body.appendChild(h);
+  }
+  return h;
+}
+function mrNotifInitial(who){
+  const w=String(who||'م').replace(/[«»"\s]/g,'').trim();
+  return w?w.slice(0,1):'م';
+}
+function mrNotifClose(el){
+  const i=MR_NOTIFS.findIndex(x=>x.el===el); if(i<0)return;
+  const n=MR_NOTIFS[i]; MR_NOTIFS.splice(i,1);
+  if(n.timer)clearTimeout(n.timer);
+  if(el){
+    el.style.transition='transform .3s ease,opacity .3s ease';
+    el.style.transform='translateX(-130%) rotate(-5deg)';
+    el.style.opacity='0';
+    setTimeout(()=>{el.remove();},320);
+  }
+}
+function mrNotifReply(n){
+  const i=MR_NOTIFS.findIndex(x=>x.chat_id===n.chat_id);
+  if(i>=0){
+    const el=MR_NOTIFS[i].el; MR_NOTIFS.splice(i,1);
+    if(n.timer)clearTimeout(n.timer);
+    if(el){
+      el.style.transition='transform .3s ease,opacity .3s ease';
+      el.style.transform='translateX(130%) rotate(5deg)';
+      el.style.opacity='0';
+      setTimeout(()=>{el.remove();},320);
+    }
+  }
+  const body=$('mrBody');
+  const hdr=body?body.previousElementSibling:null;
+  if(hdr&&!hdr.classList.contains('open'))toggleSmenu(hdr);
+  mrOpenChat(n.chat_id,n.shop||1);
+  setTimeout(()=>{const t=$('mrText');if(t){t.focus();t.scrollIntoView({block:'nearest'});}},500);
+}
+/* v10.62 (۷۶): بزرگ‌نماییِ تصویر (Lightbox) — کلیک روی تصاویر */
+function mrLightbox(url){
+  if(!url)return;
+  let ov=$('mrLightbox');
+  if(!ov){
+    ov=document.createElement('div');
+    ov.id='mrLightbox';
+    ov.style.cssText='position:fixed;inset:0;z-index:99990;background:rgba(2,6,23,.93);display:flex;align-items:center;justify-content:center;cursor:zoom-out;animation:mrZoomIn .18s ease';
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML='<img src="'+esc(url)+'" alt="تصویر" style="max-width:94%;max-height:94%;border-radius:8px;box-shadow:0 20px 60px rgba(0,0,0,.6)"/>'+
+    '<div style="position:absolute;bottom:14px;left:0;right:0;text-align:center;color:#94a3b8;font-size:10px">کلیک یا Escape برای بستن</div>';
+  const closeOv=()=>{ov.remove();document.removeEventListener('keydown',ov._kd);};
+  ov.onclick=closeOv;
+  ov._kd=e=>{if(e.key==='Escape')closeOv();};
+  document.removeEventListener('keydown',ov._kd);
+  document.addEventListener('keydown',ov._kd);
+}
+/* v10.62 (۷۶): باز کردنِ پاسخِ درِجای درونِ کارت (سوایپِ راست / دکمهٔ 💬) */
+/* v10.65 (۷۹): وقتی کاربر در حال پاسخ‌دهی است، کارت خودکار نبندد */
+function mrNotifHold(card,n){
+  if(n){if(n.timer){clearTimeout(n.timer);n.timer=null;}n.hold=true;}
+  const bar=card.querySelector('.mrnbar'); if(bar)bar.style.animationPlayState='paused';
+  card.style.maxHeight='calc(100vh - 90px)';
+}
+function mrNotifOpenReply(n){
+  const card=n.el;
+  card.style.transform='';card.style.opacity='';
+  const rep=card.querySelector('.mrnreply'); if(rep)rep.style.display='block';
+  mrNotifHold(card,n);
+  const ta=card.querySelector('.mrnta');
+  if(ta)setTimeout(()=>{ta.focus();},90);
+}
+/* v10.63 (۷۷): اعلانِ سطحِ سیستم‌عامل — با متنِ کاملِ پیام و دکمهٔ پاسخ */
+function mrSysOn(){
+  try{
+    return localStorage.getItem('mr_sys_notif')==='1'
+      && typeof Notification!=='undefined'
+      && Notification.permission==='granted';
+  }catch(e){return false;}
+}
+function mrSysIcon(){
+  try{
+    if(window._mrSysIconC)return window._mrSysIconC;
+    const cv=document.createElement('canvas');cv.width=cv.height=96;
+    const cx=cv.getContext('2d');
+    cx.fillStyle='#1d4ed8';
+    if(cx.roundRect){cx.beginPath();cx.roundRect(2,2,92,92,22);cx.fill();}
+    else{cx.fillRect(0,0,96,96);}
+    cx.font='50px serif';cx.textAlign='center';cx.textBaseline='middle';
+    cx.fillText('\u{1F4AC}',48,50);
+    window._mrSysIconC=cv.toDataURL('image/png');
+    return window._mrSysIconC;
+  }catch(e){return'';}
+}
+function mrSysNotif(c){
+  try{
+    if(!mrSysOn())return;
+    const who=String(c.who||'مشتری');
+    const shopNm=String(c.shop_name||('غرفهٔ '+toFa(c.shop||1)));
+    let body=String(mrNotifText(c));
+    if(body==='—')body='(بدونِ متن)';
+    if(body.length>500)body=body.slice(0,500)+'…';
+    const ic=mrSysIcon();
+    const nt=new Notification('💬 '+who+' — '+shopNm,{
+      body:body,
+      tag:'mrchat_'+(c.shop||1)+'_'+c.chat_id,
+      requireInteraction:true,
+      icon:ic||undefined,
+      badge:ic||undefined,
+      actions:[{action:'mr-reply',title:'💬 پاسخ'}]
+    });
+    const act=ev=>{
+      try{ev.preventDefault();}catch(err){}
+      try{window.focus();}catch(err){}
+      try{nt.close();}catch(err){}
+      const isReply=!!(ev&&ev.action==='mr-reply');
+      const f=MR_NOTIFS.find(x=>x.chat_id===c.chat_id&&(x.shop||1)===(c.shop||1));
+      if(f&&isReply){
+        /* پاسخِ درِجایِ روی همان کارتِ نوتیف */
+        mrNotifOpenReply(f);
+        return;
+      }
+      /* کلیکِ عادی یا پاسخِ بدونِ کارتِ موجود — گفتگو باز شود و فوکوس */
+      mrOpenChat(c.chat_id,c.shop||1);
+      setTimeout(()=>{const t=$('mrText');if(t){t.focus();t.scrollIntoView({block:'nearest'});}},500);
+    };
+    nt.onclick=act;
+  }catch(e){}
+}
+function mrNotifPush(c){
+  let n=MR_NOTIFS.find(x=>x.chat_id===c.chat_id);
+  if(n){
+    /* همان گفتگو دوباره پیام داد — کارتِ موجود تازه شود، نوتیف دوم نرود */
+    n.text=mrNotifText(c);
+    const tx=n.el.querySelector('.mrntext'); if(tx)tx.textContent=n.text;
+    const tt=n.el.querySelector('.mrntime'); if(tt)tt.textContent='همین حالا';
+    const bar=n.el.querySelector('.mrnbar');
+    if(n.hold){
+      /* v10.65 (۷۹): کاربر وسطِ پاسخ‌دهی است — فقط متن تازه شود، کارت نبند */
+    } else {
+      if(bar){bar.style.animation='none'; void bar.offsetHeight; bar.style.animation='';}
+      if(n.timer)clearTimeout(n.timer);
+      n.timer=setTimeout(()=>mrNotifClose(n.el),mrNotifTtlMs());
+    }
+    return;
+  }
+  const host=mrNotifHost();
+  const col=MR_COLORS[(((c.chat_id||1)+((c.shop||1)-1)*3))%MR_COLORS.length];
+  const shopCol=mrShopColor(c.shop||1);
+  const card=document.createElement('div');
+  card.style.cssText='position:relative;overflow-x:hidden;overflow-y:auto;max-height:calc(100vh - 84px);border-radius:14px;border:1px solid #334155;background:linear-gradient(135deg,#111d36 0%,#0d1526 75%);box-shadow:0 12px 30px rgba(0,0,0,.45);cursor:grab;user-select:none;-webkit-user-select:none;touch-action:pan-y;animation:mrNotifIn .38s cubic-bezier(.2,.9,.3,1.2)';
+  card.innerHTML=
+    '<div style="display:flex;align-items:center;gap:9px;padding:11px 12px 7px">'+
+      '<div style="width:37px;height:37px;flex:0 0 auto;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;color:#0b1220;background:'+col+';box-shadow:0 0 0 2px '+col+'55">'+esc(mrNotifInitial(c.who))+'</div>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="display:flex;align-items:center;gap:6px">'+
+          '<b style="font-size:12px;color:#f1f5f9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.who)+'</b>'+
+          '<span style="font-size:9px;color:'+shopCol+';border:1px solid '+shopCol+'66;border-radius:8px;padding:0 5px;flex:0 0 auto" title="غرفهٔ '+toFa(c.shop||1)+'">'+esc(c.shop_name||('غرفهٔ '+toFa(c.shop||1)))+'</span>'+
+        '</div>'+
+        '<div class="mrntime" style="font-size:9.5px;color:#64748b;margin-top:2px">'+mrRelTime(c.updated_at)+'</div>'+
+      '</div>'+
+      '<button class="mrnsys" style="flex:0 0 auto;background:none;border:none;color:'+(mrSysOn()?'#4ade80':'#475569')+';font-size:12px;cursor:pointer;padding:2px 4px" title="اعلانِ سیستم‌عامل — پیام‌های مشتری در اعلان‌هایِ سیستم">🖥</button>'+
+      '<button class="mrnbtn-close" style="flex:0 0 auto;background:none;border:none;color:#475569;font-size:13px;cursor:pointer;padding:2px 4px" title="بستن">✕</button>'+
+    '</div>'+
+    '<div class="mrntext" style="font-size:11.5px;color:#cbd5e1;line-height:1.8;padding:0 12px '+(c.last_img?'4px':'8px')+';overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">'+esc(mrNotifText(c))+'</div>'+
+    (c.last_img?'<div style="padding:0 12px 8px"><img src="'+esc(c.last_img)+'" alt="تصویرِ مشتری" onclick="event.stopPropagation();mrLightbox(this.src)" style="max-width:100%;max-height:120px;border-radius:10px;cursor:zoom-in;border:1px solid #334155" title="برای بزرگ‌نمایی کلیک کنید"></div>':'')+
+    '<div class="mrnreply" style="display:block;padding:8px 12px 10px;background:#0b122055;border-top:1px solid #1e293b">'+
+      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'+
+        '<b style="font-size:10.5px;color:#86efac;flex:1">💬 پاسخ به '+esc(c.who)+'</b>'+
+        '<button class="mrnbtn-full" style="background:none;border:none;color:#60a5fa;font-size:9.5px;cursor:pointer;padding:2px 4px">🗨 گفتگوی کامل</button>'+
+      '</div>'+
+      '<div style="display:flex;gap:5px;margin-bottom:6px;flex-wrap:wrap">'+
+        '<button class="mrnq" data-q="سلام، وقت بخیر. چطور می‌تونم کمکتون کنم؟" style="background:#173254;border:1px solid #33415555;color:#93c5fd;font-size:9px;border-radius:8px;padding:3px 8px;cursor:pointer">👋 سلام</button>'+
+        '<button class="mrnq" data-q="بله، در موجودی هست." style="background:#14532d33;border:1px solid #33415555;color:#86efac;font-size:9px;border-radius:8px;padding:3px 8px;cursor:pointer">✅ موجودی</button>'+
+        '<button class="mrnq" data-q="لطفاً کد پستی و نامِ گیرنده را بفرمایید." style="background:#42200633;border:1px solid #33415555;color:#fbbf24;font-size:9px;border-radius:8px;padding:3px 8px;cursor:pointer">📮 آدرس</button>'+
+      '</div>'+
+      '<div style="display:flex;gap:6px;align-items:flex-end">'+
+        '<textarea class="mrnta" rows="2" placeholder="پاسخ شما… (Enter = ارسال، Shift+Enter = خطِ جدید)" style="flex:1;resize:none;background:#111c31;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:11px;padding:6px 8px;font-family:inherit;user-select:text;-webkit-user-select:text"></textarea>'+
+        '<button class="mrnbtn-send" style="flex:0 0 auto;background:#059669;border:none;color:#fff;font-size:12px;border-radius:8px;padding:7px 11px;cursor:pointer" title="ارسال پاسخ">📤</button>'+
+      '</div>'+
+      '<div class="mrnerr" style="display:none;color:#fca5a5;font-size:9.5px;margin-top:4px"></div>'+
+    '</div>'+
+    '<div class="mrnfoot" style="display:flex;align-items:center;gap:8px;padding:7px 12px;background:#0b122066;border-top:1px solid #1e293b">'+
+      '<button class="mrnbtn-reply" style="flex:0 0 auto;background:#059669;border:none;color:#fff;font-size:10.5px;font-weight:700;border-radius:8px;padding:4px 11px;cursor:pointer">💬 پاسخ</button>'+
+      '<span class="mrnhint" style="flex:1;text-align:center;font-size:9px;color:#475569">⬅ بستن · پاسخ ➡</span>'+
+    '</div>'+
+    '<div class="mrnbar" style="position:absolute;bottom:0;right:0;height:3px;width:100%;background:linear-gradient(90deg,'+col+'99,'+col+'22);animation:mrNotifFade '+mrNotifTtlMs()+'ms linear forwards"></div>';
+  host.appendChild(card);
+  n={el:card, chat_id:c.chat_id, shop:c.shop||1, text:mrNotifText(c), timer:null};
+  n.timer=setTimeout(()=>mrNotifClose(card),mrNotifTtlMs());
+  /* v10.62 (۷۶): پاسخِ درِجای — مستقیم از روی همین کارت */
+  const taN=card.querySelector('.mrnta');
+  const sendN=card.querySelector('.mrnbtn-send');
+  const errN=card.querySelector('.mrnerr');
+  card.querySelectorAll('.mrnq').forEach(bN=>{bN.addEventListener('click',e=>{e.stopPropagation();if(taN){taN.value=bN.getAttribute('data-q')||'';taN.focus();}});});
+  const fullN=card.querySelector('.mrnbtn-full');
+  if(fullN)fullN.addEventListener('click',e=>{e.stopPropagation();mrNotifReply(n);});
+  /* v10.63 (۷۷): کلیدِ اعلانِ سیستم‌عامل روی کارت */
+  const bs=card.querySelector('.mrnsys');
+  if(bs){
+    const paintS=()=>{try{bs.style.color=mrSysOn()?'#4ade80':'#475569';}catch(err){}};
+    paintS();
+    bs.addEventListener('click',async e=>{
+      e.stopPropagation();
+      if(typeof Notification==='undefined'){alert('مرورگرِ شما اعلانِ سیستمی را پشتیبانی نمی‌کند.');return;}
+      let p=Notification.permission;
+      if(p==='default'){try{p=await Notification.requestPermission();}catch(err){}}
+      if(p!=='granted'){alert('دسترسیِ اعلان را از پنلِ مرورگر/سیستم بدهید تا روشن شود.');return;}
+      const on=localStorage.getItem('mr_sys_notif')!=='1';
+      localStorage.setItem('mr_sys_notif',on?'1':'0');
+      paintS();
+      if(on){
+        try{
+          const icS=mrSysIcon();
+          const ntT=new Notification('🔔 اعلانِ سیستم روشن شد',{
+            body:'پیام‌های تازهٔ مشتری از این‌به‌بعد در اعلان‌هایِ سیستمی هم می‌آید — روی دکمهٔ «پاسخ» بزنید تا همین‌جا جواب دهید.',
+            tag:'mr_sys_on',icon:icS||undefined});
+          ntT.onclick=ev=>{try{ev.preventDefault();}catch(err2){}try{window.focus();}catch(err2){}try{ntT.close();}catch(err2){}};
+        }catch(err){}
+      }
+    });
+  }
+  const doSendN=async()=>{
+    if(!sendN||sendN.disabled)return;
+    const tN=taN?taN.value.trim():'';
+    if(!tN)return;
+    sendN.disabled=true;sendN.textContent='…';
+    if(errN)errN.style.display='none';
+    try{
+      const fdN=new URLSearchParams();
+      fdN.set('chat_id',String(n.chat_id));
+      fdN.set('shop',String(n.shop||1));
+      fdN.set('text',tN);
+      const dN=await fetch('?bsl_chat_reply=1',{method:'POST',body:fdN}).then(r=>r.json()).catch(()=>({ok:false,error:'خطای شبکه'}));
+      if(dN&&dN.ok){
+        if(n.timer){clearTimeout(n.timer);n.timer=null;}
+        const barN=card.querySelector('.mrnbar'); if(barN)barN.style.display='none';
+        card.innerHTML='<div style="padding:20px 12px;text-align:center"><div style="color:#4ade80;font-weight:700;font-size:13px">✅ پاسخ ارسال شد</div><div style="color:#64748b;font-size:10px;margin-top:3px">در اتاقِ چت هم به‌روز شد</div></div>';
+        n.timer=setTimeout(()=>mrNotifClose(card),2600);
+        if(mrBodyOpen())setTimeout(()=>mrPoll(),400);
+      } else {
+        if(errN){errN.textContent='✗ '+((dN&&dN.error)||'ارسال ناموفق');errN.style.display='block';}
+        sendN.disabled=false;sendN.textContent='📤';
+      }
+    }catch(eN){
+      if(errN){errN.textContent='✗ خطای شبکه';errN.style.display='block';}
+      sendN.disabled=false;sendN.textContent='📤';
+    }
+  };
+  if(taN){
+    taN.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSendN();}});
+    /* v10.65 (۷۹): با فوکوس/شروعِ تایپ، کارت دیگر خودکار نبندد */
+    taN.addEventListener('focus',()=>mrNotifHold(card,n));
+    taN.addEventListener('input',()=>mrNotifHold(card,n));
+  }
+  if(sendN)sendN.addEventListener('click',e=>{e.stopPropagation();doSendN();});
+  MR_NOTIFS.push(n);
+  const bc=card.querySelector('.mrnbtn-close'); if(bc)bc.addEventListener('click',e=>{e.stopPropagation();mrNotifClose(card);});
+  const br=card.querySelector('.mrnbtn-reply'); if(br)br.addEventListener('click',e=>{e.stopPropagation();mrNotifOpenReply(n);}); /* v10.62 (۷۶): 💬 = پاسخِ درِجای */
+  mrNotifSwipe(card,n);
+  while(MR_NOTIFS.length>4){const old=MR_NOTIFS.shift(); if(old)mrNotifClose(old.el);}
+  mrNotifDing();
+}
+function mrNotifSwipe(card,n){
+  let sx=0,dx=0,drag=false;
+  card.addEventListener('pointerdown',e=>{
+    if(e.target.closest('button,textarea,input'))return;
+    drag=true;sx=e.clientX;dx=0;
+    card.style.transition='none';card.style.cursor='grabbing';
+    const bar=card.querySelector('.mrnbar'); if(bar)bar.style.animationPlayState='paused';
+    try{card.setPointerCapture(e.pointerId);}catch(err){}
+    e.preventDefault();
+  });
+  card.addEventListener('pointermove',e=>{
+    if(!drag)return;
+    dx=e.clientX-sx;
+    card.style.transform='translateX('+dx+'px) rotate('+(dx/38)+'deg)';
+    card.style.opacity=String(Math.max(0.55,1-Math.abs(dx)/320));
+    const hint=card.querySelector('.mrnhint');
+    if(hint)hint.textContent=dx>45?'↩️ بکش برای پاسخ به مشتری':(dx<-45?'بستن ⇠':'⬅ بستن · پاسخ ➡');
+  });
+  const up=()=>{
+    if(!drag)return;drag=false;
+    card.style.cursor='grab';
+    const bar=card.querySelector('.mrnbar'); if(bar)bar.style.animationPlayState='running';
+    if(dx>85){mrNotifOpenReply(n);return;}
+    if(dx<-85){mrNotifClose(card);return;}
+    card.style.transition='transform .28s cubic-bezier(.2,.9,.3,1.3),opacity .28s ease';
+    card.style.transform='';card.style.opacity='';
+    const hint=card.querySelector('.mrnhint');
+    if(hint)hint.textContent='⬅ بستن · پاسخ ➡';
+    dx=0;
+  };
+  card.addEventListener('pointerup',up);
+  card.addEventListener('pointercancel',up);
+}
+async function mrNotifFetch(){
+  const d=await fetch('?bsl_chats=1&limit=30&shop=0').then(r=>r.json()).catch(()=>null);
+  return (d&&d.ok)?d:null;
+}
+async function mrNotifPoll(){
+  if(document.visibilityState!=='visible'&&!mrSysOn())return; /* v10.63 (۷۷): با اعلانِ سیستمِ روشن، تبِ پشتی هم چک می‌شود */
+  const d=await mrNotifFetch(); if(!d)return;
+  const chats=d.chats||[];
+  if(!MR_NOTIF_BOOTED){
+    /* seedِ بی‌صدا: پیام‌های قبلی نوتیف نمی‌کنند؛ اما اگر در localStorage
+       شناسهٔ قدیمی‌تری داشته باشیم (بازدیدِ قبل)، پیام‌های تازهٔ زمانِ
+       نبود در اولین پویینگ می‌آیند. */
+    MR_SEEN=Object.assign({},mrNotifLoad());
+    chats.forEach(c=>{
+      const key=c.shop+':'+c.chat_id;
+      if(!c.last_is_mine&&(c.last_msg_id>0)&&(MR_SEEN[key]==null))MR_SEEN[key]=c.last_msg_id;
+    });
+    MR_NOTIF_BOOTED=true;mrNotifSave();return;
+  }
+  const reading=(mrBodyOpen()&&MR_CHAT)?MR_CHAT.id:0;
+  chats.forEach(c=>{
+    const key=c.shop+':'+c.chat_id;
+    const id=c.last_msg_id>0?c.last_msg_id:0;
+    if(c.chat_id<=0||id<=0)return;
+    if(c.chat_id===reading){
+      /* کاربر همین حالا دارد آن گفتگو را می‌خواند — فقط «دیده‌شده» را
+         به‌روز کن تا بعد از بستنِ اتاق، نوتیفِ عقب‌افتاده نداند. */
+      if(id>(MR_SEEN[key]||0))MR_SEEN[key]=id;
+      return;
+    }
+    if(!c.last_is_mine&&id>(MR_SEEN[key]||0)){
+      MR_SEEN[key]=id;
+      if(mrLiveCfg().on)mrNotifPush(c); /* v10.66 (۸۰): کارتِ درِ مرورگر — از بخشِ اعلان‌ها خاموش/روشن */
+      mrSysNotif(c); /* v10.63 (۷۷): همتایِ سیستم‌عامل */
+    }
+  });
+  mrNotifSave();
+}
+/* v10.66 (۸۰): رویدادهایِ غیرچت — از فیدِ سرور (همان رویدادهایی که به
+   پیام‌رسان رفته‌اند) — حتی وقتی تب پشتِ سر است. */
+let MR_LIVE_SINCE=0;
+try{ MR_LIVE_SINCE=parseInt(localStorage.getItem('mr_live_since')||'0',10)||0; }catch(e){}
+async function mrLiveEventPoll(){
+  try{
+    const cfg=mrLiveCfg();
+    if(!cfg.on&&!cfg.sys)return;
+    const d=await fetch('?live_feed=1&since='+MR_LIVE_SINCE).then(r=>r.json()).catch(()=>null);
+    if(!d||!d.ok)return;
+    const evs=d.events||[];
+    if(MR_LIVE_SINCE<=0){
+      /* بارِ اول: رویدادهایِ قدیمی را اعلان نکن — فقط نقطهٔ شروع بگذار */
+      MR_LIVE_SINCE=(d.now||Math.floor(Date.now()/1000));
+      try{localStorage.setItem('mr_live_since',String(MR_LIVE_SINCE));}catch(e){}
+      return;
+    }
+    if(!evs.length)return;
+    const lastTs=parseInt(evs[evs.length-1].ts||'0',10)||0;
+    if(lastTs>MR_LIVE_SINCE){
+      MR_LIVE_SINCE=lastTs;
+      try{localStorage.setItem('mr_live_since',String(MR_LIVE_SINCE));}catch(e){}
+    }
+    evs.forEach(ev=>mrLiveEvent(ev,cfg));
+  }catch(e){}
+}
+const MR_LIVE_KIND={order:'🛒',product:'📋',price:'💰',sync:'🔄',ping:'📡',error:'⚠️',digest:'🌙',retire:'🗂',remind:'🔁',ar:'',report:'📄'};
+function mrLiveEvent(ev,cfg){
+  try{
+    const kind=String(ev.kind||'report');
+    const msg=String(ev.msg||'');
+    const lines=msg.split('\n');
+    const title=(MR_LIVE_KIND[kind]!==undefined?MR_LIVE_KIND[kind]:'📢')+' '+String(lines[0]||'رویداد');
+    const body=lines.length>1?lines.slice(1).join('\n'):'';
+    if(cfg.on)mrLiveEventCard(title,body,kind);
+    if(cfg.sys)mrLiveSysNotif(title,body);
+    if(cfg.on)mrNotifDing();
+  }catch(e){}
+}
+function mrLiveEventCard(title,body,kind){
+  try{
+    const host=mrNotifHost();
+    const card=document.createElement('div');
+    card.style.cssText='position:relative;overflow:hidden;border-radius:14px;border:1px solid #334155;background:linear-gradient(135deg,#111d36 0%,#0d1526 75%);box-shadow:0 12px 30px rgba(0,0,0,.45);animation:mrNotifIn .38s cubic-bezier(.2,.9,.3,1.2)';
+    const col=({order:'#34d399',product:'#60a5fa',price:'#fbbf24',sync:'#22d3ee',ping:'#94a3b8',error:'#f87171',digest:'#a78bfa',retire:'#f472b6',remind:'#fb923c',ar:'#4ade80',report:'#94a3b8'})[kind]||'#94a3b8';
+    card.innerHTML=
+      '<div style="display:flex;align-items:center;gap:9px;padding:11px 12px 8px">'+
+        '<div style="flex:1;min-width:0"><b style="font-size:12px;color:#f1f5f9;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(title)+'</b>'+
+        '<div style="font-size:9.5px;color:#64748b;margin-top:2px">رویدادِ سیستم</div></div>'+
+        '<button class="mrnbtn-close" style="flex:0 0 auto;background:none;border:none;color:#475569;font-size:13px;cursor:pointer;padding:2px 4px" title="بستن">✕</button>'+
+      '</div>'+
+      (body?'<div style="font-size:11px;color:#cbd5e1;line-height:1.8;padding:0 12px 10px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical">'+esc(body)+'</div>':'')+
+      '<div style="position:absolute;bottom:0;right:0;height:3px;width:100%;background:linear-gradient(90deg,'+col+'99,'+col+'22);animation:mrNotifFade '+mrNotifTtlMs()+'ms linear forwards"></div>';
+    host.appendChild(card);
+    const n={el:card, chat_id:0, event:true, timer:null};
+    n.timer=setTimeout(()=>mrNotifClose(card),mrNotifTtlMs());
+    MR_NOTIFS.push(n);
+    const bc=card.querySelector('.mrnbtn-close'); if(bc)bc.addEventListener('click',e=>{e.stopPropagation();mrNotifClose(card);});
+    while(MR_NOTIFS.length>4){const old=MR_NOTIFS.shift(); if(old)mrNotifClose(old.el);}
+  }catch(e){}
+}
+function mrLiveSysNotif(title,body){
+  mrFireSysNotif(title,body);   // v10.69 (83): اول مسیرِ سرویس‌ورکر، بعد مسیرِ کلاسیکِ صفحه
+}
+/* v10.66 (۸۰): دکمه‌هایِ تست — از بخشِ «اعلان‌ها» */
+function mrLiveTestCard(){
+  try{
+    mrLiveEventCard('🧪 تستِ کارت','این یک کارتِ آزمایشی است — اعلانِ زندهِ درِ مرورگر درست کار می‌کند.','test');
+    showToast('کارتِ تست ارسالی شد',0);
+  }catch(e){alert('تست نشد: '+e);}
+}
+/* v10.69 (83): سرویس‌ورکر — مسیرِ مطمئنِ اعلانِ سیستم، مخصوصاً روی اندروید.
+   اسکریپت از خودِ فایل (آدرس ?sw=1) سرو می‌شود؛ فایلِ جدا لازم نیست.
+   اگر ثبت نشد (مرورگرِ قدیمی یا صفحهٔ غیرHTTPS)، mrFireSysNotif خودکار
+   به مسیرِ کلاسیکِ صفحه برمی‌گردد — یعنی هیچ‌وقت بی‌دلیلِ «هیچ نمی‌آید». */
+let mrSwReg=null, mrSwState='idle';   // idle | ok | failed
+function mrSwReady(){
+  if(mrSwState==='ok')return Promise.resolve(mrSwReg);
+  if(mrSwState!=='idle')return Promise.resolve(null);
+  mrSwState='pending';
+  return new Promise(res=>{
+    if(!('serviceWorker' in navigator)||!window.isSecureContext){mrSwState='failed';mrSwUpdateDiag();res(null);return;}
+    let done=false;
+    const to=setTimeout(()=>{if(!done){done=true;mrSwState='failed';mrSwUpdateDiag();res(null);}},2500);
+    try{
+      navigator.serviceWorker.register('?sw=1').then(r=>{
+        if(done)return; done=true; clearTimeout(to);
+        mrSwReg=r; mrSwState='ok'; mrSwUpdateDiag(); res(r);
+      }).catch(()=>{if(!done){done=true;clearTimeout(to);mrSwState='failed';mrSwUpdateDiag();res(null);}});
+    }catch(e){if(!done){done=true;clearTimeout(to);}mrSwState='failed';mrSwUpdateDiag();res(null);}
+  });
+}
+function mrSwUpdateDiag(){
+  try{
+    const el=$('lnSysDiag'); if(!el)return;
+    const sw = mrSwState==='ok' ? '<br>🛰 <b>سرویس‌ورکر ثبت شد</b> — اعلان‌ها از مسیرِ مطمئنِ سرویس‌ورکر می‌روند.'
+            : (mrSwState==='failed' ? '<br>🛰 سرویس‌ورکر ثبت نشد — اعلان‌ها از مسیرِ معمولیِ صفحه می‌روند.' : '');
+    el.innerHTML = mrSysDiag().html + sw;
+  }catch(e){}
+}
+function mrSysDiagRender(){mrSwUpdateDiag();}   // v10.69 (83): حالا وضعیتِ سرویس‌ورکر را هم نشان می‌دهد
+/* v10.72 (86): Web Push — اعلانِ واقعی، حتی وقتی صفحه بسته است.
+   کلیدِ عمومیِ VAPID از سرور می‌آید؛ اشتراک روی سرور ذخیره می‌شود؛
+   رویدادها (لحظه‌ای و کران) از سمتِ سرور push می‌شوند. */
+const MR_VAPID_KEY='<?= VAPID_PUBLIC_KEY_B64URL ?>';
+function mrB64UrlToBytes(str){
+  try{
+    const b64=String(str).replace(/-/g,'+').replace(/_/g,'/');
+    const pad=b64.length%4===2?'==':(b64.length%4===3?'=':'');
+    const bin=atob(b64+pad);
+    const u=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);
+    return u;
+  }catch(e){return null;}
+}
+let mrPushLastErr='';
+/* v10.74 (88): هر شکست با پیامِ دقیق — تا «دکمهٔ فعال است ولی اشتراکی
+   ثبت نشده» دیگر بی‌پاسخ نماند. */
+async function mrPushSub(){
+  mrPushLastErr='';
+  const reg=await mrSwReady();
+  if(!reg){mrPushLastErr='سرویس‌ورکر ثبت نشد (برای Push لازم است)';return null;}
+  if(!reg.pushManager){mrPushLastErr='این مرورگر Push را پشتیبانی نمی‌کند';return null;}
+  try{
+    let sub=await reg.pushManager.getSubscription();
+    if(sub){
+      const r0=await fetch('?push_subscribe=1',{method:'POST',body:JSON.stringify(sub.toJSON())});
+      const d0=await r0.json().catch(()=>({}));
+      if(d0.ok===false){mrPushLastErr=d0.error||'سرور اشتراک را نگرفت';return null;}
+      return sub;
+    }
+    const key=mrB64UrlToBytes(MR_VAPID_KEY);
+    if(!key){mrPushLastErr='کلیدِ VAPID نخواند';return null;}
+    sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
+    if(sub){
+      const r0=await fetch('?push_subscribe=1',{method:'POST',body:JSON.stringify(sub.toJSON())});
+      const d0=await r0.json().catch(()=>({}));
+      if(d0.ok===false){mrPushLastErr=d0.error||'سرور اشتراک را نگرفت';return null;}
+    }
+    return sub;
+  }catch(e){mrPushLastErr=String((e&&e.message)||e);return null;}
+}
+async function mrPushUnsub(){
+  try{
+    const reg=await mrSwReady();
+    if(!reg||!reg.pushManager)return;
+    const sub=await reg.pushManager.getSubscription();
+    if(!sub)return;
+    const ep=sub.endpoint;
+    if(await sub.unsubscribe())await fetch('?push_unsubscribe=1',{method:'POST',body:JSON.stringify({endpoint:ep})});
+  }catch(e){}
+}
+async function mrPushEnsure(){
+  try{
+    if(localStorage.getItem('mr_push_on')!=='1')return;
+    if(typeof Notification==='undefined'){mrPushStatusRender('none');return;}
+    if(Notification.permission!=='granted'){try{await Notification.requestPermission();}catch(e){}}
+    if(Notification.permission!=='granted'){mrPushStatusRender('deny');return;}
+    const sub=await mrPushSub();
+    mrPushStatusRender(sub?'on':'err',mrPushLastErr||'اشتراک ثبت نشده — «🔁» را بزنید');
+  }catch(e){mrPushStatusRender('err',String((e&&e.message)||e));}
+}
+function mrPushStatusRender(state,msg){
+  try{
+    const el=$('lnPushStatus');if(!el)return;
+    const m={on:['✅ فعال — اعلان‌ها مستقیم از سرور می‌آیند','#4ade80'],
+             off:['⚪ غیرفعال','#64748b'],
+             deny:['⛔ اجازهٔ اعلان رد شده','#f87171'],
+             none:['🔒 فقط روی HTTPS','#fbbf24'],
+             err:['⚠️ '+(msg||'اشتراک ثبت نشده — «🔁» را بزنید'),'#f87171']};
+    const t=m[state]||m.off;
+    el.textContent=t[0];el.style.color=t[1];
+  }catch(e){}
+}
+function mrLiveTestPush(){
+  fetch('?push_test=1').then(r=>r.json()).then(d=>{
+    const box=$('lnPushDiag');
+    if(d.ok&&d.total>0){
+      showToast('📡 '+toFa(d.sent||0)+'/'+toFa(d.total)+' اعلانِ Push از سرور فرستاده شد — گوشهٔ صفحه/گوشی را نگاه کنید',0);
+      if(box&&d.detail){
+        let h='<div style="font-weight:700;color:#94a3b8;margin-bottom:3px">📡 نتیجهٔ ارسال (هر اشتراک، با مسیری که جواب داد):</div>';
+        Object.keys(d.detail).forEach(function(ep){
+          const v=d.detail[ep]||{};
+          const c=(v.code||0);
+          const ok=c>=200&&c<300;
+          const via=v.via==='site_proxy'?'اتصالِ غیرمستقیمِ سایت':(v.via==='proxy'?'پراکسی':(v.via==='worker'?'Workerِ واسط':(v.via==='direct'?'مستقیم':v.via||'-')));
+          let why='';
+          if(c===0)why=' · اتصال برقرار نشد — این مسیر از هاستِ شما در دسترس نیست';
+          else if(v.error)why=' · '+v.error;
+          h+='<div style="color:'+(ok?'#4ade80':'#f87171')+'">'+(ok?'✅ ارسال شد':'❌ ناموفق')+' — مسیر: '+via+' · HTTP '+(c||'0')+(ok?'':why)+'</div>';
+        });
+        box.innerHTML=h;
+      }
+    }else{
+      showToast('❌ '+((d&&d.error)||'فرستادن نشد — اشتراکی ثبت نشده است'),1);
+      if(box)box.innerHTML='<div style="color:#f87171">'+esc((d&&d.error)||'اشتراکی ثبت نشده — کلیدِ Push را روشن کنید یا «🔁 ثبتِ دوبارهٔ اشتراک» را بزنید.')+'</div>';
+    }
+  }).catch(()=>showToast('❌ خطای شبکه',1));
+}
+/* v10.74 (88): ثبتِ دوبارهٔ اشتراک — با خطایِ صریحِ هر مرحله */
+async function mrPushResub(){
+  try{
+    if(typeof Notification==='undefined'){mrPushStatusRender('err','مرورگر Push را نمی‌شناسد (فقط HTTPS)');return;}
+    if(Notification.permission!=='granted'){try{await Notification.requestPermission();}catch(e){}}
+    if(Notification.permission!=='granted'){mrPushStatusRender('err','اجازهٔ اعلان به مرورگر داده نشده');return;}
+    mrPushStatusRender('err','در حالِ ثبتِ اشتراک...');
+    const sub=await mrPushSub();
+    if(sub){
+      mrPushStatusRender('on');
+      mrLiveTestPush();
+    }else{
+      mrPushStatusRender('err',mrPushLastErr||'ثبتِ اشتراک ممکن نشد');
+    }
+  }catch(e){mrPushStatusRender('err',String((e&&e.message)||e));}
+}
+/* v10.74 (88): مسیرِ جایگزینِ Push — ذخیره و بارگذاری */
+function mrPushRouteSave(){
+  const proxy=$('pushProxy')?$('pushProxy').value.trim():'';
+  const worker=$('pushWorker')?$('pushWorker').value.trim():'';
+  const nvSc=$('najvaScript')?$('najvaScript').value:'';
+  fetch('?push_route_save=1',{method:'POST',body:JSON.stringify({proxy:proxy,worker_url:worker,najva_script:nvSc})}).then(r=>r.json()).then(d=>{
+    if(!d.ok){showToast('❌ '+((d&&d.error)||'ذخیرهٔ مسیر ناموفق'),1);return;}
+    if(d.worker_token)window._pushWorkerToken=d.worker_token;
+    showToast('💾 مسیرِ Push ذخیره شد — حالا «📡 تستِ Push» را بزنید',0);
+  }).catch(()=>showToast('❌ خطای شبکه',1));
+}
+function mrPushRouteLoad(){
+  fetch('?push_status=1').then(r=>r.json()).then(d=>{
+    if(!d.ok||!d.route)return;
+    window._pushWorkerToken=d.route.worker_token||'';
+    if($('pushProxy'))$('pushProxy').value=d.route.proxy||'';
+    if($('pushWorker'))$('pushWorker').value=d.route.worker_url||'';
+    if($('najvaScript'))$('najvaScript').value=d.najva_script||'';
+    const srcEl=$('pushRouteSrc');
+    if(srcEl){
+      const sm={'ai_net':'🔗 مسیرِ Push: از همان عبورِ «هوش مصنوعی» استفاده می‌شود','src_net':'🔗 مسیرِ Push: از همان عبورِ «سایت مبدأ» استفاده می‌شود','push_route':'🔗 مسیرِ Push: از تنظیماتِ همین بخش','':''};
+      srcEl.textContent=sm[d.route.site_source]||'';
+    }
+    if(d.count===0&&localStorage.getItem('mr_push_on')==='1')mrPushStatusRender('err');
+  }).catch(()=>{});
+}
+/* v10.74 (88): کدِ Workerِ آماده با توکنِ مخصوصِ کاربر */
+function pushWorkerModalClose(){var m=document.getElementById('pushWorkerModal');if(m)m.remove();}
+function pushWorkerCodeCopy(){var t=document.getElementById('pushWorkerCodeTx');if(!t)return;t.select();try{document.execCommand('copy');showToast('📋 کپی شد — حالا در Worker بچسبانید',0);}catch(e){showToast('کپی خودکار نشد — متن را انتخاب و کپی کنید',1);}}
+function mrPushWorkerCode(){
+  const token=window._pushWorkerToken||'';
+  if(!token){showToast('اول «💾 ذخیرهٔ مسیر» را بزنید تا توکن ساخته شود',1);return;}
+  const code=[
+'// رلهٔ Web Push — نسخهٔ 10.74',
+'// ۱) در Cloudflare: Workers & Pages ← Create Worker',
+'// ۲) این کلِ کد را جایگزین کنید و Deploy بزنید',
+'// ۳) آدرسِ Worker (https://...workers.dev) را در «Workerِ واسط» وارد و ذخیره کنید',
+'const AUTH = "'+token+'";',
+'export default {',
+'  async fetch(req) {',
+"    if (req.method !== 'POST') return new Response('POST only', { status: 405 });",
+"    if (req.headers.get('X-Push-Auth') !== AUTH) return new Response('unauthorized', { status: 401 });",
+'    let j;',
+"    try { j = await req.json(); } catch (e) { return new Response('bad json', { status: 400 }); }",
+'    const body = Uint8Array.from(atob(j.body_b64), c => c.charCodeAt(0));',
+'    const h = new Headers();',
+'    for (const [k, v] of (j.headers || [])) h.set(k, v);',
+"    const r = await fetch(j.url, { method: 'POST', headers: h, body });",
+'    const t = (await r.text()).slice(0, 400);',
+"    return new Response(JSON.stringify({ status: r.status, body: t }), { headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' } });",
+'  }',
+'};'
+].join('\n');
+  const old=document.getElementById('pushWorkerModal');if(old)old.remove();
+  const div=document.createElement('div');div.id='pushWorkerModal';
+  div.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:999999;display:flex;align-items:center;justify-content:center;padding:16px';
+  div.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:12px;max-width:660px;width:100%;max-height:85vh;overflow:auto;padding:16px;direction:rtl">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b style="color:#67e8f9">📋 کدِ Workerِ واسطِ Push (Cloudflare)</b>'
+    +'<button class="btn btn-gray" onclick="pushWorkerModalClose()" style="font-size:10px;padding:3px 10px">✖ بستن</button></div>'
+    +'<div style="font-size:11px;color:#94a3b8;line-height:1.9;margin-bottom:8px">این Worker در <b>Cloudflare</b> اجرا می‌شود (از ایران در دسترس است): درخواستِ Push را از سرورِ شما می‌گیرد و خودش به سرویسِ گوگل می‌رساند. <b>توکنِ مخصوصِ شما</b> درونِ کد است؛ هرکس این کد را داشته باشد می‌تواند از Worker استفاده کند، پس کد را با دیگران به اشتراک نگذارید.</div>'
+    +'<textarea readonly id="pushWorkerCodeTx" style="width:100%;height:280px;background:#020617;color:#a5f3fc;border:1px solid #1e293b;border-radius:8px;padding:10px;font-size:10.5px;direction:ltr;text-align:left;font-family:ui-monospace,monospace;box-sizing:border-box"></textarea>'
+    +'<div class="cact" style="margin-top:8px"><button class="btn btn-cyan" style="flex:1" onclick="pushWorkerCodeCopy()">📋 کپیِ کد</button></div></div>';
+  document.body.appendChild(div);
+  const tx=document.getElementById('pushWorkerCodeTx');if(tx)tx.value=code;
+}
+async function mrFireSysNotif(title,body){
+  if(typeof Notification==='undefined'||Notification.permission!=='granted')return;
+  const ic=mrSysIcon();
+  const tag='mr_live_'+Date.now();
+  const reg=await mrSwReady();
+  if(reg){
+    try{
+      reg.showNotification(String(title),{body:String(body||'').slice(0,500),
+        icon:ic||undefined, badge:ic||undefined, tag, requireInteraction:true,
+        data:{url:location.href}});
+      return;
+    }catch(e){}
+  }
+  try{
+    const nt=new Notification(String(title),{body:String(body||'').slice(0,500),tag,
+      icon:ic||undefined, badge:ic||undefined, requireInteraction:true});
+    nt.onclick=ev=>{try{ev.preventDefault();}catch(e){}try{window.focus();}catch(e){}try{nt.close();}catch(e){}};
+  }catch(e){}
+}
+/* v10.68 (82): تشخیصگرِ اعلانِ سیستم — به کاربر می‌گوید زنجیره دقیقاً کجا
+   شکسته: HTTPS ← پشتیبانیِ مرورگر ← اجازه ← نمایشِ سیستم‌عامل.
+   نکته: برای «نمایش» اعلان فایلِ sw.js لازم نیست — خودِ صفحه اعلان را
+   می‌سازد (Notification API). service worker فقط برای «push» (سرور وقتی
+   صفحه بسته است بفرستد) لازم است و ما از آن نمی‌رویم. */
+function mrSysDiag(){
+  const secure=!!window.isSecureContext;
+  const support=(typeof Notification!=='undefined');
+  const perm=support?Notification.permission:'unsupported';
+  let html='';
+  if(!secure)html+='🔒 صفحه از طریق <b>HTTPS</b> باز نشده — اعلانِ سیستمی فقط روی HTTPS کار می‌کند.<br>';
+  if(!support)html+='⚠️ این مرورگر از Web Notification پشتیبانی نمی‌کند (مثلاً سافاریِ آیفون).<br>';
+  else if(perm==='granted')html+='✅ مرورگر اجازهٔ اعلان را دارد — اگر چیزی نمایش داده نمی‌شود، مشکل در تنظیماتِ <b>سیستم‌عامل</b> است (ویندوز: Settings ← System ← Notifications؛ macOS: System Settings ← Notifications؛ اندروید: Settings ← Apps ← مرورگر).';
+  else if(perm==='denied')html+='⛔ اجازهٔ اعلان <b>رد</b> شده — روی آیکونِ قفلِ کنارِ آدرس بزنید ← Site settings/Permissions ← Notifications = Allow، بعد صفحه را تازه کنید.<br>';
+  else html+='⏳ هنوز اجازهٔ اعلان داده نشده — «🔔 تستِ اعلانِ سیستم» را بزنید و در پنجرهٔ ظاهرشده Allow را بزنید.';
+  return {secure,support,perm,html};
+}
+function mrLiveTestSys(){
+  (async()=>{
+    try{
+      const dg=mrSysDiag();
+      mrSysDiagRender();
+      if(!dg.support){
+        alert('مرورگرِ شما اعلانِ سیستمی (Web Notification) را پشتیبانی نمی‌کند.'+
+              (!dg.secure?'\n\nهمچنین صفحه باید از طریقِ HTTPS باز شود.':'')+
+              '\n\nنکته: برای این کار فایلِ sw.js لازم نیست — خودِ صفحه اعلان را می‌سازد.\nبا کروم/فایرفاکسِ دسکتاپ روی HTTPS امتحان کنید.');
+        return;
+      }
+      let p=dg.perm;
+      if(p==='default'){try{p=await Notification.requestPermission();}catch(e){}}
+      mrSysDiagRender();
+      if(p!=='granted'){
+        alert('دسترسیِ اعلان داده نشد (وضعیت: '+p+').'+
+              (p==='denied'?'\nروی آیکونِ قفلِ کنارِ آدرس بزنید ← Site settings/Permissions ← Notifications = Allow، بعد صفحه را تازه کنید.'
+                           :'\nدر پنجرهٔ کوچکِ ظاهرشده Allow را بزنید، بعد دوباره تست کنید.')+
+              '\n\nنکته: برای این کار فایلِ sw.js لازم نیست.');
+        return;
+      }
+      mrLiveSysNotif('🔔 تستِ اعلانِ سیستم','اگر این پیام را در گوشهٔ صفحه (اعلان‌هایِ سیستم) دیدید، همه‌چیز درست است — از این‌به‌بعد همهٔ رویدادها اینجا هم می‌آیند.');
+      try{
+        const el=$('lnSysDiag');
+        if(el)el.innerHTML='✅ اعلان از مسیرِ '+(mrSwState==='ok'?'<b>سرویس‌ورکر</b>':'معمولیِ صفحه')+' فرستاده شد. اگر در سیستم نمایش داده نشد: تنظیماتِ <b>سیستم‌عامل</b> را بررسی کنید — ویندوز (Settings ← System ← Notifications و Focus Assist خاموش)، macOS (System Settings ← Notifications)، اندروید (Settings ← Apps ← Chrome ← Notifications). در اندروید یک لایهٔ دیگر هم هست: در خودِ کروم، Settings ← Site settings ← Notifications برای همین سایت باید <b>Allow</b> باشد.';
+      }catch(e){}
+    }catch(e){alert('تست نشد: '+e);}
+  })();
+}
+/* v10.66 (۸۰): تنظیماتِ بخشِ «اعلان‌ها» — بارگذاری و سیم‌کشیِ آنی */
+function mrLiveSettingsLoad(){
+  try{
+    const g=id=>$(id);
+    if(g('lnCards'))g('lnCards').checked=localStorage.getItem('mr_live_cards')!=='0';
+    if(g('lnSys'))g('lnSys').checked=mrLiveCfg().sys;
+    if(g('lnPoll'))g('lnPoll').value=String(mrLiveCfg().poll);
+    if(g('lnTtl'))g('lnTtl').value=String(mrLiveCfg().ttl);
+    if(g('lnSound'))g('lnSound').checked=localStorage.getItem('mr_live_sound')!=='0';
+    const elC=g('lnCards'); if(elC)elC.addEventListener('change',()=>{try{localStorage.setItem('mr_live_cards',elC.checked?'1':'0');}catch(e){}});
+    const elS=g('lnSys');
+    if(elS)elS.addEventListener('change',async()=>{
+      try{
+        if(elS.checked){
+          if(typeof Notification!=='undefined'&&Notification.permission==='default'){try{await Notification.requestPermission();}catch(e){}}
+          if(typeof Notification==='undefined'||Notification.permission!=='granted'){elS.checked=false;showToast('دسترسیِ اعلان داده نشد',1);return;}
+          localStorage.setItem('mr_sys_notif','1');
+          mrLiveSysNotif('🔔 اعلانِ سیستم روشن شد','از این‌به‌بعد همهٔ رویدادها در اعلان‌هایِ سیستمی هم می‌آیند.');
+          mrSysDiagRender();
+        } else {localStorage.setItem('mr_sys_notif','0');mrSysDiagRender();}
+      }catch(e){}
+    });
+    const elP=g('lnPoll'); if(elP)elP.addEventListener('change',()=>{try{localStorage.setItem('mr_live_poll',String(Math.max(3,parseInt(elP.value,10)||5)));}catch(e){}});
+    const elT=g('lnTtl'); if(elT)elT.addEventListener('change',()=>{try{localStorage.setItem('mr_live_ttl',String(Math.max(5,parseInt(elT.value,10)||30)));}catch(e){}});
+    const elSd=g('lnSound'); if(elSd)elSd.addEventListener('change',()=>{try{localStorage.setItem('mr_live_sound',elSd.checked?'1':'0');}catch(e){}});
+    /* v10.72 (86): سیم‌کشیِ کلیدِ اعلانِ Push */
+    const elPs=g('lnPush');
+    if(elPs){
+      elPs.checked=localStorage.getItem('mr_push_on')==='1';
+      elPs.addEventListener('change',async()=>{
+        try{
+          if(elPs.checked){
+            if(typeof Notification==='undefined'){elPs.checked=false;mrPushStatusRender('none');showToast('این مرورگر اعلانِ Push را پشتیبانی نمی‌کند (فقط HTTPS)',1);return;}
+            if(Notification.permission!=='granted'){try{await Notification.requestPermission();}catch(e){}}
+            if(Notification.permission!=='granted'){elPs.checked=false;mrPushStatusRender('deny');showToast('دسترسیِ اعلان را بدهید',1);return;}
+            localStorage.setItem('mr_push_on','1');
+            const sub=await mrPushSub();
+            if(sub){mrPushStatusRender('on');mrLiveTestPush();}
+            else{elPs.checked=false;localStorage.setItem('mr_push_on','0');mrPushStatusRender('err',mrPushLastErr||'ثبتِ اشتراک ممکن نشد — «🔁 ثبتِ دوبارهٔ اشتراک» را بزنید');}
+          }else{
+            localStorage.setItem('mr_push_on','0');
+            await mrPushUnsub();
+            mrPushStatusRender('off');
+            showToast('📡 اعلانِ Push خاموش شد',0);
+          }
+        }catch(e){}
+      });
+    }
+    mrSysDiagRender();   // v10.68 (82): خطِ تشخیص همان لحظهٔ بارگذاری هم دیده شود
+  }catch(e){}
+}
+/* v10.60 (۷۴): ضربان — فاصله از تنظیماتِ «اعلان‌ها» خوانده می‌شود (v10.66) */
+setTimeout(mrNotifPoll,2500);
+mrLiveSettingsLoad();
+mrPushRouteLoad();   // v10.74 (88): مسیرهایِ جایگزینِ Push بارگذاری شوند
+mrSwReady();   // v10.69 (83): سرویس‌ورکر همان لحظهٔ بارگذاری صفحه ثبت می‌شود
+setTimeout(()=>{ try{ if(localStorage.getItem('mr_push_on')==='1') mrPushEnsure(); }catch(e){} }, 4000);   // v10.72 (86)
+(function mrNotifLoop(){
+  try{ setTimeout(mrNotifPoll, Math.max(3000, mrLiveCfg().poll*1000)); }
+  catch(e){ setTimeout(mrNotifPoll, 5000); }
+  try{ mrLiveEventPoll(); }catch(e){}
+})();
 
 function arRenderRules(){
   const box=$('arRules'); if(!box)return;
@@ -54504,8 +59318,10 @@ if(typeof aiResumeTestModalOnLoad==='function')setTimeout(aiResumeTestModalOnLoa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
-const ne=cn.notif_events||{};if($('notifOrderNew'))$('notifOrderNew').checked=ne.order_new!==false;if($('notifOrderStatus'))$('notifOrderStatus').checked=ne.order_status!==false;if($('notifChatMsg'))$('notifChatMsg').checked=ne.chat_msg!==false;if($('notifProductStatus'))$('notifProductStatus').checked=ne.product_status!==false;if($('notifProductNew'))$('notifProductNew').checked=ne.product_new!==false;if($('notifOrderRefund'))$('notifOrderRefund').checked=ne.order_refund!==false;if($('notifSrcPrice'))$('notifSrcPrice').checked=ne.src_price!==false;if($('notifSrcStock'))$('notifSrcStock').checked=ne.src_stock!==false;if($('notifRunFail'))$('notifRunFail').checked=ne.run_fail!==false;if($('notifRetire'))$('notifRetire').checked=ne.retire!==false;if($('notifSyncReport'))$('notifSyncReport').checked=ne.sync_report!==false;if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('autoResume'))$('autoResume').checked=cn.auto_resume!==false;if($('autoResumeMax'))$('autoResumeMax').value=(cn.auto_resume_max||2);if($('bslCatAuto'))$('bslCatAuto').checked=cn.bsl_catalog_auto!==false;if($('bslCatTtl'))$('bslCatTtl').value=(cn.bsl_catalog_ttl_h!==undefined?cn.bsl_catalog_ttl_h:6);if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
+const tgm=cn.telegram||{};if($('telegramEnabled'))$('telegramEnabled').checked=!!tgm.enabled;if($('telegramToken')&&tgm.token)$('telegramToken').value=tgm.token;if($('telegramChatId')&&tgm.chat_id)$('telegramChatId').value=tgm.chat_id;
+const ne=cn.notif_events||{};/* v10.45: نبودِ کلید = روشن، صریحِ 0 = خاموش — دقیقاً همان قاعدهٔ سروری (notifEventOn). تا حالا 0 هم «روشن» نشان داده می‌شد. */const neOn=k=>ne[k]===undefined?true:!!ne[k];if($('notifOrderNew'))$('notifOrderNew').checked=neOn('order_new');if($('notifOrderStatus'))$('notifOrderStatus').checked=neOn('order_status');if($('notifChatMsg'))$('notifChatMsg').checked=neOn('chat_msg');/* v10.46 (۶۰): غرفهٔ «پیام مشتری» — گزینه‌ها از غرفهٔ پیش‌فرض + غرفه‌های اضافی می‌سازند */if($('notifChatShop')){const ncs=$('notifChatShop');const ncsCur=String(cn.notif_chat_shop||0);let ncsOpts='<option value="0">همهٔ غرفه‌ها</option>';const ncsDefVid=parseInt(b.vendor_id)||0;if(ncsDefVid>0&&b.token)ncsOpts+='<option value="'+ncsDefVid+'">غرفهٔ پیش‌فرض (#'+ncsDefVid+')</option>';(Array.isArray(bslExtraVendors)?bslExtraVendors:[]).forEach(v=>{const ncsVid=parseInt(v&&v.vendor_id)||0,ncsTok=String(v&&(v.token||''));if(ncsVid>0&&ncsTok)ncsOpts+='<option value="'+ncsVid+'">'+esc((v.shop_name||v.name)||('غرفه '+ncsVid))+' (#'+ncsVid+')</option>';});ncs.innerHTML=ncsOpts;ncs.value=(ncsCur!=='0'&&ncsOpts.indexOf('value="'+ncsCur+'"')>-1)?ncsCur:'0';}if($('notifProductStatus'))$('notifProductStatus').checked=neOn('product_status');if($('notifProductNew'))$('notifProductNew').checked=neOn('product_new');if($('notifOrderRefund'))$('notifOrderRefund').checked=neOn('order_refund');if($('notifSrcPrice'))$('notifSrcPrice').checked=neOn('src_price');if($('notifSrcStock'))$('notifSrcStock').checked=neOn('src_stock');if($('notifRunFail'))$('notifRunFail').checked=neOn('run_fail');if($('notifRetire'))$('notifRetire').checked=neOn('retire');if($('notifSyncReport'))$('notifSyncReport').checked=neOn('sync_report');if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('autoResume'))$('autoResume').checked=cn.auto_resume!==false;if($('autoResumeMax'))$('autoResumeMax').value=(cn.auto_resume_max||2);if($('bslCatAuto'))$('bslCatAuto').checked=cn.bsl_catalog_auto!==false;if($('bslCatTtl'))$('bslCatTtl').value=(cn.bsl_catalog_ttl_h!==undefined?cn.bsl_catalog_ttl_h:6);if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
+renderNotifHealth(); /* v10.46 (۶۰): خطِ وضعیتِ اعلان‌ها */
 arApplyCfg(cn.autoreply||{});arLoad();}
 /* v8.87: پیش‌نمایش زندهٔ تعدیل قیمت مقصد.
    روی یک قیمت نمونه نشان می‌دهد نتیجه چه می‌شود، تا قبل از ذخیره معلوم
@@ -54539,7 +59355,8 @@ fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('auto_resume',$('autoResume')?.checked?1:0);fd.append('auto_resume_max',$('autoResumeMax')?.value||2);fd.append('bsl_catalog_auto',$('bslCatAuto')?.checked?1:0);fd.append('bsl_catalog_ttl_h',$('bslCatTtl')?.value||6);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('telegram',JSON.stringify({enabled:$('telegramEnabled')?.checked?1:0,token:$('telegramToken')?.value||'',chat_id:$('telegramChatId')?.value||''}));
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));/* v10.46 (۶۰): غرفهٔ انتخاب‌شده برای پیام مشتری */fd.append('notif_chat_shop',String($('notifChatShop')?.value||0));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('auto_resume',$('autoResume')?.checked?1:0);fd.append('auto_resume_max',$('autoResumeMax')?.value||2);fd.append('bsl_catalog_auto',$('bslCatAuto')?.checked?1:0);fd.append('bsl_catalog_ttl_h',$('bslCatTtl')?.value||6);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
@@ -54659,6 +59476,7 @@ function testNotif(type){
     let token,chatId,label;
     if(type==='baleh'){token=$('balehToken')?.value?.trim()||'';chatId=$('balehChatId')?.value?.trim()||'';label='بله';}
     else if(type==='rubika'){token=$('rubikaToken')?.value?.trim()||'';chatId=$('rubikaChatId')?.value?.trim()||'';label='روبیکا';}
+    else if(type==='telegram'){token=$('telegramToken')?.value?.trim()||'';chatId=$('telegramChatId')?.value?.trim()||'';label='تلگرام';}
     else{showToast('نوع نامعتبر',1);return;}
     if(!token||!chatId){showToast('Token و Chat ID را وارد کنید',1);return;}
     r.innerHTML='<div style="color:#facc15;font-size:11px;padding:4px">⏳ تست '+label+'...</div>';
@@ -57739,6 +62557,8 @@ let wooLastCardCount=0,wooLastUpdateTime=0,wooLastLogCount=0,wooResumeCount=0;
 function pollBslProgress() {
     fetch('?poll_bsl=1').then(r=>r.json()).then(d=>{
         if(!d) {setTimeout(pollBslProgress,2000);return;}
+        /* v10.59 (۷۳): صف گیرکرده خودکار ادامه داده شد — به کاربر خبر بده. */
+        if(d.recovered){showToast('⚠️ ارسال گیر کرده بود — خودکار از جایی که مانده بود ادامه داده شد', true);try{tmPulse();}catch(e){}}
         console.log('[BSL poll] running='+d.running+' done='+d.done+' paused='+d.paused+' total='+d.total+' sent='+d.sent+' current='+d.current+' started_at='+d.started_at);
         const running = d.running || false;
         const done = d.done || false;
@@ -58102,6 +62922,8 @@ queueWooSend(ps);
 function pollWooProgress(){
     fetch('?poll_woo=1').then(r=>r.json()).then(d=>{
         if(!d){setTimeout(pollWooProgress,2000);return;}
+        /* v10.59 (۷۳): صف گیرکرده خودکار ادامه داده شد — به کاربر خبر بده. */
+        if(d.recovered){showToast('⚠️ ارسال گیر کرده بود — خودکار از جایی که مانده بود ادامه داده شد', true);}
         const running=d.running||false;
         const done=d.done||false;
         const total=d.total||0;
@@ -58580,6 +63402,8 @@ function queueBslSend(ps,catId){
             fd2.append('send_all_shops',($('bsSendAllShops')&&$('bsSendAllShops').checked)?'1':'0');
             fetch('?bsl_queue_add=1',{method:'POST',body:fd2}).then(r=>r.json()).then(d=>{
                 if(!d.ok){showToast('\u062e\u0637\u0627: '+d.error,1);return;}
+                /* v10.73 (87): چندغرفه‌ای شد — هر غرفه وظیفهٔ جدا دارد */
+                if(d.shop_count>1){showToast('📦 '+toFa(d.shop_count)+' غرفه — هرکدام یک وظیفهٔ جدا در صف',true);}
                 // v8.57: اگر ارسال دیگری در جریان بود، سرور این یکی را در صف
                 // گذاشته. قبلاً رابط کاربری در هر حالت وانمود می‌کرد ارسال
                 // شروع شده و کاربر فکر می‌کرد پروفایلش دارد می‌رود.
@@ -58954,7 +63778,30 @@ function renderBslQueue(q){
     const statusColors={waiting:'#fbbf24',running:'#67e8f9',paused:'#f97316',done:'#4ade80',failed:'#f87171'};
     const statusBg={waiting:'#42200630',running:'#0e749020',paused:'#c2410c20',done:'#14532d20',failed:'#7f1d1d20'};
     let html='';
+    /* v10.73 (87): نوارِ خلاصهٔ وضعیت — صف حالا وظایفِ متعدد (هر غرفه
+       یک وظیفه) است و باید یک نگاه بگوید چندتایش کجاست. */
+    const cnt={waiting:0,running:0,paused:0,done:0,failed:0};
+    entries.forEach(e=>{if(cnt[e.status]!==undefined)cnt[e.status]++;});
+    html+='<div style="display:flex;gap:8px;flex-wrap:wrap;font-size:10px;margin-bottom:8px;align-items:center">'
+      +'<span style="color:#94a3b8;font-weight:700">'+toFa(entries.length)+' وظیفه</span>'
+      +(cnt.running?'<span style="color:#67e8f9">🔄 '+toFa(cnt.running)+'</span>':'')
+      +(cnt.waiting?'<span style="color:#fbbf24">⏳ '+toFa(cnt.waiting)+'</span>':'')
+      +(cnt.paused?'<span style="color:#f97316">⏸ '+toFa(cnt.paused)+'</span>':'')
+      +(cnt.done?'<span style="color:#4ade80">✅ '+toFa(cnt.done)+'</span>':'')
+      +(cnt.failed?'<span style="color:#f87171">❌ '+toFa(cnt.failed)+'</span>':'')
+      +'</div>';
+    let __batch='';
     entries.forEach(e=>{
+        /* v10.73 (87): سربرگِ دسته — ردیف‌های یک ارسالِ چندغرفه‌ای */
+        if(e.batch_id&&e.batch_id!==__batch){
+            __batch=e.batch_id;
+            const __be=entries.filter(x=>x.batch_id===e.batch_id);
+            const __bd=__be.filter(x=>x.status==='done').length;
+            html+='<div style="display:flex;align-items:center;gap:6px;margin:6px 0 2px;padding:4px 8px;background:#0b1220;border:1px solid #1e293b;border-radius:6px;font-size:10px;color:#67e8f9;font-weight:700">'
+              +'📦 چندغرفه‌ای — '+toFa(__bd)+' از '+toFa(__be.length)+' غرفه'+(e.profile_name?' · '+esc(e.profile_name):'')
+              +'<span style="flex:1"></span>'
+              +'<span style="color:#475569;font-weight:400">همهٔ وظایفِ همین ارسال</span></div>';
+        }else if(!e.batch_id){__batch='';}
         let progText='';
         let progPercent=0;
         if(e.status==='running'&&e.current>0&&e.total>0){
@@ -58976,9 +63823,11 @@ function renderBslQueue(q){
         // Row 1: Status badge + count + action buttons
         html+='<div style="display:flex;justify-content:space-between;align-items:center">';
         html+='<div style="display:flex;align-items:center;gap:8px">';
-        html+='<span style="color:'+statusColors[e.status]+';font-weight:700;font-size:12px">'+statusLabels[e.status]+'</span>';
+        html+='<span style="color:'+statusColors[e.status]+';font-weight:700;font-size:12px">'+statusLabels[e.status]+'</span>';if(e.trigger==='manual_sync'){html+='<span style="color:#34d399;font-size:10px;background:#064e3b40;padding:1px 6px;border-radius:4px;margin-right:4px">🤝 هنگامِ همگام‌سازیِ دستی</span>';} /* v10.53 (۶۷) */
         if(e.auto_sync)html+='<span style="color:#22d3ee;font-size:10px;background:#0e749020;padding:1px 6px;border-radius:4px;margin-left:4px">⏱ سینک خودکار</span>';
         if(e.profile_name)html+='<span style="color:#94a3b8;font-size:10px;margin-left:4px">'+esc(e.profile_name)+'</span>';
+        /* v10.73 (87): نشانِ غرفهٔ اختصاصیِ همین وظیفه */
+        if(e.shop_name)html+='<span style="color:#fbbf24;font-size:10px;background:#42200640;border:1px solid #78350f66;padding:1px 7px;border-radius:4px;white-space:nowrap" title="این وظیفه فقط برای همین غرفه است">🏪 '+esc(e.shop_name)+(e.shop_is_default?' <b style="color:#67e8f9">پیش‌فرض</b>':'')+'</span>';
         html+='<span style="color:#e2e8f0;font-weight:600;font-size:12px">'+toFa(e.total)+' محصول</span>';
         html+='</div>';
         // Action buttons
@@ -59010,7 +63859,7 @@ function renderBslQueue(q){
            غرفه‌ها» نمی‌شد فهمید کدام غرفه چیزی نگرفته یا کدام‌یک منبعِ
            همهٔ خطاهاست. حالا هر غرفه بلوکِ خودش را دارد و بینِ دو غرفه
            یک خطِ جداکنندهٔ صریح کشیده می‌شود. */
-        html+=bslShopStatsHtml(e.shop_stats);
+        html+=(e.shop_vendor_id?'':bslShopStatsHtml(e.shop_stats));   // v10.73 (87): در وظیفهٔ تک‌غرفه‌ای همان ردیف است
         // Row 4: Elapsed time
         if((e.status==='running'||e.status==='paused')&&e.started_at>0){
             const elapsedSec=Math.floor(Date.now()/1000-(e.started_at||0));
@@ -59021,6 +63870,17 @@ function renderBslQueue(q){
         html+='</div>';
     });
     list.innerHTML=html;
+}
+/* v10.73 (87): تب‌های بخشِ اعلان‌ها — فقط ظاهر عوض می‌شود؛ همهٔ تنظیمات همان‌جا */
+function setNotifTab(name,btn){
+    ['messenger','events','live','query'].forEach(function(n){
+        var p=document.getElementById('ntab-'+n);
+        if(p)p.style.display=(n===name)?'block':'none';
+    });
+    if(btn&&btn.parentNode){
+        btn.parentNode.querySelectorAll('.ntab').forEach(function(b){b.classList.remove('active');});
+        btn.classList.add('active');
+    }
 }
 function pauseBslQueue(qid){
     fetch('?bsl_queue_pause=1&queue_id='+encodeURIComponent(qid)).then(r=>r.json()).then(d=>{
@@ -59157,12 +64017,13 @@ function renderWooQueue(q){
         }else if(e.status==='waiting'){
             progText=toFa(e.total)+' محصول — منتظر شروع';
         }else if(e.status==='failed'){
-            progText='❌ '+toFa(e.failed)+' خطا';
+            /* v10.51 (۶۵): اگر ردیف به‌خاطرِ تغییرِ تنظیمات جایگزین شده، علت را نشان بده */
+            progText=(e.fail_reason?('⚠ '+esc(e.fail_reason)+' — '):'')+'❌ '+toFa(e.failed)+' خطا';
         }
         html+='<div style="cursor:pointer;padding:8px 10px;border:1px solid #334155;border-radius:8px;margin:4px 0;background:'+statusBg[e.status]+';transition:background 0.2s" onmouseover="this.style.borderColor=\'#a78bfa\'" onmouseout="this.style.borderColor=\'#334155\'">';
         html+='<div style="display:flex;justify-content:space-between;align-items:center">';
         html+='<div style="display:flex;align-items:center;gap:8px">';
-        html+='<span style="color:'+statusColors[e.status]+';font-weight:700;font-size:12px">'+statusLabels[e.status]+'</span>';
+        html+='<span style="color:'+statusColors[e.status]+';font-weight:700;font-size:12px">'+statusLabels[e.status]+'</span>';if(e.trigger==='manual_sync'){html+='<span style="color:#34d399;font-size:10px;background:#064e3b40;padding:1px 6px;border-radius:4px;margin-right:4px">🤝 هنگامِ همگام‌سازیِ دستی</span>';} /* v10.53 (۶۷) */
         html+='<span style="color:#e2e8f0;font-weight:600;font-size:12px">'+toFa(e.total)+' محصول</span>';
         html+='</div>';
         html+='<div style="display:flex;gap:4px">';
@@ -59282,6 +64143,7 @@ function showBslQueueDetail(qid){
         detailHtml+='<div style="margin-bottom:12px;padding:10px;background:#0f172a;border:1px solid #334155;border-radius:8px;font-size:11.5px;line-height:2">';
         detailHtml+='<div style="color:#67e8f9;font-weight:700;margin-bottom:4px">📂 دسته‌بندی این وظیفه</div>';
         if(e.profile_name)detailHtml+='<div style="color:#94a3b8">پروفایل: <b style="color:#e2e8f0">'+esc(e.profile_name)+'</b></div>';
+if(e.shop_name)detailHtml+='<div style="color:#94a3b8">غرفهٔ هدف: <b style="color:#fbbf24">🏪 '+esc(e.shop_name)+'</b>'+(e.shop_is_default?' <span style="color:#67e8f9">(پیش‌فرض)</span>':'')+'</div>';
         if(ci.main){
             detailHtml+='<div style="color:#94a3b8">دستهٔ اصلی: <b style="color:#4ade80">'+esc(ci.main.name)+'</b> <span style="color:#64748b;font-family:ui-monospace,monospace">#'+ci.main.id+'</span></div>';
         }else{
@@ -60745,12 +65607,19 @@ function renderCronResult(d){
                 if(p.status==='not_due'){eLog.innerHTML+='<div style="color:#64748b;padding:2px 0">⏳ '+esc(p.name||p.key)+' — هنوز نوبت نیست</div>';}
             });
             // v8.29: مرحلهٔ سوم — نتیجهٔ استعلام اعلان‌ها
+            // v10.45: خطاها (errors) و «رد شد» (skipped) هم اینجا دیده می‌شوند
             const nf=d.notifications||{};
-            const nk=Object.keys(nf);
+            const nk=Object.keys(nf).filter(k=>k!=='errors'&&k!=='skipped');
             if(nk.length){
                 const lbl={orders:'🛒 سفارش جدید',chats:'💬 پیام جدید',products:'📋 تغییر محصول'};
                 nk.forEach(k=>{eLog.innerHTML+='<div style="color:#fbbf24;padding:2px 0">'+(lbl[k]||k)+': '+toFa(nf[k])+' مورد — اعلان ارسال شد</div>';});
-            }else{
+            }
+            if(nf.errors&&nf.errors.length){
+                nf.errors.forEach(e=>{eLog.innerHTML+='<div style="color:#f87171;padding:2px 0">⚠️ اعلان: '+esc(e)+'</div>';});
+            }else if(!nk.length&&nf.skipped){
+                eLog.innerHTML+='<div style="color:#64748b;padding:2px 0">🔔 استعلام اعلان‌ها: '+
+                  (nf.skipped==='no_basalam_shops'?'هیچ غرفهٔ باسلامی با توکن تنظیم نشده':esc(nf.skipped))+'</div>';
+            }else if(!nk.length){
                 eLog.innerHTML+='<div style="color:#64748b;padding:2px 0">🔔 استعلام اعلان‌ها: مورد جدیدی نبود</div>';
             }
             eLog.innerHTML+='<div style="color:#22c55e;padding:4px 0;font-weight:bold">✅ کران جاب کامل شد</div>';
@@ -61709,21 +66578,28 @@ function bslBatchStatusModal(ids,targetStatus,actionLabel){
             return;
         }
         const pid=ids[idx];idx++;
-        const url=targetStatus===-1?'?bsl_delete_product=1&product_id='+pid:'?bsl_change_status=1&product_id='+pid+'&status='+targetStatus;
-        fetch(url).then(r=>r.json()).then(d=>{
+        const urlBase=targetStatus===-1?'?bsl_delete_product=1&product_id='+pid:'?bsl_change_status=1&product_id='+pid+'&status='+targetStatus;
+        // v10.52 (۶۶): هر گام در یک درخواستِ کوتاه جدا — اگر روشِ فعلی
+        // نبرد، سرور 'next' را می‌فرستد و ما خودکار گامِ بعد را می‌زنیم
+        // (زنجیرهٔ بلندِ v10.51 در یک درخواست، ۵۰۲ می‌گرفت).
+        const tryStep=(via)=>fetch(urlBase+(via?'&via='+via:'')).then(r=>r.json()).then(d=>{
             if(d&&d.ok){
                 done++;
                 addRow('<span style="color:#4ade80">\u2705 #'+pid+' \u2014 '+esc(d.msg)+'</span>');
+                setTimeout(processNext,600);
+            }else if(d&&d.next){
+                tryStep(d.next);
             }else{
                 fail++;
                 addRow('<span style="color:#f87171">\u274C #'+pid+' \u2014 '+(d?.error||'\u062E\u0637\u0627')+'</span>');
+                setTimeout(processNext,600);
             }
-            setTimeout(processNext,600);
         }).catch(()=>{
             fail++;
             addRow('<span style="color:#f87171">\u274C #'+pid+' \u2014 \u062E\u0637\u0627 \u0634\u0628\u06A9\u0647</span>');
             setTimeout(processNext,600);
         });
+        tryStep('');
     }
     processNext();
 }
@@ -61837,7 +66713,8 @@ let cfIsRun=false, cfTimer=null, cfSeen=0, cfMode='ai_text';
 
 const CF_MODES=[['ai_text','📝 متنِ بررسیِ باسلام','از متنِ توصیه/علتِ ردِ خودِ باسلام دسته را بیرون می‌کشد — رایگان و بدونِ مدلِ هوش مصنوعی'],
                 ['master','🎯 مدلِ مستر','فقط از بهترین مدلِ کاندید (بر اساس آمارِ رأی‌ها) می‌پرسد — سریع‌تر و کم‌هزینه‌تر'],
-                ['quorum','🗳️ اجماعِ چندمدلی','از چند مدلِ کاندید می‌پرسد و رأیِ اکثریت را اعمال می‌کند — دقیق‌تر ولی پرهزینه‌تر']];
+                ['quorum','🗳️ اجماعِ چندمدلی','از چند مدلِ کاندید می‌پرسد و رأیِ اکثریت را اعمال می‌کند — دقیق‌تر ولی پرهزینه‌تر'],
+                ['fallback','🛟 زنجیرهٔ پشتیبان (مستر ← کاندیدها)','اول از مدلِ مستر می‌پرسد؛ اگر خطا داد یا دستهٔ معتبر نداد، کاندیدهایِ دیگر را به‌ترتیب امتحان می‌کند تا جوابِ معتبر بیاید']];
 
 function catfixOpen(mode){
     if(mode)cfMode=mode;
