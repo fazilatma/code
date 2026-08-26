@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.81';
+const APP_VERSION = '10.82';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24280,6 +24280,18 @@ if (isset($_GET['selftest'])) {
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
 
+    /* ==== ۹۶ (v10.82) ==== */
+    $add('10.82', 'نسخهٔ ۱۰.۸۲',
+         str_contains($selfSrc, "const APP_VERSION = '10.82';"));
+    $add('10.82', 'دکمهٔ «چت باسلام» در نوارِ هدر (کنارِ مدیرِ وظیفه)',
+         strpos($selfSrc, 'id="chatHdrBtn"') !== false
+          && strpos($selfSrc, "onclick=\"openChatsModal()\" title=\"چت باسلام") !== false
+          && strpos($selfSrc, '.chat-hdr-btn{') !== false);
+    $add('10.82', 'DoH در تلاش‌ها + مسیرهایِ غیرمستقیمِ چندتایی + راهنمایِ 530',
+         strpos($selfSrc, 'DoH: resolve نشد') !== false
+          && strpos($selfSrc, 'function msgrSiteProxies(') !== false
+          && strpos($selfSrc, 'اتصالِ غیرمستقیمِ سایت در دسترس نیست') !== false);
+
     /* ==== ۹۵ (v10.81) ==== */
     $add('10.81', 'نسخهٔ ۱۰.۸۱',
          str_contains($selfSrc, "const APP_VERSION = '10.81';"));
@@ -33890,11 +33902,10 @@ if (isset($_GET['bsl_notify_selected'])) {
 }
 
 /** v10.79 (93): Resolve با DoH — همان رزولورِ موجودِ بخشِ هوش مصنوعی */
-function msgrResolveDoH(string $host): string {
+function msgrResolveDoH(string $host): array {
     $cn = loadConnections();
     $doh = trim((string)($cn['ai_net']['doh_url'] ?? '')) ?: 'https://cloudflare-dns.com/dns-query';
-    $r = aiDohResolve($host, $doh, 8);
-    return (!empty($r['ok']) && !empty($r['ip'])) ? (string)$r['ip'] : '';
+    return aiDohResolve($host, $doh, 5);   // v10.82 (96): با خطا — تا در تلاش‌ها ثبت شود
 }
 /** v10.79 (93): آدرسِ اتصالِ غیرمستقیمِ سایت — همان کشفِ Push
     (فیلدِ جداگانه ← عبورِ هوش مصنوعی ← مبدأ). '' اگر نباشد یا
@@ -33904,6 +33915,22 @@ function msgrSiteProxy(): string {
     $u = (string)($rc['proxy'] ?? '');
     if ($u === '' || stripos($u, '@') !== false) return '';
     return $u;
+}
+/** v10.82 (96): فهرستِ همهٔ مسیرهایِ غیرمستقیمِ موجود — مسیرِ Push،
+    عبورِ هوش مصنوعی، عبورِ مبدأ (به‌ترتیب). هر کدام جدا امتحان می‌شود
+    تا یک مسیرِ مرده (مثلِ Cloudflare 530) جلویِ مسیرِ زنده را نگیرد. */
+function msgrSiteProxies(): array {
+    $rc = pushRouteCfg();
+    $cn = loadConnections();
+    $list = [];
+    foreach ([(string)($rc['proxy'] ?? ''),
+              trim((string)($cn['ai_net']['worker_url'] ?? '')),
+              trim((string)($cn['src_net']['worker_url'] ?? ''))] as $u) {
+        $u = trim((string)$u);
+        if ($u === '' || stripos($u, '@') !== false) continue;
+        if (!in_array($u, $list, true)) $list[] = $u;
+    }
+    return $list;
 }
 /** v10.81 (95): لاگِ ارسال‌هایِ پیام‌رسان — حقیقتِ «چه چیزی از کدام
     مسیر رفت و چه پاسخی آمد» (برایِ تشخیصِ مشکلاتِ مسیرِ هاست). */
@@ -33978,7 +34005,8 @@ function msgrSend(string $url, string $postJson): array {
         if ($c >= 200 && $c < 300) $via = 'مستقیم (فرم)';
     }
     if ($code === 0 && $host !== '') {
-        $ip = msgrResolveDoH($host);
+        $dr = msgrResolveDoH($host);
+        $ip = (!empty($dr['ok']) && !empty($dr['ip'])) ? (string)$dr['ip'] : '';
         if ($ip !== '') {
             [$c2, $r2, $e2] = $try('DoH', $url, $ip, $postJson, 'json');
             if ($c2 !== 0) {
@@ -33988,16 +34016,23 @@ function msgrSend(string $url, string $postJson): array {
                     $code = $c2f; $resp = $r2f; $err = $e2f; $via = 'DoH(' . $ip . ') (فرم)';
                 }
             }
+        } else {
+            /* v10.82 (96): شکستِ resolve در تلاش‌ها ثبت می‌شود (قبلاً خاموش بود) */
+            $attempts[] = 'DoH: resolve نشد — ' . mb_substr((string)($dr['error'] ?? 'نامشخص'), 0, 80);
         }
-        if ($code === 0) {
-            $proxy = msgrSiteProxy();
-            if ($proxy !== '') {
-                $pu = strpos($proxy, '{url}') !== false
-                    ? str_replace('{url}', rawurlencode($url), $proxy)
-                    : $proxy . (strpos($proxy, '?') !== false ? '&' : '?') . 'url=' . rawurlencode($url);
-                [$c3, $r3, $e3] = $try('proxy.php', $pu, null, $postJson, 'json');
-                if ($c3 !== 0) { $code = $c3; $resp = $r3; $err = $e3; $via .= ' ← proxy.php'; }
-            }
+    }
+    /* v10.82 (96): مسیرهایِ غیرمستقیم — وقتی نرسیده‌ایم یا بدنه در راه
+       خراب شده؛ هر مسیرِ موجود به‌ترتیب امتحان می‌شود تا اولِ زنده. */
+    if ($host !== '' && ($code === 0 || msgrBodyCorrupted($code, (string)$resp))) {
+        $proxies = msgrSiteProxies();
+        for ($iP = 0; $iP < count($proxies); $iP++) {
+            $proxy = $proxies[$iP];
+            $pu = strpos($proxy, '{url}') !== false
+                ? str_replace('{url}', rawurlencode($url), $proxy)
+                : $proxy . (strpos($proxy, '?') !== false ? '&' : '?') . 'url=' . rawurlencode($url);
+            [$c3, $r3, $e3] = $try('proxy.php#' . ($iP + 1), $pu, null, $postJson, 'json');
+            if ($c3 >= 200 && $c3 < 300) { $code = $c3; $resp = $r3; $err = $e3; $via .= ' ← proxy.php'; break; }
+            $code = $c3; $resp = $r3; $err = $e3;
         }
     }
     msgrSendLog($host, ['via' => $via, 'code' => $code, 'ok' => ($code >= 200 && $code < 300),
@@ -34010,8 +34045,11 @@ function msgrSend(string $url, string $postJson): array {
     if ($detail === '') $detail = mb_substr($resp, 0, 200);
     $e = $err !== '' ? 'خطای شبکه: ' . $err : ($detail !== '' ? $detail : 'پاسخی نیامد');
     $tr = count($attempts) > 1 ? ' — تلاش‌ها: ' . mb_substr(implode(' | ', $attempts), 0, 400) : '';
+    /* v10.82 (96): راهنمایِ خطای Cloudflare روی مسیرِ غیرمستقیم */
+    $hint = ($code === 530 && strpos($via, 'proxy') !== false)
+        ? ' — اتصالِ غیرمستقیمِ سایت در دسترس نیست (Cloudflare)؛ آدرسِ «مسیرِ Push» را بررسی کنید' : '';
     return ['ok' => false, 'code' => $code,
-        'error' => ($via !== 'مستقیم' && $via !== 'مستقیم (فرم)' ? '[' . $via . '] ' : '') . $e . $tr, 'via' => $via];
+        'error' => ($via !== 'مستقیم' && $via !== 'مستقیم (فرم)' ? '[' . $via . '] ' : '') . $e . $tr . $hint, 'via' => $via];
     } catch (Throwable $__msge) {
         return ['ok' => false, 'code' => 0, 'error' => 'خطای داخلی: ' . $__msge->getMessage(), 'via' => ''];
     }
@@ -44342,6 +44380,8 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 .fullwidth-btn{position:fixed;top:10px;left:60px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}.fullwidth-btn:hover{background:#334155}.fullwidth-btn.active{background:#7c3aed;color:#fff}.settings-panel.full{width:100vw;max-width:100vw;left:0}.settings-panel.full .smenu-body.open{max-height:none;overflow:visible}
 /* v10.19 (۳۲): دکمهٔ مدیر وظیفه — سومین دکمهٔ شناورِ هدر، کنارِ ☰ و ⛶ */
 .tasks-btn{position:fixed;top:10px;left:110px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:19px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}
+/* v10.82 (96): دکمهٔ چت باسلام در نوارِ هدر — کنارِ مدیرِ وظیفه */
+.chat-hdr-btn{position:fixed;top:10px;left:110px;z-index:10001;height:44px;padding:0 12px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s;direction:rtl}.chat-hdr-btn:hover{background:#334155}.chat-hdr-lbl{font-size:11px;white-space:nowrap}.hdr-tools .chat-hdr-btn{position:static;flex:0 0 auto;z-index:10050}body.modal-open .chat-hdr-btn{z-index:10}body.spanel-open .chat-hdr-btn{box-shadow:0 2px 20px rgba(0,0,0,.7)}@media(max-width:400px){.chat-hdr-lbl{display:none}}
 .tasks-btn:hover{background:#334155}
 .tasks-btn.active{background:#0891b2;color:#fff}
 /* ==================================================================
@@ -44991,6 +45031,8 @@ html[data-skin="gloss"] .progress-bar{
 <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleSettingsPanel()">☰</button>
 <button class="fullwidth-btn" id="fullBtn" onclick="toggleFullSettings()" title="تمام عرض کردن منو و محتویات آن">⛶</button>
 <button class="tasks-btn" id="tasksBtn" onclick="tmOpen()" title="مدیر وظیفه — کارهای در حال اجرا"><span aria-hidden="true">📋</span><span class="tasks-lbl">مدیر وظیفه</span><span class="tasks-sub" id="tasksSub">کارهای پس‌زمینه</span><span class="tasks-badge" id="tasksBadge">0</span></button>
+<!-- v10.82 (96): چت باسلام — باز کردن مودالِ گفتگوها از نوارِ هدر -->
+<button class="chat-hdr-btn" id="chatHdrBtn" onclick="openChatsModal()" title="چت باسلام — گفتگوها و پیام‌های مشتری"><span aria-hidden="true">💬</span><span class="chat-hdr-lbl">چت باسلام</span></button>
 </div>
 <div class="container">
 <h1><span class="h1-name"><span class="h1-ico">🛒</span> <span class="h1-txt">اسکرپر</span></span>
@@ -52403,6 +52445,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.82', t:'💬 دکمهٔ «چت باسلام» در نوارِ هدر + زنجیرهٔ ارسالِ چندمسیره', items:[
+    '💬 <b>دکمهٔ تازه در نوارِ بالا</b> (کنارِ «مدیرِ وظیفه»): با یک کلیک مودالِ چتِ باسلام — گفتگوها و پیام‌های مشتری — باز می‌شود؛ همان مودالی که در تبِ استعلام است.',
+    '🔧 <b>زنجیرهٔ ارسال هوشمندتر:</b> حالا همهٔ مسیرهایِ غیرمستقیمِ موجود (مسیرِ Push ← عبورِ هوش مصنوعی ← عبورِ مبدأ) به‌ترتیب امتحان می‌شوند تا یک مسیرِ مرده جلویِ مسیرِ زنده را نگیرد؛ شکستِ DoH هم دیگر خاموش نیست و در فهرستِ تلاش‌ها ثبت می‌شود.',
+    '🛟 <b>راهنمایِ خطای 530:</b> اگر proxy.php خطای Cloudflare بدهد، کنارِ خطا می‌آید: «اتصالِ غیرمستقیمِ سایت در دسترس نیست؛ آدرسِ مسیرِ Push را بررسی کنید».',
+  ]},
   {v:'10.81', t:'🔬 «message text is empty» = بدنهٔ خراب‌شده در راه — امتحانِ فرمی + لاگِ ارسال‌ها', items:[
     '🔬 <b>رمزِ خطای تلگرام شکسته شد:</b> «message text is empty» لزوماً به‌معنیِ متنِ خالی نیست — تلگرام همین پاسخ را زمانی می‌دهد که بدنهٔ POST اصلاً قابلِ پارس نباشد (مثلاً اگر خروجیِ هاست سربرگِ Content-Type: application/json را بیندازد). حالا این امضا شناسایی می‌شود و همان پیام با بدنهٔ <b>فرمی</b> (که Bot API هم می‌پذیرد) از همان مسیرها دوباره می‌رود.',
     '🧾 <b>دکمهٔ «🧾 ارسال‌هایِ آخر»:</b> هر ارسالِ پیام‌رسان (تست، پینگ، رویداد) با مسیرش (مستقیم/فرم/DoH/proxy.php)، HTTP code و پاسخِ اصلی ثبت می‌شود — دیگر گمان‌زنی نیست، دقیقاً می‌بینیم چه چیزی کجا شکسته است.',
