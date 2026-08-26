@@ -274,7 +274,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.69';
+const APP_VERSION = '10.70';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24040,6 +24040,16 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۸۴ (v10.7۰) ==== */
+    $add('10.70', 'نسخهٔ ۱۰.۷۰',
+         str_contains($selfSrc, "const APP_VERSION = '10.70';"));
+    $add('10.70', 'صفِ استخراج به‌صورتِ خودکار تازه می‌شود (زنده)',
+         strpos($selfSrc, 'function exqSchedule(ms){') !== false
+          && strpos($selfSrc, 'exqSchedule(active?3000:15000);') !== false
+          && strpos($selfSrc, 'id="exqLive"') !== false
+          && strpos($selfSrc, '● زنده') !== false
+          && strpos($selfSrc, '● پایشِ آهسته') !== false);
+
     /* ==== ۸۳ (v10.69) ==== */
     $add('10.69', 'نسخهٔ ۱۰.۶۹',
          str_contains($selfSrc, "const APP_VERSION = '10.69';"));
@@ -45846,7 +45856,8 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                         <span style="font-weight:700;font-size:12px;color:#a855f7">📋 صف استخراج بک‌اند</span>
                         <div style="display:flex;gap:4px">
                             <button class="btn btn-gray" onclick="clearExtractQueueDone()" style="font-size:10px;padding:3px 8px" title="پاک کردن تکمیل‌شده‌ها">🧹</button>
-                            <button class="btn btn-gray" onclick="refreshExtractQueue()" style="font-size:10px;padding:3px 8px" title="تازه‌سازی">🔄</button>
+                            <button class="btn btn-gray" onclick="refreshExtractQueue()" style="font-size:10px;padding:3px 8px" title="تازه‌سازیِ آنی (تازه‌سازیِ خودکار هم روشن است)">🔄</button>
+                            <span id="exqLive" style="font-size:9px;color:#4ade80;align-self:center;display:none" title="صف خودش تازه می‌شود — نیازی به کلیک نیست">● زنده</span>
                         </div>
                     </div>
                     <div id="extractQueueList" style="font-size:11px;color:#94a3b8">بارگذاری...</div>
@@ -50401,11 +50412,38 @@ function syncDiagnose(){
   }).catch(()=>{box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطای شبکه</div>';});
 }
 
+/* v10.70 (84): صفِ استخراج «زنده» — خودش تازه می‌شود.
+   تا حالا پیشرفتِ ردیف‌ها فقط با کلیکِ 🔄 (یا شروع/توقف/پاک‌سازی) دیده می‌شد،
+   پس کارِ پس‌زمینه (کران، نگهبان، ادامهٔ کارِ گیرکرده) را کاربر نمی‌دید مگر
+   ریفرش می‌زد. حالا هر بارِ خواندن، نوبتِ بعد را خودش می‌چیند:
+   ردیفِ فعال (در صف/در حال اجرا/متوقف) ⇒ هر ۳ ثانیه؛ وگرنه ⇒ هر ۱۵ ثانیه
+   تا شروعِ کارِ بعدی هم آنی دیده شود. دکمهٔ 🔄 همان کارِ قبلی را می‌کند
+   (و زمان‌سنج را هم از اول می‌شمارد). */
+let exqInFlight=false, exqTimer=null;
+function exqSchedule(ms){
+  if(exqTimer)clearTimeout(exqTimer);
+  exqTimer=setTimeout(refreshExtractQueue,ms);
+}
+function exqSetLive(active){
+  try{
+    const el=$('exqLive');
+    if(!el)return;
+    el.style.display='inline';
+    el.style.color=active?'#4ade80':'#64748b';
+    el.textContent=active?'● زنده':'● پایشِ آهسته';
+  }catch(e){}
+}
 function refreshExtractQueue(){
-    fetch('?extract_queue_status=1').then(r=>r.json()).then(d=>{
-        if(!d.ok)return;
-        renderExtractQueue(d.entries||[], d.progress||{});
-    }).catch(()=>{});
+  if(exqInFlight)return;
+  exqInFlight=true;
+  fetch('?extract_queue_status=1').then(r=>r.json()).then(d=>{
+    if(!d.ok)return;
+    renderExtractQueue(d.entries||[], d.progress||{});
+    const entries=d.entries||[];
+    const active=entries.some(e=>e.status==='waiting'||e.status==='running'||e.status==='paused');
+    exqSetLive(active);
+    exqSchedule(active?3000:15000);
+  }).catch(()=>exqSchedule(5000)).then(()=>{exqInFlight=false;});
 }
 
 function renderExtractQueue(entries, progress){
@@ -51378,6 +51416,10 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.70', t:'📋 صفِ استخراج «زنده» شد — دیگر دکمهٔ ریفرش لازم نیست', items:[
+    '🔄 <b>تازه‌سازیِ خودکار:</b> تا حالا پیشرفتِ ردیف‌هایِ صفِ استخراج فقط با کلیکِ 🔄 (یا بعد از شروع/توقف/پاک‌سازی) دیده می‌شد؛ پیشرفتِ کارِ پس‌زمینه (کران، نگهبان، ادامهٔ کارِ گیرکرده) را نمی‌دیدی مگر ریفرش می‌زدی. حالا باکس خودش تازه می‌شود: وقتی ردیفِ فعالی هست (در صف، در حال استخراج، متوقف) <b>هر ۳ ثانیه</b>، و وقتی کار فعال نیست <b>هر ۱۵ ثانیه</b> — پس شروعِ هر کارِ تازهٔ پس‌زمینه هم آنی دیده می‌شود.',
+    '🟢 <b>نشانِ وضعیتِ زنده:</b> کنارِ دکمه‌ها یک نقطهٔ کوچک می‌گوید حالِ پایش کجاست: «● زنده» (فعال — ۳ ثانیه) یا «● پایشِ آهسته» (۱۵ ثانیه). دکمهٔ 🔄 برای تازه‌سازیِ آنیِ دستی هم همان‌جاست.',
+  ]},
   {v:'10.69', t:'🛰 اعلانِ سیستم حالا از مسیرِ مطمئنِ «سرویس‌ورکر» می‌رود', items:[
     '🛰 <b>اعلان از طریقِ service worker (طبقِ پیشنهادِ شما):</b> مسیرِ اصلیِ اعلانِ سیستم دیگر «صفحه» نیست، «سرویس‌ورکر» است — همان راهی که وب‌سایت‌هایِ بزرگ استفاده می‌کنند و روی کرومِ اندروید مطمئن‌تر نمایش داده می‌شود. نکته: <b>فایلِ جداگانه‌ای لازم نیست</b> — خودِ scraper4.php اسکریپتِ سرویس‌ورکر را در آدرسِ ?sw=1 می‌دهد، پس هرگز «فراموشِ آپلود» یا «نسخهٔ کهنه» ندارد.',
     '🔀 <b>فالبکِ خودکار:</b> اگر سرویس‌ورکر ثبت نشد (مرورگرِ قدیمی یا صفحهٔ غیرHTTPS)، اعلان از مسیرِ معمولیِ صفحه می‌رود — هر دو مسیر پشت‌سرِ هم امتحان می‌شوند.',
