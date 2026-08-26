@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.83';
+const APP_VERSION = '10.84';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24280,6 +24280,24 @@ if (isset($_GET['selftest'])) {
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
 
+    /* ==== ۹۸ (v10.84) ==== */
+    $add('10.84', 'نسخهٔ ۱۰.۸۴',
+         str_contains($selfSrc, "const APP_VERSION = '10.84';"));
+    $add('10.84', 'پاسخِ خودِ ادمین به پیام‌رسان نمی‌رود (تمایزِ ادمین/مشتری)',
+         strpos($selfSrc, '$_lmSid84 === $_myUid84') !== false
+          && strpos($selfSrc, 'اگر آخرین پیام از خودِ غرفه‌دار') !== false);
+    $add('10.84', 'شمارندهٔ خوانده‌نشده روی دکمهٔ «پاسخ دستی»',
+         strpos($selfSrc, 'id="chatUnreadB"') !== false
+          && strpos($selfSrc, 'function mrUnreadBadge(') !== false);
+    $add('10.84', 'اتاقِ چتِ تمام‌صفحه + لیستِ کشویی',
+         strpos($selfSrc, 'function mrToggleDrawer()') !== false
+          && strpos($selfSrc, 'id="mrRow"') !== false
+          && strpos($selfSrc, '#mrModalHost #mrListWrap{') !== false);
+    $add('10.84', 'تبِ ارسال: دو تبِ فرعیِ ووکامرس/باسلام',
+         strpos($selfSrc, 'function sendSubTab(') !== false
+          && strpos($selfSrc, 'id="sendPaneWoo"') !== false
+          && strpos($selfSrc, 'id="sendPaneBsl"') !== false);
+
     /* ==== ۹۷ (v10.83) ==== */
     $add('10.83', 'نسخهٔ ۱۰.۸۳',
          str_contains($selfSrc, "const APP_VERSION = '10.83';"));
@@ -30621,6 +30639,13 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
             if (!is_array($c)) continue;
             $nc = bslNormalizeChat($c);
             if ($nc['chat_id'] <= 0) continue;
+            /* v10.84 (98): اگر آخرین پیام از خودِ غرفه‌دار (ادمین) باشد،
+               رویداد «پیام مشتری» نمی‌زند — پاسخِ خودِ ما نباید به
+               پیام‌رسان برود. (bslMyUserId کشِ استاتیک دارد؛ بدونِ
+               درخواستِ API اضافه.) */
+            $_myUid84 = bslMyUserId($tk);
+            $_lmSid84 = (int)($c['last_message']['sender']['id'] ?? 0);
+            if ($_myUid84 > 0 && $_lmSid84 > 0 && $_lmSid84 === $_myUid84) continue;
             $lastId = (int)($c['last_message']['id'] ?? 0);
             // v8.38: امضا فقط شناسهٔ آخرین پیام است. اگر تعداد خوانده‌نشده را هم
             // در امضا بیاوریم، جواب دادن مشتری (۲ → ۰) مثل «رویداد تازه» دیده
@@ -44391,6 +44416,22 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 .tasks-btn{position:fixed;top:10px;left:110px;z-index:10001;width:44px;height:44px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:19px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s}
 /* v10.82 (96): دکمهٔ چت باسلام در نوارِ هدر — کنارِ مدیرِ وظیفه */
 .chat-hdr-btn{position:fixed;top:10px;left:110px;z-index:10001;height:44px;padding:0 12px;border-radius:12px;background:#1e293b;border:1px solid #475569;color:#e2e8f0;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;box-shadow:0 2px 12px rgba(0,0,0,.4);transition:background .2s;direction:rtl}.chat-hdr-btn:hover{background:#334155}.chat-hdr-lbl{font-size:11px;white-space:nowrap}.hdr-tools .chat-hdr-btn{position:static;flex:0 0 auto;z-index:10050}body.modal-open .chat-hdr-btn{z-index:10}body.spanel-open .chat-hdr-btn{box-shadow:0 2px 20px rgba(0,0,0,.7)}@media(max-width:400px){.chat-hdr-lbl{display:none}}
+/* v10.84 (98): تب‌هایِ فرعیِ تبِ ارسال (ووکامرس / باسلام) */
+.send-subtabs{display:flex;gap:6px;margin-bottom:12px;direction:ltr}.ssb{flex:0 0 auto;font-size:12px;font-weight:700;padding:6px 18px;border-radius:8px 8px 0 0;border:1px solid #334155;border-bottom:none;background:#0f172a;color:#94a3b8;cursor:pointer;transition:all .15s;direction:rtl}.ssb:hover{color:#67e8f9}.ssb.on{color:#67e8f9;background:linear-gradient(90deg,#164e63,#0f172a);border-color:#0e7490}
+/* v10.84 (98): اتاقِ چتِ تک‌صفحهٔ تمام‌عرضِ تمام‌ارتفاع + لیستِ کشویی */
+#mrDrawerBtn{display:none}
+#mrModal{padding:0}
+#mrModal .bsl-modal{width:100vw;max-width:100vw;height:100vh;max-height:100vh;border-radius:0}
+#mrModalHost{padding:0!important;height:100%}
+#mrModalHost #mrBody{max-height:none!important;flex:1;display:flex;flex-direction:column;padding:0 12px 12px!important}
+#mrModalHost #mrRow{flex:1;min-height:0;position:relative;flex-wrap:nowrap}
+#mrModalHost #mrDrawerBtn{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;flex:0 0 auto;z-index:7;background:#16233d;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:15px;cursor:pointer}
+#mrModalHost #mrDrawerBtn:hover{background:#1e293b}
+#mrModalHost #mrListWrap{position:absolute;top:0;bottom:0;right:0;left:auto;width:min(330px,85%);min-width:0;z-index:6;background:#0f172a;border-left:1px solid #334155;box-shadow:0 0 30px rgba(0,0,0,.5);transform:translateX(105%);transition:transform .25s ease;overflow-y:auto;display:flex;flex-direction:column}
+#mrModalHost #mrRow.mr-drawer-open #mrListWrap{transform:translateX(0)}
+#mrModalHost #mrList{max-height:none;flex:1;border-radius:0;border:none}
+#mrModalHost #mrThread{min-width:0;display:flex;flex-direction:column}
+#mrModalHost #mrMsgs{height:auto;flex:1;font-size:13px}
 .tasks-btn:hover{background:#334155}
 .tasks-btn.active{background:#0891b2;color:#fff}
 /* ==================================================================
@@ -45041,7 +45082,7 @@ html[data-skin="gloss"] .progress-bar{
 <button class="fullwidth-btn" id="fullBtn" onclick="toggleFullSettings()" title="تمام عرض کردن منو و محتویات آن">⛶</button>
 <button class="tasks-btn" id="tasksBtn" onclick="tmOpen()" title="مدیر وظیفه — کارهای در حال اجرا"><span aria-hidden="true">📋</span><span class="tasks-lbl">مدیر وظیفه</span><span class="tasks-sub" id="tasksSub">کارهای پس‌زمینه</span><span class="tasks-badge" id="tasksBadge">0</span></button>
 <!-- v10.82 (96): چت باسلام — باز کردن مودالِ گفتگوها از نوارِ هدر -->
-<button class="chat-hdr-btn" id="chatHdrBtn" onclick="mrOpenModal()" title="پاسخ دستی به مشتریان — اتاقِ چتِ زنده"><span aria-hidden="true">💬</span><span class="chat-hdr-lbl">پاسخ دستی</span></button>
+<button class="chat-hdr-btn" id="chatHdrBtn" onclick="mrOpenModal()" title="پاسخ دستی به مشتریان — اتاقِ چتِ زنده"><span aria-hidden="true">💬</span><span class="chat-hdr-lbl">پاسخ دستی</span><span id="chatUnreadB" style="display:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#e11d48;color:#fff;font-size:10px;font-weight:700;align-items:center;justify-content:center">۰</span></button>
 </div>
 <div class="container">
 <h1><span class="h1-name"><span class="h1-ico">🛒</span> <span class="h1-txt">اسکرپر</span></span>
@@ -45972,7 +46013,8 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 پس از هر همگام‌سازی (خودکار یا دستی) یک گزارشِ کامل ثبت می‌شود و همان متن به پیام‌رسان می‌رود:
 استخراج، بایگانی، صف‌سازی و صرفه‌جویی‌ها. گزارش‌ها در تبِ «شروع» هم قابل مرورند.
 </div>
-<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifCronPing" style="width:15px;height:15px"><span>📡 پینگ اجرای کران‌جاب</span></label>
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer"><input type="checkbox" id="notifCronPing" style="width:15px;height:15px"><span>📡 پینگ اجرای کران‌جاب (دوره‌ای)</span></label>
+<div style="font-size:10px;color:#64748b;padding-right:21px;line-height:1.6;margin-bottom:4px">برایِ خاموش‌کردن، تیک را بردارید و <b>💾 ذخیره</b> را بزنید — بدونِ ذخیره، تغییر روی سرور اثر ندارد. فاصلهٔ زمانی = عددِ دقیقه (۰ = هر اجرا).</div>
 <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;padding-right:21px">
 <span>حداکثر هر</span>
 <input type="number" id="pingEvery" value="360" min="0" style="max-width:70px;padding:4px 6px;font-size:11px" dir="ltr">
@@ -46606,7 +46648,8 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 عددِ تویِ پرانتز = شمارهٔ غرفه (با رنگِ متفاوت). پاسخ‌ها در همان لاگِ پاسخ‌ها (نوعِ «دستی») ثبت می‌شوند.
 </div>
 <div id="mrShopChips" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:7px"></div>
-<div style="display:flex;gap:10px;flex-wrap:wrap">
+<div id="mrRow" style="display:flex;gap:10px;flex-wrap:wrap">
+<button id="mrDrawerBtn" onclick="mrToggleDrawer()" title="لیستِ چت‌ها">👥</button>
 <div id="mrListWrap" style="flex:1;min-width:215px">
 <div id="mrListHdr" onclick="mrToggleList()" style="display:none;align-items:center;justify-content:space-between;gap:6px;padding:7px 9px;cursor:pointer;background:#16233d;border:1px solid #334155;border-radius:8px">
 <b style="font-size:11px">👥 لیستِ مشتری‌ها</b><span id="mrListBadge" style="font-size:9.5px;color:#64748b"></span><span id="mrListArrow" style="font-size:10px;color:#64748b">▼</span>
@@ -47590,6 +47633,12 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 
 <div class="tab-pane" id="pane-send">
 
+<div class="send-subtabs" id="sendSubTabs">
+<button class="ssb on" id="ssbWoo" onclick="sendSubTab('woo')">🛒 ووکامرس</button>
+<button class="ssb" id="ssbBsl" onclick="sendSubTab('bsl')">🟢 باسلام</button>
+</div>
+<div id="sendPaneWoo">
+
 <div class="card">
 <div class="section-title" style="color:#a78bfa">📤 ارسال ووکامرس</div>
 <details class="alert alert-info hint-collapse" style="margin-bottom:8px"><summary><span>💡 <b id="wcN">۰</b> محصول با قیمت از <span id="wcT">۰</span> کل</span></summary><div class="hint-body" style="font-size:11px">فقط محصولاتی به ووکامرس فرستاده می‌شوند که <b>قیمت</b> داشته باشند؛ بقیه نادیده گرفته می‌شوند. کار در <b>پس‌زمینهٔ سرور</b> اجرا می‌شود و در <b>مدیر وظیفه</b> هم دیده می‌شود.</div></details>
@@ -47638,6 +47687,8 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 </div>
 
+</div>
+<div id="sendPaneBsl" style="display:none">
 <div class="card" style="margin-top:14px">
 <div class="section-title" style="color:#22d3ee">📤 ارسال باسلام</div>
 
@@ -47730,6 +47781,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 </div>
 
+</div>
 <div class="card" style="margin-top:14px">
 <div class="section-title" style="color:#22d3ee">🔄 سینک دوره‌ای (همگام‌سازی خودکار)</div>
 <details class="alert alert-info hint-collapse" style="margin-bottom:8px;font-size:11px">
@@ -52462,6 +52514,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.84', t:'💬 چتِ تمام‌صفحه + لیستِ کشویی · 🔢 خوانده‌نشده روی دکمه · 📤 تب‌هایِ فرعیِ ارسال · 🤫 سکوتِ ادمین', items:[
+    '💬 <b>اتاقِ چتِ تک‌صفحه:</b> از دکمهٔ «پاسخ دستی»، اتاقِ چت باسلام حالا <b>تمامِ عرض و ارتفاعِ صفحه</b> را می‌گیرد (تک‌صفحه، بدونِ اسکرولِ تودرتو) و <b>لیستِ چت‌ها کشویی</b> است — با دکمهٔ 👥 ازِ راست باز می‌شود و با انتخابِ هر گفتگو خودکار بسته می‌شود.',
+    '🔢 <b>شمارندهٔ خوانده‌نشده:</b> دکمهٔ «پاسخ دستی» بالایِ صفحه تعدادِ کلِ پیام‌هایِ خوانده‌نشدهٔ همهٔ غرفه‌ها را نشان می‌دهد (هر ۵ ثانیه به‌روز می‌شود).',
+    '📤 <b>تبِ ارسال دو تبِ فرعیِ بالایی شد:</b> «🛒 ووکامرس» و «🟢 باسلام» — آخرین انتخاب به‌یاد می‌ماند. «🔄 سینکِ دوره‌ای» چون برایِ هر دو است، زیرِ هر دو تب می‌ماند.',
+    '🤫 <b>ادمین درِ پیام‌رسان ساکت است:</b> اگر آخرین پیامِ یک گفتگو از خودِ غرفه‌دار باشد (یعنی شما پاسخ داده‌اید)، دیگر به‌عنوانِ «پیامِ مشتری» حساب نمی‌شود و چیزی به بله/روبیکا/تلگرام نمی‌رود.',
+  ]},
   {v:'10.83', t:'💬 «پاسخ دستی به مشتریان» به‌صورتِ مودال ازِ نوارِ هدر', items:[
     '💬 <b>دکمهٔ «پاسخ دستی» در نوارِ بالا</b> (کنارِ «مدیرِ وظیفه») حالا خودِ بخشِ «پاسخ دستی به مشتریان» را به‌صورتِ مودال باز می‌کند: اتاقِ چتِ زنده با همهٔ غرفه‌ها، پاسخِ متنی/تصویری و دکمه‌هایِ آماده — بدونِ رفتن به تنظیمات.',
     '🔧 اتاقِ چت <b>گرهٔ زنده</b> است، نه کپی: وقتی مودال باز است، بخشِ داخلِ تنظیمات جایِ خودش را نگه می‌دارد و برمی‌گردد؛ کارتِ نوتیفِ زندهٔ پیامِ تازه هم اگر لازم بود اتاق را ازِ مودال باز می‌کند.',
@@ -56508,6 +56566,7 @@ async function mrPoll(){
   MR_SHOPS=d.shops||[];
   mrRenderChips();
   mrRenderList(d.chats||[]);
+  mrUnreadBadge(d.chats||[]); /* v10.84 (98) */
   const info=$('mrInfo');
   if(info){
     const n=(d.chats||[]).length;
@@ -56553,6 +56612,7 @@ function mrRenderList(chats){
 }
 async function mrOpenChat(id,shop){
   shop=shop||1;
+  mrCloseDrawer(); /* v10.84 (98): با انتخابِ گفتگو، لیستِ کشویی بسته شود */
   const c=MR_LAST_CHATS.find(x=>x.chat_id===id)||null;
   MR_CHAT={id:id, shop:shop, shop_name:c?(c.shop_name||''):'', who:c?(c.who||'مشتری'):'مشتری'};
   mrRenderList(MR_LAST_CHATS);
@@ -56681,6 +56741,7 @@ function mrOpenModal(){
   clearTimeout(body.__smenuT);
   setTimeout(()=>{if(body.classList.contains('open'))body.classList.add('smenu-done');},320);
   modal.style.display='flex';
+  mrCloseDrawer(); /* v10.84 (98): مودال تازه باز شد — لیستِ کشویی بسته باشد */
   mrLoadChats();
 }
 function mrCloseModal(){
@@ -56694,6 +56755,34 @@ function mrCloseModal(){
     const hdr=body.previousElementSibling;
     if(hdr&&!hdr.classList.contains('open'))body.classList.remove('open','smenu-done');
   }
+}
+/* v10.84 (98): تعدادِ خوانده‌نشده روی دکمهٔ «پاسخ دستی» */
+function mrUnreadBadge(chats){
+  const b=$('chatUnreadB'); if(!b||!chats)return;
+  let n=0;
+  for(let i=0;i<chats.length;i++){ const u=chats[i].unseen; if(u>0)n+=u; }
+  if(n>0){ b.textContent=toFa(n); b.style.display='flex'; } else { b.style.display='none'; }
+}
+/* v10.84 (98): لیستِ چت‌ها به‌صورتِ کشویی درِ حالتِ تمام‌صفحه */
+function mrToggleDrawer(){
+  const row=$('mrRow'); if(!row)return;
+  row.classList.toggle('mr-drawer-open');
+  const b=$('mrDrawerBtn'); if(b)b.textContent=row.classList.contains('mr-drawer-open')?'✕':'👥';
+}
+function mrCloseDrawer(){
+  const row=$('mrRow'); if(!row)return;
+  row.classList.remove('mr-drawer-open');
+  const b=$('mrDrawerBtn'); if(b)b.textContent='👥';
+}
+/* v10.84 (98): تب‌هایِ فرعیِ تبِ ارسال — ووکامرس / باسلام */
+function sendSubTab(w){
+  try{localStorage.setItem('send_subtab',w);}catch(e){}
+  const woo=$('sendPaneWoo'),bsl=$('sendPaneBsl');
+  if(woo)woo.style.display=(w==='woo')?'':'none';
+  if(bsl)bsl.style.display=(w==='bsl')?'':'none';
+  const a=$('ssbWoo'),b=$('ssbBsl');
+  if(a)a.classList.toggle('on',w==='woo');
+  if(b)b.classList.toggle('on',w==='bsl');
 }
 
 /* =====================================================================
@@ -57069,6 +57158,7 @@ async function mrNotifPoll(){
   if(document.visibilityState!=='visible'&&!mrSysOn())return; /* v10.63 (۷۷): با اعلانِ سیستمِ روشن، تبِ پشتی هم چک می‌شود */
   const d=await mrNotifFetch(); if(!d)return;
   const chats=d.chats||[];
+  mrUnreadBadge(chats); /* v10.84 (98): تعدادِ خوانده‌نشده روی دکمهٔ هدر */
   if(!MR_NOTIF_BOOTED){
     /* seedِ بی‌صدا: پیام‌های قبلی نوتیف نمی‌کنند؛ اما اگر در localStorage
        شناسهٔ قدیمی‌تری داشته باشیم (بازدیدِ قبل)، پیام‌های تازهٔ زمانِ
@@ -59670,6 +59760,7 @@ document.addEventListener('DOMContentLoaded',function(){
     try{ initAppThemePref(); }catch(e){}     // v9.94: رنگ‌بندی (تم) برنامه
     try{ initAppFxPref(); }catch(e){}        // v10.06: جلوه‌های بصری
     try{ syncSmenuStickyOffsets(); }catch(e){}  // v9.94: افستِ سربخش‌های چسبان
+    try{ sendSubTab(localStorage.getItem('send_subtab')||'woo'); }catch(e){}  // v10.84 (98)
     try{ selCtlInit(); }catch(e){}           // v9.90: تیک‌های نمایش کنترل‌های سلکتور
     try{ selSubRestore(); }catch(e){}        // v10.25 (۳۸ب): زیرتبِ آخرِ تبِ سلکتور
     try{ manualDetailSelRestore(); }catch(e){}  // v10.29 (۴۲): حالتِ دستیِ سلکتورهای جزئیات
