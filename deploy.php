@@ -13,15 +13,18 @@
  *   • بکاپ خودکار + بازگشت به هر نسخهٔ قبلی
  *   • اعتبارسنجی چندلایه پیش از نصب
  *   • API ساده برای cron و فراخوانی خودکار
+ *   • v3.1: بدونِ رمز/نشست (خروجِ خودکار و ورودِ مجدد حذف شد) +
+ *     اندپوینتِ cron (`?action=cron&api_token=...`) که کارهای ذخیره‌شده
+ *     را نصب می‌کند؛ اگر آخرین نسخهٔ فایل از قبل نصب بود، رد می‌شود.
  *
- * نصب: فایل را روی هاست بگذارید، یک‌بار باز کنید و رمز تعیین کنید.
+ * نصب: فایل را روی هاست بگذارید و یک‌بار باز کنید (راه‌اندازیِ اولیه).
  */
 
 @set_time_limit(300);
 @ini_set('memory_limit', '256M');
 
-const DEPLOY_VERSION = '3.0';
-const DEPLOY_BUILD   = '1405-05-10';
+const DEPLOY_VERSION = '3.1';
+const DEPLOY_BUILD   = '1405-06-04';
 const CONFIG_FILE    = __DIR__ . '/.deploy-config.json';
 const BACKUP_DIR     = __DIR__ . '/_backups';
 const LOG_FILE       = __DIR__ . '/.deploy-log.json';
@@ -644,12 +647,8 @@ function do_deploy(array $job, array $cfg, bool $dryRun = false): array {
 // ==================================================================
 
 $cfg     = cfg_load();
-$isSetup = empty($cfg['password_hash']);
-
-if (session_status() === PHP_SESSION_NONE) {
-    @session_name('deploypanel');
-    @session_start();
-}
+/* v3.1: رمز و نشست دیگر وجود ندارند — راه‌اندازی فقط تا ساختِ api_token لازم است. */
+$isSetup = empty($cfg['api_token']);
 
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 $isApi  = $action !== '';
@@ -661,11 +660,9 @@ function api_token_ok(array $cfg): bool {
     return is_string($t) && $t !== '' && hash_equals($cfg['api_token'], $t);
 }
 
-$loggedIn = !empty($_SESSION['deploy_ok']) && !$isSetup;
-$apiAuth  = api_token_ok($cfg);
-$authed   = $loggedIn || $apiAuth;
+/* v3.1: خروجِ خودکار و ورودِ مجدد با پسورد به‌کامل حذف شد — پنل همیشه
+   باز است. api_token فقط برای اندپوینتِ cron استفاده می‌شود. */
 $isCli    = PHP_SAPI === 'cli';
-if ($isCli) $authed = true;
 
 // ---------- اجرای خط فرمان (cron) ----------
 if ($isCli && !$isSetup) {
@@ -698,38 +695,50 @@ if ($isApi) {
     // --- راه‌اندازی اولیه ---
     if ($action === 'setup') {
         if (!$isSetup) jout(['ok' => false, 'error' => 'قبلاً راه‌اندازی شده است'], 400);
-        $pw = (string)($_POST['password'] ?? '');
-        if (strlen($pw) < 8) jout(['ok' => false, 'error' => 'رمز باید حداقل ۸ کاراکتر باشد'], 400);
         $c = cfg_default();
-        $c['password_hash'] = password_hash($pw, PASSWORD_DEFAULT);
-        $c['api_token']     = bin2hex(random_bytes(24));
-        $c['repo']          = trim((string)($_POST['repo'] ?? 'fazilatma/code'));
+        $c['api_token'] = bin2hex(random_bytes(24));
+        $c['repo']      = trim((string)($_POST['repo'] ?? 'fazilatma/code'));
         if (!cfg_save($c)) jout(['ok' => false, 'error' => 'ذخیرهٔ تنظیمات ناموفق — سطح دسترسی پوشه را بررسی کنید'], 500);
         ensure_self_guard();
         ensure_backup_dir();
-        $_SESSION['deploy_ok'] = true;
         jout(['ok' => true]);
     }
 
-    if ($action === 'login') {
-        if ($isSetup) jout(['ok' => false, 'error' => 'ابتدا راه‌اندازی کنید'], 400);
-        $pw = (string)($_POST['password'] ?? '');
-        usleep(300000); // کند کردن حملهٔ brute force
-        if (!password_verify($pw, $cfg['password_hash'])) {
-            log_add(['type' => 'login_fail', 'ip' => $_SERVER['REMOTE_ADDR'] ?? '']);
-            jout(['ok' => false, 'error' => 'رمز نادرست است'], 403);
+    /* ============================================================
+     * v3.1 — اندپوینتِ cron: نصبِ کارهای ذخیره‌شده
+     *
+     * فراخوانی:  ?action=cron&api_token=...            (همهٔ کارها)
+     *            ?action=cron&api_token=...&job=نام     (یک کار)
+     *            ?action=cron&api_token=...&dry=1       (فقط بررسی)
+     *
+     * هر کار از طریق do_deploy اجرا می‌شود که آخرین نسخهٔ فایل را با
+     * برنچ مقایسه می‌کند: اگر نسخهٔ روی هاست از قبل آخرین نسخه باشد،
+     * «بی‌خیال» می‌شود (نه نوشتن، نه بکاپ)؛ اگر متفاوت باشد، با بکاپ
+     * نصب می‌شود.
+     * ============================================================ */
+    if ($action === 'cron') {
+        if (!api_token_ok($cfg)) jout(['ok' => false, 'error' => 'api_token لازم است (از تبِ تنظیمات کپی کنید)'], 403);
+        $only  = trim((string)($_GET['job'] ?? ''));
+        $dry   = !empty($_GET['dry']);
+        $jobs  = $cfg['jobs'] ?? [];
+        $results = []; $changed = 0; $skipped = 0; $failed = 0;
+        foreach ($jobs as $j) {
+            if ($only !== '' && ($j['name'] ?? '') !== $only) continue;
+            $r  = do_deploy($j, $cfg, $dry);
+            $ok = !empty($r['ok']);
+            $ch = $ok && !empty($r['changed']);
+            $results[] = ['name' => $j['name'] ?? '', 'ok' => $ok, 'changed' => $ch,
+                          'dest' => $r['dest'] ?? '',
+                          'message' => $ok ? ($r['message'] ?? '') : ($r['error'] ?? '')];
+            if ($ok) { if ($ch) $changed++; else $skipped++; } else { $failed++; }
+            log_add(['type' => 'cron_http', 'job' => $j['name'] ?? '', 'ok' => $ok,
+                     'changed' => $ch, 'dest' => $r['dest'] ?? '',
+                     'msg' => $ok ? ($r['message'] ?? '') : ($r['error'] ?? '')]);
         }
-        $_SESSION['deploy_ok'] = true;
-        jout(['ok' => true]);
+        jout(['ok' => $failed === 0, 'results' => $results, 'total' => count($results),
+              'changed' => $changed, 'skipped' => $skipped, 'failed' => $failed]);
     }
 
-    if ($action === 'logout') {
-        $_SESSION = [];
-        @session_destroy();
-        jout(['ok' => true]);
-    }
-
-    if (!$authed) jout(['ok' => false, 'error' => 'ابتدا وارد شوید', 'need_auth' => true], 403);
 
     // --- لیست برنچ‌ها ---
     if ($action === 'branches') {
@@ -1194,11 +1203,6 @@ if ($isApi) {
         $gh = (string)($_POST['github_token'] ?? '');
         if ($gh === '__CLEAR__')      $cfg['github_token'] = '';
         elseif (trim($gh) !== '')     $cfg['github_token'] = trim($gh);
-        if (!empty($_POST['new_password'])) {
-            $np = (string)$_POST['new_password'];
-            if (strlen($np) < 8) jout(['ok' => false, 'error' => 'رمز جدید باید حداقل ۸ کاراکتر باشد']);
-            $cfg['password_hash'] = password_hash($np, PASSWORD_DEFAULT);
-        }
         if (!empty($_POST['regen_token'])) $cfg['api_token'] = bin2hex(random_bytes(24));
         if (!cfg_save($cfg)) jout(['ok' => false, 'error' => 'ذخیره ناموفق']);
         jout(['ok' => true, 'api_token' => $cfg['api_token']]);
@@ -1303,17 +1307,9 @@ code{background:#0f172a;padding:2px 7px;border-radius:5px;font-size:11.5px;
 <!-- ============ راه‌اندازی اولیه ============ -->
 <div class="login">
   <h1>🚀 پنل استقرار</h1>
-  <p class="sub">راه‌اندازی اولیه — یک رمز برای محافظت از پنل تعیین کنید.</p>
+  <p class="sub">راه‌اندازی اولیه — از نسخهٔ ۳.۱ دیگر رمزی لازم نیست؛ فقط ریپوی پیش‌فرض را انتخاب کنید.</p>
   <div class="card">
     <div id="msg" class="msg"></div>
-    <div class="fld">
-      <label>رمز عبور پنل (حداقل ۸ کاراکتر)</label>
-      <input type="password" id="pw" autocomplete="new-password" placeholder="یک رمز قوی">
-    </div>
-    <div class="fld">
-      <label>تکرار رمز</label>
-      <input type="password" id="pw2" autocomplete="new-password">
-    </div>
     <div class="fld">
       <label>ریپوی پیش‌فرض</label>
       <input type="text" id="repo" value="fazilatma/code" placeholder="user/repo">
@@ -1328,43 +1324,14 @@ code{background:#0f172a;padding:2px 7px;border-radius:5px;font-size:11.5px;
 </div>
 <script>
 async function doSetup(){
-  const pw=document.getElementById('pw').value, pw2=document.getElementById('pw2').value;
   const m=document.getElementById('msg');
   const show=(t,c)=>{m.textContent=t;m.className='msg on '+c;};
-  if(pw.length<8) return show('رمز باید حداقل ۸ کاراکتر باشد','m-err');
-  if(pw!==pw2)    return show('رمزها یکسان نیستند','m-err');
   const fd=new FormData();
-  fd.append('password',pw);
   fd.append('repo',document.getElementById('repo').value);
   const r=await fetch('?action=setup',{method:'POST',body:fd}).then(r=>r.json());
   if(r.ok) location.reload(); else show(r.error||'خطا','m-err');
 }
-document.getElementById('pw2').addEventListener('keydown',e=>{if(e.key==='Enter')doSetup()});
-</script>
-
-<?php elseif (!$loggedIn): ?>
-<!-- ============ ورود ============ -->
-<div class="login">
-  <h1>🔒 پنل استقرار</h1>
-  <p class="sub">برای ادامه رمز عبور را وارد کنید.</p>
-  <div class="card">
-    <div id="msg" class="msg"></div>
-    <div class="fld">
-      <label>رمز عبور</label>
-      <input type="password" id="pw" autocomplete="current-password" autofocus>
-    </div>
-    <button class="btn b-blue" style="width:100%" onclick="doLogin()">ورود</button>
-  </div>
-</div>
-<script>
-async function doLogin(){
-  const m=document.getElementById('msg');
-  const fd=new FormData(); fd.append('password',document.getElementById('pw').value);
-  const r=await fetch('?action=login',{method:'POST',body:fd}).then(r=>r.json());
-  if(r.ok) location.reload();
-  else {m.textContent=r.error||'خطا';m.className='msg on m-err';}
-}
-document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+document.getElementById('repo').addEventListener('keydown',e=>{if(e.key==='Enter')doSetup()});
 </script>
 
 <?php else: ?>
@@ -1383,7 +1350,6 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
   <div class="tab" data-p="history">📜 تاریخچه</div>
   <div class="tab" data-p="settings">⚙️ تنظیمات</div>
   <div style="flex:1"></div>
-  <div class="tab" onclick="logout()">خروج</div>
 </div>
 
 <!-- ---------- استقرار ---------- -->
@@ -1632,10 +1598,6 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
         برای حذف، عبارت <code>__CLEAR__</code> را وارد کنید.
       </div>
     </div>
-    <div class="fld">
-      <label>رمز جدید پنل</label>
-      <input type="password" id="s_pw" placeholder="خالی بگذارید تا تغییر نکند">
-    </div>
     <button class="btn b-blue" onclick="saveSettings()">ذخیرهٔ تنظیمات</button>
   </div>
 
@@ -1653,13 +1615,18 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
       </div>
     </div>
     <div class="fld">
-      <label>نمونهٔ فراخوانی وب</label>
+      <label>نمونهٔ فراخوانی وب (اندپوینتِ cron)</label>
       <div id="s_url"><code>—</code></div>
     </div>
     <div class="fld">
-      <label>نمونهٔ cron (بدون نیاز به توکن)</label>
+      <label>نمونهٔ cron (از طریق وب)</label>
       <div><code id="s_cron">—</code></div>
-      <div class="hint">بدون نام کار، همهٔ کارهای ذخیره‌شده اجرا می‌شوند.</div>
+      <div class="hint">
+        همهٔ کارهای ذخیره‌شده اجرا می‌شوند؛ اگر آخرین نسخهٔ فایل از قبل نصب
+        باشد، بی‌خیال می‌شود (نه نوشتن، نه بکاپ). برای یک کار خاص،
+        <code>&amp;job=نام_کار</code> اضافه کنید. اگر php CLI هم دارید،
+        <code>php deploy.php</code> کارِ مشابه را انجام می‌دهد.
+      </div>
     </div>
   </div>
 
@@ -1724,7 +1691,6 @@ async function api(action, data, method){
   }
   const r=await fetch(url,opt);
   const j=await r.json().catch(()=>({ok:false,error:'پاسخ نامعتبر از سرور'}));
-  if(j.need_auth){ location.reload(); return {ok:false,error:'نشست منقضی شد'}; }
   return j;
 }
 
@@ -1982,16 +1948,15 @@ async function loadSettings(){
   $('i_w').innerHTML=SETTINGS.writable?'<span style="color:#4ade80">بله</span>':'<span style="color:#f87171">خیر — chmod 755</span>';
   $('i_curl').innerHTML=SETTINGS.curl?'<span style="color:#4ade80">فعال</span>':'<span style="color:#fcd34d">غیرفعال (از fallback استفاده می‌شود)</span>';
   const base=location.origin+location.pathname;
-  $('s_url').innerHTML='<code>'+esc(base+'?action=run_jobs&api_token='+(SETTINGS.api_token||''))+'</code>';
-  $('s_cron').textContent='*/30 * * * * /usr/bin/php '+SETTINGS.dir+'/'+location.pathname.split('/').pop();
+  $('s_url').innerHTML='<code>'+esc(base+'?action=cron&api_token='+(SETTINGS.api_token||''))+'</code>';
+  $('s_cron').textContent="*/15 * * * * curl -s '"+base+"?action=cron&api_token="+(SETTINGS.api_token||"")+"'";
 }
 async function saveSettings(){
   const d={repo:$('s_repo').value.trim(),branch:$('s_branch').value.trim()};
   if($('s_gh').value) d.github_token=$('s_gh').value;
-  if($('s_pw').value) d.new_password=$('s_pw').value;
   const r=await api('settings_save', d, 'POST');
   if(!r.ok) return msg('s_msg','✗ '+esc(r.error),'m-err');
-  $('s_gh').value=''; $('s_pw').value='';
+  $('s_gh').value='';
   msg('s_msg','✓ ذخیره شد','m-ok');
   loadSettings();
 }
@@ -2191,7 +2156,6 @@ async function jobsStatus(){
     +'</table>';
 }
 
-async function logout(){ await api('logout'); location.reload(); }
 
 /* ---------- شروع ---------- */
 (async()=>{
