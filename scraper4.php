@@ -272,7 +272,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.62';
+const APP_VERSION = '10.63';
 const APP_VERSION_DATE = '1405/06/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -23846,6 +23846,16 @@ if (isset($_GET['selftest'])) {
     $add('10.44', 'نتایجِ جست‌وجو شناسهٔ تکراری ندارند',
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
+
+    /* ==== ۷۷ (v10.63) ==== */
+    $add('10.63', 'نسخهٔ ۱۰.۶۳',
+         str_contains($selfSrc, "const APP_VERSION = '10.63';"));
+    $add('10.63', 'اعلانِ سطحِ سیستم‌عامل با پاسخِ یک‌کلیکه',
+         strpos($selfSrc, 'function mrSysNotif(c){') !== false
+          && strpos($selfSrc, 'mr_sys_notif') !== false
+          && strpos($selfSrc, "class=\"mrnsys\"") !== false
+          && strpos($selfSrc, 'requireInteraction:true') !== false
+          && strpos($selfSrc, "ev.action==='mr-reply'") !== false);
 
     /* ==== ۷۶ (v10.62) ==== */
     $add('10.62', 'نسخهٔ ۱۰.۶۲',
@@ -51016,6 +51026,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.63', t:'🖥 اعلانِ سطحِ سیستم‌عامل — با متنِ کاملِ مشتری و پاسخِ یک‌کلیکه', items:[
+    '🔔 <b>اعلانِ سیستمی:</b> روی کارتِ نوتیف دکمهٔ 🖥 هست — با اولین کلیک مرورگر اجازه می‌خواهد و یک اعلانِ آزمایشی می‌فرستد؛ از آن‌به‌بعد با هر پیامِ تازهٔ مشتری، اعلان در مرکزِ اعلان‌هایِ سیستم (ویندوز/macOS/اندروید) هم می‌آید',
+    '💬 <b>متنِ کاملِ پیامِ مشتری</b> در بدنهٔ اعلانِ سیستمی + دکمهٔ «💬 پاسخ» روی خودِ اعلان — صفحه را فوکوس می‌کند و تکست‌باکسِ پاسخِ درِجای را باز می‌کند',
+    '👁 <b>تبِ پشتی هم پوشش می‌شود:</b> وقتی صفحه را کمینیت/پشتِ سر گذاشتید، پیام‌های تازه همچنان اعلانِ سیستمی می‌گیرند (تا حدِ مجازِ مرورگر)'
+  ],
   {v:'10.62', t:'💬 پاسخ از روی همان نوتیف + نمایشِ تصاویرِ مشتری', items:[
     '✍️ <b>پاسخِ درِجای:</b> با سوایپِ راست (یا دکمهٔ 💬) تکست‌باکسِ پاسخ همین‌داخلِ کارتِ نوتیف باز می‌شود — با چیپ‌هایِ سریع (👋 سلام / ✅ موجودی / 📮 آدرس) و Enter = ارسال — بدونِ رفتن به اتاقِ چت. اگر کلِ گفتگو را می‌خواهید، «🗨 گفتگوی کامل» همان‌جاست.',
     '🖼 <b>تصاویرِ مشتری:</b> اگر پیامِ تازه تصویر باشد، پیش‌نمایشِ آن روی کارتِ نوتیف (و در لیستِ گفتگوها با بندانوشِ کوچک) می‌آید — با کلیک، بزرگ‌نماییِ تمام‌صفحه (Lightbox) باز می‌شود (کلیک یا Escape = بستن). تصاویرِ داخلِ اتاقِ چت هم حالا به‌جای باز شدنِ تبِ جدید، همین‌جا بزرگ می‌شوند.',
@@ -55187,6 +55202,63 @@ function mrNotifOpenReply(n){
   const ta=card.querySelector('.mrnta');
   if(ta)setTimeout(()=>{ta.focus();},90);
 }
+/* v10.63 (۷۷): اعلانِ سطحِ سیستم‌عامل — با متنِ کاملِ پیام و دکمهٔ پاسخ */
+function mrSysOn(){
+  try{
+    return localStorage.getItem('mr_sys_notif')==='1'
+      && typeof Notification!=='undefined'
+      && Notification.permission==='granted';
+  }catch(e){return false;}
+}
+function mrSysIcon(){
+  try{
+    if(window._mrSysIconC)return window._mrSysIconC;
+    const cv=document.createElement('canvas');cv.width=cv.height=96;
+    const cx=cv.getContext('2d');
+    cx.fillStyle='#1d4ed8';
+    if(cx.roundRect){cx.beginPath();cx.roundRect(2,2,92,92,22);cx.fill();}
+    else{cx.fillRect(0,0,96,96);}
+    cx.font='50px serif';cx.textAlign='center';cx.textBaseline='middle';
+    cx.fillText('\u{1F4AC}',48,50);
+    window._mrSysIconC=cv.toDataURL('image/png');
+    return window._mrSysIconC;
+  }catch(e){return'';}
+}
+function mrSysNotif(c){
+  try{
+    if(!mrSysOn())return;
+    const who=String(c.who||'مشتری');
+    const shopNm=String(c.shop_name||('غرفهٔ '+toFa(c.shop||1)));
+    let body=String(mrNotifText(c));
+    if(body==='—')body='(بدونِ متن)';
+    if(body.length>500)body=body.slice(0,500)+'…';
+    const ic=mrSysIcon();
+    const nt=new Notification('💬 '+who+' — '+shopNm,{
+      body:body,
+      tag:'mrchat_'+(c.shop||1)+'_'+c.chat_id,
+      requireInteraction:true,
+      icon:ic||undefined,
+      badge:ic||undefined,
+      actions:[{action:'mr-reply',title:'💬 پاسخ'}]
+    });
+    const act=ev=>{
+      try{ev.preventDefault();}catch(err){}
+      try{window.focus();}catch(err){}
+      try{nt.close();}catch(err){}
+      const isReply=!!(ev&&ev.action==='mr-reply');
+      const f=MR_NOTIFS.find(x=>x.chat_id===c.chat_id&&(x.shop||1)===(c.shop||1));
+      if(f&&isReply){
+        /* پاسخِ درِجایِ روی همان کارتِ نوتیف */
+        mrNotifOpenReply(f);
+        return;
+      }
+      /* کلیکِ عادی یا پاسخِ بدونِ کارتِ موجود — گفتگو باز شود و فوکوس */
+      mrOpenChat(c.chat_id,c.shop||1);
+      setTimeout(()=>{const t=$('mrText');if(t){t.focus();t.scrollIntoView({block:'nearest'});}},500);
+    };
+    nt.onclick=act;
+  }catch(e){}
+}
 function mrNotifPush(c){
   let n=MR_NOTIFS.find(x=>x.chat_id===c.chat_id);
   if(n){
@@ -55215,6 +55287,7 @@ function mrNotifPush(c){
         '</div>'+
         '<div class="mrntime" style="font-size:9.5px;color:#64748b;margin-top:2px">'+mrRelTime(c.updated_at)+'</div>'+
       '</div>'+
+      '<button class="mrnsys" style="flex:0 0 auto;background:none;border:none;color:'+(mrSysOn()?'#4ade80':'#475569')+';font-size:12px;cursor:pointer;padding:2px 4px" title="اعلانِ سیستم‌عامل — پیام‌های مشتری در اعلان‌هایِ سیستم">🖥</button>'+
       '<button class="mrnbtn-close" style="flex:0 0 auto;background:none;border:none;color:#475569;font-size:13px;cursor:pointer;padding:2px 4px" title="بستن">✕</button>'+
     '</div>'+
     '<div class="mrntext" style="font-size:11.5px;color:#cbd5e1;line-height:1.8;padding:0 12px '+(c.last_img?'4px':'8px')+';overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">'+esc(mrNotifText(c))+'</div>'+
@@ -55250,6 +55323,31 @@ function mrNotifPush(c){
   card.querySelectorAll('.mrnq').forEach(bN=>{bN.addEventListener('click',e=>{e.stopPropagation();if(taN){taN.value=bN.getAttribute('data-q')||'';taN.focus();}});});
   const fullN=card.querySelector('.mrnbtn-full');
   if(fullN)fullN.addEventListener('click',e=>{e.stopPropagation();mrNotifReply(n);});
+  /* v10.63 (۷۷): کلیدِ اعلانِ سیستم‌عامل روی کارت */
+  const bs=card.querySelector('.mrnsys');
+  if(bs){
+    const paintS=()=>{try{bs.style.color=mrSysOn()?'#4ade80':'#475569';}catch(err){}};
+    paintS();
+    bs.addEventListener('click',async e=>{
+      e.stopPropagation();
+      if(typeof Notification==='undefined'){alert('مرورگرِ شما اعلانِ سیستمی را پشتیبانی نمی‌کند.');return;}
+      let p=Notification.permission;
+      if(p==='default'){try{p=await Notification.requestPermission();}catch(err){}}
+      if(p!=='granted'){alert('دسترسیِ اعلان را از پنلِ مرورگر/سیستم بدهید تا روشن شود.');return;}
+      const on=localStorage.getItem('mr_sys_notif')!=='1';
+      localStorage.setItem('mr_sys_notif',on?'1':'0');
+      paintS();
+      if(on){
+        try{
+          const icS=mrSysIcon();
+          const ntT=new Notification('🔔 اعلانِ سیستم روشن شد',{
+            body:'پیام‌های تازهٔ مشتری از این‌به‌بعد در اعلان‌هایِ سیستمی هم می‌آید — روی دکمهٔ «پاسخ» بزنید تا همین‌جا جواب دهید.',
+            tag:'mr_sys_on',icon:icS||undefined});
+          ntT.onclick=ev=>{try{ev.preventDefault();}catch(err2){}try{window.focus();}catch(err2){}try{ntT.close();}catch(err2){}};
+        }catch(err){}
+      }
+    });
+  }
   const doSendN=async()=>{
     if(!sendN||sendN.disabled)return;
     const tN=taN?taN.value.trim():'';
@@ -55324,7 +55422,7 @@ async function mrNotifFetch(){
   return (d&&d.ok)?d:null;
 }
 async function mrNotifPoll(){
-  if(document.visibilityState!=='visible')return;
+  if(document.visibilityState!=='visible'&&!mrSysOn())return; /* v10.63 (۷۷): با اعلانِ سیستمِ روشن، تبِ پشتی هم چک می‌شود */
   const d=await mrNotifFetch(); if(!d)return;
   const chats=d.chats||[];
   if(!MR_NOTIF_BOOTED){
@@ -55352,6 +55450,7 @@ async function mrNotifPoll(){
     if(!c.last_is_mine&&id>(MR_SEEN[key]||0)){
       MR_SEEN[key]=id;
       mrNotifPush(c);
+      mrSysNotif(c); /* v10.63 (۷۷): همتایِ سیستم‌عامل */
     }
   });
   mrNotifSave();
