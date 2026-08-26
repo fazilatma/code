@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.72';
+const APP_VERSION = '10.73';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -13036,6 +13036,23 @@ function bslAllShops(array $cn): array {
     return $out;
 }
 
+/** v10.73 (87): غرفه‌های فعال برایِ fan-outِ صف — فقط غرفه‌هایی که
+    شناسهٔ سالم و توکنِ غیرخالی دارند (همان تعریفِ مسیرِ همزمان).
+    توکن برنمی‌گردد (در صف ذخیره نمی‌شود)؛ وِرکر توکن را تازه از
+    connections می‌خواند. خروجی: [vendor_id, shop_name, is_default] */
+function bslFanoutShops(?array $cn): array {
+    $cn = $cn ?: loadConnections();
+    $out = [];
+    foreach (bslAllShops($cn) as $sh) {
+        $vid = (int)($sh['vendor_id'] ?? 0);
+        $tok = trim((string)($sh['token'] ?? ''));
+        if ($vid <= 0 || $tok === '') continue;
+        $name = trim((string)($sh['shop_name'] ?? ''));
+        $out[] = ['vendor_id' => $vid, 'shop_name' => $name, 'is_default' => !empty($sh['is_default'])];
+    }
+    return $out;
+}
+
 /* v9.68: تعدیل قیمتِ مخصوصِ هر غرفهٔ باسلام، «نسبت به غرفهٔ پیش‌فرض».
    غرفهٔ پیش‌فرض خودش می‌تواند درصد/مقدار داشته باشد (price_mode/price_val
    عمومی). برای غرفه‌های دیگر هم یک درصد/مقدارِ جدا ذخیره می‌شود که روی
@@ -16021,7 +16038,19 @@ if ($bslDup !== null) {
     $pResult['bsl'] = 'already_queued';
     $pResult['bsl_queue_id'] = $bslDup['id'] ?? '';
 } else {
-$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, /* v10.21 (۳۴ب): سینکِ خودکار هم باید به همهٔ غرفه‌های فعال بفرستد. تا حالا این کلید فقط از مسیرِ دکمهٔ دستی وارد صف می‌شد، پس ارسالِ چندغرفه‌ای در کران هرگز اجرا نمی‌شد — تیک روشن بود ولی شب‌ها فقط غرفهٔ پیش‌فرض به‌روز می‌شد. */ 'send_all_shops' => !empty($cn['basalam']['send_all_shops']), /* v10.34 (۴۸ج): تیکِ خاموش ⇒ ارسالِ کامل بدون مقایسه با غرفه */ 'force_all' => $bslForceAll], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, /* v10.53 (۶۷): منشأِ ردیف (دستی/خودکار) تا در تبِ ارسال هم دیده شود */ 'trigger' => (manualSyncActive() ? 'manual_sync' : 'cron'), 'auto_sync' => true];
+/* v10.73 (87): همان fan-outِ مسیرِ دستی — هر غرفهٔ فعال یک ردیفِ مستقل.
+   ردیفِ اول با شناسهٔ اصلی و بقیه با پسوند _s{vendor_id}؛ همه زیرِ batch_id. */
+$bslFanout=!empty($cn['basalam']['send_all_shops'])?bslFanoutShops($cn):[];
+if (count($bslFanout) > 1) {
+    $__bfFirst=true;
+    foreach ($bslFanout as $__bfSh) {
+        $__bfVid=(int)$__bfSh['vendor_id'];
+        $queue['entries'][] = ['id' => $__bfFirst ? $queueId : $queueId . '_s' . $__bfVid, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, 'send_all_shops' => 0, 'fanout' => 1, 'shop_vendor_id' => $__bfVid, 'shop_name' => (string)$__bfSh['shop_name'], 'force_all' => $bslForceAll], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, 'shop_vendor_id' => $__bfVid, 'shop_name' => (string)$__bfSh['shop_name'], 'shop_is_default' => !empty($__bfSh['is_default']), 'batch_id' => $queueId, 'trigger' => (manualSyncActive() ? 'manual_sync' : 'cron'), 'auto_sync' => true];
+        $__bfFirst=false;
+    }
+} else {
+$queue['entries'][] = ['id' => $queueId, 'status' => 'waiting', 'products_file' => $qFile, 'total' => count($bslSend), 'sent' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0, 'current' => 0, 'started_at' => 0, 'done_at' => 0, 'paused_at' => 0, 'only_changed' => $bslOnlyChanged, 'config' => ['category_id' => $catId, 'auto_category' => $autoCat, 'title_suffix' => $titleSuffix, 'delay_ms' => $delayMs, 'retry_delay_ms' => $retryDelayMs, 'fallback_cat_ids' => $allFallbackCats, /* v10.21 (۳۴ب): سینکِ خودکار هم باید به همهٔ غرفه‌های فعال بفرستد. تا حالا این کلید فقط از مسیرِ دکمهٔ دستی وارد صف می‌شد، پس ارسالِ چندغرفه‌ای در کران هرگز اجرا نمی‌شد — تیک روشن بود ولی شب‌ها فقط غرفهٔ پیش‌فرض به‌روز می‌شد. v10.73 (87): وقتی چند غرفهٔ فعال است، fan-outِ بالا هرکدام را یک ردیف می‌کند و این شاخه برایِ غرفهٔ تکی می‌ماند. */ 'send_all_shops' => !empty($cn['basalam']['send_all_shops']), /* v10.34 (۴۸ج): تیکِ خاموش ⇒ ارسالِ کامل بدون مقایسه با غرفه */ 'force_all' => $bslForceAll], 'profile_key' => $key, 'profile_name' => $profile['name'] ?? $key, /* v10.53 (۶۷): منشأِ ردیف (دستی/خودکار) تا در تبِ ارسال هم دیده شود */ 'trigger' => (manualSyncActive() ? 'manual_sync' : 'cron'), 'auto_sync' => true];
+}
 bslWriteQueue($queue);
 $syncState[$key] = array_merge(is_array($syncState[$key] ?? null) ? $syncState[$key] : [], ['lastRun' => $now, 'status' => 'queued_bsl', 'price_sig' => $priceSig]);   // v9.11
 $pResult['bsl'] = 'queued'; $pResult['bsl_total'] = count($bslSend);
@@ -24130,6 +24159,31 @@ if (isset($_GET['selftest'])) {
     $add('10.72', 'Push در کنارِ پیام‌رسان برایِ همهٔ رویدادها (لحظه‌ای + کران)',
          strpos($selfSrc, 'در کنارِ پیام‌رسان، به دستگاهِ کاربر') !== false
           && strpos($selfSrc, "\$out['push'] = webpushSend(\$_pt[\$feed] ?? '🔔 اعلان', mb_substr(\$msg, 0, 400), (string)\$feed);") !== false);
+
+    /* ==== ۸۷ (v10.73) ==== */
+    $add('10.73', 'نسخهٔ ۱۰.۷۳',
+         str_contains($selfSrc, "const APP_VERSION = '10.73';"));
+    $add('10.73', 'fan-out سرور: هر غرفهٔ فعال یک ردیفِ مستقل در صف (دستی + کران)',
+         strpos($selfSrc, 'function bslFanoutShops(?array $cn): array {') !== false
+          && strpos($selfSrc, "'shop_vendor_id'=>\$__fsVid,'shop_name'=>(string)\$__fs['shop_name'],'shop_is_default'=>!empty(\$__fs['is_default']),'batch_id'=>\$queueId,") !== false
+          && strpos($selfSrc, "\$queue['entries'][] = ['id' => \$__bfFirst ? \$queueId : \$queueId . '_s' . \$__bfVid,") !== false
+          && strpos($selfSrc, "'fanout'=>1,") !== false);
+    $add('10.73', 'وِرکر: ردیفِ اختصاصیِ غرفه (حلقهٔ تک‌غرفه‌ای با قیمتِ دولایه)',
+         strpos($selfSrc, 'if(!$__scopeShop){') !== false
+          && strpos($selfSrc, '$srAll=bslUpsertManyShops($p,[$__scopeShop],$sOpts,1);') !== false
+          && strpos($selfSrc, 'if($__scopeShop){') !== false
+          && strpos($selfSrc, 'if($__isFanoutRow)break;') !== false);
+    $add('10.73', 'رابطِ صف: نوارِ خلاصه + سربرگِ دسته + نشانِ غرفه',
+         strpos($selfSrc, '📦 چندغرفه‌ای — ') !== false
+          && strpos($selfSrc, "if(e.shop_name)html+='<span style=\"color:#fbbf24;") !== false
+          && strpos($selfSrc, 'هر غرفه، یک وظیفهٔ جدا') !== false);
+    $add('10.73', 'بخشِ اعلان‌ها چهار تب شد (پیام‌رسان/رویدادها/زنده/استعلام)',
+         strpos($selfSrc, 'id="ntab-messenger"') !== false
+          && strpos($selfSrc, 'id="ntab-events"') !== false
+          && strpos($selfSrc, 'id="ntab-live"') !== false
+          && strpos($selfSrc, 'id="ntab-query"') !== false
+          && strpos($selfSrc, 'function setNotifTab(name,btn){') !== false
+          && strpos($selfSrc, '.ntab{flex:0 0 auto;') !== false);
 
     /* ==== ۸۵ (v10.71) ==== */
     $add('10.71', 'نسخهٔ ۱۰.۷۱',
@@ -37821,6 +37875,23 @@ $__pf4=$__pf3??($__pf??loadProfiles());
 $catId=(int)($__pf4[$pKeyIn]['bslCategoryId']??0);
 }
 if($catId<=0)$catId=(int)($cn['basalam']['category_id']??0);
+// v10.73 (87): «ارسال به همهٔ غرفه‌ها» دیگر داخلِ یک ردیفِ صف پنهان نمی‌شود —
+// هر غرفهٔ فعال یک وظیفهٔ مستقل در صف می‌گیرد (ردیف، پیشرفت و گزارشِ خودش)،
+// و رابط کاربری آن‌ها را زیرِ سربرگِ دستهٔ مشترک نشان می‌دهد.
+$fanoutShops=!empty($_POST['send_all_shops'])?bslFanoutShops($cn):[];
+if(count($fanoutShops)>1){
+$fanStatus=$startImm?'running':'waiting';
+$fanFirst=true;
+foreach($fanoutShops as $__fs){
+$__fsVid=(int)$__fs['vendor_id'];
+$__fsId=$fanFirst?$queueId:$queueId.'_s'.$__fsVid;
+$queue['entries'][]=['id'=>$__fsId,'status'=>$fanFirst?$fanStatus:'waiting','products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$fanFirst&&$startImm?time():0,'done_at'=>0,'paused_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'shop_vendor_id'=>$__fsVid,'shop_name'=>(string)$__fs['shop_name'],'shop_is_default'=>!empty($__fs['is_default']),'batch_id'=>$queueId,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs,'fallback_cat_ids'=>$fbIn,'send_all_shops'=>0,'fanout'=>1,'shop_vendor_id'=>$__fsVid,'shop_name'=>(string)$__fs['shop_name']]];
+$fanFirst=false;
+}
+bslWriteQueue($queue);
+echo json_encode(['ok'=>true,'queue_id'=>$queueId,'status'=>$fanStatus,'shops'=>array_map(function($__x){return (string)$__x['shop_name'];},$fanoutShops),'shop_count'=>count($fanoutShops),'position'=>count($queue['entries']),'start_now'=>$startImm,'queue_count'=>count($queue['entries'])],JSON_UNESCAPED_UNICODE);
+exit;
+}
 $entry=['id'=>$queueId,'status'=>$status,'products_file'=>$qFile,'total'=>$total,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'current'=>0,'started_at'=>$startImm?time():0,'done_at'=>0,'paused_at'=>0,'profile_key'=>$pKeyIn,'profile_name'=>$pNameIn,'config'=>['category_id'=>$catId,'auto_category'=>$autoCat,'title_suffix'=>$titleSuffix,'delay_ms'=>$delayMs,'retry_delay_ms'=>$retryDelayMs,'fallback_cat_ids'=>$fbIn,'send_all_shops'=>!empty($_POST['send_all_shops'])]];
 $queue['entries'][]=$entry;
 bslWriteQueue($queue);
@@ -38443,6 +38514,38 @@ $cn['basalam']['fallback_cat_ids']=$qCfg['fallback_cat_ids'];
 $bslForceAllRun=!empty($qCfg['force_all']);
 if($bslForceAllRun&&!defined('BSL_FORCE_SYNC'))define('BSL_FORCE_SYNC',true);
 
+/* =====================================================================
+   v10.73 (87): وظیفهٔ اختصاصیِ غرفه — ردیفِ صف به یک غرفه گره خورده است.
+
+   «ارسال به همهٔ غرفه‌ها» دیگر یعنی یک ردیف که داخلش روی غرفه‌ها حلقه
+   بزند: حالا هر غرفه ردیفِ مستقلِ خودش را در صف دارد (پیشرفت، گزارش و
+   دکمهٔ خودش). اگر این ردیف به غرفهٔ غیرپیش‌فرض گره خورده باشد، حلقهٔ
+   اصلیِ غرفهٔ پیش‌فرض رد می‌شود و به‌جای آن — بعد از احراز هویت —
+   همان حلقهٔ upsertِ تک‌غرفه‌ای که مسیرِ همزمان استفاده می‌کرد اجرا
+   می‌شود (قیمتِ دولایه، کلیدِ نگاشتِ مخصوصِ غرفه، دسته‌های جایگزین —
+   همه دقیقاً یکسان).
+   ===================================================================== */
+$__scopeVid=(int)($qCfg['shop_vendor_id']??0);
+$__scopeName=trim((string)($qCfg['shop_name']??''));
+$__isFanoutRow=!empty($qCfg['fanout']);
+$__scopeShop=null;
+if($__scopeVid>0){
+foreach(bslAllShops($cn) as $__shScope){
+if((int)$__shScope['vendor_id']===$__scopeVid){$__scopeShop=$__shScope;break;}
+}
+if(!$__scopeShop||trim((string)($__scopeShop['token']??''))===''){
+$queue['entries'][$nextIdx]['status']='failed';
+$queue['entries'][$nextIdx]['done_at']=time();
+$queue['entries'][$nextIdx]['fail_reason']='غرفهٔ هدف دیگر در تنظیمات نیست یا توکنش خالی است';
+bslWriteQueue($queue);
+writeProgress(BSL_PROGRESS_FILE,['running'=>false,'done'=>true,'sent'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,'total'=>0,'current'=>0,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$bslQueueId,'recent_log'=>['❌ غرفه هدف یافت نشد'],'total_log_count'=>1,'sent_details'=>[],'updated_details'=>[],'skipped_details'=>[],'failed_details'=>[]]);
+@unlink(BSL_PRODUCTS_FILE);
+header('Content-Type: application/json; charset=UTF-8');
+echo json_encode(['ok'=>false,'error'=>'غرفهٔ هدف یافت نشد','queue_id'=>$bslQueueId],JSON_UNESCAPED_UNICODE);
+exit;
+}
+}
+
 $queue['entries'][$nextIdx]['status']='running';
 $queue['entries'][$nextIdx]['started_at']=$startedAt;
 bslWriteQueue($queue);
@@ -38457,6 +38560,18 @@ $autoCat=!empty($cn['basalam']['auto_category']);
 $bslDefaultVid=$vid;
 $bslDefaultShopName=trim((string)($cn['basalam']['shop_name']??''));
 if($bslDefaultShopName==='')$bslDefaultShopName='غرفهٔ پیش‌فرض';
+/* v10.73 (87): ردیفِ گره‌خورده به غرفه — همهٔ درخواست‌های همین اجرا
+   (احراز هویت، جستجو، آپلود، PATCH/POST) با توکن و شناسهٔ همان غرفه.
+   $cData/$catId هم برای فازهای ۲ و ۳ که بعد از این می‌آیند تعریف می‌شوند
+   (حلقهٔ اصلی که قبلاً آن‌ها را می‌ساخت، برای این ردیف رد می‌شود). */
+if($__scopeShop){
+$tk=trim((string)$__scopeShop['token']);
+$vid=$__scopeVid;
+$bslDefaultVid=$vid;
+$bslDefaultShopName=$__scopeName!==''?$__scopeName:(string)$__scopeShop['shop_name'];
+$cData=[];
+$catId=(int)($cn['basalam']['category_id']??0);
+}
 
 $bslDelayMs=max(0,(int)($cn['basalam']['delay_ms']??500));
 $bslRetryDelayMs=max(0,(int)($cn['basalam']['retry_delay_ms']??1000));
@@ -38477,6 +38592,7 @@ echo json_encode(['ok'=>false,'error'=>$authErr,'auth_fail'=>true,'queue_id'=>$b
 exit;
 }
 bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['✅ احراز هویت موفق']);
+if($__scopeShop){bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['🏪 این ردیفِ صف مخصوصِ غرفهٔ '.$bslDefaultShopName.' است — '.count($verifyProducts).' محصول']);}
 
 bslBackendProgress(0,0,0,0,count($verifyProducts),0,'',['دریافت دسته‌بندی‌ها...']);
 /* v10.41 (۵۵): از کشِ مشترک */
@@ -38498,7 +38614,10 @@ $skipped=(int)($bslPrevProg['skipped']??0);$fail=(int)($bslPrevProg['failed']??0
 }
 $bslExisting=[];$bslExistingNorm=[];$bslArchivedMap=[];
 // v8.22: Phase 1 removed — per-product search replaces bulk loading
-
+/* v10.73 (87): شروعِ بلوکِ «غرفهٔ پیش‌فرض» — حلقهٔ اصلی + تعدیلِ قیمتِ
+   لایهٔ دوم برای ردیف‌های گره‌خورده به غرفهٔ غیرپیش‌فرض رد می‌شود (کارِ
+   آن‌ها را حلقهٔ تک‌غرفه‌ایِ بعد از این بلوک انجام می‌دهد). */
+if(!$__scopeShop){
 foreach($pd as $i=>$p){
 /* v10.56 (۷۰): محصولاتِ قبلِ چک‌پوینت را رد کن (در اجرأ قبلی انجام شده‌اند). */
 if(($i+1)<$bslResumeStart)continue;
@@ -38870,6 +38989,7 @@ if($__sendAllShops && $__liveShops){
 }
 foreach($__liveShops as $__sh){
     if($__sendAllShops) break;   // v10.20: مسیرِ همزمانِ بالا کارِ همه را کرده
+    if($__isFanoutRow)break;   // v10.73 (87): در صفِ چندغرفه‌ای هر غرفه ردیفِ خودش را دارد
     $sTk=(string)$__sh['token']; $sVid=(int)$__sh['vendor_id'];
     {
         $shopRound=(int)($__cn2['basalam']['price_round']??0);
@@ -38900,6 +39020,48 @@ foreach($__liveShops as $__sh){
         }
         if($shopFixed>0)bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',"🏪 غرفهٔ $sVid: قیمت $shopFixed محصول با تعدیلِ خودِ آن غرفه (و لایهٔ پروفایل) به‌روز شد");
     }
+}
+} /* v10.73 (87): پایانِ بلوکِ «غرفهٔ پیش‌فرض» */
+/* v10.73 (87): وظیفهٔ اختصاصیِ غرفهٔ غیرپیش‌فرض — دقیقاً همان منطقِ
+   مسیرِ همزمانِ قبلی (bslUpsertManyShops با قیمتِ دولایه و کلیدِ
+   نگاشتِ مخصوصِ غرفه)، ولی فقط برای همین یک غرفه و به‌ترتیب — چون
+   هر غرفه حالا ردیفِ و پیشرفتِ خودش را در صف دارد. */
+if($__scopeShop){
+$sShopName=$__scopeName!==''?$__scopeName:(string)$__scopeShop['shop_name'];
+if($sShopName==='')$sShopName='غرفهٔ '.$__scopeVid;
+$sOpts=['round'=>(int)($cn['basalam']['price_round']??0),'profile'=>((string)($nextEntry['profile_key']??''))!==''?(loadProfiles()[$nextEntry['profile_key']]??null):null,'stock'=>(int)($cn['basalam']['stock']??10),'preparation_days'=>(int)($cn['basalam']['preparation_days']??3),'weight'=>(int)($cn['basalam']['weight']??500),'package_weight'=>(int)($cn['basalam']['package_weight']??((int)($cn['basalam']['weight']??500)+100)),'category_id'=>(int)($cn['basalam']['category_id']??0),'auto_category'=>$autoCat,'fallback_cat_ids'=>$bslFallbackCats,'flat_cats'=>$bslFlatCats,'cdata'=>($cData??[])];
+$sStop=false;$sDone=0;
+bslBackendProgress(0,0,0,0,$total,0,'',['🏪 [غرفهٔ '.$sShopName.'] شروعِ ارسالِ اختصاصی — '.$total.' محصول — فاصله: '.$bslDelayMs.'ms']);
+foreach($pd as $si=>$p){
+clearstatcache(true,BSL_STOP_FILE);
+if(file_exists(BSL_STOP_FILE)){$sStop=true;break;}
+$srAll=bslUpsertManyShops($p,[$__scopeShop],$sOpts,1);
+if(isset($srAll[$__scopeVid])){
+$sr=$srAll[$__scopeVid];
+$srTitle=trim($p['title']??$p['name']??'');$srKey=$p['key']??'';
+$srCard=['image'=>$p['image']??'','price'=>0,'link'=>$p['link']??''];
+if(!empty($sr['ok'])){
+if(($sr['action']??'')==='created'){$sent++;$bslSentList[]=array_merge(['title'=>$srTitle,'key'=>$srKey,'remote_id'=>(int)($sr['id']??0)],$srCard);bslShopStatBump($__scopeVid,$sShopName,'c');}
+elseif(!empty($sr['skipped'])){$skipped++;$bslSkippedList[]=array_merge(['title'=>$srTitle,'key'=>$srKey,'reason'=>'بدون تغییر','remote_id'=>(int)($sr['id']??0)],$srCard);bslShopStatBump($__scopeVid,$sShopName,'s');}
+else{$updated++;$bslUpdatedList[]=array_merge(['title'=>$srTitle,'key'=>$srKey,'remote_id'=>(int)($sr['id']??0)],$srCard);bslShopStatBump($__scopeVid,$sShopName,'u');}
+}else{
+if(!empty($sr['stopped'])||($sr['error']??'')==='stopped'){$sStop=true;break;}
+$fail++;
+$bslFailedList[]=array_merge(['title'=>$srTitle,'key'=>$srKey,'error'=>mb_substr('غرفهٔ '.$sShopName.': '.($sr['error']??'?'),0,200)],$srCard);
+bslShopStatBump($__scopeVid,$sShopName,'f');
+}
+}
+$sDone++;
+if($sDone%5===0||$sDone===$total){
+bslBackendProgress($sent,$updated,$skipped,$fail,$total,$sDone,mb_substr(trim($p['title']??''),0,30),"🏪 [{$sShopName}] {$sDone}/{$total} محصول — {$sent}✅ {$updated}⚡ {$skipped}⏭ {$fail}❌");
+}
+usleep($bslDelayMs*1000);
+}
+if($sStop){
+bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',['⏹ ارسالِ غرفهٔ '.$sShopName.' با سیگنالِ توقف نیمه‌کاره ماند']);
+}else{
+bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'',['🏪 غرفهٔ '.$sShopName.' تمام شد: '.$sent.' ساخته، '.$updated.' آپدیت، '.$skipped.' بی‌تغییر، '.$fail.' خطا']);
+}
 }
 bslBackendProgress($sent,$updated,$skipped,$fail,$total,$total,'','🔍 فاز ۲: محصولات رد‌شده...');
 $catFixed=0;$catRetryFailed=0;$catRejected=[];
@@ -43892,6 +44054,9 @@ body.modal-open .hamburger-btn,body.modal-open .fullwidth-btn{z-index:10}
 .settings-panel .smenu-body .smenu-hdr{top:calc(var(--spanel-head-h,58px) + var(--smenu-hdr-h,46px));z-index:4}
 .settings-panel .smenu-body .smenu-body .smenu-hdr{top:calc(var(--spanel-head-h,58px) + (var(--smenu-hdr-h,46px) * 2));z-index:3}
 .settings-panel .smenu-body .smenu-body .smenu-body .smenu-hdr{top:calc(var(--spanel-head-h,58px) + (var(--smenu-hdr-h,46px) * 3));z-index:2}.smenu-hdr h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.smenu-hdr .arrow{font-size:12px;color:#64748b;transition:transform .2s}.smenu-hdr.open .arrow{transform:rotate(180deg)}.smenu-body{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 16px}.smenu-body.open{max-height:2000px;padding:0 16px 16px}
+/* v10.73 (87): تب‌های بخشِ اعلان‌ها */
+.ntab{flex:0 0 auto;font-size:11px;font-weight:700;padding:5px 10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#94a3b8;cursor:pointer;transition:all .15s}.ntab:hover{border-color:#67e8f9;color:#67e8f9}.ntab.active{background:linear-gradient(90deg,#164e63,#0f172a);border-color:#0e7490;color:#67e8f9}.ntabpane{animation:ntabIn .18s ease}
+@keyframes ntabIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 /* v9.94 (۸ب): بعد از پایانِ انیمیشنِ باز شدن، سقفِ ارتفاع برداشته می‌شود.
    دو سود دارد: (۱) بخش‌های بلندتر از ۲۰۰۰px دیگر بریده نمی‌شوند،
    (۲) overflow:visible باعث می‌شود سربخش‌های تودرتو هم واقعاً بچسبند
@@ -45291,12 +45456,27 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🔔 اعلان‌ها</h3><span class="cst off" id="balehS">غیرفعال</span><span class="arrow">▼</span></div>
 <div class="smenu-body">
+<!-- v10.73 (87): بخشِ اعلان‌ها چهار تب شد — تا اینجا یک ستونِ بلند بود که با هر نسخهٔ تازه بلندتر می‌شد -->
+<div style="display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap">
+<button type="button" class="ntab active" onclick="setNotifTab('messenger',this)">💬 پیام‌رسان</button>
+<button type="button" class="ntab" onclick="setNotifTab('events',this)">📋 رویدادها</button>
+<button type="button" class="ntab" onclick="setNotifTab('live',this)">🖥 زنده</button>
+<button type="button" class="ntab" onclick="setNotifTab('query',this)">🔍 استعلام</button>
+</div>
+<div id="ntab-messenger" class="ntabpane">
 <div class="crow"><label>بله فعال:</label><input type="checkbox" id="balehEnabled" style="width:16px;height:16px"></div>
 <div class="crow"><label>Token بله:</label><input type="password" id="balehToken" dir="ltr" placeholder="Bot Token" style="flex:1"></div>
 <div class="crow"><label>Chat ID:</label><input type="text" id="balehChatId" dir="ltr" placeholder="شناسه چت" style="flex:1"></div>
 <div class="crow"><label>روبیکا فعال:</label><input type="checkbox" id="rubikaEnabled" style="width:16px;height:16px"></div>
 <div class="crow"><label>Token روبیکا:</label><input type="password" id="rubikaToken" dir="ltr" placeholder="Bot Token" style="flex:1"></div>
 <div class="crow"><label>Chat ID:</label><input type="text" id="rubikaChatId" dir="ltr" placeholder="شناسه چت" style="flex:1"></div>
+<div class="cact" style="margin-top:10px">
+<button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button>
+<button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button>
+<button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button>
+</div>
+</div>
+<div id="ntab-events" class="ntabpane" style="display:none">
 <div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">📋 رویدادهای اعلان</div>
 <div id="notifHealthLine" style="font-size:10.5px;color:#64748b;margin-bottom:6px;line-height:1.6"></div>
@@ -45350,6 +45530,9 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="crow"><label>یادآوری بعد از:</label><input type="number" id="remindAfter" value="30" min="0" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">دقیقه · ۰ = خاموش</span></div>
 <div class="crow"><label>حداکثر تکرار:</label><input type="number" id="remindMax" value="0" min="0" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = بی‌نهایت</span></div>
 </div>
+</div>
+</div>
+<div id="ntab-live" class="ntabpane" style="display:none">
 <!-- v10.66 (۸۰): تنظیماتِ اعلانِ زنده — درِ مرورگر + سیستم‌عامل -->
 <div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
 <div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🖥 اعلانِ زنده (درِ مرورگر + سیستم)</div>
@@ -45374,6 +45557,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 این تنظیمات همین‌مرورگر (localStorage) ذخیره می‌شوند و <b>همان لحظه</b> اثر می‌کنند — دکمهٔ «ذخیره» لازم نیست.</div>
 </div>
 </div>
+<div id="ntab-query" class="ntabpane" style="display:none">
 <div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
 <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">🔍 استعلام از باسلام</div>
@@ -45391,6 +45575,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 <div id="notifTestR" style="margin-top:8px"></div>
 <div id="notifTR" style="margin-top:8px"></div>
+</div>
 </div></div>
 
 <div class="smenu">
@@ -47013,7 +47198,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div id="bslQueueSection" style="margin-top:10px">
 <div style="background:#1e293b;border:1px solid #475569;border-radius:10px;padding:14px">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-<span style="color:#67e8f9;font-weight:700;font-size:14px">📋 صف ارسال باسلام</span>
+<span style="color:#67e8f9;font-weight:700;font-size:14px">📋 صف ارسال باسلام <span style="font-size:9px;color:#64748b;font-weight:400">— هر غرفه، یک وظیفهٔ جدا</span></span>
 <button class="btn btn-gray" onclick="clearBslQueueDone()" style="font-size:10px;padding:4px 8px">🗑️ پاکسازی انجام‌شده</button>
 </div>
 <div id="bslQueueList" style="font-size:11px;color:#64748b">صف خالی — برای افزودن، دکمه «🚀 ارسال باسلام» را کلیک کنید</div>
@@ -51780,6 +51965,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.73', t:'📦 صف ارسال چندغرفه‌ای + بخش اعلان‌ها چهار تبی شد', items:[
+    '📦 <b>هر غرفه، یک وظیفهٔ جدا در صف ارسال:</b> تا حالا وقتی «ارسال به همهٔ غرفه‌ها» روشن بود، صف فقط یک ردیف داشت و کارِ غرفه‌های غیرپیش‌فرض <b>داخلِ همان یک ردیف</b> پنهان می‌شد — کاربر نه می‌دید چه چیزی برای غرفه‌های دیگر در صف است و نه پیشرفتِ هرکدام. حالا سرور همان لحظهٔ صف‌گذاری، <b>برای هر غرفهٔ فعال یک ردیفِ مستقل</b> می‌سازد (با همان فایلِ محصولات، ولی پیشرفت، گزارش و دکمهٔ مستقل).',
+    '🏪 <b>ساختار ظاهریِ جدیدِ صف:</b> بالای صف نوارِ خلاصهٔ وضعیت (تعداد وظایف + چندتایش در صف/در حال ارسال/تمام‌شده/خطا)؛ ردیف‌های یک ارسالِ چندغرفه‌ای زیرِ سربرگِ «📦 چندغرفه‌ای — ۲ از ۴ غرفه» جمع می‌شوند و هر ردیف <b>نشانِ غرفهٔ خودش</b> را دارد (🏪 نام + پیش‌فرض). گزارشِ تفصیلیِ هر وظیفه هم «غرفهٔ هدف» را می‌گوید.',
+    '⚙️ <b>دقیقاً همان منطقِ ارسالِ همزمانِ قبلی:</b> قیمتِ دولایه (لایهٔ پروفایل + لایهٔ خودِ غرفه)، کلیدِ نگاشتِ مخصوصِ هر غرفه، دستهٔ جایگزین، توقف/ادامه و نگهبان — فقط این‌بار هر غرفه <b>ردیفِ و پیشرفتِ خودش</b> را در صف دارد و ردیف‌ها به نوبت می‌روند (دستی، همگام‌سازیِ دستی و کران — هر سه مسیر).',
+    '🗂 <b>بخشِ «🔔 اعلان‌ها» دیگر یک ستونِ بلند نیست:</b> چهار تب — «💬 پیام‌رسان» (بله/روبیکا + تست + ذخیره)، «📋 رویدادها» (۹ رویداد + یادآوری بی‌جواب‌ها + پینگِ کران)، «🖥 زنده» (کارت/اعلانِ سیستم/صدا/Push + دکمه‌های تست + تشخیص) و «🔍 استعلام» (سفارش‌ها/گفتگوها/تست محصولات). همهٔ تنظیمات همان‌جایِ قبلی‌اند — فقط مرتب‌تر.',
+  ]},
   {v:'10.72', t:'📡 اعلانِ سیستمِ واقعی: Web Push — حتی وقتی صفحه بسته است', items:[
     '📡 <b>چرا تست می‌آمد ولی اعلان‌هایِ واقعی نمی‌آمد:</b> اعلانِ سطحِ صفحه را خودِ صفحهٔ مرورگر می‌سازد؛ اما روی اندروید، وقتی گوشی قفل می‌شود یا اپ عوض می‌شود، کدِ صفحه در چند ثانیه می‌میرد — پس رویدادهایی که در زمانِ بسته‌بودنِ صفحه اتفاق می‌افتد (سفارش، قیمت، کران‌جاب) هیچ‌وقت اعلان نمی‌شدند. <b>Web Push</b> تنها مسیرِ مطمئن است: <b>سرور</b> اعلان را به سرویسِ push (گوگل) می‌فرستد و آن سرویس، سرویس‌ورکرِ سایت را روی گوشی شما بیدار و اعلان را نمایش می‌دهد — حتی اگر صفحه هرگز باز نباشد.',
     '🔗 <b>در کنارِ پیام‌رسان + متصل به کران‌جاب:</b> هر رویدادی که تا حالا به پیام‌رسان می‌رفت (سفارش، محصول، قیمت/موجودی، گزارشِ همگام‌سازی، خطا، بازنشستگی، یادآوری، پاسخِ خودکار، پینگِ کران) حالا <b>هم‌زمان</b> به دستگاه‌هایِ ثبت‌شدهٔ شما Web Push می‌شود — چه لحظه‌ای در مرورگر رخ بدهد چه در کران‌جاب.',
@@ -62684,6 +62875,8 @@ function queueBslSend(ps,catId){
             fd2.append('send_all_shops',($('bsSendAllShops')&&$('bsSendAllShops').checked)?'1':'0');
             fetch('?bsl_queue_add=1',{method:'POST',body:fd2}).then(r=>r.json()).then(d=>{
                 if(!d.ok){showToast('\u062e\u0637\u0627: '+d.error,1);return;}
+                /* v10.73 (87): چندغرفه‌ای شد — هر غرفه وظیفهٔ جدا دارد */
+                if(d.shop_count>1){showToast('📦 '+toFa(d.shop_count)+' غرفه — هرکدام یک وظیفهٔ جدا در صف',true);}
                 // v8.57: اگر ارسال دیگری در جریان بود، سرور این یکی را در صف
                 // گذاشته. قبلاً رابط کاربری در هر حالت وانمود می‌کرد ارسال
                 // شروع شده و کاربر فکر می‌کرد پروفایلش دارد می‌رود.
@@ -63058,7 +63251,30 @@ function renderBslQueue(q){
     const statusColors={waiting:'#fbbf24',running:'#67e8f9',paused:'#f97316',done:'#4ade80',failed:'#f87171'};
     const statusBg={waiting:'#42200630',running:'#0e749020',paused:'#c2410c20',done:'#14532d20',failed:'#7f1d1d20'};
     let html='';
+    /* v10.73 (87): نوارِ خلاصهٔ وضعیت — صف حالا وظایفِ متعدد (هر غرفه
+       یک وظیفه) است و باید یک نگاه بگوید چندتایش کجاست. */
+    const cnt={waiting:0,running:0,paused:0,done:0,failed:0};
+    entries.forEach(e=>{if(cnt[e.status]!==undefined)cnt[e.status]++;});
+    html+='<div style="display:flex;gap:8px;flex-wrap:wrap;font-size:10px;margin-bottom:8px;align-items:center">'
+      +'<span style="color:#94a3b8;font-weight:700">'+toFa(entries.length)+' وظیفه</span>'
+      +(cnt.running?'<span style="color:#67e8f9">🔄 '+toFa(cnt.running)+'</span>':'')
+      +(cnt.waiting?'<span style="color:#fbbf24">⏳ '+toFa(cnt.waiting)+'</span>':'')
+      +(cnt.paused?'<span style="color:#f97316">⏸ '+toFa(cnt.paused)+'</span>':'')
+      +(cnt.done?'<span style="color:#4ade80">✅ '+toFa(cnt.done)+'</span>':'')
+      +(cnt.failed?'<span style="color:#f87171">❌ '+toFa(cnt.failed)+'</span>':'')
+      +'</div>';
+    let __batch='';
     entries.forEach(e=>{
+        /* v10.73 (87): سربرگِ دسته — ردیف‌های یک ارسالِ چندغرفه‌ای */
+        if(e.batch_id&&e.batch_id!==__batch){
+            __batch=e.batch_id;
+            const __be=entries.filter(x=>x.batch_id===e.batch_id);
+            const __bd=__be.filter(x=>x.status==='done').length;
+            html+='<div style="display:flex;align-items:center;gap:6px;margin:6px 0 2px;padding:4px 8px;background:#0b1220;border:1px solid #1e293b;border-radius:6px;font-size:10px;color:#67e8f9;font-weight:700">'
+              +'📦 چندغرفه‌ای — '+toFa(__bd)+' از '+toFa(__be.length)+' غرفه'+(e.profile_name?' · '+esc(e.profile_name):'')
+              +'<span style="flex:1"></span>'
+              +'<span style="color:#475569;font-weight:400">همهٔ وظایفِ همین ارسال</span></div>';
+        }else if(!e.batch_id){__batch='';}
         let progText='';
         let progPercent=0;
         if(e.status==='running'&&e.current>0&&e.total>0){
@@ -63083,6 +63299,8 @@ function renderBslQueue(q){
         html+='<span style="color:'+statusColors[e.status]+';font-weight:700;font-size:12px">'+statusLabels[e.status]+'</span>';if(e.trigger==='manual_sync'){html+='<span style="color:#34d399;font-size:10px;background:#064e3b40;padding:1px 6px;border-radius:4px;margin-right:4px">🤝 هنگامِ همگام‌سازیِ دستی</span>';} /* v10.53 (۶۷) */
         if(e.auto_sync)html+='<span style="color:#22d3ee;font-size:10px;background:#0e749020;padding:1px 6px;border-radius:4px;margin-left:4px">⏱ سینک خودکار</span>';
         if(e.profile_name)html+='<span style="color:#94a3b8;font-size:10px;margin-left:4px">'+esc(e.profile_name)+'</span>';
+        /* v10.73 (87): نشانِ غرفهٔ اختصاصیِ همین وظیفه */
+        if(e.shop_name)html+='<span style="color:#fbbf24;font-size:10px;background:#42200640;border:1px solid #78350f66;padding:1px 7px;border-radius:4px;white-space:nowrap" title="این وظیفه فقط برای همین غرفه است">🏪 '+esc(e.shop_name)+(e.shop_is_default?' <b style="color:#67e8f9">پیش‌فرض</b>':'')+'</span>';
         html+='<span style="color:#e2e8f0;font-weight:600;font-size:12px">'+toFa(e.total)+' محصول</span>';
         html+='</div>';
         // Action buttons
@@ -63114,7 +63332,7 @@ function renderBslQueue(q){
            غرفه‌ها» نمی‌شد فهمید کدام غرفه چیزی نگرفته یا کدام‌یک منبعِ
            همهٔ خطاهاست. حالا هر غرفه بلوکِ خودش را دارد و بینِ دو غرفه
            یک خطِ جداکنندهٔ صریح کشیده می‌شود. */
-        html+=bslShopStatsHtml(e.shop_stats);
+        html+=(e.shop_vendor_id?'':bslShopStatsHtml(e.shop_stats));   // v10.73 (87): در وظیفهٔ تک‌غرفه‌ای همان ردیف است
         // Row 4: Elapsed time
         if((e.status==='running'||e.status==='paused')&&e.started_at>0){
             const elapsedSec=Math.floor(Date.now()/1000-(e.started_at||0));
@@ -63125,6 +63343,17 @@ function renderBslQueue(q){
         html+='</div>';
     });
     list.innerHTML=html;
+}
+/* v10.73 (87): تب‌های بخشِ اعلان‌ها — فقط ظاهر عوض می‌شود؛ همهٔ تنظیمات همان‌جا */
+function setNotifTab(name,btn){
+    ['messenger','events','live','query'].forEach(function(n){
+        var p=document.getElementById('ntab-'+n);
+        if(p)p.style.display=(n===name)?'block':'none';
+    });
+    if(btn&&btn.parentNode){
+        btn.parentNode.querySelectorAll('.ntab').forEach(function(b){b.classList.remove('active');});
+        btn.classList.add('active');
+    }
 }
 function pauseBslQueue(qid){
     fetch('?bsl_queue_pause=1&queue_id='+encodeURIComponent(qid)).then(r=>r.json()).then(d=>{
@@ -63387,6 +63616,7 @@ function showBslQueueDetail(qid){
         detailHtml+='<div style="margin-bottom:12px;padding:10px;background:#0f172a;border:1px solid #334155;border-radius:8px;font-size:11.5px;line-height:2">';
         detailHtml+='<div style="color:#67e8f9;font-weight:700;margin-bottom:4px">📂 دسته‌بندی این وظیفه</div>';
         if(e.profile_name)detailHtml+='<div style="color:#94a3b8">پروفایل: <b style="color:#e2e8f0">'+esc(e.profile_name)+'</b></div>';
+if(e.shop_name)detailHtml+='<div style="color:#94a3b8">غرفهٔ هدف: <b style="color:#fbbf24">🏪 '+esc(e.shop_name)+'</b>'+(e.shop_is_default?' <span style="color:#67e8f9">(پیش‌فرض)</span>':'')+'</div>';
         if(ci.main){
             detailHtml+='<div style="color:#94a3b8">دستهٔ اصلی: <b style="color:#4ade80">'+esc(ci.main.name)+'</b> <span style="color:#64748b;font-family:ui-monospace,monospace">#'+ci.main.id+'</span></div>';
         }else{
