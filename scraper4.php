@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.76';
+const APP_VERSION = '10.77';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7236,9 +7236,11 @@ if (isset($_GET['push_test'])) {
 if (isset($_GET['push_status'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $__prC = pushRouteCfg();
+    $__cnSt = loadConnections();
     echo json_encode(['ok' => true, 'count' => count(pushLoadSubs()),
                       'public_key' => VAPID_PUBLIC_KEY_B64URL,
-                      'route' => ['proxy' => $__prC['proxy'], 'worker_url' => $__prC['worker'], 'worker_token' => $__prC['token'], 'site_source' => (string)($__prC['site_source'] ?? '')]], JSON_UNESCAPED_UNICODE);
+                      'route' => ['proxy' => $__prC['proxy'], 'worker_url' => $__prC['worker'], 'worker_token' => $__prC['token'], 'site_source' => (string)($__prC['site_source'] ?? '')],
+                      'najva' => is_array($__cnSt['najva'] ?? null) ? $__cnSt['najva'] : ['enabled' => false]], JSON_UNESCAPED_UNICODE);
     exit;
 }
 /* v10.74 (88): ذخیرهٔ مسیرِ Push — پراکسیِ خارجی و/یا Workerِ واسط */
@@ -7252,6 +7254,17 @@ if (isset($_GET['push_route_save'])) {
     $cnPr = loadConnections();
     if (trim((string)($cnPr['push_route']['worker_token'] ?? '')) === '') {
         $cnPr['push_route']['worker_token'] = bin2hex(random_bytes(16));
+    }
+    /* v10.77 (91): تنظیماتِ کانالِ نجوا — فقط وقتی کلاینت کلیدِ najva فرستاده */
+    if (array_key_exists('najva', $rawPr)) {
+        $nvIn = is_array($rawPr['najva']) ? $rawPr['najva'] : [];
+        $nvBase = trim((string)($nvIn['base'] ?? ''));
+        if ($nvBase !== '' && !preg_match('#^https://#i', $nvBase)) $nvBase = '';
+        $cnPr['najva'] = ['enabled' => !empty($nvIn['enabled']),
+                          'base' => $nvBase === '' ? 'https://api.najva.com' : $nvBase,
+                          'token' => trim((string)($nvIn['token'] ?? '')),
+                          'api_key' => trim((string)($nvIn['api_key'] ?? '')),
+                          'url' => trim((string)($nvIn['url'] ?? ''))];
     }
     $cnPr['push_route'] = ['proxy' => $proxy, 'worker_url' => $worker, 'worker_token' => (string)$cnPr['push_route']['worker_token']];
     if (!saveConnections($cnPr)) { echo json_encode(['ok' => false, 'error' => 'ذخیرهٔ تنظیماتِ مسیر ممکن نشد'], JSON_UNESCAPED_UNICODE); exit; }
@@ -24180,7 +24193,7 @@ if (isset($_GET['selftest'])) {
           && strpos($selfSrc, 'isset($_GET[' . "'push_test'" . '])') !== false);
     $add('10.72', 'Push در کنارِ پیام‌رسان برایِ همهٔ رویدادها (لحظه‌ای + کران)',
          strpos($selfSrc, 'در کنارِ پیام‌رسان، به دستگاهِ کاربر') !== false
-          && strpos($selfSrc, "\$out['push'] = webpushSend(\$_pt[\$feed] ?? '🔔 اعلان', mb_substr(\$msg, 0, 400), (string)\$feed);") !== false);
+          && strpos($selfSrc, "\$out['push'] = webpushSend(\$_pt[\$feed] ?? '🔔 اعلان', mb_substr(\$msg, 0, 400), (string)\$feed, $cn);") !== false);
 
     /* ==== ۸۷ (v10.73) ==== */
     $add('10.73', 'نسخهٔ ۱۰.۷۳',
@@ -24245,6 +24258,17 @@ if (isset($_GET['selftest'])) {
          strpos($selfSrc, "site_source") !== false
           && strpos($selfSrc, "strpos(\$w, '{url}')") !== false
           && strpos($selfSrc, 'pushRouteSrc') !== false);
+
+    /* ==== ۹۱ (v10.77) ==== */
+    $add('10.77', 'نسخهٔ ۱۰.۷۷',
+         str_contains($selfSrc, "const APP_VERSION = '10.77';"));
+    $add('10.77', 'نجوا: کانالِ مستقل به مشترکینِ موجودِ سایت (API v1/notifications)',
+         strpos($selfSrc, 'function pushNajvaSend(') !== false
+          && strpos($selfSrc, 'api/v1/notifications') !== false
+          && strpos($selfSrc, 'id="najvaOn"') !== false);
+    $add('10.77', 'نتیجهٔ نجوا در گزارشِ تستِ Push و تنظیماتش در push_status',
+         strpos($selfSrc, 'd.najva') !== false
+          && strpos($selfSrc, "'najva' => is_array(\$__cnSt['najva']") !== false);
 
     /* ==== ۸۵ (v10.71) ==== */
     $add('10.71', 'نسخهٔ ۱۰.۷۱',
@@ -29283,9 +29307,55 @@ function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $v
     curl_multi_close($mh);
     return $left;
 }
-function webpushSend(string $title, string $body, ?string $kind = null): array {
+/** v10.77 (91): نجوا — کانالِ مستقل به مشترکینِ موجودِ سایت.
+    سرویسِ ایرانی است، از هاست‌هایِ ایران بدونِ پراکسی در دسترس است و
+    بدونِ اینکه اشتراکِ جداگانه‌ای بگیریم، به همهٔ کسانی می‌رسد که از
+    اسکریپتِ نجوا روی سایت عضو شده‌اند. بازگشت: null = غیرفعال/تنظیم
+    نشده؛ وگرنه آرایهٔ {ok, code, error}. */
+function pushNajvaSend(string $title, string $body, ?array $cn): ?array {
+    $cn = $cn ?: loadConnections();
+    $nv = is_array($cn['najva'] ?? null) ? $cn['najva'] : [];
+    $tok = trim((string)($nv['token'] ?? ''));
+    $key = trim((string)($nv['api_key'] ?? ''));
+    if (empty($nv['enabled']) || $tok === '' || $key === '') return null;
+    $base = rtrim(trim((string)($nv['base'] ?? '')), '/');
+    if ($base === '') $base = 'https://api.najva.com';
+    if (substr($base, -13) !== '/notifications') $base .= '/api/v1/notifications';
+    $url = trim((string)($nv['url'] ?? ''));
+    if ($url === '') {
+        $host = (string)($_SERVER['HTTP_HOST'] ?? '');
+        $url = $host !== '' ? 'https://' . $host : '';
+    }
+    $payload = ['api_key' => $key, 'title' => $title, 'body' => mb_substr($body, 0, 500)];
+    if ($url !== '') $payload['url'] = $url;
+    $post = json_encode($payload, JSON_UNESCAPED_UNICODE);
+    $try = function (array $headers) use ($base, $post): array {
+        $ch = curl_init($base);
+        curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $post, CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 25, CURLOPT_CONNECTTIMEOUT => 10, CURLOPT_SSL_VERIFYPEER => true]);
+        $resp = (string)curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $err = (string)curl_error($ch);
+        curl_close($ch);
+        return [$code, $resp, $err];
+    };
+    /* مرسومِ مستنداتِ نجوا: Authorization: Token "<توکن>"; اگر 401 شد،
+       یک بار هم به‌صورتِ ساده امتحان می‌شود. */
+    [$code, $resp, $err] = $try(['Content-Type: application/json', 'Accept: application/json', 'Authorization: Token "' . $tok . '"']);
+    if ($code === 401) [$code, $resp, $err] = $try(['Content-Type: application/json', 'Accept: application/json', 'Authorization: ' . $tok]);
+    $detail = '';
+    $j = json_decode($resp, true);
+    if (is_array($j)) $detail = (string)($j['detail'] ?? ($j['message'] ?? ($j['error'] ?? '')));
+    if ($code < 200 || $code >= 300) {
+        if ($detail === '') $detail = $err !== '' ? $err : (mb_substr($resp, 0, 160) ?: 'پاسخی نیامد');
+        return ['ok' => false, 'code' => $code, 'error' => $detail];
+    }
+    return ['ok' => true, 'code' => $code, 'error' => $detail !== '' ? $detail : 'درِ صفِ ارسالِ نجوا گذاشته شد'];
+}
+function webpushSend(string $title, string $body, ?string $kind = null, ?array $cn = null): array {
+    /* v10.77 (91): کانالِ دومِ مستقل — نجوا به همهٔ مشترکینِ سایت */
     $subs = pushLoadSubs();
-    if (!$subs) return ['sent' => 0, 'failed' => 0, 'total' => 0, 'detail' => []];
+    if (!$subs) return ['sent' => 0, 'failed' => 0, 'total' => 0, 'detail' => [], 'najva' => pushNajvaSend($title, $body, $cn)];
     $payload = json_encode(['title' => $title, 'body' => $body,
                             'kind' => $kind ?? '', 'tag' => 'mr_push_' . ($kind ?? 'event'),
                             'requireInteraction' => true, 'at' => time()], JSON_UNESCAPED_UNICODE);
@@ -29319,7 +29389,8 @@ function webpushSend(string $title, string $body, ?string $kind = null): array {
         if ($c >= 200 && $c < 300) $sent++;
         else $failed++;
     }
-    return ['sent' => $sent, 'failed' => $failed, 'total' => count($subs), 'detail' => $detail];
+    return ['sent' => $sent, 'failed' => $failed, 'total' => count($subs), 'detail' => $detail,
+            'najva' => pushNajvaSend($title, $body, $cn)];
 }
 function notifSend(array $cn, string $msg, ?string $feed = null): array {
     $out = [];
@@ -29338,7 +29409,7 @@ function notifSend(array $cn, string $msg, ?string $feed = null): array {
                     'sync' => '🔄 همگام‌سازی', 'report' => '📄 گزارش', 'error' => '⚠️ خطا',
                     'retire' => '🗂 بازنشستگی', 'remind' => '⏰ یادآوری', 'ar' => '↩️ پاسخ خودکار',
                     'ping' => '💓 کران زنده است', 'digest' => '📊 خلاصه'];
-            $out['push'] = webpushSend($_pt[$feed] ?? '🔔 اعلان', mb_substr($msg, 0, 400), (string)$feed);
+            $out['push'] = webpushSend($_pt[$feed] ?? '🔔 اعلان', mb_substr($msg, 0, 400), (string)$feed, $cn);   // v10.77 (91): کانالِ نجوا
         } catch (Throwable $e) {}
     }
     return $out;
@@ -45731,6 +45802,18 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-gray" onclick="mrPushWorkerCode()" style="font-size:10px;padding:4px 10px" title="کدِ Workerِ آماده (با توکنِ شما) برای Cloudflare">📋 کدِ Worker</button>
 </div>
 </div>
+<!-- v10.77 (91): نجوا — کانالِ مستقل به مشترکینِ موجودِ سایت -->
+<div style="margin-top:8px;padding:8px;background:#0b1220;border:1px solid #1e293b;border-radius:8px">
+<div style="display:flex;gap:8px;align-items:center">
+<input type="checkbox" id="najvaOn" style="width:auto">
+<label for="najvaOn" style="font-size:11px">🇮🇷 ارسالِ رویدادها به <b>مشترکینِ سایت با نجوا</b> (همان‌هایی که از قبل عضوِ پوشِ سایت شده‌اند — مستقل ازِ مسیرهایِ Web Push)</label>
+</div>
+<div class="crow" style="margin-top:6px"><label>آدرسِ API:</label><input type="text" id="najvaBase" dir="ltr" placeholder="https://api.najva.com" style="flex:1"></div>
+<div class="crow"><label>توکنِ فرستنده:</label><input type="text" id="najvaToken" dir="ltr" placeholder="از پنلِ نجوا" style="flex:1"></div>
+<div class="crow"><label>API key:</label><input type="text" id="najvaKey" dir="ltr" placeholder="از پنلِ نجوا" style="flex:1"></div>
+<div class="crow"><label>آدرسِ کلیک:</label><input type="text" id="najvaUrl" dir="ltr" placeholder="https://your-site.com (اختیاری)" style="flex:1"></div>
+<div style="font-size:9.5px;color:#64748b;margin-top:4px">توکن و API key: پنلِ نجوا ← پوش نوتیفیکیشن ← تنظیمات ← تنظیماتِ اسکریپت ← مشخصاتِ API. نجوا سرویسِ ایرانی است و از هاست‌هایِ ایران بدونِ پراکسی کار می‌کند. با «💾 ذخیرهٔ مسیر» همین تنظیمات هم ذخیره می‌شود.</div>
+</div>
 <!-- v10.68 (82): خطِ تشخیصِ زندهٔ اعلانِ سیستم — می‌گوید زنجیره کجا شکسته -->
 <div id="lnSysDiag" style="font-size:10px;color:#94a3b8;line-height:1.7;margin-top:5px"></div>
 <div style="font-size:10px;color:#64748b;line-height:1.6;margin-top:4px">
@@ -52145,6 +52228,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.77', t:'🇮🇷 نجوا — رویدادها به همهٔ مشترکینِ سایت (کانالِ مستقل)', items:[
+    '🇮🇷 <b>کانالِ جدید و مستقل: نجوا</b> — هر رویداد (لحظه‌ای + کران) علاوه برِ Web Push، از طریقِ وب‌سرویسِ <b>نجوا</b> به <b>همهٔ کاربرانی که از قبل از سایت عضوِ پوش شده‌اند</b> هم فرستاده می‌شود. اشتراک‌هایِ نجوا همان‌هایی هستند که سایت شما از قبل جمع کرده؛ کاربری تازه برایِ این کانال لازم نیست.',
+    '⚙️ <b>تنظیمات:</b> در تبِ «🖥 زنده» زیرِ جعبهٔ مسیر — کلیدِ «ارسال به مشترکینِ سایت با نجوا» + آدرسِ API (پیش‌فرض <span dir="ltr">https://api.najva.com</span>) + توکنِ فرستنده + API key (دوستور: پنلِ نجوا ← پوش نوتیفیکیشن ← تنظیمات ← تنظیمات اسکریپت ← مشخصاتِ API) + آدرسِ باز شدنِ بعد از کلیک.',
+    '🩺 <b>تستِ Push</b> نتیجهٔ فراخوانیِ نجوا را کنارِ مسیرهایِ Web Push گزارش می‌کند (HTTP 201 = درِ صفِ نجوا گذاشته شد).',
+    '🌍 <b>چرا نجوا برایِ هاستِ شما مطمئن‌ترین راه است:</b> سرویسِ ایرانی و از هاست‌هایِ ایران بدونِ هیچ پراکسی در دسترس است — زنجیره: Web Push (مستقیم/پراکسی/Worker) + نجوا، هر دو درِ هر رویداد.',
+  ]},
   {v:'10.76', t:'🎯 Push خودکار از همان اتصالِ غیرمستقیمی که قبلاً تنظیم کرده‌اید', items:[
     '🎯 <b>بدونِ وارد کردنِ آدرسِ تازه:</b> اگر در بخشِ عبورِ «هوش مصنوعی» یا «سایت مبدأ» همان <span dir="ltr">proxy.php</span> را با قالبِ <span dir="ltr">{url}</span> تنظیم کرده‌اید، Push دقیقاً از همان مسیر می‌رود — آدرس دوباره نوشته نمی‌شود.',
     '🩺 <b>گزارش می‌دهد مسیر از کجا آمده:</b> زیرِ فیلدِ مسیر، نوشته می‌شود مسیرِ Push از «تنظیماتِ جداگانهٔ Push» است یا از «عبورِ هوش مصنوعی/مبدأ».',
@@ -56863,6 +56952,11 @@ function mrLiveTestPush(){
       showToast('❌ '+((d&&d.error)||'فرستادن نشد — اشتراکی ثبت نشده است'),1);
       if(box)box.innerHTML='<div style="color:#f87171">'+esc((d&&d.error)||'اشتراکی ثبت نشده — کلیدِ Push را روشن کنید یا «🔁 ثبتِ دوبارهٔ اشتراک» را بزنید.')+'</div>';
     }
+    /* v10.77 (91): نتیجهٔ کانالِ نجوا — هر زمان که تنظیم باشد */
+    if(box&&d.najva){
+      const n=d.najva;
+      box.innerHTML+='<div style="margin-top:4px;color:'+(n.ok?'#4ade80':'#f87171')+'">'+(n.ok?'✅':'❌')+' 🇮🇷 نجوا: '+(n.ok?esc(n.error||'ارسال شد'):'HTTP '+(n.code||0)+(n.error?' — '+esc(n.error):''))+'</div>';
+    }
   }).catch(()=>showToast('❌ خطای شبکه',1));
 }
 /* v10.74 (88): ثبتِ دوبارهٔ اشتراک — با خطایِ صریحِ هر مرحله */
@@ -56885,7 +56979,12 @@ async function mrPushResub(){
 function mrPushRouteSave(){
   const proxy=$('pushProxy')?$('pushProxy').value.trim():'';
   const worker=$('pushWorker')?$('pushWorker').value.trim():'';
-  fetch('?push_route_save=1',{method:'POST',body:JSON.stringify({proxy:proxy,worker_url:worker})}).then(r=>r.json()).then(d=>{
+  const nv=$('najvaOn')?{enabled:$('najvaOn').checked,
+    base:$('najvaBase')?$('najvaBase').value.trim():'',
+    token:$('najvaToken')?$('najvaToken').value.trim():'',
+    api_key:$('najvaKey')?$('najvaKey').value.trim():'',
+    url:$('najvaUrl')?$('najvaUrl').value.trim():''}:null;
+  fetch('?push_route_save=1',{method:'POST',body:JSON.stringify({proxy:proxy,worker_url:worker,najva:nv})}).then(r=>r.json()).then(d=>{
     if(!d.ok){showToast('❌ '+((d&&d.error)||'ذخیرهٔ مسیر ناموفق'),1);return;}
     if(d.worker_token)window._pushWorkerToken=d.worker_token;
     showToast('💾 مسیرِ Push ذخیره شد — حالا «📡 تستِ Push» را بزنید',0);
@@ -56897,6 +56996,12 @@ function mrPushRouteLoad(){
     window._pushWorkerToken=d.route.worker_token||'';
     if($('pushProxy'))$('pushProxy').value=d.route.proxy||'';
     if($('pushWorker'))$('pushWorker').value=d.route.worker_url||'';
+    const nv=d.najva||{};
+    if($('najvaOn'))$('najvaOn').checked=!!nv.enabled;
+    if($('najvaBase'))$('najvaBase').value=nv.base||'https://api.najva.com';
+    if($('najvaToken'))$('najvaToken').value=nv.token||'';
+    if($('najvaKey'))$('najvaKey').value=nv.api_key||'';
+    if($('najvaUrl'))$('najvaUrl').value=nv.url||'';
     const srcEl=$('pushRouteSrc');
     if(srcEl){
       const sm={'ai_net':'🔗 مسیرِ Push: از همان عبورِ «هوش مصنوعی» استفاده می‌شود','src_net':'🔗 مسیرِ Push: از همان عبورِ «سایت مبدأ» استفاده می‌شود','push_route':'🔗 مسیرِ Push: از تنظیماتِ همین بخش','':''};
