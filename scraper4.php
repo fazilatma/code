@@ -204,7 +204,7 @@ const AI_VOTES_FILE = __DIR__ . '/ai_votes.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 /* v10.66 (۸۰): فیدِ رویدادهایِ زنده — مرورگر رویدادهایِ تازه را می‌خواند */
 const LIVE_FEED_FILE = __DIR__ . '/live_events_feed.json';
-/* v10.72 (86): Web Push — کلیدهای VAPID بخشی از کد هستند:
+/* v10.72 (88): Web Push — کلیدهای VAPID بخشی از کد هستند:
    کلیدِ خصوصی روی سرور می‌ماند (امضای JWT) و کلیدِ عمومی به مرورگر
    داده می‌شود (subscribe). تغییرِ کلید = تغییرِ کد — و اشتراک‌هایِ
    کهنه با کلیدِ تازه به‌طورِ خودکار تازه‌سازی می‌شوند
@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.73';
+const APP_VERSION = '10.74';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7211,7 +7211,10 @@ if (isset($_GET['push_subscribe']) || isset($_GET['push_resubscribe'])) {
         echo json_encode(['ok' => false, 'error' => 'اشتراک خوانا نیست'], JSON_UNESCAPED_UNICODE);
         exit;
     }
-    pushUpsertSub($subIn);
+    if (!pushUpsertSub($subIn)) {
+        echo json_encode(['ok' => false, 'error' => 'اشتراک خوانا بود ولی روی سرور ذخیره نشد (دسترسیِ نوشتنِ پوشه)'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
     echo json_encode(['ok' => true, 'count' => count(pushLoadSubs())], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -7232,8 +7235,27 @@ if (isset($_GET['push_test'])) {
 }
 if (isset($_GET['push_status'])) {
     header('Content-Type: application/json; charset=UTF-8');
+    $__prC = pushRouteCfg();
     echo json_encode(['ok' => true, 'count' => count(pushLoadSubs()),
-                      'public_key' => VAPID_PUBLIC_KEY_B64URL], JSON_UNESCAPED_UNICODE);
+                      'public_key' => VAPID_PUBLIC_KEY_B64URL,
+                      'route' => ['proxy' => $__prC['proxy'], 'worker_url' => $__prC['worker'], 'worker_token' => $__prC['token']]], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+/* v10.74 (88): ذخیرهٔ مسیرِ Push — پراکسیِ خارجی و/یا Workerِ واسط */
+if (isset($_GET['push_route_save'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $rawPr = json_decode((string)@file_get_contents('php://input'), true) ?: [];
+    $proxy = trim((string)($rawPr['proxy'] ?? ''));
+    $worker = trim((string)($rawPr['worker_url'] ?? ''));
+    if ($proxy !== '' && !preg_match('#^(https?|socks5)://#i', $proxy)) $proxy = '';
+    if ($worker !== '' && !preg_match('#^https://#i', $worker)) $worker = '';
+    $cnPr = loadConnections();
+    if (trim((string)($cnPr['push_route']['worker_token'] ?? '')) === '') {
+        $cnPr['push_route']['worker_token'] = bin2hex(random_bytes(16));
+    }
+    $cnPr['push_route'] = ['proxy' => $proxy, 'worker_url' => $worker, 'worker_token' => (string)$cnPr['push_route']['worker_token']];
+    if (!saveConnections($cnPr)) { echo json_encode(['ok' => false, 'error' => 'ذخیرهٔ تنظیماتِ مسیر ممکن نشد'], JSON_UNESCAPED_UNICODE); exit; }
+    echo json_encode(['ok' => true, 'worker_token' => $cnPr['push_route']['worker_token']], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -24185,6 +24207,25 @@ if (isset($_GET['selftest'])) {
           && strpos($selfSrc, 'function setNotifTab(name,btn){') !== false
           && strpos($selfSrc, '.ntab{flex:0 0 auto;') !== false);
 
+    /* ==== ۸۸ (v10.74) ==== */
+    $add('10.74', 'نسخهٔ ۱۰.۷۴',
+         str_contains($selfSrc, "const APP_VERSION = '10.74';"));
+    $add('10.74', 'مسیرهایِ جایگزینِ Push: پراکسی + Worker با توکنِ ذخیره‌شده',
+         strpos($selfSrc, 'function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $via, array &$detail, array &$drop): array {') !== false
+          && strpos($selfSrc, 'function pushRouteCfg(?array $cn): array {') !== false
+          && strpos($selfSrc, 'push_route_save') !== false
+          && strpos($selfSrc, 'X-Push-Auth: ') !== false);
+    $add('10.74', 'تستِ Push گزارشِ مسیرِ هر اشتراک را می‌دهد (مستقیم/پراکسی/Worker)',
+         strpos($selfSrc, 'id="lnPushDiag"') !== false
+          && strpos($selfSrc, 'function mrPushRouteSave(){') !== false
+          && strpos($selfSrc, 'function mrPushWorkerCode(){') !== false
+          && strpos($selfSrc, 'function mrPushResub(){') !== false);
+    $add('10.74', 'شکستِ ثبت/ذخیرهٔ اشتراکِ Push صریح است و کلید خودکار خاموش می‌شود',
+         strpos($selfSrc, 'اشتراکِ Push ذخیره نشد') !== false
+          && strpos($selfSrc, 'if (!pushSaveSubs()) {') !== false
+          && strpos($selfSrc, 'mrPushLastErr') !== false
+          && strpos($selfSrc, "elPs.checked=false;localStorage.setItem('mr_push_on','0')") !== false);
+
     /* ==== ۸۵ (v10.71) ==== */
     $add('10.71', 'نسخهٔ ۱۰.۷۱',
          str_contains($selfSrc, "const APP_VERSION = '10.71';"));
@@ -29020,20 +29061,20 @@ function pushLoadSubs(): array {
     $d = json_decode((string)@file_get_contents(PUSH_SUBS_FILE), true);
     return (is_array($d) && is_array($d['subs'] ?? null)) ? $d['subs'] : [];
 }
-function pushSaveSubs(array $subs): void {
-    @file_put_contents(PUSH_SUBS_FILE, json_encode(['subs' => $subs, 'at' => time()], JSON_UNESCAPED_UNICODE), LOCK_EX);
+function pushSaveSubs(array $subs): bool {
+    return @file_put_contents(PUSH_SUBS_FILE, json_encode(['subs' => $subs, 'at' => time()], JSON_UNESCAPED_UNICODE), LOCK_EX) !== false;
 }
-function pushUpsertSub(array $sub): void {
+function pushUpsertSub(array $sub): bool {
     $subs = pushLoadSubs();
     $ep = (string)($sub['endpoint'] ?? '');
     $p256 = (string)($sub['keys']['p256dh'] ?? '');
     $auth = (string)($sub['keys']['auth'] ?? '');
-    if ($ep === '' || $p256 === '' || $auth === '') return;
+    if ($ep === '' || $p256 === '' || $auth === '') return false;
     $subs[$ep] = ['endpoint' => $ep,
                   'keys' => ['p256dh' => $p256, 'auth' => $auth],
                   'at' => time()];
     $subs = array_slice($subs, -30, null, true);   // سقف ۳۰ اشتراک
-    pushSaveSubs($subs);
+    return pushSaveSubs($subs);
 }
 function pushDropSub(string $endpoint): void {
     $subs = pushLoadSubs();
@@ -29117,45 +29158,108 @@ function webpushBuildRequest(string $endpoint, array $keys, string $payloadJson)
     ];
     return ['headers' => $headers, 'body' => $body];
 }
-function webpushSend(string $title, string $body, ?string $kind = null): array {
-    $subs = pushLoadSubs();
-    if (!$subs) return ['sent' => 0, 'failed' => 0, 'total' => 0];
-    $payload = json_encode(['title' => $title, 'body' => $body,
-                            'kind' => $kind ?? '', 'tag' => 'mr_push_' . ($kind ?? 'event'),
-                            'requireInteraction' => true, 'at' => time()], JSON_UNESCAPED_UNICODE);
-    $mh = curl_multi_init();
-    $handles = []; $drop = [];
-    foreach ($subs as $ep => $sub) {
-        $req = webpushBuildRequest((string)$sub['endpoint'], (array)($sub['keys'] ?? []), $payload);
-        if ($req === null) { $drop[] = (string)$ep; continue; }
-        $ch = curl_init((string)$sub['endpoint']);
-        curl_setopt_array($ch, [
-            CURLOPT_POST => true, CURLOPT_POSTFIELDS => $req['body'],
-            CURLOPT_HTTPHEADER => $req['headers'],
-            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8,
-            CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_SSL_VERIFYPEER => true,
-        ]);
+/** v10.74 (88): مسیرهایِ ارسالِ Push — مستقیم / پراکسیِ خارجی / Workerِ واسط.
+    هاست‌هایِ داخلِ ایران به fcm.googleapis.com دسترسی ندارند؛ برای همین
+    دو مسیرِ جایگزین روی تنظیماتِ کاربر ذخیره شده و فقط وقتی مسیرِ مستقیم
+    اتصالِ برقرار نمی‌کند (HTTP 0) به کار می‌افتند. */
+function pushRouteCfg(?array $cn): array {
+    $cn = $cn ?: loadConnections();
+    $pr = is_array($cn['push_route'] ?? null) ? $cn['push_route'] : [];
+    return [
+        'proxy'  => trim((string)($pr['proxy'] ?? '')),
+        'worker' => trim((string)($pr['worker_url'] ?? '')),
+        'token'  => (string)($pr['worker_token'] ?? ''),
+    ];
+}
+/** یک دورِ ارسال روی یک مسیر؛ برمی‌گرداند فهرستِ endpointهایی که هنوز
+    ارسالِ برقرار نشد (فقط اتصالِ ناموفق = HTTP 0) تا دورِ بعد امتحان شود. */
+function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $via, array &$detail, array &$drop): array {
+    if (!$pending) return $pending;
+    $mh = curl_multi_init(); $chs = [];
+    foreach ($pending as $ep => $req) {
+        $ch = curl_init();
+        if ($via === 'worker') {
+            $wBody = json_encode(['url' => $req['endpoint'], 'headers' => $req['headers'], 'body_b64' => base64_encode($req['body'])], JSON_UNESCAPED_UNICODE);
+            $wHeaders = ['Content-Type: application/json'];
+            if ($routeCfg['token'] !== '') $wHeaders[] = 'X-Push-Auth: ' . $routeCfg['token'];
+            curl_setopt_array($ch, [CURLOPT_URL => $routeCfg['worker'], CURLOPT_POST => true, CURLOPT_POSTFIELDS => $wBody,
+                CURLOPT_HTTPHEADER => $wHeaders, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 25, CURLOPT_CONNECTTIMEOUT => 10]);
+        } else {
+            $opt = [CURLOPT_URL => $req['endpoint'], CURLOPT_POST => true, CURLOPT_POSTFIELDS => $req['body'],
+                CURLOPT_HTTPHEADER => $req['headers'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 12,
+                CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_SSL_VERIFYPEER => true];
+            if ($via === 'proxy') {
+                $opt[CURLOPT_PROXY] = $viaCfg['url'];
+                if ($viaCfg['auth'] !== '') $opt[CURLOPT_PROXYUSERPWD] = $viaCfg['auth'];
+            }
+            curl_setopt_array($ch, $opt);
+        }
         curl_multi_add_handle($mh, $ch);
-        $handles[(string)$ep] = $ch;
+        $chs[(string)$ep] = $ch;
     }
-    $sent = 0; $failed = 0;
-    if ($handles) {
+    $left = $pending;
+    if ($chs) {
         do {
             $act = curl_multi_exec($mh, $running);
             if ($running > 0) curl_multi_select($mh, 0.2);
         } while ($running > 0);
-        foreach ($handles as $ep => $ch) {
+        foreach ($chs as $ep => $ch) {
             $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-            if (in_array($code, [404, 410], true)) $drop[] = $ep;
-            elseif ($code >= 200 && $code < 300) $sent++;
-            else $failed++;
+            $err = (string)curl_error($ch);
+            if ($via === 'worker' && $code >= 200 && $code < 300) {
+                // Worker زنده است — وضعیتِ واقعیِ سرویسِ Push را از پاسخِ خودِ Worker بخوان
+                $wj = json_decode((string)curl_result($ch), true);
+                if (is_array($wj) && isset($wj['status'])) $code = (int)$wj['status'];
+                else $err = 'پاسخِ Worker خوانا نبود';
+            }
             curl_multi_remove_handle($mh, $ch);
             curl_close($ch);
+            $detail[(string)$ep] = ['via' => $via, 'code' => $code, 'error' => $err];
+            if ($code >= 200 && $code < 300) { unset($left[(string)$ep]); }
+            elseif (in_array($code, [404, 410], true)) { unset($left[(string)$ep]); $drop[] = (string)$ep; }
+            elseif ($code === 0) { /* اتصال برقرار نشد — این endpoint برای دورِ بعد می‌ماند */ }
+            else { unset($left[(string)$ep]); }
         }
     }
     curl_multi_close($mh);
+    return $left;
+}
+function webpushSend(string $title, string $body, ?string $kind = null): array {
+    $subs = pushLoadSubs();
+    if (!$subs) return ['sent' => 0, 'failed' => 0, 'total' => 0, 'detail' => []];
+    $payload = json_encode(['title' => $title, 'body' => $body,
+                            'kind' => $kind ?? '', 'tag' => 'mr_push_' . ($kind ?? 'event'),
+                            'requireInteraction' => true, 'at' => time()], JSON_UNESCAPED_UNICODE);
+    $routeCfg = pushRouteCfg();
+    $proxyUrl = ''; $proxyAuth = '';
+    if ($routeCfg['proxy'] !== '' && stripos($routeCfg['proxy'], '@') !== false) {
+        $at = stripos($routeCfg['proxy'], '@');
+        $proxyAuth = substr($routeCfg['proxy'], 0, $at);
+        $proxyUrl = substr($routeCfg['proxy'], $at + 1);
+    } else {
+        $proxyUrl = $routeCfg['proxy'];
+    }
+    $pending = []; $detail = []; $drop = [];
+    foreach ($subs as $ep => $sub) {
+        $req = webpushBuildRequest((string)$sub['endpoint'], (array)($sub['keys'] ?? []), $payload);
+        if ($req === null) { $drop[] = (string)$ep; $detail[(string)$ep] = ['via' => '-', 'code' => 0, 'error' => 'ساختِ درخواست ناموفق']; continue; }
+        $pending[(string)$ep] = ['endpoint' => (string)$sub['endpoint'], 'headers' => $req['headers'], 'body' => $req['body']];
+    }
+    /* v10.74 (88): زنجیرهٔ مسیرها — اول مستقیم؛ اگر اتصال برقرار نشود، پراکسی؛ بعد Worker.
+       هاستِ خارجی (دسترسیِ مستقیم) هرگز مسیرِ دوم را لمس نمی‌کند. */
+    $pending = pushSendRound($pending, $routeCfg, [], 'direct', $detail, $drop);
+    if ($proxyUrl !== '' && $pending) $pending = pushSendRound($pending, $routeCfg, ['url' => $proxyUrl, 'auth' => $proxyAuth], 'proxy', $detail, $drop);
+    if ($routeCfg['worker'] !== '' && $pending) $pending = pushSendRound($pending, $routeCfg, ['url' => $routeCfg['worker']], 'worker', $detail, $drop);
+    foreach (array_keys($pending) as $ep) $detail[(string)$ep] = $detail[(string)$ep] ?? ['via' => '-', 'code' => 0, 'error' => 'هیچ مسیری جواب نداد'];
     if ($drop) { foreach (array_unique($drop) as $d) pushDropSub($d); }
-    return ['sent' => $sent, 'failed' => $failed, 'total' => count($subs)];
+    $sent = 0; $failed = 0;
+    foreach ($detail as $v) {
+        $c = (int)($v['code'] ?? 0);
+        if (in_array($c, [404, 410], true)) continue;
+        if ($c >= 200 && $c < 300) $sent++;
+        else $failed++;
+    }
+    return ['sent' => $sent, 'failed' => $failed, 'total' => count($subs), 'detail' => $detail];
 }
 function notifSend(array $cn, string $msg, ?string $feed = null): array {
     $out = [];
@@ -45550,6 +45654,20 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-gray" onclick="mrLiveTestCard()" style="font-size:10px;padding:4px 10px">🧪 تستِ کارت</button>
 <button class="btn btn-gray" onclick="mrLiveTestSys()" style="font-size:10px;padding:4px 10px">🔔 تستِ اعلانِ سیستم</button>
 <button class="btn btn-gray" onclick="mrLiveTestPush()" style="font-size:10px;padding:4px 10px" title="اعلان را مستقیم از سرور می‌فرستد — امتحانِ مسیرِ واقعی">📡 تستِ Push</button>
+<button class="btn btn-gray" onclick="mrPushResub()" style="font-size:10px;padding:4px 10px" title="اشتراکِ Push را تازه می‌سازد و نتیجه را همین‌جا می‌نویسد">🔁 ثبتِ دوبارهٔ اشتراک</button>
+</div>
+<div id="lnPushDiag" style="margin-top:6px"></div>
+<!-- v10.74 (88): مسیرِ جایگزینِ Push — برای هاست‌هایی که به سرویسِ Pushِ گوگل دسترسی ندارند -->
+<div style="margin-top:8px;padding:8px;background:#0b1220;border:1px solid #1e293b;border-radius:8px">
+<div style="font-size:10px;color:#94a3b8;line-height:1.8;margin-bottom:6px">
+🌍 اگر هاستِ شما به سرویسِ Pushِ گوگل (fcm.googleapis.com) دسترسی ندارد، اعلان از سرور به دستگاه نمی‌رسد.
+ارسال اول <b>مستقیم</b> امتحان می‌شود و اگر اتصال برقرار نشود، به‌ترتیب از مسیرهایِ زیر می‌رود:</div>
+<div class="crow"><label>پراکسیِ خارجی:</label><input type="text" id="pushProxy" dir="ltr" placeholder="http://user:pass@host:port" style="flex:1"></div>
+<div class="crow"><label>Workerِ واسط:</label><input type="text" id="pushWorker" dir="ltr" placeholder="https://push-relay.yourname.workers.dev" style="flex:1"></div>
+<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+<button class="btn btn-gray" onclick="mrPushRouteSave()" style="font-size:10px;padding:4px 10px">💾 ذخیرهٔ مسیر</button>
+<button class="btn btn-gray" onclick="mrPushWorkerCode()" style="font-size:10px;padding:4px 10px" title="کدِ Workerِ آماده (با توکنِ شما) برای Cloudflare">📋 کدِ Worker</button>
+</div>
 </div>
 <!-- v10.68 (82): خطِ تشخیصِ زندهٔ اعلانِ سیستم — می‌گوید زنجیره کجا شکسته -->
 <div id="lnSysDiag" style="font-size:10px;color:#94a3b8;line-height:1.7;margin-top:5px"></div>
@@ -51965,6 +52083,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.74', t:'🌍 Push از هاست‌های بدون دسترسی به گوگل — پراکسی/Worker + تشخیص دقیق', items:[
+    '🌍 <b>مسیرِ جایگزینِ ارسالِ Push:</b> اگر هاستِ شما (مثلاً داخلِ ایران) به سرویسِ Pushِ گوگل (fcm.googleapis.com) دسترسی ندارد، اعلان از سرور به دستگاه نمی‌رسد. حالا در تبِ «🖥 زنده» دو مسیرِ جایگزین است: <b>پراکسیِ خارجی</b> (http://user:pass@host:port) و <b>Workerِ واسطِ Cloudflare</b>. ارسال اول <b>مستقیم</b> امتحان می‌شود و اگر اتصال برقرار نشود (HTTP 0)، به‌ترتیب از پراکسی و Worker می‌رود — هاستِ خارجی همان‌طور مستقیم می‌فرستد.',
+    '📋 <b>کدِ Worker با یک کلیک:</b> دکمهٔ « کدِ Worker» کدِ آماده را با <b>توکنِ مخصوصِ شما</b> می‌دهد — در Cloudflare (Workers & Pages) بسازید، کپی کنید، Deploy بزنید و آدرسش را در «Workerِ واسط» بگذارید. Cloudflare از ایران در دسترس است و Worker درخواستِ Push را از سرورِ شما گرفته و به گوگل می‌رساند.',
+    '🩺 <b>تستِ Push حالا دقیق می‌گوید کجا شکسته:</b> زیرِ دکمهٔ تست، برای هر اشتراک — مسیر (مستقیم/پراکسی/Worker) + کدِ HTTP + خطا نوشته می‌شود. «HTTP 0» یعنی همان مسیر از هاستِ شما در دسترس نیست (نشانِ تحریم/بلوک)؛ «HTTP 4xx/5xx» یعنی رسیده اما سرویسِ مقصد خطا داده.',
+    '🔁 <b>ثبتِ دوبارهٔ اشتراک با خطای صریح:</b> مشکلِ «دکمهٔ Push فعال است ولی اشتراکی ثبت نشده» — حالا کلید اگر نتواند اشتراک بسازد خودکار خاموش می‌شود و پیامِ خطایِ دقیق (سرویس‌ورکر ثبت نشد / اجازه داده نشده / کلید و…) کنارش نوشته می‌شود؛ دکمهٔ « ثبتِ دوبارهٔ اشتراک» هم هر وقت لازم شد اشتراک را تازه می‌سازد و بلافاصله یک تستِ Push می‌فرستد.',
+  ]},
   {v:'10.73', t:'📦 صف ارسال چندغرفه‌ای + بخش اعلان‌ها چهار تبی شد', items:[
     '📦 <b>هر غرفه، یک وظیفهٔ جدا در صف ارسال:</b> تا حالا وقتی «ارسال به همهٔ غرفه‌ها» روشن بود، صف فقط یک ردیف داشت و کارِ غرفه‌های غیرپیش‌فرض <b>داخلِ همان یک ردیف</b> پنهان می‌شد — کاربر نه می‌دید چه چیزی برای غرفه‌های دیگر در صف است و نه پیشرفتِ هرکدام. حالا سرور همان لحظهٔ صف‌گذاری، <b>برای هر غرفهٔ فعال یک ردیفِ مستقل</b> می‌سازد (با همان فایلِ محصولات، ولی پیشرفت، گزارش و دکمهٔ مستقل).',
     '🏪 <b>ساختار ظاهریِ جدیدِ صف:</b> بالای صف نوارِ خلاصهٔ وضعیت (تعداد وظایف + چندتایش در صف/در حال ارسال/تمام‌شده/خطا)؛ ردیف‌های یک ارسالِ چندغرفه‌ای زیرِ سربرگِ «📦 چندغرفه‌ای — ۲ از ۴ غرفه» جمع می‌شوند و هر ردیف <b>نشانِ غرفهٔ خودش</b> را دارد (🏪 نام + پیش‌فرض). گزارشِ تفصیلیِ هر وظیفه هم «غرفهٔ هدف» را می‌گوید.',
@@ -56584,18 +56708,32 @@ function mrB64UrlToBytes(str){
     return u;
   }catch(e){return null;}
 }
+let mrPushLastErr='';
+/* v10.74 (88): هر شکست با پیامِ دقیق — تا «دکمهٔ فعال است ولی اشتراکی
+   ثبت نشده» دیگر بی‌پاسخ نماند. */
 async function mrPushSub(){
+  mrPushLastErr='';
   const reg=await mrSwReady();
-  if(!reg||!reg.pushManager)return null;
+  if(!reg){mrPushLastErr='سرویس‌ورکر ثبت نشد (برای Push لازم است)';return null;}
+  if(!reg.pushManager){mrPushLastErr='این مرورگر Push را پشتیبانی نمی‌کند';return null;}
   try{
     let sub=await reg.pushManager.getSubscription();
-    if(sub)return sub;
+    if(sub){
+      const r0=await fetch('?push_subscribe=1',{method:'POST',body:JSON.stringify(sub.toJSON())});
+      const d0=await r0.json().catch(()=>({}));
+      if(d0.ok===false){mrPushLastErr=d0.error||'سرور اشتراک را نگرفت';return null;}
+      return sub;
+    }
     const key=mrB64UrlToBytes(MR_VAPID_KEY);
-    if(!key)return null;
+    if(!key){mrPushLastErr='کلیدِ VAPID نخواند';return null;}
     sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
-    if(sub)await fetch('?push_subscribe=1',{method:'POST',body:JSON.stringify(sub.toJSON())});
+    if(sub){
+      const r0=await fetch('?push_subscribe=1',{method:'POST',body:JSON.stringify(sub.toJSON())});
+      const d0=await r0.json().catch(()=>({}));
+      if(d0.ok===false){mrPushLastErr=d0.error||'سرور اشتراک را نگرفت';return null;}
+    }
     return sub;
-  }catch(e){return null;}
+  }catch(e){mrPushLastErr=String((e&&e.message)||e);return null;}
 }
 async function mrPushUnsub(){
   try{
@@ -56614,25 +56752,119 @@ async function mrPushEnsure(){
     if(Notification.permission!=='granted'){try{await Notification.requestPermission();}catch(e){}}
     if(Notification.permission!=='granted'){mrPushStatusRender('deny');return;}
     const sub=await mrPushSub();
-    mrPushStatusRender(sub?'on':'off');
-  }catch(e){mrPushStatusRender('off');}
+    mrPushStatusRender(sub?'on':'err',mrPushLastErr||'اشتراک ثبت نشده — «🔁» را بزنید');
+  }catch(e){mrPushStatusRender('err',String((e&&e.message)||e));}
 }
-function mrPushStatusRender(state){
+function mrPushStatusRender(state,msg){
   try{
     const el=$('lnPushStatus');if(!el)return;
     const m={on:['✅ فعال — اعلان‌ها مستقیم از سرور می‌آیند','#4ade80'],
              off:['⚪ غیرفعال','#64748b'],
              deny:['⛔ اجازهٔ اعلان رد شده','#f87171'],
-             none:['🔒 فقط روی HTTPS','#fbbf24']};
+             none:['🔒 فقط روی HTTPS','#fbbf24'],
+             err:['⚠️ '+(msg||'اشتراک ثبت نشده — «🔁» را بزنید'),'#f87171']};
     const t=m[state]||m.off;
     el.textContent=t[0];el.style.color=t[1];
   }catch(e){}
 }
 function mrLiveTestPush(){
   fetch('?push_test=1').then(r=>r.json()).then(d=>{
-    if(d.ok&&d.total>0)showToast('📡 '+toFa(d.sent||0)+' اعلانِ Push از سرور فرستاده شد — گوشهٔ صفحه/گوشی را نگاه کنید',0);
-    else showToast('❌ '+((d&&d.error)||'فرستادن نشد — اشتراکی ثبت نشده است'),1);
+    const box=$('lnPushDiag');
+    if(d.ok&&d.total>0){
+      showToast('📡 '+toFa(d.sent||0)+'/'+toFa(d.total)+' اعلانِ Push از سرور فرستاده شد — گوشهٔ صفحه/گوشی را نگاه کنید',0);
+      if(box&&d.detail){
+        let h='<div style="font-weight:700;color:#94a3b8;margin-bottom:3px">📡 نتیجهٔ ارسال (هر اشتراک، با مسیری که جواب داد):</div>';
+        Object.keys(d.detail).forEach(function(ep){
+          const v=d.detail[ep]||{};
+          const c=(v.code||0);
+          const ok=c>=200&&c<300;
+          const via=v.via==='proxy'?'پراکسی':(v.via==='worker'?'Workerِ واسط':(v.via==='direct'?'مستقیم':v.via||'-'));
+          let why='';
+          if(c===0)why=' · اتصال برقرار نشد — این مسیر از هاستِ شما در دسترس نیست';
+          else if(v.error)why=' · '+v.error;
+          h+='<div style="color:'+(ok?'#4ade80':'#f87171')+'">'+(ok?'✅ ارسال شد':'❌ ناموفق')+' — مسیر: '+via+' · HTTP '+(c||'0')+(ok?'':why)+'</div>';
+        });
+        box.innerHTML=h;
+      }
+    }else{
+      showToast('❌ '+((d&&d.error)||'فرستادن نشد — اشتراکی ثبت نشده است'),1);
+      if(box)box.innerHTML='<div style="color:#f87171">'+esc((d&&d.error)||'اشتراکی ثبت نشده — کلیدِ Push را روشن کنید یا «🔁 ثبتِ دوبارهٔ اشتراک» را بزنید.')+'</div>';
+    }
   }).catch(()=>showToast('❌ خطای شبکه',1));
+}
+/* v10.74 (88): ثبتِ دوبارهٔ اشتراک — با خطایِ صریحِ هر مرحله */
+async function mrPushResub(){
+  try{
+    if(typeof Notification==='undefined'){mrPushStatusRender('err','مرورگر Push را نمی‌شناسد (فقط HTTPS)');return;}
+    if(Notification.permission!=='granted'){try{await Notification.requestPermission();}catch(e){}}
+    if(Notification.permission!=='granted'){mrPushStatusRender('err','اجازهٔ اعلان به مرورگر داده نشده');return;}
+    mrPushStatusRender('err','در حالِ ثبتِ اشتراک...');
+    const sub=await mrPushSub();
+    if(sub){
+      mrPushStatusRender('on');
+      mrLiveTestPush();
+    }else{
+      mrPushStatusRender('err',mrPushLastErr||'ثبتِ اشتراک ممکن نشد');
+    }
+  }catch(e){mrPushStatusRender('err',String((e&&e.message)||e));}
+}
+/* v10.74 (88): مسیرِ جایگزینِ Push — ذخیره و بارگذاری */
+function mrPushRouteSave(){
+  const proxy=$('pushProxy')?$('pushProxy').value.trim():'';
+  const worker=$('pushWorker')?$('pushWorker').value.trim():'';
+  fetch('?push_route_save=1',{method:'POST',body:JSON.stringify({proxy:proxy,worker_url:worker})}).then(r=>r.json()).then(d=>{
+    if(!d.ok){showToast('❌ '+((d&&d.error)||'ذخیرهٔ مسیر ناموفق'),1);return;}
+    if(d.worker_token)window._pushWorkerToken=d.worker_token;
+    showToast('💾 مسیرِ Push ذخیره شد — حالا «📡 تستِ Push» را بزنید',0);
+  }).catch(()=>showToast('❌ خطای شبکه',1));
+}
+function mrPushRouteLoad(){
+  fetch('?push_status=1').then(r=>r.json()).then(d=>{
+    if(!d.ok||!d.route)return;
+    window._pushWorkerToken=d.route.worker_token||'';
+    if($('pushProxy'))$('pushProxy').value=d.route.proxy||'';
+    if($('pushWorker'))$('pushWorker').value=d.route.worker_url||'';
+    if(d.count===0&&localStorage.getItem('mr_push_on')==='1')mrPushStatusRender('err');
+  }).catch(()=>{});
+}
+/* v10.74 (88): کدِ Workerِ آماده با توکنِ مخصوصِ کاربر */
+function pushWorkerModalClose(){var m=document.getElementById('pushWorkerModal');if(m)m.remove();}
+function pushWorkerCodeCopy(){var t=document.getElementById('pushWorkerCodeTx');if(!t)return;t.select();try{document.execCommand('copy');showToast('📋 کپی شد — حالا در Worker بچسبانید',0);}catch(e){showToast('کپی خودکار نشد — متن را انتخاب و کپی کنید',1);}}
+function mrPushWorkerCode(){
+  const token=window._pushWorkerToken||'';
+  if(!token){showToast('اول «💾 ذخیرهٔ مسیر» را بزنید تا توکن ساخته شود',1);return;}
+  const code=[
+'// رلهٔ Web Push — نسخهٔ 10.74',
+'// ۱) در Cloudflare: Workers & Pages ← Create Worker',
+'// ۲) این کلِ کد را جایگزین کنید و Deploy بزنید',
+'// ۳) آدرسِ Worker (https://...workers.dev) را در «Workerِ واسط» وارد و ذخیره کنید',
+'const AUTH = "'+token+'";',
+'export default {',
+'  async fetch(req) {',
+"    if (req.method !== 'POST') return new Response('POST only', { status: 405 });",
+"    if (req.headers.get('X-Push-Auth') !== AUTH) return new Response('unauthorized', { status: 401 });",
+'    let j;',
+"    try { j = await req.json(); } catch (e) { return new Response('bad json', { status: 400 }); }",
+'    const body = Uint8Array.from(atob(j.body_b64), c => c.charCodeAt(0));',
+'    const h = new Headers();',
+'    for (const [k, v] of (j.headers || [])) h.set(k, v);',
+"    const r = await fetch(j.url, { method: 'POST', headers: h, body });",
+'    const t = (await r.text()).slice(0, 400);',
+"    return new Response(JSON.stringify({ status: r.status, body: t }), { headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' } });",
+'  }',
+'};'
+].join('\n');
+  const old=document.getElementById('pushWorkerModal');if(old)old.remove();
+  const div=document.createElement('div');div.id='pushWorkerModal';
+  div.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:999999;display:flex;align-items:center;justify-content:center;padding:16px';
+  div.innerHTML='<div style="background:#0f172a;border:1px solid #334155;border-radius:12px;max-width:660px;width:100%;max-height:85vh;overflow:auto;padding:16px;direction:rtl">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b style="color:#67e8f9">📋 کدِ Workerِ واسطِ Push (Cloudflare)</b>'
+    +'<button class="btn btn-gray" onclick="pushWorkerModalClose()" style="font-size:10px;padding:3px 10px">✖ بستن</button></div>'
+    +'<div style="font-size:11px;color:#94a3b8;line-height:1.9;margin-bottom:8px">این Worker در <b>Cloudflare</b> اجرا می‌شود (از ایران در دسترس است): درخواستِ Push را از سرورِ شما می‌گیرد و خودش به سرویسِ گوگل می‌رساند. <b>توکنِ مخصوصِ شما</b> درونِ کد است؛ هرکس این کد را داشته باشد می‌تواند از Worker استفاده کند، پس کد را با دیگران به اشتراک نگذارید.</div>'
+    +'<textarea readonly id="pushWorkerCodeTx" style="width:100%;height:280px;background:#020617;color:#a5f3fc;border:1px solid #1e293b;border-radius:8px;padding:10px;font-size:10.5px;direction:ltr;text-align:left;font-family:ui-monospace,monospace;box-sizing:border-box"></textarea>'
+    +'<div class="cact" style="margin-top:8px"><button class="btn btn-cyan" style="flex:1" onclick="pushWorkerCodeCopy()">📋 کپیِ کد</button></div></div>';
+  document.body.appendChild(div);
+  const tx=document.getElementById('pushWorkerCodeTx');if(tx)tx.value=code;
 }
 async function mrFireSysNotif(title,body){
   if(typeof Notification==='undefined'||Notification.permission!=='granted')return;
@@ -56736,9 +56968,8 @@ function mrLiveSettingsLoad(){
             if(Notification.permission!=='granted'){elPs.checked=false;mrPushStatusRender('deny');showToast('دسترسیِ اعلان را بدهید',1);return;}
             localStorage.setItem('mr_push_on','1');
             const sub=await mrPushSub();
-            mrPushStatusRender(sub?'on':'off');
-            if(sub){mrLiveTestPush();}
-            else showToast('❌ ثبتِ اشتراکِ Push ممکن نشد — دوباره امتحان کنید',1);
+            if(sub){mrPushStatusRender('on');mrLiveTestPush();}
+            else{elPs.checked=false;localStorage.setItem('mr_push_on','0');mrPushStatusRender('err',mrPushLastErr||'ثبتِ اشتراک ممکن نشد — «🔁 ثبتِ دوبارهٔ اشتراک» را بزنید');}
           }else{
             localStorage.setItem('mr_push_on','0');
             await mrPushUnsub();
@@ -56754,6 +56985,7 @@ function mrLiveSettingsLoad(){
 /* v10.60 (۷۴): ضربان — فاصله از تنظیماتِ «اعلان‌ها» خوانده می‌شود (v10.66) */
 setTimeout(mrNotifPoll,2500);
 mrLiveSettingsLoad();
+mrPushRouteLoad();   // v10.74 (88): مسیرهایِ جایگزینِ Push بارگذاری شوند
 mrSwReady();   // v10.69 (83): سرویس‌ورکر همان لحظهٔ بارگذاری صفحه ثبت می‌شود
 setTimeout(()=>{ try{ if(localStorage.getItem('mr_push_on')==='1') mrPushEnsure(); }catch(e){} }, 4000);   // v10.72 (86)
 (function mrNotifLoop(){
