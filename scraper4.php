@@ -274,7 +274,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.70';
+const APP_VERSION = '10.71';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -17710,7 +17710,7 @@ function tasksResumeUrl(string $key, array $def, array $p): string {
             return $base . '&target=' . $t . '&mode=' . $m;
         case 'catfix':
             $m = (string)($p['mode'] ?? 'ai_text');
-            if (!in_array($m, ['ai_text', 'master', 'quorum'], true)) $m = 'ai_text';
+            if (!in_array($m, ['ai_text', 'master', 'quorum', 'fallback'], true)) $m = 'ai_text';   /* v10.71 (85) */
             $q = $base . '&mode=' . $m;
             if ((int)($p['product_id'] ?? 0) > 0) $q .= '&product_id=' . (int)$p['product_id'];
             return $q;
@@ -18969,7 +18969,7 @@ if (isset($_GET['dedup_stop'])) {
 if (isset($_GET['catfix_start'])) {
     header('Content-Type: application/json; charset=UTF-8');
     $mode = (string)($_GET['mode'] ?? 'ai_text');
-    if (!in_array($mode, ['ai_text', 'master', 'quorum'], true)) $mode = 'ai_text';
+    if (!in_array($mode, ['ai_text', 'master', 'quorum', 'fallback'], true)) $mode = 'ai_text';   /* v10.71 (85): روشِ چهارم */
     $opts = ['quorum' => (int)($_GET['quorum'] ?? 2),
              'product_id' => (int)($_GET['product_id'] ?? 0)];
 
@@ -23859,7 +23859,7 @@ if (isset($_GET['selftest'])) {
          catfixModeLabel('ai_text') === 'متنِ بررسیِ باسلام'
       && catfixModeLabel('master') === 'مدلِ مستر'
       && catfixModeLabel('quorum') === 'اجماعِ چندمدلی'
-      && strpos($selfSrc, "if (!in_array(\$mode, ['ai_text', 'master', 'quorum'], true)) \$mode = 'ai_text';") !== false);
+      && strpos($selfSrc, "if (!in_array(\$mode, ['ai_text', 'master', 'quorum', 'fallback'], true)) \$mode = 'ai_text';") !== false);   /* v10.71 (85) */
 
     $add('10.23', 'توقفِ catfix از مدیر وظیفه هم کار می‌کند',
          (tasksRegistry()['catfix']['stop'] ?? '') === 'catfix_stop'
@@ -24040,7 +24040,19 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
-    /* ==== ۸۴ (v10.7۰) ==== */
+    /* ==== ۸۵ (v10.71) ==== */
+    $add('10.71', 'نسخهٔ ۱۰.۷۱',
+         str_contains($selfSrc, "const APP_VERSION = '10.71';"));
+    $add('10.71', 'روشِ چهارمِ اصلاح: زنجیرهٔ پشتیبان (مستر ← کاندیدها)',
+         strpos($selfSrc, "'fallback' => 'زنجیرهٔ پشتیبان (مستر ← کاندیدها)'") !== false
+          && strpos($selfSrc, "['fallback','🛟 زنجیرهٔ پشتیبان (مستر ← کاندیدها)',") !== false
+          && strpos($selfSrc, "elseif (\$mode === 'fallback') {") !== false
+          && strpos($selfSrc, '🛟 زنجیرهٔ پشتیبان — مستر: ') !== false
+          && strpos($selfSrc, "in_array(\$mode, ['master', 'quorum', 'fallback'], true)") !== false
+          && strpos($selfSrc, '\$fbRescued++') !== false
+          && strpos($selfSrc, 'نجات‌یافته با زنجیره: ') !== false);
+
+    /* ==== ۸۴ (v10.70) ==== */
     $add('10.70', 'نسخهٔ ۱۰.۷۰',
          str_contains($selfSrc, "const APP_VERSION = '10.70';"));
     $add('10.70', 'صفِ استخراج به‌صورتِ خودکار تازه می‌شود (زنده)',
@@ -40832,7 +40844,9 @@ function catfixClearStop(): void { @unlink(CATFIX_STOP_FILE); }
 
 /** برچسبِ خوانای حالت‌های اجرا */
 function catfixModeLabel(string $mode): string {
-    $m = ['ai_text' => 'متنِ بررسیِ باسلام', 'master' => 'مدلِ مستر', 'quorum' => 'اجماعِ چندمدلی'];
+    /* v10.71 (85): روشِ چهارم — زنجیرهٔ پشتیبان */
+    $m = ['ai_text' => 'متنِ بررسیِ باسلام', 'master' => 'مدلِ مستر', 'quorum' => 'اجماعِ چندمدلی',
+          'fallback' => 'زنجیرهٔ پشتیبان (مستر ← کاندیدها)'];
     return $m[$mode] ?? $mode;
 }
 
@@ -40902,7 +40916,8 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
     /* --- آماده‌سازیِ مدل‌ها فقط در حالت‌های هوش مصنوعی --- */
     $cands = []; $providers = []; $master = null; $mp = null; $masterKey = ''; $net = []; $candKeys = [];
     $quorum = 2;
-    if ($mode === 'master' || $mode === 'quorum') {
+    /* v10.71 (85): روشِ چهارم (زنجیرهٔ پشتیبان) هم مثلِ مستر به مدل‌ها نیاز دارد */
+    if (in_array($mode, ['master', 'quorum', 'fallback'], true)) {
         $cands = aiCandidates();
         if (!$cands) return ['ok' => false, 'error' => 'هیچ مدل کاندیدی انتخاب نشده — اول در بخش 🤖 چند مدل کاندید اضافه کنید'];
         $providers = aiProvidersLoad();
@@ -40917,10 +40932,15 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
         catfixProgress(['log_add' => ['🧠 مستر: ' . $master['providerName'] . ' / ' . $master['model']
             . ($mode === 'quorum'
                ? (' · اجماع با ' . aiFaNum(count($cands)) . ' مدل، حدنصابِ مرحلهٔ اول: ' . aiFaNum($quorum))
-               : ' · حالتِ تک‌مدلی')]]);
+               : ($mode === 'fallback'
+                  ? (' · زنجیرهٔ پشتیبان — اگر مستر نداد، ' . aiFaNum(max(0, count($cands) - 1)) . ' کاندید به‌ترتیب')
+                  : ' · حالتِ تک‌مدلی'))]]);   // v10.71 (85)
         if ($mode === 'quorum' && count($cands) < 2) {
             $mode = 'master';
             catfixProgress(['log_add' => ['ℹ️ فقط یک کاندید هست — به حالتِ تک‌مدلی برگشت']]);
+        }
+        if ($mode === 'fallback' && count($cands) < 2) {
+            catfixProgress(['log_add' => ['ℹ️ فقط یک کاندید هست — زنجیرهٔ پشتیبان عملاً حالتِ مستر است']]);   // v10.71 (85)
         }
     }
 
@@ -40951,6 +40971,7 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
 
     $fixed = 0; $failed = 0; $noAi = 0; $noCat = 0; $skipSame = 0; $skipTried = 0;
     $asked = 0; $cacheHits = 0; $idx = 0; $items = []; $stopped = false;
+    $fbRescued = 0;   // v10.71 (85): چند محصول با زنجیرهٔ پشتیبان نجات یافت
     /* v10.36 (۴۹ه): نامِ پروفایلِ هر محصول به‌عنوان بافت به مدل داده می‌شود.
        یک بار ساخته می‌شود و در حلقه هزینه‌ای ندارد. */
     $profOf = catProfileResolver('bsl');
@@ -41030,6 +41051,45 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
                     . ' (' . $catId . ') — ' . aiFaNum((int)($con['agreement'] ?? 0)) . ' رأی از '
                     . aiFaNum((int)($con['asked'] ?? 0)) . ' مدل' . (!empty($con['from_cache']) ? ' · از کش ⚡' : '')
                     . ($pProf !== '' ? ' · بافت: ' . $pProf : '')]]);   // v10.36 (۴۹ه)
+            } elseif ($mode === 'fallback') {
+                /* v10.71 (85): روشِ چهارم — زنجیرهٔ پشتیبان.
+                   «جوابِ معتبر» یعنی مدل بی‌خطا جواب داده باشد و دستهٔ موجود
+                   در درخت (category_id > 0) برگردانده باشد. اگر مستر خطا داد
+                   یا دستهٔ معتبر نداد، کاندیدهایِ دیگر به‌ترتیب امتحان
+                   می‌شوند تا اولین جوابِ معتبر. نگهبان‌هایِ همان‌دسته/امتحان‌شدهٔ
+                   پایین مثلِ روش‌هایِ دیگر بر دستهٔ برگزیده حاکم می‌مانند. */
+                $res = aiCandidateCategory($mp, $master['model'], $pName, $cats, $leafCats,
+                    aiCatListBuild($leafCats, $exclude, 24000, $pName), $net, $exclude, $triedInfo, $pHint);
+                $asked++;
+                $catId   = (int)($res['category_id'] ?? 0);
+                $catName = (string)($res['category_name'] ?? '');
+                $ok      = !empty($res['ok']);
+                $err     = (string)($res['error'] ?? '');
+                $winKeys = [$masterKey];
+                if (!$ok || $catId <= 0) {
+                    $fbChain = '🛟 زنجیرهٔ پشتیبان — مستر: ' . ($err !== '' ? $err : 'دستهٔ معتبر نداد');
+                    foreach ($cands as $fc) {
+                        if (catfixStopRequested()) break;
+                        if (($fc['key'] ?? '') === $masterKey) continue;
+                        $fcp = $providers[$fc['provider']] ?? null;
+                        if ($fcp === null) continue;
+                        $fres = aiCandidateCategory($fcp, $fc['model'], $pName, $cats, $leafCats,
+                            aiCatListBuild($leafCats, $exclude, 24000, $pName), $net, $exclude, $triedInfo, $pHint);
+                        $asked++;
+                        if (!empty($fres['ok']) && (int)($fres['category_id'] ?? 0) > 0) {
+                            $catId   = (int)$fres['category_id'];
+                            $catName = (string)($fres['category_name'] ?? '');
+                            $ok      = true;
+                            $err     = '';
+                            $winKeys = [(string)$fc['key']];
+                            $fbChain .= ' → ' . ($fc['providerName'] ?? $fc['provider']) . '/' . $fc['model'] . ' ✓';
+                            $fbRescued++;
+                            break;
+                        }
+                        $fbChain .= ' → ' . ($fc['providerName'] ?? $fc['provider']) . '/' . $fc['model'] . ' ✗';
+                    }
+                    catfixProgress(['log_add' => [$fbChain]]);
+                }
             } else {
                 $res = aiCandidateCategory($mp, $master['model'], $pName, $cats, $leafCats,
                     aiCatListBuild($leafCats, $exclude, 24000, $pName), $net, $exclude, $triedInfo, $pHint);
@@ -41042,7 +41102,9 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
             }
             if (!$ok || $catId <= 0) {
                 $noCat++;
-                $m = ($mode === 'quorum' ? 'اجماع به دستهٔ تازه‌ای نرسید' : 'مستر دستهٔ معتبری نداد')
+                /* v10.71 (85): پیامِ روشِ چهارم هم جدا */
+                $m = ($mode === 'quorum' ? 'اجماع به دستهٔ تازه‌ای نرسید'
+                    : ($mode === 'fallback' ? 'زنجیرهٔ پشتیبان به دستهٔ تازه‌ای نرسید' : 'مستر دستهٔ معتبری نداد'))
                      . ($err !== '' ? ' — ' . $err : '');
                 $push('no_cat', $m);
                 catfixProgress(['log_add' => ['⚠️ [' . $idx . '/' . $total . '] ' . mb_substr($pName, 0, 40, 'UTF-8') . ' — ' . $m]]);
@@ -41104,7 +41166,8 @@ function catfixRun(array $cn, string $mode, array $opts = []): array {
     $msg = '✅ اصلاح: ' . $fixed . ' | دسته نیافت: ' . $noCat
          . ($mode === 'ai_text' ? (' | بدون متنِ AI: ' . $noAi) : '')
          . ' | تکراری/همان دسته: ' . ($skipSame + $skipTried)
-         . ' | ناموفق: ' . $failed . ' (از ' . $total . ')' . $savedMsg;
+         . ' | ناموفق: ' . $failed . ' (از ' . $total . ')' . $savedMsg
+         . (($mode === 'fallback' && $fbRescued > 0) ? (' | نجات‌یافته با زنجیره: ' . $fbRescued) : '');
 
     return ['ok' => true, 'mode' => $mode, 'total' => $total, 'processed' => $idx,
             'fixed' => $fixed, 'failed' => $failed, 'no_ai' => $noAi, 'no_cat' => $noCat,
@@ -51416,6 +51479,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.71', t:'🛟 اصلاح دسته‌بندی: روشِ چهارم — زنجیرهٔ پشتیبان (مستر ← کاندیدها)', items:[
+    '🛟 <b>روشِ چهارم در دراپ‌داونِ «🧭 روشِ تشخیصِ دسته»:</b> «زنجیرهٔ پشتیبان (مستر ← کاندیدها)» — اول از مدلِ <b>مستر</b> می‌پرسد؛ اگر <b>خطا</b> داد (شبکه، سقفِ درخواست، خرابیِ مدل) یا <b>دستهٔ معتبر</b> نداد، <b>کاندیدهایِ دیگر</b> را <b>به‌ترتیب</b> امتحان می‌کند تا اولین جوابِ معتبر به دست بیاید و اعمال شود.',
+    '📜 <b>لاگِ شفافِ زنجیره:</b> هر مرحلهٔ زنجیره در لاگِ اجرا نوشته می‌شود — «🛟 زنجیرهٔ پشتیبان — مستر: [خطا] → ارائه‌دهنده/مدل ✗ → ارائه‌دهنده/مدل ✓» — و در خلاصهٔ آخر می‌بینی «نجات‌یافته با زنجیره: N».',
+    '🔒 <b>نگهبان‌ها دست‌نخورده:</b> دو نگهبانِ همیشگی — «پیشنهاد همان دستهٔ فعلی است» و «این دسته قبلاً امتحان و رد شده» — روی دستهٔ برگزیده مثلِ روش‌هایِ دیگر حاکم می‌مانند.',
+    '💡 <b>هزینه:</b> زنجیره فقط وقتی به مدلِ بعد می‌رود که قبلی شکسته باشد — وقتی مستر سالم جواب می‌دهد، هزینه دقیقاً مثلِ حالتِ تک‌مدلی است.',
+  ]},
   {v:'10.70', t:'📋 صفِ استخراج «زنده» شد — دیگر دکمهٔ ریفرش لازم نیست', items:[
     '🔄 <b>تازه‌سازیِ خودکار:</b> تا حالا پیشرفتِ ردیف‌هایِ صفِ استخراج فقط با کلیکِ 🔄 (یا بعد از شروع/توقف/پاک‌سازی) دیده می‌شد؛ پیشرفتِ کارِ پس‌زمینه (کران، نگهبان، ادامهٔ کارِ گیرکرده) را نمی‌دیدی مگر ریفرش می‌زدی. حالا باکس خودش تازه می‌شود: وقتی ردیفِ فعالی هست (در صف، در حال استخراج، متوقف) <b>هر ۳ ثانیه</b>، و وقتی کار فعال نیست <b>هر ۱۵ ثانیه</b> — پس شروعِ هر کارِ تازهٔ پس‌زمینه هم آنی دیده می‌شود.',
     '🟢 <b>نشانِ وضعیتِ زنده:</b> کنارِ دکمه‌ها یک نقطهٔ کوچک می‌گوید حالِ پایش کجاست: «● زنده» (فعال — ۳ ثانیه) یا «● پایشِ آهسته» (۱۵ ثانیه). دکمهٔ 🔄 برای تازه‌سازیِ آنیِ دستی هم همان‌جاست.',
@@ -65490,7 +65559,8 @@ let cfIsRun=false, cfTimer=null, cfSeen=0, cfMode='ai_text';
 
 const CF_MODES=[['ai_text','📝 متنِ بررسیِ باسلام','از متنِ توصیه/علتِ ردِ خودِ باسلام دسته را بیرون می‌کشد — رایگان و بدونِ مدلِ هوش مصنوعی'],
                 ['master','🎯 مدلِ مستر','فقط از بهترین مدلِ کاندید (بر اساس آمارِ رأی‌ها) می‌پرسد — سریع‌تر و کم‌هزینه‌تر'],
-                ['quorum','🗳️ اجماعِ چندمدلی','از چند مدلِ کاندید می‌پرسد و رأیِ اکثریت را اعمال می‌کند — دقیق‌تر ولی پرهزینه‌تر']];
+                ['quorum','🗳️ اجماعِ چندمدلی','از چند مدلِ کاندید می‌پرسد و رأیِ اکثریت را اعمال می‌کند — دقیق‌تر ولی پرهزینه‌تر'],
+                ['fallback','🛟 زنجیرهٔ پشتیبان (مستر ← کاندیدها)','اول از مدلِ مستر می‌پرسد؛ اگر خطا داد یا دستهٔ معتبر نداد، کاندیدهایِ دیگر را به‌ترتیب امتحان می‌کند تا جوابِ معتبر بیاید']];
 
 function catfixOpen(mode){
     if(mode)cfMode=mode;
