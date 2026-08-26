@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.78';
+const APP_VERSION = '10.79';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24280,6 +24280,18 @@ if (isset($_GET['selftest'])) {
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
 
+    /* ==== ۹۳ (v10.79) ==== */
+    $add('10.79', 'نسخهٔ ۱۰.۷۹',
+         str_contains($selfSrc, "const APP_VERSION = '10.79';"));
+    $add('10.79', 'زنجیرهٔ ارسالِ پیام‌رسان: مستقیم ← DoH ← اتصالِ غیرمستقیمِ سایت (proxy.php)',
+         strpos($selfSrc, 'function msgrSend(') !== false
+          && strpos($selfSrc, 'function msgrSiteProxyBase()') !== false
+          && strpos($selfSrc, 'msgrCurlOnce') !== false);
+    $add('10.79', 'خطایِ دقیق + مسیرِ ارسال در بله/روبیکا/تلگرام (و گزارشِ کران)',
+         strpos($selfSrc, "'baleh_err'") !== false
+          && strpos($selfSrc, "'baleh_via'") !== false
+          && strpos($selfSrc, 'msgrErrDetail') !== false);
+
     /* ==== ۸۵ (v10.71) ==== */
     $add('10.71', 'نسخهٔ ۱۰.۷۱',
          str_contains($selfSrc, "const APP_VERSION = '10.71';"));
@@ -29360,9 +29372,9 @@ function notifSend(array $cn, string $msg, ?string $feed = null): array {
     $bt = $cn['baleh']['token'] ?? '';  $bc = $cn['baleh']['chat_id'] ?? '';
     $rt = $cn['rubika']['token'] ?? ''; $rc = $cn['rubika']['chat_id'] ?? '';
     $tt = $cn['telegram']['token'] ?? ''; $tc = $cn['telegram']['chat_id'] ?? '';   // v10.78 (92): تلگرام
-    if ($bt !== '' && $bc !== '')  $out['baleh']  = bslSendToBaleh($bt, $bc, $msg) ? 'sent' : 'fail';
-    if ($rt !== '' && $rc !== '')  { $rr = bslSendToRubika($rt, $rc, $msg); $out['rubika'] = $rr['ok'] ? 'sent' : 'fail'; if (!$rr['ok'] && $rr['error'] !== '') $out['rubika_err'] = $rr['error']; }
-    if ($tt !== '' && $tc !== '')  { $tr = bslSendToTelegram($tt, $tc, $msg); $out['telegram'] = $tr['ok'] ? 'sent' : 'fail'; if (!$tr['ok'] && $tr['error'] !== '') $out['telegram_err'] = $tr['error']; }
+    if ($bt !== '' && $bc !== '')  { $rv = bslSendToBaleh($bt, $bc, $msg); $out['baleh'] = $rv['ok'] ? 'sent' : 'fail'; if ($rv['ok'] && (string)($rv['via'] ?? '') !== 'مستقیم') $out['baleh_via'] = (string)$rv['via']; if (!$rv['ok'] && $rv['error'] !== '') $out['baleh_err'] = $rv['error']; }
+    if ($rt !== '' && $rc !== '')  { $rv = bslSendToRubika($rt, $rc, $msg); $out['rubika'] = $rv['ok'] ? 'sent' : 'fail'; if ($rv['ok'] && (string)($rv['via'] ?? '') !== 'مستقیم') $out['rubika_via'] = (string)$rv['via']; if (!$rv['ok'] && $rv['error'] !== '') $out['rubika_err'] = $rv['error']; }
+    if ($tt !== '' && $tc !== '')  { $rv = bslSendToTelegram($tt, $tc, $msg); $out['telegram'] = $rv['ok'] ? 'sent' : 'fail'; if ($rv['ok'] && (string)($rv['via'] ?? '') !== 'مستقیم') $out['telegram_via'] = (string)$rv['via']; if (!$rv['ok'] && $rv['error'] !== '') $out['telegram_err'] = $rv['error']; }
     if (!$out) $out['none'] = 'no_messenger';
     if ($feed !== null) liveFeedPush($feed, $msg);   /* v10.66 (۸۰) */
     /* v10.72 (86): Web Push — در کنارِ پیام‌رسان، به دستگاهِ کاربر.
@@ -33815,36 +33827,92 @@ if (isset($_GET['bsl_notify_selected'])) {
     exit;
 }
 
-function bslSendToBaleh(string $token, string $chatId, string $text): bool {
-$url = 'https://tapi.bale.ai/bot' . $token . '/sendMessage';
-$ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE), CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
-$resp = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
-return $code >= 200 && $code < 300;
+/** v10.79 (93): یک دورِ curl برایِ ارسالِ پیام‌رسان.
+    $pinIp: ابطالِ DNSِ هاست — با IPی که DoH پیدا کرده مستقیم وصل می‌شود
+    (SNI/Host دست‌نخورده می‌مانند، پس گواهیِ TLS همانِ دامنه است). */
+function msgrCurlOnce(string $url, string $postJson, ?string $pinIp): array {
+    $ch = curl_init($url);
+    $opt = [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $postJson,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15, CURLOPT_SSL_VERIFYPEER => true];
+    if ($pinIp !== null && $pinIp !== '') {
+        $h = (string)(parse_url($url, PHP_URL_HOST) ?? '');
+        if ($h !== '') $opt[CURLOPT_RESOLVE] = [$h . ':443:' . $pinIp];
+    }
+    curl_setopt_array($ch, $opt);
+    $resp = (string)curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err = (string)curl_error($ch);
+    curl_close($ch);
+    return [$code, $resp, $err];
 }
-/** v10.78 (92): خطاها دیگر بی‌صدا نیستند — {ok, code, error} برمی‌گردد
-    تا «چرا روبیکا کار نمی‌کند» دقیق قابلِ عیب‌یابی شود. */
+function msgrErrDetail(string $resp): string {
+    $j = json_decode($resp, true);
+    if (is_array($j)) {
+        $d = (string)($j['description'] ?? ($j['error'] ?? ($j['message'] ?? ($j['detail'] ?? ''))));
+        if ($d !== '') return mb_substr($d, 0, 200);
+        if (isset($j['error_code'])) return 'error_code=' . $j['error_code'];
+    }
+    return mb_substr($resp, 0, 160);
+}
+/** v10.79 (93): اتصالِ غیرمستقیمِ سایت (proxy.php) — همان کشفیِ مسیرِ Push */
+function msgrSiteProxyBase(): string {
+    $rc = pushRouteCfg();
+    $p = (string)($rc['proxy'] ?? '');
+    if ($p === '' || stripos($p, '@') !== false) return '';   // HTTP-proxy قدیمی برایِ انتقالِ شفاف کار نمی‌کند
+    return $p;
+}
+/** v10.79 (93): زنجیرهٔ ارسالِ پیام‌رسان‌ها — مستقیم ← DoH ← اتصالِ غیرمستقیمِ سایت.
+    هاستهایی که DNSشان مسدود/مسموم است («Could not resolve host») با همین
+    زنجیره پیام می‌فرستند؛ و اگر هر سه شکست بخورد، گزارشِ دقیقِ هر مرحله
+    برمی‌گردد. */
+function msgrSend(string $label, string $url, string $postJson): array {
+    $attempts = [];
+    [$code, $resp, $err] = msgrCurlOnce($url, $postJson, null);
+    if ($code >= 200 && $code < 300) return ['ok' => true, 'code' => $code, 'error' => '', 'via' => 'مستقیم'];
+    $attempts[] = $err !== '' ? 'مستقیم: ' . $err : ('مستقیم: HTTP ' . $code . ' ' . msgrErrDetail($resp));
+    $host = (string)(parse_url($url, PHP_URL_HOST) ?? '');
+    if ($host !== '' && $code === 0) {
+        $cn = loadConnections();
+        $dohUrl = trim((string)($cn['ai_net']['doh_url'] ?? '')) ?: 'https://cloudflare-dns.com/dns-query';
+        $dr = function_exists('aiDohResolve') ? aiDohResolve($host, $dohUrl, 8) : ['ok' => false];
+        if (!empty($dr['ok']) && !empty($dr['ip'])) {
+            $ip = (string)$dr['ip'];
+            [$c2, $r2, $e2] = msgrCurlOnce($url, $postJson, $ip);
+            if ($c2 >= 200 && $c2 < 300) return ['ok' => true, 'code' => $c2, 'error' => '', 'via' => 'DoH(' . $ip . ')'];
+            $attempts[] = $e2 !== '' ? ('DoH(' . $ip . '): ' . $e2) : ('DoH(' . $ip . '): HTTP ' . $c2 . ' ' . msgrErrDetail($r2));
+        } else {
+            $attempts[] = 'DoH: ' . (string)($dr['error'] ?? 'resolve نشد');
+        }
+    }
+    $pb = msgrSiteProxyBase();
+    if ($pb !== '') {
+        $pu = strpos($pb, '{url}') !== false
+            ? str_replace('{url}', rawurlencode($url), $pb)
+            : $pb . (strpos($pb, '?') !== false ? '&' : '?') . 'url=' . rawurlencode($url);
+        [$c3, $r3, $e3] = msgrCurlOnce($pu, $postJson, null);
+        if ($c3 >= 200 && $c3 < 300) return ['ok' => true, 'code' => $c3, 'error' => '', 'via' => 'اتصالِ غیرمستقیمِ سایت'];
+        $attempts[] = $e3 !== '' ? ('اتصالِ سایت: ' . $e3) : ('اتصالِ سایت: HTTP ' . $c3 . ' ' . msgrErrDetail($r3));
+    } else {
+        $attempts[] = 'اتصالِ غیرمستقیمِ سایت: تنظیم نشده (فیلدِ مسیرِ Push)';
+    }
+    return ['ok' => false, 'code' => $code, 'error' => implode(' | ', $attempts)];
+}
+/** v10.79 (93): ارسالِ بله — از طریقِ زنجیره (خطایِ دقیق + مسیرِ موفق) */
+function bslSendToBaleh(string $token, string $chatId, string $text): array {
+    return msgrSend('بله', 'https://tapi.bale.ai/bot' . $token . '/sendMessage',
+        json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE));
+}
+/** v10.79 (93): روبیکا از طریقِ زنجیرهٔ مشترک — مستقیم ← DoH ← اتصالِ غیرمستقیمِ سایت */
 function bslSendToRubika(string $token, string $chatId, string $text): array {
-$url = 'https://api.rubika.ir/v1/bot' . $token . '/sendMessage';
-$ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE), CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15, CURLOPT_SSL_VERIFYPEER => true]);
-$resp = (string)curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); $err = (string)curl_error($ch); curl_close($ch);
-if ($code >= 200 && $code < 300) return ['ok' => true, 'code' => $code, 'error' => ''];
-$j = json_decode($resp, true);
-$detail = '';
-if (is_array($j)) $detail = (string)($j['description'] ?? ($j['error'] ?? ($j['message'] ?? ($j['detail'] ?? ''))));
-if ($detail === '' && is_array($j) && isset($j['error_code'])) $detail = 'error_code=' . $j['error_code'];
-if ($detail === '') $detail = mb_substr($resp, 0, 200);
-return ['ok' => false, 'code' => $code, 'error' => $err !== '' ? 'خطای شبکه: ' . $err : ($detail !== '' ? $detail : 'پاسخی نیامد')];
+    return msgrSend('روبیکا', 'https://api.rubika.ir/v1/bot' . $token . '/sendMessage',
+        json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE));
 }
 
-/** v10.78 (92): تلگرام — مثلِ روبیکا، با خطایِ دقیق */
+/** v10.79 (93): تلگرام از طریقِ زنجیرهٔ مشترک */
 function bslSendToTelegram(string $token, string $chatId, string $text): array {
-$url = 'https://api.telegram.org/bot' . $token . '/sendMessage';
-$ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode(['chat_id' => $chatId, 'text' => $text, 'disable_web_page_preview' => true], JSON_UNESCAPED_UNICODE), CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15, CURLOPT_SSL_VERIFYPEER => true]);
-$resp = (string)curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); $err = (string)curl_error($ch); curl_close($ch);
-if ($code >= 200 && $code < 300) return ['ok' => true, 'code' => $code, 'error' => ''];
-$j = json_decode($resp, true);
-$detail = is_array($j) ? (string)($j['description'] ?? ($j['error'] ?? '')) : mb_substr($resp, 0, 200);
-return ['ok' => false, 'code' => $code, 'error' => $err !== '' ? 'خطای شبکه: ' . $err : ($detail !== '' ? $detail : 'پاسخی نیامد')];
+    return msgrSend('تلگرام', 'https://api.telegram.org/bot' . $token . '/sendMessage',
+        json_encode(['chat_id' => $chatId, 'text' => $text, 'disable_web_page_preview' => true], JSON_UNESCAPED_UNICODE));
 }
 function bslTryCreateWithFallback(string $tk, int $vid, array $bp, array $fallbackCatIds, string $pTitle, bool $autoCat, array $bslFlatCats, array $cData): array {
 $tried = [(int)($bp['category_id'] ?? 0)];
@@ -33942,16 +34010,16 @@ $chatId=trim($_POST['chat_id']??'');
 if(empty($token)||empty($chatId)){echo json_encode(['ok'=>false,'error'=>'Token و Chat ID الزامی است'],JSON_UNESCAPED_UNICODE);exit;}
 $testMsg='🔔 تست اعلان — '.date('H:i:s Y/m/d').' — Scraper v8.22';
 if($type==='baleh'){
-$ok=bslSendToBaleh($token,$chatId,$testMsg);
-if($ok){echo json_encode(['ok'=>true,'message'=>'پیام بله ارسال شد'],JSON_UNESCAPED_UNICODE);}
-else{echo json_encode(['ok'=>false,'error'=>'ارسال به بله ناموفق — Token یا Chat ID را بررسی کنید'],JSON_UNESCAPED_UNICODE);}
+$rv=bslSendToBaleh($token,$chatId,$testMsg);
+if($rv['ok']){echo json_encode(['ok'=>true,'message'=>'پیام بله ارسال شد' . ((string)($rv['via'] ?? '') !== 'مستقیم' ? ' (مسیر: ' . $rv['via'] . ')' : '')],JSON_UNESCAPED_UNICODE);}
+else{echo json_encode(['ok'=>false,'error'=>'ارسال به بله ناموفق — ' . ($rv['error'] !== '' ? $rv['error'] : 'HTTP ' . $rv['code'] . ' — Token یا Chat ID را بررسی کنید'),'http_code'=>$rv['code'],'detail'=>$rv['error']],JSON_UNESCAPED_UNICODE);}
 }elseif($type==='rubika'){
 $rr=bslSendToRubika($token,$chatId,$testMsg);
-if($rr['ok']){echo json_encode(['ok'=>true,'message'=>'پیام روبیکا ارسال شد'],JSON_UNESCAPED_UNICODE);}
+if($rr['ok']){echo json_encode(['ok'=>true,'message'=>'پیام روبیکا ارسال شد' . ((string)($rr['via'] ?? '') !== 'مستقیم' ? ' (مسیر: ' . $rr['via'] . ')' : '')],JSON_UNESCAPED_UNICODE);}
 else{echo json_encode(['ok'=>false,'error'=>'ارسال به روبیکا ناموفق — HTTP ' . $rr['code'] . ' — ' . ($rr['error'] !== '' ? $rr['error'] : 'Token یا Chat ID را بررسی کنید'),'http_code'=>$rr['code'],'detail'=>$rr['error']],JSON_UNESCAPED_UNICODE);}
 }elseif($type==='telegram'){
 $tr=bslSendToTelegram($token,$chatId,$testMsg);
-if($tr['ok']){echo json_encode(['ok'=>true,'message'=>'پیام تلگرام ارسال شد'],JSON_UNESCAPED_UNICODE);}
+if($tr['ok']){echo json_encode(['ok'=>true,'message'=>'پیام تلگرام ارسال شد' . ((string)($tr['via'] ?? '') !== 'مستقیم' ? ' (مسیر: ' . $tr['via'] . ')' : '')],JSON_UNESCAPED_UNICODE);}
 else{echo json_encode(['ok'=>false,'error'=>'ارسال به تلگرام ناموفق — HTTP ' . $tr['code'] . ' — ' . ($tr['error'] !== '' ? $tr['error'] : 'Token یا Chat ID را بررسی کنید'),'http_code'=>$tr['code'],'detail'=>$tr['error']],JSON_UNESCAPED_UNICODE);}
 }else{
 echo json_encode(['ok'=>false,'error'=>'نوع اعلان نامعتبر'],JSON_UNESCAPED_UNICODE);
@@ -52220,7 +52288,13 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
-  {v:'10.78', t:'🇮🇷 اسکریپتِ هدرِ نجوا + تلگرام + تشخیصِ دقیقِ خطای روبیکا', items:[
+  {v:'10.79', t:' پیام‌رسان‌ها از مسیرِ اتصالِ غیرمستقیم — حتی با DNSِ مسدود', items:[
+    '🌐 <b>چرا پیام‌رسان‌ها نمی‌آمدند:</b> هاست شما حتی دامنهٔ <span dir="ltr">api.rubika.ir</span> را resolve نمی‌کند (DNS مسدود/مسموم) — یعنی ارسالِ بله/روبیکا/تلگرام از سرور، قبل از هر چیز، در همان «رسیدن به دامنه» شکست می‌خورد؛ کران اجرا می‌شد ولی پیام جایی نمی‌رفت.',
+    ' <b>زنجیره سه‌مرحله‌ایِ ارسالِ پیام‌رسان:</b> ۱) مستقیم ← ۲) <b>DoH</b> (resolve از Cloudflare DNS با همان تنظیمِ عبورِ هوش مصنوعی، اتصال با IPِ مستقیم) ← ۳) <b>اتصالِ غیرمستقیمِ سایت (proxy.php)</b> — همان پراکسیِ خودِ شما. هر مرحله که جواب داد، همان استفاده می‌شود.',
+    '🩺 <b>گزارشِ کامل:</b> اگر هر سه مرحله شکست بخورد، دقیقاً می‌بینید کجا و چرا (مثلاً: مستقیم: Could not resolve host | DoH: ... | سایت: HTTP 403 host_not_allowed). در تستِ بله/روبیکا/تلگرام و در گزارشِ کران.',
+    '📌 <b>نکتهٔ مهم:</b> برایِ مرحلهٔ سوم، دامنه‌هایِ <span dir="ltr">tapi.bale.ai</span>، <span dir="ltr">api.rubika.ir</span> و <span dir="ltr">api.telegram.org</span> به فهرستِ PROXY_TARGET_HOSTSِ proxy.php اضافه شدند (فایلِ interface.php را هم مستقر کنید).',
+  ]},
+  {v:'10.78', t:'🇮 اسکریپتِ هدرِ نجوا + تلگرام + تشخیصِ دقیقِ خطای روبیکا', items:[
     '🇮🇷 <b>نجوا با روشِ مستنداتِ رسمی:</b> به‌جایِ تنظیماتِ API (توکن/API key)، حالا کادرِ «اسکریپتِ هدرِ نجوا» است — کدِ پنلِ نجوا (منو ← تنظیمات ← تنظیماتِ اسکریپت ← کدِ سرویس) را بچسبانید؛ اسکریپر آن را <b>پیش از تگِ پایانیِ head</b> همین صفحه درج می‌کند تا وریفایِ نصب در پنلِ نجوا قبول شود. (تنظیماتِ قدیمیِ API برداشته شد.)',
     '✈️ <b>تلگرام اضافه شد:</b> در تبِ «💬 پیام‌رسان» — Token + Chat ID + دکمهٔ تست. همهٔ رویدادها (لحظه‌ای + کران) مثلِ بله/روبیکا به تلگرام هم می‌روند؛ در گروه هم کار می‌کند (chat_id گروه با -100).',
     '🩺 <b>روبیکا (و تلگرام) دیگر بی‌صدا شکست نمی‌خورند:</b> دکمهٔ «🔔 تست» حالا HTTP code و <b>پیامِ خطایِ خودِ سرویس</b> را نشان می‌دهد (مثلاً chat not found / token نامعتبر) — برایِ عیب‌یابیِ «ارسالِ روبیکا کار نمی‌کند» دقیق بگویید کجا گیر است.',

@@ -26,6 +26,11 @@ const PROXY_TARGET_HOSTS = [
     // Web Push (scraper4) — ارسالِ اعلان‌هایِ پوش از طریقِ همین پراکسی
     // (نسخهٔ ۱۰.۷۵): fcm.googleapis.com فقط با HTTPS و پورت 443:
     'fcm.googleapis.com',
+    // پیام‌رسان‌ها (scraper4 v10.79) — وقتی DNSِ هاست مسدود است، ارسالِ
+    // بله/روبیکا/تلگرام از مسیرِ همین پراکسی امتحان می‌شود:
+    'tapi.bale.ai',
+    'api.rubika.ir',
+    'api.telegram.org',
 ];
 
 // Public HTTPS endpoints used by the dashboard's one-click connectivity test.
