@@ -272,8 +272,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.60';
-const APP_VERSION_DATE = '1405/06/08';
+const APP_VERSION = '10.61';
+const APP_VERSION_DATE = '1405/06/09';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -1589,6 +1589,51 @@ function finishRequestNow(string $body = '', string $type = 'application/json; c
     @ob_flush(); @flush();
     define('REQ_DETACHED', true);
 }
+/**
+ * v10.61 (۷۵): همگام‌سازیِ دستی اتصال را «باز» نگه می‌دارد.
+ *
+ * ریشهٔ «دکمهٔ همگام‌سازی دستی کارتی به صفِ استخراج نمی‌آورد»:
+ * هاستِ شما پردژهٔ جداشده (بدون کلاینتِ وصل) را در چند ثانیه می‌کُشد —
+ * finishRequestNow اتصال را می‌بست و کار می‌رفت پس‌زمینه، و کرانِ هاست
+ * که تنها نجات‌دهندهٔ پس‌زمینه بود خودشان روزهاست اجرا نمی‌شود (نگارِ
+ * v10.58 «آخرین تیک ۸۰٬۰۰۰ ثانیه پیش»). نتیجه: پردژه پیش از رسیدن به
+ * حلقهٔ همگام‌سازی می‌مُرد و هیچ‌وقت کارتی به صف نمی‌نشست.
+ *
+ * حالا: در همگام‌سازیِ دستی، اتصالِ مرورگر تا پایانِ کار باز می‌ماند
+ * (همان مدلِ «پُلِ مرورگر» که ارسال‌ها با آن زنده می‌مانند). مرورگرِ
+ * وصل = پردژهٔ زنده. خطوطِ ndjson (هر خط یک JSON) هم «خروجیِ زنده»
+ * محسوب می‌شوند و پردازنده را از سقفِ بی‌خروجیِ سرور نجات می‌دهند.
+ */
+function msKeepConnStart(): void {
+    if (defined('MS_KEEP_CONN')) return;
+    if (isCliRun()) return;
+    @set_time_limit(0);
+    @ignore_user_abort(true);
+    while (@ob_get_level()) @ob_end_clean();
+    if (!headers_sent()) {
+        header('Content-Type: application/x-ndjson; charset=UTF-8');
+        header('Cache-Control: no-cache');
+        header('X-Accel-Buffering: no');
+        header('X-LiteSpeed-Buffering: no');
+    }
+    echo json_encode(['ok' => true, 'started' => true, 'detached' => false,
+        'keep_alive' => true, 'note' => 'اتصال تا پایانِ کار باز است — پیشرفت را در همین تب ببینید'],
+        JSON_UNESCAPED_UNICODE) . "\n";
+    @ob_flush(); @flush();
+    define('MS_KEEP_CONN', true);
+}
+
+/** ضربانِ اتصالِ همگام‌سازیِ دستی — بیرون از حالتِ keep-conn بی‌اثر است */
+function msAlive(string $phase = ''): void {
+    if (!defined('MS_KEEP_CONN')) return;
+    if ($phase !== '') $GLOBALS['_msKeepPhase'] = $phase;
+    try {
+        echo json_encode(['alive' => time(),
+            'phase' => (string)($GLOBALS['_msKeepPhase'] ?? '')], JSON_UNESCAPED_UNICODE) . "\n";
+        @ob_flush(); @flush();
+    } catch (Throwable $e) { /* ضربان هرگز نباید کار را خراب کند */ }
+}
+
 
 /** خروجی کران: اگر اتصال بسته شده، به فایل برود نه به اتصالِ مرده */
 function cronEmit(array $results): void {
@@ -12059,6 +12104,7 @@ foreach ($_wantKeys as $_wk) {
 }
 if (!($_galDoneNow && !$_fieldMissingNow)) {
     $_inlineDetailDone++;
+    msAlive('جزئیات: ' . mb_substr((string)($p['title'] ?? $key), 0, 45));   /* v10.61 (۷۵) */
     extractProductDetailInline($allProducts, $key, $detailSelectors, $galleryCfg, false);
     extractCheckpoint($pkFinal, $allProducts,
         ['_extract_stage' => 'detail', '_extract_stage_at' => time(),
@@ -12069,6 +12115,7 @@ if (!($_galDoneNow && !$_fieldMissingNow)) {
 $logs[]='✓ +'.($newCount).' محصول (کل: '.count($allProducts).')';
 // v8.22: مقایسهٔ زنده — شمارنده‌ها و لیست‌ها همان لحظه محاسبه می‌شوند
 $liveCmp=extractLiveCompare($allProducts,$livePrevMap);
+msAlive('صفحه ' . $page . ' — ' . count($allProducts) . ' محصول');   /* v10.61 (۷۵) */
 writeProgress(EXTRACT_PROGRESS_FILE,array_merge(['running'=>true,'done'=>false,'total'=>$maxPages,'current'=>$page,'started_at'=>$startedAt,'last_progress_ts'=>time(),'queue_id'=>$queueId,'recent_log'=>$logs,'total_log_count'=>$page,'extracted'=>count($allProducts),'page'=>$page,'page_ok'=>true,'page_new'=>$newCount,'page_total'=>count($allProducts)],$liveCmp));
 
 if($pagType==='next_selector'&&!empty($pagVal)){
@@ -14861,6 +14908,9 @@ if (isset($_GET['manual_sync'])) {
     $_GET['cron_run'] = '1';
     $_GET['force']    = '1';
     if ($_msKey !== '') $_GET['only'] = $_msKey;
+    /* v10.61 (۷۵): همگام‌سازیِ دستی «جدا نمی‌شود» — اتصالِ مرورگر تا
+       پایانِ کار باز می‌ماند تا هاست پردژه را نکُشد (msKeepConnStart). */
+    $GLOBALS['_msKeepConn'] = true;
 }
 
 if (isset($_GET['cron_run']) || (($_POST['action'] ?? '') === 'cron_run')) {
@@ -14922,9 +14972,20 @@ header('Content-Type: application/json; charset=UTF-8');
    این گذرِ جداگانه در ابتدای کران نیست. */
 
 $_cronBg = !empty($_POST['bg']) || !empty($_GET['bg']);
-finishRequestNow(json_encode(['ok' => true, 'started' => true, 'bg' => $_cronBg,
-    'detached' => true, 'note' => 'اجرا در پس‌زمینه ادامه دارد — نتیجه در cron_last_run.json'],
-    JSON_UNESCAPED_UNICODE));
+/* v10.61 (۷۵): همگام‌سازیِ دستی «جدا نمی‌شود» — توضیح کامل در بالای
+   msKeepConnStart(). خلاصه: هاست شما پردژهٔ بدونِ کلاینت را در چند
+   ثانیه می‌کُشد و کرانِ هاست هم (به‌گزارشِ کاربر) روزهاست اجرا نمی‌شود،
+   پس همگام‌سازیِ دستی که جدا می‌شد، پیش از رسیدن به حلقهٔ همگام‌سازی
+   می‌مُرد و هیچ کارتی به صفِ استخراج نمی‌نشست. حالا در حالتِ دستی
+   اتصالِ مرورگر تا پایانِ کار باز می‌ماند (ndjson) و برای کران
+   رفتارِ قبلی (پاسخِ فوری + پس‌زمینه) دست‌نخورده است. */
+if (!empty($GLOBALS['_msKeepConn']) && !isCliRun()) {
+    msKeepConnStart();
+} else {
+    finishRequestNow(json_encode(['ok' => true, 'started' => true, 'bg' => $_cronBg,
+        'detached' => true, 'note' => 'اجرا در پس‌زمینه ادامه دارد — نتیجه در cron_last_run.json'],
+        JSON_UNESCAPED_UNICODE));
+}
 if ($_cronBg) define('CRON_BG', true);
 
 // قفل ضد هم‌پوشانی — یک اجرای طولانی نباید با اجرای بعدی تداخل کند
@@ -15031,6 +15092,16 @@ if ($lockAge < $cronLockSec) {
         elseif (!empty($_lp['error']))     $lockOut['ping'] = ['error' => $_lp['error']];
     } catch (Throwable $e) {
         $lockOut['ping'] = ['error' => mb_substr($e->getMessage(), 0, 200)];
+    }
+    /* v10.61 (۷۵): اگر این یک همگام‌سازیِ دستی بود، وضعیتش را
+       «در حال اجرا» جا نگذار — علتِ رد شدن را بنویس و ببند. */
+    if (manualSyncActive()) {
+        $_msSk = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+        $_msSk['running'] = false; $_msSk['done'] = true; $_msSk['cancelled'] = false;
+        $_msSk['phase'] = 'رد شد';
+        $_msSk['error'] = (string)($lockOut['reason'] ?? 'رد شد: اجرای قبلی هنوز تمام نشده است');
+        $_msSk['ts'] = time(); $_msSk['last_progress_ts'] = time();
+        writeProgress(MANUAL_SYNC_PROGRESS_FILE, $_msSk);
     }
     // v9.06: اتصال بالاتر بسته شده — خروجی به فایل می‌رود، نه به اتصالِ مرده
     cronEmit($lockOut);
@@ -15263,6 +15334,9 @@ $_onlyKey  = trim((string)($_GET['only'] ?? ''));
 $_forceRun = !empty($_GET['force']);
 foreach ($profiles as $key => $profile) {
 if ($_onlyKey !== '' && $key !== $_onlyKey) continue;
+/* v10.61 (۷۵): ضربانِ اتصالِ دستی — پردازندهٔ بی‌خروجی را هاست می‌کُشد؛
+   هر پروفایل یک خطِ ndjson می‌زند تا اتصال «زنده» بماند. */
+msAlive('پروفایل: ' . (string)($profile['name'] ?? $key));
 /* توقفِ دستی: بینِ دو پروفایل بررسی می‌شود تا کارِ نیمه‌کاره نماند */
 if (manualSyncActive() && manualSyncStopped()) { $results['manual_stopped'] = true; break; }
 $syncCfg = $profile['syncConfig'] ?? [];
@@ -16002,16 +16076,20 @@ if (isset($_GET['sync_diagnose'])) {
         $dgOut['last_cron'] = json_decode((string)@file_get_contents($cllFile), true);
     }
     $cllAge = $cllAt > 0 ? ($dgNow - $cllAt) : null;
+    /* v10.61 (۷۵): آدرسِ دقیقِ کران را هم نشان بده تا کاربر همان را در
+       کنترلِ پنلِ هاست / سرویسِ کران تنظیم کند. */
+    $dgCronUrl = selfBaseUrl() . '?cron_run=1';
     if ($cllAge === null) {
         $chk('last_tick', false,
-            'هیچ تیکِ کرانی ثبت نشده — کرانِ هاست (یا سرویسِ کرانِ خارجی) اصلاً به این آدرس نمی‌رسد. آدرسِ کران (با api_token اگر هست) و لاگِ سرویسِ کران را بررسی کنید.');
+            'هیچ تیکِ کرانی ثبت نشده — کرانِ هاست اصلاً به این آدرس نمی‌رسد. این آدرس را در کرانِ هاست تنظیم کنید: ' . $dgCronUrl . ' (هر ۵ دقیقه)');
     } else {
         $dc = is_array($dgOut['last_cron']) ? $dgOut['last_cron'] : [];
         $reason = trim((string)($dc['reason'] ?? ''));
         $chk('last_tick', $cllAge <= max(900, (int)($dgCn['cron_lock_min'] ?? 30) * 60),
             'آخرین تیکِ کران: ' . $cllAge . ' ثانیه پیش'
-            . ($reason ? (' — ' . $reason) : ''),
-            ['at' => $cllAt, 'ok' => $dc['ok'] ?? null, 'skipped' => $dc['skipped'] ?? null]);
+            . ($reason ? (' — ' . $reason) : '')
+            . ($cllAge > max(900, (int)($dgCn['cron_lock_min'] ?? 30) * 60) ? (' — کران قطع شده یا می‌مُرد؛ آدرسِ لازم: ' . $dgCronUrl) : ''),
+            ['at' => $cllAt, 'ok' => $dc['ok'] ?? null, 'skipped' => $dc['skipped'] ?? null, 'cron_url' => $dgCronUrl]);
     }
     /* ۲ — قفلِ کران */
     $crLock = __DIR__ . '/.cron_run.lock';
@@ -23755,6 +23833,21 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۷۵ (v10.61) ==== */
+    $add('10.61', 'نسخهٔ ۱۰.۶۱',
+         str_contains($selfSrc, "const APP_VERSION = '10.61';"));
+    $add('10.61', 'همگام‌سازیِ دستی اتصال را باز نگه می‌دارد (keep-conn + ndjson)',
+         (strpos($selfSrc, 'function msKeepConnStart(): void {') !== false
+          && strpos($selfSrc, "function msAlive(string \$phase = ''): void {") !== false
+          && strpos($selfSrc, "\$GLOBALS['_msKeepConn'] = true;") !== false
+          && strpos($selfSrc, "if (!empty(\$GLOBALS['_msKeepConn']) && !isCliRun()) {") !== false
+          && strpos($selfSrc, "msAlive('صفحه ' . \$page . ' — '") !== false
+          && strpos($selfSrc, "msAlive('ارسال ' . \$label . ' — '") !== false));
+    $add('10.61', 'رابطِ دستی پاسخِ ndjson را می‌خواند و تشخیص آدرسِ کران را نشان می‌دهد',
+         (strpos($selfSrc, "/* v10.61 (۷۵): پاسخ ndjson است") !== false
+          && strpos($selfSrc, "\$dgCronUrl = selfBaseUrl() . '?cron_run=1';") !== false
+          && strpos($selfSrc, "\$_msSk['phase'] = 'رد شد';") !== false));
+
     /* ==== ۷۴ (v10.60) ==== */
     $add('10.60', 'نسخهٔ ۱۰.۶۰',
          str_contains($selfSrc, "const APP_VERSION = '10.60';"));
@@ -30131,6 +30224,7 @@ function manualServerSendRun(int $roundMs = 1500000, int $maxRounds = 12): array
             $sig = (string)($row['id'] ?? '') . ':' . (int)($row['current'] ?? 0)
                  . ':' . (int)($pg['current'] ?? 0) . ':' . (int)($pg['sent'] ?? 0)
                  . ':' . (int)($pg['updated'] ?? 0) . ':' . (int)($pg['skipped'] ?? 0);
+            msAlive('ارسال ' . $label . ' — ' . (int)($row['current'] ?? 0) . '/' . (int)($row['total'] ?? 0));   /* v10.61 (۷۵) */
             $fired = fireAndForget('action=' . $action, $roundMs, ['from_file' => '1']);
             $out['rounds']++;
             if (!$fired || $sig === $lastSig) { $stuck++; } else { $stuck = 0; }
@@ -49715,14 +49809,19 @@ function msFire(pkey){
   if($('msPhase'))$('msPhase').textContent='⏳ در حال شروع…';
   if($('msLog'))$('msLog').innerHTML='';
   fetch('?manual_sync=1&profile='+encodeURIComponent(pkey))
-    .then(r=>r.json()).then(d=>{
-      /* پاسخِ فوری فقط می‌گوید «شروع شد»؛ نتیجهٔ واقعی از فایلِ پیشرفت
-         می‌آید. تنها حالتی که همین‌جا باید متوقف شویم، رد شدن است. */
-      if(d&&d.ok===false){
-        msFinish(false,(d.error||'شروع نشد'));
+    .then(r=>r.text()).then(t=>{
+      /* v10.61 (۷۵): پاسخ ndjson است — خطِ اول «شروع شد» و هر خطِ بعدی
+         یک ضربانِ زنده تا پایانِ کار. نتیجهٔ واقعی را همان‌طور از فایلِ
+         پیشرفت می‌گیریم (msPoll)؛ تنها اگر خطِ آخر خطا/رد باشد همین‌جا
+         متوقف می‌شویم. */
+      let last=null;
+      const lines=String(t).trim().split('\n');
+      for(let i=lines.length-1;i>=0;i--){try{last=JSON.parse(lines[i]);break;}catch(e){}}
+      if(last&&last.ok===false){
+        msFinish(false,(last.error||'شروع نشد'));
         return;
       }
-    }).catch(()=>{/* مهلت تمام‌شدن یعنی کار در پس‌زمینه ادامه دارد */});
+    }).catch(()=>{/* خطای شبکه — وضعیت را از پویینگِ دستی می‌پرسیم */});
   showToast('🔄 همگام‌سازی شروع شد — پیشرفت را همین‌جا ببینید');
   msWatch();
 }
@@ -50890,6 +50989,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.61', t:'🔌 همگام‌سازیِ دستی دیگر «مرده» نمی‌ماند — اتصالِ مرورگر تا پایان کار باز است', items:[
+    '🧠 <b>ریشهٔ «دکمهٔ دستی کارتی به صف نمی‌آورد»:</b> هاست پردژهٔ جداشده (بدون کلاینتِ وصل) را در چند ثانیه می‌کُشد؛ همگام‌سازیِ دستی از خطِ اول اتصال را می‌بست و کار می‌رفت پس‌زمینه — و چون کرانِ هاست هم روزهاست اجرا نمی‌شود، هیچ نجات‌دهنده‌ای نبود. پردژه پیش از رسیدن به حلقهٔ همگام‌سازی می‌مُرد.',
+    '🔌 <b>حالا اتصال باز می‌ماند:</b> در همگام‌سازیِ دستی، مرورگر تا پایانِ کار «کلاینتِ زنده» است و کارگر می‌ماند (همان مدلِ پُلِ مرورگر). هر پروفایل، هر صفحه و هر محصولِ جزئیات یک خطِ پیشرفت (ndjson) روی اتصال می‌زند — هم خروجیِ زندهٔ برای سرور، هم ردِ پایِ کار.',
+    '🩺 <b>دکترِ همگام‌سازی حالا آدرسِ دقیقِ کران را می‌نویسد</b> — همان URL را کپی کنید و در کنترلِ پنلِ هاست (هر ۵ دقیقه) تنظیم کنید تا همگام‌سازی‌های دوره‌ای هم زنده شوند.',
+    '⏹ اگر همگام‌سازیِ دستی به هر دلیلی «رد» شود (مثلاً اجرای دیگری تازه تمام نشده)، وضعیتش همان لحظه بسته و علتش نوشته می‌شود — دیگر «در حال اجرا»ِ الکی نمی‌ماند.'],},
   {v:'10.60', t:'🔔 نوتیفِ زندهٔ پیام‌های مشتری — با سوایپِ راست، پاسخ!', items:[
     '💬 <b>با هر پیامِ تازهٔ مشتری</b> (از هر غرفه) یک کارتِ شیک با نام، غرفه، متن و زمان روی صفحه بالا می‌آید — با صدایِ ملایمِ «دینگ» و انیمیشنِ ورود.',
     '👉 <b>سوایپِ راست</b> = اتاقِ چت روی همان گفتگو باز می‌شود و تکست‌باکسِ پاسخ فوکوس می‌شود — مستقیم تایپ کنید. <b>سوایپِ چپ</b> = کارت بسته می‌شود. (دکمه‌های 💬 / ✕ هم هستن برای موس.)',
