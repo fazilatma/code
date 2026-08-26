@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.80';
+const APP_VERSION = '10.81';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24280,6 +24280,15 @@ if (isset($_GET['selftest'])) {
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
 
+    /* ==== ۹۵ (v10.81) ==== */
+    $add('10.81', 'نسخهٔ ۱۰.۸۱',
+         str_contains($selfSrc, "const APP_VERSION = '10.81';"));
+    $add('10.81', 'شناساییِ بدنهٔ خراب‌شده در راه + فرمِ جایگزین + لاگِ ارسال‌ها',
+         strpos($selfSrc, 'function msgrBodyCorrupted(') !== false
+          && strpos($selfSrc, 'function msgrSendLog(') !== false
+          && strpos($selfSrc, 'msgr_send_log.json') !== false
+          && strpos($selfSrc, 'function showMsgrLog()') !== false);
+
     /* ==== ۹۴ (v10.80) ==== */
     $add('10.80', 'نسخهٔ ۱۰.۸۰',
          str_contains($selfSrc, "const APP_VERSION = '10.80';"));
@@ -33640,6 +33649,14 @@ if (isset($_GET['ping_log'])) {
     echo json_encode(['ok' => true, 'log' => array_slice($logL, 0, 30)], JSON_UNESCAPED_UNICODE);
     exit;
 }
+/* v10.81 (95): لاگِ ارسال‌هایِ پیام‌رسان — هر تلاش و پاسخِ آن */
+if (isset($_GET['msgr_log'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $dM = json_decode((string)@file_get_contents(__DIR__ . '/msgr_send_log.json'), true);
+    $rowsM = (is_array($dM) && is_array($dM['rows'] ?? null)) ? $dM['rows'] : [];
+    echo json_encode(['ok' => true, 'rows' => array_slice($rowsM, -25)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
 /* دکمه‌های تست — هر بررسی را جدا اجرا و نتیجه را گزارش می‌کند */
 if (isset($_GET['notif_test'])) {
     header('Content-Type: application/json; charset=UTF-8');
@@ -33888,16 +33905,43 @@ function msgrSiteProxy(): string {
     if ($u === '' || stripos($u, '@') !== false) return '';
     return $u;
 }
+/** v10.81 (95): لاگِ ارسال‌هایِ پیام‌رسان — حقیقتِ «چه چیزی از کدام
+    مسیر رفت و چه پاسخی آمد» (برایِ تشخیصِ مشکلاتِ مسیرِ هاست). */
+function msgrSendLog(string $host, array $entry): void {
+    try {
+        $f = __DIR__ . '/msgr_send_log.json';
+        $d = json_decode((string)@file_get_contents($f), true) ?: [];
+        $rows = is_array($d['rows'] ?? null) ? $d['rows'] : [];
+        $rows[] = ['at' => time(), 'host' => $host] + $entry;
+        @file_put_contents($f, json_encode(['rows' => array_slice($rows, -25)], JSON_UNESCAPED_UNICODE), LOCK_EX);
+    } catch (Throwable $e) { /* لاگ نباید ارسال را قطع کند */ }
+}
+/** v10.81 (95): امضایِ «بدنهٔ خراب‌شده در راه» — وقتی بدنهٔ POST
+    قابلِ پارسِ JSON نباشد (مثلاً خروجیِ هاست سربرگِ
+    Content-Type: application/json را بیندازد یا بدنه را تغییر دهد)،
+    Bot API به‌جایِ «JSON نامعتبر»، «message text is empty»
+    برمی‌گرداند. یعنی متنِ خالیِ واقعی نبود — بدنه در راه خراب شده. */
+function msgrBodyCorrupted(int $code, string $resp): bool {
+    if ($code < 400) return false;
+    return (stripos($resp, 'message text is empty') !== false
+        || stripos($resp, "can't parse") !== false
+        || stripos($resp, 'invalid json') !== false);
+}
 /** v10.79 (93): ارسالِ مشترکِ پیام‌رسان — زنجیره:
-    مستقیم ← (اگر DNS/اتصال شکست) DoH با IP ثابت ← (اگر هنوز
-    نرسید) proxy.phpِ خودِ سایت. برمی‌گرداند {ok, code, error, via}. */
+    مستقیم ← (اگر بدنه خراب شد) فرم ← (اگر DNS/اتصال شکست) DoH با
+    IP ثابت ← (اگر هنوز نرسید) proxy.phpِ خودِ سایت.
+    v10.81 (95): هر تلاش در لاگِ ارسال ثبت می‌شود و خطایِ نهایی
+    فهرستِ تلاش‌ها را دارد. برمی‌گرداند {ok, code, error, via}. */
 function msgrSend(string $url, string $postJson): array {
-    try {   // v10.80 (94): هیچ خطای داخلی، زنجیرهٔ ارسال را کامل قطع نکند
-    $do = function (string $u, ?string $pinIp = null): array {
+    try {
+    $host = (string)(parse_url($url, PHP_URL_HOST) ?? '');
+    $arr = json_decode($postJson, true);
+    $postForm = (is_array($arr) && $arr) ? http_build_query($arr) : '';
+    $do = function (string $u, ?string $pinIp, string $body, string $enc): array {
         $ch = curl_init($u);
-        $opt = [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $postJson,
-            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 20, CURLOPT_CONNECTTIMEOUT => 10,
+        $opt = [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => ['Content-Type: ' . ($enc === 'json' ? 'application/json' : 'application/x-www-form-urlencoded')],
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15, CURLOPT_CONNECTTIMEOUT => 6,
             CURLOPT_SSL_VERIFYPEER => true];
         if ($pinIp !== null && $pinIp !== '') {
             $h = (string)(parse_url($u, PHP_URL_HOST) ?? '');
@@ -33910,14 +33954,40 @@ function msgrSend(string $url, string $postJson): array {
         curl_close($ch);
         return [$code, $resp, $err];
     };
+    $short = function (string $r): string {
+        $j = json_decode($r, true);
+        $d = is_array($j) ? (string)($j['description'] ?? ($j['error'] ?? ($j['message'] ?? ''))) : '';
+        return $d !== '' ? $d : mb_substr($r, 0, 90);
+    };
+    $attempts = [];
+    $try = function (string $label, string $u, ?string $pinIp, string $body, string $enc) use ($do, $short, &$attempts): array {
+        [$c, $r, $e] = $do($u, $pinIp, $body, $enc);
+        $attempts[] = $label . ': ' . ($e !== '' ? 'خطای شبکه — ' . mb_substr($e, 0, 60)
+                              : ($c === 0 ? 'پاسخی نیامد'
+                                          : 'HTTP ' . $c . ' — ' . mb_substr($short((string)$r), 0, 90)));
+        return [$c, $r, $e];
+    };
     $via = 'مستقیم';
-    [$code, $resp, $err] = $do($url);
-    $host = (string)(parse_url($url, PHP_URL_HOST) ?? '');
+    [$code, $resp, $err] = $try('مستقیم', $url, null, $postJson, 'json');
+    /* v10.81 (95): بدنه در راه خراب شده (با وجودِ متنِ سالم، پاسخی
+       از نوعِ «text is empty» آمد) ← همان مسیر با بدنهٔ فرمی که
+       تلگرام هم قبول می‌کند، دوباره. */
+    if (!($code >= 200 && $code < 300) && $postForm !== '' && msgrBodyCorrupted($code, (string)$resp)) {
+        [$c, $r, $e] = $try('مستقیم(فرم)', $url, null, $postForm, 'form');
+        $code = $c; $resp = $r; $err = $e;
+        if ($c >= 200 && $c < 300) $via = 'مستقیم (فرم)';
+    }
     if ($code === 0 && $host !== '') {
         $ip = msgrResolveDoH($host);
         if ($ip !== '') {
-            [$c2, $r2, $e2] = $do($url, $ip);
-            if ($c2 !== 0) { [$code, $resp, $err] = [$c2, $r2, $e2]; $via = 'DoH(' . $ip . ')'; }
+            [$c2, $r2, $e2] = $try('DoH', $url, $ip, $postJson, 'json');
+            if ($c2 !== 0) {
+                $code = $c2; $resp = $r2; $err = $e2; $via = 'DoH(' . $ip . ')';
+                if ($postForm !== '' && msgrBodyCorrupted($c2, (string)$r2)) {
+                    [$c2f, $r2f, $e2f] = $try('DoH(فرم)', $url, $ip, $postForm, 'form');
+                    $code = $c2f; $resp = $r2f; $err = $e2f; $via = 'DoH(' . $ip . ') (فرم)';
+                }
+            }
         }
         if ($code === 0) {
             $proxy = msgrSiteProxy();
@@ -33925,11 +33995,13 @@ function msgrSend(string $url, string $postJson): array {
                 $pu = strpos($proxy, '{url}') !== false
                     ? str_replace('{url}', rawurlencode($url), $proxy)
                     : $proxy . (strpos($proxy, '?') !== false ? '&' : '?') . 'url=' . rawurlencode($url);
-                [$c3, $r3, $e3] = $do($pu);
-                if ($c3 !== 0) { [$code, $resp, $err] = [$c3, $r3, $e3]; $via .= ' ← proxy.php'; }
+                [$c3, $r3, $e3] = $try('proxy.php', $pu, null, $postJson, 'json');
+                if ($c3 !== 0) { $code = $c3; $resp = $r3; $err = $e3; $via .= ' ← proxy.php'; }
             }
         }
     }
+    msgrSendLog($host, ['via' => $via, 'code' => $code, 'ok' => ($code >= 200 && $code < 300),
+        'attempts' => implode(' | ', $attempts), 'resp' => mb_substr((string)$resp, 0, 300)]);
     if ($code >= 200 && $code < 300) return ['ok' => true, 'code' => $code, 'error' => '', 'via' => $via];
     $j = json_decode($resp, true);
     $detail = '';
@@ -33937,7 +34009,9 @@ function msgrSend(string $url, string $postJson): array {
     if ($detail === '' && is_array($j) && isset($j['error_code'])) $detail = 'error_code=' . $j['error_code'];
     if ($detail === '') $detail = mb_substr($resp, 0, 200);
     $e = $err !== '' ? 'خطای شبکه: ' . $err : ($detail !== '' ? $detail : 'پاسخی نیامد');
-    return ['ok' => false, 'code' => $code, 'error' => ($via !== 'مستقیم' ? '[' . $via . '] ' : '') . $e, 'via' => $via];
+    $tr = count($attempts) > 1 ? ' — تلاش‌ها: ' . mb_substr(implode(' | ', $attempts), 0, 400) : '';
+    return ['ok' => false, 'code' => $code,
+        'error' => ($via !== 'مستقیم' && $via !== 'مستقیم (فرم)' ? '[' . $via . '] ' : '') . $e . $tr, 'via' => $via];
     } catch (Throwable $__msge) {
         return ['ok' => false, 'code' => 0, 'error' => 'خطای داخلی: ' . $__msge->getMessage(), 'via' => ''];
     }
@@ -45853,9 +45927,10 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <input type="number" id="pingEvery" value="360" min="0" style="max-width:70px;padding:4px 6px;font-size:11px" dir="ltr">
 <span>دقیقه</span>
 <button class="btn btn-gray" onclick="testPing()" style="font-size:10px;padding:3px 8px">📡 تست</button>
-<button class="btn btn-gray" onclick="showPingLog()" style="font-size:10px;padding:3px 8px" title="آخرینِ تلاش‌هایِ پینگ — دستی، کران و نبض">📜 پینگ‌هایِ آخر</button>
+<button class="btn btn-gray" onclick="showPingLog()" style="font-size:10px;padding:3px 8px" title="آخرینِ تلاش‌هایِ پینگ — دستی، کران و نبض">📜 پینگ‌هایِ آخر</button><button class="btn btn-gray" onclick="showMsgrLog()" style="font-size:10px;padding:3px 8px" title="هر ارسالِ پیام‌رسان — مسیر، HTTP code و پاسخِ اصلی">🧾 ارسال‌هایِ آخر</button>
 </div>
 <div id="pingLogR" style="font-size:9.5px;color:#94a3b8;margin-top:4px;line-height:1.8"></div>
+<div id="msgrLogR" style="font-size:9.5px;color:#94a3b8;margin-top:4px;line-height:1.8"></div>
 <div style="font-size:10px;color:#64748b;padding-right:21px;line-height:1.6">
 کران معمولاً هر ۵ دقیقه اجرا می‌شود؛ بدون این فاصله روزی ۲۸۸ پیام می‌آید.
 صفر یعنی هر اجرا پیام بفرست.
@@ -52328,6 +52403,10 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.81', t:'🔬 «message text is empty» = بدنهٔ خراب‌شده در راه — امتحانِ فرمی + لاگِ ارسال‌ها', items:[
+    '🔬 <b>رمزِ خطای تلگرام شکسته شد:</b> «message text is empty» لزوماً به‌معنیِ متنِ خالی نیست — تلگرام همین پاسخ را زمانی می‌دهد که بدنهٔ POST اصلاً قابلِ پارس نباشد (مثلاً اگر خروجیِ هاست سربرگِ Content-Type: application/json را بیندازد). حالا این امضا شناسایی می‌شود و همان پیام با بدنهٔ <b>فرمی</b> (که Bot API هم می‌پذیرد) از همان مسیرها دوباره می‌رود.',
+    '🧾 <b>دکمهٔ «🧾 ارسال‌هایِ آخر»:</b> هر ارسالِ پیام‌رسان (تست، پینگ، رویداد) با مسیرش (مستقیم/فرم/DoH/proxy.php)، HTTP code و پاسخِ اصلی ثبت می‌شود — دیگر گمان‌زنی نیست، دقیقاً می‌بینیم چه چیزی کجا شکسته است.',
+  ]},
   {v:'10.80', t:'🩹 رفعِ fatalِ pushRouteCfg — دلیلِ اصلیِ نرسیدنِ اعلان‌ها', items:[
     '🩹 <b>چرا هیچ اعلانی نمی‌آمد:</b> از نسخهٔ ۱۰.۷۴، توابعی که اعلان می‌فرستادند (Web Push و پینگ کران) با خطای فاجعه‌بار «Too few arguments to function pushRouteCfg» قطع می‌شدند — همان خطایی که دکمهٔ پینگ نشان داد. پارامتر حالا اختیاری است و همهٔ مسیرها درست کار می‌کنند.',
     '🛡️ <b>محافظِ امنیتی:</b> زنجیرهٔ ارسالِ پیام‌رسان (مستقیم ← DoH ← proxy.php) در try/catch قرار گرفت تا هیچ خطای داخلی دیگر، کلِ ارسالِ اعلان‌ها را خاموش نکند؛ اگر خطا بیفتد، پیامِ «خطای داخلی: ...» در گزارشِ همان ارسال می‌آید.',
@@ -55873,6 +55952,23 @@ function showPingLog(){
         +(e.skipped?' (رد شد: '+esc(e.skipped)+')':'')
         +(chips?' — '+chips:'')
         +((e.error&&!e.skipped)?' — '+esc(e.error):'')+'</div>'+errs;
+    });
+    box.innerHTML=h;
+  }).catch(()=>{box.innerHTML='<div>✗ خطای شبکه</div>';});
+}
+/* v10.81 (95): لاگِ ارسال‌هایِ پیام‌رسان — حقیقتِ مسیر و پاسخ */
+function showMsgrLog(){
+  const box=$('msgrLogR');if(!box)return;
+  box.innerHTML='<div>⏳ بارگذاری...</div>';
+  fetch('?msgr_log=1').then(r=>r.json()).then(d=>{
+    const R=(d&&d.rows)||[];
+    if(!R.length){box.innerHTML='<div>هنوز ارسالِ ثبت‌شده‌ای نیست.</div>';return;}
+    let h='';
+    R.slice(-6).reverse().forEach(x=>{
+      const t=new Date(x.at*1000).toLocaleString('fa-IR',{hour:'2-digit',minute:'2-digit',day:'numeric',month:'numeric'});
+      h+='<div style="margin-top:3px">'+(x.ok?'<span style="color:#4ade80">✓</span>':'<span style="color:#f87171">✗</span>')
+        +' <b>'+esc(x.host||'؟')+'</b> <span style="color:#64748b">'+t+' — '+esc(x.via||'')+' (HTTP '+(x.code||0)+')</span>'
+        +'<div style="color:#94a3b8;padding-left:12px;direction:ltr;text-align:right">'+esc((x.attempts||'').slice(0,300))+'</div></div>';
     });
     box.innerHTML=h;
   }).catch(()=>{box.innerHTML='<div>✗ خطای شبکه</div>';});
