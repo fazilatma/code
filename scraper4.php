@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.84';
+const APP_VERSION = '10.85';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24280,6 +24280,21 @@ if (isset($_GET['selftest'])) {
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
 
+    /* ==== ۹۹ (v10.85) ==== */
+    $add('10.85', 'نسخهٔ ۱۰.۸۵',
+         str_contains($selfSrc, "const APP_VERSION = '10.85';"));
+    $add('10.85', 'webhook پاسخ پیام‌رسان',
+         strpos($selfSrc, 'msg_hook') !== false && strpos($selfSrc, 'msgrHookProcess') !== false
+          && strpos($selfSrc, 'function msgrMsgRegistry(') !== false);
+    $add('10.85', 'تب سینک در ارسال',
+         strpos($selfSrc, 'id="ssbSync"') !== false
+          && strpos($selfSrc, 'id="sendPaneSync"') !== false);
+    $add('10.85', 'آیکون 3D تب فوتر',
+         strpos($selfSrc, '.t-icon{font-size:22px}') !== false
+          && strpos($selfSrc, '.t-ico3d{display:none}') !== false);
+    $add('10.85', 'مودال چت: دکمهٔ بستن قابل کلیک',
+         strpos($selfSrc, '#mrModal .bsl-modal-head{z-index:') !== false);
+
     /* ==== ۹۸ (v10.84) ==== */
     $add('10.84', 'نسخهٔ ۱۰.۸۴',
          str_contains($selfSrc, "const APP_VERSION = '10.84';"));
@@ -29447,9 +29462,9 @@ function notifSend(array $cn, string $msg, ?string $feed = null): array {
     $bt = $cn['baleh']['token'] ?? '';  $bc = $cn['baleh']['chat_id'] ?? '';
     $rt = $cn['rubika']['token'] ?? ''; $rc = $cn['rubika']['chat_id'] ?? '';
     $tt = $cn['telegram']['token'] ?? ''; $tc = $cn['telegram']['chat_id'] ?? '';   // v10.78 (92): تلگرام
-    if ($bt !== '' && $bc !== '')  { $rb = bslSendToBaleh($bt, $bc, $msg); $out['baleh'] = $rb['ok'] ? 'sent' : 'fail'; if (!$rb['ok'] && $rb['error'] !== '') $out['baleh_err'] = $rb['error']; }   // v10.79 (93)
-    if ($rt !== '' && $rc !== '')  { $rr = bslSendToRubika($rt, $rc, $msg); $out['rubika'] = $rr['ok'] ? 'sent' : 'fail'; if (!$rr['ok'] && $rr['error'] !== '') $out['rubika_err'] = $rr['error']; }
-    if ($tt !== '' && $tc !== '')  { $tr = bslSendToTelegram($tt, $tc, $msg); $out['telegram'] = $tr['ok'] ? 'sent' : 'fail'; if (!$tr['ok'] && $tr['error'] !== '') $out['telegram_err'] = $tr['error']; }
+    if ($bt !== '' && $bc !== '')  { $rb = bslSendToBaleh($bt, $bc, $msg); $out['baleh'] = $rb['ok'] ? 'sent' : 'fail'; if (!$rb['ok'] && $rb['error'] !== '') $out['baleh_err'] = $rb['error']; if ($rb['ok'] && ($rb['message_id'] ?? '') !== '') { $out['baleh_msg_id'] = $rb['message_id']; msgrSaveMsg('bale', $rb['message_id'], 0, 0); } }   // v10.79 (93)
+    if ($rt !== '' && $rc !== '')  { $rr = bslSendToRubika($rt, $rc, $msg); $out['rubika'] = $rr['ok'] ? 'sent' : 'fail'; if (!$rr['ok'] && $rr['error'] !== '') $out['rubika_err'] = $rr['error']; if ($rr['ok'] && ($rr['message_id'] ?? '') !== '') { $out['rubika_msg_id'] = $rr['message_id']; msgrSaveMsg('rubika', $rr['message_id'], 0, 0); } }
+    if ($tt !== '' && $tc !== '')  { $tr = bslSendToTelegram($tt, $tc, $msg); $out['telegram'] = $tr['ok'] ? 'sent' : 'fail'; if (!$tr['ok'] && $tr['error'] !== '') $out['telegram_err'] = $tr['error']; if ($tr['ok'] && ($tr['message_id'] ?? '') !== '') { $out['telegram_msg_id'] = $tr['message_id']; msgrSaveMsg('telegram', $tr['message_id'], 0, 0); } }
     if (!$out) $out['none'] = 'no_messenger';
     if ($feed !== null) liveFeedPush($feed, $msg);   /* v10.66 (۸۰) */
     /* v10.72 (86): Web Push — در کنارِ پیام‌رسان، به دستگاهِ کاربر.
@@ -30731,7 +30746,14 @@ function notifCheckChats(array $cn, bool $test = false, bool $send = true): arra
             $msg = bslChatMsg($f['nc'], notifHead($why, '💬 پیام مشتری باسلام' . $suffix, $n - 1), $body);
             $samples[] = $msg;
             if ($why === 'remind') { $shopRemind++; $reminded++; } else { $shopFound++; $found++; }
-            if ($send) $sentTo = notifSend($cn, $msg);
+            if ($send) {
+                $sentTo = notifSend($cn, $msg);
+                /* v10.85 (99): message_id با context چت برای webhook */
+                $_ncCh85 = (int)($f['nc']['chat_id'] ?? 0); $_ncSh85 = (int)($f['nc']['shop'] ?? 1); $_ncWh85 = (string)($f['nc']['who'] ?? '');
+                foreach (['bale_msg_id' => 'bale', 'rubika_msg_id' => 'rubika', 'telegram_msg_id' => 'telegram'] as $_kM85 => $_mM85) {
+                    if (!empty($sentTo[$_kM85])) msgrSaveMsg($_mM85, (string)$sentTo[$_kM85], $_ncCh85, $_ncSh85, $_ncWh85);
+                }
+            }
         }
         $st[$wmKey] = $now;
         $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
@@ -34071,7 +34093,12 @@ function msgrSend(string $url, string $postJson): array {
     }
     msgrSendLog($host, ['via' => $via, 'code' => $code, 'ok' => ($code >= 200 && $code < 300),
         'attempts' => implode(' | ', $attempts), 'resp' => mb_substr((string)$resp, 0, 300)]);
-    if ($code >= 200 && $code < 300) return ['ok' => true, 'code' => $code, 'error' => '', 'via' => $via];
+    if ($code >= 200 && $code < 300) {
+        /* v10.85 (99): شناسهٔ پیام برای رجیستری webhook */
+        $_jR85 = json_decode((string)$resp, true);
+        $_mId85 = is_array($_jR85) ? (string)(($_jR85['result']['message_id'] ?? ($_jR85['message_id'] ?? ($_jR85['result']['id'] ?? '')))) : '';
+        return ['ok' => true, 'code' => $code, 'error' => '', 'via' => $via, 'message_id' => $_mId85];
+    }
     $j = json_decode($resp, true);
     $detail = '';
     if (is_array($j)) $detail = (string)($j['description'] ?? ($j['error'] ?? ($j['message'] ?? ($j['detail'] ?? ''))));
@@ -34098,6 +34125,62 @@ return msgrSend('https://api.rubika.ir/v1/bot' . $token . '/sendMessage', json_e
 function bslSendToTelegram(string $token, string $chatId, string $text): array {
 return msgrSend('https://api.telegram.org/bot' . $token . '/sendMessage', json_encode(['chat_id' => $chatId, 'text' => $text, 'disable_web_page_preview' => true], JSON_UNESCAPED_UNICODE));
 }
+/* v10.85 (99): registry message_id for webhook reply */
+function msgrMsgRegistry(): string { return __DIR__ . '/msgr_msg_registry.json'; }
+function msgrSaveMsg(string $msgr, string $msgId, int $chatId, int $shop, string $who = ''): void {
+    if ($msgId === '' || $msgId === '0') return;
+    $f = msgrMsgRegistry();
+    $reg = is_file($f) ? (array)@json_decode((string)@file_get_contents($f), true) : [];
+    $reg[$msgr . ':' . $msgId] = ['chat_id' => $chatId, 'shop' => $shop, 'who' => $who, 'ts' => time()];
+    if (count($reg) > 500) {
+        uasort($reg, fn($a, $b) => ($a['ts'] ?? 0) <=> ($b['ts'] ?? 0));
+        $reg = array_slice($reg, -500, null, true);
+    }
+    @file_put_contents($f, json_encode($reg, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+}
+function msgrHookProcess(string $msgr, array $cn): void {
+    header('Content-Type: application/json');
+    $body = (string)@file_get_contents('php://input');
+    $data = json_decode($body, true);
+    if (!is_array($data)) { echo json_encode(['ok' => false, 'error' => 'invalid json']); exit; }
+    $f = msgrMsgRegistry(); $reg = is_file($f) ? (array)@json_decode((string)@file_get_contents($f), true) : [];
+    $key = ''; $text = '';
+    if ($msgr === 'telegram') {
+        $upd = $data['message'] ?? $data['edited_message'] ?? null;
+        if (!is_array($upd)) { echo json_encode(['ok' => true, 'skipped' => 'no message']); exit; }
+        $rt = $upd['reply_to_message'] ?? null;
+        if (!is_array($rt)) { echo json_encode(['ok' => true, 'skipped' => 'not a reply']); exit; }
+        $key = 'telegram:' . (string)($rt['message_id'] ?? '');
+        $text = trim((string)($upd['text'] ?? $upd['caption'] ?? ''));
+    } elseif ($msgr === 'bale') {
+        $upd = $data['message'] ?? null;
+        if (!is_array($upd)) { echo json_encode(['ok' => true, 'skipped' => 'no message']); exit; }
+        $rt = $upd['reply_to_message'] ?? null;
+        if (!is_array($rt)) { echo json_encode(['ok' => true, 'skipped' => 'not a reply']); exit; }
+        $key = 'bale:' . (string)($rt['message_id'] ?? '');
+        $text = trim((string)($upd['text'] ?? ''));
+    } elseif ($msgr === 'rubika') {
+        $upd = $data['message'] ?? $data['update'] ?? null;
+        if (!is_array($upd)) { echo json_encode(['ok' => true, 'skipped' => 'no message']); exit; }
+        $rid = $upd['reply_to_message_id'] ?? ($upd['reply_to'] ?? null);
+        if (!$rid) { echo json_encode(['ok' => true, 'skipped' => 'not a reply']); exit; }
+        $key = 'rubika:' . (string)$rid;
+        $text = trim((string)($upd['text'] ?? $upd['message_text'] ?? ''));
+    } else { echo json_encode(['ok' => false, 'error' => 'unknown messenger']); exit; }
+    if (!isset($reg[$key])) { echo json_encode(['ok' => true, 'skipped' => 'not our message']); exit; }
+    $entry = $reg[$key]; $chatId = (int)($entry['chat_id'] ?? 0); $shop = (int)($entry['shop'] ?? 1);
+    if ($chatId <= 0 || $text === '') { echo json_encode(['ok' => false, 'error' => 'empty']); exit; }
+    $shops = bslAllShops($cn); $sh = null;
+    foreach ($shops as $s) { if ((int)($s['shop'] ?? 0) === $shop) { $sh = $s; break; } }
+    if (!$sh && $shops) $sh = $shops[0];
+    if (!$sh) { echo json_encode(['ok' => false, 'error' => 'no shop']); exit; }
+    $tk = trim((string)($sh['token'] ?? ''));
+    if ($tk === '') { echo json_encode(['ok' => false, 'error' => 'no token']); exit; }
+    $r = bslSendChatMessage($tk, $chatId, $text);
+    echo json_encode(['ok' => $r['ok'], 'error' => $r['error'] ?? '']);
+    exit;
+}
+
 function bslTryCreateWithFallback(string $tk, int $vid, array $bp, array $fallbackCatIds, string $pTitle, bool $autoCat, array $bslFlatCats, array $cData): array {
 $tried = [(int)($bp['category_id'] ?? 0)];
 foreach ($fallbackCatIds as $fc) {
@@ -44282,7 +44365,7 @@ app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کارب�
 *{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}html,body{overflow-x:hidden}body{font-family:var(--app-font,Tahoma,system-ui,sans-serif);background:#0f172a;color:#e2e8f0;min-height:100vh;padding:12px;padding-bottom:90px;padding-top:56px;direction:rtl}.container{max-width:1400px;margin:0 auto}h1{font-size:18px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;margin-bottom:14px}.row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}input,select{background:#0f172a;border:1px solid #475569;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%}input[type="checkbox"]{width:auto}select{min-width:90px;width:auto}
 .btn{padding:11px 14px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;transition:.15s;white-space:nowrap}.btn:hover{opacity:.9}.btn:active{transform:scale(.97)}.btn:disabled{opacity:.5;cursor:not-allowed}.btn-blue{background:linear-gradient(135deg,#3b82f6,#06b6d4);color:#000}.btn-red{background:#ef4444;color:#fff}.btn-green{background:#22c55e;color:#000}.btn-purple{background:#a855f7;color:#fff}.btn-orange{background:#f97316;color:#000}.btn-gray{background:#475569;color:#fff}.btn-yellow{background:#eab308;color:#000}.btn-cyan{background:#06b6d4;color:#000}.btn-teal{background:#14b8a6;color:#000}.btn-pink{background:#ec4899;color:#fff}.btn-indigo{background:#6366f1;color:#fff}.hidden{display:none!important}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
 .stat{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;text-align:center}.stat b{font-size:20px;display:block}.stat span{color:#64748b;font-size:10px}.progress{height:5px;background:#334155;border-radius:5px;margin:10px 0;overflow:hidden}.progress-bar{height:100%;background:linear-gradient(90deg,#3b82f6,#a855f7);width:0;transition:.3s}.progress-bar.pink{background:linear-gradient(90deg,#ec4899,#f59e0b)}.status{color:#94a3b8;font-size:12px;margin-bottom:8px}.logs{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;max-height:140px;overflow-y:auto;font-family:monospace;font-size:11px;margin-bottom:10px;direction:ltr;text-align:left}.log{padding:2px 0;border-bottom:1px solid #1e293b}.log-ok{color:#4ade80}.log-err{color:#f87171}.log-info{color:#60a5fa}.log-detail{color:#f0abfc}
-.main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #334155;display:flex;z-index:1000;box-shadow:0 -4px 20px rgba(0,0,0,.5);padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:10px 4px 8px;border:none;background:transparent;color:#64748b;font-size:11px;font-family:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative;transition:color .2s}.main-tab .t-icon{font-size:20px}.main-tab .t-label{font-weight:600}.main-tab.active{color:#3b82f6;background:#1e293b}.main-tab .badge{position:absolute;top:4px;right:calc(50% - 20px);background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:10px;min-width:16px;text-align:center}.main-tab .badge.ok{background:#22c55e;color:#000}.tab-pane{display:none;animation:fadeIn .3s ease}.tab-pane.active{display:block}
+.main-tabs{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #334155;display:flex;z-index:1000;box-shadow:0 -4px 20px rgba(0,0,0,.5);padding-bottom:env(safe-area-inset-bottom)}.main-tab{flex:1;padding:10px 4px 8px;border:none;background:transparent;color:#64748b;font-size:11px;font-family:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative;transition:color .2s}.main-tab .t-icon{font-size:22px}.main-tab .t-ico3d{display:none}.main-tab .t-label{font-weight:600}.main-tab.active{color:#3b82f6;background:#1e293b}.main-tab.active .t-icon{transform:translateY(-2px) scale(1.15);filter:drop-shadow(0 3px 8px rgba(59,130,246,.7));transition:transform .2s,filter .2s}.main-tab .badge{position:absolute;top:4px;right:calc(50% - 20px);background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:10px;min-width:16px;text-align:center}.main-tab .badge.ok{background:#22c55e;color:#000}.tab-pane{display:none;animation:fadeIn .3s ease}.tab-pane.active{display:block}
 @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}.sub-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.sub-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.sub-tab.active{background:#3b82f6;color:#000}.mode-tabs{display:flex;gap:3px;background:#0f172a;padding:3px;border-radius:10px;margin-bottom:12px}.mode-tab{flex:1;padding:9px;border:none;border-radius:8px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;font-size:12px;font-family:inherit;text-align:center}.mode-tab.active{background:#3b82f6;color:#000}
 /* v10.25 (۳۸ب): زیرتب‌های تبِ سلکتور. عمداً کلاسِ جدا از .sub-tab گرفتند،
    چون switchView() روی همهٔ .sub-tabهای سند کار می‌کند و اگر از همان کلاس
@@ -45980,6 +46063,25 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-gray" onclick="testNotif('telegram')">✈️ تست تلگرام</button>
 <button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button>
 </div>
+<!-- v10.85 (99): webhook پاسخ پیام‌رسان -->
+<details class="alert alert-info hint-collapse" style="margin-top:10px;font-size:11px">
+<summary>🔗 پاسخ در پیام‌رسان به مشتری (راه‌اندازی webhook)</summary>
+<div class="hint-body">
+<div style="font-size:11px;color:#e2e8f0;margin-bottom:8px;line-height:1.9">
+وقتی روی پیامی که ربات فرستاده پاسخ می‌دهید، پاسختان به‌طور خودکار به مشتری رسیده می‌شود.
+</div>
+<div id="webhookUrlsDiv" style="direction:ltr;font-size:10.5px;color:#67e8f9;line-height:2.2;background:#0f172a;border-radius:8px;padding:8px 10px">
+<b style="direction:rtl;color:#fbbf24;display:block;margin-bottom:4px">URL webhook (copy ٺ کنید و در پانل پیام‌رسان خود را تنظیم کنید):</b>
+🟦 Telegram: <span id="webhookUrlTg" style="word-break:break-all;color:#60a5fa"></span><br>
+🟢 Bale: <span id="webhookUrlBl" style="word-break:break-all;color:#4ade80"></span>
+</div>
+<div style="font-size:10px;color:#94a3b8;margin-top:7px;line-height:1.9">
+در تلگرام: در @BotFather بزنید <code style="background:#111c31;padding:1px 6px;border-radius:3px;direction:ltr">/setwebhook</code> و URL تلگرام را وارد کنید.<br>
+در بله: تنظیمات بوت → Webhook URL.<br>
+روبیکا: پگ webhook دارد اما نیازمند هوست در ایران است — در صورت حل، برای روبیکا هم کار می‌کند.
+</div>
+</div>
+</details>
 </div>
 <div id="ntab-events" class="ntabpane" style="display:none">
 <div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
@@ -46674,11 +46776,16 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-gray" style="font-size:10px;padding:3px 8px" onclick="mrQuick('ممنون از پیگیریتون، در اولینِ فرصت پاسخ می‌دم.')">🙏 پیگیری</button>
 </div>
 <div id="mrImgPrev" style="display:none;margin-top:7px;align-items:center;gap:7px;background:#111c31;border:1px solid #334155;border-radius:8px;padding:6px 8px"></div>
-<div style="display:flex;gap:6px;margin-top:7px">
+<div style="margin-top:7px">
 <input type="file" id="mrFile" accept="image/*" style="display:none" onchange="mrPickImage(this)">
-<button class="btn btn-gray" onclick="mrFileClick()" style="flex:0 0 auto" title="ارسالِ تصویر">🖼</button>
-<textarea id="mrText" rows="2" placeholder="متنِ پاسخ برای مشتری… (Enter = ارسال)" style="flex:1;min-width:110px;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:7px 9px;font-size:12px;resize:none" onkeydown="mrKeydown(event)"></textarea>
-<button id="mrSendBtn" class="btn btn-green" onclick="mrSend()" style="flex:0 0 auto">📤 ارسال</button>
+<div style="display:flex;gap:6px;align-items:flex-start">
+<button class="btn btn-gray" onclick="mrFileClick()" style="flex:0 0 auto;padding:6px 8px" title="ارسال تصویر">🖼</button>
+<textarea id="mrText" rows="3" placeholder="پاسخ برای مشتری… (Ctrl+Enter)" style="flex:1;background:#111c31;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:7px 9px;font-size:12px;resize:vertical;min-height:54px" onkeydown="mrKeydown(event)"></textarea>
+</div>
+<div style="display:flex;gap:6px;margin-top:5px;justify-content:flex-end;align-items:center">
+<button onclick="mrToggleDrawer()" style="flex:0 0 auto;background:#16233d;border:1px solid #334155;color:#e2e8f0;border-radius:8px;padding:5px 12px;cursor:pointer;font-size:12px" title="لیست گفتگوها">👥 لیست</button>
+<button id="mrSendBtn" class="btn btn-green" onclick="mrSend()" style="flex:1;max-width:110px">ارسال ↵</button>
+</div>
 </div>
 <div id="mrMsg" class="msg" style="margin-top:6px"></div>
 </div>
@@ -47636,6 +47743,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="send-subtabs" id="sendSubTabs">
 <button class="ssb on" id="ssbWoo" onclick="sendSubTab('woo')">🛒 ووکامرس</button>
 <button class="ssb" id="ssbBsl" onclick="sendSubTab('bsl')">🟢 باسلام</button>
+<button class="ssb" id="ssbSync" onclick="sendSubTab('sync')">🔄 سینک</button>
 </div>
 <div id="sendPaneWoo">
 
@@ -47782,7 +47890,9 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 
 </div>
-<div class="card" style="margin-top:14px">
+
+<div id="sendPaneSync" style="display:none">
+<div class="card" style="margin-top:0">
 <div class="section-title" style="color:#22d3ee">🔄 سینک دوره‌ای (همگام‌سازی خودکار)</div>
 <details class="alert alert-info hint-collapse" style="margin-bottom:8px;font-size:11px">
 <summary>💡 سینکِ دوره‌ای و راه‌اندازیِ cron</summary>
@@ -47798,6 +47908,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
     <button class="btn btn-green" onclick="runSyncNow()" style="flex:1">▶ اجرای الان</button>
 </div>
 <div class="status" id="syncStatus" style="color:#22d3ee"></div>
+</div>
 </div>
 
 </div>
@@ -56687,7 +56798,8 @@ function mrPickImage(inp){
 function mrClearImage(){MR_IMG=null;const p=$('mrImgPrev'); if(p){p.style.display='none';p.innerHTML='';}}
 function mrQuick(t){const el=$('mrText'); if(el){el.value=(el.value?el.value+' ':'')+t; el.focus();}}
 function mrKeydown(e){
-  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();mrSend();}
+  /* v10.85 (99): Ctrl+Enter = ارسال، Enter = خط جدید */
+  if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();mrSend();}
 }
 async function mrLoadChats(){
   mrMsg('در حالِ بررسیِ گفتگوها…','');
@@ -56777,12 +56889,14 @@ function mrCloseDrawer(){
 /* v10.84 (98): تب‌هایِ فرعیِ تبِ ارسال — ووکامرس / باسلام */
 function sendSubTab(w){
   try{localStorage.setItem('send_subtab',w);}catch(e){}
-  const woo=$('sendPaneWoo'),bsl=$('sendPaneBsl');
+  const woo=$('sendPaneWoo'),bsl=$('sendPaneBsl'),sync=$('sendPaneSync');
   if(woo)woo.style.display=(w==='woo')?'':'none';
   if(bsl)bsl.style.display=(w==='bsl')?'':'none';
-  const a=$('ssbWoo'),b=$('ssbBsl');
+  if(sync)sync.style.display=(w==='sync')?'':'none';
+  const a=$('ssbWoo'),b=$('ssbBsl'),c=$('ssbSync');
   if(a)a.classList.toggle('on',w==='woo');
   if(b)b.classList.toggle('on',w==='bsl');
+  if(c)c.classList.toggle('on',w==='sync');
 }
 
 /* =====================================================================
@@ -59761,6 +59875,14 @@ document.addEventListener('DOMContentLoaded',function(){
     try{ initAppFxPref(); }catch(e){}        // v10.06: جلوه‌های بصری
     try{ syncSmenuStickyOffsets(); }catch(e){}  // v9.94: افستِ سربخش‌های چسبان
     try{ sendSubTab(localStorage.getItem('send_subtab')||'woo'); }catch(e){}  // v10.84 (98)
+    /* v10.85 (99): webhook URL را در راه‌انردازی webhook نمایش ده */
+    try{
+      const wbBase = location.origin + location.pathname;
+      const tg = document.getElementById('webhookUrlTg');
+      const bl = document.getElementById('webhookUrlBl');
+      if(tg) tg.textContent = wbBase + '?msg_hook=telegram';
+      if(bl) bl.textContent = wbBase + '?msg_hook=bale';
+    }catch(e){}
     try{ selCtlInit(); }catch(e){}           // v9.90: تیک‌های نمایش کنترل‌های سلکتور
     try{ selSubRestore(); }catch(e){}        // v10.25 (۳۸ب): زیرتبِ آخرِ تبِ سلکتور
     try{ manualDetailSelRestore(); }catch(e){}  // v10.29 (۴۲): حالتِ دستیِ سلکتورهای جزئیات
