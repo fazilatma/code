@@ -274,8 +274,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.66';
-const APP_VERSION_DATE = '1405/06/10';
+const APP_VERSION = '10.67';
+const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -1392,6 +1392,29 @@ $path = trim($parts['path'] ?? '/', '/');
 $path = preg_replace('~/page/\d+/?$~i', '', $path);
 $path = preg_replace('~\.(html|htm|php)$~i', '', $path);
 return $host . ($path ? '_' . preg_replace('~[^a-z0-9]+~i', '_', $path) : '');
+}
+
+/* v10.67 (81): حلِّ ممتنِ کلیدِ پروفایل.
+   فرمولِ مرورگرِ profileKey ممکن است با فرمولِ سروری دقیقاً یکی نباشد
+   (تفاوتِ percent-decode، یا اینکه کلان URL فرستاده شده باشد نه کلید).
+   اگر کلیدِ دقیق روی دیسک نبود، با URL ذخیره‌شدهٔ پروفایل‌ها بگردیم؛
+   اگر باز هم نبود null برمی‌گردد و صدا‌زننده باید خطا را صریح بگوید. */
+function profileResolveKey(string $given, array $profiles): ?string {
+    $g = trim($given);
+    if ($g === '') return null;
+    if (isset($profiles[$g])) return $g;
+    $cands = [];
+    foreach ($profiles as $k => $p) {
+        $u = (string)($p['url'] ?? '');
+        if ($u !== '' && $u === $g) $cands[] = (string)$k;
+        elseif ($u !== '' && profileKey($u) === $g) $cands[] = (string)$k;
+    }
+    if (count($cands) === 1) return $cands[0];
+    if (strpos($g, '://') !== false && filter_var($g, FILTER_VALIDATE_URL)) {
+        $pk = profileKey($g);
+        if (isset($profiles[$pk])) return $pk;
+    }
+    return null;
 }
 
 /* v9.92: خواندنِ پروفایل‌ها با تشخیصِ «فایلِ خراب» از «فایلِ خالی».
@@ -14877,7 +14900,11 @@ if (isset($_GET['manual_sync'])) {
        قفل کند: به‌عنوانِ «نیمه‌کاره» بسته و اجرأ تازه شروع می‌شود —
        چک‌پوینتِ رویِ دیسک جلوی تکرارِ کارِ شده را می‌گیرد. */
     if (!empty($_msPrev['running']) && empty($_msPrev['done']) && empty($_GET['takeover'])) {
-        $_msMaxD = max(300, (int)(loadConnections()['stall_after'] ?? 300) * 2);
+        /* v10.67 (81): پنجرهٔ «در حال اجرا» حالا حداکثر یک چرخهٔ نگهبان
+           (نه دو): فایلِ پیشرفت در حینِ اجرا هر چند ثانیه تازه می‌شود،
+           پس اگر یک دورهٔ کامل چیز نوشته نشده، پردژه مرده است و دکمه
+           نباید قفل بماند. */
+        $_msMaxD = max(120, (int)(loadConnections()['stall_after'] ?? 300));
         if ($_msAge >= $_msMaxD) {
             $_msPrev['running']   = false;
             $_msPrev['done']      = true;
@@ -14897,6 +14924,35 @@ if (isset($_GET['manual_sync'])) {
     @unlink(MANUAL_SYNC_STOP_FILE);
     $_msKey  = trim((string)($_GET['profile'] ?? ''));
     $_msProf = $_msKey !== '' ? (loadProfiles()[$_msKey] ?? null) : null;
+    /* v10.67 (81): حلِّ ممتنِ کلید. تا حالا اگر فرمولِ مرورگر با کلیدِ
+       رویِ دیسک دقیقاً نمی‌خورد (تفاوتِ percent-decode، یا کلان URL به‌جای
+       کلید)، حلقهٔ پروفایل‌ها سراسر را با فیلترِ only رد می‌کرد: نه ردیفی
+       به صف می‌نشست، نه خطایی — همگام‌سازی «تقریباً هیچ کاری نمی‌کرد».
+       حالا کلید با URL ذخیره‌شدهٔ پروفایل‌ها پیدا می‌شود؛ اگر اصلاً نباشد
+       همان لحظه خطای صریح برمی‌گردد، نه اجرایِ خالی. */
+    if ($_msKey !== '' && !is_array($_msProf)) {
+        $_msAll = loadProfiles();
+        $_msRes = profileResolveKey($_msKey, $_msAll);
+        if ($_msRes !== null && $_msRes !== $_msKey) {
+            $_msKey  = $_msRes;
+            $_msProf = $_msAll[$_msRes] ?? null;
+        }
+    }
+    if ($_msKey !== '' && !is_array($_msProf)) {
+        writeProgress(MANUAL_SYNC_PROGRESS_FILE, [
+            'running' => false, 'done' => true, 'cancelled' => false,
+            'phase' => 'خطا', 'started_at' => time(), 'ts' => time(),
+            'last_progress_ts' => time(), 'total' => 3, 'current' => 0,
+            'profile_key' => $_msKey, 'profile_name' => $_msKey,
+            'recent_log' => ['❌ پروفایلی با کلیدِ «' . mb_substr($_msKey, 0, 80) . '» روی سرور پیدا نشد'],
+            'total_log_count' => 1,
+        ]);
+        header('Content-Type: application/json; charset=UTF-8');
+        echo json_encode(['ok' => false,
+            'error' => 'پروفایلی با این کلید روی سرور پیدا نشد — اول پروفایل را ذخیره کنید، بعد همگام‌سازی کنید'],
+            JSON_UNESCAPED_UNICODE);
+        exit;
+    }
     writeProgress(MANUAL_SYNC_PROGRESS_FILE, [
         'running' => true, 'done' => false, 'cancelled' => false,
         'phase' => 'شروع', 'started_at' => time(), 'ts' => time(),
@@ -14987,6 +15043,36 @@ if (!empty($GLOBALS['_msKeepConn']) && !isCliRun()) {
     finishRequestNow(json_encode(['ok' => true, 'started' => true, 'bg' => $_cronBg,
         'detached' => true, 'note' => 'اجرا در پس‌زمینه ادامه دارد — نتیجه در cron_last_run.json'],
         JSON_UNESCAPED_UNICODE));
+}
+/* v10.67 (81): شبکهٔ ایمنیِ کُرش. وقتی هاست پردژه را می‌کُشد یا PHP به
+   خطای فیتال می‌خورد (حافظه و...)، رابطِ همگام‌سازیِ دستی نباید تا ابد روی
+   «در حال شروع» منجمد بماند: فایلِ پیشرفت با دلیلِ واقعی بسته می‌شود و
+   خطا در cron_last_run هم ثبت. این همان جایی است که «هیچ کاری نکردن» را
+   از «مردهٔ بی‌صدا» جدا می‌کند. */
+if (!isCliRun()) {
+    register_shutdown_function(function () {
+        $e = error_get_last();
+        if (!$e || empty($e['message'])) return;
+        if (!in_array($e['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true)) return;
+        $msg = $e['message'];
+        try {
+            $p = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+            if (!empty($p['running']) && empty($p['done'])) {
+                $p['running'] = false; $p['done'] = true; $p['cancelled'] = false;
+                $p['phase'] = 'خطای فیتال';
+                $p['error'] = 'پردژه در میانِ اجرا مُرد: ' . mb_substr($msg, 0, 300) . ' (خط ' . (int)($e['line'] ?? 0) . ')';
+                $lg = is_array($p['recent_log'] ?? null) ? $p['recent_log'] : [];
+                $lg[] = '💥 ' . $p['error'];
+                $p['recent_log'] = array_slice($lg, -40);
+                $p['ts'] = time(); $p['last_progress_ts'] = time();
+                writeProgress(MANUAL_SYNC_PROGRESS_FILE, $p);
+            }
+            $lr = ['ok' => false, 'fatal' => true, 'error' => mb_substr($msg, 0, 500),
+                   'line' => (int)($e['line'] ?? 0), 'time' => time()];
+            @file_put_contents(__DIR__ . '/cron_last_run.json',
+                json_encode($lr, JSON_UNESCAPED_UNICODE), LOCK_EX);
+        } catch (Throwable $t) {}
+    });
 }
 if ($_cronBg) define('CRON_BG', true);
 
@@ -15245,7 +15331,14 @@ if (arCfg($cn)['enabled']) {
    حالا اول کارهای گیرکرده آزاد می‌شوند و بعد سراغ کار تازه می‌رویم.
    هزینه‌اش وقتی چیزی گیر نکرده چند خط خواندن فایل است. */
 
-$wdEarly = cronWatchdogs($cn);
+/* v10.67 (81): نگهبانِ ابتدایی هم در شبکهٔ catch — استثنأ بی‌جفتِ
+   اینجا کلِ همگام‌سازیِ دستی را پیش از حلقه می‌کُشت. */
+try {
+    $wdEarly = cronWatchdogs($cn);
+} catch (Throwable $e) {
+    $wdEarly = [];
+    $results['watchdog_error'] = 'ابتدایی: ' . mb_substr($e->getMessage(), 0, 200);
+}
 foreach ($wdEarly as $k => $v) { if (!empty($v)) $results[$k] = $v; }
 
 /* پروفایل‌ها و وضعیت دوباره خوانده می‌شوند تا همگام‌سازیِ پایین نسخهٔ
@@ -15572,6 +15665,19 @@ $profile  = $profiles[$key] ?? $profile;
 } else {
 $pResult['extract_error'] = $exRes['error'] ?? 'خطای نامشخص';
 notifRunFailure($cn, 'استخراج', $profile['name'] ?? $key, $pResult['extract_error']);
+}
+/* v10.67 (81): رابطِ همگام‌سازیِ دستی باید نتیجهٔ واقعیِ استخراج را ببیند.
+   تا حالا وقتی استخراج رد می‌شد (ردیف تکراری در صف، قفلِ سراسری، یا
+   هر خطایی)، جعبهٔ همگام‌سازی «تمام شد» نشان می‌داد ولی چیزی به صف
+   استخراج نمی‌نشست و دلیل فقط به مسنجر می‌رفت — از دید کاربر دکمه
+   «تقریباً هیچ کاری نمی‌کرد». حالا دلیلِ واقعی همین‌جاست. */
+if (manualSyncActive()) {
+    if (!empty($exRes['ok'])) {
+        manualSyncProgress([], '✅ استخراج: ' . (int)($exRes['extracted'] ?? 0) . ' محصول ('
+            . (int)($exRes['new'] ?? 0) . ' جدید، ' . (int)($exRes['price_changed'] ?? 0) . ' تغییرِ قیمت)');
+    } else {
+        manualSyncProgress([], '❌ استخراج: ' . mb_substr((string)($exRes['error'] ?? 'خطای نامشخص'), 0, 300));
+    }
 }
 }   // پایانِ else حالتِ عادی (مقابل noExtract) — v9.45
 
@@ -23897,6 +24003,24 @@ if (isset($_GET['selftest'])) {
     $add('10.44', 'نتایجِ جست‌وجو شناسهٔ تکراری ندارند',
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
+
+    /* ==== ۸۱ (v10.67) ==== */
+    $add('10.67', 'نسخهٔ ۱۰.۶۷',
+         str_contains($selfSrc, "const APP_VERSION = '10.67';"));
+    $add('10.67', 'همگام‌سازیِ دستی: حلِّ ممتنِ کلید + خطای صریحِ «پیدا نشد»',
+         strpos($selfSrc, 'function profileResolveKey(string $given, array $profiles): ?string {') !== false
+          && strpos($selfSrc, '❌ پروفایلی با کلیدِ «') !== false
+          && strpos($selfSrc, 'پروفایلی با این کلید روی سرور پیدا نشد') !== false);
+    $add('10.67', 'نتیجهٔ واقعیِ استخراج در جعبهٔ همگام‌سازی دیده می‌شود',
+         strpos($selfSrc, "manualSyncProgress([], '✅ استخراج: ' . (int)(\$exRes['extracted'] ?? 0)") !== false
+          && strpos($selfSrc, "manualSyncProgress([], '❌ استخراج: ' . mb_substr((string)(\$exRes['error'] ?? 'خطای نامشخص')") !== false);
+    $add('10.67', 'شبکهٔ ایمنیِ کُرش: خطای فیتال در پیشرفتِ همگام‌سازی نوشته می‌شود',
+         strpos($selfSrc, 'register_shutdown_function(function () {') !== false
+          && strpos($selfSrc, 'پردژه در میانِ اجرا مُرد: ') !== false);
+    $add('10.67', 'پنجرهٔ «در حال اجرا» به یک چرخهٔ نگهبان کاهش یافت',
+         strpos($selfSrc, "\$_msMaxD = max(120, (int)(loadConnections()['stall_after'] ?? 300));") !== false);
+    $add('10.67', 'فرمولِ کلیدِ مرورگر با سرور هم‌راستا شد (بدونِ دیکُدِ percent)',
+         strpos($selfSrc, 'const m=src.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\\/\\/[^/?#]*/);') !== false);
 
     /* ==== ۸۰ (v10.66) ==== */
     $add('10.66', 'نسخهٔ ۱۰.۶۶',
@@ -50803,10 +50927,25 @@ function loadBackendExtractResults(key){
 }
 // Helper: profileKey from URL — mirrors PHP profileKey()
 function profileKey(url){
+    // v10.67 (81): فرمولِ سمتِ سرور (PHP) مسیرِ URL را «بدونِ دیکُدِ percent»
+    // می‌خواند، ولی new URL(url).pathname کاراکترهای %XX را دیکُد می‌کند؛
+    // برای لینک‌های دارایِ کاراکترِ فارسی/percent-encoded کلیدِ مرورگر با
+    // کلیدِ سرور یکی نبود و مثلاً همگام‌سازیِ دستی فیلترِ only هیچ
+    // پروفایلی نمی‌یافت. حالا مسیر را عینِ تایپ‌شده می‌گیریم تا دقیقاً
+    // هم‌زمانِ سرور بماند.
     try{
-        const parsed=new URL(url);
-        let host=parsed.hostname.toLowerCase();
-        let path=parsed.pathname.replace(/^\/|\/$/g,'');
+        const src=String(url);
+        const m=src.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#]*/);
+        let host='',rawPath='';
+        if(m){
+            host=m[0].replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//,'').replace(/:\d+$/,'').toLowerCase();
+            rawPath=src.slice(m[0].length).split(/[?#]/)[0];
+        }else{
+            const u=new URL(src);
+            host=u.hostname.toLowerCase();
+            rawPath=u.pathname;
+        }
+        let path=rawPath.replace(/^\/|\/$/g,'');
         // Remove /page/N suffix
         path=path.replace(/\/page\/\d+\/?$/i,'');
         // Remove .html/.htm/.php suffix
@@ -51173,6 +51312,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.67', t:'🔧 همگام‌سازیِ دستی: «تقریباً هیچ کاری نمی‌کند» — حالا دلیلِ واقعی دیده می‌شود', items:[
+    '💡 <b>چرا دکمهٔ همگام‌سازی انگار هیچ کار نمی‌کرد:</b> وقتی استخراج رد می‌شد (ردیفِ تکراری در صف، قفلِ سراسریِ استخراج، یا هر خطای دیگری)، جعبهٔ همگام‌سازی «تمام شد» نشان می‌داد ولی هیچ ردیفی به صفِ استخراج نمی‌نشست و دلیل فقط به مسنجر می‌رفت. حالا جعبهٔ همگام‌سازی بلافاصله بعد از استخراج «✅ استخراج: N محصول» یا «❌ استخراج: دلیلِ واقعی» را همان‌جا می‌نویسد. اگر هم پردژه وسطِ اجرا مُرد (کُشیده‌شدهٔ هاست یا خطای فیتالِ PHP)، پیامِ فیتال — با شمارهٔ خط — در همان جعبه می‌نشیند.',
+    '🔑 <b>پیدا کردنِ پروفایل با کلیدِ ممتن:</b> فرمولِ کلیدِ مرورگر با سرور روی لینک‌های دارایِ کاراکترِ percent-encoded (فارسی) فرق می‌کرد و فیلترِ همگام‌سازی هیچ پروفایلی نمی‌یافت. حالا هر دو فرمول مسیرِ لینک را بدونِ دیکُد می‌خوانند؛ اگر کلیدِ فرستاده‌شده روی سرور نبود، با URL ذخیره‌شدهٔ پروفایل‌ها پیدایش می‌کنند؛ اگر باز هم نبود به‌جای اجرایِ خالیِ بی‌صدا، خطای صریح می‌بینید.',
+    '⏱ <b>قفلِ زودترِ همگام‌سازیِ گیرکرده:</b> پنجرهٔ «یک همگام‌سازی در حال اجراست» از دو چرخهٔ نگهبان به یک چرخه کم شد؛ اجرایِ کشته‌شده دیگر دکمه را مدام قفل نمی‌کند.',
+  ]},
   {v:'10.66', t:'🖥 تنظیماتِ اعلانِ زنده در بخشِ «اعلان‌ها» + همهٔ رویدادها (نه فقط چت) به‌صورتِ زنده + معاینهٔ صفِ استخراج', items:[
     '📋 <b>همهٔ رویدادها، نه فقط چت:</b> از این‌به‌بعد هر رویدادی که به پیام‌رسان می‌رود — سفارشِ جدید/تغییر وضعیت، محصولِ جدید/تغییر وضعیت، گران/ارزان و موجود/ناموجود، گزارشِ همگام‌سازی، خطای اجرا، یادآوری‌ها — به‌علاوهٔ کارتِ زندهٔ درِ مرورگر، اگر «اعلانِ سیستم» روشن باشد در اعلان‌هایِ ویندوز/macOS/اندروید هم می‌آید',
     '⚙️ <b>تنظیماتِ کامل در بخشِ «🔔 اعلان‌ها»:</b> روشن/خاموشِ کارت‌هایِ درِ مرورگر و اعلانِ سیستم، فاصلهٔ چک (ثانیه)، زمانِ خودکاربستن، صدا — و دکمه‌هایِ <b>🧪 تستِ کارت</b> و <b>🔔 تستِ اعلانِ سیستم</b> برایِ امتحانِ آنی. همهٔ این‌ها همان لحظه اثر می‌کنند (ذخیرهٔ مرورگر)، بدونِ دکمهٔ ذخیره',
