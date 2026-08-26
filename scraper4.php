@@ -274,7 +274,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.67';
+const APP_VERSION = '10.68';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24004,6 +24004,18 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۸۲ (v10.68) ==== */
+    $add('10.68', 'نسخهٔ ۱۰.۶۸',
+         str_contains($selfSrc, "const APP_VERSION = '10.68';"));
+    $add('10.68', 'تشخیصگرِ اعلانِ سیستم: HTTPS/پشتیبانی/اجازه/سیستم‌عامل',
+         strpos($selfSrc, 'function mrSysDiag(){') !== false
+          && strpos($selfSrc, 'id="lnSysDiag"') !== false
+          && strpos($selfSrc, 'window.isSecureContext') !== false
+          && strpos($selfSrc, 'صفحه از طریقِ <b>HTTPS</b> باز نشده') !== false);
+    $add('10.68', 'دکمهٔ تست: پیامِ مرحله‌به‌مرحله + توضیحِ «sw.js لازم نیست»',
+         strpos($selfSrc, 'فایلِ sw.js لازم نیست') !== false
+          && strpos($selfSrc, 'اعلان به مرورگر داده شد') !== false);
+
     /* ==== ۸۱ (v10.67) ==== */
     $add('10.67', 'نسخهٔ ۱۰.۶۷',
          str_contains($selfSrc, "const APP_VERSION = '10.67';"));
@@ -44930,6 +44942,8 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-gray" onclick="mrLiveTestCard()" style="font-size:10px;padding:4px 10px">🧪 تستِ کارت</button>
 <button class="btn btn-gray" onclick="mrLiveTestSys()" style="font-size:10px;padding:4px 10px">🔔 تستِ اعلانِ سیستم</button>
 </div>
+<!-- v10.68 (82): خطِ تشخیصِ زندهٔ اعلانِ سیستم — می‌گوید زنجیره کجا شکسته -->
+<div id="lnSysDiag" style="font-size:10px;color:#94a3b8;line-height:1.7;margin-top:5px"></div>
 <div style="font-size:10px;color:#64748b;line-height:1.6;margin-top:4px">
 این تنظیمات همین‌مرورگر (localStorage) ذخیره می‌شوند و <b>همان لحظه</b> اثر می‌کنند — دکمهٔ «ذخیره» لازم نیست.</div>
 </div>
@@ -51312,6 +51326,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.68', t:'🖥 اعلانِ سیستم: «چیز نمی‌آورد» — حالا دقیقاً می‌گوید کجا گیر است', items:[
+    '🩺 <b>تشخیصگرِ زندهٔ اعلانِ سیستم:</b> زیرِ دکمه‌هایِ تست، یک خطِ وضعیت همیشه تازه نشان می‌دهد که زنجیره کجا شکسته است: آیا صفحه <b>HTTPS</b> است؟ آیا مرورگر (Web Notification) را پشتیبانی می‌کند؟ اجازهٔ اعلان granted/denied/default است؟ و اگر همه‌چیز درست بود، می‌گوید مشکل از تنظیماتِ <b>سیستم‌عامل</b> است (ویندوز/macOS/اندروید) با مسیرِ دقیقِ هرکدام.',
+    '🧪 <b>دکمهٔ «تستِ اعلانِ سیستم» حالا مرحله‌به‌مرحله جواب می‌دهد:</b> ۱) اگر مرورگر پشتیبانی نمی‌کند (مثلاً سافاریِ آیفون یا صفحهٔ http) می‌گوید چرا؛ ۲) اگر اجازه لازم است همان لحظه می‌گیرد و اگر رد شده، مسیرِ Allow کردن را می‌گوید؛ ۳) اگر اعلان را به مرورگر داد ولی سیستم نمایش نداد، تنظیماتِ ویندوز (نشانِ Focus Assist)، macOS و اندروید را با مسیرِ دقیق می‌گوید.',
+    '📝 <b>پاسخ به سؤالِ sw.js:</b> برای «نمایش» اعلانِ زنده فایلِ <b>sw.js لازم نیست</b> — خودِ صفحه با Notification API اعلان را می‌سازد و مرورگرِ دسکتاپ (کروم/فایرفاکس/ایج) روی HTTPS آن را اجرا می‌کند. service worker فقط برای «push» است (وقتی صفحه کاملاً بسته باشد و سرور بخواهد بفرستد) و ما از آن مسیر نمی‌رویم.',
+  ]},
   {v:'10.67', t:'🔧 همگام‌سازیِ دستی: «تقریباً هیچ کاری نمی‌کند» — حالا دلیلِ واقعی دیده می‌شود', items:[
     '💡 <b>چرا دکمهٔ همگام‌سازی انگار هیچ کار نمی‌کرد:</b> وقتی استخراج رد می‌شد (ردیفِ تکراری در صف، قفلِ سراسریِ استخراج، یا هر خطای دیگری)، جعبهٔ همگام‌سازی «تمام شد» نشان می‌داد ولی هیچ ردیفی به صفِ استخراج نمی‌نشست و دلیل فقط به مسنجر می‌رفت. حالا جعبهٔ همگام‌سازی بلافاصله بعد از استخراج «✅ استخراج: N محصول» یا «❌ استخراج: دلیلِ واقعی» را همان‌جا می‌نویسد. اگر هم پردژه وسطِ اجرا مُرد (کُشیده‌شدهٔ هاست یا خطای فیتالِ PHP)، پیامِ فیتال — با شمارهٔ خط — در همان جعبه می‌نشیند.',
     '🔑 <b>پیدا کردنِ پروفایل با کلیدِ ممتن:</b> فرمولِ کلیدِ مرورگر با سرور روی لینک‌های دارایِ کاراکترِ percent-encoded (فارسی) فرق می‌کرد و فیلترِ همگام‌سازی هیچ پروفایلی نمی‌یافت. حالا هر دو فرمول مسیرِ لینک را بدونِ دیکُد می‌خوانند؛ اگر کلیدِ فرستاده‌شده روی سرور نبود، با URL ذخیره‌شدهٔ پروفایل‌ها پیدایش می‌کنند؛ اگر باز هم نبود به‌جای اجرایِ خالیِ بی‌صدا، خطای صریح می‌بینید.',
@@ -55863,14 +55882,50 @@ function mrLiveTestCard(){
     showToast('کارتِ تست ارسالی شد',0);
   }catch(e){alert('تست نشد: '+e);}
 }
+/* v10.68 (82): تشخیصگرِ اعلانِ سیستم — به کاربر می‌گوید زنجیره دقیقاً کجا
+   شکسته: HTTPS ← پشتیبانیِ مرورگر ← اجازه ← نمایشِ سیستم‌عامل.
+   نکته: برای «نمایش» اعلان فایلِ sw.js لازم نیست — خودِ صفحه اعلان را
+   می‌سازد (Notification API). service worker فقط برای «push» (سرور وقتی
+   صفحه بسته است بفرستد) لازم است و ما از آن نمی‌رویم. */
+function mrSysDiag(){
+  const secure=!!window.isSecureContext;
+  const support=(typeof Notification!=='undefined');
+  const perm=support?Notification.permission:'unsupported';
+  let html='';
+  if(!secure)html+='🔒 صفحه از طریق <b>HTTPS</b> باز نشده — اعلانِ سیستمی فقط روی HTTPS کار می‌کند.<br>';
+  if(!support)html+='⚠️ این مرورگر از Web Notification پشتیبانی نمی‌کند (مثلاً سافاریِ آیفون).<br>';
+  else if(perm==='granted')html+='✅ مرورگر اجازهٔ اعلان را دارد — اگر چیزی نمایش داده نمی‌شود، مشکل در تنظیماتِ <b>سیستم‌عامل</b> است (ویندوز: Settings ← System ← Notifications؛ macOS: System Settings ← Notifications؛ اندروید: Settings ← Apps ← مرورگر).';
+  else if(perm==='denied')html+='⛔ اجازهٔ اعلان <b>رد</b> شده — روی آیکونِ قفلِ کنارِ آدرس بزنید ← Site settings/Permissions ← Notifications = Allow، بعد صفحه را تازه کنید.<br>';
+  else html+='⏳ هنوز اجازهٔ اعلان داده نشده — «🔔 تستِ اعلانِ سیستم» را بزنید و در پنجرهٔ ظاهرشده Allow را بزنید.';
+  return {secure,support,perm,html};
+}
+function mrSysDiagRender(){try{const el=$('lnSysDiag');if(el)el.innerHTML=mrSysDiag().html;}catch(e){}}
 function mrLiveTestSys(){
   (async()=>{
     try{
-      if(typeof Notification==='undefined'){alert('مرورگرِ شما اعلانِ سیستمی را پشتیبانی نمی‌کند.');return;}
-      let p=Notification.permission;
+      const dg=mrSysDiag();
+      mrSysDiagRender();
+      if(!dg.support){
+        alert('مرورگرِ شما اعلانِ سیستمی (Web Notification) را پشتیبانی نمی‌کند.'+
+              (!dg.secure?'\n\nهمچنین صفحه باید از طریقِ HTTPS باز شود.':'')+
+              '\n\nنکته: برای این کار فایلِ sw.js لازم نیست — خودِ صفحه اعلان را می‌سازد.\nبا کروم/فایرفاکسِ دسکتاپ روی HTTPS امتحان کنید.');
+        return;
+      }
+      let p=dg.perm;
       if(p==='default'){try{p=await Notification.requestPermission();}catch(e){}}
-      if(p!=='granted'){alert('دسترسیِ اعلان را از پنلِ مرورگر/سیستم بدهید.');return;}
-      mrLiveSysNotif('🔔 تستِ اعلانِ سیستم','اعلانِ سیستمی درست کار می‌کند — از این‌به‌بعد همهٔ رویدادها اینجا هم می‌آیند.');
+      mrSysDiagRender();
+      if(p!=='granted'){
+        alert('دسترسیِ اعلان داده نشد (وضعیت: '+p+').'+
+              (p==='denied'?'\nروی آیکونِ قفلِ کنارِ آدرس بزنید ← Site settings/Permissions ← Notifications = Allow، بعد صفحه را تازه کنید.'
+                           :'\nدر پنجرهٔ کوچکِ ظاهرشده Allow را بزنید، بعد دوباره تست کنید.')+
+              '\n\nنکته: برای این کار فایلِ sw.js لازم نیست.');
+        return;
+      }
+      mrLiveSysNotif('🔔 تستِ اعلانِ سیستم','اگر این پیام را در گوشهٔ صفحه (اعلان‌هایِ سیستم) دیدید، همه‌چیز درست است — از این‌به‌بعد همهٔ رویدادها اینجا هم می‌آیند.');
+      try{
+        const el=$('lnSysDiag');
+        if(el)el.innerHTML='✅ اعلان به مرورگر داده شد. اگر در سیستم نمایش داده نشد، تنظیماتِ <b>سیستم‌عامل</b> را بررسی کنید — ویندوز (Settings ← System ← Notifications و Focus Assist خاموش)، macOS (System Settings ← Notifications)، اندروید (Settings ← Apps ← مرورگر ← Notifications).';
+      }catch(e){}
     }catch(e){alert('تست نشد: '+e);}
   })();
 }
@@ -55892,12 +55947,14 @@ function mrLiveSettingsLoad(){
           if(typeof Notification==='undefined'||Notification.permission!=='granted'){elS.checked=false;showToast('دسترسیِ اعلان داده نشد',1);return;}
           localStorage.setItem('mr_sys_notif','1');
           mrLiveSysNotif('🔔 اعلانِ سیستم روشن شد','از این‌به‌بعد همهٔ رویدادها در اعلان‌هایِ سیستمی هم می‌آیند.');
-        } else localStorage.setItem('mr_sys_notif','0');
+          mrSysDiagRender();
+        } else {localStorage.setItem('mr_sys_notif','0');mrSysDiagRender();}
       }catch(e){}
     });
     const elP=g('lnPoll'); if(elP)elP.addEventListener('change',()=>{try{localStorage.setItem('mr_live_poll',String(Math.max(3,parseInt(elP.value,10)||5)));}catch(e){}});
     const elT=g('lnTtl'); if(elT)elT.addEventListener('change',()=>{try{localStorage.setItem('mr_live_ttl',String(Math.max(5,parseInt(elT.value,10)||30)));}catch(e){}});
     const elSd=g('lnSound'); if(elSd)elSd.addEventListener('change',()=>{try{localStorage.setItem('mr_live_sound',elSd.checked?'1':'0');}catch(e){}});
+    mrSysDiagRender();   // v10.68 (82): خطِ تشخیص همان لحظهٔ بارگذاری هم دیده شود
   }catch(e){}
 }
 /* v10.60 (۷۴): ضربان — فاصله از تنظیماتِ «اعلان‌ها» خوانده می‌شود (v10.66) */
