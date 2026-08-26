@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.75';
+const APP_VERSION = '10.76';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7238,7 +7238,7 @@ if (isset($_GET['push_status'])) {
     $__prC = pushRouteCfg();
     echo json_encode(['ok' => true, 'count' => count(pushLoadSubs()),
                       'public_key' => VAPID_PUBLIC_KEY_B64URL,
-                      'route' => ['proxy' => $__prC['proxy'], 'worker_url' => $__prC['worker'], 'worker_token' => $__prC['token']]], JSON_UNESCAPED_UNICODE);
+                      'route' => ['proxy' => $__prC['proxy'], 'worker_url' => $__prC['worker'], 'worker_token' => $__prC['token'], 'site_source' => (string)($__prC['site_source'] ?? '')]], JSON_UNESCAPED_UNICODE);
     exit;
 }
 /* v10.74 (88): ذخیرهٔ مسیرِ Push — پراکسیِ خارجی و/یا Workerِ واسط */
@@ -24238,6 +24238,14 @@ if (isset($_GET['selftest'])) {
           && strpos($selfSrc, 'اتصالِ غیرمستقیمِ سایت') !== false
           && strpos($selfSrc, "const via=v.via==='site_proxy'") !== false);
 
+    /* ==== ۹۰ (v10.76) ==== */
+    $add('10.76', 'نسخهٔ ۱۰.۷۶',
+         str_contains($selfSrc, "const APP_VERSION = '10.76';"));
+    $add('10.76', 'مسیرِ Push خودکار از همان عبورِ تنظیم‌شده (ai_net/src_net با قالب {url})',
+         strpos($selfSrc, "site_source") !== false
+          && strpos($selfSrc, "strpos(\$w, '{url}')") !== false
+          && strpos($selfSrc, 'pushRouteSrc') !== false);
+
     /* ==== ۸۵ (v10.71) ==== */
     $add('10.71', 'نسخهٔ ۱۰.۷۱',
          str_contains($selfSrc, "const APP_VERSION = '10.71';"));
@@ -29177,10 +29185,26 @@ function webpushBuildRequest(string $endpoint, array $keys, string $payloadJson)
 function pushRouteCfg(?array $cn): array {
     $cn = $cn ?: loadConnections();
     $pr = is_array($cn['push_route'] ?? null) ? $cn['push_route'] : [];
+    $proxy = trim((string)($pr['proxy'] ?? ''));
+    $source = 'push_route';
+    if ($proxy === '') {
+        /* v10.76 (90): اگر کاربر مسیرِ جداگانهٔ Push نگذاشته، از همان
+           اتصالِ غیرمستقیمی که برایِ عبورِ «هوش مصنوعی» یا «سایت مبدأ»
+           تنظیم کرده استفاده می‌شود (قالبِ {url} یا آدرسِ proxy.php). */
+        foreach (['ai_net', 'src_net'] as $k) {
+            $w = trim((string)($cn[$k]['worker_url'] ?? ''));
+            if ($w === '') continue;
+            if (strpos($w, '{url}') !== false) { $proxy = $w; $source = $k; break; }
+            $pb = (string)(parse_url($w, PHP_URL_PATH) ?? '');
+            $bn = strtolower(basename($pb));
+            if ($bn !== '' && substr($bn, -4) === '.php') { $proxy = $w; $source = $k; break; }
+        }
+    }
     return [
-        'proxy'  => trim((string)($pr['proxy'] ?? '')),
+        'proxy'  => $proxy,
         'worker' => trim((string)($pr['worker_url'] ?? '')),
         'token'  => (string)($pr['worker_token'] ?? ''),
+        'site_source' => $source,
     ];
 }
 /** یک دورِ ارسال روی یک مسیر؛ برمی‌گرداند فهرستِ endpointهایی که هنوز
@@ -29203,7 +29227,11 @@ function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $v
             /* اتصالِ غیرمستقیمِ خودِ سایت (interface.php) — انتقالِ شفاف:
                پراکسی سردرها و بدنه را بدونِ تغییر به fcm.googleapis.com می‌دهد
                و وضعیت/بدنهٔ پاسخ را عیناً برمی‌گرداند. */
-            curl_setopt_array($ch, [CURLOPT_URL => $viaCfg['url'] . (strpos($viaCfg['url'], '?') !== false ? '&' : '?') . 'url=' . rawurlencode($req['endpoint']),
+            /* قالبِ {url} (همان قالبِ عبورِ هوش مصنوعی/مبدأ) یا آدرسِ ساده */
+            $pu = strpos($viaCfg['url'], '{url}') !== false
+                ? str_replace('{url}', rawurlencode($req['endpoint']), $viaCfg['url'])
+                : $viaCfg['url'] . (strpos($viaCfg['url'], '?') !== false ? '&' : '?') . 'url=' . rawurlencode($req['endpoint']);
+            curl_setopt_array($ch, [CURLOPT_URL => $pu,
                 CURLOPT_POST => true, CURLOPT_POSTFIELDS => $req['body'],
                 CURLOPT_HTTPHEADER => $req['headers'],
                 CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 40, CURLOPT_CONNECTTIMEOUT => 12, CURLOPT_SSL_VERIFYPEER => true]);
@@ -45694,8 +45722,9 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div style="font-size:10px;color:#94a3b8;line-height:1.8;margin-bottom:6px">
 🌍 اگر هاستِ شما به سرویسِ Pushِ گوگل (fcm.googleapis.com) دسترسی ندارد، اعلان از سرور به دستگاه نمی‌رسد.
 ارسال اول <b>مستقیم</b> امتحان می‌شود و اگر اتصال برقرار نشود، از <b>اتصالِ غیرمستقیمِ خودِ سایت (interface.php)</b> می‌رود و در صورتِ تنظیم، از Workerِ واسط:</div>
-<div class="crow"><label>اتصالِ غیرمستقیمِ سایت:</label><input type="text" id="pushProxy" dir="ltr" placeholder="https://your-site.com/proxy.php" style="flex:1"></div>
-<div style="font-size:9.5px;color:#64748b;margin-top:4px">نکته: دامنهٔ fcm.googleapis.com باید در فهرستِ PROXY_TARGET_HOSTSِ interface.php باشد (در نسخهٔ تازهٔ آن اضافه شده است).</div>
+<div class="crow"><label>اتصالِ غیرمستقیمِ سایت:</label><input type="text" id="pushProxy" dir="ltr" placeholder="https://your-site.com/proxy.php?url={url}" style="flex:1"></div>
+<div id="pushRouteSrc" style="font-size:9.5px;color:#38bdf8;margin-top:4px"></div>
+<div style="font-size:9.5px;color:#64748b;margin-top:2px">اگر خالی باشد، از همان آدرسی که در بخشِ عبورِ «هوش مصنوعی» یا «سایت مبدأ» (قالبِ {url}) تنظیم کرده‌اید استفاده می‌شود. دامنهٔ fcm.googleapis.com باید در فهرستِ PROXY_TARGET_HOSTS باشد.</div>
 <div class="crow"><label>Workerِ واسط:</label><input type="text" id="pushWorker" dir="ltr" placeholder="https://push-relay.yourname.workers.dev" style="flex:1"></div>
 <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
 <button class="btn btn-gray" onclick="mrPushRouteSave()" style="font-size:10px;padding:4px 10px">💾 ذخیرهٔ مسیر</button>
@@ -52116,6 +52145,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.76', t:'🎯 Push خودکار از همان اتصالِ غیرمستقیمی که قبلاً تنظیم کرده‌اید', items:[
+    '🎯 <b>بدونِ وارد کردنِ آدرسِ تازه:</b> اگر در بخشِ عبورِ «هوش مصنوعی» یا «سایت مبدأ» همان <span dir="ltr">proxy.php</span> را با قالبِ <span dir="ltr">{url}</span> تنظیم کرده‌اید، Push دقیقاً از همان مسیر می‌رود — آدرس دوباره نوشته نمی‌شود.',
+    '🩺 <b>گزارش می‌دهد مسیر از کجا آمده:</b> زیرِ فیلدِ مسیر، نوشته می‌شود مسیرِ Push از «تنظیماتِ جداگانهٔ Push» است یا از «عبورِ هوش مصنوعی/مبدأ».',
+    '🔁 در فیلدِ «اتصالِ غیرمستقیمِ سایت» هر دو قالب کار می‌کند: <span dir="ltr">https://site.com/proxy.php?url={url}</span> (همان قالبِ عبور) یا <span dir="ltr">https://site.com/proxy.php</span> ساده.',
+  ]},
   {v:'10.75', t:'🌐 Push از اتصالِ غیرمستقیمِ خودِ سایت (interface.php)', items:[
     '🌐 <b>مسیرِ جایگزینِ اصلیِ Push، اتصالِ غیرمستقیمِ خودِ سایت شد:</b> به‌جایِ پراکسیِ خارجیِ جداگانه، کافی است آدرسِ interface.php (مثلاً <span dir="ltr">https://site.com/proxy.php</span>) را در فیلدِ «اتصالِ غیرمستقیمِ سایت» بگذارید. درخواستِ Push (سردر و بدنهٔ RFC8291) از آن <b>شفاف</b> به fcm.googleapis.com منتقل می‌شود — زنجیره: مستقیم ← سایت ← Worker.',
     '⚙️ <b>interface.php:</b> دامنهٔ fcm.googleapis.com به فهرستِ PROXY_TARGET_HOSTS اضافه شد تا مسیرِ Push را بپذیرد (HTTPS و پورت 443 — هم‌راستا با محدودیت‌هایِ امنیتیِ پراکسی).',
@@ -56863,6 +56897,11 @@ function mrPushRouteLoad(){
     window._pushWorkerToken=d.route.worker_token||'';
     if($('pushProxy'))$('pushProxy').value=d.route.proxy||'';
     if($('pushWorker'))$('pushWorker').value=d.route.worker_url||'';
+    const srcEl=$('pushRouteSrc');
+    if(srcEl){
+      const sm={'ai_net':'🔗 مسیرِ Push: از همان عبورِ «هوش مصنوعی» استفاده می‌شود','src_net':'🔗 مسیرِ Push: از همان عبورِ «سایت مبدأ» استفاده می‌شود','push_route':'🔗 مسیرِ Push: از تنظیماتِ همین بخش','':''};
+      srcEl.textContent=sm[d.route.site_source]||'';
+    }
     if(d.count===0&&localStorage.getItem('mr_push_on')==='1')mrPushStatusRender('err');
   }).catch(()=>{});
 }
