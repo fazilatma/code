@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.74';
+const APP_VERSION = '10.75';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24226,6 +24226,18 @@ if (isset($_GET['selftest'])) {
           && strpos($selfSrc, 'mrPushLastErr') !== false
           && strpos($selfSrc, "elPs.checked=false;localStorage.setItem('mr_push_on','0')") !== false);
 
+    /* ==== ۸۹ (v10.75) ==== */
+    $add('10.75', 'نسخهٔ ۱۰.۷۵',
+         str_contains($selfSrc, "const APP_VERSION = '10.75';"));
+    $add('10.75', 'مسیرِ دومِ Push = اتصالِ غیرمستقیمِ خودِ سایت (interface.php) با انتقالِ شفاف',
+         strpos($selfSrc, "'site_proxy'") !== false
+          && strpos($selfSrc, 'اتصالِ غیرمستقیمِ خودِ سایت (interface.php)') !== false
+          && strpos($selfSrc, 'rawurlencode($req') !== false);
+    $add('10.75', 'ردِ پراکسیِ سایت در گزارشِ تستِ Push با پیامِ خطایِ دقیق',
+         strpos($selfSrc, 'PROXY_TARGET_HOSTS') !== false
+          && strpos($selfSrc, 'اتصالِ غیرمستقیمِ سایت') !== false
+          && strpos($selfSrc, "const via=v.via==='site_proxy'") !== false);
+
     /* ==== ۸۵ (v10.71) ==== */
     $add('10.71', 'نسخهٔ ۱۰.۷۱',
          str_contains($selfSrc, "const APP_VERSION = '10.71';"));
@@ -29172,7 +29184,10 @@ function pushRouteCfg(?array $cn): array {
     ];
 }
 /** یک دورِ ارسال روی یک مسیر؛ برمی‌گرداند فهرستِ endpointهایی که هنوز
-    ارسالِ برقرار نشد (فقط اتصالِ ناموفق = HTTP 0) تا دورِ بعد امتحان شود. */
+    ارسالِ برقرار نشد (فقط اتصالِ ناموفق = HTTP 0) تا دورِ بعد امتحان شود.
+    v10.75 (89): مسیرِ تازهٔ «site_proxy» — انتقالِ شفاف از طریقِ
+    interface.php (اتصالِ غیرمستقیمِ خودِ سایت): POST {base}?url={endpoint}
+    با همان سردر و بدنهٔ Web Push؛ پاسخِ سرویسِ مقصد عیناً برمی‌گردد. */
 function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $via, array &$detail, array &$drop): array {
     if (!$pending) return $pending;
     $mh = curl_multi_init(); $chs = [];
@@ -29184,6 +29199,14 @@ function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $v
             if ($routeCfg['token'] !== '') $wHeaders[] = 'X-Push-Auth: ' . $routeCfg['token'];
             curl_setopt_array($ch, [CURLOPT_URL => $routeCfg['worker'], CURLOPT_POST => true, CURLOPT_POSTFIELDS => $wBody,
                 CURLOPT_HTTPHEADER => $wHeaders, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 25, CURLOPT_CONNECTTIMEOUT => 10]);
+        } elseif ($via === 'site_proxy') {
+            /* اتصالِ غیرمستقیمِ خودِ سایت (interface.php) — انتقالِ شفاف:
+               پراکسی سردرها و بدنه را بدونِ تغییر به fcm.googleapis.com می‌دهد
+               و وضعیت/بدنهٔ پاسخ را عیناً برمی‌گرداند. */
+            curl_setopt_array($ch, [CURLOPT_URL => $viaCfg['url'] . (strpos($viaCfg['url'], '?') !== false ? '&' : '?') . 'url=' . rawurlencode($req['endpoint']),
+                CURLOPT_POST => true, CURLOPT_POSTFIELDS => $req['body'],
+                CURLOPT_HTTPHEADER => $req['headers'],
+                CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 40, CURLOPT_CONNECTTIMEOUT => 12, CURLOPT_SSL_VERIFYPEER => true]);
         } else {
             $opt = [CURLOPT_URL => $req['endpoint'], CURLOPT_POST => true, CURLOPT_POSTFIELDS => $req['body'],
                 CURLOPT_HTTPHEADER => $req['headers'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 12,
@@ -29206,11 +29229,19 @@ function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $v
         foreach ($chs as $ep => $ch) {
             $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
             $err = (string)curl_error($ch);
+            $resp = (string)curl_result($ch);
             if ($via === 'worker' && $code >= 200 && $code < 300) {
                 // Worker زنده است — وضعیتِ واقعیِ سرویسِ Push را از پاسخِ خودِ Worker بخوان
-                $wj = json_decode((string)curl_result($ch), true);
+                $wj = json_decode($resp, true);
                 if (is_array($wj) && isset($wj['status'])) $code = (int)$wj['status'];
                 else $err = 'پاسخِ Worker خوانا نبود';
+            }
+            if ($code < 200 || $code >= 300) {
+                /* v10.75 (89): پیامِ خطایِ JSONِ پراکسی/Worker را خوانا نشان بده */
+                $ej = json_decode($resp, true);
+                if (is_array($ej) && !empty($ej['message'])) $err = $ej['message'];
+                elseif ($err === '' && $resp !== '' && strlen($resp) < 200) $err = trim($resp);
+                if ($via === 'site_proxy' && $code === 403) $err .= ' — fcm.googleapis.com را به فهرستِ PROXY_TARGET_HOSTSِ interface.php اضافه کنید';
             }
             curl_multi_remove_handle($mh, $ch);
             curl_close($ch);
@@ -29245,10 +29276,11 @@ function webpushSend(string $title, string $body, ?string $kind = null): array {
         if ($req === null) { $drop[] = (string)$ep; $detail[(string)$ep] = ['via' => '-', 'code' => 0, 'error' => 'ساختِ درخواست ناموفق']; continue; }
         $pending[(string)$ep] = ['endpoint' => (string)$sub['endpoint'], 'headers' => $req['headers'], 'body' => $req['body']];
     }
-    /* v10.74 (88): زنجیرهٔ مسیرها — اول مستقیم؛ اگر اتصال برقرار نشود، پراکسی؛ بعد Worker.
+    /* v10.75 (89): زنجیرهٔ مسیرها — اول مستقیم؛ اگر اتصال برقرار نشود،
+       اتصالِ غیرمستقیمِ خودِ سایت (interface.php)؛ بعد (اختیاری) Worker.
        هاستِ خارجی (دسترسیِ مستقیم) هرگز مسیرِ دوم را لمس نمی‌کند. */
     $pending = pushSendRound($pending, $routeCfg, [], 'direct', $detail, $drop);
-    if ($proxyUrl !== '' && $pending) $pending = pushSendRound($pending, $routeCfg, ['url' => $proxyUrl, 'auth' => $proxyAuth], 'proxy', $detail, $drop);
+    if ($proxyUrl !== '' && $pending) $pending = pushSendRound($pending, $routeCfg, ['url' => $proxyUrl, 'auth' => $proxyAuth], ($proxyAuth !== '' ? 'proxy' : 'site_proxy'), $detail, $drop);
     if ($routeCfg['worker'] !== '' && $pending) $pending = pushSendRound($pending, $routeCfg, ['url' => $routeCfg['worker']], 'worker', $detail, $drop);
     foreach (array_keys($pending) as $ep) $detail[(string)$ep] = $detail[(string)$ep] ?? ['via' => '-', 'code' => 0, 'error' => 'هیچ مسیری جواب نداد'];
     if ($drop) { foreach (array_unique($drop) as $d) pushDropSub($d); }
@@ -45661,8 +45693,9 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div style="margin-top:8px;padding:8px;background:#0b1220;border:1px solid #1e293b;border-radius:8px">
 <div style="font-size:10px;color:#94a3b8;line-height:1.8;margin-bottom:6px">
 🌍 اگر هاستِ شما به سرویسِ Pushِ گوگل (fcm.googleapis.com) دسترسی ندارد، اعلان از سرور به دستگاه نمی‌رسد.
-ارسال اول <b>مستقیم</b> امتحان می‌شود و اگر اتصال برقرار نشود، به‌ترتیب از مسیرهایِ زیر می‌رود:</div>
-<div class="crow"><label>پراکسیِ خارجی:</label><input type="text" id="pushProxy" dir="ltr" placeholder="http://user:pass@host:port" style="flex:1"></div>
+ارسال اول <b>مستقیم</b> امتحان می‌شود و اگر اتصال برقرار نشود، از <b>اتصالِ غیرمستقیمِ خودِ سایت (interface.php)</b> می‌رود و در صورتِ تنظیم، از Workerِ واسط:</div>
+<div class="crow"><label>اتصالِ غیرمستقیمِ سایت:</label><input type="text" id="pushProxy" dir="ltr" placeholder="https://your-site.com/proxy.php" style="flex:1"></div>
+<div style="font-size:9.5px;color:#64748b;margin-top:4px">نکته: دامنهٔ fcm.googleapis.com باید در فهرستِ PROXY_TARGET_HOSTSِ interface.php باشد (در نسخهٔ تازهٔ آن اضافه شده است).</div>
 <div class="crow"><label>Workerِ واسط:</label><input type="text" id="pushWorker" dir="ltr" placeholder="https://push-relay.yourname.workers.dev" style="flex:1"></div>
 <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
 <button class="btn btn-gray" onclick="mrPushRouteSave()" style="font-size:10px;padding:4px 10px">💾 ذخیرهٔ مسیر</button>
@@ -52083,6 +52116,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.75', t:'🌐 Push از اتصالِ غیرمستقیمِ خودِ سایت (interface.php)', items:[
+    '🌐 <b>مسیرِ جایگزینِ اصلیِ Push، اتصالِ غیرمستقیمِ خودِ سایت شد:</b> به‌جایِ پراکسیِ خارجیِ جداگانه، کافی است آدرسِ interface.php (مثلاً <span dir="ltr">https://site.com/proxy.php</span>) را در فیلدِ «اتصالِ غیرمستقیمِ سایت» بگذارید. درخواستِ Push (سردر و بدنهٔ RFC8291) از آن <b>شفاف</b> به fcm.googleapis.com منتقل می‌شود — زنجیره: مستقیم ← سایت ← Worker.',
+    '⚙️ <b>interface.php:</b> دامنهٔ fcm.googleapis.com به فهرستِ PROXY_TARGET_HOSTS اضافه شد تا مسیرِ Push را بپذیرد (HTTPS و پورت 443 — هم‌راستا با محدودیت‌هایِ امنیتیِ پراکسی).',
+    '🩺 <b>خطاهایِ پراکسیِ سایت در گزارشِ تست خوانا می‌شوند:</b> مثلاً اگر دامنه در فهرستِ مجاز نباشد، تستِ Push همان پیامِ پراکسی را با راهنماییِ «fcm.googleapis.com را به PROXY_TARGET_HOSTS اضافه کنید» نشان می‌دهد.',
+    '🔁 قالبِ قدیمیِ HTTP-proxy (<span dir="ltr">user:pass@host:port</span>) در همان فیلد هنوز کار می‌کند و Workerِ واسط به‌عنوانِ مسیرِ سومِ اختیاری می‌ماند.',
+  ]},
   {v:'10.74', t:'🌍 Push از هاست‌های بدون دسترسی به گوگل — پراکسی/Worker + تشخیص دقیق', items:[
     '🌍 <b>مسیرِ جایگزینِ ارسالِ Push:</b> اگر هاستِ شما (مثلاً داخلِ ایران) به سرویسِ Pushِ گوگل (fcm.googleapis.com) دسترسی ندارد، اعلان از سرور به دستگاه نمی‌رسد. حالا در تبِ «🖥 زنده» دو مسیرِ جایگزین است: <b>پراکسیِ خارجی</b> (http://user:pass@host:port) و <b>Workerِ واسطِ Cloudflare</b>. ارسال اول <b>مستقیم</b> امتحان می‌شود و اگر اتصال برقرار نشود (HTTP 0)، به‌ترتیب از پراکسی و Worker می‌رود — هاستِ خارجی همان‌طور مستقیم می‌فرستد.',
     '📋 <b>کدِ Worker با یک کلیک:</b> دکمهٔ « کدِ Worker» کدِ آماده را با <b>توکنِ مخصوصِ شما</b> می‌دهد — در Cloudflare (Workers & Pages) بسازید، کپی کنید، Deploy بزنید و آدرسش را در «Workerِ واسط» بگذارید. Cloudflare از ایران در دسترس است و Worker درخواستِ Push را از سرورِ شما گرفته و به گوگل می‌رساند.',
@@ -56778,7 +56817,7 @@ function mrLiveTestPush(){
           const v=d.detail[ep]||{};
           const c=(v.code||0);
           const ok=c>=200&&c<300;
-          const via=v.via==='proxy'?'پراکسی':(v.via==='worker'?'Workerِ واسط':(v.via==='direct'?'مستقیم':v.via||'-'));
+          const via=v.via==='site_proxy'?'اتصالِ غیرمستقیمِ سایت':(v.via==='proxy'?'پراکسی':(v.via==='worker'?'Workerِ واسط':(v.via==='direct'?'مستقیم':v.via||'-')));
           let why='';
           if(c===0)why=' · اتصال برقرار نشد — این مسیر از هاستِ شما در دسترس نیست';
           else if(v.error)why=' · '+v.error;

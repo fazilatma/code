@@ -23,6 +23,9 @@ const PROXY_TARGET_HOSTS = [
     'api.x.ai',
     'api.deepseek.com',
     'api.perplexity.ai',
+    // Web Push (scraper4) — ارسالِ اعلان‌هایِ پوش از طریقِ همین پراکسی
+    // (نسخهٔ ۱۰.۷۵): fcm.googleapis.com فقط با HTTPS و پورت 443:
+    'fcm.googleapis.com',
 ];
 
 // Public HTTPS endpoints used by the dashboard's one-click connectivity test.
