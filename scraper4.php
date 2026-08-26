@@ -274,7 +274,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.68';
+const APP_VERSION = '10.69';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7131,6 +7131,42 @@ $list[] = [
 usort($list, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'] ?? 0));
 echo json_encode(['ok' => true, 'profiles' => $list], JSON_UNESCAPED_UNICODE);
 exit;
+}
+
+/* v10.69 (83): اسکریپتِ service worker از همین فایل سرو می‌شود.
+   نیازی به آپلودِ فایلِ جداگانهٔ sw.js نیست: مرورگر scraper4.php?sw=1
+   را می‌خواند و جاوااسکریپتِ خالصِ لازم برای نمایشِ مطمئنِ اعلان (مهم‌ترین
+   رویِ کرومِ اندروید) و مدیریتِ کلیکِ رویِ اعلان را می‌گیرد. چون اسکریپت
+   داخلِ خودِ کد است، نسخهٔ آن همیشه با کد یکی می‌ماند. */
+if (isset($_GET['sw'])) {
+    header('Content-Type: application/javascript; charset=UTF-8');
+    header('Cache-Control: no-cache');
+    header('Service-Worker-Allowed: /');
+    echo <<<'SWJS'
+/* scraper4 service worker — v10.69 (83) */
+self.addEventListener('install', e => { self.skipWaiting(); });
+self.addEventListener('activate', e => { e.waitUntil(self.clients.claim()); });
+self.addEventListener('message', e => {
+  const d = e.data || {};
+  if (d.type === 'showNotification' && d.title) {
+    const opt = { body: d.body || '', tag: d.tag || ('mr_live_' + Date.now()),
+                  requireInteraction: !!d.requireInteraction, data: d.data || {} };
+    if (d.icon) { opt.icon = d.icon; opt.badge = d.badge || d.icon; }
+    e.waitUntil(self.registration.showNotification(String(d.title), opt));
+  }
+});
+self.addEventListener('notificationclick', e => {
+  try { e.notification.close(); } catch (err) {}
+  const url = (e.notification.data && e.notification.data.url) || self.registration.scope;
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    for (const c of list) {
+      if ('focus' in c) { try { if ('navigate' in c) c.navigate(url); } catch (err) {} return c.focus(); }
+    }
+    return self.clients.openWindow(url);
+  }));
+});
+SWJS;
+    exit;
 }
 
 if (!empty($_GET['load_profile'])) {
@@ -24003,6 +24039,22 @@ if (isset($_GET['selftest'])) {
     $add('10.44', 'نتایجِ جست‌وجو شناسهٔ تکراری ندارند',
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
+
+    /* ==== ۸۳ (v10.69) ==== */
+    $add('10.69', 'نسخهٔ ۱۰.۶۹',
+         str_contains($selfSrc, "const APP_VERSION = '10.69';"));
+    $add('10.69', 'service worker از خودِ فایل سرو می‌شود (?sw=1)',
+         strpos($selfSrc, "isset(\$_GET['sw'])") !== false
+          && strpos($selfSrc, "self.addEventListener('notificationclick'") !== false
+          && strpos($selfSrc, "e.waitUntil(self.registration.showNotification(String(d.title), opt));") !== false);
+    $add('10.69', 'مسیرِ اعلان اول سرویس‌ورکر، بعد فالبکِ صفحه',
+         strpos($selfSrc, 'async function mrFireSysNotif(title,body){') !== false
+          && strpos($selfSrc, 'function mrSwReady(){') !== false
+          && strpos($selfSrc, "reg.showNotification(String(title),{body:String(body||'').slice(0,500),") !== false);
+    $add('10.69', 'وضعیتِ سرویس‌ورکر در خطِ تشخیصِ اعلان',
+         strpos($selfSrc, 'function mrSwUpdateDiag(){') !== false
+          && strpos($selfSrc, 'سرویس‌ورکر ثبت شد') !== false
+          && strpos($selfSrc, 'mrSwReady();   // v10.69 (83): سرویس‌ورکر همان لحظهٔ بارگذاری صفحه ثبت می‌شود') !== false);
 
     /* ==== ۸۲ (v10.68) ==== */
     $add('10.68', 'نسخهٔ ۱۰.۶۸',
@@ -51326,6 +51378,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.69', t:'🛰 اعلانِ سیستم حالا از مسیرِ مطمئنِ «سرویس‌ورکر» می‌رود', items:[
+    '🛰 <b>اعلان از طریقِ service worker (طبقِ پیشنهادِ شما):</b> مسیرِ اصلیِ اعلانِ سیستم دیگر «صفحه» نیست، «سرویس‌ورکر» است — همان راهی که وب‌سایت‌هایِ بزرگ استفاده می‌کنند و روی کرومِ اندروید مطمئن‌تر نمایش داده می‌شود. نکته: <b>فایلِ جداگانه‌ای لازم نیست</b> — خودِ scraper4.php اسکریپتِ سرویس‌ورکر را در آدرسِ ?sw=1 می‌دهد، پس هرگز «فراموشِ آپلود» یا «نسخهٔ کهنه» ندارد.',
+    '🔀 <b>فالبکِ خودکار:</b> اگر سرویس‌ورکر ثبت نشد (مرورگرِ قدیمی یا صفحهٔ غیرHTTPS)، اعلان از مسیرِ معمولیِ صفحه می‌رود — هر دو مسیر پشت‌سرِ هم امتحان می‌شوند.',
+    '🩺 <b>خطِ تشخیص حالا می‌گوید کدام مسیر فعال است:</b> «🛰 سرویس‌ورکر ثبت شد ✅» یا «🛰 سرویس‌ورکر ثبت نشد» — بعد از آپدیت همین خط را نگاه کنید.',
+    '📌 <b>مهم‌ترین نکته:</b> سرویس‌ورکر هم (مثلِ همهٔ این قابلیت‌ها) <b>فقط روی HTTPS</b> ثبت می‌شود. اگر خطِ تشخیص «🔒 صفحه از طریقِ HTTPS باز نشده» را نشان می‌دهد، هیچ روشی — نه صفحه، نه سرویس‌ورکر — اعلان نمی‌دهد؛ باید سایت با https:// (با SSL) باز شود. در اندروید هم یک لایهٔ جدا هست: تنظیمِ «Site settings ← Notifications» کروم برای همین سایت باید Allow باشد.',
+  ]},
   {v:'10.68', t:'🖥 اعلانِ سیستم: «چیز نمی‌آورد» — حالا دقیقاً می‌گوید کجا گیر است', items:[
     '🩺 <b>تشخیصگرِ زندهٔ اعلانِ سیستم:</b> زیرِ دکمه‌هایِ تست، یک خطِ وضعیت همیشه تازه نشان می‌دهد که زنجیره کجا شکسته است: آیا صفحه <b>HTTPS</b> است؟ آیا مرورگر (Web Notification) را پشتیبانی می‌کند؟ اجازهٔ اعلان granted/denied/default است؟ و اگر همه‌چیز درست بود، می‌گوید مشکل از تنظیماتِ <b>سیستم‌عامل</b> است (ویندوز/macOS/اندروید) با مسیرِ دقیقِ هرکدام.',
     '🧪 <b>دکمهٔ «تستِ اعلانِ سیستم» حالا مرحله‌به‌مرحله جواب می‌دهد:</b> ۱) اگر مرورگر پشتیبانی نمی‌کند (مثلاً سافاریِ آیفون یا صفحهٔ http) می‌گوید چرا؛ ۲) اگر اجازه لازم است همان لحظه می‌گیرد و اگر رد شده، مسیرِ Allow کردن را می‌گوید؛ ۳) اگر اعلان را به مرورگر داد ولی سیستم نمایش نداد، تنظیماتِ ویندوز (نشانِ Focus Assist)، macOS و اندروید را با مسیرِ دقیق می‌گوید.',
@@ -55863,17 +55921,7 @@ function mrLiveEventCard(title,body,kind){
   }catch(e){}
 }
 function mrLiveSysNotif(title,body){
-  try{
-    if(typeof Notification==='undefined'||Notification.permission!=='granted')return;
-    const ic=mrSysIcon();
-    const nt=new Notification(String(title),{
-      body:String(body||'').slice(0,500),
-      tag:'mr_live_'+Date.now(),
-      icon:ic||undefined, badge:ic||undefined,
-      requireInteraction:true
-    });
-    nt.onclick=ev=>{try{ev.preventDefault();}catch(e){}try{window.focus();}catch(e){}try{nt.close();}catch(e){}};
-  }catch(e){}
+  mrFireSysNotif(title,body);   // v10.69 (83): اول مسیرِ سرویس‌ورکر، بعد مسیرِ کلاسیکِ صفحه
 }
 /* v10.66 (۸۰): دکمه‌هایِ تست — از بخشِ «اعلان‌ها» */
 function mrLiveTestCard(){
@@ -55881,6 +55929,55 @@ function mrLiveTestCard(){
     mrLiveEventCard('🧪 تستِ کارت','این یک کارتِ آزمایشی است — اعلانِ زندهِ درِ مرورگر درست کار می‌کند.','test');
     showToast('کارتِ تست ارسالی شد',0);
   }catch(e){alert('تست نشد: '+e);}
+}
+/* v10.69 (83): سرویس‌ورکر — مسیرِ مطمئنِ اعلانِ سیستم، مخصوصاً روی اندروید.
+   اسکریپت از خودِ فایل (آدرس ?sw=1) سرو می‌شود؛ فایلِ جدا لازم نیست.
+   اگر ثبت نشد (مرورگرِ قدیمی یا صفحهٔ غیرHTTPS)، mrFireSysNotif خودکار
+   به مسیرِ کلاسیکِ صفحه برمی‌گردد — یعنی هیچ‌وقت بی‌دلیلِ «هیچ نمی‌آید». */
+let mrSwReg=null, mrSwState='idle';   // idle | ok | failed
+function mrSwReady(){
+  if(mrSwState==='ok')return Promise.resolve(mrSwReg);
+  if(mrSwState!=='idle')return Promise.resolve(null);
+  mrSwState='pending';
+  return new Promise(res=>{
+    if(!('serviceWorker' in navigator)||!window.isSecureContext){mrSwState='failed';mrSwUpdateDiag();res(null);return;}
+    let done=false;
+    const to=setTimeout(()=>{if(!done){done=true;mrSwState='failed';mrSwUpdateDiag();res(null);}},2500);
+    try{
+      navigator.serviceWorker.register('?sw=1').then(r=>{
+        if(done)return; done=true; clearTimeout(to);
+        mrSwReg=r; mrSwState='ok'; mrSwUpdateDiag(); res(r);
+      }).catch(()=>{if(!done){done=true;clearTimeout(to);mrSwState='failed';mrSwUpdateDiag();res(null);}});
+    }catch(e){if(!done){done=true;clearTimeout(to);}mrSwState='failed';mrSwUpdateDiag();res(null);}
+  });
+}
+function mrSwUpdateDiag(){
+  try{
+    const el=$('lnSysDiag'); if(!el)return;
+    const sw = mrSwState==='ok' ? '<br>🛰 <b>سرویس‌ورکر ثبت شد</b> — اعلان‌ها از مسیرِ مطمئنِ سرویس‌ورکر می‌روند.'
+            : (mrSwState==='failed' ? '<br>🛰 سرویس‌ورکر ثبت نشد — اعلان‌ها از مسیرِ معمولیِ صفحه می‌روند.' : '');
+    el.innerHTML = mrSysDiag().html + sw;
+  }catch(e){}
+}
+function mrSysDiagRender(){mrSwUpdateDiag();}   // v10.69 (83): حالا وضعیتِ سرویس‌ورکر را هم نشان می‌دهد
+async function mrFireSysNotif(title,body){
+  if(typeof Notification==='undefined'||Notification.permission!=='granted')return;
+  const ic=mrSysIcon();
+  const tag='mr_live_'+Date.now();
+  const reg=await mrSwReady();
+  if(reg){
+    try{
+      reg.showNotification(String(title),{body:String(body||'').slice(0,500),
+        icon:ic||undefined, badge:ic||undefined, tag, requireInteraction:true,
+        data:{url:location.href}});
+      return;
+    }catch(e){}
+  }
+  try{
+    const nt=new Notification(String(title),{body:String(body||'').slice(0,500),tag,
+      icon:ic||undefined, badge:ic||undefined, requireInteraction:true});
+    nt.onclick=ev=>{try{ev.preventDefault();}catch(e){}try{window.focus();}catch(e){}try{nt.close();}catch(e){}};
+  }catch(e){}
 }
 /* v10.68 (82): تشخیصگرِ اعلانِ سیستم — به کاربر می‌گوید زنجیره دقیقاً کجا
    شکسته: HTTPS ← پشتیبانیِ مرورگر ← اجازه ← نمایشِ سیستم‌عامل.
@@ -55899,7 +55996,6 @@ function mrSysDiag(){
   else html+='⏳ هنوز اجازهٔ اعلان داده نشده — «🔔 تستِ اعلانِ سیستم» را بزنید و در پنجرهٔ ظاهرشده Allow را بزنید.';
   return {secure,support,perm,html};
 }
-function mrSysDiagRender(){try{const el=$('lnSysDiag');if(el)el.innerHTML=mrSysDiag().html;}catch(e){}}
 function mrLiveTestSys(){
   (async()=>{
     try{
@@ -55924,7 +56020,7 @@ function mrLiveTestSys(){
       mrLiveSysNotif('🔔 تستِ اعلانِ سیستم','اگر این پیام را در گوشهٔ صفحه (اعلان‌هایِ سیستم) دیدید، همه‌چیز درست است — از این‌به‌بعد همهٔ رویدادها اینجا هم می‌آیند.');
       try{
         const el=$('lnSysDiag');
-        if(el)el.innerHTML='✅ اعلان به مرورگر داده شد. اگر در سیستم نمایش داده نشد، تنظیماتِ <b>سیستم‌عامل</b> را بررسی کنید — ویندوز (Settings ← System ← Notifications و Focus Assist خاموش)، macOS (System Settings ← Notifications)، اندروید (Settings ← Apps ← مرورگر ← Notifications).';
+        if(el)el.innerHTML='✅ اعلان از مسیرِ '+(mrSwState==='ok'?'<b>سرویس‌ورکر</b>':'معمولیِ صفحه')+' فرستاده شد. اگر در سیستم نمایش داده نشد: تنظیماتِ <b>سیستم‌عامل</b> را بررسی کنید — ویندوز (Settings ← System ← Notifications و Focus Assist خاموش)، macOS (System Settings ← Notifications)، اندروید (Settings ← Apps ← Chrome ← Notifications). در اندروید یک لایهٔ دیگر هم هست: در خودِ کروم، Settings ← Site settings ← Notifications برای همین سایت باید <b>Allow</b> باشد.';
       }catch(e){}
     }catch(e){alert('تست نشد: '+e);}
   })();
@@ -55960,6 +56056,7 @@ function mrLiveSettingsLoad(){
 /* v10.60 (۷۴): ضربان — فاصله از تنظیماتِ «اعلان‌ها» خوانده می‌شود (v10.66) */
 setTimeout(mrNotifPoll,2500);
 mrLiveSettingsLoad();
+mrSwReady();   // v10.69 (83): سرویس‌ورکر همان لحظهٔ بارگذاری صفحه ثبت می‌شود
 (function mrNotifLoop(){
   try{ setTimeout(mrNotifPoll, Math.max(3000, mrLiveCfg().poll*1000)); }
   catch(e){ setTimeout(mrNotifPoll, 5000); }
