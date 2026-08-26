@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.79';
+const APP_VERSION = '10.80';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24222,7 +24222,7 @@ if (isset($_GET['selftest'])) {
          str_contains($selfSrc, "const APP_VERSION = '10.74';"));
     $add('10.74', 'مسیرهایِ جایگزینِ Push: پراکسی + Worker با توکنِ ذخیره‌شده',
          strpos($selfSrc, 'function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $via, array &$detail, array &$drop): array {') !== false
-          && strpos($selfSrc, 'function pushRouteCfg(?array $cn): array {') !== false
+          && strpos($selfSrc, 'function pushRouteCfg(?array $cn = null): array {') !== false
           && strpos($selfSrc, 'push_route_save') !== false
           && strpos($selfSrc, 'X-Push-Auth: ') !== false);
     $add('10.74', 'تستِ Push گزارشِ مسیرِ هر اشتراک را می‌دهد (مستقیم/پراکسی/Worker)',
@@ -24279,6 +24279,13 @@ if (isset($_GET['selftest'])) {
           && strpos($selfSrc, 'خطای شبکه: ') !== false);
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
+
+    /* ==== ۹۴ (v10.80) ==== */
+    $add('10.80', 'نسخهٔ ۱۰.۸۰',
+         str_contains($selfSrc, "const APP_VERSION = '10.80';"));
+    $add('10.80', 'رفعِ fatalِ pushRouteCfg — پارامتر اختیاری (دلیلِ نرسیدنِ اعلان از v10.74)',
+         strpos($selfSrc, 'function pushRouteCfg(?array $cn = null): array {') !== false
+          && strpos($selfSrc, 'catch (Throwable $__msge)') !== false);
 
     /* ==== ۹۳ (v10.79) ==== */
     $add('10.79', 'نسخهٔ ۱۰.۷۹',
@@ -29244,7 +29251,11 @@ function webpushBuildRequest(string $endpoint, array $keys, string $payloadJson)
     هاست‌هایِ داخلِ ایران به fcm.googleapis.com دسترسی ندارند؛ برای همین
     دو مسیرِ جایگزین روی تنظیماتِ کاربر ذخیره شده و فقط وقتی مسیرِ مستقیم
     اتصالِ برقرار نمی‌کند (HTTP 0) به کار می‌افتند. */
-function pushRouteCfg(?array $cn): array {
+/* v10.80 (94): پارامتر اختیاری شد — فراخوانی‌هایِ بدونِ آرگومان
+   (webpushSend و اندپوینتِ push_status) قبلاً fatal «Too few
+   arguments» می‌دادند و از نسخهٔ ۱۰.۷۴ تمامِ ارسالِ اعلان را قطع
+   کرده بودند (همِ «هیچ اعلانی نمی‌آید» و هم «خطای شبکه» دکمهٔ پینگ). */
+function pushRouteCfg(?array $cn = null): array {
     $cn = $cn ?: loadConnections();
     $pr = is_array($cn['push_route'] ?? null) ? $cn['push_route'] : [];
     $proxy = trim((string)($pr['proxy'] ?? ''));
@@ -33881,6 +33892,7 @@ function msgrSiteProxy(): string {
     مستقیم ← (اگر DNS/اتصال شکست) DoH با IP ثابت ← (اگر هنوز
     نرسید) proxy.phpِ خودِ سایت. برمی‌گرداند {ok, code, error, via}. */
 function msgrSend(string $url, string $postJson): array {
+    try {   // v10.80 (94): هیچ خطای داخلی، زنجیرهٔ ارسال را کامل قطع نکند
     $do = function (string $u, ?string $pinIp = null): array {
         $ch = curl_init($u);
         $opt = [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $postJson,
@@ -33926,6 +33938,9 @@ function msgrSend(string $url, string $postJson): array {
     if ($detail === '') $detail = mb_substr($resp, 0, 200);
     $e = $err !== '' ? 'خطای شبکه: ' . $err : ($detail !== '' ? $detail : 'پاسخی نیامد');
     return ['ok' => false, 'code' => $code, 'error' => ($via !== 'مستقیم' ? '[' . $via . '] ' : '') . $e, 'via' => $via];
+    } catch (Throwable $__msge) {
+        return ['ok' => false, 'code' => 0, 'error' => 'خطای داخلی: ' . $__msge->getMessage(), 'via' => ''];
+    }
 }
 function bslSendToBaleh(string $token, string $chatId, string $text): array {
 return msgrSend('https://tapi.bale.ai/bot' . $token . '/sendMessage', json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE));
@@ -52313,6 +52328,10 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.80', t:'🩹 رفعِ fatalِ pushRouteCfg — دلیلِ اصلیِ نرسیدنِ اعلان‌ها', items:[
+    '🩹 <b>چرا هیچ اعلانی نمی‌آمد:</b> از نسخهٔ ۱۰.۷۴، توابعی که اعلان می‌فرستادند (Web Push و پینگ کران) با خطای فاجعه‌بار «Too few arguments to function pushRouteCfg» قطع می‌شدند — همان خطایی که دکمهٔ پینگ نشان داد. پارامتر حالا اختیاری است و همهٔ مسیرها درست کار می‌کنند.',
+    '🛡️ <b>محافظِ امنیتی:</b> زنجیرهٔ ارسالِ پیام‌رسان (مستقیم ← DoH ← proxy.php) در try/catch قرار گرفت تا هیچ خطای داخلی دیگر، کلِ ارسالِ اعلان‌ها را خاموش نکند؛ اگر خطا بیفتد، پیامِ «خطای داخلی: ...» در گزارشِ همان ارسال می‌آید.',
+  ]},
   {v:'10.79', t:'🩺 پیام‌رسان‌ها از مسیرِ غیرمستقیم + لاگِ پینگ + سفت‌کاریِ تست', items:[
     '🩺 <b>زنجیرهٔ پیام‌رسان‌ها:</b> حالا که روی هاست شما «Could not resolve host: api.rubika.ir» می‌دهد، ارسالِ بله/روبیکا/تلگرام خودکار سه‌مرحله‌ای شد: <b>مستقیم ← DoH (رفعِ DNS با Cloudflare) ← proxy.phpِ خودِ سایت</b>. هر سه پیام‌رسان یک مسیرِ مشترک دارند و در گزارش می‌آید کدام مرحله جواب داده است.',
     '📜 <b>لاگِ پینگ:</b> هر تلاشِ پینگ (دستی/کران/نبض) ثبت می‌شود — دکمهٔ «📜 پینگ‌هایِ آخر» زیرِ تنظیمِ پینگ، ۶ تلاشِ اخیر را با وضعیتِ تک‌تکِ پیام‌رسان‌ها نشان می‌دهد؛ «کجا گیر کرده» دیگر گمان‌زنی نیست.',
