@@ -202,6 +202,8 @@ const AI_KEY_RATE_COOLDOWN = 90;
 // v9.38: پایگاه رایِ «مدل کاندید» — کدام مدل در آزمون‌ها بهتر جواب داده
 const AI_VOTES_FILE = __DIR__ . '/ai_votes.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
+/* v10.66 (۸۰): فیدِ رویدادهایِ زنده — مرورگر رویدادهایِ تازه را می‌خواند */
+const LIVE_FEED_FILE = __DIR__ . '/live_events_feed.json';
 const BULKEDIT_PROGRESS_FILE = __DIR__ . '/bulkedit_progress.json';   // v8.62
 const BULKEDIT_RESULT_FILE   = __DIR__ . '/bulkedit_result.json';     // v8.62
 const PHOTOFIX_PROGRESS_FILE = __DIR__ . '/photofix_progress.json';   // v8.62
@@ -272,7 +274,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.65';
+const APP_VERSION = '10.66';
 const APP_VERSION_DATE = '1405/06/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -15201,7 +15203,7 @@ if (arCfg($cn)['enabled']) {
             $results['autoreply'] = ['replied' => (int)$arRes['replied'],
                                      'failed' => (int)$arRes['failed'],
                                      'checked' => (int)$arRes['checked']];
-            if (arCfg($cn)['notify'] && (int)$arRes['replied'] > 0) notifSend($cn, arMsg($arRes));
+            if (arCfg($cn)['notify'] && (int)$arRes['replied'] > 0) notifSend($cn, arMsg($arRes), 'ar');
         } elseif (!empty($arRes['error'])) {
             $results['autoreply'] = ['error' => $arRes['error']];
         }
@@ -16173,6 +16175,46 @@ if (isset($_GET['sync_diagnose'])) {
             'issues' => $issues, 'ok' => !$issues,
         ];
     }
+    /* v10.66 (۸۰): صفِ استخراج + آخرین همگام‌سازیِ دستی + «چرا چیزی نمی‌آید؟» */
+    $dgExQ = extractReadQueue();
+    $dgExE = array_values($dgExQ['entries'] ?? []);
+    $dgExActive = 0; $dgExRows = [];
+    foreach (array_slice($dgExE, -8) as $dgE) {
+        $dgStt = (string)($dgE['status'] ?? '');
+        if (in_array($dgStt, queueActiveStatuses(), true)) $dgExActive++;
+        $dgExRows[] = [
+            'profile'  => (string)($dgE['profile_name'] ?? $dgE['profile_key'] ?? ''),
+            'status'   => $dgStt,
+            'age'      => (int)($dgE['started_at'] ?? 0) > 0 ? max(0, $dgNow - (int)$dgE['started_at']) : 0,
+            'products' => (int)($dgE['products_count'] ?? 0),
+            'error'    => mb_substr((string)($dgE['error'] ?? ''), 0, 120),
+        ];
+    }
+    $dgMsP = readProgress(MANUAL_SYNC_PROGRESS_FILE);
+    $dgMs = [
+        'running'   => !empty($dgMsP['running']) && empty($dgMsP['done']),
+        'done'      => !empty($dgMsP['done']),
+        'cancelled' => !empty($dgMsP['cancelled']),
+        'phase'     => (string)($dgMsP['phase'] ?? ''),
+        'profile'   => (string)($dgMsP['profile_name'] ?? ''),
+        'error'     => mb_substr((string)($dgMsP['error'] ?? ''), 0, 200),
+        'age'       => (int)($dgMsP['last_progress_ts'] ?? 0) > 0 ? max(0, $dgNow - (int)$dgMsP['last_progress_ts']) : 0,
+        'log_tail'  => array_map(fn($l) => mb_substr((string)$l, 0, 160), array_slice((array)($dgMsP['recent_log'] ?? []), -10)),
+    ];
+    $dgWhy = null;
+    if ($dgMs['running']) {
+        $dgWhy = 'یک همگام‌سازیِ دستی همین حالا در جریان است (مرحله: ' . ($dgMs['phase'] ?: '?') . ') — صف در همان اجرا پر می‌شود.';
+    } elseif ($dgExActive > 0) {
+        $dgWhy = $dgExActive . ' ردیفِ فعال در صفِ استخراج هست — ردیف‌های تازه بعد از پایانِ همین ردیف اضافه می‌شوند.';
+    } elseif ($dgMs['done'] && $dgMs['age'] < 3600) {
+        $dgWhy = $dgMs['error'] !== ''
+            ? 'آخرین همگام‌سازیِ دستی با خطا تمام شده: ' . $dgMs['error']
+            : 'آخرین همگام‌سازیِ دستی بدونِ خطا تمام شده ولی ردیفی در صف نمانده — گزارشِ پایین را ببینید.';
+    } else {
+        $dgWhy = 'ردیفِ فعالی در صف نیست. اگر همگام‌سازی چیزی نمی‌آورد، وضعیتِ هر پروفایل در «آخرین اجرا» (بالا) را ببینید: هنوز نوبت نیست / غیرفعال / خطا.';
+    }
+    $dgOut['queue'] = ['count' => count($dgExE), 'active' => $dgExActive, 'rows' => $dgExRows,
+                       'manual' => $dgMs, 'why' => $dgWhy];
     echo json_encode($dgOut, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
@@ -16302,6 +16344,15 @@ if (isset($_GET['notif_health'])) {
     exit;
 }
 
+/* v10.66 (۸۰): فیدِ رویدادهایِ زنده برای مرورگر — رویدادهایِ غیرچت */
+if (isset($_GET['live_feed'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $lfSince = (int)($_GET['since'] ?? 0);
+    echo json_encode(['ok' => true, 'now' => time(),
+                      'events' => liveFeedLoad($lfSince)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 /* v10.21 (۳۴ج): ارسالِ فوریِ یک پیامِ آزمایشی به پیام‌رسان‌ها */
 if (isset($_GET['notif_test_send'])) {
     header('Content-Type: application/json; charset=UTF-8');
@@ -16408,7 +16459,7 @@ if (isset($_GET['bulk_edit'])) {
     }
     if ($notify && !$dry) {
         $why = notifPrereq($cn);
-        if ($why === null) { $res['delivery'] = notifSend($cn, bulkEditMsg($res));
+        if ($why === null) { $res['delivery'] = notifSend($cn, bulkEditMsg($res), 'report');
             bulkProgress(['log_add' => ['📤 گزارش به پیام‌رسان‌ها فرستاده شد']]); }
         else { $res['notify_error'] = $why; bulkProgress(['log_add' => ['⚠️ ارسال نشد: ' . $why]]); }
     }
@@ -16469,7 +16520,7 @@ if (isset($_GET['photo_fix'])) {
     }
     if ($notify && !$dry) {
         $why = notifPrereq($cn);
-        if ($why === null) { $res['delivery'] = notifSend($cn, photoFixMsg($res));
+        if ($why === null) { $res['delivery'] = notifSend($cn, photoFixMsg($res), 'report');
             photoFixProgress(['log_add' => ['📤 گزارش فرستاده شد']]); }
         else { $res['notify_error'] = $why; }
     }
@@ -18605,7 +18656,7 @@ if (isset($_GET['suffix_report'])) {
     if ($notify && !empty($rep['ok'])) {
         $why = notifPrereq($cn);
         if ($why === null) {
-            $rep['delivery'] = notifSend($cn, suffixReportMsg($rep));
+            $rep['delivery'] = notifSend($cn, suffixReportMsg($rep), 'report');
             suffixProgress(['log_add' => ['📤 گزارش به پیام‌رسان‌ها فرستاده شد']]);
         } else {
             $rep['notify_error'] = $why;
@@ -19085,7 +19136,7 @@ if (isset($_GET['suffix_notify'])) {
     if (!is_array($rep) || empty($rep['ok'])) {
         echo json_encode(['ok' => false, 'error' => 'اول یک گزارش بگیرید'], JSON_UNESCAPED_UNICODE); exit;
     }
-    echo json_encode(['ok' => true, 'delivery' => notifSend($cn, suffixReportMsg($rep))],
+    echo json_encode(['ok' => true, 'delivery' => notifSend($cn, suffixReportMsg($rep), 'report')],
         JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -23847,6 +23898,20 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۸۰ (v10.66) ==== */
+    $add('10.66', 'نسخهٔ ۱۰.۶۶',
+         str_contains($selfSrc, "const APP_VERSION = '10.66';"));
+    $add('10.66', 'فیدِ رویدادهایِ زنده + تنظیماتِ بخشِ اعلان‌ها',
+         strpos($selfSrc, 'function liveFeedPush(string $kind, string $msg): void {') !== false
+          && strpos($selfSrc, "isset(\$_GET['live_feed'])") !== false
+          && strpos($selfSrc, 'function mrLiveEventCard(title,body,kind){') !== false
+          && strpos($selfSrc, 'id="lnCards"') !== false
+          && strpos($selfSrc, "function mrLiveSysNotif(title,body){") !== false);
+    $add('10.66', 'معاینهٔ صفِ استخراج در دکترِ همگام‌سازی',
+         strpos($selfSrc, "const LIVE_FEED_FILE = __DIR__ . '/live_events_feed.json';") !== false
+          && strpos($selfSrc, '$dgOut[\'queue\']') !== false
+          && strpos($selfSrc, 'log_tail') !== false);
+
     /* ==== ۷۹ (v10.65) ==== */
     $add('10.65', 'نسخهٔ ۱۰.۶۵',
          str_contains($selfSrc, "const APP_VERSION = '10.65';"));
@@ -28519,13 +28584,37 @@ function notifEventOn(array $ne, string $key): bool {
 }
 
 /** ارسال یک پیام به همهٔ پیام‌رسان‌های فعال */
-function notifSend(array $cn, string $msg): array {
+/* v10.66 (۸۰): فیدِ رویداد — هر رویدادی که به پیام‌رسان رفته، اینجا هم می‌نشیند
+   تا مرورگر (کارتِ زنده + اعلانِ سیستم) آن را ببیند. چت استثناست: مرورگر
+   خودش هر ۵ ثانیه چت‌ها را مستقیم می‌پوید و تکرار نمی‌خواهد. */
+function liveFeedPush(string $kind, string $msg): void {
+    try {
+        $f = LIVE_FEED_FILE;
+        $d = is_file($f) ? (json_decode((string)@file_get_contents($f), true) ?: []) : [];
+        $ev = is_array($d['events'] ?? null) ? $d['events'] : [];
+        $flat = trim((string)preg_replace('/\s+/u', ' ', $msg));
+        $ev[] = ['ts' => time(), 'kind' => $kind, 'msg' => mb_substr($flat, 0, 600)];
+        $ev = array_slice($ev, -80);
+        @file_put_contents($f, json_encode(['events' => $ev], JSON_UNESCAPED_UNICODE), LOCK_EX);
+    } catch (Throwable $e) { /* فید نباید اعلان را قطع کند */ }
+}
+function liveFeedLoad(int $since = 0): array {
+    try {
+        if (!is_file(LIVE_FEED_FILE)) return [];
+        $d = json_decode((string)@file_get_contents(LIVE_FEED_FILE), true) ?: [];
+        $ev = is_array($d['events'] ?? null) ? $d['events'] : [];
+        if ($since > 0) $ev = array_values(array_filter($ev, fn($e) => (int)($e['ts'] ?? 0) > $since));
+        return array_slice($ev, -80);
+    } catch (Throwable $e) { return []; }
+}
+function notifSend(array $cn, string $msg, ?string $feed = null): array {
     $out = [];
     $bt = $cn['baleh']['token'] ?? '';  $bc = $cn['baleh']['chat_id'] ?? '';
     $rt = $cn['rubika']['token'] ?? ''; $rc = $cn['rubika']['chat_id'] ?? '';
     if ($bt !== '' && $bc !== '')  $out['baleh']  = bslSendToBaleh($bt, $bc, $msg) ? 'sent' : 'fail';
     if ($rt !== '' && $rc !== '')  $out['rubika'] = bslSendToRubika($rt, $rc, $msg) ? 'sent' : 'fail';
     if (!$out) $out['none'] = 'no_messenger';
+    if ($feed !== null) liveFeedPush($feed, $msg);   /* v10.66 (۸۰) */
     return $out;
 }
 
@@ -28682,7 +28771,7 @@ function notifCronPing(array $cn, array $results, bool $force = false): array {
         $msg .= "\nاعلان‌ها: اجرا نشد (پیام‌رسان یا غرفهٔ باسلام ندارد)";
     }
 
-    $delivery = notifSend($cn, $msg);
+    $delivery = notifSend($cn, $msg, 'ping');
     /* v10.22 (۳۵ب): پنجرهٔ throttle فقط وقتی مصرف می‌شود که پیام واقعاً
        رسیده باشد.
 
@@ -29612,7 +29701,7 @@ function notifCheckOrders(array $cn, bool $test = false, bool $send = true): arr
             $msg = bslParcelMsg($f['np'], notifHead($why, $base . $suffix, $n - 1));
             $samples[] = $msg;
             if ($why === 'remind') { $shopRemind++; $reminded++; } else { $shopFound++; $found++; }
-            if ($send) $sentTo = notifSend($cn, $msg);
+            if ($send) $sentTo = notifSend($cn, $msg, 'order');
         }
         $st[$wmKey] = $now;
         $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
@@ -29628,7 +29717,7 @@ function notifCheckOrders(array $cn, bool $test = false, bool $send = true): arr
                          . ' مورد اخیر · ' . (int)$sr['found'] . ' مورد قابل اعلان';
             }
             if ($samples) { $lines[] = '━━━ نمونه:'; $lines[] = mb_substr((string)$samples[0], 0, 400); }
-            $sentTo = notifSend($cn, implode("\n", $lines));
+            $sentTo = notifSend($cn, implode("\n", $lines), 'order');
         }
         return ['ok' => true, 'found' => $testFound, 'total_seen' => $totalSeen,
                 'sent' => $sentTo, 'sample' => $samples[0] ?? '',
@@ -29903,7 +29992,7 @@ function notifCheckProducts(array $cn, bool $test = false, bool $send = true): a
                  : $f['text'];
             $samples[] = $msg;
             if ($why === 'remind') { $shopRemind++; $reminded++; } else { $shopFound++; $found++; }
-            if ($send) $sentTo = notifSend($cn, $msg);
+            if ($send) $sentTo = notifSend($cn, $msg, 'product');
         }
         $st[$wmKey] = $now;
         $shopRows[] = ['vendor_id' => $vid, 'shop_name' => $name, 'ok' => true,
@@ -29919,7 +30008,7 @@ function notifCheckProducts(array $cn, bool $test = false, bool $send = true): a
                          . ' محصول اخیر · ' . (int)$sr['found'] . ' مورد قابل اعلان';
             }
             if ($samples) { $lines[] = '━━━ نمونه:'; $lines[] = mb_substr((string)$samples[0], 0, 400); }
-            $sentTo = notifSend($cn, implode("\n", $lines));
+            $sentTo = notifSend($cn, implode("\n", $lines), 'product');
         }
         return ['ok' => true, 'found' => $testFound, 'total_seen' => $totalSeen,
                 'sent' => $sentTo, 'sample' => $samples[0] ?? '',
@@ -31860,7 +31949,7 @@ function digestMaybeSend(array $cn, int $now): array {
     $why = notifPrereq($cn);
     if ($why !== null) return ['sent' => false, 'skipped' => $why];
     $d = digestBuild($cn, max(1, min(168, (int)($cn['digest_hours'] ?? 24))));
-    $res = notifSend($cn, digestMsg($d));
+    $res = notifSend($cn, digestMsg($d), 'digest');
     $st = digestLoadState();
     $st['last_date'] = date('Y-m-d', $now);
     $st['last_at'] = $now;
@@ -32550,7 +32639,7 @@ function syncReportEmit(array $cn, array $rep): array {
     $hasMsgr = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
             || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '');
     if (!$hasMsgr) { $out['skipped'] = 'no_messenger'; return $out; }
-    $out['delivery'] = notifSend($cn, syncReportText($rep));
+    $out['delivery'] = notifSend($cn, syncReportText($rep), 'sync');
     return $out;
 }
 
@@ -32564,7 +32653,7 @@ function notifRetire(array $cn, array $res, string $profileName = ''): array {
         return ['ok' => true, 'delivery' => notifSend($cn,
             "🛑 بازنشستگی خودکار متوقف شد" . ($profileName !== '' ? "\nپروفایل: {$profileName}" : '')
             . "\nعلت: " . ($res['guard']['reason'] ?? '')
-            . "\nهیچ محصولی تغییر نکرد — اگر درست است، دستی اجرا کنید.")];
+            . "\nهیچ محصولی تغییر نکرد — اگر درست است، دستی اجرا کنید.", 'retire')];
     }
     if ((int)($res['retired'] ?? 0) <= 0) return ['ok' => true, 'skipped' => 'nothing'];
     $lines = ["🗂 بازنشستگی محصولات رفته از مبدأ" . ($profileName !== '' ? " — {$profileName}" : ''),
@@ -32575,7 +32664,7 @@ function notifRetire(array $cn, array $res, string $profileName = ''): array {
     foreach (array_slice($res['items'] ?? [], 0, 8) as $it) {
         $lines[] = '• ' . ($it['title'] ?? '') . ' — ' . ($it['reason'] ?? '');
     }
-    return ['ok' => true, 'delivery' => notifSend($cn, implode("\n", $lines))];
+    return ['ok' => true, 'delivery' => notifSend($cn, implode("\n", $lines), 'retire')];
 }
 
 /**
@@ -32639,7 +32728,7 @@ function notifSourceChanges(array $cn, array $res, string $profileName = '', int
     if (!$blocks) return ['ok' => true, 'sent' => 0, 'nothing' => true];
 
     $sentCount = 0; $last = [];
-    foreach ($blocks as $b) { $last = notifSend($cn, $b); $sentCount++; }
+    foreach ($blocks as $b) { $last = notifSend($cn, $b, 'price'); $sentCount++; }
     return ['ok' => true, 'sent' => $sentCount, 'price_up' => $up, 'price_down' => $down,
             'no_price' => $noPrice, 'gone' => $gone, 'back' => $back, 'delivery' => $last];
 }
@@ -32655,7 +32744,7 @@ function notifRunFailure(array $cn, string $stage, string $profileName, string $
     $msg = "⚠️ خطا در اجرای خودکار\nمرحله: {$stage}"
          . ($profileName !== '' ? "\nپروفایل: {$profileName}" : '')
          . "\nعلت: " . mb_substr($error, 0, 200);
-    return ['ok' => true, 'delivery' => notifSend($cn, $msg)];
+    return ['ok' => true, 'delivery' => notifSend($cn, $msg, 'error')];
 }
 
 /**
@@ -32938,7 +33027,7 @@ if (isset($_GET['bsl_notify_selected'])) {
                          . ' — ' . mb_substr($n['text'], 0, 60);
             }
         }
-        $delivery = notifSend($cn, implode("\n", $lines));
+        $delivery = notifSend($cn, implode("\n", $lines), 'remind');
         $sent = 1;
     } else {
         foreach ($picked as $n) {
@@ -32949,7 +33038,7 @@ if (isset($_GET['bsl_notify_selected'])) {
                 $body = bslFetchChatMessages($tk, $n['chat_id'], max(1, min(10, $n['unseen'] ?: 1)));
                 $msg = bslChatMsg($n, '💬 پیام خوانده‌نشده', $body);
             }
-            $delivery = notifSend($cn, $msg);
+            $delivery = notifSend($cn, $msg, 'remind');
             $sent++;
             if ($sent >= 20) break;   // سقف ایمنی برای جلوگیری از هرزنامه
         }
@@ -44702,6 +44791,24 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="crow"><label>یادآوری بعد از:</label><input type="number" id="remindAfter" value="30" min="0" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">دقیقه · ۰ = خاموش</span></div>
 <div class="crow"><label>حداکثر تکرار:</label><input type="number" id="remindMax" value="0" min="0" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = بی‌نهایت</span></div>
 </div>
+<!-- v10.66 (۸۰): تنظیماتِ اعلانِ زنده — درِ مرورگر + سیستم‌عامل -->
+<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155">
+<div style="font-size:11px;color:#fbbf24;font-weight:700;margin-bottom:6px">🖥 اعلانِ زنده (درِ مرورگر + سیستم)</div>
+<div style="font-size:10px;color:#64748b;margin-bottom:6px;line-height:1.6">
+به‌جزِ پیامِ مشتری، <b>همهٔ رویدادها</b> (سفارش، محصول، قیمت/موجودی، گزارشِ همگام‌سازی، خطا و…)
+هم‌علاوهٔ ارسال به پیام‌رسان، همین‌جا به‌صورتِ کارتِ زنده و اعلانِ سیستمی هم دیده می‌شوند.</div>
+<div class="crow"><label>کارت‌هایِ درِ مرورگر:</label><input type="checkbox" id="lnCards" checked style="width:16px;height:16px"></div>
+<div class="crow"><label>اعلانِ سیستم (ویندوز/macOS/اندروید):</label><input type="checkbox" id="lnSys" style="width:16px;height:16px"></div>
+<div class="crow"><label>فاصلهٔ چک:</label><input type="number" id="lnPoll" value="5" min="3" style="max-width:70px" dir="ltr"><span style="font-size:10px;color:#64748b">ثانیه (حداقل ۳)</span></div>
+<div class="crow"><label>خودکار ببند بعد:</label><input type="number" id="lnTtl" value="30" min="5" style="max-width:70px" dir="ltr"><span style="font-size:10px;color:#64748b">ثانیه (حداقل ۵)</span></div>
+<div class="crow"><label>صدایِ کارت:</label><input type="checkbox" id="lnSound" checked style="width:16px;height:16px"></div>
+<div style="display:flex;gap:6px;margin-top:6px">
+<button class="btn btn-gray" onclick="mrLiveTestCard()" style="font-size:10px;padding:4px 10px">🧪 تستِ کارت</button>
+<button class="btn btn-gray" onclick="mrLiveTestSys()" style="font-size:10px;padding:4px 10px">🔔 تستِ اعلانِ سیستم</button>
+</div>
+<div style="font-size:10px;color:#64748b;line-height:1.6;margin-top:4px">
+این تنظیمات همین‌مرورگر (localStorage) ذخیره می‌شوند و <b>همان لحظه</b> اثر می‌کنند — دکمهٔ «ذخیره» لازم نیست.</div>
+</div>
 </div>
 <div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
@@ -50069,6 +50176,31 @@ function syncDiagnose(){
           +(p.issues.length?(' — '+p.issues.map(esc).join('، ')):' — آمادهٔ اجرا')+'</div>';
       });
     }
+    /* v10.66 (۸۰): صفِ استخراج + آخرین همگام‌سازیِ دستی + تشخیص */
+    if(d.queue){
+      h+='<div style="font-size:10px;color:#94a3b8;margin-top:6px;border-top:1px solid #1e293b;padding-top:4px"><b>صفِ استخراج:</b></div>';
+      h+='<div style="font-size:10px;color:#e2e8f0;padding:1px 0">ردیف‌ها: '+toFa(d.queue.count||0)+' · فعال: '+toFa(d.queue.active||0)+'</div>';
+      (d.queue.rows||[]).forEach(r=>{
+        const cc=(r.status==='running'||r.status==='waiting'||r.status==='paused')?'#fbbf24':(r.status==='done'?'#86efac':'#f87171');
+        h+='<div style="font-size:10px;color:'+cc+';padding:1px 0">• '+esc(r.profile||'—')+' — '+esc(r.status)
+          +(r.products?(' · '+toFa(r.products)+' محصول'):'')
+          +(r.age>0?(' · '+toFa(r.age)+' ثانیه پیش'):'')
+          +(r.error?(' · '+esc(r.error)):'')+'</div>';
+      });
+      if(d.queue.manual){
+        const m=d.queue.manual;
+        const mst=m.running?'🔄 در حال اجرا':(m.cancelled?'⏹ متوقف شد':(m.done?'✅ انجام شد':'—'));
+        h+='<div style="font-size:10px;color:#e2e8f0;padding:2px 0">آخرین همگام‌سازیِ دستی: '+mst
+          +(m.profile?(' — '+esc(m.profile)):'')
+          +(m.phase?(' · '+esc(m.phase)):'')
+          +(m.age>0?(' · '+toFa(m.age)+' ثانیه پیش'):'')
+          +(m.error?('<div style="color:#f87171;font-size:10px">'+esc(m.error)+'</div>'):'')+'</div>';
+        (m.log_tail||[]).forEach(l=>{h+='<div style="font-size:9.5px;color:#64748b;padding:0 0 0 10px">'+esc(l)+'</div>';});
+      }
+      if(d.queue.why){
+        h+='<div style="font-size:10.5px;color:#fbbf24;padding:4px 0;line-height:1.7">💡 '+esc(d.queue.why)+'</div>';
+      }
+    }
     const problems=(d.checks||[]).filter(c=>!c.ok).length + bad.length;
     h+='<div style="margin-top:6px;font-size:11px;font-weight:700;color:'+(problems===0?'#4ade80':'#fbbf24')+'">'
       +(problems===0
@@ -51041,6 +51173,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.66', t:'🖥 تنظیماتِ اعلانِ زنده در بخشِ «اعلان‌ها» + همهٔ رویدادها (نه فقط چت) به‌صورتِ زنده + معاینهٔ صفِ استخراج', items:[
+    '📋 <b>همهٔ رویدادها، نه فقط چت:</b> از این‌به‌بعد هر رویدادی که به پیام‌رسان می‌رود — سفارشِ جدید/تغییر وضعیت، محصولِ جدید/تغییر وضعیت، گران/ارزان و موجود/ناموجود، گزارشِ همگام‌سازی، خطای اجرا، یادآوری‌ها — به‌علاوهٔ کارتِ زندهٔ درِ مرورگر، اگر «اعلانِ سیستم» روشن باشد در اعلان‌هایِ ویندوز/macOS/اندروید هم می‌آید',
+    '⚙️ <b>تنظیماتِ کامل در بخشِ «🔔 اعلان‌ها»:</b> روشن/خاموشِ کارت‌هایِ درِ مرورگر و اعلانِ سیستم، فاصلهٔ چک (ثانیه)، زمانِ خودکاربستن، صدا — و دکمه‌هایِ <b>🧪 تستِ کارت</b> و <b>🔔 تستِ اعلانِ سیستم</b> برایِ امتحانِ آنی. همهٔ این‌ها همان لحظه اثر می‌کنند (ذخیرهٔ مرورگر)، بدونِ دکمهٔ ذخیره',
+    '🩺 <b>معاینهٔ صفِ استخراج در «دکترِ همگام‌سازی»:</b> حالا تعداد/وضعیتِ ردیف‌های صف، آخرین همگام‌سازیِ دستی (مرحله، خطا و ۱۰ خطِ آخرِ گزارش) و یک جملهٔ تشخیص «چرا چیزی روی صف نمی‌آید» را نشان می‌دهد — برایِ فهمیدنِ اینکه همگام‌سازی اصلاً اجرا شده یا ردیف جایی گیر کرده'
+  ]},
   {v:'10.65', t:'⌨️ تکست‌باکسِ پاسخ همیشه آماده + کارتِ نوتیف دیگر از کادرِ موبایل بیرون نمی‌زند', items:[
     '⌨️ <b>پاسخِ آماده از همانِ اول:</b> تکست‌باکسِ پاسخ (با دکمه‌هایِ سریعِ 👋/✅/📮) حالا از همانِ لحظهِٔ آمدنِ کارتِ نوتیف باز است — لازم نیست دکمهٔ 💬 بزنی؛ فقط بنویس و Enter. با شروعِ تایپ، کارت دیگر خودکار بسته نمی‌شود و اگر مشتری وسطِ تایپ دوباره پیام بدهد هم کارتِ شما را نمی‌بندد',
     '📱 <b>عرضِ درستِ موبایل:</b> کارتِ نوتیف هنگامِ پاسخ‌دهی دیگر گشاد نمی‌شود و از کادرِ صفحهِٔ موبایل بیرون نمی‌زند؛ اگر هم کارت بلند شد، خودش در ارتفاعِ صفحه جا می‌شود (اسکرولِ داخلی)'
@@ -55121,10 +55258,24 @@ let MR_NOTIFS=[];
 let MR_SEEN={};
 let MR_NOTIF_BOOTED=false;
 const MR_NOTIF_TTL=30000;
+/* v10.66 (۸۰): تنظیماتِ اعلانِ زنده — درِ localStorage، اثرِ آنی، بدونِ دکمهٔ ذخیره */
+function mrLiveCfg(){
+  try{
+    return {
+      on: localStorage.getItem('mr_live_cards')!=='0',
+      sys: (localStorage.getItem('mr_sys_notif')==='1' && typeof Notification!=='undefined' && Notification.permission==='granted'),
+      poll: Math.max(3, parseInt(localStorage.getItem('mr_live_poll')||'5',10)||5),
+      ttl: Math.max(5, parseInt(localStorage.getItem('mr_live_ttl')||'30',10)||30),
+      sound: localStorage.getItem('mr_live_sound')!=='0'
+    };
+  }catch(e){ return {on:true,sys:false,poll:5,ttl:30,sound:true}; }
+}
+function mrNotifTtlMs(){ return mrLiveCfg().ttl*1000; }
 function mrNotifLoad(){try{return JSON.parse(localStorage.getItem('mr_notif_seen')||'{}')||{};}catch(e){return{};}}
 function mrNotifSave(){try{localStorage.setItem('mr_notif_seen',JSON.stringify(MR_SEEN));}catch(e){}}
 function mrNotifDing(){
   try{
+    if(mrLiveCfg().sound===false)return; /* v10.66 (۸۰): صدایِ خاموش */
     const AC=window.AudioContext||window.webkitAudioContext; if(!AC)return;
     const C=new AC(); const t=C.currentTime;
     const o=C.createOscillator(),g=C.createGain();
@@ -55295,7 +55446,7 @@ function mrNotifPush(c){
     } else {
       if(bar){bar.style.animation='none'; void bar.offsetHeight; bar.style.animation='';}
       if(n.timer)clearTimeout(n.timer);
-      n.timer=setTimeout(()=>mrNotifClose(n.el),MR_NOTIF_TTL);
+      n.timer=setTimeout(()=>mrNotifClose(n.el),mrNotifTtlMs());
     }
     return;
   }
@@ -55339,10 +55490,10 @@ function mrNotifPush(c){
       '<button class="mrnbtn-reply" style="flex:0 0 auto;background:#059669;border:none;color:#fff;font-size:10.5px;font-weight:700;border-radius:8px;padding:4px 11px;cursor:pointer">💬 پاسخ</button>'+
       '<span class="mrnhint" style="flex:1;text-align:center;font-size:9px;color:#475569">⬅ بستن · پاسخ ➡</span>'+
     '</div>'+
-    '<div class="mrnbar" style="position:absolute;bottom:0;right:0;height:3px;width:100%;background:linear-gradient(90deg,'+col+'99,'+col+'22);animation:mrNotifFade '+MR_NOTIF_TTL+'ms linear forwards"></div>';
+    '<div class="mrnbar" style="position:absolute;bottom:0;right:0;height:3px;width:100%;background:linear-gradient(90deg,'+col+'99,'+col+'22);animation:mrNotifFade '+mrNotifTtlMs()+'ms linear forwards"></div>';
   host.appendChild(card);
   n={el:card, chat_id:c.chat_id, shop:c.shop||1, text:mrNotifText(c), timer:null};
-  n.timer=setTimeout(()=>mrNotifClose(card),MR_NOTIF_TTL);
+  n.timer=setTimeout(()=>mrNotifClose(card),mrNotifTtlMs());
   /* v10.62 (۷۶): پاسخِ درِجای — مستقیم از روی همین کارت */
   const taN=card.querySelector('.mrnta');
   const sendN=card.querySelector('.mrnbtn-send');
@@ -55481,15 +55632,138 @@ async function mrNotifPoll(){
     }
     if(!c.last_is_mine&&id>(MR_SEEN[key]||0)){
       MR_SEEN[key]=id;
-      mrNotifPush(c);
+      if(mrLiveCfg().on)mrNotifPush(c); /* v10.66 (۸۰): کارتِ درِ مرورگر — از بخشِ اعلان‌ها خاموش/روشن */
       mrSysNotif(c); /* v10.63 (۷۷): همتایِ سیستم‌عامل */
     }
   });
   mrNotifSave();
 }
-/* v10.60 (۷۴): ضربانِ ۵ ثانیه‌ای — با کشِ ۲ ثانیه‌ایِ سرور بسیار ارزان است */
+/* v10.66 (۸۰): رویدادهایِ غیرچت — از فیدِ سرور (همان رویدادهایی که به
+   پیام‌رسان رفته‌اند) — حتی وقتی تب پشتِ سر است. */
+let MR_LIVE_SINCE=0;
+try{ MR_LIVE_SINCE=parseInt(localStorage.getItem('mr_live_since')||'0',10)||0; }catch(e){}
+async function mrLiveEventPoll(){
+  try{
+    const cfg=mrLiveCfg();
+    if(!cfg.on&&!cfg.sys)return;
+    const d=await fetch('?live_feed=1&since='+MR_LIVE_SINCE).then(r=>r.json()).catch(()=>null);
+    if(!d||!d.ok)return;
+    const evs=d.events||[];
+    if(MR_LIVE_SINCE<=0){
+      /* بارِ اول: رویدادهایِ قدیمی را اعلان نکن — فقط نقطهٔ شروع بگذار */
+      MR_LIVE_SINCE=(d.now||Math.floor(Date.now()/1000));
+      try{localStorage.setItem('mr_live_since',String(MR_LIVE_SINCE));}catch(e){}
+      return;
+    }
+    if(!evs.length)return;
+    const lastTs=parseInt(evs[evs.length-1].ts||'0',10)||0;
+    if(lastTs>MR_LIVE_SINCE){
+      MR_LIVE_SINCE=lastTs;
+      try{localStorage.setItem('mr_live_since',String(MR_LIVE_SINCE));}catch(e){}
+    }
+    evs.forEach(ev=>mrLiveEvent(ev,cfg));
+  }catch(e){}
+}
+const MR_LIVE_KIND={order:'🛒',product:'📋',price:'💰',sync:'🔄',ping:'📡',error:'⚠️',digest:'🌙',retire:'🗂',remind:'🔁',ar:'',report:'📄'};
+function mrLiveEvent(ev,cfg){
+  try{
+    const kind=String(ev.kind||'report');
+    const msg=String(ev.msg||'');
+    const lines=msg.split('\n');
+    const title=(MR_LIVE_KIND[kind]!==undefined?MR_LIVE_KIND[kind]:'📢')+' '+String(lines[0]||'رویداد');
+    const body=lines.length>1?lines.slice(1).join('\n'):'';
+    if(cfg.on)mrLiveEventCard(title,body,kind);
+    if(cfg.sys)mrLiveSysNotif(title,body);
+    if(cfg.on)mrNotifDing();
+  }catch(e){}
+}
+function mrLiveEventCard(title,body,kind){
+  try{
+    const host=mrNotifHost();
+    const card=document.createElement('div');
+    card.style.cssText='position:relative;overflow:hidden;border-radius:14px;border:1px solid #334155;background:linear-gradient(135deg,#111d36 0%,#0d1526 75%);box-shadow:0 12px 30px rgba(0,0,0,.45);animation:mrNotifIn .38s cubic-bezier(.2,.9,.3,1.2)';
+    const col=({order:'#34d399',product:'#60a5fa',price:'#fbbf24',sync:'#22d3ee',ping:'#94a3b8',error:'#f87171',digest:'#a78bfa',retire:'#f472b6',remind:'#fb923c',ar:'#4ade80',report:'#94a3b8'})[kind]||'#94a3b8';
+    card.innerHTML=
+      '<div style="display:flex;align-items:center;gap:9px;padding:11px 12px 8px">'+
+        '<div style="flex:1;min-width:0"><b style="font-size:12px;color:#f1f5f9;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(title)+'</b>'+
+        '<div style="font-size:9.5px;color:#64748b;margin-top:2px">رویدادِ سیستم</div></div>'+
+        '<button class="mrnbtn-close" style="flex:0 0 auto;background:none;border:none;color:#475569;font-size:13px;cursor:pointer;padding:2px 4px" title="بستن">✕</button>'+
+      '</div>'+
+      (body?'<div style="font-size:11px;color:#cbd5e1;line-height:1.8;padding:0 12px 10px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical">'+esc(body)+'</div>':'')+
+      '<div style="position:absolute;bottom:0;right:0;height:3px;width:100%;background:linear-gradient(90deg,'+col+'99,'+col+'22);animation:mrNotifFade '+mrNotifTtlMs()+'ms linear forwards"></div>';
+    host.appendChild(card);
+    const n={el:card, chat_id:0, event:true, timer:null};
+    n.timer=setTimeout(()=>mrNotifClose(card),mrNotifTtlMs());
+    MR_NOTIFS.push(n);
+    const bc=card.querySelector('.mrnbtn-close'); if(bc)bc.addEventListener('click',e=>{e.stopPropagation();mrNotifClose(card);});
+    while(MR_NOTIFS.length>4){const old=MR_NOTIFS.shift(); if(old)mrNotifClose(old.el);}
+  }catch(e){}
+}
+function mrLiveSysNotif(title,body){
+  try{
+    if(typeof Notification==='undefined'||Notification.permission!=='granted')return;
+    const ic=mrSysIcon();
+    const nt=new Notification(String(title),{
+      body:String(body||'').slice(0,500),
+      tag:'mr_live_'+Date.now(),
+      icon:ic||undefined, badge:ic||undefined,
+      requireInteraction:true
+    });
+    nt.onclick=ev=>{try{ev.preventDefault();}catch(e){}try{window.focus();}catch(e){}try{nt.close();}catch(e){}};
+  }catch(e){}
+}
+/* v10.66 (۸۰): دکمه‌هایِ تست — از بخشِ «اعلان‌ها» */
+function mrLiveTestCard(){
+  try{
+    mrLiveEventCard('🧪 تستِ کارت','این یک کارتِ آزمایشی است — اعلانِ زندهِ درِ مرورگر درست کار می‌کند.','test');
+    showToast('کارتِ تست ارسالی شد',0);
+  }catch(e){alert('تست نشد: '+e);}
+}
+function mrLiveTestSys(){
+  (async()=>{
+    try{
+      if(typeof Notification==='undefined'){alert('مرورگرِ شما اعلانِ سیستمی را پشتیبانی نمی‌کند.');return;}
+      let p=Notification.permission;
+      if(p==='default'){try{p=await Notification.requestPermission();}catch(e){}}
+      if(p!=='granted'){alert('دسترسیِ اعلان را از پنلِ مرورگر/سیستم بدهید.');return;}
+      mrLiveSysNotif('🔔 تستِ اعلانِ سیستم','اعلانِ سیستمی درست کار می‌کند — از این‌به‌بعد همهٔ رویدادها اینجا هم می‌آیند.');
+    }catch(e){alert('تست نشد: '+e);}
+  })();
+}
+/* v10.66 (۸۰): تنظیماتِ بخشِ «اعلان‌ها» — بارگذاری و سیم‌کشیِ آنی */
+function mrLiveSettingsLoad(){
+  try{
+    const g=id=>$(id);
+    if(g('lnCards'))g('lnCards').checked=localStorage.getItem('mr_live_cards')!=='0';
+    if(g('lnSys'))g('lnSys').checked=mrLiveCfg().sys;
+    if(g('lnPoll'))g('lnPoll').value=String(mrLiveCfg().poll);
+    if(g('lnTtl'))g('lnTtl').value=String(mrLiveCfg().ttl);
+    if(g('lnSound'))g('lnSound').checked=localStorage.getItem('mr_live_sound')!=='0';
+    const elC=g('lnCards'); if(elC)elC.addEventListener('change',()=>{try{localStorage.setItem('mr_live_cards',elC.checked?'1':'0');}catch(e){}});
+    const elS=g('lnSys');
+    if(elS)elS.addEventListener('change',async()=>{
+      try{
+        if(elS.checked){
+          if(typeof Notification!=='undefined'&&Notification.permission==='default'){try{await Notification.requestPermission();}catch(e){}}
+          if(typeof Notification==='undefined'||Notification.permission!=='granted'){elS.checked=false;showToast('دسترسیِ اعلان داده نشد',1);return;}
+          localStorage.setItem('mr_sys_notif','1');
+          mrLiveSysNotif('🔔 اعلانِ سیستم روشن شد','از این‌به‌بعد همهٔ رویدادها در اعلان‌هایِ سیستمی هم می‌آیند.');
+        } else localStorage.setItem('mr_sys_notif','0');
+      }catch(e){}
+    });
+    const elP=g('lnPoll'); if(elP)elP.addEventListener('change',()=>{try{localStorage.setItem('mr_live_poll',String(Math.max(3,parseInt(elP.value,10)||5)));}catch(e){}});
+    const elT=g('lnTtl'); if(elT)elT.addEventListener('change',()=>{try{localStorage.setItem('mr_live_ttl',String(Math.max(5,parseInt(elT.value,10)||30)));}catch(e){}});
+    const elSd=g('lnSound'); if(elSd)elSd.addEventListener('change',()=>{try{localStorage.setItem('mr_live_sound',elSd.checked?'1':'0');}catch(e){}});
+  }catch(e){}
+}
+/* v10.60 (۷۴): ضربان — فاصله از تنظیماتِ «اعلان‌ها» خوانده می‌شود (v10.66) */
 setTimeout(mrNotifPoll,2500);
-setInterval(mrNotifPoll,5000);
+mrLiveSettingsLoad();
+(function mrNotifLoop(){
+  try{ setTimeout(mrNotifPoll, Math.max(3000, mrLiveCfg().poll*1000)); }
+  catch(e){ setTimeout(mrNotifPoll, 5000); }
+  try{ mrLiveEventPoll(); }catch(e){}
+})();
 
 function arRenderRules(){
   const box=$('arRules'); if(!box)return;
