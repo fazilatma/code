@@ -204,6 +204,15 @@ const AI_VOTES_FILE = __DIR__ . '/ai_votes.json';
 const NOTIF_STATE_FILE = __DIR__ . '/last_notification_check.json';
 /* v10.66 (۸۰): فیدِ رویدادهایِ زنده — مرورگر رویدادهایِ تازه را می‌خواند */
 const LIVE_FEED_FILE = __DIR__ . '/live_events_feed.json';
+/* v10.72 (86): Web Push — کلیدهای VAPID بخشی از کد هستند:
+   کلیدِ خصوصی روی سرور می‌ماند (امضای JWT) و کلیدِ عمومی به مرورگر
+   داده می‌شود (subscribe). تغییرِ کلید = تغییرِ کد — و اشتراک‌هایِ
+   کهنه با کلیدِ تازه به‌طورِ خودکار تازه‌سازی می‌شوند
+   (pushsubscriptionchange). */
+const PUSH_SUBS_FILE      = __DIR__ . '/push_subscriptions.json';
+const VAPID_PRIVATE_KEY_B64  = 'MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgsbGnrIvA/znDWZdBJQ6PFRRer8rMuPcoF4Vc6/dLRfmhRANCAAQWni5pMIvdeHj4dPYaNjmkDNH4NUbNyNxg3LC5NRliEs2okOqhrVcjuHveE9g7VXGSBTaZ9+Hv4C6wGpFerBWa';
+const VAPID_PUBLIC_KEY_B64URL = 'BBaeLmkwi914ePh09ho2OaQM0fg1Rs3I3GDcsLk1GWISzaiQ6qGtVyO4e94T2DtVcZIFNpn34e_gLrAakV6sFZo';
+const VAPID_SUBJECT = 'mailto:push@local';
 const BULKEDIT_PROGRESS_FILE = __DIR__ . '/bulkedit_progress.json';   // v8.62
 const BULKEDIT_RESULT_FILE   = __DIR__ . '/bulkedit_result.json';     // v8.62
 const PHOTOFIX_PROGRESS_FILE = __DIR__ . '/photofix_progress.json';   // v8.62
@@ -274,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.71';
+const APP_VERSION = '10.72';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7155,6 +7164,30 @@ self.addEventListener('message', e => {
     e.waitUntil(self.registration.showNotification(String(d.title), opt));
   }
 });
+self.addEventListener('push', e => {
+  /* v10.72 (86): اعلانِ واقعی — بیدارشونده از سمتِ سرور.
+     حتی وقتی صفحه/تب بسته است، اندروید/ویندوز با همین رویداد
+     سرویس‌ورکر را بیدار و اعلان را نمایش می‌دهد. */
+  let data = {};
+  try { data = (e.data && e.data.json()) || {}; } catch (err) {
+    try { data = { title: '🔔 اعلان', body: e.data ? e.data.text() : '' }; } catch (err2) {}
+  }
+  const opt = {
+    body: (data.body || '').toString(),
+    tag: data.tag || ('mr_live_' + Date.now()),
+    requireInteraction: !!data.requireInteraction,
+    data: { url: data.url || self.registration.scope }
+  };
+  if (data.icon) opt.icon = data.icon;
+  e.waitUntil(self.registration.showNotification(String(data.title || '🔔 اعلان'), opt));
+});
+self.addEventListener('pushsubscriptionchange', e => {
+  /* وقتی مرورگر کلیدهایِ اشتراک را عوض کند، اشتراکِ تازه خودکار ثبت شود */
+  e.waitUntil(self.registration.pushManager.getSubscription().then(sub => {
+    if (!sub) return;
+    return fetch('?push_resubscribe=1', { method: 'POST', body: JSON.stringify(sub.toJSON()) });
+  }).catch(() => {}));
+});
 self.addEventListener('notificationclick', e => {
   try { e.notification.close(); } catch (err) {}
   const url = (e.notification.data && e.notification.data.url) || self.registration.scope;
@@ -7166,6 +7199,41 @@ self.addEventListener('notificationclick', e => {
   }));
 });
 SWJS;
+    exit;
+}
+
+/* v10.72 (86): اندپوینت‌هایِ Web Push — ثبت/لغوِ اشتراک، تست، وضعیت */
+if (isset($_GET['push_subscribe']) || isset($_GET['push_resubscribe'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $rawIn = (string)@file_get_contents('php://input');
+    $subIn = json_decode($rawIn, true);
+    if (!is_array($subIn) || empty($subIn['endpoint']) || empty($subIn['keys']['p256dh']) || empty($subIn['keys']['auth'])) {
+        echo json_encode(['ok' => false, 'error' => 'اشتراک خوانا نیست'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    pushUpsertSub($subIn);
+    echo json_encode(['ok' => true, 'count' => count(pushLoadSubs())], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (isset($_GET['push_unsubscribe'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $rawIn = (string)@file_get_contents('php://input');
+    $subIn = json_decode($rawIn, true);
+    $ep = (string)($subIn['endpoint'] ?? ($_GET['endpoint'] ?? ''));
+    if ($ep !== '') pushDropSub($ep);
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (isset($_GET['push_test'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    $r = webpushSend('📡 تستِ Push', 'این اعلان مستقیم از سرور (نه از صفحه) فرستاده شد — اگر آن را دیدید، مسیرِ اعلان‌هایِ واقعی درست کار می‌کند.', 'push_test');
+    echo json_encode(['ok' => true] + $r + ($r['total'] === 0 ? ['error' => 'اشتراکی ثبت نشده — اول کلیدِ «📡 اعلانِ Push» را روشن کنید'] : []), JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (isset($_GET['push_status'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode(['ok' => true, 'count' => count(pushLoadSubs()),
+                      'public_key' => VAPID_PUBLIC_KEY_B64URL], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -24040,6 +24108,29 @@ if (isset($_GET['selftest'])) {
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
 
+    /* ==== ۸۶ (v10.72) ==== */
+    $add('10.72', 'نسخهٔ ۱۰.۷۲',
+         str_contains($selfSrc, "const APP_VERSION = '10.72';"));
+    $add('10.72', 'Web Push: موتورِ رمزگذاریِ RFC8291 + ارسالِ موازی',
+         strpos($selfSrc, 'function webpushBuildRequest(string $endpoint, array $keys, string $payloadJson): ?array {') !== false
+          && strpos($selfSrc, 'function webpushSend(string $title, string $body, ?string $kind = null): array {') !== false
+          && strpos($selfSrc, 'Content-Encoding: authE2048') !== false
+          && strpos($selfSrc, "const PUSH_SUBS_FILE      = __DIR__ . '/push_subscriptions.json';") !== false
+          && strpos($selfSrc, 'function pushHkdfExpand(string $prk, string $info, int $len): string {') !== false);
+    $add('10.72', 'سرویس‌ورکر: رویدادِ push + تجدیدنویسیِ خودکارِ اشتراک',
+         strpos($selfSrc, "self.addEventListener('push', e => {") !== false
+          && strpos($selfSrc, "self.addEventListener('pushsubscriptionchange', e => {") !== false
+          && strpos($selfSrc, "e.waitUntil(self.registration.showNotification(String(data.title || '🔔 اعلان'), opt));") !== false);
+    $add('10.72', 'بخشِ اعلان‌ها: کلید + تستِ Push (مستقیم از سرور)',
+         strpos($selfSrc, 'id="lnPush"') !== false
+          && strpos($selfSrc, 'id="lnPushStatus"') !== false
+          && strpos($selfSrc, 'onclick="mrLiveTestPush()"') !== false
+          && strpos($selfSrc, 'async function mrPushEnsure(){') !== false
+          && strpos($selfSrc, 'isset($_GET[' . "'push_test'" . '])') !== false);
+    $add('10.72', 'Push در کنارِ پیام‌رسان برایِ همهٔ رویدادها (لحظه‌ای + کران)',
+         strpos($selfSrc, 'در کنارِ پیام‌رسان، به دستگاهِ کاربر') !== false
+          && strpos($selfSrc, "\$out['push'] = webpushSend(\$_pt[\$feed] ?? '🔔 اعلان', mb_substr(\$msg, 0, 400), (string)\$feed);") !== false);
+
     /* ==== ۸۵ (v10.71) ==== */
     $add('10.71', 'نسخهٔ ۱۰.۷۱',
          str_contains($selfSrc, "const APP_VERSION = '10.71';"));
@@ -28817,6 +28908,201 @@ function liveFeedLoad(int $since = 0): array {
         return array_slice($ev, -80);
     } catch (Throwable $e) { return []; }
 }
+/* =====================================================================
+   v10.72 (86): Web Push — مسیرِ «واقعی»ِ اعلانِ سیستم.
+
+   چرا: اعلانِ سطحِ صفحه (new Notification یا showNotificationِ صدا
+   زده‌شده از صفحه) روی دسکتاپ خوب است، ولی روی اندروید وقتی کاربر
+   گوشی را قفل می‌کند یا اپ را عوض می‌کند، اندروید جاوااسکریپتِ صفحه
+   را در عرضِ چند ثانیه می‌کُشد — پس اعلان‌هایِ «واقعی» (رویدادهایی که
+   در زمانِ بسته‌بودنِ صفحه اتفاق می‌افتند) هرگز نمایش داده نمی‌شوند. Web Push تنها
+   مسیرِ مطمئن است: سرور اعلان را به سرویسِ push می‌فرستد، و سرویس
+   سرویس‌ورکرِ سایت را روی گوشیِ کاربر بیدار می‌کند و اعلان را
+   نمایش می‌دهد — حتی اگر صفحه هرگز باز نباشد.
+
+   چرخه: مرورگر با کلیدِ عمومیِ VAPID subscribe می‌کند و اشتراک روی
+   سرور ذخیره می‌شود (فایل push_subscriptions.json). با هر رویدادی که
+   باید به پیام‌رسان برود، webpushSend اعلان را به همهٔ اشتراک‌ها
+   می‌فرستد (curl_multi موازی، TTL کوتاه). رمزگذاری بر اساس RFC 8291
+   (authE2048): ECDH P-256 + HKDF + AES-128-GCM، امضای JWT با ES256.
+   ===================================================================== */
+function pushB64url($bytes): string {
+    return rtrim(strtr(base64_encode($bytes), '+/', '-_'), '=');
+}
+function pushB64urlDecode(string $s): ?string {
+    $b = strtr($s, '-_', '+/');
+    $pad = strlen($b) % 4;
+    if ($pad === 1) return null;
+    if ($pad === 2) $b .= '==';
+    elseif ($pad === 3) $b .= '=';
+    $raw = base64_decode($b, true);
+    return $raw === false ? null : $raw;
+}
+function pushSpkiFromRawPoint(string $raw65): string {
+    return "\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01"
+         . "\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00" . $raw65;
+}
+function pushEcdhRaw($privRes, string $peerSpkiDer): ?string {
+    $peerRes = openssl_pkey_get_public($peerSpkiDer);
+    if (!$peerRes || !$privRes) return null;
+    $ss = openssl_pkey_derive($peerRes, $privRes);
+    return ($ss === false || $ss === null) ? null : $ss;
+}
+function pushHkdfExpand(string $prk, string $info, int $len): string {
+    $t = ''; $tm = ''; $i = 1;
+    while (strlen($t) < $len) {
+        $tm = hash_hmac('sha256', $tm . $info . chr($i), $prk, true);
+        $t .= $tm; $i++;
+    }
+    return substr($t, 0, $len);
+}
+function pushAes128GcmEncrypt(string $key, string $iv, string $aad, string $pt): ?string {
+    $tag = '';
+    $ct = openssl_encrypt($pt, 'aes-128-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag, $aad, 16);
+    if ($ct === false || strlen($tag) !== 16) return null;
+    return $ct . $tag;
+}
+function pushLoadSubs(): array {
+    $d = json_decode((string)@file_get_contents(PUSH_SUBS_FILE), true);
+    return (is_array($d) && is_array($d['subs'] ?? null)) ? $d['subs'] : [];
+}
+function pushSaveSubs(array $subs): void {
+    @file_put_contents(PUSH_SUBS_FILE, json_encode(['subs' => $subs, 'at' => time()], JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+function pushUpsertSub(array $sub): void {
+    $subs = pushLoadSubs();
+    $ep = (string)($sub['endpoint'] ?? '');
+    $p256 = (string)($sub['keys']['p256dh'] ?? '');
+    $auth = (string)($sub['keys']['auth'] ?? '');
+    if ($ep === '' || $p256 === '' || $auth === '') return;
+    $subs[$ep] = ['endpoint' => $ep,
+                  'keys' => ['p256dh' => $p256, 'auth' => $auth],
+                  'at' => time()];
+    $subs = array_slice($subs, -30, null, true);   // سقف ۳۰ اشتراک
+    pushSaveSubs($subs);
+}
+function pushDropSub(string $endpoint): void {
+    $subs = pushLoadSubs();
+    if (isset($subs[$endpoint])) {
+        unset($subs[$endpoint]);
+        pushSaveSubs($subs);
+    }
+}
+function pushDerToRawSig(string $der): ?string {
+    if (strlen($der) < 8 || ord($der[0]) !== 0x30) return null;
+    $len = ord($der[1]);
+    if ($len < 2 || 2 + $len > strlen($der)) return null;
+    $i = 2; $parts = [];
+    for ($n = 0; $n < 2; $n++) {
+        if ($i + 2 > strlen($der) || ord($der[$i]) !== 0x02) return null;
+        $il = ord($der[$i + 1]);
+        if ($i + 2 + $il > strlen($der)) return null;
+        $val = substr($der, $i + 2, $il);
+        $val = ltrim($val, "\x00");
+        if (strlen($val) > 32) return null;
+        $parts[] = str_pad($val, 32, "\x00", STR_PAD_LEFT);
+        $i += 2 + $il;
+    }
+    return $parts[0] . $parts[1];
+}
+function webpushVapidJwt(string $aud): ?string {
+    $priv = openssl_pkey_get_private(base64_decode(VAPID_PRIVATE_KEY_B64));
+    if (!$priv) return null;
+    $h = pushB64url(json_encode(['typ' => 'JWT', 'alg' => 'ES256']));
+    $p = pushB64url(json_encode(['aud' => $aud, 'exp' => time() + 120, 'iat' => time(), 'sub' => VAPID_SUBJECT]));
+    $sigInput = $h . '.' . $p;
+    if (!openssl_sign($sigInput, $derSig, $priv, OPENSSL_ALGO_SHA256)) return null;
+    $raw = pushDerToRawSig($derSig);
+    if ($raw === null || strlen($raw) !== 64) return null;
+    return $sigInput . '.' . pushB64url($raw);
+}
+function webpushBuildRequest(string $endpoint, array $keys, string $payloadJson): ?array {
+    $detRaw = pushB64urlDecode((string)($keys['p256dh'] ?? ''));
+    $serverRaw = pushB64urlDecode(VAPID_PUBLIC_KEY_B64URL);
+    if ($detRaw === null || strlen($detRaw) !== 65 || $detRaw[0] !== "\x04") return null;
+    if (pushB64urlDecode((string)($keys['auth'] ?? '')) === null) return null;
+    if ($serverRaw === null || strlen($serverRaw) !== 65) return null;
+    $epriv = openssl_pkey_new(['curve_name' => 'prime256v1']);
+    if (!$epriv) return null;
+    $ss = pushEcdhRaw($epriv, pushSpkiFromRawPoint($detRaw));
+    if ($ss === null) return null;
+    $ccek        = hash_hkdf('sha256', $ss, '', 'Content Cryptography Key', 16, true);
+    $contentSalt = hash_hkdf('sha256', $ss, '', 'Content Salt', 16, true);
+    $headerSalt  = hash_hkdf('sha256', $ss, '', 'Header Salt', 16, true);
+    $iv = random_bytes(12);
+    $ct = pushAes128GcmEncrypt($ccek, $iv, $contentSalt, $payloadJson);
+    if ($ct === null) return null;
+    $body = $iv . $ct;
+    /* نقطهٔ ephemeral برای هدرها: P256ECWSK + r1/r2 */
+    $det = openssl_pkey_get_details($epriv);
+    $epubRaw = '';
+    if (is_array($det) && !empty($det['ec']['x']) && !empty($det['ec']['y'])) {
+        $x = ltrim($det['ec']['x'], "\x00");
+        $y = ltrim($det['ec']['y'], "\x00");
+        if (strlen($x) > 32 || strlen($y) > 32) return null;
+        $epubRaw = "\x04" . str_pad($x, 32, "\x00", STR_PAD_LEFT) . str_pad($y, 32, "\x00", STR_PAD_LEFT);
+    }
+    if (strlen($epubRaw) !== 65) return null;
+    $r1 = substr($epubRaw, 1, 32);
+    $r2 = substr($epubRaw, 33, 16);
+    $b64Server = pushB64url($serverRaw);
+    $b64User   = pushB64url($detRaw);
+    $aad = "BePush2.0\x01" . $r2 . $b64Server . $b64User . $endpoint . "\x00\x01";
+    $host = parse_url($endpoint, PHP_URL_HOST);
+    if (empty($host)) return null;
+    $jwt = webpushVapidJwt(parse_url($endpoint, PHP_URL_SCHEME) . '://' . $host);
+    if ($jwt === null) return null;
+    $headers = [
+        'Authorization: WebPush ' . $jwt,
+        'Content-Encoding: authE2048',
+        'Content-Length: ' . strlen($body),
+        'TTL: 60',
+        'Crypto-Key: keyid="",r1=' . pushB64url($r1) . ',r2=' . pushB64url($r2),
+        'P256ECWSK: ' . pushB64url($epubRaw),
+        'AAD: ' . pushB64url($aad),
+    ];
+    return ['headers' => $headers, 'body' => $body];
+}
+function webpushSend(string $title, string $body, ?string $kind = null): array {
+    $subs = pushLoadSubs();
+    if (!$subs) return ['sent' => 0, 'failed' => 0, 'total' => 0];
+    $payload = json_encode(['title' => $title, 'body' => $body,
+                            'kind' => $kind ?? '', 'tag' => 'mr_push_' . ($kind ?? 'event'),
+                            'requireInteraction' => true, 'at' => time()], JSON_UNESCAPED_UNICODE);
+    $mh = curl_multi_init();
+    $handles = []; $drop = [];
+    foreach ($subs as $ep => $sub) {
+        $req = webpushBuildRequest((string)$sub['endpoint'], (array)($sub['keys'] ?? []), $payload);
+        if ($req === null) { $drop[] = (string)$ep; continue; }
+        $ch = curl_init((string)$sub['endpoint']);
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true, CURLOPT_POSTFIELDS => $req['body'],
+            CURLOPT_HTTPHEADER => $req['headers'],
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8,
+            CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_SSL_VERIFYPEER => true,
+        ]);
+        curl_multi_add_handle($mh, $ch);
+        $handles[(string)$ep] = $ch;
+    }
+    $sent = 0; $failed = 0;
+    if ($handles) {
+        do {
+            $act = curl_multi_exec($mh, $running);
+            if ($running > 0) curl_multi_select($mh, 0.2);
+        } while ($running > 0);
+        foreach ($handles as $ep => $ch) {
+            $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+            if (in_array($code, [404, 410], true)) $drop[] = $ep;
+            elseif ($code >= 200 && $code < 300) $sent++;
+            else $failed++;
+            curl_multi_remove_handle($mh, $ch);
+            curl_close($ch);
+        }
+    }
+    curl_multi_close($mh);
+    if ($drop) { foreach (array_unique($drop) as $d) pushDropSub($d); }
+    return ['sent' => $sent, 'failed' => $failed, 'total' => count($subs)];
+}
 function notifSend(array $cn, string $msg, ?string $feed = null): array {
     $out = [];
     $bt = $cn['baleh']['token'] ?? '';  $bc = $cn['baleh']['chat_id'] ?? '';
@@ -28825,6 +29111,18 @@ function notifSend(array $cn, string $msg, ?string $feed = null): array {
     if ($rt !== '' && $rc !== '')  $out['rubika'] = bslSendToRubika($rt, $rc, $msg) ? 'sent' : 'fail';
     if (!$out) $out['none'] = 'no_messenger';
     if ($feed !== null) liveFeedPush($feed, $msg);   /* v10.66 (۸۰) */
+    /* v10.72 (86): Web Push — در کنارِ پیام‌رسان، به دستگاهِ کاربر.
+       رویدادها چه «لحظه‌ای» (درخواستِ مرورگر) باشند چه «کران‌جاب» —
+       هر دو از همین تابع رد می‌شوند، پس هر دو Push می‌شوند. */
+    if ($feed !== null && is_file(PUSH_SUBS_FILE)) {
+        try {
+            $_pt = ['order' => '🛒 سفارش', 'product' => '📦 محصول', 'price' => '💰 قیمت/موجودی',
+                    'sync' => '🔄 همگام‌سازی', 'report' => '📄 گزارش', 'error' => '⚠️ خطا',
+                    'retire' => '🗂 بازنشستگی', 'remind' => '⏰ یادآوری', 'ar' => '↩️ پاسخ خودکار',
+                    'ping' => '💓 کران زنده است', 'digest' => '📊 خلاصه'];
+            $out['push'] = webpushSend($_pt[$feed] ?? '🔔 اعلان', mb_substr($msg, 0, 400), (string)$feed);
+        } catch (Throwable $e) {}
+    }
     return $out;
 }
 
@@ -45063,9 +45361,12 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="crow"><label>فاصلهٔ چک:</label><input type="number" id="lnPoll" value="5" min="3" style="max-width:70px" dir="ltr"><span style="font-size:10px;color:#64748b">ثانیه (حداقل ۳)</span></div>
 <div class="crow"><label>خودکار ببند بعد:</label><input type="number" id="lnTtl" value="30" min="5" style="max-width:70px" dir="ltr"><span style="font-size:10px;color:#64748b">ثانیه (حداقل ۵)</span></div>
 <div class="crow"><label>صدایِ کارت:</label><input type="checkbox" id="lnSound" checked style="width:16px;height:16px"></div>
+<!-- v10.72 (86): کلیدِ اعلانِ Push (Web Push) — زندهٔ کامل، حتی با صفحهٔ بسته -->
+<div class="crow"><label>📡 اعلانِ Push (زندهٔ کامل — حتی وقتی صفحه بسته است):</label><input type="checkbox" id="lnPush" style="width:16px;height:16px"><span id="lnPushStatus" style="font-size:9px;color:#64748b;margin-left:6px"></span></div>
 <div style="display:flex;gap:6px;margin-top:6px">
 <button class="btn btn-gray" onclick="mrLiveTestCard()" style="font-size:10px;padding:4px 10px">🧪 تستِ کارت</button>
 <button class="btn btn-gray" onclick="mrLiveTestSys()" style="font-size:10px;padding:4px 10px">🔔 تستِ اعلانِ سیستم</button>
+<button class="btn btn-gray" onclick="mrLiveTestPush()" style="font-size:10px;padding:4px 10px" title="اعلان را مستقیم از سرور می‌فرستد — امتحانِ مسیرِ واقعی">📡 تستِ Push</button>
 </div>
 <!-- v10.68 (82): خطِ تشخیصِ زندهٔ اعلانِ سیستم — می‌گوید زنجیره کجا شکسته -->
 <div id="lnSysDiag" style="font-size:10px;color:#94a3b8;line-height:1.7;margin-top:5px"></div>
@@ -51479,6 +51780,13 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.72', t:'📡 اعلانِ سیستمِ واقعی: Web Push — حتی وقتی صفحه بسته است', items:[
+    '📡 <b>چرا تست می‌آمد ولی اعلان‌هایِ واقعی نمی‌آمد:</b> اعلانِ سطحِ صفحه را خودِ صفحهٔ مرورگر می‌سازد؛ اما روی اندروید، وقتی گوشی قفل می‌شود یا اپ عوض می‌شود، کدِ صفحه در چند ثانیه می‌میرد — پس رویدادهایی که در زمانِ بسته‌بودنِ صفحه اتفاق می‌افتد (سفارش، قیمت، کران‌جاب) هیچ‌وقت اعلان نمی‌شدند. <b>Web Push</b> تنها مسیرِ مطمئن است: <b>سرور</b> اعلان را به سرویسِ push (گوگل) می‌فرستد و آن سرویس، سرویس‌ورکرِ سایت را روی گوشی شما بیدار و اعلان را نمایش می‌دهد — حتی اگر صفحه هرگز باز نباشد.',
+    '🔗 <b>در کنارِ پیام‌رسان + متصل به کران‌جاب:</b> هر رویدادی که تا حالا به پیام‌رسان می‌رفت (سفارش، محصول، قیمت/موجودی، گزارشِ همگام‌سازی، خطا، بازنشستگی، یادآوری، پاسخِ خودکار، پینگِ کران) حالا <b>هم‌زمان</b> به دستگاه‌هایِ ثبت‌شدهٔ شما Web Push می‌شود — چه لحظه‌ای در مرورگر رخ بدهد چه در کران‌جاب.',
+    '🎛 <b>راه‌اندازی:</b> در بخشِ «🔔 اعلان‌ها» کلیدِ «📡 اعلانِ Push» را روشن کنید و Allow بزنید (با روشن‌شدن، یک تستِ خودکار هم می‌فرستد)؛ دکمهٔ «📡 تستِ Push» اعلان را <b>مستقیم از سرور</b> می‌فرستد — یعنی امتحانِ همان مسیری که اعلان‌هایِ واقعی می‌روند، نه امتحانِ صفحه.',
+    '🔑 <b>بدونِ فایلِ اضافه و بدونِ سرویسِ خارجی:</b> کلیدهایِ VAPID بخشی از کد هستند (خصوصی روی سرور، عمومی در مرورگر)، سرویس‌ورکر همان‌طور از خودِ فایل می‌آید، و اگر مرورگر کلیدهایِ اشتراک را عوض کند، اشتراک به‌طورِ خودکار تازه می‌شود.',
+    '📌 <b>محدودیتِ شناخته‌شده:</b> Web Push فقط روی <b>HTTPS</b> و مرورگرهایِ دسکتاپ/اندرویدِ کروم‌پایه (و فایرفاکس دسکتاپ) کار می‌کند؛ سافاریِ iOS همچنان هیچ‌کدام از این مسیرها را ندارد.',
+  ]},
   {v:'10.71', t:'🛟 اصلاح دسته‌بندی: روشِ چهارم — زنجیرهٔ پشتیبان (مستر ← کاندیدها)', items:[
     '🛟 <b>روشِ چهارم در دراپ‌داونِ «🧭 روشِ تشخیصِ دسته»:</b> «زنجیرهٔ پشتیبان (مستر ← کاندیدها)» — اول از مدلِ <b>مستر</b> می‌پرسد؛ اگر <b>خطا</b> داد (شبکه، سقفِ درخواست، خرابیِ مدل) یا <b>دستهٔ معتبر</b> نداد، <b>کاندیدهایِ دیگر</b> را <b>به‌ترتیب</b> امتحان می‌کند تا اولین جوابِ معتبر به دست بیاید و اعمال شود.',
     '📜 <b>لاگِ شفافِ زنجیره:</b> هر مرحلهٔ زنجیره در لاگِ اجرا نوشته می‌شود — «🛟 زنجیرهٔ پشتیبان — مستر: [خطا] → ارائه‌دهنده/مدل ✗ → ارائه‌دهنده/مدل ✓» — و در خلاصهٔ آخر می‌بینی «نجات‌یافته با زنجیره: N».',
@@ -56071,6 +56379,70 @@ function mrSwUpdateDiag(){
   }catch(e){}
 }
 function mrSysDiagRender(){mrSwUpdateDiag();}   // v10.69 (83): حالا وضعیتِ سرویس‌ورکر را هم نشان می‌دهد
+/* v10.72 (86): Web Push — اعلانِ واقعی، حتی وقتی صفحه بسته است.
+   کلیدِ عمومیِ VAPID از سرور می‌آید؛ اشتراک روی سرور ذخیره می‌شود؛
+   رویدادها (لحظه‌ای و کران) از سمتِ سرور push می‌شوند. */
+const MR_VAPID_KEY='<?= VAPID_PUBLIC_KEY_B64URL ?>';
+function mrB64UrlToBytes(str){
+  try{
+    const b64=String(str).replace(/-/g,'+').replace(/_/g,'/');
+    const pad=b64.length%4===2?'==':(b64.length%4===3?'=':'');
+    const bin=atob(b64+pad);
+    const u=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);
+    return u;
+  }catch(e){return null;}
+}
+async function mrPushSub(){
+  const reg=await mrSwReady();
+  if(!reg||!reg.pushManager)return null;
+  try{
+    let sub=await reg.pushManager.getSubscription();
+    if(sub)return sub;
+    const key=mrB64UrlToBytes(MR_VAPID_KEY);
+    if(!key)return null;
+    sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
+    if(sub)await fetch('?push_subscribe=1',{method:'POST',body:JSON.stringify(sub.toJSON())});
+    return sub;
+  }catch(e){return null;}
+}
+async function mrPushUnsub(){
+  try{
+    const reg=await mrSwReady();
+    if(!reg||!reg.pushManager)return;
+    const sub=await reg.pushManager.getSubscription();
+    if(!sub)return;
+    const ep=sub.endpoint;
+    if(await sub.unsubscribe())await fetch('?push_unsubscribe=1',{method:'POST',body:JSON.stringify({endpoint:ep})});
+  }catch(e){}
+}
+async function mrPushEnsure(){
+  try{
+    if(localStorage.getItem('mr_push_on')!=='1')return;
+    if(typeof Notification==='undefined'){mrPushStatusRender('none');return;}
+    if(Notification.permission!=='granted'){try{await Notification.requestPermission();}catch(e){}}
+    if(Notification.permission!=='granted'){mrPushStatusRender('deny');return;}
+    const sub=await mrPushSub();
+    mrPushStatusRender(sub?'on':'off');
+  }catch(e){mrPushStatusRender('off');}
+}
+function mrPushStatusRender(state){
+  try{
+    const el=$('lnPushStatus');if(!el)return;
+    const m={on:['✅ فعال — اعلان‌ها مستقیم از سرور می‌آیند','#4ade80'],
+             off:['⚪ غیرفعال','#64748b'],
+             deny:['⛔ اجازهٔ اعلان رد شده','#f87171'],
+             none:['🔒 فقط روی HTTPS','#fbbf24']};
+    const t=m[state]||m.off;
+    el.textContent=t[0];el.style.color=t[1];
+  }catch(e){}
+}
+function mrLiveTestPush(){
+  fetch('?push_test=1').then(r=>r.json()).then(d=>{
+    if(d.ok&&d.total>0)showToast('📡 '+toFa(d.sent||0)+' اعلانِ Push از سرور فرستاده شد — گوشهٔ صفحه/گوشی را نگاه کنید',0);
+    else showToast('❌ '+((d&&d.error)||'فرستادن نشد — اشتراکی ثبت نشده است'),1);
+  }).catch(()=>showToast('❌ خطای شبکه',1));
+}
 async function mrFireSysNotif(title,body){
   if(typeof Notification==='undefined'||Notification.permission!=='granted')return;
   const ic=mrSysIcon();
@@ -56161,6 +56533,30 @@ function mrLiveSettingsLoad(){
     const elP=g('lnPoll'); if(elP)elP.addEventListener('change',()=>{try{localStorage.setItem('mr_live_poll',String(Math.max(3,parseInt(elP.value,10)||5)));}catch(e){}});
     const elT=g('lnTtl'); if(elT)elT.addEventListener('change',()=>{try{localStorage.setItem('mr_live_ttl',String(Math.max(5,parseInt(elT.value,10)||30)));}catch(e){}});
     const elSd=g('lnSound'); if(elSd)elSd.addEventListener('change',()=>{try{localStorage.setItem('mr_live_sound',elSd.checked?'1':'0');}catch(e){}});
+    /* v10.72 (86): سیم‌کشیِ کلیدِ اعلانِ Push */
+    const elPs=g('lnPush');
+    if(elPs){
+      elPs.checked=localStorage.getItem('mr_push_on')==='1';
+      elPs.addEventListener('change',async()=>{
+        try{
+          if(elPs.checked){
+            if(typeof Notification==='undefined'){elPs.checked=false;mrPushStatusRender('none');showToast('این مرورگر اعلانِ Push را پشتیبانی نمی‌کند (فقط HTTPS)',1);return;}
+            if(Notification.permission!=='granted'){try{await Notification.requestPermission();}catch(e){}}
+            if(Notification.permission!=='granted'){elPs.checked=false;mrPushStatusRender('deny');showToast('دسترسیِ اعلان را بدهید',1);return;}
+            localStorage.setItem('mr_push_on','1');
+            const sub=await mrPushSub();
+            mrPushStatusRender(sub?'on':'off');
+            if(sub){mrLiveTestPush();}
+            else showToast('❌ ثبتِ اشتراکِ Push ممکن نشد — دوباره امتحان کنید',1);
+          }else{
+            localStorage.setItem('mr_push_on','0');
+            await mrPushUnsub();
+            mrPushStatusRender('off');
+            showToast('📡 اعلانِ Push خاموش شد',0);
+          }
+        }catch(e){}
+      });
+    }
     mrSysDiagRender();   // v10.68 (82): خطِ تشخیص همان لحظهٔ بارگذاری هم دیده شود
   }catch(e){}
 }
@@ -56168,6 +56564,7 @@ function mrLiveSettingsLoad(){
 setTimeout(mrNotifPoll,2500);
 mrLiveSettingsLoad();
 mrSwReady();   // v10.69 (83): سرویس‌ورکر همان لحظهٔ بارگذاری صفحه ثبت می‌شود
+setTimeout(()=>{ try{ if(localStorage.getItem('mr_push_on')==='1') mrPushEnsure(); }catch(e){} }, 4000);   // v10.72 (86)
 (function mrNotifLoop(){
   try{ setTimeout(mrNotifPoll, Math.max(3000, mrLiveCfg().poll*1000)); }
   catch(e){ setTimeout(mrNotifPoll, 5000); }
