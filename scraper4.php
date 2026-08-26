@@ -283,7 +283,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.77';
+const APP_VERSION = '10.78';
 const APP_VERSION_DATE = '1405/06/04';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -7240,7 +7240,7 @@ if (isset($_GET['push_status'])) {
     echo json_encode(['ok' => true, 'count' => count(pushLoadSubs()),
                       'public_key' => VAPID_PUBLIC_KEY_B64URL,
                       'route' => ['proxy' => $__prC['proxy'], 'worker_url' => $__prC['worker'], 'worker_token' => $__prC['token'], 'site_source' => (string)($__prC['site_source'] ?? '')],
-                      'najva' => is_array($__cnSt['najva'] ?? null) ? $__cnSt['najva'] : ['enabled' => false]], JSON_UNESCAPED_UNICODE);
+                      'najva_script' => (string)($__cnSt['najva_script'] ?? '')], JSON_UNESCAPED_UNICODE);
     exit;
 }
 /* v10.74 (88): ذخیرهٔ مسیرِ Push — پراکسیِ خارجی و/یا Workerِ واسط */
@@ -7255,16 +7255,10 @@ if (isset($_GET['push_route_save'])) {
     if (trim((string)($cnPr['push_route']['worker_token'] ?? '')) === '') {
         $cnPr['push_route']['worker_token'] = bin2hex(random_bytes(16));
     }
-    /* v10.77 (91): تنظیماتِ کانالِ نجوا — فقط وقتی کلاینت کلیدِ najva فرستاده */
-    if (array_key_exists('najva', $rawPr)) {
-        $nvIn = is_array($rawPr['najva']) ? $rawPr['najva'] : [];
-        $nvBase = trim((string)($nvIn['base'] ?? ''));
-        if ($nvBase !== '' && !preg_match('#^https://#i', $nvBase)) $nvBase = '';
-        $cnPr['najva'] = ['enabled' => !empty($nvIn['enabled']),
-                          'base' => $nvBase === '' ? 'https://api.najva.com' : $nvBase,
-                          'token' => trim((string)($nvIn['token'] ?? '')),
-                          'api_key' => trim((string)($nvIn['api_key'] ?? '')),
-                          'url' => trim((string)($nvIn['url'] ?? ''))];
+    /* v10.78 (92): اسکریپتِ هدرِ نجوا — جایگزینِ تنظیماتِ API */
+    if (array_key_exists('najva_script', $rawPr)) {
+        $cnPr['najva_script'] = (string)($rawPr['najva_script'] ?? '');
+        unset($cnPr['najva']);   // تنظیماتِ قدیمیِ API پاک می‌شود
     }
     $cnPr['push_route'] = ['proxy' => $proxy, 'worker_url' => $worker, 'worker_token' => (string)$cnPr['push_route']['worker_token']];
     if (!saveConnections($cnPr)) { echo json_encode(['ok' => false, 'error' => 'ذخیرهٔ تنظیماتِ مسیر ممکن نشد'], JSON_UNESCAPED_UNICODE); exit; }
@@ -11480,6 +11474,8 @@ if (isset($_POST['ai_net'])) {
 
 if (isset($_POST['baleh'])) { $bl = json_decode($_POST['baleh'], true) ?: []; $conn['baleh'] = ['enabled'=>!empty($bl['enabled']),'token'=>trim($bl['token']??''),'chat_id'=>trim($bl['chat_id']??'')]; }
 if (isset($_POST['rubika'])) { $rb = json_decode($_POST['rubika'], true) ?: []; $conn['rubika'] = ['enabled'=>!empty($rb['enabled']),'token'=>trim($rb['token']??''),'chat_id'=>trim($rb['chat_id']??'')]; }
+/* v10.78 (92): تلگرام — سومین پیام‌رسان، با همان ساختار بله/روبیکا */
+if (isset($_POST['telegram'])) { $tgm = json_decode($_POST['telegram'], true) ?: []; $conn['telegram'] = ['enabled'=>!empty($tgm['enabled']),'token'=>trim($tgm['token']??''),'chat_id'=>trim($tgm['chat_id']??'')]; }
 if (isset($_POST['notif_events'])) { $ne = json_decode($_POST['notif_events'], true) ?: []; $conn['notif_events'] = ['order_new'=>!empty($ne['order_new']),'order_status'=>!empty($ne['order_status']),'chat_msg'=>!empty($ne['chat_msg']),'product_status'=>!empty($ne['product_status']),'product_new'=>!empty($ne['product_new']),'order_refund'=>!empty($ne['order_refund']),'src_price'=>!empty($ne['src_price']),'src_stock'=>!empty($ne['src_stock']),'run_fail'=>!empty($ne['run_fail']),'retire'=>!empty($ne['retire']),'cron_ping'=>!empty($ne['cron_ping']),/* v10.35 (۴۷د): گزارشِ همگام‌سازی — پیش‌فرض روشن، پس نبودِ کلید یعنی روشن */'sync_report'=>!isset($ne['sync_report'])||!empty($ne['sync_report'])]; }
 /* v10.46 (۶۰): انتخاب غرفه برای رویداد «پیام مشتری» — 0 = همهٔ غرفه‌ها */
 if (isset($_POST['notif_chat_shop'])) $conn['notif_chat_shop'] = max(0, (int)$_POST['notif_chat_shop']);
@@ -16519,8 +16515,9 @@ if (isset($_GET['notif_health'])) {
     // ۱) پیام‌رسان تنظیم است؟
     $hasBaleh  = trim((string)($cnH['baleh']['token'] ?? '')) !== '' && trim((string)($cnH['baleh']['chat_id'] ?? '')) !== '';
     $hasRubika = trim((string)($cnH['rubika']['token'] ?? '')) !== '' && trim((string)($cnH['rubika']['chat_id'] ?? '')) !== '';
-    $add('messenger', $hasBaleh || $hasRubika,
-         ($hasBaleh || $hasRubika) ? ('پیام‌رسان فعال: ' . trim(($hasBaleh ? 'بله ' : '') . ($hasRubika ? 'روبیکا' : '')))
+    $hasTelegram = trim((string)($cnH['telegram']['token'] ?? '')) !== '' && trim((string)($cnH['telegram']['chat_id'] ?? '')) !== '';   // v10.78 (92)
+    $add('messenger', $hasBaleh || $hasRubika || $hasTelegram,
+         ($hasBaleh || $hasRubika || $hasTelegram) ? ('پیام‌رسان فعال: ' . trim(($hasBaleh ? 'بله ' : '') . ($hasRubika ? 'روبیکا ' : '') . ($hasTelegram ? 'تلگرام' : '')))
                                    : 'هیچ پیام‌رسانی تنظیم نشده (توکن یا شناسهٔ چت خالی است)');
 
     /* ۲) پیش‌نیازهای اعلانِ باسلام (سفارش/چت/محصول).
@@ -23879,7 +23876,7 @@ if (isset($_GET['selftest'])) {
       && strpos($selfSrc, "if (!empty(\$_lp['sent']))          \$lockOut['ping'] = 'sent';") !== false);
 
     $add('10.22', 'پینگِ دوره‌ای به توکنِ باسلام وابسته نیست',
-         strpos($selfSrc, "if (!\$_hasMsgr) return ['ok' => false, 'error' => 'هیچ پیام‌رسانی تنظیم نشده (بله یا روبیکا)'];") !== false
+         strpos($selfSrc, "if (!\$_hasMsgr) return ['ok' => false, 'error' => 'هیچ پیام‌رسانی تنظیم نشده (بله/روبیکا/تلگرام)'];") !== false
       && strpos($selfSrc, "\$_hasMsgr = (trim((string)(\$cn['baleh']['token'] ?? '')) !== ''") !== false);
 
     $add('10.22', 'پنجرهٔ throttle فقط با ارسالِ موفق مصرف می‌شود',
@@ -24262,13 +24259,26 @@ if (isset($_GET['selftest'])) {
     /* ==== ۹۱ (v10.77) ==== */
     $add('10.77', 'نسخهٔ ۱۰.۷۷',
          str_contains($selfSrc, "const APP_VERSION = '10.77';"));
-    $add('10.77', 'نجوا: کانالِ مستقل به مشترکینِ موجودِ سایت (API v1/notifications)',
-         strpos($selfSrc, 'function pushNajvaSend(') !== false
-          && strpos($selfSrc, 'api/v1/notifications') !== false
-          && strpos($selfSrc, 'id="najvaOn"') !== false);
-    $add('10.77', 'نتیجهٔ نجوا در گزارشِ تستِ Push و تنظیماتش در push_status',
-         strpos($selfSrc, 'd.najva') !== false
-          && strpos($selfSrc, "'najva' => is_array(\$__cnSt['najva']") !== false);
+    /* v10.78 (92): روشِ نجوا به «اسکریپتِ هدر» تغییر کرد (مستنداتِ رسمی) */
+    $add('10.77', 'نجوا: اسکریپتِ هدر (جایگزینِ تنظیماتِ API) — کادر + ذخیره + تزریقِ head',
+         strpos($selfSrc, 'id="najvaScript"') !== false
+          && strpos($selfSrc, 'najva_script') !== false
+          && strpos($selfSrc, '__nvSc') !== false
+          && strpos($selfSrc, "d.najva_script") !== false);
+
+    /* ==== ۹۲ (v10.78) ==== */
+    $add('10.78', 'نسخهٔ ۱۰.۷۸',
+         str_contains($selfSrc, "const APP_VERSION = '10.78';"));
+    $add('10.78', 'تلگرام: تنظیمات + ارسالِ رویدادها + دکمهٔ تست',
+         strpos($selfSrc, 'function bslSendToTelegram(') !== false
+          && strpos($selfSrc, 'id="telegramToken"') !== false
+          && strpos($selfSrc, "testNotif('telegram')") !== false
+          && strpos($selfSrc, "'telegram'] = ") !== false);
+    $add('10.78', 'روبیکا/تلگرام: خطایِ دقیق (HTTP code + پیامِ سرویس) در تست و ارسال',
+         strpos($selfSrc, "'ok' => true, 'code' => ") !== false
+          && strpos($selfSrc, 'خطای شبکه: ') !== false);
+    $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
+         substr_count($selfSrc, "telegram']['token']") >= 8);
 
     /* ==== ۸۵ (v10.71) ==== */
     $add('10.71', 'نسخهٔ ۱۰.۷۱',
@@ -28818,7 +28828,7 @@ if (isset($_GET['selftest'])) {
         'نگهبان صف'           => (!isset($cnS['stall_watchdog']) || !empty($cnS['stall_watchdog'])) ? 'فعال' : 'خاموش',
         'آستانهٔ گیر کردن'    => (int)($cnS['stall_after'] ?? 300) . ' ثانیه',
         'توکن باسلام'         => trim((string)($cnS['basalam']['token'] ?? '')) !== '' ? 'تنظیم شده' : '— خالی',
-        'پیام‌رسان'           => (!empty($cnS['baleh']['token']) || !empty($cnS['rubika']['token'])) ? 'تنظیم شده' : '— خالی',
+        'پیام‌رسان'           => (!empty($cnS['baleh']['token']) || !empty($cnS['rubika']['token']) || !empty($cnS['telegram']['token'])) ? 'تنظیم شده' : '— خالی',
     ];
 
     $okCount = 0;
@@ -29307,55 +29317,9 @@ function pushSendRound(array $pending, array $routeCfg, array $viaCfg, string $v
     curl_multi_close($mh);
     return $left;
 }
-/** v10.77 (91): نجوا — کانالِ مستقل به مشترکینِ موجودِ سایت.
-    سرویسِ ایرانی است، از هاست‌هایِ ایران بدونِ پراکسی در دسترس است و
-    بدونِ اینکه اشتراکِ جداگانه‌ای بگیریم، به همهٔ کسانی می‌رسد که از
-    اسکریپتِ نجوا روی سایت عضو شده‌اند. بازگشت: null = غیرفعال/تنظیم
-    نشده؛ وگرنه آرایهٔ {ok, code, error}. */
-function pushNajvaSend(string $title, string $body, ?array $cn): ?array {
-    $cn = $cn ?: loadConnections();
-    $nv = is_array($cn['najva'] ?? null) ? $cn['najva'] : [];
-    $tok = trim((string)($nv['token'] ?? ''));
-    $key = trim((string)($nv['api_key'] ?? ''));
-    if (empty($nv['enabled']) || $tok === '' || $key === '') return null;
-    $base = rtrim(trim((string)($nv['base'] ?? '')), '/');
-    if ($base === '') $base = 'https://api.najva.com';
-    if (substr($base, -13) !== '/notifications') $base .= '/api/v1/notifications';
-    $url = trim((string)($nv['url'] ?? ''));
-    if ($url === '') {
-        $host = (string)($_SERVER['HTTP_HOST'] ?? '');
-        $url = $host !== '' ? 'https://' . $host : '';
-    }
-    $payload = ['api_key' => $key, 'title' => $title, 'body' => mb_substr($body, 0, 500)];
-    if ($url !== '') $payload['url'] = $url;
-    $post = json_encode($payload, JSON_UNESCAPED_UNICODE);
-    $try = function (array $headers) use ($base, $post): array {
-        $ch = curl_init($base);
-        curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $post, CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 25, CURLOPT_CONNECTTIMEOUT => 10, CURLOPT_SSL_VERIFYPEER => true]);
-        $resp = (string)curl_exec($ch);
-        $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-        $err = (string)curl_error($ch);
-        curl_close($ch);
-        return [$code, $resp, $err];
-    };
-    /* مرسومِ مستنداتِ نجوا: Authorization: Token "<توکن>"; اگر 401 شد،
-       یک بار هم به‌صورتِ ساده امتحان می‌شود. */
-    [$code, $resp, $err] = $try(['Content-Type: application/json', 'Accept: application/json', 'Authorization: Token "' . $tok . '"']);
-    if ($code === 401) [$code, $resp, $err] = $try(['Content-Type: application/json', 'Accept: application/json', 'Authorization: ' . $tok]);
-    $detail = '';
-    $j = json_decode($resp, true);
-    if (is_array($j)) $detail = (string)($j['detail'] ?? ($j['message'] ?? ($j['error'] ?? '')));
-    if ($code < 200 || $code >= 300) {
-        if ($detail === '') $detail = $err !== '' ? $err : (mb_substr($resp, 0, 160) ?: 'پاسخی نیامد');
-        return ['ok' => false, 'code' => $code, 'error' => $detail];
-    }
-    return ['ok' => true, 'code' => $code, 'error' => $detail !== '' ? $detail : 'درِ صفِ ارسالِ نجوا گذاشته شد'];
-}
 function webpushSend(string $title, string $body, ?string $kind = null, ?array $cn = null): array {
-    /* v10.77 (91): کانالِ دومِ مستقل — نجوا به همهٔ مشترکینِ سایت */
     $subs = pushLoadSubs();
-    if (!$subs) return ['sent' => 0, 'failed' => 0, 'total' => 0, 'detail' => [], 'najva' => pushNajvaSend($title, $body, $cn)];
+    if (!$subs) return ['sent' => 0, 'failed' => 0, 'total' => 0, 'detail' => []];
     $payload = json_encode(['title' => $title, 'body' => $body,
                             'kind' => $kind ?? '', 'tag' => 'mr_push_' . ($kind ?? 'event'),
                             'requireInteraction' => true, 'at' => time()], JSON_UNESCAPED_UNICODE);
@@ -29389,15 +29353,16 @@ function webpushSend(string $title, string $body, ?string $kind = null, ?array $
         if ($c >= 200 && $c < 300) $sent++;
         else $failed++;
     }
-    return ['sent' => $sent, 'failed' => $failed, 'total' => count($subs), 'detail' => $detail,
-            'najva' => pushNajvaSend($title, $body, $cn)];
+    return ['sent' => $sent, 'failed' => $failed, 'total' => count($subs), 'detail' => $detail];
 }
 function notifSend(array $cn, string $msg, ?string $feed = null): array {
     $out = [];
     $bt = $cn['baleh']['token'] ?? '';  $bc = $cn['baleh']['chat_id'] ?? '';
     $rt = $cn['rubika']['token'] ?? ''; $rc = $cn['rubika']['chat_id'] ?? '';
+    $tt = $cn['telegram']['token'] ?? ''; $tc = $cn['telegram']['chat_id'] ?? '';   // v10.78 (92): تلگرام
     if ($bt !== '' && $bc !== '')  $out['baleh']  = bslSendToBaleh($bt, $bc, $msg) ? 'sent' : 'fail';
-    if ($rt !== '' && $rc !== '')  $out['rubika'] = bslSendToRubika($rt, $rc, $msg) ? 'sent' : 'fail';
+    if ($rt !== '' && $rc !== '')  { $rr = bslSendToRubika($rt, $rc, $msg); $out['rubika'] = $rr['ok'] ? 'sent' : 'fail'; if (!$rr['ok'] && $rr['error'] !== '') $out['rubika_err'] = $rr['error']; }
+    if ($tt !== '' && $tc !== '')  { $tr = bslSendToTelegram($tt, $tc, $msg); $out['telegram'] = $tr['ok'] ? 'sent' : 'fail'; if (!$tr['ok'] && $tr['error'] !== '') $out['telegram_err'] = $tr['error']; }
     if (!$out) $out['none'] = 'no_messenger';
     if ($feed !== null) liveFeedPush($feed, $msg);   /* v10.66 (۸۰) */
     /* v10.72 (86): Web Push — در کنارِ پیام‌رسان، به دستگاهِ کاربر.
@@ -29436,8 +29401,9 @@ function notifCronPing(array $cn, array $results, bool $force = false): array {
        (vendor_id اصلی صفر)، پیامِ دوره‌ای‌اش کاملاً قطع می‌شد — دقیقاً
        همان «اعلان‌ها نمی‌آیند»، بدون هیچ ردی در گزارش. */
     $_hasMsgr = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
-             || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '');
-    if (!$_hasMsgr) return ['ok' => false, 'error' => 'هیچ پیام‌رسانی تنظیم نشده (بله یا روبیکا)'];
+             || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '')
+             || (trim((string)($cn['telegram']['token'] ?? '')) !== '' && trim((string)($cn['telegram']['chat_id'] ?? '')) !== '');   // v10.78 (92)
+    if (!$_hasMsgr) return ['ok' => false, 'error' => 'هیچ پیام‌رسانی تنظیم نشده (بله/روبیکا/تلگرام)'];
 
     $everyMin = (int)($cn['ping_every'] ?? 360);   // دقیقه
     $st  = notifLoadState();
@@ -29597,8 +29563,9 @@ function notifPrereq(array $cn): ?string {
     if (trim((string)($cn['basalam']['token'] ?? '')) === '') return 'توکن باسلام تنظیم نشده';
     if ((int)($cn['basalam']['vendor_id'] ?? 0) <= 0)         return 'شناسهٔ غرفه تنظیم نشده';
     $hasMsgr = (!empty($cn['baleh']['token']) && !empty($cn['baleh']['chat_id']))
-            || (!empty($cn['rubika']['token']) && !empty($cn['rubika']['chat_id']));
-    if (!$hasMsgr) return 'هیچ پیام‌رسانی تنظیم نشده (بله یا روبیکا)';
+            || (!empty($cn['rubika']['token']) && !empty($cn['rubika']['chat_id']))
+            || (!empty($cn['telegram']['token']) && !empty($cn['telegram']['chat_id']));   // v10.78 (92)
+    if (!$hasMsgr) return 'هیچ پیام‌رسانی تنظیم نشده (بله/روبیکا/تلگرام)';
     return null;
 }
 
@@ -33434,7 +33401,8 @@ function syncReportEmit(array $cn, array $rep): array {
         $out['skipped'] = 'disabled'; return $out;
     }
     $hasMsgr = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
-            || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '');
+            || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '')
+            || (trim((string)($cn['telegram']['token'] ?? '')) !== '' && trim((string)($cn['telegram']['chat_id'] ?? '')) !== '');   // v10.78 (92)
     if (!$hasMsgr) { $out['skipped'] = 'no_messenger'; return $out; }
     $out['delivery'] = notifSend($cn, syncReportText($rep), 'sync');
     return $out;
@@ -33559,7 +33527,8 @@ function notifRunFailure(array $cn, string $stage, string $profileName, string $
 function bslCheckNotifications(array $cn): array {
     $ne = $cn['notif_events'] ?? [];
     $hasMsgr = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
-            || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '');
+            || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '')
+            || (trim((string)($cn['telegram']['token'] ?? '')) !== '' && trim((string)($cn['telegram']['chat_id'] ?? '')) !== '');   // v10.78 (92)
     if (!$hasMsgr) return [];   // فرستنده‌ای نیست که رویداد به آن برود
     $shops = array_values(array_filter(bslAllShops($cn),
         fn($s) => trim((string)($s['token'] ?? '')) !== ''));
@@ -33631,10 +33600,11 @@ if (isset($_GET['notif_test'])) {
        به «حداقل یک غرفه با توکن» نیاز دارند، نه به کامل‌بودنِ
        غرفهٔ پیش‌فرض. */
     $hasMsgrN = (trim((string)($cn['baleh']['token'] ?? '')) !== '' && trim((string)($cn['baleh']['chat_id'] ?? '')) !== '')
-             || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '');
+             || (trim((string)($cn['rubika']['token'] ?? '')) !== '' && trim((string)($cn['rubika']['chat_id'] ?? '')) !== '')
+             || (trim((string)($cn['telegram']['token'] ?? '')) !== '' && trim((string)($cn['telegram']['chat_id'] ?? '')) !== '');   // v10.78 (92)
     $why = null;
     if (!$hasMsgrN) {
-        $why = 'هیچ پیام‌رسانی تنظیم نشده (بله یا روبیکا)';
+        $why = 'هیچ پیام‌رسانی تنظیم نشده (بله/روبیکا/تلگرام)';
     } elseif ($kind !== 'ping' && $kind !== 'source'
              && !array_values(array_filter(bslAllShops($cn), fn($s) => trim((string)($s['token'] ?? '')) !== ''))) {
         $why = 'تنظیمات باسلام ناقص است (توکن غرفه)';
@@ -33851,13 +33821,31 @@ $ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POS
 $resp = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
 return $code >= 200 && $code < 300;
 }
-function bslSendToRubika(string $token, string $chatId, string $text): bool {
+/** v10.78 (92): خطاها دیگر بی‌صدا نیستند — {ok, code, error} برمی‌گردد
+    تا «چرا روبیکا کار نمی‌کند» دقیق قابلِ عیب‌یابی شود. */
+function bslSendToRubika(string $token, string $chatId, string $text): array {
 $url = 'https://api.rubika.ir/v1/bot' . $token . '/sendMessage';
-$ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE), CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
-$resp = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
-return $code >= 200 && $code < 300;
+$ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode(['chat_id' => $chatId, 'text' => $text], JSON_UNESCAPED_UNICODE), CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15, CURLOPT_SSL_VERIFYPEER => true]);
+$resp = (string)curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); $err = (string)curl_error($ch); curl_close($ch);
+if ($code >= 200 && $code < 300) return ['ok' => true, 'code' => $code, 'error' => ''];
+$j = json_decode($resp, true);
+$detail = '';
+if (is_array($j)) $detail = (string)($j['description'] ?? ($j['error'] ?? ($j['message'] ?? ($j['detail'] ?? ''))));
+if ($detail === '' && is_array($j) && isset($j['error_code'])) $detail = 'error_code=' . $j['error_code'];
+if ($detail === '') $detail = mb_substr($resp, 0, 200);
+return ['ok' => false, 'code' => $code, 'error' => $err !== '' ? 'خطای شبکه: ' . $err : ($detail !== '' ? $detail : 'پاسخی نیامد')];
 }
 
+/** v10.78 (92): تلگرام — مثلِ روبیکا، با خطایِ دقیق */
+function bslSendToTelegram(string $token, string $chatId, string $text): array {
+$url = 'https://api.telegram.org/bot' . $token . '/sendMessage';
+$ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode(['chat_id' => $chatId, 'text' => $text, 'disable_web_page_preview' => true], JSON_UNESCAPED_UNICODE), CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15, CURLOPT_SSL_VERIFYPEER => true]);
+$resp = (string)curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); $err = (string)curl_error($ch); curl_close($ch);
+if ($code >= 200 && $code < 300) return ['ok' => true, 'code' => $code, 'error' => ''];
+$j = json_decode($resp, true);
+$detail = is_array($j) ? (string)($j['description'] ?? ($j['error'] ?? '')) : mb_substr($resp, 0, 200);
+return ['ok' => false, 'code' => $code, 'error' => $err !== '' ? 'خطای شبکه: ' . $err : ($detail !== '' ? $detail : 'پاسخی نیامد')];
+}
 function bslTryCreateWithFallback(string $tk, int $vid, array $bp, array $fallbackCatIds, string $pTitle, bool $autoCat, array $bslFlatCats, array $cData): array {
 $tried = [(int)($bp['category_id'] ?? 0)];
 foreach ($fallbackCatIds as $fc) {
@@ -33958,9 +33946,13 @@ $ok=bslSendToBaleh($token,$chatId,$testMsg);
 if($ok){echo json_encode(['ok'=>true,'message'=>'پیام بله ارسال شد'],JSON_UNESCAPED_UNICODE);}
 else{echo json_encode(['ok'=>false,'error'=>'ارسال به بله ناموفق — Token یا Chat ID را بررسی کنید'],JSON_UNESCAPED_UNICODE);}
 }elseif($type==='rubika'){
-$ok=bslSendToRubika($token,$chatId,$testMsg);
-if($ok){echo json_encode(['ok'=>true,'message'=>'پیام روبیکا ارسال شد'],JSON_UNESCAPED_UNICODE);}
-else{echo json_encode(['ok'=>false,'error'=>'ارسال به روبیکا ناموفق — Token یا Chat ID را بررسی کنید'],JSON_UNESCAPED_UNICODE);}
+$rr=bslSendToRubika($token,$chatId,$testMsg);
+if($rr['ok']){echo json_encode(['ok'=>true,'message'=>'پیام روبیکا ارسال شد'],JSON_UNESCAPED_UNICODE);}
+else{echo json_encode(['ok'=>false,'error'=>'ارسال به روبیکا ناموفق — HTTP ' . $rr['code'] . ' — ' . ($rr['error'] !== '' ? $rr['error'] : 'Token یا Chat ID را بررسی کنید'),'http_code'=>$rr['code'],'detail'=>$rr['error']],JSON_UNESCAPED_UNICODE);}
+}elseif($type==='telegram'){
+$tr=bslSendToTelegram($token,$chatId,$testMsg);
+if($tr['ok']){echo json_encode(['ok'=>true,'message'=>'پیام تلگرام ارسال شد'],JSON_UNESCAPED_UNICODE);}
+else{echo json_encode(['ok'=>false,'error'=>'ارسال به تلگرام ناموفق — HTTP ' . $tr['code'] . ' — ' . ($tr['error'] !== '' ? $tr['error'] : 'Token یا Chat ID را بررسی کنید'),'http_code'=>$tr['code'],'detail'=>$tr['error']],JSON_UNESCAPED_UNICODE);}
 }else{
 echo json_encode(['ok'=>false,'error'=>'نوع اعلان نامعتبر'],JSON_UNESCAPED_UNICODE);
 }
@@ -44810,6 +44802,7 @@ html[data-skin="gloss"] .progress-bar{
 @keyframes mrNotifFade{from{width:100%}to{width:0%}}
 @keyframes mrZoomIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
 </style>
+<?php /* v10.78 (92): اسکریپتِ نجوا — از تنظیمات، پیش از تگِ پایانیِ head */ $__nvSc = trim((string)(loadConnections()['najva_script'] ?? '')); if ($__nvSc !== '') echo $__nvSc . "\n"; ?>
 </head>
 <body>
 <!-- v10.20 (۳۳ج): نوارِ ابزارِ هدر — سه دکمه چسبیده به هم؛ مدیر وظیفه
@@ -45705,9 +45698,14 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <div class="crow"><label>روبیکا فعال:</label><input type="checkbox" id="rubikaEnabled" style="width:16px;height:16px"></div>
 <div class="crow"><label>Token روبیکا:</label><input type="password" id="rubikaToken" dir="ltr" placeholder="Bot Token" style="flex:1"></div>
 <div class="crow"><label>Chat ID:</label><input type="text" id="rubikaChatId" dir="ltr" placeholder="شناسه چت" style="flex:1"></div>
+<!-- v10.78 (92): تلگرام — سومین پیام‌رسان -->
+<div class="crow" style="margin-top:8px;padding-top:8px;border-top:1px solid #334155"><b style="font-size:11px">✈️ تلگرام</b></div>
+<div class="crow"><label>تلگرام فعال:</label><input type="checkbox" id="telegramEnabled" style="width:16px;height:16px"></div>
+<div class="crow"><label>Token تلگرام:</label><input type="password" id="telegramToken" dir="ltr" placeholder="Bot Token (از BotFather)" style="flex:1"></div>
+<div class="crow"><label>Chat ID:</label><input type="text" id="telegramChatId" dir="ltr" placeholder="شناسهٔ کاربر یا گروه (با -100)" style="flex:1"></div>
 <div class="cact" style="margin-top:10px">
 <button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button>
-<button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button>
+<button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-gray" onclick="testNotif('telegram')">✈️ تست تلگرام</button>
 <button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button>
 </div>
 </div>
@@ -45802,17 +45800,11 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-gray" onclick="mrPushWorkerCode()" style="font-size:10px;padding:4px 10px" title="کدِ Workerِ آماده (با توکنِ شما) برای Cloudflare">📋 کدِ Worker</button>
 </div>
 </div>
-<!-- v10.77 (91): نجوا — کانالِ مستقل به مشترکینِ موجودِ سایت -->
+<!-- v10.78 (92): نجوا — اسکریپتِ هدر (بر اساسِ مستنداتِ رسمیِ نجوا) -->
 <div style="margin-top:8px;padding:8px;background:#0b1220;border:1px solid #1e293b;border-radius:8px">
-<div style="display:flex;gap:8px;align-items:center">
-<input type="checkbox" id="najvaOn" style="width:auto">
-<label for="najvaOn" style="font-size:11px">🇮🇷 ارسالِ رویدادها به <b>مشترکینِ سایت با نجوا</b> (همان‌هایی که از قبل عضوِ پوشِ سایت شده‌اند — مستقل ازِ مسیرهایِ Web Push)</label>
-</div>
-<div class="crow" style="margin-top:6px"><label>آدرسِ API:</label><input type="text" id="najvaBase" dir="ltr" placeholder="https://api.najva.com" style="flex:1"></div>
-<div class="crow"><label>توکنِ فرستنده:</label><input type="text" id="najvaToken" dir="ltr" placeholder="از پنلِ نجوا" style="flex:1"></div>
-<div class="crow"><label>API key:</label><input type="text" id="najvaKey" dir="ltr" placeholder="از پنلِ نجوا" style="flex:1"></div>
-<div class="crow"><label>آدرسِ کلیک:</label><input type="text" id="najvaUrl" dir="ltr" placeholder="https://your-site.com (اختیاری)" style="flex:1"></div>
-<div style="font-size:9.5px;color:#64748b;margin-top:4px">توکن و API key: پنلِ نجوا ← پوش نوتیفیکیشن ← تنظیمات ← تنظیماتِ اسکریپت ← مشخصاتِ API. نجوا سرویسِ ایرانی است و از هاست‌هایِ ایران بدونِ پراکسی کار می‌کند. با «💾 ذخیرهٔ مسیر» همین تنظیمات هم ذخیره می‌شود.</div>
+<div style="font-size:11px;margin-bottom:6px">🇮🇷 <b>نجوا — اسکریپتِ هدر</b></div>
+<textarea id="najvaScript" rows="4" placeholder="کدِ پنلِ نجوا را اینجا بچسبانید (منو ← تنظیمات ← تنظیماتِ اسکریپت ← کدِ سرویس)..." style="width:100%;background:#020617;color:#a5f3fc;border:1px solid #1e293b;border-radius:8px;padding:8px;font-size:10.5px;direction:ltr;text-align:left;font-family:ui-monospace,monospace;box-sizing:border-box"></textarea>
+<div style="font-size:9.5px;color:#64748b;margin-top:4px;line-height:1.8">این کد خودکار <b>پیش از تگِ پایانیِ head</b> همین صفحه درج می‌شود (همان‌طور که مستندات می‌گوید). مراحل: پنلِ نجوا ← منو ← تنظیمات ← تنظیماتِ اسکریپت ← <b>ساختِ سرویسِ جدید</b> (نوع: وب‌سایت + دامنه) ← کپیِ کد ← اینجا بچسبانید و «💾 ذخیره مسیر» بزنید ← بعد در پنلِ نجوا «مرحلهٔ بعد» تا «تایید و نهایی‌سازی» تا وریفایِ نصب انجام شود.</div>
 </div>
 <!-- v10.68 (82): خطِ تشخیصِ زندهٔ اعلانِ سیستم — می‌گوید زنجیره کجا شکسته -->
 <div id="lnSysDiag" style="font-size:10px;color:#94a3b8;line-height:1.7;margin-top:5px"></div>
@@ -45821,7 +45813,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 </div>
 <div id="ntab-query" class="ntabpane" style="display:none">
-<div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
+<div class="cact"><button class="btn btn-purple" onclick="testNotif('baleh')">🔔 تست بله</button><button class="btn btn-orange" onclick="testNotif('rubika')">🔔 تست روبیکا</button><button class="btn btn-gray" onclick="testNotif('telegram')">✈️ تست تلگرام</button><button class="btn btn-cyan" onclick="saveConn()">💾 ذخیره</button></div>
 <div style="border-top:1px solid #1e293b;margin:10px 0 8px"></div>
 <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">🔍 استعلام از باسلام</div>
 <div style="font-size:10.5px;color:#64748b;margin-bottom:8px;line-height:1.7">
@@ -52228,6 +52220,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.78', t:'🇮🇷 اسکریپتِ هدرِ نجوا + تلگرام + تشخیصِ دقیقِ خطای روبیکا', items:[
+    '🇮🇷 <b>نجوا با روشِ مستنداتِ رسمی:</b> به‌جایِ تنظیماتِ API (توکن/API key)، حالا کادرِ «اسکریپتِ هدرِ نجوا» است — کدِ پنلِ نجوا (منو ← تنظیمات ← تنظیماتِ اسکریپت ← کدِ سرویس) را بچسبانید؛ اسکریپر آن را <b>پیش از تگِ پایانیِ head</b> همین صفحه درج می‌کند تا وریفایِ نصب در پنلِ نجوا قبول شود. (تنظیماتِ قدیمیِ API برداشته شد.)',
+    '✈️ <b>تلگرام اضافه شد:</b> در تبِ «💬 پیام‌رسان» — Token + Chat ID + دکمهٔ تست. همهٔ رویدادها (لحظه‌ای + کران) مثلِ بله/روبیکا به تلگرام هم می‌روند؛ در گروه هم کار می‌کند (chat_id گروه با -100).',
+    '🩺 <b>روبیکا (و تلگرام) دیگر بی‌صدا شکست نمی‌خورند:</b> دکمهٔ «🔔 تست» حالا HTTP code و <b>پیامِ خطایِ خودِ سرویس</b> را نشان می‌دهد (مثلاً chat not found / token نامعتبر) — برایِ عیب‌یابیِ «ارسالِ روبیکا کار نمی‌کند» دقیق بگویید کجا گیر است.',
+    '📌 <b>راهنمایِ روبیکا:</b> اول به ربات <span dir="ltr">/start</span> بدهید و یک پیام بفرستید؛ بعد chat_id درست از <span dir="ltr">api.rubika.ir/bot&lt;TOKEN&gt;/getUpdates</span> (فیلدِ <span dir="ltr">"chat":{"id":...}</span>) بگیرید. جزئیات در گزارشِ تست.',
+  ]},
   {v:'10.77', t:'🇮🇷 نجوا — رویدادها به همهٔ مشترکینِ سایت (کانالِ مستقل)', items:[
     '🇮🇷 <b>کانالِ جدید و مستقل: نجوا</b> — هر رویداد (لحظه‌ای + کران) علاوه برِ Web Push، از طریقِ وب‌سرویسِ <b>نجوا</b> به <b>همهٔ کاربرانی که از قبل از سایت عضوِ پوش شده‌اند</b> هم فرستاده می‌شود. اشتراک‌هایِ نجوا همان‌هایی هستند که سایت شما از قبل جمع کرده؛ کاربری تازه برایِ این کانال لازم نیست.',
     '⚙️ <b>تنظیمات:</b> در تبِ «🖥 زنده» زیرِ جعبهٔ مسیر — کلیدِ «ارسال به مشترکینِ سایت با نجوا» + آدرسِ API (پیش‌فرض <span dir="ltr">https://api.najva.com</span>) + توکنِ فرستنده + API key (دوستور: پنلِ نجوا ← پوش نوتیفیکیشن ← تنظیمات ← تنظیمات اسکریپت ← مشخصاتِ API) + آدرسِ باز شدنِ بعد از کلیک.',
@@ -55701,7 +55699,7 @@ function notifTest(kind){
     const sent=d.sent||{};
     const chips=Object.keys(sent).map(k=>{
       const okv=sent[k]==='sent';
-      const nm={baleh:'بله',rubika:'روبیکا',none:'پیام‌رسان'}[k]||k;
+      const nm={baleh:'بله',rubika:'روبیکا',telegram:'تلگرام',none:'پیام‌رسان'}[k]||k;
       return '<span style="font-size:10px;padding:1px 7px;border-radius:4px;margin-left:4px;background:'
         +(okv?'#14532d':'#7f1d1d')+';color:'+(okv?'#86efac':'#fca5a5')+'">'
         +(okv?'✓ ':'✗ ')+esc(nm)+'</span>';
@@ -56952,11 +56950,6 @@ function mrLiveTestPush(){
       showToast('❌ '+((d&&d.error)||'فرستادن نشد — اشتراکی ثبت نشده است'),1);
       if(box)box.innerHTML='<div style="color:#f87171">'+esc((d&&d.error)||'اشتراکی ثبت نشده — کلیدِ Push را روشن کنید یا «🔁 ثبتِ دوبارهٔ اشتراک» را بزنید.')+'</div>';
     }
-    /* v10.77 (91): نتیجهٔ کانالِ نجوا — هر زمان که تنظیم باشد */
-    if(box&&d.najva){
-      const n=d.najva;
-      box.innerHTML+='<div style="margin-top:4px;color:'+(n.ok?'#4ade80':'#f87171')+'">'+(n.ok?'✅':'❌')+' 🇮🇷 نجوا: '+(n.ok?esc(n.error||'ارسال شد'):'HTTP '+(n.code||0)+(n.error?' — '+esc(n.error):''))+'</div>';
-    }
   }).catch(()=>showToast('❌ خطای شبکه',1));
 }
 /* v10.74 (88): ثبتِ دوبارهٔ اشتراک — با خطایِ صریحِ هر مرحله */
@@ -56979,12 +56972,8 @@ async function mrPushResub(){
 function mrPushRouteSave(){
   const proxy=$('pushProxy')?$('pushProxy').value.trim():'';
   const worker=$('pushWorker')?$('pushWorker').value.trim():'';
-  const nv=$('najvaOn')?{enabled:$('najvaOn').checked,
-    base:$('najvaBase')?$('najvaBase').value.trim():'',
-    token:$('najvaToken')?$('najvaToken').value.trim():'',
-    api_key:$('najvaKey')?$('najvaKey').value.trim():'',
-    url:$('najvaUrl')?$('najvaUrl').value.trim():''}:null;
-  fetch('?push_route_save=1',{method:'POST',body:JSON.stringify({proxy:proxy,worker_url:worker,najva:nv})}).then(r=>r.json()).then(d=>{
+  const nvSc=$('najvaScript')?$('najvaScript').value:'';
+  fetch('?push_route_save=1',{method:'POST',body:JSON.stringify({proxy:proxy,worker_url:worker,najva_script:nvSc})}).then(r=>r.json()).then(d=>{
     if(!d.ok){showToast('❌ '+((d&&d.error)||'ذخیرهٔ مسیر ناموفق'),1);return;}
     if(d.worker_token)window._pushWorkerToken=d.worker_token;
     showToast('💾 مسیرِ Push ذخیره شد — حالا «📡 تستِ Push» را بزنید',0);
@@ -56996,12 +56985,7 @@ function mrPushRouteLoad(){
     window._pushWorkerToken=d.route.worker_token||'';
     if($('pushProxy'))$('pushProxy').value=d.route.proxy||'';
     if($('pushWorker'))$('pushWorker').value=d.route.worker_url||'';
-    const nv=d.najva||{};
-    if($('najvaOn'))$('najvaOn').checked=!!nv.enabled;
-    if($('najvaBase'))$('najvaBase').value=nv.base||'https://api.najva.com';
-    if($('najvaToken'))$('najvaToken').value=nv.token||'';
-    if($('najvaKey'))$('najvaKey').value=nv.api_key||'';
-    if($('najvaUrl'))$('najvaUrl').value=nv.url||'';
+    if($('najvaScript'))$('najvaScript').value=d.najva_script||'';
     const srcEl=$('pushRouteSrc');
     if(srcEl){
       const sm={'ai_net':'🔗 مسیرِ Push: از همان عبورِ «هوش مصنوعی» استفاده می‌شود','src_net':'🔗 مسیرِ Push: از همان عبورِ «سایت مبدأ» استفاده می‌شود','push_route':'🔗 مسیرِ Push: از تنظیماتِ همین بخش','':''};
@@ -59209,6 +59193,7 @@ if(typeof aiResumeTestModalOnLoad==='function')setTimeout(aiResumeTestModalOnLoa
 // v8.17: Restore Baleh/Rubika settings
 const bl=cn.baleh||{};if($('balehEnabled'))$('balehEnabled').checked=!!bl.enabled;if($('balehToken')&&bl.token)$('balehToken').value=bl.token;if($('balehChatId')&&bl.chat_id)$('balehChatId').value=bl.chat_id;if($('balehS')&&bl.token){$('balehS').textContent='فعال';$('balehS').className='cst on';}
 const rb=cn.rubika||{};if($('rubikaEnabled'))$('rubikaEnabled').checked=!!rb.enabled;if($('rubikaToken')&&rb.token)$('rubikaToken').value=rb.token;if($('rubikaChatId')&&rb.chat_id)$('rubikaChatId').value=rb.chat_id;
+const tgm=cn.telegram||{};if($('telegramEnabled'))$('telegramEnabled').checked=!!tgm.enabled;if($('telegramToken')&&tgm.token)$('telegramToken').value=tgm.token;if($('telegramChatId')&&tgm.chat_id)$('telegramChatId').value=tgm.chat_id;
 const ne=cn.notif_events||{};/* v10.45: نبودِ کلید = روشن، صریحِ 0 = خاموش — دقیقاً همان قاعدهٔ سروری (notifEventOn). تا حالا 0 هم «روشن» نشان داده می‌شد. */const neOn=k=>ne[k]===undefined?true:!!ne[k];if($('notifOrderNew'))$('notifOrderNew').checked=neOn('order_new');if($('notifOrderStatus'))$('notifOrderStatus').checked=neOn('order_status');if($('notifChatMsg'))$('notifChatMsg').checked=neOn('chat_msg');/* v10.46 (۶۰): غرفهٔ «پیام مشتری» — گزینه‌ها از غرفهٔ پیش‌فرض + غرفه‌های اضافی می‌سازند */if($('notifChatShop')){const ncs=$('notifChatShop');const ncsCur=String(cn.notif_chat_shop||0);let ncsOpts='<option value="0">همهٔ غرفه‌ها</option>';const ncsDefVid=parseInt(b.vendor_id)||0;if(ncsDefVid>0&&b.token)ncsOpts+='<option value="'+ncsDefVid+'">غرفهٔ پیش‌فرض (#'+ncsDefVid+')</option>';(Array.isArray(bslExtraVendors)?bslExtraVendors:[]).forEach(v=>{const ncsVid=parseInt(v&&v.vendor_id)||0,ncsTok=String(v&&(v.token||''));if(ncsVid>0&&ncsTok)ncsOpts+='<option value="'+ncsVid+'">'+esc((v.shop_name||v.name)||('غرفه '+ncsVid))+' (#'+ncsVid+')</option>';});ncs.innerHTML=ncsOpts;ncs.value=(ncsCur!=='0'&&ncsOpts.indexOf('value="'+ncsCur+'"')>-1)?ncsCur:'0';}if($('notifProductStatus'))$('notifProductStatus').checked=neOn('product_status');if($('notifProductNew'))$('notifProductNew').checked=neOn('product_new');if($('notifOrderRefund'))$('notifOrderRefund').checked=neOn('order_refund');if($('notifSrcPrice'))$('notifSrcPrice').checked=neOn('src_price');if($('notifSrcStock'))$('notifSrcStock').checked=neOn('src_stock');if($('notifRunFail'))$('notifRunFail').checked=neOn('run_fail');if($('notifRetire'))$('notifRetire').checked=neOn('retire');if($('notifSyncReport'))$('notifSyncReport').checked=neOn('sync_report');if($('notifCronPing'))$('notifCronPing').checked=!!ne.cron_ping;if($('pingEvery'))$('pingEvery').value=(cn.ping_every!==undefined?cn.ping_every:360);if($('remindAfter'))$('remindAfter').value=(cn.notif_remind_after!==undefined?cn.notif_remind_after:30);if($('remindMax'))$('remindMax').value=(cn.notif_remind_max!==undefined?cn.notif_remind_max:0);if($('qDedup'))$('qDedup').checked=cn.queue_dedup!==false;if($('qDedupStale'))$('qDedupStale').value=Math.round((cn.queue_dedup_stale!==undefined?cn.queue_dedup_stale:7200)/60);if($('cronLockMin'))$('cronLockMin').value=(cn.cron_lock_min||30);if($('keepReports'))$('keepReports').value=(cn.keep_reports||20);if($('contentSync'))$('contentSync').checked=(cn.content_sync!==false);if($('catLearnWords'))$('catLearnWords').value=String(cn.catlearn_words||1);catLearnWordsCfg=parseInt(cn.catlearn_words||1)||1;updateCatWordsBadge();if($('digestEnabled'))$('digestEnabled').checked=!!cn.digest_enabled;if($('digestHour')){if(!$('digestHour').options.length){let hh='';for(let i=0;i<24;i++)hh+='<option value="'+i+'">'+toFa(String(i).padStart(2,'0'))+':۰۰</option>';$('digestHour').innerHTML=hh;}$('digestHour').value=String(cn.digest_hour!==undefined?cn.digest_hour:23);}if($('digestHours'))$('digestHours').value=String(cn.digest_hours||24);updateDigestBadge();updateGenBadge();if($('retireMode'))$('retireMode').value=cn.retire_mode||'off';if($('retireWooAction'))$('retireWooAction').value=cn.retire_woo_action||'delete';if($('retireBslAction'))$('retireBslAction').value=cn.retire_bsl_action||'delete';if($('retireMaxPct'))$('retireMaxPct').value=cn.retire_max_pct||30;if($('retireMaxCount'))$('retireMaxCount').value=cn.retire_max_count||50;if($('stallWatchdog'))$('stallWatchdog').checked=cn.stall_watchdog!==false;if($('stallAfter'))$('stallAfter').value=cn.stall_after||300;if($('autoResume'))$('autoResume').checked=cn.auto_resume!==false;if($('autoResumeMax'))$('autoResumeMax').value=(cn.auto_resume_max||2);if($('bslCatAuto'))$('bslCatAuto').checked=cn.bsl_catalog_auto!==false;if($('bslCatTtl'))$('bslCatTtl').value=(cn.bsl_catalog_ttl_h!==undefined?cn.bsl_catalog_ttl_h:6);if($('detailBudget'))$('detailBudget').value=(cn.detail_budget_sec!==undefined?cn.detail_budget_sec:0);if($('proxyTimeout'))$('proxyTimeout').value=(cn.proxy_timeout_sec||45);srcNetApply(cn.src_net||{});updateRetireBadge();updateStallBadge();
 updN();if(b.token&&bslAllCats.length===0){loadBslCats();}
 renderNotifHealth(); /* v10.46 (۶۰): خطِ وضعیتِ اعلان‌ها */
@@ -59245,6 +59230,7 @@ fd.append('ai_net',JSON.stringify(getAiNet()));
 // v8.17: Save Baleh/Rubika
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
+fd.append('telegram',JSON.stringify({enabled:$('telegramEnabled')?.checked?1:0,token:$('telegramToken')?.value||'',chat_id:$('telegramChatId')?.value||''}));
 fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));/* v10.46 (۶۰): غرفهٔ انتخاب‌شده برای پیام مشتری */fd.append('notif_chat_shop',String($('notifChatShop')?.value||0));fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('auto_resume',$('autoResume')?.checked?1:0);fd.append('auto_resume_max',$('autoResumeMax')?.value||2);fd.append('bsl_catalog_auto',$('bslCatAuto')?.checked?1:0);fd.append('bsl_catalog_ttl_h',$('bslCatTtl')?.value||6);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
 function updN(){
 let n=0,total=0;
@@ -59365,6 +59351,7 @@ function testNotif(type){
     let token,chatId,label;
     if(type==='baleh'){token=$('balehToken')?.value?.trim()||'';chatId=$('balehChatId')?.value?.trim()||'';label='بله';}
     else if(type==='rubika'){token=$('rubikaToken')?.value?.trim()||'';chatId=$('rubikaChatId')?.value?.trim()||'';label='روبیکا';}
+    else if(type==='telegram'){token=$('telegramToken')?.value?.trim()||'';chatId=$('telegramChatId')?.value?.trim()||'';label='تلگرام';}
     else{showToast('نوع نامعتبر',1);return;}
     if(!token||!chatId){showToast('Token و Chat ID را وارد کنید',1);return;}
     r.innerHTML='<div style="color:#facc15;font-size:11px;padding:4px">⏳ تست '+label+'...</div>';
