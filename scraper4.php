@@ -272,7 +272,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.64';
+const APP_VERSION = '10.65';
 const APP_VERSION_DATE = '1405/06/10';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -23846,6 +23846,15 @@ if (isset($_GET['selftest'])) {
     $add('10.44', 'نتایجِ جست‌وجو شناسهٔ تکراری ندارند',
          preg_match('~\$hits\[\]=\$row;~su', $selfSrc) === 1
       || strpos($selfSrc, 'if($rid>0&&isset($seenIds[$rid]))continue;') !== false);
+
+    /* ==== ۷۹ (v10.65) ==== */
+    $add('10.65', 'نسخهٔ ۱۰.۶۵',
+         str_contains($selfSrc, "const APP_VERSION = '10.65';"));
+    $add('10.65', 'تکست‌باکسِ پاسخِ همیشه‌آماده + عرضِ کارتِ درستِ موبایل',
+         strpos($selfSrc, 'display:block;padding:8px 12px 10px;background:#0b122055') !== false
+          && strpos($selfSrc, 'function mrNotifHold(card,n){') !== false
+          && strpos($selfSrc, 'overflow-x:hidden;overflow-y:auto;max-height:calc(100vh - 84px)') !== false
+          && strpos($selfSrc, 'taN.addEventListener(\'focus\',()=>mrNotifHold(card,n));') !== false);
 
     /* ==== ۷۸ (v10.64) ==== */
     $add('10.64', 'نسخهٔ ۱۰.۶۴',
@@ -51032,6 +51041,10 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.65', t:'⌨️ تکست‌باکسِ پاسخ همیشه آماده + کارتِ نوتیف دیگر از کادرِ موبایل بیرون نمی‌زند', items:[
+    '⌨️ <b>پاسخِ آماده از همانِ اول:</b> تکست‌باکسِ پاسخ (با دکمه‌هایِ سریعِ 👋/✅/📮) حالا از همانِ لحظهِٔ آمدنِ کارتِ نوتیف باز است — لازم نیست دکمهٔ 💬 بزنی؛ فقط بنویس و Enter. با شروعِ تایپ، کارت دیگر خودکار بسته نمی‌شود و اگر مشتری وسطِ تایپ دوباره پیام بدهد هم کارتِ شما را نمی‌بندد',
+    '📱 <b>عرضِ درستِ موبایل:</b> کارتِ نوتیف هنگامِ پاسخ‌دهی دیگر گشاد نمی‌شود و از کادرِ صفحهِٔ موبایل بیرون نمی‌زند؛ اگر هم کارت بلند شد، خودش در ارتفاعِ صفحه جا می‌شود (اسکرولِ داخلی)'
+  ]},
   {v:'10.64', t:'🩹 رفعِ سریع — یک پرانتزِ ناقص در فهرستِ تغییرات، کلِ اسکریپتِ صفحه را از کار انداخته بود', items:[
     '🩹 <b>مشکل:</b> در نسخهٔ ۱۰.۶۳، در کدِ فهرستِ تغییراتِ خودِ صفحه، براکتِ بستهٔ آیتمِ ۱۰.۶۳ جا افتاده بود؛ مرورگر به‌خاطرِ همینِ خطایِ دستوری، کلِ اسکریپتِ اصلی را اجرا نمی‌کرد (خطاهایی مثلِ «vcFilterFile is not defined» پیامِ همان بود). حالا درست شده و همهٔ بخش‌ها دوباره زنده‌اند.'
   ]},
@@ -55198,16 +55211,17 @@ function mrLightbox(url){
   document.addEventListener('keydown',ov._kd);
 }
 /* v10.62 (۷۶): باز کردنِ پاسخِ درِجای درونِ کارت (سوایپِ راست / دکمهٔ 💬) */
-function mrNotifOpenReply(n){
-  const card=n.el;
-  card.style.transition='width .25s ease';
-  card.style.transform='';card.style.opacity='';
-  card.style.width='364px';
-  const foot=card.querySelector('.mrnfoot'); if(foot)foot.style.display='none';
-  const rep=card.querySelector('.mrnreply'); if(rep)rep.style.display='block';
-  if(n.timer){clearTimeout(n.timer);n.timer=null;}
+/* v10.65 (۷۹): وقتی کاربر در حال پاسخ‌دهی است، کارت خودکار نبندد */
+function mrNotifHold(card,n){
+  if(n){if(n.timer){clearTimeout(n.timer);n.timer=null;}n.hold=true;}
   const bar=card.querySelector('.mrnbar'); if(bar)bar.style.animationPlayState='paused';
   card.style.maxHeight='calc(100vh - 90px)';
+}
+function mrNotifOpenReply(n){
+  const card=n.el;
+  card.style.transform='';card.style.opacity='';
+  const rep=card.querySelector('.mrnreply'); if(rep)rep.style.display='block';
+  mrNotifHold(card,n);
   const ta=card.querySelector('.mrnta');
   if(ta)setTimeout(()=>{ta.focus();},90);
 }
@@ -55276,16 +55290,20 @@ function mrNotifPush(c){
     const tx=n.el.querySelector('.mrntext'); if(tx)tx.textContent=n.text;
     const tt=n.el.querySelector('.mrntime'); if(tt)tt.textContent='همین حالا';
     const bar=n.el.querySelector('.mrnbar');
-    if(bar){bar.style.animation='none'; void bar.offsetHeight; bar.style.animation='';}
-    if(n.timer)clearTimeout(n.timer);
-    n.timer=setTimeout(()=>mrNotifClose(n.el),MR_NOTIF_TTL);
+    if(n.hold){
+      /* v10.65 (۷۹): کاربر وسطِ پاسخ‌دهی است — فقط متن تازه شود، کارت نبند */
+    } else {
+      if(bar){bar.style.animation='none'; void bar.offsetHeight; bar.style.animation='';}
+      if(n.timer)clearTimeout(n.timer);
+      n.timer=setTimeout(()=>mrNotifClose(n.el),MR_NOTIF_TTL);
+    }
     return;
   }
   const host=mrNotifHost();
   const col=MR_COLORS[(((c.chat_id||1)+((c.shop||1)-1)*3))%MR_COLORS.length];
   const shopCol=mrShopColor(c.shop||1);
   const card=document.createElement('div');
-  card.style.cssText='position:relative;overflow:hidden;border-radius:14px;border:1px solid #334155;background:linear-gradient(135deg,#111d36 0%,#0d1526 75%);box-shadow:0 12px 30px rgba(0,0,0,.45);cursor:grab;user-select:none;-webkit-user-select:none;touch-action:pan-y;animation:mrNotifIn .38s cubic-bezier(.2,.9,.3,1.2)';
+  card.style.cssText='position:relative;overflow-x:hidden;overflow-y:auto;max-height:calc(100vh - 84px);border-radius:14px;border:1px solid #334155;background:linear-gradient(135deg,#111d36 0%,#0d1526 75%);box-shadow:0 12px 30px rgba(0,0,0,.45);cursor:grab;user-select:none;-webkit-user-select:none;touch-action:pan-y;animation:mrNotifIn .38s cubic-bezier(.2,.9,.3,1.2)';
   card.innerHTML=
     '<div style="display:flex;align-items:center;gap:9px;padding:11px 12px 7px">'+
       '<div style="width:37px;height:37px;flex:0 0 auto;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;color:#0b1220;background:'+col+';box-shadow:0 0 0 2px '+col+'55">'+esc(mrNotifInitial(c.who))+'</div>'+
@@ -55301,7 +55319,7 @@ function mrNotifPush(c){
     '</div>'+
     '<div class="mrntext" style="font-size:11.5px;color:#cbd5e1;line-height:1.8;padding:0 12px '+(c.last_img?'4px':'8px')+';overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">'+esc(mrNotifText(c))+'</div>'+
     (c.last_img?'<div style="padding:0 12px 8px"><img src="'+esc(c.last_img)+'" alt="تصویرِ مشتری" onclick="event.stopPropagation();mrLightbox(this.src)" style="max-width:100%;max-height:120px;border-radius:10px;cursor:zoom-in;border:1px solid #334155" title="برای بزرگ‌نمایی کلیک کنید"></div>':'')+
-    '<div class="mrnreply" style="display:none;padding:8px 12px 10px;background:#0b122055;border-top:1px solid #1e293b">'+
+    '<div class="mrnreply" style="display:block;padding:8px 12px 10px;background:#0b122055;border-top:1px solid #1e293b">'+
       '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'+
         '<b style="font-size:10.5px;color:#86efac;flex:1">💬 پاسخ به '+esc(c.who)+'</b>'+
         '<button class="mrnbtn-full" style="background:none;border:none;color:#60a5fa;font-size:9.5px;cursor:pointer;padding:2px 4px">🗨 گفتگوی کامل</button>'+
@@ -55312,7 +55330,7 @@ function mrNotifPush(c){
         '<button class="mrnq" data-q="لطفاً کد پستی و نامِ گیرنده را بفرمایید." style="background:#42200633;border:1px solid #33415555;color:#fbbf24;font-size:9px;border-radius:8px;padding:3px 8px;cursor:pointer">📮 آدرس</button>'+
       '</div>'+
       '<div style="display:flex;gap:6px;align-items:flex-end">'+
-        '<textarea class="mrnta" rows="2" placeholder="پاسخ شما… (Enter = ارسال، Shift+Enter = خطِ جدید)" style="flex:1;resize:none;background:#111c31;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:11px;padding:6px 8px;font-family:inherit"></textarea>'+
+        '<textarea class="mrnta" rows="2" placeholder="پاسخ شما… (Enter = ارسال، Shift+Enter = خطِ جدید)" style="flex:1;resize:none;background:#111c31;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:11px;padding:6px 8px;font-family:inherit;user-select:text;-webkit-user-select:text"></textarea>'+
         '<button class="mrnbtn-send" style="flex:0 0 auto;background:#059669;border:none;color:#fff;font-size:12px;border-radius:8px;padding:7px 11px;cursor:pointer" title="ارسال پاسخ">📤</button>'+
       '</div>'+
       '<div class="mrnerr" style="display:none;color:#fca5a5;font-size:9.5px;margin-top:4px"></div>'+
@@ -55384,7 +55402,12 @@ function mrNotifPush(c){
       sendN.disabled=false;sendN.textContent='📤';
     }
   };
-  if(taN)taN.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSendN();}});
+  if(taN){
+    taN.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSendN();}});
+    /* v10.65 (۷۹): با فوکوس/شروعِ تایپ، کارت دیگر خودکار نبندد */
+    taN.addEventListener('focus',()=>mrNotifHold(card,n));
+    taN.addEventListener('input',()=>mrNotifHold(card,n));
+  }
   if(sendN)sendN.addEventListener('click',e=>{e.stopPropagation();doSendN();});
   MR_NOTIFS.push(n);
   const bc=card.querySelector('.mrnbtn-close'); if(bc)bc.addEventListener('click',e=>{e.stopPropagation();mrNotifClose(card);});
