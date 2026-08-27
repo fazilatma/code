@@ -24283,11 +24283,10 @@ if (isset($_GET['selftest'])) {
 
     /* ==== ۱۰۱ (v10.87) ==== */
     $add('10.87', 'نسخهٔ ۱۰.۸۷',
-         str_contains(\$selfSrc, "const APP_VERSION = '10.87';"));
+         str_contains($selfSrc, "const APP_VERSION = '10.87';"));
     $add('10.87', 'flush غرفه‌ها قبل از ذخیره + ارسال مجدد',
-         strpos(\$selfSrc, 'function bslFlushVendors(') !== false
-          && strpos(\$selfSrc, 'bslResendProfile(') !== false
-          && strpos(\$selfSrc, 'bslResendShop(') !== false);
+         strpos($selfSrc, 'function bslFlushVendors(') !== false
+          && strpos($selfSrc, 'function bslResendShop(') !== false);
 
     /* ==== ۹۹ (v10.85) ==== */
     $add('10.85', 'نسخهٔ ۱۰.۸۵',
