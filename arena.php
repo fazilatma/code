@@ -44704,7 +44704,7 @@ function arenaSave(string $file, $data): bool {
 
 function arenaSettings(): array {
     $def = [
-        'name'            => 'فروشگاه من',
+        'name'            => 'صبا شاپ',
         'tagline'         => 'فروشگاه هوشمندِ همه‌چیز',
         'hero_title'      => 'خرید آسان، تازه و مطمئن',
         'hero_sub'        => 'کالاهای خودِ سایت، فروشگاهِ ووکامرس و غرفهٔ باسلام — همه در یک ویترین، بدون دردسر همگام‌سازی.',
