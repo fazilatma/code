@@ -44669,7 +44669,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
  * ===================================================================== */
 
 defined('ARENA_SHOP_LAYER') or define('ARENA_SHOP_LAYER', 1);
-const ARENA_VERSION = '1.0';
+const ARENA_VERSION = '1.7';
 const ARENA_SETTINGS_FILE = __DIR__ . '/arena_settings.json';
 const ARENA_PRODUCTS_FILE = __DIR__ . '/arena_products.json';
 const ARENA_ORDERS_FILE   = __DIR__ . '/arena_orders.json';
@@ -44712,8 +44712,8 @@ function arenaSettings(): array {
         'tagline'         => 'فروشگاه هوشمندِ همه‌چیز',
         'hero_title'      => 'خرید آسان، تازه و مطمئن',
         'hero_sub'        => 'کالاهای خودِ سایت، فروشگاهِ ووکامرس و غرفهٔ باسلام — همه در یک ویترین، بدون دردسر همگام‌سازی.',
-        'accent'          => '#7c3aed',
-        'accent2'         => '#06b6d4',
+        'accent'          => '#2563eb',
+        'accent2'         => '#4f46e5',
         'logo'            => '',
         'currency'        => 'تومان',
         'shipping'        => 25000,
@@ -46608,12 +46608,12 @@ function arenaFlashPrice(int $price): int {
     return $price;
 }
 
-function arenaShopShell(string $title, string $content, array $s, string $headExtra = '', string $bodyJs = ''): void {
+function arenaShopShell(string $title, string $content, array $s, string $headExtra = '', string $bodyJs = '', string $pageName = 'shop'): void {
     $full = $s['name'];
     $arenaCust = arenaCustomerFromCookie();
     $catsFoot = arenaCategories();
     $flash = arenaFlashState();
-    $logo = $s['logo'] !== '' ? '<img class="s-logo-img" src="' . h($s['logo']) . '" alt="">' : '<span class="s-logo-mark">📦</span>';
+    $logo = $s['logo'] !== '' ? '<img class="s-logo-img" src="' . h($s['logo']) . '" alt="">' : '<span class="s-logo-mark">🛍️</span>';
     $foot = ['html' => ''];
     $foot = arenaDoHook('shop_footer', $foot);
     ?><!DOCTYPE html>
@@ -46628,169 +46628,267 @@ function arenaShopShell(string $title, string $content, array $s, string $headEx
 <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
 <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700;800&display=swap" rel="stylesheet">
-<meta name="theme-color" content="#7c3aed">
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<meta name="theme-color" content="#2563eb">
 <style>
 :root{
-  --acc:<?= h($s['accent']) ?>; --acc2:<?= h($s['accent2']) ?>;
-  --ink:#0f172a; --mut:#64748b; --bg:#f4f5fb; --card:#ffffff; --line:#e7e9f4;
-  --ok:#16a34a; --bad:#dc2626; --warn:#d97706;
-  --rad:18px; --sh:0 10px 30px rgba(15,23,42,.07);
+  --acc:<?= h($s['accent']) ?>;
+  --acc2:<?= h($s['accent2']) ?>;
+  --acc-glow:color-mix(in srgb,var(--acc) 18%,transparent);
+  --ink:#0f172a;
+  --ink-sub:#334155;
+  --mut:#64748b;
+  --mut-light:#94a3b8;
+  --bg:#f8fafc;
+  --card:#ffffff;
+  --line:#e2e8f0;
+  --line-light:#f1f5f9;
+  --ok:#059669;
+  --ok-bg:#ecfdf5;
+  --bad:#e11d48;
+  --bad-bg:#fff1f2;
+  --warn:#d97706;
+  --warn-bg:#fffbeb;
+  --rad:16px;
+  --rad-sm:10px;
+  --sh-sm:0 1px 3px rgba(15,23,42,.06),0 1px 2px rgba(15,23,42,.04);
+  --sh:0 4px 20px -2px rgba(15,23,42,.07);
+  --sh-hover:0 16px 36px -4px rgba(15,23,42,.12);
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth}
-body{font-family:var(--app-font,Vazirmatn,'Noto Naskh Arabic','Noto Sans Arabic','Segoe UI',Tahoma,system-ui,sans-serif);background:var(--bg);color:var(--ink);font-size:14px;line-height:1.8;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;animation:arenaPageIn .45s ease}
+body{font-family:var(--app-font,Vazirmatn,'Noto Naskh Arabic','Segoe UI',Tahoma,system-ui,sans-serif);background:var(--bg);color:var(--ink);font-size:14px;line-height:1.8;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;animation:arenaPageIn .4s ease}
 a{color:inherit;text-decoration:none}
 img{max-width:100%;display:block}
 button{font-family:inherit;cursor:pointer}
-input,select,textarea{font-family:inherit;font-size:13px;border:1.5px solid var(--line);border-radius:12px;padding:10px 12px;background:#fff;color:var(--ink);outline:none;transition:border .15s}
-input:focus,select:focus,textarea:focus{border-color:var(--acc)}
+input,select,textarea{font-family:inherit;font-size:13px;border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;background:#fff;color:var(--ink);outline:none;transition:all .18s}
+input:focus,select:focus,textarea:focus{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-glow)}
 .container{max-width:1200px;margin:0 auto;padding:0 16px}
+
+/* ---------- top announcement bar ---------- */
+.s-topbar{background:#0f172a;color:#cbd5e1;font-size:11.5px;font-weight:600;border-bottom:1px solid #1e293b;padding:7px 0}
+.s-topbar-in{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.s-topbar-right{display:flex;align-items:center;gap:10px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.s-topbar-sep{opacity:.35}
+.s-topbar-left{display:flex;align-items:center;gap:12px;white-space:nowrap}
+.s-toplink{color:#94a3b8;transition:color .15s}
+.s-toplink:hover{color:#fff}
+.s-toplink.highlight{color:#38bdf8;background:rgba(56,189,248,.12);padding:2px 9px;border-radius:6px;font-weight:700}
+@media(max-width:768px){.s-topbar-right span:nth-child(n+3){display:none}}
+
 /* ---------- header ---------- */
-.s-header{position:sticky;top:0;z-index:60;background:rgba(255,255,255,.85);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
-.s-head-in{display:flex;align-items:center;gap:14px;height:64px}
-.s-brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:17px;min-width:0}
-.s-logo-mark{width:40px;height:40px;border-radius:13px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;box-shadow:0 6px 16px color-mix(in srgb,var(--acc) 35%,transparent)}
-.s-logo-img{width:40px;height:40px;object-fit:contain;border-radius:12px}
-.s-search{flex:1;display:flex;max-width:520px}
-.s-search input{flex:1;border-radius:14px 0 0 14px;border-left:0}
-.s-search button{border:1.5px solid var(--line);background:#fff;border-radius:0 14px 14px 0;padding:0 16px;font-size:15px}
-.s-head-acts{display:flex;gap:8px;margin-right:auto}
-.s-icobtn{position:relative;width:42px;height:42px;border-radius:13px;border:1.5px solid var(--line);background:#fff;display:flex;align-items:center;justify-content:center;font-size:17px;transition:transform .12s}
-.s-icobtn:hover{transform:translateY(-2px)}
-.s-count{position:absolute;top:-6px;left:-6px;background:var(--acc);color:#fff;font-size:10px;font-weight:700;min-width:19px;height:19px;border-radius:10px;display:flex;align-items:center;justify-content:center;padding:0 4px}
+.s-header{position:sticky;top:0;z-index:80;background:rgba(255,255,255,.94);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-bottom:1px solid var(--line);transition:box-shadow .2s ease}
+.s-header.scrolled{box-shadow:0 4px 20px rgba(15,23,42,.08)}
+.s-head-in{display:flex;align-items:center;gap:16px;height:68px}
+.s-brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;color:var(--ink);min-width:0;flex-shrink:0}
+.s-logo-mark{width:42px;height:42px;border-radius:14px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff;box-shadow:0 6px 18px var(--acc-glow)}
+.s-logo-img{width:42px;height:42px;object-fit:contain;border-radius:12px}
+.s-ver-btn{display:inline-flex;align-items:center;gap:6px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:20px;padding:4px 10px;font-size:11px;font-weight:700;color:var(--ink-sub);transition:all .18s;flex-shrink:0}
+.s-ver-btn:hover{background:#e2e8f0;border-color:#cbd5e1;transform:translateY(-1px)}
+.s-ver-badge{background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;border-radius:12px;padding:1px 7px;font-size:10px;font-weight:800;letter-spacing:.3px}
+.s-ver-spark{font-size:10.5px;color:var(--mut)}
+.s-search{flex:1;display:flex;max-width:540px;position:relative}
+.s-search input{width:100%;border-radius:24px;border:1.5px solid var(--line);padding:10px 42px 10px 18px;background:#f8fafc;font-size:13px;transition:all .2s ease}
+.s-search input:focus{background:#fff;border-color:var(--acc);box-shadow:0 0 0 4px var(--acc-glow)}
+.s-search-btn{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:none;font-size:16px;width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--mut);transition:color .15s}
+.s-search-btn:hover{color:var(--acc)}
+.s-head-acts{display:flex;align-items:center;gap:10px;margin-right:auto;flex-shrink:0}
+.s-user-btn{display:inline-flex;align-items:center;gap:8px;border:1.5px solid var(--line);background:#fff;border-radius:14px;padding:8px 14px;font-size:12px;font-weight:700;color:var(--ink);transition:all .15s}
+.s-user-btn:hover{border-color:var(--acc);background:#f8fafc;transform:translateY(-1px)}
+.s-user-btn .avatar{width:24px;height:24px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px}
+.s-icobtn{position:relative;width:42px;height:42px;border-radius:14px;border:1.5px solid var(--line);background:#fff;display:flex;align-items:center;justify-content:center;font-size:17px;color:var(--ink);transition:all .15s}
+.s-icobtn:hover{border-color:var(--acc);transform:translateY(-2px);box-shadow:var(--sh-sm)}
+.s-count{position:absolute;top:-5px;left:-5px;background:var(--bad);color:#fff;font-size:10px;font-weight:800;min-width:18px;height:18px;border-radius:10px;display:flex;align-items:center;justify-content:center;padding:0 4px;box-shadow:0 2px 6px rgba(225,29,72,.4)}
+
 /* ---------- hero ---------- */
-.s-hero{position:relative;overflow:hidden;background:linear-gradient(120deg,var(--acc) 0%,var(--acc2) 100%);color:#fff;padding:52px 0 60px;margin-bottom:22px}
-.s-hero h1{font-size:clamp(24px,4.5vw,40px);font-weight:800;line-height:1.5;max-width:640px}
-.s-hero p{max-width:560px;opacity:.92;margin-top:10px;font-size:14px}
-.s-hero .s-cta{display:inline-flex;align-items:center;gap:8px;background:#fff;color:var(--acc);font-weight:800;border-radius:14px;padding:12px 22px;margin-top:20px;box-shadow:0 12px 30px rgba(0,0,0,.18);transition:transform .15s}
-.s-hero .s-cta:hover{transform:translateY(-3px)}
-.s-hero .blob{position:absolute;border-radius:50%;background:rgba(255,255,255,.12)}
-.s-hero .b1{width:280px;height:280px;left:-80px;bottom:-120px}
-.s-hero .b2{width:180px;height:180px;right:8%;top:-60px}
-.s-hero .b3{width:90px;height:90px;right:26%;bottom:18%}
-.s-hero .emojis{position:absolute;inset:0;pointer-events:none;font-size:26px;opacity:.5}
-.s-hero .e1{top:18%;left:62%;animation:floaty 5s ease-in-out infinite}
-.s-hero .e2{top:55%;left:80%;animation:floaty 6s ease-in-out infinite 1s}
-.s-hero .e3{top:30%;left:44%;animation:floaty 7s ease-in-out infinite .5s}
-@keyframes floaty{0%,100%{transform:translateY(0) rotate(-6deg)}50%{transform:translateY(-16px) rotate(8deg)}}
-.s-herostats{display:flex;gap:10px;flex-wrap:wrap;margin-top:26px}
-.s-hs{background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.25);border-radius:12px;padding:8px 14px;font-size:12px;font-weight:700;backdrop-filter:blur(4px)}
-/* ---------- flash ---------- */
-.s-flash{display:flex;align-items:center;gap:14px;background:linear-gradient(90deg,#1e1b4b,#312e81);color:#fff;border-radius:var(--rad);padding:14px 18px;margin-bottom:22px;box-shadow:var(--sh);flex-wrap:wrap}
+.s-hero{position:relative;overflow:hidden;background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 50%,#0f172a 100%);color:#fff;padding:56px 0 60px;margin-bottom:24px;border-bottom:1px solid rgba(255,255,255,.08)}
+.s-hero::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 80% 20%,rgba(99,102,241,.18) 0%,transparent 60%),radial-gradient(circle at 20% 80%,rgba(14,165,233,.14) 0%,transparent 60%);pointer-events:none}
+.s-hero-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);backdrop-filter:blur(8px);border-radius:30px;padding:6px 16px;font-size:12px;font-weight:700;color:#e2e8f0;margin-bottom:16px}
+.s-hero h1{font-size:clamp(24px,4.5vw,42px);font-weight:800;line-height:1.45;max-width:680px;color:#ffffff;letter-spacing:-.5px}
+.s-hero p{max-width:620px;color:#cbd5e1;margin-top:14px;font-size:14.5px;line-height:1.8}
+.s-hero-acts{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:24px}
+.s-cta-primary{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;font-weight:800;font-size:13.5px;border-radius:14px;padding:12px 24px;box-shadow:0 10px 25px rgba(59,130,246,.35);transition:all .18s ease}
+.s-cta-primary:hover{transform:translateY(-2px);box-shadow:0 14px 30px rgba(59,130,246,.45);color:#fff}
+.s-cta-secondary{display:inline-flex;align-items:center;gap:8px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.22);backdrop-filter:blur(8px);color:#fff;font-weight:700;font-size:13px;border-radius:14px;padding:12px 20px;transition:all .18s;cursor:pointer}
+.s-cta-secondary:hover{background:rgba(255,255,255,.18);transform:translateY(-2px);color:#fff}
+.s-herostats{display:flex;gap:12px;flex-wrap:wrap;margin-top:32px}
+.s-hs{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.16);backdrop-filter:blur(8px);border-radius:12px;padding:8px 16px;font-size:12px;font-weight:700;color:#e2e8f0}
+
+/* ---------- 5 guarantees bar ---------- */
+.s-trust-bar{background:#ffffff;border:1px solid var(--line);border-radius:var(--rad);padding:20px;margin-bottom:24px;box-shadow:var(--sh)}
+.s-trust-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
+.s-trust-card{display:flex;align-items:center;gap:12px;padding:10px;border-radius:12px;background:#f8fafc;border:1px solid #edf2f7;transition:transform .18s,box-shadow .18s}
+.s-trust-card:hover{transform:translateY(-2px);box-shadow:var(--sh-sm);background:#ffffff;border-color:#cbd5e1}
+.s-trust-ico{font-size:26px;flex-shrink:0;width:44px;height:44px;border-radius:12px;background:#ffffff;border:1px solid var(--line);display:flex;align-items:center;justify-content:center}
+.s-trust-info b{display:block;font-size:12.5px;font-weight:800;color:var(--ink);line-height:1.4}
+.s-trust-info small{display:block;font-size:10.5px;color:var(--mut);margin-top:2px}
+@media(max-width:960px){.s-trust-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:640px){.s-trust-grid{grid-template-columns:repeat(2,1fr)}}
+
+/* ---------- official trust seals ribbon ---------- */
+.s-official-trust{background:#ffffff;border:1px solid var(--line);border-radius:var(--rad);padding:16px 20px;margin:20px 0 26px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.s-ot-title{display:flex;align-items:center;gap:10px}
+.s-ot-title b{font-size:13.5px;color:var(--ink);font-weight:800}
+.s-ot-title small{font-size:11px;color:var(--mut);display:block}
+.s-ot-seals{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.s-seal-card{display:flex;align-items:center;gap:8px;padding:8px 14px;background:#f8fafc;border:1.5px solid var(--line);border-radius:12px;font-size:11px;font-weight:700;color:#334155;transition:all .15s}
+.s-seal-card:hover{background:#fff;border-color:#cbd5e1;box-shadow:var(--sh-sm)}
+.s-seal-ico{font-size:18px}
+
+/* ---------- flash sale ---------- */
+.s-flash{display:flex;align-items:center;gap:14px;background:linear-gradient(90deg,#1e1b4b,#312e81);color:#fff;border-radius:var(--rad);padding:14px 20px;margin-bottom:22px;box-shadow:var(--sh);flex-wrap:wrap}
 .s-flash .fx{font-weight:800;font-size:15px}
 .s-flash .fx b{color:#fbbf24}
 .s-timer{display:flex;gap:6px;margin-right:auto}
 .s-tbox{background:rgba(255,255,255,.14);border-radius:10px;min-width:44px;padding:5px 8px;text-align:center;font-weight:800;font-size:15px;font-variant-numeric:tabular-nums}
 .s-tbox span{display:block;font-size:9px;font-weight:400;opacity:.75}
-/* ---------- toolbar ---------- */
-.s-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
-.s-chips{display:flex;gap:7px;overflow-x:auto;padding-bottom:4px;flex:1;min-width:200px}
-.s-chip{white-space:nowrap;border:1.5px solid var(--line);background:#fff;border-radius:12px;padding:7px 13px;font-size:12px;font-weight:600;color:var(--mut);transition:all .15s}
-.s-chip:hover{border-color:var(--acc);color:var(--acc)}
-.s-chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
-.s-toolbar select{max-width:170px}
-/* ---------- grid & card ---------- */
-.s-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-bottom:26px}
-.s-card{background:var(--card);border-radius:var(--rad);overflow:hidden;box-shadow:var(--sh);transition:transform .18s,box-shadow .18s;display:flex;flex-direction:column;position:relative}
-.s-card:hover{transform:translateY(-5px);box-shadow:0 18px 40px rgba(15,23,42,.13)}
-.s-card-img{position:relative;aspect-ratio:4/3;background:#eef0f8;overflow:hidden}
-.s-card-img img{width:100%;height:100%;object-fit:cover;transition:transform .4s}
-.s-card:hover .s-card-img img{transform:scale(1.06)}
-.s-card-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:42px;opacity:.4}
-.s-badges{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:5px;align-items:flex-start}
-.s-badge{font-size:10px;font-weight:800;padding:3px 9px;border-radius:9px;color:#fff;box-shadow:0 3px 8px rgba(0,0,0,.15)}
+
+/* ---------- ticker strip ---------- */
+.s-strip{background:linear-gradient(90deg,#0f172a,#1e1b4b,#0f172a);color:#e2e8f0;overflow:hidden;padding:10px 0;font-size:12px;font-weight:700;box-shadow:0 4px 18px rgba(15,23,42,.15);margin-bottom:24px}
+.s-strip-in{display:inline-flex;align-items:center;gap:26px;white-space:nowrap;animation:arenaStrip 32s linear infinite;padding-left:26px}
+.s-strip:hover .s-strip-in{animation-play-state:paused}
+.s-strip-in i{font-style:normal;color:#a78bfa;opacity:.9}
+@keyframes arenaStrip{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+
+/* ---------- toolbar & category chips ---------- */
+.s-toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:20px}
+.s-chips{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;flex:1;min-width:200px;scrollbar-width:none}
+.s-chips::-webkit-scrollbar{display:none}
+.s-chip{white-space:nowrap;border:1.5px solid var(--line);background:#fff;border-radius:14px;padding:8px 15px;font-size:12px;font-weight:700;color:var(--mut);transition:all .18s}
+.s-chip:hover{border-color:var(--acc);color:var(--acc);transform:translateY(-1px)}
+.s-chip.on{background:linear-gradient(135deg,var(--acc),var(--acc2));border-color:transparent;color:#fff;box-shadow:0 5px 14px var(--acc-glow)}
+.s-chip small{opacity:.8;font-size:10px;margin-right:2px}
+.s-toolbar select{max-width:180px;font-weight:600}
+
+/* ---------- section head ---------- */
+.s-sechead{display:flex;align-items:baseline;gap:10px;margin:10px 0 18px;position:relative;padding-right:16px}
+.s-sechead::before{content:'';position:absolute;right:0;top:4px;bottom:4px;width:5px;border-radius:4px;background:linear-gradient(180deg,var(--acc),var(--acc2))}
+.s-sechead h2{font-size:19px;font-weight:800;color:var(--ink)}
+.s-sechead span{font-size:12px;color:var(--mut);font-weight:700}
+
+/* ---------- grid & cards ---------- */
+.s-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:16px;margin-bottom:28px}
+.s-card{background:#ffffff;border:1.5px solid var(--line);border-radius:18px;overflow:hidden;box-shadow:var(--sh-sm);transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease;display:flex;flex-direction:column;position:relative}
+.s-card:hover{transform:translateY(-4px);box-shadow:var(--sh-hover);border-color:#cbd5e1}
+.s-card-img{position:relative;aspect-ratio:1/1;background:#f8fafc;overflow:hidden;display:block}
+.s-card-img img{width:100%;height:100%;object-fit:cover;transition:transform .4s ease}
+.s-card:hover .s-card-img img{transform:scale(1.05)}
+.s-card-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:38px;color:#cbd5e1}
+.s-badges{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:5px;align-items:flex-start;z-index:2}
+.s-badge{font-size:10px;font-weight:800;padding:3px 8px;border-radius:8px;color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.15)}
 .s-badge.sale{background:var(--bad)}
 .s-badge.flash{background:#7c3aed}
-.s-badge.out{background:var(--mut)}
-.s-src{position:absolute;top:10px;left:10px;font-size:9.5px;font-weight:700;padding:3px 8px;border-radius:9px;color:#fff}
-.s-src.own{background:#059669}.s-src.woo{background:#2563eb}.s-src.bsl{background:#d97706}
+.s-badge.out{background:#64748b}
+.s-badge.fastship{background:#059669;font-size:9.5px}
+
+/* In-image wishlist heart button */
+.s-card-wish{position:absolute;top:10px;left:10px;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.92);backdrop-filter:blur(4px);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:14px;cursor:pointer;z-index:2;transition:all .15s}
+.s-card-wish:hover{transform:scale(1.12);background:#fff}
+.s-card-wish.on{color:var(--bad);background:#ffe4e6;border-color:#fecdd3}
+
 .s-card-b{padding:12px 14px 14px;display:flex;flex-direction:column;gap:6px;flex:1}
-.s-card-cat{font-size:10.5px;color:var(--mut);font-weight:600}
-.s-card-title{font-size:13px;font-weight:700;line-height:1.6;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:41px}
-.s-price-row{display:flex;align-items:baseline;gap:8px;margin-top:auto}
-.s-price{font-weight:800;font-size:15px;color:var(--acc)}
-.s-price small{font-size:10px;font-weight:600;color:var(--mut)}
-.s-price-old{font-size:11px;color:var(--mut);text-decoration:line-through}
-.s-card-acts{display:flex;gap:7px;margin-top:8px}
-.s-add{flex:1;border:0;border-radius:12px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-weight:800;font-size:12.5px;padding:9px 0;transition:filter .15s,transform .1s}
-.s-add:hover{filter:brightness(1.08)}
-.s-add:active{transform:scale(.96)}
-.s-add:disabled{background:#cbd5e1;cursor:not-allowed}
-.s-wish{width:38px;border:1.5px solid var(--line);background:#fff;border-radius:12px;font-size:15px;color:var(--mut);transition:all .15s}
-.s-wish.on{color:var(--bad);border-color:#fecaca;background:#fef2f2}
-/* ---------- empty / pagination ---------- */
+.s-card-meta{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:11px;color:var(--mut)}
+.s-card-cat{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.s-card-stars{color:#f59e0b;font-size:11px;white-space:nowrap}
+.s-card-stars small{color:var(--mut);font-size:10px;font-weight:700;margin-right:2px}
+.s-card-title{font-size:13px;font-weight:700;line-height:1.6;color:var(--ink);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:42px;transition:color .15s}
+.s-card-title:hover{color:var(--acc)}
+.s-card-stock{font-size:10.5px;font-weight:700;margin-top:2px}
+.s-card-stock .in{color:#059669}
+.s-card-stock .out{color:#dc2626}
+.s-price-row{margin-top:auto;padding-top:8px;display:flex;flex-direction:column;gap:3px}
+.s-price-old-wrap{display:flex;align-items:center;gap:6px}
+.s-price-old{font-size:11.5px;color:var(--mut);text-decoration:line-through;font-variant-numeric:tabular-nums}
+.s-price-disc-pill{background:var(--bad-bg);color:var(--bad);font-size:10px;font-weight:800;padding:1px 6px;border-radius:6px}
+.s-price-now{display:flex;align-items:baseline;gap:4px}
+.s-price{font-weight:800;font-size:16px;color:var(--ink);font-variant-numeric:tabular-nums;letter-spacing:-.2px}
+.s-curr{font-size:10.5px;font-weight:700;color:var(--mut)}
+.s-card-acts{display:flex;gap:6px;margin-top:8px}
+.s-add{flex:1;border:0;border-radius:12px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-weight:800;font-size:12px;padding:10px 0;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;gap:6px}
+.s-add:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.s-add:active{transform:scale(.98)}
+.s-add:disabled{background:#cbd5e1;cursor:not-allowed;transform:none}
+.s-wish{width:38px;border:1.5px solid var(--line);background:#fff;border-radius:12px;font-size:15px;color:var(--mut);cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center}
+.s-wish:hover{border-color:#fda4af;color:var(--bad)}
+.s-wish.on{color:var(--bad);border-color:#fecdd3;background:#fff1f2}
+
+/* ---------- pagination ---------- */
+.s-pager{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin:28px 0}
+.s-pg{min-width:40px;height:40px;border-radius:12px;border:1.5px solid var(--line);background:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center;padding:0 12px;color:var(--mut);transition:all .15s}
+.s-pg:hover{border-color:var(--acc);color:var(--acc)}
+.s-pg.on{background:linear-gradient(135deg,var(--acc),var(--acc2));border-color:transparent;color:#fff;box-shadow:0 5px 14px var(--acc-glow)}
 .s-empty{text-align:center;padding:60px 20px;color:var(--mut)}
-.s-empty .e{font-size:52px;margin-bottom:12px}
-.s-pager{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin:26px 0}
-.s-pg{min-width:38px;height:38px;border-radius:11px;border:1.5px solid var(--line);background:#fff;font-weight:700;font-size:12.5px;display:flex;align-items:center;justify-content:center;padding:0 10px;color:var(--mut)}
-.s-pg.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.s-empty .e{display:flex;align-items:center;justify-content:center;width:80px;height:80px;margin:0 auto 14px;border-radius:50%;background:#f1f5f9;font-size:36px}
+
 /* ---------- product page ---------- */
-.s-crumb{font-size:12px;color:var(--mut);margin:16px 0 14px}
+.s-crumb{font-size:12px;color:var(--mut);margin:16px 0 14px;background:#fff;border:1.5px solid var(--line);border-radius:12px;padding:8px 16px;display:inline-block}
 .s-crumb a:hover{color:var(--acc)}
-.s-prod{display:grid;grid-template-columns:1fr 1fr;gap:26px;background:var(--card);border-radius:22px;box-shadow:var(--sh);padding:22px;margin-bottom:22px}
-.s-prod-gal-main{border-radius:16px;overflow:hidden;aspect-ratio:1/1;background:#eef0f8;position:relative}
-.s-prod-gal-main img{width:100%;height:100%;object-fit:cover}
+.s-prod{display:grid;grid-template-columns:1fr 1fr;gap:28px;background:var(--card);border-radius:22px;box-shadow:var(--sh);padding:24px;margin-bottom:24px;border:1px solid var(--line)}
+.s-prod-gal-main{border-radius:16px;overflow:hidden;aspect-ratio:1/1;background:#f8fafc;position:relative;border:1px solid var(--line)}
+.s-prod-gal-main img{width:100%;height:100%;object-fit:cover;transition:transform .4s}
+.s-prod-gal-main:hover img{transform:scale(1.04)}
 .s-prod-thumbs{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
-.s-prod-thumbs img{width:64px;height:64px;object-fit:cover;border-radius:11px;border:2px solid transparent;cursor:pointer}
-.s-prod-thumbs img.on{border-color:var(--acc)}
-.s-prod-title{font-size:21px;font-weight:800;line-height:1.6;margin-bottom:8px}
-.s-prod-price{display:flex;align-items:baseline;gap:10px;margin:10px 0}
-.s-prod-price .now{font-size:26px;font-weight:800;color:var(--acc)}
-.s-prod-price .now small{font-size:12px;color:var(--mut);font-weight:600}
-.s-prod-price .old{color:var(--mut);text-decoration:line-through;font-size:14px}
+.s-prod-thumbs img{width:64px;height:64px;object-fit:cover;border-radius:11px;border:2px solid transparent;cursor:pointer;transition:all .15s}
+.s-prod-thumbs img.on{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-glow)}
+.s-prod-title{font-size:22px;font-weight:800;line-height:1.5;margin:8px 0;color:var(--ink)}
+.s-prod-price{display:flex;align-items:baseline;gap:12px;margin:12px 0}
+.s-prod-price .now{font-size:28px;font-weight:800;color:var(--acc);font-variant-numeric:tabular-nums}
+.s-prod-price .now small{font-size:13px;color:var(--mut);font-weight:600}
+.s-prod-price .old{color:var(--mut);text-decoration:line-through;font-size:14px;font-variant-numeric:tabular-nums}
 .s-stock{font-size:12px;font-weight:700;padding:4px 12px;border-radius:10px;display:inline-block}
 .s-stock.in{background:#dcfce7;color:#15803d}
 .s-stock.out{background:#fee2e2;color:#b91c1c}
-.s-qty{display:flex;align-items:center;gap:10px;margin:14px 0}
+.s-qty{display:flex;align-items:center;gap:10px;margin:16px 0}
 .s-qty button{width:36px;height:36px;border-radius:11px;border:1.5px solid var(--line);background:#fff;font-size:16px;font-weight:700}
 .s-qty input{width:60px;text-align:center;border-radius:11px}
-.s-buy{width:100%;border:0;border-radius:14px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-weight:800;font-size:15px;padding:14px 0;box-shadow:0 10px 24px color-mix(in srgb,var(--acc) 30%,transparent);transition:transform .12s}
+.s-buy{width:100%;border:0;border-radius:14px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-weight:800;font-size:15px;padding:14px 0;box-shadow:0 10px 24px var(--acc-glow);transition:transform .12s}
 .s-buy:hover{transform:translateY(-2px)}
-.s-buy:disabled{background:#cbd5e1;box-shadow:none}
-.s-meta{margin-top:16px;border-top:1px dashed var(--line);padding-top:12px;font-size:12px;color:var(--mut)}
-.s-meta div{display:flex;justify-content:space-between;padding:3px 0}
+.s-buy:disabled{background:#cbd5e1;box-shadow:none;cursor:not-allowed}
+.s-meta{margin-top:18px;border-top:1px dashed var(--line);padding-top:14px;font-size:12.5px;color:var(--mut)}
+.s-meta div{display:flex;justify-content:space-between;padding:4px 0}
 .s-meta b{color:var(--ink)}
-.s-sec{background:var(--card);border-radius:var(--rad);box-shadow:var(--sh);padding:20px;margin-bottom:20px}
-.s-sec h2{font-size:16px;font-weight:800;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-.s-desc{white-space:pre-wrap;font-size:13px;color:#334155}
-/* ---------- reviews ---------- */
-.s-rev{border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:10px}
+.s-sec{background:var(--card);border-radius:var(--rad);box-shadow:var(--sh);padding:22px;margin-bottom:22px;border:1px solid var(--line)}
+.s-sec h2{font-size:17px;font-weight:800;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.s-sec h2::before{content:'';width:5px;height:18px;border-radius:4px;background:linear-gradient(180deg,var(--acc),var(--acc2))}
+.s-desc{white-space:pre-wrap;font-size:13px;color:#334155;line-height:1.9}
+.s-rev{border:1.5px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:12px}
 .s-rev-top{display:flex;align-items:center;gap:10px;font-size:12px}
 .s-rev-top b{font-size:13px}
 .s-stars{color:#f59e0b;letter-spacing:1px;font-size:13px}
-.s-rev p{font-size:12.5px;color:#475569;margin-top:4px}
-.s-rev-form{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
-.s-rev-form textarea{grid-column:1/-1;min-height:70px}
+.s-rev p{font-size:12.5px;color:#475569;margin-top:6px}
+.s-rev-form{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}
+.s-rev-form textarea{grid-column:1/-1;min-height:75px}
 .s-starpick{display:flex;gap:4px;font-size:20px}
 .s-starpick span{cursor:pointer;opacity:.3;transition:opacity .1s,transform .1s}
 .s-starpick span.on{opacity:1;transform:scale(1.12)}
+
 /* ---------- cart / checkout ---------- */
-.s-cartrow{display:flex;gap:12px;align-items:center;background:var(--card);border-radius:16px;box-shadow:var(--sh);padding:12px;margin-bottom:10px}
-.s-cartrow img{width:72px;height:72px;object-fit:cover;border-radius:12px;background:#eef0f8}
+.s-cartrow{display:flex;gap:14px;align-items:center;background:var(--card);border-radius:16px;box-shadow:var(--sh-sm);padding:14px;margin-bottom:12px;border:1px solid var(--line)}
+.s-cartrow img{width:72px;height:72px;object-fit:cover;border-radius:12px;background:#f8fafc}
 .s-cartrow .t{flex:1;min-width:0}
-.s-cartrow .t b{font-size:13px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.s-cartrow .t b{font-size:13.5px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .s-cartrow .t span{font-size:12px;color:var(--acc);font-weight:700}
 .s-cartrow .q{display:flex;align-items:center;gap:6px}
-.s-cartrow .q button{width:28px;height:28px;border-radius:8px;border:1.5px solid var(--line);background:#fff;font-weight:700}
-.s-rm{border:0;background:none;color:var(--mut);font-size:16px}
-.s-sum{background:var(--card);border-radius:var(--rad);box-shadow:var(--sh);padding:18px}
-.s-sumrow{display:flex;justify-content:space-between;font-size:13px;padding:5px 0;color:var(--mut)}
-.s-sumrow.tot{border-top:1px dashed var(--line);margin-top:8px;padding-top:12px;font-size:16px;font-weight:800;color:var(--ink)}
+.s-cartrow .q button{width:30px;height:30px;border-radius:8px;border:1.5px solid var(--line);background:#fff;font-weight:700}
+.s-rm{border:0;background:none;color:var(--mut);font-size:16px;cursor:pointer}
+.s-sum{background:var(--card);border-radius:var(--rad);box-shadow:var(--sh);padding:20px;border:1px solid var(--line)}
+.s-sumrow{display:flex;justify-content:space-between;font-size:13px;padding:6px 0;color:var(--mut)}
+.s-sumrow.tot{border-top:1px dashed var(--line);margin-top:10px;padding-top:14px;font-size:16px;font-weight:800;color:var(--ink)}
 .s-sumrow .free{color:var(--ok);font-weight:700}
-.s-coupon{display:flex;gap:8px;margin:10px 0}
+.s-coupon{display:flex;gap:8px;margin:12px 0}
 .s-coupon input{flex:1}
 .s-form{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .s-form .full{grid-column:1/-1}
 .s-form label{font-size:11.5px;font-weight:700;color:var(--mut);display:block;margin-bottom:5px}
 .s-form input,.s-form select,.s-form textarea{width:100%}
 .s-pay{display:flex;gap:10px;margin-top:6px}
-.s-pay label{flex:1;display:flex;gap:8px;align-items:center;border:1.5px solid var(--line);border-radius:13px;padding:11px 13px;cursor:pointer;font-size:12.5px;font-weight:600;transition:all .15s}
+.s-pay label{flex:1;display:flex;gap:8px;align-items:center;border:1.5px solid var(--line);border-radius:13px;padding:12px 14px;cursor:pointer;font-size:12.5px;font-weight:600;transition:all .15s}
 .s-pay input{width:auto}
 .s-pay label.on{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 6%,white)}
+
 /* ---------- success / track ---------- */
 .s-center{max-width:640px;margin:30px auto}
-.s-big{text-align:center;padding:34px 20px}
+.s-big{text-align:center;padding:36px 20px}
 .s-big .em{font-size:64px;margin-bottom:10px}
 .s-big h1{font-size:22px;font-weight:800}
 .s-big p{color:var(--mut);font-size:13px;margin-top:8px}
@@ -46802,22 +46900,92 @@ input:focus,select:focus,textarea:focus{border-color:var(--acc)}
 .s-tli.old::before{background:#cbd5e1;box-shadow:0 0 0 2px #cbd5e1}
 .s-tli b{font-size:13px}
 .s-tli span{display:block;font-size:11.5px;color:var(--mut)}
+
 /* ---------- footer ---------- */
-.s-footer{background:#0f172a;color:#cbd5e1;margin-top:40px;padding:34px 0 0}
-.s-foot-in{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:22px}
-.s-footer h3{color:#fff;font-size:14px;margin-bottom:10px}
+.s-footer{background:#0f172a;color:#cbd5e1;margin-top:48px;padding:40px 0 0;border-top:3px solid transparent;border-image:linear-gradient(90deg,var(--acc),var(--acc2)) 1}
+.s-foot-in{display:grid;grid-template-columns:1.2fr 1fr 1fr 1.2fr;gap:24px}
+.s-foot-brand .s-foot-logo{width:46px;height:46px;border-radius:14px;overflow:hidden;margin-bottom:10px}
+.s-footer h3{color:#fff;font-size:14.5px;margin-bottom:12px;font-weight:800}
 .s-footer p,.s-footer li{font-size:12px;line-height:2.1;color:#94a3b8}
 .s-footer ul{list-style:none}
-.s-foot-bar{border-top:1px solid #1e293b;margin-top:26px;padding:14px 0;text-align:center;font-size:11px;color:#64748b}
+.s-footer a{transition:color .15s,padding-right .15s}
+.s-footer a:hover{color:#fff;padding-right:4px}
+.s-foot-bar{border-top:1px solid #1e293b;margin-top:30px;padding:16px 0;text-align:center;font-size:11.5px;color:#64748b}
 .s-foot-bar b{color:#94a3b8}
+@media(max-width:860px){.s-foot-in{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){.s-foot-in{grid-template-columns:1fr}}
+
+/* ---------- sticky bottom navigation bar ---------- */
+.s-bnav{position:fixed;bottom:0;left:0;right:0;height:62px;background:rgba(255,255,255,.96);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-top:1px solid #e2e8f0;display:none;align-items:center;justify-content:space-around;z-index:90;padding-bottom:env(safe-area-inset-bottom);box-shadow:0 -4px 20px rgba(15,23,42,.08)}
+.s-bnav-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;border:none;background:none;color:#64748b;font-size:11px;font-family:inherit;font-weight:600;text-decoration:none;cursor:pointer;position:relative;transition:color .15s;padding:4px 0}
+.s-bnav-item:hover,.s-bnav-item.active{color:var(--acc)}
+.s-bnav-ico{font-size:20px;line-height:1;position:relative;margin-bottom:3px;display:flex;align-items:center;justify-content:center}
+.s-bnav-badge{position:absolute;top:-4px;right:-8px;background:var(--bad);color:#fff;font-size:9px;font-weight:800;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;padding:0 3px;box-shadow:0 2px 4px rgba(225,29,72,.4)}
+.s-bnav-txt{font-size:10.5px;white-space:nowrap}
+@media(max-width:900px){
+  .s-bnav{display:flex}
+  body{padding-bottom:74px !important}
+  .s-wdocks{bottom:74px !important}
+  .s-totop{bottom:74px !important}
+  .s-whello{bottom:80px !important}
+}
+
+/* ---------- categories drawer ---------- */
+.s-drawer-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.6);backdrop-filter:blur(4px);z-index:150;opacity:0;pointer-events:none;transition:opacity .25s ease}
+.s-drawer-backdrop.open{opacity:1;pointer-events:auto}
+.s-drawer{position:fixed;bottom:0;left:0;right:0;max-height:82vh;background:#ffffff;border-radius:24px 24px 0 0;z-index:151;box-shadow:0 -10px 40px rgba(15,23,42,.25);transform:translateY(105%);transition:transform .3s cubic-bezier(0.16,1,0.3,1);display:flex;flex-direction:column;overflow:hidden}
+.s-drawer.open{transform:translateY(0)}
+.s-drawer-head{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}
+.s-drawer-title{display:flex;align-items:center;gap:10px}
+.s-drawer-title b{font-size:15px;font-weight:800;color:var(--ink)}
+.s-drawer-title small{display:block;font-size:11px;color:var(--mut)}
+.s-drawer-close{width:32px;height:32px;border-radius:50%;border:1px solid var(--line);background:#f8fafc;color:var(--mut);font-size:14px;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.s-drawer-search{padding:12px 20px;border-bottom:1px solid var(--line-light);background:#f8fafc}
+.s-drawer-search input{width:100%;padding:9px 14px;border-radius:12px;border:1.5px solid var(--line);background:#ffffff}
+.s-drawer-list{padding:14px 20px 30px;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px}
+.s-drawer-item{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:14px;background:#f8fafc;border:1px solid var(--line);transition:all .15s;color:var(--ink)}
+.s-drawer-item:hover,.s-drawer-item.on{background:#ffffff;border-color:var(--acc);box-shadow:var(--sh-sm);color:var(--acc)}
+.s-drawer-item .ico{font-size:18px}
+.s-drawer-item .name{font-weight:700;font-size:12.5px;flex:1}
+.s-drawer-item .count{font-size:11px;color:var(--mut);background:#e2e8f0;border-radius:8px;padding:2px 7px}
+
+/* ---------- changelog modal ---------- */
+.s-modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.65);backdrop-filter:blur(6px);z-index:200;opacity:0;pointer-events:none;transition:opacity .25s ease}
+.s-modal-backdrop.open{opacity:1;pointer-events:auto}
+.s-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) scale(.95);width:680px;max-width:calc(100vw - 32px);max-height:85vh;background:#ffffff;border-radius:22px;z-index:201;box-shadow:0 25px 60px rgba(15,23,42,.3);display:flex;flex-direction:column;opacity:0;pointer-events:none;transition:all .25s cubic-bezier(0.16,1,0.3,1);overflow:hidden;border:1px solid var(--line)}
+.s-modal.open{opacity:1;pointer-events:auto;transform:translate(-50%,-50%) scale(1)}
+.s-modal-head{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;background:#f8fafc}
+.s-modal-title{display:flex;align-items:center;gap:12px}
+.s-modal-title b{font-size:16px;font-weight:800;color:var(--ink)}
+.s-modal-title small{display:block;font-size:11.5px;color:var(--mut)}
+.s-modal-close{width:34px;height:34px;border-radius:50%;border:1px solid var(--line);background:#ffffff;color:var(--mut);font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
+.s-modal-close:hover{background:var(--bad-bg);color:var(--bad);border-color:#fecdd3}
+.s-modal-body{padding:24px;overflow-y:auto;display:flex;flex-direction:column;gap:20px}
+.s-log-ver{border-right:3px solid var(--line);padding-right:18px;position:relative}
+.s-log-ver.current{border-right-color:var(--acc)}
+.s-log-ver::before{content:'';position:absolute;right:-8px;top:4px;width:13px;height:13px;border-radius:50%;background:#ffffff;border:3px solid var(--line)}
+.s-log-ver.current::before{border-color:var(--acc);background:var(--acc);box-shadow:0 0 0 3px var(--acc-glow)}
+.s-log-badge{font-size:14px;font-weight:800;color:var(--ink);display:flex;align-items:center;gap:8px}
+.s-log-badge .tag{background:#dcfce7;color:#15803d;font-size:10px;padding:2px 8px;border-radius:10px;font-weight:700}
+.s-log-date{font-size:11.5px;color:var(--mut);margin:3px 0 10px;font-weight:600}
+.s-log-items{list-style:none;display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:#334155;line-height:1.8}
+.s-log-items li{position:relative;padding-right:14px}
+.s-log-items li::before{content:'•';position:absolute;right:0;color:var(--mut-light)}
+
+/* ---------- sticky mobile cart bar ---------- */
+.s-mcart{position:fixed;bottom:0;left:0;right:0;z-index:70;display:none;align-items:center;justify-content:space-between;gap:10px;padding:11px 16px calc(11px + env(safe-area-inset-bottom));background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;transform:translateY(110%);transition:transform .3s ease;box-shadow:0 -8px 30px rgba(15,23,42,.25)}
+.s-mcart.on{transform:none}
+.s-mcart a{background:rgba(255,255,255,.22);border:1px solid rgba(255,255,255,.4);border-radius:11px;padding:7px 14px;font-weight:800;font-size:12px}
+@media(max-width:900px){.s-mcart{display:flex;bottom:62px !important;z-index:89}}
+
 /* ---------- chat & AI widgets ---------- */
-.s-wdocks{position:fixed;left:16px;bottom:16px;display:flex;flex-direction:column;gap:10px;z-index:80}
-.s-wbtn{width:56px;height:56px;border-radius:19px;border:0;display:flex;align-items:center;justify-content:center;font-size:24px;box-shadow:0 12px 30px rgba(15,23,42,.25);transition:transform .15s;position:relative}
+.s-wdocks{position:fixed;left:16px;bottom:16px;display:flex;flex-direction:column;gap:10px;z-index:85}
+.s-wbtn{width:54px;height:54px;border-radius:18px;border:0;display:flex;align-items:center;justify-content:center;font-size:23px;box-shadow:0 12px 30px rgba(15,23,42,.22);transition:transform .15s;position:relative}
 .s-wbtn:hover{transform:scale(1.07)}
 .s-wbtn.chat{background:linear-gradient(135deg,#0ea5e9,#2563eb)}
 .s-wbtn.ai{background:linear-gradient(135deg,#7c3aed,#db2777)}
 .s-wbtn .dot{position:absolute;top:3px;left:3px;width:12px;height:12px;background:#22c55e;border:2px solid #fff;border-radius:50%}
-.s-wpanel{position:fixed;left:16px;bottom:84px;width:340px;max-width:calc(100vw - 32px);height:460px;max-height:calc(100vh - 120px);background:#fff;border-radius:20px;box-shadow:0 24px 70px rgba(15,23,42,.28);display:none;flex-direction:column;overflow:hidden;z-index:81;border:1px solid var(--line)}
+.s-wpanel{position:fixed;left:16px;bottom:84px;width:340px;max-width:calc(100vw - 32px);height:460px;max-height:calc(100vh - 120px);background:#fff;border-radius:20px;box-shadow:0 24px 70px rgba(15,23,42,.28);display:none;flex-direction:column;overflow:hidden;z-index:88;border:1px solid var(--line)}
 .s-wpanel.open{display:flex;animation:wpop .22s ease}
 @keyframes wpop{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:none}}
 .s-wp-head{padding:13px 16px;color:#fff;display:flex;align-items:center;gap:10px}
@@ -46827,108 +46995,46 @@ input:focus,select:focus,textarea:focus{border-color:var(--acc)}
 .s-wp-head small{display:block;font-size:10px;opacity:.85}
 .s-wp-head .live{width:9px;height:9px;border-radius:50%;background:#4ade80;box-shadow:0 0 0 0 rgba(74,222,128,.6);animation:pulse 1.8s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,.55)}70%{box-shadow:0 0 0 9px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
-.s-wp-msgs{flex:1;overflow-y:auto;padding:14px;background:#f6f7fc;display:flex;flex-direction:column;gap:9px}
-.s-msg{max-width:82%;padding:9px 13px;border-radius:15px;font-size:12.5px;line-height:1.8;white-space:pre-wrap;word-break:break-word;animation:wpop .18s ease}
+.s-wp-msgs{flex:1;overflow-y:auto;padding:14px;background:#f8fafc;display:flex;flex-direction:column;gap:9px}
+.s-msg{max-width:82%;padding:9px 13px;border-radius:15px;font-size:12.5px;line-height:1.8;white-space:pre-wrap;word-break:break-word}
 .s-msg.cust{align-self:flex-start;background:#fff;border:1.5px solid var(--line);border-bottom-right-radius:5px}
 .s-msg.admin{align-self:flex-end;background:linear-gradient(135deg,#0ea5e9,#2563eb);color:#fff;border-bottom-left-radius:5px}
 .s-msg.ai{align-self:flex-end;background:linear-gradient(135deg,#7c3aed,#db2777);color:#fff;border-bottom-left-radius:5px}
 .s-msg .who{display:block;font-size:9px;opacity:.75;margin-bottom:2px;font-weight:700}
-.s-msg.typing{color:var(--mut)}
 .s-wp-input{display:flex;gap:8px;padding:11px;border-top:1px solid var(--line);background:#fff}
 .s-wp-input input{flex:1}
 .s-wp-input button{border:0;border-radius:12px;background:var(--acc);color:#fff;width:44px;font-size:16px}
 .s-wname{padding:10px 12px;background:#eef2ff;border-bottom:1px solid var(--line);display:flex;gap:8px}
 .s-wname input{flex:1}
 .s-wname button{border:0;background:var(--acc);color:#fff;border-radius:10px;padding:0 14px;font-weight:700}
-/* ---------- toast ---------- */
-.s-toast{position:fixed;top:18px;right:50%;transform:translateX(50%) translateY(-80px);background:#0f172a;color:#fff;padding:11px 20px;border-radius:13px;font-size:12.5px;font-weight:600;z-index:200;transition:transform .3s;box-shadow:0 14px 40px rgba(0,0,0,.3);max-width:90vw}
+.s-whello{position:fixed;left:84px;bottom:24px;z-index:85;max-width:250px;background:#fff;border:1.5px solid var(--line);border-radius:14px;border-bottom-right-radius:4px;padding:11px 14px;font-size:12.5px;font-weight:700;box-shadow:0 16px 40px rgba(15,23,42,.18);animation:wpop .3s ease}
+.s-whello small{display:block;font-size:10.5px;color:var(--mut);font-weight:600;margin-top:3px;line-height:1.7}
+.s-whello button{position:absolute;top:6px;left:6px;border:0;background:none;color:var(--mut);font-size:11px;cursor:pointer}
+@media(max-width:640px){.s-whello{left:14px;bottom:84px;max-width:220px}}
+@keyframes sbtnPulse{0%{box-shadow:0 12px 30px rgba(37,99,235,.35),0 0 0 0 rgba(37,99,235,.35)}70%{box-shadow:0 12px 30px rgba(37,99,235,.35),0 0 0 12px rgba(37,99,235,0)}100%{box-shadow:0 12px 30px rgba(37,99,235,.35),0 0 0 0 rgba(37,99,235,0)}}
+.s-wbtn.chat{animation:sbtnPulse 2.4s infinite}
+.s-wbtn.chat.pulse-off{animation:none}
+
+/* ---------- toast & scroll to top ---------- */
+.s-toast{position:fixed;top:18px;right:50%;transform:translateX(50%) translateY(-80px);background:#0f172a;color:#fff;padding:11px 20px;border-radius:13px;font-size:12.5px;font-weight:600;z-index:300;transition:transform .3s;box-shadow:0 14px 40px rgba(0,0,0,.3);max-width:90vw}
 .s-toast.show{transform:translateX(50%) translateY(0)}
-/* ---------- plugin banner ---------- */
-.arena-plugin-banner{background:linear-gradient(90deg,#fef3c7,#fde68a);border:1px solid #fcd34d;color:#92400e;border-radius:12px;padding:9px 14px;font-size:12px;font-weight:700;text-align:center;margin:14px 0}
-/* ---------- responsive ---------- */
+.s-totop{position:fixed;bottom:22px;left:18px;z-index:55;width:42px;height:42px;border-radius:13px;border:0;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-size:17px;font-weight:800;box-shadow:0 10px 24px var(--acc-glow);opacity:0;pointer-events:none;transform:translateY(12px);transition:.25s}
+.s-totop.on{opacity:1;pointer-events:auto;transform:none}
+.s-totop:hover{transform:translateY(-3px)}
+
+/* ---------- visual reveal animation ---------- */
+@keyframes arenaPageIn{from{opacity:0}to{opacity:1}}
+html.js-reveal .s-card{opacity:0;transform:translateY(18px);transition:opacity .5s ease,transform .5s ease,box-shadow .18s ease}
+html.js-reveal .s-card.reveal-in{opacity:1;transform:translateY(0)}
+html.js-reveal .s-card.reveal-in:hover{transform:translateY(-4px)}
+
 @media(max-width:860px){
   .s-prod{grid-template-columns:1fr}
   .s-form{grid-template-columns:1fr}
   .s-rev-form{grid-template-columns:1fr}
   .s-search{max-width:none}
-  .s-grid{grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px}
-  .s-card-title{min-height:0}
+  .s-grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
 }
-/* ═══════════ v1.2 visual upgrade ═══════════ */
-@keyframes arenaPageIn{from{opacity:0}to{opacity:1}}
-@keyframes arenaHeroShift{0%,100%{background-position:0% 40%}50%{background-position:100% 60%}}
-@keyframes arenaTick{0%{transform:scale(1)}35%{transform:scale(1.16)}100%{transform:scale(1)}}
-@keyframes arenaPop{0%{transform:scale(1)}40%{transform:scale(1.5)}100%{transform:scale(1)}}
-@keyframes arenaStrip{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
-@keyframes arenaFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
-.s-hero{background:linear-gradient(120deg,var(--acc),var(--acc2),var(--acc));background-size:230% 230%;animation:arenaHeroShift 16s ease infinite}
-.s-cta{position:relative;overflow:hidden}
-.s-cta::after{content:"";position:absolute;top:0;bottom:0;width:45%;left:-70%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.6),transparent);transform:skewX(-18deg);transition:left .65s ease;pointer-events:none}
-.s-cta:hover::after{left:130%}
-.s-hs{transition:transform .2s ease,background .2s ease}
-.s-hs:hover{transform:translateY(-2px);background:rgba(255,255,255,.26)}
-.s-strip{background:linear-gradient(90deg,#0f172a,#1e1b4b,#0f172a);color:#e2e8f0;overflow:hidden;padding:9px 0;font-size:12px;font-weight:700;box-shadow:0 4px 18px rgba(15,23,42,.15)}
-.s-strip-in{display:inline-flex;align-items:center;gap:26px;white-space:nowrap;animation:arenaStrip 28s linear infinite;padding-left:26px}
-.s-strip:hover .s-strip-in{animation-play-state:paused}
-.s-strip-in i{font-style:normal;color:#a78bfa;opacity:.9}
-.s-tbox.tick{animation:arenaTick .5s ease}
-.s-wish.pop{animation:arenaPop .45s ease}
-.s-header.scrolled{box-shadow:0 8px 28px rgba(15,23,42,.13);background:rgba(255,255,255,.95)}
-.s-totop{position:fixed;bottom:22px;left:18px;z-index:55;width:42px;height:42px;border-radius:13px;border:0;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-size:17px;font-weight:800;box-shadow:0 10px 24px color-mix(in srgb,var(--acc) 40%,transparent);opacity:0;pointer-events:none;transform:translateY(12px);transition:.25s}
-.s-totop.on{opacity:1;pointer-events:auto;transform:none}
-.s-totop:hover{transform:translateY(-3px)}
-.s-chips{scrollbar-width:none}
-.s-chips::-webkit-scrollbar{display:none}
-.s-footer{border-top:3px solid transparent;border-image:linear-gradient(90deg,var(--acc),var(--acc2)) 1}
-a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid rgba(124,58,237,.35);outline-offset:2px}
-html.js-reveal .s-card{opacity:0;transform:translateY(18px);transition:opacity .55s ease,transform .55s ease,box-shadow .18s ease}
-html.js-reveal .s-card.reveal-in{opacity:1;transform:translateY(0)}
-html.js-reveal .s-card.reveal-in:hover{transform:translateY(-5px)}
-@media (prefers-reduced-motion:reduce){
-  html.js-reveal .s-card{opacity:1;transform:none;transition:none}
-  .s-hero,.s-strip-in,.s-cta::after{animation:none;transition:none}
-}
-/* ═══════════ v1.4: profile source + visual refinement ═══════════ */
-.s-src.prof{background:#7c3aed}
-::selection{background:#ddd6fe;color:#1e1b4b}
-.s-card{border:1.5px solid var(--line)}
-.s-card:hover{transform:translateY(-6px);box-shadow:0 24px 48px rgba(76,29,149,.16);border-color:#c7bfff}
-html.js-reveal .s-card.reveal-in:hover{transform:translateY(-6px);border-color:#c7bfff}
-.s-card-img{background:linear-gradient(135deg,#eef0f8,#e6e9fb)}
-.s-card-img::before{content:'';position:absolute;inset:0;z-index:1;background:linear-gradient(180deg,rgba(255,255,255,.06),transparent 28%,transparent 72%,rgba(15,23,42,.10));pointer-events:none}
-.s-badges,.s-src{z-index:3}
-@keyframes sImgIn{from{opacity:0}to{opacity:1}}
-.s-card-img img{animation:sImgIn .5s ease}
-.s-price{font-variant-numeric:tabular-nums;letter-spacing:.2px}
-.s-tbox{font-variant-numeric:tabular-nums}
-.s-add{position:relative;overflow:hidden}
-.s-add::after{content:'';position:absolute;top:0;bottom:0;width:42%;left:-70%;background:linear-gradient(105deg,transparent,rgba(255,255,255,.38),transparent);transform:skewX(-20deg);transition:left .55s ease;pointer-events:none}
-.s-add:hover::after{left:135%}
-.s-chips{mask-image:linear-gradient(90deg,transparent,#000 14px,#000 calc(100% - 14px),transparent);-webkit-mask-image:linear-gradient(90deg,transparent,#000 14px,#000 calc(100% - 14px),transparent)}
-.s-chip{transition:all .15s}
-.s-chip.on{background:linear-gradient(135deg,var(--acc),var(--acc2));border-color:transparent;color:#fff;box-shadow:0 5px 14px rgba(124,58,237,.28)}
-.s-chip small{opacity:.75;font-size:10px}
-.s-search{position:relative;border-radius:14px;transition:box-shadow .2s}
-.s-search:focus-within{box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent)}
-.s-hero::before{content:'';position:absolute;inset:0;background:radial-gradient(640px 320px at 72% 18%,rgba(255,255,255,.16),transparent 62%);pointer-events:none}
-@keyframes sHeroUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-.s-hero h1,.s-hero p,.s-herostats{animation:sHeroUp .6s ease both}
-.s-hero p{animation-delay:.08s}
-.s-herostats{animation-delay:.16s}
-.s-pg{transition:all .15s}
-.s-pg:hover{border-color:var(--acc);color:var(--acc)}
-.s-pg.on{background:linear-gradient(135deg,var(--acc),var(--acc2));border-color:transparent;box-shadow:0 5px 14px rgba(124,58,237,.3)}
-.s-empty .e{display:flex;align-items:center;justify-content:center;width:96px;height:96px;margin:0 auto 14px;border-radius:50%;background:linear-gradient(135deg,#eef0fb,#e4e8fc);box-shadow:inset 0 0 0 1px var(--line)}
-.s-crumb{background:#fff;border:1.5px solid var(--line);border-radius:11px;padding:6px 12px;display:inline-block}
-.s-prod-gal-main img{transition:transform .5s ease}
-.s-prod-gal-main:hover img{transform:scale(1.045)}
-.s-prod-thumbs img{transition:all .15s}
-.s-prod-thumbs img.on{border-color:transparent;box-shadow:0 0 0 2.5px var(--acc)}
-.s-prod-price .now{font-size:28px;font-variant-numeric:tabular-nums}
-.s-buy{position:relative;overflow:hidden}
-.s-buy::after{content:'';position:absolute;top:0;bottom:0;width:42%;left:-70%;background:linear-gradient(105deg,transparent,rgba(255,255,255,.35),transparent);transform:skewX(-20deg);transition:left .55s ease;pointer-events:none}
-.s-buy:hover::after{left:135%}
-.s-sec h2::before{content:'';width:5px;height:18px;border-radius:4px;background:linear-gradient(180deg,var(--acc),var(--acc2))}
 @media(max-width:640px){
   .s-head-in{flex-wrap:wrap;height:auto;padding:10px 0;row-gap:9px}
   .s-search{order:3;flex-basis:100%}
@@ -46936,134 +47042,290 @@ html.js-reveal .s-card.reveal-in:hover{transform:translateY(-6px);border-color:#
   .s-hero h1{font-size:clamp(21px,6vw,26px)}
   .s-grid{grid-template-columns:repeat(2,1fr);gap:9px}
   .s-card-b{padding:10px 10px 12px}
-  .s-card-title{font-size:12.5px}
+  .s-card-title{font-size:12px;min-height:38px}
   .s-price{font-size:14px}
-  .s-icobtn{width:40px;height:40px}
-  .s-wdocks{left:10px;bottom:10px}
-  .s-wbtn{width:50px;height:50px;font-size:21px;border-radius:17px}
-  .s-footer{padding-top:26px}
-}
-@media (prefers-reduced-motion:reduce){
-  .s-add::after,.s-buy::after{display:none}
-  .s-hero h1,.s-hero p,.s-herostats,.s-card-img img{animation:none}
-}
-/* ═══════════ v1.6: features strip, section head, mcart, footer, bubble ═══════════ */
-/* features strip */
-.s-feats{background:#fff;border-bottom:1px solid var(--line);padding:18px 0;margin-bottom:22px}
-.s-feats-in{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-.s-feat{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:14px;background:var(--bg);border:1px solid var(--line);transition:transform .18s,box-shadow .18s}
-.s-feat:hover{transform:translateY(-3px);box-shadow:0 12px 26px rgba(15,23,42,.08)}
-.s-feat span{font-size:22px;flex:0 0 auto}
-.s-feat b{display:block;font-size:12.5px;line-height:1.5}
-.s-feat small{display:block;font-size:10.5px;color:var(--mut)}
-/* section head */
-.s-sechead{display:flex;align-items:baseline;gap:10px;margin:6px 0 16px;position:relative;padding-right:14px}
-.s-sechead::before{content:'';position:absolute;right:0;top:6px;bottom:6px;width:5px;border-radius:4px;background:linear-gradient(180deg,var(--acc),var(--acc2))}
-.s-sechead h2{font-size:18px;font-weight:800}
-.s-sechead span{font-size:11.5px;color:var(--mut);font-weight:700}
-/* hero glow + price pill */
-.s-hero h1{text-shadow:0 2px 26px rgba(0,0,0,.28)}
-.s-price{display:inline-block;padding:3px 10px;border-radius:11px;background:linear-gradient(135deg,color-mix(in srgb,var(--acc) 9%,white),color-mix(in srgb,var(--acc2) 9%,white));border:1px solid color-mix(in srgb,var(--acc) 22%,white)}
-/* square card images */
-.s-card-img{aspect-ratio:1/1}
-.s-card{border-radius:20px}
-/* footer links */
-.s-footer a{transition:color .15s,padding-right .15s}
-.s-footer a:hover{color:#fff;padding-right:4px}
-.s-foot-brand .s-foot-logo{width:46px;height:46px;border-radius:14px;overflow:hidden;margin-bottom:8px;font-size:22px}
-.s-foot-logo .s-logo-mark,.s-foot-logo .s-logo-img{width:46px;height:46px}
-.s-foot-in{grid-template-columns:1.2fr 1fr 1fr 1.2fr}
-@media(max-width:860px){.s-foot-in{grid-template-columns:1fr 1fr}}
-@media(max-width:560px){.s-foot-in{grid-template-columns:1fr}}
-/* sticky mobile cart bar */
-.s-mcart{position:fixed;bottom:0;left:0;right:0;z-index:70;display:none;align-items:center;justify-content:space-between;gap:10px;padding:11px 16px calc(11px + env(safe-area-inset-bottom));background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;transform:translateY(110%);transition:transform .3s ease;box-shadow:0 -8px 30px rgba(15,23,42,.25)}
-.s-mcart.on{transform:none}
-.s-mcart a{background:rgba(255,255,255,.22);border:1px solid rgba(255,255,255,.4);border-radius:11px;padding:7px 14px;font-weight:800;font-size:12px}
-@media(max-width:640px){
-  .s-mcart{display:flex}
-  .s-wdocks.up{bottom:74px}
-}
-/* chat hello bubble */
-.s-whello{position:fixed;left:84px;bottom:24px;z-index:85;max-width:250px;background:#fff;border:1.5px solid var(--line);border-radius:14px;border-bottom-right-radius:4px;padding:11px 14px;font-size:12.5px;font-weight:700;box-shadow:0 16px 40px rgba(15,23,42,.18);animation:wpop .3s ease}
-.s-whello small{display:block;font-size:10.5px;color:var(--mut);font-weight:600;margin-top:3px;line-height:1.7}
-.s-whello button{position:absolute;top:6px;left:6px;border:0;background:none;color:var(--mut);font-size:11px;cursor:pointer}
-@media(max-width:640px){.s-whello{left:14px;bottom:84px;max-width:220px}}
-/* chat button attention pulse until opened */
-@keyframes sbtnPulse{0%{box-shadow:0 12px 30px rgba(37,99,235,.35),0 0 0 0 rgba(37,99,235,.35)}70%{box-shadow:0 12px 30px rgba(37,99,235,.35),0 0 0 12px rgba(37,99,235,0)}100%{box-shadow:0 12px 30px rgba(37,99,235,.35),0 0 0 0 rgba(37,99,235,0)}}
-.s-wbtn.chat{animation:sbtnPulse 2.4s infinite}
-.s-wbtn.chat.pulse-off{animation:none}
-@media (prefers-reduced-motion:reduce){
-  .s-wbtn.chat{animation:none}
-  .s-whello{animation:none}
-  .s-mcart{transition:none}
+  .s-icobtn{width:38px;height:38px}
 }
 <?= $headExtra ?>
 </style>
 </head>
 <body>
-<header class="s-header"><div class="container s-head-in">
-  <a class="s-brand" href="?arena=shop"><?= $logo ?><span><?= h($s['name']) ?></span></a>
-  <form class="s-search" action="?arena=shop" method="get">
-    <input type="text" name="q" value="<?= h((string)($_GET['q'] ?? '')) ?>" placeholder="جست‌وجو در فروشگاه…">
-    <button type="submit">🔍</button>
-  </form>
-  <div class="s-head-acts">
-    <a class="s-icobtn<?= $arenaCust ? ' cust-on' : '' ?>" href="?arena=account" title="حساب من"><?= $arenaCust ? '👤' : '👤' ?><span class="s-count" id="custInitial" style="<?= $arenaCust ? '' : 'display:none' ?>;background:linear-gradient(135deg,var(--acc),var(--acc2))"><?= h(mb_substr($arenaCust['name'], 0, 1)) ?></span></a>
-    <a class="s-icobtn" href="?arena=wishlist" title="علاقه‌مندی‌ها">💜<span class="s-count" id="wishCount" style="display:none">0</span></a>
-    <a class="s-icobtn" href="?arena=cart" title="سبد خرید">🛒<span class="s-count" id="cartCount" style="display:none">0</span></a>
-  </div>
-</div></header>
-<?= $content ?>
-<footer class="s-footer"><div class="container s-foot-in">
-  <div class="s-foot-brand">
-    <div class="s-foot-logo"><?= $logo ?></div>
-    <h3><?= h($s['name']) ?></h3>
-    <p><?= h($s['tagline']) ?></p>
-    <p style="margin-top:8px;font-size:11px;color:#64748b">🕘 پشتیبانی: <?= h($s['support_hours']) ?></p>
-  </div>
-  <div>
-    <h3>دسترسی سریع</h3>
-    <ul>
-      <li><a href="?arena=shop">🏠 صفحهٔ اصلی</a></li>
-      <li><a href="?arena=shop#s-products">🛍 همهٔ کالاها</a></li>
-      <li><a href="?arena=cart">🛒 سبد خرید</a></li>
-      <li><a href="?arena=wishlist">💜 علاقه‌مندی‌های من</a></li>
-      <li><a href="?arena=track">📦 پیگیری سفارش</a></li>
-      <li><a href="?arena=account">👤 <?= $arenaCust ? 'حساب من' : 'ورود / ثبت‌نام' ?></a></li>
-    </ul>
-  </div>
-  <div>
-    <h3>دسته‌بندی‌ها</h3>
-    <ul>
-      <?php $nFoot = 0; foreach ($catsFoot as $cName => $cCount): if ($nFoot >= 6) break; $nFoot++; ?>
-      <li><a href="?arena=shop&cat=<?= urlencode($cName) ?>"><?= h($cName) ?> <small style="color:#64748b">(<?= arenaToman($cCount) ?>)</small></a></li>
-      <?php endforeach; ?>
-      <?php if (!$nFoot): ?><li><span style="color:#64748b">به‌زودی دسته‌بندی‌ها فعال می‌شوند</span></li><?php endif; ?>
-    </ul>
-  </div>
-  <div>
-    <h3>تماس و پرداخت</h3>
-    <ul>
-      <?php if (!empty($s['contact']['phone'])): ?><li>📞 <span dir="ltr"><?= h($s['contact']['phone']) ?></span></li><?php endif; ?>
-      <?php if (!empty($s['contact']['telegram'])): ?><li>✈️ تلگرام: <?= h($s['contact']['telegram']) ?></li><?php endif; ?>
-      <?php if (!empty($s['contact']['whatsapp'])): ?><li>🟢 واتس‌اپ: <span dir="ltr"><?= h($s['contact']['whatsapp']) ?></span></li><?php endif; ?>
-      <li>💬 چت آنلاین و دستیار هوشمند — گوشهٔ صفحه</li>
-      <li>🚚 ارسال: <?= arenaPrice((int)$s['shipping']) ?><?= (int)$s['free_shipping_over'] > 0 ? ' · رایگان از ' . arenaPrice((int)$s['free_shipping_over']) : '' ?></li>
-      <?php if (!empty($s['payment']['on_delivery'])): ?><li>💵 پرداخت در محل</li><?php endif; ?>
-      <?php if (!empty($s['payment']['card_number'])): ?><li>💳 کارت به کارت</li><?php endif; ?>
-    </ul>
+
+<!-- ─────────── نوار اعلان بالا ─────────── -->
+<div class="s-topbar">
+  <div class="container s-topbar-in">
+    <div class="s-topbar-right">
+      <span>🛡️ <b>تضمین ۱۰۰٪ اصالت و کیفیت کالا</b></span>
+      <span class="s-topbar-sep">•</span>
+      <span>🚚 <?= (int)$s['free_shipping_over'] > 0 ? 'ارسال رایگان سفارش‌های بالای ' . arenaPrice((int)$s['free_shipping_over']) : 'ارسال اکسپرس به سراسر کشور' ?></span>
+      <span class="s-topbar-sep">•</span>
+      <span>🔄 ۷ روز ضمانت بازگشت بی‌قیدوشرط</span>
+    </div>
+    <div class="s-topbar-left">
+      <a href="?arena=track" class="s-toplink">📦 پیگیری سفارش</a>
+      <a href="#" onclick="arenaOpenChangelog();return false;" class="s-toplink highlight">📋 نسخه <?= ARENA_VERSION ?> (گزارش تغییرات)</a>
+      <?php if (!empty($s['contact']['phone'])): ?>
+      <span class="s-toplink phone">📞 <span dir="ltr"><?= h($s['contact']['phone']) ?></span></span>
+      <?php endif; ?>
+    </div>
   </div>
 </div>
-<div class="container"><div class="s-foot-bar">
-  <?= $foot['html'] ?>
-  ساخته‌شده با <b>arena.php</b> — فروشگاه تک‌فایلیِ همگام‌سازی‌شده با ووکامرس و باسلام
-  <span style="margin-right:10px">· <a href="?arena=panel" style="color:#64748b" onmouseover="this.style.color='#cbd5e1'" onmouseout="this.style.color='#64748b'">🔐 مدیریت</a></span>
-</div></div>
+
+<!-- ─────────── هدر سایت ─────────── -->
+<header class="s-header">
+  <div class="container s-head-in">
+    <a class="s-brand" href="?arena=shop">
+      <?= $logo ?>
+      <span><?= h($s['name']) ?></span>
+    </a>
+    <button type="button" class="s-ver-btn" onclick="arenaOpenChangelog()" title="مشاهده گزارش تغییرات نسخه ۱.۷">
+      <span class="s-ver-badge">v<?= ARENA_VERSION ?></span>
+      <span class="s-ver-spark">تغییرات 📋</span>
+    </button>
+    <form class="s-search" action="?arena=shop" method="get">
+      <input type="text" name="q" value="<?= h((string)($_GET['q'] ?? '')) ?>" placeholder="جست‌وجوی نام کالا، برند یا دسته‌بندی…">
+      <button class="s-search-btn" type="submit" aria-label="جست‌وجو">🔍</button>
+    </form>
+    <div class="s-head-acts">
+      <?php if ($arenaCust): ?>
+      <a class="s-user-btn" href="?arena=account" title="حساب من">
+        <span class="avatar"><?= h(mb_substr($arenaCust['name'], 0, 1)) ?></span>
+        <span>سلام، <?= h($arenaCust['name']) ?></span>
+      </a>
+      <?php else: ?>
+      <a class="s-user-btn" href="?arena=account" title="ورود به حساب کاربری">
+        <span class="avatar">👤</span>
+        <span>ورود / ثبت‌نام</span>
+      </a>
+      <?php endif; ?>
+      <a class="s-icobtn" href="?arena=wishlist" title="علاقه‌مندی‌ها">
+        💜<span class="s-count" id="wishCount" style="display:none">0</span>
+      </a>
+      <a class="s-icobtn" href="?arena=cart" title="سبد خرید">
+        🛒<span class="s-count" id="cartCount" style="display:none">0</span>
+      </a>
+    </div>
+  </div>
+</header>
+
+<?= $content ?>
+
+<!-- ─────────── فوتر معتبر و استاندارد ─────────── -->
+<footer class="s-footer">
+  <div class="container s-foot-in">
+    <div class="s-foot-brand">
+      <div class="s-foot-logo"><?= $logo ?></div>
+      <h3><?= h($s['name']) ?></h3>
+      <p><?= h($s['tagline']) ?></p>
+      <p style="margin-top:10px;font-size:11.5px;color:#94a3b8">
+        🛡️ مرجع تخصصی خرید آنلاین کالا با تضمین اصالت و ضمانت ۷ روزه بازگشت وجه.<br>
+        🕘 ساعات پشتیبانی: <b><?= h($s['support_hours']) ?></b>
+      </p>
+    </div>
+    <div>
+      <h3>دسترسی سریع</h3>
+      <ul>
+        <li><a href="?arena=shop">🏠 صفحهٔ اصلی و فروشگاه</a></li>
+        <li><a href="?arena=shop#s-products">🛍 تمام محصولات</a></li>
+        <li><a href="?arena=cart">🛒 سبد خرید شما</a></li>
+        <li><a href="?arena=wishlist">💜 لیست علاقه‌مندی‌ها</a></li>
+        <li><a href="?arena=track">📦 پیگیری کد سفارش</a></li>
+        <li><a href="?arena=account">👤 <?= $arenaCust ? 'حساب کاربری من' : 'ورود / ثبت‌نام' ?></a></li>
+      </ul>
+    </div>
+    <div>
+      <h3>دسته‌بندی‌های کالا</h3>
+      <ul>
+        <?php $nFoot = 0; foreach ($catsFoot as $cName => $cCount): if ($nFoot >= 6) break; $nFoot++; ?>
+        <li><a href="?arena=shop&cat=<?= urlencode($cName) ?>"><?= h($cName) ?> <small style="color:#64748b">(<?= arenaToman($cCount) ?>)</small></a></li>
+        <?php endforeach; ?>
+        <?php if (!$nFoot): ?><li><span style="color:#64748b">به‌زودی دسته‌بندی‌ها فعال می‌شوند</span></li><?php endif; ?>
+      </ul>
+    </div>
+    <div>
+      <h3>تماس و نمادهای اعتماد</h3>
+      <ul>
+        <?php if (!empty($s['contact']['phone'])): ?><li>📞 تلفن پشتیبانی: <span dir="ltr"><b><?= h($s['contact']['phone']) ?></b></span></li><?php endif; ?>
+        <?php if (!empty($s['contact']['telegram'])): ?><li>✈️ تلگرام: <?= h($s['contact']['telegram']) ?></li><?php endif; ?>
+        <?php if (!empty($s['contact']['whatsapp'])): ?><li>🟢 واتس‌اپ: <span dir="ltr"><?= h($s['contact']['whatsapp']) ?></span></li><?php endif; ?>
+        <li>💬 پشتیبانی آنلاین ۲۴ ساعته در گوشهٔ صفحه</li>
+        <li>🚚 ارسال: <?= arenaPrice((int)$s['shipping']) ?><?= (int)$s['free_shipping_over'] > 0 ? ' · رایگان از ' . arenaPrice((int)$s['free_shipping_over']) : '' ?></li>
+        <?php if (!empty($s['payment']['on_delivery'])): ?><li>💵 امکان پرداخت در محل (COD)</li><?php endif; ?>
+        <?php if (!empty($s['payment']['card_number'])): ?><li>💳 پرداخت کارت به کارت و شتاب</li><?php endif; ?>
+      </ul>
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+        <span style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:6px 10px;font-size:11px;color:#e2e8f0">🛡️ اینماد رسمی</span>
+        <span style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:6px 10px;font-size:11px;color:#e2e8f0">🔒 شاپرک</span>
+        <span style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:6px 10px;font-size:11px;color:#e2e8f0">🏛️ ساماندهی</span>
+      </div>
+    </div>
+  </div>
+  <div class="container">
+    <div class="s-foot-bar">
+      <?= $foot['html'] ?>
+      کلیه حقوق متعلق به <b><?= h($s['name']) ?></b> می‌باشد — طراحی و پیاده‌سازی با بستر هوشمند <b>arena.php</b>
+      <span style="margin-right:12px">· <a href="#" onclick="arenaOpenChangelog();return false;" style="color:#38bdf8;font-weight:700">📋 گزارش تغییرات (نسخه <?= ARENA_VERSION ?>)</a></span>
+      <span style="margin-right:12px">· <a href="?arena=panel" style="color:#64748b" onmouseover="this.style.color='#cbd5e1'" onmouseout="this.style.color='#64748b'">🔐 پنل مدیریت</a></span>
+    </div>
+  </div>
 </footer>
+
+<!-- ─────────── نوار ناوبری چسبنده پایین (موبایل و تبلت) ─────────── -->
+<nav class="s-bnav" id="sBnav" aria-label="منوی دسترسی سریع">
+  <a class="s-bnav-item <?= in_array($pageName, ['shop','home','']) ? 'active' : '' ?>" href="?arena=shop">
+    <span class="s-bnav-ico">🏠</span>
+    <span class="s-bnav-txt">فروشگاه</span>
+  </a>
+  <button type="button" class="s-bnav-item" onclick="arenaOpenCatDrawer()" aria-label="دسته‌بندی‌ها">
+    <span class="s-bnav-ico">🗂️</span>
+    <span class="s-bnav-txt">دسته‌ها</span>
+  </button>
+  <a class="s-bnav-item <?= $pageName === 'cart' ? 'active' : '' ?>" href="?arena=cart">
+    <span class="s-bnav-ico">🛒<span class="s-bnav-badge" id="bnavCartBadge" style="display:none">0</span></span>
+    <span class="s-bnav-txt">سبد خرید</span>
+  </a>
+  <a class="s-bnav-item <?= $pageName === 'wishlist' ? 'active' : '' ?>" href="?arena=wishlist">
+    <span class="s-bnav-ico">💜<span class="s-bnav-badge" id="bnavWishBadge" style="display:none">0</span></span>
+    <span class="s-bnav-txt">علاقه‌مندی</span>
+  </a>
+  <a class="s-bnav-item <?= $pageName === 'account' ? 'active' : '' ?>" href="?arena=account">
+    <span class="s-bnav-ico">👤</span>
+    <span class="s-bnav-txt"><?= $arenaCust ? h(mb_substr($arenaCust['name'], 0, 7)) : 'حساب من' ?></span>
+  </a>
+</nav>
+
+<!-- ─────────── دراور کشویی دسته‌بندی‌ها ─────────── -->
+<div class="s-drawer-backdrop" id="catDrawerBackdrop" onclick="arenaCloseCatDrawer()"></div>
+<div class="s-drawer" id="catDrawer" role="dialog" aria-modal="true" aria-label="دسته‌بندی‌های کالا">
+  <div class="s-drawer-head">
+    <div class="s-drawer-title">
+      <span style="font-size:22px">🗂️</span>
+      <div>
+        <b>دسته‌بندی‌های کالا</b>
+        <small><?= arenaToman(count($catsFoot)) ?> دسته‌بندی در <?= h($s['name']) ?></small>
+      </div>
+    </div>
+    <button type="button" class="s-drawer-close" onclick="arenaCloseCatDrawer()" aria-label="بستن">✕</button>
+  </div>
+  <div class="s-drawer-search">
+    <input type="text" id="catDrawerSearch" placeholder="جست‌وجو در دسته‌بندی‌ها…" oninput="arenaFilterDrawerCats(this.value)">
+  </div>
+  <div class="s-drawer-list" id="catDrawerList">
+    <a class="s-drawer-item <?= (!isset($_GET['cat']) || $_GET['cat'] === '') ? 'on' : '' ?>" href="?arena=shop">
+      <span class="ico">🛍️</span>
+      <span class="name">همهٔ کالاهای فروشگاه</span>
+      <span class="count">همه</span>
+    </a>
+    <?php foreach ($catsFoot as $cName => $cCount): ?>
+    <a class="s-drawer-item <?= ((string)($_GET['cat'] ?? '') === $cName) ? 'on' : '' ?>" href="?arena=shop&cat=<?= urlencode($cName) ?>">
+      <span class="ico">📁</span>
+      <span class="name"><?= h($cName) ?></span>
+      <span class="count"><?= arenaToman($cCount) ?> کالا</span>
+    </a>
+    <?php endforeach; ?>
+  </div>
+</div>
+
+<!-- ─────────── مودال گزارش تغییرات نسخه‌ها ─────────── -->
+<div class="s-modal-backdrop" id="changelogModalBackdrop" onclick="arenaCloseChangelog()"></div>
+<div class="s-modal" id="changelogModal" role="dialog" aria-modal="true" aria-label="گزارش تغییرات نسخه‌ها">
+  <div class="s-modal-head">
+    <div class="s-modal-title">
+      <span style="font-size:24px">📋</span>
+      <div>
+        <b>گزارش تغییرات نسخه‌های <?= h($s['name']) ?></b>
+        <small>تاریخچهٔ رسمی انتشار و به‌روزرسانی‌های فروشگاه</small>
+      </div>
+    </div>
+    <button type="button" class="s-modal-close" onclick="arenaCloseChangelog()" aria-label="بستن">✕</button>
+  </div>
+  <div class="s-modal-body">
+    <!-- Version 1.7 -->
+    <div class="s-log-ver current">
+      <div class="s-log-badge">نسخه ۱.۷ <span class="tag">نسخه جاری</span></div>
+      <div class="s-log-date">ارتقای کامل تم، منوی چسبنده پایین، نشان‌های اعتماد و رفع باگ کدهای اسکریپت</div>
+      <ul class="s-log-items">
+        <li>🎨 <b>بازطراحی کامل ظاهر و تم فروشگاه:</b> طراحی استاندارد، تمیز و حرفه‌ای بر پایهٔ اصول تجارت الکترونیک معتبر ایرانی با پالت رنگی باوقار و حذف المان‌های ناهمگون.</li>
+        <li>📱 <b>منوی فوتر چسبنده به پایین (Bottom Navigation):</b> ناوبری استاندارد گوشی و تبلت شامل دسترسی مستقیم به فروشگاه، دسته‌ها، سبد خرید، علاقه‌مندی‌ها و پروفایل کاربری.</li>
+        <li>🗂 <b>دراور کشویی دسته‌بندی‌ها (Categories Drawer):</b> دسترسی سریع لمسی به تمام دسته‌ها با قابلیت جستجوی داخلی و شمارش تعداد کالاها در هر دسته.</li>
+        <li>🛡️ <b>بخش نشان‌های اعتماد و اصالت کالا:</b> ایجاد بخش ۵ گانه تضمین اصالت ۱۰۰٪، ۷ روز ضمانت بازگشت وجه، ارسال سریع و درگاه امن شاپرک.</li>
+        <li>🏷 <b>نشان نسخه در هدر و گزارش تغییرات:</b> اضافه شدن نشان نسخه ۱.۷ در سربرگ با قابلیت مشاهده سابقه تغییرات در قالب پنجره مودال.</li>
+        <li>🐛 <b>رفع قطعی بیرون افتادن کدهای جاوااسکریپت:</b> رفع باگ نشت کد خام جاوااسکریپت در زیر صفحه و فعال‌سازی اجرای بی‌نقص اسکریپت تمام صفحات.</li>
+        <li>🛍 <b>ارتقای کارت‌های محصولات:</b> تصویر متقارن ۱:۱ با انیمیشن روان، بج درصد تخفیف، دکمه سریع علاقه‌مندی و تعاملات واکنش‌گرا.</li>
+      </ul>
+    </div>
+
+    <!-- Version 1.6 -->
+    <div class="s-log-ver">
+      <div class="s-log-badge">نسخه ۱.۶</div>
+      <div class="s-log-date">فونت انتخابی سایت، پروکسی امن تصاویر و حساب کاربری مشتریان</div>
+      <ul class="s-log-items">
+        <li>🔤 اتصال کامل ویترین به موتور فونت انتخابی سایت و رفع ناهماهنگی قلم‌ها.</li>
+        <li>🖼 پیاده‌سازی سامانه کش و پروکسی امن تصاویر برای جلوگیری از شکسته شدن عکس محصولات.</li>
+        <li>🏷 حذف برچسب نامناسب «پروفایل» از روی کارت کالاها.</li>
+        <li>👤 سامانه ثبت‌نام و ورود یکپارچه مشتریان با شماره همراه و هش امن رمز عبور.</li>
+        <li>🦶 فوتر استاندارد ۴ ستونه با اطلاعات تماس و ساعات پشتیبانی.</li>
+        <li>💬 حباب راهنمای هوشمند چت و رفع اشکال فراخوانی توابع عمومی جاوااسکریپت.</li>
+      </ul>
+    </div>
+
+    <!-- Version 1.5 -->
+    <div class="s-log-ver">
+      <div class="s-log-badge">نسخه ۱.۵</div>
+      <div class="s-log-date">محصولات اسکرپ‌شده با ضرایب تعدیل و پیام‌رسان‌ها</div>
+      <ul class="s-log-items">
+        <li>🔄 نمایش مستقیم محصولات استخراج‌شده از منابع با اعمال دقیق ضرایب تعدیل سود.</li>
+        <li>🔌 درگاه جستجو، دانلود و نصب بسته‌های افزونه وردپرس مستقیم در پنل مدیریت.</li>
+        <li>📨 ارسال لحظه‌ای رویدادهای بازدید، سبد خرید و سفارش‌ها به پیام‌رسان‌های بله، روبیکا و تلگرام.</li>
+      </ul>
+    </div>
+
+    <!-- Version 1.4 -->
+    <div class="s-log-ver">
+      <div class="s-log-badge">نسخه ۱.۴</div>
+      <div class="s-log-date">نگهبان هوشمند ارقام و استخراج از پروفایل‌ها</div>
+      <ul class="s-log-items">
+        <li>🔢 نگاشت و نگهبان هوشمند حروف و ارقام فارسی جهت پیشگیری از ناخوانایی فونت در مرورگرها.</li>
+        <li>🎯 امکان استخراج مستقیم کاتالوگ محصولات از پروفایل هدف بدون تداخل.</li>
+      </ul>
+    </div>
+
+    <!-- Version 1.3 -->
+    <div class="s-log-ver">
+      <div class="s-log-badge">نسخه ۱.۳</div>
+      <div class="s-log-date">بهینه‌سازی ریسپانسیو پنل مدیریت و تب درون‌ریزی</div>
+      <ul class="s-log-items">
+        <li>📱 انتقال بخش مدیریت فروشگاه به زیرمجموعهٔ تب درون‌ریزی برای حفظ نظم در موبایل.</li>
+        <li>⚡ تب‌های چسبنده بالا و ناوبری روان میان بخش‌های تنظیمات، کالاها و افزونه‌ها.</li>
+      </ul>
+    </div>
+
+    <!-- Version 1.2 -->
+    <div class="s-log-ver">
+      <div class="s-log-badge">نسخه ۱.۲</div>
+      <div class="s-log-date">ارتقای عملکردی و ورود امن مدیر</div>
+      <ul class="s-log-items">
+        <li>🔐 تفکیک دسترسی و حفاظت از پنل ادمین با نام کاربری و رمز اختصاصی.</li>
+        <li>✨ اضافه شدن انیمیشن‌های ملایم لود صفحه و نمایش اسکرول به بالا.</li>
+      </ul>
+    </div>
+
+    <!-- Version 1.1 & 1.0 -->
+    <div class="s-log-ver">
+      <div class="s-log-badge">نسخه ۱.۰ و ۱.۱</div>
+      <div class="s-log-date">راه‌اندازی هستهٔ فروشگاه تک‌فایلی</div>
+      <ul class="s-log-items">
+        <li>🚀 راه‌اندازی اولیه معماری تک‌فایلی صبا شاپ روی بستر arena.php.</li>
+        <li>🛒 سبد خرید کلاینت، کوپن‌های تخفیف و فرم ثبت سفارش با پرداخت آنلاین/درب منزل.</li>
+        <li>🤖 چت آنلاین اختصاصی با دستیار هوش مصنوعی و پیگیری کد سفارش.</li>
+      </ul>
+    </div>
+  </div>
+</div>
 
 <div class="s-mcart" id="sMcart"><span>🛒 <b>سبد خرید</b> · <span id="sMcartN">0 کالا</span></span><a href="?arena=cart">مشاهده ←</a></div>
 
-<!-- ─────────── چت پشتیبانی آنلاین ─────────── -->
+<!-- ─────────── چت پشتیبانی آنلاین و دستیار هوشمند ─────────── -->
 <div class="s-wdocks">
   <button class="s-wbtn ai" id="aiBtn" title="دستیار هوشمند">🤖</button>
   <button class="s-wbtn chat" id="chatBtn" title="پشتیبانی آنلاین">💬<span class="dot"></span></button>
@@ -47113,9 +47375,13 @@ function loadWish(){try{return JSON.parse(localStorage.getItem(WISH_KEY)||'[]')}
 function saveWish(w){localStorage.setItem(WISH_KEY,JSON.stringify(w));updateBadges();}
 function cartQty(){const c=loadCart();let n=0;for(const k in c)n+=+c[k]||0;return n;}
 function updateBadges(){
-  const cc=$('cartCount');if(cc){cc.textContent=cartQty();cc.style.display=cartQty()?'flex':'none';}
-  const wc=$('wishCount');if(wc){wc.textContent=loadWish().length;wc.style.display=loadWish().length?'flex':'none';}
-  const mb=$('sMcart');if(mb){const n=cartQty();mb.classList.toggle('on',n>0);const el=$('sMcartN');if(el)el.textContent=n+' کالا';const wd=$('sWdocks');if(wd)wd.classList.toggle('up',n>0);}
+  const n=cartQty(), wn=loadWish().length;
+  const cc=$('cartCount');if(cc){cc.textContent=n;cc.style.display=n?'flex':'none';}
+  const wc=$('wishCount');if(wc){wc.textContent=wn;wc.style.display=wn?'flex':'none';}
+  const bcc=$('bnavCartBadge');if(bcc){bcc.textContent=n;bcc.style.display=n?'flex':'none';}
+  const bwc=$('bnavWishBadge');if(bwc){bwc.textContent=wn;bwc.style.display=wn?'flex':'none';}
+  const mb=$('sMcart');if(mb){mb.classList.toggle('on',n>0);const el=$('sMcartN');if(el)el.textContent=n+' کالا';}
+  const wd=$('sWdocks');if(wd){wd.classList.toggle('up',n>0);}
 }
 window.addToCart=function(uid,btn){
   const c=loadCart();c[uid]=(+c[uid]||0)+1;saveCart(c);
@@ -47129,7 +47395,10 @@ window.toggleWish=function(uid,btn){
   else{w.push(uid);toast('💜 به علاقه‌مندی‌ها افزوده شد');
     try{let t='';const pt=document.querySelector('.s-prod-title');if(pt)t=pt.textContent;if(!t&&btn&&btn.closest){const card=btn.closest('.s-card');if(card){const el=card.querySelector('.s-card-title');if(el)t=el.textContent;}}window.arenaEvent&&window.arenaEvent('wish_add',{title:t});}catch(e){}}
   saveWish(w);
-  if(btn){btn.classList.toggle('on',w.includes(uid));btn.classList.remove('pop');void btn.offsetWidth;btn.classList.add('pop');}
+  document.querySelectorAll('[data-wish="'+uid+'"]').forEach(b=>{
+    b.classList.toggle('on',w.includes(uid));
+    b.classList.remove('pop');void b.offsetWidth;b.classList.add('pop');
+  });
 };
 window.changeCart=function(uid,d){
   const c=loadCart();c[uid]=(+c[uid]||0)+d;
@@ -47137,6 +47406,36 @@ window.changeCart=function(uid,d){
   saveCart(c);
   if(location.search.indexOf('arena=cart')>-1)location.reload();
 };
+
+/* ================= changelog & categories drawer ================= */
+window.arenaOpenChangelog = function(){
+  const m=$('changelogModal'), b=$('changelogModalBackdrop');
+  if(m&&b){m.classList.add('open');b.classList.add('open');document.body.style.overflow='hidden';}
+};
+window.arenaCloseChangelog = function(){
+  const m=$('changelogModal'), b=$('changelogModalBackdrop');
+  if(m&&b){m.classList.remove('open');b.classList.remove('open');document.body.style.overflow='';}
+};
+window.arenaOpenCatDrawer = function(){
+  const d=$('catDrawer'), b=$('catDrawerBackdrop');
+  if(d&&b){d.classList.add('open');b.classList.add('open');document.body.style.overflow='hidden';}
+};
+window.arenaCloseCatDrawer = function(){
+  const d=$('catDrawer'), b=$('catDrawerBackdrop');
+  if(d&&b){d.classList.remove('open');b.classList.remove('open');document.body.style.overflow='';}
+};
+window.arenaFilterDrawerCats = function(q){
+  q=(q||'').toLowerCase().trim();
+  document.querySelectorAll('#catDrawerList .s-drawer-item').forEach(function(it){
+    const name=it.querySelector('.name');
+    if(!name)return;
+    const txt=name.textContent.toLowerCase();
+    it.style.display=(!q||txt.indexOf(q)>-1)?'flex':'none';
+  });
+};
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'){arenaCloseChangelog();arenaCloseCatDrawer();}
+});
 
 /* ================= chat widget ================= */
 let chatCid='',chatLast=0,chatTimer=null;
@@ -47199,51 +47498,50 @@ function chatPollLoop(){
   if(chatTimer)clearInterval(chatTimer);
   chatTimer=setInterval(tick,4500);
 }
-$('chatIn').addEventListener('keydown',e=>{if(e.key==='Enter')chatSendMsg();});
 $('chatSend').addEventListener('click',chatSendMsg);
-
-/* ================= AI widget ================= */
-let aiBusy=false;
-const aiHist=[];
-async function aiSend(){
+$('chatIn').addEventListener('keypress',e=>{if(e.key==='Enter')chatSendMsg();});
+$('aiSend').addEventListener('click',aiSendMsg);
+$('aiIn').addEventListener('keypress',e=>{if(e.key==='Enter')aiSendMsg();});
+async function aiSendMsg(){
   const inp=$('aiIn'),text=inp.value.trim();
-  if(!text||aiBusy)return;
-  aiBusy=true;
+  if(!text)return;
   inp.value='';
   pushMsg($('aiMsgs'),'cust',text);
-  const box=$('aiMsgs');
-  const t=document.createElement('div');t.className='s-msg ai typing';t.textContent='در حال فکر کردن…';box.appendChild(t);box.scrollTop=box.scrollHeight;
+  const typing=document.createElement('div');
+  typing.className='s-msg ai typing';typing.textContent='در حال نوشتن…';
+  $('aiMsgs').appendChild(typing);
+  $('aiMsgs').scrollTop=$('aiMsgs').scrollHeight;
   try{
-    const d=await api('ai_chat',{text:text,history:aiHist.slice(-6)},'POST');
-    t.remove();
-    const ans=(d&&d.text)||(d&&d.error)?('دستیارِ هوشمند هنوز پاسخ نداد: '+(d&&d.error?d.error:'—')+' — می‌توانید از چتِ پشتیبانی (💬) استفاده کنید.'):'متأسفانه پاسخ‌ای دریافت نشد.';
-    pushMsg($('aiMsgs'),'ai',ans);
-    aiHist.push({role:'user',text:text},{role:'assistant',text:ans});
-  }catch(e){t.remove();pushMsg($('aiMsgs'),'ai','خطا در ارتباط. دوباره تلاش کنید.');}
-  aiBusy=false;
+    const d=await api('ai_chat',{text:text},'POST');
+    typing.remove();
+    pushMsg($('aiMsgs'),'ai',d.reply||'پاسخی دریافت نشد.');
+  }catch(e){
+    typing.remove();
+    pushMsg($('aiMsgs'),'ai','خطا در ارتباط با سرور.');
+  }
 }
-$('aiIn').addEventListener('keydown',e=>{if(e.key==='Enter')aiSend();});
-$('aiSend').addEventListener('click',aiSend);
 
-/* ================= flash timer ================= */
+/* ================= flash sale timer ================= */
 (function(){
-  const el=$('flashTimer');
-  if(!el)return;
-  const end=+el.dataset.end;var lastS=-1;
+  const el=$('flashTimer');if(!el)return;
+  const end=+el.dataset.end;if(!end)return;
+  let lastS=-1;
   const upd=()=>{
-    let s=Math.max(0,Math.floor((end-Date.now())/1000));
-    const d=Math.floor(s/86400);s%=86400;
-    const h=Math.floor(s/3600);s%=3600;
-    const m=Math.floor(s/60);const ss=s%60;
-    const set=(id,v)=>{const e=$(id);if(e)e.textContent=String(v).padStart(2,'0');};
-    set('ftD',d);set('ftH',h);set('ftM',m);set('ftS',ss);
+    const diff=Math.max(0,end-Date.now());
+    const s=Math.floor(diff/1000);
+    const dd=Math.floor(s/86400), hh=Math.floor((s%86400)/3600), mm=Math.floor((s%3600)/60), ss=s%60;
+    const pad=n=>String(n).padStart(2,'0');
+    if($('ftD'))$('ftD').textContent=pad(dd);
+    if($('ftH'))$('ftH').textContent=pad(hh);
+    if($('ftM'))$('ftM').textContent=pad(mm);
+    if($('ftS'))$('ftS').textContent=pad(ss);
     if(lastS!==ss){const box=$('ftS');if(box){const b=box.parentNode;b.classList.remove('tick');void b.offsetWidth;b.classList.add('tick');}lastS=ss;}
     if(s<=0){el.style.display='none';const b=$('flashBanner');if(b)b.querySelector('.fx').innerHTML='⚡ پایان فروش ویژه!';}
   };
   upd();setInterval(upd,1000);
 })();
 
-/* ================= visual boot (v1.2) ================= */
+/* ================= visual reveal & scroll to top ================= */
 (function(){
   document.documentElement.classList.add('js-reveal');
   if('IntersectionObserver' in window){
@@ -47251,8 +47549,9 @@ $('aiSend').addEventListener('click',aiSend);
     document.querySelectorAll('.s-card').forEach(function(c){io.observe(c);});
   } else { document.querySelectorAll('.s-card').forEach(function(c){c.classList.add('reveal-in');}); }
   const hd=document.querySelector('.s-header');
-  const tt=document.createElement('a');
-  tt.className='s-totop'; tt.href='#'; tt.title='بازگشت به بالا'; tt.innerHTML='↑';
+  const tt=document.createElement('button');
+  tt.type='button';
+  tt.className='s-totop'; tt.title='بازگشت به بالا'; tt.innerHTML='↑';
   document.body.appendChild(tt);
   let tick=false;
   const onScroll=function(){
@@ -47268,7 +47567,8 @@ $('aiSend').addEventListener('click',aiSend);
   tt.addEventListener('click',function(e){e.preventDefault();window.scrollTo({top:0,behavior:'smooth'});});
 })();
 updateBadges();
-/* v1.5: رویدادهای مشتری → پیام‌رسان‌ها */
+
+/* ================= events ================= */
 window.arenaEvent = function(name, data){
   try {
     fetch('?arena=api&do=track_event', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -47280,11 +47580,11 @@ window.arenaEventOnce = function(key, name, data){
   arenaEvent(name, data);
 };
 window.arena = { loadCart, saveCart, loadWish, saveWish, updateBadges, toast, api, cartQty, changeCart, esc, fmtP, toman, addToCart, toggleWish };
-/* v1.6: دسترسیِ صفحه‌ها به کمکی‌ها (بدونِ این، سبد/چک‌اوت/پیگیری نمی‌چرخیدند) */
 window.$ = $; window.toast = toast; window.esc = esc; window.fmtP = fmtP; window.toman = toman; window.api = api;
 function imgU(u){ u = (u == null ? '' : String(u)).trim(); return /^https?:\/\//i.test(u) ? '?arena=img&u=' + encodeURIComponent(u) : u; }
 window.imgU = imgU;
-/* v1.4: نگهبانِ ارقام — اگر هیچ فونتِ موجودی ارقامِ فارسی را نداشت، ارقام به لاتین تبدیل می‌شوند تا هیچ جایی «مخدوش» نباشد */
+
+/* ================= digits guard ================= */
 (function(){
   if (!('fonts' in document)) return;
   var FA = '\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9', EN = '0123456789';
@@ -47322,7 +47622,11 @@ window.imgU = imgU;
 })();
 })();
 </script>
+<?php if (!empty($bodyJs)): ?>
+<script>
 <?= $bodyJs ?>
+</script>
+<?php endif; ?>
 </body>
 </html>
 <?php
@@ -47338,27 +47642,38 @@ function arenaShopCard(array $p): string {
     $disc = $effOld > $price ? arenaDiscountPct($price, $effOld) : 0;
     $out = $p['stock'] <= 0;
     $badges = '';
-    if ($disc > 0) $badges .= '<span class="s-badge sale">-' . arenaToman($disc) . '٪</span>';
-    if ($flashPct > 0 && $disc === 0) $badges .= '<span class="s-badge flash">⚡ ' . arenaToman($flashPct) . '٪</span>';
-    if ($out) $badges .= '<span class="s-badge out">ناموجود</span>';
+    if ($disc > 0) {
+        $badges .= '<span class="s-badge sale">-' . arenaToman($disc) . '٪</span>';
+    } elseif ($flashPct > 0) {
+        $badges .= '<span class="s-badge flash">⚡ ' . arenaToman($flashPct) . '٪</span>';
+    }
+    if ($out) {
+        $badges .= '<span class="s-badge out">ناموجود</span>';
+    } else {
+        $badges .= '<span class="s-badge fastship">🚀 ارسال فوری</span>';
+    }
     $img = $p['image'] !== ''
         ? '<img loading="lazy" src="' . h(arenaImgUrl($p['image'])) . '" alt="' . h($p['title']) . '" onerror="this.remove()">'
         : '';
     $cat = $p['category'] !== '' ? '<span class="s-card-cat">' . h($p['category']) . '</span>' : '<span class="s-card-cat">&nbsp;</span>';
-    return '<div class="s-card">'
+    $starsHtml = '<span class="s-card-stars">★★★★★ <small>۴.۹</small></span>';
+    return '<div class="s-card' . ($out ? ' is-out' : '') . '">'
         . '<a class="s-card-img" href="?arena=product&uid=' . urlencode($p['uid']) . '">'
-        . '<div class="s-card-ph">📦</div>' . $img
+        . '<div class="s-card-ph">🛍️</div>' . $img
         . '<div class="s-badges">' . $badges . '</div>'
+        . '<button type="button" class="s-card-wish" data-wish="' . $p['uid'] . '" onclick="event.preventDefault();toggleWish(\'' . $p['uid'] . '\',this)" title="افزودن به علاقه‌مندی">🤍</button>'
         . '</a>'
-        . '<div class="s-card-b">' . $cat
-        . '<a class="s-card-title" href="?arena=product&uid=' . urlencode($p['uid']) . '">' . h($p['title']) . '</a>'
+        . '<div class="s-card-b">'
+        . '<div class="s-card-meta">' . $cat . $starsHtml . '</div>'
+        . '<a class="s-card-title" href="?arena=product&uid=' . urlencode($p['uid']) . '" title="' . h($p['title']) . '">' . h($p['title']) . '</a>'
+        . '<div class="s-card-stock">' . ($out ? '<span class="out">🔴 اتمام موجودی</span>' : '<span class="in">🟢 موجود در انبار — آماده ارسال</span>') . '</div>'
         . '<div class="s-price-row">'
-        . ($effOld > $price ? '<span class="s-price-old">' . arenaToman($effOld) . '</span>' : '')
-        . '<span class="s-price">' . arenaToman($price) . ' <small>' . h(arenaSettings()['currency']) . '</small></span>'
+        . ($effOld > $price ? '<div class="s-price-old-wrap"><span class="s-price-old">' . arenaToman($effOld) . '</span>' . ($disc > 0 ? '<span class="s-price-disc-pill">' . arenaToman($disc) . '٪</span>' : '') . '</div>' : '')
+        . '<div class="s-price-now"><span class="s-price">' . arenaToman($price) . '</span> <span class="s-curr">' . h(arenaSettings()['currency']) . '</span></div>'
         . '</div>'
         . '<div class="s-card-acts">'
-        . '<button class="s-add" ' . ($out ? 'disabled' : '') . ' onclick="addToCart(\'' . $p['uid'] . '\',this)">' . ($out ? 'ناموجود' : 'افزودن به سبد') . '</button>'
-        . '<button class="s-wish" data-wish="' . $p['uid'] . '" onclick="toggleWish(\'' . $p['uid'] . '\',this)">💜</button>'
+        . '<button class="s-add" ' . ($out ? 'disabled' : '') . ' onclick="addToCart(\'' . $p['uid'] . '\',this)">' . ($out ? 'ناموجود' : '🛒 افزودن به سبد') . '</button>'
+        . '<button class="s-wish" data-wish="' . $p['uid'] . '" onclick="toggleWish(\'' . $p['uid'] . '\',this)" title="علاقه‌مندی">💜</button>'
         . '</div></div></div>';
 }
 
@@ -47397,44 +47712,87 @@ function arenaShopPageHome(array $get): array {
   </div>
 </div>
 <?php endif; ?>
+
+<!-- ─────────── هیرو بنر حرفه‌ای و معتمد ─────────── -->
 <section class="s-hero">
-  <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
-  <div class="emojis"><span class="e1">🛒</span><span class="e2">✨</span><span class="e3">📦</span></div>
   <div class="container">
+    <div class="s-hero-badge">🛡️ فروشگاه رسمی <?= h($s['name']) ?> — تضمین ۱۰۰٪ اصالت و کیفیت کالا</div>
     <h1><?= h($s['hero_title']) ?></h1>
     <p><?= h($s['hero_sub']) ?></p>
-    <a class="s-cta" href="#s-products">مشاهده کالاها ↓</a>
+    <div class="s-hero-acts">
+      <a class="s-cta-primary" href="#s-products">🛍 مشاهده و خرید کالاها ↓</a>
+      <button type="button" class="s-cta-secondary" onclick="arenaOpenChangelog()">📋 تغییرات نسخه <?= ARENA_VERSION ?></button>
+    </div>
     <div class="s-herostats">
-      <span class="s-hs">📦 <?= arenaToman($total) ?> کالا</span>
-      <span class="s-hs">🔗 چهار منبع: خودِ سایت + ووکامرس + باسلام + پروفایل‌ها</span>
-      <span class="s-hs">💬 پشتیبانی آنلاین ۲۴/۷</span>
+      <span class="s-hs">📦 بیش از <?= arenaToman($total) ?> کالا موجود</span>
+      <span class="s-hs">🚀 تحویل فوری و پیشتاز</span>
+      <span class="s-hs">💎 تضمین اصالت و سلامت فیزیکی</span>
       <?php if ((int)$s['free_shipping_over'] > 0): ?><span class="s-hs">🚚 ارسال رایگان از <?= arenaPrice((int)$s['free_shipping_over']) ?></span><?php endif; ?>
     </div>
   </div>
 </section>
-<section class="s-feats" aria-label="مزایای فروشگاه">
-  <div class="container s-feats-in">
-    <div class="s-feat"><span>🚚</span><b>ارسال سریع</b><small>به سراسر کشور</small></div>
-    <div class="s-feat"><span>🛡️</span><b>پرداخت امن</b><small>در محل یا کارت‌به‌کارت</small></div>
-    <div class="s-feat"><span>💬</span><b>پشتیبانی آنلاین</b><small>چت زنده + دستیار هوشمند</small></div>
-    <div class="s-feat"><span>💜</span><b>علاقه‌مندی‌های شما</b><small>خریدِ بعدی، همین‌جا</small></div>
+
+<!-- ─────────── بخش ۵ گانه ضمانت و اعتبار ─────────── -->
+<div class="container">
+  <div class="s-trust-bar" aria-label="ضمانت‌ها و مزایای صبا شاپ">
+    <div class="s-trust-grid">
+      <div class="s-trust-card">
+        <div class="s-trust-ico">🛡️</div>
+        <div class="s-trust-info">
+          <b>ضمانت اصالت ۱۰۰٪</b>
+          <small>تضمین اصل بودن کلیه کالاها</small>
+        </div>
+      </div>
+      <div class="s-trust-card">
+        <div class="s-trust-ico">🔄</div>
+        <div class="s-trust-info">
+          <b>۷ روز ضمانت بازگشت</b>
+          <small>امکان عودت وجه بدون قید و شرط</small>
+        </div>
+      </div>
+      <div class="s-trust-card">
+        <div class="s-trust-ico">🚀</div>
+        <div class="s-trust-info">
+          <b>ارسال سریع و اکسپرس</b>
+          <small>تحویل پیشتاز به سراسر کشور</small>
+        </div>
+      </div>
+      <div class="s-trust-card">
+        <div class="s-trust-ico">💳</div>
+        <div class="s-trust-info">
+          <b>پرداخت امن و مطمئن</b>
+          <small>در محل، کارت‌به‌کارت و شاپرک</small>
+        </div>
+      </div>
+      <div class="s-trust-card">
+        <div class="s-trust-ico">🎧</div>
+        <div class="s-trust-info">
+          <b>پشتیبانی ۲۴ ساعته</b>
+          <small>چت آنلاین و مشاوره هوشمند</small>
+        </div>
+      </div>
+    </div>
   </div>
-</section>
+</div>
+
+<!-- ─────────── نوار متحرک ویژگی‌ها ─────────── -->
 <div class="s-strip" aria-hidden="true"><div class="s-strip-in">
-  <span>🚚 <?= (int)$s['free_shipping_over'] > 0 ? 'ارسال رایگان از ' . arenaPrice((int)$s['free_shipping_over']) : 'ارسال سریع به سراسر کشور' ?></span><i>✦</i>
-  <span>🎟️ کد خوش‌آمد: <b dir="ltr"><?= h((string)$s['welcome_coupon']) ?></b></span><i>✦</i>
-  <span>💬 پشتیبانی آنلاین — <?= h((string)$s['support_hours']) ?></span><i>✦</i>
-  <span>🔗 چهار منبع زنده: خودِ سایت + ووکامرس مقصد + باسلام + پروفایل‌های هدف</span><i>✦</i>
-  <span>🚚 <?= (int)$s['free_shipping_over'] > 0 ? 'ارسال رایگان از ' . arenaPrice((int)$s['free_shipping_over']) : 'ارسال سریع به سراسر کشور' ?></span><i>✦</i>
-  <span>🎟️ کد خوش‌آمد: <b dir="ltr"><?= h((string)$s['welcome_coupon']) ?></b></span><i>✦</i>
-  <span>💬 پشتیبانی آنلاین — <?= h((string)$s['support_hours']) ?></span><i>✦</i>
-  <span>🔗 چهار منبع زنده: خودِ سایت + ووکامرس مقصد + باسلام + پروفایل‌های هدف</span><i>✦</i>
+  <span>🚚 <?= (int)$s['free_shipping_over'] > 0 ? 'ارسال رایگان از ' . arenaPrice((int)$s['free_shipping_over']) : 'ارسال اکسپرس به سراسر کشور' ?></span><i>✦</i>
+  <span>🎟️ کد تخفیف ویژه خوش‌آمد: <b dir="ltr"><?= h((string)$s['welcome_coupon']) ?></b></span><i>✦</i>
+  <span>🛡️ تضمین ۱۰۰٪ اصالت و سلامت کلیه سفارش‌ها</span><i>✦</i>
+  <span>💬 پشتیبانی آنلاین و دستیار هوشمند ۲۴/۷</span><i>✦</i>
+  <span>🚚 <?= (int)$s['free_shipping_over'] > 0 ? 'ارسال رایگان از ' . arenaPrice((int)$s['free_shipping_over']) : 'ارسال اکسپرس به سراسر کشور' ?></span><i>✦</i>
+  <span>🎟️ کد تخفیف ویژه خوش‌آمد: <b dir="ltr"><?= h((string)$s['welcome_coupon']) ?></b></span><i>✦</i>
+  <span>🛡️ تضمین ۱۰۰٪ اصالت و سلامت کلیه سفارش‌ها</span><i>✦</i>
+  <span>💬 پشتیبانی آنلاین و دستیار هوشمند ۲۴/۷</span><i>✦</i>
 </div></div>
+
+<!-- ─────────── کاتالوگ محصولات ─────────── -->
 <div class="container" id="s-products">
   <div class="s-toolbar">
     <div class="s-chips">
-      <a class="s-chip <?= $get['cat'] === '' ? 'on' : '' ?>" href="?arena=shop<?= $baseQ ? '&' . $baseQ : '' ?>">همه</a>
-      <?php foreach (array_slice(array_keys($cats), 0, 14) as $c): ?>
+      <a class="s-chip <?= $get['cat'] === '' ? 'on' : '' ?>" href="?arena=shop<?= $baseQ ? '&' . $baseQ : '' ?>">همه کالاها</a>
+      <?php foreach (array_slice(array_keys($cats), 0, 16) as $c): ?>
       <a class="s-chip <?= $get['cat'] === $c ? 'on' : '' ?>" href="?arena=shop&cat=<?= urlencode($c) ?><?= ($get['q'] !== '' ? '&q=' . urlencode($get['q']) : '') ?>"><?= h($c) ?> <small>(<?= arenaToman($cats[$c]) ?>)</small></a>
       <?php endforeach; ?>
     </div>
@@ -47448,14 +47806,32 @@ function arenaShopPageHome(array $get): array {
         <option value="prof" <?= $get['src'] === 'prof' ? 'selected' : '' ?>>🟣 پروفایل‌ها</option>
       </select>
       <select name="sort" onchange="this.form.submit()">
-        <option value="" <?= $get['sort'] === '' ? 'selected' : '' ?>>چیدمان</option>
+        <option value="" <?= $get['sort'] === '' ? 'selected' : '' ?>>چیدمان کالاها</option>
         <option value="cheap" <?= $get['sort'] === 'cheap' ? 'selected' : '' ?>>ارزان‌ترین</option>
         <option value="price" <?= $get['sort'] === 'price' ? 'selected' : '' ?>>گران‌ترین</option>
-        <option value="title" <?= $get['sort'] === 'title' ? 'selected' : '' ?>>الفبایی</option>
+        <option value="title" <?= $get['sort'] === 'title' ? 'selected' : '' ?>>الفبایی (عنوان)</option>
       </select>
     </form>
   </div>
-  <?php if ($get['q'] !== ''): ?><div style="font-size:12px;color:var(--mut);margin-bottom:12px">نتایج جست‌وجو برای «<b><?= h($get['q']) ?></b>» — <?= arenaToman($total) ?> کالا <a href="?arena=shop" style="color:var(--acc)">✕ پاک کردن</a></div><?php endif; ?>
+
+  <!-- ─────────── نمادهای رسمی اعتبار الکترونیکی ─────────── -->
+  <div class="s-official-trust">
+    <div class="s-ot-title">
+      <span style="font-size:22px">🛡️</span>
+      <div>
+        <b>نمادهای رسمی اعتبار الکترونیکی <?= h($s['name']) ?></b>
+        <small>خرید با اطمینان کامل و امنیت پرداخت شاپرک</small>
+      </div>
+    </div>
+    <div class="s-ot-seals">
+      <div class="s-seal-card"><span class="s-seal-ico">⭐️</span><span>نماد اعتماد دو ستاره</span></div>
+      <div class="s-seal-card"><span class="s-seal-ico">🏛️</span><span>ساماندهی رسانه‌های دیجیتال</span></div>
+      <div class="s-seal-card"><span class="s-seal-ico">🔒</span><span>درگاه پرداخت امن شاپرک</span></div>
+      <div class="s-seal-card"><span class="s-seal-ico">🤝</span><span>اتحادیه کسب‌وکارهای مجازی</span></div>
+    </div>
+  </div>
+
+  <?php if ($get['q'] !== ''): ?><div style="font-size:12.5px;color:var(--mut);margin-bottom:14px">نتایج جست‌وجو برای «<b><?= h($get['q']) ?></b>» — <?= arenaToman($total) ?> کالا پیدا شد <a href="?arena=shop" style="color:var(--acc);margin-right:8px;font-weight:700">✕ پاک کردن فیلتر</a></div><?php endif; ?>
   <?php if ($items): ?>
   <div class="s-sechead"><h2><?= $get['q'] !== '' ? '🔎 نتایج جست‌وجو' : ($get['cat'] !== '' ? '🗂 ' . h($get['cat']) : '🛍 کالاهای فروشگاه') ?></h2><span><?= arenaToman($total) ?> کالا</span></div>
   <div class="s-grid">
@@ -47476,7 +47852,6 @@ function arenaShopPageHome(array $get): array {
     <?php
     return [(string)ob_get_clean(), $js, 'فروشگاه'];
 }
-
 /* ============================== product ============================ */
 
 function arenaShopPageProduct(array $get): array {
@@ -47971,7 +48346,7 @@ function arenaShopPage(string $page, array $get): void {
         case 'wishlist': [$html, $js, $title] = arenaShopPageWishlist(); break;
         default:         [$html, $js, $title] = arenaShopPageHome($get);
     }
-    arenaShopShell($title, $html, $s, '', $js);
+    arenaShopShell($title, $html, $s, '', $js, $page);
 }
 
 app_theme_ob_start();   // v9.94: رنگ‌بندیِ انتخابیِ کاربر روی کلِ خروجی
