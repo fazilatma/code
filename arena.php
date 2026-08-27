@@ -44728,8 +44728,11 @@ function arenaSettings(): array {
         'welcome_coupon'  => 'WELCOME10',
         'ai_auto'         => true,
         'ai_system'       => 'تو دستیارِ هوشمندِ یک فروشگاه ایرانی هستی. کوتاه، دوستانه و فارسی پاسخ بده. دربارهٔ قیمت، موجودی، کالاهای موجود، هزینهٔ ارسال، کدهای تخفیف، پیگیری سفارش و خدمات پشتیبانی کمک می‌کنی. اگر سوال بیرون از کار فروشگاه بود، مؤدبانه راهنمایی کن.',
-        'checkout_note'   => '',
-        'support_hours'   => 'هر روز ۹ تا ۲۱',
+        'checkout_note'        => '',
+        'support_hours'        => 'هر روز ۹ تا ۲۱',
+        'default_product_src'  => 'prof',
+        'theme_template'       => 'saba',
+        'color_palette'        => 'saba',
     ];
     $s = arenaJson(ARENA_SETTINGS_FILE, []);
     if (!is_array($s)) $s = [];
@@ -44752,8 +44755,11 @@ function arenaSettingsSave(array $s): bool {
 
 function arenaToman(int $n): string {
     $s = number_format(max(0, $n));
-    $s = str_replace(',', '٬', $s);
-    return strtr($s, '0123456789', '۰۱۲۳۴۵۶۷۸۹');
+    return strtr($s, [
+        '0' => '۰', '1' => '۱', '2' => '۲', '3' => '۳', '4' => '۴',
+        '5' => '۵', '6' => '۶', '7' => '۷', '8' => '۸', '9' => '۹',
+        ',' => '٬'
+    ]);
 }
 
 function arenaPrice(int $n, string $cur = 'تومان'): string {
@@ -47097,10 +47103,85 @@ html.js-reveal .s-card{opacity:0;transform:translateY(18px);transition:opacity .
 html.js-reveal .s-card.reveal-in{opacity:1;transform:translateY(0)}
 html.js-reveal .s-card.reveal-in:hover{transform:translateY(-4px)}
 
+
+/* ==================== THEME & TEMPLATE PRESETS ==================== */
+/* 1. Digikala Pro Theme */
+body.s-tmpl-digikala{--acc:#ef4056;--acc2:#b81432;--acc-glow:rgba(239,64,86,.18);--rad:10px;--sh-sm:0 2px 8px rgba(0,0,0,.05)}
+body.s-tmpl-digikala .s-header{border-top:3px solid #ef4056}
+body.s-tmpl-digikala .s-badge.sale{background:#ef4056;border-radius:4px;font-weight:900}
+body.s-tmpl-digikala .s-card{border:1px solid #f1f2f4;border-radius:12px;background:#fff}
+body.s-tmpl-digikala .s-card:hover{border-color:#ef4056;box-shadow:0 6px 20px rgba(239,64,86,.12)}
+body.s-tmpl-digikala .s-flash{background:linear-gradient(90deg,#ef4056 0%,#b81432 100%)}
+body.s-tmpl-digikala .s-buy,body.s-tmpl-digikala .s-add{background:#ef4056}
+body.s-tmpl-digikala .s-buy:hover,body.s-tmpl-digikala .s-add:hover{background:#d72940}
+body.s-tmpl-digikala .s-hero{background:linear-gradient(135deg,#1f1f23 0%,#3d0d16 50%,#18181b 100%)}
+body.s-tmpl-digikala .s-hero-badge{background:rgba(239,64,86,.2);border-color:rgba(239,64,86,.4);color:#fca5a5}
+body.s-tmpl-digikala .s-price{color:#ef4056;background:#fff5f6;border-color:#fed7aa}
+
+/* 2. SnappShop Tech Theme */
+body.s-tmpl-snapp{--acc:#0040ff;--acc2:#00c853;--acc-glow:rgba(0,64,255,.18);--rad:20px}
+body.s-tmpl-snapp .s-search input{border-radius:9999px}
+body.s-tmpl-snapp .s-hbtn,body.s-tmpl-snapp .s-icobtn,body.s-tmpl-snapp .s-user-btn,body.s-tmpl-snapp .s-ham-btn{border-radius:9999px}
+body.s-tmpl-snapp .s-chip{border-radius:9999px}
+body.s-tmpl-snapp .s-badge{border-radius:9999px}
+body.s-tmpl-snapp .s-card{border-radius:20px;border:1px solid rgba(0,64,255,.08);box-shadow:0 6px 22px rgba(0,64,255,.05)}
+body.s-tmpl-snapp .s-card:hover{box-shadow:0 12px 30px rgba(0,64,255,.14);border-color:#0040ff}
+body.s-tmpl-snapp .s-buy,body.s-tmpl-snapp .s-add{border-radius:9999px;background:linear-gradient(135deg,#0040ff,#00c853)}
+body.s-tmpl-snapp .s-hero{background:linear-gradient(135deg,#090d1a 0%,#002066 50%,#001133 100%)}
+body.s-tmpl-snapp .s-price{color:#0040ff;background:#f0f5ff;border-color:#bfdbfe}
+
+/* 3. Basalam Market Theme */
+body.s-tmpl-basalam{--acc:#f97316;--acc2:#ea580c;--acc-glow:rgba(249,115,22,.18);--bg:#fffdf9;--rad:14px}
+body.s-tmpl-basalam .s-card{border:1.5px solid #fed7aa;border-radius:16px;background:#ffffff}
+body.s-tmpl-basalam .s-card:hover{border-color:#f97316;box-shadow:0 6px 20px rgba(249,115,22,.15)}
+body.s-tmpl-basalam .s-flash{background:linear-gradient(90deg,#ea580c,#c2410c)}
+body.s-tmpl-basalam .s-buy,body.s-tmpl-basalam .s-add{background:linear-gradient(135deg,#f97316,#ea580c);border-radius:12px}
+body.s-tmpl-basalam .s-hero{background:linear-gradient(135deg,#2e1406 0%,#4a1d06 50%,#1c0c04 100%)}
+body.s-tmpl-basalam .s-price{color:#ea580c;background:#fff7ed;border-color:#fed7aa}
+
+/* 4. Technolife / Torob Theme */
+body.s-tmpl-techno{--acc:#2563eb;--acc2:#f59e0b;--acc-glow:rgba(37,99,235,.18);--rad:8px}
+body.s-tmpl-techno .s-card{border:1.5px solid #334155;border-radius:8px}
+body.s-tmpl-techno .s-card:hover{border-color:#2563eb;box-shadow:0 6px 18px rgba(37,99,235,.2)}
+body.s-tmpl-techno .s-badge.sale{background:#f59e0b;color:#000;font-weight:900;border-radius:4px}
+body.s-tmpl-techno .s-hero{background:linear-gradient(135deg,#020617 0%,#0f172a 60%,#1e293b 100%)}
+
+/* 5. Saba Modern Flagship (Default) */
+body.s-tmpl-saba{--rad:16px}
+
+/* Color Palettes */
+body.s-pal-digikala{--acc:#ef4056;--acc2:#b81432}
+body.s-pal-snapp{--acc:#0040ff;--acc2:#00c853}
+body.s-pal-basalam{--acc:#f97316;--acc2:#ea580c}
+body.s-pal-green{--acc:#059669;--acc2:#047857}
+body.s-pal-saba{--acc:#4f46e5;--acc2:#7c3aed}
+body.s-pal-gold{--acc:#d97706;--acc2:#1e293b}
+body.s-pal-dark{--acc:#0f172a;--acc2:#334155}
+
+/* Hamburger Button & Drawer Enhancements */
+.s-ham-btn{display:inline-flex;align-items:center;gap:8px;background:#f8fafc;border:1.5px solid var(--line);border-radius:12px;padding:7px 12px;font-size:12px;font-weight:700;color:var(--ink);transition:all .18s;flex-shrink:0}
+.s-ham-btn:hover{background:#fff;border-color:var(--acc);color:var(--acc);transform:translateY(-1px);box-shadow:var(--sh-sm)}
+.s-ham-bars{display:flex;flex-direction:column;gap:3.5px;width:16px}
+.s-ham-bars span{display:block;height:2px;background:currentColor;border-radius:2px;width:100%}
+.s-ham-bars span:nth-child(2){width:75%}
+@media(max-width:768px){
+  .s-ham-lbl{display:none}
+  .s-ham-btn{padding:7px 9px}
+}
+
+/* Advanced Drawer Styling */
+.s-drawer-sect{padding:12px 18px;border-bottom:1px solid var(--line-light)}
+.s-drawer-sect-title{font-size:11px;font-weight:800;color:var(--mut);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.s-drawer-links{display:flex;flex-direction:column;gap:4px}
+.s-drawer-link{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;font-size:12.5px;font-weight:600;color:var(--ink);transition:background .15s}
+.s-drawer-link:hover{background:#f8fafc;color:var(--acc)}
+.s-drawer-user{background:linear-gradient(135deg,color-mix(in srgb,var(--acc) 10%,white),#ffffff);border:1.5px solid var(--line);border-radius:14px;padding:12px;margin:12px 18px}
+.s-theme-tag{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:8px;border:1px solid var(--line);font-size:10.5px;font-weight:700;background:#fff;cursor:pointer}
+
 <?= $headExtra ?>
 </style>
 </head>
-<body>
+<body class="s-tmpl-<?= h((string)($s['theme_template'] ?? 'saba')) ?> s-pal-<?= h((string)($s['color_palette'] ?? 'saba')) ?>">
 
 <!-- ─────────── نوار اعلان بالا ─────────── -->
 <div class="s-topbar">
@@ -47125,6 +47206,10 @@ html.js-reveal .s-card.reveal-in:hover{transform:translateY(-4px)}
 <!-- ─────────── هدر سایت (انعطاف‌پذیر در تمام زوم‌ها) ─────────── -->
 <header class="s-header">
   <div class="container s-head-in">
+    <button type="button" class="s-ham-btn" id="sHamBtn" onclick="arenaOpenCatDrawer()" aria-label="منوی اصلی و دسته‌بندی‌ها" title="منوی دسته‌بندی‌ها و خدمات">
+      <span class="s-ham-bars"><span></span><span></span><span></span></span>
+      <span class="s-ham-lbl">دسته‌ها و منو</span>
+    </button>
     <a class="s-brand" href="?arena=shop">
       <?= $logo ?>
       <span><?= h($s['name']) ?></span>
@@ -47245,35 +47330,150 @@ html.js-reveal .s-card.reveal-in:hover{transform:translateY(-4px)}
   </a>
 </nav>
 
-<!-- ─────────── دراور کشویی دسته‌بندی‌ها ─────────── -->
+<!-- ─────────── منوی همبرگری و دراور ناوبری پیشرفته ─────────── -->
 <div class="s-drawer-backdrop" id="catDrawerBackdrop" onclick="arenaCloseCatDrawer()"></div>
-<div class="s-drawer" id="catDrawer" role="dialog" aria-modal="true" aria-label="دسته‌بندی‌های کالا">
+<div class="s-drawer" id="catDrawer" role="dialog" aria-modal="true" aria-label="منوی اصلی و دسته‌بندی‌ها">
   <div class="s-drawer-head">
     <div class="s-drawer-title">
-      <span style="font-size:22px">🗂️</span>
+      <span style="font-size:22px">🛍️</span>
       <div>
-        <b>دسته‌بندی‌های کالا</b>
-        <small><?= arenaToman(count($catsFoot)) ?> دسته‌بندی در <?= h($s['name']) ?></small>
+        <b><?= h($s['name']) ?></b>
+        <small><?= h($s['tagline']) ?></small>
       </div>
     </div>
     <button type="button" class="s-drawer-close" onclick="arenaCloseCatDrawer()" aria-label="بستن">✕</button>
   </div>
-  <div class="s-drawer-search">
-    <input type="text" id="catDrawerSearch" placeholder="جست‌وجو در دسته‌بندی‌ها…" oninput="arenaFilterDrawerCats(this.value)">
+
+  <!-- کارت وضعیت کاربری -->
+  <?php if ($arenaCust): ?>
+  <div class="s-drawer-user">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800">
+        <?= h(mb_substr($arenaCust['name'], 0, 1)) ?>
+      </div>
+      <div style="flex:1;min-width:0">
+        <b style="font-size:13px;display:block"><?= h($arenaCust['name']) ?></b>
+        <small style="color:var(--mut);font-size:10.5px" dir="ltr"><?= h($arenaCust['phone']) ?></small>
+      </div>
+    </div>
+    <div style="display:flex;gap:6px;margin-top:10px">
+      <a href="?arena=account" class="s-add" style="flex:1;padding:6px 10px;font-size:11.5px;text-align:center">📦 سفارش‌های من</a>
+      <a href="?arena=wishlist" class="s-add" style="flex:1;padding:6px 10px;font-size:11.5px;text-align:center;background:#ec4899">💜 علاقه‌مندی‌ها</a>
+    </div>
   </div>
-  <div class="s-drawer-list" id="catDrawerList">
-    <a class="s-drawer-item <?= (!isset($_GET['cat']) || $_GET['cat'] === '') ? 'on' : '' ?>" href="?arena=shop">
-      <span class="ico">🛍️</span>
-      <span class="name">همهٔ کالاهای فروشگاه</span>
-      <span class="count">همه</span>
-    </a>
-    <?php foreach ($catsFoot as $cName => $cCount): ?>
-    <a class="s-drawer-item <?= ((string)($_GET['cat'] ?? '') === $cName) ? 'on' : '' ?>" href="?arena=shop&cat=<?= urlencode($cName) ?>">
-      <span class="ico">📁</span>
-      <span class="name"><?= h($cName) ?></span>
-      <span class="count"><?= arenaToman($cCount) ?> کالا</span>
-    </a>
-    <?php endforeach; ?>
+  <?php else: ?>
+  <div class="s-drawer-user">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:26px">👤</span>
+      <div style="flex:1;min-width:0">
+        <b style="font-size:13px;display:block">ورود یا ثبت‌نام در <?= h($s['name']) ?></b>
+        <small style="color:var(--mut);font-size:10.5px">برای مشاهده سفارش‌ها و پیگیری آسان</small>
+      </div>
+    </div>
+    <a href="?arena=account" class="s-buy" style="margin-top:10px;padding:8px 12px;font-size:12px;text-align:center">ورود / عضویت سریع ←</a>
+  </div>
+  <?php endif; ?>
+
+  <div class="s-drawer-search">
+    <input type="text" id="catDrawerSearch" placeholder="جست‌وجو در دسته‌ها، کالاها و خدمات…" oninput="arenaFilterDrawerCats(this.value)">
+  </div>
+
+  <div class="s-drawer-list" id="catDrawerList" style="overflow-y:auto;flex:1">
+    <!-- دسترسی سریع و شگفت‌انگیز -->
+    <div class="s-drawer-sect">
+      <div class="s-drawer-sect-title">⚡ دسترسی‌های سریع و شگفت‌انگیز</div>
+      <div class="s-drawer-links">
+        <a class="s-drawer-link" href="?arena=shop#flashBanner" onclick="arenaCloseCatDrawer()">
+          <span style="font-size:16px">⚡</span>
+          <span style="flex:1">فروش ویژه و شگفت‌انگیزها</span>
+          <span class="s-badge sale" style="position:static">تخفیف</span>
+        </a>
+        <a class="s-drawer-link" href="?arena=shop&sort=popular" onclick="arenaCloseCatDrawer()">
+          <span style="font-size:16px">🔥</span>
+          <span style="flex:1">پرفروش‌ترین کالاها</span>
+        </a>
+        <a class="s-drawer-link" href="?arena=shop&sort=newest" onclick="arenaCloseCatDrawer()">
+          <span style="font-size:16px">🆕</span>
+          <span style="flex:1">جدیدترین محصولات</span>
+        </a>
+        <a class="s-drawer-link" href="?arena=shop&sort=cheap" onclick="arenaCloseCatDrawer()">
+          <span style="font-size:16px">💰</span>
+          <span style="flex:1">ارزان‌ترین و مقرون‌به‌صرفه</span>
+        </a>
+      </div>
+    </div>
+
+    <!-- دسته‌بندی کالاها -->
+    <div class="s-drawer-sect">
+      <div class="s-drawer-sect-title">🗂️ دسته‌بندی‌های جامع (<?= arenaToman(count($catsFoot)) ?> دسته)</div>
+      <div class="s-drawer-links">
+        <a class="s-drawer-item <?= (!isset($_GET['cat']) || $_GET['cat'] === '') ? 'on' : '' ?>" href="?arena=shop" onclick="arenaCloseCatDrawer()">
+          <span class="ico">🛍️</span>
+          <span class="name">همهٔ کالاهای فروشگاه</span>
+          <span class="count">همه</span>
+        </a>
+        <?php foreach ($catsFoot as $cName => $cCount): ?>
+        <a class="s-drawer-item <?= ((string)($_GET['cat'] ?? '') === $cName) ? 'on' : '' ?>" href="?arena=shop&cat=<?= urlencode($cName) ?>" onclick="arenaCloseCatDrawer()">
+          <span class="ico">📁</span>
+          <span class="name"><?= h($cName) ?></span>
+          <span class="count"><?= arenaToman($cCount) ?> کالا</span>
+        </a>
+        <?php endforeach; ?>
+      </div>
+    </div>
+
+    <!-- خدمات مشتریان و ابزارها -->
+    <div class="s-drawer-sect">
+      <div class="s-drawer-sect-title">🛠️ خدمات مشتریان و پیگیری</div>
+      <div class="s-drawer-links">
+        <a class="s-drawer-link" href="?arena=track" onclick="arenaCloseCatDrawer()">
+          <span style="font-size:16px">🔎</span>
+          <span style="flex:1">پیگیری و رهگیری سفارش</span>
+        </a>
+        <a class="s-drawer-link" href="?arena=cart" onclick="arenaCloseCatDrawer()">
+          <span style="font-size:16px">🛒</span>
+          <span style="flex:1">سبد خرید</span>
+          <span class="s-badge" id="drawerCartBadge" style="position:static;background:var(--acc)">سبد</span>
+        </a>
+        <a class="s-drawer-link" href="?arena=wishlist" onclick="arenaCloseCatDrawer()">
+          <span style="font-size:16px">💜</span>
+          <span style="flex:1">لیست علاقه‌مندی‌ها</span>
+        </a>
+        <button type="button" class="s-drawer-link" onclick="arenaCloseCatDrawer();chatOpen()" style="border:none;background:none;width:100%;text-align:right;cursor:pointer">
+          <span style="font-size:16px">💬</span>
+          <span style="flex:1">پشتیبانی آنلاین و چت</span>
+          <span style="font-size:9.5px;color:var(--ok);font-weight:700">● آنلاین</span>
+        </button>
+        <button type="button" class="s-drawer-link" onclick="arenaCloseCatDrawer();$('aiPanel').classList.add('open')" style="border:none;background:none;width:100%;text-align:right;cursor:pointer">
+          <span style="font-size:16px">🤖</span>
+          <span style="flex:1">مشاوره با دستیار هوشمند AI</span>
+        </button>
+        <button type="button" class="s-drawer-link" onclick="arenaCloseCatDrawer();arenaOpenChangelog()" style="border:none;background:none;width:100%;text-align:right;cursor:pointer">
+          <span style="font-size:16px">📋</span>
+          <span style="flex:1">گزارش تغییرات نسخه‌ها</span>
+          <span class="s-badge" style="position:static;background:#64748b">v<?= ARENA_VERSION ?></span>
+        </button>
+      </div>
+    </div>
+
+    <!-- انتخاب سریع قالب ویترین -->
+    <div class="s-drawer-sect">
+      <div class="s-drawer-sect-title">🎨 انتخاب سریع تم و قالب ویترین</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <button type="button" class="s-theme-tag" onclick="arenaSetLiveTheme('digikala')">🔴 دیجی‌کالا</button>
+        <button type="button" class="s-theme-tag" onclick="arenaSetLiveTheme('snapp')">🔵 اسنپ‌شاپ</button>
+        <button type="button" class="s-theme-tag" onclick="arenaSetLiveTheme('basalam')">🟠 باسلام</button>
+        <button type="button" class="s-theme-tag" onclick="arenaSetLiveTheme('techno')">🟡 تکنولایف</button>
+        <button type="button" class="s-theme-tag" onclick="arenaSetLiveTheme('saba')">🟣 صبا مدرن</button>
+      </div>
+    </div>
+
+    <!-- اطلاعات تماس و ساعات پشتیبانی -->
+    <div class="s-drawer-sect" style="background:#f8fafc;font-size:11px;color:var(--mut)">
+      <div>📞 تلفن تماس: <b style="color:var(--ink)"><?= h($s['contact']['phone'] ?: 'پشتیبانی آنلاین فعال است') ?></b></div>
+      <div style="margin-top:4px">⏰ ساعات پاسخگویی: <b style="color:var(--ink)"><?= h($s['support_hours']) ?></b></div>
+      <div style="margin-top:8px;font-size:10.5px">🛡️ ضمانت ۱۰۰٪ اصالت و ۷ روز مهلت بازگشت کالا</div>
+    </div>
   </div>
 </div>
 
@@ -47478,13 +47678,22 @@ window.arenaCloseCatDrawer = function(){
 };
 window.arenaFilterDrawerCats = function(q){
   q=(q||'').toLowerCase().trim();
-  document.querySelectorAll('#catDrawerList .s-drawer-item').forEach(function(it){
-    const name=it.querySelector('.name');
-    if(!name)return;
-    const txt=name.textContent.toLowerCase();
+  document.querySelectorAll('#catDrawerList .s-drawer-item, #catDrawerList .s-drawer-link').forEach(function(it){
+    const txt=it.textContent.toLowerCase();
     it.style.display=(!q||txt.indexOf(q)>-1)?'flex':'none';
   });
 };
+window.arenaSetLiveTheme = function(tmpl){
+  document.body.className = document.body.className.replace(/\bs-tmpl-\w+/g, '') + ' s-tmpl-' + tmpl;
+  try{localStorage.setItem('arena_live_tmpl', tmpl);}catch(e){}
+  toast('🎨 قالب ' + tmpl + ' اعمال شد');
+};
+(function(){
+  try{
+    const lt = localStorage.getItem('arena_live_tmpl');
+    if(lt){document.body.className = document.body.className.replace(/\bs-tmpl-\w+/g, '') + ' s-tmpl-' + lt;}
+  }catch(e){}
+})();
 document.addEventListener('keydown',function(e){
   if(e.key==='Escape'){arenaCloseChangelog();arenaCloseCatDrawer();}
 });
@@ -47733,7 +47942,8 @@ function arenaShopCard(array $p): string {
 
 function arenaShopPageHome(array $get): array {
     $s = arenaSettings();
-    $get['src'] = (string)($get['src'] ?? 'all');
+    $defSrc = (string)($s['default_product_src'] ?? 'prof');
+    $get['src'] = (string)($get['src'] ?? $defSrc);
     $get['cat'] = (string)($get['cat'] ?? '');
     $get['q'] = (string)($get['q'] ?? '');
     $get['sort'] = (string)($get['sort'] ?? '');
@@ -47851,11 +48061,11 @@ function arenaShopPageHome(array $get): array {
     <form method="get" action="?arena=shop" style="display:flex;gap:8px">
       <input type="hidden" name="q" value="<?= h($get['q']) ?>">
       <select name="src" onchange="this.form.submit()">
-        <option value="all" <?= $get['src'] === 'all' ? 'selected' : '' ?>>همه منابع</option>
+        <option value="prof" <?= $get['src'] === 'prof' ? 'selected' : '' ?>>🟣 پروفایل‌ها (پیش‌فرض)</option>
+        <option value="all" <?= $get['src'] === 'all' ? 'selected' : '' ?>>🌐 همه منابع</option>
         <option value="own" <?= $get['src'] === 'own' ? 'selected' : '' ?>>🏠 خودِ سایت</option>
         <option value="woo" <?= $get['src'] === 'woo' ? 'selected' : '' ?>>🔵 ووکامرس مقصد</option>
         <option value="bsl" <?= $get['src'] === 'bsl' ? 'selected' : '' ?>>🟠 باسلام</option>
-        <option value="prof" <?= $get['src'] === 'prof' ? 'selected' : '' ?>>🟣 پروفایل‌ها</option>
       </select>
       <select name="sort" onchange="this.form.submit()">
         <option value="" <?= $get['sort'] === '' ? 'selected' : '' ?>>چیدمان کالاها</option>
@@ -52430,6 +52640,68 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                     <option value="none">بدون تعدیل (قیمتِ خامِ استخراج‌شده)</option>
                 </select>
                 <div style="font-size:9.5px;color:#64748b;margin-top:4px">همان ضرایبِ تعدیلی که اسکرپر موقعِ ارسال اعمال می‌کند (سطحِ پروفایل + سطحِ مقصد)</div>
+            </div>
+            <div><label>منبع پیش‌فرض محصولات ویترین</label>
+                <select id="set_default_product_src">
+                    <option value="prof" selected>🟣 پروفایل‌های هدف با ضرایب تعدیل (پیش‌فرض)</option>
+                    <option value="all">🌐 همه منابع (خود سایت + ووکامرس + باسلام + پروفایل‌ها)</option>
+                    <option value="own">🏠 فقط محصولات خودِ سایت</option>
+                    <option value="woo">🔵 فقط فروشگاه ووکامرس مقصد</option>
+                    <option value="bsl">🟠 فقط غرفهٔ باسلام</option>
+                </select>
+                <div style="font-size:9.5px;color:#64748b;margin-top:4px">محصولات ویترین بر اساس این منبع به مشتریان نمایش داده می‌شود.</div>
+            </div>
+            <div class="full" style="border:1px solid #334155;border-radius:12px;padding:14px;background:#0f172a">
+                <div style="font-size:13px;font-weight:800;color:#f8fafc;margin-bottom:6px">🎨 انتخاب تم و قالب ویترین فروشگاه</div>
+                <p style="font-size:11px;color:#94a3b8;margin-bottom:12px">سبک بصری، چیدمان و ظاهر ویترین را متناسب با سلیقه یا شبیه سایت‌های معروف انتخاب کنید:</p>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,135px),1fr));gap:10px" id="shopThemePickers">
+                    <div class="shop-theme-card" data-theme="digikala" onclick="shopSelectTheme('digikala')" style="display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:12px;border:2px solid #334155;background:#1e293b;cursor:pointer">
+                        <input type="radio" name="set_theme_template" value="digikala" style="display:none">
+                        <div style="display:flex;align-items:center;justify-content:space-between">
+                            <span style="font-size:11.5px;font-weight:800;color:#f87171">🔴 دیجی‌کالا</span>
+                        </div>
+                        <div style="font-size:9.5px;color:#94a3b8">کارت‌های مینیمال با بوردر، هدر قرمز و بج‌های تخفیف قرمز</div>
+                    </div>
+                    <div class="shop-theme-card" data-theme="snapp" onclick="shopSelectTheme('snapp')" style="display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:12px;border:2px solid #334155;background:#1e293b;cursor:pointer">
+                        <input type="radio" name="set_theme_template" value="snapp" style="display:none">
+                        <div style="display:flex;align-items:center;justify-content:space-between">
+                            <span style="font-size:11.5px;font-weight:800;color:#60a5fa">🔵 اسنپ‌شاپ</span>
+                        </div>
+                        <div style="font-size:9.5px;color:#94a3b8">تکنولوژی مدرن، بج‌های کپسولی تمام‌گرد و سایه‌های ملایم</div>
+                    </div>
+                    <div class="shop-theme-card" data-theme="basalam" onclick="shopSelectTheme('basalam')" style="display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:12px;border:2px solid #334155;background:#1e293b;cursor:pointer">
+                        <input type="radio" name="set_theme_template" value="basalam" style="display:none">
+                        <div style="display:flex;align-items:center;justify-content:space-between">
+                            <span style="font-size:11.5px;font-weight:800;color:#fb923c">🟠 باسلام</span>
+                        </div>
+                        <div style="font-size:9.5px;color:#94a3b8">حس بازارچهٔ اجتماعی، المان‌های گرم و رنگ زعفرانی</div>
+                    </div>
+                    <div class="shop-theme-card" data-theme="techno" onclick="shopSelectTheme('techno')" style="display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:12px;border:2px solid #334155;background:#1e293b;cursor:pointer">
+                        <input type="radio" name="set_theme_template" value="techno" style="display:none">
+                        <div style="display:flex;align-items:center;justify-content:space-between">
+                            <span style="font-size:11.5px;font-weight:800;color:#fbbf24">🟡 تکنولایف / ترب</span>
+                        </div>
+                        <div style="font-size:9.5px;color:#94a3b8">کنتراست بالا، متمرکز روی کالاهای دیجیتال و مشخصات</div>
+                    </div>
+                    <div class="shop-theme-card" data-theme="saba" onclick="shopSelectTheme('saba')" style="display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:12px;border:2px solid #334155;background:#1e293b;cursor:pointer">
+                        <input type="radio" name="set_theme_template" value="saba" style="display:none">
+                        <div style="display:flex;align-items:center;justify-content:space-between">
+                            <span style="font-size:11.5px;font-weight:800;color:#c084fc">🟣 صبا مدرن (پیش‌فرض)</span>
+                        </div>
+                        <div style="font-size:9.5px;color:#94a3b8">گرادیان شیک ایندیگو و بنفش با حس اعتماد و امنیت</div>
+                    </div>
+                </div>
+
+                <div style="font-size:12px;font-weight:800;color:#f8fafc;margin:16px 0 6px">🎨 پالت‌های رنگ‌بندی آماده:</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap" id="shopPaletteChips">
+                    <button type="button" class="btn" onclick="shopSelectPalette('#ef4056','#b81432','digikala')" style="background:#ef4056;color:#fff;border-radius:20px;padding:4px 12px;font-size:11px">🔴 قرمز دیجی‌کالا</button>
+                    <button type="button" class="btn" onclick="shopSelectPalette('#0040ff','#00c853','snapp')" style="background:#0040ff;color:#fff;border-radius:20px;padding:4px 12px;font-size:11px">🔵 آبی و سبز اسنپ</button>
+                    <button type="button" class="btn" onclick="shopSelectPalette('#f97316','#ea580c','basalam')" style="background:#f97316;color:#fff;border-radius:20px;padding:4px 12px;font-size:11px">🟠 نارنجی باسلام</button>
+                    <button type="button" class="btn" onclick="shopSelectPalette('#059669','#047857','green')" style="background:#059669;color:#fff;border-radius:20px;padding:4px 12px;font-size:11px">🟢 سبز سلامت / دیجی‌پِی</button>
+                    <button type="button" class="btn" onclick="shopSelectPalette('#4f46e5','#7c3aed','saba')" style="background:#4f46e5;color:#fff;border-radius:20px;padding:4px 12px;font-size:11px">🟣 بنفش صبا</button>
+                    <button type="button" class="btn" onclick="shopSelectPalette('#d97706','#1e293b','gold')" style="background:#d97706;color:#fff;border-radius:20px;padding:4px 12px;font-size:11px">🟡 طلایی لوکس</button>
+                    <button type="button" class="btn" onclick="shopSelectPalette('#0f172a','#334155','dark')" style="background:#1e293b;color:#fff;border-radius:20px;padding:4px 12px;font-size:11px">⚫ مشکی متالیک دارک</button>
+                </div>
             </div>
             <div class="full" style="border:1px solid #334155;border-radius:12px;padding:12px">
                 <div style="font-size:12px;font-weight:800;margin-bottom:6px">📣 رویدادهای فروشگاه → پیام‌رسان‌ها</div>
@@ -73680,12 +73952,44 @@ window.shopLoadEvents = async function(){
 };
 
 /* ---------------- settings ---------------- */
+window.shopSelectTheme = function(tmpl, noToast){
+  var r = document.querySelector('input[name="set_theme_template"][value="' + tmpl + '"]');
+  if (r) r.checked = true;
+  document.querySelectorAll('.shop-theme-card').forEach(function(c){
+    var isSel = (c.getAttribute('data-theme') === tmpl);
+    c.style.borderColor = isSel ? '#7c3aed' : '#334155';
+    c.style.background = isSel ? '#2d1b69' : '#1e293b';
+  });
+  if (!noToast) {
+    var colors = {
+      digikala: ['#ef4056', '#b81432'],
+      snapp:    ['#0040ff', '#00c853'],
+      basalam:  ['#f97316', '#ea580c'],
+      techno:   ['#2563eb', '#f59e0b'],
+      saba:     ['#4f46e5', '#7c3aed']
+    };
+    if (colors[tmpl]) {
+      if ($s('set_accent')) $s('set_accent').value = colors[tmpl][0];
+      if ($s('set_accent2')) $s('set_accent2').value = colors[tmpl][1];
+    }
+    shopToast('قالب ' + tmpl + ' انتخاب شد — روی ذخیره کلیک کنید');
+  }
+};
+window.shopSelectPalette = function(c1, c2, palName){
+  if ($s('set_accent')) $s('set_accent').value = c1;
+  if ($s('set_accent2')) $s('set_accent2').value = c2;
+  shopState._curPalette = palName;
+  shopToast('پالت ' + palName + ' انتخاب شد — روی ذخیره کلیک کنید');
+};
 window.shopSettingsLoad = function(){
   var s = shopState.stats.settings;
   if (!s) return;
   var set = function(id, v){ var el = $s(id); if (el && el.value === '') el.value = v == null ? '' : v; };
   set('set_name', s.name); set('set_tagline', s.tagline);
   if ($s('set_vitrine_price_dest')) $s('set_vitrine_price_dest').value = s.vitrine_price_dest || 'auto';
+  if ($s('set_default_product_src')) $s('set_default_product_src').value = s.default_product_src || 'prof';
+  var curTmpl = s.theme_template || 'saba';
+  if (typeof shopSelectTheme === 'function') shopSelectTheme(curTmpl, true);
   ['product_view','add_cart','remove_cart','cart_view','checkout_start','order','wish_add','review_add','chat_msg','search','track'].forEach(function(k){ var el = $s('ev_' + k); if (el) el.checked = (s.events && k in s.events) ? !!s.events[k] : (k !== 'search' && k !== 'track'); });
   set('set_hero_title', s.hero_title); set('set_hero_sub', s.hero_sub);
   set('set_accent', s.accent); set('set_accent2', s.accent2); set('set_logo', s.logo);
@@ -73724,6 +74028,9 @@ window.shopSettingsSave = async function(){
     welcome_coupon: g('set_welcome_coupon'), ai_auto: $s('set_ai_auto').classList.contains('on'),
     checkout_note: g('set_checkout_note'), support_hours: g('set_support_hours'),
     vitrine_price_dest: g('set_vitrine_price_dest'),
+    default_product_src: g('set_default_product_src') || 'prof',
+    theme_template: (function(){ var r = document.querySelector('input[name="set_theme_template"]:checked'); return r ? r.value : 'saba'; })(),
+    color_palette: shopState._curPalette || (s && s.color_palette) || 'saba',
     events: (function(){ var m = {}; ['product_view','add_cart','remove_cart','cart_view','checkout_start','order','wish_add','review_add','chat_msg','search','track'].forEach(function(k){ var el = $s('ev_' + k); if (el) m[k] = el.checked ? 1 : 0; }); return m; })()
   };
   var r = await shopApi('settings_save', data, 'POST');
@@ -73824,4 +74131,13 @@ if (typeof switchMainTab === 'function') {
 
 </script>
 </body>
-</html>
+</htmlfunction arenaToman(int ): string {
+     = number_format(max(0, ));
+    return strtr(, [
+        '0' => '۰', '1' => '۱', '2' => '۲', '3' => '۳', '4' => '۴',
+        '5' => '۵', '6' => '۶', '7' => '۷', '8' => '۸', '9' => '۹',
+        ',' => '٬'
+    ]);
+}
+
+>
