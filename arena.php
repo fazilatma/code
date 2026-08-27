@@ -44805,8 +44805,35 @@ function arenaCatalogItem(array $src, string $source, $id): array {
 
 function arenaWooCache(): array { return arenaJson(ARENA_WOO_CACHE, ['fetched_at' => 0, 'items' => [], 'error' => '']); }
 function arenaBslCache(): array { return arenaJson(ARENA_BSL_CACHE, ['fetched_at' => 0, 'items' => [], 'error' => '']); }
+/* v1.4: ابزارهایِ منبعِ چهارم (محصولاتِ پروفایل‌ها) */
+function arenaNormLink(string $u): string {
+    $u = trim($u);
+    if ($u === '') return '';
+    $u = (string)preg_replace('~^https?://~i', '', $u);
+    $u = (string)preg_replace('~[#?].*$~', '', $u);
+    $u = rtrim($u, '/');
+    if (stripos($u, 'www.') === 0) $u = substr($u, 4);
+    return strtolower($u);
+}
+function arenaProfilesMemo(): array {
+    static $m = null;
+    if ($m === null) $m = loadProfiles();
+    return $m;
+}
+function arenaApplyOverride(array $p, ?array $ov): array {
+    if (!is_array($ov)) return $p;
+    if (isset($ov['price']) && $ov['price'] !== '' && extractPriceNum($ov['price']) > 0) {
+        $p['old_price'] = $p['price'] > $ov['price'] ? $p['price'] : 0;
+        $p['price'] = extractPriceNum($ov['price']);
+    }
+    if (isset($ov['stock']) && $ov['stock'] !== '') $p['stock'] = (int)$ov['stock'];
+    if (isset($ov['published']) && $ov['published'] === false) $p['published'] = false;
+    if (isset($ov['category']) && trim((string)$ov['category']) !== '') $p['category'] = (string)$ov['category'];
+    if (isset($ov['name']) && trim((string)$ov['name']) !== '') $p['title'] = (string)$ov['name'];
+    return $p;
+}
 
-/** فهرستِ کاملِ کالاها (ترکیبِ سه منبع + اعمالِ اوررایدها) */
+/** فهرستِ کاملِ کالاها (ترکیبِ چهار منبع + اعمالِ اوررایدها) */
 function arenaCatalog(bool $publishedOnly = false, array $filter = []): array {
     $out = [];
     $db = arenaProducts();
@@ -44817,9 +44844,12 @@ function arenaCatalog(bool $publishedOnly = false, array $filter = []): array {
         if ($publishedOnly && $p['published'] === false) continue;
         $out[] = $p;
     }
+    $mirrorLinks = [];
     foreach (['woo' => arenaWooCache(), 'bsl' => arenaBslCache()] as $source => $cache) {
         foreach ((array)($cache['items'] ?? []) as $id => $it) {
             if (!is_array($it) || empty($it['title'])) continue;
+            $lk = arenaNormLink((string)($it['link'] ?? ''));
+            if ($lk !== '') $mirrorLinks[$lk] = 1;
             $p = arenaCatalogItem($it, $source, $id);
             $ov = $db['overrides'][$source . ':' . $id] ?? null;
             if (is_array($ov)) {
@@ -44832,6 +44862,22 @@ function arenaCatalog(bool $publishedOnly = false, array $filter = []): array {
                 if (isset($ov['category']) && trim((string)$ov['category']) !== '') $p['category'] = (string)$ov['category'];
                 if (isset($ov['name']) && trim((string)$ov['name']) !== '') $p['title'] = (string)$ov['name'];
             }
+            if ($publishedOnly && $p['published'] === false) continue;
+            $out[] = $p;
+        }
+    }
+    /* v1.4: محصولاتِ پروفایل‌های استخراج‌شده — مگر آنکه آینهٔ ووکامرس/باسلام پوشششان دهد */
+    $seenProf = [];
+    foreach (arenaProfilesMemo() as $pk => $prof) {
+        if (!is_array($prof)) continue;
+        foreach (profileProductsMap($prof) as $k => $it) {
+            if (!is_array($it) || trim((string)($it['title'] ?? '')) === '') continue;
+            $lk = arenaNormLink((string)($it['link'] ?? ''));
+            if ($lk !== '' && (isset($mirrorLinks[$lk]) || isset($seenProf[$lk]))) continue;
+            if ($lk !== '') $seenProf[$lk] = 1;
+            $pid = (string)$pk . '|' . (string)$k;
+            $p = arenaCatalogItem($it, 'prof', $pid);
+            $p = arenaApplyOverride($p, $db['overrides']['prof:' . $pid] ?? null);
             if ($publishedOnly && $p['published'] === false) continue;
             $out[] = $p;
         }
@@ -45640,7 +45686,7 @@ function arenaRefreshBslCache(): array {
 
 function arenaStats(): array {
     $cat = arenaCatalog(false);
-    $by = ['own' => 0, 'woo' => 0, 'bsl' => 0];
+    $by = ['own' => 0, 'woo' => 0, 'bsl' => 0, 'prof' => 0];
     foreach ($cat as $p) $by[$p['src']]++;
     $orders = arenaOrders();
     $revenue = 0; $newC = 0;
@@ -45659,7 +45705,7 @@ function arenaStats(): array {
     return [
         'ok' => true,
         'admin_user' => (string)arenaAdminCreds()['user'],
-        'products' => ['own' => $by['own'], 'woo' => $by['woo'], 'bsl' => $by['bsl'], 'total' => count($cat)],
+        'products' => ['own' => $by['own'], 'woo' => $by['woo'], 'bsl' => $by['bsl'], 'prof' => $by['prof'], 'total' => count($cat)],
         'orders' => ['total' => count($orders), 'new' => $newC, 'revenue' => $revenue],
         'chat' => ['customers' => $cust, 'unread' => $unread],
         'messengers' => [
@@ -45868,9 +45914,10 @@ function arenaLoginPage(): void {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ورود ادمین — <?= h($store) ?></title>
 <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;700;800&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0}
-body{font-family:Vazirmatn,Tahoma,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(1000px 600px at 80% -10%,#1e3a8a55,transparent),radial-gradient(800px 500px at 0% 110%,#7c3aed33,transparent),#0b1020;padding:20px}
+body{font-family:Vazirmatn,'Noto Naskh Arabic','Noto Sans Arabic',Tahoma,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(1000px 600px at 80% -10%,#1e3a8a55,transparent),radial-gradient(800px 500px at 0% 110%,#7c3aed33,transparent),#0b1020;padding:20px}
 .card{width:100%;max-width:380px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);backdrop-filter:blur(16px);border-radius:22px;padding:34px 28px;text-align:center;box-shadow:0 30px 80px rgba(0,0,0,.5)}
 .lg-logo{width:64px;height:64px;margin:0 auto 14px;border-radius:20px;background:linear-gradient(135deg,#3b82f6,#a855f7);display:flex;align-items:center;justify-content:center;font-size:30px;box-shadow:0 12px 30px rgba(99,102,241,.4)}
 h1{color:#fff;font-size:20px;margin-bottom:4px}
@@ -46330,6 +46377,9 @@ function arenaShopShell(string $title, string $content, array $s, string $headEx
 <meta name="description" content="<?= h($s['tagline']) ?>">
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700;800&display=swap" rel="stylesheet">
 <meta name="theme-color" content="#7c3aed">
 <style>
 :root{
@@ -46340,7 +46390,7 @@ function arenaShopShell(string $title, string $content, array $s, string $headEx
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth}
-body{font-family:Vazirmatn,'Vazirmatn Font','Segoe UI',Tahoma,system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.8;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;animation:arenaPageIn .45s ease}
+body{font-family:Vazirmatn,'Vazirmatn Font','Noto Naskh Arabic','Noto Sans Arabic','Segoe UI',Tahoma,system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.8;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;animation:arenaPageIn .45s ease}
 a{color:inherit;text-decoration:none}
 img{max-width:100%;display:block}
 button{font-family:inherit;cursor:pointer}
@@ -46589,6 +46639,65 @@ html.js-reveal .s-card.reveal-in:hover{transform:translateY(-5px)}
   html.js-reveal .s-card{opacity:1;transform:none;transition:none}
   .s-hero,.s-strip-in,.s-cta::after{animation:none;transition:none}
 }
+/* ═══════════ v1.4: profile source + visual refinement ═══════════ */
+.s-src.prof{background:#7c3aed}
+::selection{background:#ddd6fe;color:#1e1b4b}
+.s-card{border:1.5px solid var(--line)}
+.s-card:hover{transform:translateY(-6px);box-shadow:0 24px 48px rgba(76,29,149,.16);border-color:#c7bfff}
+html.js-reveal .s-card.reveal-in:hover{transform:translateY(-6px);border-color:#c7bfff}
+.s-card-img{background:linear-gradient(135deg,#eef0f8,#e6e9fb)}
+.s-card-img::before{content:'';position:absolute;inset:0;z-index:1;background:linear-gradient(180deg,rgba(255,255,255,.06),transparent 28%,transparent 72%,rgba(15,23,42,.10));pointer-events:none}
+.s-badges,.s-src{z-index:3}
+@keyframes sImgIn{from{opacity:0}to{opacity:1}}
+.s-card-img img{animation:sImgIn .5s ease}
+.s-price{font-variant-numeric:tabular-nums;letter-spacing:.2px}
+.s-tbox{font-variant-numeric:tabular-nums}
+.s-add{position:relative;overflow:hidden}
+.s-add::after{content:'';position:absolute;top:0;bottom:0;width:42%;left:-70%;background:linear-gradient(105deg,transparent,rgba(255,255,255,.38),transparent);transform:skewX(-20deg);transition:left .55s ease;pointer-events:none}
+.s-add:hover::after{left:135%}
+.s-chips{mask-image:linear-gradient(90deg,transparent,#000 14px,#000 calc(100% - 14px),transparent);-webkit-mask-image:linear-gradient(90deg,transparent,#000 14px,#000 calc(100% - 14px),transparent)}
+.s-chip{transition:all .15s}
+.s-chip.on{background:linear-gradient(135deg,var(--acc),var(--acc2));border-color:transparent;color:#fff;box-shadow:0 5px 14px rgba(124,58,237,.28)}
+.s-chip small{opacity:.75;font-size:10px}
+.s-search{position:relative;border-radius:14px;transition:box-shadow .2s}
+.s-search:focus-within{box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent)}
+.s-hero::before{content:'';position:absolute;inset:0;background:radial-gradient(640px 320px at 72% 18%,rgba(255,255,255,.16),transparent 62%);pointer-events:none}
+@keyframes sHeroUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.s-hero h1,.s-hero p,.s-herostats{animation:sHeroUp .6s ease both}
+.s-hero p{animation-delay:.08s}
+.s-herostats{animation-delay:.16s}
+.s-pg{transition:all .15s}
+.s-pg:hover{border-color:var(--acc);color:var(--acc)}
+.s-pg.on{background:linear-gradient(135deg,var(--acc),var(--acc2));border-color:transparent;box-shadow:0 5px 14px rgba(124,58,237,.3)}
+.s-empty .e{display:flex;align-items:center;justify-content:center;width:96px;height:96px;margin:0 auto 14px;border-radius:50%;background:linear-gradient(135deg,#eef0fb,#e4e8fc);box-shadow:inset 0 0 0 1px var(--line)}
+.s-crumb{background:#fff;border:1.5px solid var(--line);border-radius:11px;padding:6px 12px;display:inline-block}
+.s-prod-gal-main img{transition:transform .5s ease}
+.s-prod-gal-main:hover img{transform:scale(1.045)}
+.s-prod-thumbs img{transition:all .15s}
+.s-prod-thumbs img.on{border-color:transparent;box-shadow:0 0 0 2.5px var(--acc)}
+.s-prod-price .now{font-size:28px;font-variant-numeric:tabular-nums}
+.s-buy{position:relative;overflow:hidden}
+.s-buy::after{content:'';position:absolute;top:0;bottom:0;width:42%;left:-70%;background:linear-gradient(105deg,transparent,rgba(255,255,255,.35),transparent);transform:skewX(-20deg);transition:left .55s ease;pointer-events:none}
+.s-buy:hover::after{left:135%}
+.s-sec h2::before{content:'';width:5px;height:18px;border-radius:4px;background:linear-gradient(180deg,var(--acc),var(--acc2))}
+@media(max-width:640px){
+  .s-head-in{flex-wrap:wrap;height:auto;padding:10px 0;row-gap:9px}
+  .s-search{order:3;flex-basis:100%}
+  .s-hero{padding:38px 0 44px}
+  .s-hero h1{font-size:clamp(21px,6vw,26px)}
+  .s-grid{grid-template-columns:repeat(2,1fr);gap:9px}
+  .s-card-b{padding:10px 10px 12px}
+  .s-card-title{font-size:12.5px}
+  .s-price{font-size:14px}
+  .s-icobtn{width:40px;height:40px}
+  .s-wdocks{left:10px;bottom:10px}
+  .s-wbtn{width:50px;height:50px;font-size:21px;border-radius:17px}
+  .s-footer{padding-top:26px}
+}
+@media (prefers-reduced-motion:reduce){
+  .s-add::after,.s-buy::after{display:none}
+  .s-hero h1,.s-hero p,.s-herostats,.s-card-img img{animation:none}
+}
 <?= $headExtra ?>
 </style>
 </head>
@@ -46830,6 +46939,34 @@ $('aiSend').addEventListener('click',aiSend);
 })();
 updateBadges();
 window.arena = { loadCart, saveCart, loadWish, saveWish, updateBadges, toast, api, cartQty, changeCart, esc, fmtP, toman, addToCart, toggleWish };
+/* v1.4: نگهبانِ ارقام — اگر هیچ فونتِ موجودی ارقامِ فارسی را نداشت، ارقام به لاتین تبدیل می‌شوند تا هیچ جایی «مخدوش» نباشد */
+(function(){
+  if (!('fonts' in document)) return;
+  var FA = '\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9', EN = '0123456789';
+  var families = ['Vazirmatn','Vazir','Estedad','IRANYekan','Yekan','Noto Naskh Arabic','Noto Sans Arabic','Tahoma','Segoe UI'];
+  var done = false;
+  function hasFaGlyphs(){
+    try { return families.some(function(f){ return document.fonts.check('16px ' + f); }); }
+    catch(e) { return true; }
+  }
+  function fix(root){
+    if (done) return; done = true;
+    if (hasFaGlyphs()) return;
+    var re = /[\u06F0-\u06F9\u066C]/;
+    var w = document.createTreeWalker(root || document.body, 4, null), n, list = [];
+    while ((n = w.nextNode())) { if (re.test(n.nodeValue)) list.push(n); }
+    list.forEach(function(t){
+      t.nodeValue = t.nodeValue
+        .replace(/[\u06F0-\u06F9]/g, function(c){ return EN[FA.indexOf(c)]; })
+        .replace(/\u066C/g, ',');
+    });
+  }
+  try {
+    if (document.fonts.status === 'loaded') fix();
+    else document.fonts.addEventListener('loadingdone', function(){ fix(); }, { once: true });
+  } catch(e) {}
+  setTimeout(function(){ fix(); }, 4000);
+})();
 })();
 </script>
 <?= $bodyJs ?>
@@ -46846,7 +46983,7 @@ function arenaShopCard(array $p): string {
     $effOld = $p['old_price'];
     if ($flashPct > 0 && $effOld <= $price) $effOld = $p['price'];
     $disc = $effOld > $price ? arenaDiscountPct($price, $effOld) : 0;
-    $srcLabel = ['own' => 'خودِ سایت', 'woo' => 'ووکامرس', 'bsl' => 'باسلام'][$p['src']];
+    $srcLabel = ['own' => 'خودِ سایت', 'woo' => 'ووکامرس', 'bsl' => 'باسلام', 'prof' => 'پروفایل'][$p['src']];
     $out = $p['stock'] <= 0;
     $badges = '';
     if ($disc > 0) $badges .= '<span class="s-badge sale">-' . arenaToman($disc) . '٪</span>';
@@ -46918,7 +47055,7 @@ function arenaShopPageHome(array $get): array {
     <a class="s-cta" href="#s-products">مشاهده کالاها ↓</a>
     <div class="s-herostats">
       <span class="s-hs">📦 <?= arenaToman($total) ?> کالا</span>
-      <span class="s-hs">🔗 سه منبع: خودِ سایت + ووکامرس + باسلام</span>
+      <span class="s-hs">🔗 چهار منبع: خودِ سایت + ووکامرس + باسلام + پروفایل‌ها</span>
       <span class="s-hs">💬 پشتیبانی آنلاین ۲۴/۷</span>
       <?php if ((int)$s['free_shipping_over'] > 0): ?><span class="s-hs">🚚 ارسال رایگان از <?= arenaPrice((int)$s['free_shipping_over']) ?></span><?php endif; ?>
     </div>
@@ -46928,11 +47065,11 @@ function arenaShopPageHome(array $get): array {
   <span>🚚 <?= (int)$s['free_shipping_over'] > 0 ? 'ارسال رایگان از ' . arenaPrice((int)$s['free_shipping_over']) : 'ارسال سریع به سراسر کشور' ?></span><i>✦</i>
   <span>🎟️ کد خوش‌آمد: <b dir="ltr"><?= h((string)$s['welcome_coupon']) ?></b></span><i>✦</i>
   <span>💬 پشتیبانی آنلاین — <?= h((string)$s['support_hours']) ?></span><i>✦</i>
-  <span>🔗 سه منبع زنده: خودِ سایت + ووکامرس مقصد + باسلام</span><i>✦</i>
+  <span>🔗 چهار منبع زنده: خودِ سایت + ووکامرس مقصد + باسلام + پروفایل‌های هدف</span><i>✦</i>
   <span>🚚 <?= (int)$s['free_shipping_over'] > 0 ? 'ارسال رایگان از ' . arenaPrice((int)$s['free_shipping_over']) : 'ارسال سریع به سراسر کشور' ?></span><i>✦</i>
   <span>🎟️ کد خوش‌آمد: <b dir="ltr"><?= h((string)$s['welcome_coupon']) ?></b></span><i>✦</i>
   <span>💬 پشتیبانی آنلاین — <?= h((string)$s['support_hours']) ?></span><i>✦</i>
-  <span>🔗 سه منبع زنده: خودِ سایت + ووکامرس مقصد + باسلام</span><i>✦</i>
+  <span>🔗 چهار منبع زنده: خودِ سایت + ووکامرس مقصد + باسلام + پروفایل‌های هدف</span><i>✦</i>
 </div></div>
 <div class="container" id="s-products">
   <div class="s-toolbar">
@@ -46972,7 +47109,7 @@ function arenaShopPageHome(array $get): array {
   </div>
   <?php endif; ?>
   <?php else: ?>
-  <div class="s-empty"><div class="e">🔍</div><b>کالایی پیدا نشد</b><p>فیلترها را تغییر دهید یا از بخش مدیریت، آینهٔ ووکامرس/باسلام را تازه کنید.</p></div>
+  <div class="s-empty"><div class="e">🔍</div><b>کالایی پیدا نشد</b><p>فیلترها را تغییر دهید؛ یا از بخشِ مدیریت: پروفایل هدف را استخراج کنید و/یا آینهٔ ووکامرس/باسلام را تازه کنید.</p></div>
   <?php endif; ?>
 </div>
     <?php
@@ -47000,7 +47137,7 @@ function arenaShopPageProduct(array $get): array {
     $effOld = $p['old_price'];
     if ($flashPct > 0 && $effOld <= $price) $effOld = $p['price'];
     $disc = $effOld > $price ? arenaDiscountPct($price, $effOld) : 0;
-    $srcLabel = ['own' => 'خودِ سایت', 'woo' => 'فروشگاه ووکامرس', 'bsl' => 'غرفهٔ باسلام'][$p['src']];
+    $srcLabel = ['own' => 'خودِ سایت', 'woo' => 'فروشگاه ووکامرس', 'bsl' => 'غرفهٔ باسلام', 'prof' => 'پروفایلِ هدف'][$p['src']];
     $gallery = $p['gallery'] ? $p['gallery'] : [$p['image']];
     $avg = $reviews ? (int)round(array_sum(array_column($reviews, 'stars')) / count($reviews)) : 0;
     $metaJson = json_encode(['uid' => $p['uid'], 'max' => max(1, $p['stock']), 'title' => $p['title']], JSON_UNESCAPED_UNICODE);
@@ -48229,7 +48366,7 @@ html[data-skin="gloss"] .progress-bar{
 #pane-import table td,#pane-import table th{padding:8px 10px}
 .shop-thumb{width:44px;height:44px;object-fit:cover;border-radius:9px;background:#1e293b}
 .shop-badge-src{font-size:9.5px;font-weight:800;padding:3px 8px;border-radius:8px;color:#fff;white-space:nowrap}
-.shop-badge-src.own{background:#059669}.shop-badge-src.woo{background:#2563eb}.shop-badge-src.bsl{background:#d97706}
+.shop-badge-src.own{background:#059669}.shop-badge-src.woo{background:#2563eb}.shop-badge-src.bsl{background:#d97706}.shop-badge-src.prof{background:#7c3aed}
 .shop-badge-out{font-size:9.5px;background:#7f1d1d;color:#fecaca;padding:3px 8px;border-radius:8px}
 .shop-toggle{position:relative;width:40px;height:22px;border-radius:12px;background:#475569;cursor:pointer;transition:background .15s;flex:0 0 auto;border:0}
 .shop-toggle.on{background:#22c55e}
@@ -51268,7 +51405,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <button class="btn btn-gray" onclick="window.open('?arena=shop','_blank')">↗ تبِ تازه</button>
         </div>
         <iframe class="shop-frame" id="shopFrame" src="?arena=shop"></iframe>
-        <p style="font-size:10.5px;color:#64748b;margin-top:10px">💡 ویترین یک سندِ جداست ولی داخل همین فایل اجرا می‌شود. محصولات از سه منبع زنده خوانده می‌شوند: <b style="color:#34d399">کالاهای خودِ سایت</b>، <b style="color:#60a5fa">فروشگاهِ ووکامرس مقصد</b> و <b style="color:#fbbf24">غرفهٔ باسلام</b> — همین داده‌هایی که اسکرپر می‌خواند؛ دیگر CSV یا درون‌ریزی لازم نیست.</p>
+        <p style="font-size:10.5px;color:#64748b;margin-top:10px">💡 ویترین یک سندِ جداست ولی داخل همین فایل اجرا می‌شود. محصولات از چهار منبع زنده خوانده می‌شوند: <b style="color:#34d399">کالاهای خودِ سایت</b>، <b style="color:#60a5fa">فروشگاهِ ووکامرس مقصد</b>، <b style="color:#fbbf24">غرفهٔ باسلام</b> و <b style="color:#c084fc">محصولاتِ پروفایل‌های استخراج‌شده</b> — همین داده‌هایی که اسکرپر می‌خواند؛ دیگر CSV یا درون‌ریزی لازم نیست.</p>
     </div>
 
     <!-- ─────────── محصولات ─────────── -->
@@ -51278,6 +51415,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <button class="shop-srcchip" data-src="own">🏠 خودِ سایت <span class="n" id="srcN_own"></span></button>
             <button class="shop-srcchip" data-src="woo">🔵 ووکامرس مقصد <span class="n" id="srcN_woo"></span></button>
             <button class="shop-srcchip" data-src="bsl">🟠 باسلام <span class="n" id="srcN_bsl"></span></button>
+            <button class="shop-srcchip" data-src="prof">🟣 پروفایل‌ها <span class="n" id="srcN_prof"></span></button>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
             <button class="btn btn-green" onclick="shopOpenProductModal('')">➕ افزودن کالای خودِ سایت</button>
@@ -72192,6 +72330,34 @@ document.querySelectorAll('#impSubTabs .imp-subtab').forEach(function(b){
   b.addEventListener('click', function(){ shopImpSwitch(b.dataset.st, true); try { b.scrollIntoView({inline: 'center', block: 'nearest', behavior: 'smooth'}); } catch(e) {} });
 });
 (function(){ var m = location.hash.match(/^#imp-([a-z]+)/); if (m && $s('shopPane_' + m[1])) shopImpSwitch(m[1], false); })();
+/* v1.4: نگهبانِ ارقام — اگر هیچ فونتِ موجودی ارقامِ فارسی را نداشت، ارقام به لاتین تبدیل می‌شوند تا هیچ جایی «مخدوش» نباشد */
+(function(){
+  if (!('fonts' in document)) return;
+  var FA = '\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9', EN = '0123456789';
+  var families = ['Vazirmatn','Vazir','Estedad','IRANYekan','Yekan','Noto Naskh Arabic','Noto Sans Arabic','Tahoma','Segoe UI'];
+  var done = false;
+  function hasFaGlyphs(){
+    try { return families.some(function(f){ return document.fonts.check('16px ' + f); }); }
+    catch(e) { return true; }
+  }
+  function fix(root){
+    if (done) return; done = true;
+    if (hasFaGlyphs()) return;
+    var re = /[\u06F0-\u06F9\u066C]/;
+    var w = document.createTreeWalker(root || document.body, 4, null), n, list = [];
+    while ((n = w.nextNode())) { if (re.test(n.nodeValue)) list.push(n); }
+    list.forEach(function(t){
+      t.nodeValue = t.nodeValue
+        .replace(/[\u06F0-\u06F9]/g, function(c){ return EN[FA.indexOf(c)]; })
+        .replace(/\u066C/g, ',');
+    });
+  }
+  try {
+    if (document.fonts.status === 'loaded') fix();
+    else document.fonts.addEventListener('loadingdone', function(){ fix(); }, { once: true });
+  } catch(e) {}
+  setTimeout(function(){ fix(); }, 4000);
+})();
 
 /* ---------------- stats ---------------- */
 async function shopLoadStats(){
@@ -72204,7 +72370,7 @@ async function shopLoadStats(){
     el = $s('stOrders'); if (el) el.innerHTML = shopFm(d.orders.total) + ' <small style="font-size:9px;color:#f87171">(' + shopFm(d.orders.new) + ' جدید)</small>';
     el = $s('stRev'); if (el) el.innerHTML = shopFm(d.orders.revenue) + ' <small style="font-size:9px">تومان</small>';
     el = $s('stChat'); if (el) el.innerHTML = d.chat.unread ? '🔴 ' + shopFm(d.chat.unread) : '✅ ۰';
-    ['all','own','woo','bsl'].forEach(function(k){ var n = $s('srcN_' + k); if (n) n.textContent = k === 'all' ? '(' + shopFm(d.products.total) + ')' : '(' + shopFm(d.products[k]) + ')'; });
+    ['all','own','woo','bsl','prof'].forEach(function(k){ var n = $s('srcN_' + k); if (n) n.textContent = k === 'all' ? '(' + shopFm(d.products.total) + ')' : '(' + shopFm(d.products[k]) + ')'; });
     el = $s('shopAiChip'); if (el){ el.style.display = d.ai ? 'inline-block' : 'none'; el.textContent = '🤖 ' + d.ai; }
     el = $s('shopAiModel'); if (el) el.textContent = d.ai || '— (حالت آفلاینِ قاعده‌محور فعال است)';
     var badge = $s('shopBadge');
@@ -72226,7 +72392,7 @@ async function shopLoadProducts(){
   if (!items.length) { body.innerHTML = '<tr><td colspan="7" style="color:#64748b">کالایی در این منبع نیست. برای ووکامرس/باسلام دکمهٔ «تازه‌سازی آینه» را بزنید یا تنظیمات مقصد را در بخشِ تنظیماتِ اصلی کامل کنید.</td></tr>'; return; }
   body.innerHTML = items.map(function(p){
     var img = p.image ? '<img class="shop-thumb" src="' + shopEsc(p.image) + '" onerror="this.style.visibility=\'hidden\'">' : '<div class="shop-thumb" style="display:flex;align-items:center;justify-content:center">🛍️</div>';
-    var srcBadge = { own: '<span class="shop-badge-src own">خودِ سایت</span>', woo: '<span class="shop-badge-src woo">ووکامرس</span>', bsl: '<span class="shop-badge-src bsl">باسلام</span>' }[p.src];
+    var srcBadge = { own: '<span class="shop-badge-src own">خودِ سایت</span>', woo: '<span class="shop-badge-src woo">ووکامرس</span>', bsl: '<span class="shop-badge-src bsl">باسلام</span>', prof: '<span class="shop-badge-src prof">پروفایل</span>' }[p.src];
     var acts = '';
     if (p.src === 'own') {
       acts = '<button class="btn btn-cyan" style="font-size:9.5px;padding:2px 8px" onclick="shopOpenProductModal(\'' + shopEsc(p.uid) + '\')>✏️ ویرایش</button> '
