@@ -44685,6 +44685,8 @@ const ARENA_PLUGINS_DIR   = __DIR__ . '/arena_plugins';
 const ARENA_WP_DIR        = __DIR__ . '/arena_wp_plugins';
 const ARENA_WP_DL_DIR     = __DIR__ . '/arena_wp_downloads';
 const ARENA_TRACK_STATE   = __DIR__ . '/arena_track_state.json';
+const ARENA_IMG_CACHE     = __DIR__ . '/arena_img_cache';
+const ARENA_CUSTOMERS     = __DIR__ . '/arena_customers.json';
 const ARENA_ADMIN_FILE  = __DIR__ . '/arena_admin.json';
 
 /* ------------------------------ storage ---------------------------- */
@@ -44911,6 +44913,96 @@ function arenaTrackEvent(string $name, array $data): array {
     } catch (\Throwable $e) { $delivery = ['error' => mb_substr((string)$e->getMessage(), 0, 80)]; }
     arenaLog('shop', $head, ['event' => $name, 'ip' => $ip, 'cust' => $cust, 'delivery' => $delivery]);
     return ['ok' => true, 'delivery' => $delivery];
+}
+
+/* ---------------- v1.6: پراکسیِ تصویر (برای عکس‌های دور که هاتلینک/HTTPS را می‌بندند) ---------------- */
+function arenaImgCache(string $url): ?string {
+    if (!is_dir(ARENA_IMG_CACHE)) @mkdir(ARENA_IMG_CACHE, 0775, true);
+    $ext = 'img';
+    if (preg_match('~\.(jpe?g|png|webp|gif|avif|bmp)(?:[?#]|$)~i', $url, $m)) $ext = strtolower(str_replace('.jpg', '', str_replace('.jpeg', 'jpg', $m[1])));
+    $file = ARENA_IMG_CACHE . '/img_' . md5($url) . '.' . $ext;
+    if (is_file($file) && (time() - (int)@filemtime($file)) < 43200) return $file;
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 4,
+        CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_TIMEOUT => 25, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_USERAGENT => 'Mozilla/5.0 (compatible; arena-shop/1.6)',
+        CURLOPT_REFERER => (string)(parse_url($url, PHP_URL_HOST) ?: ''),
+    ]);
+    $raw = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+    if ($raw === false || strlen((string)$raw) < 100 || $code >= 400) return null;
+    $tmp = $file . '.tmp-' . getmypid();
+    if (@file_put_contents($tmp, (string)$raw, LOCK_EX) === false) return null;
+    if (!@rename($tmp, $file)) { @unlink($tmp); return null; }
+    return $file;
+}
+function arenaImgUrl(string $url): string {
+    $url = trim($url);
+    if ($url === '') return '';
+    if (preg_match('~^https?://~i', $url) && strlen($url) < 2000) return '?arena=img&u=' . urlencode($url);
+    return $url;
+}
+
+/* ---------------- v1.6: حسابِ مشتریانِ ویترین ---------------- */
+function arenaCustomers(): array {
+    $c = arenaJson(ARENA_CUSTOMERS, ['customers' => []]);
+    return is_array($c['customers'] ?? null) ? $c['customers'] : [];
+}
+function arenaCustomerSave(array $c): bool { return arenaSave(ARENA_CUSTOMERS, ['customers' => $c]); }
+function arenaCustomerFromCookie(): ?array {
+    $tok = (string)($_COOKIE['arena_cust'] ?? '');
+    if ($tok === '' || strlen($tok) < 16) return null;
+    foreach (arenaCustomers() as $ph => $c) {
+        if (is_array($c) && (int)($c['token_exp'] ?? 0) > time() && hash_equals((string)($c['token'] ?? ''), $tok)) {
+            return ['phone' => (string)$ph, 'name' => (string)($c['name'] ?? ''), 'token' => $tok];
+        }
+    }
+    return null;
+}
+function arenaCustomerLogin(string $phone, string $pass, string $name = ''): array {
+    $phone = trim($phone);
+    if (!preg_match('~^09\d{9}$~', $phone)) return ['ok' => false, 'error' => 'شمارهٔ موبایل باید با 09 شروع شود و ۱۱ رقم باشد'];
+    if (strlen($pass) < 6) return ['ok' => false, 'error' => 'رمز ورود حداقل ۶ نویسه است'];
+    $ip = (string)($_SERVER['REMOTE_ADDR'] ?? 'cli');
+    $st = arenaJson(ARENA_TRACK_STATE, []);
+    if (!is_array($st)) $st = [];
+    $lk = 'loginfail|' . $ip;
+    if (isset($st[$lk]) && (time() - (int)$st['loginfail_at' . $ip] > 900 || !isset($st['loginfail_at' . $ip]))) { $st[$lk] = 0; }
+    if (isset($st[$lk]) && (int)$st[$lk] >= 8) return ['ok' => false, 'error' => 'تلاش‌های زیاد — چند دقیقهٔ دیگر دوباره سعی کنید'];
+    $list = arenaCustomers();
+    $now = time();
+    foreach ($list as $k => $v) if ((int)($v['token_exp'] ?? 0) < $now) { $list[$k]['token'] = ''; $list[$k]['token_exp'] = 0; }
+    $isNew = false;
+    if (isset($list[$phone])) {
+        if (!password_verify($pass, (string)($list[$phone]['pass_hash'] ?? ''))) {
+            $st[$lk] = (int)($st[$lk] ?? 0) + 1; $st['loginfail_at' . $ip] = $now; arenaSave(ARENA_TRACK_STATE, $st);
+            return ['ok' => false, 'error' => 'رمز ورود اشتباه است'];
+        }
+    } else {
+        $isNew = true;
+        if (mb_substr(trim($name), 0, 2) === '') return ['ok' => false, 'error' => 'برای اولین ورود، نام خود را وارد کنید'];
+        if (count($list) >= 5000) return ['ok' => false, 'error' => 'ظرفیت ثبت‌نام پر است'];
+        $list[$phone] = ['name' => mb_substr(trim($name), 0, 60), 'pass_hash' => password_hash($pass, PASSWORD_DEFAULT), 'created' => $now];
+    }
+    $tok = bin2hex(random_bytes(24));
+    $list[$phone]['token'] = $tok;
+    $list[$phone]['token_exp'] = $now + 30 * 86400;
+    $list[$phone]['last_login'] = $now;
+    if (!arenaCustomerSave($list)) return ['ok' => false, 'error' => 'ذخیره‌سازی ناموفق بود'];
+    $st[$lk] = 0; arenaSave(ARENA_TRACK_STATE, $st);
+    setcookie('arena_cust', $tok, ['path' => '/', 'expires' => $list[$phone]['token_exp'], 'samesite' => 'Lax', 'httponly' => true]);
+    arenaLog('shop', 'ورود مشتری — ' . $list[$phone]['name'] . ($isNew ? ' (ثبت‌نامِ تازه)' : ''), ['event' => 'customer_login', 'phone' => $phone]);
+    return ['ok' => true, 'name' => $list[$phone]['name'], 'phone' => $phone, 'new' => $isNew];
+}
+function arenaCustomerLogout(): void {
+    $cu = arenaCustomerFromCookie();
+    if ($cu) {
+        $list = arenaCustomers();
+        if (isset($list[$cu['phone']])) { $list[$cu['phone']]['token'] = ''; $list[$cu['phone']]['token_exp'] = 0; arenaCustomerSave($list); }
+    }
+    setcookie('arena_cust', '', ['path' => '/', 'expires' => time() - 3600]);
 }
 
 /** فهرستِ کاملِ کالاها (ترکیبِ چهار منبع + اعمالِ اوررایدها) */
@@ -45931,6 +46023,22 @@ if (PHP_SAPI !== 'cli') {
         http_response_code(404);
         exit;
     }
+    if ($arenaParam === 'img') {
+        $u = (string)($_GET['u'] ?? '');
+        if (preg_match('~^https?://~i', $u) && strlen($u) < 2000) {
+            $file = arenaImgCache($u);
+            if ($file !== null) {
+                $mime = function_exists('mime_content_type') ? ((string)@mime_content_type($file) ?: 'image/jpeg') : 'image/jpeg';
+                header('Content-Type: ' . $mime);
+                header('Cache-Control: public, max-age=86400');
+                readfile($file);
+                exit;
+            }
+            http_response_code(502);
+        }
+        http_response_code(400);
+        exit;
+    }
     if ($arenaParam === 'login')  { arenaLoginPage(); exit; }
     if ($arenaParam === 'logout') { arenaDoLogout();  exit; }
     if ($arenaParam === 'panel') {
@@ -45945,7 +46053,7 @@ if (PHP_SAPI !== 'cli') {
 }
 
 function arenaEnsureDirs(): void {
-    foreach ([ARENA_UPLOADS_DIR, ARENA_PLUGINS_DIR, ARENA_WP_DIR, ARENA_WP_DL_DIR] as $d) {
+    foreach ([ARENA_UPLOADS_DIR, ARENA_PLUGINS_DIR, ARENA_WP_DIR, ARENA_WP_DL_DIR, ARENA_IMG_CACHE] as $d) {
         if (!is_dir($d)) @mkdir($d, 0775, true);
     }
 }
@@ -46025,11 +46133,12 @@ function arenaLoginPage(): void {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ورود ادمین — <?= h($store) ?></title>
+<?= app_font_boot() ?>
 <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;700;800&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0}
-body{font-family:Vazirmatn,'Noto Naskh Arabic','Noto Sans Arabic',Tahoma,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(1000px 600px at 80% -10%,#1e3a8a55,transparent),radial-gradient(800px 500px at 0% 110%,#7c3aed33,transparent),#0b1020;padding:20px}
+body{font-family:var(--app-font,Vazirmatn,'Noto Naskh Arabic','Noto Sans Arabic',Tahoma,sans-serif);min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(1000px 600px at 80% -10%,#1e3a8a55,transparent),radial-gradient(800px 500px at 0% 110%,#7c3aed33,transparent),#0b1020;padding:20px}
 .card{width:100%;max-width:380px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);backdrop-filter:blur(16px);border-radius:22px;padding:34px 28px;text-align:center;box-shadow:0 30px 80px rgba(0,0,0,.5)}
 .lg-logo{width:64px;height:64px;margin:0 auto 14px;border-radius:20px;background:linear-gradient(135deg,#3b82f6,#a855f7);display:flex;align-items:center;justify-content:center;font-size:30px;box-shadow:0 12px 30px rgba(99,102,241,.4)}
 h1{color:#fff;font-size:20px;margin-bottom:4px}
@@ -46065,7 +46174,7 @@ function arenaAdminDos(): array {
             'cache_woo', 'cache_bsl', 'orders_list', 'order_status', 'coupons_list', 'coupon_save',
             'coupon_delete', 'chat_sessions', 'chat_messages', 'chat_admin_send', 'chat_mark_read',
             'ai_test', 'plugins_list', 'plugin_upload', 'plugin_toggle', 'plugin_delete', 'plugin_code',
-            'wp_search', 'wp_info', 'wp_install', 'wp_installed', 'wp_delete', 'track_event', 'settings_save',
+            'wp_search', 'wp_info', 'wp_install', 'wp_installed', 'wp_delete', 'track_event', 'cust_login', 'cust_logout', 'cust_me', 'cust_orders', 'settings_save',
             'backup', 'restore', 'image_upload', 'admin_save'];
 }
 
@@ -46425,6 +46534,29 @@ function arenaApiJson(): string {
             case 'track_event':
                 return json_encode(arenaTrackEvent((string)($jsonIn['name'] ?? ''), (array)($jsonIn['data'] ?? [])), JSON_UNESCAPED_UNICODE);
 
+            /* ---------------- v1.6: حساب مشتری ---------------- */
+            case 'cust_login':
+                $r = arenaCustomerLogin((string)($jsonIn['phone'] ?? ''), (string)($jsonIn['pass'] ?? ''), (string)($jsonIn['name'] ?? ''));
+                return json_encode($r, JSON_UNESCAPED_UNICODE);
+            case 'cust_logout':
+                arenaCustomerLogout();
+                return json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+            case 'cust_me':
+                $cu = arenaCustomerFromCookie();
+                return json_encode($cu ? ['ok' => true, 'name' => $cu['name'], 'phone' => $cu['phone']] : ['ok' => false], JSON_UNESCAPED_UNICODE);
+            case 'cust_orders':
+                $cu = arenaCustomerFromCookie();
+                if (!$cu) return json_encode(['ok' => false], JSON_UNESCAPED_UNICODE);
+                $rows = [];
+                foreach (array_reverse(arenaOrders()) as $o) {
+                    if ((string)($o['customer']['phone'] ?? '') === $cu['phone']) {
+                        $rows[] = ['id' => (string)$o['id'], 'status' => (string)$o['status'], 'total' => (int)$o['total'], 'created' => (int)$o['created'],
+                                   'items' => array_map(fn($l) => ['title' => (string)$l['title'], 'qty' => (int)$l['qty']], (array)$o['items'])];
+                        if (count($rows) >= 30) break;
+                    }
+                }
+                return json_encode(['ok' => true, 'orders' => $rows], JSON_UNESCAPED_UNICODE);
+
             /* ----------------------- تنظیمات/پشتیبان -------------------- */
             case 'settings_save':
                 $ok = arenaSettingsSave($jsonIn);
@@ -46478,6 +46610,8 @@ function arenaFlashPrice(int $price): int {
 
 function arenaShopShell(string $title, string $content, array $s, string $headExtra = '', string $bodyJs = ''): void {
     $full = $s['name'];
+    $arenaCust = arenaCustomerFromCookie();
+    $catsFoot = arenaCategories();
     $flash = arenaFlashState();
     $logo = $s['logo'] !== '' ? '<img class="s-logo-img" src="' . h($s['logo']) . '" alt="">' : '<span class="s-logo-mark">📦</span>';
     $foot = ['html' => ''];
@@ -46488,6 +46622,7 @@ function arenaShopShell(string $title, string $content, array $s, string $headEx
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?= h($title) ?> — <?= h($full) ?></title>
+<?= app_font_boot() ?>
 <meta name="description" content="<?= h($s['tagline']) ?>">
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
@@ -46504,7 +46639,7 @@ function arenaShopShell(string $title, string $content, array $s, string $headEx
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth}
-body{font-family:Vazirmatn,'Vazirmatn Font','Noto Naskh Arabic','Noto Sans Arabic','Segoe UI',Tahoma,system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.8;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;animation:arenaPageIn .45s ease}
+body{font-family:var(--app-font,Vazirmatn,'Noto Naskh Arabic','Noto Sans Arabic','Segoe UI',Tahoma,system-ui,sans-serif);background:var(--bg);color:var(--ink);font-size:14px;line-height:1.8;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;animation:arenaPageIn .45s ease}
 a{color:inherit;text-decoration:none}
 img{max-width:100%;display:block}
 button{font-family:inherit;cursor:pointer}
@@ -46812,6 +46947,56 @@ html.js-reveal .s-card.reveal-in:hover{transform:translateY(-6px);border-color:#
   .s-add::after,.s-buy::after{display:none}
   .s-hero h1,.s-hero p,.s-herostats,.s-card-img img{animation:none}
 }
+/* ═══════════ v1.6: features strip, section head, mcart, footer, bubble ═══════════ */
+/* features strip */
+.s-feats{background:#fff;border-bottom:1px solid var(--line);padding:18px 0;margin-bottom:22px}
+.s-feats-in{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.s-feat{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:14px;background:var(--bg);border:1px solid var(--line);transition:transform .18s,box-shadow .18s}
+.s-feat:hover{transform:translateY(-3px);box-shadow:0 12px 26px rgba(15,23,42,.08)}
+.s-feat span{font-size:22px;flex:0 0 auto}
+.s-feat b{display:block;font-size:12.5px;line-height:1.5}
+.s-feat small{display:block;font-size:10.5px;color:var(--mut)}
+/* section head */
+.s-sechead{display:flex;align-items:baseline;gap:10px;margin:6px 0 16px;position:relative;padding-right:14px}
+.s-sechead::before{content:'';position:absolute;right:0;top:6px;bottom:6px;width:5px;border-radius:4px;background:linear-gradient(180deg,var(--acc),var(--acc2))}
+.s-sechead h2{font-size:18px;font-weight:800}
+.s-sechead span{font-size:11.5px;color:var(--mut);font-weight:700}
+/* hero glow + price pill */
+.s-hero h1{text-shadow:0 2px 26px rgba(0,0,0,.28)}
+.s-price{display:inline-block;padding:3px 10px;border-radius:11px;background:linear-gradient(135deg,color-mix(in srgb,var(--acc) 9%,white),color-mix(in srgb,var(--acc2) 9%,white));border:1px solid color-mix(in srgb,var(--acc) 22%,white)}
+/* square card images */
+.s-card-img{aspect-ratio:1/1}
+.s-card{border-radius:20px}
+/* footer links */
+.s-footer a{transition:color .15s,padding-right .15s}
+.s-footer a:hover{color:#fff;padding-right:4px}
+.s-foot-brand .s-foot-logo{width:46px;height:46px;border-radius:14px;overflow:hidden;margin-bottom:8px;font-size:22px}
+.s-foot-logo .s-logo-mark,.s-foot-logo .s-logo-img{width:46px;height:46px}
+.s-foot-in{grid-template-columns:1.2fr 1fr 1fr 1.2fr}
+@media(max-width:860px){.s-foot-in{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){.s-foot-in{grid-template-columns:1fr}}
+/* sticky mobile cart bar */
+.s-mcart{position:fixed;bottom:0;left:0;right:0;z-index:70;display:none;align-items:center;justify-content:space-between;gap:10px;padding:11px 16px calc(11px + env(safe-area-inset-bottom));background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;transform:translateY(110%);transition:transform .3s ease;box-shadow:0 -8px 30px rgba(15,23,42,.25)}
+.s-mcart.on{transform:none}
+.s-mcart a{background:rgba(255,255,255,.22);border:1px solid rgba(255,255,255,.4);border-radius:11px;padding:7px 14px;font-weight:800;font-size:12px}
+@media(max-width:640px){
+  .s-mcart{display:flex}
+  .s-wdocks.up{bottom:74px}
+}
+/* chat hello bubble */
+.s-whello{position:fixed;left:84px;bottom:24px;z-index:85;max-width:250px;background:#fff;border:1.5px solid var(--line);border-radius:14px;border-bottom-right-radius:4px;padding:11px 14px;font-size:12.5px;font-weight:700;box-shadow:0 16px 40px rgba(15,23,42,.18);animation:wpop .3s ease}
+.s-whello small{display:block;font-size:10.5px;color:var(--mut);font-weight:600;margin-top:3px;line-height:1.7}
+.s-whello button{position:absolute;top:6px;left:6px;border:0;background:none;color:var(--mut);font-size:11px;cursor:pointer}
+@media(max-width:640px){.s-whello{left:14px;bottom:84px;max-width:220px}}
+/* chat button attention pulse until opened */
+@keyframes sbtnPulse{0%{box-shadow:0 12px 30px rgba(37,99,235,.35),0 0 0 0 rgba(37,99,235,.35)}70%{box-shadow:0 12px 30px rgba(37,99,235,.35),0 0 0 12px rgba(37,99,235,0)}100%{box-shadow:0 12px 30px rgba(37,99,235,.35),0 0 0 0 rgba(37,99,235,0)}}
+.s-wbtn.chat{animation:sbtnPulse 2.4s infinite}
+.s-wbtn.chat.pulse-off{animation:none}
+@media (prefers-reduced-motion:reduce){
+  .s-wbtn.chat{animation:none}
+  .s-whello{animation:none}
+  .s-mcart{transition:none}
+}
 <?= $headExtra ?>
 </style>
 </head>
@@ -46823,34 +47008,49 @@ html.js-reveal .s-card.reveal-in:hover{transform:translateY(-6px);border-color:#
     <button type="submit">🔍</button>
   </form>
   <div class="s-head-acts">
+    <a class="s-icobtn<?= $arenaCust ? ' cust-on' : '' ?>" href="?arena=account" title="حساب من"><?= $arenaCust ? '👤' : '👤' ?><span class="s-count" id="custInitial" style="<?= $arenaCust ? '' : 'display:none' ?>;background:linear-gradient(135deg,var(--acc),var(--acc2))"><?= h(mb_substr($arenaCust['name'], 0, 1)) ?></span></a>
     <a class="s-icobtn" href="?arena=wishlist" title="علاقه‌مندی‌ها">💜<span class="s-count" id="wishCount" style="display:none">0</span></a>
     <a class="s-icobtn" href="?arena=cart" title="سبد خرید">🛒<span class="s-count" id="cartCount" style="display:none">0</span></a>
   </div>
 </div></header>
 <?= $content ?>
 <footer class="s-footer"><div class="container s-foot-in">
-  <div>
+  <div class="s-foot-brand">
+    <div class="s-foot-logo"><?= $logo ?></div>
     <h3><?= h($s['name']) ?></h3>
     <p><?= h($s['tagline']) ?></p>
     <p style="margin-top:8px;font-size:11px;color:#64748b">🕘 پشتیبانی: <?= h($s['support_hours']) ?></p>
   </div>
   <div>
-    <h3>تماس با ما</h3>
+    <h3>دسترسی سریع</h3>
     <ul>
-      <?php if (!empty($s['contact']['phone'])): ?><li>📞 <?= h($s['contact']['phone']) ?></li><?php endif; ?>
-      <?php if (!empty($s['contact']['telegram'])): ?><li>✈️ تلگرام: <?= h($s['contact']['telegram']) ?></li><?php endif; ?>
-      <?php if (!empty($s['contact']['whatsapp'])): ?><li>🟢 واتس‌اپ: <?= h($s['contact']['whatsapp']) ?></li><?php endif; ?>
-      <li>💬 چت آنلاین — گوشهٔ پایین صفحه</li>
+      <li><a href="?arena=shop">🏠 صفحهٔ اصلی</a></li>
+      <li><a href="?arena=shop#s-products">🛍 همهٔ کالاها</a></li>
+      <li><a href="?arena=cart">🛒 سبد خرید</a></li>
+      <li><a href="?arena=wishlist">💜 علاقه‌مندی‌های من</a></li>
+      <li><a href="?arena=track">📦 پیگیری سفارش</a></li>
+      <li><a href="?arena=account">👤 <?= $arenaCust ? 'حساب من' : 'ورود / ثبت‌نام' ?></a></li>
     </ul>
   </div>
   <div>
-    <h3>پرداخت و ارسال</h3>
+    <h3>دسته‌بندی‌ها</h3>
     <ul>
-      <li>🚚 هزینه ارسال: <?= arenaPrice((int)$s['shipping']) ?></li>
-      <?php if ((int)$s['free_shipping_over'] > 0): ?><li>🎁 ارسال رایگان از <?= arenaPrice((int)$s['free_shipping_over']) ?></li><?php endif; ?>
+      <?php $nFoot = 0; foreach ($catsFoot as $cName => $cCount): if ($nFoot >= 6) break; $nFoot++; ?>
+      <li><a href="?arena=shop&cat=<?= urlencode($cName) ?>"><?= h($cName) ?> <small style="color:#64748b">(<?= arenaToman($cCount) ?>)</small></a></li>
+      <?php endforeach; ?>
+      <?php if (!$nFoot): ?><li><span style="color:#64748b">به‌زودی دسته‌بندی‌ها فعال می‌شوند</span></li><?php endif; ?>
+    </ul>
+  </div>
+  <div>
+    <h3>تماس و پرداخت</h3>
+    <ul>
+      <?php if (!empty($s['contact']['phone'])): ?><li>📞 <span dir="ltr"><?= h($s['contact']['phone']) ?></span></li><?php endif; ?>
+      <?php if (!empty($s['contact']['telegram'])): ?><li>✈️ تلگرام: <?= h($s['contact']['telegram']) ?></li><?php endif; ?>
+      <?php if (!empty($s['contact']['whatsapp'])): ?><li>🟢 واتس‌اپ: <span dir="ltr"><?= h($s['contact']['whatsapp']) ?></span></li><?php endif; ?>
+      <li>💬 چت آنلاین و دستیار هوشمند — گوشهٔ صفحه</li>
+      <li>🚚 ارسال: <?= arenaPrice((int)$s['shipping']) ?><?= (int)$s['free_shipping_over'] > 0 ? ' · رایگان از ' . arenaPrice((int)$s['free_shipping_over']) : '' ?></li>
       <?php if (!empty($s['payment']['on_delivery'])): ?><li>💵 پرداخت در محل</li><?php endif; ?>
-      <?php if (!empty($s['payment']['card_number'])): ?><li>💳 کارت به کارت: <span dir="ltr"><?= h($s['payment']['card_number']) ?></span></li><?php endif; ?>
-      <?php if (!empty($s['payment']['note'])): ?><li>📝 <?= h($s['payment']['note']) ?></li><?php endif; ?>
+      <?php if (!empty($s['payment']['card_number'])): ?><li>💳 کارت به کارت</li><?php endif; ?>
     </ul>
   </div>
 </div>
@@ -46860,6 +47060,8 @@ html.js-reveal .s-card.reveal-in:hover{transform:translateY(-6px);border-color:#
   <span style="margin-right:10px">· <a href="?arena=panel" style="color:#64748b" onmouseover="this.style.color='#cbd5e1'" onmouseout="this.style.color='#64748b'">🔐 مدیریت</a></span>
 </div></div>
 </footer>
+
+<div class="s-mcart" id="sMcart"><span>🛒 <b>سبد خرید</b> · <span id="sMcartN">0 کالا</span></span><a href="?arena=cart">مشاهده ←</a></div>
 
 <!-- ─────────── چت پشتیبانی آنلاین ─────────── -->
 <div class="s-wdocks">
@@ -46890,7 +47092,7 @@ html.js-reveal .s-card.reveal-in:hover{transform:translateY(-6px);border-color:#
 "use strict";
 /* ================= helpers ================= */
 const _fl0 = <?= json_encode(arenaFlashState()) ?>;
-window.ARENA_S = <?= json_encode(['shipping' => (int)$s['shipping'], 'free_over' => (int)$s['free_shipping_over'], 'welcome' => $s['welcome_coupon'], 'name' => $s['name'], 'flash_pct' => ($_fl0 && $_fl0['active']) ? (int)$_fl0['pct'] : 0], JSON_UNESCAPED_UNICODE) ?>;
+window.ARENA_S = <?= json_encode(['shipping' => (int)$s['shipping'], 'free_over' => (int)$s['free_shipping_over'], 'welcome' => $s['welcome_coupon'], 'cust' => $arenaCust, 'name' => $s['name'], 'flash_pct' => ($_fl0 && $_fl0['active']) ? (int)$_fl0['pct'] : 0], JSON_UNESCAPED_UNICODE) ?>;
 function $(id){return document.getElementById(id);}
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
 function toman(n){n=Math.max(0,Math.round(+n||0));return n.toLocaleString('fa-IR');}
@@ -46913,6 +47115,7 @@ function cartQty(){const c=loadCart();let n=0;for(const k in c)n+=+c[k]||0;retur
 function updateBadges(){
   const cc=$('cartCount');if(cc){cc.textContent=cartQty();cc.style.display=cartQty()?'flex':'none';}
   const wc=$('wishCount');if(wc){wc.textContent=loadWish().length;wc.style.display=loadWish().length?'flex':'none';}
+  const mb=$('sMcart');if(mb){const n=cartQty();mb.classList.toggle('on',n>0);const el=$('sMcartN');if(el)el.textContent=n+' کالا';const wd=$('sWdocks');if(wd)wd.classList.toggle('up',n>0);}
 }
 window.addToCart=function(uid,btn){
   const c=loadCart();c[uid]=(+c[uid]||0)+1;saveCart(c);
@@ -46938,6 +47141,7 @@ window.changeCart=function(uid,d){
 /* ================= chat widget ================= */
 let chatCid='',chatLast=0,chatTimer=null;
 function chatOpen(){
+  try{const cb=$('chatBtn');if(cb)cb.classList.add('pulse-off');}catch(e){}
   $('chatPanel').classList.toggle('open');
   $('aiPanel').classList.remove('open');
   if(!chatCid)chatCid=document.cookie.match(/arena_cid=([^;]+)/)?.[1]||'';
@@ -46949,7 +47153,17 @@ window.arenaChatStart=function(){
       if(d.ok){chatCid=d.cid;$('chatNameRow').style.display='none';$('chatIn').disabled=false;$('chatSend').disabled=false;chatPollLoop();}
     });
 };
-$('chatBtn').addEventListener('click',chatOpen);
+$('chatBtn').addEventListener('click',function(){try{localStorage.setItem('arena_hello','1');}catch(e){}const hb=$('sWHello');if(hb)hb.remove();chatOpen();});
+(function(){
+  try{
+    if(localStorage.getItem('arena_hello'))return;
+    const d=document.createElement('div');
+    d.id='sWHello';d.className='s-whello';
+    d.innerHTML='👋 نیاز به کمک دارید؟<small>با پشتیبانیِ آنلاین یا دستیارِ هوشمند صحبت کنید</small><button type=\'button\'>✕</button>';
+    d.querySelector('button').addEventListener('click',function(){try{localStorage.setItem('arena_hello','1');}catch(e){}d.remove();});
+    setTimeout(function(){document.body.appendChild(d);setTimeout(function(){const x=$('sWHello');if(x)x.remove();},15000);},2500);
+  }catch(e){}
+})();
 $('aiBtn').addEventListener('click',()=>{
   $('aiPanel').classList.toggle('open');
   $('chatPanel').classList.remove('open');
@@ -47002,7 +47216,7 @@ async function aiSend(){
   try{
     const d=await api('ai_chat',{text:text,history:aiHist.slice(-6)},'POST');
     t.remove();
-    const ans=(d&&d.text)||'متأسفانه پاسخ‌ای دریافت نشد.';
+    const ans=(d&&d.text)||(d&&d.error)?('دستیارِ هوشمند هنوز پاسخ نداد: '+(d&&d.error?d.error:'—')+' — می‌توانید از چتِ پشتیبانی (💬) استفاده کنید.'):'متأسفانه پاسخ‌ای دریافت نشد.';
     pushMsg($('aiMsgs'),'ai',ans);
     aiHist.push({role:'user',text:text},{role:'assistant',text:ans});
   }catch(e){t.remove();pushMsg($('aiMsgs'),'ai','خطا در ارتباط. دوباره تلاش کنید.');}
@@ -47066,14 +47280,26 @@ window.arenaEventOnce = function(key, name, data){
   arenaEvent(name, data);
 };
 window.arena = { loadCart, saveCart, loadWish, saveWish, updateBadges, toast, api, cartQty, changeCart, esc, fmtP, toman, addToCart, toggleWish };
+/* v1.6: دسترسیِ صفحه‌ها به کمکی‌ها (بدونِ این، سبد/چک‌اوت/پیگیری نمی‌چرخیدند) */
+window.$ = $; window.toast = toast; window.esc = esc; window.fmtP = fmtP; window.toman = toman; window.api = api;
+function imgU(u){ u = (u == null ? '' : String(u)).trim(); return /^https?:\/\//i.test(u) ? '?arena=img&u=' + encodeURIComponent(u) : u; }
+window.imgU = imgU;
 /* v1.4: نگهبانِ ارقام — اگر هیچ فونتِ موجودی ارقامِ فارسی را نداشت، ارقام به لاتین تبدیل می‌شوند تا هیچ جایی «مخدوش» نباشد */
 (function(){
   if (!('fonts' in document)) return;
   var FA = '\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9', EN = '0123456789';
-  var families = ['Vazirmatn','Vazir','Estedad','IRANYekan','Yekan','Noto Naskh Arabic','Noto Sans Arabic','Tahoma','Segoe UI'];
   var done = false;
   function hasFaGlyphs(){
-    try { return families.some(function(f){ return document.fonts.check('16px ' + f); }); }
+    try {
+      var c = document.createElement('canvas'); c.width = 160; c.height = 40;
+      var x = c.getContext('2d'); if (!x) return true;
+      var fam = (getComputedStyle(document.body).fontFamily || 'sans-serif');
+      x.font = '16px ' + fam;
+      var wd = x.measureText('\u06F3\u066C\u06F5\u06F0\u06F9').width;
+      x.font = '16px ' + fam;
+      var wt = x.measureText('\uFFFF\uFFFF\uFFFF\uFFFF\uFFFF').width;
+      return Math.abs(wd - wt) > 0.75;
+    }
     catch(e) { return true; }
   }
   function fix(root){
@@ -47110,21 +47336,19 @@ function arenaShopCard(array $p): string {
     $effOld = $p['old_price'];
     if ($flashPct > 0 && $effOld <= $price) $effOld = $p['price'];
     $disc = $effOld > $price ? arenaDiscountPct($price, $effOld) : 0;
-    $srcLabel = ['own' => 'خودِ سایت', 'woo' => 'ووکامرس', 'bsl' => 'باسلام', 'prof' => 'پروفایل'][$p['src']];
     $out = $p['stock'] <= 0;
     $badges = '';
     if ($disc > 0) $badges .= '<span class="s-badge sale">-' . arenaToman($disc) . '٪</span>';
     if ($flashPct > 0 && $disc === 0) $badges .= '<span class="s-badge flash">⚡ ' . arenaToman($flashPct) . '٪</span>';
     if ($out) $badges .= '<span class="s-badge out">ناموجود</span>';
     $img = $p['image'] !== ''
-        ? '<img loading="lazy" src="' . h($p['image']) . '" alt="' . h($p['title']) . '" onerror="this.remove()">'
+        ? '<img loading="lazy" src="' . h(arenaImgUrl($p['image'])) . '" alt="' . h($p['title']) . '" onerror="this.remove()">'
         : '';
     $cat = $p['category'] !== '' ? '<span class="s-card-cat">' . h($p['category']) . '</span>' : '<span class="s-card-cat">&nbsp;</span>';
     return '<div class="s-card">'
         . '<a class="s-card-img" href="?arena=product&uid=' . urlencode($p['uid']) . '">'
         . '<div class="s-card-ph">📦</div>' . $img
         . '<div class="s-badges">' . $badges . '</div>'
-        . '<span class="s-src ' . $p['src'] . '">' . $srcLabel . '</span>'
         . '</a>'
         . '<div class="s-card-b">' . $cat
         . '<a class="s-card-title" href="?arena=product&uid=' . urlencode($p['uid']) . '">' . h($p['title']) . '</a>'
@@ -47188,6 +47412,14 @@ function arenaShopPageHome(array $get): array {
     </div>
   </div>
 </section>
+<section class="s-feats" aria-label="مزایای فروشگاه">
+  <div class="container s-feats-in">
+    <div class="s-feat"><span>🚚</span><b>ارسال سریع</b><small>به سراسر کشور</small></div>
+    <div class="s-feat"><span>🛡️</span><b>پرداخت امن</b><small>در محل یا کارت‌به‌کارت</small></div>
+    <div class="s-feat"><span>💬</span><b>پشتیبانی آنلاین</b><small>چت زنده + دستیار هوشمند</small></div>
+    <div class="s-feat"><span>💜</span><b>علاقه‌مندی‌های شما</b><small>خریدِ بعدی، همین‌جا</small></div>
+  </div>
+</section>
 <div class="s-strip" aria-hidden="true"><div class="s-strip-in">
   <span>🚚 <?= (int)$s['free_shipping_over'] > 0 ? 'ارسال رایگان از ' . arenaPrice((int)$s['free_shipping_over']) : 'ارسال سریع به سراسر کشور' ?></span><i>✦</i>
   <span>🎟️ کد خوش‌آمد: <b dir="ltr"><?= h((string)$s['welcome_coupon']) ?></b></span><i>✦</i>
@@ -47213,6 +47445,7 @@ function arenaShopPageHome(array $get): array {
         <option value="own" <?= $get['src'] === 'own' ? 'selected' : '' ?>>🏠 خودِ سایت</option>
         <option value="woo" <?= $get['src'] === 'woo' ? 'selected' : '' ?>>🔵 ووکامرس مقصد</option>
         <option value="bsl" <?= $get['src'] === 'bsl' ? 'selected' : '' ?>>🟠 باسلام</option>
+        <option value="prof" <?= $get['src'] === 'prof' ? 'selected' : '' ?>>🟣 پروفایل‌ها</option>
       </select>
       <select name="sort" onchange="this.form.submit()">
         <option value="" <?= $get['sort'] === '' ? 'selected' : '' ?>>چیدمان</option>
@@ -47224,6 +47457,7 @@ function arenaShopPageHome(array $get): array {
   </div>
   <?php if ($get['q'] !== ''): ?><div style="font-size:12px;color:var(--mut);margin-bottom:12px">نتایج جست‌وجو برای «<b><?= h($get['q']) ?></b>» — <?= arenaToman($total) ?> کالا <a href="?arena=shop" style="color:var(--acc)">✕ پاک کردن</a></div><?php endif; ?>
   <?php if ($items): ?>
+  <div class="s-sechead"><h2><?= $get['q'] !== '' ? '🔎 نتایج جست‌وجو' : ($get['cat'] !== '' ? '🗂 ' . h($get['cat']) : '🛍 کالاهای فروشگاه') ?></h2><span><?= arenaToman($total) ?> کالا</span></div>
   <div class="s-grid">
     <?php foreach ($items as $p): echo arenaShopCard($p); endforeach; ?>
   </div>
@@ -47296,11 +47530,11 @@ function arenaShopPageProduct(array $get): array {
     <div>
       <div class="s-prod-gal-main" id="prodMainWrap">
         <div class="s-card-ph" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:70px;opacity:.35">📦</div>
-        <?php if ($gallery): ?><img id="prodMain" src="<?= h($gallery[0]) ?>" alt="<?= h($p['title']) ?>" onerror="this.remove()"><?php endif; ?>
+        <?php if ($gallery): ?><img id="prodMain" src="<?= h(arenaImgUrl($gallery[0])) ?>" alt="<?= h($p['title']) ?>" onerror="this.remove()"><?php endif; ?>
       </div>
       <?php if (count($gallery) > 1): ?>
       <div class="s-prod-thumbs">
-        <?php foreach ($gallery as $i => $g): ?><img src="<?= h($g) ?>" class="<?= $i === 0 ? 'on' : '' ?>" alt=""><?php endforeach; ?>
+        <?php foreach ($gallery as $i => $g): ?><img src="<?= h(arenaImgUrl($g)) ?>" class="<?= $i === 0 ? 'on' : '' ?>" alt=""><?php endforeach; ?>
       </div>
       <?php endif; ?>
     </div>
@@ -47383,7 +47617,7 @@ function arenaShopPageCart(): array {
         keys.forEach(uid=>{
           const p=map[uid];if(!p){return;}
           const q=+c[uid]||1;const pr=fp(p)*q;sub+=pr;
-          html+="<div class=\'s-cartrow\'><img src=\'"+(p.image||"")+"\' onerror=\'this.style.visibility=\\"none\\"\'><div class=\'t\'><b>"+esc(p.title)+"</b><span>"+esc(fmtP(fp(p)))+(ARENA_S.flash_pct?" <small style=\'color:var(--mut)\'>"+esc(fmtP(p.price))+"</small>":"")+"</span></div>"
+          html+="<div class=\'s-cartrow\'><img src=\'"+esc(imgU(p.image||""))+"\' onerror=\'this.style.visibility=\\"none\\"\'><div class=\'t\'><b>"+esc(p.title)+"</b><span>"+esc(fmtP(fp(p)))+(ARENA_S.flash_pct?" <small style=\'color:var(--mut)\'>"+esc(fmtP(p.price))+"</small>":"")+"</span></div>"
             +"<div class=\'q\'><button data-cq=\'-1\' data-uid=\'"+uid+"\'>\u2212</button><b style=\'min-width:22px;text-align:center\'>"+q+"</b><button data-cq=\'1\' data-uid=\'"+uid+"\'>+</button></div>"
             +"<span style=\'font-weight:800;font-size:13px;min-width:80px;text-align:left\'>"+esc(fmtP(pr))+"</span>"
             +"<button class=\'s-rm\' data-cq=\'-999\' data-uid=\'"+uid+"\'>🗑\ufe0f</button></div>";
@@ -47449,6 +47683,7 @@ function arenaShopPageCheckout(): array {
         const map={};(d.items||[]).forEach(p=>map[p.uid]=p);
         const c=arena.loadCart();const keys=Object.keys(c);
         const fp=p=>ARENA_S.flash_pct?Math.round(p.price*(100-ARENA_S.flash_pct)/100):p.price;
+        try{if(ARENA_S.cust){const f=document.querySelector(\'#ckForm\');if(f){const n=f.querySelector(\'[name=name]\');if(n&&!n.value&&ARENA_S.cust.name)n.value=ARENA_S.cust.name;const ph=f.querySelector(\'[name=phone]\');if(ph&&!ph.value&&ARENA_S.cust.phone)ph.value=ARENA_S.cust.phone;const nn=f.querySelector(\'[name=name]\');if(nn&&nn.value)nn.placeholder=\'\';}}}catch(e2){}
         let sub=0;keys.forEach(uid=>{const p=map[uid];if(p)sub+=fp(p)*(+c[uid]||0);});
         let disc=0;
         const apply=()=>{let sh=ARENA_S.shipping;if(ARENA_S.free_over>0&&(sub-disc)>=ARENA_S.free_over)sh=0;$("cSub").textContent=fmtP(sub);$("cDisc").textContent=disc?"− "+fmtP(disc):"—";$("cShip").textContent=sh===0?"رایگان 🎁":fmtP(sh);$("cTot").textContent=fmtP(Math.max(0,sub-disc+sh));};
@@ -47618,7 +47853,7 @@ function arenaShopPageWishlist(): array {
         if(!w.length){box.innerHTML="<div class=\'s-empty\'><div class=\'e\'>💜</div><b>لیست علاقه‌مندی‌ها خالی است</b><p><a href=\'?arena=shop\' style=\'color:var(--acc)\'>مشاهده فروشگاه</a></p></div>";return;}
         const cards=w.map(uid=>{
           const p=map[uid];if(!p)return "";
-          const img=p.image?"<img loading=\'lazy\' src=\'"+esc2(p.image)+"\' onerror=\'this.remove()\'>":"";
+          const img=p.image?"<img loading=\'lazy\' src=\'"+esc2(imgU(p.image))+"\' onerror=\'this.remove()\'>":"";
           return "<div class=\'s-card\'><a class=\'s-card-img\' href=\'?arena=product&uid="+encodeURIComponent(uid)+"\'><div class=\'s-card-ph\'>💜</div>"+img+"</a><div class=\'s-card-b\'>"+
             "<a class=\'s-card-title\' href=\'?arena=product&uid="+encodeURIComponent(uid)+"\'>"+esc2(p.title)+"</a>"+
             "<div class=\'s-price-row\'><span class=\'s-price\'>"+esc2(fmt2(p.price))+"</span></div>"+
@@ -47645,6 +47880,82 @@ function arenaShopPageWishlist(): array {
     return [(string)ob_get_clean(), $js, 'علاقه‌مندی‌ها'];
 }
 
+/* ============================= account =========================== */
+
+function arenaShopPageAccount(array $get): array {
+    $s = arenaSettings();
+    $cu = arenaCustomerFromCookie();
+    $js = '(function(){
+      const esc2=arena.esc, fmt2=arena.fmtP;
+      var f=$("ckFormCust");
+      if(f){
+        f.addEventListener("submit",async(e)=>{
+          e.preventDefault();
+          var btn=$("ckSubmitCust");btn.disabled=true;btn.textContent="در حال ورود…";
+          var d=await arena.api("cust_login",{name:$("ckNameCust").value,phone:$("ckPhoneCust").value,pass:$("ckPassCust").value},"POST");
+          if(d.ok){try{localStorage.setItem("arena_cust_me",JSON.stringify({name:d.name,phone:d.phone}));}catch(e2){}location.href="?arena=account";location.reload();}
+          else{toast(d.error||"خطا در ورود");btn.disabled=false;btn.textContent="ورود / ثبت‌نام";}
+        });
+      }
+      var lb=$("custLogout");
+      if(lb){lb.addEventListener("click",async()=>{await arena.api("cust_logout",{},"POST");try{localStorage.removeItem("arena_cust_me");}catch(e2){}location.reload();});}
+      var ob=$("custOrders");
+      if(ob){
+        (async()=>{
+          const d=await arena.api("cust_orders",{},"GET");
+          if(!d.ok){ob.innerHTML="<div class=\'s-empty\'><div class=\'e\'>📭</div><b>سفارشی پیدا نشد</b></div>";return;}
+          if(!d.orders.length){ob.innerHTML="<div class=\'s-empty\'><div class=\'e\'>📭</div><b>هنوز سفارشی ثبت نکرده‌اید</b><p><a href=\'?arena=shop\' style=\'color:var(--acc)\'>شروع خرید ←</a></p></div>";return;}
+          const SL={new:"🆕 جدید",processing:"⚙️ در حال پردازش",shipped:"🚚 ارسال شده",delivered:"✅ تحویل شده",cancelled:"❌ انصرافی"};
+          ob.innerHTML="<div class=\'s-grid\'>"+d.orders.map(o=>{
+            const dt=new Date(o.created*1000);
+            return "<div class=\'s-card\'><div class=\'s-card-b\' style=\'padding:14px\'>"
+              +"<div style=\'display:flex;justify-content:space-between;align-items:center\'><b dir=\'ltr\' style=\'font-size:12px\'>"+esc2(o.id)+"</b><span class=\'s-stock in\'>"+(SL[o.status]||o.status)+"</span></div>"
+              +"<div style=\'font-size:11px;color:var(--mut);margin:8px 0 4px\'>"+esc2(dt.toLocaleDateString("fa-IR"))+" · "+o.items.length+" کالا</div>"
+              +"<div style=\'font-size:10.5px;color:var(--mut);max-height:64px;overflow:auto\'>"+o.items.map(i=>esc2(i.title)+" ×"+i.qty).join("، ")+"</div>"
+              +"<div class=\'s-price-row\'><span class=\'s-price\'>"+esc2(fmt2(o.total))+"</span></div>"
+              +"<div class=\'s-card-acts\'><a class=\'s-add\' href=\'?arena=track&auto="+encodeURIComponent(o.id)+"\' style=\'text-align:center\'>🔎 پیگیری</a></div>"
+              +"</div></div>";
+          }).join("")+"</div>";
+        })();
+      }
+    })();';
+    ob_start();
+    ?>
+<div class="container s-center">
+  <?php if ($cu): ?>
+  <div class="s-sec" style="text-align:center;padding:26px">
+    <div class="lg-logo" style="margin-bottom:10px">👤</div>
+    <h1 style="font-size:20px;font-weight:800">سلام، <?= h($cu['name']) ?> عزیز</h1>
+    <p style="font-size:12.5px;color:var(--mut);margin-top:6px">موبایل: <b dir="ltr"><?= h($cu['phone']) ?></b></p>
+    <div style="display:flex;gap:8px;justify-content:center;margin-top:14px;flex-wrap:wrap">
+      <a class="s-add" href="?arena=shop" style="flex:0 0 auto;padding:10px 22px;font-size:13px">🛍 خرید ادامه بده</a>
+      <a class="s-add" href="?arena=wishlist" style="flex:0 0 auto;padding:10px 22px;font-size:13px;background:linear-gradient(135deg,#db2777,#9d174d)">💜 علاقه‌مندی‌ها</a>
+      <button class="s-add" id="custLogout" style="flex:0 0 auto;padding:10px 22px;font-size:13px;background:linear-gradient(135deg,#dc2626,#991b1b)">⎋ خروج</button>
+    </div>
+  </div>
+  <div class="s-sec" style="text-align:right">
+    <h2>🧾 سفارش‌های من</h2>
+    <div id="custOrders" style="margin-top:14px"><div class="s-empty"><div class="e">⏳</div>در حال بارگذاری…</div></div>
+  </div>
+  <?php else: ?>
+  <div class="s-sec" style="max-width:440px;margin:30px auto;text-align:center">
+    <div class="lg-logo" style="margin-bottom:12px">🔐</div>
+    <h1 style="font-size:20px;font-weight:800">ورود به حساب <?= h($s['name']) ?></h1>
+    <p style="font-size:12.5px;color:var(--mut);margin:8px 0 16px">با شمارهٔ موبایل وارد شوید؛ اگر حساب ندارید، با همان شماره و یک رمز، در همین‌جا ثبت‌نام می‌شوید.</p>
+    <form id="ckFormCust" style="display:grid;gap:10px">
+      <input name="name" id="ckNameCust" type="text" placeholder="نام و نام‌خانوادگی (فقط برای ثبت‌نامِ تازه) required" required style="text-align:right">
+      <input name="phone" id="ckPhoneCust" type="tel" dir="ltr" placeholder="09xxxxxxxxx" required style="text-align:center">
+      <input name="pass" id="ckPassCust" type="password" placeholder="رمز ورود (حداقل ۶ نویسه)" required style="text-align:center">
+      <button class="s-buy" id="ckSubmitCust" style="margin-top:4px">ورود / ثبت‌نام</button>
+    </form>
+    <p style="font-size:10.5px;color:var(--mut);margin-top:12px">🔒 رمز شما فقط به‌صورت هش امن روی همین سرور نگهداری می‌شود.</p>
+  </div>
+  <?php endif; ?>
+</div>
+    <?php
+    return [(string)ob_get_clean(), $js, 'حساب من'];
+}
+
 /* ============================= dispatcher ========================= */
 
 function arenaShopPage(string $page, array $get): void {
@@ -47656,6 +47967,7 @@ function arenaShopPage(string $page, array $get): void {
         case 'checkout': [$html, $js, $title] = arenaShopPageCheckout(); break;
         case 'success':  [$html, $js, $title] = arenaShopPageSuccess((string)($get['id'] ?? '')); break;
         case 'track':    [$html, $js, $title] = arenaShopPageTrack(); break;
+        case 'account':  [$html, $js, $title] = arenaShopPageAccount($get); break;
         case 'wishlist': [$html, $js, $title] = arenaShopPageWishlist(); break;
         default:         [$html, $js, $title] = arenaShopPageHome($get);
     }
@@ -72510,10 +72822,18 @@ document.querySelectorAll('#impSubTabs .imp-subtab').forEach(function(b){
 (function(){
   if (!('fonts' in document)) return;
   var FA = '\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9', EN = '0123456789';
-  var families = ['Vazirmatn','Vazir','Estedad','IRANYekan','Yekan','Noto Naskh Arabic','Noto Sans Arabic','Tahoma','Segoe UI'];
   var done = false;
   function hasFaGlyphs(){
-    try { return families.some(function(f){ return document.fonts.check('16px ' + f); }); }
+    try {
+      var c = document.createElement('canvas'); c.width = 160; c.height = 40;
+      var x = c.getContext('2d'); if (!x) return true;
+      var fam = (getComputedStyle(document.body).fontFamily || 'sans-serif');
+      x.font = '16px ' + fam;
+      var wd = x.measureText('\u06F3\u066C\u06F5\u06F0\u06F9').width;
+      x.font = '16px ' + fam;
+      var wt = x.measureText('\uFFFF\uFFFF\uFFFF\uFFFF\uFFFF').width;
+      return Math.abs(wd - wt) > 0.75;
+    }
     catch(e) { return true; }
   }
   function fix(root){
@@ -72558,7 +72878,8 @@ window.shopLoadStats = shopLoadStats;
 
 /* ---------------- products ---------------- */
 var shopCurSrc = 'all';
-async function shopLoadProducts(){
+function imgUA(u){ u = (u == null ? '' : String(u)).trim(); return /^https?:\/\//i.test(u) ? '?arena=img&u=' + encodeURIComponent(u) : u; }
+window.shopLoadProducts = async function(){
   var body = $s('shopProdBody');
   if (!body) return;
   var d = await shopApi('products_list', { src: shopCurSrc }, 'POST');
@@ -72567,7 +72888,7 @@ async function shopLoadProducts(){
   items.forEach(function(x){ shopProdCache[x.uid] = x; });
   if (!items.length) { body.innerHTML = '<tr><td colspan="7" style="color:#64748b">کالایی در این منبع نیست. برای ووکامرس/باسلام دکمهٔ «تازه‌سازی آینه» را بزنید یا تنظیمات مقصد را در بخشِ تنظیماتِ اصلی کامل کنید.</td></tr>'; return; }
   body.innerHTML = items.map(function(p){
-    var img = p.image ? '<img class="shop-thumb" src="' + shopEsc(p.image) + '" onerror="this.style.visibility=\'hidden\'">' : '<div class="shop-thumb" style="display:flex;align-items:center;justify-content:center">🛍️</div>';
+    var img = p.image ? '<img class="shop-thumb" src="' + shopEsc(imgUA(p.image)) + '" onerror="this.style.visibility=\'hidden\'">' : '<div class="shop-thumb" style="display:flex;align-items:center;justify-content:center">🛍️</div>';
     var srcBadge = { own: '<span class="shop-badge-src own">خودِ سایت</span>', woo: '<span class="shop-badge-src woo">ووکامرس</span>', bsl: '<span class="shop-badge-src bsl">باسلام</span>', prof: '<span class="shop-badge-src prof">پروفایل</span>' }[p.src];
     var acts = '';
     if (p.src === 'own') {
