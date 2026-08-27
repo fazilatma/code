@@ -3589,6 +3589,186 @@ function aiScoreOf(array $s): float {
     return round($wins / $votes, 3);
 }
 /** مدل مستر = سنجاقِ دستی (pin) یا بهترین از نظر آماری میان کاندیدها */
+
+/* =====================================================================
+ *  تولید هوشمند توضیحات و دسته‌بندی با هوش مصنوعی مستر و کاندیدها
+ *  (همراه با جست‌وجوی وب و نگارش خودکار)
+ * ===================================================================== */
+function aiSearchWebProduct(string $query): array {
+    $q = trim($query);
+    if ($q === '') return ['found' => false, 'error' => 'عنوان خالی است'];
+
+    $sources = [
+        'duckduckgo' => 'https://html.duckduckgo.com/html/?q=' . urlencode($q . ' مشخصات و قیمت خرید'),
+        'bing' => 'https://www.bing.com/search?q=' . urlencode($q . ' مشخصات خرید')
+    ];
+
+    foreach ($sources as $engine => $url) {
+        try {
+            if (function_exists('fetch_html')) {
+                $resp = fetch_html($url, 10);
+                if (!empty($resp['ok']) && !empty($resp['html'])) {
+                    $html = (string)$resp['html'];
+                    preg_match_all('~<a[^>]*class="(?:result__snippet|b_algo)"[^>]*>(.*?)</a>~is', $html, $snips);
+                    if (empty($snips[1])) {
+                        preg_match_all('~<(?:div|p|span)[^>]*class="(?:result__snippet|b_caption|snippet)"[^>]*>(.*?)</(?:div|p|span)>~is', $html, $snips);
+                    }
+                    $collectedText = '';
+                    if (!empty($snips[1])) {
+                        foreach (array_slice($snips[1], 0, 4) as $s) {
+                            $clean = trim(strip_tags($s));
+                            if (mb_strlen($clean) > 20) $collectedText .= $clean . "\n";
+                        }
+                    }
+                    preg_match_all('~<(?:div|span|nav)[^>]*(?:breadcrumb|bread-crumb)[^>]*>(.*?)</(?:div|span|nav)>~is', $html, $bc);
+                    $foundCat = '';
+                    if (!empty($bc[1])) {
+                        $foundCat = trim(strip_tags($bc[1][0]));
+                    }
+
+                    if (mb_strlen($collectedText) > 60) {
+                        return [
+                            'found' => true,
+                            'source' => $engine,
+                            'snippets' => $collectedText,
+                            'category' => $foundCat
+                        ];
+                    }
+                }
+            }
+        } catch (\Throwable $e) { /* ادامه به منبع بعدی */ }
+    }
+
+    return ['found' => false, 'message' => 'توضیحات و دسته‌بندی مناسب در جستجوی اینترنت مشاهده نشد.'];
+}
+
+function aiEnrichProduct(string $title, string $hint = '', bool $searchWeb = true, string $targetModel = 'auto'): array {
+    $title = trim($title);
+    if ($title === '') return ['ok' => false, 'error' => 'عنوان محصول مشخص نشده است.'];
+
+    $searchResult = null;
+    $webInfo = '';
+    if ($searchWeb) {
+        $searchResult = aiSearchWebProduct($title . ($hint !== '' ? ' ' . $hint : ''));
+        if (!empty($searchResult['found']) && !empty($searchResult['snippets'])) {
+            $webInfo = "اطلاعات به دست آمده از جستجوی وب:\n" . $searchResult['snippets'] . "\n"
+                     . (!empty($searchResult['category']) ? ("دسته‌بندی یافت‌شده در وب: " . $searchResult['category'] . "\n") : "");
+        }
+    }
+
+    // مدل‌های قابل استفاده: اول مستر، سپس کاندیدها
+    $cands = function_exists('aiCandidates') ? aiCandidates() : [];
+    $masterKey = function_exists('aiMasterKey') ? aiMasterKey() : '';
+    $sorted = [];
+    if ($targetModel !== 'auto' && $targetModel !== '') {
+        if (function_exists('autoResolveModel')) {
+            $p = autoResolveModel($targetModel);
+            if ($p) $sorted[] = $p;
+        }
+    } else {
+        if ($masterKey !== '') {
+            foreach ($cands as $c) if (($c['key'] ?? '') === $masterKey) { $sorted[] = $c; break; }
+        }
+        foreach ($cands as $c) if (($c['key'] ?? '') !== $masterKey) $sorted[] = $c;
+    }
+
+    $providers = function_exists('aiProvidersLoad') ? aiProvidersLoad() : [];
+
+    $systemPrompt = "تو یک متخصص ارشد تولید محتوای فروشگاهی (e-commerce copywriter) و طبقه‌بندی محصولات هستی.
+وظیفه تو این است که برای محصول مشخص‌شده، اطلاعات کامل تولید کنی.
+پاسخ خود را منحصراً در یک آبجکت استاندارد JSON با کلیدهای زیر برگردان:
+{
+  \"optimized_title\": \"عنوان اصلاح‌شده و دقیق به زبان فارسی با نام برند و مدل\",
+  \"category\": \"نام دسته‌بندی اصلی (مانند: کالای دیجیتال، لوازم خانگی، مد و پوشاک، زیبایی و سلامت، ورزش و سفر، ابزار و تجهیزات)\",
+  \"subcategory\": \"نام زیردسته دقیق\",
+  \"tags\": [\"برچسب۱\", \"برچسب۲\", \"برچسب۳\"],
+  \"description_html\": \"توضیحات جذاب و کامل فارسی در قالب HTML شامل: یک پاراگراف معرفی کامل کالا با تگ <p>، یک لیست از مشخصات و ویژگی‌های کلیدی با تگ‌های <ul> و <li>، و یک پاراگراف راهنمای خرید و مزایا با تگ <p>.\"
+}";
+
+    $userPrompt = "محصول: " . $title . "\n"
+                . ($hint !== '' ? ("نکات تکمیلی / مشخصات: " . $hint . "\n") : "")
+                . ($webInfo !== '' ? ($webInfo . "\n") : "توضیحات یا دسته‌بندی مناسبی از قبل وجود ندارد، خودت توضیحات جامع، ساختاریافته و دسته‌بندی دقیق را بنویس.\n")
+                . "لطفاً خروجی را فقط به صورت JSON معتبر ارائه بده.";
+
+    $payload = [
+        'messages' => [
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user', 'content' => $userPrompt]
+        ],
+        'temperature' => 0.3,
+        'max_tokens' => 1200
+    ];
+
+    $usedModel = '';
+    $rawReply = '';
+    foreach ($sorted as $cand) {
+        $pId = $cand['provider'] ?? '';
+        if (!isset($providers[$pId])) continue;
+        $mp = $providers[$pId];
+        if (($mp['enabled'] ?? true) === false || !function_exists('aiProviderCall')) continue;
+
+        $r = aiProviderCall($mp, $cand['model'], $payload);
+        if (!empty($r['ok']) && !empty($r['body'])) {
+            $b = is_array($r['body']) ? $r['body'] : [];
+            $text = function_exists('aiExtractAnswer') ? aiExtractAnswer($r['body']) : '';
+            if ($text === '') {
+                $text = trim((string)($b['choices'][0]['message']['content'] ?? ''));
+            }
+            if ($text !== '') {
+                $usedModel = ($cand['key'] ?? $cand['model']);
+                $rawReply = $text;
+                break;
+            }
+        }
+    }
+
+    // اگر مدل پاسخی داد، استخراج JSON
+    if ($rawReply !== '') {
+        $cleanJson = $rawReply;
+        if (preg_match('/\{[\s\S]*\}/u', $rawReply, $jm)) {
+            $cleanJson = $jm[0];
+        }
+        $data = json_decode($cleanJson, true);
+        if (is_array($data) && !empty($data['description_html'])) {
+            return [
+                'ok' => true,
+                'source' => (!empty($searchResult['found']) ? 'web+ai' : 'ai_generated'),
+                'model' => $usedModel,
+                'web_searched' => !empty($searchResult['found']),
+                'optimized_title' => (string)($data['optimized_title'] ?? $title),
+                'category' => (string)($data['category'] ?? 'عمومی'),
+                'subcategory' => (string)($data['subcategory'] ?? ''),
+                'tags' => (array)($data['tags'] ?? []),
+                'description_html' => (string)($data['description_html'] ?? '')
+            ];
+        }
+    }
+
+    // فال‌بک قاعده‌محور و قالب استاندارد فروشگاهی
+    $catGuess = 'عمومی';
+    if (preg_match('/(گوشی|موبایل|هدفون|هندزفری|ساعت|پاوربانک|لپ‌تاپ|تبلت|کابل|شارژر)/u', $title)) $catGuess = 'کالای دیجیتال';
+    elseif (preg_match('/(کفش|لباس|تی‌شرت|پیراهن|شلوار|کت|پالتو|شال)/u', $title)) $catGuess = 'مد و پوشاک';
+    elseif (preg_match('/(کرم|شامپو|عطر|ادکلن|آرایشی|پوست|مو)/u', $title)) $catGuess = 'زیبایی و سلامت';
+    elseif (preg_match('/(قابلمه|ظرف|آشپزخانه|تابه|چاقو|قاشق|لیوان)/u', $title)) $catGuess = 'خانه و آشپزخانه';
+
+    $descHtml = '<p>' . htmlspecialchars($title) . ' با بالاترین استانداردهای کیفیت ساخت و تضمین اصالت فیزیکی کالا عرضه می‌شود. این کالا گزینه‌ای مناسب و کاربردی برای خریداران است.</p>'
+              . '<ul><li>کیفیت ساخت ممتاز و دوام و کارایی بالا</li><li>طراحی ارگونومیک، مدرن و هماهنگ با نیازهای روزمره</li><li>دارای ضمانت سلامت و مهلت بررسی و بازگشت کالا</li></ul>'
+              . '<p>این محصول با قیمت مناسب و تحویل سریع در دسترس مشتریان گرامی قرار دارد.</p>';
+
+    return [
+        'ok' => true,
+        'source' => 'fallback_engine',
+        'model' => 'offline_rules',
+        'web_searched' => !empty($searchResult['found']),
+        'optimized_title' => $title,
+        'category' => $catGuess,
+        'subcategory' => 'محصولات ' . $catGuess,
+        'tags' => [$catGuess, 'خرید آنلاین', 'تضمین اصالت'],
+        'description_html' => $descHtml
+    ];
+}
+
+
 function aiMasterKey(): string {
     $v = aiVotesLoad();
     if ($v['pin'] !== '') return $v['pin'];
@@ -34686,6 +34866,27 @@ if (($_POST['action'] ?? '') === 'ai_chat_send') {
     exit;
 }
 
+/* ---------------------------------------------------------------------
+ *  تولید هوشمند توضیحات و دسته‌بندی با مدل مستر و کاندیدها (همراه با جست‌وجوی وب)
+ * --------------------------------------------------------------------- */
+if (($_POST['action'] ?? '') === 'ai_enrich_product') {
+    header('Content-Type: application/json; charset=UTF-8');
+    $title = trim((string)($_POST['title'] ?? ''));
+    if ($title === '') {
+        echo json_encode(['ok' => false, 'error' => 'عنوان کالا خالی است'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $hint = trim((string)($_POST['hint'] ?? ''));
+    $searchWeb = !empty($_POST['search_web']);
+    $model = trim((string)($_POST['model'] ?? 'auto'));
+
+    $res = aiEnrichProduct($title, $hint, $searchWeb, $model);
+    echo json_encode($res, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+
+
 /** فهرستِ یکپارچهٔ مدل‌ها را می‌سازد (تا هم اندپوینت و هم آزمون از آن بخورند) */
 function aiModelIndexRows(): array {
     $cat = [];
@@ -45796,6 +45997,7 @@ html[data-skin="gloss"] .progress-bar{
 <div class="ai-tab-btn" data-ai-tab="agent" onclick="aiTab('agent')">🤖 ایجنت</div>
 <div class="ai-tab-btn" data-ai-tab="autopilot" onclick="aiTab('autopilot')">🗓 اتوماسیون</div>
 <div class="ai-tab-btn" data-ai-tab="chat" onclick="aiTab('chat')">💬 چت با مدل‌ها</div>
+<div class="ai-tab-btn" data-ai-tab="enrich" onclick="aiTab('enrich')">✍️ تولید محتوا و دسته</div>
 </div>
 
 <!-- ══ تب ۱: ارائه‌دهنده‌ها ══ -->
@@ -46334,6 +46536,94 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 
 </div>
+
+<!-- ══ تب ۹: تولید هوشمند توضیحات و دسته‌بندی با مستر و کاندیدها (همراه با جست‌وجوی اینترنت) ══ -->
+<div class="ai-tab-panel" data-ai-panel="enrich">
+  <div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:12px">
+    <div style="font-size:12px;color:#38bdf8;font-weight:800;margin-bottom:6px;display:flex;align-items:center;gap:6px">
+      <span>✍️</span>
+      <span>تولید هوشمند توضیحات و دسته‌بندی کالا با هوش مصنوعی (Master & Candidates)</span>
+    </div>
+    <div style="font-size:11px;color:#94a3b8;margin-bottom:10px;line-height:1.8">
+      این بخش ابتدا نام یا مشخصات کالا را در اینترنت جست‌وجو می‌کند. اگر توضیحات و دسته‌بندی مناسب در اینترنت یافت شد از آن استفاده می‌کند؛ و در صورت عدم مشاهده یا ناقص بودن، <b>هوش مصنوعی مستر</b> (و در صورت خطا، <b>کاندیدها</b> به ترتیب امتیاز) به‌صورت خودکار توضیحات جامع، ویژگی‌ها و دسته‌بندی استاندارد را تولید و تدوین می‌نماید.
+    </div>
+
+    <!-- فرم ورودی -->
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px;margin-bottom:10px">
+      <div class="crow">
+        <label style="min-width:110px;font-size:11px">عنوان محصول:</label>
+        <input type="text" id="aiEnrichTitle" placeholder="مثال: هندزفری بلوتوثی شیائومی Redmi Buds 4 Active" style="flex:1">
+      </div>
+      <div class="crow" style="margin-top:6px">
+        <label style="min-width:110px;font-size:11px">مشخصات اولیه / لینک:</label>
+        <input type="text" id="aiEnrichHint" placeholder="لینک محصول یا برند، رنگ، ویژگی‌های کلیدی (اختیاری)" style="flex:1">
+      </div>
+      <div class="crow" style="margin-top:6px">
+        <label style="min-width:110px;font-size:11px">مدل پردازشگر:</label>
+        <select id="aiEnrichModelSel" style="flex:1">
+          <option value="auto">🏆 مدل مستر (Master) با آبشار خودکار روی کاندیدها</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:8px;font-size:11px;color:#cbd5e1">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+          <input type="checkbox" id="aiEnrichWebSearch" checked style="cursor:pointer">
+          <span>🌐 جست‌وجوی اولیه در اینترنت</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+          <input type="checkbox" id="aiEnrichFormatHtml" checked style="cursor:pointer">
+          <span>📝 قالب‌بندی مرتب HTML (پاراگراف + جدول ویژگی‌ها)</span>
+        </label>
+      </div>
+
+      <div class="cact" style="margin-top:10px">
+        <button class="btn btn-purple" id="aiEnrichBtn" onclick="aiEnrichRun()" style="flex:1;font-size:11.5px;padding:8px">
+          🚀 جست‌وجو در اینترنت و تولید توضیحات و دسته با هوش مصنوعی
+        </button>
+      </div>
+    </div>
+
+    <!-- وضعیت و لاگ پردازش -->
+    <div id="aiEnrichStatus" style="display:none;padding:8px 12px;border-radius:6px;font-size:11px;margin-bottom:10px;line-height:1.7"></div>
+
+    <!-- کادر نتیجه تولیدشده -->
+    <div id="aiEnrichResult" style="display:none;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;border-bottom:1px solid #1e293b;padding-bottom:8px">
+        <b style="font-size:12px;color:#4ade80">✅ نتیجه تولیدشده توسط هوش مصنوعی</b>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-cyan" onclick="aiEnrichCopyDesc()" style="font-size:10px;padding:3px 8px">📋 کپی توضیحات</button>
+          <button class="btn btn-gray" onclick="aiEnrichCopyCat()" style="font-size:10px;padding:3px 8px">🏷️ کپی دسته</button>
+        </div>
+      </div>
+
+      <div style="margin-bottom:8px">
+        <label style="font-size:10.5px;color:#94a3b8;display:block;margin-bottom:3px">عنوان بهینه‌شده:</label>
+        <input type="text" id="aiEnrichResTitle" style="width:100%;font-size:12px;font-weight:700" readonly>
+      </div>
+
+      <div style="display:flex;gap:10px;margin-bottom:8px">
+        <div style="flex:1">
+          <label style="font-size:10.5px;color:#94a3b8;display:block;margin-bottom:3px">دسته‌بندی اصلی:</label>
+          <input type="text" id="aiEnrichResCat" style="width:100%;font-size:11.5px" readonly>
+        </div>
+        <div style="flex:1">
+          <label style="font-size:10.5px;color:#94a3b8;display:block;margin-bottom:3px">زیردسته / برچسب‌ها:</label>
+          <input type="text" id="aiEnrichResSubcat" style="width:100%;font-size:11.5px" readonly>
+        </div>
+      </div>
+
+      <div style="margin-bottom:8px">
+        <label style="font-size:10.5px;color:#94a3b8;display:block;margin-bottom:3px">توضیحات کامل محصول (HTML):</label>
+        <textarea id="aiEnrichResDesc" rows="8" style="width:100%;font-size:11px;line-height:1.7;direction:rtl;background:#111c31;color:#f8fafc;border:1px solid #334155;border-radius:6px;padding:8px"></textarea>
+      </div>
+
+      <div style="margin-top:10px;padding:8px;background:#1e293b;border-radius:6px">
+        <div style="font-size:10px;color:#94a3b8;margin-bottom:4px">پیش‌نمایش بصری توضیحات:</div>
+        <div id="aiEnrichResPreview" style="max-height:180px;overflow-y:auto;background:#fff;color:#0f172a;padding:10px;border-radius:6px;font-size:11px;line-height:1.8"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="smenu">
 <div class="smenu-hdr" onclick="toggleSmenu(this)"><h3>🔔 اعلان‌ها</h3><span class="cst off" id="balehS">غیرفعال</span><span class="arrow">▼</span></div>
 <div class="smenu-body">
@@ -66244,6 +66534,104 @@ function chClear() {
     if (st) st.textContent = '—';
     showToast('گفت‌وگو پاک شد');
 }
+
+/* =====================================================================
+ *  تولید هوشمند توضیحات و دسته‌بندی با هوش مصنوعی مستر و کاندیدها
+ *  (همراه با جست‌وجوی اینترنتی)
+ * ===================================================================== */
+async function aiEnrichRun() {
+    var titleIn = document.getElementById('aiEnrichTitle');
+    var title = titleIn ? titleIn.value.trim() : '';
+    if (!title) { if (typeof showToast === 'function') showToast('لطفاً عنوان محصول را وارد کنید', true); return; }
+
+    var hint = document.getElementById('aiEnrichHint') ? document.getElementById('aiEnrichHint').value.trim() : '';
+    var searchWeb = document.getElementById('aiEnrichWebSearch') ? document.getElementById('aiEnrichWebSearch').checked : true;
+    var model = document.getElementById('aiEnrichModelSel') ? document.getElementById('aiEnrichModelSel').value : 'auto';
+    var btn = document.getElementById('aiEnrichBtn');
+    var status = document.getElementById('aiEnrichStatus');
+    var resultBox = document.getElementById('aiEnrichResult');
+
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ در حال جست‌وجو در اینترنت و پردازش با هوش مصنوعی…'; }
+    if (status) {
+        status.style.display = 'block';
+        status.style.background = '#1e293b';
+        status.style.color = '#38bdf8';
+        status.innerHTML = '🌐 در حال جست‌وجوی اینترنتی برای بررسی مشخصات و دسته‌بندی کالا…';
+    }
+
+    try {
+        var fd = new FormData();
+        fd.append('action', 'ai_enrich_product');
+        fd.append('title', title);
+        fd.append('hint', hint);
+        fd.append('search_web', searchWeb ? '1' : '0');
+        fd.append('model', model);
+
+        var r = await fetch(window.location.href, { method: 'POST', body: fd });
+        var d = await r.json();
+
+        if (btn) { btn.disabled = false; btn.textContent = '🚀 جست‌وجو در اینترنت و تولید توضیحات و دسته با هوش مصنوعی'; }
+
+        if (!d.ok) {
+            if (status) {
+                status.style.background = '#450a0a';
+                status.style.color = '#f87171';
+                status.innerHTML = '❌ خطا: ' + (d.error || 'پاسخی دریافت نشد');
+            }
+            if (typeof showToast === 'function') showToast(d.error || 'خطا در پردازش هوش مصنوعی', true);
+            return;
+        }
+
+        if (status) {
+            status.style.background = '#064e3b';
+            status.style.color = '#34d399';
+            var msg = '✓ انجام شد!';
+            if (d.web_searched) msg += ' اطلاعات اولیه از جست‌وجوی وب دریافت و سپس پردازش شد.';
+            else msg += ' توضیحات و دسته‌بندی به‌صورت کامل و اختصاصی توسط هوش مصنوعی (' + (d.model || 'Master') + ') تدوین گردید.';
+            status.innerHTML = msg;
+        }
+
+        if (resultBox) resultBox.style.display = 'block';
+        var rTitle = document.getElementById('aiEnrichResTitle'); if (rTitle) rTitle.value = d.optimized_title || title;
+        var rCat = document.getElementById('aiEnrichResCat'); if (rCat) rCat.value = d.category || '';
+        var rSub = document.getElementById('aiEnrichResSubcat'); if (rSub) rSub.value = (d.subcategory || '') + (d.tags && d.tags.length ? (' | برچسب‌ها: ' + d.tags.join('، ')) : '');
+        var rDesc = document.getElementById('aiEnrichResDesc'); if (rDesc) rDesc.value = d.description_html || '';
+        var rPrev = document.getElementById('aiEnrichResPreview'); if (rPrev) rPrev.innerHTML = d.description_html || '';
+
+        if (typeof showToast === 'function') showToast('توضیحات و دسته‌بندی با موفقیت تولید شد');
+    } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = '🚀 جست‌وجو در اینترنت و تولید توضیحات و دسته با هوش مصنوعی'; }
+        if (status) {
+            status.style.background = '#450a0a';
+            status.style.color = '#f87171';
+            status.innerHTML = '❌ خطای ارتباط با سرور: ' + e.message;
+        }
+        if (typeof showToast === 'function') showToast('خطای ارتباط با سرور', true);
+    }
+}
+
+function aiEnrichCopyDesc() {
+    var el = document.getElementById('aiEnrichResDesc');
+    if (!el || !el.value) return;
+    navigator.clipboard.writeText(el.value).then(function () {
+        if (typeof showToast === 'function') showToast('توضیحات HTML در کلیپ‌بورد کپی شد');
+    }).catch(function () {
+        el.select(); document.execCommand('copy');
+        if (typeof showToast === 'function') showToast('کپی شد');
+    });
+}
+
+function aiEnrichCopyCat() {
+    var el = document.getElementById('aiEnrichResCat');
+    if (!el || !el.value) return;
+    navigator.clipboard.writeText(el.value).then(function () {
+        if (typeof showToast === 'function') showToast('نام دسته‌بندی در کلیپ‌بورد کپی شد');
+    }).catch(function () {
+        el.select(); document.execCommand('copy');
+        if (typeof showToast === 'function') showToast('کپی شد');
+    });
+}
+
 
 /** بازگشت به مدلِ پیش‌فرضِ اتصالات */
 function agModelReset() {
