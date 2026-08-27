@@ -60077,9 +60077,9 @@ fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
 fd.append('telegram',JSON.stringify({enabled:$('telegramEnabled')?.checked?1:0,token:$('telegramToken')?.value||'',chat_id:$('telegramChatId')?.value||''}));
 fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));/* v10.46 (۶۰): غرفهٔ انتخاب‌شده برای پیام مشتری */fd.append('notif_chat_shop',String($('notifChatShop')?.value||0));fd.append('notif_scan_limit',$('notifScanLimit')?.value||20); /* v10.86 (100) */fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('auto_resume',$('autoResume')?.checked?1:0);fd.append('auto_resume_max',$('autoResumeMax')?.value||2);fd.append('bsl_catalog_auto',$('bslCatAuto')?.checked?1:0);fd.append('bsl_catalog_ttl_h',$('bslCatTtl')?.value||6);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
-if(!window._connSaveNoToast)showToast(d.ok?'\\u2713 \\u0630\\u062e\\u06cc\\u0631\\u0647 \\u0634\\u062f':'\\u062e\\u0637\\u0627',!d.ok);
+if(!window._connSaveNoToast)showToast(d.ok?'✓ ذخیره شد':'خطا',!d.ok);
 _connSaveIndicator(d.ok?'ok':'err');
-}).catch(()=>{if(!window._connSaveNoToast)showToast('\\u062e\\u0637\\u0627',1);_connSaveIndicator('err');});}
+}).catch(()=>{if(!window._connSaveNoToast)showToast('خطا',1);_connSaveIndicator('err');});}
 /* v10.89: scheduleConnSave - auto-save all settings */
 window._connSaveTimer=null;window._connSaveNoToast=false;
 function scheduleConnSave(){
@@ -68012,7 +68012,7 @@ function bslInlineRenderList(productId,query){
     cats.forEach(c=>{
         if(selId===c.id)return;
         if(q&&!c.name.toLowerCase().includes(q))return;
-        const prefix=c.level>0?'\\u2500\\u2500'.repeat(c.level)+' ':'';
+        const prefix=c.level>0?'──'.repeat(c.level)+' ':'';
         html+='<div style="padding:5px 8px;cursor:pointer;border-bottom:1px solid #1e293b;font-size:11px;color:#e2e8f0" onclick="bslInlineSelectCat('+productId+','+c.id+')">'+esc(prefix+c.name)+' ('+c.id+')</div>';
     });
     if(!html)html='<div style="padding:8px;color:#64748b;font-size:11px;text-align:center">&#x0646;&#x062a;&#x06cc;&#x062c;&#x0647; &#x06cc;&#x0627;&#x0641;&#x062a; &#x0646;&#x0634;&#x062f;</div>';
