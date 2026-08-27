@@ -283,8 +283,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.87';
-const APP_VERSION_DATE = '1405/06/05';
+const APP_VERSION = '10.88';
+const APP_VERSION_DATE = '1405/06/06';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -24281,6 +24281,14 @@ if (isset($_GET['selftest'])) {
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
 
+    /* ==== ۱۰۲ (v10.88) ==== */
+    $add('10.88', 'نسخهٔ ۱۰.۸۸',
+         str_contains($selfSrc, "const APP_VERSION = '10.88';"));
+    $add('10.88', 'دراپ‌داون چندانتخابی غرفه',
+         strpos($selfSrc, 'function bslToggleShopDrop()') !== false
+          && strpos($selfSrc, 'selected_shop_vids') !== false
+          && strpos($selfSrc, 'id="bsShopDropMenu"') !== false);
+
     /* ==== ۱۰۱ (v10.87) ==== */
     $add('10.87', 'نسخهٔ ۱۰.۸۷',
          str_contains($selfSrc, "const APP_VERSION = '10.87';"));
@@ -38453,7 +38461,15 @@ if($catId<=0)$catId=(int)($cn['basalam']['category_id']??0);
 // v10.73 (87): «ارسال به همهٔ غرفه‌ها» دیگر داخلِ یک ردیفِ صف پنهان نمی‌شود —
 // هر غرفهٔ فعال یک وظیفهٔ مستقل در صف می‌گیرد (ردیف، پیشرفت و گزارشِ خودش)،
 // و رابط کاربری آن‌ها را زیرِ سربرگِ دستهٔ مشترک نشان می‌دهد.
-$fanoutShops=!empty($_POST['send_all_shops'])?bslFanoutShops($cn):[];
+// v10.88: selected_shop_vids overrides send_all_shops
+$_selectedVids=json_decode($_POST['selected_shop_vids']??'null',true);
+if(is_array($_selectedVids)&&count($_selectedVids)>0){
+    $fanoutShops=array_values(array_filter(bslFanoutShops($cn),function($sh)use($_selectedVids){
+        return in_array((int)($sh['vendor_id']??0),$_selectedVids,true);
+    }));
+} else {
+    $fanoutShops=!empty($_POST['send_all_shops'])?bslFanoutShops($cn):[];
+}
 if(count($fanoutShops)>1){
 $fanStatus=$startImm?'running':'waiting';
 $fanFirst=true;
@@ -46200,7 +46216,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 ارسال نشود، بعد از این مدت دوباره یادآوری می‌آید. به‌محض پاسخ دادن،
 یادآوری خودبه‌خود قطع می‌شود.
 </div>
-<!-- v10.86 (100): تعداد اسکن — هر \da�ه بیشتر = رویداد بیشتری دیده می‌شود -->
+<!-- v10.86 (100): تعداد اسکن — هر \da�ه بیشتر = رویداد بیشتری دیده می‌شود -->
 <div class="crow" style="margin-bottom:6px"><label style="min-width:110px">تعداد اسکن <small>(هر استعلام)</small>:</label><input type="number" id="notifScanLimit" value="20" min="5" max="50" style="max-width:70px" dir="ltr"><span style="font-size:10px;color:#64748b">پیش‌فرض ۲۰ — سقف ۵۰</span></div>
 <div class="crow"><label>یادآوری بعد از:</label><input type="number" id="remindAfter" value="30" min="0" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">دقیقه · ۰ = خاموش</span></div>
 <div class="crow"><label>حداکثر تکرار:</label><input type="number" id="remindMax" value="0" min="0" style="max-width:80px" dir="ltr"><span style="font-size:10px;color:#64748b">۰ = بی‌نهایت</span></div>
@@ -47884,14 +47900,32 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 
 <details class="alert alert-info hint-collapse" style="margin-bottom:8px"><summary><span>💡 <b id="bsN">۰</b> محصول با قیمت از <span id="bsT2">۰</span> کل</span></summary><div class="hint-body" style="font-size:11px">فقط محصولاتِ دارای <b>قیمت</b> به باسلام فرستاده می‌شوند. با تیکِ «ارسال همزمان به همهٔ غرفه‌ها» هر غرفه قیمتِ خودش را می‌گیرد.</div></details>
-<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
-<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:#c4b5fd">
-<input type="checkbox" id="bsSendAllShops" onchange="bslToggleAllShops()" style="width:15px;height:15px">
-<span>🚚 ارسال همزمان به همهٔ غرفه‌ها</span>
-<span style="color:#64748b;font-size:9px">(پیش‌فرض + غرفه‌های اضافی، هرکدام با قیمتِ خودش — موازی)</span>
-</label>
-<span id="bsShopsHint" style="font-size:10px;color:#67e8f9"></span>
+<!-- v10.88: multi-shop picker dropdown -->
+<div style="margin-bottom:8px" id="bsShopPickerWrap">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <span style="font-size:11px;color:#c4b5fd;font-weight:600">🏪 اØ±Ø³Ø§Ù Ø¨Ù ØºØ±ÙÙÙØ§:</span>
+    <div style="position:relative;display:inline-block" id="bsShopDropWrap">
+      <button type="button" id="bsShopDropBtn"
+        onclick="bslToggleShopDrop()"
+        style="display:flex;align-items:center;gap:6px;padding:5px 10px;background:#1e293b;border:1px solid #475569;border-radius:7px;color:#e2e8f0;font-size:11px;cursor:pointer;min-width:160px;justify-content:space-between">
+        <span id="bsShopDropLabel">اÙØªØ®Ø§Ø¨ ØºØ±ÙÙâÙØ§â¦</span>
+        <span style="font-size:9px;opacity:.7">▼</span>
+      </button>
+      <div id="bsShopDropMenu"
+        style="display:none;position:absolute;top:calc(100% + 4px);right:0;min-width:240px;max-width:320px;background:#1e293b;border:1px solid #475569;border-radius:8px;box-shadow:0 8px 24px #0008;z-index:9999;padding:6px 0">
+        <div id="bsShopDropList" style="max-height:260px;overflow-y:auto"></div>
+        <div style="border-top:1px solid #334155;margin-top:4px;padding:6px 10px;display:flex;gap:6px">
+          <button class="btn" onclick="bslShopPickAll(true)" style="flex:1;font-size:10px;padding:3px 0">✔ هÙÙ</button>
+          <button class="btn btn-gray" onclick="bslShopPickAll(false)" style="flex:1;font-size:10px;padding:3px 0">✕ هÛÚâÚ©Ø¯Ø§Ù</button>
+          <button class="btn btn-cyan" onclick="bslCloseShopDrop()" style="flex:1;font-size:10px;padding:3px 0">✔️ تØ§ÛÛØ¯</button>
+        </div>
+      </div>
+    </div>
+    <span id="bsShopsHint" style="font-size:10px;color:#67e8f9"></span>
+  </div>
 </div>
+<!-- hidden compat: keep bsSendAllShops for saveConn compatibility -->
+<input type="checkbox" id="bsSendAllShops" style="display:none" onchange="bslToggleAllShops()">
 
 <!-- v10.35 (۴۷ب): کشِ کاتالوگِ غرفه — همان چیزی که ارسال را چند برابر سریع می‌کند -->
 <div style="margin-bottom:8px;padding:8px 10px;background:#0f172a;border:1px solid #334155;border-radius:8px">
@@ -48342,23 +48376,119 @@ function renderBslFallbackCatDropList(cats,q){const dl=$('bslFallbackCatDropList
    ۲) هیچ بازخوردی نبود؛ اگر هیچ غرفهٔ اضافیِ فعالی تعریف نشده بود، تیک
       روشن می‌ماند و در عمل هیچ اتفاقی نمی‌افتاد.
    حالا هم ذخیره می‌شود و هم تعدادِ غرفه‌های فعال کنارش نوشته می‌شود. */
-function bslActiveShopCount(){
-  let n=0;
-  if($('bsTk')&&$('bsTk').value.trim()!==''&&(parseInt(($('bsVid')||{}).value)||0)>0)n++;
-  (Array.isArray(bslExtraVendors)?bslExtraVendors:[]).forEach(function(v){
-    if(v&&(parseInt(v.vendor_id)||0)>0&&String(v.token||'').trim()!=='')n++;
-  });
-  return n;
+// v10.88: shop picker state — array of selected vendor_ids (null = not initialised yet)
+let bslSelectedShopVids = null; // null means "all" (default)
+
+function bslAllShopEntries() {
+    const shops = [];
+    const defVid = parseInt(($('bsVid')||{}).value)||0;
+    const defTok = ($('bsTk')||{}).value||'';
+    if(defVid>0 && defTok.trim()!=='')
+        shops.push({vid:defVid, name:'\u063a\u0631\u0641\u0647\u0654 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636', isDefault:true, token:defTok});
+    (Array.isArray(bslExtraVendors)?bslExtraVendors:[]).forEach(function(v){
+        const vid=parseInt(v&&v.vendor_id)||0, tok=String(v&&v.token||'').trim();
+        if(vid>0&&tok!=='')
+            shops.push({vid:vid, name:v.shop_name||v.name||('\u063a\u0631\u0641\u0647 '+vid), isDefault:false, token:tok,
+                price_mode:v.price_mode||'none', price_val:parseFloat(v.price_val||0)});
+    });
+    return shops;
+}
+function bslActiveShopCount(){return bslAllShopEntries().length;}
+
+// Build dropdown HTML and wire events
+function bslBuildShopDrop(){
+    const list=$('bsShopDropList'); if(!list)return;
+    const shops=bslAllShopEntries();
+    if(shops.length===0){list.innerHTML='<div style="padding:8px 12px;font-size:11px;color:#64748b">\u063a\u0631\u0641\u0647\u0627\u06cc \u0641\u0639\u0627\u0644 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f. \u0627\u0628\u062a\u062f\u0627 \u062f\u0631 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u063a\u0631\u0641\u0647 \u0627\u0636\u0627\u0641\u0647 \u06a9\u0646\u06cc\u062f.</div>';return;}
+    // Init selection: null = all selected
+    if(bslSelectedShopVids===null) bslSelectedShopVids=shops.map(s=>s.vid);
+    let h='';
+    shops.forEach(function(s){
+        const checked=bslSelectedShopVids.includes(s.vid);
+        const profMode=($('bsPMode')||{}).value||'none';
+        const profVal=parseFloat(($('bsPVal')||{}).value)||0;
+        let priceBadge='';
+        if(s.price_mode&&s.price_mode!=='none'){
+            try{
+                const prev=bslCombinedPreview(100,profMode,profVal,s.price_mode,s.price_val);
+                const pct=prev.pct; const col=pct>0?'#4ade80':(pct<0?'#f87171':'#94a3b8');
+                priceBadge='<span style="font-size:9px;color:'+col+';margin-right:4px">'+(pct>=0?'+':'')+toFa(pct)+'%</span>';
+            }catch(e){}
+        }
+        h+='<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;user-select:none" '
+          +'onmouseover="this.style.background=\'#273549\'" onmouseout="this.style.background=\'\'">'
+          +'<input type="checkbox" '+(checked?'checked':'')
+          +' onchange="bslShopPickToggle('+s.vid+',this.checked)" style="width:14px;height:14px;flex-shrink:0">'
+          +'<span style="flex:1;font-size:11px;color:#e2e8f0">'+esc(s.name)
+          +(s.isDefault?'<span style="font-size:8.5px;color:#0f172a;background:#67e8f9;border-radius:3px;padding:0 4px;margin-right:4px"> \u067e\u06cc\u0634\u200c\u0641\u0631\u0636</span>':'')
+          +'</span>'
+          +priceBadge
+          +'<span style="font-size:9px;color:#475569">#'+toFa(s.vid)+'</span>'
+          +'</label>';
+    });
+    list.innerHTML=h;
+}
+function bslToggleShopDrop(){
+    const menu=$('bsShopDropMenu'); if(!menu)return;
+    if(menu.style.display==='none'||!menu.style.display){
+        bslBuildShopDrop();
+        menu.style.display='block';
+        // close on outside click
+        setTimeout(function(){
+            function outsideClick(e){if(!$('bsShopDropWrap').contains(e.target)){bslCloseShopDrop();document.removeEventListener('click',outsideClick);}}
+            document.addEventListener('click',outsideClick);
+        },10);
+    } else { bslCloseShopDrop(); }
+}
+function bslCloseShopDrop(){
+    const menu=$('bsShopDropMenu'); if(menu)menu.style.display='none';
+    bslUpdateShopDropLabel();
+}
+function bslShopPickToggle(vid,checked){
+    const shops=bslAllShopEntries();
+    if(bslSelectedShopVids===null) bslSelectedShopVids=shops.map(s=>s.vid);
+    if(checked){ if(!bslSelectedShopVids.includes(vid))bslSelectedShopVids.push(vid); }
+    else { bslSelectedShopVids=bslSelectedShopVids.filter(v=>v!==vid); }
+    bslUpdateShopDropLabel();
+    bslRenderShopsHint();
+}
+function bslShopPickAll(select){
+    const shops=bslAllShopEntries();
+    bslSelectedShopVids=select?shops.map(s=>s.vid):[];
+    bslBuildShopDrop(); // re-render checkboxes
+    bslUpdateShopDropLabel();
+    bslRenderShopsHint();
+}
+function bslUpdateShopDropLabel(){
+    const lbl=$('bsShopDropLabel'); if(!lbl)return;
+    const shops=bslAllShopEntries(); const total=shops.length;
+    if(total===0){lbl.textContent='\u063a\u0631\u0641\u0647\u0627\u06cc \u0641\u0639\u0627\u0644 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f';return;}
+    const sel=(bslSelectedShopVids===null)?total:bslSelectedShopVids.length;
+    if(sel===0) lbl.textContent='\u0647\u06cc\u0686 \u063a\u0631\u0641\u0647\u0627\u06cc \u0627\u0646\u062a\u062e\u0627\u0628 \u0646\u0634\u062f\u0647';
+    else if(sel===total) lbl.textContent='\U0001f3ea \u0647\u0645\u0647\u0654 \u063a\u0631\u0641\u0647\u200c\u0647\u0627 ('+toFa(total)+')';
+    else {
+        const names=shops.filter(s=>bslSelectedShopVids.includes(s.vid)).map(s=>s.name.slice(0,8));
+        lbl.textContent='\U0001f3ea '+names.join('، ')+(sel>2?'...':'');
+    }
 }
 function bslRenderShopsHint(){
-  const el=$('bsShopsHint'); if(!el)return;
-  const on=$('bsSendAllShops')&&$('bsSendAllShops').checked;
-  if(!on){el.textContent='';return;}
-  const n=bslActiveShopCount();
-  if(n<=1){el.style.color='#fbbf24';el.textContent='⚠ فقط غرفهٔ پیش‌فرض فعال است — غرفهٔ اضافی در تنظیمات اضافه کنید';}
-  else{el.style.color='#67e8f9';el.textContent='✓ '+toFa(n)+' غرفهٔ فعال — همزمان ارسال می‌شود';}
+    const el=$('bsShopsHint'); if(!el)return;
+    const shops=bslAllShopEntries(); const total=shops.length;
+    const sel=(bslSelectedShopVids===null)?total:(bslSelectedShopVids||[]).length;
+    if(total===0){el.style.color='#fbbf24';el.textContent='\u26a0 \u063a\u0631\u0641\u0647\u0627\u06cc \u0641\u0639\u0627\u0644 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f';return;}
+    if(sel===0){el.style.color='#f87171';el.textContent='\u274c \u0647\u06cc\u0686 \u063a\u0631\u0641\u0647\u0627\u06cc \u0627\u0646\u062a\u062e\u0627\u0628 \u0646\u0634\u062f\u0647';return;}
+    if(sel===total){el.style.color='#67e8f9';el.textContent='\u2713 \u0647\u0645\u0647\u0654 '+toFa(total)+' \u063a\u0631\u0641\u0647 — \u0647\u0645\u0632\u0645\u0627\u0646 \u0627\u0631\u0633\u0627\u0644 \u0645\u06cc\u200c\u0634\u0648\u062f';}
+    else{el.style.color='#a78bfa';el.textContent='\u2713 '+toFa(sel)+' \u0627\u0632 '+toFa(total)+' \u063a\u0631\u0641\u0647 \u0627\u0646\u062a\u062e\u0627\u0628 \u0634\u062f\u0647';}
 }
 function bslToggleAllShops(){bslRenderShopsHint();try{saveConn();}catch(e){}}
+// initialise hint after applyCn populates bslExtraVendors
+function bslInitShopPicker(){bslSelectedShopVids=null;bslUpdateShopDropLabel();bslRenderShopsHint();}
+// Get selected vids for send action — null = all
+function bslGetSelectedVids(){
+    const shops=bslAllShopEntries();
+    if(bslSelectedShopVids===null||bslSelectedShopVids.length===shops.length) return null;
+    return bslSelectedShopVids.slice();
+}
 
 /* ═══════════════════════════════════════════════════════════════════
  *  v10.35 (۴۷ب): کشِ کاتالوگِ غرفه — وضعیت، بازسازی، پاک‌کردن
@@ -52733,6 +52863,12 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.88', t:'انتخاب غرفه‌های خاص برای ارسال — دراپ‌داون چندانتخابی', items:[
+    '🏪 دراپ‌داون تیک‌دار در بخش ارسال: انتخاب دقیق غرفه‌هایی که محصول ارسال می‌شود',
+    '✅ گزینه «همه» برای انتخاب/لغو انتخاب یک‌جا',
+    '🏷️ نمایش قیمت مؤثر هر غرفه کنار نام در دراپ‌داون',
+    '⚡ ارسال با قبلی سازگار است — بدون انتخاب = همه',
+  ]},
   {v:'10.87', t:'ارسال موازی چند-غرفه‌ای + رفع ریست ضریب + ارسال مجدد با قیمت جدید', items:[
     '🚀 ارسال <b>موازی همزمان</b> یک پروفایل به چند غرفه (curl_multi برای هر محصول، نه صف ترتیبی)',
     '💰 نمایش <b>قیمت هر غرفه</b> در پیشرفت ارسال چندغرفه‌ای — ضریب تعدیل مشخص می‌شود',
@@ -59853,7 +59989,7 @@ if($('bsAutoCat'))$('bsAutoCat').checked=!!b.auto_category;if($('bsSendAllShops'
 // v8.17: Restore global fallback categories
 if(b.fallback_cat_ids&&Array.isArray(b.fallback_cat_ids)){renderBslFallbackCats(b.fallback_cat_ids);}
 // v8.17: Restore extra vendors
-if(b.vendors&&Array.isArray(b.vendors)){bslExtraVendors=b.vendors;renderBslVendors();}
+if(b.vendors&&Array.isArray(b.vendors)){bslExtraVendors=b.vendors;renderBslVendors();bslInitShopPicker();/* v10.88 */}
 // v9.20: AI settings — چند-ارائه‌دهنده
 applyAiNet(cn.ai_net||{});
 aiLoadProviders();
@@ -63953,8 +64089,10 @@ function queueBslSend(ps,catId){
             fd2.append('profile_name',($('profileName')&&$('profileName').value)||'');
             // v8.57: دسته‌های جایگزین همین پروفایل هم همراه صف بروند
             fd2.append('fallback_cat_ids',JSON.stringify(Array.isArray(bslProfileFallbackCats)?bslProfileFallbackCats:[]));
-            // v9.69: ارسال به همهٔ غرفه‌ها
-            fd2.append('send_all_shops',($('bsSendAllShops')&&$('bsSendAllShops').checked)?'1':'0');
+            // v9.69 / v10.88: ارسال به غرفه‌های انتخابی
+            {const _sv=bslGetSelectedVids();
+             fd2.append('send_all_shops',_sv===null||_sv.length>1?'1':'0');
+             if(_sv!==null)fd2.append('selected_shop_vids',JSON.stringify(_sv));}
             fetch('?bsl_queue_add=1',{method:'POST',body:fd2}).then(r=>r.json()).then(d=>{
                 if(!d.ok){showToast('\u062e\u0637\u0627: '+d.error,1);return;}
                 /* v10.73 (87): چندغرفه‌ای شد — هر غرفه وظیفهٔ جدا دارد */
