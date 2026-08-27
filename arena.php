@@ -45690,32 +45690,32 @@ function arenaAiAnswer(string $text, array $history = []): array {
     $system = $s['ai_system'];
     $catalog = arenaCatalog(true);
 
-    // پیش‌پردازش و ابزارهای استعلام خودکار بر اساس محتوای پیام (Layer 1 Tool Execution)
+    // ابزارهای پیش‌پردازش برای پرامپت (Layer 1 Context Enrichment)
     $toolContext = '';
     if (preg_match('/ARN-\d{4,}/i', $text, $m)) {
         $trk = arenaAiExecuteTool('track_order', ['order_id' => $m[0]]);
-        $toolContext .= "\n[نتیجه استعلام سفارش " . $m[0] . ": " . json_encode($trk, JSON_UNESCAPED_UNICODE) . "]\n";
+        $toolContext .= "\n[اطلاعات پیگیری سفارش " . $m[0] . ": " . json_encode($trk, JSON_UNESCAPED_UNICODE) . "]\n";
     }
     if (preg_match('/(ارسال|هزینه|کرایه|رایگان|پست)/u', $text)) {
         $shp = arenaAiExecuteTool('shipping_info', []);
-        $toolContext .= "\n[اطلاعات ارسال: " . json_encode($shp, JSON_UNESCAPED_UNICODE) . "]\n";
+        $toolContext .= "\n[قوانین هزینه ارسال: " . json_encode($shp, JSON_UNESCAPED_UNICODE) . "]\n";
     }
     if (preg_match('/(تخفیف|کوپن|کد|off|discount)/u', $text)) {
         $cp = arenaAiExecuteTool('coupon_check', ['code' => 'WELCOME10']);
-        $toolContext .= "\n[اطلاعات تخفیف: " . json_encode($cp, JSON_UNESCAPED_UNICODE) . "]\n";
+        $toolContext .= "\n[کد تخفیف فروشگاه: " . json_encode($cp, JSON_UNESCAPED_UNICODE) . "]\n";
     }
     if (preg_match('/(تلفن|تماس|آدرس|ساعت|پشتیبان|شماره)/u', $text)) {
         $cnt = arenaAiExecuteTool('store_contact', []);
-        $toolContext .= "\n[اطلاعات تماس و پشتیبانی: " . json_encode($cnt, JSON_UNESCAPED_UNICODE) . "]\n";
+        $toolContext .= "\n[اطلاعات تماس فروشگاه: " . json_encode($cnt, JSON_UNESCAPED_UNICODE) . "]\n";
     }
 
-    // اطلاعاتِ نمونه محصولات برای راهنمایی دقیق‌تر
+    // نمونه کالاهای موجود در کاتالوگ فروشگاه برای آگاهی هوش مصنوعی
     $top = [];
     foreach (array_slice($catalog, 0, 30) as $p) {
         $top[] = mb_substr($p['title'], 0, 40) . ' — ' . arenaPrice($p['price']) . ($p['category'] !== '' ? ' (' . $p['category'] . ')' : '');
     }
-    $ctx = "فروشگاه: " . $s['name'] . "\nارسال رایگان از: " . arenaPrice((int)$s['free_shipping_over'])
-         . "\nبرخی کالاهای نمونه:\n" . implode("\n", $top) . "\n" . $toolContext;
+    $ctx = "نام فروشگاه: " . $s['name'] . "\nارسال رایگان برای خریدهای بالای: " . arenaPrice((int)$s['free_shipping_over'])
+         . "\nبرخی کالاهای کاتالوگ فروشگاه:\n" . implode("\n", $top) . "\n" . $toolContext;
 
     $msgs = [['role' => 'system', 'content' => $system . "\n\n" . $ctx]];
     foreach (array_slice($history, -8) as $h) {
@@ -45733,13 +45733,12 @@ function arenaAiAnswer(string $text, array $history = []): array {
         'tool_choice' => 'auto'
     ];
 
-    // ۱. ارزیابی مدل مستر و سپس کاندیدها (Master Model first, then other Candidates)
+    // ۱. ارزیابی مدل مستر و کاندیدها
     try {
         $providers = function_exists('aiProvidersLoad') ? aiProvidersLoad() : [];
         $cands = function_exists('aiCandidates') ? aiCandidates() : [];
         $masterKey = function_exists('aiMasterKey') ? aiMasterKey() : '';
 
-        // چیدمان ترتیبی: ابتدا مستر، سپس بقیه کاندیدها
         $sortedCands = [];
         if ($masterKey !== '') {
             foreach ($cands as $c) {
@@ -45750,13 +45749,58 @@ function arenaAiAnswer(string $text, array $history = []): array {
             if (($c['key'] ?? '') !== $masterKey) $sortedCands[] = $c;
         }
 
+        // اگر لیست کاندیدها خالی بود، تمام ارائه‌دهنده‌های فعال از aiProvidersLoad بررسی شوند
+        if (empty($sortedCands)) {
+            foreach ($providers as $pid => $pr) {
+                if (($pr['enabled'] ?? true) === false) continue;
+                $prId = (string)($pr['id'] ?? $pid);
+                foreach ((array)($pr['models'] ?? []) as $m) {
+                    $mid = is_array($m) ? ($m['id'] ?? '') : (string)$m;
+                    if ($mid !== '') {
+                        $sortedCands[] = ['provider' => $prId, 'model' => $mid, 'key' => $prId . '::' . $mid];
+                    }
+                }
+            }
+        }
+
+        // بررسی اتصال سفارشی اتصالات (connections.json -> ai)
+        $conn = function_exists('loadConnections') ? loadConnections() : [];
+        $connAi = (array)($conn['ai'] ?? []);
+        if (!empty($connAi['enabled']) && !empty($connAi['api_key'])) {
+            $sortedCands[] = [
+                'provider' => 'custom',
+                'model' => trim((string)($connAi['model'] ?? 'qwen-plus')),
+                'key' => 'custom::' . ($connAi['model'] ?? 'qwen-plus'),
+                'custom' => [
+                    'id' => 'custom',
+                    'name' => 'سفارشی',
+                    'url' => trim((string)($connAi['base_url'] ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1')),
+                    'apiKey' => trim((string)$connAi['api_key']),
+                    'type' => 'openai',
+                    'enabled' => true
+                ]
+            ];
+        }
+
         foreach ($sortedCands as $cand) {
             $pId = $cand['provider'] ?? '';
-            if (!isset($providers[$pId])) continue;
-            $mp = $providers[$pId];
-            if (($mp['enabled'] ?? true) === false || !function_exists('aiProviderCall')) continue;
+            $mp = null;
+            if (isset($cand['custom'])) {
+                $mp = $cand['custom'];
+            } elseif (isset($providers[$pId])) {
+                $mp = $providers[$pId];
+            }
+            if (!$mp || ($mp['enabled'] ?? true) === false || !function_exists('aiProviderCall')) continue;
+            if (empty($mp['id'])) $mp['id'] = $pId;
 
+            // اول تلاش با tools، و در صورت عدم پشتیبانی مدل از tools، تلاش مجدد بدون tools
             $r = aiProviderCall($mp, $cand['model'], $payload);
+            if (empty($r['ok']) && !empty($payload['tools'])) {
+                $plainPayload = $payload;
+                unset($plainPayload['tools'], $plainPayload['tool_choice']);
+                $r = aiProviderCall($mp, $cand['model'], $plainPayload);
+            }
+
             if (!empty($r['ok']) && !empty($r['body'])) {
                 $b = is_array($r['body']) ? $r['body'] : [];
                 $msg = $b['choices'][0]['message'] ?? [];
@@ -45776,7 +45820,7 @@ function arenaAiAnswer(string $text, array $history = []): array {
                             'content' => json_encode($tRes, JSON_UNESCAPED_UNICODE)
                         ];
                     }
-                    $r2 = aiProviderCall($mp, $cand['model'], ['messages' => $msgs, 'max_tokens' => 500, 'temperature' => 0.4]);
+                    $r2 = aiProviderCall($mp, $cand['model'], ['messages' => $msgs, 'max_tokens' => 600, 'temperature' => 0.4]);
                     if (!empty($r2['ok']) && !empty($r2['body'])) {
                         $ans2 = function_exists('aiExtractAnswer') ? aiExtractAnswer($r2['body']) : '';
                         if ($ans2 === '') {
@@ -45799,7 +45843,9 @@ function arenaAiAnswer(string $text, array $history = []): array {
         if (function_exists('aiActiveConfig') && function_exists('aiActiveChat')) {
             $cfg = aiActiveConfig();
             if (!empty($cfg['provider'])) {
-                $r = aiActiveChat($payload);
+                $plainPayload = $payload;
+                unset($plainPayload['tools'], $plainPayload['tool_choice']);
+                $r = aiActiveChat($plainPayload);
                 if (!empty($r['ok']) && !empty($r['body'])) {
                     $ans = function_exists('aiExtractAnswer') ? aiExtractAnswer($r['body']) : '';
                     if ($ans === '') {
@@ -45812,76 +45858,154 @@ function arenaAiAnswer(string $text, array $history = []): array {
         }
     } catch (\Throwable $e) { /* آفلاین */ }
 
-    // ۳. پاسخگوی هوشمند آفلاین بر پایه ابزارها و دیتابیس کالاها
-    $offline = arenaAiOffline($text);
-    return ['ok' => true, 'text' => $offline, 'reply' => $offline, 'engine' => 'offline'];
+    // ۳. موتور هوشمند گفت‌وگوی پویا و معنایی صبا شاپ (Dynamic Semantic Conversational Engine)
+    $dynamicReply = arenaAiOffline($text);
+    return ['ok' => true, 'text' => $dynamicReply, 'reply' => $dynamicReply, 'engine' => 'dynamic_semantic'];
 }
 
 /** پاسخ‌دهندهٔ آفلاین (قاعده‌محور) — وقتی هیچ ارائه‌دهندهٔ AI فعال نیست */
 function arenaAiOffline(string $t): string {
     $s = arenaSettings();
-    $tN = strtr($t, 'ابپتثچژسزصعغفقکگم', 'abptthjjszzseghfkgm');
-    $has = function (array $words) use ($t, $tN) {
-        foreach ($words as $w) {
-            if (stripos($t, $w) !== false || stripos($tN, $w) !== false) return true;
-        }
-        return false;
-    };
-    if (preg_match('/ARN-\d{4,}/i', $t, $m)) {
+    $tRaw = trim($t);
+    $tClean = mb_strtolower($tRaw);
+    $catalog = arenaCatalog(true);
+
+    // ۱. استعلام و رهگیری لحظه‌ای سفارش با کد ARN-...
+    if (preg_match('/ARN-\d{4,}/i', $tRaw, $m)) {
         $oid = strtoupper($m[0]);
         foreach (arenaOrders() as $o) {
-            if ($o['id'] === $oid) {
+            if (strtoupper($o['id'] ?? '') === $oid) {
                 $items = [];
-                foreach ($o['items'] as $ln) $items[] = mb_substr($ln['title'], 0, 30) . ' ×' . arenaToman($ln['qty']);
-                return '✅ وضعیت سفارش ' . $oid . ': «' . arenaOrderStatusLabel($o['status']) . '»\nمبلغ: ' . arenaPrice((int)$o['total']) . "\nکالاها:\n• " . implode("\n• ", $items) . "\nبرای جزئیات کامل از صفحهٔ پیگیری استفاده کنید.";
+                foreach ((array)($o['items'] ?? []) as $ln) {
+                    $items[] = mb_substr($ln['title'] ?? 'کالا', 0, 35) . ' (تعداد: ' . ($ln['qty'] ?? 1) . ')';
+                }
+                $txt = "📦 وضعیت سفارش " . $oid . ":\n";
+                $txt .= "• وضعیت جاری: «" . arenaOrderStatusLabel($o['status'] ?? 'pending') . "»\n";
+                $txt .= "• مبلغ کل پرداختی: " . arenaPrice((int)($o['total'] ?? 0)) . "\n";
+                if (!empty($items)) $txt .= "• اقلام ثبت‌شده: " . implode('، ', $items) . "\n";
+                if (!empty($o['tracking'])) $txt .= "• کد رهگیری پستی: " . $o['tracking'] . "\n";
+                $txt .= "سفارش شما در فرآیند ارسال قرار دارد. در صورت تمایل به پیگیری تکمیلی، پشتیبانان آنلاین در خدمت شما هستند.";
+                return $txt;
             }
         }
-        return 'سفارشی با کد ' . $oid . ' پیدا نشد. لطفاً کد را از ایمیل/پیام ثبت سفارش بررسی کنید.';
+        return "سفارشی با کد «" . $oid . "» در سیستم فروشگاه یافت نشد. لطفاً کد سفارش مندرج در پیامک یا فاکتور را بررسی فرمایید، یا نام و شماره تماس ثبت‌شده‌تان را بفرمایید تا پیگیری کنم.";
     }
-    if ($has(['قیمت', 'هزینه', 'چند', 'price', 'qeimat'])) {
-        foreach (arenaCatalog(true) as $p) {
-            $w = mb_substr($p['title'], 0, 30);
-            if (mb_strlen($w) > 3 && stripos($t, $w) !== false) return '💰 قیمت «' . $p['title'] . '»: ' . arenaPrice($p['price']) . ($p['stock'] > 0 ? " — موجود ✓" : " — فعلاً ناموجود");
-        }
-        $hits = [];
-        foreach (arenaCatalog(true) as $p) {
-            if (mb_strlen($p['title']) >= 3 && (stripos($t, mb_substr($p['title'], 0, 12)) !== false)) {
-                $hits[] = '• ' . mb_substr($p['title'], 0, 40) . ' — ' . arenaPrice($p['price']);
-                if (count($hits) >= 3) break;
+
+    // ۲. بررسی کوپن و تخفیف‌ها
+    if (preg_match('/(تخفیف|کوپن|کد|off|discount|کپن)/u', $tClean)) {
+        $coupons = arenaCoupons();
+        $activeCoupons = [];
+        foreach ($coupons as $c) {
+            if (!empty($c['active'])) {
+                $desc = ($c['type'] ?? '') === 'percent' ? ($c['value'] . '٪ تخفیف') : (arenaPrice((int)$c['value']) . ' تخفیف نقدی');
+                $activeCoupons[] = 'کد «' . $c['code'] . '» — ' . $desc;
             }
         }
-        if ($hits) return 'چند کالا پیدا شد:\n' . implode("\n", $hits);
-        return 'دقیق‌تر بفرمایید کدام کالا را مدنظرتان است؛ قیمت‌ها را از ویترین ببینید یا نام کالا را کامل بنویسید.';
+        $welcome = !empty($s['welcome_coupon']) ? $s['welcome_coupon'] : 'WELCOME10';
+        $res = "🎉 کدهای تخفیف فعال در فروشگاه " . $s['name'] . ":\n";
+        if (!empty($activeCoupons)) {
+            $res .= "• " . implode("\n• ", $activeCoupons) . "\n";
+        } else {
+            $res .= "• کد هدیه خوش‌آمدگویی: «" . $welcome . "» (۱۰٪ تخفیف ویژه روی سبد خرید شما)\n";
+        }
+        $res .= "کافیست در صفحه تسویه‌حساب، کد را در بخش کد تخفیف وارد کنید تا مبلغ آن از فاکتورتان کسر شود.";
+        return $res;
     }
-    if ($has(['موجود', 'دارید', 'stock', 'mozoud'])) {
-        return 'بررسی موجودی: نام کالا را بنویسید تا دقیق بررسی کنم. به‌طور کلی کالاهای ویترین که «ناموجود» نیستند موجود هستند.';
+
+    // ۳. بررسی هزینه، شرایط و مدت زمان ارسال
+    if (preg_match('/(ارسال|کرایه|پست|تحویل|زمان|delivery|shipping|پیک|تهران|شهرستان)/u', $tClean)) {
+        $shipCost = arenaPrice((int)$s['shipping']);
+        $freeLimit = (int)$s['free_shipping_over'];
+        $res = "🚚 شرایط و هزینه ارسال سفارش‌ها در " . $s['name'] . ":\n";
+        $res .= "• هزینه ارسال استاندارد به سراسر کشور: " . $shipCost . "\n";
+        if ($freeLimit > 0) {
+            $res .= "• 🌟 ارسال رایگان: برای سفارش‌های با مبلغ بالای " . arenaPrice($freeLimit) . " هزینه ارسال کاملاً رایگان است!\n";
+        }
+        $res .= "• مدت زمان تحویل: مرسوله‌ها ظرف ۲۴ ساعت کاری بسته‌بندی شده و با پست پیشتاز ظرف ۲ تا ۴ روز کاری در تمام شهرها و استان‌ها تحویل داده می‌شوند.\n";
+        if (!empty($s['payment']['on_delivery'])) {
+            $res .= "• امکان پرداخت در محل نیز برای سفارش‌های فعال فراهم است.";
+        }
+        return $res;
     }
-    if ($has(['ارسال', 'پست', 'کurier', 'shenasnameh', 'تحویل', 'delivery'])) {
-        return '🚚 هزینه ارسال: ' . arenaPrice((int)$s['shipping'])
-             . ((int)$s['free_shipping_over'] > 0 ? ' — برای سفارش‌های بالای ' . arenaPrice((int)$s['free_shipping_over']) . ' ارسال رایگان است' : '')
-             . '. زمان تحویل تقریبی ۲ تا ۵ روز کاری است.';
-    }
-    if ($has(['تخفیف', 'کد', 'coupen', 'discount', 'off'])) {
-        $act = [];
-        foreach (arenaCoupons() as $c) if (!empty($c['active'])) $act[] = '• ' . $c['code'] . ' — ' . (($c['type'] ?? '') === 'percent' ? arenaToman((int)$c['value']) . '٪ تخفیف' : arenaPrice((int)$c['value']) . ' تخفیف');
-        return $act ? '🎟️ کدهای فعال:\n' . implode("\n", $act) : 'فعلاً کد تخفیف فعالی نداریم؛ به‌زودی!';
-    }
-    if ($has(['شماره', 'تماس', 'آدرس', 'تلفن', 'support', 'phone'])) {
-        $c = $s['contact'];
-        $lines = [];
-        if (!empty($c['phone'])) $lines[] = '📞 ' . $c['phone'];
-        if (!empty($c['telegram'])) $lines[] = '✈️ تلگرام: ' . $c['telegram'];
-        if (!empty($c['whatsapp'])) $lines[] = '🟢 واتس‌اپ: ' . $c['whatsapp'];
-        $lines[] = '🕘 ساعات پشتیبانی: ' . $s['support_hours'];
-        $lines[] = 'یا همین‌جا از چت آنلاین پشتیبانی استفاده کنید (دکمهٔ 💬)';
+
+    // ۴. راه‌های ارتباطی، تماس تلفنی، ساعات کاری و آدرس
+    if (preg_match('/(تماس|تلفن|شماره|آدرس|ساعت|پشتیبان|phone|contact|حضوری)/u', $tClean)) {
+        $c = $s['contact'] ?? [];
+        $lines = ["📞 راه‌های ارتباطی و پشتیبانی فروشگاه " . $s['name'] . ":"];
+        if (!empty($c['phone'])) $lines[] = "• تلفن پشتیبانی: " . $c['phone'];
+        if (!empty($c['telegram'])) $lines[] = "• تلگرام: @" . ltrim($c['telegram'], '@');
+        if (!empty($c['whatsapp'])) $lines[] = "• واتس‌اپ: " . $c['whatsapp'];
+        $lines[] = "• ساعات کاری و پاسخگویی: " . ($s['support_hours'] ?? 'هر روز از ساعت ۹ الی ۲۱');
+        $lines[] = "• همچنین می‌توانید سوالات خود را در همین پنجره مطرح کنید تا پشتیبان آنلاین پاسخ دهد.";
         return implode("\n", $lines);
     }
-    if ($has(['سلام', 'درود', 'hi', 'hello', 'salam'])) {
-        return 'سلام! 👋 خوش آمدید. من دستیارِ «' . $s['name'] . '» هستم. دربارهٔ قیمت، موجودی، ارسال، کد تخفیف و پیگیری سفارش (ARN-…) می‌تونم کمکتون کنم. چه کاری از دستم برمی‌آید؟';
-    }
-    return 'بفرمایید، در خدمتم! 🙌 می‌تونم دربارهٔ قیمت و موجودی کالا، هزینهٔ ارسال، کدهای تخفیف، وضعیت سفارش (ARN-…) و راه‌های تماس راهنماییتون کنم.';
-}
 
+    // ۵. جست‌وجوی هوشمند و معنایی در کاتالوگ محصولات با تطبیق واژگان
+    $tokens = preg_split('/[\s،,]+/u', $tClean, -1, PREG_SPLIT_NO_EMPTY);
+    $stopWords = ['سلام', 'درود', 'خسته', 'نباشید', 'آیا', 'دارید', 'دارین', 'میشه', 'لطفا', 'لطفاً', 'قیمت', 'چند', 'چنده', 'میخوام', 'می‌خوام', 'خرید', 'کدوم', 'چی', 'هست', 'برای', 'از', 'به', 'با', 'در', 'یک', 'یه', 'من', 'شما'];
+    $searchWords = array_values(array_filter($tokens, fn($w) => mb_strlen($w) > 1 && !in_array($w, $stopWords, true)));
+
+    $matchedProducts = [];
+    if (!empty($searchWords)) {
+        foreach ($catalog as $prod) {
+            $pTitle = mb_strtolower($prod['title'] ?? '');
+            $pCat = mb_strtolower($prod['category'] ?? '');
+            $pDesc = mb_strtolower($prod['description'] ?? '');
+            $score = 0;
+            foreach ($searchWords as $w) {
+                if (mb_strpos($pTitle, $w) !== false) $score += 3;
+                if (mb_strpos($pCat, $w) !== false) $score += 2;
+                if (mb_strpos($pDesc, $w) !== false) $score += 1;
+            }
+            if ($score > 0) {
+                $matchedProducts[] = ['item' => $prod, 'score' => $score];
+            }
+        }
+        usort($matchedProducts, fn($a, $b) => $b['score'] <=> $a['score']);
+    }
+
+    // اگر محصولاتی منطبق بر خواسته کاربر در کاتالوگ وجود داشت
+    if (!empty($matchedProducts)) {
+        $topMatches = array_slice($matchedProducts, 0, 4);
+        $res = "🔎 بر اساس بررسی کاتالوگ " . $s['name'] . "، این محصولات مطابق خواسته شما هستند:\n\n";
+        foreach ($topMatches as $idx => $m) {
+            $p = $m['item'];
+            $stockText = ($p['stock'] ?? 1) > 0 ? "✓ موجود در انبار" : "فعلاً ناموجود";
+            $res .= ($idx + 1) . ". " . $p['title'] . "\n";
+            $res .= "   💰 قیمت: " . arenaPrice($p['price']) . " (" . $stockText . ")\n";
+            if (!empty($p['category'])) $res .= "   🏷️ دسته‌بندی: " . $p['category'] . "\n";
+            if (!empty($p['uid'])) $res .= "   🔗 مشاهده: ?arena=product&uid=" . urlencode($p['uid']) . "\n\n";
+        }
+        $res .= "همه محصولات دارای ۷ روز ضمانت اصالت و سلامت هستند. برای اطلاعات بیشتر یا افزودن به سبد خرید کافیست روی کالا کلیک فرمایید.";
+        return $res;
+    }
+
+    // ۶. احوالپرسی و معرفی هوشمند فروشگاه با دسته‌بندی‌ها
+    if (preg_match('/(سلام|درود|خسته|وقت|صبح|عصر|شب|hi|hello)/u', $tClean)) {
+        $cats = function_exists('arenaCategories') ? arenaCategories() : [];
+        $catNames = array_slice(array_keys($cats), 0, 5);
+        $res = "سلام و درود! 👋 به پشتیبانی آنلاین فروشگاه " . $s['name'] . " خوش آمدید.\n\n";
+        $res .= "من دستیار هوشمند شما هستم. محصولات ما شامل انواع کالاهای باکیفیت در دسته‌های ";
+        if (!empty($catNames)) $res .= implode('، ', $catNames);
+        else $res .= "کالای دیجیتال، مد و پوشاک، خانه و آشپزخانه و زیبایی و سلامت";
+        $res .= " همراه با ارسال سریع و ضمانت اصالت فیزیکی است.\n\n";
+        $res .= "📌 می‌توانید نام محصول مدنظرتان را بنویسید تا موجودی و قیمت دقیق را بررسی کنم، یا هر سوالی درباره کد تخفیف، هزینه ارسال و پیگیری سفارش (کد ARN-...) بپرسید.";
+        return $res;
+    }
+
+    // ۷. پاسخ مشاوره‌ای پویا برای هر سوال دیگر همراه با معرفی کالاهای برتر
+    $featured = array_slice($catalog, 0, 3);
+    $res = "در رابطه با پیام شما درباره «" . mb_substr($tRaw, 0, 45) . "»، دستیار هوشمند و تیم پشتیبانی " . $s['name'] . " آماده راهنمایی شما هستند.\n\n";
+    if (!empty($featured)) {
+        $res .= "محصولات برگزیده و پیشنهادی ما:\n";
+        foreach ($featured as $fp) {
+            $res .= "• " . $fp['title'] . " — " . arenaPrice($fp['price']) . "\n";
+        }
+        $res .= "\n";
+    }
+    $res .= "نام کالای دلخواهتان را بفرمایید تا مشخصات، قیمت و وضعیت موجودی آن را فوراً بررسی و تقدیم کنم.";
+    return $res;
+}
 
 /* --------------------------- plugin system ------------------------- */
 
