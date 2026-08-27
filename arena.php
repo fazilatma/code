@@ -48199,19 +48199,34 @@ html[data-skin="gloss"] .progress-bar{
 @keyframes mrZoomIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
 
 /* ================= ARENA SHOP LAYER — styles ================= */
-#pane-shop .shop-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
-#pane-shop .shop-open{margin-right:auto}
-#pane-shop .shop-st{display:none}
-#pane-shop .shop-st.active{display:block;animation:fadeIn .25s ease}
-#pane-shop .shop-frame{width:100%;height:74vh;border:1px solid #334155;border-radius:14px;background:#f4f5fb}
-#pane-shop .shop-framesbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap;font-size:11px;color:#94a3b8}
-#pane-shop .shop-framesbar .shop-url{background:#0f172a;border:1px solid #334155;border-radius:9px;padding:6px 12px;font-size:10.5px;color:#7dd3fc;direction:ltr;flex:1;min-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#pane-import .shop-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+#pane-import .shop-open{margin-right:auto}
+#pane-import .shop-st{display:none}
+#pane-import .shop-st.active{display:block;animation:fadeIn .25s ease}
+#pane-import .shop-frame{width:100%;height:74vh;border:1px solid #334155;border-radius:14px;background:#f4f5fb}
+#pane-import .shop-framesbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap;font-size:11px;color:#94a3b8}
+#pane-import .shop-framesbar .shop-url{background:#0f172a;border:1px solid #334155;border-radius:9px;padding:6px 12px;font-size:10.5px;color:#7dd3fc;direction:ltr;flex:1;min-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* v1.3: نوارِ چسبانِ زیرتب‌های تبِ درون‌ریزی */
+#impSubTabs{position:sticky;top:54px;z-index:120;display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;background:rgba(15,23,42,.94);backdrop-filter:blur(10px);border:1px solid #1e293b;border-radius:12px;padding:7px;margin-bottom:14px;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+#impSubTabs::-webkit-scrollbar{display:none}
+.imp-subtab{flex:0 0 auto;display:inline-flex;align-items:center;gap:5px;padding:8px 13px;border-radius:9px;border:1px solid #334155;background:#0f172a;color:#94a3b8;font-size:11.5px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap;transition:all .15s;min-height:34px}
+.imp-subtab:hover{color:#e2e8f0;border-color:#475569}
+.imp-subtab.on{background:linear-gradient(135deg,#3b82f6,#6366f1);border-color:transparent;color:#fff;box-shadow:0 4px 14px rgba(59,130,246,.35)}
+.imp-badge{display:inline-block;background:#ef4444;color:#fff;font-size:9px;font-weight:800;padding:1px 5px;border-radius:8px;min-width:15px;text-align:center;margin-right:2px}
+.imp-badge.hidden{display:none!important}
+@media(max-width:640px){
+  #impSubTabs{top:50px;padding:6px;border-radius:10px;gap:5px}
+  .imp-subtab{padding:7px 10px;font-size:10.5px}
+  #shopStats{grid-template-columns:repeat(2,1fr)!important}
+  #pane-import .shop-plugrid{grid-template-columns:1fr!important}
+  #pane-import .shop-framesbar .shop-url{min-width:110px}
+}
 .shop-srcchips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
 .shop-srcchip{padding:8px 14px;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#94a3b8;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;transition:all .15s}
 .shop-srcchip:hover{border-color:#3b82f6;color:#e2e8f0}
 .shop-srcchip.on{background:#3b82f6;border-color:#3b82f6;color:#0f172a}
 .shop-srcchip .n{opacity:.65;font-weight:400}
-#pane-shop table td,#pane-shop table th{padding:8px 10px}
+#pane-import table td,#pane-import table th{padding:8px 10px}
 .shop-thumb{width:44px;height:44px;object-fit:cover;border-radius:9px;background:#1e293b}
 .shop-badge-src{font-size:9.5px;font-weight:800;padding:3px 8px;border-radius:8px;color:#fff;white-space:nowrap}
 .shop-badge-src.own{background:#059669}.shop-badge-src.woo{background:#2563eb}.shop-badge-src.bsl{background:#d97706}
@@ -48263,9 +48278,9 @@ html[data-skin="gloss"] .progress-bar{
 .shop-ai-box{border:1px solid #334155;border-radius:14px;padding:16px;background:linear-gradient(160deg,#1e1b4b 0%,#0f172a 55%)}
 .hidden{display:none!important}
 @media(max-width:760px){
-  #pane-shop .shop-chatbox{grid-template-columns:1fr}
-  #pane-shop .shop-sesslist{max-height:160px}
-  #pane-shop .shop-frame{height:60vh}
+  #pane-import .shop-chatbox{grid-template-columns:1fr}
+  #pane-import .shop-sesslist{max-height:160px}
+  #pane-import .shop-frame{height:60vh}
 }
 
 </style>
@@ -51075,7 +51090,18 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 
 <div class="tab-pane" id="pane-import">
-
+    <div class="imp-sticky-tabs" id="impSubTabs" role="tablist">
+        <button class="imp-subtab on" data-st="import">📥 درون‌ریزی</button>
+        <button class="imp-subtab" data-st="view">🖥 ویترین</button>
+        <button class="imp-subtab" data-st="products">📦 محصولات</button>
+        <button class="imp-subtab" data-st="orders">🧾 سفارش‌ها</button>
+        <button class="imp-subtab" data-st="chat">💬 چت<span class="hidden imp-badge" id="shopBadge">0</span></button>
+        <button class="imp-subtab" data-st="ai">🤖 AI</button>
+        <button class="imp-subtab" data-st="plugins">🧩 افزونه‌ها</button>
+        <button class="imp-subtab" data-st="events">📣 رویدادها</button>
+        <button class="imp-subtab" data-st="settings">⚙️ تنظیمات</button>
+    </div>
+    <div class="shop-st active" id="shopPane_import">
     <div style="padding:8px;background:#22c55e;color:#000;font-size:12px;font-weight:bold;text-align:center;border-radius:8px;margin-bottom:10px">✅ تب درون‌ریزی v7.81b — اگر این متن را می‌بینید، تب فعال است!</div>
     <div class="card">
         <div class="section-title">📥 آپلود فایل CSV/Excel محصولات</div>
@@ -51219,12 +51245,8 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <div class="si"><b id="impF" style="color:#f87171">۰</b><span>خطا</span></div>
         </div>
     </div>
-
-    <!-- ═══════ لایهٔ فروشگاهیِ arena (v1.1): فعلاً داخلِ تبِ درون‌ریزی ═══════ -->
-    <div style="margin-top:24px;padding-top:18px;border-top:1px dashed #334155">
-
-<div class="section-title">🏬 مدیریت فروشگاه <span class="hidden" id="shopBadge" style="display:inline-block;vertical-align:middle;background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:10px;margin-left:6px">0</span> <span style="font-size:10px;color:#64748b;font-weight:400">— لایهٔ arena.php · فعلاً در تبِ درون‌ریزی</span></div>
-
+    </div><!-- /shopPane_import -->
+    <div class="shop-st active" id="shopPane_view">
     <div class="shop-head">
         <a class="btn btn-blue" target="_blank" href="?arena=shop">🖥 باز کردن ویترین در تبِ تازه</a>
         <a class="btn btn-gray" href="?arena=shop">🏪 فروشگاه</a>
@@ -51240,19 +51262,6 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         <div class="si"><b id="stChat">—</b><span>چت‌های خوانده‌نشده</span></div>
     </div>
 
-    <div class="sub-tabs" style="margin-top:14px" id="shopSubTabs">
-        <button class="sub-tab active" data-st="view">🖥 نمای فروشگاه</button>
-        <button class="sub-tab" data-st="products">📦 محصولات</button>
-        <button class="sub-tab" data-st="orders">🧾 سفارش‌ها</button>
-        <button class="sub-tab" data-st="chat">💬 چت پشتیبانی</button>
-        <button class="sub-tab" data-st="ai">🤖 هوش مصنوعی</button>
-        <button class="sub-tab" data-st="plugins">🧩 افزونه‌ها</button>
-        <button class="sub-tab" data-st="events">📣 رویدادها</button>
-        <button class="sub-tab" data-st="settings">⚙️ تنظیمات</button>
-    </div>
-
-    <!-- ─────────── نمای فروشگاه ─────────── -->
-    <div class="shop-st active" id="shopPane_view">
         <div class="shop-framesbar">
             <span class="shop-url" id="shopFrameUrl"></span>
             <button class="btn btn-gray" onclick="document.getElementById('shopFrame').src='?arena=shop'">🔄 بارگذاری</button>
@@ -51435,7 +51444,6 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <div class="sm-h"><b id="shopModalTitle">کالا</b><button class="btn btn-gray" onclick="document.getElementById('shopModal').classList.add('hidden')">✕ بستن</button></div>
             <div id="shopModalBody"></div>
         </div>
-    </div>
     </div>
 </div>
 
@@ -72156,17 +72164,34 @@ var shopState = { src: 'all', stats: null, session: '', msgSince: 0, aiOn: true 
 /* ---------------- sub tabs ---------------- */
 function shopSwitch(st){
   document.querySelectorAll('#shopSubTabs .sub-tab').forEach(function(b){ b.classList.toggle('active', b.dataset.st === st); });
-  document.querySelectorAll('#pane-shop .shop-st').forEach(function(p){ p.classList.toggle('active', p.id === 'shopPane_' + st); });
+  document.querySelectorAll('#pane-import .shop-st').forEach(function(p){ p.classList.toggle('active', p.id === 'shopPane_' + st); });
   if (st === 'products') shopLoadProducts();
   if (st === 'orders') shopLoadOrders();
   if (st === 'chat') { shopLoadSessions(); }
   if (st === 'plugins') { shopLoadPlugins(); shopLoadWpInstalled(); }
   if (st === 'events') shopLoadEvents();
 }
-document.querySelectorAll('#shopSubTabs .sub-tab').forEach(function(b){
-  b.addEventListener('click', function(){ shopSwitch(b.dataset.st); });
+/* v1.3: زیرتب‌های چسبانِ تبِ درون‌ریزی */
+function shopImpSwitch(st, scroll){
+  document.querySelectorAll('#impSubTabs .imp-subtab').forEach(function(b){ b.classList.toggle('on', b.dataset.st === st); });
+  document.querySelectorAll('#pane-import .shop-st').forEach(function(p){ p.classList.toggle('active', p.id === 'shopPane_' + st); });
+  if (st === 'products') shopLoadProducts();
+  if (st === 'orders') shopLoadOrders();
+  if (st === 'chat') shopLoadSessions();
+  if (st === 'plugins') { shopLoadPlugins(); shopLoadWpInstalled(); }
+  if (st === 'events') shopLoadEvents();
+  if (st === 'settings') { if ($s('set_name') && $s('set_name').value === '') shopSettingsLoad(); }
+  if (scroll) {
+    var el = $s('shopPane_' + st);
+    if (el) { var y = el.getBoundingClientRect().top + (window.scrollY || window.pageYOffset) - 105; softScrollTo({top: Math.max(0, y), behavior: 'smooth'}); }
+  }
+}
+window.shopImpSwitch = shopImpSwitch;
+window.shopSwitch = shopImpSwitch;
+document.querySelectorAll('#impSubTabs .imp-subtab').forEach(function(b){
+  b.addEventListener('click', function(){ shopImpSwitch(b.dataset.st, true); try { b.scrollIntoView({inline: 'center', block: 'nearest', behavior: 'smooth'}); } catch(e) {} });
 });
-window.shopSwitch = shopSwitch;
+(function(){ var m = location.hash.match(/^#imp-([a-z]+)/); if (m && $s('shopPane_' + m[1])) shopImpSwitch(m[1], false); })();
 
 /* ---------------- stats ---------------- */
 async function shopLoadStats(){
@@ -72681,7 +72706,7 @@ window.shopSelftest = async function(){
 })();
 setTimeout(function(){ shopLoadStats(); }, 400);
 setInterval(function(){
-  var pane = $s('pane-shop');
+  var pane = $s('shopPane_chat') || $s('shopPane_view');
   if (pane && pane.classList.contains('active')) shopLoadStats();
 }, 15000);
 if (typeof switchMainTab === 'function') {
