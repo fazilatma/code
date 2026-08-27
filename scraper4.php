@@ -47935,11 +47935,11 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 <button class="btn btn-green" onclick="bcRebuild()" style="font-size:9.5px;padding:2px 8px" title="فهرستِ همهٔ غرفه‌ها را از نو بگیر">🏗 بازسازی</button>
 <button class="btn btn-gray" onclick="bcClear()" style="font-size:9.5px;padding:2px 8px">🗑 پاک</button>
 </div>
-<div style="font-size:10px;color:#64748b;line-height:1.7;margin-bottom:6px">
+<details style="margin-bottom:6px"><summary style="font-size:10px;color:#64748b;cursor:pointer;user-select:none;list-style:none;display:flex;align-items:center;gap:4px"><span style="font-size:9px;opacity:.7">▶</span> توضیحات کش کاتالوگ (کلیک کنید)…</summary><div style="font-size:10px;color:#64748b;line-height:1.7;margin-top:5px;padding:6px 0">
 تا این نسخه، برنامه برای هر محصول تا ۲۴ درخواست می‌فرستاد فقط تا بفهمد آن محصول در غرفه هست یا نه.
 حالا یک بار کلِ فهرستِ غرفه گرفته و نگه داشته می‌شود، پس همان پرسش بدونِ هیچ درخواستی جواب می‌گیرد.
 کش هر ۶ ساعت خودبه‌خود تازه می‌شود؛ اگر از پنلِ باسلام محصولی دستی اضافه/حذف کردید، «بازسازی» را بزنید.
-</div>
+</div></details>
 <div id="bcBox" style="font-size:10.5px;color:#64748b">برای دیدن، «وضعیت» را بزنید.</div>
 </div>
 <div class="cact"><button class="btn btn-cyan" id="bSB" onclick="sendBsl()" style="flex:1">🚀 ارسال باسلام</button><button class="btn btn-green" id="bSBlegacy" onclick="sendBslClient()" style="flex:1">🚀 ارسال فرات</button><button class="btn btn-orange hidden" id="bRB" onclick="sendBsl()" style="flex:1">🔄 تلاش مجدد</button><button class="btn btn-teal" onclick="showBslProductsModal()" style="flex-shrink:0;font-size:12px;padding:6px 10px">🏪 مدیریت جامع محصولات باسلام</button><button class="btn btn-red hidden" id="bST" onclick="stopBslProcess()">⏹ توقف</button></div>
@@ -48451,6 +48451,8 @@ function bslPositionShopDrop(){
 function bslToggleShopDrop(){
     const menu=$('bsShopDropMenu'); if(!menu)return;
     if(menu.style.display==='none'||!menu.style.display){
+        // v10.88 fix2: portal — move to <body> so no ancestor clips it
+        if(menu.parentElement!==document.body)document.body.appendChild(menu);
         bslBuildShopDrop();
         menu.style.display='block';
         bslPositionShopDrop();
