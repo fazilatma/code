@@ -45375,19 +45375,59 @@ function arenaAiAnswer(string $text, array $history = []): array {
         if (is_array($h) && !empty($h['role']) && !empty($h['text'])) $msgs[] = ['role' => $h['role'], 'content' => (string)$h['text']];
     }
     $msgs[] = ['role' => 'user', 'content' => $text];
+    $payload = ['messages' => $msgs, 'max_tokens' => 500, 'temperature' => 0.4];
 
+    // ۱. اولویت اول و اصلی: مدل مستر انتخاب‌شده در اسکریپر (aiMasterKey)
     try {
-        $cfg = aiActiveConfig();
-        if (!empty($cfg['provider'])) {
-            $r = aiActiveChat(['messages' => $msgs, 'max_tokens' => 400, 'temperature' => 0.4]);
-            if (!empty($r['ok'])) {
-                $b = is_array($r['body'] ?? null) ? $r['body'] : [];
-                $t = (string)($b['choices'][0]['message']['content'] ?? $b['message']['content'] ?? '');
-                $t = trim($t);
-                if ($t !== '') return ['ok' => true, 'text' => $t, 'engine' => 'ai', 'model' => $cfg['model'] ?? ''];
+        $providers = function_exists('aiProvidersLoad') ? aiProvidersLoad() : [];
+        $masterCand = null;
+        if (function_exists('aiCandidates')) {
+            $cands = aiCandidates();
+            $masterKey = function_exists('aiMasterKey') ? aiMasterKey() : '';
+            if ($masterKey !== '') {
+                foreach ($cands as $c) {
+                    if (($c['key'] ?? '') === $masterKey) { $masterCand = $c; break; }
+                }
+            }
+            if ($masterCand === null && !empty($cands)) {
+                $masterCand = $cands[0];
             }
         }
-    } catch (\Throwable $e) { /* به حالت آفلاین می‌رویم */ }
+        if ($masterCand !== null && isset($providers[$masterCand['provider']])) {
+            $mp = $providers[$masterCand['provider']];
+            if (($mp['enabled'] ?? true) !== false && function_exists('aiProviderCall')) {
+                $r = aiProviderCall($mp, $masterCand['model'], $payload);
+                if (!empty($r['ok']) && !empty($r['body'])) {
+                    $ans = function_exists('aiExtractAnswer') ? aiExtractAnswer($r['body']) : '';
+                    if ($ans === '') {
+                        $b = is_array($r['body']) ? $r['body'] : [];
+                        $ans = trim((string)($b['choices'][0]['message']['content'] ?? $b['message']['content'] ?? ''));
+                    }
+                    if ($ans !== '') return ['ok' => true, 'text' => $ans, 'engine' => 'master', 'model' => $masterCand['model']];
+                }
+            }
+        }
+    } catch (\Throwable $e) { /* fallback */ }
+
+    // ۲. اولویت دوم: مدل فعال در تنظیمات (aiActiveConfig)
+    try {
+        if (function_exists('aiActiveConfig') && function_exists('aiActiveChat')) {
+            $cfg = aiActiveConfig();
+            if (!empty($cfg['provider'])) {
+                $r = aiActiveChat($payload);
+                if (!empty($r['ok']) && !empty($r['body'])) {
+                    $ans = function_exists('aiExtractAnswer') ? aiExtractAnswer($r['body']) : '';
+                    if ($ans === '') {
+                        $b = is_array($r['body']) ? $r['body'] : [];
+                        $ans = trim((string)($b['choices'][0]['message']['content'] ?? $b['message']['content'] ?? ''));
+                    }
+                    if ($ans !== '') return ['ok' => true, 'text' => $ans, 'engine' => 'ai', 'model' => $cfg['model'] ?? ''];
+                }
+            }
+        }
+    } catch (\Throwable $e) { /* fallback */ }
+
+    // ۳. حالت آفلاین هوشمند و قاعده‌محور
     return ['ok' => true, 'text' => arenaAiOffline($text), 'engine' => 'offline'];
 }
 
@@ -46686,48 +46726,90 @@ input:focus,select:focus,textarea:focus{border-color:var(--acc);box-shadow:0 0 0
   .s-topbar-left{display:none}
 }
 
-/* ---------- header (adaptive on all zooms) ---------- */
-.s-header{position:sticky;top:0;z-index:80;background:rgba(255,255,255,.95);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-bottom:1px solid var(--line);transition:box-shadow .2s ease}
-.s-header.scrolled{box-shadow:0 4px 20px rgba(15,23,42,.08)}
-.s-head-in{display:flex;align-items:center;gap:14px;min-height:68px;padding:8px 0}
-.s-brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:clamp(15px,2.2vw,18px);color:var(--ink);min-width:0;flex-shrink:0}
-.s-logo-mark{width:42px;height:42px;border-radius:14px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff;box-shadow:0 6px 18px var(--acc-glow);flex-shrink:0}
-.s-logo-img{width:42px;height:42px;object-fit:contain;border-radius:12px;flex-shrink:0}
-.s-ver-btn{display:inline-flex;align-items:center;gap:5px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:20px;padding:4px 9px;font-size:11px;font-weight:700;color:var(--ink-sub);transition:all .18s;flex-shrink:0}
-.s-ver-btn:hover{background:#e2e8f0;border-color:#cbd5e1;transform:translateY(-1px)}
-.s-ver-badge{background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;border-radius:12px;padding:1px 6px;font-size:10px;font-weight:800;letter-spacing:.3px}
-.s-ver-spark{font-size:10px;color:var(--mut)}
-.s-search{flex:1 1 280px;display:flex;max-width:540px;position:relative;min-width:160px}
-.s-search input{width:100%;border-radius:24px;border:1.5px solid var(--line);padding:9px 40px 9px 16px;background:#f8fafc;font-size:13px;transition:all .2s ease}
-.s-search input:focus{background:#fff;border-color:var(--acc);box-shadow:0 0 0 4px var(--acc-glow)}
-.s-search-btn{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:none;font-size:16px;width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--mut);transition:color .15s}
-.s-search-btn:hover{color:var(--acc)}
-.s-head-acts{display:flex;align-items:center;gap:8px;margin-right:auto;flex-shrink:0}
-.s-user-btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line);background:#fff;border-radius:14px;padding:7px 12px;font-size:11.5px;font-weight:700;color:var(--ink);transition:all .15s;white-space:nowrap}
-.s-user-btn:hover{border-color:var(--acc);background:#f8fafc;transform:translateY(-1px)}
-.s-user-btn .avatar{width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;display:flex;align-items:center;justify-content:center;font-size:10.5px}
-.s-icobtn{position:relative;width:40px;height:40px;border-radius:14px;border:1.5px solid var(--line);background:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;color:var(--ink);transition:all .15s;flex-shrink:0}
-.s-icobtn:hover{border-color:var(--acc);transform:translateY(-2px);box-shadow:var(--sh-sm)}
-.s-count{position:absolute;top:-5px;left:-5px;background:var(--bad);color:#fff;font-size:10px;font-weight:800;min-width:18px;height:18px;border-radius:10px;display:flex;align-items:center;justify-content:center;padding:0 4px;box-shadow:0 2px 6px rgba(225,29,72,.4)}
 
-/* Header auto-wraps under zoom or narrow screens */
-@media(max-width:1120px){
-  .s-head-in{flex-wrap:wrap;row-gap:10px;padding:10px 0}
-  .s-brand{order:1}
-  .s-ver-btn{order:2}
-  .s-head-acts{order:3;margin-right:auto}
-  .s-search{order:4;flex-basis:100% !important;max-width:100% !important;width:100% !important;margin-top:2px}
+/* ---------- NEW PROFESSIONAL E-COMMERCE HEADER ---------- */
+.s-header{position:sticky;top:0;z-index:80;background:#ffffff;border-bottom:1px solid var(--line);box-shadow:0 2px 10px rgba(15,23,42,.04);transition:box-shadow .2s ease}
+.s-header.scrolled{box-shadow:0 4px 20px rgba(15,23,42,.08)}
+.s-head-main{display:flex;align-items:center;justify-content:space-between;gap:18px;min-height:70px;padding:10px 0}
+.s-head-right{display:flex;align-items:center;gap:14px;flex-shrink:0}
+.s-brand{display:flex;align-items:center;gap:10px;text-decoration:none;min-width:0}
+.s-brand-text b{display:block;font-size:clamp(16px,2.2vw,19px);font-weight:900;color:var(--ink);line-height:1.2}
+.s-brand-text small{display:block;font-size:10.5px;color:var(--mut);margin-top:1px;font-weight:500}
+.s-logo-mark{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff;box-shadow:0 4px 14px var(--acc-glow);flex-shrink:0}
+.s-logo-img{width:42px;height:42px;object-fit:contain;border-radius:10px;flex-shrink:0}
+
+/* Header Center Search Box */
+.s-head-search{flex:1 1 380px;max-width:620px;position:relative}
+.s-search-box{display:flex;align-items:center;position:relative;width:100%}
+.s-search-box input{width:100%;padding:11px 44px 11px 16px;border-radius:12px;border:1.5px solid #e2e8f0;background:#f8fafc;font-size:13px;color:var(--ink);transition:all .2s ease;outline:none}
+.s-search-box input:focus{background:#fff;border-color:var(--acc);box-shadow:0 0 0 4px var(--acc-glow)}
+.s-search-ico{position:absolute;right:12px;top:50%;transform:translateY(-50%);border:none;background:none;font-size:16px;color:var(--mut);cursor:pointer;display:flex;align-items:center;justify-content:center}
+.s-search-clear{position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:12px;color:var(--mut);width:20px;height:20px;border-radius:50%;background:#e2e8f0;display:flex;align-items:center;justify-content:center;text-decoration:none}
+.s-search-clear:hover{background:#cbd5e1;color:var(--ink)}
+
+/* Header Left Actions */
+.s-head-actions{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.s-act-divider{width:1px;height:24px;background:#e2e8f0;margin:0 2px}
+.s-act-btn{display:inline-flex;align-items:center;gap:7px;padding:8px 12px;border-radius:12px;border:1.5px solid #e2e8f0;background:#fff;color:var(--ink);font-size:12px;font-weight:700;text-decoration:none;transition:all .18s;position:relative}
+.s-act-btn:hover{border-color:var(--acc);color:var(--acc);transform:translateY(-1px);box-shadow:var(--sh-sm)}
+.s-act-btn.user.on{background:#f8fafc;border-color:var(--line)}
+.s-act-avatar{width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800}
+.s-act-badge{position:absolute;top:-6px;left:-6px;background:var(--bad);color:#fff;font-size:10px;font-weight:900;min-width:18px;height:18px;border-radius:10px;display:flex;align-items:center;justify-content:center;padding:0 4px;box-shadow:0 2px 6px rgba(225,29,72,.4)}
+.s-ham-btn{display:inline-flex;align-items:center;gap:8px;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:12px;padding:8px 12px;font-size:12px;font-weight:700;color:var(--ink);cursor:pointer;transition:all .18s}
+.s-ham-btn:hover{border-color:var(--acc);color:var(--acc);background:#fff;transform:translateY(-1px)}
+.s-ham-bars{display:flex;flex-direction:column;gap:3px;width:15px}
+.s-ham-bars span{display:block;height:2px;background:currentColor;border-radius:2px;width:100%}
+.s-ham-bars span:nth-child(2){width:75%}
+
+/* Sub Header Navigation Row */
+.s-head-nav{border-top:1px solid #f1f5f9;background:#fff;font-size:12.5px}
+.s-head-nav-in{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0}
+.s-nav-links{display:flex;align-items:center;gap:16px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.s-nav-links::-webkit-scrollbar{display:none}
+.s-nav-chip.cat{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:10px;background:#f8fafc;border:1px solid #e2e8f0;font-size:12px;font-weight:800;color:var(--ink);cursor:pointer;white-space:nowrap}
+.s-nav-chip.cat:hover{background:#f1f5f9;color:var(--acc)}
+.s-nav-link{color:#475569;font-weight:600;white-space:nowrap;padding:4px 2px;transition:color .15s}
+.s-nav-link:hover{color:var(--acc)}
+.s-nav-ver{display:inline-flex;align-items:center;gap:5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:20px;padding:3px 9px;font-size:11px;font-weight:700;color:#64748b;cursor:pointer}
+.s-nav-ver:hover{color:var(--acc);border-color:var(--acc)}
+
+/* Responsive Header */
+@media(max-width:960px){
+  .s-head-main{flex-wrap:wrap;row-gap:10px;padding:10px 0}
+  .s-head-right{order:1}
+  .s-head-actions{order:2}
+  .s-head-search{order:3;flex-basis:100%;max-width:100%;margin-top:2px}
+  .s-head-nav{display:none}
+  .s-act-lbl{display:none}
+  .s-act-lbl-cart{display:none}
 }
 @media(max-width:480px){
-  .s-head-in{gap:8px}
-  .s-brand b{font-size:15px}
-  .s-ver-btn{padding:3px 8px}
-  .s-ver-pill{font-size:9.5px;padding:1px 5px}
-  .s-hbtn.cart span.lbl{display:none}
-  .s-user-btn span:last-child{display:none}
-  .s-user-btn{padding:7px 8px}
-  .s-ver-spark{display:none}
+  .s-brand-text small{display:none}
+  .s-ham-lbl{display:none}
+  .s-ham-btn{padding:8px}
+  .s-act-btn{padding:7px 9px}
 }
+
+/* REAL DIGIKALA TEMPLATE STYLES */
+body.s-tmpl-digikala{
+  --acc:#ef4056;
+  --acc2:#e6123d;
+  --acc-glow:rgba(239,64,86,.18);
+  --rad:10px;
+}
+body.s-tmpl-digikala .s-header{border-top:3px solid #ef4056}
+body.s-tmpl-digikala .s-search-box input{border-radius:8px;background:#f0f0f1;border-color:transparent}
+body.s-tmpl-digikala .s-search-box input:focus{background:#fff;border-color:#ef4056}
+body.s-tmpl-digikala .s-brand-text b{color:#ef4056}
+body.s-tmpl-digikala .s-act-btn.cart{color:#ef4056;border-color:rgba(239,64,86,.3);background:#fff5f6}
+body.s-tmpl-digikala .s-badge.sale{background:#ef4056;color:#fff;border-radius:9999px;font-weight:900;padding:2px 8px}
+body.s-tmpl-digikala .s-card{border:1px solid #f1f2f4;border-radius:12px;background:#fff}
+body.s-tmpl-digikala .s-card:hover{border-color:#ef4056;box-shadow:0 8px 24px rgba(239,64,86,.12)}
+body.s-tmpl-digikala .s-flash{background:#ef4056;background-image:radial-gradient(circle at 100% 50%, #f87171, #ef4056);border-radius:16px;box-shadow:0 10px 30px rgba(239,64,86,.25);color:#fff}
+body.s-tmpl-digikala .s-buy,body.s-tmpl-digikala .s-add{background:#ef4056;border-radius:8px}
+body.s-tmpl-digikala .s-buy:hover,body.s-tmpl-digikala .s-add:hover{background:#d72940}
+body.s-tmpl-digikala .s-hero{background:linear-gradient(135deg,#18181b 0%,#3b0811 50%,#09090b 100%)}
+body.s-tmpl-digikala .s-hero-badge{background:rgba(239,64,86,.2);border-color:rgba(239,64,86,.4);color:#fca5a5}
 
 /* ---------- hero ---------- */
 .s-hero{position:relative;overflow:hidden;background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 50%,#0f172a 100%);color:#fff;padding:clamp(32px,6vw,56px) 0 clamp(36px,6vw,60px);margin-bottom:24px;border-bottom:1px solid rgba(255,255,255,.08)}
@@ -47042,10 +47124,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--acc);box-shadow:0 0 0
 .s-log-items li::before{content:'•';position:absolute;right:0;color:var(--mut-light)}
 
 /* ---------- sticky mobile cart bar ---------- */
-.s-mcart{position:fixed;bottom:0;left:0;right:0;z-index:70;display:none;align-items:center;justify-content:space-between;gap:10px;padding:11px 16px calc(11px + env(safe-area-inset-bottom));background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;transform:translateY(110%);transition:transform .3s ease;box-shadow:0 -8px 30px rgba(15,23,42,.25)}
-.s-mcart.on{transform:none}
-.s-mcart a{background:rgba(255,255,255,.22);border:1px solid rgba(255,255,255,.4);border-radius:11px;padding:7px 14px;font-weight:800;font-size:12px}
-@media(max-width:960px){.s-mcart{display:flex;bottom:62px !important;z-index:89}}
+
 
 /* ---------- chat & AI widgets ---------- */
 .s-wdocks{position:fixed;left:16px;bottom:16px;display:flex;flex-direction:column;gap:10px;z-index:85}
@@ -47203,43 +47282,85 @@ body.s-pal-dark{--acc:#0f172a;--acc2:#334155}
   </div>
 </div>
 
-<!-- ─────────── هدر سایت (انعطاف‌پذیر در تمام زوم‌ها) ─────────── -->
+<!-- ─────────── هدر اصلی فروشگاه (طراحی مدرن، شیک و تفکیک‌شده) ─────────── -->
 <header class="s-header">
-  <div class="container s-head-in">
-    <button type="button" class="s-ham-btn" id="sHamBtn" onclick="arenaOpenCatDrawer()" aria-label="منوی اصلی و دسته‌بندی‌ها" title="منوی دسته‌بندی‌ها و خدمات">
-      <span class="s-ham-bars"><span></span><span></span><span></span></span>
-      <span class="s-ham-lbl">دسته‌ها و منو</span>
-    </button>
-    <a class="s-brand" href="?arena=shop">
-      <?= $logo ?>
-      <span><?= h($s['name']) ?></span>
-    </a>
-    <button type="button" class="s-ver-btn" onclick="arenaOpenChangelog()" title="مشاهده گزارش تغییرات نسخه ۱.۷">
-      <span class="s-ver-badge">v<?= ARENA_VERSION ?></span>
-      <span class="s-ver-spark">تغییرات 📋</span>
-    </button>
-    <form class="s-search" action="?arena=shop" method="get">
-      <input type="text" name="q" value="<?= h((string)($_GET['q'] ?? '')) ?>" placeholder="جست‌وجوی نام کالا، برند یا دسته‌بندی…">
-      <button class="s-search-btn" type="submit" aria-label="جست‌وجو">🔍</button>
-    </form>
-    <div class="s-head-acts">
+  <div class="container s-head-main">
+    <!-- سمت راست: لوگو و نام برند + دکمه دسته‌ها -->
+    <div class="s-head-right">
+      <button type="button" class="s-ham-btn" onclick="arenaOpenCatDrawer()" aria-label="دسته‌بندی‌ها" title="دسته‌بندی کالاها">
+        <span class="s-ham-bars"><span></span><span></span><span></span></span>
+        <span class="s-ham-lbl">دسته‌بندی‌ها</span>
+      </button>
+      <a class="s-brand" href="?arena=shop">
+        <?= $logo ?>
+        <div class="s-brand-text">
+          <b><?= h($s['name']) ?></b>
+          <small><?= h($s['tagline']) ?></small>
+        </div>
+      </a>
+    </div>
+
+    <!-- مرکز: نوار جست‌وجوی عریض و شیک -->
+    <div class="s-head-search">
+      <form class="s-search-box" action="?arena=shop" method="get">
+        <button class="s-search-ico" type="submit" aria-label="جست‌وجو">🔍</button>
+        <input type="text" name="q" value="<?= h((string)($_GET['q'] ?? '')) ?>" placeholder="جست‌وجو در میان محصولات، دسته‌بندی‌ها و برندها…">
+        <?php if (!empty($_GET['q'])): ?>
+        <a href="?arena=shop" class="s-search-clear" title="پاک کردن جست‌وجو">✕</a>
+        <?php endif; ?>
+      </form>
+    </div>
+
+    <!-- سمت چپ: حساب کاربری و سبد خرید (منظم و متقارن) -->
+    <div class="s-head-actions">
       <?php if ($arenaCust): ?>
-      <a class="s-user-btn" href="?arena=account" title="حساب من">
-        <span class="avatar"><?= h(mb_substr($arenaCust['name'], 0, 1)) ?></span>
-        <span>سلام، <?= h($arenaCust['name']) ?></span>
+      <a class="s-act-btn user on" href="?arena=account" title="حساب کاربری">
+        <span class="s-act-avatar"><?= h(mb_substr($arenaCust['name'], 0, 1)) ?></span>
+        <span class="s-act-lbl"><?= h(mb_substr($arenaCust['name'], 0, 10)) ?></span>
       </a>
       <?php else: ?>
-      <a class="s-user-btn" href="?arena=account" title="ورود به حساب کاربری">
-        <span class="avatar">👤</span>
-        <span>ورود / ثبت‌نام</span>
+      <a class="s-act-btn user" href="?arena=account" title="ورود به حساب کاربری">
+        <span class="s-act-ico">👤</span>
+        <span class="s-act-lbl">ورود | ثبت‌نام</span>
       </a>
       <?php endif; ?>
-      <a class="s-icobtn" href="?arena=wishlist" title="علاقه‌مندی‌ها">
-        💜<span class="s-count" id="wishCount" style="display:none">0</span>
+
+      <span class="s-act-divider"></span>
+
+      <a class="s-act-btn wishlist" href="?arena=wishlist" title="علاقه‌مندی‌ها">
+        <span class="s-act-ico">💜</span>
+        <span class="s-act-badge" id="wishCount" style="display:none">0</span>
       </a>
-      <a class="s-icobtn" href="?arena=cart" title="سبد خرید">
-        🛒<span class="s-count" id="cartCount" style="display:none">0</span>
+
+      <a class="s-act-btn cart" href="?arena=cart" title="سبد خرید">
+        <span class="s-act-ico">🛒</span>
+        <span class="s-act-lbl-cart">سبد</span>
+        <span class="s-act-badge" id="cartCount" style="display:none">0</span>
       </a>
+    </div>
+  </div>
+
+  <!-- نوار دوم هدر: لینک‌های سریع و دسته‌بندی‌ها -->
+  <div class="s-head-nav">
+    <div class="container s-head-nav-in">
+      <div class="s-nav-links">
+        <button type="button" class="s-nav-chip cat" onclick="arenaOpenCatDrawer()">
+          <span style="font-size:14px">🗂️</span>
+          <span>دسته‌بندی کالاها</span>
+          <span style="font-size:9px;opacity:.7">▼</span>
+        </button>
+        <a class="s-nav-link" href="?arena=shop#flashBanner">⚡ شگفت‌انگیزها</a>
+        <a class="s-nav-link" href="?arena=shop&sort=popular">🔥 پرفروش‌ترین‌ها</a>
+        <a class="s-nav-link" href="?arena=shop&sort=newest">🆕 جدیدترین‌ها</a>
+        <a class="s-nav-link" href="?arena=shop&sort=cheap">💰 ارزان‌ترین‌ها</a>
+        <a class="s-nav-link" href="?arena=track">🔎 پیگیری سفارش</a>
+      </div>
+      <div class="s-nav-side">
+        <button type="button" class="s-nav-ver" onclick="arenaOpenChangelog()" title="مشاهده تغییرات نسخه <?= ARENA_VERSION ?>">
+          <span>نسخه <?= ARENA_VERSION ?></span>
+          <small>📋</small>
+        </button>
+      </div>
     </div>
   </div>
 </header>
@@ -47456,17 +47577,7 @@ body.s-pal-dark{--acc:#0f172a;--acc2:#334155}
       </div>
     </div>
 
-    <!-- انتخاب سریع قالب ویترین -->
-    <div class="s-drawer-sect">
-      <div class="s-drawer-sect-title">🎨 انتخاب سریع تم و قالب ویترین</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
-        <button type="button" class="s-theme-tag" onclick="arenaSetLiveTheme('digikala')">🔴 دیجی‌کالا</button>
-        <button type="button" class="s-theme-tag" onclick="arenaSetLiveTheme('snapp')">🔵 اسنپ‌شاپ</button>
-        <button type="button" class="s-theme-tag" onclick="arenaSetLiveTheme('basalam')">🟠 باسلام</button>
-        <button type="button" class="s-theme-tag" onclick="arenaSetLiveTheme('techno')">🟡 تکنولایف</button>
-        <button type="button" class="s-theme-tag" onclick="arenaSetLiveTheme('saba')">🟣 صبا مدرن</button>
-      </div>
-    </div>
+
 
     <!-- اطلاعات تماس و ساعات پشتیبانی -->
     <div class="s-drawer-sect" style="background:#f8fafc;font-size:11px;color:var(--mut)">
@@ -47575,7 +47686,7 @@ body.s-pal-dark{--acc:#0f172a;--acc2:#334155}
   </div>
 </div>
 
-<div class="s-mcart" id="sMcart"><span>🛒 <b>سبد خرید</b> · <span id="sMcartN">0 کالا</span></span><a href="?arena=cart">مشاهده ←</a></div>
+
 
 <!-- ─────────── چت پشتیبانی آنلاین و دستیار هوشمند ─────────── -->
 <div class="s-wdocks">
@@ -47632,8 +47743,7 @@ function updateBadges(){
   const wc=$('wishCount');if(wc){wc.textContent=wn;wc.style.display=wn?'flex':'none';}
   const bcc=$('bnavCartBadge');if(bcc){bcc.textContent=n;bcc.style.display=n?'flex':'none';}
   const bwc=$('bnavWishBadge');if(bwc){bwc.textContent=wn;bwc.style.display=wn?'flex':'none';}
-  const mb=$('sMcart');if(mb){mb.classList.toggle('on',n>0);const el=$('sMcartN');if(el)el.textContent=n+' کالا';}
-  const wd=$('sWdocks');if(wd){wd.classList.toggle('up',n>0);}
+  /* sMcart removed to not block support chat */
 }
 window.addToCart=function(uid,btn){
   const c=loadCart();c[uid]=(+c[uid]||0)+1;saveCart(c);
@@ -48060,14 +48170,7 @@ function arenaShopPageHome(array $get): array {
     </div>
     <form method="get" action="?arena=shop" style="display:flex;gap:8px">
       <input type="hidden" name="q" value="<?= h($get['q']) ?>">
-      <select name="src" onchange="this.form.submit()">
-        <option value="prof" <?= $get['src'] === 'prof' ? 'selected' : '' ?>>🟣 پروفایل‌ها (پیش‌فرض)</option>
-        <option value="all" <?= $get['src'] === 'all' ? 'selected' : '' ?>>🌐 همه منابع</option>
-        <option value="own" <?= $get['src'] === 'own' ? 'selected' : '' ?>>🏠 خودِ سایت</option>
-        <option value="woo" <?= $get['src'] === 'woo' ? 'selected' : '' ?>>🔵 ووکامرس مقصد</option>
-        <option value="bsl" <?= $get['src'] === 'bsl' ? 'selected' : '' ?>>🟠 باسلام</option>
-      </select>
-      <select name="sort" onchange="this.form.submit()">
+      <select name="sort" onchange="this.form.submit()" style="min-width:140px">
         <option value="" <?= $get['sort'] === '' ? 'selected' : '' ?>>چیدمان کالاها</option>
         <option value="cheap" <?= $get['sort'] === 'cheap' ? 'selected' : '' ?>>ارزان‌ترین</option>
         <option value="price" <?= $get['sort'] === 'price' ? 'selected' : '' ?>>گران‌ترین</option>
