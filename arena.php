@@ -45649,6 +45649,7 @@ function arenaStats(): array {
     $ev = arenaJson(ARENA_EVENTS_FILE, ['events' => []]);
     return [
         'ok' => true,
+        'admin_user' => (string)arenaAdminCreds()['user'],
         'products' => ['own' => $by['own'], 'woo' => $by['woo'], 'bsl' => $by['bsl'], 'total' => count($cat)],
         'orders' => ['total' => count($orders), 'new' => $newC, 'revenue' => $revenue],
         'chat' => ['customers' => $cust, 'unread' => $unread],
@@ -45733,16 +45734,24 @@ function arenaUploadImage(array $file): array {
  *   ?arena=asset&file=...                   → تصاویرِ آپلودشده
  * ===================================================================== */
 
-if (isset($_GET['arena']) && $_GET['arena'] !== '') {
+/* v1.1: ورودِ پیش‌فرض = ویترینِ فروشگاه؛ پنلِ ادمین (اسکرپر+تنظیمات) = ?arena=panel با ورود */
+if (PHP_SAPI !== 'cli') {
+    $arenaParam = isset($_GET['arena']) && $_GET['arena'] !== '' ? strtolower((string)$_GET['arena']) : '';
+    $arenaServePanel = false;
+    if ($arenaParam === '') {
+        /* با زدنِ آدرسِ سایت، مستقیم واردِ ویترین می‌شویم */
+        arenaEnsureDirs();
+        arenaShopPage('shop', []);
+        exit;
+    }
     arenaEnsureDirs();
-    $arenaPage = strtolower((string)$_GET['arena']);
     header('X-Content-Type-Options: nosniff');
-    if ($arenaPage === 'api') {
+    if ($arenaParam === 'api') {
         header('Content-Type: application/json; charset=UTF-8');
         echo arenaApiJson();
         exit;
     }
-    if ($arenaPage === 'asset') {
+    if ($arenaParam === 'asset') {
         $f = basename((string)($_GET['file'] ?? ''));
         $path = ARENA_UPLOADS_DIR . '/' . $f;
         if ($f !== '' && is_file($path)) {
@@ -45755,8 +45764,17 @@ if (isset($_GET['arena']) && $_GET['arena'] !== '') {
         http_response_code(404);
         exit;
     }
-    arenaShopPage($arenaPage, $_GET);
-    exit;
+    if ($arenaParam === 'login')  { arenaLoginPage(); exit; }
+    if ($arenaParam === 'logout') { arenaDoLogout();  exit; }
+    if ($arenaParam === 'panel') {
+        if (arenaIsAdmin()) {
+            $arenaServePanel = true;   /* ادامه تا پنلِ اصلی (اسکرپر/تنظیمات/…) در پایین */
+        } else {
+            header('Location: ?arena=login');
+            exit;
+        }
+    }
+    if (!$arenaServePanel) { arenaShopPage($arenaParam, $_GET); exit; }
 }
 
 function arenaEnsureDirs(): void {
@@ -45765,8 +45783,120 @@ function arenaEnsureDirs(): void {
     }
 }
 
+/* --------------------------- ورودِ ادمین (v1.1) --------------------------- */
+const ARENA_ADMIN_FILE = __DIR__ . '/arena_admin.json';
+
+function arenaAdminCreds(): array {
+    $d = is_file(ARENA_ADMIN_FILE) ? (json_decode((string)@file_get_contents(ARENA_ADMIN_FILE), true) ?: []) : [];
+    if (!is_array($d)) $d = [];
+    if (empty($d['user']) || empty($d['hash'])) {
+        $d = ['user' => 'admin', 'hash' => password_hash('sabashop1405', PASSWORD_DEFAULT), 'created' => time()];
+        @file_put_contents(ARENA_ADMIN_FILE, json_encode($d, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX);
+    }
+    return $d;
+}
+
+function arenaIsAdmin(): bool {
+    if (PHP_SAPI === 'cli' || headers_sent()) return false;
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        session_name('ARENA_ADM_' . substr(md5(__DIR__), 0, 8));
+        session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax']);
+        @session_start();
+    }
+    return !empty($_SESSION['arena_admin']);
+}
+
+function arenaDoLogout(): void {
+    if (session_status() === PHP_SESSION_ACTIVE) { @session_unset(); @session_destroy(); }
+    header('Location: ?arena=shop');
+    exit;
+}
+
+function arenaLoginPage(): void {
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    $store = (string)(arenaSettings()['name'] ?? 'فروشگاه');
+    $err = '';
+    if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+        if (!headers_sent() && session_status() !== PHP_SESSION_ACTIVE) {
+            session_name('ARENA_ADM_' . substr(md5(__DIR__), 0, 8));
+            session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax']);
+            @session_start();
+        }
+        $lock = is_array($_SESSION['arena_login_lock'] ?? null) ? $_SESSION['arena_login_lock'] : ['fails' => 0, 'until' => 0];
+        if ((int)$lock['until'] > time()) {
+            $err = 'تلاش‌های ناموفق زیاد شد. لطفاً ' . (int)max(1, ceil(((int)$lock['until'] - time()) / 60)) . ' دقیقه دیگر تلاش کنید.';
+        } else {
+            $u = trim((string)($_POST['u'] ?? ''));
+            $p = (string)($_POST['p'] ?? '');
+            $c = arenaAdminCreds();
+            if ($u !== '' && hash_equals((string)$c['user'], $u) && password_verify($p, (string)$c['hash'])) {
+                if (session_status() === PHP_SESSION_ACTIVE) @session_regenerate_id(true);
+                $_SESSION['arena_admin'] = true;
+                $_SESSION['arena_login_lock'] = ['fails' => 0, 'until' => 0];
+                arenaLog('login', 'ورودِ ادمین به پنل فروشگاه');
+                header('Location: ?arena=panel');
+                exit;
+            }
+            $lock['fails'] = (int)($lock['fails'] ?? 0) + 1;
+            if ($lock['fails'] >= 8) $lock = ['fails' => 0, 'until' => time() + 600];
+            $_SESSION['arena_login_lock'] = $lock;
+            $err = 'نام کاربری یا رمز عبور اشتباه است';
+        }
+    }
+    ?><!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ورود ادمین — <?= h($store) ?></title>
+<link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0}
+body{font-family:Vazirmatn,Tahoma,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(1000px 600px at 80% -10%,#1e3a8a55,transparent),radial-gradient(800px 500px at 0% 110%,#7c3aed33,transparent),#0b1020;padding:20px}
+.card{width:100%;max-width:380px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);backdrop-filter:blur(16px);border-radius:22px;padding:34px 28px;text-align:center;box-shadow:0 30px 80px rgba(0,0,0,.5)}
+.lg-logo{width:64px;height:64px;margin:0 auto 14px;border-radius:20px;background:linear-gradient(135deg,#3b82f6,#a855f7);display:flex;align-items:center;justify-content:center;font-size:30px;box-shadow:0 12px 30px rgba(99,102,241,.4)}
+h1{color:#fff;font-size:20px;margin-bottom:4px}
+.sub{color:#94a3b8;font-size:12.5px;margin-bottom:22px}
+input{width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px 14px;color:#fff;font-size:13.5px;font-family:inherit;margin-bottom:10px;outline:none;transition:border .15s}
+input:focus{border-color:#60a5fa}
+button{width:100%;border:0;border-radius:12px;padding:13px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff;font-weight:800;font-size:14px;font-family:inherit;cursor:pointer;margin-top:4px;transition:filter .15s}
+button:hover{filter:brightness(1.1)}
+.lg-err{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);color:#fca5a5;font-size:12px;border-radius:10px;padding:9px 12px;margin-bottom:12px}
+.back{display:inline-block;margin-top:18px;color:#94a3b8;font-size:12px}
+.back:hover{color:#fff}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="lg-logo">🏬</div>
+  <h1><?= h($store) ?></h1>
+  <div class="sub">ورود به پنلِ مدیریت (اسکرپر و فروشگاه)</div>
+  <?php if ($err !== ''): ?><div class="lg-err"><?= h($err) ?></div><?php endif; ?>
+  <form method="post" action="?arena=login">
+    <input name="u" placeholder="نام کاربری" dir="ltr" autocomplete="username" required autofocus>
+    <input name="p" type="password" placeholder="رمز عبور" dir="ltr" autocomplete="current-password" required>
+    <button type="submit">🔓 ورود</button>
+  </form>
+  <a class="back" href="?arena=shop">← بازگشت به فروشگاه</a>
+</div>
+</body>
+</html><?php
+}
+
+function arenaAdminDos(): array {
+    return ['shop_stats', 'selftest', 'products_list', 'product_save', 'product_delete', 'override_save',
+            'cache_woo', 'cache_bsl', 'orders_list', 'order_status', 'coupons_list', 'coupon_save',
+            'coupon_delete', 'chat_sessions', 'chat_messages', 'chat_admin_send', 'chat_mark_read',
+            'ai_test', 'plugins_list', 'plugin_upload', 'plugin_toggle', 'plugin_delete', 'plugin_code',
+            'wp_search', 'wp_info', 'wp_install', 'wp_installed', 'wp_delete', 'settings_save',
+            'backup', 'restore', 'image_upload', 'admin_save'];
+}
+
 function arenaApiJson(): string {
     $do = (string)($_GET['do'] ?? ($_POST['do'] ?? ''));
+    if (in_array($do, arenaAdminDos(), true) && !arenaIsAdmin()) {
+        return json_encode(['ok' => false, 'error' => 'برای این عمل باید با حسابِ ادمین وارد شده باشید'], JSON_UNESCAPED_UNICODE);
+    }
     $in = function (string $k) {
         if (isset($_POST[$k])) return $_POST[$k];
         $j = json_decode((string)(isset($_GET['json']) ? $_GET['json'] : ''), true);
@@ -46121,6 +46251,17 @@ function arenaApiJson(): string {
                 $ok = arenaSettingsSave($jsonIn);
                 arenaLog('settings', 'تنظیمات فروشگاه ذخیره شد');
                 return json_encode(['ok' => $ok], JSON_UNESCAPED_UNICODE);
+            case 'admin_save':
+                $u = trim((string)($jsonIn['user'] ?? ''));
+                $p = (string)($jsonIn['pass'] ?? '');
+                if ($u === '') return json_encode(['ok' => false, 'error' => 'نام کاربری نمی‌تواند خالی باشد'], JSON_UNESCAPED_UNICODE);
+                $c = arenaAdminCreds();
+                $c['user'] = $u;
+                if ($p !== '') $c['hash'] = password_hash($p, PASSWORD_DEFAULT);
+                $c['updated'] = time();
+                @file_put_contents(ARENA_ADMIN_FILE, json_encode($c, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX);
+                arenaLog('login', 'تغییرِ حسابِ ادمین (کاربر: ' . $u . ')');
+                return json_encode(['ok' => true, 'user' => $u], JSON_UNESCAPED_UNICODE);
             case 'backup':
                 return json_encode(['ok' => true, 'data' => arenaBackupPayload()], JSON_UNESCAPED_UNICODE);
             case 'restore':
@@ -46440,6 +46581,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--acc)}
 <div class="container"><div class="s-foot-bar">
   <?= $foot['html'] ?>
   ساخته‌شده با <b>arena.php</b> — فروشگاه تک‌فایلیِ همگام‌سازی‌شده با ووکامرس و باسلام
+  <span style="margin-right:10px">· <a href="?arena=panel" style="color:#64748b" onmouseover="this.style.color='#cbd5e1'" onmouseout="this.style.color='#64748b'">🔐 مدیریت</a></span>
 </div></div>
 </footer>
 
@@ -48097,12 +48239,6 @@ html[data-skin="gloss"] .progress-bar{
         <span class="t-icon">📥</span>
         <span class="t-ico3d" aria-hidden="true">🛍️</span>
         <span class="t-label">درون‌ریزی</span>
-    </button>
-    <button class="main-tab" data-tab="shop" onclick="switchMainTab('shop')">
-        <span class="t-icon">🏬</span>
-        <span class="t-ico3d" aria-hidden="true">🏬</span>
-        <span class="t-label">فروشگاه</span>
-        <span class="badge hidden" id="shopBadge">0</span>
     </button>
 </div>
 
@@ -50995,18 +51131,16 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <div class="si"><b id="impF" style="color:#f87171">۰</b><span>خطا</span></div>
         </div>
     </div>
-</div>
 
-<div id="toast" class="toast"></div>
+    <!-- ═══════ لایهٔ فروشگاهیِ arena (v1.1): فعلاً داخلِ تبِ درون‌ریزی ═══════ -->
+    <div style="margin-top:24px;padding-top:18px;border-top:1px dashed #334155">
 
-</div>
-
-
-<div class="tab-pane" id="pane-shop">
-    <div class="section-title">🏬 مدیریت فروشگاه <span style="font-size:10px;color:#64748b;font-weight:400">— لایهٔ arena.php (تک‌فایلی، بدون دردسر همگام‌سازی)</span></div>
+<div class="section-title">🏬 مدیریت فروشگاه <span class="hidden" id="shopBadge" style="display:inline-block;vertical-align:middle;background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:10px;margin-left:6px">0</span> <span style="font-size:10px;color:#64748b;font-weight:400">— لایهٔ arena.php · فعلاً در تبِ درون‌ریزی</span></div>
 
     <div class="shop-head">
         <a class="btn btn-blue" target="_blank" href="?arena=shop">🖥 باز کردن ویترین در تبِ تازه</a>
+        <a class="btn btn-gray" href="?arena=shop">🏪 فروشگاه</a>
+        <a class="btn btn-red" href="?arena=logout">⎋ خروج از ادمین</a>
         <button class="btn btn-gray" onclick="shopSelftest()">🩺 خودآزمایی</button>
         <span id="shopAiChip" class="shop-badge-src woo" style="display:none">🤖</span>
     </div>
@@ -51180,9 +51314,12 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <div><label>کدِ تخفیفِ خوش‌آمد (خودکار ساخته می‌شود)</label><input id="set_welcome_coupon" type="text" dir="ltr"></div>
             <div><label>پاسخ خودکارِ AI: فعال</label><div><span class="shop-toggle on" id="set_ai_auto" onclick="this.classList.toggle('on')"></span></div></div>
             <div class="full"><label>یادداشتِ پایینِ صفحهٔ ثبتِ سفارش</label><input id="set_checkout_note" type="text"></div>
+            <div><label>🔐 نام کاربریِ ادمین</label><input id="adm_user" type="text" dir="ltr"></div>
+            <div><label>رمزِ تازه (خالی = بدون تغییر)</label><input id="adm_pass" type="password" dir="ltr"></div>
         </div>
         <div style="max-width:760px;display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
             <button class="btn btn-green" onclick="shopSettingsSave()">💾 ذخیرهٔ تنظیمات</button>
+            <button class="btn btn-gray" onclick="shopAdminSave()">🔐 ذخیره حسابِ ادمین</button>
             <button class="btn btn-gray" onclick="shopBackup()">📦 دانلودِ نسخهٔ پشتیبان</button>
             <input type="file" id="shopRestoreFile" accept=".json" style="font-size:11px">
             <button class="btn btn-gray" onclick="shopRestore()">♻ بازیابی</button>
@@ -51211,7 +51348,15 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <div id="shopModalBody"></div>
         </div>
     </div>
+    </div>
 </div>
+
+<div id="toast" class="toast"></div>
+
+</div>
+
+
+
 
 <script>
 (function(){
@@ -51748,6 +51893,7 @@ function bslSelectProfileCat(catId){bslProfileSelectedCatId=catId;$('bslProfileC
         setTimeout(() => switchView(rvSavedView()), 20);
     }
     if (want) {
+        if (want === 'shop') want = 'import';   /* v1.1: مدیریتِ فروشگاه به تبِ درون‌ریزی منتقل شد */
         setTimeout(() => switchMainTab(want), 50);
     }
 })();
@@ -72344,6 +72490,7 @@ window.shopSettingsLoad = function(){
   set('set_phone', s.contact.phone); set('set_telegram', s.contact.telegram); set('set_whatsapp', s.contact.whatsapp);
   set('set_support_hours', s.support_hours); set('set_welcome_coupon', s.welcome_coupon);
   set('set_checkout_note', s.checkout_note);
+  if ($s('adm_user')) $s('adm_user').value = shopState.stats.admin_user || '';
   $s('set_flash_on').classList.toggle('on', !!s.flash.on);
   $s('set_pay_delivery').classList.toggle('on', !!s.payment.on_delivery);
   $s('set_ai_auto').classList.toggle('on', !!s.ai_auto);
@@ -72390,6 +72537,15 @@ window.shopCouponDelete = async function(code){
   await shopApi('coupon_delete', { code: code }, 'POST');
   shopLoadCoupons();
 };
+window.shopAdminSave = async function(){
+  var u = $s('adm_user') ? $s('adm_user').value : '';
+  var p = $s('adm_pass') ? $s('adm_pass').value : '';
+  if (!u.trim()) { shopToast('نام کاربری نمی‌تواند خالی باشد', true); return; }
+  var r = await shopApi('admin_save', { user: u.trim(), pass: p }, 'POST');
+  if (r && r.ok) { shopToast('✓ حسابِ ادمین ذخیره شد'); if ($s('adm_pass')) $s('adm_pass').value = ''; }
+  else shopToast((r && r.error) || 'خطا', true);
+};
+
 window.shopBackup = async function(){
   shopToast('در حال ساختِ نسخهٔ پشتیبان…');
   var d = await shopApi('backup');
