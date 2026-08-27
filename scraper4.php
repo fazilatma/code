@@ -285,7 +285,7 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.90';
+const APP_VERSION = '10.91';
 const APP_VERSION_DATE = '1405/06/06';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
@@ -24469,7 +24469,15 @@ if (isset($_GET['selftest'])) {
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
 
-        /* ==== ۱۰۴ (v10.90) ==== */
+            /* ==== ۱۰۵ (v10.91) ==== */
+    $add('10.91', 'نسخهٔ ۱۰.۹۱',
+         str_contains($selfSrc, "const APP_VERSION = '10.91';"));
+    $add('10.91', 'رفع متن دوبارا رمزگذاریشده در دراپِداون',
+         strpos($selfSrc, 'انتخاب غرفه‌ها…') !== false);
+    $add('10.91', 'ارسال به غرفهٔ انتخابی count>=1',
+         strpos($selfSrc, 'if(count($fanoutShops)>=1){') !== false);
+
+    /* ==== ۱۰۴ (v10.90) ==== */
     $add('10.90', 'نسخهٔ ۱۰.۹۰',
          str_contains($selfSrc, "const APP_VERSION = '10.90';"));
     $add('10.90', 'safeFetchJson + ob_start/ob_clean',
@@ -38678,7 +38686,11 @@ if(is_array($_selectedVids)&&count($_selectedVids)>0){
 } else {
     $fanoutShops=!empty($_POST['send_all_shops'])?bslFanoutShops($cn):[];
 }
-if(count($fanoutShops)>1){
+// v10.91: اگر کاربر غرفههای خاصی انتخاب کرده ولی هیچ غرفهای یافت نشد
+if(is_array($_selectedVids)&&count($_selectedVids)>0&&count($fanoutShops)===0){
+    echo json_encode(['ok'=>false,'error'=>'غرفهٔ انتخابی، در تنظیمات پیدا نشد'],JSON_UNESCAPED_UNICODE);exit;
+}
+if(count($fanoutShops)>=1){
 $fanStatus=$startImm?'running':'waiting';
 $fanFirst=true;
 foreach($fanoutShops as $__fs){
@@ -48117,16 +48129,16 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
       <button type="button" id="bsShopDropBtn"
         onclick="bslToggleShopDrop()"
         style="display:flex;align-items:center;gap:6px;padding:5px 10px;background:#1e293b;border:1px solid #475569;border-radius:7px;color:#e2e8f0;font-size:11px;cursor:pointer;min-width:160px;justify-content:space-between">
-        <span id="bsShopDropLabel">اÙØªØ®Ø§Ø¨ ØºØ±ÙÙâÙØ§â¦</span>
+        <span id="bsShopDropLabel">انتخاب غرفه‌ها…</span>
         <span style="font-size:9px;opacity:.7">▼</span>
       </button>
       <div id="bsShopDropMenu"
         style="display:none;position:fixed;min-width:240px;max-width:320px;background:#1e293b;border:1px solid #475569;border-radius:8px;box-shadow:0 12px 32px #000a;z-index:2147483647;padding:6px 0">
         <div id="bsShopDropList" style="max-height:260px;overflow-y:auto"></div>
         <div style="border-top:1px solid #334155;margin-top:4px;padding:6px 10px;display:flex;gap:6px">
-          <button class="btn" onclick="bslShopPickAll(true)" style="flex:1;font-size:10px;padding:3px 0">✔ هÙÙ</button>
-          <button class="btn btn-gray" onclick="bslShopPickAll(false)" style="flex:1;font-size:10px;padding:3px 0">✕ هÛÚâÚ©Ø¯Ø§Ù</button>
-          <button class="btn btn-cyan" onclick="bslCloseShopDrop()" style="flex:1;font-size:10px;padding:3px 0">✔️ تØ§ÛÛØ¯</button>
+          <button class="btn" onclick="bslShopPickAll(true)" style="flex:1;font-size:10px;padding:3px 0">✔ همه</button>
+          <button class="btn btn-gray" onclick="bslShopPickAll(false)" style="flex:1;font-size:10px;padding:3px 0">✕ هیچ‌کدام</button>
+          <button class="btn btn-cyan" onclick="bslCloseShopDrop()" style="flex:1;font-size:10px;padding:3px 0">✔️ تایید</button>
         </div>
       </div>
     </div>
@@ -53134,6 +53146,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.91', t:'رفع باگ دراپ‌داون غرفه + ارسال به غرفهٔ انتخابی', items:[
+    '🐛 متن دوبار-رمزگذاری‌شده در دراپ‌داون انتخاب غرفه رفع شد (انتخاب غرفه‌ها…، همه، هیچکدام، تایید)',
+    '🐛 شرط count($fanoutShops)>1 → >=1: انتخاب یک غرفهٔ خاص دیگر برای همه ارسال نمی‌کند',
+    '🛡 اگر هیچ غرفهٔ انتخابی در تنظیمات یافت نشد، خطای واضح نشان می‌دهد',
+  ]},
   {v:'10.90', t:'رفع خطای JSON + کش هش محصولات', items:[
     '🔧 ob_start() در ابتدای PHP — جلوگیری از خروجی ناخواسته HTML قبل از JSON',
     '🔧 ob_clean() در handlerهای bsl_catalog / remote_map / queue_watchdog / save_connections',
