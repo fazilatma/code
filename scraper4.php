@@ -47912,7 +47912,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         <span style="font-size:9px;opacity:.7">▼</span>
       </button>
       <div id="bsShopDropMenu"
-        style="display:none;position:absolute;top:calc(100% + 4px);right:0;min-width:240px;max-width:320px;background:#1e293b;border:1px solid #475569;border-radius:8px;box-shadow:0 8px 24px #0008;z-index:9999;padding:6px 0">
+        style="display:none;position:fixed;min-width:240px;max-width:320px;background:#1e293b;border:1px solid #475569;border-radius:8px;box-shadow:0 12px 32px #000a;z-index:2147483647;padding:6px 0">
         <div id="bsShopDropList" style="max-height:260px;overflow-y:auto"></div>
         <div style="border-top:1px solid #334155;margin-top:4px;padding:6px 10px;display:flex;gap:6px">
           <button class="btn" onclick="bslShopPickAll(true)" style="flex:1;font-size:10px;padding:3px 0">✔ هÙÙ</button>
@@ -48428,15 +48428,37 @@ function bslBuildShopDrop(){
     });
     list.innerHTML=h;
 }
+function bslPositionShopDrop(){
+    const btn=$('bsShopDropBtn'), menu=$('bsShopDropMenu'); if(!btn||!menu)return;
+    const r=btn.getBoundingClientRect();
+    const menuH=menu.offsetHeight||300;
+    const spaceBelow=window.innerHeight-r.bottom;
+    const spaceAbove=r.top;
+    // prefer below; flip above if not enough room
+    if(spaceBelow>=menuH+8||spaceBelow>=spaceAbove){
+        menu.style.top=(r.bottom+4)+'px';
+    } else {
+        menu.style.top=Math.max(4,(r.top-menuH-4))+'px';
+    }
+    // align right edge with button right edge; clamp to viewport
+    const menuW=Math.max(240,Math.min(320,window.innerWidth-16));
+    menu.style.width=menuW+'px';
+    let left=r.right-menuW;
+    if(left<8)left=8;
+    if(left+menuW>window.innerWidth-8)left=window.innerWidth-menuW-8;
+    menu.style.left=left+'px';
+}
 function bslToggleShopDrop(){
     const menu=$('bsShopDropMenu'); if(!menu)return;
     if(menu.style.display==='none'||!menu.style.display){
         bslBuildShopDrop();
         menu.style.display='block';
-        // close on outside click
+        bslPositionShopDrop();
+        // close on outside click or scroll
         setTimeout(function(){
-            function outsideClick(e){if(!$('bsShopDropWrap').contains(e.target)){bslCloseShopDrop();document.removeEventListener('click',outsideClick);}}
+            function outsideClick(e){if(!$('bsShopDropWrap')?.contains(e.target)&&!menu.contains(e.target)){bslCloseShopDrop();document.removeEventListener('click',outsideClick);window.removeEventListener('scroll',outsideClick,true);}}
             document.addEventListener('click',outsideClick);
+            window.addEventListener('scroll',outsideClick,true);
         },10);
     } else { bslCloseShopDrop(); }
 }
