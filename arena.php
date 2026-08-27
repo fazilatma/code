@@ -44684,6 +44684,7 @@ const ARENA_UPLOADS_DIR   = __DIR__ . '/arena_uploads';
 const ARENA_PLUGINS_DIR   = __DIR__ . '/arena_plugins';
 const ARENA_WP_DIR        = __DIR__ . '/arena_wp_plugins';
 const ARENA_WP_DL_DIR     = __DIR__ . '/arena_wp_downloads';
+const ARENA_TRACK_STATE   = __DIR__ . '/arena_track_state.json';
 const ARENA_ADMIN_FILE  = __DIR__ . '/arena_admin.json';
 
 /* ------------------------------ storage ---------------------------- */
@@ -44715,6 +44716,10 @@ function arenaSettings(): array {
         'currency'        => 'تومان',
         'shipping'        => 25000,
         'free_shipping_over' => 500000,
+        'vitrine_price_dest' => 'auto',
+        'events'       => ['product_view' => 1, 'add_cart' => 1, 'remove_cart' => 1, 'cart_view' => 1,
+                           'checkout_start' => 1, 'order' => 1, 'wish_add' => 1, 'review_add' => 1,
+                           'chat_msg' => 1, 'search' => 0, 'track' => 0],
         'flash'           => ['on' => false, 'start' => 0, 'end' => 0, 'pct' => 10],
         'payment'         => ['on_delivery' => true, 'card_number' => '', 'card_name' => '', 'payment_link' => '', 'note' => ''],
         'contact'         => ['phone' => '', 'telegram' => '', 'whatsapp' => ''],
@@ -44833,6 +44838,81 @@ function arenaApplyOverride(array $p, ?array $ov): array {
     return $p;
 }
 
+/* v1.5: ضرایبِ تعدیلِ هدف برای قیمتِ کالاهای پروفایل در ویترین */
+function arenaVitrineDest(): string {
+    static $m = null;
+    if ($m !== null) return $m;
+    $mode = (string)(arenaSettings()['vitrine_price_dest'] ?? 'auto');
+    if ($mode === 'none' || $mode === '') return $m = '';
+    $cn = loadConnections();
+    $wooOk = !empty($cn['woocommerce']['enabled']) && (string)($cn['woocommerce']['store_url'] ?? '') !== '' && (string)($cn['woocommerce']['consumer_key'] ?? '') !== '';
+    $bslOk = !empty($cn['basalam']['enabled']) && (string)($cn['basalam']['token'] ?? '') !== '' && (int)($cn['basalam']['vendor_id'] ?? 0) > 0;
+    if ($mode === 'woo') return $m = 'woocommerce';
+    if ($mode === 'bsl') return $m = 'basalam';
+    return $m = ($bslOk ? 'basalam' : ($wooOk ? 'woocommerce' : ''));
+}
+
+/* ---------------- v1.5: رویدادهای فروشگاه → پیام‌رسان‌ها ---------------- */
+function arenaTrackDefs(): array {
+    return [
+        'product_view'   => ['icon' => '👁', 'title' => 'مشاهدهٔ محصول', 'cool' => 600],
+        'add_cart'       => ['icon' => '🛒', 'title' => 'افزودن به سبد', 'cool' => 20],
+        'remove_cart'    => ['icon' => '🗑', 'title' => 'حذف از سبد', 'cool' => 20],
+        'cart_view'      => ['icon' => '🧺', 'title' => 'مشاهدهٔ سبد خرید', 'cool' => 900],
+        'checkout_start' => ['icon' => '📝', 'title' => 'شروعِ فرآیندِ خرید', 'cool' => 600],
+        'order'          => ['icon' => '🛒', 'title' => 'ثبت سفارش', 'cool' => 0],
+        'wish_add'       => ['icon' => '💜', 'title' => 'اعلامِ علاقه‌مندی', 'cool' => 30],
+        'review_add'     => ['icon' => '⭐', 'title' => 'ثبتِ دیدگاه', 'cool' => 0],
+        'chat_msg'       => ['icon' => '💬', 'title' => 'پیامِ مشتری', 'cool' => 30],
+        'search'         => ['icon' => '🔍', 'title' => 'جست‌وجوی مشتری', 'cool' => 1800],
+        'track'          => ['icon' => '📦', 'title' => 'پیگیریِ سفارش', 'cool' => 1800],
+    ];
+}
+function arenaEventEnabled(string $name): bool {
+    if (!isset(arenaTrackDefs()[$name])) return false;
+    $ev = arenaSettings()['events'] ?? [];
+    if (!is_array($ev) || !array_key_exists($name, $ev)) return true;
+    return !empty($ev[$name]);
+}
+function arenaTrackEvent(string $name, array $data): array {
+    $def = arenaTrackDefs();
+    if (!isset($def[$name])) return ['ok' => false, 'error' => 'رویداد نامعتبر'];
+    if (!arenaEventEnabled($name)) return ['ok' => true, 'skipped' => 'off'];
+    $now = time();
+    $ip  = (string)($_SERVER['REMOTE_ADDR'] ?? 'cli');
+    $st  = arenaJson(ARENA_TRACK_STATE, []);
+    if (!is_array($st)) $st = [];
+    $k = $ip . '|' . $name;
+    if (isset($st[$k]) && ($now - (int)$st[$k]) < (int)$def[$name]['cool']) return ['ok' => true, 'skipped' => 'cooldown'];
+    $st[$k] = $now;
+    foreach ($st as $kk => $tt) if ($now - (int)$tt > 3600) unset($st[$kk]);
+    arenaSave(ARENA_TRACK_STATE, $st);
+    $title = mb_substr(trim((string)($data['title'] ?? '')), 0, 60);
+    $cust  = mb_substr(trim((string)($data['name'] ?? '')), 0, 40);
+    $lines = [];
+    if ($title !== '') $lines[] = $def[$name]['icon'] . ' ' . $title;
+    if (!empty($data['price'])) $lines[] = '💰 ' . arenaPrice((int)extractPriceNum($data['price']));
+    if (!empty($data['qty']))   $lines[] = '🔢 تعداد: ' . arenaToman((int)$data['qty']);
+    if (!empty($data['count'])) $lines[] = '🧺 ' . arenaToman((int)$data['count']) . ' کالا';
+    if (!empty($data['total'])) $lines[] = '💰 مبلغ: ' . arenaPrice((int)extractPriceNum($data['total']));
+    if (!empty($data['q']))     $lines[] = '🔍 «' . mb_substr(trim((string)$data['q']), 0, 40) . '»';
+    $body = (count($lines) ? implode("
+", $lines) . "
+" : '')
+          . (($cust !== '') ? '👤 مشتری: ' . $cust . "
+" : '')
+          . '🌐 ' . $ip;
+    $head = mb_substr($def[$name]['title'] . ($title !== '' ? ' — ' . $title : ''), 0, 80);
+    $delivery = [];
+    try {
+        $cn = loadConnections();
+        if (notifPrereq($cn) === null) $delivery = notifSend($cn, $def[$name]['icon'] . ' ' . $head . "
+" . $body, 'arena_shop');
+    } catch (\Throwable $e) { $delivery = ['error' => mb_substr((string)$e->getMessage(), 0, 80)]; }
+    arenaLog('shop', $head, ['event' => $name, 'ip' => $ip, 'cust' => $cust, 'delivery' => $delivery]);
+    return ['ok' => true, 'delivery' => $delivery];
+}
+
 /** فهرستِ کاملِ کالاها (ترکیبِ چهار منبع + اعمالِ اوررایدها) */
 function arenaCatalog(bool $publishedOnly = false, array $filter = []): array {
     $out = [];
@@ -44844,12 +44924,41 @@ function arenaCatalog(bool $publishedOnly = false, array $filter = []): array {
         if ($publishedOnly && $p['published'] === false) continue;
         $out[] = $p;
     }
-    $mirrorLinks = [];
+    /* v1.5: اولِ همه، محصولاتِ پروفایل‌های استخراج‌شده — با ضرایبِ تعدیلِ اعمال‌شده.
+       اگر یک کالا هم در آینه‌ها باشد، نسخهٔ استخراج‌شدهٔ با ضریب ارجح است. */
+    $profLinks = [];
+    $vdest = arenaVitrineDest();
+    $vdestCfg = $vdest !== '' ? destPriceCfg(loadConnections(), $vdest) : null;
+    foreach (arenaProfilesMemo() as $pk => $prof) {
+        if (!is_array($prof)) continue;
+        foreach (profileProductsMap($prof) as $k => $it) {
+            if (!is_array($it) || trim((string)($it['title'] ?? '')) === '') continue;
+            $lk = arenaNormLink((string)($it['link'] ?? ''));
+            if ($lk !== '' && isset($profLinks[$lk])) continue;
+            if ($lk !== '') $profLinks[$lk] = 1;
+            $pid = (string)$pk . '|' . (string)$k;
+            $p = arenaCatalogItem($it, 'prof', $pid);
+            $raw = $p['price'];
+            if ($raw > 0) {
+                $adj = profileFinalPrice($prof, $it['price'] ?? '');
+                if ($adj <= 0) $adj = $raw;
+                if ($vdestCfg !== null) $adj = destAdjustPrice($adj, $vdestCfg);
+                if ($adj > 0 && $adj !== $raw) {
+                    $p['price'] = $adj;
+                    $p['adj_pct'] = (int)round(($adj - $raw) / $raw * 100);
+                    if ($p['old_price'] > $raw) $p['old_price'] = (int)round($p['old_price'] * ($adj / $raw));
+                }
+            }
+            $p = arenaApplyOverride($p, $db['overrides']['prof:' . $pid] ?? null);
+            if ($publishedOnly && $p['published'] === false) continue;
+            $out[] = $p;
+        }
+    }
     foreach (['woo' => arenaWooCache(), 'bsl' => arenaBslCache()] as $source => $cache) {
         foreach ((array)($cache['items'] ?? []) as $id => $it) {
             if (!is_array($it) || empty($it['title'])) continue;
             $lk = arenaNormLink((string)($it['link'] ?? ''));
-            if ($lk !== '') $mirrorLinks[$lk] = 1;
+            if ($lk !== '' && isset($profLinks[$lk])) continue;
             $p = arenaCatalogItem($it, $source, $id);
             $ov = $db['overrides'][$source . ':' . $id] ?? null;
             if (is_array($ov)) {
@@ -44862,22 +44971,6 @@ function arenaCatalog(bool $publishedOnly = false, array $filter = []): array {
                 if (isset($ov['category']) && trim((string)$ov['category']) !== '') $p['category'] = (string)$ov['category'];
                 if (isset($ov['name']) && trim((string)$ov['name']) !== '') $p['title'] = (string)$ov['name'];
             }
-            if ($publishedOnly && $p['published'] === false) continue;
-            $out[] = $p;
-        }
-    }
-    /* v1.4: محصولاتِ پروفایل‌های استخراج‌شده — مگر آنکه آینهٔ ووکامرس/باسلام پوشششان دهد */
-    $seenProf = [];
-    foreach (arenaProfilesMemo() as $pk => $prof) {
-        if (!is_array($prof)) continue;
-        foreach (profileProductsMap($prof) as $k => $it) {
-            if (!is_array($it) || trim((string)($it['title'] ?? '')) === '') continue;
-            $lk = arenaNormLink((string)($it['link'] ?? ''));
-            if ($lk !== '' && (isset($mirrorLinks[$lk]) || isset($seenProf[$lk]))) continue;
-            if ($lk !== '') $seenProf[$lk] = 1;
-            $pid = (string)$pk . '|' . (string)$k;
-            $p = arenaCatalogItem($it, 'prof', $pid);
-            $p = arenaApplyOverride($p, $db['overrides']['prof:' . $pid] ?? null);
             if ($publishedOnly && $p['published'] === false) continue;
             $out[] = $p;
         }
@@ -45065,7 +45158,12 @@ function arenaCreateOrder(array $items, array $customer, string $couponCode, str
           . '📍 ' . trim($c['province'] . '، ' . $c['city'] . '، ' . $c['address']) . "\n"
           . '──────────────' . "\n" . $itemsStr
           . (($host = ($_SERVER['HTTP_HOST'] ?? '')) !== '' ? ' پیگیری: ' . ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http') . '://' . $host . '/' : '');
-    $delivery = arenaNotify('🛒', 'سفارش جدید — ' . $id, $body);
+    if (arenaEventEnabled('order')) {
+        $delivery = arenaNotify('🛒', 'سفارش جدید — ' . $id, $body);
+    } else {
+        $delivery = ['skipped' => 'event disabled'];
+        arenaLog('shop', 'سفارش جدید — ' . $id . ' (اعلام به پیام‌رسان خاموش است)', ['event' => 'order', 'total' => $total]);
+    }
     $order['messenger'] = $delivery;
     return ['ok' => true, 'order' => $order];
 }
@@ -45576,7 +45674,7 @@ function arenaWpInstalled(): array {
                 $head = (string)@file_get_contents($f, false, null, 0, 3000);
                 if (preg_match('/Version:\s*(.+)/i', $head, $m)) { $ver = trim($m[1]); break; }
             }
-            $rows[] = ['slug' => $x, 'name' => $name, 'version' => $ver, 'in_core' => $s['in_core'], 'path' => $d];
+            $rows[] = ['slug' => $x, 'name' => $name, 'version' => $ver, 'in_core' => $s['in_core'], 'path' => $d, 'zip' => is_file(ARENA_WP_DL_DIR . '/' . preg_replace('~[^a-z0-9._-]+~i', '-', (string)$x) . '.zip')];
         }
     }
     return $rows;
@@ -45819,6 +45917,20 @@ if (PHP_SAPI !== 'cli') {
         http_response_code(404);
         exit;
     }
+    if ($arenaParam === 'wpzip') {
+        $slug = (string)preg_replace('~[^a-z0-9._-]+~i', '-', basename((string)($_GET['slug'] ?? '')));
+        $zip = ARENA_WP_DL_DIR . '/' . $slug . '.zip';
+        if ($slug !== '' && is_file($zip)) {
+            header('Content-Type: application/zip');
+            header('Content-Length: ' . (int)filesize($zip));
+            header('Content-Disposition: attachment; filename="' . $slug . '.zip"');
+            header('X-Content-Type-Options: nosniff');
+            readfile($zip);
+            exit;
+        }
+        http_response_code(404);
+        exit;
+    }
     if ($arenaParam === 'login')  { arenaLoginPage(); exit; }
     if ($arenaParam === 'logout') { arenaDoLogout();  exit; }
     if ($arenaParam === 'panel') {
@@ -45953,7 +46065,7 @@ function arenaAdminDos(): array {
             'cache_woo', 'cache_bsl', 'orders_list', 'order_status', 'coupons_list', 'coupon_save',
             'coupon_delete', 'chat_sessions', 'chat_messages', 'chat_admin_send', 'chat_mark_read',
             'ai_test', 'plugins_list', 'plugin_upload', 'plugin_toggle', 'plugin_delete', 'plugin_code',
-            'wp_search', 'wp_info', 'wp_install', 'wp_installed', 'wp_delete', 'settings_save',
+            'wp_search', 'wp_info', 'wp_install', 'wp_installed', 'wp_delete', 'track_event', 'settings_save',
             'backup', 'restore', 'image_upload', 'admin_save'];
 }
 
@@ -46051,7 +46163,7 @@ function arenaApiJson(): string {
                 if (empty($r['ok'])) return json_encode($r, JSON_UNESCAPED_UNICODE);
                 $ch = arenaChat();
                 $custName = $ch['customers'][$cid]['name'] ?? 'مشتری';
-                arenaNotify('💬', 'پیام جدید از مشتری', '«' . $custName . '»: ' . mb_substr((string)($jsonIn['text'] ?? ''), 0, 200));
+                if (arenaEventEnabled('chat_msg')) arenaNotify('💬', 'پیام جدید از مشتری', '«' . $custName . '»: ' . mb_substr((string)($jsonIn['text'] ?? ''), 0, 200));
                 // پاسخِ خودکارِ هوش مصنوعی
                 if (!empty(arenaSettings()['ai_auto'])) {
                     $ai = arenaAiAnswer((string)($jsonIn['text'] ?? ''));
@@ -46310,6 +46422,8 @@ function arenaApiJson(): string {
                 return json_encode(['ok' => true, 'rows' => arenaWpInstalled(), 'wp_core' => arenaWpCore() !== null], JSON_UNESCAPED_UNICODE);
             case 'wp_delete':
                 return json_encode(arenaWpDelete((string)($jsonIn['slug'] ?? '')), JSON_UNESCAPED_UNICODE);
+            case 'track_event':
+                return json_encode(arenaTrackEvent((string)($jsonIn['name'] ?? ''), (array)($jsonIn['data'] ?? [])), JSON_UNESCAPED_UNICODE);
 
             /* ----------------------- تنظیمات/پشتیبان -------------------- */
             case 'settings_save':
@@ -46802,19 +46916,21 @@ function updateBadges(){
 }
 window.addToCart=function(uid,btn){
   const c=loadCart();c[uid]=(+c[uid]||0)+1;saveCart(c);
+  try{let t='';if(btn&&btn.closest){const card=btn.closest('.s-card');if(card){const el=card.querySelector('.s-card-title');if(el)t=el.textContent;}}window.arenaEvent&&window.arenaEvent('add_cart',{title:t,qty:c[uid]});}catch(e){}
   toast('🛒 به سبد خرید افزوده شد');
   if(btn){const o=btn.innerHTML;btn.innerHTML='✓ افزوده شد';btn.disabled=true;setTimeout(()=>{btn.innerHTML=o;btn.disabled=false;},1200);}
 };
 window.toggleWish=function(uid,btn){
   let w=loadWish();
   if(w.includes(uid)){w=w.filter(x=>x!==uid);toast('از علاقه‌مندی‌ها برداشته شد');}
-  else{w.push(uid);toast('💜 به علاقه‌مندی‌ها افزوده شد');}
+  else{w.push(uid);toast('💜 به علاقه‌مندی‌ها افزوده شد');
+    try{let t='';const pt=document.querySelector('.s-prod-title');if(pt)t=pt.textContent;if(!t&&btn&&btn.closest){const card=btn.closest('.s-card');if(card){const el=card.querySelector('.s-card-title');if(el)t=el.textContent;}}window.arenaEvent&&window.arenaEvent('wish_add',{title:t});}catch(e){}}
   saveWish(w);
   if(btn){btn.classList.toggle('on',w.includes(uid));btn.classList.remove('pop');void btn.offsetWidth;btn.classList.add('pop');}
 };
 window.changeCart=function(uid,d){
   const c=loadCart();c[uid]=(+c[uid]||0)+d;
-  if(c[uid]<=0)delete c[uid];
+  if(c[uid]<=0){delete c[uid];try{window.arenaEvent&&window.arenaEvent('remove_cart',{});}catch(e){}}
   saveCart(c);
   if(location.search.indexOf('arena=cart')>-1)location.reload();
 };
@@ -46938,6 +47054,17 @@ $('aiSend').addEventListener('click',aiSend);
   tt.addEventListener('click',function(e){e.preventDefault();window.scrollTo({top:0,behavior:'smooth'});});
 })();
 updateBadges();
+/* v1.5: رویدادهای مشتری → پیام‌رسان‌ها */
+window.arenaEvent = function(name, data){
+  try {
+    fetch('?arena=api&do=track_event', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, data: data || {} }) }).catch(function(){});
+  } catch(e) {}
+};
+window.arenaEventOnce = function(key, name, data){
+  try { var k = 'arena_ev_' + key; if (localStorage.getItem(k)) return; localStorage.setItem(k, '1'); } catch(e) {}
+  arenaEvent(name, data);
+};
 window.arena = { loadCart, saveCart, loadWish, saveWish, updateBadges, toast, api, cartQty, changeCart, esc, fmtP, toman, addToCart, toggleWish };
 /* v1.4: نگهبانِ ارقام — اگر هیچ فونتِ موجودی ارقامِ فارسی را نداشت، ارقام به لاتین تبدیل می‌شوند تا هیچ جایی «مخدوش» نباشد */
 (function(){
@@ -47028,7 +47155,7 @@ function arenaShopPageHome(array $get): array {
     $cats = arenaCategories();
     $flash = arenaFlashState();
     $baseQ = http_build_query(array_filter(['q' => $get['q'], 'src' => $get['src'] === 'all' ? '' : $get['src'], 'cat' => $get['cat'], 'sort' => $get['sort']]));
-    $js = '(function(){const w=new Set(arena.loadWish());document.querySelectorAll(\'[data-wish]\').forEach(b=>b.classList.toggle(\'on\',w.has(b.dataset.wish)));})();';
+    $js = '(function(){try{var _q=new URLSearchParams(location.search).get("q");if(_q)window.arenaEventOnce&&window.arenaEventOnce("sq_"+_q,"search",{q:_q});}catch(e){}const w=new Set(arena.loadWish());document.querySelectorAll(\'[data-wish]\').forEach(b=>b.classList.toggle(\'on\',w.has(b.dataset.wish)));})();';
     ob_start();
     ?>
 <?php if ($flash): ?>
@@ -47140,21 +47267,22 @@ function arenaShopPageProduct(array $get): array {
     $srcLabel = ['own' => 'خودِ سایت', 'woo' => 'فروشگاه ووکامرس', 'bsl' => 'غرفهٔ باسلام', 'prof' => 'پروفایلِ هدف'][$p['src']];
     $gallery = $p['gallery'] ? $p['gallery'] : [$p['image']];
     $avg = $reviews ? (int)round(array_sum(array_column($reviews, 'stars')) / count($reviews)) : 0;
-    $metaJson = json_encode(['uid' => $p['uid'], 'max' => max(1, $p['stock']), 'title' => $p['title']], JSON_UNESCAPED_UNICODE);
+    $metaJson = json_encode(['uid' => $p['uid'], 'max' => max(1, $p['stock']), 'title' => $p['title'], 'price' => (int)$price], JSON_UNESCAPED_UNICODE);
     $js = '(function(){
       const M=' . $metaJson . ';
+      window.arenaEventOnce&&window.arenaEventOnce("pv_"+M.uid,"product_view",{title:M.title,price:M.price,uid:M.uid});
       const main=$("prodMain");
       document.querySelectorAll(".s-prod-thumbs img").forEach(t=>t.addEventListener("click",()=>{main.src=t.src;document.querySelectorAll(".s-prod-thumbs img").forEach(x=>x.classList.remove("on"));t.classList.add("on");}));
       let q=1;const qi=$("prodQty");
       $("prodMinus").addEventListener("click",()=>{q=Math.max(1,q-1);qi.value=q;});
       $("prodPlus").addEventListener("click",()=>{q=Math.min(M.max,q+1);qi.value=q;});
-      $("prodAdd").addEventListener("click",()=>{const c=arena.loadCart();c[M.uid]=(+c[M.uid]||0)+q;arena.saveCart(c);toast("🛒 به سبد خرید افزوده شد ("+q+" عدد)");});
+      $("prodAdd").addEventListener("click",()=>{const c=arena.loadCart();c[M.uid]=(+c[M.uid]||0)+q;arena.saveCart(c);try{window.arenaEvent&&window.arenaEvent(\'add_cart\',{title:M.title,qty:q});}catch(e){}toast("🛒 به سبد خرید افزوده شد ("+q+" عدد)");});
       let stars=5;const sp=$("starPick");
       sp.querySelectorAll("span").forEach((s,i)=>s.addEventListener("click",()=>{stars=i+1;sp.querySelectorAll("span").forEach((x,j)=>x.classList.toggle("on",j<stars));}));
       $("revSave").addEventListener("click",async()=>{
         const d={uid:M.uid,name: $("revName").value,stars:stars,text:$("revText").value};
         const r=await arena.api("add_review",d,"POST");
-        if(r.ok){toast("⭐ نظر شما ثبت شد — ممنون!");location.reload();}
+        if(r.ok){try{window.arenaEvent&&window.arenaEvent(\'review_add\',{title:M.title});}catch(e){}toast("⭐ نظر شما ثبت شد — ممنون!");location.reload();}
         else toast("خطا: "+(r.error||""));
       });
       const w=new Set(arena.loadWish());
@@ -47194,6 +47322,7 @@ function arenaShopPageProduct(array $get): array {
       <button class="s-buy" id="prodAdd" <?= $p['stock'] <= 0 ? 'disabled' : '' ?>>🛒 افزودن به سبد خرید</button>
       <button class="s-wish" data-wish="<?= $p['uid'] ?>" style="width:100%;margin-top:8px;padding:9px" onclick="toggleWish('<?= $p['uid'] ?>',this)">💜 افزودن به علاقه‌مندی‌ها</button>
       <div class="s-meta">
+        <?php if ($p['src'] === 'prof' && !empty($p['adj_pct'])): ?><div><span>تعدیل قیمت</span><b><?= ($p['adj_pct'] >= 0 ? '+' : '') . arenaToman($p['adj_pct']) ?>٪</b></div><?php endif; ?>
         <?php if ($p['sku'] !== ''): ?><div><span>کد کالا (SKU)</span><b><?= h($p['sku']) ?></b></div><?php endif; ?>
         <?php if ($p['category'] !== ''): ?><div><span>دسته</span><b><?= h($p['category']) ?></b></div><?php endif; ?>
         <?php if ($p['weight'] > 0): ?><div><span>وزن</span><b><?= arenaToman($p['weight']) ?> گرم</b></div><?php endif; ?>
@@ -47278,6 +47407,7 @@ function arenaShopPageCart(): array {
           return tot;
         };
         apply();
+        try{window.arenaEvent&&window.arenaEvent(\'cart_view\',{count:keys.length,total:apply()});}catch(e){}
         $("cartCouponBtn").addEventListener("click",async()=>{
           const code=$("cartCouponIn").value.trim();if(!code)return;
           const d2=await arena.api("checkout_coupon",{code:code,subtotal:sub},"POST");
@@ -47323,6 +47453,7 @@ function arenaShopPageCheckout(): array {
         let disc=0;
         const apply=()=>{let sh=ARENA_S.shipping;if(ARENA_S.free_over>0&&(sub-disc)>=ARENA_S.free_over)sh=0;$("cSub").textContent=fmtP(sub);$("cDisc").textContent=disc?"− "+fmtP(disc):"—";$("cShip").textContent=sh===0?"رایگان 🎁":fmtP(sh);$("cTot").textContent=fmtP(Math.max(0,sub-disc+sh));};
         apply();
+        try{window.arenaEvent&&window.arenaEvent(\'checkout_start\',{total:apply()});}catch(e){}
         if(ARENA_S.welcome){$("ckCoupon").value=ARENA_S.welcome;}
         $("ckCouponBtn").addEventListener("click",async()=>{
           const code=$("ckCoupon").value.trim();if(!code)return;
@@ -47442,6 +47573,7 @@ function arenaShopPageSuccess(string $id): array {
 
 function arenaShopPageTrack(): array {
     $js = '(function(){
+      try{window.arenaEvent&&window.arenaEvent(\'track\',{});}catch(e){}
       const SL={new:"جدید",processing:"در حال پردازش",shipped:"ارسال شده",delivered:"تحویل شده",cancelled:"لغو شده"};
       const esc2=arena.esc, fmt2=arena.fmtP;
       $("trackBtn").addEventListener("click",async()=>{
@@ -48367,6 +48499,9 @@ html[data-skin="gloss"] .progress-bar{
 .shop-thumb{width:44px;height:44px;object-fit:cover;border-radius:9px;background:#1e293b}
 .shop-badge-src{font-size:9.5px;font-weight:800;padding:3px 8px;border-radius:8px;color:#fff;white-space:nowrap}
 .shop-badge-src.own{background:#059669}.shop-badge-src.woo{background:#2563eb}.shop-badge-src.bsl{background:#d97706}.shop-badge-src.prof{background:#7c3aed}
+/* v1.5: چیپ‌های سریعِ درگاه‌های پرداخت */
+.shop-wpq{font-size:10px;font-weight:700;font-family:inherit;color:#a5b4fc;background:#1e1b4b;border:1px solid #4c1d95;border-radius:10px;padding:5px 10px;cursor:pointer;transition:all .15s;min-height:28px}
+.shop-wpq:hover{background:#4c1d95;color:#fff;transform:translateY(-1px)}
 .shop-badge-out{font-size:9.5px;background:#7f1d1d;color:#fecaca;padding:3px 8px;border-radius:8px}
 .shop-toggle{position:relative;width:40px;height:22px;border-radius:12px;background:#475569;cursor:pointer;transition:background .15s;flex:0 0 auto;border:0}
 .shop-toggle.on{background:#22c55e}
@@ -51503,9 +51638,24 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
                     <input id="shopWpQ" type="text" placeholder="مثلاً: seo، shop، contact…" style="flex:1;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:10px;padding:9px 11px;font-size:12px;font-family:inherit">
                     <button class="btn btn-blue" onclick="shopWpSearch()">جست‌وجو</button>
                 </div>
+                <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                    <span style="font-size:10px;color:#94a3b8;font-weight:700">🏦 درگاه‌های پرداخت:</span>
+                    <button class="shop-wpq" data-q="zarinpall">زرین‌پال</button>
+                    <button class="shop-wpq" data-q="sadad">سداد</button>
+                    <button class="shop-wpq" data-q="pay.ir">Pay.ir</button>
+                    <button class="shop-wpq" data-q="bepay">BePay</button>
+                    <button class="shop-wpq" data-q="nextpay">NextPay</button>
+                    <button class="shop-wpq" data-q="midas">Midas</button>
+                    <button class="shop-wpq" data-q="invoke">Invoke</button>
+                    <button class="shop-wpq" data-q="samandehi">ساماندهی</button>
+                    <button class="shop-wpq" data-q="payment gateway">🔍 همهٔ درگاه‌ها</button>
+                </div>
                 <div id="shopWpResults" style="max-height:300px;overflow-y:auto"></div>
                 <div style="font-size:10.5px;font-weight:700;color:#67e8f9;margin:12px 0 8px">نصب‌شده‌ها</div>
                 <div id="shopWpInstalled"></div>
+                <div style="font-size:10px;color:#94a3b8;background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;margin-top:10px;line-height:2">
+                    💡 <b>نصب روی ووکامرسِ مقصد:</b> اگر هستهٔ وردپرس روی همین هاست نباشد، بعد از «نصب» فایلِ zip را از لیستِ بالا دریافت کنید؛ سپس در ووکامرس: <b>افزونه‌ها ← افزودن ← بارگذاری فایل</b> ← آپلود ← <b>فعال‌سازی</b>. برای درگاه‌های پرداخت، در تنظیماتِ خودِ افزونهٔ درگاه، کلیدِ API (زیرمجموعهٔ درگاه) را وارد کنید.
+                </div>
             </div>
         </div>
     </div>
@@ -51533,6 +51683,32 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
             <div class="full"><label>لوگو (آدرس URL — اختیاری)</label><input id="set_logo" type="text" dir="ltr"></div>
             <div><label>هزینهٔ ارسال (تومان)</label><input id="set_shipping" type="number" min="0"></div>
             <div><label>ارسال رایگان از مبلغِ (تومان؛ ۰ = خاموش)</label><input id="set_free_shipping_over" type="number" min="0"></div>
+            <div><label>تعدیلِ قیمتِ کالاهای پروفایل در ویترین</label>
+                <select id="set_vitrine_price_dest">
+                    <option value="auto">خودکار — ضرایبِ مقصدِ فعال</option>
+                    <option value="bsl">با ضرایبِ باسلام</option>
+                    <option value="woo">با ضرایبِ ووکامرس</option>
+                    <option value="none">بدون تعدیل (قیمتِ خامِ استخراج‌شده)</option>
+                </select>
+                <div style="font-size:9.5px;color:#64748b;margin-top:4px">همان ضرایبِ تعدیلی که اسکرپر موقعِ ارسال اعمال می‌کند (سطحِ پروفایل + سطحِ مقصد)</div>
+            </div>
+            <div class="full" style="border:1px solid #334155;border-radius:12px;padding:12px">
+                <div style="font-size:12px;font-weight:800;margin-bottom:6px">📣 رویدادهای فروشگاه → پیام‌رسان‌ها</div>
+                <p style="font-size:10px;color:#64748b;margin-bottom:10px">فعالیتِ مشتریانِ ویترین به‌صورت رویدادهای جداگانه و با محدودیتِ نرخ (برای هر رویداد) به بله/روبیکا/تلگرامِ تنظیم‌شده ارسال می‌شود و در تبِ «رویدادها» ثبت می‌شود:</p>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:7px">
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_product_view" style="width:auto;accent-color:#7c3aed">👁 مشاهده محصول</label>
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_add_cart" style="width:auto;accent-color:#7c3aed">🛒 افزودن به سبد</label>
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_remove_cart" style="width:auto;accent-color:#7c3aed">🗑 حذف از سبد</label>
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_cart_view" style="width:auto;accent-color:#7c3aed">🧺 مشاهده سبد</label>
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_checkout_start" style="width:auto;accent-color:#7c3aed">📝 شروعِ خرید</label>
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_order" style="width:auto;accent-color:#7c3aed">🛒 ثبت سفارش</label>
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_wish_add" style="width:auto;accent-color:#7c3aed">💜 علاقه‌مندی</label>
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_review_add" style="width:auto;accent-color:#7c3aed">⭐ ثبت دیدگاه</label>
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_chat_msg" style="width:auto;accent-color:#7c3aed">💬 پیامِ مشتری</label>
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_search" style="width:auto;accent-color:#7c3aed">🔍 جست‌وجو</label>
+                    <label style="display:flex;gap:7px;align-items:center;font-size:11px;color:#cbd5e1;cursor:pointer"><input type="checkbox" id="ev_track" style="width:auto;accent-color:#7c3aed">📦 پیگیری سفارش</label>
+                </div>
+            </div>
             <div><label>فروش ویژه: فعال</label><div style="display:flex;gap:8px;align-items:center"><span class="shop-toggle" id="set_flash_on" onclick="this.classList.toggle('on')"></span><span style="font-size:10px;color:#64748b">تخفیفِ کلِ ویترین + شمارش‌معکوس</span></div></div>
             <div><label>درصدِ تخفیفِ ویژه</label><input id="set_flash_pct" type="number" min="1" max="90" value="10"></div>
             <div><label>شروع (دقیقهٔ پیش از اكنون/آتی؛ خالی = هم‌اكنون)</label><input id="set_flash_start" type="number" min="0" value="0"></div>
@@ -72693,6 +72869,9 @@ window.shopPluginUpload = function(){
 };
 
 /* ---------------- wordpress ---------------- */
+document.querySelectorAll('.shop-wpq').forEach(function(b){
+  b.addEventListener('click', function(){ $s('shopWpQ').value = b.dataset.q; shopWpSearch(); });
+});
 window.shopWpSearch = async function(){
   var q = $s('shopWpQ').value.trim();
   if (!q) return;
@@ -72723,6 +72902,7 @@ window.shopLoadWpInstalled = async function(){
   if (!d.rows.length) { box.innerHTML = '<div style="color:#64748b;font-size:11px">افزونهٔ وردپرسی نصب نشده' + (d.wp_core ? '' : ' (arena.php درونِ هستهٔ وردپرس اجرا نمی‌شود)') + '.</div>'; return; }
   box.innerHTML = d.rows.map(function(r){
     return '<div class="shop-wprow" style="padding:8px 11px"><div class="winfo" style="min-width:0"><b style="font-size:11.5px">' + shopEsc(r.name) + '</b> <span style="font-size:9px;color:#64748b">v' + shopEsc(r.version) + (r.in_core ? ' · 🌐 هستهٔ وردپرس' : ' · arena_wp_plugins') + '</span></div>'
+      + (r.zip ? '<a class="btn btn-cyan" style="font-size:9.5px;padding:2px 8px" href="?arena=wpzip&slug=' + encodeURIComponent(r.slug) + '">⬇ zip</a>' : '')
       + (r.in_core ? '' : '<button class="btn btn-red" style="font-size:9.5px;padding:2px 8px" onclick="shopWpDelete(\'' + shopEsc(r.slug) + '\')\'>🗑️</button>')
       + '</div>';
   }).join('');
@@ -72740,7 +72920,7 @@ window.shopLoadEvents = async function(){
   var d = await shopApi('shop_stats');
   var evs = (d.events || []).slice().reverse();
   if (!evs.length) { body.innerHTML = '<tr><td colspan="4" style="color:#64748b">رویدادی ثبت نشده.</td></tr>'; return; }
-  var ico = { notify: '📣', order: '🧾', product: '📦', plugin: '🧩', cache: '🔄', coupon: '🎟️', settings: '⚙️', backup: '📦' };
+  var ico = { notify: '📣', order: '🧾', product: '📦', plugin: '🧩', cache: '🔄', coupon: '🎟️', settings: '⚙️', backup: '📦', shop: '🏬' };
   body.innerHTML = evs.map(function(e){
     var dm = '';
     if (e.meta && e.meta.delivery) {
@@ -72757,6 +72937,8 @@ window.shopSettingsLoad = function(){
   if (!s) return;
   var set = function(id, v){ var el = $s(id); if (el && el.value === '') el.value = v == null ? '' : v; };
   set('set_name', s.name); set('set_tagline', s.tagline);
+  if ($s('set_vitrine_price_dest')) $s('set_vitrine_price_dest').value = s.vitrine_price_dest || 'auto';
+  ['product_view','add_cart','remove_cart','cart_view','checkout_start','order','wish_add','review_add','chat_msg','search','track'].forEach(function(k){ var el = $s('ev_' + k); if (el) el.checked = (s.events && k in s.events) ? !!s.events[k] : (k !== 'search' && k !== 'track'); });
   set('set_hero_title', s.hero_title); set('set_hero_sub', s.hero_sub);
   set('set_accent', s.accent); set('set_accent2', s.accent2); set('set_logo', s.logo);
   set('set_shipping', s.shipping); set('set_free_shipping_over', s.free_shipping_over);
@@ -72792,7 +72974,9 @@ window.shopSettingsSave = async function(){
     payment: { on_delivery: $s('set_pay_delivery').classList.contains('on'), card_number: g('set_card_number'), card_name: g('set_card_name'), payment_link: g('set_payment_link'), note: g('set_pay_note') },
     contact: { phone: g('set_phone'), telegram: g('set_telegram'), whatsapp: g('set_whatsapp') },
     welcome_coupon: g('set_welcome_coupon'), ai_auto: $s('set_ai_auto').classList.contains('on'),
-    checkout_note: g('set_checkout_note'), support_hours: g('set_support_hours')
+    checkout_note: g('set_checkout_note'), support_hours: g('set_support_hours'),
+    vitrine_price_dest: g('set_vitrine_price_dest'),
+    events: (function(){ var m = {}; ['product_view','add_cart','remove_cart','cart_view','checkout_start','order','wish_add','review_add','chat_msg','search','track'].forEach(function(k){ var el = $s('ev_' + k); if (el) m[k] = el.checked ? 1 : 0; }); return m; })()
   };
   var r = await shopApi('settings_save', data, 'POST');
   shopToast(r.ok ? '✓ تنظیمات ذخیره شد' : 'خطا', !r.ok);
