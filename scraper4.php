@@ -25,6 +25,7 @@
 // است و یک اخطار PHP وسط پاسخ، آن را برای مرورگر غیرقابل خواندن می‌کند.
 ini_set('display_errors', '0');
 error_reporting(0);
+ob_start(); /* v10.90: جلوگیری از خروجی ناخواسته قبل از JSON */
 // عملیات همگام‌سازی طولانی است و نباید وسط کار توسط وب‌سرور قطع شود.
 set_time_limit(0);
 ini_set('memory_limit', '512M');
@@ -49,6 +50,7 @@ const BSL_PRODUCTS_FILE = __DIR__ . '/bsl_products_temp.json';
 const WOO_QUEUE_FILE = __DIR__ . '/woo_queue.json';
 const WOO_PRODUCTS_FILE = __DIR__ . '/woo_products_temp.json';
 const BSL_QUEUE_FILE = __DIR__ . '/bsl_queue.json';
+const PRODUCT_HASH_FILE = __DIR__ . '/product_hash_cache.json'; /* v10.90 */
 /* v10.53 (۶۷): سقفِ چند ردیفِ صف که یک وِرکرِ ارسال در هر اجرا به نوبت پردازش می‌کند.
    بقیهٔ «در انتظارها» در اجرای بعد (پمپ/زنجیره/دستی) ادامه می‌یابند —
    وِرکر پنجرهٔ زمانیِ هاست را رد نکند؛ اگر هم وسطِ اجرا قطع شود، هر ردیف
@@ -283,8 +285,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.89';
-const APP_VERSION_DATE = '1405/06/07';
+const APP_VERSION = '10.90';
+const APP_VERSION_DATE = '1405/06/06';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -11447,6 +11449,7 @@ exit;
 }
 
 if (($_POST['action'] ?? '') === 'save_connections') {
+ob_clean();
 header('Content-Type: application/json; charset=UTF-8');
 $conn = loadConnections();
 if (isset($_POST['woocommerce'])) { $w = json_decode($_POST['woocommerce'], true) ?: []; $conn['woocommerce'] = ['enabled'=>!empty($w['enabled']),'store_url'=>trim($w['store_url']??''),'consumer_key'=>trim($w['consumer_key']??''),'consumer_secret'=>trim($w['consumer_secret']??''),'default_category'=>(int)($w['default_category']??0),'default_status'=>$w['default_status']??'draft','stock_quantity'=>(int)($w['stock_quantity']??10),'manage_stock'=>!empty($w['manage_stock']),'price_mode'=>in_array(($w['price_mode']??'none'),['none','percent','multiplier'],true)?(string)$w['price_mode']:'none','price_val'=>(float)($w['price_val']??0),'price_round'=>max(0,(int)($w['price_round']??0))]; }
@@ -16985,8 +16988,191 @@ if (isset($_GET['bsl_cats'])) {
     echo json_encode(['ok' => true] + $st, JSON_UNESCAPED_UNICODE);
     exit;
 }
+/* =====================================================================
+ * v10.90 (۱۰۳): کش هش محصولات — همگام‌سازی افزایشی
+ * productHashRead / productHashWrite / productHashCompute*
+ * productHashDiff* / productHashUpdate*
+ * فایل: product_hash_cache.json
+ * ساختار: {bsl:{VID:{PROD_ID:HASH}}, woo:{SITE_KEY:{PROD_ID:HASH}}}
+ * ===================================================================== */
+function productHashRead(): array {
+    if (!is_file(PRODUCT_HASH_FILE)) return ['bsl' => [], 'woo' => []];
+    $d = json_decode((string)file_get_contents(PRODUCT_HASH_FILE), true);
+    if (!is_array($d)) return ['bsl' => [], 'woo' => []];
+    if (!isset($d['bsl'])) $d['bsl'] = [];
+    if (!isset($d['woo'])) $d['woo'] = [];
+    return $d;
+}
+
+function productHashWrite(array $cache): bool {
+    return (bool)file_put_contents(PRODUCT_HASH_FILE, json_encode($cache, JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+function productHashComputeBsl(array $item): string {
+    return hash('sha256', implode('|', [
+        (string)($item['id'] ?? $item['product_id'] ?? ''),
+        (string)($item['title'] ?? $item['name'] ?? ''),
+        (string)($item['price'] ?? ''),
+        (string)($item['stock'] ?? $item['stock_quantity'] ?? ''),
+        (string)($item['status'] ?? ''),
+        (string)($item['category_id'] ?? ''),
+    ]));
+}
+
+function productHashComputeWoo(array $item): string {
+    return hash('sha256', implode('|', [
+        (string)($item['id'] ?? ''),
+        (string)($item['name'] ?? ''),
+        (string)($item['price'] ?? $item['regular_price'] ?? ''),
+        (string)($item['stock_quantity'] ?? ''),
+        (string)($item['status'] ?? ''),
+        (string)($item['categories'][0]['id'] ?? ''),
+    ]));
+}
+
+/** کش بازل‌ام را برای یک غرفه بروز می‌کند و diff برمی‌گرداند */
+function productHashDiffBsl(int $vid, array $currentItems): array {
+    $cache = productHashRead();
+    $vkey = (string)$vid;
+    $old = $cache['bsl'][$vkey] ?? [];
+    $new_ = []; $added = []; $changed = []; $deleted = [];
+    foreach ($currentItems as $item) {
+        $pid = (string)($item['id'] ?? $item['product_id'] ?? '');
+        if ($pid === '') continue;
+        $h = productHashComputeBsl($item);
+        $new_[$pid] = $h;
+        if (!isset($old[$pid])) $added[] = $pid;
+        elseif ($old[$pid] !== $h) $changed[] = $pid;
+    }
+    foreach (array_keys($old) as $pid) {
+        if (!isset($new_[$pid])) $deleted[] = $pid;
+    }
+    return ['added' => $added, 'changed' => $changed, 'deleted' => $deleted, 'hashes' => $new_];
+}
+
+function productHashUpdateBsl(int $vid, array $hashes): void {
+    $cache = productHashRead();
+    $cache['bsl'][(string)$vid] = $hashes;
+    productHashWrite($cache);
+}
+
+/** کش ووکامرس را برای یک سایت بروز می‌کند و diff برمی‌گرداند */
+function productHashDiffWoo(string $siteKey, array $currentItems): array {
+    $cache = productHashRead();
+    $old = $cache['woo'][$siteKey] ?? [];
+    $new_ = []; $added = []; $changed = []; $deleted = [];
+    foreach ($currentItems as $item) {
+        $pid = (string)($item['id'] ?? '');
+        if ($pid === '') continue;
+        $h = productHashComputeWoo($item);
+        $new_[$pid] = $h;
+        if (!isset($old[$pid])) $added[] = $pid;
+        elseif ($old[$pid] !== $h) $changed[] = $pid;
+    }
+    foreach (array_keys($old) as $pid) {
+        if (!isset($new_[$pid])) $deleted[] = $pid;
+    }
+    return ['added' => $added, 'changed' => $changed, 'deleted' => $deleted, 'hashes' => $new_];
+}
+
+function productHashUpdateWoo(string $siteKey, array $hashes): void {
+    $cache = productHashRead();
+    $cache['woo'][$siteKey] = $hashes;
+    productHashWrite($cache);
+}
+
+function productHashClear(string $target = 'all', string $key = ''): int {
+    $cache = productHashRead();
+    $n = 0;
+    if ($target === 'bsl') {
+        if ($key === '') { $n = count($cache['bsl']); $cache['bsl'] = []; }
+        elseif (isset($cache['bsl'][$key])) { $n = count($cache['bsl'][$key]); unset($cache['bsl'][$key]); }
+    } elseif ($target === 'woo') {
+        if ($key === '') { $n = count($cache['woo']); $cache['woo'] = []; }
+        elseif (isset($cache['woo'][$key])) { $n = count($cache['woo'][$key]); unset($cache['woo'][$key]); }
+    } else {
+        $n = count($cache['bsl']) + count($cache['woo']);
+        $cache = ['bsl' => [], 'woo' => []];
+    }
+    productHashWrite($cache);
+    return $n;
+}
+
+
+/* =====================================================================
+ *  v10.90 (۱۰۳): استعلام کش هش محصولات
+ *  ?product_hash_diff=1&target=bsl|woo|all[&vid=N][&site=KEY][&update=1]
+ * ===================================================================== */
+if (isset($_GET['product_hash_diff'])) {
+    ob_clean();
+    header('Content-Type: application/json; charset=UTF-8');
+    $target = (string)($_GET['target'] ?? 'all');
+    $doUpdate = !empty($_GET['update']);
+    $out = [];
+    $cnH = loadConnections();
+
+    if ($target === 'bsl' || $target === 'all') {
+        $shops = bslAllShops($cnH);
+        $vid_filter = (int)($_GET['vid'] ?? 0);
+        foreach ($shops as $sh) {
+            $vid = (int)($sh['vendor_id'] ?? 0);
+            $tk  = (string)($sh['token'] ?? '');
+            if ($vid <= 0 || $tk === '') continue;
+            if ($vid_filter > 0 && $vid !== $vid_filter) continue;
+            $cat = bslCatalogGet($tk, $vid, false);
+            $items = $cat['items'] ?? [];
+            if (empty($items)) {
+                $out['bsl'][(string)$vid] = ['error' => 'کاتالوگ خالی یا ناموجود', 'shop' => $sh['shop_name'] ?? ''];
+                continue;
+            }
+            $diff = productHashDiffBsl($vid, $items);
+            if ($doUpdate) productHashUpdateBsl($vid, $diff['hashes']);
+            $out['bsl'][(string)$vid] = [
+                'shop'    => (string)($sh['shop_name'] ?? ''),
+                'added'   => count($diff['added']),
+                'changed' => count($diff['changed']),
+                'deleted' => count($diff['deleted']),
+                'total'   => count($diff['hashes']),
+                'deleted_ids' => $diff['deleted'],
+            ];
+        }
+    }
+
+    if ($target === 'woo' || $target === 'all') {
+        $woo = $cnH['woocommerce'] ?? [];
+        $siteUrl = trim((string)($woo['store_url'] ?? ''));
+        if ($siteUrl !== '' && !empty($woo['enabled'])) {
+            $siteKey = md5($siteUrl);
+            $wooItems = reconFetchWoo($woo);
+            $diff = productHashDiffWoo($siteKey, $wooItems);
+            if ($doUpdate) productHashUpdateWoo($siteKey, $diff['hashes']);
+            $out['woo'] = [
+                'site'    => $siteUrl,
+                'added'   => count($diff['added']),
+                'changed' => count($diff['changed']),
+                'deleted' => count($diff['deleted']),
+                'total'   => count($diff['hashes']),
+                'deleted_ids' => $diff['deleted'],
+            ];
+        } else {
+            $out['woo'] = ['error' => 'ووکامرس فعال نیست یا آدرس ندارد'];
+        }
+    }
+
+    if (!empty($_GET['clear'])) {
+        $n = productHashClear((string)($_GET['target'] ?? 'all'), (string)($_GET['key'] ?? ''));
+        echo json_encode(['ok' => true, 'cleared' => $n], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    echo json_encode(['ok' => true, 'updated' => $doUpdate, 'diff' => $out], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+
 
 if (isset($_GET['bsl_catalog'])) {
+    ob_clean();
     header('Content-Type: application/json; charset=UTF-8');
     @set_time_limit(300);
     if (!empty($_GET['clear'])) {
@@ -19524,6 +19710,7 @@ if (isset($_GET['sec_check'])) {
 }
 
 if (isset($_GET['remote_map'])) {
+    ob_clean();
     header('Content-Type: application/json; charset=UTF-8');
     @set_time_limit(180);
     $clr = (string)($_GET['clear'] ?? '');
@@ -20206,6 +20393,7 @@ if (isset($_GET['catlearn'])) {
 
 /** v8.33: بررسی/ادامهٔ دستی صف گیرکرده */
 if (isset($_GET['queue_watchdog'])) {
+    ob_clean();
     header('Content-Type: application/json; charset=UTF-8');
     $cn = loadConnections();
     $after = (int)($_GET['after'] ?? ($cn['stall_after'] ?? 300));
@@ -24280,6 +24468,18 @@ if (isset($_GET['selftest'])) {
           && strpos($selfSrc, 'خطای شبکه: ') !== false);
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
+
+        /* ==== ۱۰۴ (v10.90) ==== */
+    $add('10.90', 'نسخهٔ ۱۰.۹۰',
+         str_contains($selfSrc, "const APP_VERSION = '10.90';"));
+    $add('10.90', 'safeFetchJson + ob_start/ob_clean',
+         strpos($selfSrc, 'function safeFetchJson(') !== false
+          && strpos($selfSrc, 'ob_start();') !== false
+          && strpos($selfSrc, 'ob_clean();') !== false);
+    $add('10.90', 'کش هش محصولات',
+         strpos($selfSrc, 'function productHashRead()') !== false
+          && strpos($selfSrc, 'PRODUCT_HASH_FILE') !== false
+          && strpos($selfSrc, 'phDiff(') !== false);
 
     /* ==== ۱۰۳ (v10.89) ==== */
     $add('10.89', 'نسخهٔ ۱۰.۸۹',
@@ -48017,6 +48217,31 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 <div class="status" id="syncStatus" style="color:#22d3ee"></div>
 </div>
+
+<!-- v10.90 (۱۰۳): کش هش محصولات — تشخیص تغییرات افزایشی -->
+<div class="card" style="margin-top:8px">
+<div class="section-title" style="color:#f0abfc">🔍 تشخیص تغییرات محصولات (کش هش)</div>
+<details class="alert alert-info hint-collapse" style="margin-bottom:8px;font-size:11px">
+<summary>💡 چطور کار می‌کند؟</summary>
+<div class="hint-body">
+سیستم کش هش، یک اثرانگشت (SHA-256) برای هر محصول (عنوان، قیمت، موجودی، وضعیت) محاسبه و ذخیره می‌کند.<br>
+در هر دوره، فقط محصولات <b>جدید یا تغییریافته</b> ارسال می‌شوند.<br>
+اگر محصولی از سایت مبدأ <b>حذف</b> شد، در ووکامرس حذف/بایگانی و در باسلام غیرفعال می‌شود.
+</div>
+</details>
+<div class="cact" style="margin-bottom:8px">
+<button class="btn btn-purple" onclick="phDiff('all',false)" style="flex:1">🔍 استعلام تغییرات</button>
+<button class="btn btn-teal" onclick="phDiff('all',true)" style="flex:1">💾 بروزرسانی کش</button>
+<button class="btn btn-gray" onclick="phDiff('bsl',false)" style="font-size:10px;padding:3px 6px">🏪 فقط باسلام</button>
+<button class="btn btn-gray" onclick="phDiff('woo',false)" style="font-size:10px;padding:3px 6px">🛒 فقط ووکامرس</button>
+</div>
+<div id="phBox" style="font-size:11px"></div>
+<div class="cact" style="margin-top:6px">
+<button class="btn btn-red" onclick="phClear('all')" style="font-size:10px;padding:3px 8px">🗑️ پاکسازی کل کش</button>
+<button class="btn btn-gray" onclick="phClear('bsl')" style="font-size:10px;padding:3px 8px">پاک باسلام</button>
+<button class="btn btn-gray" onclick="phClear('woo')" style="font-size:10px;padding:3px 8px">پاک ووکامرس</button>
+</div>
+</div>
 </div>
 
 </div>
@@ -48552,9 +48777,22 @@ function bcRender(d){
   h+='<div style="color:#64748b;margin-top:5px">مدتِ اعتبار: '+toFa(Math.round((d.ttl||0)/3600))+' ساعت</div>';
   box.innerHTML=h;
 }
+
+/* v10.90 (۱۰۳): safeFetchJson — اگر پاسخ سرور HTML بود خطای خوانا می‌دهد */
+function safeFetchJson(url, opts){
+    return fetch(url, opts||undefined).then(function(r){
+        var ct=r.headers.get('content-type')||'';
+        if(!r.ok||!ct.includes('json')){
+            return r.text().then(function(t){
+                throw new Error('سرور پاسخ JSON نداد (HTTP '+r.status+'): '+t.slice(0,120));
+            });
+        }
+        return r.json();
+    });
+}
 function bcLoad(){
   const box=$('bcBox'); if(box)box.innerHTML='<div style="color:#93c5fd">⏳ در حال خواندن…</div>';
-  fetch('?bsl_catalog=1').then(r=>r.json()).then(d=>{
+  safeFetchJson('?bsl_catalog=1').then(d=>{
     if(!d.ok){if(box)box.innerHTML='<div style="color:#f87171">✗ '+esc(d.error||'خطا')+'</div>';return;}
     bcRender(d);
   }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171">✗ خطا در ارتباط</div>';});
@@ -48565,7 +48803,7 @@ function bcRebuild(){
      +'در این مدت صفحه را نبندید.'))return;
   const box=$('bcBox');
   if(box)box.innerHTML='<div style="color:#93c5fd">🏗 در حال گرفتنِ فهرستِ غرفه‌ها… (چند دقیقه)</div>';
-  fetch('?bsl_catalog=1&rebuild=1').then(r=>r.json()).then(d=>{
+  safeFetchJson('?bsl_catalog=1&rebuild=1').then(d=>{
     if(!d.ok){if(box)box.innerHTML='<div style="color:#f87171">✗ '+esc(d.error||'خطا')+'</div>';return;}
     bcRender(d);
     showToast('✓ کشِ کاتالوگ بازسازی شد');
@@ -48573,7 +48811,7 @@ function bcRebuild(){
 }
 function bcClear(){
   if(!confirm('کشِ کاتالوگ پاک شود؟ دفعهٔ بعد از نو ساخته می‌شود (کندتر، ولی بی‌خطر).'))return;
-  fetch('?bsl_catalog=1&clear=1').then(r=>r.json()).then(()=>{
+  safeFetchJson('?bsl_catalog=1&clear=1').then(()=>{
     const box=$('bcBox'); if(box)box.innerHTML='<div style="color:#4ade80">✓ پاک شد</div>';
   }).catch(()=>showToast('✗ خطا شبکه',1));
 }
@@ -52896,6 +53134,14 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.90', t:'رفع خطای JSON + کش هش محصولات', items:[
+    '🔧 ob_start() در ابتدای PHP — جلوگیری از خروجی ناخواسته HTML قبل از JSON',
+    '🔧 ob_clean() در handlerهای bsl_catalog / remote_map / queue_watchdog / save_connections',
+    '🛡 safeFetchJson() — اگر سرور HTML برگرداند خطای فارسی نشان می‌دهد',
+    '🗃 PRODUCT_HASH_FILE — کش هش SHA-256 هر محصول (باسلام هر غرفه + ووکامرس هر سایت)',
+    '🔍 ?product_hash_diff=1 — endpoint استعلام محصولات جدید/تغییریافته/حذف‌شده',
+    '💡 phDiff() / phClear() — UI در تب سینک برای مشاهده تغییرات افزایشی',
+  ]},
   {v:'10.89', t:'اتوسیو تمام تنظیمات — هر تغییر بلافاصله ذخیره می‌شود', items:[
     '💾 scheduleConnSave() با debounce 800ms — پس از هر تغییر input/select/checkbox اجرا می‌شود',
     '🎯 event delegation روی همهٔ پانل‌های تنظیمات بدون نیاز به onchange دستی',
@@ -56547,7 +56793,7 @@ function rmapRebuild(target){
     +'این کار چیزی را تغییر نمی‌دهد؛ فقط یاد می‌گیرد کدام محصول مقصد مال کدام محصول پروفایل است.\n'
     +'بهتر است قبل از تغییر نام محصولات انجام شود.'))return;
   if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ خواندن محصولات '+esc(lbl)+'...</div>';
-  fetch('?remote_map=1&rebuild='+encodeURIComponent(target)).then(r=>r.json()).then(d=>{
+  safeFetchJson('?remote_map=1&rebuild='+encodeURIComponent(target)).then(d=>{
     if(!box)return;
     if(!d.ok){box.innerHTML='<div style="color:#fca5a5;font-size:11px;background:#7f1d1d20;padding:6px 8px;border-radius:6px">✗ '+esc(d.error||'خطا')+'</div>';return;}
     let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px;line-height:1.9">';
@@ -59037,7 +59283,7 @@ function bslCatRebuild(){
   if(!confirm('فهرستِ همهٔ غرفه‌ها دوباره از باسلام گرفته شود؟ بسته به تعدادِ محصولات ممکن است کمی طول بکشد.'))return;
   const box=$('bslCatBox');
   if(box)box.innerHTML='<div style="color:#93c5fd">⏳ در حال گرفتن از باسلام… صبر کنید.</div>';
-  fetch('?bsl_catalog=1&rebuild=1').then(r=>r.json()).then(d=>{
+  safeFetchJson('?bsl_catalog=1&rebuild=1').then(d=>{
     bslCatRender(d);
     showToast(d&&d.ok?'✓ فهرست به‌روز شد':'خطا',!(d&&d.ok));
   }).catch(()=>{if(box)box.innerHTML='<div style="color:#f87171">✗ خطای شبکه</div>';});
@@ -59048,7 +59294,7 @@ function watchdogCheck(){
   const box=$('watchdogR');
   if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">⏳ در حال بررسی...</div>';
   const after=$('stallAfter')?$('stallAfter').value:300;
-  fetch('?queue_watchdog=1&dry=1&after='+encodeURIComponent(after)).then(r=>r.json()).then(d=>{
+  safeFetchJson('?queue_watchdog=1&dry=1&after='+encodeURIComponent(after)).then(d=>{
     if(!box)return;
     if(!d.ok){box.innerHTML='<div style="color:#f87171;font-size:11px">✗ خطا</div>';return;}
     let h='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
@@ -60078,14 +60324,14 @@ fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token
 fd.append('telegram',JSON.stringify({enabled:$('telegramEnabled')?.checked?1:0,token:$('telegramToken')?.value||'',chat_id:$('telegramChatId')?.value||''}));
 fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));/* v10.46 (۶۰): غرفهٔ انتخاب‌شده برای پیام مشتری */fd.append('notif_chat_shop',String($('notifChatShop')?.value||0));fd.append('notif_scan_limit',$('notifScanLimit')?.value||20); /* v10.86 (100) */fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('auto_resume',$('autoResume')?.checked?1:0);fd.append('auto_resume_max',$('autoResumeMax')?.value||2);fd.append('bsl_catalog_auto',$('bslCatAuto')?.checked?1:0);fd.append('bsl_catalog_ttl_h',$('bslCatTtl')?.value||6);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
 if(!window._connSaveNoToast)showToast(d.ok?'✓ ذخیره شد':'خطا',!d.ok);
-_connSaveIndicator(d.ok?'ok':'err');
-}).catch(()=>{if(!window._connSaveNoToast)showToast('خطا',1);_connSaveIndicator('err');});}
+window._connSaveNoToast=false;_connSaveIndicator(d.ok?'ok':'err');
+}).catch(()=>{if(!window._connSaveNoToast)showToast('خطا',1);window._connSaveNoToast=false;_connSaveIndicator('err');});}
 /* v10.89: scheduleConnSave - auto-save all settings */
 window._connSaveTimer=null;window._connSaveNoToast=false;
 function scheduleConnSave(){
     _connSaveIndicator('pending');
     clearTimeout(window._connSaveTimer);
-    window._connSaveTimer=setTimeout(function(){window._connSaveNoToast=true;saveConn();window._connSaveNoToast=false;},800);
+    window._connSaveTimer=setTimeout(function(){window._connSaveNoToast=true;saveConn();},800);
 }
 function _connSaveIndicator(state){
     var ids=['connSaveInd','connSaveInd2'];
@@ -60117,6 +60363,63 @@ function _connSaveIndicator(state){
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);
     else setTimeout(init,0);
 })();
+
+/* v10.90 (۱۰۳): کش هش محصولات */
+function phDiff(target,doUpdate){
+    var box=$('phBox');
+    if(box)box.innerHTML='<div style="color:#93c5fd;font-size:11px">\u23f3 در حال استعلام...</div>';
+    safeFetchJson('?product_hash_diff=1&target='+encodeURIComponent(target)+(doUpdate?'&update=1':'')).then(function(d){
+        if(!box)return;
+        if(!d.ok){box.innerHTML='<div style="color:#f87171">\u2717 '+esc(d.error||'خطا')+'</div>';return;}
+        var html='<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:11px">';
+        if(doUpdate)html+='<div style="color:#4ade80;margin-bottom:6px">\u2705 کش بروزرسانی شد</div>';
+        var diff=d.diff||{};
+        // BSL
+        var bsl=diff.bsl||{};
+        var bslKeys=Object.keys(bsl);
+        if(bslKeys.length){
+            html+='<div style="color:#34d399;font-weight:700;margin-bottom:4px">\ud83c\udfe2 باسلام</div>';
+            bslKeys.forEach(function(vid){
+                var v=bsl[vid];
+                if(v.error){html+='<div style="color:#fca5a5">\u2716 '+esc(v.shop||vid)+': '+esc(v.error)+'</div>';return;}
+                html+='<div style="padding:4px 0;border-bottom:1px solid #1e293b">';
+                html+='<span style="color:#a78bfa">\ud83c\udfe2 '+esc(v.shop||vid)+'</span> ';
+                html+='\u2022 کل: <b>'+toFa(v.total||0)+'</b> ';
+                html+='<span style="color:#4ade80">\u2795 '+toFa(v.added||0)+' جدید</span> ';
+                html+='<span style="color:#fbbf24">\u270f '+toFa(v.changed||0)+' تغییر</span> ';
+                html+='<span style="color:#f87171">\u2716 '+toFa(v.deleted||0)+' حذف</span>';
+                if((v.deleted_ids||[]).length){
+                    html+='<div style="color:#fca5a5;font-size:10px;margin-top:2px">شناسه\u200cهای حذف\u200cشده: '+esc((v.deleted_ids||[]).slice(0,10).join(', '))+(v.deleted_ids.length>10?' \u2026':'')+'</div>';
+                }
+                html+='</div>';
+            });
+        }
+        // WOO
+        var woo=diff.woo;
+        if(woo){
+            html+='<div style="color:#a78bfa;font-weight:700;margin-top:6px;margin-bottom:4px">\ud83d\uded2 ووکامرس</div>';
+            if(woo.error){html+='<div style="color:#fca5a5">\u2716 '+esc(woo.error)+'</div>';}
+            else{
+                html+='<div>\u2022 کل: <b>'+toFa(woo.total||0)+'</b> ';
+                html+='<span style="color:#4ade80">\u2795 '+toFa(woo.added||0)+' جدید</span> ';
+                html+='<span style="color:#fbbf24">\u270f '+toFa(woo.changed||0)+' تغییر</span> ';
+                html+='<span style="color:#f87171">\u2716 '+toFa(woo.deleted||0)+' حذف</span></div>';
+                if((woo.deleted_ids||[]).length){
+                    html+='<div style="color:#fca5a5;font-size:10px;margin-top:2px">شناسه\u200cهای حذف\u200cشده: '+esc((woo.deleted_ids||[]).slice(0,10).join(', '))+(woo.deleted_ids.length>10?' \u2026':'')+'</div>';
+                }
+            }
+        }
+        html+='</div>';
+        box.innerHTML=html;
+    }).catch(function(e){if(box)box.innerHTML='<div style="color:#f87171;font-size:11px">\u2717 '+esc(e.message)+'</div>';});
+}
+function phClear(target){
+    if(!confirm('پاکسازی کش هش '+target+'?'))return;
+    var box=$('phBox');
+    safeFetchJson('?product_hash_diff=1&target='+encodeURIComponent(target)+'&clear=1').then(function(d){
+        if(box)box.innerHTML='<div style="color:#4ade80">\u2713 پاک شد: '+toFa(d.cleared||0)+' مورد</div>';
+    }).catch(function(e){if(box)box.innerHTML='<div style="color:#f87171">\u2717 '+esc(e.message)+'</div>';});
+}
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
