@@ -1702,9 +1702,8 @@ function cronSummaryText(array $r): string {
 }
 
 function loadConnections(): array {
-$targetConn = function_exists('aiLookupConfigFile') ? aiLookupConfigFile('connections.json') : CONNECTIONS_FILE;
-if (!file_exists($targetConn)) return ['woocommerce'=>[],'basalam'=>['token'=>'','vendor_id'=>0,'preparation_days'=>3,'weight'=>500,'package_weight'=>600,'stock'=>10,'category_id'=>0,'auto_category'=>false,'net_indirect'=>false]];
-$d = @json_decode(@file_get_contents($targetConn) ?: '', true);
+if (!file_exists(CONNECTIONS_FILE)) return ['woocommerce'=>[],'basalam'=>['token'=>'','vendor_id'=>0,'preparation_days'=>3,'weight'=>500,'package_weight'=>600,'stock'=>10,'category_id'=>0,'auto_category'=>false,'net_indirect'=>false]];
+$d = @json_decode(@file_get_contents(CONNECTIONS_FILE) ?: '', true);
 return is_array($d) ? $d : ['woocommerce'=>[],'basalam'=>[]];
 }
 function saveConnections(array $c): bool {
@@ -2144,33 +2143,10 @@ function aiHttp(string $url, array $headers, ?array $payload, array $net, ?strin
  * ===================================================================== */
 
 /** فهرست ارائه‌دهنده‌ها را از دیسک می‌خواند: [id => {id,name,vendor,url,apiKey,enabled,models[]}] */
-/**
- * یافتن فایل‌های تنظیمات هوش مصنوعی (پشتیبانی از پوشه محلی و پوشه آپلودهای وردپرس)
- */
-function aiLookupConfigFile(string $filename): string {
-    $local = __DIR__ . '/' . $filename;
-    if (is_file($local) && filesize($local) > 2) return $local;
-
-    // پشتیبانی از آپلود در وردپرس (wp-content/uploads)
-    if (defined('ABSPATH')) {
-        $wpUpload = ABSPATH . 'wp-content/uploads/' . $filename;
-        if (is_file($wpUpload) && filesize($wpUpload) > 2) return $wpUpload;
-    }
-    if (function_exists('wp_upload_dir')) {
-        try {
-            $u = wp_upload_dir();
-            $wpU = ($u['basedir'] ?? '') . '/' . $filename;
-            if ($wpU !== '' && is_file($wpU) && filesize($wpU) > 2) return $wpU;
-        } catch (\Throwable $e) {}
-    }
-    return $local;
-}
-
 function aiProvidersLoad(): array {
     $p = [];
-    $target = function_exists('aiLookupConfigFile') ? aiLookupConfigFile('ai_providers.json') : AI_PROVIDERS_FILE;
-    if (is_file($target)) {
-        $d = json_decode((string)@file_get_contents($target), true);
+    if (is_file(AI_PROVIDERS_FILE)) {
+        $d = json_decode((string)@file_get_contents(AI_PROVIDERS_FILE), true);
         if (is_array($d)) $p = $d;
     }
     return $p;
@@ -45714,13 +45690,53 @@ function arenaAiAnswer(string $text, array $history = []): array {
     $system = $s['ai_system'];
     $catalog = arenaCatalog(true);
 
-    // ۱. دریافت مدل مستر و کاندیدها دقیقاً مطابق ساختار آماده در فایل اسکریپر۴
+    // نمونه کالاهای موجود در کاتالوگ فروشگاه صبا شاپ برای زمینه پرامپت
+    $top = [];
+    foreach (array_slice($catalog, 0, 35) as $p) {
+        $top[] = mb_substr($p['title'], 0, 40) . ' — ' . arenaPrice($p['price']) . ($p['category'] !== '' ? ' (' . $p['category'] . ')' : '');
+    }
+    $storeContext = "نام فروشگاه: " . $s['name'] . "\nارسال رایگان از: " . arenaPrice((int)$s['free_shipping_over'])
+                  . "\nبرخی کالاهای موجود در کاتالوگ:\n" . implode("\n", $top);
+
+    // ۱. بررسی مسیر فراخوانی زنده از اسکریپر (Live Scraper Bridge Endpoint)
+    if (!empty($_SERVER['HTTP_HOST']) && function_exists('curl_init')) {
+        $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https://' : 'http://';
+        $scraperEndpoint = $scheme . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . '/scraper4.php?arena_ai_chat=1';
+        try {
+            $ch = curl_init($scraperEndpoint);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 7);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query([
+                'text' => $text,
+                'history' => json_encode($history, JSON_UNESCAPED_UNICODE),
+                'store_info' => $storeContext
+            ]));
+            $raw = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if ($code === 200 && $raw) {
+                $j = json_decode($raw, true);
+                if (is_array($j) && !empty($j['ok']) && !empty($j['reply'])) {
+                    return [
+                        'ok'       => true,
+                        'text'     => (string)$j['reply'],
+                        'reply'    => (string)$j['reply'],
+                        'engine'   => (string)($j['engine'] ?? 'scraper_live_bridge'),
+                        'model'    => (string)($j['model'] ?? 'master'),
+                        'provider' => (string)($j['provider'] ?? 'scraper')
+                    ];
+                }
+            }
+        } catch (\Throwable $e) {}
+    }
+
+    // ۲. اجرای مستقیم مدل مستر و کاندیدهای اسکریپر۴ در همان محیط
     $providers = function_exists('aiProvidersLoad') ? aiProvidersLoad() : [];
     $cands     = function_exists('aiCandidates') ? aiCandidates() : [];
     $masterKey = function_exists('aiMasterKey') ? aiMasterKey() : '';
     $net       = function_exists('aiNetCfg') ? aiNetCfg() : null;
 
-    // استخراج مدل مستر برگزیده در اسکریپر۴
     $master = null;
     if (!empty($cands)) {
         foreach ($cands as $c) {
@@ -45729,7 +45745,6 @@ function arenaAiAnswer(string $text, array $history = []): array {
         if ($master === null) $master = $cands[0];
     }
 
-    // زنجیره اجرایی: ابتدا مدل مستر، سپس کاندیدهای بعدی
     $chain = [];
     if ($master !== null) $chain[] = $master;
     foreach ($cands as $c) {
@@ -45737,7 +45752,6 @@ function arenaAiAnswer(string $text, array $history = []): array {
         $chain[] = $c;
     }
 
-    // اگر کاندیدها خالی بود، بررسی مستقیم ارائه‌دهنده‌های فعال
     if (empty($chain)) {
         foreach ($providers as $pid => $pr) {
             if (($pr['enabled'] ?? true) === false) continue;
@@ -45750,14 +45764,6 @@ function arenaAiAnswer(string $text, array $history = []): array {
             }
         }
     }
-
-    // نمونه کالاهای موجود در کاتالوگ فروشگاه صبا شاپ برای زمینه پرامپت
-    $top = [];
-    foreach (array_slice($catalog, 0, 35) as $p) {
-        $top[] = mb_substr($p['title'], 0, 40) . ' — ' . arenaPrice($p['price']) . ($p['category'] !== '' ? ' (' . $p['category'] . ')' : '');
-    }
-    $storeContext = "نام فروشگاه: " . $s['name'] . "\nارسال رایگان از: " . arenaPrice((int)$s['free_shipping_over'])
-                  . "\nبرخی کالاهای موجود در کاتالوگ:\n" . implode("\n", $top);
 
     $msgs = [['role' => 'system', 'content' => $system . "\n\n" . $storeContext]];
     foreach (array_slice($history, -8) as $h) {
@@ -45773,7 +45779,6 @@ function arenaAiAnswer(string $text, array $history = []): array {
         'temperature' => 0.5
     ];
 
-    // ۲. اجرای مستقیم مدل مستر اسکریپر و کاندیدها با استفاده از زیرسیستم اسکریپر۴
     if (!empty($chain) && function_exists('aiProviderCall')) {
         foreach ($chain as $cand) {
             $pId = $cand['provider'] ?? '';
@@ -45788,8 +45793,8 @@ function arenaAiAnswer(string $text, array $history = []): array {
                     if (function_exists('aiExtractText') && function_exists('aiStripReasoning')) {
                         $ans = aiStripReasoning(aiExtractText($r['body']));
                     }
-                    if ($ans === '') {
-                        $ans = function_exists('aiExtractAnswer') ? aiExtractAnswer($r['body']) : '';
+                    if ($ans === '' && function_exists('aiExtractAnswer')) {
+                        $ans = aiExtractAnswer($r['body']);
                     }
                     if ($ans === '') {
                         $b = is_array($r['body']) ? $r['body'] : [];
@@ -45801,17 +45806,17 @@ function arenaAiAnswer(string $text, array $history = []): array {
                             'ok'       => true,
                             'text'     => $ans,
                             'reply'    => $ans,
-                            'engine'   => $isMaster ? 'master' : 'candidate',
+                            'engine'   => $isMaster ? 'scraper_master' : 'scraper_candidate',
                             'model'    => $cand['model'],
                             'provider' => $cand['providerName'] ?? $pId
                         ];
                     }
                 }
-            } catch (\Throwable $e) { /* تلاش با کاندید بعدی */ }
+            } catch (\Throwable $e) {}
         }
     }
 
-    // ۳. اگر کاندیدی موفق نشد، تلاش با ارائه‌دهندهٔ فعال (aiActiveChat)
+    // ۳. تلاش با ارائه‌دهندهٔ فعال (aiActiveChat)
     if (function_exists('aiActiveChat')) {
         try {
             $r = aiActiveChat($payload, $net);
@@ -45825,7 +45830,7 @@ function arenaAiAnswer(string $text, array $history = []): array {
                         'ok'     => true,
                         'text'   => $ans,
                         'reply'  => $ans,
-                        'engine' => 'active_chat',
+                        'engine' => 'scraper_active',
                         'model'  => $r['model'] ?? 'active'
                     ];
                 }
@@ -53132,7 +53137,8 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         <a class="btn btn-red" href="?arena=logout">⎋ خروج از ادمین</a>
         <button class="btn btn-gray" onclick="shopSelftest()">🩺 خودآزمایی</button>
         <span id="shopAiChip" class="shop-badge-src woo" style="display:none">🤖</span>
-    </div>
+    
+        <a class="btn btn-purple" target="_blank" href="scraper4.php" style="background:#6366f1;color:#fff;text-decoration:none">⚙️ بازگشت به پنل اسکریپر و هوش مصنوعی ↗</a></div>
 
     <div class="ssum" id="shopStats" style="grid-template-columns:repeat(4,1fr)">
         <div class="si"><b id="stProd">—</b><span>کل کالاها (خود/ووکامرس/باسلام)</span></div>
@@ -53213,6 +53219,15 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
     <!-- ─────────── هوش مصنوعی ─────────── -->
     <div class="shop-st" id="shopPane_ai">
         <div class="shop-ai-box">
+        <div style="background:#1e1b4b;border:1px solid #4338ca;border-radius:10px;padding:12px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+            <div>
+                <div style="font-size:12px;font-weight:700;color:#c7d2fe">🔗 مسیر اتصال هوش مصنوعی زنده به اسکریپر (scraper4.php)</div>
+                <div style="font-size:11px;color:#94a3b8;margin-top:3px">مدل مستر انتخابی و کاندیدهای اسکریپر۴ به صورت خودکار به این فروشگاه متصل هستند.</div>
+            </div>
+            <a href="scraper4.php" target="_blank" class="btn btn-purple" style="font-size:11px;padding:6px 12px;text-decoration:none;background:#6366f1;color:#fff">
+                ⚙️ تنظیمات مدل‌ها و کلیدها در اسکریپر۴ ↗
+            </a>
+        </div>
             <b style="font-size:13px">🤖 دستیار هوشمند فروشگاه</b>
             <p style="font-size:11px;color:#94a3b8;margin:8px 0 14px">از همان «ارائه‌دهنده‌های AI» که اسکرپر استفاده می‌کند (بخشِ تنظیمات اصلی) بهره می‌گیرد — نیازی به کلیدِ جدا نیست. اگر ارائه‌دهنده‌ای فعال نباشد، یک پاسخ‌دهندهٔ آفلاینِ قاعده‌محور (قیمت، موجودی، ارسال، کد تخفیف، پیگیری سفارش) فعال می‌شود.</p>
             <div style="font-size:11.5px;margin-bottom:12px">ارائه‌دهندهٔ فعال: <b id="shopAiModel" style="color:#a5b4fc">—</b></div>
@@ -74789,13 +74804,4 @@ if (typeof switchMainTab === 'function') {
 
 </script>
 </body>
-</htmlfunction arenaToman(int ): string {
-     = number_format(max(0, ));
-    return strtr(, [
-        '0' => '۰', '1' => '۱', '2' => '۲', '3' => '۳', '4' => '۴',
-        '5' => '۵', '6' => '۶', '7' => '۷', '8' => '۸', '9' => '۹',
-        ',' => '٬'
-    ]);
-}
-
->
+</html>

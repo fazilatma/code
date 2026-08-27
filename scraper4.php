@@ -2143,32 +2143,10 @@ function aiHttp(string $url, array $headers, ?array $payload, array $net, ?strin
  * ===================================================================== */
 
 /** فهرست ارائه‌دهنده‌ها را از دیسک می‌خواند: [id => {id,name,vendor,url,apiKey,enabled,models[]}] */
-/**
- * یافتن فایل‌های تنظیمات هوش مصنوعی (پشتیبانی از پوشه محلی و پوشه آپلودهای وردپرس)
- */
-function aiLookupConfigFile(string $filename): string {
-    $local = __DIR__ . '/' . $filename;
-    if (is_file($local) && filesize($local) > 2) return $local;
-
-    if (defined('ABSPATH')) {
-        $wpUpload = ABSPATH . 'wp-content/uploads/' . $filename;
-        if (is_file($wpUpload) && filesize($wpUpload) > 2) return $wpUpload;
-    }
-    if (function_exists('wp_upload_dir')) {
-        try {
-            $u = wp_upload_dir();
-            $wpU = ($u['basedir'] ?? '') . '/' . $filename;
-            if ($wpU !== '' && is_file($wpU) && filesize($wpU) > 2) return $wpU;
-        } catch (\Throwable $e) {}
-    }
-    return $local;
-}
-
 function aiProvidersLoad(): array {
     $p = [];
-    $target = function_exists('aiLookupConfigFile') ? aiLookupConfigFile('ai_providers.json') : AI_PROVIDERS_FILE;
-    if (is_file($target)) {
-        $d = json_decode((string)@file_get_contents($target), true);
+    if (is_file(AI_PROVIDERS_FILE)) {
+        $d = json_decode((string)@file_get_contents(AI_PROVIDERS_FILE), true);
         if (is_array($d)) $p = $d;
     }
     return $p;
@@ -36805,6 +36783,148 @@ if (isset($_GET['ai_candidates_reply'])) {
     exit;
 }
 
+/* =====================================================================
+ *  مسیر مستقیم هوش مصنوعی زنده برای فروشگاه (arena.php)
+ *  استفاده مستقیم از مدل مستر (Master) و کاندیدهای اسکریپر۴
+ * ===================================================================== */
+if (isset($_GET['arena_ai_chat']) || isset($_POST['arena_ai_chat']) || (isset($_POST['action']) && $_POST['action'] === 'arena_ai_chat')) {
+    header('Content-Type: application/json; charset=UTF-8');
+    header('Access-Control-Allow-Origin: *');
+    @set_time_limit(120);
+
+    $text = trim((string)($_POST['text'] ?? ($_GET['text'] ?? ($_POST['message'] ?? ($_GET['message'] ?? '')))));
+    if ($text === '') {
+        echo json_encode(['ok' => false, 'error' => 'متن پیام خالی است', 'reply' => ''], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $rawHist = $_POST['history'] ?? ($_GET['history'] ?? '[]');
+    $history = is_array($rawHist) ? $rawHist : json_decode((string)$rawHist, true);
+    if (!is_array($history)) $history = [];
+
+    $storeInfo = trim((string)($_POST['store_info'] ?? ($_GET['store_info'] ?? '')));
+
+    $system = "تو دستیار هوشمند و مشاور خرید آنلاین فروشگاه صبا شاپ هستی. "
+            . "به سؤالات خریداران با لحنی صمیمی، حرفه‌ای و کوتاه (حداکثر ۲ یا ۳ جمله) پاسخ بده. "
+            . "اگر خریدار کالایی خواست، او را راهنمایی کن و اگر اطلاعاتی نداشتی، بگو همکاران به‌زودی پاسخ می‌دهند.";
+    if ($storeInfo !== '') {
+        $system .= "\n\nاطلاعات تکمیلی فروشگاه:\n" . $storeInfo;
+    }
+
+    $msgs = [['role' => 'system', 'content' => $system]];
+    foreach (array_slice($history, -8) as $h) {
+        if (is_array($h) && !empty($h['role']) && !empty($h['text'])) {
+            $msgs[] = ['role' => ($h['role'] === 'user' || $h['role'] === 'customer' ? 'user' : 'assistant'), 'content' => (string)$h['text']];
+        }
+    }
+    $msgs[] = ['role' => 'user', 'content' => $text];
+
+    $payload = [
+        'messages' => $msgs,
+        'max_tokens' => 700,
+        'temperature' => 0.5
+    ];
+
+    $providers = aiProvidersLoad();
+    $cands     = aiCandidates();
+    $masterKey = aiMasterKey();
+    $net       = aiNetCfg();
+
+    $sorted = [];
+    if ($masterKey !== '') {
+        foreach ($cands as $c) {
+            if (($c['key'] ?? '') === $masterKey) { $sorted[] = $c; break; }
+        }
+    }
+    foreach ($cands as $c) {
+        if (($c['key'] ?? '') !== $masterKey) $sorted[] = $c;
+    }
+
+    if (empty($sorted)) {
+        foreach ($providers as $pid => $pr) {
+            if (($pr['enabled'] ?? true) === false) continue;
+            $prId = (string)($pr['id'] ?? $pid);
+            foreach ((array)($pr['models'] ?? []) as $m) {
+                $mid = is_array($m) ? ($m['id'] ?? '') : (string)$m;
+                if ($mid !== '') {
+                    $sorted[] = ['provider' => $prId, 'model' => $mid, 'key' => $prId . '::' . $mid, 'providerName' => ($pr['name'] ?? $prId)];
+                }
+            }
+        }
+    }
+
+    $ans = '';
+    $usedModel = '';
+    $usedProvider = '';
+    $isMaster = false;
+
+    foreach ($sorted as $cand) {
+        $pId = $cand['provider'] ?? '';
+        $mp  = $providers[$pId] ?? null;
+        if (!$mp || ($mp['enabled'] ?? true) === false) continue;
+        if (empty($mp['id'])) $mp['id'] = $pId;
+
+        try {
+            $r = aiProviderCall($mp, $cand['model'], $payload, $net);
+            if (!empty($r['ok']) && !empty($r['body'])) {
+                $resText = '';
+                if (function_exists('aiExtractText') && function_exists('aiStripReasoning')) {
+                    $resText = aiStripReasoning(aiExtractText($r['body']));
+                }
+                if ($resText === '' && function_exists('aiExtractAnswer')) {
+                    $resText = aiExtractAnswer($r['body']);
+                }
+                if ($resText === '') {
+                    $b = is_array($r['body']) ? $r['body'] : [];
+                    $resText = trim((string)($b['choices'][0]['message']['content'] ?? ''));
+                }
+                if ($resText !== '') {
+                    $ans = $resText;
+                    $usedModel = $cand['model'] ?? '';
+                    $usedProvider = $cand['providerName'] ?? $pId;
+                    $isMaster = ($masterKey !== '' && ($cand['key'] ?? '') === $masterKey);
+                    break;
+                }
+            }
+        } catch (\Throwable $e) {}
+    }
+
+    if ($ans === '') {
+        try {
+            $r = aiActiveChat($payload, $net);
+            if (!empty($r['ok']) && !empty($r['body'])) {
+                $resText = '';
+                if (function_exists('aiExtractText') && function_exists('aiStripReasoning')) {
+                    $resText = aiStripReasoning(aiExtractText($r['body']));
+                }
+                if ($resText !== '') {
+                    $ans = $resText;
+                    $usedModel = $r['model'] ?? 'active';
+                    $usedProvider = 'active_provider';
+                }
+            }
+        } catch (\Throwable $e) {}
+    }
+
+    if ($ans !== '') {
+        echo json_encode([
+            'ok' => true,
+            'reply' => $ans,
+            'text' => $ans,
+            'model' => $usedModel,
+            'provider' => $usedProvider,
+            'engine' => $isMaster ? 'scraper_master' : 'scraper_candidate'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    echo json_encode([
+        'ok' => false,
+        'error' => 'پاسخی از مدل‌های هوش مصنوعی اسکریپر دریافت نشد'
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if (isset($_GET['ai_category'])) {
 header('Content-Type: application/json; charset=UTF-8');
 $cn=loadConnections();$bs=$cn['basalam']??[];
@@ -45687,6 +45807,12 @@ html[data-skin="gloss"] .progress-bar{
 <button class="tasks-btn" id="tasksBtn" onclick="tmOpen()" title="مدیر وظیفه — کارهای در حال اجرا"><span aria-hidden="true">📋</span><span class="tasks-lbl">مدیر وظیفه</span><span class="tasks-sub" id="tasksSub">کارهای پس‌زمینه</span><span class="tasks-badge" id="tasksBadge">0</span></button>
 <!-- v10.82 (96): چت باسلام — باز کردن مودالِ گفتگوها از نوارِ هدر -->
 <button class="chat-hdr-btn" id="chatHdrBtn" onclick="mrOpenModal()" title="پاسخ دستی به مشتریان — اتاقِ چتِ زنده"><span aria-hidden="true">💬</span><span class="chat-hdr-lbl">پاسخ دستی</span><span id="chatUnreadB" style="display:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#e11d48;color:#fff;font-size:10px;font-weight:700;align-items:center;justify-content:center">۰</span></button>
+<!-- مسیر مستقیم به فروشگاه آنلاین و چت هوش مصنوعی زنده -->
+<a href="arena.php" target="_blank" class="shop-hdr-btn" id="shopHdrBtn" title="مشاهدهٔ فروشگاه آنلاین و گفتگوی زنده هوش مصنوعی (arena.php)" style="text-decoration:none;display:inline-flex;align-items:center;gap:6px;padding:0 12px;height:44px;border-radius:12px;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;font-size:12px;font-weight:700;box-shadow:0 4px 14px rgba(79,70,229,0.35);border:1px solid #6366f1">
+  <span aria-hidden="true" style="font-size:15px">🛍️</span>
+  <span class="shop-hdr-lbl">فروشگاه آنلاین</span>
+  <span style="font-size:9.5px;background:#10b981;color:#fff;padding:2px 6px;border-radius:6px;font-weight:800">AI زنده</span>
+</a>
 </div>
 <div class="container">
 <h1><span class="h1-name"><span class="h1-ico">🛒</span> <span class="h1-txt">اسکرپر</span></span>
@@ -46020,6 +46146,7 @@ html[data-skin="gloss"] .progress-bar{
 <div class="ai-tab-btn" data-ai-tab="autopilot" onclick="aiTab('autopilot')">🗓 اتوماسیون</div>
 <div class="ai-tab-btn" data-ai-tab="chat" onclick="aiTab('chat')">💬 چت با مدل‌ها</div>
 <div class="ai-tab-btn" data-ai-tab="enrich" onclick="aiTab('enrich')">✍️ تولید محتوا و دسته</div>
+<div class="ai-tab-btn" data-ai-tab="store" onclick="aiTab('store')" style="background:linear-gradient(135deg,#312e81,#4338ca);color:#fff">🛍️ مسیر فروشگاه (چت زنده)</div>
 </div>
 
 <!-- ══ تب ۱: ارائه‌دهنده‌ها ══ -->
@@ -46642,6 +46769,49 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
         <div style="font-size:10px;color:#94a3b8;margin-bottom:4px">پیش‌نمایش بصری توضیحات:</div>
         <div id="aiEnrichResPreview" style="max-height:180px;overflow-y:auto;background:#fff;color:#0f172a;padding:10px;border-radius:6px;font-size:11px;line-height:1.8"></div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ تب: مسیر زنده به فروشگاه (arena.php) ══ -->
+<div class="ai-tab-panel" data-ai-panel="store">
+  <div style="background:#111c31;border:1px solid #334155;border-radius:8px;padding:14px">
+    <div style="font-size:13px;color:#38bdf8;font-weight:800;margin-bottom:8px;display:flex;align-items:center;gap:8px">
+      <span>🛍️</span>
+      <span>مسیر مستقیم هوش مصنوعی زنده به فروشگاه (arena.php)</span>
+      <span style="background:#059669;color:#fff;font-size:10px;padding:2px 8px;border-radius:6px;margin-right:auto">اتصال فعال</span>
+    </div>
+    <div style="font-size:11px;color:#94a3b8;margin-bottom:14px;line-height:1.8">
+      قابلیت هوش مصنوعی زنده در این بخش مستقیماً به ویترین و چت آنلاین فروشگاه صبا شاپ وصل شده است. پیام‌های ارسالی مشتریان در صفحه فروشگاه ابتدا توسط <b>مدل مستر انتخابی</b> و در صورت در دسترس نبودن، توسط <b>کاندیدهای برگزیده</b> پاسخ داده می‌شوند.
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:10px;margin-bottom:14px">
+      <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px">
+        <div style="font-size:10.5px;color:#64748b">مدل مستر انتخابی (Master Model)</div>
+        <div style="font-size:12px;font-weight:700;color:#fbbf24;margin-top:4px"><?= htmlspecialchars(function_exists('aiMasterKey') ? (aiMasterKey() ?: 'تنظیم خودکار / بر اساس امتیاز') : 'auto') ?></div>
+      </div>
+      <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px">
+        <div style="font-size:10.5px;color:#64748b">وضعیت فایل فروشگاه</div>
+        <div style="font-size:12px;font-weight:700;color:#4ade80;margin-top:4px">
+          <?= file_exists(__DIR__ . '/arena.php') ? '✓ فایل arena.php متصل و در دسترس' : 'مسیر در حال آماده‌سازی' ?>
+        </div>
+      </div>
+      <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px">
+        <div style="font-size:10.5px;color:#64748b">دسترسی سریع به ویترین</div>
+        <div style="margin-top:4px">
+          <a href="arena.php" target="_blank" style="color:#60a5fa;font-size:11.5px;text-decoration:none;font-weight:700">باز کردن فروشگاه در تب جدید ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- ابزار تست زنده پاسخ‌گویی هوش مصنوعی فروشگاه -->
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:12px">
+      <div style="font-size:11.5px;font-weight:700;color:#f1f5f9;margin-bottom:8px">🧪 تست گفت‌وگوی زنده هوش مصنوعی فروشگاه:</div>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="storeLiveMsg" placeholder="یک پیام بنویسید (مثلاً: ساعت هوشمند چه مدل‌هایی دارید؟)" style="flex:1;font-size:11.5px;padding:8px 10px">
+        <button class="btn btn-purple" onclick="storeLiveTest()" id="storeLiveBtn" style="padding:8px 16px;font-size:11.5px;white-space:nowrap">🚀 ارسال به هوش مصنوعی زنده</button>
+      </div>
+      <div id="storeLiveStatus" style="display:none;margin-top:10px;padding:10px;border-radius:6px;font-size:11.5px;line-height:1.8"></div>
     </div>
   </div>
 </div>
