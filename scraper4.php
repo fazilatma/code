@@ -2143,10 +2143,32 @@ function aiHttp(string $url, array $headers, ?array $payload, array $net, ?strin
  * ===================================================================== */
 
 /** فهرست ارائه‌دهنده‌ها را از دیسک می‌خواند: [id => {id,name,vendor,url,apiKey,enabled,models[]}] */
+/**
+ * یافتن فایل‌های تنظیمات هوش مصنوعی (پشتیبانی از پوشه محلی و پوشه آپلودهای وردپرس)
+ */
+function aiLookupConfigFile(string $filename): string {
+    $local = __DIR__ . '/' . $filename;
+    if (is_file($local) && filesize($local) > 2) return $local;
+
+    if (defined('ABSPATH')) {
+        $wpUpload = ABSPATH . 'wp-content/uploads/' . $filename;
+        if (is_file($wpUpload) && filesize($wpUpload) > 2) return $wpUpload;
+    }
+    if (function_exists('wp_upload_dir')) {
+        try {
+            $u = wp_upload_dir();
+            $wpU = ($u['basedir'] ?? '') . '/' . $filename;
+            if ($wpU !== '' && is_file($wpU) && filesize($wpU) > 2) return $wpU;
+        } catch (\Throwable $e) {}
+    }
+    return $local;
+}
+
 function aiProvidersLoad(): array {
     $p = [];
-    if (is_file(AI_PROVIDERS_FILE)) {
-        $d = json_decode((string)@file_get_contents(AI_PROVIDERS_FILE), true);
+    $target = function_exists('aiLookupConfigFile') ? aiLookupConfigFile('ai_providers.json') : AI_PROVIDERS_FILE;
+    if (is_file($target)) {
+        $d = json_decode((string)@file_get_contents($target), true);
         if (is_array($d)) $p = $d;
     }
     return $p;

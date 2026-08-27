@@ -1702,8 +1702,9 @@ function cronSummaryText(array $r): string {
 }
 
 function loadConnections(): array {
-if (!file_exists(CONNECTIONS_FILE)) return ['woocommerce'=>[],'basalam'=>['token'=>'','vendor_id'=>0,'preparation_days'=>3,'weight'=>500,'package_weight'=>600,'stock'=>10,'category_id'=>0,'auto_category'=>false,'net_indirect'=>false]];
-$d = @json_decode(@file_get_contents(CONNECTIONS_FILE) ?: '', true);
+$targetConn = function_exists('aiLookupConfigFile') ? aiLookupConfigFile('connections.json') : CONNECTIONS_FILE;
+if (!file_exists($targetConn)) return ['woocommerce'=>[],'basalam'=>['token'=>'','vendor_id'=>0,'preparation_days'=>3,'weight'=>500,'package_weight'=>600,'stock'=>10,'category_id'=>0,'auto_category'=>false,'net_indirect'=>false]];
+$d = @json_decode(@file_get_contents($targetConn) ?: '', true);
 return is_array($d) ? $d : ['woocommerce'=>[],'basalam'=>[]];
 }
 function saveConnections(array $c): bool {
@@ -2143,10 +2144,33 @@ function aiHttp(string $url, array $headers, ?array $payload, array $net, ?strin
  * ===================================================================== */
 
 /** فهرست ارائه‌دهنده‌ها را از دیسک می‌خواند: [id => {id,name,vendor,url,apiKey,enabled,models[]}] */
+/**
+ * یافتن فایل‌های تنظیمات هوش مصنوعی (پشتیبانی از پوشه محلی و پوشه آپلودهای وردپرس)
+ */
+function aiLookupConfigFile(string $filename): string {
+    $local = __DIR__ . '/' . $filename;
+    if (is_file($local) && filesize($local) > 2) return $local;
+
+    // پشتیبانی از آپلود در وردپرس (wp-content/uploads)
+    if (defined('ABSPATH')) {
+        $wpUpload = ABSPATH . 'wp-content/uploads/' . $filename;
+        if (is_file($wpUpload) && filesize($wpUpload) > 2) return $wpUpload;
+    }
+    if (function_exists('wp_upload_dir')) {
+        try {
+            $u = wp_upload_dir();
+            $wpU = ($u['basedir'] ?? '') . '/' . $filename;
+            if ($wpU !== '' && is_file($wpU) && filesize($wpU) > 2) return $wpU;
+        } catch (\Throwable $e) {}
+    }
+    return $local;
+}
+
 function aiProvidersLoad(): array {
     $p = [];
-    if (is_file(AI_PROVIDERS_FILE)) {
-        $d = json_decode((string)@file_get_contents(AI_PROVIDERS_FILE), true);
+    $target = function_exists('aiLookupConfigFile') ? aiLookupConfigFile('ai_providers.json') : AI_PROVIDERS_FILE;
+    if (is_file($target)) {
+        $d = json_decode((string)@file_get_contents($target), true);
         if (is_array($d)) $p = $d;
     }
     return $p;
@@ -45690,34 +45714,52 @@ function arenaAiAnswer(string $text, array $history = []): array {
     $system = $s['ai_system'];
     $catalog = arenaCatalog(true);
 
-    // ابزارهای پیش‌پردازش برای پرامپت (Layer 1 Context Enrichment)
-    $toolContext = '';
-    if (preg_match('/ARN-\d{4,}/i', $text, $m)) {
-        $trk = arenaAiExecuteTool('track_order', ['order_id' => $m[0]]);
-        $toolContext .= "\n[اطلاعات پیگیری سفارش " . $m[0] . ": " . json_encode($trk, JSON_UNESCAPED_UNICODE) . "]\n";
-    }
-    if (preg_match('/(ارسال|هزینه|کرایه|رایگان|پست)/u', $text)) {
-        $shp = arenaAiExecuteTool('shipping_info', []);
-        $toolContext .= "\n[قوانین هزینه ارسال: " . json_encode($shp, JSON_UNESCAPED_UNICODE) . "]\n";
-    }
-    if (preg_match('/(تخفیف|کوپن|کد|off|discount)/u', $text)) {
-        $cp = arenaAiExecuteTool('coupon_check', ['code' => 'WELCOME10']);
-        $toolContext .= "\n[کد تخفیف فروشگاه: " . json_encode($cp, JSON_UNESCAPED_UNICODE) . "]\n";
-    }
-    if (preg_match('/(تلفن|تماس|آدرس|ساعت|پشتیبان|شماره)/u', $text)) {
-        $cnt = arenaAiExecuteTool('store_contact', []);
-        $toolContext .= "\n[اطلاعات تماس فروشگاه: " . json_encode($cnt, JSON_UNESCAPED_UNICODE) . "]\n";
+    // ۱. دریافت مدل مستر و کاندیدها دقیقاً مطابق ساختار آماده در فایل اسکریپر۴
+    $providers = function_exists('aiProvidersLoad') ? aiProvidersLoad() : [];
+    $cands     = function_exists('aiCandidates') ? aiCandidates() : [];
+    $masterKey = function_exists('aiMasterKey') ? aiMasterKey() : '';
+    $net       = function_exists('aiNetCfg') ? aiNetCfg() : null;
+
+    // استخراج مدل مستر برگزیده در اسکریپر۴
+    $master = null;
+    if (!empty($cands)) {
+        foreach ($cands as $c) {
+            if (($c['key'] ?? '') === $masterKey) { $master = $c; break; }
+        }
+        if ($master === null) $master = $cands[0];
     }
 
-    // نمونه کالاهای موجود در کاتالوگ فروشگاه برای آگاهی هوش مصنوعی
+    // زنجیره اجرایی: ابتدا مدل مستر، سپس کاندیدهای بعدی
+    $chain = [];
+    if ($master !== null) $chain[] = $master;
+    foreach ($cands as $c) {
+        if ($master !== null && ($c['key'] ?? '') === ($master['key'] ?? '')) continue;
+        $chain[] = $c;
+    }
+
+    // اگر کاندیدها خالی بود، بررسی مستقیم ارائه‌دهنده‌های فعال
+    if (empty($chain)) {
+        foreach ($providers as $pid => $pr) {
+            if (($pr['enabled'] ?? true) === false) continue;
+            $prId = (string)($pr['id'] ?? $pid);
+            foreach ((array)($pr['models'] ?? []) as $m) {
+                $mid = is_array($m) ? ($m['id'] ?? '') : (string)$m;
+                if ($mid !== '') {
+                    $chain[] = ['provider' => $prId, 'model' => $mid, 'key' => $prId . '::' . $mid, 'providerName' => ($pr['name'] ?? $prId)];
+                }
+            }
+        }
+    }
+
+    // نمونه کالاهای موجود در کاتالوگ فروشگاه صبا شاپ برای زمینه پرامپت
     $top = [];
-    foreach (array_slice($catalog, 0, 30) as $p) {
+    foreach (array_slice($catalog, 0, 35) as $p) {
         $top[] = mb_substr($p['title'], 0, 40) . ' — ' . arenaPrice($p['price']) . ($p['category'] !== '' ? ' (' . $p['category'] . ')' : '');
     }
-    $ctx = "نام فروشگاه: " . $s['name'] . "\nارسال رایگان برای خریدهای بالای: " . arenaPrice((int)$s['free_shipping_over'])
-         . "\nبرخی کالاهای کاتالوگ فروشگاه:\n" . implode("\n", $top) . "\n" . $toolContext;
+    $storeContext = "نام فروشگاه: " . $s['name'] . "\nارسال رایگان از: " . arenaPrice((int)$s['free_shipping_over'])
+                  . "\nبرخی کالاهای موجود در کاتالوگ:\n" . implode("\n", $top);
 
-    $msgs = [['role' => 'system', 'content' => $system . "\n\n" . $ctx]];
+    $msgs = [['role' => 'system', 'content' => $system . "\n\n" . $storeContext]];
     foreach (array_slice($history, -8) as $h) {
         if (is_array($h) && !empty($h['role']) && !empty($h['text'])) {
             $msgs[] = ['role' => ($h['role'] === 'user' || $h['role'] === 'customer' ? 'user' : 'assistant'), 'content' => (string)$h['text']];
@@ -45726,144 +45768,76 @@ function arenaAiAnswer(string $text, array $history = []): array {
     $msgs[] = ['role' => 'user', 'content' => $text];
 
     $payload = [
-        'messages' => $msgs,
-        'max_tokens' => 600,
-        'temperature' => 0.4,
-        'tools' => arenaAiTools(),
-        'tool_choice' => 'auto'
+        'messages'    => $msgs,
+        'max_tokens'  => 750,
+        'temperature' => 0.5
     ];
 
-    // ۱. ارزیابی مدل مستر و کاندیدها
-    try {
-        $providers = function_exists('aiProvidersLoad') ? aiProvidersLoad() : [];
-        $cands = function_exists('aiCandidates') ? aiCandidates() : [];
-        $masterKey = function_exists('aiMasterKey') ? aiMasterKey() : '';
-
-        $sortedCands = [];
-        if ($masterKey !== '') {
-            foreach ($cands as $c) {
-                if (($c['key'] ?? '') === $masterKey) { $sortedCands[] = $c; break; }
-            }
-        }
-        foreach ($cands as $c) {
-            if (($c['key'] ?? '') !== $masterKey) $sortedCands[] = $c;
-        }
-
-        // اگر لیست کاندیدها خالی بود، تمام ارائه‌دهنده‌های فعال از aiProvidersLoad بررسی شوند
-        if (empty($sortedCands)) {
-            foreach ($providers as $pid => $pr) {
-                if (($pr['enabled'] ?? true) === false) continue;
-                $prId = (string)($pr['id'] ?? $pid);
-                foreach ((array)($pr['models'] ?? []) as $m) {
-                    $mid = is_array($m) ? ($m['id'] ?? '') : (string)$m;
-                    if ($mid !== '') {
-                        $sortedCands[] = ['provider' => $prId, 'model' => $mid, 'key' => $prId . '::' . $mid];
-                    }
-                }
-            }
-        }
-
-        // بررسی اتصال سفارشی اتصالات (connections.json -> ai)
-        $conn = function_exists('loadConnections') ? loadConnections() : [];
-        $connAi = (array)($conn['ai'] ?? []);
-        if (!empty($connAi['enabled']) && !empty($connAi['api_key'])) {
-            $sortedCands[] = [
-                'provider' => 'custom',
-                'model' => trim((string)($connAi['model'] ?? 'qwen-plus')),
-                'key' => 'custom::' . ($connAi['model'] ?? 'qwen-plus'),
-                'custom' => [
-                    'id' => 'custom',
-                    'name' => 'سفارشی',
-                    'url' => trim((string)($connAi['base_url'] ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1')),
-                    'apiKey' => trim((string)$connAi['api_key']),
-                    'type' => 'openai',
-                    'enabled' => true
-                ]
-            ];
-        }
-
-        foreach ($sortedCands as $cand) {
+    // ۲. اجرای مستقیم مدل مستر اسکریپر و کاندیدها با استفاده از زیرسیستم اسکریپر۴
+    if (!empty($chain) && function_exists('aiProviderCall')) {
+        foreach ($chain as $cand) {
             $pId = $cand['provider'] ?? '';
-            $mp = null;
-            if (isset($cand['custom'])) {
-                $mp = $cand['custom'];
-            } elseif (isset($providers[$pId])) {
-                $mp = $providers[$pId];
-            }
-            if (!$mp || ($mp['enabled'] ?? true) === false || !function_exists('aiProviderCall')) continue;
+            $mp  = $providers[$pId] ?? null;
+            if (!$mp || ($mp['enabled'] ?? true) === false) continue;
             if (empty($mp['id'])) $mp['id'] = $pId;
 
-            // اول تلاش با tools، و در صورت عدم پشتیبانی مدل از tools، تلاش مجدد بدون tools
-            $r = aiProviderCall($mp, $cand['model'], $payload);
-            if (empty($r['ok']) && !empty($payload['tools'])) {
-                $plainPayload = $payload;
-                unset($plainPayload['tools'], $plainPayload['tool_choice']);
-                $r = aiProviderCall($mp, $cand['model'], $plainPayload);
-            }
-
-            if (!empty($r['ok']) && !empty($r['body'])) {
-                $b = is_array($r['body']) ? $r['body'] : [];
-                $msg = $b['choices'][0]['message'] ?? [];
-
-                // اگر مدل درخواست اجرای ابزار داد
-                if (!empty($msg['tool_calls']) && is_array($msg['tool_calls'])) {
-                    $msgs[] = $msg;
-                    foreach ($msg['tool_calls'] as $tc) {
-                        $tName = (string)($tc['function']['name'] ?? '');
-                        $tArgs = json_decode((string)($tc['function']['arguments'] ?? '{}'), true);
-                        if (!is_array($tArgs)) $tArgs = [];
-                        $tRes = arenaAiExecuteTool($tName, $tArgs);
-                        $msgs[] = [
-                            'role' => 'tool',
-                            'tool_call_id' => $tc['id'] ?? ('call_' . mt_rand(1000, 9999)),
-                            'name' => $tName,
-                            'content' => json_encode($tRes, JSON_UNESCAPED_UNICODE)
-                        ];
-                    }
-                    $r2 = aiProviderCall($mp, $cand['model'], ['messages' => $msgs, 'max_tokens' => 600, 'temperature' => 0.4]);
-                    if (!empty($r2['ok']) && !empty($r2['body'])) {
-                        $ans2 = function_exists('aiExtractAnswer') ? aiExtractAnswer($r2['body']) : '';
-                        if ($ans2 === '') {
-                            $b2 = is_array($r2['body']) ? $r2['body'] : [];
-                            $ans2 = trim((string)($b2['choices'][0]['message']['content'] ?? ''));
-                        }
-                        if ($ans2 !== '') return ['ok' => true, 'text' => $ans2, 'reply' => $ans2, 'engine' => 'master_tool', 'model' => $cand['model']];
-                    }
-                }
-
-                $ans = function_exists('aiExtractAnswer') ? aiExtractAnswer($r['body']) : '';
-                if ($ans === '') $ans = trim((string)($msg['content'] ?? ''));
-                if ($ans !== '') return ['ok' => true, 'text' => $ans, 'reply' => $ans, 'engine' => 'master', 'model' => $cand['model']];
-            }
-        }
-    } catch (\Throwable $e) { /* ادامه به حالت فعال */ }
-
-    // ۲. اولویت دوم: ارائه‌دهنده فعال
-    try {
-        if (function_exists('aiActiveConfig') && function_exists('aiActiveChat')) {
-            $cfg = aiActiveConfig();
-            if (!empty($cfg['provider'])) {
-                $plainPayload = $payload;
-                unset($plainPayload['tools'], $plainPayload['tool_choice']);
-                $r = aiActiveChat($plainPayload);
+            try {
+                $r = aiProviderCall($mp, $cand['model'], $payload, $net);
                 if (!empty($r['ok']) && !empty($r['body'])) {
-                    $ans = function_exists('aiExtractAnswer') ? aiExtractAnswer($r['body']) : '';
+                    $ans = '';
+                    if (function_exists('aiExtractText') && function_exists('aiStripReasoning')) {
+                        $ans = aiStripReasoning(aiExtractText($r['body']));
+                    }
+                    if ($ans === '') {
+                        $ans = function_exists('aiExtractAnswer') ? aiExtractAnswer($r['body']) : '';
+                    }
                     if ($ans === '') {
                         $b = is_array($r['body']) ? $r['body'] : [];
                         $ans = trim((string)($b['choices'][0]['message']['content'] ?? ''));
                     }
-                    if ($ans !== '') return ['ok' => true, 'text' => $ans, 'reply' => $ans, 'engine' => 'ai', 'model' => $cfg['model'] ?? ''];
+                    if ($ans !== '') {
+                        $isMaster = ($master && ($cand['key'] ?? '') === ($master['key'] ?? ''));
+                        return [
+                            'ok'       => true,
+                            'text'     => $ans,
+                            'reply'    => $ans,
+                            'engine'   => $isMaster ? 'master' : 'candidate',
+                            'model'    => $cand['model'],
+                            'provider' => $cand['providerName'] ?? $pId
+                        ];
+                    }
+                }
+            } catch (\Throwable $e) { /* تلاش با کاندید بعدی */ }
+        }
+    }
+
+    // ۳. اگر کاندیدی موفق نشد، تلاش با ارائه‌دهندهٔ فعال (aiActiveChat)
+    if (function_exists('aiActiveChat')) {
+        try {
+            $r = aiActiveChat($payload, $net);
+            if (!empty($r['ok']) && !empty($r['body'])) {
+                $ans = '';
+                if (function_exists('aiExtractText') && function_exists('aiStripReasoning')) {
+                    $ans = aiStripReasoning(aiExtractText($r['body']));
+                }
+                if ($ans !== '') {
+                    return [
+                        'ok'     => true,
+                        'text'   => $ans,
+                        'reply'  => $ans,
+                        'engine' => 'active_chat',
+                        'model'  => $r['model'] ?? 'active'
+                    ];
                 }
             }
-        }
-    } catch (\Throwable $e) { /* آفلاین */ }
+        } catch (\Throwable $e) {}
+    }
 
-    // ۳. موتور هوشمند گفت‌وگوی پویا و معنایی صبا شاپ (Dynamic Semantic Conversational Engine)
+    // ۴. موتور تحلیل معنایی و کاتالوگ‌محور صبا شاپ (در صورت عدم اتصال یا تنظیم نبودن مدل خارجی)
     $dynamicReply = arenaAiOffline($text);
-    return ['ok' => true, 'text' => $dynamicReply, 'reply' => $dynamicReply, 'engine' => 'dynamic_semantic'];
+    return ['ok' => true, 'text' => $dynamicReply, 'reply' => $dynamicReply, 'engine' => 'catalog_semantic'];
 }
 
-/** پاسخ‌دهندهٔ آفلاین (قاعده‌محور) — وقتی هیچ ارائه‌دهندهٔ AI فعال نیست */
 function arenaAiOffline(string $t): string {
     $s = arenaSettings();
     $tRaw = trim($t);
