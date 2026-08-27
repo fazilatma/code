@@ -283,8 +283,8 @@ const BACKUP_LOG_FILE  = __DIR__ . '/.backup-log.json';
 const BACKUP_DIR       = __DIR__ . '/_backups';
 
 /* نسخهٔ کد — با هر تغییر در این فایل به‌روز می‌شود */
-const APP_VERSION = '10.88';
-const APP_VERSION_DATE = '1405/06/06';
+const APP_VERSION = '10.89';
+const APP_VERSION_DATE = '1405/06/07';
 const UPLOAD_DIR = __DIR__ . '/uploads/';
 
 /* ==================================================================
@@ -24281,6 +24281,14 @@ if (isset($_GET['selftest'])) {
     $add('10.78', 'تمامِ چک‌هایِ «پیام‌رسان تنظیم شده» تلگرام را هم می‌شناسند',
          substr_count($selfSrc, "telegram']['token']") >= 8);
 
+    /* ==== ۱۰۳ (v10.89) ==== */
+    $add('10.89', 'نسخهٔ ۱۰.۸۹',
+         str_contains($selfSrc, "const APP_VERSION = '10.89';"));
+    $add('10.89', 'اتوسیو تنظیمات',
+         strpos($selfSrc, 'function scheduleConnSave()') !== false
+          && strpos($selfSrc, 'setupConnAutoSave') !== false
+          && strpos($selfSrc, "id='connSaveInd'") !== false);
+
     /* ==== ۱۰۲ (v10.88) ==== */
     $add('10.88', 'نسخهٔ ۱۰.۸۸',
          str_contains($selfSrc, "const APP_VERSION = '10.88';"));
@@ -45296,7 +45304,7 @@ html[data-skin="gloss"] .progress-bar{
 
 <div class="settings-overlay" id="settingsOverlay" onclick="toggleSettingsPanel()"></div>
 <div class="settings-panel" id="settingsPanel">
-<div class="settings-panel-head"><h2>☰ تنظیمات عمومی</h2><button class="btn btn-gray" onclick="toggleSettingsPanel()" style="font-size:14px;padding:4px 10px">✕</button></div>
+<div class="settings-panel-head"><h2>☰ تنظیمات عمومی</h2><span id="connSaveInd" style="font-size:13px;min-width:16px;text-align:center;transition:color .3s" title=""></span><button class="btn btn-gray" onclick="toggleSettingsPanel()" style="font-size:14px;padding:4px 10px">✕</button></div>
 <div class="settings-panel-body" style="padding:0">
 
 <!-- v9.59: ذخیره (دانلود) و بازیابی همهٔ تنظیمات — برای جابه‌جایی/نوسازی هاست یا PaaS -->
@@ -47160,6 +47168,7 @@ title="چند درخواست هم‌زمان فرستاده شود (۱ تا ۱۶
 </div>
 
 <div class="tab-pane" id="pane-settings">
+<div style="display:flex;justify-content:flex-end;padding:2px 4px 0"><span id="connSaveInd2" style="font-size:11px;color:#4ade80;min-width:14px" title=""></span></div>
     <div class="card settings-card">
         <div class="section-title">📝 عنوان محصول</div>
         <div class="row" style="align-items:center">
@@ -52887,6 +52896,11 @@ let VC = null, vcSaveTimer = null, VC_BRANCHES = [], VC_FILES = [], VC_PENDING =
  *  v8.28: تاریخچهٔ تغییرات — تازه‌ترین نسخه بالای فهرست
  * ================================================================== */
 const CHANGELOG = [
+  {v:'10.89', t:'اتوسیو تمام تنظیمات — هر تغییر بلافاصله ذخیره می‌شود', items:[
+    '💾 scheduleConnSave() با debounce 800ms — پس از هر تغییر input/select/checkbox اجرا می‌شود',
+    '🎯 event delegation روی همهٔ پانل‌های تنظیمات بدون نیاز به onchange دستی',
+    '✅ نشانگر وضعیت ذخیره در نوار بالا جایگزین دکمه‌های 💾 پراکنده شد',
+  ]},
   {v:'10.88', t:'انتخاب غرفه‌های خاص برای ارسال — دراپ‌داون چندانتخابی', items:[
     '🏪 دراپ‌داون تیک‌دار در بخش ارسال: انتخاب دقیق غرفه‌هایی که محصول ارسال می‌شود',
     '✅ گزینه «همه» برای انتخاب/لغو انتخاب یک‌جا',
@@ -60062,7 +60076,47 @@ fd.append('ai_net',JSON.stringify(getAiNet()));
 fd.append('baleh',JSON.stringify({enabled:$('balehEnabled')?.checked?1:0,token:$('balehToken')?.value||'',chat_id:$('balehChatId')?.value||''}));
 fd.append('rubika',JSON.stringify({enabled:$('rubikaEnabled')?.checked?1:0,token:$('rubikaToken')?.value||'',chat_id:$('rubikaChatId')?.value||''}));
 fd.append('telegram',JSON.stringify({enabled:$('telegramEnabled')?.checked?1:0,token:$('telegramToken')?.value||'',chat_id:$('telegramChatId')?.value||''}));
-fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));/* v10.46 (۶۰): غرفهٔ انتخاب‌شده برای پیام مشتری */fd.append('notif_chat_shop',String($('notifChatShop')?.value||0));fd.append('notif_scan_limit',$('notifScanLimit')?.value||20); /* v10.86 (100) */fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('auto_resume',$('autoResume')?.checked?1:0);fd.append('auto_resume_max',$('autoResumeMax')?.value||2);fd.append('bsl_catalog_auto',$('bslCatAuto')?.checked?1:0);fd.append('bsl_catalog_ttl_h',$('bslCatTtl')?.value||6);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{showToast(d.ok?'\u2713 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f':'\u062e\u0637\u0627',!d.ok);}).catch(()=>showToast('\u062e\u0637\u0627',1));}
+fd.append('notif_events',JSON.stringify({order_new:$('notifOrderNew')?.checked?1:0,order_status:$('notifOrderStatus')?.checked?1:0,chat_msg:$('notifChatMsg')?.checked?1:0,product_status:$('notifProductStatus')?.checked?1:0,product_new:$('notifProductNew')?.checked?1:0,order_refund:$('notifOrderRefund')?.checked?1:0,src_price:$('notifSrcPrice')?.checked?1:0,src_stock:$('notifSrcStock')?.checked?1:0,run_fail:$('notifRunFail')?.checked?1:0,retire:$('notifRetire')?.checked?1:0,cron_ping:$('notifCronPing')?.checked?1:0,sync_report:$('notifSyncReport')?.checked?1:0}));/* v10.46 (۶۰): غرفهٔ انتخاب‌شده برای پیام مشتری */fd.append('notif_chat_shop',String($('notifChatShop')?.value||0));fd.append('notif_scan_limit',$('notifScanLimit')?.value||20); /* v10.86 (100) */fd.append('ping_every',$('pingEvery')?.value||360);fd.append('notif_remind_after',$('remindAfter')?.value??30);fd.append('notif_remind_max',$('remindMax')?.value??0);fd.append('queue_dedup',$('qDedup')?.checked?1:0);fd.append('queue_dedup_stale',Math.round((parseInt($('qDedupStale')?.value)||0)*60));fd.append('cron_lock_min',$('cronLockMin')?.value??30);fd.append('keep_reports',$('keepReports')?.value??20);fd.append('content_sync',$('contentSync')?.checked?1:0);fd.append('catlearn_words',$('catLearnWords')?.value??1);fd.append('digest_enabled',$('digestEnabled')?.checked?1:0);fd.append('digest_hour',$('digestHour')?.value??23);fd.append('digest_hours',$('digestHours')?.value??24);fd.append('retire_mode',$('retireMode')?.value||'off');fd.append('retire_woo_action',$('retireWooAction')?.value||'delete');fd.append('retire_bsl_action',$('retireBslAction')?.value||'delete');fd.append('retire_max_pct',$('retireMaxPct')?.value||30);fd.append('retire_max_count',$('retireMaxCount')?.value||50);fd.append('stall_watchdog',$('stallWatchdog')?.checked?1:0);fd.append('stall_after',$('stallAfter')?.value||300);fd.append('auto_resume',$('autoResume')?.checked?1:0);fd.append('auto_resume_max',$('autoResumeMax')?.value||2);fd.append('bsl_catalog_auto',$('bslCatAuto')?.checked?1:0);fd.append('bsl_catalog_ttl_h',$('bslCatTtl')?.value||6);fd.append('detail_budget_sec',$('detailBudget')?.value??0);fd.append('proxy_timeout_sec',$('proxyTimeout')?.value??45);fd.append('src_net',JSON.stringify(srcNetCollect()));fd.append('autoreply',JSON.stringify(arCollectCfg()));fetch('',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+if(!window._connSaveNoToast)showToast(d.ok?'\\u2713 \\u0630\\u062e\\u06cc\\u0631\\u0647 \\u0634\\u062f':'\\u062e\\u0637\\u0627',!d.ok);
+_connSaveIndicator(d.ok?'ok':'err');
+}).catch(()=>{if(!window._connSaveNoToast)showToast('\\u062e\\u0637\\u0627',1);_connSaveIndicator('err');});}
+/* v10.89: scheduleConnSave - auto-save all settings */
+window._connSaveTimer=null;window._connSaveNoToast=false;
+function scheduleConnSave(){
+    _connSaveIndicator('pending');
+    clearTimeout(window._connSaveTimer);
+    window._connSaveTimer=setTimeout(function(){window._connSaveNoToast=true;saveConn();window._connSaveNoToast=false;},800);
+}
+function _connSaveIndicator(state){
+    var ids=['connSaveInd','connSaveInd2'];
+    ids.forEach(function(sid){
+        var el=document.getElementById(sid); if(!el)return;
+        clearTimeout(el._t);
+        if(state==='pending'){el.textContent='⏳';el.title='در حال آماده‌سازی...';el.style.color='#fbbf24';}
+        else if(state==='ok'){el.textContent='✓';el.title='ذخیره شد';el.style.color='#4ade80';
+            el._t=setTimeout(function(){el.textContent='';},2500);}
+        else if(state==='err'){el.textContent='⚠';el.title='خطا در ذخیره';el.style.color='#f87171';}
+    });
+}
+(function setupConnAutoSave(){
+    var SKIP={'rlSearch':1,'bslFallbackCatSearch':1,'aiQueryInput':1,
+        'bsShopDropList':1,'bcBox':1,'bR':1,'aiChat':1,'url':1};
+    function onEvt(e){
+        var el=e.target; if(!el||!el.tagName)return;
+        var tag=el.tagName.toUpperCase();
+        if(tag!=='INPUT'&&tag!=='SELECT'&&tag!=='TEXTAREA')return;
+        if(el.type==='button'||el.type==='submit')return;
+        if(SKIP[el.id])return;
+        if(el.closest&&(el.closest('#bsShopDropMenu')||el.closest('.profile-form')))return;
+        scheduleConnSave();
+    }
+    function attach(id){var el=document.getElementById(id);if(!el)return;
+        el.addEventListener('input',onEvt,true);
+        el.addEventListener('change',onEvt,true);}
+    function init(){attach('pane-settings');attach('pane-send');attach('settingsPanel');}
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);
+    else setTimeout(init,0);
+})();
 function updN(){
 let n=0,total=0;
 products.forEach(p=>{total++;if(getFinalPriceNum(p.price)>0)n++;});
