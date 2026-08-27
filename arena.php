@@ -45701,13 +45701,20 @@ function arenaAiAnswer(string $text, array $history = []): array {
     // ۱. بررسی مسیر فراخوانی زنده از اسکریپر (Live Scraper Bridge Endpoint)
     if (!empty($_SERVER['HTTP_HOST']) && function_exists('curl_init')) {
         $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https://' : 'http://';
-        $scraperEndpoint = $scheme . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . '/scraper4.php?arena_ai_chat=1';
+        $host = $_SERVER['HTTP_HOST'];
+        $scriptDir = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+        $scraperEndpoint = $scheme . $host . ($scriptDir !== '' ? $scriptDir : '') . '/scraper4.php?arena_ai_chat=1';
         try {
             $ch = curl_init($scraperEndpoint);
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 7);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
             curl_setopt($ch, CURLOPT_POST, true);
             curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query([
+                'action' => 'arena_ai_chat',
                 'text' => $text,
                 'history' => json_encode($history, JSON_UNESCAPED_UNICODE),
                 'store_info' => $storeContext
@@ -45717,11 +45724,12 @@ function arenaAiAnswer(string $text, array $history = []): array {
             curl_close($ch);
             if ($code === 200 && $raw) {
                 $j = json_decode($raw, true);
-                if (is_array($j) && !empty($j['ok']) && !empty($j['reply'])) {
+                if (is_array($j) && !empty($j['ok']) && (!empty($j['reply']) || !empty($j['text']))) {
+                    $ans = (string)(!empty($j['reply']) ? $j['reply'] : $j['text']);
                     return [
                         'ok'       => true,
-                        'text'     => (string)$j['reply'],
-                        'reply'    => (string)$j['reply'],
+                        'text'     => $ans,
+                        'reply'    => $ans,
                         'engine'   => (string)($j['engine'] ?? 'scraper_live_bridge'),
                         'model'    => (string)($j['model'] ?? 'master'),
                         'provider' => (string)($j['provider'] ?? 'scraper')
@@ -45765,6 +45773,25 @@ function arenaAiAnswer(string $text, array $history = []): array {
         }
     }
 
+    // بررسی اتصال سفارشی در connections.json
+    $conn = function_exists('loadConnections') ? loadConnections() : [];
+    $connAi = (array)($conn['ai'] ?? []);
+    if (!empty($connAi['enabled']) && !empty($connAi['api_key'])) {
+        $chain[] = [
+            'provider' => 'custom',
+            'model' => trim((string)($connAi['model'] ?? 'qwen-plus')),
+            'key' => 'custom::' . ($connAi['model'] ?? 'qwen-plus'),
+            'direct_mp' => [
+                'id' => 'custom',
+                'name' => 'اتصال هوش مصنوعی اسکریپر',
+                'url' => trim((string)($connAi['base_url'] ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1')),
+                'apiKey' => trim((string)$connAi['api_key']),
+                'type' => 'openai',
+                'enabled' => true
+            ]
+        ];
+    }
+
     $msgs = [['role' => 'system', 'content' => $system . "\n\n" . $storeContext]];
     foreach (array_slice($history, -8) as $h) {
         if (is_array($h) && !empty($h['role']) && !empty($h['text'])) {
@@ -45781,10 +45808,13 @@ function arenaAiAnswer(string $text, array $history = []): array {
 
     if (!empty($chain) && function_exists('aiProviderCall')) {
         foreach ($chain as $cand) {
-            $pId = $cand['provider'] ?? '';
-            $mp  = $providers[$pId] ?? null;
+            $mp = $cand['direct_mp'] ?? null;
+            if (!$mp) {
+                $pId = $cand['provider'] ?? '';
+                $mp  = $providers[$pId] ?? null;
+            }
             if (!$mp || ($mp['enabled'] ?? true) === false) continue;
-            if (empty($mp['id'])) $mp['id'] = $pId;
+            if (empty($mp['id']) && !empty($cand['provider'])) $mp['id'] = $cand['provider'];
 
             try {
                 $r = aiProviderCall($mp, $cand['model'], $payload, $net);
@@ -45808,7 +45838,7 @@ function arenaAiAnswer(string $text, array $history = []): array {
                             'reply'    => $ans,
                             'engine'   => $isMaster ? 'scraper_master' : 'scraper_candidate',
                             'model'    => $cand['model'],
-                            'provider' => $cand['providerName'] ?? $pId
+                            'provider' => $cand['providerName'] ?? ($mp['name'] ?? ($mp['id'] ?? ''))
                         ];
                     }
                 }
@@ -45838,7 +45868,23 @@ function arenaAiAnswer(string $text, array $history = []): array {
         } catch (\Throwable $e) {}
     }
 
-    // ۴. موتور تحلیل معنایی و کاتالوگ‌محور صبا شاپ (در صورت عدم اتصال یا تنظیم نبودن مدل خارجی)
+    // ۴. تلاش با arAiReplyText (پاسخ خودکار بومی اسکریپر)
+    if (function_exists('arAiReplyText')) {
+        try {
+            $r = arAiReplyText($text, 15);
+            if (!empty($r['ok']) && !empty($r['text'])) {
+                return [
+                    'ok'     => true,
+                    'text'   => (string)$r['text'],
+                    'reply'  => (string)$r['text'],
+                    'engine' => 'scraper_ar',
+                    'model'  => $r['model'] ?? 'ar'
+                ];
+            }
+        } catch (\Throwable $e) {}
+    }
+
+    // ۵. موتور تحلیل معنایی و کاتالوگ‌محور صبا شاپ
     $dynamicReply = arenaAiOffline($text);
     return ['ok' => true, 'text' => $dynamicReply, 'reply' => $dynamicReply, 'engine' => 'catalog_semantic'];
 }
@@ -46819,9 +46865,9 @@ function arenaApiJson(): string {
                 $custName = $ch['customers'][$cid]['name'] ?? 'مشتری';
                 if (arenaEventEnabled('chat_msg')) arenaNotify('💬', 'پیام جدید از مشتری', '«' . $custName . '»: ' . mb_substr($txt, 0, 200));
 
-                // پاسخ خودکار هوش مصنوعی (فعال به‌صورت پیش‌فرض)
+                $skipAi = !empty($jsonIn['skip_ai']);
                 $s = arenaSettings();
-                $aiAuto = !isset($s['ai_auto']) || !empty($s['ai_auto']);
+                $aiAuto = !$skipAi && (!isset($s['ai_auto']) || !empty($s['ai_auto']));
                 if ($aiAuto) {
                     $hist = [];
                     $msgs = $ch['customers'][$cid]['messages'] ?? [];
@@ -46839,6 +46885,18 @@ function arenaApiJson(): string {
                 }
                 $r['cid'] = $cid;
                 return json_encode($r, JSON_UNESCAPED_UNICODE);
+
+            case 'chat_add_ai':
+                $cid = (string)($_COOKIE['arena_cid'] ?? ($jsonIn['cid'] ?? ''));
+                $aiTxt = trim((string)($jsonIn['text'] ?? ''));
+                if ($cid === '' || $aiTxt === '') return json_encode(['ok' => false], JSON_UNESCAPED_UNICODE);
+                $mRes = arenaChatAddMessage($cid, 'ai', $aiTxt);
+                return json_encode([
+                    'ok'     => true,
+                    'mid'    => $mRes['id'] ?? ((time() * 1000) + mt_rand(1, 999)),
+                    'engine' => (string)($jsonIn['engine'] ?? 'scraper_master'),
+                    'model'  => (string)($jsonIn['model'] ?? '')
+                ], JSON_UNESCAPED_UNICODE);
             case 'chat_poll':
                 $cid = (string)($_COOKIE['arena_cid'] ?? ($jsonIn['cid'] ?? ''));
                 if ($cid === '' || !isset(arenaChat()['customers'][$cid])) return json_encode(['ok' => false, 'error' => 'no_session'], JSON_UNESCAPED_UNICODE);
@@ -48368,7 +48426,7 @@ async function chatSendMsg(){
   inEl.value = '';
   const box = $('chatMsgs');
   
-  // نمایش فوری پیام کاربر
+  // ۱. نمایش فوری پیام کاربر
   pushMsg(box, 'cust', txt);
   
   // نشانگر تایپ هوش مصنوعی
@@ -48379,25 +48437,74 @@ async function chatSendMsg(){
   box.appendChild(typing);
   box.scrollTop = box.scrollHeight;
 
+  // ۲. استخراج تاریخچه ۸ پیام اخیر گفت‌وگو
+  const hist = [];
+  const nodes = box.querySelectorAll('.s-msg:not(.s-typing)');
+  nodes.forEach(function(n){
+    const isCust = n.classList.contains('cust');
+    hist.push({ role: isCust ? 'user' : 'assistant', text: n.textContent.trim() });
+  });
+
+  let liveReply = '';
+  let liveEngine = '';
+  let liveModel = '';
+
+  // ۳. تبادل زنده و مستقیم با فایل اسکریپر (scraper4.php) از طریق مرورگر
   try {
-    const res = await api('chat_send', { cid: chatCid, text: txt }, 'POST');
-    typing.remove();
-    if(res.cid) {
-      chatCid = res.cid;
-      try{document.cookie = 'arena_cid=' + encodeURIComponent(res.cid) + '; path=/; max-age=2592000';}catch(e){}
+    const fd = new FormData();
+    fd.append('action', 'arena_ai_chat');
+    fd.append('text', txt);
+    fd.append('history', JSON.stringify(hist.slice(-8)));
+
+    const rScraper = await fetch('scraper4.php?arena_ai_chat=1', {
+      method: 'POST',
+      body: fd
+    });
+    if (rScraper.ok) {
+      const dScraper = await rScraper.json();
+      if (dScraper && dScraper.ok && (dScraper.reply || dScraper.text)) {
+        liveReply = dScraper.reply || dScraper.text;
+        liveEngine = dScraper.engine || 'scraper_master';
+        liveModel = dScraper.model || '';
+      }
     }
-    if(res.mid && +res.mid > chatLast) chatLast = +res.mid;
-    
-    // دریافت پاسخ هوش مصنوعی (پشتیبانی کامل از text, reply, ai.text)
-    const aiText = res.reply || res.text || (res.ai && res.ai.text) || '';
-    if(aiText) {
-      pushMsg(box, 'ai', aiText);
-    } else {
-      pushMsg(box, 'ai', 'پیام شما با موفقیت ثبت شد و پشتیبان فروشگاه به‌زودی پاسخ خواهد داد.');
-    }
-  } catch(e) {
+  } catch(eScraper) {
+    console.warn('Direct scraper bridge check:', eScraper);
+  }
+
+  // ۴. اگر پاسخ زنده از مدل هوش مصنوعی اسکریپر دریافت شد:
+  if (liveReply) {
     typing.remove();
-    pushMsg(box, 'ai', 'پیام شما دریافت شد. در صورت عدم پاسخ آنی، پشتیبان فروشگاه پاسخ را ارسال خواهد کرد.');
+    pushMsg(box, 'ai', liveReply);
+    // ذخیره پیام کاربر و هوش مصنوعی در سرور فروشگاه
+    api('chat_send', { cid: chatCid, text: txt, skip_ai: 1 }, 'POST').then(function(res){
+      if (res && res.cid) {
+        chatCid = res.cid;
+        try{document.cookie = 'arena_cid=' + encodeURIComponent(res.cid) + '; path=/; max-age=2592000';}catch(e){}
+      }
+      api('chat_add_ai', { cid: chatCid, text: liveReply, engine: liveEngine, model: liveModel }, 'POST');
+    });
+  } else {
+    // ۵. مسیر جایگزین: ارسال به بک‌اند فروشگاه و موتور آبشاری
+    try {
+      const res = await api('chat_send', { cid: chatCid, text: txt }, 'POST');
+      typing.remove();
+      if(res.cid) {
+        chatCid = res.cid;
+        try{document.cookie = 'arena_cid=' + encodeURIComponent(res.cid) + '; path=/; max-age=2592000';}catch(e){}
+      }
+      if(res.mid && +res.mid > chatLast) chatLast = +res.mid;
+      
+      const aiText = res.reply || res.text || (res.ai && res.ai.text) || '';
+      if(aiText) {
+        pushMsg(box, 'ai', aiText);
+      } else {
+        pushMsg(box, 'ai', 'پیام شما با موفقیت ثبت شد و پشتیبان فروشگاه به‌زودی پاسخ خواهد داد.');
+      }
+    } catch(e) {
+      typing.remove();
+      pushMsg(box, 'ai', 'پیام شما دریافت شد. پشتیبان فروشگاه به‌زودی پاسخ خواهد داد.');
+    }
   }
 }
 

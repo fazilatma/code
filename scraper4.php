@@ -36788,8 +36788,12 @@ if (isset($_GET['ai_candidates_reply'])) {
  *  استفاده مستقیم از مدل مستر (Master) و کاندیدهای اسکریپر۴
  * ===================================================================== */
 if (isset($_GET['arena_ai_chat']) || isset($_POST['arena_ai_chat']) || (isset($_POST['action']) && $_POST['action'] === 'arena_ai_chat')) {
+    while (ob_get_level() > 0) { @ob_end_clean(); }
     header('Content-Type: application/json; charset=UTF-8');
     header('Access-Control-Allow-Origin: *');
+    header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+    header('Access-Control-Allow-Headers: Content-Type, X-Requested-With');
+    if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') { exit; }
     @set_time_limit(120);
 
     $text = trim((string)($_POST['text'] ?? ($_GET['text'] ?? ($_POST['message'] ?? ($_GET['message'] ?? '')))));
@@ -36825,21 +36829,37 @@ if (isset($_GET['arena_ai_chat']) || isset($_POST['arena_ai_chat']) || (isset($_
         'temperature' => 0.5
     ];
 
-    $providers = aiProvidersLoad();
-    $cands     = aiCandidates();
-    $masterKey = aiMasterKey();
-    $net       = aiNetCfg();
+    $providers = function_exists('aiProvidersLoad') ? aiProvidersLoad() : [];
+    $cands     = function_exists('aiCandidates') ? aiCandidates() : [];
+    $masterKey = function_exists('aiMasterKey') ? aiMasterKey() : '';
+    $net       = function_exists('aiNetCfg') ? aiNetCfg() : null;
 
     $sorted = [];
+    // لایه ۱: مدل مستر انتخاب‌شده در اسکریپر
     if ($masterKey !== '') {
+        if (function_exists('autoResolveModel')) {
+            $resolved = autoResolveModel($masterKey);
+            if ($resolved) {
+                $sorted[] = [
+                    'provider' => $resolved['provider']['id'] ?? '',
+                    'model' => $resolved['model'],
+                    'key' => $masterKey,
+                    'providerName' => $resolved['provider']['name'] ?? '',
+                    'direct_mp' => $resolved['provider']
+                ];
+            }
+        }
         foreach ($cands as $c) {
             if (($c['key'] ?? '') === $masterKey) { $sorted[] = $c; break; }
         }
     }
+
+    // لایه ۲: سایر مدل‌های کاندید به ترتیب اولویت
     foreach ($cands as $c) {
         if (($c['key'] ?? '') !== $masterKey) $sorted[] = $c;
     }
 
+    // لایه ۳: اگر کاندیدی نبود، ارائه‌دهنده‌های فعال از aiProvidersLoad
     if (empty($sorted)) {
         foreach ($providers as $pid => $pr) {
             if (($pr['enabled'] ?? true) === false) continue;
@@ -36853,16 +36873,39 @@ if (isset($_GET['arena_ai_chat']) || isset($_POST['arena_ai_chat']) || (isset($_
         }
     }
 
+    // لایه ۴: تنظیمات هوش مصنوعی سفارشی در connections.json
+    $cn = function_exists('loadConnections') ? loadConnections() : [];
+    $cnAi = (array)($cn['ai'] ?? []);
+    if (!empty($cnAi['enabled']) && !empty($cnAi['api_key'])) {
+        $sorted[] = [
+            'provider' => 'custom',
+            'model' => trim((string)($cnAi['model'] ?? 'qwen-plus')),
+            'key' => 'custom::' . ($cnAi['model'] ?? 'qwen-plus'),
+            'direct_mp' => [
+                'id' => 'custom',
+                'name' => 'اتصال هوش مصنوعی اسکریپر',
+                'url' => trim((string)($cnAi['base_url'] ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1')),
+                'apiKey' => trim((string)$cnAi['api_key']),
+                'type' => 'openai',
+                'enabled' => true
+            ]
+        ];
+    }
+
     $ans = '';
     $usedModel = '';
     $usedProvider = '';
     $isMaster = false;
 
+    // اجرای حلقه روی مدل‌ها با توابع بومی اسکریپر۴
     foreach ($sorted as $cand) {
-        $pId = $cand['provider'] ?? '';
-        $mp  = $providers[$pId] ?? null;
+        $mp = $cand['direct_mp'] ?? null;
+        if (!$mp) {
+            $pId = $cand['provider'] ?? '';
+            $mp  = $providers[$pId] ?? null;
+        }
         if (!$mp || ($mp['enabled'] ?? true) === false) continue;
-        if (empty($mp['id'])) $mp['id'] = $pId;
+        if (empty($mp['id']) && !empty($cand['provider'])) $mp['id'] = $cand['provider'];
 
         try {
             $r = aiProviderCall($mp, $cand['model'], $payload, $net);
@@ -36881,7 +36924,7 @@ if (isset($_GET['arena_ai_chat']) || isset($_POST['arena_ai_chat']) || (isset($_
                 if ($resText !== '') {
                     $ans = $resText;
                     $usedModel = $cand['model'] ?? '';
-                    $usedProvider = $cand['providerName'] ?? $pId;
+                    $usedProvider = $cand['providerName'] ?? ($mp['name'] ?? ($mp['id'] ?? ''));
                     $isMaster = ($masterKey !== '' && ($cand['key'] ?? '') === $masterKey);
                     break;
                 }
@@ -36889,7 +36932,8 @@ if (isset($_GET['arena_ai_chat']) || isset($_POST['arena_ai_chat']) || (isset($_
         } catch (\Throwable $e) {}
     }
 
-    if ($ans === '') {
+    // لایه ۵: تلاش با aiActiveChat
+    if ($ans === '' && function_exists('aiActiveChat')) {
         try {
             $r = aiActiveChat($payload, $net);
             if (!empty($r['ok']) && !empty($r['body'])) {
@@ -36906,14 +36950,26 @@ if (isset($_GET['arena_ai_chat']) || isset($_POST['arena_ai_chat']) || (isset($_
         } catch (\Throwable $e) {}
     }
 
+    // لایه ۶: تلاش با arAiReplyText (سیستم پاسخ خودکار بومی اسکریپر)
+    if ($ans === '' && function_exists('arAiReplyText')) {
+        try {
+            $r = arAiReplyText($text, 15);
+            if (!empty($r['ok']) && !empty($r['text'])) {
+                $ans = (string)$r['text'];
+                $usedModel = $r['model'] ?? 'auto_reply';
+                $usedProvider = 'scraper_ar';
+            }
+        } catch (\Throwable $e) {}
+    }
+
     if ($ans !== '') {
         echo json_encode([
-            'ok' => true,
-            'reply' => $ans,
-            'text' => $ans,
-            'model' => $usedModel,
+            'ok'       => true,
+            'reply'    => $ans,
+            'text'     => $ans,
+            'model'    => $usedModel,
             'provider' => $usedProvider,
-            'engine' => $isMaster ? 'scraper_master' : 'scraper_candidate'
+            'engine'   => $isMaster ? 'scraper_master' : 'scraper_candidate'
         ], JSON_UNESCAPED_UNICODE);
         exit;
     }
@@ -36924,7 +36980,6 @@ if (isset($_GET['arena_ai_chat']) || isset($_POST['arena_ai_chat']) || (isset($_
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
-
 if (isset($_GET['ai_category'])) {
 header('Content-Type: application/json; charset=UTF-8');
 $cn=loadConnections();$bs=$cn['basalam']??[];
