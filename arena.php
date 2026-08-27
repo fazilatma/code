@@ -44669,7 +44669,7 @@ usort($initialProfiles, fn($a, $b) => ($b['updatedAt'] ?? 0) <=> ($a['updatedAt'
  * ===================================================================== */
 
 defined('ARENA_SHOP_LAYER') or define('ARENA_SHOP_LAYER', 1);
-const ARENA_VERSION = '1.7';
+const ARENA_VERSION = '1.8.2';
 const ARENA_SETTINGS_FILE = __DIR__ . '/arena_settings.json';
 const ARENA_PRODUCTS_FILE = __DIR__ . '/arena_products.json';
 const ARENA_ORDERS_FILE   = __DIR__ . '/arena_orders.json';
@@ -45360,24 +45360,197 @@ function arenaChatMarkRead(string $cid): void {
 
 /* ------------------------------ AI --------------------------------- */
 
+
+/* -------------------------- AI Tools & Function Calling -------------------------- */
+function arenaAiTools(): array {
+    return [
+        [
+            'type' => 'function',
+            'function' => [
+                'name' => 'search_products',
+                'description' => 'جست‌وجوی کالاها در کاتالوگ فروشگاه صبا شاپ با کلمه کلیدی، نام کالا یا دسته‌بندی',
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'query' => ['type' => 'string', 'description' => 'کلمه کلیدی، نام کالا یا ویژگی'],
+                        'category' => ['type' => 'string', 'description' => 'دسته‌بندی (اختیاری)']
+                    ],
+                    'required' => ['query']
+                ]
+            ]
+        ],
+        [
+            'type' => 'function',
+            'function' => [
+                'name' => 'track_order',
+                'description' => 'استعلام و رهگیری وضعیت سفارش با کد سفارش مشتری (مانند ARN-123456)',
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'order_id' => ['type' => 'string', 'description' => 'شناسه سفارش مانند ARN-123456']
+                    ],
+                    'required' => ['order_id']
+                ]
+            ]
+        ],
+        [
+            'type' => 'function',
+            'function' => [
+                'name' => 'shipping_info',
+                'description' => 'اطلاعات هزینه ارسال سفارش‌ها و حداقل مبلغ خرید برای ارسال رایگان',
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'dummy' => ['type' => 'string', 'description' => 'اختیاری']
+                    ]
+                ]
+            ]
+        ],
+        [
+            'type' => 'function',
+            'function' => [
+                'name' => 'coupon_check',
+                'description' => 'بررسی اعتبار کد تخفیف اعلام‌شده توسط مشتری',
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'code' => ['type' => 'string', 'description' => 'کد تخفیف مانند WELCOME10']
+                    ],
+                    'required' => ['code']
+                ]
+            ]
+        ],
+        [
+            'type' => 'function',
+            'function' => [
+                'name' => 'store_contact',
+                'description' => 'اطلاعات تماس، پشتیبانی، ساعات کاری و روش‌های پرداخت فروشگاه',
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'topic' => ['type' => 'string', 'description' => 'موضوع مورد نظر']
+                    ]
+                ]
+            ]
+        ]
+    ];
+}
+
+function arenaAiExecuteTool(string $name, array $args): array {
+    $s = arenaSettings();
+    switch ($name) {
+        case 'search_products':
+            $q = trim((string)($args['query'] ?? ''));
+            $cat = trim((string)($args['category'] ?? ''));
+            $items = arenaCatalog(true, ['q' => $q, 'cat' => $cat]);
+            $found = [];
+            foreach (array_slice($items, 0, 5) as $p) {
+                $found[] = [
+                    'title' => $p['title'],
+                    'price' => arenaPrice($p['price']),
+                    'stock' => $p['stock'] > 0 ? ($p['stock'] . ' عدد موجود') : 'فعلاً ناموجود',
+                    'category' => $p['category'],
+                    'link' => '?arena=product&uid=' . urlencode($p['uid'])
+                ];
+            }
+            return ['count' => count($found), 'items' => $found];
+
+        case 'track_order':
+            $oid = strtoupper(trim((string)($args['order_id'] ?? '')));
+            foreach (arenaOrders() as $o) {
+                if (strtoupper($o['id']) === $oid) {
+                    $items = [];
+                    foreach ($o['items'] as $it) $items[] = $it['title'] . ' × ' . $it['qty'];
+                    return [
+                        'found' => true,
+                        'order_id' => $oid,
+                        'status' => arenaOrderStatusLabel($o['status']),
+                        'total' => arenaPrice((int)$o['total']),
+                        'items' => $items,
+                        'tracking_code' => $o['tracking'] ?? ''
+                    ];
+                }
+            }
+            return ['found' => false, 'message' => 'سفارشی با کد ' . $oid . ' پیدا نشد.'];
+
+        case 'shipping_info':
+            return [
+                'shipping_cost' => arenaPrice((int)$s['shipping']),
+                'free_shipping_over' => (int)$s['free_shipping_over'] > 0 ? arenaPrice((int)$s['free_shipping_over']) : 'ندارد',
+                'rule' => ((int)$s['free_shipping_over'] > 0) ? ('ارسال خریدهای بالای ' . arenaPrice((int)$s['free_shipping_over']) . ' کاملاً رایگان است.') : 'هزینه ارسال ثابت است.'
+            ];
+
+        case 'coupon_check':
+            $code = trim((string)($args['code'] ?? ''));
+            $val = arenaCouponValidate($code, 100000);
+            return [
+                'code' => $code,
+                'valid' => !empty($val['ok']),
+                'discount' => !empty($val['discount']) ? arenaPrice((int)$val['discount']) : 0,
+                'error' => $val['error'] ?? ''
+            ];
+
+        case 'store_contact':
+            return [
+                'store_name' => $s['name'],
+                'phone' => $s['contact']['phone'] ?: 'پشتیبانی آنلاین فعال است',
+                'telegram' => $s['contact']['telegram'] ?? '',
+                'support_hours' => $s['support_hours'],
+                'payment_delivery' => !empty($s['payment']['on_delivery']) ? 'پرداخت در محل فعال است' : 'غیرفعال'
+            ];
+
+        default:
+            return ['status' => 'ابزار ناشناخته'];
+    }
+}
+
 function arenaAiAnswer(string $text, array $history = []): array {
     $text = trim($text);
     if ($text === '') return ['ok' => false, 'error' => 'متن خالی', 'text' => '', 'engine' => ''];
-    $system = arenaSettings()['ai_system'];
+    $s = arenaSettings();
+    $system = $s['ai_system'];
     $catalog = arenaCatalog(true);
-    // اطلاعاتِ پویا برای مدل
+
+    // پیش‌پردازش و ابزارهای استعلام خودکار بر اساس محتوای پیام (Layer 1 Tool Execution)
+    $toolContext = '';
+    if (preg_match('/ARN-\d{4,}/i', $text, $m)) {
+        $trk = arenaAiExecuteTool('track_order', ['order_id' => $m[0]]);
+        $toolContext .= "\n[نتیجه استعلام سفارش " . $m[0] . ": " . json_encode($trk, JSON_UNESCAPED_UNICODE) . "]\n";
+    }
+    if (preg_match('/(ارسال|هزینه|کرایه|رایگان)/u', $text)) {
+        $shp = arenaAiExecuteTool('shipping_info', []);
+        $toolContext .= "\n[اطلاعات ارسال: " . json_encode($shp, JSON_UNESCAPED_UNICODE) . "]\n";
+    }
+    if (preg_match('/(تلفن|تماس|آدرس|ساعت|پشتیبان|شماره)/u', $text)) {
+        $cnt = arenaAiExecuteTool('store_contact', []);
+        $toolContext .= "\n[اطلاعات تماس و پشتیبانی: " . json_encode($cnt, JSON_UNESCAPED_UNICODE) . "]\n";
+    }
+
+    // اطلاعاتِ نمونه محصولات برای راهنمایی دقیق‌تر
     $top = [];
-    foreach (array_slice($catalog, 0, 40) as $p) $top[] = mb_substr($p['title'], 0, 40) . ' — ' . arenaPrice($p['price']) . ($p['category'] !== '' ? ' (' . $p['category'] . ')' : '');
-    $ctx = "فروشگاه: " . arenaSettings()['name'] . "\nهزینهٔ ارسال: " . arenaPrice((int)arenaSettings()['shipping'])
-         . "\nکالاهای نمونه:\n" . implode("\n", $top) . "\n";
+    foreach (array_slice($catalog, 0, 30) as $p) {
+        $top[] = mb_substr($p['title'], 0, 40) . ' — ' . arenaPrice($p['price']) . ($p['category'] !== '' ? ' (' . $p['category'] . ')' : '');
+    }
+    $ctx = "فروشگاه: " . $s['name'] . "\nارسال رایگان از: " . arenaPrice((int)$s['free_shipping_over'])
+         . "\nبرخی کالاهای نمونه:\n" . implode("\n", $top) . "\n" . $toolContext;
+
     $msgs = [['role' => 'system', 'content' => $system . "\n\n" . $ctx]];
-    foreach (array_slice($history, -6) as $h) {
-        if (is_array($h) && !empty($h['role']) && !empty($h['text'])) $msgs[] = ['role' => $h['role'], 'content' => (string)$h['text']];
+    foreach (array_slice($history, -8) as $h) {
+        if (is_array($h) && !empty($h['role']) && !empty($h['text'])) {
+            $msgs[] = ['role' => ($h['role'] === 'user' || $h['role'] === 'customer' ? 'user' : 'assistant'), 'content' => (string)$h['text']];
+        }
     }
     $msgs[] = ['role' => 'user', 'content' => $text];
-    $payload = ['messages' => $msgs, 'max_tokens' => 500, 'temperature' => 0.4];
 
-    // ۱. اولویت اول و اصلی: مدل مستر انتخاب‌شده در اسکریپر (aiMasterKey)
+    $payload = [
+        'messages' => $msgs,
+        'max_tokens' => 600,
+        'temperature' => 0.4,
+        'tools' => arenaAiTools(),
+        'tool_choice' => 'auto'
+    ];
+
+    // ۱. اجرای مدل مستر انتخاب‌شده در اسکریپر (با پشتیبانی از Tool Calling)
     try {
         $providers = function_exists('aiProvidersLoad') ? aiProvidersLoad() : [];
         $masterCand = null;
@@ -45398,18 +45571,46 @@ function arenaAiAnswer(string $text, array $history = []): array {
             if (($mp['enabled'] ?? true) !== false && function_exists('aiProviderCall')) {
                 $r = aiProviderCall($mp, $masterCand['model'], $payload);
                 if (!empty($r['ok']) && !empty($r['body'])) {
+                    $b = is_array($r['body']) ? $r['body'] : [];
+                    $msg = $b['choices'][0]['message'] ?? [];
+                    
+                    // اگر مدل ابزار فراخوانی کرد (OpenAI Tool Calling)
+                    if (!empty($msg['tool_calls']) && is_array($msg['tool_calls'])) {
+                        $msgs[] = $msg;
+                        foreach ($msg['tool_calls'] as $tc) {
+                            $tName = (string)($tc['function']['name'] ?? '');
+                            $tArgs = json_decode((string)($tc['function']['arguments'] ?? '{}'), true);
+                            if (!is_array($tArgs)) $tArgs = [];
+                            $tRes = arenaAiExecuteTool($tName, $tArgs);
+                            $msgs[] = [
+                                'role' => 'tool',
+                                'tool_call_id' => $tc['id'] ?? ('call_' . mt_rand(1000, 9999)),
+                                'name' => $tName,
+                                'content' => json_encode($tRes, JSON_UNESCAPED_UNICODE)
+                            ];
+                        }
+                        $r2 = aiProviderCall($mp, $masterCand['model'], ['messages' => $msgs, 'max_tokens' => 500, 'temperature' => 0.4]);
+                        if (!empty($r2['ok']) && !empty($r2['body'])) {
+                            $ans2 = function_exists('aiExtractAnswer') ? aiExtractAnswer($r2['body']) : '';
+                            if ($ans2 === '') {
+                                $b2 = is_array($r2['body']) ? $r2['body'] : [];
+                                $ans2 = trim((string)($b2['choices'][0]['message']['content'] ?? ''));
+                            }
+                            if ($ans2 !== '') return ['ok' => true, 'text' => $ans2, 'reply' => $ans2, 'engine' => 'master_tool', 'model' => $masterCand['model']];
+                        }
+                    }
+
                     $ans = function_exists('aiExtractAnswer') ? aiExtractAnswer($r['body']) : '';
                     if ($ans === '') {
-                        $b = is_array($r['body']) ? $r['body'] : [];
-                        $ans = trim((string)($b['choices'][0]['message']['content'] ?? $b['message']['content'] ?? ''));
+                        $ans = trim((string)($msg['content'] ?? ''));
                     }
-                    if ($ans !== '') return ['ok' => true, 'text' => $ans, 'engine' => 'master', 'model' => $masterCand['model']];
+                    if ($ans !== '') return ['ok' => true, 'text' => $ans, 'reply' => $ans, 'engine' => 'master', 'model' => $masterCand['model']];
                 }
             }
         }
-    } catch (\Throwable $e) { /* fallback */ }
+    } catch (\Throwable $e) { /* ادامه به حالت فعال */ }
 
-    // ۲. اولویت دوم: مدل فعال در تنظیمات (aiActiveConfig)
+    // ۲. اولویت دوم: ارائه‌دهنده فعال
     try {
         if (function_exists('aiActiveConfig') && function_exists('aiActiveChat')) {
             $cfg = aiActiveConfig();
@@ -45419,16 +45620,17 @@ function arenaAiAnswer(string $text, array $history = []): array {
                     $ans = function_exists('aiExtractAnswer') ? aiExtractAnswer($r['body']) : '';
                     if ($ans === '') {
                         $b = is_array($r['body']) ? $r['body'] : [];
-                        $ans = trim((string)($b['choices'][0]['message']['content'] ?? $b['message']['content'] ?? ''));
+                        $ans = trim((string)($b['choices'][0]['message']['content'] ?? ''));
                     }
-                    if ($ans !== '') return ['ok' => true, 'text' => $ans, 'engine' => 'ai', 'model' => $cfg['model'] ?? ''];
+                    if ($ans !== '') return ['ok' => true, 'text' => $ans, 'reply' => $ans, 'engine' => 'ai', 'model' => $cfg['model'] ?? ''];
                 }
             }
         }
-    } catch (\Throwable $e) { /* fallback */ }
+    } catch (\Throwable $e) { /* آفلاین */ }
 
-    // ۳. حالت آفلاین هوشمند و قاعده‌محور
-    return ['ok' => true, 'text' => arenaAiOffline($text), 'engine' => 'offline'];
+    // ۳. حالت آفلاین و پاسخگوی سریع
+    $offline = arenaAiOffline($text);
+    return ['ok' => true, 'text' => $offline, 'reply' => $offline, 'engine' => 'offline'];
 }
 
 /** پاسخ‌دهندهٔ آفلاین (قاعده‌محور) — وقتی هیچ ارائه‌دهندهٔ AI فعال نیست */
@@ -46313,20 +46515,34 @@ function arenaApiJson(): string {
                 return json_encode($r, JSON_UNESCAPED_UNICODE);
             case 'chat_send':
                 $cid = (string)($_COOKIE['arena_cid'] ?? ($jsonIn['cid'] ?? ''));
-                if ($cid === '' || !isset(arenaChat()['customers'][$cid])) return json_encode(['ok' => false, 'error' => 'نشانگر گفت‌وگو نامعتبر']);
-                $r = arenaChatAddMessage($cid, 'customer', (string)($jsonIn['text'] ?? ''));
+                if ($cid === '' || !isset(arenaChat()['customers'][$cid])) {
+                    $cid = arenaChatId();
+                    setcookie('arena_cid', $cid, time() + 86400 * 30, '/');
+                    arenaChatAddCustomer($cid, (string)($jsonIn['name'] ?? 'مشتری'));
+                }
+                $txt = (string)($jsonIn['text'] ?? '');
+                $r = arenaChatAddMessage($cid, 'customer', $txt);
                 if (empty($r['ok'])) return json_encode($r, JSON_UNESCAPED_UNICODE);
                 $ch = arenaChat();
                 $custName = $ch['customers'][$cid]['name'] ?? 'مشتری';
-                if (arenaEventEnabled('chat_msg')) arenaNotify('💬', 'پیام جدید از مشتری', '«' . $custName . '»: ' . mb_substr((string)($jsonIn['text'] ?? ''), 0, 200));
-                // پاسخِ خودکارِ هوش مصنوعی
+                if (arenaEventEnabled('chat_msg')) arenaNotify('💬', 'پیام جدید از مشتری', '«' . $custName . '»: ' . mb_substr($txt, 0, 200));
+
+                // بر اساس تنظیمات پنل ادمین (ai_auto)، ابتدا دستیار هوشمند با ابزارها پاسخ می‌دهد
                 if (!empty(arenaSettings()['ai_auto'])) {
-                    $ai = arenaAiAnswer((string)($jsonIn['text'] ?? ''));
-                    if (!empty($ai['ok'])) {
+                    $hist = [];
+                    $msgs = arenaChat()['customers'][$cid]['messages'] ?? [];
+                    foreach (array_slice($msgs, -8) as $m) {
+                        $hist[] = ['role' => (($m['from'] ?? '') === 'customer' ? 'user' : 'assistant'), 'text' => (string)($m['text'] ?? '')];
+                    }
+                    $ai = arenaAiAnswer($txt, $hist);
+                    if (!empty($ai['ok']) && !empty($ai['text'])) {
                         arenaChatAddMessage($cid, 'ai', $ai['text']);
-                        $r['ai'] = ['text' => $ai['text'], 'engine' => $ai['engine'] ?? ''];
+                        $r['ai'] = ['text' => $ai['text'], 'engine' => $ai['engine'] ?? '', 'model' => $ai['model'] ?? ''];
+                        $r['reply'] = $ai['text'];
+                        $r['text'] = $ai['text'];
                     }
                 }
+                $r['cid'] = $cid;
                 return json_encode($r, JSON_UNESCAPED_UNICODE);
             case 'chat_poll':
                 $cid = (string)($_COOKIE['arena_cid'] ?? ($jsonIn['cid'] ?? ''));
@@ -46727,55 +46943,62 @@ input:focus,select:focus,textarea:focus{border-color:var(--acc);box-shadow:0 0 0
 }
 
 
-/* ---------- NEW PROFESSIONAL E-COMMERCE HEADER ---------- */
-.s-header{position:sticky;top:0;z-index:80;background:#ffffff;border-bottom:1px solid var(--line);box-shadow:0 2px 10px rgba(15,23,42,.04);transition:box-shadow .2s ease}
-.s-header.scrolled{box-shadow:0 4px 20px rgba(15,23,42,.08)}
-.s-head-main{display:flex;align-items:center;justify-content:space-between;gap:18px;min-height:70px;padding:10px 0}
-.s-head-right{display:flex;align-items:center;gap:14px;flex-shrink:0}
+/* ---------- PROFESSIONAL CLEAN E-COMMERCE HEADER ---------- */
+.s-header{position:sticky;top:0;z-index:80;background:#ffffff;border-bottom:1px solid #e2e8f0;box-shadow:0 1px 4px rgba(0,0,0,.04);transition:box-shadow .2s}
+.s-header.scrolled{box-shadow:0 4px 16px rgba(0,0,0,.07)}
+.s-head-main{display:flex;align-items:center;justify-content:space-between;gap:20px;min-height:68px;padding:8px 0}
+.s-head-right{display:flex;align-items:center;gap:12px;flex-shrink:0}
 .s-brand{display:flex;align-items:center;gap:10px;text-decoration:none;min-width:0}
-.s-brand-text b{display:block;font-size:clamp(16px,2.2vw,19px);font-weight:900;color:var(--ink);line-height:1.2}
-.s-brand-text small{display:block;font-size:10.5px;color:var(--mut);margin-top:1px;font-weight:500}
-.s-logo-mark{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff;box-shadow:0 4px 14px var(--acc-glow);flex-shrink:0}
-.s-logo-img{width:42px;height:42px;object-fit:contain;border-radius:10px;flex-shrink:0}
+.s-brand-title{font-size:18px;font-weight:900;color:var(--ink);white-space:nowrap;letter-spacing:-0.3px}
+.s-logo-mark{width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;box-shadow:0 3px 10px var(--acc-glow);flex-shrink:0}
+.s-logo-img{width:40px;height:40px;object-fit:contain;border-radius:8px;flex-shrink:0}
 
-/* Header Center Search Box */
-.s-head-search{flex:1 1 380px;max-width:620px;position:relative}
+/* Header Center Search Box: Clean 44px Height */
+.s-head-search{flex:1 1 400px;max-width:620px;position:relative}
 .s-search-box{display:flex;align-items:center;position:relative;width:100%}
-.s-search-box input{width:100%;padding:11px 44px 11px 16px;border-radius:12px;border:1.5px solid #e2e8f0;background:#f8fafc;font-size:13px;color:var(--ink);transition:all .2s ease;outline:none}
-.s-search-box input:focus{background:#fff;border-color:var(--acc);box-shadow:0 0 0 4px var(--acc-glow)}
-.s-search-ico{position:absolute;right:12px;top:50%;transform:translateY(-50%);border:none;background:none;font-size:16px;color:var(--mut);cursor:pointer;display:flex;align-items:center;justify-content:center}
-.s-search-clear{position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:12px;color:var(--mut);width:20px;height:20px;border-radius:50%;background:#e2e8f0;display:flex;align-items:center;justify-content:center;text-decoration:none}
+.s-search-box input{width:100%;height:44px;padding:0 42px 0 16px;border-radius:10px;border:1.5px solid #e2e8f0;background:#f8fafc;font-size:13px;color:var(--ink);transition:all .18s ease;outline:none}
+.s-search-box input:focus{background:#fff;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-glow)}
+.s-search-ico{position:absolute;right:12px;top:50%;transform:translateY(-50%);border:none;background:none;color:#94a3b8;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.s-search-clear{position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:11px;color:#94a3b8;width:20px;height:20px;border-radius:50%;background:#e2e8f0;display:flex;align-items:center;justify-content:center;text-decoration:none}
 .s-search-clear:hover{background:#cbd5e1;color:var(--ink)}
 
 /* Header Left Actions */
-.s-head-actions{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.s-head-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
 .s-act-divider{width:1px;height:24px;background:#e2e8f0;margin:0 2px}
-.s-act-btn{display:inline-flex;align-items:center;gap:7px;padding:8px 12px;border-radius:12px;border:1.5px solid #e2e8f0;background:#fff;color:var(--ink);font-size:12px;font-weight:700;text-decoration:none;transition:all .18s;position:relative}
-.s-act-btn:hover{border-color:var(--acc);color:var(--acc);transform:translateY(-1px);box-shadow:var(--sh-sm)}
-.s-act-btn.user.on{background:#f8fafc;border-color:var(--line)}
+.s-act-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;height:40px;border-radius:10px;border:1.5px solid #e2e8f0;background:#fff;color:var(--ink);font-size:12px;font-weight:700;text-decoration:none;transition:all .18s;position:relative;box-sizing:border-box}
+.s-act-btn:hover{border-color:var(--acc);color:var(--acc);background:#fcfcfd}
+.s-act-btn.user.on{background:#f8fafc;border-color:#cbd5e1}
 .s-act-avatar{width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800}
 .s-act-badge{position:absolute;top:-6px;left:-6px;background:var(--bad);color:#fff;font-size:10px;font-weight:900;min-width:18px;height:18px;border-radius:10px;display:flex;align-items:center;justify-content:center;padding:0 4px;box-shadow:0 2px 6px rgba(225,29,72,.4)}
-.s-ham-btn{display:inline-flex;align-items:center;gap:8px;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:12px;padding:8px 12px;font-size:12px;font-weight:700;color:var(--ink);cursor:pointer;transition:all .18s}
-.s-ham-btn:hover{border-color:var(--acc);color:var(--acc);background:#fff;transform:translateY(-1px)}
-.s-ham-bars{display:flex;flex-direction:column;gap:3px;width:15px}
+
+/* Hamburger button on top row: hidden on desktop, visible on mobile */
+.s-ham-btn{display:none;align-items:center;justify-content:center;width:40px;height:40px;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;cursor:pointer;color:var(--ink);transition:all .18s}
+.s-ham-btn:hover{border-color:var(--acc);color:var(--acc)}
+.s-ham-bars{display:flex;flex-direction:column;gap:3.5px;width:16px}
 .s-ham-bars span{display:block;height:2px;background:currentColor;border-radius:2px;width:100%}
-.s-ham-bars span:nth-child(2){width:75%}
+.s-ham-bars span:nth-child(2){width:70%}
 
 /* Sub Header Navigation Row */
 .s-head-nav{border-top:1px solid #f1f5f9;background:#fff;font-size:12.5px}
 .s-head-nav-in{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0}
-.s-nav-links{display:flex;align-items:center;gap:16px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.s-nav-links{display:flex;align-items:center;gap:14px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
 .s-nav-links::-webkit-scrollbar{display:none}
-.s-nav-chip.cat{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:10px;background:#f8fafc;border:1px solid #e2e8f0;font-size:12px;font-weight:800;color:var(--ink);cursor:pointer;white-space:nowrap}
-.s-nav-chip.cat:hover{background:#f1f5f9;color:var(--acc)}
+.s-nav-chip.cat{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;font-size:12.5px;font-weight:800;color:var(--ink);cursor:pointer;white-space:nowrap;transition:all .18s}
+.s-nav-chip.cat:hover{background:#f1f5f9;border-color:var(--acc);color:var(--acc)}
+.s-ham-bars-nav{display:flex;flex-direction:column;gap:3px;width:13px}
+.s-ham-bars-nav span{display:block;height:2px;background:currentColor;border-radius:1.5px;width:100%}
+.s-ham-bars-nav span:nth-child(2){width:70%}
+.s-nav-split{width:1px;height:16px;background:#e2e8f0}
 .s-nav-link{color:#475569;font-weight:600;white-space:nowrap;padding:4px 2px;transition:color .15s}
 .s-nav-link:hover{color:var(--acc)}
-.s-nav-ver{display:inline-flex;align-items:center;gap:5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:20px;padding:3px 9px;font-size:11px;font-weight:700;color:#64748b;cursor:pointer}
+.s-nav-side{display:flex;align-items:center}
+.s-nav-ver{display:inline-flex;align-items:center;gap:5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:16px;padding:3px 9px;font-size:11px;font-weight:700;color:#64748b;cursor:pointer}
 .s-nav-ver:hover{color:var(--acc);border-color:var(--acc)}
 
 /* Responsive Header */
 @media(max-width:960px){
-  .s-head-main{flex-wrap:wrap;row-gap:10px;padding:10px 0}
+  .s-head-main{flex-wrap:wrap;row-gap:10px;padding:8px 0}
+  .s-ham-btn{display:inline-flex}
   .s-head-right{order:1}
   .s-head-actions{order:2}
   .s-head-search{order:3;flex-basis:100%;max-width:100%;margin-top:2px}
@@ -46784,10 +47007,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--acc);box-shadow:0 0 0
   .s-act-lbl-cart{display:none}
 }
 @media(max-width:480px){
-  .s-brand-text small{display:none}
-  .s-ham-lbl{display:none}
-  .s-ham-btn{padding:8px}
-  .s-act-btn{padding:7px 9px}
+  .s-brand-title{font-size:15px}
+  .s-act-btn{padding:7px 9px;height:36px}
+  .s-ham-btn{width:36px;height:36px}
 }
 
 /* REAL DIGIKALA TEMPLATE STYLES */
@@ -47131,36 +47353,29 @@ body.s-tmpl-digikala .s-hero-badge{background:rgba(239,64,86,.2);border-color:rg
 .s-wbtn{width:52px;height:52px;border-radius:18px;border:0;display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 12px 30px rgba(15,23,42,.22);transition:transform .15s;position:relative}
 .s-wbtn:hover{transform:scale(1.07)}
 .s-wbtn.chat{background:linear-gradient(135deg,#0ea5e9,#2563eb)}
-.s-wbtn.ai{background:linear-gradient(135deg,#7c3aed,#db2777)}
-.s-wbtn .dot{position:absolute;top:3px;left:3px;width:12px;height:12px;background:#22c55e;border:2px solid #fff;border-radius:50%}
-.s-wpanel{position:fixed;left:16px;bottom:84px;width:min(360px,calc(100vw - 32px));height:min(480px,calc(100vh - 120px));max-height:calc(100dvh - 120px);background:#fff;border-radius:20px;box-shadow:0 24px 70px rgba(15,23,42,.28);display:none;flex-direction:column;overflow:hidden;z-index:1005;border:1px solid var(--line)}
+.s-wbtn.chat{background:linear-gradient(135deg,var(--acc),#2563eb);color:#fff}
+.s-wbtn .dot{position:absolute;top:3px;right:3px;width:12px;height:12px;background:#22c55e;border:2px solid #fff;border-radius:50%}
+.s-wpanel{position:fixed;left:16px;bottom:84px;width:min(380px,calc(100vw - 32px));height:min(500px,calc(100vh - 120px));max-height:calc(100dvh - 120px);background:#fff;border-radius:20px;box-shadow:0 24px 70px rgba(15,23,42,.28);display:none;flex-direction:column;overflow:hidden;z-index:1005;border:1px solid var(--line)}
 .s-wpanel.open{display:flex;animation:wpop .22s ease}
-.s-wp-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line)}
+.s-wp-head.chat{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:linear-gradient(135deg,var(--acc),#1d4ed8);color:#fff}
 .s-wp-close{width:28px;height:28px;border-radius:50%;border:none;background:rgba(255,255,255,.2);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s}
 .s-wp-close:hover{background:rgba(255,255,255,.35)}
 @media(max-width:640px){
   .s-wpanel{left:10px !important;right:10px !important;bottom:80px !important;width:auto !important;max-width:calc(100vw - 20px) !important;height:min(480px,calc(100vh - 160px)) !important;max-height:calc(100dvh - 160px) !important}
 }
 @keyframes wpop{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:none}}
-.s-wp-head{padding:12px 16px;color:#fff;display:flex;align-items:center;gap:10px}
-.s-wp-head.chat{background:linear-gradient(135deg,#0ea5e9,#2563eb)}
-.s-wp-head.ai{background:linear-gradient(135deg,#7c3aed,#db2777)}
-.s-wp-head b{font-size:13.5px}
-.s-wp-head small{display:block;font-size:10px;opacity:.85}
-.s-wp-head .live{width:9px;height:9px;border-radius:50%;background:#4ade80;box-shadow:0 0 0 0 rgba(74,222,128,.6);animation:pulse 1.8s infinite}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,.55)}70%{box-shadow:0 0 0 9px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
-.s-wp-msgs{flex:1;overflow-y:auto;padding:14px;background:#f8fafc;display:flex;flex-direction:column;gap:9px}
-.s-msg{max-width:84%;padding:8px 12px;border-radius:15px;font-size:12.5px;line-height:1.8;white-space:pre-wrap;word-break:break-word}
-.s-msg.cust{align-self:flex-start;background:#fff;border:1.5px solid var(--line);border-bottom-right-radius:5px}
-.s-msg.admin{align-self:flex-end;background:linear-gradient(135deg,#0ea5e9,#2563eb);color:#fff;border-bottom-left-radius:5px}
-.s-msg.ai{align-self:flex-end;background:linear-gradient(135deg,#7c3aed,#db2777);color:#fff;border-bottom-left-radius:5px}
-.s-msg .who{display:block;font-size:9px;opacity:.75;margin-bottom:2px;font-weight:700}
+.s-wp-msgs{flex:1;overflow-y:auto;padding:14px;background:#f8fafc;display:flex;flex-direction:column;gap:10px}
+.s-msg{max-width:86%;padding:9px 13px;border-radius:14px;font-size:12.5px;line-height:1.75;white-space:pre-wrap;word-break:break-word}
+.s-msg.cust{align-self:flex-start;background:#ffffff;border:1.5px solid #e2e8f0;color:#1e293b;border-bottom-right-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.03)}
+.s-msg.admin{align-self:flex-end;background:#eff6ff;border:1.5px solid #bfdbfe;color:#1e3a8a;border-bottom-left-radius:4px}
+.s-msg.ai{align-self:flex-end;background:#f5f3ff;border:1.5px solid #ddd6fe;color:#3b0764;border-bottom-left-radius:4px}
+.s-msg.s-typing{background:#f8fafc;border:1px dashed #cbd5e1;color:#64748b;font-style:italic}
+.s-msg .who{display:block;font-size:10px;font-weight:800;color:var(--acc);margin-bottom:3px}
 .s-wp-input{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line);background:#fff}
-.s-wp-input input{flex:1}
-.s-wp-input button{border:0;border-radius:12px;background:var(--acc);color:#fff;width:44px;font-size:16px}
-.s-wname{padding:9px 12px;background:#eef2ff;border-bottom:1px solid var(--line);display:flex;gap:8px}
-.s-wname input{flex:1}
-.s-wname button{border:0;background:var(--acc);color:#fff;border-radius:10px;padding:0 14px;font-weight:700}
+.s-wp-input input{flex:1;padding:9px 12px;border:1.5px solid #e2e8f0;border-radius:10px;font-size:13px;outline:none}
+.s-wp-input input:focus{border-color:var(--acc)}
+.s-wp-input button{border:0;border-radius:10px;background:var(--acc);color:#fff;width:44px;font-size:16px;cursor:pointer}
+
 .s-whello{position:fixed;left:80px;bottom:24px;z-index:85;max-width:min(250px,calc(100vw - 100px));background:#fff;border:1.5px solid var(--line);border-radius:14px;border-bottom-right-radius:4px;padding:10px 14px;font-size:12px;font-weight:700;box-shadow:0 16px 40px rgba(15,23,42,.18);animation:wpop .3s ease}
 .s-whello small{display:block;font-size:10px;color:var(--mut);font-weight:600;margin-top:3px;line-height:1.7}
 .s-whello button{position:absolute;top:6px;left:6px;border:0;background:none;color:var(--mut);font-size:11px;cursor:pointer}
@@ -47285,38 +47500,36 @@ body.s-pal-dark{--acc:#0f172a;--acc2:#334155}
 <!-- ─────────── هدر اصلی فروشگاه (طراحی مدرن، شیک و تفکیک‌شده) ─────────── -->
 <header class="s-header">
   <div class="container s-head-main">
-    <!-- سمت راست: لوگو و نام برند + دکمه دسته‌ها -->
+    <!-- سمت راست: لوگو و نام برند (تک‌خطی و متقارن) + همبرگر فقط در موبایل -->
     <div class="s-head-right">
       <button type="button" class="s-ham-btn" onclick="arenaOpenCatDrawer()" aria-label="دسته‌بندی‌ها" title="دسته‌بندی کالاها">
         <span class="s-ham-bars"><span></span><span></span><span></span></span>
-        <span class="s-ham-lbl">دسته‌بندی‌ها</span>
       </button>
       <a class="s-brand" href="?arena=shop">
         <?= $logo ?>
-        <div class="s-brand-text">
-          <b><?= h($s['name']) ?></b>
-          <small><?= h($s['tagline']) ?></small>
-        </div>
+        <span class="s-brand-title"><?= h($s['name']) ?></span>
       </a>
     </div>
 
-    <!-- مرکز: نوار جست‌وجوی عریض و شیک -->
+    <!-- مرکز: نوار جست‌وجوی عریض با آیکون سرچ استاندارد -->
     <div class="s-head-search">
       <form class="s-search-box" action="?arena=shop" method="get">
-        <button class="s-search-ico" type="submit" aria-label="جست‌وجو">🔍</button>
-        <input type="text" name="q" value="<?= h((string)($_GET['q'] ?? '')) ?>" placeholder="جست‌وجو در میان محصولات، دسته‌بندی‌ها و برندها…">
+        <button class="s-search-ico" type="submit" aria-label="جست‌وجو">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        </button>
+        <input type="text" name="q" value="<?= h((string)($_GET['q'] ?? '')) ?>" placeholder="جست‌وجو در میان تمام کالاها و برندها…">
         <?php if (!empty($_GET['q'])): ?>
         <a href="?arena=shop" class="s-search-clear" title="پاک کردن جست‌وجو">✕</a>
         <?php endif; ?>
       </form>
     </div>
 
-    <!-- سمت چپ: حساب کاربری و سبد خرید (منظم و متقارن) -->
+    <!-- سمت چپ: حساب کاربری، علاقه‌مندی‌ها و سبد خرید -->
     <div class="s-head-actions">
       <?php if ($arenaCust): ?>
       <a class="s-act-btn user on" href="?arena=account" title="حساب کاربری">
         <span class="s-act-avatar"><?= h(mb_substr($arenaCust['name'], 0, 1)) ?></span>
-        <span class="s-act-lbl"><?= h(mb_substr($arenaCust['name'], 0, 10)) ?></span>
+        <span class="s-act-lbl"><?= h(mb_substr($arenaCust['name'], 0, 12)) ?></span>
       </a>
       <?php else: ?>
       <a class="s-act-btn user" href="?arena=account" title="ورود به حساب کاربری">
@@ -47334,33 +47547,29 @@ body.s-pal-dark{--acc:#0f172a;--acc2:#334155}
 
       <a class="s-act-btn cart" href="?arena=cart" title="سبد خرید">
         <span class="s-act-ico">🛒</span>
-        <span class="s-act-lbl-cart">سبد</span>
+        <span class="s-act-lbl-cart">سبد خرید</span>
         <span class="s-act-badge" id="cartCount" style="display:none">0</span>
       </a>
     </div>
   </div>
 
-  <!-- نوار دوم هدر: لینک‌های سریع و دسته‌بندی‌ها -->
+  <!-- نوار دوم هدر: دسته‌بندی کالاها و لینک‌های میانبر فروشگاه -->
   <div class="s-head-nav">
     <div class="container s-head-nav-in">
       <div class="s-nav-links">
         <button type="button" class="s-nav-chip cat" onclick="arenaOpenCatDrawer()">
-          <span style="font-size:14px">🗂️</span>
+          <span class="s-ham-bars-nav"><span></span><span></span><span></span></span>
           <span>دسته‌بندی کالاها</span>
           <span style="font-size:9px;opacity:.7">▼</span>
         </button>
+        <span class="s-nav-split"></span>
         <a class="s-nav-link" href="?arena=shop#flashBanner">⚡ شگفت‌انگیزها</a>
         <a class="s-nav-link" href="?arena=shop&sort=popular">🔥 پرفروش‌ترین‌ها</a>
         <a class="s-nav-link" href="?arena=shop&sort=newest">🆕 جدیدترین‌ها</a>
         <a class="s-nav-link" href="?arena=shop&sort=cheap">💰 ارزان‌ترین‌ها</a>
         <a class="s-nav-link" href="?arena=track">🔎 پیگیری سفارش</a>
       </div>
-      <div class="s-nav-side">
-        <button type="button" class="s-nav-ver" onclick="arenaOpenChangelog()" title="مشاهده تغییرات نسخه <?= ARENA_VERSION ?>">
-          <span>نسخه <?= ARENA_VERSION ?></span>
-          <small>📋</small>
-        </button>
-      </div>
+      
     </div>
   </div>
 </header>
@@ -47562,12 +47771,8 @@ body.s-pal-dark{--acc:#0f172a;--acc2:#334155}
         </a>
         <button type="button" class="s-drawer-link" onclick="arenaCloseCatDrawer();chatOpen()" style="border:none;background:none;width:100%;text-align:right;cursor:pointer">
           <span style="font-size:16px">💬</span>
-          <span style="flex:1">پشتیبانی آنلاین و چت</span>
+          <span style="flex:1">پشتیبانی آنلاین و دستیار هوشمند</span>
           <span style="font-size:9.5px;color:var(--ok);font-weight:700">● آنلاین</span>
-        </button>
-        <button type="button" class="s-drawer-link" onclick="arenaCloseCatDrawer();$('aiPanel').classList.add('open')" style="border:none;background:none;width:100%;text-align:right;cursor:pointer">
-          <span style="font-size:16px">🤖</span>
-          <span style="flex:1">مشاوره با دستیار هوشمند AI</span>
         </button>
         <button type="button" class="s-drawer-link" onclick="arenaCloseCatDrawer();arenaOpenChangelog()" style="border:none;background:none;width:100%;text-align:right;cursor:pointer">
           <span style="font-size:16px">📋</span>
@@ -47602,9 +47807,21 @@ body.s-pal-dark{--acc:#0f172a;--acc2:#334155}
     <button type="button" class="s-modal-close" onclick="arenaCloseChangelog()" aria-label="بستن">✕</button>
   </div>
   <div class="s-modal-body">
-    <!-- Version 1.7 -->
+    <!-- Version 1.8.2 -->
     <div class="s-log-ver current">
-      <div class="s-log-badge">نسخه ۱.۷ <span class="tag">نسخه جاری</span></div>
+      <div class="s-log-badge">نسخه ۱.۸.۲ <span class="tag">نسخه جاری</span></div>
+      <div class="s-log-date">یکپارچه‌سازی کامل چت و دستیار هوشمند، ابزارهای تخصصی AI (Tool Calling)، هدر منظم تک‌خطی و رفع قطعی پیام هوش مصنوعی</div>
+      <ul class="s-log-items">
+        <li>💬 <b>ویجت یکپارچه پشتیبانی و دستیار هوشمند:</b> ادغام کامل پنجره‌ها و دکمه‌های مجزا در یک ویجت واحد با پاسخگویی ابتدا توسط هوش مصنوعی و سپس اپراتور انسانی.</li>
+        <li>🛠️ <b>مجهز به Tool Calling (فراخوانی ابزار):</b> جست‌وجوی کالاها، رهگیری سفارشات ARN، استعلام هزینه ارسال، بررسی کوپن تخفیف و اطلاعات فروشگاه.</li>
+        <li>⚡ <b>حل کامل خطای «پاسخی دریافت نشد»:</b> تصحیح کلیدهای پردازش پاسخ و اتصال پایدار به مدل مستر اسکریپر.</li>
+        <li>💎 <b>هدر منظم و استاندارد به سبک دیجی‌کالا:</b> حذف همبرگرهای اضافه، عنوان برند تک‌خطی، جست‌وجوی ۴۴ پیکسلی و لینک‌های میانبر شفاف.</li>
+      </ul>
+    </div>
+
+    <!-- Version 1.7 -->
+    <div class="s-log-ver">
+      <div class="s-log-badge">نسخه ۱.۷</div>
       <div class="s-log-date">طراحی کاملاً ریسپانسیو و پایدار در تمام زوم‌ها، منوی چسبنده پایین، نشان‌های اعتماد و رفع باگ کدهای اسکریپت</div>
       <ul class="s-log-items">
         <li>🎨 <b>بازطراحی کامل ظاهر و تم فروشگاه:</b> طراحی استاندارد، تمیز و حرفه‌ای بر پایهٔ اصول تجارت الکترونیک معتبر ایرانی با پالت رنگی باوقار و حذف المان‌های ناهمگون.</li>
@@ -47688,26 +47905,34 @@ body.s-pal-dark{--acc:#0f172a;--acc2:#334155}
 
 
 
-<!-- ─────────── چت پشتیبانی آنلاین و دستیار هوشمند ─────────── -->
-<div class="s-wdocks">
-  <button class="s-wbtn ai" id="aiBtn" title="دستیار هوشمند">🤖</button>
-  <button class="s-wbtn chat" id="chatBtn" title="پشتیبانی آنلاین">💬<span class="dot"></span></button>
+<!-- ─────────── ویجت یکپارچه پشتیبانی آنلاین و دستیار هوشمند ─────────── -->
+<div class="s-wdocks" id="sWdocks">
+  <button class="s-wbtn chat" id="chatBtn" title="پشتیبانی آنلاین و دستیار هوشمند" aria-label="پشتیبانی آنلاین">
+    <span style="font-size:22px">💬</span>
+    <span class="dot"></span>
+  </button>
 </div>
 
-<div class="s-wpanel" id="chatPanel">
-  <div class="s-wp-head chat"><div style="display:flex;align-items:center;gap:8px"><span class="live"></span><div><b>پشتیبانی آنلاین</b><small><?= h($s['support_hours']) ?></small></div></div><button type="button" class="s-wp-close" onclick="$('chatPanel').classList.remove('open')" title="بستن">✕</button></div>
-  <div class="s-wname" id="chatNameRow">
-    <input type="text" id="chatName" placeholder="نام شما (اختیاری)">
-    <button onclick="arenaChatStart()">شروع</button>
+<div class="s-wpanel" id="chatPanel" role="dialog" aria-modal="true" aria-label="پشتیبانی آنلاین و دستیار هوشمند">
+  <div class="s-wp-head chat">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div style="width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:18px">💬</div>
+      <div>
+        <b style="font-size:13.5px;display:block">پشتیبانی آنلاین <?= h($s['name']) ?></b>
+        <small style="display:block;font-size:10px;opacity:.9">● آنلاین — پاسخگویی هوشمند AI و پشتیبان فروشگاه</small>
+      </div>
+    </div>
+    <button type="button" class="s-wp-close" onclick="$('chatPanel').classList.remove('open')" title="بستن">✕</button>
   </div>
-  <div class="s-wp-msgs" id="chatMsgs"><div class="s-msg cust">سلام! 👋 خوش آمدید. چطور می‌تونم کمکتون کنم؟</div></div>
-  <div class="s-wp-input"><input type="text" id="chatIn" placeholder="پیام خود را بنویسید…" disabled><button id="chatSend" disabled>➤</button></div>
-</div>
 
-<div class="s-wpanel" id="aiPanel">
-  <div class="s-wp-head ai"><div style="display:flex;align-items:center;gap:8px"><span style="font-size:18px">🤖</span><div><b>دستیار هوشمند</b><small>قیمت، موجودی، ارسال، سفارش…</small></div></div><button type="button" class="s-wp-close" onclick="$('aiPanel').classList.remove('open')" title="بستن">✕</button></div>
-  <div class="s-wp-msgs" id="aiMsgs"><div class="s-msg ai">سلام! من دستیارِ هوشمندِ فروشگاه‌ام. 🙌 دربارهٔ قیمت کالا، موجودی، هزینهٔ ارسال، کد تخفیف یا پیگیری سفارش (ARN-…) بپرسید.</div></div>
-  <div class="s-wp-input"><input type="text" id="aiIn" placeholder="سوال خود را بنویسید…"><button id="aiSend">➤</button></div>
+  <div class="s-wp-msgs" id="chatMsgs">
+    <div class="s-msg ai"><span class="who">🤖 دستیار هوشمند <?= h($s['name']) ?></span>سلام! 👋 به پشتیبانی آنلاین خوش آمدید. من دستیار هوشمند فروشگاه هستم. می‌توانید درباره قیمت کالاها، موجودی، کد تخفیف، هزینه ارسال یا پیگیری سفارش (مانند ARN-...) بپرسید. پشتیبان انسانی نیز در صورت نیاز پاسخگوی شماست.</div>
+  </div>
+
+  <div class="s-wp-input">
+    <input type="text" id="chatIn" placeholder="پیام خود را بنویسید…">
+    <button id="chatSend" title="ارسال پیام">➤</button>
+  </div>
 </div>
 
 <div class="s-toast" id="sToast"></div>
@@ -47808,89 +48033,105 @@ document.addEventListener('keydown',function(e){
   if(e.key==='Escape'){arenaCloseChangelog();arenaCloseCatDrawer();}
 });
 
-/* ================= chat widget ================= */
-let chatCid='',chatLast=0,chatTimer=null;
+/* ================= unified chat & AI widget ================= */
+let chatCid = document.cookie.match(/arena_cid=([^;]+)/)?.[1] || '';
+let chatLast = 0, chatTimer = null;
+
 function chatOpen(){
   try{const cb=$('chatBtn');if(cb)cb.classList.add('pulse-off');}catch(e){}
-  $('chatPanel').classList.toggle('open');
-  $('aiPanel').classList.remove('open');
-  if(!chatCid)chatCid=document.cookie.match(/arena_cid=([^;]+)/)?.[1]||'';
-}
-window.arenaChatStart=function(){
-  const name=$('chatName').value.trim();
-  fetch('?arena=api&do=chat_open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})
-    .then(r=>r.json()).then(d=>{
-      if(d.ok){chatCid=d.cid;$('chatNameRow').style.display='none';$('chatIn').disabled=false;$('chatSend').disabled=false;chatPollLoop();}
-    });
-};
-$('chatBtn').addEventListener('click',function(){try{localStorage.setItem('arena_hello','1');}catch(e){}const hb=$('sWHello');if(hb)hb.remove();chatOpen();});
-(function(){
-  try{
-    if(localStorage.getItem('arena_hello'))return;
-    const d=document.createElement('div');
-    d.id='sWHello';d.className='s-whello';
-    d.innerHTML='👋 نیاز به کمک دارید؟<small>با پشتیبانیِ آنلاین یا دستیارِ هوشمند صحبت کنید</small><button type=\'button\'>✕</button>';
-    d.querySelector('button').addEventListener('click',function(){try{localStorage.setItem('arena_hello','1');}catch(e){}d.remove();});
-    setTimeout(function(){document.body.appendChild(d);setTimeout(function(){const x=$('sWHello');if(x)x.remove();},15000);},2500);
-  }catch(e){}
-})();
-$('aiBtn').addEventListener('click',()=>{
-  $('aiPanel').classList.toggle('open');
-  $('chatPanel').classList.remove('open');
-});
-function pushMsg(box,who,text){
-  const d=document.createElement('div');
-  d.className='s-msg '+who;
-  const labels={cust:'شما',admin:'پشتیبانی',ai:'دستیار هوشمند 🤖'};
-  d.innerHTML='<span class="who">'+labels[who]+'</span>'+esc(text);
-  box.appendChild(d);box.scrollTop=box.scrollHeight;
-}
-window.chatSendMsg=function(){
-  const inp=$('chatIn'),text=inp.value.trim();
-  if(!text||!chatCid)return;
-  inp.value='';
-  pushMsg($('chatMsgs'),'cust',text);
-  api('chat_send',{text:text},'POST').then(d=>{
-    if(!d.ok)toast('خطا در ارسال پیام');
-  });
-};
-function chatPollLoop(){
-  if(!chatCid)return;
-  const tick=async()=>{
-    try{
-      const d=await api('chat_poll',{since:chatLast},'POST');
-      (d.messages||[]).forEach(m=>{
-        chatLast=Math.max(chatLast,+m.id);
-        pushMsg($('chatMsgs'),m.from==='customer'?'cust':(m.from==='ai'?'ai':'admin'),m.text);
-      });
-    }catch(e){}
-  };
-  tick();
-  if(chatTimer)clearInterval(chatTimer);
-  chatTimer=setInterval(tick,4500);
-}
-$('chatSend').addEventListener('click',chatSendMsg);
-$('chatIn').addEventListener('keypress',e=>{if(e.key==='Enter')chatSendMsg();});
-$('aiSend').addEventListener('click',aiSendMsg);
-$('aiIn').addEventListener('keypress',e=>{if(e.key==='Enter')aiSendMsg();});
-async function aiSendMsg(){
-  const inp=$('aiIn'),text=inp.value.trim();
-  if(!text)return;
-  inp.value='';
-  pushMsg($('aiMsgs'),'cust',text);
-  const typing=document.createElement('div');
-  typing.className='s-msg ai typing';typing.textContent='در حال نوشتن…';
-  $('aiMsgs').appendChild(typing);
-  $('aiMsgs').scrollTop=$('aiMsgs').scrollHeight;
-  try{
-    const d=await api('ai_chat',{text:text},'POST');
-    typing.remove();
-    pushMsg($('aiMsgs'),'ai',d.reply||'پاسخی دریافت نشد.');
-  }catch(e){
-    typing.remove();
-    pushMsg($('aiMsgs'),'ai','خطا در ارتباط با سرور.');
+  const p = $('chatPanel');
+  if(!p) return;
+  p.classList.toggle('open');
+  if(p.classList.contains('open')){
+    $('chatIn')?.focus();
+    chatPollLoop();
   }
 }
+
+async function chatSendMsg(){
+  const inEl = $('chatIn');
+  const txt = inEl.value.trim();
+  if(!txt) return;
+  inEl.value = '';
+  const box = $('chatMsgs');
+  
+  // نمایش فوری پیام کاربر
+  pushMsg(box, 'cust', txt);
+  
+  // نشانگر تایپ هوش مصنوعی
+  const typing = document.createElement('div');
+  typing.className = 's-msg ai s-typing';
+  typing.id = 'aiTyping';
+  typing.textContent = '🤖 دستیار هوشمند در حال نوشتن پاسخ…';
+  box.appendChild(typing);
+  box.scrollTop = box.scrollHeight;
+
+  try {
+    const res = await api('chat_send', { cid: chatCid, text: txt }, 'POST');
+    typing.remove();
+    if(res.cid) chatCid = res.cid;
+    
+    // دریافت پاسخ هوش مصنوعی (پشتیبانی کامل از text, reply, ai.text)
+    const aiText = res.reply || res.text || (res.ai && res.ai.text) || '';
+    if(aiText) {
+      pushMsg(box, 'ai', aiText);
+    }
+  } catch(e) {
+    typing.remove();
+    pushMsg(box, 'ai', 'خطا در برقراری ارتباط. پیام شما ذخیره شد و پشتیبان به‌زودی پاسخ می‌دهد.');
+  }
+}
+
+$('chatBtn')?.addEventListener('click', function(){
+  try{localStorage.setItem('arena_hello','1');}catch(e){}
+  const hb=$('sWHello'); if(hb) hb.remove();
+  chatOpen();
+});
+
+$('chatSend')?.addEventListener('click', chatSendMsg);
+$('chatIn')?.addEventListener('keydown', function(e){
+  if(e.key === 'Enter'){ e.preventDefault(); chatSendMsg(); }
+});
+
+function pushMsg(box, who, text){
+  if(!box || !text) return;
+  const d = document.createElement('div');
+  d.className = 's-msg ' + who;
+  const labels = { cust: 'شما', admin: '🎧 پشتیبان فروشگاه', ai: '🤖 دستیار هوشمند' };
+  d.innerHTML = '<span class="who">' + (labels[who] || '') + '</span>' + esc(text).replace(/\n/g, '<br>');
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+}
+
+function chatPollLoop(){
+  if(chatTimer) clearTimeout(chatTimer);
+  if(!chatCid || !$('chatPanel')?.classList.contains('open')) return;
+  api('chat_poll', { cid: chatCid, since: chatLast }, 'POST').then(d=>{
+    if(d.ok && d.messages && d.messages.length){
+      const box = $('chatMsgs');
+      d.messages.forEach(m=>{
+        if(+m.id > chatLast){
+          chatLast = Math.max(chatLast, +m.id);
+          if(m.from === 'admin'){
+            pushMsg(box, 'admin', m.text);
+          }
+        }
+      });
+    }
+    chatTimer = setTimeout(chatPollLoop, 4000);
+  }).catch(()=>{ chatTimer = setTimeout(chatPollLoop, 8000); });
+}
+
+(function(){
+  try{
+    if(localStorage.getItem('arena_hello')) return;
+    const d = document.createElement('div');
+    d.id = 'sWHello'; d.className = 's-whello';
+    d.innerHTML = '👋 نیاز به کمک دارید؟<small>با پشتیبانی آنلاین و دستیار هوشمند گفتگو کنید</small><button type=\'button\'>✕</button>';
+    d.querySelector('button')?.addEventListener('click', function(){ try{localStorage.setItem('arena_hello','1');}catch(e){} d.remove(); });
+    setTimeout(function(){ document.body.appendChild(d); setTimeout(function(){ $('sWHello')?.remove(); }, 15000); }, 2500);
+  }catch(e){}
+})();
 
 /* ================= flash sale timer ================= */
 (function(){
