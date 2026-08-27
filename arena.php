@@ -45222,7 +45222,14 @@ function arenaPluginsList(): array {
 }
 
 function arenaPluginSaveIndex(array $list): bool {
-    return arenaSave(ARENA_PLUGINS_FILE, ['plugins' => $list]);
+    $seen = []; $out = [];
+    foreach ($list as $p) {
+        $k = (string)($p['slug'] ?? '');
+        if ($k === '' || isset($seen[$k])) { if ($k !== '') $seen[$k] = true; continue; }
+        $seen[$k] = true;
+        $out[] = $p;
+    }
+    return arenaSave(ARENA_PLUGINS_FILE, ['plugins' => $out]);
 }
 
 /** افزودنِ افزونه‌های نمونهٔ خودکار (یک‌بار) */
@@ -45251,9 +45258,6 @@ function arenaEnsureSeedPlugins(): void {
         $file = $slug . '.php';
         if (!is_file(ARENA_PLUGINS_DIR . '/' . $file)) {
             @file_put_contents(ARENA_PLUGINS_DIR . '/' . $file, $meta['code'], LOCK_EX);
-            $list[] = ['slug' => $slug, 'file' => $file, 'name' => $meta['name'], 'version' => $meta['version'],
-                       'description' => $meta['description'], 'author' => $meta['author'], 'enabled' => true, 'created' => time()];
-            $changed = true;
         }
         if (!isset(array_column($list, 'slug')[$slug])) {
             $list[] = ['slug' => $slug, 'file' => $file, 'name' => $meta['name'], 'version' => $meta['version'],
@@ -45266,8 +45270,12 @@ function arenaEnsureSeedPlugins(): void {
 
 function arenaDoHook(string $event, array $ctx): array {
     arenaEnsureSeedPlugins();
+    $seenSlugs = [];
     foreach (arenaPluginsList() as $p) {
         if (empty($p['enabled'])) continue;
+        $slugKey = (string)($p['slug'] ?? '');
+        if (isset($seenSlugs[$slugKey])) continue;
+        $seenSlugs[$slugKey] = true;
         $f = ARENA_PLUGINS_DIR . '/' . basename((string)($p['file'] ?? ''));
         if ($f === ARENA_PLUGINS_DIR . '/' || !is_file($f)) continue;
         $g = 'ARENA_PLUGIN_LOADED_' . $p['slug'];
@@ -45798,12 +45806,15 @@ function arenaAdminCreds(): array {
 
 function arenaIsAdmin(): bool {
     if (PHP_SAPI === 'cli' || headers_sent()) return false;
-    if (session_status() !== PHP_SESSION_ACTIVE) {
-        session_name('ARENA_ADM_' . substr(md5(__DIR__), 0, 8));
-        session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax']);
-        @session_start();
-    }
-    return !empty($_SESSION['arena_admin']);
+    if (!function_exists('session_start')) return false;
+    try {
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            session_name('ARENA_ADM_' . substr(md5(__DIR__), 0, 8));
+            if (PHP_VERSION_ID >= 70300) session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax']);
+            @session_start();
+        }
+        return !empty($_SESSION['arena_admin']);
+    } catch (\Throwable $e) { return false; }
 }
 
 function arenaDoLogout(): void {
@@ -45814,14 +45825,16 @@ function arenaDoLogout(): void {
 
 function arenaLoginPage(): void {
     header('Cache-Control: no-store, no-cache, must-revalidate');
-    $store = (string)(arenaSettings()['name'] ?? 'فروشگاه');
+    $store = 'فروشگاه';
     $err = '';
-    if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
-        if (!headers_sent() && session_status() !== PHP_SESSION_ACTIVE) {
-            session_name('ARENA_ADM_' . substr(md5(__DIR__), 0, 8));
-            session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax']);
-            @session_start();
-        }
+    try {
+        $store = (string)(arenaSettings()['name'] ?? 'فروشگاه');
+        if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+            if (!headers_sent() && function_exists('session_start') && session_status() !== PHP_SESSION_ACTIVE) {
+                session_name('ARENA_ADM_' . substr(md5(__DIR__), 0, 8));
+                if (PHP_VERSION_ID >= 70300) session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax']);
+                @session_start();
+            }
         $lock = is_array($_SESSION['arena_login_lock'] ?? null) ? $_SESSION['arena_login_lock'] : ['fails' => 0, 'until' => 0];
         if ((int)$lock['until'] > time()) {
             $err = 'تلاش‌های ناموفق زیاد شد. لطفاً ' . (int)max(1, ceil(((int)$lock['until'] - time()) / 60)) . ' دقیقه دیگر تلاش کنید.';
@@ -45830,18 +45843,24 @@ function arenaLoginPage(): void {
             $p = (string)($_POST['p'] ?? '');
             $c = arenaAdminCreds();
             if ($u !== '' && hash_equals((string)$c['user'], $u) && password_verify($p, (string)$c['hash'])) {
-                if (session_status() === PHP_SESSION_ACTIVE) @session_regenerate_id(true);
-                $_SESSION['arena_admin'] = true;
-                $_SESSION['arena_login_lock'] = ['fails' => 0, 'until' => 0];
-                arenaLog('login', 'ورودِ ادمین به پنل فروشگاه');
-                header('Location: ?arena=panel');
-                exit;
+                if (function_exists('session_status') && session_status() === PHP_SESSION_ACTIVE) {
+                    @session_regenerate_id(true);
+                    $_SESSION['arena_admin'] = true;
+                    $_SESSION['arena_login_lock'] = ['fails' => 0, 'until' => 0];
+                    arenaLog('login', 'ورودِ ادمین به پنل فروشگاه');
+                    header('Location: ?arena=panel');
+                    exit;
+                }
+                $err = 'رمز درست بود اما session در هاست در دسترس نیست (session.save_path قابل‌نوشتن نیست یا ماژولِ session غیرفعال است). لطفاً با پشتیبانی هاست تماس بگیرید.';
             }
             $lock['fails'] = (int)($lock['fails'] ?? 0) + 1;
             if ($lock['fails'] >= 8) $lock = ['fails' => 0, 'until' => time() + 600];
             $_SESSION['arena_login_lock'] = $lock;
             $err = 'نام کاربری یا رمز عبور اشتباه است';
         }
+        }
+    } catch (\Throwable $e) {
+        $err = 'خطای سرور در پردازش ورود: ' . get_class($e) . ' — ' . (string)$e->getMessage() . ' (خط ' . (int)$e->getLine() . ')';
     }
     ?><!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -45963,7 +45982,7 @@ function arenaApiJson(): string {
             case 'track':
                 $oid = strtoupper(trim((string)($jsonIn['id'] ?? '')));
                 foreach (arenaOrders() as $o) {
-                    if (str_starts_with($o['id'], 'ARN-') && ltrim($o['id'], 'ARN-') === ltrim($oid, 'ARN-')) {
+                    if (strpos((string)$o['id'], 'ARN-') === 0 && ltrim((string)$o['id'], 'ARN-') === ltrim($oid, 'ARN-')) {
                         return json_encode(['ok' => true, 'order' => [
                             'id' => $o['id'], 'status' => $o['status'], 'status_label' => arenaOrderStatusLabel($o['status']),
                             'total' => $o['total'], 'created' => $o['created'], 'tracking' => $o['tracking'] ?? '',
@@ -46042,7 +46061,7 @@ function arenaApiJson(): string {
                     'published' => !isset($jsonIn['published']) || $jsonIn['published'] !== false,
                 ];
                 $uid = (string)($jsonIn['uid'] ?? '');
-                if ($uid !== '' && str_starts_with($uid, 'own:')) {
+                if ($uid !== '' && strpos($uid, 'own:') === 0) {
                     $id = substr($uid, 4);
                     foreach ($db['items'] as $k => $it) {
                         if ((string)($it['id'] ?? '') === (string)$id) {
@@ -46066,7 +46085,7 @@ function arenaApiJson(): string {
                 return json_encode(['ok' => true, 'uid' => 'own:' . $id]);
             case 'product_delete':
                 $uid = (string)($jsonIn['uid'] ?? '');
-                if (str_starts_with($uid, 'own:')) {
+                if (strpos($uid, 'own:') === 0) {
                     $db = arenaProducts();
                     $before = count($db['items']);
                     $db['items'] = array_values(array_filter($db['items'], fn($it) => 'own:' . ($it['id'] ?? '') !== $uid));
@@ -46084,7 +46103,7 @@ function arenaApiJson(): string {
             case 'override_save':
                 $uid = (string)($jsonIn['uid'] ?? '');
                 $db = arenaProducts();
-                if (str_starts_with($uid, 'own:')) {
+                if (strpos($uid, 'own:') === 0) {
                     foreach ($db['items'] as $k => $it) {
                         if ('own:' . ($it['id'] ?? '') === $uid) {
                             if (isset($jsonIn['published'])) $db['items'][$k]['published'] = $jsonIn['published'] !== false;
