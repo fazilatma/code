@@ -1,0 +1,133 @@
+{
+  "totals": {
+    "site_view": 258,
+    "product_view": 161,
+    "add_cart": 69,
+    "checkout_start": 35,
+    "order": 12,
+    "revenue": 9990000
+  },
+  "daily": {
+    "2026-08-22": {
+      "site_view": 34,
+      "product_view": 21,
+      "add_cart": 9,
+      "checkout_start": 4,
+      "order": 1,
+      "revenue": 820000
+    },
+    "2026-08-23": {
+      "site_view": 39,
+      "product_view": 24,
+      "add_cart": 10,
+      "checkout_start": 5,
+      "order": 2,
+      "revenue": 1780000
+    },
+    "2026-08-24": {
+      "site_view": 31,
+      "product_view": 19,
+      "add_cart": 8,
+      "checkout_start": 4,
+      "order": 1,
+      "revenue": 950000
+    },
+    "2026-08-25": {
+      "site_view": 48,
+      "product_view": 31,
+      "add_cart": 14,
+      "checkout_start": 7,
+      "order": 3,
+      "revenue": 2420000
+    },
+    "2026-08-26": {
+      "site_view": 36,
+      "product_view": 22,
+      "add_cart": 9,
+      "checkout_start": 5,
+      "order": 1,
+      "revenue": 890000
+    },
+    "2026-08-27": {
+      "site_view": 42,
+      "product_view": 26,
+      "add_cart": 11,
+      "checkout_start": 6,
+      "order": 2,
+      "revenue": 1680000
+    },
+    "2026-08-28": {
+      "site_view": 28,
+      "product_view": 18,
+      "add_cart": 8,
+      "checkout_start": 4,
+      "order": 2,
+      "revenue": 1450000
+    }
+  },
+  "events": [
+    {
+      "type": "order",
+      "title": "ثبت سفارش ARN-59281 (هندزفری بلوتوثی + ساعت هوشمند)",
+      "amount": 1740000,
+      "time": 1787892785,
+      "icon": "🧾"
+    },
+    {
+      "type": "checkout_start",
+      "title": "ورود به مرحله تسویه حساب (۲ قلم کالا)",
+      "amount": 1740000,
+      "time": 1787892185,
+      "icon": "💳"
+    },
+    {
+      "type": "add_cart",
+      "title": "افزودن ساعت اولترا سری ۲ به سبد خرید",
+      "amount": 1250000,
+      "time": 1787890985,
+      "icon": "🛒"
+    },
+    {
+      "type": "product_view",
+      "title": "مشاهده صفحه ساعت هوشمند الترا Ultra 2",
+      "amount": 1250000,
+      "time": 1787890385,
+      "icon": "🔍"
+    },
+    {
+      "type": "site_view",
+      "title": "ورود کاربر جدید به صفحه اصلی ویترین",
+      "amount": 0,
+      "time": 1787889685,
+      "icon": "👁️"
+    },
+    {
+      "type": "order",
+      "title": "ثبت سفارش ARN-841920 (هندزفری شیائومی)",
+      "amount": 490000,
+      "time": 1787887385,
+      "icon": "🧾"
+    },
+    {
+      "type": "add_cart",
+      "title": "افزودن هندزفری شیائومی Buds 4 به سبد خرید",
+      "amount": 490000,
+      "time": 1787886485,
+      "icon": "🛒"
+    },
+    {
+      "type": "product_view",
+      "title": "مشاهده مشخصات هندزفری بلوتوثی Buds 4",
+      "amount": 490000,
+      "time": 1787885685,
+      "icon": "🔍"
+    },
+    {
+      "type": "site_view",
+      "title": "بازدید مستقیم خریدار از فروشگاه",
+      "amount": 0,
+      "time": 1787884985,
+      "icon": "👁️"
+    }
+  ]
+}

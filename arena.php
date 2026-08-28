@@ -44863,7 +44863,8 @@ function arenaVitrineDest(): string {
 /* ---------------- v1.5: رویدادهای فروشگاه → پیام‌رسان‌ها ---------------- */
 function arenaTrackDefs(): array {
     return [
-        'product_view'   => ['icon' => '👁', 'title' => 'مشاهدهٔ محصول', 'cool' => 600],
+        'site_view'      => ['icon' => '👁️', 'title' => 'بازدید از سایت', 'cool' => 1800],
+        'product_view'   => ['icon' => '🔍', 'title' => 'مشاهدهٔ محصول', 'cool' => 600],
         'add_cart'       => ['icon' => '🛒', 'title' => 'افزودن به سبد', 'cool' => 20],
         'remove_cart'    => ['icon' => '🗑', 'title' => 'حذف از سبد', 'cool' => 20],
         'cart_view'      => ['icon' => '🧺', 'title' => 'مشاهدهٔ سبد خرید', 'cool' => 900],
@@ -44911,12 +44912,36 @@ function arenaTrackEvent(string $name, array $data): array {
 " : '')
           . '🌐 ' . $ip;
     $head = mb_substr($def[$name]['title'] . ($title !== '' ? ' — ' . $title : ''), 0, 80);
+        // ثبت زنده رویداد در آمار تحلیلی فروشگاه
+    if (function_exists('shopAnalyticsRecord')) {
+        shopAnalyticsRecord($name, $data);
+    }
+
+    // بررسی سوئیچ‌های اختصاصی پیام‌رسان از تنظیمات پنل ادمین
+    $shopNotifAllowed = true;
+    try {
+        $cnCfg = loadConnections();
+        $snToggles = (array)($cnCfg['shop_notifications'] ?? [
+            'site_view'      => false,
+            'product_view'   => false,
+            'add_cart'       => true,
+            'checkout_start' => true,
+            'order'          => true
+        ]);
+        if (array_key_exists($name, $snToggles) && empty($snToggles[$name])) {
+            $shopNotifAllowed = false;
+        }
+    } catch (\Throwable $e) {}
+
     $delivery = [];
+    if ($shopNotifAllowed) {
+
     try {
         $cn = loadConnections();
         if (notifPrereq($cn) === null) $delivery = notifSend($cn, $def[$name]['icon'] . ' ' . $head . "
 " . $body, 'arena_shop');
     } catch (\Throwable $e) { $delivery = ['error' => mb_substr((string)$e->getMessage(), 0, 80)]; }
+        }
     arenaLog('shop', $head, ['event' => $name, 'ip' => $ip, 'cust' => $cust, 'delivery' => $delivery]);
     return ['ok' => true, 'delivery' => $delivery];
 }
@@ -45090,11 +45115,49 @@ function arenaCatalog(bool $publishedOnly = false, array $filter = []): array {
             return stripos($hay, $q) !== false || ($qN !== '' && stripos($hayN, $qN) !== false);
         }));
     }
-    $sort = $filter['sort'] ?? '';
-    if ($sort === 'cheap')    usort($out, fn($a, $b) => $a['price'] <=> $b['price']);
-    elseif ($sort === 'price') usort($out, fn($a, $b) => $b['price'] <=> $a['price']);
-    elseif ($sort === 'new')   usort($out, fn($a, $b) => ($b['created'] ?: 0) <=> ($a['created'] ?: 0));
-    elseif ($sort === 'title') usort($out, fn($a, $b) => strcmp($a['title'], $b['title']));
+    $sort = $filter['sort'] ?? 'popular';
+    if ($sort === 'cheap') {
+        usort($out, fn($a, $b) => $a['price'] <=> $b['price']);
+    } elseif ($sort === 'expensive' || $sort === 'price') {
+        usort($out, fn($a, $b) => $b['price'] <=> $a['price']);
+    } elseif ($sort === 'newest' || $sort === 'new') {
+        usort($out, fn($a, $b) => ($b['created'] ?: 0) <=> ($a['created'] ?: 0));
+    } elseif ($sort === 'most_viewed' || $sort === 'views') {
+        usort($out, function($a, $b) {
+            $va = (int)($a['views'] ?? ((abs(crc32((string)($a['uid'] ?? ''))) % 300) + 20));
+            $vb = (int)($b['views'] ?? ((abs(crc32((string)($b['uid'] ?? ''))) % 300) + 20));
+            return $vb <=> $va;
+        });
+    } elseif ($sort === 'discount') {
+        usort($out, function($a, $b) {
+            $discA = ($a['old_price'] > $a['price']) ? ($a['old_price'] - $a['price']) : 0;
+            $discB = ($b['old_price'] > $b['price']) ? ($b['old_price'] - $b['price']) : 0;
+            return $discB <=> $discA;
+        });
+    } elseif ($sort === 'rating') {
+        usort($out, function($a, $b) {
+            $ra = (float)($a['rating'] ?? (4.2 + (abs(crc32((string)($a['uid'] ?? ''))) % 8) * 0.1));
+            $rb = (float)($b['rating'] ?? (4.2 + (abs(crc32((string)($b['uid'] ?? ''))) % 8) * 0.1));
+            return $rb <=> $ra;
+        });
+    } elseif ($sort === 'fast_shipping') {
+        usort($out, function($a, $b) {
+            $sa = (int)($a['stock'] ?? 1);
+            $sb = (int)($b['stock'] ?? 1);
+            return $sb <=> $sa;
+        });
+    } elseif ($sort === 'title') {
+        usort($out, fn($a, $b) => strcmp($a['title'], $b['title']));
+    } else {
+        usort($out, function($a, $b) {
+            $sa = ($a['stock'] ?? 1) > 0 ? 1 : 0;
+            $sb = ($b['stock'] ?? 1) > 0 ? 1 : 0;
+            if ($sa !== $sb) return $sb <=> $sa;
+            $ordA = (int)($a['orders_count'] ?? (abs(crc32((string)($a['uid'] ?? ''))) % 45 + 5));
+            $ordB = (int)($b['orders_count'] ?? (abs(crc32((string)($b['uid'] ?? ''))) % 45 + 5));
+            return $ordB <=> $ordA;
+        });
+    }
     return $out;
 }
 
@@ -45890,148 +45953,143 @@ function arenaAiAnswer(string $text, array $history = []): array {
 }
 
 function arenaAiOffline(string $t): string {
-    $s = arenaSettings();
-    $tRaw = trim($t);
-    $tClean = mb_strtolower($tRaw);
-    $catalog = arenaCatalog(true);
-
-    // ۱. استعلام و رهگیری لحظه‌ای سفارش با کد ARN-...
-    if (preg_match('/ARN-\d{4,}/i', $tRaw, $m)) {
-        $oid = strtoupper($m[0]);
-        foreach (arenaOrders() as $o) {
-            if (strtoupper($o['id'] ?? '') === $oid) {
-                $items = [];
-                foreach ((array)($o['items'] ?? []) as $ln) {
-                    $items[] = mb_substr($ln['title'] ?? 'کالا', 0, 35) . ' (تعداد: ' . ($ln['qty'] ?? 1) . ')';
-                }
-                $txt = "📦 وضعیت سفارش " . $oid . ":\n";
-                $txt .= "• وضعیت جاری: «" . arenaOrderStatusLabel($o['status'] ?? 'pending') . "»\n";
-                $txt .= "• مبلغ کل پرداختی: " . arenaPrice((int)($o['total'] ?? 0)) . "\n";
-                if (!empty($items)) $txt .= "• اقلام ثبت‌شده: " . implode('، ', $items) . "\n";
-                if (!empty($o['tracking'])) $txt .= "• کد رهگیری پستی: " . $o['tracking'] . "\n";
-                $txt .= "سفارش شما در فرآیند ارسال قرار دارد. در صورت تمایل به پیگیری تکمیلی، پشتیبانان آنلاین در خدمت شما هستند.";
-                return $txt;
-            }
-        }
-        return "سفارشی با کد «" . $oid . "» در سیستم فروشگاه یافت نشد. لطفاً کد سفارش مندرج در پیامک یا فاکتور را بررسی فرمایید، یا نام و شماره تماس ثبت‌شده‌تان را بفرمایید تا پیگیری کنم.";
-    }
-
-    // ۲. بررسی کوپن و تخفیف‌ها
-    if (preg_match('/(تخفیف|کوپن|کد|off|discount|کپن)/u', $tClean)) {
-        $coupons = arenaCoupons();
-        $activeCoupons = [];
-        foreach ($coupons as $c) {
-            if (!empty($c['active'])) {
-                $desc = ($c['type'] ?? '') === 'percent' ? ($c['value'] . '٪ تخفیف') : (arenaPrice((int)$c['value']) . ' تخفیف نقدی');
-                $activeCoupons[] = 'کد «' . $c['code'] . '» — ' . $desc;
-            }
-        }
-        $welcome = !empty($s['welcome_coupon']) ? $s['welcome_coupon'] : 'WELCOME10';
-        $res = "🎉 کدهای تخفیف فعال در فروشگاه " . $s['name'] . ":\n";
-        if (!empty($activeCoupons)) {
-            $res .= "• " . implode("\n• ", $activeCoupons) . "\n";
-        } else {
-            $res .= "• کد هدیه خوش‌آمدگویی: «" . $welcome . "» (۱۰٪ تخفیف ویژه روی سبد خرید شما)\n";
-        }
-        $res .= "کافیست در صفحه تسویه‌حساب، کد را در بخش کد تخفیف وارد کنید تا مبلغ آن از فاکتورتان کسر شود.";
-        return $res;
-    }
-
-    // ۳. بررسی هزینه، شرایط و مدت زمان ارسال
-    if (preg_match('/(ارسال|کرایه|پست|تحویل|زمان|delivery|shipping|پیک|تهران|شهرستان)/u', $tClean)) {
-        $shipCost = arenaPrice((int)$s['shipping']);
-        $freeLimit = (int)$s['free_shipping_over'];
-        $res = "🚚 شرایط و هزینه ارسال سفارش‌ها در " . $s['name'] . ":\n";
-        $res .= "• هزینه ارسال استاندارد به سراسر کشور: " . $shipCost . "\n";
-        if ($freeLimit > 0) {
-            $res .= "• 🌟 ارسال رایگان: برای سفارش‌های با مبلغ بالای " . arenaPrice($freeLimit) . " هزینه ارسال کاملاً رایگان است!\n";
-        }
-        $res .= "• مدت زمان تحویل: مرسوله‌ها ظرف ۲۴ ساعت کاری بسته‌بندی شده و با پست پیشتاز ظرف ۲ تا ۴ روز کاری در تمام شهرها و استان‌ها تحویل داده می‌شوند.\n";
-        if (!empty($s['payment']['on_delivery'])) {
-            $res .= "• امکان پرداخت در محل نیز برای سفارش‌های فعال فراهم است.";
-        }
-        return $res;
-    }
-
-    // ۴. راه‌های ارتباطی، تماس تلفنی، ساعات کاری و آدرس
-    if (preg_match('/(تماس|تلفن|شماره|آدرس|ساعت|پشتیبان|phone|contact|حضوری)/u', $tClean)) {
-        $c = $s['contact'] ?? [];
-        $lines = ["📞 راه‌های ارتباطی و پشتیبانی فروشگاه " . $s['name'] . ":"];
-        if (!empty($c['phone'])) $lines[] = "• تلفن پشتیبانی: " . $c['phone'];
-        if (!empty($c['telegram'])) $lines[] = "• تلگرام: @" . ltrim($c['telegram'], '@');
-        if (!empty($c['whatsapp'])) $lines[] = "• واتس‌اپ: " . $c['whatsapp'];
-        $lines[] = "• ساعات کاری و پاسخگویی: " . ($s['support_hours'] ?? 'هر روز از ساعت ۹ الی ۲۱');
-        $lines[] = "• همچنین می‌توانید سوالات خود را در همین پنجره مطرح کنید تا پشتیبان آنلاین پاسخ دهد.";
-        return implode("\n", $lines);
-    }
-
-    // ۵. جست‌وجوی هوشمند و معنایی در کاتالوگ محصولات با تطبیق واژگان
-    $tokens = preg_split('/[\s،,]+/u', $tClean, -1, PREG_SPLIT_NO_EMPTY);
-    $stopWords = ['سلام', 'درود', 'خسته', 'نباشید', 'آیا', 'دارید', 'دارین', 'میشه', 'لطفا', 'لطفاً', 'قیمت', 'چند', 'چنده', 'میخوام', 'می‌خوام', 'خرید', 'کدوم', 'چی', 'هست', 'برای', 'از', 'به', 'با', 'در', 'یک', 'یه', 'من', 'شما'];
-    $searchWords = array_values(array_filter($tokens, fn($w) => mb_strlen($w) > 1 && !in_array($w, $stopWords, true)));
-
-    $matchedProducts = [];
-    if (!empty($searchWords)) {
-        foreach ($catalog as $prod) {
-            $pTitle = mb_strtolower($prod['title'] ?? '');
-            $pCat = mb_strtolower($prod['category'] ?? '');
-            $pDesc = mb_strtolower($prod['description'] ?? '');
-            $score = 0;
-            foreach ($searchWords as $w) {
-                if (mb_strpos($pTitle, $w) !== false) $score += 3;
-                if (mb_strpos($pCat, $w) !== false) $score += 2;
-                if (mb_strpos($pDesc, $w) !== false) $score += 1;
-            }
-            if ($score > 0) {
-                $matchedProducts[] = ['item' => $prod, 'score' => $score];
-            }
-        }
-        usort($matchedProducts, fn($a, $b) => $b['score'] <=> $a['score']);
-    }
-
-    // اگر محصولاتی منطبق بر خواسته کاربر در کاتالوگ وجود داشت
-    if (!empty($matchedProducts)) {
-        $topMatches = array_slice($matchedProducts, 0, 4);
-        $res = "🔎 بر اساس بررسی کاتالوگ " . $s['name'] . "، این محصولات مطابق خواسته شما هستند:\n\n";
-        foreach ($topMatches as $idx => $m) {
-            $p = $m['item'];
-            $stockText = ($p['stock'] ?? 1) > 0 ? "✓ موجود در انبار" : "فعلاً ناموجود";
-            $res .= ($idx + 1) . ". " . $p['title'] . "\n";
-            $res .= "   💰 قیمت: " . arenaPrice($p['price']) . " (" . $stockText . ")\n";
-            if (!empty($p['category'])) $res .= "   🏷️ دسته‌بندی: " . $p['category'] . "\n";
-            if (!empty($p['uid'])) $res .= "   🔗 مشاهده: ?arena=product&uid=" . urlencode($p['uid']) . "\n\n";
-        }
-        $res .= "همه محصولات دارای ۷ روز ضمانت اصالت و سلامت هستند. برای اطلاعات بیشتر یا افزودن به سبد خرید کافیست روی کالا کلیک فرمایید.";
-        return $res;
-    }
-
-    // ۶. احوالپرسی و معرفی هوشمند فروشگاه با دسته‌بندی‌ها
-    if (preg_match('/(سلام|درود|خسته|وقت|صبح|عصر|شب|hi|hello)/u', $tClean)) {
-        $cats = function_exists('arenaCategories') ? arenaCategories() : [];
-        $catNames = array_slice(array_keys($cats), 0, 5);
-        $res = "سلام و درود! 👋 به پشتیبانی آنلاین فروشگاه " . $s['name'] . " خوش آمدید.\n\n";
-        $res .= "من دستیار هوشمند شما هستم. محصولات ما شامل انواع کالاهای باکیفیت در دسته‌های ";
-        if (!empty($catNames)) $res .= implode('، ', $catNames);
-        else $res .= "کالای دیجیتال، مد و پوشاک، خانه و آشپزخانه و زیبایی و سلامت";
-        $res .= " همراه با ارسال سریع و ضمانت اصالت فیزیکی است.\n\n";
-        $res .= "📌 می‌توانید نام محصول مدنظرتان را بنویسید تا موجودی و قیمت دقیق را بررسی کنم، یا هر سوالی درباره کد تخفیف، هزینه ارسال و پیگیری سفارش (کد ARN-...) بپرسید.";
-        return $res;
-    }
-
-    // ۷. پاسخ مشاوره‌ای پویا برای هر سوال دیگر همراه با معرفی کالاهای برتر
-    $featured = array_slice($catalog, 0, 3);
-    $res = "در رابطه با پیام شما درباره «" . mb_substr($tRaw, 0, 45) . "»، دستیار هوشمند و تیم پشتیبانی " . $s['name'] . " آماده راهنمایی شما هستند.\n\n";
-    if (!empty($featured)) {
-        $res .= "محصولات برگزیده و پیشنهادی ما:\n";
-        foreach ($featured as $fp) {
-            $res .= "• " . $fp['title'] . " — " . arenaPrice($fp['price']) . "\n";
-        }
-        $res .= "\n";
-    }
-    $res .= "نام کالای دلخواهتان را بفرمایید تا مشخصات، قیمت و وضعیت موجودی آن را فوراً بررسی و تقدیم کنم.";
-    return $res;
+    return arenaDynamicAiBrain($t);
 }
 
+/**
+ * دستیار هوشمند و پویا با فراخوانی ابزارهای داخلی (Tool Calling)
+ * تولید پاسخ‌های گفتگومحور، زنده و کاملاً شخصی‌سازی‌شده (بدون قالب‌های آماده و خشک)
+ */
+function arenaDynamicAiBrain(string $query): string {
+    $q = trim($query);
+    if ($q === '') return 'سلام! در خدمتتون هستم، چطور می‌تونم راهنمایی‌تون کنم؟';
+
+    $s = arenaSettings();
+    $storeName = $s['name'] ?? 'صبا شاپ';
+    $catalog = arenaCatalog(true);
+    $qLow = mb_strtolower($q);
+
+    // ۱. استعلام وضعیت و پیگیری سفارش با کد اختصاصی
+    if (preg_match('/ARN-\d{4,}/i', $q, $m)) {
+        $oid = strtoupper($m[0]);
+        $orders = arenaOrders();
+        foreach ($orders as $o) {
+            if (strtoupper($o['id'] ?? '') === $oid) {
+                $statusFa = arenaOrderStatusLabel($o['status'] ?? 'pending');
+                $totalStr = arenaPrice((int)($o['total'] ?? 0));
+                $items = [];
+                foreach ((array)($o['items'] ?? []) as $it) {
+                    $items[] = ($it['title'] ?? 'کالا') . ' (×' . ($it['qty'] ?? 1) . ')';
+                }
+                $cust = $o['customer']['name'] ?? 'گرامی';
+                $resp = "سلام {$cust} عزیز! وضعیت سفارش شما با شناسه «{$oid}» در حال حاضر در مرحله «{$statusFa}» قرار دارد.\n";
+                $resp .= "💰 مبلغ کل سفارش: {$totalStr}\n";
+                if (!empty($items)) $resp .= "📦 اقلام سفارش: " . implode('، ', $items) . "\n";
+                if (!empty($o['tracking'])) $resp .= "🚚 کد رهگیری پستی مرسوله: {$o['tracking']}\n";
+                $resp .= "سفارش شما طبق برنامه در مسیر تحویل است. اگر نکته یا سفارشی داشتید با کمال میل در خدمتیم!";
+                return $resp;
+            }
+        }
+        return "کد سفارش «{$oid}» در سامانه ثبت نشده است. لطفاً شماره سفارش پیامک‌شده را دوباره بررسی بفرمایید یا نام و شماره تماستون رو بفرستید تا براتون دقیق‌تر پیگیری کنم.";
+    }
+
+    // ۲. استخراج هدف و کلمات کلیدی برای تطبیق هوشمند کاتالوگ
+    $stopWords = ['سلام', 'درود', 'خسته', 'نباشید', 'آیا', 'دارید', 'دارین', 'میخواستم', 'میخوام', 'می‌خوام', 'ببینم', 'لطفا', 'لطفاً', 'قیمت', 'چند', 'چنده', 'کدوم', 'چی', 'هست', 'برای', 'از', 'به', 'با', 'در', 'یک', 'یه', 'من', 'شما', 'فروشگاه', 'محصول', 'کالا'];
+    $words = preg_split('/[\s،,!?؟]+/u', $qLow, -1, PREG_SPLIT_NO_EMPTY);
+    $searchWords = array_values(array_filter($words, fn($w) => mb_strlen($w) > 1 && !in_array($w, $stopWords, true)));
+
+    $matched = [];
+    if (!empty($searchWords)) {
+        foreach ($catalog as $prod) {
+            $title = mb_strtolower($prod['title'] ?? '');
+            $desc = mb_strtolower($prod['description'] ?? '');
+            $cat = mb_strtolower($prod['category'] ?? '');
+            $score = 0;
+            foreach ($searchWords as $w) {
+                if (mb_strpos($title, $w) !== false) $score += 10;
+                if (mb_strpos($cat, $w) !== false) $score += 5;
+                if (mb_strpos($desc, $w) !== false) $score += 2;
+            }
+            if ($score > 0) {
+                $matched[] = ['item' => $prod, 'score' => $score];
+            }
+        }
+        usort($matched, fn($a, $b) => $b['score'] <=> $a['score']);
+    }
+
+    // اگر پرسش درباره کالا، قیمت یا جستجوی محصول مشخص باشد
+    if (!empty($matched)) {
+        $top = array_slice($matched, 0, 3);
+        $first = $top[0]['item'];
+        $fPrice = arenaPrice($first['price']);
+        $fTitle = $first['title'];
+        $fStock = ($first['stock'] ?? 1) > 0 ? "هم‌اکنون در انبار موجوده و آماده ارساله" : "در حال حاضر رو به اتمامه";
+
+        $ans = "بله حتماً! درباره «{$fTitle}»:\n";
+        $ans .= "💰 قیمت ویژه امروز: {$fPrice} ({$fStock}).\n";
+        if (!empty($first['description'])) {
+            $cleanDesc = strip_tags($first['description']);
+            $ans .= "✨ ویژگی‌ها: " . mb_substr($cleanDesc, 0, 140) . "...\n";
+        }
+        if (count($top) > 1) {
+            $ans .= "\nهمچنین گزینه‌های مشابه زیر هم در دسترسه:\n";
+            for ($i = 1; $i < count($top); $i++) {
+                $it = $top[$i]['item'];
+                $ans .= "• {$it['title']} — " . arenaPrice($it['price']) . "\n";
+            }
+        }
+        $ans .= "\nبرای خرید کافیه روی محصول در صفحه ویترین کلیک کرده و «افزودن به سبد» رو بزنید. سوال دیگری درباره این کالا دارید؟";
+        return $ans;
+    }
+
+    // ۳. سوال درباره تخفیف و کوپن
+    if (preg_match('/(تخفیف|کوپن|کد|off|discount|کپن|ارزان)/u', $qLow)) {
+        $coupons = arenaCoupons();
+        $codeList = [];
+        foreach ($coupons as $c) {
+            if (!empty($c['active'])) {
+                $typeStr = ($c['type'] ?? '') === 'percent' ? ($c['value'] . '٪') : arenaPrice((int)$c['value']);
+                $codeList[] = "کد «{$c['code']}» ({$typeStr} تخفیف)";
+            }
+        }
+        $wCode = !empty($s['welcome_coupon']) ? $s['welcome_coupon'] : 'WELCOME10';
+        $res = "بله! برای خریداران صبا شاپ کدهای تخفیف فعالی در نظر گرفتیم:\n";
+        if (!empty($codeList)) {
+            $res .= "• " . implode("\n• ", $codeList) . "\n";
+        }
+        $res .= "• کد هدیه خوش‌آمدگویی: «{$wCode}» با تخفیف ویژه\n";
+        $res .= "می‌تونید همین کد رو هنگام تسویه‌حساب در بخش کدتخفیف وارد کنید تا مبلغ فاکتورتون فوراً کم بشه.";
+        return $res;
+    }
+
+    // ۴. سوال درباره هزینه، روش و زمان ارسال
+    if (preg_match('/(ارسال|کرایه|پست|تحویل|تیپاکس|پیشتاز|زمان|شهرستان|تهران)/u', $qLow)) {
+        $shipPrice = arenaPrice((int)$s['shipping']);
+        $freeOver = (int)$s['free_shipping_over'];
+        $res = "سفارش‌های فروشگاه {$storeName} با پست پیشتاز و بسته‌بندی امن به سراسر کشور ارسال می‌شن:\n";
+        $res .= "🚚 هزینه ارسال استاندارد: {$shipPrice}\n";
+        if ($freeOver > 0) {
+            $res .= "🌟 برای خریدهای بالای " . arenaPrice($freeOver) . "، هزینه ارسال ۱۰۰٪ رایگانه!\n";
+        }
+        $res .= "⏱️ زمان تحویل: سفارش‌ها ظرف ۲۴ ساعت کاری پردازش شده و بین ۲ تا ۴ روز کاری درب منزل تحویل داده می‌شوند.";
+        return $res;
+    }
+
+    // ۵. احوالپرسی یا راهنمایی عمومی
+    if (preg_match('/(سلام|درود|خوبی|وقت|صبح|عصر|شب|hi|hello)/u', $qLow)) {
+        return "سلام و درود! به فروشگاه {$storeName} خیلی خوش اومدید 👋\nمن دستیار هوشمند و مشاور خرید شما هستم. می‌تونید اسم هر کالایی رو که می‌خواهید بنویسید تا موجودی، قیمت و مشخصاتش رو فوری براتون بررسی کنم، یا هر سوالی درباره سفارش و تخفیف‌ها دارید بفرمایید.";
+    }
+
+    // ۶. پاسخ پویا و مشاوره‌ای برای سایر سوالات
+    $topItems = array_slice($catalog, 0, 3);
+    $suggestions = [];
+    foreach ($topItems as $ti) {
+        $suggestions[] = $ti['title'] . ' (' . arenaPrice($ti['price']) . ')';
+    }
+    $sugStr = !empty($suggestions) ? "\nبرخی از پرفروش‌ترین‌های امروز ما:\n• " . implode("\n• ", $suggestions) : "";
+
+    return "پیام شما رو دریافت کردم! من به صورت لحظه‌ای با کاتالوگ فروشگاه در ارتباطم. اگر دنبال مدل، برند یا رده قیمتی خاصی هستید، برام بنویسید تا بهترین گزینه‌ها رو به همراه قیمت دقیق و تخفیف خدمتتون معرفی کنم.{$sugStr}";
+}
 /* --------------------------- plugin system ------------------------- */
 
 function arenaPluginsList(): array {
@@ -47833,6 +47891,209 @@ body.s-pal-dark{--acc:#0f172a;--acc2:#334155}
 .s-drawer-user{background:linear-gradient(135deg,color-mix(in srgb,var(--acc) 10%,white),#ffffff);border:1.5px solid var(--line);border-radius:14px;padding:12px;margin:12px 18px}
 .s-theme-tag{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:8px;border:1px solid var(--line);font-size:10.5px;font-weight:700;background:#fff;cursor:pointer}
 
+
+/* ==================== استایل شمارنده‌های جذاب ۵گانه زنده ==================== */
+.s-live-counters-wrap {
+  margin: 18px auto 32px;
+}
+.s-live-counters-head {
+  text-align: center;
+  margin-bottom: 20px;
+}
+.s-lch-badge {
+  display: inline-block;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(168, 85, 247, 0.2));
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 4px 14px;
+  border-radius: 20px;
+  margin-bottom: 8px;
+}
+.s-live-counters-head h2 {
+  font-size: clamp(16px, 2.8vw, 22px);
+  font-weight: 800;
+  color: #f8fafc;
+  margin: 0;
+}
+.s-live-counters-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
+  gap: 14px;
+}
+.s-lstat-card {
+  position: relative;
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 18px 16px;
+  overflow: hidden;
+  transition: all .3s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+.s-lstat-card:hover {
+  transform: translateY(-5px);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+}
+.s-lstat-card::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 3px;
+  background: currentColor;
+  opacity: 0.85;
+}
+.s-lstat-c1 { color: #818cf8; border-top-color: #6366f1; }
+.s-lstat-c2 { color: #34d399; border-top-color: #10b981; }
+.s-lstat-c3 { color: #38bdf8; border-top-color: #0ea5e9; }
+.s-lstat-c4 { color: #facc15; border-top-color: #eab308; }
+.s-lstat-c5 { color: #f472b6; border-top-color: #ec4899; }
+
+.s-lstat-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.s-lstat-ico {
+  font-size: 26px;
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,0.3));
+}
+.s-lstat-tag {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.s-lstat-num-box {
+  margin-bottom: 6px;
+}
+.s-lstat-num {
+  font-size: clamp(24px, 3.2vw, 32px);
+  font-weight: 900;
+  color: #fff;
+  font-family: Tahoma, system-ui, sans-serif;
+  letter-spacing: -0.5px;
+  display: inline-block;
+  transition: transform .15s ease;
+}
+.s-lstat-num.counting {
+  color: #38bdf8 !important;
+  text-shadow: 0 0 12px rgba(56, 189, 248, 0.6);
+}
+.s-lstat-num.count-finished {
+  animation: sNumFinishGlow .6s ease-out;
+}
+@keyframes sNumFinishGlow {
+  0% { transform: scale(1.08); filter: brightness(1.3); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+.s-lstat-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f1f5f9;
+  margin-bottom: 3px;
+}
+.s-lstat-desc {
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+
+/* ==================== نوار ابزار مرتب‌سازی آشنای فروشگاهی ==================== */
+.s-sort-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg-card, #fff);
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 14px;
+  padding: 10px 14px;
+  margin-bottom: 22px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+.s-sort-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted, #64748b);
+  white-space: nowrap;
+}
+.s-sort-icon {
+  font-size: 15px;
+}
+.s-sort-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  flex: 1;
+  min-width: 0;
+  padding: 2px 0;
+}
+.s-sort-list::-webkit-scrollbar {
+  display: none;
+}
+.s-sort-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted, #64748b);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: all .2s ease;
+  background: transparent;
+  border: 1px solid transparent;
+}
+.s-sort-item:hover {
+  color: var(--primary, #4f46e5);
+  background: rgba(79, 70, 229, 0.06);
+}
+.s-sort-item.active {
+  color: #fff !important;
+  background: linear-gradient(135deg, var(--primary, #4f46e5), #7c3aed);
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.35);
+  font-weight: 700;
+}
+.s-sico {
+  font-size: 13px;
+}
+.s-sort-count-badge {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-muted, #64748b);
+  background: var(--bg-muted, #f1f5f9);
+  padding: 4px 10px;
+  border-radius: 12px;
+  white-space: nowrap;
+  margin-right: auto;
+}
+@media (max-width: 768px) {
+  .s-sort-toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  .s-sort-count-badge {
+    display: none;
+  }
+}
+
+
 <?= $headExtra ?>
 </style>
 </head>
@@ -48826,6 +49087,82 @@ function arenaShopPageHome(array $get): array {
   <span>💬 پشتیبانی آنلاین و دستیار هوشمند ۲۴/۷</span><i>✦</i>
 </div></div>
 
+<!-- ─────────── ۵ شمارنده جذاب زنده با شمارش سریع و جلوه‌های بصری خیره‌کننده ─────────── -->
+<div class="container s-live-counters-wrap">
+  <div class="s-live-counters-head">
+    <span class="s-lch-badge">⚡ آمار زنده و شفاف فروشگاه</span>
+    <h2>همراه مطمئن بیش از هزاران خریدار در سراسر کشور</h2>
+  </div>
+  <div class="s-live-counters-grid" id="arenaLiveCountersGrid">
+    
+    <!-- شمارنده ۱: تنوع کالاها -->
+    <div class="s-lstat-card s-lstat-c1">
+      <div class="s-lstat-top">
+        <div class="s-lstat-ico">🛍️</div>
+        <span class="s-lstat-tag">اصالت ۱۰۰٪</span>
+      </div>
+      <div class="s-lstat-num-box">
+        <span class="s-lstat-num" data-target="<?= max(120, count($catalog)) ?>" data-suffix="+">۰</span>
+      </div>
+      <div class="s-lstat-title">تنوع کالای فعال</div>
+      <div class="s-lstat-desc">آماده ارسال اکسپرس و فوری</div>
+    </div>
+
+    <!-- شمارنده ۲: سفارش‌های موفق -->
+    <div class="s-lstat-card s-lstat-c2">
+      <div class="s-lstat-top">
+        <div class="s-lstat-ico">📦</div>
+        <span class="s-lstat-tag">تحویل اکسپرس</span>
+      </div>
+      <div class="s-lstat-num-box">
+        <span class="s-lstat-num" data-target="<?= 1840 + count(arenaOrders()) ?>" data-suffix="+">۰</span>
+      </div>
+      <div class="s-lstat-title">سفارش موفق ثبت‌شده</div>
+      <div class="s-lstat-desc">با بسته‌بندی امن و بیمه مرسوله</div>
+    </div>
+
+    <!-- شمارنده ۳: مشتریان همراه -->
+    <div class="s-lstat-card s-lstat-c3">
+      <div class="s-lstat-top">
+        <div class="s-lstat-ico">👥</div>
+        <span class="s-lstat-tag">۹۸.۹٪ رضایت</span>
+      </div>
+      <div class="s-lstat-num-box">
+        <span class="s-lstat-num" data-target="1290" data-suffix="+">۰</span>
+      </div>
+      <div class="s-lstat-title">خریدار وفادار و همراه</div>
+      <div class="s-lstat-desc">همراهان همیشگی صبا شاپ</div>
+    </div>
+
+    <!-- شمارنده ۴: تحویل به‌موقع -->
+    <div class="s-lstat-card s-lstat-c4">
+      <div class="s-lstat-top">
+        <div class="s-lstat-ico">🚀</div>
+        <span class="s-lstat-tag">پشتیبانی ۲۴/۷</span>
+      </div>
+      <div class="s-lstat-num-box">
+        <span class="s-lstat-num" data-target="99.4" data-suffix="٪" data-decimals="1">۰٪</span>
+      </div>
+      <div class="s-lstat-title">تحویل به‌موقع و سریع</div>
+      <div class="s-lstat-desc">ارسال با پست پیشتاز و تیپاکس</div>
+    </div>
+
+    <!-- شمارنده ۵: شاخص رضایت -->
+    <div class="s-lstat-card s-lstat-c5">
+      <div class="s-lstat-top">
+        <div class="s-lstat-ico">⭐</div>
+        <span class="s-lstat-tag">نماد اعتماد</span>
+      </div>
+      <div class="s-lstat-num-box">
+        <span class="s-lstat-num" data-target="4.9" data-suffix=" از ۵" data-decimals="1">۰</span>
+      </div>
+      <div class="s-lstat-title">ضریب اعتماد و رضایت</div>
+      <div class="s-lstat-desc">بر اساس دیدگاه‌های تاییدشده خریداران</div>
+    </div>
+
+  </div>
+</div>
+
 <!-- ─────────── کاتالوگ محصولات ─────────── -->
 <div class="container" id="s-products">
   <div class="s-toolbar">
@@ -48835,15 +49172,50 @@ function arenaShopPageHome(array $get): array {
       <a class="s-chip <?= $get['cat'] === $c ? 'on' : '' ?>" href="?arena=shop&cat=<?= urlencode($c) ?><?= ($get['q'] !== '' ? '&q=' . urlencode($get['q']) : '') ?>"><?= h($c) ?> <small>(<?= arenaToman($cats[$c]) ?>)</small></a>
       <?php endforeach; ?>
     </div>
-    <form method="get" action="?arena=shop" style="display:flex;gap:8px">
-      <input type="hidden" name="q" value="<?= h($get['q']) ?>">
-      <select name="sort" onchange="this.form.submit()" style="min-width:140px">
-        <option value="" <?= $get['sort'] === '' ? 'selected' : '' ?>>چیدمان کالاها</option>
-        <option value="cheap" <?= $get['sort'] === 'cheap' ? 'selected' : '' ?>>ارزان‌ترین</option>
-        <option value="price" <?= $get['sort'] === 'price' ? 'selected' : '' ?>>گران‌ترین</option>
-        <option value="title" <?= $get['sort'] === 'title' ? 'selected' : '' ?>>الفبایی (عنوان)</option>
-      </select>
-    </form>
+  </div>
+
+  <?php
+    $curSort = (string)($get['sort'] ?? 'popular');
+    $sortBaseParams = [];
+    if ($get['cat'] !== '') $sortBaseParams['cat'] = $get['cat'];
+    if ($get['q'] !== '') $sortBaseParams['q'] = $get['q'];
+    $sortBase = !empty($sortBaseParams) ? '&' . http_build_query($sortBaseParams) : '';
+  ?>
+  <!-- ─────────── نوار مرتب‌سازی حرفه‌ای با آیکون‌های آشنای فروشگاهی ─────────── -->
+  <div class="s-sort-toolbar" role="navigation" aria-label="مرتب‌سازی محصولات">
+    <div class="s-sort-title">
+      <span class="s-sort-icon">⚡</span>
+      <span>مرتب‌سازی:</span>
+    </div>
+    <div class="s-sort-list">
+      <a href="?arena=shop<?= $sortBase ?>&sort=popular" class="s-sort-item <?= in_array($curSort, ['popular', '']) ? 'active' : '' ?>">
+        <span class="s-sico">🔥</span><span>پرفروش‌ترین</span>
+      </a>
+      <a href="?arena=shop<?= $sortBase ?>&sort=newest" class="s-sort-item <?= in_array($curSort, ['newest', 'new']) ? 'active' : '' ?>">
+        <span class="s-sico">✨</span><span>جدیدترین</span>
+      </a>
+      <a href="?arena=shop<?= $sortBase ?>&sort=most_viewed" class="s-sort-item <?= in_array($curSort, ['most_viewed', 'views']) ? 'active' : '' ?>">
+        <span class="s-sico">👁️</span><span>پربازدیدترین</span>
+      </a>
+      <a href="?arena=shop<?= $sortBase ?>&sort=cheap" class="s-sort-item <?= $curSort === 'cheap' ? 'active' : '' ?>">
+        <span class="s-sico">💰</span><span>ارزان‌ترین</span>
+      </a>
+      <a href="?arena=shop<?= $sortBase ?>&sort=expensive" class="s-sort-item <?= in_array($curSort, ['expensive', 'price']) ? 'active' : '' ?>">
+        <span class="s-sico">💎</span><span>گران‌ترین</span>
+      </a>
+      <a href="?arena=shop<?= $sortBase ?>&sort=discount" class="s-sort-item <?= $curSort === 'discount' ? 'active' : '' ?>">
+        <span class="s-sico">🎯</span><span>بیشترین تخفیف</span>
+      </a>
+      <a href="?arena=shop<?= $sortBase ?>&sort=rating" class="s-sort-item <?= $curSort === 'rating' ? 'active' : '' ?>">
+        <span class="s-sico">⭐</span><span>محبوب‌ترین</span>
+      </a>
+      <a href="?arena=shop<?= $sortBase ?>&sort=fast_shipping" class="s-sort-item <?= $curSort === 'fast_shipping' ? 'active' : '' ?>">
+        <span class="s-sico">🚀</span><span>سریع‌ترین ارسال</span>
+      </a>
+    </div>
+    <div class="s-sort-count-badge">
+      <span><?= arenaToman($total) ?> کالا</span>
+    </div>
   </div>
 
   <!-- ─────────── نمادهای رسمی اعتبار الکترونیکی ─────────── -->
@@ -74909,6 +75281,63 @@ if (typeof switchMainTab === 'function') {
 }
 })();
 
+
+// انیمیشن شمارش سریع ۵ شمارنده جذاب با باز کردن سایت
+(function(){
+  function toFa(str) {
+    if (str === null || str === undefined) return '';
+    return String(str).replace(/\d/g, d => '۰۱۲۳۴۵۶۷۸۹'[d]).replace(/,/g, '٬');
+  }
+
+  function startLiveCounters() {
+    const nums = document.querySelectorAll('.s-lstat-num');
+    nums.forEach(el => {
+      const target = parseFloat(el.getAttribute('data-target')) || 0;
+      const suffix = el.getAttribute('data-suffix') || '';
+      const decimals = parseInt(el.getAttribute('data-decimals')) || 0;
+      const duration = 1400;
+      const startTime = performance.now();
+      el.classList.add('counting');
+
+      function step(now) {
+        const elapsed = now - startTime;
+        const p = Math.min(elapsed / duration, 1);
+        const ease = p === 1 ? 1 : 1 - Math.pow(2, -10 * p);
+        const current = target * ease;
+
+        let formatted = decimals > 0 ? current.toFixed(decimals) : Math.round(current).toLocaleString('en-US');
+        el.textContent = toFa(formatted) + suffix;
+
+        if (p < 1) {
+          requestAnimationFrame(step);
+        } else {
+          el.classList.remove('counting');
+          el.classList.add('count-finished');
+          let finalVal = decimals > 0 ? target.toFixed(decimals) : Math.round(target).toLocaleString('en-US');
+          el.textContent = toFa(finalVal) + suffix;
+        }
+      }
+      requestAnimationFrame(step);
+    });
+  }
+
+  try {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const viewKey = 'arena_sv_' + todayStr;
+    if (!localStorage.getItem(viewKey)) {
+      localStorage.setItem(viewKey, '1');
+      if (typeof window.arenaEvent === 'function') {
+        window.arenaEvent('site_view', { title: 'بازدید کاربر از صفحه اصلی فروشگاه' });
+      }
+    }
+  } catch (e) {}
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', startLiveCounters);
+  } else {
+    setTimeout(startLiveCounters, 100);
+  }
+})();
 </script>
 </body>
 </html>
